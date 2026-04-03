@@ -1,0 +1,656 @@
+---
+name: CI
+permissions: {}
+
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  FREEBSD_CLANG_VERSION: 19
+  LINUX_GCC_VERSION: 12
+  MACOSX_DEPLOYMENT_TARGET: 14.0
+
+jobs:
+  release-setup:
+    name: Release Setup
+    outputs:
+      publish_release: ${{ steps.release-setup.outputs.publish_release }}
+      release_body: ${{ steps.release-setup.outputs.release_body }}
+      release_commit: ${{ steps.release-setup.outputs.release_commit }}
+      release_generate_release_notes: ${{ steps.release-setup.outputs.release_generate_release_notes }}
+      release_tag: ${{ steps.release-setup.outputs.release_tag }}
+      release_version: ${{ steps.release-setup.outputs.release_version }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Release Setup
+        id: release-setup
+        uses: LizardByte/actions/actions/release_setup@6be4ea62064b64957aa880252fe353cd65bcdef7  # v2026.214.14019
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: ${{ matrix.build }} - ${{ matrix.name }}
+    needs: release-setup
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - BOOST
+          - FFMPEG
+        # name: ${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}
+        name:  # each entry must have a matching block in the "include" section below
+          - Darwin-arm64
+          - Darwin-x86_64
+          - FreeBSD-aarch64
+          - FreeBSD-amd64
+          - Linux-aarch64
+          - Linux-ppc64le
+          - Linux-x86_64
+          - Windows-AMD64
+          - Windows-ARM64
+        include:
+          - name: Darwin-arm64
+            os: macos-14
+            arch: aarch64
+            generator: "Unix Makefiles"
+            shell: bash
+            target: arm64-apple-macosx
+          - name: Darwin-x86_64
+            os: macos-15-intel
+            arch: x86_64
+            generator: "Unix Makefiles"
+            shell: bash
+            target: x86_64-apple-macosx
+          - name: FreeBSD-aarch64
+            os: ubuntu-latest  # ubuntu-24.04-arm is slower with the FreeBSD VM
+            arch: aarch64
+            bsd_release: '14.3'
+            generator: "Unix Makefiles"
+            shell: freebsd {0}
+          - name: FreeBSD-amd64
+            os: ubuntu-latest
+            arch: x86_64
+            bsd_release: '14.3'
+            generator: "Unix Makefiles"
+            shell: freebsd {0}
+          - name: Linux-aarch64
+            os: ubuntu-22.04
+            arch: aarch64
+            generator: "Unix Makefiles"
+            shell: bash
+            target: aarch64-linux-gnu
+          - name: Linux-ppc64le
+            os: ubuntu-22.04
+            arch: powerpc64le
+            generator: "Unix Makefiles"
+            shell: bash
+            target: powerpc64le-linux-gnu
+          - name: Linux-x86_64
+            os: ubuntu-22.04
+            arch: x86_64
+            generator: "Unix Makefiles"
+            shell: bash
+          - name: Windows-AMD64
+            os: windows-2022
+            arch: x86_64
+            generator: "MSYS Makefiles"
+            shell: msys2 {0}
+            msystem: ucrt64
+            toolchain: ucrt-x86_64
+          - name: Windows-ARM64
+            os: windows-11-arm
+            arch: aarch64
+            generator: "MSYS Makefiles"
+            shell: msys2 {0}
+            msystem: clangarm64
+            toolchain: clang-aarch64
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          submodules: recursive
+
+      - name: Prepare Dependencies Linux
+        id: cross_compile
+        if: runner.os == 'Linux' && !startsWith(matrix.shell, 'freebsd')
+        run: |
+          echo "::group::distro detection"
+          # detect dist name like bionic, focal, etc
+          dist_name=$(lsb_release -cs)
+          ubuntu_version=$(lsb_release -rs)
+          ubuntu_major_version=${ubuntu_version%%.*}
+          echo "detected dist name: $dist_name"
+          echo "detected ubuntu version: $ubuntu_version"
+          echo "detected ubuntu major version: $ubuntu_major_version"
+          echo "::endgroup::"
+
+          echo "::group::install aptitude"
+          sudo apt-get update  # must run before changing sources file
+          sudo apt-get install -y \
+            aptitude
+          echo "::endgroup::"
+
+          if [[ $ubuntu_major_version -le 20 ]]; then
+            # activate mesa backport PPA to ensure ffmpeg builds with vaSyncBuffer()
+            # (via libva 2.9.0 or later)
+            sudo add-apt-repository ppa:kisak/turtle -y
+          fi
+
+          echo "::group::dependencies prep"
+          dependencies=(
+            "autoconf"
+            "automake"
+            "build-essential"
+            "cmake"
+            "git-core"
+            "libass-dev"
+            "libfreetype6-dev"
+            "libgnutls28-dev"
+            "libmp3lame-dev"
+            "libnuma-dev"
+            "libopus-dev"
+            "libsdl2-dev"
+            "libtool"
+            "libvorbis-dev"
+            "libxcb1-dev"
+            "libxcb-shm0-dev"
+            "libxcb-xfixes0-dev"
+            "make"
+            "meson"
+            "nasm"
+            "ninja-build"
+            "pkg-config"
+            "texinfo"
+            "wget"
+            "zlib1g-dev"
+          )
+
+          package_arch="amd64"
+          cross_compile=false
+          package_arch=$(dpkg --print-architecture)
+          if [[ ${{ matrix.arch }} == "aarch64" ]]; then
+            dependencies+=("crossbuild-essential-arm64")
+            dependencies+=("gcc-${LINUX_GCC_VERSION}-aarch64-linux-gnu")
+            dependencies+=("g++-${LINUX_GCC_VERSION}-aarch64-linux-gnu")
+            cross_compile=true
+            package_arch="arm64"
+          elif [[ ${{ matrix.arch }} == "powerpc64le" ]]; then
+            dependencies+=("crossbuild-essential-ppc64el")
+            dependencies+=("gcc-${LINUX_GCC_VERSION}-powerpc64le-linux-gnu")
+            dependencies+=("g++-${LINUX_GCC_VERSION}-powerpc64le-linux-gnu")
+            cross_compile=true
+            package_arch="ppc64el"
+            dependencies+=("libquadmath0:$package_arch")  # required for cross compiling Boost 1.89+
+          else
+            dependencies+=("gcc-${LINUX_GCC_VERSION}")
+            dependencies+=("g++-${LINUX_GCC_VERSION}")
+          fi
+          echo "cross compiling: $cross_compile"
+          echo "package architecture: $package_arch"
+
+          dependencies+=(
+            "libdrm-dev:$package_arch"
+            "libgl-dev:$package_arch"
+            "libglx-dev:$package_arch"
+            "libwayland-dev:$package_arch"
+            "libwayland-client0:$package_arch"
+            "libx11-dev:$package_arch"
+            "libx11-xcb-dev:$package_arch"
+            "libxcb1-dev:$package_arch"
+            "libxcb-dri3-dev:$package_arch"
+            "libxcb-xfixes0-dev:$package_arch"
+            "libxext-dev:$package_arch"
+            "libxfixes-dev:$package_arch"
+          )
+
+          echo "::group::apt sources"
+          mirror="https://ports.ubuntu.com/ubuntu-ports"
+
+          # source file changed in 24.04
+          if [[ $ubuntu_major_version -ge 24 ]]; then
+            source_file="/etc/apt/sources.list.d/ubuntu.sources"
+            extra_sources=$(cat <<- VAREOF
+          Types: deb
+          URIs: mirror+file:/etc/apt/apt-mirrors.txt
+          Suites: ${dist_name} ${dist_name}-updates ${dist_name}-backports ${dist_name}-security
+          Components: main universe restricted multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          Architectures: $(dpkg --print-architecture)
+
+          Types: deb
+          URIs: ${mirror}
+          Suites: ${dist_name} ${dist_name}-updates ${dist_name}-backports ${dist_name}-security
+          Components: main universe restricted multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          Architectures: ${package_arch}
+          VAREOF
+          )
+          else
+            source_file="/etc/apt/sources.list"
+            extra_sources=$(cat <<- VAREOF
+          deb [arch=${package_arch}] ${mirror} ${dist_name} main restricted
+          deb [arch=${package_arch}] ${mirror} ${dist_name}-updates main restricted
+          deb [arch=${package_arch}] ${mirror} ${dist_name} universe
+          deb [arch=${package_arch}] ${mirror} ${dist_name}-updates universe
+          deb [arch=${package_arch}] ${mirror} ${dist_name} multiverse
+          deb [arch=${package_arch}] ${mirror} ${dist_name}-updates multiverse
+          deb [arch=${package_arch}] ${mirror} ${dist_name}-backports main restricted universe multiverse
+          deb [arch=${package_arch}] ${mirror} ${dist_name}-security main restricted
+          deb [arch=${package_arch}] ${mirror} ${dist_name}-security universe
+          deb [arch=${package_arch}] ${mirror} ${dist_name}-security multiverse
+          VAREOF
+          )
+          fi
+
+          if [[ ${cross_compile} == true ]]; then
+            # print original sources
+            echo "original sources:"
+            sudo cat ${source_file}
+            echo "----"
+
+            sudo dpkg --add-architecture ${package_arch}
+
+            if [[ $ubuntu_major_version -ge 24 ]]; then
+              echo "$extra_sources" | sudo tee ${source_file} > /dev/null
+            else
+              # fix original sources
+              sudo sed -i -e "s#deb mirror#deb [arch=amd64] mirror#g" ${source_file}
+
+              echo "$extra_sources" | sudo tee -a ${source_file} > /dev/null
+            fi
+            echo "----"
+            echo "new sources:"
+            sudo cat ${source_file}
+            echo "----"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::output"
+          echo "CROSS_COMPILE=${cross_compile}"
+          echo "CROSS_COMPILE=${cross_compile}" >> "${GITHUB_OUTPUT}"
+
+          echo "DEPENDENCIES=${dependencies[@]}"
+          echo "DEPENDENCIES=${dependencies[@]}" >> "${GITHUB_OUTPUT}"
+
+          echo "PKG_CONFIG_SYSROOT_DIR=${pkg_config_sysroot_dir}"
+          echo "PKG_CONFIG_SYSROOT_DIR=${pkg_config_sysroot_dir}" >> "${GITHUB_ENV}"
+
+          echo "PKG_CONFIG_PATH=${pkg_config_sysroot_dir}/pkgconfig"
+          echo "PKG_CONFIG_PATH=${pkg_config_sysroot_dir}/pkgconfig" >> "${GITHUB_ENV}"
+
+          if [[ ${cross_compile} == false ]]; then
+            echo "CC=gcc-${LINUX_GCC_VERSION}"
+            echo "CC=gcc-${LINUX_GCC_VERSION}" >> "${GITHUB_ENV}"
+
+            echo "CXX=g++-${LINUX_GCC_VERSION}"
+            echo "CXX=g++-${LINUX_GCC_VERSION}" >> "${GITHUB_ENV}"
+          fi
+          echo "::endgroup::"
+
+      - name: Setup Dependencies Linux
+        if: runner.os == 'Linux' && !startsWith(matrix.shell, 'freebsd')
+        run: |
+          echo "::group::apt update"
+          sudo apt-get update
+          echo "::endgroup::"
+
+          echo "::group::install dependencies"
+          sudo aptitude install -y --without-recommends ${{ steps.cross_compile.outputs.DEPENDENCIES }}
+          echo "::endgroup::"
+
+      - name: Setup Dependencies MacOS
+        if: runner.os == 'macOS'
+        run: |
+          # git, libtool, ninja, pkg-config, and wget are all pre-installed in brew on GitHub runners
+          # they are excluded to avoid warnings in the GitHub step summary
+
+          dependencies=(
+            "automake"
+            "fdk-aac"
+            "lame"
+            "libass"
+            "libvorbis"
+            "libvpx"
+            "nasm"
+            "opus"
+            "sdl"
+            "shtool"
+            "texi2html"
+            "theora"
+            "xvid"
+          )
+
+          brew install ${dependencies[@]}
+
+      - name: Setup msys2 Windows
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@4f806de0a5a7294ffabaff804b38a9b435a73bda  # v2.30.0
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+
+      - name: Update Windows dependencies
+        env:
+          # MSYSTEM is a built-in environment variable of MSYS2.
+          # Do not use this environment variable name.
+          MATRIX_MSYSTEM: ${{ matrix.msystem }}
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          # variables
+          declare -A pinned_deps
+          # nothing to pin currently
+
+          dependencies=(
+            "diffutils"
+            "git"
+            "make"
+            "patch"
+            "pkg-config"
+            "mingw-w64-${TOOLCHAIN}-binutils"
+            "mingw-w64-${TOOLCHAIN}-cmake"
+            "mingw-w64-${TOOLCHAIN}-gcc"
+            "mingw-w64-${TOOLCHAIN}-make"
+            "mingw-w64-${TOOLCHAIN}-nasm"
+            "mingw-w64-${TOOLCHAIN}-ninja"
+            "mingw-w64-${TOOLCHAIN}-onevpl"
+          )
+
+          # do not modify below this line
+
+          ignore_packages=()
+          tarballs=""
+          for pkg in "${!pinned_deps[@]}"; do
+            ignore_packages+=("${pkg}")
+            version="${pinned_deps[$pkg]}"
+            tarball="${pkg}-${version}-any.pkg.tar.zst"
+
+            # download and install working version
+            wget "https://repo.msys2.org/mingw/${MATRIX_MSYSTEM}/${tarball}"
+
+            tarballs="${tarballs} ${tarball}"
+          done
+
+          # Create the ignore string for pacman
+          ignore_list=$(IFS=,; echo "${ignore_packages[*]}")
+
+          # install pinned dependencies
+          if [ -n "$tarballs" ]; then
+            pacman -U --noconfirm "${tarballs}"
+          fi
+
+          # Only add --ignore if we have packages to ignore
+          if [ -n "$ignore_list" ]; then
+            pacman -Syu --noconfirm --ignore="${ignore_list}" "${dependencies[@]}"
+          else
+            pacman -Syu --noconfirm "${dependencies[@]}"
+          fi
+
+      - name: Debug msys2.CMD
+        if: runner.os == 'Windows'
+        run: |
+          echo "MSYS2_ROOT=${{ runner.temp }}/msys64" >> "${GITHUB_ENV}"
+          cat "${{ runner.temp }}/setup-msys2/msys2.CMD"
+
+      - name: Get submodule history
+        shell: bash
+        run: |
+          # x265.pc will not be installed if their cmake cannot detect the latest tag
+          # SVT-AV1 cannot determine version if the git history is not available
+
+          for repo in "x265_git" "SVT-AV1"; do
+            cd "${GITHUB_WORKSPACE}/third-party/FFmpeg/${repo}"
+            git fetch --tags --force origin
+          done
+
+      - name: Get Processor Count
+        id: processor_count
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = 'macOS' ]; then
+            PROCESSOR_COUNT=$(sysctl -n hw.ncpu)
+          else
+            PROCESSOR_COUNT=$(nproc)
+          fi
+          echo "PROCESSOR_COUNT=${PROCESSOR_COUNT}" >> "${GITHUB_OUTPUT}"
+          echo "PROCESSOR_COUNT: ${PROCESSOR_COUNT}"
+
+      - name: Setup ENV
+        id: root
+        shell: bash
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          echo "ROOT_PATH=$PWD" >> "${GITHUB_ENV}"
+
+          MAKE_CMD="make"
+          if [ "${{ startsWith(matrix.shell, 'freebsd') }}" = true ]; then
+            # use gmake on FreeBSD instead of make
+            MAKE_CMD="gmake"
+          fi
+          echo "MAKE_CMD=${MAKE_CMD}" >> "${GITHUB_ENV}"
+
+      - name: Setup cross compilation
+        id: cross
+        if: matrix.target != ''
+        shell: bash
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          TOOLCHAIN=${{ env.ROOT_PATH }}/cmake/toolchains/${{ matrix.target }}.cmake
+
+          # fail if file does not exist
+          if [ ! -f $TOOLCHAIN ]; then
+              echo "Toolchain file not found: $TOOLCHAIN"
+              exit 1
+          fi
+
+          echo "CMAKE_TOOLCHAIN_FILE=$TOOLCHAIN" >> "${GITHUB_ENV}"
+          if [[ ${{ runner.os }} == 'Linux' ]]; then
+            echo "CCPREFIX=/usr/bin/${{ matrix.target }}-" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Setup FreeBSD
+        if: startsWith(matrix.shell, 'freebsd')
+        uses: vmactions/freebsd-vm@c9f815bc7aa0d34c9fdd0619b034a32d6ca7b57e  # v1.4.2
+        with:
+          arch: ${{ matrix.arch }}
+          cpu: ${{ steps.processor_count.outputs.PROCESSOR_COUNT }}
+          prepare: |
+            pkg install -y \
+              devel/autoconf \
+              devel/automake \
+              devel/cmake \
+              devel/git \
+              devel/gmake \
+              devel/libtool \
+              devel/llvm${{ env.FREEBSD_CLANG_VERSION }} \
+              devel/meson \
+              devel/nasm \
+              devel/ninja \
+              devel/pkgconf \
+              graphics/libdrm \
+              graphics/libglvnd \
+              graphics/wayland \
+              multimedia/libass \
+              multimedia/libv4l \
+              multimedia/v4l_compat \
+              print/freetype2 \
+              security/gnutls \
+              shells/bash \
+              x11/libX11 \
+              x11/libxcb \
+              x11/libXext \
+              x11/libXfixes \
+              x11/libXrandr \
+              x11/xorgproto
+
+            # create symlink for shebang bash compatibility
+            ln -s /usr/local/bin/bash /bin/bash
+          release: ${{ matrix.bsd_release }}
+          run: |
+            git config --global --add safe.directory "*"
+          sync: rsync
+          copyback: false
+
+      - name: Configure
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+
+          if [ "${{ startsWith(matrix.shell, 'freebsd') }}" = true ]; then
+            export CC=$(which clang${{ env.FREEBSD_CLANG_VERSION }})
+            export CXX=$(which clang++${{ env.FREEBSD_CLANG_VERSION }})
+
+            # make sure they exist
+            if [ ! -f "$CC" ]; then
+              echo "Compiler not found: $CC"
+              exit 1
+            fi
+            if [ ! -f "$CXX" ]; then
+              echo "Compiler not found: $CXX"
+              exit 1
+            fi
+          fi
+
+          mkdir -p ./build/dist
+          cmake \
+            -B build \
+            -S . \
+            -G "${{ matrix.generator }}" \
+            -DBUILD_ALL=OFF \
+            -DBUILD_${{ matrix.build }}=ON \
+            -DCMAKE_TOOLCHAIN_FILE=${{ env.CMAKE_TOOLCHAIN_FILE }} \
+            -DCMAKE_INSTALL_PREFIX="${{ env.ROOT_PATH }}/build/dist" \
+            -DPARALLEL_BUILDS=${{ steps.processor_count.outputs.PROCESSOR_COUNT || 1 }}
+
+      - name: Build
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          ${{ env.MAKE_CMD }} -C build --jobs=${{ steps.processor_count.outputs.PROCESSOR_COUNT || 1 }}
+
+      - name: Install
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          ${{ env.MAKE_CMD }} -C build install
+
+      - name: Sync FreeBSD build output to host
+        if: startsWith(matrix.shell, 'freebsd')
+        shell: bash
+        run: rsync -av --mkpath -e ssh "freebsd:$GITHUB_WORKSPACE/build/dist" "$GITHUB_WORKSPACE/build"
+
+      - name: Debug logs
+        if: >-
+          always() &&
+          matrix.build == 'FFMPEG'
+        shell: bash
+        run: |
+          echo "::group::x264 config.log"
+          cat ./third-party/FFmpeg/x264/config.log || true
+          echo "::endgroup::"
+
+          echo "::group::FFmpeg config.log"
+          cat ./build/generated-src/FFmpeg/ffbuild/config.log || true
+          echo "::endgroup::"
+
+      - name: Debug build directory
+        if: always()
+        shell: bash
+        run: ls -R ./build
+
+      - name: Debug build/dist directory
+        if: always()
+        shell: bash
+        run: ls -R ./build/dist
+
+      - name: Create Archives
+        shell: bash
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE/build/dist"
+
+          # Create archives based on what was built
+          if [ "${{ matrix.build }}" = "BOOST" ] || [ "${{ matrix.build }}" = "ALL" ]; then
+            if [ -d "boost" ]; then
+              tar -czf "../../${{ matrix.name }}-boost.tar.gz" boost
+            fi
+          fi
+
+          if [ "${{ matrix.build }}" = "FFMPEG" ] || [ "${{ matrix.build }}" = "ALL" ]; then
+            if [ -d "ffmpeg" ]; then
+              tar -czf "../../${{ matrix.name }}-ffmpeg.tar.gz" ffmpeg
+            fi
+          fi
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          if-no-files-found: error
+          name: ${{ matrix.name }}-${{ matrix.build }}
+          path: ./${{ matrix.name }}-*.tar.gz
+
+  conclude:
+    needs: build
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Conclude
+        run: echo "All tests passed"
+
+  release:
+    name: Create Release
+    if:
+      needs.release-setup.outputs.publish_release == 'true' &&
+      startsWith(github.repository, 'LizardByte/')
+    needs:
+      - release-setup
+      - build
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Debug artifacts
+        run: ls -R artifacts
+
+      - name: Create/Update GitHub Release
+        uses: LizardByte/actions/actions/release_create@6be4ea62064b64957aa880252fe353cd65bcdef7  # v2026.214.14019
+        with:
+          allowUpdates: false
+          body: ${{ needs.release-setup.outputs.release_body }}
+          draft: true
+          generateReleaseNotes: ${{ needs.release-setup.outputs.release_generate_release_notes }}
+          name: ${{ needs.release-setup.outputs.release_tag }}
+          prerelease: true
+          tag: ${{ needs.release-setup.outputs.release_tag }}
+          token: ${{ secrets.GH_BOT_TOKEN }}
+          virustotal_api_key: ${{ secrets.VIRUSTOTAL_API_KEY }}

@@ -1,0 +1,30 @@
+{
+    "name": "luajit",
+    "no-autogen": true,
+    "make-args": [
+        "BUILDMODE=dynamic",
+        "PREFIX=${FLATPAK_DEST}"
+    ],
+    "make-install-args": [
+        "PREFIX=${FLATPAK_DEST}"
+    ],
+    "sources": [
+        {
+            "type": "git",
+            "url": "https://github.com/openresty/luajit2.git",
+            "tag": "v2.1-20260311",
+            "commit": "3640b6c590f9c383ffa5d0955f35e646f684a1da",
+            "x-checker-data": {
+                "type": "git",
+                "tag-pattern": "^v([\\d.-]+)$",
+                "stable-only": false
+            }
+        }
+    ],
+    "cleanup": [
+        "/bin",
+        "/include",
+        "/lib/pkgconfig",
+        "/share/man"
+    ]
+}

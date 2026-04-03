@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@fortawesome/fontawesome-free": "7.2.0",
+    "@lizardbyte/shared-web": "2026.314.32913"
+  }
+}

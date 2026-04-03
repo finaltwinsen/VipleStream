@@ -1,0 +1,40 @@
+# Build outputs
+Sunshine/build/
+Sunshine/build_mingw/
+moonlight-qt/**/release/
+moonlight-qt/**/debug/
+moonlight-qt/**/Makefile
+moonlight-qt/**/Makefile.*
+moonlight-qt/config.log
+moonlight-qt/.qmake.stash
+
+# Deploy / package artifacts
+sunshine-deploy/
+moonlight-deploy/
+*.zip
+
+# External dependencies (auto-downloaded by build)
+vcpkg/
+Sunshine/node_modules/
+
+# Large binary blobs not needed for Windows build
+Sunshine/third-party/build-deps/third-party/FFmpeg/FFmpeg/
+Sunshine/third-party/build-deps/third-party/FFmpeg/SVT-AV1/
+Sunshine/third-party/build-deps/third-party/FFmpeg/Vulkan-Loader/
+Sunshine/third-party/build-deps/third-party/FFmpeg/x264/
+Sunshine/third-party/build-deps/third-party/FFmpeg/x265_git/
+Sunshine/third-party/build-deps/third-party/FFmpeg/AMF/Thirdparty/ffmpeg/
+moonlight-qt/libs/windows/lib/arm64/
+moonlight-qt/libs/mac/
+
+# Debug symbols (not needed in repo)
+*.pdb
+
+# IDE / tool configs
+.vscode/
+.claude/
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
