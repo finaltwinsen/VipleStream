@@ -61,15 +61,12 @@ namespace system_tray {
   }
 
   void tray_donate_github_cb([[maybe_unused]] struct tray_menu *item) {
-    platf::open_url("https://github.com/sponsors/LizardByte");
   }
 
   void tray_donate_patreon_cb([[maybe_unused]] struct tray_menu *item) {
-    platf::open_url("https://www.patreon.com/LizardByte");
   }
 
   void tray_donate_paypal_cb([[maybe_unused]] struct tray_menu *item) {
-    platf::open_url("https://www.paypal.com/paypalme/ReenigneArcher");
   }
 
   void tray_reset_display_device_config_cb([[maybe_unused]] struct tray_menu *item) {

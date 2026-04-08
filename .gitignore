@@ -1,4 +1,4 @@
-# Build outputs
+# ── Build outputs ──
 Sunshine/build/
 Sunshine/build_mingw/
 moonlight-qt/**/release/
@@ -8,16 +8,18 @@ moonlight-qt/**/Makefile.*
 moonlight-qt/config.log
 moonlight-qt/.qmake.stash
 
-# Deploy / package artifacts
+# ── Temp / Release / Deploy ──
+temp/
+release/
 sunshine-deploy/
 moonlight-deploy/
-*.zip
+sunshine-backup/
 
-# External dependencies (auto-downloaded by build)
+# ── External dependencies (auto-downloaded by build) ──
 vcpkg/
 Sunshine/node_modules/
 
-# Large binary blobs not needed for Windows build
+# ── Large binary blobs not needed for Windows build ──
 Sunshine/third-party/build-deps/third-party/FFmpeg/FFmpeg/
 Sunshine/third-party/build-deps/third-party/FFmpeg/SVT-AV1/
 Sunshine/third-party/build-deps/third-party/FFmpeg/Vulkan-Loader/
@@ -27,14 +29,36 @@ Sunshine/third-party/build-deps/third-party/FFmpeg/AMF/Thirdparty/ffmpeg/
 moonlight-qt/libs/windows/lib/arm64/
 moonlight-qt/libs/mac/
 
-# Debug symbols (not needed in repo)
+# ── Debug symbols ──
 *.pdb
 
-# IDE / tool configs
+# ── Packages / archives ──
+*.zip
+
+# ── Logs ──
+*.log
+
+# ── Compiled objects / binaries ──
+*.obj
+*.exe
+*.ilk
+*.exp
+
+# ── FRUC test build artifacts ──
+tools/fruc_test/*.exe
+tools/fruc_test/*.obj
+tools/fruc_test/*.dll
+tools/fruc_test/output.txt
+tools/fruc_test/build_out.txt
+
+# ── Local config (machine-specific paths) ──
+build-config.local.cmd
+
+# ── IDE / tool configs ──
 .vscode/
 .claude/
 
-# OS files
+# ── OS files ──
 Thumbs.db
 Desktop.ini
 .DS_Store

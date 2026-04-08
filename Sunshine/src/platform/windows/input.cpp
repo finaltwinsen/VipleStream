@@ -614,8 +614,20 @@ namespace platf {
       ki.wScan = MapVirtualKey(modcode, MAPVK_VK_TO_VSC);
     }
 
-    // If we can map this to a scancode, send it as a scancode for maximum game compatibility.
-    if (ki.wScan) {
+    // Modifier keys (Shift/Ctrl/Alt) must be sent via virtual key code (wVk) rather than
+    // scancode-only mode. The Windows IME subsystem relies on wVk to detect modifier key
+    // press/release patterns (e.g., "tap Shift to toggle input method"). When sent as
+    // scancode-only, the IME may fail to recognize the event — particularly for Right Shift.
+    // We still populate wScan for completeness, but do not set KEYEVENTF_SCANCODE.
+    bool is_modifier_key = (modcode == VK_SHIFT || modcode == VK_LSHIFT || modcode == VK_RSHIFT ||
+                            modcode == VK_CONTROL || modcode == VK_LCONTROL || modcode == VK_RCONTROL ||
+                            modcode == VK_MENU || modcode == VK_LMENU || modcode == VK_RMENU);
+
+    if (is_modifier_key) {
+      ki.wVk = modcode;
+      // wScan is already populated above for informational purposes
+    } else if (ki.wScan) {
+      // If we can map this to a scancode, send it as a scancode for maximum game compatibility.
       ki.dwFlags = KEYEVENTF_SCANCODE;
     } else {
       // If there is no scancode mapping or it's non-normalized, send it as a regular VK event.
@@ -648,6 +660,23 @@ namespace platf {
 
     if (release) {
       ki.dwFlags |= KEYEVENTF_KEYUP;
+    }
+
+    // [VIPLE-DIAG] Log modifier key events for IME debugging
+    if (is_modifier_key) {
+      BOOST_LOG(info) << "[VIPLE-DIAG] keyboard_update: modcode=0x" << std::hex << modcode << std::dec
+                      << " (" << (modcode == VK_LSHIFT ? "LSHIFT" :
+                                  modcode == VK_RSHIFT ? "RSHIFT" :
+                                  modcode == VK_SHIFT ? "SHIFT" :
+                                  modcode == VK_LCONTROL ? "LCTRL" :
+                                  modcode == VK_RCONTROL ? "RCTRL" :
+                                  modcode == VK_CONTROL ? "CTRL" :
+                                  modcode == VK_LMENU ? "LALT" :
+                                  modcode == VK_RMENU ? "RALT" : "ALT") << ")"
+                      << " release=" << release
+                      << " wVk=0x" << std::hex << ki.wVk << " wScan=0x" << ki.wScan
+                      << " dwFlags=0x" << ki.dwFlags << std::dec
+                      << " flags=0x" << (int)flags;
     }
 
     send_input(i);

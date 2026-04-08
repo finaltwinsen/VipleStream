@@ -28,6 +28,10 @@ public:
     virtual int getDecoderCapabilities() override;
     virtual InitFailureReason getInitFailureReason() override;
 
+    // VipleStream: FRUC stats
+    virtual bool isFRUCActive() const override;
+    virtual bool lastFrameHadFRUCInterp() const override;
+
     enum PixelShaders {
         GENERIC_YUV_420,
         GENERIC_AYUV,
@@ -103,6 +107,12 @@ private:
 
     // Only index 0 is valid if !m_BindDecoderOutputTextures
     std::vector<std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2>> m_VideoTextureResourceViews;
+
+    // VipleStream: NVIDIA Optical Flow FRUC (lazy-init in renderFrame)
+    class NvOFRUCWrapper* m_FRUC = nullptr;
+    bool m_FRUCLastFrameInterpolated = false;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> m_FRUCBlitVertexBuffer;
+    void blitFRUCTexture(ID3D11ShaderResourceView* srv);
 
     SDL_SpinLock m_OverlayLock;
     std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, Overlay::OverlayMax> m_OverlayVertexBuffers;

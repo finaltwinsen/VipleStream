@@ -1,11 +1,31 @@
 #include "overlaymanager.h"
 #include "path.h"
 
+#include <QFile>
+
 using namespace Overlay;
+
+// VipleStream: Try loading a CJK-capable system font for Traditional Chinese overlay.
+// Falls back to the built-in ModeSeven.ttf if the system font isn't available.
+static QByteArray loadCJKFontData()
+{
+#ifdef _WIN32
+    // Microsoft JhengHei (微軟正黑體) — available on all modern Windows
+    QFile cjkFont("C:/Windows/Fonts/msjh.ttc");
+    if (cjkFont.open(QIODevice::ReadOnly)) {
+        QByteArray data = cjkFont.readAll();
+        if (!data.isEmpty()) {
+            return data;
+        }
+    }
+#endif
+    // Fallback to built-in ASCII font
+    return Path::readDataFile("ModeSeven.ttf");
+}
 
 OverlayManager::OverlayManager() :
     m_Renderer(nullptr),
-    m_FontData(Path::readDataFile("ModeSeven.ttf"))
+    m_FontData(loadCJKFontData())
 {
     memset(m_Overlays, 0, sizeof(m_Overlays));
 
@@ -150,8 +170,9 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
     SDL_Surface* oldSurface = (SDL_Surface*)SDL_AtomicSetPtr(
         (void**)&m_Overlays[type].surface,
         m_Overlays[type].enabled ?
-            // The _Wrapped variant is required for line breaks to work
-            TTF_RenderText_Blended_Wrapped(m_Overlays[type].font,
+            // The _Wrapped variant is required for line breaks to work.
+            // VipleStream: Use UTF-8 variant for CJK character support.
+            TTF_RenderUTF8_Blended_Wrapped(m_Overlays[type].font,
                                            m_Overlays[type].text,
                                            m_Overlays[type].color,
                                            1024)

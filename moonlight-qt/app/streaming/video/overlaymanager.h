@@ -46,7 +46,7 @@ private:
         bool enabled;
         int fontSize;
         SDL_Color color;
-        char text[1024];
+        char text[2048];
 
         TTF_Font* font;
         SDL_Surface* surface;

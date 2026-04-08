@@ -1,10 +1,10 @@
 #include <windows.h>
 
-IDI_ICON1	ICON	"D:\\<user>\\Project\\VipleStream\\moonlight-qt\\app\\moonlight.ico"
+IDI_ICON1	ICON	"D:\\Mission\\VipleStream\\moonlight-qt\\app\\moonlight.ico"
 
 VS_VERSION_INFO VERSIONINFO
-	FILEVERSION 6,1,0,0
-	PRODUCTVERSION 6,1,0,0
+	FILEVERSION 1,1,29,0
+	PRODUCTVERSION 1,1,29,0
 	FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
 	FILEFLAGS VS_FF_DEBUG
@@ -19,13 +19,13 @@ VS_VERSION_INFO VERSIONINFO
 		BEGIN
 			BLOCK "040904b0"
 			BEGIN
-				VALUE "CompanyName", "Moonlight Game Streaming Project\0"
-				VALUE "FileDescription", "Moonlight Game Streaming Client\0"
-				VALUE "FileVersion", "6.1.0.0\0"
+				VALUE "CompanyName", "VipleStream\0"
+				VALUE "FileDescription", "VipleStream Game Streaming Client\0"
+				VALUE "FileVersion", "1.1.29.0\0"
 				VALUE "LegalCopyright", "\0"
 				VALUE "OriginalFilename", "Moonlight.exe\0"
-				VALUE "ProductName", "Moonlight\0"
-				VALUE "ProductVersion", "6.1.0.0\0"
+				VALUE "ProductName", "VipleStream Client\0"
+				VALUE "ProductVersion", "1.1.29.0\0"
 				VALUE "InternalName", "\0"
 				VALUE "Comments", "\0"
 				VALUE "LegalTrademarks", "\0"

@@ -301,6 +301,10 @@ public:
         // preparations might include clearing the window.
     }
 
+    // VipleStream: FRUC frame interpolation queries
+    virtual bool isFRUCActive() const { return false; }
+    virtual bool lastFrameHadFRUCInterp() const { return false; }
+
     RendererType getRendererType() {
         return m_Type;
     }

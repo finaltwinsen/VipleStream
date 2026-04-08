@@ -31,6 +31,9 @@ typedef struct _VIDEO_STATS {
     double renderedFps;                        // high-res
     double videoMegabitsPerSec;                // current video bitrate in Mbps, not including FEC overhead
     uint64_t measurementStartUs;               // microseconds
+
+    // VipleStream: FRUC frame interpolation counters
+    uint32_t frucInterpolatedFrames;           // interpolated frames produced by FRUC
 } VIDEO_STATS, *PVIDEO_STATS;
 
 typedef struct _DECODER_PARAMETERS {

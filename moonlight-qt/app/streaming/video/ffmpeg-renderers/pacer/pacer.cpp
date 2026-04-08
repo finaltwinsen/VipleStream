@@ -344,6 +344,11 @@ void Pacer::renderFrame(AVFrame* frame)
     m_VideoStats->totalRenderTimeUs += (afterRender - beforeRender);
     m_VideoStats->renderedFrames++;
 
+    // VipleStream: Track FRUC interpolated frames
+    if (m_VsyncRenderer->lastFrameHadFRUCInterp()) {
+        m_VideoStats->frucInterpolatedFrames++;
+    }
+
     // Wait until after next frame to free this one to ensure the GPU
     // doesn't stall or read garbage if the backing buffer gets returned
     // to the pool and the decoder tries to write a new frame into it

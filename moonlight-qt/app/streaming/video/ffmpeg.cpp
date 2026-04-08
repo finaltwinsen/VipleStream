@@ -679,7 +679,8 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
                 char errorstring[512];
                 av_strerror(err, errorstring, sizeof(errorstring));
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "Test decode failed (avcodec_send_packet): %s", errorstring);
+                            "[VIPLE-DIAG] Test decode FAILED (avcodec_send_packet): %s (format=0x%x hw=%d)",
+                            errorstring, params->videoFormat, isHardwareAccelerated());
                 return false;
             }
 
@@ -705,10 +706,14 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
             char errorstring[512];
             av_strerror(err, errorstring, sizeof(errorstring));
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "Test decode failed (avcodec_receive_frame): %s", errorstring);
+                        "[VIPLE-DIAG] Test decode FAILED (avcodec_receive_frame): %s (format=0x%x hw=%d)",
+                        errorstring, params->videoFormat, isHardwareAccelerated());
             av_frame_free(&frame);
             return false;
         }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-DIAG] Test decode SUCCEEDED for format=0x%x hw=%d pixfmt=%d",
+                    params->videoFormat, isHardwareAccelerated(), frame->format);
 
         // Allow the renderer to do any validation it wants on this frame
         if (!m_FrontendRenderer->testRenderFrame(frame)) {
@@ -783,6 +788,7 @@ void FFmpegVideoDecoder::addVideoStats(VIDEO_STATS& src, VIDEO_STATS& dst)
     dst.totalDecodeTimeUs += src.totalDecodeTimeUs;
     dst.totalPacerTimeUs += src.totalPacerTimeUs;
     dst.totalRenderTimeUs += src.totalRenderTimeUs;
+    dst.frucInterpolatedFrames += src.frucInterpolatedFrames;
 
     if (dst.minHostProcessingLatency == 0) {
         dst.minHostProcessingLatency = src.minHostProcessingLatency;
@@ -896,6 +902,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         break;
     }
 
+    // VipleStream: All overlay strings in Traditional Chinese (繁體中文)
     if (stats.receivedFps > 0) {
         if (m_VideoDecoderCtx != nullptr) {
 #ifdef DISPLAY_BITRATE
@@ -905,9 +912,9 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 
             ret = snprintf(&output[offset],
                            length - offset,
-                           "Video stream: %dx%d %.2f FPS (Codec: %s)\n"
+                           u8"\u5F71\u50CF\u4E32\u6D41: %dx%d %.2f FPS (\u7DE8\u78BC: %s)\n"
 #ifdef DISPLAY_BITRATE
-                           "Bitrate: %.1f Mbps, Peak (%us): %.1f\n"
+                           u8"\u4F4D\u5143\u7387: %.1f Mbps, \u5CF0\u503C (%us): %.1f\n"
 #endif
                            ,
                            m_VideoDecoderCtx->width,
@@ -931,9 +938,9 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 
         ret = snprintf(&output[offset],
                        length - offset,
-                       "Incoming frame rate from network: %.2f FPS\n"
-                       "Decoding frame rate: %.2f FPS\n"
-                       "Rendering frame rate: %.2f FPS\n",
+                       u8"\u7DB2\u8DEF\u63A5\u6536\u5E40\u7387: %.2f FPS\n"
+                       u8"\u89E3\u78BC\u5E40\u7387: %.2f FPS\n"
+                       u8"\u7E6A\u88FD\u5E40\u7387: %.2f FPS\n",
                        stats.receivedFps,
                        stats.decodedFps,
                        stats.renderedFps);
@@ -948,7 +955,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
     if (stats.framesWithHostProcessingLatency > 0) {
         ret = snprintf(&output[offset],
                        length - offset,
-                       "Host processing latency min/max/average: %.1f/%.1f/%.1f ms\n",
+                       u8"\u4E3B\u6A5F\u8655\u7406\u5EF6\u9072 \u6700\u5C0F/\u6700\u5927/\u5E73\u5747: %.1f/%.1f/%.1f ms\n",
                        (float)stats.minHostProcessingLatency / 10,
                        (float)stats.maxHostProcessingLatency / 10,
                        (float)stats.totalHostProcessingLatency / 10 / stats.framesWithHostProcessingLatency);
@@ -961,23 +968,23 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
     }
 
     if (stats.renderedFrames != 0) {
-        char rttString[32];
+        char rttString[64];
 
         if (stats.lastRtt != 0) {
-            snprintf(rttString, sizeof(rttString), "%u ms (variance: %u ms)", stats.lastRtt, stats.lastRttVariance);
+            snprintf(rttString, sizeof(rttString), u8"%u ms (\u8b8a\u7570: %u ms)", stats.lastRtt, stats.lastRttVariance);
         }
         else {
-            snprintf(rttString, sizeof(rttString), "N/A");
+            snprintf(rttString, sizeof(rttString), u8"\u7121\u8CC7\u6599");
         }
 
         ret = snprintf(&output[offset],
                        length - offset,
-                       "Frames dropped by your network connection: %.2f%%\n"
-                       "Frames dropped due to network jitter: %.2f%%\n"
-                       "Average network latency: %s\n"
-                       "Average decoding time: %.2f ms\n"
-                       "Average frame queue delay: %.2f ms\n"
-                       "Average rendering time (including monitor V-sync latency): %.2f ms\n",
+                       u8"\u7DB2\u8DEF\u4E1F\u5E40: %.2f%%\n"
+                       u8"\u7DB2\u8DEF\u6296\u52D5\u4E1F\u5E40: %.2f%%\n"
+                       u8"\u5E73\u5747\u7DB2\u8DEF\u5EF6\u9072: %s\n"
+                       u8"\u5E73\u5747\u89E3\u78BC\u6642\u9593: %.2f ms\n"
+                       u8"\u5E73\u5747\u4F47\u5217\u5EF6\u9072: %.2f ms\n"
+                       u8"\u5E73\u5747\u7E6A\u88FD\u6642\u9593 (\u542B V-sync): %.2f ms\n",
                        (float)stats.networkDroppedFrames / stats.totalFrames * 100,
                        (float)stats.pacerDroppedFrames / stats.decodedFrames * 100,
                        rttString,
@@ -991,12 +998,42 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 
         offset += ret;
     }
+
+    // VipleStream: FRUC frame interpolation status
+    if (m_FrontendRenderer != nullptr) {
+        bool frucActive = m_FrontendRenderer->isFRUCActive();
+        if (frucActive && stats.renderedFrames > 0) {
+            double interpRatio = (double)stats.frucInterpolatedFrames / stats.renderedFrames * 100.0;
+            double effectiveFps = stats.renderedFps + ((double)stats.frucInterpolatedFrames /
+                ((double)(LiGetMicroseconds() - stats.measurementStartUs) / 1000000.0));
+            ret = snprintf(&output[offset],
+                           length - offset,
+                           u8"--- \u88DC\u5E40 (FRUC) ---\n"
+                           u8"\u72C0\u614B: \u5DF2\u555F\u7528 (NVIDIA Optical Flow)\n"
+                           u8"\u88DC\u5E40\u6578: %u / %u (\u6BD4\u4F8B: %.0f%%)\n"
+                           u8"\u6709\u6548\u8F38\u51FA\u5E40\u7387: %.1f FPS\n",
+                           stats.frucInterpolatedFrames,
+                           stats.renderedFrames,
+                           interpRatio,
+                           effectiveFps);
+        }
+        else {
+            ret = snprintf(&output[offset],
+                           length - offset,
+                           u8"--- \u88DC\u5E40 (FRUC) ---\n"
+                           u8"\u72C0\u614B: %s\n",
+                           frucActive ? u8"\u7B49\u5F85\u4E2D..." : u8"\u672A\u555F\u7528");
+        }
+        if (ret >= 0 && ret < length - offset) {
+            offset += ret;
+        }
+    }
 }
 
 void FFmpegVideoDecoder::logVideoStats(VIDEO_STATS& stats, const char* title)
 {
     if (stats.renderedFps > 0 || stats.renderedFrames != 0) {
-        char videoStatsStr[512];
+        char videoStatsStr[2048];
         stringifyVideoStats(stats, videoStatsStr, sizeof(videoStatsStr));
 
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -1162,6 +1199,12 @@ bool FFmpegVideoDecoder::tryInitializeRenderer(const AVCodec* decoder,
                                                IFFmpegRenderer::InitFailureReason* failureReason, // Out - Optional
                                                std::function<IFFmpegRenderer*()> createRendererFunc)
 {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-DIAG] tryInitializeRenderer: decoder=%s format=0x%x hwConfig=%s deviceType=%d",
+                decoder->name, params->videoFormat,
+                hwConfig ? "yes" : "no",
+                hwConfig ? (int)hwConfig->device_type : -1);
+
     DECODER_PARAMETERS testFrameDecoderParams = *params;
     bool separateTestDecoder = isSeparateTestDecoderRequired(decoder);
 
@@ -1200,7 +1243,13 @@ bool FFmpegVideoDecoder::tryInitializeRenderer(const AVCodec* decoder,
         }
 
         // Initialize the backend renderer for testing
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-DIAG] tryInitializeRenderer: calling initializeRendererInternal (pass i=%d) for %s",
+                    i, decoder->name);
         if (initializeRendererInternal(m_BackendRenderer, &testFrameDecoderParams)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-DIAG] tryInitializeRenderer: initializeRendererInternal SUCCEEDED for %s, calling completeInitialization",
+                        decoder->name);
             if (completeInitialization(decoder, requiredFormat, &testFrameDecoderParams,
                                        (m_TestOnly || separateTestDecoder) ? TestMode::TestFrameOnly : TestMode::TestFrame,
                                         i == 0 /* EGL/DRM */)) {
@@ -1241,6 +1290,9 @@ bool FFmpegVideoDecoder::tryInitializeRenderer(const AVCodec* decoder,
         else {
             // If we failed to initialize the backend entirely, there's no sense in trying
             // a different frontend renderer as it won't make a difference.
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-DIAG] tryInitializeRenderer: initializeRendererInternal FAILED for %s (pass i=%d)",
+                        decoder->name, i);
             backendInitFailure = true;
         }
 

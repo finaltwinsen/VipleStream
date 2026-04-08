@@ -760,6 +760,10 @@ namespace nvhttp {
       }
     }
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
+    BOOST_LOG(info) << "[VIPLE-DIAG] ServerCodecModeSupport=0x" << std::hex << codec_mode_flags << std::dec
+                    << " (hevc_mode=" << video::active_hevc_mode
+                    << " av1_mode=" << video::active_av1_mode
+                    << " MaxLumaHEVC=" << (video::active_hevc_mode > 1 ? "1869449984" : "0") << ")";
 
     auto current_appid = proc::proc.running();
     tree.put("root.PairStatus", pair_status);

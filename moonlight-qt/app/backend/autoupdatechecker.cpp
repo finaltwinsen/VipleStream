@@ -29,6 +29,10 @@ AutoUpdateChecker::AutoUpdateChecker(QObject *parent) :
 
 void AutoUpdateChecker::start()
 {
+    // VipleStream: disable auto-update check against official Moonlight server
+    qDebug() << "VipleStream: update check disabled";
+    return;
+
     if (!m_Nam) {
         Q_ASSERT(m_Nam);
         return;

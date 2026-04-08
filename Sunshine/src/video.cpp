@@ -953,7 +953,7 @@ namespace video {
       {
         {"preset"s, &config::video.sw.sw_preset},
         {"tune"s, &config::video.sw.sw_tune},
-        {"x264-params"s, "aq-mode=1:aq-strength=1.0:psy-rd=1.0:0.0"s},
+        {"x264-params"s, "aq-mode=1:aq-strength=1.0:psy-rd=1.0"s},
       },
       {},  // SDR-specific options
       {},  // HDR-specific options

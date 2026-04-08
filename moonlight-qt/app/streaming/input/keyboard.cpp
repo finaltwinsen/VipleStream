@@ -457,6 +457,16 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
         m_KeysDown.remove(keyCode);
     }
 
+    // [VIPLE-DIAG] Log modifier keys to debug IME Right Shift issue
+    if (keyCode >= 0xA0 && keyCode <= 0xA5) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-DIAG] handleKeyEvent: SDL scancode=%d keycode=0x%x mapped_vk=0x%x "
+                    "state=%s modifiers=0x%x sdl_mod=0x%x",
+                    event->keysym.scancode, event->keysym.sym, keyCode,
+                    event->state == SDL_PRESSED ? "DOWN" : "UP",
+                    modifiers, event->keysym.mod);
+    }
+
     LiSendKeyboardEvent2(0x8000 | keyCode,
                         event->state == SDL_PRESSED ?
                             KEY_ACTION_DOWN : KEY_ACTION_UP,

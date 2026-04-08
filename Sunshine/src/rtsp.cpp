@@ -1072,6 +1072,10 @@ namespace rtsp_stream {
       config.monitor.bitrate = (int) configuredBitrateKbps;
     }
 
+    BOOST_LOG(info) << "[VIPLE-DIAG] RTSP ANNOUNCE: client requested videoFormat=" << config.monitor.videoFormat
+                     << " (0=H264 1=HEVC 2=AV1) active_hevc_mode=" << video::active_hevc_mode
+                     << " active_av1_mode=" << video::active_av1_mode;
+
     if (config.monitor.videoFormat == 1 && video::active_hevc_mode == 1) {
       BOOST_LOG(warning) << "HEVC is disabled, yet the client requested HEVC"sv;
 

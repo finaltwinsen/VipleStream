@@ -305,11 +305,16 @@ namespace display_device {
      */
     bool parse_resolution_option(const config::video_t &video_config, const rtsp_stream::launch_session_t &session, SingleDisplayConfiguration &config) {
       using resolution_option_e = config::video_t::dd_t::resolution_option_e;
+      using config_option_e = config::video_t::dd_t::config_option_e;
+
+      // When ensure_only_display is set, the admin explicitly wants full display control.
+      // Apply resolution changes even if the client didn't enable "Optimize game settings".
+      bool force_apply = (video_config.dd.configuration_option == config_option_e::ensure_only_display);
 
       switch (video_config.dd.resolution_option) {
         case resolution_option_e::automatic:
           {
-            if (!session.enable_sops) {
+            if (!session.enable_sops && !force_apply) {
               BOOST_LOG(warning) << R"(Sunshine is configured to change resolution automatically, but the "Optimize game settings" is not set in the client! Resolution will not be changed.)";
             } else if (session.width >= 0 && session.height >= 0) {
               config.m_resolution = Resolution {
@@ -324,7 +329,7 @@ namespace display_device {
           }
         case resolution_option_e::manual:
           {
-            if (!session.enable_sops) {
+            if (!session.enable_sops && !force_apply) {
               BOOST_LOG(warning) << R"(Sunshine is configured to change resolution manually, but the "Optimize game settings" is not set in the client! Resolution will not be changed.)";
             } else {
               if (!parse_resolution_string(video_config.dd.manual_resolution, config.m_resolution)) {

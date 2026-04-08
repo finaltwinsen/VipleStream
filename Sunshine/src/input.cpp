@@ -815,6 +815,18 @@ namespace input {
 
     pressed = !release;
 
+    // [VIPLE-DIAG] Log key events for modifier/IME debugging
+    if (is_modifier(keyCode)) {
+      auto mapped = map_keycode(keyCode);
+      BOOST_LOG(info) << "[VIPLE-DIAG] passthrough: keyCode=0x" << std::hex << keyCode
+                      << " mapped=0x" << mapped << std::dec
+                      << " release=" << release
+                      << " flags=0x" << (int)packet->flags
+                      << " modifiers=0x" << (int)packet->modifiers
+                      << " synthetic=0x" << (int)synthetic_modifiers
+                      << " shortcutFlags=" << input->shortcutFlags;
+    }
+
     send_key_and_modifiers(keyCode, release, packet->flags, synthetic_modifiers);
 
     update_shortcutFlags(&input->shortcutFlags, map_keycode(keyCode), release);

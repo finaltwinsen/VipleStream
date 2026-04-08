@@ -24,6 +24,9 @@ CompatFetcher::CompatFetcher(QObject *parent) :
 
 void CompatFetcher::start()
 {
+    // VipleStream: disable compat check against official Moonlight server
+    return;
+
     if (!m_Nam) {
         Q_ASSERT(m_Nam);
         return;

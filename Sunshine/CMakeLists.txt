@@ -4,13 +4,13 @@ cmake_minimum_required(VERSION 3.20)
 # `cmake_path(CONVERT ... TO_NATIVE_PATH_LIST ...)` requires 3.20
 # todo - set this conditionally
 
-project(Sunshine VERSION 0.0.0
+project(VipleStream VERSION 1.1.29
         DESCRIPTION "Self-hosted game stream host for Moonlight"
-        HOMEPAGE_URL "https://app.lizardbyte.dev/Sunshine")
+        HOMEPAGE_URL "")
 
 set(PROJECT_LICENSE "GPL-3.0-only")
 
-set(PROJECT_FQDN "dev.lizardbyte.app.Sunshine")
+set(PROJECT_FQDN "app.viplestream.server")
 
 set(PROJECT_BRIEF_DESCRIPTION "GameStream host for Moonlight")  # must be <= 35 characters
 
@@ -21,9 +21,11 @@ your favorite web browser. Pair from the local server or any mobile device.")
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT result)
-if(result)
+if(result AND NOT MINGW)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
     message(STATUS "LTO / IPO (Interprocedural Optimization) enabled for maximum performance")
+else()
+    message(STATUS "LTO disabled (MinGW + Boost compatibility)")
 endif()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)

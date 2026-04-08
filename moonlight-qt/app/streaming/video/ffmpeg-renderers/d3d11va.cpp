@@ -12,6 +12,7 @@
 #include <SDL_syswm.h>
 
 #include <dwmapi.h>
+#include "nvofruc.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -73,6 +74,12 @@ D3D11VARenderer::D3D11VARenderer(int decoderSelectionPass)
 
 D3D11VARenderer::~D3D11VARenderer()
 {
+    // VipleStream: Cleanup FRUC
+    if (m_FRUC) {
+        delete m_FRUC;
+        m_FRUC = nullptr;
+    }
+
     if (m_FrameLatencyWaitableObject) {
         CloseHandle(m_FrameLatencyWaitableObject);
     }
@@ -435,9 +442,15 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
                 separateDevices ? "separate" : "shared");
 
     if (!checkDecoderSupport(adapter.Get())) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-DIAG] D3D11VA: checkDecoderSupport() FAILED for GPU %d: %S",
+                    adapterIndex, adapterDesc.Description);
         goto Exit;
     }
     else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-DIAG] D3D11VA: checkDecoderSupport() PASSED for GPU %d: %S",
+                    adapterIndex, adapterDesc.Description);
         // Remember that we found a device with support for decoding this codec
         m_DevicesWithCodecSupport++;
     }
@@ -463,6 +476,11 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
     HRESULT hr;
 
     m_DecoderParams = *params;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-DIAG] D3D11VARenderer::initialize() called for videoFormat=0x%x %dx%d@%dfps vds=%d testOnly=%d",
+                params->videoFormat, params->width, params->height, params->frameRate,
+                params->vds, params->testOnly);
 
     if (qgetenv("D3D11VA_ENABLED") == "0") {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -759,43 +777,22 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         lockContext(this);
     }
 
-    // Clear the back buffer
     const float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    m_RenderDeviceContext->ClearRenderTargetView(m_RenderTargetView.Get(), clearColor);
-
-    // Bind the back buffer. This needs to be done each time,
-    // because the render target view will be unbound by Present().
-    m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
-
-    // Render our video frame with the aspect-ratio adjusted viewport
-    renderVideo(frame);
-
-    // Render overlays on top of the video stream
-    for (int i = 0; i < Overlay::OverlayMax; i++) {
-        renderOverlay((Overlay::OverlayType)i);
-    }
 
     UINT flags;
-
     if (m_AllowTearing) {
         SDL_assert(!m_DecoderParams.enableVsync);
-
-        // If tearing is allowed, use DXGI_PRESENT_ALLOW_TEARING with syncInterval 0.
-        // It is not valid to use any other syncInterval values in tearing mode.
         flags = DXGI_PRESENT_ALLOW_TEARING;
     }
     else {
-        // Otherwise, we'll submit as fast as possible and DWM will discard excess
-        // frames for us. If frame pacing is also enabled or we're in full-screen,
-        // our Vsync source will keep us in sync with VBlank.
         flags = 0;
     }
 
-    HRESULT hr;
+    HRESULT hr = S_OK;
 
+    // Colorspace update (rare; only when HDR metadata changes)
     if (frame->color_trc != m_LastColorTrc) {
         if (frame->color_trc == AVCOL_TRC_SMPTE2084) {
-            // Switch to Rec 2020 PQ (SMPTE ST 2084) colorspace for HDR10 rendering
             hr = m_SwapChain->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
             if (FAILED(hr)) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -804,7 +801,6 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
             }
         }
         else {
-            // Restore default sRGB colorspace
             hr = m_SwapChain->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
             if (FAILED(hr)) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -812,15 +808,97 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
                              hr);
             }
         }
-
         m_LastColorTrc = frame->color_trc;
     }
 
-    // Present according to the decoder parameters
-    hr = m_SwapChain->Present(0, flags);
+    // VipleStream: Lazy-init FRUC on first frame (avoids CUDA context pollution from probing)
+    if (!m_FRUC && m_DisplayWidth >= 1920 && m_DisplayHeight >= 1080) {
+        m_FRUC = new NvOFRUCWrapper();
+        if (m_FRUC->initialize(m_RenderDevice.Get(), m_DisplayWidth, m_DisplayHeight)) {
+            // Create fullscreen blit vertex buffer for presenting FRUC output
+            VERTEX blitVerts[] = {
+                {-1.f, -1.f, 0.f, 1.f},
+                {-1.f,  1.f, 0.f, 0.f},
+                { 1.f, -1.f, 1.f, 1.f},
+                { 1.f,  1.f, 1.f, 0.f},
+            };
+            D3D11_BUFFER_DESC vbDesc = {};
+            vbDesc.ByteWidth = sizeof(blitVerts);
+            vbDesc.Usage = D3D11_USAGE_IMMUTABLE;
+            vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            vbDesc.StructureByteStride = sizeof(VERTEX);
+            D3D11_SUBRESOURCE_DATA vbData = {};
+            vbData.pSysMem = blitVerts;
+            m_RenderDevice->CreateBuffer(&vbDesc, &vbData, &m_FRUCBlitVertexBuffer);
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] Lazy init: Frame interpolation ready: %dx%d",
+                        m_DisplayWidth, m_DisplayHeight);
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] Lazy init failed");
+            delete m_FRUC;
+            m_FRUC = nullptr;
+        }
+    }
+
+    // VipleStream FRUC path: render directly into FRUC's registered texture,
+    // run optical flow, then Present interpolated + real frame (2x output).
+    if (m_FRUC && m_FRUC->isInitialized()) {
+        // Step 1: Render video directly into FRUC's registered render texture.
+        ID3D11RenderTargetView* frucRTV = m_FRUC->getCurrentRenderRTV();
+        m_RenderDeviceContext->OMSetRenderTargets(1, &frucRTV, nullptr);
+        m_RenderDeviceContext->ClearRenderTargetView(frucRTV, clearColor);
+        renderVideo(frame);
+
+        // Step 2: Submit the already-rendered FRUC texture for optical flow interpolation.
+        double frameTimestampMs = static_cast<double>(SDL_GetTicks());
+        bool hasInterp = m_FRUC->submitFrame(m_RenderDeviceContext.Get(), frameTimestampMs);
+        m_FRUCLastFrameInterpolated = hasInterp;
+
+        // Step 3: Present interpolated frame first (if available).
+        if (hasInterp) {
+            m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
+            m_RenderDeviceContext->ClearRenderTargetView(m_RenderTargetView.Get(), clearColor);
+            m_FRUC->acquireOutputMutex();
+            blitFRUCTexture(m_FRUC->getOutputSRV());
+            m_FRUC->releaseOutputMutex();
+            for (int i = 0; i < Overlay::OverlayMax; i++) {
+                renderOverlay((Overlay::OverlayType)i);
+            }
+            hr = m_SwapChain->Present(0, flags);
+            if (FAILED(hr)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-FRUC] Present(interp) failed: %x", hr);
+                if (m_DecodeDevice == m_RenderDevice) unlockContext(this);
+                SDL_Event event;
+                event.type = SDL_RENDER_DEVICE_RESET;
+                SDL_PushEvent(&event);
+                return;
+            }
+        }
+
+        // Step 4: Present the real frame — render video directly to swapchain.
+        m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
+        m_RenderDeviceContext->ClearRenderTargetView(m_RenderTargetView.Get(), clearColor);
+        renderVideo(frame);
+        for (int i = 0; i < Overlay::OverlayMax; i++) {
+            renderOverlay((Overlay::OverlayType)i);
+        }
+        hr = m_SwapChain->Present(0, flags);
+    }
+    else {
+        // Normal rendering path (no FRUC)
+        m_RenderDeviceContext->ClearRenderTargetView(m_RenderTargetView.Get(), clearColor);
+        m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
+        renderVideo(frame);
+        for (int i = 0; i < Overlay::OverlayMax; i++) {
+            renderOverlay((Overlay::OverlayType)i);
+        }
+        hr = m_SwapChain->Present(0, flags);
+    }
 
     if (m_DecodeDevice == m_RenderDevice) {
-        // Release the context lock
         unlockContext(this);
     }
 
@@ -833,7 +911,6 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         SDL_Event event;
         event.type = SDL_RENDER_DEVICE_RESET;
         SDL_PushEvent(&event);
-        return;
     }
 }
 
@@ -1088,6 +1165,19 @@ void D3D11VARenderer::renderVideo(AVFrame* frame)
     }
 }
 
+// VipleStream: Blit a BGRA SRV full-screen using the overlay shader + FRUC blit vertex buffer.
+void D3D11VARenderer::blitFRUCTexture(ID3D11ShaderResourceView* srv)
+{
+    m_RenderDeviceContext->PSSetShader(m_OverlayPixelShader.Get(), nullptr, 0);
+    UINT stride = sizeof(VERTEX);
+    UINT offset = 0;
+    m_RenderDeviceContext->IASetVertexBuffers(0, 1, m_FRUCBlitVertexBuffer.GetAddressOf(), &stride, &offset);
+    m_RenderDeviceContext->PSSetShaderResources(0, 1, &srv);
+    m_RenderDeviceContext->DrawIndexed(6, 0, 0);
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    m_RenderDeviceContext->PSSetShaderResources(0, 1, &nullSrv);
+}
+
 // This function must NOT use any DXGI or ID3D11DeviceContext methods
 // since it can be called on an arbitrary thread!
 void D3D11VARenderer::notifyOverlayUpdated(Overlay::OverlayType type)
@@ -1321,8 +1411,13 @@ bool D3D11VARenderer::checkDecoderSupport(IDXGIAdapter* adapter)
         return false;
     }
 
-    // Derive a ID3D11VideoDevice from our ID3D11Device.
-    hr = m_RenderDevice.As(&videoDevice);
+    // Derive a ID3D11VideoDevice from the decode device (not the render device).
+    // On Windows, HEVC decoder profiles are only exposed on devices created with
+    // D3D11_CREATE_DEVICE_VIDEO_SUPPORT when the HEVC Video Extensions are installed.
+    // In separate-device mode, the render device and decode device may have different
+    // video decoder capabilities, so we must check the decode device.
+    auto& deviceToCheck = m_DecodeDevice ? m_DecodeDevice : m_RenderDevice;
+    hr = deviceToCheck.As(&videoDevice);
     if (FAILED(hr)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "ID3D11Device::QueryInterface(ID3D11VideoDevice) failed: %x",
@@ -1332,77 +1427,85 @@ bool D3D11VARenderer::checkDecoderSupport(IDXGIAdapter* adapter)
 
     // Check if the format is supported by this decoder
     BOOL supported;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-DIAG] D3D11VA: Checking codec support for videoFormat=0x%x on GPU %S (VendorId=0x%x DeviceId=0x%x) using %s device",
+                m_DecoderParams.videoFormat,
+                adapterDesc.Description,
+                adapterDesc.VendorId,
+                adapterDesc.DeviceId,
+                (m_DecodeDevice && m_DecodeDevice != m_RenderDevice) ? "DECODE" : "SHARED");
+
     switch (m_DecoderParams.videoFormat)
     {
     case VIDEO_FORMAT_H264:
         if (FAILED(videoDevice->CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_H264_VLD_NOFGT, DXGI_FORMAT_NV12, &supported))) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "GPU doesn't support H.264 decoding");
+                         "[VIPLE-DIAG] GPU doesn't support H.264 decoding (CheckVideoDecoderFormat FAILED)");
             return false;
         }
         else if (!supported) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "GPU doesn't support H.264 decoding to NV12 format");
+                         "[VIPLE-DIAG] GPU doesn't support H.264 decoding to NV12 format (supported=FALSE)");
             return false;
         }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] H.264 NV12 decode: SUPPORTED");
         break;
 
     case VIDEO_FORMAT_H264_HIGH8_444:
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] H.264 HIGH8 444: Unsupported by DXVA");
         // Unsupported by DXVA
         return false;
 
-    case VIDEO_FORMAT_H265:
-        if (FAILED(videoDevice->CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_HEVC_VLD_MAIN, DXGI_FORMAT_NV12, &supported))) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "GPU doesn't support HEVC decoding");
-            return false;
+    case VIDEO_FORMAT_H265: {
+        HRESULT hrCheck = videoDevice->CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_HEVC_VLD_MAIN, DXGI_FORMAT_NV12, &supported);
+        if (FAILED(hrCheck) || !supported) {
+            // On some systems, HEVC decoder profiles are hidden by Windows HEVC licensing
+            // even though the GPU hardware fully supports HEVC. Rather than rejecting
+            // immediately, log a warning and let the test frame decode determine actual support.
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-DIAG] HEVC Main: CheckVideoDecoderFormat returned hr=0x%x supported=%d — "
+                        "proceeding anyway (will be validated by test frame decode)",
+                        hrCheck, (int)supported);
         }
-        else if (!supported) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "GPU doesn't support HEVC decoding to NV12 format");
-            return false;
+        else {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] HEVC Main NV12 decode: SUPPORTED");
         }
         break;
+    }
 
-    case VIDEO_FORMAT_H265_MAIN10:
-        if (FAILED(videoDevice->CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10, DXGI_FORMAT_P010, &supported))) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "GPU doesn't support HEVC Main10 decoding");
-            return false;
-        }
-        else if (!supported) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "GPU doesn't support HEVC Main10 decoding to P010 format");
-            return false;
+    case VIDEO_FORMAT_H265_MAIN10: {
+        HRESULT hrCheck = videoDevice->CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10, DXGI_FORMAT_P010, &supported);
+        if (FAILED(hrCheck) || !supported) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-DIAG] HEVC Main10: CheckVideoDecoderFormat returned hr=0x%x supported=%d — "
+                        "proceeding anyway (will be validated by test frame decode)",
+                        hrCheck, (int)supported);
         }
         break;
+    }
 
-    case VIDEO_FORMAT_H265_REXT8_444:
-        if (FAILED(videoDevice->CheckVideoDecoderFormat(&k_D3D11_DECODER_PROFILE_HEVC_VLD_MAIN_444, DXGI_FORMAT_AYUV, &supported)))
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "GPU doesn't support HEVC Main 444 8-bit decoding via D3D11VA");
-            return false;
-        }
-        else if (!supported) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "GPU doesn't support HEVC Main 444 8-bit decoding to AYUV format");
-            return false;
+    case VIDEO_FORMAT_H265_REXT8_444: {
+        HRESULT hrCheck = videoDevice->CheckVideoDecoderFormat(&k_D3D11_DECODER_PROFILE_HEVC_VLD_MAIN_444, DXGI_FORMAT_AYUV, &supported);
+        if (FAILED(hrCheck) || !supported) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-DIAG] HEVC RExt 444 8-bit: CheckVideoDecoderFormat returned hr=0x%x supported=%d — "
+                        "proceeding anyway (will be validated by test frame decode)",
+                        hrCheck, (int)supported);
         }
         break;
+    }
 
-    case VIDEO_FORMAT_H265_REXT10_444:
-        if (FAILED(videoDevice->CheckVideoDecoderFormat(&k_D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10_444, DXGI_FORMAT_Y410, &supported))) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "GPU doesn't support HEVC Main 444 10-bit decoding via D3D11VA");
-            return false;
-        }
-        else if (!supported) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "GPU doesn't support HEVC Main 444 10-bit decoding to Y410 format");
-            return false;
+    case VIDEO_FORMAT_H265_REXT10_444: {
+        HRESULT hrCheck = videoDevice->CheckVideoDecoderFormat(&k_D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10_444, DXGI_FORMAT_Y410, &supported);
+        if (FAILED(hrCheck) || !supported) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-DIAG] HEVC RExt 444 10-bit: CheckVideoDecoderFormat returned hr=0x%x supported=%d — "
+                        "proceeding anyway (will be validated by test frame decode)",
+                        hrCheck, (int)supported);
         }
         break;
+    }
 
     case VIDEO_FORMAT_AV1_MAIN8:
         if (FAILED(videoDevice->CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, DXGI_FORMAT_NV12, &supported))) {
@@ -1463,11 +1566,14 @@ bool D3D11VARenderer::checkDecoderSupport(IDXGIAdapter* adapter)
 
     if (DXUtil::isFormatHybridDecodedByHardware(m_DecoderParams.videoFormat, adapterDesc.VendorId, adapterDesc.DeviceId)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "GPU decoding for format %x is blocked due to hardware limitations",
-                    m_DecoderParams.videoFormat);
+                    "[VIPLE-DIAG] GPU decoding for format 0x%x is BLOCKED by hybrid decode blacklist (VendorId=0x%x DeviceId=0x%x)",
+                    m_DecoderParams.videoFormat, adapterDesc.VendorId, adapterDesc.DeviceId);
         return false;
     }
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-DIAG] D3D11VA checkDecoderSupport: ALL CHECKS PASSED for format 0x%x",
+                m_DecoderParams.videoFormat);
     return true;
 }
 
@@ -1521,6 +1627,17 @@ IFFmpegRenderer::InitFailureReason D3D11VARenderer::getInitFailureReason()
     else {
         return InitFailureReason::Unknown;
     }
+}
+
+// VipleStream: FRUC stats for overlay
+bool D3D11VARenderer::isFRUCActive() const
+{
+    return m_FRUC && m_FRUC->isInitialized();
+}
+
+bool D3D11VARenderer::lastFrameHadFRUCInterp() const
+{
+    return m_FRUCLastFrameInterpolated;
 }
 
 void D3D11VARenderer::lockContext(void *lock_ctx)
@@ -1606,11 +1723,11 @@ bool D3D11VARenderer::setupRenderingResources()
     {
         D3D11_SAMPLER_DESC samplerDesc = {};
         samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        samplerDesc.MaxAnisotropy = 1;
         samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
         samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
         samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
         samplerDesc.MipLODBias = 0.0f;
-        samplerDesc.MaxAnisotropy = 1;
         samplerDesc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
         samplerDesc.MinLOD = 0.0f;
         samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
@@ -1702,6 +1819,10 @@ bool D3D11VARenderer::setupRenderingResources()
     if (!setupSwapchainDependentResources()) {
         return false;
     }
+
+    // VipleStream: FRUC init is deferred to first renderFrame() call.
+    // Multiple init/destroy cycles during renderer probing poison the CUDA context,
+    // causing NvOFFRUCProcess to return ERR_GENERIC on subsequent inits.
 
     return true;
 }

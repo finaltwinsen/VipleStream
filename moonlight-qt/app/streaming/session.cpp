@@ -16,6 +16,7 @@
 #endif
 
 #ifdef Q_OS_WIN32
+#include <windows.h>
 // Scaling the icon down on Win32 looks dreadful, so render at lower res
 #define ICON_SIZE 32
 #else
@@ -486,11 +487,22 @@ Session::getDecoderAvailability(SDL_Window* window,
 {
     IVideoDecoder* decoder;
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-DIAG] getDecoderAvailability: probing format=0x%x %dx%d@%dfps vds=%d",
+                videoFormat, width, height, frameRate, vds);
+
     if (!chooseDecoder(vds, window, videoFormat, width, height, frameRate, false, false, true, decoder)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-DIAG] getDecoderAvailability: chooseDecoder returned FALSE for format=0x%x -> None",
+                    videoFormat);
         return DecoderAvailability::None;
     }
 
     bool hw = decoder->isHardwareAccelerated();
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-DIAG] getDecoderAvailability: format=0x%x -> %s",
+                videoFormat, hw ? "HARDWARE" : "SOFTWARE");
 
     delete decoder;
 
@@ -2233,6 +2245,35 @@ void Session::exec()
         case SDL_KEYDOWN:
             presence.runCallbacks();
             m_InputHandler->handleKeyEvent(&event.key);
+#ifdef Q_OS_WIN32
+            // Workaround: Windows IME can swallow Right Shift key events before they
+            // reach SDL, because IME uses Right Shift as an input method toggle.
+            // We use GetAsyncKeyState() to detect Right Shift state changes that SDL missed.
+            {
+                static bool s_RShiftWasDown = false;
+                bool rShiftIsDown = (GetAsyncKeyState(VK_RSHIFT) & 0x8000) != 0;
+                if (rShiftIsDown && !s_RShiftWasDown) {
+                    // Right Shift pressed but SDL didn't report it — synthesize the event
+                    SDL_KeyboardEvent synth = {};
+                    synth.type = SDL_KEYDOWN;
+                    synth.state = SDL_PRESSED;
+                    synth.keysym.scancode = SDL_SCANCODE_RSHIFT;
+                    synth.keysym.sym = SDLK_RSHIFT;
+                    synth.keysym.mod = SDL_GetModState();
+                    m_InputHandler->handleKeyEvent(&synth);
+                } else if (!rShiftIsDown && s_RShiftWasDown) {
+                    // Right Shift released but SDL didn't report it — synthesize the event
+                    SDL_KeyboardEvent synth = {};
+                    synth.type = SDL_KEYUP;
+                    synth.state = SDL_RELEASED;
+                    synth.keysym.scancode = SDL_SCANCODE_RSHIFT;
+                    synth.keysym.sym = SDLK_RSHIFT;
+                    synth.keysym.mod = SDL_GetModState();
+                    m_InputHandler->handleKeyEvent(&synth);
+                }
+                s_RShiftWasDown = rShiftIsDown;
+            }
+#endif
             break;
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP:
