@@ -22,6 +22,11 @@ temp_*.cmd
 # ── FRUC standalone test tool ──
 tools/fruc_test/
 
+# ── Upstream .github dirs in subprojects (non-functional in subdirs) ──
+Sunshine/.github/
+moonlight-qt/.github/
+moonlight-android/.github/
+
 # ── Android build outputs ──
 moonlight-android/app/build/
 moonlight-android/.gradle/

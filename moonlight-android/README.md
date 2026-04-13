@@ -1,35 +1,19 @@
-# Moonlight Android
+# Moonlight Android — VipleStream Fork
 
-[![AppVeyor Build Status](https://ci.appveyor.com/api/projects/status/232a8tadrrn8jv0k/branch/master?svg=true)](https://ci.appveyor.com/project/cgutman/moonlight-android/branch/master)
-[![Translation Status](https://hosted.weblate.org/widgets/moonlight/-/moonlight-android/svg-badge.svg)](https://hosted.weblate.org/projects/moonlight/moonlight-android/)
+This directory contains the VipleStream-modified Moonlight Android client.
 
-[Moonlight for Android](https://moonlight-stream.org) is an open source client for NVIDIA GameStream and [Sunshine](https://github.com/LizardByte/Sunshine).
+**Upstream:** [moonlight-stream/moonlight-android](https://github.com/moonlight-stream/moonlight-android) — GPL-3.0
 
-Moonlight for Android will allow you to stream your full collection of games from your Windows PC to your Android device,
-whether in your own home or over the internet.
+**VipleStream additions:**
+- `app/src/main/java/com/limelight/relay/RelayClient.java` — WebSocket relay client (lookup, HTTP proxy, RFC 6455, HMAC-SHA256 PSK)
+- `app/src/main/java/com/limelight/relay/RelayTcpTunnel.java` — RTSP TCP tunnel thread (multi-connection with reconnect protocol)
+- `app/src/main/java/com/limelight/nvstream/NvConnection.java` — Relay launch path + tunnel lifecycle
+- `app/src/main/java/com/limelight/nvstream/ConnectionContext.java` — relayUrl, relayPsk, serverUuid, stunAddress fields
+- `app/src/main/java/com/limelight/nvstream/http/NvHTTP.java` — Parse StunEndpoint/StunNatType
+- `app/src/main/java/com/limelight/computers/ComputerManagerService.java` — Relay fallback poll
+- `app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java` — relay_url, relay_psk
+- `app/src/main/res/xml/preferences.xml` — Relay settings UI
+- `app/src/main/jni/moonlight-core/moonlight-common-c/src/` — RtspAddrString cherry-pick
+- `app/src/main/assets/shaders/` — FRUC compute shaders (OpenGL ES)
 
-Moonlight also has a [PC client](https://github.com/moonlight-stream/moonlight-qt) and [iOS/tvOS client](https://github.com/moonlight-stream/moonlight-ios).
-
-You can follow development on our [Discord server](https://moonlight-stream.org/discord) and help translate Moonlight into your language on [Weblate](https://hosted.weblate.org/projects/moonlight/moonlight-android/).
-
-## Downloads
-* [Google Play Store](https://play.google.com/store/apps/details?id=com.limelight)
-* [Amazon App Store](https://www.amazon.com/gp/product/B00JK4MFN2)
-* [F-Droid](https://f-droid.org/packages/com.limelight)
-* [APK](https://github.com/moonlight-stream/moonlight-android/releases)
-
-## Building
-* Install Android Studio and the Android NDK
-* Run ‘git submodule update --init --recursive’ from within moonlight-android/
-* In moonlight-android/, create a file called ‘local.properties’. Add an ‘ndk.dir=’ property to the local.properties file and set it equal to your NDK directory.
-* Build the APK using Android Studio or gradle
-
-## Authors
-
-* [Cameron Gutman](https://github.com/cgutman)  
-* [Diego Waxemberg](https://github.com/dwaxemberg)  
-* [Aaron Neyer](https://github.com/Aaronneyer)  
-* [Andrew Hennessy](https://github.com/yetanothername)
-
-Moonlight is the work of students at [Case Western](http://case.edu) and was
-started as a project at [MHacks](http://mhacks.org).
+See the [root README](../README.md) for full project documentation and build instructions.
