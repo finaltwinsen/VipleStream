@@ -16,6 +16,12 @@ moonlight-deploy/
 sunshine-backup/
 temp_*.cmd
 
+# ── Root-level build scripts (machine-specific, not for VCS) ──
+/*.cmd
+
+# ── FRUC standalone test tool ──
+tools/fruc_test/
+
 # ── Android build outputs ──
 moonlight-android/app/build/
 moonlight-android/.gradle/
