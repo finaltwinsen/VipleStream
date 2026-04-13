@@ -90,6 +90,14 @@ if errorlevel 1 (
 echo [M-2/4] Building moonlight-qt...
 set "PATH=%QT_DIR%\bin;%PATH%"
 cd /d "%SRC_M%"
+
+:: Force qmake regeneration (version.txt changed but .pro didn't)
+copy /b "%SRC_M%\app\app.pro"+,, "%SRC_M%\app\app.pro" >nul 2>&1
+
+:: Force rebuild of files that embed VERSION_STR (qmake can't track version.txt as dep)
+del /f "%SRC_M%\app\release\systemproperties.obj" >nul 2>&1
+del /f "%SRC_M%\app\release\main.obj" >nul 2>&1
+
 qmake moonlight-qt.pro CONFIG+=release
 if errorlevel 1 (
     echo [ERROR] qmake failed
@@ -119,7 +127,8 @@ for %%F in (SDL2.dll SDL2_ttf.dll SDL3.dll avcodec-62.dll avutil-60.dll swscale-
     if exist "%DLLDIR%\%%F" copy /y "%DLLDIR%\%%F" "%TEMP_M%\" >nul
 )
 
-for %%F in (d3d11_vertex.fxc d3d11_yuv420_pixel.fxc d3d11_ayuv_pixel.fxc d3d11_y410_pixel.fxc d3d11_overlay_pixel.fxc) do (
+:: D3D11VA shaders + FRUC compute shaders (3 quality variants)
+for %%F in (d3d11_vertex.fxc d3d11_yuv420_pixel.fxc d3d11_ayuv_pixel.fxc d3d11_y410_pixel.fxc d3d11_overlay_pixel.fxc d3d11_motionest_quality.fxc d3d11_motionest_balanced.fxc d3d11_motionest_performance.fxc d3d11_warp_quality.fxc d3d11_warp_balanced.fxc d3d11_warp_performance.fxc) do (
     if exist "%SRC_M%\app\shaders\%%F" copy /y "%SRC_M%\app\shaders\%%F" "%TEMP_M%\" >nul
 )
 if exist "%SRC_M%\app\ModeSeven.ttf" copy /y "%SRC_M%\app\ModeSeven.ttf" "%TEMP_M%\" >nul

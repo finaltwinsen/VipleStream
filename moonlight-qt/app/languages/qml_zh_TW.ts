@@ -350,6 +350,16 @@
         <source>Enter the new name for this PC:</source>
         <translation>輸入此電腦的新名稱：</translation>
     </message>
+    <message>
+        <location filename="../gui/PcView.qml" line="190"/>
+        <source>Auto Wake-on-LAN: ON</source>
+        <translation>自動網路喚醒：開啟</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcView.qml" line="191"/>
+        <source>Auto Wake-on-LAN: OFF</source>
+        <translation>自動網路喚醒：關閉</translation>
+    </message>
 </context>
 <context>
     <name>PendingPairingTask</name>
@@ -885,7 +895,7 @@
     <message>
         <location filename="../gui/SettingsView.qml" line="1242"/>
         <source>Show configuration warnings</source>
-        <translation type="unfinished"></translation>
+        <translation>顯示設定警告</translation>
     </message>
     <message>
         <location filename="../gui/SettingsView.qml" line="1298"/>
@@ -1199,6 +1209,36 @@
         <location filename="../gui/SettingsView.qml" line="1729"/>
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>自動偵測被封鎖的連線 (建議)</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="672"/>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>補幀 (FRUC 2 倍)</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="683"/>
+        <source>Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate will be halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS). Only available at 180 FPS or below.</source>
+        <translation>在每個真實幀之間插入一個補幀，使實際輸出幀率倍增。向伺服器要求的幀率將減半（例如設定 120 FPS → 向伺服器要求 60 FPS → 實際輸出 120 FPS）。僅限 180 FPS 以下使用。</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="694"/>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>通用運算着色器 (低延遲，建議)</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="695"/>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA 光流引擎 (高品質，需要 CUDA)</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="705"/>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>通用運算使用 D3D11/GLES 計算着色器，每幀延遲約 1-2ms。NVIDIA 光流引擎透過 CUDA 使用專用硬體，但跨 API 同步會增加約 12ms 延遲。大多數情況下建議使用通用運算。</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="711"/>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ 補幀功能在 180 FPS 以上時停用</translation>
     </message>
 </context>
 <context>

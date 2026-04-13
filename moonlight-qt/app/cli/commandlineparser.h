@@ -72,6 +72,8 @@ private:
     QMap<QString, StreamingPreferences::VideoCodecConfig> m_VideoCodecMap;
     QMap<QString, StreamingPreferences::VideoDecoderSelection> m_VideoDecoderMap;
     QMap<QString, StreamingPreferences::CaptureSysKeysMode> m_CaptureSysKeysModeMap;
+    QMap<QString, StreamingPreferences::FrucBackend> m_FrucBackendMap;
+    QMap<QString, StreamingPreferences::FrucQuality> m_FrucQualityMap;
 };
 
 class ListCommandLineParser

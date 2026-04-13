@@ -6,7 +6,23 @@ set "SHADERS=%ROOT%\moonlight-qt\app\shaders"
 set "FXC=fxc.exe"
 
 for %%S in (d3d11_bicubic_scale_pixel d3d11_yuv420_bicubic_pixel) do (
-    echo Compiling %%S...
+    echo Compiling %%S (ps_5_0)...
     "%FXC%" /T ps_5_0 /O3 /Fo "%SHADERS%\%%S.fxc" "%SHADERS%\%%S.hlsl"
+    if errorlevel 1 (echo   FAILED) else (echo   OK)
+)
+
+:: FRUC compute shaders — 3 quality levels each (6 .fxc total)
+echo.
+echo === FRUC Multi-Quality Shader Compilation ===
+
+for %%Q in (0 1 2) do (
+    if %%Q==0 (set "QNAME=quality") else if %%Q==1 (set "QNAME=balanced") else (set "QNAME=performance")
+
+    echo Compiling motionest_!QNAME! (cs_5_0, QUALITY_LEVEL=%%Q)...
+    "%FXC%" /T cs_5_0 /O1 /D QUALITY_LEVEL=%%Q /Fo "%SHADERS%\d3d11_motionest_!QNAME!.fxc" "%SHADERS%\d3d11_motionest_compute.hlsl"
+    if errorlevel 1 (echo   FAILED) else (echo   OK)
+
+    echo Compiling warp_!QNAME! (cs_5_0, QUALITY_LEVEL=%%Q)...
+    "%FXC%" /T cs_5_0 /O1 /D QUALITY_LEVEL=%%Q /Fo "%SHADERS%\d3d11_warp_!QNAME!.fxc" "%SHADERS%\d3d11_warp_compute.hlsl"
     if errorlevel 1 (echo   FAILED) else (echo   OK)
 )

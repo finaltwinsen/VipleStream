@@ -179,6 +179,8 @@ SOURCES += \
     cli/pair.cpp \
     main.cpp \
     backend/computerseeker.cpp \
+    backend/relaylookup.cpp \
+    backend/relaytcptunnel.cpp \
     backend/identitymanager.cpp \
     backend/nvcomputer.cpp \
     backend/nvhttp.cpp \
@@ -223,6 +225,8 @@ HEADERS += \
     settings/mappingfetcher.h \
     utils.h \
     backend/computerseeker.h \
+    backend/relaylookup.h \
+    backend/relaytcptunnel.h \
     backend/identitymanager.h \
     backend/nvcomputer.h \
     backend/nvhttp.h \
@@ -402,12 +406,14 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/dxva2.cpp \
         streaming/video/ffmpeg-renderers/d3d11va.cpp \
         streaming/video/ffmpeg-renderers/nvofruc.cpp \
+        streaming/video/ffmpeg-renderers/genericfruc.cpp \
         streaming/video/ffmpeg-renderers/pacer/dxvsyncsource.cpp
 
     HEADERS += \
         streaming/video/ffmpeg-renderers/dxva2.h \
         streaming/video/ffmpeg-renderers/d3d11va.h \
         streaming/video/ffmpeg-renderers/nvofruc.h \
+        streaming/video/ffmpeg-renderers/genericfruc.h \
         streaming/video/ffmpeg-renderers/pacer/dxvsyncsource.h
 }
 macx {

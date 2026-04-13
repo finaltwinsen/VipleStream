@@ -464,14 +464,23 @@ namespace rtsp_stream {
 
       auto socket = std::move(next_socket);
 
-      auto launch_session {launch_event.view(0s)};
+      // VipleStream: Wait up to 5 seconds for pending session (relay tunnel may arrive slightly early)
+      auto launch_session {launch_event.view(5s)};
       if (launch_session) {
         // Associate the current RTSP session with this socket and start reading
+        BOOST_LOG(info) << "RTSP session assigned to incoming connection";
         socket->session = launch_session;
+        last_session = launch_session;  // Cache for tunnel reconnects
+        socket->read();
+      } else if (last_session) {
+        // VipleStream: Relay tunnel splits RTSP into multiple TCP connections.
+        // After the first /launch session is consumed, subsequent SETUP requests
+        // arrive as new TCP accepts. Reuse the cached session for these.
+        BOOST_LOG(info) << "RTSP session reused from tunnel (no new launch event)";
+        socket->session = last_session;
         socket->read();
       } else {
-        // This can happen due to normal things like port scanning, so let's not make these visible by default
-        BOOST_LOG(debug) << "No pending session for incoming RTSP connection"sv;
+        BOOST_LOG(info) << "No pending session for incoming RTSP connection (closed)";
 
         // If there is no session pending, close the connection immediately
         boost::system::error_code ec;
@@ -534,6 +543,7 @@ namespace rtsp_stream {
           launch_event.pop();
         }
       }
+      last_session.reset();  // VipleStream: clear cached tunnel session
     }
 
     /**
@@ -546,6 +556,7 @@ namespace rtsp_stream {
     }
 
     safe::event_t<std::shared_ptr<launch_session_t>> launch_event;
+    std::shared_ptr<launch_session_t> last_session;  // VipleStream: cached for tunnel multi-TCP reuse
 
     /**
      * @brief Clear launch sessions.

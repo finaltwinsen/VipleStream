@@ -116,6 +116,11 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     m_SpecialKeyCombos[KeyComboQuitAndExit].scanCode = SDL_SCANCODE_E;
     m_SpecialKeyCombos[KeyComboQuitAndExit].enabled = true;
 
+    m_SpecialKeyCombos[KeyComboToggleFRUC].keyCombo = KeyComboToggleFRUC;
+    m_SpecialKeyCombos[KeyComboToggleFRUC].keyCode = SDLK_f;
+    m_SpecialKeyCombos[KeyComboToggleFRUC].scanCode = SDL_SCANCODE_F;
+    m_SpecialKeyCombos[KeyComboToggleFRUC].enabled = true;
+
     m_OldIgnoreDevices = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES);
     m_OldIgnoreDevicesExcept = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT);
 

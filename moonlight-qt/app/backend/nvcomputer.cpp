@@ -18,6 +18,9 @@
 #define SER_MANUALPORT "manualport"
 #define SER_IPV6ADDR "ipv6address"
 #define SER_IPV6PORT "ipv6port"
+#define SER_STUNADDR "stunaddress"
+#define SER_STUNPORT "stunport"
+#define SER_STUNNATTYPE "stunnattype"
 #define SER_APPLIST "apps"
 #define SER_SRVCERT "srvcert"
 #define SER_CUSTOMNAME "customname"
@@ -35,6 +38,9 @@ NvComputer::NvComputer(QSettings& settings)
                                     settings.value(SER_REMOTEPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
     this->ipv6Address = NvAddress(settings.value(SER_IPV6ADDR).toString(),
                                   settings.value(SER_IPV6PORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
+    this->stunAddress = NvAddress(settings.value(SER_STUNADDR).toString(),
+                                  settings.value(SER_STUNPORT, QVariant(0)).toUInt());
+    this->stunNatType = settings.value(SER_STUNNATTYPE).toString();
     this->manualAddress = NvAddress(settings.value(SER_MANUALADDR).toString(),
                                     settings.value(SER_MANUALPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
     this->serverCert = QSslCertificate(settings.value(SER_SRVCERT).toByteArray());
@@ -90,6 +96,9 @@ void NvComputer::serialize(QSettings& settings, bool serializeApps) const
     settings.setValue(SER_IPV6PORT, ipv6Address.port());
     settings.setValue(SER_MANUALADDR, manualAddress.address());
     settings.setValue(SER_MANUALPORT, manualAddress.port());
+    settings.setValue(SER_STUNADDR, stunAddress.address());
+    settings.setValue(SER_STUNPORT, stunAddress.port());
+    settings.setValue(SER_STUNNATTYPE, stunNatType);
     settings.setValue(SER_SRVCERT, serverCert.toPem());
     settings.setValue(SER_NVIDIASOFTWARE, isNvidiaServerSoftware);
 
@@ -194,6 +203,23 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     }
     else {
         this->remoteAddress = NvAddress();
+    }
+
+    // VipleStream: Parse STUN endpoint from serverInfo
+    QString stunEndpoint = NvHTTP::getXmlString(serverInfo, "StunEndpoint");
+    if (!stunEndpoint.isEmpty()) {
+        // Format: "IP:port" (port is UDP control port, but we need HTTP port for API)
+        int colonIdx = stunEndpoint.lastIndexOf(':');
+        if (colonIdx > 0) {
+            QString stunIp = stunEndpoint.left(colonIdx);
+            // Use HTTP port (same as how the server is reached) not the STUN control port
+            // This allows Moonlight to reach the GameStream API via the public IP
+            this->stunAddress = NvAddress(stunIp, http.httpPort());
+        }
+        this->stunNatType = NvHTTP::getXmlString(serverInfo, "StunNatType");
+        qInfo() << "STUN endpoint:" << stunEndpoint
+                << "-> HTTP address:" << this->stunAddress.address() << ":" << this->stunAddress.port()
+                << "NAT:" << this->stunNatType;
     }
 
     // Real Nvidia host software (GeForce Experience and RTX Experience) both use the 'Mjolnir'
@@ -491,6 +517,7 @@ QVector<NvAddress> NvComputer::uniqueAddresses() const
     uniqueAddressList.append(activeAddress);
     uniqueAddressList.append(localAddress);
     uniqueAddressList.append(remoteAddress);
+    uniqueAddressList.append(stunAddress);  // VipleStream: STUN endpoint as fallback
     uniqueAddressList.append(ipv6Address);
     uniqueAddressList.append(manualAddress);
 

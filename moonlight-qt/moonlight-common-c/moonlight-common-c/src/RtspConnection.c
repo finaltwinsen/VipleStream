@@ -386,12 +386,25 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
     responseBuffer = NULL;
     connectRetries = 0;
 
+    // VipleStream: If RTSP host override exists (tunnel), resolve it instead of RemoteAddr
+    struct sockaddr_storage rtspAddr;
+    SOCKADDR_LEN rtspAddrLen = AddrLen;
+    extern char* RtspAddrString;
+    if (RtspAddrString) {
+        if (resolveHostName(RtspAddrString, AF_UNSPEC, RtspPortNumber, &rtspAddr, &rtspAddrLen) != 0) {
+            Limelog("Failed to resolve RTSP tunnel host: %s\n", RtspAddrString);
+            *error = -1;
+            return false;
+        }
+        Limelog("RTSP connecting to tunnel: %s:%u\n", RtspAddrString, RtspPortNumber);
+    } else {
+        memcpy(&rtspAddr, &RemoteAddr, sizeof(rtspAddr));
+        rtspAddrLen = AddrLen;
+    }
+
     // Retry up to 10 seconds if we receive ECONNREFUSED errors from the host PC.
-    // This can happen with GFE 3.22 when initially launching a session because it
-    // returns HTTP 200 OK for the /launch request before the RTSP handshake port
-    // is listening.
     do {
-        sock = connectTcpSocket(&RemoteAddr, AddrLen, RtspPortNumber, RTSP_CONNECT_TIMEOUT_SEC);
+        sock = connectTcpSocket(&rtspAddr, rtspAddrLen, RtspPortNumber, RTSP_CONNECT_TIMEOUT_SEC);
         if (sock == INVALID_SOCKET) {
             *error = LastSocketError();
             if (*error == ECONNREFUSED) {

@@ -1237,6 +1237,11 @@ namespace config {
 
     int_between_f(vars, "fec_percentage", stream.fec_percentage, {1, 255});
 
+    // VipleStream: NAT traversal config
+    string_f(vars, "stun_server", stream.stun_server);
+    string_f(vars, "relay_url", stream.relay_url);
+    string_f(vars, "relay_psk", stream.relay_psk);
+
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 
     // This config option will only be used by the UI

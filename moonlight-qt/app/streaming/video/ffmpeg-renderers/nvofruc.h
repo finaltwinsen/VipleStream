@@ -34,6 +34,10 @@ public:
     // Get the RTV for the current render texture (caller renders directly into it).
     ID3D11RenderTargetView* getCurrentRenderRTV() const { return m_RenderRTVs[m_CurrentRenderIndex]; }
 
+    // Get the SRV for the last submitted render texture (valid after submitFrame).
+    // Use this to blit the real frame without re-rendering.
+    ID3D11ShaderResourceView* getLastRenderSRV() const { return m_RenderSRVs[m_LastRenderIndex]; }
+
     // Submit the current render texture (already rendered into via RTV) for interpolation.
     // Call getCurrentRenderRTV(), render into it, then call this.
     // deviceContext: the SAME context used for rendering (for fence Signal).
@@ -62,12 +66,14 @@ private:
     ID3D11Device* m_Device = nullptr;
     ID3D11Texture2D* m_RenderTextures[NUM_RENDER_TEXTURES] = {};
     ID3D11RenderTargetView* m_RenderRTVs[NUM_RENDER_TEXTURES] = {};
+    ID3D11ShaderResourceView* m_RenderSRVs[NUM_RENDER_TEXTURES] = {};
     ID3D11Texture2D* m_OutputTextures[NUM_INTERP_TEXTURES] = {};
     ID3D11ShaderResourceView* m_OutputSRVs[NUM_INTERP_TEXTURES] = {};
 
     uint32_t m_Width = 0;
     uint32_t m_Height = 0;
     int m_CurrentRenderIndex = 0;
+    int m_LastRenderIndex = 0;
     int m_CurrentOutputIndex = 0;
     int m_FrameCount = 0;
     double m_PrevTimestamp = 0.0;

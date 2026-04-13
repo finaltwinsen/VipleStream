@@ -99,6 +99,11 @@ bool NvOFRUCWrapper::createTextures() {
                          "[VIPLE-FRUC] Failed to create render RTV %d", i);
             return false;
         }
+        if (FAILED(m_Device->CreateShaderResourceView(m_RenderTextures[i], nullptr, &m_RenderSRVs[i]))) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-FRUC] Failed to create render SRV %d", i);
+            return false;
+        }
     }
 
     // Create interpolation output textures and their SRVs
@@ -227,6 +232,7 @@ void NvOFRUCWrapper::destroy() {
     }
 
     for (int i = 0; i < NUM_RENDER_TEXTURES; i++) {
+        if (m_RenderSRVs[i]) { m_RenderSRVs[i]->Release(); m_RenderSRVs[i] = nullptr; }
         if (m_RenderRTVs[i]) { m_RenderRTVs[i]->Release(); m_RenderRTVs[i] = nullptr; }
         if (m_RenderTextures[i]) { m_RenderTextures[i]->Release(); m_RenderTextures[i] = nullptr; }
     }
@@ -245,6 +251,7 @@ bool NvOFRUCWrapper::submitFrame(ID3D11DeviceContext* deviceContext, double time
     if (!m_Handle) return false;
 
     int renderIdx = m_CurrentRenderIndex;
+    m_LastRenderIndex = renderIdx;  // Save for getLastRenderSRV()
     m_CurrentRenderIndex = (m_CurrentRenderIndex + 1) % NUM_RENDER_TEXTURES;
     int outputIdx = m_CurrentOutputIndex;
 

@@ -13,6 +13,8 @@
 
 #include <dwmapi.h>
 #include "nvofruc.h"
+#include "genericfruc.h"
+#include "settings/streamingpreferences.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -78,6 +80,10 @@ D3D11VARenderer::~D3D11VARenderer()
     if (m_FRUC) {
         delete m_FRUC;
         m_FRUC = nullptr;
+    }
+    if (m_GenericFRUC) {
+        delete m_GenericFRUC;
+        m_GenericFRUC = nullptr;
     }
 
     if (m_FrameLatencyWaitableObject) {
@@ -811,62 +817,109 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         m_LastColorTrc = frame->color_trc;
     }
 
-    // VipleStream: Lazy-init FRUC on first frame (avoids CUDA context pollution from probing)
-    if (!m_FRUC && m_DisplayWidth >= 1920 && m_DisplayHeight >= 1080) {
-        m_FRUC = new NvOFRUCWrapper();
-        if (m_FRUC->initialize(m_RenderDevice.Get(), m_DisplayWidth, m_DisplayHeight)) {
-            // Create fullscreen blit vertex buffer for presenting FRUC output
-            VERTEX blitVerts[] = {
-                {-1.f, -1.f, 0.f, 1.f},
-                {-1.f,  1.f, 0.f, 0.f},
-                { 1.f, -1.f, 1.f, 1.f},
-                { 1.f,  1.f, 1.f, 0.f},
-            };
-            D3D11_BUFFER_DESC vbDesc = {};
-            vbDesc.ByteWidth = sizeof(blitVerts);
-            vbDesc.Usage = D3D11_USAGE_IMMUTABLE;
-            vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-            vbDesc.StructureByteStride = sizeof(VERTEX);
-            D3D11_SUBRESOURCE_DATA vbData = {};
-            vbData.pSysMem = blitVerts;
-            m_RenderDevice->CreateBuffer(&vbDesc, &vbData, &m_FRUCBlitVertexBuffer);
+    // VipleStream: Apply deferred swap chain latency change (set by keyboard thread)
+    int pendingLatency = m_PendingSwapChainLatency.exchange(0);
+    if (pendingLatency > 0 && m_SwapChain) {
+        m_SwapChain->SetMaximumFrameLatency(pendingLatency);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] SwapChain max frame latency set to %d", pendingLatency);
+    }
 
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] Lazy init: Frame interpolation ready: %dx%d",
-                        m_DisplayWidth, m_DisplayHeight);
+    // VipleStream: Lazy-init FRUC on first frame (avoids CUDA context pollution from probing).
+    if (!m_FRUC && !m_GenericFRUC && !m_FRUCInitFailed
+        && StreamingPreferences::get(nullptr)->enableFrameInterpolation
+        && m_DecoderParams.frameRate <= 180) {
+        if (m_DisplayWidth >= 1920 && m_DisplayHeight >= 1080) {
+            if (!initFRUC()) {
+                m_FRUCInitFailed = true;
+                // Show error overlay: FRUC not supported on this device
+                if (Session::get()) {
+                    Session::get()->getOverlayManager().updateOverlayText(
+                        Overlay::OverlayStatusUpdate,
+                        "Frame interpolation is not available on this device");
+                    Session::get()->getOverlayManager().setOverlayState(
+                        Overlay::OverlayStatusUpdate, true);
+                    // Restore server FPS to original (we halved it at start for FRUC)
+                    if (Session::get()->getOriginalFps() > 0) {
+                        LiRequestFpsChange(Session::get()->getOriginalFps());
+                    }
+                }
+            }
         } else {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] Lazy init failed");
-            delete m_FRUC;
-            m_FRUC = nullptr;
+            m_FRUCInitFailed = true;
+            // Resolution too low for FRUC
+            if (Session::get()) {
+                Session::get()->getOverlayManager().updateOverlayText(
+                    Overlay::OverlayStatusUpdate,
+                    "Frame interpolation requires at least 1080p resolution");
+                Session::get()->getOverlayManager().setOverlayState(
+                    Overlay::OverlayStatusUpdate, true);
+                // Restore server FPS to original
+                if (Session::get()->getOriginalFps() > 0) {
+                    LiRequestFpsChange(Session::get()->getOriginalFps());
+                }
+            }
         }
     }
 
-    // VipleStream FRUC path: render directly into FRUC's registered texture,
-    // run optical flow, then Present interpolated + real frame (2x output).
-    if (m_FRUC && m_FRUC->isInitialized()) {
-        // Step 1: Render video directly into FRUC's registered render texture.
+    // VipleStream: Frame gap detection — detect late/dropped frames
+    uint64_t now = SDL_GetTicks();
+    uint64_t gap = (m_LastRenderTimeMs > 0) ? (now - m_LastRenderTimeMs) : 0;
+    uint32_t expectedMs = (m_DecoderParams.frameRate > 0) ? (1000 / m_DecoderParams.frameRate) : 33;
+    bool frameLate = (m_RenderFrameCount > 10) && (gap > expectedMs * 2);
+    m_LastRenderTimeMs = now;
+    m_RenderFrameCount++;
+
+    // VipleStream: Check connection quality (3C — pause FRUC on poor connection)
+    bool connectionPoor = false;
+    if (Session::get()) {
+        connectionPoor = Session::get()->isConnectionPoor();
+    }
+
+    // VipleStream: FRUC skip path — late frame or poor connection
+    // Skip interpolation to reduce latency: present real frame ASAP
+    if ((frameLate || connectionPoor) && m_GenericFRUC && m_GenericFRUC->isInitialized() && !m_FRUCPaused) {
+        // Render to FRUC texture (updates internal state for next frame)
+        ID3D11RenderTargetView* gfrucRTV = m_GenericFRUC->getRenderRTV();
+        m_RenderDeviceContext->OMSetRenderTargets(1, &gfrucRTV, nullptr);
+        m_RenderDeviceContext->ClearRenderTargetView(gfrucRTV, clearColor);
+        renderVideo(frame);
+
+        // Skip ME/warp, just update prev frame
+        m_GenericFRUC->skipFrame(m_RenderDeviceContext.Get());
+        m_FRUCLastFrameInterpolated = false;
+
+        // Blit real frame directly to swapchain, present immediately (no V-sync)
+        m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
+        blitFRUCTexture(m_GenericFRUC->getLastRenderSRV());
+        for (int i = 0; i < Overlay::OverlayMax; i++) {
+            renderOverlay((Overlay::OverlayType)i);
+        }
+        hr = m_SwapChain->Present(0, m_AllowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    }
+    // VipleStream FRUC path (Tier 0: NvOFFRUC — NVIDIA hardware optical flow)
+    else if (m_FRUC && m_FRUC->isInitialized() && !m_FRUCPaused) {
+        // Render video directly into FRUC's registered render texture
         ID3D11RenderTargetView* frucRTV = m_FRUC->getCurrentRenderRTV();
         m_RenderDeviceContext->OMSetRenderTargets(1, &frucRTV, nullptr);
         m_RenderDeviceContext->ClearRenderTargetView(frucRTV, clearColor);
         renderVideo(frame);
 
-        // Step 2: Submit the already-rendered FRUC texture for optical flow interpolation.
         double frameTimestampMs = static_cast<double>(SDL_GetTicks());
         bool hasInterp = m_FRUC->submitFrame(m_RenderDeviceContext.Get(), frameTimestampMs);
         m_FRUCLastFrameInterpolated = hasInterp;
 
-        // Step 3: Present interpolated frame first (if available).
+        // Present interpolated frame first (if available)
         if (hasInterp) {
             m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
-            m_RenderDeviceContext->ClearRenderTargetView(m_RenderTargetView.Get(), clearColor);
             m_FRUC->acquireOutputMutex();
             blitFRUCTexture(m_FRUC->getOutputSRV());
             m_FRUC->releaseOutputMutex();
             for (int i = 0; i < Overlay::OverlayMax; i++) {
                 renderOverlay((Overlay::OverlayType)i);
             }
-            hr = m_SwapChain->Present(0, flags);
+            // FRUC: Present interpolated frame with V-sync
+            hr = m_SwapChain->Present(1, 0);
             if (FAILED(hr)) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                              "[VIPLE-FRUC] Present(interp) failed: %x", hr);
@@ -876,16 +929,71 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
                 SDL_PushEvent(&event);
                 return;
             }
+
+            // Wait for the interpolated frame to be consumed by the display
+            // before queuing the real frame. Without this wait, FLIP_DISCARD
+            // discards the interp frame and only shows the real frame.
+            if (m_FrameLatencyWaitableObject) {
+                WaitForSingleObjectEx(m_FrameLatencyWaitableObject, 100, TRUE);
+            }
         }
 
-        // Step 4: Present the real frame — render video directly to swapchain.
+        // Present the real frame — blit from FRUC render texture (no re-render needed)
         m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
-        m_RenderDeviceContext->ClearRenderTargetView(m_RenderTargetView.Get(), clearColor);
-        renderVideo(frame);
+        blitFRUCTexture(m_FRUC->getLastRenderSRV());
         for (int i = 0; i < Overlay::OverlayMax; i++) {
             renderOverlay((Overlay::OverlayType)i);
         }
-        hr = m_SwapChain->Present(0, flags);
+        // FRUC requires V-sync to pace 2x presents across separate refresh intervals
+        hr = m_SwapChain->Present(1, 0);
+    }
+    // VipleStream FRUC path (Tier 1: GenericFRUC — compute shader, cross-platform)
+    else if (m_GenericFRUC && m_GenericFRUC->isInitialized() && !m_FRUCPaused) {
+        // Render video into GenericFRUC's render texture (same pattern as NvOFFRUC)
+        ID3D11RenderTargetView* gfrucRTV = m_GenericFRUC->getRenderRTV();
+        m_RenderDeviceContext->OMSetRenderTargets(1, &gfrucRTV, nullptr);
+        m_RenderDeviceContext->ClearRenderTargetView(gfrucRTV, clearColor);
+        renderVideo(frame);
+
+        double frameTimestampMs = static_cast<double>(SDL_GetTicks());
+        bool hasInterp = m_GenericFRUC->submitFrame(m_RenderDeviceContext.Get(), frameTimestampMs);
+        m_FRUCLastFrameInterpolated = hasInterp;
+
+        // Present interpolated frame first (if available)
+        if (hasInterp) {
+            m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
+            blitFRUCTexture(m_GenericFRUC->getOutputSRV());
+            for (int i = 0; i < Overlay::OverlayMax; i++) {
+                renderOverlay((Overlay::OverlayType)i);
+            }
+            // FRUC: Present interpolated frame with V-sync
+            hr = m_SwapChain->Present(1, 0);
+            if (FAILED(hr)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-FRUC-Generic] Present(interp) failed: %x", hr);
+                if (m_DecodeDevice == m_RenderDevice) unlockContext(this);
+                SDL_Event event;
+                event.type = SDL_RENDER_DEVICE_RESET;
+                SDL_PushEvent(&event);
+                return;
+            }
+
+            // Wait for the interpolated frame to be consumed by the display
+            // before queuing the real frame. Without this wait, FLIP_DISCARD
+            // discards the interp frame and only shows the real frame.
+            if (m_FrameLatencyWaitableObject) {
+                WaitForSingleObjectEx(m_FrameLatencyWaitableObject, 100, TRUE);
+            }
+        }
+
+        // Present the real frame — blit from GenericFRUC's render texture
+        m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
+        blitFRUCTexture(m_GenericFRUC->getLastRenderSRV());
+        for (int i = 0; i < Overlay::OverlayMax; i++) {
+            renderOverlay((Overlay::OverlayType)i);
+        }
+        // FRUC requires V-sync to pace 2x presents across separate refresh intervals
+        hr = m_SwapChain->Present(1, 0);
     }
     else {
         // Normal rendering path (no FRUC)
@@ -1629,15 +1737,103 @@ IFFmpegRenderer::InitFailureReason D3D11VARenderer::getInitFailureReason()
     }
 }
 
+// VipleStream: FRUC init with NvOFFRUC → GenericFRUC fallback chain
+bool D3D11VARenderer::initFRUC()
+{
+    // Helper: create blit vertex buffer (shared by both backends)
+    auto createBlitVB = [this]() {
+        VERTEX blitVerts[] = {
+            {-1.f, -1.f, 0.f, 1.f},
+            {-1.f,  1.f, 0.f, 0.f},
+            { 1.f, -1.f, 1.f, 1.f},
+            { 1.f,  1.f, 1.f, 0.f},
+        };
+        D3D11_BUFFER_DESC vbDesc = {};
+        vbDesc.ByteWidth = sizeof(blitVerts);
+        vbDesc.Usage = D3D11_USAGE_IMMUTABLE;
+        vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        vbDesc.StructureByteStride = sizeof(VERTEX);
+        D3D11_SUBRESOURCE_DATA vbData = {};
+        vbData.pSysMem = blitVerts;
+        m_RenderDevice->CreateBuffer(&vbDesc, &vbData, &m_FRUCBlitVertexBuffer);
+    };
+
+    // FRUC does 2x Present per input frame. Increase max frame latency from 1 to 2
+    // so the second Present doesn't stall waiting for buffer recycle.
+    auto boostLatency = [this]() {
+        m_SwapChain->SetMaximumFrameLatency(3);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] SwapChain max frame latency raised to 3 for 2x Present");
+    };
+
+    auto prefs = StreamingPreferences::get(nullptr);
+    bool preferNvidia = (prefs->frucBackend == StreamingPreferences::FB_NVIDIA_OF);
+
+    if (preferNvidia) {
+        // User explicitly requested NVIDIA Optical Flow — try it first
+        m_FRUC = new NvOFRUCWrapper();
+        if (m_FRUC->initialize(m_RenderDevice.Get(), m_DisplayWidth, m_DisplayHeight)) {
+            createBlitVB();
+            boostLatency();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] NVIDIA Optical Flow ready: %dx%d",
+                        m_DisplayWidth, m_DisplayHeight);
+            return true;
+        }
+        delete m_FRUC;
+        m_FRUC = nullptr;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] NVIDIA Optical Flow unavailable, falling back to Generic");
+    }
+
+    // Default: GenericFRUC (D3D11 compute shader — low latency, cross-platform)
+    m_GenericFRUC = new GenericFRUC();
+    m_GenericFRUC->setQualityLevel(static_cast<int>(prefs->frucQuality));
+    if (m_GenericFRUC->initialize(m_RenderDevice.Get(), m_DisplayWidth, m_DisplayHeight)) {
+        createBlitVB();
+        boostLatency();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] Generic compute shader ready: %dx%d",
+                    m_DisplayWidth, m_DisplayHeight);
+        return true;
+    }
+    delete m_GenericFRUC;
+    m_GenericFRUC = nullptr;
+
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC] No FRUC backend available");
+    return false;
+}
+
 // VipleStream: FRUC stats for overlay
 bool D3D11VARenderer::isFRUCActive() const
 {
-    return m_FRUC && m_FRUC->isInitialized();
+    return (m_FRUC && m_FRUC->isInitialized()) ||
+           (m_GenericFRUC && m_GenericFRUC->isInitialized());
 }
 
 bool D3D11VARenderer::lastFrameHadFRUCInterp() const
 {
     return m_FRUCLastFrameInterpolated;
+}
+
+const char* D3D11VARenderer::getFRUCBackendName() const
+{
+    if (m_FRUC && m_FRUC->isInitialized()) return "NVIDIA Optical Flow";
+    if (m_GenericFRUC && m_GenericFRUC->isInitialized()) return "Generic Compute";
+    return "None";
+}
+
+void D3D11VARenderer::toggleFRUC()
+{
+    bool paused = !m_FRUCPaused.load();
+    m_FRUCPaused.store(paused);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC] FRUC %s via hotkey", paused ? "PAUSED" : "RESUMED");
+
+    // Defer swap chain latency update to render thread (DXGI is not thread-safe).
+    // FRUC needs 3 (2x present per frame), normal needs 1.
+    m_PendingSwapChainLatency.store(paused ? 1 : 3);
 }
 
 void D3D11VARenderer::lockContext(void *lock_ctx)

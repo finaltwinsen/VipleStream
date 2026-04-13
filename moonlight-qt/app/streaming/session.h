@@ -121,6 +121,15 @@ public:
         return m_OverlayManager;
     }
 
+    // VipleStream: connection quality flag for renderer (atomic, thread-safe)
+    bool isConnectionPoor() const { return m_ConnectionPoor.load(); }
+
+    // VipleStream: access computer info for overlay display
+    NvComputer* getComputer() const { return m_Computer; }
+
+    // VipleStream: original user-requested FPS (before FRUC halving)
+    int getOriginalFps() const { return m_OriginalFps; }
+
     void flushWindowEvents();
 
     void setShouldExit(bool quitHostApp = false);
@@ -166,6 +175,7 @@ private:
                              int& width, int& height);
 
     void toggleFullscreen();
+    void toggleFRUC();
 
     void notifyMouseEmulationMode(bool enabled);
 
@@ -280,6 +290,12 @@ private:
     Uint32 m_DropAudioEndTime;
 
     Overlay::OverlayManager m_OverlayManager;
+
+    // VipleStream: connection quality for FRUC adaptive behavior
+    std::atomic<bool> m_ConnectionPoor{false};
+
+    // VipleStream: original user-requested FPS (before FRUC halving)
+    int m_OriginalFps = 0;
 
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
     static Session* s_ActiveSession;

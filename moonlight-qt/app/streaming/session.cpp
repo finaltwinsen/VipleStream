@@ -1,4 +1,6 @@
 #include "session.h"
+#include "backend/relaylookup.h"
+#include "backend/relaytcptunnel.h"
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
 #include "backend/richpresencemanager.h"
@@ -188,12 +190,18 @@ void Session::clConnectionStatusUpdate(int connectionStatus)
     switch (connectionStatus)
     {
     case CONN_STATUS_POOR:
+        s_ActiveSession->m_ConnectionPoor.store(true);
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-NET] Connection status: POOR — FRUC will reduce latency mode");
         s_ActiveSession->m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
                                                             s_ActiveSession->m_StreamConfig.bitrate > 5000 ?
                                                                 "Slow connection to PC\nReduce your bitrate" : "Poor connection to PC");
         s_ActiveSession->m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
         break;
     case CONN_STATUS_OKAY:
+        s_ActiveSession->m_ConnectionPoor.store(false);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-NET] Connection status: OKAY — FRUC resuming normal mode");
         s_ActiveSession->m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
         break;
     }
@@ -676,6 +684,17 @@ bool Session::initialize(QQuickWindow* qtWindow)
     m_VideoCallbacks.setup = drSetup;
 
     m_StreamConfig.fps = m_Preferences->fps;
+    m_OriginalFps = m_Preferences->fps;
+
+    // VipleStream: When FRUC is enabled and FPS <= 180, request half the frame rate
+    // from the server. FRUC will double it locally via optical flow interpolation.
+    if (m_Preferences->enableFrameInterpolation && m_Preferences->fps <= 180) {
+        m_StreamConfig.fps = m_Preferences->fps / 2;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] Requesting %d FPS from server (user setting: %d, FRUC 2x)",
+                    m_StreamConfig.fps, m_Preferences->fps);
+    }
+
     m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
 
 #ifndef STEAM_LINK
@@ -1499,6 +1518,31 @@ void Session::updateOptimalWindowDisplayMode()
     SDL_SetWindowDisplayMode(m_Window, &bestMode);
 }
 
+void Session::toggleFRUC()
+{
+    if (m_VideoDecoder) {
+        auto* ffmpegDecoder = dynamic_cast<FFmpegVideoDecoder*>(m_VideoDecoder);
+        if (ffmpegDecoder) {
+            auto* renderer = ffmpegDecoder->getBackendRenderer();
+            if (renderer) {
+                renderer->toggleFRUC();
+
+                // VipleStream: When FRUC is toggled, change the server's encoding FPS
+                // to match. FRUC ON = server sends fps/2 (FRUC doubles it).
+                // FRUC OFF = server sends full fps (equivalent to settings disable).
+                if (m_OriginalFps > 0 && m_OriginalFps <= 180) {
+                    bool frucOff = renderer->m_FRUCPaused.load();
+                    int newServerFps = frucOff ? m_OriginalFps : (m_OriginalFps / 2);
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC] Requesting server FPS change: %d (FRUC %s)",
+                                newServerFps, frucOff ? "OFF" : "ON");
+                    LiRequestFpsChange(newServerFps);
+                }
+            }
+        }
+    }
+}
+
 void Session::toggleFullscreen()
 {
     bool fullScreen = !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
@@ -1605,6 +1649,8 @@ bool Session::startConnectionAsync()
     }
 
     QString rtspSessionUrl;
+    bool useRelayForStream = false;
+    RelayTcpTunnel *rtspTunnel = nullptr;
 
     try {
         NvHTTP http(m_Computer);
@@ -1616,15 +1662,92 @@ bool Session::startConnectionAsync()
                       m_InputHandler->getAttachedGamepadMask(),
                       !m_Preferences->multiController,
                       rtspSessionUrl);
+    } catch (const QtNetworkReplyException&) {
+        // Direct launch failed — try via relay proxy
+        if (!m_Preferences->relayUrl.isEmpty() && !m_Computer->uuid.isEmpty()) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] Direct launch failed, trying relay proxy...");
+
+            // Build the launch URL path
+            int riKeyId;
+            memcpy(&riKeyId, m_StreamConfig.remoteInputAesIv, sizeof(riKeyId));
+            riKeyId = qFromBigEndian(riKeyId);
+
+            QString verb = m_Computer->currentGameId != 0 ? "resume" : "launch";
+            QString launchPath = QString("/%1?appid=%2&mode=%3x%4x%5&additionalStates=1&sops=%6"
+                "&rikey=%7&rikeyid=%8&localAudioPlayMode=%9&surroundAudioInfo=%10"
+                "&remoteControllersBitmap=%11&gcmap=%11&gcpersist=0&uniqueid=0123456789ABCDEF")
+                .arg(verb)
+                .arg(m_App.id)
+                .arg(m_StreamConfig.width).arg(m_StreamConfig.height).arg(m_StreamConfig.fps)
+                .arg(enableGameOptimizations ? 1 : 0)
+                .arg(QByteArray(m_StreamConfig.remoteInputAesKey, sizeof(m_StreamConfig.remoteInputAesKey)).toHex())
+                .arg(riKeyId)
+                .arg(m_Preferences->playAudioOnHost ? 1 : 0)
+                .arg(SURROUNDAUDIOINFO_FROM_AUDIO_CONFIGURATION(m_StreamConfig.audioConfiguration))
+                .arg(m_InputHandler->getAttachedGamepadMask())
+                + "&corever=1";  // Required for encrypted RTSP (rtspenc://)
+
+            QString launchResp = RelayLookup::httpProxy(
+                m_Preferences->relayUrl, m_Preferences->relayPsk,
+                m_Computer->uuid, launchPath, 45000); // /launch needs 30s+ (encoder probe)
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] Relay launch response: empty=%d len=%d contains_gamesession=%d",
+                        launchResp.isEmpty(), launchResp.length(),
+                        launchResp.contains("gamesession") ? 1 : 0);
+
+            if (!launchResp.isEmpty() && launchResp.contains("gamesession")) {
+                rtspSessionUrl = NvHTTP::getXmlString(launchResp, "sessionUrl0");
+                useRelayForStream = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-NAT] Relay launch succeeded! RTSP URL: %s",
+                            qPrintable(rtspSessionUrl));
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-NAT] Relay launch failed. Response: %s",
+                            qPrintable(launchResp.left(200)));
+                emit displayLaunchError(tr("Failed to launch via relay proxy"));
+                return false;
+            }
+        } else {
+            emit displayLaunchError(tr("Connection to host failed"));
+            return false;
+        }
     } catch (const GfeHttpResponseException& e) {
         emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
         return false;
-    } catch (const QtNetworkReplyException& e) {
-        emit displayLaunchError(e.toQString());
-        return false;
     }
 
-    QByteArray hostnameStr = m_Computer->activeAddress.address().toUtf8();
+    // VipleStream: If using relay, set up RTSP TCP tunnel
+    QByteArray hostnameStr;
+    if (useRelayForStream) {
+        // Start local RTSP tunnel
+        uint16_t rtspPort = 48010; // default RTSP port
+        rtspTunnel = new RelayTcpTunnel(m_Preferences->relayUrl, m_Preferences->relayPsk,
+                                         m_Computer->uuid, rtspPort);
+        uint16_t localRtspPort = rtspTunnel->startAndGetPort();
+
+        // Override RTSP URL to point to local tunnel
+        rtspSessionUrl = QString("rtspenc://127.0.0.1:%1").arg(localRtspPort);
+
+        // For UDP streams (control/video/audio), use STUN address if available.
+        // If no STUN endpoint (relay-only mode), use 127.0.0.1 — the ENet control
+        // stream will fail to connect but the RTSP handshake can still proceed
+        // through the tunnel. Future: relay UDP streams too.
+        if (!m_Computer->stunAddress.isNull() && !m_Computer->stunAddress.address().isEmpty()) {
+            hostnameStr = m_Computer->stunAddress.address().toUtf8();
+        } else {
+            // Relay-only: no direct UDP path. Use localhost as placeholder.
+            // RTSP handshake goes through tunnel; UDP streams won't connect.
+            hostnameStr = QByteArrayLiteral("127.0.0.1");
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-NAT] RTSP tunneled via localhost:%d, UDP to %s",
+                    localRtspPort, hostnameStr.data());
+    } else {
+        hostnameStr = m_Computer->activeAddress.address().toUtf8();
+    }
     QByteArray siAppVersion = m_Computer->appVersion.toUtf8();
 
     SERVER_INFORMATION hostInfo;
@@ -1700,9 +1823,71 @@ bool Session::startConnectionAsync()
                                                                          false);
     }
 
+    // VipleStream: If no STUN endpoint cached, try relay lookup
+    if (m_Computer->stunAddress.isNull() || m_Computer->stunAddress.address().isEmpty()) {
+        QString relayUrl = m_Preferences->relayUrl;
+        QString relayPsk = m_Preferences->relayPsk;
+        if (!relayUrl.isEmpty() && !m_Computer->uuid.isEmpty()) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] No cached STUN endpoint, querying relay: %s",
+                        qPrintable(relayUrl));
+
+            auto result = RelayLookup::lookup(relayUrl, relayPsk, m_Computer->uuid, 5000);
+            if (result.success) {
+                // Use the STUN IP with default HTTP port for API access
+                uint16_t httpPort = m_Computer->activeAddress.port() > 0 ?
+                                    m_Computer->activeAddress.port() : 47989;
+                m_Computer->stunAddress = NvAddress(result.stunIp, httpPort);
+                m_Computer->stunNatType = result.natType;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-NAT] Relay provided endpoint: %s:%d",
+                            qPrintable(result.stunIp), httpPort);
+            }
+        }
+    }
+
+    // VipleStream: Attempt hole punch if we have a STUN endpoint for the server.
+    // This is best-effort — failure is not fatal (ENet will try connecting anyway).
+    if (!m_Computer->stunAddress.isNull() && !m_Computer->stunAddress.address().isEmpty()) {
+        QByteArray serverUuid = m_Computer->uuid.toUtf8().left(16);
+        QByteArray clientUuid = QByteArray(16, 0);  // placeholder
+        serverUuid.resize(16, 0);
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-NAT] Attempting hole punch to %s:%d (NAT: %s)",
+                    qPrintable(m_Computer->stunAddress.address()),
+                    m_Computer->stunAddress.port(),
+                    qPrintable(m_Computer->stunNatType));
+
+        int punchResult = LiHolePunch(
+            qPrintable(m_Computer->stunAddress.address()),
+            m_Computer->stunAddress.port(),
+            (const uint8_t *)serverUuid.constData(),
+            (const uint8_t *)clientUuid.constData(),
+            3000);
+
+        if (punchResult == 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-NAT] Hole punch succeeded!");
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] Hole punch failed (%d), proceeding with direct connection", punchResult);
+        }
+    }
+
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
                                 NULL, 0, NULL, 0);
+
+    // VipleStream: Clean up RTSP tunnel after handshake completes (or fails).
+    // The tunnel is only needed for the RTSP handshake — streaming uses UDP.
+    if (rtspTunnel) {
+        rtspTunnel->stop();
+        rtspTunnel->wait(5000);
+        delete rtspTunnel;
+        rtspTunnel = nullptr;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-NAT] RTSP tunnel cleaned up");
+    }
+
     if (err != 0) {
         // We already displayed an error dialog in the stage failure
         // listener.

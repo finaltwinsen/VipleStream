@@ -2,6 +2,9 @@
 #include "boxartmanager.h"
 #include "nvhttp.h"
 #include "nvpairingmanager.h"
+#include "identitymanager.h"
+#include "relaylookup.h"
+#include "settings/streamingpreferences.h"
 
 #include <Limelight.h>
 #include <QtEndian>
@@ -94,6 +97,7 @@ private:
         while (!isInterruptionRequested()) {
             bool stateChanged = false;
             bool online = false;
+            bool relayOnly = false;  // true if only reachable via relay (no TCP)
             bool wasOnline = m_Computer->state == NvComputer::CS_ONLINE;
             for (int i = 0; i < (wasOnline ? TRIES_BEFORE_OFFLINING : 1) && !online; i++) {
                 for (auto& address : m_Computer->uniqueAddresses()) {
@@ -111,6 +115,91 @@ private:
                 }
             }
 
+            // VipleStream: If all direct addresses failed, try relay lookup
+            if (!online) {
+                auto prefs = StreamingPreferences::get(nullptr);
+                if (prefs && !prefs->relayUrl.isEmpty() && !m_Computer->uuid.isEmpty()) {
+                    auto result = RelayLookup::lookup(prefs->relayUrl, prefs->relayPsk, m_Computer->uuid, 5000);
+                    if (result.success) {
+                        NvAddress relayAddr;
+                        if (!result.stunIp.isEmpty()) {
+                            relayAddr = NvAddress(result.stunIp, 47989);
+                            m_Computer->stunAddress = relayAddr;
+                            m_Computer->stunNatType = result.natType;
+                        } else {
+                            // No STUN endpoint — use a placeholder address.
+                            // All communication will go through relay proxy/tunnel.
+                            relayAddr = m_Computer->activeAddress;
+                            qInfo() << "[VIPLE-NAT]" << m_Computer->name
+                                    << "online via relay (no STUN, relay-only mode)";
+                        }
+
+                        // First try direct poll (works if UPnP mapped the HTTP port)
+                        if (!result.stunIp.isEmpty() &&
+                            tryPollComputer(&nam, relayAddr, stateChanged)) {
+                            qInfo() << "[VIPLE-NAT]" << m_Computer->name
+                                    << "is now ONLINE via relay (direct poll)!";
+                            online = true;
+                        } else {
+                            // TCP unreachable or no STUN — try polling via relay HTTP proxy
+                            qInfo() << "[VIPLE-NAT] Using relay HTTP proxy for" << m_Computer->name;
+                            // Use the same hardcoded uniqueid that NvHTTP uses (see nvhttp.cpp line 480)
+                            QString serverInfoPath = QString("/serverinfo?uniqueid=0123456789ABCDEF");
+                            QString proxyResp = RelayLookup::httpProxy(
+                                prefs->relayUrl, prefs->relayPsk,
+                                m_Computer->uuid, serverInfoPath, 8000);
+
+                            if (!proxyResp.isEmpty()) {
+                                // Parse the proxied serverInfo XML, but preserve cached pair state
+                                // (relay proxy can't present the Moonlight client's TLS certificate,
+                                //  so PairStatus from proxy is always 0 — use the cached value instead)
+                                auto cachedPairState = m_Computer->pairState;
+                                auto cachedAppList = m_Computer->appList;
+                                auto cachedServerCert = m_Computer->serverCert;
+
+                                try {
+                                    NvHTTP http(relayAddr, 0, m_Computer->serverCert, &nam);
+                                    NvComputer newState(http, proxyResp);
+                                    if (m_Computer->uuid == newState.uuid) {
+                                        stateChanged = m_Computer->update(newState);
+
+                                        // Restore cached pair state, cert, and app list
+                                        // Relay proxy can't verify pairing (no client TLS cert),
+                                        // so trust the cached state. If we have cached apps,
+                                        // the device was paired at some point — force PAIRED.
+                                        m_Computer->serverCert = cachedServerCert;
+                                        if (!cachedAppList.isEmpty()) {
+                                            m_Computer->pairState = NvComputer::PS_PAIRED;
+                                            m_Computer->appList = cachedAppList;
+                                        } else {
+                                            m_Computer->pairState = cachedPairState;
+                                        }
+
+                                        m_Computer->activeAddress = relayAddr;
+                                        qInfo() << "[VIPLE-NAT]" << m_Computer->name
+                                                << "ONLINE via relay (pairState:"
+                                                << (m_Computer->pairState == NvComputer::PS_PAIRED ? "PAIRED" : "NOT_PAIRED")
+                                                << ", apps:" << m_Computer->appList.size() << ")";
+                                        online = true;
+                                        relayOnly = true;
+                                    }
+                                } catch (...) {
+                                    m_Computer->state = NvComputer::CS_ONLINE;
+                                    m_Computer->pairState = !cachedAppList.isEmpty() ?
+                                        NvComputer::PS_PAIRED : cachedPairState;
+                                    m_Computer->activeAddress = relayAddr;
+                                    online = true;
+                                    relayOnly = true;
+                                    stateChanged = true;
+                                }
+                            } else {
+                                qWarning() << "[VIPLE-NAT] Relay HTTP proxy failed for" << m_Computer->name;
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check if we failed after all retry attempts
             // Note: we don't need to acquire the read lock here,
             // because we're on the writing thread.
@@ -121,8 +210,10 @@ private:
             }
 
             // Grab the applist if it's empty or it's been long enough that we need to refresh
+            // Skip if relay-only (TCP HTTP unreachable — can't fetch app list)
             pollsSinceLastAppListFetch++;
-            if (m_Computer->state == NvComputer::CS_ONLINE &&
+            if (!relayOnly &&
+                    m_Computer->state == NvComputer::CS_ONLINE &&
                     m_Computer->pairState == NvComputer::PS_PAIRED &&
                     (m_Computer->appList.isEmpty() || pollsSinceLastAppListFetch >= POLLS_PER_APPLIST_FETCH)) {
                 // Notify prior to the app list poll since it may take a while, and we don't

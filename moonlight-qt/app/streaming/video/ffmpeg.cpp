@@ -2,6 +2,7 @@
 #include "ffmpeg.h"
 #include "utils.h"
 #include "streaming/session.h"
+#include "backend/nvcomputer.h"
 
 #include <h264_stream.h>
 
@@ -902,6 +903,75 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         break;
     }
 
+    // VipleStream: Connection status section
+    {
+        Session* session = Session::get();
+        if (session) {
+            NvComputer* computer = session->getComputer();
+            bool connPoor = session->isConnectionPoor();
+
+            const char* connTypeStr = u8"\u672A\u77E5"; // 未知
+            const char* connIcon = u8"\u2753"; // ❓
+
+            if (computer) {
+                NvComputer::ReachabilityType reach = computer->getActiveAddressReachability();
+                QString activeAddr = computer->activeAddress.address();
+                bool isStunAddr = (!computer->stunAddress.isNull() &&
+                                   activeAddr == computer->stunAddress.address());
+
+                if (reach == NvComputer::RI_LAN) {
+                    connTypeStr = u8"\u5340\u7DB2\u76F4\u9023"; // 區網直連
+                    connIcon = u8"\u2705"; // ✅
+                } else if (reach == NvComputer::RI_VPN) {
+                    connTypeStr = u8"VPN \u901A\u9053"; // VPN 通道
+                    connIcon = u8"\U0001F6E1"; // 🛡
+                } else if (isStunAddr) {
+                    connTypeStr = u8"STUN \u7A7F\u900F"; // STUN 穿透
+                    connIcon = u8"\U0001F310"; // 🌐
+                } else {
+                    connTypeStr = u8"\u516C\u7DB2\u9023\u7DDA"; // 公網連線
+                    connIcon = u8"\u2601"; // ☁
+                }
+
+                ret = snprintf(&output[offset], length - offset,
+                    u8"--- \u9023\u7DDA\u72C0\u614B ---\n"          // --- 連線狀態 ---
+                    u8"%s %s\n"                                      // icon type
+                    u8"\u4F3A\u670D\u5668: %s\n"                     // 伺服器: addr
+                    u8"\u54C1\u8CEA: %s\n",                          // 品質: OK/POOR
+                    connIcon, connTypeStr,
+                    qPrintable(activeAddr),
+                    connPoor ? u8"\u2757 \u4E0D\u7A69\u5B9A" :      // ❗ 不穩定
+                               u8"\u2714 \u6B63\u5E38");             // ✔ 正常
+            } else {
+                ret = snprintf(&output[offset], length - offset,
+                    u8"--- \u9023\u7DDA\u72C0\u614B ---\n"
+                    u8"%s %s\n",
+                    connIcon, connTypeStr);
+            }
+
+            if (ret >= 0 && ret < length - offset) {
+                offset += ret;
+            }
+
+            // STUN info (if available)
+            if (computer && !computer->stunAddress.isNull() &&
+                !computer->stunAddress.address().isEmpty()) {
+                ret = snprintf(&output[offset], length - offset,
+                    u8"STUN: %s (NAT: %s)\n",
+                    qPrintable(computer->stunAddress.address() + ":" +
+                               QString::number(computer->stunAddress.port())),
+                    qPrintable(computer->stunNatType));
+                if (ret >= 0 && ret < length - offset) {
+                    offset += ret;
+                }
+            }
+
+            // Separator
+            ret = snprintf(&output[offset], length - offset, "\n");
+            if (ret >= 0 && ret < length - offset) offset += ret;
+        }
+    }
+
     // VipleStream: All overlay strings in Traditional Chinese (繁體中文)
     if (stats.receivedFps > 0) {
         if (m_VideoDecoderCtx != nullptr) {
@@ -1002,20 +1072,30 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
     // VipleStream: FRUC frame interpolation status
     if (m_FrontendRenderer != nullptr) {
         bool frucActive = m_FrontendRenderer->isFRUCActive();
-        if (frucActive && stats.renderedFrames > 0) {
+        bool frucPaused = m_FrontendRenderer->m_FRUCPaused;
+        if (frucActive && !frucPaused && stats.renderedFrames > 0) {
             double interpRatio = (double)stats.frucInterpolatedFrames / stats.renderedFrames * 100.0;
             double effectiveFps = stats.renderedFps + ((double)stats.frucInterpolatedFrames /
                 ((double)(LiGetMicroseconds() - stats.measurementStartUs) / 1000000.0));
+            const char* backendName = m_FrontendRenderer->getFRUCBackendName();
             ret = snprintf(&output[offset],
                            length - offset,
                            u8"--- \u88DC\u5E40 (FRUC) ---\n"
-                           u8"\u72C0\u614B: \u5DF2\u555F\u7528 (NVIDIA Optical Flow)\n"
+                           u8"\u72C0\u614B: \u5DF2\u555F\u7528 (%s)\n"
                            u8"\u88DC\u5E40\u6578: %u / %u (\u6BD4\u4F8B: %.0f%%)\n"
-                           u8"\u6709\u6548\u8F38\u51FA\u5E40\u7387: %.1f FPS\n",
+                           u8"\u6709\u6548\u8F38\u51FA\u5E40\u7387: %.1f FPS\n"
+                           u8"(Ctrl+Alt+Shift+F \u5207\u63DB)\n",
+                           backendName,
                            stats.frucInterpolatedFrames,
                            stats.renderedFrames,
                            interpRatio,
                            effectiveFps);
+        }
+        else if (frucPaused) {
+            ret = snprintf(&output[offset],
+                           length - offset,
+                           u8"--- \u88DC\u5E40 (FRUC) ---\n"
+                           u8"\u72C0\u614B: \u5DF2\u66AB\u505C (Ctrl+Alt+Shift+F \u6062\u5FA9)\n");
         }
         else {
             ret = snprintf(&output[offset],

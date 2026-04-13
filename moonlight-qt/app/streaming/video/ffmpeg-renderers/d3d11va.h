@@ -2,6 +2,7 @@
 
 #include "renderer.h"
 
+#include <atomic>
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
 
@@ -28,9 +29,11 @@ public:
     virtual int getDecoderCapabilities() override;
     virtual InitFailureReason getInitFailureReason() override;
 
-    // VipleStream: FRUC stats
+    // VipleStream: FRUC stats & control
     virtual bool isFRUCActive() const override;
     virtual bool lastFrameHadFRUCInterp() const override;
+    virtual const char* getFRUCBackendName() const override;
+    virtual void toggleFRUC() override;
 
     enum PixelShaders {
         GENERIC_YUV_420,
@@ -108,11 +111,24 @@ private:
     // Only index 0 is valid if !m_BindDecoderOutputTextures
     std::vector<std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2>> m_VideoTextureResourceViews;
 
-    // VipleStream: NVIDIA Optical Flow FRUC (lazy-init in renderFrame)
+    // VipleStream: Frame interpolation (lazy-init in renderFrame)
+    // Tier 0: NvOFFRUC (NVIDIA hardware optical flow)
     class NvOFRUCWrapper* m_FRUC = nullptr;
+    // Tier 1: GenericFRUC (D3D11 compute shader, cross-platform)
+    class GenericFRUC* m_GenericFRUC = nullptr;
+
     bool m_FRUCLastFrameInterpolated = false;
+    bool m_FRUCInitFailed = false;
+
+    // Deferred swap chain latency update (set by keyboard thread, applied by render thread)
+    std::atomic<int> m_PendingSwapChainLatency{0};  // 0 = no change pending
+
+    // VipleStream: frame gap detection for FRUC drop concealment
+    uint64_t m_LastRenderTimeMs = 0;
+    int m_RenderFrameCount = 0;
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_FRUCBlitVertexBuffer;
     void blitFRUCTexture(ID3D11ShaderResourceView* srv);
+    bool initFRUC(); // Lazy-init: try NvOFFRUC, fall back to GenericFRUC
 
     SDL_SpinLock m_OverlayLock;
     std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, Overlay::OverlayMax> m_OverlayVertexBuffers;

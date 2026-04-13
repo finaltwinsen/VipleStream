@@ -87,7 +87,7 @@ for %%F in (SDL2.dll SDL2_ttf.dll SDL3.dll avcodec-62.dll avutil-60.dll swscale-
 
 :: -- 4. D3D11VA shaders + data files --
 echo [4/6] Copying shaders and data files...
-for %%F in (d3d11_vertex.fxc d3d11_yuv420_pixel.fxc d3d11_ayuv_pixel.fxc d3d11_y410_pixel.fxc d3d11_overlay_pixel.fxc) do (
+for %%F in (d3d11_vertex.fxc d3d11_yuv420_pixel.fxc d3d11_ayuv_pixel.fxc d3d11_y410_pixel.fxc d3d11_overlay_pixel.fxc d3d11_motionest_compute.fxc d3d11_warp_compute.fxc) do (
     if exist "%SRC%\app\shaders\%%F" (
         copy /y "%SRC%\app\shaders\%%F" "%TEMP_DIR%\" >nul
         echo   %%F

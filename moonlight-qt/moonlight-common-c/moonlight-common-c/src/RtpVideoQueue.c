@@ -9,9 +9,10 @@
 #define FEC_VERBOSE
 #endif
 
-// Don't try speculative RFI for 5 minutes after seeing
-// an out of order packet or incorrect prediction
-#define SPECULATIVE_RFI_COOLDOWN_PERIOD_US 300000000
+// VipleStream: Reduced from 5 minutes to 60 seconds.
+// VPN connections (Tailscale, WireGuard) have frequent OOS packets;
+// 5-minute cooldown effectively disables speculative RFI for the entire session.
+#define SPECULATIVE_RFI_COOLDOWN_PERIOD_US 60000000
 
 // RTP packets use a 90 KHz presentation timestamp clock
 #define PTS_DIVISOR 90

@@ -170,6 +170,11 @@ namespace config {
     // Video encryption settings for LAN and WAN streams
     int lan_encryption_mode;
     int wan_encryption_mode;
+
+    // VipleStream: NAT traversal
+    std::string stun_server;   // default: "stun.l.google.com"
+    std::string relay_url;     // signaling relay WebSocket URL (empty = disabled)
+    std::string relay_psk;     // relay pre-shared key
   };
 
   struct nvhttp_t {

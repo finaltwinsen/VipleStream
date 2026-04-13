@@ -321,6 +321,15 @@ StreamCommandLineParser::StreamCommandLineParser()
         {"fullscreen", StreamingPreferences::CSK_FULLSCREEN},
         {"always",     StreamingPreferences::CSK_ALWAYS},
     };
+    m_FrucBackendMap = {
+        {"generic",  StreamingPreferences::FB_GENERIC},
+        {"nvidia",   StreamingPreferences::FB_NVIDIA_OF},
+    };
+    m_FrucQualityMap = {
+        {"quality",     StreamingPreferences::FQ_QUALITY},
+        {"balanced",    StreamingPreferences::FQ_BALANCED},
+        {"performance", StreamingPreferences::FQ_PERFORMANCE},
+    };
 }
 
 StreamCommandLineParser::~StreamCommandLineParser()
@@ -368,6 +377,10 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addToggleOption("performance-overlay", "show performance overlay");
     parser.addToggleOption("hdr", "HDR streaming");
     parser.addToggleOption("yuv444", "YUV 4:4:4 sampling, if supported");
+    parser.addToggleOption("frame-interpolation", "frame interpolation (FRUC)");
+    parser.addChoiceOption("fruc-backend", "FRUC backend", m_FrucBackendMap.keys());
+    parser.addChoiceOption("fruc-quality", "FRUC quality preset", m_FrucQualityMap.keys());
+    parser.addToggleOption("auto-bitrate", "adaptive bitrate for lossy networks");
     parser.addChoiceOption("capture-system-keys", "capture system key combos", m_CaptureSysKeysModeMap.keys());
     parser.addChoiceOption("video-codec", "video codec", m_VideoCodecMap.keys());
     parser.addChoiceOption("video-decoder", "video decoder", m_VideoDecoderMap.keys());
@@ -490,7 +503,23 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
 
     // Resolve --yuv444 and --no-yuv444 options
     preferences->enableYUV444 = parser.getToggleOptionValue("yuv444", preferences->enableYUV444);
-    
+
+    // Resolve --frame-interpolation and --no-frame-interpolation options
+    preferences->enableFrameInterpolation = parser.getToggleOptionValue("frame-interpolation", preferences->enableFrameInterpolation);
+
+    // Resolve --fruc-backend option
+    if (parser.isSet("fruc-backend")) {
+        preferences->frucBackend = mapValue(m_FrucBackendMap, parser.getChoiceOptionValue("fruc-backend"));
+    }
+
+    // Resolve --fruc-quality option
+    if (parser.isSet("fruc-quality")) {
+        preferences->frucQuality = mapValue(m_FrucQualityMap, parser.getChoiceOptionValue("fruc-quality"));
+    }
+
+    // Resolve --auto-bitrate and --no-auto-bitrate options
+    preferences->autoAdjustBitrate = parser.getToggleOptionValue("auto-bitrate", preferences->autoAdjustBitrate);
+
     // Resolve --capture-system-keys option
     if (parser.isSet("capture-system-keys")) {
         preferences->captureSysKeysMode = mapValue(m_CaptureSysKeysModeMap, parser.getChoiceOptionValue("capture-system-keys"));

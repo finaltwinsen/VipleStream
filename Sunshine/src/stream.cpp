@@ -49,6 +49,7 @@ constexpr int IDX_RUMBLE_TRIGGER_DATA = 12;
 constexpr int IDX_SET_MOTION_EVENT = 13;
 constexpr int IDX_SET_RGB_LED = 14;
 constexpr int IDX_SET_ADAPTIVE_TRIGGERS = 15;
+constexpr int IDX_FPS_CHANGE = 16;  // VipleStream: dynamic FPS change
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -67,6 +68,7 @@ static const short packetTypes[] = {
   0x5501,  // Set motion event (Sunshine protocol extension)
   0x5502,  // Set RGB LED (Sunshine protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
+  0x5504,  // FPS change (VipleStream protocol extension)
 };
 
 namespace asio = boost::asio;
@@ -263,10 +265,50 @@ namespace stream {
     }
   }
 
+  // VipleStream: Hole punch magic for intercept detection
+  static constexpr uint32_t HOLEPUNCH_MAGIC = 0x56504C50;
+
+  /**
+   * ENet intercept callback: catches hole punch packets on the control port.
+   * Returns 1 to consume the packet (don't pass to ENet), 0 to let ENet handle it.
+   */
+  static int holePunchIntercept(ENetHost *host, ENetEvent *event) {
+    if (host->receivedDataLength >= 38) { // sizeof(HOLEPUNCH_PACKET)
+      uint32_t magic;
+      memcpy(&magic, host->receivedData, 4);
+      if (magic == HOLEPUNCH_MAGIC) {
+        uint8_t type = host->receivedData[5];
+        if (type == 0) { // SYN → reply ACK
+          // Modify type to ACK and send back
+          host->receivedData[5] = 1; // ACK
+          // Send ACK back to sender
+          ENetBuffer buf;
+          buf.data = host->receivedData;
+          buf.dataLength = host->receivedDataLength;
+          enet_socket_send(host->socket, &host->address, &host->receivedPeerAddress, &buf, 1);
+
+          auto addr_str = platf::from_sockaddr((sockaddr *)&host->receivedPeerAddress.address);
+          BOOST_LOG(info) << "[PUNCH] Received SYN from " << addr_str << ", sent ACK";
+        }
+        else if (type == 2) { // CONFIRM
+          auto addr_str = platf::from_sockaddr((sockaddr *)&host->receivedPeerAddress.address);
+          BOOST_LOG(info) << "[PUNCH] Received CONFIRM from " << addr_str << " — hole punched!";
+        }
+        return 1; // Consume packet (don't pass to ENet)
+      }
+    }
+    return 0; // Not a punch packet, let ENet handle it
+  }
+
   class control_server_t {
   public:
     int bind(net::af_e address_family, std::uint16_t port) {
       _host = net::host_create(address_family, _addr, port);
+
+      // VipleStream: install hole punch intercept callback
+      if (_host) {
+        _host->intercept = holePunchIntercept;
+      }
 
       return !(bool) _host;
     }
@@ -369,6 +411,16 @@ namespace stream {
       safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;
 
       std::unique_ptr<platf::deinit_t> qos;
+
+      // VipleStream: adaptive FEC based on client loss reports
+      std::atomic<int> adaptiveFecPercentage{0};  // 0 = use config default
+      std::chrono::steady_clock::time_point lastLossTime;
+      int zeroLossStreak{0};
+
+      // VipleStream: adaptive bitrate (AIMD) based on client loss reports
+      std::atomic<int> adaptiveBitrateKbps{0};  // 0 = use configured bitrate
+      int configuredBitrateKbps{0};             // original client-requested bitrate
+      int bitrateZeroLossStreak{0};
     } video;
 
     struct {
@@ -946,11 +998,108 @@ namespace stream {
         << "time in milli since last report [" << t.count() << ']' << std::endl
         << "last good frame [" << lastGoodFrame << ']' << std::endl
         << "---end stats---";
+
+      // VipleStream: Adaptive FEC — adjust based on loss reports
+      auto now = std::chrono::steady_clock::now();
+      int currentFec = session->video.adaptiveFecPercentage.load();
+      if (currentFec == 0) currentFec = config::stream.fec_percentage;
+
+      if (count > 0) {
+        int newFec = std::min(currentFec + 10, 50);
+        if (newFec != currentFec) {
+          session->video.adaptiveFecPercentage.store(newFec);
+          BOOST_LOG(info) << "[VIPLE-FEC] Loss detected (" << count
+            << " packets), FEC: " << currentFec << "% -> " << newFec << "%";
+        }
+        session->video.lastLossTime = now;
+        session->video.zeroLossStreak = 0;
+      } else {
+        session->video.zeroLossStreak++;
+        auto sinceLastLoss = std::chrono::duration_cast<std::chrono::seconds>(now - session->video.lastLossTime).count();
+        if (sinceLastLoss > 5 && session->video.zeroLossStreak >= 3) {
+          int baseFec = config::stream.fec_percentage;
+          int newFec = std::max(currentFec - 5, baseFec);
+          if (newFec != currentFec) {
+            session->video.adaptiveFecPercentage.store(newFec);
+            BOOST_LOG(info) << "[VIPLE-FEC] No loss for " << sinceLastLoss
+              << "s, FEC: " << currentFec << "% -> " << newFec << "%";
+          }
+        }
+      }
+
+      // VipleStream: Adaptive Bitrate (AIMD) — reduce bitrate on loss, recover on no-loss
+      {
+        int maxBr = session->video.configuredBitrateKbps;
+        if (maxBr > 0) {  // only run if initialized
+
+        int currentBr = session->video.adaptiveBitrateKbps.load();
+        if (currentBr <= 0) currentBr = maxBr;
+
+        int minBr = std::max(2000, maxBr * 15 / 100);  // floor: 2 Mbps or 15%
+        int newBr = currentBr;
+
+        if (count > 0) {
+          float timeS = std::max(t.count(), 1ll) / 1000.0f;
+          float lossPerSec = count / timeS;
+
+          if (lossPerSec > 30) {
+            newBr = currentBr * 50 / 100;       // heavy loss → halve
+          } else if (lossPerSec > 10) {
+            newBr = currentBr * 70 / 100;       // moderate → -30%
+          } else if (lossPerSec > 3) {
+            newBr = currentBr * 85 / 100;       // mild → -15%
+          }
+          session->video.bitrateZeroLossStreak = 0;
+        } else {
+          session->video.bitrateZeroLossStreak++;
+          if (session->video.bitrateZeroLossStreak >= 5) {
+            newBr = currentBr + maxBr * 5 / 100;  // additive increase: +5% of max
+            session->video.bitrateZeroLossStreak = 0;
+          }
+        }
+
+        newBr = std::max(minBr, std::min(newBr, maxBr));
+
+        // Only apply if change > 10% to avoid oscillation
+        if (std::abs(newBr - currentBr) > currentBr / 10) {
+          session->video.adaptiveBitrateKbps.store(newBr);
+          session->video.idr_events->raise(true);  // clean start at new bitrate
+
+          auto bitrateEvents = session->mail->event<int>(mail::bitrate_change);
+          bitrateEvents->raise(newBr);
+
+          BOOST_LOG(info) << "[VIPLE-ABR] Bitrate: " << currentBr << " -> " << newBr
+            << " kbps (loss=" << count << " in " << t.count() << "ms)";
+        }
+        }  // if (maxBr > 0)
+      }
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
 
+      session->video.idr_events->raise(true);
+    });
+
+    // VipleStream: dynamic FPS change from client (FRUC toggle)
+    server->map(packetTypes[IDX_FPS_CHANGE], [&](session_t *session, const std::string_view &payload) {
+      if (payload.size() < sizeof(uint32_t)) {
+        BOOST_LOG(warning) << "[VIPLE-FPS] Invalid FPS change payload size"sv;
+        return;
+      }
+
+      auto newFps = util::endian::little(*(uint32_t *) payload.data());
+      BOOST_LOG(info) << "[VIPLE-FPS] Client requested FPS change to " << newFps;
+
+      if (newFps < 10 || newFps > 360) {
+        BOOST_LOG(warning) << "[VIPLE-FPS] FPS value out of range, ignoring"sv;
+        return;
+      }
+
+      auto fpsEvents = session->mail->event<int>(mail::fps_change);
+      fpsEvents->raise(static_cast<int>(newFps));
+
+      // Request IDR frame for clean transition at new framerate
       session->video.idr_events->raise(true);
     });
 
@@ -1343,7 +1492,9 @@ namespace stream {
         frame_header.frame_processing_latency = 0;
       }
 
-      auto fecPercentage = config::stream.fec_percentage;
+      // VipleStream: use adaptive FEC if active, otherwise config default
+      auto fecPercentage = session->video.adaptiveFecPercentage.load();
+      if (fecPercentage == 0) fecPercentage = config::stream.fec_percentage;
 
       // Insert space for packet headers
       auto blocksize = session->config.packetsize + MAX_RTP_HEADER_SIZE;
@@ -1868,6 +2019,9 @@ namespace stream {
     // Enable local prioritization and QoS tagging on video traffic if requested by the client
     auto address = session->video.peer.address();
     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
+
+    // VipleStream: store configured bitrate for adaptive bitrate algorithm
+    session->video.configuredBitrateKbps = session->config.monitor.bitrate;
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
     video::capture(session->mail, session->config.monitor, session);

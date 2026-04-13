@@ -3,6 +3,7 @@
 #include "SDL_compat.h"
 
 #include <array>
+#include <atomic>
 
 #include "streaming/video/decoder.h"
 #include "streaming/video/overlaymanager.h"
@@ -304,6 +305,9 @@ public:
     // VipleStream: FRUC frame interpolation queries
     virtual bool isFRUCActive() const { return false; }
     virtual bool lastFrameHadFRUCInterp() const { return false; }
+    virtual const char* getFRUCBackendName() const { return "None"; }
+    virtual void toggleFRUC() {}
+    std::atomic<bool> m_FRUCPaused{false};
 
     RendererType getRendererType() {
         return m_Type;

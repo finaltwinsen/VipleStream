@@ -851,6 +851,13 @@ uint64_t LiGetMillis(void);
 // network byte order.
 int LiFindExternalAddressIP4(const char* stunServer, unsigned short stunPort, unsigned int* wanAddr);
 
+// VipleStream: Attempt UDP hole punch to server's STUN-discovered endpoint.
+// Call before LiStartConnection() when connecting through NAT.
+// Returns 0 on success, negative on failure (connection can still be attempted).
+int LiHolePunch(const char *serverAddr, unsigned short serverPort,
+                const uint8_t *serverUuid, const uint8_t *clientUuid,
+                int timeoutMs);
+
 // Returns the number of queued video frames ready for delivery. Only relevant
 // if CAPABILITY_DIRECT_SUBMIT is not set for the video renderer.
 int LiGetPendingVideoFrames(void);
@@ -998,6 +1005,10 @@ bool LiGetHdrMetadata(PSS_HDR_METADATA metadata);
 // call this API instead. Note that this function does not guarantee that the *next* frame will be an IDR
 // frame, just that an IDR frame will arrive soon.
 void LiRequestIdrFrame(void);
+
+// VipleStream: Request the server to change its encoding framerate mid-stream.
+// Used when toggling FRUC on/off via hotkey to switch between halved and full FPS.
+void LiRequestFpsChange(int newFps);
 
 // This function returns any extended feature flags supported by the host.
 #define LI_FF_PEN_TOUCH_EVENTS        0x01 // LiSendTouchEvent()/LiSendPenEvent() supported

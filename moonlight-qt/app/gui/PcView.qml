@@ -186,6 +186,16 @@ CenteredGridView {
                     visible: !model.online && model.wakeable
                 }
                 NavigableMenuItem {
+                    text: StreamingPreferences.autoWakeOnLan
+                          ? qsTr("Auto Wake-on-LAN: ON")
+                          : qsTr("Auto Wake-on-LAN: OFF")
+                    onTriggered: {
+                        StreamingPreferences.autoWakeOnLan = !StreamingPreferences.autoWakeOnLan
+                        StreamingPreferences.save()
+                    }
+                    visible: model.wakeable
+                }
+                NavigableMenuItem {
                     text: qsTr("Test Network")
                     onTriggered: {
                         computerModel.testConnectionForComputer(index)

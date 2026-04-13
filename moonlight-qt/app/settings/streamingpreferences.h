@@ -108,6 +108,21 @@ public:
     };
     Q_ENUM(CaptureSysKeysMode);
 
+    enum FrucBackend
+    {
+        FB_GENERIC,     // D3D11/GLES compute shader (low latency, default)
+        FB_NVIDIA_OF,   // NVIDIA Optical Flow via CUDA (higher quality, higher latency)
+    };
+    Q_ENUM(FrucBackend);
+
+    enum FrucQuality
+    {
+        FQ_QUALITY,      // Best visual quality, higher GPU load
+        FQ_BALANCED,     // Recommended: quality/performance balance
+        FQ_PERFORMANCE,  // Lowest latency, suitable for iGPU
+    };
+    Q_ENUM(FrucQuality);
+
     Q_PROPERTY(int width MEMBER width NOTIFY displayModeChanged)
     Q_PROPERTY(int height MEMBER height NOTIFY displayModeChanged)
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
@@ -119,6 +134,12 @@ public:
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
     Q_PROPERTY(bool multiController MEMBER multiController NOTIFY multiControllerChanged)
     Q_PROPERTY(bool enableMdns MEMBER enableMdns NOTIFY enableMdnsChanged)
+    Q_PROPERTY(bool autoWakeOnLan MEMBER autoWakeOnLan NOTIFY autoWakeOnLanChanged)
+    Q_PROPERTY(bool enableFrameInterpolation MEMBER enableFrameInterpolation NOTIFY enableFrameInterpolationChanged)
+    Q_PROPERTY(FrucBackend frucBackend MEMBER frucBackend NOTIFY frucBackendChanged)
+    Q_PROPERTY(FrucQuality frucQuality MEMBER frucQuality NOTIFY frucQualityChanged)
+    Q_PROPERTY(QString relayUrl MEMBER relayUrl NOTIFY relayUrlChanged)
+    Q_PROPERTY(QString relayPsk MEMBER relayPsk NOTIFY relayPskChanged)
     Q_PROPERTY(bool quitAppAfter MEMBER quitAppAfter NOTIFY quitAppAfterChanged)
     Q_PROPERTY(bool absoluteMouseMode MEMBER absoluteMouseMode NOTIFY absoluteMouseModeChanged)
     Q_PROPERTY(bool absoluteTouchMode MEMBER absoluteTouchMode NOTIFY absoluteTouchModeChanged)
@@ -160,6 +181,12 @@ public:
     bool playAudioOnHost;
     bool multiController;
     bool enableMdns;
+    bool autoWakeOnLan;
+    bool enableFrameInterpolation;
+    FrucBackend frucBackend;
+    FrucQuality frucQuality;
+    QString relayUrl;      // VipleStream: signaling relay WebSocket URL
+    QString relayPsk;      // VipleStream: relay pre-shared key
     bool quitAppAfter;
     bool absoluteMouseMode;
     bool absoluteTouchMode;
@@ -199,6 +226,12 @@ signals:
     void multiControllerChanged();
     void unsupportedFpsChanged();
     void enableMdnsChanged();
+    void autoWakeOnLanChanged();
+    void enableFrameInterpolationChanged();
+    void frucBackendChanged();
+    void frucQualityChanged();
+    void relayUrlChanged();
+    void relayPskChanged();
     void quitAppAfterChanged();
     void absoluteMouseModeChanged();
     void absoluteTouchModeChanged();

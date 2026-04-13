@@ -1,16 +1,19 @@
 #include "computerseeker.h"
 #include "computermanager.h"
+#include "settings/streamingpreferences.h"
 #include <QTimer>
 
 ComputerSeeker::ComputerSeeker(ComputerManager *manager, QString computerName, QObject *parent)
     : QObject(parent), m_ComputerManager(manager), m_ComputerName(computerName),
       m_TimeoutTimer(new QTimer(this))
 {
-    // If we know this computer, send a WOL packet to wake it up in case it is asleep.
-    const auto computers = m_ComputerManager->getComputers();
-    for (NvComputer* computer : computers) {
-        if (this->matchComputer(computer)) {
-            computer->wake();
+    // VipleStream: Only auto-wake if user enabled the preference (default: off).
+    if (StreamingPreferences::get(nullptr)->autoWakeOnLan) {
+        const auto computers = m_ComputerManager->getComputers();
+        for (NvComputer* computer : computers) {
+            if (this->matchComputer(computer)) {
+                computer->wake();
+            }
         }
     }
 

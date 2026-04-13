@@ -14,6 +14,17 @@ release/
 sunshine-deploy/
 moonlight-deploy/
 sunshine-backup/
+temp_*.cmd
+
+# ── Android build outputs ──
+moonlight-android/app/build/
+moonlight-android/.gradle/
+moonlight-android/build/
+
+# ── Benchmark / test output files ──
+scripts/benchmark/*.json
+scripts/benchmark/*.csv
+scripts/benchmark/*.txt
 
 # ── External dependencies (auto-downloaded by build) ──
 vcpkg/

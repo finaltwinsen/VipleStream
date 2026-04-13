@@ -666,6 +666,80 @@ Flickable {
                     }
                 }
 
+                CheckBox {
+                    id: frameInterpolationCheck
+                    width: parent.width
+                    text: qsTr("Frame interpolation (FRUC 2x)")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.enableFrameInterpolation
+                    enabled: StreamingPreferences.fps <= 180
+                    onCheckedChanged: {
+                        StreamingPreferences.enableFrameInterpolation = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate will be halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS). Only available at 180 FPS or below.")
+                }
+
+                ComboBox {
+                    id: frucBackendCombo
+                    width: parent.width
+                    visible: frameInterpolationCheck.checked
+                    font.pointSize: 12
+                    textRole: "text"
+                    model: ListModel {
+                        id: frucBackendModel
+                    }
+                    Component.onCompleted: {
+                        frucBackendModel.append({text: qsTr("Generic Compute (low latency, recommended)"), val: 0})
+                        frucBackendModel.append({text: qsTr("NVIDIA Optical Flow (high quality, CUDA required)"), val: 1})
+                        currentIndex = StreamingPreferences.frucBackend
+                    }
+                    onActivated: {
+                        StreamingPreferences.frucBackend = frucBackendModel.get(currentIndex).val
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.")
+                }
+
+                ComboBox {
+                    id: frucQualityCombo
+                    width: parent.width
+                    visible: frameInterpolationCheck.checked
+                    font.pointSize: 12
+                    textRole: "text"
+                    model: ListModel {
+                        id: frucQualityModel
+                    }
+                    Component.onCompleted: {
+                        frucQualityModel.append({text: qsTr("Quality — Best visual quality, higher GPU load"), val: 0})
+                        frucQualityModel.append({text: qsTr("Balanced — Recommended (default)"), val: 1})
+                        frucQualityModel.append({text: qsTr("Performance — Lowest latency, suitable for iGPU"), val: 2})
+                        currentIndex = StreamingPreferences.frucQuality
+                    }
+                    onActivated: {
+                        StreamingPreferences.frucQuality = frucQualityModel.get(currentIndex).val
+                    }
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)\nBalanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)\nPerformance: 4-neighbor search + minimal processing (~6ms on iGPU)")
+                }
+
+                Label {
+                    width: parent.width
+                    visible: StreamingPreferences.fps > 180 && StreamingPreferences.enableFrameInterpolation
+                    text: qsTr("⚠ Frame interpolation is disabled above 180 FPS")
+                    font.pointSize: 9
+                    color: "#cc0000"
+                    wrapMode: Text.Wrap
+                }
+
                 Label {
                     width: parent.width
                     id: bitrateTitle
@@ -978,6 +1052,45 @@ Flickable {
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!")
+                }
+
+                Label {
+                    width: parent.width
+                    text: qsTr("NAT Traversal (Signaling Relay)")
+                    font.pointSize: 12
+                    font.bold: true
+                    topPadding: 10
+                }
+
+                TextField {
+                    id: relayUrlField
+                    width: parent.width
+                    font.pointSize: 11
+                    placeholderText: qsTr("Relay URL (e.g. ws://relay.example.com:9999)")
+                    text: StreamingPreferences.relayUrl
+                    onEditingFinished: {
+                        StreamingPreferences.relayUrl = text
+                    }
+                }
+
+                TextField {
+                    id: relayPskField
+                    width: parent.width
+                    font.pointSize: 11
+                    placeholderText: qsTr("Relay PSK (pre-shared key, leave empty if none)")
+                    text: StreamingPreferences.relayPsk
+                    echoMode: TextInput.Password
+                    onEditingFinished: {
+                        StreamingPreferences.relayPsk = text
+                    }
+                }
+
+                Label {
+                    width: parent.width
+                    text: qsTr("Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.")
+                    font.pointSize: 9
+                    color: "gray"
+                    wrapMode: Text.Wrap
                 }
             }
         }

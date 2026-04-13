@@ -8,6 +8,7 @@ static int terminationCallbackErrorCode;
 
 // Common globals
 char* RemoteAddrString;
+char* RtspAddrString;  // VipleStream: RTSP host override for tunnel (NULL = use RemoteAddr)
 struct sockaddr_storage RemoteAddr;
 struct sockaddr_storage LocalAddr;
 SOCKADDR_LEN AddrLen;
@@ -141,6 +142,10 @@ void LiStopConnection(void) {
         free(RemoteAddrString);
         RemoteAddrString = NULL;
     }
+    if (RtspAddrString != NULL) {
+        free(RtspAddrString);
+        RtspAddrString = NULL;
+    }
 }
 
 static void terminationCallbackThreadFunc(void* context)
@@ -268,7 +273,7 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     ControlPortNumber = 0;
     AudioPortNumber = 0;
 
-    // Parse RTSP port number from RTSP session URL
+    // Parse RTSP port number and optional host from RTSP session URL
     if (!parseRtspPortNumberFromUrl(serverInfo->rtspSessionUrl, &RtspPortNumber)) {
         // Use the well known port if parsing fails
         RtspPortNumber = 48010;
@@ -277,6 +282,30 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     }
     else {
         Limelog("RTSP port: %u\n", RtspPortNumber);
+    }
+
+    // VipleStream: Parse RTSP host from URL if it differs from server address
+    // This allows RTSP tunnel (rtspenc://127.0.0.1:port) while keeping RemoteAddr for UDP
+    RtspAddrString = NULL;
+    if (serverInfo->rtspSessionUrl) {
+        const char *url = serverInfo->rtspSessionUrl;
+        const char *hostStart = strstr(url, "://");
+        if (hostStart) {
+            hostStart += 3;
+            const char *hostEnd = strrchr(hostStart, ':');
+            if (hostEnd && hostEnd > hostStart) {
+                int hostLen = (int)(hostEnd - hostStart);
+                char hostBuf[256] = {0};
+                if (hostLen < (int)sizeof(hostBuf)) {
+                    memcpy(hostBuf, hostStart, hostLen);
+                    // Only override if RTSP host differs from server address
+                    if (strcmp(hostBuf, serverInfo->address) != 0) {
+                        RtspAddrString = strdup(hostBuf);
+                        Limelog("RTSP host override: %s (tunnel)\n", RtspAddrString);
+                    }
+                }
+            }
+        }
     }
 
     alreadyTerminated = false;

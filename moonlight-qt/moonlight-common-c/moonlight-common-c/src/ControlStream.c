@@ -140,6 +140,7 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_SET_MOTION_EVENT 10
 #define IDX_SET_RGB_LED 11
 #define IDX_DS_ADAPTIVE_TRIGGERS 12
+#define IDX_FPS_CHANGE 13  // VipleStream: dynamic FPS change (client→server)
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -157,6 +158,8 @@ static const short packetTypesGen3[] = {
     -1,     // Rumble triggers (unused)
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
+    -1,     // Adaptive triggers (unused)
+    -1,     // FPS change (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -171,6 +174,8 @@ static const short packetTypesGen4[] = {
     -1,     // Rumble triggers (unused)
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
+    -1,     // Adaptive triggers (unused)
+    -1,     // FPS change (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -185,6 +190,8 @@ static const short packetTypesGen5[] = {
     -1,     // Rumble triggers (unused)
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
+    -1,     // Adaptive triggers (unused)
+    -1,     // FPS change (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -199,6 +206,8 @@ static const short packetTypesGen7[] = {
     -1,     // Rumble triggers (unused)
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
+    -1,     // Adaptive triggers (unused)
+    -1,     // FPS change (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -214,6 +223,7 @@ static const short packetTypesGen7Enc[] = {
     0x5501, // Set motion event (Sunshine protocol extension)
     0x5502, // Set RGB LED (Sunshine protocol extension)
     0x5503, // Set Adaptive Triggers (Sunshine protocol extension)
+    0x5504, // FPS change (VipleStream protocol extension)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -419,6 +429,30 @@ void LiRequestIdrFrame(void) {
 
     // Request the IDR frame
     PltSetEvent(&idrFrameRequiredEvent);
+}
+
+// Forward declaration (defined later in this file)
+static bool sendMessageAndForget(short ptype, short paylen, const void* payload, uint8_t channelId, uint32_t flags, bool moreData);
+
+// VipleStream: Request dynamic FPS change from server
+void LiRequestFpsChange(int newFps) {
+    if (packetTypes == NULL || packetTypes[IDX_FPS_CHANGE] == -1) {
+        Limelog("FPS change not supported on this protocol version\n");
+        return;
+    }
+
+    uint32_t payload = LE32((uint32_t)newFps);
+    if (!sendMessageAndForget(packetTypes[IDX_FPS_CHANGE],
+                              sizeof(payload),
+                              &payload,
+                              CTRL_CHANNEL_GENERIC,
+                              ENET_PACKET_FLAG_RELIABLE,
+                              false)) {
+        Limelog("FPS change request failed: %d\n", (int)LastSocketError());
+        return;
+    }
+
+    Limelog("FPS change request sent: %d fps\n", newFps);
 }
 
 // Invalidate reference frames lost by the network

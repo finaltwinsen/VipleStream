@@ -1712,8 +1712,8 @@ namespace video {
       // Exception: encoders with FIXED_GOP_SIZE flag don't support on-demand IDR
       if (encoder.flags & FIXED_GOP_SIZE) {
         // Fixed GOP for encoders that don't support on-demand IDR (e.g. Media Foundation)
-        ctx->gop_size = 120;  // ~2 seconds at 60 FPS - larger to reduce oversized IDR frame frequency
-        ctx->keyint_min = 120;
+        ctx->gop_size = 60;   // VipleStream: ~1s at 60 FPS — faster IDR recovery on lossy networks
+        ctx->keyint_min = 60;
       } else {
         ctx->gop_size = encoder.flags & LIMITED_GOP_SIZE ?
                           std::numeric_limits<std::int16_t>::max() :
@@ -2066,6 +2066,8 @@ namespace video {
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+    auto bitrate_events = mail->event<int>(mail::bitrate_change);
+    auto fps_events = mail->event<int>(mail::fps_change);
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -2105,6 +2107,56 @@ namespace video {
 
       if (requested_idr_frame) {
         session->request_idr_frame();
+      }
+
+      // VipleStream: Adaptive Bitrate — apply new bitrate from control thread
+      if (bitrate_events->peek()) {
+        if (auto newBitrateKbps = bitrate_events->pop(0ms)) {
+          auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(session.get());
+          if (avcodec_session && avcodec_session->avcodec_ctx) {
+            auto &ctx = avcodec_session->avcodec_ctx;
+            int64_t newBitrate = *newBitrateKbps * 1000LL;
+            ctx->bit_rate = newBitrate;
+            ctx->rc_max_rate = newBitrate;
+            if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
+              ctx->rc_buffer_size = newBitrate / config.framerate;
+            }
+            BOOST_LOG(info) << "[VIPLE-ABR] Encoder bitrate updated to " << *newBitrateKbps << " kbps";
+          }
+        }
+      }
+
+      // VipleStream: Dynamic FPS change — apply new framerate from client (FRUC toggle)
+      if (fps_events->peek()) {
+        if (auto newFps = fps_events->pop(0ms)) {
+          if (*newFps > 0) {
+            int oldFps = config.framerate;
+            config.framerate = *newFps;
+
+            // Update capture timing
+            double new_fps_target = (disp->is_event_driven() ? 1 : config.framerate);
+            double new_min_fps = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : new_fps_target;
+            max_frametime = std::chrono::duration<double, std::milli> {1000.0 / new_min_fps};
+
+            // Update encoder timebase and framerate
+            auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(session.get());
+            if (avcodec_session && avcodec_session->avcodec_ctx) {
+              auto &ctx = avcodec_session->avcodec_ctx;
+              ctx->time_base = AVRational {1, config.framerate};
+              ctx->framerate = AVRational {config.framerate, 1};
+
+              // Update rc_buffer_size for the new framerate
+              if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
+                ctx->rc_buffer_size = ctx->bit_rate / config.framerate;
+              }
+
+              BOOST_LOG(info) << "[VIPLE-FPS] Encoder framerate updated: " << oldFps << " -> " << *newFps << " fps";
+            } else {
+              BOOST_LOG(warning) << "[VIPLE-FPS] Non-avcodec encoder (e.g. NVENC): framerate change may require stream restart. "
+                                 << "Capture timing updated: " << oldFps << " -> " << *newFps << " fps";
+            }
+          }
+        }
       }
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;

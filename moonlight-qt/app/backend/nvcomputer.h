@@ -106,6 +106,8 @@ public:
     NvAddress remoteAddress;
     NvAddress ipv6Address;
     NvAddress manualAddress;
+    NvAddress stunAddress;      // VipleStream: STUN-discovered public endpoint
+    QString stunNatType;        // "punchable" or "symmetric"
     QByteArray macAddress;
     QString name;
     bool hasCustomName;

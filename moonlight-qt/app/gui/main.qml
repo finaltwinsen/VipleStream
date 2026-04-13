@@ -288,7 +288,7 @@ ApplicationWindow {
             Label {
                 id: versionLabel
                 visible: stackView.currentItem instanceof SettingsView
-                text: qsTr("Version %1").arg(SystemProperties.versionString)
+                text: "VipleStream v" + SystemProperties.versionString
                 font.pointSize: 12
                 horizontalAlignment: Qt.AlignRight
                 verticalAlignment: Qt.AlignVCenter
@@ -369,8 +369,9 @@ ApplicationWindow {
                 }
 
                 Component.onCompleted: {
-                    AutoUpdateChecker.onUpdateAvailable.connect(updateAvailable)
-                    AutoUpdateChecker.start()
+                    // VipleStream: update check disabled — we use our own versioning
+                    // AutoUpdateChecker.onUpdateAvailable.connect(updateAvailable)
+                    // AutoUpdateChecker.start()
                 }
 
                 Keys.onDownPressed: {

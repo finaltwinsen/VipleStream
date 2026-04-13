@@ -24,6 +24,8 @@
 #include "nvhttp.h"
 #include "process.h"
 #include "system_tray.h"
+#include "relay.h"
+#include "stun.h"
 #include "upnp.h"
 #include "video.h"
 
@@ -384,6 +386,18 @@ int main(int argc, char *argv[]) {
   std::unique_ptr<platf::deinit_t> upnp_unmap;
   auto sync_upnp = std::async(std::launch::async, [&upnp_unmap]() {
     upnp_unmap = upnp::start();
+  });
+
+  // VipleStream: STUN NAT traversal prober
+  std::unique_ptr<platf::deinit_t> stun_prober;
+  auto sync_stun = std::async(std::launch::async, [&stun_prober]() {
+    stun_prober = stun::start();
+  });
+
+  // VipleStream: Relay signaling client (optional, depends on config)
+  std::unique_ptr<platf::deinit_t> relay_client;
+  auto sync_relay = std::async(std::launch::async, [&relay_client]() {
+    relay_client = relay::start();
   });
 
   // FIXME: Temporary workaround: Simple-Web_server needs to be updated or replaced

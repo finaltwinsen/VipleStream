@@ -173,6 +173,56 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
       <div class="form-text">{{ $t('config.ping_timeout_desc') }}</div>
     </div>
 
+    <!-- VipleStream: NAT Traversal Section -->
+    <hr />
+    <h4 class="mb-3">NAT Traversal (VipleStream)</h4>
+
+    <!-- STUN Server -->
+    <div class="mb-3">
+      <label for="stun_server" class="form-label">STUN Server</label>
+      <input type="text" class="form-control" id="stun_server"
+             placeholder="stun.l.google.com"
+             v-model="config.stun_server" />
+      <div class="form-text">
+        STUN server for discovering public IP and NAT type. Default: stun.l.google.com
+      </div>
+    </div>
+
+    <!-- Relay URL -->
+    <div class="mb-3">
+      <label for="relay_url" class="form-label">Signaling Relay URL</label>
+      <input type="text" class="form-control" id="relay_url"
+             placeholder="wss://relay.example.com"
+             v-model="config.relay_url" />
+      <div class="form-text">
+        WebSocket URL of the signaling relay server. Supports ws:// (direct) and wss:// (TLS/Cloudflare).
+        Leave empty to disable relay. Run viplestream-relay on a server with a public IP.
+      </div>
+    </div>
+
+    <!-- Relay PSK -->
+    <div class="mb-3">
+      <label for="relay_psk" class="form-label">Relay Pre-Shared Key</label>
+      <input type="password" class="form-control" id="relay_psk"
+             placeholder="(optional)"
+             v-model="config.relay_psk" />
+      <div class="form-text">
+        Authentication key for the relay server. Must match the --psk value used when starting the relay.
+      </div>
+    </div>
+
+    <!-- FEC Percentage -->
+    <div class="mb-3">
+      <label for="fec_percentage" class="form-label">FEC Percentage</label>
+      <input type="number" min="1" max="255" class="form-control" id="fec_percentage"
+             placeholder="20"
+             v-model="config.fec_percentage" />
+      <div class="form-text">
+        Forward Error Correction percentage (1-255). Higher values improve reliability on lossy networks
+        but increase bandwidth usage. Default: 20. Recommended for VPN/WiFi: 30-50.
+      </div>
+    </div>
+
   </div>
 </template>
 

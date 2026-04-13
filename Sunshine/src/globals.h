@@ -55,6 +55,8 @@ namespace mail {
   MAIL(invalidate_ref_frames);
   MAIL(gamepad_feedback);
   MAIL(hdr);
+  MAIL(bitrate_change);  // VipleStream: adaptive bitrate (kbps)
+  MAIL(fps_change);      // VipleStream: dynamic FPS change from client
 #undef MAIL
 
 }  // namespace mail

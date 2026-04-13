@@ -31,6 +31,7 @@
 #include "platform/common.h"
 #include "process.h"
 #include "rtsp.h"
+#include "stun.h"
 #include "system_tray.h"
 #include "utility.h"
 #include "uuid.h"
@@ -765,6 +766,15 @@ namespace nvhttp {
                     << " av1_mode=" << video::active_av1_mode
                     << " MaxLumaHEVC=" << (video::active_hevc_mode > 1 ? "1869449984" : "0") << ")";
 
+    // VipleStream: expose STUN-discovered public endpoint for NAT traversal
+    {
+      auto stun_ep = stun::get_endpoint();
+      if (stun_ep.valid()) {
+        tree.put("root.StunEndpoint", stun_ep.to_string());
+        tree.put("root.StunNatType", stun_ep.nat_type == stun::NAT_SYMMETRIC ? "symmetric" : "punchable");
+      }
+    }
+
     auto current_appid = proc::proc.running();
     tree.put("root.PairStatus", pair_status);
     tree.put("root.currentgame", current_appid);
@@ -791,8 +801,10 @@ namespace nvhttp {
     return named_cert_nodes;
   }
 
-  void applist(resp_https_t response, req_https_t request) {
-    print_req<SunshineHTTPS>(request);
+  template <class T>
+  void applist(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
+               std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+    print_req<T>(request);
 
     pt::ptree tree;
 
@@ -819,8 +831,11 @@ namespace nvhttp {
     }
   }
 
-  void launch(bool &host_audio, resp_https_t response, req_https_t request) {
-    print_req<SunshineHTTPS>(request);
+  template <class T>
+  void launch(bool &host_audio,
+              std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
+              std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+    print_req<T>(request);
 
     pt::ptree tree;
     bool revert_display_configuration {false};
@@ -930,8 +945,11 @@ namespace nvhttp {
     revert_display_configuration = false;
   }
 
-  void resume(bool &host_audio, resp_https_t response, req_https_t request) {
-    print_req<SunshineHTTPS>(request);
+  template <class T>
+  void resume(bool &host_audio,
+              std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
+              std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+    print_req<T>(request);
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -1021,8 +1039,10 @@ namespace nvhttp {
     rtsp_stream::launch_session_raise(launch_session);
   }
 
-  void cancel(resp_https_t response, req_https_t request) {
-    print_req<SunshineHTTPS>(request);
+  template <class T>
+  void cancel(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
+              std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+    print_req<T>(request);
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -1166,15 +1186,15 @@ namespace nvhttp {
     https_server.resource["^/pair$"]["GET"] = [&add_cert](auto resp, auto req) {
       pair<SunshineHTTPS>(add_cert, resp, req);
     };
-    https_server.resource["^/applist$"]["GET"] = applist;
+    https_server.resource["^/applist$"]["GET"] = applist<SunshineHTTPS>;
     https_server.resource["^/appasset$"]["GET"] = appasset;
     https_server.resource["^/launch$"]["GET"] = [&host_audio](auto resp, auto req) {
-      launch(host_audio, resp, req);
+      launch<SunshineHTTPS>(host_audio, resp, req);
     };
     https_server.resource["^/resume$"]["GET"] = [&host_audio](auto resp, auto req) {
-      resume(host_audio, resp, req);
+      resume<SunshineHTTPS>(host_audio, resp, req);
     };
-    https_server.resource["^/cancel$"]["GET"] = cancel;
+    https_server.resource["^/cancel$"]["GET"] = cancel<SunshineHTTPS>;
 
     https_server.config.reuse_address = true;
     https_server.config.address = net::get_bind_address(address_family);
@@ -1184,6 +1204,29 @@ namespace nvhttp {
     http_server.resource["^/serverinfo$"]["GET"] = serverinfo<SimpleWeb::HTTP>;
     http_server.resource["^/pair$"]["GET"] = [&add_cert](auto resp, auto req) {
       pair<SimpleWeb::HTTP>(add_cert, resp, req);
+    };
+
+    // VipleStream: Expose authenticated endpoints on HTTP for relay proxy (localhost only).
+    // Security: relay.cpp (same process) connects to localhost. External access is blocked.
+    http_server.resource["^/applist$"]["GET"] = applist<SimpleWeb::HTTP>;
+    http_server.resource["^/cancel$"]["GET"] = cancel<SimpleWeb::HTTP>;
+    http_server.resource["^/launch$"]["GET"] = [&host_audio](auto resp, auto req) {
+      // Localhost guard: only relay.cpp (same machine) can call this
+      auto remote = req->remote_endpoint().address().to_string();
+      if (remote != "127.0.0.1" && remote != "::1") {
+        BOOST_LOG(warning) << "Rejected /launch from non-localhost: " << remote;
+        *resp << "HTTP/1.0 403 Forbidden\r\n\r\n";
+        return;
+      }
+      launch<SimpleWeb::HTTP>(host_audio, resp, req);
+    };
+    http_server.resource["^/resume$"]["GET"] = [&host_audio](auto resp, auto req) {
+      auto remote = req->remote_endpoint().address().to_string();
+      if (remote != "127.0.0.1" && remote != "::1") {
+        *resp << "HTTP/1.0 403 Forbidden\r\n\r\n";
+        return;
+      }
+      resume<SimpleWeb::HTTP>(host_audio, resp, req);
     };
 
     http_server.config.reuse_address = true;
