@@ -209,6 +209,14 @@ private:
                 stateChanged = true;
             }
 
+            // VipleStream: expose relay-only reachability to the session layer
+            // so /launch (and /quit) can skip direct HTTPS and go straight to
+            // relay proxy instead of waiting for the direct request to time out.
+            if (m_Computer->onlineViaRelay != relayOnly) {
+                m_Computer->onlineViaRelay = relayOnly;
+                stateChanged = true;
+            }
+
             // Grab the applist if it's empty or it's been long enough that we need to refresh
             // Skip if relay-only (TCP HTTP unreachable — can't fetch app list)
             pollsSinceLastAppListFetch++;

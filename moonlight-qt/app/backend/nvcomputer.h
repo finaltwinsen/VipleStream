@@ -100,6 +100,7 @@ public:
     int serverCodecModeSupport;
     QString gpuModel;
     bool isSupportedServerVersion;
+    bool onlineViaRelay = false;  // VipleStream: true when current reachability is only via relay HTTP proxy
 
     // Persisted traits
     NvAddress localAddress;

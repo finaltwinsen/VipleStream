@@ -1309,13 +1309,33 @@ private:
 
         // Perform a best-effort app quit
         if (shouldQuit) {
-            NvHTTP http(m_Session->m_Computer);
+            NvComputer* computer = m_Session->m_Computer;
+            StreamingPreferences* prefs = m_Session->m_Preferences;
 
-            // Logging is already done inside NvHTTP
-            try {
-                http.quitApp();
-            } catch (const GfeHttpResponseException&) {
-            } catch (const QtNetworkReplyException&) {
+            if (computer->onlineViaRelay && prefs &&
+                !prefs->relayUrl.isEmpty() && !computer->uuid.isEmpty()) {
+                // VipleStream: host is only reachable via relay — route /cancel
+                // through the relay HTTP proxy. Direct /cancel would hang
+                // for the full Qt network timeout.
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-NAT] Sending /cancel via relay proxy");
+                QString resp = RelayLookup::httpProxy(
+                    prefs->relayUrl, prefs->relayPsk,
+                    computer->uuid,
+                    QStringLiteral("/cancel?uniqueid=0123456789ABCDEF"),
+                    8000);
+                if (resp.isEmpty()) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-NAT] Relay /cancel returned empty response");
+                }
+            } else {
+                NvHTTP http(computer);
+                // Logging is already done inside NvHTTP
+                try {
+                    http.quitApp();
+                } catch (const GfeHttpResponseException&) {
+                } catch (const QtNetworkReplyException&) {
+                }
             }
 
             // Session is finished now
@@ -1652,71 +1672,90 @@ bool Session::startConnectionAsync()
     bool useRelayForStream = false;
     RelayTcpTunnel *rtspTunnel = nullptr;
 
-    try {
-        NvHTTP http(m_Computer);
-        http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
-                      m_Computer->isNvidiaServerSoftware,
-                      m_App.id, &m_StreamConfig,
-                      enableGameOptimizations,
-                      m_Preferences->playAudioOnHost,
-                      m_InputHandler->getAttachedGamepadMask(),
-                      !m_Preferences->multiController,
-                      rtspSessionUrl);
-    } catch (const QtNetworkReplyException&) {
-        // Direct launch failed — try via relay proxy
-        if (!m_Preferences->relayUrl.isEmpty() && !m_Computer->uuid.isEmpty()) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-NAT] Direct launch failed, trying relay proxy...");
-
-            // Build the launch URL path
-            int riKeyId;
-            memcpy(&riKeyId, m_StreamConfig.remoteInputAesIv, sizeof(riKeyId));
-            riKeyId = qFromBigEndian(riKeyId);
-
-            QString verb = m_Computer->currentGameId != 0 ? "resume" : "launch";
-            QString launchPath = QString("/%1?appid=%2&mode=%3x%4x%5&additionalStates=1&sops=%6"
-                "&rikey=%7&rikeyid=%8&localAudioPlayMode=%9&surroundAudioInfo=%10"
-                "&remoteControllersBitmap=%11&gcmap=%11&gcpersist=0&uniqueid=0123456789ABCDEF")
-                .arg(verb)
-                .arg(m_App.id)
-                .arg(m_StreamConfig.width).arg(m_StreamConfig.height).arg(m_StreamConfig.fps)
-                .arg(enableGameOptimizations ? 1 : 0)
-                .arg(QByteArray(m_StreamConfig.remoteInputAesKey, sizeof(m_StreamConfig.remoteInputAesKey)).toHex())
-                .arg(riKeyId)
-                .arg(m_Preferences->playAudioOnHost ? 1 : 0)
-                .arg(SURROUNDAUDIOINFO_FROM_AUDIO_CONFIGURATION(m_StreamConfig.audioConfiguration))
-                .arg(m_InputHandler->getAttachedGamepadMask())
-                + "&corever=1";  // Required for encrypted RTSP (rtspenc://)
-
-            QString launchResp = RelayLookup::httpProxy(
-                m_Preferences->relayUrl, m_Preferences->relayPsk,
-                m_Computer->uuid, launchPath, 45000); // /launch needs 30s+ (encoder probe)
-
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-NAT] Relay launch response: empty=%d len=%d contains_gamesession=%d",
-                        launchResp.isEmpty(), launchResp.length(),
-                        launchResp.contains("gamesession") ? 1 : 0);
-
-            if (!launchResp.isEmpty() && launchResp.contains("gamesession")) {
-                rtspSessionUrl = NvHTTP::getXmlString(launchResp, "sessionUrl0");
-                useRelayForStream = true;
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-NAT] Relay launch succeeded! RTSP URL: %s",
-                            qPrintable(rtspSessionUrl));
-            } else {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-NAT] Relay launch failed. Response: %s",
-                            qPrintable(launchResp.left(200)));
-                emit displayLaunchError(tr("Failed to launch via relay proxy"));
-                return false;
-            }
-        } else {
-            emit displayLaunchError(tr("Connection to host failed"));
+    // Helper: launch via relay HTTP proxy. Sets rtspSessionUrl + useRelayForStream on success.
+    // Returns true on success, false on failure (caller decides how to handle error).
+    auto tryRelayLaunch = [&]() -> bool {
+        if (m_Preferences->relayUrl.isEmpty() || m_Computer->uuid.isEmpty()) {
             return false;
         }
-    } catch (const GfeHttpResponseException& e) {
-        emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
+
+        int riKeyId;
+        memcpy(&riKeyId, m_StreamConfig.remoteInputAesIv, sizeof(riKeyId));
+        riKeyId = qFromBigEndian(riKeyId);
+
+        QString verb = m_Computer->currentGameId != 0 ? "resume" : "launch";
+        QString launchPath = QString("/%1?appid=%2&mode=%3x%4x%5&additionalStates=1&sops=%6"
+            "&rikey=%7&rikeyid=%8&localAudioPlayMode=%9&surroundAudioInfo=%10"
+            "&remoteControllersBitmap=%11&gcmap=%11&gcpersist=0&uniqueid=0123456789ABCDEF")
+            .arg(verb)
+            .arg(m_App.id)
+            .arg(m_StreamConfig.width).arg(m_StreamConfig.height).arg(m_StreamConfig.fps)
+            .arg(enableGameOptimizations ? 1 : 0)
+            .arg(QByteArray(m_StreamConfig.remoteInputAesKey, sizeof(m_StreamConfig.remoteInputAesKey)).toHex())
+            .arg(riKeyId)
+            .arg(m_Preferences->playAudioOnHost ? 1 : 0)
+            .arg(SURROUNDAUDIOINFO_FROM_AUDIO_CONFIGURATION(m_StreamConfig.audioConfiguration))
+            .arg(m_InputHandler->getAttachedGamepadMask())
+            + "&corever=1";  // Required for encrypted RTSP (rtspenc://)
+
+        QString launchResp = RelayLookup::httpProxy(
+            m_Preferences->relayUrl, m_Preferences->relayPsk,
+            m_Computer->uuid, launchPath, 45000); // /launch needs 30s+ (encoder probe)
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-NAT] Relay launch response: empty=%d len=%d contains_gamesession=%d",
+                    launchResp.isEmpty(), launchResp.length(),
+                    launchResp.contains("gamesession") ? 1 : 0);
+
+        if (!launchResp.isEmpty() && launchResp.contains("gamesession")) {
+            rtspSessionUrl = NvHTTP::getXmlString(launchResp, "sessionUrl0");
+            useRelayForStream = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] Relay launch succeeded! RTSP URL: %s",
+                        qPrintable(rtspSessionUrl));
+            return true;
+        }
+
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-NAT] Relay launch failed. Response: %s",
+                    qPrintable(launchResp.left(200)));
         return false;
+    };
+
+    // VipleStream: If the computer is only reachable via relay proxy (direct HTTPS
+    // to its STUN/public IP is unreachable), skip the direct /launch attempt and
+    // go straight to the relay HTTP proxy. The direct attempt would otherwise
+    // hang for ~90s (Qt's default network timeout) before the catch-fallback ran.
+    if (m_Computer->onlineViaRelay) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-NAT] Computer reachable only via relay — skipping direct /launch");
+        if (!tryRelayLaunch()) {
+            emit displayLaunchError(tr("Failed to launch via relay proxy"));
+            return false;
+        }
+    } else {
+        try {
+            NvHTTP http(m_Computer);
+            http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
+                          m_Computer->isNvidiaServerSoftware,
+                          m_App.id, &m_StreamConfig,
+                          enableGameOptimizations,
+                          m_Preferences->playAudioOnHost,
+                          m_InputHandler->getAttachedGamepadMask(),
+                          !m_Preferences->multiController,
+                          rtspSessionUrl);
+        } catch (const QtNetworkReplyException&) {
+            // Direct launch failed — try via relay proxy as fallback.
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] Direct launch failed, trying relay proxy...");
+            if (!tryRelayLaunch()) {
+                emit displayLaunchError(tr("Connection to host failed"));
+                return false;
+            }
+        } catch (const GfeHttpResponseException& e) {
+            emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
+            return false;
+        }
     }
 
     // VipleStream: If using relay, set up RTSP TCP tunnel
