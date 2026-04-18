@@ -2,7 +2,7 @@
 
 A custom game streaming solution based on [Sunshine](https://github.com/LizardByte/Sunshine) and [Moonlight](https://github.com/moonlight-stream), extended with built-in NAT traversal, frame interpolation (FRUC), and performance optimizations.
 
-> **Current version:** 1.1.65
+> **Current version:** 1.1.80
 
 ---
 
@@ -125,21 +125,55 @@ VipleStream/
 - No external dependencies (stdlib only)
 - Any always-on host (VPS, Raspberry Pi, etc.)
 
-### Build
+### Setup from a fresh clone
 
-1. Copy `build-config.template.cmd` → `build-config.local.cmd` and set your local paths.
+```cmd
+git clone https://github.com/finaltwinsen/VipleStream.git
+cd VipleStream
+```
 
-2. Build everything:
+1. Create your per-machine config (paths to MSVC, Qt, 7-Zip, MSYS2, etc.):
+   ```cmd
+   copy build-config.template.cmd build-config.local.cmd
+   notepad build-config.local.cmd
+   ```
+   `build-config.local.cmd` is gitignored. Everything else (the build wrappers,
+   the packaging script, version bumper) is tracked so you can `git pull` and
+   immediately build with no extra setup on a new machine.
+
+2. Build everything (server + client):
    ```cmd
    build_all.cmd
    ```
-   Outputs are placed in `temp/sunshine/` and `temp/moonlight/`.
-
-3. Deploy:
+   Or build individually:
    ```cmd
-   scripts\deploy_server.ps1    # Deploy Sunshine
-   scripts\deploy_client.ps1    # Deploy Moonlight
+   build_sunshine.cmd     :: server only
+   build_moonlight.cmd    :: client only
    ```
+   Outputs staged in `temp/sunshine/` and `temp/moonlight/`, zipped into
+   `release/VipleStream-{Server|Client}-<version>.zip`.
+
+3. Deploy locally (needs admin once per session for `C:\Program Files\...`):
+   ```cmd
+   scripts\deploy_server.ps1     :: Deploy Sunshine
+   scripts\deploy_client.ps1     :: Deploy Moonlight
+   ```
+   Deploy scripts read `DEPLOY_SERVER` / `DEPLOY_CLIENT` from
+   `build-config.local.cmd` (defaults point at the usual install paths).
+
+### Build chain
+
+```
+build_all.cmd  ─ bumps version
+   ├─ scripts/build_sunshine_inner.sh      (MSYS2 UCRT64 GCC build)
+   ├─ scripts/build_moonlight_package.cmd  (canonical shader/DLL list + zip)
+   └─ scripts/bump_version.cmd             (version.json → all build files)
+```
+
+The canonical Moonlight shader / DLL / windeployqt list lives in
+`scripts/build_moonlight_package.cmd`, not in the root wrapper. If you add a
+new shader, update the `for %%F in (…)` list there and every build path picks
+it up.
 
 ### Relay Server
 
@@ -182,6 +216,33 @@ Client                    Relay                     Server
 
 ---
 
+## Developing on a second machine
+
+Everything you need to build + deploy is in the repo; only the machine-specific
+paths live outside. On the new machine:
+
+```cmd
+git clone https://github.com/finaltwinsen/VipleStream.git
+cd VipleStream
+copy build-config.template.cmd build-config.local.cmd
+:: adjust the paths in build-config.local.cmd to wherever this machine has
+::   MSVC vcvars64.bat, Qt 6.10 msvc2022_64, MSYS2, 7-Zip, Windows SDK D3D
+```
+
+Then either:
+
+- **Run the whole build**: `build_all.cmd` → produces both server + client zips.
+- **Only client incremental**: `build_moonlight.cmd` — qmake + nmake + zip,
+  uses the same `scripts/build_moonlight_package.cmd` so shader shipping is
+  consistent with `build_all.cmd`.
+- **Only server**: `build_sunshine.cmd` — MSYS2 UCRT64 cmake + ninja build.
+
+After a build, the release zip in `release/` can be extracted directly on the
+same machine or scp'd to another one; there's no installer, just a folder of
+binaries.
+
+---
+
 ## Security Notes
 
 - **PSK authentication**: Every WebSocket connection must present `HMAC-SHA256(psk, uuid)[:16]`. Without the correct PSK, the relay rejects registration.
@@ -195,6 +256,12 @@ Client                    Relay                     Server
 
 | Version | Changes |
 |---------|---------|
+| 1.1.80 | Workspace sync: root build wrappers tracked, canonical packaging script |
+| 1.1.79 | Fix FRUC crash on iGPU + 4K display (Intel UHD TDR); cap FRUC to stream res |
+| 1.1.78 | Fix FRUC silently disabled — preset shader .fxc files were missing from zip |
+| 1.1.73 | Revert WaitForSingleObjectEx removal (GPU sync); add M1–M5 diagnostic logs |
+| 1.1.67 | Fix FRUC frame-late feedback loop — std −76 %, p95 −48 % for Quality preset |
+| 1.1.66 | Route `/launch` + `/cancel` through relay HTTP proxy in relay-only mode |
 | 1.1.65 | Android NAT traversal port (RelayClient + RelayTcpTunnel) |
 | 1.1.64 | RTSP multi-TCP tunnel fix; Sunshine last_session cache |
 | 1.1.63 | Relay server online without STUN; lookup error fix |

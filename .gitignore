@@ -16,8 +16,10 @@ moonlight-deploy/
 sunshine-backup/
 temp_*.cmd
 
-# ── Root-level build scripts (machine-specific, not for VCS) ──
-/*.cmd
+# ── Root-level scratch / per-machine cmds only (not the main build wrappers) ──
+# build_all.cmd / build_moonlight.cmd / build_sunshine.cmd / build-config.template.cmd
+# are generic wrappers (tracked). Only build-config.local.cmd holds per-machine paths.
+/build-config.local.cmd
 
 # ── FRUC standalone test tool ──
 tools/fruc_test/
@@ -72,9 +74,6 @@ tools/fruc_test/*.obj
 tools/fruc_test/*.dll
 tools/fruc_test/output.txt
 tools/fruc_test/build_out.txt
-
-# ── Local config (machine-specific paths) ──
-build-config.local.cmd
 
 # ── IDE / tool configs ──
 .vscode/
