@@ -862,13 +862,41 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         }
     }
 
-    // VipleStream: Frame gap detection — detect late/dropped frames
+    // VipleStream: Frame gap detection - detect late/dropped frames.
+    //
+    // Earlier logic used the single-gap threshold `gap > expectedMs * 2`
+    // which created a feedback loop with FRUC: one FRUC-added vsync wait
+    // could push the next gap above 2x expected, triggering skipFrame, which
+    // latched the system into 60 FPS (always skipping interp). PresentMon
+    // confirmed all FRUC configs delivered only 60 presents/s vs 60 baseline.
+    //
+    // New policy: compare ROLLING-AVERAGE gap against a higher threshold
+    // (2.5x expected). This tolerates isolated spikes from vsync waits while
+    // still detecting sustained frame famine from a stalled connection.
     uint64_t now = SDL_GetTicks();
     uint64_t gap = (m_LastRenderTimeMs > 0) ? (now - m_LastRenderTimeMs) : 0;
     uint32_t expectedMs = (m_DecoderParams.frameRate > 0) ? (1000 / m_DecoderParams.frameRate) : 33;
-    bool frameLate = (m_RenderFrameCount > 10) && (gap > expectedMs * 2);
     m_LastRenderTimeMs = now;
     m_RenderFrameCount++;
+
+    // Update rolling window of recent gaps (skip bootstrap frames).
+    if (m_RenderFrameCount > 2) {
+        m_RecentGapsMs[m_RecentGapsIdx] = gap;
+        m_RecentGapsIdx = (m_RecentGapsIdx + 1) % FRUC_GAP_WINDOW;
+    }
+
+    // Average gap over the window (0 entries count as "haven't filled yet"
+    // and are ignored, defaulting to expectedMs so we don't mis-flag boot).
+    uint64_t gapSum = 0;
+    int gapN = 0;
+    for (int i = 0; i < FRUC_GAP_WINDOW; i++) {
+        if (m_RecentGapsMs[i] > 0) { gapSum += m_RecentGapsMs[i]; gapN++; }
+    }
+    uint64_t gapAvg = (gapN > 0) ? (gapSum / gapN) : expectedMs;
+
+    // `frameLate` latches when the sustained gap exceeds 2.5x expected.
+    // 10-frame warm-up stays to avoid tripping during decoder init.
+    bool frameLate = (m_RenderFrameCount > 10) && (gapAvg * 2 > expectedMs * 5);
 
     // VipleStream: Check connection quality (3C — pause FRUC on poor connection)
     bool connectionPoor = false;
@@ -888,6 +916,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         // Skip ME/warp, just update prev frame
         m_GenericFRUC->skipFrame(m_RenderDeviceContext.Get());
         m_FRUCLastFrameInterpolated = false;
+        m_FrucSkipCount++;
 
         // Blit real frame directly to swapchain, present immediately (no V-sync)
         m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
@@ -958,6 +987,21 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         double frameTimestampMs = static_cast<double>(SDL_GetTicks());
         bool hasInterp = m_GenericFRUC->submitFrame(m_RenderDeviceContext.Get(), frameTimestampMs);
         m_FRUCLastFrameInterpolated = hasInterp;
+        m_FrucSubmitCount++;
+
+        // Periodic telemetry so we can quantify whether frame-late skip is
+        // dominating (indicator that FRUC is contributing zero extra presents).
+        if (now - m_FrucLastStatLogMs > 5000) {
+            uint32_t tot = m_FrucSubmitCount + m_FrucSkipCount;
+            if (tot > 0) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC-Stats] submit=%u skip=%u skip_ratio=%.1f%% gapAvg=%llums (expected=%ums)",
+                            m_FrucSubmitCount, m_FrucSkipCount,
+                            100.0 * m_FrucSkipCount / tot,
+                            (unsigned long long)gapAvg, (unsigned)expectedMs);
+            }
+            m_FrucLastStatLogMs = now;
+        }
 
         // Present interpolated frame first (if available)
         if (hasInterp) {

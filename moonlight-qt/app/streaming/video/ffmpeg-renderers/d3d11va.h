@@ -123,9 +123,18 @@ private:
     // Deferred swap chain latency update (set by keyboard thread, applied by render thread)
     std::atomic<int> m_PendingSwapChainLatency{0};  // 0 = no change pending
 
-    // VipleStream: frame gap detection for FRUC drop concealment
+    // VipleStream: frame gap detection for FRUC drop concealment.
+    // We use a rolling-window average of recent gaps rather than the last gap
+    // alone so isolated spikes don't latch skipFrame on permanently.
     uint64_t m_LastRenderTimeMs = 0;
     int m_RenderFrameCount = 0;
+    static constexpr int FRUC_GAP_WINDOW = 8;
+    uint64_t m_RecentGapsMs[FRUC_GAP_WINDOW] = {};
+    int m_RecentGapsIdx = 0;
+    // Counters to log how often FRUC was skipped vs interpolated
+    uint32_t m_FrucSubmitCount = 0;
+    uint32_t m_FrucSkipCount = 0;
+    uint64_t m_FrucLastStatLogMs = 0;
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_FRUCBlitVertexBuffer;
     void blitFRUCTexture(ID3D11ShaderResourceView* srv);
     bool initFRUC(); // Lazy-init: try NvOFFRUC, fall back to GenericFRUC
