@@ -1905,15 +1905,21 @@ bool Session::startConnectionAsync()
         QByteArray clientUuid = QByteArray(16, 0);  // placeholder
         serverUuid.resize(16, 0);
 
+        // stunAddress stores the HTTP port (for API fallback). The hole-punch
+        // intercept on Sunshine lives on the ENet control port = HTTP port + 10
+        // (see Sunshine/src/stream.h CONTROL_PORT = 10). Previously this sent
+        // SYNs to the HTTP port where they were silently dropped.
+        uint16_t controlPort = static_cast<uint16_t>(m_Computer->stunAddress.port() + 10);
+
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-NAT] Attempting hole punch to %s:%d (NAT: %s)",
                     qPrintable(m_Computer->stunAddress.address()),
-                    m_Computer->stunAddress.port(),
+                    controlPort,
                     qPrintable(m_Computer->stunNatType));
 
         int punchResult = LiHolePunch(
             qPrintable(m_Computer->stunAddress.address()),
-            m_Computer->stunAddress.port(),
+            controlPort,
             (const uint8_t *)serverUuid.constData(),
             (const uint8_t *)clientUuid.constData(),
             3000);
