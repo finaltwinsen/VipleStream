@@ -746,6 +746,11 @@ bool Session::initialize(QQuickWindow* qtWindow)
                 "Audio channel mask: %X",
                 CHANNEL_MASK_FROM_AUDIO_CONFIGURATION(m_StreamConfig.audioConfiguration));
 
+    // VipleStream DIAG: crash at second-connect with FRUC toggle was narrowed
+    // down to somewhere between audio-mask-log and the decoder probe. These
+    // milestone logs help pinpoint the exact failure when a user hits it.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] session::initialize M1 before codec list");
+
     // Start with all codecs and profiles in priority order
     m_SupportedVideoFormats.append(VIDEO_FORMAT_AV1_HIGH10_444);
     m_SupportedVideoFormats.append(VIDEO_FORMAT_AV1_MAIN10);
@@ -758,10 +763,14 @@ bool Session::initialize(QQuickWindow* qtWindow)
     m_SupportedVideoFormats.append(VIDEO_FORMAT_H264_HIGH8_444);
     m_SupportedVideoFormats.append(VIDEO_FORMAT_H264);
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] session::initialize M2 codec list populated vcc=%d",
+                (int)m_Preferences->videoCodecConfig);
+
     switch (m_Preferences->videoCodecConfig)
     {
     case StreamingPreferences::VCC_AUTO:
     {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] session::initialize M3 VCC_AUTO entered");
         // Codecs are checked in order of ascending decode complexity to ensure
         // the the deprioritized list prefers lighter codecs for software decoding
 
@@ -875,11 +884,13 @@ bool Session::initialize(QQuickWindow* qtWindow)
         m_SupportedVideoFormats.removeByMask(~VIDEO_FORMAT_MASK_H265);
         break;
     case StreamingPreferences::VCC_FORCE_AV1:
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] M3b VCC_FORCE_AV1 entered");
         // We'll try to fall back to HEVC first if AV1 fails. We'd rather not fall back
         // straight to H.264 if the user asked for AV1 and the host doesn't support it.
         m_SupportedVideoFormats.removeByMask(~(VIDEO_FORMAT_MASK_AV1 | VIDEO_FORMAT_MASK_H265));
         break;
     }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] session::initialize M3c switch exited");
 
     // NB: Since deprioritization puts codecs in reverse order (at the bottom of the list),
     // we want to deprioritize for the most critical attributes last to ensure they are the
@@ -1198,8 +1209,10 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         }
     }
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] session::initialize M4 before testAudio");
     // Test if audio works at the specified audio configuration
     bool audioTestPassed = testAudio(m_StreamConfig.audioConfiguration);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] session::initialize M5 after testAudio passed=%d", (int)audioTestPassed);
 
     // Gracefully degrade to stereo if surround sound doesn't work
     if (!audioTestPassed && CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(m_StreamConfig.audioConfiguration) > 2) {

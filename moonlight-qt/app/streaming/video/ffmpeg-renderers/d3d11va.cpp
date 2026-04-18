@@ -967,7 +967,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
             }
         }
 
-        // Present the real frame — blit from FRUC render texture (no re-render needed)
+        // Present the real frame - blit from FRUC render texture (no re-render needed)
         m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
         blitFRUCTexture(m_FRUC->getLastRenderSRV());
         for (int i = 0; i < Overlay::OverlayMax; i++) {
@@ -989,8 +989,8 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         m_FRUCLastFrameInterpolated = hasInterp;
         m_FrucSubmitCount++;
 
-        // Periodic telemetry so we can quantify whether frame-late skip is
-        // dominating (indicator that FRUC is contributing zero extra presents).
+        // Periodic telemetry: FRUC engagement ratio (skip vs submit) + gap avg.
+        // A rising skip_ratio means connection/GPU is struggling to keep up.
         if (now - m_FrucLastStatLogMs > 5000) {
             uint32_t tot = m_FrucSubmitCount + m_FrucSkipCount;
             if (tot > 0) {
@@ -1030,7 +1030,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
             }
         }
 
-        // Present the real frame — blit from GenericFRUC's render texture
+        // Present the real frame - blit from GenericFRUC's render texture
         m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
         blitFRUCTexture(m_GenericFRUC->getLastRenderSRV());
         for (int i = 0; i < Overlay::OverlayMax; i++) {

@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.20)
 # `cmake_path(CONVERT ... TO_NATIVE_PATH_LIST ...)` requires 3.20
 # todo - set this conditionally
 
-project(VipleStream VERSION 1.1.67
+project(VipleStream VERSION 1.1.73
         DESCRIPTION "Self-hosted game stream host for Moonlight"
         HOMEPAGE_URL "")
 

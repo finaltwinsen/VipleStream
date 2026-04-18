@@ -125,6 +125,10 @@ function Parse-PresentMonCsv {
     $displayedCol = $cols | Where-Object { $_ -in @('MsBetweenDisplayChange','DisplayedTime','MsUntilDisplayed') } | Select-Object -First 1
     $dropCol      = $cols | Where-Object { $_ -in @('Dropped','AllowsTearing','FrameType') } | Select-Object -First 1
     $gpuBusyCol   = $cols | Where-Object { $_ -in @('MsGPUActive','GPUBusy','msGPUActive') } | Select-Object -First 1
+    $displayLatCol= $cols | Where-Object { $_ -in @('DisplayLatency','MsInPresentAPI') } | Select-Object -First 1
+    $animErrCol   = $cols | Where-Object { $_ -in @('AnimationError','MsAnimationError') } | Select-Object -First 1
+    $cpuBusyCol   = $cols | Where-Object { $_ -in @('CPUBusy','MsInPresentAPI') } | Select-Object -First 1
+    $cpuWaitCol   = $cols | Where-Object { $_ -in @('CPUWait') } | Select-Object -First 1
 
     # Pull numeric series
     function Get-Series($col) {
@@ -139,9 +143,13 @@ function Parse-PresentMonCsv {
         return $vals
     }
 
-    $frameTimes = Get-Series $msBetweenCol
-    $displayed  = Get-Series $displayedCol
-    $gpuBusy    = Get-Series $gpuBusyCol
+    $frameTimes  = Get-Series $msBetweenCol
+    $displayed   = Get-Series $displayedCol
+    $gpuBusy     = Get-Series $gpuBusyCol
+    $displayLat  = Get-Series $displayLatCol
+    $animErr     = Get-Series $animErrCol
+    $cpuBusy     = Get-Series $cpuBusyCol
+    $cpuWait     = Get-Series $cpuWaitCol
 
     # Sort for percentiles
     function Pct($sorted, $p) {
@@ -167,13 +175,34 @@ function Parse-PresentMonCsv {
             p50   = [Math]::Round((Pct $sorted 50), 3)
             p95   = [Math]::Round((Pct $sorted 95), 3)
             p99   = [Math]::Round((Pct $sorted 99), 3)
+            p999  = [Math]::Round((Pct $sorted 99.9), 3)
             max   = [Math]::Round([double]$sorted[-1], 3)
         }
     }
 
-    $ftStats  = Stats 'frame_time_ms'   $frameTimes
-    $dispStats= Stats 'displayed_ms'    $displayed
-    $gpuStats = Stats 'gpu_busy_ms'     $gpuBusy
+    $ftStats   = Stats 'frame_time_ms'   $frameTimes
+    $dispStats = Stats 'displayed_ms'    $displayed
+    $gpuStats  = Stats 'gpu_busy_ms'     $gpuBusy
+    $latStats  = Stats 'display_lat_ms'  $displayLat
+    $animStats = Stats 'anim_error_ms'   $animErr
+    $cpuStats  = Stats 'cpu_busy_ms'     $cpuBusy
+    $cpuWaitStats = Stats 'cpu_wait_ms'  $cpuWait
+
+    # Spike counting: how many frames exceed various thresholds above the mean.
+    # p95 outliers are driven by a small fraction of frames; knowing the count
+    # helps distinguish "occasional hiccup" from "systemic pacing problem".
+    $spikes = $null
+    if ($ftStats) {
+        $thr1_5x = $ftStats.mean * 1.5
+        $thr2x   = $ftStats.mean * 2.0
+        $thr3x   = $ftStats.mean * 3.0
+        $spikes = [PSCustomObject]@{
+            over_1_5x = ($frameTimes | Where-Object { $_ -gt $thr1_5x }).Count
+            over_2x   = ($frameTimes | Where-Object { $_ -gt $thr2x   }).Count
+            over_3x   = ($frameTimes | Where-Object { $_ -gt $thr3x   }).Count
+            total     = $frameTimes.Count
+        }
+    }
 
     # Effective FPS from mean frame time
     $effFps = 0.0
@@ -190,18 +219,27 @@ function Parse-PresentMonCsv {
     }
 
     [PSCustomObject]@{
-        rows       = $rows.Count
-        fps        = $effFps
-        dropped    = $dropped
-        dropped_pct= if ($rows.Count -gt 0) { [Math]::Round(100.0 * $dropped / $rows.Count, 2) } else { 0 }
-        frame_time = $ftStats
-        displayed  = $dispStats
-        gpu_busy   = $gpuStats
+        rows        = $rows.Count
+        fps         = $effFps
+        dropped     = $dropped
+        dropped_pct = if ($rows.Count -gt 0) { [Math]::Round(100.0 * $dropped / $rows.Count, 2) } else { 0 }
+        frame_time  = $ftStats
+        displayed   = $dispStats
+        gpu_busy    = $gpuStats
+        display_lat = $latStats
+        anim_error  = $animStats
+        cpu_busy    = $cpuStats
+        cpu_wait    = $cpuWaitStats
+        spikes      = $spikes
         columns_used = [PSCustomObject]@{
-            frame_time = $msBetweenCol
-            displayed  = $displayedCol
-            dropped    = $dropCol
-            gpu_busy   = $gpuBusyCol
+            frame_time  = $msBetweenCol
+            displayed   = $displayedCol
+            dropped     = $dropCol
+            gpu_busy    = $gpuBusyCol
+            display_lat = $displayLatCol
+            anim_error  = $animErrCol
+            cpu_busy    = $cpuBusyCol
+            cpu_wait    = $cpuWaitCol
         }
     }
 }
@@ -296,8 +334,17 @@ try {
         $results[$cfg] = $m
         Write-Host ""
         Write-Host "  Effective FPS : $($m.fps)"
-        Write-Host "  Frame time    : mean=$($m.frame_time.mean)ms  p95=$($m.frame_time.p95)  p99=$($m.frame_time.p99)  std=$($m.frame_time.std)"
-        if ($m.gpu_busy) { Write-Host "  GPU busy      : mean=$($m.gpu_busy.mean)ms  p95=$($m.gpu_busy.p95)" }
+        Write-Host "  Frame time    : mean=$($m.frame_time.mean)ms  p95=$($m.frame_time.p95)  p99=$($m.frame_time.p99)  p99.9=$($m.frame_time.p999)  std=$($m.frame_time.std)"
+        if ($m.gpu_busy)    { Write-Host "  GPU busy      : mean=$($m.gpu_busy.mean)ms  p95=$($m.gpu_busy.p95)  p99=$($m.gpu_busy.p99)" }
+        if ($m.display_lat) { Write-Host "  DisplayLat    : mean=$($m.display_lat.mean)ms  p95=$($m.display_lat.p95)  p99=$($m.display_lat.p99)" }
+        if ($m.cpu_busy)    { Write-Host "  CPU busy      : mean=$($m.cpu_busy.mean)ms  p95=$($m.cpu_busy.p95)" }
+        if ($m.cpu_wait)    { Write-Host "  CPU wait      : mean=$($m.cpu_wait.mean)ms  p95=$($m.cpu_wait.p95)" }
+        if ($m.spikes) {
+            $pct15 = [Math]::Round(100.0 * $m.spikes.over_1_5x / $m.spikes.total, 2)
+            $pct2  = [Math]::Round(100.0 * $m.spikes.over_2x   / $m.spikes.total, 2)
+            $pct3  = [Math]::Round(100.0 * $m.spikes.over_3x   / $m.spikes.total, 2)
+            Write-Host "  Spikes        : >1.5x=$($m.spikes.over_1_5x) ($pct15 %)  >2x=$($m.spikes.over_2x) ($pct2 %)  >3x=$($m.spikes.over_3x) ($pct3 %)"
+        }
         Write-Host "  Dropped       : $($m.dropped) ($($m.dropped_pct) %)"
         Write-Host ""
     }
@@ -335,7 +382,27 @@ $report += ""
 $report += "- Host: $HostAddr | App: $App | $Fps fps request | $($Width)x$($Height) | $Seconds s + $WarmupSeconds s warmup"
 $report += "- Timestamp: $($summary.timestamp)"
 $report += ""
-$report += "| Config | FPS | mean ft (ms) | p95 ft | p99 ft | std | dropped% | GPU busy mean |"
+$report += "## Frame-time distribution"
+$report += ""
+$report += "| Config | FPS | mean | p50 | p95 | p99 | p99.9 | max | std | spikes >2x | dropped% |"
+$report += "|---|---|---|---|---|---|---|---|---|---|---|"
+foreach ($cfg in $Configs) {
+    if (-not $results.Contains($cfg)) { continue }
+    $m = $results[$cfg]
+    if ($m.error) {
+        $report += "| $cfg | - | - | - | - | - | - | - | - | - | _$($m.error)_ |"
+    } else {
+        $ft = $m.frame_time
+        $spikePct = if ($m.spikes -and $m.spikes.total -gt 0) {
+            [Math]::Round(100.0 * $m.spikes.over_2x / $m.spikes.total, 2).ToString() + '%'
+        } else { '-' }
+        $report += "| $cfg | $($m.fps) | $($ft.mean) | $($ft.p50) | $($ft.p95) | $($ft.p99) | $($ft.p999) | $($ft.max) | $($ft.std) | $spikePct | $($m.dropped_pct) |"
+    }
+}
+$report += ""
+$report += "## GPU / latency"
+$report += ""
+$report += "| Config | GPU mean | GPU p95 | GPU p99 | DispLat mean | DispLat p95 | DispLat p99 | CPU busy mean |"
 $report += "|---|---|---|---|---|---|---|---|"
 foreach ($cfg in $Configs) {
     if (-not $results.Contains($cfg)) { continue }
@@ -343,8 +410,8 @@ foreach ($cfg in $Configs) {
     if ($m.error) {
         $report += "| $cfg | - | - | - | - | - | - | _$($m.error)_ |"
     } else {
-        $gpu = if ($m.gpu_busy) { $m.gpu_busy.mean } else { '-' }
-        $report += "| $cfg | $($m.fps) | $($m.frame_time.mean) | $($m.frame_time.p95) | $($m.frame_time.p99) | $($m.frame_time.std) | $($m.dropped_pct) | $gpu |"
+        function fv($s, $f) { if ($s) { $s.$f } else { '-' } }
+        $report += "| $cfg | $(fv $m.gpu_busy 'mean') | $(fv $m.gpu_busy 'p95') | $(fv $m.gpu_busy 'p99') | $(fv $m.display_lat 'mean') | $(fv $m.display_lat 'p95') | $(fv $m.display_lat 'p99') | $(fv $m.cpu_busy 'mean') |"
     }
 }
 $reportPath = Join-Path $OutDir 'report.md'
