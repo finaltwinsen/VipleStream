@@ -1813,15 +1813,54 @@ bool D3D11VARenderer::initFRUC()
     auto prefs = StreamingPreferences::get(nullptr);
     bool preferNvidia = (prefs->frucBackend == StreamingPreferences::FB_NVIDIA_OF);
 
+    // VipleStream: Cap FRUC texture resolution to the video stream resolution,
+    // not the display window. This avoids GPU TDR watchdog timeouts on
+    // integrated GPUs when Moonlight runs on a 4K monitor but streams 1080p.
+    // A user's Intel UHD 630 iGPU with a 4K window was crashing with an
+    // unhandled exception at FRUC Present time; dispatch of the motionest/
+    // warp compute shaders at 3840x2160 exceeded the 2s GPU watchdog.
+    //
+    // The final upscale from FRUC output (stream resolution) to swap chain
+    // (display resolution) is done by blitFRUCTexture using bilinear
+    // sampling, so there's no visible artifact from operating at stream res.
+    uint32_t fruW = m_DecoderParams.width  ? m_DecoderParams.width  : m_DisplayWidth;
+    uint32_t fruH = m_DecoderParams.height ? m_DecoderParams.height : m_DisplayHeight;
+    if (fruW > (uint32_t)m_DisplayWidth)  fruW = (uint32_t)m_DisplayWidth;
+    if (fruH > (uint32_t)m_DisplayHeight) fruH = (uint32_t)m_DisplayHeight;
+
+    // Additional safety cap for iGPUs: never exceed 1920x1080 for FRUC compute.
+    // Known to TDR-crash at 4K on Intel UHD 630 and similar integrated GPUs.
+    DXGI_ADAPTER_DESC adapterDesc = {};
+    bool isIntegratedGPU = false;
+    if (m_RenderDevice) {
+        ComPtr<IDXGIDevice> dxgiDev;
+        if (SUCCEEDED(m_RenderDevice.As(&dxgiDev))) {
+            ComPtr<IDXGIAdapter> adapter;
+            if (SUCCEEDED(dxgiDev->GetAdapter(&adapter)) && adapter) {
+                adapter->GetDesc(&adapterDesc);
+                // Intel = 0x8086, Microsoft Basic Render = 0x1414, older AMD APU also
+                isIntegratedGPU = (adapterDesc.VendorId == 0x8086) ||
+                                  (adapterDesc.VendorId == 0x1414);
+            }
+        }
+    }
+    if (isIntegratedGPU && (fruW > 1920 || fruH > 1080)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] Integrated GPU detected (vendor 0x%04x) - capping FRUC at 1080p",
+                    adapterDesc.VendorId);
+        fruW = 1920;
+        fruH = 1080;
+    }
+
     if (preferNvidia) {
         // User explicitly requested NVIDIA Optical Flow — try it first
         m_FRUC = new NvOFRUCWrapper();
-        if (m_FRUC->initialize(m_RenderDevice.Get(), m_DisplayWidth, m_DisplayHeight)) {
+        if (m_FRUC->initialize(m_RenderDevice.Get(), fruW, fruH)) {
             createBlitVB();
             boostLatency();
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] NVIDIA Optical Flow ready: %dx%d",
-                        m_DisplayWidth, m_DisplayHeight);
+                        "[VIPLE-FRUC] NVIDIA Optical Flow ready: %ux%u (display %dx%d)",
+                        fruW, fruH, m_DisplayWidth, m_DisplayHeight);
             return true;
         }
         delete m_FRUC;
@@ -1833,12 +1872,12 @@ bool D3D11VARenderer::initFRUC()
     // Default: GenericFRUC (D3D11 compute shader — low latency, cross-platform)
     m_GenericFRUC = new GenericFRUC();
     m_GenericFRUC->setQualityLevel(static_cast<int>(prefs->frucQuality));
-    if (m_GenericFRUC->initialize(m_RenderDevice.Get(), m_DisplayWidth, m_DisplayHeight)) {
+    if (m_GenericFRUC->initialize(m_RenderDevice.Get(), fruW, fruH)) {
         createBlitVB();
         boostLatency();
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] Generic compute shader ready: %dx%d",
-                    m_DisplayWidth, m_DisplayHeight);
+                    "[VIPLE-FRUC] Generic compute shader ready: %ux%u (display %dx%d)",
+                    fruW, fruH, m_DisplayWidth, m_DisplayHeight);
         return true;
     }
     delete m_GenericFRUC;
