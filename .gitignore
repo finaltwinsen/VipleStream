@@ -8,6 +8,12 @@ moonlight-qt/**/Makefile.*
 moonlight-qt/config.log
 moonlight-qt/.qmake.stash
 
+# ── qmake-generated files (embed machine-absolute paths & version) ──
+# Regenerated on every build from app.pro (VERSION, RC_ICONS, etc.). Tracking
+# them leaks per-machine workspace paths.
+moonlight-qt/app/Moonlight_resource.rc
+moonlight-qt/app/qml_qmlcache.qrc
+
 # ── Temp / Release / Deploy ──
 temp/
 release/
