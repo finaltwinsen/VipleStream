@@ -31,6 +31,10 @@
 #define PUNCH_SEND_INTERVAL_MS 200
 #define PUNCH_MAX_ATTEMPTS 25  /* 25 * 200ms = 5 seconds */
 
+/* See HolePunch.h — used by ControlStream.c to re-bind the ENet client
+ * socket to the same local port, preserving the NAT pinhole. */
+unsigned short LocalControlPort = 0;
+
 int isHolePunchPacket(const void *data, int len) {
     if (len < (int)sizeof(HOLEPUNCH_PACKET)) return 0;
     const HOLEPUNCH_PACKET *pkt = (const HOLEPUNCH_PACKET *)data;
@@ -79,6 +83,26 @@ int LiHolePunch(const char *serverAddr, unsigned short serverPort,
     if (sock == INVALID_SOCKET) {
         freeaddrinfo(res);
         return -3;
+    }
+
+    /* Explicitly bind to an OS-chosen ephemeral port and read it back via
+     * getsockname. ControlStream.c later binds ENet to this same port so
+     * the NAT mapping opened by the punch covers the streaming traffic. */
+    {
+        struct sockaddr_in bindAddr;
+        memset(&bindAddr, 0, sizeof(bindAddr));
+        bindAddr.sin_family = AF_INET;
+        bindAddr.sin_addr.s_addr = INADDR_ANY;
+        bindAddr.sin_port = 0;
+        if (bind(sock, (struct sockaddr *)&bindAddr, sizeof(bindAddr)) == 0) {
+            struct sockaddr_in assigned;
+            socklen_t alen = sizeof(assigned);
+            if (getsockname(sock, (struct sockaddr *)&assigned, &alen) == 0) {
+                LocalControlPort = ntohs(assigned.sin_port);
+                Limelog("[PUNCH] Bound punch socket to local port %u (ENet will reuse)\n",
+                        LocalControlPort);
+            }
+        }
     }
 
     /* Set receive timeout */

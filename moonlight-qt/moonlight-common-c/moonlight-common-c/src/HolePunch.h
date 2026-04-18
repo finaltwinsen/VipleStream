@@ -9,6 +9,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define HOLEPUNCH_MAGIC 0x56504C50  /* "VPLP" */
 #define HOLEPUNCH_VERSION 1
 
@@ -51,3 +55,18 @@ int LiHolePunch(const char *serverAddr, unsigned short serverPort,
  * @return 1 if it's a punch packet, 0 otherwise
  */
 int isHolePunchPacket(const void *data, int len);
+
+/**
+ * Local UDP port used by LiHolePunch when it bound its socket.
+ * After a successful punch, ControlStream.c should bind its ENet client
+ * socket to this same port so the NAT mapping opened by the punch stays
+ * valid for the ENet control stream (otherwise restricted-cone / symmetric
+ * NATs drop the inbound traffic because the src-port would differ).
+ *
+ * 0 = not yet set / no punch performed → ENet falls back to wildcard.
+ */
+extern unsigned short LocalControlPort;
+
+#ifdef __cplusplus
+}  /* extern "C" */
+#endif

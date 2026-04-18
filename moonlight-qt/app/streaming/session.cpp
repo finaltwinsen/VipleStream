@@ -6,6 +6,7 @@
 #include "backend/richpresencemanager.h"
 
 #include <Limelight.h>
+#include "HolePunch.h"  // VipleStream: LocalControlPort global
 #include "SDL_compat.h"
 #include "utils.h"
 
@@ -1930,6 +1931,13 @@ bool Session::startConnectionAsync()
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-NAT] Hole punch failed (%d), proceeding with direct connection", punchResult);
         }
+
+        // VipleStream diag: dump the local port LiHolePunch used — ENet control
+        // socket should bind to the same value so the NAT pinhole carries over.
+        // (LocalControlPort is declared in HolePunch.h, defined in HolePunch.c)
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-NAT] LocalControlPort = %u (ENet client will bind to this)",
+                    LocalControlPort);
     }
 
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
