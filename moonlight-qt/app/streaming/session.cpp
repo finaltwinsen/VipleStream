@@ -1735,6 +1735,23 @@ bool Session::startConnectionAsync()
             .arg(m_InputHandler->getAttachedGamepadMask())
             + "&corever=1";  // Required for encrypted RTSP (rtspenc://)
 
+        // Pre-cancel any app the previous session left running. The
+        // normal quitApp() path goes through direct HTTPS which the
+        // relay-mode client can't reach, so after a forced exit
+        // (user pressed disconnect while the tunnel was congested)
+        // Sunshine still has proc::proc.running() > 0 and /launch
+        // responds 400 "An app is already running on this host" —
+        // which Moonlight surfaces as "Failed to launch via relay
+        // proxy". Calling /cancel first is a no-op on a clean host
+        // (200 OK) and a cleanup on a dirty one. Short 5 s timeout:
+        // /cancel only terminates local state, no encoder probe.
+        QString cancelResp = RelayLookup::httpProxy(
+            m_Preferences->relayUrl, m_Preferences->relayPsk,
+            m_Computer->uuid, "/cancel", 5000);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-NAT] Pre-launch /cancel sent (resp_len=%d)",
+                    cancelResp.length());
+
         QString launchResp = RelayLookup::httpProxy(
             m_Preferences->relayUrl, m_Preferences->relayPsk,
             m_Computer->uuid, launchPath, 45000); // /launch needs 30s+ (encoder probe)
