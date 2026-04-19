@@ -12,12 +12,15 @@
 #include "httpcommon.h"
 #include "logging.h"
 #include "stun.h"
+#include "udp_tunnel.h"
 
 #include <cstring>
 #include <chrono>
 #include <thread>
 #include <random>
 #include <sstream>
+#include <mutex>
+#include <map>
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -52,6 +55,25 @@ namespace relay {
   // ============================================================
   // Transport: abstracts plain TCP vs TLS socket
   // ============================================================
+
+  class Transport;  // forward-declared for tunnel-state block below
+
+  // ============================================================
+  // Tunnel control-plane state, shared between the relay thread
+  // and the streaming session threads. Declared up here so the
+  // WS recv helper can dispatch binary frames to the handler.
+  //
+  // Locking order: always g_state_mtx before g_send_mtx when both
+  // are needed (in practice they are taken disjointly).
+  // ============================================================
+  namespace {
+    std::mutex g_send_mtx;                  // serializes transport->send()
+    Transport *g_current_transport = nullptr;
+
+    std::mutex g_state_mtx;
+    std::map<std::string, std::function<void(udp_tunnel::Flow)>> g_pending_allocates;
+    std::function<void(const uint8_t *, size_t)> g_tunnel_binary_handler;
+  }  // namespace
 
   class Transport {
   public:
@@ -171,46 +193,107 @@ namespace relay {
     return hex;
   }
 
-  static bool ws_send(Transport &tr, const std::string &data) {
+  // Build one masked WebSocket frame with the given opcode and send it.
+  // Returns true iff the full frame was written to the transport.
+  static bool ws_send_frame(Transport &tr, uint8_t opcode,
+                            const uint8_t *data, size_t len) {
     std::vector<uint8_t> frame;
-    frame.push_back(0x81);
-    if (data.size() < 126) {
-      frame.push_back(0x80 | (uint8_t)data.size());
-    } else {
+    frame.reserve(len + 14);
+    frame.push_back(0x80 | (opcode & 0x0F));  // FIN + opcode
+    if (len < 126) {
+      frame.push_back(0x80 | (uint8_t)len);
+    } else if (len <= 0xFFFF) {
       frame.push_back(0x80 | 126);
-      frame.push_back((uint8_t)(data.size() >> 8));
-      frame.push_back((uint8_t)(data.size() & 0xFF));
+      frame.push_back((uint8_t)(len >> 8));
+      frame.push_back((uint8_t)(len & 0xFF));
+    } else {
+      frame.push_back(0x80 | 127);
+      for (int i = 7; i >= 0; i--) {
+        frame.push_back((uint8_t)((static_cast<uint64_t>(len) >> (i * 8)) & 0xFF));
+      }
     }
     uint8_t mask[4];
     std::random_device rd;
     for (int i = 0; i < 4; i++) mask[i] = (uint8_t)rd();
     frame.insert(frame.end(), mask, mask + 4);
-    for (size_t i = 0; i < data.size(); i++) {
+    for (size_t i = 0; i < len; i++) {
       frame.push_back(data[i] ^ mask[i % 4]);
     }
     return tr.send(frame.data(), (int)frame.size()) == (int)frame.size();
   }
 
-  static std::string ws_recv(Transport &tr) {
+  static bool ws_send(Transport &tr, const std::string &data) {
+    return ws_send_frame(tr, 0x1,
+                         reinterpret_cast<const uint8_t *>(data.data()),
+                         data.size());
+  }
+
+  // ws_recv_frame opcode sentinels:
+  //   0xFE — recv timed out (no data yet, carrier still alive)
+  //   0xFF — connection closed or fatal read error
+  // Real WebSocket opcodes are 0x0–0xA so these values can never collide.
+  struct WsFrame {
+    uint8_t opcode = 0xFF;
+    std::vector<uint8_t> payload;
+  };
+
+  static WsFrame ws_recv_frame(Transport &tr) {
+    WsFrame f;
     uint8_t hdr[2];
-    if (tr.recv(hdr, 2) < 2) return "";
-    size_t len = hdr[1] & 0x7F;
+    int n = tr.recv(hdr, 1);
+    if (n == 0) { f.opcode = 0xFF; return f; }
+    if (n < 0)  { f.opcode = 0xFE; return f; }
+    int n2 = tr.recv(hdr + 1, 1);
+    if (n2 == 0) { f.opcode = 0xFF; return f; }
+    if (n2 < 0)  { f.opcode = 0xFF; return f; }
+
+    uint8_t opcode = hdr[0] & 0x0F;
+    uint64_t len = hdr[1] & 0x7F;
     if (len == 126) {
       uint8_t ext[2];
-      tr.recv(ext, 2);
-      len = (ext[0] << 8) | ext[1];
+      if (tr.recv(ext, 2) != 2) return f;
+      len = (static_cast<uint64_t>(ext[0]) << 8) | ext[1];
+    } else if (len == 127) {
+      uint8_t ext[8];
+      if (tr.recv(ext, 8) != 8) return f;
+      len = 0;
+      for (int i = 0; i < 8; i++) len = (len << 8) | ext[i];
     }
-    if (len == 0 || len > 65536) return "";
-    std::vector<char> buf(len);
+    if (len > 10 * 1024 * 1024) return f;  // cap at 10 MiB
+
+    if (opcode == 0x8) { f.opcode = 0xFF; return f; }  // close
+
+    f.payload.resize(static_cast<size_t>(len));
     size_t total = 0;
     while (total < len) {
-      int n = tr.recv(buf.data() + total, (int)(len - total));
-      if (n <= 0) return "";
-      total += n;
+      int m = tr.recv(f.payload.data() + total,
+                      static_cast<int>(len - total));
+      if (m <= 0) { f.opcode = 0xFF; return f; }
+      total += static_cast<size_t>(m);
     }
-    uint8_t opcode = hdr[0] & 0x0F;
-    if (opcode == 0x8) return "";
-    return std::string(buf.data(), len);
+    f.opcode = opcode;
+    return f;
+  }
+
+  // Kept for the tcp_tunnel / http_proxy paths: returns text-frame payload
+  // as a string, or empty for any non-text frame / timeout / close.
+  //
+  // Binary frames are routed to the tunnel handler here so that binary
+  // tunnel data is never dropped even when the relay thread is parked
+  // inside a nested loop (e.g. the tcp_tunnel_open handler).
+  static std::string ws_recv(Transport &tr) {
+    auto f = ws_recv_frame(tr);
+    if (f.opcode == 0x2) {
+      std::function<void(const uint8_t *, size_t)> h;
+      {
+        std::lock_guard<std::mutex> l(g_state_mtx);
+        h = g_tunnel_binary_handler;
+      }
+      if (h) h(f.payload.data(), f.payload.size());
+      return "";
+    }
+    if (f.opcode != 0x1) return "";
+    return std::string(f.payload.begin(), f.payload.end());
   }
 
   static bool ws_handshake(Transport &tr, const std::string &host, uint16_t port) {
@@ -240,6 +323,149 @@ namespace relay {
       if (resp.size() >= 4 && resp.substr(resp.size() - 4) == "\r\n\r\n") break;
     }
     return resp.find("101") != std::string::npos;
+  }
+
+  // ============================================================
+  // Tunnel control plane — public API implementations.
+  // The underlying state (g_send_mtx, g_current_transport,
+  // g_state_mtx, g_pending_allocates, g_tunnel_binary_handler)
+  // is declared at the top of this namespace.
+  // ============================================================
+
+  namespace {
+    std::string gen_request_id() {
+      static thread_local std::mt19937_64 rng{std::random_device{}()};
+      static constexpr char HEX[] = "0123456789abcdef";
+      char buf[17];
+      uint64_t v = rng();
+      for (int i = 0; i < 16; i++) {
+        buf[i] = HEX[(v >> (60 - i * 4)) & 0xF];
+      }
+      buf[16] = 0;
+      return buf;
+    }
+
+    // Tiny JSON field extractors. The relay's msg format is
+    // stable enough (flat objects, no nested escapes in the fields
+    // we read) that avoiding a full JSON dep is worth it here.
+    std::string json_str(const std::string &msg, const std::string &key) {
+      auto pos = msg.find("\"" + key + "\"");
+      if (pos == std::string::npos) return "";
+      pos = msg.find(':', pos + key.size() + 2);
+      if (pos == std::string::npos) return "";
+      auto q1 = msg.find('"', pos + 1);
+      if (q1 == std::string::npos) return "";
+      auto q2 = msg.find('"', q1 + 1);
+      if (q2 == std::string::npos) return "";
+      return msg.substr(q1 + 1, q2 - q1 - 1);
+    }
+
+    bool json_int(const std::string &msg, const std::string &key, int64_t &out) {
+      auto pos = msg.find("\"" + key + "\"");
+      if (pos == std::string::npos) return false;
+      pos = msg.find(':', pos + key.size() + 2);
+      if (pos == std::string::npos) return false;
+      auto numStart = msg.find_first_of("-0123456789", pos);
+      if (numStart == std::string::npos) return false;
+      try {
+        out = std::stoll(msg.substr(numStart));
+        return true;
+      } catch (...) {
+        return false;
+      }
+    }
+  }  // namespace
+
+  void allocate_flow(const std::string &target_uuid,
+                     std::function<void(udp_tunnel::Flow)> cb) {
+    std::string request_id = gen_request_id();
+    {
+      std::lock_guard<std::mutex> l(g_state_mtx);
+      g_pending_allocates[request_id] = std::move(cb);
+    }
+    std::string msg = "{\"type\":\"udp_tunnel_allocate\",\"request_id\":\"" +
+                      request_id + "\",\"target_uuid\":\"" + target_uuid + "\"}";
+    bool sent = false;
+    {
+      std::lock_guard<std::mutex> l(g_send_mtx);
+      if (g_current_transport) sent = ws_send(*g_current_transport, msg);
+    }
+    if (!sent) {
+      // Not connected / send failed — fail the callback immediately.
+      std::function<void(udp_tunnel::Flow)> dead;
+      {
+        std::lock_guard<std::mutex> l(g_state_mtx);
+        auto it = g_pending_allocates.find(request_id);
+        if (it != g_pending_allocates.end()) {
+          dead = std::move(it->second);
+          g_pending_allocates.erase(it);
+        }
+      }
+      if (dead) dead(udp_tunnel::Flow{});
+    }
+  }
+
+  void close_flow(uint16_t flow_id) {
+    std::string msg = "{\"type\":\"udp_tunnel_close\",\"flow_id\":" +
+                      std::to_string(flow_id) + "}";
+    std::lock_guard<std::mutex> l(g_send_mtx);
+    if (g_current_transport) ws_send(*g_current_transport, msg);
+  }
+
+  bool send_tunnel_binary(const uint8_t *data, size_t len) {
+    std::lock_guard<std::mutex> l(g_send_mtx);
+    if (!g_current_transport) return false;
+    return ws_send_frame(*g_current_transport, 0x2, data, len);
+  }
+
+  void set_tunnel_binary_handler(std::function<void(const uint8_t *, size_t)> cb) {
+    std::lock_guard<std::mutex> l(g_state_mtx);
+    g_tunnel_binary_handler = std::move(cb);
+  }
+
+  // Dispatch one udp_tunnel_allocated text message received from the relay.
+  // Parses the fields and invokes any pending allocate_flow callback.
+  static void handle_allocated(const std::string &msg) {
+    std::string request_id = json_str(msg, "request_id");
+    if (request_id.empty()) return;
+
+    std::function<void(udp_tunnel::Flow)> cb;
+    {
+      std::lock_guard<std::mutex> l(g_state_mtx);
+      auto it = g_pending_allocates.find(request_id);
+      if (it != g_pending_allocates.end()) {
+        cb = std::move(it->second);
+        g_pending_allocates.erase(it);
+      }
+    }
+    if (!cb) return;
+
+    udp_tunnel::Flow flow;
+    int64_t fid = 0;
+    if (!json_int(msg, "flow_id", fid) || fid <= 0 || fid > 0xFFFF) {
+      cb(udp_tunnel::Flow{});
+      return;
+    }
+    std::string token_hex = json_str(msg, "token");
+    if (!udp_tunnel::hex_to_token(token_hex, flow.token)) {
+      cb(udp_tunnel::Flow{});
+      return;
+    }
+
+    flow.flow_id = static_cast<uint16_t>(fid);
+    flow.relay_udp_host = json_str(msg, "udp_host");
+    int64_t udp_port = 0;
+    if (json_int(msg, "udp_port", udp_port) && udp_port > 0 && udp_port < 65536) {
+      flow.relay_udp_port = static_cast<uint16_t>(udp_port);
+    }
+    flow.remote_uuid = json_str(msg, "remote_uuid");
+    flow.is_side_a = (json_str(msg, "side") == "a");
+
+    BOOST_LOG(info) << "[RELAY-TUNNEL] Flow " << flow.flow_id
+                    << " allocated (peer=" << flow.remote_uuid.substr(0, 12)
+                    << ", udp=" << flow.relay_udp_host << ":" << flow.relay_udp_port
+                    << ", side=" << (flow.is_side_a ? "a" : "b") << ")";
+    cb(flow);
   }
 
   // ============================================================
@@ -377,8 +603,17 @@ namespace relay {
         continue;
       }
 
+      // Expose this transport to the public tunnel API. All subsequent
+      // sends — from the relay thread and from any caller of
+      // allocate_flow / send_tunnel_binary — must hold g_send_mtx.
+      {
+        std::lock_guard<std::mutex> l(g_send_mtx);
+        g_current_transport = transport.get();
+      }
+
       // Main loop: publish STUN endpoint + handle incoming proxy requests
       auto lastEndpointPublish = std::chrono::steady_clock::now();
+      bool send_failed = false;
       while (!shutdown_event->peek()) {
         // Publish STUN endpoint periodically
         auto now = std::chrono::steady_clock::now();
@@ -389,17 +624,36 @@ namespace relay {
                                 "\",\"stun_ip\":\"" + ep.ip +
                                 "\",\"stun_port\":" + std::to_string(ep.port) +
                                 ",\"nat_type\":\"" + (ep.nat_type == stun::NAT_SYMMETRIC ? "symmetric" : "punchable") + "\"}";
-            if (!ws_send(*transport, epMsg)) { break; }
+            std::lock_guard<std::mutex> l(g_send_mtx);
+            if (!ws_send(*transport, epMsg)) { send_failed = true; break; }
           }
-          ws_send(*transport, "{\"type\":\"ping\"}");
+          {
+            std::lock_guard<std::mutex> l(g_send_mtx);
+            ws_send(*transport, "{\"type\":\"ping\"}");
+          }
           lastEndpointPublish = now;
         }
 
         // Read incoming messages (short timeout — non-blocking poll)
         std::string msg = ws_recv(*transport);
         if (msg.empty()) {
-          // Timeout — no message, loop again
+          // Timeout, non-text frame, or close — loop again (outer while
+          // drops out naturally if the transport is dead, because
+          // subsequent sends will fail and we'll break below).
           if (shutdown_event->pop(std::chrono::seconds(1))) break;
+          continue;
+        }
+
+        // Tunnel control plane: allocate / close acknowledgements from relay
+        if (msg.find("udp_tunnel_allocated") != std::string::npos) {
+          handle_allocated(msg);
+          continue;
+        }
+        if (msg.find("udp_tunnel_closed") != std::string::npos) {
+          int64_t fid = 0;
+          if (json_int(msg, "flow_id", fid)) {
+            BOOST_LOG(info) << "[RELAY-TUNNEL] Flow " << fid << " closed by relay";
+          }
           continue;
         }
 
@@ -488,6 +742,7 @@ namespace relay {
                                   "\",\"from_uuid\":\"" + fromUuid +
                                   "\",\"status\":" + std::to_string(httpStatus) +
                                   ",\"body\":\"" + escapedBody + "\"}";
+          std::lock_guard<std::mutex> l(g_send_mtx);
           ws_send(*transport, proxyResp);
         }
 
@@ -620,6 +875,7 @@ namespace relay {
                                 << connectionCount << " connections";
                 tunnelDone = true;
               } else if (tunnelMsg.find("ping") != std::string::npos) {
+                std::lock_guard<std::mutex> l(g_send_mtx);
                 ws_send(*transport, "{\"type\":\"pong\"}");
               }
               // Ignore endpoint updates, other messages during tunnel
@@ -634,7 +890,10 @@ namespace relay {
                 std::string dataResp = "{\"type\":\"tcp_tunnel_data\",\"tunnel_id\":\"" + tunnelId +
                                        "\",\"from_uuid\":\"" + fromUuid +
                                        "\",\"data\":\"" + b64data + "\"}";
-                ws_send(*transport, dataResp);
+                {
+                  std::lock_guard<std::mutex> l(g_send_mtx);
+                  ws_send(*transport, dataResp);
+                }
                 tunnelActivity = true;
                 BOOST_LOG(info) << "[RELAY-TUNNEL] #" << connectionCount
                                 << " TCP→WS: " << tcpN << " bytes";
@@ -644,7 +903,10 @@ namespace relay {
                                 << " RTSP server closed TCP (normal per-request close)";
                 std::string closeMsg = "{\"type\":\"tcp_tunnel_closed\",\"tunnel_id\":\"" + tunnelId +
                                         "\",\"from_uuid\":\"" + fromUuid + "\"}";
-                ws_send(*transport, closeMsg);
+                {
+                  std::lock_guard<std::mutex> l(g_send_mtx);
+                  ws_send(*transport, closeMsg);
+                }
                 closesocket(tunnelSock);
                 tunnelSock = INVALID_SOCKET;
                 // DON'T break — wait for next tcp_tunnel_data or tcp_tunnel_reconnect
@@ -667,8 +929,26 @@ namespace relay {
         }
       }
 
+      // Remove transport pointer so other threads stop routing sends
+      // through a dying carrier, then fail any in-flight allocate_flow
+      // callbacks so the streaming path doesn't hang on us.
+      {
+        std::lock_guard<std::mutex> l(g_send_mtx);
+        g_current_transport = nullptr;
+      }
+      std::map<std::string, std::function<void(udp_tunnel::Flow)>> dead;
+      {
+        std::lock_guard<std::mutex> l(g_state_mtx);
+        dead.swap(g_pending_allocates);
+      }
+      for (auto &p : dead) {
+        if (p.second) p.second(udp_tunnel::Flow{});
+      }
+
       transport->close();
-      BOOST_LOG(info) << "[RELAY] Disconnected, reconnecting in " << RECONNECT_INTERVAL_SEC << "s";
+      BOOST_LOG(info) << "[RELAY] Disconnected"
+                      << (send_failed ? " (send failed)" : "")
+                      << ", reconnecting in " << RECONNECT_INTERVAL_SEC << "s";
       if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
     }
 
