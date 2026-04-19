@@ -2249,15 +2249,19 @@ namespace stream {
         return;
       }
 
-      const std::string target = session.remote_uuid;
-      // Hold a weak-ish reference: the session_t is owned by shared_ptr
-      // in rtsp.cpp and lives at least until session::stop is called.
-      // The notify handler is cleared in session teardown below.
+      // We can't reliably match the notification's remote_uuid against
+      // `session.remote_uuid`: moonlight-common-c always sends the
+      // placeholder 0123456789ABCDEF in the /launch `uniqueid` query
+      // param, whereas the relay fills remote_uuid with the client's
+      // registered relay peer-uuid (e.g. "udptun-...-abc123"). They
+      // don't match. Sunshine is single-session in practice, so we
+      // accept the first unclaimed notification and attach it to the
+      // session that's currently listening.
       session_t *sess_ptr = &session;
       relay::set_allocated_notify_handler(
-        [sess_ptr, target, mode](udp_tunnel::Flow flow) {
-          if (flow.remote_uuid != target) return;
+        [sess_ptr, mode](udp_tunnel::Flow flow) {
           if (sess_ptr->tunnel) return;  // already set up
+          if (!flow.valid()) return;
 
           auto ts = std::make_shared<tunnel_session::TunnelSession>();
           if (!ts->start(flow, mode)) {
@@ -2268,10 +2272,12 @@ namespace stream {
           sess_ptr->tunnel = std::move(ts);
           BOOST_LOG(info) << "[TUNNEL] session tunnel active (carrier="
                           << udp_tunnel::carrier_name(sess_ptr->tunnel->carrier())
-                          << ", flow_id=" << flow.flow_id << ")";
+                          << ", flow_id=" << flow.flow_id
+                          << ", peer=" << flow.remote_uuid.substr(0, 16) << ")";
         });
       BOOST_LOG(info) << "[TUNNEL] listening for relay flow notification "
-                         "from peer=" << target.substr(0, 12);
+                         "(first unclaimed wins; peer-uuid match is "
+                         "unavailable here)";
     }
 
     int start(session_t &session, const std::string &addr_string) {
