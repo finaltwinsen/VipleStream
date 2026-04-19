@@ -294,26 +294,36 @@ void RelayUdpTunnel::run() {
                     flow.flow_id, qPrintable(relayUdpHost), relayUdpPort);
     }
 
-    /* ---------- 3. Open the relay UDP socket ---------- */
+    /* ---------- 3. Pick carrier: UDP if the relay has an advertised
+     *                 UDP host we can actually reach, otherwise fall
+     *                 back to WS binary frames over the same WSS
+     *                 connection we just registered on. The WS carrier
+     *                 is slower but works in environments where direct
+     *                 UDP to the relay is blocked (e.g. Cloudflare WARP
+     *                 or an ISP that drops UDP to public addresses).
+     * -------------------------------------------------------------- */
     sockaddr_in relayAddr = {};
-    if (relayUdpHost.isEmpty() || relayUdpPort == 0 ||
-        !resolveIpv4(relayUdpHost, relayUdpPort, relayAddr)) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-UDPTUN] relay UDP resolution failed");
-        delete ws; m_AllocFailed = true; return;
+    SOCKET tunnelSock = INVALID_SOCKET;
+    bool useUdpCarrier = false;
+    if (!relayUdpHost.isEmpty() && relayUdpPort > 0 &&
+        resolveIpv4(relayUdpHost, relayUdpPort, relayAddr)) {
+        tunnelSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (tunnelSock != INVALID_SOCKET) {
+            sockaddr_in anyAddr = {};
+            anyAddr.sin_family = AF_INET;
+            anyAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+            bind(tunnelSock, (sockaddr *)&anyAddr, sizeof(anyAddr));
+            useUdpCarrier = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-UDPTUN] carrier=UDP_RELAY %s:%u",
+                        qPrintable(relayUdpHost), relayUdpPort);
+        }
     }
-
-    SOCKET tunnelSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (tunnelSock == INVALID_SOCKET) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-UDPTUN] tunnel socket failed");
-        delete ws; m_AllocFailed = true; return;
+    if (!useUdpCarrier) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-UDPTUN] carrier=WS_RELAY (udp_host='%s' unreachable)",
+                    qPrintable(relayUdpHost));
     }
-    // Bind to any address so we can later use select() with a short timeout.
-    sockaddr_in anyAddr = {};
-    anyAddr.sin_family = AF_INET;
-    anyAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    bind(tunnelSock, (sockaddr *)&anyAddr, sizeof(anyAddr));
 
     /* ---------- 4. Bind local proxy sockets on 127.0.0.1 ---------- */
     QVector<ProxySock> proxies;
@@ -340,87 +350,167 @@ void RelayUdpTunnel::run() {
                     "[VIPLE-UDPTUN] proxy bound 127.0.0.1:%u", p);
     }
     if (proxies.isEmpty()) {
-        closesocket(tunnelSock);
+        if (tunnelSock != INVALID_SOCKET) closesocket(tunnelSock);
         delete ws; m_AllocFailed = true; return;
     }
 
     m_Ready.store(true);
 
-    /* ---------- 5. Proxy loop ---------- */
-    // We select() across all proxy sockets + the tunnel socket. 100ms
-    // poll interval so we notice m_Stop in reasonable time.
+    /* ---------- 5. Proxy loop ----------
+     *
+     * Two carrier modes:
+     *   - UDP: one select() over proxy sockets + the tunnel UDP socket;
+     *     proxy → sendto(tunnel), tunnel → parse → sendto(proxy).
+     *   - WS:  select() only over proxy sockets; proxy → encode →
+     *     ws_send_binary. A dedicated reader thread drains inbound WS
+     *     binary frames (the shared WS socket is already open and
+     *     registered on the relay; the relay routes WS binary frames
+     *     between peers when we're on flow N).
+     *
+     * The proxies vector is captured by the WS reader thread by
+     * reference because clientPort is learned lazily on the main
+     * thread; the mutex `proxy_mtx` guards those reads.
+     * -------------------------------------------------------------- */
     uint8_t rxbuf[2048];
     uint8_t txbuf[2048];
+
+    auto deliver_to_proxy = [&](uint16_t srcPort,
+                                const uint8_t *payload, size_t payloadLen) {
+        for (const auto &ps : proxies) {
+            if (ps.serverPort != srcPort) continue;
+            if (ps.clientPort == 0) return;   // not learned yet
+            sockaddr_in dst = {};
+            dst.sin_family = AF_INET;
+            dst.sin_port = htons(ps.clientPort);
+            inet_pton(AF_INET, "127.0.0.1", &dst.sin_addr);
+            sendto(ps.fd, (const char *)payload, (int)payloadLen, 0,
+                   (sockaddr *)&dst, sizeof(dst));
+            return;
+        }
+    };
+
+    // One helper for the send side — picks the active carrier.
+    auto send_carrier = [&](const uint8_t *data, size_t len) {
+        if (useUdpCarrier) {
+            sendto(tunnelSock, (const char *)data, (int)len, 0,
+                   (sockaddr *)&relayAddr, sizeof(relayAddr));
+            return;
+        }
+        // WS binary frame (opcode 0x2), masked per RFC 6455 §5.3.
+        QByteArray frame;
+        frame.append((char)0x82);   // FIN + binary
+        if (len < 126) {
+            frame.append((char)(0x80 | len));
+        } else if (len < 65536) {
+            frame.append((char)(0x80 | 126));
+            frame.append((char)(len >> 8));
+            frame.append((char)(len & 0xFF));
+        } else {
+            frame.append((char)(0x80 | 127));
+            for (int i = 7; i >= 0; i--) {
+                frame.append((char)((len >> (i * 8)) & 0xFF));
+            }
+        }
+        quint32 maskVal = QRandomGenerator::global()->generate();
+        QByteArray mask((const char *)&maskVal, 4);
+        frame.append(mask);
+        for (size_t i = 0; i < len; i++) {
+            frame.append((char)(data[i] ^ (uint8_t)mask[i % 4]));
+        }
+        ws->write(frame);
+        ws->waitForBytesWritten(500);
+    };
+
+    // Single-threaded loop. We can't use a separate reader thread on
+    // the WS socket because QAbstractSocket is thread-affined — the
+    // write side on this thread would race with reads on another.
+    // Instead, each iteration: poll proxies with select (short timeout)
+    // and additionally drain any pending WS frames (only in WS mode).
     while (!m_Stop.load()) {
         fd_set rset;
         FD_ZERO(&rset);
         SOCKET nfds = 0;
-        FD_SET(tunnelSock, &rset);
-        if (tunnelSock > nfds) nfds = tunnelSock;
+        if (useUdpCarrier) {
+            FD_SET(tunnelSock, &rset);
+            if (tunnelSock > nfds) nfds = tunnelSock;
+        }
         for (const auto &ps : proxies) {
             FD_SET(ps.fd, &rset);
             if (ps.fd > nfds) nfds = ps.fd;
         }
-        struct timeval tv = {0, 100000};  // 100 ms
+        // Short timeout so WS polling stays responsive. 20 ms is a
+        // good balance: low latency for video/audio RTP without
+        // burning CPU when idle.
+        struct timeval tv = {0, 20000};
         int sel = select((int)nfds + 1, &rset, nullptr, nullptr, &tv);
         if (sel < 0) break;
-        if (sel == 0) continue;
 
-        // ----- Outbound: common-c → tunnel -----
-        for (auto &ps : proxies) {
-            if (!FD_ISSET(ps.fd, &rset)) continue;
-            sockaddr_in from = {};
-            socklen_t fromLen = sizeof(from);
-            int n = recvfrom(ps.fd, (char *)rxbuf, sizeof(rxbuf), 0,
-                             (sockaddr *)&from, &fromLen);
-            if (n <= 0) continue;
-            uint16_t clientPort = ntohs(from.sin_port);
-            if (ps.clientPort == 0) {
-                ps.clientPort = clientPort;
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-UDPTUN] learned client port %u for server port %u",
-                            clientPort, ps.serverPort);
+        if (sel > 0) {
+            // ----- Outbound: common-c → tunnel -----
+            for (auto &ps : proxies) {
+                if (!FD_ISSET(ps.fd, &rset)) continue;
+                sockaddr_in from = {};
+                socklen_t fromLen = sizeof(from);
+                int n = recvfrom(ps.fd, (char *)rxbuf, sizeof(rxbuf), 0,
+                                 (sockaddr *)&from, &fromLen);
+                if (n <= 0) continue;
+                uint16_t clientPort = ntohs(from.sin_port);
+                if (ps.clientPort == 0) {
+                    ps.clientPort = clientPort;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-UDPTUN] learned client port %u for server port %u",
+                                clientPort, ps.serverPort);
+                }
+                size_t enc = VpTunnel_encode(&flow, clientPort, ps.serverPort,
+                                             rxbuf, (size_t)n, txbuf, sizeof(txbuf));
+                if (enc > 0) send_carrier(txbuf, enc);
             }
-            size_t enc = VpTunnel_encode(&flow, clientPort, ps.serverPort,
-                                         rxbuf, (size_t)n, txbuf, sizeof(txbuf));
-            if (enc > 0) {
-                sendto(tunnelSock, (const char *)txbuf, (int)enc, 0,
-                       (sockaddr *)&relayAddr, sizeof(relayAddr));
+
+            // ----- Inbound (UDP carrier only): tunnel → common-c -----
+            if (useUdpCarrier && FD_ISSET(tunnelSock, &rset)) {
+                sockaddr_in from = {};
+                socklen_t fromLen = sizeof(from);
+                int n = recvfrom(tunnelSock, (char *)rxbuf, sizeof(rxbuf), 0,
+                                 (sockaddr *)&from, &fromLen);
+                if (n > 0 &&
+                    from.sin_addr.s_addr == relayAddr.sin_addr.s_addr &&
+                    from.sin_port == relayAddr.sin_port) {
+                    uint16_t srcPort = 0, dstPort = 0;
+                    const uint8_t *payload = nullptr;
+                    size_t payloadLen = 0;
+                    if (VpTunnel_parse(&flow, rxbuf, (size_t)n,
+                                       &srcPort, &dstPort,
+                                       &payload, &payloadLen)) {
+                        deliver_to_proxy(srcPort, payload, payloadLen);
+                    }
+                }
             }
         }
 
-        // ----- Inbound: tunnel → common-c -----
-        if (FD_ISSET(tunnelSock, &rset)) {
-            sockaddr_in from = {};
-            socklen_t fromLen = sizeof(from);
-            int n = recvfrom(tunnelSock, (char *)rxbuf, sizeof(rxbuf), 0,
-                             (sockaddr *)&from, &fromLen);
-            if (n <= 0) continue;
-            // Silently drop datagrams not from the relay — the HMAC
-            // check would reject them anyway but this is cheaper.
-            if (from.sin_addr.s_addr != relayAddr.sin_addr.s_addr ||
-                from.sin_port != relayAddr.sin_port) {
-                continue;
+        // ----- Inbound (WS carrier): drain any WS binary frames -----
+        // bytesAvailable alone isn't enough (the TCP/TLS layer may
+        // have received bytes without emitting readyRead yet), so we
+        // let Qt drain what it has by polling with a 0-ms wait.
+        if (!useUdpCarrier) {
+            if (ws->bytesAvailable() == 0) {
+                ws->waitForReadyRead(0);
             }
-
-            uint16_t srcPort = 0, dstPort = 0;
-            const uint8_t *payload = nullptr;
-            size_t payloadLen = 0;
-            if (!VpTunnel_parse(&flow, rxbuf, (size_t)n,
-                                &srcPort, &dstPort, &payload, &payloadLen)) {
-                continue;  // bad magic / HMAC / wrong flow
-            }
-            // Find the proxy whose serverPort == srcPort.
-            for (const auto &ps : proxies) {
-                if (ps.serverPort != srcPort) continue;
-                if (ps.clientPort == 0) break;  // not learned yet; drop
-                sockaddr_in dst = {};
-                dst.sin_family = AF_INET;
-                dst.sin_port = htons(ps.clientPort);
-                inet_pton(AF_INET, "127.0.0.1", &dst.sin_addr);
-                sendto(ps.fd, (const char *)payload, (int)payloadLen, 0,
-                       (sockaddr *)&dst, sizeof(dst));
-                break;
+            while (ws->bytesAvailable() > 0 && !m_Stop.load()) {
+                QByteArray frame = wsReadFrame(ws, 200);
+                if (frame.isEmpty()) break;
+                uint16_t srcPort = 0, dstPort = 0;
+                const uint8_t *payload = nullptr;
+                size_t payloadLen = 0;
+                if (!VpTunnel_parse(&flow,
+                                    (const uint8_t *)frame.constData(),
+                                    (size_t)frame.size(),
+                                    &srcPort, &dstPort,
+                                    &payload, &payloadLen)) {
+                    // Might be a stray text control frame (e.g.
+                    // udp_tunnel_closed) — silently ignore.
+                    continue;
+                }
+                deliver_to_proxy(srcPort, payload, payloadLen);
             }
         }
     }
@@ -441,7 +531,7 @@ void RelayUdpTunnel::run() {
     for (auto &ps : proxies) {
         if (ps.fd != INVALID_SOCKET) closesocket(ps.fd);
     }
-    closesocket(tunnelSock);
+    if (tunnelSock != INVALID_SOCKET) closesocket(tunnelSock);
     delete ws;
     m_Ready.store(false);
 }
