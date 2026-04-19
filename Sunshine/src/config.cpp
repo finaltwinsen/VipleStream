@@ -1241,6 +1241,8 @@ namespace config {
     string_f(vars, "stun_server", stream.stun_server);
     string_f(vars, "relay_url", stream.relay_url);
     string_f(vars, "relay_psk", stream.relay_psk);
+    // VipleStream: UDP tunnel preference (auto|direct|udp_tunnel|ws_tunnel)
+    string_f(vars, "udp_tunnel_mode", stream.udp_tunnel_mode);
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

@@ -71,6 +71,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/stun.h"
         "${CMAKE_SOURCE_DIR}/src/relay.cpp"
         "${CMAKE_SOURCE_DIR}/src/relay.h"
+        "${CMAKE_SOURCE_DIR}/src/udp_tunnel.cpp"
+        "${CMAKE_SOURCE_DIR}/src/udp_tunnel.h"
         "${CMAKE_SOURCE_DIR}/src/cbs.cpp"
         "${CMAKE_SOURCE_DIR}/src/utility.h"
         "${CMAKE_SOURCE_DIR}/src/uuid.h"

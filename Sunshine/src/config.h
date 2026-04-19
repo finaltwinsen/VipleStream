@@ -175,6 +175,13 @@ namespace config {
     std::string stun_server;   // default: "stun.l.google.com"
     std::string relay_url;     // signaling relay WebSocket URL (empty = disabled)
     std::string relay_psk;     // relay pre-shared key
+
+    // VipleStream: UDP tunnel preference for this server.
+    //   "auto"       — try direct → relay UDP → relay WS (default)
+    //   "direct"     — never use relay for streaming (classic P2P only)
+    //   "udp_tunnel" — always use relay UDP (useful for known-broken P2P paths)
+    //   "ws_tunnel"  — always use relay WS (fallback when both direct and UDP fail)
+    std::string udp_tunnel_mode;
   };
 
   struct nvhttp_t {
