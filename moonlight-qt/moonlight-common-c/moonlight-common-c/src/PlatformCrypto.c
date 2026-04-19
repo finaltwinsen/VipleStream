@@ -15,7 +15,12 @@ bool RandomStateInitialized = false;
 
 #else
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
+#endif
+
+#ifdef USE_MBEDTLS
+#include <mbedtls/md.h>
 #endif
 
 static int addPkcs7PaddingInPlace(unsigned char* plaintext, int plaintextLen) {
@@ -466,5 +471,29 @@ void PltGenerateRandomData(unsigned char* data, int length) {
     mbedtls_ctr_drbg_random(&CtrDrbgContext, data, length);
 #else
     RAND_bytes(data, length);
+#endif
+}
+
+void PltHmac256(const unsigned char* key, int keyLength,
+                const unsigned char* data, int dataLength,
+                unsigned char out[32]) {
+#ifdef USE_MBEDTLS
+    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (info == NULL) {
+        memset(out, 0, 32);
+        return;
+    }
+    // Single-shot HMAC; mbedtls_md_hmac is thread-safe when given
+    // caller-owned temporaries like this.
+    mbedtls_md_hmac(info, key, (size_t)keyLength,
+                    data, (size_t)dataLength, out);
+#else
+    unsigned int out_len = 0;
+    HMAC(EVP_sha256(), key, keyLength, data, (size_t)dataLength,
+         out, &out_len);
+    // EVP_sha256 always produces 32 bytes; if it didn't for any reason
+    // zero the rest so the caller sees deterministic garbage, not
+    // uninitialized stack.
+    if (out_len < 32) memset(out + out_len, 0, 32 - out_len);
 #endif
 }

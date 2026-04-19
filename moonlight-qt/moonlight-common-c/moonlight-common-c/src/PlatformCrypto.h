@@ -46,3 +46,10 @@ bool PltDecryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
                        unsigned char* outputData, int* outputDataLength);
 
 void PltGenerateRandomData(unsigned char* data, int length);
+
+// VipleStream: HMAC-SHA256 helper, used by the relay UDP tunnel wire
+// format. `out` must be at least 32 bytes. Thread-safe; backed by
+// OpenSSL HMAC or mbedtls_md_hmac depending on the build.
+void PltHmac256(const unsigned char* key, int keyLength,
+                const unsigned char* data, int dataLength,
+                unsigned char out[32]);
