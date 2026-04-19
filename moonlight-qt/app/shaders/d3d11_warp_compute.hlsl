@@ -27,7 +27,20 @@ cbuffer Constants : register(b0)
     float blendFactor;
 };
 
-// Bilinear MV interpolation (Q1 → pixel units)
+// Threshold (pixels): if the largest MV delta among the 4 neighbor
+// blocks exceeds this, we consider the pixel to be on a motion
+// boundary and fall back to nearest-neighbor sampling instead of
+// bilinear. 4 px is a full-res step; anything more is a real
+// discontinuity rather than just sub-pixel motion variation.
+#define EDGE_AWARE_MV_THRESHOLD 4.0
+
+// Edge-aware bilinear MV interpolation (Q1 → pixel units).
+// At motion boundaries (fast object next to static bg), blindly
+// blending the 4 neighbor-block MVs pushes static pixels along
+// the partial motion of the moving block → visible shimmer. When
+// we detect high inter-block MV delta, sample the *nearest*
+// block's MV instead; elsewhere bilinear still gives smooth
+// sub-block interpolation.
 float2 sampleMV(float2 pixelPos)
 {
     float blockSizeF = float(mvBlockSize);
@@ -50,6 +63,24 @@ float2 sampleMV(float2 pixelPos)
     float2 v10 = float2(motionField.Load(int3(mv10, 0))) * 0.5;
     float2 v01 = float2(motionField.Load(int3(mv01, 0))) * 0.5;
     float2 v11 = float2(motionField.Load(int3(mv11, 0))) * 0.5;
+
+    // Max MV-delta across the 4 neighbors. Using squared distances
+    // avoids a bunch of sqrt() calls and comparison is equivalent.
+    float2 d01 = v00 - v10;
+    float2 d02 = v00 - v01;
+    float2 d13 = v10 - v11;
+    float2 d23 = v01 - v11;
+    float  maxDiffSq = max(max(dot(d01, d01), dot(d02, d02)),
+                           max(dot(d13, d13), dot(d23, d23)));
+
+    if (maxDiffSq > EDGE_AWARE_MV_THRESHOLD * EDGE_AWARE_MV_THRESHOLD) {
+        // Nearest-neighbor within the 2x2 cell: pick the block
+        // whose corner the pixel's frac is closest to.
+        float2 pick = (frac.x < 0.5)
+            ? ((frac.y < 0.5) ? v00 : v01)
+            : ((frac.y < 0.5) ? v10 : v11);
+        return pick;
+    }
 
     float2 top = lerp(v00, v10, frac.x);
     float2 bot = lerp(v01, v11, frac.x);
