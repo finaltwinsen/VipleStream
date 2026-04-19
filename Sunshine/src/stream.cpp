@@ -28,10 +28,14 @@ extern "C" {
 #include "network.h"
 #include "platform/common.h"
 #include "process.h"
+#include "relay.h"
+#include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
+#include "tunnel_session.h"
+#include "udp_tunnel.h"
 #include "utility.h"
 
 constexpr int IDX_START_A = 0;
@@ -457,6 +461,14 @@ namespace stream {
     } control;
 
     std::uint32_t launch_session_id;
+
+    // VipleStream: NAT-traversal relay tunnel. When the client cannot
+    // reach us on direct UDP (even after hole-punching), the streaming
+    // datagram plane is carried over the relay via this object.
+    // Remains null when `udp_tunnel_mode == "direct"` or allocation
+    // fails — the direct UDP sockets are used as before in that case.
+    std::shared_ptr<tunnel_session::TunnelSession> tunnel;
+    std::string remote_uuid;  ///< Peer UUID, used to allocate a tunnel flow.
 
     safe::mail_raw_t::event_t<bool> shutdown_event;
     safe::signal_t controlEnd;
@@ -1689,8 +1701,29 @@ namespace stream {
               batch_info.block_count = current_batch_size;
 
               frame_send_batch_latency_logger.first_point_now();
-              // Use a batched send if it's supported on this platform
-              if (!platf::send_batch(batch_info)) {
+              // VipleStream: when the session is carried by the relay
+              // tunnel, every shard goes out per-packet with the tunnel
+              // header + HMAC prepended. Batched sendmsg/WSASendTo can't
+              // be used because each packet needs its own auth header.
+              const bool use_tunnel =
+                session->tunnel &&
+                session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
+                session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
+              if (use_tunnel) {
+                const uint16_t server_port = net::map_port(VIDEO_STREAM_PORT);
+                const uint16_t peer_port = session->video.peer.port();
+                std::vector<uint8_t> scratch;
+                for (auto y = 0; y < current_batch_size; y++) {
+                  const auto idx = next_shard_to_send + y;
+                  const size_t pre = shards.prefixsize;
+                  const size_t dat = shards.blocksize;
+                  scratch.resize(pre + dat);
+                  std::memcpy(scratch.data(), shards.prefix(idx), pre);
+                  std::memcpy(scratch.data() + pre, shards.data(idx), dat);
+                  session->tunnel->send(server_port, peer_port,
+                                        scratch.data(), scratch.size());
+                }
+              } else if (!platf::send_batch(batch_info)) {
                 // Batched send is not available, so send each packet individually
                 BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
                 for (auto y = 0; y < current_batch_size; y++) {
@@ -1798,17 +1831,31 @@ namespace stream {
 
       auto peer_address = session->audio.peer.address();
       try {
-        auto send_info = platf::send_info_t {
-          (const char *) &audio_packet,
-          sizeof(audio_packet),
-          (const char *) shards_p[sequenceNumber % RTPA_DATA_SHARDS],
-          (size_t) bytes,
-          (uintptr_t) sock.native_handle(),
-          peer_address,
-          session->audio.peer.port(),
-          session->localAddress,
-        };
-        platf::send(send_info);
+        const bool use_tunnel =
+          session->tunnel &&
+          session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
+          session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
+        const uint16_t server_audio_port = net::map_port(AUDIO_STREAM_PORT);
+        if (use_tunnel) {
+          std::vector<uint8_t> scratch(sizeof(audio_packet) + bytes);
+          std::memcpy(scratch.data(), &audio_packet, sizeof(audio_packet));
+          std::memcpy(scratch.data() + sizeof(audio_packet),
+                      shards_p[sequenceNumber % RTPA_DATA_SHARDS], bytes);
+          session->tunnel->send(server_audio_port, session->audio.peer.port(),
+                                scratch.data(), scratch.size());
+        } else {
+          auto send_info = platf::send_info_t {
+            (const char *) &audio_packet,
+            sizeof(audio_packet),
+            (const char *) shards_p[sequenceNumber % RTPA_DATA_SHARDS],
+            (size_t) bytes,
+            (uintptr_t) sock.native_handle(),
+            peer_address,
+            session->audio.peer.port(),
+            session->localAddress,
+          };
+          platf::send(send_info);
+        }
 
         auto &fec_packet = session->audio.fec_packet;
         // initialize the FEC header at the beginning of the FEC block
@@ -1825,17 +1872,27 @@ namespace stream {
             fec_packet.rtp.sequenceNumber = util::endian::big<std::uint16_t>(sequenceNumber + x + 1);
             fec_packet.fecHeader.fecShardIndex = x;
 
-            auto send_info = platf::send_info_t {
-              (const char *) &fec_packet,
-              sizeof(fec_packet),
-              (const char *) shards_p[RTPA_DATA_SHARDS + x],
-              (size_t) bytes,
-              (uintptr_t) sock.native_handle(),
-              peer_address,
-              session->audio.peer.port(),
-              session->localAddress,
-            };
-            platf::send(send_info);
+            if (use_tunnel) {
+              std::vector<uint8_t> scratch(sizeof(fec_packet) + bytes);
+              std::memcpy(scratch.data(), &fec_packet, sizeof(fec_packet));
+              std::memcpy(scratch.data() + sizeof(fec_packet),
+                          shards_p[RTPA_DATA_SHARDS + x], bytes);
+              session->tunnel->send(server_audio_port,
+                                    session->audio.peer.port(),
+                                    scratch.data(), scratch.size());
+            } else {
+              auto send_info = platf::send_info_t {
+                (const char *) &fec_packet,
+                sizeof(fec_packet),
+                (const char *) shards_p[RTPA_DATA_SHARDS + x],
+                (size_t) bytes,
+                (uintptr_t) sock.native_handle(),
+                peer_address,
+                session->audio.peer.port(),
+                session->localAddress,
+              };
+              platf::send(send_info);
+            }
             BOOST_LOG(verbose) << "Audio FEC ["sv << (sequenceNumber & ~(RTPA_DATA_SHARDS - 1)) << ' ' << x << "] ::  send..."sv;
           }
         }
@@ -1959,6 +2016,27 @@ namespace stream {
     }
     ref->message_queue_queue->raise(type, session_id, messages);
 
+    // VipleStream: if a relay tunnel is active for this session, route
+    // inbound tunnel datagrams for our local video/audio port onto the
+    // same message queue. The synthetic udp::endpoint carries the
+    // client's logical port in `src_port` so the outbound send path
+    // can address the same peer over the tunnel.
+    const uint16_t local_port = (type == socket_e::video) ?
+        net::map_port(VIDEO_STREAM_PORT) : net::map_port(AUDIO_STREAM_PORT);
+    bool tunnel_handler_registered = false;
+    if (session->tunnel &&
+        session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
+        session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT) {
+      auto tunnel_weak = std::weak_ptr<tunnel_session::TunnelSession>(session->tunnel);
+      session->tunnel->set_handler(local_port,
+        [messages](const uint8_t *data, size_t len, uint16_t src_port) {
+          udp::endpoint fake_peer(asio::ip::make_address("127.0.0.1"), src_port);
+          messages->raise(fake_peer,
+                          std::string{reinterpret_cast<const char *>(data), len});
+        });
+      tunnel_handler_registered = true;
+    }
+
     auto fg = util::fail_guard([&]() {
       messages->stop();
 
@@ -1967,6 +2045,10 @@ namespace stream {
         ref->message_queue_queue->raise(type, peer.address(), nullptr);
       }
       ref->message_queue_queue->raise(type, session_id, nullptr);
+
+      if (tunnel_handler_registered && session->tunnel) {
+        session->tunnel->set_handler(local_port, {});
+      }
     });
 
     auto start_time = std::chrono::steady_clock::now();
@@ -2114,6 +2196,58 @@ namespace stream {
       BOOST_LOG(debug) << "Session ended"sv;
     }
 
+    /**
+     * VipleStream: if the server is configured with a non-direct
+     * `udp_tunnel_mode`, ask the relay for a flow to the client and
+     * bring up the TunnelSession synchronously. Returns silently on
+     * any failure — the direct UDP path still works as fallback.
+     */
+    static void maybe_start_tunnel(session_t &session) {
+      const auto mode = udp_tunnel::parse_mode(config::stream.udp_tunnel_mode);
+      if (mode == udp_tunnel::Mode::DIRECT_ONLY) return;
+      if (config::stream.relay_url.empty()) return;
+      if (session.remote_uuid.empty()) {
+        BOOST_LOG(warning) << "[TUNNEL] no remote_uuid on session — skipping";
+        return;
+      }
+
+      auto flow_promise = std::make_shared<std::promise<udp_tunnel::Flow>>();
+      auto flow_future = flow_promise->get_future();
+      auto fulfilled = std::make_shared<std::atomic<bool>>(false);
+
+      relay::allocate_flow(session.remote_uuid,
+        [flow_promise, fulfilled](udp_tunnel::Flow flow) {
+          bool expected = false;
+          if (fulfilled->compare_exchange_strong(expected, true)) {
+            flow_promise->set_value(std::move(flow));
+          }
+        });
+
+      auto status = flow_future.wait_for(std::chrono::seconds(3));
+      if (status != std::future_status::ready) {
+        BOOST_LOG(warning) << "[TUNNEL] flow allocation timed out "
+                              "— continuing with direct UDP";
+        return;
+      }
+
+      auto flow = flow_future.get();
+      if (!flow.valid()) {
+        BOOST_LOG(warning) << "[TUNNEL] relay refused flow allocation "
+                              "— continuing with direct UDP";
+        return;
+      }
+
+      auto ts = std::make_shared<tunnel_session::TunnelSession>();
+      if (!ts->start(flow, mode)) {
+        BOOST_LOG(warning) << "[TUNNEL] TunnelSession start failed";
+        return;
+      }
+      session.tunnel = std::move(ts);
+      BOOST_LOG(info) << "[TUNNEL] session tunnel active (carrier="
+                      << udp_tunnel::carrier_name(session.tunnel->carrier())
+                      << ", flow_id=" << flow.flow_id << ")";
+    }
+
     int start(session_t &session, const std::string &addr_string) {
       session.input = input::alloc(session.mail);
 
@@ -2121,6 +2255,11 @@ namespace stream {
       if (!session.broadcast_ref) {
         return -1;
       }
+
+      // Attempt to bring up a relay tunnel for this session before the
+      // streaming threads start; if it fails we fall through to direct
+      // UDP transparently.
+      maybe_start_tunnel(session);
 
       session.control.expected_peer_address = addr_string;
       BOOST_LOG(debug) << "Expecting incoming session connections from "sv << addr_string;
@@ -2163,6 +2302,7 @@ namespace stream {
 
       session->shutdown_event = mail->event<bool>(mail::shutdown);
       session->launch_session_id = launch_session.id;
+      session->remote_uuid = launch_session.unique_id;
 
       session->config = config;
 
