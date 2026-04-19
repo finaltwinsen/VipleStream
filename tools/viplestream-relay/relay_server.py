@@ -31,6 +31,7 @@ import hmac
 import time
 import argparse
 import logging
+import socket
 import ssl
 import sys
 from typing import Dict, Optional, Set
@@ -368,6 +369,17 @@ async def ws_send_binary(writer, data: bytes):
 async def handle_client(reader, writer, psk: str):
     addr = writer.get_extra_info("peername")
     logger.info(f"[CONN] New connection from {addr}")
+
+    # Disable Nagle. The tunneled WS carrier ships per-packet RTP
+    # through this connection; batching inflates latency by hundreds
+    # of ms. Has to happen before the handshake so the first binary
+    # frames aren't stuck.
+    sock = writer.get_extra_info("socket")
+    if sock is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError as e:
+            logger.debug(f"[CONN] {addr} TCP_NODELAY set failed: {e}")
 
     if not await ws_handshake(reader, writer):
         logger.warning(f"[CONN] {addr} WebSocket handshake failed")

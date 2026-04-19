@@ -621,6 +621,15 @@ namespace relay {
       }
       freeaddrinfo(res);
 
+      // Disable Nagle — tunneled RTP packets are small and need to
+      // flush immediately. With Nagle on we see hundreds of ms of
+      // extra latency as the TCP stack batches shards.
+      {
+        int on = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                   (const char *)&on, sizeof(on));
+      }
+
       // Create transport (plain or TLS)
       std::unique_ptr<Transport> transport;
       if (useTls) {

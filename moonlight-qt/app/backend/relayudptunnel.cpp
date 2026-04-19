@@ -202,6 +202,9 @@ void RelayUdpTunnel::run() {
         }
         ws = tcp;
     }
+    // Disable Nagle — we're shipping per-packet RTP through this
+    // socket and batching inflates latency by hundreds of ms.
+    ws->setSocketOption(QAbstractSocket::LowDelayOption, 1);
 
     // WS HTTP upgrade
     QByteArray wsKey(16, 0);
@@ -411,41 +414,19 @@ void RelayUdpTunnel::run() {
     uint8_t rxbuf[2048];
     uint8_t txbuf[2048];
 
-    int kDeliverCount = 0;
     auto deliver_to_proxy = [&](uint16_t srcPort,
                                 const uint8_t *payload, size_t payloadLen) {
         for (const auto &ps : proxies) {
             if (ps.serverPort != srcPort) continue;
-            if (ps.clientPort == 0) {
-                if (kDeliverCount < 5) {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-UDPTUN] drop inbound srcPort=%u len=%zu "
-                                "(no clientPort learned for that stream yet)",
-                                srcPort, payloadLen);
-                }
-                kDeliverCount++;
-                return;
-            }
+            if (ps.clientPort == 0) return;   // not learned yet
             sockaddr_in dst = {};
             dst.sin_family = AF_INET;
             dst.sin_port = htons(ps.clientPort);
             inet_pton(AF_INET, "127.0.0.1", &dst.sin_addr);
-            int sent = sendto(ps.fd, (const char *)payload, (int)payloadLen, 0,
-                              (sockaddr *)&dst, sizeof(dst));
-            if (kDeliverCount++ < 5) {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-UDPTUN] deliver #%d srv=%u -> 127.0.0.1:%u len=%zu sent=%d",
-                            kDeliverCount, srcPort, ps.clientPort, payloadLen, sent);
-            }
+            sendto(ps.fd, (const char *)payload, (int)payloadLen, 0,
+                   (sockaddr *)&dst, sizeof(dst));
             return;
         }
-        if (kDeliverCount < 5) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-UDPTUN] drop inbound srcPort=%u len=%zu "
-                        "(no proxy for that server port)",
-                        srcPort, payloadLen);
-        }
-        kDeliverCount++;
     };
 
     // One helper for the send side — picks the active carrier.
@@ -476,8 +457,11 @@ void RelayUdpTunnel::run() {
         for (size_t i = 0; i < len; i++) {
             frame.append((char)(data[i] ^ (uint8_t)mask[i % 4]));
         }
+        // Do NOT waitForBytesWritten here — Qt buffers the frame
+        // internally and the OS drains it. Blocking up to 500 ms per
+        // packet serialised every outbound RTP shard and was the
+        // dominant contributor to the 4 s end-to-end latency we saw.
         ws->write(frame);
-        ws->waitForBytesWritten(500);
     };
 
     // Single-threaded loop. We can't use a separate reader thread on
@@ -497,10 +481,10 @@ void RelayUdpTunnel::run() {
             FD_SET(ps.fd, &rset);
             if (ps.fd > nfds) nfds = ps.fd;
         }
-        // Short timeout so WS polling stays responsive. 20 ms is a
-        // good balance: low latency for video/audio RTP without
-        // burning CPU when idle.
-        struct timeval tv = {0, 20000};
+        // Short timeout so the WS drain below runs frequently. 2 ms
+        // keeps RTP latency low; CPU cost is negligible at streaming
+        // bitrates.
+        struct timeval tv = {0, 2000};
         int sel = select((int)nfds + 1, &rset, nullptr, nullptr, &tv);
         if (sel < 0) break;
 
