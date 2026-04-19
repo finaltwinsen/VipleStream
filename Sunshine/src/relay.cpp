@@ -49,7 +49,10 @@ using namespace std::literals;
 namespace relay {
 
   static constexpr int RECONNECT_INTERVAL_SEC = 30;
-  static constexpr int ENDPOINT_PUBLISH_SEC = 60;
+  // Publish more often than Cloudflare's WSS idle timeout (~60 s) so
+  // the tunnel isn't torn down between streams. 25 s also fits under
+  // most intermediate NAT / LB timeouts.
+  static constexpr int ENDPOINT_PUBLISH_SEC = 25;
   static constexpr int RECV_TIMEOUT_MS = 5000;
 
   // ============================================================
@@ -628,6 +631,28 @@ namespace relay {
         int on = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
                    (const char *)&on, sizeof(on));
+      }
+      // TCP keepalive so dead tunnels get noticed quickly instead of
+      // accepting inbound frames that never arrive. Cloudflare's
+      // edge also drops idle WSS after ~60 s even with application
+      // pings if TCP-level packets stop.
+      {
+        int ka = 1;
+        setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE,
+                   (const char *)&ka, sizeof(ka));
+#ifdef _WIN32
+        // Windows lets us tune idle / interval via SIO_KEEPALIVE_VALS.
+        // Start probing after 30 s of silence, probe every 5 s.
+        struct tcp_keepalive {
+          ULONG onoff;
+          ULONG keepalivetime;
+          ULONG keepaliveinterval;
+        } ka_vals = { 1, 30000, 5000 };
+        DWORD bytesRet = 0;
+        WSAIoctl(sock, 0x98000004 /* SIO_KEEPALIVE_VALS */,
+                 &ka_vals, sizeof(ka_vals),
+                 nullptr, 0, &bytesRet, nullptr, nullptr);
+#endif
       }
       // Short send timeout so that when the peer (or Cloudflare, or
       // the client) can't drain fast enough, our send() returns
