@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from ctypes import wintypes
 import json
 import re
 import shutil
@@ -372,6 +373,57 @@ def stop_moonlight():
     time.sleep(3.0)
 
 
+def _foreground_moonlight(pid: int) -> bool:
+    """Push Moonlight's top-level window to the foreground after
+    launch. Without this, Moonlight often comes up behind the
+    terminal running the harness and you can't see whether the
+    stream is actually live — which defeats the point of manual
+    visual validation during an auto-tune sweep.
+
+    Enumerates top-level windows, matches by the PID we launched,
+    then ShowWindow(SW_RESTORE) + SetForegroundWindow. Win32's
+    SetForegroundWindow can refuse focus changes when the
+    foreground-lock rules aren't met, so we also try the alt-tab
+    workaround (briefly attach input threads). Best-effort — a
+    False return is non-fatal.
+    """
+    user32 = ctypes.windll.user32
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.GetWindowThreadProcessId.argtypes = [
+        wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.AttachThreadInput.argtypes = [
+        wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    user32.AttachThreadInput.restype = wintypes.BOOL
+    GetCurrentThreadId = ctypes.windll.kernel32.GetCurrentThreadId
+
+    EnumWindowsProc = ctypes.WINFUNCTYPE(
+        wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    found_hwnd = [None]
+
+    def cb(hwnd, _):
+        owner_pid = wintypes.DWORD(0)
+        tid = user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
+        if owner_pid.value == pid and user32.IsWindowVisible(hwnd):
+            found_hwnd[0] = (hwnd, tid)
+            return False
+        return True
+
+    user32.EnumWindows(EnumWindowsProc(cb), 0)
+    if not found_hwnd[0]:
+        return False
+
+    hwnd, target_tid = found_hwnd[0]
+    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    # Attach this process's input thread so SetForegroundWindow
+    # doesn't get denied by the foreground-lock.
+    my_tid = GetCurrentThreadId()
+    user32.AttachThreadInput(my_tid, target_tid, True)
+    ok = bool(user32.SetForegroundWindow(hwnd))
+    user32.AttachThreadInput(my_tid, target_tid, False)
+    return ok
+
+
 def _resolve_moonlight_pid(ml_proc: subprocess.Popen) -> Optional[int]:
     """Figure out which PID is the currently-streaming Moonlight.
     First choice: our own Popen's PID (when `Moonlight.exe stream …`
@@ -462,12 +514,17 @@ def run_one(cfg: str, args: argparse.Namespace, out_dir: Path) -> RunResult:
         ml_args += ["--display-mode", "windowed"]
     print(f"Launching: {' '.join(ml_args[1:])}")
     try:
-        ml_proc = subprocess.Popen(ml_args, creationflags=0x08000000)  # DETACHED
+        # Default creation flags — DETACHED_PROCESS was preventing
+        # Moonlight from acquiring foreground focus and taking full
+        # screen. A benchmark run is no use if we can't see whether
+        # the stream actually came up.
+        ml_proc = subprocess.Popen(ml_args)
     except OSError as e:
         return RunResult(cfg, {}, None, {}, f"launch_failed: {e}")
 
     print(f"Warming up {args.warmup}s...")
     time.sleep(args.warmup)
+    _foreground_moonlight(ml_proc.pid)
 
     # Resolve Moonlight's actual PID. Popen.pid is our launched
     # process; in `Moonlight.exe stream ...` that IS the streaming
