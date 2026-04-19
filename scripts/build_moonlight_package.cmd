@@ -75,6 +75,26 @@ for %%F in (dxcompiler.dll dxil.dll) do (
     )
 )
 
+:: ---- 4b. Debug symbols (PDBs) ----
+::
+:: Ship PDBs next to the .exe so WinDbg / cdb can symbolicate minidumps
+:: without any symbol-path setup. Statically-linked submodules
+:: (moonlight-common-c, h264bitstream, qmdnsengine) merge their symbols
+:: into Moonlight.pdb at link time, so Moonlight.pdb alone covers all our
+:: first-party code. AntiHooking is a separate DLL so its PDB ships too.
+:: Third-party DLLs (FFmpeg, SDL, Qt, libcrypto, libplacebo) don't ship
+:: PDBs with their binaries so those stay unsymbolicated in the dump —
+:: which is fine, we rarely need internals of those.
+echo [pkg 4b/5] Copying PDBs for crash symbolication
+for %%F in ("%SRC%\app\release\Moonlight.pdb" "%SRC%\AntiHooking\release\AntiHooking.pdb") do (
+    if exist %%F (
+        copy /y %%F "%TEMP_DIR%\" >nul
+        echo   %%~nxF
+    ) else (
+        echo   [WARN] %%~nxF missing - crash dumps will not symbolicate
+    )
+)
+
 :: ---- 5. Zip it ----
 echo [pkg 5/5] Creating zip
 if not exist "%RELEASE%" mkdir "%RELEASE%"
