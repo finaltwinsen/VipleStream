@@ -457,11 +457,16 @@ void RelayUdpTunnel::run() {
         for (size_t i = 0; i < len; i++) {
             frame.append((char)(data[i] ^ (uint8_t)mask[i % 4]));
         }
-        // Do NOT waitForBytesWritten here — Qt buffers the frame
-        // internally and the OS drains it. Blocking up to 500 ms per
-        // packet serialised every outbound RTP shard and was the
-        // dominant contributor to the 4 s end-to-end latency we saw.
+        // Write + explicit non-blocking flush. Qt's QSslSocket stashes
+        // the frame in an internal buffer and only kicks SSL_write()
+        // from its event loop — but we're running in a raw QThread
+        // with no event loop, so without flush() the bytes can sit
+        // there until the next waitForReadyRead() call on the same
+        // socket runs the state machine. On bursty traffic (mouse
+        // movement → big video P-frames) that buffering alone drove
+        // latency into multi-second territory.
         ws->write(frame);
+        ws->flush();
     };
 
     // Single-threaded loop. We can't use a separate reader thread on
