@@ -240,8 +240,32 @@ public class NvConnection {
     {
         NvHTTP h = new NvHTTP(context.serverAddress, context.httpsPort, uniqueId, context.serverCert, cryptoProvider);
 
-        String serverInfo = h.getServerInfo(true);
-        
+        // VipleStream: try direct serverinfo first; if that fails (e.g. LAN unreachable
+        // and only relay is available), fall back to relay HTTP proxy. When we use the
+        // relay we cannot send a TLS client cert, so the server always reports
+        // PairStatus=0 — we skip the pair check in that case and trust the local cache.
+        String serverInfo;
+        boolean usedRelayForServerInfo = false;
+        try {
+            serverInfo = h.getServerInfo(true);
+        } catch (IOException directFail) {
+            if (context.relayUrl != null && !context.relayUrl.isEmpty()
+                    && context.serverUuid != null && !context.serverUuid.isEmpty()) {
+                LimeLog.info("[VIPLE-NAT] startApp direct serverinfo failed ("
+                        + directFail.getMessage() + "), falling back to relay HTTP proxy");
+                String resp = com.limelight.relay.RelayClient.httpProxy(context.relayUrl,
+                        context.relayPsk, context.serverUuid,
+                        "/serverinfo?uniqueid=0123456789ABCDEF", 8000);
+                if (resp == null || resp.isEmpty()) {
+                    throw directFail;
+                }
+                serverInfo = resp;
+                usedRelayForServerInfo = true;
+            } else {
+                throw directFail;
+            }
+        }
+
         context.serverAppVersion = h.getServerVersion(serverInfo);
         if (context.serverAppVersion == null) {
             context.connListener.displayMessage("Server version malformed");
@@ -253,8 +277,12 @@ public class NvConnection {
 
         // May be missing for older servers
         context.serverGfeVersion = h.getGfeVersion(serverInfo);
-                
-        if (h.getPairState(serverInfo) != PairingManager.PairState.PAIRED) {
+
+        // VipleStream: skip pair-state check when serverinfo came from relay proxy —
+        // proxy can't send our client cert, so PairStatus in the response is always 0
+        // even when we're actually paired.
+        if (!usedRelayForServerInfo
+                && h.getPairState(serverInfo) != PairingManager.PairState.PAIRED) {
             context.connListener.displayMessage("Device not paired with computer");
             return false;
         }
@@ -422,7 +450,10 @@ public class NvConnection {
         String launchResp = RelayClient.httpProxy(ctx.relayUrl, ctx.relayPsk,
                 ctx.serverUuid, launchPath, 45000);
 
-        if (launchResp != null && launchResp.contains("gamesession")) {
+        // VipleStream: /launch response contains <gamesession>, /resume contains
+        // <resume>1</resume> — both have <sessionUrl0>. Check that instead of
+        // gamesession-only (resume path was incorrectly reported as failed).
+        if (launchResp != null && launchResp.contains("sessionUrl0")) {
             try {
                 // Extract RTSP session URL from XML response
                 ctx.rtspSessionUrl = extractXmlTag(launchResp, "sessionUrl0");
@@ -535,6 +566,54 @@ public class NvConnection {
                 // we must not invoke that functionality in parallel.
                 synchronized (MoonBridge.class) {
                     MoonBridge.setupBridge(videoDecoderRenderer, audioRenderer, connectionListener);
+
+                    // VipleStream: if ComputerManagerService didn't pre-populate stunAddress
+                    // (happens when LAN direct connect succeeds and the fallback branch never
+                    // runs), do an on-demand relay lookup so hole punch can still be attempted.
+                    if ((context.stunAddress == null || context.stunAddress.isEmpty())
+                            && context.relayUrl != null && !context.relayUrl.isEmpty()
+                            && context.serverUuid != null) {
+                        LimeLog.info("[VIPLE-NAT] stunAddress empty — on-demand relay lookup");
+                        try {
+                            com.limelight.relay.RelayClient.LookupResult r =
+                                    com.limelight.relay.RelayClient.lookup(context.relayUrl,
+                                            context.relayPsk, context.serverUuid, 5000);
+                            if (r != null && r.success && r.stunIp != null) {
+                                context.stunAddress = r.stunIp;
+                                LimeLog.info("[VIPLE-NAT] Relay lookup OK: stunAddress="
+                                        + r.stunIp);
+                            } else {
+                                LimeLog.warning("[VIPLE-NAT] Relay lookup returned no stunIp");
+                            }
+                        } catch (Exception e) {
+                            LimeLog.warning("[VIPLE-NAT] Relay lookup failed: "
+                                    + e.getMessage());
+                        }
+                    }
+
+                    // VipleStream: NAT hole punch before LiStartConnection so ENet control
+                    // socket reuses the bound local port. Best-effort — failure is non-fatal.
+                    if (context.stunAddress != null && !context.stunAddress.isEmpty()
+                            && context.serverUuid != null) {
+                        int controlPort = context.serverAddress.port + 10;
+                        byte[] srvU = new byte[16];
+                        byte[] srvSrc = context.serverUuid.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                        System.arraycopy(srvSrc, 0, srvU, 0, Math.min(16, srvSrc.length));
+                        byte[] cliU = new byte[16]; // placeholder — server intercept doesn't verify
+                        LimeLog.info("[VIPLE-NAT] Attempting hole punch to "
+                                + context.stunAddress + ":" + controlPort);
+                        int punchResult = MoonBridge.holePunch(context.stunAddress, controlPort,
+                                srvU, cliU, 3000);
+                        if (punchResult == 0) {
+                            LimeLog.info("[VIPLE-NAT] Hole punch succeeded!");
+                        } else {
+                            LimeLog.warning("[VIPLE-NAT] Hole punch failed (" + punchResult
+                                    + "), proceeding with direct connection");
+                        }
+                        LimeLog.info("[VIPLE-NAT] LocalControlPort = "
+                                + MoonBridge.getLocalControlPort());
+                    }
+
                     int ret = MoonBridge.startConnection(context.serverAddress.address,
                             context.serverAppVersion, context.serverGfeVersion, context.rtspSessionUrl,
                             context.serverCodecModeSupport,

@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "HolePunch.h"  // VipleStream: for LocalControlPort (NAT-pinhole preservation)
 
 // This is a private header, but it just contains some time macros
 #include <enet/time.h>
@@ -1647,7 +1648,10 @@ int startControlStream(void) {
         // binding to wildcard port is broken on the 3DS, so we need to define a port manually
         enet_address_set_port(&localAddress, htons(n3ds_udp_port++));
 #else
-        enet_address_set_port(&localAddress, 0); // Wildcard port
+        // VipleStream: if LiHolePunch left us a local port, reuse it so the
+        // NAT pinhole opened by the punch covers the ENet control stream.
+        // Falls back to wildcard (0) when no punch was performed.
+        enet_address_set_port(&localAddress, LocalControlPort);
 #endif
 
         enet_address_set_address(&remoteAddress, (struct sockaddr *)&RemoteAddr, AddrLen);

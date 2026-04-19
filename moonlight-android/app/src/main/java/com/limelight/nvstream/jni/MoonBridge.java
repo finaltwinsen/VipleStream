@@ -348,6 +348,16 @@ public class MoonBridge {
                                               int videoCapabilities,
                                               int colorSpace, int colorRange);
 
+    // VipleStream: client-side NAT hole punch. Must be called BEFORE startConnection()
+    // so LocalControlPort is set when ENet binds. Returns 0 on success, negative on failure.
+    public static native int holePunch(String serverAddr, int serverPort,
+                                       byte[] serverUuid, byte[] clientUuid,
+                                       int timeoutMs);
+
+    // VipleStream: diagnostic — returns the local UDP port bound by holePunch()
+    // (same port ENet will bind to). 0 = punch not yet performed.
+    public static native int getLocalControlPort();
+
     public static native void stopConnection();
 
     public static native void interruptConnection();

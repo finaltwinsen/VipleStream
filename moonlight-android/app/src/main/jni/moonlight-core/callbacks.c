@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include <Limelight.h>
+#include "HolePunch.h"  // VipleStream: LiHolePunch + LocalControlPort
 
 #include <opus_multistream.h>
 #include <android/log.h>
@@ -517,4 +518,34 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
     }
 
     return ret;
+}
+
+// VipleStream: JNI bridge to LiHolePunch (client-side NAT punch)
+JNIEXPORT jint JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_holePunch(JNIEnv *env, jclass clazz,
+                                                     jstring serverAddr, jint serverPort,
+                                                     jbyteArray serverUuid, jbyteArray clientUuid,
+                                                     jint timeoutMs) {
+    const char *addrStr = (*env)->GetStringUTFChars(env, serverAddr, NULL);
+    jbyte *srvUuidBuf = (*env)->GetByteArrayElements(env, serverUuid, NULL);
+    jbyte *cliUuidBuf = (*env)->GetByteArrayElements(env, clientUuid, NULL);
+
+    int ret = LiHolePunch(addrStr, (unsigned short)serverPort,
+                          (const uint8_t *)srvUuidBuf, (const uint8_t *)cliUuidBuf,
+                          timeoutMs);
+
+    (*env)->ReleaseStringUTFChars(env, serverAddr, addrStr);
+    (*env)->ReleaseByteArrayElements(env, serverUuid, srvUuidBuf, JNI_ABORT);
+    (*env)->ReleaseByteArrayElements(env, clientUuid, cliUuidBuf, JNI_ABORT);
+
+    __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c",
+                        "[VIPLE-NAT] LiHolePunch -> %d, LocalControlPort = %u",
+                        ret, LocalControlPort);
+    return ret;
+}
+
+// VipleStream: diagnostic getter for LocalControlPort
+JNIEXPORT jint JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_getLocalControlPort(JNIEnv *env, jclass clazz) {
+    return (jint)LocalControlPort;
 }

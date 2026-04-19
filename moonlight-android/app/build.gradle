@@ -8,6 +8,7 @@ android {
     namespace 'com.limelight'
 
     defaultConfig {
+        applicationId "com.limelight"
         minSdk 21
         targetSdk 34
 
@@ -16,42 +17,17 @@ android {
 
         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
         ndk.debugSymbolLevel = 'FULL'
-    }
 
-    flavorDimensions.add("root")
+        // VipleStream: root flavor removed — only non-root build remains.
+        externalNativeBuild {
+            ndkBuild {
+                arguments "PRODUCT_FLAVOR=nonRoot"
+            }
+        }
+    }
 
     buildFeatures {
         buildConfig = true
-    }
-
-    productFlavors {
-        root {
-            // Android O has native mouse capture, so don't show the rooted
-            // version to devices running O on the Play Store.
-            maxSdk 25
-
-            externalNativeBuild {
-                ndkBuild {
-                    arguments "PRODUCT_FLAVOR=root"
-                }
-            }
-
-            applicationId "com.limelight.root"
-            dimension "root"
-            buildConfigField "boolean", "ROOT_BUILD", "true"
-        }
-
-        nonRoot {
-            externalNativeBuild {
-                ndkBuild {
-                    arguments "PRODUCT_FLAVOR=nonRoot"
-                }
-            }
-
-            applicationId "com.limelight"
-            dimension "root"
-            buildConfigField "boolean", "ROOT_BUILD", "false"
-        }
     }
 
     compileOptions {
@@ -83,7 +59,6 @@ android {
         debug {
             applicationIdSuffix ".debug"
             resValue "string", "app_label", "Moonlight (Debug)"
-            resValue "string", "app_label_root", "Moonlight (Root Debug)"
 
             minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
@@ -121,7 +96,6 @@ android {
             // TL;DR: Leave the following line alone!
             applicationIdSuffix ".unofficial"
             resValue "string", "app_label", "Moonlight"
-            resValue "string", "app_label_root", "Moonlight (Root)"
 
             minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
