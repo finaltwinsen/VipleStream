@@ -372,6 +372,31 @@ def stop_moonlight():
     time.sleep(3.0)
 
 
+def _resolve_moonlight_pid(ml_proc: subprocess.Popen) -> Optional[int]:
+    """Figure out which PID is the currently-streaming Moonlight.
+    First choice: our own Popen's PID (when `Moonlight.exe stream …`
+    runs, that exact process hosts the stream). Fallback: ask
+    tasklist for Moonlight.exe — covers the rare case where
+    Moonlight relaunches itself (auto-updater etc.) leaving us
+    parented to a dead launcher."""
+    # Cheap check — Popen.poll() == None means our child is alive.
+    if ml_proc.poll() is None:
+        return ml_proc.pid
+    # Launcher died; look for a running Moonlight.exe.
+    r = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq Moonlight.exe", "/FO", "CSV", "/NH"],
+        capture_output=True, text=True, check=False,
+    )
+    for line in r.stdout.splitlines():
+        parts = [p.strip('"') for p in line.split('","')]
+        if len(parts) >= 2 and parts[0].startswith("Moonlight"):
+            try:
+                return int(parts[1])
+            except ValueError:
+                pass
+    return None
+
+
 def latest_moonlight_log(after_timestamp: float) -> Optional[Path]:
     """Pick the Moonlight-*.log file whose mtime is newer than the given
     wall-clock timestamp. Moonlight names each log by ms-since-epoch, so
@@ -437,17 +462,21 @@ def run_one(cfg: str, args: argparse.Namespace, out_dir: Path) -> RunResult:
         ml_args += ["--display-mode", "windowed"]
     print(f"Launching: {' '.join(ml_args[1:])}")
     try:
-        subprocess.Popen(ml_args, creationflags=0x08000000)  # DETACHED
+        ml_proc = subprocess.Popen(ml_args, creationflags=0x08000000)  # DETACHED
     except OSError as e:
         return RunResult(cfg, {}, None, {}, f"launch_failed: {e}")
 
     print(f"Warming up {args.warmup}s...")
     time.sleep(args.warmup)
-    # Check Moonlight is still running.
-    tasks = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Moonlight.exe"],
-                           capture_output=True, text=True, check=False)
-    if "Moonlight.exe" not in tasks.stdout:
+
+    # Resolve Moonlight's actual PID. Popen.pid is our launched
+    # process; in `Moonlight.exe stream ...` that IS the streaming
+    # process (no fork), but be defensive — if the launcher has
+    # already exited, fall back to tasklist to find the live one.
+    ml_pid = _resolve_moonlight_pid(ml_proc)
+    if ml_pid is None:
         return RunResult(cfg, {}, None, {}, "moonlight_exited_early")
+    print(f"  Moonlight PID: {ml_pid}")
 
     csv_path = out_dir / f"presentmon_{cfg}.csv"
     pm_log = out_dir / f"presentmon_{cfg}.log"
@@ -457,12 +486,22 @@ def run_one(cfg: str, args: argparse.Namespace, out_dir: Path) -> RunResult:
     subprocess.run(["logman", "stop", session_name, "-ets"],
                    capture_output=True, check=False)
 
+    # Use --process_id instead of --process_name: without admin
+    # elevation, PresentMon can't resolve the process name from
+    # ETW events and --process_name silently matches zero frames
+    # from the 2nd iteration onward. --process_id bypasses the
+    # name lookup entirely and targets a specific PID directly —
+    # which is also cheaper (no per-frame name compare).
+    # --terminate_on_proc_exit so PresentMon shuts down if
+    # Moonlight dies unexpectedly instead of hanging out the full
+    # --timed window.
     pm_args = [
         str(PRESENTMON),
-        "--process_name", "Moonlight.exe",
+        "--process_id", str(ml_pid),
         "--output_file", str(csv_path),
         "--timed", str(args.seconds),
         "--terminate_after_timed",
+        "--terminate_on_proc_exit",
         "--v2_metrics",
         "--no_console_stats",
         "--stop_existing_session",
