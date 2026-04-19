@@ -784,7 +784,26 @@ def _pin_and_forward(flow: "UdpFlow", data: bytes,
     # 2. Forward to the other side.
     other = flow.endpoint_b if side == "a" else flow.endpoint_a
     if other is None:
-        return  # other side not yet pinned
+        # The other side hasn't sent anything yet, so it's not pinned.
+        # If the other peer is known WS-registered (typical: Sunshine
+        # keeps a persistent WS up and the client just allocated against
+        # its uuid), auto-pin endpoint to that writer so we don't
+        # deadlock waiting for a packet that can only arrive AFTER this
+        # one is delivered. UDP-pin still requires TOFU from an actual
+        # datagram since we don't know the source addr in advance.
+        other_uuid = flow.peer_b_uuid if side == "a" else flow.peer_a_uuid
+        other_peer = registry.lookup(other_uuid) if other_uuid else None
+        if other_peer is not None and other_peer.writer is not None:
+            pinned = ("ws", other_peer.writer)
+            if side == "a":
+                flow.endpoint_b = pinned
+            else:
+                flow.endpoint_a = pinned
+            logger.info(f"[TUN] flow={flow.flow_id} auto-pinned "
+                        f"{'b' if side == 'a' else 'a'}=ws (via registry)")
+            other = pinned
+        else:
+            return
     kind, val = other
     size = len(data)
     if kind == "udp":
