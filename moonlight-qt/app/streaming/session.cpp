@@ -1831,10 +1831,12 @@ bool Session::startConnectionAsync()
                         "[VIPLE-NAT] UDP tunnel ready — video/audio routed via relay (host=127.0.0.1)");
             // Bandwidth cap for the tunnel path. The WS carrier goes
             // TLS-over-TCP (often through Cloudflare Tunnel) which
-            // cannot sustain 20 Mbps of low-latency video. Cap the
-            // encoder at 5 Mbps when tunneling so the pipeline
-            // doesn't run into persistent TCP backpressure.
-            constexpr int TUNNEL_BITRATE_CAP_KBPS = 5000;
+            // cannot sustain 20 Mbps of low-latency video. First try
+            // at 5 Mbps still showed ~48% server-side drops, confirming
+            // the Cloudflare edge path can't sustain that rate without
+            // severe queueing. 2 Mbps keeps encoder output below the
+            // observed sustainable ceiling so queues stay shallow.
+            constexpr int TUNNEL_BITRATE_CAP_KBPS = 2000;
             if (m_StreamConfig.bitrate > TUNNEL_BITRATE_CAP_KBPS) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-NAT] capping bitrate %d -> %d kbps for WS tunnel",

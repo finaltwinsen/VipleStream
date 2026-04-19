@@ -676,18 +676,20 @@ namespace relay {
       // shards) just drop the frame — video and audio RTP are
       // loss-tolerant, ENet handles its own retransmit.
       //
-      // 2 ms bounds per-packet worst case; a 55-shard video frame
-      // stalled out completely is then at most ~110 ms behind before
-      // the whole frame is dropped.
+      // 10 ms: drops binary shards quickly under backpressure but
+      // leaves enough room for a ~200 B text control message
+      // (endpoint publish, ping) to complete even when the
+      // Cloudflare edge is momentarily slow. 2 ms was triggering
+      // false-positive reconnects on every text send collision.
 #ifdef _WIN32
       {
-        DWORD to_ms = 2;
+        DWORD to_ms = 10;
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
                    (const char *)&to_ms, sizeof(to_ms));
       }
 #else
       {
-        struct timeval to = { 0, 2 * 1000 };
+        struct timeval to = { 0, 10 * 1000 };
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
       }
 #endif
@@ -750,7 +752,12 @@ namespace relay {
 
       // Main loop: publish STUN endpoint + handle incoming proxy requests
       auto lastEndpointPublish = std::chrono::steady_clock::now();
-      bool send_failed = false;
+      // A single failed text-frame send no longer tears down the WS
+      // connection. With SO_SNDTIMEO=10ms the send API can briefly
+      // return a timeout when the Cloudflare edge is momentarily slow
+      // under heavy binary-tunnel load — that is not a terminal
+      // connection state. The ws_recv path will still detect an
+      // actually-closed socket and break the loop.
       while (!shutdown_event->peek()) {
         // Publish STUN endpoint periodically
         auto now = std::chrono::steady_clock::now();
@@ -762,7 +769,10 @@ namespace relay {
                                 "\",\"stun_port\":" + std::to_string(ep.port) +
                                 ",\"nat_type\":\"" + (ep.nat_type == stun::NAT_SYMMETRIC ? "symmetric" : "punchable") + "\"}";
             std::lock_guard<std::mutex> l(g_send_mtx);
-            if (!ws_send(*transport, epMsg)) { send_failed = true; break; }
+            if (!ws_send(*transport, epMsg)) {
+              BOOST_LOG(debug) << "[RELAY] endpoint publish send timed out "
+                                  "(transient, not reconnecting)";
+            }
           }
           {
             std::lock_guard<std::mutex> l(g_send_mtx);
@@ -1094,7 +1104,6 @@ namespace relay {
 
       transport->close();
       BOOST_LOG(info) << "[RELAY] Disconnected"
-                      << (send_failed ? " (send failed)" : "")
                       << ", reconnecting in " << RECONNECT_INTERVAL_SEC << "s";
       if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
     }
