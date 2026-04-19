@@ -101,8 +101,22 @@ namespace relay {
     SOCKET _sock;
   public:
     PlainTransport(SOCKET s) : _sock(s) {}
+    // Loop until the full buffer is written. A single ::send() can
+    // legitimately return short when the OS send buffer is partially
+    // full; treating that as a hard failure (as we used to) leaves a
+    // truncated WS frame on the wire and the peer's parser drops the
+    // whole TCP connection on the next frame. Looping guarantees
+    // frame-level atomicity on our side.
     int send(const void *data, int len) override {
-      return ::send(_sock, (const char *)data, len, 0);
+      const char *p = (const char *)data;
+      int remaining = len;
+      while (remaining > 0) {
+        int n = ::send(_sock, p, remaining, 0);
+        if (n <= 0) return (remaining == len) ? n : (len - remaining);
+        p += n;
+        remaining -= n;
+      }
+      return len;
     }
     int recv(void *buf, int len) override {
       return ::recv(_sock, (char *)buf, len, 0);
@@ -441,7 +455,16 @@ namespace relay {
   }
 
   bool send_tunnel_binary(const uint8_t *data, size_t len) {
-    std::lock_guard<std::mutex> l(g_send_mtx);
+    // Application-level backpressure: if another thread is already
+    // holding the send mutex (i.e., a previous send is still being
+    // written to the socket because TCP is backpressuring), drop
+    // this frame instead of queueing behind it. Video and audio RTP
+    // are loss-tolerant; queueing adds head-of-line latency.
+    std::unique_lock<std::mutex> l(g_send_mtx, std::try_to_lock);
+    if (!l.owns_lock()) {
+      g_binary_dropped.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
     if (!g_current_transport) return false;
     return ws_send_frame(*g_current_transport, 0x2, data, len);
   }
@@ -669,30 +692,16 @@ namespace relay {
                  nullptr, 0, &bytesRet, nullptr, nullptr);
 #endif
       }
-      // Short send timeout so that when the peer (or Cloudflare, or
-      // the client) can't drain fast enough, our send() returns
-      // WSAETIMEDOUT / EAGAIN instead of blocking the video thread
-      // forever. Callers that care (ws_send_frame → tunnel binary
-      // shards) just drop the frame — video and audio RTP are
-      // loss-tolerant, ENet handles its own retransmit.
-      //
-      // 10 ms: drops binary shards quickly under backpressure but
-      // leaves enough room for a ~200 B text control message
-      // (endpoint publish, ping) to complete even when the
-      // Cloudflare edge is momentarily slow. 2 ms was triggering
-      // false-positive reconnects on every text send collision.
-#ifdef _WIN32
-      {
-        DWORD to_ms = 10;
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
-                   (const char *)&to_ms, sizeof(to_ms));
-      }
-#else
-      {
-        struct timeval to = { 0, 10 * 1000 };
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
-      }
-#endif
+      // IMPORTANT: do NOT set SO_SNDTIMEO here. A timed-out send()
+      // returns partial bytes written, which truncates the WS frame
+      // on the wire and corrupts the rest of the byte stream for the
+      // peer — it interprets subsequent frame headers as garbage and
+      // drops the TCP. Previously this manifested as high drop-rate
+      // spikes (24%) on the binary tunnel plus stuck reconnects
+      // after exiting a session. We now rely on application-level
+      // backpressure in send_tunnel_binary (try-lock) so the video
+      // thread never blocks on a slow send; a dedicated sender
+      // completes each frame fully before the next is attempted.
 
       // Create transport (plain or TLS)
       std::unique_ptr<Transport> transport;

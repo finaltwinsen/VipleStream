@@ -1,0 +1,30 @@
+[Unit]
+Description=VipleStream Signaling Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace /opt/viplestream-relay with the actual checkout path on the host.
+WorkingDirectory=/opt/viplestream-relay
+# Read the PSK from /etc/viplestream-relay.env (a file containing RELAY_PSK=...).
+# If you don't need auth, drop the EnvironmentFile line and the --psk flag.
+EnvironmentFile=-/etc/viplestream-relay.env
+ExecStart=/usr/bin/python3 relay_server.py \
+    --host 0.0.0.0 \
+    --port 9999 \
+    --udp-port 9998 \
+    --psk ${RELAY_PSK}
+Restart=on-failure
+RestartSec=5
+
+# Sandboxing — relay_server.py needs only network + loopback.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=
+
+[Install]
+WantedBy=multi-user.target
