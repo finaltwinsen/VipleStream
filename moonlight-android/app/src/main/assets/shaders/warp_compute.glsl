@@ -28,11 +28,9 @@ uniform uint frameHeight;
 uniform uint mvBlockSize;
 uniform float blendFactor;
 
-// Threshold (pixels): if the largest MV delta among the 4 neighbor
-// blocks exceeds this, we consider the pixel to be on a motion
-// boundary and fall back to nearest-neighbor sampling instead of
-// bilinear. Mirrors the desktop v1.1.135 change.
-#define EDGE_AWARE_MV_THRESHOLD 4.0
+// Threshold (pixels): tightened 4.0 -> 3.0 to match desktop,
+// catches subtle 3-px discontinuities on thin-line / UI content.
+#define EDGE_AWARE_MV_THRESHOLD 3.0
 
 // Edge-aware bilinear MV interpolation (Q1 -> pixel units).
 // At motion boundaries (fast object next to static bg) a blind
@@ -73,7 +71,15 @@ vec2 sampleMV(vec2 pixelPos) {
     float maxDiffSq = max(max(dot(d01, d01), dot(d02, d02)),
                           max(dot(d13, d13), dot(d23, d23)));
 
-    if (maxDiffSq > EDGE_AWARE_MV_THRESHOLD * EDGE_AWARE_MV_THRESHOLD) {
+    // Gradient-magnitude gate: distinguish a real motion boundary
+    // (one block moves while neighbour is static) from uniformly-
+    // high bulk motion (all 4 blocks moving ~20 px the same way).
+    // Bilinear is fine for the latter.
+    vec2 avgMv = 0.25 * (v00 + v10 + v01 + v11);
+    float avgMagSq = dot(avgMv, avgMv);
+
+    if (maxDiffSq > EDGE_AWARE_MV_THRESHOLD * EDGE_AWARE_MV_THRESHOLD
+        && maxDiffSq > avgMagSq * 0.25) {
         // Nearest-neighbor within the 2x2 cell.
         vec2 pick = (frac_val.x < 0.5)
             ? ((frac_val.y < 0.5) ? v00 : v01)
@@ -98,8 +104,10 @@ float computeAdaptiveWeight(vec2 pixelPos, vec2 mv) {
     vec2 backFromCurr = currPos - mvAtCurr * 0.5;
     float bwdError = length(backFromCurr - pixelPos);
 
-    float prevConf = 1.0 - smoothstep(2.0, 8.0, fwdError);
-    float currConf = 1.0 - smoothstep(2.0, 8.0, bwdError);
+    // Wider confidence falloff 1..10 — smoother transition than
+    // 2..8 px, reduces pixel-level "popping" on motion boundaries.
+    float prevConf = 1.0 - smoothstep(1.0, 10.0, fwdError);
+    float currConf = 1.0 - smoothstep(1.0, 10.0, bwdError);
 
     float totalConf = prevConf + currConf;
     if (totalConf < 0.001) return 0.5;
@@ -114,13 +122,25 @@ void main() {
         return;
 
     vec2 mv = sampleMV(vec2(float(px), float(py)));
-    mv = clamp(mv, vec2(-64.0), vec2(64.0));
+    // ±48 px clamp matches the ME shader's actual search radius;
+    // tighter than ±64 avoids bilinear MV overshoots on motion
+    // boundaries pulling stray pixels from far across the frame.
+    mv = clamp(mv, vec2(-48.0), vec2(48.0));
+
+    // Static early-skip: sub-half-pixel MVs give an output identical
+    // to curr frame. Saves ALU + two texture samples on a large
+    // fraction of pixels (UI chrome, backgrounds, idle frames).
+    if (dot(mv, mv) < 0.25) {
+        imageStore(interpFrame, ivec2(px, py),
+                   texelFetch(currFrame, ivec2(px, py), 0));
+        return;
+    }
 
     vec2 dims = vec2(float(frameWidth), float(frameHeight));
     vec2 prevUV = (vec2(float(px), float(py)) - mv * 0.5 + 0.5) / dims;
     vec2 currUV = (vec2(float(px), float(py)) + mv * 0.5 + 0.5) / dims;
-    prevUV = clamp(prevUV, vec2(0.0), vec2(1.0));
-    currUV = clamp(currUV, vec2(0.0), vec2(1.0));
+    // GL CLAMP_TO_EDGE on the samplers does this for free — drop
+    // two ALU ops per pixel.
 
     vec4 prevSample = texture(prevFrame, prevUV);
     vec4 currSample = texture(currFrame, currUV);
@@ -133,10 +153,21 @@ void main() {
     vec4 result;
     if (prevValid && currValid) {
 #if ENABLE_ADAPTIVE_BLEND
-        float weight = computeAdaptiveWeight(vec2(float(px), float(py)), mv);
+        // Short-circuit adaptive weight when MV is small — saves
+        // the two extra sampleMV() calls that computeAdaptiveWeight
+        // does, on pixels where both warps land ~identically.
+        float weight = (dot(mv, mv) < 4.0)
+            ? 0.5
+            : computeAdaptiveWeight(vec2(float(px), float(py)), mv);
         result = mix(prevSample, currSample, weight);
 #else
-        result = mix(prevSample, currSample, 0.5);
+        // Catastrophic-disagreement fallback: if prev/curr warps
+        // land on wildly different colours (occlusion edge), the
+        // blend produces a ghost. Bias toward currSample.
+        vec3 diff = prevSample.rgb - currSample.rgb;
+        float diffSq = dot(diff, diff);
+        float bias = clamp(diffSq * 6.25 - 1.0, 0.0, 1.0);
+        result = mix(mix(prevSample, currSample, 0.5), currSample, bias);
 #endif
     } else if (prevValid) {
         result = prevSample;

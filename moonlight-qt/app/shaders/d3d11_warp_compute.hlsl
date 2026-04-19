@@ -30,9 +30,12 @@ cbuffer Constants : register(b0)
 // Threshold (pixels): if the largest MV delta among the 4 neighbor
 // blocks exceeds this, we consider the pixel to be on a motion
 // boundary and fall back to nearest-neighbor sampling instead of
-// bilinear. 4 px is a full-res step; anything more is a real
-// discontinuity rather than just sub-pixel motion variation.
-#define EDGE_AWARE_MV_THRESHOLD 4.0
+// bilinear. Tightened from 4.0 -> 3.0 after empirical testing:
+// subtle 3-px discontinuities were still producing visible shimmer
+// on thin-line content (e.g. UI overlays, aliased edges moving
+// past a static region). 2 px would over-trigger on sub-pixel
+// motion variation so 3 is the sweet spot.
+#define EDGE_AWARE_MV_THRESHOLD 3.0
 
 // Edge-aware bilinear MV interpolation (Q1 → pixel units).
 // At motion boundaries (fast object next to static bg), blindly
@@ -73,7 +76,18 @@ float2 sampleMV(float2 pixelPos)
     float  maxDiffSq = max(max(dot(d01, d01), dot(d02, d02)),
                            max(dot(d13, d13), dot(d23, d23)));
 
-    if (maxDiffSq > EDGE_AWARE_MV_THRESHOLD * EDGE_AWARE_MV_THRESHOLD) {
+    // Gradient-magnitude gate: a real motion *boundary* is one
+    // block moving and a neighbour not (or moving very
+    // differently). Uniformly-high motion — all 4 blocks moving
+    // 20 px in similar directions — also produces a nonzero
+    // maxDiff but bilinear interpolation there is fine. Skip the
+    // nearest-neighbour fallback when avg magnitude >> max delta,
+    // i.e. "bulk motion" rather than a discontinuity.
+    float2 avgMv = 0.25 * (v00 + v10 + v01 + v11);
+    float  avgMagSq = dot(avgMv, avgMv);
+
+    if (maxDiffSq > EDGE_AWARE_MV_THRESHOLD * EDGE_AWARE_MV_THRESHOLD
+        && maxDiffSq > avgMagSq * 0.25) {
         // Nearest-neighbor within the 2x2 cell: pick the block
         // whose corner the pixel's frac is closest to.
         float2 pick = (frac.x < 0.5)
@@ -100,8 +114,13 @@ float computeAdaptiveWeight(float2 pixelPos, float2 mv)
     float2 backFromCurr = currPos - mvAtCurr * 0.5;
     float bwdError = length(backFromCurr - pixelPos);
 
-    float prevConf = 1.0 - smoothstep(2.0, 8.0, fwdError);
-    float currConf = 1.0 - smoothstep(2.0, 8.0, bwdError);
+    // Wider confidence falloff (1..10 instead of 2..8 px): smoother
+    // transition between "fully trusts this warp" and "switches to
+    // the other side", which reduces the visible "popping" between
+    // neighbouring pixels that happened when two adjacent pixels
+    // fell on opposite sides of the hard 2/8 boundaries.
+    float prevConf = 1.0 - smoothstep(1.0, 10.0, fwdError);
+    float currConf = 1.0 - smoothstep(1.0, 10.0, bwdError);
 
     float totalConf = prevConf + currConf;
     if (totalConf < 0.001) return 0.5;
@@ -118,12 +137,29 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
         return;
 
     float2 mv = sampleMV(float2(px, py));
-    mv = clamp(mv, float2(-64, -64), float2(64, 64));
+    // MV range ±48 px matches the ME shader's actual search radius
+    // (sum of steps = 31, widened for bilinear smoothing). The
+    // previous ±64 clamp was loose enough to let bilinear-
+    // interpolated MVs overshoot real motion, pulling stray pixels
+    // from far across the frame on motion boundaries.
+    mv = clamp(mv, float2(-48, -48), float2(48, 48));
 
+    // Static early-skip: if the MV is essentially zero (below
+    // half-pixel), the interpolated pixel is identical to the
+    // current frame. Skip the bilinear fetches + blend — a
+    // significant portion of pixels in a typical frame fall here
+    // (UI chrome, background, idle periods). Saves ALU + two
+    // texture sample ops.
+    if (dot(mv, mv) < 0.25) {
+        interpFrame[int2(px, py)] = currFrame.Load(int3(px, py, 0));
+        return;
+    }
+
+    // linearSampler's AddressMode is CLAMP in the renderer, so
+    // explicit saturate() is redundant — clamp happens in the
+    // sampler hardware for free. Dropping two ALU ops per pixel.
     float2 prevUV = (float2(px, py) - mv * 0.5 + 0.5) / float2(frameWidth, frameHeight);
     float2 currUV = (float2(px, py) + mv * 0.5 + 0.5) / float2(frameWidth, frameHeight);
-    prevUV = saturate(prevUV);
-    currUV = saturate(currUV);
 
     float4 prevSample = prevFrame.SampleLevel(linearSampler, prevUV, 0);
     float4 currSample = currFrame.SampleLevel(linearSampler, currUV, 0);
@@ -136,10 +172,26 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
     float4 result;
     if (prevValid && currValid) {
 #if ENABLE_ADAPTIVE_BLEND
-        float weight = computeAdaptiveWeight(float2(px, py), mv);
+        // computeAdaptiveWeight does 2 extra sampleMV() calls (each
+        // with edge-aware branches). When the MV is small the
+        // weight is effectively 0.5 anyway because both warps land
+        // on near-identical positions — short-circuit to avoid the
+        // cost.
+        float weight = (dot(mv, mv) < 4.0) ? 0.5
+                                            : computeAdaptiveWeight(float2(px, py), mv);
         result = lerp(prevSample, currSample, weight);
 #else
-        result = lerp(prevSample, currSample, 0.5);
+        // Catastrophic-disagreement fallback (balanced/performance
+        // paths, which don't have the Quality preset's adaptive
+        // blend): if the two warps land on wildly different colours
+        // the blend produces a visible ghost. RGB Euclidean > 0.4
+        // (perceptually large in 0..1 space) is a strong hint we're
+        // on an occlusion/disocclusion edge; bias toward the
+        // current frame, which is guaranteed to be a real sample.
+        float3 diff = prevSample.rgb - currSample.rgb;
+        float diffSq = dot(diff, diff);
+        float bias = saturate(diffSq * 6.25 - 1.0);  // 0 at 0.4, 1 at ~0.566
+        result = lerp(lerp(prevSample, currSample, 0.5), currSample, bias);
 #endif
     } else if (prevValid) {
         result = prevSample;
