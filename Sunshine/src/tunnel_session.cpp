@@ -84,6 +84,20 @@ namespace tunnel_session {
   }
 
   void TunnelSession::stop() {
+    // Tear down the ENet loopback bridge first so its send path no
+    // longer touches the tunnel state we're about to clear.
+    _bridge_running.store(false);
+    if (_bridge_sock) {
+      boost::system::error_code ec;
+      _bridge_sock->close(ec);
+    }
+    if (_bridge_io) _bridge_io->stop();
+    if (_bridge_thread.joinable()) _bridge_thread.join();
+    _bridge_sock.reset();
+    _bridge_io.reset();
+    _bridge_server_port = 0;
+    _bridge_peer_port.store(0);
+
     _udp_running.store(false);
     if (_udp_sock) {
       boost::system::error_code ec;
@@ -105,6 +119,86 @@ namespace tunnel_session {
       _handlers.clear();
     }
     _carrier.store(udp_tunnel::Carrier::NONE);
+  }
+
+  bool TunnelSession::enable_local_bridge(uint16_t bound_port) {
+    if (_bridge_running.load()) return true;   // already set up
+    if (bound_port == 0) return false;
+    auto c = _carrier.load();
+    if (c == udp_tunnel::Carrier::NONE) return false;
+
+    try {
+      _bridge_io = std::make_unique<asio::io_context>();
+      _bridge_sock = std::make_unique<asio::ip::udp::socket>(*_bridge_io);
+      _bridge_sock->open(asio::ip::udp::v4());
+
+      // Bind to 127.0.0.1:ephemeral. We intentionally use loopback-only
+      // so no external traffic can reach ENet through this shim.
+      asio::ip::udp::endpoint any(asio::ip::make_address_v4("127.0.0.1"), 0);
+      _bridge_sock->bind(any);
+
+      // Target for injection: Sunshine's ENet listener on this host.
+      _bridge_loopback = asio::ip::udp::endpoint(
+        asio::ip::make_address_v4("127.0.0.1"), bound_port);
+      _bridge_server_port = bound_port;
+      _bridge_peer_port.store(0);
+
+      _bridge_running.store(true);
+      _bridge_thread = std::thread([this] { bridge_recv_loop(); });
+
+      // When a tunnel packet arrives with dst_port==bound_port, inject
+      // it into ENet via the shim socket. ENet sees the peer at
+      // 127.0.0.1:<shim_ephemeral>. We also remember the client's
+      // src_port so the reply path can tunnel back to the right peer.
+      set_handler(bound_port,
+        [this](const uint8_t *data, size_t len, uint16_t src_port) {
+          _bridge_peer_port.store(src_port);
+          if (!_bridge_sock) return;
+          boost::system::error_code ec;
+          std::lock_guard<std::mutex> l(_bridge_send_mtx);
+          _bridge_sock->send_to(asio::buffer(data, len),
+                                _bridge_loopback, 0, ec);
+        });
+
+      BOOST_LOG(info) << "[TUNNEL] ENet loopback bridge up for port "
+                      << bound_port;
+      return true;
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "[TUNNEL] ENet bridge setup failed: " << e.what();
+      _bridge_running.store(false);
+      if (_bridge_sock) {
+        boost::system::error_code ec;
+        _bridge_sock->close(ec);
+      }
+      _bridge_sock.reset();
+      _bridge_io.reset();
+      _bridge_server_port = 0;
+      return false;
+    }
+  }
+
+  void TunnelSession::bridge_recv_loop() {
+    std::vector<uint8_t> buf(2048);
+    asio::ip::udp::endpoint sender;
+    while (_bridge_running.load() && _bridge_sock) {
+      boost::system::error_code ec;
+      size_t n = _bridge_sock->receive_from(asio::buffer(buf), sender, 0, ec);
+      if (ec) {
+        if (!_bridge_running.load()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        continue;
+      }
+      // Only accept replies from the loopback ENet endpoint we injected
+      // into. This guards against stray senders since we bound on
+      // 127.0.0.1 but the source port must match Sunshine's ENet.
+      if (sender != _bridge_loopback) continue;
+
+      uint16_t peer_port = _bridge_peer_port.load();
+      if (peer_port == 0) continue;  // no client ENet port learned yet
+
+      // Tunnel back to the client's ENet ephemeral port.
+      send(_bridge_server_port, peer_port, buf.data(), n);
+    }
   }
 
   bool TunnelSession::send(uint16_t src_port, uint16_t dst_port,

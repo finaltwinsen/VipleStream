@@ -104,9 +104,30 @@ namespace tunnel_session {
      */
     void set_handler(uint16_t dst_port, PortHandler handler);
 
+    /**
+     * Enable a loopback bridge for ENet control on the given port.
+     *
+     * Sunshine's ENet is bound to `bound_port` locally (e.g. 47999).
+     * The bridge opens a shim UDP socket on 127.0.0.1:<ephemeral> and:
+     *   - Inbound tunnel packets with dst_port==bound_port are
+     *     forwarded to 127.0.0.1:bound_port via the shim so ENet sees
+     *     them arrive from the shim's loopback address.
+     *   - ENet replies (sent back to the shim's loopback port) are
+     *     tunneled out with src_port=bound_port, dst_port=<client's
+     *     ENet ephemeral port learned from the first inbound packet>.
+     *
+     * This lets the client's ENet connect through the relay without
+     * any changes to libenet's socket code.
+     *
+     * Must be called after start(); stop() also tears the bridge down.
+     * Returns true iff the shim socket and receive thread came up.
+     */
+    bool enable_local_bridge(uint16_t bound_port);
+
   private:
     void udp_recv_loop();
     void dispatch(const uint8_t *data, size_t len);
+    void bridge_recv_loop();
 
     udp_tunnel::Flow _flow;
     std::atomic<udp_tunnel::Carrier> _carrier{udp_tunnel::Carrier::NONE};
@@ -127,6 +148,19 @@ namespace tunnel_session {
     // Port dispatch table.
     std::mutex _handlers_mtx;
     std::unordered_map<uint16_t, PortHandler> _handlers;
+
+    // ENet loopback bridge state. Only populated when enable_local_bridge
+    // is called. The shim socket is bound to 127.0.0.1:ephemeral; its
+    // receive thread reads ENet replies destined to that loopback port
+    // and tunnels them back to the peer.
+    std::unique_ptr<boost::asio::io_context> _bridge_io;
+    std::unique_ptr<boost::asio::ip::udp::socket> _bridge_sock;
+    boost::asio::ip::udp::endpoint _bridge_loopback;   // 127.0.0.1:bound_port
+    std::thread _bridge_thread;
+    std::atomic<bool> _bridge_running{false};
+    uint16_t _bridge_server_port{0};                   // e.g. 47999
+    std::atomic<uint16_t> _bridge_peer_port{0};        // client's ENet ephemeral
+    std::mutex _bridge_send_mtx;
   };
 
 }  // namespace tunnel_session

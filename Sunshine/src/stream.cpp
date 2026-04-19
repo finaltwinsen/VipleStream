@@ -2242,6 +2242,11 @@ namespace stream {
         BOOST_LOG(warning) << "[TUNNEL] TunnelSession start failed";
         return;
       }
+      // Bridge the ENet control port through the tunnel. Without this,
+      // the client's ENet would have no reachable peer when the direct
+      // UDP path is blocked and the session would fail at the control
+      // stream stage (ENET_EVENT_TYPE_DISCONNECT).
+      ts->enable_local_bridge(net::map_port(CONTROL_PORT));
       session.tunnel = std::move(ts);
       BOOST_LOG(info) << "[TUNNEL] session tunnel active (carrier="
                       << udp_tunnel::carrier_name(session.tunnel->carrier())

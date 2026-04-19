@@ -1815,16 +1815,20 @@ bool Session::startConnectionAsync()
         // Override RTSP URL to point to local tunnel
         rtspSessionUrl = QString("rtspenc://127.0.0.1:%1").arg(localRtspPort);
 
-        // VipleStream: bring up the UDP tunnel for video / audio RTP.
-        // We bind local proxy sockets on 127.0.0.1:{47998,48000} and
-        // tell moonlight-common-c that the server lives at 127.0.0.1.
+        // VipleStream: bring up the UDP tunnel for video / audio /
+        // control. Local proxy sockets bind on
+        //   127.0.0.1:47998 (video)
+        //   127.0.0.1:48000 (audio)
+        //   127.0.0.1:47999 (ENet control)
+        // and moonlight-common-c is told the server lives at 127.0.0.1.
         //
-        // 47999 (ENet control) is intentionally NOT proxied here —
-        // server-side ENet tunneling is not yet wired up. Control will
-        // still try direct UDP to hostnameStr and may fail when the
-        // direct path is blocked; this is a known limitation tracked
-        // as Phase 2c-3 / Sunshine-side ENet loopback bridge.
-        QVector<uint16_t> tunneledPorts{47998, 48000};
+        // The 47999 path lands on the server-side ENet loopback bridge
+        // (see tunnel_session::enable_local_bridge) which re-injects
+        // each datagram into Sunshine's ENet socket and tunnels replies
+        // back. Without 47999 in the proxy list, the control stream
+        // would fail with ENET_EVENT_TYPE_DISCONNECT when the direct
+        // UDP path is blocked.
+        QVector<uint16_t> tunneledPorts{47998, 47999, 48000};
         m_UdpTunnel = new RelayUdpTunnel(m_Preferences->relayUrl,
                                          m_Preferences->relayPsk,
                                          m_Computer->uuid,
