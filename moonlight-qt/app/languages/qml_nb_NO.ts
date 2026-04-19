@@ -1196,6 +1196,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Oppdag blokkerte tilkoblinger automatisk (anbefales)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Bildeinterpolasjon (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Generisk Compute (lav forsinkelse, anbefalt)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (høy kvalitet, CUDA kreves)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Kvalitet — Beste bildekvalitet, høyere GPU-belastning</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Balansert — Anbefalt (standard)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Ytelse — Lavest forsinkelse, egnet for iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ Bildeinterpolasjon er deaktivert over 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT-traversering (signalrelé)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>Relé-URL (f.eks. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>Relé-PSK (forhåndsdelt nøkkel, tom hvis ingen)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Valgfritt: hjelper tilkobling når begge sider er bak NAT. Kjør viplestream-relay på en server med offentlig IP.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Tving strømming via relé (for UDP-tunnel-testing)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Generisk Compute bruker D3D11/GLES compute-shadere med ~1-2 ms forsinkelse per bilde. NVIDIA Optical Flow bruker dedikert maskinvare via CUDA, men legger til ~12 ms på grunn av API-synkronisering. Generisk anbefales i de fleste tilfeller.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Kvalitet: 8-nabo-søk + sub-piksel + adaptiv blanding (~12 ms på iGPU)
+Balansert: 8-nabo-søk + tidsmessig utjevning (~8 ms på iGPU)
+Ytelse: 4-nabo-søk + minimal behandling (~6 ms på iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Alltid strøm via relé selv når verten er direkte tilgjengelig. Nyttig for å verifisere relé-UDP-tunnelen når en VPN (f.eks. Cloudflare WARP) ellers ville latt direkte /launch fungere.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

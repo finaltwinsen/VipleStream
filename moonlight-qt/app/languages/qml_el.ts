@@ -1196,6 +1196,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Αυτόματος εντοπισμός αποκλεισμένων συνδέσεων (Συνιστάται)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Παρεμβολή καρέ (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Γενικός υπολογιστικός (χαμηλή καθυστέρηση, συνιστάται)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (υψηλή ποιότητα, απαιτείται CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Ποιότητα — Καλύτερη εικόνα, μεγαλύτερο φορτίο GPU</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Ισορροπημένο — Συνιστάται (προεπιλογή)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Απόδοση — Χαμηλότερη καθυστέρηση, κατάλληλο για iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ Η παρεμβολή καρέ απενεργοποιείται άνω των 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>Διέλευση NAT (Αναμεταδότης σηματοδοσίας)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>URL αναμεταδότη (π.χ. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>PSK αναμεταδότη (προ-διαμοιρασμένο κλειδί, κενό αν κανένα)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Προαιρετικό: βοηθά στη σύνδεση όταν και οι δύο πλευρές βρίσκονται πίσω από NAT. Εκτελέστε το viplestream-relay σε διακομιστή με δημόσιο IP.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Εξαναγκαστική μετάδοση μέσω αναμεταδότη (για δοκιμή σήραγγας UDP)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Ο Γενικός υπολογιστικός χρησιμοποιεί D3D11/GLES compute shaders με καθυστέρηση ~1-2 ms ανά καρέ. Το NVIDIA Optical Flow χρησιμοποιεί ειδικό υλικό μέσω CUDA αλλά προσθέτει ~12 ms λόγω συγχρονισμού μεταξύ API. Για τις περισσότερες περιπτώσεις συνιστάται ο Γενικός.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Ποιότητα: αναζήτηση 8 γειτόνων + υπο-pixel + προσαρμοστική ανάμειξη (~12 ms σε iGPU)
+Ισορροπημένο: αναζήτηση 8 γειτόνων + χρονική εξομάλυνση (~8 ms σε iGPU)
+Απόδοση: αναζήτηση 4 γειτόνων + ελάχιστη επεξεργασία (~6 ms σε iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Πάντα μετάδοση μέσω αναμεταδότη ακόμα κι όταν ο host είναι απευθείας προσβάσιμος. Χρήσιμο για επαλήθευση της σήραγγας UDP όταν ένα VPN (π.χ. Cloudflare WARP) θα επέτρεπε αλλιώς απευθείας /launch.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

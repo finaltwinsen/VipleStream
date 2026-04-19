@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>தடுக்கப்பட்ட இணைப்புகளை தானாக கண்டறியவும் (பரிந்துரைக்கப்படுகிறது)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>பிரேம் இடைப்படுத்தல் (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>பொது கணிப்பான் (குறைந்த தாமதம், பரிந்துரைக்கப்படுகிறது)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (உயர் தரம், CUDA தேவை)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>தரம் — சிறந்த காட்சி தரம், அதிக GPU சுமை</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>சமநிலை — பரிந்துரைக்கப்படுகிறது (இயல்புநிலை)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>செயல்திறன் — மிகக் குறைந்த தாமதம், iGPU-க்கு பொருத்தம்</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ 180 FPS க்கு மேல் பிரேம் இடைப்படுத்தல் முடக்கப்பட்டுள்ளது</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT கடப்பு (சிக்னல் ரிலே)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>ரிலே URL (எ.கா. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>ரிலே PSK (முன்பகிரப்பட்ட விசை, இல்லையென்றால் காலியாக விடவும்)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>விருப்பம்: இரு பக்கங்களும் NAT பின்னணியில் இருக்கும்போது இணைக்க உதவும். பொது IP உள்ள சேவையகத்தில் viplestream-relay ஐ இயக்கவும்.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>ரிலே வழியாக ஸ்ட்ரீம் கட்டாயப்படுத்து (UDP சுரங்கம் சோதனைக்கு)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>பொது கணிப்பான் D3D11/GLES கணிப்பு ஷேடர்களை ஒரு பிரேமுக்கு ~1-2 ms தாமதத்துடன் பயன்படுத்துகிறது. NVIDIA Optical Flow CUDA வழியாக சிறப்பு வன்பொருளைப் பயன்படுத்தினாலும் API ஒத்திசைவின் காரணமாக ~12 ms சேர்க்கிறது. பெரும்பாலான சூழ்நிலைகளுக்கு பொது பரிந்துரைக்கப்படுகிறது.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>தரம்: 8-அண்டை தேடல் + சப்-பிக்சல் + ஏற்புடைய கலவை (iGPU-வில் ~12 ms)
+சமநிலை: 8-அண்டை தேடல் + கால மென்மை (iGPU-வில் ~8 ms)
+செயல்திறன்: 4-அண்டை தேடல் + குறைந்தபட்ச செயலாக்கம் (iGPU-வில் ~6 ms)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>ஹோஸ்டை நேரடியாக அடையக்கூடியதாக இருந்தாலும் எப்போதும் ரிலே வழியாக ஸ்ட்ரீம் செய்க. VPN (உ.ம். Cloudflare WARP) /launch-ஐ நேரடியாக இயக்கிவிடும் சூழலில் ரிலே UDP சுரங்கத்தைச் சரிபார்க்கப் பயனுள்ளது.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

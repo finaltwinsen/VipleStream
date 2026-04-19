@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Автоматически определять проблемы с подключением (Рекомендуется)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Интерполяция кадров (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Универсальный Compute (низкая задержка, рекомендуется)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (высокое качество, требуется CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Качество — Лучшее качество изображения, выше нагрузка на GPU</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Сбалансированный — Рекомендуется (по умолчанию)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Производительность — Минимальная задержка, подходит для iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ Интерполяция кадров отключается выше 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>Обход NAT (сигнальный ретранслятор)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>URL ретранслятора (напр. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>PSK ретранслятора (общий ключ, пусто если отсутствует)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Необязательно: помогает установить соединение, когда обе стороны за NAT. Запустите viplestream-relay на сервере с публичным IP.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Принудительно через ретранслятор (для проверки UDP-туннеля)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Универсальный Compute использует шейдеры D3D11/GLES с задержкой ~1-2 мс на кадр. NVIDIA Optical Flow задействует специализированное оборудование через CUDA, но добавляет ~12 мс из-за синхронизации API. В большинстве случаев рекомендуется Универсальный.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Качество: поиск по 8 соседям + субпиксель + адаптивное смешивание (~12 мс на iGPU)
+Сбалансированный: поиск по 8 соседям + временное сглаживание (~8 мс на iGPU)
+Производительность: поиск по 4 соседям + минимальная обработка (~6 мс на iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Всегда передавать через ретранслятор, даже если хост доступен напрямую. Полезно для проверки UDP-туннеля ретранслятора, когда VPN (напр. Cloudflare WARP) иначе оставил бы прямой /launch работающим.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

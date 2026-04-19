@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>차단된 연결 자동 감지 (권장)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>프레임 보간 (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>일반 컴퓨트 (저지연, 권장)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (고품질, CUDA 필요)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>품질 — 최고의 시각 품질, GPU 부하 높음</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>균형 — 권장 (기본값)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>성능 — 최저 지연, iGPU에 적합</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ 180 FPS 이상에서는 프레임 보간이 비활성화됩니다</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT 우회 (시그널링 중계)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>중계 URL (예: ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>중계 PSK (사전 공유 키, 없으면 비워 두기)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>선택 사항: 양측이 모두 NAT 뒤에 있을 때 연결을 돕습니다. 공용 IP 서버에서 viplestream-relay를 실행하세요.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>중계를 통한 스트리밍 강제 (UDP 터널 테스트용)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>일반 컴퓨트는 D3D11/GLES 컴퓨트 셰이더를 사용하며 프레임당 ~1-2 ms 지연입니다. NVIDIA Optical Flow는 CUDA를 통해 전용 하드웨어를 사용하지만 API 간 동기화로 ~12 ms가 추가됩니다. 대부분의 경우 일반을 권장합니다.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>품질: 8-이웃 탐색 + 서브픽셀 + 적응형 블렌드 (iGPU에서 ~12 ms)
+균형: 8-이웃 탐색 + 시간 스무딩 (iGPU에서 ~8 ms)
+성능: 4-이웃 탐색 + 최소 처리 (iGPU에서 ~6 ms)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>호스트에 직접 접근 가능해도 항상 중계를 통해 스트리밍합니다. VPN(예: Cloudflare WARP)이 켜져 직접 /launch가 통하는 상황에서 UDP 터널을 검증할 때 유용합니다.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

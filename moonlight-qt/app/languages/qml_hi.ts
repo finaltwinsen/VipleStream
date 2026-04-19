@@ -1192,6 +1192,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>फ़्रेम इंटरपोलेशन (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>सामान्य कम्प्यूट (कम विलंब, अनुशंसित)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (उच्च गुणवत्ता, CUDA आवश्यक)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>गुणवत्ता — सर्वश्रेष्ठ दृश्य गुणवत्ता, उच्च GPU लोड</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>संतुलित — अनुशंसित (डिफ़ॉल्ट)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>परफ़ॉर्मेंस — न्यूनतम विलंब, iGPU के लिए उपयुक्त</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ 180 FPS से ऊपर फ़्रेम इंटरपोलेशन अक्षम है</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT ट्रावर्सल (सिग्नलिंग रिले)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>रिले URL (उदा. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>रिले PSK (प्री-शेयर्ड कुंजी, न हो तो खाली छोड़ें)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>वैकल्पिक: जब दोनों पक्ष NAT के पीछे हों तब कनेक्ट होने में मदद करता है। पब्लिक IP वाले सर्वर पर viplestream-relay चलाएँ.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>रिले के माध्यम से स्ट्रीमिंग जबरन करें (UDP टनल परीक्षण हेतु)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>सामान्य कम्प्यूट D3D11/GLES कम्प्यूट शेडर का उपयोग करता है, लगभग 1-2 ms प्रति फ़्रेम विलंब। NVIDIA Optical Flow CUDA के माध्यम से समर्पित हार्डवेयर उपयोग करता है लेकिन API सिंक्रनाइज़ेशन के कारण ~12 ms जोड़ता है। अधिकांश मामलों के लिए सामान्य की सिफ़ारिश की जाती है।</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>गुणवत्ता: 8-पड़ोसी खोज + सब-पिक्सेल + अनुकूली मिश्रण (~12 ms iGPU पर)
+संतुलित: 8-पड़ोसी खोज + समय-सुगमता (~8 ms iGPU पर)
+प्रदर्शन: 4-पड़ोसी खोज + न्यूनतम प्रसंस्करण (~6 ms iGPU पर)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>होस्ट सीधे उपलब्ध हो तब भी हमेशा रिले के माध्यम से स्ट्रीम करें। रिले के UDP टनल को सत्यापित करने के लिए उपयोगी, जब VPN (जैसे Cloudflare WARP) वरना सीधा /launch चला देगा।</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

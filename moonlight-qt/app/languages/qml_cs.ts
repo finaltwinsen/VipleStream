@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Automaticky detekovat zablokovaná připojení (doporučeno)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Interpolace snímků (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Obecný výpočetní shader (nízká latence, doporučeno)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (vysoká kvalita, vyžaduje CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Kvalita — Nejlepší obraz, vyšší zátěž GPU</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Vyvážené — Doporučeno (výchozí)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Výkon — Nejnižší latence, vhodné pro iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ Interpolace snímků je nad 180 FPS vypnutá</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>Průchod NAT (signální relé)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>URL relé (např. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>Relay PSK (sdílený klíč, prázdné pokud žádný)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Volitelné: pomáhá navázat spojení, když jsou obě strany za NAT. Spusťte viplestream-relay na serveru s veřejnou IP.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Vynutit streamování přes relé (pro testování UDP tunelu)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Obecný výpočetní shader používá D3D11/GLES s latencí ~1-2 ms na snímek. NVIDIA Optical Flow využívá specializovaný hardware přes CUDA, ale přidává ~12 ms kvůli synchronizaci mezi API. Pro většinu případů se doporučuje obecný.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Kvalita: 8-sousední vyhledávání + sub-pixel + adaptivní směšování (~12 ms na iGPU)
+Vyvážené: 8-sousední vyhledávání + časové vyhlazení (~8 ms na iGPU)
+Výkon: 4-sousední vyhledávání + minimální zpracování (~6 ms na iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Streamovat přes relé i když je hostitel přímo dostupný. Užitečné pro ověření UDP tunelu relé, když VPN (např. Cloudflare WARP) jinak udržuje přímý /launch funkční.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

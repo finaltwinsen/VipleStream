@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Tự động phát hiện các kết nối bị chặn (Được khuyến nghị)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Nội suy khung hình (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Compute tổng quát (độ trễ thấp, khuyến nghị)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (chất lượng cao, cần CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Chất lượng — Chất lượng hình ảnh tốt nhất, tải GPU cao hơn</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Cân bằng — Khuyến nghị (mặc định)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Hiệu năng — Độ trễ thấp nhất, phù hợp với iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ Nội suy khung hình bị tắt khi vượt 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>Xuyên NAT (bộ chuyển tín hiệu)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>URL bộ chuyển tiếp (ví dụ: ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>PSK relay (khóa chia sẻ trước, để trống nếu không có)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Tuỳ chọn: giúp kết nối khi cả hai bên đều sau NAT. Chạy viplestream-relay trên máy chủ có IP công khai.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Ép truyền qua bộ chuyển tiếp (để kiểm tra đường hầm UDP)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Compute tổng quát dùng compute shader D3D11/GLES với độ trễ ~1-2 ms mỗi khung. NVIDIA Optical Flow dùng phần cứng chuyên dụng qua CUDA nhưng thêm ~12 ms do đồng bộ giữa các API. Khuyến nghị dùng Tổng quát cho hầu hết trường hợp.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Chất lượng: tìm 8 lân cận + sub-pixel + trộn thích ứng (~12 ms trên iGPU)
+Cân bằng: tìm 8 lân cận + làm mượt theo thời gian (~8 ms trên iGPU)
+Hiệu năng: tìm 4 lân cận + xử lý tối thiểu (~6 ms trên iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Luôn truyền qua bộ chuyển tiếp ngay cả khi máy chủ có thể truy cập trực tiếp. Hữu ích để kiểm tra đường hầm UDP của bộ chuyển tiếp khi VPN (ví dụ Cloudflare WARP) vẫn cho phép /launch trực tiếp hoạt động.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

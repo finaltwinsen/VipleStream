@@ -1192,6 +1192,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>دروستکردنی چوارچێوە (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>ژمێرکاری گشتی (دواکەوتنی کەم، پێشنیازکراو)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (کوالیتی بەرز، CUDA پێویستە)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>کوالیتی — باشترین کوالیتی بینراو، باری زۆرتر لەسەر GPU</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>ڕێکخراو — پێشنیازکراو (بنەڕەتی)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>کارایی — کەمترین دواکەوتن، گونجاو بۆ iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ دروستکردنی چوارچێوە لە سەرەوەی 180 FPS ناچالاکە</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>پەڕینەوەی NAT (ڕیلی ئامراز)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>URL ی ڕیلی (نموونە: ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>Relay PSK (کلیلی پێشبەشکراو، بەتاڵی بهێڵەوە گەر نەبوو)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>هەڵبژاردە: یارمەتی دەدات کاتێک هەردووک لا لە دواوەی NAT بن. viplestream-relay بەڕێوەبە لەسەر سێرڤەرێک بە IP گشتی.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>بە زۆرەملێ لە ڕێی ڕیلی (بۆ تاقیکردنەوەی تونێلی UDP)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>ژمێرکاری گشتی شەیدەری D3D11/GLES بەکاردەهێنێت بە ~1-2 ms دواکەوتنی چوارچێوە. NVIDIA Optical Flow کەرەستەی تایبەت لە ڕێی CUDA بەکاردەهێنێت بەڵام ~12 ms دواکەوتن زیاد دەکات. گشتی بۆ زۆربەی حاڵەتەکان پێشنیازکراوە.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>کوالیتی: گەڕانی 8-دراوسێ + ژێر-پیکسێڵ + تێکەڵکردنی گونجاو (~12 ms لەسەر iGPU)
+ڕێکخراو: گەڕانی 8-دراوسێ + هێواشکردنەوەی کاتیی (~8 ms لەسەر iGPU)
+کارایی: گەڕانی 4-دراوسێ + پرۆسێسی کەمترین (~6 ms لەسەر iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>هەمیشە لە ڕێی ڕیلی بیوەشێنە ئەگەر میوانخانەی ڕاستەوخۆ بەردەستیش بێت. سوودبەخشە بۆ پشکنینی تونێلی UDP کاتێک VPN (بۆ نموونە Cloudflare WARP) وا دەکات /launch ڕاستەوخۆ کاربکات.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

@@ -1192,6 +1192,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Kadrų interpoliacija (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Bendrasis skaičiavimas (maža delsa, rekomenduojama)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (aukšta kokybė, reikia CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Kokybė — Geriausia vaizdo kokybė, didesnė GPU apkrova</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Subalansuotas — Rekomenduojama (numatytoji)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Našumas — Mažiausia delsa, tinka iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ Kadrų interpoliacija išjungta virš 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT perėjimas (signalizacijos relė)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>Relės URL (pvz. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>Relės PSK (iš anksto dalintas raktas, palikite tuščią jei nėra)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Papildoma: padeda prisijungti, kai abi pusės yra už NAT. Paleiskite viplestream-relay serveryje su viešu IP.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Priverstinai transliuoti per relę (UDP tunelio testavimui)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Bendrasis skaičiavimas naudoja D3D11/GLES skaičiavimo šešėliavimus su ~1-2 ms delsa per kadrą. NVIDIA Optical Flow naudoja specializuotą aparatinę įrangą per CUDA, bet prideda ~12 ms dėl API sinchronizacijos. Daugumai atvejų rekomenduojama Bendrasis.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Kokybė: 8 kaimynų paieška + subpikselis + adaptyvus maišymas (~12 ms iGPU)
+Subalansuotas: 8 kaimynų paieška + laikinis išlyginimas (~8 ms iGPU)
+Našumas: 4 kaimynų paieška + minimalus apdorojimas (~6 ms iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Visada transliuoti per relę net kai pagrindinis kompiuteris pasiekiamas tiesiogiai. Naudinga relės UDP tunelio tikrinimui, kai VPN (pvz. Cloudflare WARP) kitu atveju paliktų tiesioginį /launch veikti.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Detectar automáticamente las conexiones bloqueadas (recomendado)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Interpolación de fotogramas (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Compute genérico (baja latencia, recomendado)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (alta calidad, requiere CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Calidad — Mejor calidad visual, mayor carga de GPU</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Equilibrado — Recomendado (predeterminado)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Rendimiento — Menor latencia, adecuado para iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ La interpolación se desactiva por encima de 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT Traversal (relé de señalización)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>URL del relé (p. ej. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>PSK del relé (clave precompartida, deje vacío si no hay)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Opcional: ayuda a conectar cuando ambos extremos están detrás de NAT. Ejecute viplestream-relay en un servidor con IP pública.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Forzar transmisión por el relé (para probar el túnel UDP)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Compute Genérico usa shaders D3D11/GLES con ~1-2 ms de latencia por fotograma. NVIDIA Optical Flow usa hardware dedicado vía CUDA pero añade ~12 ms por la sincronización entre APIs. Para la mayoría de casos se recomienda Genérico.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Calidad: búsqueda de 8 vecinos + sub-píxel + mezcla adaptativa (~12 ms en iGPU)
+Equilibrado: búsqueda de 8 vecinos + suavizado temporal (~8 ms en iGPU)
+Rendimiento: búsqueda de 4 vecinos + procesamiento mínimo (~6 ms en iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Siempre transmitir vía el relé incluso si el host es directamente accesible. Útil para verificar el túnel UDP cuando una VPN (p. ej. Cloudflare WARP) permitiría de otro modo el /launch directo.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

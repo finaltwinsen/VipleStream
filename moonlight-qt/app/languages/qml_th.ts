@@ -1196,6 +1196,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>การแทรกเฟรม (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>คำนวณทั่วไป (หน่วงต่ำ, แนะนำ)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (คุณภาพสูง, ต้องมี CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>คุณภาพ — คุณภาพภาพดีที่สุด, โหลด GPU สูงขึ้น</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>สมดุล — แนะนำ (ค่าเริ่มต้น)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>ประสิทธิภาพ — หน่วงต่ำที่สุด, เหมาะกับ iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ การแทรกเฟรมถูกปิดเมื่อเกิน 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT Traversal (รีเลย์สัญญาณ)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>URL รีเลย์ (เช่น ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>PSK รีเลย์ (คีย์ที่แบ่งปันล่วงหน้า, เว้นว่างถ้าไม่มี)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>ตัวเลือก: ช่วยเชื่อมต่อเมื่อทั้งสองฝั่งอยู่หลัง NAT รัน viplestream-relay บนเซิร์ฟเวอร์ที่มี IP สาธารณะ</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>บังคับสตรีมผ่านรีเลย์ (สำหรับทดสอบอุโมงค์ UDP)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>คำนวณทั่วไปใช้ D3D11/GLES compute shader มีหน่วง ~1-2 ms ต่อเฟรม NVIDIA Optical Flow ใช้ฮาร์ดแวร์เฉพาะผ่าน CUDA แต่เพิ่มหน่วง ~12 ms จากการซิงก์ระหว่าง API ส่วนใหญ่แนะนำให้ใช้ทั่วไป</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>คุณภาพ: ค้นหาเพื่อนบ้าน 8 ทิศ + ซับพิกเซล + การผสมปรับได้ (~12 ms บน iGPU)
+สมดุล: ค้นหาเพื่อนบ้าน 8 ทิศ + การปรับเรียบตามเวลา (~8 ms บน iGPU)
+ประสิทธิภาพ: ค้นหาเพื่อนบ้าน 4 ทิศ + ประมวลผลขั้นต่ำ (~6 ms บน iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>สตรีมผ่านรีเลย์เสมอแม้จะเข้าถึงโฮสต์โดยตรงได้ มีประโยชน์สำหรับตรวจสอบอุโมงค์ UDP ของรีเลย์เมื่อ VPN (เช่น Cloudflare WARP) จะทำให้ /launch ตรงทำงานได้ตามปกติ</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

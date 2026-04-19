@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Upptäcker automatiskt blockerade anslutningar (Rekommenderas)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Bildinterpolering (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Generisk Compute (låg latens, rekommenderas)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (hög kvalitet, kräver CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Kvalitet — Bästa bildkvalitet, högre GPU-belastning</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Balanserad — Rekommenderas (standard)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Prestanda — Lägsta latens, lämpligt för iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ Bildinterpolering är inaktiverad över 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT-traversering (signaleringsrelä)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>Relä-URL (t.ex. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>Relä-PSK (förhandsdelad nyckel, tomt om ingen)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Valfritt: hjälper till med anslutning när båda sidor är bakom NAT. Kör viplestream-relay på en server med publik IP.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Tvinga strömning via relä (för UDP-tunneltestning)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Generisk Compute använder D3D11/GLES compute-shaders med ~1-2 ms latens per bild. NVIDIA Optical Flow använder dedikerad hårdvara via CUDA men lägger till ~12 ms på grund av API-synkronisering. Generisk rekommenderas i de flesta fall.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Kvalitet: 8-granne-sökning + sub-pixel + adaptiv blandning (~12 ms på iGPU)
+Balanserad: 8-granne-sökning + tidsmässig utjämning (~8 ms på iGPU)
+Prestanda: 4-granne-sökning + minimal bearbetning (~6 ms på iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Strömma alltid via reläet även när värden är direkt tillgänglig. Användbart för att verifiera relä-UDP-tunneln när en VPN (t.ex. Cloudflare WARP) annars skulle låta direkt /launch fungera.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

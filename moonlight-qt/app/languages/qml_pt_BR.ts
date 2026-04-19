@@ -1192,6 +1192,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Interpolação de quadros (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Compute genérico (baixa latência, recomendado)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (alta qualidade, requer CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Qualidade — Melhor qualidade visual, maior carga de GPU</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Equilibrado — Recomendado (padrão)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Desempenho — Menor latência, adequado para iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ A interpolação é desativada acima de 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT Traversal (retransmissor de sinalização)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>URL do relay (ex.: ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>PSK do relay (chave pré-compartilhada, em branco se nenhuma)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Opcional: ajuda a conectar quando ambos os lados estão atrás de NAT. Execute viplestream-relay em um servidor com IP público.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Forçar transmissão via relay (teste do túnel UDP)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Compute Genérico utiliza shaders D3D11/GLES com ~1-2 ms de latência por frame. NVIDIA Optical Flow usa hardware dedicado via CUDA mas adiciona ~12 ms devido à sincronização entre APIs. Genérico é recomendado na maioria dos casos.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Qualidade: busca de 8 vizinhos + sub-pixel + mistura adaptativa (~12 ms em iGPU)
+Equilibrado: busca de 8 vizinhos + suavização temporal (~8 ms em iGPU)
+Desempenho: busca de 4 vizinhos + processamento mínimo (~6 ms em iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Sempre transmitir via relay mesmo quando o host é diretamente acessível. Útil para verificar o túnel UDP do relay quando uma VPN (ex.: Cloudflare WARP) manteria caso contrário o /launch direto funcionando.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

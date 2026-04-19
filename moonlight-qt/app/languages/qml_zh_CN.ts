@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>自动检测被阻止的连接 (推荐)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>补帧 (FRUC 2 倍)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>通用计算着色器 (低延迟,推荐)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (高质量,需要 CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>品质 — 最佳画质,GPU 负载较高</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>均衡 — 推荐 (默认)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>性能 — 最低延迟,适合集显</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ 180 FPS 以上时补帧自动停用</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT 穿透 (信令中继)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>中继 URL (例如 ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>中继 PSK (预共享密钥,没有则留空)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>可选:两端都在 NAT 后方时有助于建立连线。请在具有公网 IP 的服务器上执行 viplestream-relay。</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>强制通过中继串流 (用于测试 UDP 隧道)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>通用计算使用 D3D11/GLES 计算着色器,每帧约 1-2 ms 延迟。NVIDIA Optical Flow 经由 CUDA 调用专用硬件,但因 API 间同步增加约 12 ms 延迟。大多数情况下建议使用通用计算。</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>品质: 8 邻域搜索 + 子像素 + 自适应混合 (集显约 12 ms)
+均衡: 8 邻域搜索 + 时域平滑 (集显约 8 ms)
+性能: 4 邻域搜索 + 最少处理 (集显约 6 ms)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>即使主机可直接连线,也总是透过中继串流。当 VPN(例如 Cloudflare WARP)仍让 /launch 直连时,适合用来验证中继的 UDP 隧道。</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

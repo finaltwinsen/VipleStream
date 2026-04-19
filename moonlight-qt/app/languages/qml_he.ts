@@ -1192,6 +1192,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>אינטרפולציה של פריימים (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>מחשוב גנרי (השהיה נמוכה, מומלץ)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (איכות גבוהה, דרוש CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>איכות — האיכות הויזואלית הטובה ביותר, עומס GPU גבוה</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>מאוזן — מומלץ (ברירת מחדל)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>ביצועים — השהיה הנמוכה ביותר, מתאים ל-iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ אינטרפולציה מושבתת מעל 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>חצית NAT (ממסר איתות)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>כתובת ממסר (לדוגמה ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>PSK של הממסר (מפתח מוגדר מראש, ריק אם אין)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>אופציונלי: עוזר להתחבר כששני הצדדים מאחורי NAT. הפעל את viplestream-relay על שרת עם IP ציבורי.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>כפה הזרמה דרך ממסר (לבדיקת מנהרת UDP)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>מחשוב גנרי משתמש ב-shader-ים של D3D11/GLES עם השהיה של ~1-2 מ"ש לפריים. NVIDIA Optical Flow משתמש בחומרה ייעודית דרך CUDA אך מוסיף ~12 מ"ש בגלל סנכרון בין API-ים. עבור רוב המקרים מומלץ גנרי.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>איכות: חיפוש 8 שכנים + תת-פיקסל + מיזוג אדפטיבי (~12 מ"ש ב-iGPU)
+מאוזן: חיפוש 8 שכנים + החלקה זמנית (~8 מ"ש ב-iGPU)
+ביצועים: חיפוש 4 שכנים + עיבוד מינימלי (~6 מ"ש ב-iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>תמיד הזרם דרך הממסר גם כשהמארח זמין ישירות. שימושי לאימות מנהרת UDP של הממסר כש-VPN (כגון Cloudflare WARP) היה אחרת משאיר /launch ישיר תקין.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

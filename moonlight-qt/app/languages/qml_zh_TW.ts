@@ -1223,22 +1223,66 @@
     <message>
         <location filename="../gui/SettingsView.qml" line="694"/>
         <source>Generic Compute (low latency, recommended)</source>
-        <translation>通用運算着色器 (低延遲，建議)</translation>
+        <translation>通用運算著色器 (低延遲,建議)</translation>
     </message>
     <message>
         <location filename="../gui/SettingsView.qml" line="695"/>
         <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
-        <translation>NVIDIA 光流引擎 (高品質，需要 CUDA)</translation>
+        <translation>NVIDIA Optical Flow (高品質,需要 CUDA)</translation>
     </message>
     <message>
         <location filename="../gui/SettingsView.qml" line="705"/>
         <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
-        <translation>通用運算使用 D3D11/GLES 計算着色器，每幀延遲約 1-2ms。NVIDIA 光流引擎透過 CUDA 使用專用硬體，但跨 API 同步會增加約 12ms 延遲。大多數情況下建議使用通用運算。</translation>
+        <translation>通用運算使用 D3D11/GLES 計算著色器,每幀約 1-2 ms 延遲。NVIDIA Optical Flow 透過 CUDA 使用專用硬體,但因 API 間同步增加約 12 ms 延遲。大多數情況建議使用通用運算。</translation>
     </message>
     <message>
         <location filename="../gui/SettingsView.qml" line="711"/>
         <source>⚠ Frame interpolation is disabled above 180 FPS</source>
         <translation>⚠ 補幀功能在 180 FPS 以上時停用</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>品質 — 最佳畫質,GPU 負載較高</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>平衡 — 建議 (預設)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>效能 — 最低延遲,適合內顯</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT 穿透 (訊令中繼)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>中繼 URL (例如 ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>中繼 PSK (預共用金鑰,沒有則留空)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>選用:兩端都在 NAT 後方時有助於建立連線。請在具有公網 IP 的伺服器上執行 viplestream-relay。</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>強制透過中繼串流 (用於測試 UDP 通道)</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>品質: 8 鄰域搜尋 + 子像素 + 適應性混合 (內顯約 12 ms)
+平衡: 8 鄰域搜尋 + 時域平滑 (內顯約 8 ms)
+效能: 4 鄰域搜尋 + 最少處理 (內顯約 6 ms)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>即使主機可直接連線,也總是透過中繼串流。當 VPN(例如 Cloudflare WARP)仍讓 /launch 直連時,適合用來驗證中繼的 UDP 通道。</translation>
     </message>
 </context>
 <context>

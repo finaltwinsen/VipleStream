@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Automatycznie wykrywaj zablokowane połączenia (zalecane)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Interpolacja klatek (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Ogólny Compute (niskie opóźnienie, zalecane)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (wysoka jakość, wymaga CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Jakość — Najlepsza jakość obrazu, większe obciążenie GPU</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Zbalansowany — Zalecany (domyślny)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Wydajność — Najniższe opóźnienie, odpowiednie dla iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ Interpolacja klatek jest wyłączona powyżej 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>Przechodzenie NAT (przekaźnik sygnalizacji)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>Adres URL przekaźnika (np. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>PSK przekaźnika (klucz współdzielony, pozostaw puste jeśli brak)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Opcjonalne: pomaga w połączeniu, gdy obie strony są za NAT. Uruchom viplestream-relay na serwerze z publicznym IP.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Wymuś strumień przez przekaźnik (test tunelu UDP)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Ogólny Compute używa shaderów obliczeniowych D3D11/GLES z opóźnieniem ~1-2 ms na klatkę. NVIDIA Optical Flow wykorzystuje dedykowany sprzęt przez CUDA, ale dodaje ~12 ms z powodu synchronizacji między API. W większości przypadków zalecany jest Ogólny.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Jakość: przeszukiwanie 8 sąsiadów + sub-piksel + mieszanie adaptacyjne (~12 ms na iGPU)
+Zbalansowany: przeszukiwanie 8 sąsiadów + wygładzanie czasowe (~8 ms na iGPU)
+Wydajność: przeszukiwanie 4 sąsiadów + minimalne przetwarzanie (~6 ms na iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Zawsze strumieniuj przez przekaźnik, nawet gdy host jest bezpośrednio dostępny. Przydatne do weryfikacji tunelu UDP przekaźnika, gdy VPN (np. Cloudflare WARP) w przeciwnym razie pozwoliłby na bezpośredni /launch.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

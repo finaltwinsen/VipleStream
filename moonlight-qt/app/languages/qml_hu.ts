@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Automatikusan észleli a blokkolt kapcsolatokat (Ajánlott)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Képkocka-interpoláció (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Általános compute (alacsony késleltetés, ajánlott)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (nagy minőség, CUDA szükséges)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Minőség — Legjobb képminőség, nagyobb GPU-terhelés</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Kiegyensúlyozott — Ajánlott (alapértelmezett)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Teljesítmény — Legalacsonyabb késleltetés, iGPU-hoz ajánlott</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ A képkocka-interpoláció 180 FPS felett le van tiltva</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT áthaladás (Jelzésközvetítő)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>Relay URL (pl. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>Relay PSK (előre megosztott kulcs, hagyja üresen ha nincs)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Opcionális: segít a csatlakozásban, ha mindkét fél NAT mögött van. Futtassa a viplestream-relay-t egy nyilvános IP-vel rendelkező szerveren.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Stream kényszerítése relén keresztül (UDP-alagút teszteléshez)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Az általános compute D3D11/GLES compute shadereket használ ~1-2 ms képkocka-késleltetéssel. Az NVIDIA Optical Flow CUDA-n keresztül dedikált hardvert használ, de ~12 ms-ot ad hozzá az API-szinkronizáció miatt. Legtöbb esetben az általános ajánlott.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Minőség: 8 szomszédos keresés + szubpixel + adaptív keverés (~12 ms iGPU-n)
+Kiegyensúlyozott: 8 szomszédos keresés + időbeli simítás (~8 ms iGPU-n)
+Teljesítmény: 4 szomszédos keresés + minimális feldolgozás (~6 ms iGPU-n)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Mindig a relén keresztül streamelj, akkor is, ha a gazdagép közvetlenül elérhető. Hasznos a relay UDP-alagút ellenőrzéséhez, ha egy VPN (pl. Cloudflare WARP) egyébként működőképesen hagyná a közvetlen /launch-ot.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

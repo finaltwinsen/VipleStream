@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Interpolado de kadroj (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Ĝenerala Komputado (malalta latenco, rekomendita)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (alta kvalito, CUDA bezonata)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Kvalito — Plej bona bildo, pli alta ŝarĝo de GPU</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Ekvilibra — Rekomendita (defaŭlta)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Rendimento — Plej malalta latenco, taŭga por iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ Kadra interpolado malŝaltiĝas super 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT-trapasigo (Signalada relajso)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>URL de relajso (ekz. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>Relajsa PSK (antaŭ-dividita ŝlosilo, lasu malplena se neniu)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Laŭvola: helpas konektiĝi kiam ambaŭ flankoj estas malantaŭ NAT. Rulu viplestream-relay sur servilo kun publika IP.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Devigi fluadon per relajso (por testi UDP-tunelon)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Ĝenerala Komputado uzas D3D11/GLES komput-ŝatelojn kun ~1-2 ms latenco po kadro. NVIDIA Optical Flow uzas dediĉitan aparataron per CUDA sed aldonas ~12 ms pro inter-API sinkronigado. Ĝenerala estas rekomendata por plej multaj okazoj.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Kvalito: 8-najbara serĉo + sub-pikselo + adapta miksado (~12 ms sur iGPU)
+Ekvilibra: 8-najbara serĉo + tempa glatigado (~8 ms sur iGPU)
+Rendimento: 4-najbara serĉo + minimuma traktado (~6 ms sur iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Ĉiam fluigi tra la relajso eĉ kiam la gastiganto estas rekte atingebla. Utila por kontroli la UDP-tunelon de la relajso kiam VPN (ekz. Cloudflare WARP) alie konservus rektan /launch funkcia.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

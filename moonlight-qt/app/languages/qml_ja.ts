@@ -1200,6 +1200,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>ブロックされた接続を自動的に検出 (推奨)</translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>フレーム補間 (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>汎用コンピュート (低遅延、推奨)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (高品質、CUDA 必須)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>品質 — 最高の画質、GPU 負荷が高い</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>バランス — 推奨 (デフォルト)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>パフォーマンス — 最低遅延、iGPU に適合</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ 180 FPS を超えるとフレーム補間は無効になります</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT 越え (シグナリングリレー)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>中継サーバー URL (例: ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>中継 PSK (事前共有鍵、なければ空欄)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>任意:両側が NAT の背後にある場合の接続を補助します。パブリック IP のサーバーで viplestream-relay を起動してください。</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>中継経由の配信を強制 (UDP トンネル検証用)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>汎用コンピュートは D3D11/GLES コンピュートシェーダーを使用しフレームあたり ~1-2 ms の遅延です。NVIDIA Optical Flow は CUDA 経由で専用ハードウェアを使いますが、API 間の同期で ~12 ms が追加されます。通常は汎用を推奨します。</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>品質: 8 近傍探索 + サブピクセル + 適応的ブレンド (iGPU で ~12 ms)
+バランス: 8 近傍探索 + 時間的スムージング (iGPU で ~8 ms)
+パフォーマンス: 4 近傍探索 + 最小限の処理 (iGPU で ~6 ms)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>ホストに直接到達可能な場合でも必ず中継経由でストリーミングします。VPN (例: Cloudflare WARP) が有効で /launch が直接通ってしまう環境での UDP トンネル検証に便利です。</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

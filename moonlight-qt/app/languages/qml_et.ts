@@ -1192,6 +1192,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Kaadri interpolatsioon (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Üldine arvutuslik (madal latentsus, soovitatud)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (kõrge kvaliteet, vajab CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Kvaliteet — Parim pilt, suurem GPU koormus</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Tasakaalustatud — Soovitatud (vaikimisi)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Jõudlus — Madalaim latentsus, sobib iGPU-le</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ Kaadri interpolatsioon on üle 180 FPS välja lülitatud</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>NAT-läbimine (signaali relee)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>Relee URL (nt ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>Relee PSK (jagatud võti, tühi kui puudub)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Valikuline: aitab ühendust luua, kui mõlemad pooled on NAT-i taga. Käivitage viplestream-relay avaliku IP-ga serveris.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Sunni voogesitus relee kaudu (UDP tunneli testimiseks)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Üldine arvutuslik kasutab D3D11/GLES arvutuslikke varjutajaid latentsusega ~1-2 ms kaadri kohta. NVIDIA Optical Flow kasutab CUDA kaudu pühendatud riistvara, kuid lisab API-de sünkroonimise tõttu ~12 ms. Enamikul juhtudel on soovitatud Üldine.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Kvaliteet: 8-naabri otsing + alampiksel + adaptiivne segamine (~12 ms iGPU-l)
+Tasakaalustatud: 8-naabri otsing + ajaline silumine (~8 ms iGPU-l)
+Jõudlus: 4-naabri otsing + minimaalne töötlus (~6 ms iGPU-l)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Alati voogesitada relee kaudu, isegi kui host on otse ligipääsetav. Kasulik relee UDP tunneli kontrollimiseks, kui VPN (nt Cloudflare WARP) muidu hoiaks otse /launch töötamas.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

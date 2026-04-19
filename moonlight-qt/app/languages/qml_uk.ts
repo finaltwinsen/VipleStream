@@ -1196,6 +1196,70 @@
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Frame interpolation (FRUC 2x)</source>
+        <translation>Інтерполяція кадрів (FRUC 2×)</translation>
+    </message>
+    <message>
+        <source>Generic Compute (low latency, recommended)</source>
+        <translation>Універсальний Compute (низька затримка, рекомендовано)</translation>
+    </message>
+    <message>
+        <source>NVIDIA Optical Flow (high quality, CUDA required)</source>
+        <translation>NVIDIA Optical Flow (висока якість, потрібен CUDA)</translation>
+    </message>
+    <message>
+        <source>Quality — Best visual quality, higher GPU load</source>
+        <translation>Якість — Найкраща якість зображення, більше навантаження на GPU</translation>
+    </message>
+    <message>
+        <source>Balanced — Recommended (default)</source>
+        <translation>Збалансований — Рекомендовано (за замовчуванням)</translation>
+    </message>
+    <message>
+        <source>Performance — Lowest latency, suitable for iGPU</source>
+        <translation>Продуктивність — Найнижча затримка, підходить для iGPU</translation>
+    </message>
+    <message>
+        <source>⚠ Frame interpolation is disabled above 180 FPS</source>
+        <translation>⚠ Інтерполяцію кадрів вимкнено понад 180 FPS</translation>
+    </message>
+    <message>
+        <source>NAT Traversal (Signaling Relay)</source>
+        <translation>Обхід NAT (сигнальний ретранслятор)</translation>
+    </message>
+    <message>
+        <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
+        <translation>URL ретранслятора (напр. ws://relay.example.com:9999)</translation>
+    </message>
+    <message>
+        <source>Relay PSK (pre-shared key, leave empty if none)</source>
+        <translation>PSK ретранслятора (спільний ключ, залиште порожнім якщо немає)</translation>
+    </message>
+    <message>
+        <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
+        <translation>Додатково: допомагає з'єднатися, коли обидві сторони за NAT. Запустіть viplestream-relay на сервері з публічним IP.</translation>
+    </message>
+    <message>
+        <source>Force streaming via relay (for testing UDP tunnel)</source>
+        <translation>Примусово через ретранслятор (тест UDP-тунелю)</translation>
+    </message>
+    <message>
+        <source>Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.</source>
+        <translation>Універсальний Compute використовує шейдери D3D11/GLES із затримкою ~1-2 мс на кадр. NVIDIA Optical Flow використовує спеціалізоване обладнання через CUDA, але додає ~12 мс через синхронізацію між API. У більшості випадків рекомендовано Універсальний.</translation>
+    </message>
+    <message>
+        <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
+Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
+Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
+        <translation>Якість: пошук по 8 сусідах + субпіксель + адаптивне змішування (~12 мс на iGPU)
+Збалансований: пошук по 8 сусідах + часове згладжування (~8 мс на iGPU)
+Продуктивність: пошук по 4 сусідах + мінімальна обробка (~6 мс на iGPU)</translation>
+    </message>
+    <message>
+        <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
+        <translation>Завжди транслювати через ретранслятор, навіть коли хост доступний напряму. Корисно для перевірки UDP-тунелю, коли VPN (напр. Cloudflare WARP) інакше дозволив би пряме /launch.</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>
