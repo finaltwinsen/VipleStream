@@ -48,6 +48,12 @@ public class FrucRenderer {
     private int prevFrameTex, currFrameTex;
     private int motionFieldTex;
     private int prevMotionFieldTex;  // VipleStream v17: temporal smoothing
+    // VipleStream v1.1.136: median-filtered MV field. Warp reads
+    // this one, not the raw motionFieldTex. Median CS runs between
+    // motion estimation and warp to kill 1-block outliers that
+    // would otherwise bleed into static neighbours via warp's
+    // bilinear MV sampling.
+    private int filteredMotionFieldTex;
     private int interpFrameTex;
 
     // Shaders
@@ -56,6 +62,7 @@ public class FrucRenderer {
     private int[] warpPrograms = new int[3];
     private int motionEstProgram;  // alias for active quality
     private int warpProgram;       // alias for active quality
+    private int mvMedianProgram;   // v1.1.136: 3x3 median on the MV field
     private int blitProgram;
 
     // FBO for OES→RGBA conversion
@@ -227,6 +234,17 @@ public class FrucRenderer {
             GLES31.glTexParameteri(GLES31.GL_TEXTURE_2D, GLES31.GL_TEXTURE_MAG_FILTER, GLES31.GL_NEAREST);
         }
 
+        // VipleStream v1.1.136: median-filtered MV field (warp reads this).
+        {
+            int[] tex3 = new int[1];
+            GLES31.glGenTextures(1, tex3, 0);
+            filteredMotionFieldTex = tex3[0];
+            GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, filteredMotionFieldTex);
+            GLES31.glTexStorage2D(GLES31.GL_TEXTURE_2D, 1, GLES31.GL_R32I, mvW, mvH);
+            GLES31.glTexParameteri(GLES31.GL_TEXTURE_2D, GLES31.GL_TEXTURE_MIN_FILTER, GLES31.GL_NEAREST);
+            GLES31.glTexParameteri(GLES31.GL_TEXTURE_2D, GLES31.GL_TEXTURE_MAG_FILTER, GLES31.GL_NEAREST);
+        }
+
         // Interpolated output
         interpFrameTex = createRgbaTexture(width, height);
 
@@ -265,6 +283,11 @@ public class FrucRenderer {
         motionEstProgram = motionEstPrograms[qualityLevel];
         warpProgram = warpPrograms[qualityLevel];
         Log.i(TAG, "Active quality: " + qualityNames[qualityLevel]);
+
+        // VipleStream v1.1.136: single-variant MV-field median filter
+        // (deterministic, no quality tiers).
+        mvMedianProgram = loadComputeProgram("shaders/mv_median.glsl");
+        Log.i(TAG, "Shader mv_median compiled OK");
     }
 
     private void initQuad() {
@@ -364,6 +387,15 @@ public class FrucRenderer {
             logToFile("frame=" + frameCount + " GL error after motionEst: 0x" + Integer.toHexString(glErr));
         }
 
+        // VipleStream v1.1.136: 3x3 median filter on the MV field
+        // before warp consumes it.
+        runMvMedian();
+
+        glErr = GLES31.glGetError();
+        if (glErr != GLES31.GL_NO_ERROR && frameCount <= 10) {
+            logToFile("frame=" + frameCount + " GL error after mvMedian: 0x" + Integer.toHexString(glErr));
+        }
+
         // Warp + blend → interpFrameTex (v17: adaptive blend)
         runWarp();
 
@@ -454,6 +486,30 @@ public class FrucRenderer {
         GLES31.glMemoryBarrier(GLES31.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
     }
 
+    // VipleStream v1.1.136: 3x3 median filter on the MV field.
+    // Reads motionFieldTex (raw ME output), writes
+    // filteredMotionFieldTex which warp then consumes. Edge-
+    // preserving, kills 1-block outliers that would otherwise
+    // bleed through warp's bilinear MV sampling into static
+    // neighbours and cause shimmer.
+    private void runMvMedian() {
+        GLES31.glUseProgram(mvMedianProgram);
+
+        GLES31.glActiveTexture(GLES31.GL_TEXTURE0);
+        GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, motionFieldTex);
+        GLES31.glUniform1i(GLES31.glGetUniformLocation(mvMedianProgram, "mvIn"), 0);
+
+        GLES31.glBindImageTexture(0, filteredMotionFieldTex, 0, false, 0, GLES31.GL_WRITE_ONLY, GLES31.GL_R32I);
+
+        int mvW = width / BLOCK_SIZE;
+        int mvH = height / BLOCK_SIZE;
+        GLES31.glUniform1ui(GLES31.glGetUniformLocation(mvMedianProgram, "mvWidth"), mvW);
+        GLES31.glUniform1ui(GLES31.glGetUniformLocation(mvMedianProgram, "mvHeight"), mvH);
+
+        GLES31.glDispatchCompute((mvW + 7) / 8, (mvH + 7) / 8, 1);
+        GLES31.glMemoryBarrier(GLES31.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+
     private void runWarp() {
         GLES31.glUseProgram(warpProgram);
 
@@ -465,8 +521,9 @@ public class FrucRenderer {
         GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, currFrameTex);
         GLES31.glUniform1i(GLES31.glGetUniformLocation(warpProgram, "currFrame"), 1);
 
+        // Warp reads the *filtered* MV field — v1.1.136 port.
         GLES31.glActiveTexture(GLES31.GL_TEXTURE2);
-        GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, motionFieldTex);
+        GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, filteredMotionFieldTex);
         GLES31.glUniform1i(GLES31.glGetUniformLocation(warpProgram, "motionField"), 2);
 
         GLES31.glBindImageTexture(0, interpFrameTex, 0, false, 0, GLES31.GL_WRITE_ONLY, GLES31.GL_RGBA8);

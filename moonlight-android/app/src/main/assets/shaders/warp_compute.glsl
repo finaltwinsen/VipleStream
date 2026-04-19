@@ -28,6 +28,17 @@ uniform uint frameHeight;
 uniform uint mvBlockSize;
 uniform float blendFactor;
 
+// Threshold (pixels): if the largest MV delta among the 4 neighbor
+// blocks exceeds this, we consider the pixel to be on a motion
+// boundary and fall back to nearest-neighbor sampling instead of
+// bilinear. Mirrors the desktop v1.1.135 change.
+#define EDGE_AWARE_MV_THRESHOLD 4.0
+
+// Edge-aware bilinear MV interpolation (Q1 -> pixel units).
+// At motion boundaries (fast object next to static bg) a blind
+// bilinear blend of the 4 neighbor-block MVs drags static pixels
+// along the partial motion -> visible shimmer. When the MVs
+// disagree strongly enough, sample the *nearest* block's MV.
 vec2 sampleMV(vec2 pixelPos) {
     float blockSizeF = float(mvBlockSize);
     vec2 mvPos = pixelPos / blockSizeF - 0.5;
@@ -53,6 +64,22 @@ vec2 sampleMV(vec2 pixelPos) {
     vec2 v10 = vec2(float(p10 >> 16), float((p10 << 16) >> 16)) * 0.5;
     vec2 v01 = vec2(float(p01 >> 16), float((p01 << 16) >> 16)) * 0.5;
     vec2 v11 = vec2(float(p11 >> 16), float((p11 << 16) >> 16)) * 0.5;
+
+    // Max pairwise MV delta (squared distances — avoids sqrt).
+    vec2 d01 = v00 - v10;
+    vec2 d02 = v00 - v01;
+    vec2 d13 = v10 - v11;
+    vec2 d23 = v01 - v11;
+    float maxDiffSq = max(max(dot(d01, d01), dot(d02, d02)),
+                          max(dot(d13, d13), dot(d23, d23)));
+
+    if (maxDiffSq > EDGE_AWARE_MV_THRESHOLD * EDGE_AWARE_MV_THRESHOLD) {
+        // Nearest-neighbor within the 2x2 cell.
+        vec2 pick = (frac_val.x < 0.5)
+            ? ((frac_val.y < 0.5) ? v00 : v01)
+            : ((frac_val.y < 0.5) ? v10 : v11);
+        return pick;
+    }
 
     vec2 top = mix(v00, v10, frac_val.x);
     vec2 bot = mix(v01, v11, frac_val.x);
