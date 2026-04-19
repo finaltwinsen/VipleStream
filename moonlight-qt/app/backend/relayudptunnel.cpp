@@ -411,19 +411,41 @@ void RelayUdpTunnel::run() {
     uint8_t rxbuf[2048];
     uint8_t txbuf[2048];
 
+    int kDeliverCount = 0;
     auto deliver_to_proxy = [&](uint16_t srcPort,
                                 const uint8_t *payload, size_t payloadLen) {
         for (const auto &ps : proxies) {
             if (ps.serverPort != srcPort) continue;
-            if (ps.clientPort == 0) return;   // not learned yet
+            if (ps.clientPort == 0) {
+                if (kDeliverCount < 5) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-UDPTUN] drop inbound srcPort=%u len=%zu "
+                                "(no clientPort learned for that stream yet)",
+                                srcPort, payloadLen);
+                }
+                kDeliverCount++;
+                return;
+            }
             sockaddr_in dst = {};
             dst.sin_family = AF_INET;
             dst.sin_port = htons(ps.clientPort);
             inet_pton(AF_INET, "127.0.0.2", &dst.sin_addr);
-            sendto(ps.fd, (const char *)payload, (int)payloadLen, 0,
-                   (sockaddr *)&dst, sizeof(dst));
+            int sent = sendto(ps.fd, (const char *)payload, (int)payloadLen, 0,
+                              (sockaddr *)&dst, sizeof(dst));
+            if (kDeliverCount++ < 5) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-UDPTUN] deliver #%d srv=%u -> 127.0.0.2:%u len=%zu sent=%d",
+                            kDeliverCount, srcPort, ps.clientPort, payloadLen, sent);
+            }
             return;
         }
+        if (kDeliverCount < 5) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-UDPTUN] drop inbound srcPort=%u len=%zu "
+                        "(no proxy for that server port)",
+                        srcPort, payloadLen);
+        }
+        kDeliverCount++;
     };
 
     // One helper for the send side — picks the active carrier.
