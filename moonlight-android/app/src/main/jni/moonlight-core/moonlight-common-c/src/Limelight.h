@@ -69,7 +69,7 @@ typedef struct _STREAM_CONFIGURATION {
     // Specifies the channel configuration of the audio stream.
     // See AUDIO_CONFIGURATION constants and MAKE_AUDIO_CONFIGURATION() below.
     int audioConfiguration;
-    
+
     // Specifies the mask of supported video formats.
     // See VIDEO_FORMAT constants below.
     int supportedVideoFormats;
@@ -154,21 +154,25 @@ typedef struct _DECODE_UNIT {
     // (happens when the frame is repeated).
     uint16_t frameHostProcessingLatency;
 
-    // Receive time of first buffer. This value uses an implementation-defined epoch,
-    // but the same epoch as enqueueTimeMs and LiGetMillis().
-    uint64_t receiveTimeMs;
+    // Receive time of first buffer in microseconds.
+    uint64_t receiveTimeUs;
 
     // Time the frame was fully assembled and queued for the video decoder to process.
     // This is also approximately the same time as the final packet was received, so
-    // enqueueTimeMs - receiveTimeMs is the time taken to receive the frame. At the
+    // enqueueTimeUs - receiveTimeUs is the time taken to receive the frame. At the
     // time the decode unit is passed to submitDecodeUnit(), the total queue delay
-    // can be calculated by LiGetMillis() - enqueueTimeMs.
-    uint64_t enqueueTimeMs;
+    // can be calculated. This value is in microseconds.
+    uint64_t enqueueTimeUs;
 
-    // Presentation time in milliseconds with the epoch at the first captured frame.
+    // Presentation time in microseconds with the epoch at the first captured frame.
     // This can be used to aid frame pacing or to drop old frames that were queued too
     // long prior to display.
-    unsigned int presentationTimeMs;
+    uint64_t presentationTimeUs;
+
+    // Original RTP timestamp in 90kHz units. Useful when using APIs that deal with integer
+    // time such as Apple's CMTime. To exactly recover the RTP timestamp, use something like
+    // CMTimeMake((int64_t)du->rtpTimestamp, 90000);
+    uint32_t rtpTimestamp;
 
     // Length of the entire buffer chain in bytes
     int fullLength;
@@ -218,17 +222,23 @@ typedef struct _DECODE_UNIT {
 
 // Passed in StreamConfiguration.supportedVideoFormats to specify supported codecs
 // and to DecoderRendererSetup() to specify selected codec.
-#define VIDEO_FORMAT_H264        0x0001 // H.264 High Profile
-#define VIDEO_FORMAT_H265        0x0100 // HEVC Main Profile
-#define VIDEO_FORMAT_H265_MAIN10 0x0200 // HEVC Main10 Profile
-#define VIDEO_FORMAT_AV1_MAIN8   0x1000 // AV1 Main 8-bit profile
-#define VIDEO_FORMAT_AV1_MAIN10  0x2000 // AV1 Main 10-bit profile
+#define VIDEO_FORMAT_H264            0x0001 // H.264 High Profile
+#define VIDEO_FORMAT_H264_HIGH8_444  0x0004 // H.264 High 4:4:4 8-bit Profile
+#define VIDEO_FORMAT_H265            0x0100 // HEVC Main Profile
+#define VIDEO_FORMAT_H265_MAIN10     0x0200 // HEVC Main10 Profile
+#define VIDEO_FORMAT_H265_REXT8_444  0x0400 // HEVC RExt 4:4:4 8-bit Profile
+#define VIDEO_FORMAT_H265_REXT10_444 0x0800 // HEVC RExt 4:4:4 10-bit Profile
+#define VIDEO_FORMAT_AV1_MAIN8       0x1000 // AV1 Main 8-bit profile
+#define VIDEO_FORMAT_AV1_MAIN10      0x2000 // AV1 Main 10-bit profile
+#define VIDEO_FORMAT_AV1_HIGH8_444   0x4000 // AV1 High 4:4:4 8-bit profile
+#define VIDEO_FORMAT_AV1_HIGH10_444  0x8000 // AV1 High 4:4:4 10-bit profile
 
 // Masks for clients to use to match video codecs without profile-specific details.
-#define VIDEO_FORMAT_MASK_H264  0x000F
-#define VIDEO_FORMAT_MASK_H265  0x0F00
-#define VIDEO_FORMAT_MASK_AV1   0xF000
-#define VIDEO_FORMAT_MASK_10BIT 0x2200
+#define VIDEO_FORMAT_MASK_H264   0x000F
+#define VIDEO_FORMAT_MASK_H265   0x0F00
+#define VIDEO_FORMAT_MASK_AV1    0xF000
+#define VIDEO_FORMAT_MASK_10BIT  0xAA00
+#define VIDEO_FORMAT_MASK_YUV444 0xCC04
 
 // If set in the renderer capabilities field, this flag will cause audio/video data to
 // be submitted directly from the receive thread. This should only be specified if the
@@ -463,6 +473,13 @@ typedef void(*ConnListenerRumbleTriggers)(uint16_t controllerNumber, uint16_t le
 // If reportRateHz is 0, the host is asking for motion event reporting to stop.
 typedef void(*ConnListenerSetMotionEventState)(uint16_t controllerNumber, uint8_t motionType, uint16_t reportRateHz);
 
+// This callback is invoked to notify the client of a change in the dualsense
+// adaptive trigger configuration.
+#define DS_EFFECT_PAYLOAD_SIZE 10
+#define DS_EFFECT_RIGHT_TRIGGER 0x04
+#define DS_EFFECT_LEFT_TRIGGER 0x08
+typedef void(*ConnListenerSetAdaptiveTriggers)(uint16_t controllerNumber, uint8_t eventFlags, uint8_t typeLeft, uint8_t typeRight, uint8_t *left, uint8_t *right);
+
 // This callback is invoked to set a controller's RGB LED (if present).
 typedef void(*ConnListenerSetControllerLED)(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b);
 
@@ -479,31 +496,38 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerRumbleTriggers rumbleTriggers;
     ConnListenerSetMotionEventState setMotionEventState;
     ConnListenerSetControllerLED setControllerLED;
+    ConnListenerSetAdaptiveTriggers setAdaptiveTriggers;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
 void LiInitializeConnectionCallbacks(PCONNECTION_LISTENER_CALLBACKS clCallbacks);
 
 // ServerCodecModeSupport values
-#define SCM_H264        0x00001
-#define SCM_HEVC        0x00100
-#define SCM_HEVC_MAIN10 0x00200
-#define SCM_AV1_MAIN8   0x10000 // Sunshine extension
-#define SCM_AV1_MAIN10  0x20000 // Sunshine extension
+#define SCM_H264            0x00000001
+#define SCM_HEVC            0x00000100
+#define SCM_HEVC_MAIN10     0x00000200
+#define SCM_AV1_MAIN8       0x00010000 // Sunshine extension
+#define SCM_AV1_MAIN10      0x00020000 // Sunshine extension
+#define SCM_H264_HIGH8_444  0x00040000 // Sunshine extension
+#define SCM_HEVC_REXT8_444  0x00080000 // Sunshine extension
+#define SCM_HEVC_REXT10_444 0x00100000 // Sunshine extension
+#define SCM_AV1_HIGH8_444   0x00200000 // Sunshine extension
+#define SCM_AV1_HIGH10_444  0x00400000 // Sunshine extension
 
 // SCM masks to identify various codec capabilities
-#define SCM_MASK_H264   SCM_H264
-#define SCM_MASK_HEVC   (SCM_HEVC | SCM_HEVC_MAIN10)
-#define SCM_MASK_AV1    (SCM_AV1_MAIN8 | SCM_AV1_MAIN10)
-#define SCM_MASK_10BIT  (SCM_HEVC_MAIN10 | SCM_AV1_MAIN10)
+#define SCM_MASK_H264   (SCM_H264 | SCM_H264_HIGH8_444)
+#define SCM_MASK_HEVC   (SCM_HEVC | SCM_HEVC_MAIN10 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444)
+#define SCM_MASK_AV1    (SCM_AV1_MAIN8 | SCM_AV1_MAIN10 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444)
+#define SCM_MASK_10BIT  (SCM_HEVC_MAIN10 | SCM_HEVC_REXT10_444 | SCM_AV1_MAIN10 | SCM_AV1_HIGH10_444)
+#define SCM_MASK_YUV444 (SCM_H264_HIGH8_444 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444)
 
 typedef struct _SERVER_INFORMATION {
     // Server host name or IP address in text form
     const char* address;
-    
+
     // Text inside 'appversion' tag in /serverinfo
     const char* serverInfoAppVersion;
-    
+
     // Text inside 'GfeVersion' tag in /serverinfo (if present)
     const char* serverInfoGfeVersion;
 
@@ -530,6 +554,14 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
 
 // This function stops streaming. This function is not thread-safe.
 void LiStopConnection(void);
+
+// VipleStream: override the UDP port values that would normally be parsed
+// from the RTSP SETUP Transport headers. When non-zero, these replace
+// VideoPortNumber / AudioPortNumber / ControlPortNumber after RTSP
+// parsing. Zero means "use the parsed value". Used by the Qt client when
+// it proxies the streaming UDP through a loopback tunnel bound on
+// OS-assigned ephemeral ports. Must be called before LiStartConnection.
+void LiOverrideUdpPorts(uint16_t videoPort, uint16_t audioPort, uint16_t controlPort);
 
 // This function interrupts a pending LiStartConnection() call. This interruption happens asynchronously
 // so it is not safe to start another connection before the first LiStartConnection() call returns.
@@ -813,7 +845,12 @@ int LiSendHighResScrollEvent(short scrollAmount);
 int LiSendHScrollEvent(signed char scrollClicks);
 int LiSendHighResHScrollEvent(short scrollAmount);
 
+// This function returns a time in microseconds with an implementation-defined epoch.
+// It should only ever be compared with the return value from a previous call to itself.
+uint64_t LiGetMicroseconds(void);
+
 // This function returns a time in milliseconds with an implementation-defined epoch.
+// It should only ever be compared with the return value from a previous call to itself.
 uint64_t LiGetMillis(void);
 
 // This is a simplistic STUN function that can assist clients in getting the WAN address
@@ -821,6 +858,13 @@ uint64_t LiGetMillis(void);
 // address for streaming after GFE stopped sending it a while back. wanAddr is returned in
 // network byte order.
 int LiFindExternalAddressIP4(const char* stunServer, unsigned short stunPort, unsigned int* wanAddr);
+
+// VipleStream: Attempt UDP hole punch to server's STUN-discovered endpoint.
+// Call before LiStartConnection() when connecting through NAT.
+// Returns 0 on success, negative on failure (connection can still be attempted).
+int LiHolePunch(const char *serverAddr, unsigned short serverPort,
+                const uint8_t *serverUuid, const uint8_t *clientUuid,
+                int timeoutMs);
 
 // Returns the number of queued video frames ready for delivery. Only relevant
 // if CAPABILITY_DIRECT_SUBMIT is not set for the video renderer.
@@ -835,6 +879,36 @@ int LiGetPendingAudioFrames(void);
 // milliseconds rather than frames, which allows callers to be agnostic of the
 // negotiated audio frame duration.
 int LiGetPendingAudioDuration(void);
+
+// Returns a pointer to a struct containing various statistics about the RTP audio stream.
+// The data should be considered read-only and must not be modified.
+typedef struct _RTP_AUDIO_STATS {
+    uint32_t packetCountAudio;         // total audio packets
+    uint32_t packetCountFec;           // total packets of type FEC
+    uint32_t packetCountFecRecovered;  // a packet was saved
+    uint32_t packetCountFecFailed;     // tried to recover but too much was lost
+    uint32_t packetCountOOS;           // out-of-sequence packets
+    uint32_t packetCountInvalid;       // corrupted packets, etc
+    uint32_t packetCountFecInvalid;    // invalid FEC packet
+} RTP_AUDIO_STATS, *PRTP_AUDIO_STATS;
+
+const RTP_AUDIO_STATS* LiGetRTPAudioStats(void);
+
+// Returns a pointer to a struct containing various statistics about the RTP video stream.
+// The data should be considered read-only and must not be modified.
+// Right now this is mainly used to track total video and FEC packets, as there are
+// many video stats already implemented at a higher level in moonlight-qt.
+typedef struct _RTP_VIDEO_STATS {
+    uint32_t packetCountVideo;         // total video packets
+    uint32_t packetCountFec;           // total packets of type FEC
+    uint32_t packetCountFecRecovered;  // a packet was saved
+    uint32_t packetCountFecFailed;     // tried to recover but too much was lost
+    uint32_t packetCountOOS;           // out-of-sequence packets
+    uint32_t packetCountInvalid;       // corrupted packets, etc
+    uint32_t packetCountFecInvalid;    // invalid FEC packet
+} RTP_VIDEO_STATS, *PRTP_VIDEO_STATS;
+
+const RTP_VIDEO_STATS* LiGetRTPVideoStats(void);
 
 // Port index flags for use with LiGetPortFromPortFlagIndex() and LiGetProtocolFromPortFlagIndex()
 #define ML_PORT_INDEX_TCP_47984 0
@@ -863,7 +937,7 @@ int LiGetPendingAudioDuration(void);
 unsigned int LiGetPortFlagsFromStage(int stage);
 unsigned int LiGetPortFlagsFromTerminationErrorCode(int errorCode);
 
-// Returns the IPPROTO_* value for the specified port index 
+// Returns the IPPROTO_* value for the specified port index
 int LiGetProtocolFromPortFlagIndex(int portFlagIndex);
 
 // Returns the port number for the specified port index
@@ -939,6 +1013,10 @@ bool LiGetHdrMetadata(PSS_HDR_METADATA metadata);
 // call this API instead. Note that this function does not guarantee that the *next* frame will be an IDR
 // frame, just that an IDR frame will arrive soon.
 void LiRequestIdrFrame(void);
+
+// VipleStream: Request the server to change its encoding framerate mid-stream.
+// Used when toggling FRUC on/off via hotkey to switch between halved and full FPS.
+void LiRequestFpsChange(int newFps);
 
 // This function returns any extended feature flags supported by the host.
 #define LI_FF_PEN_TOUCH_EVENTS        0x01 // LiSendTouchEvent()/LiSendPenEvent() supported

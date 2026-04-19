@@ -30,6 +30,22 @@ uint16_t RtspPortNumber;
 uint16_t ControlPortNumber;
 uint16_t AudioPortNumber;
 uint16_t VideoPortNumber;
+
+// VipleStream: optional UDP port overrides. When non-zero, these replace
+// the values parsed from the RTSP SETUP Transport headers. Used when the
+// client is tunneling UDP through a local proxy bound on an OS-assigned
+// ephemeral port (Windows Hyper-V / winnat can reserve the canonical
+// 47998/47999/48000 range out from under us). Set via
+// LiOverrideUdpPorts before LiStartConnection.
+uint16_t OverrideVideoPort;
+uint16_t OverrideAudioPort;
+uint16_t OverrideControlPort;
+
+void LiOverrideUdpPorts(uint16_t videoPort, uint16_t audioPort, uint16_t controlPort) {
+    OverrideVideoPort = videoPort;
+    OverrideAudioPort = audioPort;
+    OverrideControlPort = controlPort;
+}
 SS_PING AudioPingPayload;
 SS_PING VideoPingPayload;
 uint32_t ControlConnectData;

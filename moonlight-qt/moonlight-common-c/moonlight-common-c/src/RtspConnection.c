@@ -1184,6 +1184,11 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         else {
             Limelog("Audio port: %u\n", AudioPortNumber);
         }
+        // VipleStream: caller-supplied override for local UDP proxies.
+        if (OverrideAudioPort != 0) {
+            Limelog("Audio port override: %u -> %u\n", AudioPortNumber, OverrideAudioPort);
+            AudioPortNumber = OverrideAudioPort;
+        }
 
         // Parse the Sunshine ping payload protocol extension if present
         memset(&AudioPingPayload, 0, sizeof(AudioPingPayload));
@@ -1260,6 +1265,11 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         else {
             Limelog("Video port: %u\n", VideoPortNumber);
         }
+        // VipleStream: caller-supplied override for local UDP proxies.
+        if (OverrideVideoPort != 0) {
+            Limelog("Video port override: %u -> %u\n", VideoPortNumber, OverrideVideoPort);
+            VideoPortNumber = OverrideVideoPort;
+        }
 
         freeMessage(&response);
     }
@@ -1303,6 +1313,11 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         }
         else {
             Limelog("Control port: %u\n", ControlPortNumber);
+        }
+        // VipleStream: caller-supplied override for local UDP proxies.
+        if (OverrideControlPort != 0) {
+            Limelog("Control port override: %u -> %u\n", ControlPortNumber, OverrideControlPort);
+            ControlPortNumber = OverrideControlPort;
         }
 
         freeMessage(&response);

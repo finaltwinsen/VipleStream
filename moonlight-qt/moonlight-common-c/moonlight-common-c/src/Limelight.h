@@ -555,6 +555,14 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
 // This function stops streaming. This function is not thread-safe.
 void LiStopConnection(void);
 
+// VipleStream: override the UDP port values that would normally be parsed
+// from the RTSP SETUP Transport headers. When non-zero, these replace
+// VideoPortNumber / AudioPortNumber / ControlPortNumber after RTSP
+// parsing. Zero means "use the parsed value". Used by the Qt client when
+// it proxies the streaming UDP through a loopback tunnel bound on
+// OS-assigned ephemeral ports. Must be called before LiStartConnection.
+void LiOverrideUdpPorts(uint16_t videoPort, uint16_t audioPort, uint16_t controlPort);
+
 // This function interrupts a pending LiStartConnection() call. This interruption happens asynchronously
 // so it is not safe to start another connection before the first LiStartConnection() call returns.
 void LiInterruptConnection(void);

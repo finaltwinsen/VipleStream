@@ -1829,6 +1829,21 @@ bool Session::startConnectionAsync()
             hostnameStr = QByteArrayLiteral("127.0.0.2");
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-NAT] UDP tunnel ready — video/audio routed via relay (host=127.0.0.2)");
+            // Tell moonlight-common-c to target our ephemeral loopback
+            // ports instead of the parsed Sunshine ports. The RTSP
+            // traffic is end-to-end encrypted (corever=1), so rewriting
+            // `server_port=` inside the TCP tunnel doesn't work — this
+            // override runs AFTER common-c decrypts and parses.
+            uint16_t vPort = 0, aPort = 0, cPort = 0;
+            for (const auto &p : portMap) {
+                if (p.first == 47998) vPort = p.second;
+                else if (p.first == 47999) cPort = p.second;
+                else if (p.first == 48000) aPort = p.second;
+            }
+            LiOverrideUdpPorts(vPort, aPort, cPort);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] UDP port overrides: video=%u audio=%u control=%u",
+                        vPort, aPort, cPort);
         } else {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-NAT] UDP tunnel unavailable, falling back to direct UDP");

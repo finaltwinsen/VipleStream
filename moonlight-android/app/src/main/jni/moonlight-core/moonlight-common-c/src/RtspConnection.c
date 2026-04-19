@@ -267,19 +267,19 @@ static bool transactRtspMessageEnet(PRTSP_MESSAGE request, PRTSP_MESSAGE respons
     payloadLength = request->payloadLength;
     request->payload = NULL;
     request->payloadLength = 0;
-    
+
     // Serialize the RTSP message into a message buffer
     serializedMessage = serializeRtspMessage(request, &messageLen);
     if (serializedMessage == NULL) {
         goto Exit;
     }
-    
+
     // Create the reliable packet that describes our outgoing message
     packet = enet_packet_create(serializedMessage, messageLen, ENET_PACKET_FLAG_RELIABLE);
     if (packet == NULL) {
         goto Exit;
     }
-    
+
     // Send the message
     if (enet_peer_send(peer, 0, packet) < 0) {
         enet_packet_destroy(packet);
@@ -299,10 +299,10 @@ static bool transactRtspMessageEnet(PRTSP_MESSAGE request, PRTSP_MESSAGE respons
             enet_packet_destroy(packet);
             goto Exit;
         }
-        
+
         enet_host_flush(client);
     }
-    
+
     // Wait for a reply
     if (serviceEnetHost(client, &event, RTSP_RECEIVE_TIMEOUT_SEC * 1000) <= 0 ||
         event.type != ENET_EVENT_TYPE_RECEIVE) {
@@ -343,7 +343,7 @@ static bool transactRtspMessageEnet(PRTSP_MESSAGE request, PRTSP_MESSAGE respons
         offset += (int) event.packet->dataLength;
         enet_packet_destroy(event.packet);
     }
-        
+
     if (parseRtspMessage(response, responseBuffer, offset) == RTSP_ERROR_SUCCESS) {
         // Successfully parsed response
         ret = true;
@@ -403,9 +403,6 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
     }
 
     // Retry up to 10 seconds if we receive ECONNREFUSED errors from the host PC.
-    // This can happen with GFE 3.22 when initially launching a session because it
-    // returns HTTP 200 OK for the /launch request before the RTSP handshake port
-    // is listening.
     do {
         sock = connectTcpSocket(&rtspAddr, rtspAddrLen, RtspPortNumber, RTSP_CONNECT_TIMEOUT_SEC);
         if (sock == INVALID_SOCKET) {
@@ -492,18 +489,6 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
 
     // Decrypt (if necessary) and deserialize the RTSP response
     ret = unsealRtspMessage(responseBuffer, offset, response);
-
-    // Fetch the local address for this socket if it's not populated yet
-    if (LocalAddr.ss_family == 0) {
-        SOCKADDR_LEN addrLen = (SOCKADDR_LEN)sizeof(LocalAddr);
-        if (getsockname(sock, (struct sockaddr*)&LocalAddr, &addrLen) < 0) {
-            Limelog("Failed to get local address: %d\n", LastSocketError());
-            memset(&LocalAddr, 0, sizeof(LocalAddr));
-        }
-        else {
-            LC_ASSERT(addrLen == AddrLen);
-        }
-    }
 
 Exit:
     if (serializedMessage != NULL) {
@@ -599,7 +584,7 @@ static bool setupStream(PRTSP_MESSAGE response, char* target, int* error) {
         else {
             transportValue = " ";
         }
-        
+
         if (addOption(&request, "Transport", transportValue) &&
             addOption(&request, "If-Modified-Since",
                 "Thu, 01 Jan 1970 00:00:00 GMT")) {
@@ -679,6 +664,11 @@ static bool sendVideoAnnounce(PRTSP_MESSAGE response, int* error) {
 
 static int parseOpusConfigFromParamString(char* paramStr, int channelCount, POPUS_MULTISTREAM_CONFIGURATION opusConfig) {
     int i;
+
+    if (channelCount > AUDIO_CONFIGURATION_MAX_CHANNEL_COUNT) {
+        Limelog("Invalid channel count: %d\n", channelCount);
+        return -1;
+    }
 
     // Set channel count (included in the prefix, so not parsed below)
     opusConfig->channelCount = channelCount;
@@ -776,6 +766,7 @@ static int parseOpusConfigurations(PRTSP_MESSAGE response) {
             // Parse the normal quality Opus config
             err = parseOpusConfigFromParamString(paramStart, channelCount, &NormalQualityOpusConfig);
             if (err != 0) {
+                LC_ASSERT(err == 0);
                 return err;
             }
 
@@ -804,6 +795,7 @@ static int parseOpusConfigurations(PRTSP_MESSAGE response) {
                 // Parse the high quality Opus config
                 err = parseOpusConfigFromParamString(paramStart, channelCount, &HighQualityOpusConfig);
                 if (err != 0) {
+                    LC_ASSERT(err == 0);
                     return err;
                 }
 
@@ -1001,21 +993,21 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             rtspClientVersion = 14;
             break;
     }
-    
+
     // Setup ENet if required by this GFE version
     if (useEnet) {
         ENetAddress address;
         ENetEvent event;
-        
+
         enet_address_set_address(&address, (struct sockaddr *)&RemoteAddr, AddrLen);
         enet_address_set_port(&address, RtspPortNumber);
-        
+
         // Create a client that can use 1 outgoing connection and 1 channel
         client = enet_host_create(RemoteAddr.ss_family, NULL, 1, 1, 0, 0);
         if (client == NULL) {
             return -1;
         }
-    
+
         // Connect to the host
         peer = enet_host_connect(client, &address, 1, 0);
         if (peer == NULL) {
@@ -1023,7 +1015,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             client = NULL;
             return -1;
         }
-    
+
         // Wait for the connect to complete
         if (serviceEnetHost(client, &event, RTSP_CONNECT_TIMEOUT_SEC * 1000) <= 0 ||
             event.type != ENET_EVENT_TYPE_CONNECT) {
@@ -1075,10 +1067,22 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             ret = response.message.response.statusCode;
             goto Exit;
         }
-        
+
+        if (!response.payload) {
+            Limelog("RTSP DESCRIBE no content in response\n");
+            ret = -1;
+            goto Exit;
+        }
+
         if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000")) {
-            if ((serverInfo->serverCodecModeSupport & SCM_AV1_MAIN10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN10)) {
+            if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444)) {
+                NegotiatedVideoFormat = VIDEO_FORMAT_AV1_HIGH10_444;
+            }
+            else if ((serverInfo->serverCodecModeSupport & SCM_AV1_MAIN10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN10)) {
                 NegotiatedVideoFormat = VIDEO_FORMAT_AV1_MAIN10;
+            }
+            else if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH8_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH8_444)) {
+                NegotiatedVideoFormat = VIDEO_FORMAT_AV1_HIGH8_444;
             }
             else {
                 NegotiatedVideoFormat = VIDEO_FORMAT_AV1_MAIN8;
@@ -1091,15 +1095,26 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             // server can support HEVC. For some reason, they still set the MIME type of the HEVC
             // format to H264, so we can't just look for the HEVC MIME type. What we'll do instead is
             // look for the base 64 encoded VPS NALU prefix that is unique to the HEVC bitstream.
-            if ((serverInfo->serverCodecModeSupport & SCM_HEVC_MAIN10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_MAIN10)) {
+            if ((serverInfo->serverCodecModeSupport & SCM_HEVC_REXT10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_REXT10_444)) {
+                NegotiatedVideoFormat = VIDEO_FORMAT_H265_REXT10_444;
+            }
+            else if ((serverInfo->serverCodecModeSupport & SCM_HEVC_MAIN10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_MAIN10)) {
                 NegotiatedVideoFormat = VIDEO_FORMAT_H265_MAIN10;
+            }
+            else if ((serverInfo->serverCodecModeSupport & SCM_HEVC_REXT8_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_REXT8_444)) {
+                NegotiatedVideoFormat = VIDEO_FORMAT_H265_REXT8_444;
             }
             else {
                 NegotiatedVideoFormat = VIDEO_FORMAT_H265;
             }
         }
         else {
-            NegotiatedVideoFormat = VIDEO_FORMAT_H264;
+            if ((serverInfo->serverCodecModeSupport & SCM_H264_HIGH8_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H264_HIGH8_444)) {
+                NegotiatedVideoFormat = VIDEO_FORMAT_H264_HIGH8_444;
+            }
+            else {
+                NegotiatedVideoFormat = VIDEO_FORMAT_H264;
+            }
 
             // Dimensions over 4096 are only supported with HEVC on NVENC
             if (StreamConfig.width > 4096 || StreamConfig.height > 4096) {
@@ -1169,6 +1184,11 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         else {
             Limelog("Audio port: %u\n", AudioPortNumber);
         }
+        // VipleStream: caller-supplied override for local UDP proxies.
+        if (OverrideAudioPort != 0) {
+            Limelog("Audio port override: %u -> %u\n", AudioPortNumber, OverrideAudioPort);
+            AudioPortNumber = OverrideAudioPort;
+        }
 
         // Parse the Sunshine ping payload protocol extension if present
         memset(&AudioPingPayload, 0, sizeof(AudioPingPayload));
@@ -1191,10 +1211,10 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         }
 
         // Given there is a non-null session id, get the
-        // first token of the session until ";", which 
+        // first token of the session until ";", which
         // resolves any 454 session not found errors on
         // standard RTSP server implementations.
-        // (i.e - sessionId = "DEADBEEFCAFE;timeout = 90") 
+        // (i.e - sessionId = "DEADBEEFCAFE;timeout = 90")
         sessionIdString = strdup(strtok_r(sessionId, ";", &strtokCtx));
         if (sessionIdString == NULL) {
             Limelog("Failed to duplicate session ID string\n");
@@ -1245,10 +1265,15 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         else {
             Limelog("Video port: %u\n", VideoPortNumber);
         }
+        // VipleStream: caller-supplied override for local UDP proxies.
+        if (OverrideVideoPort != 0) {
+            Limelog("Video port override: %u -> %u\n", VideoPortNumber, OverrideVideoPort);
+            VideoPortNumber = OverrideVideoPort;
+        }
 
         freeMessage(&response);
     }
-    
+
     if (AppVersionQuad[0] >= 5) {
         RTSP_MESSAGE response;
         int error = -1;
@@ -1288,6 +1313,11 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         }
         else {
             Limelog("Control port: %u\n", ControlPortNumber);
+        }
+        // VipleStream: caller-supplied override for local UDP proxies.
+        if (OverrideControlPort != 0) {
+            Limelog("Control port override: %u -> %u\n", ControlPortNumber, OverrideControlPort);
+            ControlPortNumber = OverrideControlPort;
         }
 
         freeMessage(&response);
@@ -1375,9 +1405,9 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         }
     }
 
-    
+
     ret = 0;
-    
+
 Exit:
     // Cleanup the ENet stuff
     if (useEnet) {
@@ -1385,7 +1415,7 @@ Exit:
             enet_peer_disconnect_now(peer, 0);
             peer = NULL;
         }
-        
+
         if (client != NULL) {
             enet_host_destroy(client);
             client = NULL;

@@ -30,6 +30,22 @@ uint16_t RtspPortNumber;
 uint16_t ControlPortNumber;
 uint16_t AudioPortNumber;
 uint16_t VideoPortNumber;
+
+// VipleStream: optional UDP port overrides. When non-zero, these replace
+// the values parsed from the RTSP SETUP Transport headers. Used when the
+// client is tunneling UDP through a local proxy bound on an OS-assigned
+// ephemeral port (Windows Hyper-V / winnat can reserve the canonical
+// 47998/47999/48000 range out from under us). Set via
+// LiOverrideUdpPorts before LiStartConnection.
+uint16_t OverrideVideoPort;
+uint16_t OverrideAudioPort;
+uint16_t OverrideControlPort;
+
+void LiOverrideUdpPorts(uint16_t videoPort, uint16_t audioPort, uint16_t controlPort) {
+    OverrideVideoPort = videoPort;
+    OverrideAudioPort = audioPort;
+    OverrideControlPort = controlPort;
+}
 SS_PING AudioPingPayload;
 SS_PING VideoPingPayload;
 uint32_t ControlConnectData;
@@ -268,7 +284,24 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     memcpy(&StreamConfig, streamConfig, sizeof(StreamConfig));
     RemoteAddrString = strdup(serverInfo->address);
 
-    // VipleStream: Parse RTSP host override from rtspSessionUrl (for relay tunnel)
+    // The values in RTSP SETUP will be used to populate these.
+    VideoPortNumber = 0;
+    ControlPortNumber = 0;
+    AudioPortNumber = 0;
+
+    // Parse RTSP port number and optional host from RTSP session URL
+    if (!parseRtspPortNumberFromUrl(serverInfo->rtspSessionUrl, &RtspPortNumber)) {
+        // Use the well known port if parsing fails
+        RtspPortNumber = 48010;
+
+        Limelog("RTSP port: %u (RTSP URL parsing failed)\n", RtspPortNumber);
+    }
+    else {
+        Limelog("RTSP port: %u\n", RtspPortNumber);
+    }
+
+    // VipleStream: Parse RTSP host from URL if it differs from server address
+    // This allows RTSP tunnel (rtspenc://127.0.0.1:port) while keeping RemoteAddr for UDP
     RtspAddrString = NULL;
     if (serverInfo->rtspSessionUrl) {
         const char *url = serverInfo->rtspSessionUrl;
@@ -279,8 +312,9 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
             if (hostEnd && hostEnd > hostStart) {
                 int hostLen = (int)(hostEnd - hostStart);
                 char hostBuf[256] = {0};
-                if (hostLen > 0 && hostLen < (int)sizeof(hostBuf)) {
+                if (hostLen < (int)sizeof(hostBuf)) {
                     memcpy(hostBuf, hostStart, hostLen);
+                    // Only override if RTSP host differs from server address
                     if (strcmp(hostBuf, serverInfo->address) != 0) {
                         RtspAddrString = strdup(hostBuf);
                         Limelog("RTSP host override: %s (tunnel)\n", RtspAddrString);
@@ -288,22 +322,6 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
                 }
             }
         }
-    }
-
-    // The values in RTSP SETUP will be used to populate these.
-    VideoPortNumber = 0;
-    ControlPortNumber = 0;
-    AudioPortNumber = 0;
-
-    // Parse RTSP port number from RTSP session URL
-    if (!parseRtspPortNumberFromUrl(serverInfo->rtspSessionUrl, &RtspPortNumber)) {
-        // Use the well known port if parsing fails
-        RtspPortNumber = 48010;
-
-        Limelog("RTSP port: %u (RTSP URL parsing failed)\n", RtspPortNumber);
-    }
-    else {
-        Limelog("RTSP port: %u\n", RtspPortNumber);
     }
 
     alreadyTerminated = false;
@@ -404,6 +422,19 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
         ListenerCallbacks.stageFailed(STAGE_NAME_RESOLUTION, err);
         goto Cleanup;
     }
+
+    // Resolve LocalAddr by RemoteAddr.
+    {
+        SOCKADDR_LEN localAddrLen;
+        err = getLocalAddressByUdpConnect(&RemoteAddr, AddrLen, RtspPortNumber, &LocalAddr, &localAddrLen);
+        if (err != 0) {
+            Limelog("failed to resolve local addr: %d\n", err);
+            ListenerCallbacks.stageFailed(STAGE_NAME_RESOLUTION, err);
+            goto Cleanup;
+        }
+        LC_ASSERT(localAddrLen == AddrLen);
+    }
+
     stage++;
     LC_ASSERT(stage == STAGE_NAME_RESOLUTION);
     ListenerCallbacks.stageComplete(STAGE_NAME_RESOLUTION);
@@ -413,17 +444,27 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     // now that we have resolved the target address and impose the video packet
     // size cap if required.
     if (StreamConfig.streamingRemotely == STREAM_CFG_AUTO) {
-        if (isPrivateNetworkAddress(&RemoteAddr)) {
+        bool isNat64 = isNat64SynthesizedAddress(&RemoteAddr);
+
+        // It's possible to have a NAT64 prefix on a ULA or other private range,
+        // so we must exclude NAT64 addresses from our local address checks.
+        if (!isNat64 && isPrivateNetworkAddress(&RemoteAddr)) {
             StreamConfig.streamingRemotely = STREAM_CFG_LOCAL;
         }
         else {
             StreamConfig.streamingRemotely = STREAM_CFG_REMOTE;
 
-            if (StreamConfig.packetSize > 1024) {
-                // Cap packet size at 1024 for remote streaming to avoid
-                // MTU problems and fragmentation.
-                Limelog("Packet size capped at 1KB for remote streaming\n");
+            if (RemoteAddr.ss_family == AF_INET || isNat64) {
+                // Cap packet size at 1024 for remote IPv4 streaming to avoid fragmentation.
+                Limelog("Packet size capped at 1024 bytes for remote IPv4 streaming\n");
                 StreamConfig.packetSize = 1024;
+            }
+            else {
+                // IPv6 guarantees a minimum MTU of 1280 before fragmentation, so use a higher
+                // packet size cap for remote IPv6 streaming (when not using NAT64 which isn't
+                // end-to-end IPv6 traffic).
+                Limelog("Packet size capped at 1184 bytes for remote IPv6 streaming\n");
+                StreamConfig.packetSize = 1184;
             }
         }
     }
@@ -551,7 +592,7 @@ Cleanup:
     return err;
 }
 
-const char* LiGetLaunchUrlQueryParameters() {
+const char* LiGetLaunchUrlQueryParameters(void) {
     // v0 = Video encryption and control stream encryption v2
     // v1 = RTSP encryption
     return "&corever=1";
