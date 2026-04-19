@@ -1811,45 +1811,25 @@ bool Session::startConnectionAsync()
     // VipleStream: If using relay, set up RTSP TCP tunnel + UDP tunnel
     QByteArray hostnameStr;
     if (useRelayForStream) {
-        // Start local RTSP tunnel
-        uint16_t rtspPort = 48010; // default RTSP port
-        rtspTunnel = new RelayTcpTunnel(m_Preferences->relayUrl, m_Preferences->relayPsk,
-                                         m_Computer->uuid, rtspPort);
-        uint16_t localRtspPort = rtspTunnel->startAndGetPort();
-
-        // Override RTSP URL to point to local tunnel
-        rtspSessionUrl = QString("rtspenc://127.0.0.1:%1").arg(localRtspPort);
-
-        // VipleStream: bring up the UDP tunnel for video / audio /
-        // control. Local proxy sockets bind on
-        //   127.0.0.1:47998 (video)
-        //   127.0.0.1:48000 (audio)
-        //   127.0.0.1:47999 (ENet control)
-        // and moonlight-common-c is told the server lives at 127.0.0.1.
-        //
-        // The 47999 path lands on the server-side ENet loopback bridge
-        // (see tunnel_session::enable_local_bridge) which re-injects
-        // each datagram into Sunshine's ENet socket and tunnels replies
-        // back. Without 47999 in the proxy list, the control stream
-        // would fail with ENET_EVENT_TYPE_DISCONNECT when the direct
-        // UDP path is blocked.
+        // Bring up the UDP tunnel FIRST so its OS-assigned ephemeral
+        // loopback ports are known before the RTSP tunnel starts —
+        // the RTSP TCP tunnel needs that mapping to rewrite the
+        // `server_port=` entries in Sunshine's SETUP responses so
+        // moonlight-common-c targets our proxies (127.0.0.2:<eph>)
+        // instead of the literal Sunshine ports (which Windows
+        // Hyper-V / winnat often has reserved out from under us).
         QVector<uint16_t> tunneledPorts{47998, 47999, 48000};
         m_UdpTunnel = new RelayUdpTunnel(m_Preferences->relayUrl,
                                          m_Preferences->relayPsk,
                                          m_Computer->uuid,
                                          tunneledPorts);
+        QVector<QPair<uint16_t, uint16_t>> portMap;
         if (m_UdpTunnel->startAndWaitReady(7000)) {
-            // Use 127.0.0.2 instead of 127.0.0.1 so the proxy sockets
-            // don't collide with a locally running Sunshine instance
-            // (dev scenario: client and server on the same box). The
-            // whole 127.0.0.0/8 is loopback so this is fine.
+            portMap = m_UdpTunnel->portMap();
             hostnameStr = QByteArrayLiteral("127.0.0.2");
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-NAT] UDP tunnel ready — video/audio routed via relay (host=127.0.0.2)");
         } else {
-            // Tunnel allocation failed — fall back to STUN/localhost
-            // as before. Video/audio will likely not work if the
-            // direct UDP path is genuinely blocked.
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-NAT] UDP tunnel unavailable, falling back to direct UDP");
             delete m_UdpTunnel;
@@ -1860,6 +1840,42 @@ bool Session::startConnectionAsync()
                 hostnameStr = QByteArrayLiteral("127.0.0.1");
             }
         }
+
+        // Now start the RTSP TCP tunnel, with a rewriter wired up so
+        // every chunk coming back from Sunshine has the server UDP
+        // port strings substituted to our ephemeral local ones.
+        uint16_t rtspPort = 48010; // default RTSP port
+        rtspTunnel = new RelayTcpTunnel(m_Preferences->relayUrl, m_Preferences->relayPsk,
+                                         m_Computer->uuid, rtspPort);
+        if (!portMap.isEmpty()) {
+            auto mapCopy = portMap;
+            rtspTunnel->setRelayToLocalRewriter([mapCopy](const QByteArray &in) -> QByteArray {
+                QByteArray out = in;
+                for (const auto &p : mapCopy) {
+                    if (p.first == p.second) continue;
+                    QByteArray needle = "server_port=" + QByteArray::number(p.first);
+                    QByteArray repl   = "server_port=" + QByteArray::number(p.second);
+                    int idx = 0;
+                    while ((idx = out.indexOf(needle, idx)) >= 0) {
+                        // Only replace if the char right after the
+                        // digits isn't another digit (avoid matching
+                        // 47998 inside 479980).
+                        int after = idx + needle.size();
+                        char c = (after < out.size()) ? out[after] : 0;
+                        if (c >= '0' && c <= '9') {
+                            idx = after;
+                            continue;
+                        }
+                        out.replace(idx, needle.size(), repl);
+                        idx += repl.size();
+                    }
+                }
+                return out;
+            });
+        }
+        uint16_t localRtspPort = rtspTunnel->startAndGetPort();
+        rtspSessionUrl = QString("rtspenc://127.0.0.1:%1").arg(localRtspPort);
+
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-NAT] RTSP tunneled via localhost:%d, UDP to %s",
                     localRtspPort, hostnameStr.data());

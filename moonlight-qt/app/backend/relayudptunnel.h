@@ -26,6 +26,8 @@
 #pragma once
 
 #include <QByteArray>
+#include <QMutex>
+#include <QPair>
 #include <QString>
 #include <QThread>
 #include <QVector>
@@ -68,6 +70,20 @@ public:
     /** True iff the local proxy sockets are live. */
     bool isReady() const { return m_Ready.load(); }
 
+    /**
+     * After startAndWaitReady(), returns the mapping between each
+     * server-side logical port (e.g. 47998) and the local ephemeral
+     * port on 127.0.0.2 that moonlight-common-c should target. The
+     * caller uses this to rewrite the RTSP Transport headers that
+     * flow through the TCP tunnel so common-c targets our proxies.
+     *
+     * Returns {} if startAndWaitReady() hasn't succeeded yet.
+     */
+    QVector<QPair<uint16_t, uint16_t>> portMap() const {
+        QMutexLocker lk(&m_PortMapMutex);
+        return m_PortMap;
+    }
+
 private:
     void run() override;
 
@@ -79,4 +95,10 @@ private:
     std::atomic<bool> m_Stop{false};
     std::atomic<bool> m_Ready{false};
     std::atomic<bool> m_AllocFailed{false};
+
+    // Populated before m_Ready is set. Held by value once run() starts
+    // the proxy loop, so external readers need a mutex only against the
+    // race with the very-early readers during startup.
+    mutable QMutex m_PortMapMutex;
+    QVector<QPair<uint16_t, uint16_t>> m_PortMap;  // {server_port, local_port}
 };

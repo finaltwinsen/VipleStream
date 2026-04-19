@@ -138,6 +138,7 @@ namespace {
 struct ProxySock {
     SOCKET fd = INVALID_SOCKET;
     uint16_t serverPort = 0;      // e.g. 47998 / 48000 / 47999
+    uint16_t localPort = 0;       // OS-assigned local ephemeral port
     uint16_t clientPort = 0;      // learned on first packet from common-c
 };
 
@@ -325,7 +326,21 @@ void RelayUdpTunnel::run() {
                     qPrintable(relayUdpHost));
     }
 
-    /* ---------- 4. Bind local proxy sockets on 127.0.0.2 ---------- */
+    /* ---------- 4. Bind local proxy sockets on 127.0.0.2 ----------
+     *
+     * We let the OS assign the local port (bind port 0) rather than
+     * using the Sunshine logical ports like 47998 verbatim. Windows
+     * hosts with Hyper-V / WSL2 running often have stealth UDP port
+     * reservations covering the 47xxx-48xxx range (a known
+     * Hyper-V / winnat leak), so a deterministic bind fails with
+     * WSAEADDRINUSE even though netstat shows the port as free.
+     *
+     * The ephemeral local port is then published via portMap() so
+     * session.cpp can rewrite the RTSP SETUP responses that pass
+     * through the TCP tunnel (see RelayTcpTunnel's data rewriter) and
+     * moonlight-common-c targets 127.0.0.2:<ephemeral> instead of
+     * 127.0.0.2:<server_port>.
+     * -------------------------------------------------------------- */
     QVector<ProxySock> proxies;
     proxies.reserve(m_ServerPorts.size());
     for (uint16_t p : m_ServerPorts) {
@@ -333,25 +348,47 @@ void RelayUdpTunnel::run() {
         if (s == INVALID_SOCKET) continue;
         sockaddr_in a = {};
         a.sin_family = AF_INET;
-        a.sin_port = htons(p);
-        // 127.0.0.2 — moonlight-common-c is passed "127.0.0.2" as host.
+        a.sin_port = 0;  // OS-assigned
         inet_pton(AF_INET, "127.0.0.2", &a.sin_addr);
         if (bind(s, (sockaddr *)&a, sizeof(a)) < 0) {
+#ifdef _WIN32
+            int err = WSAGetLastError();
+#else
+            int err = errno;
+#endif
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-UDPTUN] bind 127.0.0.2:%u failed — port in use?", p);
+                        "[VIPLE-UDPTUN] bind 127.0.0.2:0 (for server port %u) "
+                        "failed (err=%d)", p, err);
             closesocket(s);
             continue;
+        }
+        // Read back the OS-chosen port.
+        sockaddr_in got = {};
+        socklen_t gotLen = sizeof(got);
+        uint16_t localPort = 0;
+        if (getsockname(s, (sockaddr *)&got, &gotLen) == 0) {
+            localPort = ntohs(got.sin_port);
         }
         ProxySock ps;
         ps.fd = s;
         ps.serverPort = p;
+        ps.localPort = localPort;
         proxies.append(ps);
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-UDPTUN] proxy bound 127.0.0.2:%u", p);
+                    "[VIPLE-UDPTUN] proxy bound 127.0.0.2:%u -> server port %u",
+                    localPort, p);
     }
     if (proxies.isEmpty()) {
         if (tunnelSock != INVALID_SOCKET) closesocket(tunnelSock);
         delete ws; m_AllocFailed = true; return;
+    }
+    // Publish the port map so RelayTcpTunnel can rewrite RTSP replies.
+    {
+        QMutexLocker lk(&m_PortMapMutex);
+        m_PortMap.clear();
+        for (const auto &ps : proxies) {
+            m_PortMap.append({ps.serverPort, ps.localPort});
+        }
     }
 
     m_Ready.store(true);

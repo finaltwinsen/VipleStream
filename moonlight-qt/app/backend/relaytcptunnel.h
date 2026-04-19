@@ -12,6 +12,7 @@
 #include <QSslSocket>
 #include <QString>
 #include <atomic>
+#include <functional>
 
 class RelayTcpTunnel : public QThread {
     Q_OBJECT
@@ -33,6 +34,21 @@ public:
     /** Stop the tunnel. */
     void stop();
 
+    /**
+     * Install a byte-level rewriter applied to every chunk coming
+     * from the relay on its way to the local RTSP client. Used to
+     * patch `server_port=47998` etc. in the RTSP SETUP responses so
+     * moonlight-common-c targets our relay UDP tunnel's ephemeral
+     * loopback ports instead of the literal Sunshine port numbers
+     * (which can be blocked by Hyper-V / winnat reservations).
+     *
+     * Must be set before startAndGetPort() — the worker thread
+     * snapshots it at start.
+     */
+    void setRelayToLocalRewriter(std::function<QByteArray(const QByteArray &)> rw) {
+        m_Rewriter = std::move(rw);
+    }
+
 private:
     void run() override;
 
@@ -40,4 +56,5 @@ private:
     uint16_t m_TargetPort;
     std::atomic<uint16_t> m_LocalPort{0};
     std::atomic<bool> m_Stop{false};
+    std::function<QByteArray(const QByteArray &)> m_Rewriter;
 };

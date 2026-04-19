@@ -307,6 +307,20 @@ void RelayTcpTunnel::run() {
                     QString msgType = obj["type"].toString();
                     if (msgType == "tcp_tunnel_data") {
                         QByteArray decoded = QByteArray::fromBase64(obj["data"].toString().toUtf8());
+                        // VipleStream: let the caller rewrite bytes
+                        // on their way back to the local RTSP client
+                        // (used to patch RTSP Transport server_port
+                        // entries when the UDP tunnel is on ephemeral
+                        // loopback ports).
+                        if (m_Rewriter) {
+                            QByteArray rewritten = m_Rewriter(decoded);
+                            if (rewritten.size() != decoded.size()) {
+                                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                            "[VIPLE-TUNNEL] rewriter changed size %d -> %d",
+                                            decoded.size(), rewritten.size());
+                            }
+                            decoded = std::move(rewritten);
+                        }
                         // Write directly to socket fd for reliability
 #ifdef _WIN32
                         ::send((SOCKET)localFd, decoded.constData(), decoded.size(), 0);
