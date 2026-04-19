@@ -1739,12 +1739,17 @@ bool Session::startConnectionAsync()
             m_Preferences->relayUrl, m_Preferences->relayPsk,
             m_Computer->uuid, launchPath, 45000); // /launch needs 30s+ (encoder probe)
 
+        // /launch responds with <gamesession>... ; /resume responds with
+        // <sessionUrl0>... <resume>1</resume>. Accept either.
+        const bool okResponse = !launchResp.isEmpty() &&
+            (launchResp.contains("gamesession") ||
+             launchResp.contains("sessionUrl0"));
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-NAT] Relay launch response: empty=%d len=%d contains_gamesession=%d",
+                    "[VIPLE-NAT] Relay launch response: empty=%d len=%d accept=%d",
                     launchResp.isEmpty(), launchResp.length(),
-                    launchResp.contains("gamesession") ? 1 : 0);
+                    okResponse ? 1 : 0);
 
-        if (!launchResp.isEmpty() && launchResp.contains("gamesession")) {
+        if (okResponse) {
             rtspSessionUrl = NvHTTP::getXmlString(launchResp, "sessionUrl0");
             useRelayForStream = true;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
