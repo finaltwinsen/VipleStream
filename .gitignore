@@ -89,3 +89,7 @@ tools/fruc_test/build_out.txt
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# ── Python bytecode ──
+__pycache__/
+*.pyc

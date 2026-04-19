@@ -43,7 +43,7 @@ logger = logging.getLogger("relay")
 
 class Peer:
     __slots__ = ("uuid", "role", "stun_ip", "stun_port", "nat_type",
-                 "writer", "last_seen", "extra")
+                 "writer", "last_seen", "extra", "udp_flows")
 
     def __init__(self, uuid: str, role: str, writer):
         self.uuid = uuid
@@ -54,12 +54,37 @@ class Peer:
         self.writer = writer
         self.last_seen = time.time()
         self.extra = {}
+        self.udp_flows: Set[int] = set()  # flow_ids owned by this peer (for cleanup)
+
+
+class UdpFlow:
+    """A relay-mediated UDP tunnel between two peers.
+
+    Addresses are pinned on first-arrival (TURN-like): the first authenticated
+    datagram from one peer fills addr_a; the first from the other fills addr_b.
+    Subsequent datagrams from a pinned addr are forwarded to the other pinned
+    addr. Unpinned / unauthenticated sources are dropped.
+    """
+    __slots__ = ("flow_id", "peer_a_uuid", "peer_b_uuid",
+                 "addr_a", "addr_b", "token", "created_at", "last_active")
+
+    def __init__(self, flow_id: int, peer_a_uuid: str, peer_b_uuid: str, token: bytes):
+        self.flow_id = flow_id
+        self.peer_a_uuid = peer_a_uuid
+        self.peer_b_uuid = peer_b_uuid
+        self.addr_a = None  # (ip, port) once seen
+        self.addr_b = None
+        self.token = token  # 16-byte random, shared by both peers
+        self.created_at = time.time()
+        self.last_active = self.created_at
 
 
 class Registry:
     def __init__(self):
         self.peers: Dict[str, Peer] = {}  # uuid -> Peer
         self.connections: Set = set()      # active writer set
+        self.flows: Dict[int, UdpFlow] = {}  # flow_id -> UdpFlow
+        self._next_flow_id = 1  # 0 reserved
 
     def register(self, peer: Peer):
         old = self.peers.get(peer.uuid)
@@ -77,8 +102,48 @@ class Registry:
         self.connections.discard(writer)
         to_remove = [uuid for uuid, p in self.peers.items() if p.writer == writer]
         for uuid in to_remove:
+            # Tear down any flows owned by this peer
+            peer = self.peers[uuid]
+            for flow_id in list(peer.udp_flows):
+                self._close_flow(flow_id)
             del self.peers[uuid]
             logger.info(f"[UNREG] {uuid[:8]}.. disconnected")
+
+    def allocate_flow(self, peer_a_uuid: str, peer_b_uuid: str) -> UdpFlow:
+        """Allocate a new UDP tunnel flow between two peers. Returns the flow."""
+        # Find a free flow_id (wrap around, skip 0)
+        for _ in range(65535):
+            fid = self._next_flow_id
+            self._next_flow_id = (self._next_flow_id + 1) & 0xFFFF
+            if self._next_flow_id == 0:
+                self._next_flow_id = 1
+            if fid not in self.flows:
+                break
+        else:
+            raise RuntimeError("No free UDP flow_id (65535 already in use)")
+
+        token = os.urandom(16)
+        flow = UdpFlow(fid, peer_a_uuid, peer_b_uuid, token)
+        self.flows[fid] = flow
+        for uuid in (peer_a_uuid, peer_b_uuid):
+            p = self.peers.get(uuid)
+            if p:
+                p.udp_flows.add(fid)
+        logger.info(f"[UDP-TUN] alloc flow={fid} {peer_a_uuid[:8]}..<->{peer_b_uuid[:8]}..")
+        return flow
+
+    def _close_flow(self, flow_id: int):
+        flow = self.flows.pop(flow_id, None)
+        if not flow:
+            return
+        for uuid in (flow.peer_a_uuid, flow.peer_b_uuid):
+            p = self.peers.get(uuid)
+            if p:
+                p.udp_flows.discard(flow_id)
+        logger.info(f"[UDP-TUN] closed flow={flow_id}")
+
+    def close_flow(self, flow_id: int):
+        self._close_flow(flow_id)
 
     def lookup(self, uuid: str) -> Optional[Peer]:
         return self.peers.get(uuid)
@@ -383,6 +448,68 @@ async def handle_client(reader, writer, psk: str):
                     else:
                         logger.warning(f"[TUNNEL] Can't route to {from_uuid[:8]}.. (not found)")
 
+            elif msg_type == "udp_tunnel_allocate":
+                # Requester asks the relay to mint a UDP tunnel flow between
+                # itself and target_uuid. Both peers receive `udp_tunnel_allocated`
+                # with the same flow_id/token but a "role" marker ("a" or "b").
+                target_uuid = data.get("target_uuid", "")
+                if not peer_uuid:
+                    await ws_send(writer, json.dumps({
+                        "type": "udp_tunnel_error",
+                        "msg": "not registered"}))
+                    continue
+                target = registry.lookup(target_uuid)
+                if not target:
+                    await ws_send(writer, json.dumps({
+                        "type": "udp_tunnel_error",
+                        "target_uuid": target_uuid,
+                        "msg": "target not online"}))
+                    continue
+                try:
+                    flow = registry.allocate_flow(peer_uuid, target_uuid)
+                except RuntimeError as e:
+                    await ws_send(writer, json.dumps({
+                        "type": "udp_tunnel_error",
+                        "msg": str(e)}))
+                    continue
+
+                base = {
+                    "type": "udp_tunnel_allocated",
+                    "flow_id": flow.flow_id,
+                    "token": flow.token.hex(),
+                    "relay_udp_port": UDP_TUNNEL_PORT,
+                    "relay_udp_host": UDP_TUNNEL_ADVERTISE_HOST,
+                }
+                # Tell requester it's side "a", target it's side "b".
+                requester_msg = dict(base, role="a", remote_uuid=target_uuid)
+                target_msg    = dict(base, role="b", remote_uuid=peer_uuid)
+                await ws_send(writer, json.dumps(requester_msg))
+                try:
+                    await ws_send(target.writer, json.dumps(target_msg))
+                except Exception as e:
+                    logger.warning(f"[UDP-TUN] Notify target failed: {e}")
+                    registry.close_flow(flow.flow_id)
+                    continue
+                logger.info(f"[UDP-TUN] allocated flow={flow.flow_id} "
+                            f"{peer_uuid[:8]}..(a)<->{target_uuid[:8]}..(b)")
+
+            elif msg_type == "udp_tunnel_close":
+                flow_id = int(data.get("flow_id", 0))
+                flow = registry.flows.get(flow_id)
+                if flow and peer_uuid in (flow.peer_a_uuid, flow.peer_b_uuid):
+                    registry.close_flow(flow_id)
+                    # Notify the other peer so it can tear down its tunnel endpoint
+                    other_uuid = flow.peer_b_uuid if peer_uuid == flow.peer_a_uuid else flow.peer_a_uuid
+                    other = registry.lookup(other_uuid)
+                    if other:
+                        try:
+                            await ws_send(other.writer, json.dumps({
+                                "type": "udp_tunnel_closed",
+                                "flow_id": flow_id,
+                                "reason": "peer_closed"}))
+                        except Exception:
+                            pass
+
             elif msg_type == "ping":
                 if peer_uuid:
                     peer = registry.lookup(peer_uuid)
@@ -405,10 +532,102 @@ async def handle_client(reader, writer, psk: str):
         logger.info(f"[DISC] {addr} (uuid={uuid_str}, remaining peers={registry.stats})")
 
 # ============================================================
+# UDP tunnel relay (datagram plane)
+# ============================================================
+#
+# Packet format (network byte order):
+#     [0:2]  magic 'VP' (0x56, 0x50)
+#     [2:4]  flow_id (uint16)
+#     [4:6]  src_port (uint16) — opaque to relay, interpreted by peers
+#     [6:8]  dst_port (uint16) — opaque to relay, interpreted by peers
+#     [8:24] HMAC-SHA256(token, magic||flow_id||src_port||dst_port||payload)[:16]
+#     [24:]  payload (UDP datagram)
+#
+# Both peers share the same 16-byte token (handed out via WS allocate). The
+# relay verifies HMAC, pins sender address on first-valid-arrival (side a/b),
+# and forwards the packet as-is (token is symmetric → receiver verifies too).
+# UDP_TUNNEL_PORT / UDP_TUNNEL_ADVERTISE_HOST are set by main() before run.
+
+UDP_TUNNEL_MAGIC = b"VP"
+UDP_TUNNEL_HEADER_LEN = 24  # magic(2) + flow_id(2) + src/dst port(2+2) + hmac(16)
+UDP_TUNNEL_PORT: int = 9998
+UDP_TUNNEL_ADVERTISE_HOST: str = ""  # what we tell peers to connect to
+
+
+class UdpRelayProtocol(asyncio.DatagramProtocol):
+    """Relay UDP datagrams between two pinned peer endpoints, keyed by flow_id."""
+
+    def __init__(self):
+        self.transport: Optional[asyncio.DatagramTransport] = None
+
+    def connection_made(self, transport):
+        self.transport = transport
+        sockname = transport.get_extra_info("sockname")
+        logger.info(f"[UDP-TUN] relay UDP datagram plane listening on {sockname}")
+
+    def datagram_received(self, data: bytes, addr):
+        if len(data) < UDP_TUNNEL_HEADER_LEN:
+            return
+        if data[0:2] != UDP_TUNNEL_MAGIC:
+            return
+        flow_id = struct.unpack("!H", data[2:4])[0]
+        recv_hmac = data[8:24]
+        payload = data[24:]
+
+        flow = registry.flows.get(flow_id)
+        if not flow:
+            return  # unknown/expired flow
+
+        # HMAC covers everything except the HMAC bytes themselves.
+        signed = data[0:8] + payload
+        expected = hmac.new(flow.token, signed, hashlib.sha256).digest()[:16]
+        if not hmac.compare_digest(expected, recv_hmac):
+            logger.debug(f"[UDP-TUN] bad HMAC flow={flow_id} from {addr}")
+            return
+
+        flow.last_active = time.time()
+
+        # Pin source addr to side a or b on first valid arrival.
+        if addr == flow.addr_a or addr == flow.addr_b:
+            pass  # already pinned
+        elif flow.addr_a is None:
+            flow.addr_a = addr
+            logger.info(f"[UDP-TUN] flow={flow_id} pinned addr_a={addr}")
+        elif flow.addr_b is None:
+            flow.addr_b = addr
+            logger.info(f"[UDP-TUN] flow={flow_id} pinned addr_b={addr}")
+        else:
+            # Both sides already pinned and this isn't either — reject.
+            return
+
+        # Forward as-is to the other side (both peers share the same token,
+        # so the receiver can verify HMAC without re-signing).
+        if addr == flow.addr_a:
+            peer_addr = flow.addr_b
+        else:
+            peer_addr = flow.addr_a
+        if peer_addr is not None and self.transport is not None:
+            self.transport.sendto(data, peer_addr)
+
+
+async def _udp_flow_reaper(idle_timeout: float = 300.0, interval: float = 30.0):
+    """Reap UDP flows that have been idle for too long."""
+    while True:
+        await asyncio.sleep(interval)
+        now = time.time()
+        for fid in [fid for fid, f in registry.flows.items()
+                    if now - f.last_active > idle_timeout]:
+            logger.info(f"[UDP-TUN] reap idle flow={fid}")
+            registry.close_flow(fid)
+
+
+# ============================================================
 # Server main
 # ============================================================
 
-async def run_server(host: str, port: int, psk: str, certfile: str = "", keyfile: str = ""):
+async def run_server(host: str, port: int, psk: str,
+                     certfile: str = "", keyfile: str = "",
+                     udp_port: int = 9998):
     ssl_ctx = None
     if certfile and keyfile:
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -424,21 +643,42 @@ async def run_server(host: str, port: int, psk: str, certfile: str = "", keyfile
     server = await asyncio.start_server(client_cb, host, port, ssl=ssl_ctx)
     addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
 
+    # UDP datagram plane (tunnel data).
+    loop = asyncio.get_running_loop()
+    udp_transport, _ = await loop.create_datagram_endpoint(
+        lambda: UdpRelayProtocol(),
+        local_addr=(host, udp_port),
+    )
+    udp_sockname = udp_transport.get_extra_info("sockname")
+
+    # Idle flow reaper
+    reaper_task = asyncio.create_task(_udp_flow_reaper())
+
     logger.info("=" * 50)
     logger.info("  VipleStream Signaling Relay")
     logger.info("=" * 50)
-    logger.info(f"  Listening: {addrs}")
-    logger.info(f"  PSK auth:  {'enabled' if psk else 'disabled (open)'}")
-    logger.info(f"  TLS:       {'enabled' if ssl_ctx else 'disabled'}")
+    logger.info(f"  WS listening:  {addrs}")
+    logger.info(f"  UDP tunnel:    {udp_sockname}  (advertise={UDP_TUNNEL_ADVERTISE_HOST or '<dynamic>'})")
+    logger.info(f"  PSK auth:      {'enabled' if psk else 'disabled (open)'}")
+    logger.info(f"  TLS:           {'enabled' if ssl_ctx else 'disabled'}")
     logger.info("=" * 50)
 
-    async with server:
-        await server.serve_forever()
+    try:
+        async with server:
+            await server.serve_forever()
+    finally:
+        reaper_task.cancel()
+        udp_transport.close()
 
 def main():
     parser = argparse.ArgumentParser(description="VipleStream Signaling Relay Server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=9999, help="Listen port (default: 9999)")
+    parser.add_argument("--port", type=int, default=9999, help="WS listen port (default: 9999)")
+    parser.add_argument("--udp-port", type=int, default=9998,
+                        help="UDP tunnel listen port (default: 9998)")
+    parser.add_argument("--udp-advertise-host", default="",
+                        help="Hostname/IP to advertise to peers for UDP tunnel "
+                             "(default: empty = peer uses the WS host)")
     parser.add_argument("--psk", default="", help="Pre-shared key for authentication (empty=open)")
     parser.add_argument("--tls", nargs=2, metavar=("CERT", "KEY"), help="TLS cert and key files")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
@@ -452,8 +692,14 @@ def main():
 
     certfile, keyfile = (args.tls[0], args.tls[1]) if args.tls else ("", "")
 
+    # Export UDP tunnel config so handle_client can include it in allocated messages.
+    global UDP_TUNNEL_PORT, UDP_TUNNEL_ADVERTISE_HOST
+    UDP_TUNNEL_PORT = args.udp_port
+    UDP_TUNNEL_ADVERTISE_HOST = args.udp_advertise_host
+
     try:
-        asyncio.run(run_server(args.host, args.port, args.psk, certfile, keyfile))
+        asyncio.run(run_server(args.host, args.port, args.psk, certfile, keyfile,
+                               udp_port=args.udp_port))
     except KeyboardInterrupt:
         logger.info("Relay server stopped.")
 
