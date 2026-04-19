@@ -152,12 +152,28 @@ namespace tunnel_session {
       // src_port so the reply path can tunnel back to the right peer.
       set_handler(bound_port,
         [this](const uint8_t *data, size_t len, uint16_t src_port) {
-          _bridge_peer_port.store(src_port);
+          static thread_local int kInCount = 0;
+          bool peer_changed =
+            _bridge_peer_port.exchange(src_port) != src_port;
+          if (peer_changed) {
+            BOOST_LOG(info) << "[TUNNEL/BRIDGE] learned client ENet "
+                               "port " << src_port;
+          }
           if (!_bridge_sock) return;
           boost::system::error_code ec;
-          std::lock_guard<std::mutex> l(_bridge_send_mtx);
-          _bridge_sock->send_to(asio::buffer(data, len),
-                                _bridge_loopback, 0, ec);
+          size_t sent = 0;
+          {
+            std::lock_guard<std::mutex> l(_bridge_send_mtx);
+            sent = _bridge_sock->send_to(asio::buffer(data, len),
+                                         _bridge_loopback, 0, ec);
+          }
+          if (kInCount++ < 5) {
+            BOOST_LOG(info) << "[TUNNEL/BRIDGE] in  #" << kInCount
+                            << " src=" << src_port << " len=" << len
+                            << " inject->127.0.0.1:" << _bridge_server_port
+                            << " sent=" << sent
+                            << (ec ? (" ec=" + ec.message()) : std::string{});
+          }
         });
 
       BOOST_LOG(info) << "[TUNNEL] ENet loopback bridge up for port "
@@ -180,6 +196,7 @@ namespace tunnel_session {
   void TunnelSession::bridge_recv_loop() {
     std::vector<uint8_t> buf(2048);
     asio::ip::udp::endpoint sender;
+    int kOutCount = 0;
     while (_bridge_running.load() && _bridge_sock) {
       boost::system::error_code ec;
       size_t n = _bridge_sock->receive_from(asio::buffer(buf), sender, 0, ec);
@@ -188,16 +205,27 @@ namespace tunnel_session {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         continue;
       }
-      // Only accept replies from the loopback ENet endpoint we injected
-      // into. This guards against stray senders since we bound on
-      // 127.0.0.1 but the source port must match Sunshine's ENet.
-      if (sender != _bridge_loopback) continue;
+      if (sender != _bridge_loopback) {
+        BOOST_LOG(warning) << "[TUNNEL/BRIDGE] drop reply from unexpected "
+                              "sender " << sender
+                           << " (expected " << _bridge_loopback << ")";
+        continue;
+      }
 
       uint16_t peer_port = _bridge_peer_port.load();
-      if (peer_port == 0) continue;  // no client ENet port learned yet
+      if (peer_port == 0) {
+        BOOST_LOG(warning) << "[TUNNEL/BRIDGE] reply received but no "
+                              "client ENet port learned yet, dropping "
+                              "(ENet reply len=" << n << ")";
+        continue;
+      }
 
-      // Tunnel back to the client's ENet ephemeral port.
-      send(_bridge_server_port, peer_port, buf.data(), n);
+      bool ok = send(_bridge_server_port, peer_port, buf.data(), n);
+      if (kOutCount++ < 5) {
+        BOOST_LOG(info) << "[TUNNEL/BRIDGE] out #" << kOutCount
+                        << " ENet->" << peer_port
+                        << " len=" << n << " ok=" << ok;
+      }
     }
   }
 
