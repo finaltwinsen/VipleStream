@@ -6,8 +6,10 @@ SdlAudioRenderer::SdlAudioRenderer()
     : m_AudioDevice(0),
       m_AudioBuffer(nullptr)
 {
-    SDL_assert(!SDL_WasInit(SDL_INIT_AUDIO));
-
+    // VipleStream: DO NOT assert(!SDL_WasInit(AUDIO)). We intentionally
+    // leave SDL_INIT_AUDIO initialized across sessions — see the
+    // destructor for why. SDL_InitSubSystem is refcounted so calling
+    // it again on an already-inited subsystem is cheap (just increments).
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_AUDIO) failed: %s",
@@ -83,8 +85,21 @@ SdlAudioRenderer::~SdlAudioRenderer()
         SDL_free(m_AudioBuffer);
     }
 
-    SDL_QuitSubSystem(SDL_INIT_AUDIO);
-    SDL_assert(!SDL_WasInit(SDL_INIT_AUDIO));
+    // VipleStream: DO NOT call SDL_QuitSubSystem(SDL_INIT_AUDIO) here.
+    //
+    // Symbolicated crash dump (SDL3.dll+0x176B85, RBX/RCX = ASCII bytes
+    // "a:b0,b:b...", RAX = current TID) shows SDL3 holds a dangling
+    // reference to a closed audio device after SDL_CloseAudioDevice +
+    // SDL_QuitSubSystem. A SDL-internal worker thread then runs the
+    // recursive-lock-acquire helper (which calls GetCurrentThreadId and
+    // compares it against lock->owner_tid at offset 0xC) on a freed
+    // device — the memory has already been reused by an ASCII string
+    // allocation, so the dereference faults.
+    //
+    // Leaving SDL_INIT_AUDIO initialized across session boundaries
+    // keeps the subsystem's thread alive and its internal device tables
+    // coherent between close-device / open-device cycles, side-stepping
+    // the race. SDL_Quit() at process exit cleans up properly.
 }
 
 void* SdlAudioRenderer::getAudioBuffer(int*)
