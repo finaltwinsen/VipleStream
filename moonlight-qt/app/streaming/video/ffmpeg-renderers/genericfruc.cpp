@@ -178,6 +178,7 @@ bool GenericFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t heig
 
     if (!loadShaders()) return false;
     if (!createTextures()) return false;
+    createTimestampQueries();  // non-critical: perf log only, continue on failure
 
     // Constant buffer
     D3D11_BUFFER_DESC cbDesc = {};
@@ -218,6 +219,13 @@ void GenericFRUC::destroy() {
     m_MotionField.Reset(); m_MotionFieldUAV.Reset(); m_MotionFieldSRV.Reset();
     m_PrevMotionField.Reset(); m_PrevMotionFieldSRV.Reset();
     m_InterpTexture.Reset(); m_InterpUAV.Reset(); m_InterpSRV.Reset();
+    for (int i = 0; i < TS_RING; i++) {
+        m_TsDisjoint[i].Reset();
+        m_TsMeBegin[i].Reset(); m_TsMeEnd[i].Reset();
+        m_TsWarpBegin[i].Reset(); m_TsWarpEnd[i].Reset();
+    }
+    m_TsQueriesValid = false;
+    m_LastMeMs = m_LastWarpMs = 0.0;
 }
 
 bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
@@ -231,6 +239,14 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
     if (m_FrameCount <= 1) {
         ctx->CopyResource(m_PrevFrame.Get(), m_RenderTexture.Get());
         return false;
+    }
+
+    // VipleStream: bracket the whole FRUC work in a disjoint query
+    // so GetData() can tell us whether the GPU's timestamp clock was
+    // stable over the window. Per-stage begin/end timestamps get
+    // emitted around the two Dispatch() calls below.
+    if (m_TsQueriesValid) {
+        ctx->Begin(m_TsDisjoint[m_TsSlot].Get());
     }
 
     // --- Stage 2: Motion Estimation (full-res, strided block matching) ---
@@ -254,7 +270,9 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
 
         uint32_t groupsX = (m_Width / (BLOCK_SIZE * DOWNSCALE) + 7) / 8;
         uint32_t groupsY = (m_Height / (BLOCK_SIZE * DOWNSCALE) + 7) / 8;
+        if (m_TsQueriesValid) ctx->End(m_TsMeBegin[m_TsSlot].Get());
         ctx->Dispatch(groupsX, groupsY, 1);
+        if (m_TsQueriesValid) ctx->End(m_TsMeEnd[m_TsSlot].Get());
 
         // Unbind
         ID3D11ShaderResourceView* nullSRVs[3] = {};
@@ -287,7 +305,9 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
 
         uint32_t groupsX = (m_Width + 7) / 8;
         uint32_t groupsY = (m_Height + 7) / 8;
+        if (m_TsQueriesValid) ctx->End(m_TsWarpBegin[m_TsSlot].Get());
         ctx->Dispatch(groupsX, groupsY, 1);
+        if (m_TsQueriesValid) ctx->End(m_TsWarpEnd[m_TsSlot].Get());
 
         // Unbind
         ID3D11ShaderResourceView* nullSRVs[3] = {};
@@ -295,6 +315,15 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
         ID3D11UnorderedAccessView* nullUAVs[1] = {};
         ctx->CSSetUnorderedAccessViews(0, 1, nullUAVs, nullptr);
         ctx->CSSetShader(nullptr, nullptr, 0);
+    }
+
+    // End the disjoint query and consume whichever frame's queries
+    // are now ready on the GPU (typically N-2). This updates
+    // m_LastMeMs / m_LastWarpMs for the next periodic stats log.
+    if (m_TsQueriesValid) {
+        ctx->End(m_TsDisjoint[m_TsSlot].Get());
+        m_TsSlot = (m_TsSlot + 1) % TS_RING;
+        readTimestamps(ctx);
     }
 
     // --- Save current frame as previous for next iteration ---
@@ -364,6 +393,67 @@ void GenericFRUC::skipFrame(ID3D11DeviceContext* ctx) {
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-FRUC-Generic] frame=%d SKIPPED (late arrival)", m_FrameCount);
+}
+
+// VipleStream: allocate a 3-slot ring of TIMESTAMP_DISJOINT +
+// begin/end TIMESTAMP queries so submitFrame() can bracket the
+// motion-est and warp dispatches with GPU-side timestamps.
+// Non-critical: if any Create fails, m_TsQueriesValid stays false
+// and the renderer just reports 0 ms for the two stages.
+bool GenericFRUC::createTimestampQueries()
+{
+    D3D11_QUERY_DESC dj = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
+    D3D11_QUERY_DESC ts = { D3D11_QUERY_TIMESTAMP, 0 };
+    for (int i = 0; i < TS_RING; i++) {
+        if (FAILED(m_Device->CreateQuery(&dj, &m_TsDisjoint[i])) ||
+            FAILED(m_Device->CreateQuery(&ts, &m_TsMeBegin[i])) ||
+            FAILED(m_Device->CreateQuery(&ts, &m_TsMeEnd[i])) ||
+            FAILED(m_Device->CreateQuery(&ts, &m_TsWarpBegin[i])) ||
+            FAILED(m_Device->CreateQuery(&ts, &m_TsWarpEnd[i]))) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-Generic] CreateQuery failed; "
+                        "per-stage GPU timing will be unavailable");
+            for (int j = 0; j < TS_RING; j++) {
+                m_TsDisjoint[j].Reset();
+                m_TsMeBegin[j].Reset(); m_TsMeEnd[j].Reset();
+                m_TsWarpBegin[j].Reset(); m_TsWarpEnd[j].Reset();
+            }
+            m_TsQueriesValid = false;
+            return false;
+        }
+    }
+    m_TsQueriesValid = true;
+    return true;
+}
+
+// VipleStream: pick the oldest slot in the ring (after advancing
+// the write cursor in submitFrame) and poll its GetData without
+// blocking. If the frame has retired its queries, convert to ms
+// via the disjoint frequency and update an EMA.
+void GenericFRUC::readTimestamps(ID3D11DeviceContext* ctx)
+{
+    const int read = m_TsSlot;  // this is the slot we JUST advanced PAST
+    // GetData(..., 0) returns S_FALSE if the data isn't ready yet —
+    // we tolerate that silently, the next frame's read will catch up.
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {};
+    if (ctx->GetData(m_TsDisjoint[read].Get(), &dj, sizeof(dj), 0) != S_OK) return;
+    if (dj.Disjoint || dj.Frequency == 0) return;
+    UINT64 meBegin = 0, meEnd = 0, warpBegin = 0, warpEnd = 0;
+    if (ctx->GetData(m_TsMeBegin[read].Get(), &meBegin, sizeof(meBegin), 0) != S_OK) return;
+    if (ctx->GetData(m_TsMeEnd[read].Get(), &meEnd, sizeof(meEnd), 0) != S_OK) return;
+    if (ctx->GetData(m_TsWarpBegin[read].Get(), &warpBegin, sizeof(warpBegin), 0) != S_OK) return;
+    if (ctx->GetData(m_TsWarpEnd[read].Get(), &warpEnd, sizeof(warpEnd), 0) != S_OK) return;
+
+    double toMs = 1000.0 / (double)dj.Frequency;
+    double meMs = (meEnd > meBegin) ? (meEnd - meBegin) * toMs : 0.0;
+    double warpMs = (warpEnd > warpBegin) ? (warpEnd - warpBegin) * toMs : 0.0;
+
+    // EMA (0.2 weight on new sample) keeps the log line stable
+    // between 5-second reports even though individual-frame times
+    // wobble ~20% because of scheduler / clock-scaling noise.
+    const double a = 0.2;
+    m_LastMeMs   = m_LastMeMs   == 0.0 ? meMs   : a * meMs   + (1 - a) * m_LastMeMs;
+    m_LastWarpMs = m_LastWarpMs == 0.0 ? warpMs : a * warpMs + (1 - a) * m_LastWarpMs;
 }
 
 #endif // _WIN32

@@ -43,6 +43,14 @@ public:
     bool isInitialized() const { return m_MotionEstCS[m_QualityLevel] != nullptr; }
     void setQualityLevel(int level) { m_QualityLevel = (level >= 0 && level <= 2) ? level : 1; }
 
+    // VipleStream: rolling-average GPU time for each dispatch (ms).
+    // Zero until enough frames have retired that timestamp queries are
+    // ready. Updated inside submitFrame(); read by the renderer for
+    // the periodic [VIPLE-FRUC-Stats] line so we can see per-stage
+    // budget without an external profiler.
+    double getLastMeTimeMs() const { return m_LastMeMs; }
+    double getLastWarpTimeMs() const { return m_LastWarpMs; }
+
 private:
     static const uint32_t BLOCK_SIZE = 8;      // Conceptual block size at 1/4 resolution
     static const uint32_t SEARCH_RADIUS = 12;  // Search radius in pixels
@@ -102,6 +110,25 @@ private:
     uint32_t m_QuarterWidth = 0;
     uint32_t m_QuarterHeight = 0;
     int m_FrameCount = 0;
+
+    // VipleStream: GPU-side timestamp queries for the ME + warp
+    // dispatches. Double-buffered so the CPU reads frame N-2's
+    // results while frame N is issuing new queries — avoids the
+    // stall that GetData(..., 0) would cause on the current frame.
+    static const int TS_RING = 3;
+    Microsoft::WRL::ComPtr<ID3D11Query> m_TsDisjoint[TS_RING];
+    Microsoft::WRL::ComPtr<ID3D11Query> m_TsMeBegin[TS_RING];
+    Microsoft::WRL::ComPtr<ID3D11Query> m_TsMeEnd[TS_RING];
+    Microsoft::WRL::ComPtr<ID3D11Query> m_TsWarpBegin[TS_RING];
+    Microsoft::WRL::ComPtr<ID3D11Query> m_TsWarpEnd[TS_RING];
+    int m_TsSlot = 0;
+    bool m_TsQueriesValid = false;
+    // Exponential moving average so the reported number is stable
+    // between log lines (raw per-frame numbers bounce 20%+).
+    double m_LastMeMs = 0.0;
+    double m_LastWarpMs = 0.0;
+    bool createTimestampQueries();
+    void readTimestamps(ID3D11DeviceContext* ctx);
 
     struct alignas(16) CBData {
         uint32_t frameWidth;

@@ -997,14 +997,23 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
 
         // Periodic telemetry: FRUC engagement ratio (skip vs submit) + gap avg.
         // A rising skip_ratio means connection/GPU is struggling to keep up.
+        // Per-stage GPU time comes from D3D11 timestamp queries inside
+        // GenericFRUC (EMA of the ME and warp dispatches). Reports in
+        // ms so we can tell at a glance whether additions to either
+        // stage are still in budget.
         if (now - m_FrucLastStatLogMs > 5000) {
             uint32_t tot = m_FrucSubmitCount + m_FrucSkipCount;
             if (tot > 0) {
+                double me_ms = m_GenericFRUC ? m_GenericFRUC->getLastMeTimeMs() : 0.0;
+                double warp_ms = m_GenericFRUC ? m_GenericFRUC->getLastWarpTimeMs() : 0.0;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC-Stats] submit=%u skip=%u skip_ratio=%.1f%% gapAvg=%llums (expected=%ums)",
+                            "[VIPLE-FRUC-Stats] submit=%u skip=%u skip_ratio=%.1f%% "
+                            "gapAvg=%llums (expected=%ums) "
+                            "me_gpu=%.2fms warp_gpu=%.2fms (total=%.2fms)",
                             m_FrucSubmitCount, m_FrucSkipCount,
                             100.0 * m_FrucSkipCount / tot,
-                            (unsigned long long)gapAvg, (unsigned)expectedMs);
+                            (unsigned long long)gapAvg, (unsigned)expectedMs,
+                            me_ms, warp_ms, me_ms + warp_ms);
             }
             m_FrucLastStatLogMs = now;
         }
