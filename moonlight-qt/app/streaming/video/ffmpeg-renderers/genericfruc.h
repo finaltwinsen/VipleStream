@@ -49,6 +49,7 @@ public:
     // the periodic [VIPLE-FRUC-Stats] line so we can see per-stage
     // budget without an external profiler.
     double getLastMeTimeMs() const { return m_LastMeMs; }
+    double getLastMedianTimeMs() const { return m_LastMedianMs; }
     double getLastWarpTimeMs() const { return m_LastWarpMs; }
 
 private:
@@ -64,6 +65,11 @@ private:
     // Compute shaders — 3 quality variants each
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> m_MotionEstCS[3];  // [0]=quality [1]=balanced [2]=performance
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> m_WarpBlendCS[3];
+    // VipleStream: 3x3 median filter over the MV field. One shader
+    // (no quality variants — median is deterministic). Runs between
+    // ME and warp; kills single-block MV outliers that otherwise
+    // show up as shimmer near motion boundaries.
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> m_MvMedianCS;
     int m_QualityLevel = 1;  // default: balanced
 
     // Constant buffer
@@ -97,6 +103,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_PrevMotionField;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_PrevMotionFieldSRV;
 
+    // VipleStream: post-median-filtered MV field, same format as the
+    // raw m_MotionField. warp reads from the filtered SRV.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_MotionFieldFiltered;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> m_MotionFieldFilteredUAV;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_MotionFieldFilteredSRV;
+
     // MV readback for diagnostics
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_MotionFieldStaging;
 
@@ -119,6 +131,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Query> m_TsDisjoint[TS_RING];
     Microsoft::WRL::ComPtr<ID3D11Query> m_TsMeBegin[TS_RING];
     Microsoft::WRL::ComPtr<ID3D11Query> m_TsMeEnd[TS_RING];
+    Microsoft::WRL::ComPtr<ID3D11Query> m_TsMedianBegin[TS_RING];
+    Microsoft::WRL::ComPtr<ID3D11Query> m_TsMedianEnd[TS_RING];
     Microsoft::WRL::ComPtr<ID3D11Query> m_TsWarpBegin[TS_RING];
     Microsoft::WRL::ComPtr<ID3D11Query> m_TsWarpEnd[TS_RING];
     int m_TsSlot = 0;
@@ -126,6 +140,7 @@ private:
     // Exponential moving average so the reported number is stable
     // between log lines (raw per-frame numbers bounce 20%+).
     double m_LastMeMs = 0.0;
+    double m_LastMedianMs = 0.0;
     double m_LastWarpMs = 0.0;
     bool createTimestampQueries();
     void readTimestamps(ID3D11DeviceContext* ctx);

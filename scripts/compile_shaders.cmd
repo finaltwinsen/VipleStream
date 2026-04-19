@@ -26,3 +26,9 @@ for %%Q in (0 1 2) do (
     "%FXC%" /T cs_5_0 /O1 /D QUALITY_LEVEL=%%Q /Fo "%SHADERS%\d3d11_warp_!QNAME!.fxc" "%SHADERS%\d3d11_warp_compute.hlsl"
     if errorlevel 1 (echo   FAILED) else (echo   OK)
 )
+
+:: MV field median filter (no quality variants — deterministic).
+echo.
+echo Compiling mv_median (cs_5_0)...
+"%FXC%" /T cs_5_0 /O1 /Fo "%SHADERS%\d3d11_mv_median.fxc" "%SHADERS%\d3d11_mv_median.hlsl"
+if errorlevel 1 (echo   FAILED) else (echo   OK)

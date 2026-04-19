@@ -56,8 +56,23 @@ bool GenericFRUC::loadShaders() {
         }
     }
 
+    // VipleStream: 3x3 median-filter shader for the MV field. Single
+    // variant (no quality tier — deterministic filter).
+    QByteArray medData = Path::readDataFile("d3d11_mv_median.fxc");
+    if (medData.isEmpty()) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-FRUC-Generic] d3d11_mv_median.fxc not found");
+        return false;
+    }
+    if (FAILED(m_Device->CreateComputeShader(medData.constData(), medData.size(),
+                                             nullptr, &m_MvMedianCS))) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-FRUC-Generic] CreateComputeShader(mv_median) failed");
+        return false;
+    }
+
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-FRUC-Generic] All shader variants loaded (Quality/Balanced/Performance)");
+                "[VIPLE-FRUC-Generic] All shader variants loaded (Quality/Balanced/Performance + MV median)");
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-FRUC-Generic] Active quality: %s", qualityLabels[m_QualityLevel]);
     return true;
@@ -139,6 +154,17 @@ bool GenericFRUC::createTextures() {
         if (FAILED(hr)) return false;
     }
 
+    // --- Median-filtered MV field (same format as m_MotionField) ---
+    // warp reads this SRV; the 3x3 median pass writes to it via UAV.
+    hr = m_Device->CreateTexture2D(&mvDesc, nullptr, &m_MotionFieldFiltered);
+    if (FAILED(hr)) return false;
+    hr = m_Device->CreateUnorderedAccessView(m_MotionFieldFiltered.Get(), nullptr,
+                                             &m_MotionFieldFilteredUAV);
+    if (FAILED(hr)) return false;
+    hr = m_Device->CreateShaderResourceView(m_MotionFieldFiltered.Get(), nullptr,
+                                            &m_MotionFieldFilteredSRV);
+    if (FAILED(hr)) return false;
+
     // --- MV staging texture for diagnostic readback ---
     {
         D3D11_TEXTURE2D_DESC stagingDesc = mvDesc;
@@ -210,6 +236,7 @@ void GenericFRUC::destroy() {
         m_MotionEstCS[q].Reset();
         m_WarpBlendCS[q].Reset();
     }
+    m_MvMedianCS.Reset();
     m_ConstantBuffer.Reset();
     m_PointSampler.Reset();
     m_LinearSampler.Reset();
@@ -218,14 +245,18 @@ void GenericFRUC::destroy() {
     m_CurrFrameQuarter.Reset(); m_CurrFrameQuarterSRV.Reset();
     m_MotionField.Reset(); m_MotionFieldUAV.Reset(); m_MotionFieldSRV.Reset();
     m_PrevMotionField.Reset(); m_PrevMotionFieldSRV.Reset();
+    m_MotionFieldFiltered.Reset();
+    m_MotionFieldFilteredUAV.Reset();
+    m_MotionFieldFilteredSRV.Reset();
     m_InterpTexture.Reset(); m_InterpUAV.Reset(); m_InterpSRV.Reset();
     for (int i = 0; i < TS_RING; i++) {
         m_TsDisjoint[i].Reset();
-        m_TsMeBegin[i].Reset(); m_TsMeEnd[i].Reset();
-        m_TsWarpBegin[i].Reset(); m_TsWarpEnd[i].Reset();
+        m_TsMeBegin[i].Reset();     m_TsMeEnd[i].Reset();
+        m_TsMedianBegin[i].Reset(); m_TsMedianEnd[i].Reset();
+        m_TsWarpBegin[i].Reset();   m_TsWarpEnd[i].Reset();
     }
     m_TsQueriesValid = false;
-    m_LastMeMs = m_LastWarpMs = 0.0;
+    m_LastMeMs = m_LastMedianMs = m_LastWarpMs = 0.0;
 }
 
 bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
@@ -284,6 +315,41 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
         ctx->CopyResource(m_PrevMotionField.Get(), m_MotionField.Get());
     }
 
+    // --- Stage 2.5: 3x3 median filter on the MV field ---
+    // Kills single-block outlier MVs that would otherwise get
+    // blended into neighboring static regions by warp's bilinear
+    // MV sampling. Trivially cheap — 30x17 grid at 1080p.
+    {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        ctx->Map(m_ConstantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        CBData* cb = (CBData*)mapped.pData;
+        uint32_t mvW = m_Width / (BLOCK_SIZE * DOWNSCALE);
+        uint32_t mvH = m_Height / (BLOCK_SIZE * DOWNSCALE);
+        cb->frameWidth = mvW;          // median shader reads as mvWidth
+        cb->frameHeight = mvH;         // ...           mvHeight
+        cb->blockSize = 0;             // unused by median shader
+        cb->searchRadius = 0;
+        ctx->Unmap(m_ConstantBuffer.Get(), 0);
+
+        ctx->CSSetShader(m_MvMedianCS.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[] = { m_MotionFieldSRV.Get() };
+        ctx->CSSetShaderResources(0, 1, srvs);
+        ID3D11UnorderedAccessView* uavs[] = { m_MotionFieldFilteredUAV.Get() };
+        ctx->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+        ctx->CSSetConstantBuffers(0, 1, m_ConstantBuffer.GetAddressOf());
+
+        uint32_t groupsX = (mvW + 7) / 8;
+        uint32_t groupsY = (mvH + 7) / 8;
+        if (m_TsQueriesValid) ctx->End(m_TsMedianBegin[m_TsSlot].Get());
+        ctx->Dispatch(groupsX, groupsY, 1);
+        if (m_TsQueriesValid) ctx->End(m_TsMedianEnd[m_TsSlot].Get());
+
+        ID3D11ShaderResourceView* nullSRVs[1] = {};
+        ctx->CSSetShaderResources(0, 1, nullSRVs);
+        ID3D11UnorderedAccessView* nullUAVs[1] = {};
+        ctx->CSSetUnorderedAccessViews(0, 1, nullUAVs, nullptr);
+    }
+
     // --- Stage 3: Warp + Blend ---
     {
         D3D11_MAPPED_SUBRESOURCE mapped;
@@ -296,7 +362,11 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
         ctx->Unmap(m_ConstantBuffer.Get(), 0);
 
         ctx->CSSetShader(m_WarpBlendCS[m_QualityLevel].Get(), nullptr, 0);
-        ID3D11ShaderResourceView* srvs[] = { m_PrevFrameSRV.Get(), m_RenderSRV.Get(), m_MotionFieldSRV.Get() };
+        // VipleStream: warp reads the median-filtered MV field, not
+        // the raw ME output. The filter kills 1-block outliers that
+        // would otherwise bleed into static neighbors via bilinear
+        // MV sampling.
+        ID3D11ShaderResourceView* srvs[] = { m_PrevFrameSRV.Get(), m_RenderSRV.Get(), m_MotionFieldFilteredSRV.Get() };
         ctx->CSSetShaderResources(0, 3, srvs);
         ID3D11UnorderedAccessView* uavs[] = { m_InterpUAV.Get() };
         ctx->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
@@ -408,6 +478,8 @@ bool GenericFRUC::createTimestampQueries()
         if (FAILED(m_Device->CreateQuery(&dj, &m_TsDisjoint[i])) ||
             FAILED(m_Device->CreateQuery(&ts, &m_TsMeBegin[i])) ||
             FAILED(m_Device->CreateQuery(&ts, &m_TsMeEnd[i])) ||
+            FAILED(m_Device->CreateQuery(&ts, &m_TsMedianBegin[i])) ||
+            FAILED(m_Device->CreateQuery(&ts, &m_TsMedianEnd[i])) ||
             FAILED(m_Device->CreateQuery(&ts, &m_TsWarpBegin[i])) ||
             FAILED(m_Device->CreateQuery(&ts, &m_TsWarpEnd[i]))) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -415,8 +487,9 @@ bool GenericFRUC::createTimestampQueries()
                         "per-stage GPU timing will be unavailable");
             for (int j = 0; j < TS_RING; j++) {
                 m_TsDisjoint[j].Reset();
-                m_TsMeBegin[j].Reset(); m_TsMeEnd[j].Reset();
-                m_TsWarpBegin[j].Reset(); m_TsWarpEnd[j].Reset();
+                m_TsMeBegin[j].Reset();     m_TsMeEnd[j].Reset();
+                m_TsMedianBegin[j].Reset(); m_TsMedianEnd[j].Reset();
+                m_TsWarpBegin[j].Reset();   m_TsWarpEnd[j].Reset();
             }
             m_TsQueriesValid = false;
             return false;
@@ -438,22 +511,28 @@ void GenericFRUC::readTimestamps(ID3D11DeviceContext* ctx)
     D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {};
     if (ctx->GetData(m_TsDisjoint[read].Get(), &dj, sizeof(dj), 0) != S_OK) return;
     if (dj.Disjoint || dj.Frequency == 0) return;
-    UINT64 meBegin = 0, meEnd = 0, warpBegin = 0, warpEnd = 0;
-    if (ctx->GetData(m_TsMeBegin[read].Get(), &meBegin, sizeof(meBegin), 0) != S_OK) return;
-    if (ctx->GetData(m_TsMeEnd[read].Get(), &meEnd, sizeof(meEnd), 0) != S_OK) return;
-    if (ctx->GetData(m_TsWarpBegin[read].Get(), &warpBegin, sizeof(warpBegin), 0) != S_OK) return;
-    if (ctx->GetData(m_TsWarpEnd[read].Get(), &warpEnd, sizeof(warpEnd), 0) != S_OK) return;
+    UINT64 meBegin = 0, meEnd = 0;
+    UINT64 medianBegin = 0, medianEnd = 0;
+    UINT64 warpBegin = 0, warpEnd = 0;
+    if (ctx->GetData(m_TsMeBegin[read].Get(),     &meBegin,     sizeof(meBegin), 0) != S_OK) return;
+    if (ctx->GetData(m_TsMeEnd[read].Get(),       &meEnd,       sizeof(meEnd), 0) != S_OK) return;
+    if (ctx->GetData(m_TsMedianBegin[read].Get(), &medianBegin, sizeof(medianBegin), 0) != S_OK) return;
+    if (ctx->GetData(m_TsMedianEnd[read].Get(),   &medianEnd,   sizeof(medianEnd), 0) != S_OK) return;
+    if (ctx->GetData(m_TsWarpBegin[read].Get(),   &warpBegin,   sizeof(warpBegin), 0) != S_OK) return;
+    if (ctx->GetData(m_TsWarpEnd[read].Get(),     &warpEnd,     sizeof(warpEnd), 0) != S_OK) return;
 
     double toMs = 1000.0 / (double)dj.Frequency;
-    double meMs = (meEnd > meBegin) ? (meEnd - meBegin) * toMs : 0.0;
-    double warpMs = (warpEnd > warpBegin) ? (warpEnd - warpBegin) * toMs : 0.0;
+    double meMs     = (meEnd     > meBegin)     ? (meEnd     - meBegin)     * toMs : 0.0;
+    double medianMs = (medianEnd > medianBegin) ? (medianEnd - medianBegin) * toMs : 0.0;
+    double warpMs   = (warpEnd   > warpBegin)   ? (warpEnd   - warpBegin)   * toMs : 0.0;
 
     // EMA (0.2 weight on new sample) keeps the log line stable
     // between 5-second reports even though individual-frame times
     // wobble ~20% because of scheduler / clock-scaling noise.
     const double a = 0.2;
-    m_LastMeMs   = m_LastMeMs   == 0.0 ? meMs   : a * meMs   + (1 - a) * m_LastMeMs;
-    m_LastWarpMs = m_LastWarpMs == 0.0 ? warpMs : a * warpMs + (1 - a) * m_LastWarpMs;
+    m_LastMeMs     = m_LastMeMs     == 0.0 ? meMs     : a * meMs     + (1 - a) * m_LastMeMs;
+    m_LastMedianMs = m_LastMedianMs == 0.0 ? medianMs : a * medianMs + (1 - a) * m_LastMedianMs;
+    m_LastWarpMs   = m_LastWarpMs   == 0.0 ? warpMs   : a * warpMs   + (1 - a) * m_LastWarpMs;
 }
 
 #endif // _WIN32

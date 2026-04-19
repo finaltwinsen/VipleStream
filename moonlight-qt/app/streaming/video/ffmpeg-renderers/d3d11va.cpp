@@ -1004,16 +1004,18 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         if (now - m_FrucLastStatLogMs > 5000) {
             uint32_t tot = m_FrucSubmitCount + m_FrucSkipCount;
             if (tot > 0) {
-                double me_ms = m_GenericFRUC ? m_GenericFRUC->getLastMeTimeMs() : 0.0;
-                double warp_ms = m_GenericFRUC ? m_GenericFRUC->getLastWarpTimeMs() : 0.0;
+                double me_ms     = m_GenericFRUC ? m_GenericFRUC->getLastMeTimeMs() : 0.0;
+                double median_ms = m_GenericFRUC ? m_GenericFRUC->getLastMedianTimeMs() : 0.0;
+                double warp_ms   = m_GenericFRUC ? m_GenericFRUC->getLastWarpTimeMs() : 0.0;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-FRUC-Stats] submit=%u skip=%u skip_ratio=%.1f%% "
                             "gapAvg=%llums (expected=%ums) "
-                            "me_gpu=%.2fms warp_gpu=%.2fms (total=%.2fms)",
+                            "me_gpu=%.2fms median_gpu=%.2fms warp_gpu=%.2fms (total=%.2fms)",
                             m_FrucSubmitCount, m_FrucSkipCount,
                             100.0 * m_FrucSkipCount / tot,
                             (unsigned long long)gapAvg, (unsigned)expectedMs,
-                            me_ms, warp_ms, me_ms + warp_ms);
+                            me_ms, median_ms, warp_ms,
+                            me_ms + median_ms + warp_ms);
             }
             m_FrucLastStatLogMs = now;
         }

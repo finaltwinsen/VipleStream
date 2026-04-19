@@ -136,7 +136,9 @@ RE_FRUC_STATS = re.compile(
     r"skip=(?P<skip>\d+)\s+"
     r"skip_ratio=(?P<skip_ratio>[\d.]+)%\s+"
     r"gapAvg=(?P<gap_avg>\d+)ms\s+\(expected=(?P<expected>\d+)ms\)"
-    r"(?:\s+me_gpu=(?P<me_gpu>[\d.]+)ms\s+warp_gpu=(?P<warp_gpu>[\d.]+)ms"
+    r"(?:\s+me_gpu=(?P<me_gpu>[\d.]+)ms"
+    r"(?:\s+median_gpu=(?P<median_gpu>[\d.]+)ms)?"
+    r"\s+warp_gpu=(?P<warp_gpu>[\d.]+)ms"
     r"\s+\(total=(?P<fruc_gpu_total>[\d.]+)ms\))?"
 )
 
@@ -187,8 +189,9 @@ class LogParse:
             "skip":       last(stats, "skip"),
             "skip_ratio": last(stats, "skip_ratio"),
             "gap_avg_ms": avg([s.get("gap_avg") for s in stats]),
-            "me_gpu_ms":  avg([s.get("me_gpu") for s in stats]),
-            "warp_gpu_ms":avg([s.get("warp_gpu") for s in stats]),
+            "me_gpu_ms":     avg([s.get("me_gpu") for s in stats]),
+            "median_gpu_ms": avg([s.get("median_gpu") for s in stats]),
+            "warp_gpu_ms":   avg([s.get("warp_gpu") for s in stats]),
             "mv_avg_abs": avg([s.get("avg_abs") for s in mvs]),
             "mv_nz_ratio":avg([
                 (s["nz"] / s["total"]) if s.get("total") else None
@@ -218,6 +221,7 @@ def parse_moonlight_log(path: Path) -> LogParse:
             "gap_avg":    int(d["gap_avg"]),
             "expected":   int(d["expected"]),
             "me_gpu":     float(d["me_gpu"]) if d["me_gpu"] else None,
+            "median_gpu": float(d["median_gpu"]) if d.get("median_gpu") else None,
             "warp_gpu":   float(d["warp_gpu"]) if d["warp_gpu"] else None,
         })
     for m in RE_FRUC_MV.finditer(text):
@@ -496,13 +500,14 @@ def run_one(cfg: str, args: argparse.Namespace, out_dir: Path) -> RunResult:
     # Console one-liner so the user sees progress without opening files.
     ft = pm_metrics.get("frame_time") or {}
     me = fruc_metrics.get("me_gpu_ms")
+    med = fruc_metrics.get("median_gpu_ms")
     warp = fruc_metrics.get("warp_gpu_ms")
     skip = fruc_metrics.get("skip_ratio")
     print(f"  fps={pm_metrics.get('fps', 0):.2f}  "
           f"p95={ft.get('p95', 0):.2f}ms  "
           f"p99={ft.get('p99', 0):.2f}ms  "
           f"dropped={pm_metrics.get('dropped_pct', 0):.1f}%  "
-          f"me={me or 0:.2f}ms  warp={warp or 0:.2f}ms  "
+          f"me={me or 0:.2f}ms  med={med or 0:.2f}ms  warp={warp or 0:.2f}ms  "
           f"skip={skip or 0:.1f}%")
 
     return RunResult(
@@ -569,12 +574,13 @@ def write_report(results: List[RunResult], out_dir: Path, args: argparse.Namespa
             f"{pct2x}% |"
         )
     lines += ["", "## FRUC internals (Moonlight log)", "",
-              "| Config | Backend | ME GPU | Warp GPU | "
+              "| Config | Backend | ME GPU | Median GPU | Warp GPU | "
               "Skip% | MV avgAbs | MV nz% |",
-              "|---|---|---|---|---|---|---|"]
+              "|---|---|---|---|---|---|---|---|"]
     for r in results:
         f = r.fruc or {}
         me = f.get("me_gpu_ms")
+        med = f.get("median_gpu_ms")
         warp = f.get("warp_gpu_ms")
         skip = f.get("skip_ratio")
         mv = f.get("mv_avg_abs")
@@ -583,7 +589,7 @@ def write_report(results: List[RunResult], out_dir: Path, args: argparse.Namespa
             return ("-" if x is None else format(x, fmt))
         lines.append(
             f"| {r.config} | {f.get('backend','-')} | "
-            f"{num(me,'.2f')}ms | {num(warp,'.2f')}ms | "
+            f"{num(me,'.2f')}ms | {num(med,'.2f')}ms | {num(warp,'.2f')}ms | "
             f"{num(skip,'.1f')}% | {num(mv,'.2f')} | "
             f"{'-' if nz is None else f'{100*nz:.0f}%'} |"
         )
