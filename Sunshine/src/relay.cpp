@@ -74,6 +74,15 @@ namespace relay {
     std::map<std::string, std::function<void(udp_tunnel::Flow)>> g_pending_allocates;
     std::function<void(const uint8_t *, size_t)> g_tunnel_binary_handler;
     std::function<void(udp_tunnel::Flow)> g_allocated_notify_handler;
+
+    // Buffer of role="b" allocated notifications that arrived before a
+    // listener had been installed — the relay can forward an "allocated"
+    // to us in the brief window between /launch returning and
+    // session::start calling set_allocated_notify_handler, and without
+    // this buffer that notification is silently dropped and the session
+    // deadlocks at control-stream establishment. When the listener
+    // registers we drain this buffer into it.
+    std::vector<udp_tunnel::Flow> g_pending_notifications;
   }  // namespace
 
   class Transport {
@@ -425,8 +434,20 @@ namespace relay {
   }
 
   void set_allocated_notify_handler(std::function<void(udp_tunnel::Flow)> cb) {
-    std::lock_guard<std::mutex> l(g_state_mtx);
-    g_allocated_notify_handler = std::move(cb);
+    std::vector<udp_tunnel::Flow> drain;
+    {
+      std::lock_guard<std::mutex> l(g_state_mtx);
+      g_allocated_notify_handler = cb;
+      if (cb) {
+        drain.swap(g_pending_notifications);
+      } else {
+        g_pending_notifications.clear();
+      }
+    }
+    // Fire late-arriving notifications now that someone is listening.
+    for (auto &flow : drain) {
+      if (cb) cb(flow);
+    }
   }
 
   // Parse a `udp_tunnel_allocated` JSON message into a Flow. Returns an
@@ -487,11 +508,22 @@ namespace relay {
     }
 
     // No pending request matched — this is a peer-initiated allocation
-    // notification (role="b").
+    // notification (role="b"). If a listener is registered we deliver
+    // now; otherwise we buffer so that a later
+    // set_allocated_notify_handler call can drain it. The client may
+    // have fired udp_tunnel_allocate before Sunshine's session::start
+    // got far enough to register a handler; without buffering the
+    // notification is dropped and the session deadlocks.
     std::function<void(udp_tunnel::Flow)> notify;
     {
       std::lock_guard<std::mutex> l(g_state_mtx);
       notify = g_allocated_notify_handler;
+      if (!notify && flow.valid()) {
+        g_pending_notifications.push_back(flow);
+        BOOST_LOG(info) << "[RELAY-TUNNEL] Flow " << flow.flow_id
+                        << " buffered — no listener yet (peer="
+                        << flow.remote_uuid.substr(0, 12) << ")";
+      }
     }
     if (notify && flow.valid()) {
       BOOST_LOG(info) << "[RELAY-TUNNEL] Flow " << flow.flow_id
