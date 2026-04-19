@@ -74,6 +74,7 @@ class UdpFlow:
     """
     __slots__ = ("flow_id", "peer_a_uuid", "peer_b_uuid",
                  "endpoint_a", "endpoint_b", "token",
+                 "bin_sent", "bin_dropped",
                  "created_at", "last_active",
                  "bytes_a_to_b", "bytes_b_to_a",
                  "pkts_a_to_b", "pkts_b_to_a")
@@ -91,6 +92,8 @@ class UdpFlow:
         self.bytes_b_to_a = 0
         self.pkts_a_to_b = 0
         self.pkts_b_to_a = 0
+        self.bin_sent = 0      # WS binary frames successfully written
+        self.bin_dropped = 0   # WS binary frames dropped due to backlog
 
     @property
     def mode_a(self) -> str:
@@ -840,7 +843,23 @@ def _pin_and_forward(flow: "UdpFlow", data: bytes,
 
         def _do_write(_val=val, _frame=frame, _flow=flow, _side=side, _size=size):
             try:
+                # Backpressure: asyncio's StreamWriter.write() has no
+                # flow control — without this check it will buffer
+                # data indefinitely if the peer TCP isn't draining,
+                # trading memory for latency (we saw multi-second
+                # visible lag on 5 Mbps video bursts). Drop the frame
+                # once the transport-level write buffer is already
+                # behind by more than 128 KB. RTP / audio / ENet all
+                # handle loss better than they handle head-of-line
+                # blocking.
+                transport = _val.transport
+                if transport is not None:
+                    buf_size = transport.get_write_buffer_size()
+                    if buf_size > 128 * 1024:
+                        _flow.bin_dropped += 1
+                        return
                 _val.write(_frame)
+                _flow.bin_sent += 1
                 _account(_flow, _side, _size)
             except Exception as e:
                 logger.debug(f"[TUN] WS write error flow={_flow.flow_id}: {e}")
@@ -876,6 +895,31 @@ async def _udp_flow_reaper(idle_timeout: float = 300.0, interval: float = 30.0):
             registry.close_flow(fid)
 
 
+async def _flow_stats_reporter(interval: float = 10.0):
+    """Periodically report per-flow WS forward stats so we can see
+    whether backpressure drops are actually firing during a stream."""
+    last_sent = {}
+    last_dropped = {}
+    while True:
+        await asyncio.sleep(interval)
+        for fid, f in list(registry.flows.items()):
+            sent = f.bin_sent
+            dropped = f.bin_dropped
+            d_sent = sent - last_sent.get(fid, 0)
+            d_drop = dropped - last_dropped.get(fid, 0)
+            last_sent[fid] = sent
+            last_dropped[fid] = dropped
+            if d_sent == 0 and d_drop == 0:
+                continue
+            total = d_sent + d_drop
+            pct = (d_drop * 100 // total) if total > 0 else 0
+            logger.info(
+                f"[TUN/STATS] flow={fid} fwd sent={d_sent} "
+                f"dropped={d_drop} ({pct}%) "
+                f"cum sent={sent} drop={dropped}"
+            )
+
+
 # ============================================================
 # Server main
 # ============================================================
@@ -908,6 +952,7 @@ async def run_server(host: str, port: int, psk: str,
 
     # Idle flow reaper
     reaper_task = asyncio.create_task(_udp_flow_reaper())
+    stats_task = asyncio.create_task(_flow_stats_reporter())
 
     logger.info("=" * 50)
     logger.info("  VipleStream Signaling Relay")
