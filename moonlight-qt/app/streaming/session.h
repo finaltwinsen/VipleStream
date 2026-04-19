@@ -277,6 +277,11 @@ private:
     bool m_AsyncConnectionSuccess;
     int m_PortTestResults;
 
+    // VipleStream: UDP tunnel for relay streaming. Lives from session
+    // start through exec() teardown so video/audio can flow through
+    // the relay for the entire streaming session.
+    class RelayUdpTunnel* m_UdpTunnel = nullptr;
+
     int m_ActiveVideoFormat;
     int m_ActiveVideoWidth;
     int m_ActiveVideoHeight;

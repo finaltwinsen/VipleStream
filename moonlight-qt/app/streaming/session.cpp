@@ -1,6 +1,7 @@
 #include "session.h"
 #include "backend/relaylookup.h"
 #include "backend/relaytcptunnel.h"
+#include "backend/relayudptunnel.h"
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
 #include "backend/richpresencemanager.h"
@@ -596,6 +597,16 @@ Session::~Session()
 {
     // NB: This may not get destroyed for a long time! Don't put any non-trivial cleanup here.
     // Use Session::exec() or DeferredSessionCleanupTask instead.
+
+    // VipleStream: safety net for the relay UDP tunnel — normally torn
+    // down in the deferred cleanup task after LiStopConnection, but
+    // cover the early-failure path here too.
+    if (m_UdpTunnel) {
+        m_UdpTunnel->stop();
+        m_UdpTunnel->wait(2000);
+        delete m_UdpTunnel;
+        m_UdpTunnel = nullptr;
+    }
 
     SDL_DestroyMutex(m_DecoderLock);
 }
@@ -1321,6 +1332,16 @@ private:
         // Finish cleanup of the connection state
         LiStopConnection();
 
+        // VipleStream: tear down the relay UDP tunnel. LiStopConnection
+        // has already closed all moonlight-common-c sockets so nothing
+        // is still sending to 127.0.0.1:47998/48000.
+        if (m_Session->m_UdpTunnel) {
+            m_Session->m_UdpTunnel->stop();
+            m_Session->m_UdpTunnel->wait(3000);
+            delete m_Session->m_UdpTunnel;
+            m_Session->m_UdpTunnel = nullptr;
+        }
+
         // Perform a best-effort app quit
         if (shouldQuit) {
             NvComputer* computer = m_Session->m_Computer;
@@ -1685,6 +1706,8 @@ bool Session::startConnectionAsync()
     QString rtspSessionUrl;
     bool useRelayForStream = false;
     RelayTcpTunnel *rtspTunnel = nullptr;
+    // m_UdpTunnel (session member) — survives past startConnectionAsync
+    // so the proxy sockets stay up for the whole streaming session.
 
     // Helper: launch via relay HTTP proxy. Sets rtspSessionUrl + useRelayForStream on success.
     // Returns true on success, false on failure (caller decides how to handle error).
@@ -1772,7 +1795,7 @@ bool Session::startConnectionAsync()
         }
     }
 
-    // VipleStream: If using relay, set up RTSP TCP tunnel
+    // VipleStream: If using relay, set up RTSP TCP tunnel + UDP tunnel
     QByteArray hostnameStr;
     if (useRelayForStream) {
         // Start local RTSP tunnel
@@ -1784,16 +1807,37 @@ bool Session::startConnectionAsync()
         // Override RTSP URL to point to local tunnel
         rtspSessionUrl = QString("rtspenc://127.0.0.1:%1").arg(localRtspPort);
 
-        // For UDP streams (control/video/audio), use STUN address if available.
-        // If no STUN endpoint (relay-only mode), use 127.0.0.1 — the ENet control
-        // stream will fail to connect but the RTSP handshake can still proceed
-        // through the tunnel. Future: relay UDP streams too.
-        if (!m_Computer->stunAddress.isNull() && !m_Computer->stunAddress.address().isEmpty()) {
-            hostnameStr = m_Computer->stunAddress.address().toUtf8();
-        } else {
-            // Relay-only: no direct UDP path. Use localhost as placeholder.
-            // RTSP handshake goes through tunnel; UDP streams won't connect.
+        // VipleStream: bring up the UDP tunnel for video / audio RTP.
+        // We bind local proxy sockets on 127.0.0.1:{47998,48000} and
+        // tell moonlight-common-c that the server lives at 127.0.0.1.
+        //
+        // 47999 (ENet control) is intentionally NOT proxied here —
+        // server-side ENet tunneling is not yet wired up. Control will
+        // still try direct UDP to hostnameStr and may fail when the
+        // direct path is blocked; this is a known limitation tracked
+        // as Phase 2c-3 / Sunshine-side ENet loopback bridge.
+        QVector<uint16_t> tunneledPorts{47998, 48000};
+        m_UdpTunnel = new RelayUdpTunnel(m_Preferences->relayUrl,
+                                         m_Preferences->relayPsk,
+                                         m_Computer->uuid,
+                                         tunneledPorts);
+        if (m_UdpTunnel->startAndWaitReady(7000)) {
             hostnameStr = QByteArrayLiteral("127.0.0.1");
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] UDP tunnel ready — video/audio routed via relay");
+        } else {
+            // Tunnel allocation failed — fall back to STUN/localhost
+            // as before. Video/audio will likely not work if the
+            // direct UDP path is genuinely blocked.
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] UDP tunnel unavailable, falling back to direct UDP");
+            delete m_UdpTunnel;
+            m_UdpTunnel = nullptr;
+            if (!m_Computer->stunAddress.isNull() && !m_Computer->stunAddress.address().isEmpty()) {
+                hostnameStr = m_Computer->stunAddress.address().toUtf8();
+            } else {
+                hostnameStr = QByteArrayLiteral("127.0.0.1");
+            }
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-NAT] RTSP tunneled via localhost:%d, UDP to %s",

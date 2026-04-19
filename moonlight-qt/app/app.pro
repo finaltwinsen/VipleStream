@@ -181,6 +181,7 @@ SOURCES += \
     backend/computerseeker.cpp \
     backend/relaylookup.cpp \
     backend/relaytcptunnel.cpp \
+    backend/relayudptunnel.cpp \
     backend/identitymanager.cpp \
     backend/nvcomputer.cpp \
     backend/nvhttp.cpp \
@@ -227,6 +228,7 @@ HEADERS += \
     backend/computerseeker.h \
     backend/relaylookup.h \
     backend/relaytcptunnel.h \
+    backend/relayudptunnel.h \
     backend/identitymanager.h \
     backend/nvcomputer.h \
     backend/nvhttp.h \
