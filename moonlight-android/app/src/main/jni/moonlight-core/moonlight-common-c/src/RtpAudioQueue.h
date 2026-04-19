@@ -2,7 +2,14 @@
 
 #include "Video.h"
 
-#include "rs.h"
+#include "rswrapper.h"
+
+typedef struct _reed_solomon {
+    int ds;
+    int ps;
+    int ts;
+    uint8_t p[];
+} reed_solomon;
 
 // Maximum time to wait for an OOS data/FEC shard
 // after the entire FEC block should have been received
@@ -33,7 +40,7 @@ typedef struct _RTPA_FEC_BLOCK {
 
     AUDIO_FEC_HEADER fecHeader;
 
-    uint64_t queueTimeMs;
+    uint64_t queueTimeUs;
     uint8_t dataShardsReceived;
     uint8_t fecShardsReceived;
     bool fullyReassembled;
@@ -63,6 +70,8 @@ typedef struct _RTP_AUDIO_QUEUE {
     bool receivedOosData;
     bool synchronizing;
     bool incompatibleServer;
+
+    RTP_AUDIO_STATS stats;
 } RTP_AUDIO_QUEUE, *PRTP_AUDIO_QUEUE;
 
 #define RTPQ_RET_PACKET_CONSUMED 0x1

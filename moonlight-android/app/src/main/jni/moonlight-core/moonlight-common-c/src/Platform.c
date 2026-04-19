@@ -1,5 +1,9 @@
 #define _GNU_SOURCE
 #include "Limelight-internal.h"
+#if defined(__vita__)
+#include <pthread.h>
+#include <psp2/kernel/processmgr.h>
+#endif
 
 // The maximum amount of time before observing an interrupt
 // in PltSleepMsInterruptible().
@@ -9,9 +13,6 @@ struct thread_context {
     ThreadEntry entry;
     void* context;
     const char* name;
-#if defined(__vita__)
-    PLT_THREAD* thread;
-#endif
 };
 
 static int activeThreads = 0;
@@ -67,9 +68,6 @@ void setThreadNameWin32(const char* name) {
 
 DWORD WINAPI ThreadProc(LPVOID lpParameter) {
     struct thread_context* ctx = (struct thread_context*)lpParameter;
-#elif defined(__vita__)
-int ThreadProc(SceSize args, void *argp) {
-    struct thread_context* ctx = (struct thread_context*)argp;
 #elif defined(__WIIU__)
 int ThreadProc(int argc, const char** argv) {
     struct thread_context* ctx = (struct thread_context*)argv;
@@ -80,7 +78,7 @@ void* ThreadProc(void* context) {
 
 #if defined(LC_WINDOWS)
     setThreadNameWin32(ctx->name);
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
     pthread_setname_np(pthread_self(), ctx->name);
 #elif defined(LC_DARWIN)
     pthread_setname_np(ctx->name);
@@ -88,17 +86,7 @@ void* ThreadProc(void* context) {
 
     ctx->entry(ctx->context);
 
-#if defined(__vita__)
-    if (ctx->thread->detached) {
-        free(ctx);
-        sceKernelExitDeleteThread(0);
-    }
-    else {
-        free(ctx);
-    }
-#else
     free(ctx);
-#endif
 
 #if defined(LC_WINDOWS) || defined(__vita__) || defined(__WIIU__) || defined(__3DS__)
     return 0;
@@ -110,8 +98,6 @@ void* ThreadProc(void* context) {
 void PltSleepMs(int ms) {
 #if defined(LC_WINDOWS)
     SleepEx(ms, FALSE);
-#elif defined(__vita__)
-    sceKernelDelayThread(ms * 1000);
 #elif defined(__3DS__)
     s64 nsecs = ms * 1000000;
     svcSleepThread(nsecs);
@@ -132,11 +118,6 @@ void PltSleepMsInterruptible(PLT_THREAD* thread, int ms) {
 int PltCreateMutex(PLT_MUTEX* mutex) {
 #if defined(LC_WINDOWS)
     InitializeSRWLock(mutex);
-#elif defined(__vita__)
-    *mutex = sceKernelCreateMutex("", 0, 0, NULL);
-    if (*mutex < 0) {
-        return -1;
-    }
 #elif defined(__WIIU__)
     OSFastMutex_Init(mutex, "");
 #elif defined(__3DS__)
@@ -156,8 +137,6 @@ void PltDeleteMutex(PLT_MUTEX* mutex) {
     activeMutexes--;
 #if defined(LC_WINDOWS)
     // No-op to destroy a SRWLOCK
-#elif defined(__vita__)
-    sceKernelDeleteMutex(*mutex);
 #elif defined(__WIIU__) || defined(__3DS__)
 
 #else
@@ -168,8 +147,6 @@ void PltDeleteMutex(PLT_MUTEX* mutex) {
 void PltLockMutex(PLT_MUTEX* mutex) {
 #if defined(LC_WINDOWS)
     AcquireSRWLockExclusive(mutex);
-#elif defined(__vita__)
-    sceKernelLockMutex(*mutex, 1, NULL);
 #elif defined(__WIIU__)
     OSFastMutex_Lock(mutex);
 #elif defined(__3DS__)
@@ -182,8 +159,6 @@ void PltLockMutex(PLT_MUTEX* mutex) {
 void PltUnlockMutex(PLT_MUTEX* mutex) {
 #if defined(LC_WINDOWS)
     ReleaseSRWLockExclusive(mutex);
-#elif defined(__vita__)
-    sceKernelUnlockMutex(*mutex, 1);
 #elif defined(__WIIU__)
     OSFastMutex_Unlock(mutex);
 #elif defined(__3DS__)
@@ -200,10 +175,6 @@ void PltJoinThread(PLT_THREAD* thread) {
 #if defined(LC_WINDOWS)
     WaitForSingleObjectEx(thread->handle, INFINITE, FALSE);
     CloseHandle(thread->handle);
-#elif defined(__vita__)
-    LC_ASSERT(!thread->detached);
-    sceKernelWaitThreadEnd(thread->handle, NULL, NULL);
-    sceKernelDeleteThread(thread->handle);
 #elif defined(__WIIU__)
     OSJoinThread(&thread->thread, NULL);
 #elif defined(__3DS__)
@@ -222,9 +193,6 @@ void PltDetachThread(PLT_THREAD* thread) {
     // According MSDN:
     // "Closing a thread handle does not terminate the associated thread or remove the thread object."
     CloseHandle(thread->handle);
-#elif defined(__vita__)
-    LC_ASSERT(!thread->detached);
-    thread->detached = true;
 #elif defined(__WIIU__)
     OSDetachThread(&thread->thread);
 #elif defined(__3DS__)
@@ -270,18 +238,6 @@ int PltCreateThread(const char* name, ThreadEntry entry, void* context, PLT_THRE
             return -1;
         }
     }
-#elif defined(__vita__)
-    {
-        thread->detached = false;
-        thread->context = ctx;
-        ctx->thread = thread;
-        thread->handle = sceKernelCreateThread(name, ThreadProc, 0, 0x40000, 0, 0, NULL);
-        if (thread->handle < 0) {
-            free(ctx);
-            return -1;
-        }
-        sceKernelStartThread(thread->handle, sizeof(struct thread_context), ctx);
-    }
 #elif defined(__WIIU__)
     memset(&thread->thread, 0, sizeof(thread->thread));
 
@@ -326,11 +282,23 @@ int PltCreateThread(const char* name, ThreadEntry entry, void* context, PLT_THRE
     }
 #else
     {
-        int err = pthread_create(&thread->thread, NULL, ThreadProc, ctx);
+        pthread_attr_t attr;
+
+        pthread_attr_init(&attr);
+
+#ifdef __vita__
+        pthread_attr_setstacksize(&attr, 0x100000);
+#endif
+
+        ctx->name = name;
+
+        int err = pthread_create(&thread->thread, &attr, ThreadProc, ctx);
+        pthread_attr_destroy(&attr);
         if (err != 0) {
             free(ctx);
             return err;
         }
+        
     }
 #endif
 
@@ -404,11 +372,6 @@ void PltWaitForEvent(PLT_EVENT* event) {
 int PltCreateConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex) {
 #if defined(LC_WINDOWS)
     InitializeConditionVariable(cond);
-#elif defined(__vita__)
-    *cond = sceKernelCreateCond("", 0, *mutex, NULL);
-    if (*cond < 0) {
-        return -1;
-    }
 #elif defined(__WIIU__)
     OSFastCond_Init(cond, "");
 #elif defined(__3DS__)
@@ -425,8 +388,6 @@ void PltDeleteConditionVariable(PLT_COND* cond) {
     activeCondVars--;
 #if defined(LC_WINDOWS)
     // No-op to delete a CONDITION_VARIABLE
-#elif defined(__vita__)
-    sceKernelDeleteCond(*cond);
 #elif defined(__WIIU__)
     // No-op to delete an OSFastCondition
 #elif defined(__3DS__)
@@ -439,8 +400,6 @@ void PltDeleteConditionVariable(PLT_COND* cond) {
 void PltSignalConditionVariable(PLT_COND* cond) {
 #if defined(LC_WINDOWS)
     WakeConditionVariable(cond);
-#elif defined(__vita__)
-    sceKernelSignalCond(*cond);
 #elif defined(__WIIU__)
     OSFastCond_Signal(cond);
 #elif defined(__3DS__)
@@ -453,8 +412,6 @@ void PltSignalConditionVariable(PLT_COND* cond) {
 void PltWaitForConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex) {
 #if defined(LC_WINDOWS)
     SleepConditionVariableSRW(cond, mutex, INFINITE, 0);
-#elif defined(__vita__)
-    sceKernelWaitCond(*cond, NULL);
 #elif defined(__WIIU__)
     OSFastCond_Wait(cond, mutex);
 #elif defined(__3DS__)
@@ -464,23 +421,153 @@ void PltWaitForConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex) {
 #endif
 }
 
-uint64_t PltGetMillis(void) {
+//// Begin timing functions
+
+// These functions return a number of microseconds or milliseconds since an opaque start time.
+
+static bool ticks_started = false;
+
 #if defined(LC_WINDOWS)
-    return GetTickCount64();
-#elif defined(CLOCK_MONOTONIC) && !defined(NO_CLOCK_GETTIME)
-    struct timespec tv;
 
-    clock_gettime(CLOCK_MONOTONIC, &tv);
+static LARGE_INTEGER start_ticks;
+static LARGE_INTEGER ticks_per_second;
 
-    return ((uint64_t)tv.tv_sec * 1000) + (tv.tv_nsec / 1000000);
-#else
-    struct timeval tv;
-
-    gettimeofday(&tv, NULL);
-
-    return ((uint64_t)tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-#endif
+void PltTicksInit(void) {
+    if (ticks_started) {
+        return;
+    }
+    ticks_started = true;
+    QueryPerformanceFrequency(&ticks_per_second);
+    QueryPerformanceCounter(&start_ticks);
 }
+
+uint64_t PltGetMicroseconds(void) {
+    if (!ticks_started) {
+        PltTicksInit();
+    }
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (uint64_t)(((now.QuadPart - start_ticks.QuadPart) * 1000000) / ticks_per_second.QuadPart);
+}
+
+#elif defined(LC_DARWIN)
+
+static uint64_t start_ns;
+
+void PltTicksInit(void) {
+    if (ticks_started) {
+        return;
+    }
+    ticks_started = true;
+    start_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}
+
+uint64_t PltGetMicroseconds(void) {
+    if (!ticks_started) {
+        PltTicksInit();
+    }
+    const uint64_t now_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    return (now_ns - start_ns) / 1000;
+}
+
+#elif defined(__vita__)
+
+static uint64_t start;
+
+void PltTicksInit(void) {
+    if (ticks_started) {
+        return;
+    }
+    ticks_started = true;
+    start = sceKernelGetProcessTimeWide();
+}
+
+uint64_t PltGetMicroseconds(void) {
+    if (!ticks_started) {
+        PltTicksInit();
+    }
+    uint64_t now = sceKernelGetProcessTimeWide();
+    return (uint64_t)(now - start);
+}
+
+#elif defined(__3DS__)
+
+static uint64_t start;
+
+void PltTicksInit(void) {
+    if (ticks_started) {
+        return;
+    }
+    ticks_started = true;
+    start = svcGetSystemTick();
+}
+
+uint64_t PltGetMicroseconds(void) {
+    if (!ticks_started) {
+        PltTicksInit();
+    }
+    uint64_t elapsed = svcGetSystemTick() - start;
+    return elapsed * 1000 / CPU_TICKS_PER_MSEC;
+}
+
+#else
+
+/* Use CLOCK_MONOTONIC_RAW, if available, which is not subject to adjustment by NTP */
+#ifdef HAVE_CLOCK_GETTIME
+static struct timespec start_ts;
+# ifdef CLOCK_MONOTONIC_RAW
+#  define PLT_MONOTONIC_CLOCK CLOCK_MONOTONIC_RAW
+# else
+#  define PLT_MONOTONIC_CLOCK CLOCK_MONOTONIC
+# endif
+#endif
+
+static bool has_monotonic_time = false;
+static struct timeval start_tv;
+
+void PltTicksInit(void) {
+    if (ticks_started) {
+        return;
+    }
+    ticks_started = true;
+#ifdef HAVE_CLOCK_GETTIME
+    if (clock_gettime(PLT_MONOTONIC_CLOCK, &start_ts) == 0) {
+        has_monotonic_time = true;
+    } else
+#endif
+    {
+        gettimeofday(&start_tv, NULL);
+    }
+}
+
+uint64_t PltGetMicroseconds(void) {
+    if (!ticks_started) {
+        PltTicksInit();
+    }
+
+    if (has_monotonic_time) {
+#ifdef HAVE_CLOCK_GETTIME
+        struct timespec now;
+        clock_gettime(PLT_MONOTONIC_CLOCK, &now);
+        return (uint64_t)(((int64_t)(now.tv_sec - start_ts.tv_sec) * 1000000) + ((now.tv_nsec - start_ts.tv_nsec) / 1000));
+#else
+        LC_ASSERT(false);
+        return 0;
+#endif
+    } else {
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        return (uint64_t)(((int64_t)(now.tv_sec - start_tv.tv_sec) * 1000000) + (now.tv_usec - start_tv.tv_usec));
+    }
+}
+
+#endif
+
+uint64_t PltGetMillis(void) {
+    return PltGetMicroseconds() / 1000;
+}
+
+//// End timing functions
 
 bool PltSafeStrcpy(char* dest, size_t dest_size, const char* src) {
     LC_ASSERT(dest_size > 0);
@@ -518,6 +605,8 @@ bool PltSafeStrcpy(char* dest, size_t dest_size, const char* src) {
 
 int initializePlatform(void) {
     int err;
+
+    PltTicksInit();
 
     err = initializePlatformSockets();
     if (err != 0) {

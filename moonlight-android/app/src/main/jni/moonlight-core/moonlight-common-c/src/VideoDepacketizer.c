@@ -17,10 +17,11 @@ static bool decodingFrame;
 static int frameType;
 static uint16_t lastPacketPayloadLength;
 static bool strictIdrFrameWait;
-static uint64_t syntheticPtsBase;
+static uint64_t syntheticPtsBaseUs;
 static uint16_t frameHostProcessingLatency;
-static uint64_t firstPacketReceiveTime;
-static unsigned int firstPacketPresentationTime;
+static uint64_t firstPacketReceiveTimeUs;
+static uint64_t firstPacketPresentationTime;
+static uint32_t firstPacketRtpTimestamp;
 static bool dropStatePending;
 static bool idrFrameProcessed;
 
@@ -68,10 +69,11 @@ void initializeVideoDepacketizer(int pktSize) {
     waitingForRefInvalFrame = false;
     lastPacketInStream = UINT32_MAX;
     decodingFrame = false;
-    syntheticPtsBase = 0;
+    syntheticPtsBaseUs = 0;
     frameHostProcessingLatency = 0;
-    firstPacketReceiveTime = 0;
+    firstPacketReceiveTimeUs = 0;
     firstPacketPresentationTime = 0;
+    firstPacketRtpTimestamp = 0;
     lastPacketPayloadLength = 0;
     dropStatePending = false;
     idrFrameProcessed = false;
@@ -464,7 +466,7 @@ static bool isIdrFrameStart(PBUFFER_DESC buffer) {
 }
 
 // Reassemble the frame with the given frame number
-static void reassembleFrame(int frameNumber) {
+static void reassembleFrame(int frameNumber, bool frameIsLTR) {
     if (nalChainHead != NULL) {
         QUEUED_DECODE_UNIT qduDS;
         PQUEUED_DECODE_UNIT qdu;
@@ -483,9 +485,10 @@ static void reassembleFrame(int frameNumber) {
             qdu->decodeUnit.frameType = frameType;
             qdu->decodeUnit.frameNumber = frameNumber;
             qdu->decodeUnit.frameHostProcessingLatency = frameHostProcessingLatency;
-            qdu->decodeUnit.receiveTimeMs = firstPacketReceiveTime;
-            qdu->decodeUnit.presentationTimeMs = firstPacketPresentationTime;
-            qdu->decodeUnit.enqueueTimeMs = LiGetMillis();
+            qdu->decodeUnit.receiveTimeUs = firstPacketReceiveTimeUs;
+            qdu->decodeUnit.presentationTimeUs = firstPacketPresentationTime;
+            qdu->decodeUnit.rtpTimestamp = firstPacketRtpTimestamp;
+            qdu->decodeUnit.enqueueTimeUs = PltGetMicroseconds();
 
             // These might be wrong for a few frames during a transition between SDR and HDR,
             // but the effects shouldn't very noticable since that's an infrequent operation.
@@ -495,8 +498,12 @@ static void reassembleFrame(int frameNumber) {
             qdu->decodeUnit.colorspace = (uint8_t)(qdu->decodeUnit.hdrActive ? COLORSPACE_REC_2020 : StreamConfig.colorSpace);
 
             // Invoke the key frame callback if needed
-            if (qdu->decodeUnit.frameType == FRAME_TYPE_IDR) {
+            if (nalChainHead->bufferType != BUFFER_TYPE_PICDATA || qdu->decodeUnit.frameType == FRAME_TYPE_IDR) {
+                qdu->decodeUnit.frameType = FRAME_TYPE_IDR;
                 notifyKeyFrameReceived();
+            }
+            else {
+                qdu->decodeUnit.frameType = FRAME_TYPE_PFRAME;
             }
 
             nalChainHead = nalChainTail = NULL;
@@ -532,7 +539,7 @@ static void reassembleFrame(int frameNumber) {
             }
 
             // Notify the control connection
-            connectionReceivedCompleteFrame(frameNumber);
+            connectionReceivedCompleteFrame(frameNumber, frameIsLTR);
 
             // Clear frame drops
             consecutiveFrameDrops = 0;
@@ -710,16 +717,16 @@ static void processAvcHevcRtpPayloadSlow(PBUFFER_DESC currentPos, PLENTRY_INTERN
 void requestDecoderRefresh(void) {
     // Wait for the next IDR frame
     waitingForIdrFrame = true;
-    
+
     // Flush the decode unit queue
     freeDecodeUnitList(LbqFlushQueueItems(&decodeUnitQueue));
-    
+
     // Request the receive thread drop its state
     // on the next call. We can't do it here because
     // it may be trying to queue DUs and we'll nuke
     // the state out from under it.
     dropStatePending = true;
-    
+
     // Request the IDR frame
     LiRequestIdrFrame();
 }
@@ -736,11 +743,12 @@ static bool isFirstPacket(uint8_t flags, uint8_t fecBlockNumber) {
 // Process an RTP Payload
 // The caller will free *existingEntry unless we NULL it
 static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
-                       uint64_t receiveTimeMs, unsigned int presentationTimeMs,
+                       uint64_t receiveTimeUs, uint64_t presentationTimeUs, uint32_t rtpTimestamp,
                        PLENTRY_INTERNAL* existingEntry) {
     BUFFER_DESC currentPos;
     uint32_t frameIndex;
     uint8_t flags;
+    uint8_t extraFlags;
     bool firstPacket, lastPacket;
     uint32_t streamPacketIndex;
     uint8_t fecCurrentBlockNumber;
@@ -758,13 +766,14 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
     fecLastBlockNumber = (videoPacket->multiFecBlocks >> 6) & 0x3;
     frameIndex = videoPacket->frameIndex;
     flags = videoPacket->flags;
+    extraFlags = videoPacket->extraFlags;
     firstPacket = isFirstPacket(flags, fecCurrentBlockNumber);
     lastPacket = (flags & FLAG_EOF) && fecCurrentBlockNumber == fecLastBlockNumber;
 
     LC_ASSERT_VT((flags & ~(FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA)) == 0);
 
     streamPacketIndex = videoPacket->streamPacketIndex;
-    
+
     // Drop packets from a previously corrupt frame
     if (isBefore32(frameIndex, nextFrameNumber)) {
         return;
@@ -787,10 +796,10 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         }
         return;
     }
-    
+
     // Verify that we didn't receive an incomplete frame
     LC_ASSERT(firstPacket ^ decodingFrame);
-    
+
     // Check sequencing of this frame to ensure we didn't
     // miss one in between
     if (firstPacket) {
@@ -819,20 +828,22 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         // We're now decoding a frame
         decodingFrame = true;
         frameType = FRAME_TYPE_PFRAME;
-        firstPacketReceiveTime = receiveTimeMs;
-        
+        firstPacketReceiveTimeUs = receiveTimeUs;
+
         // Some versions of Sunshine don't send a valid PTS, so we will
         // synthesize one using the receive time as the time base.
-        if (!syntheticPtsBase) {
-            syntheticPtsBase = receiveTimeMs;
+        if (!syntheticPtsBaseUs) {
+            syntheticPtsBaseUs = receiveTimeUs;
         }
-        
-        if (!presentationTimeMs && frameIndex > 0) {
-            firstPacketPresentationTime = (unsigned int)(receiveTimeMs - syntheticPtsBase);
+
+        if (!presentationTimeUs && frameIndex > 0) {
+            firstPacketPresentationTime = receiveTimeUs - syntheticPtsBaseUs;
         }
         else {
-            firstPacketPresentationTime = presentationTimeMs;
+            firstPacketPresentationTime = presentationTimeUs;
         }
+
+        firstPacketRtpTimestamp = rtpTimestamp;
     }
 
     lastPacketInStream = streamPacketIndex;
@@ -1110,7 +1121,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             }
         }
 
-        reassembleFrame(frameIndex);
+        reassembleFrame(frameIndex, extraFlags & NV_VIDEO_PACKET_EXTRA_FLAG_LTR_FRAME);
     }
 }
 
@@ -1150,7 +1161,7 @@ void queueRtpPacket(PRTPV_QUEUE_ENTRY queueEntryPtr) {
     RTPV_QUEUE_ENTRY queueEntry = *queueEntryPtr;
 
     LC_ASSERT(!queueEntry.isParity);
-    LC_ASSERT(queueEntry.receiveTimeMs != 0);
+    LC_ASSERT(queueEntry.receiveTimeUs != 0);
 
     dataOffset = sizeof(*queueEntry.packet);
     if (queueEntry.packet->header & FLAG_EXTENSION) {
@@ -1169,8 +1180,9 @@ void queueRtpPacket(PRTPV_QUEUE_ENTRY queueEntryPtr) {
 
     processRtpPayload((PNV_VIDEO_PACKET)(((char*)queueEntry.packet) + dataOffset),
                       queueEntry.length - dataOffset,
-                      queueEntry.receiveTimeMs,
-                      queueEntry.presentationTimeMs,
+                      queueEntry.receiveTimeUs,
+                      queueEntry.presentationTimeUs,
+                      queueEntry.rtpTimestamp,
                       &existingEntry);
 
     if (existingEntry != NULL) {

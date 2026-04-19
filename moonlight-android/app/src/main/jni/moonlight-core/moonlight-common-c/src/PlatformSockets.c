@@ -344,6 +344,12 @@ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCK
             Limelog("WSAIoctl(SIO_UDP_CONNRESET) failed: %d\n", LastSocketError());
         }
     }
+#elif defined(__WIIU__)
+    {
+        // Enable usage of userbuffers on Wii U
+        int val = 1;
+        setsockopt(s, SOL_SOCKET, SO_RUSRBUF, &val, sizeof(val));
+    }
 #endif
 
     // Enable QOS for the socket (best effort)
@@ -400,7 +406,7 @@ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCK
 }
 
 int setSocketNonBlocking(SOCKET s, bool enabled) {
-#if defined(__vita__)
+#if defined(__vita__) || defined(__HAIKU__)
     int val = enabled ? 1 : 0;
     return setsockopt(s, SOL_SOCKET, SO_NONBLOCK, (char*)&val, sizeof(val));
 #elif defined(O_NONBLOCK)
@@ -562,6 +568,40 @@ Exit:
     return s;
 }
 
+int getLocalAddressByUdpConnect(const struct sockaddr_storage* targetAddr, SOCKADDR_LEN targetAddrLen, unsigned short targetPort,
+                                struct sockaddr_storage* localAddr, SOCKADDR_LEN* localAddrLen) {
+    SOCKET udpSocket;
+    LC_SOCKADDR connAddr;
+
+    LC_ASSERT(targetPort != 0);
+
+    udpSocket = createSocket(targetAddr->ss_family, SOCK_DGRAM, IPPROTO_UDP, false);
+    if (udpSocket == INVALID_SOCKET) {
+        return LastSocketError();
+    }
+
+    memcpy(&connAddr, targetAddr, targetAddrLen);
+    SET_PORT(&connAddr, RtspPortNumber);
+
+    if (connect(udpSocket, (struct sockaddr*)&connAddr, targetAddrLen) < 0) {
+        int err = LastSocketError();
+        Limelog("UDP connect() failed: %d\n", err);
+        closeSocket(udpSocket);
+        return err;
+    }
+
+    *localAddrLen = sizeof(*localAddr);
+    if (getsockname(udpSocket, (struct sockaddr*)localAddr, localAddrLen) < 0) {
+        int err = LastSocketError();
+        Limelog("getsockname() failed: %d\n", err);
+        closeSocket(udpSocket);
+        return err;
+    }
+
+    closeSocket(udpSocket);
+    return 0;
+}
+
 // See TCP_MAXSEG note in connectTcpSocket() above for more information.
 // TCP_NODELAY must be enabled on the socket for this function to work!
 int sendMtuSafe(SOCKET s, char* buffer, int size) {
@@ -594,10 +634,43 @@ int enableNoDelay(SOCKET s) {
     return 0;
 }
 
+static bool isPrivateNetworkAddressV4(struct sockaddr_in* address, bool matchCGN)
+{
+    unsigned int addr;
+
+    memcpy(&addr, &address->sin_addr, sizeof(addr));
+    addr = htonl(addr);
+
+    // 10.0.0.0/8
+    if ((addr & 0xFF000000) == 0x0A000000) {
+        return true;
+    }
+    // 172.16.0.0/12
+    else if ((addr & 0xFFF00000) == 0xAC100000) {
+        return true;
+    }
+    // 192.168.0.0/16
+    else if ((addr & 0xFFFF0000) == 0xC0A80000) {
+        return true;
+    }
+    // 169.254.0.0/16
+    else if ((addr & 0xFFFF0000) == 0xA9FE0000) {
+        return true;
+    }
+    // 100.64.0.0/10
+    else if (matchCGN && (addr & 0xFFC00000) == 0x64400000) {
+        return true;
+    }
+    else {
+        return false;
+    }
+}
+
 int resolveHostName(const char* host, int family, int tcpTestPort, struct sockaddr_storage* addr, SOCKADDR_LEN* addrLen)
 {
     struct addrinfo hints, *res, *currentAddr;
     int err;
+    bool needsFallbackV4 = false;
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = family;
@@ -614,11 +687,32 @@ int resolveHostName(const char* host, int family, int tcpTestPort, struct sockad
         return -1;
     }
 
+#ifdef AF_INET6
+    {
+        struct sockaddr_in sin4;
+
+        memset(&sin4, 0, sizeof(sin4));
+        sin4.sin_family = AF_INET;
+
+        // As a workaround for broken 464XLAT on iOS where the CLAT synthesizes IPv6
+        // addresses for on-link IPv4 destinations on other interfaces, we will try
+        // again with an IPv4-only resolution if we detect that getaddrinfo() resolved
+        // a private IPv4 address to a single IPv6 address and that address didn't work.
+        needsFallbackV4 =
+            family == AF_UNSPEC &&
+            res->ai_family == AF_INET6 &&
+            res->ai_next == NULL &&
+            inet_pton(AF_INET, host, &sin4.sin_addr) == 1 &&
+            isPrivateNetworkAddressV4(&sin4, true);
+    }
+#endif
+
     for (currentAddr = res; currentAddr != NULL; currentAddr = currentAddr->ai_next) {
         // Use the test port to ensure this address is working if:
         // a) We have multiple addresses
         // b) The caller asked us to test even with a single address
-        if (tcpTestPort != 0 && (res->ai_next != NULL || (tcpTestPort & TCP_PORT_FLAG_ALWAYS_TEST))) {
+        // c) We got an IPv6 address synthesized from an IPv4 address
+        if (tcpTestPort != 0 && (res->ai_next != NULL || (tcpTestPort & TCP_PORT_FLAG_ALWAYS_TEST) || needsFallbackV4)) {
             SOCKET testSocket = connectTcpSocket((struct sockaddr_storage*)currentAddr->ai_addr,
                                                  (SOCKADDR_LEN)currentAddr->ai_addrlen,
                                                  tcpTestPort & TCP_PORT_MASK,
@@ -639,9 +733,16 @@ int resolveHostName(const char* host, int family, int tcpTestPort, struct sockad
         return 0;
     }
 
-    Limelog("No working addresses found for host: %s\n", host);
     freeaddrinfo(res);
-    return -1;
+
+    if (needsFallbackV4) {
+        // Fallback to IPv4-only if we didn't find a working address (see comment above)
+        return resolveHostName(host, AF_INET, tcpTestPort, addr, addrLen);
+    }
+    else {
+        Limelog("No working addresses found for host: %s\n", host);
+        return -1;
+    }
 }
 
 #ifdef AF_INET6
@@ -660,30 +761,8 @@ bool isInSubnetV6(struct sockaddr_in6* sin6, unsigned char* subnet, int prefixLe
 #endif
 
 bool isPrivateNetworkAddress(struct sockaddr_storage* address) {
-
-    // We only count IPv4 addresses as possibly private for now
     if (address->ss_family == AF_INET) {
-        unsigned int addr;
-
-        memcpy(&addr, &((struct sockaddr_in*)address)->sin_addr, sizeof(addr));
-        addr = htonl(addr);
-
-        // 10.0.0.0/8
-        if ((addr & 0xFF000000) == 0x0A000000) {
-            return true;
-        }
-        // 172.16.0.0/12
-        else if ((addr & 0xFFF00000) == 0xAC100000) {
-            return true;
-        }
-        // 192.168.0.0/16
-        else if ((addr & 0xFFFF0000) == 0xC0A80000) {
-            return true;
-        }
-        // 169.254.0.0/16
-        else if ((addr & 0xFFFF0000) == 0xA9FE0000) {
-            return true;
-        }
+        return isPrivateNetworkAddressV4((struct sockaddr_in*)address, false);
     }
 #ifdef AF_INET6
     else if (address->ss_family == AF_INET6) {
@@ -704,6 +783,119 @@ bool isPrivateNetworkAddress(struct sockaddr_storage* address) {
         else if (isInSubnetV6(sin6, uniqueLocalPrefix, 7)) {
             return true;
         }
+    }
+#endif
+
+    return false;
+}
+
+bool isNat64SynthesizedAddress(struct sockaddr_storage* address) {
+#ifdef AF_INET6
+    if (address->ss_family == AF_INET6) {
+        struct sockaddr_in6* sin6 = (struct sockaddr_in6*)address;
+        struct addrinfo hints, *res, *currentAddr;
+        int err;
+
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET6;
+        hints.ai_flags = AI_ADDRCONFIG;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        err = getaddrinfo("ipv4only.arpa.", NULL, &hints, &res);
+        if (err != 0) {
+            Limelog("Client is not running in NAT64 environment (%d)\n", err);
+            return false;
+        }
+        else if (res == NULL) {
+            Limelog("getaddrinfo(ipv4only.arpa.) returned success without addresses\n");
+            return false;
+        }
+
+        for (currentAddr = res; currentAddr != NULL; currentAddr = currentAddr->ai_next) {
+            struct sockaddr_in6* candidate6 = (struct sockaddr_in6*)currentAddr->ai_addr;
+            static const unsigned char wellKnownAddresses[2][4] = {
+                { 0xC0, 0x00, 0x00, 0xAA }, // 192.0.0.170
+                { 0xC0, 0x00, 0x00, 0xAB }, // 192.0.0.171
+            };
+
+            if (candidate6->sin6_family != AF_INET6) {
+                // This shouldn't be possible but check anyway
+                continue;
+            }
+
+            for (int i = 0; i < 2; i++) {
+                int foundCount = 0;
+                int prefixLen = 0;
+                int suffixStart = 0;
+
+                // Search for each well-known IPv4 address at all locations specified by
+                // https://datatracker.ietf.org/doc/html/rfc6052#section-2.2
+                if (memcmp(&candidate6->sin6_addr.s6_addr[4], wellKnownAddresses[i], 4) == 0) {
+                    foundCount++;
+
+                    prefixLen = 4;
+                    suffixStart = 9;
+                }
+                if (memcmp(&candidate6->sin6_addr.s6_addr[5], &wellKnownAddresses[i][0], 3) == 0 &&
+                    memcmp(&candidate6->sin6_addr.s6_addr[9], &wellKnownAddresses[i][3], 1) == 0) {
+                    foundCount++;
+
+                    prefixLen = 5;
+                    suffixStart = 10;
+                }
+                if (memcmp(&candidate6->sin6_addr.s6_addr[6], &wellKnownAddresses[i][0], 2) == 0 &&
+                    memcmp(&candidate6->sin6_addr.s6_addr[9], &wellKnownAddresses[i][2], 2) == 0) {
+                    foundCount++;
+
+                    prefixLen = 6;
+                    suffixStart = 11;
+                }
+                if (memcmp(&candidate6->sin6_addr.s6_addr[7], &wellKnownAddresses[i][0], 1) == 0 &&
+                    memcmp(&candidate6->sin6_addr.s6_addr[9], &wellKnownAddresses[i][1], 3) == 0) {
+                    foundCount++;
+
+                    prefixLen = 7;
+                    suffixStart = 12;
+                }
+                if (memcmp(&candidate6->sin6_addr.s6_addr[9], &wellKnownAddresses[i], 4) == 0) {
+                    foundCount++;
+
+                    prefixLen = 8;
+                    suffixStart = 13;
+                }
+                if (memcmp(&candidate6->sin6_addr.s6_addr[12], &wellKnownAddresses[i], 4) == 0) {
+                    foundCount++;
+
+                    prefixLen = 12;
+                    suffixStart = 16;
+                }
+
+                // We must find the well-known address exactly once. If we find it zero or multiple
+                // times, we must try the second well-known address or other AAAA records.
+                if (foundCount != 1) {
+                    continue;
+                }
+
+                // We have a valid NAT64 address identified, so we know we're running in an NAT64 environment.
+                //
+                // Now we must check to see if the address we resolved for the remote host actually falls
+                // within the NAT64 range to see if we must restrict ourselves to the IPv4 MTU.
+                if (memcmp(&sin6->sin6_addr.s6_addr[0], &candidate6->sin6_addr.s6_addr[0], prefixLen) == 0 &&
+                    (suffixStart == 16 || memcmp(&sin6->sin6_addr.s6_addr[suffixStart],
+                                                 &candidate6->sin6_addr.s6_addr[suffixStart],
+                                                 16 - suffixStart) == 0)) {
+                    freeaddrinfo(res);
+                    return true;
+                }
+                else {
+                    // This one didn't match, so let's break out of the loop and try the next AAAA record.
+                    break;
+                }
+            }
+        }
+
+        freeaddrinfo(res);
+        return false;
     }
 #endif
 
