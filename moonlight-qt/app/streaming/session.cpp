@@ -1829,6 +1829,18 @@ bool Session::startConnectionAsync()
             hostnameStr = QByteArrayLiteral("127.0.0.1");
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-NAT] UDP tunnel ready — video/audio routed via relay (host=127.0.0.1)");
+            // Bandwidth cap for the tunnel path. The WS carrier goes
+            // TLS-over-TCP (often through Cloudflare Tunnel) which
+            // cannot sustain 20 Mbps of low-latency video. Cap the
+            // encoder at 5 Mbps when tunneling so the pipeline
+            // doesn't run into persistent TCP backpressure.
+            constexpr int TUNNEL_BITRATE_CAP_KBPS = 5000;
+            if (m_StreamConfig.bitrate > TUNNEL_BITRATE_CAP_KBPS) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-NAT] capping bitrate %d -> %d kbps for WS tunnel",
+                            m_StreamConfig.bitrate, TUNNEL_BITRATE_CAP_KBPS);
+                m_StreamConfig.bitrate = TUNNEL_BITRATE_CAP_KBPS;
+            }
             // Tell moonlight-common-c to target our ephemeral loopback
             // ports instead of the parsed Sunshine ports. The RTSP
             // traffic is end-to-end encrypted (corever=1), so rewriting

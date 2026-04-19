@@ -206,11 +206,15 @@ void RelayUdpTunnel::run() {
     // Disable Nagle — we're shipping per-packet RTP through this
     // socket and batching inflates latency by hundreds of ms.
     ws->setSocketOption(QAbstractSocket::LowDelayOption, 1);
-    // Generous socket buffers so bursty video doesn't hit
-    // TCP-level backpressure before our read thread catches up.
+    // Generous receive buffer so bursty inbound video doesn't hit
+    // TCP-level backpressure before the read thread catches up.
+    // Intentionally DO NOT enlarge SendBufferSize: with a small OS
+    // send buffer, a full kernel buffer makes Qt's bytesToWrite()
+    // rise promptly so our backlog-drop gate can fire. A 4 MiB
+    // kernel send buffer was silently absorbing 4 MiB of unsent
+    // video on mouse movement, making bytesToWrite() stay at 0
+    // while latency ballooned past 20 s.
     ws->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption,
-                        4 * 1024 * 1024);
-    ws->setSocketOption(QAbstractSocket::SendBufferSizeSocketOption,
                         4 * 1024 * 1024);
 
     // WS HTTP upgrade
@@ -475,7 +479,10 @@ void RelayUdpTunnel::run() {
         // the outgoing backlog exceeds the threshold we drop the
         // frame instead of queuing it. Keeps end-to-end latency
         // bounded by roughly THRESHOLD / throughput.
-        constexpr qint64 BACKLOG_DROP_THRESHOLD = 256 * 1024;  // 256 KB
+        // 64 KB keeps worst-case outbound latency to ~50 ms at 10 Mbps.
+        // With the default OS send buffer (~64 KB on Windows), any
+        // further stall immediately shows up as bytesToWrite > 0.
+        constexpr qint64 BACKLOG_DROP_THRESHOLD = 64 * 1024;
         if (ws->bytesToWrite() > BACKLOG_DROP_THRESHOLD) {
             return;  // silently drop
         }
