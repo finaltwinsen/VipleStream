@@ -140,6 +140,7 @@ public:
     Q_PROPERTY(FrucQuality frucQuality MEMBER frucQuality NOTIFY frucQualityChanged)
     Q_PROPERTY(QString relayUrl MEMBER relayUrl NOTIFY relayUrlChanged)
     Q_PROPERTY(QString relayPsk MEMBER relayPsk NOTIFY relayPskChanged)
+    Q_PROPERTY(bool forceRelayStream MEMBER forceRelayStream NOTIFY forceRelayStreamChanged)
     Q_PROPERTY(bool quitAppAfter MEMBER quitAppAfter NOTIFY quitAppAfterChanged)
     Q_PROPERTY(bool absoluteMouseMode MEMBER absoluteMouseMode NOTIFY absoluteMouseModeChanged)
     Q_PROPERTY(bool absoluteTouchMode MEMBER absoluteTouchMode NOTIFY absoluteTouchModeChanged)
@@ -187,6 +188,7 @@ public:
     FrucQuality frucQuality;
     QString relayUrl;      // VipleStream: signaling relay WebSocket URL
     QString relayPsk;      // VipleStream: relay pre-shared key
+    bool forceRelayStream; // VipleStream: always stream via relay (bypass direct /launch)
     bool quitAppAfter;
     bool absoluteMouseMode;
     bool absoluteTouchMode;
@@ -232,6 +234,7 @@ signals:
     void frucQualityChanged();
     void relayUrlChanged();
     void relayPskChanged();
+    void forceRelayStreamChanged();
     void quitAppAfterChanged();
     void absoluteMouseModeChanged();
     void absoluteTouchModeChanged();

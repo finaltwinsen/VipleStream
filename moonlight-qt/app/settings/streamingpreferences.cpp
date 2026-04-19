@@ -35,6 +35,7 @@
 #define SER_FRUCQUALITY "frucQuality"
 #define SER_RELAYURL "relayUrl"
 #define SER_RELAYPSK "relayPsk"
+#define SER_FORCE_RELAY_STREAM "forceRelayStream"
 #define SER_QUITAPPAFTER "quitAppAfter"
 #define SER_ABSMOUSEMODE "mouseacceleration"
 #define SER_ABSTOUCHMODE "abstouchmode"
@@ -145,6 +146,7 @@ void StreamingPreferences::reload()
     frucQuality = static_cast<FrucQuality>(settings.value(SER_FRUCQUALITY, static_cast<int>(FQ_BALANCED)).toInt());
     relayUrl = settings.value(SER_RELAYURL, "").toString();
     relayPsk = settings.value(SER_RELAYPSK, "").toString();
+    forceRelayStream = settings.value(SER_FORCE_RELAY_STREAM, false).toBool();
     quitAppAfter = settings.value(SER_QUITAPPAFTER, false).toBool();
     absoluteMouseMode = settings.value(SER_ABSMOUSEMODE, false).toBool();
     absoluteTouchMode = settings.value(SER_ABSTOUCHMODE, true).toBool();
@@ -349,6 +351,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_FRUCQUALITY, static_cast<int>(frucQuality));
     settings.setValue(SER_RELAYURL, relayUrl);
     settings.setValue(SER_RELAYPSK, relayPsk);
+    settings.setValue(SER_FORCE_RELAY_STREAM, forceRelayStream);
     settings.setValue(SER_QUITAPPAFTER, quitAppAfter);
     settings.setValue(SER_ABSMOUSEMODE, absoluteMouseMode);
     settings.setValue(SER_ABSTOUCHMODE, absoluteTouchMode);

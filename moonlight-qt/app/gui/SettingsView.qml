@@ -1092,6 +1092,22 @@ Flickable {
                     color: "gray"
                     wrapMode: Text.Wrap
                 }
+
+                CheckBox {
+                    id: forceRelayStreamCheck
+                    width: parent.width
+                    text: qsTr("Force streaming via relay (for testing UDP tunnel)")
+                    font.pointSize: 11
+                    checked: StreamingPreferences.forceRelayStream
+                    onCheckedChanged: {
+                        StreamingPreferences.forceRelayStream = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 6000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.")
+                }
             }
         }
 

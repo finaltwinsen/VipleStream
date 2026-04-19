@@ -1763,9 +1763,17 @@ bool Session::startConnectionAsync()
     // to its STUN/public IP is unreachable), skip the direct /launch attempt and
     // go straight to the relay HTTP proxy. The direct attempt would otherwise
     // hang for ~90s (Qt's default network timeout) before the catch-fallback ran.
-    if (m_Computer->onlineViaRelay) {
+    //
+    // `forceRelayStream` is a testing knob that always takes the relay path even
+    // when direct is reachable — used to exercise the UDP tunnel when a VPN like
+    // Cloudflare WARP would otherwise make the direct /launch succeed.
+    const bool wantRelayPath = m_Computer->onlineViaRelay ||
+                               m_Preferences->forceRelayStream;
+    if (wantRelayPath) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-NAT] Computer reachable only via relay — skipping direct /launch");
+                    "[VIPLE-NAT] Taking relay path (onlineViaRelay=%d forceRelayStream=%d)",
+                    m_Computer->onlineViaRelay ? 1 : 0,
+                    m_Preferences->forceRelayStream ? 1 : 0);
         if (!tryRelayLaunch()) {
             emit displayLaunchError(tr("Failed to launch via relay proxy"));
             return false;
