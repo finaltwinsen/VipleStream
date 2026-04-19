@@ -44,6 +44,10 @@ moonlight-android/build/
 scripts/benchmark/*.json
 scripts/benchmark/*.csv
 scripts/benchmark/*.txt
+scripts/benchmark/.ffmpeg/
+scripts/benchmark/vimeo_tri_test/
+scripts/benchmark/vimeo_tri_test.zip
+scripts/benchmark/benchmark_results/
 
 # ── External dependencies (auto-downloaded by build) ──
 vcpkg/
