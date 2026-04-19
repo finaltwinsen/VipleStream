@@ -483,7 +483,16 @@ void RelayUdpTunnel::run() {
         // With the default OS send buffer (~64 KB on Windows), any
         // further stall immediately shows up as bytesToWrite > 0.
         constexpr qint64 BACKLOG_DROP_THRESHOLD = 64 * 1024;
-        if (ws->bytesToWrite() > BACKLOG_DROP_THRESHOLD) {
+        qint64 backlog = ws->bytesToWrite();
+        if (backlog > BACKLOG_DROP_THRESHOLD) {
+            static std::atomic<int> drops{0};
+            int n = drops.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n == 1 || (n % 200) == 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-UDPTUN] backlog drop #%d "
+                            "(bytesToWrite=%lld)",
+                            n, (long long)backlog);
+            }
             return;  // silently drop
         }
         ws->write(frame);

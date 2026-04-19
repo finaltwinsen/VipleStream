@@ -206,6 +206,12 @@ namespace relay {
     return hex;
   }
 
+  // Counters for tunnel-send backpressure drops. Reported periodically
+  // from the relay thread so we can see whether the 2 ms SO_SNDTIMEO
+  // is actually firing during latency spikes.
+  static std::atomic<uint64_t> g_binary_sent{0};
+  static std::atomic<uint64_t> g_binary_dropped{0};
+
   // Build one masked WebSocket frame with the given opcode and send it.
   // Returns true iff the full frame was written to the transport.
   static bool ws_send_frame(Transport &tr, uint8_t opcode,
@@ -232,7 +238,16 @@ namespace relay {
     for (size_t i = 0; i < len; i++) {
       frame.push_back(data[i] ^ mask[i % 4]);
     }
-    return tr.send(frame.data(), (int)frame.size()) == (int)frame.size();
+    int sent = tr.send(frame.data(), (int)frame.size());
+    bool ok = (sent == (int)frame.size());
+    if (opcode == 0x2) {  // binary = tunnel datagram; track drops.
+      if (ok) {
+        g_binary_sent.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        g_binary_dropped.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    return ok;
   }
 
   static bool ws_send(Transport &tr, const std::string &data) {
@@ -659,17 +674,20 @@ namespace relay {
       // WSAETIMEDOUT / EAGAIN instead of blocking the video thread
       // forever. Callers that care (ws_send_frame → tunnel binary
       // shards) just drop the frame — video and audio RTP are
-      // loss-tolerant, ENet handles its own retransmit. This bounds
-      // the relay-thread and video-thread worst-case wait to ~20 ms.
+      // loss-tolerant, ENet handles its own retransmit.
+      //
+      // 2 ms bounds per-packet worst case; a 55-shard video frame
+      // stalled out completely is then at most ~110 ms behind before
+      // the whole frame is dropped.
 #ifdef _WIN32
       {
-        DWORD to_ms = 20;
+        DWORD to_ms = 2;
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
                    (const char *)&to_ms, sizeof(to_ms));
       }
 #else
       {
-        struct timeval to = { 0, 20 * 1000 };
+        struct timeval to = { 0, 2 * 1000 };
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
       }
 #endif
@@ -751,6 +769,16 @@ namespace relay {
             ws_send(*transport, "{\"type\":\"ping\"}");
           }
           lastEndpointPublish = now;
+          uint64_t sent = g_binary_sent.load(std::memory_order_relaxed);
+          uint64_t dropped = g_binary_dropped.load(std::memory_order_relaxed);
+          if (sent > 0 || dropped > 0) {
+            BOOST_LOG(info) << "[TUNNEL/STATS] tx_binary sent=" << sent
+                            << " dropped=" << dropped
+                            << (sent + dropped > 0 ?
+                                (" (" + std::to_string(dropped * 100 /
+                                                        (sent + dropped)) + "%)")
+                              : std::string{});
+          }
         }
 
         // Read incoming messages (short timeout — non-blocking poll)
