@@ -629,6 +629,25 @@ namespace relay {
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
                    (const char *)&on, sizeof(on));
       }
+      // Short send timeout so that when the peer (or Cloudflare, or
+      // the client) can't drain fast enough, our send() returns
+      // WSAETIMEDOUT / EAGAIN instead of blocking the video thread
+      // forever. Callers that care (ws_send_frame → tunnel binary
+      // shards) just drop the frame — video and audio RTP are
+      // loss-tolerant, ENet handles its own retransmit. This bounds
+      // the relay-thread and video-thread worst-case wait to ~20 ms.
+#ifdef _WIN32
+      {
+        DWORD to_ms = 20;
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+                   (const char *)&to_ms, sizeof(to_ms));
+      }
+#else
+      {
+        struct timeval to = { 0, 20 * 1000 };
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
+      }
+#endif
 
       // Create transport (plain or TLS)
       std::unique_ptr<Transport> transport;

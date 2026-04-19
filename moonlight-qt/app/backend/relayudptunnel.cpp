@@ -4,6 +4,7 @@
  */
 #include "relayudptunnel.h"
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -205,6 +206,12 @@ void RelayUdpTunnel::run() {
     // Disable Nagle — we're shipping per-packet RTP through this
     // socket and batching inflates latency by hundreds of ms.
     ws->setSocketOption(QAbstractSocket::LowDelayOption, 1);
+    // Generous socket buffers so bursty video doesn't hit
+    // TCP-level backpressure before our read thread catches up.
+    ws->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption,
+                        4 * 1024 * 1024);
+    ws->setSocketOption(QAbstractSocket::SendBufferSizeSocketOption,
+                        4 * 1024 * 1024);
 
     // WS HTTP upgrade
     QByteArray wsKey(16, 0);
@@ -457,14 +464,21 @@ void RelayUdpTunnel::run() {
         for (size_t i = 0; i < len; i++) {
             frame.append((char)(data[i] ^ (uint8_t)mask[i % 4]));
         }
-        // Write + explicit non-blocking flush. Qt's QSslSocket stashes
-        // the frame in an internal buffer and only kicks SSL_write()
-        // from its event loop — but we're running in a raw QThread
-        // with no event loop, so without flush() the bytes can sit
-        // there until the next waitForReadyRead() call on the same
-        // socket runs the state machine. On bursty traffic (mouse
-        // movement → big video P-frames) that buffering alone drove
-        // latency into multi-second territory.
+        // Bufferbloat gate: Qt's internal write buffer is unbounded
+        // by default. When TCP can't drain fast enough (e.g. the
+        // Cloudflare Tunnel path saturates on a 20 Mbps video burst)
+        // write() keeps appending bytes; we measured 23 s of
+        // accumulated latency that way on continuous mouse movement.
+        //
+        // RTP video / audio / ENet control are all loss-tolerant
+        // (RTP recovers via FEC + NACK; ENet retransmits), so when
+        // the outgoing backlog exceeds the threshold we drop the
+        // frame instead of queuing it. Keeps end-to-end latency
+        // bounded by roughly THRESHOLD / throughput.
+        constexpr qint64 BACKLOG_DROP_THRESHOLD = 256 * 1024;  // 256 KB
+        if (ws->bytesToWrite() > BACKLOG_DROP_THRESHOLD) {
+            return;  // silently drop
+        }
         ws->write(frame);
         ws->flush();
     };
@@ -536,10 +550,14 @@ void RelayUdpTunnel::run() {
         }
 
         // ----- Inbound (WS carrier): drain any WS binary frames -----
-        // bytesAvailable alone isn't enough (the TCP/TLS layer may
-        // have received bytes without emitting readyRead yet), so we
-        // let Qt drain what it has by polling with a 0-ms wait.
+        // QSslSocket's TLS state machine is driven by Qt's event loop.
+        // We're in a raw QThread::run() with no event loop, so SSL
+        // reads/writes only advance when *something* kicks Qt. Run
+        // a zero-timeout processEvents pass every iteration so
+        // outbound flushes complete and inbound TCP bytes get decoded
+        // into bytesAvailable promptly.
         if (!useUdpCarrier) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 0);
             if (ws->bytesAvailable() == 0) {
                 ws->waitForReadyRead(0);
             }
