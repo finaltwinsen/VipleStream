@@ -479,10 +479,13 @@ void RelayUdpTunnel::run() {
         // the outgoing backlog exceeds the threshold we drop the
         // frame instead of queuing it. Keeps end-to-end latency
         // bounded by roughly THRESHOLD / throughput.
-        // 64 KB keeps worst-case outbound latency to ~50 ms at 10 Mbps.
-        // With the default OS send buffer (~64 KB on Windows), any
-        // further stall immediately shows up as bytesToWrite > 0.
-        constexpr qint64 BACKLOG_DROP_THRESHOLD = 64 * 1024;
+        // 32 KB ≈ 175 ms of one-way latency at 1.5 Mbps (the tunnel
+        // bitrate cap). At 64 KB we saw mouse-move bursts produce
+        // multi-second queue build-up that visibly froze the picture
+        // before a decoder-queue-overflow storm crashed the client.
+        // Smaller threshold = more drops on bursts, but RTP/ENet both
+        // recover from loss far better than they recover from latency.
+        constexpr qint64 BACKLOG_DROP_THRESHOLD = 32 * 1024;
         qint64 backlog = ws->bytesToWrite();
         if (backlog > BACKLOG_DROP_THRESHOLD) {
             static std::atomic<int> drops{0};

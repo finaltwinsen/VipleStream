@@ -1848,12 +1848,13 @@ bool Session::startConnectionAsync()
                         "[VIPLE-NAT] UDP tunnel ready — video/audio routed via relay (host=127.0.0.1)");
             // Bandwidth cap for the tunnel path. The WS carrier goes
             // TLS-over-TCP (often through Cloudflare Tunnel) which
-            // cannot sustain 20 Mbps of low-latency video. First try
-            // at 5 Mbps still showed ~48% server-side drops, confirming
-            // the Cloudflare edge path can't sustain that rate without
-            // severe queueing. 2 Mbps keeps encoder output below the
-            // observed sustainable ceiling so queues stay shallow.
-            constexpr int TUNNEL_BITRATE_CAP_KBPS = 2000;
+            // can't sustain high-bitrate video. At 2 Mbps server-side
+            // drops were ~0 but mouse-move bursts still exceeded the
+            // sustained pipe rate briefly, growing the TCP queue and
+            // visibly freezing the picture. 1.5 Mbps leaves enough
+            // headroom for motion-induced bitrate bursts to stay
+            // within the pipe's sustainable rate.
+            constexpr int TUNNEL_BITRATE_CAP_KBPS = 1500;
             if (m_StreamConfig.bitrate > TUNNEL_BITRATE_CAP_KBPS) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-NAT] capping bitrate %d -> %d kbps for WS tunnel",
