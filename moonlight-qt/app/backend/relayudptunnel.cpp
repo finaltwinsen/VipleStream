@@ -325,7 +325,7 @@ void RelayUdpTunnel::run() {
                     qPrintable(relayUdpHost));
     }
 
-    /* ---------- 4. Bind local proxy sockets on 127.0.0.1 ---------- */
+    /* ---------- 4. Bind local proxy sockets on 127.0.0.2 ---------- */
     QVector<ProxySock> proxies;
     proxies.reserve(m_ServerPorts.size());
     for (uint16_t p : m_ServerPorts) {
@@ -334,11 +334,11 @@ void RelayUdpTunnel::run() {
         sockaddr_in a = {};
         a.sin_family = AF_INET;
         a.sin_port = htons(p);
-        // 127.0.0.1 — moonlight-common-c is passed "127.0.0.1" as host.
-        inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+        // 127.0.0.2 — moonlight-common-c is passed "127.0.0.2" as host.
+        inet_pton(AF_INET, "127.0.0.2", &a.sin_addr);
         if (bind(s, (sockaddr *)&a, sizeof(a)) < 0) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-UDPTUN] bind 127.0.0.1:%u failed — port in use?", p);
+                        "[VIPLE-UDPTUN] bind 127.0.0.2:%u failed — port in use?", p);
             closesocket(s);
             continue;
         }
@@ -347,7 +347,7 @@ void RelayUdpTunnel::run() {
         ps.serverPort = p;
         proxies.append(ps);
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-UDPTUN] proxy bound 127.0.0.1:%u", p);
+                    "[VIPLE-UDPTUN] proxy bound 127.0.0.2:%u", p);
     }
     if (proxies.isEmpty()) {
         if (tunnelSock != INVALID_SOCKET) closesocket(tunnelSock);
@@ -382,7 +382,7 @@ void RelayUdpTunnel::run() {
             sockaddr_in dst = {};
             dst.sin_family = AF_INET;
             dst.sin_port = htons(ps.clientPort);
-            inet_pton(AF_INET, "127.0.0.1", &dst.sin_addr);
+            inet_pton(AF_INET, "127.0.0.2", &dst.sin_addr);
             sendto(ps.fd, (const char *)payload, (int)payloadLen, 0,
                    (sockaddr *)&dst, sizeof(dst));
             return;

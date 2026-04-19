@@ -1839,9 +1839,13 @@ bool Session::startConnectionAsync()
                                          m_Computer->uuid,
                                          tunneledPorts);
         if (m_UdpTunnel->startAndWaitReady(7000)) {
-            hostnameStr = QByteArrayLiteral("127.0.0.1");
+            // Use 127.0.0.2 instead of 127.0.0.1 so the proxy sockets
+            // don't collide with a locally running Sunshine instance
+            // (dev scenario: client and server on the same box). The
+            // whole 127.0.0.0/8 is loopback so this is fine.
+            hostnameStr = QByteArrayLiteral("127.0.0.2");
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-NAT] UDP tunnel ready — video/audio routed via relay");
+                        "[VIPLE-NAT] UDP tunnel ready — video/audio routed via relay (host=127.0.0.2)");
         } else {
             // Tunnel allocation failed — fall back to STUN/localhost
             // as before. Video/audio will likely not work if the
