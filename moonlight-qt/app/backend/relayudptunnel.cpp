@@ -326,7 +326,7 @@ void RelayUdpTunnel::run() {
                     qPrintable(relayUdpHost));
     }
 
-    /* ---------- 4. Bind local proxy sockets on 127.0.0.2 ----------
+    /* ---------- 4. Bind local proxy sockets on 127.0.0.1 ----------
      *
      * We let the OS assign the local port (bind port 0) rather than
      * using the Sunshine logical ports like 47998 verbatim. Windows
@@ -338,8 +338,8 @@ void RelayUdpTunnel::run() {
      * The ephemeral local port is then published via portMap() so
      * session.cpp can rewrite the RTSP SETUP responses that pass
      * through the TCP tunnel (see RelayTcpTunnel's data rewriter) and
-     * moonlight-common-c targets 127.0.0.2:<ephemeral> instead of
-     * 127.0.0.2:<server_port>.
+     * moonlight-common-c targets 127.0.0.1:<ephemeral> instead of
+     * 127.0.0.1:<server_port>.
      * -------------------------------------------------------------- */
     QVector<ProxySock> proxies;
     proxies.reserve(m_ServerPorts.size());
@@ -349,7 +349,7 @@ void RelayUdpTunnel::run() {
         sockaddr_in a = {};
         a.sin_family = AF_INET;
         a.sin_port = 0;  // OS-assigned
-        inet_pton(AF_INET, "127.0.0.2", &a.sin_addr);
+        inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
         if (bind(s, (sockaddr *)&a, sizeof(a)) < 0) {
 #ifdef _WIN32
             int err = WSAGetLastError();
@@ -357,7 +357,7 @@ void RelayUdpTunnel::run() {
             int err = errno;
 #endif
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-UDPTUN] bind 127.0.0.2:0 (for server port %u) "
+                        "[VIPLE-UDPTUN] bind 127.0.0.1:0 (for server port %u) "
                         "failed (err=%d)", p, err);
             closesocket(s);
             continue;
@@ -375,7 +375,7 @@ void RelayUdpTunnel::run() {
         ps.localPort = localPort;
         proxies.append(ps);
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-UDPTUN] proxy bound 127.0.0.2:%u -> server port %u",
+                    "[VIPLE-UDPTUN] proxy bound 127.0.0.1:%u -> server port %u",
                     localPort, p);
     }
     if (proxies.isEmpty()) {
@@ -429,12 +429,12 @@ void RelayUdpTunnel::run() {
             sockaddr_in dst = {};
             dst.sin_family = AF_INET;
             dst.sin_port = htons(ps.clientPort);
-            inet_pton(AF_INET, "127.0.0.2", &dst.sin_addr);
+            inet_pton(AF_INET, "127.0.0.1", &dst.sin_addr);
             int sent = sendto(ps.fd, (const char *)payload, (int)payloadLen, 0,
                               (sockaddr *)&dst, sizeof(dst));
             if (kDeliverCount++ < 5) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-UDPTUN] deliver #%d srv=%u -> 127.0.0.2:%u len=%zu sent=%d",
+                            "[VIPLE-UDPTUN] deliver #%d srv=%u -> 127.0.0.1:%u len=%zu sent=%d",
                             kDeliverCount, srcPort, ps.clientPort, payloadLen, sent);
             }
             return;

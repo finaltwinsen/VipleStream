@@ -1815,7 +1815,7 @@ bool Session::startConnectionAsync()
         // loopback ports are known before the RTSP tunnel starts —
         // the RTSP TCP tunnel needs that mapping to rewrite the
         // `server_port=` entries in Sunshine's SETUP responses so
-        // moonlight-common-c targets our proxies (127.0.0.2:<eph>)
+        // moonlight-common-c targets our proxies (127.0.0.1:<eph>)
         // instead of the literal Sunshine ports (which Windows
         // Hyper-V / winnat often has reserved out from under us).
         QVector<uint16_t> tunneledPorts{47998, 47999, 48000};
@@ -1826,9 +1826,9 @@ bool Session::startConnectionAsync()
         QVector<QPair<uint16_t, uint16_t>> portMap;
         if (m_UdpTunnel->startAndWaitReady(7000)) {
             portMap = m_UdpTunnel->portMap();
-            hostnameStr = QByteArrayLiteral("127.0.0.2");
+            hostnameStr = QByteArrayLiteral("127.0.0.1");
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-NAT] UDP tunnel ready — video/audio routed via relay (host=127.0.0.2)");
+                        "[VIPLE-NAT] UDP tunnel ready — video/audio routed via relay (host=127.0.0.1)");
             // Tell moonlight-common-c to target our ephemeral loopback
             // ports instead of the parsed Sunshine ports. The RTSP
             // traffic is end-to-end encrypted (corever=1), so rewriting
