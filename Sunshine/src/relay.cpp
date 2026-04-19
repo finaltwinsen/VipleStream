@@ -73,6 +73,7 @@ namespace relay {
     std::mutex g_state_mtx;
     std::map<std::string, std::function<void(udp_tunnel::Flow)>> g_pending_allocates;
     std::function<void(const uint8_t *, size_t)> g_tunnel_binary_handler;
+    std::function<void(udp_tunnel::Flow)> g_allocated_notify_handler;
   }  // namespace
 
   class Transport {
@@ -423,49 +424,82 @@ namespace relay {
     g_tunnel_binary_handler = std::move(cb);
   }
 
-  // Dispatch one udp_tunnel_allocated text message received from the relay.
-  // Parses the fields and invokes any pending allocate_flow callback.
-  static void handle_allocated(const std::string &msg) {
-    std::string request_id = json_str(msg, "request_id");
-    if (request_id.empty()) return;
+  void set_allocated_notify_handler(std::function<void(udp_tunnel::Flow)> cb) {
+    std::lock_guard<std::mutex> l(g_state_mtx);
+    g_allocated_notify_handler = std::move(cb);
+  }
 
-    std::function<void(udp_tunnel::Flow)> cb;
-    {
-      std::lock_guard<std::mutex> l(g_state_mtx);
-      auto it = g_pending_allocates.find(request_id);
-      if (it != g_pending_allocates.end()) {
-        cb = std::move(it->second);
-        g_pending_allocates.erase(it);
-      }
-    }
-    if (!cb) return;
-
+  // Parse a `udp_tunnel_allocated` JSON message into a Flow. Returns an
+  // invalid Flow (flow_id == 0) if any mandatory field is missing.
+  // Field names follow the relay wire protocol: `relay_udp_host`,
+  // `relay_udp_port`, `role` (not `udp_host`/`udp_port`/`side`).
+  static udp_tunnel::Flow parse_allocated(const std::string &msg) {
     udp_tunnel::Flow flow;
     int64_t fid = 0;
     if (!json_int(msg, "flow_id", fid) || fid <= 0 || fid > 0xFFFF) {
-      cb(udp_tunnel::Flow{});
-      return;
+      return flow;
     }
     std::string token_hex = json_str(msg, "token");
     if (!udp_tunnel::hex_to_token(token_hex, flow.token)) {
-      cb(udp_tunnel::Flow{});
-      return;
+      return flow;
     }
-
     flow.flow_id = static_cast<uint16_t>(fid);
-    flow.relay_udp_host = json_str(msg, "udp_host");
+    flow.relay_udp_host = json_str(msg, "relay_udp_host");
     int64_t udp_port = 0;
-    if (json_int(msg, "udp_port", udp_port) && udp_port > 0 && udp_port < 65536) {
+    if (json_int(msg, "relay_udp_port", udp_port) && udp_port > 0 && udp_port < 65536) {
       flow.relay_udp_port = static_cast<uint16_t>(udp_port);
     }
     flow.remote_uuid = json_str(msg, "remote_uuid");
-    flow.is_side_a = (json_str(msg, "side") == "a");
+    flow.is_side_a = (json_str(msg, "role") == "a");
+    return flow;
+  }
 
-    BOOST_LOG(info) << "[RELAY-TUNNEL] Flow " << flow.flow_id
-                    << " allocated (peer=" << flow.remote_uuid.substr(0, 12)
-                    << ", udp=" << flow.relay_udp_host << ":" << flow.relay_udp_port
-                    << ", side=" << (flow.is_side_a ? "a" : "b") << ")";
-    cb(flow);
+  // Dispatch one udp_tunnel_allocated text message received from the relay.
+  //
+  //  - If `request_id` matches a pending allocate_flow, fire that callback
+  //    (this is the requester-side response: role="a").
+  //  - Otherwise, treat it as a role="b" notification and hand it to the
+  //    allocated-notify handler. Sunshine uses this to pick up flows
+  //    initiated by the connecting Moonlight client so both ends share
+  //    the same flow_id / token.
+  static void handle_allocated(const std::string &msg) {
+    udp_tunnel::Flow flow = parse_allocated(msg);
+
+    std::string request_id = json_str(msg, "request_id");
+    if (!request_id.empty()) {
+      std::function<void(udp_tunnel::Flow)> cb;
+      {
+        std::lock_guard<std::mutex> l(g_state_mtx);
+        auto it = g_pending_allocates.find(request_id);
+        if (it != g_pending_allocates.end()) {
+          cb = std::move(it->second);
+          g_pending_allocates.erase(it);
+        }
+      }
+      if (cb) {
+        BOOST_LOG(info) << "[RELAY-TUNNEL] Flow " << flow.flow_id
+                        << " allocated (peer=" << flow.remote_uuid.substr(0, 12)
+                        << ", udp=" << flow.relay_udp_host << ":" << flow.relay_udp_port
+                        << ", role=" << (flow.is_side_a ? "a" : "b") << ")";
+        cb(flow);
+        return;
+      }
+    }
+
+    // No pending request matched — this is a peer-initiated allocation
+    // notification (role="b").
+    std::function<void(udp_tunnel::Flow)> notify;
+    {
+      std::lock_guard<std::mutex> l(g_state_mtx);
+      notify = g_allocated_notify_handler;
+    }
+    if (notify && flow.valid()) {
+      BOOST_LOG(info) << "[RELAY-TUNNEL] Flow " << flow.flow_id
+                      << " notified (peer=" << flow.remote_uuid.substr(0, 12)
+                      << ", udp=" << flow.relay_udp_host << ":" << flow.relay_udp_port
+                      << ", role=" << (flow.is_side_a ? "a" : "b") << ")";
+      notify(flow);
+    }
   }
 
   // ============================================================

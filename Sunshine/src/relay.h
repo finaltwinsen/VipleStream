@@ -68,4 +68,16 @@ namespace relay {
    */
   void set_tunnel_binary_handler(std::function<void(const uint8_t *, size_t)> cb);
 
+  /**
+   * Register a callback invoked when the relay sends a `udp_tunnel_allocated`
+   * message that does NOT match a pending allocate_flow request — i.e. a
+   * notification that another peer initiated an allocation for us. Sunshine
+   * uses this to pick up flows that its connecting client has created so the
+   * two sides share a single flow_id/token.
+   *
+   * Called on the relay thread. Pass an empty std::function to clear.
+   * Thread-safe.
+   */
+  void set_allocated_notify_handler(std::function<void(udp_tunnel::Flow)> cb);
+
 }  // namespace relay

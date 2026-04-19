@@ -2016,26 +2016,37 @@ namespace stream {
     }
     ref->message_queue_queue->raise(type, session_id, messages);
 
-    // VipleStream: if a relay tunnel is active for this session, route
-    // inbound tunnel datagrams for our local video/audio port onto the
-    // same message queue. The synthetic udp::endpoint carries the
-    // client's logical port in `src_port` so the outbound send path
-    // can address the same peer over the tunnel.
+    // VipleStream: if/when a relay tunnel becomes active for this
+    // session, route inbound tunnel datagrams for our local video /
+    // audio port onto the same message queue. The synthetic
+    // udp::endpoint carries the client's logical port in `src_port` so
+    // the outbound send path can address the same peer over the tunnel.
+    //
+    // The tunnel is allocated asynchronously when the client's
+    // `udp_tunnel_allocate` lands on the relay, so we re-check each
+    // wait iteration and install the handler the moment it appears.
     const uint16_t local_port = (type == socket_e::video) ?
         net::map_port(VIDEO_STREAM_PORT) : net::map_port(AUDIO_STREAM_PORT);
     bool tunnel_handler_registered = false;
-    if (session->tunnel &&
-        session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
-        session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT) {
-      auto tunnel_weak = std::weak_ptr<tunnel_session::TunnelSession>(session->tunnel);
+    std::shared_ptr<tunnel_session::TunnelSession> handler_owner;
+    auto try_register_tunnel_handler = [&]() {
+      if (tunnel_handler_registered) return;
+      if (!session->tunnel) return;
+      auto c = session->tunnel->carrier();
+      if (c == udp_tunnel::Carrier::NONE ||
+          c == udp_tunnel::Carrier::DIRECT) return;
       session->tunnel->set_handler(local_port,
         [messages](const uint8_t *data, size_t len, uint16_t src_port) {
           udp::endpoint fake_peer(asio::ip::make_address("127.0.0.1"), src_port);
           messages->raise(fake_peer,
                           std::string{reinterpret_cast<const char *>(data), len});
         });
+      handler_owner = session->tunnel;
       tunnel_handler_registered = true;
-    }
+      BOOST_LOG(info) << "[TUNNEL] recv_ping tunnel handler attached for port "
+                      << local_port;
+    };
+    try_register_tunnel_handler();
 
     auto fg = util::fail_guard([&]() {
       messages->stop();
@@ -2054,12 +2065,27 @@ namespace stream {
     auto start_time = std::chrono::steady_clock::now();
     auto current_time = start_time;
 
-    while (current_time - start_time < config::stream.ping_timeout) {
-      auto delta_time = current_time - start_time;
+    // Poll interval chosen short enough to pick up an asynchronously
+    // created tunnel (notify handler → session::tunnel) within a few
+    // hundred milliseconds of the client's `udp_tunnel_allocate`.
+    constexpr auto TUNNEL_POLL = std::chrono::milliseconds(200);
 
-      auto msg_opt = messages->pop(config::stream.ping_timeout - delta_time);
+    while (current_time - start_time < config::stream.ping_timeout) {
+      try_register_tunnel_handler();
+
+      auto delta_time = current_time - start_time;
+      auto remaining = config::stream.ping_timeout - delta_time;
+      auto slice = std::min<std::chrono::milliseconds>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(remaining),
+        TUNNEL_POLL);
+
+      auto msg_opt = messages->pop(slice);
       if (!msg_opt) {
-        break;
+        // Timeout on this slice. If we're still within the overall
+        // budget, loop around so try_register_tunnel_handler runs
+        // again; otherwise fall out below.
+        current_time = std::chrono::steady_clock::now();
+        continue;
       }
 
       TUPLE_2D_REF(recv_peer, msg, *msg_opt);
@@ -2197,10 +2223,22 @@ namespace stream {
     }
 
     /**
-     * VipleStream: if the server is configured with a non-direct
-     * `udp_tunnel_mode`, ask the relay for a flow to the client and
-     * bring up the TunnelSession synchronously. Returns silently on
-     * any failure — the direct UDP path still works as fallback.
+     * VipleStream: register a listener that brings up a TunnelSession
+     * when the Moonlight client allocates a relay flow targeted at us.
+     *
+     * Sunshine does NOT initiate the allocation itself — doing so while
+     * `session::start` is the blocking handler for /launch would
+     * deadlock the client, which doesn't open its own WS to the relay
+     * until after /launch returns. Instead we install a handler and
+     * return immediately; the tunnel comes up asynchronously when the
+     * client's `udp_tunnel_allocate` lands on the relay and the relay
+     * forwards us the role="b" notification.
+     *
+     * The streaming send paths (`videoBroadcastThread` /
+     * `audioBroadcastThread`) re-check `session->tunnel` on every
+     * packet so they transparently switch from direct-UDP fallback to
+     * tunnel once it becomes live. `recv_ping` does the same lazily —
+     * see its tunnel-handler registration below.
      */
     static void maybe_start_tunnel(session_t &session) {
       const auto mode = udp_tunnel::parse_mode(config::stream.udp_tunnel_mode);
@@ -2211,46 +2249,29 @@ namespace stream {
         return;
       }
 
-      auto flow_promise = std::make_shared<std::promise<udp_tunnel::Flow>>();
-      auto flow_future = flow_promise->get_future();
-      auto fulfilled = std::make_shared<std::atomic<bool>>(false);
+      const std::string target = session.remote_uuid;
+      // Hold a weak-ish reference: the session_t is owned by shared_ptr
+      // in rtsp.cpp and lives at least until session::stop is called.
+      // The notify handler is cleared in session teardown below.
+      session_t *sess_ptr = &session;
+      relay::set_allocated_notify_handler(
+        [sess_ptr, target, mode](udp_tunnel::Flow flow) {
+          if (flow.remote_uuid != target) return;
+          if (sess_ptr->tunnel) return;  // already set up
 
-      relay::allocate_flow(session.remote_uuid,
-        [flow_promise, fulfilled](udp_tunnel::Flow flow) {
-          bool expected = false;
-          if (fulfilled->compare_exchange_strong(expected, true)) {
-            flow_promise->set_value(std::move(flow));
+          auto ts = std::make_shared<tunnel_session::TunnelSession>();
+          if (!ts->start(flow, mode)) {
+            BOOST_LOG(warning) << "[TUNNEL] TunnelSession start failed";
+            return;
           }
+          ts->enable_local_bridge(net::map_port(CONTROL_PORT));
+          sess_ptr->tunnel = std::move(ts);
+          BOOST_LOG(info) << "[TUNNEL] session tunnel active (carrier="
+                          << udp_tunnel::carrier_name(sess_ptr->tunnel->carrier())
+                          << ", flow_id=" << flow.flow_id << ")";
         });
-
-      auto status = flow_future.wait_for(std::chrono::seconds(3));
-      if (status != std::future_status::ready) {
-        BOOST_LOG(warning) << "[TUNNEL] flow allocation timed out "
-                              "— continuing with direct UDP";
-        return;
-      }
-
-      auto flow = flow_future.get();
-      if (!flow.valid()) {
-        BOOST_LOG(warning) << "[TUNNEL] relay refused flow allocation "
-                              "— continuing with direct UDP";
-        return;
-      }
-
-      auto ts = std::make_shared<tunnel_session::TunnelSession>();
-      if (!ts->start(flow, mode)) {
-        BOOST_LOG(warning) << "[TUNNEL] TunnelSession start failed";
-        return;
-      }
-      // Bridge the ENet control port through the tunnel. Without this,
-      // the client's ENet would have no reachable peer when the direct
-      // UDP path is blocked and the session would fail at the control
-      // stream stage (ENET_EVENT_TYPE_DISCONNECT).
-      ts->enable_local_bridge(net::map_port(CONTROL_PORT));
-      session.tunnel = std::move(ts);
-      BOOST_LOG(info) << "[TUNNEL] session tunnel active (carrier="
-                      << udp_tunnel::carrier_name(session.tunnel->carrier())
-                      << ", flow_id=" << flow.flow_id << ")";
+      BOOST_LOG(info) << "[TUNNEL] listening for relay flow notification "
+                         "from peer=" << target.substr(0, 12);
     }
 
     int start(session_t &session, const std::string &addr_string) {

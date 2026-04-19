@@ -557,6 +557,7 @@ async def handle_client(reader, writer, psk: str):
                 # itself and target_uuid. Both peers receive `udp_tunnel_allocated`
                 # with the same flow_id/token but a "role" marker ("a" or "b").
                 target_uuid = data.get("target_uuid", "")
+                request_id = data.get("request_id", "")
                 if not peer_uuid:
                     await ws_send(writer, json.dumps({
                         "type": "udp_tunnel_error",
@@ -584,8 +585,11 @@ async def handle_client(reader, writer, psk: str):
                     "relay_udp_port": UDP_TUNNEL_PORT,
                     "relay_udp_host": UDP_TUNNEL_ADVERTISE_HOST,
                 }
-                # Tell requester it's side "a", target it's side "b".
-                requester_msg = dict(base, role="a", remote_uuid=target_uuid)
+                # Tell requester it's side "a" (and echo their request_id so
+                # the response-matching logic in the client wrapper works),
+                # target it's side "b" (no request_id — they didn't ask).
+                requester_msg = dict(base, role="a", remote_uuid=target_uuid,
+                                     request_id=request_id)
                 target_msg    = dict(base, role="b", remote_uuid=peer_uuid)
                 await ws_send(writer, json.dumps(requester_msg))
                 try:

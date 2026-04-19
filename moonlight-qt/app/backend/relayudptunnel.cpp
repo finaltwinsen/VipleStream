@@ -287,8 +287,8 @@ void RelayUdpTunnel::run() {
             delete ws; m_AllocFailed = true; return;
         }
         flow.flow_id = (uint16_t)fid;
-        relayUdpHost = o["udp_host"].toString();
-        relayUdpPort = (uint16_t)o["udp_port"].toInt(0);
+        relayUdpHost = o["relay_udp_host"].toString();
+        relayUdpPort = (uint16_t)o["relay_udp_port"].toInt(0);
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-UDPTUN] flow_id=%u udp=%s:%u",
                     flow.flow_id, qPrintable(relayUdpHost), relayUdpPort);
