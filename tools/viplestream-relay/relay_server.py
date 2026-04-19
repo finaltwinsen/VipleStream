@@ -58,25 +58,66 @@ class Peer:
 
 
 class UdpFlow:
-    """A relay-mediated UDP tunnel between two peers.
+    """A relay-mediated tunnel between two peers.
 
-    Addresses are pinned on first-arrival (TURN-like): the first authenticated
-    datagram from one peer fills addr_a; the first from the other fills addr_b.
-    Subsequent datagrams from a pinned addr are forwarded to the other pinned
-    addr. Unpinned / unauthenticated sources are dropped.
+    Each side can reach the relay via either direct UDP (fastest) or a WebSocket
+    binary frame fallback (when UDP cannot reach the relay — e.g. ISP blocks
+    inbound UDP). An endpoint is a tuple:
+        ("udp", (ip, port))   — peer sent a valid datagram from this addr
+        ("ws",  writer)       — peer used a WS binary frame, routed via this WS
+    Endpoints are pinned on first-valid-arrival. Subsequent traffic from a
+    pinned endpoint is forwarded to the other side's pinned endpoint (which
+    may be a different mode — i.e. UDP↔WS cross-mode routing is supported).
+
+    Stats track mode combination and byte counters for diagnostic UI.
     """
     __slots__ = ("flow_id", "peer_a_uuid", "peer_b_uuid",
-                 "addr_a", "addr_b", "token", "created_at", "last_active")
+                 "endpoint_a", "endpoint_b", "token",
+                 "created_at", "last_active",
+                 "bytes_a_to_b", "bytes_b_to_a",
+                 "pkts_a_to_b", "pkts_b_to_a")
 
     def __init__(self, flow_id: int, peer_a_uuid: str, peer_b_uuid: str, token: bytes):
         self.flow_id = flow_id
         self.peer_a_uuid = peer_a_uuid
         self.peer_b_uuid = peer_b_uuid
-        self.addr_a = None  # (ip, port) once seen
-        self.addr_b = None
+        self.endpoint_a = None  # ("udp", addr) or ("ws", writer)
+        self.endpoint_b = None
         self.token = token  # 16-byte random, shared by both peers
         self.created_at = time.time()
         self.last_active = self.created_at
+        self.bytes_a_to_b = 0
+        self.bytes_b_to_a = 0
+        self.pkts_a_to_b = 0
+        self.pkts_b_to_a = 0
+
+    @property
+    def mode_a(self) -> str:
+        return self.endpoint_a[0] if self.endpoint_a else "-"
+
+    @property
+    def mode_b(self) -> str:
+        return self.endpoint_b[0] if self.endpoint_b else "-"
+
+    @property
+    def mode_label(self) -> str:
+        return f"{self.mode_a}<->{self.mode_b}"
+
+    def stats_dict(self) -> dict:
+        return {
+            "flow_id": self.flow_id,
+            "peer_a": self.peer_a_uuid[:8] + "..",
+            "peer_b": self.peer_b_uuid[:8] + "..",
+            "mode_a": self.mode_a,
+            "mode_b": self.mode_b,
+            "mode_label": self.mode_label,
+            "bytes_a_to_b": self.bytes_a_to_b,
+            "bytes_b_to_a": self.bytes_b_to_a,
+            "pkts_a_to_b": self.pkts_a_to_b,
+            "pkts_b_to_a": self.pkts_b_to_a,
+            "age_s": int(time.time() - self.created_at),
+            "idle_s": int(time.time() - self.last_active),
+        }
 
 
 class Registry:
@@ -220,8 +261,16 @@ async def ws_handshake(reader, writer) -> bool:
     await writer.drain()
     return True
 
-async def ws_recv(reader) -> Optional[str]:
-    """Read one WebSocket text frame. Returns None on close/error."""
+async def ws_recv_frame(reader) -> Optional[tuple]:
+    """Read one WebSocket frame. Returns (opcode, payload_bytes) or None.
+
+    Handled opcodes (payload meaning varies):
+        0x1 Text   — payload is UTF-8 bytes
+        0x2 Binary — payload is raw bytes
+        0x8 Close  — returns None (end of stream)
+        0x9 Ping   — handled here, returns (0x9, b"") for caller to pong
+        0xA Pong   — ignored (caller sees 0xA, can no-op)
+    """
     try:
         b0 = await reader.readexactly(2)
     except (asyncio.IncompleteReadError, ConnectionError):
@@ -248,10 +297,21 @@ async def ws_recv(reader) -> Optional[str]:
 
     if opcode == 0x8:  # Close
         return None
-    if opcode == 0x9:  # Ping → Pong
+    return (opcode, payload)
+
+
+# Backward-compat: ws_recv returns str for text frames, "__PING__" for ping,
+# None on close/unsupported. Used by existing JSON-signaling callers.
+async def ws_recv(reader) -> Optional[str]:
+    frame = await ws_recv_frame(reader)
+    if frame is None:
+        return None
+    opcode, payload = frame
+    if opcode == 0x9:  # Ping
         return "__PING__"
     if opcode == 0x1:  # Text
         return payload.decode("utf-8", errors="replace")
+    # Binary / Pong / other → caller of this legacy helper ignores it
     return None
 
 def ws_frame(data: str) -> bytes:
@@ -278,6 +338,29 @@ async def ws_send(writer, data: str):
     writer.write(ws_frame(data))
     await writer.drain()
 
+
+def ws_frame_binary(data: bytes) -> bytes:
+    """Encode a WebSocket binary frame (server→client, unmasked)."""
+    frame = bytearray()
+    frame.append(0x82)  # FIN + binary opcode
+    length = len(data)
+    if length < 126:
+        frame.append(length)
+    elif length < 65536:
+        frame.append(126)
+        frame.extend(struct.pack("!H", length))
+    else:
+        frame.append(127)
+        frame.extend(struct.pack("!Q", length))
+    frame.extend(data)
+    return bytes(frame)
+
+
+async def ws_send_binary(writer, data: bytes):
+    """Send a WebSocket binary frame carrying a tunnel datagram."""
+    writer.write(ws_frame_binary(data))
+    await writer.drain()
+
 # ============================================================
 # Client handler
 # ============================================================
@@ -294,14 +377,35 @@ async def handle_client(reader, writer, psk: str):
     peer_uuid = None
     try:
         while True:
-            msg = await asyncio.wait_for(ws_recv(reader), timeout=120)
-            if msg is None:
+            frame = await asyncio.wait_for(ws_recv_frame(reader), timeout=120)
+            if frame is None:
                 break
-            if msg == "__PING__":
+            opcode, payload = frame
+
+            if opcode == 0x9:  # Ping
                 writer.write(ws_pong())
                 await writer.drain()
                 continue
+            if opcode == 0xA:  # Pong — ignore
+                continue
+            if opcode == 0x2:  # Binary — WS-mode tunnel datagram
+                # Peer is sending a tunnel packet over the WS control connection
+                # because direct UDP to the relay is blocked.
+                if not peer_uuid:
+                    # Binary frames before register are rejected.
+                    continue
+                flow = _verify_tunnel_packet(payload)
+                if flow is None:
+                    continue
+                _pin_and_forward(flow, payload,
+                                 sender_endpoint=("ws", writer),
+                                 sender_uuid=peer_uuid)
+                continue
+            if opcode != 0x1:  # Not Text — unknown/unsupported
+                continue
 
+            # Text frame — JSON signaling (existing flow)
+            msg = payload.decode("utf-8", errors="replace")
             try:
                 data = json.loads(msg)
             except json.JSONDecodeError:
@@ -493,6 +597,30 @@ async def handle_client(reader, writer, psk: str):
                 logger.info(f"[UDP-TUN] allocated flow={flow.flow_id} "
                             f"{peer_uuid[:8]}..(a)<->{target_uuid[:8]}..(b)")
 
+            elif msg_type == "udp_tunnel_stats":
+                # Query: return stats for flows this peer is part of, or all
+                # if no flow_ids filter. Useful for UI connection-type display.
+                wanted = data.get("flow_ids")  # optional list[int]
+                if peer_uuid is None:
+                    await ws_send(writer, json.dumps({
+                        "type": "udp_tunnel_stats_result",
+                        "flows": []}))
+                    continue
+                flows = []
+                for fid, fl in registry.flows.items():
+                    if peer_uuid not in (fl.peer_a_uuid, fl.peer_b_uuid):
+                        continue
+                    if wanted is not None and fid not in wanted:
+                        continue
+                    s = fl.stats_dict()
+                    # Tell THIS peer which side they are (a/b) so they can
+                    # pick the right byte counters for local display.
+                    s["my_side"] = "a" if peer_uuid == fl.peer_a_uuid else "b"
+                    flows.append(s)
+                await ws_send(writer, json.dumps({
+                    "type": "udp_tunnel_stats_result",
+                    "flows": flows}))
+
             elif msg_type == "udp_tunnel_close":
                 flow_id = int(data.get("flow_id", 0))
                 flow = registry.flows.get(flow_id)
@@ -555,59 +683,151 @@ UDP_TUNNEL_ADVERTISE_HOST: str = ""  # what we tell peers to connect to
 
 
 class UdpRelayProtocol(asyncio.DatagramProtocol):
-    """Relay UDP datagrams between two pinned peer endpoints, keyed by flow_id."""
+    """Relay UDP datagrams between two pinned peer endpoints, keyed by flow_id.
+
+    Also handles cross-mode routing: if the sender is on UDP but the other
+    peer is pinned as WS, the datagram is forwarded as a WS binary frame.
+    """
 
     def __init__(self):
         self.transport: Optional[asyncio.DatagramTransport] = None
 
     def connection_made(self, transport):
         self.transport = transport
+        global UDP_TRANSPORT_REF
+        UDP_TRANSPORT_REF = transport
         sockname = transport.get_extra_info("sockname")
         logger.info(f"[UDP-TUN] relay UDP datagram plane listening on {sockname}")
 
     def datagram_received(self, data: bytes, addr):
-        if len(data) < UDP_TUNNEL_HEADER_LEN:
+        flow = _verify_tunnel_packet(data)
+        if flow is None:
             return
-        if data[0:2] != UDP_TUNNEL_MAGIC:
-            return
-        flow_id = struct.unpack("!H", data[2:4])[0]
-        recv_hmac = data[8:24]
-        payload = data[24:]
+        _pin_and_forward(flow, data, sender_endpoint=("udp", addr),
+                         sender_uuid=None)  # identify sender by endpoint match
 
-        flow = registry.flows.get(flow_id)
-        if not flow:
-            return  # unknown/expired flow
 
-        # HMAC covers everything except the HMAC bytes themselves.
-        signed = data[0:8] + payload
-        expected = hmac.new(flow.token, signed, hashlib.sha256).digest()[:16]
-        if not hmac.compare_digest(expected, recv_hmac):
-            logger.debug(f"[UDP-TUN] bad HMAC flow={flow_id} from {addr}")
-            return
+# Shared helpers — used by both UDP plane and WS binary-frame path
+# --------------------------------------------------------------------------
+UDP_TRANSPORT_REF: Optional[asyncio.DatagramTransport] = None
 
-        flow.last_active = time.time()
 
-        # Pin source addr to side a or b on first valid arrival.
-        if addr == flow.addr_a or addr == flow.addr_b:
-            pass  # already pinned
-        elif flow.addr_a is None:
-            flow.addr_a = addr
-            logger.info(f"[UDP-TUN] flow={flow_id} pinned addr_a={addr}")
-        elif flow.addr_b is None:
-            flow.addr_b = addr
-            logger.info(f"[UDP-TUN] flow={flow_id} pinned addr_b={addr}")
+def _verify_tunnel_packet(data: bytes) -> Optional["UdpFlow"]:
+    """Parse + HMAC-verify a tunnel packet. Returns the flow or None."""
+    if len(data) < UDP_TUNNEL_HEADER_LEN or data[0:2] != UDP_TUNNEL_MAGIC:
+        return None
+    flow_id = struct.unpack("!H", data[2:4])[0]
+    flow = registry.flows.get(flow_id)
+    if not flow:
+        return None
+    recv_hmac = data[8:24]
+    payload = data[24:]
+    expected = hmac.new(flow.token, data[0:8] + payload, hashlib.sha256).digest()[:16]
+    if not hmac.compare_digest(expected, recv_hmac):
+        logger.debug(f"[TUN] bad HMAC flow={flow_id}")
+        return None
+    return flow
+
+
+def _pin_and_forward(flow: "UdpFlow", data: bytes,
+                     sender_endpoint: tuple, sender_uuid: Optional[str]):
+    """Pin the sender's endpoint to side a/b (if not yet), then forward the
+    packet to the other side. Supports cross-mode (UDP<->WS) forwarding.
+
+    sender_endpoint: ("udp", (ip, port)) or ("ws", writer)
+    sender_uuid:     required for WS mode; None for UDP (identified by addr)
+    """
+    # 1. Determine which side the sender belongs to.
+    def _matches(ep, sender):
+        if ep is None or sender is None:
+            return False
+        return ep[0] == sender[0] and ep[1] == sender[1]
+
+    side = None
+    if flow.endpoint_a is not None and _matches(flow.endpoint_a, sender_endpoint):
+        side = "a"
+    elif flow.endpoint_b is not None and _matches(flow.endpoint_b, sender_endpoint):
+        side = "b"
+    else:
+        # Not pinned yet. Decide which side this sender belongs to using uuid
+        # (for WS mode) or first-free-slot (for UDP — addr pinning is TOFU).
+        if sender_uuid is not None:
+            # WS mode — uuid tells us unambiguously which side.
+            if sender_uuid == flow.peer_a_uuid:
+                side = "a"
+            elif sender_uuid == flow.peer_b_uuid:
+                side = "b"
+            else:
+                return  # not a peer of this flow
         else:
-            # Both sides already pinned and this isn't either — reject.
-            return
+            # UDP mode — TOFU pin into first free slot.
+            if flow.endpoint_a is None:
+                side = "a"
+            elif flow.endpoint_b is None:
+                side = "b"
+            else:
+                return  # both sides pinned and sender unknown
 
-        # Forward as-is to the other side (both peers share the same token,
-        # so the receiver can verify HMAC without re-signing).
-        if addr == flow.addr_a:
-            peer_addr = flow.addr_b
+        if side == "a":
+            flow.endpoint_a = sender_endpoint
+            logger.info(f"[TUN] flow={flow.flow_id} pinned a={sender_endpoint[0]}({sender_endpoint[1] if sender_endpoint[0]=='udp' else 'ws'})")
         else:
-            peer_addr = flow.addr_a
-        if peer_addr is not None and self.transport is not None:
-            self.transport.sendto(data, peer_addr)
+            flow.endpoint_b = sender_endpoint
+            logger.info(f"[TUN] flow={flow.flow_id} pinned b={sender_endpoint[0]}({sender_endpoint[1] if sender_endpoint[0]=='udp' else 'ws'})")
+
+    flow.last_active = time.time()
+
+    # 2. Forward to the other side.
+    other = flow.endpoint_b if side == "a" else flow.endpoint_a
+    if other is None:
+        return  # other side not yet pinned
+    kind, val = other
+    size = len(data)
+    if kind == "udp":
+        if UDP_TRANSPORT_REF is not None:
+            try:
+                UDP_TRANSPORT_REF.sendto(data, val)
+                _account(flow, side, size)
+            except Exception as e:
+                logger.debug(f"[TUN] UDP forward error flow={flow.flow_id}: {e}")
+    elif kind == "ws":
+        # val is the peer's WS writer. We defer the actual write to the next
+        # event-loop iteration via call_soon. Calling val.write() directly
+        # from within a datagram_received callback on Windows SelectorEventLoop
+        # has been observed not to propagate bytes to the peer until the loop
+        # processes other I/O — deferring via call_soon makes it reliable.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(f"[TUN] no running loop flow={flow.flow_id}")
+            return
+        frame = ws_frame_binary(data)
+
+        def _do_write(_val=val, _frame=frame, _flow=flow, _side=side, _size=size):
+            try:
+                _val.write(_frame)
+                _account(_flow, _side, _size)
+            except Exception as e:
+                logger.debug(f"[TUN] WS write error flow={_flow.flow_id}: {e}")
+
+        loop.call_soon(_do_write)
+
+
+def _account(flow: "UdpFlow", side: str, size: int):
+    if side == "a":
+        flow.bytes_a_to_b += size
+        flow.pkts_a_to_b += 1
+    else:
+        flow.bytes_b_to_a += size
+        flow.pkts_b_to_a += 1
+
+
+async def _ws_forward_safe(writer, data: bytes, flow: "UdpFlow", side: str, size: int):
+    try:
+        await ws_send_binary(writer, data)
+        _account(flow, side, size)
+    except Exception as e:
+        logger.debug(f"[TUN] WS forward error flow={flow.flow_id}: {e}")
 
 
 async def _udp_flow_reaper(idle_timeout: float = 300.0, interval: float = 30.0):
@@ -671,6 +891,12 @@ async def run_server(host: str, port: int, psk: str,
         udp_transport.close()
 
 def main():
+    # Windows asyncio's default ProactorEventLoop has known limitations with
+    # datagram_received for UDP sockets. Force the selector loop so UDP
+    # tunnel forwarding works on Windows dev/test hosts. No-op on Linux.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     parser = argparse.ArgumentParser(description="VipleStream Signaling Relay Server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=9999, help="WS listen port (default: 9999)")

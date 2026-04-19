@@ -25,6 +25,10 @@ import time
 import uuid
 from typing import Optional, Tuple
 
+# Windows: force SelectorEventLoop for UDP datagram support.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import relay_server as rs
 
 WS_PORT = 19999
