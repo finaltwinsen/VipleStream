@@ -2200,6 +2200,20 @@ namespace stream {
       BOOST_LOG(debug) << "Resetting Input..."sv;
       input::reset(session.input);
 
+      // VipleStream: clear our relay-allocation listener before the
+      // session_t goes out of scope. The listener captures a raw
+      // session* that would otherwise dangle — the next session's
+      // client-initiated flow allocation would fire on the stale
+      // handler, "set up" a tunnel on the dead session, and leave the
+      // new session without one.
+      relay::set_allocated_notify_handler({});
+      // Tear the tunnel down explicitly too so its WS binary handler
+      // is unregistered before the relay thread tries to deliver to a
+      // dead TunnelSession.
+      if (session.tunnel) {
+        session.tunnel.reset();
+      }
+
       // If this is the last session, invoke the platform callbacks
       if (--running_sessions == 0) {
         bool revert_display_config {config::video.dd.config_revert_on_disconnect};
