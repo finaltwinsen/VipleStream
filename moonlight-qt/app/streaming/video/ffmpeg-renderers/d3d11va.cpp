@@ -911,6 +911,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         ID3D11RenderTargetView* gfrucRTV = m_GenericFRUC->getRenderRTV();
         m_RenderDeviceContext->OMSetRenderTargets(1, &gfrucRTV, nullptr);
         m_RenderDeviceContext->ClearRenderTargetView(gfrucRTV, clearColor);
+        setViewport(m_FrucTextureWidth, m_FrucTextureHeight);
         renderVideo(frame);
 
         // Skip ME/warp, just update prev frame
@@ -920,6 +921,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
 
         // Blit real frame directly to swapchain, present immediately (no V-sync)
         m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
+        setViewport(m_DisplayWidth, m_DisplayHeight);
         blitFRUCTexture(m_GenericFRUC->getLastRenderSRV());
         for (int i = 0; i < Overlay::OverlayMax; i++) {
             renderOverlay((Overlay::OverlayType)i);
@@ -932,6 +934,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         ID3D11RenderTargetView* frucRTV = m_FRUC->getCurrentRenderRTV();
         m_RenderDeviceContext->OMSetRenderTargets(1, &frucRTV, nullptr);
         m_RenderDeviceContext->ClearRenderTargetView(frucRTV, clearColor);
+        setViewport(m_FrucTextureWidth, m_FrucTextureHeight);
         renderVideo(frame);
 
         double frameTimestampMs = static_cast<double>(SDL_GetTicks());
@@ -941,6 +944,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         // Present interpolated frame first (if available)
         if (hasInterp) {
             m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
+            setViewport(m_DisplayWidth, m_DisplayHeight);
             m_FRUC->acquireOutputMutex();
             blitFRUCTexture(m_FRUC->getOutputSRV());
             m_FRUC->releaseOutputMutex();
@@ -969,6 +973,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
 
         // Present the real frame - blit from FRUC render texture (no re-render needed)
         m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
+        setViewport(m_DisplayWidth, m_DisplayHeight);
         blitFRUCTexture(m_FRUC->getLastRenderSRV());
         for (int i = 0; i < Overlay::OverlayMax; i++) {
             renderOverlay((Overlay::OverlayType)i);
@@ -982,6 +987,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         ID3D11RenderTargetView* gfrucRTV = m_GenericFRUC->getRenderRTV();
         m_RenderDeviceContext->OMSetRenderTargets(1, &gfrucRTV, nullptr);
         m_RenderDeviceContext->ClearRenderTargetView(gfrucRTV, clearColor);
+        setViewport(m_FrucTextureWidth, m_FrucTextureHeight);
         renderVideo(frame);
 
         double frameTimestampMs = static_cast<double>(SDL_GetTicks());
@@ -1006,6 +1012,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         // Present interpolated frame first (if available)
         if (hasInterp) {
             m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
+            setViewport(m_DisplayWidth, m_DisplayHeight);
             blitFRUCTexture(m_GenericFRUC->getOutputSRV());
             for (int i = 0; i < Overlay::OverlayMax; i++) {
                 renderOverlay((Overlay::OverlayType)i);
@@ -1032,6 +1039,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
 
         // Present the real frame - blit from GenericFRUC's render texture
         m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
+        setViewport(m_DisplayWidth, m_DisplayHeight);
         blitFRUCTexture(m_GenericFRUC->getLastRenderSRV());
         for (int i = 0; i < Overlay::OverlayMax; i++) {
             renderOverlay((Overlay::OverlayType)i);
@@ -1315,6 +1323,22 @@ void D3D11VARenderer::renderVideo(AVFrame* frame)
             m_R2DFenceValue++;
         }
     }
+}
+
+// VipleStream: set the D3D11 viewport. The swap chain and FRUC render targets
+// can differ in size (display res vs stream res), so we must switch viewports
+// as we change render targets — otherwise the vertex shader maps NDC to the
+// old viewport, D3D clips to the new RT bounds, and we get a cropped render.
+void D3D11VARenderer::setViewport(int width, int height)
+{
+    D3D11_VIEWPORT vp = {};
+    vp.TopLeftX = 0;
+    vp.TopLeftY = 0;
+    vp.Width = (FLOAT)width;
+    vp.Height = (FLOAT)height;
+    vp.MinDepth = 0;
+    vp.MaxDepth = 1;
+    m_RenderDeviceContext->RSSetViewports(1, &vp);
 }
 
 // VipleStream: Blit a BGRA SRV full-screen using the overlay shader + FRUC blit vertex buffer.
@@ -1858,6 +1882,8 @@ bool D3D11VARenderer::initFRUC()
         if (m_FRUC->initialize(m_RenderDevice.Get(), fruW, fruH)) {
             createBlitVB();
             boostLatency();
+            m_FrucTextureWidth  = (int)fruW;
+            m_FrucTextureHeight = (int)fruH;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-FRUC] NVIDIA Optical Flow ready: %ux%u (display %dx%d)",
                         fruW, fruH, m_DisplayWidth, m_DisplayHeight);
@@ -1875,6 +1901,8 @@ bool D3D11VARenderer::initFRUC()
     if (m_GenericFRUC->initialize(m_RenderDevice.Get(), fruW, fruH)) {
         createBlitVB();
         boostLatency();
+        m_FrucTextureWidth  = (int)fruW;
+        m_FrucTextureHeight = (int)fruH;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] Generic compute shader ready: %ux%u (display %dx%d)",
                     fruW, fruH, m_DisplayWidth, m_DisplayHeight);

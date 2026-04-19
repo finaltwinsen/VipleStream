@@ -57,6 +57,10 @@ private:
     void bindColorConversion(bool frameChanged, AVFrame* frame);
     void bindVideoVertexBuffer(bool frameChanged, AVFrame* frame);
     void renderVideo(AVFrame* frame);
+    // VipleStream: resize the D3D11 viewport. Used to switch between
+    // FRUC-RT-sized (stream res) and swap-chain-sized (display res)
+    // rendering within a single frame.
+    void setViewport(int width, int height);
     bool checkDecoderSupport(IDXGIAdapter* adapter);
     bool createDeviceByAdapterIndex(int adapterIndex, bool* adapterNotFound = nullptr);
     bool setupSharedDevice(IDXGIAdapter1* adapter);
@@ -97,6 +101,14 @@ private:
     DXGI_FORMAT m_TextureFormat;
     int m_DisplayWidth;
     int m_DisplayHeight;
+    // VipleStream: FRUC render targets live at stream resolution (fruW x fruH).
+    // When rendering video into them, the D3D viewport must match the RT size —
+    // otherwise D3D clips the vertex-shader output to the RT bounds and only
+    // the top-left stream_res/display_res fraction of the video ends up in the
+    // FRUC texture, which blitFRUCTexture then stretches to full-screen giving
+    // the visible "zoomed upper-left corner" aspect bug.
+    int m_FrucTextureWidth = 0;
+    int m_FrucTextureHeight = 0;
     AVColorTransferCharacteristic m_LastColorTrc;
 
     bool m_AllowTearing;
