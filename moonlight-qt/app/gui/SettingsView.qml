@@ -711,7 +711,11 @@ Flickable {
                 ComboBox {
                     id: frucQualityCombo
                     width: parent.width
-                    visible: frameInterpolationCheck.checked
+                    // Quality preset only applies to the Generic
+                    // Compute backend (shader-based). NVIDIA Optical
+                    // Flow and DirectML both run their own internal
+                    // pipelines that don't take a quality hint.
+                    visible: frameInterpolationCheck.checked && frucBackendCombo.currentIndex === 0
                     font.pointSize: 12
                     textRole: "text"
                     model: ListModel {

@@ -32,3 +32,14 @@ echo.
 echo Compiling mv_median (cs_5_0)...
 "%FXC%" /T cs_5_0 /O1 /Fo "%SHADERS%\d3d11_mv_median.fxc" "%SHADERS%\d3d11_mv_median.hlsl"
 if errorlevel 1 (echo   FAILED) else (echo   OK)
+
+:: DirectML backend pack/unpack (D3D11 compute shaders that bridge
+:: the RGBA8 render texture and the shared planar-FP16 tensor
+:: buffer read/written by DML).
+echo.
+echo Compiling dml_pack_rgba8_fp16 (cs_5_0)...
+"%FXC%" /T cs_5_0 /O1 /Fo "%SHADERS%\d3d11_dml_pack_rgba8_fp16.fxc" "%SHADERS%\d3d11_dml_pack_rgba8_fp16.hlsl"
+if errorlevel 1 (echo   FAILED) else (echo   OK)
+echo Compiling dml_unpack_fp16_rgba8 (cs_5_0)...
+"%FXC%" /T cs_5_0 /O1 /Fo "%SHADERS%\d3d11_dml_unpack_fp16_rgba8.fxc" "%SHADERS%\d3d11_dml_unpack_fp16_rgba8.hlsl"
+if errorlevel 1 (echo   FAILED) else (echo   OK)
