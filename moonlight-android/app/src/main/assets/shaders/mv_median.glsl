@@ -64,11 +64,12 @@ void main() {
             n++;
         }
     }
-    // Variance gate — if the 3x3 window is already uniform, skip
-    // the sort. Saves the bulk of the shader's work on the static
-    // majority of MV blocks in a typical frame.
-    if (minX == maxX && minY == maxY) {
-        int packedOut = (minX << 16) | (minY & 0xFFFF);
+    // D2 iter 5: variance gate loosened to "range ≤ 1 Q1 unit" —
+    // skips sort for near-uniform neighbourhoods (slow-smooth
+    // motion), not just perfectly static blocks. Writes the centre
+    // block's own value (sx[4]/sy[4] are centre in row-major order).
+    if (maxX - minX <= 1 && maxY - minY <= 1) {
+        int packedOut = (sx[4] << 16) | (sy[4] & 0xFFFF);
         imageStore(mvOut, ivec2(gx, gy), ivec4(packedOut, 0, 0, 0));
         return;
     }

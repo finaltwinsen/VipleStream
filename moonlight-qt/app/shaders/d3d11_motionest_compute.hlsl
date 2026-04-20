@@ -174,6 +174,13 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
     // --- Temporal predictor (Quality + Balanced only) ---
 #if ENABLE_TEMPORAL
     int2 prevMV_Q1 = prevMotionField.Load(int3(blockX, blockY, 0));
+    // Sanity-clamp the temporal predictor. A corrupt / out-of-range
+    // prevMV (can happen on the first frame after a resize or if
+    // the prev field was uninitialized) would send the temporal
+    // candidate into a wild position, and if that candidate's
+    // cost happened to pass the gate we'd propagate nonsense for
+    // the rest of the run.
+    prevMV_Q1 = clamp(prevMV_Q1, int2(-96, -96), int2(96, 96));
     int2 temporalMV = int2(
         (prevMV_Q1.x >= 0 ? prevMV_Q1.x + 1 : prevMV_Q1.x - 1) / 2,
         (prevMV_Q1.y >= 0 ? prevMV_Q1.y + 1 : prevMV_Q1.y - 1) / 2
@@ -258,12 +265,36 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
     int2 bestMV_Q1 = bestMV * 2;
 #endif
 
+    // High-cost rejection: if even after the search the best-match
+    // cost is still very high (> 3 hamming per sample), this block
+    // is texture-less / occluded / genuinely unreliable. Writing
+    // the winning MV in that case just feeds warp a random direction.
+    // Falling back to MV=0 ("no motion") produces a copy of currFrame
+    // for this block, which is the safest fail state.
+    if (bestCost > (float)(SAMPLE_COUNT * SAMPLE_COUNT) * 3.0) {
+        bestMV_Q1 = int2(0, 0);
+#if ENABLE_TEMPORAL
+        // Skip temporal smoothing too — propagating an unreliable
+        // MV into the next frame's predictor is how shimmer spreads.
+        motionField[int2(blockX, blockY)] = int2(0, 0);
+        return;
+#endif
+    }
+
     // --- Temporal smoothing (Quality + Balanced only) ---
 #if ENABLE_TEMPORAL
+    // 60/40 current/prev (was 70/30) — heavier prev weighting
+    // reduces per-block MV flicker on content with small motion
+    // (where the ME cost is noisy). Less current-frame responsive
+    // means slight lag on sudden direction changes, but the lower
+    // temporal noise is more important for reducing shimmer than
+    // instantaneous accuracy.
     int2 smoothedMV_Q1 = int2(
-        (bestMV_Q1.x * 7 + prevMV_Q1.x * 3 + 5) / 10,
-        (bestMV_Q1.y * 7 + prevMV_Q1.y * 3 + 5) / 10
+        (bestMV_Q1.x * 6 + prevMV_Q1.x * 4 + 5) / 10,
+        (bestMV_Q1.y * 6 + prevMV_Q1.y * 4 + 5) / 10
     );
+    // Q1 clamp ±96 == ±48 px (Q1 is 2x pixel). Matches warp's
+    // clamp and ME diamond's actual reach.
     smoothedMV_Q1 = clamp(smoothedMV_Q1, int2(-96, -96), int2(96, 96));
     motionField[int2(blockX, blockY)] = smoothedMV_Q1;
 #else

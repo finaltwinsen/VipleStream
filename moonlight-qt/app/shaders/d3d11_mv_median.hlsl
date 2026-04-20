@@ -71,12 +71,15 @@ void main(uint3 id : SV_DispatchThreadID)
             n++;
         }
     }
-    // Variance gate: if both components are constant across the
-    // neighbourhood, the median is just any sample — no need to
-    // sort. On a typical frame this skips the sort for well over
-    // half of MV blocks (all the static-background region).
-    if (minX == maxX && minY == maxY) {
-        mvOut[id.xy] = int2(minX, minY);
+    // Variance gate (loosened): if the 3x3 window is near-uniform
+    // (range ≤ 1 Q1 unit = 0.5 px) the median per axis equals a
+    // middle sample. The centre block's own value (index 4 in our
+    // row-major gather order) is always ONE of the 9 inputs and
+    // within 1 unit of the true median in this case — write it
+    // directly and skip the sort. Expands the skip rule beyond the
+    // prior exact-equal check to slow-smooth-motion regions.
+    if (maxX - minX <= 1 && maxY - minY <= 1) {
+        mvOut[id.xy] = int2(sx[4], sy[4]);
         return;
     }
     sort9(sx);

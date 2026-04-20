@@ -28,9 +28,10 @@ uniform uint frameHeight;
 uniform uint mvBlockSize;
 uniform float blendFactor;
 
-// Threshold (pixels): tightened 4.0 -> 3.0 to match desktop,
-// catches subtle 3-px discontinuities on thin-line / UI content.
-#define EDGE_AWARE_MV_THRESHOLD 3.0
+// Threshold (pixels): tightened 3.0 -> 2.0 (D2 iter 3). Now that
+// ME is much more accurate, genuine 2-px block-to-block disagreement
+// is almost always a real motion boundary, not noise.
+#define EDGE_AWARE_MV_THRESHOLD 2.0
 
 // Edge-aware bilinear MV interpolation (Q1 -> pixel units).
 // At motion boundaries (fast object next to static bg) a blind
@@ -110,8 +111,18 @@ float computeAdaptiveWeight(vec2 pixelPos, vec2 mv) {
     float currConf = 1.0 - smoothstep(1.0, 10.0, bwdError);
 
     float totalConf = prevConf + currConf;
-    if (totalConf < 0.001) return 0.5;
-    return currConf / totalConf;
+    float w;
+    if (totalConf < 0.001) {
+        w = 0.5;
+    } else {
+        w = currConf / totalConf;
+    }
+    // D2 iter 4: large-MV bias toward symmetric blend. Beyond
+    // |mv|^2 = 400 the warp reaches far and occlusion is likely —
+    // a half-strength ghost is steadier than a confident wrong pick.
+    float mvMag2 = dot(mv, mv);
+    float bigMotionBias = smoothstep(100.0, 400.0, mvMag2);
+    return mix(w, 0.5, bigMotionBias);
 }
 #endif
 
@@ -147,26 +158,39 @@ void main() {
 
     vec2 prevPos = vec2(float(px), float(py)) - mv * 0.5;
     vec2 currPos = vec2(float(px), float(py)) + mv * 0.5;
-    bool prevValid = all(greaterThanEqual(prevPos, vec2(0.0))) && all(lessThan(prevPos, dims));
-    bool currValid = all(greaterThanEqual(currPos, vec2(0.0))) && all(lessThan(currPos, dims));
+    // D2 iter 9: half-pixel inset so bilinear 2x2 footprint never
+    // straddles the edge and pulls in border colour.
+    vec2 lo = vec2(0.5);
+    vec2 hi = dims - 0.5;
+    bool prevValid = all(greaterThanEqual(prevPos, lo)) && all(lessThan(prevPos, hi));
+    bool currValid = all(greaterThanEqual(currPos, lo)) && all(lessThan(currPos, hi));
 
     vec4 result;
     if (prevValid && currValid) {
 #if ENABLE_ADAPTIVE_BLEND
-        // Short-circuit adaptive weight when MV is small — saves
-        // the two extra sampleMV() calls that computeAdaptiveWeight
-        // does, on pixels where both warps land ~identically.
+        // Short-circuit adaptive weight when MV is small.
         float weight = (dot(mv, mv) < 4.0)
             ? 0.5
             : computeAdaptiveWeight(vec2(float(px), float(py)), mv);
         result = mix(prevSample, currSample, weight);
+        // D2 iter 8: apply luma-gap catastrophic check on top of
+        // adaptive blend — catches occlusion ghosts that slip past
+        // the forward-backward consistency check.
+        {
+            const vec3 YC = vec3(0.299, 0.587, 0.114);
+            float lg = abs(dot(prevSample.rgb, YC) - dot(currSample.rgb, YC));
+            float b = smoothstep(0.05, 0.25, lg);
+            result = mix(result, currSample, b);
+        }
 #else
-        // Catastrophic-disagreement fallback: if prev/curr warps
-        // land on wildly different colours (occlusion edge), the
-        // blend produces a ghost. Bias toward currSample.
-        vec3 diff = prevSample.rgb - currSample.rgb;
-        float diffSq = dot(diff, diff);
-        float bias = clamp(diffSq * 6.25 - 1.0, 0.0, 1.0);
+        // D2 iters 6+7: luma-weighted catastrophic-disagreement
+        // fallback with smoothstep response curve. More perceptually
+        // sensitive than RGB Euclidean, smoother ramp than linear.
+        const vec3 YC = vec3(0.299, 0.587, 0.114);
+        float prevY = dot(prevSample.rgb, YC);
+        float currY = dot(currSample.rgb, YC);
+        float lumaDiff = abs(prevY - currY);
+        float bias = smoothstep(0.05, 0.25, lumaDiff);
         result = mix(mix(prevSample, currSample, 0.5), currSample, bias);
 #endif
     } else if (prevValid) {

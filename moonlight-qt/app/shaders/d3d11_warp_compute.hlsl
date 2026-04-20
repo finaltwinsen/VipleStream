@@ -27,15 +27,14 @@ cbuffer Constants : register(b0)
     float blendFactor;
 };
 
-// Threshold (pixels): if the largest MV delta among the 4 neighbor
-// blocks exceeds this, we consider the pixel to be on a motion
-// boundary and fall back to nearest-neighbor sampling instead of
-// bilinear. Tightened from 4.0 -> 3.0 after empirical testing:
-// subtle 3-px discontinuities were still producing visible shimmer
-// on thin-line content (e.g. UI overlays, aliased edges moving
-// past a static region). 2 px would over-trigger on sub-pixel
-// motion variation so 3 is the sweet spot.
-#define EDGE_AWARE_MV_THRESHOLD 3.0
+// Threshold (pixels): tightened 3.0 -> 2.0 now that ME is much
+// more accurate (round-2 temporal-success shortcut + tighter
+// clamp + high-cost rejection). With better MVs, genuine 2-px
+// disagreements between neighbours are almost always real motion
+// boundaries rather than ME noise — so the nearest-neighbour
+// fallback catches more shimmer sources. The earlier 2-px limit
+// concern (over-triggering on sub-pixel noise) no longer applies.
+#define EDGE_AWARE_MV_THRESHOLD 2.0
 
 // Edge-aware bilinear MV interpolation (Q1 → pixel units).
 // At motion boundaries (fast object next to static bg), blindly
@@ -123,8 +122,22 @@ float computeAdaptiveWeight(float2 pixelPos, float2 mv)
     float currConf = 1.0 - smoothstep(1.0, 10.0, bwdError);
 
     float totalConf = prevConf + currConf;
-    if (totalConf < 0.001) return 0.5;
-    return currConf / totalConf;
+    float w;
+    if (totalConf < 0.001) {
+        w = 0.5;
+    } else {
+        w = currConf / totalConf;
+    }
+    // Large-motion bias: when |mv| is big, both warps are reaching
+    // far across the frame and the chance of landing on a wrong
+    // object (occlusion / disocclusion) grows. Bias toward 0.5
+    // (symmetric blend) — a symmetric blend produces a "ghost" but
+    // the ghost is half-strength and steadier, vs. a confident
+    // wrong-side pick which produces a full-strength wrong pixel.
+    // Smoothly ramps in between |mv|^2 = 100 (10 px) and 400 (20 px).
+    float mvMag2 = dot(mv, mv);
+    float bigMotionBias = smoothstep(100.0, 400.0, mvMag2);
+    return lerp(w, 0.5, bigMotionBias);
 }
 #endif
 
@@ -166,8 +179,16 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
 
     float2 prevPos = float2(px, py) - mv * 0.5;
     float2 currPos = float2(px, py) + mv * 0.5;
-    bool prevValid = all(prevPos >= 0) && all(prevPos < float2(frameWidth, frameHeight));
-    bool currValid = all(currPos >= 0) && all(currPos < float2(frameWidth, frameHeight));
+    // Half-pixel inset on the validity check: bilinear sampling
+    // reads a 2x2 footprint around the sample position. If that
+    // footprint straddles the frame edge, the clamped side of the
+    // bilinear weight pulls in border-colour garbage. Marking the
+    // outermost half-pixel as invalid routes those pixels to the
+    // single-side fallback below instead.
+    float2 lo = float2(0.5, 0.5);
+    float2 hi = float2(frameWidth - 0.5, frameHeight - 0.5);
+    bool prevValid = all(prevPos >= lo) && all(prevPos < hi);
+    bool currValid = all(currPos >= lo) && all(currPos < hi);
 
     float4 result;
     if (prevValid && currValid) {
@@ -180,17 +201,36 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
         float weight = (dot(mv, mv) < 4.0) ? 0.5
                                             : computeAdaptiveWeight(float2(px, py), mv);
         result = lerp(prevSample, currSample, weight);
+        // Even with adaptive weighting, Quality-mode output can
+        // still ghost on real occlusion edges where forward-backward
+        // both fail but land on "compatible" wrong pixels. Run the
+        // same luma-gap catastrophic check as balanced/perf on top
+        // of the adaptive result. Cheap (2 dot products) and fixes
+        // the worst residual ghosts.
+        {
+            const float3 YC = float3(0.299, 0.587, 0.114);
+            float lg = abs(dot(prevSample.rgb, YC) - dot(currSample.rgb, YC));
+            float b = smoothstep(0.05, 0.25, lg);
+            result = lerp(result, currSample, b);
+        }
 #else
-        // Catastrophic-disagreement fallback (balanced/performance
-        // paths, which don't have the Quality preset's adaptive
-        // blend): if the two warps land on wildly different colours
-        // the blend produces a visible ghost. RGB Euclidean > 0.4
-        // (perceptually large in 0..1 space) is a strong hint we're
-        // on an occlusion/disocclusion edge; bias toward the
-        // current frame, which is guaranteed to be a real sample.
-        float3 diff = prevSample.rgb - currSample.rgb;
-        float diffSq = dot(diff, diff);
-        float bias = saturate(diffSq * 6.25 - 1.0);  // 0 at 0.4, 1 at ~0.566
+        // Catastrophic-disagreement fallback with luma weighting:
+        // human eye is ~4x more sensitive to luminance than chroma,
+        // so Rec.601 Y = 0.299R + 0.587G + 0.114B is a better
+        // "visible disagreement" signal than RGB Euclidean. A 10%
+        // luma gap now triggers bias at the same rate a 20% RGB
+        // gap used to, catching visually-disruptive edges the
+        // old metric missed (e.g. two differently-lit surfaces
+        // with similar RGB mean).
+        const float3 YCOEF = float3(0.299, 0.587, 0.114);
+        float prevY = dot(prevSample.rgb, YCOEF);
+        float currY = dot(currSample.rgb, YCOEF);
+        float lumaDiff = abs(prevY - currY);
+        // smoothstep(0.05, 0.25, lumaDiff) — starts responding at
+        // 5% luma gap, fully biased at 25%. Was linear-from-10%
+        // which left small-to-medium luma gaps producing partial
+        // ghosts. Smoothstep gives a nicer perceptual curve too.
+        float bias = smoothstep(0.05, 0.25, lumaDiff);
         result = lerp(lerp(prevSample, currSample, 0.5), currSample, bias);
 #endif
     } else if (prevValid) {

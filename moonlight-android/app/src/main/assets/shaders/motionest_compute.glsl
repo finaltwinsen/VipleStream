@@ -157,6 +157,9 @@ void main() {
 #if ENABLE_TEMPORAL
     int prevPacked = texelFetch(prevMotionField, ivec2(blockX, blockY), 0).r;
     ivec2 prevMV_Q1 = ivec2(prevPacked >> 16, (prevPacked << 16) >> 16);
+    // D2 iter 10: sanity-clamp the temporal predictor so a corrupt
+    // prev field can't propagate wild MVs forward.
+    prevMV_Q1 = clamp(prevMV_Q1, ivec2(-96), ivec2(96));
     ivec2 temporalMV = ivec2(
         (prevMV_Q1.x >= 0 ? prevMV_Q1.x + 1 : prevMV_Q1.x - 1) / 2,
         (prevMV_Q1.y >= 0 ? prevMV_Q1.y + 1 : prevMV_Q1.y - 1) / 2
@@ -220,10 +223,19 @@ void main() {
     ivec2 bestMV_Q1 = bestMV * 2;
 #endif
 
+    // D2 iter 1: reject high-cost matches. Write MV=0 instead of
+    // propagating a random direction into warp.
+    if (bestCost > float(SAMPLE_COUNT_SQ) * 3.0) {
+        imageStore(motionField, ivec2(blockX, blockY), ivec4(0));
+        return;
+    }
+
 #if ENABLE_TEMPORAL
+    // D2 iter 2: 60/40 current/prev (was 70/30) — heavier prev
+    // weighting reduces per-block MV flicker on small motion.
     ivec2 smoothedMV_Q1 = ivec2(
-        (bestMV_Q1.x * 7 + prevMV_Q1.x * 3 + 5) / 10,
-        (bestMV_Q1.y * 7 + prevMV_Q1.y * 3 + 5) / 10
+        (bestMV_Q1.x * 6 + prevMV_Q1.x * 4 + 5) / 10,
+        (bestMV_Q1.y * 6 + prevMV_Q1.y * 4 + 5) / 10
     );
     smoothedMV_Q1 = clamp(smoothedMV_Q1, ivec2(-96), ivec2(96));
     int packed = (smoothedMV_Q1.x << 16) | (smoothedMV_Q1.y & 0xFFFF);
