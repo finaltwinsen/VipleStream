@@ -9,48 +9,51 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <cstdint>
+#include "ifrucbackend.h"
 
-class GenericFRUC {
+class GenericFRUC : public IFRUCBackend {
 public:
     GenericFRUC();
-    ~GenericFRUC();
+    ~GenericFRUC() override;
 
     // Initialize with the D3D11 device used for rendering.
     // width/height = display dimensions (full resolution).
-    bool initialize(ID3D11Device* device, uint32_t width, uint32_t height);
+    bool initialize(ID3D11Device* device, uint32_t width, uint32_t height) override;
 
-    void destroy();
+    void destroy() override;
 
     // Get the RTV for the render texture. Caller renders video into this,
     // then calls submitFrame(). Same pattern as NvOFFRUC.
-    ID3D11RenderTargetView* getRenderRTV() const { return m_RenderRTV.Get(); }
+    ID3D11RenderTargetView* getRenderRTV() const override { return m_RenderRTV.Get(); }
 
     // Get the SRV for the last rendered frame (for blitting real frame to swapchain).
-    ID3D11ShaderResourceView* getLastRenderSRV() const { return m_RenderSRV.Get(); }
+    ID3D11ShaderResourceView* getLastRenderSRV() const override { return m_RenderSRV.Get(); }
 
     // Submit the already-rendered frame for interpolation.
     // Returns true if an interpolated frame is available.
-    bool submitFrame(ID3D11DeviceContext* ctx, double timestamp);
+    bool submitFrame(ID3D11DeviceContext* ctx, double timestamp) override;
 
     // VipleStream: Skip ME/warp but update internal state (for late frames).
     // Keeps prev frame in sync without the cost of full interpolation.
-    void skipFrame(ID3D11DeviceContext* ctx);
+    void skipFrame(ID3D11DeviceContext* ctx) override;
 
     // Get the interpolated frame (valid only when submitFrame returns true).
-    ID3D11Texture2D* getOutputTexture() const { return m_InterpTexture.Get(); }
-    ID3D11ShaderResourceView* getOutputSRV() const { return m_InterpSRV.Get(); }
+    ID3D11Texture2D* getOutputTexture() const override { return m_InterpTexture.Get(); }
+    ID3D11ShaderResourceView* getOutputSRV() const override { return m_InterpSRV.Get(); }
 
-    bool isInitialized() const { return m_MotionEstCS[m_QualityLevel] != nullptr; }
-    void setQualityLevel(int level) { m_QualityLevel = (level >= 0 && level <= 2) ? level : 1; }
+    bool isInitialized() const override { return m_MotionEstCS[m_QualityLevel] != nullptr; }
+    void setQualityLevel(int level) override { m_QualityLevel = (level >= 0 && level <= 2) ? level : 1; }
 
     // VipleStream: rolling-average GPU time for each dispatch (ms).
     // Zero until enough frames have retired that timestamp queries are
     // ready. Updated inside submitFrame(); read by the renderer for
     // the periodic [VIPLE-FRUC-Stats] line so we can see per-stage
     // budget without an external profiler.
-    double getLastMeTimeMs() const { return m_LastMeMs; }
-    double getLastMedianTimeMs() const { return m_LastMedianMs; }
-    double getLastWarpTimeMs() const { return m_LastWarpMs; }
+    double getLastMeTimeMs()     const override { return m_LastMeMs; }
+    double getLastMedianTimeMs() const override { return m_LastMedianMs; }
+    double getLastWarpTimeMs()   const override { return m_LastWarpMs; }
+
+    const char* backendName() const override { return "Generic Compute"; }
 
 private:
     static const uint32_t BLOCK_SIZE = 8;      // Conceptual block size at 1/4 resolution

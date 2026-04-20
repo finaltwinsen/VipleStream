@@ -14,6 +14,7 @@
 #include <dwmapi.h>
 #include "nvofruc.h"
 #include "genericfruc.h"
+#include "directmlfruc.h"
 #include "settings/streamingpreferences.h"
 
 using Microsoft::WRL::ComPtr;
@@ -1846,7 +1847,8 @@ bool D3D11VARenderer::initFRUC()
     };
 
     auto prefs = StreamingPreferences::get(nullptr);
-    bool preferNvidia = (prefs->frucBackend == StreamingPreferences::FB_NVIDIA_OF);
+    bool preferNvidia   = (prefs->frucBackend == StreamingPreferences::FB_NVIDIA_OF);
+    bool preferDirectML = (prefs->frucBackend == StreamingPreferences::FB_DIRECTML);
 
     // VipleStream: Cap FRUC texture resolution to the video stream resolution,
     // not the display window. This avoids GPU TDR watchdog timeouts on
@@ -1906,10 +1908,34 @@ bool D3D11VARenderer::initFRUC()
                     "[VIPLE-FRUC] NVIDIA Optical Flow unavailable, falling back to Generic");
     }
 
+    // DirectML backend (experimental ML path — user-selectable in
+    // settings). Falls through to the generic compute shader on any
+    // failure so the user is never left without interpolation when
+    // a DirectML issue (missing DLL, driver, adapter) crops up.
+    if (preferDirectML) {
+        auto* dml = new DirectMLFRUC();
+        dml->setQualityLevel(static_cast<int>(prefs->frucQuality));
+        if (dml->initialize(m_RenderDevice.Get(), fruW, fruH)) {
+            m_GenericFRUC = dml;
+            createBlitVB();
+            boostLatency();
+            m_FrucTextureWidth  = (int)fruW;
+            m_FrucTextureHeight = (int)fruH;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML backend ready: %ux%u (display %dx%d)",
+                        fruW, fruH, m_DisplayWidth, m_DisplayHeight);
+            return true;
+        }
+        delete dml;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML init failed, falling back to Generic");
+    }
+
     // Default: GenericFRUC (D3D11 compute shader — low latency, cross-platform)
-    m_GenericFRUC = new GenericFRUC();
-    m_GenericFRUC->setQualityLevel(static_cast<int>(prefs->frucQuality));
-    if (m_GenericFRUC->initialize(m_RenderDevice.Get(), fruW, fruH)) {
+    auto* gen = new GenericFRUC();
+    gen->setQualityLevel(static_cast<int>(prefs->frucQuality));
+    if (gen->initialize(m_RenderDevice.Get(), fruW, fruH)) {
+        m_GenericFRUC = gen;
         createBlitVB();
         boostLatency();
         m_FrucTextureWidth  = (int)fruW;
@@ -1919,8 +1945,7 @@ bool D3D11VARenderer::initFRUC()
                     fruW, fruH, m_DisplayWidth, m_DisplayHeight);
         return true;
     }
-    delete m_GenericFRUC;
-    m_GenericFRUC = nullptr;
+    delete gen;
 
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-FRUC] No FRUC backend available");
@@ -1942,7 +1967,7 @@ bool D3D11VARenderer::lastFrameHadFRUCInterp() const
 const char* D3D11VARenderer::getFRUCBackendName() const
 {
     if (m_FRUC && m_FRUC->isInitialized()) return "NVIDIA Optical Flow";
-    if (m_GenericFRUC && m_GenericFRUC->isInitialized()) return "Generic Compute";
+    if (m_GenericFRUC && m_GenericFRUC->isInitialized()) return m_GenericFRUC->backendName();
     return "None";
 }
 

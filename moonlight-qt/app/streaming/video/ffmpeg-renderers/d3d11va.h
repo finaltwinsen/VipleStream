@@ -126,8 +126,11 @@ private:
     // VipleStream: Frame interpolation (lazy-init in renderFrame)
     // Tier 0: NvOFFRUC (NVIDIA hardware optical flow)
     class NvOFRUCWrapper* m_FRUC = nullptr;
-    // Tier 1: GenericFRUC (D3D11 compute shader, cross-platform)
-    class GenericFRUC* m_GenericFRUC = nullptr;
+    // Tier 1: any IFRUCBackend implementation (Generic compute shader
+    // or DirectML). Name kept as m_GenericFRUC for minimal diff — the
+    // backend concrete type is chosen at initFRUC() time per
+    // prefs->frucBackend.
+    class IFRUCBackend* m_GenericFRUC = nullptr;
 
     bool m_FRUCLastFrameInterpolated = false;
     bool m_FRUCInitFailed = false;

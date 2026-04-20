@@ -112,6 +112,7 @@ public:
     {
         FB_GENERIC,     // D3D11/GLES compute shader (low latency, default)
         FB_NVIDIA_OF,   // NVIDIA Optical Flow via CUDA (higher quality, higher latency)
+        FB_DIRECTML,    // DirectML-based ML interpolation (Windows D3D11, iGPU/dGPU agnostic)
     };
     Q_ENUM(FrucBackend);
 

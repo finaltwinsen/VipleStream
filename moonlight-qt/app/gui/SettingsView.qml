@@ -695,6 +695,7 @@ Flickable {
                     Component.onCompleted: {
                         frucBackendModel.append({text: qsTr("Generic Compute (low latency, recommended)"), val: 0})
                         frucBackendModel.append({text: qsTr("NVIDIA Optical Flow (high quality, CUDA required)"), val: 1})
+                        frucBackendModel.append({text: qsTr("DirectML (experimental, Windows 10+)"), val: 2})
                         currentIndex = StreamingPreferences.frucBackend
                     }
                     onActivated: {
@@ -704,7 +705,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. Generic is recommended for most use cases.")
+                    ToolTip.text: qsTr("Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. DirectML runs an ML graph on D3D12 (works on any D3D12 GPU; slower than Generic in the current scaffolding graph, used as the plumbing for future ONNX model swap). Generic is recommended for most use cases.")
                 }
 
                 ComboBox {

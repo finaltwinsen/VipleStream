@@ -63,6 +63,10 @@ win32 {
 
     INCLUDEPATH += $$PWD/../libs/windows/include $$PWD/../libs/windows/nvofa/include
     LIBS += ws2_32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib
+    # VipleStream: DirectML FRUC backend. d3d12.lib and directml.lib
+    # both ship with the Windows 10 SDK; the runtime DirectML.dll is
+    # part of Windows 10 1903+ (no redist needed on modern systems).
+    LIBS += d3d12.lib dxgi.lib directml.lib
 }
 macx:!disable-prebuilts {
     INCLUDEPATH += $$PWD/../libs/mac/include $$PWD/../libs/mac/include/SDL2
@@ -409,6 +413,7 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/d3d11va.cpp \
         streaming/video/ffmpeg-renderers/nvofruc.cpp \
         streaming/video/ffmpeg-renderers/genericfruc.cpp \
+        streaming/video/ffmpeg-renderers/directmlfruc.cpp \
         streaming/video/ffmpeg-renderers/pacer/dxvsyncsource.cpp
 
     HEADERS += \
@@ -416,6 +421,8 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/d3d11va.h \
         streaming/video/ffmpeg-renderers/nvofruc.h \
         streaming/video/ffmpeg-renderers/genericfruc.h \
+        streaming/video/ffmpeg-renderers/directmlfruc.h \
+        streaming/video/ffmpeg-renderers/ifrucbackend.h \
         streaming/video/ffmpeg-renderers/pacer/dxvsyncsource.h
 }
 macx {
