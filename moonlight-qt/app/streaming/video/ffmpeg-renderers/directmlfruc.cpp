@@ -223,6 +223,8 @@ void DirectMLFRUC::destroy()
     m_RenderRTV.Reset();
     m_RenderTexture.Reset();
 
+    m_BarrierCmdList12.Reset();
+    m_BarrierCmdAlloc12.Reset();
     m_CmdList12.Reset();
     m_CmdAlloc12.Reset();
     m_Fence12.Reset();
@@ -252,12 +254,21 @@ bool DirectMLFRUC::createD3D12Device()
     D3D12_COMMAND_QUEUE_DESC qd = {};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     if (FAILED(m_Device12->CreateCommandQueue(&qd, IID_PPV_ARGS(&m_Queue12)))) return false;
+
     if (FAILED(m_Device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                   IID_PPV_ARGS(&m_CmdAlloc12)))) return false;
     if (FAILED(m_Device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                              m_CmdAlloc12.Get(), nullptr,
                                              IID_PPV_ARGS(&m_CmdList12)))) return false;
     m_CmdList12->Close();
+
+    // Second allocator/list for cross-API barrier submissions (ORT path).
+    if (FAILED(m_Device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                  IID_PPV_ARGS(&m_BarrierCmdAlloc12)))) return false;
+    if (FAILED(m_Device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                             m_BarrierCmdAlloc12.Get(), nullptr,
+                                             IID_PPV_ARGS(&m_BarrierCmdList12)))) return false;
+    m_BarrierCmdList12->Close();
     return true;
 }
 
@@ -315,16 +326,39 @@ bool DirectMLFRUC::createSharedTensorBuffers()
         rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         rd.Format           = DXGI_FORMAT_UNKNOWN;
-        if (FAILED(m_Device12->CreateCommittedResource(
+
+        // Shared committed resources MUST start in COMMON state per
+        // the D3D12 spec ("InitialResourceState must be
+        // D3D12_RESOURCE_STATE_COMMON for shared resources"). Using
+        // UNORDERED_ACCESS here caused CreateCommittedResource to
+        // return E_INVALIDARG on strict drivers (fixed in v1.2.7).
+        HRESULT hr = m_Device12->CreateCommittedResource(
                 &hp, D3D12_HEAP_FLAG_SHARED, &rd,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
-                IID_PPV_ARGS(&d12)))) return false;
+                D3D12_RESOURCE_STATE_COMMON, nullptr,
+                IID_PPV_ARGS(&d12));
+        if (FAILED(hr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: CreateCommittedResource(shared buf, %llu B) "
+                        "failed 0x%08lx", (unsigned long long)rd.Width, hr);
+            return false;
+        }
 
         HANDLE handle = nullptr;
-        if (FAILED(m_Device12->CreateSharedHandle(d12.Get(), nullptr, GENERIC_ALL, nullptr, &handle))) return false;
-        HRESULT hr = dev11_1->OpenSharedResource1(handle, IID_PPV_ARGS(&d11));
+        hr = m_Device12->CreateSharedHandle(d12.Get(), nullptr, GENERIC_ALL, nullptr, &handle);
+        if (FAILED(hr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: CreateSharedHandle failed 0x%08lx", hr);
+            return false;
+        }
+        hr = dev11_1->OpenSharedResource1(handle, IID_PPV_ARGS(&d11));
         CloseHandle(handle);
-        return SUCCEEDED(hr);
+        if (FAILED(hr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: OpenSharedResource1(D3D11Buffer) failed "
+                        "0x%08lx — driver may not support D3D12→D3D11 buffer sharing", hr);
+            return false;
+        }
+        return true;
     };
 
     if (!makeShared(m_TensorBytes, m_FrameTensor[0], m_FrameBuffer11[0])) return false;
@@ -662,6 +696,34 @@ void DirectMLFRUC::runPackCS(ID3D11DeviceContext4* ctx4, int slot)
 }
 
 
+void DirectMLFRUC::recordSharedTensorBarriers(ID3D12GraphicsCommandList* cl,
+                                               D3D12_RESOURCE_STATES before,
+                                               D3D12_RESOURCE_STATES after)
+{
+    // Shared resources live in D3D12_RESOURCE_STATE_COMMON while
+    // D3D11 accesses them (spec requirement for cross-API resources).
+    // Before a D3D12 DML/ORT dispatch they must be promoted to UAV;
+    // after, we demote them back to COMMON so the D3D11 pack/unpack
+    // shaders can safely write/read on the next frame.
+    D3D12_RESOURCE_BARRIER bars[3];
+    ID3D12Resource* tensors[3] = {
+        m_FrameTensor[0].Get(),
+        m_FrameTensor[1].Get(),
+        m_OutputTensor.Get()
+    };
+    for (int i = 0; i < 3; ++i) {
+        bars[i] = {};
+        bars[i].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        bars[i].Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        bars[i].Transition.pResource   = tensors[i];
+        bars[i].Transition.StateBefore = before;
+        bars[i].Transition.StateAfter  = after;
+        bars[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    }
+    cl->ResourceBarrier(3, bars);
+}
+
+
 bool DirectMLFRUC::runDMLDispatch()
 {
     if (m_UseOrt) {
@@ -688,9 +750,22 @@ bool DirectMLFRUC::runDMLDispatch()
 
     m_CmdAlloc12->Reset();
     m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+
+    // Shared tensor resources start in COMMON. Promote to UAV so DML
+    // can bind them as UnorderedAccessView inputs/outputs, then demote
+    // back to COMMON after so D3D11 can use them on the next frame.
+    recordSharedTensorBarriers(m_CmdList12.Get(),
+                               D3D12_RESOURCE_STATE_COMMON,
+                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
     ID3D12DescriptorHeap* heaps[] = { m_DMLDescHeap.Get() };
     m_CmdList12->SetDescriptorHeaps(1, heaps);
     m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), m_DMLCompiledOp.Get(), m_DMLBindingTable.Get());
+
+    recordSharedTensorBarriers(m_CmdList12.Get(),
+                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                               D3D12_RESOURCE_STATE_COMMON);
+
     m_CmdList12->Close();
     ID3D12CommandList* cmds[] = { m_CmdList12.Get() };
     m_Queue12->ExecuteCommandLists(1, cmds);
@@ -1013,6 +1088,20 @@ bool DirectMLFRUC::runOrtInference()
         int prevSlot = 1 - m_WriteSlot;
         int currSlot = m_WriteSlot;
 
+        // Pre-dispatch: promote shared tensors COMMON → UAV so the
+        // DML EP can bind them as unordered-access inputs/outputs.
+        // Submitted to our queue so the GPU-side ordering is correct.
+        m_CmdAlloc12->Reset();
+        m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+        recordSharedTensorBarriers(m_CmdList12.Get(),
+                                   D3D12_RESOURCE_STATE_COMMON,
+                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        m_CmdList12->Close();
+        {
+            ID3D12CommandList* preCmds[] = { m_CmdList12.Get() };
+            m_Queue12->ExecuteCommandLists(1, preCmds);
+        }
+
         Ort::MemoryInfo mem("DML", OrtDeviceAllocator, 0, OrtMemTypeDefault);
 
         // The shared buffer is always laid out 4-plane RGBA; a 3-
@@ -1058,6 +1147,21 @@ bool DirectMLFRUC::runOrtInference()
             ro,
             m_OrtInputNamesCStr.data(), inputs.data(), inputs.size(),
             m_OrtOutputNamesCStr.data(), &out, 1);
+
+        // Post-dispatch: demote shared tensors UAV → COMMON so D3D11
+        // can safely read/write them via the pack/unpack shaders.
+        // Uses the secondary barrier allocator so we don't have to
+        // stall waiting for the pre-dispatch command list to complete.
+        m_BarrierCmdAlloc12->Reset();
+        m_BarrierCmdList12->Reset(m_BarrierCmdAlloc12.Get(), nullptr);
+        recordSharedTensorBarriers(m_BarrierCmdList12.Get(),
+                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                   D3D12_RESOURCE_STATE_COMMON);
+        m_BarrierCmdList12->Close();
+        {
+            ID3D12CommandList* postCmds[] = { m_BarrierCmdList12.Get() };
+            m_Queue12->ExecuteCommandLists(1, postCmds);
+        }
         return true;
     } catch (const Ort::Exception& e) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,

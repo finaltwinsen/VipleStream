@@ -96,6 +96,15 @@ private:
     bool runOrtInference();       // ORT path of runDMLDispatch().
     void runUnpackCS(ID3D11DeviceContext4* ctx4);
 
+    // Record resource-state transition barriers for the three shared
+    // tensor buffers (both frame tensors + output tensor) into cl.
+    // Call with before=COMMON / after=UAV before DML/ORT dispatch and
+    // before=UAV / after=COMMON afterwards so D3D11 can safely use
+    // the resources again.
+    void recordSharedTensorBarriers(ID3D12GraphicsCommandList* cl,
+                                    D3D12_RESOURCE_STATES before,
+                                    D3D12_RESOURCE_STATES after);
+
     // --- common state ---
     bool m_Initialized = false;
     int  m_QualityLevel = 1;
@@ -133,6 +142,13 @@ private:
     CP<ID3D12CommandQueue>        m_Queue12;
     CP<ID3D12CommandAllocator>    m_CmdAlloc12;
     CP<ID3D12GraphicsCommandList> m_CmdList12;
+    // Second allocator/list used exclusively for cross-API barrier
+    // submissions in the ORT path. Kept separate from m_CmdAlloc12
+    // because both pre-dispatch and post-dispatch barriers must be
+    // submitted to the queue without a CPU stall between them; reusing
+    // a single allocator would require waiting for the GPU to drain.
+    CP<ID3D12CommandAllocator>    m_BarrierCmdAlloc12;
+    CP<ID3D12GraphicsCommandList> m_BarrierCmdList12;
     CP<ID3D12Fence>               m_Fence12;         // SHARED, cross-API
 
     CP<IDMLDevice>                m_DMLDevice;
