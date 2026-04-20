@@ -67,6 +67,19 @@ win32 {
     # both ship with the Windows 10 SDK; the runtime DirectML.dll is
     # part of Windows 10 1903+ (no redist needed on modern systems).
     LIBS += d3d12.lib dxgi.lib directml.lib
+
+    # VipleStream: ONNX Runtime with DirectML EP (x64 only). Headers
+    # + static-link lib are committed under libs/windows/onnxruntime
+    # (extracted from Microsoft.ML.OnnxRuntime.DirectML NuGet).
+    # The runtime onnxruntime.dll gets copied into the release by
+    # build_moonlight_package.cmd; it is loaded lazily on first use
+    # so systems without it still launch (FRUC falls back to the
+    # inline DML graph).
+    contains(QT_ARCH, x86_64) {
+        INCLUDEPATH += $$PWD/../libs/windows/onnxruntime/build/native/include
+        LIBS        += -L$$PWD/../libs/windows/onnxruntime/runtimes/win-x64/native
+        LIBS        += onnxruntime.lib
+    }
 }
 macx:!disable-prebuilts {
     INCLUDEPATH += $$PWD/../libs/mac/include $$PWD/../libs/mac/include/SDL2

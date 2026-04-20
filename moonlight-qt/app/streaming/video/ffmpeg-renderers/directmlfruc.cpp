@@ -29,9 +29,13 @@
 #include "path.h"
 
 #include <SDL.h>
+#include <QFileInfo>
 
 #include <algorithm>
 #include <cstring>
+
+#include <onnxruntime_cxx_api.h>
+#include <dml_provider_factory.h>
 
 #ifdef max
 #undef max
@@ -52,6 +56,18 @@ struct PackCBData {
     uint32_t _pad0;
     uint32_t _pad1;
 };
+
+// ORT env is process-global and expensive to construct (spins up a
+// thread pool, parses schema). Share across all DirectMLFRUC
+// instances; first call lazy-initialises. Never torn down —
+// ONNX Runtime's atexit handlers manage the lifetime. Constructing
+// more than one Env in a single process is explicitly supported but
+// wastes memory.
+Ort::Env& sharedOrtEnv()
+{
+    static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "VipleStream.DirectML");
+    return env;
+}
 
 } // namespace
 
@@ -81,11 +97,19 @@ bool DirectMLFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t hei
     if (!createD3D11Textures())        return false;
     if (!createD3D11Views())           return false;
     if (!loadComputeShaders())         return false;
-    if (!compileDMLGraph())            return false;
+
+    // Try the ONNX model first. Falls back to the inline DML graph
+    // silently if no fruc.onnx is on disk — that's the default
+    // path for users who haven't dropped in a model.
+    bool ortLoaded = tryLoadOnnxModel();
+    if (!ortLoaded) {
+        if (!compileDMLGraph()) return false;
+    }
 
     m_Initialized = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-FRUC] DirectML (zero-copy) initialized: %ux%u, FP16 tensor %.2f MB/buffer",
+                "[VIPLE-FRUC] DirectML (zero-copy, %s) initialized: %ux%u, FP16 tensor %.2f MB/buffer",
+                m_UseOrt ? "ONNX model" : "inline graph",
                 width, height, (double)m_TensorBytes / (1024.0 * 1024.0));
     return true;
 }
@@ -107,6 +131,23 @@ void DirectMLFRUC::destroy()
             CloseHandle(ev);
         }
     }
+
+    // ORT allocations + session must tear down BEFORE we release
+    // the D3D12 resources / DML device they reference. FreeGPUAllocation
+    // decrements the ref count on the wrapped ID3D12Resource.
+    if (m_OrtDmlApi) {
+        if (m_OrtAllocFrame[0]) m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocFrame[0]);
+        if (m_OrtAllocFrame[1]) m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocFrame[1]);
+        if (m_OrtAllocOutput)   m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocOutput);
+        m_OrtAllocFrame[0] = m_OrtAllocFrame[1] = m_OrtAllocOutput = nullptr;
+    }
+    m_OrtSession.reset();
+    m_OrtInputNames.clear();
+    m_OrtOutputNames.clear();
+    m_OrtInputNamesCStr.clear();
+    m_OrtOutputNamesCStr.clear();
+    m_OrtDmlApi = nullptr;
+    m_UseOrt = false;
 
     m_Fence11.Reset();
     m_DMLBindingTable.Reset();
@@ -555,6 +596,8 @@ void DirectMLFRUC::runPackCS(ID3D11DeviceContext4* ctx4, int slot)
 
 bool DirectMLFRUC::runDMLDispatch()
 {
+    if (m_UseOrt) return runOrtInference();
+
     m_CmdAlloc12->Reset();
     m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
     ID3D12DescriptorHeap* heaps[] = { m_DMLDescHeap.Get() };
@@ -564,6 +607,175 @@ bool DirectMLFRUC::runDMLDispatch()
     ID3D12CommandList* cmds[] = { m_CmdList12.Get() };
     m_Queue12->ExecuteCommandLists(1, cmds);
     return true;
+}
+
+
+bool DirectMLFRUC::tryLoadOnnxModel()
+{
+    // Users opt in to the ONNX path by dropping fruc.onnx into the
+    // app data directory (where the shader .fxc files live). No
+    // model present = silently use the inline DML graph.
+    QString modelPath = Path::getDataFilePath(QStringLiteral("fruc.onnx"));
+    if (modelPath.isEmpty() || !QFileInfo::exists(modelPath)) {
+        return false;
+    }
+
+    try {
+        // Grab the DirectML EP API table.
+        const OrtApi& ortApi = Ort::GetApi();
+        if (auto* st = ortApi.GetExecutionProviderApi("DML", ORT_API_VERSION,
+                                                      reinterpret_cast<const void**>(&m_OrtDmlApi));
+            st != nullptr) {
+            ortApi.ReleaseStatus(st);
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: ORT GetExecutionProviderApi(DML) failed");
+            return false;
+        }
+
+        Ort::SessionOptions so;
+        so.DisableMemPattern();
+        so.SetExecutionMode(ORT_SEQUENTIAL);
+        so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        // Route ORT onto our existing D3D12 queue and DML device so
+        // everything shares the same fence timeline.
+        if (auto* st = m_OrtDmlApi->SessionOptionsAppendExecutionProvider_DML1(
+                so, m_DMLDevice.Get(), m_Queue12.Get());
+            st != nullptr) {
+            ortApi.ReleaseStatus(st);
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: ORT SessionOptionsAppendExecutionProvider_DML1 failed");
+            return false;
+        }
+
+#ifdef _WIN32
+        std::wstring wpath = modelPath.toStdWString();
+        m_OrtSession = std::make_unique<Ort::Session>(sharedOrtEnv(), wpath.c_str(), so);
+#else
+        std::string apath = modelPath.toStdString();
+        m_OrtSession = std::make_unique<Ort::Session>(sharedOrtEnv(), apath.c_str(), so);
+#endif
+
+        // Validate shape: 2 inputs + 1 output, all [1, 4, H, W]
+        // FP16 (matching our shared tensor layout). If the model
+        // uses FP32 we'd need a different graph; warn and bail.
+        if (m_OrtSession->GetInputCount() != 2 || m_OrtSession->GetOutputCount() != 1) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] ONNX model must have 2 inputs + 1 output (got %zu/%zu)",
+                        m_OrtSession->GetInputCount(), m_OrtSession->GetOutputCount());
+            m_OrtSession.reset();
+            return false;
+        }
+
+        Ort::AllocatorWithDefaultOptions alloc;
+        auto validate = [&](Ort::TypeInfo ti, const char* kind) -> bool {
+            auto shape = ti.GetTensorTypeAndShapeInfo().GetShape();
+            auto dtype = ti.GetTensorTypeAndShapeInfo().GetElementType();
+            if (dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] ONNX %s: expected FP16 (got dtype=%d)", kind, dtype);
+                return false;
+            }
+            if (shape.size() != 4) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] ONNX %s: expected 4D NCHW (got %zu)", kind, shape.size());
+                return false;
+            }
+            // Allow dynamic dims (-1) for batch / channel but W, H
+            // must match our tensor shape.
+            if ((shape[1] > 0 && shape[1] != 4) ||
+                (shape[2] > 0 && shape[2] != (int64_t)m_Height) ||
+                (shape[3] > 0 && shape[3] != (int64_t)m_Width)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] ONNX %s: shape mismatch (need [*,4,%u,%u])", kind,
+                            m_Height, m_Width);
+                return false;
+            }
+            return true;
+        };
+        for (size_t i = 0; i < 2; ++i) {
+            if (!validate(m_OrtSession->GetInputTypeInfo(i), "input")) { m_OrtSession.reset(); return false; }
+            Ort::AllocatedStringPtr n = m_OrtSession->GetInputNameAllocated(i, alloc);
+            m_OrtInputNames.emplace_back(n.get());
+        }
+        if (!validate(m_OrtSession->GetOutputTypeInfo(0), "output")) { m_OrtSession.reset(); return false; }
+        {
+            Ort::AllocatedStringPtr n = m_OrtSession->GetOutputNameAllocated(0, alloc);
+            m_OrtOutputNames.emplace_back(n.get());
+        }
+        for (auto& s : m_OrtInputNames)  m_OrtInputNamesCStr.push_back(s.c_str());
+        for (auto& s : m_OrtOutputNames) m_OrtOutputNamesCStr.push_back(s.c_str());
+
+        // Wrap our shared D3D12 tensors as DML allocations. These
+        // don't copy memory; ORT holds a reference to the resource
+        // and binds it directly as tensor memory.
+        if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(m_FrameTensor[0].Get(), &m_OrtAllocFrame[0]);
+            st != nullptr) { ortApi.ReleaseStatus(st); m_OrtSession.reset(); return false; }
+        if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(m_FrameTensor[1].Get(), &m_OrtAllocFrame[1]);
+            st != nullptr) { ortApi.ReleaseStatus(st); m_OrtSession.reset(); return false; }
+        if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(m_OutputTensor.Get(), &m_OrtAllocOutput);
+            st != nullptr) { ortApi.ReleaseStatus(st); m_OrtSession.reset(); return false; }
+
+        m_UseOrt = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] ONNX model loaded: %s (inputs: %s, %s; output: %s)",
+                    qPrintable(modelPath),
+                    m_OrtInputNamesCStr[0], m_OrtInputNamesCStr[1], m_OrtOutputNamesCStr[0]);
+        return true;
+    } catch (const Ort::Exception& e) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] ONNX model load failed: %s", e.what());
+        m_OrtSession.reset();
+        return false;
+    }
+}
+
+
+bool DirectMLFRUC::runOrtInference()
+{
+    if (!m_UseOrt || !m_OrtSession) return false;
+    try {
+        int prevSlot = 1 - m_WriteSlot;
+        int currSlot = m_WriteSlot;
+
+        // ORT tensors wrap the shared D3D12 allocations we created
+        // at load time. Creating Ort::Value is cheap (no copy, no
+        // allocation) — we do it per-frame to reflect the ping-pong
+        // slot swap for prev/curr.
+        Ort::MemoryInfo mem("DML", OrtDeviceAllocator, 0, OrtMemTypeDefault);
+        std::array<int64_t, 4> shape = { 1, 4, (int64_t)m_Height, (int64_t)m_Width };
+
+        Ort::Value prev = Ort::Value::CreateTensor(
+            mem, m_OrtAllocFrame[prevSlot], m_TensorBytes,
+            shape.data(), shape.size(),
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+        Ort::Value curr = Ort::Value::CreateTensor(
+            mem, m_OrtAllocFrame[currSlot], m_TensorBytes,
+            shape.data(), shape.size(),
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+        Ort::Value out = Ort::Value::CreateTensor(
+            mem, m_OrtAllocOutput, m_TensorBytes,
+            shape.data(), shape.size(),
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+
+        Ort::Value inputs[2] = { std::move(prev), std::move(curr) };
+        Ort::RunOptions ro;
+        m_OrtSession->Run(
+            ro,
+            m_OrtInputNamesCStr.data(), inputs, 2,
+            m_OrtOutputNamesCStr.data(), &out, 1);
+        // session.Run enqueues commands on m_Queue12 and returns —
+        // no CPU-side wait. The fence Signal emitted by submitFrame
+        // after this call correctly orders the follow-up unpack CS.
+        return true;
+    } catch (const Ort::Exception& e) {
+        // Don't spam the log every frame — if inference fails
+        // permanently, disable ORT path and drop back to inline
+        // DML graph from now on.
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] ONNX Run() failed, disabling ORT path: %s", e.what());
+        m_UseOrt = false;
+        return false;
+    }
 }
 
 
@@ -625,7 +837,10 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
     ctx4->Signal(m_Fence11.Get(), m_FenceValue);
     m_Queue12->Wait(m_Fence12.Get(), m_FenceValue);
 
-    rebindPingPongInputs();
+    // ORT path uses its own input binding built per-frame inside
+    // runOrtInference; the hand-authored DML graph uses our binding
+    // table and needs the ping-pong rebind each frame.
+    if (!m_UseOrt) rebindPingPongInputs();
     runDMLDispatch();
     m_FenceValue++;
     m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);

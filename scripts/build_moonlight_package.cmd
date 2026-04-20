@@ -75,6 +75,18 @@ for %%F in (dxcompiler.dll dxil.dll) do (
     )
 )
 
+:: VipleStream: ONNX Runtime DirectML DLL. Required at runtime ONLY
+:: when the user picks the DirectML FRUC backend AND drops a model
+:: file at %APPDATA%\VipleStream\fruc.onnx. Ship it unconditionally
+:: so users can opt in without a separate download.
+set "ORT_DLL=%SRC%\libs\windows\onnxruntime\runtimes\win-x64\native\onnxruntime.dll"
+if exist "%ORT_DLL%" (
+    copy /y "%ORT_DLL%" "%TEMP_DIR%\" >nul
+    echo   onnxruntime.dll
+) else (
+    echo   [WARN] onnxruntime.dll missing - DirectML ONNX path disabled
+)
+
 :: ---- 4b. Debug symbols (PDBs) ----
 ::
 :: Ship PDBs next to the .exe so WinDbg / cdb can symbolicate minidumps

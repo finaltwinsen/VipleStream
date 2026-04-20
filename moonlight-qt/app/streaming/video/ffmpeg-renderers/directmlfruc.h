@@ -35,8 +35,18 @@
 #include <DirectML.h>
 #include <wrl/client.h>
 #include <cstdint>
+#include <memory>
+#include <vector>
+#include <string>
 
 #include "ifrucbackend.h"
+
+// ONNX Runtime forward-declare wrappers (full includes live only in
+// directmlfruc.cpp so the rest of the project doesn't have to
+// ingest the ORT headers). The pointer-to-impl keeps the TU count
+// and rebuild cost down.
+namespace Ort { class Env; class Session; }
+struct OrtDmlApi;
 
 class DirectMLFRUC : public IFRUCBackend {
 public:
@@ -74,10 +84,16 @@ private:
     bool createD3D11Views();
     bool loadComputeShaders();
     bool compileDMLGraph();
+    // Optional: try to load an ONNX FRUC model from the data dir.
+    // Returns true if a model was loaded and m_UseOrt is now true;
+    // false (without logging an error) if no model file exists —
+    // that's the normal path for users who didn't opt in.
+    bool tryLoadOnnxModel();
 
     bool rebindPingPongInputs();  // DML input binding swap each frame.
     void runPackCS(ID3D11DeviceContext4* ctx4, int slot);
     bool runDMLDispatch();
+    bool runOrtInference();       // ORT path of runDMLDispatch().
     void runUnpackCS(ID3D11DeviceContext4* ctx4);
 
     // --- common state ---
@@ -142,6 +158,22 @@ private:
     static constexpr DML_TENSOR_DATA_TYPE kDmlDtype = DML_TENSOR_DATA_TYPE_FLOAT16;
     uint32_t m_TensorElements = 0;  // = 4 * W * H
     uint32_t m_TensorBytes    = 0;  // = elements * 2
+
+    // --- ONNX Runtime (optional; activated when fruc.onnx exists) ---
+    bool                           m_UseOrt = false;
+    std::unique_ptr<Ort::Session>  m_OrtSession;
+    const OrtDmlApi*               m_OrtDmlApi = nullptr;
+    // Opaque ORT-owned wrappers for our shared D3D12 resources. 1:1
+    // with m_FrameTensor[0], m_FrameTensor[1], m_OutputTensor so
+    // ORT can bind them with zero copies.
+    void*                          m_OrtAllocFrame[2] = { nullptr, nullptr };
+    void*                          m_OrtAllocOutput   = nullptr;
+    // Cached session metadata — names and shape we validated at
+    // model-load time. Session::Run wants the names every call.
+    std::vector<std::string>       m_OrtInputNames;
+    std::vector<std::string>       m_OrtOutputNames;
+    std::vector<const char*>       m_OrtInputNamesCStr;
+    std::vector<const char*>       m_OrtOutputNamesCStr;
 };
 
 #endif // _WIN32
