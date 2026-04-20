@@ -20,7 +20,7 @@ cbuffer UnpackConsts : register(b0)
 {
     uint  width;
     uint  height;
-    uint  _pad0;
+    uint  useAlpha; // 0 for 3-channel model outputs; unpack writes alpha = 1.
     uint  _pad1;
 };
 
@@ -36,7 +36,10 @@ void main(uint3 id : SV_DispatchThreadID)
     px.r = input[0 * plane + idx];
     px.g = input[1 * plane + idx];
     px.b = input[2 * plane + idx];
-    px.a = input[3 * plane + idx];
+    // 3-channel models (RIFE / IFRNet / most public FRUC exports)
+    // never write plane 3, so reading it would hand us stale data.
+    // Video streams don't carry a meaningful alpha anyway — force 1.
+    px.a = (useAlpha != 0) ? input[3 * plane + idx] : 1.0f;
 
     output[id.xy] = saturate(px);
 }

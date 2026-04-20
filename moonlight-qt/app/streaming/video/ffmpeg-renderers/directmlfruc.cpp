@@ -53,7 +53,7 @@ inline uint64_t alignUp(uint64_t x, uint64_t a) { return (x + a - 1) & ~(a - 1);
 struct PackCBData {
     uint32_t width;
     uint32_t height;
-    uint32_t _pad0;
+    uint32_t useAlpha;  // unpack: 0 = force 1.0 (3-ch models), 1 = read plane 3
     uint32_t _pad1;
 };
 
@@ -82,7 +82,7 @@ bool DirectMLFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t hei
     m_Width    = width;
     m_Height   = height;
     m_TensorElements = 4u * width * height;
-    m_TensorBytes    = m_TensorElements * sizeof(uint16_t);
+    m_TensorBytes    = m_TensorElements * sizeof(float);  // FP32 internally
 
     if (FAILED(m_Device11->QueryInterface(IID_PPV_ARGS(&m_Device11_5)))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -139,8 +139,12 @@ void DirectMLFRUC::destroy()
         if (m_OrtAllocFrame[0]) m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocFrame[0]);
         if (m_OrtAllocFrame[1]) m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocFrame[1]);
         if (m_OrtAllocOutput)   m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocOutput);
-        m_OrtAllocFrame[0] = m_OrtAllocFrame[1] = m_OrtAllocOutput = nullptr;
+        if (m_OrtAllocTimestep) m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocTimestep);
+        m_OrtAllocFrame[0] = m_OrtAllocFrame[1] = m_OrtAllocOutput = m_OrtAllocTimestep = nullptr;
     }
+    m_TimestepResource.Reset();
+    m_HasTimestep = false;
+    m_ModelChannels = 4;
     m_OrtSession.reset();
     m_OrtInputNames.clear();
     m_OrtOutputNames.clear();
@@ -312,14 +316,15 @@ bool DirectMLFRUC::createD3D11Textures()
     if (FAILED(m_Device11->CreateShaderResourceView(m_OutputTexture.Get(), nullptr, m_OutputSRV.GetAddressOf()))) return false;
     if (FAILED(m_Device11->CreateUnorderedAccessView(m_OutputTexture.Get(), nullptr, m_OutputUAV.GetAddressOf()))) return false;
 
-    // Constant buffer for the pack/unpack shaders — only width /
-    // height need to reach the GPU. Filled once; WRITE_DISCARD
-    // update per frame would work too but sizes don't change.
+    // Constant buffer for the pack/unpack shaders. useAlpha
+    // defaults to 1 (4-channel I/O: inline graph or 4-ch model).
+    // tryLoadOnnxModel() flips it to 0 and re-uploads when it
+    // detects a 3-channel model output.
     D3D11_BUFFER_DESC cbd = {};
     cbd.ByteWidth = sizeof(PackCBData);
-    cbd.Usage     = D3D11_USAGE_IMMUTABLE;
+    cbd.Usage     = D3D11_USAGE_DEFAULT;
     cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    PackCBData cbInit = { m_Width, m_Height, 0, 0 };
+    PackCBData cbInit = { m_Width, m_Height, /*useAlpha=*/1, 0 };
     D3D11_SUBRESOURCE_DATA sd = { &cbInit, 0, 0 };
     if (FAILED(m_Device11->CreateBuffer(&cbd, &sd, m_PackConstBuf.GetAddressOf()))) return false;
     return true;
@@ -328,12 +333,14 @@ bool DirectMLFRUC::createD3D11Textures()
 
 bool DirectMLFRUC::createD3D11Views()
 {
-    // Typed UAV on the shared buffer as R16_FLOAT — every element
-    // is one FP16, addressing is element index, so the pack
-    // shader's `output[idx] = float_value` lowers to a single
-    // typed store per write.
+    // Typed UAV on the shared buffer as R32_FLOAT — FP32 storage
+    // so ORT can bind our buffer directly to any public RIFE /
+    // FLAVR / IFRNet model (all of which ship as FP32 ONNX). The
+    // HLSL pack/unpack shaders use `RWBuffer<float>` / `Buffer<float>`
+    // which is format-agnostic; swapping the view format is all
+    // that's required to flip the on-disk dtype.
     D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {};
-    ud.Format        = DXGI_FORMAT_R16_FLOAT;
+    ud.Format        = DXGI_FORMAT_R32_FLOAT;
     ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
     ud.Buffer.FirstElement = 0;
     ud.Buffer.NumElements  = m_TensorElements;
@@ -342,7 +349,7 @@ bool DirectMLFRUC::createD3D11Views()
     if (FAILED(m_Device11->CreateUnorderedAccessView(m_FrameBuffer11[1].Get(), &ud, m_FrameBufferUAV11[1].GetAddressOf()))) return false;
 
     D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-    sd.Format        = DXGI_FORMAT_R16_FLOAT;
+    sd.Format        = DXGI_FORMAT_R32_FLOAT;
     sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
     sd.Buffer.FirstElement = 0;
     sd.Buffer.NumElements  = m_TensorElements;
@@ -386,8 +393,23 @@ bool DirectMLFRUC::compileDMLGraph()
 
     DML_TENSOR_DESC td = { DML_TENSOR_TYPE_BUFFER, &bufDesc };
 
-    // Node 0: ADD1(A, B) — bidirectional mean (pack shader pre-
-    // scaled inputs by 0.5, so ADD1 yields the mean).
+    // The pack shader now writes pixel values in [0, 1] (matching
+    // what ONNX models expect). The inline 4-op graph below re-
+    // introduces the 0.5 scale via IDENTITY nodes so ADD1 still
+    // produces a bidirectional mean.
+    DML_SCALE_BIAS half = { 0.5f, 0.0f };
+
+    // Node 0 / 1: IDENTITY with Scale=0.5 on each input.
+    DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC idDesc = {};
+    idDesc.InputTensor  = &td;
+    idDesc.OutputTensor = &td;
+    idDesc.ScaleBias    = &half;
+    DML_OPERATOR_DESC idOpDesc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, &idDesc };
+    ComPtr<IDMLOperator> idA, idB;
+    if (FAILED(m_DMLDevice->CreateOperator(&idOpDesc, IID_PPV_ARGS(&idA)))) return false;
+    if (FAILED(m_DMLDevice->CreateOperator(&idOpDesc, IID_PPV_ARGS(&idB)))) return false;
+
+    // Node 2: ADD1(halfA, halfB) — bidirectional mean.
     DML_ELEMENT_WISE_ADD1_OPERATOR_DESC addDesc = {};
     addDesc.ATensor      = &td;
     addDesc.BTensor      = &td;
@@ -396,9 +418,7 @@ bool DirectMLFRUC::compileDMLGraph()
     ComPtr<IDMLOperator> addOp;
     if (FAILED(m_DMLDevice->CreateOperator(&addOpDesc, IID_PPV_ARGS(&addOp)))) return false;
 
-    // Node 1: CLIP(x, 0, 1) — clamps FP16 rounding drift and any
-    // future graph ops' overshoot. Cheap no-op in most pixels, but
-    // kills occasional hot/black artefacts at the tails.
+    // Node 3: CLIP(x, 0, 1) — clamps rounding drift at the tails.
     DML_ELEMENT_WISE_CLIP_OPERATOR_DESC clipDesc = {};
     clipDesc.InputTensor  = &td;
     clipDesc.OutputTensor = &td;
@@ -408,41 +428,49 @@ bool DirectMLFRUC::compileDMLGraph()
     ComPtr<IDMLOperator> clipOp;
     if (FAILED(m_DMLDevice->CreateOperator(&clipOpDesc, IID_PPV_ARGS(&clipOp)))) return false;
 
-    // Assemble into a 2-op DML graph. Moving to CompileGraph is
-    // what unlocks richer future graphs without another refactor —
-    // more layers, convolutions, or a full ONNX-derived model
-    // (TODO(directml:model)) drop in by adding nodes + edges here.
-    DML_OPERATOR_GRAPH_NODE_DESC addNode  = { addOp.Get(),  "add"  };
-    DML_OPERATOR_GRAPH_NODE_DESC clipNode = { clipOp.Get(), "clip" };
-    DML_GRAPH_NODE_DESC nodes[2] = {
+    DML_OPERATOR_GRAPH_NODE_DESC idANode = { idA.Get(),   "idA"  };
+    DML_OPERATOR_GRAPH_NODE_DESC idBNode = { idB.Get(),   "idB"  };
+    DML_OPERATOR_GRAPH_NODE_DESC addNode = { addOp.Get(), "add"  };
+    DML_OPERATOR_GRAPH_NODE_DESC clipNode= { clipOp.Get(),"clip" };
+    DML_GRAPH_NODE_DESC nodes[4] = {
+        { DML_GRAPH_NODE_TYPE_OPERATOR, &idANode  },
+        { DML_GRAPH_NODE_TYPE_OPERATOR, &idBNode  },
         { DML_GRAPH_NODE_TYPE_OPERATOR, &addNode  },
         { DML_GRAPH_NODE_TYPE_OPERATOR, &clipNode },
     };
 
     DML_INPUT_GRAPH_EDGE_DESC inEdges[2] = {
-        { 0u, 0u, 0u, "A" },   // graph input 0 -> add.A
-        { 1u, 0u, 1u, "B" },   // graph input 1 -> add.B
+        { 0u, 0u, 0u, "A" },   // graph input 0 -> idA.in
+        { 1u, 1u, 0u, "B" },   // graph input 1 -> idB.in
     };
     DML_GRAPH_EDGE_DESC inEdgeDescs[2] = {
         { DML_GRAPH_EDGE_TYPE_INPUT, &inEdges[0] },
         { DML_GRAPH_EDGE_TYPE_INPUT, &inEdges[1] },
     };
-    DML_INTERMEDIATE_GRAPH_EDGE_DESC midEdge = { 0u, 0u, 1u, 0u, "add->clip" };
-    DML_GRAPH_EDGE_DESC midEdgeDesc = { DML_GRAPH_EDGE_TYPE_INTERMEDIATE, &midEdge };
-    DML_OUTPUT_GRAPH_EDGE_DESC outEdge = { 1u, 0u, 0u, "clip->out" };
+    DML_INTERMEDIATE_GRAPH_EDGE_DESC midEdges[3] = {
+        { 0u, 0u, 2u, 0u, "idA->add.A" },
+        { 1u, 0u, 2u, 1u, "idB->add.B" },
+        { 2u, 0u, 3u, 0u, "add->clip"  },
+    };
+    DML_GRAPH_EDGE_DESC midEdgeDescs[3] = {
+        { DML_GRAPH_EDGE_TYPE_INTERMEDIATE, &midEdges[0] },
+        { DML_GRAPH_EDGE_TYPE_INTERMEDIATE, &midEdges[1] },
+        { DML_GRAPH_EDGE_TYPE_INTERMEDIATE, &midEdges[2] },
+    };
+    DML_OUTPUT_GRAPH_EDGE_DESC outEdge = { 3u, 0u, 0u, "clip->out" };
     DML_GRAPH_EDGE_DESC outEdgeDesc = { DML_GRAPH_EDGE_TYPE_OUTPUT, &outEdge };
 
     DML_GRAPH_DESC gd = {};
     gd.InputCount            = 2;
     gd.OutputCount           = 1;
-    gd.NodeCount             = 2;
+    gd.NodeCount             = 4;
     gd.Nodes                 = nodes;
     gd.InputEdgeCount        = 2;
     gd.InputEdges            = inEdgeDescs;
     gd.OutputEdgeCount       = 1;
     gd.OutputEdges           = &outEdgeDesc;
-    gd.IntermediateEdgeCount = 1;
-    gd.IntermediateEdges     = &midEdgeDesc;
+    gd.IntermediateEdgeCount = 3;
+    gd.IntermediateEdges     = midEdgeDescs;
 
     ComPtr<IDMLDevice1> device1;
     if (FAILED(m_DMLDevice.As(&device1))) {
@@ -617,6 +645,10 @@ bool DirectMLFRUC::tryLoadOnnxModel()
     // model present = silently use the inline DML graph.
     QString modelPath = Path::getDataFilePath(QStringLiteral("fruc.onnx"));
     if (modelPath.isEmpty() || !QFileInfo::exists(modelPath)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] No fruc.onnx at '%s' — using inline DML graph. "
+                    "Drop a 3-or-4-channel FP32 ONNX FRUC model there to enable the ORT path.",
+                    modelPath.isEmpty() ? "(data dir)" : qPrintable(modelPath));
         return false;
     }
 
@@ -655,24 +687,35 @@ bool DirectMLFRUC::tryLoadOnnxModel()
         m_OrtSession = std::make_unique<Ort::Session>(sharedOrtEnv(), apath.c_str(), so);
 #endif
 
-        // Validate shape: 2 inputs + 1 output, all [1, 4, H, W]
-        // FP16 (matching our shared tensor layout). If the model
-        // uses FP32 we'd need a different graph; warn and bail.
-        if (m_OrtSession->GetInputCount() != 2 || m_OrtSession->GetOutputCount() != 1) {
+        // Validate shapes. Accepted contract for v1.2.4:
+        //   Inputs: 2 or 3 FP32 tensors. First two are NCHW images
+        //           [1, 3 or 4, H, W]. Third (if present) is a
+        //           timestep — any FP32 tensor whose element count
+        //           is 1 qualifies. RIFE v4+ exports this as [1],
+        //           FLAVR variants as [1,1,1,1], some as [1,1,H/k,W/k].
+        //   Output: 1 FP32 tensor [1, 3 or 4, H, W] with matching
+        //           channel count + spatial dims.
+        const size_t inCount  = m_OrtSession->GetInputCount();
+        const size_t outCount = m_OrtSession->GetOutputCount();
+        if ((inCount != 2 && inCount != 3) || outCount != 1) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] ONNX model must have 2 inputs + 1 output (got %zu/%zu)",
-                        m_OrtSession->GetInputCount(), m_OrtSession->GetOutputCount());
+                        "[VIPLE-FRUC] ONNX: want 2 or 3 inputs + 1 output (got %zu/%zu)",
+                        inCount, outCount);
             m_OrtSession.reset();
             return false;
         }
 
         Ort::AllocatorWithDefaultOptions alloc;
-        auto validate = [&](Ort::TypeInfo ti, const char* kind) -> bool {
-            auto shape = ti.GetTensorTypeAndShapeInfo().GetShape();
-            auto dtype = ti.GetTensorTypeAndShapeInfo().GetElementType();
-            if (dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+        uint32_t detectedChannels = 0;
+        auto validateImage = [&](Ort::TypeInfo ti, const char* kind) -> bool {
+            auto info  = ti.GetTensorTypeAndShapeInfo();
+            auto shape = info.GetShape();
+            auto dtype = info.GetElementType();
+            if (dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] ONNX %s: expected FP16 (got dtype=%d)", kind, dtype);
+                            "[VIPLE-FRUC] ONNX %s: expected FP32 (got dtype=%d). "
+                            "Convert FP16 models with onnxconverter_common.convert_float_to_float16.",
+                            kind, dtype);
                 return false;
             }
             if (shape.size() != 4) {
@@ -680,30 +723,151 @@ bool DirectMLFRUC::tryLoadOnnxModel()
                             "[VIPLE-FRUC] ONNX %s: expected 4D NCHW (got %zu)", kind, shape.size());
                 return false;
             }
-            // Allow dynamic dims (-1) for batch / channel but W, H
-            // must match our tensor shape.
-            if ((shape[1] > 0 && shape[1] != 4) ||
-                (shape[2] > 0 && shape[2] != (int64_t)m_Height) ||
+            // Spatial dims must match stream resolution exactly (no
+            // padding handling yet — that's a follow-up round).
+            if ((shape[2] > 0 && shape[2] != (int64_t)m_Height) ||
                 (shape[3] > 0 && shape[3] != (int64_t)m_Width)) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] ONNX %s: shape mismatch (need [*,4,%u,%u])", kind,
+                            "[VIPLE-FRUC] ONNX %s: H/W mismatch (need [*,C,%u,%u])", kind,
                             m_Height, m_Width);
                 return false;
+            }
+            // Channel count: 3 or 4. First image input sets the
+            // detected count; everything else must agree.
+            int64_t c = shape[1];
+            if (c > 0 && c != 3 && c != 4) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] ONNX %s: only 3 or 4 channels supported (got %lld)",
+                            kind, (long long)c);
+                return false;
+            }
+            if (c > 0) {
+                if (detectedChannels == 0) {
+                    detectedChannels = (uint32_t)c;
+                } else if ((uint32_t)c != detectedChannels) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC] ONNX %s: channel mismatch (was %u, got %lld)",
+                                kind, detectedChannels, (long long)c);
+                    return false;
+                }
             }
             return true;
         };
         for (size_t i = 0; i < 2; ++i) {
-            if (!validate(m_OrtSession->GetInputTypeInfo(i), "input")) { m_OrtSession.reset(); return false; }
+            if (!validateImage(m_OrtSession->GetInputTypeInfo(i), "image input")) {
+                m_OrtSession.reset(); return false;
+            }
             Ort::AllocatedStringPtr n = m_OrtSession->GetInputNameAllocated(i, alloc);
             m_OrtInputNames.emplace_back(n.get());
         }
-        if (!validate(m_OrtSession->GetOutputTypeInfo(0), "output")) { m_OrtSession.reset(); return false; }
+        // Third input = timestep scalar (RIFE v4+). Any FP32 tensor
+        // with a single element qualifies. We feed 0.5 at runtime
+        // (midpoint of 2x FRUC). Shape can be [1] / [1,1,1,1] /
+        // [1,1,H/4,W/4] — we just verify it's FP32 and has element
+        // count 1; broadcast-shaped timestep tensors aren't common.
+        if (inCount == 3) {
+            auto ti = m_OrtSession->GetInputTypeInfo(2);
+            auto info = ti.GetTensorTypeAndShapeInfo();
+            if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] ONNX timestep input: expected FP32");
+                m_OrtSession.reset(); return false;
+            }
+            m_HasTimestep = true;
+            Ort::AllocatedStringPtr n = m_OrtSession->GetInputNameAllocated(2, alloc);
+            m_OrtInputNames.emplace_back(n.get());
+        }
+        if (!validateImage(m_OrtSession->GetOutputTypeInfo(0), "output")) {
+            m_OrtSession.reset(); return false;
+        }
         {
             Ort::AllocatedStringPtr n = m_OrtSession->GetOutputNameAllocated(0, alloc);
             m_OrtOutputNames.emplace_back(n.get());
         }
         for (auto& s : m_OrtInputNames)  m_OrtInputNamesCStr.push_back(s.c_str());
         for (auto& s : m_OrtOutputNames) m_OrtOutputNamesCStr.push_back(s.c_str());
+
+        // Default detectedChannels to 4 if every dim was dynamic
+        // (model didn't fix channel at export). That preserves the
+        // 4-channel output path for RGBA pipelines.
+        m_ModelChannels = detectedChannels ? detectedChannels : 4;
+
+        // 3-channel models leave plane 3 of our output buffer
+        // untouched; flip useAlpha=0 so the unpack shader writes
+        // alpha=1 instead of reading stale data.
+        if (m_ModelChannels == 3) {
+            PackCBData cbData = { m_Width, m_Height, 0, 0 };
+            ComPtr<ID3D11DeviceContext> ctx;
+            m_Device11->GetImmediateContext(&ctx);
+            ctx->UpdateSubresource(m_PackConstBuf.Get(), 0, nullptr, &cbData, 0, 0);
+        }
+
+        // Allocate the timestep resource (tiny FP32 buffer, 16 B
+        // for alignment) and wrap it as an ORT allocation.
+        if (m_HasTimestep) {
+            D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC rd = {};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            rd.Width = 256;  // min alignment for buffer
+            rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            rd.Flags  = D3D12_RESOURCE_FLAG_NONE;
+            if (FAILED(m_Device12->CreateCommittedResource(
+                    &hp, D3D12_HEAP_FLAG_NONE, &rd,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(&m_TimestepResource)))) {
+                m_OrtSession.reset(); return false;
+            }
+            // Upload 0.5f into the first 4 bytes via a transient
+            // UPLOAD heap + CopyBufferRegion on the queue.
+            D3D12_HEAP_PROPERTIES uhp = {}; uhp.Type = D3D12_HEAP_TYPE_UPLOAD;
+            ComPtr<ID3D12Resource> up;
+            D3D12_RESOURCE_DESC urd = rd;
+            urd.Flags = D3D12_RESOURCE_FLAG_NONE;
+            if (FAILED(m_Device12->CreateCommittedResource(
+                    &uhp, D3D12_HEAP_FLAG_NONE, &urd,
+                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                    IID_PPV_ARGS(&up)))) {
+                m_OrtSession.reset(); return false;
+            }
+            void* mapped = nullptr;
+            D3D12_RANGE noRead = { 0, 0 };
+            up->Map(0, &noRead, &mapped);
+            *reinterpret_cast<float*>(mapped) = m_TimestepValue;
+            D3D12_RANGE written = { 0, sizeof(float) };
+            up->Unmap(0, &written);
+
+            m_CmdAlloc12->Reset();
+            m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+            m_CmdList12->CopyBufferRegion(m_TimestepResource.Get(), 0, up.Get(), 0, sizeof(float));
+            D3D12_RESOURCE_BARRIER b = {};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition.pResource   = m_TimestepResource.Get();
+            b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            b.Transition.StateAfter  = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            m_CmdList12->ResourceBarrier(1, &b);
+            m_CmdList12->Close();
+            ID3D12CommandList* cmds[] = { m_CmdList12.Get() };
+            m_Queue12->ExecuteCommandLists(1, cmds);
+            m_FenceValue++;
+            m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
+            // Small sync (timestep is persistent, only uploaded once).
+            HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (m_Fence12->GetCompletedValue() < m_FenceValue) {
+                m_Fence12->SetEventOnCompletion(m_FenceValue, ev);
+                WaitForSingleObject(ev, 500);
+            }
+            CloseHandle(ev);
+
+            if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(
+                    m_TimestepResource.Get(), &m_OrtAllocTimestep);
+                st != nullptr) {
+                ortApi.ReleaseStatus(st);
+                m_OrtSession.reset(); return false;
+            }
+        }
 
         // Wrap our shared D3D12 tensors as DML allocations. These
         // don't copy memory; ORT holds a reference to the resource
@@ -717,9 +881,16 @@ bool DirectMLFRUC::tryLoadOnnxModel()
 
         m_UseOrt = true;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] ONNX model loaded: %s (inputs: %s, %s; output: %s)",
-                    qPrintable(modelPath),
-                    m_OrtInputNamesCStr[0], m_OrtInputNamesCStr[1], m_OrtOutputNamesCStr[0]);
+                    "[VIPLE-FRUC] ONNX model loaded: %s",
+                    qPrintable(modelPath));
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC]   contract: %u-ch FP32%s (inputs: %s, %s%s%s; output: %s)",
+                    m_ModelChannels,
+                    m_HasTimestep ? " + timestep" : "",
+                    m_OrtInputNamesCStr[0], m_OrtInputNamesCStr[1],
+                    m_HasTimestep ? ", " : "",
+                    m_HasTimestep ? m_OrtInputNamesCStr[2] : "",
+                    m_OrtOutputNamesCStr[0]);
         return true;
     } catch (const Ort::Exception& e) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -737,40 +908,52 @@ bool DirectMLFRUC::runOrtInference()
         int prevSlot = 1 - m_WriteSlot;
         int currSlot = m_WriteSlot;
 
-        // ORT tensors wrap the shared D3D12 allocations we created
-        // at load time. Creating Ort::Value is cheap (no copy, no
-        // allocation) — we do it per-frame to reflect the ping-pong
-        // slot swap for prev/curr.
         Ort::MemoryInfo mem("DML", OrtDeviceAllocator, 0, OrtMemTypeDefault);
-        std::array<int64_t, 4> shape = { 1, 4, (int64_t)m_Height, (int64_t)m_Width };
+
+        // The shared buffer is always laid out 4-plane RGBA; a 3-
+        // channel model simply reads/writes planes 0-2 and leaves
+        // plane 3 alone. Byte count shrinks to 3/4 of the full
+        // tensor so ORT's bounds check stays happy.
+        const uint32_t ch = m_ModelChannels;
+        const uint64_t imgBytes = (uint64_t)ch * m_Height * m_Width * sizeof(float);
+        std::array<int64_t, 4> shape = { 1, (int64_t)ch, (int64_t)m_Height, (int64_t)m_Width };
 
         Ort::Value prev = Ort::Value::CreateTensor(
-            mem, m_OrtAllocFrame[prevSlot], m_TensorBytes,
+            mem, m_OrtAllocFrame[prevSlot], imgBytes,
             shape.data(), shape.size(),
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
         Ort::Value curr = Ort::Value::CreateTensor(
-            mem, m_OrtAllocFrame[currSlot], m_TensorBytes,
+            mem, m_OrtAllocFrame[currSlot], imgBytes,
             shape.data(), shape.size(),
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
         Ort::Value out = Ort::Value::CreateTensor(
-            mem, m_OrtAllocOutput, m_TensorBytes,
+            mem, m_OrtAllocOutput, imgBytes,
             shape.data(), shape.size(),
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
 
-        Ort::Value inputs[2] = { std::move(prev), std::move(curr) };
+        // Timestep tensor: single-element FP32 = 0.5, persistent.
+        // Shape [1] is the most common; models expecting a broader
+        // shape would need a follow-up round.
+        std::array<int64_t, 1> tsShape = { 1 };
+        std::vector<Ort::Value> inputs;
+        inputs.reserve(3);
+        inputs.emplace_back(std::move(prev));
+        inputs.emplace_back(std::move(curr));
+        if (m_HasTimestep) {
+            Ort::Value t = Ort::Value::CreateTensor(
+                mem, m_OrtAllocTimestep, sizeof(float),
+                tsShape.data(), tsShape.size(),
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+            inputs.emplace_back(std::move(t));
+        }
+
         Ort::RunOptions ro;
         m_OrtSession->Run(
             ro,
-            m_OrtInputNamesCStr.data(), inputs, 2,
+            m_OrtInputNamesCStr.data(), inputs.data(), inputs.size(),
             m_OrtOutputNamesCStr.data(), &out, 1);
-        // session.Run enqueues commands on m_Queue12 and returns —
-        // no CPU-side wait. The fence Signal emitted by submitFrame
-        // after this call correctly orders the follow-up unpack CS.
         return true;
     } catch (const Ort::Exception& e) {
-        // Don't spam the log every frame — if inference fails
-        // permanently, disable ORT path and drop back to inline
-        // DML graph from now on.
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] ONNX Run() failed, disabling ORT path: %s", e.what());
         m_UseOrt = false;

@@ -155,9 +155,13 @@ private:
     uint64_t m_FenceValue = 0;
     int      m_WriteSlot  = 0;
 
-    static constexpr DML_TENSOR_DATA_TYPE kDmlDtype = DML_TENSOR_DATA_TYPE_FLOAT16;
+    // FP32 internally: matches the dtype of every public RIFE / FLAVR /
+    // IFRNet ONNX export in the wild, so models drop in without an
+    // offline conversion step. Costs ~2x the tensor VRAM vs FP16 but
+    // still well under 100 MB on 1080p which every target GPU handles.
+    static constexpr DML_TENSOR_DATA_TYPE kDmlDtype = DML_TENSOR_DATA_TYPE_FLOAT32;
     uint32_t m_TensorElements = 0;  // = 4 * W * H
-    uint32_t m_TensorBytes    = 0;  // = elements * 2
+    uint32_t m_TensorBytes    = 0;  // = elements * 4
 
     // --- ONNX Runtime (optional; activated when fruc.onnx exists) ---
     bool                           m_UseOrt = false;
@@ -168,6 +172,14 @@ private:
     // ORT can bind them with zero copies.
     void*                          m_OrtAllocFrame[2] = { nullptr, nullptr };
     void*                          m_OrtAllocOutput   = nullptr;
+    // Model-contract metadata learnt at load time. Drives per-frame
+    // tensor binding (channel count, extra timestep input, alpha
+    // passthrough path in the unpack shader).
+    uint32_t                       m_ModelChannels = 4;     // 3 or 4
+    bool                           m_HasTimestep = false;   // RIFE v4+ has a scalar 3rd input
+    float                          m_TimestepValue = 0.5f;  // midpoint for 2x FRUC
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_TimestepResource;
+    void*                          m_OrtAllocTimestep = nullptr;
     // Cached session metadata — names and shape we validated at
     // model-load time. Session::Run wants the names every call.
     std::vector<std::string>       m_OrtInputNames;

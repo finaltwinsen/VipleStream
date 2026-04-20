@@ -31,8 +31,11 @@ void main(uint3 id : SV_DispatchThreadID)
     if (id.x >= width || id.y >= height) return;
 
     // Texture2D<float4> already dequantizes R8G8B8A8_UNORM to
-    // [0,1]; multiply by 0.5 so the downstream ADD1 is a mean.
-    float4 px = input.Load(int3(id.xy, 0)) * 0.5;
+    // [0,1]. The 0.5 prescale that older revisions folded in here
+    // moved into the DML graph (DML_SCALE_BIAS on each input to
+    // ADD1) so the plane values match what ONNX models expect
+    // (pixels in [0,1], not [0, 0.5]).
+    float4 px = input.Load(int3(id.xy, 0));
 
     uint plane = width * height;
     uint idx   = id.y * width + id.x;
