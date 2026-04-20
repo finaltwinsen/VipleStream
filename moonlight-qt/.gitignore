@@ -4,5 +4,9 @@
 **/.vs/
 .vscode/
 build/
+# Third-party SDK layouts under libs/ keep their upstream "build/"
+# folder for native headers — not a build output, track them.
+!libs/windows/onnxruntime/build/
+!libs/windows/onnxruntime/build/**
 config.tests/*/.qmake.stash
 config.tests/*/Makefile
