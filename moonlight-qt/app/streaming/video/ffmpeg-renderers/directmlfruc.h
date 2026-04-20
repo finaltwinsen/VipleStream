@@ -186,6 +186,12 @@ private:
     std::vector<std::string>       m_OrtOutputNames;
     std::vector<const char*>       m_OrtInputNamesCStr;
     std::vector<const char*>       m_OrtOutputNamesCStr;
+    // Actual shape of the timestep input as exported by the model.
+    // Stored at load time so runOrtInference can create a tensor with
+    // the exact shape the model declares (e.g. [1] vs [1,1,1,1]).
+    // All dynamic dims (-1) are folded to 1 since we always pass a
+    // single 0.5 value regardless of broadcast shape.
+    std::vector<int64_t>           m_TimestepShape;
 };
 
 #endif // _WIN32

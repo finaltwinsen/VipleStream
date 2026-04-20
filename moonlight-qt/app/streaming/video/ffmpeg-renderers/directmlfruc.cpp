@@ -90,25 +90,64 @@ bool DirectMLFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t hei
         return false;
     }
 
-    if (!createD3D12Device())          return false;
-    if (!createDMLDevice())            return false;
-    if (!createSharedFence())          return false;
-    if (!createSharedTensorBuffers())  return false;
-    if (!createD3D11Textures())        return false;
-    if (!createD3D11Views())           return false;
-    if (!loadComputeShaders())         return false;
+#define DML_INIT_STEP(name, expr) \
+    do { if (!(expr)) { SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, \
+         "[VIPLE-FRUC] DirectML: init step '" name "' failed"); return false; } } while(0)
+
+    DML_INIT_STEP("createD3D12Device",         createD3D12Device());
+    DML_INIT_STEP("createDMLDevice",           createDMLDevice());
+    DML_INIT_STEP("createSharedFence",         createSharedFence());
+    DML_INIT_STEP("createSharedTensorBuffers", createSharedTensorBuffers());
+    DML_INIT_STEP("createD3D11Textures",       createD3D11Textures());
+    DML_INIT_STEP("createD3D11Views",          createD3D11Views());
+    DML_INIT_STEP("loadComputeShaders",        loadComputeShaders());
+
+#undef DML_INIT_STEP
 
     // Try the ONNX model first. Falls back to the inline DML graph
     // silently if no fruc.onnx is on disk — that's the default
     // path for users who haven't dropped in a model.
     bool ortLoaded = tryLoadOnnxModel();
     if (!ortLoaded) {
+        // ORT session creation/teardown may have submitted work to
+        // our D3D12 queue or left the command allocator in a non-
+        // reset state. Drain the queue and recreate the command
+        // infra before compiling the fallback inline DML graph.
+        {
+            m_FenceValue++;
+            m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
+            if (m_Fence12->GetCompletedValue() < m_FenceValue) {
+                HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                if (ev) {
+                    m_Fence12->SetEventOnCompletion(m_FenceValue, ev);
+                    WaitForSingleObject(ev, 500);
+                    CloseHandle(ev);
+                }
+            }
+            // Recreate the command allocator + list to guarantee a
+            // clean slate regardless of what ORT may have done.
+            m_CmdList12.Reset();
+            m_CmdAlloc12.Reset();
+            if (FAILED(m_Device12->CreateCommandAllocator(
+                    D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_CmdAlloc12)))) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] DirectML: cmd allocator recreate failed");
+                return false;
+            }
+            if (FAILED(m_Device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    m_CmdAlloc12.Get(), nullptr, IID_PPV_ARGS(&m_CmdList12)))) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] DirectML: cmd list recreate failed");
+                return false;
+            }
+            m_CmdList12->Close();
+        }
         if (!compileDMLGraph()) return false;
     }
 
     m_Initialized = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-FRUC] DirectML (zero-copy, %s) initialized: %ux%u, FP16 tensor %.2f MB/buffer",
+                "[VIPLE-FRUC] DirectML (zero-copy, %s) initialized: %ux%u, FP32 tensor %.2f MB/buffer",
                 m_UseOrt ? "ONNX model" : "inline graph",
                 width, height, (double)m_TensorBytes / (1024.0 * 1024.0));
     return true;
@@ -144,6 +183,7 @@ void DirectMLFRUC::destroy()
     }
     m_TimestepResource.Reset();
     m_HasTimestep = false;
+    m_TimestepShape.clear();
     m_ModelChannels = 4;
     m_OrtSession.reset();
     m_OrtInputNames.clear();
@@ -624,7 +664,27 @@ void DirectMLFRUC::runPackCS(ID3D11DeviceContext4* ctx4, int slot)
 
 bool DirectMLFRUC::runDMLDispatch()
 {
-    if (m_UseOrt) return runOrtInference();
+    if (m_UseOrt) {
+        bool ok = runOrtInference();
+        if (!ok) {
+            // ORT inference failed (e.g. shape mismatch, driver error).
+            // m_UseOrt was already cleared inside runOrtInference().
+            // If we have no inline graph to fall back to, return false
+            // so the frame is silently dropped rather than crashing.
+            if (!m_DMLCompiledOp) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] ORT inference failed and no inline DML graph "
+                            "is available — frame dropped. Check model resolution alignment.");
+                return false;
+            }
+            // Inline graph available (compiled on init before ORT loaded
+            // or after ORT failed). Fall through to the inline path.
+        } else {
+            return true;
+        }
+    }
+
+    if (!m_DMLCompiledOp) return false;  // should never happen; guard anyway
 
     m_CmdAlloc12->Reset();
     m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
@@ -697,12 +757,20 @@ bool DirectMLFRUC::tryLoadOnnxModel()
         //           channel count + spatial dims.
         const size_t inCount  = m_OrtSession->GetInputCount();
         const size_t outCount = m_OrtSession->GetOutputCount();
-        if ((inCount != 2 && inCount != 3) || outCount != 1) {
+        // Accept ≥1 outputs so models that export auxiliary tensors
+        // (optical-flow maps, confidence maps) aren't rejected — we
+        // only use the first output regardless.
+        if ((inCount != 2 && inCount != 3) || outCount < 1) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] ONNX: want 2 or 3 inputs + 1 output (got %zu/%zu)",
+                        "[VIPLE-FRUC] ONNX: want 2 or 3 inputs + ≥1 output (got %zu/%zu)",
                         inCount, outCount);
             m_OrtSession.reset();
             return false;
+        }
+        if (outCount > 1) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] ONNX: model has %zu outputs — using only the first",
+                        outCount);
         }
 
         Ort::AllocatorWithDefaultOptions alloc;
@@ -760,17 +828,38 @@ bool DirectMLFRUC::tryLoadOnnxModel()
             Ort::AllocatedStringPtr n = m_OrtSession->GetInputNameAllocated(i, alloc);
             m_OrtInputNames.emplace_back(n.get());
         }
-        // Third input = timestep scalar (RIFE v4+). Any FP32 tensor
-        // with a single element qualifies. We feed 0.5 at runtime
-        // (midpoint of 2x FRUC). Shape can be [1] / [1,1,1,1] /
-        // [1,1,H/4,W/4] — we just verify it's FP32 and has element
-        // count 1; broadcast-shaped timestep tensors aren't common.
+        // Third input = timestep scalar (RIFE v4+). We accept any
+        // FP32 tensor whose total element count resolves to 1 at
+        // runtime (shape [1], [1,1,1,1], etc.). Dynamic dims (-1)
+        // are treated as 1 for storage purposes. We feed 0.5.
         if (inCount == 3) {
-            auto ti = m_OrtSession->GetInputTypeInfo(2);
+            auto ti   = m_OrtSession->GetInputTypeInfo(2);
             auto info = ti.GetTensorTypeAndShapeInfo();
             if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] ONNX timestep input: expected FP32");
+                            "[VIPLE-FRUC] ONNX timestep input: expected FP32 (got %d)",
+                            (int)info.GetElementType());
+                m_OrtSession.reset(); return false;
+            }
+            // Materialise the shape: fold dynamic (-1) dims to 1.
+            auto rawShape = info.GetShape();
+            m_TimestepShape.clear();
+            int64_t tsElems = 1;
+            for (int64_t d : rawShape) {
+                int64_t concrete = (d > 0) ? d : 1;
+                m_TimestepShape.push_back(concrete);
+                tsElems *= concrete;
+            }
+            if (m_TimestepShape.empty()) {
+                // Scalar output with no shape dims — treat as [1].
+                m_TimestepShape.push_back(1);
+                tsElems = 1;
+            }
+            if (tsElems != 1) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] ONNX timestep: expected single-element tensor "
+                            "(got %lld elements) — use a model with a scalar timestep input",
+                            (long long)tsElems);
                 m_OrtSession.reset(); return false;
             }
             m_HasTimestep = true;
@@ -894,8 +983,24 @@ bool DirectMLFRUC::tryLoadOnnxModel()
         return true;
     } catch (const Ort::Exception& e) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] ONNX model load failed: %s", e.what());
+                    "[VIPLE-FRUC] ONNX model load failed (OrtException): %s", e.what());
         m_OrtSession.reset();
+        m_TimestepShape.clear();
+        m_HasTimestep = false;
+        return false;
+    } catch (const std::exception& e) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] ONNX model load failed (std::exception): %s", e.what());
+        m_OrtSession.reset();
+        m_TimestepShape.clear();
+        m_HasTimestep = false;
+        return false;
+    } catch (...) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] ONNX model load failed (unknown exception)");
+        m_OrtSession.reset();
+        m_TimestepShape.clear();
+        m_HasTimestep = false;
         return false;
     }
 }
@@ -932,17 +1037,18 @@ bool DirectMLFRUC::runOrtInference()
             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
 
         // Timestep tensor: single-element FP32 = 0.5, persistent.
-        // Shape [1] is the most common; models expecting a broader
-        // shape would need a follow-up round.
-        std::array<int64_t, 1> tsShape = { 1 };
+        // Use the shape as declared by the model (m_TimestepShape,
+        // resolved at load time). Common cases: [1], [1,1,1,1].
         std::vector<Ort::Value> inputs;
         inputs.reserve(3);
         inputs.emplace_back(std::move(prev));
         inputs.emplace_back(std::move(curr));
         if (m_HasTimestep) {
+            const auto& ts = m_TimestepShape.empty()
+                             ? std::vector<int64_t>{ 1 } : m_TimestepShape;
             Ort::Value t = Ort::Value::CreateTensor(
                 mem, m_OrtAllocTimestep, sizeof(float),
-                tsShape.data(), tsShape.size(),
+                ts.data(), ts.size(),
                 ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
             inputs.emplace_back(std::move(t));
         }
