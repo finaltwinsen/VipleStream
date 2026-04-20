@@ -180,18 +180,38 @@ void main() {
 
     if (!temporalConverged) {
         // I6: diamond convergence check.
+        // D3 iter 2: hard workload cap — prevents worst-case blocks
+        // (texture-less / ambiguous) from consuming the full search.
+        // D3 iter 10: Balanced uses (3, 1) step sequence, Quality
+        // keeps (4, 2, 1), Performance uses (2, 1).
+        const int MAX_CANDIDATES = 16;
+        int candidateCount = 0;
         float prevStepBestCost = bestCost;
-        for (int step = 4; step >= 1; step /= 2) {
+#if QUALITY_LEVEL == 1
+        const int DIAMOND_STEPS[2] = int[2](3, 1);
+        const int DIAMOND_STEP_COUNT = 2;
+#elif QUALITY_LEVEL == 2
+        const int DIAMOND_STEPS[2] = int[2](2, 1);
+        const int DIAMOND_STEP_COUNT = 2;
+#else
+        const int DIAMOND_STEPS[3] = int[3](4, 2, 1);
+        const int DIAMOND_STEP_COUNT = 3;
+#endif
+        for (int ds = 0; ds < DIAMOND_STEP_COUNT; ds++) {
+            int step = DIAMOND_STEPS[ds];
             ivec2 prevBestMV = bestMV;
             for (int i = 0; i < SEARCH_NEIGHBORS; i++) {
+                if (candidateCount >= MAX_CANDIDATES) break;
                 ivec2 candidate = prevBestMV + searchPattern[i] * step;
                 ivec2 refCenter = blockCenter + candidate;
                 if (any(lessThan(refCenter, ivec2(halfSample))) ||
                     any(greaterThanEqual(refCenter, ivec2(int(frameWidth) - halfSample, int(frameHeight) - halfSample))))
                     continue;
                 float cost = computeCensusCost(refCenter, blockCenter, bestCost);
+                candidateCount++;
                 if (cost < bestCost) { bestCost = cost; bestMV = candidate; }
             }
+            if (candidateCount >= MAX_CANDIDATES) break;
             if (bestCost >= prevStepBestCost) break;
             prevStepBestCost = bestCost;
         }
@@ -199,8 +219,12 @@ void main() {
 
 #if ENABLE_SUBPIXEL
     ivec2 bestMV_Q1 = bestMV * 2;
-    // I3: skip sub-pixel when integer match is already confident or MV=0.
+    // I3 + D3 iter 3: skip sub-pixel on marginal matches. Refine only
+    // when the integer match is confident (< 1 hamming/sample) — a
+    // half-pixel correction on a noisy integer match doesn't improve
+    // visually, just burns 4 cost evaluations.
     if (bestCost >= float(SAMPLE_COUNT_SQ) * 0.5 &&
+        bestCost < float(SAMPLE_COUNT_SQ) &&
         (bestMV.x != 0 || bestMV.y != 0)) {
         float bestSubCost = bestCost;
         // I10: sub-pixel limited to 4 cardinal half-pixel offsets
@@ -231,13 +255,21 @@ void main() {
     }
 
 #if ENABLE_TEMPORAL
-    // D2 iter 2: 60/40 current/prev (was 70/30) — heavier prev
-    // weighting reduces per-block MV flicker on small motion.
-    ivec2 smoothedMV_Q1 = ivec2(
-        (bestMV_Q1.x * 6 + prevMV_Q1.x * 4 + 5) / 10,
-        (bestMV_Q1.y * 6 + prevMV_Q1.y * 4 + 5) / 10
-    );
-    smoothedMV_Q1 = clamp(smoothedMV_Q1, ivec2(-96), ivec2(96));
+    // D3 iter 9: zero/zero fast-path. When both inputs are zero the
+    // 60/40 blend is pure waste — majority of static blocks stay at
+    // MV=0 every frame.
+    ivec2 smoothedMV_Q1;
+    if (bestMV_Q1.x == 0 && bestMV_Q1.y == 0 && prevMV_Q1.x == 0 && prevMV_Q1.y == 0) {
+        smoothedMV_Q1 = ivec2(0);
+    } else {
+        // D2 iter 2: 60/40 current/prev (was 70/30) — heavier prev
+        // weighting reduces per-block MV flicker on small motion.
+        smoothedMV_Q1 = ivec2(
+            (bestMV_Q1.x * 6 + prevMV_Q1.x * 4 + 5) / 10,
+            (bestMV_Q1.y * 6 + prevMV_Q1.y * 4 + 5) / 10
+        );
+        smoothedMV_Q1 = clamp(smoothedMV_Q1, ivec2(-96), ivec2(96));
+    }
     int packed = (smoothedMV_Q1.x << 16) | (smoothedMV_Q1.y & 0xFFFF);
 #else
     bestMV_Q1 = clamp(bestMV_Q1, ivec2(-96), ivec2(96));

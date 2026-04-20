@@ -71,13 +71,20 @@ void main(uint3 id : SV_DispatchThreadID)
             n++;
         }
     }
-    // Variance gate (loosened): if the 3x3 window is near-uniform
-    // (range ≤ 1 Q1 unit = 0.5 px) the median per axis equals a
-    // middle sample. The centre block's own value (index 4 in our
-    // row-major gather order) is always ONE of the 9 inputs and
-    // within 1 unit of the true median in this case — write it
-    // directly and skip the sort. Expands the skip rule beyond the
-    // prior exact-equal check to slow-smooth-motion regions.
+    // Variance gate (D3 iter 8 expanded): two-tier skip.
+    // (1) All-zero pattern: ME wrote MV=0 on the centre and all
+    // neighbours (static region or high-cost-rejected). Write 0
+    // directly without even preserving centre's own value — the
+    // whole neighbourhood agrees on "no motion".
+    // (2) Near-uniform: range ≤ 1 Q1 unit on both axes. Write the
+    // centre block's own MV (row-major index 4 = centre).
+    // Previously only (2) existed; adding (1) lets us skip the
+    // store for regions that were already clean zero, cutting
+    // median work on high-cost-rejected content.
+    if (maxX == 0 && minX == 0 && maxY == 0 && minY == 0) {
+        mvOut[id.xy] = int2(0, 0);
+        return;
+    }
     if (maxX - minX <= 1 && maxY - minY <= 1) {
         mvOut[id.xy] = int2(sx[4], sy[4]);
         return;

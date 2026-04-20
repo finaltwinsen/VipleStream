@@ -212,18 +212,46 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
     // improve. Bail once we hit that. Typical win on high-detail
     // content: cuts ~1 of 3 steps on average.
     if (!temporalConverged) {
+    // D3 iter 2: hard workload cap. Count cost evaluations; bail
+    // once we've done MAX_CANDIDATES. Prevents worst-case blocks
+    // (ambiguous texture-less regions) from burning through the
+    // full 24 candidate × SAMPLE_COUNT² sample matrix. The block
+    // that aborts keeps whatever bestMV it found so far — usually
+    // MV=0 or temporal predictor — which is the safest state.
+    const int MAX_CANDIDATES = 16;
+    int candidateCount = 0;
     float prevStepBestCost = bestCost;
-    [loop] for (int step = 4; step >= 1; step /= 2) {
+    // D3 iter 10: Balanced preset uses a 2-step diamond (3, 1) instead
+    // of the 3-step (4, 2, 1) Quality uses. Step-3 covers roughly the
+    // same spatial radius as step-4 but with one fewer iteration
+    // through SEARCH_NEIGHBORS; step-1 still catches near-best-match
+    // refinement. Cuts ~1/3 of diamond cost evaluations on Balanced
+    // while keeping full-quality coverage on Quality.
+#if QUALITY_LEVEL == 1
+    const int DIAMOND_STEPS[2] = { 3, 1 };
+    const int DIAMOND_STEP_COUNT = 2;
+#elif QUALITY_LEVEL == 2
+    const int DIAMOND_STEPS[2] = { 2, 1 };
+    const int DIAMOND_STEP_COUNT = 2;
+#else
+    const int DIAMOND_STEPS[3] = { 4, 2, 1 };
+    const int DIAMOND_STEP_COUNT = 3;
+#endif
+    [loop] for (int si = 0; si < DIAMOND_STEP_COUNT; si++) {
+        int step = DIAMOND_STEPS[si];
         int2 prevBestMV = bestMV;
         [loop] for (int i = 0; i < SEARCH_NEIGHBORS; i++) {
+            if (candidateCount >= MAX_CANDIDATES) break;
             int2 candidate = prevBestMV + searchPattern[i] * step;
             int2 refCenter = blockCenter + candidate;
             if (any(refCenter < int2(halfSample, halfSample)) ||
                 any(refCenter >= int2(frameWidth - halfSample, frameHeight - halfSample)))
                 continue;
             float cost = computeCensusCost(refCenter, blockCenter, bestCost);
+            candidateCount++;
             if (cost < bestCost) { bestCost = cost; bestMV = candidate; }
         }
+        if (candidateCount >= MAX_CANDIDATES) break;
         if (bestCost >= prevStepBestCost) break;
         prevStepBestCost = bestCost;
     }
@@ -238,7 +266,13 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
     // down to 0.5-px, which matters for bad matches, not good ones.
     // Skip the 8 extra cost evaluations. Also skip when MV=0 since
     // sub-pixel refining zero motion is inherently useless.
+    // D3 iter 3: skip sub-pixel on marginal matches. Only refine
+    // when the integer-level match is actually confident (cost is
+    // below 1 hamming per sample on average). A half-pixel
+    // correction on top of a noisy integer match doesn't improve
+    // visually; it just burns 4 cost evaluations.
     if (bestCost >= (float)(SAMPLE_COUNT * SAMPLE_COUNT) * 0.5 &&
+        bestCost < (float)(SAMPLE_COUNT * SAMPLE_COUNT) &&
         any(bestMV != int2(0, 0))) {
         float bestSubCost = bestCost;
         // Sub-pixel refinement limited to the 4 cardinal half-pixel
@@ -283,19 +317,29 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
 
     // --- Temporal smoothing (Quality + Balanced only) ---
 #if ENABLE_TEMPORAL
-    // 60/40 current/prev (was 70/30) — heavier prev weighting
-    // reduces per-block MV flicker on content with small motion
-    // (where the ME cost is noisy). Less current-frame responsive
-    // means slight lag on sudden direction changes, but the lower
-    // temporal noise is more important for reducing shimmer than
-    // instantaneous accuracy.
-    int2 smoothedMV_Q1 = int2(
-        (bestMV_Q1.x * 6 + prevMV_Q1.x * 4 + 5) / 10,
-        (bestMV_Q1.y * 6 + prevMV_Q1.y * 4 + 5) / 10
-    );
-    // Q1 clamp ±96 == ±48 px (Q1 is 2x pixel). Matches warp's
-    // clamp and ME diamond's actual reach.
-    smoothedMV_Q1 = clamp(smoothedMV_Q1, int2(-96, -96), int2(96, 96));
+    // D3 iter 9: skip the 6/4 weighted blend when both inputs are
+    // zero — (0*6 + 0*4 + 5) / 10 always writes 0, the divide and
+    // add are pure waste. On a typical frame the majority of blocks
+    // are static (UI, background) and carry MV=0 through every frame,
+    // so this path fires for most blocks.
+    int2 smoothedMV_Q1;
+    if (all(bestMV_Q1 == int2(0, 0)) && all(prevMV_Q1 == int2(0, 0))) {
+        smoothedMV_Q1 = int2(0, 0);
+    } else {
+        // 60/40 current/prev (was 70/30) — heavier prev weighting
+        // reduces per-block MV flicker on content with small motion
+        // (where the ME cost is noisy). Less current-frame responsive
+        // means slight lag on sudden direction changes, but the lower
+        // temporal noise is more important for reducing shimmer than
+        // instantaneous accuracy.
+        smoothedMV_Q1 = int2(
+            (bestMV_Q1.x * 6 + prevMV_Q1.x * 4 + 5) / 10,
+            (bestMV_Q1.y * 6 + prevMV_Q1.y * 4 + 5) / 10
+        );
+        // Q1 clamp ±96 == ±48 px (Q1 is 2x pixel). Matches warp's
+        // clamp and ME diamond's actual reach.
+        smoothedMV_Q1 = clamp(smoothedMV_Q1, int2(-96, -96), int2(96, 96));
+    }
     motionField[int2(blockX, blockY)] = smoothedMV_Q1;
 #else
     bestMV_Q1 = clamp(bestMV_Q1, int2(-96, -96), int2(96, 96));

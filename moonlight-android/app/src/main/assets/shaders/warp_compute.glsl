@@ -79,18 +79,22 @@ vec2 sampleMV(vec2 pixelPos) {
     vec2 avgMv = 0.25 * (v00 + v10 + v01 + v11);
     float avgMagSq = dot(avgMv, avgMv);
 
-    if (maxDiffSq > EDGE_AWARE_MV_THRESHOLD * EDGE_AWARE_MV_THRESHOLD
-        && maxDiffSq > avgMagSq * 0.25) {
-        // Nearest-neighbor within the 2x2 cell.
-        vec2 pick = (frac_val.x < 0.5)
-            ? ((frac_val.y < 0.5) ? v00 : v01)
-            : ((frac_val.y < 0.5) ? v10 : v11);
-        return pick;
-    }
-
+    // D3 iter 1: branchless edge-aware blend. Compute both the
+    // bilinear result and the nearest-neighbour pick unconditionally,
+    // then blend with a smoothstep over the boundary threshold. This
+    // makes per-pixel ALU uniform regardless of MV field content —
+    // the old branched form caused warp divergence at motion
+    // boundaries (the tail of Balanced's p90 distribution).
     vec2 top = mix(v00, v10, frac_val.x);
     vec2 bot = mix(v01, v11, frac_val.x);
-    return mix(top, bot, frac_val.y);
+    vec2 bilinear = mix(top, bot, frac_val.y);
+    vec2 pick = (frac_val.x < 0.5)
+        ? ((frac_val.y < 0.5) ? v00 : v01)
+        : ((frac_val.y < 0.5) ? v10 : v11);
+    float threshSq = EDGE_AWARE_MV_THRESHOLD * EDGE_AWARE_MV_THRESHOLD;
+    float isBoundary = step(threshSq, maxDiffSq) * step(avgMagSq * 0.25, maxDiffSq);
+    float t = isBoundary * smoothstep(threshSq, threshSq * 2.0, maxDiffSq);
+    return mix(bilinear, pick, t);
 }
 
 #if ENABLE_ADAPTIVE_BLEND
@@ -132,32 +136,43 @@ void main() {
     if (px >= frameWidth || py >= frameHeight)
         return;
 
-    vec2 mv = sampleMV(vec2(float(px), float(py)));
+    // D3 iter 4: hoist pixel pos + frame dims once at top of main —
+    // every downstream use now reads these locals instead of
+    // rebuilding vec2(float(px), float(py)) four times.
+    vec2 pp = vec2(float(px), float(py));
+    vec2 dims = vec2(float(frameWidth), float(frameHeight));
+
+    // D3 iter 7: hoist the curr-frame texel once. Used by the
+    // static-skip path and the out-of-bounds fallback.
+    vec4 sameCurr = texelFetch(currFrame, ivec2(px, py), 0);
+
+    vec2 mv = sampleMV(pp);
     // ±48 px clamp matches the ME shader's actual search radius;
     // tighter than ±64 avoids bilinear MV overshoots on motion
     // boundaries pulling stray pixels from far across the frame.
     mv = clamp(mv, vec2(-48.0), vec2(48.0));
 
-    // Static early-skip: sub-half-pixel MVs give an output identical
-    // to curr frame. Saves ALU + two texture samples on a large
-    // fraction of pixels (UI chrome, backgrounds, idle frames).
-    if (dot(mv, mv) < 0.25) {
-        imageStore(interpFrame, ivec2(px, py),
-                   texelFetch(currFrame, ivec2(px, py), 0));
+    // D3 iter 6: raise static-skip threshold 0.25 -> 1.0 (0.5 -> 1 px).
+    // A ≤1 px half-vector produces a warp that moves pixels by ≤0.5 px
+    // either side of pp; the bilinear texture filter already averages
+    // neighbours at that scale so the interp output is near-identical
+    // to currFrame. Skipping saves the full warp path (two texture
+    // samples + adaptive weight + blend + luma check).
+    if (dot(mv, mv) < 1.0) {
+        imageStore(interpFrame, ivec2(px, py), sameCurr);
         return;
     }
 
-    vec2 dims = vec2(float(frameWidth), float(frameHeight));
-    vec2 prevUV = (vec2(float(px), float(py)) - mv * 0.5 + 0.5) / dims;
-    vec2 currUV = (vec2(float(px), float(py)) + mv * 0.5 + 0.5) / dims;
+    vec2 prevUV = (pp - mv * 0.5 + 0.5) / dims;
+    vec2 currUV = (pp + mv * 0.5 + 0.5) / dims;
     // GL CLAMP_TO_EDGE on the samplers does this for free — drop
     // two ALU ops per pixel.
 
     vec4 prevSample = texture(prevFrame, prevUV);
     vec4 currSample = texture(currFrame, currUV);
 
-    vec2 prevPos = vec2(float(px), float(py)) - mv * 0.5;
-    vec2 currPos = vec2(float(px), float(py)) + mv * 0.5;
+    vec2 prevPos = pp - mv * 0.5;
+    vec2 currPos = pp + mv * 0.5;
     // D2 iter 9: half-pixel inset so bilinear 2x2 footprint never
     // straddles the edge and pulls in border colour.
     vec2 lo = vec2(0.5);
@@ -171,7 +186,7 @@ void main() {
         // Short-circuit adaptive weight when MV is small.
         float weight = (dot(mv, mv) < 4.0)
             ? 0.5
-            : computeAdaptiveWeight(vec2(float(px), float(py)), mv);
+            : computeAdaptiveWeight(pp, mv);
         result = mix(prevSample, currSample, weight);
         // D2 iter 8: apply luma-gap catastrophic check on top of
         // adaptive blend — catches occlusion ghosts that slip past
@@ -193,12 +208,12 @@ void main() {
         float bias = smoothstep(0.05, 0.25, lumaDiff);
         result = mix(mix(prevSample, currSample, 0.5), currSample, bias);
 #endif
-    } else if (prevValid) {
-        result = prevSample;
-    } else if (currValid) {
-        result = currSample;
     } else {
-        result = texelFetch(currFrame, ivec2(px, py), 0);
+        // D3 iter 5: branchless single-valid fallback. The old 3-way
+        // else-if chain divergeed threads on frame borders; a pair of
+        // selects produces uniform ALU.
+        result = prevValid ? prevSample
+               : (currValid ? currSample : sameCurr);
     }
 
     imageStore(interpFrame, ivec2(px, py), result);

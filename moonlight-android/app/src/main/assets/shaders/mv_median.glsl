@@ -64,10 +64,16 @@ void main() {
             n++;
         }
     }
-    // D2 iter 5: variance gate loosened to "range ≤ 1 Q1 unit" —
-    // skips sort for near-uniform neighbourhoods (slow-smooth
-    // motion), not just perfectly static blocks. Writes the centre
-    // block's own value (sx[4]/sy[4] are centre in row-major order).
+    // D3 iter 8: two-tier skip.
+    // (1) All-zero pattern: ME wrote MV=0 on the centre and all
+    // neighbours (static region or high-cost-rejected). Write 0
+    // directly — the whole neighbourhood agrees on "no motion".
+    // (2) Near-uniform: range ≤ 1 Q1 unit on both axes. Write the
+    // centre block's own value (sx[4]/sy[4] are centre in row-major).
+    if (maxX == 0 && minX == 0 && maxY == 0 && minY == 0) {
+        imageStore(mvOut, ivec2(gx, gy), ivec4(0));
+        return;
+    }
     if (maxX - minX <= 1 && maxY - minY <= 1) {
         int packedOut = (sx[4] << 16) | (sy[4] & 0xFFFF);
         imageStore(mvOut, ivec2(gx, gy), ivec4(packedOut, 0, 0, 0));
