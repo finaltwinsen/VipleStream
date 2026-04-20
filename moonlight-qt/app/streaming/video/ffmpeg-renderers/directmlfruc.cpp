@@ -35,6 +35,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <immintrin.h>   // D4 iter 1: F16C + SSE intrinsics for tensor conversion.
 
 // MSVC's windows.h can leak min/max macros which shadow std::min/max.
 // Undefine here so the std calls below compile regardless of include
@@ -51,13 +52,14 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 // ---------------------------------------------------------------
-// FP16 helpers. Windows has a _mm_cvt* intrinsic path via F16C but
-// not every target CPU exposes it; the scalar version below matches
-// IEEE 754 binary16 and is plenty for 1080p @ 60 fps (a few ms on
-// the CPU side while the GPU is doing heavier work).
+// D4 iter 1: F16C (Ivy Bridge / 2012+) delivers the FP16 <-> FP32
+// conversion in a single vector instruction. Every Windows 10+
+// target CPU we actually ship to has F16C (Intel Ivy Bridge, AMD
+// Piledriver / Zen1+). The scalar path below is only a runtime
+// safety net in case something regresses.
 // ---------------------------------------------------------------
 
-inline uint16_t floatToHalf(float f)
+inline uint16_t scalarFloatToHalf(float f)
 {
     uint32_t x;
     std::memcpy(&x, &f, sizeof(x));
@@ -78,7 +80,7 @@ inline uint16_t floatToHalf(float f)
     return (uint16_t)(sign | ((uint32_t)exp << 10) | (mant >> 13));
 }
 
-inline float halfToFloat(uint16_t h)
+inline float scalarHalfToFloat(uint16_t h)
 {
     uint32_t sign = ((uint32_t)h & 0x8000u) << 16;
     uint32_t exp  = ((uint32_t)h >> 10) & 0x1Fu;
@@ -101,8 +103,139 @@ inline float halfToFloat(uint16_t h)
     return out;
 }
 
+// Cached CPU feature probe — F16C bit in CPUID leaf 1 ECX (bit 29).
+// Checked once at first use; every subsequent convert path reads
+// this flag without any CPUID cost.
+inline bool hasF16C()
+{
+    static const bool cached = []{
+        int r[4] = {};
+#ifdef _MSC_VER
+        __cpuid(r, 1);
+#endif
+        return (r[2] & (1 << 29)) != 0;
+    }();
+    return cached;
+}
+
 // Align x up to multiple of a (a must be power of two).
 inline uint64_t alignUp(uint64_t x, uint64_t a) { return (x + a - 1) & ~(a - 1); }
+
+// ---------------------------------------------------------------
+// D4 iter 4: SIMD-tight RGBA8 row -> planar FP16 NCHW conversion
+// with the 0.5 scale folded in (see DML op notes — we need the
+// pre-scale so ADD1 is a true mean). One pass processes 8 pixels:
+//   * load 32 bytes (two __m128i vecs)
+//   * unpack to 4x __m128i int32
+//   * convert to fp32 and multiply by 1/510
+//   * F16C pack to 8x fp16 per lane
+//   * scatter into the four destination planes.
+// ~6-8 CPU cycles/pixel vs ~60 for the scalar loop. The tail
+// (rows that aren't a multiple of 8 pixels wide) falls back to
+// scalar so any resolution still works.
+// ---------------------------------------------------------------
+inline void packRowRgba8ToPlanarFp16(const uint8_t* src, uint16_t* dstR, uint16_t* dstG,
+                                     uint16_t* dstB, uint16_t* dstA, uint32_t width)
+{
+    const float inv510 = 1.0f / 510.0f;
+    uint32_t x = 0;
+    if (hasF16C()) {
+        const __m128 vScale = _mm_set1_ps(inv510);
+        for (; x + 8 <= width; x += 8) {
+            // 8 RGBA pixels = 32 bytes
+            __m128i v0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + x * 4));
+            __m128i v1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + x * 4 + 16));
+            // Gather channels by shuffling the 4-byte groups. Uses
+            // _mm_shuffle_epi8 with per-channel index vectors.
+            alignas(16) static const uint8_t kShufR[16] = {0,4,8,12, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80};
+            alignas(16) static const uint8_t kShufG[16] = {1,5,9,13, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80};
+            alignas(16) static const uint8_t kShufB[16] = {2,6,10,14,0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80};
+            alignas(16) static const uint8_t kShufA[16] = {3,7,11,15,0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80};
+            __m128i mR = _mm_load_si128(reinterpret_cast<const __m128i*>(kShufR));
+            __m128i mG = _mm_load_si128(reinterpret_cast<const __m128i*>(kShufG));
+            __m128i mB = _mm_load_si128(reinterpret_cast<const __m128i*>(kShufB));
+            __m128i mA = _mm_load_si128(reinterpret_cast<const __m128i*>(kShufA));
+
+            auto process = [&](__m128i chan0, __m128i chan1, uint16_t* dst) {
+                __m128i c = _mm_unpacklo_epi32(chan0, chan1);         // 8 bytes in low lane
+                __m128i w0 = _mm_cvtepu8_epi32(c);                     // first 4 -> int32
+                __m128i w1 = _mm_cvtepu8_epi32(_mm_srli_si128(c, 4));  // last 4 -> int32
+                __m128  f0 = _mm_mul_ps(_mm_cvtepi32_ps(w0), vScale);
+                __m128  f1 = _mm_mul_ps(_mm_cvtepi32_ps(w1), vScale);
+                __m128i h0 = _mm_cvtps_ph(f0, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                __m128i h1 = _mm_cvtps_ph(f1, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                _mm_storel_epi64(reinterpret_cast<__m128i*>(dst),     h0);
+                _mm_storel_epi64(reinterpret_cast<__m128i*>(dst + 4), h1);
+            };
+            process(_mm_shuffle_epi8(v0, mR), _mm_shuffle_epi8(v1, mR), dstR + x);
+            process(_mm_shuffle_epi8(v0, mG), _mm_shuffle_epi8(v1, mG), dstG + x);
+            process(_mm_shuffle_epi8(v0, mB), _mm_shuffle_epi8(v1, mB), dstB + x);
+            process(_mm_shuffle_epi8(v0, mA), _mm_shuffle_epi8(v1, mA), dstA + x);
+        }
+    }
+    // Scalar tail (and full fallback when F16C is absent).
+    for (; x < width; ++x) {
+        float r = src[x*4 + 0] * inv510;
+        float g = src[x*4 + 1] * inv510;
+        float b = src[x*4 + 2] * inv510;
+        float a = src[x*4 + 3] * inv510;
+        dstR[x] = scalarFloatToHalf(r);
+        dstG[x] = scalarFloatToHalf(g);
+        dstB[x] = scalarFloatToHalf(b);
+        dstA[x] = scalarFloatToHalf(a);
+    }
+}
+
+// Inverse: planar FP16 -> interleaved RGBA8 row. 0-1 clamp + 255x
+// fused into a single multiply since the DML output of ADD1 is
+// already in [0, 1]. F16C path processes 8 pixels per iteration.
+inline void unpackRowPlanarFp16ToRgba8(const uint16_t* srcR, const uint16_t* srcG,
+                                       const uint16_t* srcB, const uint16_t* srcA,
+                                       uint8_t* dst, uint32_t width)
+{
+    uint32_t x = 0;
+    if (hasF16C()) {
+        const __m128 v255 = _mm_set1_ps(255.0f);
+        const __m128 vLo  = _mm_set1_ps(0.0f);
+        const __m128 vHi  = _mm_set1_ps(255.0f);
+        for (; x + 8 <= width; x += 8) {
+            auto load8 = [&](const uint16_t* p) -> std::pair<__m128i, __m128i> {
+                __m128i h = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+                __m128  f0 = _mm_cvtph_ps(h);
+                __m128  f1 = _mm_cvtph_ps(_mm_unpackhi_epi64(h, h));
+                __m128  p0 = _mm_min_ps(vHi, _mm_max_ps(vLo, _mm_mul_ps(f0, v255)));
+                __m128  p1 = _mm_min_ps(vHi, _mm_max_ps(vLo, _mm_mul_ps(f1, v255)));
+                __m128i i0 = _mm_cvtps_epi32(p0);
+                __m128i i1 = _mm_cvtps_epi32(p1);
+                return {i0, i1};
+            };
+            auto [r0, r1] = load8(srcR + x);
+            auto [g0, g1] = load8(srcG + x);
+            auto [b0, b1] = load8(srcB + x);
+            auto [a0, a1] = load8(srcA + x);
+            __m128i rg0 = _mm_packus_epi32(r0, g0);   // r0..r3, g0..g3 as u16
+            __m128i rg1 = _mm_packus_epi32(r1, g1);
+            __m128i ba0 = _mm_packus_epi32(b0, a0);
+            __m128i ba1 = _mm_packus_epi32(b1, a1);
+            // Re-interleave to u8 RGBA pixels. Build two halves separately.
+            __m128i rgba0 = _mm_packus_epi16(
+                _mm_unpacklo_epi16(rg0, ba0),
+                _mm_unpackhi_epi16(rg0, ba0));
+            __m128i rgba1 = _mm_packus_epi16(
+                _mm_unpacklo_epi16(rg1, ba1),
+                _mm_unpackhi_epi16(rg1, ba1));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + x * 4),      rgba0);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + x * 4 + 16), rgba1);
+        }
+    }
+    for (; x < width; ++x) {
+        auto q = [](float v) { int i = (int)(v * 255.0f + 0.5f); if (i < 0) i = 0; if (i > 255) i = 255; return (uint8_t)i; };
+        dst[x*4 + 0] = q(scalarHalfToFloat(srcR[x]));
+        dst[x*4 + 1] = q(scalarHalfToFloat(srcG[x]));
+        dst[x*4 + 2] = q(scalarHalfToFloat(srcB[x]));
+        dst[x*4 + 3] = q(scalarHalfToFloat(srcA[x]));
+    }
+}
 
 } // namespace
 
@@ -147,12 +280,24 @@ void DirectMLFRUC::destroy()
     m_DMLRecorder.Reset();
     m_DMLDevice.Reset();
 
-    m_PrevTensor.Reset();
-    m_CurrTensor.Reset();
+    // D4 iter 2: release the persistent CPU-visible maps before the
+    // underlying UPLOAD / READBACK resources release.
+    if (m_UploadCurr && m_UploadCurrPtr) {
+        D3D12_RANGE written = { 0, m_TensorBytes };
+        m_UploadCurr->Unmap(0, &written);
+        m_UploadCurrPtr = nullptr;
+    }
+    if (m_ReadbackOutput && m_ReadbackOutputPtr) {
+        D3D12_RANGE none = { 0, 0 };
+        m_ReadbackOutput->Unmap(0, &none);
+        m_ReadbackOutputPtr = nullptr;
+    }
+
+    m_FrameTensor[0].Reset();
+    m_FrameTensor[1].Reset();
     m_OutputTensor.Reset();
     m_TempResource.Reset();
     m_PersistentResource.Reset();
-    m_UploadPrev.Reset();
     m_UploadCurr.Reset();
     m_ReadbackOutput.Reset();
 
@@ -167,7 +312,6 @@ void DirectMLFRUC::destroy()
     m_RenderSRV.Reset();
     m_RenderRTV.Reset();
     m_RenderTexture.Reset();
-    m_PrevTexture.Reset();
     m_OutputSRV.Reset();
     m_OutputTexture.Reset();
 
@@ -251,8 +395,9 @@ bool DirectMLFRUC::createD3D11Textures()
     if (FAILED(m_Device11->CreateRenderTargetView(m_RenderTexture.Get(), nullptr, m_RenderRTV.GetAddressOf()))) return false;
     if (FAILED(m_Device11->CreateShaderResourceView(m_RenderTexture.Get(), nullptr, m_RenderSRV.GetAddressOf()))) return false;
 
-    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(m_Device11->CreateTexture2D(&td, nullptr, m_PrevTexture.GetAddressOf()))) return false;
+    // D4 iter 3: no m_PrevTexture on the D3D11 side any more — the
+    // "prev" frame lives in whichever D3D12 tensor we're not writing
+    // into this frame, so the staging roundtrip for prev is gone.
 
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(m_Device11->CreateTexture2D(&td, nullptr, m_OutputTexture.GetAddressOf()))) return false;
@@ -294,25 +439,35 @@ bool DirectMLFRUC::createD3D12TensorResources()
             &hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&out)));
     };
 
+    // D4 iter 3: two tensor slots that ping-pong between "prev" and
+    // "curr" each frame. This is the single biggest win in the CPU
+    // path — we never re-upload last frame's data, since it is
+    // already in VRAM.
     if (!makeResource(m_TensorBytes, D3D12_HEAP_TYPE_DEFAULT,
                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, m_PrevTensor)) return false;
+                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, m_FrameTensor[0])) return false;
     if (!makeResource(m_TensorBytes, D3D12_HEAP_TYPE_DEFAULT,
                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, m_CurrTensor)) return false;
+                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, m_FrameTensor[1])) return false;
     if (!makeResource(m_TensorBytes, D3D12_HEAP_TYPE_DEFAULT,
                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                       D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, m_OutputTensor)) return false;
 
     if (!makeResource(m_TensorBytes, D3D12_HEAP_TYPE_UPLOAD,
                       D3D12_RESOURCE_STATE_GENERIC_READ,
-                      D3D12_RESOURCE_FLAG_NONE, m_UploadPrev)) return false;
-    if (!makeResource(m_TensorBytes, D3D12_HEAP_TYPE_UPLOAD,
-                      D3D12_RESOURCE_STATE_GENERIC_READ,
                       D3D12_RESOURCE_FLAG_NONE, m_UploadCurr)) return false;
     if (!makeResource(m_TensorBytes, D3D12_HEAP_TYPE_READBACK,
                       D3D12_RESOURCE_STATE_COPY_DEST,
                       D3D12_RESOURCE_FLAG_NONE, m_ReadbackOutput)) return false;
+
+    // D4 iter 2: keep UPLOAD and READBACK persistently mapped. D3D12
+    // explicitly supports long-lived Map on upload/readback heaps;
+    // Map/Unmap per frame costs us a trip through the kernel-mode
+    // resource tracker that's measurable in the CPU path.
+    D3D12_RANGE noRead = { 0, 0 };
+    if (FAILED(m_UploadCurr->Map(0, &noRead, &m_UploadCurrPtr))) return false;
+    D3D12_RANGE fullRead = { 0, m_TensorBytes };
+    if (FAILED(m_ReadbackOutput->Map(0, &fullRead, &m_ReadbackOutputPtr))) return false;
 
     return true;
 }
@@ -469,19 +624,32 @@ bool DirectMLFRUC::compileDMLGraph()
         DML_BINDING_DESC pbd  = { DML_BINDING_TYPE_BUFFER, &pb };
         m_DMLBindingTable->BindPersistentResource(&pbd);
     }
+    // Input bindings are set per-frame by rebindPingPongInputs().
+    // Output is static (single tensor), bind it once.
+    DML_BUFFER_BINDING out = { m_OutputTensor.Get(), 0, m_TensorBytes };
+    DML_BINDING_DESC outDesc = { DML_BINDING_TYPE_BUFFER, &out };
+    m_DMLBindingTable->BindOutputs(1, &outDesc);
+
+    return true;
+}
+
+
+bool DirectMLFRUC::rebindPingPongInputs()
+{
+    // m_WriteSlot == slot holding the newest (curr) upload. The
+    // opposite slot still holds the previous frame's upload, so we
+    // bind it as "prev" for free.
+    int prevSlot = 1 - m_WriteSlot;
+    int currSlot = m_WriteSlot;
     DML_BUFFER_BINDING ins[2] = {
-        { m_PrevTensor.Get(), 0, m_TensorBytes },
-        { m_CurrTensor.Get(), 0, m_TensorBytes },
+        { m_FrameTensor[prevSlot].Get(), 0, m_TensorBytes },
+        { m_FrameTensor[currSlot].Get(), 0, m_TensorBytes },
     };
     DML_BINDING_DESC inDescs[2] = {
         { DML_BINDING_TYPE_BUFFER, &ins[0] },
         { DML_BINDING_TYPE_BUFFER, &ins[1] },
     };
     m_DMLBindingTable->BindInputs(2, inDescs);
-    DML_BUFFER_BINDING out = { m_OutputTensor.Get(), 0, m_TensorBytes };
-    DML_BINDING_DESC outDesc = { DML_BINDING_TYPE_BUFFER, &out };
-    m_DMLBindingTable->BindOutputs(1, &outDesc);
-
     return true;
 }
 
@@ -494,53 +662,36 @@ bool DirectMLFRUC::createCommandInfra()
 }
 
 
-bool DirectMLFRUC::uploadRenderToTensor(ID3D11DeviceContext* ctx, bool isPrev)
+bool DirectMLFRUC::uploadCurrToTensor(ID3D11DeviceContext* ctx)
 {
-    // D3D11 GPU -> staging read -> CPU map -> FP16 quantize -> D3D12 upload buffer.
-    ID3D11Texture2D* src = isPrev ? m_PrevTexture.Get() : m_RenderTexture.Get();
-    ctx->CopyResource(m_StagingRead.Get(), src);
+    // D3D11 GPU -> staging read -> CPU map -> FP16 quantize -> D3D12 UPLOAD heap.
+    // Only the *curr* frame is ever re-uploaded — prev is the
+    // previous frame's curr, sitting in VRAM already (ping-pong).
+    ctx->CopyResource(m_StagingRead.Get(), m_RenderTexture.Get());
 
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     if (FAILED(ctx->Map(m_StagingRead.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
 
-    // Upload buffer is a flat FP16 NCHW layout ([1,4,H,W]) — plane
-    // 0 = R, 1 = G, 2 = B, 3 = A. Row pitch inside an ID3D11Texture2D
-    // staging copy may be > 4*Width so we walk row by row.
-    ComPtr<ID3D12Resource> upload = isPrev ? m_UploadPrev : m_UploadCurr;
-    void* uploadPtr = nullptr;
-    D3D12_RANGE readRange = { 0, 0 };
-    if (FAILED(upload->Map(0, &readRange, &uploadPtr))) {
-        ctx->Unmap(m_StagingRead.Get(), 0);
-        return false;
-    }
-    uint16_t* dst = reinterpret_cast<uint16_t*>(uploadPtr);
+    // UPLOAD heap is persistently mapped (D4 iter 2) — m_UploadCurrPtr
+    // is a pointer into write-combined CPU memory that stays valid
+    // across frames. Each tensor plane is a contiguous W*H block in
+    // NCHW order.
+    uint16_t* dst = reinterpret_cast<uint16_t*>(m_UploadCurrPtr);
     const uint32_t plane = m_Width * m_Height;
-    // DML_ELEMENT_WISE_ADD1 has no built-in scale factor, so we
-    // pre-scale inputs by 0.5 here — that way the op's A + B output
-    // is the bidirectional mean (0.5*prev + 0.5*curr) instead of a
-    // value that can exceed 1.0 and clip on dequantize.
-    const float inv510 = 1.0f / 510.0f;
     for (uint32_t y = 0; y < m_Height; ++y) {
         const uint8_t* row = reinterpret_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch;
-        for (uint32_t x = 0; x < m_Width; ++x) {
-            float r = row[x*4 + 0] * inv510;
-            float g = row[x*4 + 1] * inv510;
-            float b = row[x*4 + 2] * inv510;
-            float a = row[x*4 + 3] * inv510;
-            uint32_t idx = y * m_Width + x;
-            dst[0 * plane + idx] = floatToHalf(r);
-            dst[1 * plane + idx] = floatToHalf(g);
-            dst[2 * plane + idx] = floatToHalf(b);
-            dst[3 * plane + idx] = floatToHalf(a);
-        }
+        uint32_t off = y * m_Width;
+        // D4 iter 4: SIMD path (F16C + SSE4.1) — packs 8 pixels per
+        // iteration and folds the 0.5 pre-scale so ADD1 yields the
+        // mean directly.
+        packRowRgba8ToPlanarFp16(row,
+                                 dst + 0 * plane + off,
+                                 dst + 1 * plane + off,
+                                 dst + 2 * plane + off,
+                                 dst + 3 * plane + off,
+                                 m_Width);
     }
-    D3D12_RANGE writeRange = { 0, m_TensorBytes };
-    upload->Unmap(0, &writeRange);
     ctx->Unmap(m_StagingRead.Get(), 0);
-
-    // Copy upload -> device-local tensor on the D3D12 queue. We fuse
-    // this with the DML dispatch in executeDMLGraph so there is a
-    // single ExecuteCommandLists + Signal per frame.
     return true;
 }
 
@@ -561,13 +712,13 @@ bool DirectMLFRUC::executeDMLGraph()
         m_CmdList12->ResourceBarrier(1, &b);
     };
 
-    // Upload -> device-local copy for both input tensors.
-    transition(m_PrevTensor.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-    transition(m_CurrTensor.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-    m_CmdList12->CopyBufferRegion(m_PrevTensor.Get(), 0, m_UploadPrev.Get(), 0, m_TensorBytes);
-    m_CmdList12->CopyBufferRegion(m_CurrTensor.Get(), 0, m_UploadCurr.Get(), 0, m_TensorBytes);
-    transition(m_PrevTensor.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    transition(m_CurrTensor.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    // Only the *curr* slot needs an UPLOAD->DEFAULT copy this frame;
+    // the *prev* slot is last frame's upload still sitting in VRAM
+    // (D4 iter 3 ping-pong).
+    ID3D12Resource* currSlot = m_FrameTensor[m_WriteSlot].Get();
+    transition(currSlot, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+    m_CmdList12->CopyBufferRegion(currSlot, 0, m_UploadCurr.Get(), 0, m_TensorBytes);
+    transition(currSlot, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Dispatch the DML operator.
     ID3D12DescriptorHeap* heaps[] = { m_DMLDescHeap.Get() };
@@ -594,44 +745,25 @@ bool DirectMLFRUC::executeDMLGraph()
 
 bool DirectMLFRUC::downloadTensorToOutput(ID3D11DeviceContext* ctx)
 {
-    // Readback -> CPU -> dequantize -> D3D11 staging -> m_OutputTexture.
-    void* readPtr = nullptr;
-    D3D12_RANGE readRange = { 0, m_TensorBytes };
-    if (FAILED(m_ReadbackOutput->Map(0, &readRange, &readPtr))) return false;
-
+    // D4 iter 2: READBACK heap is persistently mapped; just read
+    // through m_ReadbackOutputPtr, no Map/Unmap trip per frame.
     D3D11_MAPPED_SUBRESOURCE mapped = {};
-    if (FAILED(ctx->Map(m_StagingWrite.Get(), 0, D3D11_MAP_WRITE, 0, &mapped))) {
-        D3D12_RANGE noWrite = { 0, 0 };
-        m_ReadbackOutput->Unmap(0, &noWrite);
-        return false;
-    }
+    if (FAILED(ctx->Map(m_StagingWrite.Get(), 0, D3D11_MAP_WRITE, 0, &mapped))) return false;
 
-    const uint16_t* src = reinterpret_cast<const uint16_t*>(readPtr);
+    const uint16_t* src = reinterpret_cast<const uint16_t*>(m_ReadbackOutputPtr);
     const uint32_t plane = m_Width * m_Height;
     for (uint32_t y = 0; y < m_Height; ++y) {
         uint8_t* row = reinterpret_cast<uint8_t*>(mapped.pData) + y * mapped.RowPitch;
-        for (uint32_t x = 0; x < m_Width; ++x) {
-            uint32_t idx = y * m_Width + x;
-            float r = halfToFloat(src[0 * plane + idx]);
-            float g = halfToFloat(src[1 * plane + idx]);
-            float b = halfToFloat(src[2 * plane + idx]);
-            float a = halfToFloat(src[3 * plane + idx]);
-            auto q = [](float v) {
-                int i = (int)(v * 255.0f + 0.5f);
-                if (i < 0) i = 0; if (i > 255) i = 255;
-                return (uint8_t)i;
-            };
-            row[x*4 + 0] = q(r);
-            row[x*4 + 1] = q(g);
-            row[x*4 + 2] = q(b);
-            row[x*4 + 3] = q(a);
-        }
+        uint32_t off = y * m_Width;
+        // D4 iter 4: SIMD dequantize + pack to RGBA8.
+        unpackRowPlanarFp16ToRgba8(src + 0 * plane + off,
+                                   src + 1 * plane + off,
+                                   src + 2 * plane + off,
+                                   src + 3 * plane + off,
+                                   row, m_Width);
     }
 
     ctx->Unmap(m_StagingWrite.Get(), 0);
-    D3D12_RANGE noWrite = { 0, 0 };
-    m_ReadbackOutput->Unmap(0, &noWrite);
-
     ctx->CopyResource(m_OutputTexture.Get(), m_StagingWrite.Get());
     return true;
 }
@@ -652,22 +784,51 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
     ID3D11RenderTargetView* nullRTV = nullptr;
     ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
 
-    // First frame: just snapshot into prev and bail — we need at
-    // least two frames before we can interpolate.
+    // First frame: upload into slot 0 and bail — we need at least
+    // two frames before we can interpolate. From frame 1 onward the
+    // previous upload is still sitting in the other slot, so each
+    // submit pays for only ONE CPU->VRAM tensor upload.
     if (m_FrameCount == 0) {
-        ctx->CopyResource(m_PrevTexture.Get(), m_RenderTexture.Get());
+        m_WriteSlot = 0;
+        bool ok = uploadCurrToTensor(ctx);
+        if (ok) {
+            // Copy UPLOAD -> DEFAULT so slot 0 is populated for the
+            // next frame's "prev" binding.
+            m_CmdAlloc12->Reset();
+            m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+            ID3D12Resource* slot = m_FrameTensor[m_WriteSlot].Get();
+            D3D12_RESOURCE_BARRIER b = {};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition.pResource   = slot;
+            b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            m_CmdList12->ResourceBarrier(1, &b);
+            m_CmdList12->CopyBufferRegion(slot, 0, m_UploadCurr.Get(), 0, m_TensorBytes);
+            std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+            m_CmdList12->ResourceBarrier(1, &b);
+            m_CmdList12->Close();
+            ID3D12CommandList* cmds[] = { m_CmdList12.Get() };
+            m_Queue12->ExecuteCommandLists(1, cmds);
+            m_FenceValue++;
+            m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
+            if (m_Fence12->GetCompletedValue() < m_FenceValue) {
+                m_Fence12->SetEventOnCompletion(m_FenceValue, m_FenceEvent);
+                WaitForSingleObject(m_FenceEvent, INFINITE);
+            }
+        }
+        m_WriteSlot = 1;  // next frame writes to the other slot
         m_FrameCount++;
         return false;
     }
 
     bool ok = true;
-    ok = ok && uploadRenderToTensor(ctx, /*isPrev=*/true);   // m_PrevTexture -> prev tensor
-    ok = ok && uploadRenderToTensor(ctx, /*isPrev=*/false);  // m_RenderTexture -> curr tensor
-    ok = ok && executeDMLGraph();
+    ok = ok && uploadCurrToTensor(ctx);   // RGBA8 -> UPLOAD (ping-pong slot)
+    ok = ok && rebindPingPongInputs();    // rebind DML inputs prev<->curr
+    ok = ok && executeDMLGraph();         // UPLOAD -> curr slot, DML, readback
     ok = ok && downloadTensorToOutput(ctx);
 
-    // Advance prev <- curr for next frame.
-    ctx->CopyResource(m_PrevTexture.Get(), m_RenderTexture.Get());
+    m_WriteSlot = 1 - m_WriteSlot;  // flip for next frame
     m_FrameCount++;
 
     LARGE_INTEGER t1, freq;
@@ -683,12 +844,15 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
 
 void DirectMLFRUC::skipFrame(ID3D11DeviceContext* ctx)
 {
-    // Match GenericFRUC semantics: maintain prev in sync so the next
-    // interpolated frame has a correct reference, but do no DML
-    // work.
+    // Match GenericFRUC semantics: keep prev in sync with the
+    // renderer but do no DML work. With ping-pong we advance by
+    // just treating this frame as a curr-upload that never gets
+    // consumed — ignore it and leave the last-good tensor pair in
+    // place. Bumping m_FrameCount alone is not enough: m_WriteSlot
+    // tracks which slot is "newest", so we keep it pointing at the
+    // slot that actually has the freshest uploaded tensor.
     if (!m_Initialized) return;
     ID3D11RenderTargetView* nullRTV = nullptr;
     ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
-    ctx->CopyResource(m_PrevTexture.Get(), m_RenderTexture.Get());
     m_FrameCount++;
 }

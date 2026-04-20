@@ -73,11 +73,18 @@ private:
     bool createCommandInfra();
 
     // --- per-frame helpers ---
-    // Stage render-texture into prev-tensor buffer; returns false on
-    // any copy / map failure (caller must skip interpolation).
-    bool uploadRenderToTensor(ID3D11DeviceContext* ctx, bool isPrev);
+    // Upload the current render texture into the "curr" tensor
+    // slot. The prev slot is satisfied by ping-ponging the two
+    // tensors between frames (D4 iter 3) — no re-upload needed.
+    bool uploadCurrToTensor(ID3D11DeviceContext* ctx);
     bool executeDMLGraph();
     bool downloadTensorToOutput(ID3D11DeviceContext* ctx);
+
+    // Rebuild the binding table so the "prev" input points at the
+    // tensor that held last frame's "curr" data, and the "curr"
+    // input points at the empty slot that uploadCurrToTensor fills.
+    // Skips re-uploading data that the GPU already has.
+    bool rebindPingPongInputs();
 
     // --- members ---
     bool m_Initialized = false;
@@ -118,19 +125,29 @@ private:
     CP<IDMLBindingTable>           m_DMLBindingTable;
     CP<ID3D12DescriptorHeap>       m_DMLDescHeap;
 
-    // Tensor buffers (prev / curr / output) and the DML persistent +
-    // temporary resources. All are D3D12 committed resources in
-    // DEFAULT heap; uploads/readbacks go through explicit upload /
-    // readback resources below.
-    CP<ID3D12Resource> m_PrevTensor;
-    CP<ID3D12Resource> m_CurrTensor;
+    // Tensor buffers — two "frame" slots that ping-pong between
+    // "prev" and "curr" bindings every frame (D4 iter 3). Saves a
+    // full-frame CPU upload per submit: what was "curr" last frame
+    // is already sitting in VRAM, we just flip the binding indices.
+    CP<ID3D12Resource> m_FrameTensor[2];  // [m_WriteSlot] = curr, [1 - m_WriteSlot] = prev
     CP<ID3D12Resource> m_OutputTensor;
     CP<ID3D12Resource> m_TempResource;
     CP<ID3D12Resource> m_PersistentResource;
 
-    CP<ID3D12Resource> m_UploadPrev;    // UPLOAD heap, maps to CPU
-    CP<ID3D12Resource> m_UploadCurr;
+    CP<ID3D12Resource> m_UploadCurr;       // UPLOAD heap; only one
+                                           // upload per frame now.
     CP<ID3D12Resource> m_ReadbackOutput;
+
+    // D4 iter 2: UPLOAD/READBACK resources stay persistently mapped
+    // between frames. Map/Unmap is non-trivial on write-combined
+    // memory; doing it per-frame shows up as measurable overhead in
+    // the CPU path. The pointers are valid until destroy() calls
+    // Unmap.
+    void*  m_UploadCurrPtr    = nullptr;
+    void*  m_ReadbackOutputPtr = nullptr;
+
+    int m_WriteSlot = 0;  // which index of m_FrameTensor holds the
+                          // "curr" (newest) upload.
 
     // Tensor sizing — RGBA FP16, NCHW layout ([1, 4, H, W]). Using
     // FP16 halves the bandwidth and matches how most shipped FRUC
