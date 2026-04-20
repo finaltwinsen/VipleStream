@@ -213,19 +213,31 @@ inline void unpackRowPlanarFp16ToRgba8(const uint16_t* srcR, const uint16_t* src
             auto [g0, g1] = load8(srcG + x);
             auto [b0, b1] = load8(srcB + x);
             auto [a0, a1] = load8(srcA + x);
-            __m128i rg0 = _mm_packus_epi32(r0, g0);   // r0..r3, g0..g3 as u16
+            // Interleave to RGBA u8 bytes. The shuffle below needs
+            // one intermediate step that the v1.1.144 version was
+            // missing, which produced [R,B,R,B,R,B,R,B,G,A,G,A,G,A,
+            // G,A] on output and showed up as green stripe flicker
+            // on the user's stream.
+            //   rg = [R0..R3, G0..G3] u16
+            //   ba = [B0..B3, A0..A3] u16
+            //   rb = unpacklo(rg,ba)  = [R0,B0, R1,B1, R2,B2, R3,B3]
+            //   ga = unpackhi(rg,ba)  = [G0,A0, G1,A1, G2,A2, G3,A3]
+            //   lo = unpacklo(rb,ga)  = [R0,G0,B0,A0, R1,G1,B1,A1]
+            //   hi = unpackhi(rb,ga)  = [R2,G2,B2,A2, R3,G3,B3,A3]
+            // then packus u16->u8 gives the 16 RGBA bytes in order.
+            auto build4 = [](__m128i rg, __m128i ba) {
+                __m128i rb = _mm_unpacklo_epi16(rg, ba);
+                __m128i ga = _mm_unpackhi_epi16(rg, ba);
+                __m128i lo = _mm_unpacklo_epi16(rb, ga);
+                __m128i hi = _mm_unpackhi_epi16(rb, ga);
+                return _mm_packus_epi16(lo, hi);
+            };
+            __m128i rg0 = _mm_packus_epi32(r0, g0);
             __m128i rg1 = _mm_packus_epi32(r1, g1);
             __m128i ba0 = _mm_packus_epi32(b0, a0);
             __m128i ba1 = _mm_packus_epi32(b1, a1);
-            // Re-interleave to u8 RGBA pixels. Build two halves separately.
-            __m128i rgba0 = _mm_packus_epi16(
-                _mm_unpacklo_epi16(rg0, ba0),
-                _mm_unpackhi_epi16(rg0, ba0));
-            __m128i rgba1 = _mm_packus_epi16(
-                _mm_unpacklo_epi16(rg1, ba1),
-                _mm_unpackhi_epi16(rg1, ba1));
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + x * 4),      rgba0);
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + x * 4 + 16), rgba1);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + x * 4),      build4(rg0, ba0));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + x * 4 + 16), build4(rg1, ba1));
         }
     }
     for (; x < width; ++x) {
