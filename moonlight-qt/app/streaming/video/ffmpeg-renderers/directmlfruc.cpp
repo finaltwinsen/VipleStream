@@ -515,14 +515,18 @@ bool DirectMLFRUC::uploadRenderToTensor(ID3D11DeviceContext* ctx, bool isPrev)
     }
     uint16_t* dst = reinterpret_cast<uint16_t*>(uploadPtr);
     const uint32_t plane = m_Width * m_Height;
-    const float inv255 = 1.0f / 255.0f;
+    // DML_ELEMENT_WISE_ADD1 has no built-in scale factor, so we
+    // pre-scale inputs by 0.5 here — that way the op's A + B output
+    // is the bidirectional mean (0.5*prev + 0.5*curr) instead of a
+    // value that can exceed 1.0 and clip on dequantize.
+    const float inv510 = 1.0f / 510.0f;
     for (uint32_t y = 0; y < m_Height; ++y) {
         const uint8_t* row = reinterpret_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch;
         for (uint32_t x = 0; x < m_Width; ++x) {
-            float r = row[x*4 + 0] * inv255;
-            float g = row[x*4 + 1] * inv255;
-            float b = row[x*4 + 2] * inv255;
-            float a = row[x*4 + 3] * inv255;
+            float r = row[x*4 + 0] * inv510;
+            float g = row[x*4 + 1] * inv510;
+            float b = row[x*4 + 2] * inv510;
+            float a = row[x*4 + 3] * inv510;
             uint32_t idx = y * m_Width + x;
             dst[0 * plane + idx] = floatToHalf(r);
             dst[1 * plane + idx] = floatToHalf(g);
@@ -639,6 +643,15 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
 
     const LARGE_INTEGER t0 = [] { LARGE_INTEGER x; QueryPerformanceCounter(&x); return x; }();
 
+    // CRITICAL: the renderer has m_RenderRTV still bound as output
+    // when it calls submitFrame. D3D11 silently turns any SRV /
+    // CopyResource access on a resource that is *also* currently
+    // bound as an RTV into a no-op, which shows as flicker (black
+    // interp frame alternating with the real frame). Mirrors the
+    // same unbind GenericFRUC does at the top of its submitFrame.
+    ID3D11RenderTargetView* nullRTV = nullptr;
+    ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
+
     // First frame: just snapshot into prev and bail — we need at
     // least two frames before we can interpolate.
     if (m_FrameCount == 0) {
@@ -674,6 +687,8 @@ void DirectMLFRUC::skipFrame(ID3D11DeviceContext* ctx)
     // interpolated frame has a correct reference, but do no DML
     // work.
     if (!m_Initialized) return;
+    ID3D11RenderTargetView* nullRTV = nullptr;
+    ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
     ctx->CopyResource(m_PrevTexture.Get(), m_RenderTexture.Get());
     m_FrameCount++;
 }
