@@ -344,17 +344,78 @@ bool DirectMLFRUC::compileDMLGraph()
     bufDesc.TotalTensorSizeInBytes = m_TensorBytes;
 
     DML_TENSOR_DESC td = { DML_TENSOR_TYPE_BUFFER, &bufDesc };
+
+    // Node 0: ADD1(A, B) — bidirectional mean (pack shader pre-
+    // scaled inputs by 0.5, so ADD1 yields the mean).
     DML_ELEMENT_WISE_ADD1_OPERATOR_DESC addDesc = {};
     addDesc.ATensor      = &td;
     addDesc.BTensor      = &td;
     addDesc.OutputTensor = &td;
-    DML_OPERATOR_DESC opDesc = { DML_OPERATOR_ELEMENT_WISE_ADD1, &addDesc };
+    DML_OPERATOR_DESC addOpDesc = { DML_OPERATOR_ELEMENT_WISE_ADD1, &addDesc };
+    ComPtr<IDMLOperator> addOp;
+    if (FAILED(m_DMLDevice->CreateOperator(&addOpDesc, IID_PPV_ARGS(&addOp)))) return false;
 
-    ComPtr<IDMLOperator> op;
-    if (FAILED(m_DMLDevice->CreateOperator(&opDesc, IID_PPV_ARGS(&op)))) return false;
-    if (FAILED(m_DMLDevice->CompileOperator(op.Get(),
+    // Node 1: CLIP(x, 0, 1) — clamps FP16 rounding drift and any
+    // future graph ops' overshoot. Cheap no-op in most pixels, but
+    // kills occasional hot/black artefacts at the tails.
+    DML_ELEMENT_WISE_CLIP_OPERATOR_DESC clipDesc = {};
+    clipDesc.InputTensor  = &td;
+    clipDesc.OutputTensor = &td;
+    clipDesc.Min          = 0.0f;
+    clipDesc.Max          = 1.0f;
+    DML_OPERATOR_DESC clipOpDesc = { DML_OPERATOR_ELEMENT_WISE_CLIP, &clipDesc };
+    ComPtr<IDMLOperator> clipOp;
+    if (FAILED(m_DMLDevice->CreateOperator(&clipOpDesc, IID_PPV_ARGS(&clipOp)))) return false;
+
+    // Assemble into a 2-op DML graph. Moving to CompileGraph is
+    // what unlocks richer future graphs without another refactor —
+    // more layers, convolutions, or a full ONNX-derived model
+    // (TODO(directml:model)) drop in by adding nodes + edges here.
+    DML_OPERATOR_GRAPH_NODE_DESC addNode  = { addOp.Get(),  "add"  };
+    DML_OPERATOR_GRAPH_NODE_DESC clipNode = { clipOp.Get(), "clip" };
+    DML_GRAPH_NODE_DESC nodes[2] = {
+        { DML_GRAPH_NODE_TYPE_OPERATOR, &addNode  },
+        { DML_GRAPH_NODE_TYPE_OPERATOR, &clipNode },
+    };
+
+    DML_INPUT_GRAPH_EDGE_DESC inEdges[2] = {
+        { 0u, 0u, 0u, "A" },   // graph input 0 -> add.A
+        { 1u, 0u, 1u, "B" },   // graph input 1 -> add.B
+    };
+    DML_GRAPH_EDGE_DESC inEdgeDescs[2] = {
+        { DML_GRAPH_EDGE_TYPE_INPUT, &inEdges[0] },
+        { DML_GRAPH_EDGE_TYPE_INPUT, &inEdges[1] },
+    };
+    DML_INTERMEDIATE_GRAPH_EDGE_DESC midEdge = { 0u, 0u, 1u, 0u, "add->clip" };
+    DML_GRAPH_EDGE_DESC midEdgeDesc = { DML_GRAPH_EDGE_TYPE_INTERMEDIATE, &midEdge };
+    DML_OUTPUT_GRAPH_EDGE_DESC outEdge = { 1u, 0u, 0u, "clip->out" };
+    DML_GRAPH_EDGE_DESC outEdgeDesc = { DML_GRAPH_EDGE_TYPE_OUTPUT, &outEdge };
+
+    DML_GRAPH_DESC gd = {};
+    gd.InputCount            = 2;
+    gd.OutputCount           = 1;
+    gd.NodeCount             = 2;
+    gd.Nodes                 = nodes;
+    gd.InputEdgeCount        = 2;
+    gd.InputEdges            = inEdgeDescs;
+    gd.OutputEdgeCount       = 1;
+    gd.OutputEdges           = &outEdgeDesc;
+    gd.IntermediateEdgeCount = 1;
+    gd.IntermediateEdges     = &midEdgeDesc;
+
+    ComPtr<IDMLDevice1> device1;
+    if (FAILED(m_DMLDevice.As(&device1))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: IDMLDevice1 not available (need DML 1.1 / Win10 2004+)");
+        return false;
+    }
+    if (FAILED(device1->CompileGraph(&gd,
             DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION,
-            IID_PPV_ARGS(&m_DMLCompiledOp)))) return false;
+            IID_PPV_ARGS(&m_DMLCompiledOp)))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CompileGraph failed (add1 + clip)");
+        return false;
+    }
 
     DML_BINDING_PROPERTIES execProps = m_DMLCompiledOp->GetBindingProperties();
 
