@@ -613,4 +613,21 @@ macx {
 }
 
 VERSION = "$$cat(version.txt)"
-DEFINES += VERSION_STR=\\\"$$cat(version.txt)\\\"
+
+# Generate version_string.h from version.txt via QMAKE_SUBSTITUTES.
+#
+# Two qmake quirks we work around here:
+#   1. QMAKE_SUBSTITUTES strips outer "..." that surrounds a $${VAR}
+#      placeholder in the template, so naive `"$${VAR}"` ends up as
+#      the bare value with no quotes. We pre-bake the quotes into the
+#      variable value itself ("\"…\""), then place the variable
+#      unsurrounded in the template so qmake leaves it alone.
+#   2. The extended-form ".input/.output = ..." silently falls back to
+#      writing into PWD on this qmake build. Use the simple form and
+#      gitignore the generated file (see .gitignore at repo root).
+#
+# See version_string.h.in for why this generated header exists at all
+# (command-line -D macros do not retrigger nmake recompiles; generated
+# headers do).
+VERSION_STR_VALUE = "\"$$cat(version.txt)\""
+QMAKE_SUBSTITUTES += version_string.h.in

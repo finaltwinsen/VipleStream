@@ -92,12 +92,11 @@ echo [M-2/3] Building moonlight-qt...
 set "PATH=%QT_DIR%\bin;%PATH%"
 cd /d "%SRC%"
 
-:: Force qmake regeneration (version.txt changed but .pro didn't)
+:: Touch app.pro so qmake re-runs and regenerates version_string.h from
+:: the current version.txt.  The generated header is a real build dep,
+:: so nmake recompiles only the files that #include it (no blanket
+:: .obj deletes needed, unlike the old -DVERSION_STR macro path).
 copy /b "%SRC%\app\app.pro"+,, "%SRC%\app\app.pro" >nul 2>&1
-
-:: Force rebuild of files that embed VERSION_STR (qmake can't track version.txt as dep)
-del /f "%SRC%\app\release\systemproperties.obj" >nul 2>&1
-del /f "%SRC%\app\release\main.obj" >nul 2>&1
 
 qmake moonlight-qt.pro CONFIG+=release
 if errorlevel 1 (

@@ -1,0 +1,9 @@
+/* Auto-generated from app/version.txt via qmake QMAKE_SUBSTITUTES.
+   Do NOT edit directly; changes are overwritten on every qmake run. */
+
+#ifndef VERSION_STRING_H
+#define VERSION_STRING_H
+
+#define VERSION_STR $${VERSION_STR_VALUE}
+
+#endif

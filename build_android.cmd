@@ -67,24 +67,19 @@ set "PATH=%JAVA_HOME%\bin;%PATH%"
 :: -Psdk.dir avoids needing to write local.properties (which is gitignored).
 set "GRADLE_USER_PROPS=-Psdk.dir=%ANDROID_HOME%"
 
-:: -- 1. Read shared version.json and sync into app/build.gradle --
-echo [1/4] Syncing version...
-for /f "delims=" %%V in ('powershell -NoProfile -Command ^
-    "$j=Get-Content '%ROOT%\version.json' -Raw | ConvertFrom-Json; '{0}.{1}.{2}' -f $j.major,$j.minor,$j.patch"') do (
+:: -- 1. Propagate shared version.json into all three targets, including
+::     moonlight-android\app\build.gradle.  Uses the central propagator
+::     in scripts\version.ps1 so the Sunshine / moonlight-qt / Android
+::     versions can never drift apart here.
+echo [1/4] Syncing version (propagate from version.json)...
+for /f "delims=" %%V in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\version.ps1" propagate') do (
     set "VER=%%V"
 )
-for /f "delims=" %%C in ('powershell -NoProfile -Command ^
-    "$j=Get-Content '%ROOT%\version.json' -Raw | ConvertFrom-Json; [int]$j.major*10000 + [int]$j.minor*1000 + [int]$j.patch"') do (
-    set "VCODE=%%C"
-)
-echo   versionName = %VER%   versionCode = %VCODE%
-
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$p='%SRC%\app\build.gradle'; $c=Get-Content $p -Raw -Encoding UTF8; $c=[regex]::Replace($c,'versionName\s+\"[^\"]+\"','versionName \"%VER%\"'); $c=[regex]::Replace($c,'versionCode\s*=\s*\d+','versionCode = %VCODE%'); [System.IO.File]::WriteAllText($p, $c, (New-Object System.Text.UTF8Encoding $false))"
-if errorlevel 1 (
-    echo [ERROR] Failed to patch build.gradle
+if not defined VER (
+    echo [ERROR] Failed to propagate version
     exit /b 1
 )
+echo   versionName = %VER%
 
 :: -- 2. Run gradle assembleDebug --
 echo [2/4] Running gradlew assembleDebug...

@@ -1,29 +1,31 @@
 // VipleStream: DirectML-backed frame interpolation backend.
 //
-// Architecture (D5 — zero-copy):
+// Architecture (D6 — D3D11-texture-share):
 //
-// Tensor buffers live in shared VRAM heaps created on D3D12 with
-// D3D12_HEAP_FLAG_SHARED; the same resources are opened on the
-// renderer's D3D11 device via ID3D11Device1::OpenSharedResource1.
-// Pack / unpack between the RGBA8 render texture and the planar
-// FP16 tensor happens entirely on the GPU via a pair of D3D11
-// compute shaders (d3d11_dml_pack_rgba8_fp16 / _unpack). A single
-// shared ID3D12Fence is signalled/waited across both APIs so the
-// D3D11 immediate context and the D3D12 DML queue serialise
-// correctly without a CPU-side WaitForSingleObject each frame.
+// D3D11 owns the render and output textures (created with
+// D3D11_RESOURCE_MISC_SHARED_NTHANDLE).  D3D12 opens them via
+// IDXGIResource1::CreateSharedHandle + ID3D12Device::OpenSharedHandle —
+// the well-supported direction for cross-API texture sharing.
+// D3D12 runs pack and unpack compute shaders on its own queue using
+// those shared textures and private (non-shared) tensor buffers.
+// A cross-API fence serialises D3D11 rendering with D3D12 FRUC work.
 //
-// The whole per-frame CPU path is now "bind, dispatch, signal,
-// wait, dispatch, signal" — no Map, no staging textures, no SIMD
-// quantise loops, no pageable memory in the hot path.
+// Per-frame sequence (frame > 0):
 //
-// TODO(directml:model): the DML graph itself remains the trivial
-// DML_ELEMENT_WISE_ADD1 bidirectional mean; with interop cost now
-// close to zero, the next round swaps this for a compiled ONNX
-// FRUC model (RIFE v4 lite is the first candidate).
+//   D3D11:  Unbind RTV, Signal fence=N
+//   D3D12:  Wait fence=N
+//              Pack CS     : shared render tex  → FrameTensor[slot]
+//              DML / ORT   : FrameTensor        → OutputTensor
+//              Unpack CS   : OutputTensor       → shared output tex
+//            Signal fence=N+1
+//   D3D11:  Wait fence=N+1  (GPU-side, CPU not blocked)
+//           Blit shared output texture to screen
 //
-// Requires Windows 10 1903+ for system DirectML.dll, D3D12 on the
-// render adapter, and D3D11.3+ interfaces (ID3D11Device5,
-// ID3D11DeviceContext4) which ship with Windows 10 1703+.
+// No D3D12→D3D11 buffer sharing (unsupported on many drivers),
+// no CPU staging, no SIMD loops, no Map/Unmap per frame.
+//
+// Requires Windows 10 1703+ (ID3D11Device5 / ID3D11DeviceContext4
+// for the cross-API fence) and a D3D12-capable adapter.
 
 #pragma once
 
@@ -41,11 +43,10 @@
 
 #include "ifrucbackend.h"
 
-// ONNX Runtime forward-declare wrappers (full includes live only in
-// directmlfruc.cpp so the rest of the project doesn't have to
-// ingest the ORT headers). The pointer-to-impl keeps the TU count
-// and rebuild cost down.
-namespace Ort { class Env; class Session; }
+// ONNX Runtime declares Env/Session as `struct` in its own public
+// header; match that tag so MSVC doesn't emit C4099 warnings when
+// onnxruntime_cxx_api.h is later included in the .cpp.
+namespace Ort { struct Env; struct Session; }
 struct OrtDmlApi;
 
 class DirectMLFRUC : public IFRUCBackend {
@@ -76,138 +77,136 @@ public:
 private:
     template<class T> using CP = Microsoft::WRL::ComPtr<T>;
 
+    // Init helpers — called in order from initialize().
     bool createD3D12Device();
     bool createDMLDevice();
     bool createSharedFence();
-    bool createD3D11Textures();
-    bool createSharedTensorBuffers();
-    bool createD3D11Views();
-    bool loadComputeShaders();
-    bool compileDMLGraph();
-    // Optional: try to load an ONNX FRUC model from the data dir.
-    // Returns true if a model was loaded and m_UseOrt is now true;
-    // false (without logging an error) if no model file exists —
-    // that's the normal path for users who didn't opt in.
-    bool tryLoadOnnxModel();
+    bool createTensorBuffers();           // private D3D12 buffers (no sharing)
+    bool createD3D11Textures();           // D3D11 textures with SHARED_NTHANDLE
+    bool openD3D11TexturesInD3D12();      // D3D12 views of the D3D11 textures
+    bool createD3D12CsPipeline();         // root-sig + PSOs + descriptor heap
+    bool compileDMLGraph();               // fallback inline DML ADD1+CLIP graph
+    bool tryLoadOnnxModel();              // optional RIFE/FLAVR/IFRNet model
 
-    bool rebindPingPongInputs();  // DML input binding swap each frame.
-    void runPackCS(ID3D11DeviceContext4* ctx4, int slot);
+    // Per-frame helpers.
     bool runDMLDispatch();
-    bool runOrtInference();       // ORT path of runDMLDispatch().
-    void runUnpackCS(ID3D11DeviceContext4* ctx4);
+    bool runOrtInference();
+    bool rebindPingPongInputs();
 
-    // Record resource-state transition barriers for the three shared
-    // tensor buffers (both frame tensors + output tensor) into cl.
-    // Call with before=COMMON / after=UAV before DML/ORT dispatch and
-    // before=UAV / after=COMMON afterwards so D3D11 can safely use
-    // the resources again.
-    void recordSharedTensorBarriers(ID3D12GraphicsCommandList* cl,
-                                    D3D12_RESOURCE_STATES before,
-                                    D3D12_RESOURCE_STATES after);
+    // Record the D3D12 pack CS (render tex → tensor[slot]) into cl.
+    void recordPackCS(ID3D12GraphicsCommandList* cl, int slot);
+    // Record the D3D12 unpack CS (tensor → output tex) into cl,
+    // including the COMMON↔UAV barriers for the shared output texture.
+    void recordUnpackCS(ID3D12GraphicsCommandList* cl);
 
     // --- common state ---
-    bool m_Initialized = false;
-    int  m_QualityLevel = 1;
-    uint32_t m_Width = 0;
+    bool     m_Initialized = false;
+    int      m_QualityLevel = 1;
+    uint32_t m_Width  = 0;
     uint32_t m_Height = 0;
-    int  m_FrameCount = 0;
-    double m_LastInterpMs = 0.0;
+    int      m_FrameCount = 0;
+    double   m_LastInterpMs = 0.0;
 
     // --- D3D11 side ---
-    ID3D11Device* m_Device11 = nullptr;
-    CP<ID3D11Device5>             m_Device11_5;      // for OpenSharedFence
-    CP<ID3D11Texture2D>           m_RenderTexture;
-    CP<ID3D11RenderTargetView>    m_RenderRTV;
-    CP<ID3D11ShaderResourceView>  m_RenderSRV;
-    CP<ID3D11Texture2D>           m_OutputTexture;
-    CP<ID3D11ShaderResourceView>  m_OutputSRV;
-    CP<ID3D11UnorderedAccessView> m_OutputUAV;       // target of unpack CS
+    ID3D11Device*                  m_Device11 = nullptr;
+    CP<ID3D11Device5>              m_Device11_5;   // for OpenSharedFence
+    // Render texture: D3D11 writes (RTV), D3D12 reads (pack CS SRV).
+    // Created with SHARED_NTHANDLE so D3D12 can open it.
+    CP<ID3D11Texture2D>            m_RenderTexture;
+    CP<ID3D11RenderTargetView>     m_RenderRTV;
+    CP<ID3D11ShaderResourceView>   m_RenderSRV;    // for getLastRenderSRV()
+    // Output texture: D3D12 writes (unpack CS UAV), D3D11 reads (blit SRV).
+    // Also created with SHARED_NTHANDLE.
+    CP<ID3D11Texture2D>            m_OutputTexture;
+    CP<ID3D11ShaderResourceView>   m_OutputSRV;    // for final blit
+    CP<ID3D11Fence>                m_Fence11;       // opened from shared D3D12 fence
 
-    // Shared tensor resources opened as D3D11 buffers. UAVs drive
-    // the pack CS (D3D11 writer); SRVs drive the unpack CS (D3D11
-    // reader from the DML output buffer).
-    CP<ID3D11Buffer>              m_FrameBuffer11[2];
-    CP<ID3D11UnorderedAccessView> m_FrameBufferUAV11[2];
-    CP<ID3D11Buffer>              m_OutputBuffer11;
-    CP<ID3D11ShaderResourceView>  m_OutputBufferSRV11;
+    // --- D3D12 + cross-API ---
+    CP<ID3D12Device>               m_Device12;
+    CP<ID3D12CommandQueue>         m_Queue12;
+    CP<ID3D12CommandAllocator>     m_CmdAlloc12;
+    CP<ID3D12GraphicsCommandList>  m_CmdList12;
+    // Second pair used exclusively for the ORT path post-dispatch
+    // command list (unpack CS + barriers).  Kept separate so both
+    // pre- and post-ORT command lists can be in-flight simultaneously
+    // without a CPU stall between them.
+    CP<ID3D12CommandAllocator>     m_PostCmdAlloc12;
+    CP<ID3D12GraphicsCommandList>  m_PostCmdList12;
+    CP<ID3D12Fence>                m_Fence12;       // SHARED, cross-API
 
-    CP<ID3D11ComputeShader>       m_PackCS;
-    CP<ID3D11ComputeShader>       m_UnpackCS;
-    CP<ID3D11Buffer>              m_PackConstBuf;    // width/height uniforms
+    // D3D12 views of the shared D3D11 render / output textures.
+    // Opened via ID3D12Device::OpenSharedHandle from IDXGIResource1 handles.
+    CP<ID3D12Resource>             m_SharedRenderTex12;
+    CP<ID3D12Resource>             m_SharedOutputTex12;
 
-    CP<ID3D11Fence>               m_Fence11;         // opened from shared D3D12 fence
+    // D3D12 pack/unpack compute pipeline.
+    CP<ID3D12RootSignature>        m_CsRS12;       // shared by pack and unpack
+    CP<ID3D12PipelineState>        m_PackPSO12;
+    CP<ID3D12PipelineState>        m_UnpackPSO12;
+    // Descriptor heap for CS bindings (6 descriptors, shader-visible):
+    //   [0] CBV — pack/unpack constant buffer
+    //   [1] SRV — render texture   (pack input)
+    //   [2] UAV — FrameTensor[0]   (pack slot-0 output)
+    //   [3] UAV — FrameTensor[1]   (pack slot-1 output)
+    //   [4] SRV — OutputTensor     (unpack input)
+    //   [5] UAV — output texture   (unpack output)
+    CP<ID3D12DescriptorHeap>       m_CsDescHeap;
+    uint32_t                       m_CsDescIncrSize = 0;
+    // Constant buffer on UPLOAD heap, persistently mapped.
+    CP<ID3D12Resource>             m_CsCB12;
+    void*                          m_CsCBMapped = nullptr;
 
-    // --- D3D12 + DML ---
-    CP<ID3D12Device>              m_Device12;
-    CP<ID3D12CommandQueue>        m_Queue12;
-    CP<ID3D12CommandAllocator>    m_CmdAlloc12;
-    CP<ID3D12GraphicsCommandList> m_CmdList12;
-    // Second allocator/list used exclusively for cross-API barrier
-    // submissions in the ORT path. Kept separate from m_CmdAlloc12
-    // because both pre-dispatch and post-dispatch barriers must be
-    // submitted to the queue without a CPU stall between them; reusing
-    // a single allocator would require waiting for the GPU to drain.
-    CP<ID3D12CommandAllocator>    m_BarrierCmdAlloc12;
-    CP<ID3D12GraphicsCommandList> m_BarrierCmdList12;
-    CP<ID3D12Fence>               m_Fence12;         // SHARED, cross-API
+    // --- DML fallback graph ---
+    CP<IDMLDevice>                 m_DMLDevice;
+    CP<IDMLCommandRecorder>        m_DMLRecorder;
+    CP<IDMLCompiledOperator>       m_DMLCompiledOp;
+    CP<IDMLBindingTable>           m_DMLBindingTable;
+    CP<ID3D12DescriptorHeap>       m_DMLDescHeap;
+    CP<ID3D12Resource>             m_TempResource;
+    CP<ID3D12Resource>             m_PersistentResource;
 
-    CP<IDMLDevice>                m_DMLDevice;
-    CP<IDMLCommandRecorder>       m_DMLRecorder;
-    CP<IDMLCompiledOperator>      m_DMLCompiledOp;
-    CP<IDMLBindingTable>          m_DMLBindingTable;
-    CP<ID3D12DescriptorHeap>      m_DMLDescHeap;
+    // Tensor buffers — private D3D12 DEFAULT resources (no sharing).
+    // Pack CS writes here, DML/ORT reads and writes here, Unpack CS reads.
+    CP<ID3D12Resource>             m_FrameTensor[2];
+    CP<ID3D12Resource>             m_OutputTensor;
 
-    // Shared tensor resources on D3D12 (ping-pong input slots +
-    // output). Created with D3D12_HEAP_FLAG_SHARED; NT handles
-    // forwarded to D3D11 at init time.
-    CP<ID3D12Resource>            m_FrameTensor[2];
-    CP<ID3D12Resource>            m_OutputTensor;
-    CP<ID3D12Resource>            m_TempResource;
-    CP<ID3D12Resource>            m_PersistentResource;
-
-    // Cross-API fence counter. Each submit advances it by 2 — one
-    // signal after pack, one after DML. Separate counters per API
-    // aren't needed: the fence is strictly monotonic.
     uint64_t m_FenceValue = 0;
     int      m_WriteSlot  = 0;
 
-    // FP32 internally: matches the dtype of every public RIFE / FLAVR /
-    // IFRNet ONNX export in the wild, so models drop in without an
-    // offline conversion step. Costs ~2x the tensor VRAM vs FP16 but
-    // still well under 100 MB on 1080p which every target GPU handles.
     static constexpr DML_TENSOR_DATA_TYPE kDmlDtype = DML_TENSOR_DATA_TYPE_FLOAT32;
-    uint32_t m_TensorElements = 0;  // = 4 * W * H
-    uint32_t m_TensorBytes    = 0;  // = elements * 4
+    uint32_t m_TensorElements = 0;  // 4 * W * H
+    uint32_t m_TensorBytes    = 0;  // elements * sizeof(float)
 
-    // --- ONNX Runtime (optional; activated when fruc.onnx exists) ---
+    // --- ONNX Runtime (optional) ---
     bool                           m_UseOrt = false;
     std::unique_ptr<Ort::Session>  m_OrtSession;
     const OrtDmlApi*               m_OrtDmlApi = nullptr;
-    // Opaque ORT-owned wrappers for our shared D3D12 resources. 1:1
-    // with m_FrameTensor[0], m_FrameTensor[1], m_OutputTensor so
-    // ORT can bind them with zero copies.
-    void*                          m_OrtAllocFrame[2] = { nullptr, nullptr };
+    void*                          m_OrtAllocFrame[2] = {};
     void*                          m_OrtAllocOutput   = nullptr;
-    // Model-contract metadata learnt at load time. Drives per-frame
-    // tensor binding (channel count, extra timestep input, alpha
-    // passthrough path in the unpack shader).
-    uint32_t                       m_ModelChannels = 4;     // 3 or 4
-    bool                           m_HasTimestep = false;   // RIFE v4+ has a scalar 3rd input
-    float                          m_TimestepValue = 0.5f;  // midpoint for 2x FRUC
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_TimestepResource;
+    uint32_t                       m_ModelChannels = 4;
+    bool                           m_HasTimestep  = false;
+    float                          m_TimestepValue = 0.5f;
+    CP<ID3D12Resource>             m_TimestepResource;
     void*                          m_OrtAllocTimestep = nullptr;
-    // Cached session metadata — names and shape we validated at
-    // model-load time. Session::Run wants the names every call.
     std::vector<std::string>       m_OrtInputNames;
     std::vector<std::string>       m_OrtOutputNames;
     std::vector<const char*>       m_OrtInputNamesCStr;
     std::vector<const char*>       m_OrtOutputNamesCStr;
-    // Actual shape of the timestep input as exported by the model.
-    // Stored at load time so runOrtInference can create a tensor with
-    // the exact shape the model declares (e.g. [1] vs [1,1,1,1]).
-    // All dynamic dims (-1) are folded to 1 since we always pass a
-    // single 0.5 value regardless of broadcast shape.
     std::vector<int64_t>           m_TimestepShape;
+
+    // 1-input concatenated layout (common for RIFE v4.x lite exports):
+    //   Input 0: [1, C, H, W] where C ∈ {6, 7, 8, 9}
+    //     C=6: prev RGB  + curr RGB           (no timestep)
+    //     C=7: prev RGB  + curr RGB  + ts ch  (timestep = 1 plane of 0.5)
+    //     C=8: prev RGBA + curr RGBA          (no timestep)
+    //     C=9: prev RGBA + curr RGBA + ts ch  (timestep = 1 plane of 0.5)
+    bool                           m_OrtConcatInput      = false;
+    uint32_t                       m_ConcatChannels      = 0;    // total C of concat input
+    uint32_t                       m_ConcatImageChannels = 0;    // 3 or 4
+    bool                           m_ConcatHasTimestep   = false;
+    CP<ID3D12Resource>             m_ConcatTensor;
+    void*                          m_OrtAllocConcat      = nullptr;
+    std::vector<int64_t>           m_ConcatShape;
 };
 
 #endif // _WIN32

@@ -1,29 +1,25 @@
-// VipleStream: DirectMLFRUC — zero-copy D5 revision.
+// VipleStream: DirectMLFRUC — D3D11-texture-share revision (D6).
 //
-// The D3D12/DML tensor buffers are created with HEAP_FLAG_SHARED,
-// forwarded to the renderer's D3D11 device via NT shared handles,
-// and driven end-to-end on the GPU with two small D3D11 compute
-// shaders (pack / unpack) plus a cross-API fence. No CPU memory
-// traffic in the hot path, no staging textures, no SIMD quantise
-// loops, no Map/Unmap per frame.
+// D3D11 owns render + output textures (SHARED_NTHANDLE).
+// D3D12 opens them via IDXGIResource1::CreateSharedHandle +
+// ID3D12Device::OpenSharedHandle. Pack/unpack compute shaders run
+// entirely on the D3D12 queue using private (non-shared) FP32
+// tensor buffers. A cross-API fence serialises D3D11 rendering with
+// D3D12 FRUC work.
 //
-// Per-frame sequence on the D3D11 immediate context:
+// Per-frame sequence (frame > 0):
 //
-//   1. Unbind RTV                     (D3D11)
-//   2. Pack CS                        (D3D11): RGBA8 -> shared FP16 buf [slot]
-//   3. Signal fence=N                 (D3D11)
-//   4. Wait fence=N, DML dispatch,    (D3D12 queue)
-//      Signal fence=N+1
-//   5. Wait fence=N+1                 (D3D11 ctx)
-//   6. Unpack CS                      (D3D11): shared FP16 buf -> RGBA8 texture
+//   D3D11:  Unbind RTV, Signal fence=N
+//   D3D12:  Wait fence=N
+//              Pack CS     : shared render tex  → FrameTensor[slot]
+//              DML / ORT   : FrameTensor        → OutputTensor
+//              Unpack CS   : OutputTensor       → shared output tex
+//            Signal fence=N+1
+//   D3D11:  Wait fence=N+1
+//           Blit shared output texture to screen
 //
-// The D3D11 Signal/Wait are non-blocking CPU-side — they enqueue
-// GPU-side waits on the graphics queue. CPU returns immediately
-// after queueing the whole chain.
-//
-// TODO(directml:model): swap the inline DML_ELEMENT_WISE_ADD1 for
-// a compiled ONNX FRUC model — the zero-copy interop is now cheap
-// enough to make a real model pay off visually.
+// No CPU staging, no Map/Unmap per frame, no D3D12→D3D11 buffer
+// sharing (fundamentally unsupported on most drivers).
 
 #include "directmlfruc.h"
 #include "path.h"
@@ -53,16 +49,11 @@ inline uint64_t alignUp(uint64_t x, uint64_t a) { return (x + a - 1) & ~(a - 1);
 struct PackCBData {
     uint32_t width;
     uint32_t height;
-    uint32_t useAlpha;  // unpack: 0 = force 1.0 (3-ch models), 1 = read plane 3
+    uint32_t useAlpha;  // unpack: 0 = force alpha=1 (3-ch model), 1 = read plane 3
     uint32_t _pad1;
 };
 
-// ORT env is process-global and expensive to construct (spins up a
-// thread pool, parses schema). Share across all DirectMLFRUC
-// instances; first call lazy-initialises. Never torn down —
-// ONNX Runtime's atexit handlers manage the lifetime. Constructing
-// more than one Env in a single process is explicitly supported but
-// wastes memory.
+// Process-global ORT env — expensive to construct, never torn down.
 Ort::Env& sharedOrtEnv()
 {
     static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "VipleStream.DirectML");
@@ -72,9 +63,13 @@ Ort::Env& sharedOrtEnv()
 } // namespace
 
 
+// ── Constructor / destructor ───────────────────────────────────────────────
+
 DirectMLFRUC::DirectMLFRUC() = default;
 DirectMLFRUC::~DirectMLFRUC() { destroy(); }
 
+
+// ── initialize ────────────────────────────────────────────────────────────
 
 bool DirectMLFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
 {
@@ -82,7 +77,7 @@ bool DirectMLFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t hei
     m_Width    = width;
     m_Height   = height;
     m_TensorElements = 4u * width * height;
-    m_TensorBytes    = m_TensorElements * sizeof(float);  // FP32 internally
+    m_TensorBytes    = m_TensorElements * sizeof(float);  // FP32 tensor buffers
 
     if (FAILED(m_Device11->QueryInterface(IID_PPV_ARGS(&m_Device11_5)))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -97,67 +92,66 @@ bool DirectMLFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t hei
     DML_INIT_STEP("createD3D12Device",         createD3D12Device());
     DML_INIT_STEP("createDMLDevice",           createDMLDevice());
     DML_INIT_STEP("createSharedFence",         createSharedFence());
-    DML_INIT_STEP("createSharedTensorBuffers", createSharedTensorBuffers());
+    DML_INIT_STEP("createTensorBuffers",       createTensorBuffers());
     DML_INIT_STEP("createD3D11Textures",       createD3D11Textures());
-    DML_INIT_STEP("createD3D11Views",          createD3D11Views());
-    DML_INIT_STEP("loadComputeShaders",        loadComputeShaders());
+    DML_INIT_STEP("openD3D11TexturesInD3D12",  openD3D11TexturesInD3D12());
+    DML_INIT_STEP("createD3D12CsPipeline",     createD3D12CsPipeline());
 
 #undef DML_INIT_STEP
 
-    // Try the ONNX model first. Falls back to the inline DML graph
-    // silently if no fruc.onnx is on disk — that's the default
-    // path for users who haven't dropped in a model.
+    // ORT model is optional; if missing / invalid, use inline DML graph.
     bool ortLoaded = tryLoadOnnxModel();
     if (!ortLoaded) {
-        // ORT session creation/teardown may have submitted work to
-        // our D3D12 queue or left the command allocator in a non-
-        // reset state. Drain the queue and recreate the command
-        // infra before compiling the fallback inline DML graph.
-        {
-            m_FenceValue++;
-            m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
-            if (m_Fence12->GetCompletedValue() < m_FenceValue) {
-                HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-                if (ev) {
-                    m_Fence12->SetEventOnCompletion(m_FenceValue, ev);
-                    WaitForSingleObject(ev, 500);
-                    CloseHandle(ev);
-                }
+        // Drain queue + recreate CL infra so the DML initializer gets a
+        // clean slate regardless of any partial ORT work.
+        m_FenceValue++;
+        m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
+        if (m_Fence12->GetCompletedValue() < m_FenceValue) {
+            HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (ev) {
+                m_Fence12->SetEventOnCompletion(m_FenceValue, ev);
+                WaitForSingleObject(ev, 500);
+                CloseHandle(ev);
             }
-            // Recreate the command allocator + list to guarantee a
-            // clean slate regardless of what ORT may have done.
-            m_CmdList12.Reset();
-            m_CmdAlloc12.Reset();
-            if (FAILED(m_Device12->CreateCommandAllocator(
-                    D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_CmdAlloc12)))) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] DirectML: cmd allocator recreate failed");
-                return false;
-            }
-            if (FAILED(m_Device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                    m_CmdAlloc12.Get(), nullptr, IID_PPV_ARGS(&m_CmdList12)))) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] DirectML: cmd list recreate failed");
-                return false;
-            }
-            m_CmdList12->Close();
         }
-        if (!compileDMLGraph()) return false;
+        m_CmdList12.Reset();
+        m_CmdAlloc12.Reset();
+        if (FAILED(m_Device12->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_CmdAlloc12)))) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: cmd allocator recreate failed");
+            return false;
+        }
+        if (FAILED(m_Device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                m_CmdAlloc12.Get(), nullptr, IID_PPV_ARGS(&m_CmdList12)))) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: cmd list recreate failed");
+            return false;
+        }
+        m_CmdList12->Close();
+
+        if (!compileDMLGraph()) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: compileDMLGraph failed");
+            return false;
+        }
     }
 
     m_Initialized = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-FRUC] DirectML (zero-copy, %s) initialized: %ux%u, FP32 tensor %.2f MB/buffer",
+                "[VIPLE-FRUC] DirectML (D6 tex-share, %s) initialized: %ux%u, "
+                "FP32 tensor %.2f MB/buf",
                 m_UseOrt ? "ONNX model" : "inline graph",
                 width, height, (double)m_TensorBytes / (1024.0 * 1024.0));
     return true;
 }
 
 
+// ── destroy ───────────────────────────────────────────────────────────────
+
 void DirectMLFRUC::destroy()
 {
-    // Drain the queue so no in-flight command list references
-    // resources we're about to drop.
+    // Drain queue so no in-flight CL touches resources we're releasing.
     if (m_Queue12 && m_Fence12) {
         m_FenceValue++;
         HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -171,16 +165,23 @@ void DirectMLFRUC::destroy()
         }
     }
 
-    // ORT allocations + session must tear down BEFORE we release
-    // the D3D12 resources / DML device they reference. FreeGPUAllocation
-    // decrements the ref count on the wrapped ID3D12Resource.
+    // ORT allocations + session must tear down before D3D12 resources.
     if (m_OrtDmlApi) {
         if (m_OrtAllocFrame[0]) m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocFrame[0]);
         if (m_OrtAllocFrame[1]) m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocFrame[1]);
         if (m_OrtAllocOutput)   m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocOutput);
         if (m_OrtAllocTimestep) m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocTimestep);
-        m_OrtAllocFrame[0] = m_OrtAllocFrame[1] = m_OrtAllocOutput = m_OrtAllocTimestep = nullptr;
+        if (m_OrtAllocConcat)   m_OrtDmlApi->FreeGPUAllocation(m_OrtAllocConcat);
+        m_OrtAllocFrame[0] = m_OrtAllocFrame[1] = m_OrtAllocOutput
+                            = m_OrtAllocTimestep = m_OrtAllocConcat = nullptr;
     }
+    m_ConcatTensor.Reset();
+    m_ConcatShape.clear();
+    m_OrtConcatInput      = false;
+    m_ConcatChannels      = 0;
+    m_ConcatImageChannels = 0;
+    m_ConcatHasTimestep   = false;
+
     m_TimestepResource.Reset();
     m_HasTimestep = false;
     m_TimestepShape.clear();
@@ -193,6 +194,7 @@ void DirectMLFRUC::destroy()
     m_OrtDmlApi = nullptr;
     m_UseOrt = false;
 
+    // DML graph
     m_Fence11.Reset();
     m_DMLBindingTable.Reset();
     m_DMLCompiledOp.Reset();
@@ -205,26 +207,31 @@ void DirectMLFRUC::destroy()
     m_FrameTensor[0].Reset();
     m_FrameTensor[1].Reset();
 
-    m_FrameBufferUAV11[0].Reset();
-    m_FrameBufferUAV11[1].Reset();
-    m_FrameBuffer11[0].Reset();
-    m_FrameBuffer11[1].Reset();
-    m_OutputBufferSRV11.Reset();
-    m_OutputBuffer11.Reset();
+    // D6: CS pipeline, descriptor heap, constant buffer
+    m_UnpackPSO12.Reset();
+    m_PackPSO12.Reset();
+    m_CsRS12.Reset();
+    m_CsDescHeap.Reset();
+    if (m_CsCBMapped) {
+        m_CsCB12->Unmap(0, nullptr);
+        m_CsCBMapped = nullptr;
+    }
+    m_CsCB12.Reset();
 
-    m_PackConstBuf.Reset();
-    m_PackCS.Reset();
-    m_UnpackCS.Reset();
+    // D6: D3D12 views of shared D3D11 textures
+    m_SharedOutputTex12.Reset();
+    m_SharedRenderTex12.Reset();
 
-    m_OutputUAV.Reset();
+    // D3D11 textures + views
     m_OutputSRV.Reset();
     m_OutputTexture.Reset();
     m_RenderSRV.Reset();
     m_RenderRTV.Reset();
     m_RenderTexture.Reset();
 
-    m_BarrierCmdList12.Reset();
-    m_BarrierCmdAlloc12.Reset();
+    // D3D12 infrastructure
+    m_PostCmdList12.Reset();
+    m_PostCmdAlloc12.Reset();
     m_CmdList12.Reset();
     m_CmdAlloc12.Reset();
     m_Fence12.Reset();
@@ -232,10 +239,12 @@ void DirectMLFRUC::destroy()
     m_Device12.Reset();
 
     m_Device11_5.Reset();
-    m_Device11 = nullptr;
+    m_Device11    = nullptr;
     m_Initialized = false;
 }
 
+
+// ── createD3D12Device ─────────────────────────────────────────────────────
 
 bool DirectMLFRUC::createD3D12Device()
 {
@@ -262,16 +271,18 @@ bool DirectMLFRUC::createD3D12Device()
                                              IID_PPV_ARGS(&m_CmdList12)))) return false;
     m_CmdList12->Close();
 
-    // Second allocator/list for cross-API barrier submissions (ORT path).
+    // Second allocator/list for ORT path post-dispatch unpack CL.
     if (FAILED(m_Device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                  IID_PPV_ARGS(&m_BarrierCmdAlloc12)))) return false;
+                                                  IID_PPV_ARGS(&m_PostCmdAlloc12)))) return false;
     if (FAILED(m_Device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                             m_BarrierCmdAlloc12.Get(), nullptr,
-                                             IID_PPV_ARGS(&m_BarrierCmdList12)))) return false;
-    m_BarrierCmdList12->Close();
+                                             m_PostCmdAlloc12.Get(), nullptr,
+                                             IID_PPV_ARGS(&m_PostCmdList12)))) return false;
+    m_PostCmdList12->Close();
     return true;
 }
 
+
+// ── createDMLDevice ───────────────────────────────────────────────────────
 
 bool DirectMLFRUC::createDMLDevice()
 {
@@ -286,15 +297,16 @@ bool DirectMLFRUC::createDMLDevice()
 }
 
 
+// ── createSharedFence ─────────────────────────────────────────────────────
+
 bool DirectMLFRUC::createSharedFence()
 {
-    // Fence must be shared (D3D12) AND cross-adapter=false (single
-    // adapter). ID3D11Device5::OpenSharedFence will then hand back
-    // an ID3D11Fence that is the same underlying kernel object.
-    if (FAILED(m_Device12->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&m_Fence12)))) return false;
+    if (FAILED(m_Device12->CreateFence(0, D3D12_FENCE_FLAG_SHARED,
+                                       IID_PPV_ARGS(&m_Fence12)))) return false;
 
     HANDLE shared = nullptr;
-    if (FAILED(m_Device12->CreateSharedHandle(m_Fence12.Get(), nullptr, GENERIC_ALL, nullptr, &shared))) return false;
+    if (FAILED(m_Device12->CreateSharedHandle(m_Fence12.Get(), nullptr,
+                                              GENERIC_ALL, nullptr, &shared))) return false;
     HRESULT hr = m_Device11_5->OpenSharedFence(shared, IID_PPV_ARGS(&m_Fence11));
     CloseHandle(shared);
     if (FAILED(hr)) {
@@ -306,152 +318,303 @@ bool DirectMLFRUC::createSharedFence()
 }
 
 
-bool DirectMLFRUC::createSharedTensorBuffers()
-{
-    ComPtr<ID3D11Device1> dev11_1;
-    if (FAILED(m_Device11->QueryInterface(IID_PPV_ARGS(&dev11_1)))) return false;
+// ── createTensorBuffers ───────────────────────────────────────────────────
+//
+// Private D3D12 DEFAULT buffers for the FRUC tensors.  No sharing flag —
+// only the D3D12 queue accesses them, so they stay in
+// D3D12_RESOURCE_STATE_UNORDERED_ACCESS for their entire lifetime.
 
-    auto makeShared = [&](uint64_t bytes, ComPtr<ID3D12Resource>& d12,
-                          ComPtr<ID3D11Buffer>& d11) -> bool
-    {
-        D3D12_HEAP_PROPERTIES hp = {};
-        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+bool DirectMLFRUC::createTensorBuffers()
+{
+    auto makeBuf = [&](ComPtr<ID3D12Resource>& out) -> bool {
+        D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC rd = {};
         rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width            = alignUp(bytes, 256);
+        rd.Width            = alignUp(m_TensorBytes, 256);
         rd.Height           = 1;
         rd.DepthOrArraySize = 1;
         rd.MipLevels        = 1;
         rd.SampleDesc.Count = 1;
         rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        rd.Format           = DXGI_FORMAT_UNKNOWN;
-
-        // Shared committed resources MUST start in COMMON state per
-        // the D3D12 spec ("InitialResourceState must be
-        // D3D12_RESOURCE_STATE_COMMON for shared resources"). Using
-        // UNORDERED_ACCESS here caused CreateCommittedResource to
-        // return E_INVALIDARG on strict drivers (fixed in v1.2.7).
         HRESULT hr = m_Device12->CreateCommittedResource(
-                &hp, D3D12_HEAP_FLAG_SHARED, &rd,
-                D3D12_RESOURCE_STATE_COMMON, nullptr,
-                IID_PPV_ARGS(&d12));
+            &hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&out));
         if (FAILED(hr)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] DirectML: CreateCommittedResource(shared buf, %llu B) "
-                        "failed 0x%08lx", (unsigned long long)rd.Width, hr);
-            return false;
+                        "[VIPLE-FRUC] DirectML: tensor buffer alloc (%llu B) failed 0x%08lx",
+                        (unsigned long long)rd.Width, hr);
         }
+        return SUCCEEDED(hr);
+    };
+    return makeBuf(m_FrameTensor[0]) && makeBuf(m_FrameTensor[1]) && makeBuf(m_OutputTensor);
+}
 
-        HANDLE handle = nullptr;
-        hr = m_Device12->CreateSharedHandle(d12.Get(), nullptr, GENERIC_ALL, nullptr, &handle);
-        if (FAILED(hr)) {
+
+// ── createD3D11Textures ───────────────────────────────────────────────────
+//
+// Both textures are created with SHARED_NTHANDLE | SHARED so D3D12 can
+// open them via IDXGIResource1::CreateSharedHandle.
+//
+// Output texture also needs D3D11_BIND_UNORDERED_ACCESS so the D3D12
+// resource that wraps it gets D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+// (bind flags are reflected in the D3D12 resource description).
+
+bool DirectMLFRUC::createD3D11Textures()
+{
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width            = m_Width;
+    td.Height           = m_Height;
+    td.MipLevels        = 1;
+    td.ArraySize        = 1;
+    td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage            = D3D11_USAGE_DEFAULT;
+    td.MiscFlags        = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
+
+    // Render texture: D3D11 renders into (RTV), D3D12 pack CS reads (SRV).
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(m_Device11->CreateTexture2D(&td, nullptr, m_RenderTexture.GetAddressOf()))) return false;
+    if (FAILED(m_Device11->CreateRenderTargetView(m_RenderTexture.Get(), nullptr,
+                                                  m_RenderRTV.GetAddressOf()))) return false;
+    if (FAILED(m_Device11->CreateShaderResourceView(m_RenderTexture.Get(), nullptr,
+                                                    m_RenderSRV.GetAddressOf()))) return false;
+
+    // Output texture: D3D12 unpack CS writes (UAV), D3D11 blits via SRV.
+    // BIND_UNORDERED_ACCESS is required so D3D12 gets ALLOW_UNORDERED_ACCESS.
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    if (FAILED(m_Device11->CreateTexture2D(&td, nullptr, m_OutputTexture.GetAddressOf()))) return false;
+    if (FAILED(m_Device11->CreateShaderResourceView(m_OutputTexture.Get(), nullptr,
+                                                    m_OutputSRV.GetAddressOf()))) return false;
+    return true;
+}
+
+
+// ── openD3D11TexturesInD3D12 ──────────────────────────────────────────────
+//
+// Export NT handles from the D3D11 textures and open them as D3D12
+// resources.  D3D11→D3D12 is the universally supported sharing direction.
+
+bool DirectMLFRUC::openD3D11TexturesInD3D12()
+{
+    auto openTex = [&](ID3D11Texture2D* tex11, ComPtr<ID3D12Resource>& d12,
+                       const char* label) -> bool
+    {
+        ComPtr<IDXGIResource1> dxgi;
+        if (FAILED(tex11->QueryInterface(IID_PPV_ARGS(&dxgi)))) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] DirectML: CreateSharedHandle failed 0x%08lx", hr);
+                        "[VIPLE-FRUC] DirectML: QueryInterface(IDXGIResource1) failed for %s", label);
             return false;
         }
-        hr = dev11_1->OpenSharedResource1(handle, IID_PPV_ARGS(&d11));
-        CloseHandle(handle);
+        HANDLE h = nullptr;
+        HRESULT hr = dxgi->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &h);
         if (FAILED(hr)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] DirectML: OpenSharedResource1(D3D11Buffer) failed "
-                        "0x%08lx — driver may not support D3D12→D3D11 buffer sharing", hr);
+                        "[VIPLE-FRUC] DirectML: CreateSharedHandle(%s) failed 0x%08lx", label, hr);
+            return false;
+        }
+        hr = m_Device12->OpenSharedHandle(h, IID_PPV_ARGS(&d12));
+        CloseHandle(h);
+        if (FAILED(hr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: OpenSharedHandle(%s) failed 0x%08lx", label, hr);
             return false;
         }
         return true;
     };
 
-    if (!makeShared(m_TensorBytes, m_FrameTensor[0], m_FrameBuffer11[0])) return false;
-    if (!makeShared(m_TensorBytes, m_FrameTensor[1], m_FrameBuffer11[1])) return false;
-    if (!makeShared(m_TensorBytes, m_OutputTensor,   m_OutputBuffer11))   return false;
+    if (!openTex(m_RenderTexture.Get(), m_SharedRenderTex12, "render"))  return false;
+    if (!openTex(m_OutputTexture.Get(), m_SharedOutputTex12, "output"))  return false;
     return true;
 }
 
 
-bool DirectMLFRUC::createD3D11Textures()
+// ── createD3D12CsPipeline ─────────────────────────────────────────────────
+//
+// Root signature, pack/unpack PSOs (reusing the same cs_5_0 .fxc
+// bytecode compiled for D3D11), descriptor heap (6 entries), and the
+// persistently-mapped UPLOAD-heap constant buffer.
+//
+// Descriptor heap layout:
+//   [0] CBV — constant buffer (width, height, useAlpha)
+//   [1] SRV — render texture  (pack input)
+//   [2] UAV — FrameTensor[0]  (pack output, slot 0)
+//   [3] UAV — FrameTensor[1]  (pack output, slot 1)
+//   [4] SRV — OutputTensor    (unpack input)
+//   [5] UAV — output texture  (unpack output)
+
+bool DirectMLFRUC::createD3D12CsPipeline()
 {
-    D3D11_TEXTURE2D_DESC td = {};
-    td.Width  = m_Width;
-    td.Height = m_Height;
-    td.MipLevels = 1;
-    td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(m_Device11->CreateTexture2D(&td, nullptr, m_RenderTexture.GetAddressOf()))) return false;
-    if (FAILED(m_Device11->CreateRenderTargetView(m_RenderTexture.Get(), nullptr, m_RenderRTV.GetAddressOf()))) return false;
-    if (FAILED(m_Device11->CreateShaderResourceView(m_RenderTexture.Get(), nullptr, m_RenderSRV.GetAddressOf()))) return false;
+    // ── Root signature: 3 params, each a 1-range descriptor table ─────────
+    D3D12_DESCRIPTOR_RANGE ranges[3] = {};
+    ranges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+    ranges[0].NumDescriptors                    = 1;
+    ranges[0].BaseShaderRegister                = 0;
+    ranges[0].RegisterSpace                     = 0;
+    ranges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    // Output texture — the unpack CS writes it via UAV; the blit
-    // path reads it via SRV. Must have both bind flags.
-    td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-    if (FAILED(m_Device11->CreateTexture2D(&td, nullptr, m_OutputTexture.GetAddressOf()))) return false;
-    if (FAILED(m_Device11->CreateShaderResourceView(m_OutputTexture.Get(), nullptr, m_OutputSRV.GetAddressOf()))) return false;
-    if (FAILED(m_Device11->CreateUnorderedAccessView(m_OutputTexture.Get(), nullptr, m_OutputUAV.GetAddressOf()))) return false;
+    ranges[1].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[1].NumDescriptors                    = 1;
+    ranges[1].BaseShaderRegister                = 0;
+    ranges[1].RegisterSpace                     = 0;
+    ranges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    // Constant buffer for the pack/unpack shaders. useAlpha
-    // defaults to 1 (4-channel I/O: inline graph or 4-ch model).
-    // tryLoadOnnxModel() flips it to 0 and re-uploads when it
-    // detects a 3-channel model output.
-    D3D11_BUFFER_DESC cbd = {};
-    cbd.ByteWidth = sizeof(PackCBData);
-    cbd.Usage     = D3D11_USAGE_DEFAULT;
-    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    PackCBData cbInit = { m_Width, m_Height, /*useAlpha=*/1, 0 };
-    D3D11_SUBRESOURCE_DATA sd = { &cbInit, 0, 0 };
-    if (FAILED(m_Device11->CreateBuffer(&cbd, &sd, m_PackConstBuf.GetAddressOf()))) return false;
-    return true;
-}
+    ranges[2].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    ranges[2].NumDescriptors                    = 1;
+    ranges[2].BaseShaderRegister                = 0;
+    ranges[2].RegisterSpace                     = 0;
+    ranges[2].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
+    D3D12_ROOT_PARAMETER params[3] = {};
+    for (int i = 0; i < 3; ++i) {
+        params[i].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[i].DescriptorTable.NumDescriptorRanges = 1;
+        params[i].DescriptorTable.pDescriptorRanges   = &ranges[i];
+        params[i].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+    }
 
-bool DirectMLFRUC::createD3D11Views()
-{
-    // Typed UAV on the shared buffer as R32_FLOAT — FP32 storage
-    // so ORT can bind our buffer directly to any public RIFE /
-    // FLAVR / IFRNet model (all of which ship as FP32 ONNX). The
-    // HLSL pack/unpack shaders use `RWBuffer<float>` / `Buffer<float>`
-    // which is format-agnostic; swapping the view format is all
-    // that's required to flip the on-disk dtype.
-    D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {};
-    ud.Format        = DXGI_FORMAT_R32_FLOAT;
-    ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-    ud.Buffer.FirstElement = 0;
-    ud.Buffer.NumElements  = m_TensorElements;
+    D3D12_ROOT_SIGNATURE_DESC rsd = {};
+    rsd.NumParameters = 3;
+    rsd.pParameters   = params;
+    rsd.Flags         = D3D12_ROOT_SIGNATURE_FLAG_NONE;
 
-    if (FAILED(m_Device11->CreateUnorderedAccessView(m_FrameBuffer11[0].Get(), &ud, m_FrameBufferUAV11[0].GetAddressOf()))) return false;
-    if (FAILED(m_Device11->CreateUnorderedAccessView(m_FrameBuffer11[1].Get(), &ud, m_FrameBufferUAV11[1].GetAddressOf()))) return false;
+    ComPtr<ID3DBlob> rsBlob, rsErr;
+    HRESULT hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1,
+                                             &rsBlob, &rsErr);
+    if (FAILED(hr)) {
+        // rsErr carries the D3D12 parser's human-readable diagnostic —
+        // always more useful than just the HRESULT.
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: D3D12SerializeRootSignature failed 0x%08lx%s%s",
+                    hr,
+                    rsErr ? ": "   : "",
+                    rsErr ? static_cast<const char*>(rsErr->GetBufferPointer()) : "");
+        return false;
+    }
+    hr = m_Device12->CreateRootSignature(0, rsBlob->GetBufferPointer(),
+                                         rsBlob->GetBufferSize(),
+                                         IID_PPV_ARGS(&m_CsRS12));
+    if (FAILED(hr)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CreateRootSignature failed 0x%08lx", hr);
+        return false;
+    }
 
-    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-    sd.Format        = DXGI_FORMAT_R32_FLOAT;
-    sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-    sd.Buffer.FirstElement = 0;
-    sd.Buffer.NumElements  = m_TensorElements;
-    if (FAILED(m_Device11->CreateShaderResourceView(m_OutputBuffer11.Get(), &sd, m_OutputBufferSRV11.GetAddressOf()))) return false;
-    return true;
-}
-
-
-bool DirectMLFRUC::loadComputeShaders()
-{
-    QByteArray pack = Path::readDataFile("d3d11_dml_pack_rgba8_fp16.fxc");
-    if (pack.isEmpty()) {
+    // ── PSOs — reuse D3D11 cs_5_0 bytecode ────────────────────────────────
+    QByteArray packBytes = Path::readDataFile("d3d11_dml_pack_rgba8_fp16.fxc");
+    if (packBytes.isEmpty()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] DirectML: d3d11_dml_pack_rgba8_fp16.fxc missing");
         return false;
     }
-    if (FAILED(m_Device11->CreateComputeShader(pack.constData(), pack.size(), nullptr, m_PackCS.GetAddressOf()))) return false;
-
-    QByteArray unpack = Path::readDataFile("d3d11_dml_unpack_fp16_rgba8.fxc");
-    if (unpack.isEmpty()) {
+    QByteArray unpackBytes = Path::readDataFile("d3d11_dml_unpack_fp16_rgba8.fxc");
+    if (unpackBytes.isEmpty()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] DirectML: d3d11_dml_unpack_fp16_rgba8.fxc missing");
         return false;
     }
-    if (FAILED(m_Device11->CreateComputeShader(unpack.constData(), unpack.size(), nullptr, m_UnpackCS.GetAddressOf()))) return false;
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC psd = {};
+    psd.pRootSignature = m_CsRS12.Get();
+    psd.CS             = { packBytes.constData(), (SIZE_T)packBytes.size() };
+    hr = m_Device12->CreateComputePipelineState(&psd, IID_PPV_ARGS(&m_PackPSO12));
+    if (FAILED(hr)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CreateComputePipelineState(pack) failed 0x%08lx", hr);
+        return false;
+    }
+    psd.CS = { unpackBytes.constData(), (SIZE_T)unpackBytes.size() };
+    hr = m_Device12->CreateComputePipelineState(&psd, IID_PPV_ARGS(&m_UnpackPSO12));
+    if (FAILED(hr)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CreateComputePipelineState(unpack) failed 0x%08lx", hr);
+        return false;
+    }
+
+    // ── Descriptor heap (6 entries, shader-visible) ────────────────────────
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.NumDescriptors = 6;
+    hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    hr = m_Device12->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_CsDescHeap));
+    if (FAILED(hr)) return false;
+    m_CsDescIncrSize = m_Device12->GetDescriptorHandleIncrementSize(
+                           D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    // ── Constant buffer on UPLOAD heap, persistently mapped ───────────────
+    D3D12_HEAP_PROPERTIES uhp = {}; uhp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC cbd = {};
+    cbd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+    cbd.Width            = 256; // CBV requires 256-byte alignment
+    cbd.Height           = 1;
+    cbd.DepthOrArraySize = 1;
+    cbd.MipLevels        = 1;
+    cbd.SampleDesc.Count = 1;
+    cbd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    cbd.Flags            = D3D12_RESOURCE_FLAG_NONE;
+    hr = m_Device12->CreateCommittedResource(&uhp, D3D12_HEAP_FLAG_NONE, &cbd,
+                                             D3D12_RESOURCE_STATE_GENERIC_READ,
+                                             nullptr, IID_PPV_ARGS(&m_CsCB12));
+    if (FAILED(hr)) return false;
+    D3D12_RANGE noRead = { 0, 0 };
+    hr = m_CsCB12->Map(0, &noRead, &m_CsCBMapped);
+    if (FAILED(hr)) return false;
+    PackCBData cbInit = { m_Width, m_Height, /*useAlpha=*/1, 0 };
+    std::memcpy(m_CsCBMapped, &cbInit, sizeof(cbInit));
+
+    // ── Populate descriptors ───────────────────────────────────────────────
+    auto cpuBase = m_CsDescHeap->GetCPUDescriptorHandleForHeapStart();
+    const UINT inc = m_CsDescIncrSize;
+    auto cpuAt = [&](UINT i) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        return { cpuBase.ptr + i * inc };
+    };
+
+    // [0] CBV
+    D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+    cbvDesc.BufferLocation = m_CsCB12->GetGPUVirtualAddress();
+    cbvDesc.SizeInBytes    = 256;
+    m_Device12->CreateConstantBufferView(&cbvDesc, cpuAt(0));
+
+    // [1] SRV — render texture (D3D12 view of shared D3D11 render tex)
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvTex = {};
+    srvTex.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvTex.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvTex.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvTex.Texture2D.MipLevels     = 1;
+    m_Device12->CreateShaderResourceView(m_SharedRenderTex12.Get(), &srvTex, cpuAt(1));
+
+    // [2] UAV — FrameTensor[0]  (FP32 flat buffer)
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavBuf = {};
+    uavBuf.Format              = DXGI_FORMAT_R32_FLOAT;
+    uavBuf.ViewDimension       = D3D12_UAV_DIMENSION_BUFFER;
+    uavBuf.Buffer.NumElements  = m_TensorElements;
+    m_Device12->CreateUnorderedAccessView(m_FrameTensor[0].Get(), nullptr, &uavBuf, cpuAt(2));
+
+    // [3] UAV — FrameTensor[1]
+    m_Device12->CreateUnorderedAccessView(m_FrameTensor[1].Get(), nullptr, &uavBuf, cpuAt(3));
+
+    // [4] SRV — OutputTensor
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvBuf = {};
+    srvBuf.Format                  = DXGI_FORMAT_R32_FLOAT;
+    srvBuf.ViewDimension           = D3D12_SRV_DIMENSION_BUFFER;
+    srvBuf.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvBuf.Buffer.NumElements      = m_TensorElements;
+    m_Device12->CreateShaderResourceView(m_OutputTensor.Get(), &srvBuf, cpuAt(4));
+
+    // [5] UAV — output texture (D3D12 view of shared D3D11 output tex)
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavTex = {};
+    uavTex.Format        = DXGI_FORMAT_R8G8B8A8_UNORM;
+    uavTex.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    m_Device12->CreateUnorderedAccessView(m_SharedOutputTex12.Get(), nullptr, &uavTex, cpuAt(5));
+
     return true;
 }
 
+
+// ── compileDMLGraph ───────────────────────────────────────────────────────
+//
+// Inline 4-node DML graph: idA(0.5·prev) + idB(0.5·curr) → ADD1 → CLIP.
+// Produces a bidirectional temporal blend in [0,1].
 
 bool DirectMLFRUC::compileDMLGraph()
 {
@@ -459,40 +622,45 @@ bool DirectMLFRUC::compileDMLGraph()
     const uint32_t strides[4] = { 4u * m_Height * m_Width, m_Height * m_Width, m_Width, 1u };
 
     DML_BUFFER_TENSOR_DESC bufDesc = {};
-    bufDesc.DataType       = kDmlDtype;
-    bufDesc.DimensionCount = 4;
-    bufDesc.Sizes          = sizes;
-    bufDesc.Strides        = strides;
+    bufDesc.DataType               = kDmlDtype;
+    bufDesc.DimensionCount         = 4;
+    bufDesc.Sizes                  = sizes;
+    bufDesc.Strides                = strides;
     bufDesc.TotalTensorSizeInBytes = m_TensorBytes;
-
     DML_TENSOR_DESC td = { DML_TENSOR_TYPE_BUFFER, &bufDesc };
 
-    // The pack shader now writes pixel values in [0, 1] (matching
-    // what ONNX models expect). The inline 4-op graph below re-
-    // introduces the 0.5 scale via IDENTITY nodes so ADD1 still
-    // produces a bidirectional mean.
     DML_SCALE_BIAS half = { 0.5f, 0.0f };
 
-    // Node 0 / 1: IDENTITY with Scale=0.5 on each input.
     DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC idDesc = {};
     idDesc.InputTensor  = &td;
     idDesc.OutputTensor = &td;
     idDesc.ScaleBias    = &half;
     DML_OPERATOR_DESC idOpDesc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, &idDesc };
     ComPtr<IDMLOperator> idA, idB;
-    if (FAILED(m_DMLDevice->CreateOperator(&idOpDesc, IID_PPV_ARGS(&idA)))) return false;
-    if (FAILED(m_DMLDevice->CreateOperator(&idOpDesc, IID_PPV_ARGS(&idB)))) return false;
+    HRESULT hr;
+    if (FAILED(hr = m_DMLDevice->CreateOperator(&idOpDesc, IID_PPV_ARGS(&idA)))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CreateOperator(idA) failed 0x%08lx", hr);
+        return false;
+    }
+    if (FAILED(hr = m_DMLDevice->CreateOperator(&idOpDesc, IID_PPV_ARGS(&idB)))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CreateOperator(idB) failed 0x%08lx", hr);
+        return false;
+    }
 
-    // Node 2: ADD1(halfA, halfB) — bidirectional mean.
     DML_ELEMENT_WISE_ADD1_OPERATOR_DESC addDesc = {};
     addDesc.ATensor      = &td;
     addDesc.BTensor      = &td;
     addDesc.OutputTensor = &td;
     DML_OPERATOR_DESC addOpDesc = { DML_OPERATOR_ELEMENT_WISE_ADD1, &addDesc };
     ComPtr<IDMLOperator> addOp;
-    if (FAILED(m_DMLDevice->CreateOperator(&addOpDesc, IID_PPV_ARGS(&addOp)))) return false;
+    if (FAILED(hr = m_DMLDevice->CreateOperator(&addOpDesc, IID_PPV_ARGS(&addOp)))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CreateOperator(add) failed 0x%08lx", hr);
+        return false;
+    }
 
-    // Node 3: CLIP(x, 0, 1) — clamps rounding drift at the tails.
     DML_ELEMENT_WISE_CLIP_OPERATOR_DESC clipDesc = {};
     clipDesc.InputTensor  = &td;
     clipDesc.OutputTensor = &td;
@@ -500,12 +668,16 @@ bool DirectMLFRUC::compileDMLGraph()
     clipDesc.Max          = 1.0f;
     DML_OPERATOR_DESC clipOpDesc = { DML_OPERATOR_ELEMENT_WISE_CLIP, &clipDesc };
     ComPtr<IDMLOperator> clipOp;
-    if (FAILED(m_DMLDevice->CreateOperator(&clipOpDesc, IID_PPV_ARGS(&clipOp)))) return false;
+    if (FAILED(hr = m_DMLDevice->CreateOperator(&clipOpDesc, IID_PPV_ARGS(&clipOp)))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CreateOperator(clip) failed 0x%08lx", hr);
+        return false;
+    }
 
-    DML_OPERATOR_GRAPH_NODE_DESC idANode = { idA.Get(),   "idA"  };
-    DML_OPERATOR_GRAPH_NODE_DESC idBNode = { idB.Get(),   "idB"  };
-    DML_OPERATOR_GRAPH_NODE_DESC addNode = { addOp.Get(), "add"  };
-    DML_OPERATOR_GRAPH_NODE_DESC clipNode= { clipOp.Get(),"clip" };
+    DML_OPERATOR_GRAPH_NODE_DESC idANode  = { idA.Get(),    "idA"  };
+    DML_OPERATOR_GRAPH_NODE_DESC idBNode  = { idB.Get(),    "idB"  };
+    DML_OPERATOR_GRAPH_NODE_DESC addNode  = { addOp.Get(),  "add"  };
+    DML_OPERATOR_GRAPH_NODE_DESC clipNode = { clipOp.Get(), "clip" };
     DML_GRAPH_NODE_DESC nodes[4] = {
         { DML_GRAPH_NODE_TYPE_OPERATOR, &idANode  },
         { DML_GRAPH_NODE_TYPE_OPERATOR, &idBNode  },
@@ -514,8 +686,8 @@ bool DirectMLFRUC::compileDMLGraph()
     };
 
     DML_INPUT_GRAPH_EDGE_DESC inEdges[2] = {
-        { 0u, 0u, 0u, "A" },   // graph input 0 -> idA.in
-        { 1u, 1u, 0u, "B" },   // graph input 1 -> idB.in
+        { 0u, 0u, 0u, "A" },
+        { 1u, 1u, 0u, "B" },
     };
     DML_GRAPH_EDGE_DESC inEdgeDescs[2] = {
         { DML_GRAPH_EDGE_TYPE_INPUT, &inEdges[0] },
@@ -531,8 +703,8 @@ bool DirectMLFRUC::compileDMLGraph()
         { DML_GRAPH_EDGE_TYPE_INTERMEDIATE, &midEdges[1] },
         { DML_GRAPH_EDGE_TYPE_INTERMEDIATE, &midEdges[2] },
     };
-    DML_OUTPUT_GRAPH_EDGE_DESC outEdge = { 3u, 0u, 0u, "clip->out" };
-    DML_GRAPH_EDGE_DESC outEdgeDesc = { DML_GRAPH_EDGE_TYPE_OUTPUT, &outEdge };
+    DML_OUTPUT_GRAPH_EDGE_DESC outEdge   = { 3u, 0u, 0u, "clip->out" };
+    DML_GRAPH_EDGE_DESC        outEdgeDesc = { DML_GRAPH_EDGE_TYPE_OUTPUT, &outEdge };
 
     DML_GRAPH_DESC gd = {};
     gd.InputCount            = 2;
@@ -547,16 +719,21 @@ bool DirectMLFRUC::compileDMLGraph()
     gd.IntermediateEdges     = midEdgeDescs;
 
     ComPtr<IDMLDevice1> device1;
-    if (FAILED(m_DMLDevice.As(&device1))) {
+    if (FAILED(hr = m_DMLDevice.As(&device1))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] DirectML: IDMLDevice1 not available (need DML 1.1 / Win10 2004+)");
+                    "[VIPLE-FRUC] DirectML: IDMLDevice1 not available (DML 1.1 / Win10 2004+) 0x%08lx", hr);
         return false;
     }
-    if (FAILED(device1->CompileGraph(&gd,
-            DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION,
+    // Drop DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION — older
+    // driver revisions hit DEVICE_REMOVED on FP32 tensors with the
+    // half-precision hint because the graph's intermediate buffers
+    // end up mis-sized.  Keep strict FP32 compilation for the fallback
+    // graph; the perf delta on 4 trivial ops is noise.
+    if (FAILED(hr = device1->CompileGraph(&gd,
+            DML_EXECUTION_FLAG_NONE,
             IID_PPV_ARGS(&m_DMLCompiledOp)))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] DirectML: CompileGraph failed (add1 + clip)");
+                    "[VIPLE-FRUC] DirectML: CompileGraph failed 0x%08lx", hr);
         return false;
     }
 
@@ -564,18 +741,35 @@ bool DirectMLFRUC::compileDMLGraph()
 
     ComPtr<IDMLOperatorInitializer> initializer;
     IDMLCompiledOperator* opsToInit[] = { m_DMLCompiledOp.Get() };
-    if (FAILED(m_DMLDevice->CreateOperatorInitializer(1, opsToInit, IID_PPV_ARGS(&initializer)))) return false;
+    if (FAILED(hr = m_DMLDevice->CreateOperatorInitializer(1, opsToInit, IID_PPV_ARGS(&initializer)))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CreateOperatorInitializer failed 0x%08lx", hr);
+        return false;
+    }
     DML_BINDING_PROPERTIES initProps = initializer->GetBindingProperties();
 
-    uint32_t descCount = std::max(initProps.RequiredDescriptorCount, execProps.RequiredDescriptorCount);
+    uint32_t descCount = std::max(initProps.RequiredDescriptorCount,
+                                  execProps.RequiredDescriptorCount);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC] DirectML: inline graph props — descCount=%u, "
+                "initTemp=%llu, execTemp=%llu, persist=%llu",
+                descCount,
+                (unsigned long long)initProps.TemporaryResourceSize,
+                (unsigned long long)execProps.TemporaryResourceSize,
+                (unsigned long long)execProps.PersistentResourceSize);
 
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     hd.NumDescriptors = descCount;
     hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    if (FAILED(m_Device12->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_DMLDescHeap)))) return false;
+    if (FAILED(hr = m_Device12->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_DMLDescHeap)))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CreateDescriptorHeap(DML %u) failed 0x%08lx",
+                    descCount, hr);
+        return false;
+    }
 
-    auto allocBuffer = [&](uint64_t bytes, ComPtr<ID3D12Resource>& out) -> bool {
+    auto allocBuf = [&](uint64_t bytes, ComPtr<ID3D12Resource>& out, const char* label) -> bool {
         if (bytes == 0) { out.Reset(); return true; }
         D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC rd = {};
@@ -587,69 +781,113 @@ bool DirectMLFRUC::compileDMLGraph()
         rd.SampleDesc.Count = 1;
         rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        return SUCCEEDED(m_Device12->CreateCommittedResource(
+        HRESULT lhr = m_Device12->CreateCommittedResource(
             &hp, D3D12_HEAP_FLAG_NONE, &rd,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&out)));
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&out));
+        if (FAILED(lhr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: %s alloc (%llu B) failed 0x%08lx",
+                        label, (unsigned long long)rd.Width, lhr);
+        }
+        return SUCCEEDED(lhr);
     };
-    uint64_t tempBytes = std::max(initProps.TemporaryResourceSize, execProps.TemporaryResourceSize);
-    if (!allocBuffer(tempBytes, m_TempResource)) return false;
-    if (!allocBuffer(execProps.PersistentResourceSize, m_PersistentResource)) return false;
+    uint64_t tempBytes = std::max(initProps.TemporaryResourceSize,
+                                  execProps.TemporaryResourceSize);
+    if (!allocBuf(tempBytes, m_TempResource, "DML Temp"))                              return false;
+    if (!allocBuf(execProps.PersistentResourceSize, m_PersistentResource, "DML Pers")) return false;
 
-    // --- Initializer dispatch ---
+    // ── Initializer dispatch ──────────────────────────────────────────────
     DML_BINDING_TABLE_DESC btd = {};
     btd.Dispatchable        = initializer.Get();
     btd.CPUDescriptorHandle = m_DMLDescHeap->GetCPUDescriptorHandleForHeapStart();
     btd.GPUDescriptorHandle = m_DMLDescHeap->GetGPUDescriptorHandleForHeapStart();
     btd.SizeInDescriptors   = descCount;
     ComPtr<IDMLBindingTable> initBinding;
-    if (FAILED(m_DMLDevice->CreateBindingTable(&btd, IID_PPV_ARGS(&initBinding)))) return false;
+    if (FAILED(hr = m_DMLDevice->CreateBindingTable(&btd, IID_PPV_ARGS(&initBinding)))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CreateBindingTable(init) failed 0x%08lx", hr);
+        return false;
+    }
     if (m_TempResource) {
         DML_BUFFER_BINDING tb = { m_TempResource.Get(), 0, m_TempResource->GetDesc().Width };
-        DML_BINDING_DESC tbd  = { DML_BINDING_TYPE_BUFFER, &tb };
+        DML_BINDING_DESC   tbd = { DML_BINDING_TYPE_BUFFER, &tb };
         initBinding->BindTemporaryResource(&tbd);
     }
     if (m_PersistentResource) {
-        DML_BUFFER_BINDING pb = { m_PersistentResource.Get(), 0, m_PersistentResource->GetDesc().Width };
-        DML_BINDING_DESC pbd  = { DML_BINDING_TYPE_BUFFER, &pb };
+        DML_BUFFER_BINDING pb = { m_PersistentResource.Get(), 0,
+                                  m_PersistentResource->GetDesc().Width };
+        DML_BINDING_DESC   pbd = { DML_BINDING_TYPE_BUFFER, &pb };
         initBinding->BindOutputs(1, &pbd);
     }
 
     m_CmdAlloc12->Reset();
     m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
-    ID3D12DescriptorHeap* heaps[] = { m_DMLDescHeap.Get() };
-    m_CmdList12->SetDescriptorHeaps(1, heaps);
+    ID3D12DescriptorHeap* initHeaps[] = { m_DMLDescHeap.Get() };
+    m_CmdList12->SetDescriptorHeaps(1, initHeaps);
     m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), initializer.Get(), initBinding.Get());
     m_CmdList12->Close();
-    ID3D12CommandList* cmds[] = { m_CmdList12.Get() };
-    m_Queue12->ExecuteCommandLists(1, cmds);
+    { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
     m_FenceValue++;
     m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
     if (m_Fence12->GetCompletedValue() < m_FenceValue) {
         HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         m_Fence12->SetEventOnCompletion(m_FenceValue, ev);
-        WaitForSingleObject(ev, INFINITE);
+        // Bounded wait — if the init dispatch crashes the device the
+        // fence still signals (device-removed unblocks all waits), but
+        // we want to fail fast rather than hang if anything else is off.
+        DWORD waitResult = WaitForSingleObject(ev, 5000);
         CloseHandle(ev);
+        if (waitResult != WAIT_OBJECT_0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: init dispatch fence wait timed out (%lu)",
+                        waitResult);
+            return false;
+        }
     }
 
-    // --- Exec binding (inputs rebound per frame) ---
+    // Did the init dispatch crash the device?  A successful fence wait
+    // after device-removed looks normal from CPU's perspective but all
+    // subsequent DML/D3D12 calls will return DEVICE_REMOVED.
+    HRESULT devReason = m_Device12->GetDeviceRemovedReason();
+    if (devReason != S_OK) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: device removed after init dispatch, reason 0x%08lx "
+                    "(likely a driver-side DML graph validation failure — try updating GPU driver)",
+                    devReason);
+        return false;
+    }
+
+    // ── Exec binding (inputs rebound per frame via rebindPingPongInputs) ───
     btd.Dispatchable = m_DMLCompiledOp.Get();
-    if (FAILED(m_DMLDevice->CreateBindingTable(&btd, IID_PPV_ARGS(&m_DMLBindingTable)))) return false;
+    if (FAILED(hr = m_DMLDevice->CreateBindingTable(&btd, IID_PPV_ARGS(&m_DMLBindingTable)))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: CreateBindingTable(exec) failed 0x%08lx", hr);
+        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: GetDeviceRemovedReason = 0x%08lx",
+                        m_Device12->GetDeviceRemovedReason());
+        }
+        return false;
+    }
     if (m_TempResource) {
         DML_BUFFER_BINDING tb = { m_TempResource.Get(), 0, m_TempResource->GetDesc().Width };
-        DML_BINDING_DESC tbd  = { DML_BINDING_TYPE_BUFFER, &tb };
+        DML_BINDING_DESC   tbd = { DML_BINDING_TYPE_BUFFER, &tb };
         m_DMLBindingTable->BindTemporaryResource(&tbd);
     }
     if (m_PersistentResource) {
-        DML_BUFFER_BINDING pb = { m_PersistentResource.Get(), 0, m_PersistentResource->GetDesc().Width };
-        DML_BINDING_DESC pbd  = { DML_BINDING_TYPE_BUFFER, &pb };
+        DML_BUFFER_BINDING pb = { m_PersistentResource.Get(), 0,
+                                  m_PersistentResource->GetDesc().Width };
+        DML_BINDING_DESC   pbd = { DML_BINDING_TYPE_BUFFER, &pb };
         m_DMLBindingTable->BindPersistentResource(&pbd);
     }
     DML_BUFFER_BINDING out = { m_OutputTensor.Get(), 0, m_TensorBytes };
-    DML_BINDING_DESC outDesc = { DML_BINDING_TYPE_BUFFER, &out };
+    DML_BINDING_DESC   outDesc = { DML_BINDING_TYPE_BUFFER, &out };
     m_DMLBindingTable->BindOutputs(1, &outDesc);
     return true;
 }
 
+
+// ── rebindPingPongInputs ──────────────────────────────────────────────────
 
 bool DirectMLFRUC::rebindPingPongInputs()
 {
@@ -668,131 +906,167 @@ bool DirectMLFRUC::rebindPingPongInputs()
 }
 
 
-void DirectMLFRUC::runPackCS(ID3D11DeviceContext4* ctx4, int slot)
+// ── recordPackCS ──────────────────────────────────────────────────────────
+//
+// Record pack compute shader into cl.  Assumes m_CsDescHeap is already
+// bound via SetDescriptorHeaps before this call.
+
+void DirectMLFRUC::recordPackCS(ID3D12GraphicsCommandList* cl, int slot)
 {
-    ID3D11ShaderResourceView*   nullSRVs[1] = { nullptr };
-    ID3D11UnorderedAccessView*  nullUAVs[1] = { nullptr };
-
-    // Bind pack CS: render texture as input SRV, shared tensor
-    // slot as output UAV, const buffer for {width, height}.
-    ctx4->CSSetShader(m_PackCS.Get(), nullptr, 0);
-    ID3D11ShaderResourceView* srv = m_RenderSRV.Get();
-    ctx4->CSSetShaderResources(0, 1, &srv);
-    ID3D11UnorderedAccessView* uav = m_FrameBufferUAV11[slot].Get();
-    UINT initialCounts = 0;
-    ctx4->CSSetUnorderedAccessViews(0, 1, &uav, &initialCounts);
-    ID3D11Buffer* cb = m_PackConstBuf.Get();
-    ctx4->CSSetConstantBuffers(0, 1, &cb);
-
-    UINT gx = (m_Width  + 15) / 16;
-    UINT gy = (m_Height + 15) / 16;
-    ctx4->Dispatch(gx, gy, 1);
-
-    // Unbind the UAV so D3D12 can see the writes. D3D11 flushes
-    // pending UAV writes to VRAM on the next GPU-side barrier; the
-    // fence signal that follows enforces that ordering.
-    ctx4->CSSetUnorderedAccessViews(0, 1, nullUAVs, &initialCounts);
-    ctx4->CSSetShaderResources(0, 1, nullSRVs);
-}
-
-
-void DirectMLFRUC::recordSharedTensorBarriers(ID3D12GraphicsCommandList* cl,
-                                               D3D12_RESOURCE_STATES before,
-                                               D3D12_RESOURCE_STATES after)
-{
-    // Shared resources live in D3D12_RESOURCE_STATE_COMMON while
-    // D3D11 accesses them (spec requirement for cross-API resources).
-    // Before a D3D12 DML/ORT dispatch they must be promoted to UAV;
-    // after, we demote them back to COMMON so the D3D11 pack/unpack
-    // shaders can safely write/read on the next frame.
-    D3D12_RESOURCE_BARRIER bars[3];
-    ID3D12Resource* tensors[3] = {
-        m_FrameTensor[0].Get(),
-        m_FrameTensor[1].Get(),
-        m_OutputTensor.Get()
+    auto gpuBase = m_CsDescHeap->GetGPUDescriptorHandleForHeapStart();
+    const UINT inc = m_CsDescIncrSize;
+    auto gpuAt = [&](UINT i) -> D3D12_GPU_DESCRIPTOR_HANDLE {
+        return { gpuBase.ptr + i * inc };
     };
-    for (int i = 0; i < 3; ++i) {
-        bars[i] = {};
-        bars[i].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        bars[i].Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        bars[i].Transition.pResource   = tensors[i];
-        bars[i].Transition.StateBefore = before;
-        bars[i].Transition.StateAfter  = after;
-        bars[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    }
-    cl->ResourceBarrier(3, bars);
+
+    cl->SetComputeRootSignature(m_CsRS12.Get());
+    cl->SetPipelineState(m_PackPSO12.Get());
+    cl->SetComputeRootDescriptorTable(0, gpuAt(0));          // CBV
+    cl->SetComputeRootDescriptorTable(1, gpuAt(1));          // SRV render tex
+    cl->SetComputeRootDescriptorTable(2, gpuAt(2 + (UINT)slot)); // UAV FrameTensor[slot]
+    cl->Dispatch((m_Width + 15) / 16, (m_Height + 15) / 16, 1);
 }
 
+
+// ── recordUnpackCS ────────────────────────────────────────────────────────
+//
+// Record unpack compute shader into cl, including the COMMON↔UAV
+// barriers for the shared output texture.  Assumes m_CsDescHeap is
+// already bound before this call.
+
+void DirectMLFRUC::recordUnpackCS(ID3D12GraphicsCommandList* cl)
+{
+    // COMMON → UAV: D3D12 will write the shared output texture.
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource   = m_SharedOutputTex12.Get();
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    b.Transition.StateAfter  = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    cl->ResourceBarrier(1, &b);
+
+    auto gpuBase = m_CsDescHeap->GetGPUDescriptorHandleForHeapStart();
+    const UINT inc = m_CsDescIncrSize;
+    auto gpuAt = [&](UINT i) -> D3D12_GPU_DESCRIPTOR_HANDLE {
+        return { gpuBase.ptr + i * inc };
+    };
+
+    cl->SetComputeRootSignature(m_CsRS12.Get());
+    cl->SetPipelineState(m_UnpackPSO12.Get());
+    cl->SetComputeRootDescriptorTable(0, gpuAt(0)); // CBV
+    cl->SetComputeRootDescriptorTable(1, gpuAt(4)); // SRV OutputTensor
+    cl->SetComputeRootDescriptorTable(2, gpuAt(5)); // UAV output texture
+    cl->Dispatch((m_Width + 15) / 16, (m_Height + 15) / 16, 1);
+
+    // UAV → COMMON: hand the texture back so D3D11 can read it as SRV.
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
+    cl->ResourceBarrier(1, &b);
+}
+
+
+// ── runDMLDispatch ────────────────────────────────────────────────────────
+//
+// D6 flow:
+//   1. Pack current frame into FrameTensor[m_WriteSlot]  (CL on m_CsDescHeap)
+//   2a. ORT path: submit pre-CL, call runOrtInference() (which submits post-CL)
+//   2b. DML path: switch heap, DML dispatch, switch back, unpack CS — all one CL
 
 bool DirectMLFRUC::runDMLDispatch()
 {
-    if (m_UseOrt) {
-        bool ok = runOrtInference();
-        if (!ok) {
-            // ORT inference failed (e.g. shape mismatch, driver error).
-            // m_UseOrt was already cleared inside runOrtInference().
-            // If we have no inline graph to fall back to, return false
-            // so the frame is silently dropped rather than crashing.
-            if (!m_DMLCompiledOp) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] ORT inference failed and no inline DML graph "
-                            "is available — frame dropped. Check model resolution alignment.");
-                return false;
-            }
-            // Inline graph available (compiled on init before ORT loaded
-            // or after ORT failed). Fall through to the inline path.
-        } else {
-            return true;
-        }
-    }
-
-    if (!m_DMLCompiledOp) return false;  // should never happen; guard anyway
-
+    // ── 1. Build the pre-dispatch CL: pack CS + UAV barrier ───────────────
     m_CmdAlloc12->Reset();
     m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+    ID3D12DescriptorHeap* csHeaps[] = { m_CsDescHeap.Get() };
+    m_CmdList12->SetDescriptorHeaps(1, csHeaps);
+    recordPackCS(m_CmdList12.Get(), m_WriteSlot);
 
-    // Shared tensor resources start in COMMON. Promote to UAV so DML
-    // can bind them as UnorderedAccessView inputs/outputs, then demote
-    // back to COMMON after so D3D11 can use them on the next frame.
-    recordSharedTensorBarriers(m_CmdList12.Get(),
-                               D3D12_RESOURCE_STATE_COMMON,
-                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    // UAV barrier: pack wrote FrameTensor[m_WriteSlot], DML/ORT will read it.
+    D3D12_RESOURCE_BARRIER uavPack = {};
+    uavPack.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uavPack.UAV.pResource = m_FrameTensor[m_WriteSlot].Get();
+    m_CmdList12->ResourceBarrier(1, &uavPack);
 
-    ID3D12DescriptorHeap* heaps[] = { m_DMLDescHeap.Get() };
-    m_CmdList12->SetDescriptorHeaps(1, heaps);
-    m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), m_DMLCompiledOp.Get(), m_DMLBindingTable.Get());
+    // ── 2a. ORT path ──────────────────────────────────────────────────────
+    if (m_UseOrt) {
+        m_CmdList12->Close();
+        { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
 
-    recordSharedTensorBarriers(m_CmdList12.Get(),
-                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                               D3D12_RESOURCE_STATE_COMMON);
+        bool ok = runOrtInference();  // submits ORT work + post-unpack CL
+        if (ok) return true;
+
+        // ORT failed — fall through to inline DML if available.
+        if (!m_DMLCompiledOp) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] ORT inference failed and no inline DML graph "
+                        "available — frame dropped");
+            return false;
+        }
+        // The caller (submitFrame) skipped rebindPingPongInputs() because
+        // m_UseOrt was still true at frame start.  Now that we've switched
+        // to inline DML mid-frame, the binding table has no inputs for
+        // this frame — rebind before RecordDispatch, otherwise DML reads
+        // stale/empty inputs.
+        rebindPingPongInputs();
+
+        // Pack CL already executed; dispatch DML + unpack in a new CL.
+        m_CmdAlloc12->Reset();
+        m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+        ID3D12DescriptorHeap* dmlHeaps[] = { m_DMLDescHeap.Get() };
+        m_CmdList12->SetDescriptorHeaps(1, dmlHeaps);
+        m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), m_DMLCompiledOp.Get(),
+                                      m_DMLBindingTable.Get());
+        D3D12_RESOURCE_BARRIER uavOut = {};
+        uavOut.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavOut.UAV.pResource = m_OutputTensor.Get();
+        m_CmdList12->ResourceBarrier(1, &uavOut);
+        m_CmdList12->SetDescriptorHeaps(1, csHeaps);
+        recordUnpackCS(m_CmdList12.Get());
+        m_CmdList12->Close();
+        { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
+        return true;
+    }
+
+    // ── 2b. Inline DML path — continue in the same CL ─────────────────────
+    if (!m_DMLCompiledOp) return false;
+
+    ID3D12DescriptorHeap* dmlHeaps[] = { m_DMLDescHeap.Get() };
+    m_CmdList12->SetDescriptorHeaps(1, dmlHeaps);
+    m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), m_DMLCompiledOp.Get(),
+                                  m_DMLBindingTable.Get());
+
+    // UAV barrier: DML wrote OutputTensor, unpack CS will read it.
+    D3D12_RESOURCE_BARRIER uavOut = {};
+    uavOut.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uavOut.UAV.pResource = m_OutputTensor.Get();
+    m_CmdList12->ResourceBarrier(1, &uavOut);
+
+    // Switch back to CS heap, record unpack.
+    m_CmdList12->SetDescriptorHeaps(1, csHeaps);
+    recordUnpackCS(m_CmdList12.Get());
 
     m_CmdList12->Close();
-    ID3D12CommandList* cmds[] = { m_CmdList12.Get() };
-    m_Queue12->ExecuteCommandLists(1, cmds);
+    { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
     return true;
 }
 
 
+// ── tryLoadOnnxModel ──────────────────────────────────────────────────────
+
 bool DirectMLFRUC::tryLoadOnnxModel()
 {
-    // Users opt in to the ONNX path by dropping fruc.onnx into the
-    // app data directory (where the shader .fxc files live). No
-    // model present = silently use the inline DML graph.
     QString modelPath = Path::getDataFilePath(QStringLiteral("fruc.onnx"));
     if (modelPath.isEmpty() || !QFileInfo::exists(modelPath)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] No fruc.onnx at '%s' — using inline DML graph. "
-                    "Drop a 3-or-4-channel FP32 ONNX FRUC model there to enable the ORT path.",
+                    "[VIPLE-FRUC] No fruc.onnx at '%s' — using inline DML graph.",
                     modelPath.isEmpty() ? "(data dir)" : qPrintable(modelPath));
         return false;
     }
 
     try {
-        // Grab the DirectML EP API table.
         const OrtApi& ortApi = Ort::GetApi();
         if (auto* st = ortApi.GetExecutionProviderApi("DML", ORT_API_VERSION,
-                                                      reinterpret_cast<const void**>(&m_OrtDmlApi));
-            st != nullptr) {
+                reinterpret_cast<const void**>(&m_OrtDmlApi)); st != nullptr) {
             ortApi.ReleaseStatus(st);
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-FRUC] DirectML: ORT GetExecutionProviderApi(DML) failed");
@@ -803,62 +1077,51 @@ bool DirectMLFRUC::tryLoadOnnxModel()
         so.DisableMemPattern();
         so.SetExecutionMode(ORT_SEQUENTIAL);
         so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        // Route ORT onto our existing D3D12 queue and DML device so
-        // everything shares the same fence timeline.
         if (auto* st = m_OrtDmlApi->SessionOptionsAppendExecutionProvider_DML1(
-                so, m_DMLDevice.Get(), m_Queue12.Get());
-            st != nullptr) {
+                so, m_DMLDevice.Get(), m_Queue12.Get()); st != nullptr) {
             ortApi.ReleaseStatus(st);
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] DirectML: ORT SessionOptionsAppendExecutionProvider_DML1 failed");
+                        "[VIPLE-FRUC] DirectML: SessionOptionsAppendExecutionProvider_DML1 failed");
             return false;
         }
 
 #ifdef _WIN32
-        std::wstring wpath = modelPath.toStdWString();
-        m_OrtSession = std::make_unique<Ort::Session>(sharedOrtEnv(), wpath.c_str(), so);
+        m_OrtSession = std::make_unique<Ort::Session>(sharedOrtEnv(),
+                           modelPath.toStdWString().c_str(), so);
 #else
-        std::string apath = modelPath.toStdString();
-        m_OrtSession = std::make_unique<Ort::Session>(sharedOrtEnv(), apath.c_str(), so);
+        m_OrtSession = std::make_unique<Ort::Session>(sharedOrtEnv(),
+                           modelPath.toStdString().c_str(), so);
 #endif
 
-        // Validate shapes. Accepted contract for v1.2.4:
-        //   Inputs: 2 or 3 FP32 tensors. First two are NCHW images
-        //           [1, 3 or 4, H, W]. Third (if present) is a
-        //           timestep — any FP32 tensor whose element count
-        //           is 1 qualifies. RIFE v4+ exports this as [1],
-        //           FLAVR variants as [1,1,1,1], some as [1,1,H/k,W/k].
-        //   Output: 1 FP32 tensor [1, 3 or 4, H, W] with matching
-        //           channel count + spatial dims.
         const size_t inCount  = m_OrtSession->GetInputCount();
         const size_t outCount = m_OrtSession->GetOutputCount();
-        // Accept ≥1 outputs so models that export auxiliary tensors
-        // (optical-flow maps, confidence maps) aren't rejected — we
-        // only use the first output regardless.
-        if ((inCount != 2 && inCount != 3) || outCount < 1) {
+        // Supported layouts:
+        //   • 1 input  — concatenated [1, C, H, W] where C ∈ {6,7,8,9}
+        //                (prev + curr [+ timestep plane]).  RIFE v4.x lite.
+        //   • 2 inputs — separate prev + curr image tensors.
+        //   • 3 inputs — separate prev + curr + scalar timestep.
+        if ((inCount < 1 || inCount > 3) || outCount < 1) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] ONNX: want 2 or 3 inputs + ≥1 output (got %zu/%zu)",
+                        "[VIPLE-FRUC] ONNX: want 1-3 inputs + ≥1 output (got %zu/%zu)",
                         inCount, outCount);
-            m_OrtSession.reset();
-            return false;
+            m_OrtSession.reset(); return false;
         }
-        if (outCount > 1) {
+        if (outCount > 1)
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] ONNX: model has %zu outputs — using only the first",
-                        outCount);
-        }
+                        "[VIPLE-FRUC] ONNX: model has %zu outputs — using first only", outCount);
 
         Ort::AllocatorWithDefaultOptions alloc;
-        uint32_t detectedChannels = 0;
-        auto validateImage = [&](Ort::TypeInfo ti, const char* kind) -> bool {
+
+        // Helper: validate common image-tensor attrs (FP32, rank-4, H/W match).
+        // Sets *outChannels to shape[1] if known (> 0), else 0 for dynamic.
+        auto checkImageTensor = [&](Ort::TypeInfo ti, const char* kind,
+                                    int64_t* outChannels) -> bool {
             auto info  = ti.GetTensorTypeAndShapeInfo();
             auto shape = info.GetShape();
-            auto dtype = info.GetElementType();
-            if (dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] ONNX %s: expected FP32 (got dtype=%d). "
-                            "Convert FP16 models with onnxconverter_common.convert_float_to_float16.",
-                            kind, dtype);
+                            "[VIPLE-FRUC] ONNX %s: expected FP32 (got %d)", kind,
+                            (int)info.GetElementType());
                 return false;
             }
             if (shape.size() != 4) {
@@ -866,133 +1129,151 @@ bool DirectMLFRUC::tryLoadOnnxModel()
                             "[VIPLE-FRUC] ONNX %s: expected 4D NCHW (got %zu)", kind, shape.size());
                 return false;
             }
-            // Spatial dims must match stream resolution exactly (no
-            // padding handling yet — that's a follow-up round).
             if ((shape[2] > 0 && shape[2] != (int64_t)m_Height) ||
                 (shape[3] > 0 && shape[3] != (int64_t)m_Width)) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] ONNX %s: H/W mismatch (need [*,C,%u,%u])", kind,
-                            m_Height, m_Width);
+                            "[VIPLE-FRUC] ONNX %s: H/W mismatch (need [*,C,%u,%u])",
+                            kind, m_Height, m_Width);
                 return false;
             }
-            // Channel count: 3 or 4. First image input sets the
-            // detected count; everything else must agree.
-            int64_t c = shape[1];
-            if (c > 0 && c != 3 && c != 4) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] ONNX %s: only 3 or 4 channels supported (got %lld)",
-                            kind, (long long)c);
-                return false;
-            }
-            if (c > 0) {
-                if (detectedChannels == 0) {
-                    detectedChannels = (uint32_t)c;
-                } else if ((uint32_t)c != detectedChannels) {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-FRUC] ONNX %s: channel mismatch (was %u, got %lld)",
-                                kind, detectedChannels, (long long)c);
-                    return false;
-                }
-            }
+            if (outChannels) *outChannels = shape[1];
             return true;
         };
-        for (size_t i = 0; i < 2; ++i) {
-            if (!validateImage(m_OrtSession->GetInputTypeInfo(i), "image input")) {
+
+        // ── 1-input concatenated layout ───────────────────────────────────
+        if (inCount == 1) {
+            int64_t inC = 0;
+            if (!checkImageTensor(m_OrtSession->GetInputTypeInfo(0), "input", &inC)) {
                 m_OrtSession.reset(); return false;
             }
-            Ort::AllocatedStringPtr n = m_OrtSession->GetInputNameAllocated(i, alloc);
-            m_OrtInputNames.emplace_back(n.get());
-        }
-        // Third input = timestep scalar (RIFE v4+). We accept any
-        // FP32 tensor whose total element count resolves to 1 at
-        // runtime (shape [1], [1,1,1,1], etc.). Dynamic dims (-1)
-        // are treated as 1 for storage purposes. We feed 0.5.
-        if (inCount == 3) {
-            auto ti   = m_OrtSession->GetInputTypeInfo(2);
-            auto info = ti.GetTensorTypeAndShapeInfo();
-            if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            if (inC < 6 || inC > 9) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] ONNX timestep input: expected FP32 (got %d)",
-                            (int)info.GetElementType());
+                            "[VIPLE-FRUC] ONNX 1-input: concat channel count must be 6-9 "
+                            "(prev+curr, optionally +1 timestep plane) — got %lld",
+                            (long long)inC);
                 m_OrtSession.reset(); return false;
             }
-            // Materialise the shape: fold dynamic (-1) dims to 1.
-            auto rawShape = info.GetShape();
-            m_TimestepShape.clear();
-            int64_t tsElems = 1;
-            for (int64_t d : rawShape) {
-                int64_t concrete = (d > 0) ? d : 1;
-                m_TimestepShape.push_back(concrete);
-                tsElems *= concrete;
+            // Derive image channel count + timestep presence from concat C.
+            uint32_t imageCh = 0;
+            bool hasTs = false;
+            switch ((int)inC) {
+                case 6: imageCh = 3; hasTs = false; break;
+                case 7: imageCh = 3; hasTs = true;  break;
+                case 8: imageCh = 4; hasTs = false; break;
+                case 9: imageCh = 4; hasTs = true;  break;
             }
-            if (m_TimestepShape.empty()) {
-                // Scalar output with no shape dims — treat as [1].
-                m_TimestepShape.push_back(1);
-                tsElems = 1;
+            m_OrtConcatInput      = true;
+            m_ConcatChannels      = (uint32_t)inC;
+            m_ConcatImageChannels = imageCh;
+            m_ConcatHasTimestep   = hasTs;
+            m_ConcatShape         = { 1, inC, (int64_t)m_Height, (int64_t)m_Width };
+
+            // Output: accept 3 or 4 channels (auto-detect) with matching H/W.
+            int64_t outC = 0;
+            if (!checkImageTensor(m_OrtSession->GetOutputTypeInfo(0), "output", &outC)) {
+                m_OrtSession.reset(); return false;
             }
-            if (tsElems != 1) {
+            if (outC > 0 && outC != 3 && outC != 4) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] ONNX timestep: expected single-element tensor "
-                            "(got %lld elements) — use a model with a scalar timestep input",
-                            (long long)tsElems);
+                            "[VIPLE-FRUC] ONNX output: only 3 or 4 channels (got %lld)",
+                            (long long)outC);
                 m_OrtSession.reset(); return false;
             }
-            m_HasTimestep = true;
-            Ort::AllocatedStringPtr n = m_OrtSession->GetInputNameAllocated(2, alloc);
-            m_OrtInputNames.emplace_back(n.get());
+            m_ModelChannels = (outC > 0) ? (uint32_t)outC : imageCh;
+
+            m_OrtInputNames.emplace_back(m_OrtSession->GetInputNameAllocated(0, alloc).get());
+            m_OrtOutputNames.emplace_back(m_OrtSession->GetOutputNameAllocated(0, alloc).get());
         }
-        if (!validateImage(m_OrtSession->GetOutputTypeInfo(0), "output")) {
-            m_OrtSession.reset(); return false;
+        // ── 2/3-input separate layout ─────────────────────────────────────
+        else {
+            uint32_t detectedChannels = 0;
+            auto validateSeparate = [&](Ort::TypeInfo ti, const char* kind) -> bool {
+                int64_t c = 0;
+                if (!checkImageTensor(std::move(ti), kind, &c)) return false;
+                if (c > 0 && c != 3 && c != 4) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC] ONNX %s: only 3 or 4 channels (got %lld)",
+                                kind, (long long)c);
+                    return false;
+                }
+                if (c > 0) {
+                    if (detectedChannels == 0) detectedChannels = (uint32_t)c;
+                    else if ((uint32_t)c != detectedChannels) {
+                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-FRUC] ONNX %s: channel mismatch (was %u, got %lld)",
+                                    kind, detectedChannels, (long long)c);
+                        return false;
+                    }
+                }
+                return true;
+            };
+            for (size_t i = 0; i < 2; ++i) {
+                if (!validateSeparate(m_OrtSession->GetInputTypeInfo(i), "image input")) {
+                    m_OrtSession.reset(); return false;
+                }
+                m_OrtInputNames.emplace_back(m_OrtSession->GetInputNameAllocated(i, alloc).get());
+            }
+            if (inCount == 3) {
+                auto ti   = m_OrtSession->GetInputTypeInfo(2);
+                auto info = ti.GetTensorTypeAndShapeInfo();
+                if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC] ONNX timestep: expected FP32 (got %d)",
+                                (int)info.GetElementType());
+                    m_OrtSession.reset(); return false;
+                }
+                m_TimestepShape.clear();
+                int64_t tsElems = 1;
+                for (int64_t d : info.GetShape()) {
+                    int64_t c = (d > 0) ? d : 1;
+                    m_TimestepShape.push_back(c);
+                    tsElems *= c;
+                }
+                if (m_TimestepShape.empty()) { m_TimestepShape.push_back(1); tsElems = 1; }
+                if (tsElems != 1) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC] ONNX timestep: expected scalar (got %lld elements)",
+                                (long long)tsElems);
+                    m_OrtSession.reset(); return false;
+                }
+                m_HasTimestep = true;
+                m_OrtInputNames.emplace_back(m_OrtSession->GetInputNameAllocated(2, alloc).get());
+            }
+            if (!validateSeparate(m_OrtSession->GetOutputTypeInfo(0), "output")) {
+                m_OrtSession.reset(); return false;
+            }
+            m_OrtOutputNames.emplace_back(m_OrtSession->GetOutputNameAllocated(0, alloc).get());
+            m_ModelChannels = detectedChannels ? detectedChannels : 4;
         }
-        {
-            Ort::AllocatedStringPtr n = m_OrtSession->GetOutputNameAllocated(0, alloc);
-            m_OrtOutputNames.emplace_back(n.get());
-        }
+
         for (auto& s : m_OrtInputNames)  m_OrtInputNamesCStr.push_back(s.c_str());
         for (auto& s : m_OrtOutputNames) m_OrtOutputNamesCStr.push_back(s.c_str());
 
-        // Default detectedChannels to 4 if every dim was dynamic
-        // (model didn't fix channel at export). That preserves the
-        // 4-channel output path for RGBA pipelines.
-        m_ModelChannels = detectedChannels ? detectedChannels : 4;
-
-        // 3-channel models leave plane 3 of our output buffer
-        // untouched; flip useAlpha=0 so the unpack shader writes
-        // alpha=1 instead of reading stale data.
-        if (m_ModelChannels == 3) {
+        // 3-channel model: flip useAlpha=0 in the D3D12 constant buffer.
+        if (m_ModelChannels == 3 && m_CsCBMapped) {
             PackCBData cbData = { m_Width, m_Height, 0, 0 };
-            ComPtr<ID3D11DeviceContext> ctx;
-            m_Device11->GetImmediateContext(&ctx);
-            ctx->UpdateSubresource(m_PackConstBuf.Get(), 0, nullptr, &cbData, 0, 0);
+            std::memcpy(m_CsCBMapped, &cbData, sizeof(cbData));
         }
 
-        // Allocate the timestep resource (tiny FP32 buffer, 16 B
-        // for alignment) and wrap it as an ORT allocation.
+        // Timestep resource: tiny D3D12 buffer, constant 0.5f.
         if (m_HasTimestep) {
             D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
             D3D12_RESOURCE_DESC rd = {};
             rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            rd.Width = 256;  // min alignment for buffer
-            rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+            rd.Width = 256; rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
             rd.SampleDesc.Count = 1;
             rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
             rd.Flags  = D3D12_RESOURCE_FLAG_NONE;
-            if (FAILED(m_Device12->CreateCommittedResource(
-                    &hp, D3D12_HEAP_FLAG_NONE, &rd,
+            if (FAILED(m_Device12->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                     IID_PPV_ARGS(&m_TimestepResource)))) {
                 m_OrtSession.reset(); return false;
             }
-            // Upload 0.5f into the first 4 bytes via a transient
-            // UPLOAD heap + CopyBufferRegion on the queue.
             D3D12_HEAP_PROPERTIES uhp = {}; uhp.Type = D3D12_HEAP_TYPE_UPLOAD;
             ComPtr<ID3D12Resource> up;
-            D3D12_RESOURCE_DESC urd = rd;
-            urd.Flags = D3D12_RESOURCE_FLAG_NONE;
-            if (FAILED(m_Device12->CreateCommittedResource(
-                    &uhp, D3D12_HEAP_FLAG_NONE, &urd,
-                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                    IID_PPV_ARGS(&up)))) {
+            D3D12_RESOURCE_DESC urd = rd; urd.Flags = D3D12_RESOURCE_FLAG_NONE;
+            if (FAILED(m_Device12->CreateCommittedResource(&uhp, D3D12_HEAP_FLAG_NONE, &urd,
+                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&up)))) {
                 m_OrtSession.reset(); return false;
             }
             void* mapped = nullptr;
@@ -1013,11 +1294,9 @@ bool DirectMLFRUC::tryLoadOnnxModel()
             b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             m_CmdList12->ResourceBarrier(1, &b);
             m_CmdList12->Close();
-            ID3D12CommandList* cmds[] = { m_CmdList12.Get() };
-            m_Queue12->ExecuteCommandLists(1, cmds);
+            { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
             m_FenceValue++;
             m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
-            // Small sync (timestep is persistent, only uploaded once).
             HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
             if (m_Fence12->GetCompletedValue() < m_FenceValue) {
                 m_Fence12->SetEventOnCompletion(m_FenceValue, ev);
@@ -1026,60 +1305,169 @@ bool DirectMLFRUC::tryLoadOnnxModel()
             CloseHandle(ev);
 
             if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(
-                    m_TimestepResource.Get(), &m_OrtAllocTimestep);
-                st != nullptr) {
+                    m_TimestepResource.Get(), &m_OrtAllocTimestep); st != nullptr) {
+                ortApi.ReleaseStatus(st); m_OrtSession.reset(); return false;
+            }
+        }
+
+        // ── ConcatTensor for 1-input concat models ────────────────────────
+        if (m_OrtConcatInput) {
+            const uint64_t concatBytes =
+                (uint64_t)m_ConcatChannels * m_Height * m_Width * sizeof(float);
+            const uint64_t planeBytes  = (uint64_t)m_Height * m_Width * sizeof(float);
+
+            D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC rd = {};
+            rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+            rd.Width            = alignUp(concatBytes, 256);
+            rd.Height           = 1;
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels        = 1;
+            rd.SampleDesc.Count = 1;
+            rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            // Land in UAV state to match every other tensor buffer — the
+            // per-frame runOrtInference() flow issues UAV→COPY_DEST before
+            // its copies and COPY_DEST→UAV after.
+            if (FAILED(m_Device12->CreateCommittedResource(
+                    &hp, D3D12_HEAP_FLAG_NONE, &rd,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                    IID_PPV_ARGS(&m_ConcatTensor)))) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] DirectML: ConcatTensor alloc (%llu B) failed",
+                            (unsigned long long)rd.Width);
+                m_OrtSession.reset(); return false;
+            }
+
+            // Initialize timestep plane (plane 2*imageCh) to all-0.5 floats,
+            // if the model has one.  The plane is written once at load-time
+            // and left untouched by per-frame copies.
+            if (m_ConcatHasTimestep) {
+                const uint64_t tsOffset = 2ull * m_ConcatImageChannels * planeBytes;
+
+                D3D12_HEAP_PROPERTIES uhp = {}; uhp.Type = D3D12_HEAP_TYPE_UPLOAD;
+                D3D12_RESOURCE_DESC urd = {};
+                urd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+                urd.Width            = alignUp(planeBytes, 256);
+                urd.Height           = 1;
+                urd.DepthOrArraySize = 1;
+                urd.MipLevels        = 1;
+                urd.SampleDesc.Count = 1;
+                urd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                ComPtr<ID3D12Resource> up;
+                if (FAILED(m_Device12->CreateCommittedResource(
+                        &uhp, D3D12_HEAP_FLAG_NONE, &urd,
+                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&up)))) {
+                    m_OrtSession.reset(); return false;
+                }
+                void* mapped = nullptr;
+                D3D12_RANGE noRead = { 0, 0 };
+                up->Map(0, &noRead, &mapped);
+                const uint32_t planeElems = m_Height * m_Width;
+                std::fill_n(reinterpret_cast<float*>(mapped), planeElems, m_TimestepValue);
+                D3D12_RANGE written = { 0, (SIZE_T)planeBytes };
+                up->Unmap(0, &written);
+
+                m_CmdAlloc12->Reset();
+                m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+                D3D12_RESOURCE_BARRIER pre = {};
+                pre.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                pre.Transition.pResource   = m_ConcatTensor.Get();
+                pre.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                pre.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+                pre.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                m_CmdList12->ResourceBarrier(1, &pre);
+                m_CmdList12->CopyBufferRegion(m_ConcatTensor.Get(), tsOffset,
+                                              up.Get(), 0, planeBytes);
+                D3D12_RESOURCE_BARRIER post = pre;
+                post.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+                post.Transition.StateAfter  = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                m_CmdList12->ResourceBarrier(1, &post);
+                m_CmdList12->Close();
+                { ID3D12CommandList* c[] = { m_CmdList12.Get() };
+                  m_Queue12->ExecuteCommandLists(1, c); }
+                m_FenceValue++;
+                m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
+                HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                if (m_Fence12->GetCompletedValue() < m_FenceValue) {
+                    m_Fence12->SetEventOnCompletion(m_FenceValue, ev);
+                    WaitForSingleObject(ev, 500);
+                }
+                CloseHandle(ev);
+            }
+
+            if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(
+                    m_ConcatTensor.Get(), &m_OrtAllocConcat); st != nullptr) {
                 ortApi.ReleaseStatus(st);
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] DirectML: CreateGPUAllocationFromD3DResource(concat) failed");
                 m_OrtSession.reset(); return false;
             }
         }
 
-        // Wrap our shared D3D12 tensors as DML allocations. These
-        // don't copy memory; ORT holds a reference to the resource
-        // and binds it directly as tensor memory.
-        if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(m_FrameTensor[0].Get(), &m_OrtAllocFrame[0]);
-            st != nullptr) { ortApi.ReleaseStatus(st); m_OrtSession.reset(); return false; }
-        if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(m_FrameTensor[1].Get(), &m_OrtAllocFrame[1]);
-            st != nullptr) { ortApi.ReleaseStatus(st); m_OrtSession.reset(); return false; }
-        if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(m_OutputTensor.Get(), &m_OrtAllocOutput);
-            st != nullptr) { ortApi.ReleaseStatus(st); m_OrtSession.reset(); return false; }
+        // Wrap tensor resources as ORT DML allocations (no copy).
+        if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(
+                m_FrameTensor[0].Get(), &m_OrtAllocFrame[0]); st != nullptr) {
+            ortApi.ReleaseStatus(st); m_OrtSession.reset(); return false;
+        }
+        if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(
+                m_FrameTensor[1].Get(), &m_OrtAllocFrame[1]); st != nullptr) {
+            ortApi.ReleaseStatus(st); m_OrtSession.reset(); return false;
+        }
+        if (auto* st = m_OrtDmlApi->CreateGPUAllocationFromD3DResource(
+                m_OutputTensor.Get(), &m_OrtAllocOutput); st != nullptr) {
+            ortApi.ReleaseStatus(st); m_OrtSession.reset(); return false;
+        }
 
         m_UseOrt = true;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] ONNX model loaded: %s",
-                    qPrintable(modelPath));
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC]   contract: %u-ch FP32%s (inputs: %s, %s%s%s; output: %s)",
-                    m_ModelChannels,
-                    m_HasTimestep ? " + timestep" : "",
-                    m_OrtInputNamesCStr[0], m_OrtInputNamesCStr[1],
-                    m_HasTimestep ? ", " : "",
-                    m_HasTimestep ? m_OrtInputNamesCStr[2] : "",
-                    m_OrtOutputNamesCStr[0]);
+                    "[VIPLE-FRUC] ONNX model loaded: %s", qPrintable(modelPath));
+        if (m_OrtConcatInput) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC]   contract: concat [%u ch = 2×%u%s] → %u-ch (input: %s, output: %s)",
+                        m_ConcatChannels, m_ConcatImageChannels,
+                        m_ConcatHasTimestep ? " + timestep plane" : "",
+                        m_ModelChannels,
+                        m_OrtInputNamesCStr[0], m_OrtOutputNamesCStr[0]);
+        } else {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC]   contract: %u-ch FP32%s (inputs: %s, %s%s%s; output: %s)",
+                        m_ModelChannels,
+                        m_HasTimestep ? " + timestep" : "",
+                        m_OrtInputNamesCStr[0], m_OrtInputNamesCStr[1],
+                        m_HasTimestep ? ", " : "",
+                        m_HasTimestep ? m_OrtInputNamesCStr[2] : "",
+                        m_OrtOutputNamesCStr[0]);
+        }
         return true;
+
     } catch (const Ort::Exception& e) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] ONNX model load failed (OrtException): %s", e.what());
-        m_OrtSession.reset();
-        m_TimestepShape.clear();
-        m_HasTimestep = false;
-        return false;
     } catch (const std::exception& e) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] ONNX model load failed (std::exception): %s", e.what());
-        m_OrtSession.reset();
-        m_TimestepShape.clear();
-        m_HasTimestep = false;
-        return false;
     } catch (...) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] ONNX model load failed (unknown exception)");
-        m_OrtSession.reset();
-        m_TimestepShape.clear();
-        m_HasTimestep = false;
-        return false;
     }
+    m_OrtSession.reset();
+    m_TimestepShape.clear();
+    m_HasTimestep         = false;
+    m_OrtConcatInput      = false;
+    m_ConcatChannels      = 0;
+    m_ConcatImageChannels = 0;
+    m_ConcatHasTimestep   = false;
+    m_ConcatShape.clear();
+    return false;
 }
 
+
+// ── runOrtInference ───────────────────────────────────────────────────────
+//
+// Called from runDMLDispatch() AFTER the pre-CL (pack CS + UAV barrier)
+// has already been submitted.  Runs ORT inference on the DML EP, then
+// submits the post-unpack CL on m_PostCmdList12.
 
 bool DirectMLFRUC::runOrtInference()
 {
@@ -1088,81 +1476,148 @@ bool DirectMLFRUC::runOrtInference()
         int prevSlot = 1 - m_WriteSlot;
         int currSlot = m_WriteSlot;
 
-        // Pre-dispatch: promote shared tensors COMMON → UAV so the
-        // DML EP can bind them as unordered-access inputs/outputs.
-        // Submitted to our queue so the GPU-side ordering is correct.
-        m_CmdAlloc12->Reset();
-        m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
-        recordSharedTensorBarriers(m_CmdList12.Get(),
-                                   D3D12_RESOURCE_STATE_COMMON,
-                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        m_CmdList12->Close();
-        {
-            ID3D12CommandList* preCmds[] = { m_CmdList12.Get() };
-            m_Queue12->ExecuteCommandLists(1, preCmds);
+        // ── Concat-input path: build the concatenated input tensor ───────
+        // Reuses m_PostCmdAlloc12 so m_CmdAlloc12 (still tracking the
+        // pack CL submitted in runDMLDispatch) is free to be reused for
+        // the post-unpack CL.
+        if (m_OrtConcatInput) {
+            const uint64_t planeBytes  = (uint64_t)m_Height * m_Width * sizeof(float);
+            const uint64_t imgBlockBytes = (uint64_t)m_ConcatImageChannels * planeBytes;
+
+            m_PostCmdAlloc12->Reset();
+            m_PostCmdList12->Reset(m_PostCmdAlloc12.Get(), nullptr);
+
+            // Pre-transitions:
+            //   FrameTensor[prev,curr]: UAV     -> COPY_SOURCE
+            //   ConcatTensor:           (init=COPY_DEST on first frame,
+            //                            UAV on subsequent) -> COPY_DEST
+            // We always issue UAV -> COPY_DEST for ConcatTensor; on the
+            // first frame D3D12 accepts UAV↔COPY_DEST as a promotion/decay
+            // since the resource was created in COPY_DEST.  To keep the
+            // transition strictly valid, we bump state to UAV once at
+            // load time (inside tryLoadOnnxModel) via an implicit
+            // promotion on the first ORT binding.  In practice ConcatTensor
+            // lives in UAV by the time we get here.
+            D3D12_RESOURCE_BARRIER preBars[3] = {};
+            for (int i = 0; i < 3; ++i) {
+                preBars[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                preBars[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                preBars[i].Transition.StateAfter  = (i < 2)
+                    ? D3D12_RESOURCE_STATE_COPY_SOURCE
+                    : D3D12_RESOURCE_STATE_COPY_DEST;
+                preBars[i].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
+            preBars[0].Transition.pResource = m_FrameTensor[prevSlot].Get();
+            preBars[1].Transition.pResource = m_FrameTensor[currSlot].Get();
+            preBars[2].Transition.pResource = m_ConcatTensor.Get();
+            m_PostCmdList12->ResourceBarrier(3, preBars);
+
+            // Copy prev image planes (planes 0..imageCh-1 of FrameTensor[prev])
+            // to planes 0..imageCh-1 of ConcatTensor.
+            m_PostCmdList12->CopyBufferRegion(m_ConcatTensor.Get(), 0,
+                                              m_FrameTensor[prevSlot].Get(), 0,
+                                              imgBlockBytes);
+            // Copy curr image planes to planes imageCh..2*imageCh-1.
+            m_PostCmdList12->CopyBufferRegion(m_ConcatTensor.Get(), imgBlockBytes,
+                                              m_FrameTensor[currSlot].Get(), 0,
+                                              imgBlockBytes);
+            // Timestep plane (if present) was filled at load time and
+            // is left untouched here.
+
+            // Post-transitions: back to UAV for ORT to read.
+            D3D12_RESOURCE_BARRIER postBars[3] = {};
+            for (int i = 0; i < 3; ++i) {
+                postBars[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                postBars[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                postBars[i].Transition.StateBefore = (i < 2)
+                    ? D3D12_RESOURCE_STATE_COPY_SOURCE
+                    : D3D12_RESOURCE_STATE_COPY_DEST;
+                postBars[i].Transition.StateAfter  = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
+            postBars[0].Transition.pResource = m_FrameTensor[prevSlot].Get();
+            postBars[1].Transition.pResource = m_FrameTensor[currSlot].Get();
+            postBars[2].Transition.pResource = m_ConcatTensor.Get();
+            m_PostCmdList12->ResourceBarrier(3, postBars);
+
+            m_PostCmdList12->Close();
+            { ID3D12CommandList* c[] = { m_PostCmdList12.Get() };
+              m_Queue12->ExecuteCommandLists(1, c); }
         }
 
         Ort::MemoryInfo mem("DML", OrtDeviceAllocator, 0, OrtMemTypeDefault);
 
-        // The shared buffer is always laid out 4-plane RGBA; a 3-
-        // channel model simply reads/writes planes 0-2 and leaves
-        // plane 3 alone. Byte count shrinks to 3/4 of the full
-        // tensor so ORT's bounds check stays happy.
-        const uint32_t ch = m_ModelChannels;
-        const uint64_t imgBytes = (uint64_t)ch * m_Height * m_Width * sizeof(float);
-        std::array<int64_t, 4> shape = { 1, (int64_t)ch, (int64_t)m_Height, (int64_t)m_Width };
-
-        Ort::Value prev = Ort::Value::CreateTensor(
-            mem, m_OrtAllocFrame[prevSlot], imgBytes,
-            shape.data(), shape.size(),
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-        Ort::Value curr = Ort::Value::CreateTensor(
-            mem, m_OrtAllocFrame[currSlot], imgBytes,
-            shape.data(), shape.size(),
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-        Ort::Value out = Ort::Value::CreateTensor(
-            mem, m_OrtAllocOutput, imgBytes,
-            shape.data(), shape.size(),
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-
-        // Timestep tensor: single-element FP32 = 0.5, persistent.
-        // Use the shape as declared by the model (m_TimestepShape,
-        // resolved at load time). Common cases: [1], [1,1,1,1].
+        // ── Build ORT input list + run ───────────────────────────────────
+        // Ort::Value has no default constructor — initialise with
+        // nullptr and std::move an actual value in below.
         std::vector<Ort::Value> inputs;
-        inputs.reserve(3);
-        inputs.emplace_back(std::move(prev));
-        inputs.emplace_back(std::move(curr));
-        if (m_HasTimestep) {
-            const auto& ts = m_TimestepShape.empty()
-                             ? std::vector<int64_t>{ 1 } : m_TimestepShape;
-            Ort::Value t = Ort::Value::CreateTensor(
-                mem, m_OrtAllocTimestep, sizeof(float),
-                ts.data(), ts.size(),
-                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-            inputs.emplace_back(std::move(t));
+        Ort::Value out{nullptr};
+
+        if (m_OrtConcatInput) {
+            const uint64_t concatBytes =
+                (uint64_t)m_ConcatChannels * m_Height * m_Width * sizeof(float);
+            inputs.reserve(1);
+            inputs.emplace_back(Ort::Value::CreateTensor(
+                mem, m_OrtAllocConcat, concatBytes,
+                m_ConcatShape.data(), m_ConcatShape.size(),
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT));
+
+            const uint32_t outCh = m_ModelChannels;
+            const uint64_t outBytes = (uint64_t)outCh * m_Height * m_Width * sizeof(float);
+            std::array<int64_t, 4> outShape = { 1, (int64_t)outCh,
+                                                (int64_t)m_Height, (int64_t)m_Width };
+            out = Ort::Value::CreateTensor(mem, m_OrtAllocOutput, outBytes,
+                                           outShape.data(), outShape.size(),
+                                           ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+        } else {
+            const uint32_t ch       = m_ModelChannels;
+            const uint64_t imgBytes = (uint64_t)ch * m_Height * m_Width * sizeof(float);
+            std::array<int64_t, 4> shape = { 1, (int64_t)ch,
+                                             (int64_t)m_Height, (int64_t)m_Width };
+
+            inputs.reserve(3);
+            inputs.emplace_back(Ort::Value::CreateTensor(
+                mem, m_OrtAllocFrame[prevSlot], imgBytes,
+                shape.data(), shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT));
+            inputs.emplace_back(Ort::Value::CreateTensor(
+                mem, m_OrtAllocFrame[currSlot], imgBytes,
+                shape.data(), shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT));
+            if (m_HasTimestep) {
+                const auto& ts = m_TimestepShape.empty()
+                                 ? std::vector<int64_t>{ 1 } : m_TimestepShape;
+                inputs.emplace_back(Ort::Value::CreateTensor(
+                    mem, m_OrtAllocTimestep, sizeof(float),
+                    ts.data(), ts.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT));
+            }
+            out = Ort::Value::CreateTensor(mem, m_OrtAllocOutput, imgBytes,
+                                           shape.data(), shape.size(),
+                                           ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
         }
 
         Ort::RunOptions ro;
-        m_OrtSession->Run(
-            ro,
-            m_OrtInputNamesCStr.data(), inputs.data(), inputs.size(),
+        m_OrtSession->Run(ro,
+            m_OrtInputNamesCStr.data(),  inputs.data(), inputs.size(),
             m_OrtOutputNamesCStr.data(), &out, 1);
 
-        // Post-dispatch: demote shared tensors UAV → COMMON so D3D11
-        // can safely read/write them via the pack/unpack shaders.
-        // Uses the secondary barrier allocator so we don't have to
-        // stall waiting for the pre-dispatch command list to complete.
-        m_BarrierCmdAlloc12->Reset();
-        m_BarrierCmdList12->Reset(m_BarrierCmdAlloc12.Get(), nullptr);
-        recordSharedTensorBarriers(m_BarrierCmdList12.Get(),
-                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                   D3D12_RESOURCE_STATE_COMMON);
-        m_BarrierCmdList12->Close();
-        {
-            ID3D12CommandList* postCmds[] = { m_BarrierCmdList12.Get() };
-            m_Queue12->ExecuteCommandLists(1, postCmds);
-        }
+        // ── Post-ORT CL: UAV barrier on OutputTensor + unpack CS ─────────
+        // Uses m_CmdAlloc12; by this point the pack pre-CL submitted in
+        // runDMLDispatch has had plenty of GPU time.
+        m_CmdAlloc12->Reset();
+        m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+        ID3D12DescriptorHeap* csHeaps[] = { m_CsDescHeap.Get() };
+        m_CmdList12->SetDescriptorHeaps(1, csHeaps);
+
+        D3D12_RESOURCE_BARRIER uavOut = {};
+        uavOut.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavOut.UAV.pResource = m_OutputTensor.Get();
+        m_CmdList12->ResourceBarrier(1, &uavOut);
+
+        recordUnpackCS(m_CmdList12.Get());
+        m_CmdList12->Close();
+        { ID3D12CommandList* c[] = { m_CmdList12.Get() };
+          m_Queue12->ExecuteCommandLists(1, c); }
+
         return true;
+
     } catch (const Ort::Exception& e) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] ONNX Run() failed, disabling ORT path: %s", e.what());
@@ -1172,28 +1627,7 @@ bool DirectMLFRUC::runOrtInference()
 }
 
 
-void DirectMLFRUC::runUnpackCS(ID3D11DeviceContext4* ctx4)
-{
-    ID3D11ShaderResourceView*   nullSRVs[1] = { nullptr };
-    ID3D11UnorderedAccessView*  nullUAVs[1] = { nullptr };
-    UINT initialCounts = 0;
-
-    ctx4->CSSetShader(m_UnpackCS.Get(), nullptr, 0);
-    ID3D11ShaderResourceView* srv = m_OutputBufferSRV11.Get();
-    ctx4->CSSetShaderResources(0, 1, &srv);
-    ID3D11UnorderedAccessView* uav = m_OutputUAV.Get();
-    ctx4->CSSetUnorderedAccessViews(0, 1, &uav, &initialCounts);
-    ID3D11Buffer* cb = m_PackConstBuf.Get();
-    ctx4->CSSetConstantBuffers(0, 1, &cb);
-
-    UINT gx = (m_Width  + 15) / 16;
-    UINT gy = (m_Height + 15) / 16;
-    ctx4->Dispatch(gx, gy, 1);
-
-    ctx4->CSSetUnorderedAccessViews(0, 1, nullUAVs, &initialCounts);
-    ctx4->CSSetShaderResources(0, 1, nullSRVs);
-}
-
+// ── submitFrame ───────────────────────────────────────────────────────────
 
 bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
 {
@@ -1201,57 +1635,66 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
 
     LARGE_INTEGER t0; QueryPerformanceCounter(&t0);
 
-    // Pack/unpack require ID3D11DeviceContext4 for Signal/Wait.
     ComPtr<ID3D11DeviceContext4> ctx4;
     if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx4)))) return false;
 
-    // Unbind RTV — same reason as v1.1.143; the render path leaves
-    // the FRUC RTV attached when it calls us.
+    // Unbind RTV: ensures D3D12 can safely read the render texture.
     ID3D11RenderTargetView* nullRTV = nullptr;
     ctx4->OMSetRenderTargets(1, &nullRTV, nullptr);
 
-    // First frame: pack into slot 0 and bail. The write becomes
-    // visible to D3D12 (for next frame's DML read) via the fence
-    // signal that we emit here.
+    // D3D11 signals N: "render texture is ready."
+    m_FenceValue++;
+    ctx4->Signal(m_Fence11.Get(), m_FenceValue);
+    // D3D12 queue waits before touching the render texture.
+    m_Queue12->Wait(m_Fence12.Get(), m_FenceValue);
+
+    // First frame: pack slot 0 only; no interpolation output yet.
     if (m_FrameCount == 0) {
-        runPackCS(ctx4.Get(), 0);
+        m_CmdAlloc12->Reset();
+        m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+        ID3D12DescriptorHeap* heaps[] = { m_CsDescHeap.Get() };
+        m_CmdList12->SetDescriptorHeaps(1, heaps);
+        recordPackCS(m_CmdList12.Get(), 0);
+        m_CmdList12->Close();
+        { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
+
+        // Signal D3D11 back so it can proceed to render the next frame.
         m_FenceValue++;
-        ctx4->Signal(m_Fence11.Get(), m_FenceValue);
-        m_Queue12->Wait(m_Fence12.Get(), m_FenceValue);
+        m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
+        ctx4->Wait(m_Fence11.Get(), m_FenceValue);
+
         m_WriteSlot = 1;
         m_FrameCount++;
         return false;
     }
 
-    // Pack current render into the write slot and make D3D12 wait
-    // for it before dispatching DML.
-    runPackCS(ctx4.Get(), m_WriteSlot);
-    m_FenceValue++;
-    ctx4->Signal(m_Fence11.Get(), m_FenceValue);
-    m_Queue12->Wait(m_Fence12.Get(), m_FenceValue);
-
-    // ORT path uses its own input binding built per-frame inside
-    // runOrtInference; the hand-authored DML graph uses our binding
-    // table and needs the ping-pong rebind each frame.
+    // Frames 1+: pack + FRUC + unpack.
     if (!m_UseOrt) rebindPingPongInputs();
-    runDMLDispatch();
+
+    bool ok = runDMLDispatch();  // internally: pack CS + DML/ORT + unpack CS
+
+    // D3D12 signals N+1: "output texture is written."
     m_FenceValue++;
     m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
+    // D3D11 waits before blitting the output texture.
     ctx4->Wait(m_Fence11.Get(), m_FenceValue);
-
-    runUnpackCS(ctx4.Get());
 
     m_WriteSlot = 1 - m_WriteSlot;
     m_FrameCount++;
+
+    if (!ok) return false;
 
     LARGE_INTEGER t1, freq;
     QueryPerformanceCounter(&t1);
     QueryPerformanceFrequency(&freq);
     double dtMs = 1000.0 * (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart;
-    m_LastInterpMs = (m_LastInterpMs == 0.0) ? dtMs : (m_LastInterpMs * 0.9375 + dtMs * 0.0625);
+    m_LastInterpMs = (m_LastInterpMs == 0.0) ? dtMs
+                   : (m_LastInterpMs * 0.9375 + dtMs * 0.0625);
     return true;
 }
 
+
+// ── skipFrame ─────────────────────────────────────────────────────────────
 
 void DirectMLFRUC::skipFrame(ID3D11DeviceContext* ctx)
 {
