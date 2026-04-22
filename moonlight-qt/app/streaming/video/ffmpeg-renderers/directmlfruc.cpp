@@ -619,13 +619,18 @@ bool DirectMLFRUC::createD3D12CsPipeline()
 bool DirectMLFRUC::compileDMLGraph()
 {
     const uint32_t sizes[4]   = { 1u, 4u, m_Height, m_Width };
-    const uint32_t strides[4] = { 4u * m_Height * m_Width, m_Height * m_Width, m_Width, 1u };
 
     DML_BUFFER_TENSOR_DESC bufDesc = {};
     bufDesc.DataType               = kDmlDtype;
     bufDesc.DimensionCount         = 4;
     bufDesc.Sizes                  = sizes;
-    bufDesc.Strides                = strides;
+    // Strides intentionally NULL — DML treats null strides as
+    // "tightly packed NCHW" which matches our actual memory layout.
+    // Passing explicit strides that *equal* the packed layout is
+    // logically correct but some DirectML driver revisions hit bugs
+    // on the explicit path; null is the canonical hint that the
+    // tensor is packed.
+    bufDesc.Strides                = nullptr;
     bufDesc.TotalTensorSizeInBytes = m_TensorBytes;
     DML_TENSOR_DESC td = { DML_TENSOR_TYPE_BUFFER, &bufDesc };
 
@@ -796,14 +801,20 @@ bool DirectMLFRUC::compileDMLGraph()
     if (!allocBuf(tempBytes, m_TempResource, "DML Temp"))                              return false;
     if (!allocBuf(execProps.PersistentResourceSize, m_PersistentResource, "DML Pers")) return false;
 
-    // ── Initializer dispatch ──────────────────────────────────────────────
+    // ── Binding table — single instance, Reset() between init and
+    //    exec phases.  Matches the Microsoft HelloDirectML reference
+    //    pattern.  Previous revision created a second binding table
+    //    on the same descriptor heap range for the exec phase; on
+    //    some drivers that returned DXGI_ERROR_DEVICE_REMOVED (even
+    //    though GetDeviceRemovedReason still returned S_OK, i.e. the
+    //    device was fine — it was a DML-level validation error).
+    //    Reusing one table with Reset() sidesteps the collision.
     DML_BINDING_TABLE_DESC btd = {};
     btd.Dispatchable        = initializer.Get();
     btd.CPUDescriptorHandle = m_DMLDescHeap->GetCPUDescriptorHandleForHeapStart();
     btd.GPUDescriptorHandle = m_DMLDescHeap->GetGPUDescriptorHandleForHeapStart();
     btd.SizeInDescriptors   = descCount;
-    ComPtr<IDMLBindingTable> initBinding;
-    if (FAILED(hr = m_DMLDevice->CreateBindingTable(&btd, IID_PPV_ARGS(&initBinding)))) {
+    if (FAILED(hr = m_DMLDevice->CreateBindingTable(&btd, IID_PPV_ARGS(&m_DMLBindingTable)))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] DirectML: CreateBindingTable(init) failed 0x%08lx", hr);
         return false;
@@ -811,20 +822,20 @@ bool DirectMLFRUC::compileDMLGraph()
     if (m_TempResource) {
         DML_BUFFER_BINDING tb = { m_TempResource.Get(), 0, m_TempResource->GetDesc().Width };
         DML_BINDING_DESC   tbd = { DML_BINDING_TYPE_BUFFER, &tb };
-        initBinding->BindTemporaryResource(&tbd);
+        m_DMLBindingTable->BindTemporaryResource(&tbd);
     }
     if (m_PersistentResource) {
         DML_BUFFER_BINDING pb = { m_PersistentResource.Get(), 0,
                                   m_PersistentResource->GetDesc().Width };
         DML_BINDING_DESC   pbd = { DML_BINDING_TYPE_BUFFER, &pb };
-        initBinding->BindOutputs(1, &pbd);
+        m_DMLBindingTable->BindOutputs(1, &pbd);
     }
 
     m_CmdAlloc12->Reset();
     m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
     ID3D12DescriptorHeap* initHeaps[] = { m_DMLDescHeap.Get() };
     m_CmdList12->SetDescriptorHeaps(1, initHeaps);
-    m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), initializer.Get(), initBinding.Get());
+    m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), initializer.Get(), m_DMLBindingTable.Get());
     m_CmdList12->Close();
     { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
     m_FenceValue++;
@@ -857,11 +868,17 @@ bool DirectMLFRUC::compileDMLGraph()
         return false;
     }
 
-    // ── Exec binding (inputs rebound per frame via rebindPingPongInputs) ───
+    // ── Exec phase: Reset() swaps the dispatchable without reopening
+    //    a second binding table on top of the same descriptor heap.
     btd.Dispatchable = m_DMLCompiledOp.Get();
-    if (FAILED(hr = m_DMLDevice->CreateBindingTable(&btd, IID_PPV_ARGS(&m_DMLBindingTable)))) {
+    if (FAILED(hr = m_DMLBindingTable->Reset(&btd))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] DirectML: CreateBindingTable(exec) failed 0x%08lx", hr);
+                    "[VIPLE-FRUC] DirectML: BindingTable->Reset(exec) failed 0x%08lx "
+                    "(%s)",
+                    hr,
+                    (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG)
+                        ? "actual device removed"
+                        : "DML-internal error; device still healthy");
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-FRUC] DirectML: GetDeviceRemovedReason = 0x%08lx",
