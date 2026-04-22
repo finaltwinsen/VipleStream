@@ -105,7 +105,7 @@
     <string name="addpc_enter_ip">請輸入一個 IP 位址</string>
     <string name="addpc_wrong_sitelocal">該位址似乎不正確。 您必須使用路由器的公共 IP 位址透過乙太網路進行串流。</string>
     <!-- Preferences -->
-    <string name="category_basic_settings">基本設定</string>
+    <string name="category_basic_settings">§ 01 · 基本設定</string>
     <string name="title_resolution_list">視訊解析度</string>
     <string name="summary_resolution_list">高解析度提升圖像清晰度。低解析度提升在低效能裝置和較慢網路中的串流體驗。</string>
     <string name="title_fps_list">視訊影格速率</string>
@@ -119,10 +119,10 @@
     <string name="summary_checkbox_disable_warnings">停用串流中連線錯誤訊息</string>
     <string name="title_checkbox_enable_pip">啟用子母畫面觀察模式</string>
     <string name="summary_checkbox_enable_pip">允許多工時檢視串流畫面 (但無法控制)</string>
-    <string name="category_audio_settings">音訊設定</string>
+    <string name="category_audio_settings">§ 02 · 音訊設定</string>
     <string name="title_audio_config_list">環場音效組態</string>
     <string name="summary_audio_config_list">為家庭電影院系統啟用 5.1 或 7.1 環場音效</string>
-    <string name="category_input_settings">輸入設定</string>
+    <string name="category_input_settings">§ 05 · 輸入設定</string>
     <string name="title_checkbox_touchscreen_trackpad">將觸控式螢幕作為觸控板使用</string>
     <string name="summary_checkbox_touchscreen_trackpad">如果啟用，則將觸控式螢幕作為觸控板使用。 如果停用，則觸控式螢幕直接控制滑鼠游標。</string>
     <string name="title_checkbox_multi_controller">自動偵測手把</string>
@@ -141,7 +141,7 @@
     <string name="summary_checkbox_mouse_nav_buttons">在一些支援不佳的裝置上啟用此項可能會使其右鍵失效</string>
     <string name="title_checkbox_flip_face_buttons">反轉技能鍵</string>
     <string name="summary_checkbox_flip_face_buttons">為手把和螢幕控制按鈕交換 A/B 和 X/Y 技能按鍵</string>
-    <string name="category_on_screen_controls_settings">螢幕控制按鈕設定</string>
+    <string name="category_on_screen_controls_settings">§ 08 · 螢幕控制按鈕</string>
     <string name="title_checkbox_show_onscreen_controls">顯示螢幕控制按鈕</string>
     <string name="summary_checkbox_show_onscreen_controls">在觸控式螢幕上顯示一層虛擬控制器</string>
     <string name="title_checkbox_vibrate_osc"> 啟用震動 </string>
@@ -153,17 +153,17 @@
     <string name="dialog_title_reset_osc">重設按鈕版面配置</string>
     <string name="dialog_text_reset_osc">你確定要刪除已儲存的螢幕按鈕版面配置嗎？</string>
     <string name="toast_reset_osc_success">螢幕控制按鈕已重設為預設值</string>
-    <string name="category_ui_settings">使用者介面設定</string>
+    <string name="category_ui_settings">§ 04 · 使用者介面設定</string>
     <string name="title_language_list"> 語言 </string>
     <string name="summary_language_list">選擇 Moonlight 顯示的語言</string>
     <string name="title_checkbox_small_icon_mode"> 使用小圖示 </string>
     <string name="summary_checkbox_small_icon_mode">使用小圖示以在螢幕上顯示更多應用程式</string>
-    <string name="category_host_settings">主機設定</string>
+    <string name="category_host_settings">§ 03 · 主機設定</string>
     <string name="title_checkbox_enable_sops">最佳化遊戲設定</string>
     <string name="summary_checkbox_enable_sops">允許 GFE 為最佳串流效果自動更改遊戲設定</string>
     <string name="title_checkbox_host_audio">在電腦上播放音訊</string>
     <string name="summary_checkbox_host_audio">在電腦和本裝置同時輸出音訊</string>
-    <string name="category_advanced_settings">進階設定</string>
+    <string name="category_advanced_settings">§ 07 · 進階設定</string>
     <string name="title_disable_frame_drop">永不丟失影格</string>
     <string name="summary_disable_frame_drop">可能會減少在一些裝置上的卡頓，但會增加延時</string>
     <string name="title_video_format">變更轉碼器設定</string>
@@ -239,7 +239,7 @@
     <string name="pacing_smoothness">偏好平滑視訊 (可能顯著提高延遲)</string>
     <string name="pacing_latency">偏好低延遲</string>
     <string name="pacing_balanced_alt">FPS 上限平衡</string>
-    <string name="category_help">說明</string>
+    <string name="category_help">§ 09 · 說明</string>
     <string name="title_troubleshooting">疑難排解指南</string>
     <string name="summary_setup_guide">檢視關於如何設定你的遊戲電腦以進行串流的指示</string>
     <string name="title_privacy_policy">隱私權政策</string>
@@ -264,7 +264,7 @@
     <string name="pcview_menu_eol">NVIDIA GameStream 終止服務</string>
     <string name="fps_suffix_fps">FPS</string>
     <string name="title_native_fps_dialog">原生 FPS 警告</string>
-    <string name="category_gamepad_settings">手把設定</string>
+    <string name="category_gamepad_settings">§ 06 · 手把設定</string>
     <string name="title_checkbox_gamepad_touchpad_as_mouse">一律使用觸摸板控制滑鼠</string>
     <string name="summary_checkbox_gamepad_motion_sensors">在使用動態感測器模擬手把時啟用支援的主機以要求動態感測器資料，若動態感測器未在遊戲中使用，停用後可能會輕微降低電力和網路使用量。</string>
     <string name="videoformat_h264always">偏好 H.264</string>

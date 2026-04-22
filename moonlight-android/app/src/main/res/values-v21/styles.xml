@@ -27,6 +27,20 @@
         <!-- Text -->
         <item name="android:textColorPrimary">@color/vs_paper</item>
         <item name="android:textColorSecondary">@color/vs_mute</item>
+
+        <!-- PreferenceCategory headers now render the "§ NN · Section"
+             prefix from strings.xml in VS lime, so the settings page
+             reads as the editorial §04 mock. -->
+        <item name="android:preferenceCategoryStyle">@style/VSPreferenceCategory</item>
+    </style>
+
+    <!-- Category row wrapper — lime title via a custom layout.
+         No parent="…" — @android:style/Preference.Category is marked
+         private and the AAPT linker rejects direct inheritance, so we
+         supply just the layout attribute; the rest of the defaults
+         come from the PreferenceCategory framework class itself. -->
+    <style name="VSPreferenceCategory">
+        <item name="android:layout">@layout/vs_preference_category</item>
     </style>
 
 </resources>

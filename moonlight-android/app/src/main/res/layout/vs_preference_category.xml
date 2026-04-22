@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    VipleStream preference-category row.
+    Replaces the default Theme.Material preference category header
+    (small grey all-caps label at a line break) with an editorial
+    section rule: lime "§ NN · Title" meta + vs_line hairline below.
+    Bound via styles.xml -> VSPreferenceCategory -> android:layout.
+    @id/title is the canonical id Android reads into for the
+    PreferenceCategory android:title="…" text.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingTop="18dp"
+    android:paddingBottom="6dp"
+    android:paddingLeft="16dp"
+    android:paddingRight="16dp">
+
+    <TextView
+        android:id="@android:id/title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="@color/vs_lime"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:fontFamily="monospace"
+        android:letterSpacing="0.14"
+        android:singleLine="true"
+        android:ellipsize="end" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="6dp"
+        android:background="@color/vs_line2" />
+
+</LinearLayout>
