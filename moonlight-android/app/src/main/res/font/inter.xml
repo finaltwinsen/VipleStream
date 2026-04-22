@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    VipleStream · Inter font-family resource.
+    Uses two STATIC TTFs extracted from the upstream rsms/inter v4.1
+    release (extras/ttf/Inter-Regular.ttf + Inter-Bold.ttf).  Static
+    weights sidestep the variable-font-weight-selection issue the
+    Space Grotesk path works around with fontVariationSettings.
+-->
+<font-family xmlns:android="http://schemas.android.com/apk/res/android">
+    <font
+        android:fontStyle="normal"
+        android:fontWeight="400"
+        android:font="@font/inter_regular" />
+    <font
+        android:fontStyle="normal"
+        android:fontWeight="700"
+        android:font="@font/inter_bold" />
+</font-family>
