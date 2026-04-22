@@ -107,6 +107,12 @@ CenteredGridView {
             property string featuredName:
                 visible ? appModel.nameAt(appModel.featuredAppIndex()) : ""
 
+            // Responsive breakpoint — see PcView heroBanner.wide for
+            // the rationale. Narrow windows collapse the tape and
+            // use compact headline size so the banner looks OK in
+            // portrait-ish windows and on phones.
+            readonly property bool wide: width > 700
+
             MouseArea {
                 anchors.fill: parent
                 cursorShape: libraryBanner.featuredName !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -140,7 +146,7 @@ CenteredGridView {
                 Text {
                     text: "◤ " + qsTr("LIBRARY")
                     font.family: "Space Grotesk"
-                    font.pointSize: 34
+                    font.pointSize: libraryBanner.wide ? 34 : 24
                     font.bold: true
                     font.letterSpacing: -1.4
                     color: "#D4FF3A"
@@ -155,6 +161,20 @@ CenteredGridView {
                     font.letterSpacing: 1.8
                     color: "#8B8E7E"
                 }
+                // Mono stat strip — running / last-played state.
+                Text {
+                    property bool running: appModel.getRunningAppId() !== 0
+                    text: (running ? qsTr("● SESSION ACTIVE") : qsTr("IDLE")) +
+                          "   ·   " +
+                          (libraryBanner.featuredName !== ""
+                              ? qsTr("TAP HERO TO LAUNCH")
+                              : qsTr("NO TITLES"))
+                    font.family: "IBM Plex Mono"
+                    font.pointSize: 9
+                    font.letterSpacing: 1.6
+                    color: running ? "#D4FF3A"
+                                   : (libraryBanner.featuredName !== "" ? "#F2F5E1" : "#FF5A4E")
+                }
             }
 
             Column {
@@ -163,7 +183,9 @@ CenteredGridView {
                 anchors.leftMargin: 32
                 anchors.bottomMargin: 20
                 spacing: 4
-                width: libraryBanner.width - 380
+                // Leave room for tape on wide; use full width on narrow.
+                width: (libraryBanner.wide ? libraryBanner.width - 380
+                                           : libraryBanner.width - 64)
 
                 Text {
                     text: "FEATURED · 01 / " + ("0" + appGrid.count).slice(-2)
@@ -176,9 +198,9 @@ CenteredGridView {
                     visible: libraryBanner.featuredName !== ""
                     text: libraryBanner.featuredName.toUpperCase()
                     font.family: "Space Grotesk"
-                    font.pointSize: 46
+                    font.pointSize: libraryBanner.wide ? 46 : 28
                     font.bold: true
-                    font.letterSpacing: -2.4
+                    font.letterSpacing: libraryBanner.wide ? -2.4 : -1.2
                     color: "#F2F5E1"
                     width: parent.width
                     elide: Text.ElideRight
@@ -193,8 +215,10 @@ CenteredGridView {
                 }
             }
 
-            // Rotated tape, top-right corner.
+            // Rotated tape — wide-only so narrow / portrait windows
+            // don't get a broken-looking clipped sticker.
             Rectangle {
+                visible: libraryBanner.wide
                 anchors.right: parent.right
                 anchors.top: parent.top
                 anchors.rightMargin: -24
@@ -217,6 +241,7 @@ CenteredGridView {
             }
 
             Rectangle {
+                visible: libraryBanner.wide
                 anchors.right: parent.right
                 anchors.top: parent.top
                 anchors.rightMargin: 28
@@ -242,6 +267,25 @@ CenteredGridView {
 
         // Dim the app if it's hidden
         opacity: model.hidden ? 0.4 : 1.0
+
+        // Bold-only outer stripe frame: fills the entire delegate
+        // cell so the 10dp margin around the box art shows an ink
+        // stripe pattern, giving every tile (boxart or not) the §03
+        // Bold magazine frame. Real box art still covers the centre
+        // unchanged.
+        Rectangle {
+            visible: appGrid.bold && !appIcon.isPlaceholder
+            anchors.fill: parent
+            color: "#0D0F0B"   // ink
+
+            Image {
+                anchors.fill: parent
+                source: "qrc:/res/vs_diag_stripe_overlay.svg"
+                fillMode: Image.Tile
+                sourceSize: Qt.size(24, 24)
+                opacity: 0.35
+            }
+        }
 
         // VipleStream: when the box art is the generic GFE / fallback
         // placeholder AND we're in Bold, replace the boring grey

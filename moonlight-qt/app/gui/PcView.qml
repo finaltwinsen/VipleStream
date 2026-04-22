@@ -152,6 +152,12 @@ CenteredGridView {
             property string featuredName:
                 visible ? computerModel.nameAt(computerModel.featuredComputerIndex()) : ""
 
+            // Responsive breakpoint — narrow window (PC window resized
+            // to portrait-ish, Android tablet-portrait if we ever
+            // reuse this) gets compact type + the tape/pip/pip-side
+            // accessories collapse so they don't spill over.
+            readonly property bool wide: width > 700
+
             MouseArea {
                 anchors.fill: parent
                 cursorShape: heroBanner.featuredName !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -188,7 +194,7 @@ CenteredGridView {
                 Text {
                     text: "◤ " + qsTr("HOSTS")
                     font.family: "Space Grotesk"
-                    font.pointSize: 34
+                    font.pointSize: heroBanner.wide ? 34 : 24
                     font.bold: true
                     font.letterSpacing: -1.4
                     color: "#D4FF3A"   // lime
@@ -201,6 +207,21 @@ CenteredGridView {
                     font.letterSpacing: 1.8
                     color: "#8B8E7E"    // mute
                 }
+                // Mono stat strip — network + found count. Gives the
+                // cover a data-dense feel matching the §01 mock.
+                Text {
+                    text: (StreamingPreferences.enableMdns ? "MDNS ON" : "MDNS OFF") +
+                          "   ·   " +
+                          pcGrid.count + " " + qsTr("FOUND") +
+                          "   ·   " +
+                          (heroBanner.featuredName !== ""
+                              ? qsTr("READY TO LAUNCH")
+                              : qsTr("NO PAIRED HOST"))
+                    font.family: "IBM Plex Mono"
+                    font.pointSize: 9
+                    font.letterSpacing: 1.6
+                    color: heroBanner.featuredName !== "" ? "#D4FF3A" : "#FF5A4E"
+                }
             }
 
             // Bottom-left: featured host name as cover-story display
@@ -211,7 +232,10 @@ CenteredGridView {
                 anchors.leftMargin: 32
                 anchors.bottomMargin: 20
                 spacing: 4
-                width: heroBanner.width - 380
+                // Leave room for tape on wide windows; on narrow
+                // windows (no tape) the column can use the full width.
+                width: (heroBanner.wide ? heroBanner.width - 380
+                                        : heroBanner.width - 64)
 
                 Text {
                     text: "FEATURED · 01 / " + ("0" + pcGrid.count).slice(-2)
@@ -224,9 +248,10 @@ CenteredGridView {
                     visible: heroBanner.featuredName !== ""
                     text: heroBanner.featuredName
                     font.family: "Space Grotesk"
-                    font.pointSize: 46
+                    // Cover-story on wide, chunky headline on narrow.
+                    font.pointSize: heroBanner.wide ? 46 : 28
                     font.bold: true
-                    font.letterSpacing: -2.4
+                    font.letterSpacing: heroBanner.wide ? -2.4 : -1.2
                     color: "#F2F5E1"
                     width: parent.width
                     elide: Text.ElideRight
@@ -242,7 +267,10 @@ CenteredGridView {
             }
 
             // Rotated tape sticker, top-right — editorial accent.
+            // Hidden on narrow windows because its rotation + negative
+            // margin would clip or overflow the hero.
             Rectangle {
+                visible: heroBanner.wide
                 anchors.right: parent.right
                 anchors.top: parent.top
                 anchors.rightMargin: -24
@@ -264,8 +292,10 @@ CenteredGridView {
                 }
             }
 
-            // Small lime live-pip top-right above the tape.
+            // Small lime live-pip top-right above the tape — also wide-only
+            // since on narrow there's no tape to anchor against.
             Rectangle {
+                visible: heroBanner.wide
                 anchors.right: parent.right
                 anchors.top: parent.top
                 anchors.rightMargin: 28
@@ -350,7 +380,9 @@ CenteredGridView {
 
         // "Box art" area — the desktop icon sits inside an ink2 panel.
         // Bold variant gives it more vertical real estate so the
-        // host card reads as a magazine cover.
+        // host card reads as a magazine cover, with a subtle diag
+        // stripe pattern layered in so every tile carries the §01
+        // Bold signature.
         Rectangle {
             id: pcBoxArt
             anchors.top: pcMetaBar.bottom
@@ -364,6 +396,20 @@ CenteredGridView {
             border.color: "#2D3127"          // line2
             border.width: 1
             radius: 0
+
+            // Bold-only diag stripe backing. Sits under the pcIcon so
+            // real icon art (if we ever wire one) stays legible; the
+            // stripe reads through the margin. Safe: invisible,
+            // original flat ink2 surface.
+            Image {
+                anchors.fill: parent
+                anchors.margins: 1   // keep the 1px line2 border clean
+                visible: pcGrid.bold
+                source: "qrc:/res/vs_diag_stripe_overlay.svg"
+                fillMode: Image.Tile
+                sourceSize: Qt.size(24, 24)
+                opacity: 0.55
+            }
 
             Image {
                 id: pcIcon
