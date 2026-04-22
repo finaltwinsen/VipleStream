@@ -259,24 +259,42 @@ ApplicationWindow {
 
     header: ToolBar {
         id: toolBar
+
+        // Single source of truth for the Safe/Bold split inside this
+        // ToolBar — readable by child Labels / icons / the version row.
+        readonly property bool bold: StreamingPreferences.designVariant == StreamingPreferences.DV_BOLD
+
+        // Bold: lime banner with dark ink text/icons (matches the
+        // Claude Design mock — the masthead is the one block of the
+        // UI that inverts from the dark-on-lime-accent norm to
+        // dark-on-lime-field). Safe: the original dark ink ToolBar
+        // with lime accents.
+        background: Rectangle {
+            color: toolBar.bold ? window.theme.lime : window.theme.ink
+        }
+        // Material.foreground drives the default text colour and —
+        // because QtQuick.Controls 2 tints AbstractButton icons with
+        // it by default — the ToolButton SVG icons inside the row
+        // layout below. Flipping it to limeInk gives us dark icons
+        // on the lime banner for free, no ColorOverlay needed.
+        Material.foreground: toolBar.bold ? window.theme.limeInk : window.theme.paper
+
         // Bold variant uses a taller masthead to fit the bigger display
         // title; Safe variant keeps the original 60dp row height.
-        height: StreamingPreferences.designVariant == StreamingPreferences.DV_BOLD ? 80 : 60
+        height: toolBar.bold ? 80 : 60
         anchors.topMargin: 5
         anchors.bottomMargin: 5
 
         // VipleStream editorial masthead — magazine-cover-style title
         // block centred in the toolbar. Bold variant renders a two-line
-        // block (lime mono meta + giant display title). Safe variant
-        // renders a single-line title with a smaller lime meta prefix.
-        // Routes the stack-view's objectName through a §NN section map.
+        // block (lime-ink mono meta + giant display title) over the
+        // lime field. Safe variant renders a single-line title with a
+        // smaller lime meta prefix over ink.
         Column {
             id: titleLabel
             visible: toolBar.width > 700
             anchors.centerIn: parent
             spacing: 1
-
-            readonly property bool bold: StreamingPreferences.designVariant == StreamingPreferences.DV_BOLD
 
             // Map the stackView top to a §NN / meta string. Undefined
             // currentItem during transitions gets a safe placeholder.
@@ -304,18 +322,19 @@ ApplicationWindow {
                 font.family: "IBM Plex Mono"
                 font.letterSpacing: 1.6
                 font.capitalization: Font.AllUppercase
-                color: window.theme.lime
+                // Bold: dark ink over lime field. Safe: lime over ink.
+                color: toolBar.bold ? window.theme.limeInk : window.theme.lime
             }
             Label {
                 text: titleLabel.displayTitle
                 anchors.horizontalCenter: parent.horizontalCenter
                 // Bold: large display-type cover title.
                 // Safe: quieter single-line title that fits the 60dp strip.
-                font.pointSize: titleLabel.bold ? 24 : 17
+                font.pointSize: toolBar.bold ? 24 : 17
                 font.family: "Space Grotesk"
                 font.bold: true
-                font.letterSpacing: titleLabel.bold ? -1.0 : -0.3
-                color: window.theme.paper
+                font.letterSpacing: toolBar.bold ? -1.0 : -0.3
+                color: toolBar.bold ? window.theme.ink : window.theme.paper
                 elide: Label.ElideRight
             }
         }
@@ -348,7 +367,8 @@ ApplicationWindow {
                 font.family: "Space Grotesk"
                 font.bold: true
                 elide: Label.ElideRight
-                color: window.theme.paper
+                // Inverts with the banner: ink on lime (Bold) / paper on ink (Safe).
+                color: toolBar.bold ? window.theme.ink : window.theme.paper
                 horizontalAlignment: Qt.AlignHCenter
                 verticalAlignment: Qt.AlignVCenter
                 Layout.fillWidth: true
@@ -359,8 +379,10 @@ ApplicationWindow {
                 text: !titleLabel.visible && stackView.currentItem ? stackView.currentItem.objectName : ""
             }
 
-            // Editorial version meta: lime live-dot + monospace label.
-            // Example: "● VIPLESTREAM · V1.2.17"
+            // Editorial version meta: live-dot + monospace label.
+            // Bold banner is lime so the dot flips to ink and text to
+            // limeInk for contrast; Safe keeps the original lime-dot
+            // over dark ink.
             Row {
                 id: versionLabel
                 visible: stackView.currentItem instanceof SettingsView
@@ -370,7 +392,7 @@ ApplicationWindow {
                     width: 7
                     height: 7
                     radius: 1   // sharp edges to match editorial vibe
-                    color: window.theme.lime
+                    color: toolBar.bold ? window.theme.ink : window.theme.lime
                     anchors.verticalCenter: parent.verticalCenter
                 }
                 Label {
@@ -379,7 +401,7 @@ ApplicationWindow {
                     font.family: "IBM Plex Mono"  // qrc-embedded, registered in main.cpp
                     font.letterSpacing: 1.2
                     font.capitalization: Font.AllUppercase
-                    color: window.theme.paper
+                    color: toolBar.bold ? window.theme.limeInk : window.theme.paper
                     anchors.verticalCenter: parent.verticalCenter
                 }
             }

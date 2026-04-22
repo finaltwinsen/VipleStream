@@ -5,6 +5,7 @@ import QtQuick.Controls.Material 2.2
 import AppModel 1.0
 import ComputerManager 1.0
 import SdlGamepadKeyNavigation 1.0
+import StreamingPreferences 1.0
 
 CenteredGridView {
     property int computerIndex
@@ -13,12 +14,18 @@ CenteredGridView {
     property bool showHiddenGames
     property bool showGames
 
+    // Bold variant sizes the library tiles up to cover-story proportions
+    // so each box-art reads like a zine poster; Safe keeps the packed
+    // 8-column reading grid from §03 Safe GameGrid.
+    readonly property bool bold: StreamingPreferences.designVariant == StreamingPreferences.DV_BOLD
+
     id: appGrid
     focus: true
     activeFocusOnTab: true
     topMargin: 20
     bottomMargin: 5
-    cellWidth: 230; cellHeight: 297;
+    cellWidth: bold ? 310 : 230
+    cellHeight: bold ? 410 : 297
 
     function computerLost()
     {
@@ -71,7 +78,8 @@ CenteredGridView {
     model: appModel
 
     delegate: NavigableItemDelegate {
-        width: 220; height: 287;
+        width: appGrid.bold ? 300 : 220
+        height: appGrid.bold ? 400 : 287
         grid: appGrid
 
         property alias appContextMenu: appContextMenuLoader.item
@@ -105,8 +113,10 @@ CenteredGridView {
                     isPlaceholder = false
                 }
 
-                width = 200
-                height = 267
+                // Bold scales the box-art ~35% bigger to match the
+                // roomier cell; Safe keeps the packed grid proportions.
+                width  = appGrid.bold ? 280 : 200
+                height = appGrid.bold ? 373 : 267
             }
 
             // Display a tooltip with the full name if it's truncated

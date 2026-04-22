@@ -12,12 +12,17 @@ import SdlGamepadKeyNavigation 1.0
 CenteredGridView {
     property ComputerModel computerModel : createModel()
 
+    // Bold variant pushes the grid into cover-story territory with
+    // ~35% bigger host cards; Safe keeps the original tight grid.
+    readonly property bool bold: StreamingPreferences.designVariant == StreamingPreferences.DV_BOLD
+
     id: pcGrid
     focus: true
     activeFocusOnTab: true
     topMargin: 20
     bottomMargin: 5
-    cellWidth: 310; cellHeight: 330;
+    cellWidth: bold ? 420 : 310
+    cellHeight: bold ? 440 : 330
     objectName: qsTr("Computers")
 
     Component.onCompleted: {
@@ -107,7 +112,8 @@ CenteredGridView {
     model: computerModel
 
     delegate: NavigableItemDelegate {
-        width: 300; height: 320;
+        width: pcGrid.bold ? 410 : 300
+        height: pcGrid.bold ? 430 : 320
         grid: pcGrid
 
         property alias pcContextMenu : pcContextMenuLoader.item
@@ -172,7 +178,9 @@ CenteredGridView {
             }
         }
 
-        // "Box art" area — the desktop icon sits inside an ink2 panel
+        // "Box art" area — the desktop icon sits inside an ink2 panel.
+        // Bold variant gives it more vertical real estate so the
+        // host card reads as a magazine cover.
         Rectangle {
             id: pcBoxArt
             anchors.top: pcMetaBar.bottom
@@ -181,7 +189,7 @@ CenteredGridView {
             anchors.leftMargin: 10
             anchors.rightMargin: 10
             anchors.topMargin: 8
-            height: 200
+            height: pcGrid.bold ? 300 : 200
             color: "#14170F"                 // ink2
             border.color: "#2D3127"          // line2
             border.width: 1
@@ -191,7 +199,7 @@ CenteredGridView {
                 id: pcIcon
                 anchors.centerIn: parent
                 source: "qrc:/res/desktop_windows-48px.svg"
-                sourceSize { width: 140; height: 140 }
+                sourceSize { width: pcGrid.bold ? 200 : 140; height: pcGrid.bold ? 200 : 140 }
                 opacity: model.online ? 1.0 : 0.55
             }
 
@@ -239,9 +247,11 @@ CenteredGridView {
             anchors.leftMargin: 10
             anchors.rightMargin: 10
             anchors.bottom: parent.bottom
-            font.pointSize: 18
+            // Bold: cover-story display type. Safe: editorial heading.
+            font.pointSize: pcGrid.bold ? 26 : 18
+            font.family: "Space Grotesk"
             font.bold: true
-            font.letterSpacing: -0.4
+            font.letterSpacing: pcGrid.bold ? -0.8 : -0.4
             color: "#F2F5E1"    // vs paper
             horizontalAlignment: Text.AlignLeft
             verticalAlignment: Text.AlignTop
