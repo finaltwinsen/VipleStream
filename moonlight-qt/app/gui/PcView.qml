@@ -387,17 +387,113 @@ CenteredGridView {
         helpUrl: "https://github.com/moonlight-stream/moonlight-docs/wiki/Setup-Guide"
     }
 
-    NavigableMessageDialog {
+    // VipleStream editorial pairing dialog — big PIN digits in
+    // sharp-edged boxes, monospace meta, "waiting" pulse. Replaces
+    // the text-only NavigableMessageDialog layout.  External API
+    // preserved: set `pairDialog.pin` then `pairDialog.open()`,
+    // and PcView.pairingComplete() still calls close().
+    NavigableDialog {
         id: pairDialog
         closePolicy: Popup.CloseOnEscape
 
-        // don't allow edits to the rest of the window while open
         property string pin : "0000"
-        text:qsTr("Please enter %1 on your host PC. This dialog will close when pairing is completed.").arg(pin)+"\n\n"+
-             qsTr("If your host PC is running Sunshine, navigate to the Sunshine web UI to enter the PIN.")
         standardButtons: Dialog.Cancel
+
         onRejected: {
             // FIXME: We should interrupt pairing here
+        }
+
+        // Transparent surround; the content Column provides its own ink2 panel.
+        background: Rectangle {
+            color: "#14170F"           // vs ink2
+            border.color: "#2D3127"    // vs line2
+            border.width: 1
+            radius: 0
+        }
+
+        ColumnLayout {
+            spacing: 16
+
+            // Editorial meta header
+            RowLayout {
+                spacing: 8
+                Rectangle { width: 8; height: 8; radius: 1; color: "#D4FF3A" }
+                Label {
+                    text: "§ 02 · " + qsTr("PAIRING") + "  ·  " + qsTr("STEP 02 / 03")
+                    font.family: "Consolas, IBM Plex Mono, monospace"
+                    font.pointSize: 9
+                    font.letterSpacing: 1.6
+                    color: "#D4FF3A"
+                }
+            }
+
+            Label {
+                text: qsTr("Enter PIN on host")
+                font.pointSize: 24
+                font.bold: true
+                font.letterSpacing: -0.8
+                color: "#F2F5E1"
+            }
+
+            // PIN digit boxes — each digit in its own sharp-edged cell
+            Row {
+                Layout.alignment: Qt.AlignHCenter
+                spacing: 10
+
+                Repeater {
+                    // Repeat one cell per character in pin (always 4 for real pairing,
+                    // but guard against empty / placeholder strings).
+                    model: pairDialog.pin.length > 0 ? pairDialog.pin.length : 4
+
+                    delegate: Rectangle {
+                        width: 62
+                        height: 90
+                        color: index === 1 ? "#1B2000" : "transparent"   // subtle tint on one cell
+                        border.color: "#2D3127"
+                        border.width: 1
+                        radius: 0
+
+                        Label {
+                            anchors.centerIn: parent
+                            text: pairDialog.pin.length > index ? pairDialog.pin.charAt(index) : "—"
+                            font.pointSize: 36
+                            font.bold: true
+                            font.letterSpacing: -1.5
+                            color: "#F2F5E1"
+                        }
+                    }
+                }
+            }
+
+            // Host helper + sunshine fallback copy
+            Label {
+                Layout.maximumWidth: 420
+                text: qsTr("If your host PC is running Sunshine, navigate to the Sunshine web UI to enter the PIN.")
+                font.pointSize: 10
+                color: "#8B8E7E"           // vs mute
+                wrapMode: Text.Wrap
+            }
+
+            // Waiting pulse
+            RowLayout {
+                spacing: 6
+                Rectangle {
+                    width: 6; height: 6; radius: 1
+                    color: "#D4FF3A"
+                    SequentialAnimation on opacity {
+                        loops: Animation.Infinite
+                        NumberAnimation { from: 1.0; to: 0.35; duration: 800 }
+                        NumberAnimation { from: 0.35; to: 1.0; duration: 800 }
+                    }
+                }
+                Label {
+                    text: qsTr("WAITING FOR HOST")
+                    font.family: "Consolas, IBM Plex Mono, monospace"
+                    font.pointSize: 9
+                    font.letterSpacing: 1.4
+                    color: "#8B8E7E"
+                }
+            }
         }
     }
 
