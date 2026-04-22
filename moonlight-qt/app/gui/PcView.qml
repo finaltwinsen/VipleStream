@@ -112,50 +112,139 @@ CenteredGridView {
 
         property alias pcContextMenu : pcContextMenuLoader.item
 
-        Image {
-            id: pcIcon
-            anchors.horizontalCenter: parent.horizontalCenter
-            source: "qrc:/res/desktop_windows-48px.svg"
-            sourceSize {
-                width: 200
-                height: 200
+        // VipleStream editorial host card. Preserves the same state
+        // bindings as before (online / paired / statusUnknown) but
+        // renders them in the §01 Safe PcList mock style: §NN index
+        // badge, status dot + monospace label in the corner, thin
+        // hairline between the icon "box art" region and the name.
+
+        // Top meta strip: §NN index on the left, status dot + label on the right
+        Item {
+            id: pcMetaBar
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.margins: 10
+            height: 14
+            z: 2
+
+            Text {
+                id: pcIndexLabel
+                text: "§ " + (index < 9 ? "0" + (index + 1) : (index + 1))
+                font.family: "Consolas, IBM Plex Mono, monospace"
+                font.pointSize: 9
+                font.letterSpacing: 1.4
+                color: "#8B8E7E"    // vs mute
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Row {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 6
+
+                // Status dot — lime/danger/mute depending on state
+                Rectangle {
+                    id: pcStatusDot
+                    width: 8; height: 8; radius: 1
+                    visible: !model.statusUnknown
+                    color: !model.online          ? "#8B8E7E"     // mute / offline
+                          : !model.paired          ? "#FF5A4E"     // danger / unpaired
+                                                   : "#D4FF3A"     // lime / ready
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                    id: pcStatusLabel
+                    visible: !model.statusUnknown
+                    text: !model.online  ? qsTr("OFFLINE")
+                        : !model.paired   ? qsTr("UNPAIRED")
+                                          : qsTr("READY")
+                    font.family: "Consolas, IBM Plex Mono, monospace"
+                    font.pointSize: 9
+                    font.letterSpacing: 1.4
+                    color: !model.online  ? "#8B8E7E"
+                         : !model.paired   ? "#FF5A4E"
+                                           : "#D4FF3A"
+                    anchors.verticalCenter: parent.verticalCenter
+                }
             }
         }
 
-        Image {
-            // TODO: Tooltip
-            id: stateIcon
-            anchors.horizontalCenter: pcIcon.horizontalCenter
-            anchors.verticalCenter: pcIcon.verticalCenter
-            anchors.verticalCenterOffset: !model.online ? -18 : -16
-            visible: !model.statusUnknown && (!model.online || !model.paired)
-            source: !model.online ? "qrc:/res/warning_FILL1_wght300_GRAD200_opsz24.svg" : "qrc:/res/baseline-lock-24px.svg"
-            sourceSize {
-                width: !model.online ? 75 : 70
-                height: !model.online ? 75 : 70
+        // "Box art" area — the desktop icon sits inside an ink2 panel
+        Rectangle {
+            id: pcBoxArt
+            anchors.top: pcMetaBar.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: 10
+            anchors.rightMargin: 10
+            anchors.topMargin: 8
+            height: 200
+            color: "#14170F"                 // ink2
+            border.color: "#2D3127"          // line2
+            border.width: 1
+            radius: 0
+
+            Image {
+                id: pcIcon
+                anchors.centerIn: parent
+                source: "qrc:/res/desktop_windows-48px.svg"
+                sourceSize { width: 140; height: 140 }
+                opacity: model.online ? 1.0 : 0.55
+            }
+
+            Image {
+                id: stateIcon
+                anchors.centerIn: parent
+                visible: !model.statusUnknown && (!model.online || !model.paired)
+                source: !model.online ? "qrc:/res/warning_FILL1_wght300_GRAD200_opsz24.svg" : "qrc:/res/baseline-lock-24px.svg"
+                sourceSize {
+                    width: !model.online ? 60 : 56
+                    height: !model.online ? 60 : 56
+                }
+            }
+
+            BusyIndicator {
+                id: statusUnknownSpinner
+                anchors.centerIn: parent
+                width: 60; height: 60
+                visible: model.statusUnknown
+                running: visible
             }
         }
 
-        BusyIndicator {
-            id: statusUnknownSpinner
-            anchors.horizontalCenter: pcIcon.horizontalCenter
-            anchors.verticalCenter: pcIcon.verticalCenter
-            anchors.verticalCenterOffset: -15
-            width: 75
-            height: 75
-            visible: model.statusUnknown
-            running: visible
+        // Hairline divider
+        Rectangle {
+            id: pcDivider
+            anchors.top: pcBoxArt.bottom
+            anchors.topMargin: 10
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: 10
+            anchors.rightMargin: 10
+            height: 1
+            color: "#1F2219"    // vs line
         }
 
         Label {
             id: pcNameText
             text: model.name
 
-            width: parent.width
-            anchors.top: pcIcon.bottom
+            anchors.top: pcDivider.bottom
+            anchors.topMargin: 6
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: 10
+            anchors.rightMargin: 10
             anchors.bottom: parent.bottom
-            font.pointSize: 36
-            horizontalAlignment: Text.AlignHCenter
+            font.pointSize: 18
+            font.bold: true
+            font.letterSpacing: -0.4
+            color: "#F2F5E1"    // vs paper
+            horizontalAlignment: Text.AlignLeft
+            verticalAlignment: Text.AlignTop
             wrapMode: Text.Wrap
             elide: Text.ElideRight
         }
