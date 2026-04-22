@@ -441,23 +441,6 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationDomain("moonlight-stream.com");
     QCoreApplication::setApplicationName("VipleStream");
 
-    // VipleStream editorial font stack — ship Space Grotesk / Inter /
-    // IBM Plex Mono as qrc-embedded TTFs so QML can ask for the exact
-    // family names without depending on whatever the host has
-    // installed. Must happen before any QML is loaded.
-    {
-        static const char* kFontResources[] = {
-            ":/fonts/SpaceGrotesk-var.ttf",
-            ":/fonts/Inter-var.ttf",
-            ":/fonts/IBMPlexMono-Regular.ttf",
-        };
-        for (const char* path : kFontResources) {
-            if (QFontDatabase::addApplicationFont(path) < 0) {
-                qWarning("Failed to load bundled font: %s", path);
-            }
-        }
-    }
-
     if (QFile(QDir::currentPath() + "/portable.dat").exists()) {
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, QDir::currentPath());
@@ -766,6 +749,31 @@ int main(int argc, char *argv[])
     SDL_SetHint("SDL_WINDOWS_DETECT_DEVICE_HOTPLUG", "0");
 
     QGuiApplication app(argc, argv);
+
+    // VipleStream editorial font stack — ship Space Grotesk / Inter /
+    // IBM Plex Mono as qrc-embedded TTFs so QML can ask for the exact
+    // family names without depending on whatever the host has
+    // installed.
+    //
+    // MUST be called AFTER the QGuiApplication is constructed.  Qt 6's
+    // QFontDatabase is tied to the application's font singleton; calling
+    // addApplicationFont before the application exists crashes on
+    // startup with a null-deref (this is how every v1.2.27..v1.2.32
+    // build shipped — broken for a user who never got to see the
+    // bundled fonts).  Placing it here also keeps the fonts visible to
+    // every QML component, since the QML engine is instantiated later.
+    {
+        static const char* kFontResources[] = {
+            ":/fonts/SpaceGrotesk-var.ttf",
+            ":/fonts/Inter-var.ttf",
+            ":/fonts/IBMPlexMono-Regular.ttf",
+        };
+        for (const char* path : kFontResources) {
+            if (QFontDatabase::addApplicationFont(path) < 0) {
+                qWarning("Failed to load bundled font: %s", path);
+            }
+        }
+    }
 
 #ifdef Q_OS_UNIX
     // Register signal handlers to arbitrate between SDL and Qt.
