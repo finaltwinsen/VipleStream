@@ -37,15 +37,23 @@ public class HelpLauncher {
         context.startActivity(i);
     }
 
+    // VipleStream rebrand: help URLs point at the VipleStream project
+    // repo. The upstream moonlight-docs wiki is still the canonical
+    // source of truth for the GameStream setup / troubleshooting
+    // material, so users who need deeper docs can follow links from
+    // the VipleStream README to the upstream Moonlight docs.
     public static void launchSetupGuide(Context context) {
-        launchUrl(context, "https://github.com/moonlight-stream/moonlight-docs/wiki/Setup-Guide");
+        launchUrl(context, "https://github.com/finaltwinsen/VipleStream#readme");
     }
 
     public static void launchTroubleshooting(Context context) {
-        launchUrl(context, "https://github.com/moonlight-stream/moonlight-docs/wiki/Troubleshooting");
+        launchUrl(context, "https://github.com/finaltwinsen/VipleStream#readme");
     }
 
     public static void launchGameStreamEolFaq(Context context) {
+        // GameStream EOL is an NVIDIA-side / upstream-specific topic;
+        // keep the upstream docs link for this one since there's no
+        // VipleStream-specific angle to replace it with.
         launchUrl(context, "https://github.com/moonlight-stream/moonlight-docs/wiki/NVIDIA-GameStream-End-Of-Service-Announcement-FAQ");
     }
 }

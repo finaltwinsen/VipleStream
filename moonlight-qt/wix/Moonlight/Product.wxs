@@ -1,8 +1,17 @@
-﻿<?define ShortName = "Moonlight" ?>
-<?define FullName = "Moonlight Game Streaming Client" ?>
+﻿<?define ShortName = "VipleStream" ?>
+<?define FullName = "VipleStream" ?>
 
 <?define ShortcutName = "$(var.ShortName)" ?>
 <?define ShortcutDesc = "Stream games and other applications from another PC" ?>
+<!--
+    VipleStream rebrand: display strings updated above but the
+    InstallFolder / APPDATAFOLDER / HKCU registry key paths are kept
+    literally at "Moonlight Game Streaming [Project]" so that users
+    who already installed VipleStream v1.2.x (which inherited those
+    paths from upstream) get a clean MajorUpgrade instead of losing
+    their pairings + settings. A future major version may migrate
+    the paths with a new UpgradeCode.
+-->
 <?define InstallFolder = "Moonlight Game Streaming" ?>
 
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:fire="http://wixtoolset.org/schemas/v4/wxs/firewall" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
@@ -10,7 +19,7 @@
   <Package Name="$(var.FullName)"
            Language="1033"
            Version="!(bind.fileVersion.MoonlightExe)"
-           Manufacturer="Moonlight Game Streaming Project"
+           Manufacturer="VipleStream"
            UpgradeCode="5c09f94e-f809-4c6a-9b7b-597c99f041fe">
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." Schedule="afterInstallInitialize" />
     <MediaTemplate CompressionLevel="high" EmbedCab="yes" />
@@ -100,7 +109,7 @@
       <Files Include="$(var.DeployDir)\**" />
     </ComponentGroup>
 
-    <Feature Id="ProductFeature" Title="Moonlight" Level="1" ConfigurableDirectory="INSTALLFOLDER">
+    <Feature Id="ProductFeature" Title="VipleStream" Level="1" ConfigurableDirectory="INSTALLFOLDER">
       <ComponentRef Id="Moonlight" />
       <ComponentRef Id="MoonlightShortcuts" />
       <ComponentRef Id="MoonlightDesktopShortcutState" />

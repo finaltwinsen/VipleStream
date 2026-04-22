@@ -154,7 +154,9 @@ namespace service_ctrl {
     }
 
     /**
-     * @brief Asynchronously starts the Sunshine service.
+     * @brief Asynchronously starts the VipleStream-Server service (Windows
+     *        service name remains "SunshineService" so existing installs
+     *        with the upstream service control code keep working).
      */
     bool start_service() {
       if (!service_handle) {
@@ -209,7 +211,7 @@ namespace service_ctrl {
   bool start_service() {
     service_controller sc {SERVICE_QUERY_STATUS | SERVICE_START};
 
-    std::cout << "Starting Sunshine..."sv;
+    std::cout << "Starting VipleStream-Server..."sv;
 
     // This operation is asynchronous, so we must wait for it to complete
     if (!sc.start_service()) {

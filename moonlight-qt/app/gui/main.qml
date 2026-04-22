@@ -180,9 +180,9 @@ ApplicationWindow {
     }
 
     // This timer keeps us polling for 5 minutes of inactivity
-    // to allow the user to work with Moonlight on a second display
+    // to allow the user to work with VipleStream on a second display
     // while dealing with configuration issues. This will ensure
-    // machines come online even if the input focus isn't on Moonlight.
+    // machines come online even if the input focus isn't on VipleStream.
     Timer {
         id: inactivityTimer
         interval: 5 * 60000
@@ -406,25 +406,14 @@ ApplicationWindow {
                 }
             }
 
-            NavigableToolButton {
-                id: discordButton
-                visible: SystemProperties.hasBrowser &&
-                         stackView.currentItem instanceof SettingsView
-
-                iconSource: "qrc:/res/discord.svg"
-
-                ToolTip.delay: 1000
-                ToolTip.timeout: 3000
-                ToolTip.visible: hovered
-                ToolTip.text: qsTr("Join our community on Discord")
-
-                // TODO need to make sure browser is brought to foreground.
-                onClicked: Qt.openUrlExternally("https://moonlight-stream.org/discord");
-
-                Keys.onDownPressed: {
-                    stackView.currentItem.forceActiveFocus(Qt.TabFocus)
-                }
-            }
+            // VipleStream rebrand: upstream had a toolbar button here
+            // linking to moonlight-stream.org/discord (the Moonlight
+            // community server). VipleStream doesn't run that community
+            // and we don't want to dump our users into someone else's
+            // support channel by accident, so the button is removed.
+            // If a VipleStream-specific Discord/Matrix/etc. server is
+            // added later, restore a NavigableToolButton here that
+            // points at it.
 
             NavigableToolButton {
                 id: addPcButton
@@ -475,7 +464,7 @@ ApplicationWindow {
 
                 function updateAvailable(version, url)
                 {
-                    ToolTip.text = qsTr("Update available for Moonlight: Version %1").arg(version)
+                    ToolTip.text = qsTr("Update available for VipleStream: Version %1").arg(version)
                     updateButton.browserUrl = url
                     updateButton.visible = true
                 }
@@ -561,7 +550,7 @@ ApplicationWindow {
 
     ErrorMessageDialog {
         id: noHwDecoderDialog
-        text: qsTr("No functioning hardware accelerated video decoder was detected by Moonlight. " +
+        text: qsTr("No functioning hardware accelerated video decoder was detected by VipleStream. " +
                    "Your streaming performance may be severely degraded in this configuration.")
         helpText: qsTr("Click the Help button for more information on solving this problem.")
         helpUrl: "https://github.com/moonlight-stream/moonlight-docs/wiki/Fixing-Hardware-Decoding-Problems"
@@ -578,7 +567,7 @@ ApplicationWindow {
     NavigableMessageDialog {
         id: wow64Dialog
         standardButtons: Dialog.Ok | Dialog.Cancel
-        text: qsTr("This version of Moonlight isn't optimized for your PC. Please download the '%1' version of Moonlight for the best streaming performance.").arg(SystemProperties.friendlyNativeArchName)
+        text: qsTr("This version of VipleStream isn't optimized for your PC. Please download the '%1' version of VipleStream for the best streaming performance.").arg(SystemProperties.friendlyNativeArchName)
         onAccepted: {
             Qt.openUrlExternally("https://github.com/moonlight-stream/moonlight-qt/releases");
         }
@@ -587,7 +576,7 @@ ApplicationWindow {
     ErrorMessageDialog {
         id: unmappedGamepadDialog
         property string unmappedGamepads : ""
-        text: qsTr("Moonlight detected gamepads without a mapping:") + "\n" + unmappedGamepads
+        text: qsTr("VipleStream detected gamepads without a mapping:") + "\n" + unmappedGamepads
         helpTextSeparator: "\n\n"
         helpText: qsTr("Click the Help button for information on how to map your gamepads.")
         helpUrl: "https://github.com/moonlight-stream/moonlight-docs/wiki/Gamepad-Mapping"

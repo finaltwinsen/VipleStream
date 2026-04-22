@@ -1,6 +1,6 @@
 /**
  * @file src/config.cpp
- * @brief Definitions for the configuration of Sunshine.
+ * @brief Definitions for the configuration of VipleStream-Server (upstream: Sunshine).
  */
 // standard includes
 #include <algorithm>
@@ -1473,7 +1473,7 @@ namespace config {
     // so that service instance will do the work instead.
 
     if (!config_loaded && !shortcut_launch) {
-      BOOST_LOG(fatal) << "To relaunch Sunshine successfully, use the shortcut in the Start Menu. Do not run Sunshine.exe manually."sv;
+      BOOST_LOG(fatal) << "To relaunch VipleStream-Server successfully, use the shortcut in the Start Menu. Do not run the server executable manually."sv;
       std::this_thread::sleep_for(10s);
 #else
     if (!config_loaded) {
@@ -1490,7 +1490,7 @@ namespace config {
       // This is a relaunch as admin to start the service
       service_ctrl::start_service();
 
-      // Always return 1 to ensure Sunshine doesn't start normally
+      // Always return 1 to ensure VipleStream-Server doesn't start normally
       return 1;
     }
     if (shortcut_launch) {
@@ -1523,7 +1523,7 @@ namespace config {
       // Launch the web UI
       launch_ui();
 
-      // Always return 1 to ensure Sunshine doesn't start normally
+      // Always return 1 to ensure VipleStream-Server doesn't start normally
       return 1;
     }
 #endif

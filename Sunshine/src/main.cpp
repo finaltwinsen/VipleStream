@@ -1,6 +1,6 @@
 /**
  * @file src/main.cpp
- * @brief Definitions for the main entry point for Sunshine.
+ * @brief Definitions for the main entry point for VipleStream-Server (upstream: Sunshine).
  */
 // standard includes
 #include <codecvt>
@@ -223,7 +223,7 @@ int main(int argc, char *argv[]) {
     nvprefs_instance.unload();
   }
 
-  // Wait as long as possible to terminate Sunshine.exe during logoff/shutdown
+  // Wait as long as possible to terminate VipleStream-Server.exe during logoff/shutdown
   SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY);
 
   // We must create a hidden window to receive shutdown notifications since we load gdi32.dll
@@ -248,7 +248,7 @@ int main(int argc, char *argv[]) {
     auto wnd = CreateWindowExA(
       0,
       wnd_class.lpszClassName,
-      "Sunshine Session Monitor Window",
+      "VipleStream-Server Session Monitor Window",
       0,
       CW_USEDEFAULT,
       CW_USEDEFAULT,
@@ -306,7 +306,7 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(info) << "Interrupt handler called"sv;
 
     auto task = []() {
-      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
+      BOOST_LOG(fatal) << "10 seconds passed, yet VipleStream-Server's still running: Forcing shutdown"sv;
       logging::log_flush();
       lifetime::debug_trap();
     };
@@ -323,7 +323,7 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(info) << "Terminate handler called"sv;
 
     auto task = []() {
-      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
+      BOOST_LOG(fatal) << "10 seconds passed, yet VipleStream-Server's still running: Forcing shutdown"sv;
       logging::log_flush();
       lifetime::debug_trap();
     };
@@ -371,7 +371,7 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(fatal) << "HTTP interface failed to initialize"sv;
 
 #ifdef _WIN32
-    BOOST_LOG(fatal) << "To relaunch Sunshine successfully, use the shortcut in the Start Menu. Do not run Sunshine.exe manually."sv;
+    BOOST_LOG(fatal) << "To relaunch VipleStream-Server successfully, use the shortcut in the Start Menu. Do not run the server executable manually."sv;
     std::this_thread::sleep_for(10s);
 #endif
 
@@ -412,8 +412,8 @@ int main(int argc, char *argv[]) {
 #ifdef _WIN32
   // If we're using the default port and GameStream is enabled, warn the user
   if (config::sunshine.port == 47989 && is_gamestream_enabled()) {
-    BOOST_LOG(fatal) << "GameStream is still enabled in GeForce Experience! This *will* cause streaming problems with Sunshine!"sv;
-    BOOST_LOG(fatal) << "Disable GameStream on the SHIELD tab in GeForce Experience or change the Port setting on the Advanced tab in the Sunshine Web UI."sv;
+    BOOST_LOG(fatal) << "GameStream is still enabled in GeForce Experience! This *will* cause streaming problems with VipleStream-Server!"sv;
+    BOOST_LOG(fatal) << "Disable GameStream on the SHIELD tab in GeForce Experience or change the Port setting on the Advanced tab in the VipleStream-Server Web UI."sv;
   }
 #endif
 
@@ -421,7 +421,7 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(info) << "Starting system tray"sv;
 #ifdef _WIN32
     // TODO: Windows has a weird bug where when running as a service and on the first Windows boot,
-    // the tray icon would not appear even though Sunshine is running correctly otherwise.
+    // the tray icon would not appear even though VipleStream-Server is running correctly otherwise.
     // Restarting the service would allow the icon to appear normally.
     // For now we will keep the Windows tray icon on a separate thread.
     // Ideally, we would run the system tray on the main thread for all platforms.

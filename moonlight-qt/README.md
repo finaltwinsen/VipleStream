@@ -1,8 +1,11 @@
-# Moonlight PC — VipleStream Fork
+# VipleStream (PC) — moonlight-qt fork
 
-This directory contains the VipleStream-modified Moonlight PC client.
+This directory contains the PC / desktop client build of VipleStream,
+a fork of Moonlight's Qt client.
 
-**Upstream:** [moonlight-stream/moonlight-qt](https://github.com/moonlight-stream/moonlight-qt) — GPL-3.0
+**Project:** [finaltwinsen/VipleStream](https://github.com/finaltwinsen/VipleStream)
+
+**Upstream (GPL-3.0 attribution):** [moonlight-stream/moonlight-qt](https://github.com/moonlight-stream/moonlight-qt)
 
 **VipleStream additions:**
 - `app/backend/relaylookup.cpp/.h` — Relay server lookup + HTTP proxy

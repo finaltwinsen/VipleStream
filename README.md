@@ -1,6 +1,6 @@
 # VipleStream
 
-A custom game streaming solution based on [Sunshine](https://github.com/LizardByte/Sunshine) and [Moonlight](https://github.com/moonlight-stream), extended with built-in NAT traversal, frame interpolation (FRUC), and performance optimizations.
+A custom game streaming solution based on [Sunshine](https://github.com/LizardByte/Sunshine) (host — renamed to **VipleStream-Server** in this fork) and [Moonlight](https://github.com/moonlight-stream) (client — renamed to **VipleStream**), extended with built-in NAT traversal, frame interpolation (FRUC), and performance optimizations. Project homepage: <https://github.com/finaltwinsen/VipleStream>.
 
 > **Current version:** 1.1.80
 

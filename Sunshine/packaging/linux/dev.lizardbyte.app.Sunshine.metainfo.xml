@@ -15,8 +15,8 @@
     <control>gamepad</control>
   </supports>
 
-  <url type="homepage">@PROJECT_HOMEPAGE_URL@</url>
-  <url type="bugtracker">https://github.com/LizardByte/Sunshine/issues</url>
+  <url type="homepage">https://github.com/finaltwinsen/VipleStream</url>
+  <url type="bugtracker">https://github.com/finaltwinsen/VipleStream/issues</url>
   <url type="faq">https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2troubleshooting.html</url>
   <url type="help">https://docs.lizardbyte.dev/projects/sunshine</url>
   <url type="donation">https://app.lizardbyte.dev/#Donate</url>

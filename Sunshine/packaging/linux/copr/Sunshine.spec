@@ -14,12 +14,12 @@
 %endif
 %endif
 
-Name: Sunshine
+Name: VipleStream-Server
 Version: %{build_version}
 Release: 1%{?dist}
-Summary: Self-hosted game stream host for Moonlight.
+Summary: Self-hosted game stream host for VipleStream (Moonlight-compatible).
 License: GPLv3-only
-URL: https://github.com/LizardByte/Sunshine
+URL: https://github.com/finaltwinsen/VipleStream
 Source0: tarball.tar.gz
 
 # Common BuildRequires

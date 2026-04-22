@@ -1,8 +1,11 @@
-# Moonlight Android — VipleStream Fork
+# VipleStream (Android) — moonlight-android fork
 
-This directory contains the VipleStream-modified Moonlight Android client.
+This directory contains the Android client build of VipleStream,
+a fork of Moonlight's Android client.
 
-**Upstream:** [moonlight-stream/moonlight-android](https://github.com/moonlight-stream/moonlight-android) — GPL-3.0
+**Project:** [finaltwinsen/VipleStream](https://github.com/finaltwinsen/VipleStream)
+
+**Upstream (GPL-3.0 attribution):** [moonlight-stream/moonlight-android](https://github.com/moonlight-stream/moonlight-android)
 
 **VipleStream additions:**
 - `app/src/main/java/com/limelight/relay/RelayClient.java` — WebSocket relay client (lookup, HTTP proxy, RFC 6455, HMAC-SHA256 PSK)

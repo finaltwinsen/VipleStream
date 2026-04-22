@@ -11,6 +11,15 @@ RichPresenceManager::RichPresenceManager(StreamingPreferences& prefs, QString ga
         handlers.ready = discordReady;
         handlers.disconnected = discordDisconnected;
         handlers.errored = discordErrored;
+        // VipleStream rebrand TODO: the App ID below is the upstream
+        // Moonlight Discord application ID. Rich Presence still works
+        // end-to-end (status text + timestamp + icon), but Discord
+        // itself will render the application name as "Moonlight" on
+        // the viewer's side because that's what the upstream App ID
+        // is registered as. A VipleStream-branded Discord App
+        // (register one at https://discord.com/developers/applications
+        // and paste its client ID here) would make the integration
+        // read "VipleStream" on the Discord viewer side.
         Discord_Initialize("594668102021677159", &handlers, 0, nullptr);
         m_DiscordActive = true;
     }
