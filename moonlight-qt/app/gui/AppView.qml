@@ -190,16 +190,67 @@ CenteredGridView {
             anchors.right: appIcon.right
             anchors.bottom: appIcon.bottom
 
-            sourceComponent: Label {
+            sourceComponent: Column {
                 id: appNameText
-                text: model.name
-                font.pointSize: 22
-                leftPadding: 20
-                rightPadding: 20
-                verticalAlignment: Text.AlignVCenter
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.Wrap
-                elide: Text.ElideRight
+                // Column positions children; expose `truncated` so the outer
+                // Image's ToolTip trigger still works (binds to appNameText.truncated).
+                property bool truncated: gameNameLabel.truncated
+
+                spacing: 4
+                leftPadding: 16
+                rightPadding: 16
+                topPadding: appNameTextLoader.height * 0.32  // push towards centre
+
+                Label {
+                    // Editorial meta above the title: "§ NN · LIBRARY"
+                    text: "§ " + (index < 9 ? "0" + (index + 1) : (index + 1)) + " · " + qsTr("LIBRARY")
+                    font.family: "Consolas, IBM Plex Mono, monospace"
+                    font.pointSize: 9
+                    font.letterSpacing: 1.2
+                    color: "#8B8E7E"    // vs mute
+                    width: appNameTextLoader.width - 32
+                    horizontalAlignment: Text.AlignHCenter
+                }
+
+                Label {
+                    id: gameNameLabel
+                    text: model.name
+                    font.pointSize: 18
+                    font.bold: true
+                    font.letterSpacing: -0.3
+                    color: "#F2F5E1"    // vs paper
+                    width: appNameTextLoader.width - 32
+                    verticalAlignment: Text.AlignVCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    elide: Text.ElideRight
+                }
+            }
+        }
+
+        // Editorial "● PLAYING" badge — lime block in the top-right corner,
+        // visible whenever the game is currently running.
+        Rectangle {
+            id: playingBadge
+            visible: model.running
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: 10
+            z: 5
+            width: playingLabel.implicitWidth + 14
+            height: playingLabel.implicitHeight + 6
+            color: "#D4FF3A"    // vs lime
+            radius: 0
+
+            Label {
+                id: playingLabel
+                anchors.centerIn: parent
+                text: "● " + qsTr("PLAYING")
+                font.family: "Consolas, IBM Plex Mono, monospace"
+                font.pointSize: 8
+                font.bold: true
+                font.letterSpacing: 1.4
+                color: "#1A2300"    // vs lime-ink
             }
         }
 
@@ -332,16 +383,27 @@ CenteredGridView {
         }
     }
 
-    Row {
+    // Editorial empty-state: monospace meta + paper display headline.
+    Column {
         anchors.centerIn: parent
-        spacing: 5
+        spacing: 8
         visible: appGrid.count === 0
 
         Label {
+            text: "§ 03 · " + qsTr("LIBRARY") + " / " + qsTr("EMPTY")
+            font.family: "Consolas, IBM Plex Mono, monospace"
+            font.pointSize: 10
+            font.letterSpacing: 1.4
+            color: "#D4FF3A"    // vs lime
+        }
+
+        Label {
             text: qsTr("This computer doesn't seem to have any applications or some applications are hidden")
-            font.pointSize: 20
-            verticalAlignment: Text.AlignVCenter
+            font.pointSize: 16
+            color: "#F2F5E1"    // vs paper
+            horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.Wrap
+            width: 420
         }
     }
 
