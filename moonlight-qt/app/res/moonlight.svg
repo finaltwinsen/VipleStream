@@ -2,9 +2,12 @@
 <!--
     VipleStream primary app icon — variant "Stripe Cut" from the
     Claude-Design mock (temp/design_bundle/viplestream/project/
-    VipleStream Icon.html §02 variation A).
+    VipleStream Icon.html §02 variation A), recoloured to use the
+    app's electric-lime accent (#D4FF3A) instead of the design
+    mock's default orange so the icon reads as the same brand as
+    the rest of the UI chrome.
 
-    Dark ink ground, horizontal orange stripe, giant Space Grotesk "V"
+    Dark ink ground, horizontal electric-lime stripe, giant Space Grotesk "V"
     rendered as a vector path (no font dependency at render time), a
     white play-triangle carved into the V, and a small orange folio dot
     top-right.
@@ -24,7 +27,7 @@
   <rect width="512" height="512" fill="#0D0F0B"/>
 
   <!-- Orange accent stripe across the middle band -->
-  <rect x="0" y="180" width="512" height="160" fill="#FF7A2E"/>
+  <rect x="0" y="180" width="512" height="160" fill="#D4FF3A"/>
 
   <!-- Giant "V" — traced as a polygon so there's no Space Grotesk
        dependency at rasterisation time. Silhouette matches the
@@ -37,5 +40,5 @@
   <polygon fill="#F2F5E1" points="204,216 204,304 284,260"/>
 
   <!-- Folio meta dot / live pip, top-right corner -->
-  <circle cx="470" cy="46" r="8" fill="#FF7A2E"/>
+  <circle cx="470" cy="46" r="8" fill="#D4FF3A"/>
 </svg>

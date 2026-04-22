@@ -111,6 +111,121 @@ CenteredGridView {
 
     model: computerModel
 
+    // VipleStream §01 Bold cover banner — a magazine masthead that
+    // sits above the host grid when the design variant is DV_BOLD,
+    // giving the screen the "HOSTS / LOCAL NETWORK" editorial look
+    // from the Claude-Design mock.  Collapses to zero height on Safe.
+    //
+    // GridView.header is a Component rendered flush at the top,
+    // full-width, above the first grid row. Scrolls with content.
+    header: Component {
+        Rectangle {
+            id: heroBanner
+            visible: pcGrid.bold && pcGrid.count > 0
+            width: pcGrid.width
+            // Tucks flush against the grid when Bold, invisible + 0-height
+            // on Safe so the existing grid layout is completely undisturbed.
+            height: visible ? 220 : 0
+            color: "#0D0F0B"   // ink
+
+            // Diagonal stripe pattern tiled across the banner.
+            Image {
+                anchors.fill: parent
+                source: "qrc:/res/vs_diag_stripe.svg"
+                fillMode: Image.Tile
+                sourceSize: Qt.size(24, 24)
+                opacity: 0.65
+            }
+            // Gradient wash so content reads against the stripes.
+            Rectangle {
+                anchors.fill: parent
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#CC0D0F0B" }
+                    GradientStop { position: 0.4; color: "#550D0F0B" }
+                    GradientStop { position: 1.0; color: "#CC0D0F0B" }
+                }
+            }
+
+            // Top-left meta + ◤ HOSTS masthead
+            Column {
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.leftMargin: 32
+                anchors.topMargin: 22
+                spacing: 6
+
+                Text {
+                    text: "◤ " + qsTr("HOSTS")
+                    font.family: "Space Grotesk"
+                    font.pointSize: 34
+                    font.bold: true
+                    font.letterSpacing: -1.4
+                    color: "#D4FF3A"   // lime
+                }
+                Text {
+                    text: qsTr("LOCAL NETWORK") + " · " +
+                          Qt.formatDateTime(new Date(), "ddd HH:mm").toUpperCase()
+                    font.family: "IBM Plex Mono"
+                    font.pointSize: 10
+                    font.letterSpacing: 1.8
+                    color: "#8B8E7E"    // mute
+                }
+            }
+
+            // Bottom-left cover line: "FEATURED · 01 / NN"
+            Text {
+                anchors.left: parent.left
+                anchors.bottom: parent.bottom
+                anchors.leftMargin: 32
+                anchors.bottomMargin: 22
+                text: "FEATURED · 01 / " + ("0" + pcGrid.count).slice(-2) +
+                      "   ·   " + qsTr("PICK A HOST TO CONNECT")
+                font.family: "IBM Plex Mono"
+                font.pointSize: 11
+                font.letterSpacing: 2.0
+                color: "#F2F5E1"
+            }
+
+            // Rotated tape sticker, top-right — editorial accent.
+            Rectangle {
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.rightMargin: -24
+                anchors.topMargin: 64
+                width: 260
+                height: 36
+                color: "#F2F5E1"
+                rotation: -3
+                transformOrigin: Item.Center
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "STREAM · PATCH · 2026"
+                    font.family: "IBM Plex Mono"
+                    font.pointSize: 11
+                    font.bold: true
+                    font.letterSpacing: 3.0
+                    color: "#0D0F0B"
+                }
+            }
+
+            // Small lime live-pip top-right above the tape.
+            Rectangle {
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.rightMargin: 28
+                anchors.topMargin: 28
+                width: 12; height: 12; radius: 2
+                color: "#D4FF3A"
+                SequentialAnimation on opacity {
+                    loops: Animation.Infinite
+                    NumberAnimation { from: 1.0; to: 0.35; duration: 900 }
+                    NumberAnimation { from: 0.35; to: 1.0; duration: 900 }
+                }
+            }
+        }
+    }
+
     delegate: NavigableItemDelegate {
         width: pcGrid.bold ? 410 : 300
         height: pcGrid.bold ? 430 : 320

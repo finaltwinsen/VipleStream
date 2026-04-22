@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     VipleStream adaptive-icon background.
-    Renders the ink ground + orange horizontal stripe + folio dot from
-    the primary icon (assets/icon/viplestream_icon.svg) as a
-    VectorDrawable, so the whole background is crisp at any density
+    Renders the ink ground + electric-lime horizontal stripe + lime
+    folio pip from the primary icon (assets/icon/viplestream_icon.svg)
+    as a VectorDrawable. Lime matches the app's main accent; an
+    earlier draft used orange from the design mock's Tweaks panel but
+    the icon should read as the same brand as the UI chrome., so the whole background is crisp at any density
     and any launcher shape.  The foreground (V + play triangle) lives
     in mipmap-*/ic_launcher_foreground.png.
 
@@ -30,7 +32,7 @@
     <!-- Orange stripe through the middle band -->
     <path
         android:pathData="M0,38 L108,38 L108,72 L0,72 Z"
-        android:fillColor="#FF7A2E" />
+        android:fillColor="#D4FF3A" />
 
     <!-- Small folio / "live" pip in the top-right corner.
          Positioned at 470/512 · 108 ≈ 99, 46/512 · 108 ≈ 10, r≈2 -->
@@ -39,5 +41,5 @@
                           m -1.7,0
                           a 1.7,1.7 0 1,0 3.4,0
                           a 1.7,1.7 0 1,0 -3.4,0 Z"
-        android:fillColor="#FF7A2E" />
+        android:fillColor="#D4FF3A" />
 </vector>

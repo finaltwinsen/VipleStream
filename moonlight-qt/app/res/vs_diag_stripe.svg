@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    VipleStream editorial diagonal-stripe pattern, hue variable.
+    Mirrors the CSS in the design mock:
+        repeating-linear-gradient(45deg, dark 0 2px, darker 2px 8px)
+    Rendered here as a 24×24 tile that Image can fillMode=Tile into
+    any hero / placeholder background.  Tilt 45° means drawing four
+    parallel stripes at x=0, 6, 12, 18 (step 6) each 2px wide.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <rect width="24" height="24" fill="#0D0F0B"/>
+  <g transform="rotate(45, 12, 12)">
+    <rect x="-20" y="-8"  width="80" height="2" fill="#14170F"/>
+    <rect x="-20" y="-2"  width="80" height="2" fill="#14170F"/>
+    <rect x="-20" y="4"   width="80" height="2" fill="#14170F"/>
+    <rect x="-20" y="10"  width="80" height="2" fill="#14170F"/>
+    <rect x="-20" y="16"  width="80" height="2" fill="#14170F"/>
+    <rect x="-20" y="22"  width="80" height="2" fill="#14170F"/>
+    <rect x="-20" y="28"  width="80" height="2" fill="#14170F"/>
+  </g>
+</svg>
