@@ -111,6 +111,27 @@ CenteredGridView {
 
     model: computerModel
 
+    // Helper: open the featured host via the same pipeline a tile
+    // click would. Called by the Bold hero banner.
+    function activateFeatured() {
+        var idx = computerModel.featuredComputerIndex();
+        if (idx < 0) return;
+        // Re-dispatch to the delegate's onClicked logic by finding
+        // its index and forcing focus + click. Simpler: inline the
+        // branching here — the delegate logic is small.
+        // Unfortunately we don't have direct access to `model` at
+        // this level; emulate by pulling the session directly.
+        // For now, just push AppView if the featured host is online
+        // + paired (the common case); anything else falls through
+        // to the grid for the user to click manually.
+        // (Emulating onPressAndHold / context menu not supported
+        // here — that still requires a tile click.)
+        pcGrid.currentIndex = idx;
+        if (pcGrid.currentItem) {
+            pcGrid.currentItem.clicked();
+        }
+    }
+
     // VipleStream §01 Bold cover banner — a magazine masthead that
     // sits above the host grid when the design variant is DV_BOLD,
     // giving the screen the "HOSTS / LOCAL NETWORK" editorial look
@@ -125,8 +146,18 @@ CenteredGridView {
             width: pcGrid.width
             // Tucks flush against the grid when Bold, invisible + 0-height
             // on Safe so the existing grid layout is completely undisturbed.
-            height: visible ? 220 : 0
+            height: visible ? 260 : 0
             color: "#0D0F0B"   // ink
+
+            property string featuredName:
+                visible ? computerModel.nameAt(computerModel.featuredComputerIndex()) : ""
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: heroBanner.featuredName !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: pcGrid.activateFeatured()
+                hoverEnabled: true
+            }
 
             // Diagonal stripe pattern tiled across the banner.
             Image {
@@ -172,18 +203,42 @@ CenteredGridView {
                 }
             }
 
-            // Bottom-left cover line: "FEATURED · 01 / NN"
-            Text {
+            // Bottom-left: featured host name as cover-story display
+            // type (§01 Bold mock). Clickable via the outer MouseArea.
+            Column {
                 anchors.left: parent.left
                 anchors.bottom: parent.bottom
                 anchors.leftMargin: 32
-                anchors.bottomMargin: 22
-                text: "FEATURED · 01 / " + ("0" + pcGrid.count).slice(-2) +
-                      "   ·   " + qsTr("PICK A HOST TO CONNECT")
-                font.family: "IBM Plex Mono"
-                font.pointSize: 11
-                font.letterSpacing: 2.0
-                color: "#F2F5E1"
+                anchors.bottomMargin: 20
+                spacing: 4
+                width: heroBanner.width - 380
+
+                Text {
+                    text: "FEATURED · 01 / " + ("0" + pcGrid.count).slice(-2)
+                    font.family: "IBM Plex Mono"
+                    font.pointSize: 9
+                    font.letterSpacing: 1.8
+                    color: "#D4FF3A"
+                }
+                Text {
+                    visible: heroBanner.featuredName !== ""
+                    text: heroBanner.featuredName
+                    font.family: "Space Grotesk"
+                    font.pointSize: 46
+                    font.bold: true
+                    font.letterSpacing: -2.4
+                    color: "#F2F5E1"
+                    width: parent.width
+                    elide: Text.ElideRight
+                }
+                Text {
+                    visible: heroBanner.featuredName === ""
+                    text: qsTr("PICK A HOST TO CONNECT")
+                    font.family: "IBM Plex Mono"
+                    font.pointSize: 11
+                    font.letterSpacing: 2.0
+                    color: "#F2F5E1"
+                }
             }
 
             // Rotated tape sticker, top-right — editorial accent.

@@ -37,27 +37,39 @@ public final class VsDesignVariant {
                 apply(vg.getChildAt(i), bold);
             }
         }
-        if (!(root instanceof TextView)) return;
-        TextView tv = (TextView) root;
-        Object tag = tv.getTag();
+
+        // Dispatch by tag regardless of View type so the same walker
+        // handles TextView + ImageView retuning in one pass.
+        Object tag = root.getTag();
         if (!(tag instanceof CharSequence)) return;
         String t = tag.toString();
-        if ("vs_display".equals(t)) {
-            // Bold mastheads (VipleStream wordmark, PC name) use the
-            // oversized type; Safe quiets them by ~6sp.
-            tv.setTextSize(bold ? 24f : 17f);
-        } else if ("vs_display_large".equals(t)) {
-            // Extra-large cover-story title (reserved for Bold hero).
-            tv.setTextSize(bold ? 28f : 18f);
-        } else if ("vs_meta".equals(t)) {
-            // "§ NN · HEADER" mono lime meta above the display title.
-            // Hidden outright on Safe — the magazine numbering is the
-            // main Bold affordance; Safe tiles just show their name.
-            tv.setVisibility(bold ? View.VISIBLE : View.GONE);
-        } else if ("vs_meta_small".equals(t)) {
-            // Smaller in-tile §NN meta that we want visible in both
-            // variants, just sized differently.
-            tv.setTextSize(bold ? 10f : 8f);
+
+        if (root instanceof TextView) {
+            TextView tv = (TextView) root;
+            if ("vs_display".equals(t)) {
+                // Bold mastheads (VipleStream wordmark, PC name) use
+                // the oversized type; Safe quiets them by ~6sp.
+                tv.setTextSize(bold ? 24f : 17f);
+            } else if ("vs_display_large".equals(t)) {
+                // Extra-large cover-story title (reserved for Bold hero).
+                tv.setTextSize(bold ? 28f : 18f);
+            } else if ("vs_meta".equals(t)) {
+                // "§ NN · HEADER" mono lime meta above the display
+                // title. Hidden on Safe — the magazine numbering is
+                // the main Bold affordance.
+                tv.setVisibility(bold ? View.VISIBLE : View.GONE);
+            } else if ("vs_meta_small".equals(t)) {
+                // In-tile small §NN meta visible in both variants.
+                tv.setTextSize(bold ? 10f : 8f);
+            }
+            return;
+        }
+
+        // ImageView — §03 Bold stripe placeholder behind the box art.
+        // Visible only in Bold; on Safe we collapse it to GONE so the
+        // flat ink surface shows through.
+        if ("vs_tile_stripe".equals(t)) {
+            root.setVisibility(bold ? View.VISIBLE : View.GONE);
         }
     }
 

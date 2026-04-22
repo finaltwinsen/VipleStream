@@ -41,6 +41,12 @@ public:
 
     Q_INVOKABLE void setAppDirectLaunch(int appIndex, bool directLaunch);
 
+    // VipleStream: §03 Bold library-hero helpers. Prefer the
+    // currently-running app, fall back to the direct-launch app,
+    // fall back to the first visible app, -1 if the list is empty.
+    Q_INVOKABLE int featuredAppIndex() const;
+    Q_INVOKABLE QString nameAt(int index) const;
+
     QVariant data(const QModelIndex &index, int role) const override;
 
     int rowCount(const QModelIndex &parent) const override;

@@ -98,6 +98,34 @@ int ComputerModel::rowCount(const QModelIndex& parent) const
     return m_Computers.count();
 }
 
+int ComputerModel::featuredComputerIndex() const
+{
+    // Prefer an online + paired host.
+    for (int i = 0; i < m_Computers.count(); ++i) {
+        NvComputer* c = m_Computers[i];
+        if (c && c->state == NvComputer::CS_ONLINE && c->pairState == NvComputer::PS_PAIRED) {
+            return i;
+        }
+    }
+    // Otherwise the first paired host (reachable-ish but may be offline).
+    for (int i = 0; i < m_Computers.count(); ++i) {
+        NvComputer* c = m_Computers[i];
+        if (c && c->pairState == NvComputer::PS_PAIRED) {
+            return i;
+        }
+    }
+    // Fall back to row 0, or -1 for an empty list.
+    return m_Computers.isEmpty() ? -1 : 0;
+}
+
+QString ComputerModel::nameAt(int index) const
+{
+    if (index < 0 || index >= m_Computers.count() || !m_Computers[index]) {
+        return QString();
+    }
+    return m_Computers[index]->name;
+}
+
 QHash<int, QByteArray> ComputerModel::roleNames() const
 {
     QHash<int, QByteArray> names;

@@ -45,6 +45,18 @@ public:
 
     Q_INVOKABLE Session* createSessionForCurrentGame(int computerIndex);
 
+    // VipleStream: decoration helpers for the §01 Bold "featured host"
+    // hero on PcView.qml.  Both return -1 / empty string for an empty
+    // grid so QML can guard on that.
+    //
+    // featuredComputerIndex() picks, in order of preference:
+    //   1. the first online + paired host
+    //   2. otherwise the first paired host
+    //   3. otherwise 0 (the first row)
+    //   4. -1 if the list is empty
+    Q_INVOKABLE int featuredComputerIndex() const;
+    Q_INVOKABLE QString nameAt(int index) const;
+
 signals:
     void pairingCompleted(QVariant error);
     void connectionTestCompleted(int result, QString blockedPorts);

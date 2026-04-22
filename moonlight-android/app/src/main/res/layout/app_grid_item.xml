@@ -34,6 +34,20 @@
             android:layout_weight="1"
             android:background="@color/vs_ink">
 
+            <!--
+                VipleStream §03 Bold decorative placeholder: behind the
+                grid_image, show a diagonal stripe pattern (tagged
+                vs_tile_stripe so VsDesignVariant.apply can hide it on
+                Safe). When a game has real box art, grid_image sits
+                on top with centerCrop and covers the stripe.
+            -->
+            <ImageView
+                android:tag="vs_tile_stripe"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scaleType="fitXY"
+                android:src="@drawable/vs_tile_stripe" />
+
             <ImageView
                 android:id="@+id/grid_image"
                 android:scaleType="centerCrop"

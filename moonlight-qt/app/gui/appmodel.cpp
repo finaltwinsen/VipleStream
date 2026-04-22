@@ -58,6 +58,35 @@ int AppModel::getDirectLaunchAppIndex()
     return -1;
 }
 
+int AppModel::featuredAppIndex() const
+{
+    // Prefer a currently-running game — that's the one the user is
+    // resuming / actively streaming.
+    if (m_CurrentGameId != 0) {
+        for (int i = 0; i < m_VisibleApps.count(); ++i) {
+            if (m_VisibleApps[i].id == m_CurrentGameId) {
+                return i;
+            }
+        }
+    }
+    // Otherwise the direct-launch app if the user pinned one.
+    for (int i = 0; i < m_VisibleApps.count(); ++i) {
+        if (m_VisibleApps[i].directLaunch) {
+            return i;
+        }
+    }
+    // Otherwise whatever's first on the list.
+    return m_VisibleApps.isEmpty() ? -1 : 0;
+}
+
+QString AppModel::nameAt(int index) const
+{
+    if (index < 0 || index >= m_VisibleApps.count()) {
+        return QString();
+    }
+    return m_VisibleApps[index].name;
+}
+
 int AppModel::rowCount(const QModelIndex &parent) const
 {
     // For list models only the root node (an invalid parent) should return the list's size. For all

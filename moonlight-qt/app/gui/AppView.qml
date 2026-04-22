@@ -77,6 +77,22 @@ CenteredGridView {
 
     model: appModel
 
+    // Hero click: launch (or resume) the featured app via the same
+    // delegate path a tile click would. The delegate's
+    // launchOrResumeSelectedApp() encapsulates the full logic so we
+    // just forward to it after moving currentIndex onto the
+    // featured row.
+    function activateFeatured() {
+        var idx = appModel.featuredAppIndex();
+        if (idx < 0) return;
+        appGrid.currentIndex = idx;
+        if (appGrid.currentItem && appGrid.currentItem.launchOrResumeSelectedApp) {
+            appGrid.currentItem.launchOrResumeSelectedApp(true);
+        } else if (appGrid.currentItem) {
+            appGrid.currentItem.clicked();
+        }
+    }
+
     // VipleStream §03 Bold library masthead — matches §01 Bold on
     // PcView (see v1.2.37 commit message). Collapsed on Safe so
     // the existing packed grid is untouched.
@@ -85,8 +101,18 @@ CenteredGridView {
             id: libraryBanner
             visible: appGrid.bold && appGrid.count > 0
             width: appGrid.width
-            height: visible ? 220 : 0
+            height: visible ? 260 : 0
             color: "#0D0F0B"   // ink
+
+            property string featuredName:
+                visible ? appModel.nameAt(appModel.featuredAppIndex()) : ""
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: libraryBanner.featuredName !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: appGrid.activateFeatured()
+                hoverEnabled: true
+            }
 
             Image {
                 anchors.fill: parent
@@ -131,17 +157,40 @@ CenteredGridView {
                 }
             }
 
-            Text {
+            Column {
                 anchors.left: parent.left
                 anchors.bottom: parent.bottom
                 anchors.leftMargin: 32
-                anchors.bottomMargin: 22
-                text: "FEATURED · 01 / " + ("0" + appGrid.count).slice(-2) +
-                      "   ·   " + qsTr("PICK A TITLE TO LAUNCH")
-                font.family: "IBM Plex Mono"
-                font.pointSize: 11
-                font.letterSpacing: 2.0
-                color: "#F2F5E1"
+                anchors.bottomMargin: 20
+                spacing: 4
+                width: libraryBanner.width - 380
+
+                Text {
+                    text: "FEATURED · 01 / " + ("0" + appGrid.count).slice(-2)
+                    font.family: "IBM Plex Mono"
+                    font.pointSize: 9
+                    font.letterSpacing: 1.8
+                    color: "#D4FF3A"
+                }
+                Text {
+                    visible: libraryBanner.featuredName !== ""
+                    text: libraryBanner.featuredName.toUpperCase()
+                    font.family: "Space Grotesk"
+                    font.pointSize: 46
+                    font.bold: true
+                    font.letterSpacing: -2.4
+                    color: "#F2F5E1"
+                    width: parent.width
+                    elide: Text.ElideRight
+                }
+                Text {
+                    visible: libraryBanner.featuredName === ""
+                    text: qsTr("PICK A TITLE TO LAUNCH")
+                    font.family: "IBM Plex Mono"
+                    font.pointSize: 11
+                    font.letterSpacing: 2.0
+                    color: "#F2F5E1"
+                }
             }
 
             // Rotated tape, top-right corner.

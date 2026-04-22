@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    VipleStream diagonal-stripe tile background for the game grid
+    (§03 Bold in temp/design_bundle/viplestream/project/
+    vs-screens-bold.jsx).  Mirrors the PC-side
+    res/vs_diag_stripe_overlay.svg — a semi-transparent ink stripe
+    pattern meant to layer over a coloured background so each tile
+    can carry its own hue.
+
+    Implemented as a Vector so it scales crisply at any density.
+    The stripe pattern is drawn once across the 120×120dp viewport;
+    Android's renderer will scale it to fit the ImageView regardless
+    of actual pixel size.  No PNG rasterisation / sharp roundtrip
+    required.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="120dp"
+    android:height="120dp"
+    android:viewportWidth="120"
+    android:viewportHeight="120">
+
+    <!-- ~45% alpha of the VS ink2 colour (#14170F). -->
+    <group android:pivotX="60" android:pivotY="60" android:rotation="45">
+        <path android:pathData="M-40,-20 L160,-20 L160,-18 L-40,-18 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40,-10 L160,-10 L160,-8  L-40,-8  Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40,  0 L160,  0 L160,  2 L-40,  2 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40, 10 L160, 10 L160, 12 L-40, 12 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40, 20 L160, 20 L160, 22 L-40, 22 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40, 30 L160, 30 L160, 32 L-40, 32 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40, 40 L160, 40 L160, 42 L-40, 42 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40, 50 L160, 50 L160, 52 L-40, 52 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40, 60 L160, 60 L160, 62 L-40, 62 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40, 70 L160, 70 L160, 72 L-40, 72 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40, 80 L160, 80 L160, 82 L-40, 82 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40, 90 L160, 90 L160, 92 L-40, 92 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40,100 L160,100 L160,102 L-40,102 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40,110 L160,110 L160,112 L-40,112 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40,120 L160,120 L160,122 L-40,122 Z" android:fillColor="#7314170F"/>
+        <path android:pathData="M-40,130 L160,130 L160,132 L-40,132 Z" android:fillColor="#7314170F"/>
+    </group>
+</vector>
