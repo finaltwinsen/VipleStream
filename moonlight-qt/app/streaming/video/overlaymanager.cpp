@@ -29,10 +29,25 @@ OverlayManager::OverlayManager() :
 {
     memset(m_Overlays, 0, sizeof(m_Overlays));
 
-    m_Overlays[OverlayType::OverlayDebug].color = {0xD0, 0xD0, 0x00, 0xFF};
+    // VipleStream in-stream HUD palette (editorial dark / electric-lime).
+    //
+    // The SDL/TTF overlay blits raw text surfaces onto the video plane,
+    // so the only per-overlay look-and-feel knobs we have are colour +
+    // font size. For the full §05 Safe HUD mock (ping-big-lime readout,
+    // perf bar strip, bottom quick-menu chips) we'd need a new overlay
+    // renderer that composes shapes + text rather than a single text
+    // blit — that's a separate, larger change. The colour swaps below
+    // at least get the HUD reading in the VS palette.
+    //
+    // OverlayDebug  — perf stats (was dim yellow #D0D000).
+    // Now VS lime (#D4FF3A) to match the in-mock lime data chips.
+    m_Overlays[OverlayType::OverlayDebug].color = {0xD4, 0xFF, 0x3A, 0xFF};
     m_Overlays[OverlayType::OverlayDebug].fontSize = 20;
 
-    m_Overlays[OverlayType::OverlayStatusUpdate].color = {0xCC, 0x00, 0x00, 0xFF};
+    // OverlayStatusUpdate — transient notices, e.g. "Gamepad mouse mode
+    // active". Was dark red (#CC0000), which read as an error. Paper
+    // (#F2F5E1) is a neutral status colour and matches the VS foreground.
+    m_Overlays[OverlayType::OverlayStatusUpdate].color = {0xF2, 0xF5, 0xE1, 0xFF};
     m_Overlays[OverlayType::OverlayStatusUpdate].fontSize = 36;
 
     // While TTF will usually not be initialized here, it is valid for that not to
