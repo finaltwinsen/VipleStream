@@ -249,19 +249,59 @@ ApplicationWindow {
 
     header: ToolBar {
         id: toolBar
-        height: 60
+        height: 80     // taller to accommodate Bold masthead
         anchors.topMargin: 5
         anchors.bottomMargin: 5
 
-        Label {
+        // VipleStream Bold masthead — magazine-cover title block centred
+        // in the toolbar. Routes the stack-view's objectName through a
+        // §NN / uppercase display-type presentation, with a small lime
+        // mono meta line above ("§ NN · SECTION · LOCAL WED 22:47"
+        // equivalent) and the page title in tight Space Grotesk bold.
+        Column {
             id: titleLabel
             visible: toolBar.width > 700
-            anchors.fill: parent
-            text: stackView.currentItem.objectName
-            font.pointSize: 20
-            elide: Label.ElideRight
-            horizontalAlignment: Qt.AlignHCenter
-            verticalAlignment: Qt.AlignVCenter
+            anchors.centerIn: parent
+            spacing: 1
+
+            // Map the stackView top to a §NN / meta string. Undefined
+            // currentItem during transitions gets a safe placeholder.
+            property var _ci: stackView.currentItem
+            property string sectionMeta: {
+                if (!_ci) return "VIPLESTREAM"
+                if (_ci instanceof PcView)       return "§ 01 · HOSTS"
+                if (_ci instanceof AppView)      return "§ 03 · LIBRARY · " + (_ci.objectName || "")
+                if (_ci instanceof SettingsView) return "§ 04 · SETTINGS"
+                // Segue pages + misc — fall back to a generic lead-in.
+                return "VIPLESTREAM · " + (_ci.objectName || "")
+            }
+            property string displayTitle: {
+                if (!_ci) return "VipleStream"
+                if (_ci instanceof PcView)       return "Hosts"
+                if (_ci instanceof AppView)      return _ci.objectName || "Library"
+                if (_ci instanceof SettingsView) return "Settings"
+                return _ci.objectName || "VipleStream"
+            }
+
+            Label {
+                text: titleLabel.sectionMeta
+                anchors.horizontalCenter: parent.horizontalCenter
+                font.pointSize: 9
+                font.family: "IBM Plex Mono"
+                font.letterSpacing: 1.6
+                font.capitalization: Font.AllUppercase
+                color: window.theme.lime
+            }
+            Label {
+                text: titleLabel.displayTitle
+                anchors.horizontalCenter: parent.horizontalCenter
+                font.pointSize: 24
+                font.family: "Space Grotesk"
+                font.bold: true
+                font.letterSpacing: -1.0
+                color: window.theme.paper
+                elide: Label.ElideRight
+            }
         }
 
         RowLayout {
@@ -283,12 +323,16 @@ ApplicationWindow {
                 }
             }
 
-            // This label will appear when the window gets too small and
-            // we need to ensure the toolbar controls don't collide
+            // Narrow-window fallback: when the toolbar is <700px wide the
+            // full Bold masthead hides (toolBar.width gate above) and
+            // this single-line label takes over so the title isn't lost.
             Label {
                 id: titleRowLabel
-                font.pointSize: titleLabel.font.pointSize
+                font.pointSize: 16
+                font.family: "Space Grotesk"
+                font.bold: true
                 elide: Label.ElideRight
+                color: window.theme.paper
                 horizontalAlignment: Qt.AlignHCenter
                 verticalAlignment: Qt.AlignVCenter
                 Layout.fillWidth: true
@@ -296,7 +340,7 @@ ApplicationWindow {
                 // We need this label to always be visible so it can occupy
                 // the remaining space in the RowLayout. To "hide" it, we
                 // just set the text to empty string.
-                text: !titleLabel.visible ? stackView.currentItem.objectName : ""
+                text: !titleLabel.visible && stackView.currentItem ? stackView.currentItem.objectName : ""
             }
 
             // Editorial version meta: lime live-dot + monospace label.
