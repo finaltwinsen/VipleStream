@@ -316,7 +316,7 @@ ApplicationWindow {
                 Label {
                     text: "VIPLESTREAM · v" + SystemProperties.versionString
                     font.pointSize: 10
-                    font.family: window.theme.fontMono
+                    font.family: "IBM Plex Mono"  // qrc-embedded, registered in main.cpp
                     font.letterSpacing: 1.2
                     font.capitalization: Font.AllUppercase
                     color: window.theme.paper

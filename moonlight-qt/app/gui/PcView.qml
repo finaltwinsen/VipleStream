@@ -131,7 +131,7 @@ CenteredGridView {
             Text {
                 id: pcIndexLabel
                 text: "§ " + (index < 9 ? "0" + (index + 1) : (index + 1))
-                font.family: "Consolas, IBM Plex Mono, monospace"
+                font.family: "IBM Plex Mono"
                 font.pointSize: 9
                 font.letterSpacing: 1.4
                 color: "#8B8E7E"    // vs mute
@@ -161,7 +161,7 @@ CenteredGridView {
                     text: !model.online  ? qsTr("OFFLINE")
                         : !model.paired   ? qsTr("UNPAIRED")
                                           : qsTr("READY")
-                    font.family: "Consolas, IBM Plex Mono, monospace"
+                    font.family: "IBM Plex Mono"
                     font.pointSize: 9
                     font.letterSpacing: 1.4
                     color: !model.online  ? "#8B8E7E"
@@ -420,7 +420,7 @@ CenteredGridView {
                 Rectangle { width: 8; height: 8; radius: 1; color: "#D4FF3A" }
                 Label {
                     text: "§ 02 · " + qsTr("PAIRING") + "  ·  " + qsTr("STEP 02 / 03")
-                    font.family: "Consolas, IBM Plex Mono, monospace"
+                    font.family: "IBM Plex Mono"
                     font.pointSize: 9
                     font.letterSpacing: 1.6
                     color: "#D4FF3A"
@@ -488,7 +488,7 @@ CenteredGridView {
                 }
                 Label {
                     text: qsTr("WAITING FOR HOST")
-                    font.family: "Consolas, IBM Plex Mono, monospace"
+                    font.family: "IBM Plex Mono"
                     font.pointSize: 9
                     font.letterSpacing: 1.4
                     color: "#8B8E7E"

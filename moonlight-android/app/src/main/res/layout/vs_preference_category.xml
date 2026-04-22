@@ -24,7 +24,7 @@
         android:textColor="@color/vs_lime"
         android:textSize="13sp"
         android:textStyle="bold"
-        android:fontFamily="monospace"
+        android:fontFamily="@font/ibm_plex_mono"
         android:letterSpacing="0.14"
         android:singleLine="true"
         android:ellipsize="end" />

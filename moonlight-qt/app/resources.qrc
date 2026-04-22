@@ -18,6 +18,11 @@
         <file>res/baseline-error_outline-24px.svg</file>
         <file>res/baseline-check_circle_outline-24px.svg</file>
         <file>res/discord.svg</file>
+        <!-- VipleStream editorial font stack. Registered at startup
+             via QFontDatabase::addApplicationFont in main.cpp. -->
+        <file>fonts/SpaceGrotesk-var.ttf</file>
+        <file>fonts/Inter-var.ttf</file>
+        <file>fonts/IBMPlexMono-Regular.ttf</file>
         <file>languages/qml_de.ts</file>
         <file>languages/qml_de.qm</file>
         <file>languages/qml_fr.ts</file>

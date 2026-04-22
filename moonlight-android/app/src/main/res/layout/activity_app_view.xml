@@ -24,7 +24,7 @@
         android:text="§ 03 · LIBRARY"
         android:textColor="@color/vs_lime"
         android:textSize="11sp"
-        android:fontFamily="monospace"
+        android:fontFamily="@font/ibm_plex_mono"
         android:letterSpacing="0.18" />
 
     <TextView
@@ -40,6 +40,7 @@
         android:textColor="@color/vs_paper"
         android:textSize="24sp"
         android:textStyle="bold"
+        android:fontFamily="@font/space_grotesk"
         android:letterSpacing="-0.02" />
 
     <FrameLayout

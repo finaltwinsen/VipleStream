@@ -45,6 +45,7 @@
             android:textColor="@color/vs_paper"
             android:textSize="11sp"
             android:textStyle="bold"
+            android:fontFamily="@font/inter"
             android:gravity="left"
             android:maxLines="2"
             android:ellipsize="end" />

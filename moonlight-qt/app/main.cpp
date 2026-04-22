@@ -10,6 +10,7 @@
 #include <QNetworkProxyFactory>
 #include <QPalette>
 #include <QFont>
+#include <QFontDatabase>
 #include <QCursor>
 #include <QElapsedTimer>
 #include <QTemporaryFile>
@@ -439,6 +440,23 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationName("Moonlight Game Streaming Project");
     QCoreApplication::setOrganizationDomain("moonlight-stream.com");
     QCoreApplication::setApplicationName("VipleStream");
+
+    // VipleStream editorial font stack — ship Space Grotesk / Inter /
+    // IBM Plex Mono as qrc-embedded TTFs so QML can ask for the exact
+    // family names without depending on whatever the host has
+    // installed. Must happen before any QML is loaded.
+    {
+        static const char* kFontResources[] = {
+            ":/fonts/SpaceGrotesk-var.ttf",
+            ":/fonts/Inter-var.ttf",
+            ":/fonts/IBMPlexMono-Regular.ttf",
+        };
+        for (const char* path : kFontResources) {
+            if (QFontDatabase::addApplicationFont(path) < 0) {
+                qWarning("Failed to load bundled font: %s", path);
+            }
+        }
+    }
 
     if (QFile(QDir::currentPath() + "/portable.dat").exists()) {
         QSettings::setDefaultFormat(QSettings::IniFormat);

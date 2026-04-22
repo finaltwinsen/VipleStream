@@ -30,11 +30,11 @@ QtObject {
     readonly property color line2:   "#2D3127"   // visible hairline (≈18% paper)
 
     // ── Typography ───────────────────────────────────────────────────
-    // We don't ship the Google Fonts (Space Grotesk / IBM Plex Mono /
-    // Inter) with the app — they'd need .ttf bundling + a QFontDatabase
-    // register at startup.  Fall back to the closest system stacks so
-    // the look reads as "editorial magazine" even without the exact
-    // fonts installed.
+    // Three TTFs are bundled into the app's qrc and registered at
+    // startup in main.cpp via QFontDatabase::addApplicationFont.
+    // We keep the system-font fallbacks just in case the registration
+    // failed on a particular machine (Qt will silently use the next
+    // match in the family list).
     readonly property string fontDisplay: "Space Grotesk, Segoe UI, Helvetica Neue, Arial, sans-serif"
     readonly property string fontMono:    "IBM Plex Mono, Consolas, Menlo, monospace"
     readonly property string fontBody:    "Inter, Segoe UI, Helvetica Neue, Arial, sans-serif"

@@ -25,7 +25,7 @@
             android:text="§ HOST"
             android:textSize="9sp"
             android:textColor="@color/vs_mute"
-            android:fontFamily="monospace"
+            android:fontFamily="@font/ibm_plex_mono"
             android:letterSpacing="0.14" />
 
         <RelativeLayout
@@ -68,6 +68,7 @@
             android:textColor="@color/vs_paper"
             android:textSize="15sp"
             android:textStyle="bold"
+            android:fontFamily="@font/inter"
             android:gravity="left"
             android:maxLines="2"
             android:ellipsize="end" />

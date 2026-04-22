@@ -204,7 +204,7 @@ CenteredGridView {
                 Label {
                     // Editorial meta above the title: "§ NN · LIBRARY"
                     text: "§ " + (index < 9 ? "0" + (index + 1) : (index + 1)) + " · " + qsTr("LIBRARY")
-                    font.family: "Consolas, IBM Plex Mono, monospace"
+                    font.family: "IBM Plex Mono"
                     font.pointSize: 9
                     font.letterSpacing: 1.2
                     color: "#8B8E7E"    // vs mute
@@ -246,7 +246,7 @@ CenteredGridView {
                 id: playingLabel
                 anchors.centerIn: parent
                 text: "● " + qsTr("PLAYING")
-                font.family: "Consolas, IBM Plex Mono, monospace"
+                font.family: "IBM Plex Mono"
                 font.pointSize: 8
                 font.bold: true
                 font.letterSpacing: 1.4
@@ -391,7 +391,7 @@ CenteredGridView {
 
         Label {
             text: "§ 03 · " + qsTr("LIBRARY") + " / " + qsTr("EMPTY")
-            font.family: "Consolas, IBM Plex Mono, monospace"
+            font.family: "IBM Plex Mono"
             font.pointSize: 10
             font.letterSpacing: 1.4
             color: "#D4FF3A"    // vs lime
