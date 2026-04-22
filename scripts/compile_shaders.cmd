@@ -43,3 +43,12 @@ if errorlevel 1 (echo   FAILED) else (echo   OK)
 echo Compiling dml_unpack_fp16_rgba8 (cs_5_0)...
 "%FXC%" /T cs_5_0 /O1 /Fo "%SHADERS%\d3d11_dml_unpack_fp16_rgba8.fxc" "%SHADERS%\d3d11_dml_unpack_fp16_rgba8.hlsl"
 if errorlevel 1 (echo   FAILED) else (echo   OK)
+
+:: DirectMLFRUC Tier 3 fallback: when DML graph init fails on the
+:: user's hardware, the backend falls back to this native D3D12
+:: compute shader that does 0.5*(prev+curr) on the same FrameTensor
+:: buffers. Shipping it is mandatory — without it DirectMLFRUC
+:: gives up on any driver that rejects the inline DML graph.
+echo Compiling fruc_blend_fp32 (cs_5_0)...
+"%FXC%" /T cs_5_0 /O1 /Fo "%SHADERS%\d3d11_fruc_blend_fp32.fxc" "%SHADERS%\d3d11_fruc_blend_fp32.hlsl"
+if errorlevel 1 (echo   FAILED) else (echo   OK)

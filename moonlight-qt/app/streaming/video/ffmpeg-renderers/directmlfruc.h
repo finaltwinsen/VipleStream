@@ -88,6 +88,14 @@ private:
     bool compileDMLGraph();               // fallback inline DML ADD1+CLIP graph
     bool tryLoadOnnxModel();              // optional RIFE/FLAVR/IFRNet model
 
+    // Tier 3: when compileDMLGraph() fails on the user's hardware
+    // (DML runtime bug returning 0x887A0005 on binding-table reset)
+    // we still want frame interpolation to work. The D3D12 blend
+    // compute shader replicates the inline DML graph's semantics
+    // — 0.5*(prev + curr) clipped to [0,1] — without touching any
+    // IDMLOperator / IDMLBindingTable machinery at all.
+    void recordBlendCS(ID3D12GraphicsCommandList* cl);
+
     // Per-frame helpers.
     bool runDMLDispatch();
     bool runOrtInference();
@@ -139,22 +147,35 @@ private:
     CP<ID3D12Resource>             m_SharedRenderTex12;
     CP<ID3D12Resource>             m_SharedOutputTex12;
 
-    // D3D12 pack/unpack compute pipeline.
-    CP<ID3D12RootSignature>        m_CsRS12;       // shared by pack and unpack
+    // D3D12 pack/unpack/blend compute pipeline.
+    // All three PSOs share one root signature with 4 descriptor-table
+    // parameters. Pack/unpack use params 0/1/2 (and ignore 3); blend
+    // uses 0/1/2/3 so it can bind two SRVs (t0 + t1) simultaneously.
+    CP<ID3D12RootSignature>        m_CsRS12;
     CP<ID3D12PipelineState>        m_PackPSO12;
     CP<ID3D12PipelineState>        m_UnpackPSO12;
-    // Descriptor heap for CS bindings (6 descriptors, shader-visible):
-    //   [0] CBV — pack/unpack constant buffer
-    //   [1] SRV — render texture   (pack input)
-    //   [2] UAV — FrameTensor[0]   (pack slot-0 output)
-    //   [3] UAV — FrameTensor[1]   (pack slot-1 output)
-    //   [4] SRV — OutputTensor     (unpack input)
-    //   [5] UAV — output texture   (unpack output)
+    CP<ID3D12PipelineState>        m_BlendPSO12;    // Tier 3 fallback
+    // Descriptor heap for CS bindings (9 descriptors, shader-visible):
+    //   [0] CBV — pack/unpack/blend constant buffer
+    //   [1] SRV — render texture         (pack input)
+    //   [2] UAV — FrameTensor[0]         (pack slot-0 output)
+    //   [3] UAV — FrameTensor[1]         (pack slot-1 output)
+    //   [4] SRV — OutputTensor           (unpack input)
+    //   [5] UAV — output texture         (unpack output)
+    //   [6] SRV — FrameTensor[0] buffer  (blend t0 — Tier 3)
+    //   [7] SRV — FrameTensor[1] buffer  (blend t1 — Tier 3)
+    //   [8] UAV — OutputTensor buffer    (blend u0 — Tier 3)
     CP<ID3D12DescriptorHeap>       m_CsDescHeap;
     uint32_t                       m_CsDescIncrSize = 0;
     // Constant buffer on UPLOAD heap, persistently mapped.
     CP<ID3D12Resource>             m_CsCB12;
     void*                          m_CsCBMapped = nullptr;
+
+    // --- Tier 3 D3D12-native blend fallback ---
+    // Set when compileDMLGraph() fails but createD3D12CsPipeline()
+    // succeeded (i.e. m_BlendPSO12 is live). In that case runDMLDispatch()
+    // dispatches m_BlendPSO12 instead of invoking the DML graph.
+    bool                           m_BlendAvailable = false;
 
     // --- DML fallback graph ---
     CP<IDMLDevice>                 m_DMLDevice;

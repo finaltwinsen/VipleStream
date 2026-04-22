@@ -131,18 +131,55 @@ bool DirectMLFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t hei
         m_CmdList12->Close();
 
         if (!compileDMLGraph()) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] DirectML: compileDMLGraph failed");
-            return false;
+            // Tier 3 fallback: DML graph refused to compile / init on
+            // this hardware, but the D3D12 CS pipeline is ready and the
+            // blend PSO exists. Fall through to native blend — this keeps
+            // DirectMLFRUC alive instead of surrendering the whole
+            // backend to GenericFRUC.
+            if (m_BlendPSO12) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] DirectML: compileDMLGraph failed — "
+                            "using Tier 3 D3D12 native blend fallback "
+                            "(0.5*prev + 0.5*curr via compute shader, "
+                            "no DML runtime involvement)");
+                // Drop any partially-created DML graph resources so
+                // runDMLDispatch() recognises the blend-only state.
+                m_DMLBindingTable.Reset();
+                m_DMLCompiledOp.Reset();
+                m_DMLDescHeap.Reset();
+                m_TempResource.Reset();
+                m_PersistentResource.Reset();
+                // Also drain the queue once more — compileDMLGraph may
+                // have left the init dispatch in flight before failing.
+                m_FenceValue++;
+                m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
+                if (m_Fence12->GetCompletedValue() < m_FenceValue) {
+                    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                    if (ev) {
+                        m_Fence12->SetEventOnCompletion(m_FenceValue, ev);
+                        WaitForSingleObject(ev, 500);
+                        CloseHandle(ev);
+                    }
+                }
+                m_BlendAvailable = true;
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] DirectML: compileDMLGraph failed "
+                            "AND blend PSO unavailable — bailing out");
+                return false;
+            }
         }
     }
 
     m_Initialized = true;
+    const char* modeTag = m_UseOrt          ? "ONNX model"
+                        : m_DMLCompiledOp   ? "inline DML graph"
+                        : m_BlendAvailable  ? "Tier 3 D3D12 blend"
+                        : "?";
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-FRUC] DirectML (D6 tex-share, %s) initialized: %ux%u, "
                 "FP32 tensor %.2f MB/buf",
-                m_UseOrt ? "ONNX model" : "inline graph",
-                width, height, (double)m_TensorBytes / (1024.0 * 1024.0));
+                modeTag, width, height, (double)m_TensorBytes / (1024.0 * 1024.0));
     return true;
 }
 
@@ -208,6 +245,8 @@ void DirectMLFRUC::destroy()
     m_FrameTensor[1].Reset();
 
     // D6: CS pipeline, descriptor heap, constant buffer
+    m_BlendPSO12.Reset();   // Tier 3 fallback
+    m_BlendAvailable = false;
     m_UnpackPSO12.Reset();
     m_PackPSO12.Reset();
     m_CsRS12.Reset();
@@ -431,42 +470,59 @@ bool DirectMLFRUC::openD3D11TexturesInD3D12()
 
 // ── createD3D12CsPipeline ─────────────────────────────────────────────────
 //
-// Root signature, pack/unpack PSOs (reusing the same cs_5_0 .fxc
-// bytecode compiled for D3D11), descriptor heap (6 entries), and the
-// persistently-mapped UPLOAD-heap constant buffer.
+// Root signature, pack/unpack/blend PSOs (reusing the same cs_5_0
+// .fxc bytecode compiled for D3D11), descriptor heap (9 entries), and
+// the persistently-mapped UPLOAD-heap constant buffer.
 //
 // Descriptor heap layout:
 //   [0] CBV — constant buffer (width, height, useAlpha)
-//   [1] SRV — render texture  (pack input)
-//   [2] UAV — FrameTensor[0]  (pack output, slot 0)
-//   [3] UAV — FrameTensor[1]  (pack output, slot 1)
-//   [4] SRV — OutputTensor    (unpack input)
-//   [5] UAV — output texture  (unpack output)
+//   [1] SRV — render texture           (pack t0)
+//   [2] UAV — FrameTensor[0]           (pack u0, slot 0)
+//   [3] UAV — FrameTensor[1]           (pack u0, slot 1)
+//   [4] SRV — OutputTensor             (unpack t0)
+//   [5] UAV — output texture           (unpack u0)
+//   [6] SRV — FrameTensor[0] buffer    (blend  t0 — Tier 3)
+//   [7] SRV — FrameTensor[1] buffer    (blend  t1 — Tier 3)
+//   [8] UAV — OutputTensor  buffer     (blend  u0 — Tier 3)
+//
+// Root signature: 4 descriptor-table parameters.
+//   param[0]: CBV @ b0           (all three PSOs)
+//   param[1]: SRV @ t0           (all three PSOs)
+//   param[2]: UAV @ u0           (all three PSOs)
+//   param[3]: SRV @ t1           (blend only; pack/unpack leave unbound
+//                                 — legal in D3D12 as long as the shader
+//                                 doesn't reference the slot)
 
 bool DirectMLFRUC::createD3D12CsPipeline()
 {
-    // ── Root signature: 3 params, each a 1-range descriptor table ─────────
-    D3D12_DESCRIPTOR_RANGE ranges[3] = {};
+    // ── Root signature: 4 params, each a 1-range descriptor table ─────────
+    D3D12_DESCRIPTOR_RANGE ranges[4] = {};
     ranges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
     ranges[0].NumDescriptors                    = 1;
-    ranges[0].BaseShaderRegister                = 0;
+    ranges[0].BaseShaderRegister                = 0;   // b0
     ranges[0].RegisterSpace                     = 0;
     ranges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
     ranges[1].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     ranges[1].NumDescriptors                    = 1;
-    ranges[1].BaseShaderRegister                = 0;
+    ranges[1].BaseShaderRegister                = 0;   // t0
     ranges[1].RegisterSpace                     = 0;
     ranges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
     ranges[2].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
     ranges[2].NumDescriptors                    = 1;
-    ranges[2].BaseShaderRegister                = 0;
+    ranges[2].BaseShaderRegister                = 0;   // u0
     ranges[2].RegisterSpace                     = 0;
     ranges[2].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    D3D12_ROOT_PARAMETER params[3] = {};
-    for (int i = 0; i < 3; ++i) {
+    ranges[3].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[3].NumDescriptors                    = 1;
+    ranges[3].BaseShaderRegister                = 1;   // t1 — blend only
+    ranges[3].RegisterSpace                     = 0;
+    ranges[3].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER params[4] = {};
+    for (int i = 0; i < 4; ++i) {
         params[i].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         params[i].DescriptorTable.NumDescriptorRanges = 1;
         params[i].DescriptorTable.pDescriptorRanges   = &ranges[i];
@@ -474,7 +530,7 @@ bool DirectMLFRUC::createD3D12CsPipeline()
     }
 
     D3D12_ROOT_SIGNATURE_DESC rsd = {};
-    rsd.NumParameters = 3;
+    rsd.NumParameters = 4;
     rsd.pParameters   = params;
     rsd.Flags         = D3D12_ROOT_SIGNATURE_FLAG_NONE;
 
@@ -531,10 +587,30 @@ bool DirectMLFRUC::createD3D12CsPipeline()
         return false;
     }
 
-    // ── Descriptor heap (6 entries, shader-visible) ────────────────────────
+    // ── Tier 3 blend PSO (optional — if the .fxc is missing the
+    //    Tier-3 fallback simply isn't available; we still try DML). ───────
+    QByteArray blendBytes = Path::readDataFile("d3d11_fruc_blend_fp32.fxc");
+    if (blendBytes.isEmpty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: d3d11_fruc_blend_fp32.fxc missing — "
+                    "Tier 3 blend fallback unavailable; DirectML init will bail "
+                    "to GenericFRUC if DML graph compilation fails.");
+    } else {
+        psd.CS = { blendBytes.constData(), (SIZE_T)blendBytes.size() };
+        HRESULT bhr = m_Device12->CreateComputePipelineState(&psd, IID_PPV_ARGS(&m_BlendPSO12));
+        if (FAILED(bhr)) {
+            // Non-fatal — we can still try DML path. Just leave m_BlendPSO12 null.
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: CreateComputePipelineState(blend) failed 0x%08lx "
+                        "— Tier 3 blend fallback unavailable", bhr);
+            m_BlendPSO12.Reset();
+        }
+    }
+
+    // ── Descriptor heap (9 entries, shader-visible) ────────────────────────
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 6;
+    hd.NumDescriptors = 9;
     hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     hr = m_Device12->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_CsDescHeap));
     if (FAILED(hr)) return false;
@@ -606,6 +682,20 @@ bool DirectMLFRUC::createD3D12CsPipeline()
     uavTex.Format        = DXGI_FORMAT_R8G8B8A8_UNORM;
     uavTex.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     m_Device12->CreateUnorderedAccessView(m_SharedOutputTex12.Get(), nullptr, &uavTex, cpuAt(5));
+
+    // ── Tier 3 blend-path views ───────────────────────────────────────────
+    // These alias the same underlying FrameTensor / OutputTensor buffers
+    // as slots [2]/[3]/[4] but with the roles the blend shader needs:
+    //   t0 ← FrameTensor[0] as Buffer<float>  (slot 6)
+    //   t1 ← FrameTensor[1] as Buffer<float>  (slot 7)
+    //   u0 → OutputTensor   as RWBuffer<float>(slot 8)
+    // We use the same FP32 typed-buffer layout as the pack/unpack paths.
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvFrame = srvBuf;  // inherits R32_FLOAT, Buffer, NumElements
+    m_Device12->CreateShaderResourceView(m_FrameTensor[0].Get(), &srvFrame, cpuAt(6));
+    m_Device12->CreateShaderResourceView(m_FrameTensor[1].Get(), &srvFrame, cpuAt(7));
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavOut = uavBuf;   // inherits R32_FLOAT, Buffer, NumElements
+    m_Device12->CreateUnorderedAccessView(m_OutputTensor.Get(), nullptr, &uavOut, cpuAt(8));
 
     return true;
 }
@@ -945,6 +1035,34 @@ void DirectMLFRUC::recordPackCS(ID3D12GraphicsCommandList* cl, int slot)
 }
 
 
+// ── recordBlendCS ─────────────────────────────────────────────────────────
+//
+// Tier 3 fallback: native D3D12 blend. Reads FrameTensor[0] at t0,
+// FrameTensor[1] at t1, writes saturated 0.5*(a+b) into OutputTensor
+// at u0. Assumes m_CsDescHeap is already bound via SetDescriptorHeaps
+// before this call. Safe to invoke even while the same heap is bound
+// to the pack pipeline — we just flip root-sig bindings + PSO.
+
+void DirectMLFRUC::recordBlendCS(ID3D12GraphicsCommandList* cl)
+{
+    auto gpuBase = m_CsDescHeap->GetGPUDescriptorHandleForHeapStart();
+    const UINT inc = m_CsDescIncrSize;
+    auto gpuAt = [&](UINT i) -> D3D12_GPU_DESCRIPTOR_HANDLE {
+        return { gpuBase.ptr + i * inc };
+    };
+
+    cl->SetComputeRootSignature(m_CsRS12.Get());
+    cl->SetPipelineState(m_BlendPSO12.Get());
+    cl->SetComputeRootDescriptorTable(0, gpuAt(0));  // b0: CBV (width/height)
+    cl->SetComputeRootDescriptorTable(1, gpuAt(6));  // t0: FrameTensor[0] SRV
+    cl->SetComputeRootDescriptorTable(2, gpuAt(8));  // u0: OutputTensor  UAV
+    cl->SetComputeRootDescriptorTable(3, gpuAt(7));  // t1: FrameTensor[1] SRV
+    // The blend is commutative — (a+b)/2 == (b+a)/2 — so whichever of
+    // FrameTensor[0]/[1] is "prev" vs "curr" makes no visual difference.
+    cl->Dispatch((m_Width + 15) / 16, (m_Height + 15) / 16, 1);
+}
+
+
 // ── recordUnpackCS ────────────────────────────────────────────────────────
 //
 // Record unpack compute shader into cl, including the COMMON↔UAV
@@ -1045,26 +1163,63 @@ bool DirectMLFRUC::runDMLDispatch()
     }
 
     // ── 2b. Inline DML path — continue in the same CL ─────────────────────
-    if (!m_DMLCompiledOp) return false;
+    if (m_DMLCompiledOp) {
+        ID3D12DescriptorHeap* dmlHeaps[] = { m_DMLDescHeap.Get() };
+        m_CmdList12->SetDescriptorHeaps(1, dmlHeaps);
+        m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), m_DMLCompiledOp.Get(),
+                                      m_DMLBindingTable.Get());
 
-    ID3D12DescriptorHeap* dmlHeaps[] = { m_DMLDescHeap.Get() };
-    m_CmdList12->SetDescriptorHeaps(1, dmlHeaps);
-    m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), m_DMLCompiledOp.Get(),
-                                  m_DMLBindingTable.Get());
+        // UAV barrier: DML wrote OutputTensor, unpack CS will read it.
+        D3D12_RESOURCE_BARRIER uavOut = {};
+        uavOut.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavOut.UAV.pResource = m_OutputTensor.Get();
+        m_CmdList12->ResourceBarrier(1, &uavOut);
 
-    // UAV barrier: DML wrote OutputTensor, unpack CS will read it.
-    D3D12_RESOURCE_BARRIER uavOut = {};
-    uavOut.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    uavOut.UAV.pResource = m_OutputTensor.Get();
-    m_CmdList12->ResourceBarrier(1, &uavOut);
+        // Switch back to CS heap, record unpack.
+        m_CmdList12->SetDescriptorHeaps(1, csHeaps);
+        recordUnpackCS(m_CmdList12.Get());
 
-    // Switch back to CS heap, record unpack.
-    m_CmdList12->SetDescriptorHeaps(1, csHeaps);
-    recordUnpackCS(m_CmdList12.Get());
+        m_CmdList12->Close();
+        { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
+        return true;
+    }
 
+    // ── 2c. Tier 3 fallback: native D3D12 blend CS ───────────────────────
+    //       No DML runtime involvement — pack → blend → unpack all on the
+    //       same m_CsDescHeap, zero descriptor-heap switches.
+    if (m_BlendAvailable && m_BlendPSO12) {
+        // FrameTensor[curr] was just written by pack; FrameTensor[prev]
+        // was written by the previous frame's pack. Both are already in
+        // UNORDERED_ACCESS; the UAV barrier recorded above guarantees the
+        // write from this frame's pack is visible to the blend read.
+        //
+        // Unlike the DML path which reads FrameTensor[prev/curr] as UAVs
+        // (DML's binding layer handles state silently), the blend shader
+        // reads them as typed SRVs aliased onto the same buffers. On
+        // simultaneous-access buffers this is fine without a transition
+        // because UAV-state buffers accept SRV reads implicitly — but
+        // the UAV barrier is still required to serialise the pack write
+        // against the blend read, which we already have from uavPack
+        // above.
+        recordBlendCS(m_CmdList12.Get());
+
+        // UAV barrier on OutputTensor before unpack reads it as SRV.
+        D3D12_RESOURCE_BARRIER uavOut = {};
+        uavOut.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavOut.UAV.pResource = m_OutputTensor.Get();
+        m_CmdList12->ResourceBarrier(1, &uavOut);
+
+        recordUnpackCS(m_CmdList12.Get());
+
+        m_CmdList12->Close();
+        { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
+        return true;
+    }
+
+    // Neither DML nor blend available — should never happen once
+    // initialize() succeeds; bail out safely.
     m_CmdList12->Close();
-    { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
-    return true;
+    return false;
 }
 
 
@@ -1686,7 +1841,10 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
     }
 
     // Frames 1+: pack + FRUC + unpack.
-    if (!m_UseOrt) rebindPingPongInputs();
+    // rebindPingPongInputs() touches the DML binding table; skip it on
+    // the ORT path (ORT owns its own bindings) and on the Tier 3 blend
+    // path (no binding table exists).
+    if (!m_UseOrt && m_DMLCompiledOp) rebindPingPongInputs();
 
     bool ok = runDMLDispatch();  // internally: pack CS + DML/ORT + unpack CS
 
