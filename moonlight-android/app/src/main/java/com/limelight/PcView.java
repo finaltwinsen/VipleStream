@@ -123,6 +123,14 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     private void initializeViews() {
         setContentView(R.layout.activity_pc_view);
 
+        // VipleStream: retune the editorial typography to the current
+        // Safe/Bold preference. Walks the layout tree, adjusts
+        // vs_display / vs_meta tagged TextViews. Called before
+        // UiHelper.notifyNewRootView so downstream layout/measure
+        // passes see the final sizes.
+        com.limelight.ui.VsDesignVariant.apply(
+            findViewById(android.R.id.content), this);
+
         UiHelper.notifyNewRootView(this);
 
         // Allow floating expanded PiP overlays while browsing PCs

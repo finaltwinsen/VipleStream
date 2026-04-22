@@ -18,6 +18,7 @@
         android:padding="8dp">
 
         <TextView
+            android:tag="vs_meta"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginBottom="4dp"

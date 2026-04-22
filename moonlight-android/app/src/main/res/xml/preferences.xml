@@ -219,6 +219,11 @@
     <PreferenceCategory android:title="@string/category_ui_settings"
         android:key="category_ui_settings">
         <CheckBoxPreference
+            android:key="checkbox_design_bold"
+            android:title="Bold editorial design"
+            android:summary="Magazine-cover energy: oversized display titles on the home masthead and bigger §NN section meta on each tile. OFF = Safe (quieter editorial grid). Takes effect the next time each screen is opened."
+            android:defaultValue="false" />
+        <CheckBoxPreference
             android:key="checkbox_enable_pip"
             android:title="@string/title_checkbox_enable_pip"
             android:summary="@string/summary_checkbox_enable_pip"

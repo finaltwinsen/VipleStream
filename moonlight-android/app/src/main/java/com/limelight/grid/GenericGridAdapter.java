@@ -58,7 +58,8 @@ public abstract class GenericGridAdapter<T> extends BaseAdapter {
 
     @Override
     public View getView(int i, View convertView, ViewGroup viewGroup) {
-        if (convertView == null) {
+        boolean freshInflate = convertView == null;
+        if (freshInflate) {
             convertView = inflater.inflate(layoutId, viewGroup, false);
         }
 
@@ -66,6 +67,15 @@ public abstract class GenericGridAdapter<T> extends BaseAdapter {
         ImageView overlayView = convertView.findViewById(R.id.grid_overlay);
         TextView txtView = convertView.findViewById(R.id.grid_text);
         ProgressBar prgView = convertView.findViewById(R.id.grid_spinner);
+
+        // VipleStream: apply the Safe/Bold editorial tuning per tile
+        // when we just inflated a fresh View. Skipped on view-recycle
+        // since the tag-based transformation is idempotent, and doing
+        // it on every getView() would hit a SharedPreferences read
+        // per-scroll-frame.
+        if (freshInflate) {
+            com.limelight.ui.VsDesignVariant.apply(convertView, context);
+        }
 
         populateView(convertView, imgView, prgView, txtView, overlayView, itemList.get(i));
 

@@ -293,6 +293,12 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
 
         setContentView(R.layout.activity_app_view);
 
+        // VipleStream: Safe/Bold editorial tuning. See PcView.initializeViews
+        // for the mirror call. Safe shrinks display text + hides §NN meta
+        // rows on tagged TextViews.
+        com.limelight.ui.VsDesignVariant.apply(
+            findViewById(android.R.id.content), this);
+
         // Allow floating expanded PiP overlays while browsing apps
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             setShouldDockBigOverlays(false);

@@ -51,6 +51,12 @@ public class PreferenceConfiguration {
     private static final boolean DEFAULT_ENABLE_FRUC = false;
     private static final String FRUC_QUALITY_PREF_STRING = "list_fruc_quality";
     private static final String DEFAULT_FRUC_QUALITY = "1"; // 0=Quality, 1=Balanced, 2=Performance
+    // VipleStream editorial design variant toggle. false = Safe (quieter
+    // editorial grid, smaller masthead), true = Bold (magazine-cover
+    // energy, oversized display type). Mirrors the Qt-side
+    // StreamingPreferences.designVariant.
+    private static final String DESIGN_BOLD_PREF_STRING = "checkbox_design_bold";
+    private static final boolean DEFAULT_DESIGN_BOLD = false;
     private static final String ENABLE_PIP_PREF_STRING = "checkbox_enable_pip";
     private static final String ENABLE_PERF_OVERLAY_STRING = "checkbox_enable_perf_overlay";
     private static final String BIND_ALL_USB_STRING = "checkbox_usb_bind_all";
@@ -142,6 +148,7 @@ public class PreferenceConfiguration {
     public boolean enableHdr;
     public boolean enableFruc;
     public int frucQuality;  // 0=Quality, 1=Balanced, 2=Performance
+    public boolean designBold; // false = Safe, true = Bold editorial
     public boolean enablePip;
     public boolean enablePerfOverlay;
     public boolean enableLatencyToast;
@@ -594,6 +601,7 @@ public class PreferenceConfiguration {
         config.enableHdr = prefs.getBoolean(ENABLE_HDR_PREF_STRING, DEFAULT_ENABLE_HDR) && !isShieldAtvFirmwareWithBrokenHdr();
         config.enableFruc = prefs.getBoolean(ENABLE_FRUC_PREF_STRING, DEFAULT_ENABLE_FRUC);
         config.frucQuality = Integer.parseInt(prefs.getString(FRUC_QUALITY_PREF_STRING, DEFAULT_FRUC_QUALITY));
+        config.designBold = prefs.getBoolean(DESIGN_BOLD_PREF_STRING, DEFAULT_DESIGN_BOLD);
         config.enablePip = prefs.getBoolean(ENABLE_PIP_PREF_STRING, DEFAULT_ENABLE_PIP);
         config.enablePerfOverlay = prefs.getBoolean(ENABLE_PERF_OVERLAY_STRING, DEFAULT_ENABLE_PERF_OVERLAY);
         config.bindAllUsb = prefs.getBoolean(BIND_ALL_USB_STRING, DEFAULT_BIND_ALL_USB);

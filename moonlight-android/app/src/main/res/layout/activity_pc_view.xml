@@ -95,6 +95,7 @@
         android:layout_alignParentTop="true">
 
         <TextView
+            android:tag="vs_meta"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="§ 01 · HOSTS"
@@ -104,6 +105,7 @@
             android:letterSpacing="0.18" />
 
         <TextView
+            android:tag="vs_display"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="VipleStream"
