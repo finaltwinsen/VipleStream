@@ -33,6 +33,7 @@
 #define SER_FRAMEINTERP "frameInterpolation"
 #define SER_FRUCBACKEND "frucBackend"
 #define SER_FRUCQUALITY "frucQuality"
+#define SER_DESIGNVARIANT "designVariant"
 #define SER_RELAYURL "relayUrl"
 #define SER_RELAYPSK "relayPsk"
 #define SER_FORCE_RELAY_STREAM "forceRelayStream"
@@ -144,6 +145,7 @@ void StreamingPreferences::reload()
     enableFrameInterpolation = settings.value(SER_FRAMEINTERP, false).toBool();
     frucBackend = static_cast<FrucBackend>(settings.value(SER_FRUCBACKEND, static_cast<int>(FB_GENERIC)).toInt());
     frucQuality = static_cast<FrucQuality>(settings.value(SER_FRUCQUALITY, static_cast<int>(FQ_BALANCED)).toInt());
+    designVariant = static_cast<DesignVariant>(settings.value(SER_DESIGNVARIANT, static_cast<int>(DV_SAFE)).toInt());
     relayUrl = settings.value(SER_RELAYURL, "").toString();
     relayPsk = settings.value(SER_RELAYPSK, "").toString();
     forceRelayStream = settings.value(SER_FORCE_RELAY_STREAM, false).toBool();
@@ -349,6 +351,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_FRAMEINTERP, enableFrameInterpolation);
     settings.setValue(SER_FRUCBACKEND, static_cast<int>(frucBackend));
     settings.setValue(SER_FRUCQUALITY, static_cast<int>(frucQuality));
+    settings.setValue(SER_DESIGNVARIANT, static_cast<int>(designVariant));
     settings.setValue(SER_RELAYURL, relayUrl);
     settings.setValue(SER_RELAYPSK, relayPsk);
     settings.setValue(SER_FORCE_RELAY_STREAM, forceRelayStream);

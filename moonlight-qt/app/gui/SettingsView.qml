@@ -1127,6 +1127,41 @@ Flickable {
                 anchors.fill: parent
                 spacing: 5
 
+                // VipleStream editorial design variant — Safe (quiet
+                // grid) vs Bold (magazine-cover energy). Applies to the
+                // app masthead height + title typography; other screens
+                // inherit the global theme and are unaffected here.
+                Label {
+                    width: parent.width
+                    id: designVariantTitle
+                    text: qsTr("Design")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+                Label {
+                    width: parent.width
+                    id: designVariantLabel
+                    text: qsTr("Safe: editorial grid, quieter masthead.\nBold: magazine-cover energy, oversized display titles.")
+                    font.pointSize: 9
+                    color: window.theme.mute
+                    wrapMode: Text.Wrap
+                }
+                AutoResizingComboBox {
+                    id: designVariantComboBox
+                    textRole: "text"
+                    Component.onCompleted: {
+                        currentIndex = StreamingPreferences.designVariant
+                    }
+                    onActivated: {
+                        StreamingPreferences.designVariant = currentIndex
+                    }
+                    model: ListModel {
+                        id: designVariantListModel
+                        ListElement { text: qsTr("Safe"); val: 0 }
+                        ListElement { text: qsTr("Bold"); val: 1 }
+                    }
+                }
+
                 Label {
                     width: parent.width
                     id: languageTitle

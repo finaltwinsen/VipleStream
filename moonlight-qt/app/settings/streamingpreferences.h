@@ -124,6 +124,16 @@ public:
     };
     Q_ENUM(FrucQuality);
 
+    // VipleStream editorial design variant selector.
+    // DV_SAFE — quiet editorial grid (thin rules, monospace meta, 8pt-row layouts)
+    // DV_BOLD — magazine-cover energy (oversized display type, wider mastheads)
+    enum DesignVariant
+    {
+        DV_SAFE,
+        DV_BOLD,
+    };
+    Q_ENUM(DesignVariant);
+
     Q_PROPERTY(int width MEMBER width NOTIFY displayModeChanged)
     Q_PROPERTY(int height MEMBER height NOTIFY displayModeChanged)
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
@@ -139,6 +149,7 @@ public:
     Q_PROPERTY(bool enableFrameInterpolation MEMBER enableFrameInterpolation NOTIFY enableFrameInterpolationChanged)
     Q_PROPERTY(FrucBackend frucBackend MEMBER frucBackend NOTIFY frucBackendChanged)
     Q_PROPERTY(FrucQuality frucQuality MEMBER frucQuality NOTIFY frucQualityChanged)
+    Q_PROPERTY(DesignVariant designVariant MEMBER designVariant NOTIFY designVariantChanged)
     Q_PROPERTY(QString relayUrl MEMBER relayUrl NOTIFY relayUrlChanged)
     Q_PROPERTY(QString relayPsk MEMBER relayPsk NOTIFY relayPskChanged)
     Q_PROPERTY(bool forceRelayStream MEMBER forceRelayStream NOTIFY forceRelayStreamChanged)
@@ -187,6 +198,7 @@ public:
     bool enableFrameInterpolation;
     FrucBackend frucBackend;
     FrucQuality frucQuality;
+    DesignVariant designVariant;
     QString relayUrl;      // VipleStream: signaling relay WebSocket URL
     QString relayPsk;      // VipleStream: relay pre-shared key
     bool forceRelayStream; // VipleStream: always stream via relay (bypass direct /launch)
@@ -233,6 +245,7 @@ signals:
     void enableFrameInterpolationChanged();
     void frucBackendChanged();
     void frucQualityChanged();
+    void designVariantChanged();
     void relayUrlChanged();
     void relayPskChanged();
     void forceRelayStreamChanged();

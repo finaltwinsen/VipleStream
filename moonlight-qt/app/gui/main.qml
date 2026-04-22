@@ -249,20 +249,24 @@ ApplicationWindow {
 
     header: ToolBar {
         id: toolBar
-        height: 80     // taller to accommodate Bold masthead
+        // Bold variant uses a taller masthead to fit the bigger display
+        // title; Safe variant keeps the original 60dp row height.
+        height: StreamingPreferences.designVariant === StreamingPreferences.DV_BOLD ? 80 : 60
         anchors.topMargin: 5
         anchors.bottomMargin: 5
 
-        // VipleStream Bold masthead — magazine-cover title block centred
-        // in the toolbar. Routes the stack-view's objectName through a
-        // §NN / uppercase display-type presentation, with a small lime
-        // mono meta line above ("§ NN · SECTION · LOCAL WED 22:47"
-        // equivalent) and the page title in tight Space Grotesk bold.
+        // VipleStream editorial masthead — magazine-cover-style title
+        // block centred in the toolbar. Bold variant renders a two-line
+        // block (lime mono meta + giant display title). Safe variant
+        // renders a single-line title with a smaller lime meta prefix.
+        // Routes the stack-view's objectName through a §NN section map.
         Column {
             id: titleLabel
             visible: toolBar.width > 700
             anchors.centerIn: parent
             spacing: 1
+
+            readonly property bool bold: StreamingPreferences.designVariant === StreamingPreferences.DV_BOLD
 
             // Map the stackView top to a §NN / meta string. Undefined
             // currentItem during transitions gets a safe placeholder.
@@ -295,10 +299,12 @@ ApplicationWindow {
             Label {
                 text: titleLabel.displayTitle
                 anchors.horizontalCenter: parent.horizontalCenter
-                font.pointSize: 24
+                // Bold: large display-type cover title.
+                // Safe: quieter single-line title that fits the 60dp strip.
+                font.pointSize: titleLabel.bold ? 24 : 17
                 font.family: "Space Grotesk"
                 font.bold: true
-                font.letterSpacing: -1.0
+                font.letterSpacing: titleLabel.bold ? -1.0 : -0.3
                 color: window.theme.paper
                 elide: Label.ElideRight
             }
