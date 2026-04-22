@@ -2,8 +2,142 @@
 #include "path.h"
 
 #include <QFile>
+#include <QStringList>
 
 using namespace Overlay;
+
+namespace {
+// VipleStream editorial HUD palette (ARGB8888 for SDL_FillRect +
+// SDL_CreateRGBSurfaceWithFormat). Keep in sync with vs-frame.jsx
+// and moonlight-qt/app/gui/Theme.qml.
+constexpr Uint32 VS_INK2_A   = 0xDC141710u;  // ~220/255 alpha on ink2
+constexpr Uint32 VS_LINE2_A  = 0xFF2D3127u;
+constexpr SDL_Color VS_PAPER = {0xF2, 0xF5, 0xE1, 0xFF};
+constexpr SDL_Color VS_MUTE  = {0x8B, 0x8E, 0x7E, 0xFF};
+constexpr SDL_Color VS_LIME  = {0xD4, 0xFF, 0x3A, 0xFF};
+
+// Compose a §05-style HUD panel from a raw perf-stats text blob.
+// Each line in `text` is split on the first ':' into (label, value).
+// The resulting SDL_Surface has:
+//   • Translucent ink2 rectangle with lime hairline frame
+//   • "§ 05 · NET · HUD" mono lime strapline at the top
+//   • One row per line: mute-mono label + lime-bold value, separated
+//     by a hairline.
+// Returns a freshly-allocated SDL_Surface (caller takes ownership)
+// or nullptr on allocation failure. Falls back to a single Blended_
+// Wrapped render from notifyOverlayUpdated() if this returns null.
+SDL_Surface* buildPerfHudSurface(TTF_Font* font, const char* text)
+{
+    if (!font || !text || !*text) return nullptr;
+
+    // Split into lines + key/value pairs up front so we can size the
+    // panel precisely.
+    QStringList lines = QString::fromUtf8(text).split('\n', Qt::SkipEmptyParts);
+    if (lines.isEmpty()) return nullptr;
+
+    struct Row { QByteArray label; QByteArray value; };
+    QList<Row> rows;
+    int labelW = 0, valueW = 0, lineH = 0;
+    for (const QString& raw : lines) {
+        int colon = raw.indexOf(':');
+        Row r;
+        if (colon > 0) {
+            r.label = raw.left(colon).trimmed().toUtf8();
+            r.value = raw.mid(colon + 1).trimmed().toUtf8();
+        } else {
+            r.label = raw.trimmed().toUtf8();
+            r.value = QByteArray();
+        }
+        // Measure text extents for layout.
+        int w = 0, h = 0;
+        if (!r.label.isEmpty()) {
+            TTF_SizeUTF8(font, r.label.constData(), &w, &h);
+            if (w > labelW) labelW = w;
+            if (h > lineH)  lineH  = h;
+        }
+        if (!r.value.isEmpty()) {
+            TTF_SizeUTF8(font, r.value.constData(), &w, &h);
+            if (w > valueW) valueW = w;
+            if (h > lineH)  lineH  = h;
+        }
+        rows.append(r);
+    }
+    if (lineH < 16) lineH = 16;
+
+    // Layout constants.
+    const int padH     = 18;
+    const int padV     = 14;
+    const int colGap   = 18;
+    const int rowGap   = 6;
+    const int strapH   = lineH + 10;
+    int W = padH * 2 + labelW + colGap + valueW;
+    if (W < 220) W = 220;
+    int H = padV + strapH + padV
+          + rows.size() * (lineH + rowGap) - rowGap
+          + padV;
+
+    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!s) return nullptr;
+    SDL_SetSurfaceBlendMode(s, SDL_BLENDMODE_BLEND);
+
+    // Translucent ink2 panel with a 1px lime-line frame.
+    SDL_Rect panel = {0, 0, W, H};
+    SDL_FillRect(s, &panel, VS_INK2_A);
+    SDL_Rect top    = {0,   0,   W, 1};
+    SDL_Rect bot    = {0,   H-1, W, 1};
+    SDL_Rect left   = {0,   0,   1, H};
+    SDL_Rect right  = {W-1, 0,   1, H};
+    SDL_FillRect(s, &top,   VS_LINE2_A);
+    SDL_FillRect(s, &bot,   VS_LINE2_A);
+    SDL_FillRect(s, &left,  VS_LINE2_A);
+    SDL_FillRect(s, &right, VS_LINE2_A);
+
+    // Strapline "§ 05 · NET · HUD" in lime.
+    {
+        SDL_Surface* t = TTF_RenderUTF8_Blended(font, "\xc2\xa7 05 \xc2\xb7 NET \xc2\xb7 HUD", VS_LIME);
+        if (t) {
+            SDL_Rect dst = {padH, padV, t->w, t->h};
+            SDL_BlitSurface(t, nullptr, s, &dst);
+            SDL_FreeSurface(t);
+        }
+        // Hairline under strapline.
+        SDL_Rect rule = {padH, padV + strapH - 3, W - padH * 2, 1};
+        SDL_FillRect(s, &rule, VS_LINE2_A);
+    }
+
+    // Rows.
+    int y = padV + strapH + padV - rowGap;
+    for (int i = 0; i < rows.size(); ++i) {
+        const Row& r = rows[i];
+        // Label in mute.
+        if (!r.label.isEmpty()) {
+            SDL_Surface* t = TTF_RenderUTF8_Blended(font, r.label.constData(), VS_MUTE);
+            if (t) {
+                SDL_Rect dst = {padH, y, t->w, t->h};
+                SDL_BlitSurface(t, nullptr, s, &dst);
+                SDL_FreeSurface(t);
+            }
+        }
+        // Value in lime, right-justified within the allotted column.
+        if (!r.value.isEmpty()) {
+            SDL_Surface* t = TTF_RenderUTF8_Blended(font, r.value.constData(), VS_LIME);
+            if (t) {
+                SDL_Rect dst = {W - padH - t->w, y, t->w, t->h};
+                SDL_BlitSurface(t, nullptr, s, &dst);
+                SDL_FreeSurface(t);
+            }
+        }
+        // Hairline between rows (not after last).
+        if (i + 1 < rows.size()) {
+            SDL_Rect rule = {padH, y + lineH + rowGap / 2, W - padH * 2, 1};
+            SDL_FillRect(s, &rule, VS_LINE2_A);
+        }
+        y += lineH + rowGap;
+    }
+    (void)VS_PAPER;  // silence unused-warning; reserved for a future variant
+    return s;
+}
+} // namespace
 
 // VipleStream: Try loading a CJK-capable system font for Traditional Chinese overlay.
 // Falls back to the built-in ModeSeven.ttf if the system font isn't available.
@@ -181,17 +315,27 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
         }
     }
 
-    // Exchange the old surface with the new one
+    // Build the new surface. Perf-stats overlay gets the editorial
+    // §05 HUD composite (translucent ink2 panel with label/value
+    // rows); status-update + anything else falls back to the single
+    // Blended_Wrapped text blit.
+    SDL_Surface* newSurface = nullptr;
+    if (m_Overlays[type].enabled) {
+        if (type == OverlayType::OverlayDebug) {
+            newSurface = buildPerfHudSurface(m_Overlays[type].font,
+                                             m_Overlays[type].text);
+        }
+        if (newSurface == nullptr) {
+            // Fallback: plain text blit. VipleStream CJK support keeps
+            // the UTF-8 variant over the ASCII TTF_RenderText_Blended.
+            newSurface = TTF_RenderUTF8_Blended_Wrapped(m_Overlays[type].font,
+                                                        m_Overlays[type].text,
+                                                        m_Overlays[type].color,
+                                                        1024);
+        }
+    }
     SDL_Surface* oldSurface = (SDL_Surface*)SDL_AtomicSetPtr(
-        (void**)&m_Overlays[type].surface,
-        m_Overlays[type].enabled ?
-            // The _Wrapped variant is required for line breaks to work.
-            // VipleStream: Use UTF-8 variant for CJK character support.
-            TTF_RenderUTF8_Blended_Wrapped(m_Overlays[type].font,
-                                           m_Overlays[type].text,
-                                           m_Overlays[type].color,
-                                           1024)
-            : nullptr);
+        (void**)&m_Overlays[type].surface, newSurface);
 
     // Notify the renderer
     m_Renderer->notifyOverlayUpdated(type);
