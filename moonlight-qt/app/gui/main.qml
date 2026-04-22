@@ -29,10 +29,20 @@ ApplicationWindow {
     // Editorial magazine theme: warm-tinted dark ink background,
     // electric lime accent, off-white "paper" foreground.  Switches
     // every Material-aware control inside the app.
+    //
+    // IMPORTANT: Material.primary is the paint for chrome surfaces
+    // like ToolBar / TabBar backgrounds.  Setting it to lime turns
+    // the header bar into a big lime block that swallows the white
+    // title text + icons (foreground=paper reads as nearly-white),
+    // which is exactly the "unreadable top bar" bug shipped in
+    // v1.2.18..v1.2.32.  Keep primary on an ink-toned surface so
+    // the header stays dark; lime is reserved for *accent* usage
+    // (focus rings, switches, CTA buttons) via Material.accent and
+    // for explicit per-element tints (§NN prefixes, live dots).
     Material.theme: Material.Dark
     Material.background: theme.ink
     Material.foreground: theme.paper
-    Material.primary: theme.lime
+    Material.primary: theme.ink2
     Material.accent: theme.lime
 
     // This function runs prior to creation of the initial StackView item
@@ -251,7 +261,7 @@ ApplicationWindow {
         id: toolBar
         // Bold variant uses a taller masthead to fit the bigger display
         // title; Safe variant keeps the original 60dp row height.
-        height: StreamingPreferences.designVariant === StreamingPreferences.DV_BOLD ? 80 : 60
+        height: StreamingPreferences.designVariant == StreamingPreferences.DV_BOLD ? 80 : 60
         anchors.topMargin: 5
         anchors.bottomMargin: 5
 
@@ -266,7 +276,7 @@ ApplicationWindow {
             anchors.centerIn: parent
             spacing: 1
 
-            readonly property bool bold: StreamingPreferences.designVariant === StreamingPreferences.DV_BOLD
+            readonly property bool bold: StreamingPreferences.designVariant == StreamingPreferences.DV_BOLD
 
             // Map the stackView top to a §NN / meta string. Undefined
             // currentItem during transitions gets a safe placeholder.
