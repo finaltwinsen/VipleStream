@@ -1,42 +1,75 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    VipleStream editorial host tile.
+    Preserves grid_image / grid_overlay / grid_spinner / grid_text IDs
+    so PcGridAdapter + GenericGridAdapter bind exactly like before.
+    New decorative elements (ink2 frame, "§ HOST" meta label, paper-
+    bold name styling) are non-ID children, purely for look.
+-->
 <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content"
-    android:padding="20dp">
-    <RelativeLayout
-        android:id="@+id/grid_image_layout"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content">
-        <ImageView
-            android:id="@+id/grid_image"
-            android:layout_centerHorizontal="true"
-            android:layout_width="125dp"
-            android:layout_height="125dp">
-        </ImageView>
-        <ImageView
-            android:id="@+id/grid_overlay"
-            android:layout_centerHorizontal="true"
-            android:layout_marginTop="28dp"
-            android:layout_width="50dp"
-            android:layout_height="50dp">
-        </ImageView>
-        <ProgressBar
-            android:id="@+id/grid_spinner"
-            android:layout_centerHorizontal="true"
-            android:layout_marginTop="28dp"
-            android:layout_width="50dp"
-            android:layout_height="50dp"
-            android:indeterminate="true">
-        </ProgressBar>
-    </RelativeLayout>
-    <TextView
-        android:id="@+id/grid_text"
-        android:layout_width="125dp"
+    android:padding="8dp">
+
+    <LinearLayout
+        android:layout_width="165dp"
         android:layout_height="wrap_content"
-        android:layout_below="@id/grid_image_layout"
-        android:layout_marginTop="10dp"
-        android:layout_centerHorizontal="true"
-        android:gravity="center"
-        android:textSize="18sp" >
-    </TextView>
+        android:orientation="vertical"
+        android:background="@drawable/vs_tile_bg"
+        android:padding="12dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="6dp"
+            android:text="§ HOST"
+            android:textSize="9sp"
+            android:textColor="@color/vs_mute"
+            android:fontFamily="monospace"
+            android:letterSpacing="0.14" />
+
+        <RelativeLayout
+            android:id="@+id/grid_image_layout"
+            android:layout_width="match_parent"
+            android:layout_height="125dp"
+            android:background="@color/vs_ink">
+
+            <ImageView
+                android:id="@+id/grid_image"
+                android:layout_centerInParent="true"
+                android:layout_width="100dp"
+                android:layout_height="100dp" />
+
+            <ImageView
+                android:id="@+id/grid_overlay"
+                android:layout_centerInParent="true"
+                android:layout_width="50dp"
+                android:layout_height="50dp" />
+
+            <ProgressBar
+                android:id="@+id/grid_spinner"
+                android:layout_centerInParent="true"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:indeterminate="true" />
+        </RelativeLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="10dp"
+            android:background="@color/vs_line" />
+
+        <TextView
+            android:id="@+id/grid_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:textColor="@color/vs_paper"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:gravity="left"
+            android:maxLines="2"
+            android:ellipsize="end" />
+    </LinearLayout>
 </RelativeLayout>
