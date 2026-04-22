@@ -5,6 +5,16 @@
     android:layout_height="match_parent"
     tools:context=".PcView" >
 
+    <!--
+        VipleStream editorial top bar — three zones anchored to the
+        same 65dp strip that previously only held toolbar buttons:
+          Left:   settingsButton + helpButton (unchanged)
+          Centre: "§ 01 · HOSTS" mono meta + "VipleStream" paper title
+          Right:  manuallyAddPc button (unchanged)
+        Fragment container is still layout_below=@settingsButton so
+        grid positioning is unchanged.
+    -->
+
     <RelativeLayout
         android:id="@+id/pcFragmentContainer"
         android:layout_width="fill_parent"
@@ -40,7 +50,9 @@
                 android:layout_marginLeft="10dp"
                 android:layout_marginStart="10dp"
                 android:layout_centerVertical="true"
-                android:textAppearance="?android:attr/textAppearanceLarge"
+                android:textColor="@color/vs_paper"
+                android:textSize="18sp"
+                android:textStyle="bold"
                 android:gravity="center"
                 android:text="@string/searching_pc"/>
         </RelativeLayout>
@@ -72,7 +84,35 @@
         android:src="@drawable/ic_help"
         android:preferKeepClear="true"
         style="?android:attr/borderlessButtonStyle"/>
-    
+
+    <!-- Editorial centre-of-strip title block -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="65dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_centerHorizontal="true"
+        android:layout_alignParentTop="true">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="§ 01 · HOSTS"
+            android:textColor="@color/vs_lime"
+            android:textSize="10sp"
+            android:fontFamily="monospace"
+            android:letterSpacing="0.18" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="VipleStream"
+            android:textColor="@color/vs_paper"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:letterSpacing="-0.02" />
+    </LinearLayout>
+
     <ImageButton
         android:id="@+id/manuallyAddPc"
         android:layout_width="70dp"
