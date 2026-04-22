@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Flat colour fallback for the adaptive-icon background.
+    No longer consumed by ic_launcher.xml (which now references the
+    VectorDrawable at @drawable/ic_launcher_background), but kept
+    in sync with the VS ink colour in case anything else — generated
+    shortcuts, tiles, ShortcutHelper, etc. — still binds to it.
+-->
 <resources>
-  <color name="ic_launcher_background">#565C64</color>
+  <color name="ic_launcher_background">#0D0F0B</color>
 </resources>

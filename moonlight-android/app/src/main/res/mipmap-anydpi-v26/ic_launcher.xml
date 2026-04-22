@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    VipleStream adaptive-icon wiring:
+      background = VectorDrawable showing the ink ground + orange stripe
+                   (drawable/ic_launcher_background.xml)
+      foreground = raster V + play-triangle on transparent canvas
+                   (mipmap-*/ic_launcher_foreground.png at each density)
+      monochrome = reuse foreground for Android 13+ themed icons
+-->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/ic_launcher_background"/>
+    <background android:drawable="@drawable/ic_launcher_background"/>
     <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
     <monochrome android:drawable="@mipmap/ic_launcher_foreground"/>
 </adaptive-icon>

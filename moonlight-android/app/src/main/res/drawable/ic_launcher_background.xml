@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    VipleStream adaptive-icon background.
+    Renders the ink ground + orange horizontal stripe + folio dot from
+    the primary icon (assets/icon/viplestream_icon.svg) as a
+    VectorDrawable, so the whole background is crisp at any density
+    and any launcher shape.  The foreground (V + play triangle) lives
+    in mipmap-*/ic_launcher_foreground.png.
+
+    The adaptive-icon canvas is 108dp but content sits inside a 66dp
+    safe zone (Android spec) — that's why the stripe offsets in dp are
+    derived from the 512px SVG scaled to 108dp:
+      stripe y  = 180/512 * 108 ≈ 38
+      stripe h  = 160/512 * 108 ≈ 34
+    Folio dot is near the top-right corner (cx=470/512 ≈ 92%) and
+    would fall inside the safe zone for most launcher masks, so we
+    render it too.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Ink ground -->
+    <path
+        android:pathData="M0,0 L108,0 L108,108 L0,108 Z"
+        android:fillColor="#0D0F0B" />
+
+    <!-- Orange stripe through the middle band -->
+    <path
+        android:pathData="M0,38 L108,38 L108,72 L0,72 Z"
+        android:fillColor="#FF7A2E" />
+
+    <!-- Small folio / "live" pip in the top-right corner.
+         Positioned at 470/512 · 108 ≈ 99, 46/512 · 108 ≈ 10, r≈2 -->
+    <path
+        android:pathData="M99.2,9.7
+                          m -1.7,0
+                          a 1.7,1.7 0 1,0 3.4,0
+                          a 1.7,1.7 0 1,0 -3.4,0 Z"
+        android:fillColor="#FF7A2E" />
+</vector>
