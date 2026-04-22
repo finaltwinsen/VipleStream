@@ -77,6 +77,112 @@ CenteredGridView {
 
     model: appModel
 
+    // VipleStream §03 Bold library masthead — matches §01 Bold on
+    // PcView (see v1.2.37 commit message). Collapsed on Safe so
+    // the existing packed grid is untouched.
+    header: Component {
+        Rectangle {
+            id: libraryBanner
+            visible: appGrid.bold && appGrid.count > 0
+            width: appGrid.width
+            height: visible ? 220 : 0
+            color: "#0D0F0B"   // ink
+
+            Image {
+                anchors.fill: parent
+                source: "qrc:/res/vs_diag_stripe.svg"
+                fillMode: Image.Tile
+                sourceSize: Qt.size(24, 24)
+                opacity: 0.65
+            }
+            Rectangle {
+                anchors.fill: parent
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#CC0D0F0B" }
+                    GradientStop { position: 0.4; color: "#550D0F0B" }
+                    GradientStop { position: 1.0; color: "#CC0D0F0B" }
+                }
+            }
+
+            Column {
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.leftMargin: 32
+                anchors.topMargin: 22
+                spacing: 6
+
+                Text {
+                    text: "◤ " + qsTr("LIBRARY")
+                    font.family: "Space Grotesk"
+                    font.pointSize: 34
+                    font.bold: true
+                    font.letterSpacing: -1.4
+                    color: "#D4FF3A"
+                }
+                Text {
+                    // objectName on AppView is the host PC's name —
+                    // surface it in the subtitle like the §03 mock.
+                    text: (appGrid.objectName || qsTr("HOST")).toUpperCase() +
+                          "  ·  " + appGrid.count + " " + qsTr("TITLES")
+                    font.family: "IBM Plex Mono"
+                    font.pointSize: 10
+                    font.letterSpacing: 1.8
+                    color: "#8B8E7E"
+                }
+            }
+
+            Text {
+                anchors.left: parent.left
+                anchors.bottom: parent.bottom
+                anchors.leftMargin: 32
+                anchors.bottomMargin: 22
+                text: "FEATURED · 01 / " + ("0" + appGrid.count).slice(-2) +
+                      "   ·   " + qsTr("PICK A TITLE TO LAUNCH")
+                font.family: "IBM Plex Mono"
+                font.pointSize: 11
+                font.letterSpacing: 2.0
+                color: "#F2F5E1"
+            }
+
+            // Rotated tape, top-right corner.
+            Rectangle {
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.rightMargin: -24
+                anchors.topMargin: 64
+                width: 260
+                height: 36
+                color: "#F2F5E1"
+                rotation: -3
+                transformOrigin: Item.Center
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "LAUNCH · TO · STREAM"
+                    font.family: "IBM Plex Mono"
+                    font.pointSize: 11
+                    font.bold: true
+                    font.letterSpacing: 3.0
+                    color: "#0D0F0B"
+                }
+            }
+
+            Rectangle {
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.rightMargin: 28
+                anchors.topMargin: 28
+                width: 12; height: 12; radius: 2
+                color: "#D4FF3A"
+                SequentialAnimation on opacity {
+                    loops: Animation.Infinite
+                    NumberAnimation { from: 1.0; to: 0.35; duration: 900 }
+                    NumberAnimation { from: 0.35; to: 1.0; duration: 900 }
+                }
+            }
+        }
+    }
+
     delegate: NavigableItemDelegate {
         width: appGrid.bold ? 300 : 220
         height: appGrid.bold ? 400 : 287
@@ -88,8 +194,47 @@ CenteredGridView {
         // Dim the app if it's hidden
         opacity: model.hidden ? 0.4 : 1.0
 
+        // VipleStream: when the box art is the generic GFE / fallback
+        // placeholder AND we're in Bold, replace the boring grey
+        // placeholder with the editorial coloured diagonal-stripe card
+        // from the mock. Each tile picks its own hue from its index
+        // so the library feels like a magazine spread.
+        Rectangle {
+            id: placeholderStripe
+            visible: appIcon.isPlaceholder && appGrid.bold
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 10
+            width: appGrid.bold ? 280 : 200
+            height: appGrid.bold ? 373 : 267
+            color: Qt.hsla(((index * 53) % 360) / 360.0, 0.35, 0.22, 1.0)
+
+            Image {
+                anchors.fill: parent
+                source: "qrc:/res/vs_diag_stripe_overlay.svg"
+                fillMode: Image.Tile
+                sourceSize: Qt.size(24, 24)
+            }
+
+            // Tiny lime "§NN" folio top-right of the card.
+            Text {
+                anchors.top: parent.top
+                anchors.right: parent.right
+                anchors.margins: 8
+                text: "§ " + (index < 9 ? "0" + (index + 1) : (index + 1))
+                font.family: "IBM Plex Mono"
+                font.pointSize: 9
+                font.letterSpacing: 1.4
+                color: "#D4FF3A"
+            }
+        }
+
         Image {
             property bool isPlaceholder: false
+
+            // Hide the raw placeholder image when the striped card is
+            // taking its place — the appNameTextLoader still draws
+            // the title on top.
+            visible: !placeholderStripe.visible
 
             id: appIcon
             anchors.horizontalCenter: parent.horizontalCenter

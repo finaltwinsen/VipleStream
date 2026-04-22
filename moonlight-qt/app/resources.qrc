@@ -19,6 +19,7 @@
         <file>res/baseline-check_circle_outline-24px.svg</file>
         <file>res/discord.svg</file>
         <file>res/vs_diag_stripe.svg</file>
+        <file>res/vs_diag_stripe_overlay.svg</file>
         <!-- VipleStream editorial font stack. Registered at startup
              via QFontDatabase::addApplicationFont in main.cpp. -->
         <file>fonts/SpaceGrotesk-var.ttf</file>

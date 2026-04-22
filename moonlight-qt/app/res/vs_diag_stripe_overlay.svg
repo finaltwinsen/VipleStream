@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    VipleStream diagonal stripe OVERLAY — semi-transparent ink stripes
+    on a transparent ground, tileable.  Meant to sit on top of a
+    coloured Rectangle so each tile can carry its own hue while
+    sharing the stripe pattern. Pairs with res/vs_diag_stripe.svg
+    (the opaque full-ink variant used for hero banners).
+
+    24×24 tile, 45° stripes 2px wide with a 6px step, stripe colour
+    #14170F at ~45% alpha (the "ink2" VS palette value with opacity
+    0.45 rounded) so the underlying hue reads through.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <g transform="rotate(45, 12, 12)" fill="#14170F" fill-opacity="0.45">
+    <rect x="-20" y="-8"  width="80" height="2"/>
+    <rect x="-20" y="-2"  width="80" height="2"/>
+    <rect x="-20" y="4"   width="80" height="2"/>
+    <rect x="-20" y="10"  width="80" height="2"/>
+    <rect x="-20" y="16"  width="80" height="2"/>
+    <rect x="-20" y="22"  width="80" height="2"/>
+    <rect x="-20" y="28"  width="80" height="2"/>
+  </g>
+</svg>
