@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    VipleStream design tokens for Android.
+    Mirrors the JS palette in temp/design/vs-frame.jsx.
+-->
+<resources>
+    <!-- Ink: warm-tinted dark backgrounds -->
+    <color name="vs_ink">#0D0F0B</color>
+    <color name="vs_ink2">#14170F</color>
+    <color name="vs_ink3">#1C1F16</color>
+
+    <!-- Paper: off-white foregrounds -->
+    <color name="vs_paper">#F2F5E1</color>
+    <color name="vs_paper2">#DEE2CC</color>
+    <color name="vs_mute">#8B8E7E</color>
+    <color name="vs_mute2">#5A5C52</color>
+
+    <!-- Lime accent -->
+    <color name="vs_lime">#D4FF3A</color>
+    <color name="vs_lime_dim">#A6CF1E</color>
+    <color name="vs_lime_ink">#1A2300</color>
+
+    <!-- Status -->
+    <color name="vs_danger">#FF5A4E</color>
+
+    <!-- Hairlines -->
+    <color name="vs_line">#1F2219</color>
+    <color name="vs_line2">#2D3127</color>
+</resources>

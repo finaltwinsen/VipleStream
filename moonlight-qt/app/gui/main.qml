@@ -22,13 +22,27 @@ ApplicationWindow {
     width: 1280
     height: 600
 
+    // VipleStream design tokens — palette, fonts, spacing.  Child views
+    // access via `window.theme.lime` etc. (see gui/Theme.qml).
+    property Theme theme: Theme {}
+
+    // Editorial magazine theme: warm-tinted dark ink background,
+    // electric lime accent, off-white "paper" foreground.  Switches
+    // every Material-aware control inside the app.
+    Material.theme: Material.Dark
+    Material.background: theme.ink
+    Material.foreground: theme.paper
+    Material.primary: theme.lime
+    Material.accent: theme.lime
+
     // This function runs prior to creation of the initial StackView item
     function doEarlyInit() {
-        // Override the background color to Material 2 colors for Qt 6.5+
-        // in order to improve contrast between GFE's placeholder box art
-        // and the background of the app grid.
+        // Override the background color (was a neutral #303030 gray
+        // for Material 3 contrast against GFE's placeholder box art;
+        // the VS palette already has enough contrast so we use ink2,
+        // a slightly raised warm-black surface, instead).
         if (SystemProperties.usesMaterial3Theme) {
-            Material.background = "#303030"
+            Material.background = theme.ink2
         }
 
         SdlGamepadKeyNavigation.enable()
@@ -285,13 +299,29 @@ ApplicationWindow {
                 text: !titleLabel.visible ? stackView.currentItem.objectName : ""
             }
 
-            Label {
+            // Editorial version meta: lime live-dot + monospace label.
+            // Example: "● VIPLESTREAM · V1.2.17"
+            Row {
                 id: versionLabel
                 visible: stackView.currentItem instanceof SettingsView
-                text: "VipleStream v" + SystemProperties.versionString
-                font.pointSize: 12
-                horizontalAlignment: Qt.AlignRight
-                verticalAlignment: Qt.AlignVCenter
+                spacing: 6
+
+                Rectangle {
+                    width: 7
+                    height: 7
+                    radius: 1   // sharp edges to match editorial vibe
+                    color: window.theme.lime
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+                Label {
+                    text: "VIPLESTREAM · v" + SystemProperties.versionString
+                    font.pointSize: 10
+                    font.family: window.theme.fontMono
+                    font.letterSpacing: 1.2
+                    font.capitalization: Font.AllUppercase
+                    color: window.theme.paper
+                    anchors.verticalCenter: parent.verticalCenter
+                }
             }
 
             NavigableToolButton {

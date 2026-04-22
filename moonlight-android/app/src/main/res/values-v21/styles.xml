@@ -1,14 +1,32 @@
 <resources>
 
     <!--
-        Base application theme for API 21+. This theme completely replaces
-        AppBaseTheme from BOTH res/values/styles.xml and
-        res/values-v21/styles.xml on API 21+ devices.
+        VipleStream editorial theme for API 21+.
+        Warm-tinted dark ink backgrounds, electric lime accent, paper
+        foreground. Mirrors temp/design/vs-frame.jsx.
+
+        We stay on android:Theme.Material (native Material 1) because
+        that's what the app already inherits from and it avoids a
+        broader AppCompat migration. The palette-level swap is enough
+        to get the editorial look on system-drawn chrome (action bar,
+        status bar, nav bar, selection highlights).
     -->
     <style name="AppBaseTheme" parent="android:Theme.Material">
-        <!-- API 21 theme customizations can go here. -->
-        <item name="android:statusBarColor">#212121</item>
-        <item name="android:navigationBarColor">#212121</item>
+        <!-- Window chrome -->
+        <item name="android:statusBarColor">@color/vs_ink</item>
+        <item name="android:navigationBarColor">@color/vs_ink</item>
+        <item name="android:windowBackground">@color/vs_ink</item>
+
+        <!-- Material colour slots -->
+        <item name="android:colorPrimary">@color/vs_ink2</item>
+        <item name="android:colorPrimaryDark">@color/vs_ink</item>
+        <item name="android:colorAccent">@color/vs_lime</item>
+        <item name="android:colorControlActivated">@color/vs_lime</item>
+        <item name="android:colorControlHighlight">#33D4FF3A</item>
+
+        <!-- Text -->
+        <item name="android:textColorPrimary">@color/vs_paper</item>
+        <item name="android:textColorSecondary">@color/vs_mute</item>
     </style>
 
 </resources>
