@@ -1992,16 +1992,28 @@ bool Session::startConnectionAsync()
     // had if the host supported YUV444 (though obviously with 4:2:0 subsampling).
     // If the user has adjusted the bitrate from default, we'll assume they really wanted
     // that value and not second guess them.
+    // VipleStream: use m_Preferences->fps (not m_StreamConfig.fps) as
+    // the fps argument to getDefaultBitrate — m_StreamConfig.fps may
+    // already have been halved by the FRUC path above, and
+    // getDefaultBitrate's `fruc=true` branch will halve it again
+    // internally. Both the "did the user adjust bitrate" comparison
+    // and the YUV420-fallback recompute must pass through the same
+    // fps/fruc pair that streamingpreferences.cpp used at load time
+    // (user fps + enableFrameInterpolation), otherwise we'll never
+    // match the stored default and the user's adjusted bitrate
+    // could silently get overwritten.
     if (m_Preferences->enableYUV444 &&
         !(m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444) &&
         m_StreamConfig.bitrate == StreamingPreferences::getDefaultBitrate(m_StreamConfig.width,
                                                                           m_StreamConfig.height,
-                                                                          m_StreamConfig.fps,
-                                                                          true)) {
+                                                                          m_Preferences->fps,
+                                                                          true,
+                                                                          m_Preferences->enableFrameInterpolation)) {
         m_StreamConfig.bitrate = StreamingPreferences::getDefaultBitrate(m_StreamConfig.width,
                                                                          m_StreamConfig.height,
-                                                                         m_StreamConfig.fps,
-                                                                         false);
+                                                                         m_Preferences->fps,
+                                                                         false,
+                                                                         m_Preferences->enableFrameInterpolation);
     }
 
     // VipleStream: If no STUN endpoint cached, try relay lookup

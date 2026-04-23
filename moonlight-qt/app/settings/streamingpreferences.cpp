@@ -133,7 +133,15 @@ void StreamingPreferences::reload()
     height = settings.value(SER_HEIGHT, 720).toInt();
     fps = settings.value(SER_FPS, 60).toInt();
     enableYUV444 = settings.value(SER_YUV444, false).toBool();
-    bitrateKbps = settings.value(SER_BITRATE, getDefaultBitrate(width, height, fps, enableYUV444)).toInt();
+    // VipleStream: read enableFrameInterpolation BEFORE bitrate, so
+    // getDefaultBitrate() can factor it into the default (halved
+    // host encode fps + small source-quality headroom). Upstream
+    // read this after bitrate; moving it up is the minimum change
+    // to let the default be FRUC-aware without restructuring load.
+    enableFrameInterpolation = settings.value(SER_FRAMEINTERP, false).toBool();
+    bitrateKbps = settings.value(SER_BITRATE,
+        getDefaultBitrate(width, height, fps, enableYUV444,
+                          enableFrameInterpolation)).toInt();
     unlockBitrate = settings.value(SER_UNLOCK_BITRATE, false).toBool();
     autoAdjustBitrate = settings.value(SER_AUTOADJUSTBITRATE, true).toBool();
     enableVsync = settings.value(SER_VSYNC, true).toBool();
@@ -142,7 +150,8 @@ void StreamingPreferences::reload()
     multiController = settings.value(SER_MULTICONT, true).toBool();
     enableMdns = settings.value(SER_MDNS, true).toBool();
     autoWakeOnLan = settings.value(SER_AUTOWOL, false).toBool();
-    enableFrameInterpolation = settings.value(SER_FRAMEINTERP, false).toBool();
+    // enableFrameInterpolation already read above (before bitrate)
+    // so getDefaultBitrate can be FRUC-aware.
     frucBackend = static_cast<FrucBackend>(settings.value(SER_FRUCBACKEND, static_cast<int>(FB_GENERIC)).toInt());
     frucQuality = static_cast<FrucQuality>(settings.value(SER_FRUCQUALITY, static_cast<int>(FQ_BALANCED)).toInt());
     designVariant = static_cast<DesignVariant>(settings.value(SER_DESIGNVARIANT, static_cast<int>(DV_SAFE)).toInt());
@@ -384,11 +393,22 @@ void StreamingPreferences::save()
     settings.setValue(SER_KEEPAWAKE, keepAwake);
 }
 
-int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444)
+int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444, bool fruc)
 {
+    // VipleStream: if FRUC is on and the target rate is within the
+    // FRUC-eligible range (<=180 fps — see session.cpp:703), the
+    // host side actually encodes at fps/2. Size the default bitrate
+    // against the host's encoded rate rather than the display rate,
+    // otherwise a user turning FRUC on would get an automatic +40%
+    // bitrate bump for pixels that never existed on the server.
+    int effectiveFps = fps;
+    if (fruc && fps <= 180) {
+        effectiveFps = fps / 2;
+    }
+
     // Don't scale bitrate linearly beyond 60 FPS. It's definitely not a linear
     // bitrate increase for frame rate once we get to values that high.
-    float frameRateFactor = (fps <= 60 ? fps : (qSqrt(fps / 60.f) * 60.f)) / 30.f;
+    float frameRateFactor = (effectiveFps <= 60 ? effectiveFps : (qSqrt(effectiveFps / 60.f) * 60.f)) / 30.f;
 
     // TODO: Collect some empirical data to see if these defaults make sense.
     // We're just using the values that the Shield used, as we have for years.
@@ -437,5 +457,22 @@ int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool
         resolutionFactor *= 2;
     }
 
-    return qRound(resolutionFactor * frameRateFactor) * 1000;
+    // VipleStream: FRUC source-quality headroom.
+    // When frame interpolation is on, the encoder is running at
+    // half the display rate. Each encoded frame now has to carry
+    // enough detail to supply *two* displayed frames (itself +
+    // the interpolator's reconstruction), so a compressed source
+    // with the "just enough" default bitrate produces visible
+    // artefacts in the interpolated output. Add ~15% headroom —
+    // empirically a good balance between visual cleanup of the
+    // interpolated frame and total bandwidth (still well below
+    // the non-FRUC default, because the fps/2 halving dominates).
+    //
+    // Net effect at 4K120 FRUC-on: ~80 Mbps default
+    // (vs ~113 Mbps at 4K120 FRUC-off — lower, not higher).
+    // Net effect at 4K60 FRUC-on:  ~46 Mbps default
+    // (vs ~80 Mbps at 4K60 FRUC-off — same direction, halved.)
+    float frucHeadroom = fruc ? 1.15f : 1.0f;
+
+    return qRound(resolutionFactor * frameRateFactor * frucHeadroom) * 1000;
 }

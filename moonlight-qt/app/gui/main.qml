@@ -20,7 +20,23 @@ ApplicationWindow {
 
     id: window
     width: 1280
-    height: 600
+    // VipleStream: initial height must accommodate the editorial
+    // layout's first row without clipping. Upstream 600px was too
+    // short because our PcView now has a §01 HOSTS hero banner
+    // (~260px) stacked above the tile grid. Breakdown:
+    //   toolbar        ~ 80px
+    //   hero banner    ~260px
+    //   tile row (Bold) ~440px  ← cellHeight in PcView.qml
+    //   margins         ~40px
+    //   ---------------------
+    //   minimum         820px
+    // Safe mode only needs ~710px; picking 820 covers the default
+    // (Bold) variant at launch. User can still drag smaller — see
+    // minimumHeight floor below, which prevents going below the
+    // point where the first tile row stops being fully visible.
+    height: 820
+    minimumWidth: 960    // two Bold tiles + padding without horizontal clip
+    minimumHeight: 720   // toolbar + banner + one Safe tile row + margins
 
     // VipleStream design tokens — palette, fonts, spacing.  Child views
     // access via `window.theme.lime` etc. (see gui/Theme.qml).

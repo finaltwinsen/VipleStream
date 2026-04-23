@@ -285,7 +285,8 @@ Flickable {
                                     StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
                                                                                                               StreamingPreferences.height,
                                                                                                               StreamingPreferences.fps,
-                                                                                                              StreamingPreferences.enableYUV444);
+                                                                                                              StreamingPreferences.enableYUV444,
+                                                                                                              StreamingPreferences.enableFrameInterpolation);
                                     slider.value = StreamingPreferences.bitrateKbps
                                 }
                             }
@@ -453,7 +454,8 @@ Flickable {
                                     StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
                                                                                                               StreamingPreferences.height,
                                                                                                               StreamingPreferences.fps,
-                                                                                                              StreamingPreferences.enableYUV444);
+                                                                                                              StreamingPreferences.enableYUV444,
+                                                                                                              StreamingPreferences.enableFrameInterpolation);
                                     slider.value = StreamingPreferences.bitrateKbps
                                 }
                             }
@@ -674,7 +676,27 @@ Flickable {
                     checked: StreamingPreferences.enableFrameInterpolation
                     enabled: StreamingPreferences.fps <= 180
                     onCheckedChanged: {
-                        StreamingPreferences.enableFrameInterpolation = checked
+                        // VipleStream: FRUC on/off changes the host-side
+                        // encode fps (ON → fps/2) AND adds a source-
+                        // quality headroom multiplier to the default
+                        // bitrate (see streamingpreferences.cpp). If the
+                        // user hasn't manually pinned a bitrate (i.e.
+                        // autoAdjustBitrate is still on), re-derive the
+                        // default so the slider follows the FRUC state.
+                        // Otherwise respect their pinned value — matches
+                        // how YUV444 / resolution / fps toggles behave.
+                        if (StreamingPreferences.enableFrameInterpolation != checked) {
+                            StreamingPreferences.enableFrameInterpolation = checked
+                            if (StreamingPreferences.autoAdjustBitrate) {
+                                StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(
+                                    StreamingPreferences.width,
+                                    StreamingPreferences.height,
+                                    StreamingPreferences.fps,
+                                    StreamingPreferences.enableYUV444,
+                                    StreamingPreferences.enableFrameInterpolation)
+                                slider.value = StreamingPreferences.bitrateKbps
+                            }
+                        }
                     }
 
                     ToolTip.delay: 1000
@@ -794,10 +816,10 @@ Flickable {
 
                     Button {
                         id: resetBitrateButton
-                        text: qsTr("Use Default (%1 Mbps)").arg(StreamingPreferences.getDefaultBitrate(StreamingPreferences.width, StreamingPreferences.height, StreamingPreferences.fps, StreamingPreferences.enableYUV444) / 1000.0)
-                        visible: StreamingPreferences.bitrateKbps !== StreamingPreferences.getDefaultBitrate(StreamingPreferences.width, StreamingPreferences.height, StreamingPreferences.fps, StreamingPreferences.enableYUV444)
+                        text: qsTr("Use Default (%1 Mbps)").arg(StreamingPreferences.getDefaultBitrate(StreamingPreferences.width, StreamingPreferences.height, StreamingPreferences.fps, StreamingPreferences.enableYUV444, StreamingPreferences.enableFrameInterpolation) / 1000.0)
+                        visible: StreamingPreferences.bitrateKbps !== StreamingPreferences.getDefaultBitrate(StreamingPreferences.width, StreamingPreferences.height, StreamingPreferences.fps, StreamingPreferences.enableYUV444, StreamingPreferences.enableFrameInterpolation)
                         onClicked: {
-                            var defaultBitrate = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width, StreamingPreferences.height, StreamingPreferences.fps, StreamingPreferences.enableYUV444)
+                            var defaultBitrate = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width, StreamingPreferences.height, StreamingPreferences.fps, StreamingPreferences.enableYUV444, StreamingPreferences.enableFrameInterpolation)
                             StreamingPreferences.bitrateKbps = defaultBitrate
                             StreamingPreferences.autoAdjustBitrate = true
                             slider.value = defaultBitrate
@@ -1837,7 +1859,8 @@ Flickable {
                                 StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
                                                                                                           StreamingPreferences.height,
                                                                                                           StreamingPreferences.fps,
-                                                                                                          StreamingPreferences.enableYUV444);
+                                                                                                          StreamingPreferences.enableYUV444,
+                                                                                                          StreamingPreferences.enableFrameInterpolation);
                                 slider.value = StreamingPreferences.bitrateKbps
                             }
                         }

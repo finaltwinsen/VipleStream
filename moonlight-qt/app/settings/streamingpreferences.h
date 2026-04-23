@@ -11,8 +11,18 @@ class StreamingPreferences : public QObject
 public:
     static StreamingPreferences* get(QQmlEngine *qmlEngine = nullptr);
 
+    // VipleStream: `fruc` reflects whether frame interpolation is
+    // ON (enableFrameInterpolation). When ON, the host actually
+    // encodes at fps/2 (see session.cpp — we request half frame rate
+    // from the server and reconstruct locally via FRUC), so the
+    // default bitrate must be computed against the *host-side*
+    // frame rate, not the user's target frame rate. A small
+    // headroom multiplier is then applied so the halved source
+    // keeps enough detail for the interpolator to work from.
+    // Defaulted to false so existing call sites that don't care
+    // (legacy) behave as before.
     Q_INVOKABLE static int
-    getDefaultBitrate(int width, int height, int fps, bool yuv444);
+    getDefaultBitrate(int width, int height, int fps, bool yuv444, bool fruc = false);
 
     Q_INVOKABLE void save();
 

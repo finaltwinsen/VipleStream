@@ -432,7 +432,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         }
     } else if (displaySet || parser.isSet("fps")) {
         preferences->bitrateKbps = preferences->getDefaultBitrate(
-            preferences->width, preferences->height, preferences->fps, preferences->enableYUV444);
+            preferences->width, preferences->height, preferences->fps,
+            preferences->enableYUV444, preferences->enableFrameInterpolation);
     }
 
     // Resolve --packet-size option

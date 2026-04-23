@@ -41,12 +41,33 @@
                 android:layout_width="100dp"
                 android:layout_height="100dp" />
 
+            <!--
+                grid_overlay 要對齊「螢幕本體視覺中心」，不是整個
+                ic_computer drawable 的幾何中心。ic_computer 的
+                viewport 是 24x24，螢幕區塊佔 y=2..16（視覺中心 y≈9），
+                腳座佔 y=18..22。幾何中心 (12,12) 落在螢幕下緣與腳
+                座之間的空隙 —— 如果 overlay centerInParent，警告
+                三角形會黏在螢幕下緣而不是螢幕正中央。
+
+                公式：grid_image 100dp，螢幕中心離 grid_image top
+                = 100 * 9/24 ≈ 37.5dp。overlay 50dp，要讓其中心落
+                在該點 → marginTop = 37.5 - 25 = 12.5dp ≈ 13dp。
+                如果日後改 ic_computer 的 viewport 或 grid_image
+                尺寸，這個偏移需要重算。
+            -->
             <ImageView
                 android:id="@+id/grid_overlay"
-                android:layout_centerInParent="true"
+                android:layout_alignTop="@id/grid_image"
+                android:layout_centerHorizontal="true"
+                android:layout_marginTop="13dp"
                 android:layout_width="50dp"
                 android:layout_height="50dp" />
 
+            <!--
+                Spinner 是「處理中」語意（state=UNKNOWN 時顯示，例
+                如 polling 中），不必對齊螢幕；對齊整個框中央更像
+                一般 loading indicator 的直覺位置，保持原行為。
+            -->
             <ProgressBar
                 android:id="@+id/grid_spinner"
                 android:layout_centerInParent="true"
