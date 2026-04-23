@@ -63,11 +63,15 @@ function Propagate-Version($ver) {
     $verCode  = [int]$ver.Major * 10000 + [int]$ver.Minor * 1000 + [int]$ver.Patch
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 
-    # 1) Sunshine CMakeLists.txt — project(VipleStream VERSION X.Y.Z ...)
+    # 1) Sunshine CMakeLists.txt — project(VipleStream-Server VERSION X.Y.Z ...)
+    # Also match legacy 'VipleStream VERSION' (pre-v1.2.43 rebrand, when
+    # Sunshine's project name was 'VipleStream' not 'VipleStream-Server')
+    # so older checkouts propagate correctly, but new writes always use
+    # the current 'VipleStream-Server' name.
     $cmake = Join-Path $Root 'Sunshine\CMakeLists.txt'
     if (Test-Path $cmake) {
         $content = Get-Content $cmake -Raw
-        $content = $content -replace 'project\(VipleStream VERSION \d+\.\d+\.\d+', "project(VipleStream VERSION $verStr"
+        $content = $content -replace 'project\(VipleStream(?:-Server)? VERSION \d+\.\d+\.\d+', "project(VipleStream-Server VERSION $verStr"
         [System.IO.File]::WriteAllText($cmake, $content, $utf8NoBom)
     }
 

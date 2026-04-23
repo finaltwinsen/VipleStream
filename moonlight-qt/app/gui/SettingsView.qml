@@ -593,7 +593,21 @@ Flickable {
                         }
 
                         function reinitialize() {
-                            // Add native refresh rate for all attached displays
+                            // VipleStream: frame rate is restricted to 30 / 60 /
+                            // the display's native refresh rate only. The seed
+                            // fpsListModel already contains 30 and 60; below
+                            // we add each attached display's refresh rate
+                            // (addRefreshRateOrdered de-duplicates, so 60 Hz
+                            // displays don't produce a "60 FPS (duplicate)"
+                            // entry). We intentionally do NOT add a "Custom"
+                            // entry — upstream Moonlight's custom-FPS dialog
+                            // lets a user ask for e.g. 144 FPS on a 60 Hz
+                            // screen, which cannot physically be displayed
+                            // and (combined with FRUC VSync-paced Present)
+                            // produces misleading Present cadences. The
+                            // Custom dialog code is still present in this
+                            // file but is now unreachable dead code; kept
+                            // to minimize diff.
                             var done = false
                             for (var displayIndex = 0; !done; displayIndex++) {
                                 var refreshRate = SystemProperties.getRefreshRate(displayIndex);
@@ -619,12 +633,30 @@ Flickable {
                                 }
                             }
 
-                            // If we didn't find one, add a custom frame rate for the current value
+                            // VipleStream: if saved_fps isn't in the
+                            // restricted list (e.g. user previously set
+                            // 120 on a 60 Hz display, or 144 on a
+                            // 120 Hz display), fall back to the highest
+                            // supported value that's ≤ saved_fps. If
+                            // saved_fps is lower than any option, pick
+                            // the lowest. Also writes the preference
+                            // back so the next launch loads a valid
+                            // value directly.
                             if (!found) {
-                                currentIndex = addRefreshRateOrdered(model, saved_fps, qsTr("Custom (%1 FPS)").arg(saved_fps), true)
-                            }
-                            else {
-                                addRefreshRateOrdered(model, "", qsTr("Custom"), true)
+                                var bestIdx = 0
+                                var bestFps = parseInt(model.get(0).video_fps)
+                                for (var k = 0; k < model.count; k++) {
+                                    var opt_fps = parseInt(model.get(k).video_fps)
+                                    // Prefer the largest value that doesn't
+                                    // exceed the user's saved choice; if
+                                    // none qualifies, keep the smallest.
+                                    if (opt_fps <= saved_fps && opt_fps >= bestFps) {
+                                        bestFps = opt_fps
+                                        bestIdx = k
+                                    }
+                                }
+                                currentIndex = bestIdx
+                                StreamingPreferences.fps = bestFps
                             }
 
                             recalculateWidth()
