@@ -291,25 +291,60 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
         cb->searchRadius = SEARCH_RADIUS;
         ctx->Unmap(m_ConstantBuffer.Get(), 0);
 
-        // AV1 vs HEVC observation (measured 2026-04-23, A1000 @ 4K120):
-        // When the host streams AV1, me_gpu and warp_gpu timestamp
-        // queries report ~4× and ~2.6× longer dispatches than the
-        // exact same shader bytecode reports under HEVC (1.67ms vs
-        // 0.38ms ME, 1.74ms vs 0.68ms warp). It's NOT a correctness
-        // problem — FRUC output is identical. The extra time is
-        // GPU-hardware contention between NVDEC (busier for AV1 —
-        // AV1 decode costs 2.3ms/frame vs HEVC's ~0ms overhead on
-        // A1000) and the compute units this shader wants. D3D11
-        // has no async-compute queue (that's a D3D12 feature), so
-        // the dispatch is effectively serialized behind NVDEC's
-        // outstanding work. The net delta in SwapChain GPU busy is
-        // only +1.44ms/frame (vs +0.78ms with HEVC) because the
-        // dispatch still overlaps with the decode tail.
+        // AV1 vs HEVC shader-dispatch timing observation
+        // ------------------------------------------------
+        // First observed 2026-04-23 on A1000 @ 4K60 on a 60 Hz display:
+        // me_gpu / warp_gpu timestamp queries reported ~4× and ~2.6×
+        // longer GPU wall-clock under AV1 streams than under HEVC
+        // streams, even though the shader bytecode and dispatch sizes
+        // are identical. Correct output in both cases; the delta is
+        // GPU-level contention between NVDEC (which is busier for AV1
+        // decode — 2.3ms/frame vs HEVC ~0ms net overhead on A1000)
+        // and the compute units this shader wants. D3D11 has no
+        // async-compute queue (that's a D3D12 feature), so our
+        // dispatches effectively serialize behind NVDEC's outstanding
+        // work. The net delta in SwapChain GPU busy was only ~+0.7ms/
+        // frame because the dispatches still overlapped with NVDEC's
+        // decode tail.
         //
-        // Nothing to optimize at the shader level. Recommend HEVC
-        // for 4K+FRUC streaming on consumer/pro NVDEC SKUs; AV1
-        // becomes net-cheaper only on GPUs with independent VDE
-        // (decode engine) + compute resources or under D3D12.
+        // The earlier commit (v1.2.45) concluded from that observation
+        // alone that HEVC was preferable for 4K+FRUC streaming. That
+        // conclusion was wrong once tested at higher refresh rates:
+        //
+        // Follow-up 2026-04-23 on A1000 streaming to a 4K@120Hz VDD:
+        //   HEVC no-FRUC:     63.7 fps Present (host encoder cap)
+        //   HEVC + Generic:   32 real + 32 interp = 64 fps combined
+        //   HEVC + NvOF:      32 real + 32 interp = 64 fps combined
+        //   AV1 no-FRUC:      63.5 fps Present
+        //   AV1 + Generic:    55 real + 51 interp, p99 frame-time 6465ms
+        //                     (GPU contention spike — periodic multi-second stalls)
+        //   AV1 + NvOF:       58 real + 58 interp = 116 fps combined ✅
+        //
+        // FRUC-Stats in the HEVC case shows gapAvg=32ms vs expected=16ms
+        // — i.e. the host is only delivering ~31 real frames/sec on HEVC,
+        // so neither FRUC backend can do better than 64 combined fps
+        // no matter how cheap the shader is. The *client-side* shader
+        // timing differential between HEVC and AV1 is real but second-
+        // order compared to the host-encoder ceiling. AV1 + NvOF wins
+        // 4K120 because:
+        //   (a) the host's AV1 encoder keeps up at 60 fps (HEVC can't),
+        //   (b) NVIDIA Optical Flow runs on the OFA hardware block, not
+        //       the SMs that NVDEC contends with — so AV1 + NvOF pairs
+        //       two *independent* hardware engines and avoids the
+        //       Generic FRUC stall we see in AV1 + compute-shader runs.
+        //
+        // Revised recommendations for 4K+FRUC:
+        //   - AV1 + NVIDIA Optical Flow  → best (115+ fps combined)
+        //   - AV1 + Generic compute       → acceptable but risks ms-
+        //                                   scale stalls from NVDEC/
+        //                                   SM contention; only use
+        //                                   on GPUs without OFA
+        //   - HEVC + any backend          → host-encoder bound; FRUC
+        //                                   doesn't help above the
+        //                                   encoder's real throughput
+        //
+        // Still nothing to optimize at the shader level — the effective
+        // cap is on the other end of the network.
         ctx->CSSetShader(m_MotionEstCS[m_QualityLevel].Get(), nullptr, 0);
         ID3D11ShaderResourceView* srvs[] = { m_PrevFrameSRV.Get(), m_RenderSRV.Get(), m_PrevMotionFieldSRV.Get() };
         ctx->CSSetShaderResources(0, 3, srvs);

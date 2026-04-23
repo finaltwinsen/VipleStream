@@ -169,16 +169,25 @@ public static extern bool SetWindowPos(System.IntPtr hWnd, System.IntPtr hWndIns
 public static extern bool GetWindowRect(System.IntPtr hWnd, out RECT r);
 '@
     }
-    $rect = New-Object 'Win32.Mover+RECT'
-    [Win32.Mover]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
-    $w = $rect.Right  - $rect.Left
-    $h = $rect.Bottom - $rect.Top
-    if ($w -le 0 -or $h -le 0) { $w = 1280; $h = 720 }
-    $x = $screen.Bounds.X + [int](($screen.Bounds.Width  - $w) / 2)
-    $y = $screen.Bounds.Y + [int](($screen.Bounds.Height - $h) / 2)
-    # SWP_NOSIZE=0x0001  SWP_NOZORDER=0x0004 -> combined=0x0005 (keep size + z-order)
-    [Win32.Mover]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, 0, 0, 0x0005) | Out-Null
-    Write-Host "  Moved window HWND=$hwnd to screen $($screen.DeviceName) at ($x,$y), size ${w}x${h}" -ForegroundColor DarkGray
+    # VipleStream: also resize the window to fill the target screen.
+    # Moonlight's D3D11VARenderer gates FRUC lazy-init on
+    # m_DisplayWidth >= 1920 && m_DisplayHeight >= 1080 — which is
+    # the SwapChain backbuffer size, not the stream resolution.
+    # Moonlight's windowed mode sizes the Qt window based on stream
+    # resolution with a conservative smart-fit heuristic, so for a
+    # 1080p stream the SwapChain ends up ~1296x856 client area —
+    # below the 1080p threshold, and FRUC silently refuses to init
+    # (no VIPLE-FRUC init log appears). Forcing the window to cover
+    # the target display's logical bounds makes the SwapChain
+    # resize to >=1080p on any display that's >=1080p, which is
+    # guaranteed for our VDD benchmark targets.
+    $newW = $screen.Bounds.Width
+    $newH = $screen.Bounds.Height
+    $x = $screen.Bounds.X
+    $y = $screen.Bounds.Y
+    # SWP_NOZORDER=0x0004 (allow resize; keep current z-order)
+    [Win32.Mover]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, $newW, $newH, 0x0004) | Out-Null
+    Write-Host "  Moved + resized window HWND=$hwnd to screen $($screen.DeviceName) at ($x,$y), size ${newW}x${newH}" -ForegroundColor DarkGray
 }
 
 # PresentMon needs ETW access. Either admin, OR membership in

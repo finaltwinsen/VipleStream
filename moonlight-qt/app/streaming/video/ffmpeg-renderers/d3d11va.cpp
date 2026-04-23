@@ -857,7 +857,22 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
     if (!m_FRUC && !m_GenericFRUC && !m_FRUCInitFailed
         && StreamingPreferences::get(nullptr)->enableFrameInterpolation
         && m_DecoderParams.frameRate <= 180) {
-        if (m_DisplayWidth >= 1920 && m_DisplayHeight >= 1080) {
+        // VipleStream: gate FRUC on *stream* resolution, not SwapChain
+        // size. Moonlight's windowed mode sizes the Qt window via a
+        // smart-fit heuristic that can produce a <1920x1080 client
+        // area even when the user asked for a 1080p stream — the old
+        // m_DisplayWidth check then rejected FRUC, and because this
+        // is a one-shot lazy init with m_FRUCInitFailed latching on
+        // failure, manually enlarging the window afterwards didn't
+        // retry. Checking m_DecoderParams dimensions (the actual
+        // stream resolution the server is sending) keeps the 1080p
+        // minimum intent intact while tolerating small initial
+        // windows. initFRUC() itself already clamps FRUC textures to
+        // min(stream, display) internally, so a small window just
+        // means FRUC works at the window's resolution until a resize.
+        uint32_t streamW = m_DecoderParams.width  ? (uint32_t)m_DecoderParams.width  : (uint32_t)m_DisplayWidth;
+        uint32_t streamH = m_DecoderParams.height ? (uint32_t)m_DecoderParams.height : (uint32_t)m_DisplayHeight;
+        if (streamW >= 1920 && streamH >= 1080) {
             if (!initFRUC()) {
                 m_FRUCInitFailed = true;
                 // Show error overlay: FRUC not supported on this device
