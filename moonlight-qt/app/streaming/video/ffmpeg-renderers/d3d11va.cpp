@@ -73,6 +73,33 @@ D3D11VARenderer::D3D11VARenderer(int decoderSelectionPass)
     m_ContextLock = SDL_CreateMutex();
 
     DwmEnableMMCSS(TRUE);
+
+    // VipleStream: QPC frequency — cached once, never changes within
+    // a process. Used by recordPresent() to convert QueryPerformanceCounter
+    // deltas to milliseconds for the [VIPLE-PRESENT-Stats] log line.
+    QueryPerformanceFrequency(&m_PresentQpcFreq);
+}
+
+// VipleStream: record a single Present() call into the given bucket.
+// `callBegin` and `callEnd` bracket the Present() invocation itself;
+// the delta is stored as the call wall-clock (how long Present blocked),
+// and the gap from the previous Present's return is the inter-Present
+// interval (the effective frame-time for that bucket).
+// Called immediately after every m_SwapChain->Present() in renderFrame;
+// the PRESENT-Stats log line consumes both series periodically.
+void D3D11VARenderer::recordPresent(PresentBucket& b,
+                                    LARGE_INTEGER callBegin,
+                                    LARGE_INTEGER callEnd)
+{
+    if (m_PresentQpcFreq.QuadPart == 0) return;  // defensive; freq is non-zero on modern Windows
+    const double freq = (double)m_PresentQpcFreq.QuadPart;
+    // Present() call latency
+    b.callLatMs.push_back(1000.0 * (double)(callEnd.QuadPart - callBegin.QuadPart) / freq);
+    // Inter-Present interval (skip the first call where lastPresent is still zero)
+    if (b.lastPresent.QuadPart != 0) {
+        b.intervalMs.push_back(1000.0 * (double)(callEnd.QuadPart - b.lastPresent.QuadPart) / freq);
+    }
+    b.lastPresent = callEnd;
 }
 
 D3D11VARenderer::~D3D11VARenderer()
@@ -927,7 +954,14 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         for (int i = 0; i < Overlay::OverlayMax; i++) {
             renderOverlay((Overlay::OverlayType)i);
         }
-        hr = m_SwapChain->Present(0, m_AllowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+        {
+            LARGE_INTEGER pBegin, pEnd;
+            QueryPerformanceCounter(&pBegin);
+            hr = m_SwapChain->Present(0, m_AllowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+            QueryPerformanceCounter(&pEnd);
+            recordPresent(m_PresentReal, pBegin, pEnd);
+            m_PresentRealTotal++;
+        }
     }
     // VipleStream FRUC path (Tier 0: NvOFFRUC — NVIDIA hardware optical flow)
     else if (m_FRUC && m_FRUC->isInitialized() && !m_FRUCPaused) {
@@ -953,7 +987,14 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
                 renderOverlay((Overlay::OverlayType)i);
             }
             // FRUC: Present interpolated frame with V-sync
-            hr = m_SwapChain->Present(1, 0);
+            {
+                LARGE_INTEGER pBegin, pEnd;
+                QueryPerformanceCounter(&pBegin);
+                hr = m_SwapChain->Present(1, 0);
+                QueryPerformanceCounter(&pEnd);
+                recordPresent(m_PresentInterp, pBegin, pEnd);
+                m_PresentInterpTotal++;
+            }
             if (FAILED(hr)) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                              "[VIPLE-FRUC] Present(interp) failed: %x", hr);
@@ -980,7 +1021,14 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
             renderOverlay((Overlay::OverlayType)i);
         }
         // FRUC requires V-sync to pace 2x presents across separate refresh intervals
-        hr = m_SwapChain->Present(1, 0);
+        {
+            LARGE_INTEGER pBegin, pEnd;
+            QueryPerformanceCounter(&pBegin);
+            hr = m_SwapChain->Present(1, 0);
+            QueryPerformanceCounter(&pEnd);
+            recordPresent(m_PresentReal, pBegin, pEnd);
+            m_PresentRealTotal++;
+        }
     }
     // VipleStream FRUC path (Tier 1: GenericFRUC — compute shader, cross-platform)
     else if (m_GenericFRUC && m_GenericFRUC->isInitialized() && !m_FRUCPaused) {
@@ -1030,7 +1078,14 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
                 renderOverlay((Overlay::OverlayType)i);
             }
             // FRUC: Present interpolated frame with V-sync
-            hr = m_SwapChain->Present(1, 0);
+            {
+                LARGE_INTEGER pBegin, pEnd;
+                QueryPerformanceCounter(&pBegin);
+                hr = m_SwapChain->Present(1, 0);
+                QueryPerformanceCounter(&pEnd);
+                recordPresent(m_PresentInterp, pBegin, pEnd);
+                m_PresentInterpTotal++;
+            }
             if (FAILED(hr)) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                              "[VIPLE-FRUC-Generic] Present(interp) failed: %x", hr);
@@ -1057,7 +1112,14 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
             renderOverlay((Overlay::OverlayType)i);
         }
         // FRUC requires V-sync to pace 2x presents across separate refresh intervals
-        hr = m_SwapChain->Present(1, 0);
+        {
+            LARGE_INTEGER pBegin, pEnd;
+            QueryPerformanceCounter(&pBegin);
+            hr = m_SwapChain->Present(1, 0);
+            QueryPerformanceCounter(&pEnd);
+            recordPresent(m_PresentReal, pBegin, pEnd);
+            m_PresentRealTotal++;
+        }
     }
     else {
         // Normal rendering path (no FRUC)
@@ -1067,11 +1129,69 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         for (int i = 0; i < Overlay::OverlayMax; i++) {
             renderOverlay((Overlay::OverlayType)i);
         }
-        hr = m_SwapChain->Present(0, flags);
+        {
+            LARGE_INTEGER pBegin, pEnd;
+            QueryPerformanceCounter(&pBegin);
+            hr = m_SwapChain->Present(0, flags);
+            QueryPerformanceCounter(&pEnd);
+            recordPresent(m_PresentReal, pBegin, pEnd);
+            m_PresentRealTotal++;
+        }
     }
 
     if (m_DecodeDevice == m_RenderDevice) {
         unlockContext(this);
+    }
+
+    // VipleStream: 5-second periodic Present-rate stats. Independent
+    // from [VIPLE-FRUC-Stats] because this code path must also run
+    // for non-FRUC ("off") configs and the FRUC skip path — FRUC-Stats
+    // only fires inside the GenericFRUC branch. Buckets are sorted
+    // and flushed in-place; cumulative totals persist.
+    if (now - m_PresentLastLogMs > 5000) {
+        auto flushBucket = [&](PresentBucket& b, const char* label) {
+            if (b.intervalMs.empty()) {
+                // Still emit a line so parsers see the config had this bucket
+                // (possibly zero presents, useful to distinguish "FRUC off =
+                // no interp" from "FRUC on but all interps dropped").
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-PRESENT-Stats] %s n=0", label);
+                return;
+            }
+            std::sort(b.intervalMs.begin(), b.intervalMs.end());
+            std::sort(b.callLatMs.begin(), b.callLatMs.end());
+            const size_t n = b.intervalMs.size();
+            double intSum = 0; for (auto v : b.intervalMs) intSum += v;
+            double callSum = 0; for (auto v : b.callLatMs)  callSum += v;
+            const double intMean  = intSum / n;
+            const double callMean = b.callLatMs.empty() ? 0.0 : (callSum / b.callLatMs.size());
+            auto pct = [&](const std::vector<double>& s, double p) {
+                if (s.empty()) return 0.0;
+                size_t idx = (size_t)(p * s.size());
+                if (idx >= s.size()) idx = s.size() - 1;
+                return s[idx];
+            };
+            const double p50  = pct(b.intervalMs, 0.50);
+            const double p95  = pct(b.intervalMs, 0.95);
+            const double p99  = pct(b.intervalMs, 0.99);
+            const double p999 = pct(b.intervalMs, 0.999);
+            const double effFps = (intMean > 0) ? (1000.0 / intMean) : 0.0;
+            const double callP95 = pct(b.callLatMs, 0.95);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-PRESENT-Stats] %s n=%zu fps=%.2f "
+                        "ft_mean=%.3fms p50=%.3f p95=%.3f p99=%.3f p99.9=%.3f "
+                        "call_mean=%.3fms p95=%.3f",
+                        label, n, effFps, intMean, p50, p95, p99, p999,
+                        callMean, callP95);
+            b.intervalMs.clear();
+            b.callLatMs.clear();
+        };
+        flushBucket(m_PresentReal,   "real");
+        flushBucket(m_PresentInterp, "interp");
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-PRESENT-Stats] cumul real=%u interp=%u",
+                    m_PresentRealTotal, m_PresentInterpTotal);
+        m_PresentLastLogMs = now;
     }
 
     if (FAILED(hr)) {

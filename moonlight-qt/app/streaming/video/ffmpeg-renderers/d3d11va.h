@@ -3,6 +3,7 @@
 #include "renderer.h"
 
 #include <atomic>
+#include <vector>
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
 
@@ -153,6 +154,35 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_FRUCBlitVertexBuffer;
     void blitFRUCTexture(ID3D11ShaderResourceView* srv);
     bool initFRUC(); // Lazy-init: try NvOFFRUC, fall back to GenericFRUC
+
+    // VipleStream: in-process Present timing, independent of ETW/
+    // PresentMon. Benchmark target displays may be indirect-display
+    // drivers (e.g. a Virtual Display Driver at 4K@120Hz that the
+    // user pushes Moonlight onto to bypass their physical 60Hz VBlank
+    // ceiling); the DXGI ETW provider doesn't always emit flip events
+    // for IDD flips, so PresentMon CSV comes out empty. Measuring
+    // Present() return time inside renderFrame() is direct and
+    // immune to that whole category of tooling issue.
+    //
+    // Tracked separately for real vs interpolated frames because
+    // the FRUC path calls SwapChain->Present() twice per incoming
+    // host frame; the gap between real and interp has different
+    // pacing semantics than real-to-real (the latter follows host
+    // frame arrival, the former follows the DXGI latency waitable).
+    struct PresentBucket {
+        LARGE_INTEGER lastPresent {};
+        std::vector<double> intervalMs;  // inter-Present intervals (ms) in current stat window
+        std::vector<double> callLatMs;   // Present() wall-clock (ms) in current stat window
+    };
+    PresentBucket m_PresentReal;
+    PresentBucket m_PresentInterp;
+    LARGE_INTEGER m_PresentQpcFreq {};
+    uint32_t      m_PresentRealTotal = 0;    // cumulative, never cleared
+    uint32_t      m_PresentInterpTotal = 0;  // cumulative, never cleared
+    uint64_t      m_PresentLastLogMs = 0;    // SDL_GetTicks() of last flush
+    void recordPresent(PresentBucket& b,
+                       LARGE_INTEGER callBegin,
+                       LARGE_INTEGER callEnd);
 
     SDL_SpinLock m_OverlayLock;
     std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, Overlay::OverlayMax> m_OverlayVertexBuffers;

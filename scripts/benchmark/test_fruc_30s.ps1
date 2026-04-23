@@ -36,7 +36,16 @@ param(
     # and dev-build so `Moonlight.exe stream <host> Desktop` works out
     # of the box as long as the user already paired with that host
     # using any Moonlight version.
-    [string]$ExePath  = ''
+    [string]$ExePath  = '',
+    # VipleStream: target display to host the Moonlight stream window.
+    # Moonlight has no --display CLI arg to pick a display, so when
+    # benchmarking on a secondary display (e.g. a VDD with 120 Hz
+    # refresh, while the physical primary is only 60 Hz), we need to
+    # move the window ourselves after the launcher spawns it. Accepts
+    # either a 0-based display index or a substring of the device
+    # name (e.g. 'DISPLAY3'). Empty = leave window on whichever
+    # display Moonlight picked (usually primary).
+    [string]$TargetDisplay = ''
 )
 
 # Don't let Qt/SDL stderr warnings from Moonlight terminate the script.
@@ -117,6 +126,59 @@ function Stop-Moonlight {
     Get-Process -Name 'Moonlight' -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 800
+}
+
+# Resolve $TargetDisplay (numeric index or substring of device name)
+# to a Screen object, or $null if no match / parameter empty.
+function Resolve-TargetScreen {
+    param([string]$spec)
+    if (-not $spec) { return $null }
+    Add-Type -AssemblyName System.Windows.Forms
+    $screens = [System.Windows.Forms.Screen]::AllScreens
+    # Numeric index
+    $idx = 0
+    if ([int]::TryParse($spec, [ref]$idx)) {
+        if ($idx -ge 0 -and $idx -lt $screens.Count) { return $screens[$idx] }
+        Write-Warning "TargetDisplay index $idx out of range (0..$($screens.Count-1)); ignoring"
+        return $null
+    }
+    # Substring match against DeviceName
+    foreach ($s in $screens) {
+        if ($s.DeviceName -like "*$spec*") { return $s }
+    }
+    Write-Warning "TargetDisplay '$spec' didn't match any screen; ignoring. Screens: $(($screens | ForEach-Object { $_.DeviceName }) -join ',')"
+    return $null
+}
+
+# Move a window (identified by its HWND) onto the given Screen's bounds.
+# Reposition without resizing so Moonlight's backbuffer geometry stays
+# intact. PowerShell 7 runs on .NET (Core), where System.Drawing.Rectangle
+# lives in a separate assembly that isn't loaded by default — we use a
+# plain Win32 RECT struct to stay self-contained.
+function Move-WindowToScreen {
+    param([IntPtr]$hwnd, $screen)
+    if ($hwnd -eq [IntPtr]::Zero -or $null -eq $screen) { return }
+    if (-not ('Win32.Mover' -as [type])) {
+        Add-Type -Namespace Win32 -Name Mover -MemberDefinition @'
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool SetWindowPos(System.IntPtr hWnd, System.IntPtr hWndInsertAfter,
+                                       int X, int Y, int cx, int cy, uint uFlags);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool GetWindowRect(System.IntPtr hWnd, out RECT r);
+'@
+    }
+    $rect = New-Object 'Win32.Mover+RECT'
+    [Win32.Mover]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+    $w = $rect.Right  - $rect.Left
+    $h = $rect.Bottom - $rect.Top
+    if ($w -le 0 -or $h -le 0) { $w = 1280; $h = 720 }
+    $x = $screen.Bounds.X + [int](($screen.Bounds.Width  - $w) / 2)
+    $y = $screen.Bounds.Y + [int](($screen.Bounds.Height - $h) / 2)
+    # SWP_NOSIZE=0x0001  SWP_NOZORDER=0x0004 -> combined=0x0005 (keep size + z-order)
+    [Win32.Mover]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, 0, 0, 0x0005) | Out-Null
+    Write-Host "  Moved window HWND=$hwnd to screen $($screen.DeviceName) at ($x,$y), size ${w}x${h}" -ForegroundColor DarkGray
 }
 
 # PresentMon needs ETW access. Either admin, OR membership in
@@ -315,6 +377,69 @@ function Parse-PresentMonCsv {
     }
 }
 
+# VipleStream: parse [VIPLE-PRESENT-Stats] lines from a Moonlight log
+# into a summary structure. Each 5-second flush produces one "real"
+# bucket and one "interp" bucket (possibly with n=0). We aggregate
+# across buckets frame-count-weighted for rate/time metrics, and take
+# the worst p95/p99/p99.9 across buckets (pessimistic — catches
+# stall episodes that a simple mean would smooth out).
+#
+# This is the measurement path we use when the stream runs on a display
+# whose Present events PresentMon can't observe (Indirect Display
+# Drivers e.g. VDD don't emit the DXGI ETW flip events PresentMon
+# subscribes to; the in-process QPC timing recordPresent() writes to
+# the Moonlight log is immune to that whole tooling category.)
+function Parse-MoonlightPresentLog {
+    param([string]$logPath)
+    if (-not (Test-Path $logPath)) { return $null }
+    $content = Get-Content $logPath -Raw -ErrorAction SilentlyContinue
+    if (-not $content) { return $null }
+    # Two line formats:
+    #   non-empty: '[VIPLE-PRESENT-Stats] real n=300 fps=60.00 ft_mean=16.667ms p50=... p95=... p99=... p99.9=... call_mean=... p95=...'
+    #   empty:     '[VIPLE-PRESENT-Stats] real n=0'
+    $re = [regex]'\[VIPLE-PRESENT-Stats\] (real|interp) n=(\d+)(?: fps=([\d.]+) ft_mean=([\d.]+)ms p50=([\d.]+) p95=([\d.]+) p99=([\d.]+) p99\.9=([\d.]+) call_mean=([\d.]+)ms p95=([\d.]+))?'
+    $real   = @()
+    $interp = @()
+    foreach ($m in $re.Matches($content)) {
+        $bucket = [PSCustomObject]@{
+            label    = $m.Groups[1].Value
+            n        = [int]$m.Groups[2].Value
+            fps      = if ($m.Groups[3].Success) { [double]$m.Groups[3].Value } else { 0.0 }
+            ft_mean  = if ($m.Groups[4].Success) { [double]$m.Groups[4].Value } else { 0.0 }
+            p50      = if ($m.Groups[5].Success) { [double]$m.Groups[5].Value } else { 0.0 }
+            p95      = if ($m.Groups[6].Success) { [double]$m.Groups[6].Value } else { 0.0 }
+            p99      = if ($m.Groups[7].Success) { [double]$m.Groups[7].Value } else { 0.0 }
+            p999     = if ($m.Groups[8].Success) { [double]$m.Groups[8].Value } else { 0.0 }
+            call_mean= if ($m.Groups[9].Success) { [double]$m.Groups[9].Value } else { 0.0 }
+            call_p95 = if ($m.Groups[10].Success){ [double]$m.Groups[10].Value } else { 0.0 }
+        }
+        if ($bucket.label -eq 'real') { $real += $bucket } else { $interp += $bucket }
+    }
+    function AggregateBuckets($buckets) {
+        $nonEmpty = @($buckets | Where-Object { $_.n -gt 0 })
+        if ($nonEmpty.Count -eq 0) { return $null }
+        $totalN = 0; $wFps = 0.0; $wFt = 0.0
+        foreach ($b in $nonEmpty) {
+            $totalN += $b.n; $wFps += $b.fps * $b.n; $wFt += $b.ft_mean * $b.n
+        }
+        return [PSCustomObject]@{
+            buckets      = $nonEmpty.Count
+            total_frames = $totalN
+            fps_avg      = [Math]::Round($wFps / $totalN, 2)
+            ft_mean_avg  = [Math]::Round($wFt  / $totalN, 3)
+            p95_worst    = [Math]::Round(($nonEmpty | Measure-Object p95  -Maximum).Maximum, 3)
+            p99_worst    = [Math]::Round(($nonEmpty | Measure-Object p99  -Maximum).Maximum, 3)
+            p999_worst   = [Math]::Round(($nonEmpty | Measure-Object p999 -Maximum).Maximum, 3)
+        }
+    }
+    [PSCustomObject]@{
+        real         = AggregateBuckets $real
+        interp       = AggregateBuckets $interp
+        real_buckets = $real
+        interp_buckets = $interp
+    }
+}
+
 # -----------------------------------------------------------------------------
 $results = [ordered]@{}
 
@@ -354,6 +479,9 @@ try {
         Set-ItemProperty $RegPath -Name videocfg -Value $codecEnum -Type DWord
 
         Stop-Moonlight
+        # Snapshot the time we start this config, to later pick the
+        # Moonlight log file produced during this config's run.
+        $configStartTime = Get-Date
 
         # Launch streaming. We captured the Process object (-PassThru)
         # originally to pass a PID to PresentMon, but that turned out
@@ -383,8 +511,30 @@ try {
         Write-Host "Launching: Moonlight.exe $($mlArgs -join ' ')"
         $mlProc = Start-Process -FilePath $MoonlightExe -ArgumentList $mlArgs -PassThru
 
-        Write-Host "Warming up $WarmupSeconds s..."
-        Start-Sleep -Seconds $WarmupSeconds
+        # Early warmup: give Moonlight ~3s to create the stream window
+        # before we try to move it. If we wait for the full WarmupSeconds
+        # the renderer has already initialized on the original display
+        # and moving it cross-display may trigger a SwapChain resize
+        # stall inside its hot path.
+        $earlyWarmup = [Math]::Min(3, $WarmupSeconds)
+        Start-Sleep -Seconds $earlyWarmup
+
+        if ($TargetDisplay) {
+            $targetScreen = Resolve-TargetScreen $TargetDisplay
+            if ($targetScreen) {
+                $mlEarly = Get-Process -Name 'Moonlight' -ErrorAction SilentlyContinue |
+                           Where-Object { $_.MainWindowHandle -ne 0 } |
+                           Sort-Object StartTime -Descending | Select-Object -First 1
+                if ($mlEarly) {
+                    Move-WindowToScreen $mlEarly.MainWindowHandle $targetScreen
+                } else {
+                    Write-Warning "No Moonlight window handle available yet to move to $TargetDisplay"
+                }
+            }
+        }
+
+        Write-Host "Warming up $($WarmupSeconds - $earlyWarmup)s more..."
+        Start-Sleep -Seconds ($WarmupSeconds - $earlyWarmup)
 
         # Verify Moonlight is running — re-resolve by name because the
         # stream child process may have a different PID than the
@@ -452,9 +602,48 @@ try {
 
         # Parse
         $m = Parse-PresentMonCsv -Csv $csvPath -FilterPid $mlPid
+
+        # VipleStream: also parse the Moonlight log's in-process
+        # [VIPLE-PRESENT-Stats] for this config. Picks the newest
+        # VipleStream-*.log modified since $configStartTime so we
+        # don't pick up stats from previous runs. Complements the
+        # PresentMon CSV (and replaces it when the stream runs on
+        # an Indirect Display like a VDD, where ETW flip events
+        # aren't emitted).
+        $presentStats = $null
+        $mlLogDir = $env:TEMP
+        $mlLog = Get-ChildItem -Path $mlLogDir -Filter 'VipleStream-*.log' -ErrorAction SilentlyContinue |
+                 Where-Object { $_.LastWriteTime -gt $configStartTime } |
+                 Sort-Object LastWriteTime -Descending |
+                 Select-Object -First 1
+        if ($mlLog) {
+            $presentStats = Parse-MoonlightPresentLog $mlLog.FullName
+            if ($presentStats) {
+                Write-Host "  Moonlight log : $($mlLog.Name)"
+            }
+        }
+
         if ($null -eq $m) {
+            # PresentMon failed but Moonlight log may still have data
+            # (this is the VDD / IDD case). Keep both paths available.
+            if ($presentStats) {
+                $results[$cfg] = [PSCustomObject]@{ present_stats = $presentStats }
+                Write-Host "  (No PresentMon data — using Moonlight log)"
+                if ($presentStats.real) {
+                    Write-Host "  Real Present  : fps=$($presentStats.real.fps_avg) ft=$($presentStats.real.ft_mean_avg)ms p95=$($presentStats.real.p95_worst) p99=$($presentStats.real.p99_worst) (n=$($presentStats.real.total_frames))"
+                }
+                if ($presentStats.interp) {
+                    Write-Host "  Interp Present: fps=$($presentStats.interp.fps_avg) ft=$($presentStats.interp.ft_mean_avg)ms p95=$($presentStats.interp.p95_worst) p99=$($presentStats.interp.p99_worst) (n=$($presentStats.interp.total_frames))"
+                }
+                Write-Host ""
+                continue
+            }
             $results[$cfg] = @{ error = 'no_data' }
             continue
+        }
+        # Attach present_stats to the PresentMon-derived result
+        if ($presentStats) {
+            $m | Add-Member -NotePropertyName 'present_stats' -NotePropertyValue $presentStats -Force
         }
         $results[$cfg] = $m
         Write-Host ""
@@ -471,6 +660,15 @@ try {
             Write-Host "  Spikes        : >1.5x=$($m.spikes.over_1_5x) ($pct15 %)  >2x=$($m.spikes.over_2x) ($pct2 %)  >3x=$($m.spikes.over_3x) ($pct3 %)"
         }
         Write-Host "  Dropped       : $($m.dropped) ($($m.dropped_pct) %)"
+        # VipleStream: also print in-process Present stats from Moonlight log.
+        if ($presentStats) {
+            if ($presentStats.real) {
+                Write-Host "  [moonlight-log] real  : fps=$($presentStats.real.fps_avg) ft=$($presentStats.real.ft_mean_avg)ms p95=$($presentStats.real.p95_worst) p99=$($presentStats.real.p99_worst) (n=$($presentStats.real.total_frames))"
+            }
+            if ($presentStats.interp) {
+                Write-Host "  [moonlight-log] interp: fps=$($presentStats.interp.fps_avg) ft=$($presentStats.interp.ft_mean_avg)ms p95=$($presentStats.interp.p95_worst) p99=$($presentStats.interp.p99_worst) (n=$($presentStats.interp.total_frames))"
+            }
+        }
         Write-Host ""
     }
 }
