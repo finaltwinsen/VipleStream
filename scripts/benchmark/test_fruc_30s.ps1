@@ -24,12 +24,19 @@ param(
     [string]$App      = 'Desktop',
     [int]   $Seconds  = 30,
     [int]   $WarmupSeconds = 8,
-    [string[]]$Configs = @('off','quality','balanced','performance'),
+    [string[]]$Configs = @('off','quality','balanced','performance','nvof_quality'),
     [int]   $Fps = 60,          # server-side FPS; with FRUC client should show 2x
-    [int]   $Width = 1920,
-    [int]   $Height = 1080,
+    [int]   $Width = 3840,
+    [int]   $Height = 2160,
     [switch]$KeepWindowed,      # stream in windowed mode so console is visible
-    [string]$OutDir = ''
+    [string]$OutDir = '',
+    # VipleStream: dev-build Moonlight path. Default points at the
+    # build output, not Program Files, because deploy_client_now.cmd
+    # requires admin. Registry pair state is shared between installed
+    # and dev-build so `Moonlight.exe stream <host> Desktop` works out
+    # of the box as long as the user already paired with that host
+    # using any Moonlight version.
+    [string]$ExePath  = ''
 )
 
 # Don't let Qt/SDL stderr warnings from Moonlight terminate the script.
@@ -39,10 +46,21 @@ $ErrorActionPreference = 'Continue'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 $PresentMon = Join-Path $ProjectRoot 'scripts\PresentMon-2.4.1-x64.exe'
-$MoonlightExe = 'C:\Program Files\Moonlight Game Streaming\Moonlight.exe'
+if ($ExePath) {
+    $MoonlightExe = $ExePath
+} else {
+    # Prefer the fresh dev build; fall back to the installed copy.
+    $devBuild = Join-Path $ProjectRoot 'temp\moonlight\Moonlight.exe'
+    if (Test-Path $devBuild) {
+        $MoonlightExe = $devBuild
+    } else {
+        $MoonlightExe = 'C:\Program Files\Moonlight Game Streaming\Moonlight.exe'
+    }
+}
 
 if (-not (Test-Path $PresentMon)) { throw "PresentMon not found: $PresentMon" }
 if (-not (Test-Path $MoonlightExe)) { throw "Moonlight not found: $MoonlightExe" }
+Write-Host "Using Moonlight at: $MoonlightExe" -ForegroundColor Cyan
 
 if (-not $OutDir) {
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -50,22 +68,47 @@ if (-not $OutDir) {
 }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 
-$RegPath = 'HKCU:\Software\Moonlight Game Streaming Project\Moonlight'
+# VipleStream: v1.2.44 rebrand changed QCoreApplication::setApplicationName
+# from "Moonlight" to "VipleStream", so QSettings now live under
+#   HKCU\Software\Moonlight Game Streaming Project\VipleStream
+# instead of the upstream ...\Moonlight path. This harness used to
+# write to the upstream path, which looked like "working" because
+# Set-ItemProperty silently created the phantom key, but Moonlight
+# read from the real VipleStream key and the FRUC config never
+# actually changed between runs — every baseline config ended up
+# streaming with whatever the user last set in the Settings UI.
+# Fix: target the VipleStream subkey. If a future major version
+# changes applicationName again, update here too.
+$RegPath = 'HKCU:\Software\Moonlight Game Streaming Project\VipleStream'
 
 # Save original settings so we can restore
-$origInterp = (Get-ItemProperty $RegPath -Name frameInterpolation -ErrorAction SilentlyContinue).frameInterpolation
-$origBackend = (Get-ItemProperty $RegPath -Name frucBackend -ErrorAction SilentlyContinue).frucBackend
-$origQuality = (Get-ItemProperty $RegPath -Name frucQuality -ErrorAction SilentlyContinue).frucQuality
-Write-Host "Original: frameInterpolation=$origInterp frucBackend=$origBackend frucQuality=$origQuality"
+$origInterp   = (Get-ItemProperty $RegPath -Name frameInterpolation -ErrorAction SilentlyContinue).frameInterpolation
+$origBackend  = (Get-ItemProperty $RegPath -Name frucBackend        -ErrorAction SilentlyContinue).frucBackend
+$origQuality  = (Get-ItemProperty $RegPath -Name frucQuality        -ErrorAction SilentlyContinue).frucQuality
+$origVideoCfg = (Get-ItemProperty $RegPath -Name videocfg           -ErrorAction SilentlyContinue).videocfg
+Write-Host "Original: frameInterpolation=$origInterp frucBackend=$origBackend frucQuality=$origQuality videocfg=$origVideoCfg"
 Write-Host ""
 
-# Map config name -> registry values
+# Map config name -> runtime settings.
+#   interp / backend / quality   -> registry keys (frameInterpolation /
+#                                   frucBackend / frucQuality)
+#   videocodec                   -> --video-codec CLI arg ('auto' |
+#                                   'H.264' | 'HEVC' | 'AV1'). Passed
+#                                   per launch, doesn't touch registry.
+#   VideoCodecConfig enum: 0=AUTO, 1=FORCE_H264, 2=FORCE_HEVC,
+#                          3=FORCE_HEVC_HDR_DEPRECATED, 4=FORCE_AV1
+# AV1 configs require host + client GPU to support AV1 HW decode:
+#   - Ampere+ NVDEC (A1000 / RTX 30 series or newer) -> yes
+#   - Older NVDEC (pre-Ampere) -> no, stream will fall back to HEVC
 $presetMap = @{
-    'off'         = @{ interp = 'false'; backend = 0; quality = 1 }  # FRUC disabled
-    'quality'     = @{ interp = 'true';  backend = 0; quality = 0 }  # FQ_QUALITY
-    'balanced'    = @{ interp = 'true';  backend = 0; quality = 1 }  # FQ_BALANCED
-    'performance' = @{ interp = 'true';  backend = 0; quality = 2 }  # FQ_PERFORMANCE
-    'nvof_quality'= @{ interp = 'true';  backend = 1; quality = 0 }  # NVIDIA OF quality
+    'off'           = @{ interp = 'false'; backend = 0; quality = 1; videocodec = 'auto' }  # FRUC disabled, codec auto (usually HEVC)
+    'quality'       = @{ interp = 'true';  backend = 0; quality = 0; videocodec = 'auto' }  # FQ_QUALITY + HEVC
+    'balanced'      = @{ interp = 'true';  backend = 0; quality = 1; videocodec = 'auto' }  # FQ_BALANCED + HEVC
+    'performance'   = @{ interp = 'true';  backend = 0; quality = 2; videocodec = 'auto' }  # FQ_PERFORMANCE + HEVC
+    'nvof_quality'  = @{ interp = 'true';  backend = 1; quality = 0; videocodec = 'auto' }  # NVIDIA OF + HEVC
+    'av1_off'       = @{ interp = 'false'; backend = 0; quality = 1; videocodec = 'AV1' }   # Hardware AV1 decode, FRUC off
+    'av1_balanced'  = @{ interp = 'true';  backend = 0; quality = 1; videocodec = 'AV1' }   # AV1 + Generic Balanced FRUC
+    'av1_nvof'      = @{ interp = 'true';  backend = 1; quality = 0; videocodec = 'AV1' }   # AV1 + NVIDIA OF FRUC
 }
 
 function Stop-Moonlight {
@@ -112,12 +155,40 @@ if ($isAdmin) {
 }
 
 function Parse-PresentMonCsv {
-    param([string]$Csv)
+    param(
+        [string]$Csv,
+        # VipleStream: filter to a single target PID when PresentMon
+        # was run unfiltered (the workaround for --process_name being
+        # admin-gated). Application column reads as '<unknown>' for
+        # processes PresentMon couldn't query, but ProcessID remains
+        # correct so PID is the reliable filter key. Pass 0 to disable.
+        [int]$FilterPid = 0
+    )
 
     if (-not (Test-Path $Csv)) { return $null }
 
     $rows = Import-Csv $Csv
     if ($rows.Count -eq 0) { return $null }
+
+    if ($FilterPid -gt 0) {
+        $totalRows = $rows.Count
+        # Snapshot unique PIDs BEFORE filtering (diagnostic for the
+        # no-match case). PowerShell parses `"..." + "..."` inside a
+        # Write-Warning arg list as separate positional args, so we
+        # must compose the diagnostic string first into a single var.
+        $uniqPidList = ($rows | Select-Object -ExpandProperty ProcessID -Unique) -join ','
+        $rows = @($rows | Where-Object {
+            try { [int]$_.ProcessID -eq $FilterPid } catch { $false }
+        })
+        if ($rows.Count -eq 0) {
+            $msg = "No rows matched PID=$FilterPid in $Csv (total rows: $totalRows). " +
+                   "Either Moonlight never presented while PresentMon was recording, " +
+                   "or the PID changed. CSV has unique PIDs: $uniqPidList"
+            Write-Warning $msg
+            return $null
+        }
+        Write-Host "  Filtered by PID=$FilterPid -> $($rows.Count) / $totalRows rows"
+    }
 
     # Identify frame time column - varies between PresentMon versions
     $cols = $rows[0].PSObject.Properties.Name
@@ -254,34 +325,82 @@ try {
             continue
         }
         $p = $presetMap[$cfg]
+        # Older preset definitions may not carry a videocodec field;
+        # default to 'auto' so legacy configs behave identically.
+        $videocodec = if ($p.ContainsKey('videocodec')) { $p.videocodec } else { 'auto' }
         Write-Host "=============================================="
         Write-Host " FRUC config: $cfg" -ForegroundColor Cyan
-        Write-Host "  interp=$($p.interp) backend=$($p.backend) quality=$($p.quality)"
+        Write-Host "  interp=$($p.interp) backend=$($p.backend) quality=$($p.quality) codec=$videocodec"
         Write-Host "=============================================="
 
-        # Apply registry
+        # Apply registry. videocfg is persisted (registry key 'videocfg'
+        # under the VipleStream subkey) so we also write it here — the
+        # --video-codec CLI arg below takes precedence for the session
+        # that launches, but leaving the registry value consistent
+        # prevents a stale value from leaking into other code paths
+        # (e.g. if commandlineparser resets bitrate using the stored
+        # codec for default lookup).
         Set-ItemProperty $RegPath -Name frameInterpolation -Value $p.interp
         Set-ItemProperty $RegPath -Name frucBackend        -Value $p.backend -Type DWord
         Set-ItemProperty $RegPath -Name frucQuality        -Value $p.quality -Type DWord
+        # Map codec name -> VideoCodecConfig enum for registry value
+        $codecEnum = switch ($videocodec) {
+            'auto'  { 0 }
+            'H.264' { 1 }
+            'HEVC'  { 2 }
+            'AV1'   { 4 }
+            default { 0 }
+        }
+        Set-ItemProperty $RegPath -Name videocfg -Value $codecEnum -Type DWord
 
         Stop-Moonlight
 
-        # Launch streaming
+        # Launch streaming. We captured the Process object (-PassThru)
+        # originally to pass a PID to PresentMon, but that turned out
+        # to not be enough because without admin PresentMon can't
+        # resolve the token for a cross-integrity-level process.
+        # Instead we run PresentMon unfiltered and post-process the
+        # CSV by PID (see Parse-PresentMonCsv -FilterPid).
+        #
+        # Do NOT start Moonlight with -WindowStyle Minimized. Empirical
+        # observation: when the launcher process is Minimized, the
+        # stream child window inherits a hidden/no-focus state and
+        # the D3D11VA renderer's completeInitialization never runs —
+        # the decoder queue fills up with unconsumed packets and the
+        # stream loops forever on `Video decode unit queue overflow`
+        # / `Waiting for IDR frame`. Letting the window appear
+        # normally (in the windowed mode set by --display-mode) is
+        # the only way the renderer initializes. Side effect: the
+        # user sees the stream window pop up during the benchmark —
+        # that's fine for a test harness; just don't give the
+        # Moonlight window focus while typing elsewhere.
         $mlArgs = @('stream', $HostAddr, $App, '--fps', $Fps, '--resolution', "$($Width)x$($Height)")
         if ($KeepWindowed) { $mlArgs += '--display-mode','windowed' }
+        # --video-codec expects one of: auto / H.264 / HEVC / AV1.
+        # Pass it for every config so "auto" is explicit (no reliance
+        # on the registry value the previous iteration left behind).
+        $mlArgs += '--video-codec', $videocodec
         Write-Host "Launching: Moonlight.exe $($mlArgs -join ' ')"
-        Start-Process -FilePath $MoonlightExe -ArgumentList $mlArgs -WindowStyle Minimized | Out-Null
+        $mlProc = Start-Process -FilePath $MoonlightExe -ArgumentList $mlArgs -PassThru
 
         Write-Host "Warming up $WarmupSeconds s..."
         Start-Sleep -Seconds $WarmupSeconds
 
-        # Verify Moonlight is running
+        # Verify Moonlight is running — re-resolve by name because the
+        # stream child process may have a different PID than the
+        # initial launcher if Moonlight respawns itself for the stream.
         $ml = Get-Process -Name 'Moonlight' -ErrorAction SilentlyContinue
         if (-not $ml) {
             Write-Warning "Moonlight not running for cfg=$cfg"
             $results[$cfg] = @{ error = 'moonlight_exited_early' }
             continue
         }
+        # Prefer the process that actually owns the stream window.
+        # Moonlight doesn't fork for streaming, so typically there's
+        # only one — take the most recently started one to be safe.
+        $mlMain = $ml | Sort-Object StartTime -Descending | Select-Object -First 1
+        $mlPid = $mlMain.Id
+        Write-Host "Moonlight PID: $mlPid"
 
         $csvPath = Join-Path $OutDir "presentmon_$cfg.csv"
         Write-Host "Recording $Seconds s -> $csvPath"
@@ -292,8 +411,14 @@ try {
         $sessionName = "viple_fruc_$cfg"
         & logman stop $sessionName -ets 2>$null | Out-Null
 
+        # PresentMon unfiltered-capture workaround: when running without
+        # admin, neither --process_name nor --process_id can target a
+        # process whose token is outside the current session's query
+        # scope (Claude-spawned Moonlight hits this on this host).
+        # Capture EVERY process's Present events; we post-process the
+        # CSV and filter on the ProcessID column ourselves. The CSV
+        # gets larger but that's fine at 30s windows.
         $pmArgs = @(
-            '--process_name','Moonlight.exe',
             '--output_file', $csvPath,
             '--timed', $Seconds,
             '--terminate_after_timed',
@@ -326,7 +451,7 @@ try {
         Stop-Moonlight
 
         # Parse
-        $m = Parse-PresentMonCsv $csvPath
+        $m = Parse-PresentMonCsv -Csv $csvPath -FilterPid $mlPid
         if ($null -eq $m) {
             $results[$cfg] = @{ error = 'no_data' }
             continue
@@ -351,9 +476,10 @@ try {
 }
 finally {
     # Restore original settings
-    if ($null -ne $origInterp) { Set-ItemProperty $RegPath -Name frameInterpolation -Value $origInterp }
-    if ($null -ne $origBackend){ Set-ItemProperty $RegPath -Name frucBackend -Value $origBackend -Type DWord }
-    if ($null -ne $origQuality){ Set-ItemProperty $RegPath -Name frucQuality -Value $origQuality -Type DWord }
+    if ($null -ne $origInterp)   { Set-ItemProperty $RegPath -Name frameInterpolation -Value $origInterp }
+    if ($null -ne $origBackend)  { Set-ItemProperty $RegPath -Name frucBackend -Value $origBackend -Type DWord }
+    if ($null -ne $origQuality)  { Set-ItemProperty $RegPath -Name frucQuality -Value $origQuality -Type DWord }
+    if ($null -ne $origVideoCfg) { Set-ItemProperty $RegPath -Name videocfg    -Value $origVideoCfg -Type DWord }
     Stop-Moonlight
     # Sweep any surviving ETW sessions we created
     foreach ($c in $presetMap.Keys) {
