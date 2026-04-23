@@ -45,7 +45,15 @@ param(
     # either a 0-based display index or a substring of the device
     # name (e.g. 'DISPLAY3'). Empty = leave window on whichever
     # display Moonlight picked (usually primary).
-    [string]$TargetDisplay = ''
+    [string]$TargetDisplay = '',
+    # VipleStream: override the bitrate (kbps) for this benchmark.
+    # Default = 0 means "let Moonlight compute from resolution / fps /
+    # FRUC via getDefaultBitrate". Used to isolate whether a perf cap
+    # is bitrate-limited (e.g. NVENC VBV buffer size = bitrate/fps
+    # too tight for HEVC 4K I-frames) by intentionally running at
+    # higher bitrate than the auto default. Pass 0 or omit to keep
+    # auto-bitrate behavior.
+    [int]$BitrateKbps = 0
 )
 
 # Don't let Qt/SDL stderr warnings from Moonlight terminate the script.
@@ -517,6 +525,10 @@ try {
         # Pass it for every config so "auto" is explicit (no reliance
         # on the registry value the previous iteration left behind).
         $mlArgs += '--video-codec', $videocodec
+        # Optional bitrate override (for VBV / encoder capacity probes).
+        if ($BitrateKbps -gt 0) {
+            $mlArgs += '--bitrate', $BitrateKbps
+        }
         Write-Host "Launching: Moonlight.exe $($mlArgs -join ' ')"
         $mlProc = Start-Process -FilePath $MoonlightExe -ArgumentList $mlArgs -PassThru
 
