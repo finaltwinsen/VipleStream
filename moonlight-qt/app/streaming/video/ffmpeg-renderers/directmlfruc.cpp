@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <vector>
 
 #include <onnxruntime_cxx_api.h>
 #include <dml_provider_factory.h>
@@ -274,6 +275,51 @@ void DirectMLFRUC::destroy()
 
 // ── createD3D12Device ─────────────────────────────────────────────────────
 
+// VipleStream v1.2.58: Check env-var `VIPLE_DIRECTML_DEBUG` once per
+// process. When set to "1" we enable the D3D12 debug layer and DML
+// debug flag during DirectMLFRUC::initialize — costs ~0 unless DML
+// path is actually hit. Used to dig into 0x887a0005 on RTX A1000.
+bool DirectMLFRUC::isDmlDebugEnabled()
+{
+    static const bool enabled = []() {
+        char buf[8] = {};
+        size_t sz = 0;
+        getenv_s(&sz, buf, sizeof(buf), "VIPLE_DIRECTML_DEBUG");
+        return sz > 0 && buf[0] == '1';
+    }();
+    return enabled;
+}
+
+// Drain ID3D12InfoQueue and log every stored message. Called right
+// after any suspicious DML / D3D12 call. Returns silently if debug
+// layer never attached (InfoQueue QI will fail on release device).
+void DirectMLFRUC::logD3D12DebugMessages(const char* where)
+{
+    if (!m_Device12) return;
+    ComPtr<ID3D12InfoQueue> iq;
+    if (FAILED(m_Device12->QueryInterface(IID_PPV_ARGS(&iq)))) return;
+    const UINT64 n = iq->GetNumStoredMessages();
+    if (n == 0) return;
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC] D3D12 InfoQueue at %s: %llu messages",
+                where, (unsigned long long)n);
+    for (UINT64 i = 0; i < n; ++i) {
+        SIZE_T sz = 0;
+        iq->GetMessage(i, nullptr, &sz);
+        if (sz == 0) continue;
+        std::vector<char> buf(sz);
+        auto* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+        if (SUCCEEDED(iq->GetMessage(i, msg, &sz))) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC]   [%u/%u] sev=%d cat=%d id=%d : %s",
+                        (unsigned)(i + 1), (unsigned)n,
+                        (int)msg->Severity, (int)msg->Category, (int)msg->ID,
+                        msg->pDescription ? msg->pDescription : "(no desc)");
+        }
+    }
+    iq->ClearStoredMessages();
+}
+
 bool DirectMLFRUC::createD3D12Device()
 {
     ComPtr<IDXGIDevice> dxgiDev;
@@ -281,11 +327,42 @@ bool DirectMLFRUC::createD3D12Device()
     ComPtr<IDXGIAdapter> adapter;
     if (FAILED(dxgiDev->GetAdapter(&adapter))) return false;
 
+    // VipleStream v1.2.58: opt-in D3D12 debug layer for digging into
+    // 0x887a0005 (fake DEVICE_REMOVED) on DirectMLFRUC init. Debug
+    // layer has measurable cost so only turn on via env var.
+    if (isDmlDebugEnabled()) {
+        ComPtr<ID3D12Debug> d12Debug;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&d12Debug)))) {
+            d12Debug->EnableDebugLayer();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: D3D12 debug layer ENABLED via VIPLE_DIRECTML_DEBUG=1");
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: D3D12 debug interface unavailable "
+                        "(install Windows 10 SDK Graphics Tools for /debug to work)");
+        }
+    }
+
     HRESULT hr = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_Device12));
     if (FAILED(hr)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] DirectML: D3D12CreateDevice failed 0x%08lx", hr);
         return false;
+    }
+
+    // VipleStream v1.2.58: retain ALL severities in InfoQueue so a
+    // post-failure drain surfaces the driver-side validation reason
+    // behind 0x887a0005. No-op if debug layer isn't on — QI fails and
+    // we silently skip.
+    if (isDmlDebugEnabled()) {
+        ComPtr<ID3D12InfoQueue> iq;
+        if (SUCCEEDED(m_Device12->QueryInterface(IID_PPV_ARGS(&iq)))) {
+            // Break on corruption/error for easier debugging when
+            // run under a debugger. In release, just collect.
+            iq->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE);
+            iq->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE);
+            iq->SetMuteDebugOutput(FALSE);
+        }
     }
 
     D3D12_COMMAND_QUEUE_DESC qd = {};
@@ -314,12 +391,40 @@ bool DirectMLFRUC::createD3D12Device()
 
 bool DirectMLFRUC::createDMLDevice()
 {
-    HRESULT hr = DMLCreateDevice(m_Device12.Get(), DML_CREATE_DEVICE_FLAG_NONE,
-                                 IID_PPV_ARGS(&m_DMLDevice));
+    // VipleStream v1.2.58: try DML_CREATE_DEVICE_FLAG_DEBUG when the
+    // user asks via VIPLE_DIRECTML_DEBUG=1, but fall back to _NONE on
+    // 0x887a002d (DXGI_ERROR_SDK_COMPONENT_MISSING) — that error means
+    // Graphics Tools / DirectML debug layer isn't installed on the
+    // system. Without this fallback, setting the debug env var would
+    // kill DML completely on default Windows installs rather than
+    // just silently skipping the extra validation.
+    HRESULT hr = S_OK;
+    DML_CREATE_DEVICE_FLAGS flags = DML_CREATE_DEVICE_FLAG_NONE;
+    if (isDmlDebugEnabled()) {
+        flags = DML_CREATE_DEVICE_FLAG_DEBUG;
+        hr = DMLCreateDevice(m_Device12.Get(), flags, IID_PPV_ARGS(&m_DMLDevice));
+        if (hr == 0x887a002d /* DXGI_ERROR_SDK_COMPONENT_MISSING */ || FAILED(hr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: DMLCreateDevice(DEBUG) returned 0x%08lx, "
+                        "falling back to non-debug (install Graphics Tools "
+                        "optional feature for /debug to work)", hr);
+            flags = DML_CREATE_DEVICE_FLAG_NONE;
+            m_DMLDevice.Reset();
+            hr = DMLCreateDevice(m_Device12.Get(), flags, IID_PPV_ARGS(&m_DMLDevice));
+        }
+    } else {
+        hr = DMLCreateDevice(m_Device12.Get(), flags, IID_PPV_ARGS(&m_DMLDevice));
+    }
     if (FAILED(hr)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] DirectML: DMLCreateDevice failed 0x%08lx", hr);
+                    "[VIPLE-FRUC] DirectML: DMLCreateDevice failed 0x%08lx "
+                    "(flags=0x%x)", hr, (unsigned)flags);
+        logD3D12DebugMessages("DMLCreateDevice-failure");
         return false;
+    }
+    if (flags & DML_CREATE_DEVICE_FLAG_DEBUG) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: DMLDevice created with DEBUG flag");
     }
     return SUCCEEDED(m_DMLDevice->CreateCommandRecorder(IID_PPV_ARGS(&m_DMLRecorder)));
 }
@@ -818,8 +923,10 @@ bool DirectMLFRUC::compileDMLGraph()
             IID_PPV_ARGS(&m_DMLCompiledOp)))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] DirectML: CompileGraph failed 0x%08lx", hr);
+        logD3D12DebugMessages("CompileGraph-failure");
         return false;
     }
+    logD3D12DebugMessages("post-CompileGraph");
 
     DML_BINDING_PROPERTIES execProps = m_DMLCompiledOp->GetBindingProperties();
 
@@ -828,30 +935,59 @@ bool DirectMLFRUC::compileDMLGraph()
     if (FAILED(hr = m_DMLDevice->CreateOperatorInitializer(1, opsToInit, IID_PPV_ARGS(&initializer)))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] DirectML: CreateOperatorInitializer failed 0x%08lx", hr);
+        logD3D12DebugMessages("CreateOperatorInitializer-failure");
         return false;
     }
     DML_BINDING_PROPERTIES initProps = initializer->GetBindingProperties();
 
-    uint32_t descCount = std::max(initProps.RequiredDescriptorCount,
-                                  execProps.RequiredDescriptorCount);
+    // VipleStream v1.2.58: separate descriptor ranges for init/exec
+    // binding tables. Previous "one table + Reset() between phases"
+    // approach was failing with 0x887a0005 on RTX A1000 even though
+    // GetDeviceRemovedReason == S_OK (i.e. DML-internal validation
+    // error, not actual device loss). Two distinct tables on distinct
+    // slices of the same heap avoids any binding-table-reuse path
+    // inside the DML runtime that the A1000 driver's validator trips on.
+    //
+    // Heap layout:
+    //   [0 .. initDescCount)              → init binding table
+    //   [initDescCount .. initDescCount + execDescCount) → exec binding table
+    //   + a small padding region          → safety margin for driver quirks
+    const uint32_t initDescCount = initProps.RequiredDescriptorCount;
+    const uint32_t execDescCount = execProps.RequiredDescriptorCount;
+    const uint32_t descPad       = 8u;
+    const uint32_t totalDescs    = initDescCount + execDescCount + descPad;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-FRUC] DirectML: inline graph props — descCount=%u, "
-                "initTemp=%llu, execTemp=%llu, persist=%llu",
-                descCount,
+                "[VIPLE-FRUC] DirectML: inline graph props — initDesc=%u, "
+                "execDesc=%u, pad=%u, totalHeap=%u, initTemp=%llu, "
+                "execTemp=%llu, persist=%llu",
+                initDescCount, execDescCount, descPad, totalDescs,
                 (unsigned long long)initProps.TemporaryResourceSize,
                 (unsigned long long)execProps.TemporaryResourceSize,
                 (unsigned long long)execProps.PersistentResourceSize);
 
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = descCount;
+    hd.NumDescriptors = totalDescs;
     hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(hr = m_Device12->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_DMLDescHeap)))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] DirectML: CreateDescriptorHeap(DML %u) failed 0x%08lx",
-                    descCount, hr);
+                    totalDescs, hr);
+        logD3D12DebugMessages("CreateDescriptorHeap-failure");
         return false;
     }
+    const UINT descIncr = m_Device12->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    auto cpuAt = [&](uint32_t i) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        auto h = m_DMLDescHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += (SIZE_T)i * descIncr;
+        return h;
+    };
+    auto gpuAt = [&](uint32_t i) -> D3D12_GPU_DESCRIPTOR_HANDLE {
+        auto h = m_DMLDescHeap->GetGPUDescriptorHandleForHeapStart();
+        h.ptr += (UINT64)i * descIncr;
+        return h;
+    };
 
     auto allocBuf = [&](uint64_t bytes, ComPtr<ID3D12Resource>& out, const char* label) -> bool {
         if (bytes == 0) { out.Reset(); return true; }
@@ -880,93 +1016,116 @@ bool DirectMLFRUC::compileDMLGraph()
     if (!allocBuf(tempBytes, m_TempResource, "DML Temp"))                              return false;
     if (!allocBuf(execProps.PersistentResourceSize, m_PersistentResource, "DML Pers")) return false;
 
-    // ── Binding table — single instance, Reset() between init and
-    //    exec phases.  Matches the Microsoft HelloDirectML reference
-    //    pattern.  Previous revision created a second binding table
-    //    on the same descriptor heap range for the exec phase; on
-    //    some drivers that returned DXGI_ERROR_DEVICE_REMOVED (even
-    //    though GetDeviceRemovedReason still returned S_OK, i.e. the
-    //    device was fine — it was a DML-level validation error).
-    //    Reusing one table with Reset() sidesteps the collision.
-    DML_BINDING_TABLE_DESC btd = {};
-    btd.Dispatchable        = initializer.Get();
-    btd.CPUDescriptorHandle = m_DMLDescHeap->GetCPUDescriptorHandleForHeapStart();
-    btd.GPUDescriptorHandle = m_DMLDescHeap->GetGPUDescriptorHandleForHeapStart();
-    btd.SizeInDescriptors   = descCount;
-    if (FAILED(hr = m_DMLDevice->CreateBindingTable(&btd, IID_PPV_ARGS(&m_DMLBindingTable)))) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] DirectML: CreateBindingTable(init) failed 0x%08lx", hr);
-        return false;
-    }
-    if (m_TempResource) {
-        DML_BUFFER_BINDING tb = { m_TempResource.Get(), 0, m_TempResource->GetDesc().Width };
-        DML_BINDING_DESC   tbd = { DML_BINDING_TYPE_BUFFER, &tb };
-        m_DMLBindingTable->BindTemporaryResource(&tbd);
-    }
-    if (m_PersistentResource) {
-        DML_BUFFER_BINDING pb = { m_PersistentResource.Get(), 0,
-                                  m_PersistentResource->GetDesc().Width };
-        DML_BINDING_DESC   pbd = { DML_BINDING_TYPE_BUFFER, &pb };
-        m_DMLBindingTable->BindOutputs(1, &pbd);
+    // ── Init binding table — range [0, initDescCount) ──────────────────────
+    ComPtr<IDMLBindingTable> initBindingTable;
+    {
+        DML_BINDING_TABLE_DESC btd = {};
+        btd.Dispatchable        = initializer.Get();
+        btd.CPUDescriptorHandle = cpuAt(0);
+        btd.GPUDescriptorHandle = gpuAt(0);
+        btd.SizeInDescriptors   = initDescCount;
+        if (FAILED(hr = m_DMLDevice->CreateBindingTable(&btd, IID_PPV_ARGS(&initBindingTable)))) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: CreateBindingTable(init) failed 0x%08lx", hr);
+            logD3D12DebugMessages("CreateBindingTable-init-failure");
+            return false;
+        }
+        // Init's temp binding (if the initializer needs scratch).
+        if (initProps.TemporaryResourceSize > 0 && m_TempResource) {
+            DML_BUFFER_BINDING tb = { m_TempResource.Get(), 0, initProps.TemporaryResourceSize };
+            DML_BINDING_DESC   tbd = { DML_BINDING_TYPE_BUFFER, &tb };
+            initBindingTable->BindTemporaryResource(&tbd);
+        }
+        // Init's outputs are the compiled op's persistent state.
+        // RequiredDescriptorCount covers this slot — always bind it
+        // if the compiled op has any persistent state.
+        if (m_PersistentResource) {
+            DML_BUFFER_BINDING pb = { m_PersistentResource.Get(), 0,
+                                      m_PersistentResource->GetDesc().Width };
+            DML_BINDING_DESC   pbd = { DML_BINDING_TYPE_BUFFER, &pb };
+            initBindingTable->BindOutputs(1, &pbd);
+        } else {
+            // No persistent state — bind a "none" output anyway so
+            // the init dispatcher doesn't read an unbound slot.
+            DML_BINDING_DESC none = { DML_BINDING_TYPE_NONE, nullptr };
+            initBindingTable->BindOutputs(1, &none);
+        }
     }
 
+    // Record + submit the init dispatch on cmd list 12.
     m_CmdAlloc12->Reset();
     m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
     ID3D12DescriptorHeap* initHeaps[] = { m_DMLDescHeap.Get() };
     m_CmdList12->SetDescriptorHeaps(1, initHeaps);
-    m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), initializer.Get(), m_DMLBindingTable.Get());
+    m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), initializer.Get(), initBindingTable.Get());
     m_CmdList12->Close();
     { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
+    logD3D12DebugMessages("post-init-dispatch-submit");
+
+    // VipleStream v1.2.58: hard CPU-side fence wait BEFORE any further
+    // allocator/table work. Previous code only waited if
+    // GetCompletedValue() < FenceValue at query time; but on fast
+    // drivers (or when the init dispatch crashed silently) the fence
+    // could signal early with the device in a bad state. An explicit
+    // WaitForSingleObject ensures any queued init work is fully
+    // retired on GPU before we touch the command allocator for the
+    // first frame's work.
     m_FenceValue++;
     m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
-    if (m_Fence12->GetCompletedValue() < m_FenceValue) {
+    {
         HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!ev) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: CreateEventW failed during init wait");
+            return false;
+        }
         m_Fence12->SetEventOnCompletion(m_FenceValue, ev);
-        // Bounded wait — if the init dispatch crashes the device the
-        // fence still signals (device-removed unblocks all waits), but
-        // we want to fail fast rather than hang if anything else is off.
         DWORD waitResult = WaitForSingleObject(ev, 5000);
         CloseHandle(ev);
         if (waitResult != WAIT_OBJECT_0) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-FRUC] DirectML: init dispatch fence wait timed out (%lu)",
                         waitResult);
+            logD3D12DebugMessages("init-fence-timeout");
             return false;
         }
     }
 
-    // Did the init dispatch crash the device?  A successful fence wait
-    // after device-removed looks normal from CPU's perspective but all
-    // subsequent DML/D3D12 calls will return DEVICE_REMOVED.
+    // Did the init dispatch crash the device?
     HRESULT devReason = m_Device12->GetDeviceRemovedReason();
     if (devReason != S_OK) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] DirectML: device removed after init dispatch, reason 0x%08lx "
-                    "(likely a driver-side DML graph validation failure — try updating GPU driver)",
+                    "(driver-side DML graph validation failure — try updating GPU driver)",
                     devReason);
+        logD3D12DebugMessages("device-removed-after-init");
         return false;
     }
 
-    // ── Exec phase: Reset() swaps the dispatchable without reopening
-    //    a second binding table on top of the same descriptor heap.
-    btd.Dispatchable = m_DMLCompiledOp.Get();
-    if (FAILED(hr = m_DMLBindingTable->Reset(&btd))) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] DirectML: BindingTable->Reset(exec) failed 0x%08lx "
-                    "(%s)",
-                    hr,
-                    (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG)
-                        ? "actual device removed"
-                        : "DML-internal error; device still healthy");
-        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG) {
+    // ── Exec binding table — range [initDescCount, initDescCount+execDescCount)
+    //     SEPARATE IDMLBindingTable instance on a SEPARATE descriptor
+    //     slice. This is the key divergence from prior versions that
+    //     reused one table with Reset() — some driver combos (RTX
+    //     A1000 with current driver) returned 0x887a0005 on Reset()
+    //     even with device in S_OK, meaning the DML runtime's own
+    //     validator rejected the swap. Fresh table on distinct
+    //     descriptor range avoids that path entirely.
+    {
+        DML_BINDING_TABLE_DESC btd = {};
+        btd.Dispatchable        = m_DMLCompiledOp.Get();
+        btd.CPUDescriptorHandle = cpuAt(initDescCount);
+        btd.GPUDescriptorHandle = gpuAt(initDescCount);
+        btd.SizeInDescriptors   = execDescCount;
+        if (FAILED(hr = m_DMLDevice->CreateBindingTable(&btd, IID_PPV_ARGS(&m_DMLBindingTable)))) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] DirectML: GetDeviceRemovedReason = 0x%08lx",
-                        m_Device12->GetDeviceRemovedReason());
+                        "[VIPLE-FRUC] DirectML: CreateBindingTable(exec) failed 0x%08lx",
+                        hr);
+            logD3D12DebugMessages("CreateBindingTable-exec-failure");
+            return false;
         }
-        return false;
     }
-    if (m_TempResource) {
-        DML_BUFFER_BINDING tb = { m_TempResource.Get(), 0, m_TempResource->GetDesc().Width };
+    if (m_TempResource && execProps.TemporaryResourceSize > 0) {
+        DML_BUFFER_BINDING tb = { m_TempResource.Get(), 0, execProps.TemporaryResourceSize };
         DML_BINDING_DESC   tbd = { DML_BINDING_TYPE_BUFFER, &tb };
         m_DMLBindingTable->BindTemporaryResource(&tbd);
     }
@@ -979,6 +1138,7 @@ bool DirectMLFRUC::compileDMLGraph()
     DML_BUFFER_BINDING out = { m_OutputTensor.Get(), 0, m_TensorBytes };
     DML_BINDING_DESC   outDesc = { DML_BINDING_TYPE_BUFFER, &out };
     m_DMLBindingTable->BindOutputs(1, &outDesc);
+    logD3D12DebugMessages("post-exec-table-bound");
     return true;
 }
 

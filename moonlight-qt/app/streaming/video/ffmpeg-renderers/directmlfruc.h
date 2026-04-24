@@ -33,6 +33,7 @@
 
 #include <d3d11_4.h>
 #include <d3d12.h>
+#include <d3d12sdklayers.h>   // ID3D12Debug, ID3D12InfoQueue
 #include <dxgi1_4.h>
 #include <DirectML.h>
 #include <wrl/client.h>
@@ -76,6 +77,12 @@ public:
 
 private:
     template<class T> using CP = Microsoft::WRL::ComPtr<T>;
+
+    // VipleStream v1.2.58: diagnostic helpers for DirectML init
+    // failures on RTX A1000 (0x887a0005 with reason=0x0). Enabled
+    // only when VIPLE_DIRECTML_DEBUG=1 is set in the environment.
+    static bool isDmlDebugEnabled();
+    void        logD3D12DebugMessages(const char* where);
 
     // Init helpers — called in order from initialize().
     bool createD3D12Device();
