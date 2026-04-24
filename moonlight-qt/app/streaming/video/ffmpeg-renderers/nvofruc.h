@@ -76,6 +76,9 @@ private:
     int m_LastRenderIndex = 0;
     int m_CurrentOutputIndex = 0;
     int m_FrameCount = 0;
+    // VipleStream v1.2.56: running count of NvOFFRUC bRepeat=true
+    // responses — diagnostic for "bRepeat on every frame" behaviour.
+    int m_RepeatCount = 0;
     double m_PrevTimestamp = 0.0;
     bool m_HasPrevTimestamp = false;
 

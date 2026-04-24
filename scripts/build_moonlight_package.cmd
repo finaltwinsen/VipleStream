@@ -76,8 +76,7 @@ for %%F in (dxcompiler.dll dxil.dll) do (
 )
 
 :: VipleStream: ONNX Runtime DirectML DLL. Required at runtime ONLY
-:: when the user picks the DirectML FRUC backend AND drops a model
-:: file at %APPDATA%\VipleStream\fruc.onnx. Ship it unconditionally
+:: when the user picks the DirectML FRUC backend. Ship it unconditionally
 :: so users can opt in without a separate download.
 set "ORT_DLL=%SRC%\libs\windows\onnxruntime\runtimes\win-x64\native\onnxruntime.dll"
 if exist "%ORT_DLL%" (
@@ -85,6 +84,48 @@ if exist "%ORT_DLL%" (
     echo   onnxruntime.dll
 ) else (
     echo   [WARN] onnxruntime.dll missing - DirectML ONNX path disabled
+)
+
+:: VipleStream: DirectML ONNX model
+:: -------------------------------------------------------------------
+:: Intentionally NOT shipped right now. tools/fruc.onnx (22 MB) has
+:: 11 input channels which DirectMLFRUC::tryLoadOnnxModel rejects
+:: (supported layouts: 1 input with 6/7/8/9 channels, or 2/3 separate
+:: inputs — see directmlfruc.cpp:1321). Shipping an incompatible
+:: model wastes 22 MB of zip + loads/parses/rejects at runtime then
+:: silently falls back to the inline DML graph, so removing it is
+:: strictly better than shipping it. Re-enable this block only when
+:: tools/fruc.onnx is replaced with a model matching the supported
+:: layouts above.
+::set "FRUC_ONNX=%ROOT%\tools\fruc.onnx"
+::if exist "%FRUC_ONNX%" copy /y "%FRUC_ONNX%" "%TEMP_DIR%\" >nul
+
+:: VipleStream: NVIDIA Optical Flow FRUC helper DLL + its CUDA runtime
+:: dependency. NvOFRUCWrapper LoadLibraryW's NvOFFRUC.dll from the exe
+:: directory at runtime. NvOFFRUC.dll has a hard import on
+:: cudart64_110.dll (CUDA 11 runtime), which normal NVIDIA driver
+:: installs do NOT provide — so without shipping cudart alongside,
+:: LoadLibrary returns ERROR_MOD_NOT_FOUND (126) even though the file
+:: itself is present, and the NVIDIA Optical Flow backend silently
+:: falls back to Generic. cudart64_110.dll is NVIDIA redistributable
+:: per the CUDA Toolkit EULA, sourced from
+:: developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/
+:: (cuda_cudart-windows-x86_64-11.8.89-archive.zip). Driver-level
+:: NVOFA requirement still applies (Turing+ GPU with a recent
+:: NVIDIA driver); nvcuda.dll + nvofapi64.dll ship with the driver.
+set "NVOFFRUC_DLL=%SRC%\libs\windows\nvofa\lib\x64\NvOFFRUC.dll"
+set "CUDART_DLL=%SRC%\libs\windows\nvofa\lib\x64\cudart64_110.dll"
+if exist "%NVOFFRUC_DLL%" (
+    copy /y "%NVOFFRUC_DLL%" "%TEMP_DIR%\" >nul
+    echo   NvOFFRUC.dll
+) else (
+    echo   [WARN] NvOFFRUC.dll missing at %NVOFFRUC_DLL% - NVIDIA Optical Flow FRUC disabled
+)
+if exist "%CUDART_DLL%" (
+    copy /y "%CUDART_DLL%" "%TEMP_DIR%\" >nul
+    echo   cudart64_110.dll
+) else (
+    echo   [WARN] cudart64_110.dll missing at %CUDART_DLL% - NvOFFRUC.dll will fail to load
 )
 
 :: ---- 4b. Debug symbols (PDBs) ----

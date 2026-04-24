@@ -698,9 +698,19 @@ bool Session::initialize(QQuickWindow* qtWindow)
     m_StreamConfig.fps = m_Preferences->fps;
     m_OriginalFps = m_Preferences->fps;
 
-    // VipleStream: When FRUC is enabled and FPS <= 180, request half the frame rate
-    // from the server. FRUC will double it locally via optical flow interpolation.
-    if (m_Preferences->enableFrameInterpolation && m_Preferences->fps <= 180) {
+    // VipleStream v1.2.56: When FRUC is enabled, request half the frame
+    // rate from the server and interpolate the other half client-side.
+    //
+    // Previous code had `&& fps <= 180` which silently disabled FRUC
+    // 2x halving above 180 fps — so 1080p244 or 4K120→240 setups were
+    // actually asking the server for the full user rate, overloading
+    // both server encode and network. That cap served no purpose once
+    // the client UI already allowed Custom FPS selection; removed so
+    // FRUC 2x kicks in at ALL rates where the user enabled it. A
+    // future "don't request < 30 fps from server" floor (should
+    // anyone pick 30 fps + FRUC) is left for the day someone actually
+    // tries it.
+    if (m_Preferences->enableFrameInterpolation) {
         m_StreamConfig.fps = m_Preferences->fps / 2;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] Requesting %d FPS from server (user setting: %d, FRUC 2x)",

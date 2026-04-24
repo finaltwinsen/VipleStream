@@ -126,6 +126,7 @@ $presetMap = @{
     'av1_off'       = @{ interp = 'false'; backend = 0; quality = 1; videocodec = 'AV1' }   # Hardware AV1 decode, FRUC off
     'av1_balanced'  = @{ interp = 'true';  backend = 0; quality = 1; videocodec = 'AV1' }   # AV1 + Generic Balanced FRUC
     'av1_nvof'      = @{ interp = 'true';  backend = 1; quality = 0; videocodec = 'AV1' }   # AV1 + NVIDIA OF FRUC
+    'av1_directml'  = @{ interp = 'true';  backend = 2; quality = 0; videocodec = 'AV1' }   # AV1 + DirectML FRUC
 }
 
 function Stop-Moonlight {

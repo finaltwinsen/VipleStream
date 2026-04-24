@@ -284,12 +284,23 @@ bool NvOFRUCWrapper::submitFrame(ID3D11DeviceContext* deviceContext, double time
         outParams.stFrameDataOutput.nTimeStamp = timestamp;
     }
 
+    // VipleStream v1.2.56: measure fnProcess wall-clock time + running
+    // repeat count. Diagnostic: user-reported "bRepeat=1 on every frame
+    // after first" + real fps collapsing to 14 on RTX A1000 @ 4K needed
+    // to rule out fnProcess itself blocking the pipeline. Log every 60
+    // frames so we get one line per second of real input at 60 fps.
+    LARGE_INTEGER qpfFreq, qpf0, qpf1;
+    QueryPerformanceFrequency(&qpfFreq);
+    QueryPerformanceCounter(&qpf0);
     auto fnProcess = (PtrToFuncNvOFFRUCProcess)m_fnProcess;
     NvOFFRUC_STATUS status = fnProcess((NvOFFRUCHandle)m_Handle, &inParams, &outParams);
+    QueryPerformanceCounter(&qpf1);
+    uint64_t processUs = (uint64_t)((qpf1.QuadPart - qpf0.QuadPart) * 1000000 / qpfFreq.QuadPart);
 
     m_FrameCount++;
     m_PrevTimestamp = timestamp;
     m_HasPrevTimestamp = true;
+    if (bRepeat) m_RepeatCount++;
 
     if (status != NvOFFRUC_SUCCESS) {
         if (m_FrameCount <= 3) {
@@ -303,13 +314,31 @@ bool NvOFRUCWrapper::submitFrame(ID3D11DeviceContext* deviceContext, double time
         return false;
     }
 
-    if (m_FrameCount <= 5 || (m_FrameCount % 300 == 0)) {
+    if (m_FrameCount <= 5 || (m_FrameCount % 60 == 0)) {
+        // running repeat ratio over last window
+        int repeatRatio = (m_FrameCount > 0)
+                        ? (int)(100 * m_RepeatCount / m_FrameCount)
+                        : 0;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] frame=%d status=OK repeat=%d outIdx=%d",
-                    m_FrameCount, (int)bRepeat, outputIdx);
+                    "[VIPLE-FRUC-NvOF] frame=%d repeat=%d repeatRatio=%d%% processUs=%llu ts=%.3f outIdx=%d",
+                    m_FrameCount, (int)bRepeat, repeatRatio, (unsigned long long)processUs,
+                    timestamp, outputIdx);
     }
 
-    if (bRepeat) return false;
+    // VipleStream: environment-variable knob to bypass bRepeat for
+    // diagnosis. When VIPLE_NVOF_FORCE_USE=1 we use the interp output
+    // even when NvOFFRUC reports repetition — lets us tell whether the
+    // output texture is a genuine (but NvOFFRUC-rejected) interp vs a
+    // stale duplicate of the previous output.
+    if (bRepeat) {
+        static const bool forceUse = []() {
+            char buf[8] = {};
+            size_t sz = 0;
+            getenv_s(&sz, buf, sizeof(buf), "VIPLE_NVOF_FORCE_USE");
+            return sz > 0 && buf[0] == '1';
+        }();
+        if (!forceUse) return false;
+    }
     m_CurrentOutputIndex = outputIdx;
     return true;
 }

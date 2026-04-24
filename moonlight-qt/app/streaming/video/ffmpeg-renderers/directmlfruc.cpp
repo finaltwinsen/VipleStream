@@ -131,43 +131,32 @@ bool DirectMLFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t hei
         m_CmdList12->Close();
 
         if (!compileDMLGraph()) {
-            // Tier 3 fallback: DML graph refused to compile / init on
-            // this hardware, but the D3D12 CS pipeline is ready and the
-            // blend PSO exists. Fall through to native blend — this keeps
-            // DirectMLFRUC alive instead of surrendering the whole
-            // backend to GenericFRUC.
-            if (m_BlendPSO12) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] DirectML: compileDMLGraph failed — "
-                            "using Tier 3 D3D12 native blend fallback "
-                            "(0.5*prev + 0.5*curr via compute shader, "
-                            "no DML runtime involvement)");
-                // Drop any partially-created DML graph resources so
-                // runDMLDispatch() recognises the blend-only state.
-                m_DMLBindingTable.Reset();
-                m_DMLCompiledOp.Reset();
-                m_DMLDescHeap.Reset();
-                m_TempResource.Reset();
-                m_PersistentResource.Reset();
-                // Also drain the queue once more — compileDMLGraph may
-                // have left the init dispatch in flight before failing.
-                m_FenceValue++;
-                m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
-                if (m_Fence12->GetCompletedValue() < m_FenceValue) {
-                    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-                    if (ev) {
-                        m_Fence12->SetEventOnCompletion(m_FenceValue, ev);
-                        WaitForSingleObject(ev, 500);
-                        CloseHandle(ev);
-                    }
-                }
-                m_BlendAvailable = true;
-            } else {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] DirectML: compileDMLGraph failed "
-                            "AND blend PSO unavailable — bailing out");
-                return false;
-            }
+            // VipleStream: no Tier-3 fallback.
+            //
+            // Previously: if compileDMLGraph() failed we fell back to a
+            // "Tier 3 D3D12 native blend" path that just produced
+            // 0.5*prev + 0.5*curr via a compute shader. That path had
+            // two user-visible problems:
+            //   1. Visually it's a crossfade, not motion-compensated
+            //      interpolation → shows as ghosting/double-image,
+            //      which users perceive as "no FRUC effect".
+            //   2. Frame-time drop after ~5–20s — likely CPU-side fence
+            //      not progressing, command-allocator resets outpacing
+            //      GPU completion, positive-feedback backpressure that
+            //      lets skip_ratio climb from 5 % → 70 % within 16 s.
+            //
+            // Rather than ship a surprise second-best path under the
+            // "DirectML" label, we now fail the DirectMLFRUC init
+            // cleanly. The caller (d3d11va.cpp) then naturally falls
+            // through to GenericFRUC which is working and motion-
+            // compensated. Re-enable the Tier-3 path (still in this
+            // file: recordBlendCS, m_BlendPSO12, etc.) behind an
+            // explicit debug flag if it ever becomes useful again.
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: compileDMLGraph failed — "
+                        "DirectML unavailable on this hardware/model; "
+                        "caller will fall back to Generic compute shader.");
+            return false;
         }
     }
 

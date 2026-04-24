@@ -854,9 +854,16 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
     }
 
     // VipleStream: Lazy-init FRUC on first frame (avoids CUDA context pollution from probing).
+    // v1.2.56: removed `frameRate <= 180` cap — same rationale as the
+    // matching cap removal in Session::initialize. m_DecoderParams.frameRate
+    // here is the POST-FRUC-halving value (i.e. what server actually sends),
+    // so for user-fps=244 it's 122, which used to slip through; for
+    // user-fps=360 it's 180 (still <=); only user-fps>360 would have
+    // tripped. Removing the gate future-proofs and makes the intent
+    // explicit: if the user enabled FRUC, initialize FRUC regardless of
+    // rate.
     if (!m_FRUC && !m_GenericFRUC && !m_FRUCInitFailed
-        && StreamingPreferences::get(nullptr)->enableFrameInterpolation
-        && m_DecoderParams.frameRate <= 180) {
+        && StreamingPreferences::get(nullptr)->enableFrameInterpolation) {
         // VipleStream: gate FRUC on *stream* resolution, not SwapChain
         // size. Moonlight's windowed mode sizes the Qt window via a
         // smart-fit heuristic that can produce a <1920x1080 client
@@ -987,11 +994,22 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         setViewport(m_FrucTextureWidth, m_FrucTextureHeight);
         renderVideo(frame);
 
-        double frameTimestampMs = static_cast<double>(SDL_GetTicks());
-        bool hasInterp = m_FRUC->submitFrame(m_RenderDeviceContext.Get(), frameTimestampMs);
+        // VipleStream v1.2.56: pass timestamp in SECONDS to NvOFRUCWrapper.
+        // NvOFFRUC SDK samples use seconds as the `nTimeStamp` unit; our
+        // previous ms value (SDL_GetTicks) gave NvOF inputs like 12345.0
+        // and 12362.0 — delta interpreted as 17 seconds, which likely
+        // triggered NvOFFRUC's "too much time between frames, repeat
+        // instead of interpolate" safeguard and explained the observed
+        // bRepeat=1 on every non-initial frame at 4K on RTX A1000.
+        double frameTimestampSec = static_cast<double>(SDL_GetTicks()) / 1000.0;
+        bool hasInterp = m_FRUC->submitFrame(m_RenderDeviceContext.Get(), frameTimestampSec);
         m_FRUCLastFrameInterpolated = hasInterp;
 
         // Present interpolated frame first (if available)
+        // VipleStream v1.2.56: removed WaitForSingleObjectEx(latency) stall
+        // between interp/real Presents — see Generic path below for
+        // rationale. Same regression: the wait was eating a full refresh
+        // interval per real frame, halving achievable real fps at 4K120.
         if (hasInterp) {
             m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
             setViewport(m_DisplayWidth, m_DisplayHeight);
@@ -1019,13 +1037,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
                 SDL_PushEvent(&event);
                 return;
             }
-
-            // Wait for the interpolated frame to be consumed by the display
-            // before queuing the real frame. Without this wait, FLIP_DISCARD
-            // discards the interp frame and only shows the real frame.
-            if (m_FrameLatencyWaitableObject) {
-                WaitForSingleObjectEx(m_FrameLatencyWaitableObject, 100, TRUE);
-            }
+            // NO WaitForSingleObjectEx stall here (see Generic path rationale).
         }
 
         // Present the real frame - blit from FRUC render texture (no re-render needed)
@@ -1085,19 +1097,43 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         }
 
         // Present interpolated frame first (if available)
+        //
+        // VipleStream 4K120 path analysis (v1.2.56):
+        //   Previous code did: Present(1,0) → WaitForSingleObjectEx(latency)
+        //   → Present(1,0). The waitable wait between the two Presents was
+        //   added to guard against FLIP_DISCARD dropping the interp. But
+        //   with a waitable swap chain + SetMaximumFrameLatency(3) the
+        //   second Present(1,0) already vsync-paces itself; the extra
+        //   wait only adds a full refresh-interval of CPU-side stall
+        //   per real frame. At 244 Hz that was ~4 ms × 60 = 240 ms/s
+        //   of pure latency-wait time, pushing FRUC into decoder
+        //   backpressure and halving real fps to ~30 at 4K120.
+        //
+        //   New behaviour: just two vsynced Presents back-to-back.
+        //   DXGI waitable-swap-chain semantics already ensure the
+        //   in-flight frame count respects SetMaximumFrameLatency(3);
+        //   there is no need to block on the waitable between the
+        //   two Presents of the SAME input frame. If FLIP_DISCARD
+        //   ever does eat the interp on some hardware we can add a
+        //   minimal spin-wait on the swap chain's frame-latency
+        //   counter instead of the blocking wait.
+        LARGE_INTEGER interpBlit0, interpBlit1, interpPres1, realBlit0, realBlit1, realPres1;
         if (hasInterp) {
             m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
             setViewport(m_DisplayWidth, m_DisplayHeight);
+            QueryPerformanceCounter(&interpBlit0);
             blitFRUCTexture(m_GenericFRUC->getOutputSRV());
             for (int i = 0; i < Overlay::OverlayMax; i++) {
                 renderOverlay((Overlay::OverlayType)i);
             }
-            // FRUC: Present interpolated frame with V-sync
+            QueryPerformanceCounter(&interpBlit1);
+            // FRUC: Present interpolated frame with V-sync (1 vblank of pacing)
             {
                 LARGE_INTEGER pBegin, pEnd;
                 QueryPerformanceCounter(&pBegin);
                 hr = m_SwapChain->Present(1, 0);
                 QueryPerformanceCounter(&pEnd);
+                interpPres1 = pEnd;
                 recordPresent(m_PresentInterp, pBegin, pEnd);
                 m_PresentInterpTotal++;
             }
@@ -1110,30 +1146,43 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
                 SDL_PushEvent(&event);
                 return;
             }
-
-            // Wait for the interpolated frame to be consumed by the display
-            // before queuing the real frame. Without this wait, FLIP_DISCARD
-            // discards the interp frame and only shows the real frame.
-            if (m_FrameLatencyWaitableObject) {
-                WaitForSingleObjectEx(m_FrameLatencyWaitableObject, 100, TRUE);
-            }
+            // NO WaitForSingleObjectEx here — vsync on the next Present
+            // paces correctly and the waitable wait was double-counting.
         }
 
         // Present the real frame - blit from GenericFRUC's render texture
         m_RenderDeviceContext->OMSetRenderTargets(1, m_RenderTargetView.GetAddressOf(), nullptr);
         setViewport(m_DisplayWidth, m_DisplayHeight);
+        QueryPerformanceCounter(&realBlit0);
         blitFRUCTexture(m_GenericFRUC->getLastRenderSRV());
         for (int i = 0; i < Overlay::OverlayMax; i++) {
             renderOverlay((Overlay::OverlayType)i);
         }
+        QueryPerformanceCounter(&realBlit1);
         // FRUC requires V-sync to pace 2x presents across separate refresh intervals
         {
             LARGE_INTEGER pBegin, pEnd;
             QueryPerformanceCounter(&pBegin);
             hr = m_SwapChain->Present(1, 0);
             QueryPerformanceCounter(&pEnd);
+            realPres1 = pEnd;
             recordPresent(m_PresentReal, pBegin, pEnd);
             m_PresentRealTotal++;
+        }
+        // Per-frame timing diagnostics (every 120 frames ≈ 2s at 60fps)
+        if ((m_FrucSubmitCount + m_FrucSkipCount) % 120 == 0 && hasInterp) {
+            LARGE_INTEGER freq;
+            QueryPerformanceFrequency(&freq);
+            auto us = [&](LARGE_INTEGER a, LARGE_INTEGER b) {
+                return (uint64_t)((b.QuadPart - a.QuadPart) * 1000000 / freq.QuadPart);
+            };
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-Pace] interp blit=%lluus pres=%lluus | real blit=%lluus pres=%lluus | pair total=%lluus",
+                        us(interpBlit0, interpBlit1),
+                        us(interpBlit1, interpPres1),
+                        us(realBlit0, realBlit1),
+                        us(realBlit1, realPres1),
+                        us(interpBlit0, realPres1));
         }
     }
     else {
@@ -2047,18 +2096,39 @@ bool D3D11VARenderer::initFRUC()
     // settings). Falls through to the generic compute shader on any
     // failure so the user is never left without interpolation when
     // a DirectML issue (missing DLL, driver, adapter) crops up.
+    //
+    // VipleStream v1.2.56: cap DirectML FRUC resolution at 1080p
+    // regardless of GPU. At 4K the FP32 tensor is 4 ch × 3840 × 2160
+    // × 4 B = 126 MB per buffer, and we allocate at least 3 of them
+    // (prev/curr/out). The DML inline graph compile step then fails
+    // with 0x887a0005 "device removed" (reason=0x0 = no actual removal)
+    // on the user's RTX A1000, which in v1.2.55 we made return-false
+    // so the caller falls to Generic. Capping at 1080p lets DML run
+    // its intended ML path; the final blitFRUCTexture upscales to
+    // display resolution bilinearly — same pattern Generic already
+    // uses for the iGPU path.
     if (preferDirectML) {
+        uint32_t dmlW = fruW;
+        uint32_t dmlH = fruH;
+        if (dmlW > 1920 || dmlH > 1080) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML tensor capped at 1080p "
+                        "(stream %ux%u → DML %ux%u, upscale on blit)",
+                        dmlW, dmlH, 1920u, 1080u);
+            dmlW = 1920;
+            dmlH = 1080;
+        }
         auto* dml = new DirectMLFRUC();
         dml->setQualityLevel(static_cast<int>(prefs->frucQuality));
-        if (dml->initialize(m_RenderDevice.Get(), fruW, fruH)) {
+        if (dml->initialize(m_RenderDevice.Get(), dmlW, dmlH)) {
             m_GenericFRUC = dml;
             createBlitVB();
             boostLatency();
-            m_FrucTextureWidth  = (int)fruW;
-            m_FrucTextureHeight = (int)fruH;
+            m_FrucTextureWidth  = (int)dmlW;
+            m_FrucTextureHeight = (int)dmlH;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-FRUC] DirectML backend ready: %ux%u (display %dx%d)",
-                        fruW, fruH, m_DisplayWidth, m_DisplayHeight);
+                        dmlW, dmlH, m_DisplayWidth, m_DisplayHeight);
             return true;
         }
         delete dml;
