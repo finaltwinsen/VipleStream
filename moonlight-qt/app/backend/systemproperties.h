@@ -37,6 +37,11 @@ public:
     Q_INVOKABLE QRect getNativeResolution(int displayIndex);
     Q_INVOKABLE QRect getSafeAreaResolution(int displayIndex);
     Q_INVOKABLE int getRefreshRate(int displayIndex);
+    // VipleStream: all unique refresh rates the display advertises at its
+    // desktop resolution. Used by the FPS dropdown so we don't hide
+    // 90/120/144 Hz modes just because the display is currently sitting
+    // at 60 Hz. Returns empty list if displayIndex is out of bounds.
+    Q_INVOKABLE QList<int> getSupportedRefreshRates(int displayIndex);
 
     Q_INVOKABLE void startAsyncLoad();
     Q_INVOKABLE void waitForAsyncLoad();
@@ -78,5 +83,8 @@ private:
     QList<QRect> monitorNativeResolutions;
     QList<QRect> monitorSafeAreaResolutions;
     QList<int> monitorRefreshRates;
+    // VipleStream: per-display list of all unique refresh rates advertised
+    // at the desktop resolution. Indexed by displayIndex.
+    QList<QList<int>> monitorSupportedRefreshRates;
 };
 

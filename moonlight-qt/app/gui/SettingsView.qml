@@ -593,31 +593,55 @@ Flickable {
                         }
 
                         function reinitialize() {
-                            // VipleStream: frame rate is restricted to 30 / 60 /
-                            // the display's native refresh rate only. The seed
-                            // fpsListModel already contains 30 and 60; below
-                            // we add each attached display's refresh rate
-                            // (addRefreshRateOrdered de-duplicates, so 60 Hz
-                            // displays don't produce a "60 FPS (duplicate)"
-                            // entry). We intentionally do NOT add a "Custom"
-                            // entry — upstream Moonlight's custom-FPS dialog
-                            // lets a user ask for e.g. 144 FPS on a 60 Hz
-                            // screen, which cannot physically be displayed
-                            // and (combined with FRUC VSync-paced Present)
-                            // produces misleading Present cadences. The
-                            // Custom dialog code is still present in this
-                            // file but is now unreachable dead code; kept
-                            // to minimize diff.
+                            // VipleStream: populate the FPS dropdown with every
+                            // refresh rate each attached display advertises at its
+                            // desktop resolution (seed 30/60 are already in
+                            // fpsListModel; addRefreshRateOrdered de-duplicates).
+                            // Previous revision restricted the list to 30 / 60 /
+                            // current-best only, which hid real modes (e.g. a VDD
+                            // currently sitting at 60 Hz would not show its 90/120/
+                            // 144 Hz options). We also re-enable the Custom FPS
+                            // entry so users can target a rate above the panel's
+                            // native refresh — useful with FRUC 2x where the
+                            // decoded stream comes in at half the displayed rate.
                             var done = false
                             for (var displayIndex = 0; !done; displayIndex++) {
-                                var refreshRate = SystemProperties.getRefreshRate(displayIndex);
-                                if (refreshRate === 0) {
+                                var rates = SystemProperties.getSupportedRefreshRates(displayIndex);
+                                if (!rates || rates.length === 0) {
                                     // Exceeded max count of displays
                                     done = true
                                     break
                                 }
 
-                                addRefreshRateOrdered(fpsListModel, refreshRate, qsTr("%1 FPS").arg(refreshRate), false)
+                                for (var r = 0; r < rates.length; r++) {
+                                    var refreshRate = rates[r];
+                                    addRefreshRateOrdered(fpsListModel, refreshRate, qsTr("%1 FPS").arg(refreshRate), false)
+                                }
+                            }
+
+                            // VipleStream: always append a single Custom entry at
+                            // the end so the user can type any FPS (including
+                            // rates above the panel's reported list, needed for
+                            // FRUC 2x targeting 120/144 on a 60 Hz-reporting VDD).
+                            // Seed video_fps with the highest known rate so the
+                            // Custom dialog opens with a sensible placeholder
+                            // instead of "0". We bypass addRefreshRateOrdered
+                            // because its dedup-by-value rule would reject this
+                            // entry whenever the seed happens to match an
+                            // already-listed rate (e.g. 120 on a 120 Hz panel).
+                            var hasCustom = false
+                            var customSeed = 120
+                            for (var c = 0; c < fpsListModel.count; c++) {
+                                if (fpsListModel.get(c).is_custom) { hasCustom = true; break }
+                                var v = parseInt(fpsListModel.get(c).video_fps)
+                                if (v > customSeed) customSeed = v
+                            }
+                            if (!hasCustom) {
+                                fpsListModel.append({
+                                    "text": qsTr("Custom"),
+                                    "video_fps": ""+customSeed,
+                                    "is_custom": true
+                                })
                             }
 
                             var saved_fps = StreamingPreferences.fps

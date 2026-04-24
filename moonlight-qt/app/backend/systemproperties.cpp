@@ -160,6 +160,12 @@ int SystemProperties::getRefreshRate(int displayIndex)
     return monitorRefreshRates.value(displayIndex);
 }
 
+QList<int> SystemProperties::getSupportedRefreshRates(int displayIndex)
+{
+    // Returns empty list if out of bounds
+    return monitorSupportedRefreshRates.value(displayIndex);
+}
+
 void SystemProperties::startAsyncLoad()
 {
     if (systemPropertyQueryThread) {
@@ -230,6 +236,7 @@ void SystemProperties::refreshDisplays()
     }
 
     monitorNativeResolutions.clear();
+    monitorSupportedRefreshRates.clear();
 
     SDL_DisplayMode bestMode;
     for (int displayIndex = 0; displayIndex < SDL_GetNumVideoDisplays(); displayIndex++) {
@@ -249,6 +256,26 @@ void SystemProperties::refreshDisplays()
 
             // Start at desktop mode and work our way up
             bestMode = desktopMode;
+            // VipleStream: also collect the full set of refresh rates the
+            // display advertises at its desktop resolution. The UI uses
+            // this to populate the FPS dropdown with every mode the panel
+            // actually supports (60/90/120/144/244/...) instead of only
+            // the single "best" value, which was hiding real options on
+            // VDDs that expose lots of rates.
+            QList<int> supportedRates;
+            auto addNormalizedRate = [&supportedRates](int rate) {
+                if (rate >= 58 && rate <= 62) {
+                    rate = 60;
+                }
+                else if (rate >= 28 && rate <= 32) {
+                    rate = 30;
+                }
+                if (rate > 0 && !supportedRates.contains(rate)) {
+                    supportedRates.append(rate);
+                }
+            };
+            addNormalizedRate(desktopMode.refresh_rate);
+
             int numDisplayModes = SDL_GetNumDisplayModes(displayIndex);
             for (int i = 0; i < numDisplayModes; i++) {
                 SDL_DisplayMode mode;
@@ -257,9 +284,13 @@ void SystemProperties::refreshDisplays()
                         if (mode.refresh_rate > bestMode.refresh_rate) {
                             bestMode = mode;
                         }
+                        addNormalizedRate(mode.refresh_rate);
                     }
                 }
             }
+
+            std::sort(supportedRates.begin(), supportedRates.end());
+            monitorSupportedRefreshRates.append(supportedRates);
 
             // Try to normalize values around our our standard refresh rates.
             // Some displays/OSes report values that are slightly off.
