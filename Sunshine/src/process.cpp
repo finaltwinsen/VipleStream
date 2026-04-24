@@ -5,7 +5,9 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include <algorithm>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -32,6 +34,7 @@
 #include "utility.h"
 
 #ifdef _WIN32
+  #include "platform/windows/steam_scanner.h"
   // from_utf8() string conversion function
   #include "platform/windows/utf_utils.h"
 
@@ -738,6 +741,72 @@ namespace proc {
 
         apps.emplace_back(std::move(ctx));
       }
+
+#ifdef _WIN32
+      // VipleStream Phase 2 of H (Steam auto-import): augment in-memory
+      // apps list with installed Steam games. 5-minute cache inside the
+      // scanner — scan() is cheap enough that we could call it on every
+      // parse() but users editing apps.json via Web UI trigger a refresh
+      // and we don't want a 200ms stall on each edit.
+      //
+      // Merge rules (per docs/TODO.md §H):
+      //   - only append Steam apps whose name doesn't clash with an
+      //     already-loaded manual entry (user may have hand-crafted
+      //     a "Counter-Strike 2" launcher with custom prep-cmds; keep
+      //     theirs)
+      //   - each Steam ctx_t is tagged `source = "steam"` +
+      //     `steam_app_id` + `steam_owners` so the /applist endpoint
+      //     (Phase 3) can expose provenance to clients
+      //   - `cmd = steam://rungameid/<AppID>` lets Steam handle
+      //     DRM / overlay / cloud save transparently
+      //   - image_path prefers library_600x900 (cover art), falls
+      //     back to header.jpg
+      if (auto steam_result = viple::steam::scan_cached()) {
+        // Build set of lowercased manual app names to detect collisions.
+        std::set<std::string> manual_names;
+        for (const auto &m : apps) {
+          std::string lower = m.name;
+          std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+          manual_names.insert(std::move(lower));
+        }
+        int steam_added = 0, steam_skipped = 0;
+        for (const auto &sa : steam_result->apps) {
+          std::string lower = sa.name;
+          std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+          if (manual_names.count(lower)) {
+            steam_skipped++;
+            continue;
+          }
+          proc::ctx_t ctx;
+          ctx.name         = sa.name;
+          ctx.cmd          = sa.launch_url;
+          ctx.image_path   = !sa.image_library.empty() ? sa.image_library : sa.image_header;
+          ctx.source       = "steam";
+          ctx.steam_app_id = sa.app_id;
+          ctx.steam_owners = sa.owners;
+          // Steam's URL handler returns quickly, so auto-detach ON keeps
+          // Sunshine from treating "steam.exe quit 0 after launch" as
+          // session end. wait_all=false means don't wait for child
+          // processes — Steam launches the game in its own session.
+          ctx.auto_detach  = true;
+          ctx.wait_all     = false;
+          ctx.elevated     = false;
+          ctx.exit_timeout = std::chrono::seconds {5};
+          auto ids_tuple = calculate_app_id(ctx.name, ctx.image_path, i++);
+          if (ids.count(std::get<0>(ids_tuple)) == 0) {
+            ctx.id = std::get<0>(ids_tuple);
+          } else {
+            ctx.id = std::get<1>(ids_tuple);
+          }
+          ids.insert(ctx.id);
+          apps.emplace_back(std::move(ctx));
+          steam_added++;
+        }
+        BOOST_LOG(info) << "[steam-import] merged " << steam_added
+                        << " Steam apps (" << steam_skipped
+                        << " skipped due to name collision with manual entries)";
+      }
+#endif
 
       return proc::proc_t {
         std::move(this_env),

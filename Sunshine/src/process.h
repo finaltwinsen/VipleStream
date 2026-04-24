@@ -67,6 +67,19 @@ namespace proc {
     bool auto_detach;
     bool wait_all;
     std::chrono::seconds exit_timeout;
+
+    // VipleStream: provenance tags for auto-discovered apps (Steam etc).
+    // `source` is the origin of this entry:
+    //   ""            (or missing) — declared in apps.json manually
+    //   "steam"       — emitted by viple::steam::scan_cached() every 5 min
+    // Future: "epic" / "xbox" / "gog". Manual entries are never
+    // touched by the auto-import layer.
+    std::string source;
+    std::string steam_app_id;
+    // steam_owners is the list of SteamID3 strings that have this app in
+    // their localconfig.vdf entitlement. Used client-side (Phase 3) to
+    // filter the apps list by profile.
+    std::vector<std::string> steam_owners;
   };
 
   class proc_t {
