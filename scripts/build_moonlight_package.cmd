@@ -86,19 +86,30 @@ if exist "%ORT_DLL%" (
     echo   [WARN] onnxruntime.dll missing - DirectML ONNX path disabled
 )
 
-:: VipleStream: DirectML ONNX model
+:: VipleStream: DirectML ONNX FRUC model.
 :: -------------------------------------------------------------------
-:: Intentionally NOT shipped right now. tools/fruc.onnx (22 MB) has
-:: 11 input channels which DirectMLFRUC::tryLoadOnnxModel rejects
-:: (supported layouts: 1 input with 6/7/8/9 channels, or 2/3 separate
-:: inputs — see directmlfruc.cpp:1321). Shipping an incompatible
-:: model wastes 22 MB of zip + loads/parses/rejects at runtime then
-:: silently falls back to the inline DML graph, so removing it is
-:: strictly better than shipping it. Re-enable this block only when
-:: tools/fruc.onnx is replaced with a model matching the supported
-:: layouts above.
-::set "FRUC_ONNX=%ROOT%\tools\fruc.onnx"
-::if exist "%FRUC_ONNX%" copy /y "%FRUC_ONNX%" "%TEMP_DIR%\" >nul
+:: tools/fruc.onnx is RIFE v4.25 lite v2 (7-channel concat: prev RGB +
+:: curr RGB + timestep plane) from AmusementClub/vs-mlrt's public
+:: release. 22 MB FP32, ~456 ops. Compatible with our DirectMLFRUC
+:: 7-channel single-input path. Shipping it gives RTX 40/50-class
+:: GPUs real motion-compensated interpolation via DirectML; on slower
+:: GPUs (e.g. RTX A1000 workstation Ampere) it runs too slow per-op
+:: kernel-launch so the user can set VIPLE_DML_RES=540 or skip the
+:: DirectML backend entirely — DirectMLFRUC's compileDMLGraph
+:: fallback (inline crossfade DML graph) still activates if ONNX
+:: load fails for any reason.
+::
+:: NOTE: earlier v1 variant (11-channel) was incompatible with our
+:: DirectMLFRUC concat-channel check (6-9 only). v2 variant computes
+:: flow internally — standalone, just needs the two RGB frames +
+:: timestep.
+set "FRUC_ONNX=%ROOT%\tools\fruc.onnx"
+if exist "%FRUC_ONNX%" (
+    copy /y "%FRUC_ONNX%" "%TEMP_DIR%\" >nul
+    echo   fruc.onnx
+) else (
+    echo   [WARN] fruc.onnx missing at %FRUC_ONNX% - DirectML will fall back to inline crossfade graph
+)
 
 :: VipleStream: NVIDIA Optical Flow FRUC helper DLL + its CUDA runtime
 :: dependency. NvOFRUCWrapper LoadLibraryW's NvOFFRUC.dll from the exe

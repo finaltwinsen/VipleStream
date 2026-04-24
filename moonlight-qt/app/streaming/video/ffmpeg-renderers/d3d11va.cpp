@@ -2110,13 +2110,36 @@ bool D3D11VARenderer::initFRUC()
     if (preferDirectML) {
         uint32_t dmlW = fruW;
         uint32_t dmlH = fruH;
-        if (dmlW > 1920 || dmlH > 1080) {
+        // VipleStream v1.2.60: cap DML tensor resolution aggressively
+        // when a ONNX FRUC model is in play. The user-reported RTX
+        // A1000 pushes ~45 fps at RIFE v4.25 lite FP32 at 1080p —
+        // nowhere near a 120 fps target. Dropping the compute to 720p
+        // is 2.25× less pixel area → ~100 fps DML feasible; the final
+        // blitFRUCTexture bilinearly upscales back to display. Quality
+        // loss is modest (RIFE already internally subsamples for flow
+        // estimation, so 720p ML interp + bilinear upscale looks
+        // broadly similar to 1080p ML interp on typical content).
+        //
+        // Env var VIPLE_DML_RES=540|720|1080|native lets power users
+        // override without a rebuild. Default = 720p.
+        uint32_t dmlCapW = 1280, dmlCapH = 720;
+        {
+            char buf[16] = {}; size_t sz = 0;
+            getenv_s(&sz, buf, sizeof(buf), "VIPLE_DML_RES");
+            if (sz > 0) {
+                if      (_stricmp(buf, "540")    == 0) { dmlCapW =  960; dmlCapH =  540; }
+                else if (_stricmp(buf, "720")    == 0) { dmlCapW = 1280; dmlCapH =  720; }
+                else if (_stricmp(buf, "1080")   == 0) { dmlCapW = 1920; dmlCapH = 1080; }
+                else if (_stricmp(buf, "native") == 0) { dmlCapW = dmlW; dmlCapH = dmlH; }
+            }
+        }
+        if (dmlW > dmlCapW || dmlH > dmlCapH) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] DirectML tensor capped at 1080p "
-                        "(stream %ux%u → DML %ux%u, upscale on blit)",
-                        dmlW, dmlH, 1920u, 1080u);
-            dmlW = 1920;
-            dmlH = 1080;
+                        "[VIPLE-FRUC] DirectML tensor capped (stream %ux%u → DML %ux%u, "
+                        "upscale on blit; override with VIPLE_DML_RES=540|720|1080|native)",
+                        dmlW, dmlH, dmlCapW, dmlCapH);
+            dmlW = dmlCapW;
+            dmlH = dmlCapH;
         }
         auto* dml = new DirectMLFRUC();
         dml->setQualityLevel(static_cast<int>(prefs->frucQuality));
