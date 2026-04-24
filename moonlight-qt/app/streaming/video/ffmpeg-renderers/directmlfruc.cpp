@@ -376,6 +376,20 @@ bool DirectMLFRUC::createD3D12Device()
                                              IID_PPV_ARGS(&m_CmdList12)))) return false;
     m_CmdList12->Close();
 
+    // VipleStream v1.2.62: Create ring of command allocators for the
+    // hot submitFrame path. Init time only — destroy happens implicitly
+    // via ComPtr at device teardown.
+    for (uint32_t i = 0; i < kAllocRingSize; ++i) {
+        if (FAILED(m_Device12->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                IID_PPV_ARGS(&m_CmdAllocRing[i])))) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: ring allocator %u create failed", i);
+            return false;
+        }
+        m_CmdAllocFenceVal[i] = 0;  // 0 = never used, Reset not needed
+    }
+
     // Second allocator/list for ORT path post-dispatch unpack CL.
     if (FAILED(m_Device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                   IID_PPV_ARGS(&m_PostCmdAlloc12)))) return false;
@@ -1258,9 +1272,41 @@ void DirectMLFRUC::recordUnpackCS(ID3D12GraphicsCommandList* cl)
 
 bool DirectMLFRUC::runDMLDispatch()
 {
+    // VipleStream v1.2.62: instrument for Option C interop tuning
+    LARGE_INTEGER qpfFreq; QueryPerformanceFrequency(&qpfFreq);
+    auto usSince = [&](LARGE_INTEGER a, LARGE_INTEGER b) -> double {
+        return (double)(b.QuadPart - a.QuadPart) * 1000000.0 / (double)qpfFreq.QuadPart;
+    };
+    auto emaAcc = [](double& acc, double sample) {
+        acc = (acc == 0.0) ? sample : (acc * 0.9375 + sample * 0.0625);
+    };
+
+    LARGE_INTEGER tR0; QueryPerformanceCounter(&tR0);
     // ── 1. Build the pre-dispatch CL: pack CS + UAV barrier ───────────────
-    m_CmdAlloc12->Reset();
-    m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+    //
+    // VipleStream v1.2.62 (Option C): pick next allocator from the
+    // ring. Wait if its last-known fence value hasn't been reached by
+    // the GPU yet (rarely happens since the ring is kAllocRingSize
+    // submissions deep — by the time we come back to slot N the GPU
+    // has done N more frames of work). `m_CmdAllocFenceVal[slot] == 0`
+    // means "never used" so no wait. GetCompletedValue is a fast CPU
+    // atomic load.
+    const uint32_t slot = m_CmdAllocIdx;
+    if (m_CmdAllocFenceVal[slot] != 0 &&
+        m_Fence12->GetCompletedValue() < m_CmdAllocFenceVal[slot]) {
+        // Fallback slow-path — should be 0% of frames in steady state
+        HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (ev) {
+            m_Fence12->SetEventOnCompletion(m_CmdAllocFenceVal[slot], ev);
+            WaitForSingleObject(ev, 500);
+            CloseHandle(ev);
+        }
+    }
+    auto& alloc = m_CmdAllocRing[slot];
+    alloc->Reset();
+    m_CmdList12->Reset(alloc.Get(), nullptr);
+    LARGE_INTEGER tR_afterReset; QueryPerformanceCounter(&tR_afterReset);
+
     ID3D12DescriptorHeap* csHeaps[] = { m_CsDescHeap.Get() };
     m_CmdList12->SetDescriptorHeaps(1, csHeaps);
     recordPackCS(m_CmdList12.Get(), m_WriteSlot);
@@ -1270,6 +1316,9 @@ bool DirectMLFRUC::runDMLDispatch()
     uavPack.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     uavPack.UAV.pResource = m_FrameTensor[m_WriteSlot].Get();
     m_CmdList12->ResourceBarrier(1, &uavPack);
+    LARGE_INTEGER tR_afterPack; QueryPerformanceCounter(&tR_afterPack);
+    emaAcc(m_Stage.alloc_reset_us, usSince(tR0,          tR_afterReset));
+    emaAcc(m_Stage.pack_record_us, usSince(tR_afterReset, tR_afterPack));
 
     // ── 2a. ORT path ──────────────────────────────────────────────────────
     if (m_UseOrt) {
@@ -1313,6 +1362,7 @@ bool DirectMLFRUC::runDMLDispatch()
 
     // ── 2b. Inline DML path — continue in the same CL ─────────────────────
     if (m_DMLCompiledOp) {
+        LARGE_INTEGER tD0; QueryPerformanceCounter(&tD0);
         ID3D12DescriptorHeap* dmlHeaps[] = { m_DMLDescHeap.Get() };
         m_CmdList12->SetDescriptorHeaps(1, dmlHeaps);
         m_DMLRecorder->RecordDispatch(m_CmdList12.Get(), m_DMLCompiledOp.Get(),
@@ -1323,13 +1373,20 @@ bool DirectMLFRUC::runDMLDispatch()
         uavOut.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         uavOut.UAV.pResource = m_OutputTensor.Get();
         m_CmdList12->ResourceBarrier(1, &uavOut);
+        LARGE_INTEGER tD_afterDML; QueryPerformanceCounter(&tD_afterDML);
 
         // Switch back to CS heap, record unpack.
         m_CmdList12->SetDescriptorHeaps(1, csHeaps);
         recordUnpackCS(m_CmdList12.Get());
+        LARGE_INTEGER tD_afterUnpack; QueryPerformanceCounter(&tD_afterUnpack);
 
         m_CmdList12->Close();
         { ID3D12CommandList* c[] = { m_CmdList12.Get() }; m_Queue12->ExecuteCommandLists(1, c); }
+        LARGE_INTEGER tD_afterExec; QueryPerformanceCounter(&tD_afterExec);
+
+        emaAcc(m_Stage.dml_record_us,    usSince(tD0,             tD_afterDML));
+        emaAcc(m_Stage.unpack_record_us, usSince(tD_afterDML,     tD_afterUnpack));
+        emaAcc(m_Stage.close_exec_us,    usSince(tD_afterUnpack,  tD_afterExec));
         return true;
     }
 
@@ -1954,6 +2011,17 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
 {
     if (!m_Initialized) return false;
 
+    // VipleStream v1.2.62: instrumented per-stage timing for interop
+    // overhead tuning (Option C). Each sub-step gets a QPC counter;
+    // EMA of all timings printed every 120 frames via `[VIPLE-FRUC-DML]`.
+    LARGE_INTEGER qpfFreq; QueryPerformanceFrequency(&qpfFreq);
+    auto usSince = [&](LARGE_INTEGER a, LARGE_INTEGER b) -> double {
+        return (double)(b.QuadPart - a.QuadPart) * 1000000.0 / (double)qpfFreq.QuadPart;
+    };
+    auto emaAcc = [](double& acc, double sample) {
+        acc = (acc == 0.0) ? sample : (acc * 0.9375 + sample * 0.0625);
+    };
+
     LARGE_INTEGER t0; QueryPerformanceCounter(&t0);
 
     ComPtr<ID3D11DeviceContext4> ctx4;
@@ -1962,17 +2030,37 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
     // Unbind RTV: ensures D3D12 can safely read the render texture.
     ID3D11RenderTargetView* nullRTV = nullptr;
     ctx4->OMSetRenderTargets(1, &nullRTV, nullptr);
+    LARGE_INTEGER t_afterRtv; QueryPerformanceCounter(&t_afterRtv);
 
-    // D3D11 signals N: "render texture is ready."
+    // D3D11 signals N: "render texture is ready." (forces D3D11 to
+    // flush pending command buffer to GPU first)
     m_FenceValue++;
     ctx4->Signal(m_Fence11.Get(), m_FenceValue);
-    // D3D12 queue waits before touching the render texture.
+    LARGE_INTEGER t_afterSignal; QueryPerformanceCounter(&t_afterSignal);
+
+    // D3D12 queue waits before touching the render texture (GPU-side
+    // wait — just queues a wait command, doesn't block CPU).
     m_Queue12->Wait(m_Fence12.Get(), m_FenceValue);
+    LARGE_INTEGER t_syncDone; QueryPerformanceCounter(&t_syncDone);
+
+    // Diagnostic sub-breakdown of d3d11_sync
+    static double ema_rtv = 0, ema_sig = 0, ema_wait = 0;
+    auto emaAccDiag = [](double& a, double s) { a = (a == 0.0) ? s : (a * 0.9375 + s * 0.0625); };
+    emaAccDiag(ema_rtv,  usSince(t0,              t_afterRtv));
+    emaAccDiag(ema_sig,  usSince(t_afterRtv,      t_afterSignal));
+    emaAccDiag(ema_wait, usSince(t_afterSignal,   t_syncDone));
+    if (m_Stage.sample_count > 0 && (m_Stage.sample_count % 120) == 119) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-DML-SUB] rtv=%.0f sig=%.0f wait=%.0f μs",
+                    ema_rtv, ema_sig, ema_wait);
+    }
 
     // First frame: pack slot 0 only; no interpolation output yet.
     if (m_FrameCount == 0) {
-        m_CmdAlloc12->Reset();
-        m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+        // Use ring slot 0 (never used, fence_val==0 → no wait).
+        auto& firstAlloc = m_CmdAllocRing[m_CmdAllocIdx];
+        firstAlloc->Reset();
+        m_CmdList12->Reset(firstAlloc.Get(), nullptr);
         ID3D12DescriptorHeap* heaps[] = { m_CsDescHeap.Get() };
         m_CmdList12->SetDescriptorHeaps(1, heaps);
         recordPackCS(m_CmdList12.Get(), 0);
@@ -1983,6 +2071,10 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
         m_FenceValue++;
         m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
         ctx4->Wait(m_Fence11.Get(), m_FenceValue);
+
+        // Record the fence value against current slot + advance.
+        m_CmdAllocFenceVal[m_CmdAllocIdx] = m_FenceValue;
+        m_CmdAllocIdx = (m_CmdAllocIdx + 1) % kAllocRingSize;
 
         m_WriteSlot = 1;
         m_FrameCount++;
@@ -1995,23 +2087,48 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
     // path (no binding table exists).
     if (!m_UseOrt && m_DMLCompiledOp) rebindPingPongInputs();
 
-    bool ok = runDMLDispatch();  // internally: pack CS + DML/ORT + unpack CS
+    bool ok = runDMLDispatch();  // timing accumulated inside runDMLDispatch
+    LARGE_INTEGER t_dispatchDone; QueryPerformanceCounter(&t_dispatchDone);
 
     // D3D12 signals N+1: "output texture is written."
     m_FenceValue++;
     m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
     // D3D11 waits before blitting the output texture.
     ctx4->Wait(m_Fence11.Get(), m_FenceValue);
+    LARGE_INTEGER t_postSignal; QueryPerformanceCounter(&t_postSignal);
+
+    // VipleStream v1.2.62 (Option C): record the post-signal fence
+    // value against the allocator slot we just submitted from, then
+    // advance the ring. Next time we land on this slot, we gate on
+    // this fence value having been reached by GPU.
+    m_CmdAllocFenceVal[m_CmdAllocIdx] = m_FenceValue;
+    m_CmdAllocIdx = (m_CmdAllocIdx + 1) % kAllocRingSize;
 
     m_WriteSlot = 1 - m_WriteSlot;
     m_FrameCount++;
 
     if (!ok) return false;
 
-    LARGE_INTEGER t1, freq;
-    QueryPerformanceCounter(&t1);
-    QueryPerformanceFrequency(&freq);
-    double dtMs = 1000.0 * (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart;
+    emaAcc(m_Stage.d3d11_sync_us,        usSince(t0,             t_syncDone));
+    emaAcc(m_Stage.d3d12_signal_wait_us, usSince(t_dispatchDone, t_postSignal));
+    double totalUs = usSince(t0, t_postSignal);
+    emaAcc(m_Stage.submit_total_us, totalUs);
+    m_Stage.sample_count++;
+
+    // Periodic per-stage breakdown (every 120 frames ≈ 2s at 60fps real).
+    if ((m_Stage.sample_count % 120) == 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-DML] n=%llu ema μs: d3d11_sync=%.0f alloc_reset=%.0f "
+                    "pack_record=%.0f dml_record=%.0f unpack_record=%.0f "
+                    "close_exec=%.0f d3d12_signal=%.0f | total=%.0f",
+                    (unsigned long long)m_Stage.sample_count,
+                    m_Stage.d3d11_sync_us, m_Stage.alloc_reset_us,
+                    m_Stage.pack_record_us, m_Stage.dml_record_us,
+                    m_Stage.unpack_record_us, m_Stage.close_exec_us,
+                    m_Stage.d3d12_signal_wait_us, m_Stage.submit_total_us);
+    }
+
+    double dtMs = totalUs / 1000.0;
     m_LastInterpMs = (m_LastInterpMs == 0.0) ? dtMs
                    : (m_LastInterpMs * 0.9375 + dtMs * 0.0625);
     return true;

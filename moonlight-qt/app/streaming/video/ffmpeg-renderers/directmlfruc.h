@@ -122,6 +122,22 @@ private:
     int      m_FrameCount = 0;
     double   m_LastInterpMs = 0.0;
 
+    // --- VipleStream v1.2.62: per-stage timing accumulators (EMA μs) ---
+    // Reset on init. Logged periodically (every 120 frames) by submitFrame
+    // so we can spot which sub-step of the DML pipeline dominates.
+    struct StageTimings {
+        double d3d11_sync_us        = 0.0;   // ctx4->Signal + Queue12->Wait
+        double alloc_reset_us       = 0.0;   // m_CmdAlloc12->Reset + list Reset
+        double pack_record_us       = 0.0;   // SetDescriptorHeaps + recordPackCS
+        double dml_record_us        = 0.0;   // DML RecordDispatch OR ORT submit
+        double unpack_record_us     = 0.0;   // recordUnpackCS
+        double close_exec_us        = 0.0;   // Close + ExecuteCommandLists
+        double d3d12_signal_wait_us = 0.0;   // Signal + ctx4->Wait at end
+        double submit_total_us      = 0.0;   // whole submitFrame body
+        uint64_t sample_count       = 0;
+    };
+    StageTimings m_Stage = {};
+
     // --- D3D11 side ---
     ID3D11Device*                  m_Device11 = nullptr;
     CP<ID3D11Device5>              m_Device11_5;   // for OpenSharedFence
@@ -139,6 +155,22 @@ private:
     // --- D3D12 + cross-API ---
     CP<ID3D12Device>               m_Device12;
     CP<ID3D12CommandQueue>         m_Queue12;
+    // VipleStream v1.2.62: Ring of command allocators (Option C).
+    // Reset() on an allocator that the GPU is still executing against
+    // returns E_INVALIDARG, so we must know the GPU is done with an
+    // allocator before reusing it. With N allocators and a fence
+    // signalled per-submission, after N frames the oldest allocator
+    // is guaranteed idle — we record its value at submit time and
+    // the next time we hit the same slot, we wait (usually zero
+    // wait because N-frame-old work is long since done). Avoids the
+    // per-frame Reset hit path that touched uninitialised CPU state.
+    static constexpr uint32_t kAllocRingSize = 3;
+    CP<ID3D12CommandAllocator>     m_CmdAllocRing[kAllocRingSize];
+    uint64_t                       m_CmdAllocFenceVal[kAllocRingSize] = {};
+    uint32_t                       m_CmdAllocIdx = 0;
+    // Keep the legacy fields for the few spots that still reference
+    // them (init-time dispatch etc); submitFrame / runDMLDispatch now
+    // use the ring instead.
     CP<ID3D12CommandAllocator>     m_CmdAlloc12;
     CP<ID3D12GraphicsCommandList>  m_CmdList12;
     // Second pair used exclusively for the ORT path post-dispatch
