@@ -89,5 +89,15 @@ public class PcGridAdapter extends GenericGridAdapter<PcView.ComputerObject> {
         else {
             overlayView.setVisibility(View.GONE);
         }
+
+        // VipleStream H.5: capability badge.  parentView is the
+        // root RelativeLayout from pc_grid_item.xml; the badge lives
+        // inside the meta row.  Hidden when peer is vanilla Sunshine
+        // / GFE (or when we haven't probed serverinfo yet, in which
+        // case isVipleStreamPeer is false by default).
+        View vipleBadge = parentView.findViewById(R.id.grid_viple_badge);
+        if (vipleBadge != null) {
+            vipleBadge.setVisibility(obj.details.isVipleStreamPeer ? View.VISIBLE : View.GONE);
+        }
     }
 }

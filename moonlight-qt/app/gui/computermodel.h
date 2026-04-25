@@ -16,6 +16,10 @@ class ComputerModel : public QAbstractListModel
         WakeableRole,
         StatusUnknownRole,
         ServerSupportedRole,
+        // VipleStream H.5: peer is running VipleStream-Server (carries the
+        // <VipleStreamProtocol> tag in /serverinfo).  Used by PcView.qml
+        // to render a small VipleStream badge on the host card.
+        IsVipleStreamPeerRole,
         DetailsRole
     };
 

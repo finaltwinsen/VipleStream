@@ -142,4 +142,21 @@
         <item>1</item>
         <item>2</item>
     </string-array>
+
+    <!-- VipleStream H Phase 2: app-list sort mode picker labels.
+         Order MUST match app_sort_mode_values 1:1. Values are the
+         AppSortMode enum.name() strings so the same persisted value
+         round-trips between this client and the Qt client. -->
+    <string-array name="app_sort_mode_names">
+        <item>@string/app_sort_mode_default</item>
+        <item>@string/app_sort_mode_recent</item>
+        <item>@string/app_sort_mode_playtime</item>
+        <item>@string/app_sort_mode_name</item>
+    </string-array>
+    <string-array name="app_sort_mode_values" translatable="false">
+        <item>DEFAULT</item>
+        <item>RECENT</item>
+        <item>PLAYTIME</item>
+        <item>NAME</item>
+    </string-array>
 </resources>

@@ -22,14 +22,36 @@ CenteredGridView {
     id: appGrid
     focus: true
     activeFocusOnTab: true
-    topMargin: 20
+    // VipleStream H.4 v1.2.108: leave room at the top for the pinned
+    // Steam profile bar (52px) when it's visible.  Without this the
+    // first row of app tiles renders directly under the bar.
+    topMargin: 20 + (pinnedSteamBar.visible ? 52 : 0)
     bottomMargin: 5
     cellWidth: bold ? 310 : 230
     cellHeight: bold ? 410 : 297
 
+    // VipleStream H.4: while a Steam-account-switch is in flight (server
+    // shutting down + relogging Steam, ~10–30 s), suppress all of the
+    // bookkeeping that would normally nuke this view:
+    //   - app-tile clicks / focus moves
+    //   - the computerLost signal that pops AppView (the host tends to
+    //     blip CS_OFFLINE for one polling tick because Sunshine's HTTP
+    //     thread is busy with /steamswitch)
+    // Bound by the busy overlay's `visible`.
+    property bool steamSwitchInProgress: false
+
     function computerLost()
     {
-        // Go back to the PC view on PC loss
+        if (appGrid.steamSwitchInProgress) {
+            // Host is *probably* coming back in a moment — Sunshine's
+            // HTTP thread is busy spawning steam.exe -shutdown / -login,
+            // which can starve one /serverinfo polling tick on a busy
+            // box.  Don't tear down the AppView: the next poll will
+            // recover.  If the switch genuinely fails, the busy overlay
+            // shows the error and the user can back out manually.
+            console.log("[H.4] computerLost ignored — switch in progress")
+            return
+        }
         stackView.pop()
     }
 
@@ -92,6 +114,16 @@ CenteredGridView {
             appGrid.currentItem.clicked();
         }
     }
+
+    // VipleStream H.4 v1.2.108: bar is no longer in the GridView header
+    // (which scrolls with content and disappears the moment GridView
+    // auto-positions to a non-zero index — e.g. resuming the running
+    // app, gamepad-set currentIndex=0 hop, etc.).  See `pinnedSteamBar`
+    // declared as a direct CenteredGridView child near the bottom of
+    // this file: GridView treats non-delegate non-header children as
+    // viewport-anchored siblings rather than scroll-content children,
+    // which is the closest thing GridView has to ListView's
+    // `headerPositioning: ListView.OverlayHeader`.
 
     // VipleStream §03 Bold library masthead — matches §01 Bold on
     // PcView (see v1.2.37 commit message). Collapsed on Safe so
@@ -254,6 +286,7 @@ CenteredGridView {
                     NumberAnimation { from: 0.35; to: 1.0; duration: 900 }
                 }
             }
+
         }
     }
 
@@ -685,4 +718,199 @@ CenteredGridView {
     }
 
     ScrollBar.vertical: ScrollBar {}
+
+    // ─────────────────────────────────────────────────────────────────────
+    // VipleStream H.4 v1.2.108: pinned Steam profile bar + switch overlay.
+    //
+    // These two Rectangles are direct children of the GridView root.
+    // Qt's Flickable parents declared root-level non-delegate children
+    // to the Flickable proper (NOT contentItem), so they sit on the
+    // viewport and don't scroll with the app grid.  This is the closest
+    // thing GridView has to ListView's `headerPositioning: OverlayHeader`.
+    // ─────────────────────────────────────────────────────────────────────
+
+    Rectangle {
+        id: pinnedSteamBar
+        z: 100  // above the grid + scroll bar
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: visible ? 52 : 0
+        visible: false
+        color: "#1A2300"          // lime_ink
+        border.color: "#D4FF3A"   // lime
+        border.width: 2
+        enabled: !appGrid.steamSwitchInProgress
+
+        Row {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: 32
+            anchors.rightMargin: 32
+            spacing: 12
+
+            Rectangle {
+                width: 10; height: 10; radius: 1
+                color: "#D4FF3A"
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+                text: "STEAM PROFILE"
+                font.family: "IBM Plex Mono"
+                font.pointSize: 11
+                font.bold: true
+                font.letterSpacing: 1.8
+                color: "#D4FF3A"
+                anchors.verticalCenter: parent.verticalCenter
+            }
+
+            ComboBox {
+                id: steamProfileCombo
+                width: 240
+                anchors.verticalCenter: parent.verticalCenter
+                model: ListModel { id: steamProfileModel }
+                textRole: "persona"
+                valueRole: "account"
+                property bool suppressActivated: false
+
+                onActivated: {
+                    if (suppressActivated) return
+                    var account = currentValue
+                    if (!account) return
+                    console.log("[H.4] switch start: account=" + account)
+                    appGrid.steamSwitchInProgress = true
+                    var ok = appModel.requestSteamSwitch(account)
+                    appGrid.steamSwitchInProgress = false
+                    console.log("[H.4] switch result: ok=" + ok
+                                + " error=" + appModel.lastSteamSwitchError())
+                    if (!ok) {
+                        console.warn("[H.4] switch failed:",
+                                     appModel.lastSteamSwitchError())
+                    }
+                    // Re-populate either way: success → reflects new
+                    // current; failure → roll back highlight to current.
+                    pinnedSteamBar.populate()
+                }
+            }
+        }
+
+        function populate() {
+            var peerOK = appModel.peerSupportsSteamProfiles()
+            if (!peerOK) {
+                pinnedSteamBar.visible = false
+                return
+            }
+            var ok = appModel.refreshSteamProfiles()
+            var n  = appModel.steamProfileCount()
+            console.log("[H.4] populate: peerOK=" + peerOK
+                        + " refreshOK=" + ok
+                        + " profileCount=" + n
+                        + " lastError=" + appModel.lastSteamSwitchError())
+            steamProfileModel.clear()
+            for (var i = 0; i < n; i++) {
+                steamProfileModel.append({
+                    "persona":  appModel.steamProfilePersona(i),
+                    "account":  appModel.steamProfileAccount(i),
+                    "switchable": appModel.steamProfileSwitchable(i)
+                })
+            }
+            var cur = appModel.currentSteamProfileIndex()
+            steamProfileCombo.suppressActivated = true
+            steamProfileCombo.currentIndex = (cur >= 0) ? cur : 0
+            steamProfileCombo.suppressActivated = false
+            pinnedSteamBar.visible = (n > 0)
+        }
+
+        Component.onCompleted: populate()
+
+        Connections {
+            target: appModel
+            function onPeerIsVipleChanged() { pinnedSteamBar.populate() }
+            // v1.2.119: receive live progress from server-side async
+            // task. Drives switchBusyOverlay's progressLabel — gives
+            // the user real "Shutting down… / Logging in…" feedback
+            // instead of staring at a spinner for 9-90 s.
+            function onSteamSwitchProgress(state, message) {
+                switchBusyOverlay.progressState   = state
+                switchBusyOverlay.progressMessage = message
+            }
+        }
+    }
+
+    // Busy overlay — covers the entire viewport while a switch is in
+    // flight.  Eats clicks (so app tiles can't be launched mid-switch),
+    // shows a spinner + status text, and dismisses when
+    // steamSwitchInProgress flips back to false.
+    Rectangle {
+        id: switchBusyOverlay
+        z: 200  // above pinnedSteamBar + grid
+        anchors.fill: parent
+        visible: appGrid.steamSwitchInProgress
+        color: "#CC0D0F0B"  // 80 % black on top of the page bg
+
+        // v1.2.119: live progress from server async task.  Initialised
+        // empty so the overlay reverts to the static helper text on
+        // first open; populated by onSteamSwitchProgress after the
+        // first /steamswitch/status reply.
+        property string progressState:   ""
+        property string progressMessage: ""
+
+        // Reset when the overlay closes so a stale state from the last
+        // switch doesn't flash on the next open.
+        onVisibleChanged: {
+            if (!visible) {
+                progressState   = ""
+                progressMessage = ""
+            }
+        }
+
+        // Eat clicks
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            onClicked: {/* swallow */}
+        }
+
+        Column {
+            anchors.centerIn: parent
+            spacing: 14
+
+            BusyIndicator {
+                running: switchBusyOverlay.visible
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: 56; height: 56
+            }
+            Text {
+                text: qsTr("Switching Steam account…")
+                font.family: "IBM Plex Mono"
+                font.pointSize: 14
+                font.bold: true
+                font.letterSpacing: 1.6
+                color: "#D4FF3A"
+                anchors.horizontalCenter: parent.horizontalCenter
+            }
+            Text {
+                // Live message from server when available, otherwise
+                // the static helper text.
+                text: switchBusyOverlay.progressMessage.length > 0
+                      ? switchBusyOverlay.progressMessage
+                      : qsTr("Steam will close and re-login on the host.\nThis can take 60–90 seconds on a typical box.\nIf it stalls longer, check the host — Steam Guard 2FA may be prompting.")
+                font.family: "Inter"
+                font.pointSize: 11
+                color: "#8B8E7E"
+                horizontalAlignment: Text.AlignHCenter
+                anchors.horizontalCenter: parent.horizontalCenter
+            }
+            Text {
+                visible: switchBusyOverlay.progressState.length > 0
+                text: "[" + switchBusyOverlay.progressState + "]"
+                font.family: "IBM Plex Mono"
+                font.pointSize: 9
+                font.letterSpacing: 1.2
+                color: "#5C6052"
+                anchors.horizontalCenter: parent.horizontalCenter
+            }
+        }
+    }
 }

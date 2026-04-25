@@ -382,6 +382,16 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
         // Display a decoder crash notification if we've returned after a crash
         UiHelper.showDecoderCrashDialog(this);
 
+        // VipleStream H Phase 2: re-read prefs in case the user just
+        // changed the app sort mode in the settings activity. Cheap
+        // (a few SharedPreferences reads) and no-ops when the mode is
+        // unchanged. Done unconditionally so it also picks up changes
+        // made via remote config / debugger / adb.
+        if (appGridAdapter != null) {
+            PreferenceConfiguration prefs = PreferenceConfiguration.readPreferences(this);
+            appGridAdapter.setSortMode(prefs.appSortMode);
+        }
+
         inForeground = true;
         startComputerUpdates();
     }
@@ -568,6 +578,29 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
                                 existingApp.app.setAppName(app.getAppName());
                                 updated = true;
                             }
+                            // VipleStream H Phase 2: Steam metadata
+                            // (lastPlayed / playtime) refreshes on the
+                            // server every 5 min when its Steam scanner
+                            // re-runs. Pull the new values into the
+                            // existing AppObject so the next sort tick
+                            // picks them up — without this the client
+                            // would keep the first-seen ordering forever.
+                            if (existingApp.app.getLastPlayed() != app.getLastPlayed()) {
+                                existingApp.app.setLastPlayed(Long.toString(app.getLastPlayed()));
+                                updated = true;
+                            }
+                            if (existingApp.app.getPlaytimeMinutes() != app.getPlaytimeMinutes()) {
+                                existingApp.app.setPlaytimeMinutes(Long.toString(app.getPlaytimeMinutes()));
+                                updated = true;
+                            }
+                            // Source typically doesn't change for a
+                            // given AppId, but be paranoid: re-tagging
+                            // a manual app as auto-import would change
+                            // its sort tier (manual-pin → not pinned).
+                            if (!existingApp.app.getSource().equals(app.getSource())) {
+                                existingApp.app.setSource(app.getSource());
+                                updated = true;
+                            }
 
                             foundExistingApp = true;
                             break;
@@ -617,6 +650,11 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
                 }
 
                 if (updated) {
+                    // VipleStream H Phase 2: re-sort before notify so
+                    // the fresh playtime / lastPlayed values reposition
+                    // games in the grid (without this we'd keep showing
+                    // stale ordering until the user re-enters settings).
+                    appGridAdapter.resort();
                     appGridAdapter.notifyDataSetChanged();
                 }
             }

@@ -1,20 +1,25 @@
 @echo off
 setlocal enabledelayedexpansion
 
-rem Get sunshine root directory
+rem Get viplestream-server root directory
 for %%I in ("%~dp0\..") do set "ROOT_DIR=%%~fI"
 
-set SERVICE_NAME=SunshineService
-set "SERVICE_BIN=%ROOT_DIR%\tools\sunshinesvc.exe"
-set "SERVICE_CONFIG_DIR=%LOCALAPPDATA%\LizardByte\Sunshine"
+rem VipleStream rebrand: service name + binary renamed.  Install path
+rem also moved out of the LizardByte directory for clarity.
+set SERVICE_NAME=VipleStreamServer
+set "SERVICE_BIN=%ROOT_DIR%\tools\viplestream-svc.exe"
+set "SERVICE_CONFIG_DIR=%LOCALAPPDATA%\VipleStream"
 set "SERVICE_CONFIG_FILE=%SERVICE_CONFIG_DIR%\service_start_type.txt"
 
 rem Set service to demand start. It will be changed to auto later if the user selected that option.
 set SERVICE_START_TYPE=demand
 
-rem Remove the legacy SunshineSvc service
-net stop sunshinesvc
-sc delete sunshinesvc
+rem Remove legacy SunshineSvc / SunshineService services if present
+rem (left over from pre-rebrand installs).
+net stop sunshinesvc 2>nul
+sc delete sunshinesvc 2>nul
+net stop SunshineService 2>nul
+sc delete SunshineService 2>nul
 
 rem Check if SunshineService already exists
 sc qc %SERVICE_NAME% > nul 2>&1
@@ -58,10 +63,10 @@ if exist "%SERVICE_CONFIG_FILE%" (
 echo Setting service start type set to: [!SERVICE_START_TYPE!]
 
 rem Run the sc command to create/reconfigure the service
-sc %SC_CMD% %SERVICE_NAME% binPath= "\"%SERVICE_BIN%\"" start= %SERVICE_START_TYPE% DisplayName= "Sunshine Service"
+sc %SC_CMD% %SERVICE_NAME% binPath= "\"%SERVICE_BIN%\"" start= %SERVICE_START_TYPE% DisplayName= "VipleStream Server Service"
 
 rem Set the description of the service
-sc description %SERVICE_NAME% "Sunshine is a self-hosted game stream host for Moonlight."
+sc description %SERVICE_NAME% "VipleStream Server is a self-hosted game stream host for VipleStream clients."
 
 rem Start the new service
 net start %SERVICE_NAME%

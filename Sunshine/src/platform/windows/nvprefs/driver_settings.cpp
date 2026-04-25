@@ -10,8 +10,12 @@
 
 namespace {
 
-  const auto sunshine_application_profile_name = L"SunshineStream";
-  const auto sunshine_application_path = L"sunshine.exe";
+  // VipleStream rebrand: NVAPI per-application profile name + binary
+  // matched against. Binary path must match the OUTPUT_NAME set in the
+  // CMake target (viplestream-server.exe) — NVAPI matches on the on-
+  // disk file name, not the project name.
+  const auto sunshine_application_profile_name = L"VipleStream-Server";
+  const auto sunshine_application_path = L"viplestream-server.exe";
 
   void nvapi_error_message(NvAPI_Status status) {
     NvAPI_ShortString message = {};

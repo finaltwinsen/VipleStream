@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-	<id>com.moonlight_stream.Moonlight</id>
+	<id>com.piinsta</id>
 	<metadata_license>CC0-1.0</metadata_license>
 	<project_license>GPL-3.0+</project_license>
 	<name>VipleStream</name>
@@ -28,9 +28,9 @@
 		<name>VipleStream</name>
 	</developer>
 	<update_contact>cameron@moonlight-stream.org</update_contact>
-	<launchable type="desktop-id">com.moonlight_stream.Moonlight.desktop</launchable>
+	<launchable type="desktop-id">com.piinsta.desktop</launchable>
 	<provides>
-		<binary>moonlight</binary>
+		<binary>viplestream</binary>
 	</provides>
 	<content_rating type="oars-1.1" />	
 

@@ -730,7 +730,10 @@ Flickable {
                     text: qsTr("Frame interpolation (FRUC 2x)")
                     font.pointSize: 12
                     checked: StreamingPreferences.enableFrameInterpolation
-                    enabled: StreamingPreferences.fps <= 180
+                    // VipleStream: 180 fps cap removed in v1.2.57.  No
+                    // hard upper limit any more — backend selection
+                    // (especially Generic) handles 240 fps + on the
+                    // benchmark machine.  Settings UI follows suit.
                     onCheckedChanged: {
                         // VipleStream: FRUC on/off changes the host-side
                         // encode fps (ON → fps/2) AND adds a source-
@@ -758,7 +761,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate will be halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS). Only available at 180 FPS or below.")
+                    ToolTip.text: qsTr("Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).")
                 }
 
                 ComboBox {
@@ -771,9 +774,21 @@ Flickable {
                         id: frucBackendModel
                     }
                     Component.onCompleted: {
-                        frucBackendModel.append({text: qsTr("Generic Compute (low latency, recommended)"), val: 0})
-                        frucBackendModel.append({text: qsTr("NVIDIA Optical Flow (high quality, CUDA required)"), val: 1})
-                        frucBackendModel.append({text: qsTr("DirectML (experimental, Windows 10+)"), val: 2})
+                        // VipleStream v1.2.92: backend labels honestly
+                        // reflect the v1.2.86+ reality. Generic remains
+                        // the default & all-rounder. NvOF is good for
+                        // up to ~120 fps on consumer NVIDIA cards (slower
+                        // on workstation Ampere). DirectML now runs
+                        // *real* RIFE ML inference and needs Tensor-Core
+                        // class GPUs to keep up at higher resolutions —
+                        // weak GPUs auto-cascade down to 360p or fall
+                        // back to Generic, surprising users who picked
+                        // it expecting "best quality". The GPU note
+                        // below is the simplest way to set expectations
+                        // up-front.
+                        frucBackendModel.append({text: qsTr("Generic Compute (recommended — lowest latency, any GPU)"), val: 0})
+                        frucBackendModel.append({text: qsTr("NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)"), val: 1})
+                        frucBackendModel.append({text: qsTr("DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)"), val: 2})
                         currentIndex = StreamingPreferences.frucBackend
                     }
                     onActivated: {
@@ -783,7 +798,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Generic Compute uses D3D11/GLES compute shaders with ~1-2ms latency per frame. NVIDIA Optical Flow uses dedicated hardware via CUDA but adds ~12ms due to cross-API synchronization. DirectML runs an ML graph on D3D12 (works on any D3D12 GPU; slower than Generic in the current scaffolding graph, used as the plumbing for future ONNX model swap). Generic is recommended for most use cases.")
+                    ToolTip.text: qsTr("Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.\n\nNVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.\n\nDirectML: runs the bundled RIFE 4.25 lite ONNX model on the D3D12 DirectML EP — *real* motion-compensated ML interpolation, best visual quality on dynamic content. Per-op kernel-launch overhead (~25 ms baseline regardless of resolution) means it needs a Tensor-Core-class GPU (RTX 30/40 mainstream or better) to keep up at 720p+ in real time. On weaker GPUs the client auto-cascades the inference resolution down (1080p → 720p → 540p → 480p → 360p) and falls back to Generic if even 360p can't fit the frame budget.")
                 }
 
                 ComboBox {
@@ -814,14 +829,10 @@ Flickable {
                     ToolTip.text: qsTr("Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)\nBalanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)\nPerformance: 4-neighbor search + minimal processing (~6ms on iGPU)")
                 }
 
-                Label {
-                    width: parent.width
-                    visible: StreamingPreferences.fps > 180 && StreamingPreferences.enableFrameInterpolation
-                    text: qsTr("⚠ Frame interpolation is disabled above 180 FPS")
-                    font.pointSize: 9
-                    color: "#cc0000"
-                    wrapMode: Text.Wrap
-                }
+                // VipleStream v1.2.92: 180 fps cap warning removed
+                // along with the cap itself.  Generic FRUC happily
+                // does 240 fps on the benchmark machine; the old red
+                // ⚠ label was a leftover from the v1.2.56-era cap.
 
                 Label {
                     width: parent.width

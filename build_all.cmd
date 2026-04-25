@@ -48,8 +48,8 @@ if errorlevel 1 (
     echo [ERROR] Sunshine compilation failed
     exit /b 1
 )
-if not exist "%BUILD_S%\sunshine.exe" (
-    echo [ERROR] sunshine.exe not found after build
+if not exist "%BUILD_S%\viplestream-server.exe" (
+    echo [ERROR] viplestream-server.exe not found after build
     exit /b 1
 )
 echo [S-1/2] Server build succeeded
@@ -57,10 +57,14 @@ echo [S-1/2] Server build succeeded
 echo [S-2/2] Collecting + packaging...
 if exist "%TEMP_S%" rmdir /s /q "%TEMP_S%"
 mkdir "%TEMP_S%"
-copy /y "%BUILD_S%\sunshine.exe" "%TEMP_S%\" >nul
-for %%F in (sunshinesvc.exe dxgi-info.exe audio-info.exe) do (
+copy /y "%BUILD_S%\viplestream-server.exe" "%TEMP_S%\" >nul
+for %%F in (viplestream-svc.exe dxgi-info.exe audio-info.exe) do (
     if exist "%BUILD_S%\tools\%%F" copy /y "%BUILD_S%\tools\%%F" "%TEMP_S%\" >nul
 )
+:: viple-splash.exe ships next to viplestream-server.exe so the
+:: server's Steam-launch splash detached-cmd path can find it via
+:: GetModuleFileName(NULL).
+if exist "%BUILD_S%\viple-splash.exe" copy /y "%BUILD_S%\viple-splash.exe" "%TEMP_S%\" >nul
 xcopy /s /e /q /y "%BUILD_S%\assets\*" "%TEMP_S%\assets\" >nul
 
 if not exist "%RELEASE%" mkdir "%RELEASE%"
@@ -108,8 +112,8 @@ if errorlevel 1 (
     echo [ERROR] Moonlight build failed
     exit /b 1
 )
-if not exist "%RELDIR%\Moonlight.exe" (
-    echo [ERROR] Moonlight.exe not found
+if not exist "%RELDIR%\VipleStream.exe" (
+    echo [ERROR] VipleStream.exe not found
     exit /b 1
 )
 echo [M-2/3] Client build succeeded

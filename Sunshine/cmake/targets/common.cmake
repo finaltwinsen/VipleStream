@@ -10,6 +10,12 @@ foreach(dep ${SUNSHINE_TARGET_DEPENDENCIES})
     add_dependencies(sunshine ${dep})  # compile these before sunshine
 endforeach()
 
+# VipleStream rebrand: keep CMake target name "sunshine" so the rest of
+# the build system (target_link_libraries, etc) doesn't ripple, but
+# emit the binary as viplestream-server[.exe].  Build scripts and
+# service code reference the on-disk name; nothing else cares.
+set_target_properties(sunshine PROPERTIES OUTPUT_NAME "viplestream-server")
+
 # platform specific target definitions
 if(WIN32)
     include(${CMAKE_MODULE_PATH}/targets/windows.cmake)

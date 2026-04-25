@@ -135,7 +135,15 @@ namespace service_ctrl {
         return;
       }
 
-      service_handle = OpenServiceA(scm_handle, "SunshineService", service_desired_access);
+      // VipleStream rebrand v1.2.93: service renamed
+      // SunshineService -> VipleStreamServer.  Try the new name first;
+      // if not found (i.e. running against a legacy install whose
+      // service name wasn't migrated yet), fall back to the old name
+      // so the in-process control still works during migration.
+      service_handle = OpenServiceA(scm_handle, "VipleStreamServer", service_desired_access);
+      if (!service_handle && GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST) {
+        service_handle = OpenServiceA(scm_handle, "SunshineService", service_desired_access);
+      }
       if (!service_handle) {
         auto winerr = GetLastError();
         BOOST_LOG(error) << "OpenService() failed: "sv << winerr;
@@ -154,9 +162,10 @@ namespace service_ctrl {
     }
 
     /**
-     * @brief Asynchronously starts the VipleStream-Server service (Windows
-     *        service name remains "SunshineService" so existing installs
-     *        with the upstream service control code keep working).
+     * @brief Asynchronously starts the VipleStream-Server service.
+     *        New installs register the service as "VipleStreamServer";
+     *        legacy installs may still use "SunshineService" until
+     *        re-installed (handled in the constructor's fallback).
      */
     bool start_service() {
       if (!service_handle) {

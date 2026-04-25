@@ -441,6 +441,86 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationDomain("moonlight-stream.com");
     QCoreApplication::setApplicationName("VipleStream");
 
+    // VipleStream H.5 / TODO §A.11 fix: migrate legacy Moonlight settings.
+    //
+    // OrganizationName intentionally stays as the upstream string (see
+    // comment block above this), so VipleStream's QSettings live at
+    //   HKCU\Software\Moonlight Game Streaming Project\VipleStream
+    // while users who came from upstream Moonlight have all their
+    // paired hosts + client cert under
+    //   HKCU\Software\Moonlight Game Streaming Project\Moonlight
+    //
+    // Without migration, first launch of a freshly-rebranded build
+    // shows an empty PcView — paired hosts, certs, all preferences
+    // appear to have vanished.  We do a one-shot copy on first launch
+    // and gate it on a `migration/from_moonlight_done` flag so we
+    // never re-run it (and so users who legitimately paired only on
+    // VipleStream don't get their state silently overwritten).
+    {
+        QSettings dest;  // default = Moonlight Game Streaming Project / VipleStream
+        if (!dest.value("migration/from_moonlight_done", false).toBool()) {
+            QSettings src("Moonlight Game Streaming Project", "Moonlight");
+
+            // Has the legacy install paired any hosts?
+            src.beginGroup("hosts");
+            int srcHostCount = src.childGroups().size();
+            src.endGroup();
+
+            // Already paired hosts on the VipleStream side?
+            dest.beginGroup("hosts");
+            int destHostCount = dest.childGroups().size();
+            dest.endGroup();
+
+            if (destHostCount == 0 && srcHostCount > 0) {
+                // Copy the entire `hosts` group recursively.
+                src.beginGroup("hosts");
+                const QStringList hostKeys = src.allKeys();
+                src.endGroup();
+                foreach (const QString& k, hostKeys) {
+                    dest.setValue("hosts/" + k, src.value("hosts/" + k));
+                }
+
+                // Copy the client identity (cert + private key).  The
+                // legacy hosts only recognise THIS cert — if we kept
+                // the freshly-generated VipleStream cert, every paired
+                // host would reject us as "unknown client".
+                // Qt's foreach() macro can't tokenise a brace-initialised
+                // QStringList literal (the comma inside the braces breaks
+                // the macro), so list the names explicitly.
+                static const QStringList kCriticalKeys {
+                    QStringLiteral("certificate"),
+                    QStringLiteral("key"),
+                };
+                for (const QString& crit : kCriticalKeys) {
+                    QVariant v = src.value(crit);
+                    if (!v.isNull() && !v.toByteArray().isEmpty()) {
+                        dest.setValue(crit, v);
+                    }
+                }
+
+                // Also copy other top-level prefs the user may have set
+                // (resolution, fps, bitrate…) — but only if VipleStream
+                // doesn't already have its own value, so the rebrand
+                // doesn't blow away VipleStream-specific tuning the
+                // user did under the new key.
+                foreach (const QString& k, src.allKeys()) {
+                    if (k.startsWith("hosts/"))      continue;
+                    if (k.startsWith("migration/"))  continue;
+                    if (k == "certificate" || k == "key") continue;
+                    if (!dest.contains(k)) {
+                        dest.setValue(k, src.value(k));
+                    }
+                }
+
+                qInfo() << "[migration] Imported"
+                        << srcHostCount << "paired host(s) +"
+                        << "client cert from legacy Moonlight QSettings";
+            }
+            dest.setValue("migration/from_moonlight_done", true);
+            dest.sync();
+        }
+    }
+
     if (QFile(QDir::currentPath() + "/portable.dat").exists()) {
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, QDir::currentPath());
@@ -905,10 +985,13 @@ int main(int argc, char *argv[])
     app.setWindowIcon(QIcon(":/res/moonlight.svg"));
 #endif
 
-    // This is necessary to show our icon correctly on Wayland
-    app.setDesktopFileName("com.moonlight_stream.Moonlight");
-    qputenv("SDL_VIDEO_WAYLAND_WMCLASS", "com.moonlight_stream.Moonlight");
-    qputenv("SDL_VIDEO_X11_WMCLASS", "com.moonlight_stream.Moonlight");
+    // This is necessary to show our icon correctly on Wayland.
+    // VipleStream FDO/desktop ID rebrand v1.2.93: was
+    // com.moonlight_stream.Moonlight; now com.piinsta to match the
+    // renamed .desktop / .appdata.xml files under deploy/linux/.
+    app.setDesktopFileName("com.piinsta");
+    qputenv("SDL_VIDEO_WAYLAND_WMCLASS", "com.piinsta");
+    qputenv("SDL_VIDEO_X11_WMCLASS", "com.piinsta");
 
     // Register our C++ types for QML
     qmlRegisterType<ComputerModel>("ComputerModel", 1, 0, "ComputerModel");

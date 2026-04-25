@@ -190,24 +190,75 @@ namespace viple::steam {
     }
 
     /**
-     * Read the ActiveProcess subkey — where the LIVE Steam client stores
-     * its per-session state. Note: this is under HKCU\Software\Valve\Steam\
-     * ActiveProcess (subkey), NOT directly under Valve\Steam. The
-     * difference cost 20 minutes in the PowerShell port.
+     * Walk HKEY_USERS subhives looking for any one that has
+     * Software\Valve\Steam\ActiveProcess\ActiveUser set to a non-zero
+     * DWORD. Used in place of HKEY_CURRENT_USER reads because Sunshine
+     * runs via CreateProcessAsUserW without LoadUserProfile — so the
+     * spawned worker's HKCU points at .DEFAULT (no Valve\Steam keys),
+     * not the actual logged-in user's hive. Caused the H.4 dropdown
+     * to permanently show "current_user = empty" through v1.2.117.
+     *
+     * Skips _Classes subkeys (those are per-user file association
+     * hives, never contain Valve\Steam). Returns the FIRST non-zero
+     * ActiveUser found, which on a typical single-user host is the
+     * console user's value. Returns "" if no hive has it set.
      */
-    std::string read_current_user_id3() {
-      uint32_t v = read_reg_dword(HKEY_CURRENT_USER, L"Software\\Valve\\Steam\\ActiveProcess", L"ActiveUser");
-      if (v == 0) {
+    std::string walk_hkey_users_for_active_user() {
+      HKEY users_root = nullptr;
+      if (RegOpenKeyExW(HKEY_USERS, nullptr, 0,
+                        KEY_ENUMERATE_SUB_KEYS | KEY_READ, &users_root) != ERROR_SUCCESS) {
         return {};
       }
-      return std::to_string(v);
+      std::string result;
+      for (DWORD i = 0;; ++i) {
+        wchar_t sid[256];
+        DWORD sid_len = 256;
+        if (RegEnumKeyExW(users_root, i, sid, &sid_len, nullptr, nullptr,
+                          nullptr, nullptr) != ERROR_SUCCESS) {
+          break;
+        }
+        if (wcsstr(sid, L"_Classes")) continue;
+        std::wstring path = std::wstring(sid) + L"\\Software\\Valve\\Steam\\ActiveProcess";
+        HKEY ap = nullptr;
+        if (RegOpenKeyExW(users_root, path.c_str(), 0, KEY_READ, &ap) != ERROR_SUCCESS) {
+          continue;
+        }
+        DWORD value = 0, value_size = sizeof(value), value_type = 0;
+        auto rc = RegQueryValueExW(ap, L"ActiveUser", nullptr, &value_type,
+                                   reinterpret_cast<BYTE *>(&value), &value_size);
+        RegCloseKey(ap);
+        if (rc == ERROR_SUCCESS && value_type == REG_DWORD && value != 0) {
+          result = std::to_string(value);
+          break;
+        }
+      }
+      RegCloseKey(users_root);
+      return result;
+    }
+
+    std::string read_current_user_id3() {
+      // Was HKCU read until v1.2.118 — see walk_hkey_users_for_active_user()
+      // doc comment for why HKCU is the wrong hive in our spawn context.
+      return walk_hkey_users_for_active_user();
     }
 
     std::string read_auto_login() {
+      // FIXME(v1.2.118): same HKCU-vs-.DEFAULT problem as
+      // read_current_user_id3 above — would need a HKEY_USERS walk to
+      // be correct. Currently unused (H.4 doesn't read auto_login),
+      // so left as-is; revisit if a future feature needs it.
       return wstr_to_utf8(read_reg_sz(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"AutoLoginUser"));
     }
 
   }  // namespace
+
+  // Public re-export. Defined outside the anonymous namespace so callers
+  // in other TUs (nvhttp.cpp's /steamprofiles + /steamswitch handlers)
+  // can use the same implementation without duplicating the HKEY_USERS
+  // walk. See header for rationale.
+  std::string read_active_user_id3() {
+    return walk_hkey_users_for_active_user();
+  }
 
   // ── Main scan ───────────────────────────────────────────────────────────
 
@@ -335,8 +386,14 @@ namespace viple::steam {
     }
     r.library_count = static_cast<int>(library_roots.size());
 
-    // ── Per-user entitlements: build map AppID → [steam_id3, ...] ──
+    // ── Per-user entitlements + playtime: build maps AppID → [owners] and
+    //    AppID → (max last_played, sum playtime_minutes) ──
     std::unordered_map<std::string /* app_id */, std::vector<std::string> /* owner id3 */> ownership;
+    struct PlayStats {
+      int64_t last_played      = 0;
+      int64_t playtime_minutes = 0;
+    };
+    std::unordered_map<std::string /* app_id */, PlayStats> playstats;
     for (const auto &p : r.profiles) {
       fs::path lc = steam / "userdata" / p.steam_id3 / "config" / "localconfig.vdf";
       if (!fs::exists(lc, ec)) {
@@ -355,8 +412,26 @@ namespace viple::steam {
       if (!apps_node || !apps_node->is_map()) {
         continue;
       }
-      for (const auto &[app_id, _node] : apps_node->as_map()) {
+      for (const auto &[app_id, app_node] : apps_node->as_map()) {
         ownership[app_id].emplace_back(p.steam_id3);
+
+        // Playtime + last_played are optional — older apps / never-run
+        // entries don't have them. Both fields are plain decimal
+        // integers stored as VDF strings; stoll's try/catch guard
+        // keeps any weird Steam format from crashing the scan.
+        if (app_node.is_map()) {
+          auto &ps = playstats[app_id];
+          try {
+            int64_t lp = std::stoll(app_node.leaf_or("LastPlayed", "0"));
+            ps.last_played = std::max(ps.last_played, lp);
+          } catch (...) {}
+          try {
+            // "Playtime" key has been used historically; Steam also writes
+            // "Playtime2wks" for 2-week trailing stats. We want cumulative.
+            int64_t pt = std::stoll(app_node.leaf_or("Playtime", "0"));
+            ps.playtime_minutes += pt;
+          } catch (...) {}
+        }
       }
     }
 
@@ -429,6 +504,10 @@ namespace viple::steam {
 
         if (auto it = ownership.find(app_id); it != ownership.end()) {
           a.owners = it->second;
+        }
+        if (auto it = playstats.find(app_id); it != playstats.end()) {
+          a.last_played      = it->second.last_played;
+          a.playtime_minutes = it->second.playtime_minutes;
         }
 
         r.apps.emplace_back(std::move(a));

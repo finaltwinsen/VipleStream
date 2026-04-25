@@ -40,6 +40,16 @@
             android:key="checkbox_stretch_video"
             android:title="@string/title_checkbox_stretch_video"
             android:defaultValue="false" />
+        <!-- VipleStream H Phase 2: app-list ordering. Mirrors the Qt
+             client setting; values are AppSortMode enum names so the
+             two clients write the same persisted strings. -->
+        <ListPreference
+            android:key="list_app_sort_mode"
+            android:title="@string/title_app_sort_mode"
+            android:summary="@string/summary_app_sort_mode"
+            android:entries="@array/app_sort_mode_names"
+            android:entryValues="@array/app_sort_mode_values"
+            android:defaultValue="RECENT" />
     </PreferenceCategory>
     <PreferenceCategory android:title="@string/category_audio_settings">
         <ListPreference

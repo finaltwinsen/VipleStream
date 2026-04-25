@@ -29,6 +29,12 @@ private:
 
     bool updateAppList(QVector<NvApp> newAppList);
 
+public:
+    // VipleStream H Phase 2.2: shared app comparator — `true` iff `a`
+    // should sort before `b` given the current StreamingPreferences
+    // AppSortMode. Exposed so AppModel's insertion-sort can reuse it.
+    static bool appLessThan(const NvApp& a, const NvApp& b);
+
     bool pendingQuit;
 
 public:
@@ -116,6 +122,13 @@ public:
     QSslCertificate serverCert;
     QVector<NvApp> appList;
     bool isNvidiaServerSoftware;
+    // VipleStream capability marker (v1.2.93). True when this host's
+    // /serverinfo response carried a <VipleStreamProtocol> element —
+    // i.e. it's a VipleStream-Server, not vanilla Sunshine / GFE.
+    // Used purely for UI affordances; protocol-level traffic is
+    // unaffected (we still happily talk to vanilla hosts).
+    bool isVipleStreamPeer = false;
+    QString vipleStreamProtocol;  // version string from the marker
     // Remember to update isEqualSerialized() when adding fields here!
 
     // Synchronization

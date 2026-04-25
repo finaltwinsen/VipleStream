@@ -155,6 +155,14 @@
     <string name="summary_seekbar_bitrate">Increase for better image quality. Decrease to improve performance on slower connections.</string>
     <string name="suffix_seekbar_bitrate_mbps">Mbps</string>
     <string name="title_checkbox_stretch_video">Stretch video to full-screen</string>
+
+    <!-- VipleStream H Phase 2: app-list sort mode preference. -->
+    <string name="title_app_sort_mode">App sort order</string>
+    <string name="summary_app_sort_mode">How games are arranged on the app list. Manually-defined apps (Desktop, Steam Big Picture) always pin to the top.</string>
+    <string name="app_sort_mode_default">Default (host order)</string>
+    <string name="app_sort_mode_recent">Recently played</string>
+    <string name="app_sort_mode_playtime">Most played</string>
+    <string name="app_sort_mode_name">Name (A–Z)</string>
     <string name="resolution_prefix_native">Native</string>
     <string name="resolution_prefix_native_fullscreen">Native Full-Screen</string>
     <string name="resolution_prefix_native_landscape">(Landscape)</string>

@@ -43,6 +43,20 @@ namespace viple::steam {
     std::string              image_library;  ///< local path to library_600x900.jpg, "" if absent
     std::vector<std::string> owners;         ///< steam_id3 list — which profiles own this app
     std::string              launch_url;     ///< "steam://rungameid/<AppID>"
+
+    // VipleStream H Phase 2.2: per-user playtime data aggregated across
+    // all owners on this machine. Steam tracks per (user, app) in the
+    // `UserLocalConfigStore.Software.Valve.Steam.apps.<AppID>` block of
+    // each user's `localconfig.vdf` — we take max(LastPlayed) so
+    // "recently played by anyone" wins for the sort, and sum(Playtime)
+    // so a game played on two accounts counts as total use on the
+    // machine. Both 0 means nobody has ever launched it (newly
+    // installed / installed-but-never-run).
+    //
+    // Phase 3 will switch aggregation to per-selected-profile once the
+    // client UI exposes a profile filter.
+    int64_t                  last_played      = 0;  ///< unix timestamp, 0 = never
+    int64_t                  playtime_minutes = 0;  ///< all-time total across all owners
   };
 
   struct Result {
@@ -76,6 +90,21 @@ namespace viple::steam {
    * in Phase 4 the ActiveUser changes, and the UI wants fresh data).
    */
   void invalidate_cache();
+
+  /**
+   * Read the currently-active Steam user (steam_id3) from the registry,
+   * bypassing scan_cached()'s 5-min TTL. Cheap (one DWORD read per
+   * HKEY_USERS subhive). Returns "" if Steam isn't logged in.
+   *
+   * Walks HKEY_USERS rather than HKEY_CURRENT_USER because Sunshine
+   * runs via CreateProcessAsUserW WITHOUT LoadUserProfile — so the
+   * spawned process's HKCU points at the .DEFAULT hive, not the
+   * actual logged-in user's. The same trick has been used since
+   * v1.2.117 in the /steamswitch polling loop; v1.2.118 hoisted it
+   * here so /steamprofiles, the /steamswitch short-circuit, and any
+   * future caller all hit one canonical implementation.
+   */
+  std::string read_active_user_id3();
 
 }  // namespace viple::steam
 

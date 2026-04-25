@@ -397,6 +397,32 @@ bool DirectMLFRUC::createD3D12Device()
                                              m_PostCmdAlloc12.Get(), nullptr,
                                              IID_PPV_ARGS(&m_PostCmdList12)))) return false;
     m_PostCmdList12->Close();
+
+    // VipleStream v1.2.86: 2-slot rings for post-unpack and concat
+    // allocators. Frames alternate slots so by the time a slot is
+    // re-used, its previous frame's GPU work has had a full source-
+    // frame period (~33 ms at 30 fps source) to drain — long enough
+    // for the ~25 ms 540p inference, eliminating the wait_post stall
+    // that's been capping real fps at 26 (vs the 30 fps source).
+    for (uint32_t i = 0; i < kPostAllocRingSize; ++i) {
+        if (FAILED(m_Device12->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                IID_PPV_ARGS(&m_PostUnpackAllocRing[i])))) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: post-unpack ring %u create failed", i);
+            return false;
+        }
+        m_PostUnpackAllocFenceVal[i] = 0;
+
+        if (FAILED(m_Device12->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                IID_PPV_ARGS(&m_ConcatAllocRing[i])))) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML: concat ring %u create failed", i);
+            return false;
+        }
+        m_ConcatAllocFenceVal[i] = 0;
+    }
     return true;
 }
 
@@ -1263,6 +1289,44 @@ void DirectMLFRUC::recordUnpackCS(ID3D12GraphicsCommandList* cl)
 }
 
 
+// VipleStream v1.2.82: gate an allocator's Reset() on its last
+// recorded fence value having been reached by the GPU.
+//
+// In steady state this is a single fast atomic load (GetCompletedValue)
+// followed by a no-op compare — sub-µs cost. When the GPU has fallen
+// behind (e.g. heavy game or low-end GPU) we block on an event for up
+// to 500 ms. That's still better than calling Reset() on an in-use
+// allocator, which is undefined behaviour and on most drivers
+// manifests as an *implicit* (un-instrumented) CPU stall — exactly
+// the regression that made DirectML "drop FPS instead of doubling it"
+// after Option C (v1.2.64) added the ring allocator for the *pack*
+// CL only, leaving m_CmdAlloc12 / m_PostCmdAlloc12 unprotected for
+// their post-dispatch CLs.
+//
+// v1.2.83: instrumented to measure how often / how long we wait —
+// the result feeds the per-stage [VIPLE-FRUC-DML] log so we can tell
+// whether the bottleneck is GPU inference or the wait.  Returns the
+// number of microseconds spent waiting (0 in the fast path).
+static double waitFenceBeforeAllocReset(ID3D12Fence* fence, uint64_t fenceVal)
+{
+    if (fenceVal == 0) return 0.0;  // never used, no work to wait for
+    if (fence->GetCompletedValue() >= fenceVal) return 0.0;  // GPU already done
+
+    LARGE_INTEGER tStart, tEnd, freq;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&tStart);
+
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!ev) return 0.0;
+    if (SUCCEEDED(fence->SetEventOnCompletion(fenceVal, ev))) {
+        WaitForSingleObject(ev, 500);
+    }
+    CloseHandle(ev);
+
+    QueryPerformanceCounter(&tEnd);
+    return (double)(tEnd.QuadPart - tStart.QuadPart) * 1000000.0 / (double)freq.QuadPart;
+}
+
 // ── runDMLDispatch ────────────────────────────────────────────────────────
 //
 // D6 flow:
@@ -1286,22 +1350,12 @@ bool DirectMLFRUC::runDMLDispatch()
     //
     // VipleStream v1.2.62 (Option C): pick next allocator from the
     // ring. Wait if its last-known fence value hasn't been reached by
-    // the GPU yet (rarely happens since the ring is kAllocRingSize
-    // submissions deep — by the time we come back to slot N the GPU
-    // has done N more frames of work). `m_CmdAllocFenceVal[slot] == 0`
-    // means "never used" so no wait. GetCompletedValue is a fast CPU
-    // atomic load.
+    // the GPU yet. v1.2.83 routes through waitFenceBeforeAllocReset
+    // so the wait time gets accumulated into wait_pack_us — making
+    // ring-allocator stalls visible in the [VIPLE-FRUC-DML] log too.
     const uint32_t slot = m_CmdAllocIdx;
-    if (m_CmdAllocFenceVal[slot] != 0 &&
-        m_Fence12->GetCompletedValue() < m_CmdAllocFenceVal[slot]) {
-        // Fallback slow-path — should be 0% of frames in steady state
-        HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (ev) {
-            m_Fence12->SetEventOnCompletion(m_CmdAllocFenceVal[slot], ev);
-            WaitForSingleObject(ev, 500);
-            CloseHandle(ev);
-        }
-    }
+    double waitPackUs = waitFenceBeforeAllocReset(m_Fence12.Get(), m_CmdAllocFenceVal[slot]);
+    emaAcc(m_Stage.wait_pack_us, waitPackUs);
     auto& alloc = m_CmdAllocRing[slot];
     alloc->Reset();
     m_CmdList12->Reset(alloc.Get(), nullptr);
@@ -1343,6 +1397,9 @@ bool DirectMLFRUC::runDMLDispatch()
         rebindPingPongInputs();
 
         // Pack CL already executed; dispatch DML + unpack in a new CL.
+        // v1.2.82: gate Reset on the previous frame's post-dispatch
+        // CL having actually completed on the GPU.
+        waitFenceBeforeAllocReset(m_Fence12.Get(), m_CmdAlloc12FenceVal);
         m_CmdAlloc12->Reset();
         m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
         ID3D12DescriptorHeap* dmlHeaps[] = { m_DMLDescHeap.Get() };
@@ -1854,6 +1911,15 @@ bool DirectMLFRUC::runOrtInference()
         int prevSlot = 1 - m_WriteSlot;
         int currSlot = m_WriteSlot;
 
+        // VipleStream v1.2.83: ORT-path stage timers.
+        LARGE_INTEGER qpfFreq; QueryPerformanceFrequency(&qpfFreq);
+        auto usSince = [&](LARGE_INTEGER a, LARGE_INTEGER b) -> double {
+            return (double)(b.QuadPart - a.QuadPart) * 1000000.0 / (double)qpfFreq.QuadPart;
+        };
+        auto emaAcc = [](double& acc, double sample) {
+            acc = (acc == 0.0) ? sample : (acc * 0.9375 + sample * 0.0625);
+        };
+
         // ── Concat-input path: build the concatenated input tensor ───────
         // Reuses m_PostCmdAlloc12 so m_CmdAlloc12 (still tracking the
         // pack CL submitted in runDMLDispatch) is free to be reused for
@@ -1862,8 +1928,20 @@ bool DirectMLFRUC::runOrtInference()
             const uint64_t planeBytes  = (uint64_t)m_Height * m_Width * sizeof(float);
             const uint64_t imgBlockBytes = (uint64_t)m_ConcatImageChannels * planeBytes;
 
-            m_PostCmdAlloc12->Reset();
-            m_PostCmdList12->Reset(m_PostCmdAlloc12.Get(), nullptr);
+            // v1.2.86: pick next concat-allocator ring slot.  The
+            // 2-slot ring eliminates per-frame wait at 30 fps source
+            // because slot N's frame is two source-frame-periods (~66 ms)
+            // old by the time it's reused — well past the 25 ms
+            // inference window.  Wait gate stays as a safety net for
+            // transients (e.g. stutter caused by external GPU load).
+            LARGE_INTEGER tConcat0; QueryPerformanceCounter(&tConcat0);
+            const uint32_t concatSlot = m_ConcatAllocIdx;
+            emaAcc(m_Stage.wait_concat_us,
+                   waitFenceBeforeAllocReset(m_Fence12.Get(),
+                                             m_ConcatAllocFenceVal[concatSlot]));
+            auto& concatAlloc = m_ConcatAllocRing[concatSlot];
+            concatAlloc->Reset();
+            m_PostCmdList12->Reset(concatAlloc.Get(), nullptr);
 
             // Pre-transitions:
             //   FrameTensor[prev,curr]: UAV     -> COPY_SOURCE
@@ -1920,6 +1998,19 @@ bool DirectMLFRUC::runOrtInference()
             m_PostCmdList12->Close();
             { ID3D12CommandList* c[] = { m_PostCmdList12.Get() };
               m_Queue12->ExecuteCommandLists(1, c); }
+
+            // VipleStream v1.2.83: signal IMMEDIATELY after the concat
+            // CL is submitted so we have a fence value that completes
+            // when (just) the concat CL is done.
+            //
+            // v1.2.86: stamp the active ring slot, then advance.
+            m_FenceValue++;
+            m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
+            m_ConcatAllocFenceVal[concatSlot] = m_FenceValue;
+            m_ConcatAllocIdx = (m_ConcatAllocIdx + 1) % kPostAllocRingSize;
+
+            LARGE_INTEGER tConcatEnd; QueryPerformanceCounter(&tConcatEnd);
+            emaAcc(m_Stage.ort_concat_us, usSince(tConcat0, tConcatEnd));
         }
 
         Ort::MemoryInfo mem("DML", OrtDeviceAllocator, 0, OrtMemTypeDefault);
@@ -1971,16 +2062,36 @@ bool DirectMLFRUC::runOrtInference()
                                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
         }
 
+        // v1.2.83: time the ORT::Run() call separately. With GPU-resident
+        // input/output tensors and the DML EP sharing our m_Queue12,
+        // this should just enqueue ops and return — but every prior
+        // [VIPLE-FRUC-DML] log shows ~44ms hidden in this region, so
+        // we need a dedicated number to know whether ORT is blocking.
+        LARGE_INTEGER tRun0; QueryPerformanceCounter(&tRun0);
         Ort::RunOptions ro;
         m_OrtSession->Run(ro,
             m_OrtInputNamesCStr.data(),  inputs.data(), inputs.size(),
             m_OrtOutputNamesCStr.data(), &out, 1);
+        LARGE_INTEGER tRun1; QueryPerformanceCounter(&tRun1);
+        emaAcc(m_Stage.ort_run_us, usSince(tRun0, tRun1));
 
         // ── Post-ORT CL: UAV barrier on OutputTensor + unpack CS ─────────
-        // Uses m_CmdAlloc12; by this point the pack pre-CL submitted in
-        // runDMLDispatch has had plenty of GPU time.
-        m_CmdAlloc12->Reset();
-        m_CmdList12->Reset(m_CmdAlloc12.Get(), nullptr);
+        //
+        // v1.2.86: 2-slot ring for post-unpack allocators.  Slot N is
+        // re-used 2 source-frame-periods (~66 ms at 30 fps source)
+        // after submission — well past the ~25 ms inference window —
+        // so the wait fence gate steady-state cost drops to zero.
+        // (The fence still gates on a slow-path stutter as a safety
+        // net.)  This is what brings DirectML real fps from 26 to ~30,
+        // matching the source rate.
+        const uint32_t postSlot = m_PostUnpackAllocIdx;
+        emaAcc(m_Stage.wait_post_us,
+               waitFenceBeforeAllocReset(m_Fence12.Get(),
+                                         m_PostUnpackAllocFenceVal[postSlot]));
+        LARGE_INTEGER tPost0; QueryPerformanceCounter(&tPost0);
+        auto& postAlloc = m_PostUnpackAllocRing[postSlot];
+        postAlloc->Reset();
+        m_CmdList12->Reset(postAlloc.Get(), nullptr);
         ID3D12DescriptorHeap* csHeaps[] = { m_CsDescHeap.Get() };
         m_CmdList12->SetDescriptorHeaps(1, csHeaps);
 
@@ -1993,6 +2104,8 @@ bool DirectMLFRUC::runOrtInference()
         m_CmdList12->Close();
         { ID3D12CommandList* c[] = { m_CmdList12.Get() };
           m_Queue12->ExecuteCommandLists(1, c); }
+        LARGE_INTEGER tPost1; QueryPerformanceCounter(&tPost1);
+        emaAcc(m_Stage.ort_post_us, usSince(tPost0, tPost1));
 
         return true;
 
@@ -2104,6 +2217,19 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
     m_CmdAllocFenceVal[m_CmdAllocIdx] = m_FenceValue;
     m_CmdAllocIdx = (m_CmdAllocIdx + 1) % kAllocRingSize;
 
+    // VipleStream v1.2.86: stamp the just-used post-unpack ring slot
+    // with the current end-of-frame fence value, then advance the
+    // index.  When the ring wraps back to this slot two source-frame
+    // periods later, the fence-gate is satisfied immediately (GPU
+    // long since past this fence value).
+    //
+    // m_CmdAlloc12FenceVal kept in sync as a defensive backstop for
+    // the few non-hot paths that still touch m_CmdAlloc12 (e.g. ORT
+    // failure -> inline DML fallback).
+    m_PostUnpackAllocFenceVal[m_PostUnpackAllocIdx] = m_FenceValue;
+    m_PostUnpackAllocIdx = (m_PostUnpackAllocIdx + 1) % kPostAllocRingSize;
+    m_CmdAlloc12FenceVal = m_FenceValue;
+
     m_WriteSlot = 1 - m_WriteSlot;
     m_FrameCount++;
 
@@ -2126,6 +2252,13 @@ bool DirectMLFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
                     m_Stage.pack_record_us, m_Stage.dml_record_us,
                     m_Stage.unpack_record_us, m_Stage.close_exec_us,
                     m_Stage.d3d12_signal_wait_us, m_Stage.submit_total_us);
+        // v1.2.83: ORT-path-specific breakdown — prints zeros for
+        // the inline DML path which doesn't go through these stages.
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-DML-ORT] ort_concat=%.0f ort_run=%.0f ort_post=%.0f | "
+                    "wait_pack=%.0f wait_post=%.0f wait_concat=%.0f μs",
+                    m_Stage.ort_concat_us, m_Stage.ort_run_us, m_Stage.ort_post_us,
+                    m_Stage.wait_pack_us, m_Stage.wait_post_us, m_Stage.wait_concat_us);
     }
 
     double dtMs = totalUs / 1000.0;
@@ -2143,4 +2276,116 @@ void DirectMLFRUC::skipFrame(ID3D11DeviceContext* ctx)
     ID3D11RenderTargetView* nullRTV = nullptr;
     ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
     m_FrameCount++;
+}
+
+// ── probeInferenceCost ────────────────────────────────────────────────────
+//
+// VipleStream v1.2.87: measure how long one DML/ORT inference takes
+// at this backend's current resolution.  Drives the auto-resolution
+// cascade in D3D11VARenderer::initFRUC().
+//
+// Strategy:
+//   1. Run `warmup` inferences with no timing — first ORT::Run on a
+//      DML EP session is always slower (kernel selection / JIT) and
+//      doesn't reflect steady-state cost.
+//   2. Run `iterations` timed inferences. Each one Signals a fence
+//      after the unpack CL submission and CPU-waits for the fence
+//      to reach that value — that's how we measure end-to-end GPU
+//      time per frame instead of just CPU enqueue time.
+//   3. Return the median timed result (resilient to one spike).
+//
+// All ops run on uninitialised GPU tensor data — DML inference cost
+// is shape-dependent, not data-dependent.
+
+double DirectMLFRUC::probeInferenceCost(int warmup, int iterations)
+{
+    if (!m_Initialized) return -1.0;
+    if (!m_UseOrt && !m_DMLCompiledOp) return -1.0;
+    if (warmup < 0)     warmup = 0;
+    if (iterations < 1) iterations = 1;
+
+    // Helper that fully drains the GPU queue up to a given fence value.
+    auto cpuWaitFence = [&](uint64_t fenceVal) {
+        if (m_Fence12->GetCompletedValue() >= fenceVal) return;
+        HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!ev) return;
+        if (SUCCEEDED(m_Fence12->SetEventOnCompletion(fenceVal, ev))) {
+            // 2 s cap — 100 ms × 20 iterations is plenty even for the
+            // slowest GPUs we'd consider; longer means something
+            // is wrong and we should bail rather than hang init.
+            WaitForSingleObject(ev, 2000);
+        }
+        CloseHandle(ev);
+    };
+
+    // Run a single inference path that mirrors runDMLDispatch+post-
+    // unpack, but skips the pack CS (we don't have a real source
+    // texture here). DML reads m_FrameTensor[0]/[1] directly — for
+    // timing they can be uninitialised garbage.
+    auto runOne = [&]() -> uint64_t {
+        // Bind ping-pong inputs every probe iteration so DML reads
+        // valid descriptors (the binding table was set up at init
+        // for slot 0 → slot 1).
+        if (!m_UseOrt && m_DMLCompiledOp) rebindPingPongInputs();
+
+        if (m_UseOrt) {
+            runOrtInference();
+        } else {
+            // Inline DML: record + submit dispatch only.
+            const uint32_t slot = m_CmdAllocIdx;
+            waitFenceBeforeAllocReset(m_Fence12.Get(), m_CmdAllocFenceVal[slot]);
+            auto& alloc = m_CmdAllocRing[slot];
+            alloc->Reset();
+            m_CmdList12->Reset(alloc.Get(), nullptr);
+            ID3D12DescriptorHeap* dmlHeaps[] = { m_DMLDescHeap.Get() };
+            m_CmdList12->SetDescriptorHeaps(1, dmlHeaps);
+            m_DMLRecorder->RecordDispatch(m_CmdList12.Get(),
+                                          m_DMLCompiledOp.Get(),
+                                          m_DMLBindingTable.Get());
+            m_CmdList12->Close();
+            ID3D12CommandList* c[] = { m_CmdList12.Get() };
+            m_Queue12->ExecuteCommandLists(1, c);
+            m_CmdAllocFenceVal[slot] = ++m_FenceValue;
+            m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
+            m_CmdAllocIdx = (m_CmdAllocIdx + 1) % kAllocRingSize;
+        }
+        // Always Signal at the end so we have a fence to wait on.
+        // ORT path's runOrtInference doesn't bump m_FenceValue itself
+        // (its own concat-Signal aside), so we add a closing one here.
+        ++m_FenceValue;
+        m_Queue12->Signal(m_Fence12.Get(), m_FenceValue);
+        return m_FenceValue;
+    };
+
+    LARGE_INTEGER qpfFreq; QueryPerformanceFrequency(&qpfFreq);
+    auto msNow = [&]() {
+        LARGE_INTEGER t; QueryPerformanceCounter(&t);
+        return (double)t.QuadPart * 1000.0 / (double)qpfFreq.QuadPart;
+    };
+
+    // Warmup — discard timings.
+    for (int i = 0; i < warmup; ++i) {
+        uint64_t fv = runOne();
+        cpuWaitFence(fv);
+    }
+
+    // Timed runs.
+    std::vector<double> samples;
+    samples.reserve(iterations);
+    for (int i = 0; i < iterations; ++i) {
+        double t0 = msNow();
+        uint64_t fv = runOne();
+        cpuWaitFence(fv);
+        samples.push_back(msNow() - t0);
+    }
+
+    std::sort(samples.begin(), samples.end());
+    double median = samples[samples.size() / 2];
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC] DirectML probe @ %ux%u: median=%.2fms "
+                "(min=%.2f max=%.2f n=%d, warmup=%d)",
+                m_Width, m_Height, median,
+                samples.front(), samples.back(), iterations, warmup);
+    return median;
 }

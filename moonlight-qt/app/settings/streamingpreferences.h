@@ -144,6 +144,28 @@ public:
     };
     Q_ENUM(DesignVariant);
 
+    // VipleStream H Phase 2.2: Apps view sort mode.
+    // - ASM_DEFAULT: manual entries from apps.json pinned at top (ordered
+    //   alphabetically), then auto-imported (Steam) ordered alphabetically.
+    //   This is the original post-H-Phase2 behaviour.
+    // - ASM_RECENT: manual entries pinned at top, then Steam games ordered
+    //   by LastPlayed descending (most recent first). Games that have
+    //   NEVER been launched (LastPlayed==0) fall to the bottom, ordered
+    //   alphabetically so they stay discoverable.
+    // - ASM_PLAYTIME: manual entries pinned at top, then Steam games
+    //   ordered by Playtime descending (most-played first). Unplayed
+    //   games at bottom alphabetical — same tiebreaker as ASM_RECENT.
+    // - ASM_NAME: pure alphabetical across all entries, ignoring source
+    //   and playtime. For users who want upstream Moonlight's behaviour.
+    enum AppSortMode
+    {
+        ASM_DEFAULT,
+        ASM_RECENT,
+        ASM_PLAYTIME,
+        ASM_NAME,
+    };
+    Q_ENUM(AppSortMode);
+
     Q_PROPERTY(int width MEMBER width NOTIFY displayModeChanged)
     Q_PROPERTY(int height MEMBER height NOTIFY displayModeChanged)
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
@@ -160,6 +182,7 @@ public:
     Q_PROPERTY(FrucBackend frucBackend MEMBER frucBackend NOTIFY frucBackendChanged)
     Q_PROPERTY(FrucQuality frucQuality MEMBER frucQuality NOTIFY frucQualityChanged)
     Q_PROPERTY(DesignVariant designVariant MEMBER designVariant NOTIFY designVariantChanged)
+    Q_PROPERTY(AppSortMode appSortMode MEMBER appSortMode NOTIFY appSortModeChanged)
     Q_PROPERTY(QString relayUrl MEMBER relayUrl NOTIFY relayUrlChanged)
     Q_PROPERTY(QString relayPsk MEMBER relayPsk NOTIFY relayPskChanged)
     Q_PROPERTY(bool forceRelayStream MEMBER forceRelayStream NOTIFY forceRelayStreamChanged)
@@ -209,6 +232,7 @@ public:
     FrucBackend frucBackend;
     FrucQuality frucQuality;
     DesignVariant designVariant;
+    AppSortMode appSortMode;
     QString relayUrl;      // VipleStream: signaling relay WebSocket URL
     QString relayPsk;      // VipleStream: relay pre-shared key
     bool forceRelayStream; // VipleStream: always stream via relay (bypass direct /launch)
@@ -256,6 +280,7 @@ signals:
     void frucBackendChanged();
     void frucQualityChanged();
     void designVariantChanged();
+    void appSortModeChanged();
     void relayUrlChanged();
     void relayPskChanged();
     void forceRelayStreamChanged();

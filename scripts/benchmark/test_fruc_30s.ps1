@@ -67,16 +67,19 @@ if ($ExePath) {
     $MoonlightExe = $ExePath
 } else {
     # Prefer the fresh dev build; fall back to the installed copy.
-    $devBuild = Join-Path $ProjectRoot 'temp\moonlight\Moonlight.exe'
-    if (Test-Path $devBuild) {
-        $MoonlightExe = $devBuild
-    } else {
-        $MoonlightExe = 'C:\Program Files\Moonlight Game Streaming\Moonlight.exe'
-    }
+    # Try the new VipleStream binary name first, then the legacy one
+    # (in case someone is running an older dev tree).
+    $candidates = @(
+        Join-Path $ProjectRoot 'temp\moonlight\VipleStream.exe',
+        Join-Path $ProjectRoot 'temp\moonlight\Moonlight.exe',
+        'C:\Program Files\VipleStream\VipleStream.exe',
+        'C:\Program Files\Moonlight Game Streaming\Moonlight.exe'
+    )
+    $MoonlightExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 
 if (-not (Test-Path $PresentMon)) { throw "PresentMon not found: $PresentMon" }
-if (-not (Test-Path $MoonlightExe)) { throw "Moonlight not found: $MoonlightExe" }
+if (-not $MoonlightExe -or -not (Test-Path $MoonlightExe)) { throw "VipleStream client not found in any of: temp/moonlight, C:\Program Files\VipleStream, C:\Program Files\Moonlight Game Streaming" }
 Write-Host "Using Moonlight at: $MoonlightExe" -ForegroundColor Cyan
 
 if (-not $OutDir) {
@@ -132,7 +135,7 @@ $presetMap = @{
 function Stop-Moonlight {
     # Force-kill; graceful quit path currently races the stream launch and
     # Moonlight's own stderr spam trips ErrorActionPreference.
-    Get-Process -Name 'Moonlight' -ErrorAction SilentlyContinue |
+    Get-Process -Name 'VipleStream','Moonlight' -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 800
 }
@@ -544,7 +547,7 @@ try {
         if ($TargetDisplay) {
             $targetScreen = Resolve-TargetScreen $TargetDisplay
             if ($targetScreen) {
-                $mlEarly = Get-Process -Name 'Moonlight' -ErrorAction SilentlyContinue |
+                $mlEarly = Get-Process -Name 'VipleStream','Moonlight' -ErrorAction SilentlyContinue |
                            Where-Object { $_.MainWindowHandle -ne 0 } |
                            Sort-Object StartTime -Descending | Select-Object -First 1
                 if ($mlEarly) {
@@ -561,7 +564,7 @@ try {
         # Verify Moonlight is running — re-resolve by name because the
         # stream child process may have a different PID than the
         # initial launcher if Moonlight respawns itself for the stream.
-        $ml = Get-Process -Name 'Moonlight' -ErrorAction SilentlyContinue
+        $ml = Get-Process -Name 'VipleStream','Moonlight' -ErrorAction SilentlyContinue
         if (-not $ml) {
             Write-Warning "Moonlight not running for cfg=$cfg"
             $results[$cfg] = @{ error = 'moonlight_exited_early' }

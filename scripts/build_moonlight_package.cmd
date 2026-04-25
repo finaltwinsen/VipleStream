@@ -24,8 +24,8 @@ echo [pkg 1/5] Collecting deploy files to %TEMP_DIR%
 if exist "%TEMP_DIR%" rmdir /s /q "%TEMP_DIR%"
 mkdir "%TEMP_DIR%"
 
-copy /y "%RELDIR%\Moonlight.exe" "%TEMP_DIR%\" >nul
-echo   Moonlight.exe
+copy /y "%RELDIR%\VipleStream.exe" "%TEMP_DIR%\" >nul
+echo   VipleStream.exe
 
 set "ANTIHOOK=%SRC%\AntiHooking\release\AntiHooking.dll"
 if exist "%ANTIHOOK%" (
@@ -64,7 +64,7 @@ if exist "%SRC%\app\SDL_GameControllerDB\gamecontrollerdb.txt" copy /y "%SRC%\ap
 
 :: ---- 3. windeployqt ----
 echo [pkg 3/5] Running windeployqt
-"%WINDEPLOYQT%" --release --qmldir "%SRC%\app\gui" --no-translations --compiler-runtime "%TEMP_DIR%\Moonlight.exe" 2>nul
+"%WINDEPLOYQT%" --release --qmldir "%SRC%\app\gui" --no-translations --compiler-runtime "%TEMP_DIR%\VipleStream.exe" 2>nul
 
 :: ---- 4. DirectX runtime libs ----
 echo [pkg 4/5] Copying DirectX runtime
@@ -144,13 +144,13 @@ if exist "%CUDART_DLL%" (
 :: Ship PDBs next to the .exe so WinDbg / cdb can symbolicate minidumps
 :: without any symbol-path setup. Statically-linked submodules
 :: (moonlight-common-c, h264bitstream, qmdnsengine) merge their symbols
-:: into Moonlight.pdb at link time, so Moonlight.pdb alone covers all our
+:: into VipleStream.pdb at link time, so VipleStream.pdb alone covers all our
 :: first-party code. AntiHooking is a separate DLL so its PDB ships too.
 :: Third-party DLLs (FFmpeg, SDL, Qt, libcrypto, libplacebo) don't ship
 :: PDBs with their binaries so those stay unsymbolicated in the dump —
 :: which is fine, we rarely need internals of those.
 echo [pkg 4b/5] Copying PDBs for crash symbolication
-for %%F in ("%SRC%\app\release\Moonlight.pdb" "%SRC%\AntiHooking\release\AntiHooking.pdb") do (
+for %%F in ("%SRC%\app\release\VipleStream.pdb" "%SRC%\AntiHooking\release\AntiHooking.pdb") do (
     if exist %%F (
         copy /y %%F "%TEMP_DIR%\" >nul
         echo   %%~nxF

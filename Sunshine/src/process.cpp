@@ -40,6 +40,12 @@
 
   // _SH constants for _wfsopen()
   #include <share.h>
+
+  // RegOpenKeyExW / RegEnumKeyExW for the Steam-game-exit watchdog —
+  // we read RunningAppID from HKEY_USERS\<active SID>\... because
+  // Sunshine runs as LocalSystem and HKCU points to the SYSTEM hive
+  // (no Steam keys there).
+  #include <windows.h>
 #endif
 
 namespace proc {
@@ -47,6 +53,10 @@ namespace proc {
   namespace pt = boost::property_tree;
 
   proc_t proc;
+
+  // Definition for the static atomic generation counter declared in
+  // process.h — see comment there explaining why this is static.
+  std::atomic<uint64_t> proc_t::_steam_watchdog_gen {0};
 
   class deinit_t: public platf::deinit_t {
   public:
@@ -136,6 +146,162 @@ namespace proc {
 
     // Now that we have a complete path, we can just use parent_path()
     return cmd_path.parent_path();
+  }
+
+#ifdef _WIN32
+  // Read Steam's "what app is currently running" indicator from any
+  // user hive. Steam writes RunningAppID (REG_DWORD) to
+  // HKCU\Software\Valve\Steam — but Sunshine runs as a service under
+  // LocalSystem so its own HKCU hive has no Steam keys. We have to
+  // walk HKEY_USERS, look at each loaded user hive, and find the one
+  // that has Software\Valve\Steam set up.
+  //
+  // Returns the AppID (0 if no game is running, or no Steam hive
+  // found at all). Cheap enough to call every second — under normal
+  // conditions there are 3-6 user hives loaded and each lookup is a
+  // single registry read.
+  uint32_t read_steam_running_app_id() {
+    HKEY users_root = nullptr;
+    if (RegOpenKeyExW(HKEY_USERS, nullptr, 0, KEY_ENUMERATE_SUB_KEYS | KEY_READ, &users_root) != ERROR_SUCCESS) {
+      return 0;
+    }
+    auto root_guard = util::fail_guard([&]() {
+      RegCloseKey(users_root);
+    });
+
+    uint32_t running = 0;
+    for (DWORD i = 0; running == 0; ++i) {
+      wchar_t sid_name[256];
+      DWORD   sid_len = 256;
+      auto rc = RegEnumKeyExW(users_root, i, sid_name, &sid_len, nullptr, nullptr, nullptr, nullptr);
+      if (rc != ERROR_SUCCESS) {
+        break;  // ERROR_NO_MORE_ITEMS or other — done enumerating
+      }
+      // Skip the per-user "_Classes" sub-hives — they aren't user hives.
+      if (wcsstr(sid_name, L"_Classes")) {
+        continue;
+      }
+
+      std::wstring path = std::wstring(sid_name) + L"\\Software\\Valve\\Steam";
+      HKEY steam_key = nullptr;
+      if (RegOpenKeyExW(users_root, path.c_str(), 0, KEY_READ, &steam_key) != ERROR_SUCCESS) {
+        continue;
+      }
+
+      DWORD value = 0;
+      DWORD value_size = sizeof(value);
+      DWORD value_type = 0;
+      if (RegQueryValueExW(steam_key, L"RunningAppID", nullptr, &value_type,
+                           reinterpret_cast<BYTE *>(&value), &value_size) == ERROR_SUCCESS &&
+          value_type == REG_DWORD && value != 0) {
+        running = value;
+      }
+      RegCloseKey(steam_key);
+    }
+    return running;
+  }
+#endif  // _WIN32
+
+  // VipleStream H Phase 2.4: when the Steam game we launched exits,
+  // tear down the streaming session instead of falling back to the
+  // host desktop. Same teardown the /cancel HTTP endpoint does.
+  //
+  // Implementation notes:
+  //   - The watchdog runs as a *detached* thread. We never join it.
+  //     Cancellation is via the generation counter: each new launch
+  //     bumps it, the watchdog checks at every poll iteration and
+  //     bails on mismatch. This avoids deadlock when proc.terminate()
+  //     itself is what's calling stop_steam_watchdog_().
+  //   - Phase A (waiting for game to start) times out at 5 min — if
+  //     RunningAppID never matches, the user probably cancelled the
+  //     launch in Steam UI or owned-but-not-installed dialog.
+  //   - Phase B (waiting for game to exit) has no timeout — games
+  //     can run for hours.
+  void proc_t::start_steam_watchdog_(uint32_t app_id) {
+#ifdef _WIN32
+    // Bump generation; any watchdog still running for the previous
+    // launch will see the mismatch and exit at its next poll tick.
+    uint64_t my_gen = ++_steam_watchdog_gen;
+
+    // Capture `this` so we can read `_steam_watchdog_gen` directly.
+    // `proc` is a global singleton with static lifetime so the
+    // capture is safe even though the thread is detached and may
+    // outlive any call frame.
+    std::thread([this, app_id, my_gen]() {
+      // 250 ms poll: balances "snappy detection of game exit" against
+      // CPU cost (registry read is ~µs but we only need sub-second
+      // detection). Shorter = less time the host desktop is visible
+      // to the client between game-window-closes and stream-disconnect.
+      const auto poll_interval = std::chrono::milliseconds(250);
+      const auto start_deadline = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+
+      BOOST_LOG(info) << "[steam-watchdog "sv << app_id << "] started, waiting for game to launch"sv;
+
+      bool game_started = false;
+      while (_steam_watchdog_gen.load() == my_gen) {
+        uint32_t cur = read_steam_running_app_id();
+
+        if (!game_started) {
+          if (cur == app_id) {
+            game_started = true;
+            BOOST_LOG(info) << "[steam-watchdog "sv << app_id << "] game running"sv;
+          } else if (std::chrono::steady_clock::now() > start_deadline) {
+            BOOST_LOG(warning) << "[steam-watchdog "sv << app_id
+                               << "] game never started in 5 min; giving up"sv;
+            return;
+          }
+        } else {
+          if (cur != app_id) {
+            BOOST_LOG(info) << "[steam-watchdog "sv << app_id
+                            << "] game exited (RunningAppID="sv << cur << "); ending stream"sv;
+            break;
+          }
+        }
+        std::this_thread::sleep_for(poll_interval);
+      }
+
+      // Re-check generation in case we exited the loop because of
+      // supersession (not game exit).
+      if (_steam_watchdog_gen.load() != my_gen) {
+        BOOST_LOG(info) << "[steam-watchdog "sv << app_id << "] superseded, bailing"sv;
+        return;
+      }
+
+      // Trigger session teardown on yet another detached thread so
+      // that proc.terminate() (which calls stop_steam_watchdog_(),
+      // which bumps our generation) can run cleanly without us still
+      // sitting in the polling loop.
+      //
+      // GRACEFUL-DISCONNECT NOTE: do NOT call rtsp_stream::terminate_sessions()
+      // here. That force-stops every RTSP session and the controlBroadcast
+      // loop reaps them via enet_peer_disconnect_now() *before* it gets a
+      // chance to send the SERVER_TERMINATED_CLOSED (0x80030023) control
+      // packet — which is exactly the packet moonlight-common-c maps to
+      // ML_ERROR_GRACEFUL_TERMINATION (suppresses the "Connection
+      // terminated" error dialog on the client).
+      //
+      // Instead, just call proc.terminate(). That makes proc.running()
+      // return 0; the controlBroadcast loop notices on its next ~150 ms
+      // iteration, exits its main loop, and runs the dedicated
+      // termination-broadcast block (stream.cpp around line 1306) which
+      // does send the 0x80030023 packet to every still-connected session.
+      // Sessions then unwind cleanly — no error dialog on the client.
+      std::thread([]() {
+        if (proc.running() > 0) {
+          proc.terminate();
+        }
+        display_device::revert_configuration();
+      }).detach();
+    }).detach();
+#else
+    (void) app_id;
+#endif
+  }
+
+  void proc_t::stop_steam_watchdog_() {
+    // Bump generation; any in-flight watchdog will notice and bail.
+    // We do not join — see comment in start_steam_watchdog_().
+    ++_steam_watchdog_gen;
   }
 
   int proc_t::execute(int app_id, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
@@ -267,6 +433,24 @@ namespace proc {
 
     _app_launch_time = std::chrono::steady_clock::now();
 
+#ifdef _WIN32
+    // VipleStream H Phase 2.4: kick off the Steam game-exit watchdog
+    // for auto-imported Steam apps, AFTER all other launch steps so a
+    // failure path above doesn't leave a watchdog running.
+    if (_app.source == "steam" && !_app.steam_app_id.empty()) {
+      try {
+        uint32_t aid = static_cast<uint32_t>(std::stoul(_app.steam_app_id));
+        if (aid > 0) {
+          start_steam_watchdog_(aid);
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "Bad steam_app_id ["sv << _app.steam_app_id
+                           << "]: "sv << e.what()
+                           << " — game-exit watchdog disabled for this launch"sv;
+      }
+    }
+#endif
+
     fg.disable();
 
     return 0;
@@ -311,6 +495,10 @@ namespace proc {
   void proc_t::terminate() {
     std::error_code ec;
     placebo = false;
+    // VipleStream H Phase 2.4: cancel any in-flight Steam game-exit
+    // watchdog before tearing down the app — otherwise the watchdog
+    // would race with us and call terminate() again.
+    stop_steam_watchdog_();
     terminate_process_group(_process, _process_group, _app.exit_timeout);
     _process = boost::process::v1::child();
     _process_group = boost::process::v1::group();
@@ -503,6 +691,21 @@ namespace proc {
     return header == PNG_SIGNATURE;
   }
 
+  // VipleStream H Phase 2: Steam library covers are JPEG not PNG.
+  // Validate via magic bytes: JPEG starts with FF D8 FF (SOI marker).
+  bool check_valid_jpeg(const std::filesystem::path &path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+      return false;
+    }
+    std::array<unsigned char, 3> header;
+    file.read(reinterpret_cast<char *>(header.data()), 3);
+    if (file.gcount() != 3) {
+      return false;
+    }
+    return header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF;
+  }
+
   std::string validate_app_image_path(std::string app_image_path) {
     if (app_image_path.empty()) {
       return DEFAULT_APP_IMAGE_PATH;
@@ -512,16 +715,26 @@ namespace proc {
     auto image_extension = std::filesystem::path(app_image_path).extension().string();
     boost::to_lower(image_extension);
 
-    // return the default box image if the extension is not "png"
-    if (image_extension != ".png") {
+    // VipleStream H Phase 2: also accept .jpg / .jpeg — Steam's local
+    // librarycache uses JPEG for header.jpg / library_600x900.jpg and
+    // we auto-populate image_path to those. Upstream Sunshine only
+    // accepted .png which silently rejected every Steam cover and
+    // substituted the generic placeholder. The appasset HTTP handler
+    // picks Content-Type at send time based on the actual extension.
+    const bool is_png  = (image_extension == ".png");
+    const bool is_jpeg = (image_extension == ".jpg" || image_extension == ".jpeg");
+    if (!is_png && !is_jpeg) {
       return DEFAULT_APP_IMAGE_PATH;
     }
 
+    auto validate_magic = [&](const std::filesystem::path &p) -> bool {
+      return is_png ? check_valid_png(p) : check_valid_jpeg(p);
+    };
+
     // check if image is in assets directory
     if (auto full_image_path = std::filesystem::path(SUNSHINE_ASSETS_DIR) / app_image_path; std::filesystem::exists(full_image_path)) {
-      // Validate PNG signature
-      if (!check_valid_png(full_image_path)) {
-        BOOST_LOG(warning) << "Invalid PNG file at path ["sv << full_image_path << ']';
+      if (!validate_magic(full_image_path)) {
+        BOOST_LOG(warning) << "Invalid " << (is_png ? "PNG" : "JPEG") << " file at path ["sv << full_image_path << ']';
         return DEFAULT_APP_IMAGE_PATH;
       }
       return full_image_path.string();
@@ -539,14 +752,12 @@ namespace proc {
       return DEFAULT_APP_IMAGE_PATH;
     }
 
-    // Validate PNG signature
-    if (!check_valid_png(app_image_path)) {
-      BOOST_LOG(warning) << "Invalid PNG file at path ["sv << app_image_path << ']';
+    if (!validate_magic(app_image_path)) {
+      BOOST_LOG(warning) << "Invalid " << (is_png ? "PNG" : "JPEG") << " file at path ["sv << app_image_path << ']';
       return DEFAULT_APP_IMAGE_PATH;
     }
 
-    // image is a png, and not in assets directory
-    // return only "content-type" http header compatible image type
+    // image is valid; return path verbatim so appasset can serve the bytes
     return app_image_path;
   }
 
@@ -781,9 +992,48 @@ namespace proc {
           ctx.name         = sa.name;
           ctx.cmd          = sa.launch_url;
           ctx.image_path   = !sa.image_library.empty() ? sa.image_library : sa.image_header;
-          ctx.source       = "steam";
-          ctx.steam_app_id = sa.app_id;
-          ctx.steam_owners = sa.owners;
+          ctx.source                 = "steam";
+          ctx.steam_app_id           = sa.app_id;
+          ctx.steam_owners           = sa.owners;
+          ctx.steam_last_played      = sa.last_played;
+          ctx.steam_playtime_minutes = sa.playtime_minutes;
+
+          // VipleStream H Phase 2.3: cover the "launching game" desktop
+          // leak. Sunshine launches via `steam://rungameid/<AppID>`,
+          // which returns instantly (steam.exe URL handler forwards
+          // the launch), so from Sunshine's POV the app is "up" but
+          // the game is still 5-15 s from showing. During that window
+          // we're streaming the bare Windows desktop to the client.
+          //
+          // Fix: inject `viple-splash.exe` as a detached command that
+          // brings up a topmost full-virtual-screen black window,
+          // then times out (default 10 s) or exits when it detects
+          // a fullscreen foreground window. Runs in parallel with the
+          // steam URL launch, so the splash appears essentially
+          // instantly while steam is still warming up.
+          //
+          // Path: viple-splash.exe is shipped next to sunshine.exe by
+          // build_sunshine.cmd. Look up via the running module dir;
+          // fall back to PATH lookup which Windows handles automatically
+          // when we pass a bare name.
+  #ifdef _WIN32
+          {
+            wchar_t mod[MAX_PATH] = {};
+            DWORD n = GetModuleFileNameW(nullptr, mod, MAX_PATH);
+            std::string splash;
+            if (n > 0 && n < MAX_PATH) {
+              std::filesystem::path p {mod};
+              p.replace_filename("viple-splash.exe");
+              if (std::filesystem::exists(p)) {
+                splash = "\"" + p.string() + "\"";
+              }
+            }
+            if (splash.empty()) {
+              splash = "viple-splash.exe";
+            }
+            ctx.detached.emplace_back(splash + " --timeout 12");
+          }
+  #endif
           // Steam's URL handler returns quickly, so auto-detach ON keeps
           // Sunshine from treating "steam.exe quit 0 after launch" as
           // session end. wait_all=false means don't wait for child

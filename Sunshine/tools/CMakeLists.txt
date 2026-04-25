@@ -37,7 +37,11 @@ target_link_libraries(audio-info
 target_compile_options(audio-info PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 
 add_executable(sunshinesvc sunshinesvc.cpp)
-set_target_properties(sunshinesvc PROPERTIES CXX_STANDARD 23)
+# VipleStream rebrand: keep CMake target name; emit binary as
+# viplestream-svc.exe so on-disk artefact matches the main server.
+set_target_properties(sunshinesvc PROPERTIES
+    CXX_STANDARD 23
+    OUTPUT_NAME "viplestream-svc")
 target_link_libraries(sunshinesvc
         ${CMAKE_THREAD_LIBS_INIT}
         wtsapi32

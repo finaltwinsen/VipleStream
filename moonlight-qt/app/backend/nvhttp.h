@@ -98,6 +98,21 @@ private:
     QByteArray m_ErrorText;
 };
 
+// VipleStream H.4: a single Steam profile entry returned by
+// /steamprofiles. Mirrors the server-side Sunshine `viple::steam::Profile`
+// fields the client cares about.  `current=true` means this is the
+// active Steam user on the host right now.
+struct SteamProfile {
+    QString steamId3;        // 32-bit account ID, used as the dropdown key
+    QString steamId64;
+    QString accountName;     // Steam username — passed to /steamswitch?account=
+    QString personaName;     // Display name shown in the dropdown
+    bool    rememberPassword = false;  // false ⇒ switch will fail with 409
+    bool    mostRecent       = false;
+    qint64  lastLogin        = 0;
+    bool    current          = false;  // matches /steamprofiles `current_user`
+};
+
 class NvHTTP : public QObject
 {
     Q_OBJECT
@@ -119,6 +134,56 @@ public:
 
     QString
     getServerInfo(NvLogLevel logLevel, bool fastFail = false);
+
+    /**
+     * VipleStream H.4: fetch /steamprofiles XML, parse into a profile
+     * vector.  Throws GfeHttpResponseException on non-200 (e.g. 503 from
+     * a vanilla Sunshine peer or a host with no Steam install).  The
+     * caller (AppView) should catch and gracefully hide the dropdown in
+     * that case.
+     */
+    QList<SteamProfile>
+    getSteamProfiles();
+
+    /**
+     * VipleStream H.4 (v1.2.119): async switch.  Two endpoints replace
+     * the old single blocking call:
+     *
+     * 1. `startSteamSwitch(account)` posts to /steamswitch and gets
+     *    back a task id within ~50 ms — the host's HTTPS worker thread
+     *    is freed immediately and won't starve /serverinfo polls.
+     *
+     * 2. `pollSteamSwitchStatus(taskId)` queries /steamswitch/status
+     *    and returns the live state — caller polls every ~1 s until
+     *    `state` is in a terminal value (done | error | already_active).
+     *
+     * The whole thing is wrapped by AppModel::requestSteamSwitch which
+     * owns the poll loop and emits a progress signal for the UI.
+     */
+    struct SteamSwitchStatus {
+        QString taskId;
+        QString state;              // starting | shutting_down | logging_in | done | error | already_active
+        QString message;            // human-readable progress text
+        QString error;              // populated when state == error
+        QString accountName;
+        QString personaName;
+        QString currentUserAfter;   // populated when state == done
+        int     httpStatus = 0;     // final logical status (200 / 4xx / 5xx)
+        qint64  elapsedMs  = -1;
+        qint64  finishedMs = -1;    // -1 if still running
+
+        bool isTerminal() const {
+            return state == QLatin1String("done")
+                || state == QLatin1String("error")
+                || state == QLatin1String("already_active");
+        }
+    };
+
+    SteamSwitchStatus
+    startSteamSwitch(QString accountName);
+
+    SteamSwitchStatus
+    pollSteamSwitchStatus(QString taskId);
 
     static
     void

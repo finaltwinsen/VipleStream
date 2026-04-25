@@ -392,6 +392,13 @@ public class NvHTTP {
             details.stunAddress = stunEp.substring(0, stunEp.lastIndexOf(':'));
         }
 
+        // VipleStream capability marker (v1.2.93). Non-blocking — vanilla
+        // Sunshine / GFE don't emit this tag and the field stays null /
+        // false; we still talk to those hosts normally.
+        details.vipleStreamProtocol = getXmlString(serverInfo, "VipleStreamProtocol", false);
+        details.isVipleStreamPeer = details.vipleStreamProtocol != null
+                                    && !details.vipleStreamProtocol.isEmpty();
+
         // We could reach it so it's online
         details.state = ComputerDetails.State.ONLINE;
 
@@ -668,6 +675,22 @@ public class NvHTTP {
                     app.setAppId(xpp.getText());
                 } else if (currentTag.peek().equals("IsHdrSupported")) {
                     app.setHdrSupported(xpp.getText().equals("1"));
+                }
+                // VipleStream H Phase 2: parse provenance + Steam fields
+                // emitted by Sunshine when the app comes from the
+                // auto-import scanner. Upstream Sunshine never emits
+                // these tags, so older hosts just don't trigger these
+                // branches and the fields stay at their defaults.
+                else if (currentTag.peek().equals("Source")) {
+                    app.setSource(xpp.getText());
+                } else if (currentTag.peek().equals("SteamAppId")) {
+                    app.setSteamAppId(xpp.getText());
+                } else if (currentTag.peek().equals("SteamOwners")) {
+                    app.setSteamOwners(xpp.getText());
+                } else if (currentTag.peek().equals("LastPlayed")) {
+                    app.setLastPlayed(xpp.getText());
+                } else if (currentTag.peek().equals("Playtime")) {
+                    app.setPlaytimeMinutes(xpp.getText());
                 }
                 break;
             }

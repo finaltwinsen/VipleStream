@@ -9,6 +9,7 @@
 #endif
 
 // standard includes
+#include <atomic>
 #include <optional>
 #include <unordered_map>
 
@@ -80,6 +81,10 @@ namespace proc {
     // their localconfig.vdf entitlement. Used client-side (Phase 3) to
     // filter the apps list by profile.
     std::vector<std::string> steam_owners;
+    // VipleStream H Phase 2.2: aggregated playtime stats across all owners.
+    // Client uses these to offer Recently-Played / Most-Played sort modes.
+    int64_t steam_last_played      = 0;
+    int64_t steam_playtime_minutes = 0;
   };
 
   class proc_t {
@@ -127,6 +132,37 @@ namespace proc {
     file_t _pipe;
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
+
+    // VipleStream H Phase 2.4: Steam game-exit watchdog.
+    //
+    // Steam launches via URL handler (`steam://rungameid/<id>`); the
+    // URL handler exits in <1s but the actual game runs minutes-to-
+    // hours. Sunshine's auto_detach heuristic flips the app to
+    // placebo mode and `running()` then returns `_app_id` forever,
+    // so the streaming session never ends when the game closes and
+    // the client falls back to seeing the host desktop.
+    //
+    // Workaround: kick off a detached watchdog thread on Steam-app
+    // launch. It polls `RunningAppID` under HKEY_USERS &lt;SID&gt;
+    // Software Valve Steam (any user, since Sunshine itself runs
+    // as LocalSystem). When that DWORD goes from our app id to 0
+    // (or any other value), it triggers the same teardown as the
+    // /cancel HTTP handler: terminate sessions, terminate proc,
+    // revert display config.
+    //
+    // The generation counter lets us cancel a running watchdog
+    // without joining its thread (which would deadlock when the
+    // watchdog itself initiated proc.terminate()).  Each new launch
+    // bumps it; the watchdog checks each iteration and bails if the
+    // value changed.
+    //
+    // Static because std::atomic isn't move-constructible and
+    // proc_t needs default move ops (parse() returns std::optional
+    // and gets assigned to the singleton).  Functionally identical
+    // since `proc` is a singleton anyway.
+    static std::atomic<uint64_t> _steam_watchdog_gen;
+    void start_steam_watchdog_(uint32_t app_id);
+    void stop_steam_watchdog_();
   };
 
   /**

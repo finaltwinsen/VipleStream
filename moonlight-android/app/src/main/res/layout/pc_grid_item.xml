@@ -18,16 +18,47 @@
         android:background="@drawable/vs_tile_bg"
         android:padding="12dp">
 
-        <TextView
-            android:tag="vs_meta"
+        <RelativeLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="6dp"
-            android:text="§ HOST"
-            android:textSize="9sp"
-            android:textColor="@color/vs_mute"
-            android:fontFamily="@font/ibm_plex_mono"
-            android:letterSpacing="0.14" />
+            android:layout_marginBottom="6dp">
+
+            <TextView
+                android:tag="vs_meta"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_alignParentStart="true"
+                android:text="§ HOST"
+                android:textSize="9sp"
+                android:textColor="@color/vs_mute"
+                android:fontFamily="@font/ibm_plex_mono"
+                android:letterSpacing="0.14" />
+
+            <!--
+                VipleStream H.5 capability badge.  PcGridAdapter sets
+                visibility based on ComputerDetails.isVipleStreamPeer.
+                Vanilla Sunshine / GFE peers show no badge.  Drawn as a
+                compact lime-bordered "V" on ink3 to match the Qt client's
+                badge.
+            -->
+            <TextView
+                android:id="@+id/grid_viple_badge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_alignParentEnd="true"
+                android:visibility="gone"
+                android:text="V"
+                android:textSize="9sp"
+                android:textStyle="bold"
+                android:textColor="@color/vs_lime"
+                android:fontFamily="@font/ibm_plex_mono"
+                android:background="@drawable/vs_viple_badge_bg"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
+                android:paddingTop="1dp"
+                android:paddingBottom="1dp"
+                android:letterSpacing="0.14" />
+        </RelativeLayout>
 
         <RelativeLayout
             android:id="@+id/grid_image_layout"

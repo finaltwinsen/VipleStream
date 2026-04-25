@@ -846,7 +846,10 @@ namespace platf {
    */
   platform_caps::caps_t get_capabilities();
 
-  constexpr auto SERVICE_NAME = "Sunshine";
+  // mDNS service-instance name. SERVICE_TYPE stays as the standard
+  // GameStream type so the host discovery is wire-compatible — VipleStream
+  // is still a Moonlight-protocol implementation, just rebranded.
+  constexpr auto SERVICE_NAME = "VipleStream";
   constexpr auto SERVICE_TYPE = "_nvstream._tcp";
 
   namespace publish {

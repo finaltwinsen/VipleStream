@@ -42,6 +42,8 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
         return computer->state == NvComputer::CS_UNKNOWN;
     case ServerSupportedRole:
         return computer->isSupportedServerVersion;
+    case IsVipleStreamPeerRole:
+        return computer->isVipleStreamPeer;
     case DetailsRole: {
         QString state, pairState;
 
@@ -137,6 +139,7 @@ QHash<int, QByteArray> ComputerModel::roleNames() const
     names[WakeableRole] = "wakeable";
     names[StatusUnknownRole] = "statusUnknown";
     names[ServerSupportedRole] = "serverSupported";
+    names[IsVipleStreamPeerRole] = "isVipleStreamPeer";
     names[DetailsRole] = "details";
 
     return names;

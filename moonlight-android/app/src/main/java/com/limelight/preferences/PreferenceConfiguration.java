@@ -23,6 +23,31 @@ public class PreferenceConfiguration {
         LEFT
     }
 
+    /**
+     * VipleStream H Phase 2: app-list sort mode for the app picker.
+     * Mirrors moonlight-qt's AppSortMode so the two clients behave the
+     * same way against a Steam-auto-import-enabled Sunshine host.
+     *
+     *   DEFAULT  — host-supplied order (whatever Sunshine returned).
+     *              Useful for users who curate apps.json by hand.
+     *   RECENT   — by lastPlayed descending; never-played apps fall to
+     *              the bottom alphabetically. The default — most users
+     *              want their last game one tap away.
+     *   PLAYTIME — by playtimeMinutes descending; favourite games top.
+     *   NAME     — pure alphabetical, case-insensitive.
+     *
+     * Across ALL modes, manual (apps.json) entries — those with empty
+     * `source` — sort before Steam-imported entries. So "Desktop" /
+     * "Steam Big Picture" stay at the top even if the user picked
+     * RECENT and last played a Steam game.
+     */
+    public enum AppSortMode {
+        DEFAULT,
+        RECENT,
+        PLAYTIME,
+        NAME
+    }
+
     private static final String LEGACY_RES_FPS_PREF_STRING = "list_resolution_fps";
     private static final String LEGACY_ENABLE_51_SURROUND_PREF_STRING = "checkbox_51_surround";
 
@@ -80,6 +105,13 @@ public class PreferenceConfiguration {
     private static final String GAMEPAD_MOTION_FALLBACK_PREF_STRING = "checkbox_gamepad_motion_fallback";
     private static final String RELAY_URL_PREF_STRING = "relay_url";
     private static final String RELAY_PSK_PREF_STRING = "relay_psk";
+
+    // VipleStream H Phase 2: app-list sort mode. Stored as the enum's
+    // name() string ("DEFAULT" / "RECENT" / "PLAYTIME" / "NAME"). The
+    // settings activity drives this via list_app_sort_mode in
+    // preferences.xml.
+    private static final String APP_SORT_MODE_PREF_STRING = "list_app_sort_mode";
+    private static final String DEFAULT_APP_SORT_MODE = "RECENT";
 
     static final String DEFAULT_RESOLUTION = "1280x720";
     static final String DEFAULT_FPS = "60";
@@ -172,6 +204,7 @@ public class PreferenceConfiguration {
     public boolean gamepadMotionSensorsFallbackToDevice;
     public String relayUrl;
     public String relayPsk;
+    public AppSortMode appSortMode;
 
     public static boolean isNativeResolution(int width, int height) {
         // It's not a native resolution if it matches an existing resolution option
@@ -624,6 +657,17 @@ public class PreferenceConfiguration {
 
         config.relayUrl = prefs.getString(RELAY_URL_PREF_STRING, "");
         config.relayPsk = prefs.getString(RELAY_PSK_PREF_STRING, "");
+
+        // VipleStream H Phase 2: parse the app-sort-mode preference.
+        // String comes from the ListPreference; valueOf throws if the
+        // user somehow gets a stale value into prefs storage so we
+        // fall back to RECENT (the default).
+        String sortModeStr = prefs.getString(APP_SORT_MODE_PREF_STRING, DEFAULT_APP_SORT_MODE);
+        try {
+            config.appSortMode = AppSortMode.valueOf(sortModeStr);
+        } catch (IllegalArgumentException e) {
+            config.appSortMode = AppSortMode.RECENT;
+        }
 
         return config;
     }

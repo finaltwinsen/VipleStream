@@ -43,8 +43,8 @@ if errorlevel 1 (
     echo [ERROR] Compilation failed
     exit /b 1
 )
-if not exist "%BUILD%\sunshine.exe" (
-    echo [ERROR] sunshine.exe not found after build
+if not exist "%BUILD%\viplestream-server.exe" (
+    echo [ERROR] viplestream-server.exe not found after build
     exit /b 1
 )
 echo [2/4] Build succeeded
@@ -54,14 +54,24 @@ echo [3/4] Collecting deploy files...
 if exist "%TEMP_DIR%" rmdir /s /q "%TEMP_DIR%"
 mkdir "%TEMP_DIR%"
 
-copy /y "%BUILD%\sunshine.exe" "%TEMP_DIR%\" >nul
-echo   sunshine.exe
+copy /y "%BUILD%\viplestream-server.exe" "%TEMP_DIR%\" >nul
+echo   viplestream-server.exe
 
-for %%F in (sunshinesvc.exe dxgi-info.exe audio-info.exe) do (
+for %%F in (viplestream-svc.exe dxgi-info.exe audio-info.exe) do (
     if exist "%BUILD%\tools\%%F" (
         copy /y "%BUILD%\tools\%%F" "%TEMP_DIR%\" >nul
         echo   %%F
     )
+)
+
+:: VipleStream H Phase 2.3: viple-splash.exe ships next to sunshine.exe
+:: so Sunshine can invoke it via its own module dir. Built as a separate
+:: CMake target in cmake/compile_definitions/windows.cmake.
+if exist "%BUILD%\viple-splash.exe" (
+    copy /y "%BUILD%\viple-splash.exe" "%TEMP_DIR%\" >nul
+    echo   viple-splash.exe
+) else (
+    echo   [WARN] viple-splash.exe not built ^- Steam games will flash desktop during load
 )
 
 xcopy /s /e /q /y "%BUILD%\assets\*" "%TEMP_DIR%\assets\" >nul

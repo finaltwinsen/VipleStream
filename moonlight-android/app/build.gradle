@@ -5,15 +5,21 @@ android {
 
     compileSdk 34
 
+    // VipleStream rebrand v1.2.93: applicationId migrated from
+    // com.limelight to com.piinsta.  This is a self-hosted private
+    // build — not on Play Store — so the loss of update continuity
+    // (existing installs become a separate app on next install) is
+    // intentional and accepted.  The Java package `com.limelight`
+    // stays as-is internally to avoid a rename of every source file.
     namespace 'com.limelight'
 
     defaultConfig {
-        applicationId "com.limelight"
+        applicationId "com.piinsta"
         minSdk 21
         targetSdk 34
 
-        versionName "1.2.67"
-        versionCode = 12067
+        versionName "1.2.119"
+        versionCode = 12119
 
         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
         ndk.debugSymbolLevel = 'FULL'
@@ -100,8 +106,11 @@ android {
             // cool projects the best of luck with their efforts. All I ask
             // is to please change the applicationId before you publish.
             //
-            // TL;DR: Leave the following line alone!
-            applicationIdSuffix ".unofficial"
+            // VipleStream rebrand: removed `.unofficial` suffix because
+            // we now ship under com.piinsta (self-hosted, not on Play
+            // Store).  The upstream Moonlight crash-attribution warning
+            // above no longer applies — we don't share an applicationId
+            // with the official Play Store build.
             resValue "string", "app_label", "VipleStream"
 
             minifyEnabled true

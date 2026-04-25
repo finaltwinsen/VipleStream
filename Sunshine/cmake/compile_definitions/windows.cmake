@@ -145,3 +145,43 @@ if(SUNSHINE_ENABLE_TRAY)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/third-party/tray/src/tray_windows.c")
 endif()
+
+# ── viple-splash.exe ──────────────────────────────────────────────────────────
+# VipleStream H Phase 2.3: tiny Win32 GUI exe that spawns in the user
+# session (via Sunshine's detached-command path) to cover the desktop
+# with a black topmost window while a Steam game loads. Keeps the
+# "launching game" transition from leaking the user's desktop to the
+# streaming client for 5-15 seconds.
+#
+# Built as a standalone executable — no link against Sunshine or its
+# boost/ssl deps. Install next to sunshine.exe so Sunshine can locate it
+# at runtime via its own GetModuleFileName(NULL) -> dirname path.
+add_executable(viple_splash WIN32
+        "${CMAKE_SOURCE_DIR}/src/tools/viple_splash.cpp"
+)
+if(MSVC)
+    target_link_libraries(viple_splash PRIVATE user32 gdi32 shcore kernel32)
+else()
+    # MinGW with `-static` (inherited from SUNSHINE exe linker flags) will
+    # skip implicit libs — spell out every DLL the code actually touches:
+    #   user32  — CreateWindowEx / ShowWindow / EnumWindows / FillRect /
+    #             GetSystemMetrics / LoadCursor / RegisterClassEx / ...
+    #   gdi32   — GetStockObject (BLACK_BRUSH)
+    #   shcore  — SetProcessDpiAwarenessContext
+    #   kernel32— GetTickCount64 / Sleep (via std::this_thread / std::chrono)
+    # mingwthrd / mingw32 / msvcrt / pthread are all auto-pulled by the
+    # C++ standard-library link line; std::thread / std::chrono compile
+    # cleanly against them.
+    target_link_libraries(viple_splash PRIVATE user32 gdi32 shcore kernel32)
+
+    # Our entry point is wWinMain (wide-char) — MinGW's default crtexewin.c
+    # looks for WinMain unless we pass -municode at both compile and link
+    # time. Without this we get:
+    #   undefined reference to `WinMain'
+    # at the link stage even though wWinMain is defined.
+    target_compile_options(viple_splash PRIVATE -municode)
+    target_link_options(viple_splash PRIVATE -municode)
+endif()
+set_target_properties(viple_splash PROPERTIES
+        OUTPUT_NAME "viple-splash"
+)

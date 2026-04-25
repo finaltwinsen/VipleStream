@@ -38,14 +38,51 @@ public class AppGridAdapter extends GenericGridAdapter<AppView.AppObject> {
     private Set<Integer> hiddenAppIds = new HashSet<>();
     private ArrayList<AppView.AppObject> allApps = new ArrayList<>();
 
+    // VipleStream H Phase 2: live sort mode. Captured at adapter
+    // construction and refreshed by AppView whenever user pops the
+    // settings sheet. Volatile because addApp() / removeApp() can be
+    // called from a poller thread while the UI thread sets a new mode.
+    private volatile PreferenceConfiguration.AppSortMode sortMode =
+            PreferenceConfiguration.AppSortMode.RECENT;
+
     public AppGridAdapter(Context context, PreferenceConfiguration prefs, ComputerDetails computer, String uniqueId, boolean showHiddenApps) {
         super(context, getLayoutIdForPreferences(prefs));
 
         this.computer = computer;
         this.uniqueId = uniqueId;
         this.showHiddenApps = showHiddenApps;
+        this.sortMode = prefs.appSortMode;
 
         updateLayoutWithPreferences(context, prefs);
+    }
+
+    /**
+     * VipleStream H Phase 2: re-sort current and all-apps lists with a
+     * new mode. AppView calls this after the settings activity returns
+     * and its prefs have been re-read. Notifies the adapter so the
+     * grid redraws in new order without a full refetch.
+     */
+    public void setSortMode(PreferenceConfiguration.AppSortMode mode) {
+        if (mode == null || mode == this.sortMode) {
+            return;
+        }
+        this.sortMode = mode;
+        sortList(allApps);
+        sortList(itemList);
+        notifyDataSetChanged();
+    }
+
+    /**
+     * VipleStream H Phase 2: re-sort with the current mode.
+     * AppView's app-list poller calls this when an existing app's
+     * sort-relevant metadata (lastPlayed / playtimeMinutes / source)
+     * changes between polls — without re-sorting, the host's fresh
+     * playtime updates wouldn't push a just-played game to the top.
+     * Caller is responsible for invoking notifyDataSetChanged().
+     */
+    public void resort() {
+        sortList(allApps);
+        sortList(itemList);
     }
 
     public void updateHiddenApps(Set<Integer> newHiddenAppIds, boolean hideImmediately) {
@@ -121,11 +158,70 @@ public class AppGridAdapter extends GenericGridAdapter<AppView.AppObject> {
         loader.freeCacheMemory();
     }
 
-    private static void sortList(List<AppView.AppObject> list) {
+    /**
+     * Case-insensitive name compare — used both as a tie-breaker for
+     * the data-driven modes and as the whole sort key for
+     * AppSortMode.NAME / AppSortMode.DEFAULT.
+     */
+    private static int compareName(AppView.AppObject lhs, AppView.AppObject rhs) {
+        return lhs.app.getAppName().toLowerCase().compareTo(rhs.app.getAppName().toLowerCase());
+    }
+
+    /**
+     * Comparator: long descending, with 0/missing values sinking to
+     * the bottom (handled by callers via the alphabetic tie-break).
+     * Used for both lastPlayed and playtimeMinutes.
+     */
+    private static int compareLongDesc(long lhs, long rhs) {
+        return Long.compare(rhs, lhs);
+    }
+
+    private void sortList(List<AppView.AppObject> list) {
+        // Snapshot the volatile field once per sort so different
+        // entries can't disagree mid-sort (Comparator contract).
+        final PreferenceConfiguration.AppSortMode mode = this.sortMode;
+
         Collections.sort(list, new Comparator<AppView.AppObject>() {
             @Override
             public int compare(AppView.AppObject lhs, AppView.AppObject rhs) {
-                return lhs.app.getAppName().toLowerCase().compareTo(rhs.app.getAppName().toLowerCase());
+                // Manual entries always pin to the top regardless of
+                // mode. Source=="" (or null) means "declared in
+                // apps.json by hand" — typically Desktop / Steam Big
+                // Picture. Auto-imported Steam apps come after.
+                boolean lManual = lhs.app.isManualEntry();
+                boolean rManual = rhs.app.isManualEntry();
+                if (lManual != rManual) {
+                    return lManual ? -1 : 1;
+                }
+
+                switch (mode) {
+                    case RECENT: {
+                        long lp = lhs.app.getLastPlayed();
+                        long rp = rhs.app.getLastPlayed();
+                        if (lp != rp) {
+                            // Both 0 falls through to name; otherwise
+                            // descending date with 0s pushed last.
+                            if (lp == 0) return 1;
+                            if (rp == 0) return -1;
+                            return compareLongDesc(lp, rp);
+                        }
+                        return compareName(lhs, rhs);
+                    }
+                    case PLAYTIME: {
+                        long lp = lhs.app.getPlaytimeMinutes();
+                        long rp = rhs.app.getPlaytimeMinutes();
+                        if (lp != rp) {
+                            if (lp == 0) return 1;
+                            if (rp == 0) return -1;
+                            return compareLongDesc(lp, rp);
+                        }
+                        return compareName(lhs, rhs);
+                    }
+                    case NAME:
+                    case DEFAULT:
+                    default:
+                        return compareName(lhs, rhs);
+                }
             }
         });
     }

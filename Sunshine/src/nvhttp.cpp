@@ -6,18 +6,29 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include <chrono>
 #include <filesystem>
 #include <format>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 
 // lib includes
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/ssl/context_base.hpp>
+#include <boost/process/v1/environment.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 #include <Simple-Web-Server/server_http.hpp>
+
+#ifdef _WIN32
+  #include <windows.h>
+  #include <tlhelp32.h>   // CreateToolhelp32Snapshot / Process32FirstW etc
+#endif
 
 // local includes
 #include "config.h"
@@ -36,6 +47,10 @@
 #include "utility.h"
 #include "uuid.h"
 #include "video.h"
+
+#ifdef _WIN32
+  #include "platform/windows/steam_scanner.h"
+#endif
 
 using namespace std::literals;
 
@@ -702,6 +717,16 @@ namespace nvhttp {
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put("root.hostname", config::nvhttp.sunshine_name);
 
+    // VipleStream capability marker (v1.2.93): non-blocking advertisement
+    // that this host is a VipleStream-Server.  Vanilla Moonlight clients
+    // ignore the unknown XML element entirely; VipleStream clients pick
+    // it up to enable VipleStream-only UI affordances (e.g. badge in the
+    // host card, FRUC backend dropdown only on Viple-paired hosts, etc.).
+    // Critically: presence/absence of this marker does NOT affect protocol
+    // compatibility — vanilla ↔ Viple connections still work, just without
+    // the VipleStream-only features.
+    tree.put("root.VipleStreamProtocol", "1");
+
     tree.put("root.appversion", VERSION);
     tree.put("root.GfeVersion", GFE_VERSION);
     tree.put("root.uniqueid", http::unique_id);
@@ -826,6 +851,44 @@ namespace nvhttp {
       app.put("IsHdrSupported"s, video::active_hevc_mode == 3 ? 1 : 0);
       app.put("AppTitle"s, proc.name);
       app.put("ID", proc.id);
+
+      // VipleStream H Phase 2: provenance + Steam metadata.
+      //
+      // These tags are *additive* to the standard NVIDIA GameStream
+      // applist schema — vanilla Moonlight ignores unknown elements,
+      // so vanilla ↔ VipleStream remains wire-compatible.  VipleStream
+      // clients consume them for:
+      //   - "manual entries pin to top" sort behaviour (any entry
+      //     without <Source> is treated as a hand-curated apps.json
+      //     row and gets sorted before auto-imported ones).
+      //   - Recently-Played / Most-Played sort modes (lastPlayed +
+      //     playtime).
+      //   - Future profile-aware filtering (steamOwners list).
+      //
+      // Empty / zero values are *omitted* rather than emitted so the
+      // common case (manual app, no Steam metadata) doesn't bloat the
+      // XML payload — and absence of <Source> is exactly what the
+      // client comparator looks for to identify a manual entry.
+      if (!proc.source.empty()) {
+        app.put("Source"s, proc.source);
+      }
+      if (!proc.steam_app_id.empty()) {
+        app.put("SteamAppId"s, proc.steam_app_id);
+      }
+      if (!proc.steam_owners.empty()) {
+        std::string owners;
+        for (size_t i = 0; i < proc.steam_owners.size(); ++i) {
+          if (i > 0) owners += ",";
+          owners += proc.steam_owners[i];
+        }
+        app.put("SteamOwners"s, owners);
+      }
+      if (proc.steam_last_played > 0) {
+        app.put("LastPlayed"s, std::to_string(proc.steam_last_played));
+      }
+      if (proc.steam_playtime_minutes > 0) {
+        app.put("Playtime"s, std::to_string(proc.steam_playtime_minutes));
+      }
 
       apps.push_back(std::make_pair("App", std::move(app)));
     }
@@ -1074,9 +1137,579 @@ namespace nvhttp {
 
     std::ifstream in(app_image, std::ios::binary);
     SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "image/png");
+
+    // VipleStream H Phase 2: Steam-imported apps use the Steam library
+    // cache header.jpg as their cover art (Steam ships them as JPEG,
+    // never PNG).  Pick the Content-Type by extension so Moonlight's
+    // image decoder doesn't reject the JPEG payload as a malformed PNG.
+    // Manual apps still typically point at .png files and keep the
+    // upstream behaviour.
+    std::string ct = "image/png";
+    if (!app_image.empty()) {
+      auto dot = app_image.find_last_of('.');
+      if (dot != std::string::npos) {
+        std::string ext = app_image.substr(dot + 1);
+        for (auto &c : ext) c = (char) std::tolower((unsigned char) c);
+        if (ext == "jpg" || ext == "jpeg") {
+          ct = "image/jpeg";
+        }
+      }
+    }
+    headers.emplace("Content-Type", ct);
     response->write(SimpleWeb::StatusCode::success_ok, in, headers);
     response->close_connection_after_response = true;
+  }
+
+  // ── VipleStream H.4: Steam profile / account switch endpoints ────────────
+  //
+  // All endpoints live behind the standard Sunshine HTTPS server (paired
+  // cert auth).  The underlying Steam scanner is Windows-only (#ifdef
+  // _WIN32 guard in steam_scanner.h), so on non-Windows builds the
+  // endpoints respond with 503-equivalent.
+  //
+  // /steamprofiles         GET → ptree XML of profiles + current user.
+  //                              Profiles list comes from the in-memory
+  //                              steam_scanner cache (5 min TTL); the
+  //                              `current_user` field is read fresh from
+  //                              HKEY_USERS on every call so the client
+  //                              dropdown reflects the actually-active
+  //                              account.
+  //
+  // /steamswitch?account=X GET → KICKS OFF an async switch task and
+  //                              returns 202 + task_id immediately.  The
+  //                              actual shutdown/login work happens on a
+  //                              detached worker thread so the HTTPS
+  //                              worker thread is freed in <100 ms — this
+  //                              is what stops /serverinfo (and any other
+  //                              endpoint) from being starved during the
+  //                              ~9 s Steam restart, which v1.2.118 saw
+  //                              cause spurious "host disconnected" UI.
+  //
+  // /steamswitch/status?id=X GET → returns current state of a task: state
+  //                              ("starting" / "shutting_down" /
+  //                              "logging_in" / "done" / "error" /
+  //                              "already_active"), message, error,
+  //                              current_user_after, http_status, and
+  //                              elapsed_ms.  Client polls this every
+  //                              ~1 s until state is in a terminal value.
+
+#ifdef _WIN32
+  // Async-switch task registry. One task per /steamswitch invocation;
+  // the entry stays in the map until 60 s after it reaches a terminal
+  // state, so a slow client poll can still observe the result.
+  struct SteamSwitchTask {
+    std::string id;
+    // Live state. Read/write under `mu`.
+    std::string state;          // starting | shutting_down | logging_in | done | error | already_active
+    std::string message;        // human-readable progress text
+    std::string error;          // populated when state == error
+    int         http_status;    // final logical HTTP status (200 / 4xx / 5xx)
+
+    // Inputs — set once at task creation, never mutated by worker.
+    std::string steam_exe;
+    std::string steam_root;
+    std::string target_account;
+    std::string target_steam_id3;
+    std::string target_persona_name;
+
+    // Output — set when state transitions to done.
+    std::string current_user_after;
+
+    std::chrono::steady_clock::time_point started_at;
+    std::chrono::steady_clock::time_point finished_at;  // 0 if still running
+    bool detected_login_ui_stuck = false;
+
+    mutable std::mutex mu;
+  };
+
+  static std::mutex                                          g_switch_tasks_mu;
+  static std::map<std::string, std::shared_ptr<SteamSwitchTask>> g_switch_tasks;
+
+  // Drop tasks that finished more than `keep` seconds ago. Called
+  // opportunistically on every /steamswitch and /steamswitch/status
+  // entry — no dedicated GC thread needed for the volumes we expect.
+  inline void gc_steam_switch_tasks(std::chrono::seconds keep = std::chrono::seconds{60}) {
+    auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk{g_switch_tasks_mu};
+    for (auto it = g_switch_tasks.begin(); it != g_switch_tasks.end();) {
+      auto &t = *it->second;
+      std::lock_guard<std::mutex> tlk{t.mu};
+      bool finished = t.finished_at != std::chrono::steady_clock::time_point{};
+      if (finished && (now - t.finished_at) > keep) {
+        it = g_switch_tasks.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  inline std::string steam_switch_state_terminal(const std::string &s) {
+    return (s == "done" || s == "error" || s == "already_active") ? s : "";
+  }
+
+  // Walk Toolhelp32 process snapshot counting alive steam.exe /
+  // steamwebhelper.exe.  Returns -1 on snapshot failure.
+  inline int count_steam_processes() {
+    int n = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return -1;
+    PROCESSENTRY32W pe {sizeof(pe)};
+    if (Process32FirstW(snap, &pe)) {
+      do {
+        std::wstring exe {pe.szExeFile};
+        if (exe == L"steam.exe" || exe == L"steamwebhelper.exe") ++n;
+      } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return n;
+  }
+
+  inline int kill_steam_processes() {
+    int killed = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return -1;
+    PROCESSENTRY32W pe {sizeof(pe)};
+    if (Process32FirstW(snap, &pe)) {
+      do {
+        std::wstring exe {pe.szExeFile};
+        if (exe == L"steam.exe" || exe == L"steamwebhelper.exe") {
+          HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+          if (h) {
+            if (TerminateProcess(h, 1)) ++killed;
+            CloseHandle(h);
+          }
+        }
+      } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return killed;
+  }
+
+  inline bool spawn_steam_command(const std::string &steam_root, const std::string &cmdline) {
+    std::error_code ec;
+    boost::filesystem::path wd {steam_root};
+    boost::process::v1::environment env = boost::this_process::environment();
+    auto child = platf::run_command(/*elevated*/ false, /*interactive*/ true,
+                                    cmdline, wd, env, nullptr, ec, nullptr);
+    if (ec) {
+      BOOST_LOG(warning) << "[steam-switch] run_command(" << cmdline
+                         << ") failed: " << ec.message();
+      return false;
+    }
+    child.detach();
+    return true;
+  }
+
+  // Worker body — runs on a detached std::thread spawned by
+  // /steamswitch.  Writes progress to `task` under `task->mu` so the
+  // /steamswitch/status handler sees consistent snapshots.
+  inline void run_steam_switch_worker(std::shared_ptr<SteamSwitchTask> task) {
+    auto set_state = [&](const std::string &state, const std::string &msg) {
+      std::lock_guard<std::mutex> lk{task->mu};
+      task->state   = state;
+      task->message = msg;
+      BOOST_LOG(warning) << "[steam-switch] task=" << task->id
+                         << " state=" << state << " msg=" << msg;
+    };
+    auto set_terminal = [&](const std::string &state, int http_status,
+                            const std::string &msg, const std::string &err) {
+      std::lock_guard<std::mutex> lk{task->mu};
+      task->state       = state;
+      task->message     = msg;
+      task->error       = err;
+      task->http_status = http_status;
+      task->finished_at = std::chrono::steady_clock::now();
+      BOOST_LOG(warning) << "[steam-switch] task=" << task->id
+                         << " TERMINAL state=" << state
+                         << " http=" << http_status
+                         << " msg=" << msg
+                         << (err.empty() ? "" : (" err=" + err));
+    };
+
+    // 1. Graceful -shutdown attempt FIRST (lets Steam flush cloud sync,
+    //    friend-list goodbye, etc).  We always attempt this regardless
+    //    of an upstream `steam_running` check because the cache might
+    //    be stale by the time we land here.
+    bool any_steam = (count_steam_processes() > 0);
+    if (any_steam) {
+      set_state("shutting_down", "Asking Steam to shut down…");
+      spawn_steam_command(task->steam_root, "\"" + task->steam_exe + "\" -shutdown");
+      auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+      while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        if (count_steam_processes() == 0) break;
+      }
+      int still = count_steam_processes();
+      BOOST_LOG(warning) << "[steam-switch] task=" << task->id
+                         << " graceful shutdown done; remaining steam processes=" << still;
+      // 2. Force-kill stragglers so the upcoming -login starts a fresh
+      //    Steam process instead of being intercepted by a Steam still
+      //    stuck at the login UI (which silently no-ops).
+      if (still > 0) {
+        set_state("shutting_down", "Force-closing stuck Steam processes…");
+        int killed = kill_steam_processes();
+        BOOST_LOG(warning) << "[steam-switch] task=" << task->id
+                           << " force-killed " << killed << " straggler steam processes";
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+      }
+    }
+
+    // 3. -login <account_name>
+    set_state("logging_in", "Logging in as " + task->target_account + "…");
+    if (!spawn_steam_command(task->steam_root,
+                             "\"" + task->steam_exe + "\" -login " + task->target_account)) {
+      set_terminal("error", 500, "Failed to spawn steam.exe -login",
+                   "spawn failed; check host steam install");
+      return;
+    }
+
+    // 4. Poll ActiveUser until it matches target.  90 s ceiling — first
+    //    login of a session can take 45-60 s on a workstation-class box
+    //    (Steam self-update + friend-list sync + shader pre-warm).
+    auto deadline   = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    auto next_log   = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    auto login_start = std::chrono::steady_clock::now();
+    std::string last_seen;
+    while (std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(750));
+      auto now = std::chrono::steady_clock::now();
+      auto cur = viple::steam::read_active_user_id3();
+
+      // Diagnostic: Steam process up but ActiveUser stuck at 0 for >20 s
+      // → almost certainly waiting for 2FA / manual Sign-In click.
+      {
+        std::lock_guard<std::mutex> lk{task->mu};
+        if (!task->detected_login_ui_stuck && cur.empty()
+            && (now - login_start) > std::chrono::seconds(20)
+            && count_steam_processes() > 0) {
+          task->detected_login_ui_stuck = true;
+          BOOST_LOG(warning) << "[steam-switch] task=" << task->id
+                             << " login UI stuck (Steam Guard 2FA / manual Sign-In suspected)";
+        }
+      }
+
+      if (cur == task->target_steam_id3) {
+        // Don't invalidate scan cache here — /steamprofiles overrides
+        // current_user with a fresh registry read (see steamprofiles<T>),
+        // and the rest of the cached scan (profiles list, apps list) is
+        // still valid after a profile switch.  Skipping the invalidation
+        // means the post-switch /steamprofiles call returns instantly
+        // from cache instead of triggering a full filesystem re-scan.
+        std::lock_guard<std::mutex> lk{task->mu};
+        task->state              = "done";
+        task->message            = "Switch complete";
+        task->http_status        = 200;
+        task->current_user_after = task->target_steam_id3;
+        task->finished_at        = std::chrono::steady_clock::now();
+        BOOST_LOG(warning) << "[steam-switch] task=" << task->id
+                           << " SUCCESS ActiveUser=" << cur
+                           << " account=" << task->target_account
+                           << " persona=" << task->target_persona_name;
+        return;
+      }
+
+      if (cur != last_seen) {
+        BOOST_LOG(warning) << "[steam-switch] task=" << task->id
+                           << " ActiveUser → '" << cur
+                           << "' (target=" << task->target_steam_id3 << ")";
+        last_seen = cur;
+      }
+      if (now > next_log) {
+        BOOST_LOG(warning) << "[steam-switch] task=" << task->id
+                           << " still waiting for login… ActiveUser='" << cur << "'";
+        next_log = now + std::chrono::seconds(5);
+      }
+    }
+
+    // Timeout.  Distinguish 2FA-stuck from generic timeout for a useful
+    // error message in the client.
+    bool stuck;
+    {
+      std::lock_guard<std::mutex> lk{task->mu};
+      stuck = task->detected_login_ui_stuck;
+    }
+    if (stuck) {
+      set_terminal("error", 504,
+                   "Steam needs human interaction on the host (2FA / manual Sign-In)",
+                   "Steam is showing its login window on the host (Steam Guard 2FA "
+                   "code, manual Sign-In, or device-trust prompt) and needs human "
+                   "interaction. Sign in once on the host, then retry switching.");
+    } else {
+      set_terminal("error", 504,
+                   "Steam did not finish logging in within 90 s",
+                   "Steam did not finish logging in within 90 s. The host's Steam "
+                   "UI may need a manual Sign-In or 2FA code, or the previous "
+                   "session is still unwinding. Check the host's Steam UI.");
+    }
+    // Failed switches DO invalidate cache so the next /steamprofiles
+    // surfaces whatever partial state Steam ended up in (not the
+    // pre-switch snapshot).
+    viple::steam::invalidate_cache();
+  }
+
+  // Serialize a task into a ptree under `root.`. Caller must hold
+  // task->mu (or have taken a snapshot first).
+  inline void serialize_steam_switch_task(const SteamSwitchTask &task, pt::ptree &tree) {
+    tree.put("root.<xmlattr>.status_code", 200);
+    tree.put("root.task_id",            task.id);
+    tree.put("root.state",              task.state);
+    tree.put("root.message",            task.message);
+    tree.put("root.error",              task.error);
+    tree.put("root.http_status",        task.http_status);
+    tree.put("root.account_name",       task.target_account);
+    tree.put("root.persona_name",       task.target_persona_name);
+    tree.put("root.target_steam_id3",   task.target_steam_id3);
+    tree.put("root.current_user_after", task.current_user_after);
+    auto now = std::chrono::steady_clock::now();
+    auto ms_since = [&](const std::chrono::steady_clock::time_point &tp) -> int64_t {
+      if (tp == std::chrono::steady_clock::time_point{}) return -1;
+      return std::chrono::duration_cast<std::chrono::milliseconds>(now - tp).count();
+    };
+    tree.put("root.elapsed_ms",  ms_since(task.started_at));
+    tree.put("root.finished_ms", ms_since(task.finished_at));
+  }
+#endif  // _WIN32
+
+  template <class T>
+  void steamprofiles(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
+                     std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+    print_req<T>(request);
+    pt::ptree tree;
+    auto fg = util::fail_guard([&]() {
+      std::ostringstream data;
+      pt::write_xml(data, tree);
+      response->write(data.str());
+      response->close_connection_after_response = true;
+    });
+
+#ifdef _WIN32
+    auto scan = viple::steam::scan_cached();
+    if (!scan) {
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Steam not installed on host");
+      return;
+    }
+
+    // v1.2.118: bypass scan_cached's 5-min TTL for `current_user`. The
+    // scanner's read_current_user_id3 was fixed to walk HKEY_USERS in
+    // the same release (root cause: HKCU was the wrong hive — Sunshine
+    // is spawned without LoadUserProfile), so scan->current_user is
+    // now also correct. The fresh read here is defence-in-depth for
+    // sub-TTL races (e.g. user switches Steam manually on the host
+    // without going through /steamswitch — cache wouldn't get
+    // invalidated until the next 5-min refresh).
+    std::string fresh_current = viple::steam::read_active_user_id3();
+    const std::string &current_user_out = !fresh_current.empty()
+        ? fresh_current
+        : scan->current_user;
+
+    tree.put("root.<xmlattr>.status_code", 200);
+    tree.put("root.steam_running", scan->steam_running ? 1 : 0);
+    tree.put("root.current_user", current_user_out);
+    auto &profiles = tree.add_child("root.profiles", pt::ptree {});
+    for (const auto &p : scan->profiles) {
+      pt::ptree node;
+      node.put("steam_id3", p.steam_id3);
+      node.put("steam_id64", p.steam_id64);
+      node.put("account_name", p.account_name);
+      node.put("persona_name", p.persona_name);
+      node.put("remember_password", p.remember_password ? 1 : 0);
+      node.put("switchable", p.switchable ? 1 : 0);
+      node.put("most_recent", p.most_recent ? 1 : 0);
+      node.put("last_login", p.last_login);
+      profiles.push_back({"profile", std::move(node)});
+    }
+#else
+    tree.put("root.<xmlattr>.status_code", 503);
+    tree.put("root.<xmlattr>.status_message", "Steam profile API is Windows-only");
+#endif
+  }
+
+  // v1.2.119: /steamswitch is now async — this handler validates +
+  // creates a SteamSwitchTask, spawns a detached worker thread, and
+  // returns 202 with the task id within milliseconds.  Previous
+  // versions blocked the only HTTPS worker thread for ~9 s while
+  // polling for Steam login, which starved /serverinfo and made the
+  // client UI flash a spurious "host disconnected".
+  template <class T>
+  void steamswitch(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
+                   std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+    print_req<T>(request);
+    BOOST_LOG(warning) << "[steam-switch] handler entered, query=" << request->path;
+    pt::ptree tree;
+    auto fg = util::fail_guard([&]() {
+      std::ostringstream data;
+      pt::write_xml(data, tree);
+      response->write(data.str());
+      response->close_connection_after_response = true;
+    });
+
+#ifdef _WIN32
+    gc_steam_switch_tasks();
+
+    auto args = request->parse_query_string();
+    auto it = args.find("account"s);
+    if (it == std::end(args) || it->second.empty()) {
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Missing 'account' query parameter");
+      return;
+    }
+    const std::string target_account = it->second;
+
+    auto scan = viple::steam::scan_cached();
+    if (!scan) {
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Steam not installed on host");
+      return;
+    }
+
+    const viple::steam::Profile *target = nullptr;
+    for (const auto &p : scan->profiles) {
+      if (p.account_name == target_account) { target = &p; break; }
+    }
+    if (!target) {
+      tree.put("root.<xmlattr>.status_code", 404);
+      tree.put("root.<xmlattr>.status_message", "Account not found in Steam profiles");
+      return;
+    }
+    if (!target->remember_password) {
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message",
+               "Account has no saved credentials (remember_password=0); "
+               "log in manually on the host once first.");
+      return;
+    }
+
+    // Build the task even for the already-active short-circuit so the
+    // client uses the same response shape for both paths.
+    auto task = std::make_shared<SteamSwitchTask>();
+    task->id                  = "sw_" + uuid_util::uuid_t::generate().string();
+    task->steam_root          = scan->steam_root;
+    task->steam_exe           = scan->steam_root + "\\steam.exe";
+    task->target_account      = target_account;
+    task->target_steam_id3    = target->steam_id3;
+    task->target_persona_name = target->persona_name;
+    task->started_at          = std::chrono::steady_clock::now();
+    task->state               = "starting";
+    task->message             = "Validating switch request…";
+    task->http_status         = 0;
+
+    // No-op if already on this account.  Read fresh — see steamprofiles<T>
+    // for why scan->current_user can be wrong here.  The cached value
+    // would force a pointless 30-90 s shutdown/login round-trip.
+    std::string fresh_current = viple::steam::read_active_user_id3();
+    if (fresh_current == target->steam_id3) {
+      task->state              = "already_active";
+      task->message            = "Already on " + target->persona_name;
+      task->current_user_after = fresh_current;
+      task->http_status        = 200;
+      task->finished_at        = std::chrono::steady_clock::now();
+      {
+        std::lock_guard<std::mutex> lk{g_switch_tasks_mu};
+        g_switch_tasks[task->id] = task;
+      }
+      tree.put("root.<xmlattr>.status_code", 202);
+      serialize_steam_switch_task(*task, tree);
+      return;
+    }
+
+    if (!std::filesystem::exists(task->steam_exe)) {
+      tree.put("root.<xmlattr>.status_code", 500);
+      tree.put("root.<xmlattr>.status_message",
+               "steam.exe not found at " + task->steam_exe);
+      return;
+    }
+
+    BOOST_LOG(warning) << "[steam-switch] task=" << task->id
+                       << " target account=" << target_account
+                       << " (steam_id3=" << target->steam_id3
+                       << "), current=" << fresh_current;
+
+    {
+      std::lock_guard<std::mutex> lk{g_switch_tasks_mu};
+      g_switch_tasks[task->id] = task;
+    }
+
+    // Detach worker.  shared_ptr capture keeps the task alive past the
+    // handler's stack frame; the registry holds the second strong ref
+    // so /steamswitch/status can find it.
+    std::thread([task]() {
+      try {
+        run_steam_switch_worker(task);
+      } catch (const std::exception &e) {
+        std::lock_guard<std::mutex> lk{task->mu};
+        task->state       = "error";
+        task->error       = std::string{"worker exception: "} + e.what();
+        task->message     = "Internal error";
+        task->http_status = 500;
+        task->finished_at = std::chrono::steady_clock::now();
+        BOOST_LOG(warning) << "[steam-switch] task=" << task->id
+                           << " worker threw: " << e.what();
+      } catch (...) {
+        std::lock_guard<std::mutex> lk{task->mu};
+        task->state       = "error";
+        task->error       = "worker threw unknown exception";
+        task->message     = "Internal error";
+        task->http_status = 500;
+        task->finished_at = std::chrono::steady_clock::now();
+      }
+    }).detach();
+
+    tree.put("root.<xmlattr>.status_code", 202);
+    {
+      std::lock_guard<std::mutex> lk{task->mu};
+      serialize_steam_switch_task(*task, tree);
+    }
+#else
+    tree.put("root.<xmlattr>.status_code", 503);
+    tree.put("root.<xmlattr>.status_message", "Steam switch is Windows-only");
+#endif
+  }
+
+  // /steamswitch/status?id=<task_id>  GET
+  // Returns the current state of an in-flight or recently-finished
+  // steam-switch task. Client polls every ~1 s until state is in a
+  // terminal value (done | error | already_active).
+  template <class T>
+  void steamswitch_status(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
+                          std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+    print_req<T>(request);
+    pt::ptree tree;
+    auto fg = util::fail_guard([&]() {
+      std::ostringstream data;
+      pt::write_xml(data, tree);
+      response->write(data.str());
+      response->close_connection_after_response = true;
+    });
+
+#ifdef _WIN32
+    gc_steam_switch_tasks();
+
+    auto args = request->parse_query_string();
+    auto it = args.find("id"s);
+    if (it == std::end(args) || it->second.empty()) {
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Missing 'id' query parameter");
+      return;
+    }
+    std::shared_ptr<SteamSwitchTask> task;
+    {
+      std::lock_guard<std::mutex> lk{g_switch_tasks_mu};
+      auto found = g_switch_tasks.find(it->second);
+      if (found != g_switch_tasks.end()) task = found->second;
+    }
+    if (!task) {
+      tree.put("root.<xmlattr>.status_code", 404);
+      tree.put("root.<xmlattr>.status_message",
+               "Task id unknown (already GC'd, or never existed)");
+      return;
+    }
+    std::lock_guard<std::mutex> lk{task->mu};
+    serialize_steam_switch_task(*task, tree);
+#else
+    tree.put("root.<xmlattr>.status_code", 503);
+    tree.put("root.<xmlattr>.status_message", "Steam switch is Windows-only");
+#endif
   }
 
   void setup(const std::string &pkey, const std::string &cert) {
@@ -1195,6 +1828,11 @@ namespace nvhttp {
       resume<SunshineHTTPS>(host_audio, resp, req);
     };
     https_server.resource["^/cancel$"]["GET"] = cancel<SunshineHTTPS>;
+    // VipleStream H.4 — Steam profiles + account switch.  Both behind
+    // the standard paired-cert HTTPS auth.
+    https_server.resource["^/steamprofiles$"]["GET"]       = steamprofiles<SunshineHTTPS>;
+    https_server.resource["^/steamswitch$"]["GET"]         = steamswitch<SunshineHTTPS>;
+    https_server.resource["^/steamswitch/status$"]["GET"]  = steamswitch_status<SunshineHTTPS>;
 
     https_server.config.reuse_address = true;
     https_server.config.address = net::get_bind_address(address_family);

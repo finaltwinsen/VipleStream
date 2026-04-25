@@ -319,6 +319,27 @@ NvHTTP::getAppList()
             else if (name == QString("IsAppCollectorGame")) {
                 apps.last().isAppCollectorGame = xmlReader.readElementText() == "1";
             }
+            // VipleStream H Phase 2: provenance + Steam metadata tags
+            // emitted by our Sunshine fork. Upstream GFE never sends
+            // these so the else-if chain naturally ignores them on
+            // non-VipleStream hosts; older Moonlight builds will also
+            // ignore these tags silently (unknown XML elements fall
+            // through the while loop).
+            else if (name == QString("Source")) {
+                apps.last().source = xmlReader.readElementText();
+            }
+            else if (name == QString("SteamAppId")) {
+                apps.last().steamAppId = xmlReader.readElementText();
+            }
+            else if (name == QString("SteamOwners")) {
+                apps.last().steamOwners = xmlReader.readElementText();
+            }
+            else if (name == QString("LastPlayed")) {
+                apps.last().lastPlayed = xmlReader.readElementText().toLongLong();
+            }
+            else if (name == QString("Playtime")) {
+                apps.last().playtimeMinutes = xmlReader.readElementText().toLongLong();
+            }
         }
     }
 
@@ -556,3 +577,107 @@ NvHTTP::openConnection(QUrl baseUrl,
 
     return reply;
 }
+
+// ── VipleStream H.4: Steam profile / account-switch client helpers ───────
+//
+// Both endpoints are HTTPS-only (server-side registered behind paired
+// cert auth).  Vanilla Sunshine doesn't expose them — getSteamProfiles
+// will throw a GfeHttpResponseException with status_code 503 in that
+// case; AppView should catch and just hide the dropdown.
+
+QList<SteamProfile>
+NvHTTP::getSteamProfiles()
+{
+    QString xml = openConnectionToString(m_BaseUrlHttps,
+                                         "steamprofiles",
+                                         nullptr,
+                                         REQUEST_TIMEOUT_MS,
+                                         NvLogLevel::NVLL_ERROR);
+    verifyResponseStatus(xml);
+
+    const QString currentSteamId3 = getXmlString(xml, "current_user");
+
+    QList<SteamProfile> result;
+    QXmlStreamReader reader(xml);
+    while (!reader.atEnd() && !reader.hasError()) {
+        if (reader.readNext() != QXmlStreamReader::StartElement) continue;
+        if (reader.name() != QStringLiteral("profile")) continue;
+
+        SteamProfile p;
+        // Walk children until matching </profile>
+        while (!reader.atEnd()) {
+            auto t = reader.readNext();
+            if (t == QXmlStreamReader::EndElement &&
+                reader.name() == QStringLiteral("profile")) {
+                break;
+            }
+            if (t != QXmlStreamReader::StartElement) continue;
+            const auto name = reader.name();
+            const QString text = reader.readElementText();
+            if      (name == QStringLiteral("steam_id3"))         p.steamId3 = text;
+            else if (name == QStringLiteral("steam_id64"))        p.steamId64 = text;
+            else if (name == QStringLiteral("account_name"))      p.accountName = text;
+            else if (name == QStringLiteral("persona_name"))      p.personaName = text;
+            else if (name == QStringLiteral("remember_password")) p.rememberPassword = (text == "1");
+            else if (name == QStringLiteral("most_recent"))       p.mostRecent = (text == "1");
+            else if (name == QStringLiteral("last_login"))        p.lastLogin = text.toLongLong();
+        }
+        p.current = (!p.steamId3.isEmpty() && p.steamId3 == currentSteamId3);
+        if (!p.steamId3.isEmpty()) {
+            result.append(p);
+        }
+    }
+    return result;
+}
+
+// VipleStream H.4 (v1.2.119): both helpers parse the same XML schema
+// emitted by serialize_steam_switch_task() on the server. Single
+// timeout for both since each request returns within milliseconds —
+// the long wait happens server-side on a background thread.
+static const int kSwitchEndpointTimeoutMs = 5000;
+
+static NvHTTP::SteamSwitchStatus parseSteamSwitchXml(const QString &xml)
+{
+    NvHTTP::SteamSwitchStatus s;
+    s.taskId           = NvHTTP::getXmlString(xml, "task_id");
+    s.state            = NvHTTP::getXmlString(xml, "state");
+    s.message          = NvHTTP::getXmlString(xml, "message");
+    s.error            = NvHTTP::getXmlString(xml, "error");
+    s.accountName      = NvHTTP::getXmlString(xml, "account_name");
+    s.personaName      = NvHTTP::getXmlString(xml, "persona_name");
+    s.currentUserAfter = NvHTTP::getXmlString(xml, "current_user_after");
+    s.httpStatus       = NvHTTP::getXmlString(xml, "http_status").toInt();
+    bool ok = false;
+    qint64 elapsed = NvHTTP::getXmlString(xml, "elapsed_ms").toLongLong(&ok);
+    s.elapsedMs = ok ? elapsed : -1;
+    qint64 finished = NvHTTP::getXmlString(xml, "finished_ms").toLongLong(&ok);
+    s.finishedMs = ok ? finished : -1;
+    return s;
+}
+
+NvHTTP::SteamSwitchStatus
+NvHTTP::startSteamSwitch(QString accountName)
+{
+    const QString args = QStringLiteral("account=") + QUrl::toPercentEncoding(accountName);
+    QString xml = openConnectionToString(m_BaseUrlHttps,
+                                         "steamswitch",
+                                         args,
+                                         kSwitchEndpointTimeoutMs,
+                                         NvLogLevel::NVLL_VERBOSE);
+    verifyResponseStatus(xml);
+    return parseSteamSwitchXml(xml);
+}
+
+NvHTTP::SteamSwitchStatus
+NvHTTP::pollSteamSwitchStatus(QString taskId)
+{
+    const QString args = QStringLiteral("id=") + QUrl::toPercentEncoding(taskId);
+    QString xml = openConnectionToString(m_BaseUrlHttps,
+                                         "steamswitch/status",
+                                         args,
+                                         kSwitchEndpointTimeoutMs,
+                                         NvLogLevel::NVLL_NONE);
+    verifyResponseStatus(xml);
+    return parseSteamSwitchXml(xml);
+}
+

@@ -60,8 +60,8 @@ if errorlevel 1 (
     echo [ERROR] Build failed
     exit /b 1
 )
-if not exist "%RELDIR%\Moonlight.exe" (
-    echo [ERROR] Moonlight.exe not found: %RELDIR%\Moonlight.exe
+if not exist "%RELDIR%\VipleStream.exe" (
+    echo [ERROR] VipleStream.exe not found: %RELDIR%\VipleStream.exe
     exit /b 1
 )
 echo [2/6] Build succeeded

@@ -1,9 +1,10 @@
 [Desktop Entry]
 Name=VipleStream
 Comment=Stream games and other applications from another PC running VipleStream-Server, Sunshine, or GeForce Experience
-Exec=moonlight
-Icon=moonlight
+Exec=viplestream
+Icon=viplestream
+StartupWMClass=com.piinsta
 Terminal=false
 Type=Application
 Categories=Qt;Game;Network;RemoteAccess;
-Keywords=viplestream;nvidia;gamestream;stream;sunshine;moonlight;remote play;
+Keywords=viplestream;piinsta;nvidia;gamestream;stream;sunshine;moonlight;remote play;

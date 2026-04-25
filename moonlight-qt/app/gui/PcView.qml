@@ -375,6 +375,40 @@ CenteredGridView {
                                            : "#D4FF3A"
                     anchors.verticalCenter: parent.verticalCenter
                 }
+
+                // VipleStream H.5: capability badge.  Visible only when the
+                // peer's /serverinfo carried <VipleStreamProtocol>.
+                // Vanilla Sunshine / GFE → no badge (still works, just no
+                // VipleStream-only affordances). Sits to the right of the
+                // status label so the meta bar reads "DESKTOP-XXX • READY • V".
+                //
+                // v1.2.105: kept deliberately simple — earlier draft had an
+                // attached ToolTip + HoverHandler with a custom `hovered`
+                // property; that combo dangled on stack pop (Settings →
+                // back) and corrupted the PcView's render state, breaking
+                // the toolbar's `+ Add PC` visibility binding too.  The
+                // badge now is a pure visual chip with zero behaviour.
+                Rectangle {
+                    visible: model.isVipleStreamPeer === true
+                    width: vipleBadgeText.implicitWidth + 8
+                    height: 14
+                    radius: 0
+                    color: "#1F2916"           // ink3
+                    border.color: "#D4FF3A"    // lime
+                    border.width: 1
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                        id: vipleBadgeText
+                        anchors.centerIn: parent
+                        text: "V"
+                        font.family: "IBM Plex Mono"
+                        font.pointSize: 8
+                        font.bold: true
+                        font.letterSpacing: 0.8
+                        color: "#D4FF3A"
+                    }
+                }
             }
         }
 

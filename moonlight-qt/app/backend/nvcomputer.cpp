@@ -1,6 +1,7 @@
 #include "nvcomputer.h"
 #include "nvapp.h"
 #include "settings/compatfetcher.h"
+#include "settings/streamingpreferences.h"
 
 #include <QUdpSocket>
 #include <QHostInfo>
@@ -129,11 +130,79 @@ bool NvComputer::isEqualSerialized(const NvComputer &that) const
            this->appList == that.appList;
 }
 
+// VipleStream H Phase 2.2: shared app-comparator reads the user's
+// Apps-view sort-mode preference (QSettings-backed) every call. Kept
+// here rather than in a separate header so both NvComputer::sortAppList
+// and AppModel::updateAppList (its inline insertion-sort in the
+// "process additions" pass) can share it — any comparator drift between
+// the two causes the AppModel to silently re-sort the NvComputer-sorted
+// list back into its own order, which is what burned Phase 2 originally.
+//
+// Contract:
+//   returns true iff `a` should appear BEFORE `b` in the Apps view.
+//
+// Order is stable: manual entries (source=="") always pin to the top,
+// then auto-imported entries (source=="steam" etc.) sort according to
+// the current mode. Alphabetical-by-name is the final tiebreaker in
+// every mode so the UI never has two apps "swap" unpredictably between
+// refreshes.
+bool NvComputer::appLessThan(const NvApp& a, const NvApp& b)
+{
+    // manual (source=="") always pins to the top, regardless of mode.
+    if (a.source.isEmpty() != b.source.isEmpty()) {
+        return a.source.isEmpty();
+    }
+
+    // source bucketing for non-empty: "steam" before "xbox" alphabetical,
+    // so the order within auto-imported sources is stable when multiple
+    // providers show up (future-proof for G.x TODOs).
+    if (a.source != b.source) {
+        return a.source < b.source;
+    }
+
+    StreamingPreferences* prefs = StreamingPreferences::get(nullptr);
+    StreamingPreferences::AppSortMode mode =
+        prefs ? prefs->appSortMode : StreamingPreferences::ASM_RECENT;
+
+    auto byName = [](const NvApp& x, const NvApp& y) {
+        return x.name.toLower() < y.name.toLower();
+    };
+
+    switch (mode) {
+        case StreamingPreferences::ASM_RECENT:
+            // Never-played games (lastPlayed==0) fall to bottom of their
+            // bucket alphabetical. Otherwise higher lastPlayed first.
+            if ((a.lastPlayed == 0) != (b.lastPlayed == 0)) {
+                return a.lastPlayed != 0;  // played before unplayed
+            }
+            if (a.lastPlayed != b.lastPlayed) {
+                return a.lastPlayed > b.lastPlayed;  // desc
+            }
+            return byName(a, b);
+
+        case StreamingPreferences::ASM_PLAYTIME:
+            if ((a.playtimeMinutes == 0) != (b.playtimeMinutes == 0)) {
+                return a.playtimeMinutes != 0;
+            }
+            if (a.playtimeMinutes != b.playtimeMinutes) {
+                return a.playtimeMinutes > b.playtimeMinutes;
+            }
+            return byName(a, b);
+
+        case StreamingPreferences::ASM_NAME:
+            return byName(a, b);
+
+        case StreamingPreferences::ASM_DEFAULT:
+        default:
+            return byName(a, b);
+    }
+}
+
 void NvComputer::sortAppList()
 {
-    std::stable_sort(appList.begin(), appList.end(), [](const NvApp& app1, const NvApp& app2) {
-       return app1.name.toLower() < app2.name.toLower();
-    });
+    // VipleStream H Phase 2 + 2.2: pinning + configurable sort mode.
+    // See appLessThan() for the ordering rules.
+    std::stable_sort(appList.begin(), appList.end(), appLessThan);
 }
 
 NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
@@ -221,6 +290,11 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
                 << "-> HTTP address:" << this->stunAddress.address() << ":" << this->stunAddress.port()
                 << "NAT:" << this->stunNatType;
     }
+
+    // VipleStream capability marker. Vanilla Sunshine / GFE don't emit this
+    // element; only VipleStream-Server does. Empty string ⇒ not a Viple peer.
+    this->vipleStreamProtocol = NvHTTP::getXmlString(serverInfo, "VipleStreamProtocol");
+    this->isVipleStreamPeer = !this->vipleStreamProtocol.isEmpty();
 
     // Real Nvidia host software (GeForce Experience and RTX Experience) both use the 'Mjolnir'
     // codename in the state field and no version of Sunshine does. We can use this to bypass
@@ -594,6 +668,13 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED(appVersion);
     ASSIGN_IF_CHANGED(isSupportedServerVersion);
     ASSIGN_IF_CHANGED(isNvidiaServerSoftware);
+    // VipleStream H.5: capability flag must propagate via update() too,
+    // otherwise hosts paired before the marker shipped (or app reboots
+    // that hydrate NvComputer from QSettings before any /serverinfo
+    // poll completes) keep isVipleStreamPeer == false forever and the
+    // PcView badge / Steam profile dropdown never appear.
+    ASSIGN_IF_CHANGED(isVipleStreamPeer);
+    ASSIGN_IF_CHANGED(vipleStreamProtocol);
     ASSIGN_IF_CHANGED(maxLumaPixelsHEVC);
     ASSIGN_IF_CHANGED(gpuModel);
     ASSIGN_IF_CHANGED_AND_NONNULL(serverCert);

@@ -79,6 +79,14 @@ public class ComputerDetails {
     public String stunAddress;  // VipleStream: STUN public endpoint IP
     public String stunNatType;  // VipleStream: NAT type (punchable/symmetric)
 
+    // VipleStream capability marker (v1.2.93). Non-blocking — `false`
+    // simply means the host is vanilla Sunshine / GFE and we get
+    // standard Moonlight protocol behaviour. `true` lets the UI surface
+    // VipleStream-only affordances (badge, extra settings entry points,
+    // etc.).
+    public boolean isVipleStreamPeer;
+    public String vipleStreamProtocol;
+
     public ComputerDetails() {
         // Use defaults
         state = State.UNKNOWN;
@@ -148,6 +156,8 @@ public class ComputerDetails {
         this.runningGameId = details.runningGameId;
         this.nvidiaServer = details.nvidiaServer;
         this.rawAppList = details.rawAppList;
+        this.isVipleStreamPeer = details.isVipleStreamPeer;
+        this.vipleStreamProtocol = details.vipleStreamProtocol;
     }
 
     @Override

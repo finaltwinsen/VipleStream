@@ -1,5 +1,11 @@
 #include "appmodel.h"
 
+// VipleStream H.4 v1.2.119: poll-loop in requestSteamSwitch needs these.
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QEventLoop>
+#include <QThread>
+
 AppModel::AppModel(QObject *parent)
     : QAbstractListModel(parent)
 {
@@ -17,6 +23,10 @@ void AppModel::initialize(ComputerManager* computerManager, int computerIndex, b
     m_Computer = m_ComputerManager->getComputers().at(computerIndex);
     m_CurrentGameId = m_Computer->currentGameId;
     m_ShowHiddenGames = showHiddenGames;
+    {
+        QReadLocker lock(&m_Computer->lock);
+        m_LastKnownPeerIsViple = m_Computer->isVipleStreamPeer;
+    }
 
     updateAppList(m_Computer->appList);
 }
@@ -206,7 +216,16 @@ void AppModel::updateAppList(QVector<NvApp> newList)
         }
     }
 
-    // Process additions now
+    // Process additions now.
+    //
+    // VipleStream H Phase 2: AppModel runs its own insertion-sort here
+    // to build m_VisibleApps one app at a time. The comparator MUST
+    // match NvComputer::sortAppList()'s — otherwise the "pre-sorted"
+    // appList handed to us gets re-sorted back to the upstream
+    // alphabetical-only order, defeating the source/playtime-based
+    // ordering. Phase 2.2 centralises this as NvComputer::appLessThan
+    // so both call sites use identical rules (including the current
+    // AppSortMode preference at call time).
     for (const NvApp& newApp : std::as_const(newVisibleList)) {
         int insertionIndex = m_VisibleApps.size();
         bool found = false;
@@ -218,7 +237,7 @@ void AppModel::updateAppList(QVector<NvApp> newList)
                 found = true;
                 break;
             }
-            else if (existingApp.name.toLower() > newApp.name.toLower()) {
+            else if (NvComputer::appLessThan(newApp, existingApp)) {
                 insertionIndex = i;
                 break;
             }
@@ -286,6 +305,22 @@ void AppModel::handleComputerStateChanged(NvComputer* computer)
         return;
     }
 
+    // VipleStream H.4: detect isVipleStreamPeer flips so QML can re-run
+    // its Steam-profile-dropdown populate when the first /serverinfo
+    // poll arrives after AppView's initial Component.onCompleted has
+    // already given up.  Read under the same lock the rest of the
+    // ASSIGN_IF_CHANGED path uses inside NvComputer::update.
+    {
+        QReadLocker lock(&m_Computer->lock);
+        bool nowIsViple = m_Computer->isVipleStreamPeer;
+        if (nowIsViple != m_LastKnownPeerIsViple) {
+            m_LastKnownPeerIsViple = nowIsViple;
+            qInfo() << "[H.4] isVipleStreamPeer changed for"
+                    << m_Computer->name << "→" << nowIsViple;
+            emit peerIsVipleChanged();
+        }
+    }
+
     // If the computer has gone offline or we've been unpaired,
     // signal the UI so we can go back to the PC view.
     if (m_Computer->state == NvComputer::CS_OFFLINE ||
@@ -346,4 +381,168 @@ void AppModel::handleBoxArtLoaded(NvComputer* computer, NvApp app, QUrl /* image
     else {
         qWarning() << "App not found for box art callback:" << app.name;
     }
+}
+
+// ── VipleStream H.4: Steam profile dropdown helpers ─────────────────────
+
+bool AppModel::peerSupportsSteamProfiles() const
+{
+    if (!m_Computer) return false;
+    QReadLocker lock(&m_Computer->lock);
+    return m_Computer->isVipleStreamPeer;
+}
+
+bool AppModel::refreshSteamProfiles()
+{
+    if (!m_Computer) return false;
+    if (!peerSupportsSteamProfiles()) {
+        m_SteamProfiles.clear();
+        return false;
+    }
+    NvHTTP http(m_Computer);
+    try {
+        QList<SteamProfile> fresh = http.getSteamProfiles();
+        bool changed = (fresh.size() != m_SteamProfiles.size());
+        if (!changed) {
+            for (int i = 0; i < fresh.size(); ++i) {
+                if (fresh[i].steamId3 != m_SteamProfiles[i].steamId3 ||
+                    fresh[i].current  != m_SteamProfiles[i].current) {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        m_SteamProfiles = fresh;
+        return changed;
+    } catch (const GfeHttpResponseException& e) {
+        qWarning() << "[H.4] /steamprofiles failed:" << e.getStatusCode() << e.getStatusMessage();
+        m_SteamProfiles.clear();
+        return false;
+    } catch (const QtNetworkReplyException& e) {
+        qWarning() << "[H.4] /steamprofiles network error:" << e.toQString();
+        m_SteamProfiles.clear();
+        return false;
+    }
+}
+
+int AppModel::steamProfileCount() const
+{
+    return m_SteamProfiles.size();
+}
+
+QString AppModel::steamProfilePersona(int index) const
+{
+    if (index < 0 || index >= m_SteamProfiles.size()) return {};
+    return m_SteamProfiles[index].personaName;
+}
+
+QString AppModel::steamProfileAccount(int index) const
+{
+    if (index < 0 || index >= m_SteamProfiles.size()) return {};
+    return m_SteamProfiles[index].accountName;
+}
+
+bool AppModel::steamProfileSwitchable(int index) const
+{
+    if (index < 0 || index >= m_SteamProfiles.size()) return false;
+    return m_SteamProfiles[index].rememberPassword;
+}
+
+int AppModel::currentSteamProfileIndex() const
+{
+    for (int i = 0; i < m_SteamProfiles.size(); ++i) {
+        if (m_SteamProfiles[i].current) return i;
+    }
+    return -1;
+}
+
+bool AppModel::requestSteamSwitch(QString accountName)
+{
+    m_LastSteamSwitchError.clear();
+    if (!m_Computer) {
+        m_LastSteamSwitchError = tr("No host selected");
+        return false;
+    }
+    NvHTTP http(m_Computer);
+
+    // 1. Kick off the async task on the host. Returns within ms.
+    NvHTTP::SteamSwitchStatus status;
+    try {
+        status = http.startSteamSwitch(accountName);
+    } catch (const GfeHttpResponseException& e) {
+        m_LastSteamSwitchError = QString::fromUtf8(e.getStatusMessage());
+        return false;
+    } catch (const QtNetworkReplyException& e) {
+        m_LastSteamSwitchError = e.toQString();
+        return false;
+    }
+
+    emit steamSwitchProgress(status.state, status.message);
+
+    // 2. Already-active short-circuit — nothing to wait for.
+    if (status.state == QLatin1String("already_active")) {
+        refreshSteamProfiles();
+        return true;
+    }
+
+    // 3. Validate that we got a usable task id back.
+    if (status.taskId.isEmpty()) {
+        m_LastSteamSwitchError = tr("Server returned no task id");
+        return false;
+    }
+
+    // 4. Poll loop.  150 s safety deadline matches the server's own
+    //    15 s shutdown + 90 s login + slack budget.  Drives
+    //    QCoreApplication::processEvents() between polls so QML stays
+    //    responsive (busy overlay animation, signal delivery).
+    const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + 150000;
+    int consecutiveErrors = 0;
+    while (QDateTime::currentMSecsSinceEpoch() < deadline) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+        QThread::msleep(900);
+
+        try {
+            status = http.pollSteamSwitchStatus(status.taskId);
+            consecutiveErrors = 0;
+        } catch (const GfeHttpResponseException& e) {
+            // 404 means the task was GC'd (server restart, or finished
+            // >60 s ago).  Anything else is transient — retry a few times
+            // before giving up.
+            if (e.getStatusCode() == 404) {
+                m_LastSteamSwitchError = tr("Switch task disappeared on host");
+                return false;
+            }
+            if (++consecutiveErrors >= 5) {
+                m_LastSteamSwitchError = QString::fromUtf8(e.getStatusMessage());
+                return false;
+            }
+            continue;
+        } catch (const QtNetworkReplyException& e) {
+            if (++consecutiveErrors >= 5) {
+                m_LastSteamSwitchError = e.toQString();
+                return false;
+            }
+            continue;
+        }
+
+        emit steamSwitchProgress(status.state, status.message);
+
+        if (status.isTerminal()) {
+            if (status.state == QLatin1String("done")
+             || status.state == QLatin1String("already_active")) {
+                refreshSteamProfiles();
+                return true;
+            }
+            m_LastSteamSwitchError = !status.error.isEmpty() ? status.error : status.message;
+            return false;
+        }
+    }
+
+    m_LastSteamSwitchError = tr("Switch timed out (>150s without server reaching a terminal state)");
+    return false;
+}
+
+QString AppModel::lastSteamSwitchError() const
+{
+    return m_LastSteamSwitchError;
 }

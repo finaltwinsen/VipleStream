@@ -69,6 +69,30 @@ public:
     bool isInitialized() const override { return m_Initialized; }
     void setQualityLevel(int level) override { m_QualityLevel = (level >= 0 && level <= 2) ? level : 1; }
 
+    /**
+     * VipleStream v1.2.87: measure end-to-end DML inference time
+     * with this backend's *current* tensor / model setup. Used by
+     * D3D11VARenderer::initFRUC() to auto-pick the highest DML
+     * resolution that still fits the user's frame budget.
+     *
+     *   warmup     : run this many inferences first to skip the
+     *                first-call JIT cost ORT-DML always pays.
+     *   iterations : number of timed inferences after warmup.
+     *
+     * Returns the *median* inference time in milliseconds, or a
+     * negative value on failure (model not loaded, OoM, etc.).
+     * Median (not mean) keeps the result resilient to a single
+     * slow GPU spike during the probe window.
+     *
+     * Inputs are uninitialised GPU tensors — DML inference time is
+     * shape-dependent, not data-dependent, so the result reflects
+     * the steady-state cost of a real frame.  Output goes to the
+     * same OutputTensor real frames write to (subsequently
+     * over-written when the stream starts), so this is a
+     * non-destructive probe.
+     */
+    double probeInferenceCost(int warmup = 2, int iterations = 5);
+
     double getLastMeTimeMs()     const override { return 0.0; }
     double getLastMedianTimeMs() const override { return 0.0; }
     double getLastWarpTimeMs()   const override { return m_LastInterpMs; }
@@ -134,6 +158,33 @@ private:
         double close_exec_us        = 0.0;   // Close + ExecuteCommandLists
         double d3d12_signal_wait_us = 0.0;   // Signal + ctx4->Wait at end
         double submit_total_us      = 0.0;   // whole submitFrame body
+
+        // VipleStream v1.2.83: ORT-path-specific instrumentation —
+        // breaks the otherwise-opaque "44 ms hidden in runDMLDispatch"
+        // budget into where the time actually goes.
+        //   ort_concat_us     — m_PostCmdList12 record+submit for the
+        //                       concat-input copy (only if model uses
+        //                       concat layout).
+        //   ort_run_us        — Ort::Session::Run() wall time; this is
+        //                       the synchronous bridge to the DML EP
+        //                       and historically the prime suspect.
+        //   ort_post_us       — post-Run unpack CL record+submit.
+        //   wait_pack_us      — fence wait on the ring slot for pack CL
+        //                       (instrumentation of the existing wait).
+        //   wait_post_us      — fence wait on m_CmdAlloc12 added in
+        //                       v1.2.82.  If this is the dominant cost
+        //                       it means the GPU is consistently behind
+        //                       and the previous frame's post-unpack CL
+        //                       hasn't completed yet.
+        //   wait_concat_us    — fence wait on m_PostCmdAlloc12 added in
+        //                       v1.2.82, mirror of wait_post_us.
+        double ort_concat_us        = 0.0;
+        double ort_run_us           = 0.0;
+        double ort_post_us          = 0.0;
+        double wait_pack_us         = 0.0;
+        double wait_post_us         = 0.0;
+        double wait_concat_us       = 0.0;
+
         uint64_t sample_count       = 0;
     };
     StageTimings m_Stage = {};
@@ -179,6 +230,59 @@ private:
     // without a CPU stall between them.
     CP<ID3D12CommandAllocator>     m_PostCmdAlloc12;
     CP<ID3D12GraphicsCommandList>  m_PostCmdList12;
+
+    // VipleStream v1.2.85: 2-slot ring of post-unpack allocators.
+    //
+    // Eliminates the per-frame ~22ms wait_post stall that's left after
+    // v1.2.83 fixed wait_concat. Mechanism: alternate which allocator
+    // hosts the post-unpack CL across frames so by the time a slot is
+    // re-used, its previous frame's GPU work has had a full
+    // frame-period (33 ms at 30 fps source) to finish — long enough
+    // for the ~25 ms inference + post-unpack to drain naturally.
+    // No CPU-side wait needed in steady state; the fence-gate is just
+    // a safety net for transients.
+    //
+    // m_CmdAlloc12 (legacy single-slot) stays for compatibility with
+    // a couple of init-time dispatches that don't go through the hot
+    // path.  Hot-path submissions in runOrtInference / inline DML
+    // fallback go through m_PostUnpackAllocRing.
+    static constexpr uint32_t kPostAllocRingSize = 2;
+    CP<ID3D12CommandAllocator>     m_PostUnpackAllocRing[kPostAllocRingSize];
+    uint64_t                       m_PostUnpackAllocFenceVal[kPostAllocRingSize] = {};
+    uint32_t                       m_PostUnpackAllocIdx = 0;
+
+    // Same idea for the concat-input allocator (only used in concat-
+    // input ORT models; otherwise sits idle).  2 slots.  Replaces the
+    // single m_PostCmdAlloc12 (kept below for backward compat).
+    CP<ID3D12CommandAllocator>     m_ConcatAllocRing[kPostAllocRingSize];
+    uint64_t                       m_ConcatAllocFenceVal[kPostAllocRingSize] = {};
+    uint32_t                       m_ConcatAllocIdx = 0;
+
+    // VipleStream v1.2.82: per-allocator fence tracking for the
+    // post-dispatch command lists.
+    //
+    // Background: v1.2.64's Option C added a 3-slot ring for the
+    // *pack* CL (m_CmdAllocRing), gating Reset() on a recorded fence
+    // value so we never recycle an allocator the GPU is still using.
+    // BUT the ORT post-unpack CL still uses m_CmdAlloc12 (single
+    // allocator), and m_PostCmdAlloc12 is used for the ORT concat-input
+    // CL — both Reset() unconditionally every frame.
+    //
+    // D3D12 says calling Reset() on an allocator while the GPU is
+    // still executing CLs from it is undefined behaviour. In practice
+    // most drivers paper over it by inserting an *implicit CPU wait*,
+    // which is exactly what causes "DirectML drops FPS instead of
+    // doubling it" on slower / busier GPUs: each frame, the post-
+    // unpack CL of the previous frame might still be running when we
+    // try to recycle its allocator, and the driver silently stalls.
+    //
+    // Fix: record the fence value the post-dispatch CLs are signalling,
+    // and gate Reset() on GetCompletedValue() reaching that fence.
+    // Steady-state on a well-paced GPU: zero waits (GetCompletedValue
+    // is a fast atomic load). Under load: an explicit, bounded wait
+    // instead of an opaque driver stall.
+    uint64_t                       m_CmdAlloc12FenceVal     = 0;
+    uint64_t                       m_PostCmdAlloc12FenceVal = 0;
     CP<ID3D12Fence>                m_Fence12;       // SHARED, cross-API
 
     // D3D12 views of the shared D3D11 render / output textures.
