@@ -24,6 +24,7 @@ import onnxruntime as ort
 REPO  = Path(__file__).resolve().parents[1]
 FP32  = REPO / "tools" / "fruc.onnx"
 FP16  = REPO / "tools" / "fruc_fp16.onnx"
+IFR_S = REPO / "tools" / "fruc_ifrnet_s.onnx"
 
 # Budget: 30->60 doubling.  The interpolated frame must be ready before
 # the half-rate display slot, so the inference budget is HALF the native
@@ -141,7 +142,7 @@ def main() -> int:
 
     results = []
     for label, w, h in RESOLUTIONS:
-        for model_label, model_path in [("fp32", FP32), ("fp16", FP16)]:
+        for model_label, model_path in [("fp32", FP32), ("fp16", FP16), ("ifr_s", IFR_S)]:
             tag = f"{model_label} {label}"
             print(f"  benching {tag} ({w}x{h})…", flush=True, end=" ")
             r = bench(model_path, tag, w, h)

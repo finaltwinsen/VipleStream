@@ -24,6 +24,8 @@
 | H.Phase 1+2+3 | Steam library 自動匯入 + applist 多送 5 個 metadata XML tags + multi-mode sort | v1.2.67 + v1.2.96 | applist 端 emit `<Source>` / `<SteamAppId>` / `<SteamOwners>` / `<LastPlayed>` / `<Playtime>`（空值省略）；client 端 NvApp 補對應欄位 + comparator 把 `source==""` pin 到頂；Sort 模式 DEFAULT/RECENT/PLAYTIME/NAME 三端（Qt + Android）。 |
 | **H.5** | **`<VipleStreamProtocol>` capability marker UI badge** | **v1.2.105** | Qt PcView (`PcView.qml:391-411`) 跟 Android PcGridAdapter (`PcGridAdapter.java:98-101` + `pc_grid_item.xml:44-60` + `vs_viple_badge_bg.xml`) 都掛了 lime 邊 + ink3 底的 `V` chip，`visible: isVipleStreamPeer`。資料層走 QAbstractListModel role (`computermodel` 的 `IsVipleStreamPeerRole`) 不需 Q\_PROPERTY。回頭整理 TODO 才發現是 v1.2.105 落實的，當時沒同步移到完成欄位。 |
 | **B** | **Discord Rich Presence App ID 獨立化** | **v1.2.123** | 註冊 VipleStream Discord App (`1497869749244268545`)，replace 上游 Moonlight 的 `594668102021677159`。順便重排 Rich Presence layout：遊戲名搬到 `details`（顯示更顯眼）、`state` 永遠是 `via VipleStream`、加 `largeImageText="VipleStream"` icon hover tooltip。`SettingsView.qml` tooltip 移除「currently shown as 'Moonlight'」caveat。1024×1024 icon 從 `assets/icon/viplestream_icon.svg` 用 `render_icon.mjs` 一次生成（順便為 Discord asset 上傳產出 `assets/icon/dist/discord_icon_1024.png`）。 |
+| **G.2** | **FP16 ONNX model variant + cascade rewrite** | **v1.2.124–127** | RIFE 4.25 lite native fp16 export (PyTorch `model.half()` + boundary fp32 I/O 給 C++ binding 0 改動)，改寫 cascade 從「resolution 降解」改成「同 res 試 fp16→fp32→Generic 三層 model 變體」。一路解掉 4 個 sub-bug：(a) v1.2.61 onnxconverter_common 結構性炸 → PyTorch native 重 export；(b) `convert_float_to_float16` 改 op_block_list 留下 Cast value_info 不一致 → 全清重 infer；(c) probe 沒偵測 ORT silently disable → 加 `wantedOrtAtEntry` snapshot；(d) Concat_12 shape mismatch (1080 非 128 倍數) → wrapper 內部 `F.pad` to 128 multiple + crop output。A1000 實測 fp16=132 ms / fp32=107 ms / 都超 14 ms budget → fall back Generic（A1000 launch overhead 25 ms floor 不可繞過）。RTX 30/40+ 預期 fp16 反而會贏 fp32 因為 Tensor Core 加速。`VIPLE_FRUC_MODEL=fp16\|fp32\|auto` env var override。Bundle 兩個 onnx (~33 MB total)。 |
+| **G.3** | **嘗試其他架構（IFRNet-S）** | **v1.2.128** | Negative result 紀錄：IFRNet-S 雖然 params 最少（2.4M vs RIFE 9.5M），op count 卻最多（802 vs RIFE 456），A1000 上跑 1080p 680 ms（比 RIFE fp32 慢 3.8×）。原因：IFRNet 的 `embt.repeat(1,1,h,w)` 加上 PyTorch 2.6 trace 把動態 shape ops 展開成 Range×40 / Unsqueeze×62 / Expand×56，加上 PReLU 比 LeakyReLU 慢。**確認 A1000 是 launch-overhead-bound，「params 少 ≠ 快」、op count 才是關鍵指標**，因此 §G.3 走「換小模型贏 RIFE」這條路不通。Export script (`scripts/export_ifrnet_s.py`)、ONNX (`tools/fruc_ifrnet_s.onnx`)、bench harness 都進 repo 當未來其他 GPU tier 的 reference 留著但不 ship 進 cascade。 |
 | **H.4** | **Steam 帳號切換 — server async + Qt + Android 全端** | **v1.2.108–122** | Server: `/steamprofiles` + 異步 `/steamswitch` (回 202+task_id) + `/steamswitch/status?id=X`；force-kill straggler steam.exe + Steam Guard 2FA 偵測；`current_user` 走 HKEY_USERS walk（修 v1.2.117 之前 HKCU=.DEFAULT 的 root cause — `CreateProcessAsUserW` 沒呼 `LoadUserProfile`）；async task registry + 60 s GC，徹底解決同步 handler 9 秒 block 造成 /serverinfo starvation 的「假斷線」。Qt client: dropdown + busy overlay 顯示即時進度（`Asking Steam to shut down…` / `Logging in as XXX…`）。Android client: 同等功能（Spinner + SpinnerDialog + rollback on error）。修 OkHttp `addPathSegment` 把 `/` URL-encode 成 `%2F` 的 bug（改用 `addPathSegments` plural）。 |
 | Y | DirectML auto-cascade probe + Generic fallback | v1.2.86–91 | init 時 probe 720p→540p→480p→360p 各解析度推論時間，挑能塞進預算的最高；全 miss 就 fall back 到 Generic。同步把 default backend 改成 Generic、DML option 加「需要強 GPU」警語、移除 180fps 警告。 |
 | 新 | DirectML reset-race 修正 | v1.2.82–86 | post-unpack + concat allocator 的 fence-gated reset；多 ring slots；submitFrame 從 50 ms → 3 ms。 |
@@ -132,20 +134,18 @@ DirectML auto-cascade（v1.2.91）已經把「中低階 GPU 跑 DML 會掉幀」
 
 ## G. DirectML FRUC — 更多 ONNX model variants
 
+§G.2（fp16 model + cascade rewrite）跟 §G.3（IFRNet-S 試水）都已 ship，
+見「已完成」表的對應列。重要的 negative result：**A1000 launch overhead
+25 ms floor 不可繞過，任何 ML 模型 op count > 150 都上不了 14 ms budget**。
+這個結論影響下面剩下的 G.1 / G.4：
+
 ### G.1 11-channel 輸入 (RIFE v4 v1)
 
 **Gain：** v1 node count 少 50%（216 vs 456），可能比 v2 快 30-50%。
+**重新評估（§G.3 之後）：** A1000 仍可能達不到 14 ms（216 ops × 0.1 ms launch
+overhead = 21.6 ms 已經超了），但對 RTX 30/40+ 可能值得；要 ship 還是
+得搭 §G.4 的「下載管理」避免 release zip 再加肥。
 **做法：** `tryLoadOnnxModel` 加 11-channel branch；pack 前加 optical flow CS 或塞 zero flow。
-
-### G.2 FP16 model variant
-
-**Gain：** 2-3× 速度（weight memory 砍半 + Tensor Core packed math）。
-**Risk：** v1.2.61 試過 onnxconverter_common 簡單轉換失敗，需要 `auto_convert_mixed_precision` 配 calibration set，per-node fallback 不能 mixed-precision 的 op。
-
-### G.3 嘗試其他架構（IFRNet / FILM / M2M）
-
-**動機：** A1000 等中階 NVIDIA 卡跑 RIFE 4.25 lite 撐不到 1080p；可能 IFRNet-S 或 EMA-VFI-light 在同硬體上能 1080p。
-**做法：** 加 `VIPLE_FRUC_ONNX` env var override 模型路徑，benchmark harness 量速度 + 視覺品質，出「model × GPU tier」推薦表。
 
 ### G.4 模型下載管理
 
@@ -194,12 +194,10 @@ DirectML auto-cascade（v1.2.91）已經把「中低階 GPU 跑 DML 會掉幀」
 | 優先級 | 條目 | 理由 |
 |---|---|---|
 | **Medium** | **§A.1+A.11** QSettings org name + ini 名稱遷移 | 升級 v1.2.43 起的使用者「設定看起來像 reset 了」是真實 regression；只是大家手動把 paired hosts 重 add 過去就不痛了，所以沒人特別抱怨。動之前要寫並測 migration |
-| **Medium** | **§G.2** FP16 ONNX 模型 | DirectML 在 RTX 30/40 主流卡的 sweet spot 解鎖；A1000 上預期 2-3× 速度，搞不好能直接吃 1080p。實作風險中，但 v1.2.61 已經知道哪幾個坑要避開 |
 | **Medium-Low** | **§A.6** HTTP Basic auth realm | 改了使用者要重登 Web UI；除非有別的 reason 一起改，否則 standalone 改一條不划算 |
-| **Low** | **§G.3** 試其他模型架構（IFRNet / FILM） | 跟 §G.2 同一個目標（DML 變實用），但比 §G.2 工作量大、收益不確定；建議先做 §G.2 確認能不能省事 |
 | **Low** | **§F** DirectML pipeline 搬 D3D12 / bundles | 4K120 real-time 才需要的架構改動；現在 1080p240 已達標 |
-| **Low** | **§G.1** 11-channel RIFE v1 | 跟 §G.2/G.3 重疊；只在前面兩條都失敗才考慮 |
-| **Low** | **§G.4** 模型下載管理 | 22 MB 沒人抱怨；release size 不是痛點 |
+| **Low** | **§G.1** 11-channel RIFE v1 | A1000-tier 仍可能 launch overhead 超 budget（§G.3 negative result 之後），主要 win 在 RTX 30/40+；要 ship 得搭 §G.4 |
+| **Low** | **§G.4** 模型下載管理 | RIFE fp32 + fp16 兩個 onnx 已 bundle (~33 MB)，IFRNet-S 5.8 MB 還沒 ship；要加新 model 才會用到 |
 | **Low** | **§E** Android themed icon | Material You 一致性 nice to have；多數使用者不會在意 |
 | **Low** | **§C** 其他 20 個語系檔 | 英文 + 繁中 cover 主要使用者；剩下純品牌一致性 |
 | **Low** | **§D** wiki / docs 連結 | 在 docs 有實際內容前換連結沒意義 |
