@@ -111,6 +111,20 @@ if exist "%FRUC_ONNX%" (
     echo   [WARN] fruc.onnx missing at %FRUC_ONNX% - DirectML will fall back to inline crossfade graph
 )
 
+:: VipleStream v1.2.124: fp16 sibling model.  fp32 I/O + fp16 internals
+:: (see scripts/export_rife_fp16.py).  ~11 MB, ~529 ops.  D3D11VARenderer's
+:: model cascade tries this first then fp32 then Generic.  On Tensor Core
+:: gen 4+ (RTX 30/40) expected ~16 % faster than fp32; on A1000-tier
+:: workstation cards SLOWER than fp32 (no Tensor Core engagement) and
+:: the cascade falls through to fp32 cleanly.
+set "FRUC_FP16_ONNX=%ROOT%\tools\fruc_fp16.onnx"
+if exist "%FRUC_FP16_ONNX%" (
+    copy /y "%FRUC_FP16_ONNX%" "%TEMP_DIR%\" >nul
+    echo   fruc_fp16.onnx
+) else (
+    echo   [INFO] fruc_fp16.onnx not generated yet - run scripts/export_rife_fp16.py
+)
+
 :: VipleStream: NVIDIA Optical Flow FRUC helper DLL + its CUDA runtime
 :: dependency. NvOFRUCWrapper LoadLibraryW's NvOFFRUC.dll from the exe
 :: directory at runtime. NvOFFRUC.dll has a hard import on

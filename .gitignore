@@ -114,6 +114,20 @@ assets/icon/dist/
 assets/icon/node_modules/
 assets/icon/package-lock.json
 
+# ── Python venv used for fp16 ONNX conversion + DML benchmark ──
+# Built ad-hoc by scripts/convert_fruc_fp16.py / fruc_dml_bench.py.
+# onnxruntime-directml conflicts with the CPU-only onnxruntime that
+# system Python uses for other repo scripts, so we keep DML in its own venv.
+.venv-dml/
+
+# ── Python venv for PyTorch CUDA RIFE export ──
+# Built by `cd assets/icon`-style ad-hoc setup or directly:
+# `python -m venv .venv-rife && .venv-rife/Scripts/pip install
+# torch torchvision --index-url https://download.pytorch.org/whl/cu124`.
+# Used by scripts/export_rife_fp16.py to load Practical-RIFE flownet
+# checkpoints + emit fp16 ONNX.  ~3 GB on disk.
+.venv-rife/
+
 # ── OS files ──
 Thumbs.db
 Desktop.ini

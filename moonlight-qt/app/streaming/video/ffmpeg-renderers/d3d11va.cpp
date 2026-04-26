@@ -2108,35 +2108,31 @@ bool D3D11VARenderer::initFRUC()
     // display resolution bilinearly — same pattern Generic already
     // uses for the iGPU path.
     if (preferDirectML) {
+        // VipleStream v1.2.124 — DirectML model cascade rewrite.
+        //
+        // Pre-v1.2.124 the cascade walked DOWN resolutions (720p → 540p →
+        // 480p → 360p) at a single FP32 model.  Practical problem: 540p
+        // RIFE upscaled to 1080p display looks worse than 1080p Generic
+        // shader, so users on weak GPUs got a quality regression even
+        // when DML "fit".  v1.2.124 keeps stream-native resolution and
+        // walks DOWN model variants instead:
+        //
+        //   1. fruc_fp16.onnx (fp32 I/O, fp16 internals) -- 16 % faster
+        //      than fp32 on Tensor Core gen 4+ (RTX 30/40); 16 % SLOWER
+        //      on A1000-tier (no/few Tensor Cores) so the probe falls
+        //      through cleanly on those.
+        //   2. fruc.onnx (fp32) -- baseline, smaller op count (456 vs
+        //      529), lower kernel-launch overhead.
+        //   3. Generic compute shader -- always fits the budget; lower
+        //      visual quality than RIFE but better than downscaled DML.
+        //
+        // VIPLE_FRUC_MODEL=fp16|fp32|auto  overrides which models are
+        // tried (default auto = fp16 then fp32).  VIPLE_DML_RES kept
+        // for backward compat as an upper resolution cap (no longer
+        // triggers cascade-down behavior).
         uint32_t dmlW = fruW;
         uint32_t dmlH = fruH;
-        // VipleStream v1.2.60: cap DML tensor resolution aggressively
-        // when a ONNX FRUC model is in play.
-        //
-        // VipleStream v1.2.87 update: auto-cascade resolutions.
-        // The hard-coded default below is now treated as the *upper*
-        // bound — initFRUC will probe DML inference cost and walk
-        // down the cascade (720p → 540p → 480p → 360p) until it
-        // finds the largest res whose probed cost fits the user's
-        // half-rate frame budget (with 30 % safety margin). If no
-        // DML res fits, we fall through to GenericFRUC.
-        //
-        // VipleStream v1.2.89 update: cap is now an UPPER bound for
-        // the auto-cascade below. The cascade probes inference cost
-        // and walks down (720p → 540p → 480p → 360p) until it finds
-        // the largest resolution whose median inference time fits
-        // the half-rate frame budget with margin. So:
-        //   • Faster GPUs (RTX 3060+) land on 720p automatically.
-        //   • Mid-tier (RTX A1000-class) lands on 480p / 360p.
-        //   • If even 360p can't fit, we fall back to GenericFRUC.
-        //
-        // Default upper cap is 720p — past that pixel count, RIFE
-        // 4.25 lite is uneconomical on integrated GPUs and the
-        // VRAM cost (FP32 tensors at 1080p+ = 124 MB+ per buf, × 4
-        // buffers) bumps into resource limits on cards under 4 GB.
-        // Power users with lots of VRAM and a 4090 can opt in to
-        // 1080p / native via VIPLE_DML_RES=1080|native.
-        uint32_t dmlCapW = 1280, dmlCapH = 720;
+        uint32_t dmlCapW = dmlW, dmlCapH = dmlH;
         {
             char buf[16] = {}; size_t sz = 0;
             getenv_s(&sz, buf, sizeof(buf), "VIPLE_DML_RES");
@@ -2149,99 +2145,77 @@ bool D3D11VARenderer::initFRUC()
         }
         if (dmlW > dmlCapW || dmlH > dmlCapH) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] DirectML upper bound (stream %ux%u → DML cap %ux%u; "
+                        "[VIPLE-FRUC] DirectML user cap (stream %ux%u → %ux%u; "
                         "override with VIPLE_DML_RES=540|720|1080|native)",
                         dmlW, dmlH, dmlCapW, dmlCapH);
             dmlW = dmlCapW;
             dmlH = dmlCapH;
         }
 
-        // VipleStream v1.2.87: auto-tune DML resolution.
-        //
-        // The frame budget is (half the user's target FPS)⁻¹ in ms —
-        // FRUC requests half-rate from the server and interpolates
-        // back. If DML inference is consistently above ~70 % of that
-        // budget, the GPU pipeline can't keep up and the user sees a
-        // real fps drop. The cascade picks the largest resolution
-        // whose probed median inference time stays under
-        // budgetMs * kBudgetMargin. If even the smallest cascade
-        // entry is too slow, we delete the DML backend and fall
-        // through to Generic — which on the same hardware delivers
-        // a working 2× FRUC effect at lower visual quality but with
-        // sub-millisecond compute cost.
-        // Server's actual sending rate is m_DecoderParams.frameRate
-        // (already halved when FRUC enabled in Session::initialize).
-        // That's what each submitFrame has to keep up with.
+        // Build the model-variant cascade respecting VIPLE_FRUC_MODEL.
+        struct ModelEntry { const char* filename; const char* tag; };
+        std::vector<ModelEntry> modelCascade;
+        {
+            char buf[16] = {}; size_t sz = 0;
+            getenv_s(&sz, buf, sizeof(buf), "VIPLE_FRUC_MODEL");
+            std::string mode = (sz > 0) ? std::string(buf) : "auto";
+            // Lowercase
+            for (auto& c : mode) c = (char)tolower((unsigned char)c);
+            if      (mode == "fp16") modelCascade = {{ "fruc_fp16.onnx", "fp16" }};
+            else if (mode == "fp32") modelCascade = {{ "fruc.onnx",      "fp32" }};
+            else                     modelCascade = {{ "fruc_fp16.onnx", "fp16" },
+                                                     { "fruc.onnx",      "fp32" }};
+        }
+
+        // Frame budget for half-rate FRUC.  v1.2.124 raises the safety
+        // margin from 0.70 (30 % headroom) to 0.85 because the new
+        // single-resolution policy doesn't have a fallback resolution
+        // -- if probe says no, we go to Generic, no second chance at a
+        // smaller DML res.  Tighter margin = fewer false positives that
+        // would later cause real frame drops.
         const int serverFps = (m_DecoderParams.frameRate > 0)
                               ? m_DecoderParams.frameRate
                               : ((prefs->fps > 0) ? prefs->fps / 2 : 30);
-        const double halfRateMs = 1000.0 / serverFps;
-        const double kBudgetMargin = 0.70;                 // 30 % headroom for vsync etc.
+        const double halfRateMs        = 1000.0 / serverFps;
+        const double kBudgetMargin     = 0.85;
         const double budgetThresholdMs = halfRateMs * kBudgetMargin;
 
-        struct CascadeEntry { uint32_t w, h; const char* tag; };
-        const CascadeEntry cascadeFull[] = {
-            {    1280,     720, "720p"     },
-            {     960,     540, "540p"     },
-            {     854,     480, "480p"     },
-            {     640,     360, "360p"     },
-        };
-        // Build the actual cascade: skip rows above user-cap (so
-        // VIPLE_DML_RES=540 caps at 540p, VIPLE_DML_RES=720 starts
-        // at 720p, etc).  Dedup against user-cap so we don't probe
-        // the same resolution twice.
-        std::vector<CascadeEntry> cascade;
-        cascade.reserve(5);
-        bool capInList = false;
-        for (const auto& e : cascadeFull) {
-            if (e.w == dmlCapW && e.h == dmlCapH) capInList = true;
-            if (e.w <= dmlCapW && e.h <= dmlCapH) cascade.push_back(e);
-        }
-        if (!capInList) {
-            // User explicitly picked an in-between resolution — try
-            // it first before walking the standard cascade.
-            cascade.insert(cascade.begin(), { dmlCapW, dmlCapH, "user-cap" });
-        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML cascade @ %ux%u: target %d fps → "
+                    "half-rate budget %.1fms (×%.2f safety = %.1fms threshold)",
+                    dmlW, dmlH, serverFps, halfRateMs, kBudgetMargin, budgetThresholdMs);
 
         DirectMLFRUC* picked = nullptr;
-        uint32_t pickedW = 0, pickedH = 0;
-        double pickedMs = 0.0;
-        const char* pickedTag = nullptr;
+        double        pickedMs = 0.0;
+        const char*   pickedTag = nullptr;
 
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] DirectML auto-cascade: target %d fps → "
-                    "half-rate budget %.1fms (×%.2f safety = %.1fms threshold)",
-                    serverFps, halfRateMs, kBudgetMargin, budgetThresholdMs);
-
-        for (const auto& entry : cascade) {
+        for (const auto& m : modelCascade) {
             auto* dml = new DirectMLFRUC();
             dml->setQualityLevel(static_cast<int>(prefs->frucQuality));
-            if (!dml->initialize(m_RenderDevice.Get(), entry.w, entry.h)) {
+            dml->setModelFilename(m.filename);
+            if (!dml->initialize(m_RenderDevice.Get(), dmlW, dmlH)) {
                 delete dml;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] DML cascade %s (%ux%u): init failed — try next",
-                            entry.tag, entry.w, entry.h);
+                            "[VIPLE-FRUC] DML model %s: init failed — try next",
+                            m.tag);
                 continue;
             }
             const double ms = dml->probeInferenceCost(/*warmup=*/2, /*iterations=*/5);
             if (ms < 0.0) {
                 delete dml;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC] DML cascade %s: probe failed — try next",
-                            entry.tag);
+                            "[VIPLE-FRUC] DML model %s: probe failed — try next", m.tag);
                 continue;
             }
             if (ms <= budgetThresholdMs) {
                 picked    = dml;
-                pickedW   = entry.w;
-                pickedH   = entry.h;
                 pickedMs  = ms;
-                pickedTag = entry.tag;
+                pickedTag = m.tag;
                 break;
             }
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] DML cascade %s (%ux%u): %.2fms exceeds %.1fms — try next",
-                        entry.tag, entry.w, entry.h, ms, budgetThresholdMs);
+                        "[VIPLE-FRUC] DML model %s: %.2fms exceeds %.1fms — try next",
+                        m.tag, ms, budgetThresholdMs);
             delete dml;
         }
 
@@ -2249,19 +2223,19 @@ bool D3D11VARenderer::initFRUC()
             m_GenericFRUC = picked;
             createBlitVB();
             boostLatency();
-            m_FrucTextureWidth  = (int)pickedW;
-            m_FrucTextureHeight = (int)pickedH;
+            m_FrucTextureWidth  = (int)dmlW;
+            m_FrucTextureHeight = (int)dmlH;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] DirectML backend ready: %s %ux%u, probed %.2fms "
+                        "[VIPLE-FRUC] DirectML backend ready: %s @ %ux%u, probed %.2fms "
                         "(budget %.1fms; display %dx%d)",
-                        pickedTag, pickedW, pickedH, pickedMs, budgetThresholdMs,
+                        pickedTag, dmlW, dmlH, pickedMs, budgetThresholdMs,
                         m_DisplayWidth, m_DisplayHeight);
             return true;
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] DirectML auto-cascade exhausted — falling back to Generic "
-                    "(no DML resolution fits %d fps half-rate budget on this GPU)",
-                    serverFps);
+                    "[VIPLE-FRUC] DirectML cascade exhausted — falling back to Generic "
+                    "(no model fits %d fps half-rate budget at %ux%u on this GPU)",
+                    serverFps, dmlW, dmlH);
     }
 
     // Default: GenericFRUC (D3D11 compute shader — low latency, cross-platform)

@@ -1490,13 +1490,16 @@ bool DirectMLFRUC::runDMLDispatch()
 
 bool DirectMLFRUC::tryLoadOnnxModel()
 {
-    QString modelPath = Path::getDataFilePath(QStringLiteral("fruc.onnx"));
+    QString modelPath = Path::getDataFilePath(QString::fromStdString(m_ModelFilename));
     if (modelPath.isEmpty() || !QFileInfo::exists(modelPath)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] No fruc.onnx at '%s' — using inline DML graph.",
+                    "[VIPLE-FRUC] No %s at '%s' — using inline DML graph.",
+                    m_ModelFilename.c_str(),
                     modelPath.isEmpty() ? "(data dir)" : qPrintable(modelPath));
         return false;
     }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC] Loading ONNX model: %s", m_ModelFilename.c_str());
 
     try {
         const OrtApi& ortApi = Ort::GetApi();

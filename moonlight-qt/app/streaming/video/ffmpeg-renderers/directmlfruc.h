@@ -69,6 +69,17 @@ public:
     bool isInitialized() const override { return m_Initialized; }
     void setQualityLevel(int level) override { m_QualityLevel = (level >= 0 && level <= 2) ? level : 1; }
 
+    // VipleStream v1.2.124: per-instance ONNX model filename (relative
+    // to the data dir).  Default is "fruc.onnx" (fp32, RIFE 4.25 lite,
+    // 456 ops, ~22 MB).  D3D11VARenderer::initFRUC()'s 3-tier cascade
+    // tries "fruc_fp16.onnx" first (fp32 I/O, fp16 internal -- about
+    // 16 % faster than fp32 on Tensor Core gen 4+ hardware; 16 % slower
+    // on A1000-tier without Tensor Cores so the cascade falls through).
+    // Setter accepts the bare filename; tryLoadOnnxModel resolves via
+    // Path::getDataFilePath.  Empty string disables ONNX entirely
+    // (DirectML uses its inline crossfade graph).
+    void setModelFilename(const std::string& fname) { m_ModelFilename = fname; }
+
     /**
      * VipleStream v1.2.87: measure end-to-end DML inference time
      * with this backend's *current* tensor / model setup. Used by
@@ -139,12 +150,13 @@ private:
     void recordUnpackCS(ID3D12GraphicsCommandList* cl);
 
     // --- common state ---
-    bool     m_Initialized = false;
-    int      m_QualityLevel = 1;
-    uint32_t m_Width  = 0;
-    uint32_t m_Height = 0;
-    int      m_FrameCount = 0;
-    double   m_LastInterpMs = 0.0;
+    bool        m_Initialized = false;
+    int         m_QualityLevel = 1;
+    std::string m_ModelFilename = "fruc.onnx";  // see setModelFilename()
+    uint32_t    m_Width  = 0;
+    uint32_t    m_Height = 0;
+    int         m_FrameCount = 0;
+    double      m_LastInterpMs = 0.0;
 
     // --- VipleStream v1.2.62: per-stage timing accumulators (EMA μs) ---
     // Reset on init. Logged periodically (every 120 frames) by submitFrame
