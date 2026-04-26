@@ -44,12 +44,12 @@ THRESHOLD_MS = HALFRATE_MS * 0.85
 #    720p ->  768 (pad +48)
 #    540p ->  640 (pad +100)
 RESOLUTIONS = [
-    ("1080p_padded", 1920, 1152),
-    ("720p_padded",  1280,  768),
-    # 540p_padded (960x640) triggers a DML kernel error on Concat_12
-    # for fp16 only -- 0x80070057 E_INVALIDARG.  Likely a DML kernel
-    # bug with this specific small fp16 shape; doesn't affect 720p+.
-    # Skipped here so the bench completes; not a production blocker.
+    # Production shapes (the wrapper pads/crops to 128-multiple internally
+    # since v1.2.127, so feeding 1080 / 720 / 540 directly works -- the
+    # earlier "_padded" variants were workarounds for the missing wrapper).
+    ("1080p", 1920, 1080),
+    ("720p",  1280,  720),
+    ("540p",   960,  540),
 ]
 
 # Each measurement: WARMUP runs to settle DML graph compile + tensor

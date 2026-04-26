@@ -99,26 +99,49 @@ class FRUCWrapper(nn.Module):
         self.flownet = flownet  # fp16 weights
 
     def forward(self, x_fp32):  # x: [B, 7, H, W] fp32 (boundary)
-        # Cast input to fp16 once at the boundary; all internal compute
-        # runs fp16 from here.  PyTorch's exporter emits this as a
-        # single ONNX Cast node at the input.
+        # IFNet block[0] uses scale=32 + two stride-2 convs in conv0,
+        # so H/W must be divisible by 128 for the F.interpolate(scale=32)
+        # round-trip to recover the original shape exactly.  When the
+        # client streams at 1920x1080, H=1080 is NOT a multiple of 128
+        # (1080/128 = 8.4375) and the internal pyramid produces
+        # mismatched widths/heights at different paths -- e.g. one
+        # branch rounds to 1024, the timestep Tile stays at 1080,
+        # then Concat_12 (the 7-input mid-block concat) sees mixed
+        # shapes and DML's fp16 kernel rejects with E_INVALIDARG.
+        #
+        # Fix: F.pad input to next multiple of 128 here, run flownet,
+        # then crop output back to the original dims.  This mirrors
+        # what the older fruc.onnx (with its visible Padoutput_dim_*
+        # wrapper) does.  Padding is "replicate" so edge pixels don't
+        # introduce sharp discontinuities the warp would amplify.
+        _, _, H, W = x_fp32.shape
+        Hp = ((H + 127) // 128) * 128
+        Wp = ((W + 127) // 128) * 128
+        pad_b = Hp - H
+        pad_r = Wp - W
+        if pad_b > 0 or pad_r > 0:
+            x_fp32 = torch.nn.functional.pad(x_fp32, (0, pad_r, 0, pad_b), mode='replicate')
+
         x = x_fp32.half()
         img0 = x[:, 0:3]
         img1 = x[:, 3:6]
-        # Channel 6 is a uniform-value timestep plane (the C++ binding
-        # fills every pixel with the same scalar -- typically 0.5 for
-        # midpoint interpolation).  IFNet's `else` branch expects
-        # timestep as [B, 1, 1, 1] then broadcast-repeats it internally.
-        # Passing the full plane causes `.repeat(1, 1, H, W)` to allocate
-        # H*H * W*W elements (an 8 TB request at 1080p).  Sample one pixel.
+        # Channel 6 is a uniform-value timestep plane (C++ binding fills
+        # every pixel with the same scalar -- typically 0.5 for midpoint
+        # interpolation).  IFNet's `else` branch expects timestep as
+        # [B, 1, 1, 1] then broadcast-repeats it internally.  Passing
+        # the full plane causes `.repeat(1, 1, H, W)` to allocate
+        # H*H * W*W elements (an 8 TB request at 1080p).  Sample one px.
         timestep = x[:, 6:7, 0:1, 0:1]
         imgs = torch.cat((img0, img1), dim=1)
         scale_list = [32.0, 16.0, 8.0, 4.0, 1.0]
         flow_list, mask, merged = self.flownet(
             imgs, timestep, scale_list, training=False, fastmode=True
         )
-        # Cast back to fp32 at output boundary.
-        return merged[4].float()
+        # Cast back to fp32 at output boundary AND crop padding off.
+        out = merged[4].float()
+        if pad_b > 0 or pad_r > 0:
+            out = out[:, :, :H, :W]
+        return out
 
 
 # Convert ONLY the inner flownet to fp16, leave the wrapper itself fp32
@@ -129,15 +152,13 @@ wrapper = FRUCWrapper(flownet).to(device).eval()
 
 
 # ── ONNX export ──────────────────────────────────────────────────────────
-# IFNet block[0] uses scale=32 in its F.interpolate, then conv0 has two
-# stride-2 convs (= 4x more downsample), so H must be divisible by 128
-# for the final F.interpolate(scale=32) to recover the original H.  At
-# 1088 the round trip lands at 1024 and concat with full-H tensors
-# fails ("Expected 1152 got 1088" in block[1]).
-# Pick the smallest multiple of 128 >= 1080 -> 1152.  W=1920 is already
-# a multiple of 128 (15*128).  C++ binding pads input to next multiple
-# of 128 before feeding the model and crops the output back.
-EXPORT_W, EXPORT_H = 1920, 1152
+# Trace with the actual production stream resolution (1920x1080, NOT a
+# multiple of 128).  Tracing with a 128-multiple input would short-circuit
+# the wrapper's pad/crop logic at trace time, baking it OUT of the graph
+# -- defeating the whole point of having that code.  Tracing with 1080
+# means the trace evaluates pad_b > 0 to True and emits torch.nn.functional.pad
+# + slice as graph ops that run dynamically per inference.
+EXPORT_W, EXPORT_H = 1920, 1080
 print(f"\nExporting ONNX with dummy [{EXPORT_W}x{EXPORT_H}] fp32 input (model casts to fp16 internally)…")
 dummy = torch.randn(1, 7, EXPORT_H, EXPORT_W, dtype=torch.float32, device=device)
 
