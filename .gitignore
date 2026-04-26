@@ -98,6 +98,22 @@ CLAUDE.md
 AGENTS.md
 .cursorrules
 
+# ── Per-release scratch notes ──
+# release-notes.md is generated per-release and uploaded via gh release
+# create --notes-file; the canonical record lives on the GitHub release
+# page, not in repo history.
+release-notes.md
+
+# ── Generated icon raster output ──
+# assets/icon/render_icon.mjs writes Discord / one-off PNG outputs here.
+# The canonical icon source is assets/icon/viplestream_icon.svg; the .ico
+# and Android mipmaps land in their proper locations and ARE tracked.
+assets/icon/dist/
+# Local sharp install for render_icon.mjs (~20 MB).  Run
+# `cd assets/icon && npm install sharp` if you need to regenerate icons.
+assets/icon/node_modules/
+assets/icon/package-lock.json
+
 # ── OS files ──
 Thumbs.db
 Desktop.ini

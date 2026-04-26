@@ -1519,7 +1519,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Updates your Discord status to display the name of the game you're streaming. (Note: the Discord application name currently shown as 'Moonlight' because VipleStream shares the upstream Discord App ID; a VipleStream-branded App ID would require registering one with Discord.)")
+                    ToolTip.text: qsTr("Updates your Discord status to display the name of the game you're streaming. The status reads \"Playing <game> · via VipleStream\" with the VipleStream icon.")
                 }
 
                 CheckBox {

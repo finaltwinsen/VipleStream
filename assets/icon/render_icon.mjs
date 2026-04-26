@@ -120,5 +120,18 @@ for (const [density, size] of [
     await png(fgSvg, size, path.join(ANDROID, `mipmap-${density}`, 'ic_launcher_foreground.png'));
 }
 
+// ─── Discord Rich Presence assets ──────────────────────────────────
+// 1024×1024 PNG for upload to Discord developer portal.
+// Upload as BOTH:
+//   1) Application Icon (General Information → App Icon)
+//   2) Rich Presence Art Asset named "icon" (Rich Presence → Art Assets)
+// The second is what `largeImageKey = "icon"` in
+// richpresencemanager.cpp references.
+console.log('Discord asset:');
+const DIST = path.join(REPO, 'assets/icon/dist');
+await png(srcSvg, 1024, path.join(DIST, 'discord_icon_1024.png'));
+
 console.log('\nDone. Remember to rebuild moonlight-qt (RC_ICONS embeds the .ico)');
 console.log('and the Android APK so the new mipmap pngs ship.');
+console.log('For Discord: upload assets/icon/dist/discord_icon_1024.png as BOTH');
+console.log('the App Icon AND the Rich Presence asset "icon".');

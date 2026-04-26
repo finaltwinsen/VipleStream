@@ -2,7 +2,7 @@
 
 A self-hosted game-streaming stack — a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients) with built-in NAT traversal, AI frame interpolation, Steam library auto-import, and a Traditional Chinese UI. Wire-protocol-compatible with vanilla Sunshine / Moonlight so VipleStream and upstream installs interoperate.
 
-> **Current version:** 1.2.122 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
+> **Current version:** 1.2.123 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
 
 Project home: <https://github.com/finaltwinsen/VipleStream>
 
@@ -187,9 +187,9 @@ notepad build-config.local.cmd
 Outputs land in `release/`:
 
 ```
-release/VipleStream-Server-1.2.122.zip   (~33 MB)
-release/VipleStream-Client-1.2.122.zip   (~106 MB)
-release/VipleStream-Android-1.2.122.apk  (~6 MB)
+release/VipleStream-Server-1.2.123.zip   (~33 MB)
+release/VipleStream-Client-1.2.123.zip   (~106 MB)
+release/VipleStream-Android-1.2.123.apk  (~6 MB)
 ```
 
 ### Server deploy (Windows host)
@@ -293,7 +293,7 @@ The release zips in `release/` can be extracted directly on the same machine or 
 
 | Version | Changes |
 |---|---|
-| **1.2.122** | Android Steam-switch dropdown reaches feature parity with PC client; fix OkHttp `addPathSegment` URL-encoding `/` to `%2F` (use `addPathSegments` plural) |
+| **1.2.123** | Android Steam-switch dropdown reaches feature parity with PC client; fix OkHttp `addPathSegment` URL-encoding `/` to `%2F` (use `addPathSegments` plural) |
 | **1.2.119** | `/steamswitch` rewritten async — server returns 202+task_id immediately, client polls `/steamswitch/status`; eliminates spurious "host disconnected" during the 9 s Steam restart |
 | **1.2.118** | Fix root cause of permanently empty `current_user`: `CreateProcessAsUserW` doesn't load the user profile, so HKCU points at `.DEFAULT`; switched to walking `HKEY_USERS` subhives |
 | **1.2.117** | Steam switch force-kills straggler `steam.exe` + `steamwebhelper.exe`; detects Steam Guard 2FA prompts |
