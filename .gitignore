@@ -90,6 +90,14 @@ tools/fruc_test/build_out.txt
 .vscode/
 .claude/
 
+# ── AI assistant instructions (machine-local) ──
+# CLAUDE.md / AGENTS.md / .cursorrules etc. carry per-machine notes
+# (SSH aliases, internal IPs, dev-environment layout) that shouldn't
+# travel with the public repo.  Keep locally; never commit.
+CLAUDE.md
+AGENTS.md
+.cursorrules
+
 # ── OS files ──
 Thumbs.db
 Desktop.ini

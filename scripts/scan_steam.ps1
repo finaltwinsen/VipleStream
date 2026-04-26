@@ -17,13 +17,13 @@
 #  {
 #    "steam_root": "C:\\Program Files (x86)\\Steam",
 #    "steam_running": false,
-#    "current_user": { "steam_id3": "105195245", "persona_name": "finaltwinsen" } | null,
+#    "current_user": { "steam_id3": "12345678", "persona_name": "examplename" } | null,
 #    "profiles": [
 #      {
-#        "steam_id3": "105195245",
-#        "steam_id64": "76561198065460973",
-#        "account_name": "finaltwinsen",
-#        "persona_name": "finaltwinsen",
+#        "steam_id3": "12345678",
+#        "steam_id64": "76561197972611406",
+#        "account_name": "examplename",
+#        "persona_name": "examplename",
 #        "avatar_path": "C:\\...\\avatarcache\\...jpg" | null,
 #        "remember_password": true,
 #        "switchable": true,
@@ -39,7 +39,7 @@
 #        "size_on_disk": 41234567890,
 #        "image_header": "C:\\...\\librarycache\\730_header.jpg" | null,
 #        "image_library": "C:\\...\\librarycache\\730_library_600x900.jpg" | null,
-#        "owners": ["105195245", "...."],
+#        "owners": ["12345678", "...."],
 #        "launch_url": "steam://rungameid/730"
 #      }, ...
 #    ],

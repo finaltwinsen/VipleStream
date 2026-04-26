@@ -25,7 +25,7 @@ Differences from the existing test_fruc_30s.ps1:
     - Designed to be driven by an outer tuning loop (see --sweep)
 
 Usage (run once, 4 presets):
-    python fruc_autotune.py --host <host-ip> --app Desktop
+    python fruc_autotune.py --host 192.168.1.10 --app Desktop
 
 Usage (sweep one preset across FRUC on/off):
     python fruc_autotune.py --configs off balanced
@@ -704,7 +704,7 @@ def main():
         description="Automated Moonlight launch + 30s capture + analysis "
                     "across FRUC configurations"
     )
-    ap.add_argument("--host", default="<host-ip>")
+    ap.add_argument("--host", default="192.168.1.10")
     ap.add_argument("--app", default="Desktop")
     ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--width", type=int, default=1920)

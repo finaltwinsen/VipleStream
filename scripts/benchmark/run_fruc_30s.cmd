@@ -4,11 +4,11 @@
 ::
 :: Usage (from elevated cmd, or double-click and accept UAC):
 ::   run_fruc_30s.cmd
-::   run_fruc_30s.cmd <host-ip> Desktop
+::   run_fruc_30s.cmd 192.168.1.10 Desktop
 ::
 setlocal
 set "HOSTADDR=%~1"
-if "%HOSTADDR%"=="" set "HOSTADDR=<host-ip>"
+if "%HOSTADDR%"=="" set "HOSTADDR=192.168.1.10"
 set "APP=%~2"
 if "%APP%"=="" set "APP=Desktop"
 

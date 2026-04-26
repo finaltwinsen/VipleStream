@@ -7,9 +7,9 @@ setlocal enabledelayedexpansion
 :: =============================================================================
 
 set "ROOT=%~dp0..\.."
-set "SERVER=<user>@<host>"
-set "SERVER_HOST=<host-ip>"
-set "SERVER_DIR=C:<user-home>/fruc_test"
+set "SERVER=user@192.168.1.10"
+set "SERVER_HOST=192.168.1.10"
+set "SERVER_DIR=C:/Users/user/fruc_test"
 set "SCRIPT_DIR=%~dp0"
 set "PYTHON=python"
 set "MOONLIGHT=C:\Program Files\Moonlight Game Streaming\Moonlight.exe"

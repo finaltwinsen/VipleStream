@@ -939,7 +939,7 @@ public class NvHTTP {
      * Parse /steamprofiles XML.  Schema:
      *   <root status_code="200">
      *     <steam_running>1</steam_running>
-     *     <current_user>105195245</current_user>      ← steam_id3
+     *     <current_user>12345678</current_user>       ← steam_id3
      *     <profiles>
      *       <profile>
      *         <steam_id3>...</steam_id3>

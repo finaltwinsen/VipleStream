@@ -15,12 +15,12 @@
 #           |- report.md                 (human-readable)
 #
 #  Usage:
-#    powershell -File test_fruc_30s.ps1 -Host <host-ip> -App Desktop
+#    powershell -File test_fruc_30s.ps1 -Host 192.168.1.10 -App Desktop
 #    powershell -File test_fruc_30s.ps1 -Configs off,balanced
 # =============================================================================
 
 param(
-    [string]$HostAddr = '<host-ip>',
+    [string]$HostAddr = '192.168.1.10',
     [string]$App      = 'Desktop',
     [int]   $Seconds  = 30,
     [int]   $WarmupSeconds = 8,
