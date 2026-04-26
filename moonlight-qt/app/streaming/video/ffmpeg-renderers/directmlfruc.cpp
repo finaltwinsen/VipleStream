@@ -2307,6 +2307,19 @@ double DirectMLFRUC::probeInferenceCost(int warmup, int iterations)
     if (warmup < 0)     warmup = 0;
     if (iterations < 1) iterations = 1;
 
+    // v1.2.124: detect "ORT silently disabled mid-probe" path.  When
+    // runOrtInference() catches an Ort::Exception (e.g. a DML kernel
+    // rejecting a Concat at runtime that didn't trip during init), it
+    // sets m_UseOrt=false and falls through to the inline DML graph
+    // for subsequent calls.  Without this guard the probe would
+    // average MIXED ORT+inline timings, return a low median, and the
+    // cascade would think the ONNX path "passed" -- but production
+    // would silently use the inline crossfade graph (= Generic-quality
+    // output).  By snapshotting m_UseOrt entry-state and re-checking
+    // at exit, we report -1 to the cascade so it tries the next model
+    // (fp16 -> fp32 -> Generic).
+    const bool wantedOrtAtEntry = m_UseOrt;
+
     // Helper that fully drains the GPU queue up to a given fence value.
     auto cpuWaitFence = [&](uint64_t fenceVal) {
         if (m_Fence12->GetCompletedValue() >= fenceVal) return;
@@ -2370,6 +2383,18 @@ double DirectMLFRUC::probeInferenceCost(int warmup, int iterations)
     for (int i = 0; i < warmup; ++i) {
         uint64_t fv = runOne();
         cpuWaitFence(fv);
+        // v1.2.125: bail immediately if ORT got disabled mid-warmup.
+        // The else-branch in runOne() expects m_DMLCompiledOp, which
+        // may be null when init went down the ORT-only path -- letting
+        // the loop continue would crash with a null deref / access
+        // violation when RecordDispatch dereferences m_DMLCompiledOp.
+        if (wantedOrtAtEntry && !m_UseOrt) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML probe @ %ux%u: ORT disabled in warmup -- "
+                        "treating as probe failure (cascade will try next model)",
+                        m_Width, m_Height);
+            return -1.0;
+        }
     }
 
     // Timed runs.
@@ -2380,10 +2405,27 @@ double DirectMLFRUC::probeInferenceCost(int warmup, int iterations)
         uint64_t fv = runOne();
         cpuWaitFence(fv);
         samples.push_back(msNow() - t0);
+        if (wantedOrtAtEntry && !m_UseOrt) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DirectML probe @ %ux%u: ORT disabled mid-iteration -- "
+                        "treating as probe failure (cascade will try next model)",
+                        m_Width, m_Height);
+            return -1.0;
+        }
     }
 
     std::sort(samples.begin(), samples.end());
     double median = samples[samples.size() / 2];
+
+    // v1.2.124: ORT was disabled mid-probe -> probe is invalid (mixed
+    // path timings).  Tell the cascade to try the next model variant.
+    if (wantedOrtAtEntry && !m_UseOrt) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML probe @ %ux%u: ORT disabled mid-probe "
+                    "(model has runtime DML kernel issue) -- treating as probe failure",
+                    m_Width, m_Height);
+        return -1.0;
+    }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-FRUC] DirectML probe @ %ux%u: median=%.2fms "
