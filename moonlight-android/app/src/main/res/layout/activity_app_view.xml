@@ -45,6 +45,47 @@
         android:fontFamily="@font/space_grotesk"
         android:letterSpacing="-0.02" />
 
+    <!--
+        VipleStream H.4: Steam profile dropdown.  Visibility starts at GONE
+        and is flipped to VISIBLE in AppView.java only when the host is a
+        VipleStream peer that returned a non-empty profiles list from
+        /steamprofiles.  Sits between the PC name header and the apps
+        grid; appFragmentContainer is layout_below this row so the grid
+        flows naturally beneath when shown.
+    -->
+    <LinearLayout
+        android:id="@+id/steamProfileBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@+id/appListText"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingLeft="24dp"
+        android:paddingRight="24dp"
+        android:paddingTop="4dp"
+        android:paddingBottom="8dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/steamProfileLabel"
+            android:tag="vs_meta"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/steam_account_label"
+            android:textColor="@color/vs_lime"
+            android:textSize="11sp"
+            android:fontFamily="@font/ibm_plex_mono"
+            android:letterSpacing="0.18"
+            android:paddingRight="12dp" />
+
+        <Spinner
+            android:id="@+id/steamProfileSpinner"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:minHeight="44dp" />
+    </LinearLayout>
+
     <FrameLayout
         android:id="@+id/appFragmentContainer"
         android:layout_width="fill_parent"
@@ -55,6 +96,6 @@
         android:layout_alignParentRight="true"
         android:layout_alignParentEnd="true"
         android:layout_alignParentBottom="true"
-        android:layout_below="@+id/appListText" />
+        android:layout_below="@+id/steamProfileBar" />
 
 </RelativeLayout>

@@ -3,15 +3,20 @@ package com.limelight;
 import java.io.IOException;
 import java.io.StringReader;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
 
+import com.limelight.binding.PlatformBinding;
 import com.limelight.computers.ComputerManagerListener;
 import com.limelight.computers.ComputerManagerService;
 import com.limelight.grid.AppGridAdapter;
 import com.limelight.nvstream.http.ComputerDetails;
+import com.limelight.nvstream.http.HostHttpResponseException;
 import com.limelight.nvstream.http.NvApp;
 import com.limelight.nvstream.http.NvHTTP;
 import com.limelight.nvstream.http.PairingManager;
+import com.limelight.nvstream.http.SteamProfile;
+import com.limelight.nvstream.http.SteamSwitchStatus;
 import com.limelight.preferences.PreferenceConfiguration;
 import com.limelight.ui.AdapterFragment;
 import com.limelight.ui.AdapterFragmentCallbacks;
@@ -42,7 +47,10 @@ import android.view.ContextMenu.ContextMenuInfo;
 import android.widget.AbsListView;
 import android.widget.AdapterView;
 import android.widget.AdapterView.OnItemClickListener;
+import android.widget.ArrayAdapter;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.AdapterView.AdapterContextMenuInfo;
@@ -63,6 +71,20 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
     private boolean inForeground;
     private boolean showHiddenApps;
     private HashSet<Integer> hiddenAppIds = new HashSet<>();
+
+    // VipleStream H.4: Steam profile dropdown state.  Populated on first
+    // load via /steamprofiles; spinner fires onItemSelected when the
+    // user picks a different account, kicking off the async switch.
+    private LinearLayout steamProfileBar;
+    private Spinner      steamProfileSpinner;
+    private LinkedList<SteamProfile> steamProfiles = new LinkedList<>();
+    // Suppresses the spinner's onItemSelected during programmatic
+    // setSelection (initial populate / rollback after error) so we
+    // don't kick off a switch we didn't ask for.
+    private boolean suppressSpinnerSelection = false;
+    // Latches true during a switch + the post-switch refresh window
+    // so a stray spinner change doesn't fire a second switch.
+    private boolean steamSwitchInProgress = false;
 
     private final static int START_OR_RESUME_ID = 1;
     private final static int QUIT_ID = 2;
@@ -125,6 +147,15 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
                     // so the initial serverinfo response can update the running
                     // icon.
                     populateAppGridWithCache();
+
+                    // VipleStream H.4: fetch Steam profiles list on the
+                    // same worker thread we're already on (we're inside
+                    // localBinder.waitForReady()'s callback).  Failures
+                    // are silent — vanilla Sunshine hosts return 404
+                    // and we just leave the dropdown hidden.
+                    if (computer.isVipleStreamPeer) {
+                        refreshSteamProfilesBlocking();
+                    }
 
                     // Start updates
                     startComputerUpdates();
@@ -320,6 +351,14 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
         setTitle(computerName);
         label.setText(computerName);
 
+        // VipleStream H.4: cache the dropdown views.  Visibility starts
+        // at GONE in the layout and is flipped only when the host turns
+        // out to be a VipleStream peer with a non-empty Steam profile
+        // list — keeps the AppView pixel-perfect identical against
+        // vanilla Sunshine hosts.
+        steamProfileBar     = findViewById(R.id.steamProfileBar);
+        steamProfileSpinner = findViewById(R.id.steamProfileSpinner);
+
         // Bind to the computer manager service
         bindService(new Intent(this, ComputerManagerService.class), serviceConnection,
                 Service.BIND_AUTO_CREATE);
@@ -338,6 +377,230 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
                 .apply();
 
         appGridAdapter.updateHiddenApps(hiddenAppIds, hideImmediately);
+    }
+
+    // ── VipleStream H.4: Steam profile dropdown + async switch ─────────────
+
+    /**
+     * Hit /steamprofiles, populate the dropdown.  Runs on a worker
+     * thread (caller's responsibility); does its own runOnUiThread for
+     * UI work.  Silently no-ops when host isn't a VipleStream peer.
+     */
+    private void refreshSteamProfilesBlocking() {
+        if (managerBinder == null || computer == null || !computer.isVipleStreamPeer) {
+            return;
+        }
+        try {
+            NvHTTP http = new NvHTTP(
+                    ServerHelper.getCurrentAddressFromComputer(computer),
+                    computer.httpsPort,
+                    managerBinder.getUniqueId(),
+                    computer.serverCert,
+                    PlatformBinding.getCryptoProvider(AppView.this));
+            final LinkedList<SteamProfile> fetched = http.getSteamProfiles();
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    if (isFinishing() || isChangingConfigurations()) return;
+                    steamProfiles = fetched;
+                    populateSteamProfileSpinner();
+                }
+            });
+        } catch (HostHttpResponseException e) {
+            // Vanilla Sunshine returns 404 on /steamprofiles — that's expected.
+            // Anything else is also non-fatal; just leave the dropdown hidden.
+            LimeLog.info("[H.4] /steamprofiles returned " + e.getErrorCode()
+                    + " — hiding profile dropdown");
+        } catch (Exception e) {
+            LimeLog.warning("[H.4] /steamprofiles failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * UI-thread-only.  Fills the spinner from `steamProfiles`,
+     * preselects the active account, and wires the change listener.
+     */
+    private void populateSteamProfileSpinner() {
+        if (steamProfileSpinner == null) return;
+        if (steamProfiles == null || steamProfiles.isEmpty()) {
+            steamProfileBar.setVisibility(View.GONE);
+            return;
+        }
+        // Build display strings (persona names, with "•" prefix on the
+        // current one for visual emphasis on TVs that don't theme the
+        // selected spinner item differently).
+        String[] labels = new String[steamProfiles.size()];
+        int currentIdx = -1;
+        int i = 0;
+        for (SteamProfile p : steamProfiles) {
+            labels[i] = p.current ? ("• " + p.displayName()) : p.displayName();
+            if (p.current) currentIdx = i;
+            i++;
+        }
+
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+
+        suppressSpinnerSelection = true;
+        steamProfileSpinner.setAdapter(adapter);
+        steamProfileSpinner.setSelection(currentIdx >= 0 ? currentIdx : 0);
+        steamProfileBar.setVisibility(View.VISIBLE);
+
+        steamProfileSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (suppressSpinnerSelection) {
+                    suppressSpinnerSelection = false;
+                    return;
+                }
+                if (steamSwitchInProgress) return;
+                if (position < 0 || position >= steamProfiles.size()) return;
+                SteamProfile picked = steamProfiles.get(position);
+                if (picked.current) return;
+                onSteamProfileSelected(picked);
+            }
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) { /* no-op */ }
+        });
+    }
+
+    /**
+     * Kicks off the async switch on a worker thread.  Shows a
+     * SpinnerDialog whose message updates each /steamswitch/status
+     * poll.  When the task reaches a terminal state, the dialog
+     * dismisses and either: (success) we re-fetch profiles + update
+     * the spinner highlight, or (error) we show an alert + roll the
+     * spinner back to the previously-current profile.
+     */
+    private void onSteamProfileSelected(final SteamProfile target) {
+        // Pre-flight 409: server will reject this with "remember_password=0"
+        // anyway, but we get a much better UX by catching it client-side.
+        if (!target.rememberPassword) {
+            Dialog.displayDialog(AppView.this,
+                    getResources().getString(R.string.steam_switch_error_title),
+                    getResources().getString(R.string.steam_switch_account_unavailable),
+                    false);
+            rollbackSteamProfileSpinner();
+            return;
+        }
+
+        steamSwitchInProgress = true;
+        final SpinnerDialog spinner = SpinnerDialog.displayDialog(AppView.this,
+                getResources().getString(R.string.steam_switch_title),
+                getResources().getString(R.string.steam_switch_starting),
+                false);
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String errorMessage = null;
+                try {
+                    NvHTTP http = new NvHTTP(
+                            ServerHelper.getCurrentAddressFromComputer(computer),
+                            computer.httpsPort,
+                            managerBinder.getUniqueId(),
+                            computer.serverCert,
+                            PlatformBinding.getCryptoProvider(AppView.this));
+
+                    SteamSwitchStatus s = http.startSteamSwitch(target.accountName);
+                    updateSpinnerMessage(spinner, s.message);
+
+                    if (s.taskId == null || s.taskId.isEmpty()) {
+                        if (!s.isSuccess()) {
+                            errorMessage = !s.error.isEmpty() ? s.error
+                                    : getResources().getString(R.string.steam_switch_error_no_taskid);
+                        }
+                    } else {
+                        long deadline = System.currentTimeMillis() + 150_000;
+                        int consecutiveErrors = 0;
+                        while (System.currentTimeMillis() < deadline) {
+                            try { Thread.sleep(1000); } catch (InterruptedException ie) { /* ignore */ }
+                            try {
+                                s = http.pollSteamSwitchStatus(s.taskId);
+                                consecutiveErrors = 0;
+                            } catch (HostHttpResponseException e) {
+                                if (e.getErrorCode() == 404) {
+                                    errorMessage = getResources().getString(R.string.steam_switch_error_taskgone);
+                                    break;
+                                }
+                                if (++consecutiveErrors >= 5) {
+                                    errorMessage = e.getMessage();
+                                    break;
+                                }
+                                continue;
+                            } catch (IOException | XmlPullParserException e) {
+                                if (++consecutiveErrors >= 5) {
+                                    errorMessage = e.getMessage();
+                                    break;
+                                }
+                                continue;
+                            }
+                            updateSpinnerMessage(spinner, s.message);
+                            if (s.isTerminal()) {
+                                if (!s.isSuccess()) {
+                                    errorMessage = !s.error.isEmpty() ? s.error : s.message;
+                                }
+                                break;
+                            }
+                        }
+                        if (errorMessage == null && !s.isTerminal()) {
+                            errorMessage = getResources().getString(R.string.steam_switch_error_timeout);
+                        }
+                    }
+                } catch (Exception e) {
+                    errorMessage = e.getMessage() != null ? e.getMessage()
+                            : e.getClass().getSimpleName();
+                }
+
+                // Refresh the profile list either way so the spinner
+                // reflects whatever Steam ended up at.  Do this BEFORE
+                // dismissing the spinner so the UI never flashes the
+                // stale "current" highlight.
+                refreshSteamProfilesBlocking();
+                spinner.dismiss();
+
+                final String finalError = errorMessage;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        steamSwitchInProgress = false;
+                        if (finalError != null) {
+                            Dialog.displayDialog(AppView.this,
+                                    getResources().getString(R.string.steam_switch_error_title),
+                                    finalError, false);
+                            rollbackSteamProfileSpinner();
+                        }
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void updateSpinnerMessage(final SpinnerDialog dialog, final String message) {
+        if (message == null || message.isEmpty()) return;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() { dialog.setMessage(message); }
+        });
+    }
+
+    /**
+     * Reset the spinner selection back to whatever profile is currently
+     * marked `current` in steamProfiles.  Called after a switch fails
+     * so the dropdown doesn't visually claim we switched when we
+     * didn't.  Suppresses the change listener for the duration so the
+     * rollback itself doesn't fire onItemSelected.
+     */
+    private void rollbackSteamProfileSpinner() {
+        if (steamProfileSpinner == null || steamProfiles == null) return;
+        int currentIdx = -1;
+        for (int i = 0; i < steamProfiles.size(); i++) {
+            if (steamProfiles.get(i).current) { currentIdx = i; break; }
+        }
+        if (currentIdx < 0) return;
+        suppressSpinnerSelection = true;
+        steamProfileSpinner.setSelection(currentIdx);
     }
 
     private void populateAppGridWithCache() {

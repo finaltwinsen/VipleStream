@@ -8,8 +8,7 @@
 
 ## 已完成（保留紀錄，後續維護用）
 
-未 commit 但已落實在 working tree（v1.2.93–v1.2.96 那批）。註明為了
-之後要 commit 時這份檔案能跟 git log 交叉對照。
+落實在 git history。新增條目時請填 commit hash 或版號，方便交叉對照。
 
 | 原條號 | 內容 | 落實版本 | 備註 |
 |---|---|---|---|
@@ -22,7 +21,8 @@
 | 新 | NVAPI per-app profile 名稱 + binary 路徑 | v1.2.93 | `SunshineStream` / `sunshine.exe` → `VipleStream-Server` / `viplestream-server.exe`（NVAPI 用實際 binary 檔名比對）。 |
 | 新 | `<VipleStreamProtocol>` capability marker 加進 `/serverinfo` XML | v1.2.93 | Server 永遠 emit 但**不擋任何請求**；vanilla Moonlight 忽略未知 tag。Qt + Android client 解析後存 `isVipleStreamPeer` 旗標，UI 用來決定是否顯示 VipleStream-only 入口。**badge UI 還沒實作**（見下面 §H.5）。 |
 | 新 | Service helper log 檔名 `sunshine.log` → `viplestream.log` | v1.2.95 | `tools/sunshinesvc.cpp:124`。寫到 `%SYSTEMROOT%\Temp\viplestream.log`。 |
-| H.Phase 1+2+3 | Steam library 自動匯入 + applist 多送 5 個 metadata XML tags + multi-mode sort | v1.2.67 + v1.2.96 | applist 端 emit `<Source>` / `<SteamAppId>` / `<SteamOwners>` / `<LastPlayed>` / `<Playtime>`（空值省略）；client 端 NvApp 補對應欄位 + comparator 把 `source==""` pin 到頂；Sort 模式 DEFAULT/RECENT/PLAYTIME/NAME 三端（Qt + Android）。Phase 4（client 觸發切 Steam 帳號）還沒做。 |
+| H.Phase 1+2+3 | Steam library 自動匯入 + applist 多送 5 個 metadata XML tags + multi-mode sort | v1.2.67 + v1.2.96 | applist 端 emit `<Source>` / `<SteamAppId>` / `<SteamOwners>` / `<LastPlayed>` / `<Playtime>`（空值省略）；client 端 NvApp 補對應欄位 + comparator 把 `source==""` pin 到頂；Sort 模式 DEFAULT/RECENT/PLAYTIME/NAME 三端（Qt + Android）。 |
+| **H.4** | **Steam 帳號切換 — server async + Qt + Android 全端** | **v1.2.108–121** | Server: `/steamprofiles` + 異步 `/steamswitch` (回 202+task_id) + `/steamswitch/status?id=X`；force-kill straggler steam.exe + Steam Guard 2FA 偵測；`current_user` 走 HKEY_USERS walk（修 v1.2.117 之前 HKCU=.DEFAULT 的 root cause — `CreateProcessAsUserW` 沒呼 `LoadUserProfile`）；async task registry + 60 s GC，徹底解決同步 handler 9 秒 block 造成 /serverinfo starvation 的「假斷線」。Qt client: dropdown + busy overlay 顯示即時進度（`Asking Steam to shut down…` / `Logging in as XXX…`）。Android client: 同等功能（Spinner + SpinnerDialog + rollback on error）。修 OkHttp `addPathSegment` 把 `/` URL-encode 成 `%2F` 的 bug（改用 `addPathSegments` plural）。 |
 | Y | DirectML auto-cascade probe + Generic fallback | v1.2.86–91 | init 時 probe 720p→540p→480p→360p 各解析度推論時間，挑能塞進預算的最高；全 miss 就 fall back 到 Generic。同步把 default backend 改成 Generic、DML option 加「需要強 GPU」警語、移除 180fps 警告。 |
 | 新 | DirectML reset-race 修正 | v1.2.82–86 | post-unpack + concat allocator 的 fence-gated reset；多 ring slots；submitFrame 從 50 ms → 3 ms。 |
 
@@ -171,18 +171,9 @@ DirectML auto-cascade（v1.2.91）已經把「中低階 GPU 跑 DML 會掉幀」
 
 ---
 
-## H. Steam library 自動匯入 — Phase 4
+## H. Steam library 自動匯入 — UI affordance
 
-Phase 1+2+3 已 ship（v1.2.67 + v1.2.96 補回 applist Source emission）。剩 Phase 4 + UI affordance。
-
-### H.4 Client 觸發 host 切 Steam 帳號
-
-- Sunshine `POST /api/steam/switch` body `{ target_steam_id3: "..." }`：
-  1. 檢查 target profile 有 `RememberPassword=1`，沒有就回 400
-  2. target 已是 current_user → 204 no-op
-  3. `steam.exe -shutdown` → poll `ActiveUser==0` → `steam.exe -login <username>` → poll `ActiveUser==target` (max 30s)
-  4. 成功 → 200 + 新 current_user；失敗 → 500
-- Moonlight client：profile dropdown 選 ≠ current_user → spinner + tooltip → call API → 重抓 apps；失敗回 fallback。
+Phase 1+2+3+4 全 ship（見「已完成」表 H.4 列）。剩 UI badge。
 
 ### H.5 Capability marker UI badge（v1.2.93 加了 marker 但 UI 沒接）
 
@@ -219,7 +210,6 @@ Phase 1+2+3 已 ship（v1.2.67 + v1.2.96 補回 applist Source emission）。剩
 
 | 優先級 | 條目 | 理由 |
 |---|---|---|
-| **High** | **§H.4** Steam 帳號切換 | 跟 Phase 1-3 是同一條 feature 的尾巴；現在使用者要切帳號得跑去 host 端手動切，UX 落差大；技術風險可控（已有 Phase 3 endpoint scaffolding 可參考） |
 | **High** | **§H.5** Capability marker UI badge | 投入最小（每端 ~30 行 QML / Java），讓 v1.2.93 加的 marker 真的有用；不接 UI 等於白做 |
 | **Medium** | **§A.1+A.11** QSettings org name + ini 名稱遷移 | 升級 v1.2.43 起的使用者「設定看起來像 reset 了」是真實 regression；只是大家手動把 paired hosts 重 add 過去就不痛了，所以沒人特別抱怨。動之前要寫並測 migration |
 | **Medium** | **§B** Discord App ID | 純 cosmetic 但 Discord 那邊出現「Moonlight」很明顯不對勁；只要去 Discord developer portal 註冊 + 換 ID 兩行 code |

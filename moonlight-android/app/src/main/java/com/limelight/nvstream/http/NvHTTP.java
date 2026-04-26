@@ -12,6 +12,7 @@ import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.Proxy;
 import java.net.Socket;
+import java.net.URLEncoder;
 import java.security.KeyManagementException;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
@@ -424,8 +425,16 @@ public class NvHTTP {
     }
 
     private HttpUrl getCompleteUrl(HttpUrl baseUrl, String path, String query) {
+        // VipleStream H.4 v1.2.120: addPathSegments (plural) splits on '/'
+        // and adds each segment separately.  The singular addPathSegment
+        // URL-encodes any embedded '/' as %2F, which broke the new
+        // multi-segment path "steamswitch/status" (SimpleWeb's regex
+        // matched the literal path, not the encoded form, and returned
+        // HTTP 404).  All existing callers pass single-word paths like
+        // "applist" / "serverinfo" — those still produce exactly one
+        // segment, so this change is backward-compatible.
         return baseUrl.newBuilder()
-                .addPathSegment(path)
+                .addPathSegments(path)
                 .query(query)
                 .addQueryParameter("uniqueid", uniqueId)
                 .addQueryParameter("uuid", UUID.randomUUID().toString())
@@ -845,5 +854,176 @@ public class NvHTTP {
         }
 
         return true;
+    }
+
+    // ── VipleStream H.4: Steam profile + async account-switch endpoints ─────
+    //
+    // Mirrors moonlight-qt's NvHTTP::getSteamProfiles + startSteamSwitch +
+    // pollSteamSwitchStatus.  Server-side spec lives in Sunshine/src/nvhttp.cpp
+    // (steamprofiles<T>, steamswitch<T>, steamswitch_status<T>).
+    //
+    // All three return parsed Java objects on 200; throw HostHttpResponseException
+    // on non-200 (caller toasts statusMessage and rolls back the dropdown).
+
+    /**
+     * Fetch the host's Steam profile list + currently-active steam_id3 in one
+     * round-trip.  Returns empty list when the host isn't a VipleStream peer
+     * (HTTPS endpoint missing → IOException on caller's side, NOT here).
+     *
+     * @return parsed profiles with `current=true` set on the active one.
+     *         Empty list if host returned 200 but no <profile> entries.
+     */
+    public LinkedList<SteamProfile> getSteamProfiles() throws IOException, XmlPullParserException {
+        String xml = openHttpConnectionToString(httpClientLongConnectTimeout, getHttpsUrl(true), "steamprofiles");
+        return getSteamProfileListByReader(new StringReader(xml));
+    }
+
+    /**
+     * POST-equivalent (we use GET to match Sunshine's existing endpoint
+     * convention) to /steamswitch?account=X. Returns a status snapshot
+     * containing the task_id the caller polls with
+     * pollSteamSwitchStatus(). Server returns within ~50 ms regardless
+     * of how long the actual switch will take.
+     */
+    public SteamSwitchStatus startSteamSwitch(String accountName) throws IOException, XmlPullParserException {
+        String xml = openHttpConnectionToString(httpClientLongConnectTimeout, getHttpsUrl(true),
+                "steamswitch", "account=" + URLEncoder.encode(accountName, "UTF-8"));
+        return parseSteamSwitchXml(xml);
+    }
+
+    /**
+     * Poll /steamswitch/status?id=task_id. Returns the live state. Caller
+     * loops on this every ~1 s until status.isTerminal() is true.
+     */
+    public SteamSwitchStatus pollSteamSwitchStatus(String taskId) throws IOException, XmlPullParserException {
+        String xml = openHttpConnectionToString(httpClientLongConnectTimeout, getHttpsUrl(true),
+                "steamswitch/status", "id=" + URLEncoder.encode(taskId, "UTF-8"));
+        return parseSteamSwitchXml(xml);
+    }
+
+    /**
+     * Parse /steamswitch + /steamswitch/status response XML.  Schema is
+     * a flat list of fields under <root>:
+     *   task_id, state, message, error, account_name, persona_name,
+     *   target_steam_id3, current_user_after, http_status, elapsed_ms,
+     *   finished_ms.
+     */
+    static SteamSwitchStatus parseSteamSwitchXml(String xml) throws XmlPullParserException, IOException {
+        SteamSwitchStatus s = new SteamSwitchStatus();
+        s.taskId           = nullToEmpty(getXmlString(xml, "task_id", false));
+        s.state            = nullToEmpty(getXmlString(xml, "state", false));
+        s.message          = nullToEmpty(getXmlString(xml, "message", false));
+        s.error            = nullToEmpty(getXmlString(xml, "error", false));
+        s.accountName      = nullToEmpty(getXmlString(xml, "account_name", false));
+        s.personaName      = nullToEmpty(getXmlString(xml, "persona_name", false));
+        s.currentUserAfter = nullToEmpty(getXmlString(xml, "current_user_after", false));
+        s.httpStatus       = parseIntOrZero(getXmlString(xml, "http_status", false));
+        s.elapsedMs        = parseLongOrNeg(getXmlString(xml, "elapsed_ms", false));
+        s.finishedMs       = parseLongOrNeg(getXmlString(xml, "finished_ms", false));
+        return s;
+    }
+
+    private static String nullToEmpty(String s) { return s == null ? "" : s; }
+
+    private static int parseIntOrZero(String s) {
+        if (s == null || s.isEmpty()) return 0;
+        try { return Integer.parseInt(s); } catch (NumberFormatException e) { return 0; }
+    }
+
+    private static long parseLongOrNeg(String s) {
+        if (s == null || s.isEmpty()) return -1;
+        try { return Long.parseLong(s); } catch (NumberFormatException e) { return -1; }
+    }
+
+    /**
+     * Parse /steamprofiles XML.  Schema:
+     *   <root status_code="200">
+     *     <steam_running>1</steam_running>
+     *     <current_user>105195245</current_user>      ← steam_id3
+     *     <profiles>
+     *       <profile>
+     *         <steam_id3>...</steam_id3>
+     *         <steam_id64>...</steam_id64>
+     *         <account_name>...</account_name>
+     *         <persona_name>...</persona_name>
+     *         <remember_password>1</remember_password>
+     *         <switchable>1</switchable>
+     *         <most_recent>1</most_recent>
+     *         <last_login>...</last_login>
+     *       </profile>
+     *       ...
+     *     </profiles>
+     *   </root>
+     *
+     * `current_user` is read first, then each <profile> block; profile.current
+     * is set to (steam_id3 == current_user).  When current_user is empty we
+     * just leave all current=false (UI shows no highlight).
+     */
+    public static LinkedList<SteamProfile> getSteamProfileListByReader(Reader r) throws XmlPullParserException, IOException {
+        XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
+        factory.setNamespaceAware(true);
+        XmlPullParser xpp = factory.newPullParser();
+        xpp.setInput(r);
+
+        int eventType = xpp.getEventType();
+        LinkedList<SteamProfile> profiles = new LinkedList<>();
+        Stack<String> currentTag = new Stack<>();
+        boolean rootTerminated = false;
+        String currentUserSteamId3 = "";
+
+        while (eventType != XmlPullParser.END_DOCUMENT) {
+            switch (eventType) {
+            case XmlPullParser.START_TAG:
+                if (xpp.getName().equals("root")) {
+                    verifyResponseStatus(xpp);
+                }
+                currentTag.push(xpp.getName());
+                if (xpp.getName().equals("profile")) {
+                    profiles.addLast(new SteamProfile());
+                }
+                break;
+            case XmlPullParser.END_TAG:
+                currentTag.pop();
+                if (xpp.getName().equals("root")) {
+                    rootTerminated = true;
+                }
+                break;
+            case XmlPullParser.TEXT: {
+                String tag = currentTag.peek();
+                String text = xpp.getText();
+                // current_user lives at root level (sibling of <profiles>)
+                if (tag.equals("current_user") && profiles.isEmpty()) {
+                    currentUserSteamId3 = text;
+                } else if (!profiles.isEmpty()) {
+                    SteamProfile p = profiles.getLast();
+                    if      (tag.equals("steam_id3"))         p.steamId3 = text;
+                    else if (tag.equals("steam_id64"))        p.steamId64 = text;
+                    else if (tag.equals("account_name"))      p.accountName = text;
+                    else if (tag.equals("persona_name"))      p.personaName = text;
+                    else if (tag.equals("remember_password")) p.rememberPassword = "1".equals(text);
+                    else if (tag.equals("switchable"))        { /* alias for remember_password */ }
+                    else if (tag.equals("most_recent"))       p.mostRecent = "1".equals(text);
+                    else if (tag.equals("last_login"))        {
+                        try { p.lastLogin = Long.parseLong(text); } catch (NumberFormatException e) { /* keep 0 */ }
+                    }
+                }
+                break;
+            }
+            }
+            eventType = xpp.next();
+        }
+        if (!rootTerminated) {
+            throw new XmlPullParserException("Malformed XML: Root tag was not terminated");
+        }
+
+        // Mark the active profile.  current_user MAY be empty (Steam not
+        // logged in on host); in that case no profile gets current=true.
+        if (currentUserSteamId3 != null && !currentUserSteamId3.isEmpty()) {
+            for (SteamProfile p : profiles) {
+                p.current = currentUserSteamId3.equals(p.steamId3);
+            }
+        }
+
+        return profiles;
     }
 }

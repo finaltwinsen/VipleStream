@@ -313,4 +313,15 @@
     <string name="relay_url_summary">WebSocket relay for NAT traversal (e.g. wss://relay.example.com)</string>
     <string name="relay_psk_title">Relay PSK</string>
     <string name="relay_psk_summary">Pre-shared key for relay authentication</string>
+
+    <!-- VipleStream H.4: Steam profile dropdown + async switch UI -->
+    <string name="steam_account_label">STEAM ACCOUNT</string>
+    <string name="steam_switch_title">Switching Steam account…</string>
+    <string name="steam_switch_starting">Starting…</string>
+    <string name="steam_switch_helper">Steam will close and re-login on the host. This can take 60–90 seconds. If it stalls, check the host — Steam Guard 2FA may be prompting.</string>
+    <string name="steam_switch_error_title">Steam switch failed</string>
+    <string name="steam_switch_error_no_taskid">Server returned no task id</string>
+    <string name="steam_switch_error_taskgone">Switch task disappeared on host</string>
+    <string name="steam_switch_error_timeout">Switch timed out (>150 s without server reaching a terminal state)</string>
+    <string name="steam_switch_account_unavailable">This account has no saved credentials on the host. Sign in once on the host first, then try again.</string>
 </resources>

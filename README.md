@@ -1,199 +1,217 @@
 # VipleStream
 
-A custom game streaming solution based on [Sunshine](https://github.com/LizardByte/Sunshine) (host — renamed to **VipleStream-Server** in this fork) and [Moonlight](https://github.com/moonlight-stream) (client — renamed to **VipleStream**), extended with built-in NAT traversal, frame interpolation (FRUC), and performance optimizations. Project homepage: <https://github.com/finaltwinsen/VipleStream>.
+A self-hosted game-streaming stack — a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients) with built-in NAT traversal, AI frame interpolation, Steam library auto-import, and a Traditional Chinese UI. Wire-protocol-compatible with vanilla Sunshine / Moonlight so VipleStream and upstream installs interoperate.
 
-> **Current version:** 1.1.80
+> **Current version:** 1.2.121 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
+
+Project home: <https://github.com/finaltwinsen/VipleStream>
 
 ---
 
-## Features
+## Components
 
-### NAT Traversal (Zero Hardware Cost)
-Stream across the internet without port forwarding, UPnP, or a VPN.
+| Component | Replaces | Binary | Install path (Windows) |
+|---|---|---|---|
+| **VipleStream-Server** | Sunshine | `viplestream-server.exe` + `viplestream-svc.exe` | `C:\Program Files\VipleStream-Server\` |
+| **VipleStream** (PC client) | Moonlight-Qt | `VipleStream.exe` | `C:\Program Files\Moonlight Game Streaming\` |
+| **VipleStream Android** | Moonlight-Android | application id `com.piinsta` | sideload-only APK |
+| **viplestream-relay** | — | `relay_server.py` | run on any always-on host |
 
-- **STUN prober** — Detects public IP and NAT type at startup
-- **Relay signaling server** — Lightweight Python WebSocket server, deployable behind Cloudflare Tunnel
-- **HTTP proxy** — Fetches server info and launches apps through the relay
-- **RTSP TCP tunnel** — Tunnels the RTSP handshake (OPTIONS → DESCRIBE → SETUP×3 → PLAY) through the relay WebSocket
-- **UDP hole punch** — Direct peer-to-peer UDP for video/audio/control after RTSP succeeds
-- **Android support** — Full relay stack ported to the Android client (RelayClient + RelayTcpTunnel)
+The wire protocol on `_nvstream._tcp` mDNS, `/serverinfo` `/launch` `/applist`, RTSP, and the client cert chain are unchanged from upstream. A VipleStream client can connect to a vanilla Sunshine host, and a vanilla Moonlight client can connect to a VipleStream-Server host — VipleStream-only features (Steam profile dropdown, FRUC backends, etc.) are quietly hidden when the peer doesn't advertise the `<VipleStreamProtocol>` capability marker.
+
+---
+
+## Features beyond upstream
+
+### NAT traversal (zero hardware cost)
+Stream over the public internet with no port forwarding, UPnP, or VPN.
+
+- **STUN prober** detects public IP + NAT type at startup
+- **Relay signaling server** — lightweight Python WebSocket service, terminate TLS via Cloudflare Tunnel / nginx
+- **HTTP proxy** — `/serverinfo` / `/launch` / `/cancel` go through the relay in relay-only mode
+- **RTSP TCP tunnel** — wraps the 7-connection RTSP handshake (OPTIONS → DESCRIBE → SETUP×3 → ANNOUNCE → PLAY) over a single WebSocket
+- **UDP hole-punch** — direct peer-to-peer UDP for video / audio / control after RTSP succeeds
+- **PSK auth** — relay rejects any client whose `HMAC-SHA256(psk, uuid)[:16]` doesn't match
+- Fully ported to the Android client (RelayClient + RelayTcpTunnel)
 
 ### Frame Rate Up-Conversion (FRUC)
-2× frame interpolation using NVIDIA Optical Flow SDK (RTX cards required).
+2× frame interpolation, three independent backends with auto-cascade selection on PC client.
 
-- **Motion estimation** — HLSL compute shaders on D3D11 (quality / balanced / performance presets)
-- **Warp rendering** — Per-pixel forward-warp with occlusion masking
-- **Presets** — Quality, Balanced, Performance, Ultra-Performance; runtime-switchable
-- **Adaptive bitrate** — Buffer-based target bitrate control
+| Backend | Algorithm | GPU requirement | Notes |
+|---|---|---|---|
+| **Generic** | HLSL motion-warp shaders | any D3D11 GPU | default; ~1-2 ms / frame |
+| **NvOFFRUC** | NVIDIA Optical Flow SDK | RTX 20+ series, driver ≥ 522 | hardware accelerated |
+| **DirectML** | RIFE 4.25-lite ONNX, fp32 | strong GPU (RTX 30/40, RX 6000+) | auto-cascade probes 720p→540p→480p→360p at init and picks the highest the GPU can sustain; falls back to Generic if no resolution fits the frame budget |
 
-### Other Improvements
-- Debug pairing tool (`scripts/debug_pair.ps1`) — ADB-based PIN-free pairing for development
-- Adaptive bitrate logic
-- Network status overlay (LAN / Relay / DERP)
-- Traditional Chinese UI (`qml_zh_TW.ts`)
+DirectML diagnostics:
+- `VIPLE_DIRECTML_DEBUG=1` — enables D3D12 debug layer + DML validation
+- `VIPLE_DML_RES=540|720|1080|native` — overrides tensor resolution
+- `[VIPLE-FRUC-DML]` log lines print per-stage EMA timings every 120 frames
+
+### Steam library auto-import (host)
+Server scans the local Steam install at startup and auto-injects every installed game into `/applist` as a launchable app. No manual configuration — click `Counter-Strike 2` in the client and the host runs `steam://rungameid/730`.
+
+- Reads `loginusers.vdf` for accounts, `libraryfolders.vdf` for install paths, each `appmanifest_*.acf` for per-app metadata
+- Per-app `<Source>` `<SteamAppId>` `<SteamOwners>` `<LastPlayed>` `<Playtime>` XML tags fed back to clients
+- Clients sort by `RECENT` / `PLAYTIME` / `NAME` (manual entries still pinned to top)
+
+### Steam account switch (client → host)
+A `STEAM ACCOUNT` dropdown sits above the apps grid (PC + Android). Pick a different account → host runs `steam.exe -shutdown` then `-login <account>`. Live progress (`Asking Steam to shut down…` → `Logging in as XXX…`) shown in a busy overlay.
+
+- Only accounts with `RememberPassword=1` are switchable; others rejected client-side
+- Server-side switch is **async** (returns `202 + task_id` in <100 ms) — client polls `/steamswitch/status` every ~1 s until terminal state, so the long-running switch never starves `/serverinfo` polls or causes spurious "host disconnected" UI
+- Force-kills straggler `steam.exe` / `steamwebhelper.exe` before re-login (otherwise the new `-login` gets intercepted by Steam's stuck login window and silently no-ops)
+- Detects Steam Guard 2FA prompts and surfaces a specific error
+- 60 s task GC keeps the registry small
+
+### Other
+- Traditional Chinese UI translation (`qml_zh_TW.ts`) on PC client; Android pulls system locale
+- Web UI English + Traditional Chinese strings rebranded to VipleStream
+- Editorial-style PcView / AppView design with IBM Plex Mono + Space Grotesk + lime accent (`#D4FF3A`)
+- `/serverinfo` advertises `<VipleStreamProtocol>` capability marker so clients can hide VipleStream-only features when connected to vanilla Sunshine
+- Adaptive bitrate, network-status overlay (LAN / Relay / DERP), debug pairing tool (ADB-based PIN-free)
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────┐        relay / direct        ┌──────────────────────┐
-│  Moonlight Client    │ ◄──────────────────────────► │  Sunshine Server     │
-│  (PC / Android)      │                               │  (Windows)           │
-│                      │   1. STUN → public IP         │                      │
-│  RelayClient.java    │   2. relay lookup             │  stun.cpp            │
-│  RelayTcpTunnel.java │   3. HTTP proxy /launch       │  relay.cpp           │
-│  relaytcptunnel.cpp  │   4. TCP tunnel (RTSP)        │  rtsp.cpp            │
-│  relaylookup.cpp     │   5. UDP hole punch           │  stream.cpp          │
-└──────────────────────┘                               └──────────────────────┘
+┌──────────────────────┐        relay or direct       ┌──────────────────────┐
+│  VipleStream client  │ ◄──────────────────────────► │  VipleStream-Server  │
+│  (PC / Android)      │                              │  (Windows)           │
+│                      │   1. STUN → public IP        │                      │
+│  RelayClient.java    │   2. relay lookup            │  stun.cpp            │
+│  RelayTcpTunnel.java │   3. HTTP proxy /launch      │  relay.cpp           │
+│  relaytcptunnel.cpp  │   4. TCP tunnel (RTSP)       │  rtsp.cpp            │
+│  relaylookup.cpp     │   5. UDP hole-punch          │  stream.cpp          │
+└──────────────────────┘                              └──────────────────────┘
                                       ▲
                                       │ WebSocket (ws:// or wss://)
-                              ┌───────┴───────┐
-                              │  Relay Server  │
-                              │  relay_server.py│
-                              │  (Python 3.10+) │
-                              └───────────────┘
+                              ┌───────┴────────┐
+                              │  Relay server  │
+                              │ relay_server.py│
+                              │  (Python 3.10+)│
+                              └────────────────┘
 ```
 
 ---
 
-## Repository Structure
+## Repository layout
 
 ```
 VipleStream/
-├── Sunshine/                  # Server (C++ / CMake)
-│   └── src/
-│       ├── relay.cpp/.h       # Relay signaling + TCP tunnel server-side
-│       ├── stun.cpp/.h        # STUN prober (public IP detection)
-│       ├── rtsp.cpp           # RTSP with last_session cache for tunnel reuse
-│       └── ...
-├── moonlight-qt/              # PC client (C++ / Qt6)
+├── Sunshine/                          # Server (C++ / CMake / MinGW UCRT64)
+│   ├── src/
+│   │   ├── nvhttp.cpp                 # GameStream HTTP + steam profile/switch endpoints
+│   │   ├── relay.cpp / stun.cpp       # NAT traversal server-side
+│   │   ├── rtsp.cpp                   # RTSP with last_session cache for tunnel reuse
+│   │   ├── platform/windows/
+│   │   │   └── steam_scanner.{cpp,h}  # Steam library scanner (loginusers/libraryfolders/appmanifest)
+│   │   └── tools/viple_splash.cpp     # launch splash overlay (avoids "launching..." desktop leak)
+│   └── tools/sunshinesvc.cpp          # service helper (spawns viplestream-server.exe in user session)
+├── moonlight-qt/                      # PC client (C++ / Qt6 / MSVC)
 │   └── app/
 │       ├── backend/
-│       │   ├── relaylookup.cpp/.h       # Relay lookup + HTTP proxy
-│       │   └── relaytcptunnel.cpp/.h    # RTSP TCP tunnel (native sockets)
+│       │   ├── nvhttp.cpp             # HTTP client + steam profile/switch endpoints
+│       │   ├── nvcomputer.cpp         # adds isVipleStreamPeer flag
+│       │   ├── relaylookup.cpp        # relay lookup + HTTP proxy
+│       │   └── relaytcptunnel.cpp     # RTSP TCP tunnel (native sockets)
+│       ├── gui/
+│       │   ├── AppView.qml            # apps grid + Steam profile dropdown + busy overlay
+│       │   └── appmodel.cpp           # /steamprofiles fetch + async switch poll loop
 │       └── streaming/video/ffmpeg-renderers/
-│           ├── nvofruc.cpp/.h           # NVIDIA Optical Flow FRUC
-│           └── d3d11va.cpp/.h           # D3D11 renderer integration
-├── moonlight-android/         # Android client (Java / Gradle + NDK)
+│           ├── nvofruc.cpp            # NVIDIA Optical Flow FRUC backend
+│           ├── directmlfruc.cpp       # DirectML RIFE backend with auto-cascade
+│           └── d3d11va.cpp            # D3D11 renderer integration
+├── moonlight-android/                 # Android client (Java / Gradle + NDK)
 │   └── app/src/main/java/com/limelight/
-│       ├── relay/
-│       │   ├── RelayClient.java         # WebSocket lookup + HTTP proxy
-│       │   └── RelayTcpTunnel.java      # RTSP TCP tunnel (Java threads)
-│       └── nvstream/
-│           └── NvConnection.java        # Relay launch + tunnel lifecycle
-├── tools/
-│   └── viplestream-relay/
-│       └── relay_server.py    # Relay signaling server
+│       ├── nvstream/http/
+│       │   ├── NvHTTP.java            # HTTP client + steam endpoints
+│       │   ├── SteamProfile.java      # profile data class
+│       │   └── SteamSwitchStatus.java # async-task status data class
+│       ├── relay/                     # NAT traversal Java port
+│       └── AppView.java               # apps grid + Spinner + SpinnerDialog
+├── tools/viplestream-relay/
+│   └── relay_server.py                # PSK-authenticated WebSocket relay
 ├── scripts/
-│   ├── debug_pair.ps1         # ADB-based debug pairing
-│   ├── deploy_server.ps1      # Deploy Sunshine to local install
-│   ├── deploy_client.ps1      # Deploy Moonlight to local install
-│   └── benchmark/             # FRUC quality measurement tools
-├── build_all.cmd              # One-command build (Sunshine + Moonlight)
-├── build_sunshine.cmd         # Build Sunshine only
-├── build_moonlight.cmd        # Build Moonlight-Qt only
-├── build-config.template.cmd  # Copy → build-config.local.cmd, fill paths
-└── version.json               # Single source of truth for version number
+│   ├── version.ps1                    # propagate version.json to all subprojects
+│   ├── build_moonlight_package.cmd    # canonical shader/DLL/windeployqt list
+│   ├── deploy_client.ps1              # local install for moonlight-qt
+│   └── benchmark/                     # FRUC quality + latency harness
+├── build_all.cmd                      # one-command build (server + Qt client; auto-bumps patch)
+├── build_sunshine.cmd                 # server only
+├── build_moonlight.cmd                # Qt client only
+├── build_android.cmd                  # Android APK only (debug-signed)
+├── build-config.template.cmd          # copy → build-config.local.cmd, fill paths
+└── version.json                       # single source of truth for version number
 ```
 
 ---
 
-## Setup
+## Build
+
+> **Rule:** always go through the build scripts. They handle version propagation, qmake regeneration, shader manifests, windeployqt, PDB collection, CPack zipping, and APK signing — all things that quietly break when invoked piecewise. See [`docs/building.md`](docs/building.md) for full details.
 
 ### Prerequisites
 
-**Sunshine (server):**
-- Windows 10/11
-- MSYS2 + MinGW-w64 (GCC 13+)
-- CMake 3.25+
-- Node.js 18+ (for web UI assets)
+| Build target | Requires |
+|---|---|
+| Server (`build_sunshine.cmd`) | MSYS2 + MinGW UCRT64 (GCC 13+), CMake 3.25+, Node 18+ (web UI assets) |
+| Qt client (`build_moonlight.cmd`) | Visual Studio 2022 Build Tools (MSVC), Qt 6.10+ (`msvc2022_64`), 7-Zip |
+| Android (`build_android.cmd`) | Android Studio or Gradle 8+, Android NDK r26+, JDK 17+ |
+| Relay server | Python 3.10+ (stdlib only) |
 
-**Moonlight PC (client):**
-- Windows 10/11
-- Visual Studio 2022 Build Tools (MSVC)
-- Qt 6.10+ (`msvc2022_64`)
-- NVIDIA GPU with driver ≥ 522 (for FRUC)
-
-**Moonlight Android:**
-- Android Studio or Gradle 8+
-- Android NDK r26+
-- JDK 17+
-
-**Relay server:**
-- Python 3.10+
-- No external dependencies (stdlib only)
-- Any always-on host (VPS, Raspberry Pi, etc.)
-
-### Setup from a fresh clone
+### First-time setup
 
 ```cmd
 git clone https://github.com/finaltwinsen/VipleStream.git
 cd VipleStream
+copy build-config.template.cmd build-config.local.cmd
+notepad build-config.local.cmd
 ```
 
-1. Create your per-machine config (paths to MSVC, Qt, 7-Zip, MSYS2, etc.):
-   ```cmd
-   copy build-config.template.cmd build-config.local.cmd
-   notepad build-config.local.cmd
-   ```
-   `build-config.local.cmd` is gitignored. Everything else (the build wrappers,
-   the packaging script, version bumper) is tracked so you can `git pull` and
-   immediately build with no extra setup on a new machine.
+`build-config.local.cmd` is gitignored — it holds `QT_DIR`, `VCVARS`, `MSYS2`, `SEVENZIP`, etc. Without it the build scripts fail fast with `[ERROR] build-config.local.cmd not found`.
 
-2. Build everything (server + client):
-   ```cmd
-   build_all.cmd
-   ```
-   Or build individually:
-   ```cmd
-   build_sunshine.cmd     :: server only
-   build_moonlight.cmd    :: client only
-   ```
-   Outputs staged in `temp/sunshine/` and `temp/moonlight/`, zipped into
-   `release/VipleStream-{Server|Client}-<version>.zip`.
+### Common operations
 
-3. Deploy locally (needs admin once per session for `C:\Program Files\...`):
-   ```cmd
-   scripts\deploy_server.ps1     :: Deploy Sunshine
-   scripts\deploy_client.ps1     :: Deploy Moonlight
-   ```
-   Deploy scripts read `DEPLOY_SERVER` / `DEPLOY_CLIENT` from
-   `build-config.local.cmd` (defaults point at the usual install paths).
+| Goal | Command |
+|---|---|
+| Build server + Qt client (auto-bump patch) | `build_all.cmd` |
+| Build server only | `build_sunshine.cmd` |
+| Build Qt client only | `build_moonlight.cmd` |
+| Build Android APK only (no bump) | `build_android.cmd` |
+| Sync `version.json` to all subprojects (no bump, no build) | `pwsh scripts\version.ps1 propagate` |
+| Show current version | `pwsh scripts\version.ps1 get` |
+| Deploy a fresh Qt client to local install | `scripts\deploy_client_now.cmd` |
 
-### Build chain
+Outputs land in `release/`:
 
 ```
-build_all.cmd  ─ bumps version
-   ├─ scripts/build_sunshine_inner.sh      (MSYS2 UCRT64 GCC build)
-   ├─ scripts/build_moonlight_package.cmd  (canonical shader/DLL list + zip)
-   └─ scripts/bump_version.cmd             (version.json → all build files)
+release/VipleStream-Server-1.2.121.zip   (~33 MB)
+release/VipleStream-Client-1.2.121.zip   (~106 MB)
+release/VipleStream-Android-1.2.121.apk  (~6 MB)
 ```
 
-The canonical Moonlight shader / DLL / windeployqt list lives in
-`scripts/build_moonlight_package.cmd`, not in the root wrapper. If you add a
-new shader, update the `for %%F in (…)` list there and every build path picks
-it up.
+### Server deploy (Windows host)
 
-### Relay Server
+`temp/deploy_sunshine.ps1` (or your own variant) handles the host-side deploy: copies the zip contents to `C:\Program Files\VipleStream-Server\`, registers the `VipleStreamServer` service, force-kills any straggler `viplestream-server.exe` (which holds an open handle on its own .exe, blocking `Copy-Item`), and migrates a legacy `C:\Program Files\Sunshine\` install if present.
+
+### Relay server
 
 ```bash
 python tools/viplestream-relay/relay_server.py --port 9999 --psk <your-psk>
 ```
 
-For HTTPS/WSS termination, use Cloudflare Tunnel or nginx as a reverse proxy in front of port 9999.
+For HTTPS/WSS termination, run behind Cloudflare Tunnel or nginx. Then in the client's **Settings → Relay**:
 
-### Client Configuration
+- **Relay URL:** `wss://your-relay-domain/`
+- **Relay PSK:** must match `--psk` on the server
 
-In Moonlight settings → **Relay**:
-- **Relay URL**: `wss://your-relay-domain/` (or `ws://host:9999` for plain)
-- **Relay PSK**: must match `--psk` on the server
-
-The PSK is stored in app preferences (not hardcoded). It is used for HMAC-SHA256 authentication; the raw PSK is never transmitted.
+The PSK is HMAC-only — the raw value is never transmitted.
 
 ---
 
-## NAT Traversal Protocol
+## NAT traversal protocol
 
 ```
 Client                    Relay                     Server
@@ -211,72 +229,92 @@ Client                    Relay                     Server
   |    (OPTIONS/DESCRIBE/    |    (7 TCP connections)  |
   |     SETUP×3/PLAY)        |                         |
   |                         |                         |
-  |◄══════════════ UDP hole punch (video/audio) ═══════►|
+  |◄══════════════ UDP hole-punch (video/audio) ═══════►|
 ```
 
 ---
 
-## Developing on a second machine
+## Steam switch protocol (v1.2.119+)
 
-Everything you need to build + deploy is in the repo; only the machine-specific
-paths live outside. On the new machine:
+```
+Client                                Server
+  |                                     |
+  |── GET /steamprofiles ──────────────►| (returns <profile> list + current_user, fresh-read)
+  |◄──────── 200 + XML ──────────────────|
+  |                                     |
+  |── GET /steamswitch?account=X ──────►| (creates SteamSwitchTask, spawns worker thread)
+  |◄────── 202 + task_id ────────────────| (returns within ~50 ms)
+  |                                     |
+  |    (worker thread runs:             |
+  |     count_steam_processes →         |
+  |     -shutdown + poll →              |
+  |     kill_steam stragglers →         |
+  |     -login <account> →              |
+  |     poll ActiveUser till target)    |
+  |                                     |
+  |── GET /steamswitch/status?id=X ────►| (every ~1 s)
+  |◄──── 200 + state + message ──────────|
+  |        ...                          |
+  |── GET /steamswitch/status?id=X ────►|
+  |◄──── 200 + state=done ───────────────| (or state=error)
+```
+
+States: `starting` → `shutting_down` → `logging_in` → `done` | `error` | `already_active`. Tasks are GC'd 60 s after reaching a terminal state.
+
+---
+
+## Working on a second machine
+
+Everything needed to build + deploy is in the repo; only machine-specific paths live outside.
 
 ```cmd
 git clone https://github.com/finaltwinsen/VipleStream.git
 cd VipleStream
 copy build-config.template.cmd build-config.local.cmd
-:: adjust the paths in build-config.local.cmd to wherever this machine has
-::   MSVC vcvars64.bat, Qt 6.10 msvc2022_64, MSYS2, 7-Zip, Windows SDK D3D
+:: edit paths: MSVC vcvars64.bat, Qt 6.10 msvc2022_64, MSYS2, 7-Zip, Windows SDK D3D
+build_all.cmd
 ```
 
-Then either:
-
-- **Run the whole build**: `build_all.cmd` → produces both server + client zips.
-- **Only client incremental**: `build_moonlight.cmd` — qmake + nmake + zip,
-  uses the same `scripts/build_moonlight_package.cmd` so shader shipping is
-  consistent with `build_all.cmd`.
-- **Only server**: `build_sunshine.cmd` — MSYS2 UCRT64 cmake + ninja build.
-
-After a build, the release zip in `release/` can be extracted directly on the
-same machine or scp'd to another one; there's no installer, just a folder of
-binaries.
+The release zips in `release/` can be extracted directly on the same machine or `scp`'d to another — no installer, just a folder of binaries.
 
 ---
 
-## Security Notes
+## Security notes
 
-- **PSK authentication**: Every WebSocket connection must present `HMAC-SHA256(psk, uuid)[:16]`. Without the correct PSK, the relay rejects registration.
-- **No credentials in source**: All PSK and relay URL values are stored in local config files or app preferences — never hardcoded.
-- **Trust-all SSL (Android relay only)**: The relay WebSocket connection uses a trust-all `SSLContext` on Android because the relay server's TLS is terminated by a reverse proxy. The Moonlight ↔ Sunshine game streaming channel continues to use the original Moonlight certificate pinning.
-- **Sunshine pairing unchanged**: The Moonlight ↔ Sunshine PIN pairing and client certificate trust chain are not modified.
+- **PSK auth** — every relay WebSocket connection must present `HMAC-SHA256(psk, uuid)[:16]`; without the right PSK the relay rejects registration.
+- **No credentials in source** — PSK + relay URL live in `build-config.local.cmd` or app preferences.
+- **Trust-all SSL on Android relay** — the relay WebSocket uses a trust-all `SSLContext` because TLS is terminated by a reverse proxy. The Moonlight ↔ Sunshine game-streaming channel still uses upstream Moonlight's certificate pinning — that part is unchanged.
+- **Sunshine pairing unchanged** — the PIN pairing flow and client cert trust chain are untouched.
+- **Steam credentials** — the host never sees the Steam password; the host only invokes `steam.exe -login <account>`, which uses Steam's own RememberPassword cookie. Accounts that haven't been signed in once on the host are rejected with HTTP 409.
 
 ---
 
-## Version History (highlights)
+## Version highlights
 
 | Version | Changes |
-|---------|---------|
-| 1.1.80 | Workspace sync: root build wrappers tracked, canonical packaging script |
-| 1.1.79 | Fix FRUC crash on iGPU + 4K display (Intel UHD TDR); cap FRUC to stream res |
-| 1.1.78 | Fix FRUC silently disabled — preset shader .fxc files were missing from zip |
-| 1.1.73 | Revert WaitForSingleObjectEx removal (GPU sync); add M1–M5 diagnostic logs |
-| 1.1.67 | Fix FRUC frame-late feedback loop — std −76 %, p95 −48 % for Quality preset |
-| 1.1.66 | Route `/launch` + `/cancel` through relay HTTP proxy in relay-only mode |
-| 1.1.65 | Android NAT traversal port (RelayClient + RelayTcpTunnel) |
-| 1.1.64 | RTSP multi-TCP tunnel fix; Sunshine last_session cache |
-| 1.1.63 | Relay server online without STUN; lookup error fix |
-| 1.1.62 | Native socket I/O in relay tunnel (fixes RTSP timeout 10060) |
-| 1.1.61 | STUN host:port parsing fix; relay thread idle timeout |
-| 1.1.60 | Full NAT traversal (PC): relay lookup + HTTP proxy + RTSP TCP tunnel |
-| 1.1.5x | FRUC presets (quality/balanced/performance/ultra); adaptive bitrate |
-| 1.1.4x | NVIDIA Optical Flow FRUC implementation |
-| 1.1.3x | Initial VipleStream fork; Traditional Chinese UI |
+|---|---|
+| **1.2.121** | Android Steam-switch dropdown reaches feature parity with PC client; fix OkHttp `addPathSegment` URL-encoding `/` to `%2F` (use `addPathSegments` plural) |
+| **1.2.119** | `/steamswitch` rewritten async — server returns 202+task_id immediately, client polls `/steamswitch/status`; eliminates spurious "host disconnected" during the 9 s Steam restart |
+| **1.2.118** | Fix root cause of permanently empty `current_user`: `CreateProcessAsUserW` doesn't load the user profile, so HKCU points at `.DEFAULT`; switched to walking `HKEY_USERS` subhives |
+| **1.2.117** | Steam switch force-kills straggler `steam.exe` + `steamwebhelper.exe`; detects Steam Guard 2FA prompts |
+| **1.2.108–116** | Steam profile dropdown UI on PC client (Qt) — fetch / populate / async switch / busy overlay |
+| **1.2.93–96** | VipleStream rebrand: Sunshine→VipleStream-Server (`viplestream-server.exe` + `viplestream-svc.exe`), Moonlight-Qt→VipleStream (`VipleStream.exe`), Android `applicationId com.piinsta`; firewall rules / mDNS instance name / NVAPI profile / Linux `.desktop` ID all updated; `<VipleStreamProtocol>` capability marker added |
+| **1.2.86–91** | DirectML auto-cascade probe (720p→540p→480p→360p) + Generic fallback; default backend set to Generic |
+| **1.2.82–86** | DirectML reset-race fix: fence-gated allocator reset, multi-ring slots, submitFrame 50 ms → 3 ms |
+| **1.2.67** | Steam library auto-import (Phase 2): host scans Steam install + injects games into `/applist` |
+| **1.2.59–64** | DirectML RIFE backend ships real model; Option C interop optimization; `VIPLE_DML_RES` env var |
+| **1.1.60–80** | Full NAT traversal (PC + Android): relay lookup, HTTP proxy, RTSP TCP tunnel, UDP hole-punch |
+| **1.1.40s–50s** | NVIDIA Optical Flow FRUC; presets (quality/balanced/performance/ultra); adaptive bitrate |
+| **1.1.30s** | Initial VipleStream fork; Traditional Chinese UI |
+
+Full per-version notes: `git log --oneline`.
 
 ---
 
 ## License
 
-This project is based on:
+VipleStream is built on:
+
 - [Sunshine](https://github.com/LizardByte/Sunshine) — GPL-3.0
 - [Moonlight](https://github.com/moonlight-stream/moonlight-qt) — GPL-3.0
 - [moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c) — LGPL-3.0
