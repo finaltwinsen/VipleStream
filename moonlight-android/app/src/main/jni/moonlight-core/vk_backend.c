@@ -434,29 +434,40 @@ static int create_instance(vk_backend_t* be)
         }
     }
     LOGI("VK_EXT_swapchain_colorspace %s",
-         be->fHdrColorspaceExt ? "available — will enable" : "not available");
+         be->fHdrColorspaceExt ? "available [enable disabled — see v1.2.181 note]"
+                              : "not available");
 
-    const char* instExts[3];
-    instExts[0] = VK_KHR_SURFACE_EXTENSION_NAME;
-    instExts[1] = VK_KHR_ANDROID_SURFACE_EXTENSION_NAME;
-    uint32_t instExtCount = 2;
-    if (be->fHdrColorspaceExt) {
-        instExts[instExtCount++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
-    }
+    // VK_EXT_swapchain_colorspace: PROBED but NOT enabled. v1.2.180 user
+    // logs from Pixel 9 (Mali-G715 driver) showed SIGSEGV inside
+    // vkCreateInstance with this ext in enabled list. Same pattern as
+    // VK_EXT_hdr_metadata in v1.2.180 device-level fix. Both ext are
+    // §I.E.b/c (HDR pipeline) prerequisites, not §I.B/C/D requirements
+    // — defer enabling until actual HDR-mode swapchain is built and
+    // user has explicit HDR opt-in (Java prefs.enableHdr).
+    const char* instExts[2] = {
+        VK_KHR_SURFACE_EXTENSION_NAME,
+        VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
+    };
 
     VkInstanceCreateInfo ici = {
         .sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo        = &appInfo,
-        .enabledExtensionCount   = instExtCount,
+        .enabledExtensionCount   = (uint32_t)(sizeof(instExts) / sizeof(instExts[0])),
         .ppEnabledExtensionNames = instExts,
     };
 
-    if (vkCreateInstance(&ici, NULL, &be->instance) != VK_SUCCESS) {
-        LOGE("vkCreateInstance failed (likely missing instance extensions)");
+    status_log("vkCreateInstance: enabled exts = %u (KHR_surface + KHR_android_surface)%s",
+               (uint32_t)(sizeof(instExts) / sizeof(instExts[0])),
+               be->fHdrColorspaceExt
+                 ? " [+ EXT_swapchain_colorspace SKIPPED — see v1.2.181 note]"
+                 : "");
+    VkResult ciRc = vkCreateInstance(&ici, NULL, &be->instance);
+    status_log("vkCreateInstance rc=%d", (int)ciRc);
+    if (ciRc != VK_SUCCESS) {
+        LOGE("vkCreateInstance failed (rc=%d, likely missing instance extensions)", ciRc);
         return -1;
     }
-    LOGI("VkInstance created (with VK_KHR_surface + VK_KHR_android_surface%s)",
-         be->fHdrColorspaceExt ? " + VK_EXT_swapchain_colorspace" : "");
+    LOGI("VkInstance created (with VK_KHR_surface + VK_KHR_android_surface)");
 
     be->vkDestroyInstance         = LOAD_INSTANCE_PROC(be, vkDestroyInstance);
     be->vkCreateAndroidSurfaceKHR = LOAD_INSTANCE_PROC(be, vkCreateAndroidSurfaceKHR);
