@@ -30,6 +30,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Pre-compiled SPIR-V shaders. Source under shaders/, regenerate via:
+//   $NDK/shader-tools/.../glslc fullscreen.vert -o fullscreen.vert.spv
+//   $NDK/shader-tools/.../glslc test_pattern.frag -o test_pattern.frag.spv
+//   xxd -i fullscreen.vert.spv | sed 's|^unsigned |static const unsigned |' > fullscreen.vert.spv.h
+#include "shaders/fullscreen.vert.spv.h"
+#include "shaders/test_pattern.frag.spv.h"
+
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_android.h>
@@ -98,6 +105,38 @@ typedef struct vk_backend_s {
     uint64_t                 ycbcrExternalFormat;   // externalFormat the sampler is bound to
     int                      ycbcrInitialized;
 
+    // Graphics pipeline (B.2c.3c.2) — full-screen triangle, no vertex
+    // buffer, test_pattern.frag draws a UV gradient. B.2c.3c.3 swaps
+    // the frag for one that samples the imported AHB image and uses
+    // a non-empty descriptor set with the YCbCr sampler binding.
+    PFN_vkCreateShaderModule        vkCreateShaderModule;
+    PFN_vkDestroyShaderModule       vkDestroyShaderModule;
+    PFN_vkCreateRenderPass          vkCreateRenderPass;
+    PFN_vkDestroyRenderPass         vkDestroyRenderPass;
+    PFN_vkCreateImageView           vkCreateImageView;
+    PFN_vkDestroyImageView          vkDestroyImageView;
+    PFN_vkCreateFramebuffer         vkCreateFramebuffer;
+    PFN_vkDestroyFramebuffer        vkDestroyFramebuffer;
+    PFN_vkCreatePipelineLayout      vkCreatePipelineLayout;
+    PFN_vkDestroyPipelineLayout     vkDestroyPipelineLayout;
+    PFN_vkCreateDescriptorSetLayout vkCreateDescriptorSetLayout;
+    PFN_vkDestroyDescriptorSetLayout vkDestroyDescriptorSetLayout;
+    PFN_vkCreateGraphicsPipelines   vkCreateGraphicsPipelines;
+    PFN_vkDestroyPipeline           vkDestroyPipeline;
+    PFN_vkCmdBeginRenderPass        vkCmdBeginRenderPass;
+    PFN_vkCmdEndRenderPass          vkCmdEndRenderPass;
+    PFN_vkCmdBindPipeline           vkCmdBindPipeline;
+    PFN_vkCmdDraw                   vkCmdDraw;
+    VkRenderPass         renderPass;
+    VkPipelineLayout     pipelineLayout;
+    VkDescriptorSetLayout descLayout;
+    VkPipeline           graphicsPipeline;
+    VkShaderModule       vertShader;
+    VkShaderModule       fragShader;
+    VkImageView*         swapchainViews;     // size = swapchainImageCount
+    VkFramebuffer*       framebuffers;       // size = swapchainImageCount
+    int                  graphicsInitialized;
+
     // Per-frame render path (B.2c.3a)
     PFN_vkAcquireNextImageKHR    vkAcquireNextImageKHR;
     PFN_vkQueuePresentKHR        vkQueuePresentKHR;
@@ -123,6 +162,11 @@ typedef struct vk_backend_s {
 
 #define LOAD_INSTANCE_PROC(be, name) \
     ((PFN_##name)(be)->vkGetInstanceProcAddr((be)->instance, #name))
+
+// Forward declarations — definitions live further down so each phase reads
+// top-to-bottom, but nativeInit calls them before they appear in source.
+static int  init_graphics_pipeline(struct vk_backend_s* be);
+static void destroy_graphics_pipeline(struct vk_backend_s* be);
 
 // ---------- helpers ----------
 
@@ -1035,7 +1079,13 @@ Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz,
         LOGW("load_ahb_procs failed — nativeImportAhb will return -2 on every frame");
     }
 
-    LOGI("B.2c.3b init complete: instance + surface + device + queue + swapchain + render + AHB");
+    // B.2c.3c.2: graphics pipeline (test pattern).
+    if (init_graphics_pipeline(be) != 0) {
+        LOGW("init_graphics_pipeline failed — render falls back to clear-only path");
+    }
+
+    LOGI("B.2c.3c.2 init complete: instance + surface + device + queue + swapchain "
+         "+ render + AHB + graphics pipeline");
     return (jlong)(uintptr_t)be;
 
 fail:
@@ -1052,6 +1102,253 @@ fail:
         free(be);
     }
     return 0;
+}
+
+// ---------- B.2c.3c.2: graphics pipeline (test pattern fragment) ----------
+
+#define LOAD_DEVICE_PROC(be, name) \
+    ((PFN_##name)(be)->vkGetDeviceProcAddr((be)->device, #name))
+
+static int load_graphics_procs(vk_backend_t* be)
+{
+    be->vkCreateShaderModule        = LOAD_DEVICE_PROC(be, vkCreateShaderModule);
+    be->vkDestroyShaderModule       = LOAD_DEVICE_PROC(be, vkDestroyShaderModule);
+    be->vkCreateRenderPass          = LOAD_DEVICE_PROC(be, vkCreateRenderPass);
+    be->vkDestroyRenderPass         = LOAD_DEVICE_PROC(be, vkDestroyRenderPass);
+    be->vkCreateImageView           = LOAD_DEVICE_PROC(be, vkCreateImageView);
+    be->vkDestroyImageView          = LOAD_DEVICE_PROC(be, vkDestroyImageView);
+    be->vkCreateFramebuffer         = LOAD_DEVICE_PROC(be, vkCreateFramebuffer);
+    be->vkDestroyFramebuffer        = LOAD_DEVICE_PROC(be, vkDestroyFramebuffer);
+    be->vkCreatePipelineLayout      = LOAD_DEVICE_PROC(be, vkCreatePipelineLayout);
+    be->vkDestroyPipelineLayout     = LOAD_DEVICE_PROC(be, vkDestroyPipelineLayout);
+    be->vkCreateDescriptorSetLayout = LOAD_DEVICE_PROC(be, vkCreateDescriptorSetLayout);
+    be->vkDestroyDescriptorSetLayout= LOAD_DEVICE_PROC(be, vkDestroyDescriptorSetLayout);
+    be->vkCreateGraphicsPipelines   = LOAD_DEVICE_PROC(be, vkCreateGraphicsPipelines);
+    be->vkDestroyPipeline           = LOAD_DEVICE_PROC(be, vkDestroyPipeline);
+    be->vkCmdBeginRenderPass        = LOAD_DEVICE_PROC(be, vkCmdBeginRenderPass);
+    be->vkCmdEndRenderPass          = LOAD_DEVICE_PROC(be, vkCmdEndRenderPass);
+    be->vkCmdBindPipeline           = LOAD_DEVICE_PROC(be, vkCmdBindPipeline);
+    be->vkCmdDraw                   = LOAD_DEVICE_PROC(be, vkCmdDraw);
+    if (!be->vkCreateShaderModule || !be->vkDestroyShaderModule ||
+        !be->vkCreateRenderPass || !be->vkDestroyRenderPass ||
+        !be->vkCreateImageView || !be->vkDestroyImageView ||
+        !be->vkCreateFramebuffer || !be->vkDestroyFramebuffer ||
+        !be->vkCreatePipelineLayout || !be->vkDestroyPipelineLayout ||
+        !be->vkCreateDescriptorSetLayout || !be->vkDestroyDescriptorSetLayout ||
+        !be->vkCreateGraphicsPipelines || !be->vkDestroyPipeline ||
+        !be->vkCmdBeginRenderPass || !be->vkCmdEndRenderPass ||
+        !be->vkCmdBindPipeline || !be->vkCmdDraw) {
+        LOGE("load_graphics_procs: missing entry points");
+        return -1;
+    }
+    return 0;
+}
+
+static int init_graphics_pipeline(vk_backend_t* be)
+{
+    if (load_graphics_procs(be) != 0) return -1;
+
+    // Render pass: 1 color attachment matching swapchain format. clear→
+    // present_src so the framebuffer can hand off to vkQueuePresentKHR.
+    VkAttachmentDescription colorAttach = {
+        .format         = be->swapchainFormat,
+        .samples        = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp        = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    };
+    VkAttachmentReference colorRef = {
+        .attachment = 0,
+        .layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+    VkSubpassDescription subpass = {
+        .pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 1,
+        .pColorAttachments    = &colorRef,
+    };
+    VkSubpassDependency dep = {
+        .srcSubpass    = VK_SUBPASS_EXTERNAL,
+        .dstSubpass    = 0,
+        .srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+    };
+    VkRenderPassCreateInfo rpci = {
+        .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .attachmentCount = 1, .pAttachments = &colorAttach,
+        .subpassCount    = 1, .pSubpasses    = &subpass,
+        .dependencyCount = 1, .pDependencies = &dep,
+    };
+    if (be->vkCreateRenderPass(be->device, &rpci, NULL, &be->renderPass) != VK_SUCCESS) {
+        LOGE("vkCreateRenderPass failed"); return -1;
+    }
+
+    // Image views + framebuffers per swapchain image
+    be->swapchainViews = (VkImageView*)calloc(be->swapchainImageCount, sizeof(VkImageView));
+    be->framebuffers   = (VkFramebuffer*)calloc(be->swapchainImageCount, sizeof(VkFramebuffer));
+    if (!be->swapchainViews || !be->framebuffers) return -1;
+
+    for (uint32_t i = 0; i < be->swapchainImageCount; i++) {
+        VkImageViewCreateInfo ivci = {
+            .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image    = be->swapchainImages[i],
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format   = be->swapchainFormat,
+            .components = {
+                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0, .levelCount = 1,
+                .baseArrayLayer = 0, .layerCount = 1,
+            },
+        };
+        if (be->vkCreateImageView(be->device, &ivci, NULL, &be->swapchainViews[i]) != VK_SUCCESS) {
+            LOGE("vkCreateImageView[%u] failed", i); return -1;
+        }
+        VkFramebufferCreateInfo fci = {
+            .sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass      = be->renderPass,
+            .attachmentCount = 1,
+            .pAttachments    = &be->swapchainViews[i],
+            .width           = be->swapchainExtent.width,
+            .height          = be->swapchainExtent.height,
+            .layers          = 1,
+        };
+        if (be->vkCreateFramebuffer(be->device, &fci, NULL, &be->framebuffers[i]) != VK_SUCCESS) {
+            LOGE("vkCreateFramebuffer[%u] failed", i); return -1;
+        }
+    }
+
+    // Shader modules
+    VkShaderModuleCreateInfo smciV = {
+        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = fullscreen_vert_spv_len,
+        .pCode    = (const uint32_t*)fullscreen_vert_spv,
+    };
+    VkShaderModuleCreateInfo smciF = {
+        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = test_pattern_frag_spv_len,
+        .pCode    = (const uint32_t*)test_pattern_frag_spv,
+    };
+    if (be->vkCreateShaderModule(be->device, &smciV, NULL, &be->vertShader) != VK_SUCCESS ||
+        be->vkCreateShaderModule(be->device, &smciF, NULL, &be->fragShader) != VK_SUCCESS) {
+        LOGE("vkCreateShaderModule failed"); return -1;
+    }
+
+    // Empty descriptor set layout (B.2c.3c.3 will swap in a sampler binding)
+    VkDescriptorSetLayoutCreateInfo dslci = {
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 0,
+        .pBindings    = NULL,
+    };
+    if (be->vkCreateDescriptorSetLayout(be->device, &dslci, NULL, &be->descLayout) != VK_SUCCESS) {
+        LOGE("vkCreateDescriptorSetLayout failed"); return -1;
+    }
+    VkPipelineLayoutCreateInfo plci = {
+        .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts    = &be->descLayout,
+    };
+    if (be->vkCreatePipelineLayout(be->device, &plci, NULL, &be->pipelineLayout) != VK_SUCCESS) {
+        LOGE("vkCreatePipelineLayout failed"); return -1;
+    }
+
+    // Graphics pipeline
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = be->vertShader, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = be->fragShader, .pName = "main" },
+    };
+    VkPipelineVertexInputStateCreateInfo vi = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    };
+    VkPipelineInputAssemblyStateCreateInfo ia = {
+        .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkViewport vp = { 0, 0,
+        (float)be->swapchainExtent.width, (float)be->swapchainExtent.height,
+        0.0f, 1.0f };
+    VkRect2D sc = { {0, 0}, be->swapchainExtent };
+    VkPipelineViewportStateCreateInfo vpst = {
+        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1, .pViewports = &vp,
+        .scissorCount  = 1, .pScissors  = &sc,
+    };
+    VkPipelineRasterizationStateCreateInfo rs = {
+        .sType            = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode      = VK_POLYGON_MODE_FILL,
+        .cullMode         = VK_CULL_MODE_NONE,
+        .frontFace        = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth        = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo ms = {
+        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineColorBlendAttachmentState cbAtt = {
+        .blendEnable    = VK_FALSE,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo cb = {
+        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments    = &cbAtt,
+    };
+
+    VkGraphicsPipelineCreateInfo gpci = {
+        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount          = 2,        .pStages           = stages,
+        .pVertexInputState   = &vi,      .pInputAssemblyState = &ia,
+        .pViewportState      = &vpst,    .pRasterizationState = &rs,
+        .pMultisampleState   = &ms,      .pColorBlendState  = &cb,
+        .layout              = be->pipelineLayout,
+        .renderPass          = be->renderPass,
+        .subpass             = 0,
+    };
+    if (be->vkCreateGraphicsPipelines(be->device, VK_NULL_HANDLE, 1, &gpci, NULL,
+                                       &be->graphicsPipeline) != VK_SUCCESS) {
+        LOGE("vkCreateGraphicsPipelines failed"); return -1;
+    }
+
+    be->graphicsInitialized = 1;
+    LOGI("graphics pipeline ready: renderPass + %u framebuffers + pipeline",
+         be->swapchainImageCount);
+    return 0;
+}
+
+static void destroy_graphics_pipeline(vk_backend_t* be)
+{
+    if (!be->graphicsInitialized) return;
+    if (be->graphicsPipeline) be->vkDestroyPipeline(be->device, be->graphicsPipeline, NULL);
+    if (be->pipelineLayout)   be->vkDestroyPipelineLayout(be->device, be->pipelineLayout, NULL);
+    if (be->descLayout)       be->vkDestroyDescriptorSetLayout(be->device, be->descLayout, NULL);
+    if (be->vertShader)       be->vkDestroyShaderModule(be->device, be->vertShader, NULL);
+    if (be->fragShader)       be->vkDestroyShaderModule(be->device, be->fragShader, NULL);
+    if (be->framebuffers) {
+        for (uint32_t i = 0; i < be->swapchainImageCount; i++)
+            if (be->framebuffers[i]) be->vkDestroyFramebuffer(be->device, be->framebuffers[i], NULL);
+        free(be->framebuffers);
+        be->framebuffers = NULL;
+    }
+    if (be->swapchainViews) {
+        for (uint32_t i = 0; i < be->swapchainImageCount; i++)
+            if (be->swapchainViews[i]) be->vkDestroyImageView(be->device, be->swapchainViews[i], NULL);
+        free(be->swapchainViews);
+        be->swapchainViews = NULL;
+    }
+    if (be->renderPass) be->vkDestroyRenderPass(be->device, be->renderPass, NULL);
+    be->graphicsInitialized = 0;
 }
 
 // ---------- B.2c.3a: per-frame steady-state clear+present ----------
@@ -1085,44 +1382,64 @@ static int render_clear_frame(vk_backend_t* be)
     };
     if (be->vkBeginCommandBuffer(be->cmdBuffer, &bbi) != VK_SUCCESS) return -1;
 
-    VkImageSubresourceRange range = {
-        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .baseMipLevel = 0, .levelCount = 1,
-        .baseArrayLayer = 0, .layerCount = 1,
-    };
-    VkImageMemoryBarrier toDst = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = 0,
-        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = be->swapchainImages[imgIdx],
-        .subresourceRange = range,
-    };
-    be->vkCmdPipelineBarrier(be->cmdBuffer,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0, 0, NULL, 0, NULL, 1, &toDst);
-
-    be->vkCmdClearColorImage(be->cmdBuffer, be->swapchainImages[imgIdx],
-                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                             &clearColor, 1, &range);
-
-    VkImageMemoryBarrier toPresent = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-        .dstAccessMask = 0,
-        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = be->swapchainImages[imgIdx],
-        .subresourceRange = range,
-    };
-    be->vkCmdPipelineBarrier(be->cmdBuffer,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        0, 0, NULL, 0, NULL, 1, &toPresent);
+    if (be->graphicsInitialized) {
+        // §I.B.2c.3c.2 path: render pass + fullscreen triangle test pattern.
+        // Render pass loadOp=CLEAR with the cycling color, then frag shader
+        // overwrites with the UV gradient. Final layout PRESENT_SRC_KHR
+        // is set by the render pass itself.
+        VkClearValue cv = { .color = clearColor };
+        VkRenderPassBeginInfo rpbi = {
+            .sType        = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass   = be->renderPass,
+            .framebuffer  = be->framebuffers[imgIdx],
+            .renderArea   = { {0, 0}, be->swapchainExtent },
+            .clearValueCount = 1,
+            .pClearValues = &cv,
+        };
+        be->vkCmdBeginRenderPass(be->cmdBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              be->graphicsPipeline);
+        be->vkCmdDraw(be->cmdBuffer, 3, 1, 0, 0);   // fullscreen triangle
+        be->vkCmdEndRenderPass(be->cmdBuffer);
+    } else {
+        // Fallback: B.2c.3a clear-only path. Used if pipeline init failed.
+        VkImageSubresourceRange range = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1,
+        };
+        VkImageMemoryBarrier toDst = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = 0,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = be->swapchainImages[imgIdx],
+            .subresourceRange = range,
+        };
+        be->vkCmdPipelineBarrier(be->cmdBuffer,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, NULL, 0, NULL, 1, &toDst);
+        be->vkCmdClearColorImage(be->cmdBuffer, be->swapchainImages[imgIdx],
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 &clearColor, 1, &range);
+        VkImageMemoryBarrier toPresent = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = 0,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = be->swapchainImages[imgIdx],
+            .subresourceRange = range,
+        };
+        be->vkCmdPipelineBarrier(be->cmdBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, NULL, 0, NULL, 1, &toPresent);
+    }
 
     if (be->vkEndCommandBuffer(be->cmdBuffer) != VK_SUCCESS) return -1;
 
@@ -1178,6 +1495,7 @@ Java_com_limelight_binding_video_VkBackend_nativeDestroy(JNIEnv* env, jclass cla
     vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
     if (!be) return;
     LOGI("destroying backend handle=%p (frames rendered=%d)", be, be->frameCounter);
+    destroy_graphics_pipeline(be);
     destroy_ycbcr_sampler(be);
     destroy_render_resources(be);
     if (be->swapchainImages) {
