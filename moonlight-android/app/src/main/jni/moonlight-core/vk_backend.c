@@ -32,6 +32,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <unistd.h>   // close(fd) for nativeSetLogFd error path
 
 // Pre-compiled SPIR-V shaders. Source under shaders/, regenerate via:
 //   $NDK/shader-tools/.../glslc <name> -o <name>.spv
@@ -3371,11 +3372,23 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     //   currently single → switch to dual only if 2×input ≤ display×1.0
     //   currently dual   → switch to single only if 2×input > display×1.10
     // Gives ~10% deadband. Default before first measurement = single.
+    //
+    // v1.2.177 fix: previous safety `!fHostFrameFilled → singleMode=1`
+    // fought the criterion every frame for the first ~120 frames (until
+    // host-timing ring filled at 2-3s @ 45-60fps). On boundary inputs
+    // (60→120, 45→90) every frame alternated single↔dual → effective
+    // displayed FPS = single average. The fix replaces the 120-frame
+    // gate with a measurement-validity gate (~200ms via early-publish).
     int singleMode = be->fLastSingleMode;  // start by holding current mode
-    if (!singleMode && !be->fHostFrameFilled) singleMode = 1;  // safety: first frame is always single
+    if (be->fInputFpsRecent <= 0.0f) singleMode = 1;  // no measurement yet → force single (safe default)
     float doubled = be->fInputFpsRecent * 2.0f;
-    float enterDualThr = displayHz * 1.00f;
-    float exitDualThr  = displayHz * 1.10f;
+    // v1.2.178 — give enter threshold 5% margin so input=display/2 with
+    // ±jitter doesn't bounce. exit at 15% to give 10% deadband.
+    //   45 in 90:  2×45=90,  enter=94.5, exit=103.5 → dual ✓
+    //   60 in 120: 2×60=120, enter=126,  exit=138   → dual ✓
+    //   55 in 60:  2×55=110, enter=63,   exit=69    → single ✓ (over)
+    float enterDualThr = displayHz * 1.05f;
+    float exitDualThr  = displayHz * 1.15f;
     if (be->fInputFpsRecent > 0.0f) {
         if (be->fLastSingleMode && doubled <= enterDualThr) {
             singleMode = 0;  // single → dual: FRUC fits
@@ -3802,6 +3815,26 @@ Java_com_limelight_binding_video_VkBackend_nativeSetQualityLevel(
 // during swapchain create (§I.E.b/c, NOT YET IMPLEMENTED — current path
 // always picks SDR R8G8B8A8_UNORM/SRGB regardless). Call this after
 // nativeInit so it's available on next swapchain (re)create.
+// Helper to seed the log header. Used by both nativeSetLogPath and
+// nativeSetLogFd entry points (which differ only in how they obtain
+// the underlying FILE*).
+static void status_log_header(const char* origin)
+{
+    if (!g_status_log) return;
+    time_t now = time(NULL);
+    struct tm* tm = localtime(&now);
+    fprintf(g_status_log,
+            "VipleStream Vulkan FRUC backend status log\n"
+            "Started: %04d-%02d-%02d %02d:%02d:%02d\n"
+            "Origin:  %s\n"
+            "Schema:  [+SECS.MS] event ...\n"
+            "         All timestamps relative to monotonic clock; first frame == ~0.\n"
+            "------------------------------------------------------------\n",
+            tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+            tm->tm_hour, tm->tm_min, tm->tm_sec, origin);
+    fflush(g_status_log);
+}
+
 JNIEXPORT void JNICALL
 Java_com_limelight_binding_video_VkBackend_nativeSetLogPath(
     JNIEnv* env, jclass clazz, jstring path)
@@ -3812,23 +3845,40 @@ Java_com_limelight_binding_video_VkBackend_nativeSetLogPath(
     if (g_status_log) { fclose(g_status_log); g_status_log = NULL; }
     g_status_log = fopen(p, "w");
     if (g_status_log) {
-        time_t now = time(NULL);
-        struct tm* tm = localtime(&now);
-        fprintf(g_status_log,
-                "VipleStream Vulkan FRUC backend status log\n"
-                "Started: %04d-%02d-%02d %02d:%02d:%02d\n"
-                "Path:    %s\n"
-                "Schema:  [+SECS.MS] event ...\n"
-                "         All timestamps relative to monotonic clock; first frame == ~0.\n"
-                "------------------------------------------------------------\n",
-                tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-                tm->tm_hour, tm->tm_min, tm->tm_sec, p);
-        fflush(g_status_log);
+        status_log_header(p);
         LOGI("[VKBE-STATUS] writing diagnostic log to %s", p);
     } else {
         LOGW("[VKBE-STATUS] fopen('%s', 'w') failed — log disabled", p);
     }
     (*env)->ReleaseStringUTFChars(env, path, p);
+}
+
+// Android 14+ blocks /Android/data/<pkg>/files/ for non-owning apps even
+// in Files-by-Google, so the v1.2.175 path is invisible to users on
+// Pixel 9. Java now opens a MediaStore.Downloads URI, hands us its fd,
+// and we fdopen it. File appears in user-visible Downloads/ folder.
+JNIEXPORT void JNICALL
+Java_com_limelight_binding_video_VkBackend_nativeSetLogFd(
+    JNIEnv* env, jclass clazz, jint fd)
+{
+    if (g_status_log) { fclose(g_status_log); g_status_log = NULL; }
+    if (fd < 0) return;
+    // MediaStore openFileDescriptor("w") doesn't guarantee truncate on
+    // Android (per docs, "may truncate ... depending on previous state").
+    // Force clean slate so each session starts a fresh log instead of
+    // appending to last session's content.
+    if (ftruncate((int)fd, 0) != 0) {
+        // Non-fatal — fdopen will continue but file may have stale tail.
+        LOGW("[VKBE-STATUS] ftruncate(fd=%d, 0) failed — log may have stale tail", (int)fd);
+    }
+    g_status_log = fdopen((int)fd, "w");
+    if (g_status_log) {
+        status_log_header("MediaStore.Downloads/viple_vkbe_status.log (via fd)");
+        LOGI("[VKBE-STATUS] writing diagnostic log via fd %d (Downloads)", (int)fd);
+    } else {
+        LOGW("[VKBE-STATUS] fdopen(%d) failed — closing fd, log disabled", (int)fd);
+        close((int)fd);
+    }
 }
 
 JNIEXPORT void JNICALL

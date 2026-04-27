@@ -126,17 +126,57 @@ public final class VkBackend implements IFrucBackend {
 
         // Set up file-based status logger for diagnostics on devices
         // where adb isn't available (e.g. Pixel 9 without USB debugging).
-        // External-files dir is /sdcard/Android/data/<pkg>/files/ —
-        // visible in Files app without storage permission.
-        try {
-            java.io.File logDir = context.getExternalFilesDir(null);
-            if (logDir != null) {
-                java.io.File logFile = new java.io.File(logDir, "viple_vkbe_status.log");
-                nativeSetLogPath(logFile.getAbsolutePath());
-                Log.i(TAG, "diagnostic log path: " + logFile.getAbsolutePath());
+        //
+        // Android 14+ (Files by Google) hides /sdcard/Android/data/<pkg>/
+        // — even the owning app's user can't browse it. So write to
+        // public Downloads/ via MediaStore.Downloads (API 29+), which is
+        // accessible without any storage permission and visible in Files
+        // app's Downloads section. Native gets a raw fd and fdopen()s it.
+        // Falls back to external-files-dir on API < 29.
+        boolean logSetUp = false;
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            try {
+                android.content.ContentResolver cr = context.getContentResolver();
+                String name = "viple_vkbe_status.log";
+                // Delete any prior file with the same name so we overwrite (MediaStore
+                // doesn't replace by name — leaves old entries hanging around).
+                cr.delete(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                          android.provider.MediaStore.MediaColumns.DISPLAY_NAME + "=?",
+                          new String[]{name});
+                android.content.ContentValues cv = new android.content.ContentValues();
+                cv.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name);
+                cv.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+                cv.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+                       android.os.Environment.DIRECTORY_DOWNLOADS);
+                android.net.Uri uri = cr.insert(
+                        android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+                if (uri != null) {
+                    android.os.ParcelFileDescriptor pfd =
+                            cr.openFileDescriptor(uri, "w");
+                    if (pfd != null) {
+                        int fd = pfd.detachFd();    // native owns it now
+                        nativeSetLogFd(fd);
+                        Log.i(TAG, "diagnostic log -> Downloads/" + name + " (fd=" + fd + ")");
+                        logSetUp = true;
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "MediaStore log setup failed (will fallback): " + t);
             }
-        } catch (Throwable t) {
-            Log.w(TAG, "couldn't set diagnostic log path: " + t);
+        }
+        if (!logSetUp) {
+            // Fallback: app's external-files dir (visible only on API < 30 or
+            // pre-Files-by-Google blocks). Better than nothing on old Android.
+            try {
+                java.io.File logDir = context.getExternalFilesDir(null);
+                if (logDir != null) {
+                    java.io.File logFile = new java.io.File(logDir, "viple_vkbe_status.log");
+                    nativeSetLogPath(logFile.getAbsolutePath());
+                    Log.i(TAG, "diagnostic log -> " + logFile.getAbsolutePath() + " (fallback)");
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "couldn't set diagnostic log path: " + t);
+            }
         }
 
         // §I.D.c v2 — read device's max supported refresh rate so native
@@ -351,6 +391,7 @@ public final class VkBackend implements IFrucBackend {
     private static native void nativeSetQualityLevel(long handle, int level);
     private static native void nativeSetHdrEnabled(long handle, boolean enabled);
     private static native void nativeSetLogPath(String path);
+    private static native void nativeSetLogFd(int fd);
 
     /**
      * §I.E.a/b prep — caller passes prefs.enableHdr down so native can
