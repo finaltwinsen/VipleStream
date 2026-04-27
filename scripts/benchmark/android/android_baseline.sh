@@ -118,10 +118,15 @@ POLL_PID=$!
 # silently ignored, leaving the *:S as the only matched filter and the file
 # empty. pixel-thermal is a Pixel-specific kernel tag emitting per-sensor
 # temps every ~2s — useful as a high-frequency cross-check on the dumpsys poll.
+# Tags: VKBE (Java VkBackend.java) + VKBE-NAT (C-side vk_backend.c, all
+# subtags like [VKBE-COMPUTE]/[VKBE-RING]/[VKBE-PERF-SUMMARY]/[VKBE-HDR]/
+# [VK-DISPLAY-TIMING-AGG]/[VK-HDR-RECON] are message-body prefixes inside
+# the VKBE-NAT android-log tag, not separate logcat tags).
 "$ADB" -s "$DEVICE" logcat -v threadtime \
     "FRUC:V" \
     "VKBE:V" \
     "VKBE-NAT:V" \
+    "VIPLE-VK-PROBE:V" \
     "ThermalManagerService:V" \
     "thermal-engine:V" \
     "ThermalHAL:V" \
