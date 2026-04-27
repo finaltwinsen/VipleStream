@@ -308,6 +308,15 @@ typedef struct vk_backend_s {
     int                  fInputWindowFrames;
     float                fInputFpsRecent;     // 0 = not yet measured
     int                  fLastSingleMode;     // 0 = dual, 1 = single (for log spam suppression)
+
+    // §I.D.c — Pixel 5 / Adreno 620: vkGetRefreshCycleDurationGOOGLE
+    // caches the swapchain-creation-time panel rate (60 Hz) and never
+    // updates after the OS hot-switches the panel mode (e.g. via
+    // ANativeWindow_setFrameRateWithChangeStrategy(90, ALWAYS)). When
+    // the hint is accepted, override the driver-reported refresh with
+    // the hinted rate for smart-mode decisions; falls back to driver
+    // query when no hint was accepted.
+    float                fHintedRefreshHz;    // 0 = no hint accepted, use driver query
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -564,6 +573,61 @@ static int create_surface(vk_backend_t* be, JNIEnv* env, jobject jSurface)
         return -1;
     }
     LOGI("VkSurfaceKHR created on ANativeWindow=%p", be->nativeWindow);
+
+    // §I.D.c — request 90 Hz panel mode. Pixel 5 has a 90 Hz LCD but
+    // defaults to 60 Hz unless the active app explicitly hints higher.
+    // FIXED_SOURCE compatibility tells the compositor "I produce frames
+    // at this exact rate — do not interpolate or average". Combined with
+    // §I.D.b smart-mode, this lets a 45 FPS input stream trigger dual
+    // present (45 < 90 × 0.92) and reach 90 FPS displayed (FRUC's
+    // designed sweet spot).
+    //
+    // Hint-only API; if user hasn't enabled "smooth display" or another
+    // window pins lower rate, panel stays at 60 Hz. Verify via
+    // [VK-DISPLAY-TIMING] refresh cycle log in create_swapchain.
+    //
+    // Symbol introduced in API 30 (Android 11). Our minSdk is 21 so the
+    // direct call is weakly linked → SIGSEGV at runtime if device < 30.
+    // Use dlsym to gracefully no-op on old devices. FIXED_SOURCE = 1
+    // per ANW header.
+    // Prefer the API 31 setFrameRateWithChangeStrategy with
+    // CHANGE_FRAME_RATE_ALWAYS so the compositor *forces* the mode
+    // switch even if it's not seamless. The default API 30
+    // setFrameRate uses ONLY_IF_SEAMLESS which on Pixel 5 LineageOS
+    // 22.1 leaves the panel pinned at 60 Hz despite accepting the
+    // 90 Hz hint (observed in v1.2.163: rc=0 accepted but
+    // mActiveSfDisplayMode stayed at fps=60).
+    {
+        typedef int32_t (*PFN_ANW_setFrameRateStrat)(ANativeWindow*, float, int8_t, int8_t);
+        typedef int32_t (*PFN_ANW_setFrameRate)(ANativeWindow*, float, int8_t);
+        static PFN_ANW_setFrameRateStrat s_anw_setFrameRateStrat = NULL;
+        static PFN_ANW_setFrameRate      s_anw_setFrameRate      = NULL;
+        static int                       s_loaded                = 0;
+        if (!s_loaded) {
+            void* libandroid = dlopen("libandroid.so", RTLD_NOW);
+            if (libandroid) {
+                s_anw_setFrameRateStrat = (PFN_ANW_setFrameRateStrat)
+                    dlsym(libandroid, "ANativeWindow_setFrameRateWithChangeStrategy");
+                s_anw_setFrameRate = (PFN_ANW_setFrameRate)
+                    dlsym(libandroid, "ANativeWindow_setFrameRate");
+            }
+            s_loaded = 1;
+        }
+        if (s_anw_setFrameRateStrat) {
+            // FIXED_SOURCE=1, CHANGE_FRAME_RATE_ALWAYS=1
+            int32_t fr = s_anw_setFrameRateStrat(be->nativeWindow, 90.0f, 1, 1);
+            LOGI("ANativeWindow_setFrameRateWithChangeStrategy(90, FIXED_SOURCE, ALWAYS) rc=%d %s",
+                 fr, fr == 0 ? "(hint accepted)" : "(rejected)");
+            if (fr == 0) be->fHintedRefreshHz = 90.0f;
+        } else if (s_anw_setFrameRate) {
+            int32_t fr = s_anw_setFrameRate(be->nativeWindow, 90.0f, 1);
+            LOGI("ANativeWindow_setFrameRate(90, FIXED_SOURCE) rc=%d %s (no ChangeStrategy variant — may stay seamless-only)",
+                 fr, fr == 0 ? "(hint accepted)" : "(rejected)");
+            if (fr == 0) be->fHintedRefreshHz = 90.0f;
+        } else {
+            LOGI("ANativeWindow_setFrameRate symbol unavailable (need API 30+) — staying at panel default rate");
+        }
+    }
     return 0;
 }
 
@@ -3068,14 +3132,35 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
             be->fInputWindowFrames = 0;
         }
     }
-    float displayHz = (be->fRefreshDurationNs > 0)
-        ? (1.0e9f / (float)be->fRefreshDurationNs)
-        : 60.0f;
-    // singleMode iff input is within 8% of display rate (gives margin so
-    // small jitter doesn't flip-flop). Stay in dual until measurement
-    // settles (fInputFpsRecent==0).
-    int singleMode = (be->fInputFpsRecent > 0.0f) &&
-                     (be->fInputFpsRecent >= displayHz * 0.92f);
+    // displayHz priority: hinted refresh (§I.D.c trustworthy if hint
+    // accepted) > driver-cached refresh (vkGetRefreshCycleDurationGOOGLE,
+    // may be stale on Adreno 620) > 60 Hz fallback.
+    float displayHz = (be->fHintedRefreshHz > 0.0f)
+        ? be->fHintedRefreshHz
+        : ((be->fRefreshDurationNs > 0)
+            ? (1.0e9f / (float)be->fRefreshDurationNs)
+            : 60.0f);
+    // Dual present's value: input < display headroom for interp frame.
+    // Test: would (input × 2) fit in display refresh budget? i.e.
+    //     2 × inputFps ≤ displayHz × 1.05 (small margin for jitter)
+    // Examples:
+    //   input 60, display 60 → 120 > 63   → single (default at 60Hz/60fps)
+    //   input 60, display 90 → 120 > 94.5 → single (no headroom)
+    //   input 45, display 90 → 90  ≤ 94.5 → dual ✓
+    //   input 30, display 60 → 60  ≤ 63   → dual ✓ (low-fps stream gets boost)
+    //
+    // Default single: avoids the "start in dual → input throttle → measurement
+    // says low → stay dual" stuck loop observed in v1.2.163 with ALWAYS
+    // change strategy. measurement-zero state means "give clean
+    // baseline first" — single mode lets input flow at full rate, then
+    // measurement decides whether dual would actually fit.
+    int singleMode = 1;
+    if (be->fInputFpsRecent > 0.0f) {
+        float doubled = be->fInputFpsRecent * 2.0f;
+        if (doubled <= displayHz * 1.05f) {
+            singleMode = 0;  // dual fits — go for FRUC
+        }
+    }
     if (singleMode != be->fLastSingleMode) {
         LOGI("[VKBE-RING] mode change: %s → %s (input ~%.1f FPS, display %.1f Hz)",
              be->fLastSingleMode ? "single" : "dual",
