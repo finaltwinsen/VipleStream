@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 // Pre-compiled SPIR-V shaders. Source under shaders/, regenerate via:
 //   $NDK/shader-tools/.../glslc <name> -o <name>.spv
@@ -254,6 +255,17 @@ typedef struct vk_backend_s {
     VkPipeline            fMePipelineQ[3];
     VkPipeline            fWarpPipelineQ[3];
     int                   fQualityLevel;     // 0/1/2, default 1 (Balanced)
+
+    // §I.C.6 VK_GOOGLE_display_timing — interp frame PTS scheduling.
+    // Probed at create_device; enabled iff present (Pixel 5 / Adreno 620
+    // confirmed support in §I.A.A2 v1.2.134). PASS 1 / PASS 2 of dual
+    // present each carry a VkPresentTimeGOOGLE to hint the driver where
+    // to slot interp vs real on the display timeline.
+    int                                       fDisplayTimingSupported;
+    PFN_vkGetRefreshCycleDurationGOOGLE       vkGetRefreshCycleDurationGOOGLE;
+    PFN_vkGetPastPresentationTimingGOOGLE     vkGetPastPresentationTimingGOOGLE;
+    uint64_t                                  fRefreshDurationNs;
+    uint32_t                                  fPresentId;          // monotonic, +1 per present
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -386,7 +398,38 @@ static int pick_physical_device_and_queue(vk_backend_t* be)
 static int create_device(vk_backend_t* be)
 {
     PFN_vkCreateDevice vkCreateDevice = LOAD_INSTANCE_PROC(be, vkCreateDevice);
-    if (!vkCreateDevice) { LOGE("getProc(vkCreateDevice) NULL"); return -1; }
+    PFN_vkEnumerateDeviceExtensionProperties vkEnumDevExts =
+        LOAD_INSTANCE_PROC(be, vkEnumerateDeviceExtensionProperties);
+    if (!vkCreateDevice || !vkEnumDevExts) {
+        LOGE("getProc(vkCreateDevice / vkEnumerateDeviceExtensionProperties) NULL");
+        return -1;
+    }
+
+    // §I.C.6 — probe VK_GOOGLE_display_timing. Confirmed available on
+    // Pixel 5 / Adreno 620 in §I.A.A2 (v1.2.134), but stay defensive in
+    // case different drivers / emulators don't ship it.
+    be->fDisplayTimingSupported = 0;
+    {
+        uint32_t extCount = 0;
+        vkEnumDevExts(be->physDevice, NULL, &extCount, NULL);
+        if (extCount > 0) {
+            VkExtensionProperties* extProps =
+                (VkExtensionProperties*)calloc(extCount, sizeof(*extProps));
+            if (extProps) {
+                vkEnumDevExts(be->physDevice, NULL, &extCount, extProps);
+                for (uint32_t i = 0; i < extCount; i++) {
+                    if (strcmp(extProps[i].extensionName,
+                               VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) == 0) {
+                        be->fDisplayTimingSupported = 1;
+                        break;
+                    }
+                }
+                free(extProps);
+            }
+        }
+    }
+    LOGI("VK_GOOGLE_display_timing %s",
+         be->fDisplayTimingSupported ? "available — will enable" : "not available");
 
     float qprio = 1.0f;
     VkDeviceQueueCreateInfo qci = {
@@ -398,16 +441,20 @@ static int create_device(vk_backend_t* be)
 
     // VK_ANDROID_external_memory_android_hardware_buffer for B.2c.3b AHB import.
     // Phase A2 confirmed Adreno 620 advertises both extensions on Pixel 5.
-    const char* deviceExts[] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
-    };
+    // VK_GOOGLE_display_timing added conditionally for §I.C.6.
+    const char* deviceExts[3];
+    deviceExts[0] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    deviceExts[1] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME;
+    uint32_t deviceExtCount = 2;
+    if (be->fDisplayTimingSupported) {
+        deviceExts[deviceExtCount++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
+    }
 
     VkDeviceCreateInfo dci = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount    = 1,
         .pQueueCreateInfos       = &qci,
-        .enabledExtensionCount   = (uint32_t)(sizeof(deviceExts) / sizeof(deviceExts[0])),
+        .enabledExtensionCount   = deviceExtCount,
         .ppEnabledExtensionNames = deviceExts,
     };
 
@@ -427,6 +474,20 @@ static int create_device(vk_backend_t* be)
 
     vkGetDeviceQueue(be->device, be->graphicsQueueFamily, 0, &be->graphicsQueue);
     LOGI("VkQueue acquired (graphics, family=%u)", be->graphicsQueueFamily);
+
+    // §I.C.6 — load VK_GOOGLE_display_timing entry points when extension
+    // is enabled. PFN miss => disable feature gracefully (refresh-cycle
+    // query won't fire, present timing chain won't attach).
+    if (be->fDisplayTimingSupported) {
+        be->vkGetRefreshCycleDurationGOOGLE = (PFN_vkGetRefreshCycleDurationGOOGLE)
+            be->vkGetDeviceProcAddr(be->device, "vkGetRefreshCycleDurationGOOGLE");
+        be->vkGetPastPresentationTimingGOOGLE = (PFN_vkGetPastPresentationTimingGOOGLE)
+            be->vkGetDeviceProcAddr(be->device, "vkGetPastPresentationTimingGOOGLE");
+        if (!be->vkGetRefreshCycleDurationGOOGLE || !be->vkGetPastPresentationTimingGOOGLE) {
+            LOGW("display_timing PFNs missing despite extension enabled — disabling feature");
+            be->fDisplayTimingSupported = 0;
+        }
+    }
 
     // Swapchain function pointers (device-level, but loadable via instance proc)
     be->vkCreateSwapchainKHR    = LOAD_INSTANCE_PROC(be, vkCreateSwapchainKHR);
@@ -583,6 +644,25 @@ static int create_swapchain(vk_backend_t* be)
     be->vkGetSwapchainImagesKHR(be->device, be->swapchain,
                                 &be->swapchainImageCount, be->swapchainImages);
     LOGI("swapchain image count actual = %u", be->swapchainImageCount);
+
+    // §I.C.6 — query display refresh cycle duration once swapchain is up.
+    // Cached as fRefreshDurationNs; used to space PASS 1 / PASS 2 PTS in
+    // dual present (interp at +0, real at +refreshDuration/2 → driver
+    // ideally rasters them on consecutive vsyncs).
+    if (be->fDisplayTimingSupported && be->vkGetRefreshCycleDurationGOOGLE) {
+        VkRefreshCycleDurationGOOGLE rcd = { 0 };
+        VkResult rc = be->vkGetRefreshCycleDurationGOOGLE(be->device, be->swapchain, &rcd);
+        if (rc == VK_SUCCESS && rcd.refreshDuration > 0) {
+            be->fRefreshDurationNs = rcd.refreshDuration;
+            double hz = 1e9 / (double)rcd.refreshDuration;
+            LOGI("[VK-DISPLAY-TIMING] refresh cycle = %llu ns (~%.2f Hz)",
+                 (unsigned long long)rcd.refreshDuration, hz);
+        } else {
+            LOGW("[VK-DISPLAY-TIMING] vkGetRefreshCycleDurationGOOGLE failed (rc=%d, dur=%llu) — disabling",
+                 rc, (unsigned long long)rcd.refreshDuration);
+            be->fDisplayTimingSupported = 0;
+        }
+    }
 
     return 0;
 }
@@ -2500,6 +2580,16 @@ static int dispatch_fruc(vk_backend_t* be, VkImageView ahbView)
     return 0;
 }
 
+// §I.C.6 — monotonic ns clock for VK_GOOGLE_display_timing PTS values.
+// Pixel 5 NDK 27+ ships clock_gettime(CLOCK_MONOTONIC) — same clock the
+// driver uses to interpret VkPresentTimeGOOGLE.desiredPresentTime.
+static uint64_t monotonic_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 // ---------- B.2c.3a: per-frame steady-state clear+present ----------
 
 static int render_clear_frame(vk_backend_t* be)
@@ -2815,8 +2905,23 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     if (be->vkQueueSubmit(be->graphicsQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS)
         goto fail_cleanup_imported;
 
+    // §I.C.6 — PASS 1 (interp): hint driver to display this frame at "now",
+    // then PASS 2 (real, below) at +refreshDuration/2 to slot interp ahead
+    // of real on the display timeline. Driver may still re-pace based on
+    // its own queue state, but desiredPresentTime gives it a strong hint.
+    uint64_t now_ns_pass1 = monotonic_ns();
+    VkPresentTimeGOOGLE pt1 = {
+        .presentID = ++be->fPresentId,
+        .desiredPresentTime = now_ns_pass1,
+    };
+    VkPresentTimesInfoGOOGLE pti1 = {
+        .sType         = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+        .swapchainCount = 1,
+        .pTimes        = &pt1,
+    };
     VkPresentInfoKHR pi = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .pNext = be->fDisplayTimingSupported ? &pti1 : NULL,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &be->renderDoneSem,
         .swapchainCount = 1,
@@ -2901,8 +3006,26 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         if (be->vkQueueSubmit(be->graphicsQueue, 1, &si2, VK_NULL_HANDLE) != VK_SUCCESS)
             goto fail_cleanup_imported;
 
+        // §I.C.6 — PASS 2 (real) PTS = PASS 1 PTS + refreshDuration / 2.
+        // If refreshDuration unknown (extension off), fall back to "now"
+        // and skip the chain. half-cycle offset positions interp on the
+        // earlier vsync, real on the next — driver does the actual paced
+        // present.
+        uint64_t pass2_desired = (be->fRefreshDurationNs > 0)
+            ? now_ns_pass1 + be->fRefreshDurationNs / 2
+            : monotonic_ns();
+        VkPresentTimeGOOGLE pt2 = {
+            .presentID = ++be->fPresentId,
+            .desiredPresentTime = pass2_desired,
+        };
+        VkPresentTimesInfoGOOGLE pti2 = {
+            .sType         = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+            .swapchainCount = 1,
+            .pTimes        = &pt2,
+        };
         VkPresentInfoKHR pi2 = {
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = be->fDisplayTimingSupported ? &pti2 : NULL,
             .waitSemaphoreCount = 1,
             .pWaitSemaphores = &be->renderDoneSem,
             .swapchainCount = 1,
@@ -2915,6 +3038,29 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         }
         be->vkQueueWaitIdle(be->graphicsQueue);
         be->fInterpolatedCount++;
+
+        // §I.C.6 — periodic past-timing diagnostic (every 120 frames).
+        // Compares actualPresentTime vs desiredPresentTime to see how
+        // closely the driver is honoring our hints.
+        if (be->fDisplayTimingSupported && be->vkGetPastPresentationTimingGOOGLE &&
+            be->frameCounter > 0 && be->frameCounter % 120 == 0) {
+            uint32_t numPast = 0;
+            be->vkGetPastPresentationTimingGOOGLE(be->device, be->swapchain, &numPast, NULL);
+            if (numPast > 8) numPast = 8;
+            if (numPast > 0) {
+                VkPastPresentationTimingGOOGLE past[8];
+                if (be->vkGetPastPresentationTimingGOOGLE(be->device, be->swapchain,
+                                                           &numPast, past) == VK_SUCCESS) {
+                    for (uint32_t i = 0; i < numPast; i++) {
+                        int64_t delta_ns = (int64_t)past[i].actualPresentTime
+                                         - (int64_t)past[i].desiredPresentTime;
+                        LOGI("[VK-DISPLAY-TIMING] past id=%u delta=%+lld ns (margin=%llu)",
+                             past[i].presentID, (long long)delta_ns,
+                             (unsigned long long)past[i].presentMargin);
+                    }
+                }
+            }
+        }
     }
 
     be->frameCounter++;
