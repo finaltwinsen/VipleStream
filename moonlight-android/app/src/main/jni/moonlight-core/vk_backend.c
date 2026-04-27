@@ -233,6 +233,7 @@ static void destroy_graphics_pipeline(struct vk_backend_s* be);
 static int  load_graphics_procs(struct vk_backend_s* be);
 static int  init_compute_pipelines(struct vk_backend_s* be);
 static void destroy_compute_pipelines(struct vk_backend_s* be);
+static int  dispatch_fruc(struct vk_backend_s* be, VkImageView ahbView);
 
 // ---------- helpers ----------
 
@@ -1898,12 +1899,122 @@ static int init_compute_pipelines(vk_backend_t* be)
         return -1;
     }
 
-    // §I.C.3.b will populate descriptor set bindings (per-frame ycbcr
-    // image view + persistent storage image bindings) and add the
-    // dispatch sequence to render_ahb_frame. C.3.a stops here.
+    // 8. Static descriptor writes. Everything except ycbcr binding 0
+    //    (the per-frame AHB view) is bound here once and reused. Layout
+    //    convention: ALL fImages stay in VK_IMAGE_LAYOUT_GENERAL — same
+    //    layout works for storage write, sampled read, and transfer
+    //    src/dst, so dispatch_fruc only needs memory barriers, not
+    //    layout transitions.
+    VkDescriptorImageInfo iiCurr   = { .imageView = be->fImageView[FRUC_IMG_CURR],     .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo iiPrev   = { .imageView = be->fImageView[FRUC_IMG_PREV],     .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo iiMv     = { .imageView = be->fImageView[FRUC_IMG_MV],       .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo iiPrevMv = { .imageView = be->fImageView[FRUC_IMG_PREV_MV],  .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo iiFiltMv = { .imageView = be->fImageView[FRUC_IMG_FILT_MV],  .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo iiInterp = { .imageView = be->fImageView[FRUC_IMG_INTERP],   .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+
+#define FRUC_W(setIdx, bind, type, info)                              \
+    {                                                                  \
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,     \
+        .dstSet          = be->fDescSet[setIdx],                       \
+        .dstBinding      = (bind),                                     \
+        .descriptorCount = 1,                                          \
+        .descriptorType  = (type),                                     \
+        .pImageInfo      = (info),                                     \
+    }
+    VkWriteDescriptorSet writes[] = {
+        // ycbcr_to_rgba: binding 1 = currFrameRgba (storage). binding 0 = AHB view (per-frame, set in dispatch_fruc).
+        FRUC_W(FRUC_PIPE_YCBCR,     1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,           &iiCurr),
+
+        // motionest: 0=prev (sampled), 1=curr (sampled), 2=prev_mv (sampled), 3=mv (storage).
+        FRUC_W(FRUC_PIPE_ME,        0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  &iiPrev),
+        FRUC_W(FRUC_PIPE_ME,        1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  &iiCurr),
+        FRUC_W(FRUC_PIPE_ME,        2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  &iiPrevMv),
+        FRUC_W(FRUC_PIPE_ME,        3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,           &iiMv),
+
+        // mv_median: 0=mv (sampled), 1=filt_mv (storage).
+        FRUC_W(FRUC_PIPE_MV_MEDIAN, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  &iiMv),
+        FRUC_W(FRUC_PIPE_MV_MEDIAN, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,           &iiFiltMv),
+
+        // warp: 0=prev (sampled), 1=curr (sampled), 2=filt_mv (sampled), 3=interp (storage).
+        FRUC_W(FRUC_PIPE_WARP,      0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  &iiPrev),
+        FRUC_W(FRUC_PIPE_WARP,      1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  &iiCurr),
+        FRUC_W(FRUC_PIPE_WARP,      2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  &iiFiltMv),
+        FRUC_W(FRUC_PIPE_WARP,      3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,           &iiInterp),
+    };
+#undef FRUC_W
+    be->vkUpdateDescriptorSets(be->device, (uint32_t)(sizeof(writes)/sizeof(writes[0])),
+                               writes, 0, NULL);
+
+    // 9. One-shot init pass: transition all 6 images UNDEFINED → GENERAL,
+    //    clear prevFrameRgba and prevMotionField to 0 so the very first
+    //    frame's motionest reads sane values. Reuses be->cmdBuffer (not
+    //    yet submitted on this first frame) + waits idle before returning.
+    VkImageSubresourceRange fullColorRange = {
+        .aspectMask   = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0, .levelCount = 1,
+        .baseArrayLayer = 0, .layerCount = 1,
+    };
+    be->vkResetCommandBuffer(be->cmdBuffer, 0);
+    VkCommandBufferBeginInfo bbi_init = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    if (be->vkBeginCommandBuffer(be->cmdBuffer, &bbi_init) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] init clear: vkBeginCommandBuffer failed");
+        return -1;
+    }
+    VkImageMemoryBarrier toGeneral[FRUC_NUM_IMAGES];
+    for (int i = 0; i < FRUC_NUM_IMAGES; i++) {
+        toGeneral[i] = (VkImageMemoryBarrier){
+            .sType                = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask        = 0,
+            .dstAccessMask        = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout            = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout            = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED,
+            .image                = be->fImage[i],
+            .subresourceRange     = fullColorRange,
+        };
+    }
+    be->vkCmdPipelineBarrier(be->cmdBuffer,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, NULL, 0, NULL, FRUC_NUM_IMAGES, toGeneral);
+
+    VkClearColorValue zeroRgba = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } };
+    VkClearColorValue zeroInt  = { .int32   = { 0, 0, 0, 0 } };
+    be->vkCmdClearColorImage(be->cmdBuffer, be->fImage[FRUC_IMG_PREV],
+                             VK_IMAGE_LAYOUT_GENERAL, &zeroRgba, 1, &fullColorRange);
+    be->vkCmdClearColorImage(be->cmdBuffer, be->fImage[FRUC_IMG_PREV_MV],
+                             VK_IMAGE_LAYOUT_GENERAL, &zeroInt,  1, &fullColorRange);
+
+    VkMemoryBarrier mb_init = {
+        .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    };
+    be->vkCmdPipelineBarrier(be->cmdBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 1, &mb_init, 0, NULL, 0, NULL);
+
+    if (be->vkEndCommandBuffer(be->cmdBuffer) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] init clear: vkEndCommandBuffer failed");
+        return -1;
+    }
+    VkSubmitInfo si_init = {
+        .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers    = &be->cmdBuffer,
+    };
+    if (be->vkQueueSubmit(be->graphicsQueue, 1, &si_init, VK_NULL_HANDLE) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] init clear: vkQueueSubmit failed");
+        return -1;
+    }
+    be->vkQueueWaitIdle(be->graphicsQueue);
 
     LOGI("[VKBE-COMPUTE] init done: 6 storage images (W=%u H=%u, mvW=%u mvH=%u), "
-         "4 pipelines (ycbcr/motionest_q1/mv_median/warp_q1), 4 descsets",
+         "4 pipelines (ycbcr/motionest_q1/mv_median/warp_q1), 4 descsets, "
+         "static bindings written, prev images cleared",
          W, H, mvW, mvH);
     be->fInitialized = 1;
     return 0;
@@ -1942,6 +2053,176 @@ static void destroy_compute_pipelines(vk_backend_t* be)
     }
     be->fInitialized = 0;
     LOGI("[VKBE-COMPUTE] destroyed");
+}
+
+// ============================================================
+// §I.C.3.b — FRUC compute dispatch (still not wired to swapchain)
+// ============================================================
+//
+// Records 4 compute dispatches + prev-rotate copies into the per-frame
+// command buffer (caller has already begun it and applied the AHB
+// inAcquire barrier). The graphics render pass that follows is
+// untouched — it still draws the AHB image directly to swapchain, so
+// interpFrame is computed but **not displayed**. §I.C.4 wires it in.
+
+static int dispatch_fruc(vk_backend_t* be, VkImageView ahbView)
+{
+    if (!be->fInitialized) return 0;
+
+    // 1. Per-frame: rebind YCBCR set's binding 0 to the just-imported AHB
+    //    view. Sampler is immutable in the layout (the ycbcr conversion
+    //    sampler), so we only fill imageView + layout.
+    VkDescriptorImageInfo dii = {
+        .sampler     = VK_NULL_HANDLE,
+        .imageView   = ahbView,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    VkWriteDescriptorSet wds = {
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = be->fDescSet[FRUC_PIPE_YCBCR],
+        .dstBinding      = 0,
+        .descriptorCount = 1,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo      = &dii,
+    };
+    be->vkUpdateDescriptorSets(be->device, 1, &wds, 0, NULL);
+
+    const uint32_t W      = (uint32_t)be->videoWidth;
+    const uint32_t H      = (uint32_t)be->videoHeight;
+    const uint32_t BLOCK  = 64;
+    const uint32_t mvW    = (W + BLOCK - 1) / BLOCK;
+    const uint32_t mvH    = (H + BLOCK - 1) / BLOCK;
+    const uint32_t gW     = (W + 7) / 8;
+    const uint32_t gH     = (H + 7) / 8;
+    const uint32_t gMvW   = (mvW + 7) / 8;
+    const uint32_t gMvH   = (mvH + 7) / 8;
+
+    // Memory barrier to insert between adjacent compute dispatches.
+    VkMemoryBarrier mb_compute = {
+        .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    };
+
+    // ---- Dispatch 1: ycbcr_to_rgba (AHB → currFrameRgba) ----
+    be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          be->fPipeline[FRUC_PIPE_YCBCR]);
+    be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                be->fPipeLayout[FRUC_PIPE_YCBCR], 0, 1,
+                                &be->fDescSet[FRUC_PIPE_YCBCR], 0, NULL);
+    {
+        uint32_t pc[2] = { W, H };
+        be->vkCmdPushConstants(be->cmdBuffer, be->fPipeLayout[FRUC_PIPE_YCBCR],
+                               VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
+    }
+    be->vkCmdDispatch(be->cmdBuffer, gW, gH, 1);
+    be->vkCmdPipelineBarrier(be->cmdBuffer,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 1, &mb_compute, 0, NULL, 0, NULL);
+
+    // ---- Dispatch 2: motionest_q1 (prev+curr+prev_mv → mv) ----
+    be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          be->fPipeline[FRUC_PIPE_ME]);
+    be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                be->fPipeLayout[FRUC_PIPE_ME], 0, 1,
+                                &be->fDescSet[FRUC_PIPE_ME], 0, NULL);
+    {
+        uint32_t pc[3] = { W, H, BLOCK };
+        be->vkCmdPushConstants(be->cmdBuffer, be->fPipeLayout[FRUC_PIPE_ME],
+                               VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
+    }
+    be->vkCmdDispatch(be->cmdBuffer, gMvW, gMvH, 1);
+    be->vkCmdPipelineBarrier(be->cmdBuffer,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 1, &mb_compute, 0, NULL, 0, NULL);
+
+    // ---- Dispatch 3: mv_median (mv → filt_mv) ----
+    be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          be->fPipeline[FRUC_PIPE_MV_MEDIAN]);
+    be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                be->fPipeLayout[FRUC_PIPE_MV_MEDIAN], 0, 1,
+                                &be->fDescSet[FRUC_PIPE_MV_MEDIAN], 0, NULL);
+    {
+        uint32_t pc[2] = { mvW, mvH };
+        be->vkCmdPushConstants(be->cmdBuffer, be->fPipeLayout[FRUC_PIPE_MV_MEDIAN],
+                               VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
+    }
+    be->vkCmdDispatch(be->cmdBuffer, gMvW, gMvH, 1);
+    be->vkCmdPipelineBarrier(be->cmdBuffer,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 1, &mb_compute, 0, NULL, 0, NULL);
+
+    // ---- Dispatch 4: warp_q1 (prev+curr+filt_mv → interp) ----
+    be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          be->fPipeline[FRUC_PIPE_WARP]);
+    be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                be->fPipeLayout[FRUC_PIPE_WARP], 0, 1,
+                                &be->fDescSet[FRUC_PIPE_WARP], 0, NULL);
+    {
+        // Layout: uvec3 (4+4+4) then float (4) = 16 bytes total.
+        uint32_t pc[4];
+        pc[0] = W; pc[1] = H; pc[2] = BLOCK;
+        float blend = 0.5f;
+        memcpy(&pc[3], &blend, sizeof(blend));
+        be->vkCmdPushConstants(be->cmdBuffer, be->fPipeLayout[FRUC_PIPE_WARP],
+                               VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
+    }
+    be->vkCmdDispatch(be->cmdBuffer, gW, gH, 1);
+
+    // ---- Prev rotate: currFrameRgba → prevFrameRgba, motionField → prevMotionField. ----
+    // Compute writes/reads must complete before transfer reads/writes.
+    VkMemoryBarrier mb_compute_to_xfer = {
+        .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+    };
+    be->vkCmdPipelineBarrier(be->cmdBuffer,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 1, &mb_compute_to_xfer, 0, NULL, 0, NULL);
+
+    VkImageCopy copyRgba = {
+        .srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0,
+                            .baseArrayLayer = 0, .layerCount = 1 },
+        .srcOffset      = { 0, 0, 0 },
+        .dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0,
+                            .baseArrayLayer = 0, .layerCount = 1 },
+        .dstOffset      = { 0, 0, 0 },
+        .extent         = { W, H, 1 },
+    };
+    be->vkCmdCopyImage(be->cmdBuffer,
+        be->fImage[FRUC_IMG_CURR], VK_IMAGE_LAYOUT_GENERAL,
+        be->fImage[FRUC_IMG_PREV], VK_IMAGE_LAYOUT_GENERAL,
+        1, &copyRgba);
+
+    VkImageCopy copyMv = {
+        .srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0,
+                            .baseArrayLayer = 0, .layerCount = 1 },
+        .srcOffset      = { 0, 0, 0 },
+        .dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0,
+                            .baseArrayLayer = 0, .layerCount = 1 },
+        .dstOffset      = { 0, 0, 0 },
+        .extent         = { mvW, mvH, 1 },
+    };
+    be->vkCmdCopyImage(be->cmdBuffer,
+        be->fImage[FRUC_IMG_MV],      VK_IMAGE_LAYOUT_GENERAL,
+        be->fImage[FRUC_IMG_PREV_MV], VK_IMAGE_LAYOUT_GENERAL,
+        1, &copyMv);
+
+    // Final barrier: rotated prev images must be visible to next frame's compute.
+    VkMemoryBarrier mb_xfer_to_compute = {
+        .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+    };
+    be->vkCmdPipelineBarrier(be->cmdBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 1, &mb_xfer_to_compute, 0, NULL, 0, NULL);
+
+    if (be->frameCounter <= 5 || be->frameCounter % 120 == 0) {
+        LOGI("[VKBE-COMPUTE] dispatch frame #%d: ycbcr+motionest_q1+mv_median+warp_q1 + prev rotate",
+             be->frameCounter);
+    }
+    return 0;
 }
 
 // ---------- B.2c.3a: per-frame steady-state clear+present ----------
@@ -2172,8 +2453,18 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         .subresourceRange = range,
     };
     be->vkCmdPipelineBarrier(be->cmdBuffer,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        // §I.C.3.b: dst covers BOTH compute (ycbcr_to_rgba reads imgIn first)
+        // AND fragment (graphics passthrough also samples imgIn). Both run
+        // off the same cmdbuf so a single barrier serves both.
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         0, 0, NULL, 0, NULL, 1, &inAcquire);
+
+    // §I.C.3.b: run FRUC compute pipeline before the graphics render pass.
+    // Output (interpFrame) is computed but not displayed — §I.C.4 wires
+    // it into the swapchain. Failure is non-fatal; graphics passthrough
+    // continues regardless.
+    dispatch_fruc(be, viewIn);
 
     VkClearValue cv = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
     VkRenderPassBeginInfo rpbi = {
