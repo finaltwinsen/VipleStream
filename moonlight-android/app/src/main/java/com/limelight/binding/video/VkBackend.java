@@ -177,14 +177,22 @@ public final class VkBackend implements IFrucBackend {
                         img = reader.acquireLatestImage();
                         if (img == null) return;
                         imageReaderFramesSeen++;
-                        // B.2c.3a: native renders a per-frame animated clear
-                        // colour to the swapchain image — does NOT yet read
-                        // the HardwareBuffer (B.2c.3b adds AHB→VkImage import,
-                        // B.2c.3c adds the YCbCr→RGB sampler so actual video
-                        // shows). The visible cycling colour proves the
-                        // per-frame Vulkan present loop is running at the
-                        // MediaCodec frame rate.
+                        // B.2c.3b: import the HardwareBuffer as a VkImage+
+                        // VkDeviceMemory, validate it actually goes through,
+                        // then immediately discard. Logged once per session
+                        // (and on errors). B.2c.3c keeps the imported image
+                        // alive long enough to sample as YCbCr and blit to
+                        // the swapchain.
                         if (nativeHandle != 0) {
+                            HardwareBuffer hb = img.getHardwareBuffer();
+                            if (hb != null) {
+                                int ahbResult = nativeImportAhb(nativeHandle, hb);
+                                if (imageReaderFramesSeen <= 3 && ahbResult != 0) {
+                                    Log.w(TAG, "AHB import returned " + ahbResult
+                                               + " on frame " + imageReaderFramesSeen);
+                                }
+                                hb.close();
+                            }
                             nativeRenderClearFrame(nativeHandle);
                         }
                         if (imageReaderFramesSeen <= 3 || imageReaderFramesSeen % 60 == 0) {
@@ -252,6 +260,7 @@ public final class VkBackend implements IFrucBackend {
     private static native long nativeInit(Surface displaySurface);
     private static native void nativeDestroy(long handle);
     private static native int  nativeRenderClearFrame(long handle);
+    private static native int  nativeImportAhb(long handle, HardwareBuffer hwBuffer);
 
     /**
      * Read {@code debug.viplestream.vkprobe} via reflection so we don't

@@ -18,6 +18,13 @@
 #include <jni.h>
 #include <android/log.h>
 #include <android/native_window_jni.h>
+// AHB JNI helpers are API 26+. minSdk is 21, so the headers reject the
+// calls unless the build sets __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__
+// (in Android.mk LOCAL_CFLAGS). At runtime VkBackend gates this whole
+// path on debug.viplestream.vkprobe + Build.VERSION.SDK_INT >= 28, so
+// we can never reach a too-old device.
+#include <android/hardware_buffer.h>
+#include <android/hardware_buffer_jni.h>
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -69,6 +76,16 @@ typedef struct vk_backend_s {
     VkExtent2D     swapchainExtent;
     uint32_t       swapchainImageCount;
     VkImage*       swapchainImages;
+
+    // AHB import path (B.2c.3b)
+    PFN_vkGetAndroidHardwareBufferPropertiesANDROID vkGetAndroidHardwareBufferPropertiesANDROID;
+    PFN_vkCreateImage                vkCreateImage;
+    PFN_vkDestroyImage               vkDestroyImage;
+    PFN_vkAllocateMemory             vkAllocateMemory;
+    PFN_vkFreeMemory                 vkFreeMemory;
+    PFN_vkBindImageMemory            vkBindImageMemory;
+    PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties;
+    int ahbImportLogged;
 
     // Per-frame render path (B.2c.3a)
     PFN_vkAcquireNextImageKHR    vkAcquireNextImageKHR;
@@ -224,7 +241,12 @@ static int create_device(vk_backend_t* be)
         .pQueuePriorities = &qprio,
     };
 
-    const char* deviceExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    // VK_ANDROID_external_memory_android_hardware_buffer for B.2c.3b AHB import.
+    // Phase A2 confirmed Adreno 620 advertises both extensions on Pixel 5.
+    const char* deviceExts[] = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
+    };
 
     VkDeviceCreateInfo dci = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -411,6 +433,171 @@ static int create_swapchain(vk_backend_t* be)
 }
 
 // ---------- B.2c.3a: persistent per-frame render resources ----------
+
+static int load_ahb_procs(vk_backend_t* be)
+{
+    be->vkGetAndroidHardwareBufferPropertiesANDROID =
+        (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)be->vkGetDeviceProcAddr(
+            be->device, "vkGetAndroidHardwareBufferPropertiesANDROID");
+    be->vkCreateImage     = (PFN_vkCreateImage)be->vkGetDeviceProcAddr(be->device, "vkCreateImage");
+    be->vkDestroyImage    = (PFN_vkDestroyImage)be->vkGetDeviceProcAddr(be->device, "vkDestroyImage");
+    be->vkAllocateMemory  = (PFN_vkAllocateMemory)be->vkGetDeviceProcAddr(be->device, "vkAllocateMemory");
+    be->vkFreeMemory      = (PFN_vkFreeMemory)be->vkGetDeviceProcAddr(be->device, "vkFreeMemory");
+    be->vkBindImageMemory = (PFN_vkBindImageMemory)be->vkGetDeviceProcAddr(be->device, "vkBindImageMemory");
+    be->vkGetPhysicalDeviceMemoryProperties =
+        (PFN_vkGetPhysicalDeviceMemoryProperties)be->vkGetInstanceProcAddr(
+            be->instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!be->vkGetAndroidHardwareBufferPropertiesANDROID || !be->vkCreateImage ||
+        !be->vkDestroyImage || !be->vkAllocateMemory || !be->vkFreeMemory ||
+        !be->vkBindImageMemory || !be->vkGetPhysicalDeviceMemoryProperties) {
+        LOGE("load_ahb_procs: missing entry points");
+        return -1;
+    }
+    return 0;
+}
+
+static int pick_memory_type(vk_backend_t* be, uint32_t bits)
+{
+    VkPhysicalDeviceMemoryProperties memProps;
+    be->vkGetPhysicalDeviceMemoryProperties(be->physDevice, &memProps);
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if (bits & (1u << i)) return (int)i;
+    }
+    return -1;
+}
+
+// Import the Image's HardwareBuffer as a VkImage + bound VkDeviceMemory,
+// then immediately destroy it. Pure validation that the import path works
+// for real MediaCodec output AHB on this device. Returns 0 on success.
+static int try_import_ahb(vk_backend_t* be, AHardwareBuffer* ahb)
+{
+    if (!be->vkGetAndroidHardwareBufferPropertiesANDROID) return -2;
+
+    AHardwareBuffer_Desc desc;
+    AHardwareBuffer_describe(ahb, &desc);
+
+    VkAndroidHardwareBufferFormatPropertiesANDROID fmtProps = {
+        .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID,
+    };
+    VkAndroidHardwareBufferPropertiesANDROID props = {
+        .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
+        .pNext = &fmtProps,
+    };
+    VkResult r = be->vkGetAndroidHardwareBufferPropertiesANDROID(be->device, ahb, &props);
+    if (r != VK_SUCCESS) {
+        LOGE("vkGetAndroidHardwareBufferPropertiesANDROID failed: %d", r);
+        return -1;
+    }
+
+    if (!be->ahbImportLogged) {
+        LOGI("AHB desc: %ux%u layers=%u format=0x%x usage=0x%llx",
+             desc.width, desc.height, desc.layers, desc.format,
+             (unsigned long long)desc.usage);
+        LOGI("AHB props: allocSize=%llu memTypeBits=0x%x VkFormat=%d "
+             "externalFormat=0x%llx samplerYcbcrModel=%d range=%d",
+             (unsigned long long)props.allocationSize, props.memoryTypeBits,
+             fmtProps.format, (unsigned long long)fmtProps.externalFormat,
+             fmtProps.suggestedYcbcrModel, fmtProps.suggestedYcbcrRange);
+    }
+
+    // VkImage with external chain. Format VK_FORMAT_UNDEFINED + non-zero
+    // externalFormat is the YUV-from-AHB pattern (ycbcr_conversion territory);
+    // RGBA-style AHB returns a real VkFormat in fmtProps.format.
+    VkExternalFormatANDROID extFmt = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID,
+        .externalFormat = fmtProps.externalFormat,
+    };
+    VkExternalMemoryImageCreateInfo extImgInfo = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        .pNext = (fmtProps.externalFormat != 0) ? &extFmt : NULL,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
+    };
+    VkImageCreateInfo ici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = &extImgInfo,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = (fmtProps.externalFormat != 0) ? VK_FORMAT_UNDEFINED : fmtProps.format,
+        .extent = { desc.width, desc.height, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    VkImage importedImage = VK_NULL_HANDLE;
+    r = be->vkCreateImage(be->device, &ici, NULL, &importedImage);
+    if (r != VK_SUCCESS) {
+        LOGE("vkCreateImage (AHB) failed: %d", r);
+        return -1;
+    }
+
+    int memTypeIdx = pick_memory_type(be, props.memoryTypeBits);
+    if (memTypeIdx < 0) {
+        LOGE("no compatible memory type for AHB import");
+        be->vkDestroyImage(be->device, importedImage, NULL);
+        return -1;
+    }
+
+    VkImportAndroidHardwareBufferInfoANDROID importInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+        .buffer = ahb,
+    };
+    VkMemoryDedicatedAllocateInfo dedAlloc = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+        .pNext = &importInfo,
+        .image = importedImage,
+    };
+    VkMemoryAllocateInfo mai = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &dedAlloc,
+        .allocationSize = props.allocationSize,
+        .memoryTypeIndex = (uint32_t)memTypeIdx,
+    };
+
+    VkDeviceMemory importedMem = VK_NULL_HANDLE;
+    r = be->vkAllocateMemory(be->device, &mai, NULL, &importedMem);
+    if (r != VK_SUCCESS) {
+        LOGE("vkAllocateMemory (AHB) failed: %d", r);
+        be->vkDestroyImage(be->device, importedImage, NULL);
+        return -1;
+    }
+
+    r = be->vkBindImageMemory(be->device, importedImage, importedMem, 0);
+    if (r != VK_SUCCESS) {
+        LOGE("vkBindImageMemory (AHB) failed: %d", r);
+        be->vkFreeMemory(be->device, importedMem, NULL);
+        be->vkDestroyImage(be->device, importedImage, NULL);
+        return -1;
+    }
+
+    if (!be->ahbImportLogged) {
+        LOGI("AHB import OK: VkImage %p + VkDeviceMemory %p bound (memTypeIdx=%d)",
+             importedImage, importedMem, memTypeIdx);
+        be->ahbImportLogged = 1;
+    }
+
+    // B.2c.3b cleanup. B.2c.3c keeps the imported image alive for sampling.
+    be->vkFreeMemory(be->device, importedMem, NULL);
+    be->vkDestroyImage(be->device, importedImage, NULL);
+    return 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_limelight_binding_video_VkBackend_nativeImportAhb(JNIEnv* env, jclass clazz,
+                                                            jlong handle, jobject jHwBuffer)
+{
+    vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
+    if (!be || !jHwBuffer) return -1;
+    AHardwareBuffer* ahb = AHardwareBuffer_fromHardwareBuffer(env, jHwBuffer);
+    if (!ahb) {
+        LOGE("AHardwareBuffer_fromHardwareBuffer returned NULL");
+        return -1;
+    }
+    return (jint)try_import_ahb(be, ahb);
+}
 
 static int load_render_procs(vk_backend_t* be)
 {
@@ -715,12 +902,17 @@ Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz,
     }
 
     // B.2c.3a: persistent resources for steady-state per-frame rendering.
-    // If this fails, we still have a usable handle for sanity diagnostics.
     if (init_render_resources(be) != 0) {
         LOGW("init_render_resources failed — per-frame nativeRenderClearFrame will return early");
     }
 
-    LOGI("B.2c.3a init complete: instance + surface + device + queue + swapchain + render path");
+    // B.2c.3b: load AHB import procs. Don't gate init on this — if it
+    // fails we just lose AHB import logging on Java-side import calls.
+    if (load_ahb_procs(be) != 0) {
+        LOGW("load_ahb_procs failed — nativeImportAhb will return -2 on every frame");
+    }
+
+    LOGI("B.2c.3b init complete: instance + surface + device + queue + swapchain + render + AHB");
     return (jlong)(uintptr_t)be;
 
 fail:
