@@ -122,17 +122,24 @@ public final class VkBackend implements IFrucBackend {
             return null;
         }
 
-        // Phase B.2c work-in-progress: native init has built the full Vulkan
-        // pipeline up to a one-shot acquire/clear/present sanity check, the
-        // Java ImageReader scaffold is alive, but B.2c.3 (AHardwareBuffer →
-        // VkImage import + per-frame blit) is not yet wired. Tear everything
-        // down so displaySurface is free for GLES via eglCreateWindowSurface.
-        Log.i(TAG, "Vulkan resources + ImageReader ready, but no per-frame import path yet. "
-                 + "Tearing down and declining → GLES fallback.");
-        destroyImageReader();
-        nativeDestroy(nativeHandle);
-        nativeHandle = 0;
-        return null;
+        // §I.B.2c.3a: ACTIVE MODE. Return ImageReader's surface so MediaCodec
+        // writes its decoded frames into our buffer queue. onImageAvailable
+        // currently triggers a clear-colour render; B.2c.3b imports the
+        // HardwareBuffer and B.2c.3c blits actual video. Visible effect for
+        // an opt-in user (setprop=1): rapidly cycling colour on screen at
+        // input fps, NOT the streamed game video. Default users (setprop=0)
+        // are not affected.
+        Surface input = imageReader.getSurface();
+        if (input == null) {
+            Log.w(TAG, "imageReader.getSurface() returned null; declining → GLES fallback");
+            destroyImageReader();
+            nativeDestroy(nativeHandle);
+            nativeHandle = 0;
+            return null;
+        }
+        initialized = true;
+        Log.i(TAG, "Active Vulkan FRUC backend (B.2c.3a clear-colour mode)");
+        return input;
     }
 
     /**
@@ -170,8 +177,16 @@ public final class VkBackend implements IFrucBackend {
                         img = reader.acquireLatestImage();
                         if (img == null) return;
                         imageReaderFramesSeen++;
-                        // B.2c.2 stops here. B.2c.3 takes the HardwareBuffer
-                        // and pushes it through nativeImportAndPresent.
+                        // B.2c.3a: native renders a per-frame animated clear
+                        // colour to the swapchain image — does NOT yet read
+                        // the HardwareBuffer (B.2c.3b adds AHB→VkImage import,
+                        // B.2c.3c adds the YCbCr→RGB sampler so actual video
+                        // shows). The visible cycling colour proves the
+                        // per-frame Vulkan present loop is running at the
+                        // MediaCodec frame rate.
+                        if (nativeHandle != 0) {
+                            nativeRenderClearFrame(nativeHandle);
+                        }
                         if (imageReaderFramesSeen <= 3 || imageReaderFramesSeen % 60 == 0) {
                             Log.i(TAG, "ImageReader frame #" + imageReaderFramesSeen
                                        + " size=" + img.getWidth() + "x" + img.getHeight()
@@ -236,6 +251,7 @@ public final class VkBackend implements IFrucBackend {
     // ---------- native bridge ----------
     private static native long nativeInit(Surface displaySurface);
     private static native void nativeDestroy(long handle);
+    private static native int  nativeRenderClearFrame(long handle);
 
     /**
      * Read {@code debug.viplestream.vkprobe} via reflection so we don't

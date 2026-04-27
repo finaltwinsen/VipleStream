@@ -69,6 +69,28 @@ typedef struct vk_backend_s {
     VkExtent2D     swapchainExtent;
     uint32_t       swapchainImageCount;
     VkImage*       swapchainImages;
+
+    // Per-frame render path (B.2c.3a)
+    PFN_vkAcquireNextImageKHR    vkAcquireNextImageKHR;
+    PFN_vkQueuePresentKHR        vkQueuePresentKHR;
+    PFN_vkQueueSubmit            vkQueueSubmit;
+    PFN_vkQueueWaitIdle          vkQueueWaitIdle;
+    PFN_vkBeginCommandBuffer     vkBeginCommandBuffer;
+    PFN_vkEndCommandBuffer       vkEndCommandBuffer;
+    PFN_vkResetCommandBuffer     vkResetCommandBuffer;
+    PFN_vkCmdClearColorImage     vkCmdClearColorImage;
+    PFN_vkCmdPipelineBarrier     vkCmdPipelineBarrier;
+    PFN_vkCreateSemaphore        vkCreateSemaphore;
+    PFN_vkDestroySemaphore       vkDestroySemaphore;
+    PFN_vkCreateCommandPool      vkCreateCommandPool;
+    PFN_vkDestroyCommandPool     vkDestroyCommandPool;
+    PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers;
+    VkCommandPool   cmdPool;
+    VkCommandBuffer cmdBuffer;
+    VkSemaphore     acquireSem;
+    VkSemaphore     renderDoneSem;
+    int             renderInitialized;
+    int             frameCounter;
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -388,6 +410,94 @@ static int create_swapchain(vk_backend_t* be)
     return 0;
 }
 
+// ---------- B.2c.3a: persistent per-frame render resources ----------
+
+static int load_render_procs(vk_backend_t* be)
+{
+    be->vkAcquireNextImageKHR    = (PFN_vkAcquireNextImageKHR)be->vkGetDeviceProcAddr(be->device, "vkAcquireNextImageKHR");
+    be->vkQueuePresentKHR        = (PFN_vkQueuePresentKHR)be->vkGetDeviceProcAddr(be->device, "vkQueuePresentKHR");
+    be->vkQueueSubmit            = (PFN_vkQueueSubmit)be->vkGetDeviceProcAddr(be->device, "vkQueueSubmit");
+    be->vkQueueWaitIdle          = (PFN_vkQueueWaitIdle)be->vkGetDeviceProcAddr(be->device, "vkQueueWaitIdle");
+    be->vkBeginCommandBuffer     = (PFN_vkBeginCommandBuffer)be->vkGetDeviceProcAddr(be->device, "vkBeginCommandBuffer");
+    be->vkEndCommandBuffer       = (PFN_vkEndCommandBuffer)be->vkGetDeviceProcAddr(be->device, "vkEndCommandBuffer");
+    be->vkResetCommandBuffer     = (PFN_vkResetCommandBuffer)be->vkGetDeviceProcAddr(be->device, "vkResetCommandBuffer");
+    be->vkCmdClearColorImage     = (PFN_vkCmdClearColorImage)be->vkGetDeviceProcAddr(be->device, "vkCmdClearColorImage");
+    be->vkCmdPipelineBarrier     = (PFN_vkCmdPipelineBarrier)be->vkGetDeviceProcAddr(be->device, "vkCmdPipelineBarrier");
+    be->vkCreateSemaphore        = (PFN_vkCreateSemaphore)be->vkGetDeviceProcAddr(be->device, "vkCreateSemaphore");
+    be->vkDestroySemaphore       = (PFN_vkDestroySemaphore)be->vkGetDeviceProcAddr(be->device, "vkDestroySemaphore");
+    be->vkCreateCommandPool      = (PFN_vkCreateCommandPool)be->vkGetDeviceProcAddr(be->device, "vkCreateCommandPool");
+    be->vkDestroyCommandPool     = (PFN_vkDestroyCommandPool)be->vkGetDeviceProcAddr(be->device, "vkDestroyCommandPool");
+    be->vkAllocateCommandBuffers = (PFN_vkAllocateCommandBuffers)be->vkGetDeviceProcAddr(be->device, "vkAllocateCommandBuffers");
+    if (!be->vkAcquireNextImageKHR || !be->vkQueuePresentKHR || !be->vkQueueSubmit ||
+        !be->vkQueueWaitIdle || !be->vkBeginCommandBuffer || !be->vkEndCommandBuffer ||
+        !be->vkResetCommandBuffer || !be->vkCmdClearColorImage || !be->vkCmdPipelineBarrier ||
+        !be->vkCreateSemaphore || !be->vkDestroySemaphore ||
+        !be->vkCreateCommandPool || !be->vkDestroyCommandPool || !be->vkAllocateCommandBuffers) {
+        LOGE("load_render_procs: missing entry points");
+        return -1;
+    }
+    return 0;
+}
+
+static int init_render_resources(vk_backend_t* be)
+{
+    if (load_render_procs(be) != 0) return -1;
+
+    VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    if (be->vkCreateSemaphore(be->device, &sci, NULL, &be->acquireSem) != VK_SUCCESS ||
+        be->vkCreateSemaphore(be->device, &sci, NULL, &be->renderDoneSem) != VK_SUCCESS) {
+        LOGE("init_render_resources: semaphore create failed");
+        return -1;
+    }
+
+    VkCommandPoolCreateInfo pci = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = be->graphicsQueueFamily,
+    };
+    if (be->vkCreateCommandPool(be->device, &pci, NULL, &be->cmdPool) != VK_SUCCESS) {
+        LOGE("init_render_resources: cmdPool create failed");
+        return -1;
+    }
+
+    VkCommandBufferAllocateInfo cai = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = be->cmdPool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    if (be->vkAllocateCommandBuffers(be->device, &cai, &be->cmdBuffer) != VK_SUCCESS) {
+        LOGE("init_render_resources: cmdBuffer alloc failed");
+        return -1;
+    }
+
+    be->renderInitialized = 1;
+    LOGI("render resources ready (cmdPool + 1 cmdBuffer + 2 semaphores)");
+    return 0;
+}
+
+static void destroy_render_resources(vk_backend_t* be)
+{
+    if (!be->renderInitialized) return;
+    if (be->vkQueueWaitIdle && be->graphicsQueue) be->vkQueueWaitIdle(be->graphicsQueue);
+    if (be->cmdPool && be->vkDestroyCommandPool) {
+        be->vkDestroyCommandPool(be->device, be->cmdPool, NULL);
+        be->cmdPool = VK_NULL_HANDLE;
+    }
+    if (be->acquireSem && be->vkDestroySemaphore) {
+        be->vkDestroySemaphore(be->device, be->acquireSem, NULL);
+        be->acquireSem = VK_NULL_HANDLE;
+    }
+    if (be->renderDoneSem && be->vkDestroySemaphore) {
+        be->vkDestroySemaphore(be->device, be->renderDoneSem, NULL);
+        be->renderDoneSem = VK_NULL_HANDLE;
+    }
+    be->renderInitialized = 0;
+}
+
+// One-shot acquire/clear/present roundtrip used during init to validate the
+// driver. Steady-state per-frame uses render_clear_frame() below.
+//
 // ---------- B.2c.1: one-shot acquire/clear/present sanity ----------
 
 static int sanity_present(vk_backend_t* be)
@@ -599,14 +709,18 @@ Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz,
 
     // B.2c.1 sanity: drive one acquire/clear/present roundtrip to prove
     // the swapchain actually renders end-to-end on this driver before we
-    // start trusting it with the MediaCodec pipeline. Side-effect: a
-    // single dark-green frame (RGBA 0,0.18,0,1) flashes on screen during
-    // VkBackend init. Drops to GLES afterwards in B.2c.x flow.
+    // start trusting it with the MediaCodec pipeline.
     if (sanity_present(be) != 0) {
         LOGW("sanity_present failed — keeping init successful so we can dump diagnostics");
     }
 
-    LOGI("B.2c.1 init complete: instance + surface + device + queue + swapchain + sanity present");
+    // B.2c.3a: persistent resources for steady-state per-frame rendering.
+    // If this fails, we still have a usable handle for sanity diagnostics.
+    if (init_render_resources(be) != 0) {
+        LOGW("init_render_resources failed — per-frame nativeRenderClearFrame will return early");
+    }
+
+    LOGI("B.2c.3a init complete: instance + surface + device + queue + swapchain + render path");
     return (jlong)(uintptr_t)be;
 
 fail:
@@ -625,12 +739,131 @@ fail:
     return 0;
 }
 
+// ---------- B.2c.3a: per-frame steady-state clear+present ----------
+
+static int render_clear_frame(vk_backend_t* be)
+{
+    if (!be->renderInitialized) return -1;
+
+    // Cycle the clear color so the screen visibly animates — useful for
+    // proving the loop is firing per MediaCodec frame, and for screen-cap
+    // visual diff against a black-screen failure mode.
+    int t = be->frameCounter++;
+    float r = ((t      ) & 0xFF) / 255.0f;
+    float g = ((t >>  4) & 0xFF) / 255.0f;
+    float b = ((t >>  2) & 0xFF) / 255.0f;
+    VkClearColorValue clearColor = { .float32 = { r, g, b, 1.0f } };
+
+    uint32_t imgIdx = 0;
+    VkResult r1 = be->vkAcquireNextImageKHR(be->device, be->swapchain, 100000000ULL,
+                                            be->acquireSem, VK_NULL_HANDLE, &imgIdx);
+    if (r1 != VK_SUCCESS && r1 != VK_SUBOPTIMAL_KHR) {
+        if (be->frameCounter <= 5 || be->frameCounter % 60 == 0)
+            LOGW("vkAcquireNextImageKHR returned %d at frame %d", r1, be->frameCounter);
+        return -1;
+    }
+
+    be->vkResetCommandBuffer(be->cmdBuffer, 0);
+    VkCommandBufferBeginInfo bbi = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    if (be->vkBeginCommandBuffer(be->cmdBuffer, &bbi) != VK_SUCCESS) return -1;
+
+    VkImageSubresourceRange range = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0, .levelCount = 1,
+        .baseArrayLayer = 0, .layerCount = 1,
+    };
+    VkImageMemoryBarrier toDst = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = be->swapchainImages[imgIdx],
+        .subresourceRange = range,
+    };
+    be->vkCmdPipelineBarrier(be->cmdBuffer,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, NULL, 0, NULL, 1, &toDst);
+
+    be->vkCmdClearColorImage(be->cmdBuffer, be->swapchainImages[imgIdx],
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &clearColor, 1, &range);
+
+    VkImageMemoryBarrier toPresent = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = 0,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = be->swapchainImages[imgIdx],
+        .subresourceRange = range,
+    };
+    be->vkCmdPipelineBarrier(be->cmdBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0, 0, NULL, 0, NULL, 1, &toPresent);
+
+    if (be->vkEndCommandBuffer(be->cmdBuffer) != VK_SUCCESS) return -1;
+
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo si = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &be->acquireSem,
+        .pWaitDstStageMask = &waitStage,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &be->cmdBuffer,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &be->renderDoneSem,
+    };
+    if (be->vkQueueSubmit(be->graphicsQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) return -1;
+
+    VkPresentInfoKHR pi = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &be->renderDoneSem,
+        .swapchainCount = 1,
+        .pSwapchains = &be->swapchain,
+        .pImageIndices = &imgIdx,
+    };
+    VkResult r2 = be->vkQueuePresentKHR(be->graphicsQueue, &pi);
+    if (r2 != VK_SUCCESS && r2 != VK_SUBOPTIMAL_KHR) {
+        LOGW("vkQueuePresentKHR returned %d at frame %d", r2, be->frameCounter);
+        return -1;
+    }
+
+    // Simple sync — eat the V-sync block per frame. Phase D will do real
+    // async with timeline semaphores / fence-based fast path.
+    be->vkQueueWaitIdle(be->graphicsQueue);
+
+    if (be->frameCounter <= 5 || be->frameCounter % 120 == 0) {
+        LOGI("render_clear_frame #%d (img=%u, color=%.2f,%.2f,%.2f)",
+             be->frameCounter, imgIdx, r, g, b);
+    }
+    return 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_limelight_binding_video_VkBackend_nativeRenderClearFrame(JNIEnv* env, jclass clazz, jlong handle)
+{
+    vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
+    if (!be) return -1;
+    return (jint)render_clear_frame(be);
+}
+
 JNIEXPORT void JNICALL
 Java_com_limelight_binding_video_VkBackend_nativeDestroy(JNIEnv* env, jclass clazz, jlong handle)
 {
     vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
     if (!be) return;
-    LOGI("destroying backend handle=%p", be);
+    LOGI("destroying backend handle=%p (frames rendered=%d)", be, be->frameCounter);
+    destroy_render_resources(be);
     if (be->swapchainImages) {
         free(be->swapchainImages);
         be->swapchainImages = NULL;
