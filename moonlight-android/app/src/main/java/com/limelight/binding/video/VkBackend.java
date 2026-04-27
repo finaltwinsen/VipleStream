@@ -29,9 +29,25 @@ public final class VkBackend implements IFrucBackend {
     private static final String TAG = "VKBE";
     private static final String BACKEND = "vulkan";
 
+    static {
+        try {
+            System.loadLibrary("moonlight-core");
+        } catch (UnsatisfiedLinkError e) {
+            Log.w(TAG, "moonlight-core not loadable from VkBackend: " + e.getMessage());
+        }
+    }
+
     private final Context context;
     private boolean initialized = false;
     private int qualityLevel = 1;
+
+    /**
+     * Native-side handle for the {@code vk_backend_t} struct (VkInstance +
+     * VkDevice + VkQueue + the function pointer table). Zero means
+     * "no backend allocated"; non-zero MUST be paired with exactly one
+     * {@link #nativeDestroy(long)} call before this object is GC'd.
+     */
+    private long nativeHandle = 0;
 
     public VkBackend(Context context) {
         this.context = context;
@@ -47,13 +63,15 @@ public final class VkBackend implements IFrucBackend {
     }
 
     /**
-     * B.1 contract: validate Vulkan availability inside the app process,
-     * then bow out so GLES takes over. Returns {@code null} unconditionally
-     * — the MediaCodec init wiring treats null as "this backend declined".
+     * B.2a contract: build a real VkInstance + VkDevice + graphics queue
+     * via {@link #nativeInit()}. Hold the handle for the backend lifetime
+     * so subsequent phases (B.2b swapchain, B.2c AHB import) can attach.
+     * Still returns {@code null} so the GLES fallback engages — the actual
+     * presentation path is not yet wired.
      */
     @Override
     public Surface initialize(Surface displaySurface, int w, int h) {
-        Log.i(TAG, "B.1 init: probing Vulkan in app process for " + w + "x" + h);
+        Log.i(TAG, "B.2a init: probing + creating Vulkan resources for " + w + "x" + h);
 
         boolean extsOk;
         try {
@@ -62,20 +80,31 @@ public final class VkBackend implements IFrucBackend {
             Log.e(TAG, "VkProbe.run() threw: " + t, t);
             extsOk = false;
         }
-
         if (!extsOk) {
             Log.w(TAG, "Vulkan extension check failed; declining backend → fallback to GLES");
             return null;
         }
 
-        // B.1 stops here intentionally. Phase B.2 will:
-        //   * create AImageReader + AHardwareBuffer plumbing on the
-        //     decoder output side,
-        //   * import as VkImage via VK_ANDROID_external_memory_*,
-        //   * create VkSwapchainKHR on the displaySurface,
-        //   * acquire/blit/present per frame.
-        Log.i(TAG, "B.1 skeleton — Vulkan available, real path not yet wired. "
-                 + "Returning null so GLES fallback engages.");
+        try {
+            nativeHandle = nativeInit();
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeInit threw: " + t, t);
+            nativeHandle = 0;
+        }
+        if (nativeHandle == 0) {
+            Log.w(TAG, "VkInstance/VkDevice creation failed; declining backend → fallback to GLES");
+            return null;
+        }
+
+        // B.2a stops here intentionally — Vulkan resources are alive but
+        // we have no swapchain or AHB import yet. Phase B.2b adds the
+        // swapchain on this Surface, B.2c adds the MediaCodec→VkImage
+        // import path. For now: clean up our resources and decline so
+        // streaming proceeds via the GLES path.
+        Log.i(TAG, "B.2a — VkInstance + VkDevice + queue ready, but no presentation path yet. "
+                 + "Tearing down and declining → GLES fallback.");
+        nativeDestroy(nativeHandle);
+        nativeHandle = 0;
         return null;
     }
 
@@ -87,8 +116,20 @@ public final class VkBackend implements IFrucBackend {
 
     @Override
     public void destroy() {
+        if (nativeHandle != 0) {
+            try {
+                nativeDestroy(nativeHandle);
+            } catch (Throwable t) {
+                Log.e(TAG, "nativeDestroy threw: " + t, t);
+            }
+            nativeHandle = 0;
+        }
         initialized = false;
     }
+
+    // ---------- native bridge ----------
+    private static native long nativeInit();
+    private static native void nativeDestroy(long handle);
 
     /**
      * Read {@code debug.viplestream.vkprobe} via reflection so we don't

@@ -572,7 +572,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                         frucEnabled = true;
                         LimeLog.info("FRUC enabled (Vulkan, opt-in)");
                     } else {
-                        LimeLog.info("Vulkan FRUC declined (B.1 skeleton); falling back to GLES");
+                        LimeLog.info("Vulkan FRUC backend declined; falling back to GLES");
                     }
                 } catch (Throwable t) {
                     LimeLog.warning("Vulkan FRUC threw: " + t + " — falling back to GLES");
