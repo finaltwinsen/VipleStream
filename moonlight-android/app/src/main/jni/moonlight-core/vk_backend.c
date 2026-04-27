@@ -3242,14 +3242,20 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
 
     // Update input-fps sliding window. Measurement is the rate at which
     // nativeRenderFrame is called (= effective MediaCodec ImageReader
-    // delivery rate). Initial state: fInputFpsRecent=0 → singleMode=0
-    // (dual default until first second elapses).
+    // delivery rate). Two-tier publish so the first decision settles
+    // sub-second:
+    //   - early publish: ≥ 30 frames AND ≥ 200ms window → ~30 frame avg
+    //   - normal publish: window ≥ 1000ms → 1s sliding average
     {
         uint64_t now_ns = monotonic_ns();
         if (be->fInputWindowStartNs == 0) be->fInputWindowStartNs = now_ns;
         be->fInputWindowFrames++;
         uint64_t window_ns = now_ns - be->fInputWindowStartNs;
-        if (window_ns >= 1000000000ULL) {
+        int early_quick = (be->fInputFpsRecent == 0.0f &&
+                           be->fInputWindowFrames >= 30 &&
+                           window_ns >= 200000000ULL);
+        int normal_window = (window_ns >= 1000000000ULL);
+        if (early_quick || normal_window) {
             be->fInputFpsRecent = (float)be->fInputWindowFrames * 1.0e9f / (float)window_ns;
             be->fInputWindowStartNs = now_ns;
             be->fInputWindowFrames = 0;
@@ -3278,17 +3284,22 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     // baseline first" — single mode lets input flow at full rate, then
     // measurement decides whether dual would actually fit.
     int singleMode = 1;
+    float doubled = be->fInputFpsRecent * 2.0f;
+    float threshold = displayHz * 1.05f;
     if (be->fInputFpsRecent > 0.0f) {
-        float doubled = be->fInputFpsRecent * 2.0f;
-        if (doubled <= displayHz * 1.05f) {
+        if (doubled <= threshold) {
             singleMode = 0;  // dual fits — go for FRUC
         }
     }
     if (singleMode != be->fLastSingleMode) {
-        LOGI("[VKBE-RING] mode change: %s → %s (input ~%.1f FPS, display %.1f Hz)",
+        const char* hzSrc = (be->fHintedRefreshHz > 0.0f)
+            ? "Java-max" : ((be->fRefreshDurationNs > 0) ? "drv-cache" : "60-fb");
+        LOGI("[VKBE-RING] mode change: %s → %s | input ~%.1f FPS | display %.1f Hz (%s) | "
+             "criterion: 2×input=%.1f %s threshold=%.1f",
              be->fLastSingleMode ? "single" : "dual",
              singleMode           ? "single" : "dual",
-             (double)be->fInputFpsRecent, (double)displayHz);
+             (double)be->fInputFpsRecent, (double)displayHz, hzSrc,
+             (double)doubled, (singleMode ? ">" : "≤"), (double)threshold);
         be->fLastSingleMode = singleMode;
     }
 
