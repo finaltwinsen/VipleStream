@@ -73,6 +73,12 @@
 #define FRUC_PIPE_WARP      3  // warp_compute_q1.comp
 #define FRUC_NUM_PIPELINES  4
 
+// §I.D async compute — in-flight ring depth. 2 slots = double buffering.
+// Per-slot resources let frame N+1 begin CPU-side work (record, AHB
+// import, descriptor update) while frame N's GPU work is still running.
+// Increase to 3 for triple-buffered if profiling shows CPU-bound.
+#define VK_FRAMES_IN_FLIGHT 2
+
 // ---------- backend handle ----------
 
 typedef struct vk_backend_s {
@@ -266,6 +272,30 @@ typedef struct vk_backend_s {
     PFN_vkGetPastPresentationTimingGOOGLE     vkGetPastPresentationTimingGOOGLE;
     uint64_t                                  fRefreshDurationNs;
     uint32_t                                  fPresentId;          // monotonic, +1 per present
+
+    // §I.D in-flight ring — double-buffered cmdbuf/sems/fence per slot
+    // so frame N+1 CPU-side work (record + AHB import) can overlap
+    // frame N's GPU work. Replaces the single per-frame cmdBuffer +
+    // vkQueueWaitIdle dance that was throttling input from 60→45 FPS
+    // (see §I.C.5.b baseline). Active only when fInitialized (dual
+    // present path); fall-back single-present path still uses the old
+    // cmdBuffer + waitIdle.
+    PFN_vkCreateFence    vkCreateFence;
+    PFN_vkDestroyFence   vkDestroyFence;
+    PFN_vkWaitForFences  vkWaitForFences;
+    PFN_vkResetFences    vkResetFences;
+    VkCommandBuffer      fSlotCmdBuf[VK_FRAMES_IN_FLIGHT];
+    VkSemaphore          fSlotAcquireSem[VK_FRAMES_IN_FLIGHT][2];     // [pass1, pass2]
+    VkSemaphore          fSlotRenderDoneSem[VK_FRAMES_IN_FLIGHT][2];
+    VkFence              fSlotInFlightFence[VK_FRAMES_IN_FLIGHT];
+    // Pending AHB import per slot — freed at start of next slot reuse
+    // (after fence signal proves GPU done with them).
+    VkImage              fSlotPendingImg[VK_FRAMES_IN_FLIGHT];
+    VkDeviceMemory       fSlotPendingMem[VK_FRAMES_IN_FLIGHT];
+    VkImageView          fSlotPendingView[VK_FRAMES_IN_FLIGHT];
+    int                  fSlotHasPending[VK_FRAMES_IN_FLIGHT];
+    uint32_t             fCurrentSlot;
+    int                  fRingInitialized;
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -279,6 +309,8 @@ static int  load_graphics_procs(struct vk_backend_s* be);
 static int  init_compute_pipelines(struct vk_backend_s* be);
 static void destroy_compute_pipelines(struct vk_backend_s* be);
 static int  dispatch_fruc(struct vk_backend_s* be, VkImageView ahbView);
+static int  init_in_flight_ring(struct vk_backend_s* be);
+static void destroy_in_flight_ring(struct vk_backend_s* be);
 
 // ---------- helpers ----------
 
@@ -2333,17 +2365,124 @@ static int init_compute_pipelines(vk_backend_t* be)
         }
     }
 
+    // §I.D — bring up the in-flight ring (2-slot cmdbuf + sems + fence per
+    // slot) for dual-present path. Failure is fatal here because dispatch
+    // path now relies on the ring; fall-back caller will see fInitialized=0
+    // staying as-is and stay on single-present graphics pipeline.
+    if (init_in_flight_ring(be) != 0) {
+        LOGE("[VKBE-COMPUTE] in-flight ring init failed; compute path disabled");
+        return -1;
+    }
+
     LOGI("[VKBE-COMPUTE] init done: 6 storage images (W=%u H=%u, mvW=%u mvH=%u), "
          "4 pipelines (ycbcr/motionest_q1/mv_median/warp_q1), 4 descsets, "
-         "static bindings written, prev images cleared, interp graphics pipeline ready",
+         "static bindings written, prev images cleared, interp graphics pipeline ready, "
+         "in-flight ring ready",
          W, H, mvW, mvH);
     be->fInitialized = 1;
     return 0;
 }
 
+static int init_in_flight_ring(vk_backend_t* be)
+{
+    if (be->fRingInitialized) return 0;
+
+    // Load fence procs (other per-frame procs already loaded by load_render_procs).
+    be->vkCreateFence    = LOAD_DEVICE_PROC(be, vkCreateFence);
+    be->vkDestroyFence   = LOAD_DEVICE_PROC(be, vkDestroyFence);
+    be->vkWaitForFences  = LOAD_DEVICE_PROC(be, vkWaitForFences);
+    be->vkResetFences    = LOAD_DEVICE_PROC(be, vkResetFences);
+    if (!be->vkCreateFence || !be->vkDestroyFence ||
+        !be->vkWaitForFences || !be->vkResetFences) {
+        LOGE("[VKBE-RING] fence PFNs missing");
+        return -1;
+    }
+
+    // Allocate VK_FRAMES_IN_FLIGHT cmdbuffers from the existing pool.
+    VkCommandBufferAllocateInfo cbai = {
+        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool        = be->cmdPool,
+        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = VK_FRAMES_IN_FLIGHT,
+    };
+    if (be->vkAllocateCommandBuffers(be->device, &cbai, be->fSlotCmdBuf) != VK_SUCCESS) {
+        LOGE("[VKBE-RING] vkAllocateCommandBuffers failed");
+        return -1;
+    }
+
+    // Per slot: 2 acquireSems (one per pass) + 2 renderDoneSems + 1 fence
+    // (signaled-initial so first frame's vkWaitForFences returns immediately).
+    VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    VkFenceCreateInfo     fci = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+    for (uint32_t i = 0; i < VK_FRAMES_IN_FLIGHT; i++) {
+        for (int p = 0; p < 2; p++) {
+            if (be->vkCreateSemaphore(be->device, &sci, NULL,
+                                       &be->fSlotAcquireSem[i][p]) != VK_SUCCESS ||
+                be->vkCreateSemaphore(be->device, &sci, NULL,
+                                       &be->fSlotRenderDoneSem[i][p]) != VK_SUCCESS) {
+                LOGE("[VKBE-RING] vkCreateSemaphore[%u][%d] failed", i, p);
+                return -1;
+            }
+        }
+        if (be->vkCreateFence(be->device, &fci, NULL, &be->fSlotInFlightFence[i]) != VK_SUCCESS) {
+            LOGE("[VKBE-RING] vkCreateFence[%u] failed", i);
+            return -1;
+        }
+    }
+
+    be->fCurrentSlot = 0;
+    be->fRingInitialized = 1;
+    LOGI("[VKBE-RING] in-flight ring ready: %d slots × (1 cmdbuf + 2 acquireSem + 2 renderDoneSem + 1 fence)",
+         VK_FRAMES_IN_FLIGHT);
+    return 0;
+}
+
+static void destroy_in_flight_ring(vk_backend_t* be)
+{
+    if (!be->fRingInitialized) return;
+
+    for (uint32_t i = 0; i < VK_FRAMES_IN_FLIGHT; i++) {
+        // Free pending AHB resources still tracked in this slot.
+        if (be->fSlotHasPending[i]) {
+            if (be->fSlotPendingView[i]) be->vkDestroyImageView(be->device, be->fSlotPendingView[i], NULL);
+            if (be->fSlotPendingImg[i])  be->vkDestroyImage(be->device, be->fSlotPendingImg[i], NULL);
+            if (be->fSlotPendingMem[i])  be->vkFreeMemory(be->device, be->fSlotPendingMem[i], NULL);
+            be->fSlotPendingView[i] = VK_NULL_HANDLE;
+            be->fSlotPendingImg[i]  = VK_NULL_HANDLE;
+            be->fSlotPendingMem[i]  = VK_NULL_HANDLE;
+            be->fSlotHasPending[i]  = 0;
+        }
+        if (be->fSlotInFlightFence[i]) {
+            be->vkDestroyFence(be->device, be->fSlotInFlightFence[i], NULL);
+            be->fSlotInFlightFence[i] = VK_NULL_HANDLE;
+        }
+        for (int p = 0; p < 2; p++) {
+            if (be->fSlotAcquireSem[i][p]) {
+                be->vkDestroySemaphore(be->device, be->fSlotAcquireSem[i][p], NULL);
+                be->fSlotAcquireSem[i][p] = VK_NULL_HANDLE;
+            }
+            if (be->fSlotRenderDoneSem[i][p]) {
+                be->vkDestroySemaphore(be->device, be->fSlotRenderDoneSem[i][p], NULL);
+                be->fSlotRenderDoneSem[i][p] = VK_NULL_HANDLE;
+            }
+        }
+        // cmdbufs are freed implicitly when cmdPool is destroyed.
+        be->fSlotCmdBuf[i] = VK_NULL_HANDLE;
+    }
+    be->fRingInitialized = 0;
+    LOGI("[VKBE-RING] destroyed");
+}
+
 static void destroy_compute_pipelines(vk_backend_t* be)
 {
     if (!be->fInitialized) return;
+
+    // §I.D — drain ring first so any in-flight GPU work using compute
+    // resources finishes before we tear them down.
+    destroy_in_flight_ring(be);
 
     // §I.C.4.a interp graphics pipeline first (descSet was allocated from
     // fDescPool which we destroy below; pipeline / layouts are independent).
@@ -2784,29 +2923,189 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     };
     be->vkUpdateDescriptorSets(be->device, 1, &wds, 0, NULL);
 
-    uint32_t imgIdx = 0;
-    VkResult r = be->vkAcquireNextImageKHR(be->device, be->swapchain, 100000000ULL,
-                                           be->acquireSem, VK_NULL_HANDLE, &imgIdx);
-    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
-        LOGW("acquire failed: %d", r);
-        goto fail_cleanup_imported;
+    // ============================================================
+    // §I.D — fall-back path: single-present via legacy be->cmdBuffer +
+    // vkQueueWaitIdle. Used only when compute init failed (fInitialized=0)
+    // — sample AHB directly via existing graphicsPipeline.
+    // ============================================================
+    if (!be->fInitialized) {
+        uint32_t imgIdx = 0;
+        VkResult r = be->vkAcquireNextImageKHR(be->device, be->swapchain, 100000000ULL,
+                                               be->acquireSem, VK_NULL_HANDLE, &imgIdx);
+        if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+            LOGW("acquire failed: %d", r);
+            goto fail_cleanup_single;
+        }
+
+        be->vkResetCommandBuffer(be->cmdBuffer, 0);
+        VkCommandBufferBeginInfo bbi = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        };
+        if (be->vkBeginCommandBuffer(be->cmdBuffer, &bbi) != VK_SUCCESS) goto fail_cleanup_single;
+
+        VkImageSubresourceRange range = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1,
+        };
+        VkImageMemoryBarrier inAcquireSingle = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = 0,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+            .dstQueueFamilyIndex = be->graphicsQueueFamily,
+            .image = imgIn,
+            .subresourceRange = range,
+        };
+        be->vkCmdPipelineBarrier(be->cmdBuffer,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, NULL, 0, NULL, 1, &inAcquireSingle);
+
+        VkClearValue cv = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
+        VkRenderPassBeginInfo rpbi = {
+            .sType        = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass   = be->renderPass,
+            .framebuffer  = be->framebuffers[imgIdx],
+            .renderArea   = { {0, 0}, be->swapchainExtent },
+            .clearValueCount = 1,
+            .pClearValues = &cv,
+        };
+        be->vkCmdBeginRenderPass(be->cmdBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, be->graphicsPipeline);
+        be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    be->pipelineLayout, 0, 1, &be->descSet, 0, NULL);
+        float uvScale[2] = {
+            (be->videoWidth  > 0 && be->ahbPaddedWidth  > 0)
+                ? (float)be->videoWidth  / (float)be->ahbPaddedWidth  : 1.0f,
+            (be->videoHeight > 0 && be->ahbPaddedHeight > 0)
+                ? (float)be->videoHeight / (float)be->ahbPaddedHeight : 1.0f,
+        };
+        be->vkCmdPushConstants(be->cmdBuffer, be->pipelineLayout,
+                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uvScale), uvScale);
+        be->vkCmdDraw(be->cmdBuffer, 3, 1, 0, 0);
+        be->vkCmdEndRenderPass(be->cmdBuffer);
+
+        if (be->vkEndCommandBuffer(be->cmdBuffer) != VK_SUCCESS) goto fail_cleanup_single;
+
+        VkPipelineStageFlags waitStageSingle = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkSubmitInfo si = {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &be->acquireSem,
+            .pWaitDstStageMask = &waitStageSingle,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &be->cmdBuffer,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &be->renderDoneSem,
+        };
+        if (be->vkQueueSubmit(be->graphicsQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS)
+            goto fail_cleanup_single;
+
+        VkPresentInfoKHR pi = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &be->renderDoneSem,
+            .swapchainCount = 1,
+            .pSwapchains = &be->swapchain,
+            .pImageIndices = &imgIdx,
+        };
+        r = be->vkQueuePresentKHR(be->graphicsQueue, &pi);
+        if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) LOGW("present failed: %d", r);
+
+        be->vkQueueWaitIdle(be->graphicsQueue);
+        be->frameCounter++;
+        if (be->frameCounter <= 5 || be->frameCounter % 120 == 0) {
+            LOGI("render_ahb_frame #%d (img=%u, src=%ux%u) [single]",
+                 be->frameCounter, imgIdx, srcW, srcH);
+        }
+
+    fail_cleanup_single:
+        if (viewIn) be->vkDestroyImageView(be->device, viewIn, NULL);
+        if (imgIn)  be->vkDestroyImage(be->device, imgIn, NULL);
+        if (memIn)  be->vkFreeMemory(be->device, memIn, NULL);
+        return 0;
     }
 
-    be->vkResetCommandBuffer(be->cmdBuffer, 0);
+    // ============================================================
+    // §I.D — fast path: dual-present via in-flight ring (NO waitIdle)
+    // ============================================================
+    // Frame N+1's CPU work (record + AHB import + descriptor update)
+    // overlaps frame N-1's GPU work (waiting on slot[N-1].fence here at
+    // entry, but slot[N]'s fence is wait-free if it's been ≥1 frame).
+    // 1 cmdbuf with 2 render passes (interp + real) → 1 submit → 2
+    // presents (PTS-paced via §I.C.6).
+    uint32_t slot = be->fCurrentSlot;
+
+    // Wait for slot's previous in-flight GPU work to drain. First frame
+    // hits a signaled fence (init_in_flight_ring set SIGNALED bit), so
+    // returns immediately. Subsequent frames in this slot wait for the
+    // submit from N-VK_FRAMES_IN_FLIGHT frames ago to finish.
+    be->vkWaitForFences(be->device, 1, &be->fSlotInFlightFence[slot], VK_TRUE, UINT64_MAX);
+
+    // Old slot: drop AHB resources from the work that just finished. They
+    // were stored in fSlotPendingImg/Mem/View at end of that frame; now
+    // that the fence signaled, GPU is done with them.
+    if (be->fSlotHasPending[slot]) {
+        if (be->fSlotPendingView[slot]) be->vkDestroyImageView(be->device, be->fSlotPendingView[slot], NULL);
+        if (be->fSlotPendingImg[slot])  be->vkDestroyImage(be->device, be->fSlotPendingImg[slot], NULL);
+        if (be->fSlotPendingMem[slot])  be->vkFreeMemory(be->device, be->fSlotPendingMem[slot], NULL);
+        be->fSlotPendingView[slot] = VK_NULL_HANDLE;
+        be->fSlotPendingImg[slot]  = VK_NULL_HANDLE;
+        be->fSlotPendingMem[slot]  = VK_NULL_HANDLE;
+        be->fSlotHasPending[slot]  = 0;
+    }
+    be->vkResetFences(be->device, 1, &be->fSlotInFlightFence[slot]);
+
+    // Acquire 2 swapchain images — one per pass. Need them up-front so we
+    // can record both render passes' framebuffer indices in the cmdbuf.
+    // swapchainImageCount=5 + 2 in-flight slots × 2 acquires = 4 images
+    // needed; well within budget.
+    uint32_t imgIdxPass1 = 0, imgIdxPass2 = 0;
+    VkResult rA1 = be->vkAcquireNextImageKHR(be->device, be->swapchain, 100000000ULL,
+                                              be->fSlotAcquireSem[slot][0], VK_NULL_HANDLE,
+                                              &imgIdxPass1);
+    if (rA1 != VK_SUCCESS && rA1 != VK_SUBOPTIMAL_KHR) {
+        LOGW("[VKBE-RING] PASS 1 acquire failed: %d", rA1);
+        goto ring_fail_drop_imported;
+    }
+    VkResult rA2 = be->vkAcquireNextImageKHR(be->device, be->swapchain, 100000000ULL,
+                                              be->fSlotAcquireSem[slot][1], VK_NULL_HANDLE,
+                                              &imgIdxPass2);
+    if (rA2 != VK_SUCCESS && rA2 != VK_SUBOPTIMAL_KHR) {
+        LOGW("[VKBE-RING] PASS 2 acquire failed: %d", rA2);
+        goto ring_fail_drop_imported;
+    }
+
+    // Record cmdbuf. dispatch_fruc still uses be->cmdBuffer internally —
+    // temporarily swap the legacy cmdbuf pointer to slot.cmdbuf for the
+    // duration of recording so dispatch_fruc emits commands into the ring
+    // cmdbuf. Saved+restored deterministically; we hold no async state.
+    VkCommandBuffer slotCmd = be->fSlotCmdBuf[slot];
+    VkCommandBuffer saveLegacyCmd = be->cmdBuffer;
+    be->cmdBuffer = slotCmd;
+
+    be->vkResetCommandBuffer(slotCmd, 0);
     VkCommandBufferBeginInfo bbi = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
-    if (be->vkBeginCommandBuffer(be->cmdBuffer, &bbi) != VK_SUCCESS) goto fail_cleanup_imported;
+    if (be->vkBeginCommandBuffer(slotCmd, &bbi) != VK_SUCCESS) {
+        be->cmdBuffer = saveLegacyCmd;
+        goto ring_fail_drop_imported;
+    }
 
-    // Imported image arrives in EXTERNAL queue family (AHB external memory).
-    // Acquire ownership + transition to SHADER_READ_ONLY_OPTIMAL.
+    // inAcquire on imgIn — same as before, dst stages = COMPUTE | FRAGMENT
+    // because both render passes (compute via dispatch_fruc, graphics via
+    // PASS 2) sample imgIn.
     VkImageSubresourceRange range = {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
         .baseMipLevel = 0, .levelCount = 1,
         .baseArrayLayer = 0, .layerCount = 1,
     };
-    VkImageMemoryBarrier inAcquire = {
+    VkImageMemoryBarrier inAcquireRing = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask = 0,
         .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
@@ -2817,260 +3116,190 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         .image = imgIn,
         .subresourceRange = range,
     };
-    be->vkCmdPipelineBarrier(be->cmdBuffer,
+    be->vkCmdPipelineBarrier(slotCmd,
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        // §I.C.3.b: dst covers BOTH compute (ycbcr_to_rgba reads imgIn first)
-        // AND fragment (graphics passthrough also samples imgIn). Both run
-        // off the same cmdbuf so a single barrier serves both.
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        0, 0, NULL, 0, NULL, 1, &inAcquire);
+        0, 0, NULL, 0, NULL, 1, &inAcquireRing);
 
-    // §I.C.3.b: run FRUC compute pipeline before the graphics render pass.
-    // §I.C.4.a: interpFrame (warp output) is now sampled by the
-    // fInterpPipeline render pass below — make compute writes visible
-    // to fragment via a global memory barrier (interpFrame stays in
-    // GENERAL layout; only memory access barrier is needed).
+    // FRUC compute pipeline (dispatch_fruc uses be->cmdBuffer = slotCmd).
     dispatch_fruc(be, viewIn);
-    if (be->fInitialized) {
+
+    // compute → fragment barrier so render pass 1 can sample interpFrame.
+    {
         VkMemoryBarrier mb_compute_to_frag = {
             .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
             .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
             .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
         };
-        be->vkCmdPipelineBarrier(be->cmdBuffer,
+        be->vkCmdPipelineBarrier(slotCmd,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             0, 1, &mb_compute_to_frag, 0, NULL, 0, NULL);
     }
 
-    VkClearValue cv = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
-    VkRenderPassBeginInfo rpbi = {
-        .sType        = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass   = be->renderPass,
-        .framebuffer  = be->framebuffers[imgIdx],
-        .renderArea   = { {0, 0}, be->swapchainExtent },
-        .clearValueCount = 1,
-        .pClearValues = &cv,
-    };
-    be->vkCmdBeginRenderPass(be->cmdBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
-
-    // §I.C.4.a: when compute pipeline is up, draw from interpFrame (the
-    // warp output) instead of the AHB. interpFrame is rgba8 1920×1080 with
-    // no padding, so uvScale = (1, 1) and the (vUV.y, 1-vUV.x) rotation in
-    // video_sample.frag still applies (warp wrote in the same coordinate
-    // system as ycbcr_to_rgba which mirrors the AHB layout).
-    //
-    // If compute init failed, fall back to the existing AHB-direct path
-    // (uvScale = video / ahbPadded, sample via ycbcrSampler).
-    VkPipeline       chosenPipe   = be->fInitialized ? be->fInterpPipeline   : be->graphicsPipeline;
-    VkPipelineLayout chosenLayout = be->fInitialized ? be->fInterpPipeLayout : be->pipelineLayout;
-    VkDescriptorSet  chosenDescSet = be->fInitialized ? be->fInterpDescSet   : be->descSet;
-    float uvScale[2];
-    if (be->fInitialized) {
-        uvScale[0] = 1.0f;
-        uvScale[1] = 1.0f;
-    } else {
-        // Defensive: if either dim is 0 fall back to 1.0 → no scale, just Y-flip.
-        uvScale[0] = (be->videoWidth  > 0 && be->ahbPaddedWidth  > 0)
-            ? (float)be->videoWidth  / (float)be->ahbPaddedWidth  : 1.0f;
-        uvScale[1] = (be->videoHeight > 0 && be->ahbPaddedHeight > 0)
-            ? (float)be->videoHeight / (float)be->ahbPaddedHeight : 1.0f;
-    }
-    be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, chosenPipe);
-    be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                chosenLayout, 0, 1, &chosenDescSet, 0, NULL);
-    be->vkCmdPushConstants(be->cmdBuffer, chosenLayout,
-                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uvScale), uvScale);
-    if (be->frameCounter == 0) {
-        LOGI("uvScale push constants: x=%.4f (video %d / ahb %d) "
-             "y=%.4f (video %d / ahb %d)",
-             uvScale[0], be->videoWidth,  be->ahbPaddedWidth,
-             uvScale[1], be->videoHeight, be->ahbPaddedHeight);
-    }
-    be->vkCmdDraw(be->cmdBuffer, 3, 1, 0, 0);
-    be->vkCmdEndRenderPass(be->cmdBuffer);
-
-    if (be->vkEndCommandBuffer(be->cmdBuffer) != VK_SUCCESS) goto fail_cleanup_imported;
-
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    VkSubmitInfo si = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &be->acquireSem,
-        .pWaitDstStageMask = &waitStage,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &be->cmdBuffer,
-        .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &be->renderDoneSem,
-    };
-    if (be->vkQueueSubmit(be->graphicsQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS)
-        goto fail_cleanup_imported;
-
-    // §I.C.6 — PASS 1 (interp): hint driver to display this frame at "now",
-    // then PASS 2 (real, below) at +refreshDuration/2 to slot interp ahead
-    // of real on the display timeline. Driver may still re-pace based on
-    // its own queue state, but desiredPresentTime gives it a strong hint.
-    uint64_t now_ns_pass1 = monotonic_ns();
-    VkPresentTimeGOOGLE pt1 = {
-        .presentID = ++be->fPresentId,
-        .desiredPresentTime = now_ns_pass1,
-    };
-    VkPresentTimesInfoGOOGLE pti1 = {
-        .sType         = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
-        .swapchainCount = 1,
-        .pTimes        = &pt1,
-    };
-    VkPresentInfoKHR pi = {
-        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = be->fDisplayTimingSupported ? &pti1 : NULL,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &be->renderDoneSem,
-        .swapchainCount = 1,
-        .pSwapchains = &be->swapchain,
-        .pImageIndices = &imgIdx,
-    };
-    r = be->vkQueuePresentKHR(be->graphicsQueue, &pi);
-    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
-        LOGW("present failed: %d", r);
-    }
-
-    // Wait queue idle so we can free the imported resources before next
-    // frame. Simple but slow — Phase D will queue these for delayed free.
-    be->vkQueueWaitIdle(be->graphicsQueue);
-
-    // ============================================================
-    // §I.C.4.b — PASS 2: real (AHB direct via graphics pipeline)
-    // ============================================================
-    // PASS 1 above presented the interp frame; now present the real
-    // frame on top. Dual present semantics matches GLES path:
-    // each input frame produces (interp, real) pair on display.
-    //
-    // Skip when fInitialized=0 — the fall-back path already showed the
-    // AHB directly in PASS 1, so a second pass would duplicate it.
-    //
-    // imgIn / viewIn are still SHADER_READ_ONLY_OPTIMAL from PASS 1's
-    // inAcquire barrier (queue-idle drained, layout unchanged), no
-    // additional barrier needed. Semaphores reuse safely: each
-    // submit/present wait drains them back to unsignaled.
-    if (be->fInitialized) {
-        uint32_t imgIdx2 = 0;
-        VkResult r2 = be->vkAcquireNextImageKHR(be->device, be->swapchain, 100000000ULL,
-                                                 be->acquireSem, VK_NULL_HANDLE, &imgIdx2);
-        if (r2 != VK_SUCCESS && r2 != VK_SUBOPTIMAL_KHR) {
-            LOGW("[VKBE-COMPUTE] PASS 2 acquire failed: %d", r2);
-            goto fail_cleanup_imported;
-        }
-
-        be->vkResetCommandBuffer(be->cmdBuffer, 0);
-        VkCommandBufferBeginInfo bbi2 = {
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        };
-        if (be->vkBeginCommandBuffer(be->cmdBuffer, &bbi2) != VK_SUCCESS) goto fail_cleanup_imported;
-
-        VkClearValue cv2 = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
-        VkRenderPassBeginInfo rpbi2 = {
+    // ---- Render pass 1 (interp): sample interpFrame, present to imgIdxPass1 ----
+    {
+        VkClearValue cv = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
+        VkRenderPassBeginInfo rpbi = {
             .sType        = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .renderPass   = be->renderPass,
-            .framebuffer  = be->framebuffers[imgIdx2],
+            .framebuffer  = be->framebuffers[imgIdxPass1],
             .renderArea   = { {0, 0}, be->swapchainExtent },
             .clearValueCount = 1,
-            .pClearValues = &cv2,
+            .pClearValues = &cv,
         };
-        be->vkCmdBeginRenderPass(be->cmdBuffer, &rpbi2, VK_SUBPASS_CONTENTS_INLINE);
-        be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, be->graphicsPipeline);
-        be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        be->vkCmdBeginRenderPass(slotCmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        be->vkCmdBindPipeline(slotCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, be->fInterpPipeline);
+        be->vkCmdBindDescriptorSets(slotCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    be->fInterpPipeLayout, 0, 1, &be->fInterpDescSet, 0, NULL);
+        float uvInterp[2] = { 1.0f, 1.0f };
+        be->vkCmdPushConstants(slotCmd, be->fInterpPipeLayout,
+                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uvInterp), uvInterp);
+        be->vkCmdDraw(slotCmd, 3, 1, 0, 0);
+        be->vkCmdEndRenderPass(slotCmd);
+    }
+
+    // ---- Render pass 2 (real): sample AHB direct, present to imgIdxPass2 ----
+    {
+        VkClearValue cv = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
+        VkRenderPassBeginInfo rpbi = {
+            .sType        = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass   = be->renderPass,
+            .framebuffer  = be->framebuffers[imgIdxPass2],
+            .renderArea   = { {0, 0}, be->swapchainExtent },
+            .clearValueCount = 1,
+            .pClearValues = &cv,
+        };
+        be->vkCmdBeginRenderPass(slotCmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        be->vkCmdBindPipeline(slotCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, be->graphicsPipeline);
+        be->vkCmdBindDescriptorSets(slotCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     be->pipelineLayout, 0, 1, &be->descSet, 0, NULL);
-        float uvScale_real[2] = {
+        float uvReal[2] = {
             (be->videoWidth  > 0 && be->ahbPaddedWidth  > 0)
                 ? (float)be->videoWidth  / (float)be->ahbPaddedWidth  : 1.0f,
             (be->videoHeight > 0 && be->ahbPaddedHeight > 0)
                 ? (float)be->videoHeight / (float)be->ahbPaddedHeight : 1.0f,
         };
-        be->vkCmdPushConstants(be->cmdBuffer, be->pipelineLayout,
-                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uvScale_real), uvScale_real);
-        be->vkCmdDraw(be->cmdBuffer, 3, 1, 0, 0);
-        be->vkCmdEndRenderPass(be->cmdBuffer);
-
-        if (be->vkEndCommandBuffer(be->cmdBuffer) != VK_SUCCESS) goto fail_cleanup_imported;
-
-        VkSubmitInfo si2 = {
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &be->acquireSem,
-            .pWaitDstStageMask = &waitStage,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &be->cmdBuffer,
-            .signalSemaphoreCount = 1,
-            .pSignalSemaphores = &be->renderDoneSem,
-        };
-        if (be->vkQueueSubmit(be->graphicsQueue, 1, &si2, VK_NULL_HANDLE) != VK_SUCCESS)
-            goto fail_cleanup_imported;
-
-        // §I.C.6 — PASS 2 (real) PTS = PASS 1 PTS + refreshDuration / 2.
-        // If refreshDuration unknown (extension off), fall back to "now"
-        // and skip the chain. half-cycle offset positions interp on the
-        // earlier vsync, real on the next — driver does the actual paced
-        // present.
-        uint64_t pass2_desired = (be->fRefreshDurationNs > 0)
-            ? now_ns_pass1 + be->fRefreshDurationNs / 2
-            : monotonic_ns();
-        VkPresentTimeGOOGLE pt2 = {
-            .presentID = ++be->fPresentId,
-            .desiredPresentTime = pass2_desired,
-        };
-        VkPresentTimesInfoGOOGLE pti2 = {
-            .sType         = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
-            .swapchainCount = 1,
-            .pTimes        = &pt2,
-        };
-        VkPresentInfoKHR pi2 = {
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = be->fDisplayTimingSupported ? &pti2 : NULL,
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &be->renderDoneSem,
-            .swapchainCount = 1,
-            .pSwapchains = &be->swapchain,
-            .pImageIndices = &imgIdx2,
-        };
-        VkResult rp2 = be->vkQueuePresentKHR(be->graphicsQueue, &pi2);
-        if (rp2 != VK_SUCCESS && rp2 != VK_SUBOPTIMAL_KHR) {
-            LOGW("[VKBE-COMPUTE] PASS 2 present failed: %d", rp2);
+        be->vkCmdPushConstants(slotCmd, be->pipelineLayout,
+                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uvReal), uvReal);
+        if (be->frameCounter == 0) {
+            LOGI("uvScale push constants: x=%.4f (video %d / ahb %d) "
+                 "y=%.4f (video %d / ahb %d)",
+                 uvReal[0], be->videoWidth,  be->ahbPaddedWidth,
+                 uvReal[1], be->videoHeight, be->ahbPaddedHeight);
         }
-        be->vkQueueWaitIdle(be->graphicsQueue);
-        be->fInterpolatedCount++;
+        be->vkCmdDraw(slotCmd, 3, 1, 0, 0);
+        be->vkCmdEndRenderPass(slotCmd);
+    }
 
-        // §I.C.6 — periodic past-timing diagnostic (every 120 frames).
-        // Compares actualPresentTime vs desiredPresentTime to see how
-        // closely the driver is honoring our hints.
-        if (be->fDisplayTimingSupported && be->vkGetPastPresentationTimingGOOGLE &&
-            be->frameCounter > 0 && be->frameCounter % 120 == 0) {
-            uint32_t numPast = 0;
-            be->vkGetPastPresentationTimingGOOGLE(be->device, be->swapchain, &numPast, NULL);
-            if (numPast > 8) numPast = 8;
-            if (numPast > 0) {
-                VkPastPresentationTimingGOOGLE past[8];
-                if (be->vkGetPastPresentationTimingGOOGLE(be->device, be->swapchain,
-                                                           &numPast, past) == VK_SUCCESS) {
-                    for (uint32_t i = 0; i < numPast; i++) {
-                        int64_t delta_ns = (int64_t)past[i].actualPresentTime
-                                         - (int64_t)past[i].desiredPresentTime;
-                        LOGI("[VK-DISPLAY-TIMING] past id=%u delta=%+lld ns (margin=%llu)",
-                             past[i].presentID, (long long)delta_ns,
-                             (unsigned long long)past[i].presentMargin);
-                    }
+    if (be->vkEndCommandBuffer(slotCmd) != VK_SUCCESS) {
+        be->cmdBuffer = saveLegacyCmd;
+        goto ring_fail_drop_imported;
+    }
+    be->cmdBuffer = saveLegacyCmd;
+
+    // Single submit with 2 wait sems + 2 signal sems + fence. Both
+    // acquires gate at COLOR_ATTACHMENT_OUTPUT (where each pass writes
+    // its respective swapchain image's framebuffer).
+    VkPipelineStageFlags waitStages[2] = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    };
+    VkSemaphore waitSems[2]   = { be->fSlotAcquireSem[slot][0],   be->fSlotAcquireSem[slot][1] };
+    VkSemaphore signalSems[2] = { be->fSlotRenderDoneSem[slot][0], be->fSlotRenderDoneSem[slot][1] };
+    VkSubmitInfo si = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 2,
+        .pWaitSemaphores = waitSems,
+        .pWaitDstStageMask = waitStages,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &slotCmd,
+        .signalSemaphoreCount = 2,
+        .pSignalSemaphores = signalSems,
+    };
+    if (be->vkQueueSubmit(be->graphicsQueue, 1, &si, be->fSlotInFlightFence[slot]) != VK_SUCCESS) {
+        LOGW("[VKBE-RING] vkQueueSubmit failed");
+        goto ring_fail_drop_imported;
+    }
+
+    // §I.C.6 — PTS for both presents.
+    uint64_t now_ns = monotonic_ns();
+    VkPresentTimeGOOGLE pt1 = { ++be->fPresentId, now_ns };
+    VkPresentTimesInfoGOOGLE pti1 = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+        .swapchainCount = 1, .pTimes = &pt1,
+    };
+    VkPresentInfoKHR pi1 = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .pNext = be->fDisplayTimingSupported ? &pti1 : NULL,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &be->fSlotRenderDoneSem[slot][0],
+        .swapchainCount = 1,
+        .pSwapchains = &be->swapchain,
+        .pImageIndices = &imgIdxPass1,
+    };
+    VkResult rp1 = be->vkQueuePresentKHR(be->graphicsQueue, &pi1);
+    if (rp1 != VK_SUCCESS && rp1 != VK_SUBOPTIMAL_KHR) LOGW("[VKBE-RING] PASS 1 present failed: %d", rp1);
+
+    uint64_t pass2_desired = (be->fRefreshDurationNs > 0)
+        ? now_ns + be->fRefreshDurationNs / 2
+        : monotonic_ns();
+    VkPresentTimeGOOGLE pt2 = { ++be->fPresentId, pass2_desired };
+    VkPresentTimesInfoGOOGLE pti2 = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+        .swapchainCount = 1, .pTimes = &pt2,
+    };
+    VkPresentInfoKHR pi2 = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .pNext = be->fDisplayTimingSupported ? &pti2 : NULL,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &be->fSlotRenderDoneSem[slot][1],
+        .swapchainCount = 1,
+        .pSwapchains = &be->swapchain,
+        .pImageIndices = &imgIdxPass2,
+    };
+    VkResult rp2 = be->vkQueuePresentKHR(be->graphicsQueue, &pi2);
+    if (rp2 != VK_SUCCESS && rp2 != VK_SUBOPTIMAL_KHR) LOGW("[VKBE-RING] PASS 2 present failed: %d", rp2);
+
+    // Stash imgIn / memIn / viewIn into slot.pendingImg/Mem/View — they're
+    // freed at start of next time this slot is reused (after that slot's
+    // fence signals → GPU done with these handles).
+    be->fSlotPendingImg[slot]  = imgIn;
+    be->fSlotPendingMem[slot]  = memIn;
+    be->fSlotPendingView[slot] = viewIn;
+    be->fSlotHasPending[slot]  = 1;
+
+    be->fCurrentSlot = (slot + 1) % VK_FRAMES_IN_FLIGHT;
+    be->frameCounter++;
+    be->fInterpolatedCount++;
+
+    if (be->frameCounter <= 5 || be->frameCounter % 120 == 0) {
+        LOGI("render_ahb_frame #%d (slot=%u img=[%u,%u], src=%ux%u) [dual present, ring]",
+             be->frameCounter, slot, imgIdxPass1, imgIdxPass2, srcW, srcH);
+    }
+
+    // §I.C.6 — periodic past-timing diagnostic (every 120 frames).
+    if (be->fDisplayTimingSupported && be->vkGetPastPresentationTimingGOOGLE &&
+        be->frameCounter > 0 && be->frameCounter % 120 == 0) {
+        uint32_t numPast = 0;
+        be->vkGetPastPresentationTimingGOOGLE(be->device, be->swapchain, &numPast, NULL);
+        if (numPast > 8) numPast = 8;
+        if (numPast > 0) {
+            VkPastPresentationTimingGOOGLE past[8];
+            if (be->vkGetPastPresentationTimingGOOGLE(be->device, be->swapchain,
+                                                       &numPast, past) == VK_SUCCESS) {
+                for (uint32_t i = 0; i < numPast; i++) {
+                    int64_t delta_ns = (int64_t)past[i].actualPresentTime
+                                     - (int64_t)past[i].desiredPresentTime;
+                    LOGI("[VK-DISPLAY-TIMING] past id=%u delta=%+lld ns (margin=%llu)",
+                         past[i].presentID, (long long)delta_ns,
+                         (unsigned long long)past[i].presentMargin);
                 }
             }
         }
     }
+    return 0;
 
-    be->frameCounter++;
-    if (be->frameCounter <= 5 || be->frameCounter % 120 == 0) {
-        LOGI("render_ahb_frame #%d (img=%u, src=%ux%u)%s",
-             be->frameCounter, imgIdx, srcW, srcH,
-             be->fInitialized ? " [dual present]" : "");
-    }
-
-fail_cleanup_imported:
+ring_fail_drop_imported:
     if (viewIn) be->vkDestroyImageView(be->device, viewIn, NULL);
     if (imgIn)  be->vkDestroyImage(be->device, imgIn, NULL);
     if (memIn)  be->vkFreeMemory(be->device, memIn, NULL);
