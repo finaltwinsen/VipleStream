@@ -3,8 +3,18 @@ setlocal enabledelayedexpansion
 
 :: =============================================================================
 ::  VipleStream Sunshine - Build + Package
-::  Bumps patch version, compiles via MSYS2 UCRT64, packages to release/
+::  Compiles via MSYS2 UCRT64, packages to release/.
+::
+::  By default this bumps the patch version (so a stand-alone Sunshine build
+::  produces a fresh release/ artifact at the next version).  Pass --no-bump
+::  to skip the bump and build at the version already in version.json — used
+::  when Sunshine is being built to match an existing Client zip (e.g. when
+::  build_moonlight.cmd already bumped and the Server is catching up to the
+::  same release version).
 :: =============================================================================
+
+set "BUMP=1"
+if /i "%~1"=="--no-bump" set "BUMP=0"
 
 if exist "%~dp0build-config.local.cmd" (
     call "%~dp0build-config.local.cmd"
@@ -30,9 +40,14 @@ if not exist "%MSYS2%" (
     exit /b 1
 )
 
-:: -- 1. Bump version --
-echo [1/4] Bumping version...
-call "%ROOT%\scripts\bump_version.cmd"
+:: -- 1. Resolve version (bump or just propagate) --
+if "%BUMP%"=="1" (
+    echo [1/4] Bumping version...
+    call "%ROOT%\scripts\bump_version.cmd"
+) else (
+    echo [1/4] Propagating version ^(no bump^)...
+    call "%ROOT%\scripts\propagate_version.cmd"
+)
 set /p VER=<"%ROOT%\temp\current_version.txt"
 echo   Version: %VER%
 

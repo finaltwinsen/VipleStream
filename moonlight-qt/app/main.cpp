@@ -431,92 +431,109 @@ int main(int argc, char *argv[])
     // These also ensure that our cache directory is named correctly. As such,
     // it is critical that these be called before Path::initialize().
     //
-    // VipleStream rebrand: applicationName was "Moonlight" — this controls
-    // window title, taskbar label, and the cache/settings subdir name.
-    // OrganizationName is kept unchanged so an existing user's paired hosts
-    // and preferences under the old "Moonlight Game Streaming Project" key
-    // continue to work (a bolder rebrand would also change the org and
-    // migrate settings, which is out of scope here).
-    QCoreApplication::setOrganizationName("Moonlight Game Streaming Project");
+    // VipleStream rebrand history (TODO §A.1 + §A.11):
+    //   v1.2.42 and earlier : org="Moonlight Game Streaming Project", app="Moonlight"
+    //   v1.2.43..v1.2.128   : org="Moonlight Game Streaming Project", app="VipleStream"
+    //                         (app rebranded but org kept to avoid breaking
+    //                         existing paired hosts; see migration block below
+    //                         which already handled the Moonlight->VipleStream
+    //                         app rebrand at first launch of v1.2.43+)
+    //   v1.2.129+           : org="VipleStream",                       app="VipleStream"
+    //                         (full rebrand; new migration block below imports
+    //                         from EITHER legacy location, preferring the
+    //                         v1.2.43..128 settings as more recent.)
+    //
+    // organizationDomain is intentionally NOT changed: on macOS QSettings
+    // NativeFormat uses <reverseDomain>.<appName>.plist, so leaving
+    // moonlight-stream.com keeps macOS users on their existing
+    // ~/Library/Preferences/com.moonlight-stream.VipleStream.plist (no
+    // macOS migration needed -- they cross from old build to new build
+    // without their settings appearing to vanish, because the org name
+    // change doesn't affect the .plist path).  On Windows / Linux the
+    // path IS controlled by organizationName, so the migration block
+    // below handles those.
+    QCoreApplication::setOrganizationName("VipleStream");
     QCoreApplication::setOrganizationDomain("moonlight-stream.com");
     QCoreApplication::setApplicationName("VipleStream");
 
-    // VipleStream H.5 / TODO §A.11 fix: migrate legacy Moonlight settings.
+    // One-shot migration to the new VipleStream/VipleStream QSettings
+    // location, run at first launch of v1.2.129+.  Without this, an
+    // upgrading user sees an empty PcView -- paired hosts, certs, FRUC
+    // tuning all appear to have vanished because they live under the
+    // old organizationName.
     //
-    // OrganizationName intentionally stays as the upstream string (see
-    // comment block above this), so VipleStream's QSettings live at
-    //   HKCU\Software\Moonlight Game Streaming Project\VipleStream
-    // while users who came from upstream Moonlight have all their
-    // paired hosts + client cert under
-    //   HKCU\Software\Moonlight Game Streaming Project\Moonlight
+    // We try TWO source locations in priority order.  The first one
+    // that has paired hosts wins -- copying from there gives us the
+    // most-recent snapshot of the user's state.
     //
-    // Without migration, first launch of a freshly-rebranded build
-    // shows an empty PcView — paired hosts, certs, all preferences
-    // appear to have vanished.  We do a one-shot copy on first launch
-    // and gate it on a `migration/from_moonlight_done` flag so we
-    // never re-run it (and so users who legitimately paired only on
-    // VipleStream don't get their state silently overwritten).
+    //   1. v1.2.43..128 path  : "Moonlight Game Streaming Project" / "VipleStream"
+    //                           (existing VipleStream user; their tuning
+    //                           is already under the VipleStream app
+    //                           name, just one more org-level move away)
+    //   2. Pre-v1.2.43 path   : "Moonlight Game Streaming Project" / "Moonlight"
+    //                           (vanilla Moonlight user crossing in for
+    //                           the first time -- previously caught by
+    //                           the v1.2.43 migration)
+    //
+    // Migration is a full snapshot copy (allKeys() recursively) -- the
+    // dest is a fresh location, so we don't worry about overwriting
+    // VipleStream-specific tuning the user did at the new path (there
+    // can be none yet).  This is simpler than the v1.2.43 migration,
+    // which had to defensively skip non-host keys to avoid clobbering
+    // user tuning under the same app name.
+    //
+    // The flag is at dest, so we never re-migrate.  Source locations
+    // are NOT deleted -- if a user downgrades to v1.2.128 they can
+    // still read their old settings.
     {
-        QSettings dest;  // default = Moonlight Game Streaming Project / VipleStream
-        if (!dest.value("migration/from_moonlight_done", false).toBool()) {
-            QSettings src("Moonlight Game Streaming Project", "Moonlight");
+        QSettings dest;  // default = VipleStream / VipleStream
+        if (!dest.value("migration/v129_org_done", false).toBool()) {
+            QSettings legacyVipleStream("Moonlight Game Streaming Project", "VipleStream");
+            QSettings legacyMoonlight   ("Moonlight Game Streaming Project", "Moonlight");
 
-            // Has the legacy install paired any hosts?
-            src.beginGroup("hosts");
-            int srcHostCount = src.childGroups().size();
-            src.endGroup();
+            auto pairedHostCount = [](QSettings& s) {
+                s.beginGroup("hosts");
+                int n = s.childGroups().size();
+                s.endGroup();
+                return n;
+            };
 
-            // Already paired hosts on the VipleStream side?
-            dest.beginGroup("hosts");
-            int destHostCount = dest.childGroups().size();
-            dest.endGroup();
+            const int legacyVSHosts = pairedHostCount(legacyVipleStream);
+            const int legacyMLHosts = pairedHostCount(legacyMoonlight);
+            const int destHosts     = pairedHostCount(dest);
 
-            if (destHostCount == 0 && srcHostCount > 0) {
-                // Copy the entire `hosts` group recursively.
-                src.beginGroup("hosts");
-                const QStringList hostKeys = src.allKeys();
-                src.endGroup();
-                foreach (const QString& k, hostKeys) {
-                    dest.setValue("hosts/" + k, src.value("hosts/" + k));
-                }
-
-                // Copy the client identity (cert + private key).  The
-                // legacy hosts only recognise THIS cert — if we kept
-                // the freshly-generated VipleStream cert, every paired
-                // host would reject us as "unknown client".
-                // Qt's foreach() macro can't tokenise a brace-initialised
-                // QStringList literal (the comma inside the braces breaks
-                // the macro), so list the names explicitly.
-                static const QStringList kCriticalKeys {
-                    QStringLiteral("certificate"),
-                    QStringLiteral("key"),
-                };
-                for (const QString& crit : kCriticalKeys) {
-                    QVariant v = src.value(crit);
-                    if (!v.isNull() && !v.toByteArray().isEmpty()) {
-                        dest.setValue(crit, v);
-                    }
-                }
-
-                // Also copy other top-level prefs the user may have set
-                // (resolution, fps, bitrate…) — but only if VipleStream
-                // doesn't already have its own value, so the rebrand
-                // doesn't blow away VipleStream-specific tuning the
-                // user did under the new key.
-                foreach (const QString& k, src.allKeys()) {
-                    if (k.startsWith("hosts/"))      continue;
-                    if (k.startsWith("migration/"))  continue;
-                    if (k == "certificate" || k == "key") continue;
-                    if (!dest.contains(k)) {
-                        dest.setValue(k, src.value(k));
-                    }
-                }
-
-                qInfo() << "[migration] Imported"
-                        << srcHostCount << "paired host(s) +"
-                        << "client cert from legacy Moonlight QSettings";
+            QSettings* src = nullptr;
+            const char* srcDesc = nullptr;
+            int srcHosts = 0;
+            if (legacyVSHosts > 0) {
+                src = &legacyVipleStream;
+                srcDesc = "VipleStream-under-Moonlight (v1.2.43..128)";
+                srcHosts = legacyVSHosts;
+            } else if (legacyMLHosts > 0) {
+                src = &legacyMoonlight;
+                srcDesc = "vanilla Moonlight (pre-VipleStream)";
+                srcHosts = legacyMLHosts;
             }
-            dest.setValue("migration/from_moonlight_done", true);
+
+            if (src && destHosts == 0) {
+                // Snapshot copy: recursive over all keys.  Qt's allKeys()
+                // returns paths with '/' separators which setValue accepts
+                // verbatim, so nested groups (hosts/0/hostname etc.) round-trip.
+                const QStringList allKeys = src->allKeys();
+                for (const QString& k : allKeys) {
+                    dest.setValue(k, src->value(k));
+                }
+                qInfo() << "[migration] Imported"
+                        << srcHosts << "paired host(s) +"
+                        << allKeys.size() << "total keys from" << srcDesc;
+            } else if (destHosts > 0) {
+                qInfo() << "[migration] Skipping import:"
+                        << destHosts << "host(s) already paired at new location";
+            } else {
+                qInfo() << "[migration] No legacy settings to import (fresh install)";
+            }
+
+            dest.setValue("migration/v129_org_done", true);
             dest.sync();
         }
     }

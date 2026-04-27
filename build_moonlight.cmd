@@ -4,11 +4,19 @@ setlocal enabledelayedexpansion
 :: =============================================================================
 ::  VipleStream Moonlight - Build + Package (root wrapper)
 ::
-::  Per-machine paths live here (this file is gitignored).
+::  Per-machine paths come from build-config.local.cmd (gitignored).
 ::  Canonical packaging list lives in scripts\build_moonlight_package.cmd
 ::  (VCS-tracked), so the shader set can be updated without touching each
 ::  developer's local copy of this file.
+::
+::  By default this bumps the patch version.  Pass --no-bump to skip the
+::  bump and rebuild at the version already in version.json (used when
+::  re-packaging at the same version, e.g. recovering from a corrupt
+::  release zip without polluting the version timeline).
 :: =============================================================================
+
+set "BUMP=1"
+if /i "%~1"=="--no-bump" set "BUMP=0"
 
 if exist "%~dp0build-config.local.cmd" (
     call "%~dp0build-config.local.cmd"
@@ -28,9 +36,14 @@ echo =========================================================
 echo   VipleStream Moonlight - Build + Package
 echo =========================================================
 
-:: -- 0. Bump version --
-echo [0/6] Bumping version...
-call "%ROOT%\scripts\bump_version.cmd"
+:: -- 0. Resolve version (bump or just propagate) --
+if "%BUMP%"=="1" (
+    echo [0/6] Bumping version...
+    call "%ROOT%\scripts\bump_version.cmd"
+) else (
+    echo [0/6] Propagating version ^(no bump^)...
+    call "%ROOT%\scripts\propagate_version.cmd"
+)
 set /p VER=<"%ROOT%\temp\current_version.txt"
 echo   Version: %VER%
 
