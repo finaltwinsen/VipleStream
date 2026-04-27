@@ -472,6 +472,20 @@ static int pick_physical_device_and_queue(vk_backend_t* be)
     if (!qf) return -1;
     vkGetPhysicalDeviceQueueFamilyProperties(be->physDevice, &qfCount, qf);
 
+    // iter 5 — log all queue families. Multi-queue path (§I.D follow-up)
+    // wants to put compute on separate queue if available; this gives
+    // visibility on what each device offers. Pixel 5 / Adreno 620 typically
+    // exports a single universal family with graphicsQueueCount=1.
+    for (uint32_t i = 0; i < qfCount; i++) {
+        const VkQueueFamilyProperties* p = &qf[i];
+        LOGI("[VKBE-QF] family[%u] queueCount=%u flags=0x%x %s%s%s%s",
+             i, p->queueCount, p->queueFlags,
+             (p->queueFlags & VK_QUEUE_GRAPHICS_BIT)       ? "[GFX] "    : "",
+             (p->queueFlags & VK_QUEUE_COMPUTE_BIT)        ? "[CMP] "    : "",
+             (p->queueFlags & VK_QUEUE_TRANSFER_BIT)       ? "[XFER] "   : "",
+             (p->queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) ? "[SPARSE] " : "");
+    }
+
     // Pick a queue family with both graphics and surface present support.
     // VkSurfaceKHR must already exist; this is called after surface creation.
     be->graphicsQueueFamily = (uint32_t)-1;
@@ -804,9 +818,13 @@ static int create_swapchain(vk_backend_t* be)
         }
     }
 
-    // Pick FIFO (always available, V-sync gated). Phase D will swap to
-    // MAILBOX or IMMEDIATE if measurements warrant.
+    // iter 6: prefer MAILBOX over FIFO when available — eliminates vsync
+    // block on PASS 1 in dual present (compositor takes latest queued
+    // image instead of waiting for the next vsync edge to swap). FIFO
+    // stays as fallback if MAILBOX isn't supported. IMMEDIATE excluded
+    // (causes tearing on stream content).
     VkPresentModeKHR present = VK_PRESENT_MODE_FIFO_KHR;
+    int mailboxAvailable = 0;
     {
         uint32_t pmCount = 0;
         vkGetPhysicalDeviceSurfacePresentModesKHR(be->physDevice, be->surface, &pmCount, NULL);
@@ -816,12 +834,24 @@ static int create_swapchain(vk_backend_t* be)
                 vkGetPhysicalDeviceSurfacePresentModesKHR(be->physDevice, be->surface,
                                                           &pmCount, pms);
                 LOGI("present modes available (%u):", pmCount);
-                for (uint32_t i = 0; i < pmCount; i++) LOGI("  [%u] = %d", i, pms[i]);
+                for (uint32_t i = 0; i < pmCount; i++) {
+                    LOGI("  [%u] = %d %s", i, pms[i],
+                         pms[i] == VK_PRESENT_MODE_FIFO_KHR ? "(FIFO)" :
+                         pms[i] == VK_PRESENT_MODE_MAILBOX_KHR ? "(MAILBOX)" :
+                         pms[i] == VK_PRESENT_MODE_IMMEDIATE_KHR ? "(IMMEDIATE)" :
+                         pms[i] == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "(FIFO_RELAXED)" : "");
+                    if (pms[i] == VK_PRESENT_MODE_MAILBOX_KHR) mailboxAvailable = 1;
+                }
                 free(pms);
             }
         }
     }
-    LOGI("picked present mode = FIFO (%d)", present);
+    if (mailboxAvailable) {
+        present = VK_PRESENT_MODE_MAILBOX_KHR;
+        LOGI("picked present mode = MAILBOX (%d) — dual-present PASS 1 won't block on vsync", present);
+    } else {
+        LOGI("picked present mode = FIFO (%d) — MAILBOX unavailable, dual-present will vsync-gate both passes", present);
+    }
 
     uint32_t imageCount = caps.minImageCount + 1;
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
