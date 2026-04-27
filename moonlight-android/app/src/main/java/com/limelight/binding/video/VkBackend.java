@@ -1,6 +1,13 @@
 package com.limelight.binding.video;
 
 import android.content.Context;
+import android.graphics.ImageFormat;
+import android.hardware.HardwareBuffer;
+import android.media.Image;
+import android.media.ImageReader;
+import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.util.Log;
 import android.view.Surface;
 
@@ -49,6 +56,17 @@ public final class VkBackend implements IFrucBackend {
      */
     private long nativeHandle = 0;
 
+    // §I.B.2c.2: ImageReader receives MediaCodec output as AHardwareBuffer-backed
+    // {@link Image} objects. Phase B.2c.3 imports each one as a VkImage via
+    // VK_ANDROID_external_memory_android_hardware_buffer and blits to the
+    // swapchain. Right now this scaffolding only validates the lifecycle —
+    // initialize() still returns null, so MediaCodec writes to the GLES
+    // SurfaceTexture path and onImageAvailable never fires.
+    private ImageReader imageReader;
+    private HandlerThread imageReaderThread;
+    private Handler imageReaderHandler;
+    private int imageReaderFramesSeen;
+
     public VkBackend(Context context) {
         this.context = context;
     }
@@ -96,16 +114,103 @@ public final class VkBackend implements IFrucBackend {
             return null;
         }
 
+        if (!setupImageReader(w, h)) {
+            Log.w(TAG, "ImageReader setup failed; declining backend → fallback to GLES");
+            destroyImageReader();
+            nativeDestroy(nativeHandle);
+            nativeHandle = 0;
+            return null;
+        }
+
         // Phase B.2c work-in-progress: native init has built the full Vulkan
-        // pipeline up to a one-shot acquire/clear/present sanity check, but
-        // we still don't have MediaCodec→VkImage import or a steady-state
-        // render loop. Tear everything down so displaySurface is free for
-        // GLES to claim via eglCreateWindowSurface.
-        Log.i(TAG, "Vulkan resources ready, but no MediaCodec→VkImage import yet. "
+        // pipeline up to a one-shot acquire/clear/present sanity check, the
+        // Java ImageReader scaffold is alive, but B.2c.3 (AHardwareBuffer →
+        // VkImage import + per-frame blit) is not yet wired. Tear everything
+        // down so displaySurface is free for GLES via eglCreateWindowSurface.
+        Log.i(TAG, "Vulkan resources + ImageReader ready, but no per-frame import path yet. "
                  + "Tearing down and declining → GLES fallback.");
+        destroyImageReader();
         nativeDestroy(nativeHandle);
         nativeHandle = 0;
         return null;
+    }
+
+    /**
+     * §I.B.2c.2 scaffold: build the {@link ImageReader} that B.2c.3+ will
+     * have MediaCodec write into. Format is PRIVATE + USAGE_GPU_SAMPLED_IMAGE
+     * so the underlying buffer is an {@link HardwareBuffer} importable by
+     * Vulkan via VK_ANDROID_external_memory_android_hardware_buffer.
+     *
+     * <p>Requires API 28+ for {@link ImageReader#newInstance(int, int, int,
+     * int, long)} with the usage flag. Pixel 5 / LineageOS 22.1 is API 35,
+     * so the gate is mostly defensive against minSdk 21 builds.</p>
+     */
+    private boolean setupImageReader(int w, int h) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            Log.w(TAG, "ImageReader (with usage) requires API 28+; current="
+                       + Build.VERSION.SDK_INT);
+            return false;
+        }
+        try {
+            // 3 buffers: matches MediaCodec's typical output queue depth.
+            // Larger eats memory; smaller can stall the encoder.
+            imageReader = ImageReader.newInstance(
+                w, h, ImageFormat.PRIVATE, /*maxImages=*/3,
+                HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE);
+
+            imageReaderThread = new HandlerThread("VipleStream-VkImageReader");
+            imageReaderThread.start();
+            imageReaderHandler = new Handler(imageReaderThread.getLooper());
+
+            imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
+                @Override
+                public void onImageAvailable(ImageReader reader) {
+                    Image img = null;
+                    try {
+                        img = reader.acquireLatestImage();
+                        if (img == null) return;
+                        imageReaderFramesSeen++;
+                        // B.2c.2 stops here. B.2c.3 takes the HardwareBuffer
+                        // and pushes it through nativeImportAndPresent.
+                        if (imageReaderFramesSeen <= 3 || imageReaderFramesSeen % 60 == 0) {
+                            Log.i(TAG, "ImageReader frame #" + imageReaderFramesSeen
+                                       + " size=" + img.getWidth() + "x" + img.getHeight()
+                                       + " hwBuffer=" + (img.getHardwareBuffer() != null));
+                        }
+                    } catch (Throwable t) {
+                        Log.e(TAG, "onImageAvailable threw: " + t, t);
+                    } finally {
+                        if (img != null) img.close();
+                    }
+                }
+            }, imageReaderHandler);
+
+            Log.i(TAG, "ImageReader created: " + w + "x" + h
+                       + " ImageFormat.PRIVATE maxImages=3 usage=GPU_SAMPLED_IMAGE");
+            return true;
+        } catch (Throwable t) {
+            Log.e(TAG, "ImageReader init threw: " + t, t);
+            destroyImageReader();
+            return false;
+        }
+    }
+
+    private void destroyImageReader() {
+        if (imageReader != null) {
+            try { imageReader.setOnImageAvailableListener(null, null); } catch (Throwable ignored) {}
+            try { imageReader.close(); } catch (Throwable t) {
+                Log.w(TAG, "ImageReader close threw: " + t);
+            }
+            imageReader = null;
+        }
+        if (imageReaderThread != null) {
+            try { imageReaderThread.quitSafely(); } catch (Throwable ignored) {}
+            imageReaderThread = null;
+            imageReaderHandler = null;
+        }
+        Log.i(TAG, "ImageReader destroyed (frames seen during this session: "
+                   + imageReaderFramesSeen + ")");
+        imageReaderFramesSeen = 0;
     }
 
     @Override
@@ -116,6 +221,7 @@ public final class VkBackend implements IFrucBackend {
 
     @Override
     public void destroy() {
+        destroyImageReader();
         if (nativeHandle != 0) {
             try {
                 nativeDestroy(nativeHandle);
