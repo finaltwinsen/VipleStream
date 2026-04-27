@@ -36,11 +36,16 @@
 #include "shaders/fullscreen.vert.spv.h"
 #include "shaders/test_pattern.frag.spv.h"
 #include "shaders/video_sample.frag.spv.h"
-// §I.C.3 compute pipelines (Q1 default; §I.C.5 wires Q0/Q2).
+// §I.C.3 compute pipelines.
 #include "shaders/ycbcr_to_rgba.comp.spv.h"
-#include "shaders/motionest_compute_q1.comp.spv.h"
 #include "shaders/mv_median.comp.spv.h"
+// §I.C.5.a quality variants: Q1 is the default; Q0=Quality, Q2=Performance.
+#include "shaders/motionest_compute_q0.comp.spv.h"
+#include "shaders/motionest_compute_q1.comp.spv.h"
+#include "shaders/motionest_compute_q2.comp.spv.h"
+#include "shaders/warp_compute_q0.comp.spv.h"
 #include "shaders/warp_compute_q1.comp.spv.h"
+#include "shaders/warp_compute_q2.comp.spv.h"
 
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
@@ -237,6 +242,18 @@ typedef struct vk_backend_s {
     // the interp, pass 2 is the real). Read back from Java via
     // nativeGetInterpolatedCount for the perf overlay.
     int                   fInterpolatedCount;
+
+    // §I.C.5.a quality preset wiring: 3 ME shaders + 3 warp shaders +
+    // 6 pipelines, all sharing the same desc set layout / pipeline layout
+    // (per docs/vulkan_fruc_port.md §4 共用 layout). Q1 is the default;
+    // fPipeline[FRUC_PIPE_ME] / fPipeline[FRUC_PIPE_WARP] above are the
+    // Q1 modules — kept for back-compat / log clarity.
+    // Java's setQualityLevel calls down via nativeSetQualityLevel.
+    VkShaderModule        fMeShaderQ[3];     // [0]=Q0, [1]=Q1 (alias of fShader[ME]), [2]=Q2
+    VkShaderModule        fWarpShaderQ[3];
+    VkPipeline            fMePipelineQ[3];
+    VkPipeline            fWarpPipelineQ[3];
+    int                   fQualityLevel;     // 0/1/2, default 1 (Balanced)
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -1886,6 +1903,84 @@ static int init_compute_pipelines(vk_backend_t* be)
         return -1;
     }
 
+    // 6.5. §I.C.5.a quality-preset variants: build extra Q0 / Q2 modules
+    //      and pipelines for ME and warp. Q1 entries alias the already-
+    //      created shader/pipeline so dispatch_fruc can index uniformly.
+    //      Layouts (descset + pipeline) are shared across Q0/Q1/Q2 by
+    //      docs/vulkan_fruc_port.md §4 design.
+    {
+        struct { const void* code; size_t size; } variants[3][2] = {
+            // [quality][0=me, 1=warp]
+            { { motionest_compute_q0_comp_spv, motionest_compute_q0_comp_spv_len },
+              { warp_compute_q0_comp_spv,      warp_compute_q0_comp_spv_len      } },
+            { { motionest_compute_q1_comp_spv, motionest_compute_q1_comp_spv_len },
+              { warp_compute_q1_comp_spv,      warp_compute_q1_comp_spv_len      } },
+            { { motionest_compute_q2_comp_spv, motionest_compute_q2_comp_spv_len },
+              { warp_compute_q2_comp_spv,      warp_compute_q2_comp_spv_len      } },
+        };
+
+        for (int q = 0; q < 3; q++) {
+            if (q == 1) {
+                // Q1 already built — alias to the original me/warp shader/pipeline.
+                be->fMeShaderQ[1]    = be->fShader[FRUC_PIPE_ME];
+                be->fWarpShaderQ[1]  = be->fShader[FRUC_PIPE_WARP];
+                be->fMePipelineQ[1]  = be->fPipeline[FRUC_PIPE_ME];
+                be->fWarpPipelineQ[1] = be->fPipeline[FRUC_PIPE_WARP];
+                continue;
+            }
+            VkShaderModuleCreateInfo smciMe = {
+                .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                .codeSize = variants[q][0].size,
+                .pCode    = (const uint32_t*)variants[q][0].code,
+            };
+            if (be->vkCreateShaderModule(be->device, &smciMe, NULL, &be->fMeShaderQ[q]) != VK_SUCCESS) {
+                LOGE("[VKBE-COMPUTE] vkCreateShaderModule(me_q%d) failed", q);
+                return -1;
+            }
+            VkShaderModuleCreateInfo smciWarp = {
+                .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                .codeSize = variants[q][1].size,
+                .pCode    = (const uint32_t*)variants[q][1].code,
+            };
+            if (be->vkCreateShaderModule(be->device, &smciWarp, NULL, &be->fWarpShaderQ[q]) != VK_SUCCESS) {
+                LOGE("[VKBE-COMPUTE] vkCreateShaderModule(warp_q%d) failed", q);
+                return -1;
+            }
+        }
+
+        // Build Q0 + Q2 pipelines (4 extra) using shared ME / warp layouts.
+        VkComputePipelineCreateInfo cpciExtra[4];
+        memset(cpciExtra, 0, sizeof(cpciExtra));
+        // [0]=me_q0, [1]=warp_q0, [2]=me_q2, [3]=warp_q2
+        const VkShaderModule modules[4] = {
+            be->fMeShaderQ[0],   be->fWarpShaderQ[0],
+            be->fMeShaderQ[2],   be->fWarpShaderQ[2],
+        };
+        const VkPipelineLayout layouts[4] = {
+            be->fPipeLayout[FRUC_PIPE_ME],   be->fPipeLayout[FRUC_PIPE_WARP],
+            be->fPipeLayout[FRUC_PIPE_ME],   be->fPipeLayout[FRUC_PIPE_WARP],
+        };
+        for (int i = 0; i < 4; i++) {
+            cpciExtra[i].sType        = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            cpciExtra[i].stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            cpciExtra[i].stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+            cpciExtra[i].stage.module = modules[i];
+            cpciExtra[i].stage.pName  = "main";
+            cpciExtra[i].layout       = layouts[i];
+        }
+        VkPipeline outPipes[4];
+        if (be->vkCreateComputePipelines(be->device, VK_NULL_HANDLE,
+                                          4, cpciExtra, NULL, outPipes) != VK_SUCCESS) {
+            LOGE("[VKBE-COMPUTE] vkCreateComputePipelines(Q0+Q2) failed");
+            return -1;
+        }
+        be->fMePipelineQ[0]   = outPipes[0];
+        be->fWarpPipelineQ[0] = outPipes[1];
+        be->fMePipelineQ[2]   = outPipes[2];
+        be->fWarpPipelineQ[2] = outPipes[3];
+        be->fQualityLevel = 1;  // default Balanced
+    }
+
     // 7. Descriptor pool + 4 compute sets + 1 interp graphics set (§I.C.4.a).
     //    Compute: ycbcr(1+1) + me(3+1) + mv_median(1+1) + warp(3+1) = 8 sampler + 4 storage.
     //    Interp graphics: 1 sampler.
@@ -2184,6 +2279,27 @@ static void destroy_compute_pipelines(vk_backend_t* be)
         be->vkDestroyDescriptorPool(be->device, be->fDescPool, NULL);
         be->fDescPool = VK_NULL_HANDLE;
     }
+
+    // §I.C.5.a Q0/Q2 variants destroyed first (Q1 entries are aliases of
+    // fShader[FRUC_PIPE_ME]/fPipeline[FRUC_PIPE_ME] etc, freed below).
+    for (int q = 0; q < 3; q++) {
+        if (q == 1) continue;  // alias, freed via fShader[]/fPipeline[]
+        if (be->fMePipelineQ[q])   be->vkDestroyPipeline(be->device, be->fMePipelineQ[q], NULL);
+        if (be->fWarpPipelineQ[q]) be->vkDestroyPipeline(be->device, be->fWarpPipelineQ[q], NULL);
+        if (be->fMeShaderQ[q])     be->vkDestroyShaderModule(be->device, be->fMeShaderQ[q], NULL);
+        if (be->fWarpShaderQ[q])   be->vkDestroyShaderModule(be->device, be->fWarpShaderQ[q], NULL);
+        be->fMePipelineQ[q]   = VK_NULL_HANDLE;
+        be->fWarpPipelineQ[q] = VK_NULL_HANDLE;
+        be->fMeShaderQ[q]     = VK_NULL_HANDLE;
+        be->fWarpShaderQ[q]   = VK_NULL_HANDLE;
+    }
+    // Clear the Q1 alias slots so they don't dangle (the actual handles
+    // are freed via fPipeline[FRUC_PIPE_ME] / fShader[FRUC_PIPE_ME] below).
+    be->fMePipelineQ[1]   = VK_NULL_HANDLE;
+    be->fWarpPipelineQ[1] = VK_NULL_HANDLE;
+    be->fMeShaderQ[1]     = VK_NULL_HANDLE;
+    be->fWarpShaderQ[1]   = VK_NULL_HANDLE;
+
     for (int i = 0; i < FRUC_NUM_PIPELINES; i++) {
         if (be->fPipeline[i])   be->vkDestroyPipeline(be->device, be->fPipeline[i], NULL);
         if (be->fPipeLayout[i]) be->vkDestroyPipelineLayout(be->device, be->fPipeLayout[i], NULL);
@@ -2276,9 +2392,11 @@ static int dispatch_fruc(vk_backend_t* be, VkImageView ahbView)
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 1, &mb_compute, 0, NULL, 0, NULL);
 
-    // ---- Dispatch 2: motionest_q1 (prev+curr+prev_mv → mv) ----
+    // ---- Dispatch 2: motionest (prev+curr+prev_mv → mv) ----
+    // §I.C.5.a: pick Q variant; default Q1.
+    int qIdx = (be->fQualityLevel >= 0 && be->fQualityLevel <= 2) ? be->fQualityLevel : 1;
     be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                          be->fPipeline[FRUC_PIPE_ME]);
+                          be->fMePipelineQ[qIdx]);
     be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                                 be->fPipeLayout[FRUC_PIPE_ME], 0, 1,
                                 &be->fDescSet[FRUC_PIPE_ME], 0, NULL);
@@ -2308,9 +2426,10 @@ static int dispatch_fruc(vk_backend_t* be, VkImageView ahbView)
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 1, &mb_compute, 0, NULL, 0, NULL);
 
-    // ---- Dispatch 4: warp_q1 (prev+curr+filt_mv → interp) ----
+    // ---- Dispatch 4: warp (prev+curr+filt_mv → interp) ----
+    // §I.C.5.a: pick Q variant matching the ME variant.
     be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                          be->fPipeline[FRUC_PIPE_WARP]);
+                          be->fWarpPipelineQ[qIdx]);
     be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                                 be->fPipeLayout[FRUC_PIPE_WARP], 0, 1,
                                 &be->fDescSet[FRUC_PIPE_WARP], 0, NULL);
@@ -2375,8 +2494,8 @@ static int dispatch_fruc(vk_backend_t* be, VkImageView ahbView)
         0, 1, &mb_xfer_to_compute, 0, NULL, 0, NULL);
 
     if (be->frameCounter <= 5 || be->frameCounter % 120 == 0) {
-        LOGI("[VKBE-COMPUTE] dispatch frame #%d: ycbcr+motionest_q1+mv_median+warp_q1 + prev rotate",
-             be->frameCounter);
+        LOGI("[VKBE-COMPUTE] dispatch frame #%d: ycbcr+motionest_q%d+mv_median+warp_q%d + prev rotate",
+             be->frameCounter, qIdx, qIdx);
     }
     return 0;
 }
@@ -2819,6 +2938,22 @@ Java_com_limelight_binding_video_VkBackend_nativeGetInterpolatedCount(
     vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
     if (!be) return 0;
     return (jint)be->fInterpolatedCount;
+}
+
+JNIEXPORT void JNICALL
+Java_com_limelight_binding_video_VkBackend_nativeSetQualityLevel(
+    JNIEnv* env, jclass clazz, jlong handle, jint level)
+{
+    vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
+    if (!be) return;
+    int q = (int)level;
+    if (q < 0) q = 0;
+    if (q > 2) q = 2;
+    if (q != be->fQualityLevel) {
+        LOGI("[VKBE-COMPUTE] qualityLevel %d -> %d (motionest_q%d + warp_q%d)",
+             be->fQualityLevel, q, q, q);
+        be->fQualityLevel = q;
+    }
 }
 
 JNIEXPORT jint JNICALL

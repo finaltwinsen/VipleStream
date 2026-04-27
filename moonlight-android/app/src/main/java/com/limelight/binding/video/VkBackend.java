@@ -92,6 +92,13 @@ public final class VkBackend implements IFrucBackend {
     @Override public void setConnectionPoor(boolean poor) {}
     @Override public void setQualityLevel(int level) {
         this.qualityLevel = Math.max(0, Math.min(2, level));
+        // §I.C.5.a: push down so dispatch_fruc picks motionest_q<N> + warp_q<N>
+        // matching the user's preset. nativeHandle 0 == backend not init'd
+        // yet — ignore; init_compute_pipelines defaults to Q1, the new value
+        // takes effect on the next setQualityLevel call after init.
+        if (nativeHandle != 0) {
+            nativeSetQualityLevel(nativeHandle, this.qualityLevel);
+        }
     }
 
     /**
@@ -300,6 +307,7 @@ public final class VkBackend implements IFrucBackend {
     private static native int  nativeImportAhb(long handle, HardwareBuffer hwBuffer);
     private static native int  nativeRenderFrame(long handle, HardwareBuffer hwBuffer);
     private static native int  nativeGetInterpolatedCount(long handle);
+    private static native void nativeSetQualityLevel(long handle, int level);
 
     /**
      * Read {@code debug.viplestream.vkprobe} via reflection so we don't
