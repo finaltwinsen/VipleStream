@@ -221,7 +221,7 @@ GLES 路徑現在用 4 個 program × 3 quality 變體（共 10 個 GLSL）+ 827
 
 | Sub-phase | 內容 | 風險 / 失敗點 |
 |---|---|---|
-| **C.1** Recon — shader port spec | 把 4 個 GLSL（motionest_compute / mv_median / warp_compute / blit）的 inputs / outputs / uniforms / image bindings 列表，標出 GLSL 310 es → 450 SPIR-V 的具體差異點。**Doc only，不 ship 程式碼。** | 低；不動執行路徑 |
+| ~~**C.1** Recon — shader port spec~~ ✅ v1.2.149 | 已 ship 為 `docs/vulkan_fruc_port.md`：5 個 shader 的 binding / uniform / size 全部列；GLSL 310 ES → 450 差異對照；7 個 storage / sampled image 規劃；per-frame command buffer 草案；7 個風險點。 | 低；不動執行路徑 |
 | **C.2** Shader port — compile only | 把 4 個 GLSL 翻成 GLSL 450，用 `glslc` 編成 `.spv` + `xxd -i` 包成 `.spv.h`，**只進 build、不接 pipeline**。Quality preset 的 3 個 ME 變體用 `-DQUALITY_LEVEL=N` 編 3 份 SPV。 | 中；GLES `imageStore` / `bitCount` 行為差異可能要重寫 |
 | **C.3** Compute pipeline scaffold | 在 VkBackend 加 4 個 `VkPipeline` (compute) + descriptor set layouts；分配 storage images（prev/curr RGBA、motionField、filteredMotionField、interpFrame）；**dispatch 但不 sample 結果到 swapchain**。 | 中；storage image format / access flags |
 | **C.4** Wire compute → present | `render_ahb_frame` 改成 `import AHB → blit YCbCr→curr_rgba → ME → median → warp → 雙 blit (interp + real) → present`；保持每 frame `vkQueueWaitIdle`（暫時）。 | 高；FRUC algo 視覺正確性 |
