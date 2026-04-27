@@ -81,10 +81,13 @@ public final class VkBackend implements IFrucBackend {
 
     @Override public String backendName() { return BACKEND; }
     @Override public boolean isInitialized() { return initialized; }
-    // §I.B is a passthrough backend (1 input frame → 1 present), no actual
-    // FRUC interpolation yet. §I.C wires the compute pipeline that produces
-    // interpolated frames; this counter starts incrementing then.
-    @Override public int getInterpolatedCount() { return 0; }
+    // §I.C.4.b dual present: native side increments fInterpolatedCount once
+    // per render_ahb_frame whenever the FRUC compute pipeline is up
+    // (pass 1 = synthesized interp, pass 2 = real). When init is partial
+    // and we fall back to single-present AHB, the counter stays at 0.
+    @Override public int getInterpolatedCount() {
+        return nativeHandle != 0 ? nativeGetInterpolatedCount(nativeHandle) : 0;
+    }
     @Override public float getOutputFps() { return currentOutputFps; }
     @Override public void setConnectionPoor(boolean poor) {}
     @Override public void setQualityLevel(int level) {
@@ -296,6 +299,7 @@ public final class VkBackend implements IFrucBackend {
     private static native int  nativeRenderClearFrame(long handle);
     private static native int  nativeImportAhb(long handle, HardwareBuffer hwBuffer);
     private static native int  nativeRenderFrame(long handle, HardwareBuffer hwBuffer);
+    private static native int  nativeGetInterpolatedCount(long handle);
 
     /**
      * Read {@code debug.viplestream.vkprobe} via reflection so we don't

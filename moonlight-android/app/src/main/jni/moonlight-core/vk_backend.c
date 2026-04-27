@@ -231,6 +231,12 @@ typedef struct vk_backend_s {
     VkPipelineLayout      fInterpPipeLayout;
     VkPipeline            fInterpPipeline;
     VkDescriptorSet       fInterpDescSet;
+
+    // §I.C.4.b dual present counter: # of synthesized in-between frames
+    // (1 per render_ahb_frame invocation when fInitialized — pass 1 is
+    // the interp, pass 2 is the real). Read back from Java via
+    // nativeGetInterpolatedCount for the perf overlay.
+    int                   fInterpolatedCount;
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -2707,9 +2713,96 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     // frame. Simple but slow — Phase D will queue these for delayed free.
     be->vkQueueWaitIdle(be->graphicsQueue);
 
+    // ============================================================
+    // §I.C.4.b — PASS 2: real (AHB direct via graphics pipeline)
+    // ============================================================
+    // PASS 1 above presented the interp frame; now present the real
+    // frame on top. Dual present semantics matches GLES path:
+    // each input frame produces (interp, real) pair on display.
+    //
+    // Skip when fInitialized=0 — the fall-back path already showed the
+    // AHB directly in PASS 1, so a second pass would duplicate it.
+    //
+    // imgIn / viewIn are still SHADER_READ_ONLY_OPTIMAL from PASS 1's
+    // inAcquire barrier (queue-idle drained, layout unchanged), no
+    // additional barrier needed. Semaphores reuse safely: each
+    // submit/present wait drains them back to unsignaled.
+    if (be->fInitialized) {
+        uint32_t imgIdx2 = 0;
+        VkResult r2 = be->vkAcquireNextImageKHR(be->device, be->swapchain, 100000000ULL,
+                                                 be->acquireSem, VK_NULL_HANDLE, &imgIdx2);
+        if (r2 != VK_SUCCESS && r2 != VK_SUBOPTIMAL_KHR) {
+            LOGW("[VKBE-COMPUTE] PASS 2 acquire failed: %d", r2);
+            goto fail_cleanup_imported;
+        }
+
+        be->vkResetCommandBuffer(be->cmdBuffer, 0);
+        VkCommandBufferBeginInfo bbi2 = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        };
+        if (be->vkBeginCommandBuffer(be->cmdBuffer, &bbi2) != VK_SUCCESS) goto fail_cleanup_imported;
+
+        VkClearValue cv2 = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
+        VkRenderPassBeginInfo rpbi2 = {
+            .sType        = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass   = be->renderPass,
+            .framebuffer  = be->framebuffers[imgIdx2],
+            .renderArea   = { {0, 0}, be->swapchainExtent },
+            .clearValueCount = 1,
+            .pClearValues = &cv2,
+        };
+        be->vkCmdBeginRenderPass(be->cmdBuffer, &rpbi2, VK_SUBPASS_CONTENTS_INLINE);
+        be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, be->graphicsPipeline);
+        be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    be->pipelineLayout, 0, 1, &be->descSet, 0, NULL);
+        float uvScale_real[2] = {
+            (be->videoWidth  > 0 && be->ahbPaddedWidth  > 0)
+                ? (float)be->videoWidth  / (float)be->ahbPaddedWidth  : 1.0f,
+            (be->videoHeight > 0 && be->ahbPaddedHeight > 0)
+                ? (float)be->videoHeight / (float)be->ahbPaddedHeight : 1.0f,
+        };
+        be->vkCmdPushConstants(be->cmdBuffer, be->pipelineLayout,
+                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uvScale_real), uvScale_real);
+        be->vkCmdDraw(be->cmdBuffer, 3, 1, 0, 0);
+        be->vkCmdEndRenderPass(be->cmdBuffer);
+
+        if (be->vkEndCommandBuffer(be->cmdBuffer) != VK_SUCCESS) goto fail_cleanup_imported;
+
+        VkSubmitInfo si2 = {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &be->acquireSem,
+            .pWaitDstStageMask = &waitStage,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &be->cmdBuffer,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &be->renderDoneSem,
+        };
+        if (be->vkQueueSubmit(be->graphicsQueue, 1, &si2, VK_NULL_HANDLE) != VK_SUCCESS)
+            goto fail_cleanup_imported;
+
+        VkPresentInfoKHR pi2 = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &be->renderDoneSem,
+            .swapchainCount = 1,
+            .pSwapchains = &be->swapchain,
+            .pImageIndices = &imgIdx2,
+        };
+        VkResult rp2 = be->vkQueuePresentKHR(be->graphicsQueue, &pi2);
+        if (rp2 != VK_SUCCESS && rp2 != VK_SUBOPTIMAL_KHR) {
+            LOGW("[VKBE-COMPUTE] PASS 2 present failed: %d", rp2);
+        }
+        be->vkQueueWaitIdle(be->graphicsQueue);
+        be->fInterpolatedCount++;
+    }
+
     be->frameCounter++;
     if (be->frameCounter <= 5 || be->frameCounter % 120 == 0) {
-        LOGI("render_ahb_frame #%d (img=%u, src=%ux%u)", be->frameCounter, imgIdx, srcW, srcH);
+        LOGI("render_ahb_frame #%d (img=%u, src=%ux%u)%s",
+             be->frameCounter, imgIdx, srcW, srcH,
+             be->fInitialized ? " [dual present]" : "");
     }
 
 fail_cleanup_imported:
@@ -2717,6 +2810,15 @@ fail_cleanup_imported:
     if (imgIn)  be->vkDestroyImage(be->device, imgIn, NULL);
     if (memIn)  be->vkFreeMemory(be->device, memIn, NULL);
     return 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_limelight_binding_video_VkBackend_nativeGetInterpolatedCount(
+    JNIEnv* env, jclass clazz, jlong handle)
+{
+    vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
+    if (!be) return 0;
+    return (jint)be->fInterpolatedCount;
 }
 
 JNIEXPORT jint JNICALL
