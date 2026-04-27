@@ -296,6 +296,18 @@ typedef struct vk_backend_s {
     int                  fSlotHasPending[VK_FRAMES_IN_FLIGHT];
     uint32_t             fCurrentSlot;
     int                  fRingInitialized;
+
+    // §I.D.b smart-mode dual present — when input fps ≈ display refresh
+    // (e.g. 60 FPS input on 60 Hz panel), dual present (interp + real)
+    // throttles input from 60→45 because of FIFO vsync gating. Detect
+    // this and degrade to single present (real only, skip interp) so
+    // input rate matches display rate. When input < display (e.g. 30
+    // in 60Hz, 45 in 90Hz), keep dual present so FRUC actually adds
+    // frames. Decision is per-frame; measurement is a 1s sliding window.
+    uint64_t             fInputWindowStartNs;
+    int                  fInputWindowFrames;
+    float                fInputFpsRecent;     // 0 = not yet measured
+    int                  fLastSingleMode;     // 0 = dual, 1 = single (for log spam suppression)
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -3031,13 +3043,46 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
 
     // ============================================================
     // §I.D — fast path: dual-present via in-flight ring (NO waitIdle)
+    // §I.D.b — degrades to single present when input fps ≈ display fps
     // ============================================================
     // Frame N+1's CPU work (record + AHB import + descriptor update)
-    // overlaps frame N-1's GPU work (waiting on slot[N-1].fence here at
-    // entry, but slot[N]'s fence is wait-free if it's been ≥1 frame).
-    // 1 cmdbuf with 2 render passes (interp + real) → 1 submit → 2
-    // presents (PTS-paced via §I.C.6).
+    // overlaps frame N-1's GPU work. 1 cmdbuf with 1 or 2 render passes
+    // depending on mode. Mode decision: dual present (interp + real) only
+    // makes sense when input < display (so FRUC adds frames); when input
+    // ≈ display, dual present's 2× vsync wait throttles input rate, so
+    // we drop to single present (real only) to match input.
     uint32_t slot = be->fCurrentSlot;
+
+    // Update input-fps sliding window. Measurement is the rate at which
+    // nativeRenderFrame is called (= effective MediaCodec ImageReader
+    // delivery rate). Initial state: fInputFpsRecent=0 → singleMode=0
+    // (dual default until first second elapses).
+    {
+        uint64_t now_ns = monotonic_ns();
+        if (be->fInputWindowStartNs == 0) be->fInputWindowStartNs = now_ns;
+        be->fInputWindowFrames++;
+        uint64_t window_ns = now_ns - be->fInputWindowStartNs;
+        if (window_ns >= 1000000000ULL) {
+            be->fInputFpsRecent = (float)be->fInputWindowFrames * 1.0e9f / (float)window_ns;
+            be->fInputWindowStartNs = now_ns;
+            be->fInputWindowFrames = 0;
+        }
+    }
+    float displayHz = (be->fRefreshDurationNs > 0)
+        ? (1.0e9f / (float)be->fRefreshDurationNs)
+        : 60.0f;
+    // singleMode iff input is within 8% of display rate (gives margin so
+    // small jitter doesn't flip-flop). Stay in dual until measurement
+    // settles (fInputFpsRecent==0).
+    int singleMode = (be->fInputFpsRecent > 0.0f) &&
+                     (be->fInputFpsRecent >= displayHz * 0.92f);
+    if (singleMode != be->fLastSingleMode) {
+        LOGI("[VKBE-RING] mode change: %s → %s (input ~%.1f FPS, display %.1f Hz)",
+             be->fLastSingleMode ? "single" : "dual",
+             singleMode           ? "single" : "dual",
+             (double)be->fInputFpsRecent, (double)displayHz);
+        be->fLastSingleMode = singleMode;
+    }
 
     // Wait for slot's previous in-flight GPU work to drain. First frame
     // hits a signaled fence (init_in_flight_ring set SIGNALED bit), so
@@ -3059,10 +3104,9 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     }
     be->vkResetFences(be->device, 1, &be->fSlotInFlightFence[slot]);
 
-    // Acquire 2 swapchain images — one per pass. Need them up-front so we
-    // can record both render passes' framebuffer indices in the cmdbuf.
-    // swapchainImageCount=5 + 2 in-flight slots × 2 acquires = 4 images
-    // needed; well within budget.
+    // Acquire 1 (single mode) or 2 (dual mode) swapchain images.
+    // singleMode uses slot.acquireSem[0] / renderDoneSem[0] for the only
+    // pass; dual mode uses both [0]/[1].
     uint32_t imgIdxPass1 = 0, imgIdxPass2 = 0;
     VkResult rA1 = be->vkAcquireNextImageKHR(be->device, be->swapchain, 100000000ULL,
                                               be->fSlotAcquireSem[slot][0], VK_NULL_HANDLE,
@@ -3071,12 +3115,14 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         LOGW("[VKBE-RING] PASS 1 acquire failed: %d", rA1);
         goto ring_fail_drop_imported;
     }
-    VkResult rA2 = be->vkAcquireNextImageKHR(be->device, be->swapchain, 100000000ULL,
-                                              be->fSlotAcquireSem[slot][1], VK_NULL_HANDLE,
-                                              &imgIdxPass2);
-    if (rA2 != VK_SUCCESS && rA2 != VK_SUBOPTIMAL_KHR) {
-        LOGW("[VKBE-RING] PASS 2 acquire failed: %d", rA2);
-        goto ring_fail_drop_imported;
+    if (!singleMode) {
+        VkResult rA2 = be->vkAcquireNextImageKHR(be->device, be->swapchain, 100000000ULL,
+                                                  be->fSlotAcquireSem[slot][1], VK_NULL_HANDLE,
+                                                  &imgIdxPass2);
+        if (rA2 != VK_SUCCESS && rA2 != VK_SUBOPTIMAL_KHR) {
+            LOGW("[VKBE-RING] PASS 2 acquire failed: %d", rA2);
+            goto ring_fail_drop_imported;
+        }
     }
 
     // Record cmdbuf. dispatch_fruc still uses be->cmdBuffer internally —
@@ -3136,8 +3182,8 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
             0, 1, &mb_compute_to_frag, 0, NULL, 0, NULL);
     }
 
-    // ---- Render pass 1 (interp): sample interpFrame, present to imgIdxPass1 ----
-    {
+    // ---- Render pass 1 (interp): sample interpFrame → imgIdxPass1 (dual only) ----
+    if (!singleMode) {
         VkClearValue cv = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
         VkRenderPassBeginInfo rpbi = {
             .sType        = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -3158,13 +3204,16 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         be->vkCmdEndRenderPass(slotCmd);
     }
 
-    // ---- Render pass 2 (real): sample AHB direct, present to imgIdxPass2 ----
+    // ---- Render pass 2 (real): sample AHB direct ----
+    // Target framebuffer = imgIdxPass2 in dual mode, imgIdxPass1 in single
+    // mode (we only acquired one image and skipped the interp pass).
     {
+        uint32_t realFbIdx = singleMode ? imgIdxPass1 : imgIdxPass2;
         VkClearValue cv = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
         VkRenderPassBeginInfo rpbi = {
             .sType        = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .renderPass   = be->renderPass,
-            .framebuffer  = be->framebuffers[imgIdxPass2],
+            .framebuffer  = be->framebuffers[realFbIdx],
             .renderArea   = { {0, 0}, be->swapchainExtent },
             .clearValueCount = 1,
             .pClearValues = &cv,
@@ -3197,23 +3246,23 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     }
     be->cmdBuffer = saveLegacyCmd;
 
-    // Single submit with 2 wait sems + 2 signal sems + fence. Both
-    // acquires gate at COLOR_ATTACHMENT_OUTPUT (where each pass writes
-    // its respective swapchain image's framebuffer).
+    // Single submit with 1 (single mode) or 2 (dual) wait/signal sems +
+    // fence. Acquires gate at COLOR_ATTACHMENT_OUTPUT.
     VkPipelineStageFlags waitStages[2] = {
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
     };
     VkSemaphore waitSems[2]   = { be->fSlotAcquireSem[slot][0],   be->fSlotAcquireSem[slot][1] };
     VkSemaphore signalSems[2] = { be->fSlotRenderDoneSem[slot][0], be->fSlotRenderDoneSem[slot][1] };
+    uint32_t semCount = singleMode ? 1u : 2u;
     VkSubmitInfo si = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .waitSemaphoreCount = 2,
+        .waitSemaphoreCount = semCount,
         .pWaitSemaphores = waitSems,
         .pWaitDstStageMask = waitStages,
         .commandBufferCount = 1,
         .pCommandBuffers = &slotCmd,
-        .signalSemaphoreCount = 2,
+        .signalSemaphoreCount = semCount,
         .pSignalSemaphores = signalSems,
     };
     if (be->vkQueueSubmit(be->graphicsQueue, 1, &si, be->fSlotInFlightFence[slot]) != VK_SUCCESS) {
@@ -3221,44 +3270,67 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         goto ring_fail_drop_imported;
     }
 
-    // §I.C.6 — PTS for both presents.
+    // §I.C.6 — PTS for the present(s). In single mode we only have 1
+    // present; PASS 1 here = the real frame (we mapped imgIdxPass1 to
+    // graphics pipeline in render pass 2 above).
     uint64_t now_ns = monotonic_ns();
-    VkPresentTimeGOOGLE pt1 = { ++be->fPresentId, now_ns };
-    VkPresentTimesInfoGOOGLE pti1 = {
-        .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
-        .swapchainCount = 1, .pTimes = &pt1,
-    };
-    VkPresentInfoKHR pi1 = {
-        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = be->fDisplayTimingSupported ? &pti1 : NULL,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &be->fSlotRenderDoneSem[slot][0],
-        .swapchainCount = 1,
-        .pSwapchains = &be->swapchain,
-        .pImageIndices = &imgIdxPass1,
-    };
-    VkResult rp1 = be->vkQueuePresentKHR(be->graphicsQueue, &pi1);
-    if (rp1 != VK_SUCCESS && rp1 != VK_SUBOPTIMAL_KHR) LOGW("[VKBE-RING] PASS 1 present failed: %d", rp1);
+    if (singleMode) {
+        // Single present (real frame at imgIdxPass1, signaled by sem[0]).
+        VkPresentTimeGOOGLE pt = { ++be->fPresentId, now_ns };
+        VkPresentTimesInfoGOOGLE pti = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+            .swapchainCount = 1, .pTimes = &pt,
+        };
+        VkPresentInfoKHR pi = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = be->fDisplayTimingSupported ? &pti : NULL,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &be->fSlotRenderDoneSem[slot][0],
+            .swapchainCount = 1,
+            .pSwapchains = &be->swapchain,
+            .pImageIndices = &imgIdxPass1,
+        };
+        VkResult rp = be->vkQueuePresentKHR(be->graphicsQueue, &pi);
+        if (rp != VK_SUCCESS && rp != VK_SUBOPTIMAL_KHR) LOGW("[VKBE-RING] single present failed: %d", rp);
+    } else {
+        // Dual present (interp at imgIdxPass1, real at imgIdxPass2).
+        VkPresentTimeGOOGLE pt1 = { ++be->fPresentId, now_ns };
+        VkPresentTimesInfoGOOGLE pti1 = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+            .swapchainCount = 1, .pTimes = &pt1,
+        };
+        VkPresentInfoKHR pi1 = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = be->fDisplayTimingSupported ? &pti1 : NULL,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &be->fSlotRenderDoneSem[slot][0],
+            .swapchainCount = 1,
+            .pSwapchains = &be->swapchain,
+            .pImageIndices = &imgIdxPass1,
+        };
+        VkResult rp1 = be->vkQueuePresentKHR(be->graphicsQueue, &pi1);
+        if (rp1 != VK_SUCCESS && rp1 != VK_SUBOPTIMAL_KHR) LOGW("[VKBE-RING] PASS 1 present failed: %d", rp1);
 
-    uint64_t pass2_desired = (be->fRefreshDurationNs > 0)
-        ? now_ns + be->fRefreshDurationNs / 2
-        : monotonic_ns();
-    VkPresentTimeGOOGLE pt2 = { ++be->fPresentId, pass2_desired };
-    VkPresentTimesInfoGOOGLE pti2 = {
-        .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
-        .swapchainCount = 1, .pTimes = &pt2,
-    };
-    VkPresentInfoKHR pi2 = {
-        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = be->fDisplayTimingSupported ? &pti2 : NULL,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &be->fSlotRenderDoneSem[slot][1],
-        .swapchainCount = 1,
-        .pSwapchains = &be->swapchain,
-        .pImageIndices = &imgIdxPass2,
-    };
-    VkResult rp2 = be->vkQueuePresentKHR(be->graphicsQueue, &pi2);
-    if (rp2 != VK_SUCCESS && rp2 != VK_SUBOPTIMAL_KHR) LOGW("[VKBE-RING] PASS 2 present failed: %d", rp2);
+        uint64_t pass2_desired = (be->fRefreshDurationNs > 0)
+            ? now_ns + be->fRefreshDurationNs / 2
+            : monotonic_ns();
+        VkPresentTimeGOOGLE pt2 = { ++be->fPresentId, pass2_desired };
+        VkPresentTimesInfoGOOGLE pti2 = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+            .swapchainCount = 1, .pTimes = &pt2,
+        };
+        VkPresentInfoKHR pi2 = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = be->fDisplayTimingSupported ? &pti2 : NULL,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &be->fSlotRenderDoneSem[slot][1],
+            .swapchainCount = 1,
+            .pSwapchains = &be->swapchain,
+            .pImageIndices = &imgIdxPass2,
+        };
+        VkResult rp2 = be->vkQueuePresentKHR(be->graphicsQueue, &pi2);
+        if (rp2 != VK_SUCCESS && rp2 != VK_SUBOPTIMAL_KHR) LOGW("[VKBE-RING] PASS 2 present failed: %d", rp2);
+    }
 
     // Stash imgIn / memIn / viewIn into slot.pendingImg/Mem/View — they're
     // freed at start of next time this slot is reused (after that slot's
@@ -3270,11 +3342,23 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
 
     be->fCurrentSlot = (slot + 1) % VK_FRAMES_IN_FLIGHT;
     be->frameCounter++;
-    be->fInterpolatedCount++;
+    // Only count an "interpolated frame" when we actually synthesized one
+    // (dual mode); single mode is just real-frame passthrough through
+    // compute pipeline + graphics → no extra display frame produced.
+    if (!singleMode) {
+        be->fInterpolatedCount++;
+    }
 
     if (be->frameCounter <= 5 || be->frameCounter % 120 == 0) {
-        LOGI("render_ahb_frame #%d (slot=%u img=[%u,%u], src=%ux%u) [dual present, ring]",
-             be->frameCounter, slot, imgIdxPass1, imgIdxPass2, srcW, srcH);
+        if (singleMode) {
+            LOGI("render_ahb_frame #%d (slot=%u img=%u, src=%ux%u) [single, ring, in~%.1f]",
+                 be->frameCounter, slot, imgIdxPass1, srcW, srcH,
+                 (double)be->fInputFpsRecent);
+        } else {
+            LOGI("render_ahb_frame #%d (slot=%u img=[%u,%u], src=%ux%u) [dual, ring, in~%.1f]",
+                 be->frameCounter, slot, imgIdxPass1, imgIdxPass2, srcW, srcH,
+                 (double)be->fInputFpsRecent);
+        }
     }
 
     // §I.C.6 — periodic past-timing diagnostic (every 120 frames).
