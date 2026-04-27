@@ -1617,11 +1617,21 @@ Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz,
         (PFN_vkGetInstanceProcAddr)dlsym(be->libvulkan, "vkGetInstanceProcAddr");
     if (!be->vkGetInstanceProcAddr) { LOGE("dlsym vkGetInstanceProcAddr failed"); goto fail; }
 
-    if (create_instance(be) != 0) goto fail;
-    if (create_surface(be, env, jSurface) != 0) goto fail;
-    if (pick_physical_device_and_queue(be) != 0) goto fail;
-    if (create_device(be) != 0) goto fail;
-    if (create_swapchain(be) != 0) goto fail;
+    status_log("init step: create_instance ...");
+    if (create_instance(be) != 0) { status_log("FAIL: create_instance"); goto fail; }
+    status_log("init step: create_instance OK");
+    status_log("init step: create_surface ...");
+    if (create_surface(be, env, jSurface) != 0) { status_log("FAIL: create_surface"); goto fail; }
+    status_log("init step: create_surface OK");
+    status_log("init step: pick_physical_device_and_queue ...");
+    if (pick_physical_device_and_queue(be) != 0) { status_log("FAIL: pick_physical_device_and_queue"); goto fail; }
+    status_log("init step: pick_physical_device_and_queue OK (queueFamily=%u)", be->graphicsQueueFamily);
+    status_log("init step: create_device ...");
+    if (create_device(be) != 0) { status_log("FAIL: create_device (VK_EXT_hdr_metadata=%d, VK_GOOGLE_display_timing=%d)", be->fHdrMetadataExt, be->fDisplayTimingSupported); goto fail; }
+    status_log("init step: create_device OK");
+    status_log("init step: create_swapchain ...");
+    if (create_swapchain(be) != 0) { status_log("FAIL: create_swapchain"); goto fail; }
+    status_log("init step: create_swapchain OK");
 
     // B.2c.1 sanity: drive one acquire/clear/present roundtrip to prove
     // the swapchain actually renders end-to-end on this driver before we
@@ -1651,9 +1661,11 @@ Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz,
 
     LOGI("B.2c.3c.3 init complete: instance + surface + device + queue + swapchain "
          "+ render + AHB (graphics pipeline lazy-init on first AHB frame)");
+    status_log("init complete: instance + surface + device + queue + swapchain + render + AHB ready");
     return (jlong)(uintptr_t)be;
 
 fail:
+    status_log("nativeInit FAILED — backend handle=0 returned, Java will fall back to GLES path");
     if (be) {
         if (be->swapchainImages) free(be->swapchainImages);
         if (be->swapchain && be->vkDestroySwapchainKHR)
@@ -1666,6 +1678,7 @@ fail:
         if (be->libvulkan) dlclose(be->libvulkan);
         free(be);
     }
+    if (g_status_log) { fclose(g_status_log); g_status_log = NULL; }
     return 0;
 }
 
