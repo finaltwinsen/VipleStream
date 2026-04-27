@@ -221,6 +221,16 @@ typedef struct vk_backend_s {
     VkDescriptorSet       fDescSet[FRUC_NUM_PIPELINES];
     VkSampler             fLinearSampler;  // CLAMP_TO_EDGE LINEAR for warp's sampleMV
     int                   fInitialized;
+
+    // §I.C.4.a: second graphics pipeline that samples interpFrame (rgba8, no
+    // ycbcr conversion) via fLinearSampler — produced by warp_q1, currently
+    // not displayed. Reuses fullscreen.vert + video_sample.frag (same SPIR-V),
+    // only the descriptor layout differs because of the sampler swap. Bound
+    // in place of the existing graphicsPipeline once fInitialized.
+    VkDescriptorSetLayout fInterpDescLayout;
+    VkPipelineLayout      fInterpPipeLayout;
+    VkPipeline            fInterpPipeline;
+    VkDescriptorSet       fInterpDescSet;
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -1870,17 +1880,17 @@ static int init_compute_pipelines(vk_backend_t* be)
         return -1;
     }
 
-    // 7. Descriptor pool + 4 sets.
-    //    ycbcr(1 sampler + 1 storage) + me(3 sampler + 1 storage) +
-    //    mv_median(1 sampler + 1 storage) + warp(3 sampler + 1 storage)
-    //    = 8 sampler + 4 storage; pad sampler to 9 for slack.
+    // 7. Descriptor pool + 4 compute sets + 1 interp graphics set (§I.C.4.a).
+    //    Compute: ycbcr(1+1) + me(3+1) + mv_median(1+1) + warp(3+1) = 8 sampler + 4 storage.
+    //    Interp graphics: 1 sampler.
+    //    Total: 9 sampler + 4 storage, 5 sets. Pad sampler to 10 for slack.
     VkDescriptorPoolSize poolSizes[2] = {
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 9 },
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 10 },
         { .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,           .descriptorCount = 4 },
     };
     VkDescriptorPoolCreateInfo dpci = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = FRUC_NUM_PIPELINES,
+        .maxSets       = FRUC_NUM_PIPELINES + 1,
         .poolSizeCount = 2,
         .pPoolSizes    = poolSizes,
     };
@@ -2012,9 +2022,139 @@ static int init_compute_pipelines(vk_backend_t* be)
     }
     be->vkQueueWaitIdle(be->graphicsQueue);
 
+    // 10. §I.C.4.a — second graphics pipeline that samples interpFrame.
+    //     Same renderPass + fullscreen.vert + video_sample.frag as the
+    //     existing graphics pipeline; only the descriptor layout differs
+    //     (immutable sampler is fLinearSampler instead of ycbcrSampler).
+    {
+        VkDescriptorSetLayoutBinding b = {
+            .binding         = 0,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = &be->fLinearSampler,
+        };
+        VkDescriptorSetLayoutCreateInfo dslci = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = 1, .pBindings = &b,
+        };
+        if (be->vkCreateDescriptorSetLayout(be->device, &dslci, NULL,
+                                             &be->fInterpDescLayout) != VK_SUCCESS) {
+            LOGE("[VKBE-COMPUTE] interp graphics: descset_layout failed");
+            return -1;
+        }
+    }
+    {
+        VkDescriptorSetAllocateInfo dsai = {
+            .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool     = be->fDescPool,
+            .descriptorSetCount = 1,
+            .pSetLayouts        = &be->fInterpDescLayout,
+        };
+        if (be->vkAllocateDescriptorSets(be->device, &dsai, &be->fInterpDescSet) != VK_SUCCESS) {
+            LOGE("[VKBE-COMPUTE] interp graphics: AllocateDescriptorSets failed");
+            return -1;
+        }
+        VkDescriptorImageInfo iiInterpDisplay = {
+            .sampler     = VK_NULL_HANDLE,
+            .imageView   = be->fImageView[FRUC_IMG_INTERP],
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+        VkWriteDescriptorSet wdsInterp = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = be->fInterpDescSet,
+            .dstBinding      = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &iiInterpDisplay,
+        };
+        be->vkUpdateDescriptorSets(be->device, 1, &wdsInterp, 0, NULL);
+    }
+    {
+        // Same uvScale push constant as video_sample.frag (FRAGMENT, 8 bytes).
+        VkPushConstantRange pcRange = {
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .offset     = 0,
+            .size       = 8,
+        };
+        VkPipelineLayoutCreateInfo plci = {
+            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount         = 1,
+            .pSetLayouts            = &be->fInterpDescLayout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges    = &pcRange,
+        };
+        if (be->vkCreatePipelineLayout(be->device, &plci, NULL, &be->fInterpPipeLayout) != VK_SUCCESS) {
+            LOGE("[VKBE-COMPUTE] interp graphics: vkCreatePipelineLayout failed");
+            return -1;
+        }
+    }
+    {
+        VkPipelineShaderStageCreateInfo stages[2] = {
+            { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+              .stage = VK_SHADER_STAGE_VERTEX_BIT,
+              .module = be->vertShader, .pName = "main" },
+            { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+              .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+              .module = be->fragShader, .pName = "main" },
+        };
+        VkPipelineVertexInputStateCreateInfo vi = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        };
+        VkPipelineInputAssemblyStateCreateInfo ia = {
+            .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        };
+        VkViewport vp = { 0, 0,
+            (float)be->swapchainExtent.width, (float)be->swapchainExtent.height,
+            0.0f, 1.0f };
+        VkRect2D sc = { {0, 0}, be->swapchainExtent };
+        VkPipelineViewportStateCreateInfo vpst = {
+            .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            .viewportCount = 1, .pViewports = &vp,
+            .scissorCount  = 1, .pScissors  = &sc,
+        };
+        VkPipelineRasterizationStateCreateInfo rs = {
+            .sType            = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            .polygonMode      = VK_POLYGON_MODE_FILL,
+            .cullMode         = VK_CULL_MODE_NONE,
+            .frontFace        = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            .lineWidth        = 1.0f,
+        };
+        VkPipelineMultisampleStateCreateInfo ms = {
+            .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        };
+        VkPipelineColorBlendAttachmentState cbAtt = {
+            .blendEnable    = VK_FALSE,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        };
+        VkPipelineColorBlendStateCreateInfo cb = {
+            .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .attachmentCount = 1,
+            .pAttachments    = &cbAtt,
+        };
+        VkGraphicsPipelineCreateInfo gpci = {
+            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .stageCount          = 2,        .pStages           = stages,
+            .pVertexInputState   = &vi,      .pInputAssemblyState = &ia,
+            .pViewportState      = &vpst,    .pRasterizationState = &rs,
+            .pMultisampleState   = &ms,      .pColorBlendState  = &cb,
+            .layout              = be->fInterpPipeLayout,
+            .renderPass          = be->renderPass,
+            .subpass             = 0,
+        };
+        if (be->vkCreateGraphicsPipelines(be->device, VK_NULL_HANDLE, 1, &gpci, NULL,
+                                           &be->fInterpPipeline) != VK_SUCCESS) {
+            LOGE("[VKBE-COMPUTE] interp graphics: vkCreateGraphicsPipelines failed");
+            return -1;
+        }
+    }
+
     LOGI("[VKBE-COMPUTE] init done: 6 storage images (W=%u H=%u, mvW=%u mvH=%u), "
          "4 pipelines (ycbcr/motionest_q1/mv_median/warp_q1), 4 descsets, "
-         "static bindings written, prev images cleared",
+         "static bindings written, prev images cleared, interp graphics pipeline ready",
          W, H, mvW, mvH);
     be->fInitialized = 1;
     return 0;
@@ -2023,6 +2163,16 @@ static int init_compute_pipelines(vk_backend_t* be)
 static void destroy_compute_pipelines(vk_backend_t* be)
 {
     if (!be->fInitialized) return;
+
+    // §I.C.4.a interp graphics pipeline first (descSet was allocated from
+    // fDescPool which we destroy below; pipeline / layouts are independent).
+    if (be->fInterpPipeline)    be->vkDestroyPipeline(be->device, be->fInterpPipeline, NULL);
+    if (be->fInterpPipeLayout)  be->vkDestroyPipelineLayout(be->device, be->fInterpPipeLayout, NULL);
+    if (be->fInterpDescLayout)  be->vkDestroyDescriptorSetLayout(be->device, be->fInterpDescLayout, NULL);
+    be->fInterpPipeline   = VK_NULL_HANDLE;
+    be->fInterpPipeLayout = VK_NULL_HANDLE;
+    be->fInterpDescLayout = VK_NULL_HANDLE;
+    be->fInterpDescSet    = VK_NULL_HANDLE;
 
     if (be->fDescPool) {
         be->vkDestroyDescriptorPool(be->device, be->fDescPool, NULL);
@@ -2461,10 +2611,21 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         0, 0, NULL, 0, NULL, 1, &inAcquire);
 
     // §I.C.3.b: run FRUC compute pipeline before the graphics render pass.
-    // Output (interpFrame) is computed but not displayed — §I.C.4 wires
-    // it into the swapchain. Failure is non-fatal; graphics passthrough
-    // continues regardless.
+    // §I.C.4.a: interpFrame (warp output) is now sampled by the
+    // fInterpPipeline render pass below — make compute writes visible
+    // to fragment via a global memory barrier (interpFrame stays in
+    // GENERAL layout; only memory access barrier is needed).
     dispatch_fruc(be, viewIn);
+    if (be->fInitialized) {
+        VkMemoryBarrier mb_compute_to_frag = {
+            .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        };
+        be->vkCmdPipelineBarrier(be->cmdBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 1, &mb_compute_to_frag, 0, NULL, 0, NULL);
+    }
 
     VkClearValue cv = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
     VkRenderPassBeginInfo rpbi = {
@@ -2476,21 +2637,33 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         .pClearValues = &cv,
     };
     be->vkCmdBeginRenderPass(be->cmdBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
-    be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, be->graphicsPipeline);
+
+    // §I.C.4.a: when compute pipeline is up, draw from interpFrame (the
+    // warp output) instead of the AHB. interpFrame is rgba8 1920×1080 with
+    // no padding, so uvScale = (1, 1) and the (vUV.y, 1-vUV.x) rotation in
+    // video_sample.frag still applies (warp wrote in the same coordinate
+    // system as ycbcr_to_rgba which mirrors the AHB layout).
+    //
+    // If compute init failed, fall back to the existing AHB-direct path
+    // (uvScale = video / ahbPadded, sample via ycbcrSampler).
+    VkPipeline       chosenPipe   = be->fInitialized ? be->fInterpPipeline   : be->graphicsPipeline;
+    VkPipelineLayout chosenLayout = be->fInitialized ? be->fInterpPipeLayout : be->pipelineLayout;
+    VkDescriptorSet  chosenDescSet = be->fInitialized ? be->fInterpDescSet   : be->descSet;
+    float uvScale[2];
+    if (be->fInitialized) {
+        uvScale[0] = 1.0f;
+        uvScale[1] = 1.0f;
+    } else {
+        // Defensive: if either dim is 0 fall back to 1.0 → no scale, just Y-flip.
+        uvScale[0] = (be->videoWidth  > 0 && be->ahbPaddedWidth  > 0)
+            ? (float)be->videoWidth  / (float)be->ahbPaddedWidth  : 1.0f;
+        uvScale[1] = (be->videoHeight > 0 && be->ahbPaddedHeight > 0)
+            ? (float)be->videoHeight / (float)be->ahbPaddedHeight : 1.0f;
+    }
+    be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, chosenPipe);
     be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                be->pipelineLayout, 0, 1, &be->descSet, 0, NULL);
-    // Push uvScale: video is logical videoW × videoH inside an AHB padded
-    // to ahbPaddedW × ahbPaddedH. Frag shader does (u, 1-v) * uvScale to
-    // crop the padding and Y-flip to match swapchain origin convention.
-    // Defensive: if either dim is 0 (e.g. nativeInit got called with bad
-    // args) fall back to 1.0 → no scale, just the Y-flip.
-    float uvScale[2] = {
-        (be->videoWidth  > 0 && be->ahbPaddedWidth  > 0)
-            ? (float)be->videoWidth  / (float)be->ahbPaddedWidth  : 1.0f,
-        (be->videoHeight > 0 && be->ahbPaddedHeight > 0)
-            ? (float)be->videoHeight / (float)be->ahbPaddedHeight : 1.0f,
-    };
-    be->vkCmdPushConstants(be->cmdBuffer, be->pipelineLayout,
+                                chosenLayout, 0, 1, &chosenDescSet, 0, NULL);
+    be->vkCmdPushConstants(be->cmdBuffer, chosenLayout,
                            VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uvScale), uvScale);
     if (be->frameCounter == 0) {
         LOGI("uvScale push constants: x=%.4f (video %d / ahb %d) "
