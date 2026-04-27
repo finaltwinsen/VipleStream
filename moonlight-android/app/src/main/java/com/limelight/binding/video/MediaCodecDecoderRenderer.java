@@ -550,10 +550,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
         LimeLog.info("Configuring with format: "+format);
 
-        // VipleStream §I.B.1: try FRUC backends in priority order.
-        //   1. Vulkan, only if the user opted in via:
-        //        adb shell setprop debug.viplestream.vkprobe 1
-        //      Default users have this unset → Vulkan path skipped entirely.
+        // VipleStream §I.B.1 / §I.C.7: try FRUC backends in priority order.
+        //   1. Vulkan if either:
+        //        a) settings UI 「FRUC 後端：Vulkan (實驗)」勾選 (§I.C.7)
+        //        b) `adb shell setprop debug.viplestream.vkprobe 1` (dev override)
+        //      Default users have neither → Vulkan path skipped entirely.
         //   2. GLES (existing FrucRenderer) as fallback. Init failure here
         //      drops to direct rendering (FRUC OFF) the same way as before.
         Surface decoderOutputSurface = renderTarget.getSurface();
@@ -561,8 +562,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             int w = format.getInteger("width", 1920);
             int h = format.getInteger("height", 1080);
 
-            boolean vkOptIn = VkBackend.isOptedIn();
-            LimeLog.info("FRUC backend selection: VkBackend.isOptedIn() = " + vkOptIn);
+            boolean vkSetting = prefs.frucBackendVulkan;
+            boolean vkOverride = VkBackend.isOptedIn();
+            boolean vkOptIn = vkSetting || vkOverride;
+            LimeLog.info("FRUC backend selection: prefs.frucBackendVulkan="
+                    + vkSetting + " vkprobe-override=" + vkOverride
+                    + " → Vulkan=" + vkOptIn);
             if (vkOptIn) {
                 try {
                     IFrucBackend vk = new VkBackend(context);

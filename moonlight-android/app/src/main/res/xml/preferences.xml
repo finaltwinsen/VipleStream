@@ -293,6 +293,12 @@
             android:defaultValue="1"
             android:dependency="checkbox_enable_fruc" />
         <CheckBoxPreference
+            android:key="checkbox_fruc_backend_vulkan"
+            android:title="FRUC 後端：Vulkan (實驗)"
+            android:summary="預設 GLES — 在 Pixel 5 等廣泛驗測過。勾選後改用 Vulkan compute pipeline (§I.C 階段，目前 60 FPS input 會 throttle 到 45 FPS、thermal +4°C；§I.D async compute 之後改善)。如果 stream 看起來不對請取消這個勾。"
+            android:defaultValue="false"
+            android:dependency="checkbox_enable_fruc" />
+        <CheckBoxPreference
             android:key="checkbox_full_range"
             android:title="@string/title_full_range"
             android:summary="@string/summary_full_range"
