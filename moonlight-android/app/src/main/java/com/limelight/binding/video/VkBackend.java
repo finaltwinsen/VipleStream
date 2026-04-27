@@ -96,13 +96,13 @@ public final class VkBackend implements IFrucBackend {
             return null;
         }
 
-        // B.2b stops here intentionally — Vulkan instance/device/surface/
-        // swapchain are all alive, but we have no MediaCodec→VkImage
-        // import path yet (B.2c) and no acquire/blit/present loop. Tear
-        // everything down so the displaySurface is free for GLES to
-        // claim via eglCreateWindowSurface.
-        Log.i(TAG, "B.2b — instance/device/surface/swapchain ready, but no MediaCodec→VkImage "
-                 + "import yet. Tearing down and declining → GLES fallback.");
+        // Phase B.2c work-in-progress: native init has built the full Vulkan
+        // pipeline up to a one-shot acquire/clear/present sanity check, but
+        // we still don't have MediaCodec→VkImage import or a steady-state
+        // render loop. Tear everything down so displaySurface is free for
+        // GLES to claim via eglCreateWindowSurface.
+        Log.i(TAG, "Vulkan resources ready, but no MediaCodec→VkImage import yet. "
+                 + "Tearing down and declining → GLES fallback.");
         nativeDestroy(nativeHandle);
         nativeHandle = 0;
         return null;

@@ -388,6 +388,194 @@ static int create_swapchain(vk_backend_t* be)
     return 0;
 }
 
+// ---------- B.2c.1: one-shot acquire/clear/present sanity ----------
+
+static int sanity_present(vk_backend_t* be)
+{
+    PFN_vkAcquireNextImageKHR vkAcquireNextImageKHR =
+        (PFN_vkAcquireNextImageKHR)be->vkGetDeviceProcAddr(be->device, "vkAcquireNextImageKHR");
+    PFN_vkQueuePresentKHR vkQueuePresentKHR =
+        (PFN_vkQueuePresentKHR)be->vkGetDeviceProcAddr(be->device, "vkQueuePresentKHR");
+    PFN_vkQueueSubmit vkQueueSubmit =
+        (PFN_vkQueueSubmit)be->vkGetDeviceProcAddr(be->device, "vkQueueSubmit");
+    PFN_vkQueueWaitIdle vkQueueWaitIdle =
+        (PFN_vkQueueWaitIdle)be->vkGetDeviceProcAddr(be->device, "vkQueueWaitIdle");
+    PFN_vkCreateSemaphore vkCreateSemaphore =
+        (PFN_vkCreateSemaphore)be->vkGetDeviceProcAddr(be->device, "vkCreateSemaphore");
+    PFN_vkDestroySemaphore vkDestroySemaphore =
+        (PFN_vkDestroySemaphore)be->vkGetDeviceProcAddr(be->device, "vkDestroySemaphore");
+    PFN_vkCreateCommandPool vkCreateCommandPool =
+        (PFN_vkCreateCommandPool)be->vkGetDeviceProcAddr(be->device, "vkCreateCommandPool");
+    PFN_vkDestroyCommandPool vkDestroyCommandPool =
+        (PFN_vkDestroyCommandPool)be->vkGetDeviceProcAddr(be->device, "vkDestroyCommandPool");
+    PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers =
+        (PFN_vkAllocateCommandBuffers)be->vkGetDeviceProcAddr(be->device, "vkAllocateCommandBuffers");
+    PFN_vkBeginCommandBuffer vkBeginCommandBuffer =
+        (PFN_vkBeginCommandBuffer)be->vkGetDeviceProcAddr(be->device, "vkBeginCommandBuffer");
+    PFN_vkEndCommandBuffer vkEndCommandBuffer =
+        (PFN_vkEndCommandBuffer)be->vkGetDeviceProcAddr(be->device, "vkEndCommandBuffer");
+    PFN_vkCmdClearColorImage vkCmdClearColorImage =
+        (PFN_vkCmdClearColorImage)be->vkGetDeviceProcAddr(be->device, "vkCmdClearColorImage");
+    PFN_vkCmdPipelineBarrier vkCmdPipelineBarrier =
+        (PFN_vkCmdPipelineBarrier)be->vkGetDeviceProcAddr(be->device, "vkCmdPipelineBarrier");
+
+    if (!vkAcquireNextImageKHR || !vkQueuePresentKHR || !vkQueueSubmit ||
+        !vkQueueWaitIdle || !vkCreateSemaphore || !vkDestroySemaphore ||
+        !vkCreateCommandPool || !vkDestroyCommandPool || !vkAllocateCommandBuffers ||
+        !vkBeginCommandBuffer || !vkEndCommandBuffer ||
+        !vkCmdClearColorImage || !vkCmdPipelineBarrier) {
+        LOGE("sanity_present: device proc loading failed");
+        return -1;
+    }
+
+    int rc = -1;
+    VkSemaphore acquireSem = VK_NULL_HANDLE;
+    VkSemaphore renderDoneSem = VK_NULL_HANDLE;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+
+    VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    if (vkCreateSemaphore(be->device, &sci, NULL, &acquireSem) != VK_SUCCESS ||
+        vkCreateSemaphore(be->device, &sci, NULL, &renderDoneSem) != VK_SUCCESS) {
+        LOGE("sanity_present: vkCreateSemaphore failed");
+        goto cleanup;
+    }
+
+    VkCommandPoolCreateInfo pci = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = be->graphicsQueueFamily,
+    };
+    if (vkCreateCommandPool(be->device, &pci, NULL, &pool) != VK_SUCCESS) {
+        LOGE("sanity_present: vkCreateCommandPool failed");
+        goto cleanup;
+    }
+
+    VkCommandBufferAllocateInfo cai = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    if (vkAllocateCommandBuffers(be->device, &cai, &cb) != VK_SUCCESS) {
+        LOGE("sanity_present: vkAllocateCommandBuffers failed");
+        goto cleanup;
+    }
+
+    uint32_t imgIdx = 0;
+    VkResult r = vkAcquireNextImageKHR(be->device, be->swapchain, 1000000000ULL,
+                                       acquireSem, VK_NULL_HANDLE, &imgIdx);
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+        LOGE("sanity_present: vkAcquireNextImageKHR failed (VkResult=%d)", r);
+        goto cleanup;
+    }
+    LOGI("sanity_present: acquired image index %u (VkResult=%d)", imgIdx, r);
+
+    VkCommandBufferBeginInfo bbi = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    if (vkBeginCommandBuffer(cb, &bbi) != VK_SUCCESS) {
+        LOGE("sanity_present: vkBeginCommandBuffer failed");
+        goto cleanup;
+    }
+
+    VkImageSubresourceRange range = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0, .levelCount = 1,
+        .baseArrayLayer = 0, .layerCount = 1,
+    };
+
+    // UNDEFINED → TRANSFER_DST_OPTIMAL
+    VkImageMemoryBarrier toDst = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = be->swapchainImages[imgIdx],
+        .subresourceRange = range,
+    };
+    vkCmdPipelineBarrier(cb,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, NULL, 0, NULL, 1, &toDst);
+
+    // Clear with VipleStream-ish dark green so it's distinguishable
+    VkClearColorValue clearColor = { .float32 = { 0.0f, 0.18f, 0.0f, 1.0f } };
+    vkCmdClearColorImage(cb, be->swapchainImages[imgIdx],
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         &clearColor, 1, &range);
+
+    // TRANSFER_DST_OPTIMAL → PRESENT_SRC_KHR
+    VkImageMemoryBarrier toPresent = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = 0,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = be->swapchainImages[imgIdx],
+        .subresourceRange = range,
+    };
+    vkCmdPipelineBarrier(cb,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0, 0, NULL, 0, NULL, 1, &toPresent);
+
+    if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
+        LOGE("sanity_present: vkEndCommandBuffer failed");
+        goto cleanup;
+    }
+
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo si = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &acquireSem,
+        .pWaitDstStageMask = &waitStage,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &cb,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &renderDoneSem,
+    };
+    if (vkQueueSubmit(be->graphicsQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+        LOGE("sanity_present: vkQueueSubmit failed");
+        goto cleanup;
+    }
+
+    VkPresentInfoKHR pi = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &renderDoneSem,
+        .swapchainCount = 1,
+        .pSwapchains = &be->swapchain,
+        .pImageIndices = &imgIdx,
+    };
+    r = vkQueuePresentKHR(be->graphicsQueue, &pi);
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+        LOGE("sanity_present: vkQueuePresentKHR failed (VkResult=%d)", r);
+        goto cleanup;
+    }
+    LOGI("sanity_present: submitted + presented (VkResult=%d)", r);
+
+    if (vkQueueWaitIdle(be->graphicsQueue) != VK_SUCCESS) {
+        LOGE("sanity_present: vkQueueWaitIdle failed");
+        goto cleanup;
+    }
+    LOGI("sanity_present: queue idle — full present roundtrip OK");
+    rc = 0;
+
+cleanup:
+    if (pool) vkDestroyCommandPool(be->device, pool, NULL);
+    if (acquireSem) vkDestroySemaphore(be->device, acquireSem, NULL);
+    if (renderDoneSem) vkDestroySemaphore(be->device, renderDoneSem, NULL);
+    return rc;
+}
+
 // ---------- JNI: nativeInit / nativeDestroy ----------
 
 JNIEXPORT jlong JNICALL
@@ -409,7 +597,16 @@ Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz,
     if (create_device(be) != 0) goto fail;
     if (create_swapchain(be) != 0) goto fail;
 
-    LOGI("B.2b init complete: instance + surface + device + queue + swapchain ready");
+    // B.2c.1 sanity: drive one acquire/clear/present roundtrip to prove
+    // the swapchain actually renders end-to-end on this driver before we
+    // start trusting it with the MediaCodec pipeline. Side-effect: a
+    // single dark-green frame (RGBA 0,0.18,0,1) flashes on screen during
+    // VkBackend init. Drops to GLES afterwards in B.2c.x flow.
+    if (sanity_present(be) != 0) {
+        LOGW("sanity_present failed — keeping init successful so we can dump diagnostics");
+    }
+
+    LOGI("B.2c.1 init complete: instance + surface + device + queue + swapchain + sanity present");
     return (jlong)(uintptr_t)be;
 
 fail:
