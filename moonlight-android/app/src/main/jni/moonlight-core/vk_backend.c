@@ -87,6 +87,17 @@ typedef struct vk_backend_s {
     PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties;
     int ahbImportLogged;
 
+    // YCbCr sampler path (B.2c.3c.1) — lazily created on first AHB frame
+    // because it depends on the externalFormat we read off the buffer.
+    PFN_vkCreateSamplerYcbcrConversion  vkCreateSamplerYcbcrConversion;
+    PFN_vkDestroySamplerYcbcrConversion vkDestroySamplerYcbcrConversion;
+    PFN_vkCreateSampler                 vkCreateSampler;
+    PFN_vkDestroySampler                vkDestroySampler;
+    VkSamplerYcbcrConversion ycbcrConversion;
+    VkSampler                ycbcrSampler;
+    uint64_t                 ycbcrExternalFormat;   // externalFormat the sampler is bound to
+    int                      ycbcrInitialized;
+
     // Per-frame render path (B.2c.3a)
     PFN_vkAcquireNextImageKHR    vkAcquireNextImageKHR;
     PFN_vkQueuePresentKHR        vkQueuePresentKHR;
@@ -447,13 +458,118 @@ static int load_ahb_procs(vk_backend_t* be)
     be->vkGetPhysicalDeviceMemoryProperties =
         (PFN_vkGetPhysicalDeviceMemoryProperties)be->vkGetInstanceProcAddr(
             be->instance, "vkGetPhysicalDeviceMemoryProperties");
+    // YCbCr sampler procs (Vulkan 1.1 core)
+    be->vkCreateSamplerYcbcrConversion =
+        (PFN_vkCreateSamplerYcbcrConversion)be->vkGetDeviceProcAddr(be->device, "vkCreateSamplerYcbcrConversion");
+    be->vkDestroySamplerYcbcrConversion =
+        (PFN_vkDestroySamplerYcbcrConversion)be->vkGetDeviceProcAddr(be->device, "vkDestroySamplerYcbcrConversion");
+    be->vkCreateSampler  = (PFN_vkCreateSampler)be->vkGetDeviceProcAddr(be->device, "vkCreateSampler");
+    be->vkDestroySampler = (PFN_vkDestroySampler)be->vkGetDeviceProcAddr(be->device, "vkDestroySampler");
+
     if (!be->vkGetAndroidHardwareBufferPropertiesANDROID || !be->vkCreateImage ||
         !be->vkDestroyImage || !be->vkAllocateMemory || !be->vkFreeMemory ||
-        !be->vkBindImageMemory || !be->vkGetPhysicalDeviceMemoryProperties) {
+        !be->vkBindImageMemory || !be->vkGetPhysicalDeviceMemoryProperties ||
+        !be->vkCreateSamplerYcbcrConversion || !be->vkDestroySamplerYcbcrConversion ||
+        !be->vkCreateSampler || !be->vkDestroySampler) {
         LOGE("load_ahb_procs: missing entry points");
         return -1;
     }
     return 0;
+}
+
+// Lazy create the YCbCr conversion + immutable sampler the first time we
+// see an AHB. The conversion baked the externalFormat / ycbcrModel / range
+// from MediaCodec's actual output — they're stable for a session, so we
+// create once and reuse for the lifetime of the backend.
+static int ensure_ycbcr_sampler(vk_backend_t* be,
+                                const VkAndroidHardwareBufferFormatPropertiesANDROID* fmt)
+{
+    if (be->ycbcrInitialized) {
+        if (be->ycbcrExternalFormat != fmt->externalFormat) {
+            LOGW("AHB externalFormat changed (was 0x%llx, now 0x%llx) — sampler is now stale",
+                 (unsigned long long)be->ycbcrExternalFormat,
+                 (unsigned long long)fmt->externalFormat);
+        }
+        return 0;
+    }
+    if (!be->vkCreateSamplerYcbcrConversion || !be->vkCreateSampler) {
+        LOGE("ensure_ycbcr_sampler: procs not loaded");
+        return -1;
+    }
+
+    VkExternalFormatANDROID extFmt = {
+        .sType          = VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID,
+        .externalFormat = fmt->externalFormat,
+    };
+    VkSamplerYcbcrConversionCreateInfo cci = {
+        .sType         = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
+        .pNext         = &extFmt,
+        .format        = VK_FORMAT_UNDEFINED,
+        .ycbcrModel    = fmt->suggestedYcbcrModel,
+        .ycbcrRange    = fmt->suggestedYcbcrRange,
+        .components    = fmt->samplerYcbcrConversionComponents,
+        .xChromaOffset = fmt->suggestedXChromaOffset,
+        .yChromaOffset = fmt->suggestedYChromaOffset,
+        .chromaFilter  = VK_FILTER_LINEAR,
+        .forceExplicitReconstruction = VK_FALSE,
+    };
+    VkResult r = be->vkCreateSamplerYcbcrConversion(be->device, &cci, NULL, &be->ycbcrConversion);
+    if (r != VK_SUCCESS) {
+        LOGE("vkCreateSamplerYcbcrConversion failed: %d", r);
+        return -1;
+    }
+
+    VkSamplerYcbcrConversionInfo convInfo = {
+        .sType      = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
+        .conversion = be->ycbcrConversion,
+    };
+    VkSamplerCreateInfo sci = {
+        .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .pNext        = &convInfo,
+        .magFilter    = VK_FILTER_LINEAR,
+        .minFilter    = VK_FILTER_LINEAR,
+        .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .anisotropyEnable = VK_FALSE,
+        .compareEnable    = VK_FALSE,
+        .borderColor      = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = VK_FALSE,
+    };
+    r = be->vkCreateSampler(be->device, &sci, NULL, &be->ycbcrSampler);
+    if (r != VK_SUCCESS) {
+        LOGE("vkCreateSampler (with ycbcr conversion) failed: %d", r);
+        be->vkDestroySamplerYcbcrConversion(be->device, be->ycbcrConversion, NULL);
+        be->ycbcrConversion = VK_NULL_HANDLE;
+        return -1;
+    }
+
+    be->ycbcrExternalFormat = fmt->externalFormat;
+    be->ycbcrInitialized = 1;
+    LOGI("YCbCr sampler ready: externalFormat=0x%llx model=%d range=%d "
+         "components(r=%d g=%d b=%d a=%d) chromaXOff=%d chromaYOff=%d",
+         (unsigned long long)fmt->externalFormat,
+         fmt->suggestedYcbcrModel, fmt->suggestedYcbcrRange,
+         fmt->samplerYcbcrConversionComponents.r,
+         fmt->samplerYcbcrConversionComponents.g,
+         fmt->samplerYcbcrConversionComponents.b,
+         fmt->samplerYcbcrConversionComponents.a,
+         fmt->suggestedXChromaOffset, fmt->suggestedYChromaOffset);
+    return 0;
+}
+
+static void destroy_ycbcr_sampler(vk_backend_t* be)
+{
+    if (be->ycbcrSampler && be->vkDestroySampler) {
+        be->vkDestroySampler(be->device, be->ycbcrSampler, NULL);
+        be->ycbcrSampler = VK_NULL_HANDLE;
+    }
+    if (be->ycbcrConversion && be->vkDestroySamplerYcbcrConversion) {
+        be->vkDestroySamplerYcbcrConversion(be->device, be->ycbcrConversion, NULL);
+        be->ycbcrConversion = VK_NULL_HANDLE;
+    }
+    be->ycbcrInitialized = 0;
 }
 
 static int pick_memory_type(vk_backend_t* be, uint32_t bits)
@@ -498,6 +614,13 @@ static int try_import_ahb(vk_backend_t* be, AHardwareBuffer* ahb)
              (unsigned long long)props.allocationSize, props.memoryTypeBits,
              fmtProps.format, (unsigned long long)fmtProps.externalFormat,
              fmtProps.suggestedYcbcrModel, fmtProps.suggestedYcbcrRange);
+    }
+
+    // B.2c.3c.1: lazy-create the YCbCr sampler from the first frame's
+    // externalFormat. Subsequent frames reuse it. Sampler binds during
+    // B.2c.3c.3 once the graphics pipeline lands.
+    if (fmtProps.externalFormat != 0) {
+        ensure_ycbcr_sampler(be, &fmtProps);
     }
 
     // VkImage with external chain. Format VK_FORMAT_UNDEFINED + non-zero
@@ -1055,6 +1178,7 @@ Java_com_limelight_binding_video_VkBackend_nativeDestroy(JNIEnv* env, jclass cla
     vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
     if (!be) return;
     LOGI("destroying backend handle=%p (frames rendered=%d)", be, be->frameCounter);
+    destroy_ycbcr_sampler(be);
     destroy_render_resources(be);
     if (be->swapchainImages) {
         free(be->swapchainImages);
