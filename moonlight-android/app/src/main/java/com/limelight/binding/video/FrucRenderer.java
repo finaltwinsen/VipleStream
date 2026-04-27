@@ -110,6 +110,13 @@ public class FrucRenderer {
     private int fpsWindowPresents = 0;
     private float currentOutputFps = 0;
 
+    // VipleStream §I.A1 spike: nominal vsync period for eglPresentationTimeANDROID
+    // hints. Hardcoded ~90Hz target; refined per device in setVsyncPeriodNs().
+    // The spike question is whether feeding the compositor explicit per-buffer
+    // presentation times lets it schedule the dual swap without dropping the
+    // interpolated frame, OR at least reduces the V-sync block penalty.
+    private long vsyncPeriodNs = 11_111_111L;  // 1e9 / 90
+
     // VipleStream v17: frame gap detection + connection quality
     private long lastRenderTimeMs = 0;
     private int renderFrameCount = 0;
@@ -142,6 +149,56 @@ public class FrucRenderer {
     public void setQualityLevel(int level) { this.qualityLevel = Math.max(0, Math.min(2, level)); }
 
     /**
+     * §I.A1 spike: derive the per-vsync period from the Context's default
+     * Display so the eglPresentationTimeANDROID hint between the dual
+     * interp+real swap is exactly one vsync apart. Falls back to the 90Hz
+     * default if anything goes wrong — the compositor always rounds to the
+     * nearest vsync, so a wrong value here just degrades the hint, not
+     * crashes anything.
+     *
+     * Don't try to read this from MediaCodecDecoderRenderer.refreshRate:
+     * that field is the stream/redraw rate (e.g. 22 for FRUC requesting
+     * 45fps from server), not the Display's actual refresh.
+     */
+    private void initVsyncPeriod() {
+        try {
+            android.view.WindowManager wm = (android.view.WindowManager)
+                context.getSystemService(android.content.Context.WINDOW_SERVICE);
+            if (wm != null) {
+                android.view.Display d = wm.getDefaultDisplay();
+                if (d != null) {
+                    // Pixel 5 / Adreno 620 / LineageOS 22.1 puzzle: the
+                    // panel runs at 90Hz under "smooth display" (and SF
+                    // dumpsys confirms a frameRateOverride to 90 on our
+                    // uid) but Display.getRefreshRate() and
+                    // Display.getMode().getRefreshRate() both report 60.
+                    // Walking getSupportedRefreshRates() and picking the
+                    // max is the only reliable way to land on 90 on this
+                    // device. If max == base mode, behaviour is the same
+                    // as before this fix.
+                    float hz = 0f;
+                    float[] supported = d.getSupportedRefreshRates();
+                    if (supported != null) {
+                        for (float r : supported) if (r > hz) hz = r;
+                    }
+                    if (hz < 1f) {
+                        android.view.Display.Mode mode = d.getMode();
+                        hz = (mode != null) ? mode.getRefreshRate() : d.getRefreshRate();
+                    }
+                    if (hz > 1f) {
+                        this.vsyncPeriodNs = (long)(1_000_000_000.0 / hz);
+                        Log.i(TAG, "vsync period set to " + vsyncPeriodNs + "ns (display=" + hz + "Hz, picked max from supported)");
+                        return;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "failed to read display refresh rate: " + t);
+        }
+        Log.i(TAG, "vsync period stays at default " + vsyncPeriodNs + "ns (90Hz)");
+    }
+
+    /**
      * Initialize the FRUC pipeline. Must be called from the GL thread.
      * @param displaySurface The Surface to render to (from SurfaceHolder)
      * @param w Video width
@@ -157,6 +214,7 @@ public class FrucRenderer {
             initTextures();
             initShaders();
             initQuad();
+            initVsyncPeriod();
 
             initialized = true;
             String msg = "FRUC initialized: " + w + "x" + h + " (GLES 3.1 compute)";
@@ -418,6 +476,7 @@ public class FrucRenderer {
         if (frameCount <= 1) {
             copyTexture(currFrameTex, prevFrameTex);
             blitToScreen(currFrameTex);
+            EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, System.nanoTime());
             EGL14.eglSwapBuffers(eglDisplay, eglSurface);
             lastRenderTimeMs = android.os.SystemClock.elapsedRealtime();
             logToFile("frame=1: first frame stored, no interp");
@@ -438,6 +497,7 @@ public class FrucRenderer {
             // Skip ME/warp, just present real frame immediately and update state
             copyTexture(currFrameTex, prevFrameTex);
             blitToScreen(currFrameTex);
+            EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, System.nanoTime());
             EGL14.eglSwapBuffers(eglDisplay, eglSurface);
             if (frameLate && frameCount % 100 == 0) {
                 logToFile("frame=" + frameCount + " SKIPPED (late=" + gap + "ms, poor=" + connectionPoor + ")");
@@ -476,12 +536,21 @@ public class FrucRenderer {
             logToFile("frame=" + frameCount + " GL error after warp: 0x" + Integer.toHexString(glErr));
         }
 
-        // Present interpolated frame (eglSwapInterval=1 ensures V-sync blocking)
+        // §I.A1: tell the compositor explicitly when each buffer is meant to
+        // hit the screen. The dual-present pattern previously relied solely on
+        // eglSwapInterval=1 to enforce ordering, which forces a full V-sync
+        // block on every swap. With per-buffer presentation hints the
+        // compositor can stage both swaps and only block when actually needed.
+        long presentBaseNs = System.nanoTime();
+
+        // Present interpolated frame at "now"
         blitToScreen(interpFrameTex);
+        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, presentBaseNs);
         EGL14.eglSwapBuffers(eglDisplay, eglSurface);
 
-        // Present real frame (blocks at next V-sync)
+        // Present real frame one vsync later
         blitToScreen(currFrameTex);
+        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, presentBaseNs + vsyncPeriodNs);
         EGL14.eglSwapBuffers(eglDisplay, eglSurface);
 
         // Save current as previous (frame + MV field)
