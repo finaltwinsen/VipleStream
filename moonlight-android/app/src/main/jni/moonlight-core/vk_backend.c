@@ -332,6 +332,11 @@ typedef struct vk_backend_s {
     float                fHostFrameMs[120];
     int                  fHostFrameIdx;
     int                  fHostFrameFilled;
+
+    // iter 12: session counters for [VKBE-PERF] summary log every 600
+    // frames + final dump in nativeDestroy.
+    int                  fDualFrameCount;
+    int                  fSingleFrameCount;
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -3435,9 +3440,12 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         .image = imgIn,
         .subresourceRange = range,
     };
+    // iter 11 — single mode skips compute (iter 8), so dst stage doesn't
+    // need COMPUTE_SHADER_BIT. Tiny barrier-cost optimization.
+    VkPipelineStageFlags inAcquireDstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (!singleMode) inAcquireDstStage |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     be->vkCmdPipelineBarrier(slotCmd,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, inAcquireDstStage,
         0, 0, NULL, 0, NULL, 1, &inAcquireRing);
 
     // iter 8 — skip FRUC compute when single mode (its output isn't
@@ -3625,6 +3633,9 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     // compute pipeline + graphics → no extra display frame produced.
     if (!singleMode) {
         be->fInterpolatedCount++;
+        be->fDualFrameCount++;
+    } else {
+        be->fSingleFrameCount++;
     }
 
     if (be->frameCounter <= 5 || be->frameCounter % 120 == 0) {
@@ -3660,6 +3671,19 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
             LOGI("[VKBE-PERF] host frame ms p50=%.2f p90=%.2f p99=%.2f min=%.2f max=%.2f (last 120 frames)",
                  (double)buf[60], (double)buf[108], (double)buf[118],
                  (double)buf[0], (double)buf[119]);
+        }
+
+        // iter 12: aggregated session summary every 600 frames. Single
+        // place to read mode distribution + I/O rates + thermal hint.
+        if (be->frameCounter % 600 == 0 && be->frameCounter > 0) {
+            int total = be->fDualFrameCount + be->fSingleFrameCount;
+            float dualPct = total > 0 ? 100.0f * (float)be->fDualFrameCount / (float)total : 0.0f;
+            LOGI("[VKBE-PERF-SUMMARY] frame=%d input~%.1f FPS | mode dual=%d (%.1f%%) single=%d | "
+                 "interp=%d total displayed=%d",
+                 be->frameCounter, (double)be->fInputFpsRecent,
+                 be->fDualFrameCount, (double)dualPct, be->fSingleFrameCount,
+                 be->fInterpolatedCount,
+                 be->fSingleFrameCount + 2 * be->fDualFrameCount);
         }
     }
 
@@ -3735,6 +3759,19 @@ Java_com_limelight_binding_video_VkBackend_nativeDestroy(JNIEnv* env, jclass cla
     vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
     if (!be) return;
     LOGI("destroying backend handle=%p (frames rendered=%d)", be, be->frameCounter);
+
+    // iter 12: final session stats. Useful for post-stream analysis.
+    {
+        int total = be->fDualFrameCount + be->fSingleFrameCount;
+        float dualPct = total > 0 ? 100.0f * (float)be->fDualFrameCount / (float)total : 0.0f;
+        LOGI("[VKBE-PERF-FINAL] session: frames=%d (dual=%d %.1f%% / single=%d) | "
+             "interp=%d displayed=%d | last input~%.1f FPS",
+             be->frameCounter, be->fDualFrameCount, (double)dualPct,
+             be->fSingleFrameCount, be->fInterpolatedCount,
+             be->fSingleFrameCount + 2 * be->fDualFrameCount,
+             (double)be->fInputFpsRecent);
+    }
+
     destroy_compute_pipelines(be);
     destroy_graphics_pipeline(be);
     destroy_ycbcr_sampler(be);
