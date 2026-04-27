@@ -127,6 +127,7 @@ typedef struct vk_backend_s {
     PFN_vkCmdEndRenderPass          vkCmdEndRenderPass;
     PFN_vkCmdBindPipeline           vkCmdBindPipeline;
     PFN_vkCmdDraw                   vkCmdDraw;
+    PFN_vkCmdPushConstants          vkCmdPushConstants;
     VkRenderPass         renderPass;
     VkPipelineLayout     pipelineLayout;
     VkDescriptorSetLayout descLayout;
@@ -147,6 +148,15 @@ typedef struct vk_backend_s {
     PFN_vkCmdBindDescriptorSets     vkCmdBindDescriptorSets;
     VkDescriptorPool descPool;
     VkDescriptorSet  descSet;
+
+    // Logical video dims (passed from Java; matches MediaCodec output res
+    // and ImageReader's defaultBufferSize). The AHB allocated by the OEM
+    // pads height up to a multiple of 16 (e.g. 1080 → 1088). uvScale push
+    // constant in video_sample.frag uses videoH/ahbH to crop the padding.
+    int videoWidth;
+    int videoHeight;
+    int ahbPaddedWidth;
+    int ahbPaddedHeight;
 
     // Per-frame render path (B.2c.3a)
     PFN_vkAcquireNextImageKHR    vkAcquireNextImageKHR;
@@ -809,6 +819,10 @@ static int do_import_ahb(vk_backend_t* be, AHardwareBuffer* ahb, int keepAlive,
     if (outView)   *outView   = importedView;
     if (outWidth)  *outWidth  = desc.width;
     if (outHeight) *outHeight = desc.height;
+    // Cache AHB padded dims so the per-frame push constant in
+    // render_ahb_frame can compute uvScale = videoSize / ahbPaddedSize.
+    be->ahbPaddedWidth  = (int)desc.width;
+    be->ahbPaddedHeight = (int)desc.height;
     return 0;
 }
 
@@ -1109,11 +1123,15 @@ cleanup:
 // ---------- JNI: nativeInit / nativeDestroy ----------
 
 JNIEXPORT jlong JNICALL
-Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz, jobject jSurface)
+Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz, jobject jSurface,
+                                                       jint videoWidth, jint videoHeight)
 {
     vk_backend_t* be = (vk_backend_t*)calloc(1, sizeof(*be));
     if (!be) { LOGE("calloc failed"); return 0; }
     be->graphicsQueueFamily = (uint32_t)-1;
+    be->videoWidth  = (int)videoWidth;
+    be->videoHeight = (int)videoHeight;
+    LOGI("nativeInit: video logical dims = %dx%d", be->videoWidth, be->videoHeight);
 
     be->libvulkan = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
     if (!be->libvulkan) { LOGE("dlopen libvulkan.so failed: %s", dlerror()); goto fail; }
@@ -1198,6 +1216,7 @@ static int load_graphics_procs(vk_backend_t* be)
     be->vkCmdEndRenderPass          = LOAD_DEVICE_PROC(be, vkCmdEndRenderPass);
     be->vkCmdBindPipeline           = LOAD_DEVICE_PROC(be, vkCmdBindPipeline);
     be->vkCmdDraw                   = LOAD_DEVICE_PROC(be, vkCmdDraw);
+    be->vkCmdPushConstants          = LOAD_DEVICE_PROC(be, vkCmdPushConstants);
     be->vkCreateDescriptorPool      = LOAD_DEVICE_PROC(be, vkCreateDescriptorPool);
     be->vkDestroyDescriptorPool     = LOAD_DEVICE_PROC(be, vkDestroyDescriptorPool);
     be->vkAllocateDescriptorSets    = LOAD_DEVICE_PROC(be, vkAllocateDescriptorSets);
@@ -1211,7 +1230,7 @@ static int load_graphics_procs(vk_backend_t* be)
         !be->vkCreateDescriptorSetLayout || !be->vkDestroyDescriptorSetLayout ||
         !be->vkCreateGraphicsPipelines || !be->vkDestroyPipeline ||
         !be->vkCmdBeginRenderPass || !be->vkCmdEndRenderPass ||
-        !be->vkCmdBindPipeline || !be->vkCmdDraw ||
+        !be->vkCmdBindPipeline || !be->vkCmdDraw || !be->vkCmdPushConstants ||
         !be->vkCreateDescriptorPool || !be->vkDestroyDescriptorPool ||
         !be->vkAllocateDescriptorSets || !be->vkUpdateDescriptorSets ||
         !be->vkCmdBindDescriptorSets) {
@@ -1369,10 +1388,20 @@ static int init_graphics_pipeline(vk_backend_t* be)
             LOGE("vkAllocateDescriptorSets failed"); return -1;
         }
     }
+    // Push constant range for video_sample.frag's uvScale (vec2 = 8 bytes).
+    // Used to crop AHB macroblock padding (e.g. 1080→1088 = scale .y 0.9926)
+    // and Y-flip the AHB layout to match swapchain origin convention.
+    VkPushConstantRange pcRange = {
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = 0,
+        .size       = 8,
+    };
     VkPipelineLayoutCreateInfo plci = {
-        .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1,
-        .pSetLayouts    = &be->descLayout,
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &be->descLayout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &pcRange,
     };
     if (be->vkCreatePipelineLayout(be->device, &plci, NULL, &be->pipelineLayout) != VK_SUCCESS) {
         LOGE("vkCreatePipelineLayout failed"); return -1;
@@ -1718,6 +1747,25 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, be->graphicsPipeline);
     be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 be->pipelineLayout, 0, 1, &be->descSet, 0, NULL);
+    // Push uvScale: video is logical videoW × videoH inside an AHB padded
+    // to ahbPaddedW × ahbPaddedH. Frag shader does (u, 1-v) * uvScale to
+    // crop the padding and Y-flip to match swapchain origin convention.
+    // Defensive: if either dim is 0 (e.g. nativeInit got called with bad
+    // args) fall back to 1.0 → no scale, just the Y-flip.
+    float uvScale[2] = {
+        (be->videoWidth  > 0 && be->ahbPaddedWidth  > 0)
+            ? (float)be->videoWidth  / (float)be->ahbPaddedWidth  : 1.0f,
+        (be->videoHeight > 0 && be->ahbPaddedHeight > 0)
+            ? (float)be->videoHeight / (float)be->ahbPaddedHeight : 1.0f,
+    };
+    be->vkCmdPushConstants(be->cmdBuffer, be->pipelineLayout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uvScale), uvScale);
+    if (be->frameCounter == 0) {
+        LOGI("uvScale push constants: x=%.4f (video %d / ahb %d) "
+             "y=%.4f (video %d / ahb %d)",
+             uvScale[0], be->videoWidth,  be->ahbPaddedWidth,
+             uvScale[1], be->videoHeight, be->ahbPaddedHeight);
+    }
     be->vkCmdDraw(be->cmdBuffer, 3, 1, 0, 0);
     be->vkCmdEndRenderPass(be->cmdBuffer);
 

@@ -104,7 +104,7 @@ public final class VkBackend implements IFrucBackend {
         }
 
         try {
-            nativeHandle = nativeInit(displaySurface);
+            nativeHandle = nativeInit(displaySurface, w, h);
         } catch (Throwable t) {
             Log.e(TAG, "nativeInit threw: " + t, t);
             nativeHandle = 0;
@@ -253,7 +253,7 @@ public final class VkBackend implements IFrucBackend {
     }
 
     // ---------- native bridge ----------
-    private static native long nativeInit(Surface displaySurface);
+    private static native long nativeInit(Surface displaySurface, int videoWidth, int videoHeight);
     private static native void nativeDestroy(long handle);
     private static native int  nativeRenderClearFrame(long handle);
     private static native int  nativeImportAhb(long handle, HardwareBuffer hwBuffer);

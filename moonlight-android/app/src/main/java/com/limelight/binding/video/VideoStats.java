@@ -4,7 +4,12 @@ import android.os.SystemClock;
 
 class VideoStats {
 
-    long decoderTimeMs;
+    // VipleStream v1.2.150: changed from millisecond to microsecond
+    // resolution. Hardware HEVC LowLatency decoders on modern phones
+    // (Pixel 5 / Adreno 620) finish a frame in < 1 ms, so the old
+    // ms-truncated accumulator pinned the perf overlay's average to
+    // 0.0 ms forever. Display layer divides by 1000 to format ms.
+    long decoderTimeUs;
     long totalTimeMs;
     int totalFrames;
     int totalFramesReceived;
@@ -18,7 +23,7 @@ class VideoStats {
     long measurementStartTimestamp;
 
     void add(VideoStats other) {
-        this.decoderTimeMs += other.decoderTimeMs;
+        this.decoderTimeUs += other.decoderTimeUs;
         this.totalTimeMs += other.totalTimeMs;
         this.totalFrames += other.totalFrames;
         this.totalFramesReceived += other.totalFramesReceived;
@@ -43,7 +48,7 @@ class VideoStats {
     }
 
     void copy(VideoStats other) {
-        this.decoderTimeMs = other.decoderTimeMs;
+        this.decoderTimeUs = other.decoderTimeUs;
         this.totalTimeMs = other.totalTimeMs;
         this.totalFrames = other.totalFrames;
         this.totalFramesReceived = other.totalFramesReceived;
@@ -58,7 +63,7 @@ class VideoStats {
     }
 
     void clear() {
-        this.decoderTimeMs = 0;
+        this.decoderTimeUs = 0;
         this.totalTimeMs = 0;
         this.totalFrames = 0;
         this.totalFramesReceived = 0;

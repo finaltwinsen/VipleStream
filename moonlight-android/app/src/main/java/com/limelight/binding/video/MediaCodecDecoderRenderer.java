@@ -1193,12 +1193,17 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                 outputBufferQueue.add(lastIndex);
                             }
 
-                            // Add delta time to the totals (excluding probable outliers)
-                            long delta = SystemClock.uptimeMillis() - (presentationTimeUs / 1000);
-                            if (delta >= 0 && delta < 1000) {
-                                activeWindowVideoStats.decoderTimeMs += delta;
+                            // Add delta time to the totals (excluding probable outliers).
+                            // v1.2.150: PTS now stamped in queueNextInputBuffer with
+                            // System.nanoTime()/1000 (us). Computing delta in µs
+                            // gives us sub-millisecond resolution for hardware
+                            // decoders that finish a frame in < 1 ms (was always
+                            // 0 in the old ms-truncated form).
+                            long deltaUs = (System.nanoTime() / 1000) - presentationTimeUs;
+                            if (deltaUs >= 0 && deltaUs < 1_000_000) {
+                                activeWindowVideoStats.decoderTimeUs += deltaUs;
                                 if (!USE_FRAME_RENDER_TIME) {
-                                    activeWindowVideoStats.totalTimeMs += delta;
+                                    activeWindowVideoStats.totalTimeMs += deltaUs / 1000;
                                 }
                             }
                         } else {
@@ -1521,7 +1526,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                     decoder = "(unknown)";
                 }
 
-                float decodeTimeMs = (float)lastTwo.decoderTimeMs / lastTwo.totalFramesReceived;
+                float decodeTimeMs = (float)lastTwo.decoderTimeUs / 1000.0f / lastTwo.totalFramesReceived;
                 long rttInfo = MoonBridge.getEstimatedRttInfo();
                 StringBuilder sb = new StringBuilder();
                 sb.append(context.getString(R.string.perf_overlay_streamdetails, initialWidth + "x" + initialHeight, fps.totalFps)).append('\n');
@@ -1816,7 +1821,15 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             }
         }
 
-        long timestampUs = enqueueTimeMs * 1000;
+        // v1.2.150: PTS sourced from System.nanoTime()/1000 (microsecond
+        // precision) instead of enqueueTimeMs * 1000. Old form lost any
+        // sub-millisecond timing — combined with the dequeue-side
+        // SystemClock.uptimeMillis() the decoder time average pinned to
+        // 0 ms on fast hardware decoders. PTS is preserved verbatim by
+        // MediaCodec and read back in BufferInfo.presentationTimeUs;
+        // it's NOT used for releaseOutputBuffer renderTimestamp here, so
+        // changing the source is safe.
+        long timestampUs = System.nanoTime() / 1000;
         if (timestampUs <= lastTimestampUs) {
             // We can't submit multiple buffers with the same timestamp
             // so bump it up by one before queuing
@@ -1909,7 +1922,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         if (globalVideoStats.totalFramesReceived == 0) {
             return 0;
         }
-        return (int)(globalVideoStats.decoderTimeMs / globalVideoStats.totalFramesReceived);
+        // v1.2.150: decoderTimeUs is microseconds; this method returns ms.
+        return (int)(globalVideoStats.decoderTimeUs / 1000 / globalVideoStats.totalFramesReceived);
     }
 
     static class DecoderHungException extends RuntimeException {
