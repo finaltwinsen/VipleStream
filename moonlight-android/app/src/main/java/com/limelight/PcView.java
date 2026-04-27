@@ -194,6 +194,16 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // VipleStream Phase A2 recon: enumerate Vulkan extensions on this
+        // device once on app launch. Fires off the EDT and just logs to
+        // logcat under [VIPLE-VK-PROBE]. Decides whether the planned
+        // GLES → Vulkan FRUC migration (docs/TODO.md §I) is viable on
+        // this hardware. Cheap (~ms) and idempotent — leave running until
+        // Phase B starts, then either evolve into the real Vulkan helper
+        // or remove entirely.
+        new Thread(() -> com.limelight.binding.video.VkProbe.run(),
+                   "VipleStream-VkProbe").start();
+
         // Assume we're in the foreground when created to avoid a race
         // between binding to CMS and onResume()
         inForeground = true;
