@@ -36,6 +36,11 @@
 #include "shaders/fullscreen.vert.spv.h"
 #include "shaders/test_pattern.frag.spv.h"
 #include "shaders/video_sample.frag.spv.h"
+// §I.C.3 compute pipelines (Q1 default; §I.C.5 wires Q0/Q2).
+#include "shaders/ycbcr_to_rgba.comp.spv.h"
+#include "shaders/motionest_compute_q1.comp.spv.h"
+#include "shaders/mv_median.comp.spv.h"
+#include "shaders/warp_compute_q1.comp.spv.h"
 
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
@@ -45,6 +50,22 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+// ---------- §I.C.3 FRUC compute pipeline indices ----------
+
+#define FRUC_IMG_CURR     0  // currFrameRgba (rgba8, video size)
+#define FRUC_IMG_PREV     1  // prevFrameRgba (rgba8, video size)
+#define FRUC_IMG_MV       2  // motionField (r32i, mv size)
+#define FRUC_IMG_PREV_MV  3  // prevMotionField
+#define FRUC_IMG_FILT_MV  4  // filteredMotionField
+#define FRUC_IMG_INTERP   5  // interpFrame (rgba8, not sampled in §I.C.3)
+#define FRUC_NUM_IMAGES   6
+
+#define FRUC_PIPE_YCBCR     0  // ycbcr_to_rgba.comp
+#define FRUC_PIPE_ME        1  // motionest_compute_q1.comp (§I.C.3 hardcodes Q1)
+#define FRUC_PIPE_MV_MEDIAN 2  // mv_median.comp
+#define FRUC_PIPE_WARP      3  // warp_compute_q1.comp
+#define FRUC_NUM_PIPELINES  4
 
 // ---------- backend handle ----------
 
@@ -179,6 +200,27 @@ typedef struct vk_backend_s {
     VkSemaphore     renderDoneSem;
     int             renderInitialized;
     int             frameCounter;
+
+    // §I.C.3 FRUC compute resources. Built lazily after the YCbCr sampler
+    // is ready (parallel to the graphics pipeline). C.3.a sets them up;
+    // C.3.b wires per-frame dispatch.
+    PFN_vkCreateComputePipelines    vkCreateComputePipelines;
+    PFN_vkCmdDispatch               vkCmdDispatch;
+    PFN_vkCmdCopyImage              vkCmdCopyImage;
+    PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements;
+
+    VkImage        fImage[FRUC_NUM_IMAGES];
+    VkDeviceMemory fImageMem[FRUC_NUM_IMAGES];
+    VkImageView    fImageView[FRUC_NUM_IMAGES];
+
+    VkShaderModule        fShader[FRUC_NUM_PIPELINES];
+    VkDescriptorSetLayout fDescLayout[FRUC_NUM_PIPELINES];
+    VkPipelineLayout      fPipeLayout[FRUC_NUM_PIPELINES];
+    VkPipeline            fPipeline[FRUC_NUM_PIPELINES];
+    VkDescriptorPool      fDescPool;
+    VkDescriptorSet       fDescSet[FRUC_NUM_PIPELINES];
+    VkSampler             fLinearSampler;  // CLAMP_TO_EDGE LINEAR for warp's sampleMV
+    int                   fInitialized;
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -189,6 +231,8 @@ typedef struct vk_backend_s {
 static int  init_graphics_pipeline(struct vk_backend_s* be);
 static void destroy_graphics_pipeline(struct vk_backend_s* be);
 static int  load_graphics_procs(struct vk_backend_s* be);
+static int  init_compute_pipelines(struct vk_backend_s* be);
+static void destroy_compute_pipelines(struct vk_backend_s* be);
 
 // ---------- helpers ----------
 
@@ -1508,6 +1552,398 @@ static void destroy_graphics_pipeline(vk_backend_t* be)
     be->graphicsInitialized = 0;
 }
 
+// ============================================================
+// §I.C.3.a — FRUC compute scaffolding (no dispatch yet)
+// ============================================================
+//
+// Allocates 6 storage images (currFrameRgba / prevFrameRgba / motionField /
+// prevMotionField / filteredMotionField / interpFrame), builds 4 compute
+// pipelines (ycbcr_to_rgba / motionest_q1 / mv_median / warp_q1) plus
+// matching descriptor sets. Per-frame dispatch is wired in §I.C.3.b;
+// this phase only proves the layout/binding story compiles + the
+// pipelines can be created on Adreno 620.
+//
+// §I.C.5 will wire Q0/Q2 variants of motionest/warp; §I.C.4 hooks
+// dispatch results into the swapchain.
+
+static int load_compute_procs(vk_backend_t* be)
+{
+    be->vkCreateComputePipelines     = LOAD_DEVICE_PROC(be, vkCreateComputePipelines);
+    be->vkCmdDispatch                = LOAD_DEVICE_PROC(be, vkCmdDispatch);
+    be->vkCmdCopyImage               = LOAD_DEVICE_PROC(be, vkCmdCopyImage);
+    be->vkGetImageMemoryRequirements = LOAD_DEVICE_PROC(be, vkGetImageMemoryRequirements);
+    if (!be->vkCreateComputePipelines || !be->vkCmdDispatch ||
+        !be->vkCmdCopyImage || !be->vkGetImageMemoryRequirements) {
+        LOGE("[VKBE-COMPUTE] load_compute_procs: missing entry points");
+        return -1;
+    }
+    return 0;
+}
+
+// Allocate a 2D storage+sampled image of given format/extent. Memory is
+// DEVICE_LOCAL. View is full-mip-level/full-layer COLOR_BIT.
+static int allocate_storage_image(vk_backend_t* be,
+                                   VkFormat format, uint32_t w, uint32_t h,
+                                   VkImage* outImage, VkDeviceMemory* outMem,
+                                   VkImageView* outView)
+{
+    VkImageCreateInfo ici = {
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType     = VK_IMAGE_TYPE_2D,
+        .format        = format,
+        .extent        = { w, h, 1 },
+        .mipLevels     = 1,
+        .arrayLayers   = 1,
+        .samples       = VK_SAMPLE_COUNT_1_BIT,
+        .tiling        = VK_IMAGE_TILING_OPTIMAL,
+        .usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    if (be->vkCreateImage(be->device, &ici, NULL, outImage) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] vkCreateImage(%dx%d fmt=%d) failed", w, h, format);
+        return -1;
+    }
+
+    VkMemoryRequirements mreq;
+    be->vkGetImageMemoryRequirements(be->device, *outImage, &mreq);
+
+    int memType = pick_memory_type(be, mreq.memoryTypeBits);
+    if (memType < 0) {
+        LOGE("[VKBE-COMPUTE] no compatible memory type for fmt=%d (mask=0x%x)",
+             format, mreq.memoryTypeBits);
+        return -1;
+    }
+    VkMemoryAllocateInfo mai = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = mreq.size,
+        .memoryTypeIndex = (uint32_t)memType,
+    };
+    if (be->vkAllocateMemory(be->device, &mai, NULL, outMem) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] vkAllocateMemory(size=%llu) failed",
+             (unsigned long long)mreq.size);
+        return -1;
+    }
+    if (be->vkBindImageMemory(be->device, *outImage, *outMem, 0) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] vkBindImageMemory failed");
+        return -1;
+    }
+
+    VkImageViewCreateInfo ivci = {
+        .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image    = *outImage,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format   = format,
+        .components = {
+            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+        },
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1,
+        },
+    };
+    if (be->vkCreateImageView(be->device, &ivci, NULL, outView) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] vkCreateImageView failed");
+        return -1;
+    }
+    return 0;
+}
+
+static int init_compute_pipelines(vk_backend_t* be)
+{
+    if (be->fInitialized) return 0;
+    if (!be->ycbcrInitialized) {
+        LOGW("[VKBE-COMPUTE] init called before ycbcr sampler is ready; skipping");
+        return -1;
+    }
+    if (load_compute_procs(be) != 0) return -1;
+
+    // Block size constant — must match the .comp shaders + GLES path.
+    const uint32_t BLOCK_SIZE = 64;
+    uint32_t W   = (uint32_t)be->videoWidth;
+    uint32_t H   = (uint32_t)be->videoHeight;
+    uint32_t mvW = (W + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    uint32_t mvH = (H + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    // 1. Storage images. (currFrameRgba / prevFrameRgba / interpFrame are
+    //    rgba8 at video size; the 3 motion fields are r32i at mv size.)
+    if (allocate_storage_image(be, VK_FORMAT_R8G8B8A8_UNORM, W, H,
+                                &be->fImage[FRUC_IMG_CURR], &be->fImageMem[FRUC_IMG_CURR], &be->fImageView[FRUC_IMG_CURR]) != 0)
+        return -1;
+    if (allocate_storage_image(be, VK_FORMAT_R8G8B8A8_UNORM, W, H,
+                                &be->fImage[FRUC_IMG_PREV], &be->fImageMem[FRUC_IMG_PREV], &be->fImageView[FRUC_IMG_PREV]) != 0)
+        return -1;
+    if (allocate_storage_image(be, VK_FORMAT_R32_SINT, mvW, mvH,
+                                &be->fImage[FRUC_IMG_MV], &be->fImageMem[FRUC_IMG_MV], &be->fImageView[FRUC_IMG_MV]) != 0)
+        return -1;
+    if (allocate_storage_image(be, VK_FORMAT_R32_SINT, mvW, mvH,
+                                &be->fImage[FRUC_IMG_PREV_MV], &be->fImageMem[FRUC_IMG_PREV_MV], &be->fImageView[FRUC_IMG_PREV_MV]) != 0)
+        return -1;
+    if (allocate_storage_image(be, VK_FORMAT_R32_SINT, mvW, mvH,
+                                &be->fImage[FRUC_IMG_FILT_MV], &be->fImageMem[FRUC_IMG_FILT_MV], &be->fImageView[FRUC_IMG_FILT_MV]) != 0)
+        return -1;
+    if (allocate_storage_image(be, VK_FORMAT_R8G8B8A8_UNORM, W, H,
+                                &be->fImage[FRUC_IMG_INTERP], &be->fImageMem[FRUC_IMG_INTERP], &be->fImageView[FRUC_IMG_INTERP]) != 0)
+        return -1;
+
+    // 2. Linear sampler for the rgba8 / r32i storage-image bindings on the
+    //    ME / mv_median / warp pipelines. CLAMP_TO_EDGE so warp's
+    //    sampleMV bilinear at the frame border doesn't pull in garbage.
+    VkSamplerCreateInfo sci = {
+        .sType         = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter     = VK_FILTER_LINEAR,
+        .minFilter     = VK_FILTER_LINEAR,
+        .mipmapMode    = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .borderColor   = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+        .unnormalizedCoordinates = VK_FALSE,
+    };
+    if (be->vkCreateSampler(be->device, &sci, NULL, &be->fLinearSampler) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] vkCreateSampler(linear) failed");
+        return -1;
+    }
+
+    // 3. Shader modules (4 pipelines × 1 module each).
+    struct { const void* code; size_t size; const char* name; } shaders[FRUC_NUM_PIPELINES] = {
+        [FRUC_PIPE_YCBCR]     = { ycbcr_to_rgba_comp_spv,        ycbcr_to_rgba_comp_spv_len,        "ycbcr_to_rgba" },
+        [FRUC_PIPE_ME]        = { motionest_compute_q1_comp_spv, motionest_compute_q1_comp_spv_len, "motionest_q1" },
+        [FRUC_PIPE_MV_MEDIAN] = { mv_median_comp_spv,            mv_median_comp_spv_len,            "mv_median" },
+        [FRUC_PIPE_WARP]      = { warp_compute_q1_comp_spv,      warp_compute_q1_comp_spv_len,      "warp_q1" },
+    };
+    for (int i = 0; i < FRUC_NUM_PIPELINES; i++) {
+        VkShaderModuleCreateInfo smci = {
+            .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = shaders[i].size,
+            .pCode    = (const uint32_t*)shaders[i].code,
+        };
+        if (be->vkCreateShaderModule(be->device, &smci, NULL, &be->fShader[i]) != VK_SUCCESS) {
+            LOGE("[VKBE-COMPUTE] vkCreateShaderModule(%s) failed", shaders[i].name);
+            return -1;
+        }
+    }
+
+    // 4. Descriptor set layouts (per docs/vulkan_fruc_port.md §4).
+    //    Sampler bindings use immutable samplers — ycbcr binding takes the
+    //    YCbCr conversion sampler (mandatory for the conversion to work),
+    //    everything else takes fLinearSampler.
+
+    // 4a. ycbcr_to_rgba: combined image sampler (binding 0, ycbcr) + storage image (binding 1)
+    {
+        VkDescriptorSetLayoutBinding b[2] = {
+            { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+              .pImmutableSamplers = &be->ycbcrSampler },
+            { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
+        };
+        VkDescriptorSetLayoutCreateInfo dslci = {
+            .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = 2, .pBindings = b,
+        };
+        if (be->vkCreateDescriptorSetLayout(be->device, &dslci, NULL,
+                                             &be->fDescLayout[FRUC_PIPE_YCBCR]) != VK_SUCCESS) {
+            LOGE("[VKBE-COMPUTE] descset_layout[ycbcr] failed");
+            return -1;
+        }
+    }
+
+    // 4b. motionest: 3 combined image samplers (prev/curr/prevMV) + 1 storage image (mv)
+    {
+        VkDescriptorSetLayoutBinding b[4] = {
+            { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+              .pImmutableSamplers = &be->fLinearSampler },
+            { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+              .pImmutableSamplers = &be->fLinearSampler },
+            { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+              .pImmutableSamplers = &be->fLinearSampler },
+            { .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
+        };
+        VkDescriptorSetLayoutCreateInfo dslci = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = 4, .pBindings = b,
+        };
+        if (be->vkCreateDescriptorSetLayout(be->device, &dslci, NULL,
+                                             &be->fDescLayout[FRUC_PIPE_ME]) != VK_SUCCESS) {
+            LOGE("[VKBE-COMPUTE] descset_layout[me] failed");
+            return -1;
+        }
+    }
+
+    // 4c. mv_median: 1 isampler + 1 storage image
+    {
+        VkDescriptorSetLayoutBinding b[2] = {
+            { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+              .pImmutableSamplers = &be->fLinearSampler },
+            { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
+        };
+        VkDescriptorSetLayoutCreateInfo dslci = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = 2, .pBindings = b,
+        };
+        if (be->vkCreateDescriptorSetLayout(be->device, &dslci, NULL,
+                                             &be->fDescLayout[FRUC_PIPE_MV_MEDIAN]) != VK_SUCCESS) {
+            LOGE("[VKBE-COMPUTE] descset_layout[mv_median] failed");
+            return -1;
+        }
+    }
+
+    // 4d. warp: 3 combined image samplers + 1 storage image (interp)
+    {
+        VkDescriptorSetLayoutBinding b[4] = {
+            { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+              .pImmutableSamplers = &be->fLinearSampler },
+            { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+              .pImmutableSamplers = &be->fLinearSampler },
+            { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+              .pImmutableSamplers = &be->fLinearSampler },
+            { .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
+        };
+        VkDescriptorSetLayoutCreateInfo dslci = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = 4, .pBindings = b,
+        };
+        if (be->vkCreateDescriptorSetLayout(be->device, &dslci, NULL,
+                                             &be->fDescLayout[FRUC_PIPE_WARP]) != VK_SUCCESS) {
+            LOGE("[VKBE-COMPUTE] descset_layout[warp] failed");
+            return -1;
+        }
+    }
+
+    // 5. Pipeline layouts. Push constant block ≤ 16 bytes (well under
+    //    Vulkan 1.0's 128-byte minimum guarantee).
+    static const uint32_t PC_SIZE[FRUC_NUM_PIPELINES] = {
+        [FRUC_PIPE_YCBCR]     = 8,   // uvec2 dims
+        [FRUC_PIPE_ME]        = 12,  // uvec3 (frameW, frameH, blockSize)
+        [FRUC_PIPE_MV_MEDIAN] = 8,   // uvec2 (mvW, mvH)
+        [FRUC_PIPE_WARP]      = 16,  // uvec3 + float blendFactor
+    };
+    for (int i = 0; i < FRUC_NUM_PIPELINES; i++) {
+        VkPushConstantRange pcRange = {
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .offset     = 0,
+            .size       = PC_SIZE[i],
+        };
+        VkPipelineLayoutCreateInfo plci = {
+            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount         = 1,
+            .pSetLayouts            = &be->fDescLayout[i],
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges    = &pcRange,
+        };
+        if (be->vkCreatePipelineLayout(be->device, &plci, NULL, &be->fPipeLayout[i]) != VK_SUCCESS) {
+            LOGE("[VKBE-COMPUTE] vkCreatePipelineLayout[%d] failed", i);
+            return -1;
+        }
+    }
+
+    // 6. Compute pipelines (one vkCreateComputePipelines call for all 4).
+    VkComputePipelineCreateInfo cpci[FRUC_NUM_PIPELINES];
+    memset(cpci, 0, sizeof(cpci));
+    for (int i = 0; i < FRUC_NUM_PIPELINES; i++) {
+        cpci[i].sType        = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpci[i].stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpci[i].stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpci[i].stage.module = be->fShader[i];
+        cpci[i].stage.pName  = "main";
+        cpci[i].layout       = be->fPipeLayout[i];
+    }
+    if (be->vkCreateComputePipelines(be->device, VK_NULL_HANDLE,
+                                      FRUC_NUM_PIPELINES, cpci, NULL,
+                                      be->fPipeline) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] vkCreateComputePipelines failed");
+        return -1;
+    }
+
+    // 7. Descriptor pool + 4 sets.
+    //    ycbcr(1 sampler + 1 storage) + me(3 sampler + 1 storage) +
+    //    mv_median(1 sampler + 1 storage) + warp(3 sampler + 1 storage)
+    //    = 8 sampler + 4 storage; pad sampler to 9 for slack.
+    VkDescriptorPoolSize poolSizes[2] = {
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 9 },
+        { .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,           .descriptorCount = 4 },
+    };
+    VkDescriptorPoolCreateInfo dpci = {
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets       = FRUC_NUM_PIPELINES,
+        .poolSizeCount = 2,
+        .pPoolSizes    = poolSizes,
+    };
+    if (be->vkCreateDescriptorPool(be->device, &dpci, NULL, &be->fDescPool) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] vkCreateDescriptorPool failed");
+        return -1;
+    }
+    VkDescriptorSetAllocateInfo dsai = {
+        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool     = be->fDescPool,
+        .descriptorSetCount = FRUC_NUM_PIPELINES,
+        .pSetLayouts        = be->fDescLayout,
+    };
+    if (be->vkAllocateDescriptorSets(be->device, &dsai, be->fDescSet) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] vkAllocateDescriptorSets failed");
+        return -1;
+    }
+
+    // §I.C.3.b will populate descriptor set bindings (per-frame ycbcr
+    // image view + persistent storage image bindings) and add the
+    // dispatch sequence to render_ahb_frame. C.3.a stops here.
+
+    LOGI("[VKBE-COMPUTE] init done: 6 storage images (W=%u H=%u, mvW=%u mvH=%u), "
+         "4 pipelines (ycbcr/motionest_q1/mv_median/warp_q1), 4 descsets",
+         W, H, mvW, mvH);
+    be->fInitialized = 1;
+    return 0;
+}
+
+static void destroy_compute_pipelines(vk_backend_t* be)
+{
+    if (!be->fInitialized) return;
+
+    if (be->fDescPool) {
+        be->vkDestroyDescriptorPool(be->device, be->fDescPool, NULL);
+        be->fDescPool = VK_NULL_HANDLE;
+    }
+    for (int i = 0; i < FRUC_NUM_PIPELINES; i++) {
+        if (be->fPipeline[i])   be->vkDestroyPipeline(be->device, be->fPipeline[i], NULL);
+        if (be->fPipeLayout[i]) be->vkDestroyPipelineLayout(be->device, be->fPipeLayout[i], NULL);
+        if (be->fDescLayout[i]) be->vkDestroyDescriptorSetLayout(be->device, be->fDescLayout[i], NULL);
+        if (be->fShader[i])     be->vkDestroyShaderModule(be->device, be->fShader[i], NULL);
+        be->fPipeline[i]   = VK_NULL_HANDLE;
+        be->fPipeLayout[i] = VK_NULL_HANDLE;
+        be->fDescLayout[i] = VK_NULL_HANDLE;
+        be->fShader[i]     = VK_NULL_HANDLE;
+        be->fDescSet[i]    = VK_NULL_HANDLE;
+    }
+    if (be->fLinearSampler) {
+        be->vkDestroySampler(be->device, be->fLinearSampler, NULL);
+        be->fLinearSampler = VK_NULL_HANDLE;
+    }
+    for (int i = 0; i < FRUC_NUM_IMAGES; i++) {
+        if (be->fImageView[i]) be->vkDestroyImageView(be->device, be->fImageView[i], NULL);
+        if (be->fImage[i])     be->vkDestroyImage(be->device, be->fImage[i], NULL);
+        if (be->fImageMem[i])  be->vkFreeMemory(be->device, be->fImageMem[i], NULL);
+        be->fImageView[i] = VK_NULL_HANDLE;
+        be->fImage[i]     = VK_NULL_HANDLE;
+        be->fImageMem[i]  = VK_NULL_HANDLE;
+    }
+    be->fInitialized = 0;
+    LOGI("[VKBE-COMPUTE] destroyed");
+}
+
 // ---------- B.2c.3a: per-frame steady-state clear+present ----------
 
 static int render_clear_frame(vk_backend_t* be)
@@ -1665,6 +2101,11 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
             if (init_graphics_pipeline(be) != 0) {
                 LOGW("lazy graphics pipeline init failed; staying on clear-only path");
                 return render_clear_frame(be);
+            }
+            // §I.C.3.a: bring up FRUC compute resources alongside graphics.
+            // Failure here is non-fatal — graphics keeps running passthrough.
+            if (init_compute_pipelines(be) != 0) {
+                LOGW("[VKBE-COMPUTE] lazy init failed; FRUC compute disabled this session");
             }
         } else {
             return render_clear_frame(be);
@@ -1832,6 +2273,7 @@ Java_com_limelight_binding_video_VkBackend_nativeDestroy(JNIEnv* env, jclass cla
     vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
     if (!be) return;
     LOGI("destroying backend handle=%p (frames rendered=%d)", be, be->frameCounter);
+    destroy_compute_pipelines(be);
     destroy_graphics_pipeline(be);
     destroy_ycbcr_sampler(be);
     destroy_render_resources(be);
