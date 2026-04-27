@@ -30,6 +30,8 @@
 | Y | DirectML auto-cascade probe + Generic fallback | v1.2.86–91 | init 時 probe 720p→540p→480p→360p 各解析度推論時間，挑能塞進預算的最高；全 miss 就 fall back 到 Generic。同步把 default backend 改成 Generic、DML option 加「需要強 GPU」警語、移除 180fps 警告。 |
 | 新 | DirectML reset-race 修正 | v1.2.82–86 | post-unpack + concat allocator 的 fence-gated reset；多 ring slots；submitFrame 從 50 ms → 3 ms。 |
 | 新 | Android FRUC bitrate strategy (a) — 文件化 + log invariant | v1.2.133 | 既有行為已是「總 bitrate 不變、per-frame 自動 2x」。`Game.java:450-457` 加 effective per-frame bitrate log 跟 inline comment 鎖死不變式（避免日後重構默默改成 strategy b）；FRUC settings summary + `summary_seekbar_bitrate` (en + zh-rTW) 加說明。 |
+| **§I.A** | **Vulkan 路徑 recon — 綠燈** | **v1.2.134–135** | A1 (v1.2.135) `eglPresentationTimeANDROID` spike — negative result，仍維持往 Vulkan 推進；A2+A3 (v1.2.134) `vkEnumerateInstanceExtensionProperties` 在 Pixel 5 / Adreno 620 確認 `VK_GOOGLE_display_timing` + `VK_ANDROID_external_memory_android_hardware_buffer` 都支援，minimal Vulkan init 跑通。Phase A 三個綠燈條件全達成。 |
+| **§I.B** | **VkPassthroughBackend — MediaCodec → AImageReader → AHardwareBuffer → VkImage → swapchain（不含 FRUC）** | **v1.2.136–147** | 11 個子 commit：B.0 `IFrucBackend` interface (v1.2.136)；B.1 VkBackend 骨架 + auto-fallback chain (v1.2.137)；B.2a `VkInstance + VkDevice + Queue` (v1.2.139)；B.2b `VkSurfaceKHR + VkSwapchainKHR` on display Surface (v1.2.140)；B.2c.1 acquire+clear+present sanity roundtrip (v1.2.141)；B.2c.2 Java `ImageReader` scaffolding (v1.2.142)；B.2c.3a active mode + per-frame clear render (v1.2.143)；B.2c.3b `AHardwareBuffer→VkImage` import validated on real frames (v1.2.144)；B.2c.3c.1 `VkSamplerYcbcrConversion + VkSampler` from AHB externalFormat (v1.2.145)；B.2c.3c.2 graphics pipeline + UV gradient test pattern (v1.2.146)；B.2c.3c.3 真實視訊 sampling via YCbCr immutable sampler (v1.2.147)。Pixel 5 / Adreno 620 / LineageOS 22.1 live 驗證 3360+ frame `render_ahb_frame` 全乾淨。**Opt-in：`adb shell setprop debug.viplestream.vkprobe 1`**（system property，TODO 原計畫的 `VIPLE_VK_PROBE` env var 在 Android 上 toggle 不便）；預設使用者完全沒感（GLES 不變）。 |
 
 ---
 
@@ -205,19 +207,35 @@ MediaCodecDecoderRenderer 持有 IFrucBackend，runtime 決定走哪條：
 
 ### 階段（每階段獨立 commit、可獨立 ship）
 
-| Phase | 工時估 | 內容 | Ship 樣貌 |
-|---|---|---|---|
-| **A** Recon | 0.5–1 day | A1 `eglPresentationTimeANDROID` spike；A2 `vkEnumerateInstanceExtensionProperties` 確認 Pixel 5 支援 `VK_GOOGLE_display_timing` + `VK_ANDROID_external_memory_android_hardware_buffer`；A3 minimal Vulkan init 驗 build chain | 不 ship 程式碼，只交報告 |
-| **B** Plumbing | 5–7 day | 抽 `IFrucBackend` interface、現有 GlesFrucBackend 改名實作；新增 `VkPassthroughBackend`（MediaCodec → AImageReader → AHardwareBuffer → VkImage → swapchain，**不含 FRUC**）；env var `VIPLE_VK_PROBE=1` 啟用 | 預設使用者完全沒感（GLES 不變） |
-| **C** Vulkan FRUC | 5–7 day | GLSL → SPIR-V (含 v17 / v1.1.136 改動全部 port)；Vulkan compute pipeline；接 B 的 present 鏈；加 `VK_GOOGLE_display_timing`；Settings 加「FRUC 後端：GLES (預設) / Vulkan (實驗)」toggle | 自願者開、出問題自動退回 GLES |
-| **D** Async compute | 3–4 day | ME 移到專屬 compute queue，跟 present queue 平行；ME 跟前一幀 present 重疊 — **這才是 +17ms 延遲的真正解法**；baseline 對比驗 latency 真的下降 | 同 C toggle，效能升級 |
-| **E** HDR | 獨立 | 10-bit P010 path、color space management、HDR10 metadata；HDR toggle 自動拉 backend 到 Vulkan | 「啟用 HDR」勾選 |
+| Phase | 工時估 | 內容 | Ship 樣貌 | 狀態 |
+|---|---|---|---|---|
+| **A** Recon | 0.5–1 day | A1 `eglPresentationTimeANDROID` spike；A2 `vkEnumerateInstanceExtensionProperties` 確認 Pixel 5 支援 `VK_GOOGLE_display_timing` + `VK_ANDROID_external_memory_android_hardware_buffer`；A3 minimal Vulkan init 驗 build chain | 不 ship 程式碼，只交報告 | ✅ v1.2.134–135 |
+| **B** Plumbing | 5–7 day | 抽 `IFrucBackend` interface、現有 GlesFrucBackend 改名實作；新增 `VkPassthroughBackend`（MediaCodec → AImageReader → AHardwareBuffer → VkImage → swapchain，**不含 FRUC**）；system property `debug.viplestream.vkprobe=1` 啟用 | 預設使用者完全沒感（GLES 不變） | ✅ v1.2.136–147（11 子 commit） |
+| **C** Vulkan FRUC | 5–7 day | GLSL → SPIR-V (含 v17 / v1.1.136 改動全部 port)；Vulkan compute pipeline；接 B 的 present 鏈；加 `VK_GOOGLE_display_timing`；Settings 加「FRUC 後端：GLES (預設) / Vulkan (實驗)」toggle | 自願者開、出問題自動退回 GLES | ⏳ 進行中 |
+| **D** Async compute | 3–4 day | ME 移到專屬 compute queue，跟 present queue 平行；ME 跟前一幀 present 重疊 — **這才是 +17ms 延遲的真正解法**；baseline 對比驗 latency 真的下降 | 同 C toggle，效能升級 | ⏸️ 等 C |
+| **E** HDR | 獨立 | 10-bit P010 path、color space management、HDR10 metadata；HDR toggle 自動拉 backend 到 Vulkan | 「啟用 HDR」勾選 | ⏸️ 等 C |
+
+### Phase C 細部子計畫（2026-04-27 規劃）
+
+GLES 路徑現在用 4 個 program × 3 quality 變體（共 10 個 GLSL）+ 827 行 `FrucRenderer.java` orchestration。整段 port 到 Vulkan 不可一個 commit 收。仿 §I.B 拆 7 個獨立 ship 的子 phase：
+
+| Sub-phase | 內容 | 風險 / 失敗點 |
+|---|---|---|
+| **C.1** Recon — shader port spec | 把 4 個 GLSL（motionest_compute / mv_median / warp_compute / blit）的 inputs / outputs / uniforms / image bindings 列表，標出 GLSL 310 es → 450 SPIR-V 的具體差異點。**Doc only，不 ship 程式碼。** | 低；不動執行路徑 |
+| **C.2** Shader port — compile only | 把 4 個 GLSL 翻成 GLSL 450，用 `glslc` 編成 `.spv` + `xxd -i` 包成 `.spv.h`，**只進 build、不接 pipeline**。Quality preset 的 3 個 ME 變體用 `-DQUALITY_LEVEL=N` 編 3 份 SPV。 | 中；GLES `imageStore` / `bitCount` 行為差異可能要重寫 |
+| **C.3** Compute pipeline scaffold | 在 VkBackend 加 4 個 `VkPipeline` (compute) + descriptor set layouts；分配 storage images（prev/curr RGBA、motionField、filteredMotionField、interpFrame）；**dispatch 但不 sample 結果到 swapchain**。 | 中；storage image format / access flags |
+| **C.4** Wire compute → present | `render_ahb_frame` 改成 `import AHB → blit YCbCr→curr_rgba → ME → median → warp → 雙 blit (interp + real) → present`；保持每 frame `vkQueueWaitIdle`（暫時）。 | 高；FRUC algo 視覺正確性 |
+| **C.5** Quality preset wiring + GLES parity | 拉 `setQualityLevel(0/1/2)` 切換 ME pipeline；對 GLES baseline 跑 `scripts/benchmark/android/`，verify fps / latency 不退步。 | 中；perf 可能輸 GLES，要分析 |
+| **C.6** `VK_GOOGLE_display_timing` | 加 extension probe + `vkGetPastPresentationTimingGOOGLE` / `vkGetRefreshCycleDurationGOOGLE`；FRUC interp frame 帶 PTS 給驅動程式排程。 | 中；驅動行為文件少 |
+| **C.7** Settings UI toggle | XML preference + summary 加「FRUC 後端 GLES / Vulkan (experimental)」；移除 `debug.viplestream.vkprobe` 強制需求。 | 低；純 UI |
+
+每個子 phase 的 commit message 用 `vX.Y.Z: §I.C.N — <短摘要>` 格式，跟 §I.B 一致。
 
 ### 不可動的鐵律
 
-1. **Phase A 結果決定整個計畫是否繼續**。A2 若回報驅動不支援 `VK_GOOGLE_display_timing`，**整個計畫退回到 EGL spike** 不要硬做。
+1. ~~**Phase A 結果決定整個計畫是否繼續**~~ — A 已綠燈通過 (v1.2.134–135)，extension 都支援。
 2. **每 Phase 都要有 baseline 對比**。沿用 `scripts/benchmark/android/`，量出來不如預期就停。
-3. **MediaCodec → AHardwareBuffer 在 LineageOS 22.1 / Pixel 5 上的行為是最大未知**。Phase B1 撞到就要決定：「妥協 SurfaceTexture + Vulkan 共享」 or 「整個計畫退回」。
+3. ~~**MediaCodec → AHardwareBuffer 在 LineageOS 22.1 / Pixel 5 上的行為是最大未知**~~ — B 已驗證可行 (v1.2.144–147)，3360+ frame live 驗證乾淨。
 4. **GLES path 至少保留到「Vulkan 穩定 6 個月」之後才移除**。期間 FRUC bug 修兩次（GLES + Vulkan）是已知 +20% 維護成本。
 
 ### 已就位的診斷工具（Phase B+ 會用到）
@@ -226,12 +244,12 @@ MediaCodecDecoderRenderer 持有 IFrucBackend，runtime 決定走哪條：
 - `scripts/benchmark/android/analyze_baseline.py` — 30s bucket fps + pixel-thermal 高頻交叉驗證（已 ship）
 - TBD：FRUC log 加 backend 名稱（GLES / Vulkan / Vulkan-async），方便事後 grep 比較
 
-### Phase A 的綠燈條件
+### ~~Phase A 的綠燈條件~~（已通過）
 
-A 跑完報告必須包含這幾個答案，缺一就停：
-1. Pixel 5 Adreno 620 是否支援 `VK_GOOGLE_display_timing`？（YES/NO）
-2. `eglPresentationTimeANDROID` 在現有 EGL 環境下能否替代部分 display timing 功能？（驗：對比 jank 比例）
-3. `AHardwareBuffer` 從 MediaCodec 拿出來在這台是否穩定？（驗：能否成功 import 進 VkImage）
+A 三個問題都拿到答案：
+1. Pixel 5 Adreno 620 支援 `VK_GOOGLE_display_timing`？✅ YES（A2, v1.2.134）
+2. `eglPresentationTimeANDROID` 能否替代？❌ NO，效果不彰（A1, v1.2.135 negative result）— 仍維持往 Vulkan 推進
+3. `AHardwareBuffer` 能否 import 進 VkImage？✅ YES（B.2c.3b, v1.2.144 驗證）
 
 ---
 
@@ -251,11 +269,11 @@ A 跑完報告必須包含這幾個答案，缺一就停：
 | 優先級 | 條目 | 理由 |
 |---|---|---|
 | **Medium** | **§A.1+A.11** QSettings org name + ini 名稱遷移 | 升級 v1.2.43 起的使用者「設定看起來像 reset 了」是真實 regression；只是大家手動把 paired hosts 重 add 過去就不痛了，所以沒人特別抱怨。動之前要寫並測 migration |
-| **Medium-High** | **§I** Android Vulkan 路徑（HDR + 降延遲） | 兩個 roadmap 需求一條解；2.5–3.5 週工，分階段可隨時停。建議 Phase A 先做（半天–1 天 recon）就能評估真實可行性 |
+| **Medium-High** | **§I** Android Vulkan 路徑（HDR + 降延遲） | 兩個 roadmap 需求一條解。**Phase A+B 已完成 (v1.2.134–147)**，VkPassthroughBackend live 跑通；現在進 Phase C（Vulkan FRUC 端到端 port），分 7 子 phase 估 5–7 day |
 | **Medium-Low** | **§A.6** HTTP Basic auth realm | 改了使用者要重登 Web UI；除非有別的 reason 一起改，否則 standalone 改一條不划算 |
 | **Low** | **§F** DirectML pipeline 搬 D3D12 / bundles | 4K120 real-time 才需要的架構改動；現在 1080p240 已達標 |
 | **Low** | **§G.1** 11-channel RIFE v1 | A1000-tier 仍可能 launch overhead 超 budget（§G.3 negative result 之後），主要 win 在 RTX 30/40+；要 ship 得搭 §G.4 |
-| **Low** | **§G.4** 模型下載管理 | RIFE fp32 + fp16 兩個 onnx 已 bundle (~33 MB)，IFRNet-S 5.8 MB 還沒 ship；要加新 model 才會用到 |
+| **Low** | **§G.4** 模型下載管理 | RIFE fp32 + fp16 兩個 onnx 已 bundle (~33 MB)；IFRNet-S 5.8 MB 進 repo 當 reference 但**故意不 bundle 進 cascade**（§G.3 negative result）；要加新 model 才會用到 |
 | **Low** | **§E** Android themed icon | Material You 一致性 nice to have；多數使用者不會在意 |
 | **Low** | **§C** 其他 20 個語系檔 | 英文 + 繁中 cover 主要使用者；剩下純品牌一致性 |
 | **Low** | **§D** wiki / docs 連結 | 在 docs 有實際內容前換連結沒意義 |
