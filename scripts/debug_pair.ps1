@@ -33,10 +33,13 @@ param(
 $ErrorActionPreference = "Stop"
 
 # --- Configuration ---
+# Paths / names match the v1.2.93–95 rebrand. If you point this at a vanilla
+# Sunshine install instead of VipleStream-Server, override the two -Sunshine*
+# variables manually. Service name has a fallback below for the same reason.
 $ADB = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
-$SunshineState = "C:\Program Files\Sunshine\config\sunshine_state.json"
-$SunshineService = "SunshineService"
-$TempCert = "$env:TEMP\moonlight_debug_client.crt"
+$SunshineState = "C:\Program Files\VipleStream-Server\config\sunshine_state.json"
+$SunshineService = "VipleStreamServer"
+$TempCert = "$env:TEMP\viplestream_debug_client.crt"
 
 # --- Helpers ---
 function Write-Status($msg) { Write-Host "[*] $msg" -ForegroundColor Cyan }
@@ -89,8 +92,14 @@ Write-OK "Found device: $deviceId"
 # --- Pull client certificate ---
 Write-Status "Extracting Moonlight client certificate..."
 
-# Try debug package first, then release
+# Try debug package first, then release. Java namespace inside the APK is
+# still "com.limelight" by design (avoids per-file package edits) but the
+# applicationId from app/build.gradle is "com.piinsta", which is what
+# /data/data/<id>/ is keyed on. Keep the legacy paths as fallback in case
+# someone is running an older build.
 $certPaths = @(
+    "/data/data/com.piinsta.debug/files/client.crt",
+    "/data/data/com.piinsta/files/client.crt",
     "/data/data/com.limelight.debug/files/client.crt",
     "/data/data/com.limelight/files/client.crt"
 )
@@ -98,7 +107,10 @@ $pulled = $false
 
 foreach ($remotePath in $certPaths) {
     # Use run-as to access app-private storage
-    $packageName = if ($remotePath -match "com\.limelight\.debug") { "com.limelight.debug" } else { "com.limelight" }
+    $packageName = if ($remotePath -match "com\.piinsta\.debug") { "com.piinsta.debug" }
+                   elseif ($remotePath -match "com\.piinsta") { "com.piinsta" }
+                   elseif ($remotePath -match "com\.limelight\.debug") { "com.limelight.debug" }
+                   else { "com.limelight" }
 
     # Method 1: run-as (works on debuggable builds)
     $certContent = & $ADB shell "run-as $packageName cat files/client.crt" 2>&1
@@ -123,7 +135,7 @@ if (-not $pulled) {
     Write-Warn "Possible causes:"
     Write-Warn "  - App not installed or never launched (certificate not generated)"
     Write-Warn "  - Need debuggable build (run-as requires android:debuggable=true)"
-    Write-Warn "  - Try: adb shell run-as com.limelight.debug cat files/client.crt"
+    Write-Warn "  - Try: adb shell run-as com.piinsta.debug cat files/client.crt"
     exit 1
 }
 
@@ -171,18 +183,25 @@ try {
     $svc = Get-Service -Name $SunshineService -ErrorAction SilentlyContinue
     if ($svc) {
         Restart-Service -Name $SunshineService -Force
-        Write-OK "Sunshine service restarted."
+        Write-OK "$SunshineService service restarted."
     } else {
-        # Try restarting the process directly
-        $proc = Get-Process -Name "sunshine" -ErrorAction SilentlyContinue
-        if ($proc) {
-            $sunshineExe = $proc.Path
-            Stop-Process -Name "sunshine" -Force
-            Start-Sleep -Seconds 2
-            Start-Process -FilePath $sunshineExe
-            Write-OK "Sunshine process restarted."
+        # Pre-rebrand fallback in case someone is running upstream Sunshine
+        $svcLegacy = Get-Service -Name "SunshineService" -ErrorAction SilentlyContinue
+        if ($svcLegacy) {
+            Restart-Service -Name "SunshineService" -Force
+            Write-OK "Legacy SunshineService restarted."
         } else {
-            Write-Warn "Sunshine not running as service or process. Please restart manually."
+            # Try restarting the process directly (any matching exe)
+            $proc = Get-Process -Name "viplestream-server","sunshine" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($proc) {
+                $exe = $proc.Path
+                Stop-Process -Id $proc.Id -Force
+                Start-Sleep -Seconds 2
+                Start-Process -FilePath $exe
+                Write-OK "Restarted process: $exe"
+            } else {
+                Write-Warn "Server not running as service or process. Please restart manually."
+            }
         }
     }
 } catch {
