@@ -708,66 +708,32 @@ static int create_surface(vk_backend_t* be, JNIEnv* env, jobject jSurface)
     }
     LOGI("VkSurfaceKHR created on ANativeWindow=%p", be->nativeWindow);
 
-    // §I.D.c — request 90 Hz panel mode. Pixel 5 has a 90 Hz LCD but
-    // defaults to 60 Hz unless the active app explicitly hints higher.
-    // FIXED_SOURCE compatibility tells the compositor "I produce frames
-    // at this exact rate — do not interpolate or average". Combined with
-    // §I.D.b smart-mode, this lets a 45 FPS input stream trigger dual
-    // present (45 < 90 × 0.92) and reach 90 FPS displayed (FRUC's
-    // designed sweet spot).
+    // v1.2.182 — ANativeWindow_setFrameRate hint REMOVED.
     //
-    // Hint-only API; if user hasn't enabled "smooth display" or another
-    // window pins lower rate, panel stays at 60 Hz. Verify via
-    // [VK-DISPLAY-TIMING] refresh cycle log in create_swapchain.
+    // History:
+    //   v1.2.163: added setFrameRate(90) for Pixel 5 — Pixel 5 OK
+    //   v1.2.164: added setFrameRateWithChangeStrategy(.., ALWAYS)
+    //   v1.2.165: added Java getSupportedModes max → setFrameRate(120 on Pixel 9)
+    //   v1.2.165–v1.2.181: Pixel 9 user reports SIGSEGV inside vkCreateDevice
+    //   v1.2.180: dropped VK_EXT_hdr_metadata enable — still crashes
+    //   v1.2.181: dropped VK_EXT_swapchain_colorspace enable — still crashes
+    // Only thing left differing from v1.2.174 (known-good on Pixel 9) is
+    // the setFrameRate hint. Mali-G715 driver appears to leave surface
+    // in inconsistent state after setFrameRate, breaking subsequent
+    // vkCreateDevice. Drop the hint.
     //
-    // Symbol introduced in API 30 (Android 11). Our minSdk is 21 so the
-    // direct call is weakly linked → SIGSEGV at runtime if device < 30.
-    // Use dlsym to gracefully no-op on old devices. FIXED_SOURCE = 1
-    // per ANW header.
-    // Prefer the API 31 setFrameRateWithChangeStrategy with
-    // CHANGE_FRAME_RATE_ALWAYS so the compositor *forces* the mode
-    // switch even if it's not seamless. The default API 30
-    // setFrameRate uses ONLY_IF_SEAMLESS which on Pixel 5 LineageOS
-    // 22.1 leaves the panel pinned at 60 Hz despite accepting the
-    // 90 Hz hint (observed in v1.2.163: rc=0 accepted but
-    // mActiveSfDisplayMode stayed at fps=60).
-    {
-        typedef int32_t (*PFN_ANW_setFrameRateStrat)(ANativeWindow*, float, int8_t, int8_t);
-        typedef int32_t (*PFN_ANW_setFrameRate)(ANativeWindow*, float, int8_t);
-        static PFN_ANW_setFrameRateStrat s_anw_setFrameRateStrat = NULL;
-        static PFN_ANW_setFrameRate      s_anw_setFrameRate      = NULL;
-        static int                       s_loaded                = 0;
-        if (!s_loaded) {
-            void* libandroid = dlopen("libandroid.so", RTLD_NOW);
-            if (libandroid) {
-                s_anw_setFrameRateStrat = (PFN_ANW_setFrameRateStrat)
-                    dlsym(libandroid, "ANativeWindow_setFrameRateWithChangeStrategy");
-                s_anw_setFrameRate = (PFN_ANW_setFrameRate)
-                    dlsym(libandroid, "ANativeWindow_setFrameRate");
-            }
-            s_loaded = 1;
-        }
-        // Use Java-provided max refresh rate (already in fHintedRefreshHz
-        // from nativeInit). Falls back to 90 only if Java query failed.
-        float hintRate = (be->fHintedRefreshHz > 0.0f) ? be->fHintedRefreshHz : 90.0f;
-        if (s_anw_setFrameRateStrat) {
-            // FIXED_SOURCE=1, CHANGE_FRAME_RATE_ALWAYS=1
-            int32_t fr = s_anw_setFrameRateStrat(be->nativeWindow, hintRate, 1, 1);
-            LOGI("ANativeWindow_setFrameRateWithChangeStrategy(%.1f, FIXED_SOURCE, ALWAYS) rc=%d %s",
-                 (double)hintRate, fr, fr == 0 ? "(hint accepted)" : "(rejected)");
-            status_log("setFrameRate hint: %.1f Hz, rc=%d (%s) [API31+ ChangeStrategy ALWAYS]",
-                       (double)hintRate, fr, fr == 0 ? "accepted" : "rejected");
-        } else if (s_anw_setFrameRate) {
-            int32_t fr = s_anw_setFrameRate(be->nativeWindow, hintRate, 1);
-            LOGI("ANativeWindow_setFrameRate(%.1f, FIXED_SOURCE) rc=%d %s (no ChangeStrategy variant)",
-                 (double)hintRate, fr, fr == 0 ? "(hint accepted)" : "(rejected)");
-            status_log("setFrameRate hint: %.1f Hz, rc=%d (%s) [API30, no ChangeStrategy]",
-                       (double)hintRate, fr, fr == 0 ? "accepted" : "rejected");
-        } else {
-            LOGI("ANativeWindow_setFrameRate symbol unavailable (need API 30+) — staying at panel default rate");
-            status_log("setFrameRate symbol unavailable (need API 30+) — panel default rate");
-        }
-    }
+    // Trade-off: panel mode is now system-policy driven. Pixel 5 with
+    // LineageOS 22.1 default 60 Hz won't auto-switch to 90 Hz; user
+    // needs `adb shell settings put system min_refresh_rate 90` or
+    // system Smooth Display ON. Pixel 9 default Smooth Display is ON,
+    // panel sits at 120 Hz natively.
+    //
+    // smart-mode displayHz still uses fHintedRefreshHz (Java
+    // Display.getSupportedModes max) for criterion — this is "device's
+    // physical max refresh capability", a stable upper bound that
+    // doesn't depend on whether panel actually got to that rate. Smart
+    // criterion still triggers dual mode on input ≤ display×0.5 boundary.
+    status_log("setFrameRate hint: SKIPPED (v1.2.182 — Pixel 9 driver SIGSEGV workaround)");
     return 0;
 }
 
