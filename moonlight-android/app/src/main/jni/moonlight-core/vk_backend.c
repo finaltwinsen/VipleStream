@@ -324,6 +324,10 @@ typedef struct vk_backend_s {
     int                  fHdrColorspaceExt;   // VK_EXT_swapchain_colorspace (instance)
     int                  fHdrMetadataExt;     // VK_EXT_hdr_metadata (device)
     int                  fHdrCapableSurface;  // surface advertises HDR10_ST2084_EXT colorspace
+    // iter 16: user-requested HDR (from prefs.enableHdr Java side).
+    // Drives §I.E.b/c gates: actual swapchain colorspace switch +
+    // P010 import path. Currently observability-only.
+    int                  fHdrUserEnabled;
 
     // iter 4: per-frame host-side timing ring (ns). Measures
     // render_ahb_frame duration (entry→exit). 120 entries = 1-2s of
@@ -3687,23 +3691,33 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         }
     }
 
-    // §I.C.6 — periodic past-timing diagnostic (every 120 frames).
+    // §I.C.6 / iter 15 — periodic past-timing aggregate (every 600 frames
+    // co-located with [VKBE-PERF-SUMMARY]). Aggregates avg/min/max delta
+    // across up to 16 past presents instead of dumping each one.
     if (be->fDisplayTimingSupported && be->vkGetPastPresentationTimingGOOGLE &&
-        be->frameCounter > 0 && be->frameCounter % 120 == 0) {
+        be->frameCounter > 0 && be->frameCounter % 600 == 0) {
         uint32_t numPast = 0;
         be->vkGetPastPresentationTimingGOOGLE(be->device, be->swapchain, &numPast, NULL);
-        if (numPast > 8) numPast = 8;
+        if (numPast > 16) numPast = 16;
         if (numPast > 0) {
-            VkPastPresentationTimingGOOGLE past[8];
+            VkPastPresentationTimingGOOGLE past[16];
             if (be->vkGetPastPresentationTimingGOOGLE(be->device, be->swapchain,
                                                        &numPast, past) == VK_SUCCESS) {
+                int64_t sum = 0;
+                int64_t mn  = INT64_MAX;
+                int64_t mx  = INT64_MIN;
                 for (uint32_t i = 0; i < numPast; i++) {
-                    int64_t delta_ns = (int64_t)past[i].actualPresentTime
-                                     - (int64_t)past[i].desiredPresentTime;
-                    LOGI("[VK-DISPLAY-TIMING] past id=%u delta=%+lld ns (margin=%llu)",
-                         past[i].presentID, (long long)delta_ns,
-                         (unsigned long long)past[i].presentMargin);
+                    int64_t d = (int64_t)past[i].actualPresentTime
+                              - (int64_t)past[i].desiredPresentTime;
+                    sum += d;
+                    if (d < mn) mn = d;
+                    if (d > mx) mx = d;
                 }
+                int64_t avg = sum / (int64_t)numPast;
+                LOGI("[VK-DISPLAY-TIMING-AGG] past=%u avg=%+lld ns (%.2fms) "
+                     "min=%+lld ns max=%+lld ns",
+                     numPast, (long long)avg, (double)avg / 1.0e6,
+                     (long long)mn, (long long)mx);
             }
         }
     }
@@ -3738,6 +3752,28 @@ Java_com_limelight_binding_video_VkBackend_nativeSetQualityLevel(
         LOGI("[VKBE-COMPUTE] qualityLevel %d -> %d (motionest_q%d + warp_q%d)",
              be->fQualityLevel, q, q, q);
         be->fQualityLevel = q;
+    }
+}
+
+// iter 16: HDR.b prep. Java caller passes prefs.enableHdr down so native
+// can decide whether to negotiate HDR10 colorspace + 10-bit format
+// during swapchain create (§I.E.b/c, NOT YET IMPLEMENTED — current path
+// always picks SDR R8G8B8A8_UNORM/SRGB regardless). Call this after
+// nativeInit so it's available on next swapchain (re)create.
+JNIEXPORT void JNICALL
+Java_com_limelight_binding_video_VkBackend_nativeSetHdrEnabled(
+    JNIEnv* env, jclass clazz, jlong handle, jboolean enabled)
+{
+    vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
+    if (!be) return;
+    int e = enabled ? 1 : 0;
+    if (e != be->fHdrUserEnabled) {
+        LOGI("[VKBE-HDR] user enable_hdr %d -> %d "
+             "| capability: ext_colorspace=%d ext_hdr_metadata=%d hdr10_surface=%d "
+             "(actual HDR pipeline NOT yet wired — §I.E.b/c future)",
+             be->fHdrUserEnabled, e,
+             be->fHdrColorspaceExt, be->fHdrMetadataExt, be->fHdrCapableSurface);
+        be->fHdrUserEnabled = e;
     }
 }
 

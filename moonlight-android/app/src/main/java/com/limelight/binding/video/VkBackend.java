@@ -334,6 +334,19 @@ public final class VkBackend implements IFrucBackend {
     private static native int  nativeRenderFrame(long handle, HardwareBuffer hwBuffer);
     private static native int  nativeGetInterpolatedCount(long handle);
     private static native void nativeSetQualityLevel(long handle, int level);
+    private static native void nativeSetHdrEnabled(long handle, boolean enabled);
+
+    /**
+     * §I.E.a/b prep — caller passes prefs.enableHdr down so native can
+     * gate swapchain colorspace + P010 import on user intent. Currently
+     * observability-only; actual HDR pipeline switch deferred to
+     * §I.E.b/c.
+     */
+    public void setHdrEnabled(boolean enabled) {
+        if (nativeHandle != 0) {
+            nativeSetHdrEnabled(nativeHandle, enabled);
+        }
+    }
 
     /**
      * Read {@code debug.viplestream.vkprobe} via reflection so we don't

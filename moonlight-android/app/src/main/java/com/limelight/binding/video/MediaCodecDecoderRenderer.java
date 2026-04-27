@@ -573,6 +573,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                     IFrucBackend vk = new VkBackend(context);
                     vk.setQualityLevel(prefs.frucQuality);
                     Surface vkInput = vk.initialize(renderTarget.getSurface(), w, h);
+                    // iter 16: thread prefs.enableHdr down to native for §I.E.b/c
+                    // gating. Currently informational only — backend logs but
+                    // doesn't act on it (HDR pipeline switch deferred).
+                    if (vkInput != null && vk instanceof VkBackend) {
+                        ((VkBackend) vk).setHdrEnabled(prefs.enableHdr);
+                    }
                     if (vkInput != null) {
                         frucRenderer = vk;
                         decoderOutputSurface = vkInput;
