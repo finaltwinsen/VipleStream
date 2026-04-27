@@ -67,14 +67,25 @@ public final class VkBackend implements IFrucBackend {
     private Handler imageReaderHandler;
     private int imageReaderFramesSeen;
 
+    // Output FPS counter (B.2c.3c.5). 1-second sliding window over the
+    // ImageReader frames that resulted in a successful nativeRenderFrame
+    // (rc=0). volatile because the perf overlay polls from the UI thread
+    // while we update from the ImageReader handler thread.
+    private long fpsWindowStartNs;
+    private int  fpsWindowFrames;
+    private volatile float currentOutputFps;
+
     public VkBackend(Context context) {
         this.context = context;
     }
 
     @Override public String backendName() { return BACKEND; }
     @Override public boolean isInitialized() { return initialized; }
+    // §I.B is a passthrough backend (1 input frame → 1 present), no actual
+    // FRUC interpolation yet. §I.C wires the compute pipeline that produces
+    // interpolated frames; this counter starts incrementing then.
     @Override public int getInterpolatedCount() { return 0; }
-    @Override public float getOutputFps() { return 0f; }
+    @Override public float getOutputFps() { return currentOutputFps; }
     @Override public void setConnectionPoor(boolean poor) {}
     @Override public void setQualityLevel(int level) {
         this.qualityLevel = Math.max(0, Math.min(2, level));
@@ -189,12 +200,14 @@ public final class VkBackend implements IFrucBackend {
                                 Log.w(TAG, "nativeRenderFrame returned " + rc
                                            + " on frame " + imageReaderFramesSeen);
                             }
+                            if (rc == 0) updateOutputFps();
                             if (hb != null) hb.close();
                         }
                         if (imageReaderFramesSeen <= 3 || imageReaderFramesSeen % 60 == 0) {
                             Log.i(TAG, "ImageReader frame #" + imageReaderFramesSeen
                                        + " size=" + img.getWidth() + "x" + img.getHeight()
-                                       + " hwBuffer=" + (img.getHardwareBuffer() != null));
+                                       + " hwBuffer=" + (img.getHardwareBuffer() != null)
+                                       + " outputFps=" + currentOutputFps);
                         }
                     } catch (Throwable t) {
                         Log.e(TAG, "onImageAvailable threw: " + t, t);
@@ -214,6 +227,28 @@ public final class VkBackend implements IFrucBackend {
         }
     }
 
+    /**
+     * §I.B.2c.3c.5: 1-second sliding window FPS counter. Called from the
+     * ImageReader callback thread for each frame that successfully went
+     * through {@code nativeRenderFrame}. The first call seeds the window
+     * start and emits no value; subsequent calls increment the frame count
+     * and re-publish {@code currentOutputFps} once a full second elapses.
+     */
+    private void updateOutputFps() {
+        long now = System.nanoTime();
+        fpsWindowFrames++;
+        if (fpsWindowStartNs == 0) {
+            fpsWindowStartNs = now;
+            return;
+        }
+        long elapsedNs = now - fpsWindowStartNs;
+        if (elapsedNs >= 1_000_000_000L) {
+            currentOutputFps = fpsWindowFrames * 1_000_000_000f / elapsedNs;
+            fpsWindowFrames  = 0;
+            fpsWindowStartNs = now;
+        }
+    }
+
     private void destroyImageReader() {
         if (imageReader != null) {
             try { imageReader.setOnImageAvailableListener(null, null); } catch (Throwable ignored) {}
@@ -230,6 +265,9 @@ public final class VkBackend implements IFrucBackend {
         Log.i(TAG, "ImageReader destroyed (frames seen during this session: "
                    + imageReaderFramesSeen + ")");
         imageReaderFramesSeen = 0;
+        fpsWindowStartNs = 0;
+        fpsWindowFrames  = 0;
+        currentOutputFps = 0f;
     }
 
     @Override
