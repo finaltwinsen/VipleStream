@@ -71,7 +71,7 @@ public final class VkBackend implements IFrucBackend {
      */
     @Override
     public Surface initialize(Surface displaySurface, int w, int h) {
-        Log.i(TAG, "B.2a init: probing + creating Vulkan resources for " + w + "x" + h);
+        Log.i(TAG, "init: probing + creating Vulkan resources for " + w + "x" + h);
 
         boolean extsOk;
         try {
@@ -86,23 +86,23 @@ public final class VkBackend implements IFrucBackend {
         }
 
         try {
-            nativeHandle = nativeInit();
+            nativeHandle = nativeInit(displaySurface);
         } catch (Throwable t) {
             Log.e(TAG, "nativeInit threw: " + t, t);
             nativeHandle = 0;
         }
         if (nativeHandle == 0) {
-            Log.w(TAG, "VkInstance/VkDevice creation failed; declining backend → fallback to GLES");
+            Log.w(TAG, "Vulkan resource creation failed; declining backend → fallback to GLES");
             return null;
         }
 
-        // B.2a stops here intentionally — Vulkan resources are alive but
-        // we have no swapchain or AHB import yet. Phase B.2b adds the
-        // swapchain on this Surface, B.2c adds the MediaCodec→VkImage
-        // import path. For now: clean up our resources and decline so
-        // streaming proceeds via the GLES path.
-        Log.i(TAG, "B.2a — VkInstance + VkDevice + queue ready, but no presentation path yet. "
-                 + "Tearing down and declining → GLES fallback.");
+        // B.2b stops here intentionally — Vulkan instance/device/surface/
+        // swapchain are all alive, but we have no MediaCodec→VkImage
+        // import path yet (B.2c) and no acquire/blit/present loop. Tear
+        // everything down so the displaySurface is free for GLES to
+        // claim via eglCreateWindowSurface.
+        Log.i(TAG, "B.2b — instance/device/surface/swapchain ready, but no MediaCodec→VkImage "
+                 + "import yet. Tearing down and declining → GLES fallback.");
         nativeDestroy(nativeHandle);
         nativeHandle = 0;
         return null;
@@ -128,7 +128,7 @@ public final class VkBackend implements IFrucBackend {
     }
 
     // ---------- native bridge ----------
-    private static native long nativeInit();
+    private static native long nativeInit(Surface displaySurface);
     private static native void nativeDestroy(long handle);
 
     /**
@@ -141,8 +141,11 @@ public final class VkBackend implements IFrucBackend {
             Class<?> sp = Class.forName("android.os.SystemProperties");
             java.lang.reflect.Method get = sp.getMethod("get", String.class, String.class);
             String v = (String) get.invoke(null, "debug.viplestream.vkprobe", "0");
-            return "1".equals(v) || "true".equalsIgnoreCase(v);
+            boolean b = "1".equals(v) || "true".equalsIgnoreCase(v);
+            Log.i(TAG, "isOptedIn: debug.viplestream.vkprobe='" + v + "' → " + b);
+            return b;
         } catch (Throwable t) {
+            Log.w(TAG, "isOptedIn reflection failed: " + t);
             return false;
         }
     }

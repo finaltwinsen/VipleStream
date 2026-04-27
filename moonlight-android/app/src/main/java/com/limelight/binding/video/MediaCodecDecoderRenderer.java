@@ -561,7 +561,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             int w = format.getInteger("width", 1920);
             int h = format.getInteger("height", 1080);
 
-            if (VkBackend.isOptedIn()) {
+            boolean vkOptIn = VkBackend.isOptedIn();
+            LimeLog.info("FRUC backend selection: VkBackend.isOptedIn() = " + vkOptIn);
+            if (vkOptIn) {
                 try {
                     IFrucBackend vk = new VkBackend(context);
                     vk.setQualityLevel(prefs.frucQuality);
