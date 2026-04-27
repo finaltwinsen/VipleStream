@@ -602,17 +602,23 @@ static int create_device(vk_backend_t* be)
     // VK_ANDROID_external_memory_android_hardware_buffer for B.2c.3b AHB import.
     // Phase A2 confirmed Adreno 620 advertises both extensions on Pixel 5.
     // VK_GOOGLE_display_timing added conditionally for §I.C.6.
-    // VK_EXT_hdr_metadata added conditionally for §I.E (recon level).
-    const char* deviceExts[4];
+    //
+    // VK_EXT_hdr_metadata: PROBED but NOT enabled in deviceExts. v1.2.179
+    // user logs showed Pixel 9 (Mali-G715 driver) SIGSEGVs inside
+    // vkCreateDevice when this ext is in the enabled list — even though
+    // the ext IS advertised. We don't use vkSetHdrMetadataEXT yet (HDR
+    // pipeline switch deferred to §I.E.b/c), so dropping the enable is
+    // free for now. fHdrMetadataExt flag stays for log + future gate.
+    const char* deviceExts[3];
     deviceExts[0] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     deviceExts[1] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME;
     uint32_t deviceExtCount = 2;
     if (be->fDisplayTimingSupported) {
         deviceExts[deviceExtCount++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
     }
-    if (be->fHdrMetadataExt) {
-        deviceExts[deviceExtCount++] = VK_EXT_HDR_METADATA_EXTENSION_NAME;
-    }
+    // Note: VK_EXT_hdr_metadata enable disabled v1.2.180 (Pixel 9 crash).
+    // To re-enable later for §I.E.b/c, add an explicit Java pref
+    // (prefs.enableHdr) gate so users on broken drivers can opt out.
 
     VkDeviceCreateInfo dci = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -622,8 +628,14 @@ static int create_device(vk_backend_t* be)
         .ppEnabledExtensionNames = deviceExts,
     };
 
-    if (vkCreateDevice(be->physDevice, &dci, NULL, &be->device) != VK_SUCCESS) {
-        LOGE("vkCreateDevice failed");
+    status_log("vkCreateDevice: enabled exts = %u (KHR_swapchain + AHB%s%s)",
+               deviceExtCount,
+               be->fDisplayTimingSupported ? " + GOOGLE_display_timing" : "",
+               be->fHdrMetadataExt ? " [+ EXT_hdr_metadata SKIPPED — see v1.2.180 note]" : "");
+    VkResult dcRc = vkCreateDevice(be->physDevice, &dci, NULL, &be->device);
+    status_log("vkCreateDevice rc=%d (0=SUCCESS, neg=error)", (int)dcRc);
+    if (dcRc != VK_SUCCESS) {
+        LOGE("vkCreateDevice failed (rc=%d)", dcRc);
         return -1;
     }
     LOGI("VkDevice created");
