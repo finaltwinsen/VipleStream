@@ -324,6 +324,14 @@ typedef struct vk_backend_s {
     int                  fHdrColorspaceExt;   // VK_EXT_swapchain_colorspace (instance)
     int                  fHdrMetadataExt;     // VK_EXT_hdr_metadata (device)
     int                  fHdrCapableSurface;  // surface advertises HDR10_ST2084_EXT colorspace
+
+    // iter 4: per-frame host-side timing ring (ns). Measures
+    // render_ahb_frame duration (entry→exit). 120 entries = 1-2s of
+    // history at 60-90 fps. Log p50/p90/p99 every 120 frames in dual
+    // path for latency monitoring.
+    float                fHostFrameMs[120];
+    int                  fHostFrameIdx;
+    int                  fHostFrameFilled;
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -3231,7 +3239,10 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     // ============================================================
     // §I.D — fast path: dual-present via in-flight ring (NO waitIdle)
     // §I.D.b — degrades to single present when input fps ≈ display fps
+    // iter 4 — host timing entry timestamp captured here; exit recorded
+    //          before return 0; ring sorted + p50/p90/p99 every 120 frames.
     // ============================================================
+    uint64_t host_t0_ns = monotonic_ns();
     // Frame N+1's CPU work (record + AHB import + descriptor update)
     // overlaps frame N-1's GPU work. 1 cmdbuf with 1 or 2 render passes
     // depending on mode. Mode decision: dual present (interp + real) only
@@ -3577,6 +3588,30 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
             LOGI("render_ahb_frame #%d (slot=%u img=[%u,%u], src=%ux%u) [dual, ring, in~%.1f]",
                  be->frameCounter, slot, imgIdxPass1, imgIdxPass2, srcW, srcH,
                  (double)be->fInputFpsRecent);
+        }
+    }
+
+    // iter 4: record this frame's host duration into ring, then every
+    // 120 frames sort + log p50/p90/p99 latency.
+    {
+        uint64_t host_dur_ns = monotonic_ns() - host_t0_ns;
+        be->fHostFrameMs[be->fHostFrameIdx] = (float)host_dur_ns / 1.0e6f;
+        be->fHostFrameIdx = (be->fHostFrameIdx + 1) % 120;
+        if (be->fHostFrameIdx == 0) be->fHostFrameFilled = 1;
+
+        if (be->fHostFrameFilled && be->frameCounter % 120 == 0) {
+            // Copy + sort + percentiles. 120 floats; cheap.
+            float buf[120];
+            memcpy(buf, be->fHostFrameMs, sizeof(buf));
+            // Insertion sort (120 elems, already mostly sorted in steady state).
+            for (int i = 1; i < 120; i++) {
+                float k = buf[i]; int j = i - 1;
+                while (j >= 0 && buf[j] > k) { buf[j+1] = buf[j]; j--; }
+                buf[j+1] = k;
+            }
+            LOGI("[VKBE-PERF] host frame ms p50=%.2f p90=%.2f p99=%.2f min=%.2f max=%.2f (last 120 frames)",
+                 (double)buf[60], (double)buf[108], (double)buf[118],
+                 (double)buf[0], (double)buf[119]);
         }
     }
 
