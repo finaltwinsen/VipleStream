@@ -827,13 +827,14 @@ static int create_swapchain(vk_backend_t* be)
         }
     }
 
-    // iter 6: prefer MAILBOX over FIFO when available — eliminates vsync
-    // block on PASS 1 in dual present (compositor takes latest queued
-    // image instead of waiting for the next vsync edge to swap). FIFO
-    // stays as fallback if MAILBOX isn't supported. IMMEDIATE excluded
-    // (causes tearing on stream content).
+    // FIFO always available + always honors vsync. iter 6 (v1.2.168) tried
+    // MAILBOX preference to skip vsync block on PASS 1 of dual present —
+    // user reported v1.2.171 60→56 FPS regression on Pixel 5 single
+    // mode, so reverted to FIFO. MAILBOX may help dual mode on Pixel 9
+    // (60→120) but the cost on single mode is too high to keep as
+    // default. iter 14 (later) can re-introduce MAILBOX as opt-in via
+    // settings or per-mode swapchain rebuild.
     VkPresentModeKHR present = VK_PRESENT_MODE_FIFO_KHR;
-    int mailboxAvailable = 0;
     {
         uint32_t pmCount = 0;
         vkGetPhysicalDeviceSurfacePresentModesKHR(be->physDevice, be->surface, &pmCount, NULL);
@@ -846,21 +847,15 @@ static int create_swapchain(vk_backend_t* be)
                 for (uint32_t i = 0; i < pmCount; i++) {
                     LOGI("  [%u] = %d %s", i, pms[i],
                          pms[i] == VK_PRESENT_MODE_FIFO_KHR ? "(FIFO)" :
-                         pms[i] == VK_PRESENT_MODE_MAILBOX_KHR ? "(MAILBOX)" :
+                         pms[i] == VK_PRESENT_MODE_MAILBOX_KHR ? "(MAILBOX, available but not picked — see iter 6 revert)" :
                          pms[i] == VK_PRESENT_MODE_IMMEDIATE_KHR ? "(IMMEDIATE)" :
                          pms[i] == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "(FIFO_RELAXED)" : "");
-                    if (pms[i] == VK_PRESENT_MODE_MAILBOX_KHR) mailboxAvailable = 1;
                 }
                 free(pms);
             }
         }
     }
-    if (mailboxAvailable) {
-        present = VK_PRESENT_MODE_MAILBOX_KHR;
-        LOGI("picked present mode = MAILBOX (%d) — dual-present PASS 1 won't block on vsync", present);
-    } else {
-        LOGI("picked present mode = FIFO (%d) — MAILBOX unavailable, dual-present will vsync-gate both passes", present);
-    }
+    LOGI("picked present mode = FIFO (%d)", present);
 
     uint32_t imageCount = caps.minImageCount + 1;
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
