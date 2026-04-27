@@ -120,6 +120,8 @@ POLL_PID=$!
 # temps every ~2s — useful as a high-frequency cross-check on the dumpsys poll.
 "$ADB" -s "$DEVICE" logcat -v threadtime \
     "FRUC:V" \
+    "VKBE:V" \
+    "VKBE-NAT:V" \
     "ThermalManagerService:V" \
     "thermal-engine:V" \
     "ThermalHAL:V" \
