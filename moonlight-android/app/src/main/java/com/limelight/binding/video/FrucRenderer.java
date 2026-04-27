@@ -20,9 +20,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Intercepts MediaCodec output via SurfaceTexture, runs motion estimation + warping,
  * and renders interpolated + real frames to the display surface.
  */
-public class FrucRenderer {
+public class FrucRenderer implements IFrucBackend {
     private static final String TAG = "FRUC";
+    private static final String BACKEND = "gles";
     private static final int BLOCK_SIZE = 64; // Full-res block size
+
+    @Override public String backendName() { return BACKEND; }
     private static final int DOWNSCALE = 8;
 
     // Quality presets: 0=Quality, 1=Balanced, 2=Performance
@@ -143,10 +146,10 @@ public class FrucRenderer {
         }
     }
 
-    public int getInterpolatedCount() { return interpolatedCount; }
-    public float getOutputFps() { return currentOutputFps; }
-    public void setConnectionPoor(boolean poor) { this.connectionPoor = poor; }
-    public void setQualityLevel(int level) { this.qualityLevel = Math.max(0, Math.min(2, level)); }
+    @Override public int getInterpolatedCount() { return interpolatedCount; }
+    @Override public float getOutputFps() { return currentOutputFps; }
+    @Override public void setConnectionPoor(boolean poor) { this.connectionPoor = poor; }
+    @Override public void setQualityLevel(int level) { this.qualityLevel = Math.max(0, Math.min(2, level)); }
 
     /**
      * §I.A1 spike: derive the per-vsync period from the Context's default
@@ -205,6 +208,7 @@ public class FrucRenderer {
      * @param h Video height
      * @return The Surface that MediaCodec should output to
      */
+    @Override
     public Surface initialize(Surface displaySurface, int w, int h) {
         this.width = w;
         this.height = h;
@@ -436,6 +440,7 @@ public class FrucRenderer {
      * Process a new frame from MediaCodec. Call this after releaseOutputBuffer.
      * @return true if an interpolated frame was produced and presented
      */
+    @Override
     public boolean onFrameAvailable() {
         if (!initialized) {
             if (frameCount == 0) logToFile("onFrameAvailable: not initialized");
@@ -724,6 +729,7 @@ public class FrucRenderer {
         GLES31.glBindFramebuffer(GLES31.GL_FRAMEBUFFER, 0);
     }
 
+    @Override
     public void destroy() {
         logToFile("destroy: frames=" + frameCount + " interpolated=" + interpolatedCount);
         if (logWriter != null) { logWriter.close(); logWriter = null; }
@@ -749,6 +755,7 @@ public class FrucRenderer {
         }
     }
 
+    @Override
     public boolean isInitialized() { return initialized; }
 
     // --- Shader loading helpers ---

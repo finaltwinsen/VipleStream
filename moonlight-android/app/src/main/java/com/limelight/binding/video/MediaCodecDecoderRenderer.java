@@ -72,7 +72,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private int initialWidth, initialHeight;
     private int videoFormat;
     private SurfaceHolder renderTarget;
-    private FrucRenderer frucRenderer;
+    // VipleStream §I.B.0: holds the abstract backend so we can plug
+    // in a Vulkan implementation without touching the Game/MediaCodec
+    // wiring. Concrete type chosen at init based on prefs / fallback.
+    private IFrucBackend frucRenderer;
     private boolean frucEnabled = false;
 
     // VipleStream v17: pass connection quality to FRUC renderer
