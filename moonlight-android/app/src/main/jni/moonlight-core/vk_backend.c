@@ -30,6 +30,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdio.h>
+#include <stdarg.h>
 
 // Pre-compiled SPIR-V shaders. Source under shaders/, regenerate via:
 //   $NDK/shader-tools/.../glslc <name> -o <name>.spv
@@ -356,6 +358,36 @@ static void destroy_compute_pipelines(struct vk_backend_s* be);
 static int  dispatch_fruc(struct vk_backend_s* be, VkImageView ahbView);
 static int  init_in_flight_ring(struct vk_backend_s* be);
 static void destroy_in_flight_ring(struct vk_backend_s* be);
+
+// §I.C.6 — monotonic ns clock for VK_GOOGLE_display_timing PTS values
+// + general timing. Defined here (not later in file) so all callers
+// from create_surface onward can use it.
+static uint64_t monotonic_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+// File-based status log for users who can't run adb (e.g. Pixel 9
+// without USB debugging set up). Java passes path via nativeSetLogPath;
+// key init / mode-change / perf events fopen-append. Phone-side path
+// is /sdcard/Android/data/com.piinsta.debug/files/viple_vkbe_status.log
+// — accessible via Files app without storage permission.
+static FILE* g_status_log = NULL;
+static void status_log(const char* fmt, ...)
+{
+    if (!g_status_log) return;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    fprintf(g_status_log, "[+%5ld.%03ld] ", ts.tv_sec, ts.tv_nsec / 1000000);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_status_log, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_status_log);
+    fflush(g_status_log);
+}
 
 // ---------- helpers ----------
 
@@ -699,15 +731,17 @@ static int create_surface(vk_backend_t* be, JNIEnv* env, jobject jSurface)
             int32_t fr = s_anw_setFrameRateStrat(be->nativeWindow, hintRate, 1, 1);
             LOGI("ANativeWindow_setFrameRateWithChangeStrategy(%.1f, FIXED_SOURCE, ALWAYS) rc=%d %s",
                  (double)hintRate, fr, fr == 0 ? "(hint accepted)" : "(rejected)");
-            // fHintedRefreshHz already set from Java; don't overwrite even on
-            // hint reject (Java's Display query is more authoritative than
-            // our setFrameRate request status).
+            status_log("setFrameRate hint: %.1f Hz, rc=%d (%s) [API31+ ChangeStrategy ALWAYS]",
+                       (double)hintRate, fr, fr == 0 ? "accepted" : "rejected");
         } else if (s_anw_setFrameRate) {
             int32_t fr = s_anw_setFrameRate(be->nativeWindow, hintRate, 1);
             LOGI("ANativeWindow_setFrameRate(%.1f, FIXED_SOURCE) rc=%d %s (no ChangeStrategy variant)",
                  (double)hintRate, fr, fr == 0 ? "(hint accepted)" : "(rejected)");
+            status_log("setFrameRate hint: %.1f Hz, rc=%d (%s) [API30, no ChangeStrategy]",
+                       (double)hintRate, fr, fr == 0 ? "accepted" : "rejected");
         } else {
             LOGI("ANativeWindow_setFrameRate symbol unavailable (need API 30+) — staying at panel default rate");
+            status_log("setFrameRate symbol unavailable (need API 30+) — panel default rate");
         }
     }
     return 0;
@@ -922,12 +956,18 @@ static int create_swapchain(vk_backend_t* be)
             double hz = 1e9 / (double)rcd.refreshDuration;
             LOGI("[VK-DISPLAY-TIMING] refresh cycle = %llu ns (~%.2f Hz)",
                  (unsigned long long)rcd.refreshDuration, hz);
+            status_log("Vulkan-driver refresh cycle = %llu ns (~%.2f Hz) "
+                       "[may differ from real panel rate; see Java-max-refresh + setFrameRate]",
+                       (unsigned long long)rcd.refreshDuration, hz);
         } else {
             LOGW("[VK-DISPLAY-TIMING] vkGetRefreshCycleDurationGOOGLE failed (rc=%d, dur=%llu) — disabling",
                  rc, (unsigned long long)rcd.refreshDuration);
             be->fDisplayTimingSupported = 0;
         }
     }
+    status_log("smart-mode displayHz source order: hint(%.1f) > drv-cache(%.2f) > 60-fb",
+               (double)be->fHintedRefreshHz,
+               (be->fRefreshDurationNs > 0) ? (1.0e9 / (double)be->fRefreshDurationNs) : 0.0);
 
     return 0;
 }
@@ -1561,6 +1601,8 @@ Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz,
     if (maxRefreshHz > 0.0f) {
         be->fHintedRefreshHz = (float)maxRefreshHz;
     }
+    status_log("nativeInit: video=%dx%d, Java-max-refresh=%.1f Hz",
+               be->videoWidth, be->videoHeight, (double)maxRefreshHz);
     // iter 7: default smart-mode = single (clean baseline; avoids
     // initial dual → throttle → stuck loop). Override fLastSingleMode=0
     // (calloc default = dual).
@@ -2964,15 +3006,7 @@ static int dispatch_fruc(vk_backend_t* be, VkImageView ahbView)
     return 0;
 }
 
-// §I.C.6 — monotonic ns clock for VK_GOOGLE_display_timing PTS values.
-// Pixel 5 NDK 27+ ships clock_gettime(CLOCK_MONOTONIC) — same clock the
-// driver uses to interpret VkPresentTimeGOOGLE.desiredPresentTime.
-static uint64_t monotonic_ns(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
+// (status_log and monotonic_ns moved to top of file — see definitions there.)
 
 // ---------- B.2c.3a: per-frame steady-state clear+present ----------
 
@@ -3358,6 +3392,13 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
              singleMode           ? "single" : "dual",
              (double)be->fInputFpsRecent, (double)displayHz, hzSrc,
              (double)doubled, (double)enterDualThr, (double)exitDualThr);
+        status_log("mode change %s -> %s @ frame %d | input %.1f | display %.1f Hz (%s) | "
+                   "2*input=%.1f vs enter=%.1f / exit=%.1f",
+                   be->fLastSingleMode ? "single" : "dual",
+                   singleMode           ? "single" : "dual",
+                   be->frameCounter,
+                   (double)be->fInputFpsRecent, (double)displayHz, hzSrc,
+                   (double)doubled, (double)enterDualThr, (double)exitDualThr);
         be->fLastSingleMode = singleMode;
     }
 
@@ -3683,6 +3724,12 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
                  be->fDualFrameCount, (double)dualPct, be->fSingleFrameCount,
                  be->fInterpolatedCount,
                  be->fSingleFrameCount + 2 * be->fDualFrameCount);
+            status_log("perf @ frame %d: input %.1f FPS | dual %d (%.1f%%) / single %d | "
+                       "interp %d | total presents %d",
+                       be->frameCounter, (double)be->fInputFpsRecent,
+                       be->fDualFrameCount, (double)dualPct, be->fSingleFrameCount,
+                       be->fInterpolatedCount,
+                       be->fSingleFrameCount + 2 * be->fDualFrameCount);
         }
     }
 
@@ -3756,6 +3803,35 @@ Java_com_limelight_binding_video_VkBackend_nativeSetQualityLevel(
 // always picks SDR R8G8B8A8_UNORM/SRGB regardless). Call this after
 // nativeInit so it's available on next swapchain (re)create.
 JNIEXPORT void JNICALL
+Java_com_limelight_binding_video_VkBackend_nativeSetLogPath(
+    JNIEnv* env, jclass clazz, jstring path)
+{
+    if (!path) return;
+    const char* p = (*env)->GetStringUTFChars(env, path, NULL);
+    if (!p) return;
+    if (g_status_log) { fclose(g_status_log); g_status_log = NULL; }
+    g_status_log = fopen(p, "w");
+    if (g_status_log) {
+        time_t now = time(NULL);
+        struct tm* tm = localtime(&now);
+        fprintf(g_status_log,
+                "VipleStream Vulkan FRUC backend status log\n"
+                "Started: %04d-%02d-%02d %02d:%02d:%02d\n"
+                "Path:    %s\n"
+                "Schema:  [+SECS.MS] event ...\n"
+                "         All timestamps relative to monotonic clock; first frame == ~0.\n"
+                "------------------------------------------------------------\n",
+                tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                tm->tm_hour, tm->tm_min, tm->tm_sec, p);
+        fflush(g_status_log);
+        LOGI("[VKBE-STATUS] writing diagnostic log to %s", p);
+    } else {
+        LOGW("[VKBE-STATUS] fopen('%s', 'w') failed — log disabled", p);
+    }
+    (*env)->ReleaseStringUTFChars(env, path, p);
+}
+
+JNIEXPORT void JNICALL
 Java_com_limelight_binding_video_VkBackend_nativeSetHdrEnabled(
     JNIEnv* env, jclass clazz, jlong handle, jboolean enabled)
 {
@@ -3801,6 +3877,16 @@ Java_com_limelight_binding_video_VkBackend_nativeDestroy(JNIEnv* env, jclass cla
              be->fSingleFrameCount, be->fInterpolatedCount,
              be->fSingleFrameCount + 2 * be->fDualFrameCount,
              (double)be->fInputFpsRecent);
+        status_log("FINAL: frames=%d (dual=%d %.1f%% / single=%d) | "
+                   "interp=%d displayed=%d | last input %.1f FPS",
+                   be->frameCounter, be->fDualFrameCount, (double)dualPct,
+                   be->fSingleFrameCount, be->fInterpolatedCount,
+                   be->fSingleFrameCount + 2 * be->fDualFrameCount,
+                   (double)be->fInputFpsRecent);
+    }
+    if (g_status_log) {
+        fclose(g_status_log);
+        g_status_log = NULL;
     }
 
     destroy_compute_pipelines(be);

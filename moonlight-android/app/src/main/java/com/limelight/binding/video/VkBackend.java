@@ -124,6 +124,21 @@ public final class VkBackend implements IFrucBackend {
             return null;
         }
 
+        // Set up file-based status logger for diagnostics on devices
+        // where adb isn't available (e.g. Pixel 9 without USB debugging).
+        // External-files dir is /sdcard/Android/data/<pkg>/files/ —
+        // visible in Files app without storage permission.
+        try {
+            java.io.File logDir = context.getExternalFilesDir(null);
+            if (logDir != null) {
+                java.io.File logFile = new java.io.File(logDir, "viple_vkbe_status.log");
+                nativeSetLogPath(logFile.getAbsolutePath());
+                Log.i(TAG, "diagnostic log path: " + logFile.getAbsolutePath());
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "couldn't set diagnostic log path: " + t);
+        }
+
         // §I.D.c v2 — read device's max supported refresh rate so native
         // can both hint compositor AND drive smart-mode dual-vs-single
         // decision against the real panel. Hardcoded 90 was Pixel-5-only;
@@ -335,6 +350,7 @@ public final class VkBackend implements IFrucBackend {
     private static native int  nativeGetInterpolatedCount(long handle);
     private static native void nativeSetQualityLevel(long handle, int level);
     private static native void nativeSetHdrEnabled(long handle, boolean enabled);
+    private static native void nativeSetLogPath(String path);
 
     /**
      * §I.E.a/b prep — caller passes prefs.enableHdr down so native can
