@@ -550,26 +550,52 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
         LimeLog.info("Configuring with format: "+format);
 
-        // VipleStream: Try FRUC if enabled in settings and GLES 3.1 compute is available
+        // VipleStream §I.B.1: try FRUC backends in priority order.
+        //   1. Vulkan, only if the user opted in via:
+        //        adb shell setprop debug.viplestream.vkprobe 1
+        //      Default users have this unset → Vulkan path skipped entirely.
+        //   2. GLES (existing FrucRenderer) as fallback. Init failure here
+        //      drops to direct rendering (FRUC OFF) the same way as before.
         Surface decoderOutputSurface = renderTarget.getSurface();
         if (context != null && prefs.enableFruc) {
-            try {
-                frucRenderer = new FrucRenderer(context);
-                frucRenderer.setQualityLevel(prefs.frucQuality);
-                Surface frucInput = frucRenderer.initialize(renderTarget.getSurface(),
-                    format.getInteger("width", 1920),
-                    format.getInteger("height", 1080));
-                if (frucInput != null) {
-                    decoderOutputSurface = frucInput;
-                    frucEnabled = true;
-                    LimeLog.info("FRUC enabled (Generic Compute)");
-                } else {
-                    frucRenderer = null;
-                    LimeLog.info("FRUC init failed, using direct rendering");
+            int w = format.getInteger("width", 1920);
+            int h = format.getInteger("height", 1080);
+
+            if (VkBackend.isOptedIn()) {
+                try {
+                    IFrucBackend vk = new VkBackend(context);
+                    vk.setQualityLevel(prefs.frucQuality);
+                    Surface vkInput = vk.initialize(renderTarget.getSurface(), w, h);
+                    if (vkInput != null) {
+                        frucRenderer = vk;
+                        decoderOutputSurface = vkInput;
+                        frucEnabled = true;
+                        LimeLog.info("FRUC enabled (Vulkan, opt-in)");
+                    } else {
+                        LimeLog.info("Vulkan FRUC declined (B.1 skeleton); falling back to GLES");
+                    }
+                } catch (Throwable t) {
+                    LimeLog.warning("Vulkan FRUC threw: " + t + " — falling back to GLES");
                 }
-            } catch (Exception e) {
-                LimeLog.warning("FRUC not available: " + e.getMessage());
-                frucRenderer = null;
+            }
+
+            if (frucRenderer == null) {
+                try {
+                    FrucRenderer gles = new FrucRenderer(context);
+                    gles.setQualityLevel(prefs.frucQuality);
+                    Surface frucInput = gles.initialize(renderTarget.getSurface(), w, h);
+                    if (frucInput != null) {
+                        frucRenderer = gles;
+                        decoderOutputSurface = frucInput;
+                        frucEnabled = true;
+                        LimeLog.info("FRUC enabled (Generic Compute, GLES)");
+                    } else {
+                        LimeLog.info("FRUC init failed, using direct rendering");
+                    }
+                } catch (Exception e) {
+                    LimeLog.warning("FRUC not available: " + e.getMessage());
+                    frucRenderer = null;
+                }
             }
         }
 
@@ -1515,7 +1541,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 // VipleStream: FRUC status in performance overlay
                 if (frucEnabled && frucRenderer != null) {
                     sb.append("--- FRUC ---\n");
-                    sb.append(String.format("FRUC: Active | Output: %.1f FPS\n", frucRenderer.getOutputFps()));
+                    sb.append(String.format("FRUC: Active [%s] | Output: %.1f FPS\n",
+                        frucRenderer.backendName(), frucRenderer.getOutputFps()));
                     sb.append(String.format("Interpolated: %d frames\n", frucRenderer.getInterpolatedCount()));
                 } else if (prefs.enableFruc) {
                     sb.append("--- FRUC ---\n");
