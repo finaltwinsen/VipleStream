@@ -1,0 +1,167 @@
+#version 450
+// VipleStream §I.C.2: Multi-quality Warp + Blend, Vulkan port of
+// GLES warp_compute.glsl. Logic 1:1 with the GLES original.
+//
+// QUALITY_LEVEL injected at compile time: 0=Quality, 1=Balanced, 2=Performance
+
+#ifndef QUALITY_LEVEL
+#define QUALITY_LEVEL 0
+#endif
+
+#if QUALITY_LEVEL == 0
+  #define ENABLE_ADAPTIVE_BLEND 1
+#else
+  #define ENABLE_ADAPTIVE_BLEND 0
+#endif
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D prevFrame;
+layout(set = 0, binding = 1) uniform sampler2D currFrame;
+layout(set = 0, binding = 2) uniform isampler2D motionField;
+layout(set = 0, binding = 3, rgba8) writeonly uniform image2D interpFrame;
+
+layout(push_constant) uniform PC {
+    uint frameWidth;
+    uint frameHeight;
+    uint mvBlockSize;
+    float blendFactor;  // declared for layout-compat; not read in shader (matches GLES behavior).
+} pc;
+
+#define EDGE_AWARE_MV_THRESHOLD 2.0
+
+vec2 sampleMV(vec2 pixelPos) {
+    float blockSizeF = float(pc.mvBlockSize);
+    vec2 mvPos = pixelPos / blockSizeF - 0.5;
+    ivec2 mv00 = ivec2(floor(mvPos));
+    ivec2 mv10 = mv00 + ivec2(1, 0);
+    ivec2 mv01 = mv00 + ivec2(0, 1);
+    ivec2 mv11 = mv00 + ivec2(1, 1);
+
+    ivec2 mvDims = textureSize(motionField, 0);
+    mv00 = clamp(mv00, ivec2(0), mvDims - 1);
+    mv10 = clamp(mv10, ivec2(0), mvDims - 1);
+    mv01 = clamp(mv01, ivec2(0), mvDims - 1);
+    mv11 = clamp(mv11, ivec2(0), mvDims - 1);
+
+    vec2 frac_val = mvPos - floor(mvPos);
+
+    int p00 = texelFetch(motionField, mv00, 0).r;
+    int p10 = texelFetch(motionField, mv10, 0).r;
+    int p01 = texelFetch(motionField, mv01, 0).r;
+    int p11 = texelFetch(motionField, mv11, 0).r;
+    vec2 v00 = vec2(float(p00 >> 16), float((p00 << 16) >> 16)) * 0.5;
+    vec2 v10 = vec2(float(p10 >> 16), float((p10 << 16) >> 16)) * 0.5;
+    vec2 v01 = vec2(float(p01 >> 16), float((p01 << 16) >> 16)) * 0.5;
+    vec2 v11 = vec2(float(p11 >> 16), float((p11 << 16) >> 16)) * 0.5;
+
+    vec2 d01 = v00 - v10;
+    vec2 d02 = v00 - v01;
+    vec2 d13 = v10 - v11;
+    vec2 d23 = v01 - v11;
+    float maxDiffSq = max(max(dot(d01, d01), dot(d02, d02)),
+                          max(dot(d13, d13), dot(d23, d23)));
+
+    vec2 avgMv = 0.25 * (v00 + v10 + v01 + v11);
+    float avgMagSq = dot(avgMv, avgMv);
+
+    vec2 top = mix(v00, v10, frac_val.x);
+    vec2 bot = mix(v01, v11, frac_val.x);
+    vec2 bilinear = mix(top, bot, frac_val.y);
+    vec2 pick = (frac_val.x < 0.5)
+        ? ((frac_val.y < 0.5) ? v00 : v01)
+        : ((frac_val.y < 0.5) ? v10 : v11);
+    float threshSq = EDGE_AWARE_MV_THRESHOLD * EDGE_AWARE_MV_THRESHOLD;
+    float isBoundary = step(threshSq, maxDiffSq) * step(avgMagSq * 0.25, maxDiffSq);
+    float t = isBoundary * smoothstep(threshSq, threshSq * 2.0, maxDiffSq);
+    return mix(bilinear, pick, t);
+}
+
+#if ENABLE_ADAPTIVE_BLEND
+float computeAdaptiveWeight(vec2 pixelPos, vec2 mv) {
+    vec2 prevPos = pixelPos - mv * 0.5;
+    vec2 mvAtPrev = sampleMV(prevPos);
+    vec2 backFromPrev = prevPos + mvAtPrev * 0.5;
+    float fwdError = length(backFromPrev - pixelPos);
+
+    vec2 currPos = pixelPos + mv * 0.5;
+    vec2 mvAtCurr = sampleMV(currPos);
+    vec2 backFromCurr = currPos - mvAtCurr * 0.5;
+    float bwdError = length(backFromCurr - pixelPos);
+
+    float prevConf = 1.0 - smoothstep(1.0, 10.0, fwdError);
+    float currConf = 1.0 - smoothstep(1.0, 10.0, bwdError);
+
+    float totalConf = prevConf + currConf;
+    float w;
+    if (totalConf < 0.001) {
+        w = 0.5;
+    } else {
+        w = currConf / totalConf;
+    }
+    float mvMag2 = dot(mv, mv);
+    float bigMotionBias = smoothstep(100.0, 400.0, mvMag2);
+    return mix(w, 0.5, bigMotionBias);
+}
+#endif
+
+void main() {
+    uint px = gl_GlobalInvocationID.x;
+    uint py = gl_GlobalInvocationID.y;
+    if (px >= pc.frameWidth || py >= pc.frameHeight)
+        return;
+
+    vec2 pp = vec2(float(px), float(py));
+    vec2 dims = vec2(float(pc.frameWidth), float(pc.frameHeight));
+
+    vec4 sameCurr = texelFetch(currFrame, ivec2(px, py), 0);
+
+    vec2 mv = sampleMV(pp);
+    mv = clamp(mv, vec2(-48.0), vec2(48.0));
+
+    if (dot(mv, mv) < 1.0) {
+        imageStore(interpFrame, ivec2(px, py), sameCurr);
+        return;
+    }
+
+    vec2 prevUV = (pp - mv * 0.5 + 0.5) / dims;
+    vec2 currUV = (pp + mv * 0.5 + 0.5) / dims;
+
+    vec4 prevSample = texture(prevFrame, prevUV);
+    vec4 currSample = texture(currFrame, currUV);
+
+    vec2 prevPos = pp - mv * 0.5;
+    vec2 currPos = pp + mv * 0.5;
+    vec2 lo = vec2(0.5);
+    vec2 hi = dims - 0.5;
+    bool prevValid = all(greaterThanEqual(prevPos, lo)) && all(lessThan(prevPos, hi));
+    bool currValid = all(greaterThanEqual(currPos, lo)) && all(lessThan(currPos, hi));
+
+    vec4 result;
+    if (prevValid && currValid) {
+#if ENABLE_ADAPTIVE_BLEND
+        float weight = (dot(mv, mv) < 4.0)
+            ? 0.5
+            : computeAdaptiveWeight(pp, mv);
+        result = mix(prevSample, currSample, weight);
+        {
+            const vec3 YC = vec3(0.299, 0.587, 0.114);
+            float lg = abs(dot(prevSample.rgb, YC) - dot(currSample.rgb, YC));
+            float b = smoothstep(0.05, 0.25, lg);
+            result = mix(result, currSample, b);
+        }
+#else
+        const vec3 YC = vec3(0.299, 0.587, 0.114);
+        float prevY = dot(prevSample.rgb, YC);
+        float currY = dot(currSample.rgb, YC);
+        float lumaDiff = abs(prevY - currY);
+        float bias = smoothstep(0.05, 0.25, lumaDiff);
+        result = mix(mix(prevSample, currSample, 0.5), currSample, bias);
+#endif
+    } else {
+        result = prevValid ? prevSample
+               : (currValid ? currSample : sameCurr);
+    }
+
+    imageStore(interpFrame, ivec2(px, py), result);
+}

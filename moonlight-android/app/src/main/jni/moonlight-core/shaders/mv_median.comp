@@ -1,0 +1,71 @@
+#version 450
+// VipleStream §I.C.2: 3x3 component-wise median filter on the
+// block-level MV field. Vulkan port of GLES mv_median.glsl;
+// logic 1:1 (sorting network, two-tier skip, packing layout).
+//
+// MV field format: r32i, upper 16 bits = X, lower 16 bits = Y,
+// both Q1 fixed-point pixels.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform isampler2D mvIn;
+layout(set = 0, binding = 1, r32i) writeonly uniform iimage2D mvOut;
+
+layout(push_constant) uniform PC {
+    uint mvWidth;
+    uint mvHeight;
+} pc;
+
+#define S9(i, j) { int _m = min(a[i], a[j]); int _M = max(a[i], a[j]); a[i] = _m; a[j] = _M; }
+void sort9(inout int a[9]) {
+    S9(0, 3) S9(1, 7) S9(2, 5) S9(4, 8)
+    S9(0, 7) S9(2, 4) S9(3, 8) S9(5, 6)
+    S9(0, 2) S9(1, 3) S9(4, 5) S9(7, 8)
+    S9(1, 4) S9(3, 6) S9(5, 7)
+    S9(0, 1) S9(2, 4) S9(3, 5) S9(6, 8)
+    S9(2, 3) S9(4, 5) S9(6, 7)
+    S9(1, 2) S9(3, 4) S9(5, 6)
+}
+#undef S9
+
+void main() {
+    uint gx = gl_GlobalInvocationID.x;
+    uint gy = gl_GlobalInvocationID.y;
+    if (gx >= pc.mvWidth || gy >= pc.mvHeight) return;
+
+    int sx[9];
+    int sy[9];
+    int n = 0;
+    int minX = 0x7FFF, maxX = -0x7FFF;
+    int minY = 0x7FFF, maxY = -0x7FFF;
+    ivec2 dims = ivec2(int(pc.mvWidth), int(pc.mvHeight));
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 p = clamp(ivec2(int(gx) + dx, int(gy) + dy),
+                            ivec2(0), dims - 1);
+            int packed = texelFetch(mvIn, p, 0).r;
+            int xv = packed >> 16;
+            int yv = (packed << 16) >> 16;
+            sx[n] = xv; sy[n] = yv;
+            minX = min(minX, xv); maxX = max(maxX, xv);
+            minY = min(minY, yv); maxY = max(maxY, yv);
+            n++;
+        }
+    }
+    if (maxX == 0 && minX == 0 && maxY == 0 && minY == 0) {
+        imageStore(mvOut, ivec2(gx, gy), ivec4(0));
+        return;
+    }
+    if (maxX - minX <= 1 && maxY - minY <= 1) {
+        int packedOut = (sx[4] << 16) | (sy[4] & 0xFFFF);
+        imageStore(mvOut, ivec2(gx, gy), ivec4(packedOut, 0, 0, 0));
+        return;
+    }
+    sort9(sx);
+    sort9(sy);
+    int medX = sx[4];
+    int medY = sy[4];
+    int packedOut = (medX << 16) | (medY & 0xFFFF);
+    imageStore(mvOut, ivec2(gx, gy), ivec4(packedOut, 0, 0, 0));
+}

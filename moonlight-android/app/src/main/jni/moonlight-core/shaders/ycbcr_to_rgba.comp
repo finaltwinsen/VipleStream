@@ -1,0 +1,31 @@
+#version 450
+// VipleStream §I.C.2: AHB YCbCr → RGBA8 storage image bridge.
+//
+// Vulkan's VkSamplerYcbcrConversion can only be used with combined
+// image samplers (sampler2D); it cannot be bound to a storage image.
+// This compute pass samples the YCbCr-converted (already RGB)
+// AHardwareBuffer-backed image and writes to a storage rgba8 image
+// that downstream ME / warp shaders can read back.
+//
+// 1 dispatch per frame, workgroups = (W/8, H/8, 1).
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D yuv;
+layout(set = 0, binding = 1, rgba8) writeonly uniform image2D currFrameRgba;
+
+layout(push_constant) uniform PC {
+    uvec2 dims;  // (frameWidth, frameHeight)
+} pc;
+
+void main() {
+    uvec2 px = gl_GlobalInvocationID.xy;
+    if (px.x >= pc.dims.x || px.y >= pc.dims.y) return;
+
+    // Half-pixel offset so we sample the centre of each texel; the
+    // YCbCr sampler is configured CLAMP_TO_EDGE upstream so border
+    // taps never bleed.
+    vec2 uv = (vec2(px) + 0.5) / vec2(pc.dims);
+    vec4 rgb = texture(yuv, uv);
+    imageStore(currFrameRgba, ivec2(px), rgb);
+}
