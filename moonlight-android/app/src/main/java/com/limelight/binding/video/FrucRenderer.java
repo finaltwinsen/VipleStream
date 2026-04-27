@@ -65,8 +65,29 @@ public class FrucRenderer {
     private int mvMedianProgram;   // v1.1.136: 3x3 median on the MV field
     private int blitProgram;
 
+    // Cached uniform / attribute locations.
+    // glGetUniformLocation does a string→int hash on every call; with the
+    // double-swap pattern we used to do ~28 lookups per input frame at
+    // ~45fps. Cache once after each program is linked, then reuse the int.
+    private int oesU_TexMatrix, oesA_Position, oesA_TexCoord;
+    private int blitU_TexMatrix, blitA_Position, blitA_TexCoord;
+    private int mvmU_FrameW, mvmU_FrameH;
+    private int[] meU_FrameW = new int[3];
+    private int[] meU_FrameH = new int[3];
+    private int[] meU_BlockSize = new int[3];
+    private int[] warpU_FrameW = new int[3];
+    private int[] warpU_FrameH = new int[3];
+    private int[] warpU_MvBlockSize = new int[3];
+    private int[] warpU_BlendFactor = new int[3];
+
     // FBO for OES→RGBA conversion
     private int conversionFbo;
+
+    // Pre-allocated FBOs reused per frame in copyTexture / copyMVTexture.
+    // Old code did glGenFramebuffers + glDeleteFramebuffers around every
+    // single copy (4 GL calls × 2 copies × ~45 fps = ~360 GL calls/sec
+    // just for FBO lifecycle). Allocate once at init.
+    private int copyReadFbo, copyDrawFbo;
 
     // Fullscreen quad
     private FloatBuffer quadVertices;
@@ -248,10 +269,13 @@ public class FrucRenderer {
         // Interpolated output
         interpFrameTex = createRgbaTexture(width, height);
 
-        // FBO for OES → RGBA conversion
-        int[] fbo = new int[1];
-        GLES31.glGenFramebuffers(1, fbo, 0);
-        conversionFbo = fbo[0];
+        // FBO for OES → RGBA conversion + 2 reusable FBOs for the
+        // per-frame copyTexture / copyMVTexture blits.
+        int[] fbos = new int[3];
+        GLES31.glGenFramebuffers(3, fbos, 0);
+        conversionFbo = fbos[0];
+        copyReadFbo = fbos[1];
+        copyDrawFbo = fbos[2];
 
         Log.i(TAG, "Textures: " + width + "x" + height + ", MV " + mvW + "x" + mvH);
     }
@@ -288,6 +312,54 @@ public class FrucRenderer {
         // (deterministic, no quality tiers).
         mvMedianProgram = loadComputeProgram("shaders/mv_median.glsl");
         Log.i(TAG, "Shader mv_median compiled OK");
+
+        cacheUniformLocations();
+    }
+
+    private void cacheUniformLocations() {
+        // OES→RGBA fragment program
+        GLES31.glUseProgram(oesToRgbaProgram);
+        GLES31.glUniform1i(GLES31.glGetUniformLocation(oesToRgbaProgram, "sTexture"), 0);
+        oesU_TexMatrix = GLES31.glGetUniformLocation(oesToRgbaProgram, "uTexMatrix");
+        oesA_Position  = GLES31.glGetAttribLocation(oesToRgbaProgram, "aPosition");
+        oesA_TexCoord  = GLES31.glGetAttribLocation(oesToRgbaProgram, "aTexCoord");
+
+        // Blit fragment program
+        GLES31.glUseProgram(blitProgram);
+        GLES31.glUniform1i(GLES31.glGetUniformLocation(blitProgram, "sTexture"), 0);
+        blitU_TexMatrix = GLES31.glGetUniformLocation(blitProgram, "uTexMatrix");
+        blitA_Position  = GLES31.glGetAttribLocation(blitProgram, "aPosition");
+        blitA_TexCoord  = GLES31.glGetAttribLocation(blitProgram, "aTexCoord");
+
+        // MV-field median filter compute program — sampler "mvIn" → unit 0
+        GLES31.glUseProgram(mvMedianProgram);
+        GLES31.glUniform1i(GLES31.glGetUniformLocation(mvMedianProgram, "mvIn"), 0);
+        mvmU_FrameW = GLES31.glGetUniformLocation(mvMedianProgram, "mvWidth");
+        mvmU_FrameH = GLES31.glGetUniformLocation(mvMedianProgram, "mvHeight");
+
+        // Per-quality compute programs.  Sampler-to-unit bindings are
+        // persistent on a program once linked, so set them once here.
+        for (int q = 0; q < 3; q++) {
+            int me = motionEstPrograms[q];
+            GLES31.glUseProgram(me);
+            GLES31.glUniform1i(GLES31.glGetUniformLocation(me, "prevFrame"), 0);
+            GLES31.glUniform1i(GLES31.glGetUniformLocation(me, "currFrame"), 1);
+            GLES31.glUniform1i(GLES31.glGetUniformLocation(me, "prevMotionField"), 2);
+            meU_FrameW[q]    = GLES31.glGetUniformLocation(me, "frameWidth");
+            meU_FrameH[q]    = GLES31.glGetUniformLocation(me, "frameHeight");
+            meU_BlockSize[q] = GLES31.glGetUniformLocation(me, "blockSize");
+
+            int wp = warpPrograms[q];
+            GLES31.glUseProgram(wp);
+            GLES31.glUniform1i(GLES31.glGetUniformLocation(wp, "prevFrame"), 0);
+            GLES31.glUniform1i(GLES31.glGetUniformLocation(wp, "currFrame"), 1);
+            GLES31.glUniform1i(GLES31.glGetUniformLocation(wp, "motionField"), 2);
+            warpU_FrameW[q]      = GLES31.glGetUniformLocation(wp, "frameWidth");
+            warpU_FrameH[q]      = GLES31.glGetUniformLocation(wp, "frameHeight");
+            warpU_MvBlockSize[q] = GLES31.glGetUniformLocation(wp, "mvBlockSize");
+            warpU_BlendFactor[q] = GLES31.glGetUniformLocation(wp, "blendFactor");
+        }
+        GLES31.glUseProgram(0);
     }
 
     private void initQuad() {
@@ -447,13 +519,12 @@ public class FrucRenderer {
         GLES31.glUseProgram(oesToRgbaProgram);
         GLES31.glActiveTexture(GLES31.GL_TEXTURE0);
         GLES31.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId);
-        GLES31.glUniform1i(GLES31.glGetUniformLocation(oesToRgbaProgram, "sTexture"), 0);
 
         // Apply SurfaceTexture transform matrix to fix orientation
         surfaceTexture.getTransformMatrix(stMatrix);
-        GLES31.glUniformMatrix4fv(GLES31.glGetUniformLocation(oesToRgbaProgram, "uTexMatrix"), 1, false, stMatrix, 0);
+        GLES31.glUniformMatrix4fv(oesU_TexMatrix, 1, false, stMatrix, 0);
 
-        drawQuad(oesToRgbaProgram);
+        drawQuad(oesA_Position, oesA_TexCoord);
 
         GLES31.glBindFramebuffer(GLES31.GL_FRAMEBUFFER, 0);
     }
@@ -463,22 +534,17 @@ public class FrucRenderer {
 
         GLES31.glActiveTexture(GLES31.GL_TEXTURE0);
         GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, prevFrameTex);
-        GLES31.glUniform1i(GLES31.glGetUniformLocation(motionEstProgram, "prevFrame"), 0);
-
         GLES31.glActiveTexture(GLES31.GL_TEXTURE1);
         GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, currFrameTex);
-        GLES31.glUniform1i(GLES31.glGetUniformLocation(motionEstProgram, "currFrame"), 1);
-
-        // VipleStream v17: bind previous MV field for temporal predictor
+        // VipleStream v17: previous MV field for temporal predictor
         GLES31.glActiveTexture(GLES31.GL_TEXTURE2);
         GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, prevMotionFieldTex);
-        GLES31.glUniform1i(GLES31.glGetUniformLocation(motionEstProgram, "prevMotionField"), 2);
 
         GLES31.glBindImageTexture(0, motionFieldTex, 0, false, 0, GLES31.GL_WRITE_ONLY, GLES31.GL_R32I);
 
-        GLES31.glUniform1ui(GLES31.glGetUniformLocation(motionEstProgram, "frameWidth"), width);
-        GLES31.glUniform1ui(GLES31.glGetUniformLocation(motionEstProgram, "frameHeight"), height);
-        GLES31.glUniform1ui(GLES31.glGetUniformLocation(motionEstProgram, "blockSize"), BLOCK_SIZE);
+        GLES31.glUniform1ui(meU_FrameW[qualityLevel], width);
+        GLES31.glUniform1ui(meU_FrameH[qualityLevel], height);
+        GLES31.glUniform1ui(meU_BlockSize[qualityLevel], BLOCK_SIZE);
 
         int mvW = width / BLOCK_SIZE;
         int mvH = height / BLOCK_SIZE;
@@ -497,14 +563,13 @@ public class FrucRenderer {
 
         GLES31.glActiveTexture(GLES31.GL_TEXTURE0);
         GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, motionFieldTex);
-        GLES31.glUniform1i(GLES31.glGetUniformLocation(mvMedianProgram, "mvIn"), 0);
 
         GLES31.glBindImageTexture(0, filteredMotionFieldTex, 0, false, 0, GLES31.GL_WRITE_ONLY, GLES31.GL_R32I);
 
         int mvW = width / BLOCK_SIZE;
         int mvH = height / BLOCK_SIZE;
-        GLES31.glUniform1ui(GLES31.glGetUniformLocation(mvMedianProgram, "mvWidth"), mvW);
-        GLES31.glUniform1ui(GLES31.glGetUniformLocation(mvMedianProgram, "mvHeight"), mvH);
+        GLES31.glUniform1ui(mvmU_FrameW, mvW);
+        GLES31.glUniform1ui(mvmU_FrameH, mvH);
 
         GLES31.glDispatchCompute((mvW + 7) / 8, (mvH + 7) / 8, 1);
         GLES31.glMemoryBarrier(GLES31.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
@@ -515,23 +580,18 @@ public class FrucRenderer {
 
         GLES31.glActiveTexture(GLES31.GL_TEXTURE0);
         GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, prevFrameTex);
-        GLES31.glUniform1i(GLES31.glGetUniformLocation(warpProgram, "prevFrame"), 0);
-
         GLES31.glActiveTexture(GLES31.GL_TEXTURE1);
         GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, currFrameTex);
-        GLES31.glUniform1i(GLES31.glGetUniformLocation(warpProgram, "currFrame"), 1);
-
         // Warp reads the *filtered* MV field — v1.1.136 port.
         GLES31.glActiveTexture(GLES31.GL_TEXTURE2);
         GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, filteredMotionFieldTex);
-        GLES31.glUniform1i(GLES31.glGetUniformLocation(warpProgram, "motionField"), 2);
 
         GLES31.glBindImageTexture(0, interpFrameTex, 0, false, 0, GLES31.GL_WRITE_ONLY, GLES31.GL_RGBA8);
 
-        GLES31.glUniform1ui(GLES31.glGetUniformLocation(warpProgram, "frameWidth"), width);
-        GLES31.glUniform1ui(GLES31.glGetUniformLocation(warpProgram, "frameHeight"), height);
-        GLES31.glUniform1ui(GLES31.glGetUniformLocation(warpProgram, "mvBlockSize"), BLOCK_SIZE);
-        GLES31.glUniform1f(GLES31.glGetUniformLocation(warpProgram, "blendFactor"), 0.5f);
+        GLES31.glUniform1ui(warpU_FrameW[qualityLevel], width);
+        GLES31.glUniform1ui(warpU_FrameH[qualityLevel], height);
+        GLES31.glUniform1ui(warpU_MvBlockSize[qualityLevel], BLOCK_SIZE);
+        GLES31.glUniform1f(warpU_BlendFactor[qualityLevel], 0.5f);
 
         GLES31.glDispatchCompute((width + 7) / 8, (height + 7) / 8, 1);
         GLES31.glMemoryBarrier(GLES31.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
@@ -544,16 +604,12 @@ public class FrucRenderer {
         GLES31.glUseProgram(blitProgram);
         GLES31.glActiveTexture(GLES31.GL_TEXTURE0);
         GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, texId);
-        GLES31.glUniform1i(GLES31.glGetUniformLocation(blitProgram, "sTexture"), 0);
-        GLES31.glUniformMatrix4fv(GLES31.glGetUniformLocation(blitProgram, "uTexMatrix"), 1, false, IDENTITY_MATRIX, 0);
+        GLES31.glUniformMatrix4fv(blitU_TexMatrix, 1, false, IDENTITY_MATRIX, 0);
 
-        drawQuad(blitProgram);
+        drawQuad(blitA_Position, blitA_TexCoord);
     }
 
-    private void drawQuad(int program) {
-        int posLoc = GLES31.glGetAttribLocation(program, "aPosition");
-        int texLoc = GLES31.glGetAttribLocation(program, "aTexCoord");
-
+    private void drawQuad(int posLoc, int texLoc) {
         quadVertices.position(0);
         GLES31.glVertexAttribPointer(posLoc, 2, GLES31.GL_FLOAT, false, 16, quadVertices);
         GLES31.glEnableVertexAttribArray(posLoc);
@@ -569,39 +625,34 @@ public class FrucRenderer {
     }
 
     private void copyTexture(int src, int dst) {
-        // Use FBO blit instead of glCopyImageSubData (requires GLES 3.2)
-        int[] tmpFbo = new int[2];
-        GLES31.glGenFramebuffers(2, tmpFbo, 0);
-
-        GLES31.glBindFramebuffer(GLES31.GL_READ_FRAMEBUFFER, tmpFbo[0]);
+        // FBO blit (glCopyImageSubData would require GLES 3.2). FBOs are
+        // pre-allocated in initTextures and reused — only the texture
+        // attachments change per call.
+        GLES31.glBindFramebuffer(GLES31.GL_READ_FRAMEBUFFER, copyReadFbo);
         GLES31.glFramebufferTexture2D(GLES31.GL_READ_FRAMEBUFFER, GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, src, 0);
 
-        GLES31.glBindFramebuffer(GLES31.GL_DRAW_FRAMEBUFFER, tmpFbo[1]);
+        GLES31.glBindFramebuffer(GLES31.GL_DRAW_FRAMEBUFFER, copyDrawFbo);
         GLES31.glFramebufferTexture2D(GLES31.GL_DRAW_FRAMEBUFFER, GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, dst, 0);
 
         GLES31.glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GLES31.GL_COLOR_BUFFER_BIT, GLES31.GL_NEAREST);
 
         GLES31.glBindFramebuffer(GLES31.GL_FRAMEBUFFER, 0);
-        GLES31.glDeleteFramebuffers(2, tmpFbo, 0);
     }
 
     // VipleStream v17: copy current MV field to previous for temporal smoothing
     private void copyMVTexture() {
         int mvW = width / BLOCK_SIZE;
         int mvH = height / BLOCK_SIZE;
-        int[] tmpFbo = new int[2];
-        GLES31.glGenFramebuffers(2, tmpFbo, 0);
 
-        GLES31.glBindFramebuffer(GLES31.GL_READ_FRAMEBUFFER, tmpFbo[0]);
+        GLES31.glBindFramebuffer(GLES31.GL_READ_FRAMEBUFFER, copyReadFbo);
         GLES31.glFramebufferTexture2D(GLES31.GL_READ_FRAMEBUFFER, GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, motionFieldTex, 0);
 
-        GLES31.glBindFramebuffer(GLES31.GL_DRAW_FRAMEBUFFER, tmpFbo[1]);
+        GLES31.glBindFramebuffer(GLES31.GL_DRAW_FRAMEBUFFER, copyDrawFbo);
         GLES31.glFramebufferTexture2D(GLES31.GL_DRAW_FRAMEBUFFER, GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, prevMotionFieldTex, 0);
 
         GLES31.glBlitFramebuffer(0, 0, mvW, mvH, 0, 0, mvW, mvH, GLES31.GL_COLOR_BUFFER_BIT, GLES31.GL_NEAREST);
 
         GLES31.glBindFramebuffer(GLES31.GL_FRAMEBUFFER, 0);
-        GLES31.glDeleteFramebuffers(2, tmpFbo, 0);
     }
 
     public void destroy() {
