@@ -1557,6 +1557,10 @@ Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz,
     if (maxRefreshHz > 0.0f) {
         be->fHintedRefreshHz = (float)maxRefreshHz;
     }
+    // iter 7: default smart-mode = single (clean baseline; avoids
+    // initial dual → throttle → stuck loop). Override fLastSingleMode=0
+    // (calloc default = dual).
+    be->fLastSingleMode = 1;
     LOGI("nativeInit: video logical dims = %dx%d, device max refresh = %.1f Hz",
          be->videoWidth, be->videoHeight, (double)maxRefreshHz);
 
@@ -3324,23 +3328,32 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     // change strategy. measurement-zero state means "give clean
     // baseline first" — single mode lets input flow at full rate, then
     // measurement decides whether dual would actually fit.
-    int singleMode = 1;
+    // iter 7 — smart-mode hysteresis. Avoid flip-flop near threshold by
+    // applying different criteria based on current mode:
+    //   currently single → switch to dual only if 2×input ≤ display×1.0
+    //   currently dual   → switch to single only if 2×input > display×1.10
+    // Gives ~10% deadband. Default before first measurement = single.
+    int singleMode = be->fLastSingleMode;  // start by holding current mode
+    if (!singleMode && !be->fHostFrameFilled) singleMode = 1;  // safety: first frame is always single
     float doubled = be->fInputFpsRecent * 2.0f;
-    float threshold = displayHz * 1.05f;
+    float enterDualThr = displayHz * 1.00f;
+    float exitDualThr  = displayHz * 1.10f;
     if (be->fInputFpsRecent > 0.0f) {
-        if (doubled <= threshold) {
-            singleMode = 0;  // dual fits — go for FRUC
+        if (be->fLastSingleMode && doubled <= enterDualThr) {
+            singleMode = 0;  // single → dual: FRUC fits
+        } else if (!be->fLastSingleMode && doubled > exitDualThr) {
+            singleMode = 1;  // dual → single: FRUC overflows display
         }
     }
     if (singleMode != be->fLastSingleMode) {
         const char* hzSrc = (be->fHintedRefreshHz > 0.0f)
             ? "Java-max" : ((be->fRefreshDurationNs > 0) ? "drv-cache" : "60-fb");
         LOGI("[VKBE-RING] mode change: %s → %s | input ~%.1f FPS | display %.1f Hz (%s) | "
-             "criterion: 2×input=%.1f %s threshold=%.1f",
+             "criterion: 2×input=%.1f vs (enter %.1f / exit %.1f)",
              be->fLastSingleMode ? "single" : "dual",
              singleMode           ? "single" : "dual",
              (double)be->fInputFpsRecent, (double)displayHz, hzSrc,
-             (double)doubled, (singleMode ? ">" : "≤"), (double)threshold);
+             (double)doubled, (double)enterDualThr, (double)exitDualThr);
         be->fLastSingleMode = singleMode;
     }
 
