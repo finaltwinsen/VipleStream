@@ -31,11 +31,11 @@
 #include <string.h>
 
 // Pre-compiled SPIR-V shaders. Source under shaders/, regenerate via:
-//   $NDK/shader-tools/.../glslc fullscreen.vert -o fullscreen.vert.spv
-//   $NDK/shader-tools/.../glslc test_pattern.frag -o test_pattern.frag.spv
-//   xxd -i fullscreen.vert.spv | sed 's|^unsigned |static const unsigned |' > fullscreen.vert.spv.h
+//   $NDK/shader-tools/.../glslc <name> -o <name>.spv
+//   xxd -i <name>.spv | sed 's|^unsigned |static const unsigned |' > <name>.spv.h
 #include "shaders/fullscreen.vert.spv.h"
 #include "shaders/test_pattern.frag.spv.h"
+#include "shaders/video_sample.frag.spv.h"
 
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
@@ -137,6 +137,17 @@ typedef struct vk_backend_s {
     VkFramebuffer*       framebuffers;       // size = swapchainImageCount
     int                  graphicsInitialized;
 
+    // Descriptor pool / set for the video sampler (B.2c.3c.3). The
+    // descriptor set's image binding is updated per frame to point at
+    // whatever VkImageView we just imported from MediaCodec's AHB.
+    PFN_vkCreateDescriptorPool      vkCreateDescriptorPool;
+    PFN_vkDestroyDescriptorPool     vkDestroyDescriptorPool;
+    PFN_vkAllocateDescriptorSets    vkAllocateDescriptorSets;
+    PFN_vkUpdateDescriptorSets      vkUpdateDescriptorSets;
+    PFN_vkCmdBindDescriptorSets     vkCmdBindDescriptorSets;
+    VkDescriptorPool descPool;
+    VkDescriptorSet  descSet;
+
     // Per-frame render path (B.2c.3a)
     PFN_vkAcquireNextImageKHR    vkAcquireNextImageKHR;
     PFN_vkQueuePresentKHR        vkQueuePresentKHR;
@@ -167,6 +178,7 @@ typedef struct vk_backend_s {
 // top-to-bottom, but nativeInit calls them before they appear in source.
 static int  init_graphics_pipeline(struct vk_backend_s* be);
 static void destroy_graphics_pipeline(struct vk_backend_s* be);
+static int  load_graphics_procs(struct vk_backend_s* be);
 
 // ---------- helpers ----------
 
@@ -626,10 +638,14 @@ static int pick_memory_type(vk_backend_t* be, uint32_t bits)
     return -1;
 }
 
-// Import the Image's HardwareBuffer as a VkImage + bound VkDeviceMemory,
-// then immediately destroy it. Pure validation that the import path works
-// for real MediaCodec output AHB on this device. Returns 0 on success.
-static int try_import_ahb(vk_backend_t* be, AHardwareBuffer* ahb)
+// Import an AHardwareBuffer into Vulkan resources. Two modes:
+//   keepAlive=0 → import + destroy in-function (validation only, B.2c.3b)
+//   keepAlive=1 → return image / mem / view through outImage / outMem /
+//                 outView; caller is responsible for freeing after the
+//                 GPU is done reading them
+static int do_import_ahb(vk_backend_t* be, AHardwareBuffer* ahb, int keepAlive,
+                         VkImage* outImage, VkDeviceMemory* outMem, VkImageView* outView,
+                         uint32_t* outWidth, uint32_t* outHeight)
 {
     if (!be->vkGetAndroidHardwareBufferPropertiesANDROID) return -2;
 
@@ -746,10 +762,60 @@ static int try_import_ahb(vk_backend_t* be, AHardwareBuffer* ahb)
         be->ahbImportLogged = 1;
     }
 
-    // B.2c.3b cleanup. B.2c.3c keeps the imported image alive for sampling.
-    be->vkFreeMemory(be->device, importedMem, NULL);
-    be->vkDestroyImage(be->device, importedImage, NULL);
+    if (!keepAlive) {
+        be->vkFreeMemory(be->device, importedMem, NULL);
+        be->vkDestroyImage(be->device, importedImage, NULL);
+        return 0;
+    }
+
+    // Caller wants the image alive for sampling. Build a view with the
+    // SamplerYcbcrConversion chain so the descriptor-set update knows the
+    // implicit YUV→RGB conversion to apply.
+    if (!be->ycbcrInitialized) {
+        LOGE("do_import_ahb keepAlive: ycbcr sampler not ready");
+        be->vkFreeMemory(be->device, importedMem, NULL);
+        be->vkDestroyImage(be->device, importedImage, NULL);
+        return -1;
+    }
+    VkSamplerYcbcrConversionInfo viewYcbcr = {
+        .sType      = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
+        .conversion = be->ycbcrConversion,
+    };
+    VkImageViewCreateInfo ivci = {
+        .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext    = &viewYcbcr,
+        .image    = importedImage,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format   = VK_FORMAT_UNDEFINED,
+        .components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY },
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1,
+        },
+    };
+    VkImageView importedView = VK_NULL_HANDLE;
+    r = be->vkCreateImageView(be->device, &ivci, NULL, &importedView);
+    if (r != VK_SUCCESS) {
+        LOGE("vkCreateImageView (AHB) failed: %d", r);
+        be->vkFreeMemory(be->device, importedMem, NULL);
+        be->vkDestroyImage(be->device, importedImage, NULL);
+        return -1;
+    }
+
+    if (outImage)  *outImage  = importedImage;
+    if (outMem)    *outMem    = importedMem;
+    if (outView)   *outView   = importedView;
+    if (outWidth)  *outWidth  = desc.width;
+    if (outHeight) *outHeight = desc.height;
     return 0;
+}
+
+// Backward-compat shim used by Java's nativeImportAhb (B.2c.3b validation).
+static int try_import_ahb(vk_backend_t* be, AHardwareBuffer* ahb)
+{
+    return do_import_ahb(be, ahb, /*keepAlive=*/0, NULL, NULL, NULL, NULL, NULL);
 }
 
 JNIEXPORT jint JNICALL
@@ -1079,13 +1145,16 @@ Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz,
         LOGW("load_ahb_procs failed — nativeImportAhb will return -2 on every frame");
     }
 
-    // B.2c.3c.2: graphics pipeline (test pattern).
-    if (init_graphics_pipeline(be) != 0) {
-        LOGW("init_graphics_pipeline failed — render falls back to clear-only path");
+    // Graphics pipeline is now LAZY (B.2c.3c.3): we wait for the first
+    // AHB so its externalFormat can drive a VkSamplerYcbcrConversion
+    // immutable sampler in the descriptor set layout. Until that lands
+    // the per-frame render path falls back to the clear-only path.
+    if (load_graphics_procs(be) != 0) {
+        LOGW("load_graphics_procs failed — graphics pipeline will never lazy-init");
     }
 
-    LOGI("B.2c.3c.2 init complete: instance + surface + device + queue + swapchain "
-         "+ render + AHB + graphics pipeline");
+    LOGI("B.2c.3c.3 init complete: instance + surface + device + queue + swapchain "
+         "+ render + AHB (graphics pipeline lazy-init on first AHB frame)");
     return (jlong)(uintptr_t)be;
 
 fail:
@@ -1129,6 +1198,11 @@ static int load_graphics_procs(vk_backend_t* be)
     be->vkCmdEndRenderPass          = LOAD_DEVICE_PROC(be, vkCmdEndRenderPass);
     be->vkCmdBindPipeline           = LOAD_DEVICE_PROC(be, vkCmdBindPipeline);
     be->vkCmdDraw                   = LOAD_DEVICE_PROC(be, vkCmdDraw);
+    be->vkCreateDescriptorPool      = LOAD_DEVICE_PROC(be, vkCreateDescriptorPool);
+    be->vkDestroyDescriptorPool     = LOAD_DEVICE_PROC(be, vkDestroyDescriptorPool);
+    be->vkAllocateDescriptorSets    = LOAD_DEVICE_PROC(be, vkAllocateDescriptorSets);
+    be->vkUpdateDescriptorSets      = LOAD_DEVICE_PROC(be, vkUpdateDescriptorSets);
+    be->vkCmdBindDescriptorSets     = LOAD_DEVICE_PROC(be, vkCmdBindDescriptorSets);
     if (!be->vkCreateShaderModule || !be->vkDestroyShaderModule ||
         !be->vkCreateRenderPass || !be->vkDestroyRenderPass ||
         !be->vkCreateImageView || !be->vkDestroyImageView ||
@@ -1137,7 +1211,10 @@ static int load_graphics_procs(vk_backend_t* be)
         !be->vkCreateDescriptorSetLayout || !be->vkDestroyDescriptorSetLayout ||
         !be->vkCreateGraphicsPipelines || !be->vkDestroyPipeline ||
         !be->vkCmdBeginRenderPass || !be->vkCmdEndRenderPass ||
-        !be->vkCmdBindPipeline || !be->vkCmdDraw) {
+        !be->vkCmdBindPipeline || !be->vkCmdDraw ||
+        !be->vkCreateDescriptorPool || !be->vkDestroyDescriptorPool ||
+        !be->vkAllocateDescriptorSets || !be->vkUpdateDescriptorSets ||
+        !be->vkCmdBindDescriptorSets) {
         LOGE("load_graphics_procs: missing entry points");
         return -1;
     }
@@ -1225,30 +1302,72 @@ static int init_graphics_pipeline(vk_backend_t* be)
         }
     }
 
-    // Shader modules
+    // Shader modules. Pick the frag based on whether the YCbCr sampler is
+    // ready (= we'll have a real video texture to sample). Without it we
+    // fall back to the UV-gradient test pattern.
     VkShaderModuleCreateInfo smciV = {
         .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .codeSize = fullscreen_vert_spv_len,
         .pCode    = (const uint32_t*)fullscreen_vert_spv,
     };
-    VkShaderModuleCreateInfo smciF = {
-        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = test_pattern_frag_spv_len,
-        .pCode    = (const uint32_t*)test_pattern_frag_spv,
-    };
+    VkShaderModuleCreateInfo smciF = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+    if (be->ycbcrInitialized) {
+        smciF.codeSize = video_sample_frag_spv_len;
+        smciF.pCode    = (const uint32_t*)video_sample_frag_spv;
+    } else {
+        smciF.codeSize = test_pattern_frag_spv_len;
+        smciF.pCode    = (const uint32_t*)test_pattern_frag_spv;
+    }
     if (be->vkCreateShaderModule(be->device, &smciV, NULL, &be->vertShader) != VK_SUCCESS ||
         be->vkCreateShaderModule(be->device, &smciF, NULL, &be->fragShader) != VK_SUCCESS) {
         LOGE("vkCreateShaderModule failed"); return -1;
     }
 
-    // Empty descriptor set layout (B.2c.3c.3 will swap in a sampler binding)
+    // Descriptor set layout: 1 binding for the YCbCr-converted video
+    // sampler. Immutable sampler is REQUIRED for VkSamplerYcbcrConversion
+    // — the conversion has to be known at pipeline-compile time. If
+    // ycbcrSampler isn't ready yet we fall back to an empty layout
+    // (test_pattern frag), expecting a later lazy re-init.
+    VkDescriptorSetLayoutBinding videoBind = {
+        .binding         = 0,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .pImmutableSamplers = be->ycbcrInitialized ? &be->ycbcrSampler : NULL,
+    };
     VkDescriptorSetLayoutCreateInfo dslci = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 0,
-        .pBindings    = NULL,
+        .bindingCount = be->ycbcrInitialized ? 1u : 0u,
+        .pBindings    = be->ycbcrInitialized ? &videoBind : NULL,
     };
     if (be->vkCreateDescriptorSetLayout(be->device, &dslci, NULL, &be->descLayout) != VK_SUCCESS) {
         LOGE("vkCreateDescriptorSetLayout failed"); return -1;
+    }
+
+    // Descriptor pool + 1 descriptor set (only if we have a sampler binding)
+    if (be->ycbcrInitialized) {
+        VkDescriptorPoolSize poolSize = {
+            .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+        };
+        VkDescriptorPoolCreateInfo dpci = {
+            .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .maxSets       = 1,
+            .poolSizeCount = 1,
+            .pPoolSizes    = &poolSize,
+        };
+        if (be->vkCreateDescriptorPool(be->device, &dpci, NULL, &be->descPool) != VK_SUCCESS) {
+            LOGE("vkCreateDescriptorPool failed"); return -1;
+        }
+        VkDescriptorSetAllocateInfo dsai = {
+            .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool     = be->descPool,
+            .descriptorSetCount = 1,
+            .pSetLayouts        = &be->descLayout,
+        };
+        if (be->vkAllocateDescriptorSets(be->device, &dsai, &be->descSet) != VK_SUCCESS) {
+            LOGE("vkAllocateDescriptorSets failed"); return -1;
+        }
     }
     VkPipelineLayoutCreateInfo plci = {
         .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1322,14 +1441,17 @@ static int init_graphics_pipeline(vk_backend_t* be)
     }
 
     be->graphicsInitialized = 1;
-    LOGI("graphics pipeline ready: renderPass + %u framebuffers + pipeline",
-         be->swapchainImageCount);
+    LOGI("graphics pipeline ready: renderPass + %u framebuffers + pipeline (frag=%s)",
+         be->swapchainImageCount, be->ycbcrInitialized ? "video_sample" : "test_pattern");
     return 0;
 }
 
 static void destroy_graphics_pipeline(vk_backend_t* be)
 {
     if (!be->graphicsInitialized) return;
+    if (be->descPool)         be->vkDestroyDescriptorPool(be->device, be->descPool, NULL);
+    be->descPool = VK_NULL_HANDLE;
+    be->descSet  = VK_NULL_HANDLE;
     if (be->graphicsPipeline) be->vkDestroyPipeline(be->device, be->graphicsPipeline, NULL);
     if (be->pipelineLayout)   be->vkDestroyPipelineLayout(be->device, be->pipelineLayout, NULL);
     if (be->descLayout)       be->vkDestroyDescriptorSetLayout(be->device, be->descLayout, NULL);
@@ -1348,6 +1470,12 @@ static void destroy_graphics_pipeline(vk_backend_t* be)
         be->swapchainViews = NULL;
     }
     if (be->renderPass) be->vkDestroyRenderPass(be->device, be->renderPass, NULL);
+    be->graphicsPipeline = VK_NULL_HANDLE;
+    be->pipelineLayout   = VK_NULL_HANDLE;
+    be->descLayout       = VK_NULL_HANDLE;
+    be->vertShader       = VK_NULL_HANDLE;
+    be->fragShader       = VK_NULL_HANDLE;
+    be->renderPass       = VK_NULL_HANDLE;
     be->graphicsInitialized = 0;
 }
 
@@ -1487,6 +1615,167 @@ Java_com_limelight_binding_video_VkBackend_nativeRenderClearFrame(JNIEnv* env, j
     vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
     if (!be) return -1;
     return (jint)render_clear_frame(be);
+}
+
+// Per-frame video render: import AHB → bind → draw → present → cleanup.
+static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
+{
+    // First-frame lazy init of pipeline once we know the externalFormat
+    // from the AHB. ensure_ycbcr_sampler runs first (called by import).
+    if (!be->graphicsInitialized) {
+        VkAndroidHardwareBufferFormatPropertiesANDROID fmt = {
+            .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID,
+        };
+        VkAndroidHardwareBufferPropertiesANDROID propsOnly = {
+            .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
+            .pNext = &fmt,
+        };
+        if (be->vkGetAndroidHardwareBufferPropertiesANDROID(be->device, ahb, &propsOnly) == VK_SUCCESS &&
+            fmt.externalFormat != 0) {
+            ensure_ycbcr_sampler(be, &fmt);
+            if (init_graphics_pipeline(be) != 0) {
+                LOGW("lazy graphics pipeline init failed; staying on clear-only path");
+                return render_clear_frame(be);
+            }
+        } else {
+            return render_clear_frame(be);
+        }
+    }
+
+    // Import the AHB into VkImage+memory+view (kept alive for the GPU).
+    VkImage   imgIn  = VK_NULL_HANDLE;
+    VkDeviceMemory memIn = VK_NULL_HANDLE;
+    VkImageView viewIn = VK_NULL_HANDLE;
+    uint32_t srcW = 0, srcH = 0;
+    if (do_import_ahb(be, ahb, /*keepAlive=*/1, &imgIn, &memIn, &viewIn, &srcW, &srcH) != 0) {
+        return render_clear_frame(be);
+    }
+
+    // Update descriptor set: combined image sampler binding 0 → (sampler
+    // is immutable in the layout; we only fill imageView + layout).
+    VkDescriptorImageInfo dii = {
+        .sampler     = VK_NULL_HANDLE,
+        .imageView   = viewIn,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    VkWriteDescriptorSet wds = {
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = be->descSet,
+        .dstBinding      = 0,
+        .descriptorCount = 1,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo      = &dii,
+    };
+    be->vkUpdateDescriptorSets(be->device, 1, &wds, 0, NULL);
+
+    uint32_t imgIdx = 0;
+    VkResult r = be->vkAcquireNextImageKHR(be->device, be->swapchain, 100000000ULL,
+                                           be->acquireSem, VK_NULL_HANDLE, &imgIdx);
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+        LOGW("acquire failed: %d", r);
+        goto fail_cleanup_imported;
+    }
+
+    be->vkResetCommandBuffer(be->cmdBuffer, 0);
+    VkCommandBufferBeginInfo bbi = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    if (be->vkBeginCommandBuffer(be->cmdBuffer, &bbi) != VK_SUCCESS) goto fail_cleanup_imported;
+
+    // Imported image arrives in EXTERNAL queue family (AHB external memory).
+    // Acquire ownership + transition to SHADER_READ_ONLY_OPTIMAL.
+    VkImageSubresourceRange range = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0, .levelCount = 1,
+        .baseArrayLayer = 0, .layerCount = 1,
+    };
+    VkImageMemoryBarrier inAcquire = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+        .dstQueueFamilyIndex = be->graphicsQueueFamily,
+        .image = imgIn,
+        .subresourceRange = range,
+    };
+    be->vkCmdPipelineBarrier(be->cmdBuffer,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, NULL, 0, NULL, 1, &inAcquire);
+
+    VkClearValue cv = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
+    VkRenderPassBeginInfo rpbi = {
+        .sType        = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .renderPass   = be->renderPass,
+        .framebuffer  = be->framebuffers[imgIdx],
+        .renderArea   = { {0, 0}, be->swapchainExtent },
+        .clearValueCount = 1,
+        .pClearValues = &cv,
+    };
+    be->vkCmdBeginRenderPass(be->cmdBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, be->graphicsPipeline);
+    be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                be->pipelineLayout, 0, 1, &be->descSet, 0, NULL);
+    be->vkCmdDraw(be->cmdBuffer, 3, 1, 0, 0);
+    be->vkCmdEndRenderPass(be->cmdBuffer);
+
+    if (be->vkEndCommandBuffer(be->cmdBuffer) != VK_SUCCESS) goto fail_cleanup_imported;
+
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo si = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &be->acquireSem,
+        .pWaitDstStageMask = &waitStage,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &be->cmdBuffer,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &be->renderDoneSem,
+    };
+    if (be->vkQueueSubmit(be->graphicsQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS)
+        goto fail_cleanup_imported;
+
+    VkPresentInfoKHR pi = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &be->renderDoneSem,
+        .swapchainCount = 1,
+        .pSwapchains = &be->swapchain,
+        .pImageIndices = &imgIdx,
+    };
+    r = be->vkQueuePresentKHR(be->graphicsQueue, &pi);
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+        LOGW("present failed: %d", r);
+    }
+
+    // Wait queue idle so we can free the imported resources before next
+    // frame. Simple but slow — Phase D will queue these for delayed free.
+    be->vkQueueWaitIdle(be->graphicsQueue);
+
+    be->frameCounter++;
+    if (be->frameCounter <= 5 || be->frameCounter % 120 == 0) {
+        LOGI("render_ahb_frame #%d (img=%u, src=%ux%u)", be->frameCounter, imgIdx, srcW, srcH);
+    }
+
+fail_cleanup_imported:
+    if (viewIn) be->vkDestroyImageView(be->device, viewIn, NULL);
+    if (imgIn)  be->vkDestroyImage(be->device, imgIn, NULL);
+    if (memIn)  be->vkFreeMemory(be->device, memIn, NULL);
+    return 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_limelight_binding_video_VkBackend_nativeRenderFrame(
+    JNIEnv* env, jclass clazz, jlong handle, jobject jHwBuffer)
+{
+    vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
+    if (!be) return -1;
+    if (!jHwBuffer) return (jint)render_clear_frame(be);
+    AHardwareBuffer* ahb = AHardwareBuffer_fromHardwareBuffer(env, jHwBuffer);
+    if (!ahb) return (jint)render_clear_frame(be);
+    return (jint)render_ahb_frame(be, ahb);
 }
 
 JNIEXPORT void JNICALL

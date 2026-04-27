@@ -177,23 +177,19 @@ public final class VkBackend implements IFrucBackend {
                         img = reader.acquireLatestImage();
                         if (img == null) return;
                         imageReaderFramesSeen++;
-                        // B.2c.3b: import the HardwareBuffer as a VkImage+
-                        // VkDeviceMemory, validate it actually goes through,
-                        // then immediately discard. Logged once per session
-                        // (and on errors). B.2c.3c keeps the imported image
-                        // alive long enough to sample as YCbCr and blit to
-                        // the swapchain.
+                        // §I.B.2c.3c.3: hand the HardwareBuffer to native,
+                        // which imports it as a VkImage with the YCbCr
+                        // sampler view and renders the fullscreen video
+                        // sample shader. Falls back to clear-render if the
+                        // import or pipeline isn't ready.
                         if (nativeHandle != 0) {
                             HardwareBuffer hb = img.getHardwareBuffer();
-                            if (hb != null) {
-                                int ahbResult = nativeImportAhb(nativeHandle, hb);
-                                if (imageReaderFramesSeen <= 3 && ahbResult != 0) {
-                                    Log.w(TAG, "AHB import returned " + ahbResult
-                                               + " on frame " + imageReaderFramesSeen);
-                                }
-                                hb.close();
+                            int rc = nativeRenderFrame(nativeHandle, hb);
+                            if (rc != 0 && imageReaderFramesSeen <= 5) {
+                                Log.w(TAG, "nativeRenderFrame returned " + rc
+                                           + " on frame " + imageReaderFramesSeen);
                             }
-                            nativeRenderClearFrame(nativeHandle);
+                            if (hb != null) hb.close();
                         }
                         if (imageReaderFramesSeen <= 3 || imageReaderFramesSeen % 60 == 0) {
                             Log.i(TAG, "ImageReader frame #" + imageReaderFramesSeen
@@ -261,6 +257,7 @@ public final class VkBackend implements IFrucBackend {
     private static native void nativeDestroy(long handle);
     private static native int  nativeRenderClearFrame(long handle);
     private static native int  nativeImportAhb(long handle, HardwareBuffer hwBuffer);
+    private static native int  nativeRenderFrame(long handle, HardwareBuffer hwBuffer);
 
     /**
      * Read {@code debug.viplestream.vkprobe} via reflection so we don't
