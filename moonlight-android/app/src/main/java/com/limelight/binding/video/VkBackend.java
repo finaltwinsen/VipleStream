@@ -124,8 +124,33 @@ public final class VkBackend implements IFrucBackend {
             return null;
         }
 
+        // §I.D.c v2 — read device's max supported refresh rate so native
+        // can both hint compositor AND drive smart-mode dual-vs-single
+        // decision against the real panel. Hardcoded 90 was Pixel-5-only;
+        // Pixel 9 (120 Hz) needs 120 to trigger 60→120 dual present.
+        float maxRefreshHz = 60.0f;
         try {
-            nativeHandle = nativeInit(displaySurface, w, h);
+            android.view.Display d = (android.os.Build.VERSION.SDK_INT >= 30)
+                    ? context.getDisplay()
+                    : ((android.view.WindowManager) context.getSystemService(
+                            android.content.Context.WINDOW_SERVICE)).getDefaultDisplay();
+            if (d != null) {
+                android.view.Display.Mode[] modes = d.getSupportedModes();
+                if (modes != null) {
+                    for (android.view.Display.Mode m : modes) {
+                        float r = m.getRefreshRate();
+                        if (r > maxRefreshHz) maxRefreshHz = r;
+                    }
+                }
+                Log.i(TAG, "device display: current=" + d.getRefreshRate()
+                        + " Hz, max-supported=" + maxRefreshHz + " Hz");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "display rate query failed: " + t + " (defaulting to 60 Hz)");
+        }
+
+        try {
+            nativeHandle = nativeInit(displaySurface, w, h, maxRefreshHz);
         } catch (Throwable t) {
             Log.e(TAG, "nativeInit threw: " + t, t);
             nativeHandle = 0;
@@ -301,7 +326,8 @@ public final class VkBackend implements IFrucBackend {
     }
 
     // ---------- native bridge ----------
-    private static native long nativeInit(Surface displaySurface, int videoWidth, int videoHeight);
+    private static native long nativeInit(Surface displaySurface, int videoWidth, int videoHeight,
+                                          float maxRefreshHz);
     private static native void nativeDestroy(long handle);
     private static native int  nativeRenderClearFrame(long handle);
     private static native int  nativeImportAhb(long handle, HardwareBuffer hwBuffer);

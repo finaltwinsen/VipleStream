@@ -317,6 +317,13 @@ typedef struct vk_backend_s {
     // the hinted rate for smart-mode decisions; falls back to driver
     // query when no hint was accepted.
     float                fHintedRefreshHz;    // 0 = no hint accepted, use driver query
+
+    // §I.E.a HDR recon — capability flags. Set during init; pure
+    // observability for now (recon phase, no behavioural change).
+    // §I.E.b/c will gate actual HDR pipeline changes on these.
+    int                  fHdrColorspaceExt;   // VK_EXT_swapchain_colorspace (instance)
+    int                  fHdrMetadataExt;     // VK_EXT_hdr_metadata (device)
+    int                  fHdrCapableSurface;  // surface advertises HDR10_ST2084_EXT colorspace
 } vk_backend_t;
 
 #define LOAD_INSTANCE_PROC(be, name) \
@@ -353,15 +360,44 @@ static int create_instance(vk_backend_t* be)
     // VK_KHR_surface + VK_KHR_android_surface are mandatory on every
     // conformant Android Vulkan driver (per vendor compliance), so we
     // demand them rather than probe.
-    const char* instExts[] = {
-        VK_KHR_SURFACE_EXTENSION_NAME,
-        VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
-    };
+    // §I.E.a recon — probe VK_EXT_swapchain_colorspace (instance ext)
+    // for HDR10/BT2020 support. Conditionally enable.
+    PFN_vkEnumerateInstanceExtensionProperties vkEnumInstExts =
+        (PFN_vkEnumerateInstanceExtensionProperties)be->vkGetInstanceProcAddr(
+            NULL, "vkEnumerateInstanceExtensionProperties");
+    be->fHdrColorspaceExt = 0;
+    if (vkEnumInstExts) {
+        uint32_t cnt = 0;
+        vkEnumInstExts(NULL, &cnt, NULL);
+        if (cnt > 0) {
+            VkExtensionProperties* p = (VkExtensionProperties*)calloc(cnt, sizeof(*p));
+            if (p) {
+                vkEnumInstExts(NULL, &cnt, p);
+                for (uint32_t i = 0; i < cnt; i++) {
+                    if (strcmp(p[i].extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0) {
+                        be->fHdrColorspaceExt = 1;
+                        break;
+                    }
+                }
+                free(p);
+            }
+        }
+    }
+    LOGI("VK_EXT_swapchain_colorspace %s",
+         be->fHdrColorspaceExt ? "available — will enable" : "not available");
+
+    const char* instExts[3];
+    instExts[0] = VK_KHR_SURFACE_EXTENSION_NAME;
+    instExts[1] = VK_KHR_ANDROID_SURFACE_EXTENSION_NAME;
+    uint32_t instExtCount = 2;
+    if (be->fHdrColorspaceExt) {
+        instExts[instExtCount++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
+    }
 
     VkInstanceCreateInfo ici = {
         .sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo        = &appInfo,
-        .enabledExtensionCount   = (uint32_t)(sizeof(instExts) / sizeof(instExts[0])),
+        .enabledExtensionCount   = instExtCount,
         .ppEnabledExtensionNames = instExts,
     };
 
@@ -369,7 +405,8 @@ static int create_instance(vk_backend_t* be)
         LOGE("vkCreateInstance failed (likely missing instance extensions)");
         return -1;
     }
-    LOGI("VkInstance created (with VK_KHR_surface + VK_KHR_android_surface)");
+    LOGI("VkInstance created (with VK_KHR_surface + VK_KHR_android_surface%s)",
+         be->fHdrColorspaceExt ? " + VK_EXT_swapchain_colorspace" : "");
 
     be->vkDestroyInstance         = LOAD_INSTANCE_PROC(be, vkDestroyInstance);
     be->vkCreateAndroidSurfaceKHR = LOAD_INSTANCE_PROC(be, vkCreateAndroidSurfaceKHR);
@@ -461,7 +498,9 @@ static int create_device(vk_backend_t* be)
     // §I.C.6 — probe VK_GOOGLE_display_timing. Confirmed available on
     // Pixel 5 / Adreno 620 in §I.A.A2 (v1.2.134), but stay defensive in
     // case different drivers / emulators don't ship it.
+    // §I.E.a — probe VK_EXT_hdr_metadata in same enumeration pass.
     be->fDisplayTimingSupported = 0;
+    be->fHdrMetadataExt = 0;
     {
         uint32_t extCount = 0;
         vkEnumDevExts(be->physDevice, NULL, &extCount, NULL);
@@ -474,7 +513,9 @@ static int create_device(vk_backend_t* be)
                     if (strcmp(extProps[i].extensionName,
                                VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) == 0) {
                         be->fDisplayTimingSupported = 1;
-                        break;
+                    } else if (strcmp(extProps[i].extensionName,
+                               VK_EXT_HDR_METADATA_EXTENSION_NAME) == 0) {
+                        be->fHdrMetadataExt = 1;
                     }
                 }
                 free(extProps);
@@ -483,6 +524,8 @@ static int create_device(vk_backend_t* be)
     }
     LOGI("VK_GOOGLE_display_timing %s",
          be->fDisplayTimingSupported ? "available — will enable" : "not available");
+    LOGI("VK_EXT_hdr_metadata %s",
+         be->fHdrMetadataExt ? "available — will enable (§I.E recon)" : "not available");
 
     float qprio = 1.0f;
     VkDeviceQueueCreateInfo qci = {
@@ -495,12 +538,16 @@ static int create_device(vk_backend_t* be)
     // VK_ANDROID_external_memory_android_hardware_buffer for B.2c.3b AHB import.
     // Phase A2 confirmed Adreno 620 advertises both extensions on Pixel 5.
     // VK_GOOGLE_display_timing added conditionally for §I.C.6.
-    const char* deviceExts[3];
+    // VK_EXT_hdr_metadata added conditionally for §I.E (recon level).
+    const char* deviceExts[4];
     deviceExts[0] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     deviceExts[1] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME;
     uint32_t deviceExtCount = 2;
     if (be->fDisplayTimingSupported) {
         deviceExts[deviceExtCount++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
+    }
+    if (be->fHdrMetadataExt) {
+        deviceExts[deviceExtCount++] = VK_EXT_HDR_METADATA_EXTENSION_NAME;
     }
 
     VkDeviceCreateInfo dci = {
@@ -613,17 +660,21 @@ static int create_surface(vk_backend_t* be, JNIEnv* env, jobject jSurface)
             }
             s_loaded = 1;
         }
+        // Use Java-provided max refresh rate (already in fHintedRefreshHz
+        // from nativeInit). Falls back to 90 only if Java query failed.
+        float hintRate = (be->fHintedRefreshHz > 0.0f) ? be->fHintedRefreshHz : 90.0f;
         if (s_anw_setFrameRateStrat) {
             // FIXED_SOURCE=1, CHANGE_FRAME_RATE_ALWAYS=1
-            int32_t fr = s_anw_setFrameRateStrat(be->nativeWindow, 90.0f, 1, 1);
-            LOGI("ANativeWindow_setFrameRateWithChangeStrategy(90, FIXED_SOURCE, ALWAYS) rc=%d %s",
-                 fr, fr == 0 ? "(hint accepted)" : "(rejected)");
-            if (fr == 0) be->fHintedRefreshHz = 90.0f;
+            int32_t fr = s_anw_setFrameRateStrat(be->nativeWindow, hintRate, 1, 1);
+            LOGI("ANativeWindow_setFrameRateWithChangeStrategy(%.1f, FIXED_SOURCE, ALWAYS) rc=%d %s",
+                 (double)hintRate, fr, fr == 0 ? "(hint accepted)" : "(rejected)");
+            // fHintedRefreshHz already set from Java; don't overwrite even on
+            // hint reject (Java's Display query is more authoritative than
+            // our setFrameRate request status).
         } else if (s_anw_setFrameRate) {
-            int32_t fr = s_anw_setFrameRate(be->nativeWindow, 90.0f, 1);
-            LOGI("ANativeWindow_setFrameRate(90, FIXED_SOURCE) rc=%d %s (no ChangeStrategy variant — may stay seamless-only)",
-                 fr, fr == 0 ? "(hint accepted)" : "(rejected)");
-            if (fr == 0) be->fHintedRefreshHz = 90.0f;
+            int32_t fr = s_anw_setFrameRate(be->nativeWindow, hintRate, 1);
+            LOGI("ANativeWindow_setFrameRate(%.1f, FIXED_SOURCE) rc=%d %s (no ChangeStrategy variant)",
+                 (double)hintRate, fr, fr == 0 ? "(hint accepted)" : "(rejected)");
         } else {
             LOGI("ANativeWindow_setFrameRate symbol unavailable (need API 30+) — staying at panel default rate");
         }
@@ -677,9 +728,73 @@ static int create_swapchain(vk_backend_t* be)
             break;
         }
     }
+
+    // §I.E.a recon — log all surface formats + look for HDR10 colorspace.
+    // We don't switch to HDR yet (still picking SDR R8G8B8A8_UNORM); just
+    // record what's available so §I.E.b can negotiate HDR10 + 10-bit
+    // format pair. HDR10_ST2084_EXT colorspace value = 1000104008 (per
+    // VK_EXT_swapchain_colorspace ext).
+    be->fHdrCapableSurface = 0;
+    for (uint32_t i = 0; i < fmtCount; i++) {
+        const char* csName = "?";
+        switch (fmts[i].colorSpace) {
+            case VK_COLOR_SPACE_SRGB_NONLINEAR_KHR:        csName = "sRGB_NONLINEAR";      break;
+            case 1000104001 /*DISPLAY_P3_NONLINEAR_EXT*/:  csName = "DISPLAY_P3_NONLINEAR"; break;
+            case 1000104002 /*EXTENDED_SRGB_LINEAR_EXT*/:  csName = "EXTENDED_SRGB_LINEAR"; break;
+            case 1000104003 /*DISPLAY_P3_LINEAR_EXT*/:     csName = "DISPLAY_P3_LINEAR";   break;
+            case 1000104004 /*DCI_P3_NONLINEAR_EXT*/:      csName = "DCI_P3_NONLINEAR";    break;
+            case 1000104005 /*BT709_LINEAR_EXT*/:          csName = "BT709_LINEAR";        break;
+            case 1000104006 /*BT709_NONLINEAR_EXT*/:       csName = "BT709_NONLINEAR";     break;
+            case 1000104007 /*BT2020_LINEAR_EXT*/:         csName = "BT2020_LINEAR";       break;
+            case 1000104008 /*HDR10_ST2084_EXT*/:          csName = "HDR10_ST2084 ✨";     break;
+            case 1000104009 /*DOLBYVISION_EXT*/:           csName = "DOLBYVISION";         break;
+            case 1000104010 /*HDR10_HLG_EXT*/:             csName = "HDR10_HLG";           break;
+            case 1000104011 /*ADOBERGB_LINEAR_EXT*/:       csName = "ADOBERGB_LINEAR";     break;
+            case 1000104012 /*ADOBERGB_NONLINEAR_EXT*/:    csName = "ADOBERGB_NONLINEAR";  break;
+            case 1000104013 /*PASS_THROUGH_EXT*/:          csName = "PASS_THROUGH";        break;
+            case 1000104014 /*EXTENDED_SRGB_NONLINEAR_EXT*/: csName = "EXTENDED_SRGB_NONLINEAR"; break;
+            case 1000213000 /*DISPLAY_NATIVE_AMD*/:        csName = "DISPLAY_NATIVE_AMD";  break;
+            default: break;
+        }
+        LOGI("[VK-HDR-RECON] surface[%u]: format=%d colorSpace=%d (%s)",
+             i, fmts[i].format, fmts[i].colorSpace, csName);
+        if (fmts[i].colorSpace == 1000104008 /* HDR10_ST2084 */) {
+            be->fHdrCapableSurface = 1;
+        }
+    }
+    LOGI("[VK-HDR-RECON] HDR10_ST2084 colorspace %s on this surface",
+         be->fHdrCapableSurface ? "AVAILABLE" : "not advertised");
     LOGI("picked surface format=%d colorSpace=%d (out of %u)",
          chosen.format, chosen.colorSpace, fmtCount);
     free(fmts);
+
+    // §I.E.a recon — probe 10-bit format support for HDR pipeline.
+    // Three candidate formats covering the typical HDR data flow:
+    //   A2B10G10R10_UNORM_PACK32 = 64   — 10-bit RGB swapchain image (HDR10 display)
+    //   R16G16B16A16_SFLOAT      = 97   — half-float RGB for compute / interp frame
+    //   G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16 = 1000156005 — YCbCr P010 / P016 (decoded video)
+    // Look for SAMPLED_IMAGE_BIT (0x1), STORAGE_IMAGE_BIT (0x2),
+    // COLOR_ATTACHMENT_BIT (0x80), MIDPOINT_CHROMA_SAMPLES_BIT (0x20000)
+    // in the optimalTilingFeatures bitmask.
+    {
+        PFN_vkGetPhysicalDeviceFormatProperties vkGetFmtProps =
+            LOAD_INSTANCE_PROC(be, vkGetPhysicalDeviceFormatProperties);
+        if (vkGetFmtProps) {
+            struct { VkFormat f; const char* name; } probes[] = {
+                { VK_FORMAT_A2B10G10R10_UNORM_PACK32, "A2B10G10R10_UNORM_PACK32" },
+                { VK_FORMAT_R16G16B16A16_SFLOAT,      "R16G16B16A16_SFLOAT" },
+                { (VkFormat)1000156005,               "G10X6_B10X6R10X6_2PLANE_420 (P010)" },
+            };
+            for (size_t i = 0; i < sizeof(probes)/sizeof(probes[0]); i++) {
+                VkFormatProperties fp = {0};
+                vkGetFmtProps(be->physDevice, probes[i].f, &fp);
+                LOGI("[VK-HDR-RECON] format %s (%d): optimalTiling=0x%x linearTiling=0x%x buffer=0x%x %s",
+                     probes[i].name, probes[i].f,
+                     fp.optimalTilingFeatures, fp.linearTilingFeatures, fp.bufferFeatures,
+                     (fp.optimalTilingFeatures & 0x1) ? "[SAMPLED✓]" : "[no SAMPLED]");
+            }
+        }
+    }
 
     // Pick FIFO (always available, V-sync gated). Phase D will swap to
     // MAILBOX or IMMEDIATE if measurements warrant.
@@ -1390,14 +1505,22 @@ cleanup:
 
 JNIEXPORT jlong JNICALL
 Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz, jobject jSurface,
-                                                       jint videoWidth, jint videoHeight)
+                                                       jint videoWidth, jint videoHeight,
+                                                       jfloat maxRefreshHz)
 {
     vk_backend_t* be = (vk_backend_t*)calloc(1, sizeof(*be));
     if (!be) { LOGE("calloc failed"); return 0; }
     be->graphicsQueueFamily = (uint32_t)-1;
     be->videoWidth  = (int)videoWidth;
     be->videoHeight = (int)videoHeight;
-    LOGI("nativeInit: video logical dims = %dx%d", be->videoWidth, be->videoHeight);
+    // §I.D.c v2: Java caller probed Display.getSupportedModes()'s max
+    // refresh rate. Used both as setFrameRate hint target AND smart-mode
+    // displayHz reference. Hardcoded 90 was Pixel-5-only.
+    if (maxRefreshHz > 0.0f) {
+        be->fHintedRefreshHz = (float)maxRefreshHz;
+    }
+    LOGI("nativeInit: video logical dims = %dx%d, device max refresh = %.1f Hz",
+         be->videoWidth, be->videoHeight, (double)maxRefreshHz);
 
     be->libvulkan = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
     if (!be->libvulkan) { LOGE("dlopen libvulkan.so failed: %s", dlerror()); goto fail; }
