@@ -3440,11 +3440,16 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         0, 0, NULL, 0, NULL, 1, &inAcquireRing);
 
-    // FRUC compute pipeline (dispatch_fruc uses be->cmdBuffer = slotCmd).
-    dispatch_fruc(be, viewIn);
+    // iter 8 — skip FRUC compute when single mode (its output isn't
+    // sampled). Saves ycbcr_to_rgba + motionest + mv_median + warp +
+    // 2 image copies per frame (~5-10ms GPU work). Trade-off: when
+    // smart-mode flips back to dual, prev frame state is stale → 1
+    // frame of warp blend artifact, then recovers (motionest's
+    // temporal predictor self-corrects within 2-3 frames).
+    if (!singleMode) {
+        dispatch_fruc(be, viewIn);
 
-    // compute → fragment barrier so render pass 1 can sample interpFrame.
-    {
+        // compute → fragment barrier so render pass 1 can sample interpFrame.
         VkMemoryBarrier mb_compute_to_frag = {
             .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
             .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
