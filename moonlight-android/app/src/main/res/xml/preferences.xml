@@ -282,7 +282,7 @@
         <CheckBoxPreference
             android:key="checkbox_enable_fruc"
             android:title="Frame interpolation (FRUC 2x)"
-            android:summary="Doubles effective frame rate via OpenGL ES 3.1 compute shaders (motion estimation + warping). Requests half FPS from the server and interpolates locally on the device GPU. Android-only FRUC path — DirectML and NVIDIA Optical Flow are desktop-only and not offered here."
+            android:summary="Doubles effective frame rate via OpenGL ES 3.1 compute shaders (motion estimation + warping). Server is asked for half FPS, GPU interpolates locally. Total bitrate stays at the slider value — this means each source frame gets ~2x the per-frame budget vs a vanilla full-FPS stream, so source quality goes up. Android-only FRUC path — DirectML and NVIDIA Optical Flow are desktop-only and not offered here."
             android:defaultValue="false" />
         <ListPreference
             android:key="list_fruc_quality"

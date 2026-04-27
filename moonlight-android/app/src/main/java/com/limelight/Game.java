@@ -446,14 +446,25 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         int roundedRefreshRate = Math.round(displayRefreshRate);
         int chosenFrameRate = prefConfig.fps;
 
-        // VipleStream: FRUC auto-adapt FPS to display refresh rate, then halve for server
+        // VipleStream: FRUC auto-adapt FPS to display refresh rate, then halve for server.
+        // Bitrate strategy (a): total stream bitrate stays at the user-configured value
+        // (prefConfig.bitrate), passed unmodified to setBitrate() below. Because the server
+        // is asked for half the FPS, this implicitly doubles the per-frame bitrate budget,
+        // which is exactly what FRUC wants — better source frame quality means better
+        // motion vectors and warps. Do NOT scale prefConfig.bitrate here without re-deriving
+        // strategy (a/b/c) from docs/TODO.md §F? — see logged effective per-frame bitrate.
         if (prefConfig.enableFruc) {
             // Auto-cap to display refresh rate (FRUC will double it locally)
             int frucTargetFps = Math.min(prefConfig.fps, roundedRefreshRate);
             // Server gets half — FRUC doubles it back
             chosenFrameRate = frucTargetFps / 2;
+            int perFrameKbits = chosenFrameRate > 0 ? prefConfig.bitrate / chosenFrameRate : 0;
+            int vanillaPerFrameKbits = frucTargetFps > 0 ? prefConfig.bitrate / frucTargetFps : 0;
             LimeLog.info("[FRUC] Display=" + roundedRefreshRate + "Hz, target=" + frucTargetFps
                          + "FPS, requesting " + chosenFrameRate + "FPS from server (FRUC 2x)");
+            LimeLog.info("[FRUC] bitrate strategy (a): total=" + prefConfig.bitrate + "kbps unchanged, "
+                         + "effective per-frame=" + perFrameKbits + "kbits "
+                         + "(2x vanilla " + vanillaPerFrameKbits + "kbits @ " + frucTargetFps + "FPS)");
         }
         if (prefConfig.framePacing == PreferenceConfiguration.FRAME_PACING_CAP_FPS) {
             if (prefConfig.fps >= roundedRefreshRate) {

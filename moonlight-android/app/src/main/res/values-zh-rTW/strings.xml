@@ -111,7 +111,7 @@
     <string name="title_fps_list">視訊影格速率</string>
     <string name="summary_fps_list">提高影格速率以取得更順暢的視訊串流，降低可在低效能裝置上取得更好的串流體驗。</string>
     <string name="title_seekbar_bitrate">視訊位元速率</string>
-    <string name="summary_seekbar_bitrate">提高位元速率以提升圖像品質，降低可在較慢的網路中取得更好的串流體驗。</string>
+    <string name="summary_seekbar_bitrate">串流總位元速率。調高可提升圖像品質，調低可在較慢的網路中取得更穩定的串流。啟用 FRUC 2x 後總位元速率不變，但畫面更新率減半，因此每幀分到的位元速率約為兩倍。</string>
     <string name="title_unlock_fps">解鎖所有可用影格速率</string>
     <string name="summary_unlock_fps">以 90 或 120 畫面更新率串流可能會減少在高效能裝置上的網路延時，但在不支援的裝置上會卡頓或不穩定的狀況</string>
     <string name="title_checkbox_stretch_video">將畫面延展至全螢幕</string>
