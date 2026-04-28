@@ -248,7 +248,7 @@ GLES 路徑現在用 4 個 program × 3 quality 變體（共 10 個 GLSL）+ 827
 
 每個子 phase 的 commit message 用 `vX.Y.Z: §I.C.N — <短摘要>` 格式，跟 §I.B 一致。
 
-### 不可動的鐵律
+### 不可動的鐵律 (§I)
 
 1. ~~**Phase A 結果決定整個計畫是否繼續**~~ — A 已綠燈通過 (v1.2.134–135)，extension 都支援。
 2. **每 Phase 都要有 baseline 對比**。沿用 `scripts/benchmark/android/`，量出來不如預期就停。
@@ -270,6 +270,82 @@ A 三個問題都拿到答案：
 
 ---
 
+## J. Desktop Client Vulkan-native（v1.3.45+，2026-04-28 規劃）
+
+**動機：** §I.F NCNN-Vulkan FRUC backend 在 D3D11 主 renderer 上踩到結構性瓶頸：
+
+1. **D3D11 → Vulkan bridge cost ~30-40ms/frame**（CPU staging 路徑），讓 RIFE inference 21ms 只佔總耗時的 33%。Cascade probe 退讓給 Generic 太頻繁，user 看不到 ML 補幀的視覺品質。
+2. **Shared texture 路線在 NVIDIA 596.84 driver device lost** — `VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT` 任何 raw Vulkan command 都被 reject。要 ID3D11Fence + VkSemaphore 完整同步基礎設施才有機會（v1.3.43 三次嘗試都失敗，見 §J.1）。
+3. **D3D11 deprecation pressure** — Microsoft 主推 D3D12 + WinUI；D3D11 video decoder 不太可能加新 codec（AV2 / VVC）。
+4. **Cross-platform 一致性** — 我們 Android client 已是 Vulkan-native（§I 全套 ship），desktop 也走 Vulkan 後 codebase 大幅簡化。
+
+**長期目標：** 完整 Vulkan-native PC client，eliminate D3D11/Vulkan bridge，NCNN 從 unusable 變 usable，HDR pipeline 由 swapchain 硬體處理。
+
+### 效能預估
+
+| Path | 現狀 (D3D11 + bridge) | Vulkan-native 預估 | 改善 |
+|---|---|---|---|
+| Generic FRUC | ~5-7ms / frame | ~5-6ms | -5-7% (marginal) |
+| **NCNN-Vulkan FRUC** | **43-80ms** | **17-38ms** | **2-5x speedup** |
+| HDR pipeline | sRGB→PQ shader (~0.3ms) | swapchain HDR10 硬體 | -0.3ms + 色彩更準 |
+| Frame pacing | DXGI frame stats（粗）| VK_KHR_present_wait（精準）| 高 refresh rate 場景 |
+
+**真正受益：NCNN backend**。其他 path 改善 marginal，但長期統一 codebase 跟 future-proof 才是主因。
+
+### 階段（每階段獨立 commit、可獨立 ship）
+
+| Phase | 工時估 | 內容 | Ship 樣貌 | 狀態 |
+|---|---|---|---|---|
+| **J.1** D3D11.4 fence ↔ VkSemaphore bridge | 1-2 weeks | ID3D11Fence + VK_KHR_timeline_semaphore + DXGI shared handle，patch ncnn 加 external_semaphore_win32 ext。submitFrameShared 用 fence sync 取代 ID3D11Query event poll + vkQueueWaitIdle | NCNN shared path 真的能跑（cascade 真選上時不再 device lost） | ⏳ 進行中 |
+| **J.2** Vulkan post-processing pipeline | 2-3 weeks | Generic FRUC、HDR shader、blit、swapchain present 全部移到 Vulkan。Decoder 暫保 D3D11VA + 走 J.1 的 fence sync bridge | 預設仍走 D3D11；CLI flag `--renderer vulkan` opt-in | 規劃中 |
+| **J.3** VK_KHR_video_decode AV1 | 3-4 weeks | 完整 Vulkan-native decoder，eliminate D3D11VA → Vulkan bridge。透過 ffmpeg 6.1+ Vulkan video hwaccel 包裝 DPB lifecycle | NCNN 無 bridge cost，真實 17-38ms / frame | 規劃中 |
+| **J.4** HEVC + H264 decode + 跨平台驗證 | 2-3 weeks | Linux full coverage；macOS 路徑決策（VideoToolbox+Metal vs MoltenVK hybrid，後者 NCNN 在 mac 不可用） | 跨 OS 一致 | 規劃中 |
+| **J.5** 整合測試 + fallback hardening + 預設切換 | 1-2 weeks | NV / AMD / Intel 各跑 bench；舊 driver 退回 D3D11 renderer；預設改 Vulkan | Vulkan 預設 ON，D3D11 留 fallback | 規劃中 |
+
+**總工時估：** ~10-14 週（一個 engineer full-time），~2800-3000 LOC。
+
+### J.1 細部子計畫（衝刺中）
+
+NCNN shared path 在 NV 596.84 device lost (v1.3.43) → 缺跨 API sync。J.1 加 ID3D11Fence + VkSemaphore 完整同步，驗證 driver 加 fence 後是否買單。**此 phase 範圍小、scope 明確、可隨時 ship**，做了不浪費 — fence bridge 在 J.2/J.3 都會用到。
+
+| Sub-phase | 內容 | 風險 |
+|---|---|---|
+| **J.1.a** Patch ncnn 加 timeline_semaphore + external_semaphore_win32 | ncnn 自家 VkDevice 不 enable timeline semaphore extension。仿 v1.3.30 的 `VK_KHR_external_memory_win32` patch，在 `gpu.cpp:1898` VulkanDevice ctor 加上：`VK_KHR_external_semaphore` / `VK_KHR_external_semaphore_win32` / `VK_KHR_timeline_semaphore` 三個 ext，加 `VkPhysicalDeviceTimelineSemaphoreFeaturesKHR`。重 build ncnn.dll | 中；ncnn 20220729 的 glslang 版本對 timeline semaphore 有沒有 implicit dep 要驗 |
+| **J.1.b** D3D11.4 ID3D11Fence 創建 + DXGI shared NT handle 匯出 | `m_Device->QueryInterface(ID3D11Device5)` → `CreateFence(0, D3D11_FENCE_FLAG_SHARED)` → `ID3D11Fence::CreateSharedHandle`。NcnnFRUC 多 ID3D11Fence m_D3D11Fence 跟 HANDLE m_FenceSharedHandle | 低；D3D11.4 在 Windows 10 1703+ 全部支援 |
+| **J.1.c** Vulkan 端 VkSemaphore import via D3D12_FENCE handle type | 動態 load `vkImportSemaphoreWin32HandleKHR` from vulkan-1.dll；create VkSemaphore with `VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT`（spec 確認此 type 同時吃 D3D11 跟 D3D12 fence）+ `VkSemaphoreTypeCreateInfo`(timeline)；store m_VkFenceSemaphore | 中；handle type 命名誤導，要實測 NV driver 是否認 D3D11 fence |
+| **J.1.d** submitFrameShared 用 fence Signal/Wait 取代 event-poll + waitIdle | 移除 ID3D11Query event poll loop。每 frame：(1) `ctx->Signal(m_D3D11Fence, m_FenceValue)` after RTV write (2) `vkQueueSubmit` 帶 `VkTimelineSemaphoreSubmitInfo` waitValue=m_FenceValue (3) image ops 跑（vkCmdCopyImageToBuffer 等）(4) submit 結尾 signalValue=m_FenceValue+1 (5) `ctx->Wait(m_D3D11Fence, m_FenceValue+1)` before D3D11 reads m_OutputTex (6) m_FenceValue += 2 | 中；submit info chain pNext 順序、timeline semaphore submit info 要 v1.2 core 或 KHR ext path |
+| **J.1.e** End-to-end stream test | 用 `--fruc-backend ncnn` + 720p/60fps 觸發 NCNN cascade 真選上；觀察 submitFrameShared 全部 vkQueueSubmit 是否成功；real/interp 比例；無 device lost | 高；J.1 整體 risky 點 — 這步證明 NV driver 加 fence 後接受 imported VkImage access |
+| **J.1.f** 整合 + commit | clean up；3-fail fallback 機制保留作 safety net；commit `vX.Y.Z: §J.1 — D3D11.4 fence + VkSemaphore bridge`. 如果 J.1.e 通過，update `project_phase_b_dead_end.md` memory 反映新進展 | 低 |
+
+### J.1 後決策點
+
+**情境 A — J.1 通過（NV driver 加 fence 後接受 image access）：**
+NCNN shared path 真實可用。bridge cost 從 30ms 降到 ~5ms (timeline semaphore signal/wait + memory barriers)。**1080p NCNN 在 90fps half-rate budget 11ms 還是過不了，但在 60fps half-rate budget 16ms 過得了** — user 在中等 fps 場景就有 ML 補幀畫質提升。Phase J.2 開始規劃。
+
+**情境 B — J.1 失敗（NV driver 還是 device lost）：**
+NV driver 對 D3D11_TEXTURE_BIT import 嚴格到連 fence 都不認。三條路：
+1. 升級到 D3D12 shared resource (~250 LOC，B.4-44 後再加一層 D3D12 device bridge)
+2. 直接跳 J.3 走 VK_KHR_video_decode（避開 D3D11/Vulkan bridge 整個問題）
+3. 接受 NCNN backend 在 NVIDIA 永遠 CPU staging path，Phase J 從 J.2 開始 (Vulkan post-processing 不依賴 imported VkImage)
+
+### 不可動的鐵律 (§J)
+
+1. **fallback 機制保留** — v1.3.41 的 3-fail fallback、v1.3.44 的 process-lifetime singleton 都不能移除。Phase J 改動失敗時不能讓 user crash。
+2. **預設行為跟 v1.3.44 等價** — 直到 Phase J.5 預設切 Vulkan，預設 user 走 D3D11 主路徑（CLI flag opt-in）。
+3. **D3D11 renderer 留作 legacy fallback** — driver 不支援 VK_KHR_video_decode 的 user 退回 D3D11VA。預計支援到 2027 年（Win10 EOL + 主流 driver 都更新到 VK 1.3.274+）。
+4. **每 Phase 都要有 baseline 對比** — 沿用 §I 的 baseline.sh 設計，desktop 版自寫一份。
+
+### 已就位的診斷工具（會用到）
+
+- `[VIPLE-FRUC-NCNN]` log family — Phase B/J 全用同一系列
+- `VIPLE_FRUC_NCNN_SHARED=1` env var — Phase J.1 用此 opt-in 觸發 fence path
+- `loadModel: step N/6` trace log — v1.3.39 加的 step trace，定位 init crash 位置
+- 3-fail fallback counter — v1.3.41 機制，phase J 重用
+
+每個子 phase 的 commit message 用 `vX.Y.Z: §J.N.M — <短摘要>` 格式。
+
+---
+
 ## 如何使用這份清單
 
 - 動某條相容性債 → **不要**單獨 commit「改名」，要一起 ship migration code + release notes
@@ -286,6 +362,7 @@ A 三個問題都拿到答案：
 | 優先級 | 條目 | 理由 |
 |---|---|---|
 | **Medium** | **§A.1+A.11** QSettings org name + ini 名稱遷移 | 升級 v1.2.43 起的使用者「設定看起來像 reset 了」是真實 regression；只是大家手動把 paired hosts 重 add 過去就不痛了，所以沒人特別抱怨。動之前要寫並測 migration |
+| **High** | **§J** Desktop Client Vulkan-native | NCNN ML 補幀真實可用的唯一解；長期統一跨平台 codebase；future-proof D3D11 deprecation。J.1 衝刺中（D3D11.4 fence + VkSemaphore 解 NV driver device lost），J.2-5 視 J.1 結果決定 |
 | **Medium-High** | **§I** Android Vulkan 路徑（HDR + 降延遲） | 兩個 roadmap 需求一條解。**Phase A+B 已完成 (v1.2.134–150)**，VkPassthroughBackend live 跑通；現在進 Phase C（Vulkan FRUC 端到端 port），分 7 子 phase 估 5–7 day。C.1 spec 已 ship (v1.2.149)，C.2 等觸發 |
 | **Medium-Low** | **§A.6** HTTP Basic auth realm | 改了使用者要重登 Web UI；除非有別的 reason 一起改，否則 standalone 改一條不划算 |
 | **Low** | **§F** DirectML pipeline 搬 D3D12 / bundles | 4K120 real-time 才需要的架構改動；現在 1080p240 已達標 |
