@@ -25,6 +25,8 @@
 #include <memory>
 #include <string>
 
+#include <ncnn/mat.h>
+
 namespace ncnn {
 class Net;
 class VulkanDevice;
@@ -83,21 +85,35 @@ private:
     uint32_t          m_Height      = 0;
     std::string       m_ModelDir    = "rife-v4.25-lite";
 
-    // D3D11 device + placeholder textures (RGBA8 sized to W×H).  Phase
-    // 2 will repurpose these as the shared-texture endpoints for the
-    // D3D11↔Vulkan bridge.
+    // D3D11 layout (mirrors GenericFRUC):
+    //   m_RenderTex (DEFAULT, RTV+SRV) — caller writes decoded frame
+    //   m_StagingCurrTex (STAGING, READ) — submitFrame copies render
+    //                       into here then Map()s for CPU readback
+    //                       into m_PrevMat (ncnn fp32 normalized).
+    //   m_OutputTex (DEFAULT, SRV) — interpolated frame for caller's blit
+    //   m_StagingOutTex (STAGING, WRITE) — CPU writes ncnn output here,
+    //                       then CopyResource() to m_OutputTex.
     Microsoft::WRL::ComPtr<ID3D11Device>             m_Device;
     Microsoft::WRL::ComPtr<ID3D11Texture2D>          m_RenderTex;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView>   m_RenderRTV;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_LastSRV;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>          m_StagingCurrTex;
     Microsoft::WRL::ComPtr<ID3D11Texture2D>          m_OutputTex;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_OutputSRV;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>          m_StagingOutTex;
 
     // NCNN bits.  m_Net is the loaded RIFE 4.25-lite flownet
     // (3-input: in0/in1/in2 = prev RGB, curr RGB, timestep).
+    // m_PrevMat is the previous-frame fp32 normalized RGB tensor we
+    // feed into in0 on each forward; m_FrameCount==0 means "no prev
+    // yet, just stash and skip".  m_TimestepMat is constant-fill 0.5
+    // for midpoint interpolation.
     std::unique_ptr<ncnn::Net> m_Net;
     int                        m_GpuIndex = 0;
     double                     m_LastInferenceMs = 0.0;
+    ncnn::Mat                  m_PrevMat;
+    ncnn::Mat                  m_TimestepMat;
+    int                        m_FrameCount = 0;
 };
 
 #endif // _WIN32

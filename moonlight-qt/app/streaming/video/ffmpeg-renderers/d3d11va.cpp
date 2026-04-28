@@ -2255,11 +2255,17 @@ bool D3D11VARenderer::initFRUC()
                                      ? m_DecoderParams.frameRate
                                      : ((prefs->fps > 0) ? prefs->fps / 2 : 30);
         const double halfRateMsN   = 1000.0 / serverFpsN;
-        // v1.3.x — relax 0.85 → 0.95 safety margin so borderline-fit
-        // backends (typical NCNN result on mid-tier mobile dGPUs)
-        // still get picked.  Half-rate frames have natural slack
-        // because the next real frame doesn't need to ship until the
-        // following vsync; tighter margin was a DML-era artefact.
+        // v1.3.x — Phase A.5 CPU staging ships interp frames but the
+        // ~30 ms per-frame staging overhead pushes the total above
+        // budget for the 30 fps source path on mobile dGPUs (e.g.
+        // RTX 3060 Laptop measures 37 ms probe = ~36 ms inference +
+        // staging).  Letting it ship anyway caused user-visible
+        // flicker because real-frame arrival gets delayed past the
+        // next vsync.  v1.3.23 keeps the strict 0.95× margin so the
+        // cascade falls through to Generic on borderline GPUs and
+        // only ships NCNN when the GPU genuinely fits the budget.
+        // Phase B shared-texture bridge (eliminates staging cost)
+        // is the proper fix on mid-tier GPUs.
         const double kBudgetMarginN = 0.95;
         const double budgetThrMsN   = halfRateMsN * kBudgetMarginN;
 
@@ -2281,8 +2287,7 @@ bool D3D11VARenderer::initFRUC()
                 m_FrucTextureHeight = (int)fruH;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-FRUC] NCNN backend ready: rife-v4.25-lite @ %ux%u, "
-                            "probed %.2fms (budget %.1fms; display %dx%d) "
-                            "[phase 1 probe-only — submitFrame is a no-op until shared-texture lands]",
+                            "probed %.2fms (budget %.1fms; display %dx%d)",
                             fruW, fruH, ms, budgetThrMsN, m_DisplayWidth, m_DisplayHeight);
                 return true;
             }

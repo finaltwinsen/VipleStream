@@ -116,37 +116,71 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
         return false;
     }
 
-    // Phase-1 placeholder textures.  Backend contract requires
-    // non-null RTV/SRV/OutputTexture so callers don't crash on read;
-    // submitFrame is a no-op until the shared-texture bridge lands.
-    D3D11_TEXTURE2D_DESC td = {};
-    td.Width = m_Width;
-    td.Height = m_Height;
-    td.MipLevels = 1;
-    td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    // §I.F Phase A.5 (v1.3.21) — full D3D11 texture set for CPU-staged
+    // bridge between D3D11 (caller) and ncnn::Mat (NCNN Vulkan).
+    //
+    // Render → caller writes decoded RGBA8 frame here (RTV).
+    // Staging-curr → CopyResource() target, CPU-readable, used to lift
+    //                pixels into m_PrevMat for the next inference.
+    // Output → Vulkan-side interp result lands here (after staging-out
+    //          → CopyResource), caller blits to swapchain via SRV.
+    // Staging-out → CPU-writable, holds ncnn output until CopyResource.
+    D3D11_TEXTURE2D_DESC renderDesc = {};
+    renderDesc.Width = m_Width;
+    renderDesc.Height = m_Height;
+    renderDesc.MipLevels = 1;
+    renderDesc.ArraySize = 1;
+    renderDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    renderDesc.SampleDesc.Count = 1;
+    renderDesc.Usage = D3D11_USAGE_DEFAULT;
+    renderDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(m_Device->CreateTexture2D(&renderDesc, nullptr, m_RenderTex.GetAddressOf())) ||
+        FAILED(m_Device->CreateRenderTargetView(m_RenderTex.Get(), nullptr, m_RenderRTV.GetAddressOf())) ||
+        FAILED(m_Device->CreateShaderResourceView(m_RenderTex.Get(), nullptr, m_LastSRV.GetAddressOf()))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] render-tex creation failed");
+        destroy();
+        return false;
+    }
 
-    if (FAILED(m_Device->CreateTexture2D(&td, nullptr, m_RenderTex.GetAddressOf())) ||
-        FAILED(m_Device->CreateTexture2D(&td, nullptr, m_OutputTex.GetAddressOf()))) {
+    D3D11_TEXTURE2D_DESC outDesc = renderDesc;
+    outDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(m_Device->CreateTexture2D(&outDesc, nullptr, m_OutputTex.GetAddressOf())) ||
+        FAILED(m_Device->CreateShaderResourceView(m_OutputTex.Get(), nullptr, m_OutputSRV.GetAddressOf()))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC-NCNN] D3D11 placeholder texture creation failed");
+                    "[VIPLE-FRUC-NCNN] output-tex creation failed");
         destroy();
         return false;
     }
-    if (FAILED(m_Device->CreateRenderTargetView(m_RenderTex.Get(), nullptr,
-                                                m_RenderRTV.GetAddressOf())) ||
-        FAILED(m_Device->CreateShaderResourceView(m_RenderTex.Get(), nullptr,
-                                                  m_LastSRV.GetAddressOf())) ||
-        FAILED(m_Device->CreateShaderResourceView(m_OutputTex.Get(), nullptr,
-                                                  m_OutputSRV.GetAddressOf()))) {
+
+    D3D11_TEXTURE2D_DESC stagingCurrDesc = renderDesc;
+    stagingCurrDesc.Usage = D3D11_USAGE_STAGING;
+    stagingCurrDesc.BindFlags = 0;
+    stagingCurrDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(m_Device->CreateTexture2D(&stagingCurrDesc, nullptr, m_StagingCurrTex.GetAddressOf()))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC-NCNN] D3D11 placeholder RTV/SRV creation failed");
+                    "[VIPLE-FRUC-NCNN] staging-curr-tex creation failed");
         destroy();
         return false;
     }
+
+    D3D11_TEXTURE2D_DESC stagingOutDesc = renderDesc;
+    stagingOutDesc.Usage = D3D11_USAGE_STAGING;
+    stagingOutDesc.BindFlags = 0;
+    stagingOutDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(m_Device->CreateTexture2D(&stagingOutDesc, nullptr, m_StagingOutTex.GetAddressOf()))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] staging-out-tex creation failed");
+        destroy();
+        return false;
+    }
+
+    // Pre-build the constant-fill timestep input (1×1×H×W = 0.5 for
+    // midpoint interpolation between prev and curr frames).  RIFE
+    // 4.25-lite reads it as in2.
+    m_TimestepMat = ncnn::Mat(static_cast<int>(m_Width), static_cast<int>(m_Height), 1);
+    m_TimestepMat.fill(0.5f);
+    m_FrameCount = 0;
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-FRUC-NCNN] initialized: %ux%u, model=%s "
@@ -307,19 +341,181 @@ double NcnnFRUC::probeInferenceCost(int warmup, int iterations)
     return med;
 }
 
-bool NcnnFRUC::submitFrame(ID3D11DeviceContext* /*ctx*/, double /*timestamp*/)
+// ---- pixel format conversion helpers ----
+// D3D11 Map gives us interleaved RGBA8 with row pitch >= w*4 (driver
+// alignment).  ncnn::Mat for RIFE uses planar [C, H, W] fp32 in 0..1.
+// We do the conversion CPU-side; per frame this is ~10 ms at 1080p,
+// dominating the staging cost. Phase B (D3D11→D3D12→Vulkan shared
+// texture) will eliminate this in a future iteration.
+
+namespace {
+
+void rgba8RowToPlanarFp32(const unsigned char* src, int w,
+                          float* outR, float* outG, float* outB)
 {
-    // Phase 1: shared-texture bridge not yet implemented.  Returning
-    // false makes the caller treat us as "no interp emitted this
-    // frame" — the real frame still presents normally.  Phase 2 will
-    // record the actual ncnn Vulkan compute submission here.
-    return false;
+    constexpr float kInv255 = 1.0f / 255.0f;
+    for (int x = 0; x < w; ++x) {
+        outR[x] = src[x * 4 + 0] * kInv255;
+        outG[x] = src[x * 4 + 1] * kInv255;
+        outB[x] = src[x * 4 + 2] * kInv255;
+    }
 }
 
-void NcnnFRUC::skipFrame(ID3D11DeviceContext* /*ctx*/)
+void planarFp32RowToRgba8(const float* inR, const float* inG, const float* inB,
+                          unsigned char* dst, int w)
 {
-    // Stateful caches (prev frame) live in phase 2.  Today nothing to
-    // skip — the no-op submitFrame already did nothing.
+    for (int x = 0; x < w; ++x) {
+        float r = inR[x] * 255.0f;
+        float g = inG[x] * 255.0f;
+        float b = inB[x] * 255.0f;
+        if (r < 0.0f) r = 0.0f; else if (r > 255.0f) r = 255.0f;
+        if (g < 0.0f) g = 0.0f; else if (g > 255.0f) g = 255.0f;
+        if (b < 0.0f) b = 0.0f; else if (b > 255.0f) b = 255.0f;
+        dst[x * 4 + 0] = static_cast<unsigned char>(r);
+        dst[x * 4 + 1] = static_cast<unsigned char>(g);
+        dst[x * 4 + 2] = static_cast<unsigned char>(b);
+        dst[x * 4 + 3] = 255;
+    }
+}
+
+// D3D11 staging-tex Map() → ncnn::Mat (1, 3, H, W) fp32 normalized.
+// out_mat must be created as ncnn::Mat(W, H, 3) before the call.
+bool stagingToMat(ID3D11DeviceContext* ctx, ID3D11Texture2D* staging,
+                  int w, int h, ncnn::Mat& out_mat)
+{
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m))) return false;
+    const auto* base = static_cast<const unsigned char*>(m.pData);
+    float* r = out_mat.channel(0);
+    float* g = out_mat.channel(1);
+    float* b = out_mat.channel(2);
+    for (int y = 0; y < h; ++y) {
+        rgba8RowToPlanarFp32(base + y * m.RowPitch, w,
+                             r + y * w, g + y * w, b + y * w);
+    }
+    ctx->Unmap(staging, 0);
+    return true;
+}
+
+// ncnn::Mat (3, H, W) fp32 → D3D11 staging-tex Map(WRITE).
+bool matToStaging(ID3D11DeviceContext* ctx, ID3D11Texture2D* staging,
+                  int w, int h, const ncnn::Mat& in_mat)
+{
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_WRITE, 0, &m))) return false;
+    auto* base = static_cast<unsigned char*>(m.pData);
+    const float* r = in_mat.channel(0);
+    const float* g = in_mat.channel(1);
+    const float* b = in_mat.channel(2);
+    for (int y = 0; y < h; ++y) {
+        planarFp32RowToRgba8(r + y * w, g + y * w, b + y * w,
+                             base + y * m.RowPitch, w);
+    }
+    ctx->Unmap(staging, 0);
+    return true;
+}
+
+} // namespace
+
+bool NcnnFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
+{
+    if (!ctx || !m_Net) return false;
+
+    // CRITICAL: same dance as GenericFRUC — caller wrote into RTV;
+    // we must unbind it before lifting the texture as SRV / staging
+    // source, otherwise D3D11 silently drops the SRV bind.
+    ID3D11RenderTargetView* nullRTV = nullptr;
+    ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
+
+    // Lift the freshly-rendered frame into a CPU-readable staging
+    // texture, then convert RGBA8 → planar fp32 normalized.
+    ctx->CopyResource(m_StagingCurrTex.Get(), m_RenderTex.Get());
+    ncnn::Mat curr_mat(static_cast<int>(m_Width), static_cast<int>(m_Height), 3);
+    if (!stagingToMat(ctx, m_StagingCurrTex.Get(),
+                      static_cast<int>(m_Width), static_cast<int>(m_Height),
+                      curr_mat)) {
+        return false;
+    }
+
+    // First frame: stash and skip.  RIFE needs prev + curr; we have
+    // only curr so far.  Caller will see "no interp" but the real
+    // frame still presents normally via getLastRenderSRV().
+    if (m_FrameCount == 0) {
+        m_PrevMat = curr_mat;
+        m_FrameCount = 1;
+        return false;
+    }
+
+    // RIFE 4.25-lite forward: in0=prev RGB, in1=curr RGB, in2=timestep
+    // plane (constant 0.5 for midpoint).  out0 is the interpolated
+    // RGB tensor at t=0.5 between prev and curr.
+    auto t0 = std::chrono::steady_clock::now();
+    ncnn::Extractor ex = m_Net->create_extractor();
+    ex.input("in0", m_PrevMat);
+    ex.input("in1", curr_mat);
+    ex.input("in2", m_TimestepMat);
+    ncnn::Mat out_mat;
+    if (ex.extract("out0", out_mat) != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] extract(out0) failed @ frame %d",
+                    m_FrameCount);
+        m_PrevMat = curr_mat;
+        m_FrameCount++;
+        return false;
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    m_LastInferenceMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    // Validate output shape — if RIFE returns garbage (e.g. wrong
+    // channel count, empty mat) writing it to staging would emit a
+    // black or uninitialized frame which the user sees as "flicker".
+    // Bail out and let the caller fall back to real-frame-only.
+    if (out_mat.empty() || out_mat.w != static_cast<int>(m_Width) ||
+        out_mat.h != static_cast<int>(m_Height) || out_mat.c != 3) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] extract returned unexpected shape "
+                    "(w=%d h=%d c=%d empty=%d) @ frame %d — declining interp",
+                    out_mat.w, out_mat.h, out_mat.c, (int)out_mat.empty(),
+                    m_FrameCount);
+        m_PrevMat = curr_mat;
+        m_FrameCount++;
+        return false;
+    }
+
+    // Output back to D3D11: fp32 → RGBA8 staging → CopyResource to
+    // SRV-side output texture.
+    if (!matToStaging(ctx, m_StagingOutTex.Get(),
+                      static_cast<int>(m_Width), static_cast<int>(m_Height),
+                      out_mat)) {
+        m_PrevMat = curr_mat;
+        m_FrameCount++;
+        return false;
+    }
+    ctx->CopyResource(m_OutputTex.Get(), m_StagingOutTex.Get());
+
+    // Save current frame as the "prev" tensor for the next call.
+    // ncnn::Mat is reference-counted internally so this is cheap.
+    m_PrevMat = curr_mat;
+    m_FrameCount++;
+    return true;
+}
+
+void NcnnFRUC::skipFrame(ID3D11DeviceContext* ctx)
+{
+    if (!ctx) return;
+    // Even when caller asks us to skip interp (late frame, poor
+    // network), we still stash this frame as the new "prev" so the
+    // next interp uses the freshest reference.
+    ID3D11RenderTargetView* nullRTV = nullptr;
+    ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
+    ctx->CopyResource(m_StagingCurrTex.Get(), m_RenderTex.Get());
+    ncnn::Mat next_mat(static_cast<int>(m_Width), static_cast<int>(m_Height), 3);
+    if (stagingToMat(ctx, m_StagingCurrTex.Get(),
+                     static_cast<int>(m_Width), static_cast<int>(m_Height),
+                     next_mat)) {
+        m_PrevMat = next_mat;
+        if (m_FrameCount == 0) m_FrameCount = 1;
+    }
 }
 
 void NcnnFRUC::destroy()
@@ -328,8 +524,13 @@ void NcnnFRUC::destroy()
         m_Net.reset();
         releaseNcnnGpu();
     }
+    m_PrevMat.release();
+    m_TimestepMat.release();
+    m_FrameCount = 0;
+    m_StagingOutTex.Reset();
     m_OutputSRV.Reset();
     m_OutputTex.Reset();
+    m_StagingCurrTex.Reset();
     m_LastSRV.Reset();
     m_RenderRTV.Reset();
     m_RenderTex.Reset();
