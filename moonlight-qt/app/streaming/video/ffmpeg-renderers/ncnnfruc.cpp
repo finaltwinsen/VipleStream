@@ -182,6 +182,71 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
     m_TimestepMat.fill(0.5f);
     m_FrameCount = 0;
 
+    // Phase B.1 capability probe — log whether the Vulkan device that
+    // ncnn picked supports the bits we need to bypass CPU staging in
+    // a future phase B.2-5: external memory win32 import (so a D3D11
+    // SHARED_NTHANDLE texture can be opened as a VkImage on the same
+    // physical adapter).  We can't link vulkan-1.lib (would need the
+    // Vulkan SDK installed), so dynamically load via vulkan-1.dll
+    // (always present on Win10 1903+ since ncnn's already running).
+    {
+        HMODULE vk = ::GetModuleHandleW(L"vulkan-1.dll");
+        if (!vk) vk = ::LoadLibraryW(L"vulkan-1.dll");
+        if (vk) {
+            auto pfnGetDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+                ::GetProcAddress(vk, "vkGetDeviceProcAddr"));
+            auto pfnEnumDeviceExt = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+                ::GetProcAddress(vk, "vkEnumerateDeviceExtensionProperties"));
+
+            const VkPhysicalDevice phys = gi.physical_device();
+            const VkDevice         dev  = ncnn::get_gpu_device(m_GpuIndex)->vkdevice();
+
+            bool extMemWin32 = false, extMem = false;
+            bool memReq2 = false, dedicatedAlloc = false;
+            if (pfnEnumDeviceExt) {
+                uint32_t extCount = 0;
+                pfnEnumDeviceExt(phys, nullptr, &extCount, nullptr);
+                std::vector<VkExtensionProperties> exts(extCount);
+                pfnEnumDeviceExt(phys, nullptr, &extCount, exts.data());
+                auto hasExt = [&](const char* name) {
+                    for (const auto& e : exts) {
+                        if (strcmp(e.extensionName, name) == 0) return true;
+                    }
+                    return false;
+                };
+                extMemWin32    = hasExt("VK_KHR_external_memory_win32");
+                extMem         = hasExt("VK_KHR_external_memory");
+                memReq2        = hasExt("VK_KHR_get_memory_requirements2");
+                dedicatedAlloc = hasExt("VK_KHR_dedicated_allocation");
+            }
+
+            void* fpImport = nullptr;
+            void* fpProps  = nullptr;
+            if (pfnGetDeviceProcAddr && dev) {
+                fpImport = (void*)pfnGetDeviceProcAddr(dev, "vkGetMemoryWin32HandleKHR");
+                fpProps  = (void*)pfnGetDeviceProcAddr(dev, "vkGetMemoryWin32HandlePropertiesKHR");
+            }
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B capability probe: "
+                        "ext_mem_win32=%d ext_mem=%d mem_req2=%d ded_alloc=%d "
+                        "fp_get_handle=%d fp_get_handle_props=%d",
+                        extMemWin32, extMem, memReq2, dedicatedAlloc,
+                        fpImport != nullptr, fpProps != nullptr);
+
+            if (extMemWin32 && fpImport && fpProps && extMem) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC-NCNN] phase-B feasible — D3D11→VkImage shared-texture path can be wired");
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC-NCNN] phase-B BLOCKED — fall back to CPU staging permanently on this device");
+            }
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B probe skipped: vulkan-1.dll not loadable");
+        }
+    }
+
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-FRUC-NCNN] initialized: %ux%u, model=%s "
                 "(phase 1: probe-only, submitFrame is a no-op until shared-texture lands)",
