@@ -764,6 +764,9 @@ static int create_swapchain(vk_backend_t* be)
          caps.minImageCount, caps.maxImageCount,
          caps.currentExtent.width, caps.currentExtent.height,
          caps.supportedTransforms, caps.supportedCompositeAlpha);
+    status_log("create_swapchain: surface caps OK (extent=%ux%u, minImg=%u maxImg=%u)",
+               caps.currentExtent.width, caps.currentExtent.height,
+               caps.minImageCount, caps.maxImageCount);
 
     // Pick format. Android-side surface usually advertises BGRA8 UNORM as
     // first option; we accept either RGBA8 or BGRA8 in UNORM/sRGB form.
@@ -821,6 +824,9 @@ static int create_swapchain(vk_backend_t* be)
          be->fHdrCapableSurface ? "AVAILABLE" : "not advertised");
     LOGI("picked surface format=%d colorSpace=%d (out of %u)",
          chosen.format, chosen.colorSpace, fmtCount);
+    status_log("create_swapchain: %u surface formats listed (HDR10_ST2084 %s, picked fmt=%d cs=%d)",
+               fmtCount, be->fHdrCapableSurface ? "AVAILABLE" : "n/a",
+               chosen.format, chosen.colorSpace);
     free(fmts);
 
     // §I.E.a recon — probe 10-bit format support for HDR pipeline.
@@ -850,6 +856,7 @@ static int create_swapchain(vk_backend_t* be)
             }
         }
     }
+    status_log("create_swapchain: 10-bit format probe done");
 
     // FIFO always available + always honors vsync. iter 6 (v1.2.168) tried
     // MAILBOX preference to skip vsync block on PASS 1 of dual present —
@@ -859,6 +866,7 @@ static int create_swapchain(vk_backend_t* be)
     // default. iter 14 (later) can re-introduce MAILBOX as opt-in via
     // settings or per-mode swapchain rebuild.
     VkPresentModeKHR present = VK_PRESENT_MODE_FIFO_KHR;
+    uint32_t pmCountSeen = 0;
     {
         uint32_t pmCount = 0;
         vkGetPhysicalDeviceSurfacePresentModesKHR(be->physDevice, be->surface, &pmCount, NULL);
@@ -878,8 +886,10 @@ static int create_swapchain(vk_backend_t* be)
                 free(pms);
             }
         }
+        pmCountSeen = pmCount;
     }
     LOGI("picked present mode = FIFO (%d)", present);
+    status_log("create_swapchain: %u present modes listed (picked FIFO)", pmCountSeen);
 
     uint32_t imageCount = caps.minImageCount + 1;
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
@@ -912,8 +922,11 @@ static int create_swapchain(vk_backend_t* be)
         .oldSwapchain     = VK_NULL_HANDLE,
     };
 
-    if (be->vkCreateSwapchainKHR(be->device, &sci, NULL, &be->swapchain)
-        != VK_SUCCESS) {
+    status_log("create_swapchain: calling vkCreateSwapchainKHR (extent=%ux%u, fmt=%d, cs=%d, imgCount=%u, presentMode=%d) ...",
+               extent.width, extent.height, chosen.format, chosen.colorSpace, imageCount, present);
+    VkResult sccRc = be->vkCreateSwapchainKHR(be->device, &sci, NULL, &be->swapchain);
+    status_log("create_swapchain: vkCreateSwapchainKHR rc=%d (0=SUCCESS, neg=error)", (int)sccRc);
+    if (sccRc != VK_SUCCESS) {
         LOGE("vkCreateSwapchainKHR failed");
         return -1;
     }
@@ -933,6 +946,7 @@ static int create_swapchain(vk_backend_t* be)
     be->vkGetSwapchainImagesKHR(be->device, be->swapchain,
                                 &be->swapchainImageCount, be->swapchainImages);
     LOGI("swapchain image count actual = %u", be->swapchainImageCount);
+    status_log("create_swapchain: got %u swapchain images", be->swapchainImageCount);
 
     // §I.C.6 — query display refresh cycle duration once swapchain is up.
     // Cached as fRefreshDurationNs; used to space PASS 1 / PASS 2 PTS in
