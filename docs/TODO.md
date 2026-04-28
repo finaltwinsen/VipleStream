@@ -298,13 +298,34 @@ A 三個問題都拿到答案：
 |---|---|---|---|---|
 | **J.1** D3D11.4 fence ↔ VkSemaphore bridge | 1-2 weeks | ID3D11Fence + VK_KHR_timeline_semaphore + DXGI shared handle，patch ncnn 加 external_semaphore_win32 ext。submitFrameShared 用 fence sync 取代 ID3D11Query event poll + vkQueueWaitIdle | NCNN shared path 真的能跑（cascade 真選上時不再 device lost） | ❌ **DEAD END on NV 596.84** (v1.3.47, 121dd72) — 4 種 ablation 全部 rc=-4 device lost。Driver-level 拒絕，application 無解。Fallback 機制 work。下一步要 path A (ID3D12Device bridge) 或 path B (跳 J.3) |
 | **J.2** Vulkan post-processing pipeline | 2-3 weeks | Generic FRUC、HDR shader、blit、swapchain present 全部移到 Vulkan。Decoder 暫保 D3D11VA + 走 J.1 的 fence sync bridge | 預設仍走 D3D11；CLI flag `--renderer vulkan` opt-in | 規劃中 |
-| **J.3** VK_KHR_video_decode AV1 | 3-4 weeks | 完整 Vulkan-native decoder，eliminate D3D11VA → Vulkan bridge。透過 ffmpeg 6.1+ Vulkan video hwaccel 包裝 DPB lifecycle | NCNN 無 bridge cost，真實 17-38ms / frame | 規劃中 |
+| **J.3** VK_KHR_video_decode AV1 | 3-4 weeks | 完整 Vulkan-native decoder，eliminate D3D11VA → Vulkan bridge。透過 ffmpeg 6.1+ Vulkan video hwaccel 包裝 DPB lifecycle | NCNN 無 bridge cost，真實 17-38ms / frame | ✅ **基礎已存在** (v1.3.60, ca24b57)。發現 ffmpeg 8.x 已有 hevc/h264 Vulkan hwaccel + PlVkRenderer 早就在 cascade。VIPLE_USE_VK_DECODER=1 + --video-codec HEVC 即啟用完整 Vulkan-native pipeline。AV1 因為走 libdav1d 沒 hwaccel；HEVC 直通。剩 §J.3.e FRUC 整合進 PlVkRenderer (~300 LOC) |
 | **J.4** HEVC + H264 decode + 跨平台驗證 | 2-3 weeks | Linux full coverage；macOS 路徑決策（VideoToolbox+Metal vs MoltenVK hybrid，後者 NCNN 在 mac 不可用） | 跨 OS 一致 | 規劃中 |
 | **J.5** 整合測試 + fallback hardening + 預設切換 | 1-2 weeks | NV / AMD / Intel 各跑 bench；舊 driver 退回 D3D11 renderer；預設改 Vulkan | Vulkan 預設 ON，D3D11 留 fallback | 規劃中 |
 
 **總工時估：** ~10-14 週（一個 engineer full-time），~2800-3000 LOC。
 
-### J.1 細部子計畫（衝刺中）
+### J.3 已落實（2026-04-29 衝刺，commit ca24b57 為止）
+
+意外發現 §J.3 工程量遠比規劃時估的小。ffmpeg 8.x (libavcodec 62.11.100)
+已包 Vulkan hwaccel；PlVkRenderer (libplacebo) 早就在 cascade 處理
+AV_HWDEVICE_TYPE_VULKAN。原本 800+ LOC 估算的工作真正必要的就 ~30 LOC：
+
+| 子 phase | 內容 | 狀態 |
+|---|---|---|
+| **J.3.a** 確認 driver 支援 | `VK_KHR_video_decode_av1/h265/h264` + `video_queue` + `decode_queue` + `synchronization2` 全部 NV 596.84 ✓；queue family idx=3 dedicated decode queue（v1.3.52, fa10b49） | ✅ |
+| **J.3.b.0** queue family probe | 用 1.0 core API probe，VIDEO_DECODE_BIT 位置確認；ffmpeg AVHWDeviceContext (Vulkan) 創建測試（v1.3.54, e506e5a） | ✅ |
+| **J.3.b.1** VulkanVideoRenderer skeleton | 寫了 vulkanvideo.h/cpp 但 v1.3.58 發現是冗工 — PlVkRenderer 早就在；保留 skeleton 作 future ref | ✅ (skeleton 保留) |
+| **J.3.b.2** prepareDecoderContext + prepareDecoderContextInGetFormat | impl OK；測試 throwaway 直接 call 觸發 crash（必須從 avcodec_open2 內部 get_format 觸發），revert（v1.3.57, 62be447） | ✅ (impl 留作 ref) |
+| **J.3.c.0** hw_configs 列舉 | 確認 ffmpeg 8.x HEVC + H264 都 advertise type=12 (VULKAN) hwaccel；AV1 沒（libdav1d 路徑）（v1.3.58, 8a3edbe） | ✅ |
+| **J.3.c.1** Vulkan-first cascade override | `VIPLE_USE_VK_DECODER=1` env var → `tryInitializeHwAccelDecoder` 先掃 VULKAN type 試（v1.3.60, ca24b57）。**實測 HEVC stream 啟用完整 Vulkan-native pipeline，0 crash 跑 28 秒** | ✅ |
+| **J.3.e** FRUC 整合進 PlVkRenderer | 把 NCNN-Vulkan / GenericFRUC 從 D3D11VARenderer 移到 PlVkRenderer 的 renderFrame loop。AVVkFrame.img[0] 直接餵 ncnn::VkMat 不過 bridge | ⏳ 下一步 (~300 LOC) |
+| **J.3.f** AV1 Vulkan 路徑 | 重 build ffmpeg 把 libdav1d → vulkan_hwaccel 註冊（或改用 ffmpeg 內建 av1 decoder 加 vulkan）。需要 ffmpeg source + build 環境 | 🟡 long-term |
+
+**目前狀態（v1.3.60）：** 預設 user 行為跟 v1.3.59 等價 (D3D11VA + FRUC)。
+opt-in user (`VIPLE_USE_VK_DECODER=1` + `--video-codec HEVC`) 拿到完整
+Vulkan-native pipeline 但暫時沒 FRUC interpolation。要兩者兼得需要 §J.3.e。
+
+### J.1 細部子計畫（DEAD END）
 
 NCNN shared path 在 NV 596.84 device lost (v1.3.43) → 缺跨 API sync。J.1 加 ID3D11Fence + VkSemaphore 完整同步，驗證 driver 加 fence 後是否買單。**此 phase 範圍小、scope 明確、可隨時 ship**，做了不浪費 — fence bridge 在 J.2/J.3 都會用到。
 
