@@ -9,6 +9,17 @@
 #include <SDL.h>
 #include <QDir>
 
+#include <dxgi1_2.h>
+#include <wrl/client.h>
+
+// vulkan_win32.h pulls in the Win32-specific structs (VkImportMemoryWin32HandleInfoKHR,
+// VkMemoryWin32HandlePropertiesKHR) and PFN typedefs that vulkan_core.h alone doesn't.
+// Define VK_USE_PLATFORM_WIN32_KHR so vulkan.h opts those into its include chain.
+#ifndef VK_USE_PLATFORM_WIN32_KHR
+#define VK_USE_PLATFORM_WIN32_KHR 1
+#endif
+#include <vulkan/vulkan_win32.h>
+
 #include <ncnn/net.h>
 #include <ncnn/gpu.h>
 #include <ncnn/mat.h>
@@ -125,6 +136,10 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
     // Output → Vulkan-side interp result lands here (after staging-out
     //          → CopyResource), caller blits to swapchain via SRV.
     // Staging-out → CPU-writable, holds ncnn output until CopyResource.
+    // Phase B.2: SHARED_NTHANDLE on render + output textures so we
+    // can export DXGI handles for Vulkan import (B.3).  The flag set
+    // is identical to DirectMLFRUC's createD3D11Textures (which uses
+    // the same handles for D3D12 / DML EP wrap).
     D3D11_TEXTURE2D_DESC renderDesc = {};
     renderDesc.Width = m_Width;
     renderDesc.Height = m_Height;
@@ -134,6 +149,7 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
     renderDesc.SampleDesc.Count = 1;
     renderDesc.Usage = D3D11_USAGE_DEFAULT;
     renderDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    renderDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
     if (FAILED(m_Device->CreateTexture2D(&renderDesc, nullptr, m_RenderTex.GetAddressOf())) ||
         FAILED(m_Device->CreateRenderTargetView(m_RenderTex.Get(), nullptr, m_RenderRTV.GetAddressOf())) ||
         FAILED(m_Device->CreateShaderResourceView(m_RenderTex.Get(), nullptr, m_LastSRV.GetAddressOf()))) {
@@ -144,7 +160,7 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
     }
 
     D3D11_TEXTURE2D_DESC outDesc = renderDesc;
-    outDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    outDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
     if (FAILED(m_Device->CreateTexture2D(&outDesc, nullptr, m_OutputTex.GetAddressOf())) ||
         FAILED(m_Device->CreateShaderResourceView(m_OutputTex.Get(), nullptr, m_OutputSRV.GetAddressOf()))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -153,9 +169,53 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
         return false;
     }
 
+    // Export DXGI NT handles — to be opened by Vulkan in B.3.
+    // CreateSharedHandle on a DXGIResource1 with name=nullptr,
+    // access=GENERIC_ALL gives an unnamed NT handle ownable by us.
+    auto exportHandle = [&](ID3D11Texture2D* tex, HANDLE* outHandle, const char* label) -> bool {
+        Microsoft::WRL::ComPtr<IDXGIResource1> dxgi;
+        if (FAILED(tex->QueryInterface(IID_PPV_ARGS(&dxgi)))) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] QueryInterface(IDXGIResource1) failed for %s", label);
+            return false;
+        }
+        HRESULT hr = dxgi->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, outHandle);
+        if (FAILED(hr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] CreateSharedHandle(%s) failed 0x%08lx",
+                        label, hr);
+            return false;
+        }
+        return true;
+    };
+    if (!exportHandle(m_RenderTex.Get(), &m_SharedRenderHandle, "render") ||
+        !exportHandle(m_OutputTex.Get(), &m_SharedOutputHandle, "output")) {
+        // Phase A.5 CPU-staging path still works without these handles,
+        // so don't fail init — just log + continue.  B.3+ shared path
+        // checks m_SharedPathReady before attempting the GPU shortcut.
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] DXGI handle export failed — staying on CPU staging path");
+    } else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] DXGI shared handles exported "
+                    "(render=%p, output=%p) — ready for Vulkan import",
+                    m_SharedRenderHandle, m_SharedOutputHandle);
+        // Phase B.3: try to wire the Vulkan side now.  If it works
+        // m_SharedPathReady is set and Phase B.4 (preprocess shader)
+        // can take over from CPU staging.
+        if (importSharedTexturesIntoVulkan()) {
+            // Note: m_SharedPathReady stays false until B.4-5 land
+            // the actual GPU compute path.  B.3 alone proves the
+            // memory bridge but submitFrame still uses CPU staging.
+        }
+    }
+
+    // STAGING textures must NOT have SHARED_NTHANDLE — D3D11 rejects
+    // the combination.  Copy from renderDesc but clear MiscFlags.
     D3D11_TEXTURE2D_DESC stagingCurrDesc = renderDesc;
     stagingCurrDesc.Usage = D3D11_USAGE_STAGING;
     stagingCurrDesc.BindFlags = 0;
+    stagingCurrDesc.MiscFlags = 0;
     stagingCurrDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     if (FAILED(m_Device->CreateTexture2D(&stagingCurrDesc, nullptr, m_StagingCurrTex.GetAddressOf()))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -167,6 +227,7 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
     D3D11_TEXTURE2D_DESC stagingOutDesc = renderDesc;
     stagingOutDesc.Usage = D3D11_USAGE_STAGING;
     stagingOutDesc.BindFlags = 0;
+    stagingOutDesc.MiscFlags = 0;
     stagingOutDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(m_Device->CreateTexture2D(&stagingOutDesc, nullptr, m_StagingOutTex.GetAddressOf()))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -398,12 +459,212 @@ double NcnnFRUC::probeInferenceCost(int warmup, int iterations)
 
     const double med = median(samples);
     const auto [mn, mx] = std::minmax_element(samples.begin(), samples.end());
+
+    // Phase B perf-honesty correction: until B.4 lands the shared-
+    // texture preprocess shader, every submitFrame eats ~30 ms of
+    // CPU staging on top of pure inference (RGBA8↔fp32 conversion +
+    // GPU↔CPU memcpy at 1080p).  Probe alone reports ~17 ms; if we
+    // hand that to the cascade, it picks NCNN over Generic and the
+    // real-world frame budget overflows → user-visible flicker.  Add
+    // a staging estimate now so the cascade picks NCNN only when
+    // there's headroom for both inference and staging.  Once
+    // m_SharedPathReady flips true (B.5), the estimate drops to a
+    // small fixed GPU-compute cost.
+    const double stagingMs = m_SharedPathReady ? 2.0 : 30.0;
+    const double effective = med + stagingMs;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-FRUC-NCNN] probe @ %ux%u: median=%.2fms (min=%.2f max=%.2f n=%d, warmup=%d)",
-                m_Width, m_Height, med, *mn, *mx, iterations, warmup);
+                "[VIPLE-FRUC-NCNN] probe @ %ux%u: median=%.2fms (min=%.2f max=%.2f n=%d, warmup=%d) "
+                "+ staging ~%.0f ms = effective %.2f ms %s",
+                m_Width, m_Height, med, *mn, *mx, iterations, warmup,
+                stagingMs, effective,
+                m_SharedPathReady ? "[shared path]" : "[CPU staging]");
 
     m_LastInferenceMs = med;
-    return med;
+    return effective;
+}
+
+// ---- Phase B.3: D3D11 NT handle → Vulkan VkImage import ----
+
+bool NcnnFRUC::importSharedTexturesIntoVulkan()
+{
+    if (!m_SharedRenderHandle || !m_SharedOutputHandle) return false;
+    if (!m_Net) return false;
+
+    HMODULE vk = ::GetModuleHandleW(L"vulkan-1.dll");
+    if (!vk) vk = ::LoadLibraryW(L"vulkan-1.dll");
+    if (!vk) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.3: vulkan-1.dll missing");
+        return false;
+    }
+
+    auto pfnGDPA = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        ::GetProcAddress(vk, "vkGetDeviceProcAddr"));
+    if (!pfnGDPA) return false;
+
+    const VkDevice dev = ncnn::get_gpu_device(m_GpuIndex)->vkdevice();
+
+    // Resolve every entry point we need.  Bail loudly if any miss —
+    // the device must have been created with the right extensions
+    // (we patched ncnn for that in v1.3.30).
+    auto pfnCreateImage   = (PFN_vkCreateImage)    pfnGDPA(dev, "vkCreateImage");
+    auto pfnDestroyImage  = (PFN_vkDestroyImage)   pfnGDPA(dev, "vkDestroyImage");
+    auto pfnGetReqs       = (PFN_vkGetImageMemoryRequirements) pfnGDPA(dev, "vkGetImageMemoryRequirements");
+    auto pfnAllocate      = (PFN_vkAllocateMemory) pfnGDPA(dev, "vkAllocateMemory");
+    auto pfnFreeMemory    = (PFN_vkFreeMemory)     pfnGDPA(dev, "vkFreeMemory");
+    auto pfnBindImage     = (PFN_vkBindImageMemory) pfnGDPA(dev, "vkBindImageMemory");
+    auto pfnGetHandleProps = (PFN_vkGetMemoryWin32HandlePropertiesKHR)
+        pfnGDPA(dev, "vkGetMemoryWin32HandlePropertiesKHR");
+    if (!pfnCreateImage || !pfnDestroyImage || !pfnGetReqs ||
+        !pfnAllocate || !pfnFreeMemory || !pfnBindImage || !pfnGetHandleProps) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.3: required Vulkan entry points missing");
+        return false;
+    }
+
+    auto importOne = [&](HANDLE shared, VkImage* outImage, VkDeviceMemory* outMem,
+                         const char* label, bool wantStorageBit) -> bool {
+        // Step 1: VkImage with external-memory create info.
+        VkExternalMemoryImageCreateInfo extInfo = {};
+        extInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+        extInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+
+        VkImageCreateInfo ici = {};
+        ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.pNext         = &extInfo;
+        ici.imageType     = VK_IMAGE_TYPE_2D;
+        ici.format        = VK_FORMAT_R8G8B8A8_UNORM;
+        ici.extent        = { m_Width, m_Height, 1 };
+        ici.mipLevels     = 1;
+        ici.arrayLayers   = 1;
+        ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                          | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if (wantStorageBit) {
+            ici.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        }
+        ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VkResult r = pfnCreateImage(dev, &ici, nullptr, outImage);
+        if (r != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B.3 vkCreateImage(%s) failed rc=%d",
+                        label, (int)r);
+            return false;
+        }
+
+        // Step 2: query image memory requirements (size, alignment,
+        // memoryTypeBits) so the imported memory has matching size.
+        VkMemoryRequirements memReq = {};
+        pfnGetReqs(dev, *outImage, &memReq);
+
+        // Step 3: query memoryTypeBits constraints from the imported
+        // handle so we can intersect with the image's requirements
+        // and pick a memory type that is valid for both.
+        VkMemoryWin32HandlePropertiesKHR hp = {};
+        hp.sType = VK_STRUCTURE_TYPE_MEMORY_WIN32_HANDLE_PROPERTIES_KHR;
+        r = pfnGetHandleProps(dev,
+                              VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT,
+                              shared, &hp);
+        if (r != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B.3 GetHandleProps(%s) failed rc=%d",
+                        label, (int)r);
+            pfnDestroyImage(dev, *outImage, nullptr);
+            *outImage = VK_NULL_HANDLE;
+            return false;
+        }
+
+        const uint32_t memTypeBits = memReq.memoryTypeBits & hp.memoryTypeBits;
+        if (memTypeBits == 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B.3 (%s) memoryTypeBits intersection empty: img=0x%x handle=0x%x",
+                        label, memReq.memoryTypeBits, hp.memoryTypeBits);
+            pfnDestroyImage(dev, *outImage, nullptr);
+            *outImage = VK_NULL_HANDLE;
+            return false;
+        }
+        // Pick the lowest set bit from the intersection — typical
+        // host-coherent / device-local mem on the intersection map.
+        uint32_t memTypeIndex = 0;
+        for (uint32_t i = 0; i < 32; ++i) {
+            if (memTypeBits & (1u << i)) { memTypeIndex = i; break; }
+        }
+
+        // Step 4: VkAllocateMemory with VkImportMemoryWin32HandleInfoKHR.
+        // Per spec, memory must be DEDICATED to the image when the
+        // handle came from D3D11.
+        VkMemoryDedicatedAllocateInfo ded = {};
+        ded.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+        ded.image = *outImage;
+
+        VkImportMemoryWin32HandleInfoKHR imp = {};
+        imp.sType      = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+        imp.pNext      = &ded;
+        imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+        imp.handle     = shared;
+
+        VkMemoryAllocateInfo mai = {};
+        mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.pNext           = &imp;
+        mai.allocationSize  = memReq.size;
+        mai.memoryTypeIndex = memTypeIndex;
+
+        r = pfnAllocate(dev, &mai, nullptr, outMem);
+        if (r != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B.3 vkAllocateMemory(%s) failed rc=%d "
+                        "(memSize=%llu memType=%u)",
+                        label, (int)r,
+                        (unsigned long long)memReq.size, memTypeIndex);
+            pfnDestroyImage(dev, *outImage, nullptr);
+            *outImage = VK_NULL_HANDLE;
+            return false;
+        }
+
+        // Step 5: bind image to the imported memory at offset 0.
+        r = pfnBindImage(dev, *outImage, *outMem, 0);
+        if (r != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B.3 vkBindImageMemory(%s) failed rc=%d",
+                        label, (int)r);
+            pfnFreeMemory(dev, *outMem, nullptr);
+            *outMem = VK_NULL_HANDLE;
+            pfnDestroyImage(dev, *outImage, nullptr);
+            *outImage = VK_NULL_HANDLE;
+            return false;
+        }
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.3 imported %s: VkImage=%p VkMemory=%p (size=%llu memType=%u)",
+                    label, (void*)*outImage, (void*)*outMem,
+                    (unsigned long long)memReq.size, memTypeIndex);
+        return true;
+    };
+
+    VkImage renderImg = VK_NULL_HANDLE, outputImg = VK_NULL_HANDLE;
+    VkDeviceMemory renderMem = VK_NULL_HANDLE, outputMem = VK_NULL_HANDLE;
+
+    if (!importOne(m_SharedRenderHandle, &renderImg, &renderMem, "render", false) ||
+        !importOne(m_SharedOutputHandle, &outputImg, &outputMem, "output", true)) {
+        // Cleanup partial state — destroy whatever did succeed.
+        if (renderImg) pfnDestroyImage(dev, renderImg, nullptr);
+        if (renderMem) pfnFreeMemory(dev, renderMem, nullptr);
+        if (outputImg) pfnDestroyImage(dev, outputImg, nullptr);
+        if (outputMem) pfnFreeMemory(dev, outputMem, nullptr);
+        return false;
+    }
+
+    m_VkRenderImage = (void*)renderImg;
+    m_VkOutputImage = (void*)outputImg;
+    m_VkRenderMem   = (void*)renderMem;
+    m_VkOutputMem   = (void*)outputMem;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC-NCNN] phase-B.3 SUCCESS — D3D11 textures opened as Vulkan VkImage. "
+                "Phase B.4 (preprocess compute shader) is the next missing piece.");
+    return true;
 }
 
 // ---- pixel format conversion helpers ----
@@ -592,6 +853,18 @@ void NcnnFRUC::destroy()
     m_PrevMat.release();
     m_TimestepMat.release();
     m_FrameCount = 0;
+    // Close DXGI shared handles before releasing the underlying
+    // D3D11 textures (CloseHandle is safe even if Vulkan-side imports
+    // were already done — Vulkan keeps its own ref to the memory).
+    if (m_SharedRenderHandle) {
+        ::CloseHandle(m_SharedRenderHandle);
+        m_SharedRenderHandle = nullptr;
+    }
+    if (m_SharedOutputHandle) {
+        ::CloseHandle(m_SharedOutputHandle);
+        m_SharedOutputHandle = nullptr;
+    }
+    m_SharedPathReady = false;
     m_StagingOutTex.Reset();
     m_OutputSRV.Reset();
     m_OutputTex.Reset();

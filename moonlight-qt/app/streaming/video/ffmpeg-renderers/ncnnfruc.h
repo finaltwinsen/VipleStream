@@ -78,6 +78,13 @@ public:
 
 private:
     bool loadModel();
+    // Phase B.3: open the DXGI shared handles as Vulkan VkImage +
+    // VkDeviceMemory pointing at the same physical memory.  Returns
+    // false (and logs reason) if any step fails — caller leaves
+    // m_SharedPathReady=false and the CPU-staging Phase A.5 path
+    // continues to operate as before.  Idempotent: nullable input
+    // handles are tolerated.
+    bool importSharedTexturesIntoVulkan();
 
     std::atomic<bool> m_Initialized { false };
     int               m_Quality     = 0;
@@ -86,13 +93,15 @@ private:
     std::string       m_ModelDir    = "rife-v4.25-lite";
 
     // D3D11 layout (mirrors GenericFRUC):
-    //   m_RenderTex (DEFAULT, RTV+SRV) — caller writes decoded frame
-    //   m_StagingCurrTex (STAGING, READ) — submitFrame copies render
-    //                       into here then Map()s for CPU readback
-    //                       into m_PrevMat (ncnn fp32 normalized).
-    //   m_OutputTex (DEFAULT, SRV) — interpolated frame for caller's blit
-    //   m_StagingOutTex (STAGING, WRITE) — CPU writes ncnn output here,
-    //                       then CopyResource() to m_OutputTex.
+    //   m_RenderTex (DEFAULT, RTV+SRV, SHARED_NTHANDLE in B.2+) — caller
+    //   m_OutputTex (DEFAULT, SRV, SHARED_NTHANDLE in B.2+) — output
+    //   m_StagingCurrTex / m_StagingOutTex — Phase A.5 CPU staging
+    //                       fallback path (kept until shared-texture
+    //                       wiring in B.4-5 is verified end-to-end)
+    //   m_SharedRenderHandle / m_SharedOutputHandle — DXGI NT handles
+    //                       exported from D3D11 textures, opened by
+    //                       Vulkan in B.3 as imported VkImage backing
+    //                       memory.
     Microsoft::WRL::ComPtr<ID3D11Device>             m_Device;
     Microsoft::WRL::ComPtr<ID3D11Texture2D>          m_RenderTex;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView>   m_RenderRTV;
@@ -101,6 +110,15 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D>          m_OutputTex;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_OutputSRV;
     Microsoft::WRL::ComPtr<ID3D11Texture2D>          m_StagingOutTex;
+    HANDLE                                           m_SharedRenderHandle = nullptr;
+    HANDLE                                           m_SharedOutputHandle = nullptr;
+    // Imported Vulkan resources (B.3+): same physical memory as the
+    // D3D11 textures above, accessed via VK_KHR_external_memory_win32.
+    void*                                            m_VkRenderImage      = nullptr;  // VkImage (opaque)
+    void*                                            m_VkOutputImage      = nullptr;  // VkImage
+    void*                                            m_VkRenderMem        = nullptr;  // VkDeviceMemory
+    void*                                            m_VkOutputMem        = nullptr;  // VkDeviceMemory
+    bool                                             m_SharedPathReady    = false;
 
     // NCNN bits.  m_Net is the loaded RIFE 4.25-lite flownet
     // (3-input: in0/in1/in2 = prev RGB, curr RGB, timestep).
