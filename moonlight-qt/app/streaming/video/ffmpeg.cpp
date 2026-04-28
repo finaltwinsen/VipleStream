@@ -1699,6 +1699,35 @@ bool FFmpegVideoDecoder::tryInitializeHwAccelDecoder(PDECODER_PARAMETERS params,
             continue;
         }
 
+        // §J.3.f — when VIPLE_USE_VK_DECODER=1, skip decoders that don't
+        // advertise any Vulkan hwaccel.  This is mainly to bypass libdav1d
+        // (the AV1 default in our ffmpeg build) which has no hwaccel —
+        // so the iteration falls through to the native `av1` decoder
+        // which DOES have VK_KHR_video_decode_av1 in its hw_configs.
+        // Without this skip, libdav1d wins decoder selection and Vulkan
+        // path never gets tried.
+        {
+            const char* vkOverride = SDL_getenv("VIPLE_USE_VK_DECODER");
+            if (vkOverride && SDL_atoi(vkOverride) != 0) {
+                bool decoderHasVulkan = false;
+                for (int j = 0; ; ++j) {
+                    const AVCodecHWConfig* cfg = avcodec_get_hw_config(decoder, j);
+                    if (!cfg) break;
+                    if (cfg->device_type == AV_HWDEVICE_TYPE_VULKAN) {
+                        decoderHasVulkan = true;
+                        break;
+                    }
+                }
+                if (!decoderHasVulkan) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VK-VIDEO] §J.3.f skipping decoder=%s — no Vulkan hwaccel "
+                                "(VIPLE_USE_VK_DECODER=1 active)",
+                                decoder->name);
+                    continue;
+                }
+            }
+        }
+
         // §J.3.c.1 — env-var-gated Vulkan-first override.  Same logic as
         // the one in tryInitializeRendererForUnknownDecoder; this is the
         // primary cascade path for known decoders (HEVC/H264).  When

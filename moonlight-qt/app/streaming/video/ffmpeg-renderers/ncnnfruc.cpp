@@ -433,12 +433,11 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
                                 // suspect ffmpeg build doesn't register Vulkan hwaccel.
                                 // This probe enumerates hw_configs for HEVC/AV1/H264
                                 // and logs every device_type to confirm.
-                                auto probeHwConfigs = [&](AVCodecID id, const char* name) {
-                                    const AVCodec* dec = avcodec_find_decoder(id);
+                                auto probeHwConfigsCommon = [&](const AVCodec* dec, const char* label) {
                                     if (!dec) {
                                         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                                    "[VIPLE-FRUC-NCNN] §J.3.c.0 (%s) avcodec_find_decoder=null",
-                                                    name);
+                                                    "[VIPLE-FRUC-NCNN] §J.3.c.0 (%s) decoder NOT FOUND",
+                                                    label);
                                         return;
                                     }
                                     bool foundVulkan = false;
@@ -456,13 +455,30 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
                                         }
                                     }
                                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                                "[VIPLE-FRUC-NCNN] §J.3.c.0 %s hw_configs:%s — Vulkan=%s",
-                                                name, buf[0] ? buf : " (none)",
+                                                "[VIPLE-FRUC-NCNN] §J.3.c.0 %s decoder=%s hw_configs:%s — Vulkan=%s",
+                                                label, dec->name, buf[0] ? buf : " (none)",
                                                 foundVulkan ? "YES" : "NO");
                                 };
-                                probeHwConfigs(AV_CODEC_ID_AV1,  "AV1");
-                                probeHwConfigs(AV_CODEC_ID_HEVC, "HEVC");
-                                probeHwConfigs(AV_CODEC_ID_H264, "H264");
+                                auto probeById = [&](AVCodecID id, const char* label) {
+                                    probeHwConfigsCommon(avcodec_find_decoder(id), label);
+                                };
+                                auto probeByName = [&](const char* dname, const char* label) {
+                                    probeHwConfigsCommon(avcodec_find_decoder_by_name(dname), label);
+                                };
+                                probeById  (AV_CODEC_ID_AV1,  "AV1 (default)");
+                                probeById  (AV_CODEC_ID_HEVC, "HEVC (default)");
+                                probeById  (AV_CODEC_ID_H264, "H264 (default)");
+
+                                // §J.3.f probe — find out which AV1 decoders are actually
+                                // registered.  ffmpeg ships native `av1` decoder (with
+                                // hwaccels) AND `libdav1d` wrapper (no hwaccels).
+                                // avcodec_find_decoder(AV_CODEC_ID_AV1) picks one based
+                                // on internal priority.  If both exist, force native
+                                // `av1` to get Vulkan hwaccel.  If only libdav1d, we
+                                // need to rebuild ffmpeg.
+                                probeByName("av1",      "AV1 (native by-name)");
+                                probeByName("libdav1d", "AV1 (libdav1d by-name)");
+                                probeByName("av1_cuvid","AV1 (cuvid by-name)");
                             } else {
                                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                                             "[VIPLE-FRUC-NCNN] §J.3.b.1 skeleton probe FAILED — "
