@@ -10,6 +10,7 @@
 #include <QDir>
 
 #include <dxgi1_2.h>
+#include <d3d11_4.h>     // §J.1: ID3D11Device5, ID3D11Fence, ID3D11DeviceContext4
 #include <wrl/client.h>
 
 // vulkan_win32.h pulls in the Win32-specific structs (VkImportMemoryWin32HandleInfoKHR,
@@ -242,10 +243,22 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
             const bool wantShared = sharedEnv && SDL_atoi(sharedEnv) != 0;
             if (wantShared) {
                 if (compileSharedPathPipelines() && initSharedPathResources() && selftestSharedPath()) {
+                    // §J.1 — additionally try fence sync.  v1.3.41-43
+                    // confirmed NV driver rejects raw Vulkan ops on
+                    // imported D3D11 VkImages (DEVICE_LOST) without
+                    // explicit cross-API fence.  createFenceSync()
+                    // creates ID3D11Fence + Vulkan timeline VkSemaphore.
+                    // Failure here is non-fatal — m_SharedPathReady
+                    // still becomes true (then submitFrameShared 3-fail
+                    // counter trips on the first device lost and
+                    // permanently disables the path).  Success means
+                    // each frame can wait/signal across APIs.
+                    bool fenceSyncReady = createFenceSync();
                     m_SharedPathReady = true;
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-FRUC-NCNN] phase-B.4c: shared path ENABLED via VIPLE_FRUC_NCNN_SHARED=1 "
-                                "(experimental; probe staging cost drops to ~2ms)");
+                                "(experimental; fence-sync=%s, probe staging cost drops to ~2ms)",
+                                fenceSyncReady ? "READY (§J.1)" : "MISSING — expect device lost");
                 } else {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-FRUC-NCNN] phase-B.4c: shared path opt-in failed (compile/alloc/selftest);"
@@ -578,12 +591,21 @@ bool NcnnFRUC::importSharedTexturesIntoVulkan()
         return false;
     }
 
+    // §J.1.g — switch handle type from D3D11_TEXTURE_BIT to D3D12_RESOURCE_BIT.
+    // The same DXGI shared NT handle works for both — Vulkan spec says
+    // both types accept the kernel handle from CreateSharedHandle on
+    // either D3D11 (NT-handle variant) or D3D12 resource.  v1.3.45
+    // proved on RTX 3060 Laptop + NV 596.84 that D3D11_TEXTURE_BIT
+    // imports get device lost on ANY raw Vulkan command, even with
+    // proper fence sync (§J.1.a-e all worked but image ops still fail).
+    // D3D12_RESOURCE_BIT is the spec-blessed cross-API path that NV
+    // documents and tests against; if it works here, §J.1 is unblocked.
     auto importOne = [&](HANDLE shared, VkImage* outImage, VkDeviceMemory* outMem,
                          const char* label, bool wantStorageBit) -> bool {
         // Step 1: VkImage with external-memory create info.
         VkExternalMemoryImageCreateInfo extInfo = {};
         extInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-        extInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+        extInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
 
         VkImageCreateInfo ici = {};
         ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -622,7 +644,7 @@ bool NcnnFRUC::importSharedTexturesIntoVulkan()
         VkMemoryWin32HandlePropertiesKHR hp = {};
         hp.sType = VK_STRUCTURE_TYPE_MEMORY_WIN32_HANDLE_PROPERTIES_KHR;
         r = pfnGetHandleProps(dev,
-                              VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT,
+                              VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
                               shared, &hp);
         if (r != VK_SUCCESS) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -659,7 +681,7 @@ bool NcnnFRUC::importSharedTexturesIntoVulkan()
         VkImportMemoryWin32HandleInfoKHR imp = {};
         imp.sType      = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
         imp.pNext      = &ded;
-        imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+        imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
         imp.handle     = shared;
 
         VkMemoryAllocateInfo mai = {};
@@ -1035,6 +1057,178 @@ bool NcnnFRUC::initSharedPathResources()
     return true;
 }
 
+// ---- §J.1 — D3D11.4 fence ↔ Vulkan timeline VkSemaphore bridge ----
+//
+// NV 596.84 driver rejects raw Vulkan ops on D3D11_TEXTURE_BIT-imported
+// VkImages with VK_ERROR_DEVICE_LOST unless cross-API fence sync is in
+// place (v1.3.41-43 testing).  This helper creates an ID3D11Fence and
+// imports it on the Vulkan side as a timeline VkSemaphore.  Each frame:
+//
+//   D3D11 writes m_RenderTex
+//   ctx->Signal(m_D3D11Fence, N)            ← marks "D3D11 done with N"
+//   vkQueueSubmit waits on semaphore=N      ← Vulkan waits for D3D11
+//   Vulkan ops on imported VkImage          ← driver allows now
+//   submit signals semaphore=N+1            ← Vulkan done
+//   ctx->Wait(m_D3D11Fence, N+1)            ← D3D11 waits for Vulkan
+//   D3D11 reads m_OutputTex
+//   m_FenceValue += 2
+
+bool NcnnFRUC::createFenceSync()
+{
+    if (!m_Device || !m_Net) return false;
+
+    // ---- D3D11 side: ID3D11Fence + DXGI shared NT handle ----
+    // ID3D11Fence requires ID3D11Device5 (D3D11.4 / Win10 1703+).
+    Microsoft::WRL::ComPtr<ID3D11Device5> dev5;
+    if (FAILED(m_Device.As(&dev5))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.1: ID3D11Device5 not available (need Win10 1703+)");
+        return false;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11Fence> fence;
+    HRESULT hr = dev5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence));
+    if (FAILED(hr)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.1: CreateFence failed 0x%08lx", hr);
+        return false;
+    }
+
+    HANDLE sharedHandle = nullptr;
+    hr = fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &sharedHandle);
+    if (FAILED(hr) || !sharedHandle) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.1: fence CreateSharedHandle failed 0x%08lx", hr);
+        return false;
+    }
+
+    // ---- Vulkan side: open shared handle as timeline VkSemaphore ----
+    HMODULE vk = ::GetModuleHandleW(L"vulkan-1.dll");
+    if (!vk) vk = ::LoadLibraryW(L"vulkan-1.dll");
+    if (!vk) {
+        ::CloseHandle(sharedHandle);
+        return false;
+    }
+    auto pfnGDPA = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        ::GetProcAddress(vk, "vkGetDeviceProcAddr"));
+    if (!pfnGDPA) {
+        ::CloseHandle(sharedHandle);
+        return false;
+    }
+
+    ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
+    if (!vkdev) {
+        ::CloseHandle(sharedHandle);
+        return false;
+    }
+    const VkDevice dev = vkdev->vkdevice();
+
+    auto pfnCreateSem    = (PFN_vkCreateSemaphore)            pfnGDPA(dev, "vkCreateSemaphore");
+    auto pfnImportSem    = (PFN_vkImportSemaphoreWin32HandleKHR) pfnGDPA(dev, "vkImportSemaphoreWin32HandleKHR");
+    if (!pfnCreateSem || !pfnImportSem) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.1: required semaphore entry points missing "
+                    "(vkCreateSemaphore=%p, vkImportSemaphoreWin32HandleKHR=%p) — "
+                    "ncnn build doesn't have VK_KHR_external_semaphore_win32 patched in",
+                    (void*)pfnCreateSem, (void*)pfnImportSem);
+        ::CloseHandle(sharedHandle);
+        return false;
+    }
+
+    // Step 1: vkCreateSemaphore with timeline + external handle types.
+    VkSemaphoreTypeCreateInfo semType = {};
+    semType.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    semType.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    semType.initialValue  = 0;
+
+    VkExternalSemaphoreHandleTypeFlagBits handleType =
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
+    VkExportSemaphoreCreateInfo expInfo = {};
+    expInfo.sType       = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
+    expInfo.pNext       = &semType;
+    expInfo.handleTypes = handleType;
+
+    VkSemaphoreCreateInfo sci = {};
+    sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    sci.pNext = &expInfo;
+
+    VkSemaphore sem = VK_NULL_HANDLE;
+    VkResult vr = pfnCreateSem(dev, &sci, nullptr, &sem);
+    if (vr != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.1: vkCreateSemaphore (timeline+external) rc=%d "
+                    "(timelineSemaphore feature not enabled in ncnn VulkanDevice?)",
+                    (int)vr);
+        ::CloseHandle(sharedHandle);
+        return false;
+    }
+
+    // Step 2: vkImportSemaphoreWin32HandleKHR with the shared handle.
+    VkImportSemaphoreWin32HandleInfoKHR imp = {};
+    imp.sType      = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR;
+    imp.semaphore  = sem;
+    imp.flags      = 0;  // not temporary — permanently bind shared handle
+    imp.handleType = handleType;
+    imp.handle     = sharedHandle;
+    imp.name       = nullptr;
+
+    vr = pfnImportSem(dev, &imp);
+    if (vr != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.1: vkImportSemaphoreWin32HandleKHR rc=%d "
+                    "(D3D12_FENCE handle type not accepted on this driver/D3D11 fence?)",
+                    (int)vr);
+        auto pfnDestroySem = (PFN_vkDestroySemaphore)pfnGDPA(dev, "vkDestroySemaphore");
+        if (pfnDestroySem) pfnDestroySem(dev, sem, nullptr);
+        ::CloseHandle(sharedHandle);
+        return false;
+    }
+
+    // Per spec for non-temporary import of NT handle: "If handleType is
+    // VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT, the application
+    // must close the handle returned by ID3D11Fence::CreateSharedHandle
+    // when it is no longer needed."  Vulkan keeps its own ref, so it's
+    // safe to CloseHandle now (we still keep m_FenceSharedHandle for
+    // destroy-time symmetry).
+    m_D3D11Fence        = fence.Detach();
+    m_FenceSharedHandle = sharedHandle;
+    m_VkFenceSemaphore  = (void*)sem;
+    m_FenceValue        = 0;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC-NCNN] §J.1 SUCCESS — D3D11.4 fence + Vulkan timeline semaphore "
+                "bridged (D3D11Fence=%p, VkSem=%p, sharedHandle=%p)",
+                m_D3D11Fence, m_VkFenceSemaphore, m_FenceSharedHandle);
+    return true;
+}
+
+void NcnnFRUC::destroyFenceSync()
+{
+    if (m_VkFenceSemaphore && m_Net) {
+        HMODULE vk = ::GetModuleHandleW(L"vulkan-1.dll");
+        if (vk) {
+            auto pfnGDPA = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+                ::GetProcAddress(vk, "vkGetDeviceProcAddr"));
+            ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
+            if (pfnGDPA && vkdev) {
+                const VkDevice dev = vkdev->vkdevice();
+                auto pfnDestroySem = (PFN_vkDestroySemaphore)pfnGDPA(dev, "vkDestroySemaphore");
+                if (pfnDestroySem) pfnDestroySem(dev, (VkSemaphore)m_VkFenceSemaphore, nullptr);
+            }
+        }
+        m_VkFenceSemaphore = nullptr;
+    }
+    if (m_FenceSharedHandle) {
+        ::CloseHandle(m_FenceSharedHandle);
+        m_FenceSharedHandle = nullptr;
+    }
+    if (m_D3D11Fence) {
+        ((ID3D11Fence*)m_D3D11Fence)->Release();
+        m_D3D11Fence = nullptr;
+    }
+    m_FenceValue = 0;
+}
+
 // v1.3.43 diagnostic: skip the explicit UNDEFINED→GENERAL barrier on
 // imported D3D11 VkImages.  Vulkan spec for
 // VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT says "The
@@ -1200,22 +1394,69 @@ bool NcnnFRUC::submitFrameShared(ID3D11DeviceContext* ctx)
     ID3D11RenderTargetView* nullRTV = nullptr;
     ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
 
-    // Step 2: D3D11 sync — End() the event query and spin until GetData returns S_OK.
-    auto* sync = (ID3D11Query*)m_D3D11SyncQuery;
-    ctx->End(sync);
-    BOOL d3d11Done = FALSE;
-    while (true) {
-        HRESULT hr = ctx->GetData(sync, &d3d11Done, sizeof(d3d11Done), 0);
-        if (hr == S_OK && d3d11Done) break;
-        if (FAILED(hr)) {
+    // §J.1 — fence-sync handshake replaces the v1.3.43 ID3D11Query
+    // event poll + vkQueueWaitIdle pattern.  Per frame:
+    //
+    //   D3D11 finishes RTV writes (caller already returned)
+    //   ctx->Signal(fence, N)         ← D3D11 done with this frame's writes
+    //   vkSubmit waits on sem=N       ← Vulkan waits for D3D11
+    //   image→buf copy + compute      ← imported VkImage access OK now
+    //   vkSubmit signals sem=N+1      ← Vulkan done with reads / writes
+    //   buf→img copy                  ← second submission, same fence pair? No —
+    //                                   we use sem=N+1 for both: one wait at start
+    //                                   of img→buf, one signal at end of buf→img.
+    //                                   The fence pair brackets the entire
+    //                                   Vulkan section, not each individual submit.
+    //   ctx->Wait(fence, N+1)         ← D3D11 waits before reading m_OutputTex
+    //   m_FenceValue += 2 for next frame
+    //
+    // If fence sync isn't ready (createFenceSync failed), fall back to
+    // the legacy ID3D11Query event-poll path and accept that NV driver
+    // will return DEVICE_LOST on the first vkCmdCopyImageToBuffer.
+    const bool fenceReady = (m_D3D11Fence != nullptr) && (m_VkFenceSemaphore != nullptr);
+    const uint64_t waitValue   = m_FenceValue + 1;
+    const uint64_t signalValue = m_FenceValue + 2;
+
+    if (fenceReady) {
+        // D3D11 → fence: signal that all RTV writes through this point
+        // are complete on the GPU.  Need ID3D11DeviceContext4 for Signal.
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext4> ctx4;
+        if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx4)))) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC-NCNN] phase-B.4b: D3D11 sync GetData failed 0x%08lx", hr);
+                        "[VIPLE-FRUC-NCNN] §J.1: ID3D11DeviceContext4 not available");
+            bumpFailureAndMaybeDisable("ctx4 QueryInterface");
             return false;
         }
-        // S_FALSE: not yet ready, spin.
+        HRESULT hr = ctx4->Signal((ID3D11Fence*)m_D3D11Fence, waitValue);
+        if (FAILED(hr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] §J.1: ctx4->Signal(%llu) failed 0x%08lx",
+                        (unsigned long long)waitValue, hr);
+            bumpFailureAndMaybeDisable("d3d11 fence signal");
+            return false;
+        }
+        // Flush so the Signal is actually submitted to the GPU queue
+        // (without Flush, deferred command lists could leave Vulkan
+        // waiting forever).
+        ctx->Flush();
+    } else {
+        // Legacy path: spin-poll ID3D11Query.
+        auto* sync = (ID3D11Query*)m_D3D11SyncQuery;
+        ctx->End(sync);
+        BOOL d3d11Done = FALSE;
+        while (true) {
+            HRESULT hr = ctx->GetData(sync, &d3d11Done, sizeof(d3d11Done), 0);
+            if (hr == S_OK && d3d11Done) break;
+            if (FAILED(hr)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC-NCNN] phase-B.4b: D3D11 sync GetData failed 0x%08lx", hr);
+                return false;
+            }
+        }
     }
 
     // Step 3: Vulkan submission — vkCmdCopyImageToBuffer (imported render → packed-in buf)
+    // §J.1: wait on D3D11 fence semaphore before image access.
     {
         auto cb = (VkCommandBuffer)m_VkCmdBufImgIn;
         pfnReset(cb, 0);
@@ -1257,14 +1498,43 @@ bool NcnnFRUC::submitFrameShared(ID3D11DeviceContext* ctx)
         si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.commandBufferCount = 1;
         si.pCommandBuffers    = &cb;
+
+        // §J.1: chain VkTimelineSemaphoreSubmitInfo via pNext to wait
+        // for D3D11 fence value.  Wait stage = TOP_OF_PIPE — for
+        // cross-API semaphores, narrower stages (like TRANSFER) might
+        // be rejected by some drivers; TOP_OF_PIPE is the most permissive
+        // and matches "wait before any work begins".
+        VkTimelineSemaphoreSubmitInfo tsInfo = {};
+        VkSemaphore                   waitSem  = VK_NULL_HANDLE;
+        VkPipelineStageFlags          waitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        if (fenceReady) {
+            waitSem = (VkSemaphore)m_VkFenceSemaphore;
+            tsInfo.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            tsInfo.waitSemaphoreValueCount   = 1;
+            tsInfo.pWaitSemaphoreValues      = &waitValue;
+            tsInfo.signalSemaphoreValueCount = 0;  // signal happens at the end of buf→img submit
+            tsInfo.pSignalSemaphoreValues    = nullptr;
+            si.pNext                = &tsInfo;
+            si.waitSemaphoreCount   = 1;
+            si.pWaitSemaphores      = &waitSem;
+            si.pWaitDstStageMask    = &waitStage;
+        }
+
         VkResult rc = pfnSubmit((VkQueue)m_VkComputeQueue, 1, &si, VK_NULL_HANDLE);
         if (rc != VK_SUCCESS) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC-NCNN] phase-B img→buf vkQueueSubmit rc=%d", (int)rc);
+                        "[VIPLE-FRUC-NCNN] phase-B img→buf vkQueueSubmit rc=%d (fenceReady=%d)",
+                        (int)rc, fenceReady ? 1 : 0);
             bumpFailureAndMaybeDisable("img2buf submit");
             return false;
         }
-        pfnWait((VkQueue)m_VkComputeQueue);
+        // §J.1: removed pfnWait((VkQueue)m_VkComputeQueue) — fence sync
+        // gives ordering guarantees, no need for synchronous CPU wait.
+        // Legacy fenceless path still needs the wait though, so keep
+        // it conditional.
+        if (!fenceReady) {
+            pfnWait((VkQueue)m_VkComputeQueue);
+        }
     }
 
     // Step 4: ncnn::VkCompute — pre-shader, then RIFE forward, then post-shader.
@@ -1366,14 +1636,55 @@ bool NcnnFRUC::submitFrameShared(ID3D11DeviceContext* ctx)
         si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.commandBufferCount = 1;
         si.pCommandBuffers    = &cb;
+
+        // §J.1: signal the D3D11 fence at the END of buf→img submit
+        // (signalValue = waitValue + 1).  D3D11 will wait on this value
+        // before reading m_OutputTex.  This brackets the entire Vulkan
+        // section under fence sync, even though there are 3 separate
+        // submissions (img→buf, ncnn::VkCompute, buf→img) — only the
+        // first waits on D3D11→Vulkan, only the last signals Vulkan→D3D11.
+        VkTimelineSemaphoreSubmitInfo tsInfoEnd = {};
+        VkSemaphore                   sigSem = VK_NULL_HANDLE;
+        if (fenceReady) {
+            sigSem = (VkSemaphore)m_VkFenceSemaphore;
+            tsInfoEnd.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            tsInfoEnd.waitSemaphoreValueCount   = 0;
+            tsInfoEnd.pWaitSemaphoreValues      = nullptr;
+            tsInfoEnd.signalSemaphoreValueCount = 1;
+            tsInfoEnd.pSignalSemaphoreValues    = &signalValue;
+            si.pNext                = &tsInfoEnd;
+            si.signalSemaphoreCount = 1;
+            si.pSignalSemaphores    = &sigSem;
+        }
+
         VkResult rc = pfnSubmit((VkQueue)m_VkComputeQueue, 1, &si, VK_NULL_HANDLE);
         if (rc != VK_SUCCESS) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC-NCNN] phase-B buf→img vkQueueSubmit rc=%d", (int)rc);
+                        "[VIPLE-FRUC-NCNN] phase-B buf→img vkQueueSubmit rc=%d (fenceReady=%d)",
+                        (int)rc, fenceReady ? 1 : 0);
             bumpFailureAndMaybeDisable("buf2img submit");
             return false;
         }
-        pfnWait((VkQueue)m_VkComputeQueue);
+        // §J.1: with fence sync, no need for vkQueueWaitIdle.  D3D11
+        // will block on Wait(fence, signalValue) before reading the
+        // output texture, which gives the same ordering guarantee at
+        // GPU-level (no CPU stall).
+        if (!fenceReady) {
+            pfnWait((VkQueue)m_VkComputeQueue);
+        }
+    }
+
+    // §J.1: D3D11 side waits on fence before reading m_OutputTex.
+    // ID3D11DeviceContext4::Wait queues a GPU-side wait; this returns
+    // immediately on CPU but D3D11's subsequent reads are gated.
+    if (fenceReady) {
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext4> ctx4;
+        if (SUCCEEDED(ctx->QueryInterface(IID_PPV_ARGS(&ctx4)))) {
+            ctx4->Wait((ID3D11Fence*)m_D3D11Fence, signalValue);
+        }
+        // Advance fence value for next frame.  Each frame consumes 2
+        // values: waitValue (D3D11→Vulkan) and signalValue (Vulkan→D3D11).
+        m_FenceValue += 2;
     }
 
     // Reset fail counter on success — we want only consecutive failures
@@ -1693,6 +2004,11 @@ void NcnnFRUC::destroy()
 {
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC-NCNN] destroy() called (initialized=%d, m_Net=%p)",
                 m_Initialized.load(std::memory_order_acquire) ? 1 : 0, (void*)m_Net.get());
+    // §J.1: release fence sync FIRST.  VkSemaphore must be destroyed
+    // while VulkanDevice is alive; ID3D11Fence must be released before
+    // m_Device.Reset().  Idempotent if createFenceSync didn't run.
+    destroyFenceSync();
+
     // Phase B.4b: tear down GPU shared-path resources BEFORE pipelines
     // and m_Net.  Order: query → cmdbufs → cmdpool → VkMats (auto via
     // dtor) → pipelines → m_Net → ncnn instance refcount.

@@ -130,6 +130,29 @@ private:
     // flip m_SharedPathReady regardless of env var settings.
     bool selftestSharedPath();
 
+    // §J.1 — D3D11.4 fence ↔ Vulkan timeline VkSemaphore bridge.  Two
+    // helpers wire the handle pair end-to-end:
+    //
+    //   createFenceSync()   creates ID3D11Fence (D3D11.4 / D3D11_DEVICE5),
+    //                       exports as DXGI shared NT handle, opens on
+    //                       Vulkan side as a VkSemaphore (timeline) via
+    //                       VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT.
+    //                       Required for cross-API sync that NV driver
+    //                       insists on before allowing raw Vulkan ops on
+    //                       imported D3D11 VkImages (otherwise:
+    //                       VK_ERROR_DEVICE_LOST).
+    //
+    //   destroyFenceSync()  releases the VkSemaphore, closes the shared
+    //                       NT handle, drops ID3D11Fence ref.  Idempotent
+    //                       — destroy() can call it whether init ran or not.
+    //
+    // Returns false on any step failure; on failure m_D3D11Fence /
+    // m_VkFenceSemaphore stay nullptr and submitFrameShared falls
+    // through the same way as v1.3.43 (3-fail counter + permanent
+    // disable).
+    bool createFenceSync();
+    void destroyFenceSync();
+
     std::atomic<bool> m_Initialized { false };
     int               m_Quality     = 0;
     uint32_t          m_Width       = 0;
@@ -199,6 +222,16 @@ private:
     // 785-line warn spam and per-frame retry cost when the shared path
     // is fundamentally broken on this GPU/driver.
     int                                              m_SharedPathFailCount = 0;
+
+    // §J.1 — cross-API fence sync resources.  ID3D11Fence and the
+    // Vulkan VkSemaphore are two views of the same kernel fence object.
+    // m_FenceValue is the monotonically increasing timeline value:
+    // each frame uses (N, N+1) pair to bracket Vulkan ops between
+    // D3D11 write completion and D3D11 read of the output.
+    void*                                            m_D3D11Fence         = nullptr;  // ID3D11Fence*
+    HANDLE                                           m_FenceSharedHandle  = nullptr;
+    void*                                            m_VkFenceSemaphore   = nullptr;  // VkSemaphore (timeline)
+    uint64_t                                         m_FenceValue         = 0;
 
     // NCNN bits.  m_Net is the loaded RIFE 4.25-lite flownet
     // (3-input: in0/in1/in2 = prev RGB, curr RGB, timestep).

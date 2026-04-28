@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.20)
 # `cmake_path(CONVERT ... TO_NATIVE_PATH_LIST ...)` requires 3.20
 # todo - set this conditionally
 
-project(VipleStream-Server VERSION 1.3.44
+project(VipleStream-Server VERSION 1.3.47
         DESCRIPTION "Self-hosted game stream host for VipleStream"
         HOMEPAGE_URL "https://github.com/finaltwinsen/VipleStream")
 
