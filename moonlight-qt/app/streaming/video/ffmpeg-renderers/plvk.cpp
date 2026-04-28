@@ -15,6 +15,7 @@ extern "C" {
 
 #include <vector>
 #include <set>
+#include <atomic>
 
 #ifndef VK_KHR_video_decode_av1
 #define VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME "VK_KHR_video_decode_av1"
@@ -767,6 +768,33 @@ void PlVkRenderer::cleanupRenderContext()
 void PlVkRenderer::renderFrame(AVFrame *frame)
 {
     pl_frame mappedFrame, targetFrame;
+
+    // §J.3.e.0 — AVVkFrame access probe.  When VIPLE_VK_FRUC_PROBE=1
+    // env var is set, log the VkImage handles every 60 frames.  This
+    // proves the hook point for FRUC integration: at this stage in
+    // renderFrame, the AVFrame carries an AVVkFrame whose img[] array
+    // points to fully-decoded VkImages on m_Vulkan->device.  §J.3.e.1+
+    // will pass these handles to NCNN-Vulkan without any D3D11 bridge.
+    if (frame->format == AV_PIX_FMT_VULKAN) {
+        const char* probe = SDL_getenv("VIPLE_VK_FRUC_PROBE");
+        if (probe && SDL_atoi(probe) != 0) {
+            static std::atomic<uint64_t> s_FrameCount{0};
+            uint64_t n = s_FrameCount.fetch_add(1, std::memory_order_relaxed);
+            if ((n % 60) == 0) {
+                auto* vkFrame = (AVVkFrame*)frame->data[0];
+                if (vkFrame) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VK-FRUC] §J.3.e.0 frame#%llu AVVkFrame "
+                                "img[0]=%p img[1]=%p layout[0]=%d layout[1]=%d "
+                                "size=%dx%d sw_format=%d",
+                                (unsigned long long)n,
+                                (void*)vkFrame->img[0], (void*)vkFrame->img[1],
+                                (int)vkFrame->layout[0], (int)vkFrame->layout[1],
+                                frame->width, frame->height, (int)frame->format);
+                }
+            }
+        }
+    }
 
     // If waitToRender() failed to get the next swapchain frame, skip
     // rendering this frame. It probably means the window is occluded.
