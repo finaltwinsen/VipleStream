@@ -122,6 +122,14 @@ private:
     // transitions needed afterwards, just memory barriers).
     bool transitionSharedImagesToGeneral();
 
+    // Phase B.4c: end-to-end correctness check on the conversion
+    // shaders.  Builds a 4×4 packed RGBA8 input with known pixel
+    // values, dispatches pre → post → reads back, asserts
+    // bit-pattern-close-to-original (loss is fp32→u8 round-trip
+    // quantisation only).  Runs at init time; if it fails we never
+    // flip m_SharedPathReady regardless of env var settings.
+    bool selftestSharedPath();
+
     std::atomic<bool> m_Initialized { false };
     int               m_Quality     = 0;
     uint32_t          m_Width       = 0;

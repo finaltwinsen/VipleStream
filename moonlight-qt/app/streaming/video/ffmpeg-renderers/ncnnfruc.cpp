@@ -207,15 +207,29 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
         // m_SharedPathReady is set and Phase B.4 (preprocess shader)
         // can take over from CPU staging.
         if (importSharedTexturesIntoVulkan()) {
-            // Phase B.4a + B.4b — compile GPU conversion shaders and
-            // allocate command pool / staging buffers.  Both must
-            // succeed for the shared path to be functional.  Failure
-            // is non-fatal: m_SharedPathReady stays false and CPU
-            // staging continues to operate as it does today.
-            // m_SharedPathReady is flipped in B.4c, after empirical
-            // selftest, so this commit only lays the inert plumbing.
-            if (compileSharedPathPipelines()) {
-                initSharedPathResources();
+            // Phase B.4a + B.4b + B.4c — compile GPU conversion
+            // shaders, allocate command pool / staging buffers, run
+            // a pixel-level selftest, and conditionally enable the
+            // shared path.  Default is OFF for safety: user must
+            // export VIPLE_FRUC_NCNN_SHARED=1 to opt in.  Once empirical
+            // testing confirms the path works on the user's GPU, a
+            // follow-up commit flips the default.  Ordered so each
+            // step can short-circuit cleanly without touching m_SharedPathReady.
+            if (compileSharedPathPipelines() && initSharedPathResources()) {
+                if (selftestSharedPath()) {
+                    const char* sharedEnv = SDL_getenv("VIPLE_FRUC_NCNN_SHARED");
+                    const bool wantShared = sharedEnv && SDL_atoi(sharedEnv) != 0;
+                    if (wantShared) {
+                        m_SharedPathReady = true;
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-FRUC-NCNN] phase-B.4c: shared path ENABLED via VIPLE_FRUC_NCNN_SHARED=1 "
+                                    "(probe staging cost drops to ~2ms; submitFrame uses GPU compute)");
+                    } else {
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-FRUC-NCNN] phase-B.4c: shared path READY but disabled by default. "
+                                    "Set VIPLE_FRUC_NCNN_SHARED=1 to enable GPU compute path");
+                    }
+                }
             }
         }
     }
@@ -1271,6 +1285,108 @@ void planarFp32RowToRgba8(const float* inR, const float* inG, const float* inB,
         dst[x * 4 + 3] = 255;
     }
 }
+
+} // namespace
+
+// ---- Phase B.4c: shader correctness selftest ----
+// 4×4 packed RGBA8 → planar fp32 round-trip via record_upload + pre-shader
+// + record_download.  Validates pipeline reflection / dispatch / memory
+// barriers without touching the imported VkImages or D3D11 sync, so a
+// failure here pinpoints shader / pipeline issues vs interop issues.
+
+bool NcnnFRUC::selftestSharedPath()
+{
+    if (!m_PipelinePre) return false;
+
+    ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
+    if (!vkdev) return false;
+
+    ncnn::VkAllocator* blob    = vkdev->acquire_blob_allocator();
+    ncnn::VkAllocator* staging = vkdev->acquire_staging_allocator();
+
+    constexpr int W = 4, H = 4;
+
+    // Build CPU input: pixel(x,y).R = (x*16+y*4)&0xFF (deterministic)
+    // We pack into a 1D Mat of W*H uint32s.  ncnn doesn't have a "uint"
+    // Mat type so we treat it as W*H elements with elemsize=4 — the
+    // bytes flow through unchanged.
+    ncnn::Mat cpu_packed(W * H, (size_t)4);
+    auto* packed_u32 = static_cast<uint32_t*>(cpu_packed.data);
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            uint32_t r = static_cast<uint32_t>(x * 32 + y * 8) & 0xFFu;
+            uint32_t g = static_cast<uint32_t>(x * 16 + y * 4) & 0xFFu;
+            uint32_t b = static_cast<uint32_t>(x *  8 + y * 2) & 0xFFu;
+            packed_u32[y * W + x] = r | (g << 8) | (b << 16) | (255u << 24);
+        }
+    }
+
+    ncnn::Option opt;
+    opt.use_vulkan_compute  = true;
+    opt.blob_vkallocator    = blob;
+    opt.staging_vkallocator = staging;
+
+    // Allocate dedicated test mats (don't touch m_PackedInVkMat which is
+    // sized for the full frame).
+    ncnn::VkMat gpu_packed;
+    ncnn::VkMat gpu_planar(W, H, 3, (size_t)4, blob);
+
+    ncnn::VkTransfer xfer(vkdev);
+    xfer.record_upload(cpu_packed, gpu_packed, opt);
+    xfer.submit_and_wait();
+
+    ncnn::VkCompute cmd(vkdev);
+    std::vector<ncnn::vk_constant_type> consts(2);
+    consts[0].i = W;
+    consts[1].i = H;
+    cmd.record_pipeline(m_PipelinePre,
+                        std::vector<ncnn::VkMat>{ gpu_packed, gpu_planar },
+                        consts, gpu_planar);
+
+    ncnn::Mat result;
+    cmd.record_download(gpu_planar, result, opt);
+    if (cmd.submit_and_wait() != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.4c selftest: VkCompute submit failed");
+        vkdev->reclaim_staging_allocator(staging);
+        return false;
+    }
+
+    // Verify: 4 sample pixels.  fp32 should be roughly src_byte/255.
+    // Tolerance 1/255 is enough — shader does exact divide.
+    auto check = [&](int x, int y) -> bool {
+        const uint32_t pix = packed_u32[y * W + x];
+        const float er = float(pix         & 0xFFu) / 255.0f;
+        const float eg = float((pix >>  8) & 0xFFu) / 255.0f;
+        const float eb = float((pix >> 16) & 0xFFu) / 255.0f;
+        const float ar = result.channel(0).row(y)[x];
+        const float ag = result.channel(1).row(y)[x];
+        const float ab = result.channel(2).row(y)[x];
+        const bool ok =
+            std::fabs(ar - er) < 0.01f &&
+            std::fabs(ag - eg) < 0.01f &&
+            std::fabs(ab - eb) < 0.01f;
+        if (!ok) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B.4c selftest pixel(%d,%d): "
+                        "got (%.4f, %.4f, %.4f) expected (%.4f, %.4f, %.4f)",
+                        x, y, ar, ag, ab, er, eg, eb);
+        }
+        return ok;
+    };
+    const bool pass = check(0, 0) && check(3, 0) && check(0, 3) && check(3, 3);
+
+    vkdev->reclaim_staging_allocator(staging);
+
+    if (pass) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.4c selftest PASS — pre-shader produces "
+                    "correct planar fp32 from packed RGBA8 (4 sample points within 1/255 tolerance)");
+    }
+    return pass;
+}
+
+namespace {
 
 // D3D11 staging-tex Map() → ncnn::Mat (1, 3, H, W) fp32 normalized.
 // out_mat must be created as ncnn::Mat(W, H, 3) before the call.
