@@ -8,6 +8,8 @@ build/
 # folder for native headers — not a build output, track them.
 !libs/windows/onnxruntime/build/
 !libs/windows/onnxruntime/build/**
+!libs/windows/ncnn/build/
+!libs/windows/ncnn/build/**
 config.tests/*/.qmake.stash
 config.tests/*/Makefile
 
