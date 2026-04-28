@@ -1515,6 +1515,76 @@ bool DirectMLFRUC::tryLoadOnnxModel()
         so.DisableMemPattern();
         so.SetExecutionMode(ORT_SEQUENTIAL);
         so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        // v1.3.3 — VIPLE_DIRECTML_VERBOSE=1 flips this session's log
+        // severity to VERBOSE (level 0).  ORT then dumps the EP each
+        // node ends up assigned to as part of the partitioner output.
+        // We need this to find which ops are falling back to CPU EP
+        // and causing the 60-70ms inference on Tensor-Core-class GPUs.
+        // Default (env unset) keeps the global Env's WARNING level so
+        // production logs aren't flooded.
+        {
+            char vbuf[8] = {}; size_t vsz = 0;
+            getenv_s(&vsz, vbuf, sizeof(vbuf), "VIPLE_DIRECTML_VERBOSE");
+            if (vsz > 0 && (vbuf[0] == '1' || _stricmp(vbuf, "true") == 0)) {
+                so.SetLogSeverityLevel(0);  // 0 = VERBOSE
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] DirectML: VIPLE_DIRECTML_VERBOSE=1 → "
+                            "ORT session log = VERBOSE (expect node-by-node EP assignment dump)");
+            }
+        }
+        // v1.3.5 — Pin the model's symbolic input dims (batch=1,
+        // height=m_Height, width=m_Width) up-front so ORT's graph
+        // optimiser can constant-fold the entire shape-arithmetic
+        // subgraph. Both fruc.onnx and fruc_fp16.onnx ship with input
+        // shape [batch, 7, height, width] — when these dims are
+        // dynamic, ~84 shape-domain ops (Cast/Gather/Sub/Div/
+        // Unsqueeze/Concat ...) get assigned to CPU EP, which inserts
+        // 8+ MemcpyFromHost boundaries that dominate runtime even on
+        // a Tensor-Core GPU (RTX 3060 Laptop measured 60-70 ms before
+        // this change, vs 28.3 ms half-rate budget).  The dim names
+        // match what `python -c "import onnx; ..."` reports for both
+        // models in the cascade; mismatched names are ignored
+        // silently by ORT (no harm if a future model uses different
+        // names, just no acceleration).
+        // ORT 1.20 C++ wrapper doesn't expose AddFreeDimensionOverrideByName
+        // — call through the C API.  Ort::SessionOptions has an implicit
+        // OrtSessionOptions* cast operator (used same pattern at the DML1
+        // append call below).  Mismatched dim names return non-fatal status
+        // we just log + ignore.
+        auto applyDimOverride = [&](const char* name, int64_t value) {
+            if (auto* st = ortApi.AddFreeDimensionOverrideByName(so, name, value); st != nullptr) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] DirectML: free-dim '%s' override skipped (%s)",
+                            name, ortApi.GetErrorMessage(st));
+                ortApi.ReleaseStatus(st);
+            }
+        };
+        applyDimOverride("batch",  1);
+        applyDimOverride("height", static_cast<int64_t>(m_Height));
+        applyDimOverride("width",  static_cast<int64_t>(m_Width));
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] DirectML: free-dim overrides set "
+                    "(batch=1, height=%u, width=%u) → ORT can constant-fold shape subgraph",
+                    m_Height, m_Width);
+
+        // VIPLE_DIRECTML_NO_CPU_FALLBACK=1 escape hatch — forces DML
+        // to claim every op or reject the model entirely. v1.3.4
+        // experiment confirmed this just makes ORT bail out and the
+        // cascade falls through to the inline DML blend graph (a
+        // simple 0.5×prev + 0.5×curr, NOT RIFE), so it's only useful
+        // for diagnostic confirmation that CPU-EP fallback is the
+        // limiting factor.
+        {
+            char nbuf[8] = {}; size_t nsz = 0;
+            getenv_s(&nsz, nbuf, sizeof(nbuf), "VIPLE_DIRECTML_NO_CPU_FALLBACK");
+            if (nsz > 0 && (nbuf[0] == '1' || _stricmp(nbuf, "true") == 0)) {
+                so.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] DirectML: VIPLE_DIRECTML_NO_CPU_FALLBACK=1 → "
+                            "session.disable_cpu_ep_fallback=1 (diagnostic only — "
+                            "expected to fail loading and fall through to inline blend)");
+            }
+        }
         if (auto* st = m_OrtDmlApi->SessionOptionsAppendExecutionProvider_DML1(
                 so, m_DMLDevice.Get(), m_Queue12.Get()); st != nullptr) {
             ortApi.ReleaseStatus(st);
