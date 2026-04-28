@@ -3,6 +3,9 @@
 #include "streaming/session.h"
 #include "streaming/streamutils.h"
 
+// §J.3.e.1.d — handoff to ncnn via the new external VkDevice API.
+#include <ncnn/gpu.h>
+
 // Implementation in plvk_c.c
 #define PL_LIBAV_IMPLEMENTATION 0
 #include <libplacebo/utils/libav.h>
@@ -127,6 +130,12 @@ PlVkRenderer::~PlVkRenderer()
 {
     // The render context must have been cleaned up by now
     SDL_assert(!m_HasPendingSwapchainFrame);
+
+    // §J.3.e.1.d — ncnn::destroy_gpu_instance must run BEFORE
+    // pl_vulkan_destroy: ncnn-allocated VkPipeline/VkBuffer ride
+    // libplacebo's VkDevice; tearing down the device first makes the
+    // subsequent vkDestroy* in ncnn fail.
+    teardownNcnnExternalHandoff();
 
     if (m_Vulkan != nullptr) {
         for (int i = 0; i < (int)SDL_arraysize(m_Overlays); i++) {
@@ -533,7 +542,99 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
         }
     }
 
+    // §J.3.e.1.d — opt-in: hand libplacebo's VkInstance/PhysDev/Device to
+    // ncnn so the future §J.3.e FRUC integration can run on the same VkDevice
+    // as the decoder + renderer (no cross-device shared-memory dance).
+    if (qEnvironmentVariableIntValue("VIPLE_PLVK_NCNN_HANDOFF") != 0) {
+        if (!initializeNcnnExternalHandoff()) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-PLVK-NCNN] §J.3.e.1.d handoff failed — "
+                        "PlVkRenderer continues without ncnn integration");
+            // Non-fatal: PlVkRenderer still works, just no NCNN backend
+            // available on this VkDevice for §J.3.e to wire up.
+        }
+    }
+
     return true;
+}
+
+bool PlVkRenderer::initializeNcnnExternalHandoff()
+{
+    if (m_NcnnExternalReady) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-PLVK-NCNN] §J.3.e.1.d handoff: already initialised");
+        return true;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-PLVK-NCNN] §J.3.e.1.d handoff: starting "
+                "(libplacebo VkInstance=%p, VkPhysDev=%p, VkDevice=%p)",
+                (void*)m_PlVkInstance->instance,
+                (void*)m_Vulkan->phys_device,
+                (void*)m_Vulkan->device);
+
+    // libplacebo's queue_compute / queue_graphics / queue_transfer expose
+    // .index (queue family idx) and .count (queue count from VkDeviceQueueCreateInfo).
+    int rc = ncnn::create_gpu_instance_external(
+        m_PlVkInstance->instance,
+        m_Vulkan->phys_device,
+        m_Vulkan->device,
+        m_Vulkan->queue_compute.index,  m_Vulkan->queue_compute.count,
+        m_Vulkan->queue_graphics.index, m_Vulkan->queue_graphics.count,
+        m_Vulkan->queue_transfer.index, m_Vulkan->queue_transfer.count);
+    if (rc != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-PLVK-NCNN] §J.3.e.1.d ncnn::create_gpu_instance_external failed rc=%d "
+                    "(ncnn singleton may already be claimed by another caller)",
+                    rc);
+        return false;
+    }
+
+    // Verify the API contract: ncnn's internal d->device must be exactly the
+    // VkDevice we handed in.  This is the load-bearing assertion of §J.3.e.1.
+    ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(0);
+    if (!vkdev) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-PLVK-NCNN] §J.3.e.1.d ncnn::get_gpu_device(0) returned nullptr");
+        ncnn::destroy_gpu_instance();
+        return false;
+    }
+    VkDevice ncnnDevice = vkdev->vkdevice();
+    if (ncnnDevice != m_Vulkan->device) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-PLVK-NCNN] §J.3.e.1.d VkDevice mismatch — "
+                     "ncnn d->device=%p, libplacebo m_Vulkan->device=%p",
+                     (void*)ncnnDevice, (void*)m_Vulkan->device);
+        ncnn::destroy_gpu_instance();
+        return false;
+    }
+
+    const ncnn::GpuInfo& gi = ncnn::get_gpu_info(0);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-PLVK-NCNN] §J.3.e.1.d handoff: PASS — "
+                "ncnn d->device=%p == m_Vulkan->device=%p; "
+                "GpuInfo.name='%s' subgroup=%u fp16-arith=%d "
+                "queueC=%u/%u queueG=%u/%u queueT=%u/%u",
+                (void*)ncnnDevice, (void*)m_Vulkan->device,
+                gi.device_name(), gi.subgroup_size(),
+                gi.support_fp16_arithmetic() ? 1 : 0,
+                gi.compute_queue_family_index(), gi.compute_queue_count(),
+                gi.graphics_queue_family_index(), gi.graphics_queue_count(),
+                gi.transfer_queue_family_index(), gi.transfer_queue_count());
+
+    m_NcnnExternalReady = true;
+    return true;
+}
+
+void PlVkRenderer::teardownNcnnExternalHandoff()
+{
+    if (!m_NcnnExternalReady) return;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-PLVK-NCNN] §J.3.e.1.d teardown: ncnn::destroy_gpu_instance "
+                "(BEFORE pl_vulkan_destroy)");
+    ncnn::destroy_gpu_instance();
+    m_NcnnExternalReady = false;
 }
 
 bool PlVkRenderer::prepareDecoderContext(AVCodecContext *context, AVDictionary **)

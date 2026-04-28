@@ -44,6 +44,17 @@ private:
     bool isColorSpaceSupportedByPhysicalDevice(VkPhysicalDevice device, VkColorSpaceKHR colorSpace);
     bool isSurfacePresentationSupportedByPhysicalDevice(VkPhysicalDevice device);
 
+    // §J.3.e.1.d — opt-in handoff of libplacebo's VkInstance/PhysDev/Device
+    // triple to ncnn via the new external API.  Gated on
+    // VIPLE_PLVK_NCNN_HANDOFF=1.  When successful, ncnn lives on the same
+    // VkDevice as PlVkRenderer's libplacebo, ready for §J.3.e.2 to plug
+    // AVVkFrame.img[0] (NV12) directly into ncnn::VkMat without crossing
+    // VkDevices.  Lifetime: must be torn down (ncnn::destroy_gpu_instance)
+    // BEFORE pl_vulkan_destroy, since ncnn-allocated VkPipeline/VkBuffer
+    // ride the libplacebo VkDevice.
+    bool initializeNcnnExternalHandoff();
+    void teardownNcnnExternalHandoff();
+
     // The backend renderer if we're frontend-only
     IFFmpegRenderer* m_Backend;
     bool m_HwAccelBackend;
@@ -100,4 +111,10 @@ private:
     PFN_vkGetPhysicalDeviceProperties fn_vkGetPhysicalDeviceProperties = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR fn_vkGetPhysicalDeviceSurfaceSupportKHR = nullptr;
     PFN_vkEnumerateDeviceExtensionProperties fn_vkEnumerateDeviceExtensionProperties = nullptr;
+
+    // §J.3.e.1.d — true while ncnn singleton is initialised in external
+    // mode against this PlVkRenderer's libplacebo VkDevice.  Set after a
+    // successful initializeNcnnExternalHandoff(); cleared by
+    // teardownNcnnExternalHandoff() (must run before pl_vulkan_destroy).
+    bool m_NcnnExternalReady = false;
 };

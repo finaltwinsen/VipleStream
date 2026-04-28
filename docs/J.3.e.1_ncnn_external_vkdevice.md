@@ -326,6 +326,23 @@ acquire 即 deadlock**。
 populate g_gpu_infos」的 scope 內，scope 結束 lock 釋放，**之後**才 `new VulkanDevice`。
 此時 `try_create_gpu_instance` 看到 g_instance 已非 0 直接 short-circuit，不會去 vkCreateInstance。
 
+### R7: libplacebo 的 VkInstance 不 enable VK_KHR_get_physical_device_properties2（§J.3.e.1.d 實測）
+
+ncnn 的 `init_instance_extension` 用 `vkGetInstanceProcAddr(g_instance, "vkGetPhysicalDeviceProperties2KHR")`
+（KHR-suffixed 名）載 PFN。Vulkan spec 規定該 API 對 KHR alias 只在「instance 創建時 enable
+了該 KHR extension」才會回非 NULL。在 Vulkan 1.1+ 該 functionality 已是 core，libplacebo
+（也包括 ffmpeg 的 hwcontext_vulkan）建立 instance 時**不**勞煩 enable 此 KHR ext，於是
+`vkGetPhysicalDeviceProperties2KHR` PFN 回 NULL → populate_gpu_info_from_external 在
+subgroup 探測時 NULL deref。實測 §J.3.e.1.d 第一次 wire 時 vkQueueSubmit 之前就 0xC0000005。
+
+**Mitigation**: `create_gpu_instance_external` 在 `init_instance_extension()` 之後，補一段
+fallback：如果 KHR-suffixed PFN 沒載到，改用 unsuffixed core name (`vkGetPhysicalDeviceProperties2` /
+`vkGetPhysicalDeviceFeatures2` / `vkGetPhysicalDeviceMemoryProperties2` /
+`vkGetPhysicalDeviceQueueFamilyProperties2`) 重試一次。如果這次成功，把
+`support_VK_KHR_get_physical_device_properties2 = 1` 標起來讓後續 populate 跑該 path。
+v1.3.71 ship 此修正後 §J.3.e.1.d handoff log 印 `ncnn d->device=000001245A7C46F0
+== m_Vulkan->device=000001245A7C46F0` 確認 RTX 3060 上 wire 通了。
+
 ---
 
 ## Testing strategy
