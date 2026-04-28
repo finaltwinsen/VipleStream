@@ -44,29 +44,50 @@ double median(std::vector<double> xs)
     return xs[xs.size() / 2];
 }
 
-// Lazy global ncnn Vulkan-instance handle.  ncnn requires
-// ncnn::create_gpu_instance() be called before any Vulkan work and
-// destroy_gpu_instance() at shutdown.  We refcount across NcnnFRUC
-// instances since the cascade may construct/destruct several during
-// probe and only the last destruction should tear down Vulkan.
-std::atomic<int> g_NcnnGpuRefcount { 0 };
+// v1.3.44 — process-lifetime singleton instead of refcounted lifecycle.
+//
+// The previous refcount design (v1.3.19+) was:
+//   acquire: refcount 0→1 → ncnn::create_gpu_instance()
+//   release: refcount 1→0 → ncnn::destroy_gpu_instance()
+//
+// User-reported crash on v1.3.43 (1080p / 180 fps stream, AV1 codec
+// re-init triggered second cascade): m_Net->set_vulkan_device(0) inside
+// loadModel step 2/6 unhandled exception on the SECOND NcnnFRUC instance.
+// Even with VIPLE_FRUC_NCNN_SHARED unset (B.4 init code skipped entirely),
+// the crash still hit — proving the bug is in ncnn's destroy→re-create
+// cycle, not in our code.
+//
+// ncnn's destroy_gpu_instance() calls glslang::FinalizeProcess() and
+// vkDestroyInstance(); create_gpu_instance() calls glslang::InitializeProcess()
+// and vkCreateInstance().  In theory these are paired and idempotent.  In
+// practice on RTX 3060 Laptop + NV 596.84 the second VulkanDevice ctor
+// hits a fault inside glslang state initialization (possibly NCNN built
+// with glslang version that doesn't fully reset Finalize→Initialize state).
+//
+// Fix: never call destroy_gpu_instance.  Acquire once on first NcnnFRUC,
+// stay alive for process lifetime.  Memory cost: one VkInstance + one
+// VulkanDevice + glslang state ≈ ~10-20 MB.  Acceptable trade for
+// robustness — there's no scenario where the user benefits from
+// teardown of these singletons (we're a single-process desktop app).
+std::atomic<bool> g_NcnnGpuInitialized { false };
 
 bool acquireNcnnGpu()
 {
-    if (g_NcnnGpuRefcount.fetch_add(1, std::memory_order_acq_rel) == 0) {
+    bool expected = false;
+    if (g_NcnnGpuInitialized.compare_exchange_strong(expected, true)) {
+        // First caller wins the race to initialize.
         if (ncnn::create_gpu_instance() != 0) {
-            g_NcnnGpuRefcount.fetch_sub(1, std::memory_order_acq_rel);
+            g_NcnnGpuInitialized.store(false);
             return false;
         }
     }
+    // Either we just initialized, or someone else already did.
     return true;
 }
 
 void releaseNcnnGpu()
 {
-    if (g_NcnnGpuRefcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-        ncnn::destroy_gpu_instance();
-    }
+    // No-op — process-lifetime singleton.  See comment above acquireNcnnGpu.
 }
 
 } // namespace
