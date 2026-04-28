@@ -82,6 +82,29 @@ win32 {
         LIBS        += -L$$PWD/../libs/windows/onnxruntime/runtimes/win-x64/native
         LIBS        += onnxruntime.lib
     }
+
+    # VipleStream v1.3.x — NCNN with Vulkan EP for FRUC backend C
+    # (cross-vendor RIFE that doesn't depend on ORT's DML EP heuristics).
+    # Headers + import lib committed under libs/windows/ncnn (Tencent
+    # ncnn-windows-vs2022-shared release, Vulkan-enabled). Runtime
+    # ncnn.dll is copied into release by build_moonlight_package.cmd.
+    # Loaded lazily on first use so systems without Vulkan loader
+    # still launch (FRUC cascade falls through to DirectML / Generic).
+    contains(QT_ARCH, x86_64) {
+        INCLUDEPATH += $$PWD/../libs/windows/ncnn/build/native/include
+        LIBS        += -L$$PWD/../libs/windows/ncnn/runtimes/win-x64/native
+        LIBS        += ncnn.lib
+        # NCNN handles Vulkan dispatch entirely inside ncnn.dll; no
+        # need to link vulkan-1.lib at this layer. We may need it
+        # later for shared-texture path (D3D12↔Vulkan handle import).
+        #
+        # NCNN's mat.h gates on POSIX-style preprocessor macros
+        # (__SSE2__, __AVX__) that MSVC doesn't define by default.
+        # x86_64 always has SSE2; AVX is opt-in via /arch:AVX.  Define
+        # __SSE2__ unconditionally and expose AVX iff /arch:AVX was
+        # set so the right intrinsic headers get included.
+        DEFINES += __SSE2__=1
+    }
 }
 macx:!disable-prebuilts {
     INCLUDEPATH += $$PWD/../libs/mac/include $$PWD/../libs/mac/include/SDL2
@@ -429,6 +452,8 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/nvofruc.cpp \
         streaming/video/ffmpeg-renderers/genericfruc.cpp \
         streaming/video/ffmpeg-renderers/directmlfruc.cpp \
+        streaming/video/ffmpeg-renderers/ncnnfruc.cpp \
+        streaming/video/ffmpeg-renderers/ncnn_rife_warp.cpp \
         streaming/video/ffmpeg-renderers/pacer/dxvsyncsource.cpp
 
     HEADERS += \
@@ -437,6 +462,8 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/nvofruc.h \
         streaming/video/ffmpeg-renderers/genericfruc.h \
         streaming/video/ffmpeg-renderers/directmlfruc.h \
+        streaming/video/ffmpeg-renderers/ncnnfruc.h \
+        streaming/video/ffmpeg-renderers/ncnn_rife_warp.h \
         streaming/video/ffmpeg-renderers/ifrucbackend.h \
         streaming/video/ffmpeg-renderers/pacer/dxvsyncsource.h
 }

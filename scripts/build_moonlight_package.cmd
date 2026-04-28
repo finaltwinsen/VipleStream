@@ -153,6 +153,34 @@ if exist "%CUDART_DLL%" (
     echo   [WARN] cudart64_110.dll missing at %CUDART_DLL% - NvOFFRUC.dll will fail to load
 )
 
+:: VipleStream v1.3.x: NCNN with Vulkan EP for the cross-vendor RIFE
+:: backend.  Tencent ncnn-windows-vs2022-shared release.  Loaded
+:: lazily by NcnnFRUC; if absent, FRUC cascade skips to DirectML /
+:: Generic without crashing.  ncnn.dll dynamically links to
+:: vulkan-1.dll (system-provided on Win10 1903+).
+set "NCNN_DLL=%SRC%\libs\windows\ncnn\runtimes\win-x64\native\ncnn.dll"
+if exist "%NCNN_DLL%" (
+    copy /y "%NCNN_DLL%" "%TEMP_DIR%\" >nul
+    echo   ncnn.dll
+) else (
+    echo   [WARN] ncnn.dll missing at %NCNN_DLL% - NCNN FRUC backend disabled
+)
+
+:: VipleStream v1.3.x: RIFE 4.25-lite NCNN model files.  Two files:
+:: flownet.param (architecture, ~36 KB ascii) + flownet.bin (weights,
+:: ~11 MB fp16).  Model bundled into release/ folder rife-v4.25-lite/
+:: subdir to match nihui's rife-ncnn-vulkan reference layout.  Caller
+:: side resolves Path::getDataFilePath("rife-v4.25-lite/flownet.param").
+set "RIFE_NCNN_DIR=%SRC%\app\rife_models\rife-v4.25-lite"
+if exist "%RIFE_NCNN_DIR%\flownet.param" (
+    if not exist "%TEMP_DIR%\rife-v4.25-lite" mkdir "%TEMP_DIR%\rife-v4.25-lite"
+    copy /y "%RIFE_NCNN_DIR%\flownet.param" "%TEMP_DIR%\rife-v4.25-lite\" >nul
+    copy /y "%RIFE_NCNN_DIR%\flownet.bin"   "%TEMP_DIR%\rife-v4.25-lite\" >nul
+    echo   rife-v4.25-lite/flownet.{param,bin}
+) else (
+    echo   [WARN] RIFE 4.25-lite NCNN model missing at %RIFE_NCNN_DIR% - NCNN FRUC backend disabled
+)
+
 :: ---- 4b. Debug symbols (PDBs) ----
 ::
 :: Ship PDBs next to the .exe so WinDbg / cdb can symbolicate minidumps

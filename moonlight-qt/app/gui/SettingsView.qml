@@ -789,6 +789,7 @@ Flickable {
                         frucBackendModel.append({text: qsTr("Generic Compute (recommended — lowest latency, any GPU)"), val: 0})
                         frucBackendModel.append({text: qsTr("NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)"), val: 1})
                         frucBackendModel.append({text: qsTr("DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)"), val: 2})
+                        frucBackendModel.append({text: qsTr("NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)"), val: 3})
                         currentIndex = StreamingPreferences.frucBackend
                     }
                     onActivated: {

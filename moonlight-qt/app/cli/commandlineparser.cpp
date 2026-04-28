@@ -325,6 +325,7 @@ StreamCommandLineParser::StreamCommandLineParser()
         {"generic",  StreamingPreferences::FB_GENERIC},
         {"nvidia",   StreamingPreferences::FB_NVIDIA_OF},
         {"directml", StreamingPreferences::FB_DIRECTML},
+        {"ncnn",     StreamingPreferences::FB_NCNN},
     };
     m_FrucQualityMap = {
         {"quality",     StreamingPreferences::FQ_QUALITY},

@@ -15,6 +15,7 @@
 #include "nvofruc.h"
 #include "genericfruc.h"
 #include "directmlfruc.h"
+#include "ncnnfruc.h"
 #include "settings/streamingpreferences.h"
 
 using Microsoft::WRL::ComPtr;
@@ -2033,6 +2034,7 @@ bool D3D11VARenderer::initFRUC()
     auto prefs = StreamingPreferences::get(nullptr);
     bool preferNvidia   = (prefs->frucBackend == StreamingPreferences::FB_NVIDIA_OF);
     bool preferDirectML = (prefs->frucBackend == StreamingPreferences::FB_DIRECTML);
+    bool preferNcnn     = (prefs->frucBackend == StreamingPreferences::FB_NCNN);
 
     // VipleStream: Cap FRUC texture resolution to the video stream resolution,
     // not the display window. This avoids GPU TDR watchdog timeouts on
@@ -2236,6 +2238,63 @@ bool D3D11VARenderer::initFRUC()
                     "[VIPLE-FRUC] DirectML cascade exhausted — falling back to Generic "
                     "(no model fits %d fps half-rate budget at %ux%u on this GPU)",
                     serverFps, dmlW, dmlH);
+    }
+
+    // VipleStream §I.F (v1.3.x) — NCNN-Vulkan RIFE backend.
+    //
+    // Cross-vendor (NV/AMD/Intel) ML interpolation via Tencent ncnn's
+    // Vulkan compute path.  Skips ORT entirely so the partitioner
+    // heuristics that send Cast/Gather/Sub/Div ops to CPU EP (the
+    // 84-node split that dominates DML EP runtime on Tensor-Core
+    // GPUs) don't apply — ncnn dispatches every op straight onto the
+    // Vulkan compute queue.  Phase 1 is probe-only (submitFrame is a
+    // no-op until D3D11↔Vulkan shared-texture lands); we still run
+    // the cascade so the probe number lands in the log for tuning.
+    if (preferNcnn) {
+        const int   serverFpsN     = (m_DecoderParams.frameRate > 0)
+                                     ? m_DecoderParams.frameRate
+                                     : ((prefs->fps > 0) ? prefs->fps / 2 : 30);
+        const double halfRateMsN   = 1000.0 / serverFpsN;
+        // v1.3.x — relax 0.85 → 0.95 safety margin so borderline-fit
+        // backends (typical NCNN result on mid-tier mobile dGPUs)
+        // still get picked.  Half-rate frames have natural slack
+        // because the next real frame doesn't need to ship until the
+        // following vsync; tighter margin was a DML-era artefact.
+        const double kBudgetMarginN = 0.95;
+        const double budgetThrMsN   = halfRateMsN * kBudgetMarginN;
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] NCNN cascade @ %ux%u: target %d fps → "
+                    "half-rate budget %.1fms (×%.2f safety = %.1fms threshold)",
+                    fruW, fruH, serverFpsN, halfRateMsN, kBudgetMarginN, budgetThrMsN);
+
+        auto* ncnn = new NcnnFRUC();
+        ncnn->setQualityLevel(static_cast<int>(prefs->frucQuality));
+        ncnn->setModelDir("rife-v4.25-lite");
+        if (ncnn->initialize(m_RenderDevice.Get(), fruW, fruH)) {
+            const double ms = ncnn->probeInferenceCost(/*warmup=*/2, /*iterations=*/5);
+            if (ms > 0.0 && ms <= budgetThrMsN) {
+                m_GenericFRUC = ncnn;   // IFRUCBackend slot
+                createBlitVB();
+                boostLatency();
+                m_FrucTextureWidth  = (int)fruW;
+                m_FrucTextureHeight = (int)fruH;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] NCNN backend ready: rife-v4.25-lite @ %ux%u, "
+                            "probed %.2fms (budget %.1fms; display %dx%d) "
+                            "[phase 1 probe-only — submitFrame is a no-op until shared-texture lands]",
+                            fruW, fruH, ms, budgetThrMsN, m_DisplayWidth, m_DisplayHeight);
+                return true;
+            }
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] NCNN probe %.2fms exceeds %.1fms budget — falling back to Generic",
+                        ms, budgetThrMsN);
+            delete ncnn;
+        } else {
+            delete ncnn;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] NCNN init failed (Vulkan loader missing or model not bundled) — falling back to Generic");
+        }
     }
 
     // Default: GenericFRUC (D3D11 compute shader — low latency, cross-platform)
