@@ -46,6 +46,7 @@ public:
     // IFFmpegRenderer
     bool initialize(PDECODER_PARAMETERS params) override;
     bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
+    bool prepareDecoderContextInGetFormat(AVCodecContext* context, AVPixelFormat pixelFormat) override;
     void renderFrame(AVFrame* frame) override;
     InitFailureReason getInitFailureReason() override;
 

@@ -405,10 +405,15 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
                                         decodeFamilyIdx);
 
                             // §J.3.b.1 — exercise VulkanVideoRenderer skeleton.
-                            // Throwaway instance; just validate that
-                            // av_hwdevice_ctx_create(VULKAN) works on this
-                            // system before we wire VulkanVideoRenderer
-                            // into the renderer cascade (§J.3.c+).
+                            // Throwaway instance; validates av_hwdevice_ctx_create
+                            // (VULKAN) works on this system.  Full hw_frames_ctx
+                            // init requires going through avcodec_open2's
+                            // get_format callback flow — defer that to §J.3.c
+                            // when cascade integration provides the right context
+                            // (a v1.3.56 standalone probe attempt at calling
+                            // prepareDecoderContextInGetFormat directly hit a
+                            // null-deref inside avcodec_get_hw_frames_parameters
+                            // because the codec wasn't fully open yet).
                             DECODER_PARAMETERS dummyParams = {};
                             dummyParams.width  = (int)m_Width;
                             dummyParams.height = (int)m_Height;

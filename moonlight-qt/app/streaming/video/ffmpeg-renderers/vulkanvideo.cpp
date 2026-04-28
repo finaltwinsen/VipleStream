@@ -94,14 +94,75 @@ bool VulkanVideoRenderer::initialize(PDECODER_PARAMETERS params)
     return true;
 }
 
-bool VulkanVideoRenderer::prepareDecoderContext(AVCodecContext* /*context*/, AVDictionary** /*options*/)
+bool VulkanVideoRenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary** /*options*/)
 {
-    // §J.3.b.2 will set context->hw_device_ctx = av_buffer_ref(m_HwDeviceCtx)
-    // and install a get_format callback that picks AV_PIX_FMT_VULKAN.
-    // For the skeleton, return false — we're not yet hooked into cascade.
-    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-VIDEO] prepareDecoderContext called — §J.3.b.1 skeleton, no impl yet");
-    return false;
+    // §J.3.b.2: same pattern as D3D11VARenderer — pass our pre-created
+    // AVHWDeviceContext to ffmpeg.  The actual hw_frames_ctx is set up
+    // later in prepareDecoderContextInGetFormat (called from get_format
+    // callback once ffmpeg confirms the codec accepts AV_PIX_FMT_VULKAN).
+    if (!m_HwDeviceCtx) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-VIDEO] prepareDecoderContext called before initialize succeeded");
+        return false;
+    }
+    context->hw_device_ctx = av_buffer_ref(m_HwDeviceCtx);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-VIDEO] §J.3.b.2 prepareDecoderContext: hw_device_ctx attached to AVCodecContext");
+    return true;
+}
+
+bool VulkanVideoRenderer::prepareDecoderContextInGetFormat(AVCodecContext* context,
+                                                           AVPixelFormat pixelFormat)
+{
+    // §J.3.b.2: called from FFmpegVideoDecoder's get_format callback
+    // once ffmpeg has decided AV_PIX_FMT_VULKAN is the chosen output
+    // format.  We need to build an AVHWFramesContext describing the DPB
+    // (decoded picture buffer) — ffmpeg will allocate VkImages from
+    // this context and tag each AVFrame.data[0] = AVVkFrame.
+    //
+    // ffmpeg's avcodec_get_hw_frames_parameters does most of the work;
+    // we just init the resulting context.  For Vulkan-native, the
+    // hwctx-specific tweaks (BindFlags etc. on D3D11) don't apply —
+    // ffmpeg's AVVulkanFramesContext defaults are sane.
+
+    av_buffer_unref(&context->hw_frames_ctx);
+    int err = avcodec_get_hw_frames_parameters(context, m_HwDeviceCtx,
+                                               pixelFormat, &context->hw_frames_ctx);
+    if (err < 0) {
+        char errBuf[AV_ERROR_MAX_STRING_SIZE] = {};
+        av_strerror(err, errBuf, sizeof(errBuf));
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VK-VIDEO] §J.3.b.2 avcodec_get_hw_frames_parameters failed: %d (%s)",
+                     err, errBuf);
+        return false;
+    }
+
+    auto* framesContext = (AVHWFramesContext*)context->hw_frames_ctx->data;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-VIDEO] §J.3.b.2 hw_frames_ctx params: %dx%d sw_format=%d initial_pool=%d",
+                framesContext->width, framesContext->height,
+                (int)framesContext->sw_format, framesContext->initial_pool_size);
+
+    // Mimic d3d11va: extra 3 frames in initial pool to absorb decoder
+    // reordering buffer + present queue + free frame headroom.
+    if (framesContext->initial_pool_size) {
+        framesContext->initial_pool_size += 3;
+    }
+
+    err = av_hwframe_ctx_init(context->hw_frames_ctx);
+    if (err < 0) {
+        char errBuf[AV_ERROR_MAX_STRING_SIZE] = {};
+        av_strerror(err, errBuf, sizeof(errBuf));
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VK-VIDEO] §J.3.b.2 av_hwframe_ctx_init failed: %d (%s)",
+                     err, errBuf);
+        av_buffer_unref(&context->hw_frames_ctx);
+        return false;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-VIDEO] §J.3.b.2 hw_frames_ctx init OK — DPB allocator ready");
+    return true;
 }
 
 void VulkanVideoRenderer::renderFrame(AVFrame* /*frame*/)
