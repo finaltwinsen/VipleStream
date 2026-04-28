@@ -434,32 +434,38 @@ static int create_instance(vk_backend_t* be)
         }
     }
     LOGI("VK_EXT_swapchain_colorspace %s",
-         be->fHdrColorspaceExt ? "available [enable disabled — see v1.2.181 note]"
-                              : "not available");
+         be->fHdrColorspaceExt ? "available" : "not available");
 
-    // VK_EXT_swapchain_colorspace: PROBED but NOT enabled. v1.2.180 user
-    // logs from Pixel 9 (Mali-G715 driver) showed SIGSEGV inside
-    // vkCreateInstance with this ext in enabled list. Same pattern as
-    // VK_EXT_hdr_metadata in v1.2.180 device-level fix. Both ext are
-    // §I.E.b/c (HDR pipeline) prerequisites, not §I.B/C/D requirements
-    // — defer enabling until actual HDR-mode swapchain is built and
-    // user has explicit HDR opt-in (Java prefs.enableHdr).
-    const char* instExts[2] = {
-        VK_KHR_SURFACE_EXTENSION_NAME,
-        VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
-    };
+    // §I.E.b (v1.2.186) — VK_EXT_swapchain_colorspace gate.
+    // Conditionally enable when user opted into HDR AND driver advertises
+    // the ext. v1.2.180-181 disabled this universally because Pixel 9
+    // Mali-G715 SIGSEGV'd inside vkCreateInstance with the ext in the
+    // enabled list. Now we only enable when user explicitly toggled
+    // "Enable HDR (Experimental)"; users on broken drivers either
+    // (a) leave HDR off → no ext → no crash, or (b) enable → crash →
+    // v1.2.185 canary catches and forces GLES fallback on next launch.
+    const char* instExts[3];
+    instExts[0] = VK_KHR_SURFACE_EXTENSION_NAME;
+    instExts[1] = VK_KHR_ANDROID_SURFACE_EXTENSION_NAME;
+    uint32_t instExtCount = 2;
+    int hdrColorspaceEnabled = 0;
+    if (be->fHdrUserEnabled && be->fHdrColorspaceExt) {
+        instExts[instExtCount++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
+        hdrColorspaceEnabled = 1;
+    }
 
     VkInstanceCreateInfo ici = {
         .sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo        = &appInfo,
-        .enabledExtensionCount   = (uint32_t)(sizeof(instExts) / sizeof(instExts[0])),
+        .enabledExtensionCount   = instExtCount,
         .ppEnabledExtensionNames = instExts,
     };
 
-    status_log("vkCreateInstance: enabled exts = %u (KHR_surface + KHR_android_surface)%s",
-               (uint32_t)(sizeof(instExts) / sizeof(instExts[0])),
-               be->fHdrColorspaceExt
-                 ? " [+ EXT_swapchain_colorspace SKIPPED — see v1.2.181 note]"
+    status_log("vkCreateInstance: enabled exts = %u (KHR_surface + KHR_android_surface%s)%s",
+               instExtCount,
+               hdrColorspaceEnabled ? " + EXT_swapchain_colorspace" : "",
+               (be->fHdrColorspaceExt && !be->fHdrUserEnabled)
+                 ? " [colorspace ext available but user has HDR off]"
                  : "");
     VkResult ciRc = vkCreateInstance(&ici, NULL, &be->instance);
     status_log("vkCreateInstance rc=%d", (int)ciRc);
@@ -600,7 +606,7 @@ static int create_device(vk_backend_t* be)
     LOGI("VK_GOOGLE_display_timing %s",
          be->fDisplayTimingSupported ? "available — will enable" : "not available");
     LOGI("VK_EXT_hdr_metadata %s",
-         be->fHdrMetadataExt ? "available — will enable (§I.E recon)" : "not available");
+         be->fHdrMetadataExt ? "available" : "not available");
 
     float qprio = 1.0f;
     VkDeviceQueueCreateInfo qci = {
@@ -611,25 +617,24 @@ static int create_device(vk_backend_t* be)
     };
 
     // VK_ANDROID_external_memory_android_hardware_buffer for B.2c.3b AHB import.
-    // Phase A2 confirmed Adreno 620 advertises both extensions on Pixel 5.
     // VK_GOOGLE_display_timing added conditionally for §I.C.6.
     //
-    // VK_EXT_hdr_metadata: PROBED but NOT enabled in deviceExts. v1.2.179
-    // user logs showed Pixel 9 (Mali-G715 driver) SIGSEGVs inside
-    // vkCreateDevice when this ext is in the enabled list — even though
-    // the ext IS advertised. We don't use vkSetHdrMetadataEXT yet (HDR
-    // pipeline switch deferred to §I.E.b/c), so dropping the enable is
-    // free for now. fHdrMetadataExt flag stays for log + future gate.
-    const char* deviceExts[3];
+    // §I.E.b (v1.2.186) — VK_EXT_hdr_metadata gate.
+    // Conditionally enable when user opted into HDR AND driver advertises
+    // the ext. v1.2.180 disabled this universally after Pixel 9 SIGSEGV.
+    // Same gating policy as instance-level VK_EXT_swapchain_colorspace.
+    const char* deviceExts[4];
     deviceExts[0] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     deviceExts[1] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME;
     uint32_t deviceExtCount = 2;
     if (be->fDisplayTimingSupported) {
         deviceExts[deviceExtCount++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
     }
-    // Note: VK_EXT_hdr_metadata enable disabled v1.2.180 (Pixel 9 crash).
-    // To re-enable later for §I.E.b/c, add an explicit Java pref
-    // (prefs.enableHdr) gate so users on broken drivers can opt out.
+    int hdrMetadataEnabled = 0;
+    if (be->fHdrUserEnabled && be->fHdrMetadataExt) {
+        deviceExts[deviceExtCount++] = VK_EXT_HDR_METADATA_EXTENSION_NAME;
+        hdrMetadataEnabled = 1;
+    }
 
     VkDeviceCreateInfo dci = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -639,10 +644,13 @@ static int create_device(vk_backend_t* be)
         .ppEnabledExtensionNames = deviceExts,
     };
 
-    status_log("vkCreateDevice: enabled exts = %u (KHR_swapchain + AHB%s%s)",
+    status_log("vkCreateDevice: enabled exts = %u (KHR_swapchain + AHB%s%s)%s",
                deviceExtCount,
                be->fDisplayTimingSupported ? " + GOOGLE_display_timing" : "",
-               be->fHdrMetadataExt ? " [+ EXT_hdr_metadata SKIPPED — see v1.2.180 note]" : "");
+               hdrMetadataEnabled ? " + EXT_hdr_metadata" : "",
+               (be->fHdrMetadataExt && !be->fHdrUserEnabled)
+                 ? " [hdr_metadata ext available but user has HDR off]"
+                 : "");
     VkResult dcRc = vkCreateDevice(be->physDevice, &dci, NULL, &be->device);
     status_log("vkCreateDevice rc=%d (0=SUCCESS, neg=error)", (int)dcRc);
     if (dcRc != VK_SUCCESS) {
@@ -1592,13 +1600,26 @@ cleanup:
 JNIEXPORT jlong JNICALL
 Java_com_limelight_binding_video_VkBackend_nativeInit(JNIEnv* env, jclass clazz, jobject jSurface,
                                                        jint videoWidth, jint videoHeight,
-                                                       jfloat maxRefreshHz)
+                                                       jfloat maxRefreshHz,
+                                                       jboolean enableHdr)
 {
     vk_backend_t* be = (vk_backend_t*)calloc(1, sizeof(*be));
     if (!be) { LOGE("calloc failed"); return 0; }
     be->graphicsQueueFamily = (uint32_t)-1;
     be->videoWidth  = (int)videoWidth;
     be->videoHeight = (int)videoHeight;
+    // §I.E.b — Java caller threaded prefs.enableHdr ("Enable HDR
+    // (Experimental)" checkbox) down so create_instance / create_device
+    // can conditionally enable VK_EXT_swapchain_colorspace +
+    // VK_EXT_hdr_metadata. Default OFF — Pixel 9 driver SIGSEGV'd on
+    // these in v1.2.180-181, so we only re-enable when the user
+    // explicitly opted into HDR. The v1.2.185 canary catches any
+    // residual driver crash so a bad opt-in falls back to GLES on the
+    // next launch instead of bricking the app.
+    be->fHdrUserEnabled = enableHdr ? 1 : 0;
+    LOGI("nativeInit: enableHdr=%d (user opt-in via Settings → Enable HDR)",
+         be->fHdrUserEnabled);
+    status_log("nativeInit: enableHdr=%d (user opt-in)", be->fHdrUserEnabled);
     // §I.D.c v2: Java caller probed Display.getSupportedModes()'s max
     // refresh rate. Used both as setFrameRate hint target AND smart-mode
     // displayHz reference. Hardcoded 90 was Pixel-5-only.
@@ -3910,6 +3931,13 @@ Java_com_limelight_binding_video_VkBackend_nativeSetLogFd(
     }
 }
 
+// v1.2.186 — kept as a runtime status updater only. Actual HDR ext
+// enable decisions (VK_EXT_swapchain_colorspace at instance level,
+// VK_EXT_hdr_metadata at device level) are made at nativeInit time
+// from the enableHdr param, because the ext lists are immutable
+// after vkCreateInstance / vkCreateDevice. Toggling this post-init
+// just updates the flag for telemetry and any future state checks
+// (e.g. the §I.E.b/c swapchain rebuild path could honour it later).
 JNIEXPORT void JNICALL
 Java_com_limelight_binding_video_VkBackend_nativeSetHdrEnabled(
     JNIEnv* env, jclass clazz, jlong handle, jboolean enabled)
@@ -3918,11 +3946,11 @@ Java_com_limelight_binding_video_VkBackend_nativeSetHdrEnabled(
     if (!be) return;
     int e = enabled ? 1 : 0;
     if (e != be->fHdrUserEnabled) {
-        LOGI("[VKBE-HDR] user enable_hdr %d -> %d "
-             "| capability: ext_colorspace=%d ext_hdr_metadata=%d hdr10_surface=%d "
-             "(actual HDR pipeline NOT yet wired — §I.E.b/c future)",
+        LOGI("[VKBE-HDR] post-init flag %d -> %d "
+             "(ext list locked at init: colorspace=%d metadata=%d "
+             "→ pipeline-rebuild path would re-evaluate)",
              be->fHdrUserEnabled, e,
-             be->fHdrColorspaceExt, be->fHdrMetadataExt, be->fHdrCapableSurface);
+             be->fHdrColorspaceExt, be->fHdrMetadataExt);
         be->fHdrUserEnabled = e;
     }
 }

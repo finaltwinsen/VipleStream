@@ -590,17 +590,20 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 try {
                     IFrucBackend vk = new VkBackend(context);
                     vk.setQualityLevel(prefs.frucQuality);
+                    // §I.E.b (v1.2.186) — must thread prefs.enableHdr down
+                    // BEFORE initialize() so nativeInit can decide instance/
+                    // device ext enable. Vulkan ext lists are immutable
+                    // post-vkCreateInstance/Device, so a post-init setter
+                    // wouldn't be able to flip VK_EXT_swapchain_colorspace
+                    // or VK_EXT_hdr_metadata anymore.
+                    if (vk instanceof VkBackend) {
+                        ((VkBackend) vk).setHdrEnabled(prefs.enableHdr);
+                    }
                     Surface vkInput = vk.initialize(renderTarget.getSurface(), w, h);
                     // Returned (any value) ⇒ no SIGSEGV happened; safe to
                     // disarm. Whether init succeeded or returned null is
                     // independent of the canary purpose.
                     VkBackend.disarmCanary(context);
-                    // iter 16: thread prefs.enableHdr down to native for §I.E.b/c
-                    // gating. Currently informational only — backend logs but
-                    // doesn't act on it (HDR pipeline switch deferred).
-                    if (vkInput != null && vk instanceof VkBackend) {
-                        ((VkBackend) vk).setHdrEnabled(prefs.enableHdr);
-                    }
                     if (vkInput != null) {
                         frucRenderer = vk;
                         decoderOutputSurface = vkInput;

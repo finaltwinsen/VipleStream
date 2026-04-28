@@ -49,6 +49,11 @@ public final class VkBackend implements IFrucBackend {
     private final Context context;
     private boolean initialized = false;
     private int qualityLevel = 1;
+    // §I.E.b — caller stashes prefs.enableHdr here BEFORE initialize() so
+    // nativeInit can decide instance/device ext enable up-front. Setting
+    // post-init is still legal (forwarded as a runtime flag for telemetry)
+    // but cannot retroactively change the ext list.
+    private boolean userEnableHdr = false;
 
     /**
      * Native-side handle for the {@code vk_backend_t} struct (VkInstance +
@@ -209,7 +214,7 @@ public final class VkBackend implements IFrucBackend {
         }
 
         try {
-            nativeHandle = nativeInit(displaySurface, w, h, maxRefreshHz);
+            nativeHandle = nativeInit(displaySurface, w, h, maxRefreshHz, userEnableHdr);
         } catch (Throwable t) {
             Log.e(TAG, "nativeInit threw: " + t, t);
             nativeHandle = 0;
@@ -394,7 +399,7 @@ public final class VkBackend implements IFrucBackend {
 
     // ---------- native bridge ----------
     private static native long nativeInit(Surface displaySurface, int videoWidth, int videoHeight,
-                                          float maxRefreshHz);
+                                          float maxRefreshHz, boolean enableHdr);
     private static native void nativeDestroy(long handle);
     private static native int  nativeRenderClearFrame(long handle);
     private static native int  nativeImportAhb(long handle, HardwareBuffer hwBuffer);
@@ -407,12 +412,18 @@ public final class VkBackend implements IFrucBackend {
     private static native void nativeSetLogFd(int fd);
 
     /**
-     * §I.E.a/b prep — caller passes prefs.enableHdr down so native can
-     * gate swapchain colorspace + P010 import on user intent. Currently
-     * observability-only; actual HDR pipeline switch deferred to
-     * §I.E.b/c.
+     * Pass through prefs.enableHdr ("Enable HDR (Experimental)" checkbox).
+     *
+     * <p>Pre-{@link #initialize}: stashes the flag so {@code nativeInit}
+     * can gate VK_EXT_swapchain_colorspace (instance) + VK_EXT_hdr_metadata
+     * (device) — both must be decided before vkCreateInstance/vkCreateDevice
+     * because Vulkan ext lists are immutable post-creation.</p>
+     *
+     * <p>Post-init: still forwarded to native for telemetry / future
+     * pipeline-rebuild logic, but cannot retroactively change ext lists.</p>
      */
     public void setHdrEnabled(boolean enabled) {
+        this.userEnableHdr = enabled;
         if (nativeHandle != 0) {
             nativeSetHdrEnabled(nativeHandle, enabled);
         }
