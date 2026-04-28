@@ -903,12 +903,23 @@ bool NcnnFRUC::initSharedPathResources()
     // ncnn's compute queue family — same one its layers run on.  The
     // imported VkImages are owned by the same VulkanDevice so any
     // queue from this family can access them without ownership transfer.
+    //
+    // v1.3.41: switch from raw vkGetDeviceQueue to ncnn::VulkanDevice::
+    // acquire_queue.  ncnn pre-acquires N queues (queueC=8 on RTX 3060
+    // Laptop) at create_gpu_instance time and hands them out via a
+    // mutex-protected pool — direct vkGetDeviceQueue returns a VkQueue
+    // that ncnn's VkCompute is also using concurrently, and Vulkan
+    // requires external sync on the queue parameter of vkQueueSubmit.
+    // The "layout transition vkQueueSubmit failed" 785× spam in v1.3.40
+    // testing was almost certainly this race.  acquire_queue gives us
+    // a queue that's reserved for our use; reclaim_queue in destroy()
+    // returns it to the pool.
     m_VkComputeQueueFamily = vkdev->info.compute_queue_family_index();
-    VkQueue queue = VK_NULL_HANDLE;
-    pfnGetQueue(dev, m_VkComputeQueueFamily, 0, &queue);
+    VkQueue queue = vkdev->acquire_queue(m_VkComputeQueueFamily);
     if (!queue) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC-NCNN] phase-B.4b: vkGetDeviceQueue returned NULL");
+                    "[VIPLE-FRUC-NCNN] phase-B.4b: acquire_queue(family=%u) returned NULL",
+                    m_VkComputeQueueFamily);
         return false;
     }
     m_VkComputeQueue = (void*)queue;
@@ -1003,13 +1014,34 @@ bool NcnnFRUC::initSharedPathResources()
     return true;
 }
 
-// One-shot UNDEFINED→GENERAL transition for the imported VkImages.
-// Called lazily on first submitFrameShared invocation because
-// vkQueueSubmit is only valid once the queue exists and cmdBuf can be
-// recorded.  Returns false on Vulkan error; caller treats as fatal
-// for the shared path (falls back to CPU staging path).
-
+// v1.3.43 diagnostic: skip the explicit UNDEFINED→GENERAL barrier on
+// imported D3D11 VkImages.  Vulkan spec for
+// VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT says "The
+// implementation may treat such an image as if it has
+// VK_IMAGE_LAYOUT_GENERAL initially and not require any layout
+// transitions."  v1.3.41/.42 confirmed on RTX 3060 Laptop + driver
+// 596.84 that ANY pipeline barrier with src=EXTERNAL or src=IGNORED
+// returns VK_ERROR_DEVICE_LOST (-4).  This impl treats the imports
+// as already-GENERAL and lets submitFrameShared dispatch
+// vkCmdCopyImageToBuffer / vkCmdCopyBufferToImage directly.  If those
+// also DEVICE_LOST, the issue is at the image-access level (not the
+// barrier) and we'll need a different bridge approach (e.g. ncnn
+// VkImageMat wrapper, or just keep CPU staging).
 bool NcnnFRUC::transitionSharedImagesToGeneral()
+{
+    m_VkImagesInGeneralLayout = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC-NCNN] phase-B.4b: skipping explicit GENERAL barrier "
+                "(D3D11_TEXTURE_BIT imports treated as already-GENERAL per Vulkan spec)");
+    return true;
+}
+
+// Original barrier-based transition kept under ifdef for future reference.
+// v1.3.42 attempted EXTERNAL→our_family ownership transfer; still hit
+// DEVICE_LOST on NVIDIA 596.84.  See git history (v1.3.40-42) for the
+// version that actually submitted the barrier.
+#if 0
+bool NcnnFRUC::transitionSharedImagesToGeneralWithBarrier_DEPRECATED()
 {
     HMODULE vk = ::GetModuleHandleW(L"vulkan-1.dll");
     if (!vk) return false;
@@ -1036,15 +1068,28 @@ bool NcnnFRUC::transitionSharedImagesToGeneral()
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     pfnBegin(cb, &bi);
 
-    auto makeBarrier = [](VkImage img) {
+    // v1.3.42: D3D11-imported VkImages start out owned by the EXTERNAL
+    // queue family.  v1.3.41 used IGNORED for srcQueueFamilyIndex,
+    // which made the GPU return VK_ERROR_DEVICE_LOST (-4) on the very
+    // first vkQueueSubmit because we were trying to transition layout
+    // on an image we don't own.  The fix is a queue-family-ownership
+    // ACQUIRE barrier: src=EXTERNAL, dst=our_family.  After this the
+    // image is owned by our compute family for the rest of this
+    // NcnnFRUC instance's lifetime; we don't release back to EXTERNAL
+    // because (a) D3D11 driver doesn't track Vulkan ownership and
+    // (b) D3D11/Vulkan write-write coordination is handled by our
+    // ID3D11Query event poll in submitFrameShared, not by Vulkan
+    // ownership semantics.
+    const uint32_t myFamily = m_VkComputeQueueFamily;
+    auto makeBarrier = [myFamily](VkImage img) {
         VkImageMemoryBarrier b = {};
         b.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         b.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;
         b.newLayout        = VK_IMAGE_LAYOUT_GENERAL;
         b.srcAccessMask    = 0;
         b.dstAccessMask    = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        b.dstQueueFamilyIndex = myFamily;
         b.image            = img;
         b.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
         b.subresourceRange.baseMipLevel   = 0;
@@ -1068,9 +1113,14 @@ bool NcnnFRUC::transitionSharedImagesToGeneral()
     si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers    = &cb;
-    if (pfnSubmit((VkQueue)m_VkComputeQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+    VkResult subRc = pfnSubmit((VkQueue)m_VkComputeQueue, 1, &si, VK_NULL_HANDLE);
+    if (subRc != VK_SUCCESS) {
+        // v1.3.41: log VkResult so we know what went wrong (was just
+        // "failed" before — uninformative for diagnosis).
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC-NCNN] phase-B.4b: layout transition vkQueueSubmit failed");
+                    "[VIPLE-FRUC-NCNN] phase-B.4b: layout transition vkQueueSubmit rc=%d "
+                    "(queue=%p, family=%u)",
+                    (int)subRc, m_VkComputeQueue, m_VkComputeQueueFamily);
         return false;
     }
     pfnWait((VkQueue)m_VkComputeQueue);
@@ -1080,6 +1130,7 @@ bool NcnnFRUC::transitionSharedImagesToGeneral()
                 "[VIPLE-FRUC-NCNN] phase-B.4b: imported VkImages transitioned to GENERAL layout");
     return true;
 }
+#endif // 0  end of deprecated barrier transition
 
 bool NcnnFRUC::submitFrameShared(ID3D11DeviceContext* ctx)
 {
@@ -1090,9 +1141,22 @@ bool NcnnFRUC::submitFrameShared(ID3D11DeviceContext* ctx)
     ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
     if (!vkdev) return false;
 
+    auto bumpFailureAndMaybeDisable = [&](const char* where) {
+        if (++m_SharedPathFailCount >= 3) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B shared path failed %d× at %s — "
+                        "disabling permanently for this session, falling back to CPU staging",
+                        m_SharedPathFailCount, where);
+            m_SharedPathReady = false;
+        }
+    };
+
     // Lazy first-use: transition imported images to GENERAL layout.
     if (!m_VkImagesInGeneralLayout) {
-        if (!transitionSharedImagesToGeneral()) return false;
+        if (!transitionSharedImagesToGeneral()) {
+            bumpFailureAndMaybeDisable("transitionSharedImagesToGeneral");
+            return false;
+        }
     }
 
     HMODULE vk = ::GetModuleHandleW(L"vulkan-1.dll");
@@ -1172,7 +1236,13 @@ bool NcnnFRUC::submitFrameShared(ID3D11DeviceContext* ctx)
         si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.commandBufferCount = 1;
         si.pCommandBuffers    = &cb;
-        if (pfnSubmit((VkQueue)m_VkComputeQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) return false;
+        VkResult rc = pfnSubmit((VkQueue)m_VkComputeQueue, 1, &si, VK_NULL_HANDLE);
+        if (rc != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B img→buf vkQueueSubmit rc=%d", (int)rc);
+            bumpFailureAndMaybeDisable("img2buf submit");
+            return false;
+        }
         pfnWait((VkQueue)m_VkComputeQueue);
     }
 
@@ -1275,10 +1345,19 @@ bool NcnnFRUC::submitFrameShared(ID3D11DeviceContext* ctx)
         si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.commandBufferCount = 1;
         si.pCommandBuffers    = &cb;
-        if (pfnSubmit((VkQueue)m_VkComputeQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) return false;
+        VkResult rc = pfnSubmit((VkQueue)m_VkComputeQueue, 1, &si, VK_NULL_HANDLE);
+        if (rc != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B buf→img vkQueueSubmit rc=%d", (int)rc);
+            bumpFailureAndMaybeDisable("buf2img submit");
+            return false;
+        }
         pfnWait((VkQueue)m_VkComputeQueue);
     }
 
+    // Reset fail counter on success — we want only consecutive failures
+    // to disable the path (transient hiccups should self-heal).
+    m_SharedPathFailCount = 0;
     m_FrameCount++;
     return true;
 }
@@ -1671,7 +1750,13 @@ void NcnnFRUC::destroy()
     }
 
     m_VkImagesInGeneralLayout = false;
-    m_VkComputeQueue = nullptr;
+    // v1.3.41: reclaim the queue we acquired in initSharedPathResources.
+    // Must happen before m_Net.reset() triggers destroy_gpu_instance.
+    if (m_VkComputeQueue) {
+        ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
+        if (vkdev) vkdev->reclaim_queue(m_VkComputeQueueFamily, (VkQueue)m_VkComputeQueue);
+        m_VkComputeQueue = nullptr;
+    }
 
     // Phase B.4a: release the GPU conversion pipelines BEFORE m_Net.
     // ncnn::Pipeline holds references into the VulkanDevice that

@@ -193,6 +193,12 @@ private:
     ncnn::VkAllocator*                               m_BlobAllocator      = nullptr;
     bool                                             m_VkImagesInGeneralLayout = false;
     void*                                            m_D3D11SyncQuery     = nullptr;  // ID3D11Query (event)
+    // v1.3.41: count consecutive shared-path failures; after 3 we
+    // permanently flip m_SharedPathReady=false and stay on CPU staging
+    // for the rest of this NcnnFRUC instance's lifetime.  Avoids
+    // 785-line warn spam and per-frame retry cost when the shared path
+    // is fundamentally broken on this GPU/driver.
+    int                                              m_SharedPathFailCount = 0;
 
     // NCNN bits.  m_Net is the loaded RIFE 4.25-lite flownet
     // (3-input: in0/in1/in2 = prev RGB, curr RGB, timestep).
