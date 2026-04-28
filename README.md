@@ -2,7 +2,7 @@
 
 A self-hosted game-streaming stack — a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients) with built-in NAT traversal, AI frame interpolation, Steam library auto-import, and a Traditional Chinese UI. Wire-protocol-compatible with vanilla Sunshine / Moonlight so VipleStream and upstream installs interoperate.
 
-> **Current version:** 1.2.123 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
+> **Current version:** 1.3.24 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
 
 Project home: <https://github.com/finaltwinsen/VipleStream>
 
@@ -35,18 +35,26 @@ Stream over the public internet with no port forwarding, UPnP, or VPN.
 - Fully ported to the Android client (RelayClient + RelayTcpTunnel)
 
 ### Frame Rate Up-Conversion (FRUC)
-2× frame interpolation, three independent backends with auto-cascade selection on PC client.
+2× frame interpolation, four independent backends with auto-cascade selection on PC client.
 
 | Backend | Algorithm | GPU requirement | Notes |
 |---|---|---|---|
-| **Generic** | HLSL motion-warp shaders | any D3D11 GPU | default; ~1-2 ms / frame |
-| **NvOFFRUC** | NVIDIA Optical Flow SDK | RTX 20+ series, driver ≥ 522 | hardware accelerated |
-| **DirectML** | RIFE 4.25-lite ONNX, fp32 | strong GPU (RTX 30/40, RX 6000+) | auto-cascade probes 720p→540p→480p→360p at init and picks the highest the GPU can sustain; falls back to Generic if no resolution fits the frame budget |
+| **Generic** | HLSL block-match ME + warp compute | any D3D11 GPU | default; ~3-5 ms / frame; cross-vendor |
+| **NvOFFRUC** | NVIDIA Optical Flow SDK | RTX 20+ series, driver ≥ 522 | hardware accelerated; lowest latency on NV |
+| **DirectML** | RIFE 4.25-lite ONNX, fp16/fp32 cascade | strong NV GPU (Tensor Core RTX 30/40+) | model variants probed at native stream resolution; ORT-DML EP partition heuristics make it CPU-bound on mid-tier GPUs (e.g. RTX 3060 Laptop ~80ms vs ~25ms on 4070+) |
+| **NCNN-Vulkan** | RIFE 4.25-lite, custom-built ncnn 20220729 + pack8 + rife.Warp custom layer | any Vulkan-capable GPU | experimental (Path B shared-texture bridge pending); cross-vendor (NV/AMD/Intel); pack8 Tensor Core path retained |
 
-DirectML diagnostics:
-- `VIPLE_DIRECTML_DEBUG=1` — enables D3D12 debug layer + DML validation
-- `VIPLE_DML_RES=540|720|1080|native` — overrides tensor resolution
-- `[VIPLE-FRUC-DML]` log lines print per-stage EMA timings every 120 frames
+PC client cascade (when `Generic Compute` is the user setting): tries the user-preferred backend first, falls through to Generic on failure / over-budget.
+
+Android client uses a separate **Vulkan FRUC backend** (`vk_backend.c`) with AHardwareBuffer zero-copy import, smart-mode dual present (60→120 FPS), VK_GOOGLE_display_timing, in-flight ring, and SIGSEGV canary fallback to GLES on driver crash.
+
+DirectML / NCNN diagnostics:
+- `VIPLE_DIRECTML_DEBUG=1` — D3D12 debug layer + DML validation
+- `VIPLE_DIRECTML_VERBOSE=1` — ORT session VERBOSE log (shows partitioner node-by-node EP assignment)
+- `VIPLE_DIRECTML_NO_CPU_FALLBACK=1` — diagnostic; force DML to claim every op
+- `VIPLE_DML_RES=540|720|1080|native` — caps DirectML tensor resolution
+- `VIPLE_FRUC_MODEL=fp16|fp32|auto` — overrides model cascade order
+- `[VIPLE-FRUC-DML]` / `[VIPLE-FRUC-NCNN]` log lines print per-stage timings
 
 ### Steam library auto-import (host)
 Server scans the local Steam install at startup and auto-injects every installed game into `/applist` as a launchable app. No manual configuration — click `Counter-Strike 2` in the client and the host runs `steam://rungameid/730`.
@@ -64,12 +72,24 @@ A `STEAM ACCOUNT` dropdown sits above the apps grid (PC + Android). Pick a diffe
 - Detects Steam Guard 2FA prompts and surfaces a specific error
 - 60 s task GC keeps the registry small
 
+### HDR support (Android)
+End-to-end HDR pipeline on Android Vulkan FRUC backend:
+- `VK_EXT_swapchain_colorspace` (instance) + `VK_EXT_hdr_metadata` (device) — capability-gated by user opt-in (`Settings → Enable HDR`) + driver advertise
+- HDR10 swapchain — `VK_FORMAT_A2B10G10R10_UNORM_PACK32` + `VK_COLOR_SPACE_HDR10_ST2084_EXT` when capable
+- `vkSetHdrMetadataEXT` — BT.2020 primaries, 1000 nits MaxCLL, 400 nits MaxFALL
+- Fragment shader sRGB → linear → ST.2084 PQ encoding for HDR10 swapchain on SDR content (BT.2408 100-nit reference white)
+- Three-tier safety: user opt-in + capability probe + SIGSEGV canary fallback (Pixel 9 Mali-G715 driver bug history)
+
+PC client HDR is upstream Moonlight-Qt's existing HDR path (Sunshine `hdrMode=1` launch param + MediaCodec / D3D11 HDR colorspace negotiation).
+
 ### Other
 - Traditional Chinese UI translation (`qml_zh_TW.ts`) on PC client; Android pulls system locale
 - Web UI English + Traditional Chinese strings rebranded to VipleStream
 - Editorial-style PcView / AppView design with IBM Plex Mono + Space Grotesk + lime accent (`#D4FF3A`)
+- Performance overlay (Android v1.2.184+) — lime-on-ink2 monospace, PC §05 NET HUD style, FRUC stats (interpolated count, dual-mode ratio, effective output FPS)
 - `/serverinfo` advertises `<VipleStreamProtocol>` capability marker so clients can hide VipleStream-only features when connected to vanilla Sunshine
 - Adaptive bitrate, network-status overlay (LAN / Relay / DERP), debug pairing tool (ADB-based PIN-free)
+- Status log to `Downloads/viple_vkbe_status.log.txt` on Android — adb-less diagnostic for Pixel 9 / locked-down devices
 
 ---
 
@@ -121,16 +141,25 @@ VipleStream/
 │       │   └── appmodel.cpp           # /steamprofiles fetch + async switch poll loop
 │       └── streaming/video/ffmpeg-renderers/
 │           ├── nvofruc.cpp            # NVIDIA Optical Flow FRUC backend
-│           ├── directmlfruc.cpp       # DirectML RIFE backend with auto-cascade
-│           └── d3d11va.cpp            # D3D11 renderer integration
+│           ├── directmlfruc.cpp       # DirectML RIFE backend (ORT / DML EP)
+│           ├── ncnnfruc.cpp           # NCNN-Vulkan RIFE backend (cross-vendor)
+│           ├── ncnn_rife_warp.cpp     # rife.Warp custom layer (extracted from rife-ncnn-vulkan, registered at runtime)
+│           └── d3d11va.cpp            # D3D11 renderer + FRUC cascade selection
 ├── moonlight-android/                 # Android client (Java / Gradle + NDK)
-│   └── app/src/main/java/com/limelight/
-│       ├── nvstream/http/
-│       │   ├── NvHTTP.java            # HTTP client + steam endpoints
-│       │   ├── SteamProfile.java      # profile data class
-│       │   └── SteamSwitchStatus.java # async-task status data class
-│       ├── relay/                     # NAT traversal Java port
-│       └── AppView.java               # apps grid + Spinner + SpinnerDialog
+│   └── app/src/main/
+│       ├── jni/moonlight-core/
+│       │   └── vk_backend.c           # Vulkan FRUC backend (AHB import, smart-mode dual present, HDR)
+│       └── java/com/limelight/
+│           ├── nvstream/http/
+│           │   ├── NvHTTP.java        # HTTP client + steam endpoints
+│           │   ├── SteamProfile.java  # profile data class
+│           │   └── SteamSwitchStatus.java
+│           ├── relay/                 # NAT traversal Java port
+│           ├── binding/video/
+│           │   ├── VkBackend.java     # Vulkan FRUC backend Java wrapper + canary fallback
+│           │   ├── FrucRenderer.java  # GLES FRUC backend (legacy, fallback path)
+│           │   └── MediaCodecDecoderRenderer.java  # decoder + FRUC backend selection
+│           └── AppView.java           # apps grid + Spinner + SpinnerDialog
 ├── tools/viplestream-relay/
 │   └── relay_server.py                # PSK-authenticated WebSocket relay
 ├── scripts/
@@ -187,9 +216,9 @@ notepad build-config.local.cmd
 Outputs land in `release/`:
 
 ```
-release/VipleStream-Server-1.2.123.zip   (~33 MB)
-release/VipleStream-Client-1.2.123.zip   (~106 MB)
-release/VipleStream-Android-1.2.123.apk  (~6 MB)
+release/VipleStream-Server-1.3.24.zip   (~33 MB)
+release/VipleStream-Client-1.3.24.zip   (~116 MB)
+release/VipleStream-Android-1.3.24.apk  (~7 MB)
 ```
 
 ### Server deploy (Windows host)
@@ -293,6 +322,16 @@ The release zips in `release/` can be extracted directly on the same machine or 
 
 | Version | Changes |
 |---|---|
+| **1.3.x** (in progress) | NCNN-Vulkan FRUC backend (cross-vendor RIFE); custom-built ncnn 20220729 with pack8 + rife.Warp custom layer registered at runtime; CPU-staging submitFrame (Phase A.5) — works end-to-end but adds ~30ms staging overhead, Phase B (D3D11→D3D12→Vulkan shared texture) pending for production perf |
+| **1.2.189** | HDR Phase 3 — fragment shader sRGB → linear → ST.2084 PQ encoding for SDR-on-HDR-swapchain colour correctness |
+| **1.2.188** | HDR Phase 2 — HDR10 swapchain (A2B10G10R10 + HDR10_ST2084) + vkSetHdrMetadataEXT BT.2020 / 1000 nits |
+| **1.2.186** | HDR Phase 1 — capability-gated VK_EXT_swapchain_colorspace + VK_EXT_hdr_metadata re-enable behind user opt-in |
+| **1.2.185** | SIGSEGV canary fallback — SharedPreferences flag survives JVM crash so Pixel 9-class driver bugs auto fall through to GLES on next launch |
+| **1.2.184** | Android perf overlay redesign (lime/ink2 monospace, PC §05 NET HUD style); FRUC Output FPS bug fix (was reporting input rate, now actual present rate) |
+| **1.2.180–183** | Pixel 9 Vulkan FRUC bisect chain — drop VK_EXT_hdr_metadata / VK_EXT_swapchain_colorspace / ANativeWindow_setFrameRate enable to clear vkCreateInstance/Device SIGSEGV on Mali-G715 driver |
+| **1.2.165–179** | Vulkan FRUC (Android) §I.C/D — smart-mode dual present (60→120 FPS), in-flight ring (VK_FRAMES_IN_FLIGHT=2), VK_GOOGLE_display_timing, flip-flop hysteresis fix, Java max-refresh propagation |
+| **1.2.150–164** | Vulkan FRUC (Android) §I.B — AHardwareBuffer zero-copy import via VK_ANDROID_external_memory_android_hardware_buffer + VkSamplerYcbcrConversion immutable sampler; graphics pipeline lazy init |
+| **1.2.124–149** | DirectML cascade rewrite — ditched the resolution-walking probe (720p→540p→480p→360p) for native-res model variant cascade (fp16→fp32→Generic); fp16 RIFE export with internal pad/crop fix; IFRNet-S negative result documented |
 | **1.2.123** | Android Steam-switch dropdown reaches feature parity with PC client; fix OkHttp `addPathSegment` URL-encoding `/` to `%2F` (use `addPathSegments` plural) |
 | **1.2.119** | `/steamswitch` rewritten async — server returns 202+task_id immediately, client polls `/steamswitch/status`; eliminates spurious "host disconnected" during the 9 s Steam restart |
 | **1.2.118** | Fix root cause of permanently empty `current_user`: `CreateProcessAsUserW` doesn't load the user profile, so HKCU points at `.DEFAULT`; switched to walking `HKEY_USERS` subhives |
