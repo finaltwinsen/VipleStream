@@ -92,12 +92,35 @@ private:
     // are the GPU replacement for rgba8RowToPlanarFp32 /
     // planarFp32RowToRgba8 — running them on the same Vulkan device
     // as the RIFE inference avoids the ~30 ms CPU staging round-trip
-    // per submitFrame.  Pipelines are created here but not invoked
-    // until B.4b wires submitFrame to use them.  Returns false on
-    // GLSL compile failure or pipeline create failure; failure is
-    // non-fatal — m_SharedPathReady stays false and CPU staging path
-    // continues to operate.
+    // per submitFrame.  Returns false on GLSL compile failure or
+    // pipeline create failure; failure is non-fatal — m_SharedPathReady
+    // stays false and CPU staging path continues to operate.
     bool compileSharedPathPipelines();
+
+    // Phase B.4b: own command pool, command buffers, packed-RGBA8
+    // staging VkMats, the D3D11 event query, and pre-uploaded
+    // timestep tensor.  Called from initialize() after the pipelines
+    // build successfully.  Returns false on any allocation failure
+    // (logs reason); failure is non-fatal — m_SharedPathReady stays
+    // false.  Resources are torn down in destroy().
+    bool initSharedPathResources();
+
+    // Phase B.4b: GPU-only path equivalent to submitFrame's CPU
+    // staging body.  Only invoked when m_SharedPathReady is true.
+    // Steps: D3D11 event-query sync → vkCmdCopyImageToBuffer
+    // (imported render VkImage → m_PackedInVkMat) → pre-shader
+    // dispatch → RIFE forward → post-shader dispatch →
+    // vkCmdCopyBufferToImage (m_PackedOutVkMat → imported output
+    // VkImage).  Returns true if interp output landed in m_OutputTex,
+    // false on any failure (caller falls back to last frame as in the
+    // CPU-staging path).
+    bool submitFrameShared(ID3D11DeviceContext* ctx);
+
+    // Phase B.4b: one-shot transition the imported render + output
+    // VkImages from UNDEFINED to GENERAL on first use.  GENERAL is
+    // the recommended layout for D3D11/Vulkan shared images (no
+    // transitions needed afterwards, just memory barriers).
+    bool transitionSharedImagesToGeneral();
 
     std::atomic<bool> m_Initialized { false };
     int               m_Quality     = 0;
@@ -140,6 +163,23 @@ private:
     // private types — see ncnnfruc.cpp for the cast.
     ncnn::Pipeline*                                  m_PipelinePre        = nullptr;
     ncnn::Pipeline*                                  m_PipelinePost       = nullptr;
+    // Phase B.4b: shared-path GPU resources.  All Vulkan handles
+    // are stored as void* so the header doesn't need to drag in
+    // <vulkan/vulkan.h> — the .cpp casts back to the typed handles
+    // for use.  ncnn::VkMat instances embed VkBufferMemory* with
+    // refcount; they're owned by ncnn's blob allocator and freed
+    // when the allocator is reclaimed in destroy().
+    void*                                            m_VkComputeQueue     = nullptr;  // VkQueue
+    uint32_t                                         m_VkComputeQueueFamily = 0;
+    void*                                            m_VkCmdPool          = nullptr;  // VkCommandPool
+    void*                                            m_VkCmdBufImgIn      = nullptr;  // VkCommandBuffer (img→buf)
+    void*                                            m_VkCmdBufImgOut     = nullptr;  // VkCommandBuffer (buf→img)
+    ncnn::VkMat                                      m_PackedInVkMat;                 // RGBA8 staging (W*H uint32, c=1)
+    ncnn::VkMat                                      m_PackedOutVkMat;                // RGBA8 staging output
+    ncnn::VkMat                                      m_PrevVkMat;                     // planar fp32 prev frame (W,H,3)
+    ncnn::VkMat                                      m_TimestepVkMat;                 // constant 0.5 (W,H,1)
+    bool                                             m_VkImagesInGeneralLayout = false;
+    void*                                            m_D3D11SyncQuery     = nullptr;  // ID3D11Query (event)
 
     // NCNN bits.  m_Net is the loaded RIFE 4.25-lite flownet
     // (3-input: in0/in1/in2 = prev RGB, curr RGB, timestep).

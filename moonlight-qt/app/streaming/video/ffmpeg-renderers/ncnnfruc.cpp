@@ -25,6 +25,7 @@
 #include <ncnn/mat.h>
 #include <ncnn/pipeline.h>
 #include <ncnn/option.h>
+#include <ncnn/command.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -206,13 +207,16 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
         // m_SharedPathReady is set and Phase B.4 (preprocess shader)
         // can take over from CPU staging.
         if (importSharedTexturesIntoVulkan()) {
-            // Phase B.4a — try to compile the GPU conversion shaders.
-            // Failure is non-fatal: shaders not present means
-            // m_SharedPathReady stays false and CPU staging continues
-            // to operate as it does today.  m_SharedPathReady itself
-            // doesn't flip until B.4b wires submitFrame to use the
-            // dispatched pipelines.
-            compileSharedPathPipelines();
+            // Phase B.4a + B.4b — compile GPU conversion shaders and
+            // allocate command pool / staging buffers.  Both must
+            // succeed for the shared path to be functional.  Failure
+            // is non-fatal: m_SharedPathReady stays false and CPU
+            // staging continues to operate as it does today.
+            // m_SharedPathReady is flipped in B.4c, after empirical
+            // selftest, so this commit only lays the inert plumbing.
+            if (compileSharedPathPipelines()) {
+                initSharedPathResources();
+            }
         }
     }
 
@@ -809,6 +813,428 @@ bool NcnnFRUC::compileSharedPathPipelines()
     return true;
 }
 
+// ---- Phase B.4b: command pool, staging VkMats, D3D11 sync query ----
+//
+// Persistent resources owned by us across the whole streaming session.
+// VkCommandPool + 2× VkCommandBuffer are needed because we record the
+// imported-image ↔ packed-buffer copies via raw Vulkan (ncnn doesn't
+// expose its own VkCommandBuffer).  ncnn::VkMat instances for the
+// staging buffers are allocated through the device's blob allocator
+// so they integrate with the rest of ncnn's pipeline machinery.
+
+bool NcnnFRUC::initSharedPathResources()
+{
+    if (!m_Net) return false;
+
+    ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
+    if (!vkdev) return false;
+
+    // ---- D3D11 sync query ----
+    // D3D11_QUERY_EVENT End()/GetData() pair gives us a CPU-side
+    // fence: GetData returns S_OK only after every D3D11 command
+    // submitted before End() has reached the GPU.  We poll-spin in
+    // submitFrameShared until that point so Vulkan never reads the
+    // imported texture mid-D3D11-write.  Adds ~0.2-1 ms CPU per
+    // frame; future B.5 optimisation: switch to ID3D11Fence +
+    // VkSemaphore via VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT.
+    D3D11_QUERY_DESC qDesc = {};
+    qDesc.Query = D3D11_QUERY_EVENT;
+    Microsoft::WRL::ComPtr<ID3D11Query> query;
+    if (FAILED(m_Device->CreateQuery(&qDesc, query.GetAddressOf()))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.4b: D3D11 CreateQuery(EVENT) failed");
+        return false;
+    }
+    m_D3D11SyncQuery = query.Detach();
+
+    // ---- Vulkan resources ----
+    HMODULE vk = ::GetModuleHandleW(L"vulkan-1.dll");
+    if (!vk) vk = ::LoadLibraryW(L"vulkan-1.dll");
+    if (!vk) return false;
+
+    auto pfnGDPA = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        ::GetProcAddress(vk, "vkGetDeviceProcAddr"));
+    if (!pfnGDPA) return false;
+
+    const VkDevice dev = vkdev->vkdevice();
+    auto pfnGetQueue       = (PFN_vkGetDeviceQueue)        pfnGDPA(dev, "vkGetDeviceQueue");
+    auto pfnCreatePool     = (PFN_vkCreateCommandPool)     pfnGDPA(dev, "vkCreateCommandPool");
+    auto pfnAllocCmdBufs   = (PFN_vkAllocateCommandBuffers)pfnGDPA(dev, "vkAllocateCommandBuffers");
+    if (!pfnGetQueue || !pfnCreatePool || !pfnAllocCmdBufs) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.4b: required Vulkan entry points missing");
+        return false;
+    }
+
+    // ncnn's compute queue family — same one its layers run on.  The
+    // imported VkImages are owned by the same VulkanDevice so any
+    // queue from this family can access them without ownership transfer.
+    m_VkComputeQueueFamily = vkdev->info.compute_queue_family_index();
+    VkQueue queue = VK_NULL_HANDLE;
+    pfnGetQueue(dev, m_VkComputeQueueFamily, 0, &queue);
+    if (!queue) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.4b: vkGetDeviceQueue returned NULL");
+        return false;
+    }
+    m_VkComputeQueue = (void*)queue;
+
+    // Command pool with TRANSIENT bit (we re-record every frame, so
+    // RESET_COMMAND_BUFFER_BIT is needed too).
+    VkCommandPoolCreateInfo cpci = {};
+    cpci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    cpci.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT
+                          | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    cpci.queueFamilyIndex = m_VkComputeQueueFamily;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (pfnCreatePool(dev, &cpci, nullptr, &pool) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.4b: vkCreateCommandPool failed");
+        return false;
+    }
+    m_VkCmdPool = (void*)pool;
+
+    // Two primary command buffers, one for each direction.  Keeping
+    // them separate simplifies recording — we don't need to track
+    // intermediate fence states.
+    VkCommandBufferAllocateInfo cbai = {};
+    cbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbai.commandPool        = pool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+
+    VkCommandBuffer cbIn = VK_NULL_HANDLE, cbOut = VK_NULL_HANDLE;
+    if (pfnAllocCmdBufs(dev, &cbai, &cbIn) != VK_SUCCESS ||
+        pfnAllocCmdBufs(dev, &cbai, &cbOut) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.4b: vkAllocateCommandBuffers failed");
+        return false;
+    }
+    m_VkCmdBufImgIn  = (void*)cbIn;
+    m_VkCmdBufImgOut = (void*)cbOut;
+
+    // ---- ncnn-allocated staging VkMats ----
+    // Packed RGBA8 buffers: shape (W*H, 1) elemsize=4 = W*H*4 bytes.
+    // Planar fp32 prev/timestep: shape (W, H, 3) and (W, H, 1) elemsize=4.
+    ncnn::VkAllocator* blob = vkdev->acquire_blob_allocator();
+    const int W = static_cast<int>(m_Width);
+    const int H = static_cast<int>(m_Height);
+
+    m_PackedInVkMat.create(W * H, (size_t)4, blob);
+    m_PackedOutVkMat.create(W * H, (size_t)4, blob);
+    m_PrevVkMat.create(W, H, 3, (size_t)4, blob);
+    m_TimestepVkMat.create(W, H, 1, (size_t)4, blob);
+    if (m_PackedInVkMat.empty() || m_PackedOutVkMat.empty() ||
+        m_PrevVkMat.empty() || m_TimestepVkMat.empty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.4b: VkMat allocation failed via blob allocator");
+        return false;
+    }
+
+    // Upload constant 0.5 timestep into m_TimestepVkMat.  This is the
+    // RIFE midpoint indicator; it never changes after init.  We use a
+    // VkTransfer (one-shot CPU→GPU upload) since it's a single tensor.
+    {
+        ncnn::Mat cpu_timestep(W, H, 1);
+        cpu_timestep.fill(0.5f);
+        ncnn::Option opt;
+        opt.use_vulkan_compute = true;
+        opt.blob_vkallocator    = blob;
+        opt.staging_vkallocator = vkdev->acquire_staging_allocator();
+        ncnn::VkTransfer xfer(vkdev);
+        xfer.record_upload(cpu_timestep, m_TimestepVkMat, opt);
+        xfer.submit_and_wait();
+        vkdev->reclaim_staging_allocator(opt.staging_vkallocator);
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC-NCNN] phase-B.4b SUCCESS — command pool, command buffers, "
+                "packed VkMats (%dx%d), and timestep tensor allocated. "
+                "submitFrameShared is wired but gated behind m_SharedPathReady (still false)",
+                W, H);
+    return true;
+}
+
+// One-shot UNDEFINED→GENERAL transition for the imported VkImages.
+// Called lazily on first submitFrameShared invocation because
+// vkQueueSubmit is only valid once the queue exists and cmdBuf can be
+// recorded.  Returns false on Vulkan error; caller treats as fatal
+// for the shared path (falls back to CPU staging path).
+
+bool NcnnFRUC::transitionSharedImagesToGeneral()
+{
+    HMODULE vk = ::GetModuleHandleW(L"vulkan-1.dll");
+    if (!vk) return false;
+    auto pfnGDPA = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        ::GetProcAddress(vk, "vkGetDeviceProcAddr"));
+    if (!pfnGDPA) return false;
+
+    ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
+    const VkDevice dev = vkdev->vkdevice();
+    auto pfnBegin   = (PFN_vkBeginCommandBuffer) pfnGDPA(dev, "vkBeginCommandBuffer");
+    auto pfnEnd     = (PFN_vkEndCommandBuffer)   pfnGDPA(dev, "vkEndCommandBuffer");
+    auto pfnBarrier = (PFN_vkCmdPipelineBarrier) pfnGDPA(dev, "vkCmdPipelineBarrier");
+    auto pfnSubmit  = (PFN_vkQueueSubmit)        pfnGDPA(dev, "vkQueueSubmit");
+    auto pfnWait    = (PFN_vkQueueWaitIdle)      pfnGDPA(dev, "vkQueueWaitIdle");
+    auto pfnReset   = (PFN_vkResetCommandBuffer) pfnGDPA(dev, "vkResetCommandBuffer");
+    if (!pfnBegin || !pfnEnd || !pfnBarrier || !pfnSubmit || !pfnWait || !pfnReset)
+        return false;
+
+    auto cb = (VkCommandBuffer)m_VkCmdBufImgIn;
+    pfnReset(cb, 0);
+
+    VkCommandBufferBeginInfo bi = {};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    pfnBegin(cb, &bi);
+
+    auto makeBarrier = [](VkImage img) {
+        VkImageMemoryBarrier b = {};
+        b.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout        = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcAccessMask    = 0;
+        b.dstAccessMask    = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image            = img;
+        b.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        b.subresourceRange.baseMipLevel   = 0;
+        b.subresourceRange.levelCount     = 1;
+        b.subresourceRange.baseArrayLayer = 0;
+        b.subresourceRange.layerCount     = 1;
+        return b;
+    };
+
+    VkImageMemoryBarrier barriers[2] = {
+        makeBarrier((VkImage)m_VkRenderImage),
+        makeBarrier((VkImage)m_VkOutputImage),
+    };
+    pfnBarrier(cb,
+               VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+               VK_PIPELINE_STAGE_TRANSFER_BIT,
+               0, 0, nullptr, 0, nullptr, 2, barriers);
+    pfnEnd(cb);
+
+    VkSubmitInfo si = {};
+    si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &cb;
+    if (pfnSubmit((VkQueue)m_VkComputeQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.4b: layout transition vkQueueSubmit failed");
+        return false;
+    }
+    pfnWait((VkQueue)m_VkComputeQueue);
+
+    m_VkImagesInGeneralLayout = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC-NCNN] phase-B.4b: imported VkImages transitioned to GENERAL layout");
+    return true;
+}
+
+bool NcnnFRUC::submitFrameShared(ID3D11DeviceContext* ctx)
+{
+    if (!m_SharedPathReady || !m_PipelinePre || !m_PipelinePost) return false;
+    if (!m_VkCmdPool || !m_VkComputeQueue) return false;
+    if (!m_VkRenderImage || !m_VkOutputImage) return false;
+
+    ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
+    if (!vkdev) return false;
+
+    // Lazy first-use: transition imported images to GENERAL layout.
+    if (!m_VkImagesInGeneralLayout) {
+        if (!transitionSharedImagesToGeneral()) return false;
+    }
+
+    HMODULE vk = ::GetModuleHandleW(L"vulkan-1.dll");
+    if (!vk) return false;
+    auto pfnGDPA = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        ::GetProcAddress(vk, "vkGetDeviceProcAddr"));
+    if (!pfnGDPA) return false;
+
+    const VkDevice dev = vkdev->vkdevice();
+    auto pfnBegin    = (PFN_vkBeginCommandBuffer) pfnGDPA(dev, "vkBeginCommandBuffer");
+    auto pfnEnd      = (PFN_vkEndCommandBuffer)   pfnGDPA(dev, "vkEndCommandBuffer");
+    auto pfnBarrier  = (PFN_vkCmdPipelineBarrier) pfnGDPA(dev, "vkCmdPipelineBarrier");
+    auto pfnImg2Buf  = (PFN_vkCmdCopyImageToBuffer) pfnGDPA(dev, "vkCmdCopyImageToBuffer");
+    auto pfnBuf2Img  = (PFN_vkCmdCopyBufferToImage) pfnGDPA(dev, "vkCmdCopyBufferToImage");
+    auto pfnSubmit   = (PFN_vkQueueSubmit)        pfnGDPA(dev, "vkQueueSubmit");
+    auto pfnWait     = (PFN_vkQueueWaitIdle)      pfnGDPA(dev, "vkQueueWaitIdle");
+    auto pfnReset    = (PFN_vkResetCommandBuffer) pfnGDPA(dev, "vkResetCommandBuffer");
+
+    // Step 1: Unbind RTV (D3D11 silently drops SRV bind otherwise; same dance as GenericFRUC).
+    ID3D11RenderTargetView* nullRTV = nullptr;
+    ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
+
+    // Step 2: D3D11 sync — End() the event query and spin until GetData returns S_OK.
+    auto* sync = (ID3D11Query*)m_D3D11SyncQuery;
+    ctx->End(sync);
+    BOOL d3d11Done = FALSE;
+    while (true) {
+        HRESULT hr = ctx->GetData(sync, &d3d11Done, sizeof(d3d11Done), 0);
+        if (hr == S_OK && d3d11Done) break;
+        if (FAILED(hr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B.4b: D3D11 sync GetData failed 0x%08lx", hr);
+            return false;
+        }
+        // S_FALSE: not yet ready, spin.
+    }
+
+    // Step 3: Vulkan submission — vkCmdCopyImageToBuffer (imported render → packed-in buf)
+    {
+        auto cb = (VkCommandBuffer)m_VkCmdBufImgIn;
+        pfnReset(cb, 0);
+        VkCommandBufferBeginInfo bi = {};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        pfnBegin(cb, &bi);
+
+        VkBufferImageCopy region = {};
+        region.bufferOffset      = m_PackedInVkMat.buffer_offset();
+        region.bufferRowLength   = 0;  // tightly packed
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel       = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount     = 1;
+        region.imageOffset = { 0, 0, 0 };
+        region.imageExtent = { m_Width, m_Height, 1 };
+        pfnImg2Buf(cb, (VkImage)m_VkRenderImage, VK_IMAGE_LAYOUT_GENERAL,
+                   m_PackedInVkMat.buffer(), 1, &region);
+
+        // Buffer barrier so the compute shader read sees the copy.
+        VkBufferMemoryBarrier bb = {};
+        bb.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bb.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bb.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+        bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bb.buffer              = m_PackedInVkMat.buffer();
+        bb.offset              = m_PackedInVkMat.buffer_offset();
+        bb.size                = VK_WHOLE_SIZE;
+        pfnBarrier(cb,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                   0, 0, nullptr, 1, &bb, 0, nullptr);
+        pfnEnd(cb);
+
+        VkSubmitInfo si = {};
+        si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers    = &cb;
+        if (pfnSubmit((VkQueue)m_VkComputeQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) return false;
+        pfnWait((VkQueue)m_VkComputeQueue);
+    }
+
+    // Step 4: ncnn::VkCompute — pre-shader, then RIFE forward, then post-shader.
+    auto t0 = std::chrono::steady_clock::now();
+    ncnn::VkCompute cmd(vkdev);
+
+    const int W = static_cast<int>(m_Width);
+    const int H = static_cast<int>(m_Height);
+    ncnn::VkMat curr_vk(W, H, 3, (size_t)4, vkdev->acquire_blob_allocator());
+
+    // Pre-shader push constants: w, h.
+    std::vector<ncnn::vk_constant_type> preConsts(2);
+    preConsts[0].i = W;
+    preConsts[1].i = H;
+    cmd.record_pipeline(m_PipelinePre,
+                        std::vector<ncnn::VkMat>{ m_PackedInVkMat, curr_vk },
+                        preConsts, curr_vk);
+
+    // First frame: stash and skip — no prev yet.
+    if (m_FrameCount == 0) {
+        cmd.record_clone(curr_vk, m_PrevVkMat, ncnn::Option());
+        cmd.submit_and_wait();
+        m_FrameCount = 1;
+        return false;
+    }
+
+    // RIFE forward, VkMat in/out.
+    ncnn::Extractor ex = m_Net->create_extractor();
+    ex.input("in0", m_PrevVkMat);
+    ex.input("in1", curr_vk);
+    ex.input("in2", m_TimestepVkMat);
+    ncnn::VkMat out_vk;
+    if (ex.extract("out0", out_vk, cmd) != 0) {
+        cmd.submit_and_wait();
+        cmd.record_clone(curr_vk, m_PrevVkMat, ncnn::Option());
+        m_FrameCount++;
+        return false;
+    }
+
+    // Post-shader: out_vk (planar fp32) → m_PackedOutVkMat (RGBA8).
+    std::vector<ncnn::vk_constant_type> postConsts(2);
+    postConsts[0].i = W;
+    postConsts[1].i = H;
+    cmd.record_pipeline(m_PipelinePost,
+                        std::vector<ncnn::VkMat>{ out_vk, m_PackedOutVkMat },
+                        postConsts, m_PackedOutVkMat);
+
+    // Save curr → prev for next frame.
+    cmd.record_clone(curr_vk, m_PrevVkMat, ncnn::Option());
+
+    if (cmd.submit_and_wait() != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.4b: VkCompute submit_and_wait failed");
+        return false;
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    m_LastInferenceMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    // Step 5: vkCmdCopyBufferToImage (m_PackedOutVkMat → imported output VkImage).
+    {
+        auto cb = (VkCommandBuffer)m_VkCmdBufImgOut;
+        pfnReset(cb, 0);
+        VkCommandBufferBeginInfo bi = {};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        pfnBegin(cb, &bi);
+
+        // Buffer must be readable for transfer.
+        VkBufferMemoryBarrier bb = {};
+        bb.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bb.srcAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;
+        bb.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+        bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bb.buffer              = m_PackedOutVkMat.buffer();
+        bb.offset              = m_PackedOutVkMat.buffer_offset();
+        bb.size                = VK_WHOLE_SIZE;
+        pfnBarrier(cb,
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   0, 0, nullptr, 1, &bb, 0, nullptr);
+
+        VkBufferImageCopy region = {};
+        region.bufferOffset      = m_PackedOutVkMat.buffer_offset();
+        region.bufferRowLength   = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel       = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount     = 1;
+        region.imageOffset = { 0, 0, 0 };
+        region.imageExtent = { m_Width, m_Height, 1 };
+        pfnBuf2Img(cb, m_PackedOutVkMat.buffer(),
+                   (VkImage)m_VkOutputImage, VK_IMAGE_LAYOUT_GENERAL,
+                   1, &region);
+        pfnEnd(cb);
+
+        VkSubmitInfo si = {};
+        si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers    = &cb;
+        if (pfnSubmit((VkQueue)m_VkComputeQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) return false;
+        pfnWait((VkQueue)m_VkComputeQueue);
+    }
+
+    m_FrameCount++;
+    return true;
+}
+
 // ---- pixel format conversion helpers ----
 // D3D11 Map gives us interleaved RGBA8 with row pitch >= w*4 (driver
 // alignment).  ncnn::Mat for RIFE uses planar [C, H, W] fp32 in 0..1.
@@ -885,15 +1311,28 @@ bool matToStaging(ID3D11DeviceContext* ctx, ID3D11Texture2D* staging,
 
 } // namespace
 
-bool NcnnFRUC::submitFrame(ID3D11DeviceContext* ctx, double /*timestamp*/)
+bool NcnnFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp)
 {
     if (!ctx || !m_Net) return false;
+
+    // Phase B.4b: when the shared path is ready (B.4c flips this on
+    // after empirical selftest), bypass the CPU staging round-trip
+    // entirely.  Failure inside submitFrameShared falls through to
+    // the CPU path so a transient Vulkan error doesn't black out the
+    // stream — the user might see one frame of stale interp but the
+    // next frame recovers.
+    if (m_SharedPathReady) {
+        if (submitFrameShared(ctx)) return true;
+        // Shared path declined or failed.  Fall through to CPU staging
+        // — m_PrevMat is independent of m_PrevVkMat so this is safe.
+    }
 
     // CRITICAL: same dance as GenericFRUC — caller wrote into RTV;
     // we must unbind it before lifting the texture as SRV / staging
     // source, otherwise D3D11 silently drops the SRV bind.
     ID3D11RenderTargetView* nullRTV = nullptr;
     ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
+    (void)timestamp;
 
     // Lift the freshly-rendered frame into a CPU-readable staging
     // texture, then convert RGBA8 → planar fp32 normalized.
@@ -988,6 +1427,45 @@ void NcnnFRUC::skipFrame(ID3D11DeviceContext* ctx)
 
 void NcnnFRUC::destroy()
 {
+    // Phase B.4b: tear down GPU shared-path resources BEFORE pipelines
+    // and m_Net.  Order: query → cmdbufs → cmdpool → VkMats (auto via
+    // dtor) → pipelines → m_Net → ncnn instance refcount.
+    if (m_D3D11SyncQuery) {
+        ((ID3D11Query*)m_D3D11SyncQuery)->Release();
+        m_D3D11SyncQuery = nullptr;
+    }
+    if (m_VkCmdPool) {
+        HMODULE vk = ::GetModuleHandleW(L"vulkan-1.dll");
+        if (vk) {
+            auto pfnGDPA = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+                ::GetProcAddress(vk, "vkGetDeviceProcAddr"));
+            if (pfnGDPA && m_Net) {
+                ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
+                if (vkdev) {
+                    const VkDevice dev = vkdev->vkdevice();
+                    auto pfnDestroyPool = (PFN_vkDestroyCommandPool)pfnGDPA(dev, "vkDestroyCommandPool");
+                    if (pfnDestroyPool) {
+                        // FreeCommandBuffers is implicit when the pool is destroyed.
+                        pfnDestroyPool(dev, (VkCommandPool)m_VkCmdPool, nullptr);
+                    }
+                }
+            }
+        }
+        m_VkCmdPool = nullptr;
+        m_VkCmdBufImgIn = nullptr;
+        m_VkCmdBufImgOut = nullptr;
+    }
+    // ncnn::VkMat dtors release their VkBufferMemory back to ncnn's
+    // blob allocator.  The VulkanDevice/blob allocator outlives them
+    // because the m_Net.reset() below is what triggers VulkanDevice
+    // teardown via destroy_gpu_instance refcount.
+    m_PackedInVkMat.release();
+    m_PackedOutVkMat.release();
+    m_PrevVkMat.release();
+    m_TimestepVkMat.release();
+    m_VkImagesInGeneralLayout = false;
+    m_VkComputeQueue = nullptr;
+
     // Phase B.4a: release the GPU conversion pipelines BEFORE m_Net.
     // ncnn::Pipeline holds references into the VulkanDevice that
     // m_Net's destructor would otherwise tear down out from under us.
