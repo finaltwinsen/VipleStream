@@ -113,6 +113,13 @@
     <string name="perf_overlay_netdrops">Frames dropped by your network connection: %1$.2f%%</string>
     <string name="perf_overlay_netlatency">Average network latency: %1$d ms (variance: %2$d ms)</string>
     <string name="perf_overlay_dectime">Average decoding time: %1$.2f ms</string>
+    <string name="perf_overlay_fruc_separator">--- Frame Interpolation (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Status: Active (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Status: Paused</string>
+    <string name="perf_overlay_fruc_pending">Status: Waiting…</string>
+    <string name="perf_overlay_fruc_off">Status: Off</string>
+    <string name="perf_overlay_fruc_count">Interpolated: %1$d / %2$d (ratio: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Effective output: %1$.1f FPS</string>
 
     <!-- AppList activity -->
     <string name="applist_connect_msg">Connecting to PC…</string>

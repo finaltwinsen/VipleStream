@@ -3810,6 +3810,19 @@ Java_com_limelight_binding_video_VkBackend_nativeGetInterpolatedCount(
     return (jint)be->fInterpolatedCount;
 }
 
+// Total swapchain presents = single-mode frames + 2× dual-mode frames.
+// Java updateOutputFps() uses this for delta-based PPS so the perf overlay
+// reports the actual on-screen rate, not the input/decoder rate (fix for
+// the "Output ≈ input" appearance of v1.2.183 even when dual%≈90%).
+JNIEXPORT jint JNICALL
+Java_com_limelight_binding_video_VkBackend_nativeGetDisplayedCount(
+    JNIEnv* env, jclass clazz, jlong handle)
+{
+    vk_backend_t* be = (vk_backend_t*)(uintptr_t)handle;
+    if (!be) return 0;
+    return (jint)(be->fSingleFrameCount + 2 * be->fDualFrameCount);
+}
+
 JNIEXPORT void JNICALL
 Java_com_limelight_binding_video_VkBackend_nativeSetQualityLevel(
     JNIEnv* env, jclass clazz, jlong handle, jint level)

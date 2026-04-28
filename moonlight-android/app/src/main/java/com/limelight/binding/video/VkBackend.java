@@ -67,12 +67,14 @@ public final class VkBackend implements IFrucBackend {
     private Handler imageReaderHandler;
     private int imageReaderFramesSeen;
 
-    // Output FPS counter (B.2c.3c.5). 1-second sliding window over the
-    // ImageReader frames that resulted in a successful nativeRenderFrame
-    // (rc=0). volatile because the perf overlay polls from the UI thread
-    // while we update from the ImageReader handler thread.
+    // Output FPS counter (delta-based since v1.2.184). Reads
+    // nativeGetDisplayedCount() — which returns single + 2*dual — and
+    // divides delta by elapsed time. Reports actual on-screen present
+    // rate, not the input/decoder rate. volatile because the perf
+    // overlay polls from the UI thread while we update from the
+    // ImageReader handler thread.
     private long fpsWindowStartNs;
-    private int  fpsWindowFrames;
+    private int  fpsLastDisplayedCount;
     private volatile float currentOutputFps;
 
     public VkBackend(Context context) {
@@ -318,24 +320,32 @@ public final class VkBackend implements IFrucBackend {
     }
 
     /**
-     * §I.B.2c.3c.5: 1-second sliding window FPS counter. Called from the
-     * ImageReader callback thread for each frame that successfully went
-     * through {@code nativeRenderFrame}. The first call seeds the window
-     * start and emits no value; subsequent calls increment the frame count
-     * and re-publish {@code currentOutputFps} once a full second elapses.
+     * Delta-based 1-second sliding window over the native displayed
+     * count (single + 2*dual). Reports the actual swapchain present
+     * rate so the perf overlay shows ~2× input in dual mode and ~1×
+     * in single mode, matching the GLES FRUC path's semantics.
+     *
+     * Pre-v1.2.184 this incremented by 1 per input frame, which made
+     * the overlay's "Output FPS" always equal "Input FPS" regardless
+     * of how many presents the dual-mode pipeline submitted — that
+     * was the source of the user-reported "1:1 even with FRUC active"
+     * appearance.
      */
     private void updateOutputFps() {
         long now = System.nanoTime();
-        fpsWindowFrames++;
+        int displayed = (nativeHandle != 0) ? nativeGetDisplayedCount(nativeHandle) : 0;
         if (fpsWindowStartNs == 0) {
-            fpsWindowStartNs = now;
+            fpsWindowStartNs      = now;
+            fpsLastDisplayedCount = displayed;
             return;
         }
         long elapsedNs = now - fpsWindowStartNs;
         if (elapsedNs >= 1_000_000_000L) {
-            currentOutputFps = fpsWindowFrames * 1_000_000_000f / elapsedNs;
-            fpsWindowFrames  = 0;
-            fpsWindowStartNs = now;
+            int delta = displayed - fpsLastDisplayedCount;
+            if (delta < 0) delta = 0;   // shouldn't happen; counters monotonic
+            currentOutputFps      = delta * 1_000_000_000f / elapsedNs;
+            fpsLastDisplayedCount = displayed;
+            fpsWindowStartNs      = now;
         }
     }
 
@@ -355,9 +365,9 @@ public final class VkBackend implements IFrucBackend {
         Log.i(TAG, "ImageReader destroyed (frames seen during this session: "
                    + imageReaderFramesSeen + ")");
         imageReaderFramesSeen = 0;
-        fpsWindowStartNs = 0;
-        fpsWindowFrames  = 0;
-        currentOutputFps = 0f;
+        fpsWindowStartNs      = 0;
+        fpsLastDisplayedCount = 0;
+        currentOutputFps      = 0f;
     }
 
     @Override
@@ -388,6 +398,7 @@ public final class VkBackend implements IFrucBackend {
     private static native int  nativeImportAhb(long handle, HardwareBuffer hwBuffer);
     private static native int  nativeRenderFrame(long handle, HardwareBuffer hwBuffer);
     private static native int  nativeGetInterpolatedCount(long handle);
+    private static native int  nativeGetDisplayedCount(long handle);
     private static native void nativeSetQualityLevel(long handle, int level);
     private static native void nativeSetHdrEnabled(long handle, boolean enabled);
     private static native void nativeSetLogPath(String path);

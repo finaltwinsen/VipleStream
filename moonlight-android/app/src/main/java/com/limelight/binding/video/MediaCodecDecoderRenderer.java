@@ -1556,17 +1556,31 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 }
                 sb.append(context.getString(R.string.perf_overlay_dectime, decodeTimeMs)).append('\n');
 
-                // VipleStream: FRUC status in performance overlay
+                // VipleStream: FRUC status in performance overlay (PC-style layout).
+                // Always emits the separator + a status line so the section is
+                // visually consistent regardless of FRUC state. When active,
+                // adds count (with PC-style ratio = interp / session-rendered)
+                // and effective output FPS (= actual swapchain present rate
+                // since v1.2.184 — pre-184 the Vulkan path falsely reported
+                // input rate).
+                sb.append(context.getString(R.string.perf_overlay_fruc_separator)).append('\n');
                 if (frucEnabled && frucRenderer != null) {
-                    sb.append("--- FRUC ---\n");
-                    sb.append(String.format("FRUC: Active [%s] | Output: %.1f FPS\n",
-                        frucRenderer.backendName(), frucRenderer.getOutputFps()));
-                    sb.append(String.format("Interpolated: %d frames\n", frucRenderer.getInterpolatedCount()));
+                    sb.append(context.getString(R.string.perf_overlay_fruc_active,
+                              frucRenderer.backendName())).append('\n');
+                    int interp = frucRenderer.getInterpolatedCount();
+                    int sessionRendered = globalVideoStats.totalFramesRendered
+                                        + activeWindowVideoStats.totalFramesRendered;
+                    float ratio = sessionRendered > 0
+                                ? (float) interp / sessionRendered * 100f
+                                : 0f;
+                    sb.append(context.getString(R.string.perf_overlay_fruc_count,
+                              interp, sessionRendered, ratio)).append('\n');
+                    sb.append(context.getString(R.string.perf_overlay_fruc_effective_fps,
+                              frucRenderer.getOutputFps())).append('\n');
                 } else if (prefs.enableFruc) {
-                    sb.append("--- FRUC ---\n");
-                    sb.append("Status: Enabled but not active\n");
+                    sb.append(context.getString(R.string.perf_overlay_fruc_pending)).append('\n');
                 } else {
-                    sb.append("FRUC: Off\n");
+                    sb.append(context.getString(R.string.perf_overlay_fruc_off)).append('\n');
                 }
 
                 perfListener.onPerfUpdate(sb.toString());
