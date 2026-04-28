@@ -341,6 +341,81 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
                 extMem         = hasExt("VK_KHR_external_memory");
                 memReq2        = hasExt("VK_KHR_get_memory_requirements2");
                 dedicatedAlloc = hasExt("VK_KHR_dedicated_allocation");
+
+                // §J.3.a — Vulkan video decode capability probe.  Long-term
+                // path B: VK_KHR_video_decode_av1 / _h265 / _h264 turns the
+                // entire decoder into Vulkan-native, eliminating the
+                // D3D11→Vulkan bridge that §J.1 hit a wall on.  Just
+                // informational here — actual decoder wiring is in §J.3.b+.
+                bool vidQ        = hasExt("VK_KHR_video_queue");
+                bool vidDecode   = hasExt("VK_KHR_video_decode_queue");
+                bool vidH264     = hasExt("VK_KHR_video_decode_h264");
+                bool vidH265     = hasExt("VK_KHR_video_decode_h265");
+                bool vidAv1      = hasExt("VK_KHR_video_decode_av1");
+                bool vidMaint1   = hasExt("VK_KHR_video_maintenance1");
+                bool synch2      = hasExt("VK_KHR_synchronization2");
+                bool fmtMod      = hasExt("VK_EXT_image_drm_format_modifier");
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC-NCNN] §J.3.a video decode probe: "
+                            "video_queue=%d decode_queue=%d h264=%d h265=%d av1=%d "
+                            "maint1=%d sync2=%d drm_fmt_mod=%d",
+                            vidQ, vidDecode, vidH264, vidH265, vidAv1,
+                            vidMaint1, synch2, fmtMod);
+                if (vidQ && vidDecode && synch2 && (vidH264 || vidH265 || vidAv1)) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC-NCNN] §J.3.a feasible — Vulkan-native decoder pipeline can be wired "
+                                "(codecs: %s%s%s)",
+                                vidH264 ? "H264 " : "",
+                                vidH265 ? "H265 " : "",
+                                vidAv1  ? "AV1"   : "");
+
+                    // §J.3.b.0 — queue family probe.  Plain
+                    // vkGetPhysicalDeviceQueueFamilyProperties is 1.0 core,
+                    // exported by vulkan-1.dll directly (no need for
+                    // VkInstance).  VK_QUEUE_VIDEO_DECODE_BIT_KHR is a queue
+                    // flag bit added by VK_KHR_video_queue, comes through
+                    // 1.0 properties just fine.  Per-family codec_ops query
+                    // would need Properties2 + VkInstance-level proc lookup
+                    // — defer to §J.3.b.1 when we create our own VkInstance
+                    // for the actual decoder.
+                    auto pfnEnumQueueFams = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)
+                        ::GetProcAddress(vk, "vkGetPhysicalDeviceQueueFamilyProperties");
+                    if (pfnEnumQueueFams) {
+                        uint32_t qfCount = 0;
+                        pfnEnumQueueFams(phys, &qfCount, nullptr);
+                        std::vector<VkQueueFamilyProperties> qfProps(qfCount);
+                        pfnEnumQueueFams(phys, &qfCount, qfProps.data());
+
+                        int decodeFamilyIdx = -1;
+                        for (uint32_t i = 0; i < qfCount; ++i) {
+                            const auto& q = qfProps[i];
+                            if (q.queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) {
+                                if (decodeFamilyIdx < 0) decodeFamilyIdx = (int)i;
+                                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                            "[VIPLE-FRUC-NCNN] §J.3.b.0 queue family[%u]: "
+                                            "count=%u flags=0x%x VIDEO_DECODE",
+                                            i, q.queueCount, (unsigned)q.queueFlags);
+                            }
+                        }
+                        if (decodeFamilyIdx >= 0) {
+                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                        "[VIPLE-FRUC-NCNN] §J.3.b.0 OK — decode queue family found at idx=%d "
+                                        "(per-codec ops query needs §J.3.b.1 VkInstance)",
+                                        decodeFamilyIdx);
+                        } else {
+                            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                        "[VIPLE-FRUC-NCNN] §J.3.b.0 no queue family advertises VIDEO_DECODE_BIT — "
+                                        "extensions exist but no decode queue?!");
+                        }
+                    } else {
+                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-FRUC-NCNN] §J.3.b.0 vkGetPhysicalDeviceQueueFamilyProperties not loadable");
+                    }
+                } else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC-NCNN] §J.3.a BLOCKED — driver missing core video extensions; "
+                                "VK_KHR_video_decode path not viable on this device");
+                }
             }
 
             void* fpImport = nullptr;
