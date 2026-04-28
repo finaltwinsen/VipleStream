@@ -1975,13 +1975,21 @@ static int init_graphics_pipeline(vk_backend_t* be)
             LOGE("vkAllocateDescriptorSets failed"); return -1;
         }
     }
-    // Push constant range for video_sample.frag's uvScale (vec2 = 8 bytes).
-    // Used to crop AHB macroblock padding (e.g. 1080→1088 = scale .y 0.9926)
-    // and Y-flip the AHB layout to match swapchain origin convention.
+    // Push constant range for video_sample.frag (16 bytes total):
+    //   • offset 0  vec2 uvScale    — crop AHB macroblock padding +
+    //                                  Y-flip AHB layout
+    //   • offset 8  uint hdrActive  — §I.E.b Phase 3 (v1.2.189): when 1,
+    //                                  the shader applies sRGB → linear →
+    //                                  ST.2084 PQ encoding so SDR samples
+    //                                  display correctly on the HDR10
+    //                                  swapchain. Set from
+    //                                  be->fHdrSwapchainActive at draw time.
+    //   • offset 12 uint _pad       — keeps the struct 16-byte aligned
+    //                                  (matches shader-side layout).
     VkPushConstantRange pcRange = {
         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset     = 0,
-        .size       = 8,
+        .size       = 16,
     };
     VkPipelineLayoutCreateInfo plci = {
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -3366,14 +3374,16 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         be->vkCmdBindPipeline(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, be->graphicsPipeline);
         be->vkCmdBindDescriptorSets(be->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     be->pipelineLayout, 0, 1, &be->descSet, 0, NULL);
-        float uvScale[2] = {
-            (be->videoWidth  > 0 && be->ahbPaddedWidth  > 0)
-                ? (float)be->videoWidth  / (float)be->ahbPaddedWidth  : 1.0f,
-            (be->videoHeight > 0 && be->ahbPaddedHeight > 0)
-                ? (float)be->videoHeight / (float)be->ahbPaddedHeight : 1.0f,
+        struct { float uvScale[2]; uint32_t hdrActive; uint32_t _pad; } pcSingle = {
+            { (be->videoWidth  > 0 && be->ahbPaddedWidth  > 0)
+                  ? (float)be->videoWidth  / (float)be->ahbPaddedWidth  : 1.0f,
+              (be->videoHeight > 0 && be->ahbPaddedHeight > 0)
+                  ? (float)be->videoHeight / (float)be->ahbPaddedHeight : 1.0f },
+            be->fHdrSwapchainActive ? 1u : 0u,
+            0u,
         };
         be->vkCmdPushConstants(be->cmdBuffer, be->pipelineLayout,
-                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uvScale), uvScale);
+                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pcSingle), &pcSingle);
         be->vkCmdDraw(be->cmdBuffer, 3, 1, 0, 0);
         be->vkCmdEndRenderPass(be->cmdBuffer);
 
@@ -3670,19 +3680,22 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         be->vkCmdBindPipeline(slotCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, be->graphicsPipeline);
         be->vkCmdBindDescriptorSets(slotCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     be->pipelineLayout, 0, 1, &be->descSet, 0, NULL);
-        float uvReal[2] = {
-            (be->videoWidth  > 0 && be->ahbPaddedWidth  > 0)
-                ? (float)be->videoWidth  / (float)be->ahbPaddedWidth  : 1.0f,
-            (be->videoHeight > 0 && be->ahbPaddedHeight > 0)
-                ? (float)be->videoHeight / (float)be->ahbPaddedHeight : 1.0f,
+        struct { float uvScale[2]; uint32_t hdrActive; uint32_t _pad; } pcReal = {
+            { (be->videoWidth  > 0 && be->ahbPaddedWidth  > 0)
+                  ? (float)be->videoWidth  / (float)be->ahbPaddedWidth  : 1.0f,
+              (be->videoHeight > 0 && be->ahbPaddedHeight > 0)
+                  ? (float)be->videoHeight / (float)be->ahbPaddedHeight : 1.0f },
+            be->fHdrSwapchainActive ? 1u : 0u,
+            0u,
         };
         be->vkCmdPushConstants(slotCmd, be->pipelineLayout,
-                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uvReal), uvReal);
+                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pcReal), &pcReal);
         if (be->frameCounter == 0) {
             LOGI("uvScale push constants: x=%.4f (video %d / ahb %d) "
-                 "y=%.4f (video %d / ahb %d)",
-                 uvReal[0], be->videoWidth,  be->ahbPaddedWidth,
-                 uvReal[1], be->videoHeight, be->ahbPaddedHeight);
+                 "y=%.4f (video %d / ahb %d) hdrActive=%u",
+                 pcReal.uvScale[0], be->videoWidth,  be->ahbPaddedWidth,
+                 pcReal.uvScale[1], be->videoHeight, be->ahbPaddedHeight,
+                 pcReal.hdrActive);
         }
         be->vkCmdDraw(slotCmd, 3, 1, 0, 0);
         be->vkCmdEndRenderPass(slotCmd);
