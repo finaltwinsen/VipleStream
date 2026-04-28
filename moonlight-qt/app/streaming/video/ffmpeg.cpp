@@ -1467,6 +1467,38 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
 
     // This might be a hwaccel decoder, so try any hw configs first
     if (tryHwAccel) {
+        // §J.3.c.1 — env-var-gated Vulkan-first override.  ffmpeg returns
+        // hw_configs in [D3D11VA, NONE, DXVA2, VULKAN, D3D12VA] order on
+        // Windows, so D3D11VA succeeds at index 0 and Vulkan never gets
+        // tried.  When VIPLE_USE_VK_DECODER=1, scan for AV_HWDEVICE_TYPE_VULKAN
+        // first and try it before the regular cascade.  Falls through to
+        // standard order if Vulkan path fails — keeps default behaviour
+        // safe (D3D11VA still primary).
+        const char* vkOverride = SDL_getenv("VIPLE_USE_VK_DECODER");
+        if (vkOverride && SDL_atoi(vkOverride) != 0) {
+            for (int i = 0; ; ++i) {
+                const AVCodecHWConfig* cfg = avcodec_get_hw_config(decoder, i);
+                if (!cfg) break;
+                if (cfg->device_type != AV_HWDEVICE_TYPE_VULKAN) continue;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-VIDEO] §J.3.c.1 VIPLE_USE_VK_DECODER=1 — "
+                            "trying Vulkan hwaccel first (decoder=%s, hw_config[%d])",
+                            decoder->name, i);
+                IFFmpegRenderer::InitFailureReason failureReason;
+                if (tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, cfg, &failureReason,
+                                          [cfg]() -> IFFmpegRenderer* { return createHwAccelRenderer(cfg, 0); })) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VK-VIDEO] §J.3.c.1 Vulkan-first override SUCCESS");
+                    return true;
+                }
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-VIDEO] §J.3.c.1 Vulkan-first override failed (reason=%d) — "
+                            "falling through to standard cascade",
+                            (int)failureReason);
+                break;  // Found Vulkan but it failed — stop scanning.
+            }
+        }
+
         for (int pass = 0; pass <= MAX_DECODER_PASS; pass++) {
             for (int i = 0;; i++) {
                 const AVCodecHWConfig *config = avcodec_get_hw_config(decoder, i);
@@ -1665,6 +1697,39 @@ bool FFmpegVideoDecoder::tryInitializeHwAccelDecoder(PDECODER_PARAMETERS params,
         // Skip hardware decoders that have returned a terminal failure status
         if (terminallyFailedHardwareDecoders.contains(decoder)) {
             continue;
+        }
+
+        // §J.3.c.1 — env-var-gated Vulkan-first override.  Same logic as
+        // the one in tryInitializeRendererForUnknownDecoder; this is the
+        // primary cascade path for known decoders (HEVC/H264).  When
+        // VIPLE_USE_VK_DECODER=1, scan for AV_HWDEVICE_TYPE_VULKAN first
+        // before the regular cascade order picks D3D11VA.  Only kicks in
+        // on pass=0 to avoid double-trying on subsequent passes.
+        if (pass == 0) {
+            const char* vkOverride = SDL_getenv("VIPLE_USE_VK_DECODER");
+            if (vkOverride && SDL_atoi(vkOverride) != 0) {
+                for (int j = 0; ; ++j) {
+                    const AVCodecHWConfig* cfg = avcodec_get_hw_config(decoder, j);
+                    if (!cfg) break;
+                    if (cfg->device_type != AV_HWDEVICE_TYPE_VULKAN) continue;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VK-VIDEO] §J.3.c.1 VIPLE_USE_VK_DECODER=1 — "
+                                "trying Vulkan hwaccel first (decoder=%s, hw_config[%d])",
+                                decoder->name, j);
+                    IFFmpegRenderer::InitFailureReason failureReason;
+                    if (tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, cfg, &failureReason,
+                                              [cfg]() -> IFFmpegRenderer* { return createHwAccelRenderer(cfg, 0); })) {
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-VK-VIDEO] §J.3.c.1 Vulkan-first override SUCCESS");
+                        return true;
+                    }
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VK-VIDEO] §J.3.c.1 Vulkan-first override failed (reason=%d) — "
+                                "falling through to standard cascade",
+                                (int)failureReason);
+                    break;
+                }
+            }
         }
 
         // Look for the first matching hwaccel hardware decoder
