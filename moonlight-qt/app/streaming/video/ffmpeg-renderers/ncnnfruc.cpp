@@ -424,6 +424,45 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
                                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                             "[VIPLE-FRUC-NCNN] §J.3.b.1 skeleton probe SUCCESS — "
                                             "AVHWDeviceContext (Vulkan) creation works");
+
+                                // §J.3.c.0 — hwaccel registration probe.
+                                // ffmpeg cascade iterates avcodec_get_hw_config(decoder, i).
+                                // For Vulkan path to ever be tried, the decoder must
+                                // advertise AV_HWDEVICE_TYPE_VULKAN in its hw_config list.
+                                // User log v1.3.x earlier shows only D3D11VA/DXVA2 listed —
+                                // suspect ffmpeg build doesn't register Vulkan hwaccel.
+                                // This probe enumerates hw_configs for HEVC/AV1/H264
+                                // and logs every device_type to confirm.
+                                auto probeHwConfigs = [&](AVCodecID id, const char* name) {
+                                    const AVCodec* dec = avcodec_find_decoder(id);
+                                    if (!dec) {
+                                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                                    "[VIPLE-FRUC-NCNN] §J.3.c.0 (%s) avcodec_find_decoder=null",
+                                                    name);
+                                        return;
+                                    }
+                                    bool foundVulkan = false;
+                                    char buf[256] = {};
+                                    int off = 0;
+                                    for (int i = 0; ; ++i) {
+                                        const AVCodecHWConfig* cfg = avcodec_get_hw_config(dec, i);
+                                        if (!cfg) break;
+                                        off += snprintf(buf + off, sizeof(buf) - off,
+                                                        " [%d](type=%d pix=%d methods=0x%x)",
+                                                        i, (int)cfg->device_type,
+                                                        (int)cfg->pix_fmt, cfg->methods);
+                                        if (cfg->device_type == AV_HWDEVICE_TYPE_VULKAN) {
+                                            foundVulkan = true;
+                                        }
+                                    }
+                                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                                "[VIPLE-FRUC-NCNN] §J.3.c.0 %s hw_configs:%s — Vulkan=%s",
+                                                name, buf[0] ? buf : " (none)",
+                                                foundVulkan ? "YES" : "NO");
+                                };
+                                probeHwConfigs(AV_CODEC_ID_AV1,  "AV1");
+                                probeHwConfigs(AV_CODEC_ID_HEVC, "HEVC");
+                                probeHwConfigs(AV_CODEC_ID_H264, "H264");
                             } else {
                                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                                             "[VIPLE-FRUC-NCNN] §J.3.b.1 skeleton probe FAILED — "
