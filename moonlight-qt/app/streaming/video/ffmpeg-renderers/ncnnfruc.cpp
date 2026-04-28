@@ -206,30 +206,34 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
         // Phase B.3: try to wire the Vulkan side now.  If it works
         // m_SharedPathReady is set and Phase B.4 (preprocess shader)
         // can take over from CPU staging.
+        //
+        // v1.3.38 — gate ALL of B.4a/B.4b/B.4c behind VIPLE_FRUC_NCNN_SHARED
+        // env var.  v1.3.37 ran the new init code paths unconditionally
+        // (only m_SharedPathReady flip was gated).  Default users on
+        // v1.3.37 reported crashes during a SECOND NcnnFRUC init (codec
+        // re-init triggered by AV1 format change).  Until the root cause
+        // of those crashes is found, default behavior must match v1.3.34
+        // exactly: only B.1+B.2+B.3 code touches Vulkan, CPU staging
+        // path runs from submitFrame.  Set the env var to opt back into
+        // experimental B.4 territory.
         if (importSharedTexturesIntoVulkan()) {
-            // Phase B.4a + B.4b + B.4c — compile GPU conversion
-            // shaders, allocate command pool / staging buffers, run
-            // a pixel-level selftest, and conditionally enable the
-            // shared path.  Default is OFF for safety: user must
-            // export VIPLE_FRUC_NCNN_SHARED=1 to opt in.  Once empirical
-            // testing confirms the path works on the user's GPU, a
-            // follow-up commit flips the default.  Ordered so each
-            // step can short-circuit cleanly without touching m_SharedPathReady.
-            if (compileSharedPathPipelines() && initSharedPathResources()) {
-                if (selftestSharedPath()) {
-                    const char* sharedEnv = SDL_getenv("VIPLE_FRUC_NCNN_SHARED");
-                    const bool wantShared = sharedEnv && SDL_atoi(sharedEnv) != 0;
-                    if (wantShared) {
-                        m_SharedPathReady = true;
-                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                    "[VIPLE-FRUC-NCNN] phase-B.4c: shared path ENABLED via VIPLE_FRUC_NCNN_SHARED=1 "
-                                    "(probe staging cost drops to ~2ms; submitFrame uses GPU compute)");
-                    } else {
-                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                    "[VIPLE-FRUC-NCNN] phase-B.4c: shared path READY but disabled by default. "
-                                    "Set VIPLE_FRUC_NCNN_SHARED=1 to enable GPU compute path");
-                    }
+            const char* sharedEnv = SDL_getenv("VIPLE_FRUC_NCNN_SHARED");
+            const bool wantShared = sharedEnv && SDL_atoi(sharedEnv) != 0;
+            if (wantShared) {
+                if (compileSharedPathPipelines() && initSharedPathResources() && selftestSharedPath()) {
+                    m_SharedPathReady = true;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC-NCNN] phase-B.4c: shared path ENABLED via VIPLE_FRUC_NCNN_SHARED=1 "
+                                "(experimental; probe staging cost drops to ~2ms)");
+                } else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC-NCNN] phase-B.4c: shared path opt-in failed (compile/alloc/selftest);"
+                                " falling back to CPU staging path");
                 }
+            } else {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC-NCNN] phase-B.4 disabled (default). "
+                            "Set VIPLE_FRUC_NCNN_SHARED=1 to opt into the experimental GPU compute path");
             }
         }
     }
