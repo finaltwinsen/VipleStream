@@ -454,6 +454,7 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/directmlfruc.cpp \
         streaming/video/ffmpeg-renderers/ncnnfruc.cpp \
         streaming/video/ffmpeg-renderers/ncnn_rife_warp.cpp \
+        streaming/video/ffmpeg-renderers/vulkanvideo.cpp \
         streaming/video/ffmpeg-renderers/pacer/dxvsyncsource.cpp
 
     HEADERS += \
@@ -464,6 +465,7 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/directmlfruc.h \
         streaming/video/ffmpeg-renderers/ncnnfruc.h \
         streaming/video/ffmpeg-renderers/ncnn_rife_warp.h \
+        streaming/video/ffmpeg-renderers/vulkanvideo.h \
         streaming/video/ffmpeg-renderers/ifrucbackend.h \
         streaming/video/ffmpeg-renderers/pacer/dxvsyncsource.h
 }

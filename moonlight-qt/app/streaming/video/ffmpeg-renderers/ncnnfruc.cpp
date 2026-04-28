@@ -4,6 +4,7 @@
 
 #include "ncnnfruc.h"
 #include "ncnn_rife_warp.h"
+#include "vulkanvideo.h"  // §J.3.b.1 probe
 #include "path.h"
 
 #include <SDL.h>
@@ -402,6 +403,27 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
                                         "[VIPLE-FRUC-NCNN] §J.3.b.0 OK — decode queue family found at idx=%d "
                                         "(per-codec ops query needs §J.3.b.1 VkInstance)",
                                         decodeFamilyIdx);
+
+                            // §J.3.b.1 — exercise VulkanVideoRenderer skeleton.
+                            // Throwaway instance; just validate that
+                            // av_hwdevice_ctx_create(VULKAN) works on this
+                            // system before we wire VulkanVideoRenderer
+                            // into the renderer cascade (§J.3.c+).
+                            DECODER_PARAMETERS dummyParams = {};
+                            dummyParams.width  = (int)m_Width;
+                            dummyParams.height = (int)m_Height;
+                            dummyParams.frameRate = 60;
+                            dummyParams.videoFormat = 0;
+                            VulkanVideoRenderer probeRenderer;
+                            if (probeRenderer.initialize(&dummyParams)) {
+                                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                            "[VIPLE-FRUC-NCNN] §J.3.b.1 skeleton probe SUCCESS — "
+                                            "AVHWDeviceContext (Vulkan) creation works");
+                            } else {
+                                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                            "[VIPLE-FRUC-NCNN] §J.3.b.1 skeleton probe FAILED — "
+                                            "av_hwdevice_ctx_create(VULKAN) returns error on this system");
+                            }
                         } else {
                             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                                         "[VIPLE-FRUC-NCNN] §J.3.b.0 no queue family advertises VIDEO_DECODE_BIT — "
