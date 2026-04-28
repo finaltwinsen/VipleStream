@@ -33,6 +33,17 @@ class VulkanDevice;
 class Pipeline;
 }
 
+// VipleStream §J.3.e.1.c — dev-only probe of ncnn::create_gpu_instance_external.
+// Idempotent: only the first call runs the probe; subsequent calls log + no-op.
+// Designed to be invoked once at process startup when VIPLE_NCNN_EXTERNAL_PROBE
+// is set, so the test fires regardless of cascade selection.  Side-effect: claims
+// the ncnn singleton in external mode, then destroys it — leaves a teardown/setup
+// cycle that v1.3.44 explicitly avoided, so if the probe runs a subsequent
+// production NcnnFRUC init may not be safe (dev-only flag).
+namespace ncnnfruc {
+bool runExternalApiProbe();
+}
+
 class NcnnFRUC : public IFRUCBackend {
 public:
     NcnnFRUC();

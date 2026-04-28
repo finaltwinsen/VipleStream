@@ -37,6 +37,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <dxgi1_6.h>
+// §J.3.e.1.c — early probe entry point lives in NcnnFRUC's TU.
+#include "streaming/video/ffmpeg-renderers/ncnnfruc.h"
 #elif defined(Q_OS_LINUX)
 #include <openssl/ssl.h>
 #endif
@@ -599,6 +601,20 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_WIN32
     // Create a crash dump when we crash on Windows
     SetUnhandledExceptionFilter(UnhandledExceptionHandler);
+#endif
+
+    // §J.3.e.1.c — opt-in early probe of ncnn::create_gpu_instance_external.
+    // Fires before any video cascade so its outcome doesn't depend on which
+    // renderer gets selected.  Side-effect: claims+releases the ncnn singleton
+    // (destroy/recreate cycle that v1.3.44 explicitly avoids), so a streaming
+    // session started after the probe may not have a working NCNN backend —
+    // env var is dev-only.
+#ifdef Q_OS_WIN32
+    if (const char* probeEnv = qgetenv("VIPLE_NCNN_EXTERNAL_PROBE").constData()) {
+        if (probeEnv[0] && probeEnv[0] != '0') {
+            (void)ncnnfruc::runExternalApiProbe();
+        }
+    }
 #endif
 
 #ifdef LOG_TO_FILE

@@ -94,6 +94,237 @@ void releaseNcnnGpu()
 
 } // namespace
 
+// VipleStream §J.3.e.1.c — throwaway probe of ncnn::create_gpu_instance_external.
+// Gated on VIPLE_NCNN_EXTERNAL_PROBE=1.  Creates a minimal VkInstance +
+// VkDevice locally, hands them to ncnn via the new external API, sanity-checks
+// that ncnn::get_gpu_device(0)->vkdevice() returns the SAME VkDevice we passed
+// in, then tears everything down.
+//
+// Side-effect: claims the ncnn process-singleton in external mode.  After the
+// probe, destroy_gpu_instance() releases the singleton (g_external_mode reset
+// at end of destroy).  Subsequent NcnnFRUC initialization will fail because
+// process-lifetime singleton expects monotonic acquire — caller must abort
+// init when this probe is enabled.  This is fine: probe is dev-only; production
+// users never set the env var.
+//
+// Idempotent — only the first call runs the probe; later calls log + no-op.
+// Returns true if the API contract held end-to-end; false on any failure.
+namespace ncnnfruc {
+bool runExternalApiProbe()
+{
+    static std::atomic<bool> s_AlreadyRan { false };
+    bool expected = false;
+    if (!s_AlreadyRan.compare_exchange_strong(expected, true)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.3.e.1.c external probe: already ran this session, skipping");
+        return false;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC-NCNN] §J.3.e.1.c external probe: starting");
+
+    // Dynamically load vulkan-1.dll — moonlight-qt does not link
+    // vulkan-1.lib directly (NCNN handles all Vulkan internally).
+    HMODULE vkLib = ::GetModuleHandleW(L"vulkan-1.dll");
+    if (!vkLib) vkLib = ::LoadLibraryW(L"vulkan-1.dll");
+    if (!vkLib) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: vulkan-1.dll not loadable");
+        return false;
+    }
+
+    auto pfnGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        ::GetProcAddress(vkLib, "vkGetInstanceProcAddr"));
+    auto pfnCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+        ::GetProcAddress(vkLib, "vkCreateInstance"));
+    if (!pfnGetInstanceProcAddr || !pfnCreateInstance) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: vulkan-1.dll missing entry points");
+        return false;
+    }
+
+    VkInstance vkInstance = VK_NULL_HANDLE;
+    VkDevice   vkDevice   = VK_NULL_HANDLE;
+    VkPhysicalDevice vkPhys = VK_NULL_HANDLE;
+
+    PFN_vkDestroyInstance pfnDestroyInstance = nullptr;
+    PFN_vkDestroyDevice   pfnDestroyDevice   = nullptr;
+
+    auto teardown = [&]() {
+        if (vkDevice != VK_NULL_HANDLE && pfnDestroyDevice) {
+            pfnDestroyDevice(vkDevice, nullptr);
+            vkDevice = VK_NULL_HANDLE;
+        }
+        if (vkInstance != VK_NULL_HANDLE && pfnDestroyInstance) {
+            pfnDestroyInstance(vkInstance, nullptr);
+            vkInstance = VK_NULL_HANDLE;
+        }
+    };
+
+    // ---- Create local VkInstance (probe-owned) -----------------------
+    {
+        VkApplicationInfo appInfo = {};
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+        appInfo.pApplicationName = "VipleStream-NcnnExternalProbe";
+        appInfo.apiVersion = VK_API_VERSION_1_2;
+
+        const char* enabledExt[] = {
+            "VK_KHR_get_physical_device_properties2",
+        };
+
+        VkInstanceCreateInfo ici = {};
+        ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        ici.pApplicationInfo = &appInfo;
+        ici.enabledExtensionCount = (uint32_t)(sizeof(enabledExt) / sizeof(enabledExt[0]));
+        ici.ppEnabledExtensionNames = enabledExt;
+
+        VkResult r = pfnCreateInstance(&ici, nullptr, &vkInstance);
+        if (r != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: vkCreateInstance failed %d", (int)r);
+            return false;
+        }
+    }
+
+    // Now load instance-level entries.
+    pfnDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
+        pfnGetInstanceProcAddr(vkInstance, "vkDestroyInstance"));
+    auto pfnEnumPhys = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+        pfnGetInstanceProcAddr(vkInstance, "vkEnumeratePhysicalDevices"));
+    auto pfnGetPhysProps = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+        pfnGetInstanceProcAddr(vkInstance, "vkGetPhysicalDeviceProperties"));
+    auto pfnGetQFProps = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+        pfnGetInstanceProcAddr(vkInstance, "vkGetPhysicalDeviceQueueFamilyProperties"));
+    auto pfnCreateDevice = reinterpret_cast<PFN_vkCreateDevice>(
+        pfnGetInstanceProcAddr(vkInstance, "vkCreateDevice"));
+    if (!pfnEnumPhys || !pfnGetPhysProps || !pfnGetQFProps || !pfnCreateDevice || !pfnDestroyInstance) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: failed to load instance entries");
+        teardown();
+        return false;
+    }
+
+    // ---- Pick the first physical device ------------------------------
+    uint32_t physCount = 0;
+    if (pfnEnumPhys(vkInstance, &physCount, nullptr) != VK_SUCCESS || physCount == 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: no physical devices");
+        teardown();
+        return false;
+    }
+    std::vector<VkPhysicalDevice> phys(physCount);
+    pfnEnumPhys(vkInstance, &physCount, phys.data());
+    vkPhys = phys[0];
+
+    VkPhysicalDeviceProperties physProps;
+    pfnGetPhysProps(vkPhys, &physProps);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: picked physical device '%s' (api=%u.%u)",
+                physProps.deviceName,
+                VK_VERSION_MAJOR(physProps.apiVersion),
+                VK_VERSION_MINOR(physProps.apiVersion));
+
+    // ---- Find a compute queue family ---------------------------------
+    uint32_t qfCount = 0;
+    pfnGetQFProps(vkPhys, &qfCount, nullptr);
+    std::vector<VkQueueFamilyProperties> qfProps(qfCount);
+    pfnGetQFProps(vkPhys, &qfCount, qfProps.data());
+
+    uint32_t computeQF = UINT32_MAX;
+    for (uint32_t i = 0; i < qfCount; i++) {
+        if (qfProps[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { computeQF = i; break; }
+    }
+    if (computeQF == UINT32_MAX) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: no compute queue family");
+        teardown();
+        return false;
+    }
+
+    // ---- Create VkDevice with one compute queue ----------------------
+    {
+        float prio = 1.0f;
+        VkDeviceQueueCreateInfo qci = {};
+        qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qci.queueFamilyIndex = computeQF;
+        qci.queueCount = 1;
+        qci.pQueuePriorities = &prio;
+
+        VkDeviceCreateInfo dci = {};
+        dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        dci.queueCreateInfoCount = 1;
+        dci.pQueueCreateInfos = &qci;
+
+        VkResult r = pfnCreateDevice(vkPhys, &dci, nullptr, &vkDevice);
+        if (r != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: vkCreateDevice failed %d", (int)r);
+            teardown();
+            return false;
+        }
+        pfnDestroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(
+            pfnGetInstanceProcAddr(vkInstance, "vkDestroyDevice"));
+    }
+
+    // ---- Hand to ncnn via the new external API -----------------------
+    int rc = ncnn::create_gpu_instance_external(
+        vkInstance, vkPhys, vkDevice,
+        /*compute*/  computeQF, 1,
+        /*graphics*/ computeQF, 1,
+        /*transfer*/ computeQF, 1);
+    if (rc != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: ncnn::create_gpu_instance_external failed rc=%d", rc);
+        teardown();
+        return false;
+    }
+
+    bool ok = true;
+
+    // ---- Verify ncnn picked up our handles ---------------------------
+    {
+        const int gpuCount = ncnn::get_gpu_count();
+        if (gpuCount < 1) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: ncnn::get_gpu_count() returned %d", gpuCount);
+            ok = false;
+        } else {
+            const ncnn::GpuInfo& gi = ncnn::get_gpu_info(0);
+            ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(0);
+            if (!vkdev) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: ncnn::get_gpu_device(0) returned nullptr");
+                ok = false;
+            } else {
+                VkDevice ncnnDevice = vkdev->vkdevice();
+                if (ncnnDevice != vkDevice) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: VkDevice mismatch — ncnn d->device=%p, expected=%p",
+                                (void*)ncnnDevice, (void*)vkDevice);
+                    ok = false;
+                } else {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: VkDevice handed off to ncnn — d->device=%p (matches caller); "
+                                "GpuInfo.device_name='%s' subgroup=%u fp16-arith=%d compute_qfi=%u",
+                                (void*)ncnnDevice, gi.device_name(),
+                                gi.subgroup_size(),
+                                gi.support_fp16_arithmetic() ? 1 : 0,
+                                gi.compute_queue_family_index());
+                }
+            }
+        }
+    }
+
+    // ---- Teardown ----------------------------------------------------
+    ncnn::destroy_gpu_instance();
+    teardown();
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC-NCNN] §J.3.e.1.c probe: %s", ok ? "PASS" : "FAIL");
+    return ok;
+}
+} // namespace ncnnfruc
+
 NcnnFRUC::NcnnFRUC() = default;
 
 NcnnFRUC::~NcnnFRUC()
@@ -104,6 +335,20 @@ NcnnFRUC::~NcnnFRUC()
 bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
 {
     if (!device || width == 0 || height == 0) return false;
+
+    // §J.3.e.1.c — opt-in throwaway probe of ncnn::create_gpu_instance_external.
+    // Runs once per process, claims and releases the ncnn singleton.  When set,
+    // this NcnnFRUC instance refuses to init so the cascade falls through to
+    // DirectMLFRUC / GenericFRUC.  Dev-only flag.
+    if (const char* probeEnv = SDL_getenv("VIPLE_NCNN_EXTERNAL_PROBE")) {
+        if (SDL_atoi(probeEnv) != 0) {
+            (void)ncnnfruc::runExternalApiProbe();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] §J.3.e.1.c VIPLE_NCNN_EXTERNAL_PROBE set — declining "
+                        "NcnnFRUC initialization so cascade falls through");
+            return false;
+        }
+    }
 
     m_Device = device;
     m_Width  = width;
