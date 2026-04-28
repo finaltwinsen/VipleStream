@@ -568,11 +568,33 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             LimeLog.info("FRUC backend selection: prefs.frucBackendVulkan="
                     + vkSetting + " vkprobe-override=" + vkOverride
                     + " → Vulkan=" + vkOptIn);
+
+            // v1.2.185: SIGSEGV canary — if the previous Vulkan FRUC init
+            // crashed the process (driver bug in vkCreate*; e.g. Pixel 9
+            // pre-1.2.183 chain), force GLES fallback this run. Java
+            // try/catch cannot recover from a kernel-issued SIGSEGV, so
+            // without this the user gets stuck in a crash loop with no
+            // way to launch the app. App-upgrade auto-clears the canary.
+            if (vkOptIn && VkBackend.isCanaryActive(context)) {
+                LimeLog.warning("Vulkan FRUC: skipping due to previous-launch SIGSEGV canary; "
+                                + "falling back to GLES this run. Update the app to retry Vulkan.");
+                vkOptIn = false;
+            }
+
             if (vkOptIn) {
+                // Arm canary BEFORE any JNI call into Vulkan. If native
+                // crashes, the flag persists across process death and the
+                // next launch sees it. commit() not apply() — has to be
+                // on disk before the call.
+                VkBackend.armCanary(context);
                 try {
                     IFrucBackend vk = new VkBackend(context);
                     vk.setQualityLevel(prefs.frucQuality);
                     Surface vkInput = vk.initialize(renderTarget.getSurface(), w, h);
+                    // Returned (any value) ⇒ no SIGSEGV happened; safe to
+                    // disarm. Whether init succeeded or returned null is
+                    // independent of the canary purpose.
+                    VkBackend.disarmCanary(context);
                     // iter 16: thread prefs.enableHdr down to native for §I.E.b/c
                     // gating. Currently informational only — backend logs but
                     // doesn't act on it (HDR pipeline switch deferred).
@@ -588,6 +610,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                         LimeLog.info("Vulkan FRUC backend declined; falling back to GLES");
                     }
                 } catch (Throwable t) {
+                    // Java exception ⇒ also no SIGSEGV ⇒ disarm canary,
+                    // then continue to GLES fallback below.
+                    VkBackend.disarmCanary(context);
                     LimeLog.warning("Vulkan FRUC threw: " + t + " — falling back to GLES");
                 }
             }

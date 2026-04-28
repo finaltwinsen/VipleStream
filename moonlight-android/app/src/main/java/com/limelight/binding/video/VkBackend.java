@@ -1,6 +1,8 @@
 package com.limelight.binding.video;
 
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.graphics.ImageFormat;
 import android.hardware.HardwareBuffer;
 import android.media.Image;
@@ -432,6 +434,86 @@ public final class VkBackend implements IFrucBackend {
         } catch (Throwable t) {
             Log.w(TAG, "isOptedIn reflection failed: " + t);
             return false;
+        }
+    }
+
+    // ---------- SIGSEGV canary (v1.2.185) ----------
+    //
+    // Java try/catch can recover from RuntimeException / native init
+    // returning null, but it CANNOT recover from a SIGSEGV inside
+    // native code (e.g. driver bugs in vkCreateInstance /
+    // vkCreateDevice / vkCreateSwapchainKHR — confirmed on Pixel 9
+    // v1.2.180-182 with VK_EXT_hdr_metadata, VK_EXT_swapchain_colorspace,
+    // ANativeWindow_setFrameRate). When that happens, the kernel kills
+    // the JVM before any catch block runs, and re-launching the app
+    // hits the same code path and crashes again — the user is locked
+    // out forever with no fallback.
+    //
+    // This canary persists "we are about to call into native Vulkan
+    // init" to disk synchronously BEFORE the call. If the call SIGSEGVs,
+    // the flag stays armed across process death. Next launch reads it
+    // and forces GLES fallback. App upgrades (versionCode bump) auto-
+    // clear the canary so a fixed build gets a fresh retry.
+    private static final String CANARY_PREFS_NAME      = "vipleStream_vk_canary";
+    private static final String CANARY_KEY_ARMED       = "init_in_progress";
+    private static final String CANARY_KEY_VERSION     = "last_version_code";
+
+    /**
+     * @return true if the previous Vulkan FRUC init attempt SIGSEGV'd
+     *         the process. When true the caller MUST skip Vulkan and
+     *         fall back to GLES. Auto-clears on app upgrade.
+     */
+    public static boolean isCanaryActive(Context context) {
+        SharedPreferences sp = context.getSharedPreferences(
+                CANARY_PREFS_NAME, Context.MODE_PRIVATE);
+        int curVer = readVersionCode(context);
+        int lastVer = sp.getInt(CANARY_KEY_VERSION, -1);
+        if (lastVer != curVer) {
+            // App upgraded (or first run after canary feature added).
+            // Stale canary may be from an older build whose bug is now
+            // fixed — clear and retry on this fresh version.
+            sp.edit()
+              .putBoolean(CANARY_KEY_ARMED, false)
+              .putInt(CANARY_KEY_VERSION, curVer)
+              .apply();
+            Log.i(TAG, "canary: version changed " + lastVer + " → " + curVer
+                       + ", cleared stale canary");
+            return false;
+        }
+        boolean armed = sp.getBoolean(CANARY_KEY_ARMED, false);
+        if (armed) {
+            Log.w(TAG, "canary: ARMED — previous Vulkan init likely SIGSEGV'd, "
+                       + "forcing GLES fallback. Update the app to retry.");
+        }
+        return armed;
+    }
+
+    /** Persist "about to call native Vulkan init" synchronously. */
+    public static void armCanary(Context context) {
+        // commit() not apply() — must be on disk before native call,
+        // otherwise a SIGSEGV before the async write completes would
+        // leave the canary unarmed and we'd crash again next launch.
+        context.getSharedPreferences(CANARY_PREFS_NAME, Context.MODE_PRIVATE)
+               .edit()
+               .putBoolean(CANARY_KEY_ARMED, true)
+               .commit();
+    }
+
+    /** Native init returned (success or graceful null) — clear canary. */
+    public static void disarmCanary(Context context) {
+        context.getSharedPreferences(CANARY_PREFS_NAME, Context.MODE_PRIVATE)
+               .edit()
+               .putBoolean(CANARY_KEY_ARMED, false)
+               .apply();
+    }
+
+    private static int readVersionCode(Context context) {
+        try {
+            PackageInfo pi = context.getPackageManager()
+                    .getPackageInfo(context.getPackageName(), 0);
+            return pi.versionCode;
+        } catch (Throwable t) {
+            return -1;
         }
     }
 }
