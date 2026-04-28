@@ -287,14 +287,22 @@ int RifeWarp::create_pipeline(const ncnn::Option& opt)
         pipeline_warp_pack4->create(spirv.data(), spirv.size() * 4, specializations);
     }
 
-    // pack8 dropped — stock ncnn 1.20+ removed `use_shader_pack8`
-    // and rebound the macros (`afpvec8`/`sfpvec8`) to require both
-    // fp16_storage and fp16_arithmetic + a custom builder hook our
-    // simplified runtime register doesn't replicate.  pack4 covers
-    // every Tensor-Core-class GPU we care about; the only loss is
-    // ~5-8% throughput on RTX 40-class with fp16e2m1, well below
-    // measurement noise for FRUC's 30 fps frame budget.
-    pipeline_warp_pack8 = nullptr;
+    // pack8 — restored in v1.3.20 after switching to ncnn 20220729
+    // built from source (pre-cooperative_matrix era, has the legacy
+    // pack8 macro injection + use_shader_pack8 toggle).  This is the
+    // Tensor-Core fast path on RTX 30/40 — RIFE 4.25-lite drops from
+    // ~99 ms (pack4-only) to ~45 ms (pack8) on RTX 3060 Laptop.
+    if (opt.use_shader_pack8) {
+        static std::vector<uint32_t> spirv;
+        static std::mutex lock;
+        std::lock_guard<std::mutex> guard(lock);
+        if (spirv.empty()) {
+            compile_spirv_module(kWarpPack8Comp, sizeof(kWarpPack8Comp) - 1, opt, spirv);
+        }
+        pipeline_warp_pack8 = new Pipeline(vkdev);
+        pipeline_warp_pack8->set_optimal_local_size_xyz();
+        pipeline_warp_pack8->create(spirv.data(), spirv.size() * 4, specializations);
+    }
 
     return 0;
 }
@@ -389,12 +397,9 @@ int RifeWarp::forward(const std::vector<VkMat>& bottom_blobs,
     constants[2].i = top_blob.c;
     constants[3].i = top_blob.cstep;
 
-    // Pack8 path was dropped in create_pipeline; if ncnn somehow
-    // hands us an elempack=8 blob (shouldn't happen for a custom
-    // layer that didn't declare pack8 support), fall through to
-    // pack4 and let ncnn re-pack on the boundary.  pack1 stays as
-    // the single-channel scalar fallback.
-    if (elempack == 4 || elempack == 8) {
+    if (elempack == 8 && pipeline_warp_pack8) {
+        cmd.record_pipeline(pipeline_warp_pack8, bindings, constants, top_blob);
+    } else if (elempack == 4) {
         cmd.record_pipeline(pipeline_warp_pack4, bindings, constants, top_blob);
     } else {
         cmd.record_pipeline(pipeline_warp, bindings, constants, top_blob);
