@@ -186,6 +186,11 @@ private:
     ncnn::VkMat                                      m_PackedOutVkMat;                // RGBA8 staging output
     ncnn::VkMat                                      m_PrevVkMat;                     // planar fp32 prev frame (W,H,3)
     ncnn::VkMat                                      m_TimestepVkMat;                 // constant 0.5 (W,H,1)
+    // v1.3.39: track the blob allocator we acquired so destroy() can
+    // reclaim it.  Without this every destroy/init cycle (e.g. AV1
+    // codec re-init) would leak one allocator off the device pool;
+    // pool exhaustion eventually crashes vkCreateBuffer.
+    ncnn::VkAllocator*                               m_BlobAllocator      = nullptr;
     bool                                             m_VkImagesInGeneralLayout = false;
     void*                                            m_D3D11SyncQuery     = nullptr;  // ID3D11Query (event)
 

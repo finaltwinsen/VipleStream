@@ -359,6 +359,8 @@ bool NcnnFRUC::loadModel()
         return false;
     }
 
+    // v1.3.39: per-step trace so future crash logs pinpoint location.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC-NCNN] loadModel: step 1/6 new ncnn::Net");
     m_Net = std::make_unique<ncnn::Net>();
     m_Net->opt.use_vulkan_compute  = true;
     // RIFE 4.25-lite is fp16-trained without int8 calibration, so we
@@ -370,12 +372,14 @@ bool NcnnFRUC::loadModel()
     m_Net->opt.use_fp16_arithmetic = true;
     m_Net->opt.use_int8_storage    = false;
     m_Net->opt.use_int8_arithmetic = false;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC-NCNN] loadModel: step 2/6 set_vulkan_device(%d)", m_GpuIndex);
     m_Net->set_vulkan_device(m_GpuIndex);
 
     // Register the custom rife.Warp layer extracted from
     // rife-ncnn-vulkan source.  Stock ncnn doesn't ship this layer,
     // so without registration load_param() fails with rc=-1 the
     // moment the parser hits "rife.Warp" in the network.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC-NCNN] loadModel: step 3/6 register_custom_layer(rife.Warp)");
     if (m_Net->register_custom_layer("rife.Warp",
                                      viple::createRifeWarp,
                                      viple::destroyRifeWarp,
@@ -395,6 +399,7 @@ bool NcnnFRUC::loadModel()
     std::wstring paramWide = QDir::toNativeSeparators(paramPath).toStdWString();
     std::wstring binWide   = QDir::toNativeSeparators(binPath).toStdWString();
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC-NCNN] loadModel: step 4/6 load_param");
     FILE* paramFp = _wfopen(paramWide.c_str(), L"rb");
     if (!paramFp) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -413,6 +418,7 @@ bool NcnnFRUC::loadModel()
         return false;
     }
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC-NCNN] loadModel: step 5/6 load_model");
     FILE* binFp = _wfopen(binWide.c_str(), L"rb");
     if (!binFp) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -430,6 +436,7 @@ bool NcnnFRUC::loadModel()
         return false;
     }
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC-NCNN] loadModel: step 6/6 done");
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-FRUC-NCNN] loaded RIFE model from %s",
                 m_ModelDir.c_str());
@@ -774,12 +781,21 @@ bool NcnnFRUC::compileSharedPathPipelines()
     ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
     if (!vkdev) return false;
 
-    // Use a stripped-down Option for shader compile.  We don't need
-    // the fp16 / packing knobs ncnn uses for its own ops because our
-    // two shaders are just byte-shuffles + scale.  Leave use_vulkan_compute
-    // on so compile_spirv_module emits a Vulkan-target SPIR-V.
+    // v1.3.39: explicit raw Option — ncnn::compile_spirv_module
+    // injects #define NCNN_fp16_packed / NCNN_fp16_storage / etc. into
+    // the GLSL preprocessor based on opt flags, and rewrites
+    // afp/sfp/buffer_ld* macros accordingly.  Our shaders use plain
+    // float/uint with no afp pretense, so we want every ncnn knob OFF
+    // to get a verbatim compile of the source we wrote.
     ncnn::Option opt;
-    opt.use_vulkan_compute = true;
+    opt.use_vulkan_compute    = true;
+    opt.use_fp16_packed       = false;
+    opt.use_fp16_storage      = false;
+    opt.use_fp16_arithmetic   = false;
+    opt.use_int8_storage      = false;
+    opt.use_int8_arithmetic   = false;
+    opt.use_packing_layout    = false;
+    opt.use_shader_pack8      = false;
 
     auto buildPipeline = [&](const char* glsl, const char* label,
                              ncnn::Pipeline*& outPipeline) -> bool {
@@ -934,14 +950,15 @@ bool NcnnFRUC::initSharedPathResources()
     // ---- ncnn-allocated staging VkMats ----
     // Packed RGBA8 buffers: shape (W*H, 1) elemsize=4 = W*H*4 bytes.
     // Planar fp32 prev/timestep: shape (W, H, 3) and (W, H, 1) elemsize=4.
-    ncnn::VkAllocator* blob = vkdev->acquire_blob_allocator();
+    // v1.3.39: stash allocator in m_BlobAllocator for reclaim in destroy().
+    m_BlobAllocator = vkdev->acquire_blob_allocator();
     const int W = static_cast<int>(m_Width);
     const int H = static_cast<int>(m_Height);
 
-    m_PackedInVkMat.create(W * H, (size_t)4, blob);
-    m_PackedOutVkMat.create(W * H, (size_t)4, blob);
-    m_PrevVkMat.create(W, H, 3, (size_t)4, blob);
-    m_TimestepVkMat.create(W, H, 1, (size_t)4, blob);
+    m_PackedInVkMat.create(W * H, (size_t)4, m_BlobAllocator);
+    m_PackedOutVkMat.create(W * H, (size_t)4, m_BlobAllocator);
+    m_PrevVkMat.create(W, H, 3, (size_t)4, m_BlobAllocator);
+    m_TimestepVkMat.create(W, H, 1, (size_t)4, m_BlobAllocator);
     if (m_PackedInVkMat.empty() || m_PackedOutVkMat.empty() ||
         m_PrevVkMat.empty() || m_TimestepVkMat.empty()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -952,13 +969,26 @@ bool NcnnFRUC::initSharedPathResources()
     // Upload constant 0.5 timestep into m_TimestepVkMat.  This is the
     // RIFE midpoint indicator; it never changes after init.  We use a
     // VkTransfer (one-shot CPU→GPU upload) since it's a single tensor.
+    //
+    // v1.3.39: explicit raw Option — default ncnn::Option carries
+    // use_fp16_packed/storage/arithmetic + use_packing_layout = true,
+    // which makes record_upload reformat the bytes (fp32→fp16 +
+    // elempack alignment).  RIFE's in2 input expects raw fp32 (3, H, W)
+    // so we want a verbatim byte copy.
     {
         ncnn::Mat cpu_timestep(W, H, 1);
         cpu_timestep.fill(0.5f);
         ncnn::Option opt;
-        opt.use_vulkan_compute = true;
-        opt.blob_vkallocator    = blob;
-        opt.staging_vkallocator = vkdev->acquire_staging_allocator();
+        opt.use_vulkan_compute    = true;
+        opt.use_fp16_packed       = false;
+        opt.use_fp16_storage      = false;
+        opt.use_fp16_arithmetic   = false;
+        opt.use_int8_storage      = false;
+        opt.use_int8_arithmetic   = false;
+        opt.use_packing_layout    = false;
+        opt.use_shader_pack8      = false;
+        opt.blob_vkallocator      = m_BlobAllocator;
+        opt.staging_vkallocator   = vkdev->acquire_staging_allocator();
         ncnn::VkTransfer xfer(vkdev);
         xfer.record_upload(cpu_timestep, m_TimestepVkMat, opt);
         xfer.submit_and_wait();
@@ -1300,12 +1330,16 @@ void planarFp32RowToRgba8(const float* inR, const float* inG, const float* inB,
 
 bool NcnnFRUC::selftestSharedPath()
 {
-    if (!m_PipelinePre) return false;
+    if (!m_PipelinePre || !m_BlobAllocator) return false;
 
     ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
     if (!vkdev) return false;
 
-    ncnn::VkAllocator* blob    = vkdev->acquire_blob_allocator();
+    // v1.3.39: reuse m_BlobAllocator instead of acquiring a fresh one
+    // (would leak the allocator since selftest goes out of scope and
+    // the local pointer is dropped).  Staging allocator IS local —
+    // selftest reclaim is straightforward via RAII.
+    ncnn::VkAllocator* blob    = m_BlobAllocator;
     ncnn::VkAllocator* staging = vkdev->acquire_staging_allocator();
 
     constexpr int W = 4, H = 4;
@@ -1325,10 +1359,20 @@ bool NcnnFRUC::selftestSharedPath()
         }
     }
 
+    // v1.3.39: explicit raw Option — same reasoning as the timestep
+    // upload (default Option's fp16 flags would cause record_upload to
+    // reformat our uint32 packed buffer as fp16).
     ncnn::Option opt;
-    opt.use_vulkan_compute  = true;
-    opt.blob_vkallocator    = blob;
-    opt.staging_vkallocator = staging;
+    opt.use_vulkan_compute    = true;
+    opt.use_fp16_packed       = false;
+    opt.use_fp16_storage      = false;
+    opt.use_fp16_arithmetic   = false;
+    opt.use_int8_storage      = false;
+    opt.use_int8_arithmetic   = false;
+    opt.use_packing_layout    = false;
+    opt.use_shader_pack8      = false;
+    opt.blob_vkallocator      = blob;
+    opt.staging_vkallocator   = staging;
 
     // Allocate dedicated test mats (don't touch m_PackedInVkMat which is
     // sized for the full frame).
@@ -1547,6 +1591,8 @@ void NcnnFRUC::skipFrame(ID3D11DeviceContext* ctx)
 
 void NcnnFRUC::destroy()
 {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC-NCNN] destroy() called (initialized=%d, m_Net=%p)",
+                m_Initialized.load(std::memory_order_acquire) ? 1 : 0, (void*)m_Net.get());
     // Phase B.4b: tear down GPU shared-path resources BEFORE pipelines
     // and m_Net.  Order: query → cmdbufs → cmdpool → VkMats (auto via
     // dtor) → pipelines → m_Net → ncnn instance refcount.
@@ -1583,6 +1629,47 @@ void NcnnFRUC::destroy()
     m_PackedOutVkMat.release();
     m_PrevVkMat.release();
     m_TimestepVkMat.release();
+
+    // v1.3.39: release imported VkImage + VkDeviceMemory (B.3 leak).
+    // Without this, every destroy/init cycle leaks ~16 MB GPU memory
+    // and 2 kernel allocations.  Pre-existing in v1.3.34.  Vulkan
+    // entry points still need to be loaded dynamically.
+    if (m_VkRenderImage || m_VkOutputImage || m_VkRenderMem || m_VkOutputMem) {
+        HMODULE vk = ::GetModuleHandleW(L"vulkan-1.dll");
+        if (vk && m_Net) {
+            auto pfnGDPA = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+                ::GetProcAddress(vk, "vkGetDeviceProcAddr"));
+            ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
+            if (pfnGDPA && vkdev) {
+                const VkDevice dev = vkdev->vkdevice();
+                auto pfnDestroyImage = (PFN_vkDestroyImage)pfnGDPA(dev, "vkDestroyImage");
+                auto pfnFreeMemory   = (PFN_vkFreeMemory)  pfnGDPA(dev, "vkFreeMemory");
+                if (pfnDestroyImage && pfnFreeMemory) {
+                    if (m_VkRenderImage) pfnDestroyImage(dev, (VkImage)m_VkRenderImage, nullptr);
+                    if (m_VkOutputImage) pfnDestroyImage(dev, (VkImage)m_VkOutputImage, nullptr);
+                    if (m_VkRenderMem)   pfnFreeMemory  (dev, (VkDeviceMemory)m_VkRenderMem, nullptr);
+                    if (m_VkOutputMem)   pfnFreeMemory  (dev, (VkDeviceMemory)m_VkOutputMem, nullptr);
+                }
+            }
+        }
+        m_VkRenderImage = nullptr;
+        m_VkOutputImage = nullptr;
+        m_VkRenderMem   = nullptr;
+        m_VkOutputMem   = nullptr;
+    }
+
+    // v1.3.39: reclaim the blob allocator we acquired in
+    // initSharedPathResources (and that selftest reused).  Must happen
+    // AFTER all VkMats above have released their VkBufferMemory back
+    // into the allocator's internal pool but BEFORE m_Net.reset()
+    // triggers destroy_gpu_instance, which would leave the allocator
+    // dangling on the device's outstanding-acquired list.
+    if (m_BlobAllocator) {
+        ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
+        if (vkdev) vkdev->reclaim_blob_allocator(m_BlobAllocator);
+        m_BlobAllocator = nullptr;
+    }
+
     m_VkImagesInGeneralLayout = false;
     m_VkComputeQueue = nullptr;
 
