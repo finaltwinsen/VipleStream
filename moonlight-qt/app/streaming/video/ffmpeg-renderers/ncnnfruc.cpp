@@ -23,6 +23,8 @@
 #include <ncnn/net.h>
 #include <ncnn/gpu.h>
 #include <ncnn/mat.h>
+#include <ncnn/pipeline.h>
+#include <ncnn/option.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -204,9 +206,13 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
         // m_SharedPathReady is set and Phase B.4 (preprocess shader)
         // can take over from CPU staging.
         if (importSharedTexturesIntoVulkan()) {
-            // Note: m_SharedPathReady stays false until B.4-5 land
-            // the actual GPU compute path.  B.3 alone proves the
-            // memory bridge but submitFrame still uses CPU staging.
+            // Phase B.4a — try to compile the GPU conversion shaders.
+            // Failure is non-fatal: shaders not present means
+            // m_SharedPathReady stays false and CPU staging continues
+            // to operate as it does today.  m_SharedPathReady itself
+            // doesn't flip until B.4b wires submitFrame to use the
+            // dispatched pipelines.
+            compileSharedPathPipelines();
         }
     }
 
@@ -667,6 +673,142 @@ bool NcnnFRUC::importSharedTexturesIntoVulkan()
     return true;
 }
 
+// ---- Phase B.4a: GLSL → SPIR-V → ncnn::Pipeline ----
+//
+// Two compute shaders translate between the two pixel layouts that
+// straddle the D3D11 / RIFE boundary:
+//
+//   pre  : packed RGBA8 buffer  →  planar fp32 buffer (3 channels, 0..1)
+//   post : planar fp32 buffer    →  packed RGBA8 buffer (clamped 0..255)
+//
+// ncnn::Pipeline auto-reflects bindings + push constants via
+// SPIRV-Reflect, so the GLSL just declares storage buffers + a tiny
+// push-constant block (w, h) and ncnn handles the layout setup.
+// Workgroup is 8×8×1 — empirically the sweet spot for memcpy-bound
+// shaders on most GPUs (256 invocations / wave amortises descriptor
+// fetch overhead without flooding the LLC).
+//
+// The bindings + dispatcher set on record_pipeline don't have to be
+// the same VkMat — we pass a "shape mat" (W×H×1) so ncnn divides by
+// local_size to get the right groupCount.
+
+namespace {
+
+const char* kPreShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer PackedRGBA8 { uint data[]; } src;
+layout(binding = 1) writeonly buffer PlanarFp32 { float data[]; } dst;
+layout(push_constant) uniform Params { int w; int h; } p;
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= p.w || y >= p.h) return;
+    uint pix = src.data[y * p.w + x];
+    float r = float((pix >>  0) & 0xFFu) * (1.0 / 255.0);
+    float g = float((pix >>  8) & 0xFFu) * (1.0 / 255.0);
+    float b = float((pix >> 16) & 0xFFu) * (1.0 / 255.0);
+    int idx = y * p.w + x;
+    int plane = p.w * p.h;
+    dst.data[idx + 0 * plane] = r;
+    dst.data[idx + 1 * plane] = g;
+    dst.data[idx + 2 * plane] = b;
+}
+)GLSL";
+
+const char* kPostShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer PlanarFp32 { float data[]; } src;
+layout(binding = 1) writeonly buffer PackedRGBA8 { uint data[]; } dst;
+layout(push_constant) uniform Params { int w; int h; } p;
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= p.w || y >= p.h) return;
+    int idx = y * p.w + x;
+    int plane = p.w * p.h;
+    float r = clamp(src.data[idx + 0 * plane], 0.0, 1.0);
+    float g = clamp(src.data[idx + 1 * plane], 0.0, 1.0);
+    float b = clamp(src.data[idx + 2 * plane], 0.0, 1.0);
+    uint pix = uint(r * 255.0)
+             | (uint(g * 255.0) <<  8)
+             | (uint(b * 255.0) << 16)
+             | (uint(255)       << 24);
+    dst.data[idx] = pix;
+}
+)GLSL";
+
+} // namespace
+
+bool NcnnFRUC::compileSharedPathPipelines()
+{
+    if (!m_Net) return false;
+
+    ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(m_GpuIndex);
+    if (!vkdev) return false;
+
+    // Use a stripped-down Option for shader compile.  We don't need
+    // the fp16 / packing knobs ncnn uses for its own ops because our
+    // two shaders are just byte-shuffles + scale.  Leave use_vulkan_compute
+    // on so compile_spirv_module emits a Vulkan-target SPIR-V.
+    ncnn::Option opt;
+    opt.use_vulkan_compute = true;
+
+    auto buildPipeline = [&](const char* glsl, const char* label,
+                             ncnn::Pipeline*& outPipeline) -> bool {
+        std::vector<uint32_t> spirv;
+        int rc = ncnn::compile_spirv_module(glsl, opt, spirv);
+        if (rc != 0 || spirv.empty()) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B.4a compile_spirv_module(%s) failed rc=%d (size=%zu)",
+                        label, rc, spirv.size());
+            return false;
+        }
+
+        auto* pipe = new ncnn::Pipeline(vkdev);
+        // GLSL declares local_size 8×8×1 already; tell ncnn the same so
+        // its dispatcher math matches.  set_local_size_xyz overrides
+        // shader's declared layout.
+        pipe->set_local_size_xyz(8, 8, 1);
+
+        // No specialization constants — the shader is parameterised
+        // entirely via push constants (w, h).
+        std::vector<ncnn::vk_specialization_type> specs;
+        rc = pipe->create(spirv.data(), spirv.size() * sizeof(uint32_t), specs);
+        if (rc != 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] phase-B.4a Pipeline::create(%s) failed rc=%d",
+                        label, rc);
+            delete pipe;
+            return false;
+        }
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] phase-B.4a compiled %s pipeline "
+                    "(spv=%zu bytes, local=8x8x1)",
+                    label, spirv.size() * sizeof(uint32_t));
+        outPipeline = pipe;
+        return true;
+    };
+
+    if (!buildPipeline(kPreShaderGlsl, "pre", m_PipelinePre)) return false;
+    if (!buildPipeline(kPostShaderGlsl, "post", m_PipelinePost)) {
+        delete m_PipelinePre;
+        m_PipelinePre = nullptr;
+        return false;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC-NCNN] phase-B.4a SUCCESS — both conversion pipelines "
+                "compiled and ready (B.4b will wire dispatch into submitFrame)");
+    return true;
+}
+
 // ---- pixel format conversion helpers ----
 // D3D11 Map gives us interleaved RGBA8 with row pitch >= w*4 (driver
 // alignment).  ncnn::Mat for RIFE uses planar [C, H, W] fp32 in 0..1.
@@ -846,6 +988,17 @@ void NcnnFRUC::skipFrame(ID3D11DeviceContext* ctx)
 
 void NcnnFRUC::destroy()
 {
+    // Phase B.4a: release the GPU conversion pipelines BEFORE m_Net.
+    // ncnn::Pipeline holds references into the VulkanDevice that
+    // m_Net's destructor would otherwise tear down out from under us.
+    if (m_PipelinePre) {
+        delete m_PipelinePre;
+        m_PipelinePre = nullptr;
+    }
+    if (m_PipelinePost) {
+        delete m_PipelinePost;
+        m_PipelinePost = nullptr;
+    }
     if (m_Net) {
         m_Net.reset();
         releaseNcnnGpu();

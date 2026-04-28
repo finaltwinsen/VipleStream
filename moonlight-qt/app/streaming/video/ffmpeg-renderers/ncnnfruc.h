@@ -30,6 +30,7 @@
 namespace ncnn {
 class Net;
 class VulkanDevice;
+class Pipeline;
 }
 
 class NcnnFRUC : public IFRUCBackend {
@@ -86,6 +87,18 @@ private:
     // handles are tolerated.
     bool importSharedTexturesIntoVulkan();
 
+    // Phase B.4a: compile the two compute shaders that turn packed
+    // RGBA8 buffers ↔ planar fp32 buffers (ncnn-compatible).  These
+    // are the GPU replacement for rgba8RowToPlanarFp32 /
+    // planarFp32RowToRgba8 — running them on the same Vulkan device
+    // as the RIFE inference avoids the ~30 ms CPU staging round-trip
+    // per submitFrame.  Pipelines are created here but not invoked
+    // until B.4b wires submitFrame to use them.  Returns false on
+    // GLSL compile failure or pipeline create failure; failure is
+    // non-fatal — m_SharedPathReady stays false and CPU staging path
+    // continues to operate.
+    bool compileSharedPathPipelines();
+
     std::atomic<bool> m_Initialized { false };
     int               m_Quality     = 0;
     uint32_t          m_Width       = 0;
@@ -119,6 +132,14 @@ private:
     void*                                            m_VkRenderMem        = nullptr;  // VkDeviceMemory
     void*                                            m_VkOutputMem        = nullptr;  // VkDeviceMemory
     bool                                             m_SharedPathReady    = false;
+    // Phase B.4a: GPU compute pipelines for RGBA8 ↔ planar fp32
+    // conversion.  ncnn::Pipeline is the framework's wrapper around
+    // VkPipeline + VkDescriptorSetLayout + VkPipelineLayout, with
+    // shader-reflection done via SPIRV-Reflect during create().
+    // Stored as opaque pointers to keep the header free of ncnn
+    // private types — see ncnnfruc.cpp for the cast.
+    ncnn::Pipeline*                                  m_PipelinePre        = nullptr;
+    ncnn::Pipeline*                                  m_PipelinePost       = nullptr;
 
     // NCNN bits.  m_Net is the loaded RIFE 4.25-lite flownet
     // (3-input: in0/in1/in2 = prev RGB, curr RGB, timestep).
