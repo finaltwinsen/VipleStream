@@ -328,9 +328,14 @@ typedef struct vk_backend_s {
     int                  fHdrMetadataExt;     // VK_EXT_hdr_metadata (device)
     int                  fHdrCapableSurface;  // surface advertises HDR10_ST2084_EXT colorspace
     // iter 16: user-requested HDR (from prefs.enableHdr Java side).
-    // Drives §I.E.b/c gates: actual swapchain colorspace switch +
-    // P010 import path. Currently observability-only.
+    // Drives §I.E.b/c gates: swapchain colorspace switch + P010 import.
     int                  fHdrUserEnabled;
+    // §I.E.b Phase 2 (v1.2.188) — set when create_swapchain successfully
+    // built an HDR10 swapchain (A2B10G10R10 + HDR10_ST2084) instead of
+    // the SDR fallback. Used to gate vkSetHdrMetadataEXT and any future
+    // shader-side PQ encoding.
+    int                  fHdrSwapchainActive;
+    PFN_vkSetHdrMetadataEXT vkSetHdrMetadataEXT;
 
     // iter 4: per-frame host-side timing ring (ns). Measures
     // render_ahb_frame duration (entry→exit). 120 entries = 1-2s of
@@ -684,6 +689,18 @@ static int create_device(vk_backend_t* be)
         }
     }
 
+    // §I.E.b Phase 2 — load vkSetHdrMetadataEXT when ext was enabled.
+    // PFN miss here is non-fatal: HDR swapchain still works (driver uses
+    // a default whitepoint/luminance) but display can't do tone-mapping
+    // calibrated to source content.
+    if (hdrMetadataEnabled) {
+        be->vkSetHdrMetadataEXT = (PFN_vkSetHdrMetadataEXT)
+            be->vkGetDeviceProcAddr(be->device, "vkSetHdrMetadataEXT");
+        if (!be->vkSetHdrMetadataEXT) {
+            LOGW("vkSetHdrMetadataEXT PFN missing despite ext enabled — HDR metadata won't be set");
+        }
+    }
+
     // Swapchain function pointers (device-level, but loadable via instance proc)
     be->vkCreateSwapchainKHR    = LOAD_INSTANCE_PROC(be, vkCreateSwapchainKHR);
     be->vkDestroySwapchainKHR   = LOAD_INSTANCE_PROC(be, vkDestroySwapchainKHR);
@@ -776,8 +793,11 @@ static int create_swapchain(vk_backend_t* be)
                caps.currentExtent.width, caps.currentExtent.height,
                caps.minImageCount, caps.maxImageCount);
 
-    // Pick format. Android-side surface usually advertises BGRA8 UNORM as
-    // first option; we accept either RGBA8 or BGRA8 in UNORM/sRGB form.
+    // Enumerate surface formats once; on the same pass we both detect
+    // HDR10 availability (§I.E.a recon) AND build SDR / HDR pick indices
+    // (§I.E.b Phase 2). Decision happens after the loop based on
+    // fHdrUserEnabled — when HDR opted in AND HDR10_ST2084 advertised AND
+    // A2B10G10R10 format pair available, pick that; otherwise SDR pair.
     uint32_t fmtCount = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(be->physDevice, be->surface, &fmtCount, NULL);
     if (fmtCount == 0) { LOGE("no surface formats"); return -1; }
@@ -786,20 +806,8 @@ static int create_swapchain(vk_backend_t* be)
     if (!fmts) return -1;
     vkGetPhysicalDeviceSurfaceFormatsKHR(be->physDevice, be->surface, &fmtCount, fmts);
 
-    VkSurfaceFormatKHR chosen = fmts[0];   // first is always valid per spec
-    for (uint32_t i = 0; i < fmtCount; i++) {
-        if (fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM &&
-            fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-            chosen = fmts[i];
-            break;
-        }
-    }
-
-    // §I.E.a recon — log all surface formats + look for HDR10 colorspace.
-    // We don't switch to HDR yet (still picking SDR R8G8B8A8_UNORM); just
-    // record what's available so §I.E.b can negotiate HDR10 + 10-bit
-    // format pair. HDR10_ST2084_EXT colorspace value = 1000104008 (per
-    // VK_EXT_swapchain_colorspace ext).
+    int sdrPickIdx = -1;
+    int hdrPickIdx = -1;
     be->fHdrCapableSurface = 0;
     for (uint32_t i = 0; i < fmtCount; i++) {
         const char* csName = "?";
@@ -827,14 +835,48 @@ static int create_swapchain(vk_backend_t* be)
         if (fmts[i].colorSpace == 1000104008 /* HDR10_ST2084 */) {
             be->fHdrCapableSurface = 1;
         }
+        // SDR fallback: RGBA8_UNORM + sRGB_NONLINEAR (works on every
+        // conformant Android driver).
+        if (sdrPickIdx < 0 &&
+            fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM &&
+            fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            sdrPickIdx = (int)i;
+        }
+        // HDR10 pick: A2B10G10R10_UNORM_PACK32 (10-bit RGB) + HDR10_ST2084
+        // colorspace. The fragment shader currently writes SDR-encoded
+        // values; with this swapchain, the driver expects PQ-encoded
+        // values, so SDR streams will look dim/desaturated until §I.E
+        // Phase 3 lands proper P010 input + shader PQ encoding.
+        // Genuine P010 HDR streams from Sunshine should look correct
+        // because MediaCodec keeps the values PQ-encoded through to the
+        // shader.
+        if (hdrPickIdx < 0 &&
+            fmts[i].format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
+            fmts[i].colorSpace == 1000104008 /* HDR10_ST2084 */) {
+            hdrPickIdx = (int)i;
+        }
     }
     LOGI("[VK-HDR-RECON] HDR10_ST2084 colorspace %s on this surface",
          be->fHdrCapableSurface ? "AVAILABLE" : "not advertised");
-    LOGI("picked surface format=%d colorSpace=%d (out of %u)",
-         chosen.format, chosen.colorSpace, fmtCount);
-    status_log("create_swapchain: %u surface formats listed (HDR10_ST2084 %s, picked fmt=%d cs=%d)",
+
+    // Final pick: HDR10 if user opted in + A2B10G10R10/HDR10 pair found,
+    // SDR otherwise. fmts[0] is the safety fallback (spec guarantees
+    // index 0 exists).
+    VkSurfaceFormatKHR chosen = fmts[0];
+    be->fHdrSwapchainActive = 0;
+    if (be->fHdrUserEnabled && hdrPickIdx >= 0) {
+        chosen = fmts[hdrPickIdx];
+        be->fHdrSwapchainActive = 1;
+    } else if (sdrPickIdx >= 0) {
+        chosen = fmts[sdrPickIdx];
+    }
+    LOGI("picked surface format=%d colorSpace=%d (out of %u) [%s]",
+         chosen.format, chosen.colorSpace, fmtCount,
+         be->fHdrSwapchainActive ? "HDR10_ST2084" : "SDR sRGB");
+    status_log("create_swapchain: %u surface formats listed (HDR10_ST2084 %s, picked fmt=%d cs=%d %s)",
                fmtCount, be->fHdrCapableSurface ? "AVAILABLE" : "n/a",
-               chosen.format, chosen.colorSpace);
+               chosen.format, chosen.colorSpace,
+               be->fHdrSwapchainActive ? "[HDR10]" : "[SDR]");
     free(fmts);
 
     // §I.E.a recon — probe 10-bit format support for HDR pipeline.
@@ -955,6 +997,36 @@ static int create_swapchain(vk_backend_t* be)
                                 &be->swapchainImageCount, be->swapchainImages);
     LOGI("swapchain image count actual = %u", be->swapchainImageCount);
     status_log("create_swapchain: got %u swapchain images", be->swapchainImageCount);
+
+    // §I.E.b Phase 2 — set HDR10 metadata when an HDR swapchain was
+    // built. Uses Rec.2020 (BT.2020) primaries + 1000 nits MaxCLL +
+    // 400 nits MaxFALL. These are the standard HDR10 mastering display
+    // values; without server-side metadata negotiation we hard-code
+    // values that cover the typical mastering range. Sunshine doesn't
+    // currently propagate stream metadata to the client — when it does
+    // (§I.E future), these can be updated dynamically.
+    if (be->fHdrSwapchainActive && be->vkSetHdrMetadataEXT) {
+        VkHdrMetadataEXT meta = {
+            .sType                       = VK_STRUCTURE_TYPE_HDR_METADATA_EXT,
+            .pNext                       = NULL,
+            // Rec.2020 / BT.2020 primaries (CIE 1931 xy):
+            .displayPrimaryRed           = { 0.708f, 0.292f },
+            .displayPrimaryGreen         = { 0.170f, 0.797f },
+            .displayPrimaryBlue          = { 0.131f, 0.046f },
+            .whitePoint                  = { 0.3127f, 0.3290f },  // D65
+            .maxLuminance                = 1000.0f,  // cd/m²
+            .minLuminance                = 0.0001f,  // cd/m² (HDR10 floor)
+            .maxContentLightLevel        = 1000.0f,  // cd/m²
+            .maxFrameAverageLightLevel   = 400.0f,   // cd/m²
+        };
+        be->vkSetHdrMetadataEXT(be->device, 1, &be->swapchain, &meta);
+        LOGI("[VKBE-HDR] vkSetHdrMetadataEXT submitted: BT.2020 primaries, "
+             "max=%.0f / MaxCLL=%.0f / MaxFALL=%.0f nits",
+             meta.maxLuminance, meta.maxContentLightLevel, meta.maxFrameAverageLightLevel);
+        status_log("HDR mode ACTIVE: A2B10G10R10 + HDR10_ST2084 + BT.2020/1000nits metadata");
+    } else if (be->fHdrUserEnabled && !be->fHdrSwapchainActive) {
+        status_log("HDR mode REQUESTED but swapchain stayed SDR (HDR10_ST2084 pair not advertised)");
+    }
 
     // §I.C.6 — query display refresh cycle duration once swapchain is up.
     // Cached as fRefreshDurationNs; used to space PASS 1 / PASS 2 PTS in
