@@ -43,7 +43,7 @@ public:
     int getRendererAttributes() override;
     int getDecoderColorspace() override { return COLORSPACE_REC_709; }
 
-    void notifyOverlayUpdated(Overlay::OverlayType) override {}
+    void notifyOverlayUpdated(Overlay::OverlayType type) override;
 
 private:
     // §J.3.e.2.i.2 sub-helpers — port from Android vk_backend.c
@@ -302,6 +302,49 @@ private:
     VkDeviceMemory m_FrucInterpRgbMem  = VK_NULL_HANDLE;
 
     VkDescriptorPool m_FrucDescPool = VK_NULL_HANDLE;
+
+    // §J.3.e.2.i — overlay rendering (Ctrl+Alt+Shift+S 效能資訊).
+    // moonlight-qt OverlayManager 給 SDL_Surface (RGBA8)，我們：
+    //   1. notifyOverlayUpdated 拿 surface，alloc 配對 VkImage + staging
+    //   2. memcpy surface pixels → staging buffer（host-visible coherent）
+    //   3. mark m_OverlayUploadPending；renderFrameSw 拿到 cmdbuf 後
+    //      cmdCopyBufferToImage staging → image，barrier to SHADER_READ
+    //   4. 在 main video render pass 之後 bind overlay pipeline + descSet，
+    //      draw 3 verts (fullscreen tri)，frag shader discard 在 rect 外的
+    //      pixel + alpha blend 在 rect 內
+    // Overlay rect 固定 top-left，按 surface 比例放置.
+    bool createOverlayResources();
+    void destroyOverlayResources();
+    void drainOverlayStash();  // render-thread: process notifyOverlayUpdated stash, alloc/copy
+    void uploadPendingOverlay(VkCommandBuffer cmd);  // call before render pass
+    void drawOverlayInRenderPass(VkCommandBuffer cmd);  // call inside render pass
+    static constexpr uint32_t kOverlayMax = 2;  // matches Overlay::OverlayMax
+    int             m_OverlayWidth [kOverlayMax]    = {};
+    int             m_OverlayHeight[kOverlayMax]    = {};
+    int             m_OverlayPitch [kOverlayMax]    = {};
+    bool            m_OverlayPending[kOverlayMax]   = {};  // staging has new data
+    bool            m_OverlayHasContent[kOverlayMax]= {};  // image has valid content
+    bool            m_OverlayLayoutInited[kOverlayMax] = {};
+    VkImage         m_OverlayImage [kOverlayMax]    = {};
+    VkDeviceMemory  m_OverlayMem   [kOverlayMax]    = {};
+    VkImageView     m_OverlayView  [kOverlayMax]    = {};
+    VkBuffer        m_OverlayStagingBuf[kOverlayMax]= {};
+    VkDeviceMemory  m_OverlayStagingMem[kOverlayMax]= {};
+    void*           m_OverlayStagingMapped[kOverlayMax] = {};
+    size_t          m_OverlayStagingSize[kOverlayMax]   = {};
+    VkDescriptorSet m_OverlayDescSet[kOverlayMax]   = {};
+    VkSampler       m_OverlaySampler                = VK_NULL_HANDLE;
+    VkShaderModule  m_OverlayFragShaderMod          = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_OverlayDescSetLayout    = VK_NULL_HANDLE;
+    VkPipelineLayout      m_OverlayPipelineLayout   = VK_NULL_HANDLE;
+    VkPipeline            m_OverlayPipeline         = VK_NULL_HANDLE;
+    VkDescriptorPool      m_OverlayDescPool         = VK_NULL_HANDLE;
+
+    // Cross-thread stash: notifyOverlayUpdated runs on SDL event thread,
+    // render thread drains in renderFrameSw → drainOverlayStash().
+    SDL_mutex*       m_OverlayStashMutex            = nullptr;
+    SDL_Surface*     m_OverlayStashedSurface[kOverlayMax] = {};
+    bool             m_OverlayStashedDisable[kOverlayMax] = {};
 
     // §J.3.e.2.i.6 GPU timestamp queries — measures compute chain total
     // GPU time (NV12->RGB + ME + Median + Warp).  2 timestamps per ring

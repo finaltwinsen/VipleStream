@@ -126,6 +126,7 @@ void VkFrucRenderer::teardown()
     // set layout, so they go first; sampler-conversion holds the
     // immutable sampler used in descriptor set layout, so layouts go
     // before the sampler.
+    destroyOverlayResources();      // §J.3.e.2.i overlay
     destroyInterpGraphicsPipeline(); // §J.3.e.2.i.4.2
     destroyFrucComputeResources(); // §J.3.e.2.i.4
     destroySwUploadResources();   // §J.3.e.2.i.3.e-SW
@@ -706,6 +707,11 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
+    // §J.3.e.2.i DIAG2: skip overlay resources entirely to confirm if
+    // teardown hang is overlay-related.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i DIAG2: overlay resources NOT allocated");
+
     // §J.3.e.2.i.3.e-SW — allocate upload buffer + image when in software
     // mode.  Size from params.  We use the source resolution; if the
     // stream switches resolution mid-session we'd need to recreate, but
@@ -773,6 +779,10 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
 #include "vkfruc-shaders/vkfruc.vert.spv.h"
 #include "vkfruc-shaders/vkfruc.frag.spv.h"
 #include "vkfruc-shaders/vkfruc_interp.frag.spv.h"
+#include "vkfruc-shaders/vkfruc_overlay.frag.spv.h"
+
+#include "streaming/streamutils.h"  // not strictly needed, but for any utility
+#include "streaming/session.h"
 
 bool VkFrucRenderer::createRenderPassAndFramebuffers()
 {
@@ -1239,6 +1249,518 @@ void VkFrucRenderer::destroyInterpGraphicsPipeline()
     if (m_InterpFragShaderMod && pfnDestroyShader) {
         pfnDestroyShader(m_Device, m_InterpFragShaderMod, nullptr);
         m_InterpFragShaderMod = VK_NULL_HANDLE;
+    }
+}
+
+// =====================================================================
+// §J.3.e.2.i — performance overlay rendering (Ctrl+Alt+Shift+S 效能資訊)
+//
+// moonlight-qt's OverlayManager renders overlay text into SDL_Surface
+// (RGBA8/ARGB8888).  Our notifyOverlayUpdated handler grabs the surface,
+// uploads to a per-overlay-type VkImage via host-coherent staging buffer,
+// and drawOverlayInRenderPass composites it onto the swapchain via a
+// fullscreen-tri pipeline whose frag shader discards outside the rect
+// (alpha-blended onto the underlying video draw of the same render pass).
+// =====================================================================
+
+bool VkFrucRenderer::createOverlayResources()
+{
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCreateShaderModule = (PFN_vkCreateShaderModule)getDevPa(m_Device, "vkCreateShaderModule");
+    auto pfnCreateSampler      = (PFN_vkCreateSampler)getDevPa(m_Device, "vkCreateSampler");
+    auto pfnCreateDsl          = (PFN_vkCreateDescriptorSetLayout)getDevPa(m_Device, "vkCreateDescriptorSetLayout");
+    auto pfnCreatePL           = (PFN_vkCreatePipelineLayout)getDevPa(m_Device, "vkCreatePipelineLayout");
+    auto pfnCreateGraphicsPipelines = (PFN_vkCreateGraphicsPipelines)getDevPa(m_Device, "vkCreateGraphicsPipelines");
+    auto pfnCreateDescPool     = (PFN_vkCreateDescriptorPool)getDevPa(m_Device, "vkCreateDescriptorPool");
+    if (!pfnCreateShaderModule || !pfnCreateSampler || !pfnCreateDsl
+        || !pfnCreatePL || !pfnCreateGraphicsPipelines || !pfnCreateDescPool) return false;
+
+    // Frag shader (vkfruc_overlay.frag pre-compiled)
+    {
+        VkShaderModuleCreateInfo smCi = {};
+        smCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smCi.codeSize = vkfruc_overlay_frag_spv_len;
+        smCi.pCode = reinterpret_cast<const uint32_t*>(vkfruc_overlay_frag_spv);
+        if (pfnCreateShaderModule(m_Device, &smCi, nullptr, &m_OverlayFragShaderMod) != VK_SUCCESS) return false;
+    }
+
+    // Linear sampler (no ycbcr, no mipmap)
+    {
+        VkSamplerCreateInfo sci = {};
+        sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sci.magFilter = VK_FILTER_LINEAR;
+        sci.minFilter = VK_FILTER_LINEAR;
+        sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        if (pfnCreateSampler(m_Device, &sci, nullptr, &m_OverlaySampler) != VK_SUCCESS) return false;
+    }
+
+    // DSL: 1 combined image sampler at binding 0 (NOT immutable — different
+    // texture per overlay type)
+    VkDescriptorSetLayoutBinding dslB = {};
+    dslB.binding = 0;
+    dslB.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    dslB.descriptorCount = 1;
+    dslB.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo dslCi = {};
+    dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dslCi.bindingCount = 1;
+    dslCi.pBindings = &dslB;
+    if (pfnCreateDsl(m_Device, &dslCi, nullptr, &m_OverlayDescSetLayout) != VK_SUCCESS) return false;
+
+    // Pipeline layout: 16-byte push const for rect [vec2 min, vec2 max]
+    VkPushConstantRange pcRange = {};
+    pcRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pcRange.size = 16;
+    VkPipelineLayoutCreateInfo plCi = {};
+    plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plCi.setLayoutCount = 1;
+    plCi.pSetLayouts = &m_OverlayDescSetLayout;
+    plCi.pushConstantRangeCount = 1;
+    plCi.pPushConstantRanges = &pcRange;
+    if (pfnCreatePL(m_Device, &plCi, nullptr, &m_OverlayPipelineLayout) != VK_SUCCESS) return false;
+
+    // Graphics pipeline: reuse vert shader, alpha blending on, no depth.
+    VkPipelineShaderStageCreateInfo stages[2] = {};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = m_VertShaderModule;  // reused fullscreen tri
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = m_OverlayFragShaderMod;
+    stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vi = {};
+    vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    VkPipelineInputAssemblyStateCreateInfo ia = {};
+    ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkViewport viewport = {};
+    viewport.width = (float)m_SwapchainExtent.width;
+    viewport.height = (float)m_SwapchainExtent.height;
+    viewport.maxDepth = 1.0f;
+    VkRect2D scissor = { {0,0}, m_SwapchainExtent };
+    VkPipelineViewportStateCreateInfo vp = {};
+    vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp.viewportCount = 1; vp.pViewports = &viewport;
+    vp.scissorCount = 1;  vp.pScissors  = &scissor;
+    VkPipelineRasterizationStateCreateInfo rs = {};
+    rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms = {};
+    ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    // Alpha blending (overlay composited over video)
+    VkPipelineColorBlendAttachmentState cba = {};
+    cba.blendEnable = VK_TRUE;
+    cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cba.colorBlendOp        = VK_BLEND_OP_ADD;
+    cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    cba.alphaBlendOp        = VK_BLEND_OP_ADD;
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                       | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb = {};
+    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb.attachmentCount = 1;
+    cb.pAttachments = &cba;
+
+    VkGraphicsPipelineCreateInfo gpCi = {};
+    gpCi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    gpCi.stageCount = 2;
+    gpCi.pStages = stages;
+    gpCi.pVertexInputState = &vi;
+    gpCi.pInputAssemblyState = &ia;
+    gpCi.pViewportState = &vp;
+    gpCi.pRasterizationState = &rs;
+    gpCi.pMultisampleState = &ms;
+    gpCi.pColorBlendState = &cb;
+    gpCi.layout = m_OverlayPipelineLayout;
+    gpCi.renderPass = m_RenderPass;
+    gpCi.subpass = 0;
+    if (pfnCreateGraphicsPipelines(m_Device, VK_NULL_HANDLE, 1, &gpCi, nullptr,
+                                    &m_OverlayPipeline) != VK_SUCCESS) return false;
+
+    // Descriptor pool: kOverlayMax sets, one COMBINED_IMAGE_SAMPLER each
+    VkDescriptorPoolSize poolSize = {};
+    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSize.descriptorCount = kOverlayMax;
+    VkDescriptorPoolCreateInfo dpCi = {};
+    dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpCi.maxSets = kOverlayMax;
+    dpCi.poolSizeCount = 1;
+    dpCi.pPoolSizes = &poolSize;
+    if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_OverlayDescPool) != VK_SUCCESS) return false;
+
+    m_OverlayStashMutex = SDL_CreateMutex();
+    if (!m_OverlayStashMutex) return false;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i overlay resources ready (frag=%u B SPIR-V)",
+                (unsigned)vkfruc_overlay_frag_spv_len);
+    return true;
+}
+
+void VkFrucRenderer::destroyOverlayResources()
+{
+    if (m_Device == VK_NULL_HANDLE) return;
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnDestroyImage   = (PFN_vkDestroyImage)getDevPa(m_Device, "vkDestroyImage");
+    auto pfnDestroyView    = (PFN_vkDestroyImageView)getDevPa(m_Device, "vkDestroyImageView");
+    auto pfnDestroyBuffer  = (PFN_vkDestroyBuffer)getDevPa(m_Device, "vkDestroyBuffer");
+    auto pfnFreeMem        = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+    auto pfnUnmapMem       = (PFN_vkUnmapMemory)getDevPa(m_Device, "vkUnmapMemory");
+    auto pfnDestroyPipe    = (PFN_vkDestroyPipeline)getDevPa(m_Device, "vkDestroyPipeline");
+    auto pfnDestroyPL      = (PFN_vkDestroyPipelineLayout)getDevPa(m_Device, "vkDestroyPipelineLayout");
+    auto pfnDestroyDsl     = (PFN_vkDestroyDescriptorSetLayout)getDevPa(m_Device, "vkDestroyDescriptorSetLayout");
+    auto pfnDestroyShader  = (PFN_vkDestroyShaderModule)getDevPa(m_Device, "vkDestroyShaderModule");
+    auto pfnDestroySampler = (PFN_vkDestroySampler)getDevPa(m_Device, "vkDestroySampler");
+    auto pfnDestroyDescPool = (PFN_vkDestroyDescriptorPool)getDevPa(m_Device, "vkDestroyDescriptorPool");
+
+    for (uint32_t i = 0; i < kOverlayMax; i++) {
+        if (m_OverlayView[i] && pfnDestroyView)   { pfnDestroyView(m_Device, m_OverlayView[i], nullptr); m_OverlayView[i] = VK_NULL_HANDLE; }
+        if (m_OverlayImage[i] && pfnDestroyImage) { pfnDestroyImage(m_Device, m_OverlayImage[i], nullptr); m_OverlayImage[i] = VK_NULL_HANDLE; }
+        if (m_OverlayMem[i] && pfnFreeMem)        { pfnFreeMem(m_Device, m_OverlayMem[i], nullptr); m_OverlayMem[i] = VK_NULL_HANDLE; }
+        if (m_OverlayStagingMapped[i] && pfnUnmapMem) { pfnUnmapMem(m_Device, m_OverlayStagingMem[i]); m_OverlayStagingMapped[i] = nullptr; }
+        if (m_OverlayStagingBuf[i] && pfnDestroyBuffer) { pfnDestroyBuffer(m_Device, m_OverlayStagingBuf[i], nullptr); m_OverlayStagingBuf[i] = VK_NULL_HANDLE; }
+        if (m_OverlayStagingMem[i] && pfnFreeMem) { pfnFreeMem(m_Device, m_OverlayStagingMem[i], nullptr); m_OverlayStagingMem[i] = VK_NULL_HANDLE; }
+        m_OverlayDescSet[i] = VK_NULL_HANDLE;  // freed implicitly with pool
+    }
+    if (m_OverlayDescPool && pfnDestroyDescPool) { pfnDestroyDescPool(m_Device, m_OverlayDescPool, nullptr); m_OverlayDescPool = VK_NULL_HANDLE; }
+    if (m_OverlayPipeline && pfnDestroyPipe)     { pfnDestroyPipe(m_Device, m_OverlayPipeline, nullptr); m_OverlayPipeline = VK_NULL_HANDLE; }
+    if (m_OverlayPipelineLayout && pfnDestroyPL) { pfnDestroyPL(m_Device, m_OverlayPipelineLayout, nullptr); m_OverlayPipelineLayout = VK_NULL_HANDLE; }
+    if (m_OverlayDescSetLayout && pfnDestroyDsl) { pfnDestroyDsl(m_Device, m_OverlayDescSetLayout, nullptr); m_OverlayDescSetLayout = VK_NULL_HANDLE; }
+    if (m_OverlayFragShaderMod && pfnDestroyShader) { pfnDestroyShader(m_Device, m_OverlayFragShaderMod, nullptr); m_OverlayFragShaderMod = VK_NULL_HANDLE; }
+    if (m_OverlaySampler && pfnDestroySampler)   { pfnDestroySampler(m_Device, m_OverlaySampler, nullptr); m_OverlaySampler = VK_NULL_HANDLE; }
+
+    // §J.3.e.2.i — drain stashed surfaces before destroying mutex.
+    if (m_OverlayStashMutex) {
+        SDL_LockMutex(m_OverlayStashMutex);
+        for (uint32_t i = 0; i < kOverlayMax; i++) {
+            if (m_OverlayStashedSurface[i]) {
+                SDL_FreeSurface(m_OverlayStashedSurface[i]);
+                m_OverlayStashedSurface[i] = nullptr;
+            }
+        }
+        SDL_UnlockMutex(m_OverlayStashMutex);
+        SDL_DestroyMutex(m_OverlayStashMutex);
+        m_OverlayStashMutex = nullptr;
+    }
+}
+
+void VkFrucRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
+{
+    // §J.3.e.2.i overlay rendering — DEFERRED.
+    //
+    // First-ship attempt at composite overlay rendering hit a teardown hang
+    // when SDL_QUIT (window X close) fires while overlay was enabled.  Race
+    // appears to be in OverlayManager / SDL_TTF cleanup interaction with
+    // our pipeline tear-down; not worth blocking ship on.
+    //
+    // Empty handler keeps OverlayManager's own surface lifecycle intact
+    // (it free's old surfaces in atomic-swap dance regardless of whether
+    // we drain).  Result: Ctrl+Alt+Shift+D toggles state in OverlayManager
+    // but nothing is rendered onscreen.
+    //
+    // To re-enable: revisit overlay shader path with proper SDL_QUIT-safe
+    // teardown ordering (or pivot to libplacebo's overlay system).
+    (void)type;
+}
+
+void VkFrucRenderer::drainOverlayStash()
+{
+    // §J.3.e.2.i — runs on render thread; safe to do Vulkan work.
+    if (!m_OverlayStashMutex || !m_OverlayPipeline) return;
+
+    // Pull stashed surfaces out under lock; do GPU work after release.
+    SDL_Surface* surfaces[kOverlayMax] = {};
+    bool disables[kOverlayMax] = {};
+    SDL_LockMutex(m_OverlayStashMutex);
+    for (uint32_t i = 0; i < kOverlayMax; i++) {
+        surfaces[i] = m_OverlayStashedSurface[i];
+        disables[i] = m_OverlayStashedDisable[i];
+        m_OverlayStashedSurface[i] = nullptr;
+        m_OverlayStashedDisable[i] = false;
+    }
+    SDL_UnlockMutex(m_OverlayStashMutex);
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCreateImage = (PFN_vkCreateImage)getDevPa(m_Device, "vkCreateImage");
+    auto pfnGetImgMemReq = (PFN_vkGetImageMemoryRequirements)getDevPa(m_Device, "vkGetImageMemoryRequirements");
+    auto pfnAllocMem = (PFN_vkAllocateMemory)getDevPa(m_Device, "vkAllocateMemory");
+    auto pfnBindImgMem = (PFN_vkBindImageMemory)getDevPa(m_Device, "vkBindImageMemory");
+    auto pfnCreateView = (PFN_vkCreateImageView)getDevPa(m_Device, "vkCreateImageView");
+    auto pfnCreateBuffer = (PFN_vkCreateBuffer)getDevPa(m_Device, "vkCreateBuffer");
+    auto pfnGetBufMemReq = (PFN_vkGetBufferMemoryRequirements)getDevPa(m_Device, "vkGetBufferMemoryRequirements");
+    auto pfnBindBufMem = (PFN_vkBindBufferMemory)getDevPa(m_Device, "vkBindBufferMemory");
+    auto pfnMapMem = (PFN_vkMapMemory)getDevPa(m_Device, "vkMapMemory");
+    auto pfnGetMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetPhysicalDeviceMemoryProperties");
+    auto pfnAllocDescSets = (PFN_vkAllocateDescriptorSets)getDevPa(m_Device, "vkAllocateDescriptorSets");
+    auto pfnUpdateDescSets = (PFN_vkUpdateDescriptorSets)getDevPa(m_Device, "vkUpdateDescriptorSets");
+    auto pfnDestroyImage = (PFN_vkDestroyImage)getDevPa(m_Device, "vkDestroyImage");
+    auto pfnDestroyView = (PFN_vkDestroyImageView)getDevPa(m_Device, "vkDestroyImageView");
+    auto pfnDestroyBuffer = (PFN_vkDestroyBuffer)getDevPa(m_Device, "vkDestroyBuffer");
+    auto pfnFreeMem = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+    auto pfnUnmapMem = (PFN_vkUnmapMemory)getDevPa(m_Device, "vkUnmapMemory");
+    if (!pfnCreateImage || !pfnAllocMem || !pfnGetMemProps) {
+        for (auto* s : surfaces) if (s) SDL_FreeSurface(s);
+        return;
+    }
+
+    for (uint32_t type = 0; type < kOverlayMax; type++) {
+        if (disables[type]) {
+            m_OverlayHasContent[type] = false;
+            continue;
+        }
+        SDL_Surface* surface = surfaces[type];
+        if (!surface) continue;
+
+        int w = surface->w, h = surface->h;
+        if (w == 0 || h == 0) { SDL_FreeSurface(surface); continue; }
+
+    VkPhysicalDeviceMemoryProperties memProps;
+    pfnGetMemProps(m_PhysicalDevice, &memProps);
+    auto findMemType = [&](uint32_t typeBits, VkMemoryPropertyFlags wanted) -> int {
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+            if ((typeBits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & wanted) == wanted)
+                return (int)i;
+        }
+        return -1;
+    };
+
+    // (Re)alloc image if size mismatched (or first time).
+    if (m_OverlayWidth[type] != w || m_OverlayHeight[type] != h) {
+        // Free old (if any).
+        if (m_OverlayView[type])  { pfnDestroyView(m_Device, m_OverlayView[type], nullptr);   m_OverlayView[type] = VK_NULL_HANDLE; }
+        if (m_OverlayImage[type]) { pfnDestroyImage(m_Device, m_OverlayImage[type], nullptr); m_OverlayImage[type] = VK_NULL_HANDLE; }
+        if (m_OverlayMem[type])   { pfnFreeMem(m_Device, m_OverlayMem[type], nullptr);        m_OverlayMem[type] = VK_NULL_HANDLE; }
+        if (m_OverlayStagingMapped[type]) { pfnUnmapMem(m_Device, m_OverlayStagingMem[type]); m_OverlayStagingMapped[type] = nullptr; }
+        if (m_OverlayStagingBuf[type]) { pfnDestroyBuffer(m_Device, m_OverlayStagingBuf[type], nullptr); m_OverlayStagingBuf[type] = VK_NULL_HANDLE; }
+        if (m_OverlayStagingMem[type]) { pfnFreeMem(m_Device, m_OverlayStagingMem[type], nullptr); m_OverlayStagingMem[type] = VK_NULL_HANDLE; }
+
+        // VkImage RGBA8
+        VkImageCreateInfo ici = {};
+        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.imageType = VK_IMAGE_TYPE_2D;
+        ici.format = VK_FORMAT_B8G8R8A8_UNORM;  // matches SDL_PIXELFORMAT_ARGB8888 byte order
+        ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+        ici.mipLevels = 1;
+        ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (pfnCreateImage(m_Device, &ici, nullptr, &m_OverlayImage[type]) != VK_SUCCESS) {
+            SDL_FreeSurface(surface); return;
+        }
+        VkMemoryRequirements mr;
+        pfnGetImgMemReq(m_Device, m_OverlayImage[type], &mr);
+        int mti = findMemType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (mti < 0) { SDL_FreeSurface(surface); return; }
+        VkMemoryAllocateInfo mai = {};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = mr.size;
+        mai.memoryTypeIndex = (uint32_t)mti;
+        if (pfnAllocMem(m_Device, &mai, nullptr, &m_OverlayMem[type]) != VK_SUCCESS) {
+            SDL_FreeSurface(surface); return;
+        }
+        if (pfnBindImgMem(m_Device, m_OverlayImage[type], m_OverlayMem[type], 0) != VK_SUCCESS) {
+            SDL_FreeSurface(surface); return;
+        }
+        VkImageViewCreateInfo vci = {};
+        vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.image = m_OverlayImage[type];
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = VK_FORMAT_B8G8R8A8_UNORM;
+        vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.levelCount = 1;
+        vci.subresourceRange.layerCount = 1;
+        if (pfnCreateView(m_Device, &vci, nullptr, &m_OverlayView[type]) != VK_SUCCESS) {
+            SDL_FreeSurface(surface); return;
+        }
+
+        // Staging buffer (host-visible coherent)
+        VkDeviceSize stagingSize = (VkDeviceSize)surface->pitch * h;
+        VkBufferCreateInfo bci = {};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = stagingSize;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (pfnCreateBuffer(m_Device, &bci, nullptr, &m_OverlayStagingBuf[type]) != VK_SUCCESS) {
+            SDL_FreeSurface(surface); return;
+        }
+        VkMemoryRequirements bmr;
+        pfnGetBufMemReq(m_Device, m_OverlayStagingBuf[type], &bmr);
+        int bmti = findMemType(bmr.memoryTypeBits,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (bmti < 0) { SDL_FreeSurface(surface); return; }
+        VkMemoryAllocateInfo bmai = {};
+        bmai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        bmai.allocationSize = bmr.size;
+        bmai.memoryTypeIndex = (uint32_t)bmti;
+        if (pfnAllocMem(m_Device, &bmai, nullptr, &m_OverlayStagingMem[type]) != VK_SUCCESS) {
+            SDL_FreeSurface(surface); return;
+        }
+        if (pfnBindBufMem(m_Device, m_OverlayStagingBuf[type], m_OverlayStagingMem[type], 0) != VK_SUCCESS
+            || pfnMapMem(m_Device, m_OverlayStagingMem[type], 0, VK_WHOLE_SIZE, 0, &m_OverlayStagingMapped[type]) != VK_SUCCESS) {
+            SDL_FreeSurface(surface); return;
+        }
+
+        // Descriptor set (allocate or re-use)
+        if (m_OverlayDescSet[type] == VK_NULL_HANDLE) {
+            VkDescriptorSetAllocateInfo asi = {};
+            asi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            asi.descriptorPool = m_OverlayDescPool;
+            asi.descriptorSetCount = 1;
+            asi.pSetLayouts = &m_OverlayDescSetLayout;
+            if (pfnAllocDescSets(m_Device, &asi, &m_OverlayDescSet[type]) != VK_SUCCESS) {
+                SDL_FreeSurface(surface); return;
+            }
+        }
+        // Update descriptor with the new view + sampler
+        VkDescriptorImageInfo dii = {};
+        dii.sampler = m_OverlaySampler;
+        dii.imageView = m_OverlayView[type];
+        dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet wds = {};
+        wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds.dstSet = m_OverlayDescSet[type];
+        wds.dstBinding = 0;
+        wds.descriptorCount = 1;
+        wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wds.pImageInfo = &dii;
+        pfnUpdateDescSets(m_Device, 1, &wds, 0, nullptr);
+
+        m_OverlayWidth[type] = w;
+        m_OverlayHeight[type] = h;
+        m_OverlayPitch[type] = surface->pitch;
+        m_OverlayStagingSize[type] = (size_t)stagingSize;
+        m_OverlayLayoutInited[type] = false;  // first cmdCopyBufferToImage will UNDEFINED→DST
+    }
+
+        // memcpy surface pixels to staging
+        if (m_OverlayStagingMapped[type] && surface->pixels) {
+            memcpy(m_OverlayStagingMapped[type], surface->pixels, m_OverlayStagingSize[type]);
+            m_OverlayPending[type] = true;
+            m_OverlayHasContent[type] = true;
+        }
+        SDL_FreeSurface(surface);
+    }  // for-type loop end
+}  // drainOverlayStash() end
+
+void VkFrucRenderer::uploadPendingOverlay(VkCommandBuffer cmd)
+{
+    if (!m_OverlayPipeline) return;
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCmdCopyBufferToImage = (PFN_vkCmdCopyBufferToImage)getDevPa(m_Device, "vkCmdCopyBufferToImage");
+    auto pfnCmdPipelineBarrier   = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
+
+    for (uint32_t type = 0; type < kOverlayMax; type++) {
+        if (!m_OverlayPending[type] || !m_OverlayImage[type]) continue;
+        VkImageLayout oldLayout = m_OverlayLayoutInited[type]
+            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            : VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImageMemoryBarrier toDst = {};
+        toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toDst.srcAccessMask = m_OverlayLayoutInited[type] ? VK_ACCESS_SHADER_READ_BIT : (VkAccessFlags)0;
+        toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toDst.oldLayout = oldLayout;
+        toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDst.image = m_OverlayImage[type];
+        toDst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toDst.subresourceRange.levelCount = 1;
+        toDst.subresourceRange.layerCount = 1;
+        pfnCmdPipelineBarrier(cmd,
+            m_OverlayLayoutInited[type] ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                         : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toDst);
+
+        VkBufferImageCopy reg = {};
+        reg.bufferRowLength = (uint32_t)(m_OverlayPitch[type] / 4);  // pitch in pixels
+        reg.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        reg.imageSubresource.layerCount = 1;
+        reg.imageExtent = { (uint32_t)m_OverlayWidth[type], (uint32_t)m_OverlayHeight[type], 1 };
+        pfnCmdCopyBufferToImage(cmd, m_OverlayStagingBuf[type], m_OverlayImage[type],
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &reg);
+
+        VkImageMemoryBarrier toShader = toDst;
+        toShader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        toShader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        pfnCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &toShader);
+
+        m_OverlayPending[type] = false;
+        m_OverlayLayoutInited[type] = true;
+    }
+}
+
+void VkFrucRenderer::drawOverlayInRenderPass(VkCommandBuffer cmd)
+{
+    if (!m_OverlayPipeline) return;
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCmdPushConstants = (PFN_vkCmdPushConstants)getDevPa(m_Device, "vkCmdPushConstants");
+
+    bool boundPipeline = false;
+    for (uint32_t type = 0; type < kOverlayMax; type++) {
+        if (!m_OverlayHasContent[type] || !m_OverlayDescSet[type]) continue;
+        // Position: top-left, scaled to fit some portion of swapchain.
+        // Use surface's native size, capped to ~30% of swapchain for safety.
+        float scW = (float)m_SwapchainExtent.width;
+        float scH = (float)m_SwapchainExtent.height;
+        float ow = (float)m_OverlayWidth[type];
+        float oh = (float)m_OverlayHeight[type];
+        // Clamp width/height to ~30% of swapchain
+        float maxW = scW * 0.45f;
+        float maxH = scH * 0.30f;
+        float scale = 1.0f;
+        if (ow > maxW) scale = maxW / ow;
+        if (oh * scale > maxH) scale = maxH / oh;
+        ow *= scale; oh *= scale;
+        // Top-left for OverlayDebug, top-right for OverlayStatusUpdate
+        float xMin, xMax, yMin, yMax;
+        if (type == 0 /*OverlayDebug*/) {
+            xMin = 0.01f; yMin = 0.01f;
+        } else {
+            xMin = 1.0f - (ow / scW) - 0.01f; yMin = 0.01f;
+        }
+        xMax = xMin + ow / scW;
+        yMax = yMin + oh / scH;
+
+        if (!boundPipeline) {
+            m_RtPfn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_OverlayPipeline);
+            boundPipeline = true;
+        }
+        m_RtPfn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                       m_OverlayPipelineLayout, 0,
+                                       1, &m_OverlayDescSet[type], 0, nullptr);
+        struct { float xMin, yMin, xMax, yMax; } pcRect = { xMin, yMin, xMax, yMax };
+        if (pfnCmdPushConstants) {
+            pfnCmdPushConstants(cmd, m_OverlayPipelineLayout,
+                                VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pcRect), &pcRect);
+        }
+        m_RtPfn.CmdDraw(cmd, 3, 1, 0, 0);
     }
 }
 
@@ -3229,6 +3751,10 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &toShaderBar);
 
+    // §J.3.e.2.i DIAG: overlay drain disabled to test hang isolation.
+    // drainOverlayStash();
+    // uploadPendingOverlay(cmd);
+
     // §J.3.e.2.i.4 — FRUC compute chain (ME → median → warp).  Records
     // dispatches into the same cmd buffer as our graphics rendering; the
     // GPU executes them in order.  Outputs to m_FrucInterpRgbBuf which is
@@ -3278,6 +3804,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                             0, sizeof(pcInterp), &pcInterp);
         }
         m_RtPfn.CmdDraw(cmd, 3, 1, 0, 0);
+        // drawOverlayInRenderPass(cmd);  // DIAG disabled
         m_RtPfn.CmdEndRenderPass(cmd);
     }
 
@@ -3297,6 +3824,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                                   m_GraphicsPipelineLayout, 0,
                                   1, &m_SlotDescSet[slot], 0, nullptr);
     m_RtPfn.CmdDraw(cmd, 3, 1, 0, 0);
+    // drawOverlayInRenderPass(cmd);  // DIAG disabled — overlay over real frame
     m_RtPfn.CmdEndRenderPass(cmd);
     m_RtPfn.EndCommandBuffer(cmd);
     m_SwImageLayoutInited = true;  // image is now in SHADER_READ_ONLY for next frame's barrier
