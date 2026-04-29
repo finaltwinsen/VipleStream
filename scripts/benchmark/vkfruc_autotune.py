@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 SCRIPT_DIR = Path(__file__).parent.resolve()
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 DEFAULT_BIN = PROJECT_ROOT / "temp" / "moonlight" / "VipleStream.exe"
+PRESENTMON   = PROJECT_ROOT / "scripts" / "PresentMon-2.4.1-x64.exe"
 TEMP_DIR = Path.home() / "AppData" / "Local" / "Temp"
 
 # §J.3.e.2.i.6 stats log:
@@ -179,14 +180,49 @@ def run_one(args, label: str, out_dir: Path) -> Dict[str, Any]:
     proc = subprocess.Popen(cmd)
     print(f"  launched pid={proc.pid}")
 
-    total_wait = args.warmup + args.seconds
-    t_end = t_launch + total_wait
-    while time.time() < t_end:
-        if proc.poll() is not None:
-            print(f"  [WARN] process exited early after {time.time()-t_launch:.1f}s")
-            break
-        time.sleep(1.0)
+    # Warmup, then optionally start PresentMon for the capture window.
+    time.sleep(args.warmup)
 
+    pm_csv = out_dir / "presentmon.csv"
+    pm_proc: Optional[subprocess.Popen] = None
+    if PRESENTMON.is_file() and not args.no_presentmon:
+        # Stop any leftover ETW session from prior runs.
+        subprocess.run(["logman", "stop", "viple_vkfruc_pm", "-ets"],
+                       capture_output=True, check=False)
+        pm_args = [
+            str(PRESENTMON),
+            "--process_id", str(proc.pid),
+            "--output_file", str(pm_csv),
+            "--timed", str(args.seconds),
+            "--terminate_after_timed",
+            "--terminate_on_proc_exit",
+            "--v2_metrics",
+            "--no_console_stats",
+            "--stop_existing_session",
+            "--session_name", "viple_vkfruc_pm",
+        ]
+        try:
+            pm_log = open(out_dir / "presentmon.log", "w")
+            pm_proc = subprocess.Popen(pm_args, stdout=pm_log, stderr=subprocess.STDOUT)
+            print(f"  presentmon started pid={pm_proc.pid}")
+        except Exception as e:
+            print(f"  [WARN] presentmon failed to start: {e}")
+            pm_proc = None
+
+    # Wait for the capture window to elapse (or for either the stream
+    # or PresentMon to die, whichever happens first).
+    t_capture_end = time.time() + args.seconds
+    while time.time() < t_capture_end:
+        if proc.poll() is not None:
+            print(f"  [WARN] stream process exited mid-capture")
+            break
+        if pm_proc is not None and pm_proc.poll() is not None:
+            break
+        time.sleep(0.5)
+
+    if pm_proc is not None and pm_proc.poll() is None:
+        try: pm_proc.wait(timeout=5)
+        except: pm_proc.kill()
     stop_viplestream()
     log_src = latest_log(t_launch)
     log_copy = None
@@ -206,6 +242,57 @@ def run_one(args, label: str, out_dir: Path) -> Dict[str, Any]:
               f"p99={parsed.p99:.2f}  p99.9={parsed.p999:.2f}  "
               f"gpu={parsed.gpu_mean_ms or 0:.2f}ms")
 
+    # PresentMon CSV → DisplayLatency / GPUBusy stats.
+    pm_metrics: Dict[str, Any] = {}
+    if pm_csv.is_file() and pm_csv.stat().st_size > 0:
+        try:
+            import csv as csvlib
+            ftimes, lats, gpus = [], [], []
+            with open(pm_csv, newline="", encoding="utf-8", errors="replace") as f:
+                r = csvlib.DictReader(f)
+                for row in r:
+                    for k_ft in ("MsBetweenPresents", "FrameTime"):
+                        v = row.get(k_ft)
+                        if v and v != "NA":
+                            try: ftimes.append(float(v))
+                            except: pass
+                            break
+                    for k_lat in ("MsUntilDisplayed", "DisplayLatency"):
+                        v = row.get(k_lat)
+                        if v and v != "NA":
+                            try: lats.append(float(v))
+                            except: pass
+                            break
+                    for k_gpu in ("MsGPUActive", "GPUBusy"):
+                        v = row.get(k_gpu)
+                        if v and v != "NA":
+                            try: gpus.append(float(v))
+                            except: pass
+                            break
+
+            def stats_of(xs: List[float]) -> Optional[Dict[str, float]]:
+                if not xs: return None
+                s = sorted(xs)
+                def pct(p):
+                    idx = int(len(s) * p / 100)
+                    return s[min(idx, len(s) - 1)]
+                return {"n": len(xs), "mean": round(sum(xs) / len(xs), 3),
+                        "p50": round(pct(50), 3), "p95": round(pct(95), 3),
+                        "p99": round(pct(99), 3), "p999": round(pct(99.9), 3)}
+            pm_metrics = {
+                "n_present":     len(ftimes),
+                "frame_time":    stats_of(ftimes),
+                "display_lat":   stats_of(lats),
+                "gpu_busy":      stats_of(gpus),
+            }
+            if pm_metrics["display_lat"]:
+                lat = pm_metrics["display_lat"]
+                print(f"  pm: lat_mean={lat['mean']:.2f}ms  lat_p99={lat['p99']:.2f}ms  "
+                      f"presents={len(ftimes)}")
+        except Exception as e:
+            print(f"  [WARN] PresentMon CSV parse failed: {e}")
+            pm_metrics = {"error": str(e)}
+
     res = {
         "label":       label,
         "log_path":    str(log_copy) if log_copy else None,
@@ -223,6 +310,7 @@ def run_one(args, label: str, out_dir: Path) -> Dict[str, Any]:
         "gpu_mean_ms": parsed.gpu_mean_ms,
         "cumul_real":  parsed.cumul_real,
         "cumul_interp":parsed.cumul_interp,
+        "presentmon":  pm_metrics,
     }
     (out_dir / "summary.json").write_text(json.dumps(res, indent=2), encoding="utf-8")
     return res
@@ -241,6 +329,8 @@ def main():
     p.add_argument("--codec", default="HEVC", choices=["AUTO", "H264", "HEVC", "AV1"],
                    help="Force codec via --video-codec CLI arg (default HEVC; "
                         "VkFruc + AV1 has cascade conflict, HEVC keeps cascade clean)")
+    p.add_argument("--no-presentmon", action="store_true",
+                   help="Skip PresentMon capture (useful if PresentMon ETW perms not granted)")
     p.add_argument("--out-label", default="run")
     p.add_argument("--out-dir", default=str(SCRIPT_DIR / "output"))
     a = p.parse_args()
