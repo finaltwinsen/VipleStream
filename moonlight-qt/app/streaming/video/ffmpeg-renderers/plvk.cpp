@@ -2256,66 +2256,72 @@ bool PlVkRenderer::initFrucRgbImgResources()
     }
     m_FrucRgbImgVkPipeline = pipe;
 
-    // 5. Dest VkImage (RGBA8 UNORM, USAGE STORAGE | TRANSFER_SRC | SAMPLED for libplacebo wrap)
-    VkImageCreateInfo iCi = {};
-    iCi.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    iCi.imageType = VK_IMAGE_TYPE_2D;
-    iCi.format = VK_FORMAT_R8G8B8A8_UNORM;
-    iCi.extent = {m_FrucNv12RgbWidth, m_FrucNv12RgbHeight, 1};
-    iCi.mipLevels = 1; iCi.arrayLayers = 1;
-    iCi.samples = VK_SAMPLE_COUNT_1_BIT;
-    iCi.tiling = VK_IMAGE_TILING_OPTIMAL;
-    iCi.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-              | VK_IMAGE_USAGE_SAMPLED_BIT;
-    iCi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    iCi.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkImage img = VK_NULL_HANDLE;
-    if (pfnCreateImage(m_Vulkan->device, &iCi, nullptr, &img) != VK_SUCCESS) {
-        m_FrucRgbImgDisabled = true; return false;
-    }
-    m_FrucRgbImgImage = img;
-
+    // §J.3.e.2.g.C — allocate FRUC_RGB_IMG_RING (=2) VkImages + memory +
+    // image views.  Each ring slot is a separate destination for the
+    // reverse compute shader; libplacebo samples slot N while we write
+    // slot N+1.  No cross-frame timeline sem needed (replaces v1.3.83's
+    // m_FrucOverrideHoldSem mechanism that proved unreliable in
+    // §J.3.e.2.f benchmark).
     VkPhysicalDeviceMemoryProperties mp = {};
     pfnGetPhysProps(m_Vulkan->phys_device, &mp);
-
-    VkMemoryRequirements imgReq = {};
-    pfnGetImageMemReq(m_Vulkan->device, img, &imgReq);
-    uint32_t imgMti = UINT32_MAX;
-    for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
-        if ((imgReq.memoryTypeBits & (1u << i))
-            && (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-            imgMti = i; break;
+    for (uint32_t ri = 0; ri < FRUC_RGB_IMG_RING; ri++) {
+        VkImageCreateInfo iCi = {};
+        iCi.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        iCi.imageType = VK_IMAGE_TYPE_2D;
+        iCi.format = VK_FORMAT_R8G8B8A8_UNORM;
+        iCi.extent = {m_FrucNv12RgbWidth, m_FrucNv12RgbHeight, 1};
+        iCi.mipLevels = 1; iCi.arrayLayers = 1;
+        iCi.samples = VK_SAMPLE_COUNT_1_BIT;
+        iCi.tiling = VK_IMAGE_TILING_OPTIMAL;
+        iCi.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                  | VK_IMAGE_USAGE_SAMPLED_BIT;
+        iCi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        iCi.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImage img = VK_NULL_HANDLE;
+        if (pfnCreateImage(m_Vulkan->device, &iCi, nullptr, &img) != VK_SUCCESS) {
+            m_FrucRgbImgDisabled = true; return false;
         }
-    }
-    if (imgMti == UINT32_MAX) { m_FrucRgbImgDisabled = true; return false; }
+        m_FrucRgbImgImage[ri] = img;
 
-    VkMemoryAllocateInfo mai = {};
-    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    mai.allocationSize = imgReq.size;
-    mai.memoryTypeIndex = imgMti;
-    VkDeviceMemory imgMem = VK_NULL_HANDLE;
-    if (pfnAllocMem(m_Vulkan->device, &mai, nullptr, &imgMem) != VK_SUCCESS) {
-        m_FrucRgbImgDisabled = true; return false;
-    }
-    m_FrucRgbImgImageMem = imgMem;
-    if (pfnBindImgMem(m_Vulkan->device, img, imgMem, 0) != VK_SUCCESS) {
-        m_FrucRgbImgDisabled = true; return false;
-    }
+        VkMemoryRequirements imgReq = {};
+        pfnGetImageMemReq(m_Vulkan->device, img, &imgReq);
+        uint32_t imgMti = UINT32_MAX;
+        for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+            if ((imgReq.memoryTypeBits & (1u << i))
+                && (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+                imgMti = i; break;
+            }
+        }
+        if (imgMti == UINT32_MAX) { m_FrucRgbImgDisabled = true; return false; }
 
-    // 6. Image view (RGBA8 COLOR aspect)
-    VkImageViewCreateInfo ivCi = {};
-    ivCi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    ivCi.image = img;
-    ivCi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    ivCi.format = VK_FORMAT_R8G8B8A8_UNORM;
-    ivCi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    ivCi.subresourceRange.levelCount = 1;
-    ivCi.subresourceRange.layerCount = 1;
-    VkImageView iv = VK_NULL_HANDLE;
-    if (pfnCreateImageView(m_Vulkan->device, &ivCi, nullptr, &iv) != VK_SUCCESS) {
-        m_FrucRgbImgDisabled = true; return false;
+        VkMemoryAllocateInfo mai = {};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = imgReq.size;
+        mai.memoryTypeIndex = imgMti;
+        VkDeviceMemory imgMem = VK_NULL_HANDLE;
+        if (pfnAllocMem(m_Vulkan->device, &mai, nullptr, &imgMem) != VK_SUCCESS) {
+            m_FrucRgbImgDisabled = true; return false;
+        }
+        m_FrucRgbImgImageMem[ri] = imgMem;
+        if (pfnBindImgMem(m_Vulkan->device, img, imgMem, 0) != VK_SUCCESS) {
+            m_FrucRgbImgDisabled = true; return false;
+        }
+
+        // Image view (RGBA8 COLOR aspect)
+        VkImageViewCreateInfo ivCi = {};
+        ivCi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        ivCi.image = img;
+        ivCi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ivCi.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ivCi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        ivCi.subresourceRange.levelCount = 1;
+        ivCi.subresourceRange.layerCount = 1;
+        VkImageView iv = VK_NULL_HANDLE;
+        if (pfnCreateImageView(m_Vulkan->device, &ivCi, nullptr, &iv) != VK_SUCCESS) {
+            m_FrucRgbImgDisabled = true; return false;
+        }
+        m_FrucRgbImgImageView[ri] = iv;
     }
-    m_FrucRgbImgImageView = iv;
 
     // 7. 4-byte readback host buffer (RGBA8 center pixel)
     VkBufferCreateInfo hbCi = {};
@@ -2355,13 +2361,15 @@ bool PlVkRenderer::initFrucRgbImgResources()
         m_FrucRgbImgDisabled = true; return false;
     }
 
-    // 8. Descriptor pool + set, bind RGB SSBO + storage image once.
+    // 8. Descriptor pool + RING descriptor sets (one per ring slot).
+    //    Each set binds the SAME bufRGB (input) but a DIFFERENT image
+    //    view (its own ring slot's storage image).
     VkDescriptorPoolSize ps[2] = {};
-    ps[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[0].descriptorCount = 1;
-    ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  ps[1].descriptorCount = 1;
+    ps[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[0].descriptorCount = FRUC_RGB_IMG_RING;
+    ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  ps[1].descriptorCount = FRUC_RGB_IMG_RING;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpCi.maxSets = 1;
+    dpCi.maxSets = FRUC_RGB_IMG_RING;
     dpCi.poolSizeCount = 2; dpCi.pPoolSizes = ps;
     VkDescriptorPool dPool = VK_NULL_HANDLE;
     if (pfnCreateDPool(m_Vulkan->device, &dpCi, nullptr, &dPool) != VK_SUCCESS) {
@@ -2369,59 +2377,67 @@ bool PlVkRenderer::initFrucRgbImgResources()
     }
     m_FrucRgbImgDescPool = dPool;
 
-    VkDescriptorSetAllocateInfo dsai = {};
-    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    dsai.descriptorPool = dPool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &dsl;
-    VkDescriptorSet dSet = VK_NULL_HANDLE;
-    if (pfnAllocDS(m_Vulkan->device, &dsai, &dSet) != VK_SUCCESS) {
-        m_FrucRgbImgDisabled = true; return false;
-    }
-    m_FrucRgbImgDescSet = dSet;
+    for (uint32_t ri = 0; ri < FRUC_RGB_IMG_RING; ri++) {
+        VkDescriptorSetAllocateInfo dsai = {};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = dPool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &dsl;
+        VkDescriptorSet dSet = VK_NULL_HANDLE;
+        if (pfnAllocDS(m_Vulkan->device, &dsai, &dSet) != VK_SUCCESS) {
+            m_FrucRgbImgDisabled = true; return false;
+        }
+        m_FrucRgbImgDescSet[ri] = dSet;
 
-    VkDescriptorBufferInfo dbi = {};
-    dbi.buffer = (VkBuffer)m_FrucNv12RgbBufRGB; dbi.offset = 0; dbi.range = VK_WHOLE_SIZE;
-    VkDescriptorImageInfo dii = {};
-    dii.imageView = iv; dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkWriteDescriptorSet w[2] = {};
-    w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w[0].dstSet = dSet; w[0].dstBinding = 0; w[0].descriptorCount = 1;
-    w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[0].pBufferInfo = &dbi;
-    w[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w[1].dstSet = dSet; w[1].dstBinding = 1; w[1].descriptorCount = 1;
-    w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; w[1].pImageInfo = &dii;
-    pfnUpdateDS(m_Vulkan->device, 2, w, 0, nullptr);
+        VkDescriptorBufferInfo dbi = {};
+        dbi.buffer = (VkBuffer)m_FrucNv12RgbBufRGB; dbi.offset = 0; dbi.range = VK_WHOLE_SIZE;
+        VkDescriptorImageInfo dii = {};
+        dii.imageView = (VkImageView)m_FrucRgbImgImageView[ri];
+        dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet w[2] = {};
+        w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[0].dstSet = dSet; w[0].dstBinding = 0; w[0].descriptorCount = 1;
+        w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[0].pBufferInfo = &dbi;
+        w[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[1].dstSet = dSet; w[1].dstBinding = 1; w[1].descriptorCount = 1;
+        w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; w[1].pImageInfo = &dii;
+        pfnUpdateDS(m_Vulkan->device, 2, w, 0, nullptr);
+    }
 
     m_FrucRgbImgReady = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VK-FRUC] §J.3.e.2.d init: reverse pipeline ready (spv=%zu bytes), "
-                "VkImage=%p (RGBA8_UNORM %ux%u, GENERAL layout, STORAGE|SAMPLED|TRANSFER_SRC)",
-                spirv.size() * sizeof(uint32_t), (void*)img, m_FrucNv12RgbWidth, m_FrucNv12RgbHeight);
+                "ring x%u VkImages (RGBA8_UNORM %ux%u, GENERAL layout, STORAGE|SAMPLED|TRANSFER_SRC) "
+                "— §J.3.e.2.g.C disposable-wrap pattern",
+                spirv.size() * sizeof(uint32_t),
+                (unsigned)FRUC_RGB_IMG_RING, m_FrucNv12RgbWidth, m_FrucNv12RgbHeight);
 
-    // §J.3.e.2.e1a — wrap the VkImage as a pl_tex so libplacebo can sample it.
-    // pl_vulkan_wrap doesn't take ownership of the VkImage; pl_tex_destroy
-    // releases the wrapper without touching the underlying image.  The image
-    // starts in "held by user" state — we own it until pl_vulkan_release_ex
-    // hands it to libplacebo (will be wired in §J.3.e.2.e1b).
-    pl_vulkan_wrap_params wrapParams = {};
-    wrapParams.image  = (VkImage)m_FrucRgbImgImage;
-    wrapParams.width  = (int)m_FrucNv12RgbWidth;
-    wrapParams.height = (int)m_FrucNv12RgbHeight;
-    wrapParams.format = VK_FORMAT_R8G8B8A8_UNORM;
-    wrapParams.usage  = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-                      | VK_IMAGE_USAGE_SAMPLED_BIT;
-    wrapParams.debug_tag = PL_DEBUG_TAG;
-    pl_tex wrappedTex = pl_vulkan_wrap(m_Vulkan->gpu, &wrapParams);
-    if (!wrappedTex) {
+    // §J.3.e.2.e1a + g.C — wrap each ring slot's VkImage as a long-lived
+    // pl_tex.  We keep the wraps for the renderer's lifetime instead of
+    // wrapping/unwrapping per frame: pl_vulkan_wrap returns a small
+    // struct that just references the VkImage, no GPU resources beyond
+    // a host-side handle.  Rotating descriptor sets + render targets
+    // by ring index gives us the disposability semantics needed to
+    // bypass the §J.3.e.2.e1b hold/release timeline bug.
+    bool anyWrapFailed = false;
+    for (uint32_t ri = 0; ri < FRUC_RGB_IMG_RING; ri++) {
+        pl_vulkan_wrap_params wrapParams = {};
+        wrapParams.image  = (VkImage)m_FrucRgbImgImage[ri];
+        wrapParams.width  = (int)m_FrucNv12RgbWidth;
+        wrapParams.height = (int)m_FrucNv12RgbHeight;
+        wrapParams.format = VK_FORMAT_R8G8B8A8_UNORM;
+        wrapParams.usage  = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                          | VK_IMAGE_USAGE_SAMPLED_BIT;
+        wrapParams.debug_tag = PL_DEBUG_TAG;
+        pl_tex wrappedTex = pl_vulkan_wrap(m_Vulkan->gpu, &wrapParams);
+        if (!wrappedTex) { anyWrapFailed = true; break; }
+        m_FrucRgbImgPlTex[ri] = const_cast<void*>(static_cast<const void*>(wrappedTex));
+    }
+    pl_tex wrappedTex = m_FrucRgbImgPlTex[0] ? (pl_tex)m_FrucRgbImgPlTex[0] : nullptr;
+    if (anyWrapFailed || !wrappedTex) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e1a: pl_vulkan_wrap failed — "
-                    "libplacebo couldn't map our RGBA8 VkImage to a pl_fmt; "
-                    "render-path override (§J.3.e.2.e1b) won't be available");
-        // Non-fatal: §J.3.e.2.c/d probes still work, but §J.3.e.2.e1b override
-        // can't proceed.  Leave m_FrucRgbImgPlTex null.
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e1a: pl_vulkan_wrap failed on at least one "
+                    "ring slot — render-path override (§J.3.e.2.e1b) won't be available");
+        // Leave nulls; runtime checks bail out cleanly.
     } else {
-        // pl_tex is `const struct pl_tex_t *` so an explicit const-cast is
-        // needed to stash it in a void* slot.  We won't write through it.
-        m_FrucRgbImgPlTex = const_cast<void*>(static_cast<const void*>(wrappedTex));
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VK-FRUC] §J.3.e.2.e1a: pl_vulkan_wrap → pl_tex=%p "
                     "(ready for §J.3.e.2.e1b render path override)",
@@ -2530,13 +2546,15 @@ void PlVkRenderer::destroyFrucRgbImgResources()
     m_FrucOverrideFrameCount = 0;
     m_FrucOverrideReady = false;
 
-    // §J.3.e.2.e1a — drop the libplacebo wrapper.  pl_tex_destroy doesn't free
-    // the underlying VkImage, but holds an internal ref that must be released
-    // before vkDestroyImage runs further down.
-    if (m_FrucRgbImgPlTex) {
-        pl_tex tex = (pl_tex)m_FrucRgbImgPlTex;
-        pl_tex_destroy(m_Vulkan->gpu, &tex);
-        m_FrucRgbImgPlTex = nullptr;
+    // §J.3.e.2.e1a + g.C — drop the libplacebo wrappers (RING of them).
+    // pl_tex_destroy doesn't free the underlying VkImage, but holds an
+    // internal ref that must be released before vkDestroyImage runs.
+    for (uint32_t ri = 0; ri < FRUC_RGB_IMG_RING; ri++) {
+        if (m_FrucRgbImgPlTex[ri]) {
+            pl_tex tex = (pl_tex)m_FrucRgbImgPlTex[ri];
+            pl_tex_destroy(m_Vulkan->gpu, &tex);
+            m_FrucRgbImgPlTex[ri] = nullptr;
+        }
     }
     auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
         return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
@@ -2553,12 +2571,15 @@ void PlVkRenderer::destroyFrucRgbImgResources()
 
     if (m_FrucRgbImgDescPool && pfnDestroyDPool)
         pfnDestroyDPool(m_Vulkan->device, (VkDescriptorPool)m_FrucRgbImgDescPool, nullptr);
-    if (m_FrucRgbImgImageView && pfnDestroyIV)
-        pfnDestroyIV(m_Vulkan->device, (VkImageView)m_FrucRgbImgImageView, nullptr);
-    if (m_FrucRgbImgImage && pfnDestroyImg)
-        pfnDestroyImg(m_Vulkan->device, (VkImage)m_FrucRgbImgImage, nullptr);
-    if (m_FrucRgbImgImageMem && pfnFreeMem)
-        pfnFreeMem(m_Vulkan->device, (VkDeviceMemory)m_FrucRgbImgImageMem, nullptr);
+    // §J.3.e.2.g.C — RING image views, images, and memory in lockstep.
+    for (uint32_t ri = 0; ri < FRUC_RGB_IMG_RING; ri++) {
+        if (m_FrucRgbImgImageView[ri] && pfnDestroyIV)
+            pfnDestroyIV(m_Vulkan->device, (VkImageView)m_FrucRgbImgImageView[ri], nullptr);
+        if (m_FrucRgbImgImage[ri] && pfnDestroyImg)
+            pfnDestroyImg(m_Vulkan->device, (VkImage)m_FrucRgbImgImage[ri], nullptr);
+        if (m_FrucRgbImgImageMem[ri] && pfnFreeMem)
+            pfnFreeMem(m_Vulkan->device, (VkDeviceMemory)m_FrucRgbImgImageMem[ri], nullptr);
+    }
     if (m_FrucRgbImgHostBuf && pfnDestroyBuf)
         pfnDestroyBuf(m_Vulkan->device, (VkBuffer)m_FrucRgbImgHostBuf, nullptr);
     if (m_FrucRgbImgHostBufMem && pfnFreeMem)
@@ -2571,17 +2592,31 @@ void PlVkRenderer::destroyFrucRgbImgResources()
         pfnDestroyDSL(m_Vulkan->device, (VkDescriptorSetLayout)m_FrucRgbImgVkDsl, nullptr);
     if (m_FrucRgbImgVkShader && pfnDestroySM)
         pfnDestroySM(m_Vulkan->device, (VkShaderModule)m_FrucRgbImgVkShader, nullptr);
-    m_FrucRgbImgDescPool = nullptr;     m_FrucRgbImgDescSet = nullptr;
-    m_FrucRgbImgImageView = nullptr;    m_FrucRgbImgImage = nullptr;    m_FrucRgbImgImageMem = nullptr;
+    m_FrucRgbImgDescPool = nullptr;
+    for (uint32_t ri = 0; ri < FRUC_RGB_IMG_RING; ri++) {
+        m_FrucRgbImgDescSet[ri] = nullptr;
+        m_FrucRgbImgImageView[ri] = nullptr;
+        m_FrucRgbImgImage[ri] = nullptr;
+        m_FrucRgbImgImageMem[ri] = nullptr;
+        m_FrucRgbImgPlTex[ri] = nullptr;
+    }
+    m_FrucRgbImgRingIdx = 0;
     m_FrucRgbImgHostBuf = nullptr;      m_FrucRgbImgHostBufMem = nullptr;
     m_FrucRgbImgVkPipeline = nullptr;   m_FrucRgbImgVkPipeLay = nullptr;
     m_FrucRgbImgVkDsl = nullptr;        m_FrucRgbImgVkShader = nullptr;
     m_FrucRgbImgReady = false;
 }
 
+// §J.3.e.2.g.C — uses m_FrucRgbImgRingIdx (advanced by caller before
+// invocation) to pick which ring slot's VkImage + descriptor set to
+// dispatch the reverse compute against.  No cross-frame sync needed:
+// libplacebo's swapchain rotation guarantees ring slot reuse only after
+// the previous frame's present completed (and thus its sampling read
+// of the same slot finished).
 bool PlVkRenderer::runRgbImgReversePass(VkCommandBuffer cb, uint32_t width, uint32_t height)
 {
     if (!m_FrucRgbImgReady || !cb) return false;
+    const uint32_t slot = m_FrucRgbImgRingIdx % FRUC_RGB_IMG_RING;
 
     auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
         return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
@@ -2593,29 +2628,29 @@ bool PlVkRenderer::runRgbImgReversePass(VkCommandBuffer cb, uint32_t width, uint
     static auto pfnDispatch  = (PFN_vkCmdDispatch)getDevProc("vkCmdDispatch");
     if (!pfnBarrier || !pfnBindPipe || !pfnBindDS || !pfnPushC || !pfnDispatch) return false;
 
-    // First-use: image is in UNDEFINED.  Subsequent calls: image is in GENERAL
-    // (we leave it there).  Use a self-targeting barrier with oldLayout=GENERAL
-    // (initial UNDEFINED is a one-shot transitioned via the same barrier on
-    // first dispatch; storage image accepts UNDEFINED→GENERAL transition).
-    static bool s_FirstUseTracked = false;
+    // First-use: each ring slot's image starts in UNDEFINED.  Track per-slot.
+    // Subsequent calls: GENERAL → GENERAL (after libplacebo sampled, ring
+    // rotation brings the slot back; the swapchain ack means the prior
+    // sample is done).
+    static bool s_FirstUseTracked[FRUC_RGB_IMG_RING] = {};
     VkImageMemoryBarrier toGen = {};
     toGen.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toGen.srcAccessMask = s_FirstUseTracked ? VK_ACCESS_SHADER_READ_BIT : 0;
+    toGen.srcAccessMask = s_FirstUseTracked[slot] ? VK_ACCESS_SHADER_READ_BIT : 0;
     toGen.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    toGen.oldLayout = s_FirstUseTracked ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    toGen.oldLayout = s_FirstUseTracked[slot] ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
     toGen.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     toGen.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toGen.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toGen.image = (VkImage)m_FrucRgbImgImage;
+    toGen.image = (VkImage)m_FrucRgbImgImage[slot];
     toGen.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     toGen.subresourceRange.levelCount = 1;
     toGen.subresourceRange.layerCount = 1;
     pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                0, 0, nullptr, 0, nullptr, 1, &toGen);
-    s_FirstUseTracked = true;
+    s_FirstUseTracked[slot] = true;
 
     pfnBindPipe(cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipeline)m_FrucRgbImgVkPipeline);
-    VkDescriptorSet dSet = (VkDescriptorSet)m_FrucRgbImgDescSet;
+    VkDescriptorSet dSet = (VkDescriptorSet)m_FrucRgbImgDescSet[slot];
     pfnBindDS(cb, VK_PIPELINE_BIND_POINT_COMPUTE,
               (VkPipelineLayout)m_FrucRgbImgVkPipeLay, 0, 1, &dSet, 0, nullptr);
     int pushVals[2] = {(int)width, (int)height};
@@ -2673,29 +2708,18 @@ bool PlVkRenderer::runFrucOverridePass(AVVkFrame* vkFrame, AVFrame* frame)
         return false;
     }
 
-    // Step A: host-wait on hold timeline at current value (== libplacebo's prev
-    // frame done with our pl_tex).  First frame: m_FrucOverrideHoldVal=0,
-    // timeline init=0, returns immediately.  After ++ at end of frame N, frame
-    // N+1 waits at value N (signaled by libplacebo when it finished frame N's
-    // pl_render_image).
-    if (m_FrucOverrideHoldVal > 0) {
-        VkSemaphore sem = (VkSemaphore)m_FrucOverrideHoldSem;
-        uint64_t waitVal = m_FrucOverrideHoldVal;
-        VkSemaphoreWaitInfo wi = {};
-        wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-        wi.semaphoreCount = 1;
-        wi.pSemaphores = &sem;
-        wi.pValues = &waitVal;
-        // 100ms timeout.  If libplacebo hasn't finished prev frame within
-        // 100ms something's wrong — disable override to avoid runaway.
-        VkResult wr = pfnWaitSems(m_Vulkan->device, &wi, 100ULL * 1000 * 1000);
-        if (wr != VK_SUCCESS) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VK-FRUC] §J.3.e.2.e1b: hold timeline wait rc=%d (val=%llu)",
-                        (int)wr, (unsigned long long)waitVal);
-            return false;
-        }
-    }
+    // §J.3.e.2.g.C — REMOVED Step A's host-wait on hold timeline.  The
+    // wait was the v1.3.107 benchmark's systematic frame#2 stall:
+    // libplacebo's signal value for our wrapped pl_tex didn't match
+    // what we waited on, so the wait perpetually timed out at 100ms
+    // and silently returned false — every frame after the first.
+    //
+    // Replacement: rotate ring slot per frame.  m_FrucRgbImgRingIdx
+    // bumps before runRgbImgReversePass uses it, so we write slot N
+    // while libplacebo is still sampling slot N-1 (or possibly N-2).
+    // pl_swapchain_start_frame's natural wait on swapchain image
+    // acquire gates ring slot reuse implicitly.
+    ++m_FrucRgbImgRingIdx;
 
     // Step B: record cmd buffer (forward + reverse, no readback).
     VkCommandBuffer cb = (VkCommandBuffer)m_FrucOverrideCmdBuf;
@@ -2921,23 +2945,9 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
         return b;
     };
 
-    // Step 1: wait on hold timeline (libplacebo done with prev frame's VkImage)
-    if (m_FrucOverrideHoldVal > 0) {
-        VkSemaphore sem = (VkSemaphore)m_FrucOverrideHoldSem;
-        uint64_t waitVal = m_FrucOverrideHoldVal;
-        VkSemaphoreWaitInfo wi = {};
-        wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-        wi.semaphoreCount = 1;
-        wi.pSemaphores = &sem;
-        wi.pValues = &waitVal;
-        VkResult wr = pfnWaitSems(m_Vulkan->device, &wi, 100ULL * 1000 * 1000);
-        if (wr != VK_SUCCESS) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d: hold timeline wait rc=%d val=%llu",
-                        (int)wr, (unsigned long long)waitVal);
-            return false;
-        }
-    }
+    // §J.3.e.2.g.C — REMOVED hold timeline wait (see runFrucOverridePass
+    // for rationale).  Ring rotation replaces cross-frame timeline sem.
+    ++m_FrucRgbImgRingIdx;
 
     if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                   "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase A start", (unsigned long long)entryN);
@@ -4331,7 +4341,8 @@ bool PlVkRenderer::runNv12RgbProbe(AVVkFrame* vkFrame, AVFrame* frame)
                 toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
                 toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                toSrc.image = (VkImage)m_FrucRgbImgImage;
+                // §J.3.e.2.g.C — probe diagnostic uses fixed slot 0.
+                toSrc.image = (VkImage)m_FrucRgbImgImage[m_FrucRgbImgRingIdx % FRUC_RGB_IMG_RING];
                 toSrc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                 toSrc.subresourceRange.levelCount = 1;
                 toSrc.subresourceRange.layerCount = 1;
@@ -4343,7 +4354,7 @@ bool PlVkRenderer::runNv12RgbProbe(AVVkFrame* vkFrame, AVFrame* frame)
                 regCenter.imageSubresource.layerCount = 1;
                 regCenter.imageOffset = {(int32_t)(W / 2), (int32_t)(H / 2), 0};
                 regCenter.imageExtent = {1, 1, 1};
-                pfnCopyImgBuf(cb, (VkImage)m_FrucRgbImgImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                pfnCopyImgBuf(cb, (VkImage)m_FrucRgbImgImage[m_FrucRgbImgRingIdx % FRUC_RGB_IMG_RING], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                               (VkBuffer)m_FrucRgbImgHostBuf, 1, &regCenter);
 
                 VkImageMemoryBarrier toGen = toSrc;
@@ -4901,7 +4912,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         // Otherwise (e.g. RIFE env var not set or load_model failed) fall through
         // to §J.3.e.2.e1b pass-through pipeline.
         bool dispatchOk = false;
-        if (vkFrame && m_FrucOverrideReady && m_FrucRgbImgPlTex) {
+        if (vkFrame && m_FrucOverrideReady && m_FrucRgbImgPlTex[0]) {
             // §J.3.e.2.g — only use the 3-phase RIFE-injected pass when RIFE
             // forward is actually going to fire this frame.  Otherwise the
             // single-cmd-buf forward+reverse path (runFrucOverridePass) is
@@ -4934,14 +4945,48 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             }
         }
         if (dispatchOk) {
-            // Image now in GENERAL with new content.  Hand to libplacebo via
-            // pl_vulkan_release_ex (sem omitted because we host-fenced above).
-            heldTex = (pl_tex)m_FrucRgbImgPlTex;
+            // §J.3.e.2.g.C v2 — disposable wrap per frame.  Release the
+            // long-lived ring wrap immediately, re-wrap from scratch.
+            // libplacebo treats each fresh wrap as a brand-new pl_tex
+            // with its own internal lifetime, so the cross-frame
+            // ownership timeline issue (release/hold sem signal value
+            // mismatch) doesn't apply.  CPU cost ≈ a struct alloc per
+            // frame.  Underlying VkImage is unchanged — we cycle the
+            // wrap, not the storage.
+            const uint32_t slot = m_FrucRgbImgRingIdx % FRUC_RGB_IMG_RING;
+            // Tear down whatever wrap was sitting in this slot from
+            // previous use of the same ring index.  pl_tex_destroy
+            // doesn't touch the underlying VkImage.
+            if (m_FrucRgbImgPlTex[slot]) {
+                pl_tex oldTex = (pl_tex)m_FrucRgbImgPlTex[slot];
+                pl_tex_destroy(m_Vulkan->gpu, &oldTex);
+                m_FrucRgbImgPlTex[slot] = nullptr;
+            }
+            pl_vulkan_wrap_params wrapParams = {};
+            wrapParams.image  = (VkImage)m_FrucRgbImgImage[slot];
+            wrapParams.width  = (int)m_FrucNv12RgbWidth;
+            wrapParams.height = (int)m_FrucNv12RgbHeight;
+            wrapParams.format = VK_FORMAT_R8G8B8A8_UNORM;
+            wrapParams.usage  = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                              | VK_IMAGE_USAGE_SAMPLED_BIT;
+            wrapParams.debug_tag = PL_DEBUG_TAG;
+            pl_tex freshTex = pl_vulkan_wrap(m_Vulkan->gpu, &wrapParams);
+            if (!freshTex) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-FRUC] §J.3.e.2.g.C: per-frame pl_vulkan_wrap failed");
+                useOverride = false;
+                goto skipOverride;
+            }
+            m_FrucRgbImgPlTex[slot] = const_cast<void*>(static_cast<const void*>(freshTex));
+            heldTex = freshTex;
+            // Tell libplacebo the image is GENERAL layout, ours-no-longer.
+            // No semaphore: we host-fenced inside run*OverridePass* so the
+            // image content is already visible to any subsequent GPU work
+            // libplacebo schedules.
             pl_vulkan_release_params relP = {};
             relP.tex = heldTex;
             relP.layout = VK_IMAGE_LAYOUT_GENERAL;
             relP.qf = VK_QUEUE_FAMILY_IGNORED;
-            // semaphore left zero-initialized (optional per pl_vulkan_release_params)
             pl_vulkan_release_ex(m_Vulkan->gpu, &relP);
 
             // Build ourFrame from mappedFrame template, then override planes
@@ -4962,6 +5007,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             ourFrame.repr.levels = PL_COLOR_LEVELS_FULL;
             useOverride = true;
         }
+        skipOverride: ;  // §J.3.e.2.g.C v2 — bail target if per-frame wrap fails
     }
 
     const pl_frame* renderSrc = useOverride ? &ourFrame : &mappedFrame;
@@ -4971,20 +5017,14 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         // NB: We must fallthrough to call pl_swapchain_submit_frame()
     }
 
-    // §J.3.e.2.e1b — if we used the override path, take ownership back via
-    // pl_vulkan_hold_ex with the timeline sem at the next value.  libplacebo
-    // signals this sem when its sampling/render submit completes; runFrucOverridePass
-    // will host-wait at that value before next frame's dispatch.
-    if (useOverride && heldTex) {
-        ++m_FrucOverrideHoldVal;
-        pl_vulkan_hold_params holdP = {};
-        holdP.tex = heldTex;
-        holdP.layout = VK_IMAGE_LAYOUT_GENERAL;
-        holdP.qf = VK_QUEUE_FAMILY_IGNORED;
-        holdP.semaphore.sem = (VkSemaphore)m_FrucOverrideHoldSem;
-        holdP.semaphore.value = m_FrucOverrideHoldVal;
-        pl_vulkan_hold_ex(m_Vulkan->gpu, &holdP);
-    }
+    // §J.3.e.2.g.C v2 — REMOVED pl_vulkan_hold_ex entirely.
+    // Disposable wrap pattern: each renderFrame call wraps a fresh
+    // pl_tex from the current ring slot's VkImage (above), uses it
+    // for pl_render_image, then leaves it as libplacebo's responsibility
+    // until the next time we touch this ring slot (which is RING frames
+    // later — by then libplacebo's submit + present has long completed).
+    // Next time we cycle back to this ring slot, we pl_tex_destroy the
+    // stale wrap and re-create.
 
     // Submit the frame for display and swap buffers
     m_HasPendingSwapchainFrame = false;

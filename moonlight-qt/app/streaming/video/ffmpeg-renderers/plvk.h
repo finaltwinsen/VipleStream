@@ -249,18 +249,23 @@ private:
     void*    m_FrucRgbImgVkDsl     = nullptr;  // VkDescriptorSetLayout (1 SSBO + 1 storage image)
     void*    m_FrucRgbImgVkPipeLay = nullptr;  // VkPipelineLayout
     void*    m_FrucRgbImgVkPipeline= nullptr;  // VkPipeline (compute)
-    void*    m_FrucRgbImgImage     = nullptr;  // VkImage (RGBA8 UNORM)
-    void*    m_FrucRgbImgImageMem  = nullptr;  // VkDeviceMemory
-    void*    m_FrucRgbImgImageView = nullptr;  // VkImageView (R8G8B8A8 COLOR aspect)
-    void*    m_FrucRgbImgDescPool  = nullptr;  // VkDescriptorPool
-    void*    m_FrucRgbImgDescSet   = nullptr;  // VkDescriptorSet
-    void*    m_FrucRgbImgHostBuf   = nullptr;  // VkBuffer (4 bytes RGBA8 readback)
+    // §J.3.e.2.g.C — ring of 2 VkImages.  v1.3.111 benchmark identified
+    // the single-image + pl_vulkan_hold_ex/release_ex timeline pattern
+    // as the systematic frame#2 stall root cause.  Replacing with a
+    // 2-deep ring (matches typical swapchain depth) lets libplacebo
+    // sample ring[N] while we write ring[(N+1) % 2], no cross-frame
+    // timeline sem needed — relies on pl_swapchain_start_frame's
+    // implicit wait on the previous swap to gate ring slot reuse.
+    static constexpr uint32_t FRUC_RGB_IMG_RING = 2;
+    void*    m_FrucRgbImgImage    [FRUC_RGB_IMG_RING] = {};  // VkImage[2] (RGBA8)
+    void*    m_FrucRgbImgImageMem [FRUC_RGB_IMG_RING] = {};
+    void*    m_FrucRgbImgImageView[FRUC_RGB_IMG_RING] = {};
+    void*    m_FrucRgbImgDescSet  [FRUC_RGB_IMG_RING] = {};  // VkDescriptorSet[2]
+    void*    m_FrucRgbImgPlTex    [FRUC_RGB_IMG_RING] = {};  // pl_tex[2] (long-lived wrap)
+    uint32_t m_FrucRgbImgRingIdx  = 0;  // monotonic frame counter, slot = idx % RING
+    void*    m_FrucRgbImgDescPool  = nullptr;  // VkDescriptorPool (sized for RING sets)
+    void*    m_FrucRgbImgHostBuf   = nullptr;  // VkBuffer (4 bytes RGBA8 readback, single)
     void*    m_FrucRgbImgHostBufMem= nullptr;  // VkDeviceMemory
-    // §J.3.e.2.e1a — libplacebo wrapping of m_FrucRgbImgImage as pl_tex.
-    // Lifetime: created after §J.3.e.2.d init succeeds, destroyed BEFORE
-    // §J.3.e.2.d resources (pl_tex_destroy must run before vkDestroyImage —
-    // pl_tex doesn't own the underlying VkImage but does hold a ref).
-    void*    m_FrucRgbImgPlTex     = nullptr;  // pl_tex
 
     // §J.3.e.2.e1b — render-path override: hold-timeline semaphore + monotonic
     // value for ping-ponging image ownership between us (compute writes) and
