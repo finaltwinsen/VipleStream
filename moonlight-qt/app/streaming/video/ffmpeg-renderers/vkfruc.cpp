@@ -586,14 +586,24 @@ bool VkFrucRenderer::createSwapchain()
                 pmode = m;  // mailbox as 2nd choice
             }
         }
+    } else if (m_DualMode) {
+        // §J.3.e.2.i.7 R1: dual mode 試 FIFO_RELAXED — 跟 FIFO 一樣 vsync
+        // 鎖定每個 present 到 slot，但 frame 遲到時允許 tearing 而非等下
+        // 個 vsync.  目標降 p99/p99.9 jitter (baseline p99=21.57 ~2× mean,
+        // 表示 1% cycles miss vsync slot).  FIFO_RELAXED 不一定所有 driver
+        // 支援，找不到就 fallback 回普通 FIFO.
+        for (auto m : modes) {
+            if (m == VK_PRESENT_MODE_FIFO_RELAXED_KHR) { pmode = m; break; }
+        }
     }
     m_SwapchainPresentMode = pmode;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.2.b chose present mode %d (%s)",
                 (int)pmode,
-                pmode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE (no vsync)" :
-                pmode == VK_PRESENT_MODE_MAILBOX_KHR   ? "MAILBOX (vsync, no tearing)" :
-                pmode == VK_PRESENT_MODE_FIFO_KHR      ? "FIFO (vsync locked)" :
+                pmode == VK_PRESENT_MODE_IMMEDIATE_KHR    ? "IMMEDIATE (no vsync)" :
+                pmode == VK_PRESENT_MODE_MAILBOX_KHR      ? "MAILBOX (vsync, no tearing)" :
+                pmode == VK_PRESENT_MODE_FIFO_KHR         ? "FIFO (vsync locked)" :
+                pmode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "FIFO_RELAXED (vsync, late tearing)" :
                 "other");
 
     VkSwapchainCreateInfoKHR sci = {};
