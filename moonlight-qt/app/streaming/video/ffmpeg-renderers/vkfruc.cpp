@@ -1864,9 +1864,12 @@ bool VkFrucRenderer::createInFlightRing()
         return false;
     }
 
+    // §J.3.e.2.i.7 R8: 加 TRANSIENT_BIT — 讓 driver 知道 cmd buffer 短命
+    // (re-record every frame)，可以選用 cheaper allocation strategy.
     VkCommandPoolCreateInfo pci = {};
     pci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    pci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+                         | VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     pci.queueFamilyIndex = m_QueueFamily;
     if (pfnCreateCmdPool(m_Device, &pci, nullptr, &m_CmdPool) != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
