@@ -32,6 +32,15 @@ extern "C" {
 // single-threaded, but ffmpeg can submit decode work concurrently.
 static std::mutex s_VkFrucQueueLock;
 
+// §J.3.e.2.i.6 — process-wide ref count for ncnn::create_gpu_instance.
+// Multiple VkFrucRenderer instances (test probes + real) each call create
+// in createFrucComputeResources; we must call destroy ONLY when the last
+// instance tears down — otherwise teardown order vs ncnn's static dtors
+// causes SIGSEGV on process exit (observed in v1.3.151 dual-present test).
+// PlVkRenderer pattern (plvk.cpp:158): ncnn::destroy_gpu_instance() must
+// run BEFORE the renderer's VkDevice is destroyed.
+static std::atomic<int> s_NcnnRefCount(0);
+
 VkFrucRenderer::VkFrucRenderer(int pass)
     : IFFmpegRenderer(RendererType::Vulkan)
     , m_Pass(pass)
@@ -2082,7 +2091,13 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // the plain create_gpu_instance() which creates ncnn's own context.
     // Idempotent: returns 0 if already initialised.
     int ncnnInit = ncnn::create_gpu_instance();
-    if (ncnnInit != 0) {
+    if (ncnnInit == 0) {
+        // Successfully created or already created (idempotent).  Track
+        // refcount so destroyFrucComputeResources knows to call destroy
+        // when the last renderer instance tears down.
+        m_NcnnInited = true;
+        s_NcnnRefCount.fetch_add(1, std::memory_order_relaxed);
+    } else {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.4 ncnn::create_gpu_instance failed rc=%d "
                     "(may already be claimed; compile may still work)", ncnnInit);
@@ -2273,6 +2288,33 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         m_FrucDisabled = true; return false;
     }
 
+    // §J.3.e.2.i.6 GPU timestamp query pool + timestampPeriod cache.
+    // Optional — failure here doesn't block FRUC compute, just disables timing.
+    {
+        auto pfnCreateQueryPool = (PFN_vkCreateQueryPool)getDevPa(m_Device, "vkCreateQueryPool");
+        auto pfnGetPhysProps    = (PFN_vkGetPhysicalDeviceProperties)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetPhysicalDeviceProperties");
+        if (pfnCreateQueryPool && pfnGetPhysProps) {
+            VkPhysicalDeviceProperties props = {};
+            pfnGetPhysProps(m_PhysicalDevice, &props);
+            m_FrucTimerNsPerTick = (double)props.limits.timestampPeriod;
+            VkQueryPoolCreateInfo qpCi = {};
+            qpCi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            qpCi.queryType  = VK_QUERY_TYPE_TIMESTAMP;
+            qpCi.queryCount = 2 * kFrucFramesInFlight;  // 2 timestamps per slot
+            if (pfnCreateQueryPool(m_Device, &qpCi, nullptr, &m_FrucTimerPool) != VK_SUCCESS) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.6 timestamp pool create failed (non-fatal)");
+                m_FrucTimerPool = VK_NULL_HANDLE;
+            } else {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.6 timestamp pool ready "
+                            "(period=%.2f ns/tick, %u queries)",
+                            m_FrucTimerNsPerTick, qpCi.queryCount);
+            }
+        }
+    }
+
     m_FrucReady = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: PASS — 3 pipelines + 6 buffers + 3 descSets ready "
@@ -2323,6 +2365,28 @@ void VkFrucRenderer::destroyFrucComputeResources()
         m_FrucDescPool = VK_NULL_HANDLE;
     }
 
+    // §J.3.e.2.i.6 timestamp pool
+    auto pfnDestroyQueryPool = (PFN_vkDestroyQueryPool)getDevPa(m_Device, "vkDestroyQueryPool");
+    if (m_FrucTimerPool && pfnDestroyQueryPool) {
+        pfnDestroyQueryPool(m_Device, m_FrucTimerPool, nullptr);
+        m_FrucTimerPool = VK_NULL_HANDLE;
+    }
+
+    // §J.3.e.2.i.6 teardown crash fix — when the last ref drops, call
+    // ncnn::destroy_gpu_instance() so ncnn's internal Vulkan resources
+    // are released BEFORE process exit (their static dtors otherwise hit
+    // stale state that we already destroyed → SIGSEGV).  Use fetch_sub:
+    // returns OLD value, so old==1 means we're the last one releasing.
+    if (m_NcnnInited) {
+        if (s_NcnnRefCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.6 last ref — calling "
+                        "ncnn::destroy_gpu_instance()");
+            ncnn::destroy_gpu_instance();
+        }
+        m_NcnnInited = false;
+    }
+
     m_FrucReady = false;
 }
 
@@ -2348,8 +2412,35 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     auto pfnCmdDispatch        = (PFN_vkCmdDispatch)getDevPa(m_Device, "vkCmdDispatch");
     auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
     auto pfnCmdCopyBuffer      = (PFN_vkCmdCopyBuffer)getDevPa(m_Device, "vkCmdCopyBuffer");
+    auto pfnCmdResetQueryPool  = (PFN_vkCmdResetQueryPool)getDevPa(m_Device, "vkCmdResetQueryPool");
+    auto pfnCmdWriteTimestamp  = (PFN_vkCmdWriteTimestamp)getDevPa(m_Device, "vkCmdWriteTimestamp");
+    auto pfnGetQueryPoolResults = (PFN_vkGetQueryPoolResults)getDevPa(m_Device, "vkGetQueryPoolResults");
     if (!pfnCmdBindPipeline || !pfnCmdBindDescSets || !pfnCmdPushConst
         || !pfnCmdDispatch || !pfnCmdPipelineBarrier || !pfnCmdCopyBuffer) return false;
+
+    // §J.3.e.2.i.6 — read PREVIOUS pass's timestamps for THIS slot (fence
+    // wait at start of renderFrameSw guarantees GPU finished).  Skip on
+    // first iteration when not yet armed.
+    const uint32_t timerSlot = m_FrucTimerSlot;
+    const uint32_t timerBase = timerSlot * 2;
+    if (m_FrucTimerPool && pfnGetQueryPoolResults && pfnCmdResetQueryPool
+        && pfnCmdWriteTimestamp && m_FrucTimerArmed[timerSlot]) {
+        uint64_t ts[2] = {};
+        VkResult qr = pfnGetQueryPoolResults(m_Device, m_FrucTimerPool,
+            timerBase, 2, sizeof(ts), ts, sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT);
+        if (qr == VK_SUCCESS && ts[1] >= ts[0]) {
+            uint64_t deltaTicks = ts[1] - ts[0];
+            double deltaUs = (double)deltaTicks * m_FrucTimerNsPerTick / 1000.0;
+            m_FrucGpuUsAccum += deltaUs;
+            m_FrucGpuUsCount++;
+        }
+    }
+    // Reset queries for this slot before re-using.
+    if (m_FrucTimerPool && pfnCmdResetQueryPool) {
+        pfnCmdResetQueryPool(cmd, m_FrucTimerPool, timerBase, 2);
+    }
+    m_FrucTimerSlot = (m_FrucTimerSlot + 1) % kFrucFramesInFlight;
 
     const uint32_t mvW = m_FrucMvWidth;
     const uint32_t mvH = m_FrucMvHeight;
@@ -2377,6 +2468,12 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
     };
+
+    // §J.3.e.2.i.6 — write chain_start timestamp BEFORE first dispatch.
+    if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
+        pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             m_FrucTimerPool, timerBase + 0);
+    }
 
     // ---- Stage 0 (i.4.1): NV12 → planar fp32 RGB ----
     // Reads m_SwStagingBuffer (NV12 packed: Y plane + UV plane), writes to
@@ -2453,6 +2550,13 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     bufBarrier(m_FrucPrevRgbBuf,
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+    // §J.3.e.2.i.6 — write chain_end timestamp AFTER last barrier.
+    if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
+        pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             m_FrucTimerPool, timerBase + 1);
+        m_FrucTimerArmed[timerSlot] = true;
+    }
 
     return true;
 }
@@ -3314,12 +3418,21 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                         sorted.size(), fps, mean,
                         pct(0.50), pct(0.95), pct(0.99), pct(0.999),
                         bucketSec);
+            // §J.3.e.2.i.6 — GPU compute chain timing (NV12->RGB + ME +
+            // Median + Warp), averaged over the window.
+            double gpuMeanUs = (m_FrucGpuUsCount > 0)
+                                ? (m_FrucGpuUsAccum / m_FrucGpuUsCount) : 0.0;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-Stats] cumul real=%llu interp=%llu "
+                        "compute_gpu_mean=%.3fms (n=%d) "
                         "(swMode=%d frucMode=%d dualMode=%d)",
                         (unsigned long long)s_CumulReal,
                         (unsigned long long)s_CumulInterp,
+                        gpuMeanUs / 1000.0,
+                        m_FrucGpuUsCount,
                         m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0);
+            m_FrucGpuUsAccum = 0.0;
+            m_FrucGpuUsCount = 0;
 
             s_FrameMsRing.clear();
             s_StatsBucketStart = now;

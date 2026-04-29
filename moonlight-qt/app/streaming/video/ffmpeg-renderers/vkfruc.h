@@ -252,6 +252,7 @@ private:
     bool     m_FrucMode      = false;
     bool     m_FrucReady     = false;
     bool     m_FrucDisabled  = false;
+    bool     m_NcnnInited    = false;  // §J.3.e.2.i.6: tracks ncnn::create_gpu_instance call
     uint32_t m_FrucMvWidth   = 0;   // ceil(W / 8)
     uint32_t m_FrucMvHeight  = 0;
     uint64_t m_FrucFrameCount = 0;
@@ -301,6 +302,19 @@ private:
     VkDeviceMemory m_FrucInterpRgbMem  = VK_NULL_HANDLE;
 
     VkDescriptorPool m_FrucDescPool = VK_NULL_HANDLE;
+
+    // §J.3.e.2.i.6 GPU timestamp queries — measures compute chain total
+    // GPU time (NV12->RGB + ME + Median + Warp).  2 timestamps per ring
+    // slot: chain_start (TOP_OF_PIPE before NV12RGB dispatch), chain_end
+    // (BOTTOM_OF_PIPE after Warp barrier).  Read at start of next frame
+    // for the SAME slot (after fence wait → GPU has finished prior pass).
+    VkQueryPool m_FrucTimerPool   = VK_NULL_HANDLE;
+    uint32_t    m_FrucTimerSlot   = 0;     // ring slot for queries
+    bool        m_FrucTimerArmed[2] = {};  // whether slot's timestamps were written
+    double      m_FrucTimerNsPerTick = 0.0;  // from VkPhysicalDeviceLimits.timestampPeriod
+    // Aggregated GPU time (us) — accumulated each frame, logged in stats window
+    double      m_FrucGpuUsAccum  = 0.0;
+    int         m_FrucGpuUsCount  = 0;
 
     // Loaded PFNs (we don't have the libplacebo wrapper's lookup; use
     // SDL_Vulkan_GetVkGetInstanceProcAddr + raw vk*ProcAddr chain).
