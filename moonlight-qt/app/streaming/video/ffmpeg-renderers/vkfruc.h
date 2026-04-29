@@ -162,6 +162,14 @@ public:
                                   void*& outMappedPtr,
                                   VkDeviceSize& outActualSize);
     void destroyGpuBitstreamBuffer(VkBuffer buffer, VkDeviceMemory memory);
+
+    // §J.3.e.2.i.8 Phase 1.3b — DPB image pool, lazy-allocated when the parser
+    // BeginSequence callback delivers stream dimensions.  17 NV12 images
+    // (DPB+DST+SAMPLED), profile chained for the active codec.  ensureDpbImagePool
+    // is idempotent; first call provisions, subsequent calls no-op (unless we
+    // teardown via destroyVideoSession which clears m_DpbReady).
+    bool ensureDpbImagePool(int width, int height);
+    void destroyDpbImagePool();
 private:
     PFN_vkUpdateVideoSessionParametersKHR m_pfnUpdateVideoSessionParams = nullptr;
     // Vulkan spec requires updateSequenceCount to be exactly the current value
@@ -182,6 +190,13 @@ private:
     VkVideoDecodeH265ProfileInfoKHR m_H265ProfileInfo   = {};
     VkVideoDecodeAV1ProfileInfoKHR  m_AV1ProfileInfo    = {};
     bool                            m_VideoProfileReady = false;
+
+    // §J.3.e.2.i.8 Phase 1.3b — DPB image pool state.  m_DpbReady gates per-frame
+    // decode submission until the pool is provisioned at the actual stream
+    // resolution (rounded up to a 64-pixel multiple for HEVC CTU alignment).
+    bool m_DpbReady       = false;
+    int  m_DpbAlignedW    = 0;
+    int  m_DpbAlignedH    = 0;
 
     // Phase 1.2 — native NAL intercept hook (renderer.h interface).
     bool acceptsNativeDecode() const override;

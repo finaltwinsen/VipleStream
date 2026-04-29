@@ -199,7 +199,14 @@ int32_t VkFrucDecodeClient::BeginSequence(const VkParserSequenceInfo* pnvsi)
                 pnvsi->nCodedWidth, pnvsi->nCodedHeight,
                 pnvsi->nDisplayWidth, pnvsi->nDisplayHeight,
                 (unsigned)pnvsi->uBitDepthLumaMinus8 + 8);
-    // Phase 1.3 — 若 stream 維度變了, recreate VkVideoSession.
+
+    // §J.3.e.2.i.8 Phase 1.3b — provision DPB image pool at the actual stream
+    // resolution.  Idempotent across IDR resends; teardown clears m_DpbReady.
+    // 若 stream 維度變了 (rare), Phase 1.3 之後可能需要 recreate VkVideoSession
+    // — 目前先信任 first BeginSequence 的尺寸.
+    if (m_Parent && pnvsi->nCodedWidth > 0 && pnvsi->nCodedHeight > 0) {
+        m_Parent->ensureDpbImagePool(pnvsi->nCodedWidth, pnvsi->nCodedHeight);
+    }
     return 16;  // max ref frames (H.265 spec)
 }
 
@@ -452,6 +459,180 @@ bool VkFrucRenderer::onH265PictureParametersFromParser(
 
 
 // =============================================================================
+// VkFrucRenderer Phase 1.3b — DPB image pool (17 NV12 VkImages with profile chain)
+// =============================================================================
+
+bool VkFrucRenderer::ensureDpbImagePool(int width, int height)
+{
+    if (m_DpbReady) return true;
+    if (!m_VideoProfileReady || m_Device == VK_NULL_HANDLE) return false;
+    if (!m_NvParser || !m_NvParser->client) return false;
+
+    // HEVC CTU sizes are 16/32/64 — round up to 64 to fit any CTB layout.
+    auto alignUp = [](int x, int a) { return (x + a - 1) & ~(a - 1); };
+    int alignedW = alignUp(width, 64);
+    int alignedH = alignUp(height, 64);
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCreateImage      = (PFN_vkCreateImage)getDevPa(m_Device, "vkCreateImage");
+    auto pfnDestroyImage     = (PFN_vkDestroyImage)getDevPa(m_Device, "vkDestroyImage");
+    auto pfnGetImageMemReq   = (PFN_vkGetImageMemoryRequirements)getDevPa(m_Device, "vkGetImageMemoryRequirements");
+    auto pfnAllocMem         = (PFN_vkAllocateMemory)getDevPa(m_Device, "vkAllocateMemory");
+    auto pfnFreeMem          = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+    auto pfnBindImageMem     = (PFN_vkBindImageMemory)getDevPa(m_Device, "vkBindImageMemory");
+    auto pfnCreateImageView  = (PFN_vkCreateImageView)getDevPa(m_Device, "vkCreateImageView");
+    auto pfnDestroyImageView = (PFN_vkDestroyImageView)getDevPa(m_Device, "vkDestroyImageView");
+    auto pfnGetMemProps      = (PFN_vkGetPhysicalDeviceMemoryProperties)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnCreateImage || !pfnGetImageMemReq || !pfnAllocMem || !pfnBindImageMem
+        || !pfnCreateImageView || !pfnGetMemProps) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b DPB image PFN missing");
+        return false;
+    }
+
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetMemProps(m_PhysicalDevice, &memProps);
+    auto findDeviceLocal = [&](uint32_t typeBits) -> int {
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+            if ((typeBits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+                return (int)i;
+            }
+        }
+        return -1;
+    };
+
+    VkVideoProfileListInfoKHR profileList = { VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR };
+    profileList.profileCount = 1;
+    profileList.pProfiles    = &m_VideoProfile;
+
+    auto& pool = m_NvParser->client->m_PicPool;
+    for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) {
+        // ── VkImage ──
+        VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ici.pNext         = &profileList;
+        ici.imageType     = VK_IMAGE_TYPE_2D;
+        ici.format        = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;  // NV12
+        ici.extent        = { (uint32_t)alignedW, (uint32_t)alignedH, 1 };
+        ici.mipLevels     = 1;
+        ici.arrayLayers   = 1;
+        ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        // DPB+DST so single image serves both reference & output (NV typical
+        // capability: DPB_AND_OUTPUT_COINCIDE).  SAMPLED so Phase 1.4 can
+        // sample directly without a copy.
+        ici.usage         = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR
+                          | VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR
+                          | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VkResult vr = pfnCreateImage(m_Device, &ici, nullptr, &pool[i].image);
+        if (vr != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b vkCreateImage[%d] rc=%d "
+                         "%dx%d", i, (int)vr, alignedW, alignedH);
+            destroyDpbImagePool();
+            return false;
+        }
+
+        VkMemoryRequirements memReq = {};
+        pfnGetImageMemReq(m_Device, pool[i].image, &memReq);
+        int mti = findDeviceLocal(memReq.memoryTypeBits);
+        if (mti < 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b no DEVICE_LOCAL memory type "
+                         "for DPB image[%d] (typeBits=0x%x)", i, memReq.memoryTypeBits);
+            destroyDpbImagePool();
+            return false;
+        }
+        VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = memReq.size;
+        mai.memoryTypeIndex = (uint32_t)mti;
+        vr = pfnAllocMem(m_Device, &mai, nullptr, &pool[i].memory);
+        if (vr != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b vkAllocateMemory[%d] rc=%d size=%llu",
+                         i, (int)vr, (unsigned long long)memReq.size);
+            destroyDpbImagePool();
+            return false;
+        }
+        vr = pfnBindImageMem(m_Device, pool[i].image, pool[i].memory, 0);
+        if (vr != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b vkBindImageMemory[%d] rc=%d",
+                         i, (int)vr);
+            destroyDpbImagePool();
+            return false;
+        }
+
+        // ── VkImageView (full plane, COLOR aspect — NV12 multi-plane is treated
+        // as single COLOR aspect at this level; ycbcr conversion samplers handle
+        // plane disaggregation downstream) ──
+        VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image                       = pool[i].image;
+        vci.viewType                    = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format                      = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+        vci.components                  = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+        vci.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.baseMipLevel   = 0;
+        vci.subresourceRange.levelCount     = 1;
+        vci.subresourceRange.baseArrayLayer = 0;
+        vci.subresourceRange.layerCount     = 1;
+        vr = pfnCreateImageView(m_Device, &vci, nullptr, &pool[i].view);
+        if (vr != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b vkCreateImageView[%d] rc=%d",
+                         i, (int)vr);
+            destroyDpbImagePool();
+            return false;
+        }
+    }
+
+    m_DpbReady    = true;
+    m_DpbAlignedW = alignedW;
+    m_DpbAlignedH = alignedH;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b DPB image pool ready — "
+                "%d slots @ %dx%d NV12 (req %dx%d, aligned to 64-pixel CTB grid)",
+                VkFrucDecodeClient::kPicPoolSize, alignedW, alignedH, width, height);
+    return true;
+}
+
+void VkFrucRenderer::destroyDpbImagePool()
+{
+    if (m_Device == VK_NULL_HANDLE) return;
+    if (!m_NvParser || !m_NvParser->client) return;
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnDestroyImageView = (PFN_vkDestroyImageView)getDevPa(m_Device, "vkDestroyImageView");
+    auto pfnDestroyImage     = (PFN_vkDestroyImage)getDevPa(m_Device, "vkDestroyImage");
+    auto pfnFreeMem          = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+
+    auto& pool = m_NvParser->client->m_PicPool;
+    for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) {
+        if (pool[i].view  != VK_NULL_HANDLE && pfnDestroyImageView)
+            pfnDestroyImageView(m_Device, pool[i].view, nullptr);
+        if (pool[i].image != VK_NULL_HANDLE && pfnDestroyImage)
+            pfnDestroyImage(m_Device, pool[i].image, nullptr);
+        if (pool[i].memory != VK_NULL_HANDLE && pfnFreeMem)
+            pfnFreeMem(m_Device, pool[i].memory, nullptr);
+        pool[i].view   = VK_NULL_HANDLE;
+        pool[i].image  = VK_NULL_HANDLE;
+        pool[i].memory = VK_NULL_HANDLE;
+        pool[i].Reset();  // refcount → 0 so subsequent IsAvailable returns true
+    }
+    m_DpbReady    = false;
+    m_DpbAlignedW = 0;
+    m_DpbAlignedH = 0;
+}
+
+
+// =============================================================================
 // VkFrucRenderer parser instance management (defined here to avoid pulling
 // nvvideoparser headers into vkfruc.cpp's already-massive #include set)
 // =============================================================================
@@ -516,6 +697,10 @@ bool VkFrucRenderer::createNvVideoParser()
 void VkFrucRenderer::destroyNvVideoParser()
 {
     if (m_NvParser) {
+        // §J.3.e.2.i.8 Phase 1.3b — DPB image pool lives inside the client's
+        // m_PicPool[].  Drop those VkImages BEFORE releasing the client
+        // (otherwise destroyDpbImagePool can't iterate the pool).
+        destroyDpbImagePool();
         // VulkanVideoDecodeParser uses intrusive refcount; reset() drops our
         // reference + destructor calls Deinitialize() automatically.
         m_NvParser->parser.reset();

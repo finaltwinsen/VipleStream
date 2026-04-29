@@ -65,17 +65,27 @@ public:
     uint64_t getDecodePicCount()      const { return m_DecodePicCount.load(); }
     uint64_t getDisplayPicCount()     const { return m_DisplayPicCount.load(); }
 
+    // §J.3.e.2.i.8 Phase 1.3b — DPB picture buffer pool with VkImage backing.
+    // 17 slots = H.265 max DPB.  Each slot owns its own VkImage / VkDeviceMemory /
+    // VkImageView (allocated lazily on first BeginSequence by the renderer's
+    // ensureDpbImagePool helper).  vkPicBuffBase tracks parser refcount + slot id.
+    struct VkFrucDpbPicture : public vkPicBuffBase {
+        VkImage        image  = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView    view   = VK_NULL_HANDLE;
+    };
+    static constexpr int kPicPoolSize = 17;
+
+    // Public so VkFrucRenderer can iterate slots to populate VkImages from
+    // ensureDpbImagePool / tear them down on destroyVideoSession.
+    VkFrucDpbPicture       m_PicPool[kPicPoolSize];
+
 private:
     VkFrucRenderer*        m_Parent;
     std::atomic<uint64_t>  m_BeginSeqCount{0};
     std::atomic<uint64_t>  m_UpdateParamsCount{0};
     std::atomic<uint64_t>  m_DecodePicCount{0};
     std::atomic<uint64_t>  m_DisplayPicCount{0};
-
-    // §J.3.e.2.i.8 Phase 1.1c — DPB picture buffer pool (17 slots = H.265
-    // maxDpbSlots).  Phase 1.3 換成真的 VkImage 配置.
-    static constexpr int kPicPoolSize = 17;
-    vkPicBuffBase          m_PicPool[kPicPoolSize];
 };
 
 #endif // HAVE_LIBPLACEBO_VULKAN
