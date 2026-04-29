@@ -495,3 +495,84 @@ RIFE 4.25-lite 真實計算量（fuse 後）：
 
 Path B 是「**現在能用**」的 baseline。§J.3.e.X 是「**要更快才動**」的優化。
 不要在 Path B 還沒驗品質前就跳到手刻。
+
+---
+
+## §J.3.e.2.f — Path B benchmark vs D3D11 baseline (v1.3.107)
+
+### Setup
+
+兩條 path 在同一硬體（RTX 3060 mobile / NVIDIA 596.84 driver）跑 720p
+60Hz Desktop streaming，同一 host (<host>)，60 秒
+steady-state。
+
+| Setup | 環境變數 | --fruc-backend |
+|---|---|---|
+| A — D3D11 baseline | （清空 VIPLE_*） | generic |
+| B — PlVkRenderer + Path B pass-through | VIPLE_USE_VK_DECODER=1, VIPLE_PLVK_NCNN_HANDOFF=1, VIPLE_VK_FRUC_OUTPUT_OVERRIDE=1, VIPLE_VK_FRUC_RIFE=1 | ncnn |
+
+兩 setup 都 `--fps 60 --frame-interpolation --no-vsync --display-mode
+windowed`，跟生產環境一致。
+
+### 結果
+
+**Setup A — D3D11 + GenericFRUC：穩定**
+
+```
+real  fps=30.00  ft_mean=33.33ms p50=33.34 p95=34.6 p99=51.8 p99.9=69.6
+interp fps=30.00  ft_mean=33.33ms p50=33.33 p95=34.4 p99=52.0 p99.9=69.2
+FRUC-Stats: submit=1511 skip=0 skip_ratio=0.0% gapAvg=33ms (expected=33ms)
+            me_gpu=0.66ms warp_gpu=0.04ms (total GPU=0.70ms)
+cumul real=1511 interp=1510  →  60s 內 3021 frame total
+```
+
+跑 60 秒 0 個 dropped frame，p99 ~52ms 表示偶發 vsync spike 但沒有
+sustained jank。Generic FRUC 的 ME (motion estimation) GPU cost 0.66ms
+非常輕。
+
+**Setup B — PlVkRenderer + Path B pass-through：不穩定**
+
+連跑 3 次都在 frame#2 掛掉：
+
+```
+00:00:07 frame#1 OK (first frame)
+00:00:08 Phase C fence wait failed   ← ★
+00:00:08-onwards: "Waiting for IDR frame" 直到 timeout
+```
+
+Phase C 的 `pfnWaitFences` 1 秒超時，代表 GPU 沒在 1 秒內 signal 我們
+共用的 `m_FrucOverrideFence`。之前 v1.3.107 build 完直接測一次有跑出
+480 frame，現在三次重測都掛 —— 是 **systematic race**，不是隨機現象。
+
+**初步推測：** Phase A 跟 Phase C 共用同一個 `m_FrucOverrideCmdBuf` +
+`m_FrucOverrideFence`。Phase A 拿 fence 用 → wait → reset，Phase C 再
+拿同一個 fence + reset 同一個 cmd buf。這個 reset+reuse pattern 跟
+libplacebo 的 swapchain present sync 排程互相打架（libplacebo 可能還
+沒釋放對 AVVkFrame.sem 的 hold，而我們已經要進下一輪），第二 frame 之
+後 timeline semaphore 鏈條卡住 → Phase C 永遠等不到 Phase A 的 V+1
+signal。
+
+### 結論
+
+1. **Path B pass-through 結構在 cold-start 後跑不穩 —— 不能 ship 成 default**
+2. 這是 **Phase A↔C 同步問題**，跟 RIFE forward 無關。所以 §J.3.e.X
+   手刻 RIFE 也救不了這個 path（除非順便重設計 cmd buf / fence 拆分）
+3. v1.3.107 的價值在於把 Path B **結構打通**並驗證 cold-start 路徑可
+   跑（loadRife PASS、staging buffer 配置 OK、Phase A→B→C handshake
+   邏輯完整）。但 steady-state 穩定性留待後續 phase 解決
+
+### Next sub-phase 建議：§J.3.e.2.g — Phase A/C 同步重整
+
+不要急著推 §J.3.e.X 手刻 RIFE。先把 §J.3.e.2.g 補進來：
+
+| 子題 | 目的 |
+|---|---|
+| **g.1** Phase A / Phase C 用獨立 cmd buf | 避開 cmd buf reset/reuse 競賽 |
+| **g.2** Phase A / Phase C 用獨立 fence | 同上 |
+| **g.3** AVVkFrame.sem 取代 local fence | 走 timeline semaphore 整條，跟 libplacebo 的 sync model 對齊 |
+| **g.4** 連跑 60 秒 stable + p99 跟 D3D11 baseline 比 | 驗證修好了 |
+
+§J.3.e.2.g 完成後再評估 §J.3.e.X 是否值得做。如果 Path B 修好但仍然
+沒 RIFE，至少 PlVkRenderer override 是實用的 pass-through path（NV12
+→ libplacebo render 全程 Vulkan-native，省掉 D3D11 cascade 的 NV12 →
+ANGLE → swapchain 路徑），即使沒 frame interp 還是有 latency 改善。
