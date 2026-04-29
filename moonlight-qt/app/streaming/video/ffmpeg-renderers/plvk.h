@@ -207,4 +207,9 @@ private:
     void*    m_FrucRgbImgDescSet   = nullptr;  // VkDescriptorSet
     void*    m_FrucRgbImgHostBuf   = nullptr;  // VkBuffer (4 bytes RGBA8 readback)
     void*    m_FrucRgbImgHostBufMem= nullptr;  // VkDeviceMemory
+    // §J.3.e.2.e1a — libplacebo wrapping of m_FrucRgbImgImage as pl_tex.
+    // Lifetime: created after §J.3.e.2.d init succeeds, destroyed BEFORE
+    // §J.3.e.2.d resources (pl_tex_destroy must run before vkDestroyImage —
+    // pl_tex doesn't own the underlying VkImage but does hold a ref).
+    void*    m_FrucRgbImgPlTex     = nullptr;  // pl_tex
 };

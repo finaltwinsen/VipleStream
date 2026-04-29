@@ -1813,12 +1813,51 @@ bool PlVkRenderer::initFrucRgbImgResources()
                 "[VIPLE-VK-FRUC] §J.3.e.2.d init: reverse pipeline ready (spv=%zu bytes), "
                 "VkImage=%p (RGBA8_UNORM %ux%u, GENERAL layout, STORAGE|SAMPLED|TRANSFER_SRC)",
                 spirv.size() * sizeof(uint32_t), (void*)img, m_FrucNv12RgbWidth, m_FrucNv12RgbHeight);
+
+    // §J.3.e.2.e1a — wrap the VkImage as a pl_tex so libplacebo can sample it.
+    // pl_vulkan_wrap doesn't take ownership of the VkImage; pl_tex_destroy
+    // releases the wrapper without touching the underlying image.  The image
+    // starts in "held by user" state — we own it until pl_vulkan_release_ex
+    // hands it to libplacebo (will be wired in §J.3.e.2.e1b).
+    pl_vulkan_wrap_params wrapParams = {};
+    wrapParams.image  = (VkImage)m_FrucRgbImgImage;
+    wrapParams.width  = (int)m_FrucNv12RgbWidth;
+    wrapParams.height = (int)m_FrucNv12RgbHeight;
+    wrapParams.format = VK_FORMAT_R8G8B8A8_UNORM;
+    wrapParams.usage  = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                      | VK_IMAGE_USAGE_SAMPLED_BIT;
+    wrapParams.debug_tag = PL_DEBUG_TAG;
+    pl_tex wrappedTex = pl_vulkan_wrap(m_Vulkan->gpu, &wrapParams);
+    if (!wrappedTex) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e1a: pl_vulkan_wrap failed — "
+                    "libplacebo couldn't map our RGBA8 VkImage to a pl_fmt; "
+                    "render-path override (§J.3.e.2.e1b) won't be available");
+        // Non-fatal: §J.3.e.2.c/d probes still work, but §J.3.e.2.e1b override
+        // can't proceed.  Leave m_FrucRgbImgPlTex null.
+    } else {
+        // pl_tex is `const struct pl_tex_t *` so an explicit const-cast is
+        // needed to stash it in a void* slot.  We won't write through it.
+        m_FrucRgbImgPlTex = const_cast<void*>(static_cast<const void*>(wrappedTex));
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e1a: pl_vulkan_wrap → pl_tex=%p "
+                    "(ready for §J.3.e.2.e1b render path override)",
+                    (const void*)wrappedTex);
+    }
     return true;
 }
 
 void PlVkRenderer::destroyFrucRgbImgResources()
 {
     if (!m_PlVkInstance || !m_Vulkan) return;
+    // §J.3.e.2.e1a — drop the libplacebo wrapper FIRST.  pl_tex_destroy doesn't
+    // free the underlying VkImage, but holds an internal ref that must be
+    // released before vkDestroyImage runs further down.
+    if (m_FrucRgbImgPlTex) {
+        pl_tex tex = (pl_tex)m_FrucRgbImgPlTex;
+        pl_tex_destroy(m_Vulkan->gpu, &tex);
+        m_FrucRgbImgPlTex = nullptr;
+    }
     auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
         return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
     };
