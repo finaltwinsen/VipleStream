@@ -103,6 +103,98 @@ PlVkRenderer），不破壞既有行為。
 
 成功標準：跟 Setup D 一樣 stable 60s（單 present，無 FRUC）。
 
+進度（v1.3.123 / 即將 ship）：
+  • i.3.a — AVHWDeviceContext 建好，bridge 給 ffmpeg Vulkan 解碼器 ✅
+  • i.3.b — `VkSamplerYcbcrConversion` + immutable sampler + descriptor
+    set layout + pipeline layout ✅
+  • i.3.c — render pass + framebuffer per swapchain image + graphics
+    pipeline（pre-compiled SPIR-V，xxd 包成 .spv.h；mirrors Android
+    `moonlight-core/shaders/` pattern）✅
+    - Source `vkfruc-shaders/vkfruc.vert` + `vkfruc.frag`
+    - `build_shaders.cmd` 用 Android NDK 內建 glslc.exe 編譯
+    - 結果 .spv.h 簽進 git，end-user 不需要重跑
+  • i.3.d — per-slot in-flight ring（2 slots × 1 cmdbuf + 2 acquireSem
+    + 2 renderDoneSem + 1 fence；signaled-init fence；mirrors
+    `vk_backend.c:init_in_flight_ring`）✅
+  • i.3.e — `renderFrame()` 完整實作 ✅
+    - VkDescriptorPool + per-slot DescriptorSet pre-alloc
+    - Render-time PFN cache (m_RtPfn) 避免 hot-path 查表
+    - Per-frame 流程：fence wait → destroy slot's pending view →
+      vkAcquireNextImageKHR → `lock_frame` → vkCreateImageView (with
+      VkSamplerYcbcrConversionInfo) → vkUpdateDescriptorSets →
+      cmd record (QFOT acquire barrier + render pass + bind + draw 3) →
+      vkQueueSubmit (waits on acquireSem + AVVkFrame.sem@v, signals
+      renderDoneSem + AVVkFrame.sem@v+1, signals fence) →
+      AVVkFrame state update → `unlock_frame` → vkQueuePresentKHR
+    - Cascade hook (`ffmpeg.cpp`) 改成 pass-based：pass=0 →
+      VkFrucRenderer，init 失敗 → pass=1 fallback 到 PlVkRenderer
+    - `initialize()` 改回 true，VIPLE_VK_FRUC_GENERIC=1 直接走新 renderer
+
+i.3 全部完成，目前狀態：single-present、QFOT 接 ffmpeg Vulkan
+decoder、graphics pipeline 在跑。下一步進 i.4（compute）/ i.5
+（dual-present）/ i.6（benchmark）。
+
+### §J.3.e.2.i.3.e — runtime status：known-broken（v1.3.123-136）
+
+**Init / setup 全部 OK，但開串流第一個 frame 進 renderFrame 後 crash。**
+
+驗證流程：
+```
+set VIPLE_USE_VK_DECODER=1
+set VIPLE_VK_FRUC_GENERIC=1
+VipleStream.exe stream <host> Desktop --1080 --fps 60 --video-codec H.264
+```
+
+Crash signature（cdb minidump 分析）：
+```
+nvoglv64+0x14ca62  mov rax, [rcx+0xF0]  ← rcx=NULL, EXCEPTION_ACCESS_VIOLATION
+nvoglv64+0xe02
+avutil_60+0xe9e4c (FFmpeg hwcontext_vulkan)
+avutil_60+0x6d0c8 / +0x70408 / +0x3e824 / +0x68a89 / +0x604d9
+avcodec_62+... (avcodec_send_packet → vulkan h264 decode submit)
+VipleStream!FFmpegVideoDecoder::submitDecodeUnit+0x455
+```
+
+→ FFmpeg decoder thread 在 submit decode 時，呼叫 NV driver 內 Vulkan
+PFN，第一個 arg（`rcx`）是 NULL → driver 內部 deref 0xF0 offset → SEGV.
+
+**已試過的修法（都不解）：**
+1. **Persistent feature struct chain** — 把 `VkPhysicalDeviceXxxFeatures`
+   從 stack 改成 class member（`m_DevFeat2 / m_YcbcrFeat / m_TimelineFeat
+   / m_Sync2Feat`）讓 `device_features.pNext` 不 dangling
+2. **`VK_API_VERSION_1_3`** — FFmpeg 文件第 73 行寫 "Must be at least
+   version 1.3"，原本是 1.1，改 1.3
+3. **同時填新式 `qf[]` + 舊式 `queue_family_*_index`** —
+   `FF_API_VULKAN_FIXED_QUEUES`（libavutil 60 還是 1）相容欄位
+4. **`vkGetPhysicalDeviceFeatures2` query + enable 全部** — mirror
+   libplacebo `*m_Vulkan->features` 全 device feature set
+
+**沒解的可能 root cause：**
+- FFmpeg hwcontext_vulkan 期待我們沒提供的某個 device extension
+  （e.g. `VK_EXT_external_memory_host`、`VK_KHR_external_memory_*`）
+- 我們的 VkInstance 跟 SDL 共用 surface，而 FFmpeg 認為應該獨立 instance
+- AVVulkanDeviceContext.alloc 應該指向某個 callback 而不是 NULL
+- 其他 internal 狀態 mismatch，要 step into FFmpeg `hwcontext_vulkan.c`
+  source 才能定位
+
+**現況的影響：**
+- VkFrucRenderer.initialize() 仍 return true，cascade flip 給它，跑串
+  流→ crash. **預設 user 不踩它**：`VIPLE_VK_FRUC_GENERIC` 沒設就
+  走原本的 PlVkRenderer，無問題。
+- 設了 env var → init OK + 第一個 frame crash. cascade pass=1 是
+  PlVkRenderer 但因為是 process-level crash，整個 client 死掉，cascade
+  retry 沒機會。
+
+**下一步建議：**
+- (a) 進 FFmpeg `libavutil/hwcontext_vulkan.c` source 找 PFN 表初始化
+  時 dispatch state 是怎麼 build 的，跟我們提供的 `vkCtx` 欄位對得上
+  哪些 — 這是嚴肅的 multi-day deep dive
+- (b) 改 strategy：放棄手刻 VkInstance/VkDevice，piggyback 在
+  PlVkRenderer 的 libplacebo 實例上，只 override renderFrame 路徑做
+  我們的 swapchain + present，省掉 hwcontext bridge
+- (c) 暫停 §J.3.e.2.i 路線，回到 §J.3.e.2.h（D3D11+GenericFRUC）+
+  §J.3.e.2.f benchmark 收尾，單獨 ship
+
 ### §J.3.e.2.i.4 — Compute pipeline 接上（重用 §J.3.e.2.h.c）
 
   • initFrucGenericResources() 從 PlVkRenderer 搬到 VkFrucRenderer

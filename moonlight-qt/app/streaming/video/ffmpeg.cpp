@@ -1159,12 +1159,13 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
         case AV_HWDEVICE_TYPE_VULKAN:
             // §J.3.e.2.i — opt-in VkFrucRenderer (Android architecture
             // port; bypasses libplacebo).  When VIPLE_VK_FRUC_GENERIC=1
-            // and pass=0, try VkFrucRenderer first; on failure cascade
-            // continues to PlVkRenderer in the next pass.
-            if (qEnvironmentVariableIntValue("VIPLE_VK_FRUC_GENERIC") != 0) {
+            // and pass=0, try VkFrucRenderer first; on init failure the
+            // outer cascade retries with pass=1, at which point we hand
+            // back PlVkRenderer so the user still gets video.
+            if (qEnvironmentVariableIntValue("VIPLE_VK_FRUC_GENERIC") != 0 && pass == 0) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VKFRUC] §J.3.e.2.i cascade: VkFrucRenderer "
-                            "selected (VIPLE_VK_FRUC_GENERIC=1, pass=%d)", pass);
+                            "selected (VIPLE_VK_FRUC_GENERIC=1, pass=0)");
                 return new VkFrucRenderer(pass);
             }
             return new PlVkRenderer(true);
@@ -1474,6 +1475,33 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
     }
 #else
     decoder_pix_fmts = decoder->pix_fmts;
+#endif
+
+    // §J.3.e.2.i.3.e-SW — force VkFrucRenderer SW path BEFORE HW cascade.
+    // When VIPLE_VKFRUC_SW=1, skip all HW hwaccel options entirely and
+    // try VkFrucRenderer with NV12 software decode.  This is for isolating
+    // VkFrucRenderer's graphics+swapchain pipeline from FFmpeg-Vulkan
+    // hwcontext (HW path crashes; see docs/J.3.e.2.i_*.md).
+#ifdef HAVE_LIBPLACEBO_VULKAN
+    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0) {
+        // SW h264/hevc/av1 decoders default to YUV420P output.  We try
+        // YUV420P unconditionally — if decoder_pix_fmts list is missing
+        // (newer FFmpeg returns NULL for some SW decoders), iterating
+        // it would never enter.  Use AV_PIX_FMT_NONE arg to tryInitialize
+        // to indicate "any compatible format works".
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-SW] forcing VkFrucRenderer SW for codec %s "
+                    "(pix_fmts list size unknown — trying with YUV420P preferred)",
+                    decoder->name);
+        if (tryInitializeRenderer(decoder, AV_PIX_FMT_YUV420P, params, nullptr, nullptr,
+                                   []() -> IFFmpegRenderer* { return new VkFrucRenderer(0); })) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-SW] VkFrucRenderer SW chosen, skipping HW cascade");
+            return true;
+        }
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-SW] VkFrucRenderer SW init failed — falling through");
+    }
 #endif
 
     // This might be a hwaccel decoder, so try any hw configs first
@@ -1869,6 +1897,31 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
 {
     // Increase log level until the first frame is decoded
     av_log_set_level(AV_LOG_DEBUG);
+
+    // §J.3.e.2.i.3.e-SW — when VIPLE_VKFRUC_SW=1, force SW h264/hevc decoder
+    // BEFORE any HW cascade.  Validates VkFrucRenderer's graphics+swapchain
+    // pipeline in isolation from FFmpeg-Vulkan hwcontext (HW path crashes;
+    // see docs/J.3.e.2.i_*.md).
+    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0) {
+        const char* swDecoderName = nullptr;
+        if (params->videoFormat & VIDEO_FORMAT_MASK_H264) swDecoderName = "h264";
+        else if (params->videoFormat & VIDEO_FORMAT_MASK_H265) swDecoderName = "hevc";
+        else if (params->videoFormat & VIDEO_FORMAT_MASK_AV1) swDecoderName = "av1";
+        if (swDecoderName) {
+            const AVCodec* swDec = avcodec_find_decoder_by_name(swDecoderName);
+            if (swDec) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-SW] forcing software decoder '%s' "
+                            "for VkFrucRenderer SW upload path", swDecoderName);
+                if (tryInitializeRendererForUnknownDecoder(swDec, params, false)) {
+                    return true;
+                }
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-SW] SW decoder init failed — falling through "
+                            "to standard cascade");
+            }
+        }
+    }
 
     // First try decoders that the user has manually specified via environment variables.
     // These must output surfaces in one of the formats that one of our renderers supports,
