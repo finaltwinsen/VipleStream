@@ -734,10 +734,11 @@ bool PlVkRenderer::initFrucProbeResources()
     }
     m_FrucProbeCmdBuf = cb;
 
-    // Tiny host-visible buffer for 1-texel readback.
+    // Tiny host-visible buffer for plane-0 (Y, 1 byte) + plane-1 (UV pair, 2 bytes)
+    // readback.  Layout: [Y at offset 0][UV pair at offset 16, 16-byte aligned].
     VkBufferCreateInfo bufCi = {};
     bufCi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufCi.size = 16;  // 4 bytes for Y, padded
+    bufCi.size = 32;  // §J.3.e.2.b: enlarged from 16 → 32 to fit dual-plane samples.
     bufCi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bufCi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     VkBuffer buf = VK_NULL_HANDLE;
@@ -899,53 +900,80 @@ bool PlVkRenderer::runLayoutTransitionProbe(AVVkFrame* vkFrame, AVFrame* frame)
     bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     pfnBegin(cb, &bbi);
 
-    // Barrier 1: origLayout (probably VIDEO_DECODE_DPB_KHR) → TRANSFER_SRC_OPTIMAL,
-    // plane 0 only.  Use VK_QUEUE_FAMILY_IGNORED — trust the AVVkFrame timeline
-    // semaphore for cross-queue sync.
-    VkImageMemoryBarrier toSrcBarrier = {};
-    toSrcBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toSrcBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-    toSrcBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    toSrcBarrier.oldLayout = origLayout;
-    toSrcBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    toSrcBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toSrcBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toSrcBarrier.image = srcImg;
-    toSrcBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
-    toSrcBarrier.subresourceRange.baseMipLevel = 0;
-    toSrcBarrier.subresourceRange.levelCount = 1;
-    toSrcBarrier.subresourceRange.baseArrayLayer = 0;
-    toSrcBarrier.subresourceRange.layerCount = 1;
+    // Barrier 1: origLayout (probably VIDEO_DECODE_DPB_KHR) → TRANSFER_SRC_OPTIMAL.
+    // §J.3.e.2.b: cover BOTH plane 0 (Y) and plane 1 (UV) so we can copy from
+    // each below.  NV12 multi-planar VkImage exposes plane aspects separately;
+    // each plane needs its own barrier (subresourceRange.aspectMask is bitwise).
+    // Use VK_QUEUE_FAMILY_IGNORED — trust the AVVkFrame timeline semaphore for
+    // cross-queue sync.
+    auto buildBarrier = [&](VkImageAspectFlags aspect, VkImageLayout oldL, VkImageLayout newL,
+                             VkAccessFlags srcA, VkAccessFlags dstA) -> VkImageMemoryBarrier {
+        VkImageMemoryBarrier b = {};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.srcAccessMask = srcA;
+        b.dstAccessMask = dstA;
+        b.oldLayout = oldL;
+        b.newLayout = newL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = srcImg;
+        b.subresourceRange.aspectMask = aspect;
+        b.subresourceRange.baseMipLevel = 0;
+        b.subresourceRange.levelCount = 1;
+        b.subresourceRange.baseArrayLayer = 0;
+        b.subresourceRange.layerCount = 1;
+        return b;
+    };
+
+    VkImageMemoryBarrier toSrcBarriers[2] = {
+        buildBarrier(VK_IMAGE_ASPECT_PLANE_0_BIT, origLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+        buildBarrier(VK_IMAGE_ASPECT_PLANE_1_BIT, origLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+    };
 
     pfnBarrier(cb,
                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                VK_PIPELINE_STAGE_TRANSFER_BIT,
-               0, 0, nullptr, 0, nullptr, 1, &toSrcBarrier);
+               0, 0, nullptr, 0, nullptr, 2, toSrcBarriers);
 
-    // Copy 1 texel (top-left luma sample) from plane 0 → host buffer.
-    VkBufferImageCopy region = {};
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;
-    region.bufferImageHeight = 0;
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
-    region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.baseArrayLayer = 0;
-    region.imageSubresource.layerCount = 1;
-    region.imageOffset = {0, 0, 0};
-    region.imageExtent = {1, 1, 1};
+    // Copy 1 luma byte (plane 0) from CENTER of frame → buffer offset 0.
+    // Copy 1 UV pair (plane 1, R8G8) from chroma center (W/2, H/2 in chroma
+    // coordinates = W/4, H/4 in luma coords for 4:2:0) → buffer offset 16.
+    // §J.3.e.2.b: dual-plane access lets us do BT.709 on host below.
+    const int32_t cx = frame->width  / 2;
+    const int32_t cy = frame->height / 2;
+    const int32_t ccx = cx / 2;  // chroma plane is half-res for NV12 (4:2:0)
+    const int32_t ccy = cy / 2;
+
+    VkBufferImageCopy regions[2] = {};
+    // plane 0 Y, R8 format
+    regions[0].bufferOffset = 0;
+    regions[0].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    regions[0].imageSubresource.layerCount = 1;
+    regions[0].imageOffset = {cx, cy, 0};
+    regions[0].imageExtent = {1, 1, 1};
+    // plane 1 UV, R8G8 format (2 bytes per texel)
+    regions[1].bufferOffset = 16;
+    regions[1].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+    regions[1].imageSubresource.layerCount = 1;
+    regions[1].imageOffset = {ccx, ccy, 0};
+    regions[1].imageExtent = {1, 1, 1};
+
     pfnCopyImgBuf(cb, srcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                  (VkBuffer)m_FrucProbeBuffer, 1, &region);
+                  (VkBuffer)m_FrucProbeBuffer, 2, regions);
 
-    // Barrier 2: restore plane 0 to origLayout for ffmpeg's next access.
-    VkImageMemoryBarrier toOrigBarrier = toSrcBarrier;
-    toOrigBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    toOrigBarrier.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-    toOrigBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    toOrigBarrier.newLayout = origLayout;
+    // Barrier 2: restore both planes to origLayout for ffmpeg's next access.
+    VkImageMemoryBarrier toOrigBarriers[2] = {
+        buildBarrier(VK_IMAGE_ASPECT_PLANE_0_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, origLayout,
+                     VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_WRITE_BIT),
+        buildBarrier(VK_IMAGE_ASPECT_PLANE_1_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, origLayout,
+                     VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_WRITE_BIT),
+    };
     pfnBarrier(cb,
                VK_PIPELINE_STAGE_TRANSFER_BIT,
                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-               0, 0, nullptr, 0, nullptr, 1, &toOrigBarrier);
+               0, 0, nullptr, 0, nullptr, 2, toOrigBarriers);
 
     pfnEnd(cb);
 
@@ -1005,16 +1033,40 @@ bool PlVkRenderer::runLayoutTransitionProbe(AVVkFrame* vkFrame, AVFrame* frame)
     }
     pfnResetFences(m_Vulkan->device, 1, &fence);
 
-    // Read one luma byte and log.
+    // Read one luma byte (plane 0, offset 0) + one UV pair (plane 1, offset 16),
+    // do BT.709 limited-range conversion on host, log Y/U/V/R/G/B together.
+    // §J.3.e.2.b: this proves dual-plane access works AND validates that the
+    // BT.709 conversion math we'll bake into §J.3.e.2.c's compute shader gives
+    // sensible results on real decoded frames.
     void* mapped = nullptr;
     pfnMap(m_Vulkan->device, (VkDeviceMemory)m_FrucProbeBufferMem, 0, VK_WHOLE_SIZE, 0, &mapped);
-    uint8_t y = mapped ? *(uint8_t*)mapped : 0;
-    if (mapped) pfnUnmap(m_Vulkan->device, (VkDeviceMemory)m_FrucProbeBufferMem);
+    uint8_t y_raw = 0, cb_raw = 0, cr_raw = 0;
+    if (mapped) {
+        const uint8_t* p = (const uint8_t*)mapped;
+        y_raw  = p[0];
+        cb_raw = p[16];
+        cr_raw = p[17];
+        pfnUnmap(m_Vulkan->device, (VkDeviceMemory)m_FrucProbeBufferMem);
+    }
+
+    // BT.709 limited-range YUV (Y∈[16,235], UV∈[16,240]) → linear sRGB [0,1].
+    // Same matrix that §J.3.e.2.c GLSL shader will use, so we have a cross-check.
+    auto u8tof = [](uint8_t v) { return (float)v / 255.0f; };
+    float Y_n  = (u8tof(y_raw)  - 16.0f / 255.0f) * (255.0f / 219.0f);
+    float Cb_n = (u8tof(cb_raw) - 128.0f / 255.0f) * (255.0f / 224.0f);
+    float Cr_n = (u8tof(cr_raw) - 128.0f / 255.0f) * (255.0f / 224.0f);
+    float r = Y_n + 1.5748f * Cr_n;
+    float g = Y_n - 0.1873f * Cb_n - 0.4681f * Cr_n;
+    float b = Y_n + 1.8556f * Cb_n;
+    auto clamp01 = [](float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); };
+    r = clamp01(r); g = clamp01(g); b = clamp01(b);
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.a probe: PASS  size=%dx%d  origLayout=%d  "
-                "topleft Y=%u (raw NV12 luma byte)",
-                frame->width, frame->height, (int)origLayout, (unsigned)y);
+                "[VIPLE-VK-FRUC] §J.3.e.2.b probe: PASS  size=%dx%d  origLayout=%d  "
+                "center NV12 raw Y=%u Cb=%u Cr=%u → BT.709 linear RGB (%.3f, %.3f, %.3f)",
+                frame->width, frame->height, (int)origLayout,
+                (unsigned)y_raw, (unsigned)cb_raw, (unsigned)cr_raw,
+                r, g, b);
     return true;
 }
 
