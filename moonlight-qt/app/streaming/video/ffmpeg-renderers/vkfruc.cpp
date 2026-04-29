@@ -103,6 +103,28 @@ void VkFrucRenderer::unlockQueueStub(struct AVHWDeviceContext*, uint32_t, uint32
     s_VkFrucQueueLock.unlock();
 }
 
+// §J.3.e.2.i — FRUC status getters 給 perf overlay (ffmpeg.cpp:1073-1107) 跟
+// Pacer::renderFrame (pacer.cpp:348) 用.  D3D11VARenderer 對應在
+// d3d11va.cpp:2306-2322.  VkFruc 的 FRUC 走 native Vulkan compute (ME→
+// median→warp) + dual-present，所以判斷條件是 m_FrucMode + m_FrucReady +
+// m_DualMode 三者皆 true.  m_FRUCPaused 由 base class 提供 (renderer.h:310)，
+// Ctrl+Alt+Shift+F 切換；目前 VkFruc 的 renderFrameSw 還沒接 pause 跳過 dual-
+// present 的邏輯，但 lastFrameHadFRUCInterp 仍尊重它讓 stats 一致.
+bool VkFrucRenderer::isFRUCActive() const
+{
+    return m_FrucMode && m_FrucReady && m_DualMode;
+}
+
+bool VkFrucRenderer::lastFrameHadFRUCInterp() const
+{
+    return m_FrucMode && m_FrucReady && m_DualMode && !m_FRUCPaused.load();
+}
+
+const char* VkFrucRenderer::getFRUCBackendName() const
+{
+    return "VkFruc-Vulkan compute";
+}
+
 void VkFrucRenderer::teardown()
 {
     // §J.3.e.2.i.3.e — drain GPU first.  Pending submits may still hold
@@ -707,10 +729,21 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
-    // §J.3.e.2.i DIAG2: skip overlay resources entirely to confirm if
-    // teardown hang is overlay-related.
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i DIAG2: overlay resources NOT allocated");
+    // §J.3.e.2.i — overlay 資源（pipeline/shader/sampler/desc pool/spinlock
+    // state）.  v1.3.171 上線後在某些 host 配置觸發 VK_ERROR_DEVICE_LOST，
+    // 還沒找到 root cause——env-var gate 起來，預設 OFF，使用者能用
+    // VIPLE_VKFRUC_OVERLAY=1 opt-in 並協助回報 console log.
+    bool overlayWanted = qEnvironmentVariableIntValue("VIPLE_VKFRUC_OVERLAY") != 0;
+    if (overlayWanted) {
+        if (!createOverlayResources()) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i overlay 資源建立失敗，效能資訊 overlay 將不會顯示");
+            destroyOverlayResources();  // best-effort 清掉部分建好的 handle
+        }
+    } else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i overlay disabled (set VIPLE_VKFRUC_OVERLAY=1 to enable)");
+    }
 
     // §J.3.e.2.i.3.e-SW — allocate upload buffer + image when in software
     // mode.  Size from params.  We use the source resolution; if the
@@ -1400,11 +1433,11 @@ bool VkFrucRenderer::createOverlayResources()
     dpCi.pPoolSizes = &poolSize;
     if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_OverlayDescPool) != VK_SUCCESS) return false;
 
-    m_OverlayStashMutex = SDL_CreateMutex();
-    if (!m_OverlayStashMutex) return false;
+    // §J.3.e.2.i overlay：m_OverlayLock 是 zero-initialised int (header) —
+    // SDL_AtomicLock spinlock 不需要顯式 create / destroy。
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i overlay resources ready (frag=%u B SPIR-V)",
+                "[VIPLE-VKFRUC] §J.3.e.2.i overlay resources ready (frag=%u B SPIR-V, atomic-lock)",
                 (unsigned)vkfruc_overlay_frag_spv_len);
     return true;
 }
@@ -1442,56 +1475,78 @@ void VkFrucRenderer::destroyOverlayResources()
     if (m_OverlayFragShaderMod && pfnDestroyShader) { pfnDestroyShader(m_Device, m_OverlayFragShaderMod, nullptr); m_OverlayFragShaderMod = VK_NULL_HANDLE; }
     if (m_OverlaySampler && pfnDestroySampler)   { pfnDestroySampler(m_Device, m_OverlaySampler, nullptr); m_OverlaySampler = VK_NULL_HANDLE; }
 
-    // §J.3.e.2.i — drain stashed surfaces before destroying mutex.
-    if (m_OverlayStashMutex) {
-        SDL_LockMutex(m_OverlayStashMutex);
-        for (uint32_t i = 0; i < kOverlayMax; i++) {
-            if (m_OverlayStashedSurface[i]) {
-                SDL_FreeSurface(m_OverlayStashedSurface[i]);
-                m_OverlayStashedSurface[i] = nullptr;
-            }
+    // §J.3.e.2.i — drain stashed surfaces under spinlock.  By此時
+    // OverlayManager 已經 setOverlayRenderer(nullptr)（見 ffmpeg.cpp:294），
+    // 不會再有新 callback 進來；spinlock 只是保護任何 in-flight
+    // notifyOverlayUpdated 完成。SDL_AtomicLock 是純 int spinlock，沒有
+    // destroy 步驟 —— 這裡若拿不到 lock 就 spin，但因為 deregister 已經
+    // 發生，最多 spin 一個 in-flight call 的時間（μs 等級）。
+    SDL_AtomicLock(&m_OverlayLock);
+    for (uint32_t i = 0; i < kOverlayMax; i++) {
+        if (m_OverlayStashedSurface[i]) {
+            SDL_FreeSurface(m_OverlayStashedSurface[i]);
+            m_OverlayStashedSurface[i] = nullptr;
         }
-        SDL_UnlockMutex(m_OverlayStashMutex);
-        SDL_DestroyMutex(m_OverlayStashMutex);
-        m_OverlayStashMutex = nullptr;
+        m_OverlayStashedDisable[i] = false;
     }
+    SDL_AtomicUnlock(&m_OverlayLock);
 }
 
 void VkFrucRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
 {
-    // §J.3.e.2.i overlay rendering — DEFERRED.
+    // §J.3.e.2.i overlay — 跟 D3D11VARenderer::notifyOverlayUpdated 一樣，
+    // 這個 callback 可能在任意 thread 進來（OverlayManager 在 render thread
+    // 之外的 SDL event/UI thread 觸發），所以 **絕對不能** 碰 cmd buffer
+    // 或 queue submit.  我們只做兩件事：
+    //   1. 從 OverlayManager 把新 SDL_Surface「atomic-swap 出來」（拿走
+    //      所有權，OverlayManager 之後會自己 free 上一張舊的）
+    //   2. 在 spinlock 內把 surface 塞到 stash slot；如果 slot 已有舊的
+    //      stash，直接 free 它（沒被 drain 到的就是過時的）
     //
-    // First-ship attempt at composite overlay rendering hit a teardown hang
-    // when SDL_QUIT (window X close) fires while overlay was enabled.  Race
-    // appears to be in OverlayManager / SDL_TTF cleanup interaction with
-    // our pipeline tear-down; not worth blocking ship on.
-    //
-    // Empty handler keeps OverlayManager's own surface lifecycle intact
-    // (it free's old surfaces in atomic-swap dance regardless of whether
-    // we drain).  Result: Ctrl+Alt+Shift+D toggles state in OverlayManager
-    // but nothing is rendered onscreen.
-    //
-    // To re-enable: revisit overlay shader path with proper SDL_QUIT-safe
-    // teardown ordering (or pivot to libplacebo's overlay system).
-    (void)type;
+    // 真正的 GPU 工作（vkCreateImage/vkAllocateMemory/cmdCopyBufferToImage/
+    // barriers）全部在 render thread 的 drainOverlayStash + uploadPendingOverlay
+    // 做.  notifyOverlayUpdated → drainOverlayStash 透過 SDL_AtomicLock
+    // 同步.
+    if (type >= kOverlayMax) return;
+
+    Overlay::OverlayManager& mgr = Session::get()->getOverlayManager();
+    SDL_Surface* newSurface  = mgr.getUpdatedOverlaySurface(type);  // ownership transfers to us
+    bool         enabledNow  = mgr.isOverlayEnabled(type);
+
+    SDL_AtomicLock(&m_OverlayLock);
+    // 取代任何 in-flight 但未被 drain 的 stash.
+    if (m_OverlayStashedSurface[type]) {
+        SDL_FreeSurface(m_OverlayStashedSurface[type]);
+        m_OverlayStashedSurface[type] = nullptr;
+    }
+    if (newSurface) {
+        m_OverlayStashedSurface[type] = newSurface;
+        m_OverlayStashedDisable[type] = false;
+    } else if (!enabledNow) {
+        // overlay 剛被關掉 (Ctrl+Alt+Shift+D 第二下), 透過 disable flag
+        // 通知 drain 把 m_OverlayHasContent 清掉.
+        m_OverlayStashedDisable[type] = true;
+    }
+    SDL_AtomicUnlock(&m_OverlayLock);
 }
 
 void VkFrucRenderer::drainOverlayStash()
 {
     // §J.3.e.2.i — runs on render thread; safe to do Vulkan work.
-    if (!m_OverlayStashMutex || !m_OverlayPipeline) return;
+    if (!m_OverlayPipeline) return;
 
-    // Pull stashed surfaces out under lock; do GPU work after release.
+    // 用 SDL_AtomicTryLock —— 拿不到 lock 就跳這幀，下一幀再試.  D3D11VA 的
+    // renderOverlay 也是同樣 pattern (d3d11va.cpp:1260)，避免 render block.
     SDL_Surface* surfaces[kOverlayMax] = {};
     bool disables[kOverlayMax] = {};
-    SDL_LockMutex(m_OverlayStashMutex);
+    if (!SDL_AtomicTryLock(&m_OverlayLock)) return;
     for (uint32_t i = 0; i < kOverlayMax; i++) {
         surfaces[i] = m_OverlayStashedSurface[i];
         disables[i] = m_OverlayStashedDisable[i];
         m_OverlayStashedSurface[i] = nullptr;
         m_OverlayStashedDisable[i] = false;
     }
-    SDL_UnlockMutex(m_OverlayStashMutex);
+    SDL_AtomicUnlock(&m_OverlayLock);
 
     auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetDeviceProcAddr");
@@ -1725,28 +1780,26 @@ void VkFrucRenderer::drawOverlayInRenderPass(VkCommandBuffer cmd)
     bool boundPipeline = false;
     for (uint32_t type = 0; type < kOverlayMax; type++) {
         if (!m_OverlayHasContent[type] || !m_OverlayDescSet[type]) continue;
-        // Position: top-left, scaled to fit some portion of swapchain.
-        // Use surface's native size, capped to ~30% of swapchain for safety.
+        // 對齊 D3D11VARenderer::createOverlayVertexBuffer (d3d11va.cpp:1620):
+        // surface 原 pixel size、不縮放、不 padding.  OverlayDebug 在左上,
+        // OverlayStatusUpdate 在左下 (跟 D3D11 註解 "Top left" / "Bottom Left"
+        // 相符 —— 雖然 D3D11 用 screen-space y 經 NDC flip 換算,Vulkan UV
+        // 直接用 [0,1] 表示).
         float scW = (float)m_SwapchainExtent.width;
         float scH = (float)m_SwapchainExtent.height;
-        float ow = (float)m_OverlayWidth[type];
-        float oh = (float)m_OverlayHeight[type];
-        // Clamp width/height to ~30% of swapchain
-        float maxW = scW * 0.45f;
-        float maxH = scH * 0.30f;
-        float scale = 1.0f;
-        if (ow > maxW) scale = maxW / ow;
-        if (oh * scale > maxH) scale = maxH / oh;
-        ow *= scale; oh *= scale;
-        // Top-left for OverlayDebug, top-right for OverlayStatusUpdate
+        float ow  = (float)m_OverlayWidth[type];
+        float oh  = (float)m_OverlayHeight[type];
         float xMin, xMax, yMin, yMax;
         if (type == 0 /*OverlayDebug*/) {
-            xMin = 0.01f; yMin = 0.01f;
-        } else {
-            xMin = 1.0f - (ow / scW) - 0.01f; yMin = 0.01f;
+            xMin = 0.0f; yMin = 0.0f;          // 左上角
+        } else /*OverlayStatusUpdate*/ {
+            xMin = 0.0f; yMin = 1.0f - oh / scH;  // 左下角
         }
         xMax = xMin + ow / scW;
         yMax = yMin + oh / scH;
+        // 萬一 overlay surface 比 swapchain 還大，clamp 到 [0,1] 不要超出.
+        if (xMax > 1.0f) xMax = 1.0f;
+        if (yMax > 1.0f) yMax = 1.0f;
 
         if (!boundPipeline) {
             m_RtPfn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_OverlayPipeline);
@@ -3751,9 +3804,13 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &toShaderBar);
 
-    // §J.3.e.2.i DIAG: overlay drain disabled to test hang isolation.
-    // drainOverlayStash();
-    // uploadPendingOverlay(cmd);
+    // §J.3.e.2.i overlay：drain stash → memcpy 到 staging（可能 alloc 新
+    // image 若尺寸變了），然後 uploadPendingOverlay 在 cmd buffer 內把
+    // staging copy 進 image + barrier 到 SHADER_READ_ONLY_OPTIMAL.  必須
+    // 在 BeginRenderPass 之前做（cmdCopyBufferToImage 不能在 render pass
+    // 裡）.
+    drainOverlayStash();
+    uploadPendingOverlay(cmd);
 
     // §J.3.e.2.i.4 — FRUC compute chain (ME → median → warp).  Records
     // dispatches into the same cmd buffer as our graphics rendering; the
@@ -3804,7 +3861,9 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                             0, sizeof(pcInterp), &pcInterp);
         }
         m_RtPfn.CmdDraw(cmd, 3, 1, 0, 0);
-        // drawOverlayInRenderPass(cmd);  // DIAG disabled
+        // overlay 疊在 interp pass 上（dual mode 下兩 pass 都疊，跟 D3D11VA
+        // dual-FRUC 一樣 d3d11va.cpp:1107、1139）。
+        drawOverlayInRenderPass(cmd);
         m_RtPfn.CmdEndRenderPass(cmd);
     }
 
@@ -3824,7 +3883,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                                   m_GraphicsPipelineLayout, 0,
                                   1, &m_SlotDescSet[slot], 0, nullptr);
     m_RtPfn.CmdDraw(cmd, 3, 1, 0, 0);
-    // drawOverlayInRenderPass(cmd);  // DIAG disabled — overlay over real frame
+    drawOverlayInRenderPass(cmd);  // overlay 疊在 real frame pass 上.
     m_RtPfn.CmdEndRenderPass(cmd);
     m_RtPfn.EndCommandBuffer(cmd);
     m_SwImageLayoutInited = true;  // image is now in SHADER_READ_ONLY for next frame's barrier

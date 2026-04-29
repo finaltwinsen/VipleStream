@@ -45,6 +45,14 @@ public:
 
     void notifyOverlayUpdated(Overlay::OverlayType type) override;
 
+    // §J.3.e.2.i — FRUC status hooks 給 perf overlay 用 (ffmpeg.cpp:1075).
+    // 沒 override 時 base class 全 return false，overlay 會顯示「未啟用」.
+    // Pacer::renderFrame (pacer.cpp:348) 也用 lastFrameHadFRUCInterp 來
+    // 累加 frucInterpolatedFrames，要正確才能算出補幀比例.
+    bool isFRUCActive() const override;
+    bool lastFrameHadFRUCInterp() const override;
+    const char* getFRUCBackendName() const override;
+
 private:
     // §J.3.e.2.i.2 sub-helpers — port from Android vk_backend.c
     bool createInstanceAndSurface(SDL_Window* window);
@@ -340,9 +348,12 @@ private:
     VkPipeline            m_OverlayPipeline         = VK_NULL_HANDLE;
     VkDescriptorPool      m_OverlayDescPool         = VK_NULL_HANDLE;
 
-    // Cross-thread stash: notifyOverlayUpdated runs on SDL event thread,
-    // render thread drains in renderFrameSw → drainOverlayStash().
-    SDL_mutex*       m_OverlayStashMutex            = nullptr;
+    // Cross-thread stash: notifyOverlayUpdated runs on任意 thread (見
+    // overlaymanager.cpp:290 註解，跟 D3D11VARenderer 一樣），render thread
+    // 在 renderFrameSw → drainOverlayStash() 拉資料。改用 SDL_AtomicLock
+    // (spinlock) 取代 SDL_mutex —— D3D11VA 也是這個 pattern：render 拿不到
+    // lock 就跳這幀，比 mutex block 安全（teardown 也不必先拆 mutex）。
+    int              m_OverlayLock                  = 0;
     SDL_Surface*     m_OverlayStashedSurface[kOverlayMax] = {};
     bool             m_OverlayStashedDisable[kOverlayMax] = {};
 
