@@ -309,3 +309,113 @@ Stats logging 實作：`renderFrameSw` 每 5 秒 emit 一個
 `docs/J.3.e.2.i_vulkan_native_renderer.md` — 本文件
 `moonlight-qt/app/streaming/video/ffmpeg-renderers/vkfruc.h/cpp` — 新
 renderer class（命名沿用 ffmpeg-renderers 目錄慣例）
+
+## §J.3.e.2.i.7 — HW path retry（v1.3.189-190）+ pivot
+
+v1.3.189 attempt 1：把 device extension list 從 9 個（minimal subset）
+改成 mirror libplacebo 的 `k_OptionalDeviceExtensions`（plvk.cpp:38），
+加 `VK_KHR_PUSH_DESCRIPTOR / VK_EXT_EXTERNAL_MEMORY_HOST /
+VK_KHR_EXTERNAL_MEMORY_WIN32 / VK_KHR_EXTERNAL_SEMAPHORE_WIN32`。
+做法：query 物理裝置支援哪些 ext，跟 wanted 列表取交集，存 class
+member `m_EnabledDevExts`，createLogicalDevice + populateAvHwDeviceCtx
+用同一份。
+
+v1.3.190 attempt 2：`getPreferredPixelFormat` HW 模式回 `AV_PIX_FMT_VULKAN`
+（之前 fallback 到 base class 的 yuv420p）；`isPixelFormatSupported`
+HW 模式只接受 `AV_PIX_FMT_VULKAN`。
+
+**結果：兩個 attempt 都沒讓 HW 真正啟動。**
+
+實測 log（VIPLE_VKFRUC_HW=1, HEVC, RS_VULKAN）：
+```
+[VIPLE-VKFRUC] §J.3.e.2.i.3.e initialize SUCCESS ... (HW mode: AV_PIX_FMT_VULKAN)
+[VIPLE-VKFRUC] §J.3.e.2.i.3.a prepareDecoderContext OK — ffmpeg will decode into AVVkFrame
+FFmpeg: [hevc] Format yuv420p chosen by get_format().    ← FFmpeg 還是選了 SW
+Test decode SUCCEEDED for format=0x100 hw=0 pixfmt=0
+[VIPLE-VKFRUC-SW] VkFrucRenderer SW chosen, skipping HW cascade
+```
+
+Root cause 不在 hwctx 的 ext list 或 pixel format signal，而在
+**ffmpeg.cpp:1486 cascade trigger**：
+```cpp
+if (tryInitializeRenderer(decoder, AV_PIX_FMT_YUV420P, ...,
+                           []() -> IFFmpegRenderer* { return new VkFrucRenderer(0); })) {
+```
+
+`tryInitializeRenderer` 第二個參數 `requiredFormat=AV_PIX_FMT_YUV420P`
+強制 SW codec format → FFmpeg 永遠 pick SW codec → 沒走 HW decode.
+
+要走 FFmpeg-Vulkan HW 路線，cascade 要新增一個 slot 用
+`AV_PIX_FMT_VULKAN` 為 requiredFormat 並用 HEVC HW decoder。那是
+attempt #3 + 整個 cascade restructure。
+
+## §J.3.e.2.i.8 — pivot：自己 VK_KHR_video_decode（跳 FFmpeg）
+
+v1.3.190 之後決定 pivot —— 跳過 FFmpeg-Vulkan wrapper，自己接
+VK_KHR_video_decode。
+
+### 動機
+
+- FFmpeg cascade restructure 風險高（影響 D3D11 / Pl / 其他 backend
+  的選擇邏輯）
+- VK_KHR_video_decode 直接用 driver-level Vulkan API，繞掉 FFmpeg
+  hwcontext 的 dispatch table mis-init bug 整套
+- VkFruc 已有的 swapchain + compute pipeline + dual-present 都能直接
+  在 decoded VkImage 上接
+
+### 範圍
+
+| 子任務 | 預估 LOC | 風險 |
+|---|---|---|
+| NAL unit reception (intercept moonlight pre-FFmpeg) | ~50 | 低，現成 hook |
+| H.264/H.265 SPS/PPS parser (用 h264_stream lib 或 ffmpeg parser) | ~150 | 中 |
+| VkVideoSessionKHR + VkVideoSessionParametersKHR | ~250 | 中-高 |
+| DPB (Decoded Picture Buffer) management | ~250 | 高（reference frame tracking） |
+| Per-frame vkCmdDecodeVideoKHR + barriers | ~150 | 中 |
+| Output VkImage → 既有 graphics pipeline | ~50 | 低（已現成） |
+| 整合 dual-present + FRUC compute | ~100 | 低 |
+| **TOTAL** | **~1000 LOC** | **multi-session** |
+
+### Phase 規劃
+
+- **Phase 1**: H.264 only baseline（H.264 比 H.265 簡單，先跑通流程）
+- **Phase 2**: H.265 (HEVC, 跟 stream 主要 codec 對齊)
+- **Phase 3**: AV1（FFmpeg 6.1+ 才有 VK_KHR_video_decode_av1）
+- **Phase 4**: 整合 dual-present + FRUC compute path
+
+### 關鍵 Vulkan API
+
+```c
+// Setup
+vkCreateVideoSessionKHR
+vkBindVideoSessionMemoryKHR
+vkCreateVideoSessionParametersKHR
+vkUpdateVideoSessionParametersKHR  // SPS/PPS 變更時
+
+// Per-frame decode (in cmd buffer)
+vkCmdBeginVideoCodingKHR
+vkCmdControlVideoCodingKHR  // first time after session create
+vkCmdDecodeVideoKHR
+vkCmdEndVideoCodingKHR
+```
+
+### 失敗風險預演
+
+- **NV 596.84 driver 對 VK_KHR_video_decode_h265 支援程度** —
+  RTX 30 系列應該支援，要 query VkVideoCapabilitiesKHR 確認
+- **Bitstream parsing 邊角案例** — 重排序 frame、B frame、slice mode、
+  HEVC 10-bit
+- **DPB management bug** — 錯的 reference frame → 視覺壞畫面、不會 crash
+  但難 debug
+- **Replace FFmpeg 的 connection 流程** — moonlight 既有 NAL hook 點是
+  `submitDecodeUnit`（限制：必須在 FFmpeg path 走完前 intercept）
+
+### 動工前必確認
+
+1. NV 596.84 對 VK_KHR_video_decode_h265 + decode H.265 Main 的支援
+   (vkGetPhysicalDeviceVideoCapabilitiesKHR query)
+2. moonlight-qt 哪一層拿到 raw NAL bytes（看 `submitDecodeUnit` 上游）
+3. 既有 h264_stream library import 是否能 reuse for H.264 parsing
+   （`#include <h264_stream.h>` 已在 ffmpeg.cpp 第 7 行）
+
+實作工作排在 §J.3.e.2.i.8.* sub-phase，超出單 session 範圍.
