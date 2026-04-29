@@ -900,6 +900,10 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 createVideoSession failed — Phase 1 native decode 路徑 skip");
             destroyVideoSession();  // best-effort cleanup
+        } else if (!createVideoSessionParameters(m_VideoFormat)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 createVideoSessionParameters failed");
+            destroyVideoSession();
         }
     } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2555,6 +2559,89 @@ bool VkFrucRenderer::createVideoSession(int videoFormat)
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.8 video session memory bound (%u bindings)",
                 reqCount);
+
+    m_VideoCodec = videoFormat;  // remember which codec for Phase 1.1+
+    return true;
+}
+
+// §J.3.e.2.i.8 Phase 1.1 — VkVideoSessionParametersKHR (empty slots).
+//
+// 建空的 parameters object，預留 max VPS/SPS/PPS slots. 之後 stream 收到
+// VPS/SPS/PPS NAL 時用 vkUpdateVideoSessionParametersKHR 動態加進去 ——
+// 不需要 init 時就有 parameter sets.
+//
+// H.264: maxStdSPSCount + maxStdPPSCount
+// H.265: maxStdVPSCount + maxStdSPSCount + maxStdPPSCount
+// AV1:   maxStdSequenceHeaderCount
+bool VkFrucRenderer::createVideoSessionParameters(int videoFormat)
+{
+    if (m_VideoSession == VK_NULL_HANDLE) return false;
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCreateVidSessParams = (PFN_vkCreateVideoSessionParametersKHR)getDevPa(
+        m_Device, "vkCreateVideoSessionParametersKHR");
+    if (!pfnCreateVidSessParams) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 vkCreateVideoSessionParametersKHR PFN missing");
+        return false;
+    }
+
+    VkVideoSessionParametersCreateInfoKHR vspCi = {
+        VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR
+    };
+    vspCi.videoSession = m_VideoSession;
+    vspCi.videoSessionParametersTemplate = VK_NULL_HANDLE;
+
+    // codec-specific create struct
+    VkVideoDecodeH264SessionParametersCreateInfoKHR h264ParamsCi = {
+        VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_SESSION_PARAMETERS_CREATE_INFO_KHR
+    };
+    VkVideoDecodeH265SessionParametersCreateInfoKHR h265ParamsCi = {
+        VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_SESSION_PARAMETERS_CREATE_INFO_KHR
+    };
+    VkVideoDecodeAV1SessionParametersCreateInfoKHR av1ParamsCi = {
+        VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_SESSION_PARAMETERS_CREATE_INFO_KHR
+    };
+    const char* codecName;
+    if (videoFormat & VIDEO_FORMAT_MASK_H264) {
+        h264ParamsCi.maxStdSPSCount  = 32;  // H.264 spec max
+        h264ParamsCi.maxStdPPSCount  = 256;
+        h264ParamsCi.pParametersAddInfo = nullptr;  // empty initial
+        vspCi.pNext = &h264ParamsCi;
+        codecName = "H.264";
+    } else if (videoFormat & VIDEO_FORMAT_MASK_H265) {
+        h265ParamsCi.maxStdVPSCount  = 16;   // H.265 spec max
+        h265ParamsCi.maxStdSPSCount  = 16;
+        h265ParamsCi.maxStdPPSCount  = 64;
+        h265ParamsCi.pParametersAddInfo = nullptr;
+        vspCi.pNext = &h265ParamsCi;
+        codecName = "H.265";
+    } else if (videoFormat & VIDEO_FORMAT_MASK_AV1) {
+        // AV1 sequence header: only 1 active per session typically.
+        // Need to provide a non-null pStdSequenceHeader at create time
+        // (AV1 spec says session params requires a sequence header).
+        // For Phase 1.1 placeholder: zero-init struct (will fail if driver
+        // strictly validates).  Phase 1.2 will populate from parsed AV1
+        // sequence OBU.
+        static StdVideoAV1SequenceHeader av1SeqHdr = {};
+        av1ParamsCi.pStdSequenceHeader = &av1SeqHdr;
+        vspCi.pNext = &av1ParamsCi;
+        codecName = "AV1";
+    } else {
+        return false;
+    }
+
+    VkResult vr = pfnCreateVidSessParams(m_Device, &vspCi, nullptr, &m_VideoSessionParams);
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 vkCreateVideoSessionParametersKHR(%s) rc=%d",
+                     codecName, (int)vr);
+        return false;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.8 VkVideoSessionParametersKHR created (%s, empty slots)",
+                codecName);
     return true;
 }
 

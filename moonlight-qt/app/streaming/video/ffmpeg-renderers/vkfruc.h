@@ -120,10 +120,12 @@ private:
     //   3. vkAllocateMemory + vkBindVideoSessionMemoryKHR
     //   4. vkCreateVideoSessionParametersKHR (VPS/SPS/PPS, Phase 1.1 填)
     bool createVideoSession(int videoFormat);
+    bool createVideoSessionParameters(int videoFormat);  // Phase 1.1: empty
     void destroyVideoSession();
     VkVideoSessionKHR           m_VideoSession       = VK_NULL_HANDLE;
     VkVideoSessionParametersKHR m_VideoSessionParams = VK_NULL_HANDLE;
     std::vector<VkDeviceMemory> m_VideoSessionMem;  // per binding
+    int                         m_VideoCodec         = 0;  // VIDEO_FORMAT_MASK_H264/H265/AV1
 
     // §J.3.e.2.i.3.a — feature structs MUST persist for FFmpeg's lifetime
     // because vkCtx->device_features.pNext points into them.  Allocating
