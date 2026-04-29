@@ -37,9 +37,10 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     // var is set.  Bypasses FFmpeg-Vulkan hwcontext entirely (which is
     // currently broken; see docs/J.3.e.2.i_vulkan_native_renderer.md).
     m_SwMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0;
+    m_FrucMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_FRUC") != 0;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d)",
-                pass, m_SwMode ? 1 : 0);
+                "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d, frucMode=%d)",
+                pass, m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0);
 }
 
 // §J.3.e.2.i.3.e-SW — declare NV12 as preferred so FFmpeg get_format()
@@ -112,6 +113,7 @@ void VkFrucRenderer::teardown()
     // set layout, so they go first; sampler-conversion holds the
     // immutable sampler used in descriptor set layout, so layouts go
     // before the sampler.
+    destroyFrucComputeResources(); // §J.3.e.2.i.4
     destroySwUploadResources();   // §J.3.e.2.i.3.e-SW
     destroyDescriptorPool();
     destroyInFlightRing();
@@ -680,6 +682,19 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
             m_InitFailureReason = InitFailureReason::NoSoftwareSupport;
             teardown();
             return false;
+        }
+    }
+
+    // §J.3.e.2.i.4 — FRUC compute pipeline (motion estimate + median filter
+    // + warp).  Independent of SW vs HW path; runs on storage buffers in
+    // either mode.  Only allocate when m_FrucMode is set (env-var gated).
+    if (m_FrucMode) {
+        if (!createFrucComputeResources(params->width, params->height)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.4 init failed — disabling FRUC for "
+                        "this session (renderer keeps running without compute chain)");
+            // Don't fail init; just disable FRUC for this session.
+            m_FrucMode = false;
         }
     }
 
@@ -1710,6 +1725,393 @@ void VkFrucRenderer::destroySwUploadResources()
     }
 }
 
+// =====================================================================
+// §J.3.e.2.i.4 — FRUC compute pipeline integration
+//
+// Port of PlVkRenderer::initFrucGenericResources / runFrucGenericComputePass
+// (plvk.cpp:3604-4180).  Builds 3 compute pipelines (motionest / mv_median /
+// warp), allocates planar fp32 RGB buffers + MV buffers, runs the chain
+// every frame after our SW upload.
+//
+// i.4 first ship — placeholder bufRGB pair (zeros), no NV12→RGB feed yet,
+// no interp display.  Validates compute pipeline integration in our
+// VkFrucRenderer.  Future expansions:
+//   • i.4.1 — add NV12→RGB compute feed from m_SwUploadImage
+//   • i.4.2 — display m_FrucInterpRgbBuf via dual-present (with §J.3.e.2.i.5)
+//
+// Shader sources (kFrucMotionEstShaderGlsl etc.) are defined in plvk.cpp;
+// extern-declared here so we can compile them without copy/paste.
+// =====================================================================
+
+// Forward declarations — defined in plvk.cpp (external linkage; not
+// `static`).  Use C++ linkage to match the definitions there.
+extern const char* kFrucMotionEstShaderGlsl;
+extern const char* kFrucMvMedianShaderGlsl;
+extern const char* kFrucWarpShaderGlsl;
+
+#include <ncnn/gpu.h>  // for ncnn::compile_spirv_module + ncnn::Option
+
+bool VkFrucRenderer::createFrucComputeResources(int width, int height)
+{
+    if (m_FrucReady || m_FrucDisabled) return m_FrucReady;
+
+    const uint32_t BLOCK_SIZE = 8;
+    const uint32_t mvW = ((uint32_t)width  + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const uint32_t mvH = ((uint32_t)height + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    m_FrucMvWidth  = mvW;
+    m_FrucMvHeight = mvH;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: enter (W=%d H=%d block=%u mv=%ux%u)",
+                width, height, BLOCK_SIZE, mvW, mvH);
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCreateShaderModule = (PFN_vkCreateShaderModule)getDevPa(m_Device, "vkCreateShaderModule");
+    auto pfnCreateDsl          = (PFN_vkCreateDescriptorSetLayout)getDevPa(m_Device, "vkCreateDescriptorSetLayout");
+    auto pfnCreatePipeLay      = (PFN_vkCreatePipelineLayout)getDevPa(m_Device, "vkCreatePipelineLayout");
+    auto pfnCreateComputePipes = (PFN_vkCreateComputePipelines)getDevPa(m_Device, "vkCreateComputePipelines");
+    auto pfnCreateBuffer       = (PFN_vkCreateBuffer)getDevPa(m_Device, "vkCreateBuffer");
+    auto pfnGetBufMemReq       = (PFN_vkGetBufferMemoryRequirements)getDevPa(m_Device, "vkGetBufferMemoryRequirements");
+    auto pfnAllocMem           = (PFN_vkAllocateMemory)getDevPa(m_Device, "vkAllocateMemory");
+    auto pfnBindBufMem         = (PFN_vkBindBufferMemory)getDevPa(m_Device, "vkBindBufferMemory");
+    auto pfnCreateDescPool     = (PFN_vkCreateDescriptorPool)getDevPa(m_Device, "vkCreateDescriptorPool");
+    auto pfnAllocDescSets      = (PFN_vkAllocateDescriptorSets)getDevPa(m_Device, "vkAllocateDescriptorSets");
+    auto pfnUpdateDescSets     = (PFN_vkUpdateDescriptorSets)getDevPa(m_Device, "vkUpdateDescriptorSets");
+    auto pfnGetPdMemProps      = (PFN_vkGetPhysicalDeviceMemoryProperties)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnCreateShaderModule || !pfnCreateDsl || !pfnCreatePipeLay || !pfnCreateComputePipes
+        || !pfnCreateBuffer || !pfnGetBufMemReq || !pfnAllocMem || !pfnBindBufMem
+        || !pfnCreateDescPool || !pfnAllocDescSets || !pfnUpdateDescSets || !pfnGetPdMemProps) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.4 PFN load failed");
+        m_FrucDisabled = true;
+        return false;
+    }
+
+    // §J.3.e.2.i.4 — ncnn::compile_spirv_module needs ncnn's Vulkan context
+    // initialised.  PlVkRenderer does this via create_gpu_instance_external
+    // (sharing libplacebo's VkDevice).  We don't have libplacebo here; use
+    // the plain create_gpu_instance() which creates ncnn's own context.
+    // Idempotent: returns 0 if already initialised.
+    int ncnnInit = ncnn::create_gpu_instance();
+    if (ncnnInit != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.4 ncnn::create_gpu_instance failed rc=%d "
+                    "(may already be claimed; compile may still work)", ncnnInit);
+    }
+
+    auto buildPipeline = [&](const char* tag, const char* glsl, int numBindings,
+                              uint32_t pcSize,
+                              VkShaderModule& outMod, VkDescriptorSetLayout& outDsl,
+                              VkPipelineLayout& outPL, VkPipeline& outPipe) -> bool {
+        std::vector<uint32_t> spirv;
+        ncnn::Option opt;
+        if (ncnn::compile_spirv_module(glsl, opt, spirv) != 0 || spirv.empty()) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.4 %s: compile_spirv_module failed", tag);
+            return false;
+        }
+        VkShaderModuleCreateInfo smCi = {};
+        smCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smCi.codeSize = spirv.size() * sizeof(uint32_t);
+        smCi.pCode = spirv.data();
+        if (pfnCreateShaderModule(m_Device, &smCi, nullptr, &outMod) != VK_SUCCESS) return false;
+        std::vector<VkDescriptorSetLayoutBinding> dslB(numBindings);
+        for (int i = 0; i < numBindings; i++) {
+            dslB[i].binding = (uint32_t)i;
+            dslB[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            dslB[i].descriptorCount = 1;
+            dslB[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo dslCi = {};
+        dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslCi.bindingCount = (uint32_t)numBindings;
+        dslCi.pBindings = dslB.data();
+        if (pfnCreateDsl(m_Device, &dslCi, nullptr, &outDsl) != VK_SUCCESS) return false;
+        VkPushConstantRange pcRange = {};
+        pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        pcRange.size = pcSize;
+        VkPipelineLayoutCreateInfo plCi = {};
+        plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plCi.setLayoutCount = 1;
+        plCi.pSetLayouts = &outDsl;
+        plCi.pushConstantRangeCount = pcSize > 0 ? 1 : 0;
+        plCi.pPushConstantRanges = pcSize > 0 ? &pcRange : nullptr;
+        if (pfnCreatePipeLay(m_Device, &plCi, nullptr, &outPL) != VK_SUCCESS) return false;
+        VkComputePipelineCreateInfo cpCi = {};
+        cpCi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpCi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpCi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpCi.stage.module = outMod;
+        cpCi.stage.pName = "main";
+        cpCi.layout = outPL;
+        if (pfnCreateComputePipes(m_Device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &outPipe) != VK_SUCCESS) return false;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.4 %s: pipeline built (spv=%zu B, %d bind, pc=%u B)",
+                    tag, spirv.size() * sizeof(uint32_t), numBindings, pcSize);
+        return true;
+    };
+
+    if (!buildPipeline("ME", kFrucMotionEstShaderGlsl, 4, 24,
+                        m_FrucMeShaderMod, m_FrucMeDsl, m_FrucMePipeLay, m_FrucMePipeline)) {
+        m_FrucDisabled = true; return false;
+    }
+    if (!buildPipeline("Median", kFrucMvMedianShaderGlsl, 2, 16,
+                        m_FrucMedianShaderMod, m_FrucMedianDsl, m_FrucMedianPipeLay, m_FrucMedianPipeline)) {
+        m_FrucDisabled = true; return false;
+    }
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 4, 24,
+                        m_FrucWarpShaderMod, m_FrucWarpDsl, m_FrucWarpPipeLay, m_FrucWarpPipeline)) {
+        m_FrucDisabled = true; return false;
+    }
+
+    // === Allocate buffers (DEVICE_LOCAL) ===
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPdMemProps(m_PhysicalDevice, &memProps);
+    auto pickMemType = [&](uint32_t typeBits, VkMemoryPropertyFlags want) -> int {
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+            if ((typeBits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & want) == want)
+                return (int)i;
+        }
+        return -1;
+    };
+    auto allocBuf = [&](VkDeviceSize size, VkBufferUsageFlags usage,
+                         VkBuffer& outBuf, VkDeviceMemory& outMem) -> bool {
+        VkBufferCreateInfo bci = {};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = size;
+        bci.usage = usage;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (pfnCreateBuffer(m_Device, &bci, nullptr, &outBuf) != VK_SUCCESS) return false;
+        VkMemoryRequirements memReq = {};
+        pfnGetBufMemReq(m_Device, outBuf, &memReq);
+        int mti = pickMemType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (mti < 0) return false;
+        VkMemoryAllocateInfo mai = {};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = memReq.size;
+        mai.memoryTypeIndex = (uint32_t)mti;
+        if (pfnAllocMem(m_Device, &mai, nullptr, &outMem) != VK_SUCCESS) return false;
+        return pfnBindBufMem(m_Device, outBuf, outMem, 0) == VK_SUCCESS;
+    };
+    const VkDeviceSize sizeRGB = (VkDeviceSize)width * height * 3 * sizeof(float);
+    const VkDeviceSize sizeMV  = (VkDeviceSize)mvW * mvH * 2 * sizeof(int);
+
+    if (!allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                  m_FrucPrevRgbBuf, m_FrucPrevRgbBufMem)
+        || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_FrucCurrRgbBuf, m_FrucCurrRgbBufMem)
+        || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_FrucMvBuf, m_FrucMvBufMem)
+        || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_FrucMvFilteredBuf, m_FrucMvFilteredMem)
+        || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_FrucPrevMvBuf, m_FrucPrevMvMem)
+        || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                     m_FrucInterpRgbBuf, m_FrucInterpRgbMem)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: buffer alloc failed");
+        m_FrucDisabled = true;
+        return false;
+    }
+
+    // === Descriptor pool: 3 sets × (4+2+4) = 10 storage-buffer descriptors ===
+    VkDescriptorPoolSize pSize = {};
+    pSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    pSize.descriptorCount = 10;
+    VkDescriptorPoolCreateInfo dpCi = {};
+    dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpCi.maxSets = 3;
+    dpCi.poolSizeCount = 1;
+    dpCi.pPoolSizes = &pSize;
+    if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_FrucDescPool) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: vkCreateDescriptorPool failed");
+        m_FrucDisabled = true; return false;
+    }
+
+    auto allocAndUpdateSet = [&](VkDescriptorSetLayout dsl,
+                                  std::vector<VkBuffer> bufs,
+                                  VkDescriptorSet& outDs) -> bool {
+        VkDescriptorSetAllocateInfo asi = {};
+        asi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        asi.descriptorPool = m_FrucDescPool;
+        asi.descriptorSetCount = 1;
+        asi.pSetLayouts = &dsl;
+        if (pfnAllocDescSets(m_Device, &asi, &outDs) != VK_SUCCESS) return false;
+        std::vector<VkDescriptorBufferInfo> bi(bufs.size());
+        std::vector<VkWriteDescriptorSet> wr(bufs.size());
+        for (size_t i = 0; i < bufs.size(); i++) {
+            bi[i].buffer = bufs[i];
+            bi[i].offset = 0;
+            bi[i].range = VK_WHOLE_SIZE;
+            wr[i] = {};
+            wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wr[i].dstSet = outDs;
+            wr[i].dstBinding = (uint32_t)i;
+            wr[i].descriptorCount = 1;
+            wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            wr[i].pBufferInfo = &bi[i];
+        }
+        pfnUpdateDescSets(m_Device, (uint32_t)wr.size(), wr.data(), 0, nullptr);
+        return true;
+    };
+
+    if (!allocAndUpdateSet(m_FrucMeDsl,
+                           { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucPrevMvBuf, m_FrucMvBuf },
+                           m_FrucMeDescSet)
+        || !allocAndUpdateSet(m_FrucMedianDsl,
+                              { m_FrucMvBuf, m_FrucMvFilteredBuf },
+                              m_FrucMedianDescSet)
+        || !allocAndUpdateSet(m_FrucWarpDsl,
+                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf, m_FrucInterpRgbBuf },
+                              m_FrucWarpDescSet)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: descriptor set alloc/update failed");
+        m_FrucDisabled = true; return false;
+    }
+
+    m_FrucReady = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: PASS — 3 pipelines + 6 buffers + 3 descSets ready "
+                "(sizeRGB=%llu, sizeMV=%llu)",
+                (unsigned long long)sizeRGB, (unsigned long long)sizeMV);
+    return true;
+}
+
+void VkFrucRenderer::destroyFrucComputeResources()
+{
+    if (!m_FrucReady && !m_FrucMePipeline) return;
+    if (m_Device == VK_NULL_HANDLE) return;
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnDestroyPipe     = (PFN_vkDestroyPipeline)getDevPa(m_Device, "vkDestroyPipeline");
+    auto pfnDestroyPL       = (PFN_vkDestroyPipelineLayout)getDevPa(m_Device, "vkDestroyPipelineLayout");
+    auto pfnDestroyDsl      = (PFN_vkDestroyDescriptorSetLayout)getDevPa(m_Device, "vkDestroyDescriptorSetLayout");
+    auto pfnDestroyShader   = (PFN_vkDestroyShaderModule)getDevPa(m_Device, "vkDestroyShaderModule");
+    auto pfnDestroyBuf      = (PFN_vkDestroyBuffer)getDevPa(m_Device, "vkDestroyBuffer");
+    auto pfnFreeMem         = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+    auto pfnDestroyDescPool = (PFN_vkDestroyDescriptorPool)getDevPa(m_Device, "vkDestroyDescriptorPool");
+
+#define DESTROY_PIPE(p, l, d, s)                                          \
+    if (p && pfnDestroyPipe)   { pfnDestroyPipe(m_Device,   p, nullptr); p = VK_NULL_HANDLE; } \
+    if (l && pfnDestroyPL)     { pfnDestroyPL(m_Device,     l, nullptr); l = VK_NULL_HANDLE; } \
+    if (d && pfnDestroyDsl)    { pfnDestroyDsl(m_Device,    d, nullptr); d = VK_NULL_HANDLE; } \
+    if (s && pfnDestroyShader) { pfnDestroyShader(m_Device, s, nullptr); s = VK_NULL_HANDLE; }
+    DESTROY_PIPE(m_FrucMePipeline,     m_FrucMePipeLay,     m_FrucMeDsl,     m_FrucMeShaderMod)
+    DESTROY_PIPE(m_FrucMedianPipeline, m_FrucMedianPipeLay, m_FrucMedianDsl, m_FrucMedianShaderMod)
+    DESTROY_PIPE(m_FrucWarpPipeline,   m_FrucWarpPipeLay,   m_FrucWarpDsl,   m_FrucWarpShaderMod)
+#undef DESTROY_PIPE
+
+#define DESTROY_BUF(b, m)                                          \
+    if (b && pfnDestroyBuf) { pfnDestroyBuf(m_Device, b, nullptr); b = VK_NULL_HANDLE; } \
+    if (m && pfnFreeMem)    { pfnFreeMem(m_Device,    m, nullptr); m = VK_NULL_HANDLE; }
+    DESTROY_BUF(m_FrucPrevRgbBuf,    m_FrucPrevRgbBufMem)
+    DESTROY_BUF(m_FrucCurrRgbBuf,    m_FrucCurrRgbBufMem)
+    DESTROY_BUF(m_FrucMvBuf,         m_FrucMvBufMem)
+    DESTROY_BUF(m_FrucMvFilteredBuf, m_FrucMvFilteredMem)
+    DESTROY_BUF(m_FrucPrevMvBuf,     m_FrucPrevMvMem)
+    DESTROY_BUF(m_FrucInterpRgbBuf,  m_FrucInterpRgbMem)
+#undef DESTROY_BUF
+
+    if (m_FrucDescPool && pfnDestroyDescPool) {
+        pfnDestroyDescPool(m_Device, m_FrucDescPool, nullptr);
+        m_FrucDescPool = VK_NULL_HANDLE;
+    }
+
+    m_FrucReady = false;
+}
+
+// §J.3.e.2.i.4 — record FRUC compute chain into the existing renderFrame
+// command buffer (we don't use a separate compute queue/cmdpool — runs on
+// our universal graphics queue with explicit pipeline barriers).
+//
+// Push constant layouts (must match the GLSL shader expectations from
+// PlVkRenderer):
+//   ME     (24 bytes): vec2 invSize / int mvW / int mvH / int blockSize
+//                       — but actually: int srcW,srcH,mvW,mvH,blockSize,frameNum
+//   Median (16 bytes): int mvW,mvH,radius,reserved
+//   Warp   (24 bytes): int srcW,srcH,mvW,mvH,blockSize,frameNum
+bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, uint32_t height)
+{
+    if (!m_FrucReady) return false;
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCmdBindPipeline = (PFN_vkCmdBindPipeline)getDevPa(m_Device, "vkCmdBindPipeline");
+    auto pfnCmdBindDescSets = (PFN_vkCmdBindDescriptorSets)getDevPa(m_Device, "vkCmdBindDescriptorSets");
+    auto pfnCmdPushConst    = (PFN_vkCmdPushConstants)getDevPa(m_Device, "vkCmdPushConstants");
+    auto pfnCmdDispatch     = (PFN_vkCmdDispatch)getDevPa(m_Device, "vkCmdDispatch");
+    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
+    if (!pfnCmdBindPipeline || !pfnCmdBindDescSets || !pfnCmdPushConst
+        || !pfnCmdDispatch || !pfnCmdPipelineBarrier) return false;
+
+    const uint32_t mvW = m_FrucMvWidth;
+    const uint32_t mvH = m_FrucMvHeight;
+    const uint32_t BLOCK_SIZE = 8;
+    const uint32_t MEDIAN_RADIUS = 1;
+    const uint32_t frameNum = (uint32_t)(m_FrucFrameCount++);
+
+    auto bufBarrier = [&](VkBuffer b) {
+        VkBufferMemoryBarrier bmb = {};
+        bmb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bmb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        bmb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        bmb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb.buffer = b;
+        bmb.offset = 0;
+        bmb.size = VK_WHOLE_SIZE;
+        pfnCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, nullptr, 1, &bmb, 0, nullptr);
+    };
+
+    // ---- Stage 1: motion estimation ----
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMePipeline);
+    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMePipeLay,
+                       0, 1, &m_FrucMeDescSet, 0, nullptr);
+    {
+        struct { int srcW, srcH, mvW, mvH, blockSize, frameNum; } pcME = {
+            (int)width, (int)height, (int)mvW, (int)mvH, (int)BLOCK_SIZE, (int)frameNum
+        };
+        pfnCmdPushConst(cmd, m_FrucMePipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcME), &pcME);
+    }
+    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
+    bufBarrier(m_FrucMvBuf);
+
+    // ---- Stage 2: MV median filter ----
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeline);
+    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeLay,
+                       0, 1, &m_FrucMedianDescSet, 0, nullptr);
+    {
+        struct { int mvW, mvH, radius, _pad; } pcMed = {
+            (int)mvW, (int)mvH, (int)MEDIAN_RADIUS, 0
+        };
+        pfnCmdPushConst(cmd, m_FrucMedianPipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcMed), &pcMed);
+    }
+    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
+    bufBarrier(m_FrucMvFilteredBuf);
+
+    // ---- Stage 3: warp ----
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeline);
+    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeLay,
+                       0, 1, &m_FrucWarpDescSet, 0, nullptr);
+    {
+        struct { int srcW, srcH, mvW, mvH, blockSize, frameNum; } pcWarp = {
+            (int)width, (int)height, (int)mvW, (int)mvH, (int)BLOCK_SIZE, (int)frameNum
+        };
+        pfnCmdPushConst(cmd, m_FrucWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcWarp), &pcWarp);
+    }
+    pfnCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
+    bufBarrier(m_FrucInterpRgbBuf);
+
+    return true;
+}
+
 // §J.3.e.2.i.3.e — full renderFrame impl.
 //
 // Per-frame steps (single-present; dual-present added in i.5):
@@ -2317,6 +2719,23 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &toShaderBar);
+
+    // §J.3.e.2.i.4 — FRUC compute chain (ME → median → warp).  Records
+    // dispatches into the same cmd buffer as our graphics rendering; the
+    // GPU executes them in order.  Outputs to m_FrucInterpRgbBuf which is
+    // not yet displayed (i.4.2 will add dual-present); for now we just
+    // verify the chain runs without crash.
+    if (m_FrucMode && m_FrucReady) {
+        runFrucComputeChain(cmd, (uint32_t)m_SwImageWidth, (uint32_t)m_SwImageHeight);
+        if (firstFrame) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-SW] frame#%llu FRUC compute chain dispatched (%ux%u "
+                        "block=8 mv=%ux%u)",
+                        (unsigned long long)fnum,
+                        (unsigned)m_SwImageWidth, (unsigned)m_SwImageHeight,
+                        (unsigned)m_FrucMvWidth, (unsigned)m_FrucMvHeight);
+        }
+    }
 
     // 4d-g. Render pass + draw 3 vertices.
     VkClearValue clearVal = {};

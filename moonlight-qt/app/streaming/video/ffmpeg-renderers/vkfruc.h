@@ -215,6 +215,62 @@ private:
     VkImageView      m_SwUploadView       = VK_NULL_HANDLE;
     bool             m_SwImageLayoutInited = false;  // true after first transition
 
+    // §J.3.e.2.i.4 — FRUC compute pipeline (port from PlVkRenderer
+    // §J.3.e.2.h.c).  Gated on VIPLE_VKFRUC_FRUC=1.  Allocates prev/curr/
+    // interp RGB buffers + MV buffers, builds 3 compute pipelines (ME,
+    // Median, Warp), dispatches the chain per-frame after our SW upload.
+    //
+    // i.4 first ship: bufRGB pair filled with zeros (placeholder); the
+    // chain runs but doesn't produce visually meaningful interp output.
+    // Validates compute pipeline integration in our renderer.  Future:
+    // i.4.1 add NV12→RGB feed; i.4.2 display interp output via dual-present.
+    bool createFrucComputeResources(int width, int height);
+    void destroyFrucComputeResources();
+    bool runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, uint32_t height);
+
+    bool     m_FrucMode      = false;
+    bool     m_FrucReady     = false;
+    bool     m_FrucDisabled  = false;
+    uint32_t m_FrucMvWidth   = 0;   // ceil(W / 8)
+    uint32_t m_FrucMvHeight  = 0;
+    uint64_t m_FrucFrameCount = 0;
+
+    // 3 compute pipelines (ME / Median / Warp).  Each has own DSL because
+    // binding counts differ (ME=4, Median=2, Warp=4).
+    VkShaderModule        m_FrucMeShaderMod  = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_FrucMeDsl        = VK_NULL_HANDLE;
+    VkPipelineLayout      m_FrucMePipeLay    = VK_NULL_HANDLE;
+    VkPipeline            m_FrucMePipeline   = VK_NULL_HANDLE;
+    VkDescriptorSet       m_FrucMeDescSet    = VK_NULL_HANDLE;
+
+    VkShaderModule        m_FrucMedianShaderMod = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_FrucMedianDsl       = VK_NULL_HANDLE;
+    VkPipelineLayout      m_FrucMedianPipeLay   = VK_NULL_HANDLE;
+    VkPipeline            m_FrucMedianPipeline  = VK_NULL_HANDLE;
+    VkDescriptorSet       m_FrucMedianDescSet   = VK_NULL_HANDLE;
+
+    VkShaderModule        m_FrucWarpShaderMod = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_FrucWarpDsl       = VK_NULL_HANDLE;
+    VkPipelineLayout      m_FrucWarpPipeLay   = VK_NULL_HANDLE;
+    VkPipeline            m_FrucWarpPipeline  = VK_NULL_HANDLE;
+    VkDescriptorSet       m_FrucWarpDescSet   = VK_NULL_HANDLE;
+
+    // Storage buffers (DEVICE_LOCAL).  All planar fp32 R/G/B.
+    VkBuffer       m_FrucPrevRgbBuf    = VK_NULL_HANDLE;
+    VkDeviceMemory m_FrucPrevRgbBufMem = VK_NULL_HANDLE;
+    VkBuffer       m_FrucCurrRgbBuf    = VK_NULL_HANDLE;
+    VkDeviceMemory m_FrucCurrRgbBufMem = VK_NULL_HANDLE;
+    VkBuffer       m_FrucMvBuf         = VK_NULL_HANDLE;  // mvW*mvH*2 int
+    VkDeviceMemory m_FrucMvBufMem      = VK_NULL_HANDLE;
+    VkBuffer       m_FrucMvFilteredBuf = VK_NULL_HANDLE;
+    VkDeviceMemory m_FrucMvFilteredMem = VK_NULL_HANDLE;
+    VkBuffer       m_FrucPrevMvBuf     = VK_NULL_HANDLE;
+    VkDeviceMemory m_FrucPrevMvMem     = VK_NULL_HANDLE;
+    VkBuffer       m_FrucInterpRgbBuf  = VK_NULL_HANDLE;
+    VkDeviceMemory m_FrucInterpRgbMem  = VK_NULL_HANDLE;
+
+    VkDescriptorPool m_FrucDescPool = VK_NULL_HANDLE;
+
     // Loaded PFNs (we don't have the libplacebo wrapper's lookup; use
     // SDL_Vulkan_GetVkGetInstanceProcAddr + raw vk*ProcAddr chain).
     PFN_vkGetInstanceProcAddr m_pfnGetInstanceProcAddr = nullptr;
