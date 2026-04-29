@@ -127,6 +127,25 @@ private:
     std::vector<VkDeviceMemory> m_VideoSessionMem;  // per binding
     int                         m_VideoCodec         = 0;  // VIDEO_FORMAT_MASK_H264/H265/AV1
 
+    // Phase 1.2 — native NAL intercept hook (renderer.h interface).
+    bool acceptsNativeDecode() const override;
+    void submitNativeDecodeUnit(const uint8_t* data, size_t len) override;
+    // Phase 1.1b scaffold — NAL type detection (parser comes next session).
+    // Counts per NAL type accumulated; logged periodically for diagnostics.
+    struct NalCounts {
+        uint64_t vps = 0;
+        uint64_t sps = 0;
+        uint64_t pps = 0;
+        uint64_t idr_slice = 0;
+        uint64_t trailing_slice = 0;
+        uint64_t aud = 0;     // access unit delimiter (NAL=35)
+        uint64_t prefix_sei = 0;  // (NAL=39)
+        uint64_t other = 0;
+        uint64_t total_packets = 0;
+        uint64_t total_bytes = 0;
+    } m_NalCounts;
+    uint64_t m_LastNalLogUs = 0;
+
     // §J.3.e.2.i.3.a — feature structs MUST persist for FFmpeg's lifetime
     // because vkCtx->device_features.pNext points into them.  Allocating
     // on stack in createLogicalDevice → use-after-free when FFmpeg later

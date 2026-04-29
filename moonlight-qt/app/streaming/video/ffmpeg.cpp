@@ -2402,6 +2402,21 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
     m_ActiveWndVideoStats.totalReassemblyTimeUs += (du->enqueueTimeUs - du->receiveTimeUs);
 
+    // §J.3.e.2.i.8 — VipleStream native VK_KHR_video_decode intercept.
+    // 當 renderer 自己跑 decode (acceptsNativeDecode() == true) 就把 raw NAL
+    // bytes 交給它，跳過 FFmpeg avcodec_send_packet.  目前只有
+    // VkFrucRenderer (Phase 1.x ready) 走此路徑.
+    //
+    // m_BackendRenderer 跟 m_FrontendRenderer 多半是同一個 (D3D11VA、VkFruc
+    // 等都是 backend=frontend).  這裡查 backend 才是真正在 decode 的那位.
+    if (m_BackendRenderer && m_BackendRenderer->acceptsNativeDecode()) {
+        m_BackendRenderer->submitNativeDecodeUnit(
+            reinterpret_cast<const uint8_t*>(m_Pkt->data), (size_t)m_Pkt->size);
+        m_FrameInfoQueue.enqueue(*du);
+        m_FramesIn++;
+        return DR_OK;
+    }
+
     err = avcodec_send_packet(m_VideoDecoderCtx, m_Pkt);
     if (err < 0) {
         char errorstring[512];

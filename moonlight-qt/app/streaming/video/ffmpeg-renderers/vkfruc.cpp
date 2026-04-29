@@ -2645,6 +2645,96 @@ bool VkFrucRenderer::createVideoSessionParameters(int videoFormat)
     return true;
 }
 
+// §J.3.e.2.i.8 Phase 1.2 — native VK decode hook (renderer.h interface).
+// 只有 m_VideoSession 真的建好才接收 NAL bytes.  Phase 1.1b parser 還沒接,
+// 目前只統計 NAL types + log 每 5 秒給 diagnostic.
+bool VkFrucRenderer::acceptsNativeDecode() const
+{
+    // Phase 1 disabled by default: 不在 Phase 1.x 完整前接管 decode.
+    // 設 VIPLE_VKFRUC_NATIVE_DECODE=1 才 opt-in.  之後 Phase 1.4 完成且
+    // 走通 stream 後拆 gate.
+    static const bool wantNative = qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE") != 0;
+    return wantNative && (m_VideoSession != VK_NULL_HANDLE);
+}
+
+void VkFrucRenderer::submitNativeDecodeUnit(const uint8_t* data, size_t len)
+{
+    // Annex-B byte-stream NAL units: 0x000001 or 0x00000001 start code,
+    // 然後 NAL header (HEVC 是 2 bytes, H.264 是 1 byte).
+    // 此處掃 start codes 切出每個 NAL，分類 type 計數.
+    if (!data || len < 4) return;
+    // First-call diagnostic log so we know the intercept actually fires.
+    if (m_NalCounts.total_packets == 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 native decode intercept ACTIVE — "
+                    "first packet len=%zu first6bytes=%02x %02x %02x %02x %02x %02x",
+                    len, data[0], data[1], data[2], data[3], data[4], data[5]);
+    }
+    m_NalCounts.total_packets++;
+    m_NalCounts.total_bytes += len;
+
+    auto isStartCode = [](const uint8_t* p, size_t remain) -> int {
+        if (remain >= 4 && p[0]==0 && p[1]==0 && p[2]==0 && p[3]==1) return 4;
+        if (remain >= 3 && p[0]==0 && p[1]==0 && p[2]==1)            return 3;
+        return 0;
+    };
+
+    // Find each NAL unit boundary.
+    size_t i = 0;
+    while (i < len) {
+        int sc = isStartCode(data + i, len - i);
+        if (!sc) { i++; continue; }
+        size_t nalStart = i + sc;
+        if (nalStart >= len) break;
+
+        // Find next start code OR end of buffer.
+        size_t nalEnd = len;
+        for (size_t j = nalStart + 1; j + 2 < len; j++) {
+            if (data[j] == 0 && data[j+1] == 0 && (data[j+2] == 1 || (data[j+2] == 0 && j+3 < len && data[j+3] == 1))) {
+                nalEnd = j;
+                break;
+            }
+        }
+
+        // HEVC NAL header: forbidden_zero_bit(1) | nal_unit_type(6) | layer_id(6) | tid_plus1(3)
+        // First byte: ((data[0] >> 1) & 0x3F) = nal_unit_type (HEVC).
+        // For H.264: nal_unit_type = data[0] & 0x1F (5 bits).  Phase 1 focuses HEVC.
+        uint8_t firstByte = data[nalStart];
+        int hevcNalType = (firstByte >> 1) & 0x3F;
+        switch (hevcNalType) {
+            case 19: case 20:                  m_NalCounts.idr_slice++;       break;  // IDR_W_RADL / IDR_N_LP
+            case 0:  case 1:  case 2:  case 3:                                       // TRAIL/TSA/STSA
+            case 4:  case 5:  case 6:  case 7:                                       // RADL/RASL
+            case 8:  case 9:                                                          // RASL_N etc
+            case 16: case 17: case 18:                                               // BLA
+            case 21:                          m_NalCounts.trailing_slice++;  break;  // CRA
+            case 32:                          m_NalCounts.vps++;             break;
+            case 33:                          m_NalCounts.sps++;             break;
+            case 34:                          m_NalCounts.pps++;             break;
+            case 35:                          m_NalCounts.aud++;             break;
+            case 39:                          m_NalCounts.prefix_sei++;      break;
+            default:                          m_NalCounts.other++;           break;
+        }
+        i = nalEnd;
+    }
+
+    // Periodic diagnostic log (every ~1s based on packet count at 60fps).
+    if ((m_NalCounts.total_packets % 60) == 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 NAL types VPS=%llu SPS=%llu PPS=%llu IDR=%llu trail=%llu AUD=%llu SEI=%llu other=%llu (packets=%llu, bytes=%.2f MB)",
+                    (unsigned long long)m_NalCounts.vps,
+                    (unsigned long long)m_NalCounts.sps,
+                    (unsigned long long)m_NalCounts.pps,
+                    (unsigned long long)m_NalCounts.idr_slice,
+                    (unsigned long long)m_NalCounts.trailing_slice,
+                    (unsigned long long)m_NalCounts.aud,
+                    (unsigned long long)m_NalCounts.prefix_sei,
+                    (unsigned long long)m_NalCounts.other,
+                    (unsigned long long)m_NalCounts.total_packets,
+                    m_NalCounts.total_bytes / (1024.0 * 1024.0));
+    }
+}
+
 void VkFrucRenderer::destroyVideoSession()
 {
     if (m_Device == VK_NULL_HANDLE) return;

@@ -309,6 +309,15 @@ public:
     virtual void toggleFRUC() {}
     std::atomic<bool> m_FRUCPaused{false};
 
+    // §J.3.e.2.i.8 — VipleStream native VK_KHR_video_decode hook.
+    // 當 renderer 自己跑 decode (跳過 FFmpeg avcodec_send_packet)，
+    // FFmpegVideoDecoder::submitDecodeUnit 會檢查 acceptsNativeDecode()，
+    // 若 true 就把 raw NAL bytes 交給 submitNativeDecodeUnit() 而非 ffmpeg.
+    // VkFrucRenderer (HW path + Phase 1.x ready) 才回 true; 其他 renderer
+    // 預設 false 走 FFmpeg.
+    virtual bool acceptsNativeDecode() const { return false; }
+    virtual void submitNativeDecodeUnit(const uint8_t* /*data*/, size_t /*len*/) {}
+
     RendererType getRendererType() {
         return m_Type;
     }
