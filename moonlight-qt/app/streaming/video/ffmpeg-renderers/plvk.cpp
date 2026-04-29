@@ -1283,13 +1283,186 @@ bool PlVkRenderer::initFrucNv12RgbResources(uint32_t width, uint32_t height)
     m_FrucNv12RgbVkPipeline = pipe;
     m_FrucNv12RgbWidth = width;
     m_FrucNv12RgbHeight = height;
-    m_FrucNv12RgbReady = true;
 
+    // §J.3.e.2.c2 — allocate dispatch resources: 3 device-local storage buffers
+    // (bufY, bufUV, bufRGB), 1 host-visible readback buffer, descriptor pool +
+    // descriptor set bound once, command pool + buffer + fence.
+    auto pfnCreateBuffer = (PFN_vkCreateBuffer)getDevProc("vkCreateBuffer");
+    auto pfnGetBufferMemoryRequirements = (PFN_vkGetBufferMemoryRequirements)getDevProc("vkGetBufferMemoryRequirements");
+    auto pfnAllocateMemory = (PFN_vkAllocateMemory)getDevProc("vkAllocateMemory");
+    auto pfnBindBufferMemory = (PFN_vkBindBufferMemory)getDevProc("vkBindBufferMemory");
+    auto pfnCreateDescriptorPool = (PFN_vkCreateDescriptorPool)getDevProc("vkCreateDescriptorPool");
+    auto pfnAllocateDescriptorSets = (PFN_vkAllocateDescriptorSets)getDevProc("vkAllocateDescriptorSets");
+    auto pfnUpdateDescriptorSets = (PFN_vkUpdateDescriptorSets)getDevProc("vkUpdateDescriptorSets");
+    auto pfnCreateCommandPool = (PFN_vkCreateCommandPool)getDevProc("vkCreateCommandPool");
+    auto pfnAllocateCommandBuffers = (PFN_vkAllocateCommandBuffers)getDevProc("vkAllocateCommandBuffers");
+    auto pfnCreateFence = (PFN_vkCreateFence)getDevProc("vkCreateFence");
+    auto pfnGetPhysProps = (PFN_vkGetPhysicalDeviceMemoryProperties)
+        m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnCreateBuffer || !pfnGetBufferMemoryRequirements || !pfnAllocateMemory
+        || !pfnBindBufferMemory || !pfnCreateDescriptorPool || !pfnAllocateDescriptorSets
+        || !pfnUpdateDescriptorSets || !pfnCreateCommandPool || !pfnAllocateCommandBuffers
+        || !pfnCreateFence || !pfnGetPhysProps) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c2 init: missing dispatch PFNs");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPhysProps(m_Vulkan->phys_device, &memProps);
+
+    auto findMemType = [&](uint32_t typeBits, VkMemoryPropertyFlags wantFlags) -> uint32_t {
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+            if ((typeBits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & wantFlags) == wantFlags) {
+                return i;
+            }
+        }
+        return UINT32_MAX;
+    };
+
+    auto createBuffer = [&](VkDeviceSize size, VkBufferUsageFlags usage,
+                             VkMemoryPropertyFlags memFlags,
+                             VkBuffer& outBuf, VkDeviceMemory& outMem) -> bool {
+        VkBufferCreateInfo bci = {};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = size;
+        bci.usage = usage;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (pfnCreateBuffer(m_Vulkan->device, &bci, nullptr, &outBuf) != VK_SUCCESS) return false;
+        VkMemoryRequirements memReq = {};
+        pfnGetBufferMemoryRequirements(m_Vulkan->device, outBuf, &memReq);
+        uint32_t mti = findMemType(memReq.memoryTypeBits, memFlags);
+        if (mti == UINT32_MAX) return false;
+        VkMemoryAllocateInfo mai = {};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = memReq.size;
+        mai.memoryTypeIndex = mti;
+        if (pfnAllocateMemory(m_Vulkan->device, &mai, nullptr, &outMem) != VK_SUCCESS) return false;
+        if (pfnBindBufferMemory(m_Vulkan->device, outBuf, outMem, 0) != VK_SUCCESS) return false;
+        return true;
+    };
+
+    const VkDeviceSize sizeY   = (VkDeviceSize)width * height;
+    const VkDeviceSize sizeUV  = (VkDeviceSize)width * height / 2;
+    const VkDeviceSize sizeRGB = (VkDeviceSize)width * height * 3 * sizeof(float);
+    VkBuffer bufY = VK_NULL_HANDLE, bufUV = VK_NULL_HANDLE, bufRGB = VK_NULL_HANDLE, hostBuf = VK_NULL_HANDLE;
+    VkDeviceMemory bufYMem = VK_NULL_HANDLE, bufUVMem = VK_NULL_HANDLE, bufRGBMem = VK_NULL_HANDLE, hostBufMem = VK_NULL_HANDLE;
+
+    if (!createBuffer(sizeY, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, bufY, bufYMem)
+        || !createBuffer(sizeUV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, bufUV, bufUVMem)
+        || !createBuffer(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, bufRGB, bufRGBMem)
+        || !createBuffer(/*3 floats*/ 12, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          hostBuf, hostBufMem)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c2 init: buffer/memory allocation failed");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    m_FrucNv12RgbBufY = bufY;        m_FrucNv12RgbBufYMem = bufYMem;
+    m_FrucNv12RgbBufUV = bufUV;      m_FrucNv12RgbBufUVMem = bufUVMem;
+    m_FrucNv12RgbBufRGB = bufRGB;    m_FrucNv12RgbBufRGBMem = bufRGBMem;
+    m_FrucNv12RgbHostBuf = hostBuf;  m_FrucNv12RgbHostBufMem = hostBufMem;
+
+    // Descriptor pool + set, bind 3 buffers once.
+    VkDescriptorPoolSize poolSize = {};
+    poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    poolSize.descriptorCount = 3;
+    VkDescriptorPoolCreateInfo dpCi = {};
+    dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpCi.maxSets = 1;
+    dpCi.poolSizeCount = 1;
+    dpCi.pPoolSizes = &poolSize;
+    VkDescriptorPool dPool = VK_NULL_HANDLE;
+    if (pfnCreateDescriptorPool(m_Vulkan->device, &dpCi, nullptr, &dPool) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c2 init: vkCreateDescriptorPool failed");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    m_FrucNv12RgbDescPool = dPool;
+
+    VkDescriptorSetAllocateInfo dsAlloc = {};
+    dsAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dsAlloc.descriptorPool = dPool;
+    dsAlloc.descriptorSetCount = 1;
+    dsAlloc.pSetLayouts = &dsl;
+    VkDescriptorSet dSet = VK_NULL_HANDLE;
+    if (pfnAllocateDescriptorSets(m_Vulkan->device, &dsAlloc, &dSet) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c2 init: vkAllocateDescriptorSets failed");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    m_FrucNv12RgbDescSet = dSet;
+
+    VkDescriptorBufferInfo dbi[3] = {};
+    dbi[0].buffer = bufY;   dbi[0].offset = 0; dbi[0].range = VK_WHOLE_SIZE;
+    dbi[1].buffer = bufUV;  dbi[1].offset = 0; dbi[1].range = VK_WHOLE_SIZE;
+    dbi[2].buffer = bufRGB; dbi[2].offset = 0; dbi[2].range = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet writes[3] = {};
+    for (int i = 0; i < 3; i++) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = dSet;
+        writes[i].dstBinding = (uint32_t)i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &dbi[i];
+    }
+    pfnUpdateDescriptorSets(m_Vulkan->device, 3, writes, 0, nullptr);
+
+    // Command pool on compute queue family + cmd buffer + fence.
+    VkCommandPoolCreateInfo cpCi2 = {};
+    cpCi2.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    cpCi2.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    cpCi2.queueFamilyIndex = m_Vulkan->queue_compute.index;
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    if (pfnCreateCommandPool(m_Vulkan->device, &cpCi2, nullptr, &cmdPool) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c2 init: vkCreateCommandPool failed");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    m_FrucNv12RgbCmdPool = cmdPool;
+
+    VkCommandBufferAllocateInfo cbAlloc = {};
+    cbAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbAlloc.commandPool = cmdPool;
+    cbAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbAlloc.commandBufferCount = 1;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    if (pfnAllocateCommandBuffers(m_Vulkan->device, &cbAlloc, &cb) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c2 init: vkAllocateCommandBuffers failed");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    m_FrucNv12RgbCmdBuf = cb;
+
+    VkFenceCreateInfo fenceCi2 = {};
+    fenceCi2.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence = VK_NULL_HANDLE;
+    if (pfnCreateFence(m_Vulkan->device, &fenceCi2, nullptr, &fence) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c2 init: vkCreateFence failed");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    m_FrucNv12RgbFence = fence;
+
+    m_FrucNv12RgbReady = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VK-FRUC] §J.3.e.2.c init: shader compiled (spv=%zu bytes), "
-                "raw VkPipeline=%p (DSL=%p PL=%p ShaderMod=%p), target %ux%u",
+                "raw VkPipeline=%p (DSL=%p PL=%p ShaderMod=%p), target %ux%u, "
+                "bufY/UV/RGB sizes %llu/%llu/%llu bytes",
                 spirv.size() * sizeof(uint32_t),
-                (void*)pipe, (void*)dsl, (void*)pipeLay, (void*)shaderMod, width, height);
+                (void*)pipe, (void*)dsl, (void*)pipeLay, (void*)shaderMod, width, height,
+                (unsigned long long)sizeY, (unsigned long long)sizeUV, (unsigned long long)sizeRGB);
     return true;
 }
 
@@ -1303,6 +1476,36 @@ void PlVkRenderer::destroyFrucNv12RgbResources()
     auto pfnDestroyPipelineLayout = (PFN_vkDestroyPipelineLayout)getDevProc("vkDestroyPipelineLayout");
     auto pfnDestroyDescriptorSetLayout = (PFN_vkDestroyDescriptorSetLayout)getDevProc("vkDestroyDescriptorSetLayout");
     auto pfnDestroyShaderModule = (PFN_vkDestroyShaderModule)getDevProc("vkDestroyShaderModule");
+    auto pfnDestroyDescriptorPool = (PFN_vkDestroyDescriptorPool)getDevProc("vkDestroyDescriptorPool");
+    auto pfnDestroyCommandPool = (PFN_vkDestroyCommandPool)getDevProc("vkDestroyCommandPool");
+    auto pfnDestroyFence = (PFN_vkDestroyFence)getDevProc("vkDestroyFence");
+    auto pfnDestroyBuffer = (PFN_vkDestroyBuffer)getDevProc("vkDestroyBuffer");
+    auto pfnFreeMemory = (PFN_vkFreeMemory)getDevProc("vkFreeMemory");
+    auto pfnDeviceWait = (PFN_vkDeviceWaitIdle)getDevProc("vkDeviceWaitIdle");
+
+    // Wait for any pending dispatch on the device before destroying its resources.
+    if (pfnDeviceWait) pfnDeviceWait(m_Vulkan->device);
+
+    if (m_FrucNv12RgbFence && pfnDestroyFence) {
+        pfnDestroyFence(m_Vulkan->device, (VkFence)m_FrucNv12RgbFence, nullptr);
+    }
+    if (m_FrucNv12RgbCmdPool && pfnDestroyCommandPool) {
+        // Frees the command buffer too.
+        pfnDestroyCommandPool(m_Vulkan->device, (VkCommandPool)m_FrucNv12RgbCmdPool, nullptr);
+    }
+    if (m_FrucNv12RgbDescPool && pfnDestroyDescriptorPool) {
+        // Frees the descriptor set too.
+        pfnDestroyDescriptorPool(m_Vulkan->device, (VkDescriptorPool)m_FrucNv12RgbDescPool, nullptr);
+    }
+    auto destroyBuf = [&](void*& buf, void*& mem) {
+        if (buf && pfnDestroyBuffer) pfnDestroyBuffer(m_Vulkan->device, (VkBuffer)buf, nullptr);
+        if (mem && pfnFreeMemory)    pfnFreeMemory(m_Vulkan->device, (VkDeviceMemory)mem, nullptr);
+        buf = nullptr; mem = nullptr;
+    };
+    destroyBuf(m_FrucNv12RgbBufY,    m_FrucNv12RgbBufYMem);
+    destroyBuf(m_FrucNv12RgbBufUV,   m_FrucNv12RgbBufUVMem);
+    destroyBuf(m_FrucNv12RgbBufRGB,  m_FrucNv12RgbBufRGBMem);
+    destroyBuf(m_FrucNv12RgbHostBuf, m_FrucNv12RgbHostBufMem);
 
     if (m_FrucNv12RgbVkPipeline && pfnDestroyPipeline) {
         pfnDestroyPipeline(m_Vulkan->device, (VkPipeline)m_FrucNv12RgbVkPipeline, nullptr);
@@ -1316,29 +1519,262 @@ void PlVkRenderer::destroyFrucNv12RgbResources()
     if (m_FrucNv12RgbVkShader && pfnDestroyShaderModule) {
         pfnDestroyShaderModule(m_Vulkan->device, (VkShaderModule)m_FrucNv12RgbVkShader, nullptr);
     }
+    m_FrucNv12RgbFence = nullptr;
+    m_FrucNv12RgbCmdPool = nullptr;
+    m_FrucNv12RgbCmdBuf = nullptr;
+    m_FrucNv12RgbDescPool = nullptr;
+    m_FrucNv12RgbDescSet = nullptr;
     m_FrucNv12RgbVkPipeline = nullptr;
     m_FrucNv12RgbVkPipeLay  = nullptr;
     m_FrucNv12RgbVkDsl      = nullptr;
     m_FrucNv12RgbVkShader   = nullptr;
-    // §J.3.e.2.c2 will add buffer/cmdpool/fence cleanup here.
     m_FrucNv12RgbReady = false;
     m_FrucNv12RgbWidth = 0;
     m_FrucNv12RgbHeight = 0;
 }
 
-bool PlVkRenderer::runNv12RgbProbe(AVVkFrame* /*vkFrame*/, AVFrame* frame)
+bool PlVkRenderer::runNv12RgbProbe(AVVkFrame* vkFrame, AVFrame* frame)
 {
-    // §J.3.e.2.c1 — for now just verify init, log a one-shot.  Per-frame
-    // dispatch lands in §J.3.e.2.c2.
     if (m_FrucNv12RgbDisabled) return false;
     if (!m_FrucNv12RgbReady) {
         if (!initFrucNv12RgbResources((uint32_t)frame->width, (uint32_t)frame->height)) {
             return false;
         }
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.c1 probe: pipeline ready — "
-                    "§J.3.e.2.c2 will wire dispatch + readback");
     }
+    if (!vkFrame || !vkFrame->img[0]) return false;
+
+    // §J.3.e.2.c2 — per-frame dispatch:
+    //   1. plane-0 / plane-1 layout transition origLayout → TRANSFER_SRC_OPTIMAL
+    //   2. vkCmdCopyImageToBuffer × 2 (Y plane → bufY, UV plane → bufUV)
+    //   3. buffer barrier (TRANSFER_WRITE → SHADER_READ on bufY/bufUV)
+    //   4. dispatch NV12→RGB compute (writes bufRGB)
+    //   5. buffer barrier (SHADER_WRITE → TRANSFER_READ on bufRGB)
+    //   6. vkCmdCopyBuffer (3 plane center-pixel floats → host buf)
+    //   7. plane-0 / plane-1 layout transition back to origLayout
+    //   8. submit on compute queue with AVVkFrame.sem timeline wait/signal
+    //   9. wait fence, map host buf, log RGB & compare to §J.3.e.2.b CPU result.
+
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
+    };
+    static auto pfnBegin       = (PFN_vkBeginCommandBuffer)getDevProc("vkBeginCommandBuffer");
+    static auto pfnEnd         = (PFN_vkEndCommandBuffer)getDevProc("vkEndCommandBuffer");
+    static auto pfnReset       = (PFN_vkResetCommandBuffer)getDevProc("vkResetCommandBuffer");
+    static auto pfnBarrier     = (PFN_vkCmdPipelineBarrier)getDevProc("vkCmdPipelineBarrier");
+    static auto pfnCopyImgBuf  = (PFN_vkCmdCopyImageToBuffer)getDevProc("vkCmdCopyImageToBuffer");
+    static auto pfnCopyBuf     = (PFN_vkCmdCopyBuffer)getDevProc("vkCmdCopyBuffer");
+    static auto pfnBindPipe    = (PFN_vkCmdBindPipeline)getDevProc("vkCmdBindPipeline");
+    static auto pfnBindDS      = (PFN_vkCmdBindDescriptorSets)getDevProc("vkCmdBindDescriptorSets");
+    static auto pfnPushC       = (PFN_vkCmdPushConstants)getDevProc("vkCmdPushConstants");
+    static auto pfnDispatch    = (PFN_vkCmdDispatch)getDevProc("vkCmdDispatch");
+    static auto pfnGetQueue    = (PFN_vkGetDeviceQueue)getDevProc("vkGetDeviceQueue");
+    static auto pfnSubmit      = (PFN_vkQueueSubmit)getDevProc("vkQueueSubmit");
+    static auto pfnWaitFences  = (PFN_vkWaitForFences)getDevProc("vkWaitForFences");
+    static auto pfnResetFences = (PFN_vkResetFences)getDevProc("vkResetFences");
+    static auto pfnMap         = (PFN_vkMapMemory)getDevProc("vkMapMemory");
+    static auto pfnUnmap       = (PFN_vkUnmapMemory)getDevProc("vkUnmapMemory");
+    if (!pfnBegin || !pfnEnd || !pfnReset || !pfnBarrier || !pfnCopyImgBuf || !pfnCopyBuf
+        || !pfnBindPipe || !pfnBindDS || !pfnPushC || !pfnDispatch || !pfnGetQueue
+        || !pfnSubmit || !pfnWaitFences || !pfnResetFences || !pfnMap || !pfnUnmap) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c2 probe: missing PFN");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+
+    VkCommandBuffer cb   = (VkCommandBuffer)m_FrucNv12RgbCmdBuf;
+    VkImage         img  = (VkImage)vkFrame->img[0];
+    VkImageLayout   orig = vkFrame->layout[0];
+    const uint32_t  W    = m_FrucNv12RgbWidth;
+    const uint32_t  H    = m_FrucNv12RgbHeight;
+
+    pfnReset(cb, 0);
+    VkCommandBufferBeginInfo bbi = {};
+    bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    pfnBegin(cb, &bbi);
+
+    auto buildImgBarrier = [&](VkImageAspectFlags aspect, VkImageLayout oldL, VkImageLayout newL,
+                                VkAccessFlags srcA, VkAccessFlags dstA) -> VkImageMemoryBarrier {
+        VkImageMemoryBarrier b = {};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.srcAccessMask = srcA;
+        b.dstAccessMask = dstA;
+        b.oldLayout = oldL;
+        b.newLayout = newL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img;
+        b.subresourceRange.aspectMask = aspect;
+        b.subresourceRange.levelCount = 1;
+        b.subresourceRange.layerCount = 1;
+        return b;
+    };
+
+    // Step 1: orig → TRANSFER_SRC for both planes.
+    VkImageMemoryBarrier toSrc[2] = {
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_0_BIT, orig, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_1_BIT, orig, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+    };
+    pfnBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+               0, 0, nullptr, 0, nullptr, 2, toSrc);
+
+    // Step 2: vkCmdCopyImageToBuffer × 2.  Plane 0 is W×H (R8 / 1 byte each).
+    // Plane 1 is (W/2)×(H/2) of R8G8 (2 bytes each → W*H/2 bytes total).
+    VkBufferImageCopy regY = {};
+    regY.imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    regY.imageSubresource.layerCount = 1;
+    regY.imageExtent = {W, H, 1};
+    pfnCopyImgBuf(cb, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  (VkBuffer)m_FrucNv12RgbBufY, 1, &regY);
+
+    VkBufferImageCopy regUV = {};
+    regUV.imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+    regUV.imageSubresource.layerCount = 1;
+    regUV.imageExtent = {W / 2, H / 2, 1};
+    pfnCopyImgBuf(cb, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  (VkBuffer)m_FrucNv12RgbBufUV, 1, &regUV);
+
+    // Step 3: buffer barrier (TRANSFER_WRITE → SHADER_READ on bufY/bufUV).
+    VkBufferMemoryBarrier bufBar1[2] = {};
+    bufBar1[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bufBar1[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bufBar1[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    bufBar1[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufBar1[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufBar1[0].buffer = (VkBuffer)m_FrucNv12RgbBufY;
+    bufBar1[0].size = VK_WHOLE_SIZE;
+    bufBar1[1] = bufBar1[0];
+    bufBar1[1].buffer = (VkBuffer)m_FrucNv12RgbBufUV;
+    pfnBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+               0, 0, nullptr, 2, bufBar1, 0, nullptr);
+
+    // Step 4: dispatch NV12→RGB compute shader.
+    pfnBindPipe(cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipeline)m_FrucNv12RgbVkPipeline);
+    VkDescriptorSet dSet = (VkDescriptorSet)m_FrucNv12RgbDescSet;
+    pfnBindDS(cb, VK_PIPELINE_BIND_POINT_COMPUTE,
+              (VkPipelineLayout)m_FrucNv12RgbVkPipeLay,
+              0, 1, &dSet, 0, nullptr);
+    int pushVals[2] = {(int)W, (int)H};
+    pfnPushC(cb, (VkPipelineLayout)m_FrucNv12RgbVkPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+             0, sizeof(pushVals), pushVals);
+    const uint32_t gx = (W + 7) / 8;
+    const uint32_t gy = (H + 7) / 8;
+    pfnDispatch(cb, gx, gy, 1);
+
+    // Step 5: buffer barrier (SHADER_WRITE → TRANSFER_READ on bufRGB).
+    VkBufferMemoryBarrier bufBar2 = {};
+    bufBar2.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bufBar2.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    bufBar2.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    bufBar2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufBar2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufBar2.buffer = (VkBuffer)m_FrucNv12RgbBufRGB;
+    bufBar2.size = VK_WHOLE_SIZE;
+    pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+               0, 0, nullptr, 1, &bufBar2, 0, nullptr);
+
+    // Step 6: copy 3 plane center-pixel floats to host buffer.  Center pixel
+    // index = (H/2) * W + (W/2).  Layout: planar [R-plane][G-plane][B-plane],
+    // each plane W*H floats.  byteOffset_R = idx*4, byteOffset_G = idx*4 + W*H*4,
+    // byteOffset_B = idx*4 + 2*W*H*4.
+    const VkDeviceSize centerIdx = (VkDeviceSize)(H / 2) * W + (W / 2);
+    const VkDeviceSize planeBytes = (VkDeviceSize)W * H * sizeof(float);
+    VkBufferCopy bcRegions[3] = {};
+    bcRegions[0].srcOffset = centerIdx * sizeof(float);
+    bcRegions[0].dstOffset = 0;
+    bcRegions[0].size = sizeof(float);
+    bcRegions[1].srcOffset = centerIdx * sizeof(float) + planeBytes;
+    bcRegions[1].dstOffset = sizeof(float);
+    bcRegions[1].size = sizeof(float);
+    bcRegions[2].srcOffset = centerIdx * sizeof(float) + 2 * planeBytes;
+    bcRegions[2].dstOffset = 2 * sizeof(float);
+    bcRegions[2].size = sizeof(float);
+    pfnCopyBuf(cb, (VkBuffer)m_FrucNv12RgbBufRGB, (VkBuffer)m_FrucNv12RgbHostBuf,
+               3, bcRegions);
+
+    // Step 7: restore plane layouts.
+    VkImageMemoryBarrier toOrig[2] = {
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_0_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, orig,
+                        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_WRITE_BIT),
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_1_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, orig,
+                        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_WRITE_BIT),
+    };
+    pfnBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+               0, 0, nullptr, 0, nullptr, 2, toOrig);
+
+    pfnEnd(cb);
+
+    // Step 8: submit on compute queue with AVVkFrame.sem timeline wait/signal.
+    VkQueue computeQueue = VK_NULL_HANDLE;
+    pfnGetQueue(m_Vulkan->device, m_Vulkan->queue_compute.index, 0, &computeQueue);
+
+    uint64_t waitVal   = vkFrame->sem_value[0];
+    uint64_t signalVal = waitVal + 1;
+    VkSemaphore sem    = vkFrame->sem[0];
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+    VkTimelineSemaphoreSubmitInfo tlInfo = {};
+    tlInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    tlInfo.waitSemaphoreValueCount = 1;
+    tlInfo.pWaitSemaphoreValues = &waitVal;
+    tlInfo.signalSemaphoreValueCount = 1;
+    tlInfo.pSignalSemaphoreValues = &signalVal;
+
+    VkSubmitInfo si = {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.pNext = &tlInfo;
+    si.waitSemaphoreCount = 1;
+    si.pWaitSemaphores = &sem;
+    si.pWaitDstStageMask = &waitStage;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &sem;
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    m_Vulkan->lock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
+    VkResult subRes = pfnSubmit(computeQueue, 1, &si, (VkFence)m_FrucNv12RgbFence);
+    m_Vulkan->unlock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
+
+    if (subRes != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c2 probe: vkQueueSubmit rc=%d", (int)subRes);
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    vkFrame->sem_value[0] = signalVal;
+
+    // Step 9: wait fence, map host buf, log + compare.
+    VkFence fence = (VkFence)m_FrucNv12RgbFence;
+    VkResult wr = pfnWaitFences(m_Vulkan->device, 1, &fence, VK_TRUE, /*1s*/ 1000ULL * 1000 * 1000);
+    if (wr != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c2 probe: vkWaitForFences rc=%d", (int)wr);
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    pfnResetFences(m_Vulkan->device, 1, &fence);
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double dispatchMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    void* mapped = nullptr;
+    pfnMap(m_Vulkan->device, (VkDeviceMemory)m_FrucNv12RgbHostBufMem, 0, VK_WHOLE_SIZE, 0, &mapped);
+    float r = 0, g = 0, b = 0;
+    if (mapped) {
+        const float* p = (const float*)mapped;
+        r = p[0]; g = p[1]; b = p[2];
+        pfnUnmap(m_Vulkan->device, (VkDeviceMemory)m_FrucNv12RgbHostBufMem);
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.c2 probe: PASS  %ux%u dispatch+readback=%.2fms  "
+                "GPU center RGB (%.3f, %.3f, %.3f) — compare to §J.3.e.2.b CPU result",
+                W, H, dispatchMs, r, g, b);
     return true;
 }
 
@@ -1619,23 +2055,18 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             }
         }
 
-        // §J.3.e.2.c1 — NV12→RGB compute pipeline build probe.  Gated separately
-        // on VIPLE_VK_FRUC_PROBE3=1.  Requires VIPLE_PLVK_NCNN_HANDOFF=1 to have
-        // succeeded (ncnn external instance must be live for ncnn::Pipeline
-        // creation).  Fires once at frame 30 (per PlVkRenderer instance) and is
-        // idempotent thereafter.
+        // §J.3.e.2.c — NV12→RGB compute pipeline + per-frame dispatch probe.
+        // Gated on VIPLE_VK_FRUC_PROBE3=1 + VIPLE_PLVK_NCNN_HANDOFF=1.
+        // First fire at frame 30 (init + first dispatch), then every 60 frames
+        // after.  Per-instance counter so test-decode + reconnect cycles each
+        // get a fresh window.
         const char* probe3 = SDL_getenv("VIPLE_VK_FRUC_PROBE3");
         if (probe3 && SDL_atoi(probe3) != 0 && m_NcnnExternalReady) {
-            // Per-instance counter so test-decode + reconnect cycles each get
-            // a fresh window — probe3 fires once per PlVkRenderer instance
-            // (after we've seen >= 30 decoded frames on this instance).
             ++m_FrucNv12RgbFrameCount;
-            if (m_FrucNv12RgbFrameCount == 30) {
+            uint64_t n = m_FrucNv12RgbFrameCount;
+            if (n == 30 || (n > 30 && ((n - 30) % 60) == 0)) {
                 auto* vkFrame = (AVVkFrame*)frame->data[0];
                 if (vkFrame) {
-                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-VK-FRUC] §J.3.e.2.c1 probe gating fired @ frame#%llu",
-                                (unsigned long long)m_FrucNv12RgbFrameCount);
                     runNv12RgbProbe(vkFrame, frame);
                 }
             }

@@ -176,5 +176,7 @@ private:
     void*    m_FrucNv12RgbCmdPool  = nullptr;  // VkCommandPool
     void*    m_FrucNv12RgbCmdBuf   = nullptr;  // VkCommandBuffer
     void*    m_FrucNv12RgbFence    = nullptr;  // VkFence
+    void*    m_FrucNv12RgbDescPool = nullptr;  // VkDescriptorPool
+    void*    m_FrucNv12RgbDescSet  = nullptr;  // VkDescriptorSet
     uint64_t m_FrucNv12RgbFrameCount = 0;
 };
