@@ -404,10 +404,12 @@ libplacebo {
     SOURCES += \
         streaming/video/ffmpeg-renderers/plvk.cpp \
         streaming/video/ffmpeg-renderers/plvk_c.c \
-        streaming/video/ffmpeg-renderers/vkfruc.cpp
+        streaming/video/ffmpeg-renderers/vkfruc.cpp \
+        streaming/video/ffmpeg-renderers/vkfruc-decode.cpp
     HEADERS += \
         streaming/video/ffmpeg-renderers/plvk.h \
-        streaming/video/ffmpeg-renderers/vkfruc.h
+        streaming/video/ffmpeg-renderers/vkfruc.h \
+        streaming/video/ffmpeg-renderers/vkfruc-decode.h
 }
 config_EGL {
     message(EGL renderer selected)
@@ -584,7 +586,14 @@ win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../3rdparty/nvvideopar
 else:win32:CONFIG(debug, debug|release): LIBS += -L$$OUT_PWD/../3rdparty/nvvideoparser/debug/ -lnvvideoparser
 else:unix: LIBS += -L$$OUT_PWD/../3rdparty/nvvideoparser/ -lnvvideoparser
 
-INCLUDEPATH += $$PWD/../3rdparty/nvvideoparser/include
+# 4 條 INCLUDEPATH match nvvideoparser.pro 的設定 — 上游 #include 用
+# bare angle-bracket (e.g. <cpudetect.h>) 跟 quoted (e.g. "VulkanVideoParserIf.h")
+# 都需要對應 sub-dir 在 INCLUDEPATH.
+INCLUDEPATH += \
+    $$PWD/../3rdparty/nvvideoparser/include \
+    $$PWD/../3rdparty/nvvideoparser/include/NvVideoParser \
+    $$PWD/../3rdparty/nvvideoparser/include/vkvideo_parser \
+    $$PWD/../3rdparty/nvvideoparser/include/VkCodecUtils
 DEPENDPATH += $$PWD/../3rdparty/nvvideoparser/include
 
 !winrt {

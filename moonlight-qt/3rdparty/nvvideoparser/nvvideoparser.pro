@@ -51,7 +51,16 @@ SOURCES += \
     $$SRC/VulkanH265Parser.cpp     \
     $$SRC/VulkanVideoDecoder.cpp   \
     $$SRC/cpudetect.cpp            \
-    $$SRC/NextStartCodeC.cpp
+    $$SRC/NextStartCodeC.cpp       \
+    $$SRC/NextStartCodeAVX2.cpp    \
+    $$SRC/NextStartCodeAVX512.cpp  \
+    $$SRC/NextStartCodeSSSE3.cpp
+
+# AVX2 / AVX512 / SSSE3 source files require specific compiler intrinsics
+# enabled.  /arch:AVX2 covers most; AVX512/SSSE3 use intrinsic headers
+# that work without the /arch flag (compiler still emits target-specific
+# code via the intrinsics).
+QMAKE_CXXFLAGS += /arch:AVX2
 
 HEADERS += \
     $$INC/NvVideoParser/ByteStreamParser.h            \

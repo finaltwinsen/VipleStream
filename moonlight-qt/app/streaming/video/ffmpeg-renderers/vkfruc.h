@@ -130,6 +130,14 @@ private:
     // Phase 1.2 — native NAL intercept hook (renderer.h interface).
     bool acceptsNativeDecode() const override;
     void submitNativeDecodeUnit(const uint8_t* data, size_t len) override;
+
+    // Phase 1.1c — NvVideoParser instance + callback handler.
+    // Pimpl 完整型別在 vkfruc-decode.cpp，這裡只 forward decl + 指標.
+    struct NvParserPimpl;
+    NvParserPimpl* m_NvParser = nullptr;
+    bool createNvVideoParser();
+    void destroyNvVideoParser();
+    void feedNalToNvParser(const uint8_t* data, size_t len);
     // Phase 1.1b scaffold — NAL type detection (parser comes next session).
     // Counts per NAL type accumulated; logged periodically for diagnostics.
     struct NalCounts {

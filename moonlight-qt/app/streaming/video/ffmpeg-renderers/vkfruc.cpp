@@ -173,6 +173,7 @@ void VkFrucRenderer::teardown()
     // set layout, so they go first; sampler-conversion holds the
     // immutable sampler used in descriptor set layout, so layouts go
     // before the sampler.
+    destroyNvVideoParser();         // §J.3.e.2.i.8 native VK decode parser
     destroyVideoSession();          // §J.3.e.2.i.8 native VK decode
     destroyOverlayResources();      // §J.3.e.2.i overlay
     destroyInterpGraphicsPipeline(); // §J.3.e.2.i.4.2
@@ -904,6 +905,12 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 createVideoSessionParameters failed");
             destroyVideoSession();
+        } else if (!createNvVideoParser()) {
+            // Non-fatal — Phase 1.1c 失敗時 fallback 到 v1.3.198 的
+            // 自寫 NAL type detection (acceptsNativeDecode 仍 true 但
+            // submitNativeDecodeUnit 跳 parser 路).
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 createNvVideoParser failed — fallback to legacy NAL type counter");
         }
     } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2659,9 +2666,14 @@ bool VkFrucRenderer::acceptsNativeDecode() const
 
 void VkFrucRenderer::submitNativeDecodeUnit(const uint8_t* data, size_t len)
 {
+    // §J.3.e.2.i.8 Phase 1.1c — 把 NAL bytes 餵給 NvVideoParser.
+    // Parser 內部解析 + 觸發 callback (StartVideoSequence / UpdatePictureParameters /
+    // DecodePictureWithParameters) on VkFrucDecoderHandler.
+    feedNalToNvParser(data, len);
+
     // Annex-B byte-stream NAL units: 0x000001 or 0x00000001 start code,
     // 然後 NAL header (HEVC 是 2 bytes, H.264 是 1 byte).
-    // 此處掃 start codes 切出每個 NAL，分類 type 計數.
+    // 此處掃 start codes 切出每個 NAL，分類 type 計數 (legacy diagnostic).
     if (!data || len < 4) return;
     // First-call diagnostic log so we know the intercept actually fires.
     if (m_NalCounts.total_packets == 0) {
