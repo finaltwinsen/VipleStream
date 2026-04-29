@@ -186,7 +186,7 @@ bool VkFrucDecodeClient::UpdatePictureParameters(
     return true;
 }
 
-bool VkFrucDecodeClient::DecodePicture(VkParserPictureData* /*pParserPictureData*/)
+bool VkFrucDecodeClient::DecodePicture(VkParserPictureData* pParserPictureData)
 {
     m_DecodePicCount.fetch_add(1);
     if ((m_DecodePicCount.load() % 60) == 0) {
@@ -194,6 +194,16 @@ bool VkFrucDecodeClient::DecodePicture(VkParserPictureData* /*pParserPictureData
                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 parser DecodePicture cumul=%llu",
                     (unsigned long long)m_DecodePicCount.load());
     }
+
+    // §J.3.e.2.i.8 Phase 1.1d — extract VPS/SPS/PPS std structs the parser
+    // resolved for this picture and feed them to vkUpdateVideoSessionParametersKHR.
+    // outOfBandPictureParameters=false 模式下 parser 不單獨呼叫 UpdatePictureParameters
+    // callback；active param sets 都從 hevc.pStdVps/pStdSps/pStdPps 帶過來。
+    if (m_Parent && pParserPictureData) {
+        const auto& hevc = pParserPictureData->CodecSpecific.hevc;
+        m_Parent->onH265PictureParametersFromParser(hevc.pStdVps, hevc.pStdSps, hevc.pStdPps);
+    }
+
     // Phase 1.3 — 在這裡呼叫 vkCmdDecodeVideoKHR.
     return true;
 }
@@ -236,6 +246,146 @@ VkDeviceSize VkFrucDecodeClient::GetBitstreamBuffer(
     }
     bitstreamBuffer = buf;
     return size;
+}
+
+
+// =============================================================================
+// VkFrucRenderer Phase 1.1d — H.265 VPS/SPS/PPS upload to video session params.
+// =============================================================================
+
+bool VkFrucRenderer::onH265PictureParametersFromParser(
+    const StdVideoPictureParametersSet* vps,
+    const StdVideoPictureParametersSet* sps,
+    const StdVideoPictureParametersSet* pps)
+{
+    if (m_VideoSessionParams == VK_NULL_HANDLE) return false;
+
+    // Lazy-cache the PFN once the session params object exists.
+    if (!m_pfnUpdateVideoSessionParams) {
+        auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        m_pfnUpdateVideoSessionParams =
+            (PFN_vkUpdateVideoSessionParametersKHR)getDevPa(
+                m_Device, "vkUpdateVideoSessionParametersKHR");
+        if (!m_pfnUpdateVideoSessionParams) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.1d "
+                         "vkUpdateVideoSessionParametersKHR PFN missing");
+            return false;
+        }
+    }
+
+    // Determine which sets are NEW (not yet uploaded for that ID, or seen with
+    // a strictly higher GetUpdateSequenceCount).  Parser owns the underlying
+    // std structs; we copy pointers into the AddInfo, then call vkUpdate before
+    // returning to the parser callback (driver copies internally).
+    StdVideoH265VideoParameterSet    vpsCopy{};
+    StdVideoH265SequenceParameterSet spsCopy{};
+    StdVideoH265PictureParameterSet  ppsCopy{};
+    uint32_t addVps = 0, addSps = 0, addPps = 0;
+
+    auto isNew = [](std::map<int, uint32_t>& seen, int id, uint32_t seq) {
+        auto it = seen.find(id);
+        if (it == seen.end())   return true;          // first time
+        return seq > it->second;                      // strictly newer
+    };
+
+    if (vps) {
+        bool isVps = false;
+        int  id    = vps->GetVpsId(isVps);
+        uint32_t seq = vps->GetUpdateSequenceCount();
+        if (isVps && id >= 0) {
+            const auto* p = vps->GetStdH265Vps();
+            if (p && isNew(m_H265VpsSeqSeen, id, seq)) {
+                vpsCopy = *p;
+                addVps  = 1;
+            }
+        }
+    }
+    if (sps) {
+        bool isSps = false;
+        int  id    = sps->GetSpsId(isSps);
+        uint32_t seq = sps->GetUpdateSequenceCount();
+        if (isSps && id >= 0) {
+            const auto* p = sps->GetStdH265Sps();
+            if (p && isNew(m_H265SpsSeqSeen, id, seq)) {
+                spsCopy = *p;
+                addSps  = 1;
+            }
+        }
+    }
+    if (pps) {
+        bool isPps = false;
+        int  id    = pps->GetPpsId(isPps);
+        uint32_t seq = pps->GetUpdateSequenceCount();
+        if (isPps && id >= 0) {
+            const auto* p = pps->GetStdH265Pps();
+            if (p && isNew(m_H265PpsSeqSeen, id, seq)) {
+                ppsCopy = *p;
+                addPps  = 1;
+            }
+        }
+    }
+
+    if (!addVps && !addSps && !addPps) {
+        // All param sets already uploaded with current seq — no-op.
+        return true;
+    }
+
+    VkVideoDecodeH265SessionParametersAddInfoKHR h265Add = {
+        VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_SESSION_PARAMETERS_ADD_INFO_KHR
+    };
+    h265Add.stdVPSCount = addVps;
+    h265Add.pStdVPSs    = addVps ? &vpsCopy : nullptr;
+    h265Add.stdSPSCount = addSps;
+    h265Add.pStdSPSs    = addSps ? &spsCopy : nullptr;
+    h265Add.stdPPSCount = addPps;
+    h265Add.pStdPPSs    = addPps ? &ppsCopy : nullptr;
+
+    VkVideoSessionParametersUpdateInfoKHR updateInfo = {
+        VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_UPDATE_INFO_KHR
+    };
+    updateInfo.pNext               = &h265Add;
+    // Spec: monotonically increasing, starts at 1 for the first update.
+    updateInfo.updateSequenceCount = ++m_H265SessionParamsSeq;
+
+    VkResult vr = m_pfnUpdateVideoSessionParams(
+        m_Device, m_VideoSessionParams, &updateInfo);
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.1d "
+                     "vkUpdateVideoSessionParametersKHR rc=%d "
+                     "(addVPS=%u addSPS=%u addPPS=%u seq=%u)",
+                     (int)vr, addVps, addSps, addPps, m_H265SessionParamsSeq);
+        // Roll back our local seq counter so a retry has a chance to succeed.
+        --m_H265SessionParamsSeq;
+        return false;
+    }
+
+    // Mark uploaded.  Update tracking AFTER the successful vkUpdate.
+    if (addVps) {
+        bool isVps = false;
+        int  id    = vps->GetVpsId(isVps);
+        m_H265VpsSeqSeen[id] = vps->GetUpdateSequenceCount();
+    }
+    if (addSps) {
+        bool isSps = false;
+        int  id    = sps->GetSpsId(isSps);
+        m_H265SpsSeqSeen[id] = sps->GetUpdateSequenceCount();
+    }
+    if (addPps) {
+        bool isPps = false;
+        int  id    = pps->GetPpsId(isPps);
+        m_H265PpsSeqSeen[id] = pps->GetUpdateSequenceCount();
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.1d "
+                "vkUpdateVideoSessionParametersKHR ok — added VPS=%u SPS=%u PPS=%u, "
+                "seqCount=%u (cumul VPS-ids=%zu SPS-ids=%zu PPS-ids=%zu)",
+                addVps, addSps, addPps, m_H265SessionParamsSeq,
+                m_H265VpsSeqSeen.size(), m_H265SpsSeqSeen.size(), m_H265PpsSeqSeen.size());
+    return true;
 }
 
 

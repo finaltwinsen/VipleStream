@@ -2769,6 +2769,14 @@ void VkFrucRenderer::destroyVideoSession()
         }
     }
     m_VideoSessionMem.clear();
+
+    // §J.3.e.2.i.8 Phase 1.1d — reset H.265 param-set tracking so a restart
+    // re-uploads VPS/SPS/PPS into the new session params object.
+    m_pfnUpdateVideoSessionParams = nullptr;
+    m_H265SessionParamsSeq        = 0;
+    m_H265VpsSeqSeen.clear();
+    m_H265SpsSeqSeen.clear();
+    m_H265PpsSeqSeen.clear();
 }
 
 bool VkFrucRenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary** options)

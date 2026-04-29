@@ -19,7 +19,14 @@
 #endif
 #include <vulkan/vulkan.h>
 
+#include <map>
 #include <vector>
+
+// §J.3.e.2.i.8 Phase 1.1d — forward decl from nvvideoparser; full def lives in
+// 3rdparty/nvvideoparser/include/vkvideo_parser/StdVideoPictureParametersSet.h
+// and is only pulled in by vkfruc-decode.cpp (keeps vkfruc.cpp's #include set
+// from ballooning).
+class StdVideoPictureParametersSet;
 
 class VkFrucRenderer : public IFFmpegRenderer {
 public:
@@ -126,6 +133,31 @@ private:
     VkVideoSessionParametersKHR m_VideoSessionParams = VK_NULL_HANDLE;
     std::vector<VkDeviceMemory> m_VideoSessionMem;  // per binding
     int                         m_VideoCodec         = 0;  // VIDEO_FORMAT_MASK_H264/H265/AV1
+
+    // §J.3.e.2.i.8 Phase 1.1d — H.265 VPS/SPS/PPS upload to VkVideoSessionParametersKHR.
+    //
+    // Parser hands us the active StdVideoPictureParametersSet* for the current
+    // picture inside the DecodePicture callback (CodecSpecific.hevc.pStdVps/Sps/Pps).
+    // We track the last-seen GetUpdateSequenceCount() per ID and only call
+    // vkUpdateVideoSessionParametersKHR when we see a new ID, or a strictly
+    // higher seq count for an existing ID (Sunshine resends on every IDR but
+    // typically without changes, so this avoids spamming the driver).
+    //
+    // Defined in vkfruc-decode.cpp where StdVideoPictureParametersSet's full
+    // header is already pulled in.
+public:
+    bool onH265PictureParametersFromParser(const StdVideoPictureParametersSet* vps,
+                                           const StdVideoPictureParametersSet* sps,
+                                           const StdVideoPictureParametersSet* pps);
+private:
+    PFN_vkUpdateVideoSessionParametersKHR m_pfnUpdateVideoSessionParams = nullptr;
+    // Vulkan spec requires updateSequenceCount to be exactly the current value
+    // of the session params object's update count + 1 on each call — we track
+    // it ourselves and bump after every successful call.
+    uint32_t                m_H265SessionParamsSeq = 0;
+    std::map<int, uint32_t> m_H265VpsSeqSeen;
+    std::map<int, uint32_t> m_H265SpsSeqSeen;
+    std::map<int, uint32_t> m_H265PpsSeqSeen;
 
     // Phase 1.2 — native NAL intercept hook (renderer.h interface).
     bool acceptsNativeDecode() const override;
