@@ -3124,16 +3124,15 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     computeBufBarrier(m_FrucMvBuf);
 
     // ---- Stage 2: MV median filter ----
-    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeline);
-    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeLay,
-                       0, 1, &m_FrucMedianDescSet, 0, nullptr);
+    // §J.3.e.2.i.7 R5: 把 median compute pass 換成 cmdCopyBuffer
+    // (m_FrucMvBuf → m_FrucMvFilteredBuf)，等同 noop 過濾.  目標是測 median
+    // 對視覺品質的實際貢獻 vs GPU 時間節省 (median 預估佔 0.2-0.3ms).
+    // Warp 仍從 m_FrucMvFilteredBuf 讀，binding 不變.
     {
-        struct { int mvW, mvH, radius, _pad; } pcMed = {
-            (int)mvW, (int)mvH, (int)MEDIAN_RADIUS, 0
-        };
-        pfnCmdPushConst(cmd, m_FrucMedianPipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcMed), &pcMed);
+        VkBufferCopy cp = {};
+        cp.size = (VkDeviceSize)mvW * mvH * 2 * sizeof(int);  // mvX + mvY per block
+        pfnCmdCopyBuffer(cmd, m_FrucMvBuf, m_FrucMvFilteredBuf, 1, &cp);
     }
-    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
     computeBufBarrier(m_FrucMvFilteredBuf);
 
     // ---- Stage 3: warp ----
