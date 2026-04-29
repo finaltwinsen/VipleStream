@@ -579,6 +579,14 @@ else:unix: LIBS += -L$$OUT_PWD/../h264bitstream/ -lh264bitstream
 INCLUDEPATH += $$PWD/../h264bitstream/h264bitstream
 DEPENDPATH += $$PWD/../h264bitstream/h264bitstream
 
+# §J.3.e.2.i.8 — H.265 native VK_KHR_video_decode parser (Apache 2.0)
+win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../3rdparty/nvvideoparser/release/ -lnvvideoparser
+else:win32:CONFIG(debug, debug|release): LIBS += -L$$OUT_PWD/../3rdparty/nvvideoparser/debug/ -lnvvideoparser
+else:unix: LIBS += -L$$OUT_PWD/../3rdparty/nvvideoparser/ -lnvvideoparser
+
+INCLUDEPATH += $$PWD/../3rdparty/nvvideoparser/include
+DEPENDPATH += $$PWD/../3rdparty/nvvideoparser/include
+
 !winrt {
     win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../AntiHooking/release/ -lAntiHooking
     else:win32:CONFIG(debug, debug|release): LIBS += -L$$OUT_PWD/../AntiHooking/debug/ -lAntiHooking

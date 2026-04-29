@@ -648,10 +648,14 @@ void VulkanVideoDecoder::end_of_stream()
 }
 
 #include "nvVulkanh265ScalingList.h"
+#ifndef VIPLESTREAM_NVPARSER_H265_ONLY
 #include "VulkanH264Decoder.h"
+#endif
 #include "VulkanH265Decoder.h"
+#ifndef VIPLESTREAM_NVPARSER_H265_ONLY
 #include "VulkanAV1Decoder.h"
 #include "VulkanVP9Decoder.h"
+#endif
 
 static nvParserLogFuncType gParserLogFunc = nullptr;
 static int gLogLevel = 0;
@@ -700,6 +704,7 @@ VkResult CreateVulkanVideoDecodeParser(VkVideoCodecOperationFlagBitsKHR videoCod
     gLogLevel = logLevel;
     switch((uint32_t)videoCodecOperation)
     {
+#ifndef VIPLESTREAM_NVPARSER_H265_ONLY
     case VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR:
     {
         if ((pStdExtensionVersion == nullptr) ||
@@ -717,6 +722,7 @@ VkResult CreateVulkanVideoDecodeParser(VkVideoCodecOperationFlagBitsKHR videoCod
         nvVideoDecodeParser = nvVideoH264DecodeParser;
     }
         break;
+#endif
     case VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR:
     {
         if ((pStdExtensionVersion == nullptr) ||
@@ -734,6 +740,7 @@ VkResult CreateVulkanVideoDecodeParser(VkVideoCodecOperationFlagBitsKHR videoCod
         nvVideoDecodeParser = nvVideoH265DecodeParser;
     }
         break;
+#ifndef VIPLESTREAM_NVPARSER_H265_ONLY
     case VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR:
         if ((pStdExtensionVersion == nullptr) ||
                 (0 != strcmp(pStdExtensionVersion->extensionName, VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_EXTENSION_NAME)) ||
@@ -756,6 +763,7 @@ VkResult CreateVulkanVideoDecodeParser(VkVideoCodecOperationFlagBitsKHR videoCod
         }
         nvVideoDecodeParser =  VkSharedBaseObj<VulkanVP9Decoder>(new VulkanVP9Decoder(videoCodecOperation));
         break;
+#endif
     default:
         nvParserErrorLog("Unsupported codec type!!!\n");
     }
