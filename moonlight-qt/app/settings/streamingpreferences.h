@@ -127,6 +127,22 @@ public:
     };
     Q_ENUM(FrucBackend);
 
+    // §J.3.e.2.i — VipleStream renderer backend.  使用者在 Settings 下拉
+    // 選單裡切.  RS_VULKAN（預設）跑 VkFrucRenderer (SW upload + dual-
+    // present + Vulkan compute FRUC).  RS_D3D11 跑 D3D11VARenderer +
+    // FRUC backend (NV-OF / Generic / DirectML).
+    //
+    // FRUC engine 對應：RS_D3D11 用 frucBackend 設定的 backend；
+    // RS_VULKAN 因為還沒接 IFRUCBackend 抽象，固定用 VkFruc 內建的 ME→
+    // median→warp compute（行為等同 FB_GENERIC），UI 會把 frucBackend
+    // dropdown disable + 顯示提示.
+    enum RendererSelection
+    {
+        RS_VULKAN,      // 預設：VkFrucRenderer (SW upload + dual-present + Vulkan compute FRUC)
+        RS_D3D11,       // D3D11VARenderer + frucBackend 選的補幀引擎
+    };
+    Q_ENUM(RendererSelection);
+
     enum FrucQuality
     {
         FQ_QUALITY,      // Best visual quality, higher GPU load
@@ -181,6 +197,7 @@ public:
     Q_PROPERTY(bool autoWakeOnLan MEMBER autoWakeOnLan NOTIFY autoWakeOnLanChanged)
     Q_PROPERTY(bool enableFrameInterpolation MEMBER enableFrameInterpolation NOTIFY enableFrameInterpolationChanged)
     Q_PROPERTY(FrucBackend frucBackend MEMBER frucBackend NOTIFY frucBackendChanged)
+    Q_PROPERTY(RendererSelection rendererSelection MEMBER rendererSelection NOTIFY rendererSelectionChanged)
     Q_PROPERTY(FrucQuality frucQuality MEMBER frucQuality NOTIFY frucQualityChanged)
     Q_PROPERTY(DesignVariant designVariant MEMBER designVariant NOTIFY designVariantChanged)
     Q_PROPERTY(AppSortMode appSortMode MEMBER appSortMode NOTIFY appSortModeChanged)
@@ -231,6 +248,7 @@ public:
     bool autoWakeOnLan;
     bool enableFrameInterpolation;
     FrucBackend frucBackend;
+    RendererSelection rendererSelection;  // §J.3.e.2.i — D3D11 vs Vulkan renderer
     FrucQuality frucQuality;
     DesignVariant designVariant;
     AppSortMode appSortMode;
@@ -279,6 +297,7 @@ signals:
     void autoWakeOnLanChanged();
     void enableFrameInterpolationChanged();
     void frucBackendChanged();
+    void rendererSelectionChanged();
     void frucQualityChanged();
     void designVariantChanged();
     void appSortModeChanged();

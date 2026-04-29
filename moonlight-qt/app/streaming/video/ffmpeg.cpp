@@ -1478,12 +1478,23 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
 #endif
 
     // §J.3.e.2.i.3.e-SW — force VkFrucRenderer SW path BEFORE HW cascade.
-    // When VIPLE_VKFRUC_SW=1, skip all HW hwaccel options entirely and
-    // try VkFrucRenderer with NV12 software decode.  This is for isolating
-    // VkFrucRenderer's graphics+swapchain pipeline from FFmpeg-Vulkan
-    // hwcontext (HW path crashes; see docs/J.3.e.2.i_*.md).
+    //
+    // 觸發條件 (任一即可)：
+    //   1. 使用者在 Settings 下拉選 Vulkan 渲染器 (RS_VULKAN, v1.3.175 default)
+    //   2. 環境變數 VIPLE_VKFRUC_SW=1 (legacy dev/CI 用)
+    //
+    // 跳過 VkFruc 的條件：
+    //   • Settings 選 RS_D3D11（即使環境變數有設也跳過 —— 使用者意願優先）
+    //
+    // 當 VkFruc 路徑被觸發，會繞過所有 HW hwaccel options 直接試 VkFruc + NV12
+    // software decode.  這是因為 FFmpeg-Vulkan hwcontext HW path 還會 crash
+    // （docs/J.3.e.2.i_*.md known-broken）.
 #ifdef HAVE_LIBPLACEBO_VULKAN
-    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0) {
+    auto* vkPrefs = StreamingPreferences::get(nullptr);
+    bool prefsForceD3D11 = vkPrefs && vkPrefs->rendererSelection == StreamingPreferences::RS_D3D11;
+    bool prefsWantVulkan = vkPrefs && vkPrefs->rendererSelection == StreamingPreferences::RS_VULKAN;
+    bool envForceVulkan  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0;
+    if (!prefsForceD3D11 && (prefsWantVulkan || envForceVulkan)) {
         // SW h264/hevc/av1 decoders default to YUV420P output.  We try
         // YUV420P unconditionally — if decoder_pix_fmts list is missing
         // (newer FFmpeg returns NULL for some SW decoders), iterating
@@ -1572,7 +1583,13 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
 #endif
 
 #ifdef HAVE_LIBPLACEBO_VULKAN
-        if (!vulkanIsSlow && tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, nullptr, nullptr,
+        // §J.3.e.2.i — RS_D3D11 設定下要跳過所有 Vulkan renderer，落到
+        // SDL D3D11/OpenGL renderer.  否則 SW decode + libplacebo Vulkan
+        // renderer 會被選到（PlVkRenderer 沒接 FRUC），效能 overlay 顯示
+        // 「補幀 未啟用」就是這個原因.
+        auto* prefsForVk = StreamingPreferences::get(nullptr);
+        bool prefsForceD3D11ForVk = prefsForVk && prefsForVk->rendererSelection == StreamingPreferences::RS_D3D11;
+        if (!prefsForceD3D11ForVk && !vulkanIsSlow && tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, nullptr, nullptr,
                                   []() -> IFFmpegRenderer* { return new PlVkRenderer(); })) {
             return true;
         }
@@ -1898,11 +1915,15 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
     // Increase log level until the first frame is decoded
     av_log_set_level(AV_LOG_DEBUG);
 
-    // §J.3.e.2.i.3.e-SW — when VIPLE_VKFRUC_SW=1, force SW h264/hevc decoder
-    // BEFORE any HW cascade.  Validates VkFrucRenderer's graphics+swapchain
-    // pipeline in isolation from FFmpeg-Vulkan hwcontext (HW path crashes;
-    // see docs/J.3.e.2.i_*.md).
-    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0) {
+    // §J.3.e.2.i.3.e-SW — RS_VULKAN 設定 (default) 或 VIPLE_VKFRUC_SW=1
+    // 觸發時，force SW h264/hevc/av1 decoder BEFORE HW cascade.  原因是
+    // FFmpeg-Vulkan hwcontext HW path 還會 crash (docs/J.3.e.2.i_*.md
+    // known-broken)，VkFruc 必須走 SW 上傳路徑.
+    auto* vkPrefs2 = StreamingPreferences::get(nullptr);
+    bool prefsForceD3D11_2 = vkPrefs2 && vkPrefs2->rendererSelection == StreamingPreferences::RS_D3D11;
+    bool prefsWantVulkan_2 = vkPrefs2 && vkPrefs2->rendererSelection == StreamingPreferences::RS_VULKAN;
+    bool envForceVulkan_2  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0;
+    if (!prefsForceD3D11_2 && (prefsWantVulkan_2 || envForceVulkan_2)) {
         const char* swDecoderName = nullptr;
         if (params->videoFormat & VIDEO_FORMAT_MASK_H264) swDecoderName = "h264";
         else if (params->videoFormat & VIDEO_FORMAT_MASK_H265) swDecoderName = "hevc";

@@ -32,6 +32,7 @@
 #define SER_AUTOWOL "autoWakeOnLan"
 #define SER_FRAMEINTERP "frameInterpolation"
 #define SER_FRUCBACKEND "frucBackend"
+#define SER_RENDERERSEL "rendererSelection"
 #define SER_FRUCQUALITY "frucQuality"
 #define SER_DESIGNVARIANT "designVariant"
 #define SER_APPSORTMODE "appSortMode"
@@ -154,6 +155,9 @@ void StreamingPreferences::reload()
     // enableFrameInterpolation already read above (before bitrate)
     // so getDefaultBitrate can be FRUC-aware.
     frucBackend = static_cast<FrucBackend>(settings.value(SER_FRUCBACKEND, static_cast<int>(FB_GENERIC)).toInt());
+    // §J.3.e.2.i — renderer 預設 RS_VULKAN（VkFruc + 內建 compute FRUC）.
+    // 使用者可在 Settings 下拉切到 RS_D3D11 + frucBackend 設定的 backend.
+    rendererSelection = static_cast<RendererSelection>(settings.value(SER_RENDERERSEL, static_cast<int>(RS_VULKAN)).toInt());
     frucQuality = static_cast<FrucQuality>(settings.value(SER_FRUCQUALITY, static_cast<int>(FQ_BALANCED)).toInt());
     designVariant = static_cast<DesignVariant>(settings.value(SER_DESIGNVARIANT, static_cast<int>(DV_SAFE)).toInt());
     // VipleStream H Phase 2.2: default to ASM_RECENT so users see their
@@ -365,6 +369,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_AUTOWOL, autoWakeOnLan);
     settings.setValue(SER_FRAMEINTERP, enableFrameInterpolation);
     settings.setValue(SER_FRUCBACKEND, static_cast<int>(frucBackend));
+    settings.setValue(SER_RENDERERSEL, static_cast<int>(rendererSelection));
     settings.setValue(SER_FRUCQUALITY, static_cast<int>(frucQuality));
     settings.setValue(SER_DESIGNVARIANT, static_cast<int>(designVariant));
     settings.setValue(SER_APPSORTMODE, static_cast<int>(appSortMode));

@@ -2,6 +2,7 @@
 // See vkfruc.h header + docs/J.3.e.2.i_vulkan_native_renderer.md.
 
 #include "vkfruc.h"
+#include "settings/streamingpreferences.h"
 
 #ifdef HAVE_LIBPLACEBO_VULKAN
 
@@ -45,15 +46,26 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     : IFFmpegRenderer(RendererType::Vulkan)
     , m_Pass(pass)
 {
-    // §J.3.e.2.i.3.e-SW — opt into software-decode upload path when env
-    // var is set.  Bypasses FFmpeg-Vulkan hwcontext entirely (which is
-    // currently broken; see docs/J.3.e.2.i_vulkan_native_renderer.md).
-    m_SwMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0;
-    m_FrucMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_FRUC") != 0;
-    m_DualMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_DUAL") != 0;
+    // §J.3.e.2.i.3.e-SW — opt into software-decode upload path when 設定
+    // 是 RS_VULKAN（v1.3.175 default）或 env var 是設的（dev / probe）.
+    // Bypasses FFmpeg-Vulkan hwcontext entirely (currently broken; see
+    // docs/J.3.e.2.i_vulkan_native_renderer.md).
+    //
+    // Preference path：當使用者在 Settings dropdown 選 Vulkan 渲染器，
+    // m_SwMode / m_FrucMode / m_DualMode 都自動開（FRUC 跟 dual 還受
+    // enableFrameInterpolation 控制 —— 沒勾補幀就只跑 SW upload + single
+    // present）.  Env-var path 留給 dev/CI 測試獨立子集 (e.g. 只想測 SW
+    // upload 不想跑 FRUC 用 VIPLE_VKFRUC_SW=1 + 不設 FRUC/DUAL).
+    auto* prefs = StreamingPreferences::get(nullptr);
+    bool prefsWantVulkan = prefs && prefs->rendererSelection == StreamingPreferences::RS_VULKAN;
+    bool prefsWantInterp = prefs && prefs->enableFrameInterpolation;
+    m_SwMode   = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW")   != 0 || prefsWantVulkan;
+    m_FrucMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_FRUC") != 0 || (prefsWantVulkan && prefsWantInterp);
+    m_DualMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_DUAL") != 0 || (prefsWantVulkan && prefsWantInterp);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d, frucMode=%d, dualMode=%d)",
-                pass, m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0);
+                "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d, frucMode=%d, dualMode=%d, prefs=%s)",
+                pass, m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0,
+                prefsWantVulkan ? "RS_VULKAN" : "n/a");
 }
 
 // §J.3.e.2.i.3.e-SW — declare NV12 as preferred so FFmpeg get_format()
@@ -730,19 +742,16 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
     }
 
     // §J.3.e.2.i — overlay 資源（pipeline/shader/sampler/desc pool/spinlock
-    // state）.  v1.3.171 上線後在某些 host 配置觸發 VK_ERROR_DEVICE_LOST，
-    // 還沒找到 root cause——env-var gate 起來，預設 OFF，使用者能用
-    // VIPLE_VKFRUC_OVERLAY=1 opt-in 並協助回報 console log.
-    bool overlayWanted = qEnvironmentVariableIntValue("VIPLE_VKFRUC_OVERLAY") != 0;
-    if (overlayWanted) {
-        if (!createOverlayResources()) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC] §J.3.e.2.i overlay 資源建立失敗，效能資訊 overlay 將不會顯示");
-            destroyOverlayResources();  // best-effort 清掉部分建好的 handle
-        }
-    } else {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC] §J.3.e.2.i overlay disabled (set VIPLE_VKFRUC_OVERLAY=1 to enable)");
+    // state）.  v1.3.171 一度懷疑 createOverlayResources 觸發 VK_ERROR_
+    // DEVICE_LOST 而加 VIPLE_VKFRUC_OVERLAY env-var gate，但 v1.3.172~174
+    // 五次測試都沒重現，確認當時是 transient driver state.  v1.3.175 拆
+    // gate，跟著 RS_VULKAN 預設一起 default-on，使用者不必設環境變數
+    // 也能用 Ctrl+Alt+Shift+S 開效能 overlay.  失敗仍 non-fatal — 只是
+    // overlay 看不到，串流照跑.
+    if (!createOverlayResources()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i overlay 資源建立失敗，效能資訊 overlay 將不會顯示");
+        destroyOverlayResources();  // best-effort 清掉部分建好的 handle
     }
 
     // §J.3.e.2.i.3.e-SW — allocate upload buffer + image when in software

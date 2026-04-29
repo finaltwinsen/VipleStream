@@ -724,6 +724,40 @@ Flickable {
                     }
                 }
 
+                // §J.3.e.2.i — VipleStream renderer backend dropdown.
+                // RS_VULKAN (default, val=0) → VkFrucRenderer + 內建 Vulkan
+                // compute FRUC.  RS_D3D11 (val=1) → D3D11VARenderer +
+                // frucBackend 選的補幀引擎 (NV-OF / Generic / DirectML / NCNN).
+                Label {
+                    width: parent.width
+                    text: qsTr("Renderer 渲染器")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                ComboBox {
+                    id: rendererSelectionCombo
+                    width: parent.width
+                    font.pointSize: 12
+                    textRole: "text"
+                    model: ListModel {
+                        id: rendererSelectionModel
+                    }
+                    Component.onCompleted: {
+                        rendererSelectionModel.append({text: qsTr("Vulkan (推薦：內建補幀引擎，等同 Generic)"), val: 0})
+                        rendererSelectionModel.append({text: qsTr("Direct3D 11 (可搭配 NV-OF / DirectML / NCNN 補幀引擎)"), val: 1})
+                        currentIndex = StreamingPreferences.rendererSelection
+                    }
+                    onActivated: {
+                        StreamingPreferences.rendererSelection = rendererSelectionModel.get(currentIndex).val
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Vulkan：原生 Vulkan 渲染管線 + dual-present 補幀，補幀引擎內建（等同 Generic）。Direct3D 11：傳統 D3D11 渲染，補幀引擎可在下方下拉選擇 (NV-OF / Generic / DirectML / NCNN)。")
+                }
+
                 CheckBox {
                     id: frameInterpolationCheck
                     width: parent.width
@@ -764,10 +798,24 @@ Flickable {
                     ToolTip.text: qsTr("Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).")
                 }
 
+                // §J.3.e.2.i — Vulkan renderer 用內建 compute 補幀引擎，不
+                //吃 frucBackend 選擇 (還沒接 IFRUCBackend 抽象)；D3D11 才需要
+                // 選 backend.  顯示提示讓使用者知道 Vulkan 等同 Generic.
+                Label {
+                    width: parent.width
+                    visible: frameInterpolationCheck.checked && rendererSelectionCombo.currentIndex === 0
+                    text: qsTr("Vulkan 渲染器使用內建補幀引擎（等同 Generic）。要選擇其他補幀引擎請切到 Direct3D 11。")
+                    font.pointSize: 10
+                    font.italic: true
+                    opacity: 0.75
+                    wrapMode: Text.Wrap
+                }
+
                 ComboBox {
                     id: frucBackendCombo
                     width: parent.width
-                    visible: frameInterpolationCheck.checked
+                    // Vulkan renderer 的 compute 補幀內建,不需 frucBackend.
+                    visible: frameInterpolationCheck.checked && rendererSelectionCombo.currentIndex === 1
                     font.pointSize: 12
                     textRole: "text"
                     model: ListModel {
@@ -805,11 +853,14 @@ Flickable {
                 ComboBox {
                     id: frucQualityCombo
                     width: parent.width
-                    // Quality preset only applies to the Generic
+                    // Quality preset only applies to D3D11 + Generic
                     // Compute backend (shader-based). NVIDIA Optical
                     // Flow and DirectML both run their own internal
                     // pipelines that don't take a quality hint.
-                    visible: frameInterpolationCheck.checked && frucBackendCombo.currentIndex === 0
+                    // Vulkan renderer 走自己內建 compute，不吃 quality hint.
+                    visible: frameInterpolationCheck.checked
+                             && rendererSelectionCombo.currentIndex === 1
+                             && frucBackendCombo.currentIndex === 0
                     font.pointSize: 12
                     textRole: "text"
                     model: ListModel {
