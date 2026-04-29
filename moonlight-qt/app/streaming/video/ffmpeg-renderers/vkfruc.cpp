@@ -7,9 +7,12 @@
 
 #include <SDL.h>
 #include <SDL_vulkan.h>
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 extern "C" {
 #include <libavutil/hwcontext.h>
@@ -3261,6 +3264,65 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-SW] frame#%llu OK — upload+render+present complete",
                         (unsigned long long)fnum);
+        }
+    }
+
+    // §J.3.e.2.i.6 — periodic [VIPLE-VKFRUC-Stats] benchmark logging.
+    // Mirrors D3D11+GenericFRUC's [VIPLE-PRESENT-Stats] format so we can
+    // compare apples-to-apples.  Tracks frame-to-frame intervals (= present
+    // pacing).  In dual mode, reports both real and "effective" (real +
+    // interp counted as separate display events).  Emit every ~5 sec.
+    {
+        using namespace std::chrono;
+        static thread_local steady_clock::time_point s_LastPresent{};
+        static thread_local steady_clock::time_point s_StatsBucketStart{};
+        static thread_local std::vector<double> s_FrameMsRing;  // intervals in current 5s bucket
+        static thread_local uint64_t s_CumulReal   = 0;
+        static thread_local uint64_t s_CumulInterp = 0;
+
+        auto now = steady_clock::now();
+        if (s_LastPresent.time_since_epoch().count() != 0) {
+            double dtMs = duration_cast<duration<double, std::milli>>(now - s_LastPresent).count();
+            s_FrameMsRing.push_back(dtMs);
+        } else {
+            s_StatsBucketStart = now;
+        }
+        s_LastPresent = now;
+        s_CumulReal++;
+        if (m_DualMode) s_CumulInterp++;
+
+        // Emit every ~5 seconds of wall time in the current bucket.
+        double bucketSec = duration_cast<duration<double>>(now - s_StatsBucketStart).count();
+        if (bucketSec >= 5.0 && !s_FrameMsRing.empty()) {
+            // Compute percentiles by sorted copy (small N=~150 at 30fps).
+            std::vector<double> sorted = s_FrameMsRing;
+            std::sort(sorted.begin(), sorted.end());
+            auto pct = [&](double q) -> double {
+                size_t idx = (size_t)((sorted.size() - 1) * q + 0.5);
+                if (idx >= sorted.size()) idx = sorted.size() - 1;
+                return sorted[idx];
+            };
+            double sum = 0;
+            for (double v : sorted) sum += v;
+            double mean = sum / sorted.size();
+            double fps = sorted.size() / bucketSec;
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-Stats] %s n=%zu fps=%.2f ft_mean=%.2fms "
+                        "p50=%.2f p95=%.2f p99=%.2f p99.9=%.2f (window %.1fs)",
+                        m_DualMode ? "dual-present" : "single-present",
+                        sorted.size(), fps, mean,
+                        pct(0.50), pct(0.95), pct(0.99), pct(0.999),
+                        bucketSec);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-Stats] cumul real=%llu interp=%llu "
+                        "(swMode=%d frucMode=%d dualMode=%d)",
+                        (unsigned long long)s_CumulReal,
+                        (unsigned long long)s_CumulInterp,
+                        m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0);
+
+            s_FrameMsRing.clear();
+            s_StatsBucketStart = now;
         }
     }
 }

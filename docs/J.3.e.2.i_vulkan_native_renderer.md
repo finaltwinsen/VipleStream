@@ -223,6 +223,48 @@ frame 60 fps stable。
 跟 §J.3.e.2.f Setup A 對等的指標：cumul real / interp、ft_mean、p95、
 p99、p99.9、submit / skip / skip_ratio、me_gpu / warp_gpu。
 
+**結果（v1.3.153，2026-04-29）**：
+
+測試環境：H.264 1080p @ 30 source fps，Desktop 串流 65 秒，10 個 5 秒
+window steady-state 平均，NVIDIA RTX 3060 Laptop。
+
+| Metric | Baseline (D3D11+GenericFRUC) | VkFruc (SW+FRUC+DUAL) | Δ |
+|---|---|---|---|
+| Source FPS | ~30.0 | ~30.0 | tie |
+| ft_mean | 33.42 ms | 33.32 ms | -0.10 ms |
+| p50 | 33.55 ms | 33.35 ms | -0.20 ms |
+| p95 | 42.23 ms | **37.26 ms** | **-4.97 ms** ✅ |
+| p99 | 55.71 ms | **49.44 ms** | **-6.27 ms** ✅ |
+| p99.9 | 63.04 ms | **56.13 ms** | **-6.91 ms** ✅ |
+| Skip ratio | 0% | 0% | tie |
+| Cumul source frames | 1803 (66s) | 1960 (70s) | similar |
+
+關鍵發現：
+
+1. **VkFruc dual-present frame time 尾巴更緊** — p95/p99/p99.9 比 D3D11
+   baseline 低 5–7 ms。Median/mean 約等。
+   - 推測原因：
+     - 單 cmdbuf 單 submit（vs D3D11 baseline 多次 present call）
+     - Software decode 時序穩定，不跟 GPU graphics 搶 cycles
+     - Compute chain（NV12→RGB + ME + Median + Warp）共 ~1ms 沒成 bottleneck
+2. **跳動感未量化解決** — p99 數據雖然較好，但 dual-present 兩 image
+   緊貼（沒 frame pacing），人眼觀感是「閃兩張、空一段」的群聚。i.5
+   設計的 frame pacing（interp 排在 real 後 ~8 ms）尚未實作，列入
+   future enhancement。
+3. **VkFruc 整套 native Vulkan FRUC 架構 viable** — 即使用 software
+   decode 也能達到 D3D11+GenericFRUC 同等以上的 frame timing。
+
+未量化項目：
+  - GPU timestamp queries（ME/Median/Warp 個別時間，baseline 有
+    me_gpu=0.51 ms / median=0.01 ms / warp=0.05 ms = 0.57 ms 總計）
+  - Motion estimation quality（MV vector field 是否合理）
+  - 跳動 frequency / temporal distribution（要 high-speed camera 或
+    `present_id` 時序 trace）
+
+Stats logging 實作：`renderFrameSw` 每 5 秒 emit 一個
+`[VIPLE-VKFRUC-Stats]` line，格式對齊 D3D11 的 `[VIPLE-PRESENT-Stats]`
+方便 grep + 對比。
+
 ## 風險
 
   • **Probe 結果不確定**：NVIDIA Windows desktop driver 不見得支援

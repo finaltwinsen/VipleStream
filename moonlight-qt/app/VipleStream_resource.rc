@@ -3,8 +3,8 @@
 IDI_ICON1	ICON	"D:\\Mission\\VipleStream\\moonlight-qt\\app\\moonlight.ico"
 
 VS_VERSION_INFO VERSIONINFO
-	FILEVERSION 1,3,151,0
-	PRODUCTVERSION 1,3,151,0
+	FILEVERSION 1,3,154,0
+	PRODUCTVERSION 1,3,154,0
 	FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
 	FILEFLAGS VS_FF_DEBUG
@@ -21,11 +21,11 @@ VS_VERSION_INFO VERSIONINFO
 			BEGIN
 				VALUE "CompanyName", "VipleStream\0"
 				VALUE "FileDescription", "VipleStream Game Streaming Client\0"
-				VALUE "FileVersion", "1.3.151.0\0"
+				VALUE "FileVersion", "1.3.154.0\0"
 				VALUE "LegalCopyright", "\0"
 				VALUE "OriginalFilename", "VipleStream.exe\0"
 				VALUE "ProductName", "VipleStream Client\0"
-				VALUE "ProductVersion", "1.3.151.0\0"
+				VALUE "ProductVersion", "1.3.154.0\0"
 				VALUE "InternalName", "\0"
 				VALUE "Comments", "\0"
 				VALUE "LegalTrademarks", "\0"
