@@ -486,9 +486,16 @@ bool VkFrucRenderer::createSwapchain()
         return false;
     }
 
-    // Image count: minImageCount + 1 for triple buffering, capped by
-    // maxImageCount (0 = unbounded per spec).
+    // Image count.  Default: minImageCount + 1 for triple buffering.
+    // Dual-present (i.4.2/i.5) needs at least 4 images so vkAcquireNextImageKHR
+    // doesn't block — we acquire 2 per frame, present 2 per frame, with FIFO
+    // only ~3 in flight at a time leaves no headroom for source-rate jitter.
     uint32_t imageCount = caps.minImageCount + 1;
+    if (m_DualMode) {
+        // (std::max) parens defeat Windows.h max() macro pollution.
+        uint32_t want = caps.minImageCount + 2;  // = 4 typically
+        if (want > imageCount) imageCount = want;
+    }
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
         imageCount = caps.maxImageCount;
 
@@ -524,15 +531,20 @@ bool VkFrucRenderer::createSwapchain()
     m_SwapchainFormat     = chosen.format;
     m_SwapchainColorSpace = chosen.colorSpace;
 
-    // Present mode: IMMEDIATE for --no-vsync, MAILBOX as fallback,
-    // FIFO guaranteed by spec.
+    // Present mode selection.
+    //   • Single-present (no DUAL):    IMMEDIATE → MAILBOX → FIFO (low latency)
+    //   • Dual-present (m_DualMode):   FIFO REQUIRED — IMMEDIATE makes the
+    //     second present overwrite the first almost instantly, killing
+    //     the interp+real alternation.  FIFO locks 2 presents to 2
+    //     consecutive vsync slots → 60 Hz panel sees true 60fps display.
+    //   • VIPLE_VK_FRUC_VSYNC=1 forces FIFO regardless (legacy).
     uint32_t modeCount = 0;
     pfnGetSurfModes(m_PhysicalDevice, m_Surface, &modeCount, nullptr);
     std::vector<VkPresentModeKHR> modes(modeCount);
     pfnGetSurfModes(m_PhysicalDevice, m_Surface, &modeCount, modes.data());
-    VkPresentModeKHR pmode = VK_PRESENT_MODE_FIFO_KHR;
-    bool wantImmediate = !qEnvironmentVariableIntValue("VIPLE_VK_FRUC_VSYNC");
-    if (wantImmediate) {
+    VkPresentModeKHR pmode = VK_PRESENT_MODE_FIFO_KHR;  // always supported per spec
+    bool wantVsync = m_DualMode || qEnvironmentVariableIntValue("VIPLE_VK_FRUC_VSYNC");
+    if (!wantVsync) {
         for (auto m : modes) {
             if (m == VK_PRESENT_MODE_IMMEDIATE_KHR) { pmode = m; break; }
             if (m == VK_PRESENT_MODE_MAILBOX_KHR && pmode == VK_PRESENT_MODE_FIFO_KHR) {
@@ -541,6 +553,13 @@ bool VkFrucRenderer::createSwapchain()
         }
     }
     m_SwapchainPresentMode = pmode;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.2.b chose present mode %d (%s)",
+                (int)pmode,
+                pmode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE (no vsync)" :
+                pmode == VK_PRESENT_MODE_MAILBOX_KHR   ? "MAILBOX (vsync, no tearing)" :
+                pmode == VK_PRESENT_MODE_FIFO_KHR      ? "FIFO (vsync locked)" :
+                "other");
 
     VkSwapchainCreateInfoKHR sci = {};
     sci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -2492,12 +2511,18 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     computeBufBarrier(m_FrucCurrRgbBuf);
 
     // ---- Stage 1: motion estimation ----
+    // Push constant layout MUST match shader's struct order exactly:
+    //   ME shader (plvk.cpp:1275-1282): frameWidth, frameHeight, blockSize,
+    //   mvWidth, mvHeight, _pad0  — 24 bytes total
     pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMePipeline);
     pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMePipeLay,
                        0, 1, &m_FrucMeDescSet, 0, nullptr);
     {
-        struct { int srcW, srcH, mvW, mvH, blockSize, frameNum; } pcME = {
-            (int)width, (int)height, (int)mvW, (int)mvH, (int)BLOCK_SIZE, (int)frameNum
+        struct {
+            uint32_t frameWidth, frameHeight, blockSize, mvWidth, mvHeight, _pad0;
+        } pcME = {
+            (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
+            (uint32_t)mvW, (uint32_t)mvH, (uint32_t)frameNum
         };
         pfnCmdPushConst(cmd, m_FrucMePipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcME), &pcME);
     }
@@ -2518,16 +2543,29 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     computeBufBarrier(m_FrucMvFilteredBuf);
 
     // ---- Stage 3: warp ----
+    // Push constant layout MUST match shader's struct order exactly:
+    //   Warp shader (plvk.cpp:1563-1570): frameWidth, frameHeight,
+    //   mvBlockSize, mvWidth, mvHeight, blendFactor (float, NOT int)
+    //   — 24 bytes total.  blendFactor=0.5 = midpoint interpolation.
     pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeline);
     pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeLay,
                        0, 1, &m_FrucWarpDescSet, 0, nullptr);
     {
-        struct { int srcW, srcH, mvW, mvH, blockSize, frameNum; } pcWarp = {
-            (int)width, (int)height, (int)mvW, (int)mvH, (int)BLOCK_SIZE, (int)frameNum
+        struct {
+            uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
+            float    blendFactor;
+        } pcWarp = {
+            (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
+            (uint32_t)mvW, (uint32_t)mvH, 0.5f
         };
         pfnCmdPushConst(cmd, m_FrucWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcWarp), &pcWarp);
     }
-    pfnCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
+    // Warp shader local_size = 8x8 (plvk.cpp:1551), one thread per pixel.
+    // Bug history: dispatched (W+15)/16 = W/16 workgroups → only covered
+    // 1/4 of interpRGB → top-left quadrant correct, other 3 quadrants left
+    // with stale/uninit garbage → visible flicker on dual-present (user
+    // observation: 第二象限 only quadrant without flicker).
+    pfnCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
     computeBufBarrier(m_FrucInterpRgbBuf);
 
     // ---- Stage 4 (i.4.1): currRGB → prevRGB for next frame's ME ----
