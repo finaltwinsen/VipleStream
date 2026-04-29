@@ -63,8 +63,19 @@ private:
     // ports cleanly).  Compute work also runs on this queue — we don't
     // need async compute for the FRUC pipeline (motion est ~0.7ms is
     // already under frame budget).
-    uint32_t m_QueueFamily = UINT32_MAX;
-    VkQueue  m_GraphicsQueue = VK_NULL_HANDLE;
+    uint32_t m_QueueFamily       = UINT32_MAX;  // graphics + present (universal)
+    uint32_t m_DecodeQueueFamily = UINT32_MAX;  // VK_QUEUE_VIDEO_DECODE_BIT_KHR (separate on NV)
+    uint32_t m_DecodeQueueCount  = 0;
+    VkQueue  m_GraphicsQueue     = VK_NULL_HANDLE;
+
+    // §J.3.e.2.i.3.a — ffmpeg AVHWDeviceContext bridges our VkDevice
+    // to ffmpeg's Vulkan video decoder so AVVkFrame.img[0] gets created
+    // on the same device our graphics pipeline samples from.
+    AVBufferRef* m_HwDeviceCtx = nullptr;
+    int          m_VideoFormat = 0;
+    bool populateAvHwDeviceCtx(int videoFormat);
+    static void  lockQueueStub(struct AVHWDeviceContext* ctx, uint32_t qf, uint32_t idx);
+    static void  unlockQueueStub(struct AVHWDeviceContext* ctx, uint32_t qf, uint32_t idx);
 
     // §J.3.e.2.i.2.b — swapchain
     VkSwapchainKHR             m_Swapchain       = VK_NULL_HANDLE;

@@ -8,6 +8,25 @@
 #include <SDL.h>
 #include <SDL_vulkan.h>
 #include <cstring>
+#include <mutex>
+
+extern "C" {
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_vulkan.h>
+}
+
+// §J.3.e.2.i.3.a — FFmpeg 6.1 (LIBAVCODEC_VERSION_MAJOR=60) used a
+// MESA AV1 ext name; 7.0 (61+) uses official KHR.  AVVulkanDeviceContext
+// also bumped its queue-family struct shape between the two.  We
+// follow PlVkRenderer's compile-time gating.
+#ifndef VK_KHR_video_decode_av1
+#define VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME "VK_KHR_video_decode_av1"
+#endif
+
+// Shared lock for ffmpeg vkQueueSubmit serialisation (per AVVulkanDeviceContext
+// contract).  ffmpeg may submit on multiple threads; our renderFrame is
+// single-threaded, but ffmpeg can submit decode work concurrently.
+static std::mutex s_VkFrucQueueLock;
 
 VkFrucRenderer::VkFrucRenderer(int pass)
     : IFFmpegRenderer(RendererType::Vulkan)
@@ -22,6 +41,22 @@ VkFrucRenderer::~VkFrucRenderer()
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.2 dtor");
     teardown();
+    if (m_HwDeviceCtx != nullptr) {
+        av_buffer_unref(&m_HwDeviceCtx);
+        m_HwDeviceCtx = nullptr;
+    }
+}
+
+// AVVulkanDeviceContext lock_queue / unlock_queue callbacks.  ffmpeg
+// uses these to serialise vkQueueSubmit calls on shared queues.  We
+// only have one graphics queue family so a single mutex suffices.
+void VkFrucRenderer::lockQueueStub(struct AVHWDeviceContext*, uint32_t, uint32_t)
+{
+    s_VkFrucQueueLock.lock();
+}
+void VkFrucRenderer::unlockQueueStub(struct AVHWDeviceContext*, uint32_t, uint32_t)
+{
+    s_VkFrucQueueLock.unlock();
 }
 
 void VkFrucRenderer::teardown()
@@ -130,6 +165,9 @@ bool VkFrucRenderer::pickPhysicalDeviceAndQueue()
         m_Instance, "vkGetPhysicalDeviceQueueFamilyProperties");
     auto pfnGetSurfSupport = (PFN_vkGetPhysicalDeviceSurfaceSupportKHR)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetPhysicalDeviceSurfaceSupportKHR");
+    auto pfnEnumDevExts = (PFN_vkEnumerateDeviceExtensionProperties)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkEnumerateDeviceExtensionProperties");
+    (void)pfnEnumDevExts;
     if (!pfnEnumPDs || !pfnGetPDProps || !pfnGetQFP || !pfnGetSurfSupport) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "[VIPLE-VKFRUC] §J.3.e.2.i.2 PD proc PFN load failed");
@@ -193,9 +231,26 @@ bool VkFrucRenderer::pickPhysicalDeviceAndQueue()
 
     VkPhysicalDeviceProperties chosen = {};
     pfnGetPDProps(m_PhysicalDevice, &chosen);
+
+    // §J.3.e.2.i.3.a — also locate a queue family with VIDEO_DECODE_BIT_KHR
+    // so ffmpeg can decode H264/H265/AV1 into AVVkFrame on our device.
+    // NV typically exposes this on QF=3 (separate from graphics QF=0).
+    uint32_t qfCount = 0;
+    pfnGetQFP(m_PhysicalDevice, &qfCount, nullptr);
+    std::vector<VkQueueFamilyProperties> qfs(qfCount);
+    pfnGetQFP(m_PhysicalDevice, &qfCount, qfs.data());
+    for (uint32_t qf = 0; qf < qfCount; qf++) {
+        if (qfs[qf].queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) {
+            m_DecodeQueueFamily = qf;
+            m_DecodeQueueCount  = qfs[qf].queueCount;
+            break;
+        }
+    }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i.2 picked '%s' QF=%u %s",
+                "[VIPLE-VKFRUC] §J.3.e.2.i.2 picked '%s' (QF gfx=%u, decode=%u%s) %s",
                 chosen.deviceName, m_QueueFamily,
+                m_DecodeQueueFamily,
+                m_DecodeQueueFamily == UINT32_MAX ? " — NO VIDEO DECODE QF!" : "",
                 discreteIdx >= 0 ? "(DISCRETE_GPU)" : "(integrated/other)");
     return true;
 }
@@ -213,31 +268,66 @@ bool VkFrucRenderer::createLogicalDevice()
     }
 
     float queuePriority = 1.0f;
-    VkDeviceQueueCreateInfo qci = {};
-    qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    qci.queueFamilyIndex = m_QueueFamily;
-    qci.queueCount = 1;
-    qci.pQueuePriorities = &queuePriority;
+    std::vector<VkDeviceQueueCreateInfo> qcis;
+    {
+        VkDeviceQueueCreateInfo qci = {};
+        qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qci.queueFamilyIndex = m_QueueFamily;
+        qci.queueCount = 1;
+        qci.pQueuePriorities = &queuePriority;
+        qcis.push_back(qci);
+    }
+    if (m_DecodeQueueFamily != UINT32_MAX && m_DecodeQueueFamily != m_QueueFamily) {
+        VkDeviceQueueCreateInfo qci = {};
+        qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qci.queueFamilyIndex = m_DecodeQueueFamily;
+        qci.queueCount = 1;
+        qci.pQueuePriorities = &queuePriority;
+        qcis.push_back(qci);
+    }
 
-    // i.2 minimal extension set: KHR_swapchain mandatory; SamplerYcbcrConversion
-    // for NV12 sampling in i.3 graphics pipeline.
-    const char* devExts[] = {
+    // i.3.a extension list: swapchain + ycbcr (i.2.b) + video decode
+    // (so ffmpeg can build AVVkFrame on our device).  Mirrors
+    // PlVkRenderer's k_RequiredDeviceExtensions video-decode block.
+    std::vector<const char*> devExts = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
+        VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
+        VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
+        VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
+        VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
+#if LIBAVCODEC_VERSION_MAJOR >= 61
+        VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME,
+#endif
+        // ffmpeg's vk hwcontext also asks for synchronization2 +
+        // timeline semaphore.  Both are core in Vulkan 1.3 / available
+        // as 1.2 ext.  Add explicitly for safety.
+        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
     };
+
+    VkPhysicalDeviceSynchronization2Features sync2Feat = {};
+    sync2Feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+    sync2Feat.synchronization2 = VK_TRUE;
+
+    VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeat = {};
+    timelineFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+    timelineFeat.timelineSemaphore = VK_TRUE;
+    timelineFeat.pNext = &sync2Feat;
 
     VkPhysicalDeviceSamplerYcbcrConversionFeatures ycbcrFeat = {};
     ycbcrFeat.sType =
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES;
     ycbcrFeat.samplerYcbcrConversion = VK_TRUE;
+    ycbcrFeat.pNext = &timelineFeat;
 
     VkDeviceCreateInfo dci = {};
     dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dci.pNext = &ycbcrFeat;
-    dci.queueCreateInfoCount = 1;
-    dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = (uint32_t)(sizeof(devExts) / sizeof(devExts[0]));
-    dci.ppEnabledExtensionNames = devExts;
+    dci.queueCreateInfoCount = (uint32_t)qcis.size();
+    dci.pQueueCreateInfos = qcis.data();
+    dci.enabledExtensionCount = (uint32_t)devExts.size();
+    dci.ppEnabledExtensionNames = devExts.data();
 
     VkResult rc = pfnCreateDevice(m_PhysicalDevice, &dci, nullptr, &m_Device);
     if (rc != VK_SUCCESS) {
@@ -450,22 +540,137 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
         teardown();
         return false;
     }
+    m_VideoFormat = params->videoFormat;
+    if (!populateAvHwDeviceCtx(m_VideoFormat)) {
+        m_InitFailureReason = InitFailureReason::NoSoftwareSupport;
+        teardown();
+        return false;
+    }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i.2.b initialize: instance/PD/device/swapchain "
-                "READY — i.3 (graphics pipeline) is next; still returning false to "
-                "fall through to PlVkRenderer for streaming");
+                "[VIPLE-VKFRUC] §J.3.e.2.i.3.a initialize: instance/PD/device/swapchain"
+                " + AVHWDeviceContext READY — i.3.b (sampler+descriptor) is next; "
+                "still returning false to fall through to PlVkRenderer for streaming");
 
-    // i.2 still returns false (no graphics pipeline yet → can't render).
+    // i.3.a still returns false (no graphics pipeline / renderFrame yet).
     m_InitFailureReason = InitFailureReason::NoSoftwareSupport;
     return false;
 }
 
+// §J.3.e.2.i.3.a — populate AVVulkanDeviceContext with our handles so
+// ffmpeg's Vulkan video decoder builds AVVkFrame on OUR VkDevice.
+// Mirrors PlVkRenderer::populateQueues + the AVHWDeviceContext setup
+// block in PlVkRenderer::completeInitialization.
+bool VkFrucRenderer::populateAvHwDeviceCtx(int videoFormat)
+{
+    auto pfnGetQFP = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetPhysicalDeviceQueueFamilyProperties");
+    if (!pfnGetQFP) return false;
+
+    m_HwDeviceCtx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VULKAN);
+    if (m_HwDeviceCtx == nullptr) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.3.a av_hwdevice_ctx_alloc(VULKAN) failed");
+        return false;
+    }
+    auto hwDeviceContext = (AVHWDeviceContext*)m_HwDeviceCtx->data;
+    hwDeviceContext->user_opaque = this;
+
+    auto vkCtx = (AVVulkanDeviceContext*)hwDeviceContext->hwctx;
+    vkCtx->get_proc_addr = m_pfnGetInstanceProcAddr;
+    vkCtx->inst          = m_Instance;
+    vkCtx->phys_dev      = m_PhysicalDevice;
+    vkCtx->act_dev       = m_Device;
+    // device_features: leave default (all-VK_FALSE struct).  ffmpeg
+    // checks specific feature bits (samplerYcbcrConversion etc.) but
+    // those are pulled from the device at hwdevice_ctx_init via
+    // vkGetPhysicalDeviceFeatures2; we don't need to set them here.
+
+    // Extension list: same minimal set we built device with.  ffmpeg
+    // uses this to filter what it can request.
+    static const char* kInstExts[] = {
+        VK_KHR_SURFACE_EXTENSION_NAME,
+#ifdef Q_OS_WIN32
+        VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+#endif
+    };
+    static const char* kDevExts[] = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
+        VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
+        VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
+        VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
+        VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
+#if LIBAVCODEC_VERSION_MAJOR >= 61
+        VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME,
+#endif
+        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
+    };
+    vkCtx->enabled_inst_extensions    = kInstExts;
+    vkCtx->nb_enabled_inst_extensions = (int)(sizeof(kInstExts) / sizeof(kInstExts[0]));
+    vkCtx->enabled_dev_extensions     = kDevExts;
+    vkCtx->nb_enabled_dev_extensions  = (int)(sizeof(kDevExts) / sizeof(kDevExts[0]));
+
+#if LIBAVUTIL_VERSION_INT > AV_VERSION_INT(58, 9, 100)
+    vkCtx->lock_queue   = lockQueueStub;
+    vkCtx->unlock_queue = unlockQueueStub;
+#endif
+
+    // Queue family info — fill the new-style nb_qf table when libavutil
+    // supports it; older libavutil uses the discrete index/count fields.
+    uint32_t qfCount = 0;
+    pfnGetQFP(m_PhysicalDevice, &qfCount, nullptr);
+    std::vector<VkQueueFamilyProperties> qfs(qfCount);
+    pfnGetQFP(m_PhysicalDevice, &qfCount, qfs.data());
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 34, 100)
+    (void)videoFormat;
+    for (uint32_t i = 0; i < qfCount; i++) {
+        vkCtx->qf[i].idx        = i;
+        vkCtx->qf[i].num        = qfs[i].queueCount;
+        vkCtx->qf[i].flags      = (VkQueueFlagBits)qfs[i].queueFlags;
+        vkCtx->qf[i].video_caps = (VkVideoCodecOperationFlagBitsKHR)0;  // ffmpeg re-probes
+    }
+    vkCtx->nb_qf = qfCount;
+#else
+    vkCtx->queue_family_index        = (int)m_QueueFamily;
+    vkCtx->nb_graphics_queues        = 1;
+    vkCtx->queue_family_tx_index     = (int)m_QueueFamily;
+    vkCtx->nb_tx_queues              = 1;
+    vkCtx->queue_family_comp_index   = (int)m_QueueFamily;
+    vkCtx->nb_comp_queues            = 1;
+    vkCtx->queue_family_decode_index = (int)m_DecodeQueueFamily;
+    vkCtx->nb_decode_queues          = (int)m_DecodeQueueCount;
+    (void)videoFormat;
+#endif
+
+    int err = av_hwdevice_ctx_init(m_HwDeviceCtx);
+    if (err < 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.3.a av_hwdevice_ctx_init failed: %d", err);
+        return false;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.3.a AVHWDeviceContext init OK "
+                "(QF gfx=%u decode=%u, %u queue families wired)",
+                m_QueueFamily, m_DecodeQueueFamily, qfCount);
+    return true;
+}
+
 bool VkFrucRenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary** options)
 {
-    (void)context;
     (void)options;
-    return false;
+    if (m_HwDeviceCtx == nullptr) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.3.a prepareDecoderContext called "
+                    "without m_HwDeviceCtx ready");
+        return false;
+    }
+    context->hw_device_ctx = av_buffer_ref(m_HwDeviceCtx);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.3.a prepareDecoderContext OK — ffmpeg "
+                "will decode into AVVkFrame on our VkDevice");
+    return true;
 }
 
 void VkFrucRenderer::renderFrame(AVFrame* frame)
