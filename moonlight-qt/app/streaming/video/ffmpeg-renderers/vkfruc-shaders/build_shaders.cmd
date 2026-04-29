@@ -62,20 +62,23 @@ if errorlevel 1 (
 
 echo.
 echo === Compiling SPV ===
-"!GLSLC!" -O --target-env=vulkan1.1 vkfruc.vert -o vkfruc.vert.spv || goto :compile_failed
-"!GLSLC!" -O --target-env=vulkan1.1 vkfruc.frag -o vkfruc.frag.spv || goto :compile_failed
+"!GLSLC!" -O --target-env=vulkan1.1 vkfruc.vert        -o vkfruc.vert.spv        || goto :compile_failed
+"!GLSLC!" -O --target-env=vulkan1.1 vkfruc.frag        -o vkfruc.frag.spv        || goto :compile_failed
+"!GLSLC!" -O --target-env=vulkan1.1 vkfruc_interp.frag -o vkfruc_interp.frag.spv || goto :compile_failed
 
 echo.
 echo === Packing .spv.h ===
-xxd -i vkfruc.vert.spv > vkfruc.vert.spv.h || goto :pack_failed
-xxd -i vkfruc.frag.spv > vkfruc.frag.spv.h || goto :pack_failed
-powershell -NoProfile -Command "Get-ChildItem 'vkfruc.*.spv.h' | ForEach-Object { (Get-Content $_.FullName -Raw) -replace '(?m)^unsigned ', 'static const unsigned ' | Set-Content $_.FullName -NoNewline }"
+xxd -i vkfruc.vert.spv        > vkfruc.vert.spv.h        || goto :pack_failed
+xxd -i vkfruc.frag.spv        > vkfruc.frag.spv.h        || goto :pack_failed
+xxd -i vkfruc_interp.frag.spv > vkfruc_interp.frag.spv.h || goto :pack_failed
+powershell -NoProfile -Command "Get-ChildItem 'vkfruc*.spv.h' | ForEach-Object { (Get-Content $_.FullName -Raw) -replace '(?m)^unsigned ', 'static const unsigned ' | Set-Content $_.FullName -NoNewline }"
 if errorlevel 1 goto :pack_failed
 
 echo.
 echo === Done. ===
 echo   vkfruc.vert.spv.h
 echo   vkfruc.frag.spv.h
+echo   vkfruc_interp.frag.spv.h
 exit /b 0
 
 :compile_failed

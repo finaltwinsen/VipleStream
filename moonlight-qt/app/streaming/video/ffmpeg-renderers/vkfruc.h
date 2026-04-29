@@ -215,15 +215,36 @@ private:
     VkImageView      m_SwUploadView       = VK_NULL_HANDLE;
     bool             m_SwImageLayoutInited = false;  // true after first transition
 
+    // §J.3.e.2.i.4.2 / §J.3.e.2.i.5 — interp graphics pipeline + dual-present.
+    // Second graphics pipeline displays m_FrucInterpRgbBuf via fragment
+    // shader that reads planar fp32 RGB storage buffer.  Used as the
+    // FIRST of two render passes per frame when VIPLE_VKFRUC_DUAL=1.
+    //
+    // Per renderFrameSw call (when dual mode):
+    //   1. acquire imgA + imgB
+    //   2. begin cmd: NV12 upload + compute chain → bufInterpRGB
+    //   3. render pass on m_Framebuffers[imgA] using m_InterpPipeline +
+    //      m_InterpDescSet (samples bufInterpRGB)
+    //   4. render pass on m_Framebuffers[imgB] using m_GraphicsPipeline
+    //      (existing, samples m_SwUploadImage NV12 via ycbcr sampler)
+    //   5. end cmd, submit (waits both acquireSems, signals both renderDones)
+    //   6. present imgA, present imgB
+    bool             m_DualMode             = false;
+    VkShaderModule   m_InterpFragShaderMod  = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_InterpDescSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_InterpPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline       m_InterpPipeline       = VK_NULL_HANDLE;
+    VkDescriptorPool m_InterpDescPool       = VK_NULL_HANDLE;
+    VkDescriptorSet  m_InterpDescSet        = VK_NULL_HANDLE;
+    bool createInterpGraphicsPipeline();
+    void destroyInterpGraphicsPipeline();
+
     // §J.3.e.2.i.4 — FRUC compute pipeline (port from PlVkRenderer
     // §J.3.e.2.h.c).  Gated on VIPLE_VKFRUC_FRUC=1.  Allocates prev/curr/
     // interp RGB buffers + MV buffers, builds 3 compute pipelines (ME,
     // Median, Warp), dispatches the chain per-frame after our SW upload.
-    //
-    // i.4 first ship: bufRGB pair filled with zeros (placeholder); the
-    // chain runs but doesn't produce visually meaningful interp output.
-    // Validates compute pipeline integration in our renderer.  Future:
-    // i.4.1 add NV12→RGB feed; i.4.2 display interp output via dual-present.
+    // i.4.1 added NV12→RGB feed (real bufRGB instead of zeros).
+    // i.4.2 added interp display via m_InterpPipeline (above).
     bool createFrucComputeResources(int width, int height);
     void destroyFrucComputeResources();
     bool runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, uint32_t height);
@@ -234,6 +255,16 @@ private:
     uint32_t m_FrucMvWidth   = 0;   // ceil(W / 8)
     uint32_t m_FrucMvHeight  = 0;
     uint64_t m_FrucFrameCount = 0;
+
+    // §J.3.e.2.i.4.1 NV12 → planar fp32 RGB compute.  Reads raw NV12
+    // bytes from m_SwStagingBuffer (Y at offset 0, UV at offset W*H),
+    // writes to m_FrucCurrRgbBuf in [R-plane, G-plane, B-plane] layout
+    // matching ME shader's expectation.
+    VkShaderModule        m_FrucNv12RgbShaderMod = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_FrucNv12RgbDsl       = VK_NULL_HANDLE;
+    VkPipelineLayout      m_FrucNv12RgbPipeLay   = VK_NULL_HANDLE;
+    VkPipeline            m_FrucNv12RgbPipeline  = VK_NULL_HANDLE;
+    VkDescriptorSet       m_FrucNv12RgbDescSet   = VK_NULL_HANDLE;
 
     // 3 compute pipelines (ME / Median / Warp).  Each has own DSL because
     // binding counts differ (ME=4, Median=2, Warp=4).
