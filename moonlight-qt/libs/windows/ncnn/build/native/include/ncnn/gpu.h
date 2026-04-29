@@ -226,6 +226,11 @@ private:
                                                 uint32_t, uint32_t,
                                                 uint32_t, uint32_t,
                                                 uint32_t, uint32_t);
+    // VipleStream §J.3.e.2.e2b — VulkanDevice's external ctor needs to mask
+    // off support_VK_KHR_* flags for any PFN that failed to load (libplacebo
+    // didn't enable that ext on the external VkDevice).  Friend the whole
+    // class to give the ctor write access to GpuInfoPrivate.
+    friend class VulkanDevice;
     GpuInfoPrivate* const d;
 };
 

@@ -2383,26 +2383,24 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
     }
     fclose(binFp);
 
-    // §J.3.e.2.e2a KNOWN ISSUE — ncnn::Net::load_model crashes inside
-    // ncnn::Pipeline::create when running on libplacebo's externally-created
-    // VkDevice.  Same RIFE 4.25-lite model loads fine on NcnnFRUC's
-    // internally-created VkDevice (D3D11VARenderer cascade).  Likely an
-    // assumption inside ncnn about device extension enablement that holds
-    // for ncnn's own vkCreateDevice but not for libplacebo's.
+    // §J.3.e.2.e2b STATUS — ncnn::Net::load_model still crashes 0xC0000005
+    // on libplacebo's external VkDevice EVEN WITH the §J.3.e.2.e2b PFN-mask
+    // patch (gpu.cpp clears support_VK_KHR_* flags whose PFNs failed to load).
+    // The mask now correctly identifies missing exts (libplacebo only enables
+    // push_descriptor + ycbcr + swapchain; bind_memory2 / create_renderpass2 /
+    // descriptor_update_template / get_memory_requirements2 / maintenance1 /
+    // maintenance3 are all missing PFNs → masked).
     //
-    // §J.3.e.2.e2b will debug this — either patch ncnn to log per-layer
-    // pipeline creation failure, force libplacebo to enable additional
-    // extensions, or fall back to a separate ncnn-owned VkDevice paired with
-    // cross-device VkBuffer staging.
+    // Crash persists, suggesting the issue is not just PFN unloading but the
+    // same ncnn::Pipeline::create bug we hit in §J.3.e.2.c1 — RIFE 4.25-lite
+    // layers create their pipelines through that same ncnn path, hitting
+    // whatever assumption is broken on libplacebo's device.
     //
-    // For §J.3.e.2.e2a milestone: ship the model-load scaffolding (file
-    // verification + Net construction + custom layer registration + param
-    // parse) but DO NOT call load_model.  m_RifeReady stays false, RIFE
-    // forward never fires in §J.3.e.2.e2b until this is resolved.
+    // For now: skip load_model gracefully.  RIFE forward stays disabled.
+    // §J.3.e.2.e1b's NV12→RGB→VkImage pass-through still works.
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 6 SKIPPED — "
-                "ncnn::Net::load_model crashes on libplacebo's external VkDevice. "
-                "Param parse + file verification OK; investigate in §J.3.e.2.e2b.");
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2 step 6 SKIPPED — load_model still "
+                "crashes after PFN-mask patch (R-impl-2 deeper investigation needed)");
     m_RifeNet.reset();
     m_RifeDisabled = true;
     return false;
