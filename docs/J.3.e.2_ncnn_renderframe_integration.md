@@ -222,6 +222,44 @@ constants (W, H) 失效要重建。
 **Mitigation:** PlVkRenderer 已有 frame size 監控（`m_LastColorspace` 變動處理），
 延伸做 size invalidation；§J.3.e.2.e 收尾時加。
 
+### R-impl-2: ncnn::Net::load_model 在 libplacebo external VkDevice 上 crash（§J.3.e.2.e2a 實測）
+
+把 RIFE 4.25-lite 在 PlVkRenderer 的 §J.3.e.1.d external ncnn instance 上
+load 時 — `ncnn::Net::load_model(binFp)` 內部 0xC0000005 access violation。
+同樣 model + 同樣 fp16/fp32 opt 在 NcnnFRUC 的 internal ncnn instance（自家
+vkCreateDevice）上 load 完全正常。差別只在 VkDevice 是誰建的。
+
+懷疑原因：ncnn::Pipeline::create per-layer 載 RIFE shader 時假設某些 device
+extension 已 enable（VK_KHR_shader_float16_int8 / VK_KHR_16bit_storage 等），
+這些在 ncnn 自己的 vkCreateDevice 路徑會根據 GpuInfo support 自動 enable，
+但 libplacebo 的 pl_vulkan_create 可能沒打開所有 ext，造成 ncnn 編出來的 SPIR-V
+跟 device 實際 enabled feature set 不對齊。
+
+`GpuInfo::support_fp16_*` 是「device capability」flag，不代表「device extension
+enabled」。populate_gpu_info_from_external 抄 standard create_gpu_instance 的
+loop body，照著 device-level vkEnumerateDeviceExtensionProperties 結果填，但
+那是 ENUMERATE，跟 ENABLED 不同概念。
+
+**Mitigation (§J.3.e.2.e2a 短期):** initRifeModel 走完 file 驗證 + custom layer
+register + load_param 之後 graceful skip load_model，return false 停在這個
+milestone。RIFE 永遠 disable，§J.3.e.2.e1b 的 NV12→RGB→VkImage pass-through
+path 還是工作（已 ship）。
+
+**Mitigation (§J.3.e.2.e2b 長期，三條路擇一):**
+1. **Patch ncnn fork** 加 per-layer pipeline-create 失敗 log，定位實際 fail 的
+   layer 跟 SPIR-V op 之後針對性處理（移除/降級該 op）。最徹底但耗時。
+2. **強迫 libplacebo enable 額外 extensions**：在 §J.3.e.1.d handoff 之前看
+   libplacebo 是否能 expose enabled-extension list，比對 ncnn 預期的清單，
+   缺的 ext 走 pl_vulkan_create 的 opt-in 補上。需要 libplacebo API 配合，
+   但比 patch ncnn 風險低。
+3. **第二個 ncnn-owned VkDevice** — 接受 cross-device 成本；§J.3.e.1.d
+   external mode 的 forward/reverse shader 仍走 libplacebo VkDevice，但 RIFE
+   專門開另一個 ncnn::create_gpu_instance() 用自家 device。bufRGB 跟 RIFE input
+   之間 vkCmdCopyBuffer 跨 device（要 OPAQUE_WIN32 export/import，回到
+   §J.3.e.1 一開始想避免的工程）。最後手段。
+
+選 1 或 2 等 §J.3.e.2.e2b 再決定。
+
 ### R-impl-1: ncnn::Pipeline::create() 對 binding layout 有限制（§J.3.e.2.c1 實測）
 
 NcnnFRUC Phase B.4a 用 `ncnn::Pipeline + Pipeline::create(spirv, size, specs)` 走得通是

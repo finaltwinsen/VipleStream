@@ -10,6 +10,15 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/vulkan.h>
 
+// §J.3.e.2.e2 — RIFE forward integration on the external ncnn instance.
+// ncnn::VkMat / ncnn::Net are needed as members.
+#include <ncnn/mat.h>
+#include <memory>
+
+namespace ncnn {
+class Net;
+}
+
 class PlVkRenderer : public IFFmpegRenderer {
 public:
     PlVkRenderer(bool hwaccel = false, IFFmpegRenderer *backendRenderer = nullptr);
@@ -101,6 +110,15 @@ private:
     // with our pl_tex as source plane and finally pl_vulkan_hold_ex to take
     // the image back when libplacebo signals the timeline.
     bool runFrucOverridePass(struct AVVkFrame* vkFrame, AVFrame* frame);
+
+    // §J.3.e.2.e2a — load RIFE model on the external ncnn instance + allocate
+    // ncnn::VkMat resources for prev/curr/timestep frames.  Gated on
+    // VIPLE_VK_FRUC_RIFE=1; lazy-initialised on first override frame.  Uses
+    // ncnn::get_gpu_device(0) which under §J.3.e.1.d external mode returns
+    // libplacebo's VkDevice — no cross-device sync needed.  VkMats are
+    // allocated via the device's blob_allocator (process-lifetime ncnn pool).
+    bool initRifeModel(uint32_t width, uint32_t height);
+    void destroyRifeModel();
 
     // The backend renderer if we're frontend-only
     IFFmpegRenderer* m_Backend;
@@ -236,4 +254,13 @@ private:
     void*    m_FrucOverrideCmdPool  = nullptr;  // VkCommandPool
     void*    m_FrucOverrideCmdBuf   = nullptr;  // VkCommandBuffer
     void*    m_FrucOverrideFence    = nullptr;  // VkFence
+
+    // §J.3.e.2.e2a — RIFE model + VkMats on external ncnn instance.
+    bool     m_RifeReady    = false;
+    bool     m_RifeDisabled = false;
+    std::unique_ptr<ncnn::Net> m_RifeNet;
+    ncnn::VkMat m_RifePrevVkMat;
+    ncnn::VkMat m_RifeCurrVkMat;
+    ncnn::VkMat m_RifeTimestepVkMat;
+    bool        m_RifeHasPrevFrame = false;  // false until first frame's curr is cloned to prev
 };

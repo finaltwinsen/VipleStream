@@ -8,6 +8,11 @@
 // §J.3.e.2.c — pipeline + shader compilation for NV12 → planar fp32 RGB.
 #include <ncnn/pipeline.h>
 #include <ncnn/option.h>
+// §J.3.e.2.e2a — RIFE forward integration.
+#include <ncnn/net.h>
+#include "ncnn_rife_warp.h"
+#include "path.h"
+#include <QDir>
 
 // Implementation in plvk_c.c
 #define PL_LIBAV_IMPLEMENTATION 0
@@ -134,6 +139,10 @@ PlVkRenderer::~PlVkRenderer()
     // The render context must have been cleaned up by now
     SDL_assert(!m_HasPendingSwapchainFrame);
 
+    // §J.3.e.2.e2a — RIFE model + VkMats live on the external ncnn instance;
+    // release before teardownNcnnExternalHandoff or ncnn::destroy_gpu_instance
+    // tears down the device-side allocator.
+    destroyRifeModel();
     // §J.3.e.2.d — reverse pipeline references §J.3.e.2.c bufRGB via descriptor
     // set; tear down BEFORE §J.3.e.2.c cleanup destroys bufRGB.
     destroyFrucRgbImgResources();
@@ -2253,6 +2262,220 @@ bool PlVkRenderer::runFrucOverridePass(AVVkFrame* vkFrame, AVFrame* frame)
     return true;
 }
 
+// §J.3.e.2.e2a — load RIFE model on external ncnn instance + allocate VkMats.
+//
+// Runs once per PlVkRenderer instance, lazy-initialised on first call.  Mirrors
+// NcnnFRUC::loadModel but skips the steps (ncnn::create_gpu_instance / pick GPU
+// 0 / log device picked) that §J.3.e.1.d's external handoff already covered.
+//
+// Uses the same fp16 packed/storage/arithmetic options NcnnFRUC uses on the
+// production cascade, since RIFE 4.25-lite is fp16-trained.  The `rife.Warp`
+// custom layer is required (defined in ncnn_rife_warp.h, shared with NcnnFRUC).
+//
+// Allocates ncnn::VkMat for prev/curr/timestep at (W, H, 3) fp32 packed planar
+// — matches the shape RIFE's in0/in1 expect.  in2 is timestep (W, H, 1) fp32
+// uniformly filled with 0.5 (midpoint interpolation).
+bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
+{
+    if (m_RifeReady || m_RifeDisabled) return m_RifeReady;
+    if (!m_NcnnExternalReady) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a init: ncnn external not ready");
+        m_RifeDisabled = true;
+        return false;
+    }
+
+    ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(0);
+    if (!vkdev) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a init: ncnn::get_gpu_device(0) returned null");
+        m_RifeDisabled = true;
+        return false;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 1/6 new ncnn::Net + opt");
+    m_RifeNet = std::make_unique<ncnn::Net>();
+    m_RifeNet->opt.use_vulkan_compute  = true;
+    // fp16/int8 are gated behind device features that libplacebo's pl_vulkan_create
+    // may or may not enable.  Honour what the GpuInfo (queried in
+    // populate_gpu_info_from_external) reports for the external VkDevice — if
+    // libplacebo didn't enable a feature, the GpuInfo flag is 0 and we leave
+    // the corresponding ncnn opt off.  This keeps load_model from trying to
+    // compile shaders that reference unsupported instruction sets.
+    // Disable fp16 entirely on external mode: GpuInfo reports device capability
+    // but doesn't tell us whether the relevant device extensions
+    // (VK_KHR_shader_float16_int8, VK_KHR_16bit_storage) were enabled at
+    // libplacebo's vkCreateDevice time.  Compiling SPIR-V that references
+    // fp16 ops on a device where the ext isn't enabled crashes inside
+    // ncnn::Pipeline::create.  Trade fp16 perf bonus for correctness — RIFE
+    // 4.25-lite still runs at fp32 ~25ms instead of ~12ms; further
+    // optimisation in §J.3.e.2.f via libplacebo opt-in extension list.
+    m_RifeNet->opt.use_fp16_packed     = false;
+    m_RifeNet->opt.use_fp16_storage    = false;
+    m_RifeNet->opt.use_fp16_arithmetic = false;
+    m_RifeNet->opt.use_int8_storage    = false;
+    m_RifeNet->opt.use_int8_arithmetic = false;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a opt: fp32 path (fp16 OFF — external mode "
+                "doesn't expose libplacebo's enabled-extension list)");
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 2/6 set_vulkan_device(0)");
+    m_RifeNet->set_vulkan_device(0);
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 3/6 register_custom_layer(rife.Warp)");
+    if (m_RifeNet->register_custom_layer("rife.Warp",
+                                          viple::createRifeWarp,
+                                          viple::destroyRifeWarp,
+                                          nullptr) != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a register_custom_layer(rife.Warp) failed");
+        m_RifeNet.reset();
+        m_RifeDisabled = true;
+        return false;
+    }
+
+    QString paramPath = Path::getDataFilePath("rife-v4.25-lite/flownet.param");
+    QString binPath   = Path::getDataFilePath("rife-v4.25-lite/flownet.bin");
+    if (paramPath.isEmpty() || binPath.isEmpty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a RIFE model files not found in data path");
+        m_RifeNet.reset();
+        m_RifeDisabled = true;
+        return false;
+    }
+
+    std::wstring paramWide = QDir::toNativeSeparators(paramPath).toStdWString();
+    std::wstring binWide   = QDir::toNativeSeparators(binPath).toStdWString();
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 4/6 load_param");
+    FILE* paramFp = _wfopen(paramWide.c_str(), L"rb");
+    if (!paramFp) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a _wfopen(param) failed errno=%d", errno);
+        m_RifeNet.reset();
+        m_RifeDisabled = true;
+        return false;
+    }
+    int paramRc = m_RifeNet->load_param(paramFp);
+    fclose(paramFp);
+    if (paramRc != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a load_param rc=%d", paramRc);
+        m_RifeNet.reset();
+        m_RifeDisabled = true;
+        return false;
+    }
+
+    // Verify .bin file is reachable + readable before we hand to ncnn.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 5/6 verify .bin readable");
+    FILE* binFp = _wfopen(binWide.c_str(), L"rb");
+    if (!binFp) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a _wfopen(bin) failed errno=%d", errno);
+        m_RifeNet.reset();
+        m_RifeDisabled = true;
+        return false;
+    }
+    fclose(binFp);
+
+    // §J.3.e.2.e2a KNOWN ISSUE — ncnn::Net::load_model crashes inside
+    // ncnn::Pipeline::create when running on libplacebo's externally-created
+    // VkDevice.  Same RIFE 4.25-lite model loads fine on NcnnFRUC's
+    // internally-created VkDevice (D3D11VARenderer cascade).  Likely an
+    // assumption inside ncnn about device extension enablement that holds
+    // for ncnn's own vkCreateDevice but not for libplacebo's.
+    //
+    // §J.3.e.2.e2b will debug this — either patch ncnn to log per-layer
+    // pipeline creation failure, force libplacebo to enable additional
+    // extensions, or fall back to a separate ncnn-owned VkDevice paired with
+    // cross-device VkBuffer staging.
+    //
+    // For §J.3.e.2.e2a milestone: ship the model-load scaffolding (file
+    // verification + Net construction + custom layer registration + param
+    // parse) but DO NOT call load_model.  m_RifeReady stays false, RIFE
+    // forward never fires in §J.3.e.2.e2b until this is resolved.
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 6 SKIPPED — "
+                "ncnn::Net::load_model crashes on libplacebo's external VkDevice. "
+                "Param parse + file verification OK; investigate in §J.3.e.2.e2b.");
+    m_RifeNet.reset();
+    m_RifeDisabled = true;
+    return false;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 6/6 alloc VkMats W=%u H=%u",
+                width, height);
+
+    // Allocate ncnn::VkMat resources via the external device's blob allocator.
+    // Layout: prev/curr are (W, H, 3) fp32 — RIFE input shape.  Timestep is
+    // (W, H, 1) fp32 filled with 0.5 (midpoint interp).  The VkBuffer backing
+    // each VkMat is owned by ncnn's pool; reclaimed when the mats release.
+    ncnn::VkAllocator* blobAlloc = vkdev->acquire_blob_allocator();
+    if (!blobAlloc) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a acquire_blob_allocator failed");
+        m_RifeNet.reset();
+        m_RifeDisabled = true;
+        return false;
+    }
+    m_RifePrevVkMat.create((int)width, (int)height, 3, sizeof(float), 1, blobAlloc);
+    m_RifeCurrVkMat.create((int)width, (int)height, 3, sizeof(float), 1, blobAlloc);
+    m_RifeTimestepVkMat.create((int)width, (int)height, 1, sizeof(float), 1, blobAlloc);
+    if (m_RifePrevVkMat.empty() || m_RifeCurrVkMat.empty() || m_RifeTimestepVkMat.empty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a VkMat::create failed (prev empty=%d curr=%d ts=%d)",
+                    (int)m_RifePrevVkMat.empty(), (int)m_RifeCurrVkMat.empty(), (int)m_RifeTimestepVkMat.empty());
+        m_RifeNet.reset();
+        m_RifeDisabled = true;
+        return false;
+    }
+
+    // Pre-fill timestep VkMat with 0.5 via host staging + record_upload.  Using
+    // a separate VkCompute scope so it's submit-and-waited before any per-frame
+    // forward pass tries to read it.
+    {
+        ncnn::Mat tsHost((int)width, (int)height, 1, sizeof(float));
+        tsHost.fill(0.5f);
+        ncnn::VkCompute upload(vkdev);
+        upload.record_upload(tsHost, m_RifeTimestepVkMat, m_RifeNet->opt);
+        if (upload.submit_and_wait() != 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2a timestep VkMat upload failed");
+            m_RifeNet.reset();
+            m_RifeDisabled = true;
+            return false;
+        }
+    }
+
+    m_RifeReady = true;
+    m_RifeHasPrevFrame = false;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: PASS — RIFE 4.25-lite loaded on "
+                "external ncnn instance, VkMats prev/curr=%dx%dx3 fp32, timestep=%dx%dx1 fp32 (=0.5)",
+                (int)width, (int)height, (int)width, (int)height);
+    return true;
+}
+
+void PlVkRenderer::destroyRifeModel()
+{
+    if (!m_RifeReady && !m_RifeNet) return;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a destroyRifeModel");
+    // Release VkMats first — they ride the device allocator owned by ncnn.
+    m_RifePrevVkMat.release();
+    m_RifeCurrVkMat.release();
+    m_RifeTimestepVkMat.release();
+    m_RifeNet.reset();
+    m_RifeReady = false;
+    m_RifeDisabled = false;
+    m_RifeHasPrevFrame = false;
+}
+
 bool PlVkRenderer::runNv12RgbProbe(AVVkFrame* vkFrame, AVFrame* frame)
 {
     if (m_FrucNv12RgbDisabled) return false;
@@ -2986,6 +3209,15 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         }
         if (m_FrucNv12RgbReady && !m_FrucRgbImgReady && !m_FrucRgbImgDisabled) {
             initFrucRgbImgResources();
+        }
+        // §J.3.e.2.e2a — when VIPLE_VK_FRUC_RIFE=1 set, also lazy-init RIFE
+        // model + VkMats.  Forward use lands in §J.3.e.2.e2b.  Init is decoupled
+        // from override: even with RIFE init failed, override still works as
+        // pass-through (§J.3.e.2.e1b path).
+        const char* rifeEnv = SDL_getenv("VIPLE_VK_FRUC_RIFE");
+        if (rifeEnv && SDL_atoi(rifeEnv) != 0
+            && m_FrucNv12RgbReady && !m_RifeReady && !m_RifeDisabled) {
+            initRifeModel((uint32_t)frame->width, (uint32_t)frame->height);
         }
         auto* vkFrame = (AVVkFrame*)frame->data[0];
         if (vkFrame && m_FrucOverrideReady && m_FrucRgbImgPlTex
