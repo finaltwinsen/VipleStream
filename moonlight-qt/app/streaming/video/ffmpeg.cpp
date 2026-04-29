@@ -49,6 +49,7 @@ extern "C" {
 
 #ifdef HAVE_LIBPLACEBO_VULKAN
 #include "ffmpeg-renderers/plvk.h"
+#include "ffmpeg-renderers/vkfruc.h"
 #endif
 
 // This is gross but it allows us to use sizeof()
@@ -1156,6 +1157,16 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
 #endif
 #ifdef HAVE_LIBPLACEBO_VULKAN
         case AV_HWDEVICE_TYPE_VULKAN:
+            // §J.3.e.2.i — opt-in VkFrucRenderer (Android architecture
+            // port; bypasses libplacebo).  When VIPLE_VK_FRUC_GENERIC=1
+            // and pass=0, try VkFrucRenderer first; on failure cascade
+            // continues to PlVkRenderer in the next pass.
+            if (qEnvironmentVariableIntValue("VIPLE_VK_FRUC_GENERIC") != 0) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i cascade: VkFrucRenderer "
+                            "selected (VIPLE_VK_FRUC_GENERIC=1, pass=%d)", pass);
+                return new VkFrucRenderer(pass);
+            }
             return new PlVkRenderer(true);
 #endif
         default:

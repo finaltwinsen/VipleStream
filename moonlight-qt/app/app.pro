@@ -403,9 +403,11 @@ libplacebo {
     DEFINES += HAVE_LIBPLACEBO_VULKAN
     SOURCES += \
         streaming/video/ffmpeg-renderers/plvk.cpp \
-        streaming/video/ffmpeg-renderers/plvk_c.c
+        streaming/video/ffmpeg-renderers/plvk_c.c \
+        streaming/video/ffmpeg-renderers/vkfruc.cpp
     HEADERS += \
-        streaming/video/ffmpeg-renderers/plvk.h
+        streaming/video/ffmpeg-renderers/plvk.h \
+        streaming/video/ffmpeg-renderers/vkfruc.h
 }
 config_EGL {
     message(EGL renderer selected)
