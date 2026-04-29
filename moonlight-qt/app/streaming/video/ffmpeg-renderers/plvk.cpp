@@ -134,6 +134,9 @@ PlVkRenderer::~PlVkRenderer()
     // The render context must have been cleaned up by now
     SDL_assert(!m_HasPendingSwapchainFrame);
 
+    // §J.3.e.2.d — reverse pipeline references §J.3.e.2.c bufRGB via descriptor
+    // set; tear down BEFORE §J.3.e.2.c cleanup destroys bufRGB.
+    destroyFrucRgbImgResources();
     // §J.3.e.2.c — VkPipeline / DSL / VkShaderModule live on m_Vulkan->device.
     // Tear down before pl_vulkan_destroy.
     destroyFrucNv12RgbResources();
@@ -1077,6 +1080,33 @@ bool PlVkRenderer::runLayoutTransitionProbe(AVVkFrame* vkFrame, AVFrame* frame)
     return true;
 }
 
+// §J.3.e.2.d — reverse converter: planar fp32 RGB buffer → RGBA8 VkImage.
+// Reads bufRGB (output from §J.3.e.2.c shader, layout R-plane / G-plane /
+// B-plane each W*H floats), writes RGBA8 image with alpha=1.0.  Storage-image
+// output binding (rgba8 format inferred from the layout qualifier).  GENERAL
+// layout for the image so we don't need transitions between dispatch and
+// libplacebo sampling (§J.3.e.2.e wraps this image as pl_tex).
+static const char* kRgbImgShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) readonly  buffer RGB_in { float data[]; } rgbIn;
+layout(binding = 1, rgba8) writeonly uniform image2D outImg;
+layout(push_constant) uniform Params { int w; int h; } p;
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= p.w || y >= p.h) return;
+    int idx = y * p.w + x;
+    int planeSize = p.w * p.h;
+    float r = clamp(rgbIn.data[idx + 0 * planeSize], 0.0, 1.0);
+    float g = clamp(rgbIn.data[idx + 1 * planeSize], 0.0, 1.0);
+    float b = clamp(rgbIn.data[idx + 2 * planeSize], 0.0, 1.0);
+    imageStore(outImg, ivec2(x, y), vec4(r, g, b, 1.0));
+}
+)GLSL";
+
 // §J.3.e.2.c — NV12 → planar fp32 RGB compute shader.  Reads NV12 plane-0
 // (Y) and plane-1 (UV interleaved at half-res) from raw byte storage buffers,
 // applies BT.709 limited-range YCbCr → linear sRGB conversion (same matrix as
@@ -1533,6 +1563,352 @@ void PlVkRenderer::destroyFrucNv12RgbResources()
     m_FrucNv12RgbHeight = 0;
 }
 
+bool PlVkRenderer::initFrucRgbImgResources()
+{
+    if (m_FrucRgbImgReady || m_FrucRgbImgDisabled) return m_FrucRgbImgReady;
+    if (!m_FrucNv12RgbReady) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.d init: §J.3.e.2.c (forward path) must be ready first");
+        m_FrucRgbImgDisabled = true;
+        return false;
+    }
+
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
+    };
+
+    auto pfnCreateShaderModule = (PFN_vkCreateShaderModule)getDevProc("vkCreateShaderModule");
+    auto pfnCreateDSL = (PFN_vkCreateDescriptorSetLayout)getDevProc("vkCreateDescriptorSetLayout");
+    auto pfnCreatePL = (PFN_vkCreatePipelineLayout)getDevProc("vkCreatePipelineLayout");
+    auto pfnCreatePipe = (PFN_vkCreateComputePipelines)getDevProc("vkCreateComputePipelines");
+    auto pfnCreateImage = (PFN_vkCreateImage)getDevProc("vkCreateImage");
+    auto pfnGetImageMemReq = (PFN_vkGetImageMemoryRequirements)getDevProc("vkGetImageMemoryRequirements");
+    auto pfnAllocMem = (PFN_vkAllocateMemory)getDevProc("vkAllocateMemory");
+    auto pfnBindImgMem = (PFN_vkBindImageMemory)getDevProc("vkBindImageMemory");
+    auto pfnCreateImageView = (PFN_vkCreateImageView)getDevProc("vkCreateImageView");
+    auto pfnCreateBuffer = (PFN_vkCreateBuffer)getDevProc("vkCreateBuffer");
+    auto pfnGetBufMemReq = (PFN_vkGetBufferMemoryRequirements)getDevProc("vkGetBufferMemoryRequirements");
+    auto pfnBindBufMem = (PFN_vkBindBufferMemory)getDevProc("vkBindBufferMemory");
+    auto pfnCreateDPool = (PFN_vkCreateDescriptorPool)getDevProc("vkCreateDescriptorPool");
+    auto pfnAllocDS = (PFN_vkAllocateDescriptorSets)getDevProc("vkAllocateDescriptorSets");
+    auto pfnUpdateDS = (PFN_vkUpdateDescriptorSets)getDevProc("vkUpdateDescriptorSets");
+    auto pfnGetPhysProps = (PFN_vkGetPhysicalDeviceMemoryProperties)
+        m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, "vkGetPhysicalDeviceMemoryProperties");
+
+    if (!pfnCreateShaderModule || !pfnCreateDSL || !pfnCreatePL || !pfnCreatePipe
+        || !pfnCreateImage || !pfnGetImageMemReq || !pfnAllocMem || !pfnBindImgMem
+        || !pfnCreateImageView || !pfnCreateBuffer || !pfnGetBufMemReq || !pfnBindBufMem
+        || !pfnCreateDPool || !pfnAllocDS || !pfnUpdateDS || !pfnGetPhysProps) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.d init: missing PFN");
+        m_FrucRgbImgDisabled = true;
+        return false;
+    }
+
+    // 1. Compile reverse shader
+    ncnn::Option opt;
+    opt.use_vulkan_compute = true;
+    opt.use_fp16_packed = false; opt.use_fp16_storage = false; opt.use_fp16_arithmetic = false;
+    opt.use_int8_storage = false; opt.use_int8_arithmetic = false;
+    opt.use_packing_layout = false; opt.use_shader_pack8 = false;
+    std::vector<uint32_t> spirv;
+    int rc = ncnn::compile_spirv_module(kRgbImgShaderGlsl, opt, spirv);
+    if (rc != 0 || spirv.empty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.d init: compile_spirv_module rc=%d size=%zu", rc, spirv.size());
+        m_FrucRgbImgDisabled = true;
+        return false;
+    }
+
+    VkShaderModuleCreateInfo smCi = {};
+    smCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smCi.codeSize = spirv.size() * sizeof(uint32_t);
+    smCi.pCode = spirv.data();
+    VkShaderModule shaderMod = VK_NULL_HANDLE;
+    if (pfnCreateShaderModule(m_Vulkan->device, &smCi, nullptr, &shaderMod) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+    m_FrucRgbImgVkShader = shaderMod;
+
+    // 2. Descriptor set layout: binding 0 = SSBO (rgbIn), binding 1 = STORAGE_IMAGE (outImg)
+    VkDescriptorSetLayoutBinding dslB[2] = {};
+    dslB[0].binding = 0; dslB[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    dslB[0].descriptorCount = 1; dslB[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    dslB[1].binding = 1; dslB[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    dslB[1].descriptorCount = 1; dslB[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutCreateInfo dslCi = {};
+    dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dslCi.bindingCount = 2; dslCi.pBindings = dslB;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    if (pfnCreateDSL(m_Vulkan->device, &dslCi, nullptr, &dsl) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+    m_FrucRgbImgVkDsl = dsl;
+
+    // 3. Pipeline layout (push constants W, H)
+    VkPushConstantRange pcRange = {};
+    pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcRange.size = sizeof(int) * 2;
+    VkPipelineLayoutCreateInfo plCi = {};
+    plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plCi.setLayoutCount = 1; plCi.pSetLayouts = &dsl;
+    plCi.pushConstantRangeCount = 1; plCi.pPushConstantRanges = &pcRange;
+    VkPipelineLayout pipeLay = VK_NULL_HANDLE;
+    if (pfnCreatePL(m_Vulkan->device, &plCi, nullptr, &pipeLay) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+    m_FrucRgbImgVkPipeLay = pipeLay;
+
+    // 4. Compute pipeline
+    VkComputePipelineCreateInfo cpCi = {};
+    cpCi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpCi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpCi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpCi.stage.module = shaderMod;
+    cpCi.stage.pName = "main";
+    cpCi.layout = pipeLay;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    if (pfnCreatePipe(m_Vulkan->device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &pipe) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+    m_FrucRgbImgVkPipeline = pipe;
+
+    // 5. Dest VkImage (RGBA8 UNORM, USAGE STORAGE | TRANSFER_SRC | SAMPLED for libplacebo wrap)
+    VkImageCreateInfo iCi = {};
+    iCi.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    iCi.imageType = VK_IMAGE_TYPE_2D;
+    iCi.format = VK_FORMAT_R8G8B8A8_UNORM;
+    iCi.extent = {m_FrucNv12RgbWidth, m_FrucNv12RgbHeight, 1};
+    iCi.mipLevels = 1; iCi.arrayLayers = 1;
+    iCi.samples = VK_SAMPLE_COUNT_1_BIT;
+    iCi.tiling = VK_IMAGE_TILING_OPTIMAL;
+    iCi.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+              | VK_IMAGE_USAGE_SAMPLED_BIT;
+    iCi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    iCi.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImage img = VK_NULL_HANDLE;
+    if (pfnCreateImage(m_Vulkan->device, &iCi, nullptr, &img) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+    m_FrucRgbImgImage = img;
+
+    VkPhysicalDeviceMemoryProperties mp = {};
+    pfnGetPhysProps(m_Vulkan->phys_device, &mp);
+
+    VkMemoryRequirements imgReq = {};
+    pfnGetImageMemReq(m_Vulkan->device, img, &imgReq);
+    uint32_t imgMti = UINT32_MAX;
+    for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+        if ((imgReq.memoryTypeBits & (1u << i))
+            && (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            imgMti = i; break;
+        }
+    }
+    if (imgMti == UINT32_MAX) { m_FrucRgbImgDisabled = true; return false; }
+
+    VkMemoryAllocateInfo mai = {};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = imgReq.size;
+    mai.memoryTypeIndex = imgMti;
+    VkDeviceMemory imgMem = VK_NULL_HANDLE;
+    if (pfnAllocMem(m_Vulkan->device, &mai, nullptr, &imgMem) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+    m_FrucRgbImgImageMem = imgMem;
+    if (pfnBindImgMem(m_Vulkan->device, img, imgMem, 0) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+
+    // 6. Image view (RGBA8 COLOR aspect)
+    VkImageViewCreateInfo ivCi = {};
+    ivCi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    ivCi.image = img;
+    ivCi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivCi.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ivCi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ivCi.subresourceRange.levelCount = 1;
+    ivCi.subresourceRange.layerCount = 1;
+    VkImageView iv = VK_NULL_HANDLE;
+    if (pfnCreateImageView(m_Vulkan->device, &ivCi, nullptr, &iv) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+    m_FrucRgbImgImageView = iv;
+
+    // 7. 4-byte readback host buffer (RGBA8 center pixel)
+    VkBufferCreateInfo hbCi = {};
+    hbCi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    hbCi.size = 4;
+    hbCi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    hbCi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBuffer hostBuf = VK_NULL_HANDLE;
+    if (pfnCreateBuffer(m_Vulkan->device, &hbCi, nullptr, &hostBuf) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+    m_FrucRgbImgHostBuf = hostBuf;
+
+    VkMemoryRequirements hbReq = {};
+    pfnGetBufMemReq(m_Vulkan->device, hostBuf, &hbReq);
+    uint32_t hbMti = UINT32_MAX;
+    for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+        if ((hbReq.memoryTypeBits & (1u << i))
+            && (mp.memoryTypes[i].propertyFlags
+                & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+                == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            hbMti = i; break;
+        }
+    }
+    if (hbMti == UINT32_MAX) { m_FrucRgbImgDisabled = true; return false; }
+
+    VkMemoryAllocateInfo hmai = {};
+    hmai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    hmai.allocationSize = hbReq.size;
+    hmai.memoryTypeIndex = hbMti;
+    VkDeviceMemory hbMem = VK_NULL_HANDLE;
+    if (pfnAllocMem(m_Vulkan->device, &hmai, nullptr, &hbMem) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+    m_FrucRgbImgHostBufMem = hbMem;
+    if (pfnBindBufMem(m_Vulkan->device, hostBuf, hbMem, 0) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+
+    // 8. Descriptor pool + set, bind RGB SSBO + storage image once.
+    VkDescriptorPoolSize ps[2] = {};
+    ps[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ps[0].descriptorCount = 1;
+    ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  ps[1].descriptorCount = 1;
+    VkDescriptorPoolCreateInfo dpCi = {};
+    dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpCi.maxSets = 1;
+    dpCi.poolSizeCount = 2; dpCi.pPoolSizes = ps;
+    VkDescriptorPool dPool = VK_NULL_HANDLE;
+    if (pfnCreateDPool(m_Vulkan->device, &dpCi, nullptr, &dPool) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+    m_FrucRgbImgDescPool = dPool;
+
+    VkDescriptorSetAllocateInfo dsai = {};
+    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dsai.descriptorPool = dPool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &dsl;
+    VkDescriptorSet dSet = VK_NULL_HANDLE;
+    if (pfnAllocDS(m_Vulkan->device, &dsai, &dSet) != VK_SUCCESS) {
+        m_FrucRgbImgDisabled = true; return false;
+    }
+    m_FrucRgbImgDescSet = dSet;
+
+    VkDescriptorBufferInfo dbi = {};
+    dbi.buffer = (VkBuffer)m_FrucNv12RgbBufRGB; dbi.offset = 0; dbi.range = VK_WHOLE_SIZE;
+    VkDescriptorImageInfo dii = {};
+    dii.imageView = iv; dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet w[2] = {};
+    w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w[0].dstSet = dSet; w[0].dstBinding = 0; w[0].descriptorCount = 1;
+    w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[0].pBufferInfo = &dbi;
+    w[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w[1].dstSet = dSet; w[1].dstBinding = 1; w[1].descriptorCount = 1;
+    w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; w[1].pImageInfo = &dii;
+    pfnUpdateDS(m_Vulkan->device, 2, w, 0, nullptr);
+
+    m_FrucRgbImgReady = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.d init: reverse pipeline ready (spv=%zu bytes), "
+                "VkImage=%p (RGBA8_UNORM %ux%u, GENERAL layout, STORAGE|SAMPLED|TRANSFER_SRC)",
+                spirv.size() * sizeof(uint32_t), (void*)img, m_FrucNv12RgbWidth, m_FrucNv12RgbHeight);
+    return true;
+}
+
+void PlVkRenderer::destroyFrucRgbImgResources()
+{
+    if (!m_PlVkInstance || !m_Vulkan) return;
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
+    };
+    auto pfnDestroyPipe = (PFN_vkDestroyPipeline)getDevProc("vkDestroyPipeline");
+    auto pfnDestroyPL = (PFN_vkDestroyPipelineLayout)getDevProc("vkDestroyPipelineLayout");
+    auto pfnDestroyDSL = (PFN_vkDestroyDescriptorSetLayout)getDevProc("vkDestroyDescriptorSetLayout");
+    auto pfnDestroySM = (PFN_vkDestroyShaderModule)getDevProc("vkDestroyShaderModule");
+    auto pfnDestroyDPool = (PFN_vkDestroyDescriptorPool)getDevProc("vkDestroyDescriptorPool");
+    auto pfnDestroyImg = (PFN_vkDestroyImage)getDevProc("vkDestroyImage");
+    auto pfnDestroyIV = (PFN_vkDestroyImageView)getDevProc("vkDestroyImageView");
+    auto pfnDestroyBuf = (PFN_vkDestroyBuffer)getDevProc("vkDestroyBuffer");
+    auto pfnFreeMem = (PFN_vkFreeMemory)getDevProc("vkFreeMemory");
+
+    if (m_FrucRgbImgDescPool && pfnDestroyDPool)
+        pfnDestroyDPool(m_Vulkan->device, (VkDescriptorPool)m_FrucRgbImgDescPool, nullptr);
+    if (m_FrucRgbImgImageView && pfnDestroyIV)
+        pfnDestroyIV(m_Vulkan->device, (VkImageView)m_FrucRgbImgImageView, nullptr);
+    if (m_FrucRgbImgImage && pfnDestroyImg)
+        pfnDestroyImg(m_Vulkan->device, (VkImage)m_FrucRgbImgImage, nullptr);
+    if (m_FrucRgbImgImageMem && pfnFreeMem)
+        pfnFreeMem(m_Vulkan->device, (VkDeviceMemory)m_FrucRgbImgImageMem, nullptr);
+    if (m_FrucRgbImgHostBuf && pfnDestroyBuf)
+        pfnDestroyBuf(m_Vulkan->device, (VkBuffer)m_FrucRgbImgHostBuf, nullptr);
+    if (m_FrucRgbImgHostBufMem && pfnFreeMem)
+        pfnFreeMem(m_Vulkan->device, (VkDeviceMemory)m_FrucRgbImgHostBufMem, nullptr);
+    if (m_FrucRgbImgVkPipeline && pfnDestroyPipe)
+        pfnDestroyPipe(m_Vulkan->device, (VkPipeline)m_FrucRgbImgVkPipeline, nullptr);
+    if (m_FrucRgbImgVkPipeLay && pfnDestroyPL)
+        pfnDestroyPL(m_Vulkan->device, (VkPipelineLayout)m_FrucRgbImgVkPipeLay, nullptr);
+    if (m_FrucRgbImgVkDsl && pfnDestroyDSL)
+        pfnDestroyDSL(m_Vulkan->device, (VkDescriptorSetLayout)m_FrucRgbImgVkDsl, nullptr);
+    if (m_FrucRgbImgVkShader && pfnDestroySM)
+        pfnDestroySM(m_Vulkan->device, (VkShaderModule)m_FrucRgbImgVkShader, nullptr);
+    m_FrucRgbImgDescPool = nullptr;     m_FrucRgbImgDescSet = nullptr;
+    m_FrucRgbImgImageView = nullptr;    m_FrucRgbImgImage = nullptr;    m_FrucRgbImgImageMem = nullptr;
+    m_FrucRgbImgHostBuf = nullptr;      m_FrucRgbImgHostBufMem = nullptr;
+    m_FrucRgbImgVkPipeline = nullptr;   m_FrucRgbImgVkPipeLay = nullptr;
+    m_FrucRgbImgVkDsl = nullptr;        m_FrucRgbImgVkShader = nullptr;
+    m_FrucRgbImgReady = false;
+}
+
+bool PlVkRenderer::runRgbImgReversePass(VkCommandBuffer cb, uint32_t width, uint32_t height)
+{
+    if (!m_FrucRgbImgReady || !cb) return false;
+
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
+    };
+    static auto pfnBarrier   = (PFN_vkCmdPipelineBarrier)getDevProc("vkCmdPipelineBarrier");
+    static auto pfnBindPipe  = (PFN_vkCmdBindPipeline)getDevProc("vkCmdBindPipeline");
+    static auto pfnBindDS    = (PFN_vkCmdBindDescriptorSets)getDevProc("vkCmdBindDescriptorSets");
+    static auto pfnPushC     = (PFN_vkCmdPushConstants)getDevProc("vkCmdPushConstants");
+    static auto pfnDispatch  = (PFN_vkCmdDispatch)getDevProc("vkCmdDispatch");
+    if (!pfnBarrier || !pfnBindPipe || !pfnBindDS || !pfnPushC || !pfnDispatch) return false;
+
+    // First-use: image is in UNDEFINED.  Subsequent calls: image is in GENERAL
+    // (we leave it there).  Use a self-targeting barrier with oldLayout=GENERAL
+    // (initial UNDEFINED is a one-shot transitioned via the same barrier on
+    // first dispatch; storage image accepts UNDEFINED→GENERAL transition).
+    static bool s_FirstUseTracked = false;
+    VkImageMemoryBarrier toGen = {};
+    toGen.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toGen.srcAccessMask = s_FirstUseTracked ? VK_ACCESS_SHADER_READ_BIT : 0;
+    toGen.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toGen.oldLayout = s_FirstUseTracked ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    toGen.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    toGen.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toGen.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toGen.image = (VkImage)m_FrucRgbImgImage;
+    toGen.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    toGen.subresourceRange.levelCount = 1;
+    toGen.subresourceRange.layerCount = 1;
+    pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+               0, 0, nullptr, 0, nullptr, 1, &toGen);
+    s_FirstUseTracked = true;
+
+    pfnBindPipe(cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipeline)m_FrucRgbImgVkPipeline);
+    VkDescriptorSet dSet = (VkDescriptorSet)m_FrucRgbImgDescSet;
+    pfnBindDS(cb, VK_PIPELINE_BIND_POINT_COMPUTE,
+              (VkPipelineLayout)m_FrucRgbImgVkPipeLay, 0, 1, &dSet, 0, nullptr);
+    int pushVals[2] = {(int)width, (int)height};
+    pfnPushC(cb, (VkPipelineLayout)m_FrucRgbImgVkPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+             0, sizeof(pushVals), pushVals);
+    const uint32_t gx = (width + 7) / 8;
+    const uint32_t gy = (height + 7) / 8;
+    pfnDispatch(cb, gx, gy, 1);
+
+    return true;
+}
+
 bool PlVkRenderer::runNv12RgbProbe(AVVkFrame* vkFrame, AVFrame* frame)
 {
     if (m_FrucNv12RgbDisabled) return false;
@@ -1664,16 +2040,20 @@ bool PlVkRenderer::runNv12RgbProbe(AVVkFrame* vkFrame, AVFrame* frame)
     const uint32_t gy = (H + 7) / 8;
     pfnDispatch(cb, gx, gy, 1);
 
-    // Step 5: buffer barrier (SHADER_WRITE → TRANSFER_READ on bufRGB).
+    // Step 5: buffer barrier (SHADER_WRITE → TRANSFER_READ + SHADER_READ on bufRGB).
+    // dstAccessMask covers both consumers: §J.3.e.2.c2 vkCmdCopyBuffer host readback
+    // (TRANSFER_READ) AND §J.3.e.2.d reverse pass (SHADER_READ).  dstStageMask
+    // also widened to TRANSFER | COMPUTE_SHADER.
     VkBufferMemoryBarrier bufBar2 = {};
     bufBar2.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
     bufBar2.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    bufBar2.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    bufBar2.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
     bufBar2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bufBar2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bufBar2.buffer = (VkBuffer)m_FrucNv12RgbBufRGB;
     bufBar2.size = VK_WHOLE_SIZE;
-    pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+               VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                0, 0, nullptr, 1, &bufBar2, 0, nullptr);
 
     // Step 6: copy 3 plane center-pixel floats to host buffer.  Center pixel
@@ -1694,6 +2074,55 @@ bool PlVkRenderer::runNv12RgbProbe(AVVkFrame* vkFrame, AVFrame* frame)
     bcRegions[2].size = sizeof(float);
     pfnCopyBuf(cb, (VkBuffer)m_FrucNv12RgbBufRGB, (VkBuffer)m_FrucNv12RgbHostBuf,
                3, bcRegions);
+
+    // §J.3.e.2.d — reverse pass + center pixel RGBA8 readback (gated PROBE4=1).
+    // Reads bufRGB (already SHADER_READ-visible from Step 5 barrier), writes
+    // RGBA8 storage image, then copies center texel to m_FrucRgbImgHostBuf.
+    bool ranReverse = false;
+    const char* probe4 = SDL_getenv("VIPLE_VK_FRUC_PROBE4");
+    if (probe4 && SDL_atoi(probe4) != 0) {
+        if (!m_FrucRgbImgReady && !m_FrucRgbImgDisabled) {
+            initFrucRgbImgResources();
+        }
+        if (m_FrucRgbImgReady) {
+            if (runRgbImgReversePass(cb, W, H)) {
+                // Image now has fresh content in GENERAL layout.  Transition to
+                // TRANSFER_SRC for readback, copy 1 RGBA8 texel, transition back.
+                VkImageMemoryBarrier toSrc = {};
+                toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                toSrc.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                toSrc.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                toSrc.image = (VkImage)m_FrucRgbImgImage;
+                toSrc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                toSrc.subresourceRange.levelCount = 1;
+                toSrc.subresourceRange.layerCount = 1;
+                pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           0, 0, nullptr, 0, nullptr, 1, &toSrc);
+
+                VkBufferImageCopy regCenter = {};
+                regCenter.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                regCenter.imageSubresource.layerCount = 1;
+                regCenter.imageOffset = {(int32_t)(W / 2), (int32_t)(H / 2), 0};
+                regCenter.imageExtent = {1, 1, 1};
+                pfnCopyImgBuf(cb, (VkImage)m_FrucRgbImgImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              (VkBuffer)m_FrucRgbImgHostBuf, 1, &regCenter);
+
+                VkImageMemoryBarrier toGen = toSrc;
+                toGen.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                toGen.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                toGen.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                toGen.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                pfnBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           0, 0, nullptr, 0, nullptr, 1, &toGen);
+
+                ranReverse = true;
+            }
+        }
+    }
 
     // Step 7: restore plane layouts.
     VkImageMemoryBarrier toOrig[2] = {
@@ -1775,6 +2204,26 @@ bool PlVkRenderer::runNv12RgbProbe(AVVkFrame* vkFrame, AVFrame* frame)
                 "[VIPLE-VK-FRUC] §J.3.e.2.c2 probe: PASS  %ux%u dispatch+readback=%.2fms  "
                 "GPU center RGB (%.3f, %.3f, %.3f) — compare to §J.3.e.2.b CPU result",
                 W, H, dispatchMs, r, g, b);
+
+    if (ranReverse) {
+        // Map §J.3.e.2.d host buf, log RGBA8, compare to scaled (*255) §J.3.e.2.c2 RGB.
+        void* mapped2 = nullptr;
+        pfnMap(m_Vulkan->device, (VkDeviceMemory)m_FrucRgbImgHostBufMem, 0, VK_WHOLE_SIZE, 0, &mapped2);
+        uint8_t r8 = 0, g8 = 0, b8 = 0, a8 = 0;
+        if (mapped2) {
+            const uint8_t* q = (const uint8_t*)mapped2;
+            r8 = q[0]; g8 = q[1]; b8 = q[2]; a8 = q[3];
+            pfnUnmap(m_Vulkan->device, (VkDeviceMemory)m_FrucRgbImgHostBufMem);
+        }
+        // Expected RGBA8 from forward output (*255): ideally close to (r*255, g*255, b*255, 255).
+        const int er = (int)(r * 255.0f + 0.5f), eg = (int)(g * 255.0f + 0.5f), eb = (int)(b * 255.0f + 0.5f);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.d probe: PASS  RGBA8 from VkImage (%u, %u, %u, %u) "
+                    "vs expected (%d, %d, %d, 255) — delta(R/G/B)=(%d, %d, %d)",
+                    (unsigned)r8, (unsigned)g8, (unsigned)b8, (unsigned)a8,
+                    er, eg, eb,
+                    (int)r8 - er, (int)g8 - eg, (int)b8 - eb);
+    }
     return true;
 }
 

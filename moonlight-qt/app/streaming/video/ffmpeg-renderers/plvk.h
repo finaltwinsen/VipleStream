@@ -77,6 +77,19 @@ private:
     void destroyFrucNv12RgbResources();
     bool runNv12RgbProbe(struct AVVkFrame* vkFrame, AVFrame* frame);
 
+    // §J.3.e.2.d — reverse converter: planar fp32 RGB buffer → RGBA8 VkImage.
+    // The RGBA8 VkImage is created with USAGE_STORAGE (compute-shader writable)
+    // + USAGE_SAMPLED (for libplacebo pl_vulkan_wrap → pl_tex → pl_render_image)
+    // + USAGE_TRANSFER_SRC (for §J.3.e.2.d readback verification).  Layout
+    // GENERAL (no transitions needed between dispatch and pl_tex sampling).
+    // Resources allocated alongside §J.3.e.2.c init; per-frame dispatch fires
+    // inside runNv12RgbProbe right after the forward dispatch when
+    // VIPLE_VK_FRUC_PROBE4=1 is set.  Verifies RGBA8 readback matches scaled
+    // §J.3.e.2.c2 GPU output.
+    bool initFrucRgbImgResources();
+    void destroyFrucRgbImgResources();
+    bool runRgbImgReversePass(VkCommandBuffer cb, uint32_t width, uint32_t height);
+
     // The backend renderer if we're frontend-only
     IFFmpegRenderer* m_Backend;
     bool m_HwAccelBackend;
@@ -179,4 +192,19 @@ private:
     void*    m_FrucNv12RgbDescPool = nullptr;  // VkDescriptorPool
     void*    m_FrucNv12RgbDescSet  = nullptr;  // VkDescriptorSet
     uint64_t m_FrucNv12RgbFrameCount = 0;
+
+    // §J.3.e.2.d — reverse converter (planar fp32 RGB buffer → RGBA8 VkImage).
+    bool     m_FrucRgbImgReady     = false;
+    bool     m_FrucRgbImgDisabled  = false;
+    void*    m_FrucRgbImgVkShader  = nullptr;  // VkShaderModule
+    void*    m_FrucRgbImgVkDsl     = nullptr;  // VkDescriptorSetLayout (1 SSBO + 1 storage image)
+    void*    m_FrucRgbImgVkPipeLay = nullptr;  // VkPipelineLayout
+    void*    m_FrucRgbImgVkPipeline= nullptr;  // VkPipeline (compute)
+    void*    m_FrucRgbImgImage     = nullptr;  // VkImage (RGBA8 UNORM)
+    void*    m_FrucRgbImgImageMem  = nullptr;  // VkDeviceMemory
+    void*    m_FrucRgbImgImageView = nullptr;  // VkImageView (R8G8B8A8 COLOR aspect)
+    void*    m_FrucRgbImgDescPool  = nullptr;  // VkDescriptorPool
+    void*    m_FrucRgbImgDescSet   = nullptr;  // VkDescriptorSet
+    void*    m_FrucRgbImgHostBuf   = nullptr;  // VkBuffer (4 bytes RGBA8 readback)
+    void*    m_FrucRgbImgHostBufMem= nullptr;  // VkDeviceMemory
 };
