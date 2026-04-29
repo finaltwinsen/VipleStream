@@ -10,6 +10,7 @@
 #include <ncnn/option.h>
 // §J.3.e.2.e2a — RIFE forward integration.
 #include <ncnn/net.h>
+#include <ncnn/command.h>
 #include "ncnn_rife_warp.h"
 #include "path.h"
 #include <QDir>
@@ -2370,80 +2371,102 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
         return false;
     }
 
-    // Verify .bin file is reachable + readable before we hand to ncnn.
+    // §J.3.e.2.e2c (path 1) — actually call load_model now that ncnn fork
+    // has per-layer trace logs (see net.cpp `[VipleStream e2c]` markers).
+    // First-firing-layer-no-POST trace identifies the crashing layer.
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 5/6 verify .bin readable");
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2c loadRife: step 5/6 load_model "
+                "(per-layer trace active in ncnn fork)");
     FILE* binFp = _wfopen(binWide.c_str(), L"rb");
     if (!binFp) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a _wfopen(bin) failed errno=%d", errno);
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c _wfopen(bin) failed errno=%d", errno);
         m_RifeNet.reset();
         m_RifeDisabled = true;
         return false;
     }
+    int modelRc = m_RifeNet->load_model(binFp);
     fclose(binFp);
-
-    // §J.3.e.2.e2b STATUS — ncnn::Net::load_model still crashes 0xC0000005
-    // on libplacebo's external VkDevice EVEN WITH the §J.3.e.2.e2b PFN-mask
-    // patch (gpu.cpp clears support_VK_KHR_* flags whose PFNs failed to load).
-    // The mask now correctly identifies missing exts (libplacebo only enables
-    // push_descriptor + ycbcr + swapchain; bind_memory2 / create_renderpass2 /
-    // descriptor_update_template / get_memory_requirements2 / maintenance1 /
-    // maintenance3 are all missing PFNs → masked).
-    //
-    // Crash persists, suggesting the issue is not just PFN unloading but the
-    // same ncnn::Pipeline::create bug we hit in §J.3.e.2.c1 — RIFE 4.25-lite
-    // layers create their pipelines through that same ncnn path, hitting
-    // whatever assumption is broken on libplacebo's device.
-    //
-    // For now: skip load_model gracefully.  RIFE forward stays disabled.
-    // §J.3.e.2.e1b's NV12→RGB→VkImage pass-through still works.
-    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2 step 6 SKIPPED — load_model still "
-                "crashes after PFN-mask patch (R-impl-2 deeper investigation needed)");
-    m_RifeNet.reset();
-    m_RifeDisabled = true;
-    return false;
+    if (modelRc != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c load_model rc=%d", modelRc);
+        m_RifeNet.reset();
+        m_RifeDisabled = true;
+        return false;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2c loadRife: step 6/6 load_model OK");
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 6/6 alloc VkMats W=%u H=%u",
-                width, height);
-
-    // Allocate ncnn::VkMat resources via the external device's blob allocator.
-    // Layout: prev/curr are (W, H, 3) fp32 — RIFE input shape.  Timestep is
-    // (W, H, 1) fp32 filled with 0.5 (midpoint interp).  The VkBuffer backing
-    // each VkMat is owned by ncnn's pool; reclaimed when the mats release.
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2c loadRife: step 6a — acquire_blob_allocator");
     ncnn::VkAllocator* blobAlloc = vkdev->acquire_blob_allocator();
     if (!blobAlloc) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a acquire_blob_allocator failed");
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c acquire_blob_allocator failed");
         m_RifeNet.reset();
         m_RifeDisabled = true;
         return false;
     }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6b — VkMat::create prev (W=%u H=%u c=3)",
+                width, height);
     m_RifePrevVkMat.create((int)width, (int)height, 3, sizeof(float), 1, blobAlloc);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6c — VkMat::create curr empty=%d",
+                (int)m_RifePrevVkMat.empty());
     m_RifeCurrVkMat.create((int)width, (int)height, 3, sizeof(float), 1, blobAlloc);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6d — VkMat::create timestep curr_empty=%d",
+                (int)m_RifeCurrVkMat.empty());
     m_RifeTimestepVkMat.create((int)width, (int)height, 1, sizeof(float), 1, blobAlloc);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6e — VkMat creates done ts_empty=%d",
+                (int)m_RifeTimestepVkMat.empty());
     if (m_RifePrevVkMat.empty() || m_RifeCurrVkMat.empty() || m_RifeTimestepVkMat.empty()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a VkMat::create failed (prev empty=%d curr=%d ts=%d)",
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c VkMat::create reported empty (prev=%d curr=%d ts=%d)",
                     (int)m_RifePrevVkMat.empty(), (int)m_RifeCurrVkMat.empty(), (int)m_RifeTimestepVkMat.empty());
         m_RifeNet.reset();
         m_RifeDisabled = true;
         return false;
     }
 
-    // Pre-fill timestep VkMat with 0.5 via host staging + record_upload.  Using
-    // a separate VkCompute scope so it's submit-and-waited before any per-frame
-    // forward pass tries to read it.
+    // Match NcnnFRUC's working pattern: ncnn::VkTransfer (not VkCompute) for
+    // one-shot CPU→GPU upload, with explicit staging allocator + raw Option
+    // (fp16/packing all OFF so record_upload does verbatim byte copy).
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6f — fill timestep + VkTransfer setup");
     {
-        ncnn::Mat tsHost((int)width, (int)height, 1, sizeof(float));
+        ncnn::Mat tsHost((int)width, (int)height, 1, (size_t)sizeof(float));
         tsHost.fill(0.5f);
-        ncnn::VkCompute upload(vkdev);
-        upload.record_upload(tsHost, m_RifeTimestepVkMat, m_RifeNet->opt);
-        if (upload.submit_and_wait() != 0) {
+
+        ncnn::Option uploadOpt;
+        uploadOpt.use_vulkan_compute    = true;
+        uploadOpt.use_fp16_packed       = false;
+        uploadOpt.use_fp16_storage      = false;
+        uploadOpt.use_fp16_arithmetic   = false;
+        uploadOpt.use_int8_storage      = false;
+        uploadOpt.use_int8_arithmetic   = false;
+        uploadOpt.use_packing_layout    = false;
+        uploadOpt.use_shader_pack8      = false;
+        uploadOpt.blob_vkallocator      = blobAlloc;
+        uploadOpt.staging_vkallocator   = vkdev->acquire_staging_allocator();
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6g — VkTransfer xfer ctor");
+        ncnn::VkTransfer xfer(vkdev);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6h — record_upload");
+        xfer.record_upload(tsHost, m_RifeTimestepVkMat, uploadOpt);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6i — submit_and_wait");
+        int upRc = xfer.submit_and_wait();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6j — submit_and_wait rc=%d", upRc);
+        vkdev->reclaim_staging_allocator(uploadOpt.staging_vkallocator);
+        if (upRc != 0) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VK-FRUC] §J.3.e.2.e2a timestep VkMat upload failed");
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2c timestep VkTransfer upload failed");
             m_RifeNet.reset();
             m_RifeDisabled = true;
             return false;

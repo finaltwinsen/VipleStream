@@ -272,6 +272,37 @@ path 還是工作（已 ship）。
 skip。RIFE 還沒能在 external VkDevice load。下一步繼續路徑 1 (深入 patch
 Pipeline::create) 或路徑 2 (libplacebo opt-in)。
 
+**§J.3.e.2.e2c RESOLVED (v1.3.92):** 走路徑 1 加 per-layer trace log 進
+ncnn fork 的 net.cpp `Net::load_model` create_pipeline loop。實機跑出來
+**load_model 其實 OK** — 全部 389 個 layer (Convolution / Crop / BinaryOp /
+Sigmoid / Split / rife.Warp / etc.) PRE+POST trace 都 rc=0 通過。意思是
+v1.3.88 的 PFN-mask patch 已經默默 fix 了 load_model 的 crash — 我之前
+推測是 §J.3.e.2.c1 同類 Pipeline::create bug 是錯的，**真正的問題就是
+PFN unloading**，mask 之後 ncnn 走 legacy code path 完全工作。
+
+剩下的 crash 不在 load_model — 在後面的 timestep VkMat upload 步驟。
+我原本用 `ncnn::VkCompute::record_upload` (錯的 class)，crash 在 record_upload
+裡面。改抄 NcnnFRUC `phase-B.4b` 的工作 pattern：用 `ncnn::VkTransfer`
+（一次性 CPU→GPU upload class，不是 compute pipeline 的 VkCompute）+
+顯式 raw `ncnn::Option` (`use_packing_layout=false` 等全關，blob+staging
+allocator 都填好) 之後，record_upload + submit_and_wait rc=0 OK。
+
+整條鍊 ship 點 v1.3.92：
+  loadRife: step 1/6 new ncnn::Net + opt
+  loadRife: step 2/6 set_vulkan_device(0)
+  loadRife: step 3/6 register_custom_layer(rife.Warp)
+  loadRife: step 4/6 load_param
+  loadRife: step 5/6 load_model (per-layer trace OK: 389/389 PASS)
+  loadRife: step 6/6 load_model OK
+  step 6a-e: VkMat::create prev/curr/timestep OK (blob_allocator)
+  step 6f-j: VkTransfer record_upload + submit_and_wait rc=0
+  PASS — RIFE 4.25-lite loaded on external ncnn instance, VkMats
+  prev/curr=1280x720x3 fp32, timestep=1280x720x1 fp32 (=0.5)
+
+下一步 §J.3.e.2.e2d: per-frame RIFE forward integration — bufRGB →
+m_RifeCurrVkMat (vkCmdCopyBuffer) → ncnn::Extractor::extract → outputVkMat
+→ bufRGB (vkCmdCopyBuffer) → reverse converter → swapchain。
+
 ### R-impl-1: ncnn::Pipeline::create() 對 binding layout 有限制（§J.3.e.2.c1 實測）
 
 NcnnFRUC Phase B.4a 用 `ncnn::Pipeline + Pipeline::create(spirv, size, specs)` 走得通是
