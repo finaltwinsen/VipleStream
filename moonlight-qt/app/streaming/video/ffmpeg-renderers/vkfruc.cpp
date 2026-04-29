@@ -376,6 +376,38 @@ bool VkFrucRenderer::pickPhysicalDeviceAndQueue()
     // this device supports H.264 / H.265 / AV1 decode via raw Vulkan API
     // (跳過 FFmpeg).  Probe only — actual decode session 在 i.8.* sub-phase
     // 實作.  Log 結果讓使用者 + 後續 session 知道 driver 可走的 codec.
+    //
+    // v1.3.192 第一步：先 enumerate device extensions，看 driver 是否開放
+    // VK_KHR_video_queue / video_decode_h264 / h265 / av1.  上一個 session
+    // probe 全 NOT SUPPORTED (rc=-3) 可能就是因為 ext 根本沒開放，不是
+    // profile struct 問題.
+    {
+        auto pfnEnumDevExts3 = (PFN_vkEnumerateDeviceExtensionProperties)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkEnumerateDeviceExtensionProperties");
+        if (pfnEnumDevExts3) {
+            uint32_t devExtCount = 0;
+            pfnEnumDevExts3(m_PhysicalDevice, nullptr, &devExtCount, nullptr);
+            std::vector<VkExtensionProperties> devExtProps(devExtCount);
+            pfnEnumDevExts3(m_PhysicalDevice, nullptr, &devExtCount, devExtProps.data());
+            const char* probeExts[] = {
+                VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
+                VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
+                VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
+                VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
+                VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME,
+            };
+            for (const char* e : probeExts) {
+                bool found = false;
+                for (const auto& p : devExtProps) {
+                    if (strcmp(p.extensionName, e) == 0) { found = true; break; }
+                }
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.8 ext %s: %s",
+                            e, found ? "AVAILABLE" : "MISSING");
+            }
+        }
+    }
+
     auto pfnGetVidCaps = (PFN_vkGetPhysicalDeviceVideoCapabilitiesKHR)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetPhysicalDeviceVideoCapabilitiesKHR");
     if (pfnGetVidCaps) {
@@ -396,34 +428,56 @@ bool VkFrucRenderer::pickPhysicalDeviceAndQueue()
 #endif
         };
         for (const auto& probe : probes) {
-            VkVideoDecodeH264ProfileInfoKHR h264Info = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PROFILE_INFO_KHR };
-            VkVideoDecodeH265ProfileInfoKHR h265Info = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PROFILE_INFO_KHR };
+            // §J.3.e.2.i.8 v1.3.193: profile INPUT pNext + caps OUTPUT pNext
+            // 都需要 codec-specific struct.  上一版只接 input 沒接 output，
+            // NV driver 看到 caps 的 pNext 沒對應 codec struct → rc=-3.
+            //
+            // 標準鏈接:
+            //   profileInput.pNext → VkVideoDecode<Codec>ProfileInfoKHR
+            //   caps.pNext         → VkVideoDecodeCapabilitiesKHR
+            //                            → VkVideoDecode<Codec>CapabilitiesKHR
+            VkVideoDecodeH264ProfileInfoKHR h264In  = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PROFILE_INFO_KHR };
+            VkVideoDecodeH265ProfileInfoKHR h265In  = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PROFILE_INFO_KHR };
+            VkVideoDecodeAV1ProfileInfoKHR  av1In   = { VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_PROFILE_INFO_KHR };
+            VkVideoDecodeH264CapabilitiesKHR h264Out = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_CAPABILITIES_KHR };
+            VkVideoDecodeH265CapabilitiesKHR h265Out = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_CAPABILITIES_KHR };
+            VkVideoDecodeAV1CapabilitiesKHR  av1Out  = { VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_CAPABILITIES_KHR };
             VkVideoProfileInfoKHR profInfo = {};
             profInfo.sType = VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR;
             profInfo.videoCodecOperation = probe.op;
             profInfo.chromaSubsampling   = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
             profInfo.lumaBitDepth        = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
             profInfo.chromaBitDepth      = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
-            if (probe.op == VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR) {
-                h264Info.stdProfileIdc = (StdVideoH264ProfileIdc)probe.profile;
-                h264Info.pictureLayout = VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_PROGRESSIVE_KHR;
-                profInfo.pNext = &h264Info;
-            } else if (probe.op == VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR) {
-                h265Info.stdProfileIdc = (StdVideoH265ProfileIdc)probe.profile;
-                profInfo.pNext = &h265Info;
-            }
+
             VkVideoCapabilitiesKHR caps = { VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR };
             VkVideoDecodeCapabilitiesKHR decCaps = { VK_STRUCTURE_TYPE_VIDEO_DECODE_CAPABILITIES_KHR };
             caps.pNext = &decCaps;
+
+            if (probe.op == VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR) {
+                h264In.stdProfileIdc = (StdVideoH264ProfileIdc)probe.profile;
+                h264In.pictureLayout = VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_PROGRESSIVE_KHR;
+                profInfo.pNext = &h264In;
+                decCaps.pNext = &h264Out;  // H.264-specific caps output
+            } else if (probe.op == VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR) {
+                h265In.stdProfileIdc = (StdVideoH265ProfileIdc)probe.profile;
+                profInfo.pNext = &h265In;
+                decCaps.pNext = &h265Out;
+            } else if (probe.op == VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR) {
+                av1In.stdProfile = (StdVideoAV1Profile)probe.profile;
+                av1In.filmGrainSupport = VK_FALSE;
+                profInfo.pNext = &av1In;
+                decCaps.pNext = &av1Out;
+            }
             VkResult vr = pfnGetVidCaps(m_PhysicalDevice, &profInfo, &caps);
             if (vr == VK_SUCCESS) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VKFRUC] §J.3.e.2.i.8 codec %s: SUPPORTED "
-                            "(maxLevel=%u maxRefs=%u maxDPB=%u min=%dx%d max=%dx%d)",
-                            probe.name, caps.maxCodedExtent.width / 2 /* placeholder */,
+                            "maxRefs=%u maxDPB=%u min=%ux%u max=%ux%u flags=%x",
+                            probe.name,
                             caps.maxActiveReferencePictures, caps.maxDpbSlots,
-                            (int)caps.minCodedExtent.width, (int)caps.minCodedExtent.height,
-                            (int)caps.maxCodedExtent.width, (int)caps.maxCodedExtent.height);
+                            caps.minCodedExtent.width, caps.minCodedExtent.height,
+                            caps.maxCodedExtent.width, caps.maxCodedExtent.height,
+                            (unsigned)decCaps.flags);
             } else {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VKFRUC] §J.3.e.2.i.8 codec %s: NOT SUPPORTED (rc=%d)",
