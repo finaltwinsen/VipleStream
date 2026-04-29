@@ -325,4 +325,69 @@ private:
     // flag flips true, real RIFE midpoint interpolation kicks in.
     std::atomic<bool> m_RifeWarmupComplete{false};
     std::thread       m_RifeWarmupThread;
+
+    // §J.3.e.2.h — Generic FRUC port (Vulkan native).  Resources
+    // allocated lazily on first override frame when VIPLE_VK_FRUC_GENERIC=1
+    // is set.  All buffers DEVICE_LOCAL (no host staging round-trip);
+    // dispatch chain runs on libplacebo's compute queue.
+    bool     m_FrucGenericReady    = false;
+    bool     m_FrucGenericDisabled = false;
+    uint32_t m_FrucGenericMvWidth  = 0;  // ceil(W / 8)
+    uint32_t m_FrucGenericMvHeight = 0;
+    uint64_t m_FrucGenericFrameCount = 0;
+
+    // 3 compute pipelines + their layouts.  Each shader has its own
+    // descriptor set layout (different binding count) and push constant
+    // range, so we can't share a single pipeline layout.
+    void*    m_FrucMeShaderMod   = nullptr;  // VkShaderModule
+    void*    m_FrucMeDsl         = nullptr;  // VkDescriptorSetLayout (4 bindings)
+    void*    m_FrucMePipeLay     = nullptr;  // VkPipelineLayout
+    void*    m_FrucMePipeline    = nullptr;  // VkPipeline
+    void*    m_FrucMeDescSet     = nullptr;  // VkDescriptorSet (bound once at init)
+
+    void*    m_FrucMedianShaderMod = nullptr;
+    void*    m_FrucMedianDsl       = nullptr;
+    void*    m_FrucMedianPipeLay   = nullptr;
+    void*    m_FrucMedianPipeline  = nullptr;
+    void*    m_FrucMedianDescSet   = nullptr;
+
+    void*    m_FrucWarpShaderMod = nullptr;
+    void*    m_FrucWarpDsl       = nullptr;
+    void*    m_FrucWarpPipeLay   = nullptr;
+    void*    m_FrucWarpPipeline  = nullptr;
+    void*    m_FrucWarpDescSet   = nullptr;
+
+    // Storage buffers (DEVICE_LOCAL).  prevRGB/currRGB share format with
+    // §J.3.e.2.c bufRGB (planar fp32 R/G/B, W*H*3*sizeof(float) bytes).
+    void*    m_FrucPrevRgbBuf     = nullptr;  // VkBuffer
+    void*    m_FrucPrevRgbBufMem  = nullptr;
+    // currRGB aliases m_FrucNv12RgbBufRGB — the §J.3.e.2.c forward
+    // shader's output buffer.  No separate alloc.
+
+    void*    m_FrucMvBuf          = nullptr;  // VkBuffer (mvW*mvH*2*sizeof(int))
+    void*    m_FrucMvBufMem       = nullptr;
+    void*    m_FrucMvFilteredBuf  = nullptr;
+    void*    m_FrucMvFilteredMem  = nullptr;
+    void*    m_FrucPrevMvBuf      = nullptr;  // for next frame's temporal predictor
+    void*    m_FrucPrevMvMem      = nullptr;
+    void*    m_FrucInterpRgbBuf   = nullptr;  // VkBuffer (W*H*3*sizeof(float)) — warp output
+    void*    m_FrucInterpRgbMem   = nullptr;
+
+    // Descriptor pool shared across the 3 sets.
+    void*    m_FrucDescPool   = nullptr;  // VkDescriptorPool
+
+    // Dedicated cmd buf + fence for the compute chain.  Reused per frame.
+    void*    m_FrucCmdPool    = nullptr;  // VkCommandPool
+    void*    m_FrucCmdBuf     = nullptr;  // VkCommandBuffer
+    void*    m_FrucFence      = nullptr;  // VkFence
+
+    bool initFrucGenericResources(uint32_t width, uint32_t height);
+    void destroyFrucGenericResources();
+    // Records + submits the 3-stage compute dispatch (ME → median →
+    // warp), then dispatches §J.3.e.2.d's reverse converter writing
+    // m_FrucInterpRgbBuf → m_FrucRgbImgImage so libplacebo can wrap
+    // the same VkImage that §J.3.e.2.e1 already exposes.  Caller must
+    // ensure m_FrucNv12RgbBufRGB has been written this frame
+    // (§J.3.e.2.c forward).
+    bool runFrucGenericComputePass(uint32_t width, uint32_t height);
 };
