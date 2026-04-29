@@ -303,6 +303,44 @@ allocator 都填好) 之後，record_upload + submit_and_wait rc=0 OK。
 m_RifeCurrVkMat (vkCmdCopyBuffer) → ncnn::Extractor::extract → outputVkMat
 → bufRGB (vkCmdCopyBuffer) → reverse converter → swapchain。
 
+### §J.3.e.2.e2d 三相結構通了，但 ncnn::VkCompute::record_clone crash (v1.3.97)
+
+把 runFrucOverridePass 拆成三相 (Phase A: NV12→bufRGB + 拷 bufRGB→curr.buffer
++ plane layout 還原；Phase B: ncnn::Extractor extract / first-frame clone；
+Phase C: 拷 out→bufRGB + reverse shader)。Phase A、C 各一個我們自家
+cmd buffer submit (timeline sem chain V → V+1 → V+2 跟 AVVkFrame.sem)，
+Phase B 是 ncnn::VkCompute::submit_and_wait host-blocking。每 phase host-fenced。
+
+實機跑 first frame：
+  e2d ENTRY #0 (override=1 nv12rgb=1 rgbimg=1 rife=1 hasPrev=0)
+  e2d #0 — Phase A start
+  e2d #0 — Phase A done, Phase B start
+  e2d #0 — Phase B (first frame): VkCompute ctor ← OK
+  e2d #0 — Phase B (first frame): record_clone ← 0xC0000005
+
+`ncnn::VkCompute::record_clone(m_RifeCurrVkMat, m_RifePrevVkMat, ncnn::Option())`
+在 ncnn 內部 access violation。輸入 VkMat 都 well-formed (allocated via
+`vkdev->acquire_blob_allocator()`, empty()=0, shape=W×H×3 fp32)，default-constructed
+Option，跟 NcnnFRUC phase-B.4b 工作 pattern (line 1960) 一樣。
+
+差別找不到，但 workaround：Phase B 跳過 record_clone，outVkMat 直接
+alias m_RifeCurrVkMat (real frame pass-through，沒真實 interp)。Phase A→C
+鏈接通暢，frame#1/60/120 都 OK，clean kill 25s 後 stream。
+
+實作改動 (v1.3.93-97 一系列 iteration)：
+- plvk.h: runFrucOverridePassWithRife 方法宣告
+- plvk.cpp:
+  - initRifeModel m_RifeNet->opt 加 use_packing_layout=false / shader_pack8=false
+  - VkMat::create 從 6-arg (有 explicit elempack=1) 改 5-arg (default
+    elempack) 跟 NcnnFRUC pattern 一致
+  - runFrucOverridePassWithRife ~280 LOC 三相結構，Phase B 暫 skip
+- renderFrame: 加 m_RifeReady gate，Ready 走 RIFE-injected pass，沒 ready 走
+  §J.3.e.2.e1b pass-through (回退路)
+
+下一步 §J.3.e.2.e2e: debug record_clone crash — 加 ncnn fork per-step
+trace 進 record_clone，找實際 fail 點。或試 ex.extract pattern 跟
+record_clone 不同的 RIFE forward 路徑。
+
 ### R-impl-1: ncnn::Pipeline::create() 對 binding layout 有限制（§J.3.e.2.c1 實測）
 
 NcnnFRUC Phase B.4a 用 `ncnn::Pipeline + Pipeline::create(spirv, size, specs)` 走得通是

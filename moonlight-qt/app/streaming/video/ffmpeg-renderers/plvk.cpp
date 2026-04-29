@@ -2263,6 +2263,348 @@ bool PlVkRenderer::runFrucOverridePass(AVVkFrame* vkFrame, AVFrame* frame)
     return true;
 }
 
+// §J.3.e.2.e2d — RIFE-injected override pass.  See header for phase breakdown.
+bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* frame)
+{
+    static std::atomic<uint64_t> s_e2dEntryCount{0};
+    uint64_t entryN = s_e2dEntryCount.fetch_add(1, std::memory_order_relaxed);
+    if (entryN < 3 || (entryN % 60) == 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2d ENTRY #%llu (override=%d nv12rgb=%d rgbimg=%d rife=%d hasPrev=%d)",
+                    (unsigned long long)entryN,
+                    (int)m_FrucOverrideReady, (int)m_FrucNv12RgbReady,
+                    (int)m_FrucRgbImgReady, (int)m_RifeReady, (int)m_RifeHasPrevFrame);
+    }
+    if (!m_FrucOverrideReady || !m_FrucNv12RgbReady || !m_FrucRgbImgReady || !m_RifeReady) return false;
+    if (!vkFrame || !vkFrame->img[0]) return false;
+
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
+    };
+    static auto pfnBegin       = (PFN_vkBeginCommandBuffer)getDevProc("vkBeginCommandBuffer");
+    static auto pfnEnd         = (PFN_vkEndCommandBuffer)getDevProc("vkEndCommandBuffer");
+    static auto pfnReset       = (PFN_vkResetCommandBuffer)getDevProc("vkResetCommandBuffer");
+    static auto pfnBarrier     = (PFN_vkCmdPipelineBarrier)getDevProc("vkCmdPipelineBarrier");
+    static auto pfnCopyImgBuf  = (PFN_vkCmdCopyImageToBuffer)getDevProc("vkCmdCopyImageToBuffer");
+    static auto pfnCopyBuf     = (PFN_vkCmdCopyBuffer)getDevProc("vkCmdCopyBuffer");
+    static auto pfnBindPipe    = (PFN_vkCmdBindPipeline)getDevProc("vkCmdBindPipeline");
+    static auto pfnBindDS      = (PFN_vkCmdBindDescriptorSets)getDevProc("vkCmdBindDescriptorSets");
+    static auto pfnPushC       = (PFN_vkCmdPushConstants)getDevProc("vkCmdPushConstants");
+    static auto pfnDispatch    = (PFN_vkCmdDispatch)getDevProc("vkCmdDispatch");
+    static auto pfnGetQueue    = (PFN_vkGetDeviceQueue)getDevProc("vkGetDeviceQueue");
+    static auto pfnSubmit      = (PFN_vkQueueSubmit)getDevProc("vkQueueSubmit");
+    static auto pfnWaitFences  = (PFN_vkWaitForFences)getDevProc("vkWaitForFences");
+    static auto pfnResetFences = (PFN_vkResetFences)getDevProc("vkResetFences");
+    static auto pfnWaitSems    = (PFN_vkWaitSemaphores)getDevProc("vkWaitSemaphores");
+    if (!pfnBegin || !pfnEnd || !pfnReset || !pfnBarrier || !pfnCopyImgBuf || !pfnCopyBuf
+        || !pfnBindPipe || !pfnBindDS || !pfnPushC || !pfnDispatch || !pfnGetQueue
+        || !pfnSubmit || !pfnWaitFences || !pfnResetFences || !pfnWaitSems) {
+        return false;
+    }
+
+    VkCommandBuffer cb = (VkCommandBuffer)m_FrucOverrideCmdBuf;
+    VkImage         img = (VkImage)vkFrame->img[0];
+    VkImageLayout   orig = vkFrame->layout[0];
+    const uint32_t  W = m_FrucNv12RgbWidth;
+    const uint32_t  H = m_FrucNv12RgbHeight;
+    VkQueue computeQueue = VK_NULL_HANDLE;
+    pfnGetQueue(m_Vulkan->device, m_Vulkan->queue_compute.index, 0, &computeQueue);
+
+    auto buildImgBarrier = [&](VkImageAspectFlags aspect, VkImageLayout oldL, VkImageLayout newL,
+                                VkAccessFlags srcA, VkAccessFlags dstA) -> VkImageMemoryBarrier {
+        VkImageMemoryBarrier b = {};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.srcAccessMask = srcA; b.dstAccessMask = dstA;
+        b.oldLayout = oldL; b.newLayout = newL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img;
+        b.subresourceRange.aspectMask = aspect;
+        b.subresourceRange.levelCount = 1; b.subresourceRange.layerCount = 1;
+        return b;
+    };
+
+    // Step 1: wait on hold timeline (libplacebo done with prev frame's VkImage)
+    if (m_FrucOverrideHoldVal > 0) {
+        VkSemaphore sem = (VkSemaphore)m_FrucOverrideHoldSem;
+        uint64_t waitVal = m_FrucOverrideHoldVal;
+        VkSemaphoreWaitInfo wi = {};
+        wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+        wi.semaphoreCount = 1;
+        wi.pSemaphores = &sem;
+        wi.pValues = &waitVal;
+        VkResult wr = pfnWaitSems(m_Vulkan->device, &wi, 100ULL * 1000 * 1000);
+        if (wr != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d: hold timeline wait rc=%d val=%llu",
+                        (int)wr, (unsigned long long)waitVal);
+            return false;
+        }
+    }
+
+    if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                  "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase A start", (unsigned long long)entryN);
+    // ===== PHASE A: forward dispatch + copy bufRGB → curr.buffer + plane restore =====
+    pfnReset(cb, 0);
+    VkCommandBufferBeginInfo bbi = {};
+    bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    pfnBegin(cb, &bbi);
+
+    VkImageMemoryBarrier toSrc[2] = {
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_0_BIT, orig, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_1_BIT, orig, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+    };
+    pfnBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+               0, 0, nullptr, 0, nullptr, 2, toSrc);
+
+    VkBufferImageCopy regY = {};
+    regY.imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    regY.imageSubresource.layerCount = 1;
+    regY.imageExtent = {W, H, 1};
+    pfnCopyImgBuf(cb, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  (VkBuffer)m_FrucNv12RgbBufY, 1, &regY);
+    VkBufferImageCopy regUV = {};
+    regUV.imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+    regUV.imageSubresource.layerCount = 1;
+    regUV.imageExtent = {W / 2, H / 2, 1};
+    pfnCopyImgBuf(cb, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  (VkBuffer)m_FrucNv12RgbBufUV, 1, &regUV);
+
+    VkBufferMemoryBarrier bbar1[2] = {};
+    bbar1[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bbar1[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bbar1[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    bbar1[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbar1[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbar1[0].buffer = (VkBuffer)m_FrucNv12RgbBufY;
+    bbar1[0].size = VK_WHOLE_SIZE;
+    bbar1[1] = bbar1[0];
+    bbar1[1].buffer = (VkBuffer)m_FrucNv12RgbBufUV;
+    pfnBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+               0, 0, nullptr, 2, bbar1, 0, nullptr);
+
+    // Forward dispatch (NV12 → bufRGB)
+    pfnBindPipe(cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipeline)m_FrucNv12RgbVkPipeline);
+    VkDescriptorSet fwdDS = (VkDescriptorSet)m_FrucNv12RgbDescSet;
+    pfnBindDS(cb, VK_PIPELINE_BIND_POINT_COMPUTE,
+              (VkPipelineLayout)m_FrucNv12RgbVkPipeLay, 0, 1, &fwdDS, 0, nullptr);
+    int pushVals[2] = {(int)W, (int)H};
+    pfnPushC(cb, (VkPipelineLayout)m_FrucNv12RgbVkPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+             0, sizeof(pushVals), pushVals);
+    const uint32_t gx = (W + 7) / 8;
+    const uint32_t gy = (H + 7) / 8;
+    pfnDispatch(cb, gx, gy, 1);
+
+    // Buffer barrier (forward shader write → transfer read for vkCmdCopyBuffer below)
+    VkBufferMemoryBarrier bbar2 = {};
+    bbar2.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bbar2.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    bbar2.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    bbar2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbar2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbar2.buffer = (VkBuffer)m_FrucNv12RgbBufRGB;
+    bbar2.size = VK_WHOLE_SIZE;
+    pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+               0, 0, nullptr, 1, &bbar2, 0, nullptr);
+
+    // Copy bufRGB → m_RifeCurrVkMat.buffer (planar fp32 RGB, W*H*3*sizeof(float))
+    const VkDeviceSize rgbBytes = (VkDeviceSize)W * H * 3 * sizeof(float);
+    VkBufferCopy copyToCurr = {};
+    copyToCurr.srcOffset = 0;
+    copyToCurr.dstOffset = m_RifeCurrVkMat.buffer_offset();
+    copyToCurr.size = rgbBytes;
+    pfnCopyBuf(cb, (VkBuffer)m_FrucNv12RgbBufRGB, m_RifeCurrVkMat.buffer(), 1, &copyToCurr);
+
+    // Restore plane layouts for ffmpeg.
+    VkImageMemoryBarrier toOrig[2] = {
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_0_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, orig,
+                        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_WRITE_BIT),
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_1_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, orig,
+                        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_WRITE_BIT),
+    };
+    pfnBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+               0, 0, nullptr, 0, nullptr, 2, toOrig);
+
+    pfnEnd(cb);
+
+    // Submit Phase A — wait AVVkFrame.sem at V, signal at V+1, signal local fence
+    {
+        uint64_t waitVal   = vkFrame->sem_value[0];
+        uint64_t signalVal = waitVal + 1;
+        VkSemaphore avSem  = vkFrame->sem[0];
+        VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+        VkTimelineSemaphoreSubmitInfo tlInfo = {};
+        tlInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        tlInfo.waitSemaphoreValueCount = 1;
+        tlInfo.pWaitSemaphoreValues = &waitVal;
+        tlInfo.signalSemaphoreValueCount = 1;
+        tlInfo.pSignalSemaphoreValues = &signalVal;
+
+        VkSubmitInfo si = {};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.pNext = &tlInfo;
+        si.waitSemaphoreCount = 1;
+        si.pWaitSemaphores = &avSem;
+        si.pWaitDstStageMask = &waitStage;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cb;
+        si.signalSemaphoreCount = 1;
+        si.pSignalSemaphores = &avSem;
+
+        m_Vulkan->lock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
+        VkResult subRes = pfnSubmit(computeQueue, 1, &si, (VkFence)m_FrucOverrideFence);
+        m_Vulkan->unlock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
+        if (subRes != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase A submit rc=%d", (int)subRes);
+            return false;
+        }
+        vkFrame->sem_value[0] = signalVal;
+
+        VkFence fence = (VkFence)m_FrucOverrideFence;
+        if (pfnWaitFences(m_Vulkan->device, 1, &fence, VK_TRUE, 1000ULL * 1000 * 1000) != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase A fence wait failed");
+            return false;
+        }
+        pfnResetFences(m_Vulkan->device, 1, &fence);
+    }
+
+    if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                  "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase A done, Phase B start",
+                                  (unsigned long long)entryN);
+    // ===== PHASE B: ncnn RIFE forward (or first-frame curr→prev clone) =====
+    auto t0 = std::chrono::high_resolution_clock::now();
+    ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(0);
+    if (!vkdev) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase B: ncnn::get_gpu_device(0) null");
+        return false;
+    }
+
+    // §J.3.e.2.e2d temporary diagnostic — skip RIFE entirely, just pass through
+    // current frame as "interp output".  This proves Phase A→C (NV12→RGB→VkImage)
+    // pipeline works end-to-end.  record_clone(curr→prev) crashes inside ncnn
+    // for reasons we don't yet understand — debug deferred.  Pass-through doesn't
+    // give real interp but does verify the VkMat I/O linkage works.
+    ncnn::VkMat outVkMat = m_RifeCurrVkMat;
+    bool usedRife = false;
+    if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                  "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B: SKIPPED "
+                                  "(record_clone crashes; pass-through curr as out for now)",
+                                  (unsigned long long)entryN);
+    (void)vkdev;
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double rifeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                  "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B done %.2fms (usedRife=%d), Phase C start",
+                                  (unsigned long long)entryN, rifeMs, (int)usedRife);
+
+    // ===== PHASE C: copy out.buffer → bufRGB + reverse shader =====
+    pfnReset(cb, 0);
+    pfnBegin(cb, &bbi);
+
+    // Buffer barrier (Phase B's shader write completed via host fence already, but
+    // VkBuffer ownership/visibility for our Phase C transfer read still needs sync).
+    VkBufferMemoryBarrier bbarOut = {};
+    bbarOut.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bbarOut.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    bbarOut.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    bbarOut.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbarOut.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbarOut.buffer = outVkMat.buffer();
+    bbarOut.size = VK_WHOLE_SIZE;
+    pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+               0, 0, nullptr, 1, &bbarOut, 0, nullptr);
+
+    // Copy out → bufRGB (overrides forward shader's bufRGB content with interp midpoint
+    // OR with curr alias on first frame).
+    VkBufferCopy copyToBufRgb = {};
+    copyToBufRgb.srcOffset = outVkMat.buffer_offset();
+    copyToBufRgb.dstOffset = 0;
+    copyToBufRgb.size = rgbBytes;
+    pfnCopyBuf(cb, outVkMat.buffer(), (VkBuffer)m_FrucNv12RgbBufRGB, 1, &copyToBufRgb);
+
+    // Buffer barrier: TRANSFER_WRITE → SHADER_READ on bufRGB (reverse shader will read).
+    VkBufferMemoryBarrier bbarRgb = {};
+    bbarRgb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bbarRgb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bbarRgb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    bbarRgb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbarRgb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbarRgb.buffer = (VkBuffer)m_FrucNv12RgbBufRGB;
+    bbarRgb.size = VK_WHOLE_SIZE;
+    pfnBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+               0, 0, nullptr, 1, &bbarRgb, 0, nullptr);
+
+    // Reverse dispatch (bufRGB → m_FrucRgbImgImage in GENERAL)
+    if (!runRgbImgReversePass(cb, W, H)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase C: runRgbImgReversePass failed");
+        return false;
+    }
+
+    pfnEnd(cb);
+
+    // Submit Phase C — wait AVVkFrame.sem at V+1 (set after Phase A submit), signal at V+2
+    {
+        uint64_t waitVal   = vkFrame->sem_value[0];
+        uint64_t signalVal = waitVal + 1;
+        VkSemaphore avSem  = vkFrame->sem[0];
+        VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+        VkTimelineSemaphoreSubmitInfo tlInfo = {};
+        tlInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        tlInfo.waitSemaphoreValueCount = 1;
+        tlInfo.pWaitSemaphoreValues = &waitVal;
+        tlInfo.signalSemaphoreValueCount = 1;
+        tlInfo.pSignalSemaphoreValues = &signalVal;
+
+        VkSubmitInfo si = {};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.pNext = &tlInfo;
+        si.waitSemaphoreCount = 1;
+        si.pWaitSemaphores = &avSem;
+        si.pWaitDstStageMask = &waitStage;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cb;
+        si.signalSemaphoreCount = 1;
+        si.pSignalSemaphores = &avSem;
+
+        m_Vulkan->lock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
+        VkResult subRes = pfnSubmit(computeQueue, 1, &si, (VkFence)m_FrucOverrideFence);
+        m_Vulkan->unlock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
+        if (subRes != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase C submit rc=%d", (int)subRes);
+            return false;
+        }
+        vkFrame->sem_value[0] = signalVal;
+
+        VkFence fence = (VkFence)m_FrucOverrideFence;
+        if (pfnWaitFences(m_Vulkan->device, 1, &fence, VK_TRUE, 1000ULL * 1000 * 1000) != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase C fence wait failed");
+            return false;
+        }
+        pfnResetFences(m_Vulkan->device, 1, &fence);
+    }
+
+    ++m_FrucOverrideFrameCount;
+    if (m_FrucOverrideFrameCount == 1 || (m_FrucOverrideFrameCount % 60) == 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2d frame#%llu OK %s RIFE=%.2fms",
+                    (unsigned long long)m_FrucOverrideFrameCount,
+                    usedRife ? "(interp)" : "(first frame, real)",
+                    rifeMs);
+    }
+    return true;
+}
+
 // §J.3.e.2.e2a — load RIFE model on external ncnn instance + allocate VkMats.
 //
 // Runs once per PlVkRenderer instance, lazy-initialised on first call.  Mirrors
@@ -2317,9 +2659,15 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
     m_RifeNet->opt.use_fp16_arithmetic = false;
     m_RifeNet->opt.use_int8_storage    = false;
     m_RifeNet->opt.use_int8_arithmetic = false;
+    // §J.3.e.2.e2d — disable packing layout so input/output VkMats are planar
+    // (W,H,3,1) fp32 — matches our bufRGB layout for direct vkCmdCopyBuffer.
+    // With packing on, RIFE outputs elempack=4 packed VkMat and we'd need an
+    // extra unpack shader.
+    m_RifeNet->opt.use_packing_layout  = false;
+    m_RifeNet->opt.use_shader_pack8    = false;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a opt: fp32 path (fp16 OFF — external mode "
-                "doesn't expose libplacebo's enabled-extension list)");
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a opt: fp32 path, packing OFF "
+                "(planar I/O matches bufRGB layout)");
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 2/6 set_vulkan_device(0)");
@@ -2410,15 +2758,17 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6b — VkMat::create prev (W=%u H=%u c=3)",
                 width, height);
-    m_RifePrevVkMat.create((int)width, (int)height, 3, sizeof(float), 1, blobAlloc);
+    // 5-arg form (no explicit elempack) matches NcnnFRUC's working phase-B.4b
+    // pattern; default elempack lets ncnn pick the right value internally.
+    m_RifePrevVkMat.create((int)width, (int)height, 3, (size_t)sizeof(float), blobAlloc);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6c — VkMat::create curr empty=%d",
                 (int)m_RifePrevVkMat.empty());
-    m_RifeCurrVkMat.create((int)width, (int)height, 3, sizeof(float), 1, blobAlloc);
+    m_RifeCurrVkMat.create((int)width, (int)height, 3, (size_t)sizeof(float), blobAlloc);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6d — VkMat::create timestep curr_empty=%d",
                 (int)m_RifeCurrVkMat.empty());
-    m_RifeTimestepVkMat.create((int)width, (int)height, 1, sizeof(float), 1, blobAlloc);
+    m_RifeTimestepVkMat.create((int)width, (int)height, 1, (size_t)sizeof(float), blobAlloc);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6e — VkMat creates done ts_empty=%d",
                 (int)m_RifeTimestepVkMat.empty());
@@ -3241,8 +3591,18 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             initRifeModel((uint32_t)frame->width, (uint32_t)frame->height);
         }
         auto* vkFrame = (AVVkFrame*)frame->data[0];
-        if (vkFrame && m_FrucOverrideReady && m_FrucRgbImgPlTex
-            && runFrucOverridePass(vkFrame, frame)) {
+        // §J.3.e.2.e2d — if RIFE init succeeded, use RIFE-injected pass.
+        // Otherwise (e.g. RIFE env var not set or load_model failed) fall through
+        // to §J.3.e.2.e1b pass-through pipeline.
+        bool dispatchOk = false;
+        if (vkFrame && m_FrucOverrideReady && m_FrucRgbImgPlTex) {
+            if (m_RifeReady) {
+                dispatchOk = runFrucOverridePassWithRife(vkFrame, frame);
+            } else {
+                dispatchOk = runFrucOverridePass(vkFrame, frame);
+            }
+        }
+        if (dispatchOk) {
             // Image now in GENERAL with new content.  Hand to libplacebo via
             // pl_vulkan_release_ex (sem omitted because we host-fenced above).
             heldTex = (pl_tex)m_FrucRgbImgPlTex;

@@ -120,6 +120,21 @@ private:
     bool initRifeModel(uint32_t width, uint32_t height);
     void destroyRifeModel();
 
+    // §J.3.e.2.e2d — same role as runFrucOverridePass but injects RIFE forward
+    // between the NV12→bufRGB forward shader and the bufRGB→VkImage reverse
+    // shader.  Three-phase per-frame submit:
+    //   Phase A (our cmd buf): forward dispatch + vkCmdCopyBuffer bufRGB →
+    //                          m_RifeCurrVkMat.buffer + plane layout restore
+    //   Phase B (ncnn cmd):    if has prev: ncnn::Extractor::extract(prev,
+    //                          curr, timestep) → out + clone curr→prev.
+    //                          If first frame: just clone curr→prev,
+    //                          out=curr alias.
+    //   Phase C (our cmd buf): vkCmdCopyBuffer out.buffer → bufRGB +
+    //                          reverse shader (bufRGB → m_FrucRgbImgImage)
+    // Each phase host-fenced for now (3 syncs/frame; §J.3.e.2.f will replace
+    // with timeline sem chain for async pipelining).
+    bool runFrucOverridePassWithRife(struct AVVkFrame* vkFrame, AVFrame* frame);
+
     // The backend renderer if we're frontend-only
     IFFmpegRenderer* m_Backend;
     bool m_HwAccelBackend;
