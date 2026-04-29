@@ -647,6 +647,45 @@ bool PlVkRenderer::initializeNcnnExternalHandoff()
                 gi.transfer_queue_family_index(), gi.transfer_queue_count());
 
     m_NcnnExternalReady = true;
+
+    // §J.3.e.2.h.a — forward decls for the GLSL string literals defined
+    // further down in this file (alongside the existing NV12-RGB / RGB-img
+    // shaders, ~line 1180).  Defined as extern-linkage const char* with
+    // C++ guaranteed initialization order within a single TU.
+    extern const char* kFrucMotionEstShaderGlsl;
+    extern const char* kFrucMvMedianShaderGlsl;
+    extern const char* kFrucWarpShaderGlsl;
+
+    // §J.3.e.2.h.a — compile-time probe of the three Generic FRUC GLSL
+    // ports (motionest, mv_median, warp).  Just exercises
+    // ncnn::compile_spirv_module on each source so we know the GLSL
+    // is valid before the next sub-phase wires them into VkPipelines.
+    // Gated behind VIPLE_VK_FRUC_GENERIC_PROBE=1 so it doesn't slow
+    // production init.  spv sizes logged for sanity.
+    if (qEnvironmentVariableIntValue("VIPLE_VK_FRUC_GENERIC_PROBE") != 0) {
+        struct ShaderProbe { const char* tag; const char* src; };
+        const ShaderProbe probes[] = {
+            { "motionest",  kFrucMotionEstShaderGlsl },
+            { "mv_median",  kFrucMvMedianShaderGlsl  },
+            { "warp",       kFrucWarpShaderGlsl      },
+        };
+        for (const auto& pr : probes) {
+            std::vector<uint32_t> spv;
+            ncnn::Option opt;
+            int rc = ncnn::compile_spirv_module(pr.src, opt, spv);
+            if (rc == 0) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-FRUC] §J.3.e.2.h.a probe: %s GLSL compiled — "
+                            "spv_size=%zu words (%zu bytes)",
+                            pr.tag, spv.size(), spv.size() * sizeof(uint32_t));
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-FRUC] §J.3.e.2.h.a probe: %s GLSL FAILED rc=%d",
+                            pr.tag, rc);
+            }
+        }
+    }
+
     return true;
 }
 
@@ -1171,6 +1210,501 @@ void main() {
     rgbOut.data[outIdx + 0 * planeSize] = r;
     rgbOut.data[outIdx + 1 * planeSize] = g;
     rgbOut.data[outIdx + 2 * planeSize] = b;
+}
+)GLSL";
+
+// =====================================================================
+// §J.3.e.2.h — Generic FRUC port: HLSL → GLSL compute shaders.
+//
+// Three shaders matching D3D11 GenericFRUC's pipeline 1:1.  Algorithm
+// preserved bit-for-bit (so quality should match D3D11 baseline);
+// resource layout adapted to our planar fp32 RGB buffer format
+// (§J.3.e.2.c output) instead of D3D11's RGBA8 textures.
+//
+// Pipeline (per real frame N from server):
+//   1. NV12 → bufRGB compute (already shipped, §J.3.e.2.c forward)
+//   2. memcpy bufRGB → prevRGB[ring slot N-1] for next frame's ME
+//   3. If N >= 1:
+//      a. ME compute: (prevRGB[ring N-2], currRGB=bufRGB) → mvField
+//      b. MV median: mvField → mvFieldFiltered
+//      c. Warp compute: (prevRGB, currRGB, mvFieldFiltered, t=0.5)
+//         → interpRGB
+//   4. interpRGB → VkImage (reverse compute, §J.3.e.2.d)
+//   5. wrap as disposable pl_tex, pl_render_image at +8ms (interp slot)
+//   6. pl_render_image(real AVVkFrame) at +16ms (real slot)
+//
+// Quality variants: only "balanced" (Q=1) implemented in first cut.
+// Q=0 (Quality, +subpixel +adaptive) and Q=2 (Performance, -temporal)
+// can be added later by prepending #define QUALITY_LEVEL N at compile.
+//
+// Push constants kept ≤ 32 bytes (well within Vulkan's 128-byte minimum
+// guaranteed limit) — frameW/H, blockSize, mvW/H, blendFactor packed.
+//
+// MV field format: storage buffer of int packed pairs.  Each MV slot
+// is 2 consecutive int32 (x, y) in Q1 fixed-point pixels (×2 actual px,
+// matching D3D11 shader's bestMV_Q1 convention).  Index =
+// (blockY * mvW + blockX) * 2.
+
+// Motion estimation shader — Balanced (Q=1) variant.
+// Source: d3d11_motionest_compute.hlsl @ QUALITY_LEVEL=1.
+// 8-neighbor diamond, 3×3 sample (9 census points), no sub-pixel,
+// with temporal predictor.
+// External linkage so initializeNcnnExternalHandoff (much earlier in TU)
+// can forward-declare and reference these via extern.
+const char* kFrucMotionEstShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#define QUALITY_LEVEL 1
+#define SEARCH_NEIGHBORS 8
+#define SAMPLE_COUNT     3
+#define ENABLE_SUBPIXEL  0
+#define ENABLE_TEMPORAL  1
+#define SAMPLE_STRIDE    4
+#define CENSUS_RADIUS    1
+
+layout(binding = 0) readonly  buffer PrevRGB { float data[]; } prevFrame;
+layout(binding = 1) readonly  buffer CurrRGB { float data[]; } currFrame;
+layout(binding = 2) readonly  buffer PrevMV  { int   data[]; } prevMV;
+layout(binding = 3) writeonly buffer OutMV   { int   data[]; } outMV;
+
+layout(push_constant) uniform Params {
+    uint frameWidth;
+    uint frameHeight;
+    uint blockSize;
+    uint mvWidth;
+    uint mvHeight;
+    uint _pad0;
+} p;
+
+float loadR(int planeStart, int x, int y) {
+    int xx = clamp(x, 0, int(p.frameWidth) - 1);
+    int yy = clamp(y, 0, int(p.frameHeight) - 1);
+    return prevFrame.data[planeStart + yy * int(p.frameWidth) + xx];
+}
+float loadPrevR(int x, int y) { return loadR(0, x, y); }
+float loadCurrR(int x, int y) {
+    int xx = clamp(x, 0, int(p.frameWidth) - 1);
+    int yy = clamp(y, 0, int(p.frameHeight) - 1);
+    return currFrame.data[yy * int(p.frameWidth) + xx];
+}
+
+uint censusDescriptorPrev(ivec2 pos) {
+    float center = loadPrevR(pos.x, pos.y);
+    uint bits = 0u; int bit = 0;
+    for (int dy = -CENSUS_RADIUS; dy <= CENSUS_RADIUS; dy++) {
+        for (int dx = -CENSUS_RADIUS; dx <= CENSUS_RADIUS; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            float nb = loadPrevR(pos.x + dx, pos.y + dy);
+            bits |= ((nb < center) ? 1u : 0u) << bit;
+            bit++;
+        }
+    }
+    return bits;
+}
+uint censusDescriptorCurr(ivec2 pos) {
+    float center = loadCurrR(pos.x, pos.y);
+    uint bits = 0u; int bit = 0;
+    for (int dy = -CENSUS_RADIUS; dy <= CENSUS_RADIUS; dy++) {
+        for (int dx = -CENSUS_RADIUS; dx <= CENSUS_RADIUS; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            float nb = loadCurrR(pos.x + dx, pos.y + dy);
+            bits |= ((nb < center) ? 1u : 0u) << bit;
+            bit++;
+        }
+    }
+    return bits;
+}
+
+uint hammingDist(uint a, uint b) {
+    return bitCount(a ^ b);
+}
+
+uint currCensusCache[SAMPLE_COUNT * SAMPLE_COUNT];
+
+void buildCurrCensusCache(ivec2 curCenter) {
+    int half_s = (SAMPLE_COUNT * SAMPLE_STRIDE) / 2;
+    for (int y = 0; y < SAMPLE_COUNT; y++) {
+        for (int x = 0; x < SAMPLE_COUNT; x++) {
+            ivec2 offset = ivec2(x * SAMPLE_STRIDE - half_s, y * SAMPLE_STRIDE - half_s);
+            ivec2 cp = clamp(curCenter + offset,
+                             ivec2(0, 0),
+                             ivec2(int(p.frameWidth) - 1, int(p.frameHeight) - 1));
+            currCensusCache[y * SAMPLE_COUNT + x] = censusDescriptorCurr(cp);
+        }
+    }
+}
+
+float computeCensusCost(ivec2 refCenter, ivec2 curCenter, float abortAbove) {
+    float cost = 0.0;
+    int half_s = (SAMPLE_COUNT * SAMPLE_STRIDE) / 2;
+    for (int y = 0; y < SAMPLE_COUNT; y++) {
+        for (int x = 0; x < SAMPLE_COUNT; x++) {
+            ivec2 offset = ivec2(x * SAMPLE_STRIDE - half_s, y * SAMPLE_STRIDE - half_s);
+            ivec2 rp = clamp(refCenter + offset,
+                             ivec2(0, 0),
+                             ivec2(int(p.frameWidth) - 1, int(p.frameHeight) - 1));
+            cost += float(hammingDist(censusDescriptorPrev(rp),
+                                      currCensusCache[y * SAMPLE_COUNT + x]));
+        }
+        if (cost >= abortAbove) return cost;
+    }
+    return cost;
+}
+
+const ivec2 searchPattern[8] = ivec2[8](
+    ivec2(0,-1), ivec2(0,1), ivec2(-1,0), ivec2(1,0),
+    ivec2(-1,-1), ivec2(1,-1), ivec2(-1,1), ivec2(1,1)
+);
+
+ivec2 loadPrevMV(int bx, int by) {
+    int idx = (by * int(p.mvWidth) + bx) * 2;
+    return ivec2(prevMV.data[idx], prevMV.data[idx + 1]);
+}
+void storeOutMV(int bx, int by, ivec2 v) {
+    int idx = (by * int(p.mvWidth) + bx) * 2;
+    outMV.data[idx]     = v.x;
+    outMV.data[idx + 1] = v.y;
+}
+
+void main() {
+    uint blockX = gl_GlobalInvocationID.x;
+    uint blockY = gl_GlobalInvocationID.y;
+    if (blockX >= p.mvWidth || blockY >= p.mvHeight) return;
+
+    int halfSample = (SAMPLE_COUNT * SAMPLE_STRIDE) / 2;
+    ivec2 blockCenter = ivec2(int(blockX * p.blockSize + p.blockSize / 2u),
+                              int(blockY * p.blockSize + p.blockSize / 2u));
+    blockCenter = clamp(blockCenter,
+                        ivec2(halfSample, halfSample),
+                        ivec2(int(p.frameWidth) - halfSample - 1,
+                              int(p.frameHeight) - halfSample - 1));
+
+    buildCurrCensusCache(blockCenter);
+
+    ivec2 bestMV   = ivec2(0, 0);
+    float bestCost = computeCensusCost(blockCenter, blockCenter, 1e9);
+
+    if (bestCost < float(SAMPLE_COUNT * SAMPLE_COUNT) * 0.5) {
+        storeOutMV(int(blockX), int(blockY), ivec2(0, 0));
+        return;
+    }
+
+    // Temporal predictor (Balanced/Quality)
+    ivec2 prevMV_Q1 = loadPrevMV(int(blockX), int(blockY));
+    prevMV_Q1 = clamp(prevMV_Q1, ivec2(-96, -96), ivec2(96, 96));
+    ivec2 temporalMV = ivec2(
+        (prevMV_Q1.x >= 0 ? prevMV_Q1.x + 1 : prevMV_Q1.x - 1) / 2,
+        (prevMV_Q1.y >= 0 ? prevMV_Q1.y + 1 : prevMV_Q1.y - 1) / 2
+    );
+    {
+        ivec2 refCenterTmp = blockCenter + temporalMV;
+        if (all(greaterThanEqual(refCenterTmp, ivec2(halfSample, halfSample))) &&
+            all(lessThan(refCenterTmp,
+                         ivec2(int(p.frameWidth) - halfSample,
+                               int(p.frameHeight) - halfSample)))) {
+            float tmpCost = computeCensusCost(refCenterTmp, blockCenter, bestCost);
+            if (tmpCost < bestCost) { bestCost = tmpCost; bestMV = temporalMV; }
+        }
+    }
+    bool temporalConverged = (bestCost < float(SAMPLE_COUNT * SAMPLE_COUNT));
+
+    // Diamond search (Balanced 2-step: 3, 1)
+    if (!temporalConverged) {
+        const int MAX_CANDIDATES = 16;
+        int candidateCount = 0;
+        float prevStepBestCost = bestCost;
+        const int DIAMOND_STEPS[2] = int[2](3, 1);
+        const int DIAMOND_STEP_COUNT = 2;
+        for (int si = 0; si < DIAMOND_STEP_COUNT; si++) {
+            int step = DIAMOND_STEPS[si];
+            ivec2 prevBestMV = bestMV;
+            for (int i = 0; i < SEARCH_NEIGHBORS; i++) {
+                if (candidateCount >= MAX_CANDIDATES) break;
+                ivec2 candidate = prevBestMV + searchPattern[i] * step;
+                ivec2 refCenter = blockCenter + candidate;
+                if (any(lessThan(refCenter, ivec2(halfSample, halfSample))) ||
+                    any(greaterThanEqual(refCenter,
+                                          ivec2(int(p.frameWidth) - halfSample,
+                                                int(p.frameHeight) - halfSample))))
+                    continue;
+                float cost = computeCensusCost(refCenter, blockCenter, bestCost);
+                candidateCount++;
+                if (cost < bestCost) { bestCost = cost; bestMV = candidate; }
+            }
+            if (candidateCount >= MAX_CANDIDATES) break;
+            if (bestCost >= prevStepBestCost) break;
+            prevStepBestCost = bestCost;
+        }
+    }
+
+    // No sub-pixel on Balanced — Q1 = ×2 of integer MV
+    ivec2 bestMV_Q1 = bestMV * 2;
+
+    // High-cost rejection → fallback to MV=0
+    if (bestCost > float(SAMPLE_COUNT * SAMPLE_COUNT) * 3.0) {
+        storeOutMV(int(blockX), int(blockY), ivec2(0, 0));
+        return;
+    }
+
+    // Temporal smoothing: 60/40 current/prev
+    ivec2 smoothedMV_Q1;
+    if (all(equal(bestMV_Q1, ivec2(0, 0))) && all(equal(prevMV_Q1, ivec2(0, 0)))) {
+        smoothedMV_Q1 = ivec2(0, 0);
+    } else {
+        smoothedMV_Q1 = ivec2(
+            (bestMV_Q1.x * 6 + prevMV_Q1.x * 4 + 5) / 10,
+            (bestMV_Q1.y * 6 + prevMV_Q1.y * 4 + 5) / 10
+        );
+        smoothedMV_Q1 = clamp(smoothedMV_Q1, ivec2(-96, -96), ivec2(96, 96));
+    }
+    storeOutMV(int(blockX), int(blockY), smoothedMV_Q1);
+}
+)GLSL";
+
+// MV median 3×3 filter shader.
+// Source: d3d11_mv_median.hlsl (no quality variants).
+const char* kFrucMvMedianShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) readonly  buffer MvIn  { int data[]; } mvIn;
+layout(binding = 1) writeonly buffer MvOut { int data[]; } mvOut;
+
+layout(push_constant) uniform Params {
+    uint mvWidth;
+    uint mvHeight;
+    uint _pad0;
+    uint _pad1;
+} p;
+
+#define S9(a, i, j) { int _m = min(a[i], a[j]); int _M = max(a[i], a[j]); a[i] = _m; a[j] = _M; }
+
+void sort9(inout int a[9]) {
+    S9(a, 0, 3) S9(a, 1, 7) S9(a, 2, 5) S9(a, 4, 8)
+    S9(a, 0, 7) S9(a, 2, 4) S9(a, 3, 8) S9(a, 5, 6)
+    S9(a, 0, 2) S9(a, 1, 3) S9(a, 4, 5) S9(a, 7, 8)
+    S9(a, 1, 4) S9(a, 3, 6) S9(a, 5, 7)
+    S9(a, 0, 1) S9(a, 2, 4) S9(a, 3, 5) S9(a, 6, 8)
+    S9(a, 2, 3) S9(a, 4, 5) S9(a, 6, 7)
+    S9(a, 1, 2) S9(a, 3, 4) S9(a, 5, 6)
+}
+
+ivec2 loadMV(int bx, int by) {
+    int idx = (by * int(p.mvWidth) + bx) * 2;
+    return ivec2(mvIn.data[idx], mvIn.data[idx + 1]);
+}
+void storeMV(int bx, int by, ivec2 v) {
+    int idx = (by * int(p.mvWidth) + bx) * 2;
+    mvOut.data[idx]     = v.x;
+    mvOut.data[idx + 1] = v.y;
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= p.mvWidth || y >= p.mvHeight) return;
+
+    int sx[9]; int sy[9];
+    int n = 0;
+    int minX =  0x7FFF, maxX = -0x7FFF;
+    int minY =  0x7FFF, maxY = -0x7FFF;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 q = clamp(ivec2(int(x) + dx, int(y) + dy),
+                            ivec2(0, 0),
+                            ivec2(int(p.mvWidth) - 1, int(p.mvHeight) - 1));
+            ivec2 v = loadMV(q.x, q.y);
+            sx[n] = v.x; sy[n] = v.y;
+            minX = min(minX, v.x); maxX = max(maxX, v.x);
+            minY = min(minY, v.y); maxY = max(maxY, v.y);
+            n++;
+        }
+    }
+
+    if (maxX == 0 && minX == 0 && maxY == 0 && minY == 0) {
+        storeMV(int(x), int(y), ivec2(0, 0));
+        return;
+    }
+    if (maxX - minX <= 1 && maxY - minY <= 1) {
+        storeMV(int(x), int(y), ivec2(sx[4], sy[4]));
+        return;
+    }
+    sort9(sx);
+    sort9(sy);
+    storeMV(int(x), int(y), ivec2(sx[4], sy[4]));
+}
+)GLSL";
+
+// Warp+blend shader — Balanced (Q=1) variant.
+// Source: d3d11_warp_compute.hlsl @ QUALITY_LEVEL=1.
+// Cheap adaptive (MV-magnitude weight, no extra texture reads),
+// luma-gap catastrophic check, manual bilinear from planar buffers.
+// Outputs to a planar fp32 RGB buffer (same layout as input bufRGB so
+// §J.3.e.2.d reverse converter can consume it directly).
+const char* kFrucWarpShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#define QUALITY_LEVEL 1
+#define ENABLE_ADAPTIVE_BLEND 0
+#define ENABLE_CHEAP_ADAPTIVE 1
+#define EDGE_AWARE_MV_THRESHOLD 2.0
+
+layout(binding = 0) readonly  buffer PrevRGB { float data[]; } prevFrame;
+layout(binding = 1) readonly  buffer CurrRGB { float data[]; } currFrame;
+layout(binding = 2) readonly  buffer MV      { int   data[]; } motionField;
+layout(binding = 3) writeonly buffer InterpRGB { float data[]; } interpFrame;
+
+layout(push_constant) uniform Params {
+    uint  frameWidth;
+    uint  frameHeight;
+    uint  mvBlockSize;
+    uint  mvWidth;
+    uint  mvHeight;
+    float blendFactor;
+} p;
+
+vec3 fetchPrevRGB(int x, int y) {
+    int xx = clamp(x, 0, int(p.frameWidth)  - 1);
+    int yy = clamp(y, 0, int(p.frameHeight) - 1);
+    int idx = yy * int(p.frameWidth) + xx;
+    int planeSize = int(p.frameWidth) * int(p.frameHeight);
+    return vec3(prevFrame.data[idx],
+                prevFrame.data[idx + planeSize],
+                prevFrame.data[idx + 2 * planeSize]);
+}
+vec3 fetchCurrRGB(int x, int y) {
+    int xx = clamp(x, 0, int(p.frameWidth)  - 1);
+    int yy = clamp(y, 0, int(p.frameHeight) - 1);
+    int idx = yy * int(p.frameWidth) + xx;
+    int planeSize = int(p.frameWidth) * int(p.frameHeight);
+    return vec3(currFrame.data[idx],
+                currFrame.data[idx + planeSize],
+                currFrame.data[idx + 2 * planeSize]);
+}
+
+// Bilinear sample of the planar fp32 RGB buffer at sub-pixel UV
+// coordinates (0..1).  CLAMP edge handling.
+vec3 sampleBilinearPrev(vec2 uv) {
+    vec2 fp = uv * vec2(p.frameWidth, p.frameHeight) - 0.5;
+    int x0 = int(floor(fp.x));
+    int y0 = int(floor(fp.y));
+    vec2 f = fp - vec2(x0, y0);
+    vec3 c00 = fetchPrevRGB(x0,     y0);
+    vec3 c10 = fetchPrevRGB(x0 + 1, y0);
+    vec3 c01 = fetchPrevRGB(x0,     y0 + 1);
+    vec3 c11 = fetchPrevRGB(x0 + 1, y0 + 1);
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+vec3 sampleBilinearCurr(vec2 uv) {
+    vec2 fp = uv * vec2(p.frameWidth, p.frameHeight) - 0.5;
+    int x0 = int(floor(fp.x));
+    int y0 = int(floor(fp.y));
+    vec2 f = fp - vec2(x0, y0);
+    vec3 c00 = fetchCurrRGB(x0,     y0);
+    vec3 c10 = fetchCurrRGB(x0 + 1, y0);
+    vec3 c01 = fetchCurrRGB(x0,     y0 + 1);
+    vec3 c11 = fetchCurrRGB(x0 + 1, y0 + 1);
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+ivec2 loadMVRaw(int bx, int by) {
+    bx = clamp(bx, 0, int(p.mvWidth)  - 1);
+    by = clamp(by, 0, int(p.mvHeight) - 1);
+    int idx = (by * int(p.mvWidth) + bx) * 2;
+    return ivec2(motionField.data[idx], motionField.data[idx + 1]);
+}
+
+vec2 sampleMV(vec2 pixelPos) {
+    float bs = float(p.mvBlockSize);
+    vec2 mvPos = pixelPos / bs - 0.5;
+    ivec2 mv00 = ivec2(floor(mvPos));
+    ivec2 mv10 = mv00 + ivec2(1, 0);
+    ivec2 mv01 = mv00 + ivec2(0, 1);
+    ivec2 mv11 = mv00 + ivec2(1, 1);
+
+    vec2 frac_v = mvPos - floor(mvPos);
+
+    vec2 v00 = vec2(loadMVRaw(mv00.x, mv00.y)) * 0.5;
+    vec2 v10 = vec2(loadMVRaw(mv10.x, mv10.y)) * 0.5;
+    vec2 v01 = vec2(loadMVRaw(mv01.x, mv01.y)) * 0.5;
+    vec2 v11 = vec2(loadMVRaw(mv11.x, mv11.y)) * 0.5;
+
+    vec2 d01 = v00 - v10; vec2 d02 = v00 - v01;
+    vec2 d13 = v10 - v11; vec2 d23 = v01 - v11;
+    float maxDiffSq = max(max(dot(d01, d01), dot(d02, d02)),
+                          max(dot(d13, d13), dot(d23, d23)));
+
+    vec2 avgMv = 0.25 * (v00 + v10 + v01 + v11);
+    float avgMagSq = dot(avgMv, avgMv);
+
+    vec2 top = mix(v00, v10, frac_v.x);
+    vec2 bot = mix(v01, v11, frac_v.x);
+    vec2 bilinear = mix(top, bot, frac_v.y);
+
+    vec2 pick = (frac_v.x < 0.5)
+        ? ((frac_v.y < 0.5) ? v00 : v01)
+        : ((frac_v.y < 0.5) ? v10 : v11);
+    float threshSq = EDGE_AWARE_MV_THRESHOLD * EDGE_AWARE_MV_THRESHOLD;
+    float isBoundary = step(threshSq, maxDiffSq)
+                     * step(avgMagSq * 0.25, maxDiffSq);
+    float t = isBoundary * smoothstep(threshSq, threshSq * 2.0, maxDiffSq);
+    return mix(bilinear, pick, t);
+}
+
+void storeInterp(int x, int y, vec3 c) {
+    int idx = y * int(p.frameWidth) + x;
+    int planeSize = int(p.frameWidth) * int(p.frameHeight);
+    interpFrame.data[idx]                 = c.r;
+    interpFrame.data[idx + planeSize]     = c.g;
+    interpFrame.data[idx + 2 * planeSize] = c.b;
+}
+
+void main() {
+    uint px = gl_GlobalInvocationID.x;
+    uint py = gl_GlobalInvocationID.y;
+    if (px >= p.frameWidth || py >= p.frameHeight) return;
+
+    vec2 pp   = vec2(float(px), float(py));
+    vec2 dims = vec2(float(p.frameWidth), float(p.frameHeight));
+    vec3 sameCurr = fetchCurrRGB(int(px), int(py));
+
+    vec2 mv = sampleMV(pp);
+    mv = clamp(mv, vec2(-48.0, -48.0), vec2(48.0, 48.0));
+
+    if (dot(mv, mv) < 1.0) {
+        storeInterp(int(px), int(py), sameCurr);
+        return;
+    }
+
+    vec2 prevUV = (pp - mv * 0.5 + 0.5) / dims;
+    vec2 currUV = (pp + mv * 0.5 + 0.5) / dims;
+    vec3 prevSample = sampleBilinearPrev(prevUV);
+    vec3 currSample = sampleBilinearCurr(currUV);
+
+    vec2 prevPos = pp - mv * 0.5;
+    vec2 currPos = pp + mv * 0.5;
+    vec2 lo = vec2(0.5, 0.5);
+    vec2 hi = vec2(float(p.frameWidth) - 0.5, float(p.frameHeight) - 0.5);
+    bool prevValid = all(greaterThanEqual(prevPos, lo)) && all(lessThan(prevPos, hi));
+    bool currValid = all(greaterThanEqual(currPos, lo)) && all(lessThan(currPos, hi));
+
+    vec3 result;
+    if (prevValid && currValid) {
+        // Balanced "cheap adaptive": 0.5 base weight + luma-gap bias toward currSample.
+        float w = 0.5;
+        const vec3 YC = vec3(0.299, 0.587, 0.114);
+        float lg = abs(dot(prevSample, YC) - dot(currSample, YC));
+        float b = smoothstep(0.05, 0.25, lg);
+        vec3 blended = mix(prevSample, currSample, w);
+        result = mix(blended, currSample, b);
+    } else {
+        result = prevValid ? prevSample
+               : (currValid ? currSample : sameCurr);
+    }
+
+    storeInterp(int(px), int(py), result);
 }
 )GLSL";
 
