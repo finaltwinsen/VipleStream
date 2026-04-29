@@ -137,6 +137,10 @@ PlVkRenderer::~PlVkRenderer()
     // subsequent vkDestroy* in ncnn fail.
     teardownNcnnExternalHandoff();
 
+    // §J.3.e.2.a — same lifetime constraint: probe resources are owned
+    // on m_Vulkan->device; destroy before pl_vulkan_destroy.
+    destroyFrucProbeResources();
+
     if (m_Vulkan != nullptr) {
         for (int i = 0; i < (int)SDL_arraysize(m_Overlays); i++) {
             pl_tex_destroy(m_Vulkan->gpu, &m_Overlays[i].overlay.tex);
@@ -637,6 +641,383 @@ void PlVkRenderer::teardownNcnnExternalHandoff()
     m_NcnnExternalReady = false;
 }
 
+// §J.3.e.2.a — layout transition + 1-pixel readback probe.
+//
+// Probe goal: prove cross-queue-family ownership transfer
+// (decode_qf → compute_qf) and VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR →
+// VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL transition work on production
+// drivers.  This is the load-bearing primitive for §J.3.e.2.b/c —
+// the NV12→RGB compute shader needs the source image readable from a
+// compute-queue command buffer.
+//
+// Sync model: ffmpeg's hwcontext_vulkan exposes per-frame timeline
+// VkSemaphores on AVVkFrame.sem[i] / sem_value[i].  Consumers must wait on
+// sem_value[i] before any submit, and signal sem_value[i]+1 after, then
+// store the new value back so ffmpeg knows to wait when reusing the slot.
+//
+// Queue ownership: we use VK_QUEUE_FAMILY_IGNORED for both sides of the
+// barrier — ffmpeg's hwcontext_vulkan creates AVVkFrames with sharing
+// flags that allow consumption across queue families it knows about
+// (compute / transfer / video).  If validation layers complain on a
+// future driver, we'll revisit with explicit release-on-decode-queue +
+// acquire-on-compute-queue barriers.
+
+#include <vulkan/vulkan.h>
+
+bool PlVkRenderer::initFrucProbeResources()
+{
+    if (m_FrucProbeInitialised || m_FrucProbeDisabled) return m_FrucProbeInitialised;
+    if (!m_Vulkan || !m_PlVkInstance) {
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+
+    // Dynamically load Vulkan device entries via libplacebo's instance proc addr.
+    // (moonlight-qt doesn't link vulkan-1.lib directly.)
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        // vkGetDeviceProcAddr is itself an instance-level entry; load via
+        // libplacebo's get_proc_addr (= vkGetInstanceProcAddr).
+        static PFN_vkGetDeviceProcAddr s_pfnGetDeviceProcAddr = nullptr;
+        if (!s_pfnGetDeviceProcAddr) {
+            s_pfnGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)
+                m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, "vkGetDeviceProcAddr");
+        }
+        return s_pfnGetDeviceProcAddr ? s_pfnGetDeviceProcAddr(m_Vulkan->device, name) : nullptr;
+    };
+
+    auto pfnCreateCommandPool = (PFN_vkCreateCommandPool)getDevProc("vkCreateCommandPool");
+    auto pfnAllocateCommandBuffers = (PFN_vkAllocateCommandBuffers)getDevProc("vkAllocateCommandBuffers");
+    auto pfnCreateBuffer = (PFN_vkCreateBuffer)getDevProc("vkCreateBuffer");
+    auto pfnGetBufferMemoryRequirements = (PFN_vkGetBufferMemoryRequirements)getDevProc("vkGetBufferMemoryRequirements");
+    auto pfnAllocateMemory = (PFN_vkAllocateMemory)getDevProc("vkAllocateMemory");
+    auto pfnBindBufferMemory = (PFN_vkBindBufferMemory)getDevProc("vkBindBufferMemory");
+    auto pfnCreateFence = (PFN_vkCreateFence)getDevProc("vkCreateFence");
+
+    auto pfnGetPhysProps = (PFN_vkGetPhysicalDeviceMemoryProperties)
+        m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, "vkGetPhysicalDeviceMemoryProperties");
+
+    if (!pfnCreateCommandPool || !pfnAllocateCommandBuffers || !pfnCreateBuffer
+        || !pfnGetBufferMemoryRequirements || !pfnAllocateMemory || !pfnBindBufferMemory
+        || !pfnCreateFence || !pfnGetPhysProps) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.a probe init: missing Vulkan PFN");
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+
+    // Command pool on compute queue family — we'll submit on libplacebo's
+    // compute queue via lock_queue/unlock_queue.
+    VkCommandPoolCreateInfo poolCi = {};
+    poolCi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolCi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolCi.queueFamilyIndex = m_Vulkan->queue_compute.index;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (pfnCreateCommandPool(m_Vulkan->device, &poolCi, nullptr, &pool) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.a probe init: vkCreateCommandPool failed");
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+    m_FrucProbeCmdPool = pool;
+
+    VkCommandBufferAllocateInfo cbAlloc = {};
+    cbAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbAlloc.commandPool = pool;
+    cbAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbAlloc.commandBufferCount = 1;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    if (pfnAllocateCommandBuffers(m_Vulkan->device, &cbAlloc, &cb) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.a probe init: vkAllocateCommandBuffers failed");
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+    m_FrucProbeCmdBuf = cb;
+
+    // Tiny host-visible buffer for 1-texel readback.
+    VkBufferCreateInfo bufCi = {};
+    bufCi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufCi.size = 16;  // 4 bytes for Y, padded
+    bufCi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufCi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBuffer buf = VK_NULL_HANDLE;
+    if (pfnCreateBuffer(m_Vulkan->device, &bufCi, nullptr, &buf) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.a probe init: vkCreateBuffer failed");
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+    m_FrucProbeBuffer = buf;
+
+    VkMemoryRequirements memReq = {};
+    pfnGetBufferMemoryRequirements(m_Vulkan->device, buf, &memReq);
+
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPhysProps(m_Vulkan->phys_device, &memProps);
+
+    uint32_t memTypeIdx = UINT32_MAX;
+    const VkMemoryPropertyFlags wantFlags =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if ((memReq.memoryTypeBits & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags & wantFlags) == wantFlags) {
+            memTypeIdx = i;
+            break;
+        }
+    }
+    if (memTypeIdx == UINT32_MAX) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.a probe init: no host-coherent memory type");
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+
+    VkMemoryAllocateInfo memAlloc = {};
+    memAlloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    memAlloc.allocationSize = memReq.size;
+    memAlloc.memoryTypeIndex = memTypeIdx;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    if (pfnAllocateMemory(m_Vulkan->device, &memAlloc, nullptr, &mem) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.a probe init: vkAllocateMemory failed");
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+    m_FrucProbeBufferMem = mem;
+
+    if (pfnBindBufferMemory(m_Vulkan->device, buf, mem, 0) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.a probe init: vkBindBufferMemory failed");
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+
+    VkFenceCreateInfo fenceCi = {};
+    fenceCi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence = VK_NULL_HANDLE;
+    if (pfnCreateFence(m_Vulkan->device, &fenceCi, nullptr, &fence) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.a probe init: vkCreateFence failed");
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+    m_FrucProbeFence = fence;
+
+    m_FrucProbeInitialised = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.a probe init: ready (compute_qf=%u)",
+                m_Vulkan->queue_compute.index);
+    return true;
+}
+
+void PlVkRenderer::destroyFrucProbeResources()
+{
+    if (!m_FrucProbeInitialised && !m_FrucProbeCmdPool && !m_FrucProbeBuffer
+        && !m_FrucProbeBufferMem && !m_FrucProbeFence) return;
+    if (!m_Vulkan || !m_PlVkInstance) return;
+
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        static PFN_vkGetDeviceProcAddr s_pfnGetDeviceProcAddr = nullptr;
+        if (!s_pfnGetDeviceProcAddr) {
+            s_pfnGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)
+                m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, "vkGetDeviceProcAddr");
+        }
+        return s_pfnGetDeviceProcAddr ? s_pfnGetDeviceProcAddr(m_Vulkan->device, name) : nullptr;
+    };
+
+    auto pfnDestroyCommandPool = (PFN_vkDestroyCommandPool)getDevProc("vkDestroyCommandPool");
+    auto pfnDestroyBuffer = (PFN_vkDestroyBuffer)getDevProc("vkDestroyBuffer");
+    auto pfnFreeMemory = (PFN_vkFreeMemory)getDevProc("vkFreeMemory");
+    auto pfnDestroyFence = (PFN_vkDestroyFence)getDevProc("vkDestroyFence");
+
+    if (m_FrucProbeFence && pfnDestroyFence) {
+        pfnDestroyFence(m_Vulkan->device, (VkFence)m_FrucProbeFence, nullptr);
+    }
+    if (m_FrucProbeBuffer && pfnDestroyBuffer) {
+        pfnDestroyBuffer(m_Vulkan->device, (VkBuffer)m_FrucProbeBuffer, nullptr);
+    }
+    if (m_FrucProbeBufferMem && pfnFreeMemory) {
+        pfnFreeMemory(m_Vulkan->device, (VkDeviceMemory)m_FrucProbeBufferMem, nullptr);
+    }
+    if (m_FrucProbeCmdPool && pfnDestroyCommandPool) {
+        // Frees command buffers allocated from the pool too.
+        pfnDestroyCommandPool(m_Vulkan->device, (VkCommandPool)m_FrucProbeCmdPool, nullptr);
+    }
+
+    m_FrucProbeFence = nullptr;
+    m_FrucProbeBuffer = nullptr;
+    m_FrucProbeBufferMem = nullptr;
+    m_FrucProbeCmdBuf = nullptr;
+    m_FrucProbeCmdPool = nullptr;
+    m_FrucProbeInitialised = false;
+}
+
+bool PlVkRenderer::runLayoutTransitionProbe(AVVkFrame* vkFrame, AVFrame* frame)
+{
+    if (m_FrucProbeDisabled) return false;
+    if (!m_FrucProbeInitialised && !initFrucProbeResources()) return false;
+    if (!vkFrame || !vkFrame->img[0]) return false;
+
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        static PFN_vkGetDeviceProcAddr s_pfnGetDeviceProcAddr = nullptr;
+        if (!s_pfnGetDeviceProcAddr) {
+            s_pfnGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)
+                m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, "vkGetDeviceProcAddr");
+        }
+        return s_pfnGetDeviceProcAddr ? s_pfnGetDeviceProcAddr(m_Vulkan->device, name) : nullptr;
+    };
+
+    static auto pfnBegin = (PFN_vkBeginCommandBuffer)getDevProc("vkBeginCommandBuffer");
+    static auto pfnEnd = (PFN_vkEndCommandBuffer)getDevProc("vkEndCommandBuffer");
+    static auto pfnReset = (PFN_vkResetCommandBuffer)getDevProc("vkResetCommandBuffer");
+    static auto pfnBarrier = (PFN_vkCmdPipelineBarrier)getDevProc("vkCmdPipelineBarrier");
+    static auto pfnCopyImgBuf = (PFN_vkCmdCopyImageToBuffer)getDevProc("vkCmdCopyImageToBuffer");
+    static auto pfnGetQueue = (PFN_vkGetDeviceQueue)getDevProc("vkGetDeviceQueue");
+    static auto pfnSubmit = (PFN_vkQueueSubmit)getDevProc("vkQueueSubmit");
+    static auto pfnWaitFences = (PFN_vkWaitForFences)getDevProc("vkWaitForFences");
+    static auto pfnResetFences = (PFN_vkResetFences)getDevProc("vkResetFences");
+    static auto pfnMap = (PFN_vkMapMemory)getDevProc("vkMapMemory");
+    static auto pfnUnmap = (PFN_vkUnmapMemory)getDevProc("vkUnmapMemory");
+
+    if (!pfnBegin || !pfnEnd || !pfnReset || !pfnBarrier || !pfnCopyImgBuf
+        || !pfnGetQueue || !pfnSubmit || !pfnWaitFences || !pfnResetFences
+        || !pfnMap || !pfnUnmap) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.a probe: missing PFN — disabling");
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+
+    VkCommandBuffer cb = (VkCommandBuffer)m_FrucProbeCmdBuf;
+    VkImage srcImg = (VkImage)vkFrame->img[0];
+    VkImageLayout origLayout = vkFrame->layout[0];
+
+    pfnReset(cb, 0);
+
+    VkCommandBufferBeginInfo bbi = {};
+    bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    pfnBegin(cb, &bbi);
+
+    // Barrier 1: origLayout (probably VIDEO_DECODE_DPB_KHR) → TRANSFER_SRC_OPTIMAL,
+    // plane 0 only.  Use VK_QUEUE_FAMILY_IGNORED — trust the AVVkFrame timeline
+    // semaphore for cross-queue sync.
+    VkImageMemoryBarrier toSrcBarrier = {};
+    toSrcBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toSrcBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    toSrcBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toSrcBarrier.oldLayout = origLayout;
+    toSrcBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toSrcBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toSrcBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toSrcBarrier.image = srcImg;
+    toSrcBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    toSrcBarrier.subresourceRange.baseMipLevel = 0;
+    toSrcBarrier.subresourceRange.levelCount = 1;
+    toSrcBarrier.subresourceRange.baseArrayLayer = 0;
+    toSrcBarrier.subresourceRange.layerCount = 1;
+
+    pfnBarrier(cb,
+               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+               VK_PIPELINE_STAGE_TRANSFER_BIT,
+               0, 0, nullptr, 0, nullptr, 1, &toSrcBarrier);
+
+    // Copy 1 texel (top-left luma sample) from plane 0 → host buffer.
+    VkBufferImageCopy region = {};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = {0, 0, 0};
+    region.imageExtent = {1, 1, 1};
+    pfnCopyImgBuf(cb, srcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  (VkBuffer)m_FrucProbeBuffer, 1, &region);
+
+    // Barrier 2: restore plane 0 to origLayout for ffmpeg's next access.
+    VkImageMemoryBarrier toOrigBarrier = toSrcBarrier;
+    toOrigBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toOrigBarrier.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    toOrigBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toOrigBarrier.newLayout = origLayout;
+    pfnBarrier(cb,
+               VK_PIPELINE_STAGE_TRANSFER_BIT,
+               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+               0, 0, nullptr, 0, nullptr, 1, &toOrigBarrier);
+
+    pfnEnd(cb);
+
+    // Submit on compute queue (libplacebo lock).  Wait on AVVkFrame.sem[0]
+    // timeline = sem_value[0]; signal sem_value[0]+1.  Also signal local fence
+    // for synchronous host wait.
+    VkQueue computeQueue = VK_NULL_HANDLE;
+    pfnGetQueue(m_Vulkan->device, m_Vulkan->queue_compute.index, 0, &computeQueue);
+
+    uint64_t waitVal = vkFrame->sem_value[0];
+    uint64_t signalVal = waitVal + 1;
+    VkSemaphore sem = vkFrame->sem[0];
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+    VkTimelineSemaphoreSubmitInfo tlInfo = {};
+    tlInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    tlInfo.waitSemaphoreValueCount = 1;
+    tlInfo.pWaitSemaphoreValues = &waitVal;
+    tlInfo.signalSemaphoreValueCount = 1;
+    tlInfo.pSignalSemaphoreValues = &signalVal;
+
+    VkSubmitInfo si = {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.pNext = &tlInfo;
+    si.waitSemaphoreCount = 1;
+    si.pWaitSemaphores = &sem;
+    si.pWaitDstStageMask = &waitStage;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &sem;
+
+    m_Vulkan->lock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
+    VkResult subRes = pfnSubmit(computeQueue, 1, &si, (VkFence)m_FrucProbeFence);
+    m_Vulkan->unlock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
+
+    if (subRes != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.a probe: vkQueueSubmit rc=%d — disabling",
+                    (int)subRes);
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+    // Bump the AVVkFrame timeline so subsequent ffmpeg / consumer waits
+    // pick up our signal.
+    vkFrame->sem_value[0] = signalVal;
+
+    VkFence fence = (VkFence)m_FrucProbeFence;
+    VkResult waitRes = pfnWaitFences(m_Vulkan->device, 1, &fence, VK_TRUE,
+                                      /* timeout: 1 sec */ 1000ULL * 1000 * 1000);
+    if (waitRes != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.a probe: vkWaitForFences rc=%d — disabling",
+                    (int)waitRes);
+        m_FrucProbeDisabled = true;
+        return false;
+    }
+    pfnResetFences(m_Vulkan->device, 1, &fence);
+
+    // Read one luma byte and log.
+    void* mapped = nullptr;
+    pfnMap(m_Vulkan->device, (VkDeviceMemory)m_FrucProbeBufferMem, 0, VK_WHOLE_SIZE, 0, &mapped);
+    uint8_t y = mapped ? *(uint8_t*)mapped : 0;
+    if (mapped) pfnUnmap(m_Vulkan->device, (VkDeviceMemory)m_FrucProbeBufferMem);
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.a probe: PASS  size=%dx%d  origLayout=%d  "
+                "topleft Y=%u (raw NV12 luma byte)",
+                frame->width, frame->height, (int)origLayout, (unsigned)y);
+    return true;
+}
+
 bool PlVkRenderer::prepareDecoderContext(AVCodecContext *context, AVDictionary **)
 {
     if (m_HwAccelBackend) {
@@ -892,6 +1273,24 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
                                 (void*)vkFrame->img[0], (void*)vkFrame->img[1],
                                 (int)vkFrame->layout[0], (int)vkFrame->layout[1],
                                 frame->width, frame->height, (int)frame->format);
+                }
+            }
+        }
+
+        // §J.3.e.2.a — layout transition + 1-pixel readback probe.  Independent
+        // of §J.3.e.0 (different env var).  Validates cross-queue-family ownership
+        // transfer + VIDEO_DECODE_DPB → TRANSFER_SRC_OPTIMAL — primitive for
+        // §J.3.e.2.b/c NV12→RGB compute shader.
+        const char* probe2 = SDL_getenv("VIPLE_VK_FRUC_PROBE2");
+        if (probe2 && SDL_atoi(probe2) != 0) {
+            static std::atomic<uint64_t> s_Probe2FrameCount{0};
+            uint64_t n = s_Probe2FrameCount.fetch_add(1, std::memory_order_relaxed);
+            // First probe at frame 30 (give decoder time to stabilise),
+            // then every 60 frames.
+            if (n == 30 || (n > 30 && ((n - 30) % 60) == 0)) {
+                auto* vkFrame = (AVVkFrame*)frame->data[0];
+                if (vkFrame) {
+                    runLayoutTransitionProbe(vkFrame, frame);
                 }
             }
         }

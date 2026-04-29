@@ -55,6 +55,16 @@ private:
     bool initializeNcnnExternalHandoff();
     void teardownNcnnExternalHandoff();
 
+    // §J.3.e.2.a — layout transition + 1-pixel readback probe for AVVkFrame.img[0].
+    // Validates cross-queue-family ownership transfer (decode → compute) and
+    // VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR → VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+    // transition.  Gated on VIPLE_VK_FRUC_PROBE2=1.  Ran every 60 frames; if any
+    // step fails the per-instance probe is permanently disabled.  Resources are
+    // allocated lazily on first call and freed in dtor.
+    bool initFrucProbeResources();
+    void destroyFrucProbeResources();
+    bool runLayoutTransitionProbe(struct AVVkFrame* vkFrame, AVFrame* frame);
+
     // The backend renderer if we're frontend-only
     IFFmpegRenderer* m_Backend;
     bool m_HwAccelBackend;
@@ -117,4 +127,15 @@ private:
     // successful initializeNcnnExternalHandoff(); cleared by
     // teardownNcnnExternalHandoff() (must run before pl_vulkan_destroy).
     bool m_NcnnExternalReady = false;
+
+    // §J.3.e.2.a — frame-recurrent layout transition probe state.
+    // Resources lazily allocated on first probe call; held until dtor.
+    // Stored as opaque so the header doesn't drag in <vulkan/vulkan.h>.
+    bool  m_FrucProbeInitialised = false;
+    bool  m_FrucProbeDisabled    = false;
+    void* m_FrucProbeCmdPool     = nullptr;  // VkCommandPool
+    void* m_FrucProbeCmdBuf      = nullptr;  // VkCommandBuffer
+    void* m_FrucProbeBuffer      = nullptr;  // VkBuffer (host-visible readback)
+    void* m_FrucProbeBufferMem   = nullptr;  // VkDeviceMemory
+    void* m_FrucProbeFence       = nullptr;  // VkFence
 };

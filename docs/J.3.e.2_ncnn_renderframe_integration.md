@@ -74,24 +74,30 @@
 
 ffmpeg 的 hwcontext_vulkan 解碼完一張 frame 後，img[0] 留在
 `queue_family_decode_index` 上，layout 是 `VIDEO_DECODE_DPB_KHR`。Vulkan spec
-規定 image 要被另一個 queue family 用，必須 issue **queue ownership transfer
+規定 image 要被另一個 queue family 用，**通常**必須 issue **queue ownership transfer
 barrier**（一對 release-on-source / acquire-on-destination）。
 
 實作上有兩條路：
 
 **A1.** 走 **`VK_SHARING_MODE_CONCURRENT`** 跨 decode + compute family（簡單、
 可能有效能 penalty，但 frame size 中等下無感）。需要 ffmpeg 創 VkImage 時就
-列舉兩個 family — 我們不控 ffmpeg 的 create flow，這條路除非 patch ffmpeg
-否則不可行。
+列舉兩個 family — 我們不控 ffmpeg 的 create flow。
 
 **A2.** 走 **正式的 ownership transfer barrier** — 兩條 command buffer，一條
 在 decode queue（release ownership），一條在 compute queue（acquire ownership）。
 ncnn 的 `VkCompute` API 不直接支援，但底層可用 `vkCmdPipelineBarrier2` 自己跑。
 
-**選 A2** — 更乾淨、跟 spec 對齊。需要在 §J.3.e.2.b 把 release/acquire 機制
-建好。ncnn 的 compute queue 是 family `m_Vulkan->queue_compute.index`；decode
-queue 是 ffmpeg AVHWDeviceContext 的 `queue_family_decode_index`（透過
-`av_buffer_get_ref(m_HwDeviceCtx)->...->qf[]`）。
+**A3 (實測選用，§J.3.e.2.a 驗證).** `VkImageMemoryBarrier` 用
+**`srcQueueFamilyIndex = dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED`** —
+不做 ownership transfer，靠 AVVkFrame.sem[0] timeline semaphore 跨 queue family
+sync。ffmpeg's hwcontext_vulkan 顯然把 AVVkFrame 創建為 sharing flags 允許跨
+family 使用（A1 變體），**NV 596.84 driver 直接吃**，§J.3.e.2.a probe 連續 8 次
+PASS、無 validation error、無 crash。這條路最簡單、code 最少、效能最好（沒額外
+release/acquire submit 開銷）。
+
+**結論：A3 — VK_QUEUE_FAMILY_IGNORED + timeline semaphore sync。** §J.3.e.2.b/c
+照此走，不需要 cross-queue-family release/acquire 機制。Mitigation：若未來 driver
+update 或不同 vendor 抓到 validation error，再回 A2。
 
 ### B. NV12 multi-plane 處理
 
