@@ -1843,6 +1843,62 @@ bool PlVkRenderer::initFrucRgbImgResources()
                     "[VIPLE-VK-FRUC] §J.3.e.2.e1a: pl_vulkan_wrap → pl_tex=%p "
                     "(ready for §J.3.e.2.e1b render path override)",
                     (const void*)wrappedTex);
+
+        // §J.3.e.2.e1b — set up dedicated override resources: timeline
+        // semaphore + cmd pool + cmd buf + fence.
+        auto pfnCreateSem    = (PFN_vkCreateSemaphore)getDevProc("vkCreateSemaphore");
+        auto pfnCreatePool   = (PFN_vkCreateCommandPool)getDevProc("vkCreateCommandPool");
+        auto pfnAllocCB      = (PFN_vkAllocateCommandBuffers)getDevProc("vkAllocateCommandBuffers");
+        auto pfnCreateFence2 = (PFN_vkCreateFence)getDevProc("vkCreateFence");
+        if (pfnCreateSem && pfnCreatePool && pfnAllocCB && pfnCreateFence2) {
+            VkSemaphoreTypeCreateInfo tci = {};
+            tci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+            tci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+            tci.initialValue = 0;
+            VkSemaphoreCreateInfo sci = {};
+            sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+            sci.pNext = &tci;
+            VkSemaphore holdSem = VK_NULL_HANDLE;
+            VkCommandPool ovPool = VK_NULL_HANDLE;
+            VkCommandBuffer ovCb = VK_NULL_HANDLE;
+            VkFence ovFence = VK_NULL_HANDLE;
+
+            VkCommandPoolCreateInfo poolCi = {};
+            poolCi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+            poolCi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+            poolCi.queueFamilyIndex = m_Vulkan->queue_compute.index;
+
+            VkCommandBufferAllocateInfo cbAi = {};
+            cbAi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            cbAi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cbAi.commandBufferCount = 1;
+
+            VkFenceCreateInfo fci = {};
+            fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
+            if (pfnCreateSem(m_Vulkan->device, &sci, nullptr, &holdSem) == VK_SUCCESS
+                && pfnCreatePool(m_Vulkan->device, &poolCi, nullptr, &ovPool) == VK_SUCCESS) {
+                cbAi.commandPool = ovPool;
+                if (pfnAllocCB(m_Vulkan->device, &cbAi, &ovCb) == VK_SUCCESS
+                    && pfnCreateFence2(m_Vulkan->device, &fci, nullptr, &ovFence) == VK_SUCCESS) {
+                    m_FrucOverrideHoldSem = holdSem;
+                    m_FrucOverrideCmdPool = ovPool;
+                    m_FrucOverrideCmdBuf  = ovCb;
+                    m_FrucOverrideFence   = ovFence;
+                    m_FrucOverrideHoldVal = 0;
+                    m_FrucOverrideFrameCount = 0;
+                    m_FrucOverrideReady = true;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VK-FRUC] §J.3.e.2.e1b: override resources ready "
+                                "(timeline sem=%p, cmd pool=%p, cmd buf=%p, fence=%p)",
+                                (void*)holdSem, (void*)ovPool, (void*)ovCb, (void*)ovFence);
+                }
+            }
+            if (!m_FrucOverrideReady) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-FRUC] §J.3.e.2.e1b: override resource alloc failed");
+            }
+        }
     }
     return true;
 }
@@ -1850,9 +1906,36 @@ bool PlVkRenderer::initFrucRgbImgResources()
 void PlVkRenderer::destroyFrucRgbImgResources()
 {
     if (!m_PlVkInstance || !m_Vulkan) return;
-    // §J.3.e.2.e1a — drop the libplacebo wrapper FIRST.  pl_tex_destroy doesn't
-    // free the underlying VkImage, but holds an internal ref that must be
-    // released before vkDestroyImage runs further down.
+    auto getDevProcEarly = [&](const char* name) -> PFN_vkVoidFunction {
+        return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
+    };
+    auto pfnWaitDev = (PFN_vkDeviceWaitIdle)getDevProcEarly("vkDeviceWaitIdle");
+    if (pfnWaitDev) pfnWaitDev(m_Vulkan->device);
+
+    // §J.3.e.2.e1b — drop override timeline sem + cmd pool + fence FIRST,
+    // before pl_tex_destroy or VkImage destroy (pool destruction frees cmd
+    // buffers; fence/sem must outlive any pending submit, which the wait
+    // above guaranteed has finished).
+    auto pfnDestroySem = (PFN_vkDestroySemaphore)getDevProcEarly("vkDestroySemaphore");
+    auto pfnDestroyPool = (PFN_vkDestroyCommandPool)getDevProcEarly("vkDestroyCommandPool");
+    auto pfnDestroyFence = (PFN_vkDestroyFence)getDevProcEarly("vkDestroyFence");
+    if (m_FrucOverrideFence && pfnDestroyFence)
+        pfnDestroyFence(m_Vulkan->device, (VkFence)m_FrucOverrideFence, nullptr);
+    if (m_FrucOverrideCmdPool && pfnDestroyPool)
+        pfnDestroyPool(m_Vulkan->device, (VkCommandPool)m_FrucOverrideCmdPool, nullptr);
+    if (m_FrucOverrideHoldSem && pfnDestroySem)
+        pfnDestroySem(m_Vulkan->device, (VkSemaphore)m_FrucOverrideHoldSem, nullptr);
+    m_FrucOverrideFence = nullptr;
+    m_FrucOverrideCmdPool = nullptr;
+    m_FrucOverrideCmdBuf = nullptr;
+    m_FrucOverrideHoldSem = nullptr;
+    m_FrucOverrideHoldVal = 0;
+    m_FrucOverrideFrameCount = 0;
+    m_FrucOverrideReady = false;
+
+    // §J.3.e.2.e1a — drop the libplacebo wrapper.  pl_tex_destroy doesn't free
+    // the underlying VkImage, but holds an internal ref that must be released
+    // before vkDestroyImage runs further down.
     if (m_FrucRgbImgPlTex) {
         pl_tex tex = (pl_tex)m_FrucRgbImgPlTex;
         pl_tex_destroy(m_Vulkan->gpu, &tex);
@@ -1945,6 +2028,228 @@ bool PlVkRenderer::runRgbImgReversePass(VkCommandBuffer cb, uint32_t width, uint
     const uint32_t gy = (height + 7) / 8;
     pfnDispatch(cb, gx, gy, 1);
 
+    return true;
+}
+
+// §J.3.e.2.e1b — runFrucOverridePass: every-frame dispatch for override mode.
+// Same pipeline as runNv12RgbProbe (forward + reverse) but no readback, dedicated
+// cmd buffer/fence (separate from probe path), waits on hold timeline before
+// dispatch (host-side vkWaitSemaphores), submits with AVVkFrame.sem chain.
+// On success, image is in GENERAL with new content; caller does pl_vulkan_release_ex
+// then pl_render_image with our pl_tex, then pl_vulkan_hold_ex with the
+// timeline sem at incremented value.
+bool PlVkRenderer::runFrucOverridePass(AVVkFrame* vkFrame, AVFrame* frame)
+{
+    if (!m_FrucOverrideReady || !m_FrucNv12RgbReady || !m_FrucRgbImgReady) return false;
+    if (!vkFrame || !vkFrame->img[0]) return false;
+
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
+    };
+    static auto pfnBegin       = (PFN_vkBeginCommandBuffer)getDevProc("vkBeginCommandBuffer");
+    static auto pfnEnd         = (PFN_vkEndCommandBuffer)getDevProc("vkEndCommandBuffer");
+    static auto pfnReset       = (PFN_vkResetCommandBuffer)getDevProc("vkResetCommandBuffer");
+    static auto pfnBarrier     = (PFN_vkCmdPipelineBarrier)getDevProc("vkCmdPipelineBarrier");
+    static auto pfnCopyImgBuf  = (PFN_vkCmdCopyImageToBuffer)getDevProc("vkCmdCopyImageToBuffer");
+    static auto pfnBindPipe    = (PFN_vkCmdBindPipeline)getDevProc("vkCmdBindPipeline");
+    static auto pfnBindDS      = (PFN_vkCmdBindDescriptorSets)getDevProc("vkCmdBindDescriptorSets");
+    static auto pfnPushC       = (PFN_vkCmdPushConstants)getDevProc("vkCmdPushConstants");
+    static auto pfnDispatch    = (PFN_vkCmdDispatch)getDevProc("vkCmdDispatch");
+    static auto pfnGetQueue    = (PFN_vkGetDeviceQueue)getDevProc("vkGetDeviceQueue");
+    static auto pfnSubmit      = (PFN_vkQueueSubmit)getDevProc("vkQueueSubmit");
+    static auto pfnWaitFences  = (PFN_vkWaitForFences)getDevProc("vkWaitForFences");
+    static auto pfnResetFences = (PFN_vkResetFences)getDevProc("vkResetFences");
+    static auto pfnWaitSems    = (PFN_vkWaitSemaphores)getDevProc("vkWaitSemaphores");
+    if (!pfnBegin || !pfnEnd || !pfnReset || !pfnBarrier || !pfnCopyImgBuf
+        || !pfnBindPipe || !pfnBindDS || !pfnPushC || !pfnDispatch || !pfnGetQueue
+        || !pfnSubmit || !pfnWaitFences || !pfnResetFences || !pfnWaitSems) {
+        return false;
+    }
+
+    // Step A: host-wait on hold timeline at current value (== libplacebo's prev
+    // frame done with our pl_tex).  First frame: m_FrucOverrideHoldVal=0,
+    // timeline init=0, returns immediately.  After ++ at end of frame N, frame
+    // N+1 waits at value N (signaled by libplacebo when it finished frame N's
+    // pl_render_image).
+    if (m_FrucOverrideHoldVal > 0) {
+        VkSemaphore sem = (VkSemaphore)m_FrucOverrideHoldSem;
+        uint64_t waitVal = m_FrucOverrideHoldVal;
+        VkSemaphoreWaitInfo wi = {};
+        wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+        wi.semaphoreCount = 1;
+        wi.pSemaphores = &sem;
+        wi.pValues = &waitVal;
+        // 100ms timeout.  If libplacebo hasn't finished prev frame within
+        // 100ms something's wrong — disable override to avoid runaway.
+        VkResult wr = pfnWaitSems(m_Vulkan->device, &wi, 100ULL * 1000 * 1000);
+        if (wr != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e1b: hold timeline wait rc=%d (val=%llu)",
+                        (int)wr, (unsigned long long)waitVal);
+            return false;
+        }
+    }
+
+    // Step B: record cmd buffer (forward + reverse, no readback).
+    VkCommandBuffer cb = (VkCommandBuffer)m_FrucOverrideCmdBuf;
+    VkImage         img = (VkImage)vkFrame->img[0];
+    VkImageLayout   orig = vkFrame->layout[0];
+    const uint32_t  W = m_FrucNv12RgbWidth;
+    const uint32_t  H = m_FrucNv12RgbHeight;
+
+    pfnReset(cb, 0);
+    VkCommandBufferBeginInfo bbi = {};
+    bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    pfnBegin(cb, &bbi);
+
+    auto buildImgBarrier = [&](VkImageAspectFlags aspect, VkImageLayout oldL, VkImageLayout newL,
+                                VkAccessFlags srcA, VkAccessFlags dstA) -> VkImageMemoryBarrier {
+        VkImageMemoryBarrier b = {};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.srcAccessMask = srcA; b.dstAccessMask = dstA;
+        b.oldLayout = oldL; b.newLayout = newL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img;
+        b.subresourceRange.aspectMask = aspect;
+        b.subresourceRange.levelCount = 1; b.subresourceRange.layerCount = 1;
+        return b;
+    };
+
+    VkImageMemoryBarrier toSrc[2] = {
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_0_BIT, orig, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_1_BIT, orig, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+    };
+    pfnBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+               0, 0, nullptr, 0, nullptr, 2, toSrc);
+
+    VkBufferImageCopy regY = {};
+    regY.imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    regY.imageSubresource.layerCount = 1;
+    regY.imageExtent = {W, H, 1};
+    pfnCopyImgBuf(cb, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  (VkBuffer)m_FrucNv12RgbBufY, 1, &regY);
+    VkBufferImageCopy regUV = {};
+    regUV.imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+    regUV.imageSubresource.layerCount = 1;
+    regUV.imageExtent = {W / 2, H / 2, 1};
+    pfnCopyImgBuf(cb, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  (VkBuffer)m_FrucNv12RgbBufUV, 1, &regUV);
+
+    VkBufferMemoryBarrier bbar1[2] = {};
+    bbar1[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bbar1[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bbar1[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    bbar1[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbar1[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbar1[0].buffer = (VkBuffer)m_FrucNv12RgbBufY;
+    bbar1[0].size = VK_WHOLE_SIZE;
+    bbar1[1] = bbar1[0];
+    bbar1[1].buffer = (VkBuffer)m_FrucNv12RgbBufUV;
+    pfnBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+               0, 0, nullptr, 2, bbar1, 0, nullptr);
+
+    // Forward dispatch (NV12 → bufRGB)
+    pfnBindPipe(cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipeline)m_FrucNv12RgbVkPipeline);
+    VkDescriptorSet fwdDS = (VkDescriptorSet)m_FrucNv12RgbDescSet;
+    pfnBindDS(cb, VK_PIPELINE_BIND_POINT_COMPUTE,
+              (VkPipelineLayout)m_FrucNv12RgbVkPipeLay, 0, 1, &fwdDS, 0, nullptr);
+    int pushVals[2] = {(int)W, (int)H};
+    pfnPushC(cb, (VkPipelineLayout)m_FrucNv12RgbVkPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+             0, sizeof(pushVals), pushVals);
+    const uint32_t gx = (W + 7) / 8;
+    const uint32_t gy = (H + 7) / 8;
+    pfnDispatch(cb, gx, gy, 1);
+
+    // Buffer barrier (forward shader write → reverse shader read)
+    VkBufferMemoryBarrier bbar2 = {};
+    bbar2.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bbar2.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    bbar2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    bbar2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbar2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bbar2.buffer = (VkBuffer)m_FrucNv12RgbBufRGB;
+    bbar2.size = VK_WHOLE_SIZE;
+    pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+               0, 0, nullptr, 1, &bbar2, 0, nullptr);
+
+    // Reverse dispatch (bufRGB → m_FrucRgbImgImage in GENERAL)
+    if (!runRgbImgReversePass(cb, W, H)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e1b: runRgbImgReversePass returned false");
+        return false;
+    }
+
+    // Restore plane layouts for ffmpeg.
+    VkImageMemoryBarrier toOrig[2] = {
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_0_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, orig,
+                        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_WRITE_BIT),
+        buildImgBarrier(VK_IMAGE_ASPECT_PLANE_1_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, orig,
+                        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_WRITE_BIT),
+    };
+    pfnBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+               0, 0, nullptr, 0, nullptr, 2, toOrig);
+
+    pfnEnd(cb);
+
+    // Step C: submit on compute queue with AVVkFrame.sem timeline wait/signal
+    // + local fence for host wait.
+    VkQueue computeQueue = VK_NULL_HANDLE;
+    pfnGetQueue(m_Vulkan->device, m_Vulkan->queue_compute.index, 0, &computeQueue);
+
+    uint64_t waitVal   = vkFrame->sem_value[0];
+    uint64_t signalVal = waitVal + 1;
+    VkSemaphore avSem  = vkFrame->sem[0];
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+    VkTimelineSemaphoreSubmitInfo tlInfo = {};
+    tlInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    tlInfo.waitSemaphoreValueCount = 1;
+    tlInfo.pWaitSemaphoreValues = &waitVal;
+    tlInfo.signalSemaphoreValueCount = 1;
+    tlInfo.pSignalSemaphoreValues = &signalVal;
+
+    VkSubmitInfo si = {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.pNext = &tlInfo;
+    si.waitSemaphoreCount = 1;
+    si.pWaitSemaphores = &avSem;
+    si.pWaitDstStageMask = &waitStage;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &avSem;
+
+    m_Vulkan->lock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
+    VkResult subRes = pfnSubmit(computeQueue, 1, &si, (VkFence)m_FrucOverrideFence);
+    m_Vulkan->unlock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
+    if (subRes != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e1b: vkQueueSubmit rc=%d", (int)subRes);
+        return false;
+    }
+    vkFrame->sem_value[0] = signalVal;
+
+    // Step D: host-wait on local fence (image now in GENERAL with new content).
+    VkFence fence = (VkFence)m_FrucOverrideFence;
+    VkResult wr = pfnWaitFences(m_Vulkan->device, 1, &fence, VK_TRUE, 1000ULL * 1000 * 1000);
+    if (wr != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e1b: vkWaitForFences rc=%d", (int)wr);
+        return false;
+    }
+    pfnResetFences(m_Vulkan->device, 1, &fence);
+
+    ++m_FrucOverrideFrameCount;
+    if (m_FrucOverrideFrameCount == 1 || (m_FrucOverrideFrameCount % 60) == 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e1b: dispatch frame#%llu OK (image in GENERAL, "
+                    "ready for pl_vulkan_release_ex)",
+                    (unsigned long long)m_FrucOverrideFrameCount);
+    }
     return true;
 }
 
@@ -2661,10 +2966,80 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     // Render the video image and overlays into the swapchain buffer
     targetFrame.num_overlays = (int)overlays.size();
     targetFrame.overlays = overlays.data();
-    if (!pl_render_image(m_Renderer, &mappedFrame, &targetFrame, &pl_render_fast_params)) {
+
+    // §J.3.e.2.e1b — when VIPLE_VK_FRUC_OUTPUT_OVERRIDE=1 and our pl_tex /
+    // override resources are ready, run forward+reverse compute every frame
+    // and use our wrapped RGBA8 VkImage as the pl_render_image source.  This
+    // proves the end-to-end pipeline (NV12→RGB→VkImage→swapchain) without
+    // RIFE yet — §J.3.e.2.e2 will insert the RIFE forward in between.
+    pl_frame ourFrame = {};
+    bool useOverride = false;
+    pl_tex heldTex = nullptr;
+    const char* ovEnv = SDL_getenv("VIPLE_VK_FRUC_OUTPUT_OVERRIDE");
+    if (ovEnv && SDL_atoi(ovEnv) != 0
+        && m_NcnnExternalReady
+        && frame->format == AV_PIX_FMT_VULKAN) {
+        // Lazy-init §J.3.e.2.c forward + §J.3.e.2.d reverse + §J.3.e.2.e1
+        // wrap/override resources (normally gated behind probe env vars).
+        if (!m_FrucNv12RgbReady && !m_FrucNv12RgbDisabled) {
+            initFrucNv12RgbResources((uint32_t)frame->width, (uint32_t)frame->height);
+        }
+        if (m_FrucNv12RgbReady && !m_FrucRgbImgReady && !m_FrucRgbImgDisabled) {
+            initFrucRgbImgResources();
+        }
+        auto* vkFrame = (AVVkFrame*)frame->data[0];
+        if (vkFrame && m_FrucOverrideReady && m_FrucRgbImgPlTex
+            && runFrucOverridePass(vkFrame, frame)) {
+            // Image now in GENERAL with new content.  Hand to libplacebo via
+            // pl_vulkan_release_ex (sem omitted because we host-fenced above).
+            heldTex = (pl_tex)m_FrucRgbImgPlTex;
+            pl_vulkan_release_params relP = {};
+            relP.tex = heldTex;
+            relP.layout = VK_IMAGE_LAYOUT_GENERAL;
+            relP.qf = VK_QUEUE_FAMILY_IGNORED;
+            // semaphore left zero-initialized (optional per pl_vulkan_release_params)
+            pl_vulkan_release_ex(m_Vulkan->gpu, &relP);
+
+            // Build ourFrame from mappedFrame template, then override planes
+            // to point at our single RGBA8 pl_tex.  Keep mappedFrame's color/
+            // repr metadata so libplacebo's tone-mapping/dither stays sane —
+            // but force repr.sys=RGB and repr.levels=FULL since our shader did
+            // limited→full + YCbCr→RGB matrix.
+            ourFrame = mappedFrame;
+            ourFrame.num_planes = 1;
+            ourFrame.planes[0] = {};
+            ourFrame.planes[0].texture = heldTex;
+            ourFrame.planes[0].components = 4;
+            ourFrame.planes[0].component_mapping[0] = 0; // R
+            ourFrame.planes[0].component_mapping[1] = 1; // G
+            ourFrame.planes[0].component_mapping[2] = 2; // B
+            ourFrame.planes[0].component_mapping[3] = 3; // A
+            ourFrame.repr.sys = PL_COLOR_SYSTEM_RGB;
+            ourFrame.repr.levels = PL_COLOR_LEVELS_FULL;
+            useOverride = true;
+        }
+    }
+
+    const pl_frame* renderSrc = useOverride ? &ourFrame : &mappedFrame;
+    if (!pl_render_image(m_Renderer, renderSrc, &targetFrame, &pl_render_fast_params)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_render_image() failed");
         // NB: We must fallthrough to call pl_swapchain_submit_frame()
+    }
+
+    // §J.3.e.2.e1b — if we used the override path, take ownership back via
+    // pl_vulkan_hold_ex with the timeline sem at the next value.  libplacebo
+    // signals this sem when its sampling/render submit completes; runFrucOverridePass
+    // will host-wait at that value before next frame's dispatch.
+    if (useOverride && heldTex) {
+        ++m_FrucOverrideHoldVal;
+        pl_vulkan_hold_params holdP = {};
+        holdP.tex = heldTex;
+        holdP.layout = VK_IMAGE_LAYOUT_GENERAL;
+        holdP.qf = VK_QUEUE_FAMILY_IGNORED;
+        holdP.semaphore.sem = (VkSemaphore)m_FrucOverrideHoldSem;
+        holdP.semaphore.value = m_FrucOverrideHoldVal;
+        pl_vulkan_hold_ex(m_Vulkan->gpu, &holdP);
     }
 
     // Submit the frame for display and swap buffers

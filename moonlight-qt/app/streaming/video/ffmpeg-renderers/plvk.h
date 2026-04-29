@@ -90,6 +90,18 @@ private:
     void destroyFrucRgbImgResources();
     bool runRgbImgReversePass(VkCommandBuffer cb, uint32_t width, uint32_t height);
 
+    // §J.3.e.2.e1b — render-path override.  When VIPLE_VK_FRUC_OUTPUT_OVERRIDE=1
+    // is set, every frame: (1) wait host-side on m_FrucOverrideHoldSem timeline
+    // (signaled by libplacebo when previous frame's pl_render_image finished
+    // with our pl_tex), (2) record forward+reverse compute dispatch on a
+    // dedicated cmd buffer, (3) submit on compute queue with AVVkFrame.sem
+    // wait/signal + local fence, (4) host-wait local fence (image now in
+    // GENERAL with new content), (5) pl_vulkan_release_ex hands image to
+    // libplacebo for sampling.  Caller (renderFrame) then runs pl_render_image
+    // with our pl_tex as source plane and finally pl_vulkan_hold_ex to take
+    // the image back when libplacebo signals the timeline.
+    bool runFrucOverridePass(struct AVVkFrame* vkFrame, AVFrame* frame);
+
     // The backend renderer if we're frontend-only
     IFFmpegRenderer* m_Backend;
     bool m_HwAccelBackend;
@@ -212,4 +224,16 @@ private:
     // §J.3.e.2.d resources (pl_tex_destroy must run before vkDestroyImage —
     // pl_tex doesn't own the underlying VkImage but does hold a ref).
     void*    m_FrucRgbImgPlTex     = nullptr;  // pl_tex
+
+    // §J.3.e.2.e1b — render-path override: hold-timeline semaphore + monotonic
+    // value for ping-ponging image ownership between us (compute writes) and
+    // libplacebo (sampling for pl_render_image).  Dedicated cmd buffer + fence
+    // separate from §J.3.e.2.c2's probe path so override and probe can co-exist.
+    bool     m_FrucOverrideReady    = false;
+    void*    m_FrucOverrideHoldSem  = nullptr;  // VkSemaphore (timeline)
+    uint64_t m_FrucOverrideHoldVal  = 0;
+    uint64_t m_FrucOverrideFrameCount = 0;
+    void*    m_FrucOverrideCmdPool  = nullptr;  // VkCommandPool
+    void*    m_FrucOverrideCmdBuf   = nullptr;  // VkCommandBuffer
+    void*    m_FrucOverrideFence    = nullptr;  // VkFence
 };
