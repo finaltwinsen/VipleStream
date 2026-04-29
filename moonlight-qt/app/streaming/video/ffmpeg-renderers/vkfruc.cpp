@@ -63,6 +63,7 @@ void VkFrucRenderer::teardown()
 {
     // Order: device-owned objects → device → surface → instance.
     // i.3+ will insert pipelines / etc. here.
+    destroyYcbcrSamplerAndLayouts();
     destroySwapchain();
     if (m_Device != VK_NULL_HANDLE && m_pfnDestroyDevice) {
         m_pfnDestroyDevice(m_Device, nullptr);
@@ -546,15 +547,154 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
         teardown();
         return false;
     }
+    if (!createYcbcrSamplerAndLayouts()) {
+        m_InitFailureReason = InitFailureReason::NoSoftwareSupport;
+        teardown();
+        return false;
+    }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i.3.a initialize: instance/PD/device/swapchain"
-                " + AVHWDeviceContext READY — i.3.b (sampler+descriptor) is next; "
-                "still returning false to fall through to PlVkRenderer for streaming");
+                "[VIPLE-VKFRUC] §J.3.e.2.i.3.b initialize: instance/PD/device/swapchain"
+                " + AVHWDeviceContext + ycbcr-sampler+layouts READY — i.3.c (graphics "
+                "pipeline) is next; still returning false to fall through");
 
     // i.3.a still returns false (no graphics pipeline / renderFrame yet).
     m_InitFailureReason = InitFailureReason::NoSoftwareSupport;
     return false;
+}
+
+// §J.3.e.2.i.3.b — VkSamplerYcbcrConversion + VkSampler + descriptor
+// set layout + pipeline layout.  Maps NV12 (G8_B8R8_2PLANE_420_UNORM)
+// to a single combined image sampler binding the fragment shader sees
+// as `sampler2D` returning RGB (driver-side YCbCr→RGB conversion).
+//
+// Algorithm choice: BT.709 narrow range (matches Sunshine / standard
+// streaming output).  10-bit (P010 → G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16)
+// deferred to §J.3.e.2.j HDR.
+bool VkFrucRenderer::createYcbcrSamplerAndLayouts()
+{
+    auto pfnGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCreateYcbcrConv = (PFN_vkCreateSamplerYcbcrConversion)pfnGetDeviceProcAddr(
+        m_Device, "vkCreateSamplerYcbcrConversion");
+    auto pfnCreateSampler = (PFN_vkCreateSampler)pfnGetDeviceProcAddr(
+        m_Device, "vkCreateSampler");
+    auto pfnCreateDsl = (PFN_vkCreateDescriptorSetLayout)pfnGetDeviceProcAddr(
+        m_Device, "vkCreateDescriptorSetLayout");
+    auto pfnCreatePL = (PFN_vkCreatePipelineLayout)pfnGetDeviceProcAddr(
+        m_Device, "vkCreatePipelineLayout");
+    if (!pfnCreateYcbcrConv || !pfnCreateSampler || !pfnCreateDsl || !pfnCreatePL) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.3.b PFN load failed");
+        return false;
+    }
+
+    VkSamplerYcbcrConversionCreateInfo yci = {};
+    yci.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO;
+    yci.format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;  // NV12
+    yci.ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
+    yci.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+    yci.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+    yci.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+    yci.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+    yci.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+    yci.xChromaOffset = VK_CHROMA_LOCATION_COSITED_EVEN;
+    yci.yChromaOffset = VK_CHROMA_LOCATION_COSITED_EVEN;
+    yci.chromaFilter = VK_FILTER_LINEAR;
+    yci.forceExplicitReconstruction = VK_FALSE;
+    if (pfnCreateYcbcrConv(m_Device, &yci, nullptr, &m_YcbcrConversion) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.3.b vkCreateSamplerYcbcrConversion failed");
+        return false;
+    }
+
+    VkSamplerYcbcrConversionInfo ycbInfo = {};
+    ycbInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO;
+    ycbInfo.conversion = m_YcbcrConversion;
+
+    VkSamplerCreateInfo sci = {};
+    sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sci.pNext = &ycbInfo;
+    sci.magFilter = VK_FILTER_LINEAR;
+    sci.minFilter = VK_FILTER_LINEAR;
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.maxAnisotropy = 1.0f;
+    sci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    sci.unnormalizedCoordinates = VK_FALSE;
+    if (pfnCreateSampler(m_Device, &sci, nullptr, &m_YcbcrSampler) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.3.b vkCreateSampler failed");
+        return false;
+    }
+
+    // Descriptor set layout: 1 combined image sampler with IMMUTABLE
+    // sampler (required when using ycbcr conversion — driver bakes
+    // conversion into the descriptor).
+    VkDescriptorSetLayoutBinding dslBinding = {};
+    dslBinding.binding = 0;
+    dslBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    dslBinding.descriptorCount = 1;
+    dslBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    dslBinding.pImmutableSamplers = &m_YcbcrSampler;
+
+    VkDescriptorSetLayoutCreateInfo dslCi = {};
+    dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dslCi.bindingCount = 1;
+    dslCi.pBindings = &dslBinding;
+    if (pfnCreateDsl(m_Device, &dslCi, nullptr, &m_DescSetLayout) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.3.b vkCreateDescriptorSetLayout failed");
+        return false;
+    }
+
+    VkPipelineLayoutCreateInfo plCi = {};
+    plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plCi.setLayoutCount = 1;
+    plCi.pSetLayouts = &m_DescSetLayout;
+    if (pfnCreatePL(m_Device, &plCi, nullptr, &m_GraphicsPipelineLayout) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.3.b vkCreatePipelineLayout failed");
+        return false;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.3.b ycbcr sampler+layouts ready "
+                "(format=NV12, model=BT709, range=narrow, magFilter=linear)");
+    return true;
+}
+
+void VkFrucRenderer::destroyYcbcrSamplerAndLayouts()
+{
+    if (m_Device == VK_NULL_HANDLE) return;
+    auto pfnGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnDestroyPL = (PFN_vkDestroyPipelineLayout)pfnGetDeviceProcAddr(
+        m_Device, "vkDestroyPipelineLayout");
+    auto pfnDestroyDsl = (PFN_vkDestroyDescriptorSetLayout)pfnGetDeviceProcAddr(
+        m_Device, "vkDestroyDescriptorSetLayout");
+    auto pfnDestroySampler = (PFN_vkDestroySampler)pfnGetDeviceProcAddr(
+        m_Device, "vkDestroySampler");
+    auto pfnDestroyYcbcrConv = (PFN_vkDestroySamplerYcbcrConversion)pfnGetDeviceProcAddr(
+        m_Device, "vkDestroySamplerYcbcrConversion");
+    if (m_GraphicsPipelineLayout && pfnDestroyPL) {
+        pfnDestroyPL(m_Device, m_GraphicsPipelineLayout, nullptr);
+        m_GraphicsPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (m_DescSetLayout && pfnDestroyDsl) {
+        pfnDestroyDsl(m_Device, m_DescSetLayout, nullptr);
+        m_DescSetLayout = VK_NULL_HANDLE;
+    }
+    if (m_YcbcrSampler && pfnDestroySampler) {
+        pfnDestroySampler(m_Device, m_YcbcrSampler, nullptr);
+        m_YcbcrSampler = VK_NULL_HANDLE;
+    }
+    if (m_YcbcrConversion && pfnDestroyYcbcrConv) {
+        pfnDestroyYcbcrConv(m_Device, m_YcbcrConversion, nullptr);
+        m_YcbcrConversion = VK_NULL_HANDLE;
+    }
 }
 
 // §J.3.e.2.i.3.a — populate AVVulkanDeviceContext with our handles so

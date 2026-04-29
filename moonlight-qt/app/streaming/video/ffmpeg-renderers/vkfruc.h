@@ -44,6 +44,8 @@ private:
     bool createLogicalDevice();
     bool createSwapchain();
     void destroySwapchain();
+    bool createYcbcrSamplerAndLayouts();
+    void destroyYcbcrSamplerAndLayouts();
     void teardown();
 
     int m_Pass;
@@ -85,6 +87,15 @@ private:
     VkPresentModeKHR           m_SwapchainPresentMode = VK_PRESENT_MODE_FIFO_KHR;
     std::vector<VkImage>       m_SwapchainImages;
     std::vector<VkImageView>   m_SwapchainViews;
+
+    // §J.3.e.2.i.3.b — VkSamplerYcbcrConversion + sampler + layouts.
+    // The sampler must be IMMUTABLE on the descriptor binding so that
+    // GLSL fragment shader sees a single combined image+sampler with
+    // YCbCr→RGB conversion baked in (ports Android's ensure_ycbcr_sampler).
+    VkSamplerYcbcrConversion m_YcbcrConversion = VK_NULL_HANDLE;
+    VkSampler                m_YcbcrSampler    = VK_NULL_HANDLE;
+    VkDescriptorSetLayout    m_DescSetLayout   = VK_NULL_HANDLE;
+    VkPipelineLayout         m_GraphicsPipelineLayout = VK_NULL_HANDLE;
 
     // §J.3.e.2.i.3+ — populated by later sub-phases:
     //   • m_Swapchain + image array + image views
