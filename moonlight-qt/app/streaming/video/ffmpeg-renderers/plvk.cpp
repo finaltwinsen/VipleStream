@@ -5,6 +5,9 @@
 
 // §J.3.e.1.d — handoff to ncnn via the new external VkDevice API.
 #include <ncnn/gpu.h>
+// §J.3.e.2.c — pipeline + shader compilation for NV12 → planar fp32 RGB.
+#include <ncnn/pipeline.h>
+#include <ncnn/option.h>
 
 // Implementation in plvk_c.c
 #define PL_LIBAV_IMPLEMENTATION 0
@@ -130,6 +133,10 @@ PlVkRenderer::~PlVkRenderer()
 {
     // The render context must have been cleaned up by now
     SDL_assert(!m_HasPendingSwapchainFrame);
+
+    // §J.3.e.2.c — VkPipeline / DSL / VkShaderModule live on m_Vulkan->device.
+    // Tear down before pl_vulkan_destroy.
+    destroyFrucNv12RgbResources();
 
     // §J.3.e.1.d — ncnn::destroy_gpu_instance must run BEFORE
     // pl_vulkan_destroy: ncnn-allocated VkPipeline/VkBuffer ride
@@ -1070,6 +1077,271 @@ bool PlVkRenderer::runLayoutTransitionProbe(AVVkFrame* vkFrame, AVFrame* frame)
     return true;
 }
 
+// §J.3.e.2.c — NV12 → planar fp32 RGB compute shader.  Reads NV12 plane-0
+// (Y) and plane-1 (UV interleaved at half-res) from raw byte storage buffers,
+// applies BT.709 limited-range YCbCr → linear sRGB conversion (same matrix as
+// §J.3.e.2.b CPU sanity check), writes planar fp32 RGB to output storage
+// buffer in (R-plane, G-plane, B-plane) layout — the format ncnn::VkMat
+// expects for c=3 mats fed to RIFE.
+//
+// Caller pipeline (§J.3.e.2.c2 will wire it up):
+//   1. vkCmdCopyImageToBuffer NV12 plane-0 → bufY (W*H bytes)
+//   2. vkCmdCopyImageToBuffer NV12 plane-1 → bufUV (W*H/2 bytes)
+//   3. buffer barrier (TRANSFER_WRITE → SHADER_READ)
+//   4. vkCmdDispatch(ceilDiv(W,8), ceilDiv(H,8), 1) of THIS shader
+//   5. result lands in bufRGB (W*H*3 floats, planar)
+static const char* kNv12RgbShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) readonly  buffer Y_in   { uint  data[]; } yIn;
+layout(binding = 1) readonly  buffer UV_in  { uint  data[]; } uvIn;
+layout(binding = 2) writeonly buffer RGB_out{ float data[]; } rgbOut;
+layout(push_constant) uniform Params { int w; int h; } p;
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= p.w || y >= p.h) return;
+
+    int yIdx   = y * p.w + x;
+    uint yWord = yIn.data[yIdx >> 2];
+    uint yByte = (yWord >> ((yIdx & 3) * 8)) & 0xFFu;
+    float Y_raw = float(yByte) * (1.0 / 255.0);
+
+    int chromaX  = x >> 1;
+    int chromaY  = y >> 1;
+    int uvByteI  = (chromaY * (p.w >> 1) + chromaX) * 2;
+    uint uvWord0 = uvIn.data[uvByteI >> 2];
+    uint uvWord1 = uvIn.data[(uvByteI + 1) >> 2];
+    uint cbByte  = (uvWord0 >> ((uvByteI       & 3) * 8)) & 0xFFu;
+    uint crByte  = (uvWord1 >> (((uvByteI + 1) & 3) * 8)) & 0xFFu;
+    float Cb_raw = float(cbByte) * (1.0 / 255.0);
+    float Cr_raw = float(crByte) * (1.0 / 255.0);
+
+    float Y_n  = (Y_raw  - 16.0  / 255.0) * (255.0 / 219.0);
+    float Cb_n = (Cb_raw - 128.0 / 255.0) * (255.0 / 224.0);
+    float Cr_n = (Cr_raw - 128.0 / 255.0) * (255.0 / 224.0);
+    float r = clamp(Y_n + 1.5748   * Cr_n, 0.0, 1.0);
+    float g = clamp(Y_n - 0.1873   * Cb_n - 0.4681 * Cr_n, 0.0, 1.0);
+    float b = clamp(Y_n + 1.8556   * Cb_n, 0.0, 1.0);
+
+    int outIdx    = y * p.w + x;
+    int planeSize = p.w * p.h;
+    rgbOut.data[outIdx + 0 * planeSize] = r;
+    rgbOut.data[outIdx + 1 * planeSize] = g;
+    rgbOut.data[outIdx + 2 * planeSize] = b;
+}
+)GLSL";
+
+bool PlVkRenderer::initFrucNv12RgbResources(uint32_t width, uint32_t height)
+{
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.c init: enter (W=%u H=%u ready=%d disabled=%d ncnn=%d)",
+                width, height, (int)m_FrucNv12RgbReady, (int)m_FrucNv12RgbDisabled,
+                (int)m_NcnnExternalReady);
+    if (m_FrucNv12RgbReady || m_FrucNv12RgbDisabled) return m_FrucNv12RgbReady;
+    if (!m_NcnnExternalReady) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c init: ncnn external mode not ready "
+                    "(VIPLE_PLVK_NCNN_HANDOFF=1 must be set first)");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.c init: A1 — calling ncnn::get_gpu_device(0)");
+    ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(0);
+    if (!vkdev) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c init: ncnn::get_gpu_device(0) returned null");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.c init: A2 — vkdev=%p, vkdevice=%p",
+                (void*)vkdev, (void*)vkdev->vkdevice());
+
+    ncnn::Option opt;
+    opt.use_vulkan_compute  = true;
+    opt.use_fp16_packed     = false;
+    opt.use_fp16_storage    = false;
+    opt.use_fp16_arithmetic = false;
+    opt.use_int8_storage    = false;
+    opt.use_int8_arithmetic = false;
+    opt.use_packing_layout  = false;
+    opt.use_shader_pack8    = false;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.c init: A3 — calling ncnn::compile_spirv_module");
+    std::vector<uint32_t> spirv;
+    int rc = ncnn::compile_spirv_module(kNv12RgbShaderGlsl, opt, spirv);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.c init: A4 — compile_spirv_module rc=%d spv_size=%zu",
+                rc, spirv.size());
+    if (rc != 0 || spirv.empty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c init: compile_spirv_module failed rc=%d size=%zu",
+                    rc, spirv.size());
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+
+    // Build VkPipeline directly via raw Vulkan — ncnn::Pipeline::create()
+    // crashes inside SPIR-V reflection when the shader doesn't follow
+    // ncnn-Mat binding semantics (verified empirically with this 3-binding
+    // shader at v1.3.75).  We have the SPIR-V bytecode; the rest is plain
+    // Vulkan: shader module → descriptor set layout → pipeline layout →
+    // compute pipeline.
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.c init: A5 — raw Vulkan pipeline build");
+
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
+    };
+    auto pfnCreateShaderModule = (PFN_vkCreateShaderModule)getDevProc("vkCreateShaderModule");
+    auto pfnCreateDescriptorSetLayout = (PFN_vkCreateDescriptorSetLayout)getDevProc("vkCreateDescriptorSetLayout");
+    auto pfnCreatePipelineLayout = (PFN_vkCreatePipelineLayout)getDevProc("vkCreatePipelineLayout");
+    auto pfnCreateComputePipelines = (PFN_vkCreateComputePipelines)getDevProc("vkCreateComputePipelines");
+    if (!pfnCreateShaderModule || !pfnCreateDescriptorSetLayout || !pfnCreatePipelineLayout
+        || !pfnCreateComputePipelines) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c init: raw Vulkan PFN load failed");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+
+    VkShaderModuleCreateInfo smCi = {};
+    smCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smCi.codeSize = spirv.size() * sizeof(uint32_t);
+    smCi.pCode = spirv.data();
+    VkShaderModule shaderMod = VK_NULL_HANDLE;
+    if (pfnCreateShaderModule(m_Vulkan->device, &smCi, nullptr, &shaderMod) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c init: vkCreateShaderModule failed");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    m_FrucNv12RgbVkShader = shaderMod;
+
+    VkDescriptorSetLayoutBinding dslBindings[3] = {};
+    for (int i = 0; i < 3; i++) {
+        dslBindings[i].binding = (uint32_t)i;
+        dslBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        dslBindings[i].descriptorCount = 1;
+        dslBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo dslCi = {};
+    dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dslCi.bindingCount = 3;
+    dslCi.pBindings = dslBindings;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    if (pfnCreateDescriptorSetLayout(m_Vulkan->device, &dslCi, nullptr, &dsl) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c init: vkCreateDescriptorSetLayout failed");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    m_FrucNv12RgbVkDsl = dsl;
+
+    VkPushConstantRange pcRange = {};
+    pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcRange.offset = 0;
+    pcRange.size = sizeof(int) * 2;  // w, h
+
+    VkPipelineLayoutCreateInfo plCi = {};
+    plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plCi.setLayoutCount = 1;
+    plCi.pSetLayouts = &dsl;
+    plCi.pushConstantRangeCount = 1;
+    plCi.pPushConstantRanges = &pcRange;
+    VkPipelineLayout pipeLay = VK_NULL_HANDLE;
+    if (pfnCreatePipelineLayout(m_Vulkan->device, &plCi, nullptr, &pipeLay) != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c init: vkCreatePipelineLayout failed");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    m_FrucNv12RgbVkPipeLay = pipeLay;
+
+    VkComputePipelineCreateInfo cpCi = {};
+    cpCi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpCi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpCi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpCi.stage.module = shaderMod;
+    cpCi.stage.pName = "main";
+    cpCi.layout = pipeLay;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    if (pfnCreateComputePipelines(m_Vulkan->device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &pipe)
+        != VK_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c init: vkCreateComputePipelines failed");
+        m_FrucNv12RgbDisabled = true;
+        return false;
+    }
+    m_FrucNv12RgbVkPipeline = pipe;
+    m_FrucNv12RgbWidth = width;
+    m_FrucNv12RgbHeight = height;
+    m_FrucNv12RgbReady = true;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-FRUC] §J.3.e.2.c init: shader compiled (spv=%zu bytes), "
+                "raw VkPipeline=%p (DSL=%p PL=%p ShaderMod=%p), target %ux%u",
+                spirv.size() * sizeof(uint32_t),
+                (void*)pipe, (void*)dsl, (void*)pipeLay, (void*)shaderMod, width, height);
+    return true;
+}
+
+void PlVkRenderer::destroyFrucNv12RgbResources()
+{
+    if (!m_PlVkInstance || !m_Vulkan) return;
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
+    };
+    auto pfnDestroyPipeline = (PFN_vkDestroyPipeline)getDevProc("vkDestroyPipeline");
+    auto pfnDestroyPipelineLayout = (PFN_vkDestroyPipelineLayout)getDevProc("vkDestroyPipelineLayout");
+    auto pfnDestroyDescriptorSetLayout = (PFN_vkDestroyDescriptorSetLayout)getDevProc("vkDestroyDescriptorSetLayout");
+    auto pfnDestroyShaderModule = (PFN_vkDestroyShaderModule)getDevProc("vkDestroyShaderModule");
+
+    if (m_FrucNv12RgbVkPipeline && pfnDestroyPipeline) {
+        pfnDestroyPipeline(m_Vulkan->device, (VkPipeline)m_FrucNv12RgbVkPipeline, nullptr);
+    }
+    if (m_FrucNv12RgbVkPipeLay && pfnDestroyPipelineLayout) {
+        pfnDestroyPipelineLayout(m_Vulkan->device, (VkPipelineLayout)m_FrucNv12RgbVkPipeLay, nullptr);
+    }
+    if (m_FrucNv12RgbVkDsl && pfnDestroyDescriptorSetLayout) {
+        pfnDestroyDescriptorSetLayout(m_Vulkan->device, (VkDescriptorSetLayout)m_FrucNv12RgbVkDsl, nullptr);
+    }
+    if (m_FrucNv12RgbVkShader && pfnDestroyShaderModule) {
+        pfnDestroyShaderModule(m_Vulkan->device, (VkShaderModule)m_FrucNv12RgbVkShader, nullptr);
+    }
+    m_FrucNv12RgbVkPipeline = nullptr;
+    m_FrucNv12RgbVkPipeLay  = nullptr;
+    m_FrucNv12RgbVkDsl      = nullptr;
+    m_FrucNv12RgbVkShader   = nullptr;
+    // §J.3.e.2.c2 will add buffer/cmdpool/fence cleanup here.
+    m_FrucNv12RgbReady = false;
+    m_FrucNv12RgbWidth = 0;
+    m_FrucNv12RgbHeight = 0;
+}
+
+bool PlVkRenderer::runNv12RgbProbe(AVVkFrame* /*vkFrame*/, AVFrame* frame)
+{
+    // §J.3.e.2.c1 — for now just verify init, log a one-shot.  Per-frame
+    // dispatch lands in §J.3.e.2.c2.
+    if (m_FrucNv12RgbDisabled) return false;
+    if (!m_FrucNv12RgbReady) {
+        if (!initFrucNv12RgbResources((uint32_t)frame->width, (uint32_t)frame->height)) {
+            return false;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.c1 probe: pipeline ready — "
+                    "§J.3.e.2.c2 will wire dispatch + readback");
+    }
+    return true;
+}
+
 bool PlVkRenderer::prepareDecoderContext(AVCodecContext *context, AVDictionary **)
 {
     if (m_HwAccelBackend) {
@@ -1343,6 +1615,28 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
                 auto* vkFrame = (AVVkFrame*)frame->data[0];
                 if (vkFrame) {
                     runLayoutTransitionProbe(vkFrame, frame);
+                }
+            }
+        }
+
+        // §J.3.e.2.c1 — NV12→RGB compute pipeline build probe.  Gated separately
+        // on VIPLE_VK_FRUC_PROBE3=1.  Requires VIPLE_PLVK_NCNN_HANDOFF=1 to have
+        // succeeded (ncnn external instance must be live for ncnn::Pipeline
+        // creation).  Fires once at frame 30 (per PlVkRenderer instance) and is
+        // idempotent thereafter.
+        const char* probe3 = SDL_getenv("VIPLE_VK_FRUC_PROBE3");
+        if (probe3 && SDL_atoi(probe3) != 0 && m_NcnnExternalReady) {
+            // Per-instance counter so test-decode + reconnect cycles each get
+            // a fresh window — probe3 fires once per PlVkRenderer instance
+            // (after we've seen >= 30 decoded frames on this instance).
+            ++m_FrucNv12RgbFrameCount;
+            if (m_FrucNv12RgbFrameCount == 30) {
+                auto* vkFrame = (AVVkFrame*)frame->data[0];
+                if (vkFrame) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VK-FRUC] §J.3.e.2.c1 probe gating fired @ frame#%llu",
+                                (unsigned long long)m_FrucNv12RgbFrameCount);
+                    runNv12RgbProbe(vkFrame, frame);
                 }
             }
         }

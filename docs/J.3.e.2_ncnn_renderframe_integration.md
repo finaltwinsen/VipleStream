@@ -222,6 +222,22 @@ constants (W, H) 失效要重建。
 **Mitigation:** PlVkRenderer 已有 frame size 監控（`m_LastColorspace` 變動處理），
 延伸做 size invalidation；§J.3.e.2.e 收尾時加。
 
+### R-impl-1: ncnn::Pipeline::create() 對 binding layout 有限制（§J.3.e.2.c1 實測）
+
+NcnnFRUC Phase B.4a 用 `ncnn::Pipeline + Pipeline::create(spirv, size, specs)` 走得通是
+因為 shader 有 ncnn-Mat-style 的 2 binding (in / out) layout。把同樣 API 套到我們
+3-binding (Y_in / UV_in / RGB_out) 的 NV12→RGB shader，`pipe->create()` 內部 SPIR-V
+reflection 直接 access violation 0xC0000005，沒回 error code、沒 log，整個 process 死。
+
+**Mitigation:** 走 raw Vulkan VkPipeline 路徑 — 用 `ncnn::compile_spirv_module()` 純做
+GLSL → SPIR-V 編譯（此函式只用 glslang，跟 ncnn pipeline 無關），然後自己叫
+`vkCreateShaderModule` / `vkCreateDescriptorSetLayout` / `vkCreatePipelineLayout` /
+`vkCreateComputePipelines` 建管線。多 ~80 LOC，但完全 control + 不被 ncnn 內部
+Mat layout 假設 bite。實機 v1.3.77 wire 通：
+  raw VkPipeline=0x...CD30 (DSL=... PL=... ShaderMod=...), target 1280x720
+
+**Lesson learned:** 寫非 ncnn-Mat-style shader 一律走 raw Vulkan，不要碰 ncnn::Pipeline。
+
 ### R5: ncnn forward 失敗 / driver 拒絕 fall through
 
 ncnn forward 失敗時 PlVkRenderer 不能炸 — 要 fallback 到「直接 present real frame

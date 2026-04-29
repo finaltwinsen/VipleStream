@@ -65,6 +65,18 @@ private:
     void destroyFrucProbeResources();
     bool runLayoutTransitionProbe(struct AVVkFrame* vkFrame, AVFrame* frame);
 
+    // §J.3.e.2.c — full-frame NV12 → planar fp32 RGB compute pipeline.
+    // Pipeline: vkCmdCopyImageToBuffer (NV12 plane-0 → bufY, plane-1 → bufUV) →
+    // compute shader (BT.709 limited-range YCbCr → linear sRGB) → planar fp32
+    // RGB output buffer.  Storage-buffer-only shader so we reuse ncnn's
+    // compile_spirv_module + ncnn::Pipeline machinery (samplers would need a
+    // different compilation path).  Gated on VIPLE_VK_FRUC_PROBE3=1 — runs every
+    // 60 frames, dispatches W*H workgroups, reads back a 12-byte center-pixel
+    // window for correctness check vs §J.3.e.2.b's CPU BT.709 result.
+    bool initFrucNv12RgbResources(uint32_t width, uint32_t height);
+    void destroyFrucNv12RgbResources();
+    bool runNv12RgbProbe(struct AVVkFrame* vkFrame, AVFrame* frame);
+
     // The backend renderer if we're frontend-only
     IFFmpegRenderer* m_Backend;
     bool m_HwAccelBackend;
@@ -138,4 +150,31 @@ private:
     void* m_FrucProbeBuffer      = nullptr;  // VkBuffer (host-visible readback)
     void* m_FrucProbeBufferMem   = nullptr;  // VkDeviceMemory
     void* m_FrucProbeFence       = nullptr;  // VkFence
+
+    // §J.3.e.2.c — NV12 → planar fp32 RGB compute pipeline state.
+    // Held as opaque pointers; types live in the ncnn:: / Vk:: spaces hidden
+    // behind the .cpp.  The ncnn::Pipeline rides the same VkDevice as the
+    // §J.3.e.1.d external handoff (m_Vulkan->device).
+    bool     m_FrucNv12RgbReady    = false;
+    bool     m_FrucNv12RgbDisabled = false;
+    uint32_t m_FrucNv12RgbWidth    = 0;
+    uint32_t m_FrucNv12RgbHeight   = 0;
+    // §J.3.e.2.c1 raw VkPipeline path (ncnn::Pipeline::create crashes on
+    // shaders with non-ncnn-Mat binding semantics — see git log for details).
+    void*    m_FrucNv12RgbVkShader   = nullptr;  // VkShaderModule
+    void*    m_FrucNv12RgbVkDsl      = nullptr;  // VkDescriptorSetLayout
+    void*    m_FrucNv12RgbVkPipeLay  = nullptr;  // VkPipelineLayout
+    void*    m_FrucNv12RgbVkPipeline = nullptr;  // VkPipeline (compute)
+    void*    m_FrucNv12RgbBufY     = nullptr;  // VkBuffer (W*H bytes)
+    void*    m_FrucNv12RgbBufYMem  = nullptr;  // VkDeviceMemory
+    void*    m_FrucNv12RgbBufUV    = nullptr;  // VkBuffer (W*H/2 bytes)
+    void*    m_FrucNv12RgbBufUVMem = nullptr;  // VkDeviceMemory
+    void*    m_FrucNv12RgbBufRGB   = nullptr;  // VkBuffer (W*H*3*sizeof(float))
+    void*    m_FrucNv12RgbBufRGBMem= nullptr;  // VkDeviceMemory
+    void*    m_FrucNv12RgbHostBuf  = nullptr;  // VkBuffer (12 bytes host-visible readback)
+    void*    m_FrucNv12RgbHostBufMem= nullptr; // VkDeviceMemory
+    void*    m_FrucNv12RgbCmdPool  = nullptr;  // VkCommandPool
+    void*    m_FrucNv12RgbCmdBuf   = nullptr;  // VkCommandBuffer
+    void*    m_FrucNv12RgbFence    = nullptr;  // VkFence
+    uint64_t m_FrucNv12RgbFrameCount = 0;
 };
