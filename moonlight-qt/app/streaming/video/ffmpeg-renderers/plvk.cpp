@@ -2486,18 +2486,89 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
         return false;
     }
 
-    // §J.3.e.2.e2d temporary diagnostic — skip RIFE entirely, just pass through
-    // current frame as "interp output".  This proves Phase A→C (NV12→RGB→VkImage)
-    // pipeline works end-to-end.  record_clone(curr→prev) crashes inside ncnn
-    // for reasons we don't yet understand — debug deferred.  Pass-through doesn't
-    // give real interp but does verify the VkMat I/O linkage works.
-    ncnn::VkMat outVkMat = m_RifeCurrVkMat;
+    // §J.3.e.2.e2d Phase B — RIFE forward via ncnn::Extractor.
+    //
+    // Critical: record_clone(src, dst, Option) internally calls
+    // dst.create_like(src, opt.blob_vkallocator).  With default-constructed
+    // ncnn::Option(), opt.blob_vkallocator == nullptr.  When dst's existing
+    // allocator differs from nullptr (i.e., dst is already allocated like
+    // ours), VkMat::create takes the release+realloc branch, then calls
+    // `nullptr->fastMalloc(...)` → 0xC0000005 (verified by reading ncnn
+    // src/command.cpp:983 + src/mat.cpp:771 source).
+    //
+    // Fix: explicitly set opt.blob_vkallocator to match what we created
+    // m_Rife{Curr,Prev}VkMat with.  Then create_like's allocator-equality
+    // early-return triggers and re-alloc is skipped (correct behavior since
+    // dst is already the right shape).
+    ncnn::Option cloneOpt;
+    cloneOpt.blob_vkallocator    = vkdev->acquire_blob_allocator();
+    cloneOpt.staging_vkallocator = vkdev->acquire_staging_allocator();
+
+    ncnn::VkMat outVkMat;
     bool usedRife = false;
-    if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                  "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B: SKIPPED "
-                                  "(record_clone crashes; pass-through curr as out for now)",
-                                  (unsigned long long)entryN);
-    (void)vkdev;
+    if (m_RifeHasPrevFrame) {
+        // RIFE forward: prev + curr + timestep → out (midpoint interp)
+        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B: extract setup",
+                                      (unsigned long long)entryN);
+        ncnn::Extractor ex = m_RifeNet->create_extractor();
+        ex.input("in0", m_RifePrevVkMat);
+        ex.input("in1", m_RifeCurrVkMat);
+        ex.input("in2", m_RifeTimestepVkMat);
+        ncnn::VkCompute ncnnCmd(vkdev);
+        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B: ex.extract",
+                                      (unsigned long long)entryN);
+        int rc = ex.extract("out0", outVkMat, ncnnCmd);
+        if (rc != 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase B: extract rc=%d", rc);
+            vkdev->reclaim_blob_allocator(cloneOpt.blob_vkallocator);
+            vkdev->reclaim_staging_allocator(cloneOpt.staging_vkallocator);
+            return false;
+        }
+        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B: record_clone curr→prev",
+                                      (unsigned long long)entryN);
+        ncnnCmd.record_clone(m_RifeCurrVkMat, m_RifePrevVkMat, cloneOpt);
+        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B: submit_and_wait",
+                                      (unsigned long long)entryN);
+        if (ncnnCmd.submit_and_wait() != 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase B: submit_and_wait failed");
+            vkdev->reclaim_blob_allocator(cloneOpt.blob_vkallocator);
+            vkdev->reclaim_staging_allocator(cloneOpt.staging_vkallocator);
+            return false;
+        }
+        usedRife = true;
+    } else {
+        // First frame — no prev yet.  Clone curr → prev for next frame.
+        // outVkMat aliases curr (real frame, no interp).
+        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B (first frame): VkCompute ctor",
+                                      (unsigned long long)entryN);
+        ncnn::VkCompute ncnnCmd(vkdev);
+        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B (first frame): record_clone",
+                                      (unsigned long long)entryN);
+        ncnnCmd.record_clone(m_RifeCurrVkMat, m_RifePrevVkMat, cloneOpt);
+        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B (first frame): submit_and_wait",
+                                      (unsigned long long)entryN);
+        if (ncnnCmd.submit_and_wait() != 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase B: first-frame clone failed");
+            vkdev->reclaim_blob_allocator(cloneOpt.blob_vkallocator);
+            vkdev->reclaim_staging_allocator(cloneOpt.staging_vkallocator);
+            return false;
+        }
+        outVkMat = m_RifeCurrVkMat;
+        m_RifeHasPrevFrame = true;
+    }
+
+    vkdev->reclaim_blob_allocator(cloneOpt.blob_vkallocator);
+    vkdev->reclaim_staging_allocator(cloneOpt.staging_vkallocator);
     auto t1 = std::chrono::high_resolution_clock::now();
     double rifeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
     if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2659,15 +2730,22 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
     m_RifeNet->opt.use_fp16_arithmetic = false;
     m_RifeNet->opt.use_int8_storage    = false;
     m_RifeNet->opt.use_int8_arithmetic = false;
-    // §J.3.e.2.e2d — disable packing layout so input/output VkMats are planar
-    // (W,H,3,1) fp32 — matches our bufRGB layout for direct vkCmdCopyBuffer.
-    // With packing on, RIFE outputs elempack=4 packed VkMat and we'd need an
-    // extra unpack shader.
-    m_RifeNet->opt.use_packing_layout  = false;
     m_RifeNet->opt.use_shader_pack8    = false;
+    // §J.3.e.2.e2d — wire blob/staging/workspace VkAllocators on the Net opt.
+    // ncnn::Net::forward (called inside ex.extract) allocates intermediate
+    // VkMats via opt.blob_vkallocator and staging via opt.staging_vkallocator.
+    // If left null, internal allocations crash on `nullptr->fastMalloc`.
+    // NcnnFRUC's production path uses CPU ncnn::Mat (different code path) so
+    // this issue is invisible there; we hit it because we feed VkMat inputs.
+    m_RifeNet->opt.blob_vkallocator      = vkdev->acquire_blob_allocator();
+    m_RifeNet->opt.staging_vkallocator   = vkdev->acquire_staging_allocator();
+    m_RifeNet->opt.workspace_vkallocator = m_RifeNet->opt.blob_vkallocator;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a opt: fp32 path, packing OFF "
-                "(planar I/O matches bufRGB layout)");
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2a opt: fp32 path, packing ON (default), "
+                "blob_vkallocator=%p staging=%p workspace=%p (mandatory for VkMat ex.input)",
+                (void*)m_RifeNet->opt.blob_vkallocator,
+                (void*)m_RifeNet->opt.staging_vkallocator,
+                (void*)m_RifeNet->opt.workspace_vkallocator);
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 2/6 set_vulkan_device(0)");
