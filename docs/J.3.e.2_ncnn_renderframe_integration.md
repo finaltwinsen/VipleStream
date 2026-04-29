@@ -647,3 +647,94 @@ state 撞上同一面牆。
 跑原本的 libplacebo direct render（不過 override），就跟 §J.3.c.1
 shipped 的 Vulkan-native 一樣。沒 FRUC，但 latency 跟 D3D11 cascade
 比有保障。
+
+---
+
+## §J.3.e.2.h — Generic FRUC port to Vulkan-native（v1.3.113~114）
+
+### h.a (v1.3.113) — HLSL → GLSL 三條 shader port
+
+把 D3D11 GenericFRUC 的三條 compute shader 從 HLSL 轉成 GLSL/SPIR-V，
+algorithm 1:1 維持，resource 改 storage buffer：
+  • `motionest_compute.hlsl` Q=1 → `kFrucMotionEstShaderGlsl` (19.3KB SPIR-V)
+  • `mv_median.hlsl` → `kFrucMvMedianShaderGlsl` (15.9KB)
+  • `warp_compute.hlsl` Q=1 → `kFrucWarpShaderGlsl` (18.5KB)
+
+`VIPLE_VK_FRUC_GENERIC_PROBE=1` 觸發 init-time `compile_spirv_module`
+驗證 — 三條都通過 glslang。
+
+### h.b — IFRUCBackend 抽象化（跳過）
+
+既有 `IFRUCBackend` interface 完全 D3D11-shaped（`ID3D11Device*`、
+`ID3D11Texture2D*` 等），不適合給 Vulkan path 用。Vulkan-side
+`runFrucGenericComputePass` 直接 PlVkRenderer member function，沒
+透過抽象。D3D11 path 不動。
+
+### h.c (v1.3.114) — Compute pipeline 結構就位
+
+  • plvk.h 加 30+ 個 §J.3.e.2.h member（3 pipeline、5 buffer、
+    descriptor pool/sets、cmd buf/fence）
+  • `initFrucGenericResources()` 250 行：lambda `buildPipeline` 把
+    GLSL 編譯 + DSL + PipelineLayout + VkPipeline 一次性建好；3 條
+    shader binding count + push-constant size 不同（ME 4/24, Median
+    2/16, Warp 4/24）
+  • `runFrucGenericComputePass()` 120 行：3 stage dispatch + buffer
+    barrier + 2 vkCmdCopyBuffer（bufRGB→prevRGB, mvFiltered→prevMV
+    給下 frame temporal predictor 用），1s fence wait
+  • `currRGB` 直接 alias `m_FrucNv12RgbBufRGB`，不重複配置
+
+`VIPLE_VK_FRUC_GENERIC=1` 觸發 init 加 1 次 smoke dispatch 驗證實測：
+
+```
+[VIPLE-VK-FRUC] §J.3.e.2.h.c init: enter (W=1280 H=720 block=8 mv=160x90)
+[VIPLE-VK-FRUC] §J.3.e.2.h.c init: PASS — pipelines/buffers/desc-sets ready
+[VIPLE-VK-FRUC] §J.3.e.2.h.c run: frame#1 OK (interp ready in m_FrucInterpRgbBuf)
+[VIPLE-VK-FRUC] §J.3.e.2.h.c init: smoke dispatch PASS
+```
+
+3 pipeline build + 5 buffer alloc + 3 dispatch + fence wait 全部 cleanly
+過。**Vulkan-side compute infrastructure 完全就位**。
+
+### h.d — 阻塞於 §J.3.e.2.g（libplacebo hold/release sync bug）
+
+要把 §J.3.e.2.h.c 的 compute output 接到 libplacebo render 路徑，需要
+其中一個：
+  • 雙 `pl_render_image` + 雙 `pl_swapchain_submit_frame`（每 frame
+    server 對應 client present 一個 interp + 一個 real）
+  • 或修改 `pl_render_image` 的 source plane override 路徑
+
+兩種都會走過 `pl_vulkan_wrap` + `pl_render_image` + 跨 frame ownership
+管理，**直接撞上 §J.3.e.2.g 的根因**：libplacebo 對我們 wrap 出來的
+`pl_tex` 的 hold/release timeline signal 行為跟我們期望的 value 對不上，
+frame#2+ silently drop。
+
+§J.3.e.2.h.c 的 compute pipeline **本身正常**（smoke dispatch 證實），
+但要看到實際畫面 output 必須先解 §J.3.e.2.g.A/B/C 三選一。
+
+### h.e — Benchmark vs D3D11 baseline（gated by h.d）
+
+無法跑（h.d 沒接通 → 沒實際 interp output 可量測）。
+
+### Status (v1.3.114)
+
+| 子題 | 狀態 |
+|---|---|
+| h.a GLSL 移植 | ✅ ship v1.3.113 |
+| h.b 抽象化 | ⏭ skip（不需要）|
+| h.c Vulkan compute pipeline | ✅ ship v1.3.114（init + smoke 通）|
+| h.d 雙 present 整合 | 🔴 阻塞於 §J.3.e.2.g |
+| h.e benchmark | 🔴 阻塞於 h.d |
+
+**Vulkan FRUC 的演算法層完全就位**（GLSL ports + compute infrastructure），
+**但渲染整合卡在 §J.3.e.2.e1b 的 libplacebo timeline bug**。後者跟手刻
+RIFE / Path B / Generic FRUC 都共用同一條 override 路徑 ——
+**§J.3.e.2.g 是這條 workstream 真正的 bottleneck**。
+
+### 對使用者的可見效果（v1.3.114 ship）
+
+  • 預設沒設 env 完全沒影響（向下相容）
+  • `VIPLE_VK_FRUC_GENERIC_PROBE=1` 跑 init-time GLSL→SPIR-V 驗證
+  • `VIPLE_VK_FRUC_GENERIC=1` 加上 `VIPLE_VK_FRUC_OUTPUT_OVERRIDE=1`
+    可看 init log 確認 compute pipeline 建構成功，但實際畫面還是
+    走 v1.3.111 的 e1b 路徑 — **不會比之前更好**（一樣會在
+    frame#2 後 stall 到 fallback 進 D3D11 cascade）
