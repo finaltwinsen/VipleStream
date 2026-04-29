@@ -15,108 +15,163 @@
 #include <cstring>
 #include <vector>
 
-// §J.3.e.2.i.8 Phase 1.1c — minimal CPU-side bitstream buffer.
+// §J.3.e.2.i.8 Phase 1.3a — GPU-backed bitstream buffer.
 //
-// VulkanBitstreamBuffer 19 個 pure virtual 的 minimal impl: 用 std::vector
-// 保 NAL 拷貝 + 各種 stub. VkBuffer/VkDeviceMemory 全 NULL_HANDLE，因為
-// 此 phase parser 只 ParseByteStream (不 submit decode).  Phase 1.3 把
-// 這個換成真的 vkCreateBuffer + vkAllocateMemory + vkMapMemory.
+// VkBuffer (VIDEO_DECODE_SRC_BIT_KHR) + host-visible+coherent VkDeviceMemory,
+// persistently mapped.  Parser writes NAL bytes through GetDataPtr (returns the
+// mapped host pointer); decode queue reads via GetBuffer + bitstreamBufferOffset
+// during vkCmdDecodeVideoKHR (Phase 1.3d).
 //
-// 寫在 anonymous namespace 隔離 link visibility.
+// 19 pure virtuals on VulkanBitstreamBuffer all wired against the mapped pointer
+// so the parser sees byte-addressable memory just like the Phase 1.1c CPU version.
+// FlushRange/InvalidateRange are no-ops because the memory is HOST_COHERENT.
+//
+// Allocation is via VkFrucRenderer::createGpuBitstreamBuffer (which knows the
+// codec profile + queue family + memory props).  Destructor walks back to the
+// renderer's destroyGpuBitstreamBuffer for unmap+free+destroy.  Anonymous
+// namespace isolates link visibility.
 namespace {
-class VkFrucCpuBitstreamBuffer : public VulkanBitstreamBuffer {
+class VkFrucGpuBitstreamBuffer : public VulkanBitstreamBuffer {
 public:
-    VkFrucCpuBitstreamBuffer(size_t size, size_t offsetAlign, size_t sizeAlign)
-        : m_buf(size), m_offsetAlign(offsetAlign), m_sizeAlign(sizeAlign) {}
+    static std::shared_ptr<VkFrucGpuBitstreamBuffer> Create(VkFrucRenderer* parent,
+                                                            VkDeviceSize size,
+                                                            VkDeviceSize offsetAlign,
+                                                            VkDeviceSize sizeAlign) {
+        if (!parent) return nullptr;
+        VkBuffer       buf  = VK_NULL_HANDLE;
+        VkDeviceMemory mem  = VK_NULL_HANDLE;
+        void*          mapped = nullptr;
+        VkDeviceSize   actual = 0;
+        if (!parent->createGpuBitstreamBuffer(size, buf, mem, mapped, actual)) {
+            return nullptr;
+        }
+        // make_shared with private ctor isn't possible; just `new` and wrap.
+        return std::shared_ptr<VkFrucGpuBitstreamBuffer>(new VkFrucGpuBitstreamBuffer(
+            parent, buf, mem, mapped, actual, offsetAlign, sizeAlign));
+    }
+    ~VkFrucGpuBitstreamBuffer() override {
+        if (m_Parent && (m_Buffer != VK_NULL_HANDLE || m_Memory != VK_NULL_HANDLE)) {
+            m_Parent->destroyGpuBitstreamBuffer(m_Buffer, m_Memory);
+        }
+    }
 
-    VkDeviceSize GetMaxSize() const override { return m_buf.size(); }
-    VkDeviceSize GetOffsetAlignment() const override { return m_offsetAlign; }
-    VkDeviceSize GetSizeAlignment()   const override { return m_sizeAlign;   }
+    VkDeviceSize GetMaxSize() const override { return m_Size; }
+    VkDeviceSize GetOffsetAlignment() const override { return m_OffsetAlign; }
+    VkDeviceSize GetSizeAlignment()   const override { return m_SizeAlign;   }
 
     VkDeviceSize Resize(VkDeviceSize newSize, VkDeviceSize copySize, VkDeviceSize copyOffset) override {
-        if (newSize <= m_buf.size()) return m_buf.size();
-        std::vector<uint8_t> newBuf(newSize, 0);
-        if (copySize) memcpy(newBuf.data(), m_buf.data() + copyOffset, copySize);
-        m_buf.swap(newBuf);
-        return m_buf.size();
+        if (newSize <= m_Size) return m_Size;
+        // Allocate fresh buffer + memory, copy old contents, swap, free old.
+        VkBuffer       newBuf  = VK_NULL_HANDLE;
+        VkDeviceMemory newMem  = VK_NULL_HANDLE;
+        void*          newMap  = nullptr;
+        VkDeviceSize   newAct  = 0;
+        if (!m_Parent->createGpuBitstreamBuffer(newSize, newBuf, newMem, newMap, newAct)) {
+            return m_Size;  // resize failed, keep old
+        }
+        if (copySize && copyOffset + copySize <= m_Size) {
+            memcpy(newMap, (uint8_t*)m_MappedPtr + copyOffset, (size_t)copySize);
+        }
+        m_Parent->destroyGpuBitstreamBuffer(m_Buffer, m_Memory);
+        m_Buffer    = newBuf;
+        m_Memory    = newMem;
+        m_MappedPtr = newMap;
+        m_Size      = newAct;
+        return m_Size;
     }
     VkDeviceSize Clone(VkDeviceSize newSize, VkDeviceSize copySize, VkDeviceSize copyOffset,
                        VkSharedBaseObj<VulkanBitstreamBuffer>& vulkanBitstreamBuffer) override {
-        auto cl = std::make_shared<VkFrucCpuBitstreamBuffer>(newSize, m_offsetAlign, m_sizeAlign);
-        if (copySize && copyOffset + copySize <= m_buf.size())
-            memcpy(cl->m_buf.data(), m_buf.data() + copyOffset, copySize);
+        auto cl = Create(m_Parent, newSize, m_OffsetAlign, m_SizeAlign);
+        if (!cl) {
+            vulkanBitstreamBuffer.reset();
+            return 0;
+        }
+        if (copySize && copyOffset + copySize <= m_Size) {
+            memcpy(cl->m_MappedPtr, (uint8_t*)m_MappedPtr + copyOffset, (size_t)copySize);
+        }
         vulkanBitstreamBuffer = cl;
         return cl->GetMaxSize();
     }
 
     int64_t MemsetData(uint32_t value, VkDeviceSize offset, VkDeviceSize size) override {
-        if (offset + size > m_buf.size()) return -1;
-        memset(m_buf.data() + offset, (int)value, (size_t)size);
+        if (offset + size > m_Size) return -1;
+        memset((uint8_t*)m_MappedPtr + offset, (int)value, (size_t)size);
         return (int64_t)size;
     }
     int64_t CopyDataToBuffer(uint8_t* dst, VkDeviceSize dstOff, VkDeviceSize srcOff, VkDeviceSize size) const override {
-        if (srcOff + size > m_buf.size()) return -1;
-        memcpy(dst + dstOff, m_buf.data() + srcOff, (size_t)size);
+        if (srcOff + size > m_Size) return -1;
+        memcpy(dst + dstOff, (const uint8_t*)m_MappedPtr + srcOff, (size_t)size);
         return (int64_t)size;
     }
     int64_t CopyDataToBuffer(VkSharedBaseObj<VulkanBitstreamBuffer>& dst, VkDeviceSize dstOff,
                               VkDeviceSize srcOff, VkDeviceSize size) const override {
-        if (!dst || srcOff + size > m_buf.size()) return -1;
+        if (!dst || srcOff + size > m_Size) return -1;
         VkDeviceSize maxSz = 0;
         uint8_t* dstPtr = dst->GetDataPtr(dstOff, maxSz);
         if (!dstPtr || size > maxSz) return -1;
-        memcpy(dstPtr, m_buf.data() + srcOff, (size_t)size);
+        memcpy(dstPtr, (const uint8_t*)m_MappedPtr + srcOff, (size_t)size);
         return (int64_t)size;
     }
     int64_t CopyDataFromBuffer(const uint8_t* src, VkDeviceSize srcOff, VkDeviceSize dstOff, VkDeviceSize size) override {
-        if (dstOff + size > m_buf.size()) return -1;
-        memcpy(m_buf.data() + dstOff, src + srcOff, (size_t)size);
+        if (dstOff + size > m_Size) return -1;
+        memcpy((uint8_t*)m_MappedPtr + dstOff, src + srcOff, (size_t)size);
         return (int64_t)size;
     }
     int64_t CopyDataFromBuffer(const VkSharedBaseObj<VulkanBitstreamBuffer>& src, VkDeviceSize srcOff,
                                 VkDeviceSize dstOff, VkDeviceSize size) override {
-        if (!src || dstOff + size > m_buf.size()) return -1;
+        if (!src || dstOff + size > m_Size) return -1;
         VkDeviceSize maxSz = 0;
         const uint8_t* srcPtr = src->GetReadOnlyDataPtr(srcOff, maxSz);
         if (!srcPtr || size > maxSz) return -1;
-        memcpy(m_buf.data() + dstOff, srcPtr, (size_t)size);
+        memcpy((uint8_t*)m_MappedPtr + dstOff, srcPtr, (size_t)size);
         return (int64_t)size;
     }
     uint8_t* GetDataPtr(VkDeviceSize offset, VkDeviceSize& maxSize) override {
-        if (offset >= m_buf.size()) { maxSize = 0; return nullptr; }
-        maxSize = m_buf.size() - offset;
-        return m_buf.data() + offset;
+        if (offset >= m_Size) { maxSize = 0; return nullptr; }
+        maxSize = m_Size - offset;
+        return (uint8_t*)m_MappedPtr + offset;
     }
     const uint8_t* GetReadOnlyDataPtr(VkDeviceSize offset, VkDeviceSize& maxSize) const override {
-        if (offset >= m_buf.size()) { maxSize = 0; return nullptr; }
-        maxSize = m_buf.size() - offset;
-        return m_buf.data() + offset;
+        if (offset >= m_Size) { maxSize = 0; return nullptr; }
+        maxSize = m_Size - offset;
+        return (const uint8_t*)m_MappedPtr + offset;
     }
-    void FlushRange(VkDeviceSize, VkDeviceSize) const override {}      // CPU-only, noop
-    void InvalidateRange(VkDeviceSize, VkDeviceSize) const override {} // CPU-only, noop
-    VkBuffer       GetBuffer()       const override { return VK_NULL_HANDLE; }  // Phase 1.3 fix
-    VkDeviceMemory GetDeviceMemory() const override { return VK_NULL_HANDLE; }  // Phase 1.3 fix
+    // HOST_COHERENT memory — host writes are immediately GPU-visible.
+    void FlushRange(VkDeviceSize, VkDeviceSize) const override {}
+    void InvalidateRange(VkDeviceSize, VkDeviceSize) const override {}
+    VkBuffer       GetBuffer()       const override { return m_Buffer; }
+    VkDeviceMemory GetDeviceMemory() const override { return m_Memory; }
 
-    uint32_t AddStreamMarker(uint32_t off) override { m_markers.push_back(off); return (uint32_t)m_markers.size() - 1; }
+    uint32_t AddStreamMarker(uint32_t off) override { m_Markers.push_back(off); return (uint32_t)m_Markers.size() - 1; }
     uint32_t SetStreamMarker(uint32_t off, uint32_t idx) override {
-        if (idx >= m_markers.size()) m_markers.resize(idx + 1, 0);
-        m_markers[idx] = off;
+        if (idx >= m_Markers.size()) m_Markers.resize(idx + 1, 0);
+        m_Markers[idx] = off;
         return idx;
     }
-    uint32_t GetStreamMarker(uint32_t idx) const override { return idx < m_markers.size() ? m_markers[idx] : 0; }
-    uint32_t GetStreamMarkersCount() const override { return (uint32_t)m_markers.size(); }
+    uint32_t GetStreamMarker(uint32_t idx) const override { return idx < m_Markers.size() ? m_Markers[idx] : 0; }
+    uint32_t GetStreamMarkersCount() const override { return (uint32_t)m_Markers.size(); }
     const uint32_t* GetStreamMarkersPtr(uint32_t startIdx, uint32_t& maxCount) const override {
-        if (startIdx >= m_markers.size()) { maxCount = 0; return nullptr; }
-        maxCount = (uint32_t)m_markers.size() - startIdx;
-        return m_markers.data() + startIdx;
+        if (startIdx >= m_Markers.size()) { maxCount = 0; return nullptr; }
+        maxCount = (uint32_t)m_Markers.size() - startIdx;
+        return m_Markers.data() + startIdx;
     }
-    uint32_t ResetStreamMarkers() override { m_markers.clear(); return 0; }
+    uint32_t ResetStreamMarkers() override { m_Markers.clear(); return 0; }
 
 private:
-    std::vector<uint8_t>  m_buf;
-    std::vector<uint32_t> m_markers;
-    size_t m_offsetAlign;
-    size_t m_sizeAlign;
+    VkFrucGpuBitstreamBuffer(VkFrucRenderer* parent, VkBuffer buf, VkDeviceMemory mem,
+                             void* mapped, VkDeviceSize size,
+                             VkDeviceSize offAlign, VkDeviceSize szAlign)
+        : m_Parent(parent), m_Buffer(buf), m_Memory(mem), m_MappedPtr(mapped),
+          m_Size(size), m_OffsetAlign(offAlign), m_SizeAlign(szAlign) {}
+
+    VkFrucRenderer*       m_Parent      = nullptr;
+    VkBuffer              m_Buffer      = VK_NULL_HANDLE;
+    VkDeviceMemory        m_Memory      = VK_NULL_HANDLE;
+    void*                 m_MappedPtr   = nullptr;
+    VkDeviceSize          m_Size        = 0;
+    VkDeviceSize          m_OffsetAlign = 0;
+    VkDeviceSize          m_SizeAlign   = 0;
+    std::vector<uint32_t> m_Markers;
 };
 } // namespace
 
@@ -228,15 +283,22 @@ VkDeviceSize VkFrucDecodeClient::GetBitstreamBuffer(
     VkDeviceSize initializeBufferMemorySize,
     VkSharedBaseObj<VulkanBitstreamBuffer>& bitstreamBuffer)
 {
-    // §J.3.e.2.i.8 Phase 1.1c — 配 CPU-only bitstream buffer 給 parser.
-    // Parser 在 ParseByteStream 把 NAL bytes 拷進來 + walks bytes 解出
-    // SPS/PPS/slice headers + 觸發我們的 callback. 此 phase 不 submit
-    // decode → VkBuffer/VkDeviceMemory 留 NULL_HANDLE.
-    // Phase 1.3 換成 vkCreateBuffer + vkAllocateMemory + vkMapMemory.
-    auto buf = std::make_shared<VkFrucCpuBitstreamBuffer>(
-        (size_t)size,
-        (size_t)minBitstreamBufferOffsetAlignment,
-        (size_t)minBitstreamBufferSizeAlignment);
+    // §J.3.e.2.i.8 Phase 1.3a — GPU-backed bitstream buffer.
+    // Parser writes NAL bytes via the persistent host mapping; decode queue
+    // reads via VkBuffer handle in vkCmdDecodeVideoKHR (Phase 1.3d).
+    if (!m_Parent) {
+        bitstreamBuffer.reset();
+        return 0;
+    }
+    auto buf = VkFrucGpuBitstreamBuffer::Create(
+        m_Parent, size, minBitstreamBufferOffsetAlignment, minBitstreamBufferSizeAlignment);
+    if (!buf) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3a GetBitstreamBuffer "
+                     "GPU alloc failed (size=%llu)", (unsigned long long)size);
+        bitstreamBuffer.reset();
+        return 0;
+    }
     if (pInitializeBufferMemory && initializeBufferMemorySize) {
         VkDeviceSize maxSz = 0;
         uint8_t* dst = buf->GetDataPtr(0, maxSz);
@@ -245,7 +307,7 @@ VkDeviceSize VkFrucDecodeClient::GetBitstreamBuffer(
         }
     }
     bitstreamBuffer = buf;
-    return size;
+    return buf->GetMaxSize();
 }
 
 

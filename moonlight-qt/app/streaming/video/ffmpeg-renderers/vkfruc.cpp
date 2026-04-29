@@ -2433,40 +2433,43 @@ bool VkFrucRenderer::createVideoSession(int videoFormat)
     }
 
     // ── Step 1: codec profile from videoFormat ──
+    // §J.3.e.2.i.8 Phase 1.3 — populate as MEMBERS (m_VideoProfile + matching
+    // codec-specific m_*ProfileInfo) so they stay alive for bitstream buffer +
+    // DPB image creation that needs to chain VkVideoProfileListInfoKHR.
     VkVideoCodecOperationFlagBitsKHR codecOp;
     const char* codecName;
     const char* stdName;
     uint32_t    stdVersion = 0;
-    VkVideoDecodeH264ProfileInfoKHR h264Prof = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PROFILE_INFO_KHR };
-    VkVideoDecodeH265ProfileInfoKHR h265Prof = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PROFILE_INFO_KHR };
-    VkVideoDecodeAV1ProfileInfoKHR  av1Prof  = { VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_PROFILE_INFO_KHR };
     void* codecProfilePNext = nullptr;
     uint32_t maxDpbSlots, maxRefs;
+    m_H264ProfileInfo = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PROFILE_INFO_KHR };
+    m_H265ProfileInfo = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PROFILE_INFO_KHR };
+    m_AV1ProfileInfo  = { VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_PROFILE_INFO_KHR  };
     if (videoFormat & VIDEO_FORMAT_MASK_H264) {
         codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
         codecName = "H.264 Main";
         stdName = VK_STD_VULKAN_VIDEO_CODEC_H264_DECODE_EXTENSION_NAME;
         stdVersion = VK_STD_VULKAN_VIDEO_CODEC_H264_DECODE_SPEC_VERSION;
-        h264Prof.stdProfileIdc = STD_VIDEO_H264_PROFILE_IDC_MAIN;
-        h264Prof.pictureLayout = VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_PROGRESSIVE_KHR;
-        codecProfilePNext = &h264Prof;
+        m_H264ProfileInfo.stdProfileIdc = STD_VIDEO_H264_PROFILE_IDC_MAIN;
+        m_H264ProfileInfo.pictureLayout = VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_PROGRESSIVE_KHR;
+        codecProfilePNext = &m_H264ProfileInfo;
         maxDpbSlots = 17; maxRefs = 16;
     } else if (videoFormat & VIDEO_FORMAT_MASK_H265) {
         codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
         codecName = "H.265 Main";
         stdName = VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_EXTENSION_NAME;
         stdVersion = VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_SPEC_VERSION;
-        h265Prof.stdProfileIdc = STD_VIDEO_H265_PROFILE_IDC_MAIN;
-        codecProfilePNext = &h265Prof;
+        m_H265ProfileInfo.stdProfileIdc = STD_VIDEO_H265_PROFILE_IDC_MAIN;
+        codecProfilePNext = &m_H265ProfileInfo;
         maxDpbSlots = 16; maxRefs = 16;
     } else if (videoFormat & VIDEO_FORMAT_MASK_AV1) {
         codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
         codecName = "AV1 Main";
         stdName = VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_EXTENSION_NAME;
         stdVersion = VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_SPEC_VERSION;
-        av1Prof.stdProfile = STD_VIDEO_AV1_PROFILE_MAIN;
-        av1Prof.filmGrainSupport = VK_FALSE;
-        codecProfilePNext = &av1Prof;
+        m_AV1ProfileInfo.stdProfile = STD_VIDEO_AV1_PROFILE_MAIN;
+        m_AV1ProfileInfo.filmGrainSupport = VK_FALSE;
+        codecProfilePNext = &m_AV1ProfileInfo;
         maxDpbSlots = 16; maxRefs = 16;
     } else {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -2474,12 +2477,14 @@ bool VkFrucRenderer::createVideoSession(int videoFormat)
         return false;
     }
 
-    VkVideoProfileInfoKHR profile = { VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR };
-    profile.pNext                 = codecProfilePNext;
-    profile.videoCodecOperation   = codecOp;
-    profile.chromaSubsampling     = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
-    profile.lumaBitDepth          = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
-    profile.chromaBitDepth        = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
+    m_VideoProfile = { VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR };
+    m_VideoProfile.pNext               = codecProfilePNext;
+    m_VideoProfile.videoCodecOperation = codecOp;
+    m_VideoProfile.chromaSubsampling   = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
+    m_VideoProfile.lumaBitDepth        = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
+    m_VideoProfile.chromaBitDepth      = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
+    m_VideoProfileReady                = true;
+    VkVideoProfileInfoKHR& profile = m_VideoProfile;  // alias for downstream code below
 
     // ── Step 2: Std header version (codec-specific extension struct) ──
     VkExtensionProperties stdHeaderVer = {};
@@ -2777,6 +2782,152 @@ void VkFrucRenderer::destroyVideoSession()
     m_H265VpsSeqSeen.clear();
     m_H265SpsSeqSeen.clear();
     m_H265PpsSeqSeen.clear();
+
+    // §J.3.e.2.i.8 Phase 1.3 — invalidate codec profile so subsequent bitstream
+    // buffer / DPB image allocations refuse to chain into stale state.
+    m_VideoProfileReady = false;
+}
+
+// §J.3.e.2.i.8 Phase 1.3a — GPU bitstream buffer factory.
+//
+// Parser asks for a buffer via GetBitstreamBuffer; we hand back a host-visible
+// + host-coherent VkBuffer with VIDEO_DECODE_SRC_BIT_KHR usage and the codec
+// profile chained in pNext.  Persistently mapped (parser writes NAL bytes via
+// returned mapped pointer; decode queue reads via VkBuffer handle).
+//
+// Sharing mode EXCLUSIVE — buffer ownership lives on m_DecodeQueueFamily; host
+// mapping doesn't need queue-family ownership transfer per Vulkan spec.
+bool VkFrucRenderer::createGpuBitstreamBuffer(VkDeviceSize size,
+                                              VkBuffer& outBuffer,
+                                              VkDeviceMemory& outMemory,
+                                              void*& outMappedPtr,
+                                              VkDeviceSize& outActualSize)
+{
+    outBuffer    = VK_NULL_HANDLE;
+    outMemory    = VK_NULL_HANDLE;
+    outMappedPtr = nullptr;
+    outActualSize = 0;
+
+    if (!m_VideoProfileReady || m_Device == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCreateBuffer    = (PFN_vkCreateBuffer)getDevPa(m_Device, "vkCreateBuffer");
+    auto pfnDestroyBuffer   = (PFN_vkDestroyBuffer)getDevPa(m_Device, "vkDestroyBuffer");
+    auto pfnGetBufMemReq    = (PFN_vkGetBufferMemoryRequirements)getDevPa(m_Device, "vkGetBufferMemoryRequirements");
+    auto pfnAllocMem        = (PFN_vkAllocateMemory)getDevPa(m_Device, "vkAllocateMemory");
+    auto pfnFreeMem         = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+    auto pfnBindBufMem      = (PFN_vkBindBufferMemory)getDevPa(m_Device, "vkBindBufferMemory");
+    auto pfnMapMem          = (PFN_vkMapMemory)getDevPa(m_Device, "vkMapMemory");
+    auto pfnGetMemProps     = (PFN_vkGetPhysicalDeviceMemoryProperties)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnCreateBuffer || !pfnGetBufMemReq || !pfnAllocMem || !pfnBindBufMem
+        || !pfnMapMem || !pfnGetMemProps) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3a bitstream buffer PFN missing");
+        return false;
+    }
+
+    VkVideoProfileListInfoKHR profileList = { VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR };
+    profileList.profileCount = 1;
+    profileList.pProfiles    = &m_VideoProfile;
+
+    VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bci.pNext       = &profileList;
+    bci.size        = size;
+    bci.usage       = VK_BUFFER_USAGE_VIDEO_DECODE_SRC_BIT_KHR;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    bci.queueFamilyIndexCount = 0;
+    bci.pQueueFamilyIndices   = nullptr;
+
+    VkResult vr = pfnCreateBuffer(m_Device, &bci, nullptr, &outBuffer);
+    if (vr != VK_SUCCESS || outBuffer == VK_NULL_HANDLE) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3a vkCreateBuffer rc=%d size=%llu",
+                     (int)vr, (unsigned long long)size);
+        return false;
+    }
+
+    VkMemoryRequirements memReq = {};
+    pfnGetBufMemReq(m_Device, outBuffer, &memReq);
+
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetMemProps(m_PhysicalDevice, &memProps);
+
+    // Pick host-visible + host-coherent so writes are immediately visible to GPU.
+    int mti = -1;
+    const VkMemoryPropertyFlags want =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if ((memReq.memoryTypeBits & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags & want) == want) {
+            mti = (int)i;
+            break;
+        }
+    }
+    if (mti < 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3a no host-coherent memory type "
+                     "(typeBits=0x%x)", memReq.memoryTypeBits);
+        if (pfnDestroyBuffer) pfnDestroyBuffer(m_Device, outBuffer, nullptr);
+        outBuffer = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = memReq.size;
+    mai.memoryTypeIndex = (uint32_t)mti;
+
+    vr = pfnAllocMem(m_Device, &mai, nullptr, &outMemory);
+    if (vr != VK_SUCCESS || outMemory == VK_NULL_HANDLE) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3a vkAllocateMemory rc=%d size=%llu",
+                     (int)vr, (unsigned long long)memReq.size);
+        if (pfnDestroyBuffer) pfnDestroyBuffer(m_Device, outBuffer, nullptr);
+        outBuffer = VK_NULL_HANDLE;
+        return false;
+    }
+
+    vr = pfnBindBufMem(m_Device, outBuffer, outMemory, 0);
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3a vkBindBufferMemory rc=%d", (int)vr);
+        if (pfnFreeMem) pfnFreeMem(m_Device, outMemory, nullptr);
+        if (pfnDestroyBuffer) pfnDestroyBuffer(m_Device, outBuffer, nullptr);
+        outBuffer = VK_NULL_HANDLE;
+        outMemory = VK_NULL_HANDLE;
+        return false;
+    }
+
+    vr = pfnMapMem(m_Device, outMemory, 0, memReq.size, 0, &outMappedPtr);
+    if (vr != VK_SUCCESS || !outMappedPtr) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3a vkMapMemory rc=%d", (int)vr);
+        if (pfnFreeMem) pfnFreeMem(m_Device, outMemory, nullptr);
+        if (pfnDestroyBuffer) pfnDestroyBuffer(m_Device, outBuffer, nullptr);
+        outBuffer    = VK_NULL_HANDLE;
+        outMemory    = VK_NULL_HANDLE;
+        outMappedPtr = nullptr;
+        return false;
+    }
+
+    outActualSize = memReq.size;
+    return true;
+}
+
+void VkFrucRenderer::destroyGpuBitstreamBuffer(VkBuffer buffer, VkDeviceMemory memory)
+{
+    if (m_Device == VK_NULL_HANDLE) return;
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnUnmapMem      = (PFN_vkUnmapMemory)getDevPa(m_Device, "vkUnmapMemory");
+    auto pfnFreeMem       = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+    auto pfnDestroyBuffer = (PFN_vkDestroyBuffer)getDevPa(m_Device, "vkDestroyBuffer");
+    if (memory != VK_NULL_HANDLE && pfnUnmapMem) pfnUnmapMem(m_Device, memory);
+    if (buffer != VK_NULL_HANDLE && pfnDestroyBuffer) pfnDestroyBuffer(m_Device, buffer, nullptr);
+    if (memory != VK_NULL_HANDLE && pfnFreeMem) pfnFreeMem(m_Device, memory, nullptr);
 }
 
 bool VkFrucRenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary** options)

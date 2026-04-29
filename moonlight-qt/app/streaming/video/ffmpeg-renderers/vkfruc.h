@@ -149,6 +149,19 @@ public:
     bool onH265PictureParametersFromParser(const StdVideoPictureParametersSet* vps,
                                            const StdVideoPictureParametersSet* sps,
                                            const StdVideoPictureParametersSet* pps);
+
+    // §J.3.e.2.i.8 Phase 1.3a — GPU bitstream buffer factory for the parser.
+    // Allocates a host-visible+coherent VkBuffer with VIDEO_DECODE_SRC_BIT_KHR
+    // usage and the codec profile chained in pNext.  Returned handles are
+    // owned by the caller — must call destroyGpuBitstreamBuffer to free.
+    // outMappedPtr points to the persistent mapping (no need to vkMap on
+    // every Resize/CopyDataFrom).
+    bool createGpuBitstreamBuffer(VkDeviceSize size,
+                                  VkBuffer& outBuffer,
+                                  VkDeviceMemory& outMemory,
+                                  void*& outMappedPtr,
+                                  VkDeviceSize& outActualSize);
+    void destroyGpuBitstreamBuffer(VkBuffer buffer, VkDeviceMemory memory);
 private:
     PFN_vkUpdateVideoSessionParametersKHR m_pfnUpdateVideoSessionParams = nullptr;
     // Vulkan spec requires updateSequenceCount to be exactly the current value
@@ -158,6 +171,17 @@ private:
     std::map<int, uint32_t> m_H265VpsSeqSeen;
     std::map<int, uint32_t> m_H265SpsSeqSeen;
     std::map<int, uint32_t> m_H265PpsSeqSeen;
+
+    // §J.3.e.2.i.8 Phase 1.3 — codec profile structs kept alive at member scope
+    // so VkVideoProfileListInfoKHR (used by bitstream buffer + DPB image creation)
+    // can chain into them.  Populated by createVideoSession() based on m_VideoCodec.
+    // Only one of m_H264/H265/AV1 is actually used; the chosen one is wired into
+    // m_VideoProfile.pNext.
+    VkVideoProfileInfoKHR           m_VideoProfile      = {};
+    VkVideoDecodeH264ProfileInfoKHR m_H264ProfileInfo   = {};
+    VkVideoDecodeH265ProfileInfoKHR m_H265ProfileInfo   = {};
+    VkVideoDecodeAV1ProfileInfoKHR  m_AV1ProfileInfo    = {};
+    bool                            m_VideoProfileReady = false;
 
     // Phase 1.2 — native NAL intercept hook (renderer.h interface).
     bool acceptsNativeDecode() const override;
