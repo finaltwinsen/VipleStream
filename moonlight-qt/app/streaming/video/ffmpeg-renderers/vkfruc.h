@@ -6,27 +6,7 @@
 // vkAcquireNextImageKHR / vkQueuePresentKHR directly, single
 // vkQueueSubmit + 2× vkQueuePresentKHR for dual-present (interp + real).
 //
-// The reason for the bypass: PC libplacebo's wrapped pl_tex internal
-// sync (pl_vulkan_release_ex / pl_vulkan_hold_ex) had a systematic
-// frame#2 stall on the override path (§J.3.e.2.f benchmark), and three
-// rounds of application-side workarounds (§J.3.e.2.g.A/B/C) couldn't
-// resolve it.  The Android impl has been production-tested on Pixel 5,
-// so we know the architecture works — we just need to port it.
-//
-// Rules of engagement:
-//   1. opt-in only via VIPLE_VK_FRUC_GENERIC=1
-//   2. PlVkRenderer / D3D11VARenderer cascade unaffected
-//   3. SDR sRGB only in this phase; HDR / 10-bit deferred to §J.3.e.2.j
-//   4. Reuses §J.3.e.2.h.a GLSL compute shaders (motionest / median / warp)
-//      — the algorithm layer is already shipped & glslang-validated
-//
-// Sub-phase split:
-//   i.1 — this scaffold (initialize returns false, cascade falls through)
-//   i.2 — instance/device/swapchain
-//   i.3 — graphics pipeline (NV12→swapchain)
-//   i.4 — compute integration
-//   i.5 — dual present
-//   i.6 — benchmark vs D3D11+GenericFRUC
+// See docs/J.3.e.2.i_vulkan_native_renderer.md for the full design.
 
 #pragma once
 
@@ -34,19 +14,18 @@
 
 #ifdef HAVE_LIBPLACEBO_VULKAN
 
-#include <vulkan/vulkan.h>
-
 #ifdef Q_OS_WIN32
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
+#include <vulkan/vulkan.h>
+
+#include <vector>
 
 class VkFrucRenderer : public IFFmpegRenderer {
 public:
     VkFrucRenderer(int pass);
     ~VkFrucRenderer() override;
 
-    // §J.3.e.2.i.1 — scaffold returns false (cascade falls through to
-    // PlVkRenderer).  i.2 will replace with real init.
     bool initialize(PDECODER_PARAMETERS params) override;
     bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
     void renderFrame(AVFrame* frame) override;
@@ -56,21 +35,47 @@ public:
     int getRendererAttributes() override;
     int getDecoderColorspace() override { return COLORSPACE_REC_709; }
 
-    // Overlay::IOverlayRenderer interface — stub for now (i.3+ will wire)
     void notifyOverlayUpdated(Overlay::OverlayType) override {}
 
 private:
-    int m_Pass;  // cascade pass index (matches D3D11VARenderer / PlVkRenderer pattern)
+    // §J.3.e.2.i.2 sub-helpers — port from Android vk_backend.c
+    bool createInstanceAndSurface(SDL_Window* window);
+    bool pickPhysicalDeviceAndQueue();
+    bool createLogicalDevice();
+    void teardown();
+
+    int m_Pass;
     InitFailureReason m_InitFailureReason = InitFailureReason::Unknown;
 
-    // §J.3.e.2.i.2+ — Vulkan handles will live here
-    // VkInstance       m_VkInstance       = VK_NULL_HANDLE;
-    // VkPhysicalDevice m_PhysicalDevice   = VK_NULL_HANDLE;
-    // VkDevice         m_Device           = VK_NULL_HANDLE;
-    // VkSurfaceKHR     m_Surface          = VK_NULL_HANDLE;
-    // VkSwapchainKHR   m_Swapchain        = VK_NULL_HANDLE;
-    // ... etc — see Android vk_backend.c struct vk_backend_s for the
-    // full member list this will eventually mirror
+    SDL_Window* m_Window = nullptr;
+
+    // §J.3.e.2.i.2 — Vulkan handles owned by VkFrucRenderer (NOT shared
+    // with PlVkRenderer's libplacebo handles — they're alternatives).
+    VkInstance       m_Instance       = VK_NULL_HANDLE;
+    VkPhysicalDevice m_PhysicalDevice = VK_NULL_HANDLE;
+    VkDevice         m_Device         = VK_NULL_HANDLE;
+    VkSurfaceKHR     m_Surface        = VK_NULL_HANDLE;
+
+    // Single graphics+present queue family (PC NVIDIA / AMD typically
+    // expose a "universal" queue family; Android's same-family pattern
+    // ports cleanly).  Compute work also runs on this queue — we don't
+    // need async compute for the FRUC pipeline (motion est ~0.7ms is
+    // already under frame budget).
+    uint32_t m_QueueFamily = UINT32_MAX;
+    VkQueue  m_GraphicsQueue = VK_NULL_HANDLE;
+
+    // §J.3.e.2.i.3+ — populated by later sub-phases:
+    //   • m_Swapchain + image array + image views
+    //   • m_RenderPass / m_GraphicsPipeline / m_DescPool / etc.
+    //   • Compute pipeline (motionest / median / warp) re-using §J.3.e.2.h.a shaders
+    //   • Per-slot in-flight ring (acquire+renderDone sems × 2 for dual-present)
+
+    // Loaded PFNs (we don't have the libplacebo wrapper's lookup; use
+    // SDL_Vulkan_GetVkGetInstanceProcAddr + raw vk*ProcAddr chain).
+    PFN_vkGetInstanceProcAddr m_pfnGetInstanceProcAddr = nullptr;
+    PFN_vkDestroyInstance     m_pfnDestroyInstance     = nullptr;
+    PFN_vkDestroyDevice       m_pfnDestroyDevice       = nullptr;
+    PFN_vkDestroySurfaceKHR   m_pfnDestroySurfaceKHR   = nullptr;
 };
 
 #endif // HAVE_LIBPLACEBO_VULKAN
