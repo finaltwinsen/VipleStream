@@ -174,6 +174,7 @@ void VkFrucRenderer::teardown()
     // immutable sampler used in descriptor set layout, so layouts go
     // before the sampler.
     destroyNvVideoParser();         // §J.3.e.2.i.8 native VK decode parser
+    destroyDecodeCommandResources(); // §J.3.e.2.i.8 Phase 1.3c decode cmd
     destroyVideoSession();          // §J.3.e.2.i.8 native VK decode
     destroyOverlayResources();      // §J.3.e.2.i overlay
     destroyInterpGraphicsPipeline(); // §J.3.e.2.i.4.2
@@ -904,6 +905,14 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
         } else if (!createVideoSessionParameters(m_VideoFormat)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 createVideoSessionParameters failed");
+            destroyVideoSession();
+        } else if (!createDecodeCommandResources()) {
+            // §J.3.e.2.i.8 Phase 1.3c — without decode cmd resources we cannot
+            // submit vkCmdDecodeVideoKHR; tear down the session so we don't
+            // leave a half-initialized native decode path live.
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 createDecodeCommandResources failed");
+            destroyDecodeCommandResources();
             destroyVideoSession();
         } else if (!createNvVideoParser()) {
             // Non-fatal — Phase 1.1c 失敗時 fallback 到 v1.3.198 的
@@ -2928,6 +2937,125 @@ void VkFrucRenderer::destroyGpuBitstreamBuffer(VkBuffer buffer, VkDeviceMemory m
     if (memory != VK_NULL_HANDLE && pfnUnmapMem) pfnUnmapMem(m_Device, memory);
     if (buffer != VK_NULL_HANDLE && pfnDestroyBuffer) pfnDestroyBuffer(m_Device, buffer, nullptr);
     if (memory != VK_NULL_HANDLE && pfnFreeMem) pfnFreeMem(m_Device, memory, nullptr);
+}
+
+// §J.3.e.2.i.8 Phase 1.3c — decode queue handle + cmd pool + cmd buffer + fence + sem.
+//
+// Allocated once after createVideoSession.  Destroyed before destroyVideoSession
+// so the cmd buffer doesn't outlive the session it references.
+bool VkFrucRenderer::createDecodeCommandResources()
+{
+    if (m_DecodeQueueFamily == UINT32_MAX || m_Device == VK_NULL_HANDLE) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3c no decode queue family available");
+        return false;
+    }
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnGetDeviceQueue       = (PFN_vkGetDeviceQueue)getDevPa(m_Device, "vkGetDeviceQueue");
+    auto pfnCreateCommandPool    = (PFN_vkCreateCommandPool)getDevPa(m_Device, "vkCreateCommandPool");
+    auto pfnAllocateCommandBuffers = (PFN_vkAllocateCommandBuffers)getDevPa(m_Device, "vkAllocateCommandBuffers");
+    auto pfnCreateFence          = (PFN_vkCreateFence)getDevPa(m_Device, "vkCreateFence");
+    auto pfnCreateSemaphore      = (PFN_vkCreateSemaphore)getDevPa(m_Device, "vkCreateSemaphore");
+    if (!pfnGetDeviceQueue || !pfnCreateCommandPool || !pfnAllocateCommandBuffers
+        || !pfnCreateFence || !pfnCreateSemaphore) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3c decode cmd PFN missing");
+        return false;
+    }
+
+    // Decode queue: index 0 of the decode queue family (we only requested 1
+    // queue from this family in createLogicalDevice).
+    pfnGetDeviceQueue(m_Device, m_DecodeQueueFamily, 0, &m_DecodeQueue);
+    if (m_DecodeQueue == VK_NULL_HANDLE) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3c vkGetDeviceQueue returned NULL "
+                     "for QF %u", m_DecodeQueueFamily);
+        return false;
+    }
+
+    VkCommandPoolCreateInfo cpi = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    cpi.queueFamilyIndex = m_DecodeQueueFamily;
+    cpi.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    if (pfnCreateCommandPool(m_Device, &cpi, nullptr, &m_DecodeCmdPool) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3c vkCreateCommandPool failed");
+        destroyDecodeCommandResources();
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool        = m_DecodeCmdPool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    if (pfnAllocateCommandBuffers(m_Device, &cbai, &m_DecodeCmdBuf) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3c vkAllocateCommandBuffers failed");
+        destroyDecodeCommandResources();
+        return false;
+    }
+
+    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;  // first wait succeeds immediately
+    if (pfnCreateFence(m_Device, &fci, nullptr, &m_DecodeFence) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3c vkCreateFence failed");
+        destroyDecodeCommandResources();
+        return false;
+    }
+
+    VkSemaphoreCreateInfo sci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    if (pfnCreateSemaphore(m_Device, &sci, nullptr, &m_DecodeDoneSem) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3c vkCreateSemaphore failed");
+        destroyDecodeCommandResources();
+        return false;
+    }
+
+    m_DecodeCmdReady   = true;
+    m_DecodeNeedsReset = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3c decode cmd resources ready "
+                "(QF=%u, queue=%p, pool/cmdbuf/fence/sem allocated)",
+                m_DecodeQueueFamily, (void*)m_DecodeQueue);
+    return true;
+}
+
+void VkFrucRenderer::destroyDecodeCommandResources()
+{
+    if (m_Device == VK_NULL_HANDLE) {
+        m_DecodeCmdReady = false;
+        return;
+    }
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnDeviceWaitIdle    = (PFN_vkDeviceWaitIdle)getDevPa(m_Device, "vkDeviceWaitIdle");
+    auto pfnDestroySemaphore  = (PFN_vkDestroySemaphore)getDevPa(m_Device, "vkDestroySemaphore");
+    auto pfnDestroyFence      = (PFN_vkDestroyFence)getDevPa(m_Device, "vkDestroyFence");
+    auto pfnFreeCommandBuffers= (PFN_vkFreeCommandBuffers)getDevPa(m_Device, "vkFreeCommandBuffers");
+    auto pfnDestroyCommandPool= (PFN_vkDestroyCommandPool)getDevPa(m_Device, "vkDestroyCommandPool");
+
+    // Idle the device so any in-flight decode submission completes before we
+    // free its referenced cmd buffer / fence.
+    if (pfnDeviceWaitIdle) pfnDeviceWaitIdle(m_Device);
+
+    if (m_DecodeDoneSem  != VK_NULL_HANDLE && pfnDestroySemaphore)
+        pfnDestroySemaphore(m_Device, m_DecodeDoneSem, nullptr);
+    if (m_DecodeFence    != VK_NULL_HANDLE && pfnDestroyFence)
+        pfnDestroyFence(m_Device, m_DecodeFence, nullptr);
+    if (m_DecodeCmdBuf   != VK_NULL_HANDLE && pfnFreeCommandBuffers && m_DecodeCmdPool != VK_NULL_HANDLE)
+        pfnFreeCommandBuffers(m_Device, m_DecodeCmdPool, 1, &m_DecodeCmdBuf);
+    if (m_DecodeCmdPool  != VK_NULL_HANDLE && pfnDestroyCommandPool)
+        pfnDestroyCommandPool(m_Device, m_DecodeCmdPool, nullptr);
+
+    m_DecodeDoneSem    = VK_NULL_HANDLE;
+    m_DecodeFence      = VK_NULL_HANDLE;
+    m_DecodeCmdBuf     = VK_NULL_HANDLE;
+    m_DecodeCmdPool    = VK_NULL_HANDLE;
+    m_DecodeQueue      = VK_NULL_HANDLE;
+    m_DecodeCmdReady   = false;
+    m_DecodeNeedsReset = true;
 }
 
 bool VkFrucRenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary** options)

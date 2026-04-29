@@ -198,6 +198,24 @@ private:
     int  m_DpbAlignedW    = 0;
     int  m_DpbAlignedH    = 0;
 
+    // §J.3.e.2.i.8 Phase 1.3c — decode queue + cmd pool + per-frame sync.
+    //
+    // Single-frame serial pattern for first cut: record → submit → wait fence →
+    // reset cmd buf → repeat.  m_DecodeDoneSem signals graphics queue when
+    // decode finishes (Phase 1.4 will wait on this in the render-pass submit).
+    // Phase 1.3+ may upgrade to N-deep ring for pipelining.
+    bool createDecodeCommandResources();
+    void destroyDecodeCommandResources();
+    VkQueue         m_DecodeQueue       = VK_NULL_HANDLE;
+    VkCommandPool   m_DecodeCmdPool     = VK_NULL_HANDLE;
+    VkCommandBuffer m_DecodeCmdBuf      = VK_NULL_HANDLE;
+    VkFence         m_DecodeFence       = VK_NULL_HANDLE;
+    VkSemaphore     m_DecodeDoneSem     = VK_NULL_HANDLE;
+    bool            m_DecodeCmdReady    = false;
+    // True until the very first vkCmdControlVideoCodingKHR with RESET fires
+    // (driver requires session reset before first decode submit).
+    bool            m_DecodeNeedsReset  = true;
+
     // Phase 1.2 — native NAL intercept hook (renderer.h interface).
     bool acceptsNativeDecode() const override;
     void submitNativeDecodeUnit(const uint8_t* data, size_t len) override;
