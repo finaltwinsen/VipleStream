@@ -27,7 +27,8 @@ VkFrucRenderer::~VkFrucRenderer()
 void VkFrucRenderer::teardown()
 {
     // Order: device-owned objects → device → surface → instance.
-    // i.3+ will insert swapchain / pipelines / etc. here.
+    // i.3+ will insert pipelines / etc. here.
+    destroySwapchain();
     if (m_Device != VK_NULL_HANDLE && m_pfnDestroyDevice) {
         m_pfnDestroyDevice(m_Device, nullptr);
         m_Device = VK_NULL_HANDLE;
@@ -260,6 +261,171 @@ bool VkFrucRenderer::createLogicalDevice()
     return true;
 }
 
+bool VkFrucRenderer::createSwapchain()
+{
+    auto pfnGetSurfCaps = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)
+        m_pfnGetInstanceProcAddr(m_Instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    auto pfnGetSurfFmts = (PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)
+        m_pfnGetInstanceProcAddr(m_Instance, "vkGetPhysicalDeviceSurfaceFormatsKHR");
+    auto pfnGetSurfModes = (PFN_vkGetPhysicalDeviceSurfacePresentModesKHR)
+        m_pfnGetInstanceProcAddr(m_Instance, "vkGetPhysicalDeviceSurfacePresentModesKHR");
+    auto pfnGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    if (!pfnGetSurfCaps || !pfnGetSurfFmts || !pfnGetSurfModes || !pfnGetDeviceProcAddr) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.2.b PFN load (instance) failed");
+        return false;
+    }
+    auto pfnCreateSwapchain = (PFN_vkCreateSwapchainKHR)pfnGetDeviceProcAddr(
+        m_Device, "vkCreateSwapchainKHR");
+    auto pfnGetSwapImgs = (PFN_vkGetSwapchainImagesKHR)pfnGetDeviceProcAddr(
+        m_Device, "vkGetSwapchainImagesKHR");
+    auto pfnCreateImgView = (PFN_vkCreateImageView)pfnGetDeviceProcAddr(
+        m_Device, "vkCreateImageView");
+    if (!pfnCreateSwapchain || !pfnGetSwapImgs || !pfnCreateImgView) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.2.b PFN load (device) failed");
+        return false;
+    }
+
+    VkSurfaceCapabilitiesKHR caps = {};
+    if (pfnGetSurfCaps(m_PhysicalDevice, m_Surface, &caps) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.2.b vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed");
+        return false;
+    }
+
+    // Image count: minImageCount + 1 for triple buffering, capped by
+    // maxImageCount (0 = unbounded per spec).
+    uint32_t imageCount = caps.minImageCount + 1;
+    if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
+        imageCount = caps.maxImageCount;
+
+    // Extent: prefer surface's currentExtent; fall back to SDL's window
+    // size if currentExtent is { 0xFFFFFFFF, 0xFFFFFFFF } (some drivers
+    // signal "renderer chooses" with that value).
+    VkExtent2D extent = caps.currentExtent;
+    if (extent.width == 0xFFFFFFFFu) {
+        int w = 0, h = 0;
+        SDL_Vulkan_GetDrawableSize(m_Window, &w, &h);
+        extent.width  = (uint32_t)w;
+        extent.height = (uint32_t)h;
+    }
+    m_SwapchainExtent = extent;
+
+    // Format: pick BGRA8 SRGB / UNORM if available, else first.
+    uint32_t fmtCount = 0;
+    pfnGetSurfFmts(m_PhysicalDevice, m_Surface, &fmtCount, nullptr);
+    if (fmtCount == 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.2.b no supported surface formats");
+        return false;
+    }
+    std::vector<VkSurfaceFormatKHR> fmts(fmtCount);
+    pfnGetSurfFmts(m_PhysicalDevice, m_Surface, &fmtCount, fmts.data());
+    VkSurfaceFormatKHR chosen = fmts[0];
+    for (const auto& f : fmts) {
+        if (f.format == VK_FORMAT_B8G8R8A8_UNORM
+            && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            chosen = f; break;
+        }
+    }
+    m_SwapchainFormat     = chosen.format;
+    m_SwapchainColorSpace = chosen.colorSpace;
+
+    // Present mode: IMMEDIATE for --no-vsync, MAILBOX as fallback,
+    // FIFO guaranteed by spec.
+    uint32_t modeCount = 0;
+    pfnGetSurfModes(m_PhysicalDevice, m_Surface, &modeCount, nullptr);
+    std::vector<VkPresentModeKHR> modes(modeCount);
+    pfnGetSurfModes(m_PhysicalDevice, m_Surface, &modeCount, modes.data());
+    VkPresentModeKHR pmode = VK_PRESENT_MODE_FIFO_KHR;
+    bool wantImmediate = !qEnvironmentVariableIntValue("VIPLE_VK_FRUC_VSYNC");
+    if (wantImmediate) {
+        for (auto m : modes) {
+            if (m == VK_PRESENT_MODE_IMMEDIATE_KHR) { pmode = m; break; }
+            if (m == VK_PRESENT_MODE_MAILBOX_KHR && pmode == VK_PRESENT_MODE_FIFO_KHR) {
+                pmode = m;  // mailbox as 2nd choice
+            }
+        }
+    }
+    m_SwapchainPresentMode = pmode;
+
+    VkSwapchainCreateInfoKHR sci = {};
+    sci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    sci.surface = m_Surface;
+    sci.minImageCount = imageCount;
+    sci.imageFormat = chosen.format;
+    sci.imageColorSpace = chosen.colorSpace;
+    sci.imageExtent = extent;
+    sci.imageArrayLayers = 1;
+    sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                   | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    sci.queueFamilyIndexCount = 0;
+    sci.preTransform = caps.currentTransform;
+    sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    sci.presentMode = pmode;
+    sci.clipped = VK_TRUE;
+    sci.oldSwapchain = VK_NULL_HANDLE;
+
+    if (pfnCreateSwapchain(m_Device, &sci, nullptr, &m_Swapchain) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.2.b vkCreateSwapchainKHR failed");
+        return false;
+    }
+
+    uint32_t imgCnt = 0;
+    pfnGetSwapImgs(m_Device, m_Swapchain, &imgCnt, nullptr);
+    m_SwapchainImages.resize(imgCnt);
+    pfnGetSwapImgs(m_Device, m_Swapchain, &imgCnt, m_SwapchainImages.data());
+
+    m_SwapchainViews.resize(imgCnt, VK_NULL_HANDLE);
+    for (uint32_t i = 0; i < imgCnt; i++) {
+        VkImageViewCreateInfo ivCi = {};
+        ivCi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        ivCi.image = m_SwapchainImages[i];
+        ivCi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ivCi.format = chosen.format;
+        ivCi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        ivCi.subresourceRange.levelCount = 1;
+        ivCi.subresourceRange.layerCount = 1;
+        if (pfnCreateImgView(m_Device, &ivCi, nullptr, &m_SwapchainViews[i]) != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.2.b vkCreateImageView failed (i=%u)", i);
+            return false;
+        }
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.2.b VkSwapchainKHR created "
+                "(format=%d colorSpace=%d extent=%ux%u images=%u presentMode=%d)",
+                (int)chosen.format, (int)chosen.colorSpace,
+                extent.width, extent.height, imgCnt, (int)pmode);
+    return true;
+}
+
+void VkFrucRenderer::destroySwapchain()
+{
+    if (m_Device == VK_NULL_HANDLE) return;
+    auto pfnGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnDestroyImgView = (PFN_vkDestroyImageView)pfnGetDeviceProcAddr(
+        m_Device, "vkDestroyImageView");
+    auto pfnDestroySwapchain = (PFN_vkDestroySwapchainKHR)pfnGetDeviceProcAddr(
+        m_Device, "vkDestroySwapchainKHR");
+    for (auto v : m_SwapchainViews) {
+        if (v != VK_NULL_HANDLE && pfnDestroyImgView)
+            pfnDestroyImgView(m_Device, v, nullptr);
+    }
+    m_SwapchainViews.clear();
+    m_SwapchainImages.clear();
+    if (m_Swapchain != VK_NULL_HANDLE && pfnDestroySwapchain) {
+        pfnDestroySwapchain(m_Device, m_Swapchain, nullptr);
+        m_Swapchain = VK_NULL_HANDLE;
+    }
+}
+
 bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
 {
     m_Window = params->window;
@@ -279,15 +445,18 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
         teardown();
         return false;
     }
+    if (!createSwapchain()) {
+        m_InitFailureReason = InitFailureReason::NoSoftwareSupport;
+        teardown();
+        return false;
+    }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i.2 initialize: instance/PD/device READY — "
-                "i.3 (graphics pipeline) is the next sub-phase; for now still "
-                "returning false so PlVkRenderer handles the actual streaming");
+                "[VIPLE-VKFRUC] §J.3.e.2.i.2.b initialize: instance/PD/device/swapchain "
+                "READY — i.3 (graphics pipeline) is next; still returning false to "
+                "fall through to PlVkRenderer for streaming");
 
-    // i.2 is just instance/device bring-up.  Without swapchain / pipelines /
-    // renderFrame impl, we can't actually display anything.  Deliberately
-    // return false so cascade falls through to PlVkRenderer.
+    // i.2 still returns false (no graphics pipeline yet → can't render).
     m_InitFailureReason = InitFailureReason::NoSoftwareSupport;
     return false;
 }

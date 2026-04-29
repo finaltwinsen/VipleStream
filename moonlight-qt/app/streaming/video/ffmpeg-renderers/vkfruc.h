@@ -42,6 +42,8 @@ private:
     bool createInstanceAndSurface(SDL_Window* window);
     bool pickPhysicalDeviceAndQueue();
     bool createLogicalDevice();
+    bool createSwapchain();
+    void destroySwapchain();
     void teardown();
 
     int m_Pass;
@@ -63,6 +65,15 @@ private:
     // already under frame budget).
     uint32_t m_QueueFamily = UINT32_MAX;
     VkQueue  m_GraphicsQueue = VK_NULL_HANDLE;
+
+    // §J.3.e.2.i.2.b — swapchain
+    VkSwapchainKHR             m_Swapchain       = VK_NULL_HANDLE;
+    VkFormat                   m_SwapchainFormat = VK_FORMAT_UNDEFINED;
+    VkColorSpaceKHR            m_SwapchainColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    VkExtent2D                 m_SwapchainExtent = { 0, 0 };
+    VkPresentModeKHR           m_SwapchainPresentMode = VK_PRESENT_MODE_FIFO_KHR;
+    std::vector<VkImage>       m_SwapchainImages;
+    std::vector<VkImageView>   m_SwapchainViews;
 
     // §J.3.e.2.i.3+ — populated by later sub-phases:
     //   • m_Swapchain + image array + image views
