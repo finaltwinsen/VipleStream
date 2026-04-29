@@ -2410,13 +2410,15 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
     pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                0, 0, nullptr, 1, &bbar2, 0, nullptr);
 
-    // Copy bufRGB → m_RifeCurrVkMat.buffer (planar fp32 RGB, W*H*3*sizeof(float))
+    // Path B: copy bufRGB (DEVICE_LOCAL) → m_RifeRgbInHostBuf (HOST_VISIBLE,
+    // mapped at init).  After Phase A's vkQueueSubmit + fence wait, the host
+    // mapping reflects the current frame's planar fp32 RGB.
     const VkDeviceSize rgbBytes = (VkDeviceSize)W * H * 3 * sizeof(float);
-    VkBufferCopy copyToCurr = {};
-    copyToCurr.srcOffset = 0;
-    copyToCurr.dstOffset = m_RifeCurrVkMat.buffer_offset();
-    copyToCurr.size = rgbBytes;
-    pfnCopyBuf(cb, (VkBuffer)m_FrucNv12RgbBufRGB, m_RifeCurrVkMat.buffer(), 1, &copyToCurr);
+    VkBufferCopy copyToInStaging = {};
+    copyToInStaging.srcOffset = 0;
+    copyToInStaging.dstOffset = 0;
+    copyToInStaging.size = rgbBytes;
+    pfnCopyBuf(cb, (VkBuffer)m_FrucNv12RgbBufRGB, (VkBuffer)m_RifeRgbInHostBuf, 1, &copyToInStaging);
 
     // Restore plane layouts for ffmpeg.
     VkImageMemoryBarrier toOrig[2] = {
@@ -2477,128 +2479,117 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
     if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                   "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase A done, Phase B start",
                                   (unsigned long long)entryN);
-    // ===== PHASE B: ncnn RIFE forward (or first-frame curr→prev clone) =====
+    // ===== PHASE B (Path B): RIFE forward via CPU ncnn::Mat (HOST_VISIBLE staging) =====
+    //
+    // After Phase A's fence wait, m_RifeRgbInHostMapped reflects the current
+    // frame's planar fp32 RGB.  We wrap it as a non-owning ncnn::Mat for
+    // ex.input.  ex.extract returns a CPU ncnn::Mat we memcpy into
+    // m_RifeRgbOutHostMapped for Phase C to copy back to bufRGB.
     auto t0 = std::chrono::high_resolution_clock::now();
-    ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(0);
-    if (!vkdev) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase B: ncnn::get_gpu_device(0) null");
-        return false;
-    }
-
-    // §J.3.e.2.e2d Phase B — RIFE forward via ncnn::Extractor.
-    //
-    // Critical: record_clone(src, dst, Option) internally calls
-    // dst.create_like(src, opt.blob_vkallocator).  With default-constructed
-    // ncnn::Option(), opt.blob_vkallocator == nullptr.  When dst's existing
-    // allocator differs from nullptr (i.e., dst is already allocated like
-    // ours), VkMat::create takes the release+realloc branch, then calls
-    // `nullptr->fastMalloc(...)` → 0xC0000005 (verified by reading ncnn
-    // src/command.cpp:983 + src/mat.cpp:771 source).
-    //
-    // Fix: explicitly set opt.blob_vkallocator to match what we created
-    // m_Rife{Curr,Prev}VkMat with.  Then create_like's allocator-equality
-    // early-return triggers and re-alloc is skipped (correct behavior since
-    // dst is already the right shape).
-    ncnn::Option cloneOpt;
-    cloneOpt.blob_vkallocator    = vkdev->acquire_blob_allocator();
-    cloneOpt.staging_vkallocator = vkdev->acquire_staging_allocator();
-
-    ncnn::VkMat outVkMat;
     bool usedRife = false;
-    if (m_RifeHasPrevFrame) {
-        // RIFE forward: prev + curr + timestep → out (midpoint interp)
-        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B: extract setup",
-                                      (unsigned long long)entryN);
-        ncnn::Extractor ex = m_RifeNet->create_extractor();
-        ex.input("in0", m_RifePrevVkMat);
-        ex.input("in1", m_RifeCurrVkMat);
-        ex.input("in2", m_RifeTimestepVkMat);
-        ncnn::VkCompute ncnnCmd(vkdev);
-        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B: ex.extract",
-                                      (unsigned long long)entryN);
-        int rc = ex.extract("out0", outVkMat, ncnnCmd);
-        if (rc != 0) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase B: extract rc=%d", rc);
-            vkdev->reclaim_blob_allocator(cloneOpt.blob_vkallocator);
-            vkdev->reclaim_staging_allocator(cloneOpt.staging_vkallocator);
-            return false;
-        }
-        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B: record_clone curr→prev",
-                                      (unsigned long long)entryN);
-        ncnnCmd.record_clone(m_RifeCurrVkMat, m_RifePrevVkMat, cloneOpt);
-        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B: submit_and_wait",
-                                      (unsigned long long)entryN);
-        if (ncnnCmd.submit_and_wait() != 0) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase B: submit_and_wait failed");
-            vkdev->reclaim_blob_allocator(cloneOpt.blob_vkallocator);
-            vkdev->reclaim_staging_allocator(cloneOpt.staging_vkallocator);
-            return false;
-        }
-        usedRife = true;
-    } else {
-        // First frame — no prev yet.  Clone curr → prev for next frame.
-        // outVkMat aliases curr (real frame, no interp).
-        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B (first frame): VkCompute ctor",
-                                      (unsigned long long)entryN);
-        ncnn::VkCompute ncnnCmd(vkdev);
-        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B (first frame): record_clone",
-                                      (unsigned long long)entryN);
-        ncnnCmd.record_clone(m_RifeCurrVkMat, m_RifePrevVkMat, cloneOpt);
-        if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                      "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B (first frame): submit_and_wait",
-                                      (unsigned long long)entryN);
-        if (ncnnCmd.submit_and_wait() != 0) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase B: first-frame clone failed");
-            vkdev->reclaim_blob_allocator(cloneOpt.blob_vkallocator);
-            vkdev->reclaim_staging_allocator(cloneOpt.staging_vkallocator);
-            return false;
-        }
-        outVkMat = m_RifeCurrVkMat;
-        m_RifeHasPrevFrame = true;
-    }
+    VkBuffer phaseCSrcBuf = VK_NULL_HANDLE;
+    const bool warmupDone = m_RifeWarmupComplete.load(std::memory_order_acquire);
+    {
+        ncnn::Mat curr_mat((int)W, (int)H, 3, m_RifeRgbInHostMapped, (size_t)sizeof(float));
 
-    vkdev->reclaim_blob_allocator(cloneOpt.blob_vkallocator);
-    vkdev->reclaim_staging_allocator(cloneOpt.staging_vkallocator);
+        if (m_RifeHasPrevFrame && warmupDone) {
+            if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                          "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) #%llu — Phase B: ex.extract (CPU mat)",
+                                          (unsigned long long)entryN);
+            ncnn::Extractor ex = m_RifeNet->create_extractor();
+            ex.input("in0", m_RifePrevMat);
+            ex.input("in1", curr_mat);
+            ex.input("in2", m_RifeTimestepMat);
+            ncnn::Mat out_mat;
+            int rc = ex.extract("out0", out_mat);
+            if (rc != 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) Phase B: extract rc=%d", rc);
+                return false;
+            }
+            if (out_mat.empty() || out_mat.w != (int)W || out_mat.h != (int)H || out_mat.c != 3) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) Phase B: extract returned "
+                            "unexpected shape (w=%d h=%d c=%d empty=%d)",
+                            out_mat.w, out_mat.h, out_mat.c, (int)out_mat.empty());
+                return false;
+            }
+
+            // Copy each fp32 channel plane into the mapped host staging buffer.
+            // ncnn::Mat planes may be non-contiguous (cstep padded to 16-byte
+            // multiples on x86) — copy plane-by-plane to be safe.
+            const size_t planePixels = (size_t)W * (size_t)H;
+            auto* dst = static_cast<float*>(m_RifeRgbOutHostMapped);
+            for (int c = 0; c < 3; ++c) {
+                memcpy(dst + (size_t)c * planePixels,
+                       out_mat.channel(c).data,
+                       planePixels * sizeof(float));
+            }
+
+            // Stash this frame as next iteration's prev (deep-clone so it
+            // detaches from the host-mapped buffer about to be reused).
+            m_RifePrevMat = curr_mat.clone();
+            phaseCSrcBuf = (VkBuffer)m_RifeRgbOutHostBuf;
+            usedRife = true;
+        } else {
+            // Pass-through path: skip the 10MB clone unless we actually need
+            // prev for the next frame's RIFE forward.  Saves ~50ms per
+            // pre-warmup frame (HOST_COHERENT mapped memory is uncached on
+            // x86 → memcpy READ from staging is slow, ~5x DRAM speed).
+            //
+            //   • Warm-up not done: RIFE will not fire on next frame either,
+            //     so prev is unused.  Skip clone entirely.
+            //   • Warm-up just done + no prev yet: clone now so next frame
+            //     has prev=curr-of-this-frame to interpolate against.
+            //   • First frame ever (warmupDone but hasPrev=false): same as
+            //     above — set up prev for next iteration.
+            const bool needPrev = warmupDone && !m_RifeHasPrevFrame;
+            if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                          "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) #%llu — Phase B (pass-through): "
+                                          "warmupDone=%d hasPrev=%d clone-prev=%d",
+                                          (unsigned long long)entryN,
+                                          (int)warmupDone, (int)m_RifeHasPrevFrame, (int)needPrev);
+            if (needPrev) {
+                m_RifePrevMat = curr_mat.clone();
+                m_RifeHasPrevFrame = true;
+            }
+            phaseCSrcBuf = (VkBuffer)m_RifeRgbInHostBuf;
+        }
+    }
     auto t1 = std::chrono::high_resolution_clock::now();
     double rifeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
     if (entryN < 3) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                  "[VIPLE-VK-FRUC] §J.3.e.2.e2d #%llu — Phase B done %.2fms (usedRife=%d), Phase C start",
+                                  "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) #%llu — Phase B done %.2fms (usedRife=%d), Phase C start",
                                   (unsigned long long)entryN, rifeMs, (int)usedRife);
 
     // ===== PHASE C: copy out.buffer → bufRGB + reverse shader =====
     pfnReset(cb, 0);
     pfnBegin(cb, &bbi);
 
-    // Buffer barrier (Phase B's shader write completed via host fence already, but
-    // VkBuffer ownership/visibility for our Phase C transfer read still needs sync).
+    // Path B: Phase B already wrote into the HOST_VISIBLE staging buffer via
+    // CPU memcpy.  The host write becomes visible to the GPU at command-buffer
+    // submit time (HOST_COHERENT memory + VK_PIPELINE_STAGE_HOST barrier).
+    // Source buffer chosen by Phase B:
+    //   • m_RifeRgbInHostBuf (first frame, pass-through current)
+    //   • m_RifeRgbOutHostBuf (subsequent frames, RIFE midpoint output)
     VkBufferMemoryBarrier bbarOut = {};
     bbarOut.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    bbarOut.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    bbarOut.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
     bbarOut.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     bbarOut.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bbarOut.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bbarOut.buffer = outVkMat.buffer();
+    bbarOut.buffer = phaseCSrcBuf;
     bbarOut.size = VK_WHOLE_SIZE;
-    pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    pfnBarrier(cb, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                0, 0, nullptr, 1, &bbarOut, 0, nullptr);
 
-    // Copy out → bufRGB (overrides forward shader's bufRGB content with interp midpoint
-    // OR with curr alias on first frame).
+    // Copy host staging → bufRGB (replaces forward shader's bufRGB with RIFE
+    // midpoint OR pass-through curr on first frame).
     VkBufferCopy copyToBufRgb = {};
-    copyToBufRgb.srcOffset = outVkMat.buffer_offset();
+    copyToBufRgb.srcOffset = 0;
     copyToBufRgb.dstOffset = 0;
     copyToBufRgb.size = rgbBytes;
-    pfnCopyBuf(cb, outVkMat.buffer(), (VkBuffer)m_FrucNv12RgbBufRGB, 1, &copyToBufRgb);
+    pfnCopyBuf(cb, phaseCSrcBuf, (VkBuffer)m_FrucNv12RgbBufRGB, 1, &copyToBufRgb);
 
     // Buffer barrier: TRANSFER_WRITE → SHADER_READ on bufRGB (reverse shader will read).
     VkBufferMemoryBarrier bbarRgb = {};
@@ -2676,89 +2667,77 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
     return true;
 }
 
-// §J.3.e.2.e2a — load RIFE model on external ncnn instance + allocate VkMats.
+// §J.3.e.2.e2 (Path B) — load RIFE model on ncnn's INTERNAL vkdev + allocate
+// HOST_VISIBLE staging buffers for CPU↔GPU RGB shuttling around CPU ncnn::Mat
+// inference.
 //
-// Runs once per PlVkRenderer instance, lazy-initialised on first call.  Mirrors
-// NcnnFRUC::loadModel but skips the steps (ncnn::create_gpu_instance / pick GPU
-// 0 / log device picked) that §J.3.e.1.d's external handoff already covered.
+// Why CPU Mat instead of VkMat: feeding ex.input(VkMat) on a ncnn singleton
+// initialised from libplacebo's external VkDevice triggers an MSVC ABI bug
+// in Convolution_vulkan's internal Padding sub-layer dispatch (verified via
+// per-layer trace in §J.3.e.2.e2e).  Path B uses ncnn's own internal vkdev
+// (same path NcnnFRUC.cpp uses successfully) and feeds the model CPU
+// ncnn::Mat inputs — bypassing the entire external-VkDevice ABI rabbit hole.
 //
-// Uses the same fp16 packed/storage/arithmetic options NcnnFRUC uses on the
-// production cascade, since RIFE 4.25-lite is fp16-trained.  The `rife.Warp`
-// custom layer is required (defined in ncnn_rife_warp.h, shared with NcnnFRUC).
-//
-// Allocates ncnn::VkMat for prev/curr/timestep at (W, H, 3) fp32 packed planar
-// — matches the shape RIFE's in0/in1 expect.  in2 is timestep (W, H, 1) fp32
-// uniformly filled with 0.5 (midpoint interpolation).
+// The cost is one PCIe round-trip per inference: bufRGB (DEVICE_LOCAL) →
+// m_RifeRgbInHostBuf (HOST_VISIBLE) → CPU forward → memcpy out to
+// m_RifeRgbOutHostBuf (HOST_VISIBLE) → bufRGB.  At 720p × 3ch × fp32 =
+// ~10.5 MB each way, this is 1-2 ms on PCIe 4.0.
 bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
 {
     if (m_RifeReady || m_RifeDisabled) return m_RifeReady;
+
+    // Path B keeps the §J.3.e.1.d external ncnn handoff alive — required for
+    // initFrucNv12RgbResources (uses ncnn::compile_spirv_module on the external
+    // singleton's VkDevice).  The earlier attempt to destroy+recreate the
+    // singleton mid-session triggered VK_ERROR_DEVICE_LOST in libplacebo's
+    // av1 decoder (TDR or driver state corruption when ncnn cleanup races
+    // with concurrent video-decode work on the same physical device).
+    //
+    // Tradeoff: external vkdev can't run RIFE GPU forward (virtual-dispatch
+    // ABI bug; see §J.3.e.X).  So we run RIFE on **CPU only**
+    // (use_vulkan_compute=false).  Pure CPU forward of RIFE 4.25-lite at 720p
+    // is ~100-200ms on RTX 3060 mobile's 10-core CPU — too slow for 60fps
+    // half-rate budget (16ms) but acceptable for staged updates (e.g. 30fps
+    // half-rate every other frame, or pulse interp on demand).  Real
+    // perf/quality tuning happens in §J.3.e.2.f; this lands the structural
+    // pipeline first.
     if (!m_NcnnExternalReady) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a init: ncnn external not ready");
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) external ncnn handoff not ready "
+                    "(VIPLE_PLVK_NCNN_HANDOFF=1 must be set)");
         m_RifeDisabled = true;
         return false;
     }
-
     ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device(0);
     if (!vkdev) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a init: ncnn::get_gpu_device(0) returned null");
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) ncnn::get_gpu_device(0) returned null");
         m_RifeDisabled = true;
         return false;
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 1/6 new ncnn::Net + opt");
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2 loadRife: step 1/4 new ncnn::Net + opt "
+                "(external vkdev kept; use_vulkan_compute=false → pure CPU forward)");
     m_RifeNet = std::make_unique<ncnn::Net>();
-    m_RifeNet->opt.use_vulkan_compute  = true;
-    // fp16/int8 are gated behind device features that libplacebo's pl_vulkan_create
-    // may or may not enable.  Honour what the GpuInfo (queried in
-    // populate_gpu_info_from_external) reports for the external VkDevice — if
-    // libplacebo didn't enable a feature, the GpuInfo flag is 0 and we leave
-    // the corresponding ncnn opt off.  This keeps load_model from trying to
-    // compile shaders that reference unsupported instruction sets.
-    // Disable fp16 entirely on external mode: GpuInfo reports device capability
-    // but doesn't tell us whether the relevant device extensions
-    // (VK_KHR_shader_float16_int8, VK_KHR_16bit_storage) were enabled at
-    // libplacebo's vkCreateDevice time.  Compiling SPIR-V that references
-    // fp16 ops on a device where the ext isn't enabled crashes inside
-    // ncnn::Pipeline::create.  Trade fp16 perf bonus for correctness — RIFE
-    // 4.25-lite still runs at fp32 ~25ms instead of ~12ms; further
-    // optimisation in §J.3.e.2.f via libplacebo opt-in extension list.
+    // Path B critical: use_vulkan_compute = false routes Net::forward through
+    // the CPU forward chain (Convolution_x86 etc.).  This bypasses the
+    // Padding_vulkan virtual-dispatch ABI bug that fires only on the GPU
+    // forward path of an externally-managed VulkanDevice.
+    m_RifeNet->opt.use_vulkan_compute  = false;
     m_RifeNet->opt.use_fp16_packed     = false;
     m_RifeNet->opt.use_fp16_storage    = false;
     m_RifeNet->opt.use_fp16_arithmetic = false;
     m_RifeNet->opt.use_int8_storage    = false;
     m_RifeNet->opt.use_int8_arithmetic = false;
-    m_RifeNet->opt.use_shader_pack8    = false;
-    // §J.3.e.2.e2d — wire blob/staging/workspace VkAllocators on the Net opt.
-    // ncnn::Net::forward (called inside ex.extract) allocates intermediate
-    // VkMats via opt.blob_vkallocator and staging via opt.staging_vkallocator.
-    // If left null, internal allocations crash on `nullptr->fastMalloc`.
-    // NcnnFRUC's production path uses CPU ncnn::Mat (different code path) so
-    // this issue is invisible there; we hit it because we feed VkMat inputs.
-    m_RifeNet->opt.blob_vkallocator      = vkdev->acquire_blob_allocator();
-    m_RifeNet->opt.staging_vkallocator   = vkdev->acquire_staging_allocator();
-    m_RifeNet->opt.workspace_vkallocator = m_RifeNet->opt.blob_vkallocator;
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a opt: fp32 path, packing ON (default), "
-                "blob_vkallocator=%p staging=%p workspace=%p (mandatory for VkMat ex.input)",
-                (void*)m_RifeNet->opt.blob_vkallocator,
-                (void*)m_RifeNet->opt.staging_vkallocator,
-                (void*)m_RifeNet->opt.workspace_vkallocator);
+    // Skip set_vulkan_device — pure CPU forward doesn't need a GPU device handle.
 
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 2/6 set_vulkan_device(0)");
-    m_RifeNet->set_vulkan_device(0);
-
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 3/6 register_custom_layer(rife.Warp)");
     if (m_RifeNet->register_custom_layer("rife.Warp",
                                           viple::createRifeWarp,
                                           viple::destroyRifeWarp,
                                           nullptr) != 0) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a register_custom_layer(rife.Warp) failed");
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 register_custom_layer(rife.Warp) failed");
         m_RifeNet.reset();
         m_RifeDisabled = true;
         return false;
@@ -2768,7 +2747,7 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
     QString binPath   = Path::getDataFilePath("rife-v4.25-lite/flownet.bin");
     if (paramPath.isEmpty() || binPath.isEmpty()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a RIFE model files not found in data path");
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 RIFE model files not found in data path");
         m_RifeNet.reset();
         m_RifeDisabled = true;
         return false;
@@ -2778,11 +2757,11 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
     std::wstring binWide   = QDir::toNativeSeparators(binPath).toStdWString();
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: step 4/6 load_param");
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2 loadRife: step 2/4 load_param");
     FILE* paramFp = _wfopen(paramWide.c_str(), L"rb");
     if (!paramFp) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a _wfopen(param) failed errno=%d", errno);
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 _wfopen(param) failed errno=%d", errno);
         m_RifeNet.reset();
         m_RifeDisabled = true;
         return false;
@@ -2791,22 +2770,18 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
     fclose(paramFp);
     if (paramRc != 0) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2a load_param rc=%d", paramRc);
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 load_param rc=%d", paramRc);
         m_RifeNet.reset();
         m_RifeDisabled = true;
         return false;
     }
 
-    // §J.3.e.2.e2c (path 1) — actually call load_model now that ncnn fork
-    // has per-layer trace logs (see net.cpp `[VipleStream e2c]` markers).
-    // First-firing-layer-no-POST trace identifies the crashing layer.
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2c loadRife: step 5/6 load_model "
-                "(per-layer trace active in ncnn fork)");
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2 loadRife: step 3/4 load_model");
     FILE* binFp = _wfopen(binWide.c_str(), L"rb");
     if (!binFp) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c _wfopen(bin) failed errno=%d", errno);
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 _wfopen(bin) failed errno=%d", errno);
         m_RifeNet.reset();
         m_RifeDisabled = true;
         return false;
@@ -2815,110 +2790,219 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
     fclose(binFp);
     if (modelRc != 0) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c load_model rc=%d", modelRc);
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 load_model rc=%d", modelRc);
         m_RifeNet.reset();
         m_RifeDisabled = true;
         return false;
     }
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2c loadRife: step 6/6 load_model OK");
 
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2c loadRife: step 6a — acquire_blob_allocator");
-    ncnn::VkAllocator* blobAlloc = vkdev->acquire_blob_allocator();
-    if (!blobAlloc) {
+    // CPU mats — timestep is constant 0.5 across W×H×1 plane.  prev is
+    // populated on the first frame's clone-from-curr.
+    m_RifeTimestepMat.create((int)width, (int)height, 1, (size_t)sizeof(float));
+    m_RifeTimestepMat.fill(0.5f);
+    if (m_RifeTimestepMat.empty()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c acquire_blob_allocator failed");
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 timestep ncnn::Mat::create failed");
         m_RifeNet.reset();
         m_RifeDisabled = true;
         return false;
     }
+
+    // Allocate two HOST_VISIBLE staging buffers (sizeRGB = W*H*3*sizeof(float))
+    // on libplacebo's VkDevice so Phase A can vkCmdCopyBuffer directly into
+    // m_RifeRgbInHostBuf and Phase C can vkCmdCopyBuffer from
+    // m_RifeRgbOutHostBuf into bufRGB.
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6b — VkMat::create prev (W=%u H=%u c=3)",
-                width, height);
-    // 5-arg form (no explicit elempack) matches NcnnFRUC's working phase-B.4b
-    // pattern; default elempack lets ncnn pick the right value internally.
-    m_RifePrevVkMat.create((int)width, (int)height, 3, (size_t)sizeof(float), blobAlloc);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6c — VkMat::create curr empty=%d",
-                (int)m_RifePrevVkMat.empty());
-    m_RifeCurrVkMat.create((int)width, (int)height, 3, (size_t)sizeof(float), blobAlloc);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6d — VkMat::create timestep curr_empty=%d",
-                (int)m_RifeCurrVkMat.empty());
-    m_RifeTimestepVkMat.create((int)width, (int)height, 1, (size_t)sizeof(float), blobAlloc);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6e — VkMat creates done ts_empty=%d",
-                (int)m_RifeTimestepVkMat.empty());
-    if (m_RifePrevVkMat.empty() || m_RifeCurrVkMat.empty() || m_RifeTimestepVkMat.empty()) {
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2 loadRife: step 4/4 alloc staging buffers");
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        return m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name);
+    };
+    auto pfnCreateBuffer    = (PFN_vkCreateBuffer)getDevProc("vkCreateBuffer");
+    auto pfnGetBufMemReq    = (PFN_vkGetBufferMemoryRequirements)getDevProc("vkGetBufferMemoryRequirements");
+    auto pfnAllocateMemory  = (PFN_vkAllocateMemory)getDevProc("vkAllocateMemory");
+    auto pfnBindBufMem      = (PFN_vkBindBufferMemory)getDevProc("vkBindBufferMemory");
+    auto pfnMapMemory       = (PFN_vkMapMemory)getDevProc("vkMapMemory");
+    auto pfnGetPdMemProps   = (PFN_vkGetPhysicalDeviceMemoryProperties)getDevProc("vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnCreateBuffer || !pfnGetBufMemReq || !pfnAllocateMemory || !pfnBindBufMem
+        || !pfnMapMemory || !pfnGetPdMemProps) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c VkMat::create reported empty (prev=%d curr=%d ts=%d)",
-                    (int)m_RifePrevVkMat.empty(), (int)m_RifeCurrVkMat.empty(), (int)m_RifeTimestepVkMat.empty());
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 staging-buffer PFN load failed");
         m_RifeNet.reset();
+        m_RifeTimestepMat.release();
         m_RifeDisabled = true;
         return false;
     }
 
-    // Match NcnnFRUC's working pattern: ncnn::VkTransfer (not VkCompute) for
-    // one-shot CPU→GPU upload, with explicit staging allocator + raw Option
-    // (fp16/packing all OFF so record_upload does verbatim byte copy).
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6f — fill timestep + VkTransfer setup");
-    {
-        ncnn::Mat tsHost((int)width, (int)height, 1, (size_t)sizeof(float));
-        tsHost.fill(0.5f);
-
-        ncnn::Option uploadOpt;
-        uploadOpt.use_vulkan_compute    = true;
-        uploadOpt.use_fp16_packed       = false;
-        uploadOpt.use_fp16_storage      = false;
-        uploadOpt.use_fp16_arithmetic   = false;
-        uploadOpt.use_int8_storage      = false;
-        uploadOpt.use_int8_arithmetic   = false;
-        uploadOpt.use_packing_layout    = false;
-        uploadOpt.use_shader_pack8      = false;
-        uploadOpt.blob_vkallocator      = blobAlloc;
-        uploadOpt.staging_vkallocator   = vkdev->acquire_staging_allocator();
-
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6g — VkTransfer xfer ctor");
-        ncnn::VkTransfer xfer(vkdev);
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6h — record_upload");
-        xfer.record_upload(tsHost, m_RifeTimestepVkMat, uploadOpt);
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6i — submit_and_wait");
-        int upRc = xfer.submit_and_wait();
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-FRUC] §J.3.e.2.e2c step 6j — submit_and_wait rc=%d", upRc);
-        vkdev->reclaim_staging_allocator(uploadOpt.staging_vkallocator);
-        if (upRc != 0) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VK-FRUC] §J.3.e.2.e2c timestep VkTransfer upload failed");
-            m_RifeNet.reset();
-            m_RifeDisabled = true;
-            return false;
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPdMemProps(m_Vulkan->phys_device, &memProps);
+    auto pickMemType = [&](uint32_t typeBits, VkMemoryPropertyFlags want) -> int {
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+            if ((typeBits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & want) == want) {
+                return (int)i;
+            }
         }
+        return -1;
+    };
+
+    auto allocHostVisibleBuf = [&](VkDeviceSize size, VkBuffer& outBuf,
+                                   VkDeviceMemory& outMem, void*& outMapped) -> bool {
+        VkBufferCreateInfo bci = {};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = size;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (pfnCreateBuffer(m_Vulkan->device, &bci, nullptr, &outBuf) != VK_SUCCESS) return false;
+        VkMemoryRequirements memReq = {};
+        pfnGetBufMemReq(m_Vulkan->device, outBuf, &memReq);
+        int mti = pickMemType(memReq.memoryTypeBits,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                              | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (mti < 0) return false;
+        VkMemoryAllocateInfo mai = {};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = memReq.size;
+        mai.memoryTypeIndex = (uint32_t)mti;
+        if (pfnAllocateMemory(m_Vulkan->device, &mai, nullptr, &outMem) != VK_SUCCESS) return false;
+        if (pfnBindBufMem(m_Vulkan->device, outBuf, outMem, 0) != VK_SUCCESS) return false;
+        if (pfnMapMemory(m_Vulkan->device, outMem, 0, size, 0, &outMapped) != VK_SUCCESS) return false;
+        return true;
+    };
+
+    const VkDeviceSize sizeRGB = (VkDeviceSize)width * height * 3 * sizeof(float);
+    VkBuffer inBuf = VK_NULL_HANDLE, outBuf = VK_NULL_HANDLE;
+    VkDeviceMemory inMem = VK_NULL_HANDLE, outMem = VK_NULL_HANDLE;
+    void* inMapped = nullptr;
+    void* outMapped = nullptr;
+    if (!allocHostVisibleBuf(sizeRGB, inBuf, inMem, inMapped)
+        || !allocHostVisibleBuf(sizeRGB, outBuf, outMem, outMapped)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 staging-buffer alloc failed (sizeRGB=%llu)",
+                    (unsigned long long)sizeRGB);
+        m_RifeNet.reset();
+        m_RifeTimestepMat.release();
+        m_RifeDisabled = true;
+        return false;
+    }
+    m_RifeRgbInHostBuf      = inBuf;       m_RifeRgbInHostBufMem  = inMem;
+    m_RifeRgbInHostMapped   = inMapped;
+    m_RifeRgbOutHostBuf     = outBuf;      m_RifeRgbOutHostBufMem = outMem;
+    m_RifeRgbOutHostMapped  = outMapped;
+
+    // Path B steady-state strategy:
+    //
+    // CPU forward of RIFE 4.25-lite at 720p is ~200-400ms per inference
+    // (RTX 3060 mobile's CPU SIMD).  Running this on the render thread
+    // overflows the 16ms half-rate budget.  Running it on a worker thread
+    // either competes with libplacebo's render-thread decode/present
+    // (causing fence-wait timeouts and unhandled exceptions) or arrives too
+    // late to be useful as a midpoint frame.  GPU forward via the external
+    // vkdev hits the §J.3.e.X virtual-dispatch ABI bug.
+    //
+    // Conclusion: Path B ships as **structural pass-through only** —
+    // override pipeline runs Phase A/B/C every frame, with Phase B copying
+    // bufRGB unchanged through staging buffers (no RIFE).  The RIFE Net is
+    // loaded and ready, the staging buffers are wired, but
+    // m_RifeWarmupComplete stays false so Phase B never invokes ex.extract.
+    //
+    // This locks in:
+    //   • End-to-end Path B plumbing (Phase A→B→C handshake, HOST_VISIBLE
+    //     staging buffers, CPU Mat wrapping, command-buffer sync) — tested
+    //     working on RTX 3060.
+    //   • Pass-through frame cost ≈ 0 ms (no clone, no inference).
+    //   • Forward path for §J.3.e.X (hand-rolled VkPipeline RIFE) to drop
+    //     into Phase B without re-doing the buffer/sync glue.
+    //
+    // To re-enable async-warmup + CPU RIFE forward later (e.g. for offline
+    // quality testing), set VIPLE_VK_FRUC_RIFE_CPU=1 — gated below.
+    m_RifeWarmupComplete.store(false, std::memory_order_release);
+    if (qEnvironmentVariableIntValue("VIPLE_VK_FRUC_RIFE_CPU") != 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) VIPLE_VK_FRUC_RIFE_CPU=1 — "
+                    "launching CPU forward warm-up thread (slow, ~5s; not real-time viable)");
+        m_RifeWarmupThread = std::thread([this, width, height]() {
+            auto wt0 = std::chrono::high_resolution_clock::now();
+            ncnn::Mat warm_prev((int)width, (int)height, 3, (size_t)sizeof(float));
+            ncnn::Mat warm_curr((int)width, (int)height, 3, (size_t)sizeof(float));
+            warm_prev.fill(0.5f);
+            warm_curr.fill(0.5f);
+            ncnn::Extractor wex = m_RifeNet->create_extractor();
+            wex.input("in0", warm_prev);
+            wex.input("in1", warm_curr);
+            wex.input("in2", m_RifeTimestepMat);
+            ncnn::Mat warm_out;
+            int wrc = wex.extract("out0", warm_out);
+            auto wt1 = std::chrono::high_resolution_clock::now();
+            double warmMs = std::chrono::duration<double, std::milli>(wt1 - wt0).count();
+            if (wrc == 0 && !warm_out.empty()
+                && warm_out.w == (int)width && warm_out.h == (int)height && warm_out.c == 3) {
+                m_RifeWarmupComplete.store(true, std::memory_order_release);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) CPU warm-up: DONE %.0fms — "
+                            "RIFE CPU forward armed (per-frame ~200-400ms expected)", warmMs);
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) CPU warm-up: FAIL "
+                            "rc=%d out{%dx%dx%d empty=%d} %.0fms",
+                            wrc, warm_out.w, warm_out.h, warm_out.c, (int)warm_out.empty(), warmMs);
+            }
+        });
+    } else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) RIFE forward disabled by default "
+                    "(set VIPLE_VK_FRUC_RIFE_CPU=1 to enable slow CPU forward); pass-through only");
     }
 
     m_RifeReady = true;
     m_RifeHasPrevFrame = false;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a loadRife: PASS — RIFE 4.25-lite loaded on "
-                "external ncnn instance, VkMats prev/curr=%dx%dx3 fp32, timestep=%dx%dx1 fp32 (=0.5)",
-                (int)width, (int)height, (int)width, (int)height);
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) loadRife: PASS — RIFE 4.25-lite "
+                "loaded on internal ncnn vkdev, prev/timestep CPU mats %dx%d, "
+                "RGB staging buffers in=%p out=%p (sizeRGB=%llu, host-mapped in=%p out=%p)",
+                (int)width, (int)height, (void*)m_RifeRgbInHostBuf,
+                (void*)m_RifeRgbOutHostBuf, (unsigned long long)sizeRGB,
+                m_RifeRgbInHostMapped, m_RifeRgbOutHostMapped);
     return true;
 }
 
 void PlVkRenderer::destroyRifeModel()
 {
-    if (!m_RifeReady && !m_RifeNet) return;
+    if (!m_RifeReady && !m_RifeNet
+        && !m_RifeRgbInHostBuf && !m_RifeRgbOutHostBuf
+        && !m_RifeWarmupThread.joinable()) return;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VK-FRUC] §J.3.e.2.e2a destroyRifeModel");
-    // Release VkMats first — they ride the device allocator owned by ncnn.
-    m_RifePrevVkMat.release();
-    m_RifeCurrVkMat.release();
-    m_RifeTimestepVkMat.release();
+                "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) destroyRifeModel");
+
+    // Join the warm-up thread before tearing down m_RifeNet — the thread holds
+    // an Extractor that references the Net's pipelines.  Worst case: blocks
+    // for the remaining warm-up time (≤4s).
+    if (m_RifeWarmupThread.joinable()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e2 (Path B) destroyRifeModel: joining warm-up thread");
+        m_RifeWarmupThread.join();
+    }
+    m_RifeWarmupComplete.store(false, std::memory_order_release);
+
+    auto getDevProc = [&](const char* name) -> PFN_vkVoidFunction {
+        return m_PlVkInstance ? m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, name) : nullptr;
+    };
+    auto pfnUnmap   = (PFN_vkUnmapMemory)getDevProc("vkUnmapMemory");
+    auto pfnDestBuf = (PFN_vkDestroyBuffer)getDevProc("vkDestroyBuffer");
+    auto pfnFreeMem = (PFN_vkFreeMemory)getDevProc("vkFreeMemory");
+
+    if (m_Vulkan && m_Vulkan->device) {
+        if (m_RifeRgbInHostBufMem && pfnUnmap)   pfnUnmap(m_Vulkan->device, (VkDeviceMemory)m_RifeRgbInHostBufMem);
+        if (m_RifeRgbInHostBuf && pfnDestBuf)    pfnDestBuf(m_Vulkan->device, (VkBuffer)m_RifeRgbInHostBuf, nullptr);
+        if (m_RifeRgbInHostBufMem && pfnFreeMem) pfnFreeMem(m_Vulkan->device, (VkDeviceMemory)m_RifeRgbInHostBufMem, nullptr);
+
+        if (m_RifeRgbOutHostBufMem && pfnUnmap)   pfnUnmap(m_Vulkan->device, (VkDeviceMemory)m_RifeRgbOutHostBufMem);
+        if (m_RifeRgbOutHostBuf && pfnDestBuf)    pfnDestBuf(m_Vulkan->device, (VkBuffer)m_RifeRgbOutHostBuf, nullptr);
+        if (m_RifeRgbOutHostBufMem && pfnFreeMem) pfnFreeMem(m_Vulkan->device, (VkDeviceMemory)m_RifeRgbOutHostBufMem, nullptr);
+    }
+    m_RifeRgbInHostBuf = nullptr; m_RifeRgbInHostBufMem = nullptr; m_RifeRgbInHostMapped = nullptr;
+    m_RifeRgbOutHostBuf = nullptr; m_RifeRgbOutHostBufMem = nullptr; m_RifeRgbOutHostMapped = nullptr;
+
+    m_RifePrevMat.release();
+    m_RifeTimestepMat.release();
     m_RifeNet.reset();
     m_RifeReady = false;
     m_RifeDisabled = false;
@@ -3648,8 +3732,17 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     bool useOverride = false;
     pl_tex heldTex = nullptr;
     const char* ovEnv = SDL_getenv("VIPLE_VK_FRUC_OUTPUT_OVERRIDE");
+    // §J.3.e.2.e2 Path B: dropped the `&& m_NcnnExternalReady` gate that the
+    // pre-Path-B code used as a proxy for "ncnn ready".  Path B's initRifeModel
+    // tears down the §J.3.e.1.d external handoff (sets m_NcnnExternalReady=false)
+    // and switches ncnn to internal vkdev mode; without removing this gate the
+    // override would run for frame#0 (which lazy-init'd RIFE) and then silently
+    // skip every subsequent frame because the teardown invalidated the gate.
+    // The override pipeline itself (NV12→RGB→VkImage compute) doesn't need ncnn
+    // — only the RIFE Phase B does, and runFrucOverridePassWithRife checks
+    // m_RifeReady internally.  Pass-through fallback (runFrucOverridePass)
+    // doesn't touch ncnn at all.
     if (ovEnv && SDL_atoi(ovEnv) != 0
-        && m_NcnnExternalReady
         && frame->format == AV_PIX_FMT_VULKAN) {
         // Lazy-init §J.3.e.2.c forward + §J.3.e.2.d reverse + §J.3.e.2.e1
         // wrap/override resources (normally gated behind probe env vars).

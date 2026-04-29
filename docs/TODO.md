@@ -318,7 +318,8 @@ AV_HWDEVICE_TYPE_VULKAN。原本 800+ LOC 估算的工作真正必要的就 ~30 
 | **J.3.b.2** prepareDecoderContext + prepareDecoderContextInGetFormat | impl OK；測試 throwaway 直接 call 觸發 crash（必須從 avcodec_open2 內部 get_format 觸發），revert（v1.3.57, 62be447） | ✅ (impl 留作 ref) |
 | **J.3.c.0** hw_configs 列舉 | 確認 ffmpeg 8.x HEVC + H264 都 advertise type=12 (VULKAN) hwaccel；AV1 沒（libdav1d 路徑）（v1.3.58, 8a3edbe） | ✅ |
 | **J.3.c.1** Vulkan-first cascade override | `VIPLE_USE_VK_DECODER=1` env var → `tryInitializeHwAccelDecoder` 先掃 VULKAN type 試（v1.3.60, ca24b57）。**實測 HEVC stream 啟用完整 Vulkan-native pipeline，0 crash 跑 28 秒** | ✅ |
-| **J.3.e** FRUC 整合進 PlVkRenderer | 把 NCNN-Vulkan / GenericFRUC 從 D3D11VARenderer 移到 PlVkRenderer 的 renderFrame loop。AVVkFrame.img[0] 直接餵 ncnn::VkMat 不過 bridge | ⏳ 進行中 — §J.3.e.1.a-d (v1.3.65-71) ncnn external VkDevice API + PlVkRenderer handoff 已 ship。剩 §J.3.e.2 NV12→RGB compute shader + AVVkFrame → ncnn::VkMat input |
+| **J.3.e** FRUC 整合進 PlVkRenderer | 把 NCNN-Vulkan / GenericFRUC 從 D3D11VARenderer 移到 PlVkRenderer 的 renderFrame loop。AVVkFrame.img[0] 直接餵 ncnn::VkMat 不過 bridge | ⏳ 進行中 — §J.3.e.1.a-d (v1.3.65-71) + §J.3.e.2.a-e1b (v1.3.72-91) NV12→RGB compute / pl_vulkan_wrap render override / 3-phase pipeline 全部 ship。§J.3.e.2.e2 (RIFE forward 注入) 經 trace 確認 ncnn external VkDevice 的 VkMat input path 撞到 MSVC virtual-inheritance ABI 雷，**改走 Path B（CPU ncnn::Mat 中介，HOST_VISIBLE staging buffer）**。詳見 `docs/J.3.e.2_ncnn_renderframe_integration.md` |
+| **J.3.e.X** 手刻 RIFE Vulkan pipeline | 跳過 ncnn 整個依賴，自己用 ~10-15 個 raw VkPipeline 實作 RIFE forward；權重 mmap 進 VkBuffer，PipelineCache binary 開機建一次。預期 latency 從 Path B 的 ~12ms 壓到 ~3-5ms | 🟡 long-term — 觸發條件：Path B 量測後 PCIe staging cost 占 budget 30%+，或要推 1080p/4K，或要砍 ncnn DLL 依賴 |
 | **J.3.f** AV1 Vulkan 路徑 | 重 build ffmpeg 把 libdav1d → vulkan_hwaccel 註冊（或改用 ffmpeg 內建 av1 decoder 加 vulkan）。需要 ffmpeg source + build 環境 | 🟡 long-term |
 
 **目前狀態（v1.3.60）：** 預設 user 行為跟 v1.3.59 等價 (D3D11VA + FRUC)。

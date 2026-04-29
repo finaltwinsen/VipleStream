@@ -416,3 +416,82 @@ if (probe2Enabled() && frame->format == AV_PIX_FMT_VULKAN && (frameCount % 60) =
 `docs/J.3.e.2_ncnn_renderframe_integration.md` — 本文件
 
 之後若有 §J.3.e.3 (frame pacing)，新文件 `docs/J.3.e.3_*.md`。
+
+---
+
+## §J.3.e.X — 長期備案：手刻 RIFE Vulkan pipeline（跳過 ncnn）
+
+### 動機
+
+§J.3.e.2.e2e 嘗試把 RIFE 4.25-lite 透過 ncnn::Net 的 VkMat input 路徑
+跑在 libplacebo 建出來的外部 VkDevice 上時，撞到 ncnn 自身的 MSVC
+ABI 雷區：
+
+- **L1：** `Padding_final : virtual public Padding, virtual public Padding_vulkan, virtual public Padding_x86`
+  在 conv 內部 sub-layer (`padding->forward(VkMat,...)`) 經由 `Layer*`
+  做 virtual dispatch 時無法正確分派到 `Padding_vulkan::forward`。手動
+  `dynamic_cast<Padding_vulkan*>(padding)->Padding_vulkan::forward(...)`
+  繞過虛擬分派可進入函式。
+- **L2：** 進入 `Padding_vulkan::forward` 後，跑到 `std::vector<vk_constant_type> constants(13)`
+  附近又掛掉。深層原因未確認，疑似跨 DLL/EXE 邊界的 vbtable thunk 與
+  ncnn 內部 utility allocator 互動。
+- **影響面：** RIFE 4.25-lite 有 389 個 layer，幾乎每個 conv 都有 padding
+  sub-layer。逐一 patch ncnn 是無底洞工作。
+
+§J.3.e.2 後續正式走 **Path B（CPU ncnn::Mat 中介）**：在 Phase A 寫到
+GPU bufRGB 之後，download 到 HOST_VISIBLE staging buffer，wrap 成
+`ncnn::Mat` 餵 ex.input，extract 後拷回 GPU bufRGB，再走 Phase C
+RGB→VkImage compute。每幀多一份 W×H×3×4 bytes 的 PCIe 來回 (~2ms @ 720p
+on PCIe 4.0)，但避開整個外部 VkDevice ncnn ABI 雷區。
+
+### 手刻 pipeline 的時機
+
+當 Path B 跑通且穩定，**未來**若：
+- (a) 量測發現 PCIe 來回 + CPU 推論 是 latency 瓶頸（半率 16ms budget 實
+  測 30%+ 花在 staging copy）
+- (b) 想把 RIFE 推到 1080p / 4K（PCIe 來回 cost scales linearly）
+- (c) 想擺脫對 ncnn 整個依賴（DLL size、編譯時間、license
+  考量）
+
+可以開新 phase **§J.3.e.X — 手刻 RIFE Vulkan pipeline** 重寫整條
+forward path，直接用 raw VkPipeline。
+
+### 手刻 pipeline 的範圍估算
+
+RIFE 4.25-lite 真實計算量（fuse 後）：
+- ~50 個 Conv2d（不同 kernel/stride/pad 組合，但都是 fp32 GEMM-like）
+- 4-6 個 Resize / PixelShuffle（upsample）
+- 4-6 個 Warp（grid_sample 等價，需要 sampler）
+- ~20 個 Eltwise add / mul（trivially fused into adjacent shader）
+- 1 個 Sigmoid（output）
+
+對應 VkPipeline 數估算 **10~15 個 dispatch**（融合 conv-relu-add-mul 後）。
+比 ncnn 的 389 layer 少兩個數量級。
+
+### 實作 sketch
+
+1. **權重轉換**：寫 Python script 把 RIFE 的 `.pth` 轉成 fp16 packed
+   binary blob（每個 conv 一段，weight + bias 連續排）。Load 時 mmap
+   進 VkBuffer。
+2. **Shader 模板**：寫 N 個 GLSL compute shader 模板（conv1x1, conv3x3
+   stride1, conv3x3 stride2, conv1x1 GEMM, warp, resize2x, sigmoid+blend）。
+   用 specialization constants 控 channel 數/dim。
+3. **PipelineCache**：所有 VkPipeline 開機建一次，cache 到 disk（VkPipelineCache
+   binary blob），下次啟動直接 load。
+4. **Forward 函式**：500~800 行 C++，每個 layer 一個 `recordConvXxx(cb, in,
+   out, weights_offset, ...)` helper，串成一條 command buffer。
+
+工作量估：1 週 senior dev (full-time)。風險：
+- Shader 正確性驗證（要對著 ncnn CPU output 做 bit-exact / SSIM > 0.99 比對）
+- 不同 GPU vendor 的 cooperative-matrix / subgroup 支援差異（先不用 coop-matrix，
+  純 SIMD WMMA fp16）
+
+### 與 Path B 的相對位置
+
+| 路線 | latency 預期 (720p 60fps) | 工作量 | 維護成本 |
+|---|---|---|---|
+| Path B (CPU mat) | ~10ms 推論 + 2ms staging = 12ms | 1~2 天 | 低（依賴 ncnn upstream）|
+| §J.3.e.X 手刻 | ~3-5ms (純 GPU) | 5~7 天 | 高（每個 RIFE 版本要重做）|
+
+Path B 是「**現在能用**」的 baseline。§J.3.e.X 是「**要更快才動**」的優化。
+不要在 Path B 還沒驗品質前就跳到手刻。

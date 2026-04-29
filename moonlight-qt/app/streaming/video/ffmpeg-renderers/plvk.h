@@ -10,6 +10,9 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/vulkan.h>
 
+#include <atomic>
+#include <thread>
+
 // §J.3.e.2.e2 — RIFE forward integration on the external ncnn instance.
 // ncnn::VkMat / ncnn::Net are needed as members.
 #include <ncnn/mat.h>
@@ -120,16 +123,17 @@ private:
     bool initRifeModel(uint32_t width, uint32_t height);
     void destroyRifeModel();
 
-    // §J.3.e.2.e2d — same role as runFrucOverridePass but injects RIFE forward
-    // between the NV12→bufRGB forward shader and the bufRGB→VkImage reverse
-    // shader.  Three-phase per-frame submit:
+    // §J.3.e.2.e2 (Path B) — same role as runFrucOverridePass but injects
+    // RIFE forward between the NV12→bufRGB forward shader and the
+    // bufRGB→VkImage reverse shader.  Three-phase per-frame submit:
     //   Phase A (our cmd buf): forward dispatch + vkCmdCopyBuffer bufRGB →
-    //                          m_RifeCurrVkMat.buffer + plane layout restore
-    //   Phase B (ncnn cmd):    if has prev: ncnn::Extractor::extract(prev,
-    //                          curr, timestep) → out + clone curr→prev.
-    //                          If first frame: just clone curr→prev,
-    //                          out=curr alias.
-    //   Phase C (our cmd buf): vkCmdCopyBuffer out.buffer → bufRGB +
+    //                          m_RifeRgbInHostBuf (HOST_VISIBLE staging)
+    //   Phase B (CPU):         if has prev: wrap input staging as ncnn::Mat,
+    //                          ex.extract(prev, curr, timestep) → CPU out_mat,
+    //                          memcpy out_mat → m_RifeRgbOutHostBuf, clone
+    //                          curr→prev.  If first frame: clone curr→prev,
+    //                          phaseCSrcBuf = m_RifeRgbInHostBuf (pass-through).
+    //   Phase C (our cmd buf): vkCmdCopyBuffer phaseCSrcBuf → bufRGB +
     //                          reverse shader (bufRGB → m_FrucRgbImgImage)
     // Each phase host-fenced for now (3 syncs/frame; §J.3.e.2.f will replace
     // with timeline sem chain for async pipelining).
@@ -270,12 +274,48 @@ private:
     void*    m_FrucOverrideCmdBuf   = nullptr;  // VkCommandBuffer
     void*    m_FrucOverrideFence    = nullptr;  // VkFence
 
-    // §J.3.e.2.e2a — RIFE model + VkMats on external ncnn instance.
+    // §J.3.e.2.e2 (Path B) — RIFE model + CPU ncnn::Mat + HOST_VISIBLE staging.
+    //
+    // Why CPU Mat (Path B) rather than VkMat (Path A): feeding ex.input(VkMat)
+    // on an external-VkDevice ncnn singleton hits an MSVC virtual-inheritance
+    // ABI bug in Convolution_vulkan's internal Padding sub-layer dispatch
+    // (verified via per-layer trace in §J.3.e.2.e2e — Conv_16's
+    // padding->forward(VkMat,...) virtual dispatch fails to reach
+    // Padding_vulkan::forward and eventually hangs/crashes).  See
+    // docs/J.3.e.2_ncnn_renderframe_integration.md §J.3.e.X.
+    //
+    // Path B sidesteps the external-VkDevice ABI rabbit hole entirely:
+    //   • m_RifeNet runs on ncnn's INTERNAL vkdev (default
+    //     ncnn::create_gpu_instance, same path NcnnFRUC uses successfully).
+    //     PlVkRenderer drops the §J.3.e.1.d external handoff for RIFE.
+    //   • Phase A copies bufRGB (DEVICE_LOCAL) → m_RifeRgbInHostBuf
+    //     (HOST_VISIBLE) so we can wrap the CPU side as a non-owning
+    //     ncnn::Mat for ex.input("in1", curr_mat).
+    //   • ex.extract returns a CPU ncnn::Mat (out_mat); we memcpy its data
+    //     into m_RifeRgbOutHostBuf (HOST_VISIBLE) and let Phase C copy that
+    //     back to bufRGB before the RGB→VkImage compute.
+    //   • Cost: one PCIe round-trip per frame (W*H*3*sizeof(float) each way).
+    //     Budget at 720p ≈ 10.5 MB × 2 = 21 MB ≈ 1-2 ms on PCIe 4.0.
     bool     m_RifeReady    = false;
     bool     m_RifeDisabled = false;
     std::unique_ptr<ncnn::Net> m_RifeNet;
-    ncnn::VkMat m_RifePrevVkMat;
-    ncnn::VkMat m_RifeCurrVkMat;
-    ncnn::VkMat m_RifeTimestepVkMat;
-    bool        m_RifeHasPrevFrame = false;  // false until first frame's curr is cloned to prev
+    ncnn::Mat m_RifePrevMat;       // W×H×3 fp32, persists across frames
+    ncnn::Mat m_RifeTimestepMat;   // W×H×1 fp32 const 0.5 (matches RIFE 4.25-lite spec)
+    bool      m_RifeHasPrevFrame = false;
+    void*    m_RifeRgbInHostBuf      = nullptr;  // VkBuffer (W*H*3*4 bytes, HOST_VISIBLE)
+    void*    m_RifeRgbInHostBufMem   = nullptr;  // VkDeviceMemory
+    void*    m_RifeRgbInHostMapped   = nullptr;  // mapped pointer (lifetime = init→destroy)
+    void*    m_RifeRgbOutHostBuf     = nullptr;  // VkBuffer (W*H*3*4 bytes, HOST_VISIBLE)
+    void*    m_RifeRgbOutHostBufMem  = nullptr;  // VkDeviceMemory
+    void*    m_RifeRgbOutHostMapped  = nullptr;  // mapped pointer
+    // §J.3.e.2.e2 (Path B) — async pipeline-cache warm-up.  ncnn lazily
+    // compiles SPIR-V on first ex.extract; for RIFE 4.25-lite that's ~4s
+    // at 720p which (a) overflows moonlight's session-establish window if
+    // done in initRifeModel synchronously, (b) freezes the render thread if
+    // done on frame#1.  Solution: launch a detached warm-up thread at init
+    // time; until it completes, Phase B treats every frame as "first frame
+    // pass-through" (no RIFE forward, just rotate prev = curr).  Once the
+    // flag flips true, real RIFE midpoint interpolation kicks in.
+    std::atomic<bool> m_RifeWarmupComplete{false};
+    std::thread       m_RifeWarmupThread;
 };
