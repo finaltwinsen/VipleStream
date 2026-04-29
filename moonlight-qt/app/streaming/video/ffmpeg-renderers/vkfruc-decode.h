@@ -71,6 +71,11 @@ private:
     std::atomic<uint64_t>  m_UpdateParamsCount{0};
     std::atomic<uint64_t>  m_DecodePicCount{0};
     std::atomic<uint64_t>  m_DisplayPicCount{0};
+
+    // §J.3.e.2.i.8 Phase 1.1c — DPB picture buffer pool (17 slots = H.265
+    // maxDpbSlots).  Phase 1.3 換成真的 VkImage 配置.
+    static constexpr int kPicPoolSize = 17;
+    vkPicBuffBase          m_PicPool[kPicPoolSize];
 };
 
 #endif // HAVE_LIBPLACEBO_VULKAN

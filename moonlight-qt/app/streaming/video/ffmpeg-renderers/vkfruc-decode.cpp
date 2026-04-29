@@ -12,6 +12,113 @@
 
 #include "vkfruc.h"
 #include <SDL.h>
+#include <cstring>
+#include <vector>
+
+// §J.3.e.2.i.8 Phase 1.1c — minimal CPU-side bitstream buffer.
+//
+// VulkanBitstreamBuffer 19 個 pure virtual 的 minimal impl: 用 std::vector
+// 保 NAL 拷貝 + 各種 stub. VkBuffer/VkDeviceMemory 全 NULL_HANDLE，因為
+// 此 phase parser 只 ParseByteStream (不 submit decode).  Phase 1.3 把
+// 這個換成真的 vkCreateBuffer + vkAllocateMemory + vkMapMemory.
+//
+// 寫在 anonymous namespace 隔離 link visibility.
+namespace {
+class VkFrucCpuBitstreamBuffer : public VulkanBitstreamBuffer {
+public:
+    VkFrucCpuBitstreamBuffer(size_t size, size_t offsetAlign, size_t sizeAlign)
+        : m_buf(size), m_offsetAlign(offsetAlign), m_sizeAlign(sizeAlign) {}
+
+    VkDeviceSize GetMaxSize() const override { return m_buf.size(); }
+    VkDeviceSize GetOffsetAlignment() const override { return m_offsetAlign; }
+    VkDeviceSize GetSizeAlignment()   const override { return m_sizeAlign;   }
+
+    VkDeviceSize Resize(VkDeviceSize newSize, VkDeviceSize copySize, VkDeviceSize copyOffset) override {
+        if (newSize <= m_buf.size()) return m_buf.size();
+        std::vector<uint8_t> newBuf(newSize, 0);
+        if (copySize) memcpy(newBuf.data(), m_buf.data() + copyOffset, copySize);
+        m_buf.swap(newBuf);
+        return m_buf.size();
+    }
+    VkDeviceSize Clone(VkDeviceSize newSize, VkDeviceSize copySize, VkDeviceSize copyOffset,
+                       VkSharedBaseObj<VulkanBitstreamBuffer>& vulkanBitstreamBuffer) override {
+        auto cl = std::make_shared<VkFrucCpuBitstreamBuffer>(newSize, m_offsetAlign, m_sizeAlign);
+        if (copySize && copyOffset + copySize <= m_buf.size())
+            memcpy(cl->m_buf.data(), m_buf.data() + copyOffset, copySize);
+        vulkanBitstreamBuffer = cl;
+        return cl->GetMaxSize();
+    }
+
+    int64_t MemsetData(uint32_t value, VkDeviceSize offset, VkDeviceSize size) override {
+        if (offset + size > m_buf.size()) return -1;
+        memset(m_buf.data() + offset, (int)value, (size_t)size);
+        return (int64_t)size;
+    }
+    int64_t CopyDataToBuffer(uint8_t* dst, VkDeviceSize dstOff, VkDeviceSize srcOff, VkDeviceSize size) const override {
+        if (srcOff + size > m_buf.size()) return -1;
+        memcpy(dst + dstOff, m_buf.data() + srcOff, (size_t)size);
+        return (int64_t)size;
+    }
+    int64_t CopyDataToBuffer(VkSharedBaseObj<VulkanBitstreamBuffer>& dst, VkDeviceSize dstOff,
+                              VkDeviceSize srcOff, VkDeviceSize size) const override {
+        if (!dst || srcOff + size > m_buf.size()) return -1;
+        VkDeviceSize maxSz = 0;
+        uint8_t* dstPtr = dst->GetDataPtr(dstOff, maxSz);
+        if (!dstPtr || size > maxSz) return -1;
+        memcpy(dstPtr, m_buf.data() + srcOff, (size_t)size);
+        return (int64_t)size;
+    }
+    int64_t CopyDataFromBuffer(const uint8_t* src, VkDeviceSize srcOff, VkDeviceSize dstOff, VkDeviceSize size) override {
+        if (dstOff + size > m_buf.size()) return -1;
+        memcpy(m_buf.data() + dstOff, src + srcOff, (size_t)size);
+        return (int64_t)size;
+    }
+    int64_t CopyDataFromBuffer(const VkSharedBaseObj<VulkanBitstreamBuffer>& src, VkDeviceSize srcOff,
+                                VkDeviceSize dstOff, VkDeviceSize size) override {
+        if (!src || dstOff + size > m_buf.size()) return -1;
+        VkDeviceSize maxSz = 0;
+        const uint8_t* srcPtr = src->GetReadOnlyDataPtr(srcOff, maxSz);
+        if (!srcPtr || size > maxSz) return -1;
+        memcpy(m_buf.data() + dstOff, srcPtr, (size_t)size);
+        return (int64_t)size;
+    }
+    uint8_t* GetDataPtr(VkDeviceSize offset, VkDeviceSize& maxSize) override {
+        if (offset >= m_buf.size()) { maxSize = 0; return nullptr; }
+        maxSize = m_buf.size() - offset;
+        return m_buf.data() + offset;
+    }
+    const uint8_t* GetReadOnlyDataPtr(VkDeviceSize offset, VkDeviceSize& maxSize) const override {
+        if (offset >= m_buf.size()) { maxSize = 0; return nullptr; }
+        maxSize = m_buf.size() - offset;
+        return m_buf.data() + offset;
+    }
+    void FlushRange(VkDeviceSize, VkDeviceSize) const override {}      // CPU-only, noop
+    void InvalidateRange(VkDeviceSize, VkDeviceSize) const override {} // CPU-only, noop
+    VkBuffer       GetBuffer()       const override { return VK_NULL_HANDLE; }  // Phase 1.3 fix
+    VkDeviceMemory GetDeviceMemory() const override { return VK_NULL_HANDLE; }  // Phase 1.3 fix
+
+    uint32_t AddStreamMarker(uint32_t off) override { m_markers.push_back(off); return (uint32_t)m_markers.size() - 1; }
+    uint32_t SetStreamMarker(uint32_t off, uint32_t idx) override {
+        if (idx >= m_markers.size()) m_markers.resize(idx + 1, 0);
+        m_markers[idx] = off;
+        return idx;
+    }
+    uint32_t GetStreamMarker(uint32_t idx) const override { return idx < m_markers.size() ? m_markers[idx] : 0; }
+    uint32_t GetStreamMarkersCount() const override { return (uint32_t)m_markers.size(); }
+    const uint32_t* GetStreamMarkersPtr(uint32_t startIdx, uint32_t& maxCount) const override {
+        if (startIdx >= m_markers.size()) { maxCount = 0; return nullptr; }
+        maxCount = (uint32_t)m_markers.size() - startIdx;
+        return m_markers.data() + startIdx;
+    }
+    uint32_t ResetStreamMarkers() override { m_markers.clear(); return 0; }
+
+private:
+    std::vector<uint8_t>  m_buf;
+    std::vector<uint32_t> m_markers;
+    size_t m_offsetAlign;
+    size_t m_sizeAlign;
+};
+} // namespace
 
 
 // §J.3.e.2.i.8 Phase 1.1c — Pimpl 完整定義 (vkfruc.h 只 forward decl).
@@ -43,9 +150,18 @@ int32_t VkFrucDecodeClient::BeginSequence(const VkParserSequenceInfo* pnvsi)
 
 bool VkFrucDecodeClient::AllocPictureBuffer(VkPicIf** ppPicBuf)
 {
-    // Phase 1.3 — alloc VkImage as DPB slot.  目前回 nullptr → parser
-    // 之後 DecodePicture 會跳過實際 decode (因為沒 buffer).
-    if (ppPicBuf) *ppPicBuf = nullptr;
+    if (!ppPicBuf) return false;
+    // §J.3.e.2.i.8 Phase 1.1c — 從 pool 找空閒 slot (refCount == 0).
+    // Phase 1.3 換成 VkImage-backed DPB pool.
+    for (int i = 0; i < kPicPoolSize; i++) {
+        if (m_PicPool[i].IsAvailable()) {
+            m_PicPool[i].m_picIdx = i;
+            m_PicPool[i].AddRef();  // parser → DPB hold
+            *ppPicBuf = &m_PicPool[i];
+            return true;
+        }
+    }
+    *ppPicBuf = nullptr;
     return false;
 }
 
@@ -95,15 +211,31 @@ void VkFrucDecodeClient::UnhandledNALU(const uint8_t* /*pbData*/, size_t /*cbDat
 }
 
 VkDeviceSize VkFrucDecodeClient::GetBitstreamBuffer(
-    VkDeviceSize /*size*/,
-    VkDeviceSize /*minBitstreamBufferOffsetAlignment*/,
-    VkDeviceSize /*minBitstreamBufferSizeAlignment*/,
-    const uint8_t* /*pInitializeBufferMemory*/,
-    VkDeviceSize /*initializeBufferMemorySize*/,
-    VkSharedBaseObj<VulkanBitstreamBuffer>& /*bitstreamBuffer*/)
+    VkDeviceSize size,
+    VkDeviceSize minBitstreamBufferOffsetAlignment,
+    VkDeviceSize minBitstreamBufferSizeAlignment,
+    const uint8_t* pInitializeBufferMemory,
+    VkDeviceSize initializeBufferMemorySize,
+    VkSharedBaseObj<VulkanBitstreamBuffer>& bitstreamBuffer)
 {
-    // Phase 1.3 — 配 device-local bitstream buffer 給 parser 上傳 NAL bytes.
-    return 0;
+    // §J.3.e.2.i.8 Phase 1.1c — 配 CPU-only bitstream buffer 給 parser.
+    // Parser 在 ParseByteStream 把 NAL bytes 拷進來 + walks bytes 解出
+    // SPS/PPS/slice headers + 觸發我們的 callback. 此 phase 不 submit
+    // decode → VkBuffer/VkDeviceMemory 留 NULL_HANDLE.
+    // Phase 1.3 換成 vkCreateBuffer + vkAllocateMemory + vkMapMemory.
+    auto buf = std::make_shared<VkFrucCpuBitstreamBuffer>(
+        (size_t)size,
+        (size_t)minBitstreamBufferOffsetAlignment,
+        (size_t)minBitstreamBufferSizeAlignment);
+    if (pInitializeBufferMemory && initializeBufferMemorySize) {
+        VkDeviceSize maxSz = 0;
+        uint8_t* dst = buf->GetDataPtr(0, maxSz);
+        if (dst && initializeBufferMemorySize <= maxSz) {
+            memcpy(dst, pInitializeBufferMemory, (size_t)initializeBufferMemorySize);
+        }
+    }
+    bitstreamBuffer = buf;
+    return size;
 }
 
 
