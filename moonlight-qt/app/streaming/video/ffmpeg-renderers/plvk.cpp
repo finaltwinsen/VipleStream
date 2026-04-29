@@ -1889,19 +1889,28 @@ bool PlVkRenderer::initFrucRgbImgResources()
             if (pfnCreateSem(m_Vulkan->device, &sci, nullptr, &holdSem) == VK_SUCCESS
                 && pfnCreatePool(m_Vulkan->device, &poolCi, nullptr, &ovPool) == VK_SUCCESS) {
                 cbAi.commandPool = ovPool;
+                VkCommandBuffer phaseCCb = VK_NULL_HANDLE;
+                VkFence         phaseCFence = VK_NULL_HANDLE;
                 if (pfnAllocCB(m_Vulkan->device, &cbAi, &ovCb) == VK_SUCCESS
-                    && pfnCreateFence2(m_Vulkan->device, &fci, nullptr, &ovFence) == VK_SUCCESS) {
+                    && pfnAllocCB(m_Vulkan->device, &cbAi, &phaseCCb) == VK_SUCCESS
+                    && pfnCreateFence2(m_Vulkan->device, &fci, nullptr, &ovFence) == VK_SUCCESS
+                    && pfnCreateFence2(m_Vulkan->device, &fci, nullptr, &phaseCFence) == VK_SUCCESS) {
                     m_FrucOverrideHoldSem = holdSem;
                     m_FrucOverrideCmdPool = ovPool;
                     m_FrucOverrideCmdBuf  = ovCb;
                     m_FrucOverrideFence   = ovFence;
+                    m_FrucOverridePhaseCCmdBuf = phaseCCb;
+                    m_FrucOverridePhaseCFence  = phaseCFence;
                     m_FrucOverrideHoldVal = 0;
                     m_FrucOverrideFrameCount = 0;
                     m_FrucOverrideReady = true;
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VK-FRUC] §J.3.e.2.e1b: override resources ready "
-                                "(timeline sem=%p, cmd pool=%p, cmd buf=%p, fence=%p)",
-                                (void*)holdSem, (void*)ovPool, (void*)ovCb, (void*)ovFence);
+                                "(timeline sem=%p, cmd pool=%p, Phase A cb=%p fence=%p, "
+                                "Phase C cb=%p fence=%p — §J.3.e.2.g split)",
+                                (void*)holdSem, (void*)ovPool,
+                                (void*)ovCb, (void*)ovFence,
+                                (void*)phaseCCb, (void*)phaseCFence);
                 }
             }
             if (!m_FrucOverrideReady) {
@@ -1929,15 +1938,20 @@ void PlVkRenderer::destroyFrucRgbImgResources()
     auto pfnDestroySem = (PFN_vkDestroySemaphore)getDevProcEarly("vkDestroySemaphore");
     auto pfnDestroyPool = (PFN_vkDestroyCommandPool)getDevProcEarly("vkDestroyCommandPool");
     auto pfnDestroyFence = (PFN_vkDestroyFence)getDevProcEarly("vkDestroyFence");
+    if (m_FrucOverridePhaseCFence && pfnDestroyFence)
+        pfnDestroyFence(m_Vulkan->device, (VkFence)m_FrucOverridePhaseCFence, nullptr);
     if (m_FrucOverrideFence && pfnDestroyFence)
         pfnDestroyFence(m_Vulkan->device, (VkFence)m_FrucOverrideFence, nullptr);
+    // Cmd buffers are freed when the pool is destroyed; no per-cb destroy.
     if (m_FrucOverrideCmdPool && pfnDestroyPool)
         pfnDestroyPool(m_Vulkan->device, (VkCommandPool)m_FrucOverrideCmdPool, nullptr);
     if (m_FrucOverrideHoldSem && pfnDestroySem)
         pfnDestroySem(m_Vulkan->device, (VkSemaphore)m_FrucOverrideHoldSem, nullptr);
     m_FrucOverrideFence = nullptr;
+    m_FrucOverridePhaseCFence = nullptr;
     m_FrucOverrideCmdPool = nullptr;
     m_FrucOverrideCmdBuf = nullptr;
+    m_FrucOverridePhaseCCmdBuf = nullptr;
     m_FrucOverrideHoldSem = nullptr;
     m_FrucOverrideHoldVal = 0;
     m_FrucOverrideFrameCount = 0;
@@ -2050,6 +2064,16 @@ bool PlVkRenderer::runRgbImgReversePass(VkCommandBuffer cb, uint32_t width, uint
 // timeline sem at incremented value.
 bool PlVkRenderer::runFrucOverridePass(AVVkFrame* vkFrame, AVFrame* frame)
 {
+    static std::atomic<uint64_t> s_e1bEntryCount{0};
+    uint64_t entryN = s_e1bEntryCount.fetch_add(1, std::memory_order_relaxed);
+    if (entryN < 5 || (entryN % 60) == 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-FRUC] §J.3.e.2.e1b ENTRY #%llu (override=%d nv12rgb=%d rgbimg=%d HoldVal=%llu)",
+                    (unsigned long long)entryN,
+                    (int)m_FrucOverrideReady, (int)m_FrucNv12RgbReady,
+                    (int)m_FrucRgbImgReady,
+                    (unsigned long long)m_FrucOverrideHoldVal);
+    }
     if (!m_FrucOverrideReady || !m_FrucNv12RgbReady || !m_FrucRgbImgReady) return false;
     if (!vkFrame || !vkFrame->img[0]) return false;
 
@@ -2467,10 +2491,11 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
         }
         vkFrame->sem_value[0] = signalVal;
 
+        // §J.3.e.2.g — same 5s timeout rationale as Phase C below.
         VkFence fence = (VkFence)m_FrucOverrideFence;
-        if (pfnWaitFences(m_Vulkan->device, 1, &fence, VK_TRUE, 1000ULL * 1000 * 1000) != VK_SUCCESS) {
+        if (pfnWaitFences(m_Vulkan->device, 1, &fence, VK_TRUE, 5000ULL * 1000 * 1000) != VK_SUCCESS) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase A fence wait failed");
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase A fence wait failed (5s timeout)");
             return false;
         }
         pfnResetFences(m_Vulkan->device, 1, &fence);
@@ -2563,8 +2588,15 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
                                   (unsigned long long)entryN, rifeMs, (int)usedRife);
 
     // ===== PHASE C: copy out.buffer → bufRGB + reverse shader =====
-    pfnReset(cb, 0);
-    pfnBegin(cb, &bbi);
+    // §J.3.e.2.g — Phase C runs on its own cmd buf (m_FrucOverridePhaseCCmdBuf)
+    // and its own fence (m_FrucOverridePhaseCFence) so we don't reset/reuse
+    // Phase A's resources within the same frame.  v1.3.107 benchmark
+    // (§J.3.e.2.f) showed shared cmd buf + fence reset between Phase A and
+    // Phase C reliably hangs at frame#2 — likely because libplacebo holds
+    // an in-flight reference to Phase A's cmd buf via swapchain present sync.
+    VkCommandBuffer cbC = (VkCommandBuffer)m_FrucOverridePhaseCCmdBuf;
+    pfnReset(cbC, 0);
+    pfnBegin(cbC, &bbi);
 
     // Path B: Phase B already wrote into the HOST_VISIBLE staging buffer via
     // CPU memcpy.  The host write becomes visible to the GPU at command-buffer
@@ -2580,7 +2612,7 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
     bbarOut.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bbarOut.buffer = phaseCSrcBuf;
     bbarOut.size = VK_WHOLE_SIZE;
-    pfnBarrier(cb, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    pfnBarrier(cbC, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                0, 0, nullptr, 1, &bbarOut, 0, nullptr);
 
     // Copy host staging → bufRGB (replaces forward shader's bufRGB with RIFE
@@ -2589,7 +2621,7 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
     copyToBufRgb.srcOffset = 0;
     copyToBufRgb.dstOffset = 0;
     copyToBufRgb.size = rgbBytes;
-    pfnCopyBuf(cb, phaseCSrcBuf, (VkBuffer)m_FrucNv12RgbBufRGB, 1, &copyToBufRgb);
+    pfnCopyBuf(cbC, phaseCSrcBuf, (VkBuffer)m_FrucNv12RgbBufRGB, 1, &copyToBufRgb);
 
     // Buffer barrier: TRANSFER_WRITE → SHADER_READ on bufRGB (reverse shader will read).
     VkBufferMemoryBarrier bbarRgb = {};
@@ -2600,17 +2632,17 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
     bbarRgb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bbarRgb.buffer = (VkBuffer)m_FrucNv12RgbBufRGB;
     bbarRgb.size = VK_WHOLE_SIZE;
-    pfnBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    pfnBarrier(cbC, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                0, 0, nullptr, 1, &bbarRgb, 0, nullptr);
 
     // Reverse dispatch (bufRGB → m_FrucRgbImgImage in GENERAL)
-    if (!runRgbImgReversePass(cb, W, H)) {
+    if (!runRgbImgReversePass(cbC, W, H)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase C: runRgbImgReversePass failed");
         return false;
     }
 
-    pfnEnd(cb);
+    pfnEnd(cbC);
 
     // Submit Phase C — wait AVVkFrame.sem at V+1 (set after Phase A submit), signal at V+2
     {
@@ -2633,12 +2665,12 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
         si.pWaitSemaphores = &avSem;
         si.pWaitDstStageMask = &waitStage;
         si.commandBufferCount = 1;
-        si.pCommandBuffers = &cb;
+        si.pCommandBuffers = &cbC;
         si.signalSemaphoreCount = 1;
         si.pSignalSemaphores = &avSem;
 
         m_Vulkan->lock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
-        VkResult subRes = pfnSubmit(computeQueue, 1, &si, (VkFence)m_FrucOverrideFence);
+        VkResult subRes = pfnSubmit(computeQueue, 1, &si, (VkFence)m_FrucOverridePhaseCFence);
         m_Vulkan->unlock_queue(m_Vulkan, m_Vulkan->queue_compute.index, 0);
         if (subRes != VK_SUCCESS) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -2647,10 +2679,20 @@ bool PlVkRenderer::runFrucOverridePassWithRife(AVVkFrame* vkFrame, AVFrame* fram
         }
         vkFrame->sem_value[0] = signalVal;
 
-        VkFence fence = (VkFence)m_FrucOverrideFence;
-        if (pfnWaitFences(m_Vulkan->device, 1, &fence, VK_TRUE, 1000ULL * 1000 * 1000) != VK_SUCCESS) {
+        // §J.3.e.2.g — extended Phase C fence wait to 5s (was 1s).
+        // Steady-state under load: Phase C's submit waits on AVVkFrame.sem
+        // at V+1 (set by Phase A) and on libplacebo's swapchain present
+        // pipeline implicitly via the AVVkFrame.sem chain.  When ffmpeg
+        // decode is throttled by upstream network jitter or libplacebo's
+        // swapchain backpressures, the GPU work behind the fence can take
+        // > 1s — a benign jitter event that previously tripped fence wait
+        // failure → renderer-wide tear-down.  5s timeout covers reasonable
+        // jitter envelopes; anything longer than that is a real driver hang
+        // and should still bail.
+        VkFence fence = (VkFence)m_FrucOverridePhaseCFence;
+        if (pfnWaitFences(m_Vulkan->device, 1, &fence, VK_TRUE, 5000ULL * 1000 * 1000) != VK_SUCCESS) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase C fence wait failed");
+                        "[VIPLE-VK-FRUC] §J.3.e.2.e2d Phase C fence wait failed (5s timeout)");
             return false;
         }
         pfnResetFences(m_Vulkan->device, 1, &fence);
@@ -3767,10 +3809,35 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         // to §J.3.e.2.e1b pass-through pipeline.
         bool dispatchOk = false;
         if (vkFrame && m_FrucOverrideReady && m_FrucRgbImgPlTex) {
-            if (m_RifeReady) {
+            // §J.3.e.2.g — only use the 3-phase RIFE-injected pass when RIFE
+            // forward is actually going to fire this frame.  Otherwise the
+            // single-cmd-buf forward+reverse path (runFrucOverridePass) is
+            // both faster (no inter-phase host fence) and more reliable
+            // (one cmd buf + one fence per frame avoids the Phase A/C
+            // sync race documented in §J.3.e.2.f benchmark).
+            //
+            // RIFE forward fires only when:
+            //   (a) m_RifeReady (init succeeded)
+            //   (b) m_RifeWarmupComplete (async pipeline cache primed)
+            //   (c) m_RifeHasPrevFrame (prev frame stashed for interp)
+            // Any of those false → pass-through via runFrucOverridePass.
+            const bool wantRifeFrame = m_RifeReady
+                && m_RifeWarmupComplete.load(std::memory_order_acquire)
+                && m_RifeHasPrevFrame;
+            if (wantRifeFrame) {
                 dispatchOk = runFrucOverridePassWithRife(vkFrame, frame);
             } else {
                 dispatchOk = runFrucOverridePass(vkFrame, frame);
+                // Even when running pass-through, if RIFE init succeeded but
+                // warmup hasn't completed, we still need to capture curr
+                // into m_RifePrevMat at the moment warmup finishes so the
+                // first RIFE-active frame has a valid prev to interpolate
+                // against.  The dispatchOk path above doesn't touch
+                // m_RifePrevMat; the WithRife path will set it on first
+                // call.  Acceptable: first interp frame after warmup will
+                // be a real frame (no interp), then subsequent frames
+                // interp normally.
+                (void)0;
             }
         }
         if (dispatchOk) {

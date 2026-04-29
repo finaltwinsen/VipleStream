@@ -270,9 +270,16 @@ private:
     void*    m_FrucOverrideHoldSem  = nullptr;  // VkSemaphore (timeline)
     uint64_t m_FrucOverrideHoldVal  = 0;
     uint64_t m_FrucOverrideFrameCount = 0;
-    void*    m_FrucOverrideCmdPool  = nullptr;  // VkCommandPool
-    void*    m_FrucOverrideCmdBuf   = nullptr;  // VkCommandBuffer
-    void*    m_FrucOverrideFence    = nullptr;  // VkFence
+    void*    m_FrucOverrideCmdPool   = nullptr;  // VkCommandPool (shared by Phase A + C)
+    void*    m_FrucOverrideCmdBuf    = nullptr;  // VkCommandBuffer (Phase A submits on this)
+    void*    m_FrucOverrideFence     = nullptr;  // VkFence (Phase A host-waits on this)
+    // §J.3.e.2.g — Phase C uses its own cmd buf + fence to remove the
+    // reset/reuse-within-frame race that v1.3.107 benchmark hit (§J.3.e.2.f
+    // findings: same cmd buf + fence reset between Phase A and Phase C
+    // collided with libplacebo swapchain present sync, frame#2 fence wait
+    // timed out 100% systematically).  Cmd pool is shared (allocations only).
+    void*    m_FrucOverridePhaseCCmdBuf = nullptr;  // VkCommandBuffer (Phase C submits on this)
+    void*    m_FrucOverridePhaseCFence  = nullptr;  // VkFence (Phase C host-waits on this)
 
     // §J.3.e.2.e2 (Path B) — RIFE model + CPU ncnn::Mat + HOST_VISIBLE staging.
     //

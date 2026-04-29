@@ -576,3 +576,74 @@ signal。
 沒 RIFE，至少 PlVkRenderer override 是實用的 pass-through path（NV12
 → libplacebo render 全程 Vulkan-native，省掉 D3D11 cascade 的 NV12 →
 ANGLE → swapchain 路徑），即使沒 frame interp 還是有 latency 改善。
+
+---
+
+## §J.3.e.2.g v1.3.108-111 嘗試與深度發現
+
+### v1.3.108 — Phase A/C cmd buf + fence 分開 (g.1 + g.2)
+
+加 `m_FrucOverridePhaseCCmdBuf` + `m_FrucOverridePhaseCFence`，Phase C
+只用這兩個。Phase A 仍用原 `m_FrucOverrideCmdBuf` + `m_FrucOverrideFence`。
+
+**結果：壽命從 frame#2 hang 拉到 frame#240 hang。** 改善 120 倍但
+還是會掛。代表「同 cmd buf reset+reuse」是真的雷但**不是唯一雷**。
+
+### v1.3.109 — fence wait timeout 從 1s 拉到 5s
+
+理論：可能只是 GPU jitter under load，1s 太緊。實測：5s 也 timeout，
+**真 GPU hang 不是 jitter**。
+
+### v1.3.110 — pass-through 改走 single-cmd-buf path (`runFrucOverridePass`)
+
+當 RIFE 不會跑時 (warmup 沒完成或 hasPrev=false)，dispatch 直接走原
+v1.3.83 的 `runFrucOverridePass`（forward + reverse 一條 cmd buf 一次
+submit），完全避開 Phase A/C 分裂。理論上 v1.3.83 ship 時測過穩定。
+
+**結果：仍然只跑了 frame#1，第二 frame 就 silently 不再 dispatch。**
+Phase A/C 分裂不是根因 —— `runFrucOverridePass` 本身就有問題。
+
+### v1.3.111 — 加 ENTRY trace 看真正發生什麼
+
+確認 `runFrucOverridePass` 每 frame ENTRY 都有跑（HoldVal=0,1,2,3,4），
+代表 dispatch 都「成功」（從 caller 角度看），只是 `frame#N OK` log 是
+modulo 60 才出。但 ENTRY count 30 秒只到 5 次 —— 真實 fps **0.16fps**，
+不是 30。
+
+### 翻轉的根因認定
+
+跟 RIFE init 也沒關係：用 `VIPLE_VK_FRUC_RIFE=0`（完全不 init RIFE）
+跑也一樣 —— 3 個 ENTRY 後 silently drop frame，queue overflow。
+
+所以問題在 **`runFrucOverridePass` 跟 libplacebo 的 hold/release 互動**：
+- frame#0：override 跑，hold_ex 在 HoldVal=1 hold image
+- frame#1：override 等 HoldVal=1 timeline sem signaled
+- libplacebo 每 frame 應該在 pl_swapchain_submit_frame 內 signal 那個
+  sem，但實測似乎沒有 reliable 在每 frame signal，或 signal 跟我們的
+  期待 value 對不上
+
+### §J.3.e.2.g 真正的範圍其實是 §J.3.e.2.e1b 的整段重做
+
+不是 cmd buf / fence 拆分（那只是表象 fix）。真正要動的：
+
+| 子題 | 內容 |
+|---|---|
+| **g.A** dump pl_vulkan_hold_ex / release_ex 的真實 sem signal 行為 | trace libplacebo 每 frame 是否真的在 pl_swapchain_submit_frame 結束時 signal m_FrucOverrideHoldSem 至 m_FrucOverrideHoldVal |
+| **g.B** 移除 hold/release timeline，改用 simple ownership transfer | 每 frame：override 跑→ image GENERAL → pl_render_image **不 hold** → pl_swapchain_submit_frame → 下一 frame override 用 pipeline barrier transit ownership 即可 |
+| **g.C** 或：每 frame 自己重 wrap pl_tex（disposable wrap） | 避開跨 frame 的 hold/release 生命週期 |
+
+### v1.3.107~v1.3.111 結論
+
+Path B 結構（HOST_VISIBLE staging + Phase A/B/C）是正確的
+**抽象**，但實際實作 dependent on `runFrucOverridePass` 的穩定性，
+而 §J.3.e.2.e1b 的 hold/release timeline 設計**從第一版就有 latent
+bug**，只是早期測試短不到 5 秒看不到。
+
+**建議手段：先解 §J.3.e.2.e1b 的根本同步問題（g.A/g.B/g.C 三選一），
+再回頭推 Path B / §J.3.e.X。** 否則任何 override 路徑都會在 steady-
+state 撞上同一面牆。
+
+短期可用方案：disable `VIPLE_VK_FRUC_OUTPUT_OVERRIDE`，讓 PlVkRenderer
+跑原本的 libplacebo direct render（不過 override），就跟 §J.3.c.1
+shipped 的 Vulkan-native 一樣。沒 FRUC，但 latency 跟 D3D11 cascade
+比有保障。
