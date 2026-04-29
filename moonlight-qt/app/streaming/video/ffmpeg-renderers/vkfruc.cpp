@@ -173,6 +173,7 @@ void VkFrucRenderer::teardown()
     // set layout, so they go first; sampler-conversion holds the
     // immutable sampler used in descriptor set layout, so layouts go
     // before the sampler.
+    destroyVideoSession();          // §J.3.e.2.i.8 native VK decode
     destroyOverlayResources();      // §J.3.e.2.i overlay
     destroyInterpGraphicsPipeline(); // §J.3.e.2.i.4.2
     destroyFrucComputeResources(); // §J.3.e.2.i.4
@@ -889,6 +890,16 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
             m_InitFailureReason = InitFailureReason::NoSoftwareSupport;
             teardown();
             return false;
+        }
+        // §J.3.e.2.i.8 Phase 1.0 — VkVideoSession scaffold (skip FFmpeg).
+        // Non-fatal — Phase 1.0 仍 piggyback FFmpeg AVHWDeviceContext path
+        // for actual decode；session 只是 probe API 是否真的可建.
+        // 之後 Phase 1.1+ 接 NAL parsing + 自己 decode 後，再把 populateAv-
+        // HwDeviceCtx 那段拿掉.
+        if (!createVideoSession(m_VideoFormat)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 createVideoSession failed — Phase 1 native decode 路徑 skip");
+            destroyVideoSession();  // best-effort cleanup
         }
     } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2379,6 +2390,196 @@ bool VkFrucRenderer::populateAvHwDeviceCtx(int videoFormat)
                 "(QF gfx=%u decode=%u, %u queue families wired)",
                 m_QueueFamily, m_DecodeQueueFamily, qfCount);
     return true;
+}
+
+// §J.3.e.2.i.8 Phase 1.0 — VkVideoSessionKHR scaffold (skip FFmpeg entirely).
+//
+// 流程：
+//   1. 從 videoFormat 推 codec (H.264 / H.265 / AV1)
+//   2. 建 VkVideoProfileInfoKHR (跟 probe 同邏輯, codec-specific pNext)
+//   3. vkCreateVideoSessionKHR (queueFamilyIndex = m_DecodeQueueFamily,
+//      pictureFormat = NV12, max DPB / refs from probe values)
+//   4. vkGetVideoSessionMemoryRequirementsKHR → N 個 binding requirements
+//   5. 逐一 vkAllocateMemory + 收集 BindSessionMemoryInfoKHR
+//   6. vkBindVideoSessionMemoryKHR 一次 bind 所有
+//
+// Phase 1.0 stops here.  m_VideoSessionParams 在 1.1 SPS/PPS parse 後才建.
+bool VkFrucRenderer::createVideoSession(int videoFormat)
+{
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCreateVideoSession  = (PFN_vkCreateVideoSessionKHR)getDevPa(m_Device, "vkCreateVideoSessionKHR");
+    auto pfnGetVidSessMemReq    = (PFN_vkGetVideoSessionMemoryRequirementsKHR)getDevPa(m_Device, "vkGetVideoSessionMemoryRequirementsKHR");
+    auto pfnBindVidSessMem      = (PFN_vkBindVideoSessionMemoryKHR)getDevPa(m_Device, "vkBindVideoSessionMemoryKHR");
+    auto pfnAllocMem            = (PFN_vkAllocateMemory)getDevPa(m_Device, "vkAllocateMemory");
+    auto pfnGetMemProps         = (PFN_vkGetPhysicalDeviceMemoryProperties)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnCreateVideoSession || !pfnGetVidSessMemReq || !pfnBindVidSessMem
+        || !pfnAllocMem || !pfnGetMemProps) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 video session PFN missing");
+        return false;
+    }
+
+    // ── Step 1: codec profile from videoFormat ──
+    VkVideoCodecOperationFlagBitsKHR codecOp;
+    const char* codecName;
+    const char* stdName;
+    uint32_t    stdVersion = 0;
+    VkVideoDecodeH264ProfileInfoKHR h264Prof = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PROFILE_INFO_KHR };
+    VkVideoDecodeH265ProfileInfoKHR h265Prof = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PROFILE_INFO_KHR };
+    VkVideoDecodeAV1ProfileInfoKHR  av1Prof  = { VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_PROFILE_INFO_KHR };
+    void* codecProfilePNext = nullptr;
+    uint32_t maxDpbSlots, maxRefs;
+    if (videoFormat & VIDEO_FORMAT_MASK_H264) {
+        codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
+        codecName = "H.264 Main";
+        stdName = VK_STD_VULKAN_VIDEO_CODEC_H264_DECODE_EXTENSION_NAME;
+        stdVersion = VK_STD_VULKAN_VIDEO_CODEC_H264_DECODE_SPEC_VERSION;
+        h264Prof.stdProfileIdc = STD_VIDEO_H264_PROFILE_IDC_MAIN;
+        h264Prof.pictureLayout = VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_PROGRESSIVE_KHR;
+        codecProfilePNext = &h264Prof;
+        maxDpbSlots = 17; maxRefs = 16;
+    } else if (videoFormat & VIDEO_FORMAT_MASK_H265) {
+        codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+        codecName = "H.265 Main";
+        stdName = VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_EXTENSION_NAME;
+        stdVersion = VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_SPEC_VERSION;
+        h265Prof.stdProfileIdc = STD_VIDEO_H265_PROFILE_IDC_MAIN;
+        codecProfilePNext = &h265Prof;
+        maxDpbSlots = 16; maxRefs = 16;
+    } else if (videoFormat & VIDEO_FORMAT_MASK_AV1) {
+        codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
+        codecName = "AV1 Main";
+        stdName = VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_EXTENSION_NAME;
+        stdVersion = VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_SPEC_VERSION;
+        av1Prof.stdProfile = STD_VIDEO_AV1_PROFILE_MAIN;
+        av1Prof.filmGrainSupport = VK_FALSE;
+        codecProfilePNext = &av1Prof;
+        maxDpbSlots = 16; maxRefs = 16;
+    } else {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 unsupported videoFormat=0x%x", videoFormat);
+        return false;
+    }
+
+    VkVideoProfileInfoKHR profile = { VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR };
+    profile.pNext                 = codecProfilePNext;
+    profile.videoCodecOperation   = codecOp;
+    profile.chromaSubsampling     = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
+    profile.lumaBitDepth          = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
+    profile.chromaBitDepth        = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
+
+    // ── Step 2: Std header version (codec-specific extension struct) ──
+    VkExtensionProperties stdHeaderVer = {};
+    strncpy_s(stdHeaderVer.extensionName, sizeof(stdHeaderVer.extensionName), stdName, _TRUNCATE);
+    stdHeaderVer.specVersion = stdVersion;
+
+    // ── Step 3: vkCreateVideoSessionKHR ──
+    VkVideoSessionCreateInfoKHR vsci = { VK_STRUCTURE_TYPE_VIDEO_SESSION_CREATE_INFO_KHR };
+    vsci.queueFamilyIndex             = m_DecodeQueueFamily;
+    vsci.flags                        = 0;
+    vsci.pVideoProfile                = &profile;
+    vsci.pictureFormat                = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;  // NV12
+    vsci.maxCodedExtent               = { 4096, 4096 };  // ≤4K, fits H.264/H.265 maxRefs probe
+    vsci.referencePictureFormat       = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+    vsci.maxDpbSlots                  = maxDpbSlots;
+    vsci.maxActiveReferencePictures   = maxRefs;
+    vsci.pStdHeaderVersion            = &stdHeaderVer;
+
+    VkResult vr = pfnCreateVideoSession(m_Device, &vsci, nullptr, &m_VideoSession);
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 vkCreateVideoSessionKHR(%s) rc=%d",
+                     codecName, (int)vr);
+        return false;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.8 VkVideoSessionKHR created (%s, dpb=%u refs=%u, max=4096x4096)",
+                codecName, maxDpbSlots, maxRefs);
+
+    // ── Step 4-6: memory bindings ──
+    uint32_t reqCount = 0;
+    pfnGetVidSessMemReq(m_Device, m_VideoSession, &reqCount, nullptr);
+    std::vector<VkVideoSessionMemoryRequirementsKHR> reqs(reqCount, { VK_STRUCTURE_TYPE_VIDEO_SESSION_MEMORY_REQUIREMENTS_KHR });
+    pfnGetVidSessMemReq(m_Device, m_VideoSession, &reqCount, reqs.data());
+
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetMemProps(m_PhysicalDevice, &memProps);
+    // Find memory type matching memoryTypeBits.  優先嘗試 DEVICE_LOCAL,
+    // 找不到就退到任何 driver 允許的 type —— video session 某些 binding
+    // (如 control state / context buffer) driver 給非 DEVICE_LOCAL 的
+    // memory 要求是正常的.
+    auto findMemType = [&](uint32_t typeBits, VkMemoryPropertyFlags preferred) -> int {
+        // Pass 1: try preferred (DEVICE_LOCAL)
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+            if ((typeBits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & preferred) == preferred) return (int)i;
+        }
+        // Pass 2: any allowed type
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+            if (typeBits & (1u << i)) return (int)i;
+        }
+        return -1;
+    };
+
+    std::vector<VkBindVideoSessionMemoryInfoKHR> binds(reqCount, { VK_STRUCTURE_TYPE_BIND_VIDEO_SESSION_MEMORY_INFO_KHR });
+    m_VideoSessionMem.assign(reqCount, VK_NULL_HANDLE);
+    for (uint32_t i = 0; i < reqCount; i++) {
+        int mti = findMemType(reqs[i].memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (mti < 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 video session mem[%u] no compatible memory type (typeBits=0x%x)",
+                         i, reqs[i].memoryRequirements.memoryTypeBits);
+            return false;
+        }
+        VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = reqs[i].memoryRequirements.size;
+        mai.memoryTypeIndex = (uint32_t)mti;
+        if (pfnAllocMem(m_Device, &mai, nullptr, &m_VideoSessionMem[i]) != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 video session mem[%u] vkAllocateMemory failed (size=%llu)",
+                         i, (unsigned long long)reqs[i].memoryRequirements.size);
+            return false;
+        }
+        binds[i].memoryBindIndex = reqs[i].memoryBindIndex;
+        binds[i].memory          = m_VideoSessionMem[i];
+        binds[i].memoryOffset    = 0;
+        binds[i].memorySize      = reqs[i].memoryRequirements.size;
+    }
+    if (pfnBindVidSessMem(m_Device, m_VideoSession, reqCount, binds.data()) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 vkBindVideoSessionMemoryKHR failed");
+        return false;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.8 video session memory bound (%u bindings)",
+                reqCount);
+    return true;
+}
+
+void VkFrucRenderer::destroyVideoSession()
+{
+    if (m_Device == VK_NULL_HANDLE) return;
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnDestroyVidSessParams = (PFN_vkDestroyVideoSessionParametersKHR)getDevPa(m_Device, "vkDestroyVideoSessionParametersKHR");
+    auto pfnDestroyVidSess       = (PFN_vkDestroyVideoSessionKHR)getDevPa(m_Device, "vkDestroyVideoSessionKHR");
+    auto pfnFreeMem              = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+    if (m_VideoSessionParams && pfnDestroyVidSessParams) {
+        pfnDestroyVidSessParams(m_Device, m_VideoSessionParams, nullptr);
+        m_VideoSessionParams = VK_NULL_HANDLE;
+    }
+    if (m_VideoSession && pfnDestroyVidSess) {
+        pfnDestroyVidSess(m_Device, m_VideoSession, nullptr);
+        m_VideoSession = VK_NULL_HANDLE;
+    }
+    if (pfnFreeMem) {
+        for (auto m : m_VideoSessionMem) {
+            if (m) pfnFreeMem(m_Device, m, nullptr);
+        }
+    }
+    m_VideoSessionMem.clear();
 }
 
 bool VkFrucRenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary** options)

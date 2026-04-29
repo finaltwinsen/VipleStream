@@ -108,6 +108,23 @@ private:
     // 否則 hwcontext_vulkan PFN dispatch table mis-init → NV driver NULL deref.
     std::vector<const char*> m_EnabledDevExts;
 
+    // §J.3.e.2.i.8 — native VK_KHR_video_decode (skip FFmpeg).
+    //
+    // Phase 1.0 scaffold：createVideoSession() 建 VkVideoSessionKHR +
+    // memory bindings（per-codec H.265 / H.264 / AV1）.  確認 API 在 NV
+    // driver 走得通後，再進 Phase 1.1+ 接 NAL parsing + per-frame decode.
+    //
+    // 流程:
+    //   1. vkCreateVideoSessionKHR (codec profile + maxCodedExtent + format)
+    //   2. vkGetVideoSessionMemoryRequirementsKHR (多個 binding)
+    //   3. vkAllocateMemory + vkBindVideoSessionMemoryKHR
+    //   4. vkCreateVideoSessionParametersKHR (VPS/SPS/PPS, Phase 1.1 填)
+    bool createVideoSession(int videoFormat);
+    void destroyVideoSession();
+    VkVideoSessionKHR           m_VideoSession       = VK_NULL_HANDLE;
+    VkVideoSessionParametersKHR m_VideoSessionParams = VK_NULL_HANDLE;
+    std::vector<VkDeviceMemory> m_VideoSessionMem;  // per binding
+
     // §J.3.e.2.i.3.a — feature structs MUST persist for FFmpeg's lifetime
     // because vkCtx->device_features.pNext points into them.  Allocating
     // on stack in createLogicalDevice → use-after-free when FFmpeg later
