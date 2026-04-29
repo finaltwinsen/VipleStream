@@ -102,6 +102,12 @@ private:
     int          m_VideoFormat = 0;
     bool populateAvHwDeviceCtx(int videoFormat);
 
+    // §J.3.e.2.i.7 HW path：actual extension list enabled at vkCreateDevice
+    // (filtered wanted∩available).  populateAvHwDeviceCtx 把這個交給
+    // FFmpeg's vkCtx->enabled_dev_extensions —— 要跟實際 enable 完全一致,
+    // 否則 hwcontext_vulkan PFN dispatch table mis-init → NV driver NULL deref.
+    std::vector<const char*> m_EnabledDevExts;
+
     // §J.3.e.2.i.3.a — feature structs MUST persist for FFmpeg's lifetime
     // because vkCtx->device_features.pNext points into them.  Allocating
     // on stack in createLogicalDevice → use-after-free when FFmpeg later

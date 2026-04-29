@@ -62,6 +62,13 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     m_SwMode   = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW")   != 0 || prefsWantVulkan;
     m_FrucMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_FRUC") != 0 || (prefsWantVulkan && prefsWantInterp);
     m_DualMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_DUAL") != 0 || (prefsWantVulkan && prefsWantInterp);
+    // §J.3.e.2.i.7 HW path retry：VIPLE_VKFRUC_HW=1 強制走 FFmpeg-Vulkan
+    // hwcontext (override SW path).  搭配 mirror-libplacebo ext list 嘗試
+    // 解掉 v1.3.123-136 的 NV nvoglv64 NULL deref crash.  Init 失敗或
+    // crash 時 cascade fallback 到 PlVkRenderer.
+    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_HW") != 0) {
+        m_SwMode = false;
+    }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d, frucMode=%d, dualMode=%d, prefs=%s)",
                 pass, m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0,
@@ -81,7 +88,11 @@ AVPixelFormat VkFrucRenderer::getPreferredPixelFormat(int videoFormat)
         // renderFrameSw() and re-pack into our NV12 multi-plane VkImage.
         return AV_PIX_FMT_YUV420P;
     }
-    return IFFmpegRenderer::getPreferredPixelFormat(videoFormat);
+    // §J.3.e.2.i.7 HW path: 告訴 FFmpeg get_format() 走 Vulkan HW decode
+    // (AVVkFrame).  之前 v1.3.123-136 沒回這個 → FFmpeg 走 yuv420p CPU
+    // path 反而 cascade 出問題.  m_SwMode=false 時必須 return AV_PIX_FMT_VULKAN.
+    (void)videoFormat;
+    return AV_PIX_FMT_VULKAN;
 }
 
 bool VkFrucRenderer::isPixelFormatSupported(int videoFormat, AVPixelFormat pixelFormat)
@@ -89,7 +100,9 @@ bool VkFrucRenderer::isPixelFormatSupported(int videoFormat, AVPixelFormat pixel
     if (m_SwMode) {
         return pixelFormat == AV_PIX_FMT_YUV420P || pixelFormat == AV_PIX_FMT_NV12;
     }
-    return IFFmpegRenderer::isPixelFormatSupported(videoFormat, pixelFormat);
+    // §J.3.e.2.i.7 HW path
+    (void)videoFormat;
+    return pixelFormat == AV_PIX_FMT_VULKAN;
 }
 
 VkFrucRenderer::~VkFrucRenderer()
@@ -399,12 +412,21 @@ bool VkFrucRenderer::createLogicalDevice()
         qcis.push_back(qci);
     }
 
-    // i.3.a extension list: swapchain + ycbcr (i.2.b) + video decode
-    // (so ffmpeg can build AVVkFrame on our device).  Mirrors
-    // PlVkRenderer's k_RequiredDeviceExtensions video-decode block.
-    std::vector<const char*> devExts = {
+    // §J.3.e.2.i.7 HW path：mirror libplacebo's k_OptionalDeviceExtensions
+    // (plvk.cpp:38-69) — FFmpeg hwcontext_vulkan 期待這些 ext 已 enable
+    // 才能正確 build PFN dispatch table; v1.3.123-136 crash 的最可能 root
+    // cause 就是我們提供的 ext list 缺東西，driver 內部 dispatch state mis-
+    // init → NULL deref.
+    //
+    // 做法：query device 支援哪些，filter wanted ∩ available, enable 並把
+    // 結果存到 m_EnabledDevExts class member —— populateAvHwDeviceCtx 會
+    // 把這個傳給 vkCtx->enabled_dev_extensions, 必須完全一致.
+    std::vector<const char*> wantedDevExts = {
+        // Required for our own swapchain / ycbcr render path
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
+
+        // Video decode — FFmpeg-Vulkan hwcontext 必需
         VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
         VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
         VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
@@ -412,12 +434,48 @@ bool VkFrucRenderer::createLogicalDevice()
 #if LIBAVCODEC_VERSION_MAJOR >= 61
         VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME,
 #endif
-        // ffmpeg's vk hwcontext also asks for synchronization2 +
-        // timeline semaphore.  Both are core in Vulkan 1.3 / available
-        // as 1.2 ext.  Add explicitly for safety.
+
+        // Sync — FFmpeg 也會用
         VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
         VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
+
+        // libplacebo k_OptionalDeviceExtensions (plvk.cpp:38)：FFmpeg
+        // hwcontext_vulkan 在 dispatch table 建構時會 lookup 這些 PFN.
+        // 沒 enable 的話對應 PFN 是 NULL → NV driver dereference NULL.
+        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+        VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME,
+#ifdef Q_OS_WIN32
+        VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
+#endif
     };
+
+    // Query device extensions supported on this physical device, filter
+    // wantedDevExts ∩ available.
+    auto pfnEnumDevExts2 = (PFN_vkEnumerateDeviceExtensionProperties)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkEnumerateDeviceExtensionProperties");
+    std::vector<VkExtensionProperties> devExtProps;
+    if (pfnEnumDevExts2) {
+        uint32_t devExtCount = 0;
+        pfnEnumDevExts2(m_PhysicalDevice, nullptr, &devExtCount, nullptr);
+        devExtProps.resize(devExtCount);
+        pfnEnumDevExts2(m_PhysicalDevice, nullptr, &devExtCount, devExtProps.data());
+    }
+    auto extSupported = [&](const char* name) -> bool {
+        for (const auto& p : devExtProps) {
+            if (strcmp(p.extensionName, name) == 0) return true;
+        }
+        return false;
+    };
+    m_EnabledDevExts.clear();
+    for (const char* e : wantedDevExts) {
+        if (extSupported(e)) m_EnabledDevExts.push_back(e);
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.7 HW-ext filter: %zu wanted, %zu enabled",
+                wantedDevExts.size(), m_EnabledDevExts.size());
+
+    std::vector<const char*>& devExts = m_EnabledDevExts;  // alias for following code
 
     // §J.3.e.2.i.3.a — feature chain stored in members so it persists for
     // FFmpeg's lifetime (vkCtx->device_features.pNext walks this chain
@@ -2138,31 +2196,20 @@ bool VkFrucRenderer::populateAvHwDeviceCtx(int videoFormat)
     // chain — exactly what FFmpeg needs.
     vkCtx->device_features = m_DevFeat2;
 
-    // Extension list: same minimal set we built device with.  ffmpeg
-    // uses this to filter what it can request.
+    // §J.3.e.2.i.7 — extension list MUST match exactly what we passed to
+    // vkCreateDevice (otherwise FFmpeg's hwcontext_vulkan PFN dispatch table
+    // mis-init → NV driver NULL deref crash).  m_EnabledDevExts 是
+    // createLogicalDevice 過濾過的 wanted ∩ available 集合.
     static const char* kInstExts[] = {
         VK_KHR_SURFACE_EXTENSION_NAME,
 #ifdef Q_OS_WIN32
         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
 #endif
     };
-    static const char* kDevExts[] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
-        VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
-        VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
-        VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
-        VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
-#if LIBAVCODEC_VERSION_MAJOR >= 61
-        VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME,
-#endif
-        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
-        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
-    };
     vkCtx->enabled_inst_extensions    = kInstExts;
     vkCtx->nb_enabled_inst_extensions = (int)(sizeof(kInstExts) / sizeof(kInstExts[0]));
-    vkCtx->enabled_dev_extensions     = kDevExts;
-    vkCtx->nb_enabled_dev_extensions  = (int)(sizeof(kDevExts) / sizeof(kDevExts[0]));
+    vkCtx->enabled_dev_extensions     = m_EnabledDevExts.data();
+    vkCtx->nb_enabled_dev_extensions  = (int)m_EnabledDevExts.size();
 
 #if LIBAVUTIL_VERSION_INT > AV_VERSION_INT(58, 9, 100)
     vkCtx->lock_queue   = lockQueueStub;
