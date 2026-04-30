@@ -767,6 +767,14 @@ VkResult CreateVulkanVideoDecodeParser(VkVideoCodecOperationFlagBitsKHR videoCod
     default:
         nvParserErrorLog("Unsupported codec type!!!\n");
     }
+    // §J.3.e.2.i.8 — defensive: when VIPLESTREAM_NVPARSER_H265_ONLY is set and
+    // caller passes AV1/VP9/H.264, the switch's #ifdef strips those cases and
+    // we fall through to default with nvVideoDecodeParser still empty.  The
+    // upstream code unconditionally dereferenced it on the next line → null
+    // shared_ptr deref → crash.  Bail with a clear error code instead.
+    if (!nvVideoDecodeParser) {
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+    }
     VkResult result = nvVideoDecodeParser->Initialize(pParserPictureData);
     if (result != VK_SUCCESS) {
         nvVideoDecodeParser = nullptr;

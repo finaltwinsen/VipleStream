@@ -871,6 +871,22 @@ void VkFrucRenderer::destroyDpbImagePool()
 
 bool VkFrucRenderer::createNvVideoParser()
 {
+    // §J.3.e.2.i.8 Phase 1 — H.265 ONLY.  nvvideoparser library compiled with
+    // VIPLESTREAM_NVPARSER_H265_ONLY define strips out H.264/AV1/VP9 dispatch
+    // cases (see nvvideoparser.pro:41).  Trying CreateVulkanVideoDecodeParser
+    // with non-H265 codec falls through to the switch's default branch and
+    // dereferences a null shared_ptr → crash.  We hard-skip parser instantiation
+    // for non-H265 streams and let session/cmd resources stay live (graphics
+    // path still runs SW NV12 upload, just no native decode acceleration).
+    // Phase 2 ports H.264; Phase 3 ports AV1.
+    if (!(m_VideoCodec & VIDEO_FORMAT_MASK_H265)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 createNvVideoParser SKIPPED — "
+                    "current stream codec mask=0x%x is not H.265 (Phase 1 supports H.265 only)",
+                    m_VideoCodec);
+        return false;  // caller logs warning + falls back to legacy NAL-counter path
+    }
+
     auto pimpl = new NvParserPimpl();
     pimpl->client = std::make_shared<VkFrucDecodeClient>(this);
 
@@ -881,17 +897,8 @@ bool VkFrucRenderer::createNvVideoParser()
                   VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_EXTENSION_NAME, _TRUNCATE);
         stdHeaderVer.specVersion = VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_SPEC_VERSION;
         codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
-    } else if (m_VideoCodec & VIDEO_FORMAT_MASK_H264) {
-        strncpy_s(stdHeaderVer.extensionName, sizeof(stdHeaderVer.extensionName),
-                  VK_STD_VULKAN_VIDEO_CODEC_H264_DECODE_EXTENSION_NAME, _TRUNCATE);
-        stdHeaderVer.specVersion = VK_STD_VULKAN_VIDEO_CODEC_H264_DECODE_SPEC_VERSION;
-        codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
-    } else if (m_VideoCodec & VIDEO_FORMAT_MASK_AV1) {
-        strncpy_s(stdHeaderVer.extensionName, sizeof(stdHeaderVer.extensionName),
-                  VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_EXTENSION_NAME, _TRUNCATE);
-        stdHeaderVer.specVersion = VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_SPEC_VERSION;
-        codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
     } else {
+        // Unreachable due to early bail above — keep for future codec phases.
         delete pimpl;
         return false;
     }
