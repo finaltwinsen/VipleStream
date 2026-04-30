@@ -519,6 +519,25 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
 
     const auto& hevc = ppd->CodecSpecific.hevc;
 
+    // §J.3.e.2.i.8 Phase 1.3d.2.c — Catch ANY IRAP (random-access picture:
+    // IDR / CRA / BLA) after the first decode, force session RESET so the
+    // DPB tracking starts fresh.  Initial trigger only on IdrPicFlag missed
+    // mid-stream IRAPs that Sunshine emits on packet loss / GOP refresh.
+    if ((hevc.IrapPicFlag || hevc.IdrPicFlag) && m_DecodeSubmitCount > 0) {
+        m_DecodeNeedsReset = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d.2.c — IRAP/IDR after %llu submits "
+                    "(IRAP=%d IDR=%d) — queueing session RESET",
+                    (unsigned long long)m_DecodeSubmitCount,
+                    (int)hevc.IrapPicFlag, (int)hevc.IdrPicFlag);
+    }
+
+    // §J.3.e.2.i.8 Phase 1.3d.2.c — first ~5 frames + every IRAP get diag log
+    // for crash forensics (slot, ref count, IRAP/IDR/POC).  Periodic frames
+    // remain on the existing 60-frame counter to avoid log flood.
+    bool diagThisFrame = (m_DecodeSubmitCount + m_DecodeSkipCount < 5)
+                       || hevc.IrapPicFlag || hevc.IdrPicFlag;
+
     // pCurrPic is one of our VkFrucDecodeClient::VkFrucDpbPicture instances
     // (handed out by AllocPictureBuffer).
     auto* curPic = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(ppd->pCurrPic);
@@ -668,12 +687,15 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     setupResource.imageViewBinding = curPic->view;
 
     // Spec: in BeginCoding's pReferenceSlots, an entry with slotIndex=-1 means
-    // "this slot is being activated/re-activated in this scope".  Active slots
-    // (already set up) use their actual slotIndex.
-    // DecodeInfo.pSetupReferenceSlot always uses the actual target slotIndex.
+    // "this slot is being (re)activated in this scope".  ALWAYS use -1 here:
+    // even when the slot was previously active, a new picture is being
+    // installed and the driver treats it as a re-setup.  Earlier code branched
+    // (active ? N : -1) but NV-HEVC device-lost'd around frame 60, which
+    // coincided with slot reuse.  Forcing -1 unconditionally avoids that path.
+    // DecodeInfo.pSetupReferenceSlot still carries the actual slot index.
     VkVideoReferenceSlotInfoKHR setupSlotInBegin = { VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR };
     setupSlotInBegin.pNext            = &setupSlotH265;
-    setupSlotInBegin.slotIndex        = m_DpbSlotActive[slotIdx] ? slotIdx : -1;
+    setupSlotInBegin.slotIndex        = -1;
     setupSlotInBegin.pPictureResource = &setupResource;
 
     VkVideoReferenceSlotInfoKHR setupSlotInDecode = setupSlotInBegin;
@@ -785,6 +807,20 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     curPic->layoutInited = true;
     m_DpbSlotActive[slotIdx] = true;   // slot is now usable as a reference
     m_DecodeSubmitCount++;
+    if (diagThisFrame) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d diag #%llu — "
+                    "slot=%d refs=%d IRAP=%d IDR=%d POC=%d slices=%u "
+                    "active{0..6}=%d%d%d%d%d%d%d",
+                    (unsigned long long)m_DecodeSubmitCount,
+                    slotIdx, activeRefCount,
+                    (int)hevc.IrapPicFlag, (int)hevc.IdrPicFlag,
+                    hevc.CurrPicOrderCntVal, markerCount,
+                    (int)m_DpbSlotActive[0], (int)m_DpbSlotActive[1],
+                    (int)m_DpbSlotActive[2], (int)m_DpbSlotActive[3],
+                    (int)m_DpbSlotActive[4], (int)m_DpbSlotActive[5],
+                    (int)m_DpbSlotActive[6]);
+    }
     if (m_DecodeSubmitCount == 1 || (m_DecodeSubmitCount % 60) == 0) {
         const char* picType = hevc.IdrPicFlag ? "IDR" :
                               hevc.IrapPicFlag ? "IRAP" :
