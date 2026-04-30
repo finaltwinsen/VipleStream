@@ -3104,6 +3104,22 @@ bool VkFrucRenderer::createDecodeCommandResources()
         return false;
     }
 
+    // §J.3.e.2.i.8 Phase 1.5b — timeline semaphore for cross-queue sync.
+    // Initial value 0; first decode signals 1, graphics waits >=1, etc.
+    VkSemaphoreTypeCreateInfo timelineType = { VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+    timelineType.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    timelineType.initialValue  = 0;
+    VkSemaphoreCreateInfo timelineSci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    timelineSci.pNext = &timelineType;
+    if (pfnCreateSemaphore(m_Device, &timelineSci, nullptr, &m_TimelineSem) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.5b timeline vkCreateSemaphore failed");
+        destroyDecodeCommandResources();
+        return false;
+    }
+    m_TimelineNext.store(1);
+    m_LastDecodeValue.store(0);
+
     m_DecodeCmdReady   = true;
     m_DecodeNeedsReset = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -3133,6 +3149,11 @@ void VkFrucRenderer::destroyDecodeCommandResources()
 
     if (m_DecodeDoneSem  != VK_NULL_HANDLE && pfnDestroySemaphore)
         pfnDestroySemaphore(m_Device, m_DecodeDoneSem, nullptr);
+    if (m_TimelineSem != VK_NULL_HANDLE && pfnDestroySemaphore)
+        pfnDestroySemaphore(m_Device, m_TimelineSem, nullptr);
+    m_TimelineSem = VK_NULL_HANDLE;
+    m_TimelineNext.store(1);
+    m_LastDecodeValue.store(0);
     if (m_DecodeFence    != VK_NULL_HANDLE && pfnDestroyFence)
         pfnDestroyFence(m_Device, m_DecodeFence, nullptr);
     if (m_DecodeCmdBuf   != VK_NULL_HANDLE && pfnFreeCommandBuffers && m_DecodeCmdPool != VK_NULL_HANDLE)
@@ -4910,21 +4931,32 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     m_SwImageLayoutInited = true;  // image is now in SHADER_READ_ONLY for next frame's barrier
 
     // ---- 5. Submit + present ----
+    // §J.3.e.2.i.8 Phase 1.5b — when sampling native-decoded m_SwUploadImage,
+    // wait on decode's timeline value before fragment-shader sample.  Skip
+    // the timeline wait if no decode has signaled yet (timelineWaitValue == 0).
+    uint64_t timelineWaitValue = useNativeDecode ? m_LastDecodeValue.load(std::memory_order_acquire) : 0;
     VkResult vr;
     if (m_DualMode) {
         // Dual: wait both acquire sems (pass 0 = interp, pass 1 = real),
         // signal both renderDone sems.  Both render passes ran in order
         // in the same cmd buf; GPU executes them sequentially before
         // signaling.  The two presents below display both images.
-        VkSemaphore waitSems[2]   = { m_SlotAcquireSem[slot][0], m_SlotAcquireSem[slot][1] };
+        VkSemaphore waitSems[3]   = { m_SlotAcquireSem[slot][0], m_SlotAcquireSem[slot][1], m_TimelineSem };
         VkSemaphore signalSems[2] = { m_SlotRenderDoneSem[slot][0], m_SlotRenderDoneSem[slot][1] };
-        VkPipelineStageFlags waitMasks[2] = {
+        VkPipelineStageFlags waitMasks[3] = {
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         };
+        // Timeline values: 0 ignored for binary sems; real value for timeline.
+        uint64_t waitVals[3] = { 0, 0, timelineWaitValue };
+        VkTimelineSemaphoreSubmitInfo tssi = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+        tssi.waitSemaphoreValueCount = 3;
+        tssi.pWaitSemaphoreValues    = waitVals;
         VkSubmitInfo si = {};
         si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.waitSemaphoreCount   = 2;
+        si.pNext                = (timelineWaitValue > 0) ? &tssi : nullptr;
+        si.waitSemaphoreCount   = (timelineWaitValue > 0) ? 3 : 2;
         si.pWaitSemaphores      = waitSems;
         si.pWaitDstStageMask    = waitMasks;
         si.commandBufferCount   = 1;
@@ -4979,12 +5011,21 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         }
     } else {
         // Single-present (legacy SW path, m_DualMode off)
-        VkPipelineStageFlags waitMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkSemaphore singleWaitSems[2] = { m_SlotAcquireSem[slot][0], m_TimelineSem };
+        VkPipelineStageFlags singleWaitMasks[2] = {
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        };
+        uint64_t singleWaitVals[2] = { 0, timelineWaitValue };
+        VkTimelineSemaphoreSubmitInfo singleTssi = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+        singleTssi.waitSemaphoreValueCount = 2;
+        singleTssi.pWaitSemaphoreValues    = singleWaitVals;
         VkSubmitInfo si = {};
         si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.waitSemaphoreCount   = 1;
-        si.pWaitSemaphores      = &m_SlotAcquireSem[slot][0];
-        si.pWaitDstStageMask    = &waitMask;
+        si.pNext                = (timelineWaitValue > 0) ? &singleTssi : nullptr;
+        si.waitSemaphoreCount   = (timelineWaitValue > 0) ? 2 : 1;
+        si.pWaitSemaphores      = singleWaitSems;
+        si.pWaitDstStageMask    = singleWaitMasks;
         si.commandBufferCount   = 1;
         si.pCommandBuffers      = &cmd;
         si.signalSemaphoreCount = 1;

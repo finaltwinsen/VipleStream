@@ -240,6 +240,14 @@ private:
     VkCommandBuffer m_DecodeCmdBuf      = VK_NULL_HANDLE;
     VkFence         m_DecodeFence       = VK_NULL_HANDLE;
     VkSemaphore     m_DecodeDoneSem     = VK_NULL_HANDLE;
+    // §J.3.e.2.i.8 Phase 1.5b — cross-queue timeline semaphore.
+    // Decode submit signals monotonic value N; graphics submit waits for N
+    // before sampling m_SwUploadImage.  Replaces the racey CPU-side
+    // WaitForFences(m_DecodeFence) attempt that hit VUID-vkResetFences-pFences-01123
+    // (renderFrameSw and submitDecodeFrame both touched the same fence).
+    VkSemaphore           m_TimelineSem      = VK_NULL_HANDLE;
+    std::atomic<uint64_t> m_TimelineNext     {1};   // next value to allocate
+    std::atomic<uint64_t> m_LastDecodeValue  {0};   // last value signaled by decode
     bool            m_DecodeCmdReady    = false;
     // True until the very first vkCmdControlVideoCodingKHR with RESET fires
     // (driver requires session reset before first decode submit).

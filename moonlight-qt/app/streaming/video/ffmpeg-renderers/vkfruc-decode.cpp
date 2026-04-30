@@ -822,9 +822,11 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
         preBars[0].subresourceRange.layerCount = 1;
 
         preBars[1].sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        preBars[1].srcStageMask                = m_SwImageLayoutInited ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
-                                                                       : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-        preBars[1].srcAccessMask               = m_SwImageLayoutInited ? VK_ACCESS_2_SHADER_READ_BIT : (VkAccessFlags2)0;
+        // §J.3.e.2.i.8 Phase 1.5 — decode queue family doesn't support
+        // FRAGMENT_SHADER stage. Use TOP_OF_PIPE + 0 access for the "release"
+        // side; cross-queue sync to graphics done via CPU-side fence wait.
+        preBars[1].srcStageMask                = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        preBars[1].srcAccessMask               = 0;
         preBars[1].dstStageMask                = VK_PIPELINE_STAGE_2_COPY_BIT;
         preBars[1].dstAccessMask               = VK_ACCESS_2_TRANSFER_WRITE_BIT;
         preBars[1].oldLayout                   = m_SwImageLayoutInited
@@ -875,8 +877,10 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
         postBars[1] = preBars[1];
         postBars[1].srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT;
         postBars[1].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        postBars[1].dstStageMask  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-        postBars[1].dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+        // §J.3.e.2.i.8 Phase 1.5 — BOTTOM_OF_PIPE + 0 access, graphics queue
+        // does its own acquire when sampling (CONCURRENT image — no QF transfer).
+        postBars[1].dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
+        postBars[1].dstAccessMask = 0;
         postBars[1].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         postBars[1].newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
@@ -889,17 +893,28 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
 
     rt.EndCommandBuffer(m_DecodeCmdBuf);
 
-    // §J.3.e.2.i.8 Phase 1.3d.2.b — drop signal semaphore: nothing waits on it
-    // in Phase 1.3 (graphics-queue handoff lives in Phase 1.4).  Repeatedly
-    // signaling a binary semaphore without a wait between signals is a spec
-    // violation (VUID-vkQueueSubmit-pCommandBuffers-00065).  Phase 1.4 will
-    // re-introduce signal+wait when the decoded image flows to the renderer.
+    // §J.3.e.2.i.8 Phase 1.5b — signal timeline semaphore so graphics queue
+    // can wait on it in renderFrameSw.  Allocate a monotonically increasing
+    // value (m_TimelineNext) and publish it via m_LastDecodeValue so the
+    // graphics submit knows what to wait for.  Allocate the value BEFORE
+    // QueueSubmit so the wait→signal happens-before relationship is clear
+    // even if graphics reads m_LastDecodeValue before our QueueSubmit returns.
+    uint64_t signalVal = m_TimelineNext.fetch_add(1, std::memory_order_acq_rel);
+
+    VkTimelineSemaphoreSubmitInfo tssi = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+    tssi.signalSemaphoreValueCount = 1;
+    tssi.pSignalSemaphoreValues    = &signalVal;
+
     VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.pNext                = &tssi;
     si.commandBufferCount   = 1;
     si.pCommandBuffers      = &m_DecodeCmdBuf;
-    si.signalSemaphoreCount = 0;
-    si.pSignalSemaphores    = nullptr;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores    = &m_TimelineSem;
     VkResult vr = rt.QueueSubmit(m_DecodeQueue, 1, &si, m_DecodeFence);
+    if (vr == VK_SUCCESS) {
+        m_LastDecodeValue.store(signalVal, std::memory_order_release);
+    }
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d vkQueueSubmit rc=%d", (int)vr);
