@@ -633,9 +633,14 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
             imb.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, layer, 1 };
         };
 
-        // Setup/dst layer barrier
+        // Setup/dst layer barrier — always treat the destination layer as
+        // fresh (UNDEFINED → DPB).  When a slot is reused after being a
+        // reference for older frames, NV's HEVC decoder appears to reject
+        // a same-layout DPB→DPB transition for write; transitioning from
+        // UNDEFINED discards prior content, which is what we want anyway
+        // (we're about to overwrite the layer with a new picture).
         fillBarrier(curPic->image, (uint32_t)slotIdx, /*isRefRead*/false,
-                    /*initFromUndefined*/!curPic->layoutInited);
+                    /*initFromUndefined*/true);
 
         // Reference layer barriers (cache flush from prior write → current read)
         for (int i = 0; i < activeRefCount; i++) {
