@@ -205,6 +205,12 @@ private:
     int            m_DpbAlignedH    = 0;
     VkImage        m_DpbSharedImage = VK_NULL_HANDLE;
     VkDeviceMemory m_DpbSharedMem   = VK_NULL_HANDLE;
+    // §J.3.e.2.i.8 Phase 1.3d.2.d — single 2D_ARRAY view for video-decode
+    // (NV vk_video_samples pattern).  vkCmdDecodeVideoKHR uses this view
+    // with VkVideoPictureResourceInfoKHR.baseArrayLayer = slot index.
+    // Per-slot 2D views (in m_PicPool[].view) remain for Phase 1.4 graphics
+    // sampling (each will get its own VkSamplerYcbcrConversion).
+    VkImageView    m_DpbDecodeArrayView = VK_NULL_HANDLE;
     // Per-slot active state — flipped to true after the slot has been used as
     // pSetupReferenceSlot in a successful vkCmdDecodeVideoKHR submission.
     // Drives setupSlot.slotIndex in BeginCoding (must be -1 until activated).

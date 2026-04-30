@@ -584,8 +584,9 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
         res.sType            = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
         res.codedOffset      = { 0, 0 };
         res.codedExtent      = { (uint32_t)m_DpbAlignedW, (uint32_t)m_DpbAlignedH };
-        res.baseArrayLayer   = 0;
-        res.imageViewBinding = p->view;
+        // 2D_ARRAY decode view + per-slot layer index (§J.3.e.2.i.8 Phase 1.3d.2.d).
+        res.baseArrayLayer   = (uint32_t)slot;
+        res.imageViewBinding = m_DpbDecodeArrayView;
 
         auto& s = refSlots[activeRefCount];
         s.sType            = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
@@ -683,8 +684,10 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     VkVideoPictureResourceInfoKHR setupResource = { VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR };
     setupResource.codedOffset      = { 0, 0 };
     setupResource.codedExtent      = { (uint32_t)m_DpbAlignedW, (uint32_t)m_DpbAlignedH };
-    setupResource.baseArrayLayer   = 0;          // imageView already selects the layer
-    setupResource.imageViewBinding = curPic->view;
+    // §J.3.e.2.i.8 Phase 1.3d.2.d — point at the 2D_ARRAY decode view + use
+    // baseArrayLayer to select the slot's layer (NV vk_video_samples pattern).
+    setupResource.baseArrayLayer   = (uint32_t)slotIdx;
+    setupResource.imageViewBinding = m_DpbDecodeArrayView;
 
     // Spec: in BeginCoding's pReferenceSlots, an entry with slotIndex=-1 means
     // "this slot is being (re)activated in this scope".  ALWAYS use -1 here:
@@ -948,6 +951,8 @@ bool VkFrucRenderer::ensureDpbImagePool(int width, int height)
     }
 
     // Per-slot views: each selects a single array layer of the shared image.
+    // Used by Phase 1.4 graphics sampling later (each will pair with its own
+    // VkSamplerYcbcrConversion).  Decode itself uses m_DpbDecodeArrayView below.
     for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) {
         pool[i].image  = m_DpbSharedImage;          // shared backing image
         pool[i].memory = VK_NULL_HANDLE;            // memory owned by renderer
@@ -968,6 +973,31 @@ bool VkFrucRenderer::ensureDpbImagePool(int width, int height)
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b vkCreateImageView[%d] rc=%d",
                          i, (int)vr);
+            destroyDpbImagePool();
+            return false;
+        }
+    }
+
+    // §J.3.e.2.i.8 Phase 1.3d.2.d — single 2D_ARRAY view used by video-decode.
+    // Matches NV vk_video_samples pattern; submit uses
+    // VkVideoPictureResourceInfoKHR.imageViewBinding=this + baseArrayLayer=N.
+    {
+        VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image                           = m_DpbSharedImage;
+        vci.viewType                        = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        vci.format                          = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+        vci.components                      = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+        vci.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.baseMipLevel   = 0;
+        vci.subresourceRange.levelCount     = 1;
+        vci.subresourceRange.baseArrayLayer = 0;
+        vci.subresourceRange.layerCount     = (uint32_t)VkFrucDecodeClient::kPicPoolSize;
+        vr = pfnCreateImageView(m_Device, &vci, nullptr, &m_DpbDecodeArrayView);
+        if (vr != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d.2.d vkCreateImageView (decode 2D_ARRAY) rc=%d",
+                         (int)vr);
             destroyDpbImagePool();
             return false;
         }
@@ -1010,10 +1040,13 @@ void VkFrucRenderer::destroyDpbImagePool()
             pool[i].Reset();
         }
     }
+    if (m_DpbDecodeArrayView != VK_NULL_HANDLE && pfnDestroyImageView)
+        pfnDestroyImageView(m_Device, m_DpbDecodeArrayView, nullptr);
     if (m_DpbSharedImage != VK_NULL_HANDLE && pfnDestroyImage)
         pfnDestroyImage(m_Device, m_DpbSharedImage, nullptr);
     if (m_DpbSharedMem != VK_NULL_HANDLE && pfnFreeMem)
         pfnFreeMem(m_Device, m_DpbSharedMem, nullptr);
+    m_DpbDecodeArrayView = VK_NULL_HANDLE;
     m_DpbSharedImage = VK_NULL_HANDLE;
     m_DpbSharedMem   = VK_NULL_HANDLE;
     m_DpbReady       = false;
