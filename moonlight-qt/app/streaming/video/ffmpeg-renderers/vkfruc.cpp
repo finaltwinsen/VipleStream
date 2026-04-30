@@ -194,6 +194,12 @@ void VkFrucRenderer::teardown()
         m_pfnDestroySurfaceKHR(m_Instance, m_Surface, nullptr);
         m_Surface = VK_NULL_HANDLE;
     }
+    if (m_DebugMessenger != VK_NULL_HANDLE && m_Instance != VK_NULL_HANDLE && m_pfnGetInstanceProcAddr) {
+        auto pfn = (PFN_vkDestroyDebugUtilsMessengerEXT)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkDestroyDebugUtilsMessengerEXT");
+        if (pfn) pfn(m_Instance, m_DebugMessenger, nullptr);
+        m_DebugMessenger = VK_NULL_HANDLE;
+    }
     if (m_Instance != VK_NULL_HANDLE && m_pfnDestroyInstance) {
         m_pfnDestroyInstance(m_Instance, nullptr);
         m_Instance = VK_NULL_HANDLE;
@@ -234,6 +240,41 @@ bool VkFrucRenderer::createInstanceAndSurface(SDL_Window* window)
         return false;
     }
 
+    // §J.3.e.2.i.8 Phase 1.3d.2 debug — opt-in VK_EXT_debug_utils so validation
+    // layer messages route through SDL_Log into our log file.  Gated on
+    // VIPLE_VKFRUC_VULKAN_DEBUG=1 so production builds stay extension-minimal.
+    bool wantDebugUtils = qEnvironmentVariableIntValue("VIPLE_VKFRUC_VULKAN_DEBUG") != 0;
+    if (wantDebugUtils) {
+        // Verify the extension is exposed by the loader before requesting it
+        // (would fail vkCreateInstance with VK_ERROR_EXTENSION_NOT_PRESENT
+        // otherwise).
+        auto pfnEnumExt = (PFN_vkEnumerateInstanceExtensionProperties)m_pfnGetInstanceProcAddr(
+            nullptr, "vkEnumerateInstanceExtensionProperties");
+        bool dbgUtilsAvail = false;
+        if (pfnEnumExt) {
+            uint32_t propCount = 0;
+            pfnEnumExt(nullptr, &propCount, nullptr);
+            std::vector<VkExtensionProperties> props(propCount);
+            pfnEnumExt(nullptr, &propCount, props.data());
+            for (auto& p : props) {
+                if (strcmp(p.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0) {
+                    dbgUtilsAvail = true;
+                    break;
+                }
+            }
+        }
+        if (dbgUtilsAvail) {
+            exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 debug: VK_EXT_debug_utils requested "
+                        "(VIPLE_VKFRUC_VULKAN_DEBUG=1) — validation messages will route to log");
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 debug: VIPLE_VKFRUC_VULKAN_DEBUG=1 set "
+                        "but VK_EXT_debug_utils not exposed (no validation layer loaded?)");
+        }
+    }
+
     VkApplicationInfo appInfo = {};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "VipleStreamFruc";
@@ -264,6 +305,31 @@ bool VkFrucRenderer::createInstanceAndSurface(SDL_Window* window)
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.2 VkInstance created (exts=%u)",
                 (unsigned)exts.size());
+
+    // §J.3.e.2.i.8 Phase 1.3d.2 debug — register debug messenger if extension
+    // was enabled.  Errors / warnings flow through SDL_Log; verbose info is
+    // suppressed by default to avoid drowning the log.
+    if (wantDebugUtils) {
+        auto pfnCreateMessenger = (PFN_vkCreateDebugUtilsMessengerEXT)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkCreateDebugUtilsMessengerEXT");
+        if (pfnCreateMessenger) {
+            VkDebugUtilsMessengerCreateInfoEXT mci = { VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
+            mci.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT
+                                | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+            mci.messageType     = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
+                                | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
+                                | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+            mci.pfnUserCallback = &VkFrucRenderer::debugMessengerCallback;
+            mci.pUserData       = this;
+            if (pfnCreateMessenger(m_Instance, &mci, nullptr, &m_DebugMessenger) == VK_SUCCESS) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.8 debug messenger registered");
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.8 vkCreateDebugUtilsMessengerEXT failed");
+            }
+        }
+    }
 
     m_pfnDestroyInstance = (PFN_vkDestroyInstance)m_pfnGetInstanceProcAddr(m_Instance, "vkDestroyInstance");
     m_pfnDestroySurfaceKHR = (PFN_vkDestroySurfaceKHR)m_pfnGetInstanceProcAddr(m_Instance, "vkDestroySurfaceKHR");
@@ -2766,6 +2832,24 @@ void VkFrucRenderer::submitNativeDecodeUnit(const uint8_t* data, size_t len)
                     (unsigned long long)m_NalCounts.total_packets,
                     m_NalCounts.total_bytes / (1024.0 * 1024.0));
     }
+}
+
+// §J.3.e.2.i.8 Phase 1.3d.2 debug — Vulkan validation messages → SDL_Log.
+VkBool32 VKAPI_PTR VkFrucRenderer::debugMessengerCallback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageTypeFlagsEXT /*types*/,
+    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+    void* /*pUserData*/)
+{
+    if (!pCallbackData || !pCallbackData->pMessage) return VK_FALSE;
+    int prio = (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)   ? SDL_LOG_PRIORITY_ERROR :
+               (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) ? SDL_LOG_PRIORITY_WARN  :
+                                                                              SDL_LOG_PRIORITY_INFO;
+    SDL_LogMessage(SDL_LOG_CATEGORY_APPLICATION, (SDL_LogPriority)prio,
+                   "[VVL] %s: %s",
+                   pCallbackData->pMessageIdName ? pCallbackData->pMessageIdName : "?",
+                   pCallbackData->pMessage);
+    return VK_FALSE;
 }
 
 void VkFrucRenderer::destroyVideoSession()

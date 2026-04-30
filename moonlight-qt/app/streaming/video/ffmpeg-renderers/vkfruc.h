@@ -546,6 +546,17 @@ private:
     PFN_vkDestroyInstance     m_pfnDestroyInstance     = nullptr;
     PFN_vkDestroyDevice       m_pfnDestroyDevice       = nullptr;
     PFN_vkDestroySurfaceKHR   m_pfnDestroySurfaceKHR   = nullptr;
+
+    // §J.3.e.2.i.8 Phase 1.3d.2 debug — VK_EXT_debug_utils messenger to route
+    // Vulkan validation layer messages through SDL_Log so they land in our
+    // log file alongside renderer events.  Created when the extension is
+    // exposed (typical when the loader has the validation layer present).
+    VkDebugUtilsMessengerEXT m_DebugMessenger = VK_NULL_HANDLE;
+    static VkBool32 VKAPI_PTR debugMessengerCallback(
+        VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+        VkDebugUtilsMessageTypeFlagsEXT types,
+        const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+        void* pUserData);
 };
 
 #endif // HAVE_LIBPLACEBO_VULKAN
