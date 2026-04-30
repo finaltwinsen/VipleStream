@@ -893,38 +893,45 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
             teardown();
             return false;
         }
-        // §J.3.e.2.i.8 Phase 1.0 — VkVideoSession scaffold (skip FFmpeg).
-        // Non-fatal — Phase 1.0 仍 piggyback FFmpeg AVHWDeviceContext path
-        // for actual decode；session 只是 probe API 是否真的可建.
-        // 之後 Phase 1.1+ 接 NAL parsing + 自己 decode 後，再把 populateAv-
-        // HwDeviceCtx 那段拿掉.
-        if (!createVideoSession(m_VideoFormat)) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 createVideoSession failed — Phase 1 native decode 路徑 skip");
-            destroyVideoSession();  // best-effort cleanup
-        } else if (!createVideoSessionParameters(m_VideoFormat)) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 createVideoSessionParameters failed");
-            destroyVideoSession();
-        } else if (!createDecodeCommandResources()) {
-            // §J.3.e.2.i.8 Phase 1.3c — without decode cmd resources we cannot
-            // submit vkCmdDecodeVideoKHR; tear down the session so we don't
-            // leave a half-initialized native decode path live.
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 createDecodeCommandResources failed");
-            destroyDecodeCommandResources();
-            destroyVideoSession();
-        } else if (!createNvVideoParser()) {
-            // Non-fatal — Phase 1.1c 失敗時 fallback 到 v1.3.198 的
-            // 自寫 NAL type detection (acceptsNativeDecode 仍 true 但
-            // submitNativeDecodeUnit 跳 parser 路).
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 createNvVideoParser failed — fallback to legacy NAL type counter");
-        }
     } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.3.e-SW skipping AVHWDeviceContext "
                     "(software upload mode active)");
+    }
+
+    // §J.3.e.2.i.8 — native VK_KHR_video_decode setup is INDEPENDENT of the
+    // FFmpeg-Vulkan bridge path (m_SwMode flag).  SW mode does FFmpeg→staging
+    // upload for the *display* path, while native decode replaces the *decode*
+    // step entirely (NAL bytes → vkCmdDecodeVideoKHR).  These two pipelines
+    // don't share VkImages, so we always provision native decode resources
+    // when the device exposes the required extensions; whether NAL units
+    // actually route through them is gated by acceptsNativeDecode() (env var
+    // VIPLE_VKFRUC_NATIVE_DECODE=1).
+    //
+    // Until v1.3.221 this whole block lived inside `if (!m_SwMode)` — meaning
+    // native decode never instantiated when the user (typical) ran in SW
+    // mode.  The fix: lift it out so Phase 1.3d.1 vkCmdDecodeVideoKHR submits
+    // are reachable from the SW display pipeline as well.
+    if (!createVideoSession(m_VideoFormat)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 createVideoSession failed — Phase 1 native decode 路徑 skip");
+        destroyVideoSession();
+    } else if (!createVideoSessionParameters(m_VideoFormat)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 createVideoSessionParameters failed");
+        destroyVideoSession();
+    } else if (!createDecodeCommandResources()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 createDecodeCommandResources failed");
+        destroyDecodeCommandResources();
+        destroyVideoSession();
+    } else if (!createNvVideoParser()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 createNvVideoParser failed — fallback to legacy NAL type counter");
+    } else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 native decode chain READY "
+                    "— session+params+cmd+parser+DPB-pool. Awaiting VIPLE_VKFRUC_NATIVE_DECODE=1 + NAL packets.");
     }
     if (!createYcbcrSamplerAndLayouts()) {
         m_InitFailureReason = InitFailureReason::NoSoftwareSupport;
