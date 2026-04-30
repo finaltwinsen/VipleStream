@@ -4609,62 +4609,102 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                     frame->linesize[0], frame->linesize[1]);
     }
 
-    if (frame == nullptr || frame->data[0] == nullptr) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-SW] null frame/data[0]");
+    if (frame == nullptr) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-SW] null frame");
         return;
     }
-    if (frame->format != AV_PIX_FMT_YUV420P && frame->format != AV_PIX_FMT_NV12) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-SW] unexpected pixfmt %d (want YUV420P=%d or NV12=%d)",
-                    frame->format, (int)AV_PIX_FMT_YUV420P, (int)AV_PIX_FMT_NV12);
+    // §J.3.e.2.i.8 Phase 1.5 — gate logic:
+    //   isSynthFrame   = data[0] is null (Phase 1.5 ffmpeg.cpp path)
+    //   useNativeDecode = native chain has produced a sample-able m_SwUploadImage
+    // Combinations:
+    //   synth + native ready       → render native (Phase 1.5 default)
+    //   synth + native NOT ready   → drop frame (Pacer delivers next)
+    //   real ffmpeg + native ready → render native (parallel mode — prioritize native data)
+    //   real ffmpeg + native NOT   → render via staging upload (Phase 0/1 SW path)
+    bool isSynthFrame = (frame->data[0] == nullptr);
+    bool useNativeDecodeEarly = (m_NewestDecodedSlot.load(std::memory_order_acquire) >= 0)
+                              && (m_DpbSharedImage != VK_NULL_HANDLE)
+                              && m_SwImageLayoutInited;
+
+    // §J.3.e.2.i.8 Phase 1.5 attempt — earlier we tried CPU-side WaitForFences
+    // on m_DecodeFence here, but Pacer-thread WaitForFences races
+    // submitDecodeFrame's ResetFences → VUID-vkResetFences-pFences-01123.
+    // Removed; sync to next decode is via decode submit's WaitForFences on
+    // m_LastGraphicsFence (graphics queue's own per-slot fence).
+
+    if (isSynthFrame && !useNativeDecodeEarly) {
+        // Synthetic frame but native decode chain not ready yet (slot not
+        // published / DPB not allocated / first decode not yet completed).
+        // Drop this frame quietly — Pacer will deliver the next one.
+        if (firstFrame) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-SW] synth frame dropped — native decode not ready "
+                        "(newestSlot=%d dpbImg=%p layoutInited=%d)",
+                        m_NewestDecodedSlot.load(),
+                        (void*)m_DpbSharedImage, (int)m_SwImageLayoutInited);
+        }
         return;
     }
-    if (frame->width != m_SwImageWidth || frame->height != m_SwImageHeight) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-SW] resolution mismatch %dx%d vs allocated %dx%d",
-                    frame->width, frame->height, m_SwImageWidth, m_SwImageHeight);
-        return;
+    if (!isSynthFrame) {
+        if (frame->format != AV_PIX_FMT_YUV420P && frame->format != AV_PIX_FMT_NV12) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-SW] unexpected pixfmt %d (want YUV420P=%d or NV12=%d)",
+                        frame->format, (int)AV_PIX_FMT_YUV420P, (int)AV_PIX_FMT_NV12);
+            return;
+        }
+        if (frame->width != m_SwImageWidth || frame->height != m_SwImageHeight) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-SW] resolution mismatch %dx%d vs allocated %dx%d",
+                        frame->width, frame->height, m_SwImageWidth, m_SwImageHeight);
+            return;
+        }
     }
+    // Synth frames: dimensions trusted from m_SwImageWidth/Height (set at
+    // createSwUploadResources time using actual stream params).
 
     // ---- 1. memcpy/repack Y + UV into staging (NV12 layout) ----
     const int W = m_SwImageWidth;
     const int H = m_SwImageHeight;
-    uint8_t* dst = (uint8_t*)m_SwStagingMapped;
-    // Y plane: same layout for both YUV420P and NV12, just stride-fix copy.
-    for (int y = 0; y < H; y++) {
-        memcpy(dst + y * W, frame->data[0] + y * frame->linesize[0], W);
-    }
-    // UV plane:
-    //   NV12 input → already interleaved, plain memcpy each row (W bytes, H/2 rows)
-    //   YUV420P input → 3 planes (Y, U, V); interleave U+V to get NV12 UV layout
-    uint8_t* uvDst = dst + W * H;
-    if (frame->format == AV_PIX_FMT_NV12) {
-        if (frame->data[1] == nullptr) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC-SW] NV12 frame missing data[1]");
-            return;
+    if (!useNativeDecodeEarly) {
+        uint8_t* dst = (uint8_t*)m_SwStagingMapped;
+        // Y plane: same layout for both YUV420P and NV12, just stride-fix copy.
+        for (int y = 0; y < H; y++) {
+            memcpy(dst + y * W, frame->data[0] + y * frame->linesize[0], W);
         }
-        for (int y = 0; y < H / 2; y++) {
-            memcpy(uvDst + y * W, frame->data[1] + y * frame->linesize[1], W);
-        }
-    } else {
-        // YUV420P: data[1]=U plane (W/2 × H/2), data[2]=V plane (W/2 × H/2)
-        if (frame->data[1] == nullptr || frame->data[2] == nullptr) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC-SW] YUV420P frame missing U/V plane");
-            return;
-        }
-        for (int y = 0; y < H / 2; y++) {
-            const uint8_t* uRow = frame->data[1] + y * frame->linesize[1];
-            const uint8_t* vRow = frame->data[2] + y * frame->linesize[2];
-            uint8_t* dstRow = uvDst + y * W;
-            for (int x = 0; x < W / 2; x++) {
-                dstRow[2 * x + 0] = uRow[x];  // U
-                dstRow[2 * x + 1] = vRow[x];  // V
+        // UV plane:
+        //   NV12 input → already interleaved, plain memcpy each row (W bytes, H/2 rows)
+        //   YUV420P input → 3 planes (Y, U, V); interleave U+V to get NV12 UV layout
+        uint8_t* uvDst = dst + W * H;
+        if (frame->format == AV_PIX_FMT_NV12) {
+            if (frame->data[1] == nullptr) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-SW] NV12 frame missing data[1]");
+                return;
+            }
+            for (int y = 0; y < H / 2; y++) {
+                memcpy(uvDst + y * W, frame->data[1] + y * frame->linesize[1], W);
+            }
+        } else {
+            // YUV420P: data[1]=U plane (W/2 × H/2), data[2]=V plane (W/2 × H/2)
+            if (frame->data[1] == nullptr || frame->data[2] == nullptr) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-SW] YUV420P frame missing U/V plane");
+                return;
+            }
+            for (int y = 0; y < H / 2; y++) {
+                const uint8_t* uRow = frame->data[1] + y * frame->linesize[1];
+                const uint8_t* vRow = frame->data[2] + y * frame->linesize[2];
+                uint8_t* dstRow = uvDst + y * W;
+                for (int x = 0; x < W / 2; x++) {
+                    dstRow[2 * x + 0] = uRow[x];  // U
+                    dstRow[2 * x + 1] = vRow[x];  // V
+                }
             }
         }
     }
+    // §J.3.e.2.i.8 Phase 1.5 — when useNativeDecodeEarly, the staging memcpy
+    // is skipped entirely.  Decode-queue cmd buffer in submitDecodeFrame
+    // already copied DPB layer → m_SwUploadImage in SHADER_READ_ONLY layout.
 
     // ---- 2/3. Slot rotation, fence wait/reset, swapchain acquire ----
     uint32_t slot = m_CurrentSlot;
@@ -4717,9 +4757,9 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     // m_SwUploadImage and left it in SHADER_READ_ONLY layout.  Skip the
     // staging upload + layout transitions entirely; just sample.
     int nativeSlot = m_NewestDecodedSlot.load(std::memory_order_acquire);
-    bool useNativeDecode = (nativeSlot >= 0)
-                        && (m_DpbSharedImage != VK_NULL_HANDLE)
-                        && m_SwImageLayoutInited;
+    // Reuse useNativeDecodeEarly's semantics — keeps the early-return path
+    // (synth frame dropped if !ready) consistent with the late barrier gating.
+    bool useNativeDecode = useNativeDecodeEarly;
     {
         static std::atomic<uint64_t> s_renderCount{0};
         uint64_t r = s_renderCount.fetch_add(1) + 1;

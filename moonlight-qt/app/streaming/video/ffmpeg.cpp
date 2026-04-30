@@ -2409,26 +2409,52 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     //
     // m_BackendRenderer 跟 m_FrontendRenderer 多半是同一個 (D3D11VA、VkFruc
     // 等都是 backend=frontend).  這裡查 backend 才是真正在 decode 的那位.
-    // §J.3.e.2.i.8 Phase 1.4 — VIPLE_VKFRUC_NATIVE_DECODE_PARALLEL=1 keeps
-    // FFmpeg path active so renderFrame is still driven by the existing
-    // pacer.  Our native parser gets fed the same NAL bytes for decoding,
-    // but FFmpeg also decodes (waste of CPU) so the SW upload path keeps
-    // showing video while the native path proves out the decode chain.
-    // Once Phase 1.4 has its own render trigger, this parallel mode goes away.
-    static const bool s_nativeDecodeParallel =
-        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_PARALLEL") != 0;
+    // §J.3.e.2.i.8 Phase 1.5 — native decode drives Pacer with a SYNTHETIC AVFrame.
+    //
+    // 流程:
+    //   1. submitNativeDecodeUnit(NAL bytes) → parser → submitDecodeFrame →
+    //      vkCmdDecodeVideoKHR + DPB→m_SwUploadImage copy on decode queue
+    //   2. Allocate AVFrame stub with width/height/pts/format only (no data[]).
+    //      VkFrucRenderer::renderFrameSw checks useNativeDecode (m_NewestDecodedSlot
+    //      >= 0) and skips data[] access — samples m_SwUploadImage instead.
+    //   3. m_Pacer->submitFrame(synth) → vsync thread pacing → SDL_USEREVENT
+    //      (SDL_CODE_FRAME_READY) → main thread → renderFrame(synth).
+    //
+    // VIPLE_VKFRUC_NATIVE_DECODE_PARALLEL=1 (legacy debug) keeps FFmpeg also
+    // decoding for direct comparison; default 0 = pure native (Phase 1.5).
+    // VIPLE_VKFRUC_NATIVE_DECODE_ONLY=1 → Phase 1.5 sole-decoder mode (skip
+    //   FFmpeg avcodec_send_packet, drive Pacer with synthetic AVFrames).
+    //   Currently has a race between synth submission (submitDecodeUnit thread)
+    //   and submitDecodeFrame completion (parser callback thread) — Pacer can
+    //   call renderFrame BEFORE the decode-queue cmd buffer finishes writing
+    //   m_SwUploadImage.  Stable Phase 1.5 needs cross-queue timeline semaphore
+    //   instead of CPU-side fence wait; left as opt-in until that lands.
+    // Default: PARALLEL — FFmpeg also decodes (AVFrame drives Pacer), our native
+    //   chain runs concurrently, renderFrameSw prefers native sample (matches
+    //   v1.3.242 PROPER behavior validated for 5000+ frames).
+    static const bool s_nativeDecodeOnly =
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY") != 0;
     if (m_BackendRenderer && m_BackendRenderer->acceptsNativeDecode()) {
         m_BackendRenderer->submitNativeDecodeUnit(
             reinterpret_cast<const uint8_t*>(m_Pkt->data), (size_t)m_Pkt->size);
-        if (!s_nativeDecodeParallel) {
-            // Default: native-only — skip FFmpeg entirely (production path).
+        if (s_nativeDecodeOnly) {
+            // §J.3.e.2.i.8 Phase 1.5 (experimental) — synthesize AVFrame to drive Pacer.
+            AVFrame* synth = av_frame_alloc();
+            if (synth) {
+                synth->width  = m_VideoDecoderCtx ? m_VideoDecoderCtx->width  : 1920;
+                synth->height = m_VideoDecoderCtx ? m_VideoDecoderCtx->height : 1080;
+                synth->format = AV_PIX_FMT_NV12;
+                synth->pts    = (int64_t)du->enqueueTimeUs;
+                m_Pacer->submitFrame(synth);
+            }
             m_FrameInfoQueue.enqueue(*du);
             m_FramesIn++;
             return DR_OK;
         }
-        // Parallel: fall through to also call avcodec_send_packet → ffmpeg path
-        // produces AVFrames → renderFrame fires → renderFrameSw can use the
-        // newest decoded slot from our native pipeline.
+        // Parallel (default): fall through to also call avcodec_send_packet →
+        // ffmpeg produces AVFrames → renderFrame fires → renderFrameSw uses
+        // the newest decoded slot from our native pipeline (m_SwUploadImage
+        // populated by decode-queue cmd buffer).
     }
 
     err = avcodec_send_packet(m_VideoDecoderCtx, m_Pkt);
