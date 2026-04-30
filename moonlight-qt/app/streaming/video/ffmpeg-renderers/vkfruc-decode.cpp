@@ -807,6 +807,18 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
         return false;
     }
 
+    // §J.3.e.2.i.8 Phase 1.4 sanity probe — drain GPU after every submit to
+    // prove/disprove the "no consumer = decode pipeline backlog" hypothesis.
+    // If this makes the stream stable, the device-lost is from missing
+    // graphics-queue consumer (Phase 1.4 graphics handoff will fix properly).
+    // If still unstable, Phase 1.4 won't help and we need NSight diag.
+    {
+        auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        auto pfnDeviceWaitIdle = (PFN_vkDeviceWaitIdle)getDevPa(m_Device, "vkDeviceWaitIdle");
+        if (pfnDeviceWaitIdle) pfnDeviceWaitIdle(m_Device);
+    }
+
     curPic->layoutInited = true;
     m_DpbSlotActive[slotIdx] = true;   // slot is now usable as a reference
     m_DecodeSubmitCount++;
