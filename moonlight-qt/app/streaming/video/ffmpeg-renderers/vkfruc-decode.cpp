@@ -787,6 +787,97 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     VkVideoEndCodingInfoKHR eci = { VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR };
     rt.CmdEndVideoCodingKHR(m_DecodeCmdBuf, &eci);
 
+    // §J.3.e.2.i.8 Phase 1.4 — copy decoded layer to m_SwUploadImage in the
+    // SAME decode-queue cmd buffer.  Sync2 barriers because video-decode
+    // pipeline stage only exists in the _2 form.
+    if (m_SwUploadImage != VK_NULL_HANDLE && m_SwImageWidth > 0 && m_SwImageHeight > 0) {
+        auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        auto pfnCmdCopyImage = (PFN_vkCmdCopyImage)getDevPa(m_Device, "vkCmdCopyImage");
+
+        // Pre-copy: DPB layer → TRANSFER_SRC, m_SwUploadImage → TRANSFER_DST
+        VkImageMemoryBarrier2 preBars[2] = {};
+        preBars[0].sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        preBars[0].srcStageMask                = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+        preBars[0].srcAccessMask               = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+        preBars[0].dstStageMask                = VK_PIPELINE_STAGE_2_COPY_BIT;
+        preBars[0].dstAccessMask               = VK_ACCESS_2_TRANSFER_READ_BIT;
+        preBars[0].oldLayout                   = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+        preBars[0].newLayout                   = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        preBars[0].srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[0].dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[0].image                       = curPic->image;
+        preBars[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        preBars[0].subresourceRange.levelCount = 1;
+        preBars[0].subresourceRange.baseArrayLayer = (uint32_t)slotIdx;
+        preBars[0].subresourceRange.layerCount = 1;
+
+        preBars[1].sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        preBars[1].srcStageMask                = m_SwImageLayoutInited ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                                                                       : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        preBars[1].srcAccessMask               = m_SwImageLayoutInited ? VK_ACCESS_2_SHADER_READ_BIT : (VkAccessFlags2)0;
+        preBars[1].dstStageMask                = VK_PIPELINE_STAGE_2_COPY_BIT;
+        preBars[1].dstAccessMask               = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        preBars[1].oldLayout                   = m_SwImageLayoutInited
+                                                   ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                   : VK_IMAGE_LAYOUT_UNDEFINED;
+        preBars[1].newLayout                   = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        preBars[1].srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[1].dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[1].image                       = m_SwUploadImage;
+        preBars[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        preBars[1].subresourceRange.levelCount = 1;
+        preBars[1].subresourceRange.layerCount = 1;
+
+        VkDependencyInfo preDep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        preDep.imageMemoryBarrierCount = 2;
+        preDep.pImageMemoryBarriers    = preBars;
+        rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &preDep);
+
+        // Two-plane copy: Y (PLANE_0) + UV (PLANE_1, half-resolution chroma 4:2:0).
+        VkImageCopy copyRegions[2] = {};
+        copyRegions[0].srcSubresource.aspectMask     = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        copyRegions[0].srcSubresource.baseArrayLayer = (uint32_t)slotIdx;
+        copyRegions[0].srcSubresource.layerCount     = 1;
+        copyRegions[0].dstSubresource.aspectMask     = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        copyRegions[0].dstSubresource.baseArrayLayer = 0;
+        copyRegions[0].dstSubresource.layerCount     = 1;
+        copyRegions[0].extent                        = { (uint32_t)m_SwImageWidth, (uint32_t)m_SwImageHeight, 1 };
+        copyRegions[1] = copyRegions[0];
+        copyRegions[1].srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+        copyRegions[1].dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+        copyRegions[1].extent = { (uint32_t)m_SwImageWidth / 2, (uint32_t)m_SwImageHeight / 2, 1 };
+        if (pfnCmdCopyImage) {
+            pfnCmdCopyImage(m_DecodeCmdBuf,
+                curPic->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                m_SwUploadImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                2, copyRegions);
+        }
+
+        // Post-copy: DPB → DPB (so next decode reads it as ref OK), m_SwUploadImage → SHADER_READ_ONLY
+        VkImageMemoryBarrier2 postBars[2] = {};
+        postBars[0] = preBars[0];
+        postBars[0].srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT;
+        postBars[0].srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        postBars[0].dstStageMask  = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+        postBars[0].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR;
+        postBars[0].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        postBars[0].newLayout     = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+        postBars[1] = preBars[1];
+        postBars[1].srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT;
+        postBars[1].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        postBars[1].dstStageMask  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        postBars[1].dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+        postBars[1].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        postBars[1].newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkDependencyInfo postDep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        postDep.imageMemoryBarrierCount = 2;
+        postDep.pImageMemoryBarriers    = postBars;
+        rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &postDep);
+        m_SwImageLayoutInited = true;
+    }
+
     rt.EndCommandBuffer(m_DecodeCmdBuf);
 
     // §J.3.e.2.i.8 Phase 1.3d.2.b — drop signal semaphore: nothing waits on it
@@ -822,6 +913,10 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     curPic->layoutInited = true;
     m_DpbSlotActive[slotIdx] = true;   // slot is now usable as a reference
     m_DecodeSubmitCount++;
+    // §J.3.e.2.i.8 Phase 1.4 — publish the freshly decoded slot for renderFrameSw
+    // to copy into m_SwUploadImage.  Atomic store ensures cross-thread visibility
+    // (decode runs on submitNativeDecodeUnit thread, render on Pacer thread).
+    m_NewestDecodedSlot.store(slotIdx, std::memory_order_release);
     if (diagThisFrame) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d diag #%llu — "
@@ -909,19 +1004,29 @@ bool VkFrucRenderer::ensureDpbImagePool(int width, int height)
     // so all reference slots must view into the same backing image.  Per-slot
     // VkImageView selects via baseArrayLayer.  Drop SAMPLED (Phase 1.4 will
     // create a separate sampled view with VkSamplerYcbcrConversion attached).
+    // §J.3.e.2.i.8 Phase 1.4 — graphics queue family also reads this image
+    // (vkCmdCopyImage in renderFrameSw), so use CONCURRENT sharing across
+    // [graphics, decode] QFs (avoids ownership transfer barriers).  Add
+    // TRANSFER_SRC bit so the graphics QF can vkCmdCopyImage from any layer.
+    uint32_t qfs[2] = { m_QueueFamily, m_DecodeQueueFamily };
+    bool concurrent = (m_QueueFamily != m_DecodeQueueFamily);
+
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-    ici.pNext         = &profileList;
-    ici.imageType     = VK_IMAGE_TYPE_2D;
-    ici.format        = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
-    ici.extent        = { (uint32_t)alignedW, (uint32_t)alignedH, 1 };
-    ici.mipLevels     = 1;
-    ici.arrayLayers   = (uint32_t)VkFrucDecodeClient::kPicPoolSize;
-    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
-    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage         = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR
-                      | VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR;
-    ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
-    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ici.pNext                 = &profileList;
+    ici.imageType             = VK_IMAGE_TYPE_2D;
+    ici.format                = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+    ici.extent                = { (uint32_t)alignedW, (uint32_t)alignedH, 1 };
+    ici.mipLevels             = 1;
+    ici.arrayLayers           = (uint32_t)VkFrucDecodeClient::kPicPoolSize;
+    ici.samples               = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling                = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage                 = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR
+                              | VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR
+                              | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    ici.sharingMode           = concurrent ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
+    ici.queueFamilyIndexCount = concurrent ? 2u : 0u;
+    ici.pQueueFamilyIndices   = concurrent ? qfs : nullptr;
+    ici.initialLayout         = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkResult vr = pfnCreateImage(m_Device, &ici, nullptr, &m_DpbSharedImage);
     if (vr != VK_SUCCESS) {

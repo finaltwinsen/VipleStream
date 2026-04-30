@@ -3393,7 +3393,14 @@ bool VkFrucRenderer::createSwUploadResources(int width, int height)
         ici.samples       = VK_SAMPLE_COUNT_1_BIT;
         ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
         ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        // §J.3.e.2.i.8 Phase 1.4 — decode queue may also write to this image
+        // (vkCmdCopyImage from DPB layer).  Use CONCURRENT sharing across
+        // [graphics, decode] QFs to skip ownership transfer barriers.
+        uint32_t swQfs[2] = { m_QueueFamily, m_DecodeQueueFamily };
+        bool swConcurrent = (m_DecodeQueueFamily != UINT32_MAX) && (m_QueueFamily != m_DecodeQueueFamily);
+        ici.sharingMode           = swConcurrent ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
+        ici.queueFamilyIndexCount = swConcurrent ? 2u : 0u;
+        ici.pQueueFamilyIndices   = swConcurrent ? swQfs : nullptr;
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (pfnCreateImage(m_Device, &ici, nullptr, &m_SwUploadImage) != VK_SUCCESS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -4705,57 +4712,78 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     m_RtPfn.BeginCommandBuffer(cmd, &cbbi);
 
-    // 4a. Barrier upload image → TRANSFER_DST_OPTIMAL (oldLayout depends
-    // on whether this is the first frame).
-    VkImageLayout oldImgLayout = m_SwImageLayoutInited
-        ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-        : VK_IMAGE_LAYOUT_UNDEFINED;
-    VkImageMemoryBarrier toDstBar = {};
-    toDstBar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toDstBar.srcAccessMask       = m_SwImageLayoutInited ? VK_ACCESS_SHADER_READ_BIT : (VkAccessFlags)0;
-    toDstBar.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
-    toDstBar.oldLayout           = oldImgLayout;
-    toDstBar.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    toDstBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toDstBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toDstBar.image               = m_SwUploadImage;
-    toDstBar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    toDstBar.subresourceRange.levelCount = 1;
-    toDstBar.subresourceRange.layerCount = 1;
-    m_RtPfn.CmdPipelineBarrier(cmd,
-        m_SwImageLayoutInited ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                              : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &toDstBar);
+    // §J.3.e.2.i.8 Phase 1.4 — when native decode produced a fresh slot,
+    // the decode-queue cmd buffer (in submitDecodeFrame) already copied DPB→
+    // m_SwUploadImage and left it in SHADER_READ_ONLY layout.  Skip the
+    // staging upload + layout transitions entirely; just sample.
+    int nativeSlot = m_NewestDecodedSlot.load(std::memory_order_acquire);
+    bool useNativeDecode = (nativeSlot >= 0)
+                        && (m_DpbSharedImage != VK_NULL_HANDLE)
+                        && m_SwImageLayoutInited;
+    {
+        static std::atomic<uint64_t> s_renderCount{0};
+        uint64_t r = s_renderCount.fetch_add(1) + 1;
+        if (r == 1 || (r % 120) == 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-SW] §J.3.e.2.i.8 renderFrameSw#%llu — nativeSlot=%d "
+                        "useNative=%d", (unsigned long long)r, nativeSlot, (int)useNativeDecode);
+        }
+    }
 
-    // 4b. Copy staging → image (two regions, one per plane).
-    VkBufferImageCopy regions[2] = {};
-    // Y plane → PLANE_0
-    regions[0].bufferOffset      = 0;
-    regions[0].bufferRowLength   = (uint32_t)W;
-    regions[0].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
-    regions[0].imageSubresource.layerCount = 1;
-    regions[0].imageExtent       = { (uint32_t)W, (uint32_t)H, 1 };
-    // UV plane → PLANE_1 (half-resolution, R8G8 format)
-    regions[1].bufferOffset      = (VkDeviceSize)W * H;
-    regions[1].bufferRowLength   = (uint32_t)W / 2;
-    regions[1].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
-    regions[1].imageSubresource.layerCount = 1;
-    regions[1].imageExtent       = { (uint32_t)W / 2, (uint32_t)H / 2, 1 };
-    m_RtPfn.CmdCopyBufferToImage(cmd, m_SwStagingBuffer, m_SwUploadImage,
-                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                  2, regions);
+    if (!useNativeDecode) {
+        // 4a. Barrier upload image → TRANSFER_DST_OPTIMAL (oldLayout depends
+        // on whether this is the first frame).
+        VkImageLayout oldImgLayout = m_SwImageLayoutInited
+            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            : VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImageMemoryBarrier toDstBar = {};
+        toDstBar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toDstBar.srcAccessMask       = m_SwImageLayoutInited ? VK_ACCESS_SHADER_READ_BIT : (VkAccessFlags)0;
+        toDstBar.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toDstBar.oldLayout           = oldImgLayout;
+        toDstBar.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toDstBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDstBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDstBar.image               = m_SwUploadImage;
+        toDstBar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toDstBar.subresourceRange.levelCount = 1;
+        toDstBar.subresourceRange.layerCount = 1;
+        m_RtPfn.CmdPipelineBarrier(cmd,
+            m_SwImageLayoutInited ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                  : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &toDstBar);
 
-    // 4c. Barrier upload image → SHADER_READ_ONLY_OPTIMAL.
-    VkImageMemoryBarrier toShaderBar = toDstBar;  // copy template
-    toShaderBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    toShaderBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    toShaderBar.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    toShaderBar.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    m_RtPfn.CmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &toShaderBar);
+        // 4b. Staging buffer → image, two regions per plane.
+        VkBufferImageCopy regions[2] = {};
+        regions[0].bufferOffset      = 0;
+        regions[0].bufferRowLength   = (uint32_t)W;
+        regions[0].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        regions[0].imageSubresource.layerCount = 1;
+        regions[0].imageExtent       = { (uint32_t)W, (uint32_t)H, 1 };
+        regions[1].bufferOffset      = (VkDeviceSize)W * H;
+        regions[1].bufferRowLength   = (uint32_t)W / 2;
+        regions[1].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+        regions[1].imageSubresource.layerCount = 1;
+        regions[1].imageExtent       = { (uint32_t)W / 2, (uint32_t)H / 2, 1 };
+        m_RtPfn.CmdCopyBufferToImage(cmd, m_SwStagingBuffer, m_SwUploadImage,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      2, regions);
+
+        // 4c. Barrier upload image → SHADER_READ_ONLY_OPTIMAL.
+        VkImageMemoryBarrier toShaderBar = toDstBar;
+        toShaderBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toShaderBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        toShaderBar.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toShaderBar.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        m_RtPfn.CmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &toShaderBar);
+    }
+    // §J.3.e.2.i.8 Phase 1.4 — when useNativeDecode, decode-queue cmd buffer
+    // already wrote into m_SwUploadImage and left it in SHADER_READ_ONLY,
+    // so this whole 4a-4c upload block is skipped.
 
     // §J.3.e.2.i overlay：drain stash → memcpy 到 staging（可能 alloc 新
     // image 若尺寸變了），然後 uploadPendingOverlay 在 cmd buffer 內把

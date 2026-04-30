@@ -19,6 +19,7 @@
 #endif
 #include <vulkan/vulkan.h>
 
+#include <atomic>
 #include <map>
 #include <vector>
 
@@ -205,6 +206,10 @@ private:
     int            m_DpbAlignedH    = 0;
     VkImage        m_DpbSharedImage = VK_NULL_HANDLE;
     VkDeviceMemory m_DpbSharedMem   = VK_NULL_HANDLE;
+    // §J.3.e.2.i.8 Phase 1.4 — newest decoded slot index, set by submitDecodeFrame
+    // and consumed by renderFrameSw (atomic for cross-thread).  -1 = no native
+    // decode result yet, fall back to ffmpeg staging upload.
+    std::atomic<int> m_NewestDecodedSlot{-1};
     // §J.3.e.2.i.8 Phase 1.3d.2.d — single 2D_ARRAY view for video-decode
     // (NV vk_video_samples pattern).  vkCmdDecodeVideoKHR uses this view
     // with VkVideoPictureResourceInfoKHR.baseArrayLayer = slot index.

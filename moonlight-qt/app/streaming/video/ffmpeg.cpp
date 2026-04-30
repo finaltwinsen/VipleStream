@@ -2409,12 +2409,26 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     //
     // m_BackendRenderer 跟 m_FrontendRenderer 多半是同一個 (D3D11VA、VkFruc
     // 等都是 backend=frontend).  這裡查 backend 才是真正在 decode 的那位.
+    // §J.3.e.2.i.8 Phase 1.4 — VIPLE_VKFRUC_NATIVE_DECODE_PARALLEL=1 keeps
+    // FFmpeg path active so renderFrame is still driven by the existing
+    // pacer.  Our native parser gets fed the same NAL bytes for decoding,
+    // but FFmpeg also decodes (waste of CPU) so the SW upload path keeps
+    // showing video while the native path proves out the decode chain.
+    // Once Phase 1.4 has its own render trigger, this parallel mode goes away.
+    static const bool s_nativeDecodeParallel =
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_PARALLEL") != 0;
     if (m_BackendRenderer && m_BackendRenderer->acceptsNativeDecode()) {
         m_BackendRenderer->submitNativeDecodeUnit(
             reinterpret_cast<const uint8_t*>(m_Pkt->data), (size_t)m_Pkt->size);
-        m_FrameInfoQueue.enqueue(*du);
-        m_FramesIn++;
-        return DR_OK;
+        if (!s_nativeDecodeParallel) {
+            // Default: native-only — skip FFmpeg entirely (production path).
+            m_FrameInfoQueue.enqueue(*du);
+            m_FramesIn++;
+            return DR_OK;
+        }
+        // Parallel: fall through to also call avcodec_send_packet → ffmpeg path
+        // produces AVFrames → renderFrame fires → renderFrameSw can use the
+        // newest decoded slot from our native pipeline.
     }
 
     err = avcodec_send_packet(m_VideoDecoderCtx, m_Pkt);
