@@ -264,9 +264,13 @@ bool VkFrucDecodeClient::DecodePicture(VkParserPictureData* pParserPictureData)
     if (m_Parent && pParserPictureData) {
         const auto& hevc = pParserPictureData->CodecSpecific.hevc;
         m_Parent->onH265PictureParametersFromParser(hevc.pStdVps, hevc.pStdSps, hevc.pStdPps);
+
+        // §J.3.e.2.i.8 Phase 1.3d — record + submit vkCmdDecodeVideoKHR for IDR
+        // frames (P/B-frame reference handling lands in 1.3d.2).  Skips silently
+        // when prerequisites aren't ready yet (DPB pool, cmd buf, etc).
+        m_Parent->submitDecodeFrame(pParserPictureData);
     }
 
-    // Phase 1.3 — 在這裡呼叫 vkCmdDecodeVideoKHR.
     return true;
 }
 
@@ -454,6 +458,234 @@ bool VkFrucRenderer::onH265PictureParametersFromParser(
                 "seqCount=%u (cumul VPS-ids=%zu SPS-ids=%zu PPS-ids=%zu)",
                 addVps, addSps, addPps, m_H265SessionParamsSeq,
                 m_H265VpsSeqSeen.size(), m_H265SpsSeqSeen.size(), m_H265PpsSeqSeen.size());
+    return true;
+}
+
+
+// =============================================================================
+// VkFrucRenderer Phase 1.3d — per-frame vkCmdDecodeVideoKHR submission
+// =============================================================================
+
+bool VkFrucRenderer::loadDecodeRtPfns()
+{
+    if (m_DecodeRtPfnReady) return true;
+    if (m_Device == VK_NULL_HANDLE) return false;
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto& p = m_DecodeRtPfn;
+    p.BeginCommandBuffer       = (PFN_vkBeginCommandBuffer)getDevPa(m_Device, "vkBeginCommandBuffer");
+    p.EndCommandBuffer         = (PFN_vkEndCommandBuffer)getDevPa(m_Device, "vkEndCommandBuffer");
+    p.ResetCommandBuffer       = (PFN_vkResetCommandBuffer)getDevPa(m_Device, "vkResetCommandBuffer");
+    // Sync2: vkCmdPipelineBarrier2 was core in Vulkan 1.3; if absent we fall
+    // back to the KHR alias (sync2 extension promoted into core).
+    p.CmdPipelineBarrier2      = (PFN_vkCmdPipelineBarrier2)getDevPa(m_Device, "vkCmdPipelineBarrier2");
+    if (!p.CmdPipelineBarrier2) p.CmdPipelineBarrier2 = (PFN_vkCmdPipelineBarrier2)getDevPa(m_Device, "vkCmdPipelineBarrier2KHR");
+    p.CmdBeginVideoCodingKHR   = (PFN_vkCmdBeginVideoCodingKHR)getDevPa(m_Device, "vkCmdBeginVideoCodingKHR");
+    p.CmdEndVideoCodingKHR     = (PFN_vkCmdEndVideoCodingKHR)getDevPa(m_Device, "vkCmdEndVideoCodingKHR");
+    p.CmdControlVideoCodingKHR = (PFN_vkCmdControlVideoCodingKHR)getDevPa(m_Device, "vkCmdControlVideoCodingKHR");
+    p.CmdDecodeVideoKHR        = (PFN_vkCmdDecodeVideoKHR)getDevPa(m_Device, "vkCmdDecodeVideoKHR");
+    p.QueueSubmit              = (PFN_vkQueueSubmit)getDevPa(m_Device, "vkQueueSubmit");
+    p.WaitForFences            = (PFN_vkWaitForFences)getDevPa(m_Device, "vkWaitForFences");
+    p.ResetFences              = (PFN_vkResetFences)getDevPa(m_Device, "vkResetFences");
+    if (!p.BeginCommandBuffer || !p.EndCommandBuffer || !p.CmdBeginVideoCodingKHR
+        || !p.CmdEndVideoCodingKHR || !p.CmdControlVideoCodingKHR || !p.CmdDecodeVideoKHR
+        || !p.CmdPipelineBarrier2 || !p.QueueSubmit || !p.WaitForFences || !p.ResetFences) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d decode rt-PFN missing");
+        return false;
+    }
+    m_DecodeRtPfnReady = true;
+    return true;
+}
+
+bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
+{
+    if (!ppd || !m_DpbReady || !m_DecodeCmdReady
+        || m_VideoSession == VK_NULL_HANDLE
+        || m_VideoSessionParams == VK_NULL_HANDLE) {
+        m_DecodeSkipCount++;
+        return false;
+    }
+    if (!(m_VideoCodec & VIDEO_FORMAT_MASK_H265)) {
+        // Phase 1: H.265 only.  Other codecs land in Phase 2+.
+        m_DecodeSkipCount++;
+        return false;
+    }
+    if (!loadDecodeRtPfns()) {
+        m_DecodeSkipCount++;
+        return false;
+    }
+
+    const auto& hevc = ppd->CodecSpecific.hevc;
+
+    // Phase 1.3d.1 scope — IDR-only (no references).  P/B-frame reference
+    // handling lands in 1.3d.2.
+    int refCount = hevc.NumPocStCurrBefore + hevc.NumPocStCurrAfter + hevc.NumPocLtCurr;
+    if (refCount > 0) {
+        m_DecodeSkipCount++;
+        return false;
+    }
+
+    // pCurrPic is one of our VkFrucDecodeClient::VkFrucDpbPicture instances
+    // (handed out by AllocPictureBuffer).
+    auto* curPic = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(ppd->pCurrPic);
+    if (!curPic || curPic->image == VK_NULL_HANDLE || curPic->view == VK_NULL_HANDLE) {
+        m_DecodeSkipCount++;
+        return false;
+    }
+    int slotIdx = curPic->m_picIdx;
+
+    auto& bsBuf = ppd->bitstreamData;
+    if (!bsBuf || bsBuf->GetBuffer() == VK_NULL_HANDLE) {
+        m_DecodeSkipCount++;
+        return false;
+    }
+
+    // Slice segment offsets — parser stores them as stream markers in the bitstream
+    // buffer (one per slice).  numSlices was filled by VulkanVideoDecoder::end_of_picture.
+    uint32_t markerCount = 0;
+    const uint32_t* sliceOffsets = bsBuf->GetStreamMarkersPtr(ppd->firstSliceIndex, markerCount);
+    if (!sliceOffsets || markerCount == 0) {
+        m_DecodeSkipCount++;
+        return false;
+    }
+    if (markerCount > ppd->numSlices) markerCount = ppd->numSlices;
+
+    auto& rt = m_DecodeRtPfn;
+
+    // Wait for previous decode submission to complete (single cmd buffer pattern).
+    rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
+    rt.ResetFences(m_Device, 1, &m_DecodeFence);
+    rt.ResetCommandBuffer(m_DecodeCmdBuf, 0);
+
+    VkCommandBufferBeginInfo cbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    rt.BeginCommandBuffer(m_DecodeCmdBuf, &cbi);
+
+    // ── Layout transition: setup-ref/DST image to VIDEO_DECODE_DPB_KHR ──
+    // When DPB+DST coincide (NV typical), the same image acts as both setup
+    // reference and decode output, so we use VIDEO_DECODE_DPB_KHR layout for both.
+    // Sync2 because VK_ACCESS_*_VIDEO_DECODE_*_BIT_KHR / VK_PIPELINE_STAGE_*_VIDEO_DECODE_*
+    // only exist as the sync2 forms (no legacy aliases).
+    {
+        VkImageMemoryBarrier2 imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
+        imb.srcStageMask        = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        imb.srcAccessMask       = 0;
+        imb.dstStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+        imb.dstAccessMask       = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+        imb.oldLayout           = curPic->layoutInited ? VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR
+                                                       : VK_IMAGE_LAYOUT_UNDEFINED;
+        imb.newLayout           = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+        imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        imb.image               = curPic->image;
+        imb.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+        VkDependencyInfo dep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers    = &imb;
+        rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &dep);
+    }
+
+    // ── Setup-ref slot (current picture occupies one DPB slot) ──
+    StdVideoDecodeH265ReferenceInfo stdRefInfo = {};
+    stdRefInfo.PicOrderCntVal = hevc.CurrPicOrderCntVal;
+
+    VkVideoDecodeH265DpbSlotInfoKHR setupSlotH265 = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_DPB_SLOT_INFO_KHR };
+    setupSlotH265.pStdReferenceInfo = &stdRefInfo;
+
+    VkVideoPictureResourceInfoKHR setupResource = { VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR };
+    setupResource.codedOffset      = { 0, 0 };
+    setupResource.codedExtent      = { (uint32_t)m_DpbAlignedW, (uint32_t)m_DpbAlignedH };
+    setupResource.baseArrayLayer   = 0;
+    setupResource.imageViewBinding = curPic->view;
+
+    VkVideoReferenceSlotInfoKHR setupSlot = { VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR };
+    setupSlot.pNext            = &setupSlotH265;
+    setupSlot.slotIndex        = slotIdx;
+    setupSlot.pPictureResource = &setupResource;
+
+    // ── Begin video coding ──
+    VkVideoBeginCodingInfoKHR bci = { VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR };
+    bci.videoSession           = m_VideoSession;
+    bci.videoSessionParameters = m_VideoSessionParams;
+    bci.referenceSlotCount     = 1;          // setup slot only, IDR has no refs
+    bci.pReferenceSlots        = &setupSlot;
+    rt.CmdBeginVideoCodingKHR(m_DecodeCmdBuf, &bci);
+
+    // ── Reset session state on first submit ──
+    if (m_DecodeNeedsReset) {
+        VkVideoCodingControlInfoKHR cci = { VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR };
+        cci.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR;
+        rt.CmdControlVideoCodingKHR(m_DecodeCmdBuf, &cci);
+        m_DecodeNeedsReset = false;
+    }
+
+    // ── Decode ──
+    StdVideoDecodeH265PictureInfo stdPicInfo = {};
+    stdPicInfo.flags.IrapPicFlag                     = hevc.IrapPicFlag;
+    stdPicInfo.flags.IdrPicFlag                      = hevc.IdrPicFlag;
+    stdPicInfo.flags.IsReference                     = ppd->ref_pic_flag;
+    stdPicInfo.flags.short_term_ref_pic_set_sps_flag = hevc.short_term_ref_pic_set_sps_flag;
+    stdPicInfo.sps_video_parameter_set_id            = hevc.vps_video_parameter_set_id;
+    stdPicInfo.pps_seq_parameter_set_id              = hevc.seq_parameter_set_id;
+    stdPicInfo.pps_pic_parameter_set_id              = hevc.pic_parameter_set_id;
+    stdPicInfo.NumDeltaPocsOfRefRpsIdx               = (uint8_t)hevc.NumDeltaPocsOfRefRpsIdx;
+    stdPicInfo.PicOrderCntVal                        = hevc.CurrPicOrderCntVal;
+    stdPicInfo.NumBitsForSTRefPicSetInSlice          = (uint16_t)hevc.NumBitsForShortTermRPSInSlice;
+    // RefPicSet*: IDR has none, all zeros.
+
+    VkVideoDecodeH265PictureInfoKHR h265Pic = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PICTURE_INFO_KHR };
+    h265Pic.pStdPictureInfo      = &stdPicInfo;
+    h265Pic.sliceSegmentCount    = markerCount;
+    h265Pic.pSliceSegmentOffsets = sliceOffsets;
+
+    // Align srcBufferRange up — driver may require minBitstreamBufferSizeAlignment;
+    // 256 covers the typical Vulkan requirement (actual cap is queried later if needed).
+    VkDeviceSize alignedRange = (ppd->bitstreamDataLen + 255u) & ~VkDeviceSize(255);
+
+    VkVideoDecodeInfoKHR di = { VK_STRUCTURE_TYPE_VIDEO_DECODE_INFO_KHR };
+    di.pNext                = &h265Pic;
+    di.srcBuffer            = bsBuf->GetBuffer();
+    di.srcBufferOffset      = ppd->bitstreamDataOffset;
+    di.srcBufferRange       = alignedRange;
+    di.dstPictureResource   = setupResource;
+    di.pSetupReferenceSlot  = &setupSlot;
+    di.referenceSlotCount   = 0;
+    di.pReferenceSlots      = nullptr;
+    rt.CmdDecodeVideoKHR(m_DecodeCmdBuf, &di);
+
+    // ── End video coding ──
+    VkVideoEndCodingInfoKHR eci = { VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR };
+    rt.CmdEndVideoCodingKHR(m_DecodeCmdBuf, &eci);
+
+    rt.EndCommandBuffer(m_DecodeCmdBuf);
+
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount   = 1;
+    si.pCommandBuffers      = &m_DecodeCmdBuf;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores    = &m_DecodeDoneSem;
+    VkResult vr = rt.QueueSubmit(m_DecodeQueue, 1, &si, m_DecodeFence);
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d vkQueueSubmit rc=%d", (int)vr);
+        m_DecodeSkipCount++;
+        return false;
+    }
+
+    curPic->layoutInited = true;
+    m_DecodeSubmitCount++;
+    if (m_DecodeSubmitCount == 1 || (m_DecodeSubmitCount % 60) == 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d decode submitted #%llu "
+                    "(IDR slot=%d slices=%u srcRange=%llu skipped=%llu)",
+                    (unsigned long long)m_DecodeSubmitCount,
+                    slotIdx, markerCount,
+                    (unsigned long long)alignedRange,
+                    (unsigned long long)m_DecodeSkipCount);
+    }
     return true;
 }
 

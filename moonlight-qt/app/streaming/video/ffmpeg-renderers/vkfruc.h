@@ -215,6 +215,35 @@ private:
     // True until the very first vkCmdControlVideoCodingKHR with RESET fires
     // (driver requires session reset before first decode submit).
     bool            m_DecodeNeedsReset  = true;
+    uint64_t        m_DecodeSubmitCount = 0;
+    uint64_t        m_DecodeSkipCount   = 0;
+
+    // §J.3.e.2.i.8 Phase 1.3d — record + submit one decode frame.  Called from
+    // VkFrucDecodeClient::DecodePicture callback.  Returns true if submitted,
+    // false if skipped (P/B references not yet supported, or pre-conditions
+    // unmet).  forward decl avoids dragging nvvideoparser headers into vkfruc.h.
+    struct VkParserPictureData_;  // alias to avoid pulling header
+public:
+    bool submitDecodeFrame(struct VkParserPictureData* ppd);
+private:
+    // Decode-time PFN cache (looked up lazily on first submit).
+    // Uses sync2 barrier — VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR is only
+    // defined on the sync2 path; legacy VkAccessFlagBits has no VIDEO_DECODE_*.
+    struct {
+        PFN_vkBeginCommandBuffer       BeginCommandBuffer;
+        PFN_vkEndCommandBuffer         EndCommandBuffer;
+        PFN_vkResetCommandBuffer       ResetCommandBuffer;
+        PFN_vkCmdPipelineBarrier2      CmdPipelineBarrier2;
+        PFN_vkCmdBeginVideoCodingKHR   CmdBeginVideoCodingKHR;
+        PFN_vkCmdEndVideoCodingKHR     CmdEndVideoCodingKHR;
+        PFN_vkCmdControlVideoCodingKHR CmdControlVideoCodingKHR;
+        PFN_vkCmdDecodeVideoKHR        CmdDecodeVideoKHR;
+        PFN_vkQueueSubmit              QueueSubmit;
+        PFN_vkWaitForFences            WaitForFences;
+        PFN_vkResetFences              ResetFences;
+    } m_DecodeRtPfn = {};
+    bool m_DecodeRtPfnReady = false;
+    bool loadDecodeRtPfns();
 
     // Phase 1.2 — native NAL intercept hook (renderer.h interface).
     bool acceptsNativeDecode() const override;

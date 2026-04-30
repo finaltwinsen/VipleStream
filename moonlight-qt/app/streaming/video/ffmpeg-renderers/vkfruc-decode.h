@@ -70,9 +70,12 @@ public:
     // VkImageView (allocated lazily on first BeginSequence by the renderer's
     // ensureDpbImagePool helper).  vkPicBuffBase tracks parser refcount + slot id.
     struct VkFrucDpbPicture : public vkPicBuffBase {
-        VkImage        image  = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        VkImageView    view   = VK_NULL_HANDLE;
+        VkImage        image         = VK_NULL_HANDLE;
+        VkDeviceMemory memory        = VK_NULL_HANDLE;
+        VkImageView    view          = VK_NULL_HANDLE;
+        // Phase 1.3d — true once first vkCmdDecodeVideoKHR has populated this
+        // slot.  Controls UNDEFINED→DPB vs DPB→DPB barrier on subsequent decodes.
+        bool           layoutInited  = false;
     };
     static constexpr int kPicPoolSize = 17;
 
