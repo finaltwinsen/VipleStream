@@ -4900,6 +4900,10 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                          "[VIPLE-VKFRUC-SW] dual: vkQueueSubmit failed (%d)", (int)vr);
             return;
         }
+        // §J.3.e.2.i.8 Phase 1.4 proper — publish the fence so submitDecodeFrame
+        // (parser thread) can wait on it before recording the next decode's
+        // m_SwUploadImage write.  Avoids cross-queue race on shared image.
+        m_LastGraphicsFence.store(m_SlotInFlightFence[slot], std::memory_order_release);
 
         // Present interp (imgIdxA) first, real (imgIdxB) second.
         VkPresentInfoKHR piA = {};
@@ -4954,6 +4958,8 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                          "[VIPLE-VKFRUC-SW] vkQueueSubmit failed (%d)", (int)vr);
             return;
         }
+        // §J.3.e.2.i.8 Phase 1.4 proper — see dual-mode comment above.
+        m_LastGraphicsFence.store(m_SlotInFlightFence[slot], std::memory_order_release);
 
         VkPresentInfoKHR pi = {};
         pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;

@@ -210,6 +210,12 @@ private:
     // and consumed by renderFrameSw (atomic for cross-thread).  -1 = no native
     // decode result yet, fall back to ffmpeg staging upload.
     std::atomic<int> m_NewestDecodedSlot{-1};
+    // §J.3.e.2.i.8 Phase 1.4 proper — fence of the most recent graphics-queue
+    // submit that sampled m_SwUploadImage.  Decode submit waits on this before
+    // recording its own m_SwUploadImage write so the sample (graphics) finishes
+    // before the next overwrite (decode).  Atomic because set on render thread,
+    // read on parser/decode thread.
+    std::atomic<VkFence> m_LastGraphicsFence{VK_NULL_HANDLE};
     // §J.3.e.2.i.8 Phase 1.3d.2.d — single 2D_ARRAY view for video-decode
     // (NV vk_video_samples pattern).  vkCmdDecodeVideoKHR uses this view
     // with VkVideoPictureResourceInfoKHR.baseArrayLayer = slot index.

@@ -618,6 +618,15 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
 
     auto& rt = m_DecodeRtPfn;
 
+    // §J.3.e.2.i.8 Phase 1.4 proper — wait for prior graphics-queue submit
+    // (which samples m_SwUploadImage) to finish BEFORE we start recording
+    // the next decode's m_SwUploadImage overwrite.  This eliminates the
+    // cross-queue race that was killing v1.3.241 after ~300-480 frames.
+    VkFence gfxFence = m_LastGraphicsFence.load(std::memory_order_acquire);
+    if (gfxFence != VK_NULL_HANDLE) {
+        rt.WaitForFences(m_Device, 1, &gfxFence, VK_TRUE, UINT64_MAX);
+    }
+
     // Wait for previous decode submission to complete (single cmd buffer pattern).
     rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
     rt.ResetFences(m_Device, 1, &m_DecodeFence);
@@ -898,17 +907,15 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
         return false;
     }
 
-    // §J.3.e.2.i.8 Phase 1.4 sanity probe — drain GPU after every submit to
-    // prove/disprove the "no consumer = decode pipeline backlog" hypothesis.
-    // If this makes the stream stable, the device-lost is from missing
-    // graphics-queue consumer (Phase 1.4 graphics handoff will fix properly).
-    // If still unstable, Phase 1.4 won't help and we need NSight diag.
-    {
-        auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
-            m_Instance, "vkGetDeviceProcAddr");
-        auto pfnDeviceWaitIdle = (PFN_vkDeviceWaitIdle)getDevPa(m_Device, "vkDeviceWaitIdle");
-        if (pfnDeviceWaitIdle) pfnDeviceWaitIdle(m_Device);
-    }
+    // §J.3.e.2.i.8 Phase 1.4 proper (v1.3.235→242 transition):
+    // vkDeviceWaitIdle removed.  Cross-queue sync now handled by:
+    //  - Decode submit START waits on m_LastGraphicsFence (graphics finished
+    //    sampling m_SwUploadImage before we overwrite it).
+    //  - Decode submit END signals m_DecodeFence (already), so the next
+    //    submitDecodeFrame's WaitForFences below blocks until prior decode
+    //    finished writing.  Graphics' own per-slot fences guard their reads.
+    // The decode-queue cmd buffer's sync2 image barriers (around vkCmdCopyImage)
+    // handle the WITHIN-queue write→write ordering on m_SwUploadImage.
 
     curPic->layoutInited = true;
     m_DpbSlotActive[slotIdx] = true;   // slot is now usable as a reference
