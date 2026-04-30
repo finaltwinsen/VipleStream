@@ -194,9 +194,21 @@ private:
     // §J.3.e.2.i.8 Phase 1.3b — DPB image pool state.  m_DpbReady gates per-frame
     // decode submission until the pool is provisioned at the actual stream
     // resolution (rounded up to a 64-pixel multiple for HEVC CTU alignment).
-    bool m_DpbReady       = false;
-    int  m_DpbAlignedW    = 0;
-    int  m_DpbAlignedH    = 0;
+    //
+    // §J.3.e.2.i.8 Phase 1.3d.2.b — refactored from N independent VkImage to
+    // ONE VkImage with arrayLayers=kPicPoolSize: NV HEVC profile doesn't
+    // expose VK_VIDEO_CAPABILITY_SEPARATE_REFERENCE_IMAGES_BIT_KHR, so all
+    // DPB slots must alias the same underlying VkImage.  Each slot still has
+    // a unique VkImageView with its own baseArrayLayer.
+    bool           m_DpbReady       = false;
+    int            m_DpbAlignedW    = 0;
+    int            m_DpbAlignedH    = 0;
+    VkImage        m_DpbSharedImage = VK_NULL_HANDLE;
+    VkDeviceMemory m_DpbSharedMem   = VK_NULL_HANDLE;
+    // Per-slot active state — flipped to true after the slot has been used as
+    // pSetupReferenceSlot in a successful vkCmdDecodeVideoKHR submission.
+    // Drives setupSlot.slotIndex in BeginCoding (must be -1 until activated).
+    bool           m_DpbSlotActive[17] = {};
 
     // §J.3.e.2.i.8 Phase 1.3c — decode queue + cmd pool + per-frame sync.
     //

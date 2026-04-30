@@ -547,6 +547,8 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
         if (!p || p->image == VK_NULL_HANDLE || p->view == VK_NULL_HANDLE) return;
         int slot = p->m_picIdx;
         if (slot < 0 || slot >= VkFrucDecodeClient::kPicPoolSize) return;
+        if (slot == slotIdx) return;        // never include current pic among refs
+        if (!m_DpbSlotActive[slot]) return;  // skip slots not yet activated by a prior decode
         if (seenSlot[slot]) return;
         seenSlot[slot] = true;
 
@@ -606,58 +608,39 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     rt.BeginCommandBuffer(m_DecodeCmdBuf, &cbi);
 
     // ── Layout transitions + cache flush via sync2 image barriers ──
-    // (1) setup-ref/DST image: prior DPB → DPB (or UNDEFINED → DPB on first use).
-    //     When DPB+DST coincide (NV typical), same image acts as both setup-ref
-    //     and decode output, layout = VIDEO_DECODE_DPB_KHR for both.
-    // (2) each active reference image: DPB → DPB with VIDEO_DECODE_WRITE →
-    //     VIDEO_DECODE_READ to force cache flush of prior decode's writes.
-    //     Without (2), driver may read stale data → device-lost after a few
-    //     P-frames (validated empirically: IDR + 59 P-frames OK, then rc=-4).
+    // §J.3.e.2.i.8 Phase 1.3d.2.b — all DPB slots back the same VkImage
+    // (NV's HEVC profile lacks SEPARATE_REFERENCE_IMAGES capability).  Each
+    // barrier targets a single array layer via subresourceRange.baseArrayLayer.
     {
         constexpr int kMaxBarriers = 1 + kMaxRefs;
         VkImageMemoryBarrier2 barriers[kMaxBarriers] = {};
         int barrierCount = 0;
 
-        // Setup-ref/DST barrier
-        {
+        auto fillBarrier = [&](VkImage img, uint32_t layer, bool isRefRead, bool initFromUndefined) {
             auto& imb = barriers[barrierCount++];
             imb.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
             imb.srcStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
-            imb.srcAccessMask       = curPic->layoutInited ? VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR : 0;
+            imb.srcAccessMask       = initFromUndefined ? 0 : VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
             imb.dstStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
-            imb.dstAccessMask       = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
-            imb.oldLayout           = curPic->layoutInited ? VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR
-                                                           : VK_IMAGE_LAYOUT_UNDEFINED;
+            imb.dstAccessMask       = isRefRead ? VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR
+                                                : VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+            imb.oldLayout           = initFromUndefined ? VK_IMAGE_LAYOUT_UNDEFINED
+                                                        : VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
             imb.newLayout           = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
             imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            imb.image               = curPic->image;
-            imb.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        }
+            imb.image               = img;
+            imb.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, layer, 1 };
+        };
 
-        // Reference image barriers
+        // Setup/dst layer barrier
+        fillBarrier(curPic->image, (uint32_t)slotIdx, /*isRefRead*/false,
+                    /*initFromUndefined*/!curPic->layoutInited);
+
+        // Reference layer barriers (cache flush from prior write → current read)
         for (int i = 0; i < activeRefCount; i++) {
-            auto* p = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(nullptr);
-            // Walk RefPics[] to recover the picture pointer matching this slot.
-            // (We only stored slot index in refSlots; recover via seenSlot map
-            // is unnecessary — we can scan RefPics[].)
-            for (int j = 0; j < 16; j++) {
-                auto* q = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(hevc.RefPics[j]);
-                if (q && q->m_picIdx == refSlots[i].slotIndex) { p = q; break; }
-            }
-            if (!p || p->image == VK_NULL_HANDLE) continue;
-            auto& imb = barriers[barrierCount++];
-            imb.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-            imb.srcStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
-            imb.srcAccessMask       = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
-            imb.dstStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
-            imb.dstAccessMask       = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR;
-            imb.oldLayout           = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
-            imb.newLayout           = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
-            imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            imb.image               = p->image;
-            imb.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            fillBarrier(curPic->image, (uint32_t)refSlots[i].slotIndex,
+                        /*isRefRead*/true, /*initFromUndefined*/false);
         }
 
         VkDependencyInfo dep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
@@ -666,7 +649,7 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
         rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &dep);
     }
 
-    // ── Setup-ref slot (current picture occupies one DPB slot) ──
+    // ── Setup-ref slot (current picture's slot) ──
     StdVideoDecodeH265ReferenceInfo stdRefInfo = {};
     stdRefInfo.PicOrderCntVal = hevc.CurrPicOrderCntVal;
 
@@ -676,20 +659,26 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     VkVideoPictureResourceInfoKHR setupResource = { VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR };
     setupResource.codedOffset      = { 0, 0 };
     setupResource.codedExtent      = { (uint32_t)m_DpbAlignedW, (uint32_t)m_DpbAlignedH };
-    setupResource.baseArrayLayer   = 0;
+    setupResource.baseArrayLayer   = 0;          // imageView already selects the layer
     setupResource.imageViewBinding = curPic->view;
 
-    VkVideoReferenceSlotInfoKHR setupSlot = { VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR };
-    setupSlot.pNext            = &setupSlotH265;
-    setupSlot.slotIndex        = slotIdx;
-    setupSlot.pPictureResource = &setupResource;
+    // Spec: in BeginCoding's pReferenceSlots, an entry with slotIndex=-1 means
+    // "this slot is being activated/re-activated in this scope".  Active slots
+    // (already set up) use their actual slotIndex.
+    // DecodeInfo.pSetupReferenceSlot always uses the actual target slotIndex.
+    VkVideoReferenceSlotInfoKHR setupSlotInBegin = { VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR };
+    setupSlotInBegin.pNext            = &setupSlotH265;
+    setupSlotInBegin.slotIndex        = m_DpbSlotActive[slotIdx] ? slotIdx : -1;
+    setupSlotInBegin.pPictureResource = &setupResource;
+
+    VkVideoReferenceSlotInfoKHR setupSlotInDecode = setupSlotInBegin;
+    setupSlotInDecode.slotIndex = slotIdx;
 
     // ── Begin video coding ──
-    // BeginCoding lists all DPB slots used in this coding scope: the setup
-    // slot (current pic) + every active reference.  DecodeInfo's reference
-    // list is just the inputs (refs only, no setup).
+    // BeginCoding lists all DPB slots used in this scope: the setup slot
+    // (slotIndex=-1 if first activation, else slotIdx) + every active reference.
     VkVideoReferenceSlotInfoKHR allCodingSlots[1 + kMaxRefs];
-    allCodingSlots[0] = setupSlot;
+    allCodingSlots[0] = setupSlotInBegin;
     for (int i = 0; i < activeRefCount; i++) allCodingSlots[1 + i] = refSlots[i];
 
     VkVideoBeginCodingInfoKHR bci = { VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR };
@@ -705,6 +694,8 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
         cci.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR;
         rt.CmdControlVideoCodingKHR(m_DecodeCmdBuf, &cci);
         m_DecodeNeedsReset = false;
+        // Session RESET deactivates all DPB slots — sync our tracking.
+        for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) m_DpbSlotActive[i] = false;
     }
 
     // ── Decode ──
@@ -757,7 +748,7 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     di.srcBufferOffset      = ppd->bitstreamDataOffset;
     di.srcBufferRange       = alignedRange;
     di.dstPictureResource   = setupResource;
-    di.pSetupReferenceSlot  = &setupSlot;
+    di.pSetupReferenceSlot  = &setupSlotInDecode;     // slotIndex = real target (>=0)
     di.referenceSlotCount   = (uint32_t)activeRefCount;
     di.pReferenceSlots      = activeRefCount > 0 ? refSlots : nullptr;
     rt.CmdDecodeVideoKHR(m_DecodeCmdBuf, &di);
@@ -768,11 +759,16 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
 
     rt.EndCommandBuffer(m_DecodeCmdBuf);
 
+    // §J.3.e.2.i.8 Phase 1.3d.2.b — drop signal semaphore: nothing waits on it
+    // in Phase 1.3 (graphics-queue handoff lives in Phase 1.4).  Repeatedly
+    // signaling a binary semaphore without a wait between signals is a spec
+    // violation (VUID-vkQueueSubmit-pCommandBuffers-00065).  Phase 1.4 will
+    // re-introduce signal+wait when the decoded image flows to the renderer.
     VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount   = 1;
     si.pCommandBuffers      = &m_DecodeCmdBuf;
-    si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores    = &m_DecodeDoneSem;
+    si.signalSemaphoreCount = 0;
+    si.pSignalSemaphores    = nullptr;
     VkResult vr = rt.QueueSubmit(m_DecodeQueue, 1, &si, m_DecodeFence);
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -782,6 +778,7 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     }
 
     curPic->layoutInited = true;
+    m_DpbSlotActive[slotIdx] = true;   // slot is now usable as a reference
     m_DecodeSubmitCount++;
     if (m_DecodeSubmitCount == 1 || (m_DecodeSubmitCount % 60) == 0) {
         const char* picType = hevc.IdrPicFlag ? "IDR" :
@@ -850,78 +847,80 @@ bool VkFrucRenderer::ensureDpbImagePool(int width, int height)
     profileList.pProfiles    = &m_VideoProfile;
 
     auto& pool = m_NvParser->client->m_PicPool;
+
+    // §J.3.e.2.i.8 Phase 1.3d.2.b — single VkImage with arrayLayers=kPicPoolSize.
+    // NV HEVC profile lacks VK_VIDEO_CAPABILITY_SEPARATE_REFERENCE_IMAGES_BIT_KHR,
+    // so all reference slots must view into the same backing image.  Per-slot
+    // VkImageView selects via baseArrayLayer.  Drop SAMPLED (Phase 1.4 will
+    // create a separate sampled view with VkSamplerYcbcrConversion attached).
+    VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.pNext         = &profileList;
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+    ici.extent        = { (uint32_t)alignedW, (uint32_t)alignedH, 1 };
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = (uint32_t)VkFrucDecodeClient::kPicPoolSize;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR
+                      | VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR;
+    ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkResult vr = pfnCreateImage(m_Device, &ici, nullptr, &m_DpbSharedImage);
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b shared DPB vkCreateImage rc=%d "
+                     "%dx%d arrayLayers=%d", (int)vr, alignedW, alignedH,
+                     VkFrucDecodeClient::kPicPoolSize);
+        destroyDpbImagePool();
+        return false;
+    }
+
+    VkMemoryRequirements memReq = {};
+    pfnGetImageMemReq(m_Device, m_DpbSharedImage, &memReq);
+    int mti = findDeviceLocal(memReq.memoryTypeBits);
+    if (mti < 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b no DEVICE_LOCAL memory type "
+                     "(typeBits=0x%x)", memReq.memoryTypeBits);
+        destroyDpbImagePool();
+        return false;
+    }
+    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = memReq.size;
+    mai.memoryTypeIndex = (uint32_t)mti;
+    vr = pfnAllocMem(m_Device, &mai, nullptr, &m_DpbSharedMem);
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b shared DPB vkAllocateMemory rc=%d size=%llu",
+                     (int)vr, (unsigned long long)memReq.size);
+        destroyDpbImagePool();
+        return false;
+    }
+    vr = pfnBindImageMem(m_Device, m_DpbSharedImage, m_DpbSharedMem, 0);
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b vkBindImageMemory rc=%d", (int)vr);
+        destroyDpbImagePool();
+        return false;
+    }
+
+    // Per-slot views: each selects a single array layer of the shared image.
     for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) {
-        // ── VkImage ──
-        VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-        ici.pNext         = &profileList;
-        ici.imageType     = VK_IMAGE_TYPE_2D;
-        ici.format        = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;  // NV12
-        ici.extent        = { (uint32_t)alignedW, (uint32_t)alignedH, 1 };
-        ici.mipLevels     = 1;
-        ici.arrayLayers   = 1;
-        ici.samples       = VK_SAMPLE_COUNT_1_BIT;
-        ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
-        // DPB+DST so single image serves both reference & output (NV typical
-        // capability: DPB_AND_OUTPUT_COINCIDE).  SAMPLED so Phase 1.4 can
-        // sample directly without a copy.
-        ici.usage         = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR
-                          | VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR
-                          | VK_IMAGE_USAGE_SAMPLED_BIT;
-        ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
-        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        pool[i].image  = m_DpbSharedImage;          // shared backing image
+        pool[i].memory = VK_NULL_HANDLE;            // memory owned by renderer
 
-        VkResult vr = pfnCreateImage(m_Device, &ici, nullptr, &pool[i].image);
-        if (vr != VK_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b vkCreateImage[%d] rc=%d "
-                         "%dx%d", i, (int)vr, alignedW, alignedH);
-            destroyDpbImagePool();
-            return false;
-        }
-
-        VkMemoryRequirements memReq = {};
-        pfnGetImageMemReq(m_Device, pool[i].image, &memReq);
-        int mti = findDeviceLocal(memReq.memoryTypeBits);
-        if (mti < 0) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b no DEVICE_LOCAL memory type "
-                         "for DPB image[%d] (typeBits=0x%x)", i, memReq.memoryTypeBits);
-            destroyDpbImagePool();
-            return false;
-        }
-        VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        mai.allocationSize  = memReq.size;
-        mai.memoryTypeIndex = (uint32_t)mti;
-        vr = pfnAllocMem(m_Device, &mai, nullptr, &pool[i].memory);
-        if (vr != VK_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b vkAllocateMemory[%d] rc=%d size=%llu",
-                         i, (int)vr, (unsigned long long)memReq.size);
-            destroyDpbImagePool();
-            return false;
-        }
-        vr = pfnBindImageMem(m_Device, pool[i].image, pool[i].memory, 0);
-        if (vr != VK_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b vkBindImageMemory[%d] rc=%d",
-                         i, (int)vr);
-            destroyDpbImagePool();
-            return false;
-        }
-
-        // ── VkImageView (full plane, COLOR aspect — NV12 multi-plane is treated
-        // as single COLOR aspect at this level; ycbcr conversion samplers handle
-        // plane disaggregation downstream) ──
         VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-        vci.image                       = pool[i].image;
-        vci.viewType                    = VK_IMAGE_VIEW_TYPE_2D;
-        vci.format                      = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
-        vci.components                  = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+        vci.image                           = m_DpbSharedImage;
+        vci.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format                          = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+        vci.components                      = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
         vci.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
         vci.subresourceRange.baseMipLevel   = 0;
         vci.subresourceRange.levelCount     = 1;
-        vci.subresourceRange.baseArrayLayer = 0;
+        vci.subresourceRange.baseArrayLayer = (uint32_t)i;
         vci.subresourceRange.layerCount     = 1;
         vr = pfnCreateImageView(m_Device, &vci, nullptr, &pool[i].view);
         if (vr != VK_SUCCESS) {
@@ -933,20 +932,23 @@ bool VkFrucRenderer::ensureDpbImagePool(int width, int height)
         }
     }
 
+    // All slots inactive until they've been pSetupReferenceSlot of a decode submit.
+    for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) m_DpbSlotActive[i] = false;
+
     m_DpbReady    = true;
     m_DpbAlignedW = alignedW;
     m_DpbAlignedH = alignedH;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3b DPB image pool ready — "
-                "%d slots @ %dx%d NV12 (req %dx%d, aligned to 64-pixel CTB grid)",
-                VkFrucDecodeClient::kPicPoolSize, alignedW, alignedH, width, height);
+                "1 shared VkImage @ %dx%d NV12 × %d array layers (req %dx%d, "
+                "DPB|DST usage; sampling deferred to Phase 1.4)",
+                alignedW, alignedH, VkFrucDecodeClient::kPicPoolSize, width, height);
     return true;
 }
 
 void VkFrucRenderer::destroyDpbImagePool()
 {
     if (m_Device == VK_NULL_HANDLE) return;
-    if (!m_NvParser || !m_NvParser->client) return;
 
     auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetDeviceProcAddr");
@@ -954,22 +956,29 @@ void VkFrucRenderer::destroyDpbImagePool()
     auto pfnDestroyImage     = (PFN_vkDestroyImage)getDevPa(m_Device, "vkDestroyImage");
     auto pfnFreeMem          = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
 
-    auto& pool = m_NvParser->client->m_PicPool;
-    for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) {
-        if (pool[i].view  != VK_NULL_HANDLE && pfnDestroyImageView)
-            pfnDestroyImageView(m_Device, pool[i].view, nullptr);
-        if (pool[i].image != VK_NULL_HANDLE && pfnDestroyImage)
-            pfnDestroyImage(m_Device, pool[i].image, nullptr);
-        if (pool[i].memory != VK_NULL_HANDLE && pfnFreeMem)
-            pfnFreeMem(m_Device, pool[i].memory, nullptr);
-        pool[i].view   = VK_NULL_HANDLE;
-        pool[i].image  = VK_NULL_HANDLE;
-        pool[i].memory = VK_NULL_HANDLE;
-        pool[i].Reset();  // refcount → 0 so subsequent IsAvailable returns true
+    // Per-slot views (one per array layer) — only walk if parser/client still alive.
+    if (m_NvParser && m_NvParser->client) {
+        auto& pool = m_NvParser->client->m_PicPool;
+        for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) {
+            if (pool[i].view != VK_NULL_HANDLE && pfnDestroyImageView)
+                pfnDestroyImageView(m_Device, pool[i].view, nullptr);
+            pool[i].view   = VK_NULL_HANDLE;
+            pool[i].image  = VK_NULL_HANDLE;  // backing was shared, freed below
+            pool[i].memory = VK_NULL_HANDLE;
+            pool[i].layoutInited = false;
+            pool[i].Reset();
+        }
     }
-    m_DpbReady    = false;
-    m_DpbAlignedW = 0;
-    m_DpbAlignedH = 0;
+    if (m_DpbSharedImage != VK_NULL_HANDLE && pfnDestroyImage)
+        pfnDestroyImage(m_Device, m_DpbSharedImage, nullptr);
+    if (m_DpbSharedMem != VK_NULL_HANDLE && pfnFreeMem)
+        pfnFreeMem(m_Device, m_DpbSharedMem, nullptr);
+    m_DpbSharedImage = VK_NULL_HANDLE;
+    m_DpbSharedMem   = VK_NULL_HANDLE;
+    m_DpbReady       = false;
+    m_DpbAlignedW    = 0;
+    m_DpbAlignedH    = 0;
+    for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) m_DpbSlotActive[i] = false;
 }
 
 
