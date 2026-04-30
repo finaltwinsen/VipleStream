@@ -519,14 +519,6 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
 
     const auto& hevc = ppd->CodecSpecific.hevc;
 
-    // Phase 1.3d.1 scope — IDR-only (no references).  P/B-frame reference
-    // handling lands in 1.3d.2.
-    int refCount = hevc.NumPocStCurrBefore + hevc.NumPocStCurrAfter + hevc.NumPocLtCurr;
-    if (refCount > 0) {
-        m_DecodeSkipCount++;
-        return false;
-    }
-
     // pCurrPic is one of our VkFrucDecodeClient::VkFrucDpbPicture instances
     // (handed out by AllocPictureBuffer).
     auto* curPic = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(ppd->pCurrPic);
@@ -535,6 +527,56 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
         return false;
     }
     int slotIdx = curPic->m_picIdx;
+
+    // §J.3.e.2.i.8 Phase 1.3d.2 — collect active reference DPB slots.
+    // hevc.RefPicSetStCurrBefore/After/LtCurr are int8_t[8] containing INDICES
+    // INTO hevc.RefPics[16] (NOT directly DPB slot indices).  We dereference
+    // RefPics[j] to get the VkFrucDpbPicture* and read its m_picIdx for the
+    // actual DPB slot, deduping by slot.
+    constexpr int kMaxRefs = 16;
+    StdVideoDecodeH265ReferenceInfo refStdInfos[kMaxRefs] = {};
+    VkVideoDecodeH265DpbSlotInfoKHR refH265Slots[kMaxRefs] = {};
+    VkVideoPictureResourceInfoKHR   refResources[kMaxRefs] = {};
+    VkVideoReferenceSlotInfoKHR     refSlots[kMaxRefs]     = {};
+    int  activeRefCount = 0;
+    bool seenSlot[VkFrucDecodeClient::kPicPoolSize] = {};
+
+    auto collectRef = [&](int j) {
+        if (j < 0 || j >= 16) return;
+        auto* p = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(hevc.RefPics[j]);
+        if (!p || p->image == VK_NULL_HANDLE || p->view == VK_NULL_HANDLE) return;
+        int slot = p->m_picIdx;
+        if (slot < 0 || slot >= VkFrucDecodeClient::kPicPoolSize) return;
+        if (seenSlot[slot]) return;
+        seenSlot[slot] = true;
+
+        auto& sri = refStdInfos[activeRefCount];
+        sri.PicOrderCntVal = hevc.PicOrderCntVal[j];
+        sri.flags.used_for_long_term_reference = hevc.IsLongTerm[j] ? 1 : 0;
+        sri.flags.unused_for_reference         = 0;
+
+        auto& slotH265 = refH265Slots[activeRefCount];
+        slotH265.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_DPB_SLOT_INFO_KHR;
+        slotH265.pStdReferenceInfo = &sri;
+
+        auto& res = refResources[activeRefCount];
+        res.sType            = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
+        res.codedOffset      = { 0, 0 };
+        res.codedExtent      = { (uint32_t)m_DpbAlignedW, (uint32_t)m_DpbAlignedH };
+        res.baseArrayLayer   = 0;
+        res.imageViewBinding = p->view;
+
+        auto& s = refSlots[activeRefCount];
+        s.sType            = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
+        s.pNext            = &slotH265;
+        s.slotIndex        = slot;
+        s.pPictureResource = &res;
+
+        activeRefCount++;
+    };
+    for (int i = 0; i < hevc.NumPocStCurrBefore && i < 8; i++) collectRef(hevc.RefPicSetStCurrBefore[i]);
+    for (int i = 0; i < hevc.NumPocStCurrAfter  && i < 8; i++) collectRef(hevc.RefPicSetStCurrAfter[i]);
+    for (int i = 0; i < hevc.NumPocLtCurr       && i < 8; i++) collectRef(hevc.RefPicSetLtCurr[i]);
 
     auto& bsBuf = ppd->bitstreamData;
     if (!bsBuf || bsBuf->GetBuffer() == VK_NULL_HANDLE) {
@@ -563,28 +605,64 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     rt.BeginCommandBuffer(m_DecodeCmdBuf, &cbi);
 
-    // ── Layout transition: setup-ref/DST image to VIDEO_DECODE_DPB_KHR ──
-    // When DPB+DST coincide (NV typical), the same image acts as both setup
-    // reference and decode output, so we use VIDEO_DECODE_DPB_KHR layout for both.
-    // Sync2 because VK_ACCESS_*_VIDEO_DECODE_*_BIT_KHR / VK_PIPELINE_STAGE_*_VIDEO_DECODE_*
-    // only exist as the sync2 forms (no legacy aliases).
+    // ── Layout transitions + cache flush via sync2 image barriers ──
+    // (1) setup-ref/DST image: prior DPB → DPB (or UNDEFINED → DPB on first use).
+    //     When DPB+DST coincide (NV typical), same image acts as both setup-ref
+    //     and decode output, layout = VIDEO_DECODE_DPB_KHR for both.
+    // (2) each active reference image: DPB → DPB with VIDEO_DECODE_WRITE →
+    //     VIDEO_DECODE_READ to force cache flush of prior decode's writes.
+    //     Without (2), driver may read stale data → device-lost after a few
+    //     P-frames (validated empirically: IDR + 59 P-frames OK, then rc=-4).
     {
-        VkImageMemoryBarrier2 imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
-        imb.srcStageMask        = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-        imb.srcAccessMask       = 0;
-        imb.dstStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
-        imb.dstAccessMask       = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
-        imb.oldLayout           = curPic->layoutInited ? VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR
-                                                       : VK_IMAGE_LAYOUT_UNDEFINED;
-        imb.newLayout           = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
-        imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        imb.image               = curPic->image;
-        imb.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        constexpr int kMaxBarriers = 1 + kMaxRefs;
+        VkImageMemoryBarrier2 barriers[kMaxBarriers] = {};
+        int barrierCount = 0;
+
+        // Setup-ref/DST barrier
+        {
+            auto& imb = barriers[barrierCount++];
+            imb.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            imb.srcStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+            imb.srcAccessMask       = curPic->layoutInited ? VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR : 0;
+            imb.dstStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+            imb.dstAccessMask       = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+            imb.oldLayout           = curPic->layoutInited ? VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR
+                                                           : VK_IMAGE_LAYOUT_UNDEFINED;
+            imb.newLayout           = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+            imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imb.image               = curPic->image;
+            imb.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        }
+
+        // Reference image barriers
+        for (int i = 0; i < activeRefCount; i++) {
+            auto* p = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(nullptr);
+            // Walk RefPics[] to recover the picture pointer matching this slot.
+            // (We only stored slot index in refSlots; recover via seenSlot map
+            // is unnecessary — we can scan RefPics[].)
+            for (int j = 0; j < 16; j++) {
+                auto* q = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(hevc.RefPics[j]);
+                if (q && q->m_picIdx == refSlots[i].slotIndex) { p = q; break; }
+            }
+            if (!p || p->image == VK_NULL_HANDLE) continue;
+            auto& imb = barriers[barrierCount++];
+            imb.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            imb.srcStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+            imb.srcAccessMask       = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+            imb.dstStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+            imb.dstAccessMask       = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR;
+            imb.oldLayout           = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+            imb.newLayout           = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+            imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imb.image               = p->image;
+            imb.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        }
 
         VkDependencyInfo dep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-        dep.imageMemoryBarrierCount = 1;
-        dep.pImageMemoryBarriers    = &imb;
+        dep.imageMemoryBarrierCount = (uint32_t)barrierCount;
+        dep.pImageMemoryBarriers    = barriers;
         rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &dep);
     }
 
@@ -607,11 +685,18 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     setupSlot.pPictureResource = &setupResource;
 
     // ── Begin video coding ──
+    // BeginCoding lists all DPB slots used in this coding scope: the setup
+    // slot (current pic) + every active reference.  DecodeInfo's reference
+    // list is just the inputs (refs only, no setup).
+    VkVideoReferenceSlotInfoKHR allCodingSlots[1 + kMaxRefs];
+    allCodingSlots[0] = setupSlot;
+    for (int i = 0; i < activeRefCount; i++) allCodingSlots[1 + i] = refSlots[i];
+
     VkVideoBeginCodingInfoKHR bci = { VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR };
     bci.videoSession           = m_VideoSession;
     bci.videoSessionParameters = m_VideoSessionParams;
-    bci.referenceSlotCount     = 1;          // setup slot only, IDR has no refs
-    bci.pReferenceSlots        = &setupSlot;
+    bci.referenceSlotCount     = (uint32_t)(1 + activeRefCount);
+    bci.pReferenceSlots        = allCodingSlots;
     rt.CmdBeginVideoCodingKHR(m_DecodeCmdBuf, &bci);
 
     // ── Reset session state on first submit ──
@@ -634,7 +719,28 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     stdPicInfo.NumDeltaPocsOfRefRpsIdx               = (uint8_t)hevc.NumDeltaPocsOfRefRpsIdx;
     stdPicInfo.PicOrderCntVal                        = hevc.CurrPicOrderCntVal;
     stdPicInfo.NumBitsForSTRefPicSetInSlice          = (uint16_t)hevc.NumBitsForShortTermRPSInSlice;
-    // RefPicSet*: IDR has none, all zeros.
+    // §J.3.e.2.i.8 Phase 1.3d.2 — fill RefPicSet*StCurrBefore/After/LtCurr arrays.
+    // These uint8_t[8] entries are DPB slot indices (NOT indices into RefPics[]).
+    // Convert via: parser_idx → RefPics[parser_idx] → VkFrucDpbPicture::m_picIdx.
+    // Unused entries left as 0xFF defensively (driver should ignore beyond active count).
+    for (int i = 0; i < 8; i++) {
+        stdPicInfo.RefPicSetStCurrBefore[i] = 0xFF;
+        stdPicInfo.RefPicSetStCurrAfter[i]  = 0xFF;
+        stdPicInfo.RefPicSetLtCurr[i]       = 0xFF;
+    }
+    auto fillStdRefSlot = [&](uint8_t* dst, const int8_t* src, int count) {
+        for (int i = 0; i < count && i < 8; i++) {
+            int j = src[i];
+            if (j < 0 || j >= 16) continue;
+            auto* p = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(hevc.RefPics[j]);
+            if (p && p->m_picIdx >= 0 && p->m_picIdx < VkFrucDecodeClient::kPicPoolSize) {
+                dst[i] = (uint8_t)p->m_picIdx;
+            }
+        }
+    };
+    fillStdRefSlot(stdPicInfo.RefPicSetStCurrBefore, hevc.RefPicSetStCurrBefore, hevc.NumPocStCurrBefore);
+    fillStdRefSlot(stdPicInfo.RefPicSetStCurrAfter,  hevc.RefPicSetStCurrAfter,  hevc.NumPocStCurrAfter);
+    fillStdRefSlot(stdPicInfo.RefPicSetLtCurr,       hevc.RefPicSetLtCurr,       hevc.NumPocLtCurr);
 
     VkVideoDecodeH265PictureInfoKHR h265Pic = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PICTURE_INFO_KHR };
     h265Pic.pStdPictureInfo      = &stdPicInfo;
@@ -652,8 +758,8 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     di.srcBufferRange       = alignedRange;
     di.dstPictureResource   = setupResource;
     di.pSetupReferenceSlot  = &setupSlot;
-    di.referenceSlotCount   = 0;
-    di.pReferenceSlots      = nullptr;
+    di.referenceSlotCount   = (uint32_t)activeRefCount;
+    di.pReferenceSlots      = activeRefCount > 0 ? refSlots : nullptr;
     rt.CmdDecodeVideoKHR(m_DecodeCmdBuf, &di);
 
     // ── End video coding ──
@@ -678,11 +784,14 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     curPic->layoutInited = true;
     m_DecodeSubmitCount++;
     if (m_DecodeSubmitCount == 1 || (m_DecodeSubmitCount % 60) == 0) {
+        const char* picType = hevc.IdrPicFlag ? "IDR" :
+                              hevc.IrapPicFlag ? "IRAP" :
+                              activeRefCount == 0 ? "I" : "P/B";
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d decode submitted #%llu "
-                    "(IDR slot=%d slices=%u srcRange=%llu skipped=%llu)",
+                    "(%s slot=%d refs=%d slices=%u srcRange=%llu skipped=%llu)",
                     (unsigned long long)m_DecodeSubmitCount,
-                    slotIdx, markerCount,
+                    picType, slotIdx, activeRefCount, markerCount,
                     (unsigned long long)alignedRange,
                     (unsigned long long)m_DecodeSkipCount);
     }
