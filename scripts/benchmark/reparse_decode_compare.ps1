@@ -18,7 +18,12 @@ function Parse-Log {
     $r.decode_submits      = ([regex]::Matches($logText, 'Phase 1\.3d decode submitted')).Count
     $r.device_lost_count   = ([regex]::Matches($logText, 'vkQueueSubmit rc=-4')).Count
     $r.renderer_chosen     = '?'
+    # Renderer detection: VkFruc has a custom ctor log, D3D11VA tags itself
+    # via [VIPLE-FRUC-Stats] lines (its FRUC compute chain), and SDL fallback
+    # is what kicks in when D3D11VA HW path can't satisfy SW request.
     if     ($logText -match '\[VIPLE-VKFRUC\] [^\n]*i\.2 ctor') { $r.renderer_chosen = 'VkFruc' }
+    elseif ($logText -match '\[VIPLE-FRUC-Stats\]')             { $r.renderer_chosen = 'D3D11VA' }
+    elseif ($logText -match "Renderer 'SDL' chosen")            { $r.renderer_chosen = 'SDL' }
     elseif ($logText -match 'D3D11VARenderer|D3D11VA renderer chosen') { $r.renderer_chosen = 'D3D11VA' }
 
     function ExtractFloat([string]$pattern) {
@@ -35,7 +40,11 @@ function Parse-Log {
     $r.avg_queue_ms     = ExtractFloat '平均佇列延遲:\s*([0-9.]+)\s*ms'
     $r.avg_render_ms    = ExtractFloat '平均繪製時間[^:]*:\s*([0-9.]+)\s*ms'
 
-    $statLines = [regex]::Matches($logText, '\[VIPLE-(?:VKFRUC|D3D11VA)-Stats\].*?n=(\d+)\s+fps=([0-9.]+)\s+ft_mean=([0-9.]+)ms\s+p50=([0-9.]+)\s+p95=([0-9.]+)\s+p99=([0-9.]+)\s+p99\.9=([0-9.]+)')
+    # Two stats line formats:
+    # - VkFruc:  "[VIPLE-VKFRUC-Stats] dual-present n=N fps=X ft_mean=Yms p50=A p95=B p99=C p99.9=D"
+    # - D3D11VA: "[VIPLE-PRESENT-Stats] real n=N fps=X ft_mean=Yms p50=A p95=B p99=C p99.9=D ..."
+    # - SDL (fallback for d3d11_sw): no inline stats, must rely on PresentMon
+    $statLines = [regex]::Matches($logText, '\[VIPLE-(?:VKFRUC-Stats|PRESENT-Stats)\][^\[]*?n=(\d+)\s+fps=([0-9.]+)\s+ft_mean=([0-9.]+)ms\s+p50=([0-9.]+)\s+p95=([0-9.]+)\s+p99=([0-9.]+)\s+p99\.9=([0-9.]+)')
     if ($statLines.Count -gt 0) {
         # Average over the last N stats windows (more representative than just final)
         $vals = @()

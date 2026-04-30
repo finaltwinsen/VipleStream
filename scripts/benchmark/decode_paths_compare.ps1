@@ -42,7 +42,11 @@ if (-not $OutDir) {
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 Write-Host "Output: $OutDir" -ForegroundColor Cyan
 
-$RegPath = 'HKCU:\Software\Moonlight Game Streaming Project\VipleStream'
+# §J.3.e.2.i.8 — v1.2.44 rebrand changed QCoreApplication::setOrganizationName
+# from "Moonlight Game Streaming Project" to "VipleStream", so QSettings registry
+# path is now \Software\VipleStream\VipleStream (NOT the legacy Moonlight path).
+# The old test_fruc_30s.ps1 still references the legacy path and is broken too.
+$RegPath = 'HKCU:\Software\VipleStream\VipleStream'
 
 # Save originals so we can restore at the end
 $origRenderer = (Get-ItemProperty $RegPath -Name rendererSelection -ErrorAction SilentlyContinue).rendererSelection
