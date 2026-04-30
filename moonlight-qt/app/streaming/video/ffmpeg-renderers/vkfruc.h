@@ -61,6 +61,10 @@ public:
     bool lastFrameHadFRUCInterp() const override;
     const char* getFRUCBackendName() const override;
 
+    // §J.3.e.2.i.8 Phase 3a — VkFrucDecodeClient::DecodePicture needs to gate
+    // on codec before reading the CodecSpecific union (hevc / av1 share storage).
+    int  getVideoCodecMask() const { return m_VideoCodec; }
+
 private:
     // §J.3.e.2.i.2 sub-helpers — port from Android vk_backend.c
     bool createInstanceAndSurface(SDL_Window* window);
@@ -151,6 +155,17 @@ public:
                                            const StdVideoPictureParametersSet* sps,
                                            const StdVideoPictureParametersSet* pps);
 
+    // §J.3.e.2.i.8 Phase 3b.1 — AV1 sequence-header upload to VkVideoSessionParametersKHR.
+    //
+    // Vulkan AV1 session parameters are immutable (no VkVideoDecodeAV1SessionParametersAddInfoKHR
+    // exists, unlike H.265/H.264).  When we see a NEW sequence header (parser bumps
+    // GetUpdateSequenceCount), the strategy is destroy + recreate the
+    // m_VideoSessionParams object with the real StdVideoAV1SequenceHeader, replacing
+    // the zero-init placeholder that createVideoSessionParameters initially builds.
+    // Cache the seq count to no-op repeated calls with the same header (parser
+    // re-delivers the same pStdSps every picture).
+    bool onAv1SequenceHeaderFromParser(const StdVideoPictureParametersSet* sps);
+
     // §J.3.e.2.i.8 Phase 1.3a — GPU bitstream buffer factory for the parser.
     // Allocates a host-visible+coherent VkBuffer with VIDEO_DECODE_SRC_BIT_KHR
     // usage and the codec profile chained in pNext.  Returned handles are
@@ -180,6 +195,20 @@ private:
     std::map<int, uint32_t> m_H265VpsSeqSeen;
     std::map<int, uint32_t> m_H265SpsSeqSeen;
     std::map<int, uint32_t> m_H265PpsSeqSeen;
+
+    // §J.3.e.2.i.8 Phase 3b.1 — AV1 sequence header tracking.  AV1 has no SPS ID
+    // (single sequence header per stream); cache by GetUpdateSequenceCount() so
+    // repeat callbacks are no-ops.  m_AV1SeqHdrApplied flips true once the
+    // zero-init placeholder has been replaced by the parser-supplied real header.
+    PFN_vkDestroyVideoSessionParametersKHR m_pfnDestroyVideoSessionParams = nullptr;
+    PFN_vkCreateVideoSessionParametersKHR  m_pfnCreateVideoSessionParams  = nullptr;
+    uint32_t m_AV1SeqHdrSeqSeen = 0;
+    bool     m_AV1SeqHdrApplied = false;
+    // §J.3.e.2.i.8 Phase 3d.4d — content-aware dedup snapshot.  Parser bumps
+    // GetUpdateSequenceCount() on every Sunshine OBU_SEQUENCE_HEADER resend
+    // (≈once per second) even when the std header content is identical, so
+    // count-based dedup thrashes session params.  Compare full struct bytes.
+    StdVideoAV1SequenceHeader m_AV1SeqHdrCached = {};
 
     // §J.3.e.2.i.8 Phase 1.3 — codec profile structs kept alive at member scope
     // so VkVideoProfileListInfoKHR (used by bitstream buffer + DPB image creation)
@@ -259,10 +288,18 @@ private:
     // VkFrucDecodeClient::DecodePicture callback.  Returns true if submitted,
     // false if skipped (P/B references not yet supported, or pre-conditions
     // unmet).  forward decl avoids dragging nvvideoparser headers into vkfruc.h.
+    //
+    // Phase 3b.2a — submitDecodeFrame is a thin codec dispatcher; the actual
+    // recording lives in submitDecodeFrameH265 / submitDecodeFrameAv1.  Both
+    // helpers assume the universal pre-checks (DPB ready, video session live,
+    // PFNs loaded) already ran in the dispatcher.
     struct VkParserPictureData_;  // alias to avoid pulling header
 public:
     bool submitDecodeFrame(struct VkParserPictureData* ppd);
 private:
+    bool submitDecodeFrameH265(struct VkParserPictureData* ppd);
+    bool submitDecodeFrameAv1 (struct VkParserPictureData* ppd);
+
     // Decode-time PFN cache (looked up lazily on first submit).
     // Uses sync2 barrier — VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR is only
     // defined on the sync2 path; legacy VkAccessFlagBits has no VIDEO_DECODE_*.
@@ -284,6 +321,7 @@ private:
 
     // Phase 1.2 — native NAL intercept hook (renderer.h interface).
     bool acceptsNativeDecode() const override;
+    bool isNativelyDecodingCurrentCodec() const override;
     void submitNativeDecodeUnit(const uint8_t* data, size_t len) override;
 
     // Phase 1.1c — NvVideoParser instance + callback handler.

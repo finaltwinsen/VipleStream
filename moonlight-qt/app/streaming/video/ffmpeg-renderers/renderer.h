@@ -318,6 +318,15 @@ public:
     virtual bool acceptsNativeDecode() const { return false; }
     virtual void submitNativeDecodeUnit(const uint8_t* /*data*/, size_t /*len*/) {}
 
+    // §J.3.e.2.i.8 Phase 3d.3 — finer-grained per-codec native decode probe.
+    // acceptsNativeDecode() gates the parser-feed path (NAL bytes → parser
+    // callbacks); this method tells whether the current codec actually
+    // produces decoded frames via vkCmdDecodeVideoKHR (vs falling through to
+    // FFmpeg).  Used by the HW/SW indicator + isHardwareAccelerated() so the
+    // overlay accurately distinguishes "原生" (real native) from "SW" (FFmpeg
+    // libdav1d) when AV1 native submit is gated off pending Phase 3d.4 fix.
+    virtual bool isNativelyDecodingCurrentCodec() const { return false; }
+
     RendererType getRendererType() {
         return m_Type;
     }

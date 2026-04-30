@@ -176,6 +176,66 @@ private:
 } // namespace
 
 
+// §J.3.e.2.i.8 Phase 3d.4e/h — AV1 OBU stream scanner.
+//
+// The upstream nvvideoparser library memcpy()s the entire raw packet (which can
+// contain OBU_TEMPORAL_DELIMITER + OBU_SEQUENCE_HEADER + OBU_FRAME / OBU_FRAME_HEADER)
+// into the per-picture bitstream buffer at offset 0.  Vulkan AV1 decoder is
+// supposed to receive ONLY the frame's bitstream (no TD / SEQ_HDR / METADATA);
+// the spec says srcBufferOffset/Range scopes that range and frameHeaderOffset
+// is relative to it.  NV's driver appears to NOT tolerate trailing leading TD
+// and silently miscoumputes — surfacing as the grey-green flicker we hit.
+//
+// Walk OBUs from the start and return BOTH the OBU_FRAME / OBU_FRAME_HEADER's
+// header position and the size of its OBU header (so the caller can shift
+// srcBufferOffset to the OBU header and set frameHeaderOffset to skip past it).
+// Returns false if not found.
+struct Av1FrameObuLocation {
+    uint32_t obuHeaderPos;   // offset of OBU header byte in bitstream
+    uint32_t obuHeaderBytes; // bytes of OBU header (1 + ext + leb128 size)
+};
+
+static bool scanForAv1FrameObu(const uint8_t* data, size_t size,
+                               Av1FrameObuLocation* out)
+{
+    if (!data || size == 0 || !out) return false;
+    size_t pos = 0;
+    while (pos < size) {
+        uint8_t obuHdr = data[pos];
+        uint8_t obuType  = (uint8_t)((obuHdr >> 3) & 0x0F);
+        bool    hasExt   = (obuHdr & 0x04) != 0;
+        bool    hasSize  = (obuHdr & 0x02) != 0;
+        size_t  hdrBytes = 1u + (hasExt ? 1u : 0u);
+
+        // Read leb128 obu_size if present.
+        uint64_t obuSize = 0;
+        if (hasSize) {
+            int shift = 0;
+            for (int i = 0; i < 8; i++) {
+                if (pos + hdrBytes >= size) return false;
+                uint8_t b = data[pos + hdrBytes];
+                obuSize |= (uint64_t)(b & 0x7Fu) << shift;
+                hdrBytes++;
+                if ((b & 0x80u) == 0) break;
+                shift += 7;
+            }
+        } else {
+            obuSize = size - (pos + hdrBytes);
+        }
+
+        if (obuType == 3 /* FRAME_HEADER */ || obuType == 6 /* FRAME */) {
+            out->obuHeaderPos   = (uint32_t)pos;
+            out->obuHeaderBytes = (uint32_t)hdrBytes;
+            return true;
+        }
+
+        if (obuSize > size - (pos + hdrBytes)) return false;
+        pos += hdrBytes + (size_t)obuSize;
+    }
+    return false;
+}
+
+
 // §J.3.e.2.i.8 Phase 1.1c — Pimpl 完整定義 (vkfruc.h 只 forward decl).
 struct VkFrucRenderer::NvParserPimpl {
     std::shared_ptr<VkFrucDecodeClient>          client;
@@ -261,13 +321,30 @@ bool VkFrucDecodeClient::DecodePicture(VkParserPictureData* pParserPictureData)
     // resolved for this picture and feed them to vkUpdateVideoSessionParametersKHR.
     // outOfBandPictureParameters=false 模式下 parser 不單獨呼叫 UpdatePictureParameters
     // callback；active param sets 都從 hevc.pStdVps/pStdSps/pStdPps 帶過來。
+    //
+    // Phase 3a — gate the union access by codec.  CodecSpecific is a union
+    // (hevc / av1 / h264 / vp9 share storage); reading hevc fields when the
+    // stream is AV1 reinterprets AV1 picture-data bytes as HEVC pointers
+    // → garbage pointer → crash inside onH265PictureParametersFromParser.
     if (m_Parent && pParserPictureData) {
-        const auto& hevc = pParserPictureData->CodecSpecific.hevc;
-        m_Parent->onH265PictureParametersFromParser(hevc.pStdVps, hevc.pStdSps, hevc.pStdPps);
+        const int codecMask = m_Parent->getVideoCodecMask();
+        if (codecMask & VIDEO_FORMAT_MASK_H265) {
+            const auto& hevc = pParserPictureData->CodecSpecific.hevc;
+            m_Parent->onH265PictureParametersFromParser(hevc.pStdVps, hevc.pStdSps, hevc.pStdPps);
+        } else if (codecMask & VIDEO_FORMAT_MASK_AV1) {
+            // Phase 3b.1 — destroy + recreate session params on first real
+            // sequence header (replaces the zero-init placeholder built at
+            // createVideoSessionParameters time).  Parser re-delivers the
+            // same pStdSps every picture; method no-ops on repeat seq counts.
+            const auto& av1 = pParserPictureData->CodecSpecific.av1;
+            m_Parent->onAv1SequenceHeaderFromParser(av1.pStdSps);
+        }
 
         // §J.3.e.2.i.8 Phase 1.3d — record + submit vkCmdDecodeVideoKHR for IDR
         // frames (P/B-frame reference handling lands in 1.3d.2).  Skips silently
         // when prerequisites aren't ready yet (DPB pool, cmd buf, etc).
+        // Phase 3b.2 will lift the H.265-only gate inside submitDecodeFrame
+        // and add the AV1 picture-info / DPB / decode-info chain.
         m_Parent->submitDecodeFrame(pParserPictureData);
     }
 
@@ -463,6 +540,116 @@ bool VkFrucRenderer::onH265PictureParametersFromParser(
 
 
 // =============================================================================
+// VkFrucRenderer Phase 3b.1 — AV1 sequence header upload (destroy+recreate)
+// =============================================================================
+//
+// Vulkan AV1 session parameters are immutable.  Unlike H.265's incremental
+// add-info update path, switching the active StdVideoAV1SequenceHeader requires
+// destroying and recreating the entire VkVideoSessionParametersKHR object.
+// This is called from VkFrucDecodeClient::DecodePicture before submitDecodeFrame,
+// so any in-flight decode is already drained (single-cmd-buffer pattern).
+
+bool VkFrucRenderer::onAv1SequenceHeaderFromParser(const StdVideoPictureParametersSet* sps)
+{
+    if (m_VideoSession == VK_NULL_HANDLE) return false;
+    if (!sps) return false;
+
+    // Lazy-resolve PFNs.  We reuse the H.265 path's m_pfnUpdateVideoSessionParams
+    // tracking pattern; for AV1 we additionally need create/destroy.
+    if (!m_pfnDestroyVideoSessionParams || !m_pfnCreateVideoSessionParams) {
+        auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        m_pfnDestroyVideoSessionParams = (PFN_vkDestroyVideoSessionParametersKHR)
+            getDevPa(m_Device, "vkDestroyVideoSessionParametersKHR");
+        m_pfnCreateVideoSessionParams  = (PFN_vkCreateVideoSessionParametersKHR)
+            getDevPa(m_Device, "vkCreateVideoSessionParametersKHR");
+        if (!m_pfnDestroyVideoSessionParams || !m_pfnCreateVideoSessionParams) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3b.1 "
+                         "create/destroy VideoSessionParameters PFN missing");
+            return false;
+        }
+    }
+
+    const StdVideoAV1SequenceHeader* pStdHeader = sps->GetStdAV1Sps();
+    if (!pStdHeader) {
+        // Parser handed us a non-AV1 SPS object — defensive bail.
+        return false;
+    }
+
+    // §J.3.e.2.i.8 Phase 3d.4d — the upstream parser bumps GetUpdateSequenceCount()
+    // every time Sunshine resends the OBU_SEQUENCE_HEADER (which it does at
+    // ~every keyframe, ≈once per second), even when the actual std header
+    // contents are identical.  Acting on the bumped count would re-destroy +
+    // recreate VkVideoSessionParametersKHR + force vkCmdControlVideoCodingKHR
+    // RESET every second → DPB tracking thrash → alternating valid/garbage
+    // frames → grey-green flicker.  Compare the actual StdVideoAV1SequenceHeader
+    // bytes against the last-applied snapshot and short-circuit when truly
+    // unchanged.  Note: this struct contains pColorConfig / pTimingInfo
+    // pointers, which we DO want to follow when comparing — but for repeated
+    // re-sends of the same SPS, parser typically points at the same shared
+    // data, so memcmp on the parent struct catches pointer equality even
+    // when content is also equal (sufficient signal for no-op).
+    uint32_t seq = sps->GetUpdateSequenceCount();
+    if (m_AV1SeqHdrApplied
+        && memcmp(&m_AV1SeqHdrCached, pStdHeader, sizeof(StdVideoAV1SequenceHeader)) == 0) {
+        // Same content, regardless of parser-bumped seq count — no-op.
+        return true;
+    }
+
+    // Copy the header locally so the create-info pointer stays valid through
+    // the entire vkCreate call (parser owns the source struct).  Also stash
+    // the snapshot for the next-call dedup check.
+    StdVideoAV1SequenceHeader hdrCopy = *pStdHeader;
+    m_AV1SeqHdrCached = *pStdHeader;
+
+    VkVideoDecodeAV1SessionParametersCreateInfoKHR av1ParamsCi = {
+        VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_SESSION_PARAMETERS_CREATE_INFO_KHR
+    };
+    av1ParamsCi.pStdSequenceHeader = &hdrCopy;
+
+    VkVideoSessionParametersCreateInfoKHR vspCi = {
+        VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR
+    };
+    vspCi.pNext                          = &av1ParamsCi;
+    vspCi.videoSession                   = m_VideoSession;
+    vspCi.videoSessionParametersTemplate = VK_NULL_HANDLE;
+
+    VkVideoSessionParametersKHR newParams = VK_NULL_HANDLE;
+    VkResult vr = m_pfnCreateVideoSessionParams(m_Device, &vspCi, nullptr, &newParams);
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3b.1 "
+                     "vkCreateVideoSessionParametersKHR(AV1, real seq header) rc=%d",
+                     (int)vr);
+        return false;
+    }
+
+    // Swap in the real-header params and destroy the old (placeholder or
+    // previous-seq) one.  Caller is responsible for ensuring no in-flight
+    // decode references m_VideoSessionParams — currently guaranteed because
+    // submitDecodeFrame drains via m_DecodeFence wait before recording.
+    VkVideoSessionParametersKHR oldParams = m_VideoSessionParams;
+    m_VideoSessionParams = newParams;
+    if (oldParams != VK_NULL_HANDLE) {
+        m_pfnDestroyVideoSessionParams(m_Device, oldParams, nullptr);
+    }
+
+    m_AV1SeqHdrSeqSeen = seq;
+    m_AV1SeqHdrApplied = true;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3b.1 — AV1 session params "
+                "rebuilt with real sequence header (seq=%u, profile=%u, "
+                "max_frame=%ux%u)", seq,
+                (unsigned)hdrCopy.seq_profile,
+                (unsigned)(hdrCopy.max_frame_width_minus_1 + 1),
+                (unsigned)(hdrCopy.max_frame_height_minus_1 + 1));
+    return true;
+}
+
+
+// =============================================================================
 // VkFrucRenderer Phase 1.3d — per-frame vkCmdDecodeVideoKHR submission
 // =============================================================================
 
@@ -499,6 +686,15 @@ bool VkFrucRenderer::loadDecodeRtPfns()
     return true;
 }
 
+// =============================================================================
+// Phase 3b.2a — submitDecodeFrame top-level dispatcher
+// =============================================================================
+//
+// Universal pre-checks (DPB pool, live session, PFN load) run here; codec-
+// specific recording happens in submitDecodeFrameH265 / submitDecodeFrameAv1.
+// Each helper assumes its pre-conditions are already met by the dispatcher
+// — they should not re-check m_VideoSession / m_VideoSessionParams etc.
+
 bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
 {
     if (!ppd || !m_DpbReady || !m_DecodeCmdReady
@@ -507,16 +703,533 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
         m_DecodeSkipCount++;
         return false;
     }
-    if (!(m_VideoCodec & VIDEO_FORMAT_MASK_H265)) {
-        // Phase 1: H.265 only.  Other codecs land in Phase 2+.
-        m_DecodeSkipCount++;
-        return false;
-    }
     if (!loadDecodeRtPfns()) {
         m_DecodeSkipCount++;
         return false;
     }
 
+    if (m_VideoCodec & VIDEO_FORMAT_MASK_H265) {
+        return submitDecodeFrameH265(ppd);
+    }
+    if (m_VideoCodec & VIDEO_FORMAT_MASK_AV1) {
+        return submitDecodeFrameAv1(ppd);
+    }
+    // H.264 / VP9 / unknown — Phase 2 will land H.264; nothing else supported.
+    m_DecodeSkipCount++;
+    return false;
+}
+
+// =============================================================================
+// Phase 3b.2b — AV1 native decode submission body
+// =============================================================================
+//
+// AV1 sibling of submitDecodeFrameH265.  Differences from H.265 path:
+//   1. Reference collection — AV1 uses ref_frame_idx[7] indexing pic_idx[8]
+//      DPB-position table; no RefPicSetStCurrBefore/After/LtCurr split.
+//   2. Picture info — VkVideoDecodeAV1PictureInfoKHR (av1.khr_info) is
+//      pre-filled by parser (pStdPictureInfo, referenceNameSlotIndices,
+//      tileCount/Offsets/Sizes); we chain it directly into VkVideoDecodeInfoKHR.
+//   3. Setup ref slot — av1.setupSlot is pre-filled VkVideoDecodeAV1DpbSlotInfoKHR.
+//   4. Reset trigger — av1.needsSessionReset flag from parser (no IRAP/IDR
+//      semantic in AV1; sequence header swap causes this in Phase 3b.1).
+//   5. Bitstream — AV1 has no slice markers; tile offsets/sizes live inside
+//      av1.khr_info.pTileOffsets/pTileSizes (parser-managed, not bsBuf markers).
+//
+// Decode→SwUpload copy section is codec-agnostic and identical to H.265 path.
+
+bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
+{
+    // §J.3.e.2.i.8 Phase 3d.3 — AV1 native decode submission is gated behind
+    // a separate env var until we finish debugging the v1.3.260 GPU
+    // device-lost (decode submit succeeds at CPU, GPU work then faults
+    // → grey screen → app crash).  Default OFF means AV1 streams flow
+    // through FFmpeg's libdav1d SW decoder + our Vulkan render path
+    // (Phase 3a parser instantiation + Phase 3b.1 session-params rebuild
+    // still fire, but submitDecodeFrameAv1 short-circuits before we record
+    // any vkCmdDecodeVideoKHR for AV1).  Set VIPLE_VKFRUC_NATIVE_AV1_SUBMIT=1
+    // to opt back in for diagnosis.
+    static const bool s_enableAv1Submit =
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_AV1_SUBMIT") != 0;
+    if (!s_enableAv1Submit) {
+        if (m_DecodeSkipCount == 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3d.3 — AV1 native "
+                        "decode submission DISABLED (set VIPLE_VKFRUC_NATIVE_AV1_SUBMIT=1 "
+                        "to opt in for diagnosis); falling back to FFmpeg libdav1d");
+        }
+        m_DecodeSkipCount++;
+        return false;
+    }
+
+    // §J.3.e.2.i.8 Phase 3d — non-const reference because the parser delivers
+    // VkParserAv1PictureData with the *target* sub-structs populated (tileInfo,
+    // quantization, segmentation, loopFilter, CDEF, loopRestoration, globalMotion,
+    // filmGrain, plus tileInfo's nested MiColStarts/MiRowStarts/...) but does
+    // NOT wire the pointer fields inside std_info / tileInfo / setupSlot /
+    // dpbSlots[] that the driver dereferences during vkCmdDecodeVideoKHR.
+    // Driver hits null → null-deref / GPU device-lost.  We patch them here
+    // (safe because the parser owns the struct's lifetime through DecodePicture
+    // and no other consumer reads them between our writes and vkCmdDecodeVideoKHR).
+    auto& av1 = ppd->CodecSpecific.av1;
+    av1.std_info.pTileInfo        = &av1.tileInfo;
+    av1.std_info.pQuantization    = &av1.quantization;
+    av1.std_info.pSegmentation    = &av1.segmentation;
+    av1.std_info.pLoopFilter      = &av1.loopFilter;
+    av1.std_info.pCDEF            = &av1.CDEF;
+    av1.std_info.pLoopRestoration = &av1.loopRestoration;
+    av1.std_info.pGlobalMotion    = &av1.globalMotion;
+    av1.std_info.pFilmGrain       = &av1.filmGrain;
+    av1.tileInfo.pMiColStarts        = av1.MiColStarts;
+    av1.tileInfo.pMiRowStarts        = av1.MiRowStarts;
+    av1.tileInfo.pWidthInSbsMinus1   = av1.width_in_sbs_minus_1;
+    av1.tileInfo.pHeightInSbsMinus1  = av1.height_in_sbs_minus_1;
+    // Phase 3d.4 — setupSlot has sType set but pStdReferenceInfo left null;
+    // dpbSlots[8] are entirely zeroed (no sType, no pStdReferenceInfo).
+    // Wire them to the parser-prefilled setupSlotInfo / dpbSlotInfos[i] arrays.
+    av1.setupSlot.pStdReferenceInfo = &av1.setupSlotInfo;
+    for (int i = 0; i < STD_VIDEO_AV1_NUM_REF_FRAMES; i++) {
+        av1.dpbSlots[i].sType             = VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_DPB_SLOT_INFO_KHR;
+        av1.dpbSlots[i].pStdReferenceInfo = &av1.dpbSlotInfos[i];
+    }
+
+    // §J.3.e.2.i.8 Phase 3b.2b / 3d.4b — parser flags a session reset on
+    // sequence-header swap (we already did destroy+recreate in
+    // onAv1SequenceHeaderFromParser; the decoder side also needs
+    // vkCmdControlVideoCodingKHR(RESET) to discard internal DPB tracking).
+    // Drop the >0 count gate so the FIRST AV1 decode after a fresh session
+    // params object also gets RESET — without it NV's AV1 decoder appears to
+    // reference stale internal state across the params destroy+recreate
+    // boundary, manifesting as alternating valid/garbage frames.
+    if (av1.needsSessionReset) {
+        m_DecodeNeedsReset = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3b.2b — AV1 needsSessionReset "
+                    "(submits so far=%llu) — queueing decoder RESET",
+                    (unsigned long long)m_DecodeSubmitCount);
+    }
+
+    bool diagThisFrame = (m_DecodeSubmitCount + m_DecodeSkipCount < 5)
+                       || av1.needsSessionReset;
+
+    auto* curPic = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(ppd->pCurrPic);
+    if (!curPic || curPic->image == VK_NULL_HANDLE || curPic->view == VK_NULL_HANDLE) {
+        m_DecodeSkipCount++;
+        return false;
+    }
+    int slotIdx = curPic->m_picIdx;
+
+    // §J.3.e.2.i.8 Phase 3b.2b — collect active AV1 reference DPB positions.
+    // av1.pic_idx[k] is the DPB slot index assigned to AV1 ref_frame buffer
+    // position k (or -1 if that buffer is empty).  We iterate all 8 positions
+    // and include those that map to a real, currently-active DPB slot.
+    // av1.dpbSlots[k] holds the parser-prefilled VkVideoDecodeAV1DpbSlotInfoKHR
+    // (with pStdReferenceInfo → av1.dpbSlotInfos[k]) for that position.
+    constexpr int kAv1RefSlots = STD_VIDEO_AV1_NUM_REF_FRAMES;  // 8
+    VkVideoPictureResourceInfoKHR refResources[kAv1RefSlots] = {};
+    VkVideoReferenceSlotInfoKHR   refSlots[kAv1RefSlots]     = {};
+    int  activeRefCount = 0;
+    bool seenSlot[VkFrucDecodeClient::kPicPoolSize] = {};
+
+    for (int i = 0; i < kAv1RefSlots; i++) {
+        int slot = av1.pic_idx[i];
+        if (slot < 0 || slot >= VkFrucDecodeClient::kPicPoolSize) continue;
+        if (slot == slotIdx) continue;
+        if (!m_DpbSlotActive[slot]) continue;
+        if (seenSlot[slot]) continue;
+        seenSlot[slot] = true;
+
+        auto& res = refResources[activeRefCount];
+        res.sType            = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
+        res.codedOffset      = { 0, 0 };
+        res.codedExtent      = { (uint32_t)m_DpbAlignedW, (uint32_t)m_DpbAlignedH };
+        res.baseArrayLayer   = (uint32_t)slot;
+        res.imageViewBinding = m_DpbDecodeArrayView;
+
+        auto& s = refSlots[activeRefCount];
+        s.sType            = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
+        s.pNext            = &av1.dpbSlots[i];   // parser-prefilled VkVideoDecodeAV1DpbSlotInfoKHR
+        s.slotIndex        = slot;
+        s.pPictureResource = &res;
+
+        activeRefCount++;
+    }
+
+    auto& bsBuf = ppd->bitstreamData;
+    if (!bsBuf || bsBuf->GetBuffer() == VK_NULL_HANDLE) {
+        m_DecodeSkipCount++;
+        return false;
+    }
+
+    auto& rt = m_DecodeRtPfn;
+
+    // §J.3.e.2.i.8 Phase 1.4 proper — wait for prior graphics-queue submit
+    // to finish before we overwrite m_SwUploadImage.  Codec-agnostic.
+    VkFence gfxFence = m_LastGraphicsFence.load(std::memory_order_acquire);
+    if (gfxFence != VK_NULL_HANDLE) {
+        rt.WaitForFences(m_Device, 1, &gfxFence, VK_TRUE, UINT64_MAX);
+    }
+
+    rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
+    rt.ResetFences(m_Device, 1, &m_DecodeFence);
+    rt.ResetCommandBuffer(m_DecodeCmdBuf, 0);
+
+    VkCommandBufferBeginInfo cbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    rt.BeginCommandBuffer(m_DecodeCmdBuf, &cbi);
+
+    // ── Layout transitions (single-image + arrayLayers, same as H.265 path) ──
+    {
+        constexpr int kMaxBarriers = 1 + kAv1RefSlots;
+        VkImageMemoryBarrier2 barriers[kMaxBarriers] = {};
+        int barrierCount = 0;
+
+        auto fillBarrier = [&](VkImage img, uint32_t layer, bool isRefRead, bool initFromUndefined) {
+            auto& imb = barriers[barrierCount++];
+            imb.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            imb.srcStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+            imb.srcAccessMask       = initFromUndefined ? 0 : VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+            imb.dstStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+            imb.dstAccessMask       = isRefRead ? VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR
+                                                : VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+            imb.oldLayout           = initFromUndefined ? VK_IMAGE_LAYOUT_UNDEFINED
+                                                        : VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+            imb.newLayout           = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+            imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imb.image               = img;
+            imb.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, layer, 1 };
+        };
+
+        fillBarrier(curPic->image, (uint32_t)slotIdx, /*isRefRead*/false,
+                    /*initFromUndefined*/true);
+        for (int i = 0; i < activeRefCount; i++) {
+            fillBarrier(curPic->image, (uint32_t)refSlots[i].slotIndex,
+                        /*isRefRead*/true, /*initFromUndefined*/false);
+        }
+
+        VkDependencyInfo dep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        dep.imageMemoryBarrierCount = (uint32_t)barrierCount;
+        dep.pImageMemoryBarriers    = barriers;
+        rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &dep);
+    }
+
+    // ── Setup-ref slot (current picture's slot) ──
+    VkVideoPictureResourceInfoKHR setupResource = { VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR };
+    setupResource.codedOffset      = { 0, 0 };
+    setupResource.codedExtent      = { (uint32_t)m_DpbAlignedW, (uint32_t)m_DpbAlignedH };
+    setupResource.baseArrayLayer   = (uint32_t)slotIdx;
+    setupResource.imageViewBinding = m_DpbDecodeArrayView;
+
+    VkVideoReferenceSlotInfoKHR setupSlotInBegin = { VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR };
+    setupSlotInBegin.pNext            = &av1.setupSlot;   // parser-prefilled VkVideoDecodeAV1DpbSlotInfoKHR
+    setupSlotInBegin.slotIndex        = -1;
+    setupSlotInBegin.pPictureResource = &setupResource;
+
+    VkVideoReferenceSlotInfoKHR setupSlotInDecode = setupSlotInBegin;
+    setupSlotInDecode.slotIndex = slotIdx;
+
+    // ── Begin video coding ──
+    VkVideoReferenceSlotInfoKHR allCodingSlots[1 + kAv1RefSlots];
+    allCodingSlots[0] = setupSlotInBegin;
+    for (int i = 0; i < activeRefCount; i++) allCodingSlots[1 + i] = refSlots[i];
+
+    VkVideoBeginCodingInfoKHR bci = { VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR };
+    bci.videoSession           = m_VideoSession;
+    bci.videoSessionParameters = m_VideoSessionParams;
+    bci.referenceSlotCount     = (uint32_t)(1 + activeRefCount);
+    bci.pReferenceSlots        = allCodingSlots;
+    rt.CmdBeginVideoCodingKHR(m_DecodeCmdBuf, &bci);
+
+    if (m_DecodeNeedsReset) {
+        VkVideoCodingControlInfoKHR cci = { VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR };
+        cci.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR;
+        rt.CmdControlVideoCodingKHR(m_DecodeCmdBuf, &cci);
+        m_DecodeNeedsReset = false;
+        for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) m_DpbSlotActive[i] = false;
+    }
+
+    // ── Decode ──
+    // §J.3.e.2.i.8 Phase 3b.2b — the parser only populates a small subset of
+    // av1.khr_info (tileCount + the tileOffsets/tileSizes arrays' contents);
+    // sType, pNext, pStdPictureInfo, pTileOffsets/pTileSizes pointers,
+    // referenceNameSlotIndices and frameHeaderOffset all stay zero.  Chaining
+    // the raw parser struct hands the driver an effectively-empty picture
+    // info → decoder writes all-zero NV12 → green (YUV(0,0,0) → RGB(0,135,0)
+    // narrow-range BT.709).  We assemble a fully-populated picture info
+    // ourselves; std_info / tileOffsets[] / tileSizes[] data still comes from
+    // the parser-owned struct.
+    // §J.3.e.2.i.8 Phase 3d.4h — Vulkan AV1 spec says srcBufferOffset/Range
+    // must scope just the FRAME's bitstream (OBU_FRAME or OBU_FRAME_HEADER +
+    // OBU_TILE_GROUPs).  NV's driver does not tolerate leading TD/SEQ_HDR
+    // OBUs even with frameHeaderOffset pointing past them — apparent
+    // grey/green flicker comes from misparse on those leading OBUs.
+    // Strategy: scan, find OBU_FRAME header position, shift srcBufferOffset to
+    // that position, reduce range, and rebase frameHeaderOffset / tileOffsets.
+    VkDeviceSize bsMaxSz = 0;
+    uint8_t* bsMappedPtr = bsBuf->GetDataPtr(0, bsMaxSz);
+    Av1FrameObuLocation obuLoc = {};
+    bool obuFound = bsMappedPtr
+        && scanForAv1FrameObu(bsMappedPtr + ppd->bitstreamDataOffset,
+                              (size_t)ppd->bitstreamDataLen, &obuLoc);
+    uint32_t obuShift = obuFound ? obuLoc.obuHeaderPos : 0;
+
+    // Build rebased tile offsets: parser supplies absolute offsets within
+    // the buffer; we want them relative to the new srcBufferOffset (which
+    // moves forward by `obuShift`).
+    uint32_t tileOffsetsLocal[64];
+    uint32_t numTiles = av1.khr_info.tileCount;
+    if (numTiles > 64) numTiles = 64;
+    for (uint32_t i = 0; i < numTiles; i++) {
+        // Parser-stored offset minus how far we shifted srcBufferOffset.
+        // Defensive: clamp to 0 if for some reason parser's offset < shift.
+        tileOffsetsLocal[i] = (av1.tileOffsets[i] >= obuShift)
+            ? (av1.tileOffsets[i] - obuShift) : 0;
+    }
+
+    VkVideoDecodeAV1PictureInfoKHR av1Pic = {
+        VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_PICTURE_INFO_KHR
+    };
+    av1Pic.pStdPictureInfo  = &av1.std_info;
+    // frameHeaderOffset relative to (rebased) srcBufferOffset = bytes spent on
+    // the OBU header (header byte + ext byte + leb128 size).  This skips the
+    // OBU header, leaving driver at frame_header_obu() syntax start.
+    av1Pic.frameHeaderOffset = obuFound ? obuLoc.obuHeaderBytes : 0;
+    av1Pic.tileCount        = numTiles;
+    av1Pic.pTileOffsets     = tileOffsetsLocal;
+    av1Pic.pTileSizes       = av1.tileSizes;
+    // Cache the absolute (pre-shift) value for the diag log below.
+    uint32_t frameHeaderOff = obuFound ? (obuShift + obuLoc.obuHeaderBytes) : 0;
+    // referenceNameSlotIndices[7]: AV1 ref_frame_idx[i] selects which of the
+    // 8 DPB-buffer positions is the i-th reference (LAST/LAST2/.../ALTREF).
+    // Convert to DPB slot indices via av1.pic_idx[] (-1 for inactive).
+    for (int i = 0; i < STD_VIDEO_AV1_REFS_PER_FRAME; i++) {
+        int rfi = av1.ref_frame_idx[i];
+        if (rfi >= 0 && rfi < STD_VIDEO_AV1_NUM_REF_FRAMES
+            && av1.pic_idx[rfi] >= 0) {
+            av1Pic.referenceNameSlotIndices[i] = av1.pic_idx[rfi];
+        } else {
+            av1Pic.referenceNameSlotIndices[i] = -1;
+        }
+    }
+
+    // §J.3.e.2.i.8 Phase 3d.4h — srcBufferOffset shifts forward by obuShift
+    // bytes (past TD / SEQ_HDR) so the decoder sees only FRAME-OBU bitstream.
+    // Range correspondingly shrinks; align up to 256 (Vulkan video extension
+    // typically wants 256-byte alignment, matches H.265 path's pattern).
+    VkDeviceSize effectiveRange = (VkDeviceSize)ppd->bitstreamDataLen - obuShift;
+    VkDeviceSize alignedRange = (effectiveRange + 255u) & ~VkDeviceSize(255);
+
+    VkVideoDecodeInfoKHR di = { VK_STRUCTURE_TYPE_VIDEO_DECODE_INFO_KHR };
+    di.pNext                = &av1Pic;
+    di.srcBuffer            = bsBuf->GetBuffer();
+    di.srcBufferOffset      = (VkDeviceSize)ppd->bitstreamDataOffset + obuShift;
+    di.srcBufferRange       = alignedRange;
+    di.dstPictureResource   = setupResource;
+    di.pSetupReferenceSlot  = &setupSlotInDecode;
+    di.referenceSlotCount   = (uint32_t)activeRefCount;
+    di.pReferenceSlots      = activeRefCount > 0 ? refSlots : nullptr;
+    rt.CmdDecodeVideoKHR(m_DecodeCmdBuf, &di);
+
+    // ── End video coding ──
+    VkVideoEndCodingInfoKHR eci = { VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR };
+    rt.CmdEndVideoCodingKHR(m_DecodeCmdBuf, &eci);
+
+    // ── Decode → SwUpload copy (codec-agnostic, identical to H.265 path) ──
+    if (m_SwUploadImage != VK_NULL_HANDLE && m_SwImageWidth > 0 && m_SwImageHeight > 0) {
+        auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        auto pfnCmdCopyImage = (PFN_vkCmdCopyImage)getDevPa(m_Device, "vkCmdCopyImage");
+
+        VkImageMemoryBarrier2 preBars[2] = {};
+        preBars[0].sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        preBars[0].srcStageMask                = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+        preBars[0].srcAccessMask               = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+        preBars[0].dstStageMask                = VK_PIPELINE_STAGE_2_COPY_BIT;
+        preBars[0].dstAccessMask               = VK_ACCESS_2_TRANSFER_READ_BIT;
+        preBars[0].oldLayout                   = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+        preBars[0].newLayout                   = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        preBars[0].srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[0].dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[0].image                       = curPic->image;
+        preBars[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        preBars[0].subresourceRange.levelCount = 1;
+        preBars[0].subresourceRange.baseArrayLayer = (uint32_t)slotIdx;
+        preBars[0].subresourceRange.layerCount = 1;
+
+        preBars[1].sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        preBars[1].srcStageMask                = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        preBars[1].srcAccessMask               = 0;
+        preBars[1].dstStageMask                = VK_PIPELINE_STAGE_2_COPY_BIT;
+        preBars[1].dstAccessMask               = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        preBars[1].oldLayout                   = m_SwImageLayoutInited
+                                                   ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                   : VK_IMAGE_LAYOUT_UNDEFINED;
+        preBars[1].newLayout                   = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        preBars[1].srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[1].dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[1].image                       = m_SwUploadImage;
+        preBars[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        preBars[1].subresourceRange.levelCount = 1;
+        preBars[1].subresourceRange.layerCount = 1;
+
+        VkDependencyInfo preDep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        preDep.imageMemoryBarrierCount = 2;
+        preDep.pImageMemoryBarriers    = preBars;
+        rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &preDep);
+
+        VkImageCopy copyRegions[2] = {};
+        copyRegions[0].srcSubresource.aspectMask     = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        copyRegions[0].srcSubresource.baseArrayLayer = (uint32_t)slotIdx;
+        copyRegions[0].srcSubresource.layerCount     = 1;
+        copyRegions[0].dstSubresource.aspectMask     = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        copyRegions[0].dstSubresource.baseArrayLayer = 0;
+        copyRegions[0].dstSubresource.layerCount     = 1;
+        copyRegions[0].extent                        = { (uint32_t)m_SwImageWidth, (uint32_t)m_SwImageHeight, 1 };
+        copyRegions[1] = copyRegions[0];
+        copyRegions[1].srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+        copyRegions[1].dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+        copyRegions[1].extent = { (uint32_t)m_SwImageWidth / 2, (uint32_t)m_SwImageHeight / 2, 1 };
+        if (pfnCmdCopyImage) {
+            pfnCmdCopyImage(m_DecodeCmdBuf,
+                curPic->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                m_SwUploadImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                2, copyRegions);
+        }
+
+        VkImageMemoryBarrier2 postBars[2] = {};
+        postBars[0] = preBars[0];
+        postBars[0].srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT;
+        postBars[0].srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        postBars[0].dstStageMask  = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+        postBars[0].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR;
+        postBars[0].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        postBars[0].newLayout     = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+        postBars[1] = preBars[1];
+        postBars[1].srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT;
+        postBars[1].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        postBars[1].dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
+        postBars[1].dstAccessMask = 0;
+        postBars[1].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        postBars[1].newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkDependencyInfo postDep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        postDep.imageMemoryBarrierCount = 2;
+        postDep.pImageMemoryBarriers    = postBars;
+        rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &postDep);
+        m_SwImageLayoutInited = true;
+    }
+
+    rt.EndCommandBuffer(m_DecodeCmdBuf);
+
+    // ── Submit with timeline semaphore (Phase 1.5b — same as H.265 path) ──
+    uint64_t signalVal = m_TimelineNext.fetch_add(1, std::memory_order_acq_rel);
+
+    VkTimelineSemaphoreSubmitInfo tssi = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+    tssi.signalSemaphoreValueCount = 1;
+    tssi.pSignalSemaphoreValues    = &signalVal;
+
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.pNext                = &tssi;
+    si.commandBufferCount   = 1;
+    si.pCommandBuffers      = &m_DecodeCmdBuf;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores    = &m_TimelineSem;
+    VkResult vr = rt.QueueSubmit(m_DecodeQueue, 1, &si, m_DecodeFence);
+    if (vr == VK_SUCCESS) {
+        m_LastDecodeValue.store(signalVal, std::memory_order_release);
+    }
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3b.2b vkQueueSubmit(AV1) rc=%d", (int)vr);
+        m_DecodeSkipCount++;
+        return false;
+    }
+
+    curPic->layoutInited = true;
+    m_DpbSlotActive[slotIdx] = true;
+    m_DecodeSubmitCount++;
+    m_NewestDecodedSlot.store(slotIdx, std::memory_order_release);
+
+    if (diagThisFrame) {
+        // Phase 3d.4g/h — dump key std_info fields + ref mapping + OBU shift
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3b.2b AV1 diag #%llu — "
+                    "slot=%d refs=%d showFrame=%d needsReset=%d "
+                    "tiles=%u obuShift=%u srcRange=%llu fhOff=%u tile0OffAbs=%u tile0OffRel=%u tile0Sz=%u",
+                    (unsigned long long)m_DecodeSubmitCount,
+                    slotIdx, activeRefCount,
+                    (int)av1.showFrame, (int)av1.needsSessionReset,
+                    av1.khr_info.tileCount,
+                    obuShift,
+                    (unsigned long long)alignedRange,
+                    frameHeaderOff,
+                    av1.tileOffsets[0],
+                    tileOffsetsLocal[0],
+                    av1.tileSizes[0]);
+        // Phase 3d.4i — dump first 32 bytes of bitstream (post-shift) so we
+        // can verify what the driver actually sees as "frame data".
+        if (bsMappedPtr) {
+            const uint8_t* p = bsMappedPtr + ppd->bitstreamDataOffset + obuShift;
+            char hexBuf[256];
+            int n = 0;
+            for (int i = 0; i < 32 && i < (int)(ppd->bitstreamDataLen - obuShift); i++) {
+                n += snprintf(hexBuf + n, sizeof(hexBuf) - n, "%02x ", p[i]);
+            }
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC]   AV1 post-shift first32: %s", hexBuf);
+        }
+        // std_info dump
+        const auto& si = av1.std_info;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC]   AV1 std_info: type=%u OH=%u pri_ref=%u rf_flags=0x%02x "
+                    "interpFil=%u TxMode=%u dq=%u dlf=%u skipMF=[%u,%u] coded_denom=%u "
+                    "OH8=[%u,%u,%u,%u,%u,%u,%u,%u]",
+                    (unsigned)si.frame_type, (unsigned)si.OrderHint,
+                    (unsigned)si.primary_ref_frame, (unsigned)si.refresh_frame_flags,
+                    (unsigned)si.interpolation_filter, (unsigned)si.TxMode,
+                    (unsigned)si.delta_q_res, (unsigned)si.delta_lf_res,
+                    (unsigned)si.SkipModeFrame[0], (unsigned)si.SkipModeFrame[1],
+                    (unsigned)si.coded_denom,
+                    (unsigned)si.OrderHints[0], (unsigned)si.OrderHints[1],
+                    (unsigned)si.OrderHints[2], (unsigned)si.OrderHints[3],
+                    (unsigned)si.OrderHints[4], (unsigned)si.OrderHints[5],
+                    (unsigned)si.OrderHints[6], (unsigned)si.OrderHints[7]);
+        // pic_idx + ref_frame_idx + referenceNameSlotIndices
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC]   AV1 picIdx=[%d,%d,%d,%d,%d,%d,%d,%d] "
+                    "rfIdx=[%u,%u,%u,%u,%u,%u,%u] "
+                    "rnSlot=[%d,%d,%d,%d,%d,%d,%d]",
+                    av1.pic_idx[0], av1.pic_idx[1], av1.pic_idx[2], av1.pic_idx[3],
+                    av1.pic_idx[4], av1.pic_idx[5], av1.pic_idx[6], av1.pic_idx[7],
+                    av1.ref_frame_idx[0], av1.ref_frame_idx[1], av1.ref_frame_idx[2],
+                    av1.ref_frame_idx[3], av1.ref_frame_idx[4], av1.ref_frame_idx[5],
+                    av1.ref_frame_idx[6],
+                    av1Pic.referenceNameSlotIndices[0], av1Pic.referenceNameSlotIndices[1],
+                    av1Pic.referenceNameSlotIndices[2], av1Pic.referenceNameSlotIndices[3],
+                    av1Pic.referenceNameSlotIndices[4], av1Pic.referenceNameSlotIndices[5],
+                    av1Pic.referenceNameSlotIndices[6]);
+    }
+    if (m_DecodeSubmitCount == 1 || (m_DecodeSubmitCount % 60) == 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3b.2b AV1 decode submitted "
+                    "#%llu (slot=%d refs=%d tiles=%u skipped=%llu)",
+                    (unsigned long long)m_DecodeSubmitCount,
+                    slotIdx, activeRefCount, av1.khr_info.tileCount,
+                    (unsigned long long)m_DecodeSkipCount);
+    }
+    return true;
+}
+
+// =============================================================================
+// Phase 1.3d / 1.3d.2 — H.265 native decode submission body
+// =============================================================================
+//
+// Renamed from submitDecodeFrame in Phase 3b.2a.  Pre-conditions (m_DpbReady,
+// PFN load, valid video session) are guaranteed by the dispatcher; this
+// helper goes straight into recording.
+
+bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
+{
     const auto& hevc = ppd->CodecSpecific.hevc;
 
     // §J.3.e.2.i.8 Phase 1.3d.2.c — Catch ANY IRAP (random-access picture:
@@ -979,10 +1692,21 @@ bool VkFrucRenderer::ensureDpbImagePool(int width, int height)
     if (!m_VideoProfileReady || m_Device == VK_NULL_HANDLE) return false;
     if (!m_NvParser || !m_NvParser->client) return false;
 
-    // HEVC CTU sizes are 16/32/64 — round up to 64 to fit any CTB layout.
+    // §J.3.e.2.i.8 Phase 3d.4c — codec-aware DPB image extent alignment.
+    // HEVC CTU max=64; AV1 super-block max=128 (NV driver advertises
+    // min=128x128 for AV1 in the per-codec capability probe at startup,
+    // which suggests pictureAccessGranularity is also 128 for that codec).
+    // Mismatched alignment → decoder writes beyond/inside DPB image edges
+    // and the resulting NV12 has uninitialized regions sampled as grey
+    // (Y=0,U=V=128) on alternating frames depending on slot reuse pattern.
     auto alignUp = [](int x, int a) { return (x + a - 1) & ~(a - 1); };
-    int alignedW = alignUp(width, 64);
-    int alignedH = alignUp(height, 64);
+    int blockAlign = (m_VideoCodec & VIDEO_FORMAT_MASK_AV1) ? 128 : 64;
+    int alignedW = alignUp(width, blockAlign);
+    int alignedH = alignUp(height, blockAlign);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3d.4c DPB pool extent "
+                "%dx%d aligned to %d-block → %dx%d",
+                width, height, blockAlign, alignedW, alignedH);
 
     auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetDeviceProcAddr");
@@ -1202,18 +1926,20 @@ void VkFrucRenderer::destroyDpbImagePool()
 
 bool VkFrucRenderer::createNvVideoParser()
 {
-    // §J.3.e.2.i.8 Phase 1 — H.265 ONLY.  nvvideoparser library compiled with
-    // VIPLESTREAM_NVPARSER_H265_ONLY define strips out H.264/AV1/VP9 dispatch
-    // cases (see nvvideoparser.pro:41).  Trying CreateVulkanVideoDecodeParser
-    // with non-H265 codec falls through to the switch's default branch and
-    // dereferences a null shared_ptr → crash.  We hard-skip parser instantiation
-    // for non-H265 streams and let session/cmd resources stay live (graphics
-    // path still runs SW NV12 upload, just no native decode acceleration).
-    // Phase 2 ports H.264; Phase 3 ports AV1.
-    if (!(m_VideoCodec & VIDEO_FORMAT_MASK_H265)) {
+    // §J.3.e.2.i.8 Phase 1 (H.265) + Phase 3a (AV1).  H.264 / VP9 still gated
+    // out from the parser library build (VIPLESTREAM_NVPARSER_NO_H264 +
+    // VIPLESTREAM_NVPARSER_NO_VP9 in nvvideoparser.pro), so attempting those
+    // would hit the defensive null-shared_ptr bail in CreateVulkanVideoDecodeParser
+    // and fail cleanly with VK_ERROR_FEATURE_NOT_PRESENT.  We still bail early
+    // here for codecs we know aren't ported, so the caller doesn't waste a
+    // syscall.  Phase 3b lands the AV1 submitDecodeFrame native-decode path;
+    // Phase 2 ports H.264.
+    const bool isH265 = (m_VideoCodec & VIDEO_FORMAT_MASK_H265) != 0;
+    const bool isAv1  = (m_VideoCodec & VIDEO_FORMAT_MASK_AV1)  != 0;
+    if (!isH265 && !isAv1) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 createNvVideoParser SKIPPED — "
-                    "current stream codec mask=0x%x is not H.265 (Phase 1 supports H.265 only)",
+                    "current stream codec mask=0x%x is neither H.265 nor AV1",
                     m_VideoCodec);
         return false;  // caller logs warning + falls back to legacy NAL-counter path
     }
@@ -1223,11 +1949,16 @@ bool VkFrucRenderer::createNvVideoParser()
 
     VkExtensionProperties stdHeaderVer = {};
     VkVideoCodecOperationFlagBitsKHR codecOp;
-    if (m_VideoCodec & VIDEO_FORMAT_MASK_H265) {
+    if (isH265) {
         strncpy_s(stdHeaderVer.extensionName, sizeof(stdHeaderVer.extensionName),
                   VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_EXTENSION_NAME, _TRUNCATE);
         stdHeaderVer.specVersion = VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_SPEC_VERSION;
         codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+    } else if (isAv1) {
+        strncpy_s(stdHeaderVer.extensionName, sizeof(stdHeaderVer.extensionName),
+                  VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_EXTENSION_NAME, _TRUNCATE);
+        stdHeaderVer.specVersion = VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_SPEC_VERSION;
+        codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
     } else {
         // Unreachable due to early bail above — keep for future codec phases.
         delete pimpl;

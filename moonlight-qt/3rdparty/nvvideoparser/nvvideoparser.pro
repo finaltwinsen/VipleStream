@@ -35,10 +35,13 @@ INCLUDEPATH += \
     $$PWD/../../libs/windows/include \
     $$PWD/../../libs/windows/include/x64
 
-# §J.3.e.2.i.8 — VipleStream Phase 1 只 port H.265 decoder.
-# Patch VulkanVideoDecoder.cpp 用 VIPLESTREAM_NVPARSER_H265_ONLY define
-# 把 H264/AV1/VP9 dispatch case 編譯掉，保留 H.265 + 共用 framework.
-DEFINES += VIPLESTREAM_NVPARSER_H265_ONLY
+# §J.3.e.2.i.8 — Phase 1 (H.265) + Phase 3 (AV1).  H264/VP9 still stripped.
+# Old VIPLESTREAM_NVPARSER_H265_ONLY define is removed; the AV1 case is now
+# always compiled (we patch the existing #ifndef VIPLESTREAM_NVPARSER_H265_ONLY
+# in VulkanVideoDecoder.cpp's switch — un-defining the gate enables AV1+VP9
+# but VP9 source isn't imported, so we keep that case behind a separate
+# VIPLESTREAM_NVPARSER_NO_VP9 define).  H.264 same — VIPLESTREAM_NVPARSER_NO_H264.
+DEFINES += VIPLESTREAM_NVPARSER_NO_H264 VIPLESTREAM_NVPARSER_NO_VP9
 
 SRC = $$PWD/src
 INC = $$PWD/include
@@ -48,12 +51,14 @@ INC = $$PWD/include
 DEFINES += NV_VIDEO_PARSER_NO_LOG
 
 SOURCES += \
-    $$SRC/VulkanH265Parser.cpp     \
-    $$SRC/VulkanVideoDecoder.cpp   \
-    $$SRC/cpudetect.cpp            \
-    $$SRC/NextStartCodeC.cpp       \
-    $$SRC/NextStartCodeAVX2.cpp    \
-    $$SRC/NextStartCodeAVX512.cpp  \
+    $$SRC/VulkanH265Parser.cpp         \
+    $$SRC/VulkanAV1Decoder.cpp         \
+    $$SRC/VulkanAV1GlobalMotionDec.cpp \
+    $$SRC/VulkanVideoDecoder.cpp       \
+    $$SRC/cpudetect.cpp                \
+    $$SRC/NextStartCodeC.cpp           \
+    $$SRC/NextStartCodeAVX2.cpp        \
+    $$SRC/NextStartCodeAVX512.cpp      \
     $$SRC/NextStartCodeSSSE3.cpp
 
 # AVX2 / AVX512 / SSSE3 source files require specific compiler intrinsics
@@ -64,6 +69,7 @@ QMAKE_CXXFLAGS += /arch:AVX2
 
 HEADERS += \
     $$INC/NvVideoParser/ByteStreamParser.h            \
+    $$INC/NvVideoParser/VulkanAV1Decoder.h            \
     $$INC/NvVideoParser/VulkanH265Decoder.h           \
     $$INC/NvVideoParser/VulkanH26xDecoder.h           \
     $$INC/NvVideoParser/VulkanVideoDecoder.h          \

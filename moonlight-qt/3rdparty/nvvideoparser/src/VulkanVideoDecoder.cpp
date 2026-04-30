@@ -648,12 +648,12 @@ void VulkanVideoDecoder::end_of_stream()
 }
 
 #include "nvVulkanh265ScalingList.h"
-#ifndef VIPLESTREAM_NVPARSER_H265_ONLY
+#ifndef VIPLESTREAM_NVPARSER_NO_H264
 #include "VulkanH264Decoder.h"
 #endif
 #include "VulkanH265Decoder.h"
-#ifndef VIPLESTREAM_NVPARSER_H265_ONLY
 #include "VulkanAV1Decoder.h"
+#ifndef VIPLESTREAM_NVPARSER_NO_VP9
 #include "VulkanVP9Decoder.h"
 #endif
 
@@ -704,7 +704,7 @@ VkResult CreateVulkanVideoDecodeParser(VkVideoCodecOperationFlagBitsKHR videoCod
     gLogLevel = logLevel;
     switch((uint32_t)videoCodecOperation)
     {
-#ifndef VIPLESTREAM_NVPARSER_H265_ONLY
+#ifndef VIPLESTREAM_NVPARSER_NO_H264
     case VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR:
     {
         if ((pStdExtensionVersion == nullptr) ||
@@ -740,7 +740,6 @@ VkResult CreateVulkanVideoDecodeParser(VkVideoCodecOperationFlagBitsKHR videoCod
         nvVideoDecodeParser = nvVideoH265DecodeParser;
     }
         break;
-#ifndef VIPLESTREAM_NVPARSER_H265_ONLY
     case VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR:
         if ((pStdExtensionVersion == nullptr) ||
                 (0 != strcmp(pStdExtensionVersion->extensionName, VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_EXTENSION_NAME)) ||
@@ -752,6 +751,7 @@ VkResult CreateVulkanVideoDecodeParser(VkVideoCodecOperationFlagBitsKHR videoCod
         }
         nvVideoDecodeParser =  VkSharedBaseObj<VulkanAV1Decoder>(new VulkanAV1Decoder(videoCodecOperation));
         break;
+#ifndef VIPLESTREAM_NVPARSER_NO_VP9
     case VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR:
         if ((pStdExtensionVersion == nullptr) ||
                 (0 != strcmp(pStdExtensionVersion->extensionName, VK_STD_VULKAN_VIDEO_CODEC_VP9_DECODE_EXTENSION_NAME)) ||
@@ -767,11 +767,11 @@ VkResult CreateVulkanVideoDecodeParser(VkVideoCodecOperationFlagBitsKHR videoCod
     default:
         nvParserErrorLog("Unsupported codec type!!!\n");
     }
-    // §J.3.e.2.i.8 — defensive: when VIPLESTREAM_NVPARSER_H265_ONLY is set and
-    // caller passes AV1/VP9/H.264, the switch's #ifdef strips those cases and
-    // we fall through to default with nvVideoDecodeParser still empty.  The
-    // upstream code unconditionally dereferenced it on the next line → null
-    // shared_ptr deref → crash.  Bail with a clear error code instead.
+    // §J.3.e.2.i.8 — defensive: when VIPLESTREAM_NVPARSER_NO_H264 / NO_VP9 are
+    // set and caller passes one of those codecs, the switch's #ifdef strips
+    // those cases and we fall through to default with nvVideoDecodeParser
+    // still empty.  Upstream code unconditionally dereferenced it on the next
+    // line → null shared_ptr deref → crash.  Bail with a clear error instead.
     if (!nvVideoDecodeParser) {
         return VK_ERROR_FEATURE_NOT_PRESENT;
     }

@@ -63,6 +63,14 @@ extern "C" {
 
 bool FFmpegVideoDecoder::isHardwareAccelerated()
 {
+    // §J.3.e.2.i.8 Phase 3d.3 — backend renderer reports native decode at a
+    // per-codec granularity now (acceptsNativeDecode is true even when the
+    // current codec falls through to FFmpeg, e.g. AV1 with submit gated off).
+    // Use the finer-grained probe so the SystemProperties HW probe only
+    // reports HW when an actual GPU decode pipeline is producing frames.
+    if (m_BackendRenderer && m_BackendRenderer->isNativelyDecodingCurrentCodec()) {
+        return true;
+    }
     return m_HwDecodeCfg != nullptr ||
             (getAVCodecCapabilities(m_VideoDecoderCtx->codec) & AV_CODEC_CAP_HARDWARE) != 0;
 }
@@ -614,7 +622,24 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     // our minds on the selected video codec, so we'll do a trial run
     // now to see if things will actually work when the video stream
     // comes in.
-    if (testMode != TestMode::NoTesting) {
+    //
+    // §J.3.e.2.i.8 Phase 3 — when the backend renderer can decode this codec
+    // natively (skipping FFmpeg's libavcodec entirely), the FFmpeg test
+    // packet path is irrelevant and may fail spuriously even when the real
+    // streaming path will work fine (e.g. AV1 with our native VK decode +
+    // libdav1d as a Pacer drive).  Bypass just the test packet body; do NOT
+    // mutate testMode itself — TestFrameOnly probes rely on it staying
+    // TestFrameOnly so the function returns BEFORE the "real init" block
+    // (prepareToRender, setOverlayRenderer, etc.) at the bottom runs.
+    const bool skipFFmpegTestPacket = (testMode != TestMode::NoTesting
+        && m_BackendRenderer && m_BackendRenderer->acceptsNativeDecode());
+    if (skipFFmpegTestPacket) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-DIAG] Test decode SKIPPED — backend renderer "
+                    "claims native decode (format=0x%x, testMode=%d)",
+                    params->videoFormat, (int)testMode);
+    }
+    if (testMode != TestMode::NoTesting && !skipFFmpegTestPacket) {
         switch (params->videoFormat) {
         case VIDEO_FORMAT_H264:
             m_Pkt->data = (uint8_t*)k_H264TestFrame;
@@ -936,9 +961,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 
                 ret = snprintf(&output[offset], length - offset,
                     u8"--- \u9023\u7DDA\u72C0\u614B ---\n"          // --- 連線狀態 ---
-                    u8"%s %s\n"                                      // icon type
-                    u8"\u4F3A\u670D\u5668: %s\n"                     // 伺服器: addr
-                    u8"\u54C1\u8CEA: %s\n",                          // 品質: OK/POOR
+                    u8"%s %s | %s | %s\n",                           // icon 類型 | addr | 品質
                     connIcon, connTypeStr,
                     qPrintable(activeAddr),
                     connPoor ? u8"\u2757 \u4E0D\u7A69\u5B9A" :      // ❗ 不穩定
@@ -967,9 +990,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                 }
             }
 
-            // Separator
-            ret = snprintf(&output[offset], length - offset, "\n");
-            if (ret >= 0 && ret < length - offset) offset += ret;
+            // VipleStream: 移除原本連線狀態結尾的空行分隔，改靠下一段標題分節
         }
     }
 
@@ -981,9 +1002,20 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
             double peakVideoMbps = m_BwTracker.GetPeakMbps();
 #endif
 
+            // §J.3.e.2.i.8 Phase 3d.3 — 「原生 / HW / SW」per-codec accuracy:
+            //   原生 = backend renderer is REALLY firing vkCmdDecodeVideoKHR
+            //          for the current codec (H.265 always; AV1 only when
+            //          VIPLE_VKFRUC_NATIVE_AV1_SUBMIT=1; H.264 never until Phase 2).
+            //   HW   = FFmpeg 走 hwaccel (m_HwDecodeCfg != nullptr)
+            //   SW   = FFmpeg 純軟解 (libdav1d / hevc / h264 等 SW codec)
+            const char* decoderType =
+                (m_BackendRenderer && m_BackendRenderer->isNativelyDecodingCurrentCodec())
+                    ? u8"原生"
+                    : (m_HwDecodeCfg != nullptr ? u8"HW" : u8"SW");
+
             ret = snprintf(&output[offset],
                            length - offset,
-                           u8"\u5F71\u50CF\u4E32\u6D41: %dx%d %.2f FPS (\u7DE8\u78BC: %s)\n"
+                           u8"\u5F71\u50CF: %dx%d %.2f FPS  \u7DE8\u78BC: %s, \u89E3\u78BC: %s\n"
 #ifdef DISPLAY_BITRATE
                            u8"\u4F4D\u5143\u7387: %.1f Mbps, \u5CF0\u503C (%us): %.1f\n"
 #endif
@@ -991,7 +1023,8 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                            m_VideoDecoderCtx->width,
                            m_VideoDecoderCtx->height,
                            stats.totalFps,
-                           codecString
+                           codecString,
+                           decoderType
 #ifdef DISPLAY_BITRATE
                            ,
                            avgVideoMbps,
@@ -1009,9 +1042,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 
         ret = snprintf(&output[offset],
                        length - offset,
-                       u8"\u7DB2\u8DEF\u63A5\u6536\u5E40\u7387: %.2f FPS\n"
-                       u8"\u89E3\u78BC\u5E40\u7387: %.2f FPS\n"
-                       u8"\u7E6A\u88FD\u5E40\u7387: %.2f FPS\n",
+                       u8"\u5E40\u7387: \u63A5\u6536 %.2f / \u89E3\u78BC %.2f / \u7E6A\u88FD %.2f FPS\n",
                        stats.receivedFps,
                        stats.decodedFps,
                        stats.renderedFps);
@@ -1050,12 +1081,10 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 
         ret = snprintf(&output[offset],
                        length - offset,
-                       u8"\u7DB2\u8DEF\u4E1F\u5E40: %.2f%%\n"
-                       u8"\u7DB2\u8DEF\u6296\u52D5\u4E1F\u5E40: %.2f%%\n"
-                       u8"\u5E73\u5747\u7DB2\u8DEF\u5EF6\u9072: %s\n"
-                       u8"\u5E73\u5747\u89E3\u78BC\u6642\u9593: %.2f ms\n"
-                       u8"\u5E73\u5747\u4F47\u5217\u5EF6\u9072: %.2f ms\n"
-                       u8"\u5E73\u5747\u7E6A\u88FD\u6642\u9593 (\u542B V-sync): %.2f ms\n",
+                       // VipleStream: \u7DB2\u8DEF\u4E09\u9805\u5408\u4E00\u884C (\u4E1F\u5E40/\u6296\u52D5/\u5EF6\u9072)
+                       u8"\u7DB2\u8DEF: \u4E1F\u5E40 %.2f%% / \u6296\u52D5 %.2f%% / \u5EF6\u9072 %s\n"
+                       // VipleStream: \u5E73\u5747\u6642\u9593\u4E09\u9805\u5408\u4E00\u884C (\u89E3\u78BC/\u4F47\u5217/\u7E6A\u88FD)
+                       u8"\u5E73\u5747\u6642\u9593: \u89E3\u78BC %.2f / \u4F47\u5217 %.2f / \u7E6A\u88FD %.2f ms (\u542B V-sync)\n",
                        (float)stats.networkDroppedFrames / stats.totalFrames * 100,
                        (float)stats.pacerDroppedFrames / stats.decodedFrames * 100,
                        rttString,
@@ -1924,24 +1953,42 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
     bool prefsWantVulkan_2 = vkPrefs2 && vkPrefs2->rendererSelection == StreamingPreferences::RS_VULKAN;
     bool envForceVulkan_2  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0;
     if (!prefsForceD3D11_2 && (prefsWantVulkan_2 || envForceVulkan_2)) {
-        const char* swDecoderName = nullptr;
-        if (params->videoFormat & VIDEO_FORMAT_MASK_H264) swDecoderName = "h264";
-        else if (params->videoFormat & VIDEO_FORMAT_MASK_H265) swDecoderName = "hevc";
-        else if (params->videoFormat & VIDEO_FORMAT_MASK_AV1) swDecoderName = "av1";
-        if (swDecoderName) {
-            const AVCodec* swDec = avcodec_find_decoder_by_name(swDecoderName);
-            if (swDec) {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-VKFRUC-SW] forcing software decoder '%s' "
-                            "for VkFrucRenderer SW upload path", swDecoderName);
-                if (tryInitializeRendererForUnknownDecoder(swDec, params, false)) {
-                    return true;
-                }
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-VKFRUC-SW] SW decoder init failed — falling through "
-                            "to standard cascade");
-            }
+        // §J.3.e.2.i.8 Phase 3 — for AV1 the FFmpeg-internal `av1` decoder in
+        // our avcodec-62 build is a HW-only stub ("Your platform doesn't
+        // support hardware accelerated AV1 decoding" / "Failed to get pixel
+        // format" → test decode aborts).  Prefer `libdav1d` first (the
+        // dav1d.dll-backed SW decoder is registered in our build); fall back
+        // to `av1` only if libdav1d isn't available at runtime.
+        const char* candidateNames[3] = { nullptr, nullptr, nullptr };
+        if (params->videoFormat & VIDEO_FORMAT_MASK_H264) {
+            candidateNames[0] = "h264";
+        } else if (params->videoFormat & VIDEO_FORMAT_MASK_H265) {
+            candidateNames[0] = "hevc";
+        } else if (params->videoFormat & VIDEO_FORMAT_MASK_AV1) {
+            candidateNames[0] = "libdav1d";
+            candidateNames[1] = "av1";
         }
+        for (int ci = 0; ci < 3 && candidateNames[ci]; ci++) {
+            const char* swDecoderName = candidateNames[ci];
+            const AVCodec* swDec = avcodec_find_decoder_by_name(swDecoderName);
+            if (!swDec) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-SW] software decoder '%s' not registered, "
+                            "trying next candidate", swDecoderName);
+                continue;
+            }
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-SW] forcing software decoder '%s' "
+                        "for VkFrucRenderer SW upload path", swDecoderName);
+            if (tryInitializeRendererForUnknownDecoder(swDec, params, false)) {
+                return true;
+            }
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-SW] SW decoder '%s' init failed", swDecoderName);
+        }
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-SW] all SW decoder candidates failed — falling "
+                    "through to standard cascade");
     }
 
     // First try decoders that the user has manually specified via environment variables.

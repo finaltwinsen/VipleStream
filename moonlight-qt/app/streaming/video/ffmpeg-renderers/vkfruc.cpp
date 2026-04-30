@@ -62,6 +62,13 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     m_SwMode   = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW")   != 0 || prefsWantVulkan;
     m_FrucMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_FRUC") != 0 || (prefsWantVulkan && prefsWantInterp);
     m_DualMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_DUAL") != 0 || (prefsWantVulkan && prefsWantInterp);
+    // §J.3.e.2.i.8 Phase 3d.4i — diagnostic override: forces FRUC + dual mode
+    // OFF so we can isolate whether the AV1 grey-green flicker comes from the
+    // decode path or the FRUC interpolation/dual-present blending path.
+    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_NO_FRUC") != 0) {
+        m_FrucMode = false;
+        m_DualMode = false;
+    }
     // §J.3.e.2.i.7 HW path retry：VIPLE_VKFRUC_HW=1 強制走 FFmpeg-Vulkan
     // hwcontext (override SW path).  搭配 mirror-libplacebo ext list 嘗試
     // 解掉 v1.3.123-136 的 NV nvoglv64 NULL deref crash.  Init 失敗或
@@ -541,12 +548,15 @@ bool VkFrucRenderer::pickPhysicalDeviceAndQueue()
             if (vr == VK_SUCCESS) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VKFRUC] §J.3.e.2.i.8 codec %s: SUPPORTED "
-                            "maxRefs=%u maxDPB=%u min=%ux%u max=%ux%u flags=%x",
+                            "maxRefs=%u maxDPB=%u min=%ux%u max=%ux%u flags=%x "
+                            "pictureGranularity=%ux%u",
                             probe.name,
                             caps.maxActiveReferencePictures, caps.maxDpbSlots,
                             caps.minCodedExtent.width, caps.minCodedExtent.height,
                             caps.maxCodedExtent.width, caps.maxCodedExtent.height,
-                            (unsigned)decCaps.flags);
+                            (unsigned)decCaps.flags,
+                            caps.pictureAccessGranularity.width,
+                            caps.pictureAccessGranularity.height);
             } else {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VKFRUC] §J.3.e.2.i.8 codec %s: NOT SUPPORTED (rc=%d)",
@@ -2751,6 +2761,27 @@ bool VkFrucRenderer::acceptsNativeDecode() const
     return wantNative && (m_VideoSession != VK_NULL_HANDLE);
 }
 
+bool VkFrucRenderer::isNativelyDecodingCurrentCodec() const
+{
+    // §J.3.e.2.i.8 Phase 3d.3 — accurate per-codec native-decode probe.
+    //
+    //   * H.265: Phase 1 + 1.5b stable, vkCmdDecodeVideoKHR fires every frame.
+    //   * AV1: parser dispatch + sequence-header rebuild work, but the actual
+    //     vkCmdDecodeVideoKHR submit is gated behind VIPLE_VKFRUC_NATIVE_AV1_SUBMIT
+    //     pending Phase 3d.4 GPU device-lost diagnosis; without that env var
+    //     AV1 streams flow through FFmpeg libdav1d so we report "not native".
+    //   * H.264: parser library was compiled with VIPLESTREAM_NVPARSER_NO_H264
+    //     (Phase 2 will port); always FFmpeg.
+    if (!acceptsNativeDecode()) return false;
+    if (m_VideoCodec & VIDEO_FORMAT_MASK_H265) return true;
+    if (m_VideoCodec & VIDEO_FORMAT_MASK_AV1) {
+        static const bool av1SubmitEnabled =
+            qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_AV1_SUBMIT") != 0;
+        return av1SubmitEnabled;
+    }
+    return false;
+}
+
 void VkFrucRenderer::submitNativeDecodeUnit(const uint8_t* data, size_t len)
 {
     // §J.3.e.2.i.8 Phase 1.1c — 把 NAL bytes 餵給 NvVideoParser.
@@ -2882,6 +2913,14 @@ void VkFrucRenderer::destroyVideoSession()
     m_H265VpsSeqSeen.clear();
     m_H265SpsSeqSeen.clear();
     m_H265PpsSeqSeen.clear();
+
+    // §J.3.e.2.i.8 Phase 3b.1 — reset AV1 sequence-header tracking so a restart
+    // rebuilds session params from the fresh placeholder + first parser-supplied
+    // sequence header.
+    m_pfnDestroyVideoSessionParams = nullptr;
+    m_pfnCreateVideoSessionParams  = nullptr;
+    m_AV1SeqHdrSeqSeen             = 0;
+    m_AV1SeqHdrApplied             = false;
 
     // §J.3.e.2.i.8 Phase 1.3 — invalidate codec profile so subsequent bitstream
     // buffer / DPB image allocations refuse to chain into stale state.
