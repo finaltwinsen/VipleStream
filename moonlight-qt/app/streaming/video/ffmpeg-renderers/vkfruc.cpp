@@ -69,6 +69,30 @@ VkFrucRenderer::VkFrucRenderer(int pass)
         m_FrucMode = false;
         m_DualMode = false;
     }
+    // §J.3.e.2.i.8 Phase 1.5c — when running in ONLY mode (Pacer driven by
+    // synth AVFrame from native decode, no FFmpeg avcodec_send_packet),
+    // force FRUC + dual mode OFF.  Phase 2.5's graphics-queue image→buffer
+    // copy of m_SwUploadImage races against the previous frame's fragment-
+    // shader sample on cross-cmd-buf submissions when ONLY's high
+    // submission rate (= network packet rate) is reached → DEVICE_LOST in
+    // ~3 frames on NV 596.84 (v1.3.278 testing).  Until Phase 2.5
+    // architectural fix moves the copy to the decode queue, ONLY mode is
+    // exclusive of FRUC.  User can still get FRUC via PARALLEL mode (slower
+    // FFmpeg-bound but FRUC works).  Allow override for forensics via
+    // VIPLE_VKFRUC_ONLY_FORCE_FRUC=1 (testing-only — expect crash).
+    static const bool s_onlyMode =
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY") != 0;
+    static const bool s_onlyForceFruc =
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_ONLY_FORCE_FRUC") != 0;
+    if (s_onlyMode && (m_FrucMode || m_DualMode) && !s_onlyForceFruc) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.5c — ONLY mode active, "
+                    "auto-disabling FRUC + dual-present (Phase 2.5 image→buffer "
+                    "copy collides with high-rate submissions → DEVICE_LOST). "
+                    "Set VIPLE_VKFRUC_ONLY_FORCE_FRUC=1 to override (debug).");
+        m_FrucMode = false;
+        m_DualMode = false;
+    }
     // §J.3.e.2.i.7 HW path retry：VIPLE_VKFRUC_HW=1 強制走 FFmpeg-Vulkan
     // hwcontext (override SW path).  搭配 mirror-libplacebo ext list 嘗試
     // 解掉 v1.3.123-136 的 NV nvoglv64 NULL deref crash.  Init 失敗或
@@ -297,11 +321,45 @@ bool VkFrucRenderer::createInstanceAndSurface(SDL_Window* window)
     // VipleStream-1777464748.dmp; root cause of v1.3.123-133 crashes).
     appInfo.apiVersion = VK_API_VERSION_1_3;
 
+    // §J.3.e.2.i.8 Phase 1.5c — when VIPLE_VKFRUC_VULKAN_DEBUG=1 and the
+    // Khronos validation layer is installed (LunarG SDK or
+    // VK_LAYER_PATH set), enable it.  Routes spec violations + sync errors
+    // through the debug messenger to SDL_Log, critical infra for diagnosing
+    // DEVICE_LOST events that production driver hides as silent GPU faults.
+    std::vector<const char*> layers;
+    if (wantDebugUtils) {
+        auto pfnEnumLayer = (PFN_vkEnumerateInstanceLayerProperties)m_pfnGetInstanceProcAddr(
+            nullptr, "vkEnumerateInstanceLayerProperties");
+        if (pfnEnumLayer) {
+            uint32_t lcount = 0;
+            pfnEnumLayer(&lcount, nullptr);
+            std::vector<VkLayerProperties> lprops(lcount);
+            pfnEnumLayer(&lcount, lprops.data());
+            for (auto& l : lprops) {
+                if (strcmp(l.layerName, "VK_LAYER_KHRONOS_validation") == 0) {
+                    layers.push_back("VK_LAYER_KHRONOS_validation");
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VKFRUC] §J.3.e.2.i.8 debug: VK_LAYER_KHRONOS_validation "
+                                "enabled (spec=v%u impl=%u)", l.specVersion, l.implementationVersion);
+                    break;
+                }
+            }
+            if (layers.empty()) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.8 debug: VIPLE_VKFRUC_VULKAN_DEBUG=1 "
+                            "set but VK_LAYER_KHRONOS_validation not found — install LunarG "
+                            "Vulkan SDK or set VK_LAYER_PATH to the Khronos validation layer dir");
+            }
+        }
+    }
+
     VkInstanceCreateInfo ici = {};
     ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     ici.pApplicationInfo = &appInfo;
     ici.enabledExtensionCount = (uint32_t)exts.size();
     ici.ppEnabledExtensionNames = exts.data();
+    ici.enabledLayerCount = (uint32_t)layers.size();
+    ici.ppEnabledLayerNames = layers.empty() ? nullptr : layers.data();
 
     VkResult rc = pfnCreateInstance(&ici, nullptr, &m_Instance);
     if (rc != VK_SUCCESS) {
@@ -779,10 +837,23 @@ bool VkFrucRenderer::createSwapchain()
     // Dual-present (i.4.2/i.5) needs at least 4 images so vkAcquireNextImageKHR
     // doesn't block — we acquire 2 per frame, present 2 per frame, with FIFO
     // only ~3 in flight at a time leaves no headroom for source-rate jitter.
+    //
+    // §J.3.e.2.i.8 Phase 1.5c — ONLY mode (synth-frame Pacer drive at network
+    // packet rate, ~60-90fps) needs deeper swapchain to absorb submission /
+    // present rate variance.  3 images @ IMMEDIATE present caused
+    // vkAcquireNextImageKHR to fail with NOT_READY after ~60 frames in
+    // v1.3.279 testing (no spare images while previous presents in flight).
+    // Bump to minImageCount + 4 → typically 5-6 images with maxImageCount cap.
     uint32_t imageCount = caps.minImageCount + 1;
     if (m_DualMode) {
         // (std::max) parens defeat Windows.h max() macro pollution.
         uint32_t want = caps.minImageCount + 2;  // = 4 typically
+        if (want > imageCount) imageCount = want;
+    }
+    static const bool s_onlyModeForSwapDepth =
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY") != 0;
+    if (s_onlyModeForSwapDepth) {
+        uint32_t want = caps.minImageCount + 4;  // = ~6 typically
         if (want > imageCount) imageCount = want;
     }
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
@@ -826,6 +897,12 @@ bool VkFrucRenderer::createSwapchain()
     //     second present overwrite the first almost instantly, killing
     //     the interp+real alternation.  FIFO locks 2 presents to 2
     //     consecutive vsync slots → 60 Hz panel sees true 60fps display.
+    //   • ONLY mode:                   MAILBOX → FIFO (avoid IMMEDIATE — at
+    //     synth-frame submission rate of 60-90fps, IMMEDIATE backlogs the
+    //     swapchain since each present is queued without replacing.  MAILBOX
+    //     keeps the latest frame and discards older ones, so acquire never
+    //     starves.  Falls back to FIFO if MAILBOX unsupported on this
+    //     surface — also fine, lower latency penalty than IMMEDIATE backlog.)
     //   • VIPLE_VK_FRUC_VSYNC=1 forces FIFO regardless (legacy).
     uint32_t modeCount = 0;
     pfnGetSurfModes(m_PhysicalDevice, m_Surface, &modeCount, nullptr);
@@ -833,7 +910,15 @@ bool VkFrucRenderer::createSwapchain()
     pfnGetSurfModes(m_PhysicalDevice, m_Surface, &modeCount, modes.data());
     VkPresentModeKHR pmode = VK_PRESENT_MODE_FIFO_KHR;  // always supported per spec
     bool wantVsync = m_DualMode || qEnvironmentVariableIntValue("VIPLE_VK_FRUC_VSYNC");
-    if (!wantVsync) {
+    static const bool s_onlyModeForPresent =
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY") != 0;
+    if (s_onlyModeForPresent && !wantVsync) {
+        // ONLY mode: prefer MAILBOX (no backlog) over IMMEDIATE (backlogs at
+        // high submit rate → swapchain over-acquire).  FIFO as fallback.
+        for (auto m : modes) {
+            if (m == VK_PRESENT_MODE_MAILBOX_KHR) { pmode = m; break; }
+        }
+    } else if (!wantVsync) {
         for (auto m : modes) {
             if (m == VK_PRESENT_MODE_IMMEDIATE_KHR) { pmode = m; break; }
             if (m == VK_PRESENT_MODE_MAILBOX_KHR && pmode == VK_PRESENT_MODE_FIFO_KHR) {

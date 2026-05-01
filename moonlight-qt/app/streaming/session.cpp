@@ -716,6 +716,12 @@ bool Session::initialize(QQuickWindow* qtWindow)
                     "[VIPLE-FRUC] Requesting %d FPS from server (user setting: %d, FRUC 2x)",
                     m_StreamConfig.fps, m_Preferences->fps);
     }
+    // §J.3.e.2.i.8 Phase 1.5c — note: ONLY mode + FRUC pref ON → FRUC pref
+    // gives us 30fps stream (FRUC 2x halving above), which happens to match
+    // ONLY mode's max stable submission rate on NV 596.84 + RTX 3060.  60fps
+    // ONLY mode reproduces graphics-queue DEVICE_LOST on first render submit
+    // (v1.3.282 testing).  Phase 1.5c-final needs Pacer-level submit rate
+    // throttling to match swapchain/display rate; deferred.
 
     m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
 
