@@ -13,7 +13,7 @@
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
 | **High** | **§J.3.e.2.i.8** Phase 3d.5 — AV1 native decode GPU-side grey 診斷 | 9 個 parser/picture-info bug 修了仍 grey；剩 driver-level，需 validation layer 或 vk_video_samples 對比 |
-| **High** | **§J.3.e.2.i.8** Phase 2 — H.264 native VK decode port | 主流 host 還會 fallback 到 H.264；現在 H.264 走 FFmpeg SW，加 native HW 提升大 |
+| **High (in progress)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | v1.3.275 H.264 native ship 後發現 FRUC 從 m_SwStagingBuffer (FFmpeg SW)、real frame 從 m_SwUploadImage (native) 兩條 pipeline source 不對稱 → dual-present 3-4 Hz blur/sharp。v1.3.276 image→buffer copy + descset 切換改善但有 WAW race；v1.3.277 per-slot buffer 修，runtime 驗證中 |
 | **Medium-High** | **§I.D** Android Vulkan FRUC async compute | C.5.b 量到 dual-present + waitIdle thermal regression；async compute queue 是真正解 |
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) — 解 NCNN-Vulkan shared path | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
 | **Medium** | **§A.1 + A.11** QSettings org / ini 遷移 | 升級 v1.2.43 起使用者設定看起來像 reset；migration 寫好且測試後再動 |
@@ -210,7 +210,8 @@ DirectML auto-cascade（v1.2.91）已經把「中低階 GPU 跑 DML 會掉幀」
 | **§J.3.e.2.i.1-7** Init / device / swapchain / FFmpeg-Vulkan bridge / ext probe | Vulkan device + swapchain + FFmpeg AVHWDeviceContext + RGB upload pipeline 全套 | ✅ ship |
 | **§J.3.e.2.i.8 Phase 1.x** H.265 native VK_KHR_video_decode | NvVideoParser + VkVideoSessionKHR + DPB pool + vkCmdDecodeVideoKHR + cross-queue timeline sem | ✅ v1.3.251（84.78 fps PARALLEL stable，5000+ frame ZERO device-lost）|
 | **§J.3.e.2.i.8 Phase 1.5c** ONLY mode swapchain depth | `VIPLE_VKFRUC_NATIVE_DECODE_ONLY=1` 跳過 FFmpeg、純 native 驅動 Pacer。Synth-frame submission rate 高 → swapchain over-acquire (`VUID-vkAcquireNextImageKHR-surface-07783`) | 🟡 deferred — 預設 PARALLEL mode 不受影響；要修需 Pacer integration / swapchain depth bump |
-| **§J.3.e.2.i.8 Phase 2** H.264 native VK decode port | parser library 把 `VIPLESTREAM_NVPARSER_NO_H264` 拿掉、port `submitDecodeFrameH264`、跟 H.265 + AV1 共用 dispatcher | ⏳ 未開始 — 主流 host fallback 到 H.264 機率高 |
+| **§J.3.e.2.i.8 Phase 2** H.264 native VK decode port | nvvideoparser 把 H264 sources 加進來、createNvVideoParser + DecodePicture H.264 dispatch、onH264PictureParametersFromParser SPS/PPS 增量上傳、submitDecodeFrameH264 (DPB iterate dpb[17] / 自 alloc StdVideoDecodeH264ReferenceInfo / flat picture-info)、移除過度保守的 intra_pic_flag RESET trigger | ✅ v1.3.275 — H.264 stream 走 native VK_KHR_video_decode，VIPLE_VKFRUC_NATIVE_DECODE=1 開啟 |
+| **§J.3.e.2.i.8 Phase 2.5** FRUC NV12 source 整合 native decode | dual-present 下 real frame 從 m_SwUploadImage (native VK decode 寫的) sample，但 FRUC 的 NV12→RGB compute 從 m_SwStagingBuffer (FFmpeg parallel SW decode 用 memcpy 寫的) 讀 → source asymmetry → 3-4 Hz blur/sharp flicker。修法：m_SwUploadImage 加 TRANSFER_SRC usage、graphics queue 在 renderFrameSw cmd buf 開頭做 image→buffer copy 進 m_SwFrucNv12Buf[slot]、FRUC binding 0 透過 m_FrucNv12RgbDescSetNative[slot] 改指這個 buffer、timeline sem wait stage 改 TRANSFER_BIT 涵蓋 copy | 🟡 in progress — v1.3.276 single-buffer 改善 (decode 41→31ms, drops 7.77→5.02%) 但有 WAW race 殘留偶爾模糊；v1.3.277 per-slot buffer + per-slot descset 修 race，runtime 驗證中 |
 | **§J.3.e.2.i.8 Phase 3** AV1 native VK decode | parser library 加 AV1 sources、createNvVideoParser AV1 路徑、submitDecodeFrameAv1 | ✅ source 全到位（v1.3.272），AV1 stream 走 FFmpeg libdav1d + Vulkan render @84fps，overlay 顯示精準 |
 | **§J.3.e.2.i.8 Phase 3d.5** AV1 native decode GPU-side grey 診斷 | 9 個 parser/picture-info real bug 修了仍吐 constant grey；剩下 driver-level 問題 | 🟡 阻塞 — 需 Vulkan validation layer (LunarG SDK) 或 vk_video_samples 上游 client 逐行 diff |
 

@@ -456,6 +456,8 @@ private:
         PFN_vkDestroyImageView       DestroyImageView;
         // §J.3.e.2.i.3.e-SW additions (only used when m_SwMode):
         PFN_vkCmdCopyBufferToImage   CmdCopyBufferToImage;
+        // §J.3.e.2.i.8 Phase 2.5 — image→buffer copy for FRUC native NV12 mirror.
+        PFN_vkCmdCopyImageToBuffer   CmdCopyImageToBuffer;
     } m_RtPfn = {};
     bool loadRenderTimePfns();
 
@@ -479,6 +481,31 @@ private:
     VkDeviceMemory   m_SwUploadImageMem   = VK_NULL_HANDLE;
     VkImageView      m_SwUploadView       = VK_NULL_HANDLE;
     bool             m_SwImageLayoutInited = false;  // true after first transition
+    // §J.3.e.2.i.8 Phase 2.5 — per-slot gpu-only NV12 buffer that mirrors
+    // m_SwUploadImage for FRUC compute consumption when native VK decode is
+    // active.  We avoid teaching the FRUC NV12→RGB compute shader to read
+    // sampled images by copying the decoded NV12 bytes via vkCmdCopyImageToBuffer
+    // at the start of renderFrameSw's cmd buffer; FRUC binding 0 then points
+    // to this buffer (via m_FrucNv12RgbDescSetNative[slot]) instead of
+    // m_SwStagingBuffer.  Removes the source asymmetry that caused 3-4 Hz
+    // blur/sharp flicker in v1.3.275.
+    //
+    // PER-SLOT (kFrucFramesInFlight = 2): each frame slot owns its own buffer
+    // and matching descriptor set so consecutive frames don't WAW-race on a
+    // shared buffer across submissions (no implicit memory barrier between
+    // separate vkQueueSubmit calls on the graphics queue).  The slot fence
+    // (m_SlotInFlightFence[slot]) waited at the start of renderFrameSw
+    // ensures the previous use of slot N has completed before slot N reuses
+    // m_SwFrucNv12Buf[N].
+    //
+    // v1.3.277 REVERTED to single buffer — per-slot caused reliable
+    // VK_ERROR_DEVICE_LOST after ~1380 frames on NV 596.84 + RTX 3060.
+    // v1.3.276 single-buffer ran 2940+ frames stable (with theoretical WAW
+    // race manifesting as "occasional blur" but no crash).  Keeping
+    // single-buffer trade-off until we can root-cause the per-slot crash
+    // (likely descriptor set / buffer interaction with NV driver).
+    VkBuffer         m_SwFrucNv12Buf      = VK_NULL_HANDLE;
+    VkDeviceMemory   m_SwFrucNv12BufMem   = VK_NULL_HANDLE;
 
     // §J.3.e.2.i.4.2 / §J.3.e.2.i.5 — interp graphics pipeline + dual-present.
     // Second graphics pipeline displays m_FrucInterpRgbBuf via fragment
@@ -512,7 +539,8 @@ private:
     // i.4.2 added interp display via m_InterpPipeline (above).
     bool createFrucComputeResources(int width, int height);
     void destroyFrucComputeResources();
-    bool runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, uint32_t height);
+    bool runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, uint32_t height,
+                             bool useNativeSrc);
 
     bool     m_FrucMode      = false;
     bool     m_FrucReady     = false;
@@ -531,6 +559,11 @@ private:
     VkPipelineLayout      m_FrucNv12RgbPipeLay   = VK_NULL_HANDLE;
     VkPipeline            m_FrucNv12RgbPipeline  = VK_NULL_HANDLE;
     VkDescriptorSet       m_FrucNv12RgbDescSet   = VK_NULL_HANDLE;
+    // §J.3.e.2.i.8 Phase 2.5 — alternate descriptor set whose binding 0 points
+    // at m_SwFrucNv12Buf (native-decoded NV12) instead of m_SwStagingBuffer
+    // (FFmpeg memcpy NV12).  Bound by runFrucComputeChain when useNative=true.
+    // (Reverted from per-slot in v1.3.278 — see m_SwFrucNv12Buf comment.)
+    VkDescriptorSet       m_FrucNv12RgbDescSetNative = VK_NULL_HANDLE;
 
     // 3 compute pipelines (ME / Median / Warp).  Each has own DSL because
     // binding counts differ (ME=4, Median=2, Warp=4).
