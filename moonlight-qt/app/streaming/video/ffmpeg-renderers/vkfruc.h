@@ -155,6 +155,13 @@ public:
                                            const StdVideoPictureParametersSet* sps,
                                            const StdVideoPictureParametersSet* pps);
 
+    // §J.3.e.2.i.8 Phase 2 — H.264 SPS/PPS upload to VkVideoSessionParametersKHR.
+    // Same incremental add-info pattern as H.265 but two param-set types instead
+    // of three (no VPS).  Caches per-id GetUpdateSequenceCount() so repeat
+    // callbacks are no-ops.
+    bool onH264PictureParametersFromParser(const StdVideoPictureParametersSet* sps,
+                                           const StdVideoPictureParametersSet* pps);
+
     // §J.3.e.2.i.8 Phase 3b.1 — AV1 sequence-header upload to VkVideoSessionParametersKHR.
     //
     // Vulkan AV1 session parameters are immutable (no VkVideoDecodeAV1SessionParametersAddInfoKHR
@@ -195,6 +202,10 @@ private:
     std::map<int, uint32_t> m_H265VpsSeqSeen;
     std::map<int, uint32_t> m_H265SpsSeqSeen;
     std::map<int, uint32_t> m_H265PpsSeqSeen;
+    // §J.3.e.2.i.8 Phase 2 — H.264 SPS/PPS tracking, parallel structure.
+    uint32_t                m_H264SessionParamsSeq = 0;
+    std::map<int, uint32_t> m_H264SpsSeqSeen;
+    std::map<int, uint32_t> m_H264PpsSeqSeen;
 
     // §J.3.e.2.i.8 Phase 3b.1 — AV1 sequence header tracking.  AV1 has no SPS ID
     // (single sequence header per stream); cache by GetUpdateSequenceCount() so
@@ -298,6 +309,7 @@ public:
     bool submitDecodeFrame(struct VkParserPictureData* ppd);
 private:
     bool submitDecodeFrameH265(struct VkParserPictureData* ppd);
+    bool submitDecodeFrameH264(struct VkParserPictureData* ppd);
     bool submitDecodeFrameAv1 (struct VkParserPictureData* ppd);
 
     // Decode-time PFN cache (looked up lazily on first submit).

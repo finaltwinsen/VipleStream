@@ -35,13 +35,11 @@ INCLUDEPATH += \
     $$PWD/../../libs/windows/include \
     $$PWD/../../libs/windows/include/x64
 
-# §J.3.e.2.i.8 — Phase 1 (H.265) + Phase 3 (AV1).  H264/VP9 still stripped.
-# Old VIPLESTREAM_NVPARSER_H265_ONLY define is removed; the AV1 case is now
-# always compiled (we patch the existing #ifndef VIPLESTREAM_NVPARSER_H265_ONLY
-# in VulkanVideoDecoder.cpp's switch — un-defining the gate enables AV1+VP9
-# but VP9 source isn't imported, so we keep that case behind a separate
-# VIPLESTREAM_NVPARSER_NO_VP9 define).  H.264 same — VIPLESTREAM_NVPARSER_NO_H264.
-DEFINES += VIPLESTREAM_NVPARSER_NO_H264 VIPLESTREAM_NVPARSER_NO_VP9
+# §J.3.e.2.i.8 — Phase 1 (H.265) + Phase 2 (H.264) + Phase 3 (AV1).  VP9 still
+# stripped (source not imported).  H264 is now always compiled (Phase 2 import,
+# v1.3.273); the switch case in VulkanVideoDecoder.cpp's CreateVulkanVideoDecodeParser
+# uses #ifndef VIPLESTREAM_NVPARSER_NO_H264 → un-define removes the gate.
+DEFINES += VIPLESTREAM_NVPARSER_NO_VP9
 
 SRC = $$PWD/src
 INC = $$PWD/include
@@ -51,6 +49,7 @@ INC = $$PWD/include
 DEFINES += NV_VIDEO_PARSER_NO_LOG
 
 SOURCES += \
+    $$SRC/VulkanH264Parser.cpp         \
     $$SRC/VulkanH265Parser.cpp         \
     $$SRC/VulkanAV1Decoder.cpp         \
     $$SRC/VulkanAV1GlobalMotionDec.cpp \
@@ -70,12 +69,14 @@ QMAKE_CXXFLAGS += /arch:AVX2
 HEADERS += \
     $$INC/NvVideoParser/ByteStreamParser.h            \
     $$INC/NvVideoParser/VulkanAV1Decoder.h            \
+    $$INC/NvVideoParser/VulkanH264Decoder.h           \
     $$INC/NvVideoParser/VulkanH265Decoder.h           \
     $$INC/NvVideoParser/VulkanH26xDecoder.h           \
     $$INC/NvVideoParser/VulkanVideoDecoder.h          \
     $$INC/NvVideoParser/cpudetect.h                   \
     $$INC/NvVideoParser/nvVulkanVideoParser.h         \
     $$INC/NvVideoParser/nvVulkanVideoUtils.h          \
+    $$INC/NvVideoParser/nvVulkanh264ScalingList.h     \
     $$INC/NvVideoParser/nvVulkanh265ScalingList.h     \
     $$INC/VkCodecUtils/VkVideoRefCountBase.h          \
     $$INC/VkCodecUtils/VulkanBitstreamBuffer.h        \

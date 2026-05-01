@@ -331,6 +331,11 @@ bool VkFrucDecodeClient::DecodePicture(VkParserPictureData* pParserPictureData)
         if (codecMask & VIDEO_FORMAT_MASK_H265) {
             const auto& hevc = pParserPictureData->CodecSpecific.hevc;
             m_Parent->onH265PictureParametersFromParser(hevc.pStdVps, hevc.pStdSps, hevc.pStdPps);
+        } else if (codecMask & VIDEO_FORMAT_MASK_H264) {
+            // Phase 2 — H.264 has SPS+PPS only (no VPS).  Same incremental
+            // add-info upload pattern as H.265.
+            const auto& h264 = pParserPictureData->CodecSpecific.h264;
+            m_Parent->onH264PictureParametersFromParser(h264.pStdSps, h264.pStdPps);
         } else if (codecMask & VIDEO_FORMAT_MASK_AV1) {
             // Phase 3b.1 — destroy + recreate session params on first real
             // sequence header (replaces the zero-init placeholder built at
@@ -540,6 +545,120 @@ bool VkFrucRenderer::onH265PictureParametersFromParser(
 
 
 // =============================================================================
+// VkFrucRenderer Phase 2 — H.264 SPS/PPS upload to video session params.
+// =============================================================================
+//
+// Same incremental add-info upload pattern as onH265PictureParametersFromParser
+// minus the VPS branch (H.264 has no VPS — sps_id + pps_id only).  Caches each
+// param set's GetUpdateSequenceCount() per id so repeat callbacks no-op.
+
+bool VkFrucRenderer::onH264PictureParametersFromParser(
+    const StdVideoPictureParametersSet* sps,
+    const StdVideoPictureParametersSet* pps)
+{
+    if (m_VideoSessionParams == VK_NULL_HANDLE) return false;
+
+    if (!m_pfnUpdateVideoSessionParams) {
+        auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        m_pfnUpdateVideoSessionParams =
+            (PFN_vkUpdateVideoSessionParametersKHR)getDevPa(
+                m_Device, "vkUpdateVideoSessionParametersKHR");
+        if (!m_pfnUpdateVideoSessionParams) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2 "
+                         "vkUpdateVideoSessionParametersKHR PFN missing");
+            return false;
+        }
+    }
+
+    StdVideoH264SequenceParameterSet spsCopy{};
+    StdVideoH264PictureParameterSet  ppsCopy{};
+    uint32_t addSps = 0, addPps = 0;
+
+    auto isNew = [](std::map<int, uint32_t>& seen, int id, uint32_t seq) {
+        auto it = seen.find(id);
+        if (it == seen.end())   return true;
+        return seq > it->second;
+    };
+
+    if (sps) {
+        bool isSps = false;
+        int  id    = sps->GetSpsId(isSps);
+        uint32_t seq = sps->GetUpdateSequenceCount();
+        if (isSps && id >= 0) {
+            const auto* p = sps->GetStdH264Sps();
+            if (p && isNew(m_H264SpsSeqSeen, id, seq)) {
+                spsCopy = *p;
+                addSps  = 1;
+            }
+        }
+    }
+    if (pps) {
+        bool isPps = false;
+        int  id    = pps->GetPpsId(isPps);
+        uint32_t seq = pps->GetUpdateSequenceCount();
+        if (isPps && id >= 0) {
+            const auto* p = pps->GetStdH264Pps();
+            if (p && isNew(m_H264PpsSeqSeen, id, seq)) {
+                ppsCopy = *p;
+                addPps  = 1;
+            }
+        }
+    }
+
+    if (!addSps && !addPps) {
+        return true;
+    }
+
+    VkVideoDecodeH264SessionParametersAddInfoKHR h264Add = {
+        VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_SESSION_PARAMETERS_ADD_INFO_KHR
+    };
+    h264Add.stdSPSCount = addSps;
+    h264Add.pStdSPSs    = addSps ? &spsCopy : nullptr;
+    h264Add.stdPPSCount = addPps;
+    h264Add.pStdPPSs    = addPps ? &ppsCopy : nullptr;
+
+    VkVideoSessionParametersUpdateInfoKHR updateInfo = {
+        VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_UPDATE_INFO_KHR
+    };
+    updateInfo.pNext               = &h264Add;
+    updateInfo.updateSequenceCount = ++m_H264SessionParamsSeq;
+
+    VkResult vr = m_pfnUpdateVideoSessionParams(
+        m_Device, m_VideoSessionParams, &updateInfo);
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2 "
+                     "vkUpdateVideoSessionParametersKHR rc=%d "
+                     "(addSPS=%u addPPS=%u seq=%u)",
+                     (int)vr, addSps, addPps, m_H264SessionParamsSeq);
+        --m_H264SessionParamsSeq;
+        return false;
+    }
+
+    if (addSps) {
+        bool isSps = false;
+        int  id    = sps->GetSpsId(isSps);
+        m_H264SpsSeqSeen[id] = sps->GetUpdateSequenceCount();
+    }
+    if (addPps) {
+        bool isPps = false;
+        int  id    = pps->GetPpsId(isPps);
+        m_H264PpsSeqSeen[id] = pps->GetUpdateSequenceCount();
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2 "
+                "vkUpdateVideoSessionParametersKHR ok — added SPS=%u PPS=%u, "
+                "seqCount=%u (cumul SPS-ids=%zu PPS-ids=%zu)",
+                addSps, addPps, m_H264SessionParamsSeq,
+                m_H264SpsSeqSeen.size(), m_H264PpsSeqSeen.size());
+    return true;
+}
+
+
+// =============================================================================
 // VkFrucRenderer Phase 3b.1 — AV1 sequence header upload (destroy+recreate)
 // =============================================================================
 //
@@ -711,10 +830,13 @@ bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
     if (m_VideoCodec & VIDEO_FORMAT_MASK_H265) {
         return submitDecodeFrameH265(ppd);
     }
+    if (m_VideoCodec & VIDEO_FORMAT_MASK_H264) {
+        return submitDecodeFrameH264(ppd);
+    }
     if (m_VideoCodec & VIDEO_FORMAT_MASK_AV1) {
         return submitDecodeFrameAv1(ppd);
     }
-    // H.264 / VP9 / unknown — Phase 2 will land H.264; nothing else supported.
+    // VP9 / unknown — not supported.
     m_DecodeSkipCount++;
     return false;
 }
@@ -1219,6 +1341,391 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
     }
     return true;
 }
+
+// =============================================================================
+// Phase 2 — H.264 native decode submission body
+// =============================================================================
+//
+// Modeled on submitDecodeFrameH265 with H.264-specific struct swaps:
+//   * Reference collection iterates h264.dpb[16+1] directly (vs H.265's
+//     RefPicSetStCurr*/After/LtCurr index-into-RefPics indirection).
+//   * Std picture info is FLAT (no nested pointers like AV1 needed) — just
+//     sps_id, pps_id, frame_num, idr_pic_id, PicOrderCnt[2], 6 1-bit flags.
+//   * Std reference info is similarly flat — flags + FrameNum + PicOrderCnt[2].
+//   * Slice offsets via parser's stream-marker pattern (same as H.265).
+// Decode→SwUpload copy / barriers / submit / timeline sem are codec-agnostic.
+
+bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
+{
+    const auto& h264 = ppd->CodecSpecific.h264;
+
+    // §J.3.e.2.i.8 Phase 2 — H.264 RESET policy.
+    //
+    // We DO NOT force a session RESET on H.264 intra pictures.  Unlike HEVC's
+    // explicit IRAP/IDR pic flags, the parser-level intra_pic_flag fires on
+    // every I-frame — and Sunshine's low-latency H.264 emits I-frames every
+    // ~2 seconds for intra refresh / packet-loss recovery.  Resetting that
+    // often (≈30× per minute) caused visible flicker in v1.3.274 because each
+    // vkCmdControlVideoCodingKHR(RESET) drops the driver's internal DPB
+    // tracking mid-stream → next P-frame references stale slot → glitch.
+    //
+    // Vulkan video H.264 doesn't need an explicit RESET on IDR: the driver
+    // handles DPB clearing from the slice header itself, and our per-submit
+    // VkVideoReferenceSlotInfoKHR list already reflects the parser's post-IDR
+    // empty DPB.  RESET stays reserved for: (a) initial create (implicit) and
+    // (b) recovery after VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR (TBD).
+
+    bool diagThisFrame = (m_DecodeSubmitCount + m_DecodeSkipCount < 5)
+                       || ppd->intra_pic_flag;
+
+    auto* curPic = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(ppd->pCurrPic);
+    if (!curPic || curPic->image == VK_NULL_HANDLE || curPic->view == VK_NULL_HANDLE) {
+        m_DecodeSkipCount++;
+        return false;
+    }
+    int slotIdx = curPic->m_picIdx;
+
+    // §J.3.e.2.i.8 Phase 2 — collect active reference DPB slots from H.264 dpb[].
+    // Each entry: pPicBuf (VkFrucDpbPicture*), FrameIdx (frame_num/longTermFrameIdx),
+    // is_long_term, not_existing, used_for_reference (0=unused/1=top/2=bot/3=both),
+    // FieldOrderCnt[2].  Skip not_existing or unused entries; dedupe by slot.
+    constexpr int kMaxRefs = 16;
+    StdVideoDecodeH264ReferenceInfo refStdInfos[kMaxRefs] = {};
+    VkVideoDecodeH264DpbSlotInfoKHR refH264Slots[kMaxRefs] = {};
+    VkVideoPictureResourceInfoKHR   refResources[kMaxRefs] = {};
+    VkVideoReferenceSlotInfoKHR     refSlots[kMaxRefs]     = {};
+    int  activeRefCount = 0;
+    bool seenSlot[VkFrucDecodeClient::kPicPoolSize] = {};
+
+    constexpr int kDpbEntries = 16 + 1;  // matches dpb[16 + 1] layout
+    for (int j = 0; j < kDpbEntries && activeRefCount < kMaxRefs; j++) {
+        const auto& e = h264.dpb[j];
+        if (e.not_existing || e.used_for_reference == 0) continue;
+        auto* p = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(e.pPicBuf);
+        if (!p || p->image == VK_NULL_HANDLE || p->view == VK_NULL_HANDLE) continue;
+        int slot = p->m_picIdx;
+        if (slot < 0 || slot >= VkFrucDecodeClient::kPicPoolSize) continue;
+        if (slot == slotIdx) continue;
+        if (!m_DpbSlotActive[slot]) continue;
+        if (seenSlot[slot]) continue;
+        seenSlot[slot] = true;
+
+        auto& sri = refStdInfos[activeRefCount];
+        sri.flags.top_field_flag              = (e.used_for_reference & 1) ? 1 : 0;
+        sri.flags.bottom_field_flag           = (e.used_for_reference & 2) ? 1 : 0;
+        sri.flags.used_for_long_term_reference = e.is_long_term ? 1 : 0;
+        sri.flags.is_non_existing             = 0;  // already filtered above
+        sri.FrameNum                          = (uint16_t)e.FrameIdx;
+        sri.PicOrderCnt[0]                    = e.FieldOrderCnt[0];
+        sri.PicOrderCnt[1]                    = e.FieldOrderCnt[1];
+
+        auto& slotH264 = refH264Slots[activeRefCount];
+        slotH264.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_DPB_SLOT_INFO_KHR;
+        slotH264.pStdReferenceInfo = &sri;
+
+        auto& res = refResources[activeRefCount];
+        res.sType            = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
+        res.codedOffset      = { 0, 0 };
+        res.codedExtent      = { (uint32_t)m_DpbAlignedW, (uint32_t)m_DpbAlignedH };
+        res.baseArrayLayer   = (uint32_t)slot;
+        res.imageViewBinding = m_DpbDecodeArrayView;
+
+        auto& s = refSlots[activeRefCount];
+        s.sType            = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
+        s.pNext            = &slotH264;
+        s.slotIndex        = slot;
+        s.pPictureResource = &res;
+
+        activeRefCount++;
+    }
+
+    auto& bsBuf = ppd->bitstreamData;
+    if (!bsBuf || bsBuf->GetBuffer() == VK_NULL_HANDLE) {
+        m_DecodeSkipCount++;
+        return false;
+    }
+
+    uint32_t markerCount = 0;
+    const uint32_t* sliceOffsets = bsBuf->GetStreamMarkersPtr(ppd->firstSliceIndex, markerCount);
+    if (!sliceOffsets || markerCount == 0) {
+        m_DecodeSkipCount++;
+        return false;
+    }
+    if (markerCount > ppd->numSlices) markerCount = ppd->numSlices;
+
+    auto& rt = m_DecodeRtPfn;
+
+    VkFence gfxFence = m_LastGraphicsFence.load(std::memory_order_acquire);
+    if (gfxFence != VK_NULL_HANDLE) {
+        rt.WaitForFences(m_Device, 1, &gfxFence, VK_TRUE, UINT64_MAX);
+    }
+
+    rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
+    rt.ResetFences(m_Device, 1, &m_DecodeFence);
+    rt.ResetCommandBuffer(m_DecodeCmdBuf, 0);
+
+    VkCommandBufferBeginInfo cbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    rt.BeginCommandBuffer(m_DecodeCmdBuf, &cbi);
+
+    // ── Layout transitions (single-image arrayLayers, identical to H.265 path) ──
+    {
+        constexpr int kMaxBarriers = 1 + kMaxRefs;
+        VkImageMemoryBarrier2 barriers[kMaxBarriers] = {};
+        int barrierCount = 0;
+
+        auto fillBarrier = [&](VkImage img, uint32_t layer, bool isRefRead, bool initFromUndefined) {
+            auto& imb = barriers[barrierCount++];
+            imb.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            imb.srcStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+            imb.srcAccessMask       = initFromUndefined ? 0 : VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+            imb.dstStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+            imb.dstAccessMask       = isRefRead ? VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR
+                                                : VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+            imb.oldLayout           = initFromUndefined ? VK_IMAGE_LAYOUT_UNDEFINED
+                                                        : VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+            imb.newLayout           = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+            imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imb.image               = img;
+            imb.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, layer, 1 };
+        };
+
+        fillBarrier(curPic->image, (uint32_t)slotIdx, /*isRefRead*/false,
+                    /*initFromUndefined*/true);
+        for (int i = 0; i < activeRefCount; i++) {
+            fillBarrier(curPic->image, (uint32_t)refSlots[i].slotIndex,
+                        /*isRefRead*/true, /*initFromUndefined*/false);
+        }
+
+        VkDependencyInfo dep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        dep.imageMemoryBarrierCount = (uint32_t)barrierCount;
+        dep.pImageMemoryBarriers    = barriers;
+        rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &dep);
+    }
+
+    // ── Setup-ref slot (current picture) ──
+    StdVideoDecodeH264ReferenceInfo stdSetupRef = {};
+    stdSetupRef.flags.top_field_flag              = (ppd->field_pic_flag && !ppd->bottom_field_flag) ? 1 : 0;
+    stdSetupRef.flags.bottom_field_flag           = (ppd->field_pic_flag && ppd->bottom_field_flag) ? 1 : 0;
+    stdSetupRef.flags.used_for_long_term_reference = 0;  // newly-encoded pictures default short-term
+    stdSetupRef.flags.is_non_existing             = 0;
+    stdSetupRef.FrameNum                          = (uint16_t)h264.frame_num;
+    stdSetupRef.PicOrderCnt[0]                    = h264.CurrFieldOrderCnt[0];
+    stdSetupRef.PicOrderCnt[1]                    = h264.CurrFieldOrderCnt[1];
+
+    VkVideoDecodeH264DpbSlotInfoKHR setupSlotH264 = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_DPB_SLOT_INFO_KHR };
+    setupSlotH264.pStdReferenceInfo = &stdSetupRef;
+
+    VkVideoPictureResourceInfoKHR setupResource = { VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR };
+    setupResource.codedOffset      = { 0, 0 };
+    setupResource.codedExtent      = { (uint32_t)m_DpbAlignedW, (uint32_t)m_DpbAlignedH };
+    setupResource.baseArrayLayer   = (uint32_t)slotIdx;
+    setupResource.imageViewBinding = m_DpbDecodeArrayView;
+
+    VkVideoReferenceSlotInfoKHR setupSlotInBegin = { VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR };
+    setupSlotInBegin.pNext            = &setupSlotH264;
+    setupSlotInBegin.slotIndex        = -1;
+    setupSlotInBegin.pPictureResource = &setupResource;
+
+    VkVideoReferenceSlotInfoKHR setupSlotInDecode = setupSlotInBegin;
+    setupSlotInDecode.slotIndex = slotIdx;
+
+    // ── Begin video coding ──
+    VkVideoReferenceSlotInfoKHR allCodingSlots[1 + kMaxRefs];
+    allCodingSlots[0] = setupSlotInBegin;
+    for (int i = 0; i < activeRefCount; i++) allCodingSlots[1 + i] = refSlots[i];
+
+    VkVideoBeginCodingInfoKHR bci = { VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR };
+    bci.videoSession           = m_VideoSession;
+    bci.videoSessionParameters = m_VideoSessionParams;
+    bci.referenceSlotCount     = (uint32_t)(1 + activeRefCount);
+    bci.pReferenceSlots        = allCodingSlots;
+    rt.CmdBeginVideoCodingKHR(m_DecodeCmdBuf, &bci);
+
+    if (m_DecodeNeedsReset) {
+        VkVideoCodingControlInfoKHR cci = { VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR };
+        cci.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR;
+        rt.CmdControlVideoCodingKHR(m_DecodeCmdBuf, &cci);
+        m_DecodeNeedsReset = false;
+        for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) m_DpbSlotActive[i] = false;
+    }
+
+    // ── Decode ──
+    StdVideoDecodeH264PictureInfo stdPicInfo = {};
+    // intra_pic_flag is generic (not in h264 union); is_intra in std flags follows.
+    stdPicInfo.flags.is_intra              = ppd->intra_pic_flag ? 1 : 0;
+    stdPicInfo.flags.IdrPicFlag            = ppd->intra_pic_flag ? 1 : 0;  // IDR ≈ intra in our streaming
+    stdPicInfo.flags.is_reference          = ppd->ref_pic_flag ? 1 : 0;
+    stdPicInfo.flags.field_pic_flag        = ppd->field_pic_flag ? 1 : 0;
+    stdPicInfo.flags.bottom_field_flag     = ppd->bottom_field_flag ? 1 : 0;
+    stdPicInfo.flags.complementary_field_pair = 0;
+    stdPicInfo.seq_parameter_set_id        = h264.seq_parameter_set_id;
+    stdPicInfo.pic_parameter_set_id        = h264.pic_parameter_set_id;
+    stdPicInfo.frame_num                   = (uint16_t)h264.frame_num;
+    stdPicInfo.idr_pic_id                  = 0;  // parser doesn't expose; driver
+                                                 // typically tolerates 0 for streaming
+    stdPicInfo.PicOrderCnt[0]              = h264.CurrFieldOrderCnt[0];
+    stdPicInfo.PicOrderCnt[1]              = h264.CurrFieldOrderCnt[1];
+
+    VkVideoDecodeH264PictureInfoKHR h264Pic = { VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PICTURE_INFO_KHR };
+    h264Pic.pStdPictureInfo = &stdPicInfo;
+    h264Pic.sliceCount      = markerCount;
+    h264Pic.pSliceOffsets   = sliceOffsets;
+
+    VkDeviceSize alignedRange = (ppd->bitstreamDataLen + 255u) & ~VkDeviceSize(255);
+
+    VkVideoDecodeInfoKHR di = { VK_STRUCTURE_TYPE_VIDEO_DECODE_INFO_KHR };
+    di.pNext                = &h264Pic;
+    di.srcBuffer            = bsBuf->GetBuffer();
+    di.srcBufferOffset      = ppd->bitstreamDataOffset;
+    di.srcBufferRange       = alignedRange;
+    di.dstPictureResource   = setupResource;
+    di.pSetupReferenceSlot  = &setupSlotInDecode;
+    di.referenceSlotCount   = (uint32_t)activeRefCount;
+    di.pReferenceSlots      = activeRefCount > 0 ? refSlots : nullptr;
+    rt.CmdDecodeVideoKHR(m_DecodeCmdBuf, &di);
+
+    VkVideoEndCodingInfoKHR eci = { VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR };
+    rt.CmdEndVideoCodingKHR(m_DecodeCmdBuf, &eci);
+
+    // ── Decode → SwUpload copy (codec-agnostic, identical to H.265 path) ──
+    if (m_SwUploadImage != VK_NULL_HANDLE && m_SwImageWidth > 0 && m_SwImageHeight > 0) {
+        auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        auto pfnCmdCopyImage = (PFN_vkCmdCopyImage)getDevPa(m_Device, "vkCmdCopyImage");
+
+        VkImageMemoryBarrier2 preBars[2] = {};
+        preBars[0].sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        preBars[0].srcStageMask                = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+        preBars[0].srcAccessMask               = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+        preBars[0].dstStageMask                = VK_PIPELINE_STAGE_2_COPY_BIT;
+        preBars[0].dstAccessMask               = VK_ACCESS_2_TRANSFER_READ_BIT;
+        preBars[0].oldLayout                   = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+        preBars[0].newLayout                   = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        preBars[0].srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[0].dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[0].image                       = curPic->image;
+        preBars[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        preBars[0].subresourceRange.levelCount = 1;
+        preBars[0].subresourceRange.baseArrayLayer = (uint32_t)slotIdx;
+        preBars[0].subresourceRange.layerCount = 1;
+
+        preBars[1].sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        preBars[1].srcStageMask                = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        preBars[1].srcAccessMask               = 0;
+        preBars[1].dstStageMask                = VK_PIPELINE_STAGE_2_COPY_BIT;
+        preBars[1].dstAccessMask               = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        preBars[1].oldLayout                   = m_SwImageLayoutInited
+                                                   ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                   : VK_IMAGE_LAYOUT_UNDEFINED;
+        preBars[1].newLayout                   = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        preBars[1].srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[1].dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+        preBars[1].image                       = m_SwUploadImage;
+        preBars[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        preBars[1].subresourceRange.levelCount = 1;
+        preBars[1].subresourceRange.layerCount = 1;
+
+        VkDependencyInfo preDep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        preDep.imageMemoryBarrierCount = 2;
+        preDep.pImageMemoryBarriers    = preBars;
+        rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &preDep);
+
+        VkImageCopy copyRegions[2] = {};
+        copyRegions[0].srcSubresource.aspectMask     = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        copyRegions[0].srcSubresource.baseArrayLayer = (uint32_t)slotIdx;
+        copyRegions[0].srcSubresource.layerCount     = 1;
+        copyRegions[0].dstSubresource.aspectMask     = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        copyRegions[0].dstSubresource.baseArrayLayer = 0;
+        copyRegions[0].dstSubresource.layerCount     = 1;
+        copyRegions[0].extent                        = { (uint32_t)m_SwImageWidth, (uint32_t)m_SwImageHeight, 1 };
+        copyRegions[1] = copyRegions[0];
+        copyRegions[1].srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+        copyRegions[1].dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+        copyRegions[1].extent = { (uint32_t)m_SwImageWidth / 2, (uint32_t)m_SwImageHeight / 2, 1 };
+        if (pfnCmdCopyImage) {
+            pfnCmdCopyImage(m_DecodeCmdBuf,
+                curPic->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                m_SwUploadImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                2, copyRegions);
+        }
+
+        VkImageMemoryBarrier2 postBars[2] = {};
+        postBars[0] = preBars[0];
+        postBars[0].srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT;
+        postBars[0].srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        postBars[0].dstStageMask  = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+        postBars[0].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR;
+        postBars[0].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        postBars[0].newLayout     = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+        postBars[1] = preBars[1];
+        postBars[1].srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT;
+        postBars[1].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        postBars[1].dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
+        postBars[1].dstAccessMask = 0;
+        postBars[1].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        postBars[1].newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkDependencyInfo postDep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        postDep.imageMemoryBarrierCount = 2;
+        postDep.pImageMemoryBarriers    = postBars;
+        rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &postDep);
+        m_SwImageLayoutInited = true;
+    }
+
+    rt.EndCommandBuffer(m_DecodeCmdBuf);
+
+    uint64_t signalVal = m_TimelineNext.fetch_add(1, std::memory_order_acq_rel);
+
+    VkTimelineSemaphoreSubmitInfo tssi = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+    tssi.signalSemaphoreValueCount = 1;
+    tssi.pSignalSemaphoreValues    = &signalVal;
+
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.pNext                = &tssi;
+    si.commandBufferCount   = 1;
+    si.pCommandBuffers      = &m_DecodeCmdBuf;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores    = &m_TimelineSem;
+    VkResult vr = rt.QueueSubmit(m_DecodeQueue, 1, &si, m_DecodeFence);
+    if (vr == VK_SUCCESS) {
+        m_LastDecodeValue.store(signalVal, std::memory_order_release);
+    }
+    if (vr != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2 vkQueueSubmit(H.264) rc=%d", (int)vr);
+        m_DecodeSkipCount++;
+        return false;
+    }
+
+    curPic->layoutInited = true;
+    m_DpbSlotActive[slotIdx] = true;
+    m_DecodeSubmitCount++;
+    m_NewestDecodedSlot.store(slotIdx, std::memory_order_release);
+
+    if (diagThisFrame) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2 H.264 diag #%llu — "
+                    "slot=%d refs=%d intra=%d field=%d frame_num=%u POC=[%d,%d] slices=%u",
+                    (unsigned long long)m_DecodeSubmitCount,
+                    slotIdx, activeRefCount,
+                    (int)ppd->intra_pic_flag, (int)ppd->field_pic_flag,
+                    (unsigned)h264.frame_num,
+                    h264.CurrFieldOrderCnt[0], h264.CurrFieldOrderCnt[1],
+                    markerCount);
+    }
+    if (m_DecodeSubmitCount == 1 || (m_DecodeSubmitCount % 60) == 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2 H.264 decode submitted "
+                    "#%llu (slot=%d refs=%d slices=%u skipped=%llu)",
+                    (unsigned long long)m_DecodeSubmitCount,
+                    slotIdx, activeRefCount, markerCount,
+                    (unsigned long long)m_DecodeSkipCount);
+    }
+    return true;
+}
+
 
 // =============================================================================
 // Phase 1.3d / 1.3d.2 — H.265 native decode submission body
@@ -1926,20 +2433,19 @@ void VkFrucRenderer::destroyDpbImagePool()
 
 bool VkFrucRenderer::createNvVideoParser()
 {
-    // §J.3.e.2.i.8 Phase 1 (H.265) + Phase 3a (AV1).  H.264 / VP9 still gated
-    // out from the parser library build (VIPLESTREAM_NVPARSER_NO_H264 +
-    // VIPLESTREAM_NVPARSER_NO_VP9 in nvvideoparser.pro), so attempting those
-    // would hit the defensive null-shared_ptr bail in CreateVulkanVideoDecodeParser
-    // and fail cleanly with VK_ERROR_FEATURE_NOT_PRESENT.  We still bail early
-    // here for codecs we know aren't ported, so the caller doesn't waste a
-    // syscall.  Phase 3b lands the AV1 submitDecodeFrame native-decode path;
-    // Phase 2 ports H.264.
+    // §J.3.e.2.i.8 Phase 1 (H.265) + Phase 2 (H.264) + Phase 3a (AV1).  VP9
+    // still gated out from the parser library build (VIPLESTREAM_NVPARSER_NO_VP9
+    // in nvvideoparser.pro); attempting that codec would hit the defensive
+    // null-shared_ptr bail in CreateVulkanVideoDecodeParser and fail cleanly
+    // with VK_ERROR_FEATURE_NOT_PRESENT.  We bail early here for codecs we
+    // know aren't ported.
+    const bool isH264 = (m_VideoCodec & VIDEO_FORMAT_MASK_H264) != 0;
     const bool isH265 = (m_VideoCodec & VIDEO_FORMAT_MASK_H265) != 0;
     const bool isAv1  = (m_VideoCodec & VIDEO_FORMAT_MASK_AV1)  != 0;
-    if (!isH265 && !isAv1) {
+    if (!isH264 && !isH265 && !isAv1) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 createNvVideoParser SKIPPED — "
-                    "current stream codec mask=0x%x is neither H.265 nor AV1",
+                    "current stream codec mask=0x%x is none of H.264 / H.265 / AV1",
                     m_VideoCodec);
         return false;  // caller logs warning + falls back to legacy NAL-counter path
     }
@@ -1949,7 +2455,12 @@ bool VkFrucRenderer::createNvVideoParser()
 
     VkExtensionProperties stdHeaderVer = {};
     VkVideoCodecOperationFlagBitsKHR codecOp;
-    if (isH265) {
+    if (isH264) {
+        strncpy_s(stdHeaderVer.extensionName, sizeof(stdHeaderVer.extensionName),
+                  VK_STD_VULKAN_VIDEO_CODEC_H264_DECODE_EXTENSION_NAME, _TRUNCATE);
+        stdHeaderVer.specVersion = VK_STD_VULKAN_VIDEO_CODEC_H264_DECODE_SPEC_VERSION;
+        codecOp = VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
+    } else if (isH265) {
         strncpy_s(stdHeaderVer.extensionName, sizeof(stdHeaderVer.extensionName),
                   VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_EXTENSION_NAME, _TRUNCATE);
         stdHeaderVer.specVersion = VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_SPEC_VERSION;

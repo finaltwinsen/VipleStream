@@ -2766,14 +2766,15 @@ bool VkFrucRenderer::isNativelyDecodingCurrentCodec() const
     // §J.3.e.2.i.8 Phase 3d.3 — accurate per-codec native-decode probe.
     //
     //   * H.265: Phase 1 + 1.5b stable, vkCmdDecodeVideoKHR fires every frame.
+    //   * H.264: Phase 2 (v1.3.273+) parser ported, submitDecodeFrameH264 lands
+    //     in the same patch.  Treated like H.265 — always native when env var on.
     //   * AV1: parser dispatch + sequence-header rebuild work, but the actual
     //     vkCmdDecodeVideoKHR submit is gated behind VIPLE_VKFRUC_NATIVE_AV1_SUBMIT
-    //     pending Phase 3d.4 GPU device-lost diagnosis; without that env var
+    //     pending Phase 3d.5 GPU-side grey diagnosis; without that env var
     //     AV1 streams flow through FFmpeg libdav1d so we report "not native".
-    //   * H.264: parser library was compiled with VIPLESTREAM_NVPARSER_NO_H264
-    //     (Phase 2 will port); always FFmpeg.
     if (!acceptsNativeDecode()) return false;
     if (m_VideoCodec & VIDEO_FORMAT_MASK_H265) return true;
+    if (m_VideoCodec & VIDEO_FORMAT_MASK_H264) return true;
     if (m_VideoCodec & VIDEO_FORMAT_MASK_AV1) {
         static const bool av1SubmitEnabled =
             qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_AV1_SUBMIT") != 0;
@@ -2913,6 +2914,10 @@ void VkFrucRenderer::destroyVideoSession()
     m_H265VpsSeqSeen.clear();
     m_H265SpsSeqSeen.clear();
     m_H265PpsSeqSeen.clear();
+    // §J.3.e.2.i.8 Phase 2 — same for H.264 (SPS+PPS, no VPS).
+    m_H264SessionParamsSeq        = 0;
+    m_H264SpsSeqSeen.clear();
+    m_H264PpsSeqSeen.clear();
 
     // §J.3.e.2.i.8 Phase 3b.1 — reset AV1 sequence-header tracking so a restart
     // rebuilds session params from the fresh placeholder + first parser-supplied
@@ -4094,6 +4099,21 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     // Reads m_SwStagingBuffer (NV12 packed: Y plane + UV plane), writes to
     // m_FrucCurrRgbBuf.  Staging buffer contents were memcpy'd from CPU
     // earlier in renderFrameSw — host coherent so already visible to GPU.
+    //
+    // §J.3.e.2.i.8 KNOWN LIMITATION (Phase 2 H.264 + Phase 1 H.265):
+    //   When VIPLE_VKFRUC_NATIVE_DECODE=1 is active, the *real* frame samples
+    //   m_SwUploadImage written by the decode queue, but FRUC still reads
+    //   m_SwStagingBuffer written by FFmpeg's parallel SW decode.  Source
+    //   asymmetry → real frames show fresh native-decoded content while
+    //   interp frames show FFmpeg-decoded content (potentially older when
+    //   FFmpeg lags, e.g. H.264 SW = 41ms/frame).  User-visible symptom:
+    //   3-4 Hz "blur ↔ sharp" oscillation in dual-present mode.  Workaround:
+    //   disable FRUC ("Frame Interpolation" pref) when using native VK
+    //   decode.  Proper fix (deferred): change this NV12→RGB compute pass
+    //   to read m_SwUploadImage directly (sampled-image descriptor instead
+    //   of buffer), and signal a decode→compute timeline-semaphore wait so
+    //   FRUC compute synchronizes with decode-queue writes the same way the
+    //   real-frame fragment-shader sample does (see Phase 1.5b in renderFrameSw).
     pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucNv12RgbPipeline);
     pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucNv12RgbPipeLay,
                        0, 1, &m_FrucNv12RgbDescSet, 0, nullptr);
