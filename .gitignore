@@ -86,6 +86,16 @@ tools/fruc_test/*.dll
 tools/fruc_test/output.txt
 tools/fruc_test/build_out.txt
 
+# ── Aftermath dump decoder CLI build artifacts ──
+# main.cpp / build.cmd are tracked; built exe + GFSDK DLL are not.
+tools/aftermath_decode/*.exe
+tools/aftermath_decode/*.obj
+tools/aftermath_decode/*.dll
+tools/aftermath_decode/*.nv-gpudmp
+tools/aftermath_decode/*.nv-shaderdbg
+tools/aftermath_decode/*.json
+tools/aftermath_decode/DIAGNOSIS-*.md
+
 # ── IDE / tool configs ──
 .vscode/
 .claude/
@@ -127,6 +137,12 @@ assets/icon/package-lock.json
 # Used by scripts/export_rife_fp16.py to load Practical-RIFE flownet
 # checkpoints + emit fp16 ONNX.  ~3 GB on disk.
 .venv-rife/
+
+# ── NVIDIA Nsight Aftermath SDK ──
+# Free SDK from developer.nvidia.com but redistribution restricted by EULA;
+# each developer downloads it themselves, drops the unzipped contents under
+# moonlight-qt/3rdparty/aftermath_sdk/.  app.pro auto-detects via lib path.
+moonlight-qt/3rdparty/aftermath_sdk/
 
 # ── OS files ──
 Thumbs.db

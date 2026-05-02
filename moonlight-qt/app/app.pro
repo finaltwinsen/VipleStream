@@ -105,6 +105,19 @@ win32 {
         # set so the right intrinsic headers get included.
         DEFINES += __SSE2__=1
     }
+
+    # §J.3.e.2.i.8 Phase 1.6 — NVIDIA Nsight Aftermath SDK (GPU crash dump
+    # collection on device-lost / TDR).  Used to diagnose ONLY mode 24-78s
+    # device-lost root cause that validation layer can't see (driver-internal
+    # GPU fault).  SDK headers + lib + DLL committed under 3rdparty/aftermath_sdk/
+    # (free download, NV Developer account required).  Disabled if SDK not
+    # present (e.g. CI without dev tools).
+    !disable-aftermath:exists($$PWD/../3rdparty/aftermath_sdk/lib/x64/GFSDK_Aftermath_Lib.x64.lib) {
+        DEFINES     += VIPLESTREAM_HAVE_AFTERMATH
+        INCLUDEPATH += $$PWD/../3rdparty/aftermath_sdk/include
+        LIBS        += -L$$PWD/../3rdparty/aftermath_sdk/lib/x64
+        LIBS        += GFSDK_Aftermath_Lib.x64.lib
+    }
 }
 macx:!disable-prebuilts {
     INCLUDEPATH += $$PWD/../libs/mac/include $$PWD/../libs/mac/include/SDL2
@@ -405,11 +418,13 @@ libplacebo {
         streaming/video/ffmpeg-renderers/plvk.cpp \
         streaming/video/ffmpeg-renderers/plvk_c.c \
         streaming/video/ffmpeg-renderers/vkfruc.cpp \
-        streaming/video/ffmpeg-renderers/vkfruc-decode.cpp
+        streaming/video/ffmpeg-renderers/vkfruc-decode.cpp \
+        streaming/video/ffmpeg-renderers/vkfruc-aftermath.cpp
     HEADERS += \
         streaming/video/ffmpeg-renderers/plvk.h \
         streaming/video/ffmpeg-renderers/vkfruc.h \
-        streaming/video/ffmpeg-renderers/vkfruc-decode.h
+        streaming/video/ffmpeg-renderers/vkfruc-decode.h \
+        streaming/video/ffmpeg-renderers/vkfruc-aftermath.h
 }
 config_EGL {
     message(EGL renderer selected)

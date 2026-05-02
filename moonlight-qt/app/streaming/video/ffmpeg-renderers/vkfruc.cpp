@@ -2,6 +2,7 @@
 // See vkfruc.h header + docs/J.3.e.2.i_vulkan_native_renderer.md.
 
 #include "vkfruc.h"
+#include "vkfruc-aftermath.h"
 #include "settings/streamingpreferences.h"
 
 #ifdef HAVE_LIBPLACEBO_VULKAN
@@ -239,6 +240,16 @@ void VkFrucRenderer::teardown()
 
 bool VkFrucRenderer::createInstanceAndSurface(SDL_Window* window)
 {
+    // §J.3.e.2.i.8 Phase 1.6 — enable Nsight Aftermath GPU crash dump
+    // collection BEFORE we create the Vulkan instance/device.  Idempotent;
+    // first call wins, subsequent calls are no-ops.  When the device goes
+    // into VK_ERROR_DEVICE_LOST (NV TDR / driver fault), Aftermath writes
+    // a `.nv-gpudmp` to %TEMP% so we can post-mortem load in Nsight Graphics
+    // and see which cmd buffer / which dispatch tipped the GPU over.  No-op
+    // if SDK not compiled in (release builds without 3rdparty/aftermath_sdk
+    // present remain SDK-free).  Only meaningful on NVIDIA cards.
+    VipleAftermath::Ensure();
+
     m_pfnGetInstanceProcAddr =
         (PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr();
     if (!m_pfnGetInstanceProcAddr) {
@@ -703,6 +714,14 @@ bool VkFrucRenderer::createLogicalDevice()
         VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
 #endif
     };
+    // §J.3.e.2.i.8 Phase 1.6 — opt-in NV device diagnostics extensions for
+    // Aftermath crash dump.  Enables driver-side cmd buffer tracking so the
+    // dump can pinpoint last in-flight work.  Only request when SDK is loaded
+    // — otherwise the extra extensions just sit there inert.
+    if (VipleAftermath::IsActive()) {
+        wantedDevExts.push_back(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
+        wantedDevExts.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    }
 
     // Query device extensions supported on this physical device, filter
     // wantedDevExts ∩ available.
@@ -769,9 +788,34 @@ bool VkFrucRenderer::createLogicalDevice()
         m_YcbcrFeat.samplerYcbcrConversion   = VK_TRUE;
     }
 
+    // §J.3.e.2.i.8 Phase 1.6 — Aftermath device diagnostics config.  When
+    // the matching extension is enabled, this struct tells the NV driver to
+    // track shader debug info, automatic cmd buffer markers + resource
+    // tracking — all of which surface in the GPU crash dump.  Only attached
+    // when Aftermath is active; otherwise harmless to leave detached.
+    VkDeviceDiagnosticsConfigCreateInfoNV diagCfg = {
+        VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV
+    };
+    diagCfg.flags =
+          VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_DEBUG_INFO_BIT_NV
+        | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV
+        | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_AUTOMATIC_CHECKPOINTS_BIT_NV;
+    bool diagCfgEnabled = false;
+    for (const auto* ext : devExts) {
+        if (strcmp(ext, VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME) == 0) {
+            diagCfgEnabled = true;
+            break;
+        }
+    }
+    if (diagCfgEnabled && VipleAftermath::IsActive()) {
+        diagCfg.pNext = (void*)&m_DevFeat2;
+    }
+
     VkDeviceCreateInfo dci = {};
     dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    dci.pNext = &m_DevFeat2;
+    dci.pNext = (diagCfgEnabled && VipleAftermath::IsActive())
+                    ? (const void*)&diagCfg
+                    : (const void*)&m_DevFeat2;
     dci.queueCreateInfoCount = (uint32_t)qcis.size();
     dci.pQueueCreateInfos = qcis.data();
     dci.enabledExtensionCount = (uint32_t)devExts.size();

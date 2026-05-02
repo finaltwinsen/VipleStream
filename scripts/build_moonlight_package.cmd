@@ -146,6 +146,20 @@ if exist "%NVOFFRUC_DLL%" (
 ) else (
     echo   [WARN] NvOFFRUC.dll missing at %NVOFFRUC_DLL% - NVIDIA Optical Flow FRUC disabled
 )
+
+:: §J.3.e.2.i.8 Phase 1.6 - NVIDIA Nsight Aftermath SDK runtime DLL.
+:: When linked, GFSDK_Aftermath_Lib.x64.dll must sit beside VipleStream.exe
+:: (or anywhere on PATH).  Used to write GPU crash dump files when the
+:: device goes into VK_ERROR_DEVICE_LOST so we can diagnose post-mortem
+:: in Nsight Graphics.  Optional - if SDK is not present locally the lib
+:: was not linked at compile time, so the DLL is unnecessary at runtime.
+set "AFTERMATH_DLL=%SRC%\3rdparty\aftermath_sdk\lib\x64\GFSDK_Aftermath_Lib.x64.dll"
+if exist "%AFTERMATH_DLL%" (
+    copy /y "%AFTERMATH_DLL%" "%TEMP_DIR%\" >nul
+    echo   GFSDK_Aftermath_Lib.x64.dll
+) else (
+    echo   [INFO] Aftermath SDK not present - GPU crash dump collection disabled
+)
 if exist "%CUDART_DLL%" (
     copy /y "%CUDART_DLL%" "%TEMP_DIR%\" >nul
     echo   cudart64_110.dll
