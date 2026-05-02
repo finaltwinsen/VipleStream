@@ -18,7 +18,7 @@
 | **Medium-High** | **§I.D** Android Vulkan FRUC async compute | C.5.b 量到 dual-present + waitIdle thermal regression；async compute queue 是真正解 |
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) — 解 NCNN-Vulkan shared path | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
 | **Medium-Low** | **§A.6** HTTP Basic auth realm | 改了使用者要重登 Web UI；併進其他改動才划算 |
-| **Low** | **§C / §D / §E** 其他語系 / wiki 連結 / Android themed icon | 純品牌 / 視覺一致性 |
+| **Low** | **§D / §E** wiki 連結 / Android themed icon | 純品牌 / 視覺一致性（§C 已 ship at v1.3.310）|
 | **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |
 | **Low** | **§G.1 / §G.4** RIFE v1 11-channel / 模型下載管理 | A1000 launch overhead bound（§G.3 negative result）；RTX 30/40+ 才有意義 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
@@ -85,9 +85,10 @@ password 存在這個 realm 下。
 
 ## §C. Sunshine Web UI 其他語系檔
 
-**目前：** v1.2.43 只改了 `en.json` / `zh_TW.json` 的 Sunshine / Moonlight → VipleStream-Server / VipleStream。另外 20 個語系檔還是舊字串。
-
-**要做：** 下一次 i18n sync commit 順便對 20 個檔做 bulk replace。**不影響功能，只是品牌一致性。**
+**狀態：** ✅ 已於 v1.3.310 ship — 19 個 locale (`bg / cs / de / en_GB / es /
+fr / hu / it / ja / ko / pl / pt / pt_BR / ru / sv / tr / uk / vi / zh`)
+共 1270 處 `Sunshine` → `VipleStream-Server` 跟 `Moonlight` → `VipleStream`
+bulk replace。en.json / zh_TW.json / en_US.json 自 v1.2.43 起就已 sync。
 
 ---
 
