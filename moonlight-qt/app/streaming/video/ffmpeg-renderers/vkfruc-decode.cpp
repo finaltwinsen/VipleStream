@@ -1048,9 +1048,32 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
                         /*isRefRead*/true, /*initFromUndefined*/false);
         }
 
+        // §J.3.e.2.i.8 Phase 1.7c — bitstream buffer barrier
+        // (HOST_WRITE → VIDEO_DECODE_READ).  See H.265 path comment for
+        // why this is mandatory; same pattern applies to AV1.  AV1 srcRange
+        // is computed below for the actual decode info; align here to 256
+        // (the conservative bound used elsewhere).
+        constexpr VkDeviceSize kBitstreamAlignmentForBarrier = 256;
+        VkDeviceSize bsAlignedRange =
+            ((VkDeviceSize)ppd->bitstreamDataLen + (kBitstreamAlignmentForBarrier - 1))
+            & ~(kBitstreamAlignmentForBarrier - 1);
+
+        VkBufferMemoryBarrier2 bsBufBarrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+        bsBufBarrier.srcStageMask        = VK_PIPELINE_STAGE_2_HOST_BIT;
+        bsBufBarrier.srcAccessMask       = VK_ACCESS_2_HOST_WRITE_BIT;
+        bsBufBarrier.dstStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+        bsBufBarrier.dstAccessMask       = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR;
+        bsBufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bsBufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bsBufBarrier.buffer              = bsBuf->GetBuffer();
+        bsBufBarrier.offset              = (VkDeviceSize)ppd->bitstreamDataOffset;
+        bsBufBarrier.size                = bsAlignedRange;
+
         VkDependencyInfo dep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-        dep.imageMemoryBarrierCount = (uint32_t)barrierCount;
-        dep.pImageMemoryBarriers    = barriers;
+        dep.imageMemoryBarrierCount  = (uint32_t)barrierCount;
+        dep.pImageMemoryBarriers     = barriers;
+        dep.bufferMemoryBarrierCount = 1;
+        dep.pBufferMemoryBarriers    = &bsBufBarrier;
         rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &dep);
     }
 
@@ -1543,9 +1566,25 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
                         /*isRefRead*/true, /*initFromUndefined*/false);
         }
 
+        // §J.3.e.2.i.8 Phase 1.7c — bitstream buffer barrier
+        // (HOST_WRITE → VIDEO_DECODE_READ).  See H.265 path comment for
+        // why this is mandatory; same pattern applies to H.264.
+        VkBufferMemoryBarrier2 bsBufBarrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+        bsBufBarrier.srcStageMask        = VK_PIPELINE_STAGE_2_HOST_BIT;
+        bsBufBarrier.srcAccessMask       = VK_ACCESS_2_HOST_WRITE_BIT;
+        bsBufBarrier.dstStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+        bsBufBarrier.dstAccessMask       = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR;
+        bsBufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bsBufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bsBufBarrier.buffer              = bsBuf->GetBuffer();
+        bsBufBarrier.offset              = ppd->bitstreamDataOffset;
+        bsBufBarrier.size                = (ppd->bitstreamDataLen + 255u) & ~VkDeviceSize(255);
+
         VkDependencyInfo dep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-        dep.imageMemoryBarrierCount = (uint32_t)barrierCount;
-        dep.pImageMemoryBarriers    = barriers;
+        dep.imageMemoryBarrierCount  = (uint32_t)barrierCount;
+        dep.pImageMemoryBarriers     = barriers;
+        dep.bufferMemoryBarrierCount = 1;
+        dep.pBufferMemoryBarriers    = &bsBufBarrier;
         rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &dep);
     }
 
@@ -1948,9 +1987,36 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
                         /*isRefRead*/true, /*initFromUndefined*/false);
         }
 
+        // §J.3.e.2.i.8 Phase 1.7c — bitstream buffer barrier.
+        //
+        // We memcpy NAL bytes into bsBuf via the host-coherent mapped
+        // pointer; without an explicit HOST_WRITE → VIDEO_DECODE_READ
+        // barrier the driver-side NVDEC engine can read stale GPU-cache
+        // contents — which Aftermath surfaces as "Failed to translate the
+        // virtual address" in the bitstream buffer's own VA range
+        // (the 24~78s ONLY-mode TDR root cause; see DIAGNOSIS-1777698146.md).
+        //
+        // Pattern lifted directly from NVIDIA's vk_video_samples
+        // VkVideoDecoder.cpp (HOST_BIT/HOST_WRITE → VIDEO_DECODE_BIT_KHR/
+        // VIDEO_DECODE_READ_BIT_KHR) — they bake this into every decode
+        // submit and we missed it on first port.  Same fix applied to the
+        // H.264 and AV1 paths below.
+        VkBufferMemoryBarrier2 bsBufBarrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+        bsBufBarrier.srcStageMask        = VK_PIPELINE_STAGE_2_HOST_BIT;
+        bsBufBarrier.srcAccessMask       = VK_ACCESS_2_HOST_WRITE_BIT;
+        bsBufBarrier.dstStageMask        = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+        bsBufBarrier.dstAccessMask       = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR;
+        bsBufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bsBufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bsBufBarrier.buffer              = bsBuf->GetBuffer();
+        bsBufBarrier.offset              = ppd->bitstreamDataOffset;
+        bsBufBarrier.size                = (ppd->bitstreamDataLen + 255u) & ~VkDeviceSize(255);
+
         VkDependencyInfo dep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-        dep.imageMemoryBarrierCount = (uint32_t)barrierCount;
-        dep.pImageMemoryBarriers    = barriers;
+        dep.imageMemoryBarrierCount  = (uint32_t)barrierCount;
+        dep.pImageMemoryBarriers     = barriers;
+        dep.bufferMemoryBarrierCount = 1;
+        dep.pBufferMemoryBarriers    = &bsBufBarrier;
         rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &dep);
     }
 
