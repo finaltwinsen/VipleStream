@@ -1092,14 +1092,28 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
     // info → decoder writes all-zero NV12 → green (YUV(0,0,0) → RGB(0,135,0)
     // narrow-range BT.709).  We assemble a fully-populated picture info
     // ourselves; std_info / tileOffsets[] / tileSizes[] data still comes from
-    // the parser-owned struct.
-    // §J.3.e.2.i.8 Phase 3d.4h — Vulkan AV1 spec says srcBufferOffset/Range
-    // must scope just the FRAME's bitstream (OBU_FRAME or OBU_FRAME_HEADER +
-    // OBU_TILE_GROUPs).  NV's driver does not tolerate leading TD/SEQ_HDR
-    // OBUs even with frameHeaderOffset pointing past them — apparent
-    // grey/green flicker comes from misparse on those leading OBUs.
-    // Strategy: scan, find OBU_FRAME header position, shift srcBufferOffset to
-    // that position, reduce range, and rebase frameHeaderOffset / tileOffsets.
+    // §J.3.e.2.i.8 Phase 3d.5 — Vulkan AV1 srcBufferOffset semantics:
+    // srcBufferOffset is the start of the bitstream (whole packet, can include
+    // leading TD / SEQ_HDR), and frameHeaderOffset (in VkVideoDecodeAV1Picture-
+    // InfoKHR) tells driver the byte offset to OBU_FRAME / OBU_FRAME_HEADER
+    // *header byte itself* (not past it).  Driver internally parses the OBU
+    // header (1 byte + optional ext + leb128 size) starting from this offset.
+    //
+    // Earlier Phase 3d.4h tried to shift srcBufferOffset past TD/SEQ_HDR
+    // and use frameHeaderOffset = obuHeaderBytes.  That was wrong on TWO
+    // counts: (a) frameHeaderOffset must point AT the OBU header, not past it
+    // (b) shifting srcBufferOffset can break minBitstreamBufferOffsetAlignment
+    // (256 for AV1 on NV) — Phase 3d.5 first attempt fixed alignment by
+    // align-down + prefix rebase, but that dragged junk bytes into the
+    // bitstream and driver mis-parsed them → black output.
+    //
+    // Correct approach: parser is now configured with 256-byte buffer offset
+    // alignment (covers both H.264/H.265 16-byte and AV1 256-byte requirement).
+    // Pass srcBufferOffset = bitstreamDataOffset directly (already 256-aligned),
+    // srcBufferRange = bitstreamDataLen aligned UP to 256.  frameHeaderOffset =
+    // OBU_FRAME header byte position within the bitstream (= scanForAv1FrameObu's
+    // obuHeaderPos result).  tileOffsets = parser's absolute offsets within
+    // the bitstream (no rebase).
     VkDeviceSize bsMaxSz = 0;
     uint8_t* bsMappedPtr = bsBuf->GetDataPtr(0, bsMaxSz);
     Av1FrameObuLocation obuLoc = {};
@@ -1108,32 +1122,21 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
                               (size_t)ppd->bitstreamDataLen, &obuLoc);
     uint32_t obuShift = obuFound ? obuLoc.obuHeaderPos : 0;
 
-    // Build rebased tile offsets: parser supplies absolute offsets within
-    // the buffer; we want them relative to the new srcBufferOffset (which
-    // moves forward by `obuShift`).
-    uint32_t tileOffsetsLocal[64];
     uint32_t numTiles = av1.khr_info.tileCount;
     if (numTiles > 64) numTiles = 64;
-    for (uint32_t i = 0; i < numTiles; i++) {
-        // Parser-stored offset minus how far we shifted srcBufferOffset.
-        // Defensive: clamp to 0 if for some reason parser's offset < shift.
-        tileOffsetsLocal[i] = (av1.tileOffsets[i] >= obuShift)
-            ? (av1.tileOffsets[i] - obuShift) : 0;
-    }
 
     VkVideoDecodeAV1PictureInfoKHR av1Pic = {
         VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_PICTURE_INFO_KHR
     };
     av1Pic.pStdPictureInfo  = &av1.std_info;
-    // frameHeaderOffset relative to (rebased) srcBufferOffset = bytes spent on
-    // the OBU header (header byte + ext byte + leb128 size).  This skips the
-    // OBU header, leaving driver at frame_header_obu() syntax start.
-    av1Pic.frameHeaderOffset = obuFound ? obuLoc.obuHeaderBytes : 0;
+    // frameHeaderOffset = OBU_FRAME header byte position (relative to
+    // srcBufferOffset).  Driver parses obu_header + leb128 size + frame header
+    // syntax starting from this byte.
+    av1Pic.frameHeaderOffset = obuShift;
     av1Pic.tileCount        = numTiles;
-    av1Pic.pTileOffsets     = tileOffsetsLocal;
+    av1Pic.pTileOffsets     = av1.tileOffsets;
     av1Pic.pTileSizes       = av1.tileSizes;
-    // Cache the absolute (pre-shift) value for the diag log below.
-    uint32_t frameHeaderOff = obuFound ? (obuShift + obuLoc.obuHeaderBytes) : 0;
+    uint32_t frameHeaderOff = obuShift;  // for diag log compatibility
     // referenceNameSlotIndices[7]: AV1 ref_frame_idx[i] selects which of the
     // 8 DPB-buffer positions is the i-th reference (LAST/LAST2/.../ALTREF).
     // Convert to DPB slot indices via av1.pic_idx[] (-1 for inactive).
@@ -1147,36 +1150,18 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
         }
     }
 
-    // §J.3.e.2.i.8 Phase 3d.5 — Vulkan AV1 spec mandates srcBufferOffset
-    // be an integer multiple of minBitstreamBufferOffsetAlignment (= 256
-    // on NV 596.84 RTX 3060, validation VUID-vkCmdDecodeVideoKHR-pDecodeInfo-
-    // 07138).  Phase 3d.4h's "shift past TD/SEQ_HDR" gave offsets like 18
-    // or 2 → driver accepts the call but produces grey output (this is the
-    // "9 bugs fixed but still grey" Phase 3d.5 mystery).
-    //
-    // Fix: align srcBufferOffset DOWN to 256 boundary, expand range to
-    // cover the prefix bytes, and rebase frameHeaderOffset + tile offsets
-    // by the prefix amount so the driver still finds the frame OBU at the
-    // correct relative position.  Aligning down is safe — those prefix
-    // bytes are within bsBuf's contiguous data, the driver reads through
-    // them harmlessly until frameHeaderOffset points it at the OBU start.
+    // §J.3.e.2.i.8 Phase 3d.5 — srcBufferOffset = bitstreamDataOffset directly.
+    // Parser's 256-byte bufferOffsetAlignment guarantees 256-aligned (covers
+    // AV1's strict requirement).  Range covers entire bitstream, aligned UP
+    // to 256.  frameHeaderOffset already set above to OBU_FRAME header
+    // position relative to srcBufferOffset.
     constexpr VkDeviceSize kBitstreamAlignment = 256;
-    VkDeviceSize desiredStart = (VkDeviceSize)ppd->bitstreamDataOffset + obuShift;
-    VkDeviceSize alignedOffset = desiredStart & ~(kBitstreamAlignment - 1);
-    VkDeviceSize prefixBytes   = desiredStart - alignedOffset;  // 0..255
-    // Re-base in-frame offsets by prefixBytes since srcBufferOffset just
-    // moved backwards by that amount.
-    av1Pic.frameHeaderOffset += (uint32_t)prefixBytes;
-    for (uint32_t i = 0; i < numTiles; i++) {
-        tileOffsetsLocal[i] += (uint32_t)prefixBytes;
-    }
-    VkDeviceSize effectiveRange = (VkDeviceSize)ppd->bitstreamDataLen - obuShift + prefixBytes;
-    VkDeviceSize alignedRange   = (effectiveRange + (kBitstreamAlignment - 1)) & ~(kBitstreamAlignment - 1);
+    VkDeviceSize alignedRange = ((VkDeviceSize)ppd->bitstreamDataLen + (kBitstreamAlignment - 1)) & ~(kBitstreamAlignment - 1);
 
     VkVideoDecodeInfoKHR di = { VK_STRUCTURE_TYPE_VIDEO_DECODE_INFO_KHR };
     di.pNext                = &av1Pic;
     di.srcBuffer            = bsBuf->GetBuffer();
-    di.srcBufferOffset      = alignedOffset;
+    di.srcBufferOffset      = (VkDeviceSize)ppd->bitstreamDataOffset;
     di.srcBufferRange       = alignedRange;
     di.dstPictureResource   = setupResource;
     di.pSetupReferenceSlot  = &setupSlotInDecode;
@@ -1318,7 +1303,7 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
                     (unsigned long long)alignedRange,
                     frameHeaderOff,
                     av1.tileOffsets[0],
-                    tileOffsetsLocal[0],
+                    av1.tileOffsets[0],  // Phase 3d.5 — no rebase, parser's offset is final
                     av1.tileSizes[0]);
         // Phase 3d.4i — dump first 32 bytes of bitstream (post-shift) so we
         // can verify what the driver actually sees as "frame data".
@@ -2538,8 +2523,13 @@ bool VkFrucRenderer::createNvVideoParser()
     initParams.interfaceVersion          = NV_VULKAN_VIDEO_PARSER_API_VERSION;
     initParams.pClient                   = pimpl->client.get();
     initParams.defaultMinBufferSize      = 1024 * 1024;
-    initParams.bufferOffsetAlignment     = 64;
-    initParams.bufferSizeAlignment       = 64;
+    // §J.3.e.2.i.8 Phase 3d.5 — parser-level alignment must match Vulkan
+    // video session's minBitstreamBufferOffsetAlignment (256 for AV1 on NV).
+    // 64 was OK for H.264/H.265 but for AV1 caused align-down at submit time,
+    // dragging junk prefix bytes into the OBU stream → driver mis-parses →
+    // black screen (Phase 3d.5).  256 covers all 3 codecs safely.
+    initParams.bufferOffsetAlignment     = 256;
+    initParams.bufferSizeAlignment       = 256;
     initParams.referenceClockRate        = 10000000;  // 10 MHz default
     initParams.errorThreshold            = 50;
     initParams.outOfBandPictureParameters = false;

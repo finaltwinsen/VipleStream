@@ -2676,6 +2676,9 @@ bool VkFrucRenderer::createVideoSession(int videoFormat)
         stdName = VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_EXTENSION_NAME;
         stdVersion = VK_STD_VULKAN_VIDEO_CODEC_AV1_DECODE_SPEC_VERSION;
         m_AV1ProfileInfo.stdProfile = STD_VIDEO_AV1_PROFILE_MAIN;
+        // §J.3.e.2.i.8 Phase 3d.5 — filmGrainSupport=TRUE didn't help and
+        // introduced VUID-07212 cleanup warning; reverted to FALSE.  The
+        // remaining black output is not film-grain related.
         m_AV1ProfileInfo.filmGrainSupport = VK_FALSE;
         codecProfilePNext = &m_AV1ProfileInfo;
         maxDpbSlots = 16; maxRefs = 16;
