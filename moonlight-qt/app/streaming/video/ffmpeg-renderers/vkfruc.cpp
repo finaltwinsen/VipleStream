@@ -3442,9 +3442,32 @@ bool VkFrucRenderer::createDescriptorPool()
         return false;
     }
 
+    // §J.3.e.2.i.3.e (v1.3.303 AMD fix) — descriptor pool sizing for ycbcr
+    // immutable sampler.
+    //
+    // NVIDIA driver counts an immutable ycbcr sampler descriptor as 1
+    // pool slot regardless of the underlying format's plane count, so we
+    // historically used `descriptorCount = kFrucFramesInFlight` and it
+    // worked.  AMD Mesa / AMDVLK on Vega 10 (and likely other AMD parts)
+    // count it as plane-count slots — NV12 is 2 planes so each set eats
+    // 2 pool slots, and our previous size of 2 only fit 1 set out of 2.
+    // vkAllocateDescriptorSets returned `VK_ERROR_OUT_OF_POOL_MEMORY`
+    // and the entire VkFrucRenderer init failed (see VipleStream-1777705461.log
+    // line 44 from a Ryzen + Vega 10 test machine).
+    //
+    // Spec ref VkSamplerYcbcrConversionImageFormatProperties::
+    // combinedImageSamplerDescriptorCount: drivers report how many
+    // descriptors a ycbcr sampler binding needs; we don't query it here
+    // (the fast path is over-provision since pool memory is tiny — a few
+    // KB at most) and just over-allocate by ×4.  That covers up to a
+    // 4-plane format (none in our pipeline today) plus headroom on
+    // drivers that take ×3 for some 3-plane variants.
+    //
+    // maxSets stays at kFrucFramesInFlight: still N descriptor sets, each
+    // with 1 binding.  Only the per-binding pool-slot count changes.
     VkDescriptorPoolSize poolSize = {};
     poolSize.type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = kFrucFramesInFlight;
+    poolSize.descriptorCount = kFrucFramesInFlight * 4;
 
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
