@@ -322,6 +322,27 @@ typedef struct vk_backend_s {
     VkSemaphore          fSlotAcquireSem[VK_FRAMES_IN_FLIGHT][2];     // [pass1, pass2]
     VkSemaphore          fSlotRenderDoneSem[VK_FRAMES_IN_FLIGHT][2];
     VkFence              fSlotInFlightFence[VK_FRAMES_IN_FLIGHT];
+
+    // §I.D Phase D.2.2/D.2.3 — hot-path FRUC compute split.  D.2.0 acquired a
+    // distinct compute VkQueue (same family, queueIndex 1).  D.2.1 verified the
+    // cross-queue binary-semaphore handshake on real Adreno.  Now we move the
+    // FRUC compute work (AHB import barrier + ycbcr_to_rgba + motionest +
+    // mv_median + warp + prev rotate) onto a dedicated per-slot compute cmd
+    // buffer submitted on `computeQueue`, signaling `fSlotComputeDoneSem`.
+    // The graphics cmd buffer (PASS 1 + PASS 2 render passes) waits this sem
+    // at FRAGMENT_SHADER stage so PASS 1 can sample interpFrame + PASS 2 can
+    // sample imgIn (same family → no queue family ownership transfer needed,
+    // sem provides availability+visibility).
+    //
+    // Allocated once in init_in_flight_ring; reset/recorded per-frame.  Even
+    // in single-present mode (no compute work) we still record the AHB import
+    // barrier into fSlotComputeCmdBuf and submit on computeQueue — avoids the
+    // "binary sem signaled but never waited" gotcha across mode transitions
+    // (single mode skips render-pass-1 wait so we couldn't drop the compute
+    // submit unilaterally).  The single-mode compute submit is a single
+    // pipeline barrier ≈ tens of µs of driver overhead per frame.
+    VkCommandBuffer      fSlotComputeCmdBuf[VK_FRAMES_IN_FLIGHT];
+    VkSemaphore          fSlotComputeDoneSem[VK_FRAMES_IN_FLIGHT];
     // Pending AHB import per slot — freed at start of next slot reuse
     // (after fence signal proves GPU done with them).
     VkImage              fSlotPendingImg[VK_FRAMES_IN_FLIGHT];
@@ -2724,29 +2745,128 @@ static int init_compute_pipelines(vk_backend_t* be)
     be->vkCmdClearColorImage(be->cmdBuffer, be->fImage[FRUC_IMG_PREV_MV],
                              VK_IMAGE_LAYOUT_GENERAL, &zeroInt,  1, &fullColorRange);
 
+    // === Phase D.2.1 — split init clear submit across queues ====================
+    // D.2.0 acquired up to 3 same-family VkQueues. probe2.c verified the driver
+    // returns distinct handles + accepts concurrent submit on Adreno 620; this
+    // step actually exercises the cross-queue binary VkSemaphore handshake on
+    // the real Adreno driver (probe2 ran in its own minimal VkInstance), so a
+    // failure here surfaces it during init rather than mid-stream.
+    //
+    // We split the previous single submit into two submits chained by
+    // semInitHandoff:
+    //   cmdGfx (= be->cmdBuffer): UNDEFINED→GENERAL barriers + clears
+    //                             recorded above.  Submit on graphicsQueue,
+    //                             signal sem (signal-side availability covers
+    //                             the TRANSFER_WRITE issued by the clears).
+    //   cmdCmp (= cmdInitCompute): TRANSFER_WRITE → SHADER_READ|SHADER_WRITE
+    //                             memory barrier (same dependency the legacy
+    //                             single-submit code recorded inside cmdGfx —
+    //                             hoisted here so it pairs with the wait).
+    //                             Submit on computeQueue, wait sem at
+    //                             COMPUTE_SHADER stage.
+    // Pre-streaming init still wants synchronous completion before we return,
+    // so we waitIdle on both queues afterwards.  In single-queue mode
+    // (graphicsQueue == computeQueue) the two submits run sequentially on one
+    // queue and the two waitIdle calls collapse to one — still correct.
+
+    if (be->vkEndCommandBuffer(be->cmdBuffer) != VK_SUCCESS) {
+        LOGE("[VKBE-COMPUTE] init clear: vkEndCommandBuffer (gfx) failed");
+        return -1;
+    }
+
+    VkCommandBufferAllocateInfo cbai_init2 = {
+        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool        = be->cmdPool,
+        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer cmdInitCompute = VK_NULL_HANDLE;
+    if (be->vkAllocateCommandBuffers(be->device, &cbai_init2, &cmdInitCompute) != VK_SUCCESS) {
+        LOGE("[VKBE-D21] init clear: vkAllocateCommandBuffers (compute) failed");
+        return -1;
+    }
+    VkCommandBufferBeginInfo bbi_init2 = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    if (be->vkBeginCommandBuffer(cmdInitCompute, &bbi_init2) != VK_SUCCESS) {
+        LOGE("[VKBE-D21] init clear: vkBeginCommandBuffer (compute) failed");
+        return -1;
+    }
     VkMemoryBarrier mb_init = {
         .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
         .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
     };
-    be->vkCmdPipelineBarrier(be->cmdBuffer,
+    be->vkCmdPipelineBarrier(cmdInitCompute,
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 1, &mb_init, 0, NULL, 0, NULL);
+    if (be->vkEndCommandBuffer(cmdInitCompute) != VK_SUCCESS) {
+        LOGE("[VKBE-D21] init clear: vkEndCommandBuffer (compute) failed");
+        return -1;
+    }
 
-    if (be->vkEndCommandBuffer(be->cmdBuffer) != VK_SUCCESS) {
-        LOGE("[VKBE-COMPUTE] init clear: vkEndCommandBuffer failed");
-        return -1;
+    VkSemaphore semInitHandoff = VK_NULL_HANDLE;
+    {
+        VkSemaphoreCreateInfo sci_init = {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        };
+        if (be->vkCreateSemaphore(be->device, &sci_init, NULL,
+                                   &semInitHandoff) != VK_SUCCESS) {
+            LOGE("[VKBE-D21] init clear: vkCreateSemaphore failed");
+            return -1;
+        }
     }
-    VkSubmitInfo si_init = {
-        .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 1,
-        .pCommandBuffers    = &be->cmdBuffer,
+
+    VkSubmitInfo si_initGfx = {
+        .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount   = 1,
+        .pCommandBuffers      = &be->cmdBuffer,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores    = &semInitHandoff,
     };
-    if (be->vkQueueSubmit(be->graphicsQueue, 1, &si_init, VK_NULL_HANDLE) != VK_SUCCESS) {
-        LOGE("[VKBE-COMPUTE] init clear: vkQueueSubmit failed");
+    if (be->vkQueueSubmit(be->graphicsQueue, 1, &si_initGfx,
+                           VK_NULL_HANDLE) != VK_SUCCESS) {
+        LOGE("[VKBE-D21] init clear: vkQueueSubmit (gfx) failed");
+        be->vkDestroySemaphore(be->device, semInitHandoff, NULL);
         return -1;
     }
-    be->vkQueueWaitIdle(be->graphicsQueue);
+
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    VkSubmitInfo si_initCmp = {
+        .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount   = 1,
+        .pWaitSemaphores      = &semInitHandoff,
+        .pWaitDstStageMask    = &waitStage,
+        .commandBufferCount   = 1,
+        .pCommandBuffers      = &cmdInitCompute,
+    };
+    if (be->vkQueueSubmit(be->computeQueue, 1, &si_initCmp,
+                           VK_NULL_HANDLE) != VK_SUCCESS) {
+        LOGE("[VKBE-D21] init clear: vkQueueSubmit (compute) failed");
+        // gfx submit was already accepted — drain it before destroying the sem.
+        be->vkQueueWaitIdle(be->graphicsQueue);
+        be->vkDestroySemaphore(be->device, semInitHandoff, NULL);
+        return -1;
+    }
+
+    be->vkQueueWaitIdle(be->computeQueue);
+    if (be->graphicsQueue != be->computeQueue) {
+        be->vkQueueWaitIdle(be->graphicsQueue);
+    }
+
+    be->vkDestroySemaphore(be->device, semInitHandoff, NULL);
+    // cmdInitCompute is left allocated against be->cmdPool — reclaimed when
+    // the pool is destroyed at backend teardown.  We don't have
+    // vkFreeCommandBuffers wired up and one extra primary cmd buffer until
+    // pool destroy is acceptable overhead for a one-shot init.
+
+    LOGI("[VKBE-D21] init clear: cross-queue handoff OK "
+         "(gfx=%p compute=%p, %s)",
+         (void*)be->graphicsQueue, (void*)be->computeQueue,
+         (be->graphicsQueue != be->computeQueue)
+             ? "DISTINCT queues — async submit handshake live"
+             : "single-queue mode (degraded, sequential)");
 
     // 10. §I.C.4.a — second graphics pipeline that samples interpFrame.
     //     Same renderPass + fullscreen.vert + video_sample.frag as the
@@ -2923,8 +3043,18 @@ static int init_in_flight_ring(vk_backend_t* be)
         return -1;
     }
 
+    // §I.D Phase D.2.2/D.2.3: per-slot compute cmd buffer.  Same pool / same
+    // family as the gfx cmd buffers — a same-family cmd buffer can be
+    // submitted on any queue from that family, so no second pool needed.
+    if (be->vkAllocateCommandBuffers(be->device, &cbai, be->fSlotComputeCmdBuf) != VK_SUCCESS) {
+        LOGE("[VKBE-RING] vkAllocateCommandBuffers (compute slot) failed");
+        return -1;
+    }
+
     // Per slot: 2 acquireSems (one per pass) + 2 renderDoneSems + 1 fence
     // (signaled-initial so first frame's vkWaitForFences returns immediately).
+    // Phase D.2.2/D.2.3 adds 1 binary computeDoneSem per slot for the
+    // compute→gfx cross-queue handshake.
     VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     VkFenceCreateInfo     fci = {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -2940,6 +3070,11 @@ static int init_in_flight_ring(vk_backend_t* be)
                 return -1;
             }
         }
+        if (be->vkCreateSemaphore(be->device, &sci, NULL,
+                                   &be->fSlotComputeDoneSem[i]) != VK_SUCCESS) {
+            LOGE("[VKBE-RING] vkCreateSemaphore (computeDone[%u]) failed", i);
+            return -1;
+        }
         if (be->vkCreateFence(be->device, &fci, NULL, &be->fSlotInFlightFence[i]) != VK_SUCCESS) {
             LOGE("[VKBE-RING] vkCreateFence[%u] failed", i);
             return -1;
@@ -2948,7 +3083,8 @@ static int init_in_flight_ring(vk_backend_t* be)
 
     be->fCurrentSlot = 0;
     be->fRingInitialized = 1;
-    LOGI("[VKBE-RING] in-flight ring ready: %d slots × (1 cmdbuf + 2 acquireSem + 2 renderDoneSem + 1 fence)",
+    LOGI("[VKBE-RING] in-flight ring ready: %d slots × (gfx+compute cmdbuf + 2 acquireSem + "
+         "2 renderDoneSem + 1 computeDoneSem + 1 fence)",
          VK_FRAMES_IN_FLIGHT);
     return 0;
 }
@@ -2982,8 +3118,13 @@ static void destroy_in_flight_ring(vk_backend_t* be)
                 be->fSlotRenderDoneSem[i][p] = VK_NULL_HANDLE;
             }
         }
+        if (be->fSlotComputeDoneSem[i]) {
+            be->vkDestroySemaphore(be->device, be->fSlotComputeDoneSem[i], NULL);
+            be->fSlotComputeDoneSem[i] = VK_NULL_HANDLE;
+        }
         // cmdbufs are freed implicitly when cmdPool is destroyed.
-        be->fSlotCmdBuf[i] = VK_NULL_HANDLE;
+        be->fSlotCmdBuf[i]        = VK_NULL_HANDLE;
+        be->fSlotComputeCmdBuf[i] = VK_NULL_HANDLE;
     }
     be->fRingInitialized = 0;
     LOGI("[VKBE-RING] destroyed");
@@ -3683,27 +3824,42 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         }
     }
 
-    // Record cmdbuf. dispatch_fruc still uses be->cmdBuffer internally —
-    // temporarily swap the legacy cmdbuf pointer to slot.cmdbuf for the
-    // duration of recording so dispatch_fruc emits commands into the ring
-    // cmdbuf. Saved+restored deterministically; we hold no async state.
-    VkCommandBuffer slotCmd = be->fSlotCmdBuf[slot];
+    // === Phase D.2.2/D.2.3 — record into TWO cmd buffers ========================
+    // The compute side owns: AHB import barrier (FOREIGN→graphicsQueueFamily,
+    // since compute reads imgIn first) + dispatch_fruc (ycbcr+ME+median+warp +
+    // prev rotate copies) when in dual mode.  Single mode records only the
+    // import barrier into the compute cmd buffer; we still submit it (so the
+    // compute→gfx binary semaphore handshake is symmetric across modes — the
+    // alternative of conditionally skipping the compute submit leaves a sem
+    // signaled-but-not-waited at mode transitions).
+    //
+    // The gfx side owns the render passes only.  Same family means no queue
+    // ownership transfer is required between compute and gfx; the
+    // fSlotComputeDoneSem signal+wait pair carries availability+visibility for
+    // imgIn and (in dual mode) for warp's interpFrame output.
+    //
+    // dispatch_fruc still records via be->cmdBuffer; we point it at slotCmpCmd
+    // for the compute recording phase (saved + restored), preserving the
+    // existing helper API.
+    VkCommandBuffer slotCmd       = be->fSlotCmdBuf[slot];
+    VkCommandBuffer slotCmpCmd    = be->fSlotComputeCmdBuf[slot];
     VkCommandBuffer saveLegacyCmd = be->cmdBuffer;
-    be->cmdBuffer = slotCmd;
 
-    be->vkResetCommandBuffer(slotCmd, 0);
-    VkCommandBufferBeginInfo bbi = {
+    // ---- Compute cmd buffer ----
+    be->vkResetCommandBuffer(slotCmpCmd, 0);
+    VkCommandBufferBeginInfo bbi_cmp = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
-    if (be->vkBeginCommandBuffer(slotCmd, &bbi) != VK_SUCCESS) {
-        be->cmdBuffer = saveLegacyCmd;
+    if (be->vkBeginCommandBuffer(slotCmpCmd, &bbi_cmp) != VK_SUCCESS) {
         goto ring_fail_drop_imported;
     }
 
-    // inAcquire on imgIn — same as before, dst stages = COMPUTE | FRAGMENT
-    // because both render passes (compute via dispatch_fruc, graphics via
-    // PASS 2) sample imgIn.
+    // inAcquire on imgIn — FOREIGN→graphicsQueueFamily layout transition + dst
+    // stage COMPUTE_SHADER (the first reader on compute queue is ycbcr_to_rgba
+    // dispatch in dispatch_fruc; in single mode no compute reader, but
+    // COMPUTE_SHADER is still a valid stage on this queue and the cross-queue
+    // sem then exposes the layout to the gfx queue's fragment shader at PASS 2).
     VkImageSubresourceRange range = {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
         .baseMipLevel = 0, .levelCount = 1,
@@ -3720,12 +3876,8 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         .image = imgIn,
         .subresourceRange = range,
     };
-    // iter 11 — single mode skips compute (iter 8), so dst stage doesn't
-    // need COMPUTE_SHADER_BIT. Tiny barrier-cost optimization.
-    VkPipelineStageFlags inAcquireDstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    if (!singleMode) inAcquireDstStage |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    be->vkCmdPipelineBarrier(slotCmd,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, inAcquireDstStage,
+    be->vkCmdPipelineBarrier(slotCmpCmd,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 0, NULL, 0, NULL, 1, &inAcquireRing);
 
     // iter 8 — skip FRUC compute when single mode (its output isn't
@@ -3735,17 +3887,27 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     // frame of warp blend artifact, then recovers (motionest's
     // temporal predictor self-corrects within 2-3 frames).
     if (!singleMode) {
+        be->cmdBuffer = slotCmpCmd;
         dispatch_fruc(be, viewIn);
+        be->cmdBuffer = saveLegacyCmd;
+        // No explicit compute→fragment barrier needed here: the
+        // fSlotComputeDoneSem signal-side availability + gfx submit's
+        // FRAGMENT_SHADER-stage wait visibility together act as the cross-queue
+        // memory dependency for warp's interpFrame writes.
+    }
 
-        // compute → fragment barrier so render pass 1 can sample interpFrame.
-        VkMemoryBarrier mb_compute_to_frag = {
-            .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-        };
-        be->vkCmdPipelineBarrier(slotCmd,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            0, 1, &mb_compute_to_frag, 0, NULL, 0, NULL);
+    if (be->vkEndCommandBuffer(slotCmpCmd) != VK_SUCCESS) {
+        goto ring_fail_drop_imported;
+    }
+
+    // ---- Graphics cmd buffer ----
+    be->vkResetCommandBuffer(slotCmd, 0);
+    VkCommandBufferBeginInfo bbi = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    if (be->vkBeginCommandBuffer(slotCmd, &bbi) != VK_SUCCESS) {
+        goto ring_fail_drop_imported;
     }
 
     // ---- Render pass 1 (interp): sample interpFrame → imgIdxPass1 (dual only) ----
@@ -3810,33 +3972,84 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
     }
 
     if (be->vkEndCommandBuffer(slotCmd) != VK_SUCCESS) {
-        be->cmdBuffer = saveLegacyCmd;
         goto ring_fail_drop_imported;
     }
-    be->cmdBuffer = saveLegacyCmd;
 
-    // Single submit with 1 (single mode) or 2 (dual) wait/signal sems +
-    // fence. Acquires gate at COLOR_ATTACHMENT_OUTPUT.
-    VkPipelineStageFlags waitStages[2] = {
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    // ---- Submit compute (signals fSlotComputeDoneSem[slot]) ----
+    VkSubmitInfo si_cmp = {
+        .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount   = 1,
+        .pCommandBuffers      = &slotCmpCmd,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores    = &be->fSlotComputeDoneSem[slot],
     };
-    VkSemaphore waitSems[2]   = { be->fSlotAcquireSem[slot][0],   be->fSlotAcquireSem[slot][1] };
+    if (be->vkQueueSubmit(be->computeQueue, 1, &si_cmp, VK_NULL_HANDLE) != VK_SUCCESS) {
+        LOGW("[VKBE-RING] compute vkQueueSubmit failed");
+        goto ring_fail_drop_imported;
+    }
+
+    // ---- Submit gfx ----
+    // Wait on acquire sems (gate at COLOR_ATTACHMENT_OUTPUT) + computeDoneSem
+    // (gate at FRAGMENT_SHADER, since render passes' frag shaders sample
+    // interpFrame / imgIn that compute either wrote or transitioned).
+    // semCount waits = (singleMode ? 1 acquire : 2 acquire) + 1 computeDone.
+    VkSemaphore waitSems[3] = {
+        be->fSlotAcquireSem[slot][0],
+        be->fSlotAcquireSem[slot][1],
+        be->fSlotComputeDoneSem[slot],
+    };
+    VkPipelineStageFlags waitStages[3] = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+    };
+    // Compact in-place when single mode: drop acquire[1] slot.
+    if (singleMode) {
+        waitSems[1]   = waitSems[2];
+        waitStages[1] = waitStages[2];
+    }
+    uint32_t waitCount = singleMode ? 2u : 3u;
+
     VkSemaphore signalSems[2] = { be->fSlotRenderDoneSem[slot][0], be->fSlotRenderDoneSem[slot][1] };
     uint32_t semCount = singleMode ? 1u : 2u;
+
     VkSubmitInfo si = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .waitSemaphoreCount = semCount,
-        .pWaitSemaphores = waitSems,
-        .pWaitDstStageMask = waitStages,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &slotCmd,
+        .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount   = waitCount,
+        .pWaitSemaphores      = waitSems,
+        .pWaitDstStageMask    = waitStages,
+        .commandBufferCount   = 1,
+        .pCommandBuffers      = &slotCmd,
         .signalSemaphoreCount = semCount,
-        .pSignalSemaphores = signalSems,
+        .pSignalSemaphores    = signalSems,
     };
-    if (be->vkQueueSubmit(be->graphicsQueue, 1, &si, be->fSlotInFlightFence[slot]) != VK_SUCCESS) {
-        LOGW("[VKBE-RING] vkQueueSubmit failed");
+    if (be->vkQueueSubmit(be->graphicsQueue, 1, &si,
+                           be->fSlotInFlightFence[slot]) != VK_SUCCESS) {
+        LOGW("[VKBE-RING] gfx vkQueueSubmit failed");
+        // Compute submit already accepted — drain its work, then drain the
+        // signaled-pending fSlotComputeDoneSem with a no-op gfx submit so the
+        // sem returns to the unsignaled state next frame's compute submit
+        // requires.  Per spec a binary sem signaled-but-never-waited becomes
+        // UB on the next signal attempt.
+        be->vkQueueWaitIdle(be->computeQueue);
+        VkPipelineStageFlags drainStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        VkSubmitInfo si_drain = {
+            .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores    = &be->fSlotComputeDoneSem[slot],
+            .pWaitDstStageMask  = &drainStage,
+        };
+        if (be->vkQueueSubmit(be->graphicsQueue, 1, &si_drain,
+                               VK_NULL_HANDLE) == VK_SUCCESS) {
+            be->vkQueueWaitIdle(be->graphicsQueue);
+        }
         goto ring_fail_drop_imported;
+    }
+    if (be->frameCounter == 0) {
+        LOGI("[VKBE-D22] hot-path split live: compute submit on Q=%p, gfx submit on Q=%p (%s)",
+             (void*)be->computeQueue, (void*)be->graphicsQueue,
+             (be->graphicsQueue != be->computeQueue) ? "DISTINCT — async submit"
+                                                     : "single-queue mode (sequential)");
     }
 
     // §I.C.6 — PTS for the present(s). In single mode we only have 1

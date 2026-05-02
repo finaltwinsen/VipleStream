@@ -15,7 +15,7 @@
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 3d.6 — AV1 native decode GPU-side grey | 9 個 parser bug 修完仍 grey；NV driver 596.36 + AV1 vkCmdDecodeVideoKHR 黑/灰畫面，需 RenderDoc + vk_video_samples client diff，目前 AV1 預設走 libdav1d SW 不擋使用 |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 1.7 ONLY-mode NVDEC device-lost | v1.3.298~301 五個變體（fence-pin / hold-ring / pool-reuse / barrier）都無法繞過，NV driver 596.36 對 native VK_KHR_video_decode 內部 NVDEC 有結構性 bug；v1.3.302 把 `*_ONLY` env rename 成 `*_ONLY_DANGEROUS` 強迫舊 `setx` 失效，預設 PARALLEL mode 穩 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | v1.3.275 H.264 native ship 後 dual-present 3-4 Hz blur/sharp；v1.3.276/277 per-slot buffer 改善大半，殘留小 race 等 Phase J.5 整體切換 Vulkan 才補完整 |
-| **Active (Phase D.2.0 done + verified [GO])** | **§I.D** Android Vulkan FRUC async compute | Adreno 620 / Pixel 5 probed: 1 family / queueCount=3 / [GFX CMP]. probe2 在 device 上實證 driver returns 3 distinct VkQueue handles + accepts concurrent same-family submit → Phase D.2.1+ API-viable. Phase D.2.0 已 ship multi-queue acquisition (vk_backend.c)。Phase D.2.1+ 拆 hot-path submit 待 user 在 LAN 連 host stream + benchmark 才能驗 GPU 端真 parallel 與否 |
+| **Active (Phase D.2.0/2.1/2.2/2.3 done + 真機 verified)** | **§I.D** Android Vulkan FRUC async compute | Adreno 620 / Pixel 5 verified: D.2.0 multi-queue acquisition + D.2.1 init-time cross-queue handoff + D.2.2/D.2.3 hot-path FRUC compute split (ycbcr+ME+median+warp+rotate 進 computeQueue, render passes 留 graphicsQueue, 中間用 binary VkSemaphore)。1300+ frame single-mode 60fps stable + 960+ frame forced-dual mode 60fps stable，無 VK_ERROR。Phase D.2.4 baseline benchmark vs pre-split 比較尚未測（perf 無 regression 已驗，但實際 GPU 平行收益要 ETW/RenderDoc capture 才能量） |
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) — 解 NCNN-Vulkan shared path | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
 | **Done / partial** | **§A.6 / §C / §D / §E** brand consistency 收工 | A.6/C 已 ship；D HelpLauncher URL 已指 finaltwinsen/VipleStream README，等正式 docs；E themed icon 自 v1.2.36 已 wire |
 | **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |
@@ -179,7 +179,15 @@ fruc.onnx + fruc_fp16.onnx）。Build script 拿掉 onnx copy block。實機驗
 
 **做法：** ME / warp 移到 dedicated compute queue，跟 graphics queue 平行；移除 host-side `vkQueueWaitIdle`；ME 跟前一幀 present 重疊；mailbox present 取代 FIFO。
 
-**狀態：** v1.2.162 ship in-flight ring（host-side waitIdle 移除）但 perf 平 — 真要 latency gain 還要 mailbox present 或 multi-queue，**Adreno 620 queue family 數量待 probe**。
+**狀態：**
+- v1.2.162 ship in-flight ring（host-side waitIdle 移除）但 perf 平 — 真要 latency gain 還要 mailbox present 或 multi-queue。
+- Phase D.2.0 (3dc860a + 81e50d4)：Adreno 620 / Pixel 5 probed → 1 family / queueCount=3 / [GFX CMP]，`probe2` 真機證明 driver returns 3 distinct VkQueue handles + 接受 concurrent same-family submit。`vk_backend.c` create_device 改成 request 3 queues（gfx queueIndex=0、compute queueIndex=1、transfer queueIndex=2，driver 不夠 fallback aliased to gfx），加 `[VKBE-D20]` log 三條印 handle 跟 distinctness。
+- Phase D.2.1：init-time `compute init clear` submit 拆 gfx→compute 兩個 cmd buffer 用 binary `VkSemaphore` chain，pre-streaming 仍 waitIdle 兩條 queue（單 queue mode 自然 collapse）。`[VKBE-D21] init clear: cross-queue handoff OK ... DISTINCT queues — async submit handshake live` 真機 captured。
+- Phase D.2.2 / D.2.3：hot-path `render_ahb_frame` 的 ring path 拆兩 cmd buffer。compute 側收 AHB import barrier + (dual mode) 整套 dispatch_fruc (ycbcr_to_rgba + motionest + mv_median + warp + prev rotate copies)，submit 在 `computeQueue` signal `fSlotComputeDoneSem[slot]`。gfx 側收 render pass 1 (interp) + render pass 2 (real)，submit 在 `graphicsQueue` 等 acquireSem(s) + computeDoneSem (waitDstStage = FRAGMENT_SHADER)，signal renderDoneSem(s) + fSlotInFlightFence。Single mode compute 側僅 AHB import barrier — 仍 submit 以維持 sem 對稱。`[VKBE-D22] hot-path split live` 真機 captured；single mode 1300+ frames + forced-dual 960+ frames 都 stable 無 VK_ERROR。
+
+**未做：**
+- Phase D.2.4 真正的 vs-baseline benchmark — 跑 `scripts/benchmark/android/android_baseline.sh` 對比 D.2.x 前後的 thermal / fps / jank。perf 在 Pixel 5 上沒退（p50 host frame 1.0–1.3ms single, 14.2ms dual vsync-bound），但 GPU 端真 async 要 RenderDoc / Adreno profiler capture 才能量到 queue 平行。Pixel 5 + 60fps 60Hz 沒 dual mode 觸發空間（要 ≤45fps input on 90Hz 才會 enter dual hysteresis），baseline 比較需要低 fps source。
+- Phase D.2.5 (mailbox per-mode) — D.2.x 路完整跑通才考慮。
 
 **鐵律：**
 1. 每 Phase 都要有 baseline 對比。沿用 `scripts/benchmark/android/`，量出來不如預期就停。
