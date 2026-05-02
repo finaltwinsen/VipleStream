@@ -1,5 +1,5 @@
 # Restore firewall to pre-lockdown state
-# Run on <host> as Administrator
+# Run on the streaming host as Administrator
 
 $ErrorActionPreference = 'Stop'
 

@@ -1,5 +1,5 @@
 # VipleStream firewall lockdown (scenario ii: force hole-punch)
-# Run on <host> as Administrator
+# Run on the streaming host as Administrator
 #
 # Effect:
 #   - Inbound default: Block (all profiles)

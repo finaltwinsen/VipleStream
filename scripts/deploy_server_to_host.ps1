@@ -3,15 +3,21 @@
 # zip to the remote streaming host via SSH (BatchMode, OpenSSH default key).
 #
 # Usage:
-#   pwsh scripts\deploy_server_to_host.ps1                    # latest release/
-#   pwsh scripts\deploy_server_to_host.ps1 -Version 1.3.310   # specific zip
-#   pwsh scripts\deploy_server_to_host.ps1 -Host alt-host.lan
+#   pwsh scripts\deploy_server_to_host.ps1 -RemoteHost user@host
+#   pwsh scripts\deploy_server_to_host.ps1 -RemoteHost user@host -Version 1.3.310
+#
+# `-RemoteHost` is mandatory and takes the OpenSSH `user@host` form (e.g.
+# `you@192.0.2.10` or `you@your-host.lan`).  We deliberately don't pin a
+# default here — every developer's streaming host is different.  Set
+# `VIPLESTREAM_DEPLOY_HOST` in your shell environment and pass that, or
+# wrap this in build-config.local.cmd, if you want a per-machine default.
 #
 # Prereqs:
 #   - SSH key in ~/.ssh/id_ed25519 already in remote authorized_keys
 #   - Remote host running OpenSSH server with sshd-launched session having
-#     admin rights (default for our <host> setup; runs as
-#     SYSTEM or elevated user)
+#     admin rights (sshd typically runs as SYSTEM on Windows, which
+#     inherits enough privilege; verify with `whoami /priv` in your first
+#     SSH session)
 #   - Remote install path = C:\Program Files\VipleStream-Server\
 #   - Remote service name = VipleStreamServer
 #
@@ -21,7 +27,9 @@
 # Only the binaries + assets/ directory are overwritten.
 
 param(
-    [string] $RemoteHost = '<user>@<host>',
+    [Parameter(Mandatory = $true)]
+    [string] $RemoteHost,
+
     [string] $Version    = '',
     [string] $RemoteUser = ''  # optional: use 'user@' style instead of $RemoteHost
 )
@@ -59,8 +67,14 @@ if (-not (Test-Path $remoteDeploy)) {
     throw ('Sibling script not found: ' + $remoteDeploy)
 }
 
-# Remote staging dir on host's home
-$remoteHome   = '<user-home>'  # Cygwin/OpenSSH-style path; works for scp
+# Remote staging dir on host: derive home folder from the user portion of
+# `user@host` (works for the standard Windows `C:\Users\<user>` layout).
+# Cygwin/OpenSSH-style forward slashes are accepted by scp on Windows.
+$userPart = ($RemoteHost -split '@', 2)[0]
+if (-not $userPart) {
+    throw 'RemoteHost must be in user@host form (e.g. you@192.0.2.10)'
+}
+$remoteHome   = "/Users/$userPart"
 $remoteZip    = "C:" + $remoteHome + "/" + $zipName
 $remoteScript = "C:" + $remoteHome + "/deploy_server_remote.ps1"
 

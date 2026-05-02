@@ -1,14 +1,15 @@
 #requires -version 5.1
 # VipleStream Server remote deploy script.
 #
-# Runs on the streaming host (<host>) via SSH.  The
-# accompanying client-side wrapper `scripts/deploy_server_to_host.ps1`
-# uploads the zip + this script and invokes it.  Idempotent: stage →
-# stop service → copy → start → verify realm.
+# Runs on the streaming host via SSH.  The accompanying client-side
+# wrapper `scripts/deploy_server_to_host.ps1` uploads the zip + this
+# script and invokes it.  Idempotent: stage → stop service → copy →
+# start → verify realm.
 #
 # Hard-codes the install path to the canonical `C:\Program Files\
-# VipleStream-Server`; if you ever change that, also update CLAUDE.md
-# and `scripts/deploy_server.ps1` (the localhost variant).
+# VipleStream-Server`; if you ever change that, also update
+# `scripts/deploy_server.ps1` (the localhost variant) and any per-machine
+# build-config.local.cmd notes.
 
 param(
     [Parameter(Mandatory = $true)]
@@ -16,7 +17,11 @@ param(
 
     [string] $InstallPath = 'C:\Program Files\VipleStream-Server',
 
-    [string] $StagePath   = 'C:\Users\<user>\.viplestream-server-staging',
+    # Defaults to a hidden folder under the **current** user's profile
+    # (whoever sshd launches this as), so the script never bakes in a
+    # specific username.  Override with -StagePath if you want to pin
+    # it elsewhere (e.g. on a different drive for space reasons).
+    [string] $StagePath   = (Join-Path $env:USERPROFILE '.viplestream-server-staging'),
 
     [string] $ServiceName = 'VipleStreamServer'
 )

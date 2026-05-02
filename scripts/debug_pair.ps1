@@ -37,29 +37,28 @@
     Remove the debug device entry instead of adding it. Honours -RemoteHost.
 
 .PARAMETER RemoteHost
-    OpenSSH-style target spec (e.g. "<user>@<host>"). When set,
-    sunshine_state.json on the remote is updated; nothing is touched on
-    the local machine besides pulling the cert via adb.
+    OpenSSH-style target spec (e.g. "user@host" or "user@10.0.0.5"). When
+    set, sunshine_state.json on the remote is updated; nothing is touched
+    on the local machine besides pulling the cert via adb.
 
 .PARAMETER AdbDeviceId
     Restrict adb to a specific device serial (passed as `adb -s <id>`).
-    Default: "<device-serial>" (Pixel 5 / VipleStream test device, per
-    feedback_test_workflow memory). Use empty string ("") to use whatever
-    `adb devices` returns first.
+    Default: empty (use whatever `adb devices` returns first). Pin to a
+    serial when multiple devices are attached.
 
 .EXAMPLE
     .\debug_pair.ps1
     .\debug_pair.ps1 -DeviceName "MyPhone"
     .\debug_pair.ps1 -Remove
-    .\debug_pair.ps1 -RemoteHost <user>@<host>
-    .\debug_pair.ps1 -RemoteHost <user>@<host> -Remove
+    .\debug_pair.ps1 -RemoteHost user@your-host.lan
+    .\debug_pair.ps1 -RemoteHost user@your-host.lan -Remove
 #>
 
 param(
     [string]$DeviceName = "VipleStream-Debug",
     [switch]$Remove,
     [string]$RemoteHost = "",
-    [string]$AdbDeviceId = "<device-serial>"
+    [string]$AdbDeviceId = ""
 )
 
 $ErrorActionPreference = "Stop"

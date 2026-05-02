@@ -49,6 +49,9 @@ scripts/benchmark/vimeo_tri_test/
 scripts/benchmark/vimeo_tri_test.zip
 scripts/benchmark/benchmark_results/
 scripts/benchmark/results/
+# Per-run captures (logs / PresentMon CSV / reports). Always include host
+# name + IP from VipleStream client log lines, so we keep them local-only.
+scripts/benchmark/output/
 
 # ── External dependencies (auto-downloaded by build) ──
 vcpkg/

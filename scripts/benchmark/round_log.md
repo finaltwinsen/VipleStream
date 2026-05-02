@@ -4,8 +4,8 @@
 迭代，priority 流暢度 > 延遲 > 品質 > 多幀生成.
 
 **Test config:** HEVC 1920x1080 @ 180fps user / 90fps server / dual-present /
-SW decode (libdav1d) / 18-25s capture / host <host-ip> / RTX 3060 Laptop /
-NV 596.84 driver
+SW decode (libdav1d) / 18-25s capture / RTX 3060 Laptop /
+NV 596.84 driver (host on the same LAN)
 
 ## 指標
 

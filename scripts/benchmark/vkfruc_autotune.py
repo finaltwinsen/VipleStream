@@ -16,7 +16,7 @@ Differences from fruc_autotune.py (which targets D3D11+FRUC):
     +compute_gpu_mean, sufficient for tuning)
 
 Usage:
-  python vkfruc_autotune.py --host <host-ip> --app Desktop \
+  python vkfruc_autotune.py --host <hostname-or-ip> --app Desktop \
       --width 1920 --height 1080 --fps 180 --seconds 25 --warmup 8
 
 Output:

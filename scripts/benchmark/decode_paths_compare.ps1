@@ -17,14 +17,24 @@
 # =============================================================================
 
 param(
-    [string]$HostAddr     = '<host>',
+    [Parameter(Mandatory = $true)]
+    [string]$HostAddr,                    # streaming host name or IP
+
     [string]$App          = 'Desktop',
     [int]   $Seconds      = 60,
     [int]   $WarmupSeconds = 10,
     [string[]]$Configs    = @('vulkan_sw','vulkan_hw','d3d11_sw','d3d11_hw'),
     [string]$VideoCodec   = 'HEVC',
-    [string]$OutDir       = ''
+    [string]$OutDir       = '',
+    # SSH spec for restarting VipleStreamServer between runs (user@host
+    # form).  Defaults to "<current-user>@$HostAddr" if not specified;
+    # override when the SSH user differs from your local username.
+    [string]$RemoteSsh    = ''
 )
+
+if (-not $RemoteSsh) {
+    $RemoteSsh = "$env:USERNAME@$HostAddr"
+}
 
 $ErrorActionPreference = 'Continue'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -92,8 +102,8 @@ function Stop-Stream {
 }
 
 function Restart-Server {
-    Write-Host "  Restarting host service VipleStreamServer..."
-    ssh -o BatchMode=yes <user>@<host> 'powershell -Command "Restart-Service VipleStreamServer; Start-Sleep -Seconds 4"' 2>$null | Out-Null
+    Write-Host "  Restarting host service VipleStreamServer ($RemoteSsh)..."
+    ssh -o BatchMode=yes $RemoteSsh 'powershell -Command "Restart-Service VipleStreamServer; Start-Sleep -Seconds 4"' 2>$null | Out-Null
     Start-Sleep -Seconds 4
 }
 

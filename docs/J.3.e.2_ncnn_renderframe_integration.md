@@ -503,8 +503,7 @@ Path B 是「**現在能用**」的 baseline。§J.3.e.X 是「**要更快才動
 ### Setup
 
 兩條 path 在同一硬體（RTX 3060 mobile / NVIDIA 596.84 driver）跑 720p
-60Hz Desktop streaming，同一 host (<host>)，60 秒
-steady-state。
+60Hz Desktop streaming，同一 LAN streaming host，60 秒 steady-state。
 
 | Setup | 環境變數 | --fruc-backend |
 |---|---|---|
