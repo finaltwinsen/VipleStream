@@ -22,6 +22,7 @@
 // sharing (fundamentally unsupported on most drivers).
 
 #include "directmlfruc.h"
+#include "modelfetcher.h"
 #include "path.h"
 
 #include <SDL.h>
@@ -1490,13 +1491,33 @@ bool DirectMLFRUC::runDMLDispatch()
 
 bool DirectMLFRUC::tryLoadOnnxModel()
 {
+    // §G.4 — model lookup order (release zip no longer ships the .onnx files):
+    //   1. Path::getDataFilePath  — exe dir / install / portable / Qt resource;
+    //                                covers dev builds where the .onnx still
+    //                                sits next to the binary.
+    //   2. ModelFetcher cache      — %LOCALAPPDATA%\VipleStream\fruc_models\;
+    //                                blocking download from GitHub release on
+    //                                first use, sha-256 verified, retried once.
+    // If both miss, fall through to the inline DML blend graph (existing
+    // behaviour pre-§G.4) so the user still gets a working — if non-RIFE —
+    // FRUC chain rather than a startup error.
     QString modelPath = Path::getDataFilePath(QString::fromStdString(m_ModelFilename));
     if (modelPath.isEmpty() || !QFileInfo::exists(modelPath)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] No %s at '%s' — using inline DML graph.",
-                    m_ModelFilename.c_str(),
-                    modelPath.isEmpty() ? "(data dir)" : qPrintable(modelPath));
-        return false;
+                    "[VIPLE-FRUC] %s not found in install/data dirs; "
+                    "checking on-demand model cache (will download if absent)",
+                    m_ModelFilename.c_str());
+        modelPath = ModelFetcher::ensureModelPath(QString::fromStdString(m_ModelFilename));
+        if (modelPath.isEmpty()) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] %s unavailable (cache + download both failed) "
+                        "— using inline DML graph.",
+                        m_ModelFilename.c_str());
+            return false;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] %s resolved via cache/download → %s",
+                    m_ModelFilename.c_str(), qPrintable(modelPath));
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-FRUC] Loading ONNX model: %s", m_ModelFilename.c_str());

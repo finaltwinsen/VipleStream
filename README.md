@@ -2,7 +2,7 @@
 
 A self-hosted game-streaming stack — a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients) with built-in NAT traversal, AI frame interpolation, Steam library auto-import, and a Traditional Chinese UI. Wire-protocol-compatible with vanilla Sunshine / Moonlight so VipleStream and upstream installs interoperate.
 
-> **Current version:** 1.3.310 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
+> **Current version:** 1.3.312 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
 
 Project home: <https://github.com/finaltwinsen/VipleStream>
 
@@ -322,6 +322,7 @@ The release zips in `release/` can be extracted directly on the same machine or 
 
 | Version | Changes |
 |---|---|
+| **1.3.311–312** | §G.4 DirectML ONNX model on-demand download — `fruc.onnx` (22 MB) + `fruc_fp16.onnx` (11 MB) + `fruc_ifrnet_s.onnx` (5.5 MB) 不再隨 release zip 出貨 (zip 132 → 102 MB)，DirectML backend 第一次 init 時透過 `ModelFetcher` 從 GitHub release v1.3.310 attached assets 動態下載到 `%LOCALAPPDATA%\VipleStream\fruc_models\` 並 SHA-256 verify，失敗 retry 一次後 fallback 既有 inline DML blend graph |
 | **1.3.295–310** | §J.3.e.2.i.8 Phase 1.6 NVIDIA Aftermath SDK 整合 + standalone `.nv-gpudmp` decoder CLI；Phase 1.7 五個變體確認 NV driver 596.36 對 native VK_KHR_video_decode + ONLY mode 有結構性 bug，**Vulkan renderer 改實驗性 / 預設 Direct3D 11**；AMD Vega 10 ycbcr descriptor pool sizing dynamic query；Sunshine Web UI brand consistency 收尾（HTTP Basic auth realm rebrand + 19 locales i18n bulk replace 1270 處）；SSH-based 一鍵 deploy server zip 到 streaming host |
 | **1.3.250–294** | §J.3.e.2.i.8 Phase 1.x H.265 + Phase 2 H.264 + Phase 3 AV1 native VK_KHR_video_decode：NvVideoParser + VkVideoSessionKHR + DPB pool + cross-queue timeline semaphore；84 fps PARALLEL stable / 5000+ frame ZERO device-lost；FRUC NV12 source 整合 native decode (per-slot buffer 修 WAW race) |
 | **1.3.40–249** | NCNN-Vulkan FRUC backend (cross-vendor RIFE)；custom-built ncnn 20220729 with pack8 + rife.Warp custom layer registered at runtime；CPU-staging submitFrame (Phase A.5) ~30ms staging overhead，Phase B shared-texture 因 NV 596.84 driver `D3D11_TEXTURE_BIT` reject 而轉向 §J native Vulkan |

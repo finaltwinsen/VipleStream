@@ -19,7 +19,7 @@
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) — 解 NCNN-Vulkan shared path | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
 | **Done / partial** | **§A.6 / §C / §D / §E** brand consistency 收工 | A.6/C 已 ship；D HelpLauncher URL 已指 finaltwinsen/VipleStream README，等正式 docs；E themed icon 自 v1.2.36 已 wire |
 | **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |
-| **Low** | **§G.1 / §G.4** RIFE v1 11-channel / 模型下載管理 | A1000 launch overhead bound（§G.3 negative result）；RTX 30/40+ 才有意義 |
+| **Low** | **§G.1** RIFE v1 11-channel | A1000 launch overhead bound（§G.3 negative result）；RTX 30/40+ 才有意義（§G.4 已 ship at v1.3.311–312）|
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
 | **Won't fix** | **§A.7** Wire-protocol 字串 | 動了等於跟 Moonlight 生態斷線，違背「混搭互聯」設計 |
 
@@ -152,8 +152,13 @@ DirectML auto-cascade（v1.2.91）已經把「中低階 GPU 跑 DML 會掉幀」
 
 ### §G.4 模型下載管理
 
-**動機：** `fruc.onnx` 22 MB 跟 release zip 一起出。多數 NVIDIA user 用 NvOF / Generic，DML 是少數派。
-**做法：** Moonlight 第一次選 DML 時跳「下載 22 MB」dialog，model 放 `%LOCALAPPDATA%\VipleStream\fruc_models\`。低優先度。
+**狀態：** ✅ 已於 v1.3.311–312 ship — `moonlight-qt/.../modelfetcher.{h,cpp}`
+new ~250 LOC class，DirectMLFRUC::tryLoadOnnxModel() 找不到 install/data
+copy 時觸發 ModelFetcher::ensureModelPath()，從 GitHub release v1.3.310
+attached assets 同步下載到 `%LOCALAPPDATA%\VipleStream\fruc_models\`，
+SHA-256 verify、失敗 retry 一次。Release zip 132 → 102 MB（少 30 MB 對應
+fruc.onnx + fruc_fp16.onnx）。Build script 拿掉 onnx copy block。實機驗
+過 dev 機 NV laptop 走 D3D11+DML cascade 觸發兩次下載 + verify 成功。
 
 ### 已就位的診斷工具
 

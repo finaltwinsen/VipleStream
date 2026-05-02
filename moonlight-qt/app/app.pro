@@ -471,6 +471,7 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/nvofruc.cpp \
         streaming/video/ffmpeg-renderers/genericfruc.cpp \
         streaming/video/ffmpeg-renderers/directmlfruc.cpp \
+        streaming/video/ffmpeg-renderers/modelfetcher.cpp \
         streaming/video/ffmpeg-renderers/ncnnfruc.cpp \
         streaming/video/ffmpeg-renderers/ncnn_rife_warp.cpp \
         streaming/video/ffmpeg-renderers/vulkanvideo.cpp \
@@ -482,6 +483,7 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/nvofruc.h \
         streaming/video/ffmpeg-renderers/genericfruc.h \
         streaming/video/ffmpeg-renderers/directmlfruc.h \
+        streaming/video/ffmpeg-renderers/modelfetcher.h \
         streaming/video/ffmpeg-renderers/ncnnfruc.h \
         streaming/video/ffmpeg-renderers/ncnn_rife_warp.h \
         streaming/video/ffmpeg-renderers/vulkanvideo.h \
