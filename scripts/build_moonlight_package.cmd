@@ -21,10 +21,25 @@ setlocal enabledelayedexpansion
 
 :: ---- 1. Clean staging ----
 echo [pkg 1/5] Collecting deploy files to %TEMP_DIR%
-if exist "%TEMP_DIR%" rmdir /s /q "%TEMP_DIR%"
+if exist "%TEMP_DIR%" (
+    rmdir /s /q "%TEMP_DIR%"
+    if exist "%TEMP_DIR%" (
+        echo [ERROR] Failed to remove %TEMP_DIR%
+        echo         Likely a zombie VipleStream.exe is holding files.
+        echo         Run: taskkill /F /IM VipleStream.exe ^&^& reboot if needed.
+        exit /b 2
+    )
+)
 mkdir "%TEMP_DIR%"
 
 copy /y "%RELDIR%\VipleStream.exe" "%TEMP_DIR%\" >nul
+if errorlevel 1 (
+    echo [ERROR] Failed to copy VipleStream.exe into %TEMP_DIR%
+    echo         Source : %RELDIR%\VipleStream.exe
+    echo         If staging dir wasn't cleaned, the old exe was kept and
+    echo         the resulting zip / temp\moonlight binary will be STALE.
+    exit /b 2
+)
 echo   VipleStream.exe
 
 set "ANTIHOOK=%SRC%\AntiHooking\release\AntiHooking.dll"

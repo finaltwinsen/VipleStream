@@ -3442,32 +3442,76 @@ bool VkFrucRenderer::createDescriptorPool()
         return false;
     }
 
-    // §J.3.e.2.i.3.e (v1.3.303 AMD fix) — descriptor pool sizing for ycbcr
-    // immutable sampler.
+    // §J.3.e.2.i.3.e (v1.3.304 AMD fix v2) — descriptor pool sizing for
+    // ycbcr immutable sampler, *driver-queried* multiplier.
     //
-    // NVIDIA driver counts an immutable ycbcr sampler descriptor as 1
-    // pool slot regardless of the underlying format's plane count, so we
-    // historically used `descriptorCount = kFrucFramesInFlight` and it
-    // worked.  AMD Mesa / AMDVLK on Vega 10 (and likely other AMD parts)
-    // count it as plane-count slots — NV12 is 2 planes so each set eats
-    // 2 pool slots, and our previous size of 2 only fit 1 set out of 2.
-    // vkAllocateDescriptorSets returned `VK_ERROR_OUT_OF_POOL_MEMORY`
-    // and the entire VkFrucRenderer init failed (see VipleStream-1777705461.log
-    // line 44 from a Ryzen + Vega 10 test machine).
+    // History:
+    //   v1.3.303: ×4 hard-coded over-provision (assumed plane-count + headroom)
+    //             — failed on AMD Vega 10 again (Ryzen log 1777706526.log
+    //             still hits vkAllocateDescriptorSets failed at line 43).
+    //   v1.3.304: query the actual count via vkGetPhysicalDeviceImage-
+    //             FormatProperties2 + VkSamplerYcbcrConversionImage-
+    //             FormatProperties::combinedImageSamplerDescriptorCount.
     //
-    // Spec ref VkSamplerYcbcrConversionImageFormatProperties::
-    // combinedImageSamplerDescriptorCount: drivers report how many
-    // descriptors a ycbcr sampler binding needs; we don't query it here
-    // (the fast path is over-provision since pool memory is tiny — a few
-    // KB at most) and just over-allocate by ×4.  That covers up to a
-    // 4-plane format (none in our pipeline today) plus headroom on
-    // drivers that take ×3 for some 3-plane variants.
+    // Spec rationale (Vulkan §14.2.1):
+    //   "When using a VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER with a
+    //    sampler that uses Y'CBCR conversion, the driver may consume
+    //    `combinedImageSamplerDescriptorCount` pool descriptors for each
+    //    descriptor in the set."
     //
-    // maxSets stays at kFrucFramesInFlight: still N descriptor sets, each
-    // with 1 binding.  Only the per-binding pool-slot count changes.
+    // NV reports 1 (so ×1 always worked).  AMD reports up to 6 on some
+    // multi-plane pixel formats (driver-internal storage of plane views +
+    // mip / sampler caches).  Querying gives the actual number; we pick
+    // a conservative fallback of 8 if the query fails (max we've seen on
+    // any driver report is 4–6).
+    // Default: brute-force over-provision.  Try driver query first to get
+    // the exact number, but fall back to a generous static value so we
+    // never under-size on drivers where the PFN resolve doesn't surface.
+    uint32_t ycbcrDescCount = 16;  // generous static fallback
+    bool     queryHit       = false;
+    auto pfnGetPDIFP2 = (PFN_vkGetPhysicalDeviceImageFormatProperties2)
+        m_pfnGetInstanceProcAddr(m_Instance, "vkGetPhysicalDeviceImageFormatProperties2");
+    if (!pfnGetPDIFP2) {
+        pfnGetPDIFP2 = (PFN_vkGetPhysicalDeviceImageFormatProperties2)
+            m_pfnGetInstanceProcAddr(m_Instance, "vkGetPhysicalDeviceImageFormatProperties2KHR");
+    }
+    if (pfnGetPDIFP2 && m_PhysicalDevice != VK_NULL_HANDLE) {
+        VkSamplerYcbcrConversionImageFormatProperties ycbcrProps = {
+            VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES
+        };
+        VkImageFormatProperties2 ifp2 = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
+        ifp2.pNext = &ycbcrProps;
+        VkPhysicalDeviceImageFormatInfo2 ifInfo = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2
+        };
+        ifInfo.format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;  // NV12
+        ifInfo.type   = VK_IMAGE_TYPE_2D;
+        ifInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ifInfo.usage  = VK_IMAGE_USAGE_SAMPLED_BIT;
+        VkResult vr = pfnGetPDIFP2(m_PhysicalDevice, &ifInfo, &ifp2);
+        if (vr == VK_SUCCESS && ycbcrProps.combinedImageSamplerDescriptorCount > 0) {
+            // Pick the larger of driver-reported and our fallback so a
+            // driver that mis-reports a low value still gets enough pool.
+            uint32_t reported = ycbcrProps.combinedImageSamplerDescriptorCount;
+            ycbcrDescCount = (reported > ycbcrDescCount) ? reported : ycbcrDescCount;
+            queryHit = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.3.e driver-reported ycbcr "
+                        "combinedImageSamplerDescriptorCount=%u for NV12 — "
+                        "using effective multiplier %u",
+                        reported, ycbcrDescCount);
+        }
+    }
+    if (!queryHit) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.3.e ycbcr property query "
+                    "unavailable (pfn=%p) — using static multiplier %u",
+                    (void*)pfnGetPDIFP2, ycbcrDescCount);
+    }
+
     VkDescriptorPoolSize poolSize = {};
     poolSize.type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = kFrucFramesInFlight * 4;
+    poolSize.descriptorCount = kFrucFramesInFlight * ycbcrDescCount;
 
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
