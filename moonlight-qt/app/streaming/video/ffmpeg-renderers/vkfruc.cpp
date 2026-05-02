@@ -3365,14 +3365,6 @@ void VkFrucRenderer::destroyDecodeCommandResources()
     // free its referenced cmd buffer / fence.
     if (pfnDeviceWaitIdle) pfnDeviceWaitIdle(m_Device);
 
-    // §J.3.e.2.i.8 Phase 1.7 — release the held bitstream-buffer ref.  We
-    // just idled the device, so the destructor is now safe to fire
-    // vkDestroyBuffer / vkFreeMemory.  Doing this AFTER WaitIdle (rather
-    // than relying on member destruction order at ~VkFrucRenderer time)
-    // also covers the case where the renderer object outlives the Vulkan
-    // device (e.g. recreate-on-resize paths).
-    m_PrevDecodeBsBuf.reset();
-
     if (m_DecodeDoneSem  != VK_NULL_HANDLE && pfnDestroySemaphore)
         pfnDestroySemaphore(m_Device, m_DecodeDoneSem, nullptr);
     if (m_TimelineSem != VK_NULL_HANDLE && pfnDestroySemaphore)

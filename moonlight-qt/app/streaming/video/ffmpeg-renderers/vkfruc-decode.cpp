@@ -1012,12 +1012,6 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
 
     rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
     rt.ResetFences(m_Device, 1, &m_DecodeFence);
-
-    // §J.3.e.2.i.8 Phase 1.7 — see vkfruc.h m_PrevDecodeBsBuf comment.
-    // GPU is now drained for the previous decode; safe to release the
-    // bitstream buffer we pinned alive across that submit.
-    m_PrevDecodeBsBuf.reset();
-
     rt.ResetCommandBuffer(m_DecodeCmdBuf, 0);
 
     VkCommandBufferBeginInfo cbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -1288,11 +1282,6 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
     VkResult vr = rt.QueueSubmit(m_DecodeQueue, 1, &si, m_DecodeFence);
     if (vr == VK_SUCCESS) {
         m_LastDecodeValue.store(signalVal, std::memory_order_release);
-        // §J.3.e.2.i.8 Phase 1.7 — pin this frame's bitstream buffer alive
-        // until the next submitDecodeFrame*'s WaitForFences confirms the
-        // GPU has drained NVDEC.  Replaces the per-frame use-after-free
-        // race that the upstream parser's shared_ptr lifecycle introduced.
-        m_PrevDecodeBsBuf = bsBuf;
     }
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -1518,12 +1507,6 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
 
     rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
     rt.ResetFences(m_Device, 1, &m_DecodeFence);
-
-    // §J.3.e.2.i.8 Phase 1.7 — see vkfruc.h m_PrevDecodeBsBuf comment.
-    // GPU is now drained for the previous decode; safe to release the
-    // bitstream buffer we pinned alive across that submit.
-    m_PrevDecodeBsBuf.reset();
-
     rt.ResetCommandBuffer(m_DecodeCmdBuf, 0);
 
     VkCommandBufferBeginInfo cbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -1753,11 +1736,6 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
     VkResult vr = rt.QueueSubmit(m_DecodeQueue, 1, &si, m_DecodeFence);
     if (vr == VK_SUCCESS) {
         m_LastDecodeValue.store(signalVal, std::memory_order_release);
-        // §J.3.e.2.i.8 Phase 1.7 — pin this frame's bitstream buffer alive
-        // until the next submitDecodeFrame*'s WaitForFences confirms the
-        // GPU has drained NVDEC.  Replaces the per-frame use-after-free
-        // race that the upstream parser's shared_ptr lifecycle introduced.
-        m_PrevDecodeBsBuf = bsBuf;
     }
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -1923,14 +1901,6 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
     // Wait for previous decode submission to complete (single cmd buffer pattern).
     rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
     rt.ResetFences(m_Device, 1, &m_DecodeFence);
-
-    // §J.3.e.2.i.8 Phase 1.7 — previous decode is now GPU-complete.  Drop
-    // our hold on the previous frame's bitstream buffer; if no other ref
-    // exists, this fires the destructor → vkDestroyBuffer + vkFreeMemory,
-    // which is now safe (NVDEC can't still be reading it).  See vkfruc.h
-    // m_PrevDecodeBsBuf comment for the page-fault that motivated this.
-    m_PrevDecodeBsBuf.reset();
-
     rt.ResetCommandBuffer(m_DecodeCmdBuf, 0);
 
     VkCommandBufferBeginInfo cbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -2215,11 +2185,6 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
     VkResult vr = rt.QueueSubmit(m_DecodeQueue, 1, &si, m_DecodeFence);
     if (vr == VK_SUCCESS) {
         m_LastDecodeValue.store(signalVal, std::memory_order_release);
-        // §J.3.e.2.i.8 Phase 1.7 — pin this frame's bitstream buffer alive
-        // until the next submitDecodeFrame*'s WaitForFences confirms the
-        // GPU has drained NVDEC.  Replaces the per-frame use-after-free
-        // race that the upstream parser's shared_ptr lifecycle introduced.
-        m_PrevDecodeBsBuf = bsBuf;
     }
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
