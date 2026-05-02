@@ -305,6 +305,15 @@ private:
     // before sampling m_SwUploadImage.  Replaces the racey CPU-side
     // WaitForFences(m_DecodeFence) attempt that hit VUID-vkResetFences-pFences-01123
     // (renderFrameSw and submitDecodeFrame both touched the same fence).
+    // §J.3.e.2.i.8 Phase 1.5c-final — device-lost flag.  ONLY mode runs
+    // 24-57 sec then GPU goes into DEVICE_LOST silently (NV TDR or driver
+    // bug — root cause needs RenderDoc / Nsight to identify).  Once any
+    // call returns rc=-4 we set this flag; subsequent renderFrameSw /
+    // submitDecodeFrame* early-return without trying any Vulkan call.
+    // Stops the cascade of validation errors and prevents log spam.  User
+    // sees frozen frame; restart the stream to recover (proper device
+    // recreate is future work).
+    std::atomic<bool>     m_DeviceLost {false};
     VkSemaphore           m_TimelineSem      = VK_NULL_HANDLE;
     std::atomic<uint64_t> m_TimelineNext     {1};   // next value to allocate
     std::atomic<uint64_t> m_LastDecodeValue  {0};   // last value signaled by decode

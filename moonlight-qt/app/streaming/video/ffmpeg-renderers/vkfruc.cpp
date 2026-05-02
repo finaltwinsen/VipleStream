@@ -5012,8 +5012,31 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     // ---- 2/3. Slot rotation, fence wait/reset, swapchain acquire ----
     uint32_t slot = m_CurrentSlot;
     m_CurrentSlot = (m_CurrentSlot + 1) % kFrucFramesInFlight;
-    m_RtPfn.WaitForFences(m_Device, 1, &m_SlotInFlightFence[slot], VK_TRUE, UINT64_MAX);
-    m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);
+    // §J.3.e.2.i.8 Phase 1.5c-final — early-out if previous call detected
+    // device-lost.  ONLY mode at high submission rate triggers GPU TDR
+    // / driver hang after 24-57 sec on NV 596.84.  Without this gate we'd
+    // cascade through hundreds of VUID errors per second.
+    if (m_DeviceLost.load(std::memory_order_acquire)) {
+        return;
+    }
+    {
+        VkResult wfRes = m_RtPfn.WaitForFences(m_Device, 1, &m_SlotInFlightFence[slot], VK_TRUE, UINT64_MAX);
+        if (wfRes != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC-SW] §J.3.e.2.i.8 1.5c — WaitForFences slot=%u rc=%d (device lost) — disabling native path",
+                         slot, (int)wfRes);
+            m_DeviceLost.store(true, std::memory_order_release);
+            return;
+        }
+        VkResult rfRes = m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);
+        if (rfRes != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC-SW] §J.3.e.2.i.8 1.5c — ResetFences slot=%u rc=%d (device lost) — disabling native path",
+                         slot, (int)rfRes);
+            m_DeviceLost.store(true, std::memory_order_release);
+            return;
+        }
+    }
 
     // Acquire 1 (real) image for single mode, or 2 (interp + real) for dual.
     uint32_t imgIdxA = 0;  // interp slot (only used in dual mode)
@@ -5362,7 +5385,8 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         }
         if (vr != VK_SUCCESS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC-SW] dual: vkQueueSubmit failed (%d)", (int)vr);
+                         "[VIPLE-VKFRUC-SW] dual: vkQueueSubmit failed (%d) — disabling native path", (int)vr);
+            if (vr == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
             return;
         }
         // §J.3.e.2.i.8 Phase 1.5c — publish gfx timeline value so decode-thread
@@ -5434,7 +5458,8 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         }
         if (vr != VK_SUCCESS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC-SW] vkQueueSubmit failed (%d)", (int)vr);
+                         "[VIPLE-VKFRUC-SW] vkQueueSubmit failed (%d) — disabling native path", (int)vr);
+            if (vr == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
             return;
         }
         // §J.3.e.2.i.8 Phase 1.5c — see dual-mode comment above.

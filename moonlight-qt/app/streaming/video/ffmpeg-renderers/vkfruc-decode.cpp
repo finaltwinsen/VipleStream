@@ -821,6 +821,12 @@ bool VkFrucRenderer::loadDecodeRtPfns()
 
 bool VkFrucRenderer::submitDecodeFrame(VkParserPictureData* ppd)
 {
+    // §J.3.e.2.i.8 Phase 1.5c-final — graceful early-out once device-lost
+    // detected.  Avoids cascading rc=-4 spam after first detection.
+    if (m_DeviceLost.load(std::memory_order_acquire)) {
+        m_DecodeSkipCount++;
+        return false;
+    }
     if (!ppd || !m_DpbReady || !m_DecodeCmdReady
         || m_VideoSession == VK_NULL_HANDLE
         || m_VideoSessionParams == VK_NULL_HANDLE) {
@@ -1279,7 +1285,8 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
     }
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3b.2b vkQueueSubmit(AV1) rc=%d", (int)vr);
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3b.2b vkQueueSubmit(AV1) rc=%d — disabling native path", (int)vr);
+        if (vr == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
         m_DecodeSkipCount++;
         return false;
     }
@@ -1732,7 +1739,8 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
     }
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2 vkQueueSubmit(H.264) rc=%d", (int)vr);
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2 vkQueueSubmit(H.264) rc=%d — disabling native path", (int)vr);
+        if (vr == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
         m_DecodeSkipCount++;
         return false;
     }
@@ -2180,7 +2188,8 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
     }
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d vkQueueSubmit rc=%d", (int)vr);
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d vkQueueSubmit rc=%d — disabling native path", (int)vr);
+        if (vr == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
         m_DecodeSkipCount++;
         return false;
     }
