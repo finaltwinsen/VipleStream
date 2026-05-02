@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <map>
+#include <memory>
 #include <vector>
 
 // §J.3.e.2.i.8 Phase 1.1d — forward decl from nvvideoparser; full def lives in
@@ -28,6 +29,12 @@
 // and is only pulled in by vkfruc-decode.cpp (keeps vkfruc.cpp's #include set
 // from ballooning).
 class StdVideoPictureParametersSet;
+
+// §J.3.e.2.i.8 Phase 1.7 — forward decl for the bitstream-buffer hold.
+// Full def in 3rdparty/nvvideoparser/include/VkCodecUtils/VulkanBitstreamBuffer.h.
+// VkSharedBaseObj<T> is `using ... = std::shared_ptr<T>;` so std::shared_ptr
+// against the forward decl works.
+class VulkanBitstreamBuffer;
 
 class VkFrucRenderer : public IFFmpegRenderer {
 public:
@@ -323,6 +330,28 @@ private:
     bool            m_DecodeNeedsReset  = true;
     uint64_t        m_DecodeSubmitCount = 0;
     uint64_t        m_DecodeSkipCount   = 0;
+
+    // §J.3.e.2.i.8 Phase 1.7 — fence-pinned bitstream buffer hold.
+    //
+    // The parser's `VkParserPictureData::bitstreamData` is a shared_ptr that
+    // upstream releases as soon as our `submitDecodeFrame*` returns.  When
+    // its refcount hits zero, the destructor calls `vkDestroyBuffer` /
+    // `vkFreeMemory` on the GPU buffer that NVDEC is still draining
+    // asynchronously — that's what produces the `Error_DMA_PageFault` on
+    // NVDEC reads we caught with Aftermath in v1.3.298 (see
+    // tools/aftermath_decode/DIAGNOSIS-1777691647.md).
+    //
+    // Hold our own strong reference to the most-recently-submitted
+    // bitstream buffer.  The hold is released at the top of the NEXT
+    // submitDecodeFrame*, AFTER `WaitForFences(m_DecodeFence)` confirms
+    // the previous decode's GPU work has fully drained.  At that moment,
+    // it is safe for the destructor to fire `vkDestroyBuffer` because no
+    // GPU operation can still be reading the buffer.
+    //
+    // Cost: one extra in-flight bsBuf alive at any time (≈1.2 MB at
+    // current bitrates).  The single-decode-in-flight serial submit
+    // pattern means this is sufficient — no ring needed.
+    std::shared_ptr<VulkanBitstreamBuffer> m_PrevDecodeBsBuf;
 
     // §J.3.e.2.i.8 Phase 1.3d — record + submit one decode frame.  Called from
     // VkFrucDecodeClient::DecodePicture callback.  Returns true if submitted,
