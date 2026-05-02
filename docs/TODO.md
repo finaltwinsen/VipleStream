@@ -17,7 +17,7 @@
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | v1.3.275 H.264 native ship 後 dual-present 3-4 Hz blur/sharp；v1.3.276/277 per-slot buffer 改善大半，殘留小 race 等 Phase J.5 整體切換 Vulkan 才補完整 |
 | **Medium-High** | **§I.D** Android Vulkan FRUC async compute | C.5.b 量到 dual-present + waitIdle thermal regression；async compute queue 是真正解 |
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) — 解 NCNN-Vulkan shared path | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
-| **Low** | **§D** wiki 連結 | 等 VipleStream 自己有 docs 才能換 (§A.6 已 ship at v1.3.309；§C 已 ship at v1.3.310；§E 部分 ship — themed icon 自 v1.2.36 已 wire) |
+| **Done / partial** | **§A.6 / §C / §D / §E** brand consistency 收工 | A.6/C 已 ship；D HelpLauncher URL 已指 finaltwinsen/VipleStream README，等正式 docs；E themed icon 自 v1.2.36 已 wire |
 | **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |
 | **Low** | **§G.1 / §G.4** RIFE v1 11-channel / 模型下載管理 | A1000 launch overhead bound（§G.3 negative result）；RTX 30/40+ 才有意義 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
@@ -93,9 +93,14 @@ bulk replace。en.json / zh_TW.json / en_US.json 自 v1.2.43 起就已 sync。
 
 ## §D. 上游 wiki 連結
 
-**目前：** `moonlight-android/.../HelpLauncher.java` 的 setup guide / troubleshooting 指 `finaltwinsen/VipleStream#readme`；GameStream EOL FAQ 仍指上游。
+**狀態：** 🟡 部分 ship — `moonlight-android/.../HelpLauncher.java` 的
+setup guide + troubleshooting 已改指 `https://github.com/finaltwinsen/
+VipleStream#readme`（GitHub README 當文件入口）；GameStream EOL FAQ 維持
+upstream `moonlight-stream/moonlight-docs` wiki（這個是 NVIDIA-side 議題，
+跟我們無關）。
 
-**要做：** VipleStream 自己的 docs（setup guide、troubleshooting、錯誤碼表）有實際內容後，HelpLauncher URL 換成 VipleStream 自己的 docs。
+**還沒做：** 等 VipleStream 自己有結構化 setup guide / troubleshooting /
+錯誤碼表時，把 HelpLauncher URL 從 README 換成那些頁面 anchor。
 
 ---
 
