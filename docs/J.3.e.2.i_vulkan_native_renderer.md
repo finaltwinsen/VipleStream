@@ -419,3 +419,124 @@ vkCmdEndVideoCodingKHR
    （`#include <h264_stream.h>` 已在 ffmpeg.cpp 第 7 行）
 
 實作工作排在 §J.3.e.2.i.8.* sub-phase，超出單 session 範圍.
+
+---
+
+## §J.3.e.2.i.8 Epilogue — Phase 1.6 / 1.7 系列收網（v1.3.295 ~ v1.3.308）
+
+§J.3.e.2.i.8 Phase 1.x H.265 native 路徑 v1.3.251 ship 之後，**ONLY mode**
+（`VIPLE_VKFRUC_NATIVE_DECODE_ONLY=1`，synth-frame Pacer drive）有個一直
+無法解的痛點：跑 24~78 秒就會 NVDEC device-lost，validation layer 抓不
+到，driver-internal NVDEC engine fault。Phase 1.5c-final（v1.3.295）先
+補 graceful degrade（rc=-4 後 set m_DeviceLost flag、後續 render/decode
+早 return、停 cascade noise）；接著 Phase 1.6 / 1.7 系列為**真正修 root
+cause** 的努力跟最終放棄。
+
+### Phase 1.6 — NVIDIA Nsight Aftermath SDK 整合（v1.3.298, 7cb4fb4）
+
+**動機：** validation layer 看不到 NVDEC engine 內部，需要 driver-side
+crash dump 機制。
+
+**做法：**
+- `moonlight-qt/3rdparty/aftermath_sdk/` 收 NV Nsight Aftermath SDK 1.6
+  （EULA 限制 redistribution，`.gitignore` 排除）
+- `vkfruc-aftermath.{h,cpp}` singleton：第一次建 instance 前呼
+  `GFSDK_Aftermath_EnableGpuCrashDumps`；callback 把 dump bytes 寫到
+  `%TEMP%\VipleStream-aftermath-<ts>.nv-gpudmp`
+- `vkfruc.cpp::createLogicalDevice` 偵測 Aftermath active 時 push
+  `VK_NV_DEVICE_DIAGNOSTICS_CONFIG` + `VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS`
+  ext，把 `VkDeviceDiagnosticsConfigCreateInfoNV`（shader debug info /
+  resource tracking / automatic checkpoints）chain 進 `dci.pNext`
+- `app.pro` 偵測 SDK 存在才 link，CI / 沒裝 SDK 的開發者 build 仍能跑
+- `tools/aftermath_decode/` standalone CLI：呼
+  `GFSDK_Aftermath_GpuCrashDump_CreateDecoder` + `GenerateJSON(ALL_INFO)`
+  把 `.nv-gpudmp` 轉成可讀 JSON，免裝 Nsight Graphics GUI 也能快速看
+  page fault / device state
+
+**第一發 dump（`1777691647.nv-gpudmp` 142932 bytes）解出根因候選：**
+
+```
+Device state    : Error_DMA_PageFault
+Engine          : Video Decoder (NVDEC)
+Access          : Read
+Faulting GPU VA : 0x351200200
+Resource        : 1D buffer, size 1207568 (~1.15 MB), Destroyed=false
+Resources hist  : 180 1D buffer entries，179 個 Destroyed=true，
+                  GPU VA 連續滑動 0x350D80000 → 0x351200200，
+                  ~10 個 unique handle 在輪替
+```
+
+當時假設：parser 內部 ring 自然釋放 bsBuf shared_ptr 後，host vkDestroyBuffer
+跟 NVDEC 仍在 deferred 讀 buffer 之間 race。修法目標：延長 bsBuf lifetime。
+
+### Phase 1.7 — 五個變體輪流嘗試，全失敗
+
+| Phase | 改動 | 結果 |
+|---|---|---|
+| **1.7a** v1.3.299 (5a7c9ff) | hold 上一幀 bsBuf shared_ptr，next submit 入口 reset | **4 frames 必死** ── 不是好轉，是嚴重 regression |
+| **1.7b A** stash drop | hold-forever ring N=16，永遠不主動 destroy | **4 frames 必死** |
+| **1.7c** v1.3.301 (fdbbf8c) | 加 `HOST_BIT/HOST_WRITE_BIT` → `VIDEO_DECODE_BIT_KHR/VIDEO_DECODE_READ_BIT_KHR` buffer memory barrier 在 vkCmdDecodeVideoKHR 之前；抄自 NV vk_video_samples 的 reference pattern | **4 frames 必死**，dump pattern 變 (17→72 KB resource list) 但 device-lost 仍發生 |
+| **1.7d** stash drop | pool of N=16 pre-allocated VkBuffer + grow on demand；抄自 vk_video_samples `m_decodeFramesData.GetBitstreamBuffersQueue()` | **4 frames 必死** |
+| **1.7e** v1.3.302 (029937c) | 上面四個都不修，rename `VIPLE_VKFRUC_NATIVE_DECODE_ONLY` → `*_DANGEROUS` 強迫舊 `setx` 失效，預設 PARALLEL mode | ✅ PARALLEL mode 真穩定 |
+
+**關鍵觀察：** v1.3.298 (per-frame Create+Destroy, no barrier) 是已知最久
+撐到 24-78s；任何「客戶端延長 bsBuf lifetime」的嘗試都讓 device-lost 從
+「24~78s 偶發」變「4 frames 必發」。Pool reuse 加 barrier ── 抄完整
+vk_video_samples pattern ── 也壞。
+
+**結論：** 不是客戶端 use-after-free 也不是 missing barrier，是 NV driver
+596.36 對 native VK_KHR_video_decode + ONLY mode 的內部 NVDEC engine 有
+結構性 bug，從應用層繞不過。Phase 1.7c 的 buffer barrier 是 spec-correct
+的補強，留在 source；Phase 1.7e 的 env rename 是 user-protection。
+
+### Phase 1.7c stale-binary 事故（v1.3.299 ~ v1.3.306）
+
+`scripts/build_moonlight_package.cmd` 的 staging step 之前**沒**檢查
+errorlevel ── 如果 zombie `VipleStream.exe` process 卡住 file lock：
+
+- `rmdir /s /q "%TEMP_DIR%"` 無聲失敗
+- `mkdir "%TEMP_DIR%"` 失敗（dir 已在）
+- `copy /y "%RELDIR%\VipleStream.exe" "%TEMP_DIR%\"` 無聲失敗
+- 但 build 仍繼續打 zip（zip source 是 `%TEMP_DIR%\*`）
+
+結果：v1.3.299 ~ v1.3.306 連續 8 個 release zip 內含的全是 2026-05-02
+11:05:11 那次 build 的**同一份** `VipleStream.exe`，只有 metadata 版號
+不同。Phase 1.7c barrier、1.7e env rename、v1.3.303 ycbcr ×4 等的「smoke
+pass」/「stream test 95s 0 dumps」全跑同一個過時 binary，沒驗到任何源碼
+改動。事後 reboot 清 zombie + 加 errorlevel guard 後（v1.3.307 5183cee）
+才真正驗到 Phase 1.7 系列源碼改動的真實行為。教訓進「不可動的鐵律 #5」。
+
+### AMD Vega 10 ycbcr descriptor pool sizing（v1.3.303~307）
+
+VipleStream 在 AMD Vega 10 (Ryzen iGPU) 走到 `createDescriptorPool()` 的
+`vkAllocateDescriptorSets` 就 `VK_ERROR_OUT_OF_POOL_MEMORY`，整個
+`VkFrucRenderer init failed`。原因：AMD driver 對 ycbcr immutable sampler
+在 NV12 (2 plane) 下視為多個 pool descriptor，我們之前 `poolSize.descriptorCount =
+kFrucFramesInFlight = 2` 不夠，第二個 set alloc 失敗。NV driver 對 ycbcr
+寬鬆計 1 個，所以開發機從沒撞到。
+
+修法（v1.3.307）：動態查 `VkSamplerYcbcrConversionImageFormatProperties::
+combinedImageSamplerDescriptorCount` via `vkGetPhysicalDeviceImageFormat
+Properties2` (1.1 core) + `*KHR` 後綴 fallback；pool size = `kFrucFramesInFlight
+× max(reported, 16)`。即使 driver 報 0 / PFN resolve 不到也保 ×16
+over-provision。NV 端 query 報 1 → effective 16；AMD 端 query 報的若 ≤ 16
+都 cover 得到。
+
+### Vulkan 降級為實驗性（v1.3.308, 2a892e7）
+
+考量 (a) NV 596.36 ONLY mode bug 無解、(b) AMD 整合顯卡邊界情況、(c)
+PARALLEL+SW upload 路徑 80+ ms/frame perf 限制、(d) 上游 D3D11+DXVA
+是穩定多年的路徑且 FRUC backend 選擇更廣，把 `RendererSelection` 預設
+從 `RS_VULKAN` 改 `RS_D3D11`，GUI dropdown 把 D3D11 放第一、Vulkan 標
+[實驗性] + ToolTip 詳述已知問題。enum 值不動（`RS_VULKAN=0 / RS_D3D11=1`）
+保 QSettings backwards-compat ── 既有 user 之前 manual 選過 Vulkan 的設定
+不被改動，仍依個人選擇。
+
+### 後續還活著的觸發條件
+
+- NV driver 升級（596.36 → 597.x+）後 retest ONLY mode device-lost
+- vk_video_samples reference client binary 拿到、在同 driver / 同硬體跑：
+  - 如果 NV sample 也 24~78s 必死 → 確認 driver bug，等 fix
+  - 如果 NV sample 穩定 → 我們 client 的 sync pattern 還有 diff 沒抄到
+- Phase 3d.6 AV1 grey 同樣等 RenderDoc + NV sample diff
+

@@ -12,12 +12,12 @@
 
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
-| **High** | **§J.3.e.2.i.8** Phase 3d.5 — AV1 native decode GPU-side grey 診斷 | 9 個 parser/picture-info bug 修了仍 grey；剩 driver-level，需 validation layer 或 vk_video_samples 對比 |
-| **High (in progress)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | v1.3.275 H.264 native ship 後發現 FRUC 從 m_SwStagingBuffer (FFmpeg SW)、real frame 從 m_SwUploadImage (native) 兩條 pipeline source 不對稱 → dual-present 3-4 Hz blur/sharp。v1.3.276 image→buffer copy + descset 切換改善但有 WAW race；v1.3.277 per-slot buffer 修，runtime 驗證中 |
+| **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 3d.6 — AV1 native decode GPU-side grey | 9 個 parser bug 修完仍 grey；NV driver 596.36 + AV1 vkCmdDecodeVideoKHR 黑/灰畫面，需 RenderDoc + vk_video_samples client diff，目前 AV1 預設走 libdav1d SW 不擋使用 |
+| **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 1.7 ONLY-mode NVDEC device-lost | v1.3.298~301 五個變體（fence-pin / hold-ring / pool-reuse / barrier）都無法繞過，NV driver 596.36 對 native VK_KHR_video_decode 內部 NVDEC 有結構性 bug；v1.3.302 把 `*_ONLY` env rename 成 `*_ONLY_DANGEROUS` 強迫舊 `setx` 失效，預設 PARALLEL mode 穩 |
+| **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | v1.3.275 H.264 native ship 後 dual-present 3-4 Hz blur/sharp；v1.3.276/277 per-slot buffer 改善大半，殘留小 race 等 Phase J.5 整體切換 Vulkan 才補完整 |
 | **Medium-High** | **§I.D** Android Vulkan FRUC async compute | C.5.b 量到 dual-present + waitIdle thermal regression；async compute queue 是真正解 |
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) — 解 NCNN-Vulkan shared path | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
 | **Medium** | **§A.1 + A.11** QSettings org / ini 遷移 | 升級 v1.2.43 起使用者設定看起來像 reset；migration 寫好且測試後再動 |
-| **Medium** | **§J.3.e.2.i.8** Phase 1.5c — ONLY mode swapchain depth | 第二個 env var 開的 sole-decoder 模式 swapchain over-acquire；不影響預設 PARALLEL |
 | **Medium-Low** | **§A.6** HTTP Basic auth realm | 改了使用者要重登 Web UI；併進其他改動才划算 |
 | **Low** | **§C / §D / §E** 其他語系 / wiki 連結 / Android themed icon | 純品牌 / 視覺一致性 |
 | **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |
@@ -209,11 +209,19 @@ DirectML auto-cascade（v1.2.91）已經把「中低階 GPU 跑 DML 會掉幀」
 |---|---|---|
 | **§J.3.e.2.i.1-7** Init / device / swapchain / FFmpeg-Vulkan bridge / ext probe | Vulkan device + swapchain + FFmpeg AVHWDeviceContext + RGB upload pipeline 全套 | ✅ ship |
 | **§J.3.e.2.i.8 Phase 1.x** H.265 native VK_KHR_video_decode | NvVideoParser + VkVideoSessionKHR + DPB pool + vkCmdDecodeVideoKHR + cross-queue timeline sem | ✅ v1.3.251（84.78 fps PARALLEL stable，5000+ frame ZERO device-lost）|
-| **§J.3.e.2.i.8 Phase 1.5c** ONLY mode swapchain depth | `VIPLE_VKFRUC_NATIVE_DECODE_ONLY=1` 跳過 FFmpeg、純 native 驅動 Pacer。Synth-frame submission rate 高 → swapchain over-acquire (`VUID-vkAcquireNextImageKHR-surface-07783`) | 🟡 deferred — 預設 PARALLEL mode 不受影響；要修需 Pacer integration / swapchain depth bump |
-| **§J.3.e.2.i.8 Phase 2** H.264 native VK decode port | nvvideoparser 把 H264 sources 加進來、createNvVideoParser + DecodePicture H.264 dispatch、onH264PictureParametersFromParser SPS/PPS 增量上傳、submitDecodeFrameH264 (DPB iterate dpb[17] / 自 alloc StdVideoDecodeH264ReferenceInfo / flat picture-info)、移除過度保守的 intra_pic_flag RESET trigger | ✅ v1.3.275 — H.264 stream 走 native VK_KHR_video_decode，VIPLE_VKFRUC_NATIVE_DECODE=1 開啟 |
-| **§J.3.e.2.i.8 Phase 2.5** FRUC NV12 source 整合 native decode | dual-present 下 real frame 從 m_SwUploadImage (native VK decode 寫的) sample，但 FRUC 的 NV12→RGB compute 從 m_SwStagingBuffer (FFmpeg parallel SW decode 用 memcpy 寫的) 讀 → source asymmetry → 3-4 Hz blur/sharp flicker。修法：m_SwUploadImage 加 TRANSFER_SRC usage、graphics queue 在 renderFrameSw cmd buf 開頭做 image→buffer copy 進 m_SwFrucNv12Buf[slot]、FRUC binding 0 透過 m_FrucNv12RgbDescSetNative[slot] 改指這個 buffer、timeline sem wait stage 改 TRANSFER_BIT 涵蓋 copy | 🟡 in progress — v1.3.276 single-buffer 改善 (decode 41→31ms, drops 7.77→5.02%) 但有 WAW race 殘留偶爾模糊；v1.3.277 per-slot buffer + per-slot descset 修 race，runtime 驗證中 |
-| **§J.3.e.2.i.8 Phase 3** AV1 native VK decode | parser library 加 AV1 sources、createNvVideoParser AV1 路徑、submitDecodeFrameAv1 | ✅ source 全到位（v1.3.272），AV1 stream 走 FFmpeg libdav1d + Vulkan render @84fps，overlay 顯示精準 |
-| **§J.3.e.2.i.8 Phase 3d.5** AV1 native decode GPU-side grey 診斷 | 9 個 parser/picture-info real bug 修了仍吐 constant grey；剩下 driver-level 問題 | 🟡 阻塞 — 需 Vulkan validation layer (LunarG SDK) 或 vk_video_samples 上游 client 逐行 diff |
+| **§J.3.e.2.i.8 Phase 1.5c** ONLY mode device-lost graceful degrade | rc=-4 (DEVICE_LOST) cascade 接管：set m_DeviceLost flag → 後續 render/decode 早 return → log 一條停 | ✅ v1.3.295 (86adc5d) — 之前每次 device-lost 都連續吐幾百行 validation cascade |
+| **§J.3.e.2.i.8 Phase 1.6** Aftermath GPU crash dump 整合 | NVIDIA Nsight Aftermath SDK 1.6 + VK_NV_device_diagnostics_config + VK_NV_device_diagnostic_checkpoints；device-lost 自動寫 `%TEMP%\VipleStream-aftermath-<ts>.nv-gpudmp` | ✅ v1.3.298 (7cb4fb4) — 配 `tools/aftermath_decode/` standalone CLI 解 dump 為 JSON |
+| **§J.3.e.2.i.8 Phase 1.7a** fence-pin bsBuf | 在 next submit 入口 reset 上一幀 bsBuf shared_ptr | ❌ v1.3.299 (5a7c9ff)，4 frames 必死，revert 為 v1.3.300 (7d126b3) |
+| **§J.3.e.2.i.8 Phase 1.7b** hold-forever ring N=16 | 永遠不主動 destroy，等 16 幀後 round-robin 自然回收 | ❌ stash drop，4 frames 必死 |
+| **§J.3.e.2.i.8 Phase 1.7c** host→video_decode buffer barrier | `VK_PIPELINE_STAGE_2_HOST_BIT` + `HOST_WRITE_BIT` → `VIDEO_DECODE_READ_BIT_KHR` 在 vkCmdDecodeVideoKHR 之前；抄自 vk_video_samples reference client | ✅ v1.3.301 (fdbbf8c) — spec-correct，dump pattern 變但 ONLY mode 仍 4 frames 死 |
+| **§J.3.e.2.i.8 Phase 1.7d** pool-reuse bsBuf | N=16 pre-allocated VkBuffer + grow on demand；抄自 vk_video_samples `m_decodeFramesData.GetBitstreamBuffersQueue()` | ❌ stash drop，4 frames 必死 |
+| **§J.3.e.2.i.8 Phase 1.7e** ONLY env rename to *_DANGEROUS | 五個變體都無法修 NV 596.36 driver bug；rename `VIPLE_VKFRUC_NATIVE_DECODE_ONLY` → `*_DANGEROUS` 強迫舊 setx 失效，預設 PARALLEL | ✅ v1.3.302 (029937c) — PARALLEL mode 穩定走 native VK_KHR_video_decode（FFmpeg AVFrame 驅動 Pacer，native VK sample 顯示） |
+| **§J.3.e.2.i.8 Phase 2** H.264 native VK decode port | nvvideoparser H.264 sources、submitDecodeFrameH264、onH264PictureParametersFromParser | ✅ v1.3.275 — H.264 stream 走 native VK_KHR_video_decode |
+| **§J.3.e.2.i.8 Phase 2.5** FRUC NV12 source 整合 native decode | m_SwUploadImage 加 TRANSFER_SRC、image→buffer copy 進 m_SwFrucNv12Buf[slot]、per-slot descset；殘留小 race 在 Phase J.5 整體切換時補完 | 🟡 v1.3.277 per-slot buffer 改善大半，runtime 仍偶爾抖；不擋使用 |
+| **§J.3.e.2.i.8 Phase 3** AV1 native VK decode plumbing | parser AV1 sources、submitDecodeFrameAv1 | ✅ v1.3.272 — source 全到位，submit 預設 OFF（pending Phase 3d.6） |
+| **§J.3.e.2.i.8 Phase 3d.6** AV1 native decode GPU-side grey 診斷 | 9 個 parser/picture-info real bug 修了仍吐 constant grey；driver-level，需 RenderDoc + vk_video_samples 對比 | 🟡 deferred indefinitely — AV1 預設走 libdav1d SW，Vulkan render 不擋使用 |
+| **AMD ycbcr** descriptor pool sizing | 動態 query `VkSamplerYcbcrConversionImageFormatProperties::combinedImageSamplerDescriptorCount`，pool size = N × max(reported, 16) | ✅ v1.3.307 (5183cee) — 在 AMD Vega 10 整合顯卡上能 init 過 createDescriptorPool |
+| **Vulkan demoted to experimental** | 預設 renderer 改 `RS_D3D11`、Settings dropdown D3D11 在前、Vulkan 標 [實驗性] | ✅ v1.3.308 (2a892e7) — 既有 user 設定不變、新 user 預設 D3D11 |
 
 ### §J.3.e.X 手刻 RIFE Vulkan pipeline（long-term）
 
@@ -233,18 +241,21 @@ DirectML auto-cascade（v1.2.91）已經把「中低階 GPU 跑 DML 會掉幀」
 ### 不可動的鐵律 (§J)
 
 1. **Fallback 機制保留** — v1.3.41 的 3-fail fallback、v1.3.44 的 process-lifetime singleton 都不能移除。Phase J 改動失敗時不能讓 user crash。
-2. **預設行為跟 v1.3.44 等價** — 直到 Phase J.5 預設切 Vulkan，預設 user 走 D3D11 主路徑（CLI flag opt-in）。
-3. **D3D11 renderer 留作 legacy fallback** — driver 不支援 VK_KHR_video_decode 的 user 退回 D3D11VA。預計支援到 2027 年（Win10 EOL + 主流 driver 都更新到 VK 1.3.274+）。
+2. **預設 D3D11 (v1.3.308 起)** — Vulkan 改實驗性次要選項。Phase J.5 真正切 Vulkan 為預設前，新 user 第一次啟動只看到 D3D11；既有 user 設定不被動。
+3. **D3D11 renderer 是穩定主線**（不再只是 legacy fallback）— Phase 1.7 系列確認 NV driver 596.36 對 native VK_KHR_video_decode + ONLY mode 有結構性 bug，五個變體都繞不過。D3D11 + DXVA hardware decode 是所有 NV / AMD / Intel Windows 環境的穩定路徑。
 4. **每 Phase 都要有 baseline 對比** — 沿用 §I 的 baseline.sh 設計，desktop 版自寫一份。
+5. **build script 不能無聲拿舊 binary** — `scripts/build_moonlight_package.cmd` 的 staging step 必須 errorlevel-check rmdir / copy，否則 zombie process 鎖檔會讓 release zip 內含過時 binary（v1.3.299~306 連 8 個 zip 都中招的事故，見 v1.3.307 commit message 5183cee）。
 
 ### 已就位的診斷工具（會用到）
 
-- `[VIPLE-FRUC-NCNN]` / `[VIPLE-VKFRUC]` log family
+- `[VIPLE-FRUC-NCNN]` / `[VIPLE-VKFRUC]` / `[VIPLE-AFTERMATH]` log family
 - `VIPLE_USE_VK_DECODER=1` — opt-in Vulkan-first cascade（HEVC 完整 Vulkan-native pipeline）
 - `VIPLE_VKFRUC_NATIVE_DECODE=1` — opt-in nvvideoparser feed + native VkVideoSessionKHR
-- `VIPLE_VKFRUC_NATIVE_AV1_SUBMIT=1` — opt-in AV1 vkCmdDecodeVideoKHR submit（**目前 default OFF**，pending §J.3.e.2.i.8 Phase 3d.5）
+- `VIPLE_VKFRUC_NATIVE_DECODE_ONLY_DANGEROUS=1` — opt-in ONLY mode（synth-frame Pacer drive）。已知在 NV 596.36 上會 NVDEC device-lost；舊 `*_ONLY` 自 v1.3.302 失效。
+- `VIPLE_VKFRUC_NATIVE_AV1_SUBMIT=1` — opt-in AV1 vkCmdDecodeVideoKHR submit（**目前 default OFF**，pending §J.3.e.2.i.8 Phase 3d.6 grey 修法）
 - `VIPLE_VKFRUC_VULKAN_DEBUG=1` — VK_EXT_debug_utils + 路 validation 訊息進 SDL log
 - `VIPLE_VKFRUC_NO_FRUC=1` — 暫時關 FRUC + dual mode（diagnostic）
+- `tools/aftermath_decode/` — standalone CLI 解 `.nv-gpudmp` → JSON（不需要 Nsight Graphics GUI）；自 v1.3.298 起 device-lost 自動寫到 `%TEMP%\VipleStream-aftermath-<ts>.nv-gpudmp`
 - `loadModel: step N/6` trace log — v1.3.39 加，定位 init crash 位置
 - 3-fail fallback counter — v1.3.41 機制
 
