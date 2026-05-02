@@ -17,8 +17,7 @@
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | v1.3.275 H.264 native ship 後 dual-present 3-4 Hz blur/sharp；v1.3.276/277 per-slot buffer 改善大半，殘留小 race 等 Phase J.5 整體切換 Vulkan 才補完整 |
 | **Medium-High** | **§I.D** Android Vulkan FRUC async compute | C.5.b 量到 dual-present + waitIdle thermal regression；async compute queue 是真正解 |
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) — 解 NCNN-Vulkan shared path | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
-| **Medium-Low** | **§A.6** HTTP Basic auth realm | 改了使用者要重登 Web UI；併進其他改動才划算 |
-| **Low** | **§D / §E** wiki 連結 / Android themed icon | 純品牌 / 視覺一致性（§C 已 ship at v1.3.310）|
+| **Low** | **§D** wiki 連結 | 等 VipleStream 自己有 docs 才能換 (§A.6 已 ship at v1.3.309；§C 已 ship at v1.3.310；§E 部分 ship — themed icon 自 v1.2.36 已 wire) |
 | **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |
 | **Low** | **§G.1 / §G.4** RIFE v1 11-channel / 模型下載管理 | A1000 launch overhead bound（§G.3 negative result）；RTX 30/40+ 才有意義 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
@@ -102,10 +101,13 @@ bulk replace。en.json / zh_TW.json / en_US.json 自 v1.2.43 起就已 sync。
 
 ## §E. moonlight-android Icon 補完
 
-**目前：** v1.2.30 已用 lime VipleStream icon，但：
-- Splash screen 需確認用新 icon
-- 「最近應用程式」列表 icon 在各版本 Android 上的顯示要驗證
-- Android 12+ themed icon（Material You 單色化）沒提供 monochrome mask → 會 fallback 到 adaptive-icon。要支援需加 `ic_launcher_monochrome.xml`
+**狀態：** 🟡 部分 ship — Android 12+ themed icon (Material You) 自 v1.2.36
+(1ec4445) 已 wire — `mipmap-anydpi-v26/ic_launcher.xml` 內 `<monochrome>`
+element reuse `ic_launcher_foreground` 當 silhouette mask。剩下兩件事
+需 Android 機驗證才知道是否需動：
+
+- Splash screen 在 Android 12+ SplashScreen API 下顯示是否用新 icon
+- 「最近應用程式」列表 icon 在各 Android 版本（10/11/12/13/14）顯示
 
 ---
 
