@@ -991,6 +991,29 @@ bool VkFrucRenderer::createSwapchain()
         }
     }
 
+    // §J.3.e.2.i.8 Phase 1.5c-final — per-image renderDone binary semaphore.
+    // One per swapchain image, indexed by image idx returned by
+    // vkAcquireNextImageKHR.  Submit signals m_SwapchainRenderDoneSem[idx],
+    // present waits the same sem.  Vulkan's swapchain reuse rule guarantees
+    // image idx X won't be re-acquired until present consumed sem[X], so
+    // sem reuse is naturally serialized — fixes VUID-vkQueueSubmit-
+    // pSignalSemaphores-00067 in ONLY mode.
+    auto pfnCreateSemaphore2 = (PFN_vkCreateSemaphore)pfnGetDeviceProcAddr(m_Device, "vkCreateSemaphore");
+    if (!pfnCreateSemaphore2) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.2.b vkCreateSemaphore PFN missing");
+        return false;
+    }
+    m_SwapchainRenderDoneSem.assign(imgCnt, VK_NULL_HANDLE);
+    for (uint32_t i = 0; i < imgCnt; i++) {
+        VkSemaphoreCreateInfo sci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+        if (pfnCreateSemaphore2(m_Device, &sci, nullptr, &m_SwapchainRenderDoneSem[i]) != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.5c-final per-image renderDone sem[%u] create failed", i);
+            return false;
+        }
+    }
+
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.2.b VkSwapchainKHR created "
                 "(format=%d colorSpace=%d extent=%ux%u images=%u presentMode=%d)",
@@ -1008,6 +1031,14 @@ void VkFrucRenderer::destroySwapchain()
         m_Device, "vkDestroyImageView");
     auto pfnDestroySwapchain = (PFN_vkDestroySwapchainKHR)pfnGetDeviceProcAddr(
         m_Device, "vkDestroySwapchainKHR");
+    auto pfnDestroySem = (PFN_vkDestroySemaphore)pfnGetDeviceProcAddr(
+        m_Device, "vkDestroySemaphore");
+    // §J.3.e.2.i.8 Phase 1.5c-final — per-image renderDone sems
+    for (auto s : m_SwapchainRenderDoneSem) {
+        if (s != VK_NULL_HANDLE && pfnDestroySem)
+            pfnDestroySem(m_Device, s, nullptr);
+    }
+    m_SwapchainRenderDoneSem.clear();
     for (auto v : m_SwapchainViews) {
         if (v != VK_NULL_HANDLE && pfnDestroyImgView)
             pfnDestroyImgView(m_Device, v, nullptr);
@@ -5292,9 +5323,13 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     uint64_t gfxSignalVal = m_GfxTimelineNext.fetch_add(1, std::memory_order_acq_rel);
     if (m_DualMode) {
         // Dual: wait both acquire sems (pass 0 = interp, pass 1 = real),
-        // signal both renderDone sems + m_GfxTimelineSem (gfx→decode sync).
+        // signal both per-IMAGE renderDone sems + m_GfxTimelineSem (gfx→decode sync).
+        // §J.3.e.2.i.8 Phase 1.5c-final — renderDone sems indexed by swapchain
+        // image idx (not slot), so reuse is gated by Vulkan's swapchain image
+        // re-acquire rule (image idx X re-acquired only after present consumed
+        // its sem) → no VUID-vkQueueSubmit-pSignalSemaphores-00067 race.
         VkSemaphore waitSems[3]   = { m_SlotAcquireSem[slot][0], m_SlotAcquireSem[slot][1], m_TimelineSem };
-        VkSemaphore signalSems[3] = { m_SlotRenderDoneSem[slot][0], m_SlotRenderDoneSem[slot][1], m_GfxTimelineSem };
+        VkSemaphore signalSems[3] = { m_SwapchainRenderDoneSem[imgIdxA], m_SwapchainRenderDoneSem[imgIdxB], m_GfxTimelineSem };
         VkPipelineStageFlags waitMasks[3] = {
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -5332,11 +5367,11 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         // m_SwUploadImage write.  Replaces racey m_LastGraphicsFence pattern.
         m_LastGraphicsValue.store(gfxSignalVal, std::memory_order_release);
 
-        // Present interp (imgIdxA) first, real (imgIdxB) second.
+        // §J.3.e.2.i.8 Phase 1.5c-final — present per-image renderDone sems.
         VkPresentInfoKHR piA = {};
         piA.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
         piA.waitSemaphoreCount = 1;
-        piA.pWaitSemaphores    = &m_SlotRenderDoneSem[slot][0];
+        piA.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxA];
         piA.swapchainCount     = 1;
         piA.pSwapchains        = &m_Swapchain;
         piA.pImageIndices      = &imgIdxA;
@@ -5347,7 +5382,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         VkPresentInfoKHR piB = {};
         piB.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
         piB.waitSemaphoreCount = 1;
-        piB.pWaitSemaphores    = &m_SlotRenderDoneSem[slot][1];
+        piB.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxB];
         piB.swapchainCount     = 1;
         piB.pSwapchains        = &m_Swapchain;
         piB.pImageIndices      = &imgIdxB;
@@ -5366,8 +5401,9 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         }
     } else {
         // Single-present (legacy SW path, m_DualMode off)
+        // §J.3.e.2.i.8 Phase 1.5c-final — renderDone sem per-image (imgIdx).
         VkSemaphore singleWaitSems[2] = { m_SlotAcquireSem[slot][0], m_TimelineSem };
-        VkSemaphore singleSignalSems[2] = { m_SlotRenderDoneSem[slot][0], m_GfxTimelineSem };
+        VkSemaphore singleSignalSems[2] = { m_SwapchainRenderDoneSem[imgIdx], m_GfxTimelineSem };
         VkPipelineStageFlags singleWaitMasks[2] = {
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             timelineWaitStage,  // §J.3.e.2.i.8 Phase 2.5 — see comment above.
@@ -5401,10 +5437,11 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         // §J.3.e.2.i.8 Phase 1.5c — see dual-mode comment above.
         m_LastGraphicsValue.store(gfxSignalVal, std::memory_order_release);
 
+        // §J.3.e.2.i.8 Phase 1.5c-final — present per-image renderDone sem.
         VkPresentInfoKHR pi = {};
         pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
         pi.waitSemaphoreCount = 1;
-        pi.pWaitSemaphores    = &m_SlotRenderDoneSem[slot][0];
+        pi.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdx];
         pi.swapchainCount     = 1;
         pi.pSwapchains        = &m_Swapchain;
         pi.pImageIndices      = &imgIdx;

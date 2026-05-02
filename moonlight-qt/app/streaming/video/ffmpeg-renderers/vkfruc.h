@@ -400,6 +400,17 @@ private:
     VkPresentModeKHR           m_SwapchainPresentMode = VK_PRESENT_MODE_FIFO_KHR;
     std::vector<VkImage>       m_SwapchainImages;
     std::vector<VkImageView>   m_SwapchainViews;
+    // §J.3.e.2.i.8 Phase 1.5c-final — per-swapchain-image renderDone semaphore.
+    // Replaces per-slot m_SlotRenderDoneSem (which raced with vkQueuePresentKHR
+    // when slot cycle reused sem before present consumed prior signal →
+    // VUID-vkQueueSubmit-pSignalSemaphores-00067, in turn the trigger for
+    // ONLY mode's eventual DEVICE_LOST cascade).  Vulkan guarantees the same
+    // swapchain image won't be re-acquired until present completes — so
+    // indexing renderDone sem by image index naturally serializes its reuse
+    // with present completion, no explicit sync needed.  Sized at
+    // m_SwapchainImages.size() (typically 6 in ONLY mode, 4 in dual-FRUC,
+    // 3 in vanilla single).
+    std::vector<VkSemaphore>   m_SwapchainRenderDoneSem;
 
     // §J.3.e.2.i.3.b — VkSamplerYcbcrConversion + sampler + layouts.
     // The sampler must be IMMUTABLE on the descriptor binding so that
