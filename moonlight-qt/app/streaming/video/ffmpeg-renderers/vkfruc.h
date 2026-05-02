@@ -255,7 +255,27 @@ private:
     // recording its own m_SwUploadImage write so the sample (graphics) finishes
     // before the next overwrite (decode).  Atomic because set on render thread,
     // read on parser/decode thread.
+    //
+    // §J.3.e.2.i.8 Phase 1.5c — DEPRECATED.  Cross-thread fence access raced
+    // with render-thread fence reset (validation v1.3.284:
+    // VUID-vkResetFences-pFences-01123 + VUID-vkBeginCommandBuffer-cmdBuf-00049
+    // chains into VK_ERROR_DEVICE_LOST after ~12 seconds in ONLY mode).  Replaced
+    // by m_GfxTimelineSem below (timeline sems support concurrent multi-thread
+    // wait without reset).  Field kept VK_NULL_HANDLE for now until migration
+    // confirmed clean.
     std::atomic<VkFence> m_LastGraphicsFence{VK_NULL_HANDLE};
+
+    // §J.3.e.2.i.8 Phase 1.5c — graphics→decode timeline semaphore.
+    // Replaces the racey m_LastGraphicsFence pattern: graphics submit signals
+    // m_GfxTimelineSem at monotonic value N, decode submit blocks via host
+    // vkWaitSemaphores(N) before recording its m_SwUploadImage write.  Timeline
+    // sems are designed for concurrent multi-thread waits without state races
+    // (unlike VkFence which can't be safely reset while another thread is in
+    // WaitForFences).  Mirrors m_TimelineSem (decode→graphics) but in the
+    // opposite direction.
+    VkSemaphore           m_GfxTimelineSem    = VK_NULL_HANDLE;
+    std::atomic<uint64_t> m_GfxTimelineNext   {1};   // next value to allocate
+    std::atomic<uint64_t> m_LastGraphicsValue {0};   // last value signaled by graphics
     // §J.3.e.2.i.8 Phase 1.3d.2.d — single 2D_ARRAY view for video-decode
     // (NV vk_video_samples pattern).  vkCmdDecodeVideoKHR uses this view
     // with VkVideoPictureResourceInfoKHR.baseArrayLayer = slot index.
@@ -327,6 +347,8 @@ private:
         PFN_vkQueueSubmit              QueueSubmit;
         PFN_vkWaitForFences            WaitForFences;
         PFN_vkResetFences              ResetFences;
+        // §J.3.e.2.i.8 Phase 1.5c — host-side timeline-sem wait for gfx→decode sync.
+        PFN_vkWaitSemaphores           WaitSemaphores;
     } m_DecodeRtPfn = {};
     bool m_DecodeRtPfnReady = false;
     bool loadDecodeRtPfns();
@@ -406,6 +428,10 @@ private:
     // can use the [0] pair for the interp present and the [1] pair for
     // the real-frame present without cross-pass sync hazards.  i.3.e
     // single-present uses only the [0] pair.
+    // §J.3.e.2.i.8 Phase 1.5c — bumping to 4 made things worse (10s vs 40s
+    // crash) because more in-flight slots = more sem reuse opportunities.
+    // Reverted back to 2.  The proper fix for the renderDone-sem-reuse race
+    // is per-swapchain-image sems, deferred.
     static constexpr uint32_t kFrucFramesInFlight = 2;
     VkCommandPool   m_CmdPool                = VK_NULL_HANDLE;
     VkCommandBuffer m_SlotCmdBuf[kFrucFramesInFlight]            = {};
@@ -654,7 +680,7 @@ private:
     // for the SAME slot (after fence wait → GPU has finished prior pass).
     VkQueryPool m_FrucTimerPool   = VK_NULL_HANDLE;
     uint32_t    m_FrucTimerSlot   = 0;     // ring slot for queries
-    bool        m_FrucTimerArmed[2] = {};  // whether slot's timestamps were written
+    bool        m_FrucTimerArmed[kFrucFramesInFlight] = {};  // whether slot's timestamps were written
     double      m_FrucTimerNsPerTick = 0.0;  // from VkPhysicalDeviceLimits.timestampPeriod
     // Aggregated GPU time (us) — accumulated each frame, logged in stats window
     double      m_FrucGpuUsAccum  = 0.0;

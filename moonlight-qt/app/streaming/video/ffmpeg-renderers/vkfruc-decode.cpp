@@ -794,9 +794,14 @@ bool VkFrucRenderer::loadDecodeRtPfns()
     p.QueueSubmit              = (PFN_vkQueueSubmit)getDevPa(m_Device, "vkQueueSubmit");
     p.WaitForFences            = (PFN_vkWaitForFences)getDevPa(m_Device, "vkWaitForFences");
     p.ResetFences              = (PFN_vkResetFences)getDevPa(m_Device, "vkResetFences");
+    // §J.3.e.2.i.8 Phase 1.5c — vkWaitSemaphores (Vulkan 1.2 core) for
+    // gfx→decode timeline-sem host wait, replacing fence-based sync.
+    p.WaitSemaphores           = (PFN_vkWaitSemaphores)getDevPa(m_Device, "vkWaitSemaphores");
+    if (!p.WaitSemaphores) p.WaitSemaphores = (PFN_vkWaitSemaphores)getDevPa(m_Device, "vkWaitSemaphoresKHR");
     if (!p.BeginCommandBuffer || !p.EndCommandBuffer || !p.CmdBeginVideoCodingKHR
         || !p.CmdEndVideoCodingKHR || !p.CmdControlVideoCodingKHR || !p.CmdDecodeVideoKHR
-        || !p.CmdPipelineBarrier2 || !p.QueueSubmit || !p.WaitForFences || !p.ResetFences) {
+        || !p.CmdPipelineBarrier2 || !p.QueueSubmit || !p.WaitForFences || !p.ResetFences
+        || !p.WaitSemaphores) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d decode rt-PFN missing");
         return false;
@@ -984,11 +989,19 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
 
     auto& rt = m_DecodeRtPfn;
 
-    // §J.3.e.2.i.8 Phase 1.4 proper — wait for prior graphics-queue submit
-    // to finish before we overwrite m_SwUploadImage.  Codec-agnostic.
-    VkFence gfxFence = m_LastGraphicsFence.load(std::memory_order_acquire);
-    if (gfxFence != VK_NULL_HANDLE) {
-        rt.WaitForFences(m_Device, 1, &gfxFence, VK_TRUE, UINT64_MAX);
+    // §J.3.e.2.i.8 Phase 1.5c — wait for prior graphics-queue submit (which
+    // sampled m_SwUploadImage) to finish before we overwrite it.  Replaces
+    // the racey fence-based pattern (m_LastGraphicsFence) which hit
+    // VUID-vkResetFences-pFences-01123 when render thread reset the same
+    // fence decode thread was waiting on.  Timeline sems support concurrent
+    // host waits without reset.
+    uint64_t gfxWaitVal = m_LastGraphicsValue.load(std::memory_order_acquire);
+    if (gfxWaitVal > 0 && m_GfxTimelineSem != VK_NULL_HANDLE) {
+        VkSemaphoreWaitInfo wi = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+        wi.semaphoreCount = 1;
+        wi.pSemaphores    = &m_GfxTimelineSem;
+        wi.pValues        = &gfxWaitVal;
+        rt.WaitSemaphores(m_Device, &wi, UINT64_MAX);
     }
 
     rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
@@ -1411,8 +1424,24 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
         seenSlot[slot] = true;
 
         auto& sri = refStdInfos[activeRefCount];
-        sri.flags.top_field_flag              = (e.used_for_reference & 1) ? 1 : 0;
-        sri.flags.bottom_field_flag           = (e.used_for_reference & 2) ? 1 : 0;
+        // §J.3.e.2.i.8 Phase 1.5c — H.264 PROGRESSIVE frame mode (the only
+        // mode our session was created with; see createVideoSession's
+        // VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_PROGRESSIVE_KHR).  In Vulkan,
+        // top_field_flag / bottom_field_flag describe a FIELD reference picture;
+        // for a frame reference both flags are 0.  NV parser's used_for_reference
+        // uses 0=unused / 1=top / 2=bot / 3=both (i.e. complete frame), but
+        // mapping (val & 1) → top, (val & 2) → bottom literally turns
+        // used_for_reference=3 into "this is BOTH a top field AND a bottom field
+        // simultaneously" which validation reports as VUID-vkCmdDecodeVideoKHR-
+        // pDecodeInfo-07260 ("reference picture is a field but session was not
+        // created with interlaced frame support") and chains through 07267/07268
+        // → eventual GPU DEVICE_LOST after 30-50s of accumulated mis-coded refs.
+        // Sunshine streams are progressive, so always emit frame refs.  Pure
+        // top-field or bottom-field references would only happen with interlaced
+        // content; if we ever support that we'd also need to recreate the video
+        // session with VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_INTERLACED_*.
+        sri.flags.top_field_flag              = 0;
+        sri.flags.bottom_field_flag           = 0;
         sri.flags.used_for_long_term_reference = e.is_long_term ? 1 : 0;
         sri.flags.is_non_existing             = 0;  // already filtered above
         sri.FrameNum                          = (uint16_t)e.FrameIdx;
@@ -1455,9 +1484,14 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
 
     auto& rt = m_DecodeRtPfn;
 
-    VkFence gfxFence = m_LastGraphicsFence.load(std::memory_order_acquire);
-    if (gfxFence != VK_NULL_HANDLE) {
-        rt.WaitForFences(m_Device, 1, &gfxFence, VK_TRUE, UINT64_MAX);
+    // §J.3.e.2.i.8 Phase 1.5c — gfx→decode timeline sem (replaces racey fence).
+    uint64_t gfxWaitVal = m_LastGraphicsValue.load(std::memory_order_acquire);
+    if (gfxWaitVal > 0 && m_GfxTimelineSem != VK_NULL_HANDLE) {
+        VkSemaphoreWaitInfo wi = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+        wi.semaphoreCount = 1;
+        wi.pSemaphores    = &m_GfxTimelineSem;
+        wi.pValues        = &gfxWaitVal;
+        rt.WaitSemaphores(m_Device, &wi, UINT64_MAX);
     }
 
     rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
@@ -1842,9 +1876,14 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
     // (which samples m_SwUploadImage) to finish BEFORE we start recording
     // the next decode's m_SwUploadImage overwrite.  This eliminates the
     // cross-queue race that was killing v1.3.241 after ~300-480 frames.
-    VkFence gfxFence = m_LastGraphicsFence.load(std::memory_order_acquire);
-    if (gfxFence != VK_NULL_HANDLE) {
-        rt.WaitForFences(m_Device, 1, &gfxFence, VK_TRUE, UINT64_MAX);
+    // §J.3.e.2.i.8 Phase 1.5c — gfx→decode timeline sem (replaces racey fence).
+    uint64_t gfxWaitVal = m_LastGraphicsValue.load(std::memory_order_acquire);
+    if (gfxWaitVal > 0 && m_GfxTimelineSem != VK_NULL_HANDLE) {
+        VkSemaphoreWaitInfo wi = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+        wi.semaphoreCount = 1;
+        wi.pSemaphores    = &m_GfxTimelineSem;
+        wi.pValues        = &gfxWaitVal;
+        rt.WaitSemaphores(m_Device, &wi, UINT64_MAX);
     }
 
     // Wait for previous decode submission to complete (single cmd buffer pattern).

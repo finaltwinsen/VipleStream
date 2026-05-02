@@ -3249,6 +3249,17 @@ bool VkFrucRenderer::createDecodeCommandResources()
     m_TimelineNext.store(1);
     m_LastDecodeValue.store(0);
 
+    // §J.3.e.2.i.8 Phase 1.5c — graphics→decode timeline semaphore, mirrors
+    // m_TimelineSem in the opposite direction.  Replaces racey m_LastGraphicsFence.
+    if (pfnCreateSemaphore(m_Device, &timelineSci, nullptr, &m_GfxTimelineSem) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.5c gfx timeline vkCreateSemaphore failed");
+        destroyDecodeCommandResources();
+        return false;
+    }
+    m_GfxTimelineNext.store(1);
+    m_LastGraphicsValue.store(0);
+
     m_DecodeCmdReady   = true;
     m_DecodeNeedsReset = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -3283,6 +3294,11 @@ void VkFrucRenderer::destroyDecodeCommandResources()
     m_TimelineSem = VK_NULL_HANDLE;
     m_TimelineNext.store(1);
     m_LastDecodeValue.store(0);
+    if (m_GfxTimelineSem != VK_NULL_HANDLE && pfnDestroySemaphore)
+        pfnDestroySemaphore(m_Device, m_GfxTimelineSem, nullptr);
+    m_GfxTimelineSem = VK_NULL_HANDLE;
+    m_GfxTimelineNext.store(1);
+    m_LastGraphicsValue.store(0);
     if (m_DecodeFence    != VK_NULL_HANDLE && pfnDestroyFence)
         pfnDestroyFence(m_Device, m_DecodeFence, nullptr);
     if (m_DecodeCmdBuf   != VK_NULL_HANDLE && pfnFreeCommandBuffers && m_DecodeCmdPool != VK_NULL_HANDLE)
@@ -3982,11 +3998,20 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     const VkDeviceSize sizeRGB = (VkDeviceSize)width * height * 3 * sizeof(float);
     const VkDeviceSize sizeMV  = (VkDeviceSize)mvW * mvH * 2 * sizeof(int);
 
-    if (!allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    // §J.3.e.2.i.8 Phase 1.5c — TRANSFER_SRC_BIT added because runFrucComputeChain
+    // ends with vkCmdCopyBuffer m_FrucCurrRgbBuf → m_FrucPrevRgbBuf for next-
+    // frame ME ping-pong.  Validation VUID-vkCmdCopyBuffer-srcBuffer-00118 fires
+    // without it (caught in v1.3.287 PARALLEL mode test with VK_LAYER_KHRONOS_validation).
+    if (!allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                         | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                   m_FrucPrevRgbBuf, m_FrucPrevRgbBufMem)
-        || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                            | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                      m_FrucCurrRgbBuf, m_FrucCurrRgbBufMem)
-        || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        // §J.3.e.2.i.8 Phase 1.5c — TRANSFER_SRC on m_FrucMvBuf because the
+        // median pass cmdCopyBuffer's it into m_FrucMvFilteredBuf.
+        || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                            | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                      m_FrucMvBuf, m_FrucMvBufMem)
         || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                      m_FrucMvFilteredBuf, m_FrucMvFilteredMem)
@@ -5262,32 +5287,36 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
             ? VK_PIPELINE_STAGE_TRANSFER_BIT
             : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     VkResult vr;
+    // §J.3.e.2.i.8 Phase 1.5c — always allocate gfx timeline signal value (so
+    // decode side can always vkWaitSemaphores on the latest published value).
+    uint64_t gfxSignalVal = m_GfxTimelineNext.fetch_add(1, std::memory_order_acq_rel);
     if (m_DualMode) {
         // Dual: wait both acquire sems (pass 0 = interp, pass 1 = real),
-        // signal both renderDone sems.  Both render passes ran in order
-        // in the same cmd buf; GPU executes them sequentially before
-        // signaling.  The two presents below display both images.
+        // signal both renderDone sems + m_GfxTimelineSem (gfx→decode sync).
         VkSemaphore waitSems[3]   = { m_SlotAcquireSem[slot][0], m_SlotAcquireSem[slot][1], m_TimelineSem };
-        VkSemaphore signalSems[2] = { m_SlotRenderDoneSem[slot][0], m_SlotRenderDoneSem[slot][1] };
+        VkSemaphore signalSems[3] = { m_SlotRenderDoneSem[slot][0], m_SlotRenderDoneSem[slot][1], m_GfxTimelineSem };
         VkPipelineStageFlags waitMasks[3] = {
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             timelineWaitStage,
         };
         // Timeline values: 0 ignored for binary sems; real value for timeline.
-        uint64_t waitVals[3] = { 0, 0, timelineWaitValue };
+        uint64_t waitVals[3]   = { 0, 0, timelineWaitValue };
+        uint64_t signalVals[3] = { 0, 0, gfxSignalVal };
         VkTimelineSemaphoreSubmitInfo tssi = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
-        tssi.waitSemaphoreValueCount = 3;
-        tssi.pWaitSemaphoreValues    = waitVals;
+        tssi.waitSemaphoreValueCount   = 3;
+        tssi.pWaitSemaphoreValues      = waitVals;
+        tssi.signalSemaphoreValueCount = 3;
+        tssi.pSignalSemaphoreValues    = signalVals;
         VkSubmitInfo si = {};
         si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.pNext                = (timelineWaitValue > 0) ? &tssi : nullptr;
+        si.pNext                = &tssi;  // always attach now (gfx sem always signals)
         si.waitSemaphoreCount   = (timelineWaitValue > 0) ? 3 : 2;
         si.pWaitSemaphores      = waitSems;
         si.pWaitDstStageMask    = waitMasks;
         si.commandBufferCount   = 1;
         si.pCommandBuffers      = &cmd;
-        si.signalSemaphoreCount = 2;
+        si.signalSemaphoreCount = 3;
         si.pSignalSemaphores    = signalSems;
         {
             std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
@@ -5298,10 +5327,10 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                          "[VIPLE-VKFRUC-SW] dual: vkQueueSubmit failed (%d)", (int)vr);
             return;
         }
-        // §J.3.e.2.i.8 Phase 1.4 proper — publish the fence so submitDecodeFrame
-        // (parser thread) can wait on it before recording the next decode's
-        // m_SwUploadImage write.  Avoids cross-queue race on shared image.
-        m_LastGraphicsFence.store(m_SlotInFlightFence[slot], std::memory_order_release);
+        // §J.3.e.2.i.8 Phase 1.5c — publish gfx timeline value so decode-thread
+        // submitDecodeFrame can vkWaitSemaphores on it before recording its next
+        // m_SwUploadImage write.  Replaces racey m_LastGraphicsFence pattern.
+        m_LastGraphicsValue.store(gfxSignalVal, std::memory_order_release);
 
         // Present interp (imgIdxA) first, real (imgIdxB) second.
         VkPresentInfoKHR piA = {};
@@ -5338,24 +5367,28 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     } else {
         // Single-present (legacy SW path, m_DualMode off)
         VkSemaphore singleWaitSems[2] = { m_SlotAcquireSem[slot][0], m_TimelineSem };
+        VkSemaphore singleSignalSems[2] = { m_SlotRenderDoneSem[slot][0], m_GfxTimelineSem };
         VkPipelineStageFlags singleWaitMasks[2] = {
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             timelineWaitStage,  // §J.3.e.2.i.8 Phase 2.5 — see comment above.
         };
-        uint64_t singleWaitVals[2] = { 0, timelineWaitValue };
+        uint64_t singleWaitVals[2]   = { 0, timelineWaitValue };
+        uint64_t singleSignalVals[2] = { 0, gfxSignalVal };
         VkTimelineSemaphoreSubmitInfo singleTssi = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
-        singleTssi.waitSemaphoreValueCount = 2;
-        singleTssi.pWaitSemaphoreValues    = singleWaitVals;
+        singleTssi.waitSemaphoreValueCount   = 2;
+        singleTssi.pWaitSemaphoreValues      = singleWaitVals;
+        singleTssi.signalSemaphoreValueCount = 2;
+        singleTssi.pSignalSemaphoreValues    = singleSignalVals;
         VkSubmitInfo si = {};
         si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.pNext                = (timelineWaitValue > 0) ? &singleTssi : nullptr;
+        si.pNext                = &singleTssi;  // always attach (gfx sem always signals)
         si.waitSemaphoreCount   = (timelineWaitValue > 0) ? 2 : 1;
         si.pWaitSemaphores      = singleWaitSems;
         si.pWaitDstStageMask    = singleWaitMasks;
         si.commandBufferCount   = 1;
         si.pCommandBuffers      = &cmd;
-        si.signalSemaphoreCount = 1;
-        si.pSignalSemaphores    = &m_SlotRenderDoneSem[slot][0];
+        si.signalSemaphoreCount = 2;
+        si.pSignalSemaphores    = singleSignalSems;
         {
             std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
@@ -5365,8 +5398,8 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                          "[VIPLE-VKFRUC-SW] vkQueueSubmit failed (%d)", (int)vr);
             return;
         }
-        // §J.3.e.2.i.8 Phase 1.4 proper — see dual-mode comment above.
-        m_LastGraphicsFence.store(m_SlotInFlightFence[slot], std::memory_order_release);
+        // §J.3.e.2.i.8 Phase 1.5c — see dual-mode comment above.
+        m_LastGraphicsValue.store(gfxSignalVal, std::memory_order_release);
 
         VkPresentInfoKHR pi = {};
         pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
