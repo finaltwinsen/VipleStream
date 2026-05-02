@@ -30,16 +30,33 @@ AutoUpdateChecker::AutoUpdateChecker(QObject *parent) :
 
 void AutoUpdateChecker::start()
 {
-    // VipleStream: disable auto-update check against official Moonlight server
-    qDebug() << "VipleStream: update check disabled";
-    return;
-
+    // VipleStream Phase A — query GitHub Releases API for the latest tag
+    // and compare with the embedded VERSION_STR.  Replaces the upstream
+    // moonlight-stream.org/updates/qt.json check (no longer applicable;
+    // VipleStream releases live on the fork's GitHub repo).
+    //
+    // Endpoint contract (subset we read):
+    //   {
+    //     "tag_name":  "v1.3.312",            // strip leading 'v'
+    //     "html_url":  "https://github.com/.../releases/tag/v1.3.312",
+    //     "draft":     false,
+    //     "prerelease":false
+    //   }
+    //
+    // Notes:
+    //   - We hand the user the release page URL (not the asset download
+    //     URL) so they can read the release notes + breaking-change
+    //     warnings before grabbing the zip.
+    //   - We don't filter `assets[]` per platform — VipleStream's PC
+    //     client only ships Windows zips today; if/when other platforms
+    //     ship, the matching click goes to the release page anyway.
+    //   - GitHub unauthenticated rate limit is 60 req/hour/IP.  One
+    //     request per process launch is well within that.
     if (!m_Nam) {
         Q_ASSERT(m_Nam);
         return;
     }
 
-#if defined(Q_OS_WIN32) || defined(Q_OS_DARWIN) || defined(STEAM_LINK) || defined(APP_IMAGE) // Only run update checker on platforms without auto-update
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0) && QT_VERSION < QT_VERSION_CHECK(5, 15, 1) && !defined(QT_NO_BEARERMANAGEMENT)
     // HACK: Set network accessibility to work around QTBUG-80947 (introduced in Qt 5.14.0 and fixed in Qt 5.15.1)
     QT_WARNING_PUSH
@@ -48,16 +65,18 @@ void AutoUpdateChecker::start()
     QT_WARNING_POP
 #endif
 
-    // We'll get a callback when this is finished
-    QUrl url("https://moonlight-stream.org/updates/qt.json");
+    QUrl url("https://api.github.com/repos/finaltwinsen/VipleStream/releases/latest");
     QNetworkRequest request(url);
+    // GitHub recommends sending the API version + a JSON Accept header.
+    request.setRawHeader("Accept", "application/vnd.github+json");
+    request.setRawHeader("X-GitHub-Api-Version", "2022-11-28");
+    request.setRawHeader("User-Agent", "VipleStream-Qt-AutoUpdateChecker/1.0");
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, true);
 #else
     request.setAttribute(QNetworkRequest::HTTP2AllowedAttribute, true);
 #endif
     m_Nam->get(request);
-#endif
 }
 
 void AutoUpdateChecker::parseStringToVersionQuad(QString& string, QVector<int>& version)
@@ -118,106 +137,78 @@ void AutoUpdateChecker::handleUpdateCheckRequestFinished(QNetworkReply* reply)
     m_Nam->deleteLater();
     m_Nam = nullptr;
 
-    if (reply->error() == QNetworkReply::NoError) {
-        QTextStream stream(reply);
+    if (reply->error() != QNetworkReply::NoError) {
+        // Quiet failure: don't pop a dialog if the user is offline
+        // / behind a captive portal / GitHub is rate-limiting us.
+        // Logged to qDebug so a developer can grep on demand.
+        qDebug() << "[AutoUpdateChecker] HTTP failure (silent):"
+                 << reply->errorString();
+        reply->deleteLater();
+        return;
+    }
 
+    QString jsonString;
+    {
+        QTextStream stream(reply);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
         stream.setEncoding(QStringConverter::Utf8);
 #else
         stream.setCodec("UTF-8");
 #endif
+        jsonString = stream.readAll();
+    }
+    reply->deleteLater();
 
-        // Read all data and queue the reply for deletion
-        QString jsonString = stream.readAll();
-        reply->deleteLater();
+    QJsonParseError error;
+    QJsonDocument jsonDoc = QJsonDocument::fromJson(jsonString.toUtf8(), &error);
+    if (jsonDoc.isNull() || !jsonDoc.isObject()) {
+        qWarning() << "[AutoUpdateChecker] release JSON malformed:"
+                   << error.errorString();
+        return;
+    }
 
-        QJsonParseError error;
-        QJsonDocument jsonDoc = QJsonDocument::fromJson(jsonString.toUtf8(), &error);
-        if (jsonDoc.isNull()) {
-            qWarning() << "Update manifest malformed:" << error.errorString();
-            return;
-        }
+    QJsonObject release = jsonDoc.object();
 
-        QJsonArray array = jsonDoc.array();
-        if (array.isEmpty()) {
-            qWarning() << "Update manifest doesn't contain an array";
-            return;
-        }
+    // Skip drafts and pre-releases — they shouldn't ever be returned
+    // by /releases/latest, but defensive parse nonetheless.
+    if (release.value("draft").toBool(false) ||
+            release.value("prerelease").toBool(false)) {
+        qDebug() << "[AutoUpdateChecker] latest release flagged draft/prerelease — skip";
+        return;
+    }
 
-        for (const auto& updateEntry : std::as_const(array)) {
-            if (updateEntry.isObject()) {
-                QJsonObject updateObj = updateEntry.toObject();
-                if (!updateObj.contains("platform") ||
-                        !updateObj.contains("arch") ||
-                        !updateObj.contains("version") ||
-                        !updateObj.contains("browser_url")) {
-                    qWarning() << "Update manifest entry missing vital field";
-                    continue;
-                }
+    QString tagName = release.value("tag_name").toString();
+    QString releasePageUrl = release.value("html_url").toString();
+    if (tagName.isEmpty() || releasePageUrl.isEmpty()) {
+        qWarning() << "[AutoUpdateChecker] release JSON missing tag_name or html_url";
+        return;
+    }
 
-                if (!updateObj["platform"].isString() ||
-                        !updateObj["arch"].isString() ||
-                        !updateObj["version"].isString() ||
-                        !updateObj["browser_url"].isString()) {
-                    qWarning() << "Update manifest entry has unexpected vital field type";
-                    continue;
-                }
+    // GitHub release tags use a leading 'v' (`v1.3.312`); VERSION_STR is
+    // `1.3.312`. Strip the prefix before comparing.
+    QString latestVersion = tagName;
+    if (latestVersion.startsWith(QLatin1Char('v')) || latestVersion.startsWith(QLatin1Char('V'))) {
+        latestVersion = latestVersion.mid(1);
+    }
 
-                if (updateObj["arch"] == QSysInfo::buildCpuArchitecture() &&
-                        updateObj["platform"] == getPlatform()) {
+    QVector<int> latestVersionQuad;
+    parseStringToVersionQuad(latestVersion, latestVersionQuad);
+    if (latestVersionQuad.isEmpty()) {
+        qWarning() << "[AutoUpdateChecker] tag_name not a version-like string:" << tagName;
+        return;
+    }
 
-                    // Check the kernel version minimum if one exists
-                    if (updateObj.contains("kernel_version_at_least") && updateObj["kernel_version_at_least"].isString()) {
-                        QVector<int> requiredVersionQuad;
-                        QVector<int> actualVersionQuad;
-
-                        QString requiredVersion = updateObj["kernel_version_at_least"].toString();
-                        QString actualVersion = QSysInfo::kernelVersion();
-                        parseStringToVersionQuad(requiredVersion, requiredVersionQuad);
-                        parseStringToVersionQuad(actualVersion, actualVersionQuad);
-
-                        if (compareVersion(actualVersionQuad, requiredVersionQuad) < 0) {
-                            qDebug() << "Skipping manifest entry due to kernel version (" << actualVersion << "<" << requiredVersion << ")";
-                            continue;
-                        }
-                    }
-
-                    qDebug() << "Found update manifest match for current platform";
-
-                    QString latestVersion = updateObj["version"].toString();
-                    qDebug() << "Latest version of Moonlight for this platform is:" << latestVersion;
-
-                    QVector<int> latestVersionQuad;
-                    parseStringToVersionQuad(latestVersion, latestVersionQuad);
-
-                    int res = compareVersion(m_CurrentVersionQuad, latestVersionQuad);
-                    if (res < 0) {
-                        // m_CurrentVersionQuad < latestVersionQuad
-                        qDebug() << "Update available";
-                        emit onUpdateAvailable(updateObj["version"].toString(),
-                                               updateObj["browser_url"].toString());
-                        return;
-                    }
-                    else if (res > 0) {
-                        qDebug() << "Update manifest version lower than current version";
-                        return;
-                    }
-                    else {
-                        qDebug() << "Update manifest version equal to current version";
-                        return;
-                    }
-                }
-            }
-            else {
-                qWarning() << "Update manifest contained unrecognized entry:" << updateEntry.toString();
-            }
-        }
-
-        qWarning() << "No entry in update manifest found for current platform:"
-                   << QSysInfo::buildCpuArchitecture() << getPlatform() << QSysInfo::kernelVersion();
+    int res = compareVersion(m_CurrentVersionQuad, latestVersionQuad);
+    if (res < 0) {
+        qDebug() << "[AutoUpdateChecker] update available — current"
+                 << QString(VERSION_STR) << "→ latest" << latestVersion;
+        emit onUpdateAvailable(latestVersion, releasePageUrl);
+    }
+    else if (res > 0) {
+        qDebug() << "[AutoUpdateChecker] running ahead of latest release ("
+                 << QString(VERSION_STR) << ">" << latestVersion << ") — skip";
     }
     else {
-        qWarning() << "Update checking failed with error:" << reply->error();
-        reply->deleteLater();
+        qDebug() << "[AutoUpdateChecker] up to date (" << latestVersion << ")";
     }
 }

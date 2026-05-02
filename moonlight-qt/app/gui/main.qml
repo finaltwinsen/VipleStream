@@ -486,9 +486,12 @@ ApplicationWindow {
                 }
 
                 Component.onCompleted: {
-                    // VipleStream: update check disabled — we use our own versioning
-                    // AutoUpdateChecker.onUpdateAvailable.connect(updateAvailable)
-                    // AutoUpdateChecker.start()
+                    // VipleStream Phase A — re-wired to GitHub Releases API of
+                    // finaltwinsen/VipleStream (the upstream moonlight-stream.org
+                    // endpoint is not applicable to the fork; see backend/
+                    // autoupdatechecker.cpp).
+                    AutoUpdateChecker.onUpdateAvailable.connect(updateAvailable)
+                    AutoUpdateChecker.start()
                 }
 
                 Keys.onDownPressed: {
