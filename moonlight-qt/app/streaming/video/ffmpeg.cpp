@@ -1,4 +1,5 @@
 #include <Limelight.h>
+#include <mutex>
 #include "ffmpeg.h"
 #include "utils.h"
 #include "streaming/session.h"
@@ -2469,18 +2470,35 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     //
     // VIPLE_VKFRUC_NATIVE_DECODE_PARALLEL=1 (legacy debug) keeps FFmpeg also
     // decoding for direct comparison; default 0 = pure native (Phase 1.5).
-    // VIPLE_VKFRUC_NATIVE_DECODE_ONLY=1 → Phase 1.5 sole-decoder mode (skip
-    //   FFmpeg avcodec_send_packet, drive Pacer with synthetic AVFrames).
-    //   Currently has a race between synth submission (submitDecodeUnit thread)
-    //   and submitDecodeFrame completion (parser callback thread) — Pacer can
-    //   call renderFrame BEFORE the decode-queue cmd buffer finishes writing
-    //   m_SwUploadImage.  Stable Phase 1.5 needs cross-queue timeline semaphore
-    //   instead of CPU-side fence wait; left as opt-in until that lands.
-    // Default: PARALLEL — FFmpeg also decodes (AVFrame drives Pacer), our native
-    //   chain runs concurrently, renderFrameSw prefers native sample (matches
-    //   v1.3.242 PROPER behavior validated for 5000+ frames).
+    //
+    // §J.3.e.2.i.8 Phase 1.7e (v1.3.302+) — ONLY mode env var rename.
+    //
+    // Old name `VIPLE_VKFRUC_NATIVE_DECODE_ONLY` is **disabled** (treated as
+    // not set even if user has it `setx`'d).  Phase 1.7 series (1.7a–1.7d)
+    // exhausted every reasonable client-side fix for the 24-78s NVDEC
+    // device-lost in ONLY mode and none stuck — this is a NV driver 596.36
+    // bug in the Vulkan video decode → NVDEC engine path that we can't
+    // route around from the application layer.  See:
+    //   - tools/aftermath_decode/DIAGNOSIS-1777691647.md  (root cause)
+    //   - git log v1.3.298 .. v1.3.301                    (attempted fixes)
+    //
+    // To opt in for further driver / sync diagnosis, set the new name
+    // `VIPLE_VKFRUC_NATIVE_DECODE_ONLY_DANGEROUS=1`.  Renaming forces
+    // anyone with the old `setx` value to make a deliberate choice rather
+    // than silently flipping into a known-broken path on next launch.
     static const bool s_nativeDecodeOnly =
-        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY") != 0;
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY_DANGEROUS") != 0;
+    static std::once_flag s_onlyModeWarnOnce;
+    if (s_nativeDecodeOnly) {
+        std::call_once(s_onlyModeWarnOnce, []() {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.7e — ONLY mode "
+                        "DANGEROUS opt-in via VIPLE_VKFRUC_NATIVE_DECODE_ONLY_DANGEROUS=1; "
+                        "expect NVDEC device-lost within seconds on NV driver 596.36 "
+                        "(see tools/aftermath_decode/DIAGNOSIS notes). PARALLEL mode "
+                        "(default, env unset) is the supported path.");
+        });
+    }
     if (m_BackendRenderer && m_BackendRenderer->acceptsNativeDecode()) {
         m_BackendRenderer->submitNativeDecodeUnit(
             reinterpret_cast<const uint8_t*>(m_Pkt->data), (size_t)m_Pkt->size);

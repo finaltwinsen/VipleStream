@@ -81,8 +81,11 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     // exclusive of FRUC.  User can still get FRUC via PARALLEL mode (slower
     // FFmpeg-bound but FRUC works).  Allow override for forensics via
     // VIPLE_VKFRUC_ONLY_FORCE_FRUC=1 (testing-only — expect crash).
+    // §J.3.e.2.i.8 Phase 1.7e — env name renamed to *_DANGEROUS so a stale
+    // `setx VIPLE_VKFRUC_NATIVE_DECODE_ONLY=1` from prior debug sessions
+    // doesn't silently flip into the known-broken NVDEC-fault path.
     static const bool s_onlyMode =
-        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY") != 0;
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY_DANGEROUS") != 0;
     static const bool s_onlyForceFruc =
         qEnvironmentVariableIntValue("VIPLE_VKFRUC_ONLY_FORCE_FRUC") != 0;
     if (s_onlyMode && (m_FrucMode || m_DualMode) && !s_onlyForceFruc) {
@@ -894,8 +897,9 @@ bool VkFrucRenderer::createSwapchain()
         uint32_t want = caps.minImageCount + 2;  // = 4 typically
         if (want > imageCount) imageCount = want;
     }
+    // §J.3.e.2.i.8 Phase 1.7e — see ctor comment; env renamed to *_DANGEROUS.
     static const bool s_onlyModeForSwapDepth =
-        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY") != 0;
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY_DANGEROUS") != 0;
     if (s_onlyModeForSwapDepth) {
         uint32_t want = caps.minImageCount + 4;  // = ~6 typically
         if (want > imageCount) imageCount = want;
@@ -954,8 +958,9 @@ bool VkFrucRenderer::createSwapchain()
     pfnGetSurfModes(m_PhysicalDevice, m_Surface, &modeCount, modes.data());
     VkPresentModeKHR pmode = VK_PRESENT_MODE_FIFO_KHR;  // always supported per spec
     bool wantVsync = m_DualMode || qEnvironmentVariableIntValue("VIPLE_VK_FRUC_VSYNC");
+    // §J.3.e.2.i.8 Phase 1.7e — see ctor comment; env renamed to *_DANGEROUS.
     static const bool s_onlyModeForPresent =
-        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY") != 0;
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE_ONLY_DANGEROUS") != 0;
     if (s_onlyModeForPresent && !wantVsync) {
         // ONLY mode: prefer MAILBOX (no backlog) over IMMEDIATE (backlogs at
         // high submit rate → swapchain over-acquire).  FIFO as fallback.
