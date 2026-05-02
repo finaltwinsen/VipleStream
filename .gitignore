@@ -99,6 +99,12 @@ tools/aftermath_decode/*.nv-shaderdbg
 tools/aftermath_decode/*.json
 tools/aftermath_decode/DIAGNOSIS-*.md
 
+# ── Android Vulkan queue-family probe binary ──
+# tools/android_vulkan_probe/probe.c is tracked; the cross-compiled
+# aarch64 binary `vk_probe` is rebuilt via NDK on demand and not
+# committed.
+tools/android_vulkan_probe/vk_probe
+
 # ── IDE / tool configs ──
 .vscode/
 .claude/

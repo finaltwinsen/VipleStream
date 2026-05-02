@@ -15,7 +15,7 @@
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 3d.6 — AV1 native decode GPU-side grey | 9 個 parser bug 修完仍 grey；NV driver 596.36 + AV1 vkCmdDecodeVideoKHR 黑/灰畫面，需 RenderDoc + vk_video_samples client diff，目前 AV1 預設走 libdav1d SW 不擋使用 |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 1.7 ONLY-mode NVDEC device-lost | v1.3.298~301 五個變體（fence-pin / hold-ring / pool-reuse / barrier）都無法繞過，NV driver 596.36 對 native VK_KHR_video_decode 內部 NVDEC 有結構性 bug；v1.3.302 把 `*_ONLY` env rename 成 `*_ONLY_DANGEROUS` 強迫舊 `setx` 失效，預設 PARALLEL mode 穩 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | v1.3.275 H.264 native ship 後 dual-present 3-4 Hz blur/sharp；v1.3.276/277 per-slot buffer 改善大半，殘留小 race 等 Phase J.5 整體切換 Vulkan 才補完整 |
-| **Medium-High** | **§I.D** Android Vulkan FRUC async compute | C.5.b 量到 dual-present + waitIdle thermal regression；async compute queue 是真正解 |
+| **Active (Phase D.2.0 done)** | **§I.D** Android Vulkan FRUC async compute | Adreno 620 / Pixel 5 probed: 1 family / queueCount=3 / [GFX CMP] / no dedicated compute family ── verdict [PARTIAL]. Phase D.2.0 已 ship multi-queue acquisition + log，未動 submit pattern。Phase D.2.1+ 拆 submit 待 user benchmark 決定 ROI |
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) — 解 NCNN-Vulkan shared path | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
 | **Done / partial** | **§A.6 / §C / §D / §E** brand consistency 收工 | A.6/C 已 ship；D HelpLauncher URL 已指 finaltwinsen/VipleStream README，等正式 docs；E themed icon 自 v1.2.36 已 wire |
 | **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |

@@ -107,8 +107,39 @@ typedef struct vk_backend_s {
     PFN_vkDestroyDevice vkDestroyDevice;
 
     // Queue
+    //
+    // §I.D Phase D.2.0 — multi-queue acquisition (same family).
+    //
+    // Adreno 620 / Pixel 5 advertises a single queue family (index 0)
+    // with queueCount=3 and flags=GFX|CMP|PROT (probed via standalone
+    // `tools/android_vulkan_probe/probe.c`).  No dedicated compute-only
+    // family exists, so async-compute optimisation can only target
+    // **multiple queues within the same family**, not a separate family
+    // queue.  Same-family multi-queue submits time-multiplex on the same
+    // GPU scheduler, but different queues let the driver overlap
+    // submission / preparation work and (on some Qualcomm drivers) issue
+    // independent compute + graphics work without explicit pipeline
+    // barrier serialization.
+    //
+    // We acquire up to `effectiveQueueCount` queues at create_device
+    // time:
+    //   - graphicsQueue : queueIndex 0  — present + main render path
+    //   - computeQueue  : queueIndex 1  — ME / warp compute submits
+    //                                     (planned for Phase D.2.1+;
+    //                                      Phase D.2.0 only acquires)
+    //   - transferQueue : queueIndex 2  — staging / NV12 upload copies
+    //                                     (planned; Phase D.2.0 acquires)
+    //
+    // If the driver reports < 3 queues per family (some lower-end Adreno
+    // / Mali) we fall through to single-queue mode: computeQueue and
+    // transferQueue alias to graphicsQueue.  Phase D.2.0 logs the actual
+    // count + handles for benchmarking visibility.
     VkQueue  graphicsQueue;
+    VkQueue  computeQueue;       // queueIndex 1 if available, else == graphicsQueue
+    VkQueue  transferQueue;      // queueIndex 2 if available, else == graphicsQueue
     uint32_t graphicsQueueFamily;
+    uint32_t effectiveQueueCount; // 1, 2, or 3 — what we actually requested
+                                  // and got back from vkGetDeviceQueue
 
     // Swapchain
     PFN_vkCreateSwapchainKHR    vkCreateSwapchainKHR;
@@ -613,12 +644,48 @@ static int create_device(vk_backend_t* be)
     LOGI("VK_EXT_hdr_metadata %s",
          be->fHdrMetadataExt ? "available" : "not available");
 
-    float qprio = 1.0f;
+    // §I.D Phase D.2.0 — request up to 3 queues from the chosen family.
+    //
+    // We have to re-query the family caps here (pickPhysicalDevice freed
+    // its `qf` array).  Cap our request to whatever the driver actually
+    // exposes; never request more than the family advertises or
+    // vkCreateDevice will fail.
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPDQFP =
+        LOAD_INSTANCE_PROC(be, vkGetPhysicalDeviceQueueFamilyProperties);
+    uint32_t requestedQueueCount = 1;  // safe fallback if the query fails
+    if (vkGetPDQFP) {
+        uint32_t qfCount = 0;
+        vkGetPDQFP(be->physDevice, &qfCount, NULL);
+        if (qfCount > be->graphicsQueueFamily) {
+            VkQueueFamilyProperties* qfArr =
+                (VkQueueFamilyProperties*)calloc(qfCount, sizeof(*qfArr));
+            if (qfArr) {
+                vkGetPDQFP(be->physDevice, &qfCount, qfArr);
+                uint32_t available = qfArr[be->graphicsQueueFamily].queueCount;
+                if (available >= 3) {
+                    requestedQueueCount = 3;
+                } else if (available >= 2) {
+                    requestedQueueCount = 2;
+                } else {
+                    requestedQueueCount = 1;
+                }
+                LOGI("[VKBE-D20] family[%u] advertises queueCount=%u → "
+                     "requesting %u for graphics/compute/transfer split",
+                     be->graphicsQueueFamily, available, requestedQueueCount);
+                free(qfArr);
+            }
+        }
+    }
+
+    // Equal priority across all requested queues.  Bumping compute
+    // priority might help on some drivers but invites starvation;
+    // start neutral and tune in Phase D.2.1+ if benchmarks justify.
+    float qprios[3] = { 1.0f, 1.0f, 1.0f };
     VkDeviceQueueCreateInfo qci = {
         .sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
         .queueFamilyIndex = be->graphicsQueueFamily,
-        .queueCount       = 1,
-        .pQueuePriorities = &qprio,
+        .queueCount       = requestedQueueCount,
+        .pQueuePriorities = qprios,
     };
 
     // VK_ANDROID_external_memory_android_hardware_buffer for B.2c.3b AHB import.
@@ -673,7 +740,48 @@ static int create_device(vk_backend_t* be)
     }
 
     vkGetDeviceQueue(be->device, be->graphicsQueueFamily, 0, &be->graphicsQueue);
-    LOGI("VkQueue acquired (graphics, family=%u)", be->graphicsQueueFamily);
+    LOGI("VkQueue acquired (graphics, family=%u, index=0, handle=%p)",
+         be->graphicsQueueFamily, (void*)be->graphicsQueue);
+
+    // §I.D Phase D.2.0 — acquire compute / transfer queues if the
+    // driver gave us additional handles.  Aliased to graphicsQueue when
+    // unavailable so all submit sites can use the dedicated handle
+    // unconditionally without per-call fallback checks.
+    be->effectiveQueueCount = requestedQueueCount;
+    if (requestedQueueCount >= 2) {
+        vkGetDeviceQueue(be->device, be->graphicsQueueFamily, 1, &be->computeQueue);
+        LOGI("[VKBE-D20] VkQueue acquired (compute,  family=%u, index=1, handle=%p)",
+             be->graphicsQueueFamily, (void*)be->computeQueue);
+    } else {
+        be->computeQueue = be->graphicsQueue;
+        LOGI("[VKBE-D20] computeQueue aliased to graphicsQueue (family has only 1 queue)");
+    }
+    if (requestedQueueCount >= 3) {
+        vkGetDeviceQueue(be->device, be->graphicsQueueFamily, 2, &be->transferQueue);
+        LOGI("[VKBE-D20] VkQueue acquired (transfer, family=%u, index=2, handle=%p)",
+             be->graphicsQueueFamily, (void*)be->transferQueue);
+    } else {
+        be->transferQueue = be->graphicsQueue;
+        LOGI("[VKBE-D20] transferQueue aliased to graphicsQueue (family has < 3 queues)");
+    }
+
+    // Sanity: distinct VkQueue handles?  The Vulkan spec doesn't strictly
+    // require that vkGetDeviceQueue with different indices returns
+    // distinct handles, but every driver I've seen does.  Log the
+    // distinct/aliased status so future debugging knows which case we
+    // landed on (matters when we wire actual cross-queue submits in
+    // Phase D.2.1+).
+    {
+        int gfxComputeDistinct  = (be->graphicsQueue != be->computeQueue);
+        int gfxTransferDistinct = (be->graphicsQueue != be->transferQueue);
+        int computeTransferDistinct = (be->computeQueue != be->transferQueue);
+        LOGI("[VKBE-D20] queue distinctness: gfx-vs-compute=%s gfx-vs-transfer=%s "
+             "compute-vs-transfer=%s — async submit %s",
+             gfxComputeDistinct  ? "DIFFERENT" : "SAME",
+             gfxTransferDistinct ? "DIFFERENT" : "SAME",
+             computeTransferDistinct ? "DIFFERENT" : "SAME",
+             (gfxComputeDistinct && computeTransferDistinct) ? "viable" : "single-queue");
+    }
 
     // §I.C.6 — load VK_GOOGLE_display_timing entry points when extension
     // is enabled. PFN miss => disable feature gracefully (refresh-cycle
