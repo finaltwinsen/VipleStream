@@ -1147,17 +1147,36 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
         }
     }
 
-    // §J.3.e.2.i.8 Phase 3d.4h — srcBufferOffset shifts forward by obuShift
-    // bytes (past TD / SEQ_HDR) so the decoder sees only FRAME-OBU bitstream.
-    // Range correspondingly shrinks; align up to 256 (Vulkan video extension
-    // typically wants 256-byte alignment, matches H.265 path's pattern).
-    VkDeviceSize effectiveRange = (VkDeviceSize)ppd->bitstreamDataLen - obuShift;
-    VkDeviceSize alignedRange = (effectiveRange + 255u) & ~VkDeviceSize(255);
+    // §J.3.e.2.i.8 Phase 3d.5 — Vulkan AV1 spec mandates srcBufferOffset
+    // be an integer multiple of minBitstreamBufferOffsetAlignment (= 256
+    // on NV 596.84 RTX 3060, validation VUID-vkCmdDecodeVideoKHR-pDecodeInfo-
+    // 07138).  Phase 3d.4h's "shift past TD/SEQ_HDR" gave offsets like 18
+    // or 2 → driver accepts the call but produces grey output (this is the
+    // "9 bugs fixed but still grey" Phase 3d.5 mystery).
+    //
+    // Fix: align srcBufferOffset DOWN to 256 boundary, expand range to
+    // cover the prefix bytes, and rebase frameHeaderOffset + tile offsets
+    // by the prefix amount so the driver still finds the frame OBU at the
+    // correct relative position.  Aligning down is safe — those prefix
+    // bytes are within bsBuf's contiguous data, the driver reads through
+    // them harmlessly until frameHeaderOffset points it at the OBU start.
+    constexpr VkDeviceSize kBitstreamAlignment = 256;
+    VkDeviceSize desiredStart = (VkDeviceSize)ppd->bitstreamDataOffset + obuShift;
+    VkDeviceSize alignedOffset = desiredStart & ~(kBitstreamAlignment - 1);
+    VkDeviceSize prefixBytes   = desiredStart - alignedOffset;  // 0..255
+    // Re-base in-frame offsets by prefixBytes since srcBufferOffset just
+    // moved backwards by that amount.
+    av1Pic.frameHeaderOffset += (uint32_t)prefixBytes;
+    for (uint32_t i = 0; i < numTiles; i++) {
+        tileOffsetsLocal[i] += (uint32_t)prefixBytes;
+    }
+    VkDeviceSize effectiveRange = (VkDeviceSize)ppd->bitstreamDataLen - obuShift + prefixBytes;
+    VkDeviceSize alignedRange   = (effectiveRange + (kBitstreamAlignment - 1)) & ~(kBitstreamAlignment - 1);
 
     VkVideoDecodeInfoKHR di = { VK_STRUCTURE_TYPE_VIDEO_DECODE_INFO_KHR };
     di.pNext                = &av1Pic;
     di.srcBuffer            = bsBuf->GetBuffer();
-    di.srcBufferOffset      = (VkDeviceSize)ppd->bitstreamDataOffset + obuShift;
+    di.srcBufferOffset      = alignedOffset;
     di.srcBufferRange       = alignedRange;
     di.dstPictureResource   = setupResource;
     di.pSetupReferenceSlot  = &setupSlotInDecode;
