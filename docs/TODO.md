@@ -17,7 +17,6 @@
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | v1.3.275 H.264 native ship 後 dual-present 3-4 Hz blur/sharp；v1.3.276/277 per-slot buffer 改善大半，殘留小 race 等 Phase J.5 整體切換 Vulkan 才補完整 |
 | **Medium-High** | **§I.D** Android Vulkan FRUC async compute | C.5.b 量到 dual-present + waitIdle thermal regression；async compute queue 是真正解 |
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) — 解 NCNN-Vulkan shared path | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
-| **Medium** | **§A.1 + A.11** QSettings org / ini 遷移 | 升級 v1.2.43 起使用者設定看起來像 reset；migration 寫好且測試後再動 |
 | **Medium-Low** | **§A.6** HTTP Basic auth realm | 改了使用者要重登 Web UI；併進其他改動才划算 |
 | **Low** | **§C / §D / §E** 其他語系 / wiki 連結 / Android themed icon | 純品牌 / 視覺一致性 |
 | **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |
@@ -29,20 +28,14 @@
 
 ## §A. 品牌遷移相容性債
 
-### §A.1 QSettings organizationName + Windows registry 主路徑
+### §A.1 + §A.11 QSettings organizationName + Windows registry 主路徑
 
-**目前：** `moonlight-qt/app/main.cpp` 仍是 `setOrganizationName("Moonlight Game Streaming Project")`。Windows 上 paired hosts、偏好設定全部存在 `HKCU\Software\Moonlight Game Streaming Project\VipleStream`。
-
-**現象：** `applicationName` 已是 `VipleStream`（v1.2.43）但 organizationName 沒動，registry 路徑像是「上游品牌名底下的 VipleStream key」。改了 → 路徑換成 `HKCU\Software\VipleStream\VipleStream`，原來的 key 變無主，使用者體感是所有 paired hosts 一夕消失。
-
-**清的時候要做：**
-1. 新版啟動時先用舊 org / app name 構造 `QSettings`，檢查 `HKCU\Software\Moonlight Game Streaming Project\VipleStream` 在不在
-2. 在 → 讀全部 key/value、寫到新的 `QSettings("VipleStream", "VipleStream")`
-3. 砍掉舊 registry 樹（或留 migrated-flag 避免重複搬）
-4. macOS / Linux 同樣處理 `~/.config/Moonlight Game Streaming Project/` → `~/.config/VipleStream/`
-5. unit test 覆蓋初始 / 已遷移 / 部分遷移三種情境
-
-**併合進 A.11**：v1.2.43 把 `applicationName` 改成 `VipleStream` 已經造成升級時設定看起來「回預設值」（檔名從 `Moonlight.ini` 變 `VipleStream.ini`）。這份 migration 也要處理。
+**狀態：** ✅ 已於 v1.2.129 (ff6b5ce) ship — `setOrganizationName("VipleStream")` +
+`setApplicationName("VipleStream")`，啟動時 one-shot migration 從兩個 legacy 位置
+(`Moonlight Game Streaming Project / VipleStream` v1.2.43..128、`Moonlight Game
+Streaming Project / Moonlight` 純 vanilla) 取較新的 paired-hosts snapshot 寫入新
+位置；`migration/v129_org_done` flag 防重複跑；macOS 因 reverse-domain 無 path
+影響不需要 migration（見 main.cpp:431-541 註解）。
 
 ### §A.2 WiX installer 的 registry / install paths
 
@@ -60,7 +53,13 @@
 
 ### §A.6 HTTP Basic auth realm `"Sunshine Gamestream Host"`
 
-**目前：** `Sunshine/src/httpcommon.cpp:132` 用這個字串當 HTTP Basic auth realm。Web UI 登入時 browser 把 username/password 存在這個 realm 下。
+**目前：** `Sunshine/src/confighttp.cpp:131` 用這個字串當 Web UI 401 回應的
+`WWW-Authenticate: Basic realm=...` header。Web UI 登入時 browser 把 username/
+password 存在這個 realm 下。
+
+> 註：之前 TODO 寫成 `httpcommon.cpp:132` 是錯的 — 該行是 cert generation 的
+> Common Name (`gen_creds("Sunshine Gamestream Host", 2048)`)，屬於 §A.7「不該清」
+> 的 wire-format 範圍。realm 跟 cert CN 共用同一個字串只是巧合。
 
 **影響：** realm 一改，browser 已存的憑證對不上新 realm，使用者要重新登入。
 

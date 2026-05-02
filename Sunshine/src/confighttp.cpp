@@ -126,9 +126,16 @@ namespace confighttp {
     tree["status"] = false;
     tree["error"] = "Unauthorized";
 
+    // VipleStream §A.6 — HTTP Basic auth realm rebrand (TODO.md §A.6).
+    // Old realm string was "Sunshine Gamestream Host" (shared coincidentally
+    // with the TLS cert CN in httpcommon.cpp gen_creds(); the cert CN must
+    // stay for wire-format compatibility per §A.7, but this realm is purely
+    // a browser-side credential bucket label and is safe to rename).
+    // After upgrade, browsers will prompt for the Web UI password again
+    // because saved credentials are filed under the old realm.
     const SimpleWeb::CaseInsensitiveMultimap headers {
       {"Content-Type", "application/json"},
-      {"WWW-Authenticate", R"(Basic realm="Sunshine Gamestream Host", charset="UTF-8")"},
+      {"WWW-Authenticate", R"(Basic realm="VipleStream-Server Web UI", charset="UTF-8")"},
       {"X-Frame-Options", "DENY"},
       {"Content-Security-Policy", "frame-ancestors 'none';"}
     };
