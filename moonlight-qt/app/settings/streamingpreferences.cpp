@@ -155,9 +155,16 @@ void StreamingPreferences::reload()
     // enableFrameInterpolation already read above (before bitrate)
     // so getDefaultBitrate can be FRUC-aware.
     frucBackend = static_cast<FrucBackend>(settings.value(SER_FRUCBACKEND, static_cast<int>(FB_GENERIC)).toInt());
-    // §J.3.e.2.i — renderer 預設 RS_VULKAN（VkFruc + 內建 compute FRUC）.
-    // 使用者可在 Settings 下拉切到 RS_D3D11 + frucBackend 設定的 backend.
-    rendererSelection = static_cast<RendererSelection>(settings.value(SER_RENDERERSEL, static_cast<int>(RS_VULKAN)).toInt());
+    // §J.3.e.2.i (v1.3.308) — Vulkan 改為次要/實驗性。預設 fallback
+    // 從 RS_VULKAN 改成 RS_D3D11。Vulkan 路徑（VkFruc native VK_KHR_video_
+    // decode + SW upload）在 NV 596.36 driver 上有 ONLY-mode NVDEC
+    // device-lost (Phase 1.7 五個變體都無法繞過)、AMD Vega 10 上有
+    // ycbcr descriptor pool sizing 邊界情況、PARALLEL+SW 路徑單核 80+
+    // ms/frame 的 perf 限制。Direct3D 11 是上游 Moonlight 多年驗證的
+    // 穩定 renderer，且 FRUC backend 可選 Generic / NV-OF / DirectML /
+    // NCNN，覆蓋面更廣。舊 user 在 settings 已選 Vulkan 的不被改動，
+    // 仍依設定走 Vulkan。新 user 第一次啟動只會看到 D3D11。
+    rendererSelection = static_cast<RendererSelection>(settings.value(SER_RENDERERSEL, static_cast<int>(RS_D3D11)).toInt());
     frucQuality = static_cast<FrucQuality>(settings.value(SER_FRUCQUALITY, static_cast<int>(FQ_BALANCED)).toInt());
     designVariant = static_cast<DesignVariant>(settings.value(SER_DESIGNVARIANT, static_cast<int>(DV_SAFE)).toInt());
     // VipleStream H Phase 2.2: default to ASM_RECENT so users see their

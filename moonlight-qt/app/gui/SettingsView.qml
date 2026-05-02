@@ -724,10 +724,12 @@ Flickable {
                     }
                 }
 
-                // §J.3.e.2.i — VipleStream renderer backend dropdown.
-                // RS_VULKAN (default, val=0) → VkFrucRenderer + 內建 Vulkan
-                // compute FRUC.  RS_D3D11 (val=1) → D3D11VARenderer +
-                // frucBackend 選的補幀引擎 (NV-OF / Generic / DirectML / NCNN).
+                // §J.3.e.2.i (v1.3.308) — VipleStream renderer backend dropdown.
+                //
+                // 自 v1.3.308 起順序改為 D3D11 在前 (default)、Vulkan 在後
+                // 並標 [實驗性]。Enum 值 RS_VULKAN=0 / RS_D3D11=1 不變
+                // (避免 QSettings backwards-compat 災難)，但 model 順序
+                // 反過來 + currentIndex 用 lookup 對應 enum 值。
                 Label {
                     width: parent.width
                     text: qsTr("Renderer 渲染器")
@@ -744,9 +746,16 @@ Flickable {
                         id: rendererSelectionModel
                     }
                     Component.onCompleted: {
-                        rendererSelectionModel.append({text: qsTr("Vulkan (推薦：內建補幀引擎，等同 Generic)"), val: 0})
-                        rendererSelectionModel.append({text: qsTr("Direct3D 11 (可搭配 NV-OF / DirectML / NCNN 補幀引擎)"), val: 1})
-                        currentIndex = StreamingPreferences.rendererSelection
+                        rendererSelectionModel.append({text: qsTr("Direct3D 11 (推薦：穩定，可搭配 NV-OF / DirectML / NCNN 補幀引擎)"), val: 1})
+                        rendererSelectionModel.append({text: qsTr("Vulkan [實驗性] (內建補幀引擎，部分機種有相容性問題)"), val: 0})
+                        // Lookup currentIndex by val (enum value) — model
+                        // order is no longer 1:1 with enum integer.
+                        for (var i = 0; i < rendererSelectionModel.count; i++) {
+                            if (rendererSelectionModel.get(i).val === StreamingPreferences.rendererSelection) {
+                                currentIndex = i
+                                break
+                            }
+                        }
                     }
                     onActivated: {
                         StreamingPreferences.rendererSelection = rendererSelectionModel.get(currentIndex).val
@@ -755,7 +764,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Vulkan：原生 Vulkan 渲染管線 + dual-present 補幀，補幀引擎內建（等同 Generic）。Direct3D 11：傳統 D3D11 渲染，補幀引擎可在下方下拉選擇 (NV-OF / Generic / DirectML / NCNN)。")
+                    ToolTip.text: qsTr("Direct3D 11（推薦）：上游 Moonlight 穩定路徑，補幀引擎可選 Generic / NV-OF / DirectML / NCNN。\n\nVulkan [實驗性]：原生 Vulkan 渲染管線 + dual-present，補幀引擎內建（等同 Generic）。已知問題：NV driver 596.36 上 native vkCmdDecodeVideoKHR 在 ONLY mode 會 NVDEC device-lost；AMD 部分整合顯卡 ycbcr descriptor pool sizing 在舊版 driver 上失敗；PARALLEL+SW upload 路徑 perf 偏低（80+ ms/frame）。穩定後會回到推薦選項。")
                 }
 
                 CheckBox {
