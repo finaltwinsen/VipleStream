@@ -87,9 +87,12 @@ GPU. Notable picks:
 
 - **1920×1080 @ 120 fps** — recommended for desktop client, all 3 codecs
   (H.264 / HEVC / AV1) PASS the SW + HW decode bench at this res.
-- **2560×1440 @ 120 fps** — H.264 + AV1 work; HEVC currently caps at
-  60 fps server-side on certain hardware combos (see TODO §J HEVC 1440p
-  server-cap diagnosis).
+- **2560×1440 @ 120 fps** — works on the default D3D11 renderer (HW
+  decode). On Vulkan + FRUC + HEVC specifically the SW decoder caps at
+  ~50 fps because FRUC bypasses HW decode for CPU-side frame access; if
+  you need FRUC at 1440p120, use H.264 or AV1 (both pass), or stay on
+  D3D11. See [`troubleshooting.md`](./troubleshooting.md) "HEVC 1440p120
+  only delivers ~50 fps when using Vulkan + FRUC".
 - **3840×2160 @ 120 fps** — decoder-bound on i7-11800H-class CPUs even
   in HW decode; consider 60 fps at 4K instead.
 
@@ -141,9 +144,9 @@ input latency.
 - Sunshine config lives at `C:\Program Files\VipleStream-Server\config\sunshine.conf`.
 - Service name is `VipleStreamServer` (not the upstream `SunshineService`).
 - Default install does NOT auto-flip the host display to client-requested
-  resolution — see TODO §J HEVC 1440p server-cap for known limitations
-  with 1440p+ streaming on hosts whose physical / VDD monitor is locked
-  at 1080p60.
+  resolution. Hosts with a physical / VDD monitor locked at 1080p60 will
+  render the client at 1080p60 even if the client requests 1440p120 —
+  configure VDD or use a higher-res dummy plug if you need 1440p+.
 - Adaptive bitrate (AIMD): if the client reports packet loss > 2%, server
   reduces bitrate by 25% per second until loss clears, then ramps back.
   Override in `sunshine.conf` with `adaptive_bitrate_disabled=true`.

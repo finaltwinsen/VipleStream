@@ -127,6 +127,11 @@ private:
     int m_OriginalVideoWidth;
     int m_OriginalVideoHeight;
     int m_VideoFormat;
+    // [VIPLE-NET-WARN] consecutive seconds where receivedFrames < 75% × m_StreamFps.
+    // Used to fire a single warning when client decoder can't keep up with host fps,
+    // so the user can self-diagnose (e.g. 1440p120 HEVC SW decode caps ~50fps).
+    int m_LowReceiveFpsSeconds;
+    bool m_LowReceiveFpsWarned;
     bool m_NeedsSpsFixup;
     bool m_TestOnly;
     TestMode m_CurrentTestMode;

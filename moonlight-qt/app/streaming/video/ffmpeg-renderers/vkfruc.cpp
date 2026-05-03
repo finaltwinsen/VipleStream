@@ -1236,6 +1236,25 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
             teardown();
             return false;
         }
+
+        // [VIPLE-NET-WARN] Startup-time warn for the verified decoder-throughput
+        // cap combo: SW HEVC + 1440p+ + 90+fps caps at ~50fps real on this class
+        // of mobile CPU.  The runtime [VIPLE-NET-WARN] in ffmpeg.cpp also catches
+        // this after 5s, but firing at startup gives the user the actionable hint
+        // before they wait for frame drops.  See project_hevc_1440p_decode_cap
+        // memory + docs/TODO.md §J HEVC 1440p120 decoder-throughput cap.
+        const bool isHevc = (m_VideoFormat & VIDEO_FORMAT_MASK_H265) != 0;
+        const bool highRes = params->height >= 1440;
+        const bool highFps = params->frameRate >= 90;
+        if (isHevc && highRes && highFps) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NET-WARN] SW HEVC %dx%d@%dfps via VkFrucRenderer is known "
+                        "to cap at ~50fps real on mobile CPU classes (libavcodec FRAME-thread "
+                        "throughput limit, NOT packet loss).  For full %dfps consider: switch "
+                        "to default D3D11 renderer (uses NVDEC/DXVA HW decode), reduce to "
+                        "1080p, or pick H.264/AV1 codec.",
+                        params->width, params->height, params->frameRate, params->frameRate);
+        }
     }
 
     // §J.3.e.2.i.4 — FRUC compute pipeline (motion estimate + median filter

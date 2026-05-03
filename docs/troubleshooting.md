@@ -59,13 +59,32 @@ Symptoms: Client overlay shows non-zero `pacerDroppedFrames` or
         - Windows: `HKLM\System\CurrentControlSet\Services\AFD\Parameters\DefaultReceiveWindow` DWORD = `8388608` (8 MB), reboot
         - Linux: `sudo sysctl -w net.core.rmem_max=33554432`
 
-### HEVC 1440p120 only delivers 60 fps
+### HEVC 1440p120 only delivers ~50 fps when using Vulkan + FRUC
 
-This is a known issue documented in [`TODO.md`](./TODO.md) §J HEVC 1440p
-server-cap. On certain hardware combos (RTX 5060 Ti + dummy plug HDMI
-EDID emulator), `hevc_nvenc` produces 60 fps real frames even though
-the encoder is asked for 120 fps. H.264 / AV1 don't show this. Workaround:
-use H.264 or AV1 for 1440p+ streaming until the server-side fix lands.
+This is **not** packet loss or a server-side encoder problem — verified
+via pktmon on both ends (server NIC TX 0 loss, client NIC RX 0 loss,
+2026-05-03 measurement). It's a client-side **SW HEVC decoder
+throughput cap** in the VkFrucRenderer SW upload path.
+
+- **Cause**: When you select Renderer = Vulkan + FRUC enabled, the FRUC
+  ME/warp shaders need CPU-side frame access for staging upload, so HW
+  decode (NVDEC/DXVA) is bypassed and libavcodec SW HEVC runs instead.
+  At 1440p HEVC the SW decoder tops out at ~50 fps on most mobile CPUs.
+  H.264 / AV1 SW decoders are faster and pass 1440p120; HW decode (the
+  default D3D11 renderer's path) handles 1440p120 HEVC easily.
+- **Self-diagnose**: Look for `[VIPLE-NET-WARN]` in the log — it fires
+  at startup for the verified cap combo (SW HEVC + ≥1440p + ≥90fps),
+  and again at runtime if `received fps < 75% × target` for 5s.
+- **Fix (pick one)**:
+    - Switch to default D3D11 renderer (Settings → Renderer). Uses
+      NVDEC/DXVA HW decode, full 120fps.
+    - Stay on Vulkan + FRUC, drop to 1080p120 (passes on all 3 codecs).
+    - Stay on Vulkan + FRUC, switch codec to H.264 or AV1 (both pass
+      1440p120 in SW decode).
+    - Stay on Vulkan + FRUC + HEVC + 1440p, drop frame rate to 60fps.
+
+See [`TODO.md`](./TODO.md) §J HEVC 1440p120 decoder-throughput cap for
+the full diagnosis trail.
 
 ### Stream black-screens / freezes after 10-30 seconds
 

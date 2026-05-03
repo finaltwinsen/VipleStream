@@ -53,6 +53,12 @@ scripts/benchmark/results/
 # name + IP from VipleStream client log lines, so we keep them local-only.
 scripts/benchmark/output/
 
+# ── Per-developer diagnostic tools (pktmon SOP scripts etc.) ──
+# scripts/diag/*.ps1 / *.py / README.md typically hard-code the developer's
+# LAN IPs, NIC component ids, output paths, etc.  The public-facing SOP
+# lives in docs/diag_wire_loss.md; concrete tooling stays local.
+scripts/diag/
+
 # ── External dependencies (auto-downloaded by build) ──
 vcpkg/
 Sunshine/node_modules/

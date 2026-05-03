@@ -245,6 +245,8 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
       m_LastFrameNumber(0),
       m_StreamFps(0),
       m_VideoFormat(0),
+      m_LowReceiveFpsSeconds(0),
+      m_LowReceiveFpsWarned(false),
       m_NeedsSpsFixup(false),
       m_TestOnly(testOnly),
       m_CurrentTestMode(TestMode::TestFrameOnly),
@@ -2464,6 +2466,33 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                     m_ActiveWndVideoStats.framesWithHostProcessingLatency > 0
                         ? (double)m_ActiveWndVideoStats.totalHostProcessingLatency / m_ActiveWndVideoStats.framesWithHostProcessingLatency / 10.0
                         : 0.0);
+
+        // [VIPLE-NET-WARN] When receivedFrames < 75% of host target fps for 5 consecutive
+        // seconds, emit a one-shot warning so users can self-diagnose decoder-throughput
+        // caps (e.g. 1440p120 HEVC SW decode ~50fps in VkFrucRenderer).  Wire-loss has
+        // been ruled out by pktmon at this rate threshold; the bottleneck is downstream
+        // of the NIC.  Reset/quiet logic: fps recovers above threshold → reset counter,
+        // warning re-armed only after a fresh 5s degradation window.
+        if (m_StreamFps > 0) {
+            const unsigned int threshold = (unsigned int)((m_StreamFps * 75 + 99) / 100); // ceil(0.75 × fps)
+            if (m_ActiveWndVideoStats.receivedFrames < threshold) {
+                m_LowReceiveFpsSeconds++;
+                if (m_LowReceiveFpsSeconds >= 5 && !m_LowReceiveFpsWarned) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-NET-WARN] received=%u fps < %u (%d%% of target %d) for 5s — "
+                                "client decoder/pipeline can't keep up.  This is NOT packet loss "
+                                "(verified via pktmon).  Try: switch to default D3D11 renderer, "
+                                "lower resolution to 1080p, or disable FRUC.",
+                                m_ActiveWndVideoStats.receivedFrames, threshold, 75, m_StreamFps);
+                    m_LowReceiveFpsWarned = true;
+                }
+            }
+            else {
+                m_LowReceiveFpsSeconds = 0;
+                m_LowReceiveFpsWarned = false;
+            }
+        }
+
         // Update overlay stats if it's enabled
         if (Session::get()->getOverlayManager().isOverlayEnabled(Overlay::OverlayDebug)) {
             VIDEO_STATS lastTwoWndStats = {};

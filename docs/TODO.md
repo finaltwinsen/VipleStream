@@ -13,7 +13,7 @@
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
 | **Active (主戰場)** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限）|
-| **Active (diagnosed)** | **§J HEVC 1440p server cap** | Server 跑 122fps NVENC + broadcast 38Mbps 上 wire；client 端 50% LAN 丟包，需 Wireshark + UDP buffer 工程；instrumentation 已 ship at v1.3.327 |
+| **Diagnosed (not LAN)** | **§J HEVC 1440p decoder-throughput cap** | pktmon 雙端 pcap 證實 wire 0 loss；root cause 是 RS_VULKAN + VkFrucRenderer SW HEVC 1440p decode throughput ~50fps；非 FRUC 預設 D3D11 + DXVA HW decode 不受影響 |
 | **Done + open hw-pending** | **§I.D** Android Vulkan FRUC async compute | D.2.0–D.2.5 全部 verified on Pixel 5；剩自然 45fps→90Hz ideal 1:2 比例 — Pixel 5 panel 鎖 60/90Hz、GameManagerService 鎖 60fps，需 LTPO panel hw 才能驗 |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 3d.6 — AV1 native VK decode grey | 9 個 parser bug 修完仍 grey；NV driver 596.36 + AV1 vkCmdDecodeVideoKHR 黑/灰，要 RenderDoc + vk_video_samples diff，AV1 預設走 libdav1d SW 不擋使用 |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 1.7 ONLY-mode NVDEC device-lost | 5 個變體都繞不過，NV 596.36 結構性 bug，預設 PARALLEL 穩 |
@@ -173,34 +173,56 @@ Pixel 5 panel 只支援 60Hz/90Hz mode，GameManagerService 又把 app default f
 | **§J.4** HEVC + H264 decode + 跨平台驗證 | Linux full coverage；macOS 路徑決策 | 規劃中 |
 | **§J.5** 整合測試 + fallback hardening + 預設切換 | NV / AMD / Intel bench；舊 driver 退回 D3D11；預設改 Vulkan | 規劃中 |
 
-### §J HEVC 1440p120 server-side cap（**已 diagnosed，gated on Wireshark**）
+### §J HEVC 1440p120 decoder-throughput cap（**diagnosed 2026-05-03，root cause 不是 LAN**）
 
-**現象：** 在這台 host (RTX 5060 Ti) 上 HEVC 1440p+ 客戶端 stream 只收到 60fps real，H.264 / AV1 在同一硬體 1440p120 收到滿 120fps。
+**現象：** RS_VULKAN + VkFrucRenderer (SW HEVC decode) 跑 1440p120 時 client 只收到 ~50 fps real。預設 RS_D3D11 + DXVA HW decode 在同樣 1440p120 順跑滿 120fps。
 
-**已驗證（commit `a9d62b3` + `c051f6e`）：**
+**2026-05-03 雙端 pktmon pcap 結論：wire 完全乾淨，cap 在 client decoder pipeline。**
 
-- Server NVENC 跑 122 calls/sec，encode_frame total avg 2.26ms — encoder fine
-- Sunshine broadcast thread popped 122 packets/sec × 38.7 Mbps 真的上 wire
-- Client OS UDP `Receive Errors=0`，NIC `ReceivedDiscardedPackets=0` — client OS / NIC 沒丟
-- Client moonlight 收到 ~70 fps + networkDropped 51 fps（合計 ~121）
-- 推算 server NIC TX → client NIC RX 中間 ~16% packet 損失 → ~50% frame 損失（FEC 10% 撐不住）
-- **失敗實驗：**
-  - Round 1: RTP_RECV_PACKETS_BUFFERED 2048→8192 加 always-on getsockopt 驗證，OS 真的給滿 11.5MB buffer，但 networkDropped 沒改變 — 不是 buffer overflow。
-  - Round 2: `VIPLE_SMOOTH_PACING=1` 環境變數 opt-in 把 Sunshine ratecontrol 從 line-rate 改 stream-bitrate-shaped — networkDropped 沒改，且發現 AV1 1080p120 在開啟下從 120→94 fps（big I-frame 需要 fast burst），確認該 opt-in 不能設預設 on。
-  - Round 5: FEC 10%→35% — networkDropped 變更糟（更大 frame size → 更多 burst 壓力），revert。
+| Stage | 工具 | 量到的 rate | loss |
+|---|---|---|---|
+| Server NVENC | `[VIPLE-NVENC-RATE]` | 122 calls/sec | — |
+| Server broadcast pop | `[VIPLE-BCAST-RATE]` | 122 fps × ~38 Mbps | — |
+| Server NIC TX | pktmon `--comp <id>` (physical NIC, dup_factor=1×) | 13525 packets / 6.6s, 2040 pps | **0 missing** |
+| Client NIC RX | pktmon (UAC elevated, all NDIS 5 layers, 5× dedup) | 35636 unique seqs / 13.3s, 2682 pps | **0 missing** |
+| Client received | `[VIPLE-NET]` | ~50 fps | — |
+| Client networkDropped | `[VIPLE-NET]` | ~34–51 fps | — |
+| Client total = received + networkDropped | `[VIPLE-NET]` | ~85–105 fps | — |
+| Vulkan upload + present | `[VIPLE-VKFRUC-Stats]` | 46–52 fps | totalfn ~1ms |
 
-**結論：drop 落在 server NIC TX 跟 client NIC RX 之間**（在 OS UDP layer 之前）。可能是 NIC 驅動 TX buffer / LAN 交換器 / 線材 / NIC RX coalescing。**沒 Wireshark 抓不出來。**
+**真正 root cause：**
 
-**Wireshark MCP 嘗試：** 系統不在 registry，winget 安裝 Wireshark 需要 UAC elevation 但 Claude Code tool environment 拿不到（user 嘗試了 `自行安裝Wireshark mcp` 但 elevation 提示在 tool 流程被自動 cancel）。`pktmon` (Windows 內建) 也需 admin 才能 talk to driver。**真正進一步需要 user 在 host + client 開 Wireshark 抓 pcap 自己看，client codebase 沒空間繼續推。**
+- libavcodec HEVC SW decode（FRAME threading × 8 thread）在這台 mobile CPU 上 1440p HEVC 的 throughput 上限就是 ~50 fps。1080p HEVC 11.18ms p95 的測量結果在 1440p（pixel 1.78×）對應 ~20ms，但實測 wall-clock decodeMean 90–110ms（FRAME-threading pipeline depth latency；steady-state throughput 還是 ~50fps）。
+- `networkDropped` 是 moonlight-common-c 的 frame-number gap 計數，**不是封包遺失**。是 decoder back-pressure stall 住 RTP draining → FEC reassembly window 內 partially-formed frame 被 evict → 下一個收完的 frame 看到 frameNumber 跳號 → 計入 networkDropped。
+- Vulkan upload path 本身沒問題：`totalfn ~1ms`（SSE2 UV interleave 後 mem_UV ~220us、submit ~200us）。
 
-**已就位 instrumentation（v1.3.327+ 起一直在印）：**
+**為什麼 Vulkan + FRUC 強制 SW decode：** [`ffmpeg-renderers/vkfruc.cpp`](../moonlight-qt/app/streaming/video/ffmpeg-renderers/vkfruc.cpp) 在 ctor 標 `[VIPLE-VKFRUC-SW] forcing software decoder` — FRUC ME/warp shader 需要 CPU-side frame 做 staging buffer upload，HW decoder 沒有方便的 zero-copy 路徑進 Vulkan。Phase B（D3D11/NVDEC → Vulkan shared image）已知 NV 596.84 device-lost，見 `project_phase_b_dead_end.md`。
+
+**已嘗試但無效（2026-04-30~05-02）：**
+
+- Round 1: `RTP_RECV_PACKETS_BUFFERED` 2048→8192 + always-on getsockopt 驗證，OS 真的給滿 11.5MB buffer，networkDropped 沒改 — **不是 socket overflow**
+- Round 2: `VIPLE_SMOOTH_PACING=1` env opt-in（Sunshine ratecontrol line-rate→bitrate-shaped），networkDropped 沒改，且 AV1 1080p120 退化 120→94fps（I-frame 需要 fast burst），確認不能設預設 on
+- Round 5: FEC 10%→35%，networkDropped 變更糟（更大 frame size → 更多 burst 壓力），revert
+- 之前推估「server NIC↔client NIC 間 16% 封包遺失 → 50% frame 遺失」**錯了** — pcap 證明 wire 0 loss
+
+**fix path（依工時排序）：**
+
+1. **小：UI / log warn** — 偵測 `received_fps < 0.75 × target_fps` 連續 5s 時印 `[VIPLE-NET-WARN]` 並（可選）overlay 提示「客戶端解碼跟不上 — 改用預設 D3D11 渲染器或降低解析度」。純診斷增益，不改行為。
+2. **中：1440p120 + Vulkan + FRUC 自動回退** — `Session::populateAppropriateBitrate` 或 renderer-selection 階段 detect 該 combo，提示使用者並建議 1080p120 或 1440p60。
+3. **大（重啟 Phase B）：HW decode 直接灌 Vulkan via shared image** — 解掉 SW decode 瓶頸的根本路。要重新攻 NV 596.84 ID3D11Fence + VkSemaphore 同步路徑或 ID3D12Device intermediary（§J.1 路線 A）。已知 dead-end，但今年 NV driver 已從 596.84→596.36→更新版，值得 re-verify。
+
+**用 D3D11 預設不踩這個坑：** 一般 user 不選 Vulkan + FRUC 就沒影響；目前 v1.3.308 起 Vulkan 標 [實驗性]。**FRUC + 1440p120 + HEVC** 才是踩 cap 的特定組合。
+
+**已就位 instrumentation：**
 
 - `[VIPLE-NVENC] encode_frame total / wait_async_evt / lock_bitstream / bitstream_size` (5s window)
 - `[VIPLE-NVENC-RATE]` 每 5s N calls/sec
 - `[VIPLE-BCAST-RATE]` 每 5s popped fps + Mbps
 - `[VIPLE-NET]` client-side received / decoded / networkDropped / decodeMeanMs / hostLatency 每秒一行
+- `[VIPLE-VKFRUC-SW-PROF]` mem_Y / mem_UV / fence / submit / present 五段 percentile
 - `Actual receive buffer size: N (requested: M)` + 不到一半時的 WARNING — moonlight-common-c PlatformSockets always-on
-- `VIPLE_SMOOTH_PACING=1` env opt-in (server-side bitrate-shaped pacing — 不擋 default，要修 client RX 突發容量時可開)
+- `VIPLE_SMOOTH_PACING=1` env opt-in（已驗證會傷 AV1 burst，**不能設預設 on**）
+- [`docs/diag_wire_loss.md`](./diag_wire_loss.md) — pktmon 雙端 capture + tshark 序號 dedup 分析 SOP。任何「`networkDropped > 0` 是不是 LAN 丟包」的疑問，**第一步**走這套流程：兩端 capture，`Missing packets: 0` 就確認 wire 乾淨，往 OS UDP / FEC reassembly / decoder throughput 找。具體 .ps1 / .py 工具在開發者本機（IP / 路徑 / NIC id 個人化），不入版本管。
 
 ### §J.3.e VkFrucRenderer（Android architecture port，**目前主戰場**）
 
