@@ -18,6 +18,7 @@
 #include <jni.h>
 #include <android/log.h>
 #include <android/native_window_jni.h>
+#include <sys/system_properties.h>
 // AHB JNI helpers are API 26+. minSdk is 21, so the headers reject the
 // calls unless the build sets __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__
 // (in Android.mk LOCAL_CFLAGS). At runtime VkBackend gates this whole
@@ -1037,14 +1038,32 @@ static int create_swapchain(vk_backend_t* be)
     }
     status_log("create_swapchain: 10-bit format probe done");
 
-    // FIFO always available + always honors vsync. iter 6 (v1.2.168) tried
+    // FIFO always available + always honors vsync.  iter 6 (v1.2.168) tried
     // MAILBOX preference to skip vsync block on PASS 1 of dual present —
-    // user reported v1.2.171 60→56 FPS regression on Pixel 5 single
-    // mode, so reverted to FIFO. MAILBOX may help dual mode on Pixel 9
-    // (60→120) but the cost on single mode is too high to keep as
-    // default. iter 14 (later) can re-introduce MAILBOX as opt-in via
-    // settings or per-mode swapchain rebuild.
+    // user reported v1.2.171 60→56 FPS regression on Pixel 5 single mode,
+    // so reverted to FIFO.  MAILBOX may help dual mode on Pixel 9
+    // (60→120) but the cost on single mode is too high to keep as default.
+    //
+    // §I.D mailbox-per-mode opt-in: `debug.viplestream.mailbox=1` swaps the
+    // present mode preference order to MAILBOX → FIFO_RELAXED → FIFO.
+    // MAILBOX never blocks and replaces queued frames with newer ones — a
+    // good fit for dual-present FRUC on high-refresh panels (skipping the
+    // PASS 1 vsync wait that pulls input cadence down to half display rate).
+    // FIFO_RELAXED is the middle ground: vsync-locked unless we miss the
+    // deadline.  Swapchain present mode is fixed at create time so this is
+    // selected once per session — users who toggle FRUC on/off mid-session
+    // would need to restart the stream to switch.
     VkPresentModeKHR present = VK_PRESENT_MODE_FIFO_KHR;
+    int prefMailbox = 0;
+    {
+        char propVal[PROP_VALUE_MAX] = {0};
+        if (__system_property_get("debug.viplestream.mailbox", propVal) > 0) {
+            if (propVal[0] == '1' || propVal[0] == 't' || propVal[0] == 'T') {
+                prefMailbox = 1;
+                LOGI("[VKBE-MAILBOX] debug.viplestream.mailbox=1 — preferring MAILBOX → FIFO_RELAXED → FIFO");
+            }
+        }
+    }
     uint32_t pmCountSeen = 0;
     {
         uint32_t pmCount = 0;
@@ -1055,20 +1074,35 @@ static int create_swapchain(vk_backend_t* be)
                 vkGetPhysicalDeviceSurfacePresentModesKHR(be->physDevice, be->surface,
                                                           &pmCount, pms);
                 LOGI("present modes available (%u):", pmCount);
+                int hasMailbox = 0;
+                int hasFifoRelaxed = 0;
                 for (uint32_t i = 0; i < pmCount; i++) {
+                    if (pms[i] == VK_PRESENT_MODE_MAILBOX_KHR)        hasMailbox = 1;
+                    if (pms[i] == VK_PRESENT_MODE_FIFO_RELAXED_KHR)   hasFifoRelaxed = 1;
                     LOGI("  [%u] = %d %s", i, pms[i],
                          pms[i] == VK_PRESENT_MODE_FIFO_KHR ? "(FIFO)" :
-                         pms[i] == VK_PRESENT_MODE_MAILBOX_KHR ? "(MAILBOX, available but not picked — see iter 6 revert)" :
+                         pms[i] == VK_PRESENT_MODE_MAILBOX_KHR ? "(MAILBOX)" :
                          pms[i] == VK_PRESENT_MODE_IMMEDIATE_KHR ? "(IMMEDIATE)" :
                          pms[i] == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "(FIFO_RELAXED)" : "");
+                }
+                if (prefMailbox) {
+                    if (hasMailbox)            present = VK_PRESENT_MODE_MAILBOX_KHR;
+                    else if (hasFifoRelaxed)   present = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+                    // else stays at FIFO
                 }
                 free(pms);
             }
         }
         pmCountSeen = pmCount;
     }
-    LOGI("picked present mode = FIFO (%d)", present);
-    status_log("create_swapchain: %u present modes listed (picked FIFO)", pmCountSeen);
+    const char* pmName =
+        present == VK_PRESENT_MODE_MAILBOX_KHR       ? "MAILBOX" :
+        present == VK_PRESENT_MODE_FIFO_RELAXED_KHR  ? "FIFO_RELAXED" :
+        present == VK_PRESENT_MODE_IMMEDIATE_KHR     ? "IMMEDIATE" :
+                                                       "FIFO";
+    LOGI("picked present mode = %s (%d)%s", pmName, present,
+         prefMailbox ? " [opt-in via debug.viplestream.mailbox]" : "");
+    status_log("create_swapchain: %u present modes listed (picked %s)", pmCountSeen, pmName);
 
     uint32_t imageCount = caps.minImageCount + 1;
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
