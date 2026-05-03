@@ -563,25 +563,42 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
             // Critical for low-jitter output cadence: cap libdav1d's internal
             // frame queue with `max_frame_delay=1`.  Default (0=auto) lets
             // libdav1d batch up to N frames behind the dispatcher, which then
-            // emits them in bursts from avcodec_receive_frame().  That bursty
-            // output is what shows up downstream as bimodal Pacer cadence
-            // (p50≈7ms / p95≈16ms vs HEVC's tight ≈12ms p95) when the
-            // VsyncSource is disabled and submitFrame is called inline.  With
+            // emits them in bursts from avcodec_receive_frame().  With
             // max_frame_delay=1 libdav1d holds at most 1 frame, so output
             // cadence matches input cadence (~8.33ms at 120fps).
             m_VideoDecoderCtx->thread_type  = FF_THREAD_FRAME;
             m_VideoDecoderCtx->thread_count = qMin(8, cpus);
             av_opt_set_int(m_VideoDecoderCtx->priv_data, "max_frame_delay", 1, 0);
         }
+        else if (m_VideoDecoderCtx->codec_id == AV_CODEC_ID_HEVC) {
+            // libavcodec HEVC SW decoder.  At 1440p120 the original
+            // FF_THREAD_SLICE × MAX_SLICES=4 throttled to ~60fps because
+            // server-side NVENC may emit fewer slices than we requested
+            // and slice threads sit idle.  FF_THREAD_FRAME parallelizes
+            // across frames (each decoded on its own pool thread) — total
+            // throughput then limited by aggregate CPU, not per-frame
+            // single-thread latency.  Adds ~thread_count frames of latency
+            // (acceptable for streaming, Pacer already buffers).
+            m_VideoDecoderCtx->thread_type  = FF_THREAD_FRAME;
+            m_VideoDecoderCtx->thread_count = qMin(8, cpus);
+        }
         else {
+            // H.264 etc. — slice threading was sufficient at 1080p120 and
+            // 1440p120 in measurement.  Keep status quo until proven needed.
             m_VideoDecoderCtx->thread_type  = FF_THREAD_SLICE;
             m_VideoDecoderCtx->thread_count = qMin(MAX_SLICES, cpus);
+        }
+        const char* threadTypeStr;
+        switch (m_VideoDecoderCtx->thread_type) {
+            case FF_THREAD_FRAME:                  threadTypeStr = "FRAME"; break;
+            case FF_THREAD_SLICE:                  threadTypeStr = "SLICE"; break;
+            case FF_THREAD_FRAME|FF_THREAD_SLICE:  threadTypeStr = "FRAME|SLICE"; break;
+            default:                               threadTypeStr = "?"; break;
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-SW-THREAD] codec=%s thread_type=%s thread_count=%d "
                     "max_frame_delay=%s (cpus=%d)",
-                    decoder->name,
-                    m_VideoDecoderCtx->thread_type == FF_THREAD_FRAME ? "FRAME" : "SLICE",
+                    decoder->name, threadTypeStr,
                     m_VideoDecoderCtx->thread_count,
                     m_VideoDecoderCtx->codec_id == AV_CODEC_ID_AV1 ? "1" : "default",
                     cpus);
