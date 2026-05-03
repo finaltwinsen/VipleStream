@@ -5155,7 +5155,14 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     auto _profT1aY = std::chrono::steady_clock::now();
     if (!useNativeDecodeEarly) {
         uint8_t* dst = (uint8_t*)m_SwStagingMapped + stagingSlotOffset;
-        // Y plane: same layout for both YUV420P and NV12, just stride-fix copy.
+        // Y plane: same layout for both YUV420P and NV12, just stride-fix
+        // copy.  Tested manual SSE2 non-temporal stores (Round 14) and they
+        // *regressed* — modern libc memcpy is already hand-tuned with
+        // prefetching + NT-store cadence + alignment handling that beats a
+        // naive 64-byte _mm_stream_si128 loop.  Empirical at 4K AV1: NT-store
+        // raised mem_Y mean 770→920µs and dropped AV1 throughput 76→62fps.
+        // Conclusion: trust the compiler's memcpy here; revisit only if a
+        // future profile shows libc memcpy NOT using NT-stores on this path.
         for (int y = 0; y < H; y++) {
             memcpy(dst + y * W, frame->data[0] + y * frame->linesize[0], W);
         }

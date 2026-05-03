@@ -22,7 +22,8 @@
 | **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |
 | **Low** | **§G.1** RIFE v1 11-channel | A1000 launch overhead bound (§G.3 negative result)；RTX 30/40+ 才有意義 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
-| **Low** | **§D / §E** 文件 + Android icon 補齊 | HelpLauncher 等正式 docs；Android 12+ themed icon 已 wire，splash + recent-apps 待真機驗 |
+| **Low** | **§D** HelpLauncher URL → 結構化 docs | docs/setup_guide.md + docs/troubleshooting.md 已寫；HelpLauncher 切過去等 doc site stand 起來 |
+| **Done** | **§E** Android icon 三處驗證 | home / recents / splash 全在 Pixel 5 (Android 15) 確認正確 |
 | **Won't fix** | **§A.7** Wire-protocol 字串 | 動了等於跟 Moonlight 生態斷線，違背「混搭互聯」設計 |
 
 ---
@@ -61,18 +62,15 @@
 
 ## §D. 上游 wiki 連結
 
-**狀態：** 🟡 部分 ship — `moonlight-android/.../HelpLauncher.java` 的 setup guide + troubleshooting 已改指 `https://github.com/finaltwinsen/VipleStream#readme`；GameStream EOL FAQ 維持上游 `moonlight-stream/moonlight-docs` wiki。
+**狀態：** 🟡 部分 ship — `moonlight-android/.../HelpLauncher.java` 的 setup guide + troubleshooting 目前指 `https://github.com/finaltwinsen/VipleStream#readme`；GameStream EOL FAQ 維持上游 `moonlight-stream/moonlight-docs` wiki。
 
-**還沒做：** 等 VipleStream 自己有結構化 setup guide / troubleshooting / 錯誤碼表時，把 HelpLauncher URL 從 README 換成那些頁面 anchor。
+**已加但未連線：** [`docs/setup_guide.md`](./setup_guide.md) + [`docs/troubleshooting.md`](./troubleshooting.md) 已寫（pairing / config / FRUC / common failure modes 都有），等 GitHub Pages 或類似 doc site stand 起來後，把 HelpLauncher URL 從 README anchor 換成 docs/* 頁面 anchor。
 
 ---
 
 ## §E. moonlight-android Icon 補完
 
-**狀態：** 🟡 部分 ship — Android 12+ themed icon (Material You) 自 v1.2.36 已 wire (`<monochrome>` element reuse `ic_launcher_foreground` 當 silhouette mask)。剩下兩件事需 Android 機驗證才知道是否需動：
-
-- Splash screen 在 Android 12+ SplashScreen API 下顯示是否用新 icon
-- 「最近應用程式」列表 icon 在各 Android 版本（10/11/12/13/14）顯示
+**狀態：** ✅ 已驗 on Pixel 5 (Android 15) — home screen launcher、recents screen card、splash screen 三處全部正確使用 VipleStream "V" 圖示（lime on black circle）。Android 12+ themed icon (Material You) 在使用者啟用「Themed icons」時會自動切換為 `<monochrome>` 黑白剪影；預設關閉時用全彩 adaptive icon。`docs/_drafts/android_icon_eval/` 留有截圖佐證（不入版控）。
 
 ---
 
@@ -175,32 +173,34 @@ Pixel 5 panel 只支援 60Hz/90Hz mode，GameManagerService 又把 app default f
 | **§J.4** HEVC + H264 decode + 跨平台驗證 | Linux full coverage；macOS 路徑決策 | 規劃中 |
 | **§J.5** 整合測試 + fallback hardening + 預設切換 | NV / AMD / Intel bench；舊 driver 退回 D3D11；預設改 Vulkan | 規劃中 |
 
-### §J HEVC 1440p120 server-side cap（**已 diagnosed，未修**）
+### §J HEVC 1440p120 server-side cap（**已 diagnosed，gated on Wireshark**）
 
 **現象：** 在這台 host (RTX 5060 Ti) 上 HEVC 1440p+ 客戶端 stream 只收到 60fps real，H.264 / AV1 在同一硬體 1440p120 收到滿 120fps。
 
-**已驗證的（commit `a9d62b3` 加了 instrumentation）：**
+**已驗證（commit `a9d62b3` + `c051f6e`）：**
 
-- Server NVENC 跑 122 calls/sec，encode_frame total avg 2.26ms，max 5.27ms — 編碼器 fine
-- Sunshine broadcast thread popped 122 packets/sec × 38.7 Mbps **真的上 wire**
-- Client 收到 ~70 fps + networkDropped 51 fps（合計 ~121，跟 server 送的數量對得上）
-- 是 client-side **50% LAN 丟包**，不是 server slowness
+- Server NVENC 跑 122 calls/sec，encode_frame total avg 2.26ms — encoder fine
+- Sunshine broadcast thread popped 122 packets/sec × 38.7 Mbps 真的上 wire
+- Client OS UDP `Receive Errors=0`，NIC `ReceivedDiscardedPackets=0` — client OS / NIC 沒丟
+- Client moonlight 收到 ~70 fps + networkDropped 51 fps（合計 ~121）
+- 推算 server NIC TX → client NIC RX 中間 ~16% packet 損失 → ~50% frame 損失（FEC 10% 撐不住）
+- **失敗實驗：**
+  - Round 1: RTP_RECV_PACKETS_BUFFERED 2048→8192 加 always-on getsockopt 驗證，OS 真的給滿 11.5MB buffer，但 networkDropped 沒改變 — 不是 buffer overflow。
+  - Round 2: `VIPLE_SMOOTH_PACING=1` 環境變數 opt-in 把 Sunshine ratecontrol 從 line-rate 改 stream-bitrate-shaped — networkDropped 沒改，且發現 AV1 1080p120 在開啟下從 120→94 fps（big I-frame 需要 fast burst），確認該 opt-in 不能設預設 on。
+  - Round 5: FEC 10%→35% — networkDropped 變更糟（更大 frame size → 更多 burst 壓力），revert。
 
-**Hypothesis（未驗）：** HEVC 每幀 38KB / 27 packets 的 burst 在 ~0.4ms 用 ratecontrol 1Gbps × 80% 的 line-rate 送出去，client AFD / SO_RCVBUF 撐不住這個 burst rate；H.264 / AV1 per-frame packet 數較少（~18-20）所以撐得住。
+**結論：drop 落在 server NIC TX 跟 client NIC RX 之間**（在 OS UDP layer 之前）。可能是 NIC 驅動 TX buffer / LAN 交換器 / 線材 / NIC RX coalescing。**沒 Wireshark 抓不出來。**
 
-**真要修的 path（multi-hour scope，session 內 fit 不下）：**
+**Wireshark MCP 嘗試：** 系統不在 registry，winget 安裝 Wireshark 需要 UAC elevation 但 Claude Code tool environment 拿不到（user 嘗試了 `自行安裝Wireshark mcp` 但 elevation 提示在 tool 流程被自動 cancel）。`pktmon` (Windows 內建) 也需 admin 才能 talk to driver。**真正進一步需要 user 在 host + client 開 Wireshark 抓 pcap 自己看，client codebase 沒空間繼續推。**
 
-1. Wireshark capture client NIC 期間 HEVC vs H.264 1440p120，確認丟包點（NIC / AFD / app socket）
-2. 改 moonlight `RTP_RECV_PACKETS_BUFFERED` 從 2048→8192 + 加 getsockopt(SO_RCVBUF) 驗證 actual size 並 retry
-3. Sunshine 改 `ratecontrol_packets_in_1ms` 從 line-rate-based 改 stream-bitrate-based（38Mbps → ~3 packets/ms 更平滑）
-4. 跟 sunshine 上游同步看有無相關 issue / PR
-
-**已就位 instrumentation（v1.3.327 起 host service log 一直在印）：**
+**已就位 instrumentation（v1.3.327+ 起一直在印）：**
 
 - `[VIPLE-NVENC] encode_frame total / wait_async_evt / lock_bitstream / bitstream_size` (5s window)
-- `[VIPLE-NVENC-RATE]` 每秒 N calls/sec
-- `[VIPLE-BCAST-RATE]` 每 5s pop fps + Mbps
+- `[VIPLE-NVENC-RATE]` 每 5s N calls/sec
+- `[VIPLE-BCAST-RATE]` 每 5s popped fps + Mbps
 - `[VIPLE-NET]` client-side received / decoded / networkDropped / decodeMeanMs / hostLatency 每秒一行
+- `Actual receive buffer size: N (requested: M)` + 不到一半時的 WARNING — moonlight-common-c PlatformSockets always-on
+- `VIPLE_SMOOTH_PACING=1` env opt-in (server-side bitrate-shaped pacing — 不擋 default，要修 client RX 突發容量時可開)
 
 ### §J.3.e VkFrucRenderer（Android architecture port，**目前主戰場**）
 
