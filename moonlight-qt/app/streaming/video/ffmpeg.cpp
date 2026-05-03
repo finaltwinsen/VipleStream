@@ -620,6 +620,65 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     // Allocate enough extra frames for Pacer to avoid stalling the decoder
     m_VideoDecoderCtx->extra_hw_frames = PACER_MAX_OUTSTANDING_FRAMES;
 
+    // §J.3.f latency tune (2026-05-03) — AV1's vulkan hwaccel is hard-coded to
+    // dedicated_dpb mode in ffmpeg's vulkan_decode.c:1368
+    // (`if (dec->dedicated_dpb || avctx->codec_id == AV_CODEC_ID_AV1)`),
+    // meaning the OUTPUT image pool is separate from the DPB pool.  The
+    // pool size = max_ref_frames + 1 + extra_hw_frames; Pacer downstream
+    // holds K frames before render, so steady-state decode-ahead pipeline
+    // depth = pool_size - K.  At 120fps that's per-frame wall-clock
+    // latency = depth × 8.3ms.
+    //
+    // HEVC vulkan uses in-place decode (DPB == output) on NV driver, so
+    // pipeline depth is bounded by ffmpeg's internal sequencing (~1 frame),
+    // hence 0.3ms per frame.  For AV1, with default extra_hw_frames=4 and
+    // 8 ref slots, pool=13, Pacer holds ~4 → decode runs 9 frames ahead →
+    // 75-100ms wall-clock latency observed.
+    //
+    // 2026-05-03 round 1: extra_hw_frames=1 → 100ms→5ms (20× faster).
+    // 2026-05-03 round 2: try to push under 5ms toward HEVC's 0.3ms.
+    //
+    //  (a) extra_hw_frames=0 — tightest possible pool.  Decoder may stall
+    //      briefly on Pacer hold spike, but Pacer's own buffer absorbs
+    //      that.  Empirical risk: rare 1-frame stutter under heavy GPU
+    //      contention; acceptable trade for tighter latency.
+    //  (b) AV_CODEC_EXPORT_DATA_FILM_GRAIN — tells ffmpeg's AV1 hwaccel
+    //      to export film-grain metadata as side data instead of running
+    //      the in-decoder film grain synthesis pass on every frame
+    //      (vulkan_decode.c:832 sets filmGrainSupport = !flag).  Sunshine
+    //      streams have no film grain anyway (no codec config asks for
+    //      it), so synthesis is a no-op kernel that still costs GPU time.
+    //  (c) AV_CODEC_FLAG2_FAST — opts into "any decoder behavior that
+    //      sacrifices strict spec compliance for speed".  For AV1 this
+    //      enables some shortcut paths in deblocking/CDEF; quality cost
+    //      is imperceptible for game streaming workloads.
+    //
+    // HEVC/H.264 unaffected (in-place path doesn't depend on
+    // extra_hw_frames for pipeline depth, and FILM_GRAIN flag has no
+    // effect on non-AV1 codecs).
+    //
+    // 2026-05-03 round 2 attempts (none beat round 1 stably):
+    //   * extra_hw_frames=0 → 5→6.7ms steady + 78ms startup spike (pool
+    //     starves Pacer on hold spike).
+    //   * extra_hw_frames=2 + FLAG2_FAST → best moment 2.9ms but variance
+    //     to 10ms; high jitter.
+    //   * extra_hw_frames=1 + FLAG2_FAST → 5.3–6.3ms; FAST flag had no
+    //     measurable effect (sometimes 3ms moments visible but not
+    //     reproducible vs =1 alone).
+    //   * EXPORT_DATA_FILM_GRAIN → unstable, no improvement.
+    //
+    // 5ms is the architectural floor for AV1 vulkan on NV driver.  It's
+    // the dedicated_dpb DPB→output copy cost (HEVC at 0.3ms uses in-place
+    // decode; AV1 hard-coded to dedicated_dpb in vulkan_decode.c:1368).
+    // To push lower needs either an ffmpeg patch (force in-place when
+    // driver advertises DPB_AND_OUTPUT_COINCIDE for AV1) or different GPU.
+    if ((m_VideoDecoderCtx->codec_id == AV_CODEC_ID_AV1) && m_HwDecodeCfg) {
+        m_VideoDecoderCtx->extra_hw_frames = 1;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VK-VIDEO] §J.3.f AV1 hwaccel — extra_hw_frames "
+                    "tuned 4→1 (dedicated-DPB pipeline depth)");
+    }
+
     // For non-hwaccel decoders, set the pix_fmt to hint to the decoder which
     // format should be used. This is necessary for certain decoders like the
     // out-of-tree nvv4l2dec decoders for L4T platforms. We do not do this
@@ -2444,6 +2503,18 @@ void FFmpegVideoDecoder::decoderThreadProc()
 
                         // Store the presentation time (90 kHz timebase)
                         frame->pts = (int64_t)du.rtpTimestamp;
+
+                        // [VIPLE-DEC-DEPTH] §J.3.f recon — log queue depth at receive
+                        // to understand whether decoder is pipeline-deep (HEVC ~1,
+                        // AV1 ~12 expected) vs queue back-pressure.  Sample 1/120
+                        // frames to avoid log spam.
+                        if ((m_FramesOut % 120) == 0) {
+                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                        "[VIPLE-DEC-DEPTH] queueDepth=%d "
+                                        "frameLatencyUs=%lld",
+                                        m_FrameInfoQueue.size(),
+                                        (long long)(LiGetMicroseconds() - du.enqueueTimeUs));
+                        }
                     }
 
                     m_ActiveWndVideoStats.decodedFrames++;

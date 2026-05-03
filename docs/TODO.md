@@ -14,7 +14,8 @@
 |---|---|---|
 | **Active (主戰場)** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限）|
 | **Diagnosed (not LAN)** | **§J HEVC 1440p decoder-throughput cap** | pktmon 雙端 pcap 證實 wire 0 loss；root cause 是 RS_VULKAN + VkFrucRenderer SW HEVC 1440p decode throughput ~50fps；非 FRUC 預設 D3D11 + DXVA HW decode 不受影響 |
-| **Done (§J.3.f)** | **AV1 / HEVC / H.264 vulkan_hwaccel via ffmpeg** | rebuild minimal FFmpeg 8.1 + `VIPLE_USE_VK_DECODER=1` opt-in；1440p120 三個 codec 全鎖滿 121fps；HEVC/H.264 decode 0.3–0.5ms (200×加速)；AV1 throughput 達標但 NV driver 路徑 100ms decode latency |
+| **Done (§J.3.f)** | **AV1 / HEVC / H.264 vulkan_hwaccel via ffmpeg** | rebuild minimal FFmpeg 8.1 + `VIPLE_USE_VK_DECODER=1` opt-in；1440p120 三個 codec 全鎖滿 121fps；HEVC/H.264 decode 0.3–0.5ms；AV1 5ms（`extra_hw_frames=1` tune；架構底線 — dedicated_dpb DPB→output copy 成本）|
+| **Negative result (§J.3.g)** | **FRUC ME 解析度下放：不是 bottleneck** | 2026-05-03 實作完整 ME→1080p / 720p downsample（NV12→RGB 雙 shader、warp shader mvScale、buffer 重新 size），4K120 + FRUC 仍卡 75-81 fps，跟下放前一樣。也試 DUAL off — fps 不變。代表 ME compute / DUAL present 都不是限制。實際 bottleneck 推測在 warp shader（per-pixel @ 4K）+ memory bandwidth + sync barriers。需要 GPU per-stage timing 才能定位。實作已 revert |
 | **Done + open hw-pending** | **§I.D** Android Vulkan FRUC async compute | D.2.0–D.2.5 全部 verified on Pixel 5；剩自然 45fps→90Hz ideal 1:2 比例 — Pixel 5 panel 鎖 60/90Hz、GameManagerService 鎖 60fps，需 LTPO panel hw 才能驗 |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 3d.6 — AV1 native VK decode grey | 9 個 parser bug 修完仍 grey；NV driver 596.36 + AV1 vkCmdDecodeVideoKHR 黑/灰，要 RenderDoc + vk_video_samples diff，AV1 預設走 libdav1d SW 不擋使用 |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 1.7 ONLY-mode NVDEC device-lost | 5 個變體都繞不過，NV 596.36 結構性 bug，預設 PARALLEL 穩 |
@@ -285,9 +286,11 @@ Pixel 5 panel 只支援 60Hz/90Hz mode，GameManagerService 又把 app default f
 |---|---|---|---|---|---|
 | **H.264** | 121–123 | **0.26–0.55 ms** | 0 | 7.3 ms | ✅ |
 | **HEVC** | 119–122 | **0.30 ms** | 0 | 3.5 ms | ✅ |
-| **AV1** | 121–125 | 76–106 ms | 0 | 2.7 ms | ✅(throughput) ⚠️(latency) |
+| **AV1** | 121–125 | **5–8 ms** | 0 | 2.7 ms | ✅ |
 
 **對比之前 SW HEVC 1440p120 cap：** received 50→122 fps（2.4×）、decodeMean 100ms→0.3ms（**300×加速**）、networkDropped 34–51→0。§J HEVC 1440p120 cap 完全解決。
+
+**AV1 latency tune（2026-05-03）：** ffmpeg native AV1 decoder 在 [`vulkan_decode.c:1368`](https://git.ffmpeg.org/gitweb/ffmpeg.git/blob/HEAD:/libavcodec/vulkan_decode.c#l1368) 硬寫死 `|| AV_CODEC_ID_AV1` 強制 dedicated_dpb（out-of-place decode + DPB→output copy）。此設計對 game streaming 有 trade-off：copy step 成本 ~5ms，但讓 Pacer 持有 output 不會 block 解碼器。`extra_hw_frames=4` 的預設 pool 太深（max_refs 8 + 1 + 4 = 13 slots × Pacer 持有 ~4 = 9 frames pipeline = 75–100ms）；改 `extra_hw_frames=1` 後 pool=10、pipeline 1 frame，降到 5ms steady。試過 `=0`（pool 太緊 → 卡 Pacer + 78ms startup spike）、`=2 + FLAG2_FAST`（variance 大）、`EXPORT_DATA_FILM_GRAIN`（無效）、patch ffmpeg `vulkan_decode.c:1368` 拿掉強制 dedicated_dpb（**反而更糟** — Pacer 持有 output 會 block 下一 frame 的解碼，因為 output 即 DPB 共用）。**5ms = AV1 vulkan 在這條 driver+架構下的硬底線**，HEVC 0.3ms 是因為它的 reference pattern 不衝突 Pacer hold。
 
 #### 跟 §J.3.e.2.i.8 Phase 3d.6 對比
 
@@ -310,8 +313,46 @@ AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame
 
 - [ ] **Settings UI toggle** 取代 env var — `VIPLE_USE_VK_DECODER=1` 變「Vulkan hardware decode (experimental)」勾選框
 - [ ] 把 §J.3.e.2.i.8 Phase 3d.6 標 deprecated，Vulkan 路線改 ffmpeg 包裝為主
-- [ ] AV1 vulkan 解碼 100ms latency 等 NV driver 升級或試 AMD/Intel 看是否 driver-specific
+- [ ] AV1 5ms 底線等 NV driver 升級 / AMD / Intel 試或 ffmpeg patch 重 design dedicated_dpb 行為
 - [ ] 4K AV1 用 vulkan hwaccel 的 baseline benchmark（`scripts/benchmark/vk_sw_codec_120.ps1`）— 之前 SW 受限 76 fps，HW 路徑該能直奔 120fps
+
+### §J.3.g FRUC ME 解析度下放 — **NEGATIVE RESULT（2026-05-03，已 revert）**
+
+**原假設（錯）：** Vulkan HW + FRUC + DUAL 在 4K120 卡 77-84 fps，是因為 RTX 3060 mobile FRUC ME compute (block matching @ 480×270 blocks @ 4K) 太慢。預估 ME 下放到 1080p 解析度 4× 加速，總 FRUC time 0.30 + 0.70/4 = 0.47× → 2.1× speedup → 預期 110-120 fps。
+
+**實作完成，未達預期：** 完整實作 NV12→RGB 雙 shader（含新增 `kVkFrucNv12RgbDownsampleShaderGlsl`、bilinear-Y / nearest-chroma downsample）+ buffer 重新 size（`m_FrucMeWidth/Height` + `sizeRGBMe` vs `sizeRGBSrc` 拆分）+ warp shader 改造（PC 加 `meWidthF/meHeightF`、`mvScale = src/me`、`fetchPrev/CurrRGB` 改用 me dims）+ cascade 決策（src ≤ 1440p 不下放、4K 下放 1080p、env `VIPLE_FRUC_ME_RES=540|720|1080`）。
+
+**實測（2026-05-03）：**
+
+| 配置 | 4K120 + FRUC + DUAL fps |
+|---|---|
+| §J.3.g 前（ME @ 4K） | H.264 77-81 / HEVC 79-84 / AV1 80-84 |
+| §J.3.g（ME @ 1080p）| H.264 77-78 / HEVC 75-80 / AV1 不可用（host 卡 720p） |
+| §J.3.g（ME @ 720p）| HEVC 75-81 |
+| §J.3.g + DUAL=0（FRUC 但單 present）| HEVC 76-81 |
+
+**結論：fps 完全沒變**。隔離測試也排除 DUAL present 是 cost。**ME compute / DUAL 都不是 bottleneck**。
+
+**真正的 bottleneck 推測（未驗證）：**
+
+1. **Warp shader（per-pixel @ 4K）— `§J.3.g` 沒動到** — 8.3M threads × bilinear sample + adaptive blend，估 2-3 ms/frame
+2. **Memory bandwidth** — 4K RGB buffer 95 MB × 多次 read/write × 120fps，bandwidth 壓力大
+3. **Sync barriers between cmd buffers** — `computeBufBarrier()` 在 4 個 dispatch 之間
+4. **Vsync / Pacer 互動** — FIFO_RELAXED 在 GPU 趕不上時 tearing，但 GPU 很慢時 fps 還是受 vsync 拖
+
+**下次定位需要的工具：** GPU timestamp queries（`VkQueryPool` + `VK_QUERY_TYPE_TIMESTAMP`）量出 NV12→RGB / ME / Median / Warp 各自時間。沒這個資料純猜瓶頸只會繼續錯。
+
+**已 revert 的程式碼：**
+- `vkfruc.h`: `m_FrucMeWidth/Height/Downsample` 成員拿掉
+- `vkfruc.cpp`: cascade decision、buffer sizing 兩 size 變數、`kVkFrucNv12RgbDownsampleShaderGlsl` shader、dispatch 參數改動全部 revert
+- `plvk.cpp`: warp shader 的 `meWidthF/meHeightF` PC、`mvScale`、fetch/sampleBilinear 改用 me dims 全 revert
+
+**保留的觀察：**
+- `VIPLE_VKFRUC_DUAL=0`（單 present、FRUC compute on）跟 DUAL=1 同 fps — DUAL 不是 cost
+- 1080p120 + FRUC 在 §J.3.g 前後也都 ~90 fps，不到 120 — FRUC compute 在 1080p120 也碰邊界
+- HEVC 4K decode 0.3-0.6ms / AV1 4K decode 4-7ms — 解碼確實不是瓶頸
+
+**下次接手這條路時：** 不要再先動 ME。**先加 GPU timestamp 量出 per-stage 時間**，看到 warp 真的占大頭，再針對 warp 動（例：dispatch 拆成 8×8 tile + scratchpad、或 warp shader inline bilinear、或 pre-baked MV→pixel-offset 表）。
 
 ### 不可動的鐵律 (§J)
 
