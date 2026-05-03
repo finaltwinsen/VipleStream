@@ -32,7 +32,15 @@ static bool receivedFullFrame;
 // much kernel memory with larger packet sizes. It also
 // can smooth over transient pauses in network traffic
 // and subsequent packet/frame bursts that follow.
-#define RTP_RECV_PACKETS_BUFFERED 2048
+// VipleStream §J HEVC 1440p120 server-cap diagnosis (TODO §J): client RX side
+// was dropping ~50% of frames at high-bitrate-burst codecs (HEVC 1440p120 has
+// ~38 KB / 27 packets per frame in 0.4 ms server-side bursts).  Bumping from
+// 2048 → 8192 packets requested bumps the SO_RCVBUF target to ~12 MB at
+// 1500 B/packet — still capped by Windows AFD's max but should land at
+// 1-2 MB instead of the default ~256 KB Windows cap on the original 3 MB
+// request.  Verify-via-getsockopt below is now always-on so we can read
+// the actual realized buffer size from the log instead of guessing.
+#define RTP_RECV_PACKETS_BUFFERED 8192
 
 // Initialize the video stream
 void initializeVideoStream(void) {

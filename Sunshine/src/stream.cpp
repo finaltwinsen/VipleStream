@@ -1597,6 +1597,36 @@ namespace stream {
         // Use around 80% of 1Gbps          1Gbps            percent    ms     packet      byte
         size_t ratecontrol_packets_in_1ms = std::giga::num * 80 / 100 / 1000 / blocksize / 8;
 
+        // [VIPLE-SMOOTH-PACING] Optional bitrate-shaped pacing.  The default
+        // line-rate budget above sends a frame's full payload in 0.4-1.0 ms
+        // bursts at near-1Gbps (~67 packets/ms × 1500 B = 800 Mbps).  For
+        // codecs with bigger per-frame packet counts (HEVC 1440p120 = 27-30
+        // packets/frame after FEC), this burst rate appears to overrun the
+        // client RX path: client sees ~50% UDP drop on that exact session
+        // even with SO_RCVBUF raised to 11 MB (verified — see TODO §J HEVC
+        // 1440p server-cap diagnosis).  Smooth pacing instead at the actual
+        // stream bitrate × 1.25 (25% headroom for FEC + retransmits) so a
+        // frame's packets get spread across the full inter-frame interval.
+        // For 57 Mbps stream + 1500 B blocks: 57M × 1.25 / 8 / 1500 / 1000 =
+        // ~6 packets/ms → 30 packets ≈ 5 ms send window vs 0.45 ms burst.
+        if (const char* env = std::getenv("VIPLE_SMOOTH_PACING"); env && (env[0] == '1' || env[0] == 't' || env[0] == 'T')) {
+          // session->video.configuredBitrateKbps is the original client-requested
+          // bitrate in kbps; adaptiveBitrateKbps may have lowered it on packet loss.
+          int br_kbps = session->video.adaptiveBitrateKbps.load();
+          if (br_kbps == 0) br_kbps = session->video.configuredBitrateKbps;
+          uint64_t bitrate_bps = (uint64_t)br_kbps * 1000 * 5 / 4;  // ×1.25 headroom
+          if (bitrate_bps > 0) {
+            size_t smooth_pkts_per_ms = (size_t)(bitrate_bps / 1000 / blocksize / 8);
+            if (smooth_pkts_per_ms < 1) smooth_pkts_per_ms = 1;
+            // Only override if the bitrate-shaped target is *lower* (smoother)
+            // than the current line-rate target.  At ≥1Gbps streams (rare) we
+            // want to keep the line-rate cap.
+            if (smooth_pkts_per_ms < ratecontrol_packets_in_1ms) {
+              ratecontrol_packets_in_1ms = smooth_pkts_per_ms;
+            }
+          }
+        }
+
         // Send less than 64K in a single batch.
         // On Windows, batches above 64K seem to bypass SO_SNDBUF regardless of its size,
         // appear in "Other I/O" and begin waiting for interrupts.
