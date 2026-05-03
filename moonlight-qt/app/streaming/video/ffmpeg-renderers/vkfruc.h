@@ -519,10 +519,20 @@ private:
     bool             m_SwMode             = false;
     int              m_SwImageWidth       = 0;
     int              m_SwImageHeight      = 0;
+    // Staging buffer is logically 2 (kFrucFramesInFlight) frames worth of
+    // NV12 data, partitioned into back-to-back regions so per-frame CPU memcpy
+    // can overlap with the previous frame's GPU upload (vkCmdCopyBufferToImage).
+    // Slot rotation gates writes via the per-slot in-flight fence — when slot N
+    // is rewritten, slot N's previous GPU upload has already retired.  When
+    // FRUC compute is active (m_FrucMode), we always write to slot 0 so the
+    // FRUC NV12-RGB descriptor set's hard-coded {Y@0, UV@W*H} layout still
+    // refers to the freshest data (FRUC compute path never benefits from
+    // async upload but stays semantically identical to pre-async behavior).
     VkBuffer         m_SwStagingBuffer    = VK_NULL_HANDLE;
     VkDeviceMemory   m_SwStagingMem       = VK_NULL_HANDLE;
     void*            m_SwStagingMapped    = nullptr;
-    size_t           m_SwStagingSize      = 0;
+    size_t           m_SwStagingSize      = 0;  // total: kFrucFramesInFlight × per-slot
+    size_t           m_SwStagingPerSlot   = 0;  // single frame's NV12 = W*H*3/2
     VkImage          m_SwUploadImage      = VK_NULL_HANDLE;
     VkDeviceMemory   m_SwUploadImageMem   = VK_NULL_HANDLE;
     VkImageView      m_SwUploadView       = VK_NULL_HANDLE;

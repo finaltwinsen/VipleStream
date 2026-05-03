@@ -3639,8 +3639,14 @@ bool VkFrucRenderer::createSwUploadResources(int width, int height)
 
     m_SwImageWidth  = width;
     m_SwImageHeight = height;
-    // NV12: Y plane = w×h bytes, UV plane = (w×h)/2 bytes (interleaved at half height)
-    m_SwStagingSize = (size_t)width * height * 3 / 2;
+    // NV12: Y plane = w×h bytes, UV plane = (w×h)/2 bytes (interleaved at half
+    // height).  Allocate kFrucFramesInFlight back-to-back per-slot regions so
+    // the SW upload path (m_FrucMode=false) can pipeline CPU memcpy of frame N
+    // with previous frame N-1's GPU vkCmdCopyBufferToImage.  At 4K (12 MB / slot)
+    // this trims ~2-3ms of CPU memcpy off the per-frame critical path; the
+    // memory cost (24 MB host-coherent total at 4K, 6 MB at 1080p) is trivial.
+    m_SwStagingPerSlot = (size_t)width * height * 3 / 2;
+    m_SwStagingSize    = m_SwStagingPerSlot * kFrucFramesInFlight;
 
     VkPhysicalDeviceMemoryProperties memProps;
     pfnGetMemProps(m_PhysicalDevice, &memProps);
@@ -5091,11 +5097,55 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     // Synth frames: dimensions trusted from m_SwImageWidth/Height (set at
     // createSwUploadResources time using actual stream params).
 
-    // ---- 1. memcpy/repack Y + UV into staging (NV12 layout) ----
+    // ---- 1a. Slot rotation + fence wait BEFORE memcpy ----
+    // Async upload pipelining: writing the staging buffer for this slot
+    // races with the GPU read from the SAME slot's prior submission.  Wait
+    // on the per-slot in-flight fence first → guarantees prior CmdCopyBuffer-
+    // ToImage retired this slot's region.  CPU memcpy of slot N then runs in
+    // parallel with the GPU upload of slot N±1 from the previous frame.
+    uint32_t slot = m_CurrentSlot;
+    m_CurrentSlot = (m_CurrentSlot + 1) % kFrucFramesInFlight;
+    // §J.3.e.2.i.8 Phase 1.5c-final — early-out if previous call detected
+    // device-lost.  ONLY mode at high submission rate triggers GPU TDR
+    // / driver hang after 24-57 sec on NV 596.84.  Without this gate we'd
+    // cascade through hundreds of VUID errors per second.
+    if (m_DeviceLost.load(std::memory_order_acquire)) {
+        return;
+    }
+    {
+        VkResult wfRes = m_RtPfn.WaitForFences(m_Device, 1, &m_SlotInFlightFence[slot], VK_TRUE, UINT64_MAX);
+        if (wfRes != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC-SW] §J.3.e.2.i.8 1.5c — WaitForFences slot=%u rc=%d (device lost) — disabling native path",
+                         slot, (int)wfRes);
+            m_DeviceLost.store(true, std::memory_order_release);
+            return;
+        }
+        VkResult rfRes = m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);
+        if (rfRes != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC-SW] §J.3.e.2.i.8 1.5c — ResetFences slot=%u rc=%d (device lost) — disabling native path",
+                         slot, (int)rfRes);
+            m_DeviceLost.store(true, std::memory_order_release);
+            return;
+        }
+    }
+    _profT2 = std::chrono::steady_clock::now();
+
+    // ---- 1b. memcpy/repack Y + UV into staging (NV12 layout) ----
+    // FRUC compute path's m_FrucNv12RgbDescSet has a hard-coded {Y@0, UV@W*H}
+    // binding pointing into m_SwStagingBuffer (slot 0 region).  When FRUC is
+    // active we always write to slot 0 so its read sees the freshest frame —
+    // forfeiting the async win for that path but preserving its current
+    // semantics until the FRUC desc sets are made per-slot.  When FRUC is off
+    // (the SW-only benchmark / production path), each slot writes its own
+    // region and the GPU reads its own region in CmdCopyBufferToImage below.
     const int W = m_SwImageWidth;
     const int H = m_SwImageHeight;
+    const VkDeviceSize stagingSlotOffset =
+        m_FrucMode ? 0 : (VkDeviceSize)slot * m_SwStagingPerSlot;
     if (!useNativeDecodeEarly) {
-        uint8_t* dst = (uint8_t*)m_SwStagingMapped;
+        uint8_t* dst = (uint8_t*)m_SwStagingMapped + stagingSlotOffset;
         // Y plane: same layout for both YUV420P and NV12, just stride-fix copy.
         for (int y = 0; y < H; y++) {
             memcpy(dst + y * W, frame->data[0] + y * frame->linesize[0], W);
@@ -5135,36 +5185,6 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     // is skipped entirely.  Decode-queue cmd buffer in submitDecodeFrame
     // already copied DPB layer → m_SwUploadImage in SHADER_READ_ONLY layout.
     _profT1 = std::chrono::steady_clock::now();
-
-    // ---- 2/3. Slot rotation, fence wait/reset, swapchain acquire ----
-    uint32_t slot = m_CurrentSlot;
-    m_CurrentSlot = (m_CurrentSlot + 1) % kFrucFramesInFlight;
-    // §J.3.e.2.i.8 Phase 1.5c-final — early-out if previous call detected
-    // device-lost.  ONLY mode at high submission rate triggers GPU TDR
-    // / driver hang after 24-57 sec on NV 596.84.  Without this gate we'd
-    // cascade through hundreds of VUID errors per second.
-    if (m_DeviceLost.load(std::memory_order_acquire)) {
-        return;
-    }
-    {
-        VkResult wfRes = m_RtPfn.WaitForFences(m_Device, 1, &m_SlotInFlightFence[slot], VK_TRUE, UINT64_MAX);
-        if (wfRes != VK_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC-SW] §J.3.e.2.i.8 1.5c — WaitForFences slot=%u rc=%d (device lost) — disabling native path",
-                         slot, (int)wfRes);
-            m_DeviceLost.store(true, std::memory_order_release);
-            return;
-        }
-        VkResult rfRes = m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);
-        if (rfRes != VK_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC-SW] §J.3.e.2.i.8 1.5c — ResetFences slot=%u rc=%d (device lost) — disabling native path",
-                         slot, (int)rfRes);
-            m_DeviceLost.store(true, std::memory_order_release);
-            return;
-        }
-    }
-    _profT2 = std::chrono::steady_clock::now();
 
     // Acquire 1 (real) image for single mode, or 2 (interp + real) for dual.
     uint32_t imgIdxA = 0;  // interp slot (only used in dual mode)
@@ -5249,13 +5269,15 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
             0, 0, nullptr, 0, nullptr, 1, &toDstBar);
 
         // 4b. Staging buffer → image, two regions per plane.
+        // bufferOffset starts at this slot's region within the unified staging
+        // buffer (0 when m_FrucMode is on — see memcpy comment above).
         VkBufferImageCopy regions[2] = {};
-        regions[0].bufferOffset      = 0;
+        regions[0].bufferOffset      = stagingSlotOffset + 0;
         regions[0].bufferRowLength   = (uint32_t)W;
         regions[0].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
         regions[0].imageSubresource.layerCount = 1;
         regions[0].imageExtent       = { (uint32_t)W, (uint32_t)H, 1 };
-        regions[1].bufferOffset      = (VkDeviceSize)W * H;
+        regions[1].bufferOffset      = stagingSlotOffset + (VkDeviceSize)W * H;
         regions[1].bufferRowLength   = (uint32_t)W / 2;
         regions[1].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
         regions[1].imageSubresource.layerCount = 1;
@@ -5634,11 +5656,14 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         static thread_local std::vector<double> s_ProfSubmitUs;
         static thread_local std::vector<double> s_ProfPresentUs;
         static thread_local std::vector<double> s_ProfTotalUs;
-        // record this frame's phase deltas (only when single mode + we measured all 4)
+        // record this frame's phase deltas.  With the async-pipelining reorder
+        // the timestamp sequence is T0 → T2 (after WaitForFences) → T1 (after
+        // memcpy) → T3 (after QueueSubmit) → T4 (after QueuePresent).  We
+        // re-label the deltas so the bucket logs read intuitively.
         if (_profT4 > _profT0) {
-            s_ProfMemUs.push_back(duration_cast<duration<double, std::micro>>(_profT1 - _profT0).count());
-            s_ProfWaitUs.push_back(duration_cast<duration<double, std::micro>>(_profT2 - _profT1).count());
-            s_ProfSubmitUs.push_back(duration_cast<duration<double, std::micro>>(_profT3 - _profT2).count());
+            s_ProfWaitUs.push_back(duration_cast<duration<double, std::micro>>(_profT2 - _profT0).count());
+            s_ProfMemUs.push_back(duration_cast<duration<double, std::micro>>(_profT1 - _profT2).count());
+            s_ProfSubmitUs.push_back(duration_cast<duration<double, std::micro>>(_profT3 - _profT1).count());
             s_ProfPresentUs.push_back(duration_cast<duration<double, std::micro>>(_profT4 - _profT3).count());
             s_ProfTotalUs.push_back(duration_cast<duration<double, std::micro>>(_profT4 - _profT0).count());
         }
