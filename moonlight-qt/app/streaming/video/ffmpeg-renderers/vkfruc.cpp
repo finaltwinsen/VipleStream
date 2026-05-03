@@ -61,14 +61,21 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     // docs/J.3.e.2.i_vulkan_native_renderer.md).
     //
     // Preference path：當使用者在 Settings dropdown 選 Vulkan 渲染器，
-    // m_SwMode / m_FrucMode / m_DualMode 都自動開（FRUC 跟 dual 還受
-    // enableFrameInterpolation 控制 —— 沒勾補幀就只跑 SW upload + single
-    // present）.  Env-var path 留給 dev/CI 測試獨立子集 (e.g. 只想測 SW
-    // upload 不想跑 FRUC 用 VIPLE_VKFRUC_SW=1 + 不設 FRUC/DUAL).
+    // m_FrucMode / m_DualMode 自動開（受 enableFrameInterpolation 控制
+    // —— 沒勾補幀就只跑 single present）.  Env-var path 留給 dev/CI
+    // 測試獨立子集.
+    //
+    // §J.3.f integration (2026-05-04) — m_SwMode 不再因 RS_VULKAN 自動
+    // 開.  HW path 經 §J.3.f rebuild FFmpeg 8.1 + extra_hw_frames=1 +
+    // overlay round-2 fix 後在 4K120 + FRUC + DUAL × 3 codec 全跑得乾淨
+    // (H.264 92 / HEVC 100-104 / AV1 120fps，full-power GPU)，預設 HW
+    // 比預設 SW 快 ~10ms decode + 省 CPU upload 工作.  保留
+    // VIPLE_VKFRUC_SW=1 作 debug override (e.g. 比較解碼品質 / HW
+    // driver broken 時 fallback).
     auto* prefs = StreamingPreferences::get(nullptr);
     bool prefsWantVulkan = prefs && prefs->rendererSelection == StreamingPreferences::RS_VULKAN;
     bool prefsWantInterp = prefs && prefs->enableFrameInterpolation;
-    m_SwMode   = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW")   != 0 || prefsWantVulkan;
+    m_SwMode   = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW")   != 0;
     m_FrucMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_FRUC") != 0 || (prefsWantVulkan && prefsWantInterp);
     m_DualMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_DUAL") != 0 || (prefsWantVulkan && prefsWantInterp);
     // §J.3.e.2.i.8 Phase 3d.4i — diagnostic override: forces FRUC + dual mode
@@ -106,9 +113,9 @@ VkFrucRenderer::VkFrucRenderer(int pass)
         m_DualMode = false;
     }
     // §J.3.e.2.i.7 HW path retry：VIPLE_VKFRUC_HW=1 強制走 FFmpeg-Vulkan
-    // hwcontext (override SW path).  搭配 mirror-libplacebo ext list 嘗試
-    // 解掉 v1.3.123-136 的 NV nvoglv64 NULL deref crash.  Init 失敗或
-    // crash 時 cascade fallback 到 PlVkRenderer.
+    // hwcontext.  §J.3.f integration (2026-05-04) HW 變預設後此 env var
+    // 變 redundant (m_SwMode 預設已是 false)，但保留以防 user 設了
+    // VIPLE_VKFRUC_SW=1 又想用 VIPLE_VKFRUC_HW=1 強制蓋過.  HW 優先級高.
     if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_HW") != 0) {
         m_SwMode = false;
     }

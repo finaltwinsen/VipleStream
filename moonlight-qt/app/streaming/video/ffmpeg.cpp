@@ -63,6 +63,34 @@ extern "C" {
 
 #define FAILED_DECODES_RESET_THRESHOLD 20
 
+// §J.3.f integration (2026-05-04) — fold three env-var gates into Settings:
+// when user picked RS_VULKAN, we now default to the Vulkan hwaccel decoder
+// cascade + VkFrucRenderer routing.  Env vars become explicit overrides.
+//
+// VIPLE_USE_VK_DECODER controls the cascade probe order.  Three states:
+//   * unset (default): follow user's renderer preference (RS_VULKAN → on)
+//   * "1"            : force on regardless of preference
+//   * "0"            : force off (debug / fallback to D3D11 cascade order)
+static inline bool shouldPreferVulkanDecoderCascade()
+{
+    const char* e = SDL_getenv("VIPLE_USE_VK_DECODER");
+    if (e) return SDL_atoi(e) != 0;
+    auto* prefs = StreamingPreferences::get(nullptr);
+    return prefs && prefs->rendererSelection == StreamingPreferences::RS_VULKAN;
+}
+
+// VIPLE_VK_FRUC_GENERIC controls which renderer is returned for vulkan
+// hwaccel — VkFrucRenderer (FRUC capable) vs PlVkRenderer (libplacebo,
+// no FRUC).  Same 3-state logic; default-on for RS_VULKAN since FRUC is
+// the reason a user picks the Vulkan renderer.
+static inline bool shouldUseVkFrucRendererForVulkanHwaccel()
+{
+    const char* e = SDL_getenv("VIPLE_VK_FRUC_GENERIC");
+    if (e) return SDL_atoi(e) != 0;
+    auto* prefs = StreamingPreferences::get(nullptr);
+    return prefs && prefs->rendererSelection == StreamingPreferences::RS_VULKAN;
+}
+
 bool FFmpegVideoDecoder::isHardwareAccelerated()
 {
     // §J.3.e.2.i.8 Phase 3d.3 — backend renderer reports native decode at a
@@ -1309,15 +1337,22 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
 #endif
 #ifdef HAVE_LIBPLACEBO_VULKAN
         case AV_HWDEVICE_TYPE_VULKAN:
-            // §J.3.e.2.i — opt-in VkFrucRenderer (Android architecture
-            // port; bypasses libplacebo).  When VIPLE_VK_FRUC_GENERIC=1
-            // and pass=0, try VkFrucRenderer first; on init failure the
-            // outer cascade retries with pass=1, at which point we hand
-            // back PlVkRenderer so the user still gets video.
-            if (qEnvironmentVariableIntValue("VIPLE_VK_FRUC_GENERIC") != 0 && pass == 0) {
+            // §J.3.e.2.i — VkFrucRenderer (Android architecture port;
+            // bypasses libplacebo) returned for Vulkan hwaccel when user
+            // picked RS_VULKAN OR set VIPLE_VK_FRUC_GENERIC=1.  Pass=0
+            // attempts FRUC; on init failure outer cascade retries with
+            // pass=1 → fall back to PlVkRenderer (libplacebo, no FRUC)
+            // so user still gets video.
+            //
+            // §J.3.f integration (2026-05-04): default-on for RS_VULKAN.
+            // Env override hierarchy (see shouldUseVkFrucRendererForVulkanHwaccel):
+            //   VIPLE_VK_FRUC_GENERIC=1 → force VkFrucRenderer
+            //   VIPLE_VK_FRUC_GENERIC=0 → force PlVkRenderer (debug)
+            //   unset                    → follow renderer preference.
+            if (shouldUseVkFrucRendererForVulkanHwaccel() && pass == 0) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VKFRUC] §J.3.e.2.i cascade: VkFrucRenderer "
-                            "selected (VIPLE_VK_FRUC_GENERIC=1, pass=0)");
+                            "selected (RS_VULKAN or VIPLE_VK_FRUC_GENERIC=1, pass=0)");
                 return new VkFrucRenderer(pass);
             }
             return new PlVkRenderer(true);
@@ -1646,13 +1681,18 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
     bool prefsForceD3D11 = vkPrefs && vkPrefs->rendererSelection == StreamingPreferences::RS_D3D11;
     bool prefsWantVulkan = vkPrefs && vkPrefs->rendererSelection == StreamingPreferences::RS_VULKAN;
     bool envForceVulkan  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0;
-    // §J.3.f override (2026-05-03) — same pattern as the SW-force block in
-    // initialize().  When VIPLE_USE_VK_DECODER=1, skip this short-circuit
-    // and let the standard cascade probe Vulkan hwaccel via line 1620's
-    // §J.3.c.1 path.  ffmpeg 8.1 vulkan hwaccel for h264/hevc/av1 verified
-    // working on this NV driver (2026-05-03 ffmpeg CLI smoke test).
-    bool envWantVkDecoderInner = qEnvironmentVariableIntValue("VIPLE_USE_VK_DECODER") != 0;
-    if (!prefsForceD3D11 && !envWantVkDecoderInner && (prefsWantVulkan || envForceVulkan)) {
+    // §J.3.f override (2026-05-03) — when shouldPreferVulkanDecoderCascade()
+    // is true, skip this short-circuit and let the standard cascade probe
+    // Vulkan hwaccel via line 1620's §J.3.c.1 path.  ffmpeg 8.1 vulkan
+    // hwaccel for h264/hevc/av1 verified working on this NV driver
+    // (2026-05-03 ffmpeg CLI smoke test, full-power 2026-05-04 — H.264 92,
+    // HEVC 100-104, AV1 120fps @ 4K120 + FRUC + DUAL).
+    //
+    // §J.3.f integration (2026-05-04) — RS_VULKAN now triggers this path
+    // by default (no env var needed).  VIPLE_VKFRUC_SW=1 still forces SW
+    // upload for debug.
+    bool wantVkDecoderInner = shouldPreferVulkanDecoderCascade();
+    if (!prefsForceD3D11 && !wantVkDecoderInner && (prefsWantVulkan || envForceVulkan)) {
         // SW h264/hevc/av1 decoders default to YUV420P output.  We try
         // YUV420P unconditionally — if decoder_pix_fmts list is missing
         // (newer FFmpeg returns NULL for some SW decoders), iterating
@@ -1675,15 +1715,15 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
 
     // This might be a hwaccel decoder, so try any hw configs first
     if (tryHwAccel) {
-        // §J.3.c.1 — env-var-gated Vulkan-first override.  ffmpeg returns
-        // hw_configs in [D3D11VA, NONE, DXVA2, VULKAN, D3D12VA] order on
-        // Windows, so D3D11VA succeeds at index 0 and Vulkan never gets
-        // tried.  When VIPLE_USE_VK_DECODER=1, scan for AV_HWDEVICE_TYPE_VULKAN
+        // §J.3.c.1 — Vulkan-first override.  ffmpeg returns hw_configs in
+        // [D3D11VA, NONE, DXVA2, VULKAN, D3D12VA] order on Windows, so
+        // D3D11VA succeeds at index 0 and Vulkan never gets tried.  When
+        // shouldPreferVulkanDecoderCascade() (RS_VULKAN preference OR
+        // VIPLE_USE_VK_DECODER=1 env), scan for AV_HWDEVICE_TYPE_VULKAN
         // first and try it before the regular cascade.  Falls through to
-        // standard order if Vulkan path fails — keeps default behaviour
-        // safe (D3D11VA still primary).
-        const char* vkOverride = SDL_getenv("VIPLE_USE_VK_DECODER");
-        if (vkOverride && SDL_atoi(vkOverride) != 0) {
+        // standard order if Vulkan path fails — keeps RS_D3D11 default
+        // safe (D3D11VA still primary for those users).
+        if (shouldPreferVulkanDecoderCascade()) {
             // §J.3.f recon — track whether we actually found a Vulkan
             // hw_config so we can distinguish "decoder doesn't expose
             // Vulkan hwaccel at all" (e.g. AV1 today via libdav1d
@@ -1931,44 +1971,42 @@ bool FFmpegVideoDecoder::tryInitializeHwAccelDecoder(PDECODER_PARAMETERS params,
             continue;
         }
 
-        // §J.3.f — when VIPLE_USE_VK_DECODER=1, skip decoders that don't
-        // advertise any Vulkan hwaccel.  This is mainly to bypass libdav1d
+        // §J.3.f — when shouldPreferVulkanDecoderCascade() (RS_VULKAN
+        // preference OR VIPLE_USE_VK_DECODER=1 env), skip decoders that
+        // don't advertise any Vulkan hwaccel.  Mainly to bypass libdav1d
         // (the AV1 default in our ffmpeg build) which has no hwaccel —
         // so the iteration falls through to the native `av1` decoder
         // which DOES have VK_KHR_video_decode_av1 in its hw_configs.
         // Without this skip, libdav1d wins decoder selection and Vulkan
         // path never gets tried.
-        {
-            const char* vkOverride = SDL_getenv("VIPLE_USE_VK_DECODER");
-            if (vkOverride && SDL_atoi(vkOverride) != 0) {
-                bool decoderHasVulkan = false;
-                for (int j = 0; ; ++j) {
-                    const AVCodecHWConfig* cfg = avcodec_get_hw_config(decoder, j);
-                    if (!cfg) break;
-                    if (cfg->device_type == AV_HWDEVICE_TYPE_VULKAN) {
-                        decoderHasVulkan = true;
-                        break;
-                    }
+        if (shouldPreferVulkanDecoderCascade()) {
+            bool decoderHasVulkan = false;
+            for (int j = 0; ; ++j) {
+                const AVCodecHWConfig* cfg = avcodec_get_hw_config(decoder, j);
+                if (!cfg) break;
+                if (cfg->device_type == AV_HWDEVICE_TYPE_VULKAN) {
+                    decoderHasVulkan = true;
+                    break;
                 }
-                if (!decoderHasVulkan) {
-                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-VK-VIDEO] §J.3.f skipping decoder=%s — no Vulkan hwaccel "
-                                "(VIPLE_USE_VK_DECODER=1 active)",
-                                decoder->name);
-                    continue;
-                }
+            }
+            if (!decoderHasVulkan) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-VIDEO] §J.3.f skipping decoder=%s — no Vulkan hwaccel "
+                            "(RS_VULKAN preference or VIPLE_USE_VK_DECODER=1 active)",
+                            decoder->name);
+                continue;
             }
         }
 
-        // §J.3.c.1 — env-var-gated Vulkan-first override.  Same logic as
-        // the one in tryInitializeRendererForUnknownDecoder; this is the
-        // primary cascade path for known decoders (HEVC/H264).  When
-        // VIPLE_USE_VK_DECODER=1, scan for AV_HWDEVICE_TYPE_VULKAN first
-        // before the regular cascade order picks D3D11VA.  Only kicks in
-        // on pass=0 to avoid double-trying on subsequent passes.
+        // §J.3.c.1 — Vulkan-first override.  Same logic as the one in
+        // tryInitializeRendererForUnknownDecoder; this is the primary
+        // cascade path for known decoders (HEVC/H264).  When
+        // shouldPreferVulkanDecoderCascade() (RS_VULKAN preference OR
+        // VIPLE_USE_VK_DECODER=1 env), scan for AV_HWDEVICE_TYPE_VULKAN
+        // first before the regular cascade order picks D3D11VA.  Only
+        // kicks in on pass=0 to avoid double-trying on subsequent passes.
         if (pass == 0) {
-            const char* vkOverride = SDL_getenv("VIPLE_USE_VK_DECODER");
-            if (vkOverride && SDL_atoi(vkOverride) != 0) {
+            if (shouldPreferVulkanDecoderCascade()) {
                 for (int j = 0; ; ++j) {
                     const AVCodecHWConfig* cfg = avcodec_get_hw_config(decoder, j);
                     if (!cfg) break;
@@ -2108,12 +2146,13 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
     bool prefsForceD3D11_2 = vkPrefs2 && vkPrefs2->rendererSelection == StreamingPreferences::RS_D3D11;
     bool prefsWantVulkan_2 = vkPrefs2 && vkPrefs2->rendererSelection == StreamingPreferences::RS_VULKAN;
     bool envForceVulkan_2  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0;
-    bool envWantVkDecoder  = qEnvironmentVariableIntValue("VIPLE_USE_VK_DECODER") != 0;
+    bool envWantVkDecoder  = shouldPreferVulkanDecoderCascade();
     if (envWantVkDecoder) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-SW] VIPLE_USE_VK_DECODER=1 — skipping SW-force "
+                    "[VIPLE-VKFRUC-SW] Vulkan decoder cascade active (RS_VULKAN "
+                    "preference or VIPLE_USE_VK_DECODER=1) — skipping SW-force "
                     "block; standard cascade will probe Vulkan hwaccel first "
-                    "(§J.3.f override)");
+                    "(§J.3.f integration 2026-05-04)");
     }
     if (!prefsForceD3D11_2 && !envWantVkDecoder && (prefsWantVulkan_2 || envForceVulkan_2)) {
         // §J.3.e.2.i.8 Phase 3 — for AV1 the FFmpeg-internal `av1` decoder in
