@@ -49,7 +49,17 @@ if exist "%ANTIHOOK%" (
 )
 
 set "DLLDIR=%SRC%\libs\windows\lib\x64"
-for %%F in (SDL2.dll SDL2_ttf.dll SDL3.dll avcodec-62.dll avutil-60.dll swscale-9.dll dav1d.dll opus.dll discord-rpc.dll libcrypto-3-x64.dll libssl-3-x64.dll libplacebo-360.dll) do (
+:: §J.3.f — runtime deps of rebuilt FFmpeg 8.1 (mingw GCC built):
+::   libdav1d-7.dll  libiconv-2.dll  zlib1.dll       — pulled in by avcodec
+::   libwinpthread-1.dll                              — mingw threading runtime
+::   libva.dll  libva_win32.dll                       — VAAPI loader stubs
+::                                                      (link-time imports;
+::                                                      no-op at runtime on
+::                                                      Windows since avutil
+::                                                      doesn't use VAAPI)
+:: dav1d.dll (no -7 suffix) is the legacy pre-§J.3.f standalone dav1d build;
+:: kept until we drop ABI compat with old plugins.
+for %%F in (SDL2.dll SDL2_ttf.dll SDL3.dll avcodec-62.dll avutil-60.dll swscale-9.dll dav1d.dll libdav1d-7.dll libiconv-2.dll zlib1.dll libwinpthread-1.dll libva.dll libva_win32.dll opus.dll discord-rpc.dll libcrypto-3-x64.dll libssl-3-x64.dll libplacebo-360.dll) do (
     if exist "%DLLDIR%\%%F" (
         copy /y "%DLLDIR%\%%F" "%TEMP_DIR%\" >nul
         echo   %%F

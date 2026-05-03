@@ -28,6 +28,11 @@ public:
     virtual ~PlVkRenderer() override;
     virtual bool initialize(PDECODER_PARAMETERS params) override;
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
+    // §J.3.f — allocate AVHWFramesContext at get_format() time so ffmpeg's
+    // *_vulkan hwaccels (h264_vulkan / hevc_vulkan / av1_vulkan) can finish
+    // init.  Without this override, hwaccel init logs "A hardware frames or
+    // device context is required" and falls back to SW decode.
+    virtual bool prepareDecoderContextInGetFormat(AVCodecContext* context, AVPixelFormat pixelFormat) override;
     virtual void renderFrame(AVFrame* frame) override;
     virtual bool testRenderFrame(AVFrame* frame) override;
     virtual void waitToRender() override;

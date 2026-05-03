@@ -4489,6 +4489,57 @@ bool PlVkRenderer::prepareDecoderContext(AVCodecContext *context, AVDictionary *
     return true;
 }
 
+bool PlVkRenderer::prepareDecoderContextInGetFormat(AVCodecContext *context,
+                                                   AVPixelFormat pixelFormat)
+{
+    // Only relevant for the hwaccel-backend mode; passthrough/render-only
+    // mode doesn't pick AV_PIX_FMT_VULKAN at get_format() time.
+    if (!m_HwAccelBackend) {
+        return true;
+    }
+
+    // §J.3.f — mirrors D3D11VARenderer::prepareDecoderContextInGetFormat.
+    // ffmpeg 8.1's *_vulkan hwaccels need AVCodecContext::hw_frames_ctx
+    // populated by the time get_format() returns AV_PIX_FMT_VULKAN; otherwise
+    // the per-codec hwaccel init logs "A hardware frames or device context is
+    // required for hardware accelerated decoding" and the decoder falls back
+    // to SW.  ffmpeg-CLI's `-hwaccel_output_format vulkan` does this same
+    // dance internally; we replicate it here for the moonlight pipeline.
+    av_buffer_unref(&context->hw_frames_ctx);
+
+    int err = avcodec_get_hw_frames_parameters(context, m_HwDeviceCtx,
+                                                pixelFormat, &context->hw_frames_ctx);
+    if (err < 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VK-VIDEO] §J.3.f avcodec_get_hw_frames_parameters() failed: %d",
+                     err);
+        return false;
+    }
+
+    auto framesContext = (AVHWFramesContext*)context->hw_frames_ctx->data;
+    // Mirror ff_decode_get_hw_frames_ctx() default — extra 3 frames headroom.
+    if (framesContext->initial_pool_size) {
+        framesContext->initial_pool_size += 3;
+    }
+
+    err = av_hwframe_ctx_init(context->hw_frames_ctx);
+    if (err < 0) {
+        av_buffer_unref(&context->hw_frames_ctx);
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VK-VIDEO] §J.3.f av_hwframe_ctx_init() failed: %d",
+                     err);
+        return false;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-VIDEO] §J.3.f hw_frames_ctx initialised "
+                "(format=%d, sw_format=%d, %dx%d, pool=%d) — vulkan hwaccel ready",
+                framesContext->format, framesContext->sw_format,
+                framesContext->width, framesContext->height,
+                framesContext->initial_pool_size);
+    return true;
+}
+
 bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame)
 {
     pl_avframe_params mapParams = {};

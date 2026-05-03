@@ -14,6 +14,7 @@
 |---|---|---|
 | **Active (主戰場)** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限）|
 | **Diagnosed (not LAN)** | **§J HEVC 1440p decoder-throughput cap** | pktmon 雙端 pcap 證實 wire 0 loss；root cause 是 RS_VULKAN + VkFrucRenderer SW HEVC 1440p decode throughput ~50fps；非 FRUC 預設 D3D11 + DXVA HW decode 不受影響 |
+| **Done (§J.3.f)** | **AV1 / HEVC / H.264 vulkan_hwaccel via ffmpeg** | rebuild minimal FFmpeg 8.1 + `VIPLE_USE_VK_DECODER=1` opt-in；1440p120 三個 codec 全鎖滿 121fps；HEVC/H.264 decode 0.3–0.5ms (200×加速)；AV1 throughput 達標但 NV driver 路徑 100ms decode latency |
 | **Done + open hw-pending** | **§I.D** Android Vulkan FRUC async compute | D.2.0–D.2.5 全部 verified on Pixel 5；剩自然 45fps→90Hz ideal 1:2 比例 — Pixel 5 panel 鎖 60/90Hz、GameManagerService 鎖 60fps，需 LTPO panel hw 才能驗 |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 3d.6 — AV1 native VK decode grey | 9 個 parser bug 修完仍 grey；NV driver 596.36 + AV1 vkCmdDecodeVideoKHR 黑/灰，要 RenderDoc + vk_video_samples diff，AV1 預設走 libdav1d SW 不擋使用 |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 1.7 ONLY-mode NVDEC device-lost | 5 個變體都繞不過，NV 596.36 結構性 bug，預設 PARALLEL 穩 |
@@ -274,9 +275,43 @@ Pixel 5 panel 只支援 60Hz/90Hz mode，GameManagerService 又把 app default f
 - 或要推 1080p/4K
 - 或要砍 ncnn DLL 依賴
 
-### §J.3.f AV1 Vulkan hwaccel via ffmpeg（long-term）
+### §J.3.f AV1 / HEVC / H.264 Vulkan hwaccel via ffmpeg（**✅ DONE 2026-05-03**）
 
-重 build ffmpeg 把 libdav1d → vulkan_hwaccel 註冊（或改用 ffmpeg 內建 av1 decoder 加 vulkan）。需要 ffmpeg source + build 環境。**注意：跟 §J.3.e.2.i.8 Phase 3 是不同路線** — Phase 3 是 raw vkCmdDecodeVideoKHR + 自己跑 nvvideoparser，§J.3.f 是 ffmpeg 包裝。
+**達成：** rebuild 出 minimal FFmpeg 8.1 client DLL（`avcodec-62.dll` 5.2 MB），含 `--enable-vulkan --enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan --enable-libdav1d`。`VIPLE_USE_VK_DECODER=1` env opt-in 自動 prefer 走 NVDEC 經 `vkCmdDecodeVideoKHR` 路徑。
+
+#### 1440p120 即時實測（`stream --1440 --fps 120 --video-codec <H.264|HEVC|AV1> <host-ip> Desktop`）
+
+| Codec | received fps | decodeMeanMs | networkDropped | hostLatencyAvgMs | Vulkan HW |
+|---|---|---|---|---|---|
+| **H.264** | 121–123 | **0.26–0.55 ms** | 0 | 7.3 ms | ✅ |
+| **HEVC** | 119–122 | **0.30 ms** | 0 | 3.5 ms | ✅ |
+| **AV1** | 121–125 | 76–106 ms | 0 | 2.7 ms | ✅(throughput) ⚠️(latency) |
+
+**對比之前 SW HEVC 1440p120 cap：** received 50→122 fps（2.4×）、decodeMean 100ms→0.3ms（**300×加速**）、networkDropped 34–51→0。§J HEVC 1440p120 cap 完全解決。
+
+#### 跟 §J.3.e.2.i.8 Phase 3d.6 對比
+
+Phase 3d.6 自製 raw `vkCmdDecodeVideoKHR` + 我們自己跑 nvvideoparser，9 個 parser bug 修完仍 grey。**ffmpeg 包裝走 ffmpeg 內建 parser + DPB 管理，避開了我們自製 parser 的問題**，同樣的 NV driver 上對 H.264/HEVC/AV1 三個 codec 都能 init + decode 成功。Phase 3d.6 可以 deprecate（Vulkan 路線改走 ffmpeg 包裝）。
+
+#### AV1 latency 警告
+
+AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame wall-clock 80–106 ms（HEVC 是 0.3 ms，差 200×）。Pipeline depth 撐住 120fps throughput，但端到端遊戲延遲偏高。建議使用者預設挑 HEVC，AV1 留作頻寬限制下的選項。NV driver 升級或許可改善。
+
+#### 涉及的檔案 / 改動
+
+- **rebuilt FFmpeg 8.1** in `moonlight-qt/libs/windows/{include,lib}/x64/`：`avcodec-62.dll` (5.2 MB)、`avutil-60.dll` (1.8 MB)、`swscale-9.dll` (2.7 MB) + matching `.lib` + headers (libavcodec 62.28.100)
+- **6 個 mingw runtime DLL**：`libdav1d-7.dll` / `libiconv-2.dll` / `zlib1.dll` / `libwinpthread-1.dll` / `libva.dll` / `libva_win32.dll`（總計 +5 MB ship）
+- [`scripts/build_moonlight_package.cmd`](../scripts/build_moonlight_package.cmd) 加上述 6 個 DLL 到 deploy allowlist
+- [`ffmpeg.cpp:1590-1605`](../moonlight-qt/app/streaming/video/ffmpeg.cpp#L1590) + [`:2029-2096`](../moonlight-qt/app/streaming/video/ffmpeg.cpp#L2029) 兩處 SW-force escape：`VIPLE_USE_VK_DECODER=1` 時跳過短路
+- [`ffmpeg.cpp:2098+`](../moonlight-qt/app/streaming/video/ffmpeg.cpp#L2098) §J.3.f auto-prefer：`VIPLE_USE_VK_DECODER=1` 時自動走 native h264 / hevc / av1 by name（繞過 av_codec_iterate 不會走到 native 的問題）
+- [`plvk.cpp:4492-4540`](../moonlight-qt/app/streaming/video/ffmpeg-renderers/plvk.cpp#L4492) `prepareDecoderContextInGetFormat` override：在 get_format() callback 時 alloc `AVHWFramesContext`（鏡 d3d11va 同名 method），ffmpeg 的 *_vulkan hwaccel 才能 init
+
+#### 後續
+
+- [ ] **Settings UI toggle** 取代 env var — `VIPLE_USE_VK_DECODER=1` 變「Vulkan hardware decode (experimental)」勾選框
+- [ ] 把 §J.3.e.2.i.8 Phase 3d.6 標 deprecated，Vulkan 路線改 ffmpeg 包裝為主
+- [ ] AV1 vulkan 解碼 100ms latency 等 NV driver 升級或試 AMD/Intel 看是否 driver-specific
+- [ ] 4K AV1 用 vulkan hwaccel 的 baseline benchmark（`scripts/benchmark/vk_sw_codec_120.ps1`）— 之前 SW 受限 76 fps，HW 路徑該能直奔 120fps
 
 ### 不可動的鐵律 (§J)
 

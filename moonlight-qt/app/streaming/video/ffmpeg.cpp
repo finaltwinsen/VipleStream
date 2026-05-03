@@ -1587,7 +1587,13 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
     bool prefsForceD3D11 = vkPrefs && vkPrefs->rendererSelection == StreamingPreferences::RS_D3D11;
     bool prefsWantVulkan = vkPrefs && vkPrefs->rendererSelection == StreamingPreferences::RS_VULKAN;
     bool envForceVulkan  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0;
-    if (!prefsForceD3D11 && (prefsWantVulkan || envForceVulkan)) {
+    // §J.3.f override (2026-05-03) — same pattern as the SW-force block in
+    // initialize().  When VIPLE_USE_VK_DECODER=1, skip this short-circuit
+    // and let the standard cascade probe Vulkan hwaccel via line 1620's
+    // §J.3.c.1 path.  ffmpeg 8.1 vulkan hwaccel for h264/hevc/av1 verified
+    // working on this NV driver (2026-05-03 ffmpeg CLI smoke test).
+    bool envWantVkDecoderInner = qEnvironmentVariableIntValue("VIPLE_USE_VK_DECODER") != 0;
+    if (!prefsForceD3D11 && !envWantVkDecoderInner && (prefsWantVulkan || envForceVulkan)) {
         // SW h264/hevc/av1 decoders default to YUV420P output.  We try
         // YUV420P unconditionally — if decoder_pix_fmts list is missing
         // (newer FFmpeg returns NULL for some SW decoders), iterating
@@ -1619,10 +1625,20 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
         // safe (D3D11VA still primary).
         const char* vkOverride = SDL_getenv("VIPLE_USE_VK_DECODER");
         if (vkOverride && SDL_atoi(vkOverride) != 0) {
+            // §J.3.f recon — track whether we actually found a Vulkan
+            // hw_config so we can distinguish "decoder doesn't expose
+            // Vulkan hwaccel at all" (e.g. AV1 today via libdav1d
+            // wrapper, or a minimal FFmpeg DLL build without Vulkan
+            // codec support) from "Vulkan hwaccel exists but init
+            // failed".  Both fall through to the standard cascade, but
+            // only the latter is a real init bug; the former is a
+            // build-time configuration limit.
+            bool foundVulkanCfg = false;
             for (int i = 0; ; ++i) {
                 const AVCodecHWConfig* cfg = avcodec_get_hw_config(decoder, i);
                 if (!cfg) break;
                 if (cfg->device_type != AV_HWDEVICE_TYPE_VULKAN) continue;
+                foundVulkanCfg = true;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VK-VIDEO] §J.3.c.1 VIPLE_USE_VK_DECODER=1 — "
                             "trying Vulkan hwaccel first (decoder=%s, hw_config[%d])",
@@ -1639,6 +1655,14 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
                             "falling through to standard cascade",
                             (int)failureReason);
                 break;  // Found Vulkan but it failed — stop scanning.
+            }
+            if (!foundVulkanCfg) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-VIDEO] §J.3.c.1 VIPLE_USE_VK_DECODER=1 but decoder='%s' "
+                            "exposes NO AV_HWDEVICE_TYPE_VULKAN hw_config — bundled FFmpeg DLL "
+                            "wasn't built with Vulkan hwaccel for this codec.  Falling through "
+                            "to standard cascade.  See docs/TODO.md §J.3.f for AV1 case.",
+                            decoder->name);
             }
         }
 
@@ -2012,11 +2036,27 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
     // 觸發時，force SW h264/hevc/av1 decoder BEFORE HW cascade.  原因是
     // FFmpeg-Vulkan hwcontext HW path 還會 crash (docs/J.3.e.2.i_*.md
     // known-broken)，VkFruc 必須走 SW 上傳路徑.
+    //
+    // §J.3.f override (2026-05-03) — 當 VIPLE_USE_VK_DECODER=1 時，跳過
+    // 這條 SW-force 短路，讓 cascade 走到 line 1620 的 Vulkan-first 分支
+    // 並試 av1_vulkan / hevc_vulkan / h264_vulkan hwaccel.  ffmpeg 8.1 的
+    // vulkan hwaccel 經 2026-05-03 雙端 ffmpeg CLI smoke test 確認在這台
+    // NV driver 上對三種 codec 都能 init + decode（與 §J.3.e.2.i.8 Phase
+    // 3d.6 raw integration grey 不同；ffmpeg 包裝多走 parser/DPB 程式碼
+    // 路徑，避開了我們自製 nvvideoparser 的 9 個 bug）.  失敗會 fall
+    // through 標準 cascade（D3D11VA/DXVA2）保底.
     auto* vkPrefs2 = StreamingPreferences::get(nullptr);
     bool prefsForceD3D11_2 = vkPrefs2 && vkPrefs2->rendererSelection == StreamingPreferences::RS_D3D11;
     bool prefsWantVulkan_2 = vkPrefs2 && vkPrefs2->rendererSelection == StreamingPreferences::RS_VULKAN;
     bool envForceVulkan_2  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0;
-    if (!prefsForceD3D11_2 && (prefsWantVulkan_2 || envForceVulkan_2)) {
+    bool envWantVkDecoder  = qEnvironmentVariableIntValue("VIPLE_USE_VK_DECODER") != 0;
+    if (envWantVkDecoder) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-SW] VIPLE_USE_VK_DECODER=1 — skipping SW-force "
+                    "block; standard cascade will probe Vulkan hwaccel first "
+                    "(§J.3.f override)");
+    }
+    if (!prefsForceD3D11_2 && !envWantVkDecoder && (prefsWantVulkan_2 || envForceVulkan_2)) {
         // §J.3.e.2.i.8 Phase 3 — for AV1 the FFmpeg-internal `av1` decoder in
         // our avcodec-62 build is a HW-only stub ("Your platform doesn't
         // support hardware accelerated AV1 decoding" / "Failed to get pixel
@@ -2053,6 +2093,46 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-SW] all SW decoder candidates failed — falling "
                     "through to standard cascade");
+    }
+
+    // §J.3.f auto-prefer (2026-05-03) — when VIPLE_USE_VK_DECODER=1, force-try
+    // the codec's native decoder by name (h264 / hevc / av1) BEFORE the standard
+    // tryInitializeHwAccelDecoder cascade.  Mirrors the user-facing
+    // HEVC/AV1_DECODER_HINT path but automatic.
+    //
+    // Why: tryInitializeHwAccelDecoder's av_codec_iterate() iteration somehow
+    // doesn't reach native hevc/av1 in this build (likely libdav1d wrapper
+    // registers as AV1's primary AVCodec and the iterator picks it before the
+    // native decoder; for HEVC the symptom is similar even though there's no
+    // wrapper, so probably some pre-condition skip we haven't traced yet).
+    // Forcing by name guarantees we try the decoder with Vulkan hwaccel.
+    //
+    // tryInitializeRendererForUnknownDecoder(decoder, params, true /* tryHwAccel */)
+    // routes to the line 1620 cascade where VIPLE_USE_VK_DECODER=1 picks up
+    // and runs PlVkRenderer + hw_frames_ctx allocation (via the override in
+    // plvk.cpp).  Failure falls through to the standard cascade unchanged.
+    if (envWantVkDecoder) {
+        const char* candidateName = nullptr;
+        if (params->videoFormat & VIDEO_FORMAT_MASK_H264) candidateName = "h264";
+        else if (params->videoFormat & VIDEO_FORMAT_MASK_H265) candidateName = "hevc";
+        else if (params->videoFormat & VIDEO_FORMAT_MASK_AV1)  candidateName = "av1";
+        if (candidateName) {
+            const AVCodec* nativeDec = avcodec_find_decoder_by_name(candidateName);
+            if (nativeDec) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-VIDEO] §J.3.f auto-prefer native '%s' decoder "
+                            "for Vulkan hwaccel cascade", candidateName);
+                if (tryInitializeRendererForUnknownDecoder(nativeDec, params, true)) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VK-VIDEO] §J.3.f auto-prefer SUCCESS (decoder=%s)",
+                                candidateName);
+                    return true;
+                }
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-VIDEO] §J.3.f auto-prefer failed for '%s' — "
+                            "falling through to standard cascade", candidateName);
+            }
+        }
     }
 
     // First try decoders that the user has manually specified via environment variables.
