@@ -4874,6 +4874,20 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                     (void*)m_SlotDescSet[slot]);
     }
 
+    // §J.3.f bug fix round 2 (2026-05-04) — overlay needs three steps,
+    // first patch only added the third.  Adding the missing two before
+    // BeginRenderPass:
+    //   * drainOverlayStash() — pop SDL_Surface from atomic stash that
+    //     notifyOverlayUpdated populated, alloc GPU image + staging if
+    //     surface size changed, mark pendingUpload.
+    //   * uploadPendingOverlay(cmd) — record cmdCopyBufferToImage +
+    //     barrier inside the cmd buffer (must be OUTSIDE render pass —
+    //     cmdCopyBufferToImage is not allowed inside).
+    //   * (already done) drawOverlayInRenderPass(cmd) inside render pass
+    //     before CmdEndRenderPass.
+    drainOverlayStash();
+    uploadPendingOverlay(cmd);
+
     //  6b. Begin render pass — clear to opaque black.
     VkClearValue clearVal = {};
     clearVal.color.float32[0] = 0.0f;
