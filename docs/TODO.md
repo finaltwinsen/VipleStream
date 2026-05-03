@@ -13,11 +13,9 @@
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
 | **Active (主戰場)** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限）|
-| **Diagnosed (not LAN)** | **§J HEVC 1440p decoder-throughput cap** | pktmon 雙端 pcap 證實 wire 0 loss；root cause 是 RS_VULKAN + VkFrucRenderer SW HEVC 1440p decode throughput ~50fps；非 FRUC 預設 D3D11 + DXVA HW decode 不受影響 |
-| **Done (§J.3.f)** | **AV1 / HEVC / H.264 vulkan_hwaccel via ffmpeg** | rebuild minimal FFmpeg 8.1 + `VIPLE_USE_VK_DECODER=1` opt-in；1440p120 三個 codec 全鎖滿 121fps；HEVC/H.264 decode 0.3–0.5ms；AV1 5ms（`extra_hw_frames=1` tune；架構底線 — dedicated_dpb DPB→output copy 成本）|
-| **Negative result (§J.3.g)** | **FRUC ME 解析度下放：不是 bottleneck** | 2026-05-03 實作完整 ME→1080p / 720p downsample（NV12→RGB 雙 shader、warp shader mvScale、buffer 重新 size），4K120 + FRUC 仍卡 75-81 fps，跟下放前一樣。也試 DUAL off — fps 不變。代表 ME compute / DUAL present 都不是限制。實際 bottleneck 推測在 warp shader（per-pixel @ 4K）+ memory bandwidth + sync barriers。需要 GPU per-stage timing 才能定位。實作已 revert |
-| **Done + open hw-pending** | **§I.D** Android Vulkan FRUC async compute | D.2.0–D.2.5 全部 verified on Pixel 5；剩自然 45fps→90Hz ideal 1:2 比例 — Pixel 5 panel 鎖 60/90Hz、GameManagerService 鎖 60fps，需 LTPO panel hw 才能驗 |
-| **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 3d.6 — AV1 native VK decode grey | 9 個 parser bug 修完仍 grey；NV driver 596.36 + AV1 vkCmdDecodeVideoKHR 黑/灰，要 RenderDoc + vk_video_samples diff，AV1 預設走 libdav1d SW 不擋使用 |
+| **Negative result (§J.3.g)** | **FRUC ME 解析度下放：不是 bottleneck** | 2026-05-03 實作完整 ME→1080p / 720p downsample，4K120 + FRUC 仍卡 75-81 fps；DUAL off 也一樣。ME / DUAL 都不是限制；推測 warp shader (per-pixel @ 4K) + memory bandwidth + sync barriers。需要 GPU per-stage timing 才能定位。實作已 revert |
+| **HW-pending** | **§I.D** Android Vulkan FRUC async compute | D.2.0–D.2.5 已 ship + Pixel 5 verify；剩自然 45fps→90Hz ideal 1:2 比例 — Pixel 5 panel 鎖 60/90Hz、GameManagerService 鎖 60fps，需 LTPO panel hw 才能驗 |
+| **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 3d.6 — AV1 native VK decode grey | 9 個 parser bug 修完仍 grey；NV driver 596.36 + AV1 vkCmdDecodeVideoKHR 黑/灰；§J.3.f ffmpeg 包裝路徑已 cover AV1，這條 deprecated |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 1.7 ONLY-mode NVDEC device-lost | 5 個變體都繞不過，NV 596.36 結構性 bug，預設 PARALLEL 穩 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
@@ -25,7 +23,6 @@
 | **Low** | **§G.1** RIFE v1 11-channel | A1000 launch overhead bound (§G.3 negative result)；RTX 30/40+ 才有意義 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
 | **Low** | **§D** HelpLauncher URL → 結構化 docs | docs/setup_guide.md + docs/troubleshooting.md 已寫；HelpLauncher 切過去等 doc site stand 起來 |
-| **Done** | **§E** Android icon 三處驗證 | home / recents / splash 全在 Pixel 5 (Android 15) 確認正確 |
 | **Won't fix** | **§A.7** Wire-protocol 字串 | 動了等於跟 Moonlight 生態斷線，違背「混搭互聯」設計 |
 
 ---
@@ -67,12 +64,6 @@
 **狀態：** 🟡 部分 ship — `moonlight-android/.../HelpLauncher.java` 的 setup guide + troubleshooting 目前指 `https://github.com/finaltwinsen/VipleStream#readme`；GameStream EOL FAQ 維持上游 `moonlight-stream/moonlight-docs` wiki。
 
 **已加但未連線：** [`docs/setup_guide.md`](./setup_guide.md) + [`docs/troubleshooting.md`](./troubleshooting.md) 已寫（pairing / config / FRUC / common failure modes 都有），等 GitHub Pages 或類似 doc site stand 起來後，把 HelpLauncher URL 從 README anchor 換成 docs/* 頁面 anchor。
-
----
-
-## §E. moonlight-android Icon 補完
-
-**狀態：** ✅ 已驗 on Pixel 5 (Android 15) — home screen launcher、recents screen card、splash screen 三處全部正確使用 VipleStream "V" 圖示（lime on black circle）。Android 12+ themed icon (Material You) 在使用者啟用「Themed icons」時會自動切換為 `<monochrome>` 黑白剪影；預設關閉時用全彩 adaptive icon。`docs/_drafts/android_icon_eval/` 留有截圖佐證（不入版控）。
 
 ---
 
@@ -175,56 +166,13 @@ Pixel 5 panel 只支援 60Hz/90Hz mode，GameManagerService 又把 app default f
 | **§J.4** HEVC + H264 decode + 跨平台驗證 | Linux full coverage；macOS 路徑決策 | 規劃中 |
 | **§J.5** 整合測試 + fallback hardening + 預設切換 | NV / AMD / Intel bench；舊 driver 退回 D3D11；預設改 Vulkan | 規劃中 |
 
-### §J HEVC 1440p120 decoder-throughput cap（**diagnosed 2026-05-03，root cause 不是 LAN**）
+### §J HEVC 1440p120 SW decode cap — **resolved by §J.3.f**
 
-**現象：** RS_VULKAN + VkFrucRenderer (SW HEVC decode) 跑 1440p120 時 client 只收到 ~50 fps real。預設 RS_D3D11 + DXVA HW decode 在同樣 1440p120 順跑滿 120fps。
+歷史症狀：RS_VULKAN + VkFrucRenderer 走 SW HEVC decode 在 mobile CPU 上 1440p120 卡 ~50 fps（FRAME-threading throughput 限制）；2026-05-03 兩端 pktmon pcap 確認 wire 0 loss、root cause 在 client decoder。
 
-**2026-05-03 雙端 pktmon pcap 結論：wire 完全乾淨，cap 在 client decoder pipeline。**
+**§J.3.f rebuild（FFmpeg 8.1 + `hevc_vulkan` hwaccel）後解掉**：HEVC HW Vulkan 1440p120 跑 119–122 fps、decodeMean 0.30 ms、networkDropped 0。整合 commit b2b7afd 起 RS_VULKAN 預設走這條，使用者無須額外勾選。SW HEVC 1440p cap 仍存在（CPU 上限），但走 RS_D3D11 (DXVA HW) 或 RS_VULKAN (HW Vulkan) 都能避開。
 
-| Stage | 工具 | 量到的 rate | loss |
-|---|---|---|---|
-| Server NVENC | `[VIPLE-NVENC-RATE]` | 122 calls/sec | — |
-| Server broadcast pop | `[VIPLE-BCAST-RATE]` | 122 fps × ~38 Mbps | — |
-| Server NIC TX | pktmon `--comp <id>` (physical NIC, dup_factor=1×) | 13525 packets / 6.6s, 2040 pps | **0 missing** |
-| Client NIC RX | pktmon (UAC elevated, all NDIS 5 layers, 5× dedup) | 35636 unique seqs / 13.3s, 2682 pps | **0 missing** |
-| Client received | `[VIPLE-NET]` | ~50 fps | — |
-| Client networkDropped | `[VIPLE-NET]` | ~34–51 fps | — |
-| Client total = received + networkDropped | `[VIPLE-NET]` | ~85–105 fps | — |
-| Vulkan upload + present | `[VIPLE-VKFRUC-Stats]` | 46–52 fps | totalfn ~1ms |
-
-**真正 root cause：**
-
-- libavcodec HEVC SW decode（FRAME threading × 8 thread）在這台 mobile CPU 上 1440p HEVC 的 throughput 上限就是 ~50 fps。1080p HEVC 11.18ms p95 的測量結果在 1440p（pixel 1.78×）對應 ~20ms，但實測 wall-clock decodeMean 90–110ms（FRAME-threading pipeline depth latency；steady-state throughput 還是 ~50fps）。
-- `networkDropped` 是 moonlight-common-c 的 frame-number gap 計數，**不是封包遺失**。是 decoder back-pressure stall 住 RTP draining → FEC reassembly window 內 partially-formed frame 被 evict → 下一個收完的 frame 看到 frameNumber 跳號 → 計入 networkDropped。
-- Vulkan upload path 本身沒問題：`totalfn ~1ms`（SSE2 UV interleave 後 mem_UV ~220us、submit ~200us）。
-
-**為什麼 Vulkan + FRUC 強制 SW decode：** [`ffmpeg-renderers/vkfruc.cpp`](../moonlight-qt/app/streaming/video/ffmpeg-renderers/vkfruc.cpp) 在 ctor 標 `[VIPLE-VKFRUC-SW] forcing software decoder` — FRUC ME/warp shader 需要 CPU-side frame 做 staging buffer upload，HW decoder 沒有方便的 zero-copy 路徑進 Vulkan。Phase B（D3D11/NVDEC → Vulkan shared image）已知 NV 596.84 device-lost，見 `project_phase_b_dead_end.md`。
-
-**已嘗試但無效（2026-04-30~05-02）：**
-
-- Round 1: `RTP_RECV_PACKETS_BUFFERED` 2048→8192 + always-on getsockopt 驗證，OS 真的給滿 11.5MB buffer，networkDropped 沒改 — **不是 socket overflow**
-- Round 2: `VIPLE_SMOOTH_PACING=1` env opt-in（Sunshine ratecontrol line-rate→bitrate-shaped），networkDropped 沒改，且 AV1 1080p120 退化 120→94fps（I-frame 需要 fast burst），確認不能設預設 on
-- Round 5: FEC 10%→35%，networkDropped 變更糟（更大 frame size → 更多 burst 壓力），revert
-- 之前推估「server NIC↔client NIC 間 16% 封包遺失 → 50% frame 遺失」**錯了** — pcap 證明 wire 0 loss
-
-**fix path（依工時排序）：**
-
-1. **小：UI / log warn** — 偵測 `received_fps < 0.75 × target_fps` 連續 5s 時印 `[VIPLE-NET-WARN]` 並（可選）overlay 提示「客戶端解碼跟不上 — 改用預設 D3D11 渲染器或降低解析度」。純診斷增益，不改行為。
-2. **中：1440p120 + Vulkan + FRUC 自動回退** — `Session::populateAppropriateBitrate` 或 renderer-selection 階段 detect 該 combo，提示使用者並建議 1080p120 或 1440p60。
-3. **大（重啟 Phase B）：HW decode 直接灌 Vulkan via shared image** — 解掉 SW decode 瓶頸的根本路。要重新攻 NV 596.84 ID3D11Fence + VkSemaphore 同步路徑或 ID3D12Device intermediary（§J.1 路線 A）。已知 dead-end，但今年 NV driver 已從 596.84→596.36→更新版，值得 re-verify。
-
-**用 D3D11 預設不踩這個坑：** 一般 user 不選 Vulkan + FRUC 就沒影響；目前 v1.3.308 起 Vulkan 標 [實驗性]。**FRUC + 1440p120 + HEVC** 才是踩 cap 的特定組合。
-
-**已就位 instrumentation：**
-
-- `[VIPLE-NVENC] encode_frame total / wait_async_evt / lock_bitstream / bitstream_size` (5s window)
-- `[VIPLE-NVENC-RATE]` 每 5s N calls/sec
-- `[VIPLE-BCAST-RATE]` 每 5s popped fps + Mbps
-- `[VIPLE-NET]` client-side received / decoded / networkDropped / decodeMeanMs / hostLatency 每秒一行
-- `[VIPLE-VKFRUC-SW-PROF]` mem_Y / mem_UV / fence / submit / present 五段 percentile
-- `Actual receive buffer size: N (requested: M)` + 不到一半時的 WARNING — moonlight-common-c PlatformSockets always-on
-- `VIPLE_SMOOTH_PACING=1` env opt-in（已驗證會傷 AV1 burst，**不能設預設 on**）
-- [`docs/diag_wire_loss.md`](./diag_wire_loss.md) — pktmon 雙端 capture + tshark 序號 dedup 分析 SOP。任何「`networkDropped > 0` 是不是 LAN 丟包」的疑問，**第一步**走這套流程：兩端 capture，`Missing packets: 0` 就確認 wire 乾淨，往 OS UDP / FEC reassembly / decoder throughput 找。具體 .ps1 / .py 工具在開發者本機（IP / 路徑 / NIC id 個人化），不入版本管。
+**保留的診斷工具**（之後其他 throughput 問題還會用）：[`docs/diag_wire_loss.md`](./diag_wire_loss.md) 雙端 pktmon SOP、`[VIPLE-NVENC-RATE]` / `[VIPLE-BCAST-RATE]` / `[VIPLE-NET]` 三段 rate trace。
 
 ### §J.3.e VkFrucRenderer（Android architecture port，**目前主戰場**）
 
@@ -276,17 +224,27 @@ Pixel 5 panel 只支援 60Hz/90Hz mode，GameManagerService 又把 app default f
 - 或要推 1080p/4K
 - 或要砍 ncnn DLL 依賴
 
-### §J.3.f AV1 / HEVC / H.264 Vulkan hwaccel via ffmpeg（**✅ DONE 2026-05-03**）
+### §J.3.f AV1 / HEVC / H.264 Vulkan hwaccel via ffmpeg（**✅ DONE 2026-05-03 / integration b2b7afd**）
 
-**達成：** rebuild 出 minimal FFmpeg 8.1 client DLL（`avcodec-62.dll` 5.2 MB），含 `--enable-vulkan --enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan --enable-libdav1d`。`VIPLE_USE_VK_DECODER=1` env opt-in 自動 prefer 走 NVDEC 經 `vkCmdDecodeVideoKHR` 路徑。
+**達成：** rebuild 出 minimal FFmpeg 8.1 client DLL（`avcodec-62.dll` 5.2 MB），含 `--enable-vulkan --enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan --enable-libdav1d`。整合 commit `b2b7afd` 起，**RS_VULKAN preference 自動觸發 Vulkan HW decode + FRUC + DUAL**（不再需要 `VIPLE_USE_VK_DECODER=1` / `VIPLE_VK_FRUC_GENERIC` / `VIPLE_VKFRUC_HW` env 三件組）。env var 仍保留作 explicit override / debug fallback。
 
-#### 1440p120 即時實測（`stream --1440 --fps 120 --video-codec <H.264|HEVC|AV1> <host-ip> Desktop`）
+#### 1440p120 即時實測（v1.3.333，env-var opt-in 路徑）
 
 | Codec | received fps | decodeMeanMs | networkDropped | hostLatencyAvgMs | Vulkan HW |
 |---|---|---|---|---|---|
 | **H.264** | 121–123 | **0.26–0.55 ms** | 0 | 7.3 ms | ✅ |
 | **HEVC** | 119–122 | **0.30 ms** | 0 | 3.5 ms | ✅ |
 | **AV1** | 121–125 | **5–8 ms** | 0 | 2.7 ms | ✅ |
+
+#### 4K120 + FRUC + DUAL × 3 codec（v1.3.333+ b2b7afd integration，full-power GPU）
+
+| Codec | fps | decode | 備註 |
+|---|---|---|---|
+| **H.264** | 92 | 0.6 ms | host NVENC 4K H.264 編碼上限 |
+| **HEVC** | 101–103 | 0.4–0.7 ms | host NVENC 4K HEVC 編碼上限 |
+| **AV1** | 116–119 | 4.2–4.8 ms | 達 120fps target，dedicated_dpb 5ms 底線 |
+
+5-env-var 路徑跟 RS_VULKAN auto-detect 路徑量到完全相同 fps，整合無 regression。
 
 **對比之前 SW HEVC 1440p120 cap：** received 50→122 fps（2.4×）、decodeMean 100ms→0.3ms（**300×加速**）、networkDropped 34–51→0。§J HEVC 1440p120 cap 完全解決。
 
@@ -311,10 +269,10 @@ AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame
 
 #### 後續
 
-- [ ] **Settings UI toggle** 取代 env var — `VIPLE_USE_VK_DECODER=1` 變「Vulkan hardware decode (experimental)」勾選框
-- [ ] 把 §J.3.e.2.i.8 Phase 3d.6 標 deprecated，Vulkan 路線改 ffmpeg 包裝為主
+- [x] ~~Settings UI toggle 取代 env var~~ — done by b2b7afd（RS_VULKAN preference 直接 auto-trigger，不需要勾選框）
+- [x] ~~把 §J.3.e.2.i.8 Phase 3d.6 標 deprecated~~ — 在 priority overview 標記
+- [x] ~~4K AV1 baseline benchmark~~ — done in b2b7afd 整合測試（4K120+FRUC+DUAL × 3 codec 全 PASS）
 - [ ] AV1 5ms 底線等 NV driver 升級 / AMD / Intel 試或 ffmpeg patch 重 design dedicated_dpb 行為
-- [ ] 4K AV1 用 vulkan hwaccel 的 baseline benchmark（`scripts/benchmark/vk_sw_codec_120.ps1`）— 之前 SW 受限 76 fps，HW 路徑該能直奔 120fps
 
 ### §J.3.g FRUC ME 解析度下放 — **NEGATIVE RESULT（2026-05-03，已 revert）**
 
