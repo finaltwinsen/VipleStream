@@ -9,6 +9,7 @@
 
 extern "C" {
 #include <libavutil/mastering_display_metadata.h>
+#include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 }
 
@@ -537,10 +538,53 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     // runs out of output buffers.
     m_VideoDecoderCtx->err_recognition = AV_EF_EXPLODE;
 
-    // Enable slice multi-threading for software decoding
+    // Multi-threading for software decoding.
+    //
+    // Historically Moonlight set FF_THREAD_SLICE + thread_count = min(MAX_SLICES,
+    // CPU) — appropriate for H.264/HEVC where the server encodes N slices and
+    // the client farms them across N worker threads.  AV1 fundamentally has no
+    // "slices" in the same sense (tile_groups + frame-level parallelism) and
+    // libdav1d's internal threading model manages its own workers (it carries
+    // AV_CODEC_CAP_OTHER_THREADS — FF_THREAD_* flags are inert, only
+    // thread_count is honored as the total worker pool).  Capping at 4 leaves
+    // 1080p120 AV1 SW visibly thread-starved (verified by [VIPLE-VKFRUC-Stats]
+    // p95=16.32ms vs HEVC's 12.50ms on the same baseline).  Give libdav1d more
+    // cores so it can run frame-threading + tile-threading in parallel.
     if (!isHardwareAccelerated()) {
-        m_VideoDecoderCtx->thread_type = FF_THREAD_SLICE;
-        m_VideoDecoderCtx->thread_count = qMin(MAX_SLICES, SDL_GetCPUCount());
+        const int cpus = SDL_GetCPUCount();
+        if (m_VideoDecoderCtx->codec_id == AV_CODEC_ID_AV1) {
+            // libdav1d carries AV_CODEC_CAP_OTHER_THREADS — FFmpeg's MT layer is
+            // bypassed; libdav1d manages its own workers.  thread_count seeds
+            // the worker pool size which it auto-splits between frame and tile
+            // threads.  We cap at 8 (4 frame × 2 tile) for 1080p — empirically
+            // the knee of the curve.  thread_type=FF_THREAD_FRAME is no-op for
+            // OTHER_THREADS codecs but set for self-documentation.
+            //
+            // Critical for low-jitter output cadence: cap libdav1d's internal
+            // frame queue with `max_frame_delay=1`.  Default (0=auto) lets
+            // libdav1d batch up to N frames behind the dispatcher, which then
+            // emits them in bursts from avcodec_receive_frame().  That bursty
+            // output is what shows up downstream as bimodal Pacer cadence
+            // (p50≈7ms / p95≈16ms vs HEVC's tight ≈12ms p95) when the
+            // VsyncSource is disabled and submitFrame is called inline.  With
+            // max_frame_delay=1 libdav1d holds at most 1 frame, so output
+            // cadence matches input cadence (~8.33ms at 120fps).
+            m_VideoDecoderCtx->thread_type  = FF_THREAD_FRAME;
+            m_VideoDecoderCtx->thread_count = qMin(8, cpus);
+            av_opt_set_int(m_VideoDecoderCtx->priv_data, "max_frame_delay", 1, 0);
+        }
+        else {
+            m_VideoDecoderCtx->thread_type  = FF_THREAD_SLICE;
+            m_VideoDecoderCtx->thread_count = qMin(MAX_SLICES, cpus);
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-SW-THREAD] codec=%s thread_type=%s thread_count=%d "
+                    "max_frame_delay=%s (cpus=%d)",
+                    decoder->name,
+                    m_VideoDecoderCtx->thread_type == FF_THREAD_FRAME ? "FRAME" : "SLICE",
+                    m_VideoDecoderCtx->thread_count,
+                    m_VideoDecoderCtx->codec_id == AV_CODEC_ID_AV1 ? "1" : "default",
+                    cpus);
     }
     else {
         // No threading for HW decode

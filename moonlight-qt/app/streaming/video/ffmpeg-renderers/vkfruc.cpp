@@ -5018,6 +5018,16 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     uint64_t fnum = s_FrameCountSw.fetch_add(1, std::memory_order_relaxed);
     bool firstFrame = (fnum < 3);
 
+    // §J.3.e.2.i.6 SW-PROF — per-phase profile timestamps for [VIPLE-VKFRUC-SW-PROF]
+    // breakdown logging.  Recorded with steady_clock::now() at each phase boundary
+    // so we can identify which step (memcpy / fence / submit / present) is the
+    // largest contributor to p95/p99 frame time variance.
+    auto _profT0 = std::chrono::steady_clock::now();
+    auto _profT1 = _profT0;  // after memcpy
+    auto _profT2 = _profT0;  // after WaitForFences
+    auto _profT3 = _profT0;  // after QueueSubmit
+    auto _profT4 = _profT0;  // after QueuePresent
+
     if (firstFrame) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-SW] frame#%llu ENTRY format=%d w=%d h=%d "
@@ -5124,6 +5134,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     // §J.3.e.2.i.8 Phase 1.5 — when useNativeDecodeEarly, the staging memcpy
     // is skipped entirely.  Decode-queue cmd buffer in submitDecodeFrame
     // already copied DPB layer → m_SwUploadImage in SHADER_READ_ONLY layout.
+    _profT1 = std::chrono::steady_clock::now();
 
     // ---- 2/3. Slot rotation, fence wait/reset, swapchain acquire ----
     uint32_t slot = m_CurrentSlot;
@@ -5153,6 +5164,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
             return;
         }
     }
+    _profT2 = std::chrono::steady_clock::now();
 
     // Acquire 1 (real) image for single mode, or 2 (interp + real) for dual.
     uint32_t imgIdxA = 0;  // interp slot (only used in dual mode)
@@ -5572,6 +5584,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
             std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
+        _profT3 = std::chrono::steady_clock::now();
         if (vr != VK_SUCCESS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "[VIPLE-VKFRUC-SW] vkQueueSubmit failed (%d) — disabling native path", (int)vr);
@@ -5593,6 +5606,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
             std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &pi);
         }
+        _profT4 = std::chrono::steady_clock::now();
         if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-SW] vkQueuePresentKHR returned %d", (int)vr);
@@ -5614,6 +5628,20 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         static thread_local steady_clock::time_point s_LastPresent{};
         static thread_local steady_clock::time_point s_StatsBucketStart{};
         static thread_local std::vector<double> s_FrameMsRing;  // intervals in current 5s bucket
+        // §J.3.e.2.i.6 SW-PROF — per-phase microsecond samples in current bucket
+        static thread_local std::vector<double> s_ProfMemUs;
+        static thread_local std::vector<double> s_ProfWaitUs;
+        static thread_local std::vector<double> s_ProfSubmitUs;
+        static thread_local std::vector<double> s_ProfPresentUs;
+        static thread_local std::vector<double> s_ProfTotalUs;
+        // record this frame's phase deltas (only when single mode + we measured all 4)
+        if (_profT4 > _profT0) {
+            s_ProfMemUs.push_back(duration_cast<duration<double, std::micro>>(_profT1 - _profT0).count());
+            s_ProfWaitUs.push_back(duration_cast<duration<double, std::micro>>(_profT2 - _profT1).count());
+            s_ProfSubmitUs.push_back(duration_cast<duration<double, std::micro>>(_profT3 - _profT2).count());
+            s_ProfPresentUs.push_back(duration_cast<duration<double, std::micro>>(_profT4 - _profT3).count());
+            s_ProfTotalUs.push_back(duration_cast<duration<double, std::micro>>(_profT4 - _profT0).count());
+        }
         static thread_local uint64_t s_CumulReal   = 0;
         static thread_local uint64_t s_CumulInterp = 0;
 
@@ -5666,6 +5694,30 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                         m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0);
             m_FrucGpuUsAccum = 0.0;
             m_FrucGpuUsCount = 0;
+
+            // §J.3.e.2.i.6 SW-PROF — emit per-phase breakdown when we have
+            // single-mode samples (synth / dual frames don't measure all 4
+            // phases, so the arrays may be smaller than s_FrameMsRing).
+            auto phasePctLog = [&](const char* name, std::vector<double>& vec) {
+                if (vec.empty()) return;
+                std::sort(vec.begin(), vec.end());
+                auto pp = [&](double q) -> double {
+                    size_t idx = (size_t)((vec.size() - 1) * q + 0.5);
+                    if (idx >= vec.size()) idx = vec.size() - 1;
+                    return vec[idx];
+                };
+                double sum = 0; for (double v : vec) sum += v;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-SW-PROF] %-8s n=%zu mean=%.0fus p50=%.0f p95=%.0f p99=%.0f max=%.0f",
+                            name, vec.size(), sum / vec.size(),
+                            pp(0.50), pp(0.95), pp(0.99), vec.back());
+                vec.clear();
+            };
+            phasePctLog("memcpy",   s_ProfMemUs);
+            phasePctLog("fence",    s_ProfWaitUs);
+            phasePctLog("submit",   s_ProfSubmitUs);
+            phasePctLog("present",  s_ProfPresentUs);
+            phasePctLog("totalfn",  s_ProfTotalUs);
 
             s_FrameMsRing.clear();
             s_StatsBucketStart = now;
