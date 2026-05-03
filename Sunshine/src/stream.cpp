@@ -1454,9 +1454,36 @@ namespace stream {
 
     auto ratecontrol_next_frame_start = std::chrono::steady_clock::now();
 
+    // [VIPLE-BCAST-RATE] count frames pulled from the encoder→broadcast queue
+    // to verify whether the rate-control / FEC / send_batch pipeline below
+    // sustains the encoder's actual output rate (HEVC 1440p120 sees 123
+    // calls/sec at NVENC but client reports only 60fps received).
+    static thread_local std::chrono::steady_clock::time_point s_BcastBucketStart{};
+    static thread_local uint32_t s_BcastBucketCount = 0;
+    static thread_local uint64_t s_BcastBucketBytes = 0;
     while (auto packet = packets->pop()) {
       if (shutdown_event->peek()) {
         break;
+      }
+
+      {
+        auto _bcastNow = std::chrono::steady_clock::now();
+        if (s_BcastBucketStart.time_since_epoch().count() == 0) {
+          s_BcastBucketStart = _bcastNow;
+        }
+        s_BcastBucketCount++;
+        s_BcastBucketBytes += packet->data_size();
+        auto bucketMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(_bcastNow - s_BcastBucketStart).count();
+        if (bucketMs >= 5000.0) {
+          double rate = s_BcastBucketCount * 1000.0 / bucketMs;
+          double mbps = (s_BcastBucketBytes * 8.0 / 1e6) / (bucketMs / 1000.0);
+          BOOST_LOG(info) << "[VIPLE-BCAST-RATE] popped " << s_BcastBucketCount
+                          << " packets/" << bucketMs << "ms = " << rate << " fps,"
+                          << " " << mbps << " Mbps";
+          s_BcastBucketCount = 0;
+          s_BcastBucketBytes = 0;
+          s_BcastBucketStart = _bcastNow;
+        }
       }
 
       frame_network_latency_logger.first_point_now();

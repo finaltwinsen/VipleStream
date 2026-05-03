@@ -2448,6 +2448,22 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
     // Flip stats windows roughly every second
     if (LiGetMicroseconds() > m_ActiveWndVideoStats.measurementStartUs + 1000000) {
+        // [VIPLE-NET] expose per-second receive/decode/drop counters in the
+        // log without requiring overlay enabled.  Diagnoses where the stream
+        // rate cap is when server pushes 120 fps but client renders fewer.
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-NET] received=%u decoded=%u networkDropped=%u total=%u "
+                    "decodeMeanMs=%.2f hostLatencyAvgMs=%.2f",
+                    m_ActiveWndVideoStats.receivedFrames,
+                    m_ActiveWndVideoStats.decodedFrames,
+                    m_ActiveWndVideoStats.networkDroppedFrames,
+                    m_ActiveWndVideoStats.totalFrames,
+                    m_ActiveWndVideoStats.decodedFrames > 0
+                        ? (double)m_ActiveWndVideoStats.totalDecodeTimeUs / m_ActiveWndVideoStats.decodedFrames / 1000.0
+                        : 0.0,
+                    m_ActiveWndVideoStats.framesWithHostProcessingLatency > 0
+                        ? (double)m_ActiveWndVideoStats.totalHostProcessingLatency / m_ActiveWndVideoStats.framesWithHostProcessingLatency / 10.0
+                        : 0.0);
         // Update overlay stats if it's enabled
         if (Session::get()->getOverlayManager().isOverlayEnabled(Overlay::OverlayDebug)) {
             VIDEO_STATS lastTwoWndStats = {};

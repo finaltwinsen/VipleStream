@@ -503,6 +503,12 @@ namespace nvenc {
     assert(registered_input_buffer);
     assert(output_bitstream);
 
+    // [VIPLE-NVENC-PROF] timing instrumentation for HEVC 1440p 60fps cap
+    // investigation.  Baseline: at 1440p hevc_nvenc was producing only 60 stream
+    // packets/sec on the test host (RTX 5060 Ti, NVENC P1) while h264_nvenc /
+    // av1_nvenc produced 120 — codec-specific behavior we want to localize.
+    auto _profEntry = std::chrono::steady_clock::now();
+
     if (!synchronize_input_buffer()) {
       BOOST_LOG(error) << "NvEnc: failed to synchronize input buffer";
       return {};
@@ -541,15 +547,18 @@ namespace nvenc {
     lock_bitstream.outputBitstream = output_bitstream;
     lock_bitstream.doNotWait = async_event_handle ? 1 : 0;
 
+    auto _profBeforeWait = std::chrono::steady_clock::now();
     if (async_event_handle && !wait_for_async_event(100)) {
       BOOST_LOG(error) << "NvEnc: frame " << frame_index << " encode wait timeout";
       return {};
     }
+    auto _profAfterWait = std::chrono::steady_clock::now();
 
     if (nvenc_failed(nvenc->nvEncLockBitstream(encoder, &lock_bitstream))) {
       BOOST_LOG(error) << "NvEnc: NvEncLockBitstream() failed: " << last_nvenc_error_string;
       return {};
     }
+    auto _profAfterLock = std::chrono::steady_clock::now();
 
     auto data_pointer = (uint8_t *) lock_bitstream.bitstreamBufferPtr;
     nvenc_encoded_frame encoded_frame {
@@ -575,6 +584,35 @@ namespace nvenc {
     }
 
     encoder_state.frame_size_logger.collect_and_log(encoded_frame.data.size() / 1000.);
+
+    // [VIPLE-NVENC-PROF] tracker windows.  total = entry → after-unlock; the
+    // sub-deltas isolate where the time goes (sync+map+encode_picture, then
+    // wait_for_async_event, then lock+copy+unlock).
+    auto _profExit = std::chrono::steady_clock::now();
+    using ms_d = std::chrono::duration<double, std::milli>;
+    encoder_state.encode_total_ms_logger.collect_and_log(std::chrono::duration_cast<ms_d>(_profExit       - _profEntry).count());
+    encoder_state.encode_async_ms_logger.collect_and_log(std::chrono::duration_cast<ms_d>(_profAfterWait  - _profBeforeWait).count());
+    encoder_state.encode_lock_ms_logger.collect_and_log( std::chrono::duration_cast<ms_d>(_profAfterLock  - _profAfterWait).count());
+    encoder_state.encode_bsize_logger.collect_and_log(static_cast<double>(encoded_frame.data.size()));
+
+    // [VIPLE-NVENC-RATE] explicit per-second call rate counter so we can tell
+    // whether the encoder loop actually iterates 120/sec or is being gated.
+    {
+      static thread_local std::chrono::steady_clock::time_point bucketStart{};
+      static thread_local uint32_t bucketCount = 0;
+      if (bucketStart.time_since_epoch().count() == 0) {
+        bucketStart = _profExit;
+      }
+      bucketCount++;
+      auto bucketMs = std::chrono::duration_cast<ms_d>(_profExit - bucketStart).count();
+      if (bucketMs >= 5000.0) {
+        double rate = bucketCount * 1000.0 / bucketMs;
+        BOOST_LOG(info) << "[VIPLE-NVENC-RATE] encode_frame called " << bucketCount
+                        << " times over " << bucketMs << "ms = " << rate << " calls/sec";
+        bucketCount = 0;
+        bucketStart = _profExit;
+      }
+    }
 
     return encoded_frame;
   }

@@ -149,6 +149,13 @@ namespace nvenc {
       bool rfi_needs_confirmation = false;
       std::pair<uint64_t, uint64_t> last_rfi_range;
       logging::min_max_avg_periodic_logger<double> frame_size_logger = {debug, "NvEnc: encoded frame sizes in kB", ""};
+      // [VIPLE-NVENC-PROF] HEVC 1440p 60fps cap diagnosis: log encode_frame
+      // sub-step timings periodically.  `info` severity so visible without
+      // debug log level; 5-second interval keeps log volume manageable.
+      logging::min_max_avg_periodic_logger<double> encode_total_ms_logger  {info, "[VIPLE-NVENC] encode_frame total", "ms", std::chrono::seconds(5)};
+      logging::min_max_avg_periodic_logger<double> encode_async_ms_logger  {info, "[VIPLE-NVENC]   wait_async_evt",   "ms", std::chrono::seconds(5)};
+      logging::min_max_avg_periodic_logger<double> encode_lock_ms_logger   {info, "[VIPLE-NVENC]   lock_bitstream",   "ms", std::chrono::seconds(5)};
+      logging::min_max_avg_periodic_logger<double> encode_bsize_logger     {info, "[VIPLE-NVENC]   bitstream_size",   "B",  std::chrono::seconds(5)};
     } encoder_state;
   };
 
