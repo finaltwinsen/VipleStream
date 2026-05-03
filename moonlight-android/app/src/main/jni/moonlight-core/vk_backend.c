@@ -3721,42 +3721,53 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         : ((be->fRefreshDurationNs > 0)
             ? (1.0e9f / (float)be->fRefreshDurationNs)
             : 60.0f);
-    // Dual present's value: input < display headroom for interp frame.
-    // Test: would (input × 2) fit in display refresh budget? i.e.
-    //     2 × inputFps ≤ displayHz × 1.05 (small margin for jitter)
+    // Dual present's value: every render call shows interp + real, doubling
+    // perceived smoothness on a panel with refresh > input.  Original
+    // criterion `2 × input ≤ display × 1.05` gated dual entry conservatively
+    // because we feared FIFO present overflow would stutter.  Pixel 5 + 90Hz
+    // panel real-machine measurement (D.2.4 follow-up) showed FIFO actually
+    // drops surplus presents cleanly — 60fps source on 90Hz with dual
+    // running at 97% sustained: 2910 interp / 5910 total displayed across
+    // 3000 native renders, p50 host frame ms 14.22 (vs 1.34 single mode),
+    // ZERO VK_ERROR.  The historical concern was theoretical; FIFO 's
+    // semantics are forgiving.
+    //
+    // v1.3.314 — relax thresholds so 60fps streams on 90Hz / 120Hz panels
+    // pick up FRUC interp by default.  User-facing impact: anyone setting
+    // "90 fps" + enabling FRUC now actually sees interpolated frames at
+    // 90Hz; previously the setting was a no-op because dual entry never
+    // fired with input==60fps (Pixel 5 + Sunshine pipeline can't deliver
+    // ≤45fps regardless of negotiated rate — see D.2.4 followup notes).
+    // Test budget allows ~33% present overrun:
+    //     2 × inputFps ≤ displayHz × 1.40 → dual entry
+    //     2 × inputFps >  displayHz × 1.50 → exit dual (10% hysteresis band)
+    //
     // Examples:
-    //   input 60, display 60 → 120 > 63   → single (default at 60Hz/60fps)
-    //   input 60, display 90 → 120 > 94.5 → single (no headroom)
-    //   input 45, display 90 → 90  ≤ 94.5 → dual ✓
-    //   input 30, display 60 → 60  ≤ 63   → dual ✓ (low-fps stream gets boost)
+    //   input 60, display 60  → 120 > 84    → single (over-budget at same rate)
+    //   input 60, display 90  → 120 ≤ 126   → dual ✓ (was single under 1.05×)
+    //   input 60, display 120 → 120 ≤ 168   → dual ✓
+    //   input 45, display 90  → 90  ≤ 126   → dual ✓ (natural ratio)
+    //   input 30, display 60  → 60  ≤ 84    → dual ✓ (low-fps stream gets boost)
+    //   input 75, display 90  → 150 > 126   → single (over-budget)
+    //   input 90, display 90  → 180 > 126   → single (no headroom)
     //
     // Default single: avoids the "start in dual → input throttle → measurement
     // says low → stay dual" stuck loop observed in v1.2.163 with ALWAYS
-    // change strategy. measurement-zero state means "give clean
-    // baseline first" — single mode lets input flow at full rate, then
-    // measurement decides whether dual would actually fit.
-    // iter 7 — smart-mode hysteresis. Avoid flip-flop near threshold by
-    // applying different criteria based on current mode:
-    //   currently single → switch to dual only if 2×input ≤ display×1.0
-    //   currently dual   → switch to single only if 2×input > display×1.10
-    // Gives ~10% deadband. Default before first measurement = single.
+    // change strategy.  Measurement-zero state means "give clean baseline
+    // first" — single lets input flow at full rate, then measurement decides
+    // whether dual fits.
     //
-    // v1.2.177 fix: previous safety `!fHostFrameFilled → singleMode=1`
-    // fought the criterion every frame for the first ~120 frames (until
-    // host-timing ring filled at 2-3s @ 45-60fps). On boundary inputs
-    // (60→120, 45→90) every frame alternated single↔dual → effective
-    // displayed FPS = single average. The fix replaces the 120-frame
-    // gate with a measurement-validity gate (~200ms via early-publish).
+    // v1.2.177 fix: previous safety `!fHostFrameFilled → singleMode=1` fought
+    // the criterion every frame for the first ~120 frames (until host-timing
+    // ring filled at 2-3s @ 45-60fps).  On boundary inputs (60→120, 45→90)
+    // every frame alternated single↔dual → effective displayed FPS = single
+    // average.  Fixed by replacing the 120-frame gate with a measurement-
+    // validity gate (~200ms via early-publish).
     int singleMode = be->fLastSingleMode;  // start by holding current mode
     if (be->fInputFpsRecent <= 0.0f) singleMode = 1;  // no measurement yet → force single (safe default)
     float doubled = be->fInputFpsRecent * 2.0f;
-    // v1.2.178 — give enter threshold 5% margin so input=display/2 with
-    // ±jitter doesn't bounce. exit at 15% to give 10% deadband.
-    //   45 in 90:  2×45=90,  enter=94.5, exit=103.5 → dual ✓
-    //   60 in 120: 2×60=120, enter=126,  exit=138   → dual ✓
-    //   55 in 60:  2×55=110, enter=63,   exit=69    → single ✓ (over)
-    float enterDualThr = displayHz * 1.05f;
-    float exitDualThr  = displayHz * 1.15f;
+    float enterDualThr = displayHz * 1.40f;
+    float exitDualThr  = displayHz * 1.50f;
     if (be->fInputFpsRecent > 0.0f) {
         if (be->fLastSingleMode && doubled <= enterDualThr) {
             singleMode = 0;  // single → dual: FRUC fits
