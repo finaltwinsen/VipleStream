@@ -188,8 +188,9 @@ fruc.onnx + fruc_fp16.onnx）。Build script 拿掉 onnx copy block。實機驗
 - Phase D.2.4 baseline benchmark：60fps single-mode 對比 pre-split / post-split， p50 +0.07ms (1.29 → 1.36ms)、p99 +0.52ms (2.94 → 3.46ms)、120s GPU 升溫 +0.52°C。 Single mode 多付 ~70µs / frame 在 compute-side barrier-only submit + sem 上， cost < 1ms p99 可接受。
 - Dual entry threshold 從 1.05× 改成 1.40×：起因是 60fps Sunshine input + 90Hz panel 在原 1.05× 永遠進不了 dual（2×60=120 > 94.5），實際真機驗證 FIFO present 對 surplus 的處理是 driver-side drop 不是 stutter，p50 frame 14.2ms 跟 ideal 1:2 dual 行為一致。改後 60fps@90Hz 預設進 dual mode 92.6% (1111 / 1200 frames)，使用者只要設 "90 fps + 開 FRUC" 就能拿到 interp。
 
+- Phase D.2.5 mailbox opt-in (commit `0217426`)：`debug.viplestream.mailbox=1` sysprop 切 MAILBOX → FIFO_RELAXED → FIFO 順序；default off 保留 v1.2.171 那次 Pixel 5 single-mode regression 的避雷。Pixel 5 真機 A/B 3 runs × 60s × dual mode @ 90Hz panel：FIFO p50 14.13/p90 14.79/p99 15.70 vs MAILBOX p50 14.21/p90 14.88/p99 15.86 — Δ +0.08/+0.09/+0.16 ms（run-to-run noise 範圍內）。MAILBOX 在 60fps source on 90Hz 場景 **無顯著 latency win**；對其他組合（60fps source on 60Hz panel 強迫 dual 因此 backpressure 嚴重時，或 LTPO panel 上）才有理論收益，需要 user-side empirical 才能驗。
+
 **未做：**
-- Phase D.2.5 (mailbox per-mode) — D.2.x 路跑通了；mailbox 對 dual mode 的 latency 是否再降需要 user-perceptible test，先擱著。
 - 自然 45fps source on 90Hz panel 的 ideal 1:2 比例測試 — Pixel 5 panel 只支援 60Hz/90Hz mode，GameManagerService 又把 app default frame rate override 為 60fps，現有 hardware combo 拿不到 ≤ 45fps stable input。要驗 ideal 比例得換 LTPO panel 手機（S24+/Pixel 8）。
 
 **鐵律：**
