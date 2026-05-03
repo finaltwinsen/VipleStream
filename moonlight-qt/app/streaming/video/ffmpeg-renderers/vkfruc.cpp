@@ -4902,6 +4902,13 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     m_RtPfn.CmdDraw(cmd, 3, 1, 0, 0);
     if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC] frame#0 CmdDraw OK");
 
+    // §J.3.f bug fix (2026-05-04) — HW path was missing the overlay draw
+    // call that exists in renderFrameSw (lines 5513, 5533).  Without this,
+    // Ctrl+Alt+Shift+S to toggle the perf overlay does nothing visible
+    // when running m_SwMode=0 + FRUC + HW decode (notifyOverlayUpdated
+    // stashes the surface but no consumer in HW renderFrame).
+    drawOverlayInRenderPass(cmd);
+
     m_RtPfn.CmdEndRenderPass(cmd);
     if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC] frame#0 CmdEndRenderPass OK");
 
