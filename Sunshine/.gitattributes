@@ -3,3 +3,11 @@ Dockerfile text eol=lf
 *.dockerfile text eol=lf
 *flatpak-lint-*.json text eol=lf
 *.sh text eol=lf
+# VipleStream §K.1: dpkg maintainer scripts must be LF-only.  Windows CRLF
+# checkout makes the kernel see "#!/bin/sh\r" → ENOENT on interpreter →
+# postinst fails with "no such file or directory".  Bare-named scripts
+# under src_assets/linux/misc/ aren't covered by *.sh above.
+src_assets/linux/misc/postinst text eol=lf
+src_assets/linux/misc/preinst text eol=lf
+src_assets/linux/misc/prerm text eol=lf
+src_assets/linux/misc/postrm text eol=lf
