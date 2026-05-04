@@ -1,7 +1,14 @@
 [Unit]
 Description=@PROJECT_DESCRIPTION@
-StartLimitIntervalSec=500
-StartLimitBurst=5
+# VipleStream §K.1: Wayland XDG portal session can break after client
+# disconnect (libwayland EPIPE on the display socket → process exits
+# with status 1).  Until upstream root-cause is patched in
+# wayland.cpp / portalgrab.cpp, rely on systemd to keep the server
+# resilient: 60s window with up to 30 restart attempts, 2s back-off
+# between each.  In practice the server recovers within 2-4 seconds
+# and remains pairable from the same client without manual restart.
+StartLimitIntervalSec=60
+StartLimitBurst=30
 After=graphical-session.target xdg-desktop-autostart.target xdg-desktop-portal.service
 
 [Service]
@@ -9,8 +16,8 @@ After=graphical-session.target xdg-desktop-autostart.target xdg-desktop-portal.s
 ExecStartPre=/bin/sleep 5
 @SUNSHINE_SERVICE_START_COMMAND@
 @SUNSHINE_SERVICE_STOP_COMMAND@
-Restart=on-failure
-RestartSec=5s
+Restart=always
+RestartSec=2s
 
 [Install]
 WantedBy=graphical-session.target

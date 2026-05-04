@@ -3,7 +3,11 @@
  * @brief Definitions for Wayland capture.
  */
 // standard includes
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <mutex>
 
 // platform includes
 #include <drm_fourcc.h>
@@ -48,7 +52,29 @@ namespace wl {
     .failed = dmabuf_t::buffer_params_failed
   };
 
+  // VipleStream §K.1: route libwayland's internal log (default writes to
+  // stderr → mixes with our journald output, plus on display EPIPE the
+  // default handler doesn't propagate cleanly back to capture loop) into
+  // boost::log so messages land in our normal log file with structured
+  // levels.  Install once before first wl_display_connect.
+  static void wl_log_to_boost(const char *fmt, va_list args) {
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    // libwayland appends '\n' — strip for cleaner log lines.
+    auto len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
+      buf[--len] = '\0';
+    }
+    BOOST_LOG(warning) << "[libwayland] "sv << buf;
+  }
+
+  static std::once_flag wl_log_handler_installed;
+
   int display_t::init(const char *display_name) {
+    std::call_once(wl_log_handler_installed, []() {
+      wl_log_set_handler_client(wl_log_to_boost);
+    });
+
     if (!display_name) {
       display_name = std::getenv("WAYLAND_DISPLAY");
     }
@@ -79,10 +105,26 @@ namespace wl {
    * @return `true` if new events were dispatched or `false` if the timeout expired.
    */
   bool display_t::dispatch(std::chrono::milliseconds timeout) {
+    // VipleStream §K.1: detect fatal display error early.  When the
+    // compositor closes the socket (e.g. portal session ended after
+    // streaming client disconnect), wl_display_get_error returns
+    // non-zero and any further wl_display_* call would either re-fire
+    // libwayland's "Error reading events from display: Broken pipe"
+    // log line or block.  Bail out so callers can trigger reinit
+    // instead of looping on a dead display.
+    if (auto err = wl_display_get_error(display_internal.get()); err != 0) {
+      BOOST_LOG(warning) << "[wayland] display fatal error ("sv << err << "): connection lost"sv;
+      return false;
+    }
+
     // Check if any events are queued already. If not, flush
     // outgoing events, and prepare to wait for readability.
     if (wl_display_prepare_read(display_internal.get()) == 0) {
-      wl_display_flush(display_internal.get());
+      if (wl_display_flush(display_internal.get()) < 0 && errno != EAGAIN) {
+        wl_display_cancel_read(display_internal.get());
+        BOOST_LOG(warning) << "[wayland] display flush failed errno="sv << errno;
+        return false;
+      }
 
       // Wait for an event to come in
       struct pollfd pfd = {};
@@ -90,7 +132,10 @@ namespace wl {
       pfd.events = POLLIN;
       if (poll(&pfd, 1, timeout.count()) == 1 && (pfd.revents & POLLIN)) {
         // Read the new event(s)
-        wl_display_read_events(display_internal.get());
+        if (wl_display_read_events(display_internal.get()) < 0) {
+          BOOST_LOG(warning) << "[wayland] read_events failed errno="sv << errno;
+          return false;
+        }
       } else {
         // We timed out, so unlock the queue now
         wl_display_cancel_read(display_internal.get());
@@ -99,7 +144,10 @@ namespace wl {
     }
 
     // Dispatch any existing or new pending events
-    wl_display_dispatch_pending(display_internal.get());
+    if (wl_display_dispatch_pending(display_internal.get()) < 0) {
+      BOOST_LOG(warning) << "[wayland] dispatch_pending failed errno="sv << errno;
+      return false;
+    }
     return true;
   }
 
