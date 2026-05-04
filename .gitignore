@@ -59,6 +59,12 @@ scripts/benchmark/output/
 # lives in docs/diag_wire_loss.md; concrete tooling stays local.
 scripts/diag/
 
+# ── §K.1 Linux build probe scripts (per-developer WSL dev env) ──
+# wsl_*.sh hard-code ~/viplestream-build paths inside one specific WSL distro
+# and depend on /mnt/d/Mission/VipleStream/ Windows mount.  Public-facing
+# Linux build SOP belongs in docs/building.md once §K.1 cleanup is done.
+scripts/wsl_*.sh
+
 # ── External dependencies (auto-downloaded by build) ──
 vcpkg/
 Sunshine/node_modules/

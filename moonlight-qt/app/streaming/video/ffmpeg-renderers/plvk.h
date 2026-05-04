@@ -14,7 +14,9 @@
 #include <thread>
 
 // §J.3.e.2.e2 — RIFE forward integration on the external ncnn instance.
-// ncnn::VkMat / ncnn::Net are needed as members.
+// ncnn::VkMat / ncnn::Net are needed as members.  ncnn is Windows-only
+// (prebuilt under libs/windows/ncnn/); §K.1 Linux build needs full
+// VIPLESTREAM_HAVE_NCNN gating across plvk.cpp's ~149 ncnn references.
 #include <ncnn/mat.h>
 #include <memory>
 

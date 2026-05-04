@@ -37,7 +37,7 @@ namespace stream { constexpr auto CONTROL_PORT = 10; }
   #define SOCKET int
   #define INVALID_SOCKET (-1)
   #define SOCKET_ERROR (-1)
-  #define closesocket close
+  #define closesocket(fd) (::close(fd))
 #endif
 
 using namespace std::literals;

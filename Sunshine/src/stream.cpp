@@ -1051,7 +1051,7 @@ namespace stream {
         int newBr = currentBr;
 
         if (count > 0) {
-          float timeS = std::max(t.count(), 1ll) / 1000.0f;
+          float timeS = std::max<long long>(t.count(), 1ll) / 1000.0f;
           float lossPerSec = count / timeS;
 
           if (lossPerSec > 30) {

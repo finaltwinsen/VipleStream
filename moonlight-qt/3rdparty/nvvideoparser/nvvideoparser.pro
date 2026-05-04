@@ -64,7 +64,15 @@ SOURCES += \
 # enabled.  /arch:AVX2 covers most; AVX512/SSSE3 use intrinsic headers
 # that work without the /arch flag (compiler still emits target-specific
 # code via the intrinsics).
-QMAKE_CXXFLAGS += /arch:AVX2
+*-msvc {
+    QMAKE_CXXFLAGS += /arch:AVX2
+} else {
+    # gcc/clang are strict about per-intrinsic target requirements (unlike MSVC).
+    # Enable the full set used across the SSSE3 / AVX2 / AVX512 source variants;
+    # runtime cpudetect.cpp picks the right path based on CPUID at startup.
+    QMAKE_CXXFLAGS += -mssse3 -mavx -mavx2 -mfma \
+                      -mavx512f -mavx512bw -mavx512dq -mavx512vl
+}
 
 HEADERS += \
     $$INC/NvVideoParser/ByteStreamParser.h            \

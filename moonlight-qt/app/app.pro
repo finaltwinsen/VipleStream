@@ -94,6 +94,7 @@ win32 {
         INCLUDEPATH += $$PWD/../libs/windows/ncnn/build/native/include
         LIBS        += -L$$PWD/../libs/windows/ncnn/runtimes/win-x64/native
         LIBS        += ncnn.lib
+        DEFINES     += VIPLESTREAM_HAVE_NCNN
         # NCNN handles Vulkan dispatch entirely inside ncnn.dll; no
         # need to link vulkan-1.lib at this layer. We may need it
         # later for shared-texture path (D3D12↔Vulkan handle import).

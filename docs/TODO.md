@@ -19,6 +19,8 @@
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 1.7 ONLY-mode NVDEC device-lost | 5 個變體都繞不過，NV 596.36 結構性 bug，預設 PARALLEL 穩 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
+| **Medium** | **§K** Linux client + server build pipeline | 上游基礎完整（AppImage / linux_build.sh / dockerfiles）；本地 fork 改動侷限字串層；要進 WSL 驗 build + 補 vkfruc 的 `Q_OS_LINUX` Vulkan ext gate |
+| **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | Pi 5 + V3DV mesa Vulkan + V4L2 HW decode + DRM/KMS render；上游 source-level 支援，沒 CI prebuilt；FRUC backend 全 disable（Vulkan 補幀 Pi 5 GPU 不夠力），純 streaming 應 OK；先確認 §K Linux x86 通了再做 |
 | **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |
 | **Low** | **§G.1** RIFE v1 11-channel | A1000 launch overhead bound (§G.3 negative result)；RTX 30/40+ 才有意義 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
@@ -336,6 +338,82 @@ AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame
 - `tools/android_vulkan_probe/` — Android Vulkan queue-family probe (probe.c + probe2.c)，cross-compile via NDK，用來在新硬體 verify §I.D 假設
 
 每個子 phase 的 commit message 用 `vX.Y.Z: §J.N.M — <短摘要>` 格式。
+
+---
+
+## §K. Linux build pipeline（active 探勘中 2026-05-04）
+
+GitHub release 規範改成「每個 release 必 ship 完整三件、全同版號」（見 `CLAUDE.md` Release 規範）後，下一步要把 Linux artifact 也加進完整 ship。本節追蹤探勘進度。
+
+### §K.1 Linux x86_64 兩端（**probe done 2026-05-04，需 source 整理才能 ship**）
+
+**目標 artifact：**
+- `VipleStream-Client-X.Y.Z-linux-x64.AppImage`（從 `moonlight-qt/scripts/build-appimage.sh`）
+- `VipleStream-Server-X.Y.Z-linux-x64.deb`（從 `Sunshine/scripts/linux_build.sh`，CPack DEB generator）
+
+**上游基礎都健康：**
+- moonlight-qt: `build-appimage.yml` GitHub Actions workflow on Ubuntu 22.04，依賴 SDL3 / SDL_ttf / libva / libplacebo / dav1d / FFmpeg n8.0.1（vulkan/vaapi/vdpau hwaccel 全開）+ linuxdeployqt 打包
+- Sunshine: `linux_build.sh` 842 行 + ubuntu-22.04 / ubuntu-24.04 / debian-trixie dockerfiles + ci-linux.yml / ci-archlinux.yml / ci-flatpak.yml / ci-freebsd.yml 多 distro CI
+
+**WSL Ubuntu 24.04 上實際跑下來的 fork 相容性問題清單：**
+
+Sunshine（`scripts/linux_build.sh --skip-cuda`）：
+- `src/stream.cpp:1054` `std::max(t.count(), 1ll)` template type 推導失敗（gcc 14 嚴格，`chrono::duration::rep` 是 `long`、不能直接配 `long long`）—— **fixed in source**：`std::max<long long>(...)`
+- `src/relay.cpp` / `src/stun.cpp` 的 `#define closesocket close` 在 `PlainTransport::close()` / `TlsTransport::close()` class scope 內 unqualified lookup 撞 member function —— **fixed in source**：改成 `#define closesocket(fd) (::close(fd))`
+- `src/nvenc/nvenc_base.cpp:24,336,369,370` —— `nv-codec-headers sdk/12.0` 比 fork code 期待的 NVENC API 新（`pixelBitDepthMinus8`、`inputPixelBitDepthMinus8` field 已改名/移除），triggers `#error Check and update NVENC code for backwards compatibility`。**未修**，需要 pin 舊 nv-codec-headers commit 或 patch 4 處 NVENC 欄位
+- `src/platform/linux/vulkan_encode.cpp:748` `AVVulkanDeviceContext::unlock_queue` 在 ffmpeg 8.x 標 deprecated（warning only，搭 `BUILD_WERROR=OFF` 可繞過）
+- `packaging/linux/dev.lizardbyte.app.Sunshine.{desktop,metainfo.xml,terminal.desktop,service.in}` 還是上游 FQDN，但 `CMakeLists.txt` `PROJECT_FQDN = app.viplestream.server`，cmake 找不到對應 file 的 file → 5 個檔案要 rename 或 PROJECT_FQDN 暫 revert
+- `linux_build.sh` 預設 `BUILD_WERROR=ON`，要 `-DBUILD_WERROR=OFF` 才容忍 deprecated warnings
+- 多個 `third-party/` submodule 我們 vendored 但漏 `inputtino` / `wlr-protocols`（`scripts/wsl_init_submodules.sh` 補回）
+
+moonlight-qt（`scripts/build-appimage.sh`）：
+- 從 Windows 同步過來的 `.qmake.cache` / `.qmake.stash` / `Makefile.Release` 鎖定 MSVC spec，要清掉重 qmake6 才會走 `linux-g++`
+- `3rdparty/nvvideoparser/nvvideoparser.pro:67` 之前 `QMAKE_CXXFLAGS += /arch:AVX2` 沒 `*-msvc` gate；gcc 解 `/arch:AVX2` 為檔名 → 直接 link error。**fixed in source**：拆 msvc / gcc 兩條，gcc 改 `-mssse3 -mavx -mavx2 -mfma -mavx512f -mavx512bw -mavx512dq -mavx512vl`（`NextStartCode{SSSE3,AVX2,AVX512}.cpp` 用 intrinsics，runtime cpudetect 分派）
+- `app/scripts/*.sh` 從 Windows 鈍 CRLF 過來，`bash` 噴 `$'\r': command not found` —— **fixed**：`find ... -name "*.sh" -exec sed -i "s/\r$//"`
+- `app/streaming/video/ffmpeg-renderers/plvk.h:18` 無條件 `#include <ncnn/mat.h>`，但 ncnn 是 `win32 {` 內的 prebuilt → Linux 沒 header → fatal error。**未修**，因為 plvk.cpp 內有 ~149 處 `m_Rife*` / `ncnn::*` 使用，要把整段 RIFE Phase B 用 `#ifdef VIPLESTREAM_HAVE_NCNN` 隔離才合理
+- `vkfruc.cpp` 兩處 `#ifdef Q_OS_WIN32` Vulkan ext 沒 Linux elif（runtime 端 SDL_Vulkan_GetInstanceExtensions auto-detect，但 ffmpeg hwcontext_vulkan 的 `enabled_inst_extensions` 不齊；非阻擋 build，但 vulkan hwaccel 可能 init 不順）
+
+**WSL 環境驗測現狀：** Ubuntu 24.04 + 16 CPU + 19 GB RAM，`/dev/dxg` + `libnvidia-encode` + `libnvcuvid` 都有，Vulkan ICD 還缺 NVIDIA `libnvidia-icd`。`scripts/linux_build.sh --skip-cuda --step=cmake` 跟 SDL3 / sdl2-compat / SDL_ttf / libva / libplacebo / dav1d / FFmpeg n8.0.1 都成功 build；卡關都在我們 fork 的 source。Sunshine 端到端 streaming 在 WSL 不可驗（headless），client 端 smoke startup 可驗。
+
+**進度：** Probe 完成。Source 整理工時估：
+- Sunshine：NVENC API 4 處更新（半天）+ packaging FQDN rename（10 分鐘）+ vulkan_encode.cpp 接新 lock_queue API（半天，optional 因為 BUILD_WERROR=OFF 可繞）= **~1 day**
+- moonlight-qt：plvk.h/cpp ncnn 整段 `#ifdef VIPLESTREAM_HAVE_NCNN` 隔離（~1 天）+ `vkfruc.cpp` Linux Vulkan ext gate（~30 分鐘）+ qmake artifact gitignore（10 分鐘）= **~1 day**
+- 加 build wrapper（`build_linux.cmd` / `release_full.cmd`）+ CI 設定 = **~1 day**
+
+**短期狀態：** Linux artifact **暫不加進** Release 規範強制三件，仍只 ship Windows × 3。等上述 ~3 工作天 cleanup 完成才放進完整 ship。Windows 三件已是 release blocker。
+
+**已確認可逕修進 main 的 source fix（不影響 Windows build）：**
+- [`Sunshine/src/stream.cpp:1054`](../Sunshine/src/stream.cpp#L1054) — `std::max<long long>(t.count(), 1ll)`
+- [`Sunshine/src/relay.cpp:37`](../Sunshine/src/relay.cpp#L37) / [`Sunshine/src/stun.cpp:40`](../Sunshine/src/stun.cpp#L40) — `#define closesocket(fd) (::close(fd))`
+- [`moonlight-qt/3rdparty/nvvideoparser/nvvideoparser.pro:63-71`](../moonlight-qt/3rdparty/nvvideoparser/nvvideoparser.pro) — `*-msvc` gate `/arch:AVX2`
+- WSL build infrastructure scripts in [`scripts/wsl_*.sh`](../scripts/)（探勘工具，非 release path）
+
+### §K.2 Raspberry Pi 5 client（aarch64，等 §K.1 通後）
+
+**目標 artifact：**
+- `VipleStream-Client-X.Y.Z-rpi-aarch64.deb`（Pi 5 + 64-bit RPi OS Bookworm 用）
+
+**為什麼選 Pi 5、放掉 Pi 3 / Pi 4 / armhf 32-bit：**
+- Pi 5 自家 video block + V3DV mesa Vulkan + Bookworm 64-bit 是 RPi 主流現在式
+- Pi 3 / Pi 4 32-bit RPi OS 走 MMAL legacy 路徑，現代用戶幾乎不在這條，不值得三條 ARM target 都 ship
+- Pi 4 64-bit Bookworm 走 V4L2 + DRM/KMS，跟 Pi 5 部分共用，但 GPU 跑 Vulkan 邊緣，FRUC 補幀絕對沒救
+
+**Pi 上的 fork 改動相容性：**
+- FRUC backend 全 disable（Pi 5 V3DV 跑不動 4K compute，1080p 也勉強）—— 退回 vanilla Moonlight 體驗
+- DirectML / NCNN-Vulkan / Aftermath 全 win32 only，Pi 自動 skip
+- core streaming + DRM/KMS render + V4L2 / Vulkan HW decode 走上游現成 path
+
+**Build pipeline 候選（待選）：**
+1. **GitHub Actions arm64 runner** —— 現在 GH-hosted arm64 runner 已 GA，但 build time 跟 cost 待測
+2. **Native build on Pi 5** —— 一次 setup，每次 release SSH 觸發，build time ~30 min；可靠
+3. **QEMU cross-compile (aarch64-linux-gnu-gcc + Qt sysroot)** —— 設 sysroot 痛苦，但本機 build time 接近 native x86 速度
+4. **Docker buildx multi-arch** —— `Sunshine/docker/ubuntu-24.04.dockerfile` 改 cross-build，可一次出 amd64 + arm64
+
+**進度：** 待 §K.1 通過再開工。
+
+### §K.3 macOS client（optional，hw-pending）
+
+上游 `build-win-mac.yml` GitHub Actions matrix 含 macOS-15 + Qt 6.10.2 + create-dmg；產出 `Moonlight-X.Y.Z.dmg`。本地 fork 沒 Mac 機器驗測，**won't-add** 直到使用者有 mac dev 環境。
 
 ---
 

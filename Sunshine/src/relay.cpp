@@ -34,7 +34,7 @@
   #define SOCKET int
   #define INVALID_SOCKET (-1)
   #define SOCKET_ERROR (-1)
-  #define closesocket close
+  #define closesocket(fd) (::close(fd))
 #endif
 
 #include <openssl/ssl.h>
