@@ -44,6 +44,20 @@ popd
 
 echo Compiling Moonlight in $BUILD_CONFIG configuration
 pushd $BUILD_FOLDER
+# VipleStream §K.1: qmake6 on Ubuntu noble emits a broken absolute path in
+# the .o rule's prereq list for source files that #include their own .moc
+# (boxartmanager.cpp / computermanager.cpp / computermodel.cpp).  The path
+# points to <SOURCE_ROOT>/app/release/<name>.moc which never exists, so
+# Make never triggers the moc rule, and the parallel .cpp compile races
+# ahead and fails with "<name>.moc: No such file or directory".
+#
+# Workaround: explicitly run compiler_moc_source_make_all (defined in
+# Makefile.Release / Makefile.Debug) before the main compile so all .moc
+# files are generated up-front.  Then the .cpp compile finds them via
+# the -Irelease path that's already in CXXFLAGS.
+echo "  Pre-generating moc sources to work around qmake6 noble path bug"
+make -f app/Makefile.Release -C app -j$(nproc) compiler_moc_source_make_all \
+    || fail "moc pre-generation failed!"
 make -j$(nproc) $(echo "$BUILD_CONFIG" | tr '[:upper:]' '[:lower:]') || fail "Make failed!"
 popd
 
