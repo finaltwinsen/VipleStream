@@ -576,7 +576,7 @@ function run_step_cmake() {
     "-DCMAKE_BUILD_TYPE=Release"
     "-DCMAKE_INSTALL_PREFIX=/usr"
     "-DSUNSHINE_ASSETS_DIR=share/sunshine"
-    "-DSUNSHINE_EXECUTABLE_PATH=/usr/bin/sunshine"
+    "-DSUNSHINE_EXECUTABLE_PATH=/usr/bin/viplestream-server"
     "-DSUNSHINE_ENABLE_DRM=ON"
     "-DSUNSHINE_ENABLE_PORTAL=ON"
     "-DSUNSHINE_ENABLE_WAYLAND=ON"
