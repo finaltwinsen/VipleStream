@@ -1,0 +1,31 @@
+#!/bin/sh
+# VipleStream §K.1: cleanup symlinks placed by postinst under each user's
+# ~/.config/systemd/user/.  These are dpkg-untracked so we have to remove
+# them manually on package remove / purge — otherwise they linger as
+# dangling symlinks pointing at /usr/lib/systemd/user/app-app.viplestream
+# .server.service which dpkg already deleted.
+#
+# Action runs on remove + purge (postrm $1 in {remove, purge, ...}).
+set -e
+
+case "$1" in
+    remove|purge|abort-install|abort-upgrade|disappear)
+        unit="app-app.viplestream.server.service"
+        # Walk all human users (UID >= 1000, has /home/ home dir).
+        getent passwd | awk -F: '$3 >= 1000 && $6 ~ /^\/home\// { print $1 ":" $6 }' | \
+        while IFS=: read -r user home; do
+            f1="$home/.config/systemd/user/sunshine.service"
+            f2="$home/.config/systemd/user/graphical-session.target.wants/$unit"
+            for f in "$f1" "$f2"; do
+                if [ -L "$f" ]; then
+                    rm -f "$f"
+                    echo "  removed dangling symlink: $f"
+                fi
+            done
+        done
+        ;;
+    *)
+        ;;
+esac
+
+exit 0

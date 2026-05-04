@@ -42,9 +42,16 @@ set(CPACK_FREEBSD_PACKAGE_MAINTAINER "${CPACK_PACKAGE_VENDOR}")
 set(CPACK_FREEBSD_PACKAGE_ORIGIN "misc/${CPACK_PACKAGE_NAME}")
 set(CPACK_FREEBSD_PACKAGE_LICENSE "GPLv3")
 
-# Post install
-set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/postinst")
+# Post install + remove
+# VipleStream §K.1: postrm cleans up the symlinks postinst placed under
+# each user's ~/.config/systemd/user/ — without it those become dangling
+# symlinks after `apt remove` since dpkg has no record of files outside
+# the package's manifest.
+set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+    "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/postinst"
+    "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/postrm")
 set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/postinst")
+set(CPACK_RPM_POST_UNINSTALL_SCRIPT_FILE "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/postrm")
 
 # FreeBSD post install/deinstall scripts
 if(FREEBSD)

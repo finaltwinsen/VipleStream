@@ -8,16 +8,18 @@ modprobe uhid
 if [ ! -x "$(command -v rpm-ostree)" ]; then
   echo "Not in an rpm-ostree environment, proceeding with post install steps."
 
-  # Ensure Sunshine can grab images from KMS
+  # Ensure VipleStream-Server can grab images from KMS.
+  # Upstream Sunshine looks up "sunshine" binary, but post-rebrand the
+  # binary is "viplestream-server" — fall back to that if "sunshine" is
+  # absent so caps land on the right file.
   path_to_setcap=$(which setcap)
-  path_to_sunshine=$(readlink -f "$(which sunshine)")
-  if [ -x "$path_to_setcap" ] ; then
-    echo "Setting CAP_SYS_ADMIN, CAP_SYS_NICE capabilities on Sunshine binary."
-    echo "$path_to_setcap cap_sys_admin,cap_sys_nice+p $path_to_sunshine"
-    $path_to_setcap cap_sys_admin,cap_sys_nice+p $path_to_sunshine
-    echo "CAP_SYS_ADMIN, CAP_SYS_NICE capabilities set on Sunshine binary."
+  path_to_bin=$(readlink -f "$(which viplestream-server 2>/dev/null || which sunshine 2>/dev/null)")
+  if [ -x "$path_to_setcap" ] && [ -n "$path_to_bin" ] ; then
+    echo "Setting CAP_SYS_ADMIN, CAP_SYS_NICE capabilities on $path_to_bin."
+    $path_to_setcap cap_sys_admin,cap_sys_nice+p "$path_to_bin"
+    echo "CAP_SYS_ADMIN, CAP_SYS_NICE capabilities set."
   else
-    echo "error: setcap not found or not executable."
+    echo "error: setcap not found, or no viplestream-server / sunshine binary in PATH."
   fi
 
   # Trigger udev rule reload for /dev/uinput and /dev/uhid
@@ -30,6 +32,42 @@ if [ ! -x "$(command -v rpm-ostree)" ]; then
     echo "Udev rules reloaded successfully."
   else
     echo "error: udevadm not found or not executable."
+  fi
+
+  # VipleStream §K.1: enable systemd user service + lingering for the
+  # invoking user so the streaming server auto-starts on every boot
+  # (no GUI login required).  Without this the unit is loaded but
+  # disabled — Restart=always only protects against in-session crashes,
+  # not against cold boots.
+  unit="app-app.viplestream.server.service"
+  unit_file="/usr/lib/systemd/user/$unit"
+  if [ -f "$unit_file" ] && [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+    user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    if [ -d "$user_home" ]; then
+      echo "Enabling user service for $SUDO_USER (auto-start on graphical session)."
+      # Do the enable ourselves as root by creating the same symlinks
+      # `systemctl --user enable` would create.  Avoids needing a running
+      # user-level systemd dbus connection from this postinst context.
+      mkdir -p "$user_home/.config/systemd/user/graphical-session.target.wants"
+      ln -sf "$unit_file" "$user_home/.config/systemd/user/sunshine.service"
+      ln -sf "$unit_file" "$user_home/.config/systemd/user/graphical-session.target.wants/$unit"
+      chown -R "$SUDO_USER:$(id -gn $SUDO_USER)" "$user_home/.config/systemd/user"
+      echo "  symlinks placed under $user_home/.config/systemd/user/"
+
+      echo "Enabling user lingering so user systemd starts at boot."
+      loginctl enable-linger "$SUDO_USER" 2>/dev/null && \
+        echo "  Linger=yes for $SUDO_USER" || \
+        echo "  warn: could not enable lingering — run 'sudo loginctl enable-linger $SUDO_USER' manually"
+    else
+      echo "  skip enable: \$SUDO_USER home dir '$user_home' not found"
+    fi
+  else
+    echo ""
+    echo "Note: \$SUDO_USER not set (e.g. running 'dpkg -i' as raw root)."
+    echo "      To enable auto-start on boot, run as the streaming user:"
+    echo "        systemctl --user enable $unit"
+    echo "        sudo loginctl enable-linger \$USER"
+    echo ""
   fi
 else
   echo "rpm-ostree environment detected, skipping post install steps. Restart to apply the changes."
