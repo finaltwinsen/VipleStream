@@ -19,6 +19,24 @@
 
 #include "vk_video/vulkan_video_codecs_common.h"
 
+// VipleStream §K.1: VP9 std header is provisional and not shipped in the
+// Vulkan SDK 1.4.313 Linux pkg yet (only AV1 / H.264 / H.265 are GA).  Probe
+// for it via __has_include and ifdef the VP9 PictureData struct out when
+// missing.  VipleStream's wire protocol doesn't use VP9 anyway — it's vendored
+// dead code from upstream nvvideoparser sample that we never exercised.
+#if defined(__has_include)
+#  if __has_include(<vk_video/vulkan_video_codec_vp9std_decode.h>)
+#    include <vk_video/vulkan_video_codec_vp9std_decode.h>
+#    define VIPLE_NVVIDEOPARSER_HAVE_VP9 1
+#  else
+#    define VIPLE_NVVIDEOPARSER_HAVE_VP9 0
+#  endif
+#elif defined(_WIN32)
+#  define VIPLE_NVVIDEOPARSER_HAVE_VP9 1
+#else
+#  define VIPLE_NVVIDEOPARSER_HAVE_VP9 0
+#endif
+
 #include "vkvideo_parser/PictureBufferBase.h"
 #include "VkCodecUtils/VkVideoRefCountBase.h"
 #include "vkvideo_parser/StdVideoPictureParametersSet.h"
@@ -318,6 +336,7 @@ struct VkParserAv1PictureData {
     uint32_t frame_height;
 };
 
+#if VIPLE_NVVIDEOPARSER_HAVE_VP9
 typedef struct VkParserVp9PictureData {
 
     StdVideoDecodeVP9PictureInfo stdPictureInfo;
@@ -353,6 +372,7 @@ typedef struct VkParserVp9PictureData {
     uint32_t compressedHeaderOffset;
     uint32_t tilesOffset;
 } VkParserVp9PictureData;
+#endif // VIPLE_NVVIDEOPARSER_HAVE_VP9
 
 typedef struct VkParserPictureData {
     int32_t PicWidthInMbs;            // Coded Frame Size
@@ -377,7 +397,9 @@ typedef struct VkParserPictureData {
         VkParserH264PictureData h264;
         VkParserHevcPictureData hevc;
         VkParserAv1PictureData av1;
+#if VIPLE_NVVIDEOPARSER_HAVE_VP9
         VkParserVp9PictureData vp9;
+#endif
     } CodecSpecific;
 
     // Dpb Id for the setup (current picture to be reference) slot

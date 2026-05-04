@@ -95,6 +95,10 @@ win32 {
         LIBS        += -L$$PWD/../libs/windows/ncnn/runtimes/win-x64/native
         LIBS        += ncnn.lib
         DEFINES     += VIPLESTREAM_HAVE_NCNN
+        # Windows ncnn DLL is custom-patched with create_gpu_instance_external()
+        # for §J.3.e.1.d external VkDevice handoff to libplacebo.  Linux stock
+        # ncnn doesn't have this — falls back to plain create_gpu_instance().
+        DEFINES     += VIPLE_NCNN_HAS_EXTERNAL_HANDOFF
         # NCNN handles Vulkan dispatch entirely inside ncnn.dll; no
         # need to link vulkan-1.lib at this layer. We may need it
         # later for shared-texture path (D3D12↔Vulkan handle import).
@@ -194,6 +198,19 @@ unix:if(!macx|disable-prebuilts) {
                     PKGCONFIG += libplacebo
                     CONFIG += libplacebo
                 }
+            }
+
+            # VipleStream §K.1 — ncnn (Vulkan EP) for PlVkRenderer's RIFE Phase B
+            # + Generic FRUC override.  Linux 補幀主力是 VkFrucRenderer (vkfruc.cpp，
+            # 無 ncnn 依賴)，但 plvk.cpp 有 149 處 ncnn 引用編譯依賴.  最小改動路：
+            # 裝 ncnn from source 進 /usr/local (見 scripts/wsl_build_moonlight.sh)，
+            # source 完全不動.  AppImage 多 ~9 MB；RIFE Phase B 在 Linux 上技術上
+            # 可用，但 stream pipeline 預設仍走 VkFrucRenderer.
+            !disable-ncnn:exists(/usr/local/include/ncnn/mat.h) {
+                message(NCNN found at /usr/local — RIFE Phase B available)
+                DEFINES     += VIPLESTREAM_HAVE_NCNN
+                INCLUDEPATH += /usr/local/include
+                LIBS        += -lncnn
             }
         }
 
@@ -420,12 +437,14 @@ libplacebo {
         streaming/video/ffmpeg-renderers/plvk_c.c \
         streaming/video/ffmpeg-renderers/vkfruc.cpp \
         streaming/video/ffmpeg-renderers/vkfruc-decode.cpp \
-        streaming/video/ffmpeg-renderers/vkfruc-aftermath.cpp
+        streaming/video/ffmpeg-renderers/vkfruc-aftermath.cpp \
+        streaming/video/ffmpeg-renderers/ncnn_rife_warp.cpp
     HEADERS += \
         streaming/video/ffmpeg-renderers/plvk.h \
         streaming/video/ffmpeg-renderers/vkfruc.h \
         streaming/video/ffmpeg-renderers/vkfruc-decode.h \
-        streaming/video/ffmpeg-renderers/vkfruc-aftermath.h
+        streaming/video/ffmpeg-renderers/vkfruc-aftermath.h \
+        streaming/video/ffmpeg-renderers/ncnn_rife_warp.h
 }
 config_EGL {
     message(EGL renderer selected)
@@ -474,7 +493,6 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/directmlfruc.cpp \
         streaming/video/ffmpeg-renderers/modelfetcher.cpp \
         streaming/video/ffmpeg-renderers/ncnnfruc.cpp \
-        streaming/video/ffmpeg-renderers/ncnn_rife_warp.cpp \
         streaming/video/ffmpeg-renderers/vulkanvideo.cpp \
         streaming/video/ffmpeg-renderers/pacer/dxvsyncsource.cpp
 
@@ -486,7 +504,6 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/directmlfruc.h \
         streaming/video/ffmpeg-renderers/modelfetcher.h \
         streaming/video/ffmpeg-renderers/ncnnfruc.h \
-        streaming/video/ffmpeg-renderers/ncnn_rife_warp.h \
         streaming/video/ffmpeg-renderers/vulkanvideo.h \
         streaming/video/ffmpeg-renderers/ifrucbackend.h \
         streaming/video/ffmpeg-renderers/pacer/dxvsyncsource.h

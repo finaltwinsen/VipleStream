@@ -60,9 +60,34 @@ cp /usr/local/lib/libSDL3.so.0 $DEPLOY_FOLDER/usr/lib/
 
 echo Creating AppImage
 pushd $INSTALLER_FOLDER
-VERSION=$VERSION linuxdeployqt $DEPLOY_FOLDER/usr/share/applications/com.moonlight_stream.Moonlight.desktop \
-  -qmake=qmake6 -qmldir=$SOURCE_ROOT/app/gui -appimage -extra-plugins=tls \
-  -executable=$DEPLOY_FOLDER/usr/lib/libSDL3.so.0 || fail "linuxdeployqt failed!"
+# VipleStream §K.1: switched from linuxdeployqt to linuxdeploy + qt plugin.
+# Reason: linuxdeployqt continuous build hard-blocks Ubuntu noble's glibc
+# 2.39 (> 2.35 max), and -unsupported-allow-new-glibc only suppresses the
+# warning — the bundle step then silently fails with exit 1.  linuxdeploy
+# (different project) has no such restriction and is actively maintained.
+# Both produce equivalent AppImages.
+
+export QML_SOURCES_PATHS="$SOURCE_ROOT/app/gui"
+export QMAKE=qmake6
+# linuxdeploy looks up the desktop file's Icon= entry by name across standard
+# search paths.  Place the icon at the canonical /usr/share/icons/hicolor/...
+# path (already there from `make install`) AND at AppDir root so linuxdeploy's
+# .DirIcon symlink + AppImage thumbnail both resolve.
+cp $DEPLOY_FOLDER/usr/share/icons/hicolor/scalable/apps/moonlight.svg $DEPLOY_FOLDER/moonlight.svg
+linuxdeploy --appdir $DEPLOY_FOLDER \
+    --desktop-file $DEPLOY_FOLDER/usr/share/applications/com.piinsta.desktop \
+    --icon-file $DEPLOY_FOLDER/usr/share/icons/hicolor/scalable/apps/moonlight.svg \
+    --icon-filename moonlight \
+    --executable $DEPLOY_FOLDER/usr/lib/libSDL3.so.0 \
+    --plugin qt \
+    --output appimage \
+    || fail "linuxdeploy failed!"
+# linuxdeploy emits VipleStream-x86_64.AppImage by default; rename to match
+# the established release naming scheme.
+APPIMAGE_RAW=$(ls VipleStream-*.AppImage 2>/dev/null | head -1)
+if [ -n "$APPIMAGE_RAW" ]; then
+    mv "$APPIMAGE_RAW" "VipleStream-Client-${VERSION}-linux-x64.AppImage"
+fi
 popd
 
 echo Build successful

@@ -2,7 +2,7 @@
 Name=VipleStream
 Comment=Stream games and other applications from another PC running VipleStream-Server, Sunshine, or GeForce Experience
 Exec=viplestream
-Icon=viplestream
+Icon=moonlight
 StartupWMClass=com.piinsta
 Terminal=false
 Type=Application

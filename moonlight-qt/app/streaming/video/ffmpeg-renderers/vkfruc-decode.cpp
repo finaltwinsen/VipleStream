@@ -13,7 +13,16 @@
 #include "vkfruc.h"
 #include <SDL.h>
 #include <cstring>
+#include <cstdio>
 #include <vector>
+
+// VipleStream §K.1: strncpy_s + _TRUNCATE are MSVC bounds-checked CRT;
+// substitute with snprintf which is cross-platform and equally safe (always
+// NUL-terminates, won't overflow the dst buffer).
+#ifndef _WIN32
+#  define strncpy_s(dst, dstsz, src, _) snprintf((dst), (dstsz), "%s", (src))
+#  define _TRUNCATE 0
+#endif
 
 // §J.3.e.2.i.8 Phase 1.3a — GPU-backed bitstream buffer.
 //

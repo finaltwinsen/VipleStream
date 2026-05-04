@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-	<id>com.piinsta</id>
+	<id>com.piinsta.Client</id>
 	<metadata_license>CC0-1.0</metadata_license>
 	<project_license>GPL-3.0+</project_license>
 	<name>VipleStream</name>
-	<summary>Stream games and other applications from another PC running VipleStream-Server, Sunshine, or GeForce Experience</summary>
+	<summary>Stream games and apps from a PC running VipleStream-Server or Sunshine</summary>
 
 	<description>
 		<p>VipleStream can stream games and other applications from another PC with VipleStream-Server, Sunshine, or GeForce Experience software installed.</p>

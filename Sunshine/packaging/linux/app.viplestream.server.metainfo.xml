@@ -47,8 +47,8 @@
     </release>
   </releases>
 
-  <developer id="dev.lizardbyte">
-    <name>LizardByte</name>
+  <developer id="dev.finaltwinsen">
+    <name>finaltwinsen (VipleStream fork; upstream LizardByte/Sunshine)</name>
   </developer>
   <screenshots>
     <screenshot type="default">

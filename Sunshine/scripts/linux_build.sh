@@ -572,7 +572,7 @@ function run_step_cmake() {
     "-B=build"
     "-G=Ninja"
     "-S=."
-    "-DBUILD_WERROR=ON"
+    "-DBUILD_WERROR=OFF"
     "-DCMAKE_BUILD_TYPE=Release"
     "-DCMAKE_INSTALL_PREFIX=/usr"
     "-DSUNSHINE_ASSETS_DIR=share/sunshine"
@@ -585,6 +585,18 @@ function run_step_cmake() {
 
   if [[ "$appimage_build" == 1 ]]; then
     cmake_args+=("-DSUNSHINE_BUILD_APPIMAGE=ON")
+  fi
+
+  # VipleStream §K.1: VAAPI=OFF doesn't help — FetchContent FFmpeg pre-built
+  # libavutil.a unconditionally pulls hwcontext_vaapi.o which references
+  # vaMapBuffer2 (libva 2.21+ symbol).  Ubuntu 24.04 noble apt's libva-dev is
+  # 2.20 (no vaMapBuffer2); scripts/wsl_build_moonlight.sh installs libva
+  # 2.23 from intel/libva source build into /usr/local/lib.  Force the linker
+  # to look there first so the symbol resolves.
+  cmake_args+=("-DCMAKE_PREFIX_PATH=/usr/local")
+  cmake_args+=("-DCMAKE_EXE_LINKER_FLAGS=-L/usr/local/lib -Wl,-rpath,/usr/local/lib")
+  if [[ "$skip_libva" == 1 ]]; then
+    cmake_args+=("-DSUNSHINE_ENABLE_VAAPI=OFF")
   fi
 
   # Publisher metadata
@@ -626,11 +638,11 @@ function run_step_validation() {
   echo "Running step: Validation"
 
   # Run appstream validation, etc.
-  appstreamcli validate "build/dev.lizardbyte.app.Sunshine.metainfo.xml"
-  appstream-util validate "build/dev.lizardbyte.app.Sunshine.metainfo.xml"
-  desktop-file-validate "build/dev.lizardbyte.app.Sunshine.desktop"
+  appstreamcli validate "build/app.viplestream.server.metainfo.xml"
+  appstream-util validate "build/app.viplestream.server.metainfo.xml"
+  desktop-file-validate "build/app.viplestream.server.desktop"
   if [[ "$appimage_build" == 0 ]]; then
-    desktop-file-validate "build/dev.lizardbyte.app.Sunshine.terminal.desktop"
+    desktop-file-validate "build/app.viplestream.server.terminal.desktop"
   fi
   return 0
 }

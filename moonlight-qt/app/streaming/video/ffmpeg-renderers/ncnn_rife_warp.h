@@ -16,7 +16,10 @@
 
 #pragma once
 
-#ifdef _WIN32
+// VipleStream §K.1: gate on VIPLESTREAM_HAVE_NCNN (set by app.pro when ncnn
+// is available — Windows prebuilt libs/windows/ncnn always; Linux when
+// /usr/local/include/ncnn/mat.h exists from source build).
+#ifdef VIPLESTREAM_HAVE_NCNN
 
 #include <ncnn/layer.h>
 #include <ncnn/pipeline.h>
@@ -54,4 +57,4 @@ void         destroyRifeWarp(ncnn::Layer* layer, void* /*userdata*/);
 
 } // namespace viple
 
-#endif // _WIN32
+#endif // VIPLESTREAM_HAVE_NCNN

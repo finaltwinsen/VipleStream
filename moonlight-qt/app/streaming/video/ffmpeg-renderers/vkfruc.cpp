@@ -5,6 +5,14 @@
 #include "vkfruc-aftermath.h"
 #include "settings/streamingpreferences.h"
 
+// VipleStream §K.1: strncpy_s + _TRUNCATE are MSVC bounds-checked CRT.
+// snprintf is cross-platform, NUL-terminates, won't overflow dst buffer.
+#ifndef _WIN32
+#  include <cstdio>
+#  define strncpy_s(dst, dstsz, src, _) snprintf((dst), (dstsz), "%s", (src))
+#  define _TRUNCATE 0
+#endif
+
 #ifdef HAVE_LIBPLACEBO_VULKAN
 
 #include <SDL.h>
@@ -730,6 +738,9 @@ bool VkFrucRenderer::createLogicalDevice()
 #ifdef Q_OS_WIN32
         VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
         VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
+#elif defined(Q_OS_LINUX)
+        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
 #endif
     };
     // §J.3.e.2.i.8 Phase 1.6 — opt-in NV device diagnostics extensions for
@@ -2634,6 +2645,15 @@ bool VkFrucRenderer::populateAvHwDeviceCtx(int videoFormat)
         VK_KHR_SURFACE_EXTENSION_NAME,
 #ifdef Q_OS_WIN32
         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+#elif defined(Q_OS_LINUX)
+        // String literals avoid dragging <vulkan/vulkan_{xlib,xcb,wayland}.h>
+        // (which pull in X11 / XCB / Wayland headers).  These names are part
+        // of the Vulkan spec and stable; SDL_Vulkan_GetInstanceExtensions
+        // already enables the right one at instance creation, this list just
+        // tells ffmpeg's hwcontext_vulkan dispatch table what we have.
+        "VK_KHR_xlib_surface",
+        "VK_KHR_xcb_surface",
+        "VK_KHR_wayland_surface",
 #endif
     };
     vkCtx->enabled_inst_extensions    = kInstExts;

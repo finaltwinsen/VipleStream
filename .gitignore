@@ -7,6 +7,10 @@ moonlight-qt/**/Makefile
 moonlight-qt/**/Makefile.*
 moonlight-qt/config.log
 moonlight-qt/.qmake.stash
+moonlight-qt/.qmake.cache
+moonlight-qt/**/.qmake.stash
+moonlight-qt/**/.qmake.cache
+moonlight-qt/build/
 
 # ── qmake-generated files (embed machine-absolute paths & version) ──
 # Regenerated on every build from app.pro (VERSION, RC_ICONS, etc.). Tracking

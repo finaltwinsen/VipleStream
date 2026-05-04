@@ -4,7 +4,9 @@
 // .comp shaders embedded inline as raw string literals — ncnn's
 // glslang compiles them once on first dispatch.
 
-#ifdef _WIN32
+// VipleStream §K.1: gate on VIPLESTREAM_HAVE_NCNN (Windows prebuilt always,
+// Linux when ncnn source-built into /usr/local).
+#ifdef VIPLESTREAM_HAVE_NCNN
 
 // NOMINMAX must come before any header that pulls in <Windows.h> so
 // std::min / std::max in <algorithm> aren't trampled by the Win32
@@ -420,4 +422,4 @@ void destroyRifeWarp(ncnn::Layer* layer, void* /*userdata*/)
 
 } // namespace viple
 
-#endif // _WIN32
+#endif // VIPLESTREAM_HAVE_NCNN

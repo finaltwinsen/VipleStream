@@ -603,6 +603,13 @@ bool PlVkRenderer::initializeNcnnExternalHandoff()
 
     // libplacebo's queue_compute / queue_graphics / queue_transfer expose
     // .index (queue family idx) and .count (queue count from VkDeviceQueueCreateInfo).
+    //
+    // VipleStream §K.1: external_handoff is the custom API in our patched
+    // libs/windows/ncnn DLL; Linux stock ncnn (built from upstream) doesn't
+    // have it.  Fall back to stock create_gpu_instance() — ncnn manages its
+    // own VkInstance/Device on Linux which means RIFE Phase B runs on a
+    // separate VkDevice from libplacebo (Path B works, Path A doesn't).
+#ifdef VIPLE_NCNN_HAS_EXTERNAL_HANDOFF
     int rc = ncnn::create_gpu_instance_external(
         m_PlVkInstance->instance,
         m_Vulkan->phys_device,
@@ -610,6 +617,9 @@ bool PlVkRenderer::initializeNcnnExternalHandoff()
         m_Vulkan->queue_compute.index,  m_Vulkan->queue_compute.count,
         m_Vulkan->queue_graphics.index, m_Vulkan->queue_graphics.count,
         m_Vulkan->queue_transfer.index, m_Vulkan->queue_transfer.count);
+#else
+    int rc = ncnn::create_gpu_instance();
+#endif
     if (rc != 0) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-PLVK-NCNN] §J.3.e.1.d ncnn::create_gpu_instance_external failed rc=%d "
@@ -3378,12 +3388,21 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
         return false;
     }
 
+    // VipleStream §K.1: _wfopen is MSVC; use fopen with UTF-8 native path on
+    // Linux (Qt's toLocal8Bit returns UTF-8 on POSIX, narrow CP_ACP on Win).
+#ifdef _WIN32
     std::wstring paramWide = QDir::toNativeSeparators(paramPath).toStdWString();
     std::wstring binWide   = QDir::toNativeSeparators(binPath).toStdWString();
+    auto openFile = [](const std::wstring& path) { return _wfopen(path.c_str(), L"rb"); };
+#else
+    QByteArray paramWide = QDir::toNativeSeparators(paramPath).toLocal8Bit();
+    QByteArray binWide   = QDir::toNativeSeparators(binPath).toLocal8Bit();
+    auto openFile = [](const QByteArray& path) { return fopen(path.constData(), "rb"); };
+#endif
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VK-FRUC] §J.3.e.2.e2 loadRife: step 2/4 load_param");
-    FILE* paramFp = _wfopen(paramWide.c_str(), L"rb");
+    FILE* paramFp = openFile(paramWide);
     if (!paramFp) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VK-FRUC] §J.3.e.2.e2 _wfopen(param) failed errno=%d", errno);
@@ -3403,7 +3422,7 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VK-FRUC] §J.3.e.2.e2 loadRife: step 3/4 load_model");
-    FILE* binFp = _wfopen(binWide.c_str(), L"rb");
+    FILE* binFp = openFile(binWide);
     if (!binFp) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VK-FRUC] §J.3.e.2.e2 _wfopen(bin) failed errno=%d", errno);
