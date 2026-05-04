@@ -61,6 +61,14 @@ public:
     bool lastFrameHadFRUCInterp() const override;
     const char* getFRUCBackendName() const override;
 
+    // VipleStream: Ctrl+Alt+Shift+F runtime toggle.  D3D11VARenderer 走
+    // 這條 (d3d11va.cpp:2324) 用 m_FRUCPaused atomically gate dual-present.
+    // VkFruc 之前漏 override，使得 Vulkan hwaccel 路徑 (RS_VULKAN，§J.3.f
+    // 之後成預設) 上 hotkey 完全無作用.  Override 把 m_FRUCPaused 翻轉,
+    // renderFrameSw 在每一幀開頭快照值，跳過 dual-acquire + interp pass
+    // + FRUC compute chain，等同單影像直通顯示.
+    void toggleFRUC() override;
+
     // §J.3.e.2.i.8 Phase 3a — VkFrucDecodeClient::DecodePicture needs to gate
     // on codec before reading the CodecSpecific union (hevc / av1 share storage).
     int  getVideoCodecMask() const { return m_VideoCodec; }

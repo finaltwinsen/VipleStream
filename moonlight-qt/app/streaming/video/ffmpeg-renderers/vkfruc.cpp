@@ -191,8 +191,8 @@ void VkFrucRenderer::unlockQueueStub(struct AVHWDeviceContext*, uint32_t, uint32
 // d3d11va.cpp:2306-2322.  VkFruc 的 FRUC 走 native Vulkan compute (ME→
 // median→warp) + dual-present，所以判斷條件是 m_FrucMode + m_FrucReady +
 // m_DualMode 三者皆 true.  m_FRUCPaused 由 base class 提供 (renderer.h:310)，
-// Ctrl+Alt+Shift+F 切換；目前 VkFruc 的 renderFrameSw 還沒接 pause 跳過 dual-
-// present 的邏輯，但 lastFrameHadFRUCInterp 仍尊重它讓 stats 一致.
+// Ctrl+Alt+Shift+F 切換；renderFrameSw 一開頭快照成 frucPausedThisFrame，
+// 跳過 dual-acquire + interp render pass + FRUC compute chain (5 sites).
 bool VkFrucRenderer::isFRUCActive() const
 {
     return m_FrucMode && m_FrucReady && m_DualMode;
@@ -206,6 +206,18 @@ bool VkFrucRenderer::lastFrameHadFRUCInterp() const
 const char* VkFrucRenderer::getFRUCBackendName() const
 {
     return "VkFruc-Vulkan compute";
+}
+
+// VipleStream: Ctrl+Alt+Shift+F hotkey 翻轉 m_FRUCPaused，下一幀
+// renderFrameSw 快照後跳過 dual-present + FRUC compute.  Server FPS 在
+// Session::toggleFRUC (session.cpp:1604) 讀回 m_FRUCPaused 後決定全速還
+// 是減半發送.  D3D11VARenderer 對應 d3d11va.cpp:2324.
+void VkFrucRenderer::toggleFRUC()
+{
+    bool paused = !m_FRUCPaused.load();
+    m_FRUCPaused.store(paused);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] FRUC %s via hotkey", paused ? "PAUSED" : "RESUMED");
 }
 
 void VkFrucRenderer::teardown()
@@ -5123,6 +5135,14 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-SW] null frame");
         return;
     }
+
+    // VipleStream: Ctrl+Alt+Shift+F runtime hotkey snapshot.  toggleFRUC()
+    // 把 m_FRUCPaused 翻轉後，下一幀進這裡讀到的快照值決定本幀是否走
+    // dual-present / FRUC compute / interp render pass。一律快照同一份
+    // atomic 值避免本幀內 partial state（例如 acquire 走 dual 但 submit
+    // 走 single → 半個 swapchain image 沒 release 卡到下一幀）.
+    const bool frucPausedThisFrame = m_FRUCPaused.load();
+    const bool dualPresentThisFrame = m_DualMode && !frucPausedThisFrame;
     // §J.3.e.2.i.8 Phase 1.5 — gate logic:
     //   isSynthFrame   = data[0] is null (Phase 1.5 ffmpeg.cpp path)
     //   useNativeDecode = native chain has produced a sample-able m_SwUploadImage
@@ -5298,7 +5318,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     // Acquire 1 (real) image for single mode, or 2 (interp + real) for dual.
     uint32_t imgIdxA = 0;  // interp slot (only used in dual mode)
     uint32_t imgIdxB = 0;  // real frame slot (always)
-    if (m_DualMode) {
+    if (dualPresentThisFrame) {
         VkResult vrA = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
                                                     m_SlotAcquireSem[slot][0],
                                                     VK_NULL_HANDLE, &imgIdxA);
@@ -5427,7 +5447,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     //
     // Skip on the very first frame (m_SwImageLayoutInited=false) — there's
     // nothing valid to copy from yet, FRUC just sees stale prevRGB once.
-    if (useNativeDecode && m_FrucMode && m_FrucReady && m_SwImageLayoutInited) {
+    if (useNativeDecode && m_FrucMode && m_FrucReady && !frucPausedThisFrame && m_SwImageLayoutInited) {
         // m_SwUploadImage SHADER_READ_ONLY → TRANSFER_SRC_OPTIMAL
         VkImageMemoryBarrier toSrcBar = {};
         toSrcBar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -5510,7 +5530,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     // GPU executes them in order.  Outputs to m_FrucInterpRgbBuf which is
     // not yet displayed (i.4.2 will add dual-present); for now we just
     // verify the chain runs without crash.
-    if (m_FrucMode && m_FrucReady) {
+    if (m_FrucMode && m_FrucReady && !frucPausedThisFrame) {
         // §J.3.e.2.i.8 Phase 2.5 — useNativeDecode gates FRUC's NV12 source.
         runFrucComputeChain(cmd, (uint32_t)m_SwImageWidth, (uint32_t)m_SwImageHeight,
                             useNativeDecode);
@@ -5529,7 +5549,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
 
     // §J.3.e.2.i.4.2 dual-present: first render pass writes interp via
     // m_InterpPipeline (samples bufInterpRGB) into framebuffer[imgIdxA].
-    if (m_DualMode) {
+    if (dualPresentThisFrame) {
         // Need pfnCmdPushConstants for interp shader; load via m_RtPfn isn't
         // there for push-const, so resolve here.
         auto getDevPa2 = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
@@ -5599,14 +5619,14 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     // pixels.  Without FRUC, no transfer needs to wait → keep FRAGMENT_SHADER.
     uint64_t timelineWaitValue = useNativeDecode ? m_LastDecodeValue.load(std::memory_order_acquire) : 0;
     const VkPipelineStageFlags timelineWaitStage =
-        (useNativeDecode && m_FrucMode && m_FrucReady)
+        (useNativeDecode && m_FrucMode && m_FrucReady && !frucPausedThisFrame)
             ? VK_PIPELINE_STAGE_TRANSFER_BIT
             : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     VkResult vr;
     // §J.3.e.2.i.8 Phase 1.5c — always allocate gfx timeline signal value (so
     // decode side can always vkWaitSemaphores on the latest published value).
     uint64_t gfxSignalVal = m_GfxTimelineNext.fetch_add(1, std::memory_order_acq_rel);
-    if (m_DualMode) {
+    if (dualPresentThisFrame) {
         // Dual: wait both acquire sems (pass 0 = interp, pass 1 = real),
         // signal both per-IMAGE renderDone sems + m_GfxTimelineSem (gfx→decode sync).
         // §J.3.e.2.i.8 Phase 1.5c-final — renderDone sems indexed by swapchain
@@ -5792,7 +5812,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         }
         s_LastPresent = now;
         s_CumulReal++;
-        if (m_DualMode) s_CumulInterp++;
+        if (dualPresentThisFrame) s_CumulInterp++;
 
         // Emit every ~5 seconds of wall time in the current bucket.
         double bucketSec = duration_cast<duration<double>>(now - s_StatsBucketStart).count();
