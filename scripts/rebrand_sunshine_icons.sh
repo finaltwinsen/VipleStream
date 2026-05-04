@@ -43,6 +43,17 @@ rsvg-convert -w 45 -h 45 "$SRC" -o "$WEB_OUT/logo-sunshine-45.png"
 echo "=== 2. Sunshine Web UI favicon (browser tab) ==="
 mkico "$WEB_OUT/sunshine.ico"
 
+echo "=== 2b. Sunshine tray state ICOs (Windows runtime tray) ==="
+# system_tray.cpp Windows path loads images/sunshine-{playing,pausing,locked}.ico
+# at runtime via tray library — .svg counterparts are NOT consulted on Windows.
+# Use plain chevron for all three states until §K.4 designs a state-overlay
+# variant (green dot for playing / yellow for pausing / red lock for locked).
+# At least Task Manager / tray no longer flashes the upstream Sunshine sun
+# the moment a stream starts.
+mkico "$WEB_OUT/sunshine-playing.ico"
+mkico "$WEB_OUT/sunshine-pausing.ico"
+mkico "$WEB_OUT/sunshine-locked.ico"
+
 echo "=== 3. Sunshine .exe icon (Windows Task Manager / Start menu) ==="
 mkico "$SUNSHINE_TOP/sunshine.ico"
 
