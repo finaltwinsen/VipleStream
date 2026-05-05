@@ -323,6 +323,152 @@ const char* getConv2DShaderGlsl() {
 }
 
 // ============================================================================
+// §J.3.e.Y 4Y.4 — tiled shared-memory Conv2D for k=3 stride=1 pad=1
+// dilation=1 (the case for 44 of 56 conv layers in flownet).
+//
+// 16×16 output pixels per workgroup, 256 threads.  Per input channel,
+// the workgroup cooperatively loads an 18×18 input tile into shared
+// memory (each thread loads ~2 values), then each thread reads its
+// own 3×3 window from the tile + 9 weights from global → 9 MAC.
+// Channel loop iterates over inC.
+//
+// Memory traffic vs the generic kConv2DShader:
+//   generic: each of 256 threads reads 9 inputs from global = 256*9 =
+//            2304 input loads per channel per workgroup.
+//   tiled:   workgroup loads 324 inputs from global per channel.
+//   reduction: 7.1× fewer input loads.  Weight reads same (256*9 still
+//   hit L1 cache; not worth shared-memorying for our small kernels).
+//
+// Bias buffer required even when hasBias=0 (binding 2); caller hands a
+// placeholder buffer in that case (existing convention from
+// dispatchConvolution).
+// ============================================================================
+
+static const char* kConv2D_3x3_s1_ShaderGlsl = R"GLSL(
+#version 450
+
+#define TILE_W       16
+#define TILE_H       16
+#define HALO         1
+#define IN_TILE_W    18
+#define IN_TILE_H    18
+#define IN_TILE_SIZE 324
+
+layout(local_size_x = TILE_W, local_size_y = TILE_H, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer InputBuf  { float in_buf[];  };
+layout(set = 0, binding = 1) readonly  buffer WeightBuf { float w_buf[];   };
+layout(set = 0, binding = 2) readonly  buffer BiasBuf   { float bias_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { float out_buf[]; };
+
+layout(push_constant) uniform PC {
+    ivec4 inDims;     // (inW, inH, inC, hasBias)
+    ivec4 outDims;    // (outW, outH, outChan, _pad)
+    ivec4 conv;       // unused for this specialised shader, kept for layout compat
+    float leakyReluSlope;
+} pc;
+
+shared float tile[IN_TILE_SIZE];
+
+void main() {
+    int olx = int(gl_LocalInvocationID.x);
+    int oly = int(gl_LocalInvocationID.y);
+    int wgx = int(gl_WorkGroupID.x);
+    int wgy = int(gl_WorkGroupID.y);
+    int n   = int(gl_WorkGroupID.z);
+
+    int outW = pc.outDims.x;
+    int outH = pc.outDims.y;
+    int outN = pc.outDims.z;
+    int inW  = pc.inDims.x;
+    int inH  = pc.inDims.y;
+    int inC  = pc.inDims.z;
+    int hasB = pc.inDims.w;
+
+    int ox = wgx * TILE_W + olx;
+    int oy = wgy * TILE_H + oly;
+
+    float acc = (hasB != 0) ? bias_buf[n] : 0.0;
+
+    int tile_x_base = wgx * TILE_W - HALO;
+    int tile_y_base = wgy * TILE_H - HALO;
+
+    int thread_idx = oly * TILE_W + olx;  // 0..255
+
+    for (int c = 0; c < inC; ++c) {
+        int in_chan_base = c * inH * inW;
+
+        // Cooperative load: thread_idx → first 256, thread_idx+256 →
+        // covers indices [256, 324).  Indices ≥ 324 skipped.
+        int idx_a = thread_idx;
+        int idx_b = thread_idx + 256;
+        if (idx_a < IN_TILE_SIZE) {
+            int ly = idx_a / IN_TILE_W;
+            int lx = idx_a - ly * IN_TILE_W;
+            int iy = tile_y_base + ly;
+            int ix = tile_x_base + lx;
+            float v = 0.0;
+            if (ix >= 0 && ix < inW && iy >= 0 && iy < inH) {
+                v = in_buf[in_chan_base + iy * inW + ix];
+            }
+            tile[idx_a] = v;
+        }
+        if (idx_b < IN_TILE_SIZE) {
+            int ly = idx_b / IN_TILE_W;
+            int lx = idx_b - ly * IN_TILE_W;
+            int iy = tile_y_base + ly;
+            int ix = tile_x_base + lx;
+            float v = 0.0;
+            if (ix >= 0 && ix < inW && iy >= 0 && iy < inH) {
+                v = in_buf[in_chan_base + iy * inW + ix];
+            }
+            tile[idx_b] = v;
+        }
+        memoryBarrierShared();
+        barrier();
+
+        if (ox < outW && oy < outH) {
+            int wbase = (n * inC + c) * 9;  // 9 = kH * kW, hardcoded
+            // Manually unrolled 3×3 MAC.
+            float w0 = w_buf[wbase + 0];
+            float w1 = w_buf[wbase + 1];
+            float w2 = w_buf[wbase + 2];
+            float w3 = w_buf[wbase + 3];
+            float w4 = w_buf[wbase + 4];
+            float w5 = w_buf[wbase + 5];
+            float w6 = w_buf[wbase + 6];
+            float w7 = w_buf[wbase + 7];
+            float w8 = w_buf[wbase + 8];
+
+            int row0 = (oly + 0) * IN_TILE_W + olx;
+            int row1 = (oly + 1) * IN_TILE_W + olx;
+            int row2 = (oly + 2) * IN_TILE_W + olx;
+
+            acc += tile[row0 + 0] * w0;
+            acc += tile[row0 + 1] * w1;
+            acc += tile[row0 + 2] * w2;
+            acc += tile[row1 + 0] * w3;
+            acc += tile[row1 + 1] * w4;
+            acc += tile[row1 + 2] * w5;
+            acc += tile[row2 + 0] * w6;
+            acc += tile[row2 + 1] * w7;
+            acc += tile[row2 + 2] * w8;
+        }
+        barrier();  // make sure all threads done before next channel overwrites tile
+    }
+
+    if (ox < outW && oy < outH) {
+        if (pc.leakyReluSlope > 0.0 && acc < 0.0) {
+            acc *= pc.leakyReluSlope;
+        }
+        out_buf[(n * outH + oy) * outW + ox] = acc;
+    }
+}
+)GLSL";
+
+const char* getConv2D_3x3_s1_ShaderGlsl() { return kConv2D_3x3_s1_ShaderGlsl; }
+
+// ============================================================================
 // §J.3.e.X Phase 4b — element-wise BinaryOp.
 //
 // Covers 92 BinaryOp layers in rife-v4.25-lite/flownet.param.  Audit:
@@ -1940,6 +2086,7 @@ enum class ShaderKind : int {
     InterpBilinear,
     EltwiseSum,
     RifeWarp,
+    Conv2D_3x3_s1,   // §J.3.e.Y 4Y.4 — tiled, k=3 stride=1 pad=1 dilation=1
     Count
 };
 
@@ -1964,6 +2111,7 @@ static const ShaderSpec kShaderSpecs[(int)ShaderKind::Count] = {
     { "InterpBilinear", getInterpBilinearShaderGlsl, 2, 32 },
     { "EltwiseSum",     getEltwiseShaderGlsl,        3, 16 },
     { "RifeWarp",       getRifeWarpShaderGlsl,       3, 16 },
+    { "Conv2D_3x3_s1",  getConv2D_3x3_s1_ShaderGlsl, 4, 64 },
 };
 
 struct CachedPipeline {
@@ -2639,6 +2787,20 @@ bool dispatchConvolution(ExecState& e, const Layer& L) {
     pc.outDims[0] = outS->w; pc.outDims[1] = outS->h; pc.outDims[2] = outS->c;
     pc.conv[0] = kW; pc.conv[1] = kH; pc.conv[2] = sW; pc.conv[3] = pad;
     pc.lr = lr;
+
+    // §J.3.e.Y 4Y.4 — tiled k=3 s=1 specialised path covers 44 of 56
+    // conv layers in flownet (the dominant case).  Stride=2 (12 layers)
+    // stays on generic shader until a future stride=2 tiled phase.
+    const bool tiled_eligible = (kW == 3 && kH == 3 && sW == 1 && sH == 1
+                                 && pad == 1
+                                 && paramInt(Lref, 2,  1) == 1   // dilation_w
+                                 && paramInt(Lref, 12, 1) == 1); // dilation_h
+    if (tiled_eligible) {
+        return bindDispatch(e, ShaderKind::Conv2D_3x3_s1, bufs, 4, &pc, sizeof(pc),
+                            (uint32_t)((outS->w + 15) / 16),
+                            (uint32_t)((outS->h + 15) / 16),
+                            (uint32_t)outS->c);
+    }
     return bindDispatch(e, ShaderKind::Conv2D, bufs, 4, &pc, sizeof(pc),
                         (uint32_t)((outS->w + 7) / 8),
                         (uint32_t)((outS->h + 7) / 8),
