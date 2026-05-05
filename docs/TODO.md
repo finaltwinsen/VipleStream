@@ -12,7 +12,7 @@
 
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
-| **Active (主戰場)** | **§J.3.e.Y** native RIFE perf — Tensor Core 4Y.6 | 6 commit 86→22ms 4× cumulative；Final.1 vs-ncnn correctness 收緊到 mean 4.7e-5 (9× 改善)；下個 session 主戰場 4Y.6 `VK_KHR_cooperative_matrix` (RTX 30+ Tensor Core, fp16 GEMM) 預期 1.5-2.5×→9-15ms |
+| **Done (perf milestone)** | **§J.3.e.Y** native RIFE perf — 4Y.1..4Y.6 全收尾 | 9 commit 86→22ms 4× cumulative + Final.1 vs-ncnn mean 4.7e-5；4Y.6 Tensor Core path 完整實作但**預設關閉**（perf 僅 7%、precision 70× 差），`VIPLE_RIFE_VK_COOPMAT=1` opt-in；後續往別的方向走 |
 | **Done (correctness)** | **§J.3.e.X** 手刻 RIFE Vulkan inference | 17 commits 8807886..cba641d，0 ncnn dep；通過 vs-ncnn correctness gate，標準 standalone via `VIPLE_RIFE_NATIVE_VK_TEST=1`；production NcnnFRUC integration (Final.3b) deferred |
 | **Active** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限）|
 | **Negative result (§J.3.g)** | **FRUC ME 解析度下放：不是 bottleneck** | 2026-05-03 實作完整 ME→1080p / 720p downsample，4K120 + FRUC 仍卡 75-81 fps；DUAL off 也一樣。ME / DUAL 都不是限制；推測 warp shader (per-pixel @ 4K) + memory bandwidth + sync barriers。需要 GPU per-stage timing 才能定位。實作已 revert |
@@ -234,46 +234,56 @@ streaming 路徑**沒有改動**，仍走 NcnnFRUC. Final.3b（接成 NcnnFRUC
 的 Linux fallback）刻意 deferred 直到 Linux test VM 有 ncnn-build-fail
 環境可重現驗測。
 
-### §J.3.e.Y native RIFE perf optimisation（**🟡 active 2026-05-05..06**）
+### §J.3.e.Y native RIFE perf optimisation（**✅ milestone DONE 2026-05-06**）
 
-**目標：** 把 §J.3.e.X 的 86 ms cold-GPU baseline 壓到比 ncnn 8.6 ms 還快。
-
-**目前進度：** 6 個 commit (`876ce45..4be1a6b`) 累積 4× 加速到 ~22 ms cold-GPU.
-詳細 phase map 在 [`docs/J.3.e.XY_native_rife_pipeline.md`](J.3.e.XY_native_rife_pipeline.md)
-的 §J.3.e.Y 段落.
+**達成：** §J.3.e.X 的 86 ms cold-GPU baseline 壓到 ~22 ms（4× 加速），
+9 個 commit (`876ce45..068c9b2` + 文件 `e4e4dfc`)。詳細 phase map 在
+[`docs/J.3.e.XY_native_rife_pipeline.md`](J.3.e.XY_native_rife_pipeline.md)。
 
 | Phase | 內容 | 結果 |
 |---|---|---|
 | 4Y.1a | `findHostVisibleMemoryType` 偏好 BAR/ReBAR | 86 → 43.6 ms (2.0×) |
-| 4Y.0 | per-phase wall-clock instrument | (no perf Δ, 找出 readback 是 24% 大頭) |
+| 4Y.0 | per-phase wall-clock instrument | (找出 readback 是 24% 大頭) |
 | 4Y.1b | out0 host-cached staging buffer | 43.6 → 24.0 ms (3.6×) |
 | 4Y.4 | tiled shared-mem Conv2D for k=3 s=1 | 24.0 → 21.5 ms (4.0×) |
-| 4Y.4-stride2 | s=2 tiled (negative — barrier overhead) | (reverted) |
-| 4Y.5a | fp16 weight storage | 21.5 → ~22 ms (perf 持平), **vs-ncnn correctness 9× 收緊** |
+| 4Y.4-stride2 | s=2 tiled — barrier overhead | (negative, reverted) |
+| 4Y.5a | fp16 weight storage | perf 持平、**vs-ncnn 9× 收緊** |
+| 4Y.6 Step 1+2 | cooperative_matrix probe + hello-world | infrastructure 完成 |
+| 4Y.6 Step 3 | Conv2D-via-GEMM coopmat shader + unit test | isolated PASS |
+| 4Y.6 Step 4 | dispatch path 整合 + env-var gate | **opt-in default-OFF** |
 
-**Profile 後仍剩：** 89% 是純 GPU compute time. shader-level optimisation
-才有再壓的空間.
+**4Y.6 為什麼 opt-in（RTX 3060 Laptop 量到的 trade-off）：**
+
+| 指標 | OFF（4Y.4 路徑） | ON（coopmat） |
+|---|---|---|
+| Final.1 mean abs err | 4.72e-05 | 3.21e-03（70× 差） |
+| Final.1 max abs err | 0.0135 | 0.530（39× 差） |
+| Final.1 verdict | PASS | **FAIL** |
+| Final.3a native median | 19.25 ms | 17.95 ms（**僅 7% 加速**） |
+
+Precision regression 是 double-fp16 quantisation 跨 40 layer 累積（σ × √40
+≈ 3.2e-3，數學可預期，shader 本身正確）；perf 只贏 7% 是因為 RIFE-v4-lite
+每層 conv 太小，Tensor Core fixed-cost 吃掉大半 throughput。7% 遠小於
+thermal-throttle 噪音 ~30%，不值得 ship 預設。`VIPLE_RIFE_VK_COOPMAT=1`
+opt-in 留著當 known-working capability，未來推 4090 或更大 RIFE 模型時
+直接 build on。
 
 **Thermal noise 警告：** GPU sustained workload vs short cold-GPU benchmark
-行為差很大 (ncnn 退化 10× vs native 2×). 進一步 1.5× 量級的優化 benchmark
-驗測需要 fixed clock (`nvidia-smi --lock-gpu-clocks`) 或 cool-down protocol.
+行為差很大（ncnn 退化 10× vs native 2×）。進一步 1.5× 量級的優化 benchmark
+驗測需要 fixed clock (`nvidia-smi --lock-gpu-clocks`) 或 cool-down protocol。
 
-**下一步候選（依 ROI）：**
+**還沒做但有 ROI 的候選（沒人推之前 deferred）：**
 
-- **4Y.6 Tensor Core / `VK_KHR_cooperative_matrix`** — RTX 30+ 16×16 fp16
-  matmul 硬體單元，預期 1.5-2.5× 加速到 ~9-15 ms. **下個 session 主戰
-  場.** 工程要點：enable `cooperativeMatrix` device feature, query
-  supported (M,N,K) tuples, 把 conv reformulate 成 GEMM (im2col),
-  保留 4Y.4 tiled path 當非-RTX fallback. 細節在 milestone doc 的
-  「下一步」段落.
-- **4Y.5b activation fp16 storage** — bandwidth 大頭，但 11 個 shader
-  的 input/output binding 全要改, 4-6h 工程, dynamic range 風險低
-  (activation magnitude profile 過 ~6, fp16 上限 65504).
-- **4Y.7 dispatch fusion** — Conv→ReLU→BinOp×beta chain 合併, 預期
-  1.1-1.2× (小, 但 shader 改動量適中).
+- **4Y.6 shader 改 multi-subgroup WG** — 1 WG = 1 subgroup 的設計使 SM
+  利用率僅 ~50%；改成 4 subgroups/WG 共享 im2col tile load 預期再 1.5-2×
+  攤平 fixed cost。但 RIFE-v4-lite 規模太小，可能仍贏不過 4Y.4 多少
+- **4Y.5b activation fp16 storage** — bandwidth 大頭，但 11 個 shader 的
+  input/output binding 全要改，4-6h 工程，dynamic range 風險低
+- **4Y.7 dispatch fusion** — Conv→ReLU→BinOp×beta chain 合併，預期
+  1.1-1.2×（小，但 shader 改動量適中）
 
-**Final.3b 接 NcnnFRUC**: 仍 deferred until Linux env. 預估 4-6h 工程,
-medium-high risk (動 production hot path).
+**Final.3b 接 NcnnFRUC：** 仍 deferred until Linux env。預估 4-6h 工程，
+medium-high risk（動 production hot path）。
 
 ### §J.3.f AV1 / HEVC / H.264 Vulkan hwaccel via ffmpeg（**✅ DONE 2026-05-03 / integration b2b7afd**）
 
