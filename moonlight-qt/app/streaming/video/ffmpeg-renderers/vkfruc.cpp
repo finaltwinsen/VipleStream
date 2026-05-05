@@ -3769,57 +3769,10 @@ bool VkFrucRenderer::createSwUploadResources(int width, int height)
         }
     }
 
-    // §J.3.e.2.i.8 Phase 2.5 — single gpu-only NV12 buffer (DEVICE_LOCAL).
-    // When native VK decode is active, renderFrameSw copies m_SwUploadImage
-    // → m_SwFrucNv12Buf at the start of its graphics-queue cmd buf, then FRUC
-    // NV12→RGB compute reads from here instead of m_SwStagingBuffer (which
-    // holds FFmpeg's parallel SW decode output).  Removes the source
-    // asymmetry that caused 3-4 Hz blur/sharp flicker in v1.3.275 dual-present
-    // FRUC.
-    //
-    // v1.3.278 — Reverted from per-slot back to single buffer.  Per-slot
-    // (v1.3.277) caused reliable VK_ERROR_DEVICE_LOST after ~1380 frames on
-    // NV 596.84 + RTX 3060.  v1.3.276 single-buffer ran 2940+ frames stable
-    // with a theoretical cross-submission WAW race manifesting as residual
-    // "occasional blur" but no crash.  Trade-off: visual blur is acceptable,
-    // hard crash is not.  Future work — diagnose per-slot crash (likely a
-    // descriptor-set / buffer interaction with NV driver) before re-enabling.
-    {
-        VkBufferCreateInfo bci = {};
-        bci.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bci.size        = m_SwStagingSize;  // same NV12 size as staging
-        bci.usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;  // graphics queue only
-        if (pfnCreateBuffer(m_Device, &bci, nullptr, &m_SwFrucNv12Buf) != VK_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2.5 vkCreateBuffer(SwFrucNv12) failed");
-            return false;
-        }
-        VkMemoryRequirements mr;
-        pfnGetBufMemReq(m_Device, m_SwFrucNv12Buf, &mr);
-        int memTypeIdx = findMemType(mr.memoryTypeBits,
-                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (memTypeIdx < 0) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2.5 no DEVICE_LOCAL memory type for SwFrucNv12Buf");
-            return false;
-        }
-        VkMemoryAllocateInfo mai = {};
-        mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        mai.allocationSize  = mr.size;
-        mai.memoryTypeIndex = (uint32_t)memTypeIdx;
-        if (pfnAllocMem(m_Device, &mai, nullptr, &m_SwFrucNv12BufMem) != VK_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2.5 vkAllocateMemory(SwFrucNv12) failed");
-            return false;
-        }
-        if (pfnBindBufMem(m_Device, m_SwFrucNv12Buf, m_SwFrucNv12BufMem, 0) != VK_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2.5 vkBindBufferMemory(SwFrucNv12) failed");
-            return false;
-        }
-    }
+    // §J.3.e.2.i.8 Phase 2.5 / §B1a 2026-05-06 — m_SwFrucNv12Buf creation
+    // moved to createFrucComputeResources so HW path also gets the mirror
+    // buffer (HW renderFrame copies AVVkFrame.img[0] → m_SwFrucNv12Buf for
+    // FRUC compute consumption, mirroring SW path's m_SwUploadImage source).
 
     // Upload image: NV12 multi-plane, sampled + transfer-dst
     {
@@ -3961,15 +3914,8 @@ void VkFrucRenderer::destroySwUploadResources()
         pfnDestroyBuffer(m_Device, m_SwStagingBuffer, nullptr);
         m_SwStagingBuffer = VK_NULL_HANDLE;
     }
-    // §J.3.e.2.i.8 Phase 2.5 — release gpu-only NV12 mirror buffer
-    if (m_SwFrucNv12Buf && pfnDestroyBuffer) {
-        pfnDestroyBuffer(m_Device, m_SwFrucNv12Buf, nullptr);
-        m_SwFrucNv12Buf = VK_NULL_HANDLE;
-    }
-    if (m_SwFrucNv12BufMem && pfnFreeMem) {
-        pfnFreeMem(m_Device, m_SwFrucNv12BufMem, nullptr);
-        m_SwFrucNv12BufMem = VK_NULL_HANDLE;
-    }
+    // §B1a 2026-05-06 — m_SwFrucNv12Buf release moved to
+    // destroyFrucComputeResources (FRUC-owned across SW + HW path).
     if (m_SwStagingMem && pfnFreeMem) {
         pfnFreeMem(m_Device, m_SwStagingMem, nullptr);
         m_SwStagingMem = VK_NULL_HANDLE;
@@ -4217,8 +4163,18 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         if (pfnAllocMem(m_Device, &mai, nullptr, &outMem) != VK_SUCCESS) return false;
         return pfnBindBufMem(m_Device, outBuf, outMem, 0) == VK_SUCCESS;
     };
-    const VkDeviceSize sizeRGB = (VkDeviceSize)width * height * 3 * sizeof(float);
-    const VkDeviceSize sizeMV  = (VkDeviceSize)mvW * mvH * 2 * sizeof(int);
+    const VkDeviceSize sizeRGB  = (VkDeviceSize)width * height * 3 * sizeof(float);
+    const VkDeviceSize sizeMV   = (VkDeviceSize)mvW * mvH * 2 * sizeof(int);
+    // §B1a 2026-05-06 — NV12 mirror buffer (was created in
+    // createSwUploadResources / m_SwStagingSize).  Same size formula —
+    // width*height*1.5 (Y plane W*H + UV plane W*H/2) × kFrucFramesInFlight
+    // for back-to-back per-slot regions.  HW path also needs this buffer:
+    // renderFrame copies AVVkFrame.img[0] (NV12 multi-plane VkImage) to
+    // this buffer via vkCmdCopyImageToBuffer for FRUC NV12→RGB compute
+    // consumption.  SW path keeps populating it via cmdCopyImageToBuffer
+    // from m_SwUploadImage, identical wire format.
+    const VkDeviceSize sizeNV12 = (VkDeviceSize)width * height * 3 / 2
+                                  * kFrucFramesInFlight;
 
     // §J.3.e.2.i.8 Phase 1.5c — TRANSFER_SRC_BIT added because runFrucComputeChain
     // ends with vkCmdCopyBuffer m_FrucCurrRgbBuf → m_FrucPrevRgbBuf for next-
@@ -4240,7 +4196,13 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                      m_FrucPrevMvBuf, m_FrucPrevMvMem)
         || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                     m_FrucInterpRgbBuf, m_FrucInterpRgbMem)) {
+                     m_FrucInterpRgbBuf, m_FrucInterpRgbMem)
+        // §B1a — NV12 mirror, TRANSFER_DST so HW path's cmdCopyImageToBuffer
+        // can write into it; STORAGE_BUFFER so NV12→RGB compute reads as
+        // raw bytes via Y@offset 0 / UV@offset W*H.  No TRANSFER_SRC since
+        // we never copy this buffer onwards.
+        || !allocBuf(sizeNV12, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_SwFrucNv12Buf, m_SwFrucNv12BufMem)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: buffer alloc failed");
         m_FrucDisabled = true;
@@ -4394,6 +4356,9 @@ void VkFrucRenderer::destroyFrucComputeResources()
     DESTROY_BUF(m_FrucMvFilteredBuf, m_FrucMvFilteredMem)
     DESTROY_BUF(m_FrucPrevMvBuf,     m_FrucPrevMvMem)
     DESTROY_BUF(m_FrucInterpRgbBuf,  m_FrucInterpRgbMem)
+    // §B1a 2026-05-06 — m_SwFrucNv12Buf moved here from
+    // destroySwUploadResources (FRUC-owned, used by both SW + HW path).
+    DESTROY_BUF(m_SwFrucNv12Buf,     m_SwFrucNv12BufMem)
 #undef DESTROY_BUF
 
     if (m_FrucDescPool && pfnDestroyDescPool) {
@@ -4891,10 +4856,18 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     }
 
     // ---- 5. Update slot's descriptor set with the new view ----
+    // §B1a 2026-05-06 — imageLayout changed SHADER_READ_ONLY_OPTIMAL →
+    // GENERAL so vkf->img[0] can stay in GENERAL throughout the frame
+    // (acquireBar transitions directly to GENERAL, image-to-buffer copy
+    // reads from GENERAL, fragment shader samples from GENERAL, release
+    // barrier no-op stays in GENERAL).  Avoids the double-transition
+    // SHADER_READ_ONLY → TRANSFER_SRC → SHADER_READ_ONLY that hangs NV's
+    // video-decode image tracker (frame 0/1/2 record but no further
+    // decoded frames — see commit history).
     VkDescriptorImageInfo dii = {};
     dii.sampler     = VK_NULL_HANDLE;  // immutable, baked into layout
     dii.imageView   = frameView;
-    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
     VkWriteDescriptorSet wds = {};
     wds.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -4921,12 +4894,19 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     //      explicit QFOT release/acquire is unnecessary (and would hang
     //      without a matching release-side barrier on the decoder queue,
     //      which FFmpeg-vulkan does not always issue).
+    // §B1a 2026-05-06 — newLayout SHADER_READ_ONLY_OPTIMAL → GENERAL.
+    // Image stays in GENERAL throughout the frame to allow image-to-buffer
+    // copy + fragment shader sample to coexist without driver-hostile
+    // re-transitions on NV video-decode images.  GENERAL is universally
+    // sample-compatible (less optimal than SHADER_READ_ONLY but the loss
+    // is negligible vs the FRUC chain win).
     VkImageMemoryBarrier acquireBar = {};
     acquireBar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     acquireBar.srcAccessMask       = 0;
-    acquireBar.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+    acquireBar.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT
+                                   | VK_ACCESS_TRANSFER_READ_BIT;
     acquireBar.oldLayout           = vkf->layout[0];
-    acquireBar.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    acquireBar.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
     acquireBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     acquireBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     acquireBar.image               = vkf->img[0];
@@ -4937,7 +4917,8 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     acquireBar.subresourceRange.layerCount     = 1;
     m_RtPfn.CmdPipelineBarrier(cmd,
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+            | VK_PIPELINE_STAGE_TRANSFER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &acquireBar);
     if (firstFrame) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -4948,6 +4929,101 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                     m_SwapchainExtent.width, m_SwapchainExtent.height,
                     (void*)m_GraphicsPipeline, (void*)m_GraphicsPipelineLayout,
                     (void*)m_SlotDescSet[slot]);
+    }
+
+    // §B1a 2026-05-06 — HW path FRUC compute integration.
+    //
+    // Mirror AVVkFrame.img[0] (NV12 multi-plane VkImage) to m_SwFrucNv12Buf
+    // via cmdCopyImageToBuffer so the existing FRUC NV12→RGB compute reads
+    // identical buffer format as SW path.  Code mirrors renderFrameSw's
+    // §J.3.e.2.i.8 Phase 2.5 v2 block, with two adjustments for HW path:
+    //
+    //   1. Image stays in VK_IMAGE_LAYOUT_GENERAL throughout (instead of
+    //      bouncing through TRANSFER_SRC_OPTIMAL).  GENERAL accepts both
+    //      transfer reads and shader sampled reads, sidestepping NV's
+    //      video-decode image layout tracker which appears to deadlock on
+    //      double-transition (SHADER_READ → TRANSFER_SRC → SHADER_READ in
+    //      same cmd buffer caused frame 0/1/2 to record successfully but
+    //      no further frames decoded — "Video decode unit queue overflow"
+    //      after 1s).
+    //
+    //   2. acquireBar (above) was already set to transition vkf->img[0]
+    //      from oldLayout → SHADER_READ_ONLY_OPTIMAL.  We re-issue our
+    //      own transition SHADER_READ_ONLY → GENERAL here (cheap), then
+    //      run image-to-buffer copy + compute chain.  vkf->img[0]
+    //      remains in GENERAL when the fragment shader render pass
+    //      samples it later (sampler descriptor's imageLayout was set
+    //      to SHADER_READ_ONLY_OPTIMAL but GENERAL is also valid for
+    //      sampler — see VUID-VkDescriptorImageInfo-imageLayout-00344
+    //      relaxation for storage / general-compatible layouts).
+    //
+    // No FRUC output presented yet — B1b adds dual-present.
+    if (m_FrucMode && m_FrucReady && frame && frame->width > 0 && frame->height > 0) {
+        const uint32_t hwW = (uint32_t)frame->width;
+        const uint32_t hwH = (uint32_t)frame->height;
+
+        // acquireBar (above) put vkf->img[0] in GENERAL with TRANSFER_READ
+        // already in dstAccessMask, so cmdCopyImageToBuffer can read it
+        // directly without an additional image barrier.  Only need to
+        // drain prior frame's FRUC compute SHADER_READ on m_SwFrucNv12Buf
+        // before this frame's TRANSFER_WRITE (closes the cross-frame WAW
+        // race documented at renderFrameSw line ~5489).
+        VkBufferMemoryBarrier preCopyBar = {};
+        preCopyBar.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        preCopyBar.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        preCopyBar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        preCopyBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        preCopyBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        preCopyBar.buffer = m_SwFrucNv12Buf;
+        preCopyBar.offset = 0;
+        preCopyBar.size   = VK_WHOLE_SIZE;
+        m_RtPfn.CmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 1, &preCopyBar, 0, nullptr);
+
+        // Image → buffer copy: PLANE_0 (Y) → offset 0, PLANE_1 (UV
+        // interleaved at half spatial) → offset W×H.
+        VkBufferImageCopy regs[2] = {};
+        regs[0].bufferOffset      = 0;
+        regs[0].bufferRowLength   = hwW;
+        regs[0].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        regs[0].imageSubresource.layerCount = 1;
+        regs[0].imageExtent       = { hwW, hwH, 1 };
+        regs[1].bufferOffset      = (VkDeviceSize)hwW * hwH;
+        regs[1].bufferRowLength   = hwW / 2;
+        regs[1].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+        regs[1].imageSubresource.layerCount = 1;
+        regs[1].imageExtent       = { hwW / 2, hwH / 2, 1 };
+        m_RtPfn.CmdCopyImageToBuffer(cmd, vkf->img[0],
+            VK_IMAGE_LAYOUT_GENERAL,
+            m_SwFrucNv12Buf, 2, regs);
+
+        // Buffer TRANSFER_WRITE → COMPUTE_SHADER_READ for FRUC's NV12→RGB.
+        // No image transition back — vkf->img[0] stays in GENERAL; sampler
+        // descriptor's SHADER_READ_ONLY_OPTIMAL spec is relaxed to GENERAL
+        // for storage-compatible images (which video decode output is).
+        VkBufferMemoryBarrier bufBar = {};
+        bufBar.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bufBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bufBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        bufBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bufBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bufBar.buffer = m_SwFrucNv12Buf;
+        bufBar.offset = 0;
+        bufBar.size   = VK_WHOLE_SIZE;
+        m_RtPfn.CmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, nullptr, 1, &bufBar, 0, nullptr);
+
+        runFrucComputeChain(cmd, hwW, hwH, /*useNativeSrc*/ true);
+        if (firstFrame) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-HW] §B1a frame#0 FRUC compute chain dispatched "
+                        "(image→buffer copy + chain) (%ux%u mv=%ux%u)",
+                        hwW, hwH, m_FrucMvWidth, m_FrucMvHeight);
+        }
     }
 
     // §J.3.f bug fix round 2 (2026-05-04) — overlay needs three steps,
@@ -5011,11 +5087,16 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     //      decode queue (valid).  We update vkf->layout[0] = GENERAL
     //      below so FFmpeg knows the image's current layout when it
     //      issues that next barrier.
+    // §B1a 2026-05-06 — oldLayout SHADER_READ_ONLY_OPTIMAL → GENERAL
+    // matching B1a's acquireBar change (image stays in GENERAL).  This
+    // is now a same-layout barrier — no transition — but still emits
+    // the cache flush + execution dep needed before FFmpeg's next decode
+    // queue submission re-uses the image.
     VkImageMemoryBarrier releaseBar = {};
     releaseBar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     releaseBar.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
     releaseBar.dstAccessMask       = 0;
-    releaseBar.oldLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    releaseBar.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
     releaseBar.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
     releaseBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     releaseBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -5123,6 +5204,81 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     if (firstFrame) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] frame#0 vkQueuePresentKHR OK — first frame complete");
+    }
+
+    // §B1a 2026-05-06 — periodic Stats / GPU-PROF emit, ported from
+    // renderFrameSw §J.3.e.2.i.6 block.  Independent thread_local state
+    // so SW + HW path don't cross-contaminate.  SW-PROF (memcpy/wait/
+    // submit/present per-phase) is SW-specific and omitted here.
+    {
+        using namespace std::chrono;
+        static thread_local steady_clock::time_point s_HwLastPresent{};
+        static thread_local steady_clock::time_point s_HwBucketStart{};
+        static thread_local std::vector<double> s_HwFrameMsRing;
+        static thread_local uint64_t s_HwCumulReal = 0;
+        static thread_local uint64_t s_HwCumulInterp = 0;
+        auto now = steady_clock::now();
+        if (s_HwLastPresent.time_since_epoch().count() != 0) {
+            double dtMs = duration_cast<duration<double, std::milli>>(now - s_HwLastPresent).count();
+            s_HwFrameMsRing.push_back(dtMs);
+        } else {
+            s_HwBucketStart = now;
+        }
+        s_HwLastPresent = now;
+        s_HwCumulReal++;
+        // B1b will set this when an interp frame is presented.
+
+        double bucketSec = duration_cast<duration<double>>(now - s_HwBucketStart).count();
+        if (bucketSec >= 5.0 && !s_HwFrameMsRing.empty()) {
+            std::vector<double> sorted = s_HwFrameMsRing;
+            std::sort(sorted.begin(), sorted.end());
+            auto pct = [&](double q) -> double {
+                size_t idx = (size_t)((sorted.size() - 1) * q + 0.5);
+                if (idx >= sorted.size()) idx = sorted.size() - 1;
+                return sorted[idx];
+            };
+            double sum = 0;
+            for (double v : sorted) sum += v;
+            double mean = sum / sorted.size();
+            double fps = sorted.size() / bucketSec;
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-Stats] %s n=%zu fps=%.2f ft_mean=%.2fms "
+                        "p50=%.2f p95=%.2f p99=%.2f p99.9=%.2f (window %.1fs)",
+                        m_DualMode ? "dual-present" : "single-present",
+                        sorted.size(), fps, mean,
+                        pct(0.50), pct(0.95), pct(0.99), pct(0.999),
+                        bucketSec);
+            int gpuN = m_FrucGpuUsCount;
+            double gpuTotalUs = (gpuN > 0) ? (m_FrucGpuUsAccum / gpuN) : 0.0;
+            double sNv12 = (gpuN > 0) ? (m_FrucGpuStageUsAccum[0] / gpuN) : 0.0;
+            double sMe   = (gpuN > 0) ? (m_FrucGpuStageUsAccum[1] / gpuN) : 0.0;
+            double sMed  = (gpuN > 0) ? (m_FrucGpuStageUsAccum[2] / gpuN) : 0.0;
+            double sWarp = (gpuN > 0) ? (m_FrucGpuStageUsAccum[3] / gpuN) : 0.0;
+            double sCopy = (gpuN > 0) ? (m_FrucGpuStageUsAccum[4] / gpuN) : 0.0;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-Stats] cumul real=%llu interp=%llu "
+                        "compute_gpu_total=%.3fms (n=%d) "
+                        "(swMode=%d frucMode=%d dualMode=%d)",
+                        (unsigned long long)s_HwCumulReal,
+                        (unsigned long long)s_HwCumulInterp,
+                        gpuTotalUs / 1000.0,
+                        gpuN,
+                        m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-GPU-PROF] nv12rgb=%.0fus me=%.0fus "
+                        "median=%.0fus warp=%.0fus copy=%.0fus "
+                        "(total=%.0fus, n=%d)",
+                        sNv12, sMe, sMed, sWarp, sCopy,
+                        gpuTotalUs, gpuN);
+            m_FrucGpuUsAccum = 0.0;
+            for (int i = 0; i < kFrucStageCount; ++i) {
+                m_FrucGpuStageUsAccum[i] = 0.0;
+            }
+            m_FrucGpuUsCount = 0;
+            s_HwFrameMsRing.clear();
+            s_HwBucketStart = now;
+        }
     }
 }
 
