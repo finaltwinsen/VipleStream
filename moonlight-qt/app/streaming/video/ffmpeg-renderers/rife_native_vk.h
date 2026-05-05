@@ -197,6 +197,38 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
                       const QString& layerName,
                       float tolerance = 1e-4f);
 
+// Phase 4b — element-wise BinaryOp: ADD/SUB/MUL/DIV/RSUB across three
+// broadcast modes.  Handles all 92 BinaryOp layers in rife-v4.25-lite.
+// `mode` selects the layout of `b`:
+//   0 = same-shape NCHW (length == count)
+//   1 = channel broadcast (length == channels; each channel index gets
+//       broadcast over hw spatial positions)
+//   2 = scalar (length == 1; ignored, scalarB used instead)
+// `opType` follows ncnn's BinaryOp param 0 (0=ADD ... 9=RPOW).
+//
+// Returns true on PASS (max abs error within `tolerance`).
+struct BinaryOpDesc {
+    int   opType  = 0;       // ncnn op_type
+    int   mode    = 0;       // 0 same / 1 channel-bcast / 2 scalar
+    int   channels = 1;      // used when mode==1
+    int   hw       = 1;      // used when mode==1
+    float scalarB  = 0.0f;   // used when mode==2
+};
+bool runBinaryOpGpuTest(const VulkanCtx& ctx,
+                        const BinaryOpDesc& desc,
+                        const std::vector<float>& a,
+                        const std::vector<float>& b /* may be empty if mode==2 */,
+                        float tolerance = 1e-5f);
+
+// CPU reference for BinaryOp.  `out.size()` must equal `a.size()`.
+// `b` semantics follow `desc.mode` exactly (see runBinaryOpGpuTest).
+void referenceBinaryOp(const BinaryOpDesc& desc,
+                       const float* a, size_t aCount,
+                       const float* b /* may be nullptr if mode==2 */,
+                       float* out);
+
+const char* getBinaryOpShaderGlsl();
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.

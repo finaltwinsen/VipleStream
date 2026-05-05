@@ -288,6 +288,84 @@ const char* getConv2DShaderGlsl() {
     return kConv2DShaderGlsl;
 }
 
+// ============================================================================
+// §J.3.e.X Phase 4b — element-wise BinaryOp.
+//
+// Covers 92 BinaryOp layers in rife-v4.25-lite/flownet.param.  Audit:
+//   ops:         ADD (43)  MUL (45)  DIV (3)  RSUB (1)
+//   forms:       same-shape NCHW⊕NCHW           (85 layers, in_count=2)
+//                channel broadcast NCHW × C     (subset of above for MUL × beta)
+//                scalar  NCHW ⊕ const           (7 layers, with_scalar=1)
+//
+// One unified shader handles all cases via a `mode` push constant:
+//   mode 0 = same-shape   :  y[i] = a[i] OP b[i]
+//   mode 1 = channel-bcast:  y[i] = a[i] OP b[chan(i)]   where chan(i) = (i / hw) % C
+//   mode 2 = scalar       :  y[i] = a[i] OP scalar_b
+//
+// op_type uses ncnn's IDs directly:
+//   0 ADD   1 SUB   2 MUL   3 DIV   4 MAX   5 MIN
+//   6 POW   7 RSUB  8 RDIV  9 RPOW
+// (Only ADD / SUB / MUL / DIV / RSUB are reachable in this model.)
+//
+// Dispatch: 1D over the total element count of a (gl_GlobalInvocationID.x
+// = linear index).  local_size_x = 64.  For tensors larger than
+// maxComputeWorkGroupCount[0]×64 the executor will need to split into
+// 2D dispatch — out of scope for the correctness gate; small inputs
+// only.
+// ============================================================================
+
+static const char* kBinaryOpShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer InA { float a_buf[]; };
+layout(set = 0, binding = 1) readonly  buffer InB { float b_buf[]; };
+layout(set = 0, binding = 2) writeonly buffer Out { float y_buf[]; };
+
+layout(push_constant) uniform PC {
+    uint count;       // total elements in a (== output count)
+    uint hw;          // h*w           (used in mode 1 channel broadcast)
+    uint channels;    // C             (used in mode 1)
+    int  op_type;     // ncnn op_type
+    int  mode;        // 0 same / 1 chan-bcast / 2 scalar
+    float scalar_b;   // mode 2 only
+} pc;
+
+float apply_op(float aa, float bb) {
+    if (pc.op_type == 0) return aa + bb;          // ADD
+    if (pc.op_type == 1) return aa - bb;          // SUB
+    if (pc.op_type == 2) return aa * bb;          // MUL
+    if (pc.op_type == 3) return aa / bb;          // DIV
+    if (pc.op_type == 4) return max(aa, bb);      // MAX
+    if (pc.op_type == 5) return min(aa, bb);      // MIN
+    if (pc.op_type == 6) return pow(aa, bb);      // POW
+    if (pc.op_type == 7) return bb - aa;          // RSUB
+    if (pc.op_type == 8) return bb / aa;          // RDIV
+    if (pc.op_type == 9) return pow(bb, aa);      // RPOW
+    return aa;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    float aa = a_buf[i];
+    float bb;
+    if (pc.mode == 2) {
+        bb = pc.scalar_b;
+    } else if (pc.mode == 1) {
+        // channel broadcast: i is linear NCHW index → channel = (i / hw) % C
+        bb = b_buf[(i / pc.hw) % pc.channels];
+    } else {
+        bb = b_buf[i];
+    }
+    y_buf[i] = apply_op(aa, bb);
+}
+)GLSL";
+
+const char* getBinaryOpShaderGlsl() {
+    return kBinaryOpShaderGlsl;
+}
+
 // IEEE-754 fp16 → fp32 conversion.  Handles ±0, normals, and ±inf/NaN.
 // Subnormals (e==0, m!=0) are flushed to ±0 — acceptable for trained
 // conv weights where we never see subnormals in practice.
@@ -1203,6 +1281,348 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
 }
 
 // ============================================================================
+// §J.3.e.X Phase 4b — BinaryOp CPU reference + GPU correctness gate.
+// Self-contained from any model file; takes raw input arrays so the
+// shader gets exercised independently of layer wiring.
+// ============================================================================
+
+void referenceBinaryOp(const BinaryOpDesc& desc,
+                       const float* a, size_t aCount,
+                       const float* b,
+                       float* out)
+{
+    auto apply = [op = desc.opType](float aa, float bb) -> float {
+        switch (op) {
+            case 0: return aa + bb;
+            case 1: return aa - bb;
+            case 2: return aa * bb;
+            case 3: return aa / bb;
+            case 4: return std::max(aa, bb);
+            case 5: return std::min(aa, bb);
+            case 6: return std::pow(aa, bb);
+            case 7: return bb - aa;          // RSUB
+            case 8: return bb / aa;          // RDIV
+            case 9: return std::pow(bb, aa); // RPOW
+            default: return aa;
+        }
+    };
+    if (desc.mode == 2) {
+        const float bb = desc.scalarB;
+        for (size_t i = 0; i < aCount; ++i) out[i] = apply(a[i], bb);
+    } else if (desc.mode == 1) {
+        const size_t hw = (size_t)desc.hw;
+        const size_t C  = (size_t)desc.channels;
+        for (size_t i = 0; i < aCount; ++i) {
+            size_t ch = (i / hw) % C;
+            out[i] = apply(a[i], b[ch]);
+        }
+    } else {
+        for (size_t i = 0; i < aCount; ++i) out[i] = apply(a[i], b[i]);
+    }
+}
+
+bool runBinaryOpGpuTest(const VulkanCtx& ctx,
+                        const BinaryOpDesc& desc,
+                        const std::vector<float>& a,
+                        const std::vector<float>& b,
+                        float tolerance)
+{
+    auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr;
+    auto instance = (VkInstance)ctx.instance;
+    auto pd       = (VkPhysicalDevice)ctx.physicalDevice;
+    auto device   = (VkDevice)ctx.device;
+    auto queue    = (VkQueue)ctx.computeQueue;
+    if (!pfnGetInstancePA || !instance || !pd || !device || !queue) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] BinOpTest: VulkanCtx incomplete; skipping");
+        return false;
+    }
+
+    auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstancePA(instance, "vkGetDeviceProcAddr");
+    if (!pfnGetDevPa) return false;
+    auto getDev = [&](const char* n) -> PFN_vkVoidFunction {
+        return pfnGetDevPa(device, n);
+    };
+#define LOAD_PFN(NAME) auto pfn ## NAME = (PFN_vk ## NAME)getDev("vk" #NAME); \
+        if (!pfn ## NAME) { return false; }
+    LOAD_PFN(CreateShaderModule)
+    LOAD_PFN(DestroyShaderModule)
+    LOAD_PFN(CreateDescriptorSetLayout)
+    LOAD_PFN(DestroyDescriptorSetLayout)
+    LOAD_PFN(CreatePipelineLayout)
+    LOAD_PFN(DestroyPipelineLayout)
+    LOAD_PFN(CreateComputePipelines)
+    LOAD_PFN(DestroyPipeline)
+    LOAD_PFN(CreateBuffer)
+    LOAD_PFN(DestroyBuffer)
+    LOAD_PFN(GetBufferMemoryRequirements)
+    LOAD_PFN(AllocateMemory)
+    LOAD_PFN(FreeMemory)
+    LOAD_PFN(BindBufferMemory)
+    LOAD_PFN(MapMemory)
+    LOAD_PFN(UnmapMemory)
+    LOAD_PFN(CreateDescriptorPool)
+    LOAD_PFN(DestroyDescriptorPool)
+    LOAD_PFN(AllocateDescriptorSets)
+    LOAD_PFN(UpdateDescriptorSets)
+    LOAD_PFN(CreateCommandPool)
+    LOAD_PFN(DestroyCommandPool)
+    LOAD_PFN(AllocateCommandBuffers)
+    LOAD_PFN(BeginCommandBuffer)
+    LOAD_PFN(EndCommandBuffer)
+    LOAD_PFN(CmdBindPipeline)
+    LOAD_PFN(CmdBindDescriptorSets)
+    LOAD_PFN(CmdPushConstants)
+    LOAD_PFN(CmdDispatch)
+    LOAD_PFN(QueueSubmit)
+    LOAD_PFN(CreateFence)
+    LOAD_PFN(DestroyFence)
+    LOAD_PFN(WaitForFences)
+#undef LOAD_PFN
+    auto pfnGetPdMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)pfnGetInstancePA(
+        instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnGetPdMemProps) return false;
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPdMemProps(pd, &memProps);
+
+    // ---- 1. CPU reference ----
+    std::vector<float> cpuOut(a.size());
+    referenceBinaryOp(desc, a.data(), a.size(),
+                      desc.mode == 2 ? nullptr : b.data(),
+                      cpuOut.data());
+
+    // ---- 2. Compile shader ----
+    std::vector<uint32_t> spirv;
+    {
+        ncnn::Option opt;
+        if (ncnn::compile_spirv_module(getBinaryOpShaderGlsl(), opt, spirv) != 0
+            || spirv.empty()) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] BinOpTest: compile_spirv_module failed");
+            return false;
+        }
+    }
+
+    VkShaderModule shaderMod = VK_NULL_HANDLE;
+    {
+        VkShaderModuleCreateInfo smCi = {};
+        smCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smCi.codeSize = spirv.size() * sizeof(uint32_t);
+        smCi.pCode = spirv.data();
+        if (pfnCreateShaderModule(device, &smCi, nullptr, &shaderMod) != VK_SUCCESS) return false;
+    }
+
+    // 3 storage buffer bindings: a, b, out
+    VkDescriptorSetLayoutBinding dslB[3] = {};
+    for (int i = 0; i < 3; ++i) {
+        dslB[i].binding = (uint32_t)i;
+        dslB[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        dslB[i].descriptorCount = 1;
+        dslB[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    {
+        VkDescriptorSetLayoutCreateInfo dslCi = {};
+        dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslCi.bindingCount = 3;
+        dslCi.pBindings = dslB;
+        if (pfnCreateDescriptorSetLayout(device, &dslCi, nullptr, &dsl) != VK_SUCCESS) return false;
+    }
+
+    VkPushConstantRange pcRange = {};
+    pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcRange.size = 32;  // 6 fields × 4 bytes = 24, round up to 32
+    VkPipelineLayout pipeLay = VK_NULL_HANDLE;
+    {
+        VkPipelineLayoutCreateInfo plCi = {};
+        plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plCi.setLayoutCount = 1;
+        plCi.pSetLayouts = &dsl;
+        plCi.pushConstantRangeCount = 1;
+        plCi.pPushConstantRanges = &pcRange;
+        if (pfnCreatePipelineLayout(device, &plCi, nullptr, &pipeLay) != VK_SUCCESS) return false;
+    }
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    {
+        VkComputePipelineCreateInfo cpCi = {};
+        cpCi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpCi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpCi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpCi.stage.module = shaderMod;
+        cpCi.stage.pName = "main";
+        cpCi.layout = pipeLay;
+        if (pfnCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &pipeline) != VK_SUCCESS) return false;
+    }
+
+    // ---- 3. Buffers ----
+    GpuBuffer bufA = {}, bufB = {}, bufOut = {};
+    if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                          pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                          a.size() * sizeof(float), bufA)) return false;
+    // For mode==2 (scalar) we still need a non-zero buffer for binding
+    // 1; allocate a 1-float dummy.  Otherwise size from b.
+    size_t bBytes = (desc.mode == 2 ? sizeof(float) : b.size() * sizeof(float));
+    if (bBytes == 0) bBytes = sizeof(float);
+    if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                          pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                          bBytes, bufB)) return false;
+    if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                          pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                          a.size() * sizeof(float), bufOut)) return false;
+    std::memcpy(bufA.mapped, a.data(), bufA.size);
+    if (desc.mode != 2 && !b.empty()) {
+        std::memcpy(bufB.mapped, b.data(), b.size() * sizeof(float));
+    } else {
+        float dummy = 0.0f;
+        std::memcpy(bufB.mapped, &dummy, sizeof(float));
+    }
+    std::memset(bufOut.mapped, 0, bufOut.size);
+
+    // ---- 4. Descriptor set ----
+    VkDescriptorPool descPool = VK_NULL_HANDLE;
+    {
+        VkDescriptorPoolSize sz = {};
+        sz.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sz.descriptorCount = 3;
+        VkDescriptorPoolCreateInfo dpCi = {};
+        dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpCi.maxSets = 1;
+        dpCi.poolSizeCount = 1;
+        dpCi.pPoolSizes = &sz;
+        if (pfnCreateDescriptorPool(device, &dpCi, nullptr, &descPool) != VK_SUCCESS) return false;
+    }
+    VkDescriptorSet descSet = VK_NULL_HANDLE;
+    {
+        VkDescriptorSetAllocateInfo dsai = {};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = descPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts = &dsl;
+        if (pfnAllocateDescriptorSets(device, &dsai, &descSet) != VK_SUCCESS) return false;
+    }
+    {
+        VkDescriptorBufferInfo dbi[3] = {};
+        dbi[0].buffer = bufA.buf;   dbi[0].range = VK_WHOLE_SIZE;
+        dbi[1].buffer = bufB.buf;   dbi[1].range = VK_WHOLE_SIZE;
+        dbi[2].buffer = bufOut.buf; dbi[2].range = VK_WHOLE_SIZE;
+        VkWriteDescriptorSet wds[3] = {};
+        for (int i = 0; i < 3; ++i) {
+            wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wds[i].dstSet = descSet;
+            wds[i].dstBinding = (uint32_t)i;
+            wds[i].descriptorCount = 1;
+            wds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            wds[i].pBufferInfo = &dbi[i];
+        }
+        pfnUpdateDescriptorSets(device, 3, wds, 0, nullptr);
+    }
+
+    // ---- 5. Command buffer ----
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    {
+        VkCommandPoolCreateInfo cpCi = {};
+        cpCi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpCi.queueFamilyIndex = ctx.computeQueueFamily;
+        cpCi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        if (pfnCreateCommandPool(device, &cpCi, nullptr, &cmdPool) != VK_SUCCESS) return false;
+    }
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    {
+        VkCommandBufferAllocateInfo cbai = {};
+        cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool = cmdPool;
+        cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        if (pfnAllocateCommandBuffers(device, &cbai, &cmd) != VK_SUCCESS) return false;
+    }
+    {
+        VkCommandBufferBeginInfo cbbi = {};
+        cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (pfnBeginCommandBuffer(cmd, &cbbi) != VK_SUCCESS) return false;
+    }
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    pfnCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLay, 0,
+                             1, &descSet, 0, nullptr);
+    struct PC {
+        uint32_t count;
+        uint32_t hw;
+        uint32_t channels;
+        int32_t  opType;
+        int32_t  mode;
+        float    scalarB;
+        uint32_t _pad[2];   // round to 32 bytes for alignment safety
+    } pcVal = {};
+    pcVal.count    = (uint32_t)a.size();
+    pcVal.hw       = (uint32_t)desc.hw;
+    pcVal.channels = (uint32_t)desc.channels;
+    pcVal.opType   = desc.opType;
+    pcVal.mode     = desc.mode;
+    pcVal.scalarB  = desc.scalarB;
+    pfnCmdPushConstants(cmd, pipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                        sizeof(pcVal), &pcVal);
+    uint32_t groups = (uint32_t)((a.size() + 63) / 64);
+    pfnCmdDispatch(cmd, groups, 1, 1);
+    pfnEndCommandBuffer(cmd);
+
+    VkFence fence = VK_NULL_HANDLE;
+    {
+        VkFenceCreateInfo fci = {};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        if (pfnCreateFence(device, &fci, nullptr, &fence) != VK_SUCCESS) return false;
+    }
+    {
+        VkSubmitInfo si = {};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+        if (pfnQueueSubmit(queue, 1, &si, fence) != VK_SUCCESS) return false;
+    }
+    pfnWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+
+    // ---- 6. Compare ----
+    const float* gpuOut = reinterpret_cast<const float*>(bufOut.mapped);
+    float maxAbsErr = 0.0f;
+    int worstIdx = 0;
+    for (size_t i = 0; i < cpuOut.size(); ++i) {
+        float diff = std::abs(gpuOut[i] - cpuOut[i]);
+        if (diff > maxAbsErr) { maxAbsErr = diff; worstIdx = (int)i; }
+    }
+    bool pass = maxAbsErr <= tolerance;
+    const char* opNames[] = { "ADD","SUB","MUL","DIV","MAX","MIN","POW","RSUB","RDIV","RPOW" };
+    const char* opName = (desc.opType >= 0 && desc.opType < 10) ? opNames[desc.opType] : "?";
+    const char* modeNames[] = { "same", "chan-bcast", "scalar" };
+    const char* modeName = (desc.mode >= 0 && desc.mode < 3) ? modeNames[desc.mode] : "?";
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] BinOpTest %s/%s (count=%zu c=%d hw=%d): "
+                "max_abs_err=%.6e — %s",
+                opName, modeName, a.size(), desc.channels, desc.hw,
+                (double)maxAbsErr, pass ? "PASS" : "FAIL");
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] BinOpTest %s/%s (count=%zu c=%d hw=%d): "
+        "max_abs_err=%.6e (worst idx=%d cpu=%.6f gpu=%.6f) — %s\n",
+        opName, modeName, a.size(), desc.channels, desc.hw,
+        (double)maxAbsErr, worstIdx,
+        (double)cpuOut[worstIdx], (double)gpuOut[worstIdx],
+        pass ? "PASS" : "FAIL");
+    std::fflush(stderr);
+
+    // ---- 7. Cleanup ----
+    pfnDestroyFence(device, fence, nullptr);
+    pfnDestroyCommandPool(device, cmdPool, nullptr);
+    destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, bufA);
+    destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, bufB);
+    destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, bufOut);
+    pfnDestroyDescriptorPool(device, descPool, nullptr);
+    pfnDestroyPipeline(device, pipeline, nullptr);
+    pfnDestroyPipelineLayout(device, pipeLay, nullptr);
+    pfnDestroyDescriptorSetLayout(device, dsl, nullptr);
+    pfnDestroyShaderModule(device, shaderMod, nullptr);
+    return pass;
+}
+
+// ============================================================================
 // Phase 3b.2 standalone — replicates ncnnfruc::runExternalApiProbe's Vulkan
 // init pattern, hands handles to ncnn, runs runConv2DGpuTest, tears down.
 // Side-effect: claims+releases the ncnn process-singleton (same caveat as
@@ -1386,6 +1806,36 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
     pass &= runConv2DGpuTest(ctx, m, "Conv_16", tolerance);  // s=2 ic=3  n=16  LeakyReLU
     pass &= runConv2DGpuTest(ctx, m, "Conv_18", tolerance);  // s=1 ic=16 n=16  LeakyReLU
     pass &= runConv2DGpuTest(ctx, m, "Conv_50", tolerance);  // s=2 ic=96 n=192 LeakyReLU
+
+    // ---- Phase 4b BinaryOp coverage: 3 broadcast modes × representative ops ----
+    {
+        // Synthesize NCHW = (1, 16, 8, 8) deterministic input.
+        constexpr int C = 16, HW = 64;       // hw = 8*8
+        constexpr int N = C * HW;            // 1024 elements
+        std::vector<float> a(N), b_same(N), b_chan(C);
+        uint32_t st = 0x42424242u;
+        auto next = [&]() {
+            st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+            return (float)(st & 0xFFFFFF) / (float)0xFFFFFF - 0.5f;
+        };
+        for (auto& v : a)      v = next();
+        for (auto& v : b_same) v = next();
+        for (auto& v : b_chan) v = next() + 0.6f;  // keep > 0 so DIV won't blow up
+
+        // 1. same-shape ADD (residual skip)
+        BinaryOpDesc d1{}; d1.opType = 0; d1.mode = 0;
+        pass &= runBinaryOpGpuTest(ctx, d1, a, b_same, tolerance);
+        // 2. channel-broadcast MUL × beta
+        BinaryOpDesc d2{}; d2.opType = 2; d2.mode = 1;
+        d2.channels = C; d2.hw = HW;
+        pass &= runBinaryOpGpuTest(ctx, d2, a, b_chan, tolerance);
+        // 3. scalar DIV (Div_146 pattern: x / 16.0)
+        BinaryOpDesc d3{}; d3.opType = 3; d3.mode = 2; d3.scalarB = 16.0f;
+        pass &= runBinaryOpGpuTest(ctx, d3, a, {}, tolerance);
+        // 4. scalar RSUB (Sub_519 pattern: 1.0 - x)
+        BinaryOpDesc d4{}; d4.opType = 7; d4.mode = 2; d4.scalarB = 1.0f;
+        pass &= runBinaryOpGpuTest(ctx, d4, a, {}, tolerance);
+    }
 
     // ---- Cleanup ----
     ncnn::destroy_gpu_instance();
