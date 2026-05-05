@@ -19,8 +19,9 @@
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 1.7 ONLY-mode NVDEC device-lost | 5 個變體都繞不過，NV 596.36 結構性 bug，預設 PARALLEL 穩 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
-| **Medium** | **§K** Linux client + server build pipeline | 上游基礎完整（AppImage / linux_build.sh / dockerfiles）；本地 fork 改動侷限字串層；要進 WSL 驗 build + 補 vkfruc 的 `Q_OS_LINUX` Vulkan ext gate |
-| **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | Pi 5 + V3DV mesa Vulkan + V4L2 HW decode + DRM/KMS render；上游 source-level 支援，沒 CI prebuilt；FRUC backend 全 disable（Vulkan 補幀 Pi 5 GPU 不夠力），純 streaming 應 OK；先確認 §K Linux x86 通了再做 |
+| **Done (v1.3.337)** | **§K.1** Linux x86_64 兩端 ship | `.deb` server + AppImage client 正式進入 release，五件對齊。fix 清單見 §K. 章節 |
+| **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | Pi 5 + V3DV mesa Vulkan + V4L2 HW decode + DRM/KMS render；上游 source-level 支援，沒 CI prebuilt；FRUC backend 全 disable（Vulkan 補幀 Pi 5 GPU 不夠力），純 streaming 應 OK |
+| **Deferred** | **§K.4** Wayland XDG portal teardown root-cause | `Restart=always` 緩解已 ship；需可重現 streaming 環境（GPU Linux 機）才能修進 wayland.cpp/portalgrab.cpp 的 EPIPE 路徑 |
 | **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |
 | **Low** | **§G.1** RIFE v1 11-channel | A1000 launch overhead bound (§G.3 negative result)；RTX 30/40+ 才有意義 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
@@ -341,52 +342,38 @@ AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame
 
 ---
 
-## §K. Linux build pipeline（active 探勘中 2026-05-04）
+## §K. Linux build pipeline
 
-GitHub release 規範改成「每個 release 必 ship 完整三件、全同版號」（見 `CLAUDE.md` Release 規範）後，下一步要把 Linux artifact 也加進完整 ship。本節追蹤探勘進度。
+GitHub release 規範改成「每個 release 必 ship 完整三件、全同版號」（見 `CLAUDE.md` Release 規範）後，下一步把 Linux artifact 也加進完整 ship。
 
-### §K.1 Linux x86_64 兩端（**probe done 2026-05-04，需 source 整理才能 ship**）
+### §K.1 Linux x86_64 兩端（**SHIPPED 2026-05-05 in v1.3.337**）
 
-**目標 artifact：**
-- `VipleStream-Client-X.Y.Z-linux-x64.AppImage`（從 `moonlight-qt/scripts/build-appimage.sh`）
-- `VipleStream-Server-X.Y.Z-linux-x64.deb`（從 `Sunshine/scripts/linux_build.sh`，CPack DEB generator）
+**Artifact 已正式進入 release：**
+- `VipleStream-Client-1.3.337-linux-x64.AppImage`（59 MB，從 `moonlight-qt/scripts/build-appimage.sh`，三段式手工組裝繞過 linuxdeployqt-on-noble 限制）
+- `VipleStream-Server-1.3.337-linux-x64.deb`（9.4 MB，從 `Sunshine/scripts/linux_build.sh` + CPack DEB generator + `--skip-libva` workaround）
 
-**上游基礎都健康：**
-- moonlight-qt: `build-appimage.yml` GitHub Actions workflow on Ubuntu 22.04，依賴 SDL3 / SDL_ttf / libva / libplacebo / dav1d / FFmpeg n8.0.1（vulkan/vaapi/vdpau hwaccel 全開）+ linuxdeployqt 打包
-- Sunshine: `linux_build.sh` 842 行 + ubuntu-22.04 / ubuntu-24.04 / debian-trixie dockerfiles + ci-linux.yml / ci-archlinux.yml / ci-flatpak.yml / ci-freebsd.yml 多 distro CI
+**完成的 source fix（一次性 rebase 後 land 進 main）：**
+- Sunshine `src/stream.cpp:1054` — `std::max<long long>` 顯式 template
+- Sunshine `src/relay.cpp` / `src/stun.cpp` — `closesocket` macro 改 `(::close(fd))` 避 unqualified lookup
+- Sunshine `src/nvenc/nvenc_base.cpp` — NVENC API v12 vs v13 dual-support，`#if NVENCAPI_MAJOR_VERSION >= 13` gate
+- Sunshine `packaging/linux/` — 5 個 `dev.lizardbyte.app.Sunshine.*` rename 為 `app.viplestream.server.*`
+- Sunshine `scripts/linux_build.sh` — `SUNSHINE_EXECUTABLE_PATH=/usr/bin/viplestream-server`、`CMAKE_PREFIX_PATH=/usr/local`、`SUNSHINE_ENABLE_VAAPI=OFF`-on-skip-libva
+- Sunshine `.gitattributes` — 強制 LF on `src_assets/linux/misc/{postinst,preinst,prerm,postrm}` 避 dpkg `#!/bin/sh\r` ENOENT
+- Sunshine `src_assets/linux/misc/postinst` — auto-enable + `loginctl enable-linger` for `$SUDO_USER`，配 `postrm` 清 dangling symlink
+- Sunshine `src_assets/linux/assets/apps.json` — drop `Low Res Desktop` (xrandr HDMI-1 hardcode) + `Steam Big Picture` (setsid dep)
+- Sunshine `src/platform/linux/wayland.cpp` — `wl_log_set_handler_client` libwayland EPIPE 防護 + dispatch() defensive
+- Sunshine `app-app.viplestream.server.service.in` — `Restart=always` + `StartLimitBurst=30`，client 斷線後 8 秒自動回來
+- moonlight-qt `app/streaming/video/ffmpeg-renderers/plvk.{h,cpp}` — ncnn 整段 `#ifdef VIPLESTREAM_HAVE_NCNN` 隔離 + Linux 用系統 ncnn `/usr/local/lib/libncnn.so`
+- moonlight-qt `vkfruc.cpp` — Linux POSIX 等價 `_wfopen` / `strncpy_s` / VK_KHR_X*_SURFACE 字串字面量
+- moonlight-qt `3rdparty/nvvideoparser/nvvideoparser.pro` — `*-msvc { /arch:AVX2 } else { -mssse3 -mavx ... }` gate
+- moonlight-qt `scripts/build-appimage.sh` — qmake6-on-noble moc race workaround：build 前先 `make compiler_moc_source_make_all`
+- moonlight-qt `app/deploy/linux/com.piinsta.{desktop,appdata.xml}` — appdata id 改 reverse-DNS + Exec= 修正
 
-**WSL Ubuntu 24.04 上實際跑下來的 fork 相容性問題清單：**
+**§K.1 Linux pipeline 視為 done。** `release_full.cmd` 一鍵化包進 Linux 兩端是後續 nice-to-have。
 
-Sunshine（`scripts/linux_build.sh --skip-cuda`）：
-- `src/stream.cpp:1054` `std::max(t.count(), 1ll)` template type 推導失敗（gcc 14 嚴格，`chrono::duration::rep` 是 `long`、不能直接配 `long long`）—— **fixed in source**：`std::max<long long>(...)`
-- `src/relay.cpp` / `src/stun.cpp` 的 `#define closesocket close` 在 `PlainTransport::close()` / `TlsTransport::close()` class scope 內 unqualified lookup 撞 member function —— **fixed in source**：改成 `#define closesocket(fd) (::close(fd))`
-- `src/nvenc/nvenc_base.cpp:24,336,369,370` —— `nv-codec-headers sdk/12.0` 比 fork code 期待的 NVENC API 新（`pixelBitDepthMinus8`、`inputPixelBitDepthMinus8` field 已改名/移除），triggers `#error Check and update NVENC code for backwards compatibility`。**未修**，需要 pin 舊 nv-codec-headers commit 或 patch 4 處 NVENC 欄位
-- `src/platform/linux/vulkan_encode.cpp:748` `AVVulkanDeviceContext::unlock_queue` 在 ffmpeg 8.x 標 deprecated（warning only，搭 `BUILD_WERROR=OFF` 可繞過）
-- `packaging/linux/dev.lizardbyte.app.Sunshine.{desktop,metainfo.xml,terminal.desktop,service.in}` 還是上游 FQDN，但 `CMakeLists.txt` `PROJECT_FQDN = app.viplestream.server`，cmake 找不到對應 file 的 file → 5 個檔案要 rename 或 PROJECT_FQDN 暫 revert
-- `linux_build.sh` 預設 `BUILD_WERROR=ON`，要 `-DBUILD_WERROR=OFF` 才容忍 deprecated warnings
-- 多個 `third-party/` submodule 我們 vendored 但漏 `inputtino` / `wlr-protocols`（`scripts/wsl_init_submodules.sh` 補回）
+### §K.4 Wayland XDG portal teardown root-cause（追隨 §K.1，deferred）
 
-moonlight-qt（`scripts/build-appimage.sh`）：
-- 從 Windows 同步過來的 `.qmake.cache` / `.qmake.stash` / `Makefile.Release` 鎖定 MSVC spec，要清掉重 qmake6 才會走 `linux-g++`
-- `3rdparty/nvvideoparser/nvvideoparser.pro:67` 之前 `QMAKE_CXXFLAGS += /arch:AVX2` 沒 `*-msvc` gate；gcc 解 `/arch:AVX2` 為檔名 → 直接 link error。**fixed in source**：拆 msvc / gcc 兩條，gcc 改 `-mssse3 -mavx -mavx2 -mfma -mavx512f -mavx512bw -mavx512dq -mavx512vl`（`NextStartCode{SSSE3,AVX2,AVX512}.cpp` 用 intrinsics，runtime cpudetect 分派）
-- `app/scripts/*.sh` 從 Windows 鈍 CRLF 過來，`bash` 噴 `$'\r': command not found` —— **fixed**：`find ... -name "*.sh" -exec sed -i "s/\r$//"`
-- `app/streaming/video/ffmpeg-renderers/plvk.h:18` 無條件 `#include <ncnn/mat.h>`，但 ncnn 是 `win32 {` 內的 prebuilt → Linux 沒 header → fatal error。**未修**，因為 plvk.cpp 內有 ~149 處 `m_Rife*` / `ncnn::*` 使用，要把整段 RIFE Phase B 用 `#ifdef VIPLESTREAM_HAVE_NCNN` 隔離才合理
-- `vkfruc.cpp` 兩處 `#ifdef Q_OS_WIN32` Vulkan ext 沒 Linux elif（runtime 端 SDL_Vulkan_GetInstanceExtensions auto-detect，但 ffmpeg hwcontext_vulkan 的 `enabled_inst_extensions` 不齊；非阻擋 build，但 vulkan hwaccel 可能 init 不順）
-
-**WSL 環境驗測現狀：** Ubuntu 24.04 + 16 CPU + 19 GB RAM，`/dev/dxg` + `libnvidia-encode` + `libnvcuvid` 都有，Vulkan ICD 還缺 NVIDIA `libnvidia-icd`。`scripts/linux_build.sh --skip-cuda --step=cmake` 跟 SDL3 / sdl2-compat / SDL_ttf / libva / libplacebo / dav1d / FFmpeg n8.0.1 都成功 build；卡關都在我們 fork 的 source。Sunshine 端到端 streaming 在 WSL 不可驗（headless），client 端 smoke startup 可驗。
-
-**進度：** Probe 完成。Source 整理工時估：
-- Sunshine：NVENC API 4 處更新（半天）+ packaging FQDN rename（10 分鐘）+ vulkan_encode.cpp 接新 lock_queue API（半天，optional 因為 BUILD_WERROR=OFF 可繞）= **~1 day**
-- moonlight-qt：plvk.h/cpp ncnn 整段 `#ifdef VIPLESTREAM_HAVE_NCNN` 隔離（~1 天）+ `vkfruc.cpp` Linux Vulkan ext gate（~30 分鐘）+ qmake artifact gitignore（10 分鐘）= **~1 day**
-- 加 build wrapper（`build_linux.cmd` / `release_full.cmd`）+ CI 設定 = **~1 day**
-
-**短期狀態：** Linux artifact **暫不加進** Release 規範強制三件，仍只 ship Windows × 3。等上述 ~3 工作天 cleanup 完成才放進完整 ship。Windows 三件已是 release blocker。
-
-**已確認可逕修進 main 的 source fix（不影響 Windows build）：**
-- [`Sunshine/src/stream.cpp:1054`](../Sunshine/src/stream.cpp#L1054) — `std::max<long long>(t.count(), 1ll)`
-- [`Sunshine/src/relay.cpp:37`](../Sunshine/src/relay.cpp#L37) / [`Sunshine/src/stun.cpp:40`](../Sunshine/src/stun.cpp#L40) — `#define closesocket(fd) (::close(fd))`
-- [`moonlight-qt/3rdparty/nvvideoparser/nvvideoparser.pro:63-71`](../moonlight-qt/3rdparty/nvvideoparser/nvvideoparser.pro) — `*-msvc` gate `/arch:AVX2`
-- WSL build infrastructure scripts in [`scripts/wsl_*.sh`](../scripts/)（探勘工具，非 release path）
+§K.1 ship 了 systemd `Restart=always` 緩解 client 斷線後 server 死掉的問題（option A），但 libwayland EPIPE 從何處發出未根因。需可重現 streaming 環境（VM 沒 GPU 不能驗 encoder + portal grab combo）。Pi 5 / 真 GPU Linux 機驗到時再修進 `wayland.cpp` / `portalgrab.cpp` 的 EPIPE 路徑。
 
 ### §K.2 Raspberry Pi 5 client（aarch64，等 §K.1 通後）
 
