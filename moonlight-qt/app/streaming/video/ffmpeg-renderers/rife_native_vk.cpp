@@ -4858,6 +4858,9 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
     //      389 layers as one command buffer; no value check yet) ----
     pass &= runGraphExecutorSmoke(ctx, modelDir);
 
+    // ---- §J.3.e.X Final.1 — production API class smoke ----
+    pass &= runProductionApiSmoke(ctx, modelDir);
+
     // ---- Phase 4g.1 shape inference smoke ----
     {
         InferInputs in{};
@@ -4935,6 +4938,338 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
                 "[VIPLE-RIFE-VK] standalone GpuTest: %s",
                 pass ? "PASS" : "FAIL");
     return pass;
+}
+
+// ============================================================================
+// §J.3.e.X Final.1 — RifeNativeExecutor production API.
+//
+// Wraps the graph executor lifecycle:
+//   initialize(): load model + infer shapes + build pipelines/buffers
+//                 + descriptor pool + command pool.  Heavy work (~10s
+//                 of ms; shader compile is the bottleneck).
+//   runInference(): memcpy inputs into in0/in1/in2 blob buffers,
+//                   record a fresh command buffer (descriptor sets
+//                   allocated from a per-call reset of the pool),
+//                   submit + fence wait, memcpy out0 back.
+//   shutdown(): tear down everything.
+//
+// Notes vs runGraphExecutorSmoke:
+//   - state lives across many runInference() calls (vs single-shot
+//     test that allocates+frees on every call)
+//   - descriptor pool is reset between frames (no per-set destroy)
+//   - command pool is reset between frames (free of all cmd buffers)
+//   - no ncnn dependency in the run path (only Vulkan)
+//
+// Future Final.2/3/4 work will (a) plumb a VkPipelineCache for cold-
+// start, (b) wire this into VkFrucRenderer in place of the ncnn FRUC
+// path, (c) drop the ncnn DLL from build deps once Final.3 ships
+// without regression.
+// ============================================================================
+
+struct RifeNativeExecutor::Impl {
+    InitOptions opts;
+    Model       model;
+    std::unordered_map<QString, BlobShape> shapes;
+    ExecState   state;
+    bool        initialized = false;
+
+    // Cached PFNs needed at runtime that aren't in ExecState already.
+    PFN_vkResetDescriptorPool       pfnResetDP   = nullptr;
+    PFN_vkResetCommandPool          pfnResetCP   = nullptr;
+    PFN_vkBeginCommandBuffer        pfnBegin     = nullptr;
+    PFN_vkEndCommandBuffer          pfnEnd       = nullptr;
+    PFN_vkQueueSubmit               pfnSubmit    = nullptr;
+    PFN_vkCreateFence               pfnCreateFc  = nullptr;
+    PFN_vkDestroyFence              pfnDestroyFc = nullptr;
+    PFN_vkWaitForFences             pfnWaitFc    = nullptr;
+    PFN_vkResetFences               pfnResetFc   = nullptr;
+    VkFence                         fence        = VK_NULL_HANDLE;
+    BlobShape                       outShape{};
+};
+
+RifeNativeExecutor::RifeNativeExecutor() : m_impl(new Impl) {}
+RifeNativeExecutor::~RifeNativeExecutor() { shutdown(); delete m_impl; }
+bool RifeNativeExecutor::initialized() const { return m_impl && m_impl->initialized; }
+BlobShape RifeNativeExecutor::outputShape() const {
+    return m_impl ? m_impl->outShape : BlobShape{};
+}
+
+bool RifeNativeExecutor::initialize(const InitOptions& opts) {
+    if (!m_impl) return false;
+    if (m_impl->initialized) shutdown();
+    m_impl->opts = opts;
+
+    if (!parseParam(opts.modelDir + "/flownet.param", m_impl->model)
+        || !loadWeights(opts.modelDir + "/flownet.bin", m_impl->model)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] RifeNativeExecutor: model load failed");
+        return false;
+    }
+
+    InferInputs in{};
+    in.in0 = opts.in0Shape;
+    in.in1 = opts.in1Shape;
+    in.in2 = opts.in2Shape;
+    if (!inferBlobShapes(m_impl->model, in, m_impl->shapes)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] RifeNativeExecutor: shape inference failed");
+        return false;
+    }
+
+    if (!buildExecState(opts.ctx, m_impl->model, m_impl->shapes, m_impl->state)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] RifeNativeExecutor: buildExecState failed");
+        return false;
+    }
+
+    auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)opts.ctx.getInstanceProcAddr;
+    auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstancePA(
+        (VkInstance)opts.ctx.instance, "vkGetDeviceProcAddr");
+    auto getDev = [&](const char* n) -> PFN_vkVoidFunction {
+        return pfnGetDevPa(m_impl->state.device, n);
+    };
+    m_impl->pfnResetDP   = (PFN_vkResetDescriptorPool)getDev("vkResetDescriptorPool");
+    m_impl->pfnResetCP   = (PFN_vkResetCommandPool)getDev("vkResetCommandPool");
+    m_impl->pfnBegin     = (PFN_vkBeginCommandBuffer)getDev("vkBeginCommandBuffer");
+    m_impl->pfnEnd       = (PFN_vkEndCommandBuffer)getDev("vkEndCommandBuffer");
+    m_impl->pfnSubmit    = (PFN_vkQueueSubmit)pfnGetInstancePA(
+        (VkInstance)opts.ctx.instance, "vkQueueSubmit");
+    m_impl->pfnCreateFc  = (PFN_vkCreateFence)getDev("vkCreateFence");
+    m_impl->pfnDestroyFc = (PFN_vkDestroyFence)getDev("vkDestroyFence");
+    m_impl->pfnWaitFc    = (PFN_vkWaitForFences)getDev("vkWaitForFences");
+    m_impl->pfnResetFc   = (PFN_vkResetFences)getDev("vkResetFences");
+    if (!m_impl->pfnResetDP || !m_impl->pfnResetCP
+        || !m_impl->pfnBegin || !m_impl->pfnEnd  || !m_impl->pfnSubmit
+        || !m_impl->pfnCreateFc || !m_impl->pfnDestroyFc
+        || !m_impl->pfnWaitFc || !m_impl->pfnResetFc) {
+        shutdown();
+        return false;
+    }
+
+    VkFenceCreateInfo fci = {};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (m_impl->pfnCreateFc(m_impl->state.device, &fci, nullptr, &m_impl->fence) != VK_SUCCESS) {
+        shutdown();
+        return false;
+    }
+
+    auto outIt = m_impl->shapes.find("out0");
+    if (outIt == m_impl->shapes.end()) {
+        shutdown();
+        return false;
+    }
+    m_impl->outShape = outIt->second;
+    m_impl->initialized = true;
+    return true;
+}
+
+void RifeNativeExecutor::shutdown() {
+    if (!m_impl) return;
+    if (m_impl->fence != VK_NULL_HANDLE && m_impl->pfnDestroyFc) {
+        m_impl->pfnDestroyFc(m_impl->state.device, m_impl->fence, nullptr);
+        m_impl->fence = VK_NULL_HANDLE;
+    }
+    destroyExecState(m_impl->state);
+    m_impl->shapes.clear();
+    m_impl->model = {};
+    m_impl->initialized = false;
+}
+
+bool RifeNativeExecutor::runInference(const float* in0Data,
+                                      const float* in1Data,
+                                      float        timestep,
+                                      float*       out0Data)
+{
+    if (!m_impl || !m_impl->initialized) return false;
+    if (!in0Data || !in1Data || !out0Data) return false;
+
+    auto seed = [&](const QString& name, const float* src, size_t count) {
+        auto it = m_impl->state.buffers.blobs.find(name);
+        if (it == m_impl->state.buffers.blobs.end()) return;
+        size_t bytes = std::min(it->second.size, count * sizeof(float));
+        std::memcpy(it->second.mapped, src, bytes);
+    };
+    seed("in0", in0Data,
+         (size_t)m_impl->opts.in0Shape.c * m_impl->opts.in0Shape.h * m_impl->opts.in0Shape.w);
+    seed("in1", in1Data,
+         (size_t)m_impl->opts.in1Shape.c * m_impl->opts.in1Shape.h * m_impl->opts.in1Shape.w);
+    seed("in2", &timestep, 1);
+
+    // Reset descriptor + command pools so we can rebuild this frame's
+    // dispatch sequence cleanly.
+    m_impl->pfnResetDP(m_impl->state.device, m_impl->state.descPool, 0);
+    m_impl->pfnResetCP(m_impl->state.device, m_impl->state.cmdPool, 0);
+
+    VkCommandBufferBeginInfo cbbi = {};
+    cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (m_impl->pfnBegin(m_impl->state.cmd, &cbbi) != VK_SUCCESS) return false;
+
+    for (const Layer& L : m_impl->model.layers) {
+        if (L.kind == OpKind::Input || L.kind == OpKind::MemoryData) continue;
+        if (!dispatchLayer(m_impl->state, L)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] runInference: dispatch FAILED at '%s' (%s)",
+                         qUtf8Printable(L.name), opKindName(L.kind));
+            m_impl->pfnEnd(m_impl->state.cmd);
+            return false;
+        }
+        emitComputeBarrier(m_impl->state);
+    }
+    m_impl->pfnEnd(m_impl->state.cmd);
+
+    m_impl->pfnResetFc(m_impl->state.device, 1, &m_impl->fence);
+    VkSubmitInfo si = {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &m_impl->state.cmd;
+    if (m_impl->pfnSubmit(m_impl->state.queue, 1, &si, m_impl->fence) != VK_SUCCESS) return false;
+    m_impl->pfnWaitFc(m_impl->state.device, 1, &m_impl->fence, VK_TRUE, UINT64_MAX);
+
+    auto outIt = m_impl->state.buffers.blobs.find("out0");
+    if (outIt == m_impl->state.buffers.blobs.end()) return false;
+    size_t outBytes = (size_t)m_impl->outShape.c * m_impl->outShape.h
+                                                  * m_impl->outShape.w * sizeof(float);
+    std::memcpy(out0Data, outIt->second.mapped,
+                std::min(outBytes, outIt->second.size));
+    return true;
+}
+
+// ============================================================================
+// Final.1 smoke: lifecycle + determinism + vs-ncnn correctness
+// ============================================================================
+
+bool runProductionApiSmoke(const VulkanCtx& ctx, const QString& modelDir) {
+    std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.1 ProductionApi: start\n");
+    std::fflush(stderr);
+
+    RifeNativeExecutor exec;
+    RifeNativeExecutor::InitOptions opts;
+    opts.ctx       = ctx;
+    opts.modelDir  = modelDir;
+    opts.in0Shape  = { 3, 256, 256 };
+    opts.in1Shape  = { 3, 256, 256 };
+    opts.in2Shape  = { 1,   1,   1 };
+    if (!exec.initialize(opts)) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.1: initialize FAILED\n");
+        return false;
+    }
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] Final.1 init OK: outShape=(%d,%d,%d)\n",
+        exec.outputShape().c, exec.outputShape().h, exec.outputShape().w);
+
+    // Build deterministic synthetic inputs (same as 4g.6 path).
+    auto buildInput = [](size_t count, uint32_t seed) {
+        std::vector<float> v(count);
+        uint32_t st = seed;
+        for (auto& x : v) {
+            st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+            x = (float)(st & 0xFFFFFF) / (float)0xFFFFFF;
+        }
+        return v;
+    };
+    auto in0 = buildInput((size_t)opts.in0Shape.c * opts.in0Shape.h * opts.in0Shape.w, 0xA1A1A1A1u);
+    auto in1 = buildInput((size_t)opts.in1Shape.c * opts.in1Shape.h * opts.in1Shape.w, 0xB2B2B2B2u);
+
+    BlobShape outS = exec.outputShape();
+    size_t outCount = (size_t)outS.c * outS.h * outS.w;
+    std::vector<float> outA(outCount, 0.0f), outB(outCount, 0.0f);
+
+    // Run twice with same input — outputs must be identical (no state leak).
+    if (!exec.runInference(in0.data(), in1.data(), 0.5f, outA.data())) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.1: runInference #1 FAILED\n");
+        return false;
+    }
+    if (!exec.runInference(in0.data(), in1.data(), 0.5f, outB.data())) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.1: runInference #2 FAILED\n");
+        return false;
+    }
+    float maxAB = 0.0f;
+    for (size_t i = 0; i < outCount; ++i) {
+        float d = std::abs(outA[i] - outB[i]);
+        if (d > maxAB) maxAB = d;
+    }
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] Final.1 determinism: max diff between two identical-input runs = %.6e\n",
+        (double)maxAB);
+
+    bool deterministic = (maxAB == 0.0f);
+    if (!deterministic) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.1: non-deterministic — FAIL\n");
+        return false;
+    }
+
+    // vs-ncnn correctness gate (same tolerance as 4g.6).
+    ncnn::Net net;
+    net.opt.use_vulkan_compute  = true;
+    net.opt.use_fp16_storage    = false;
+    net.opt.use_fp16_arithmetic = false;
+    net.opt.use_fp16_packed     = false;
+    net.opt.use_packing_layout  = false;
+    net.opt.use_shader_pack8    = false;
+    net.opt.num_threads         = 1;
+    if (net.register_custom_layer("rife.Warp",
+                                  viple::createRifeWarp,
+                                  viple::destroyRifeWarp) != 0) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.1: register_custom_layer failed\n");
+        return false;
+    }
+    if (net.load_param(qUtf8Printable(modelDir + "/flownet.param")) != 0
+        || net.load_model(qUtf8Printable(modelDir + "/flownet.bin")) != 0) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.1: ncnn model load failed\n");
+        return false;
+    }
+    ncnn::Mat in0M(opts.in0Shape.w, opts.in0Shape.h, opts.in0Shape.c);
+    ncnn::Mat in1M(opts.in1Shape.w, opts.in1Shape.h, opts.in1Shape.c);
+    ncnn::Mat in2M(opts.in2Shape.w, opts.in2Shape.h, opts.in2Shape.c);
+    std::memcpy(in0M.data, in0.data(), in0.size() * sizeof(float));
+    std::memcpy(in1M.data, in1.data(), in1.size() * sizeof(float));
+    *(float*)in2M.data = 0.5f;
+
+    ncnn::Extractor ex = net.create_extractor();
+    ex.set_num_threads(1);
+    ex.input("in0", in0M);
+    ex.input("in1", in1M);
+    ex.input("in2", in2M);
+    ncnn::Mat ncnnOut;
+    if (ex.extract("out0", ncnnOut) != 0) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.1: ncnn extract failed\n");
+        return false;
+    }
+    size_t ncnnCount = (size_t)ncnnOut.c * ncnnOut.h * ncnnOut.w;
+    if (ncnnCount != outCount) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.1: count mismatch %zu vs %zu\n",
+                     ncnnCount, outCount);
+        return false;
+    }
+
+    const float* nP = outA.data();
+    const float* rP = (const float*)ncnnOut.data;
+    float maxErr = 0.0f;
+    double sumDiff = 0.0;
+    size_t over1e2 = 0;
+    for (size_t i = 0; i < outCount; ++i) {
+        float d = std::abs(nP[i] - rP[i]);
+        sumDiff += d;
+        if (d > maxErr) maxErr = d;
+        if (d > 1e-2f) ++over1e2;
+    }
+    double meanDiff = sumDiff / (double)outCount;
+    double fracOver = (double)over1e2 / (double)outCount;
+
+    constexpr float  MEAN_TOL = 1.0e-3f;
+    constexpr float  MAX_TOL  = 2.0e-1f;
+    constexpr double FRAC_TOL = 0.01;
+    bool match = meanDiff <= MEAN_TOL && maxErr <= MAX_TOL && fracOver <= FRAC_TOL;
+
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] Final.1 vs-ncnn: mean=%.4e max=%.4e frac>1e-2=%.2f%% — %s\n",
+        meanDiff, (double)maxErr, 100.0 * fracOver,
+        match ? "PASS" : "FAIL");
+    std::fflush(stderr);
+
+    exec.shutdown();
+    return deterministic && match;
 }
 
 } // namespace viple::rife_native_vk

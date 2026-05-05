@@ -371,6 +371,64 @@ bool runBlobBufferPoolSmoke(const VulkanCtx& ctx, const QString& modelDir);
 // (that's 4g.6 vs ncnn).
 bool runGraphExecutorSmoke(const VulkanCtx& ctx, const QString& modelDir);
 
+// ===== §J.3.e.X Final.1 — production-shape API =====
+//
+// RifeNativeExecutor encapsulates the graph executor lifecycle so
+// callers (VkFrucRenderer when Final.3 lands) can:
+//   1. initialize(opts)  — once: load model, build pipelines + buffers
+//   2. runInference(...) — per-frame: upload inputs, dispatch, readback
+//   3. shutdown()        — once: destroy everything
+//
+// Per-frame cost is just descriptor-set allocation + command buffer
+// recording + submit + wait; shader compilation + pipeline build only
+// happens at initialize().  The persistent state matches what 4g.2 +
+// 4g.3 + 4g.4 standalone smoke functions assemble each call, but
+// keeping it alive across frames is the whole point of Final.1.
+
+class RifeNativeExecutor {
+public:
+    struct InitOptions {
+        VulkanCtx  ctx;
+        QString    modelDir;
+        BlobShape  in0Shape;   // prev RGB frame  (typically (3, H, W))
+        BlobShape  in1Shape;   // curr RGB frame  (matches in0Shape)
+        BlobShape  in2Shape;   // timestep scalar (typically (1, 1, 1))
+    };
+
+    RifeNativeExecutor();
+    ~RifeNativeExecutor();
+
+    // Non-copyable, non-movable (owns Vulkan resources).
+    RifeNativeExecutor(const RifeNativeExecutor&) = delete;
+    RifeNativeExecutor& operator=(const RifeNativeExecutor&) = delete;
+
+    bool initialize(const InitOptions& opts);
+    bool initialized() const;
+    void shutdown();
+
+    // Output blob shape, valid after initialize() succeeds.
+    BlobShape outputShape() const;
+
+    // Per-frame inference.  in0Data / in1Data layouts match in0Shape /
+    // in1Shape (CHW packed fp32).  timestep is a single fp32 scalar.
+    // out0Data must be sized to outputShape().c * .h * .w fp32 floats;
+    // CHW layout, ready for upload to the next stage in the FRUC chain.
+    bool runInference(const float* in0Data,
+                      const float* in1Data,
+                      float        timestep,
+                      float*       out0Data);
+
+private:
+    struct Impl;
+    Impl* m_impl = nullptr;
+};
+
+// Final.1 smoke: init → run twice (deterministic check) → vs ncnn
+// (same gate as 4g.6) → shutdown.  Verifies the lifecycle works AND
+// the per-frame run produces identical output across calls (no state
+// leakage between frames).
+bool runProductionApiSmoke(const VulkanCtx& ctx, const QString& modelDir);
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.
