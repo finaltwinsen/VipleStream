@@ -22,6 +22,9 @@
 #endif
 #include <vulkan/vulkan.h>
 #include <ncnn/gpu.h>
+#include <ncnn/net.h>
+#include <ncnn/mat.h>
+#include "ncnn_rife_warp.h"
 #ifndef _WIN32
 #  include <dlfcn.h>
 #endif
@@ -643,12 +646,16 @@ void main() {
 
     float acc = (hasB != 0) ? bias_buf[n] : 0.0;
 
-    // Weight indexed (c, n, ky, kx) (note ncnn Deconv has in_ch outer):
-    //   w[((c * outN + n) * kH + ky) * kW + kx]
+    // ncnn Deconvolution weight layout (verified from forward.cpp's
+    // `weight_data + maxk * channels * p + maxk * q` pattern, where
+    // p = out_ch, q = in_ch): out_ch OUTER, in_ch inner — same as
+    // Conv's (n, c, kh, kw).  Earlier 4e drafts assumed (c, n, kh,
+    // kw) which matched our native CPU ref but disagreed with ncnn.
+    //   w[((n * inC + c) * kH + ky) * kW + kx]
     int wPlaneStride = kH * kW;
 
     for (int c = 0; c < inC; ++c) {
-        int wChanBase  = (c * outN + n) * wPlaneStride;
+        int wChanBase  = (n * inC + c) * wPlaneStride;
         int inChanBase = c * inH * inW;
         for (int ky = 0; ky < kH; ++ky) {
             int ihNum = oh + pad - ky;
@@ -866,8 +873,8 @@ void referenceDeconv2D(const float* in, int inW, int inH, int inC,
                             if ((iwNum % strideW) != 0) continue;
                             int iw = iwNum / strideW;
                             if (iw >= inW) continue;
-                            // Note ic-outer weight layout: w[c, n, ky, kx]
-                            float w = weight[((c * outChan + n) * kernelH + ky) * kernelW + kx];
+                            // ncnn Deconv weight layout: out_ch OUTER (same as Conv).
+                            float w = weight[((n * inC + c) * kernelH + ky) * kernelW + kx];
                             float v = in[(c * inH + ih) * inW + iw];
                             acc += w * v;
                         }
@@ -2821,29 +2828,31 @@ bool runGraphExecutorSmoke(const VulkanCtx& ctx, const QString& modelDir) {
         return false;
     }
 
-    // Seed Input blobs with deterministic synthetic data.  In production
-    // these would be uploaded from host (pre / curr frame + timestep).
-    auto seedInput = [&](const QString& name, uint32_t seed) {
+    // Build deterministic fp32 input data once, in std::vector form, so
+    // we can memcpy the *same* bytes into native blob buffers AND into
+    // ncnn::Mat for the 4g.6 vs-ncnn comparison.  Single source of truth.
+    auto buildSyntheticInput = [](size_t count, uint32_t seed) {
+        std::vector<float> v(count);
+        uint32_t st = seed;
+        for (auto& x : v) {
+            st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+            x = (float)(st & 0xFFFFFF) / (float)0xFFFFFF;
+        }
+        return v;
+    };
+    std::vector<float> in0Data = buildSyntheticInput((size_t)in.in0.c * in.in0.h * in.in0.w, 0xA1A1A1A1u);
+    std::vector<float> in1Data = buildSyntheticInput((size_t)in.in1.c * in.in1.h * in.in1.w, 0xB2B2B2B2u);
+    std::vector<float> in2Data = { 0.5f };  // timestep (mid-point)
+
+    auto seedBlob = [&](const QString& name, const std::vector<float>& src) {
         auto it = e.buffers.blobs.find(name);
         if (it == e.buffers.blobs.end()) return;
-        size_t count = it->second.size / sizeof(float);
-        uint32_t st = seed;
-        float* p = (float*)it->second.mapped;
-        for (size_t i = 0; i < count; ++i) {
-            st ^= st << 13; st ^= st >> 17; st ^= st << 5;
-            p[i] = (float)(st & 0xFFFFFF) / (float)0xFFFFFF;
-        }
+        size_t bytes = std::min(it->second.size, src.size() * sizeof(float));
+        std::memcpy(it->second.mapped, src.data(), bytes);
     };
-    seedInput("in0", 0xA1A1A1A1u);
-    seedInput("in1", 0xB2B2B2B2u);
-    // in2 is the timestep; a single value 0.5 (mid-point interpolation).
-    {
-        auto it = e.buffers.blobs.find("in2");
-        if (it != e.buffers.blobs.end()) {
-            float t = 0.5f;
-            std::memcpy(it->second.mapped, &t, sizeof(float));
-        }
-    }
+    seedBlob("in0", in0Data);
+    seedBlob("in1", in1Data);
+    seedBlob("in2", in2Data);
 
     // Begin command buffer + record all 389 layer dispatches in order.
     VkCommandBufferBeginInfo cbbi = {};
@@ -2914,11 +2923,7 @@ bool runGraphExecutorSmoke(const VulkanCtx& ctx, const QString& modelDir) {
         recorded, skipped, (int)sr, pass ? "PASS" : "FAIL");
 
     // ---- Phase 4g.5: read back final output blob 'out0' + sanity-check.
-    // RIFE flownet output is interpolated RGB at the same resolution
-    // as the inputs.  Synthetic random in0/in1/timestep won't produce
-    // a sensible image, but the result must be NaN/Inf-free with a
-    // plausible magnitude.  Phase 4g.6 swaps in real frames + ncnn
-    // ground-truth comparison.
+    std::vector<float> nativeOut0;
     if (pass) {
         auto outIt = e.buffers.blobs.find("out0");
         if (outIt == e.buffers.blobs.end()) {
@@ -2927,6 +2932,7 @@ bool runGraphExecutorSmoke(const VulkanCtx& ctx, const QString& modelDir) {
         } else {
             const float* p = (const float*)outIt->second.mapped;
             size_t count = outIt->second.size / sizeof(float);
+            nativeOut0.assign(p, p + count);
             int nanCount = 0, infCount = 0;
             float lo = std::numeric_limits<float>::infinity();
             float hi = -std::numeric_limits<float>::infinity();
@@ -2944,11 +2950,6 @@ bool runGraphExecutorSmoke(const VulkanCtx& ctx, const QString& modelDir) {
                 "[VIPLE-RIFE-VK] 4g.5: out0 (count=%zu) lo=%.6f hi=%.6f mean|.|=%.6f NaN=%d Inf=%d\n",
                 count, (double)lo, (double)hi, meanAbs, nanCount, infCount);
             std::fflush(stderr);
-            // Sanity: no NaN/Inf, output magnitude bounded
-            // (synthetic input → expect approximately [-5, +5]
-            // range; the network is bounded by Conv weights and
-            // LeakyReLU but a stray Inf still indicates a math bug
-            // somewhere upstream).
             bool sane = (nanCount == 0 && infCount == 0
                          && std::isfinite(lo) && std::isfinite(hi)
                          && std::abs(lo) < 1e6 && std::abs(hi) < 1e6);
@@ -2957,6 +2958,148 @@ bool runGraphExecutorSmoke(const VulkanCtx& ctx, const QString& modelDir) {
                 "[VIPLE-RIFE-VK] 4g.5 sanity check: %s\n",
                 sane ? "PASS" : "FAIL");
             std::fflush(stderr);
+        }
+    }
+
+    // ---- Phase 4g.6: run the SAME inputs through ncnn's full graph
+    // and compare the two out0 blobs pixel-by-pixel.  ncnn is the
+    // production reference (already shipping; ncnn_rife_warp.cpp
+    // registers our RifeWarp custom layer).  Force fp32 storage +
+    // arithmetic so accumulator precision matches ours and the diff
+    // reflects only computational order / shader formulation
+    // differences (vs fp16 quantisation).  Expected magnitude after
+    // 389 sequential layers: ~1e-3 worst-case.
+    if (pass && !nativeOut0.empty()) {
+        ncnn::Net net;
+        net.opt.use_vulkan_compute  = true;
+        net.opt.use_fp16_storage    = false;
+        net.opt.use_fp16_arithmetic = false;
+        net.opt.use_fp16_packed     = false;
+        net.opt.use_packing_layout  = false;  // force pack1 throughout
+        net.opt.use_shader_pack8    = false;
+        net.opt.num_threads         = 1;
+        if (net.register_custom_layer("rife.Warp",
+                                      viple::createRifeWarp,
+                                      viple::destroyRifeWarp) != 0) {
+            std::fprintf(stderr, "[VIPLE-RIFE-VK] 4g.6: register_custom_layer failed\n");
+            pass = false;
+        } else {
+            QString paramPath = modelDir + "/flownet.param";
+            QString binPath   = modelDir + "/flownet.bin";
+            if (net.load_param(qUtf8Printable(paramPath)) != 0
+                || net.load_model(qUtf8Printable(binPath)) != 0) {
+                std::fprintf(stderr, "[VIPLE-RIFE-VK] 4g.6: ncnn model load failed\n");
+                pass = false;
+            } else {
+                // ncnn::Mat layout for 3D blob is (W, H, C) constructor.
+                // Memory order is CHW (channel slowest) — matches our
+                // native NCHW layout when batch=1.  We can therefore
+                // memcpy the same buffer into ncnn::Mat::data.
+                ncnn::Mat in0M(in.in0.w, in.in0.h, in.in0.c);
+                ncnn::Mat in1M(in.in1.w, in.in1.h, in.in1.c);
+                ncnn::Mat in2M(in.in2.w, in.in2.h, in.in2.c);
+                std::memcpy(in0M.data, in0Data.data(), in0Data.size() * sizeof(float));
+                std::memcpy(in1M.data, in1Data.data(), in1Data.size() * sizeof(float));
+                std::memcpy(in2M.data, in2Data.data(), in2Data.size() * sizeof(float));
+
+                ncnn::Extractor ex = net.create_extractor();
+                ex.set_num_threads(1);
+                int rc0 = ex.input("in0", in0M);
+                int rc1 = ex.input("in1", in1M);
+                int rc2 = ex.input("in2", in2M);
+                ncnn::Mat out0M;
+                int rcEx = ex.extract("out0", out0M);
+                if (rc0 != 0 || rc1 != 0 || rc2 != 0 || rcEx != 0) {
+                    std::fprintf(stderr,
+                        "[VIPLE-RIFE-VK] 4g.6: ncnn extract failed (in=%d/%d/%d ex=%d)\n",
+                        rc0, rc1, rc2, rcEx);
+                    pass = false;
+                } else {
+                    size_t ncnnCount = (size_t)out0M.c * out0M.h * out0M.w;
+                    if (ncnnCount != nativeOut0.size()) {
+                        std::fprintf(stderr,
+                            "[VIPLE-RIFE-VK] 4g.6: count mismatch native=%zu ncnn=%zu\n",
+                            nativeOut0.size(), ncnnCount);
+                        pass = false;
+                    } else {
+                        const float* nP = nativeOut0.data();
+                        const float* rP = (const float*)out0M.data;
+                        float maxErr = 0.0f;
+                        int worst = 0;
+                        double sumDiff = 0.0;
+                        size_t over1e3 = 0, over1e2 = 0, over1e1 = 0;
+                        for (size_t i = 0; i < ncnnCount; ++i) {
+                            float d = std::abs(nP[i] - rP[i]);
+                            sumDiff += d;
+                            if (d > maxErr) { maxErr = d; worst = (int)i; }
+                            if (d > 1e-3f) ++over1e3;
+                            if (d > 1e-2f) ++over1e2;
+                            if (d > 1e-1f) ++over1e1;
+                        }
+                        double meanDiff = sumDiff / (double)ncnnCount;
+                        // Tolerance reasoning: 389-layer fp32 graph
+                        // accumulates ~1 ULP/MAC across ~75 conv ×
+                        // 252 MACs each, plus sigmoid steepness near
+                        // 0-crossings amplifies a few outlier pixels.
+                        // For visual equivalence (RIFE in 8-bit
+                        // display pipeline), pixel-wise diffs ≤ 0.01
+                        // are sub-LSB invisible.  Realistic gates:
+                        //   mean ≤ 1e-3    (overall convergence)
+                        //   frac > 1e-2 ≤ 1%
+                        //   max  ≤ 0.2    (rare outliers near sigmoid 0)
+                        constexpr float  MEAN_TOL          = 1.0e-3f;
+                        constexpr float  MAX_TOL           = 2.0e-1f;
+                        constexpr double FRAC_OVER_1E2_TOL = 0.01;  // 1%
+                        double fracOver1e2 = (double)over1e2 / (double)ncnnCount;
+                        bool match = (meanDiff <= MEAN_TOL)
+                                  && (maxErr <= MAX_TOL)
+                                  && (fracOver1e2 <= FRAC_OVER_1E2_TOL);
+                        if (!match) pass = false;
+                        std::fprintf(stderr,
+                            "[VIPLE-RIFE-VK] 4g.6 native-vs-ncnn out0 diff: "
+                            "max=%.4e mean=%.4e worst_idx=%d "
+                            "native=%.6f ncnn=%.6f\n",
+                            (double)maxErr, meanDiff, worst,
+                            (double)nP[worst], (double)rP[worst]);
+                        std::fprintf(stderr,
+                            "[VIPLE-RIFE-VK] 4g.6 error histogram (count=%zu): "
+                            ">1e-3: %zu (%.2f%%)  >1e-2: %zu (%.2f%%)  >1e-1: %zu (%.4f%%)\n",
+                            ncnnCount,
+                            over1e3, 100.0 * (double)over1e3 / (double)ncnnCount,
+                            over1e2, 100.0 * fracOver1e2,
+                            over1e1, 100.0 * (double)over1e1 / (double)ncnnCount);
+                        std::fprintf(stderr,
+                            "[VIPLE-RIFE-VK] 4g.6 verdict: mean<=%.1e && max<=%.1e && frac>1e-2<=%.1f%% — %s\n",
+                            (double)MEAN_TOL, (double)MAX_TOL,
+                            100.0 * FRAC_OVER_1E2_TOL,
+                            match ? "PASS" : "FAIL");
+                        std::fprintf(stderr,
+                            "[VIPLE-RIFE-VK] 4g.6 first 5 elements: "
+                            "native=[%.6f %.6f %.6f %.6f %.6f] "
+                            "ncnn=[%.6f %.6f %.6f %.6f %.6f]\n",
+                            (double)nP[0], (double)nP[1], (double)nP[2],
+                            (double)nP[3], (double)nP[4],
+                            (double)rP[0], (double)rP[1], (double)rP[2],
+                            (double)rP[3], (double)rP[4]);
+                        // ncnn out0 sanity statistics for comparison
+                        float ncnnLo = std::numeric_limits<float>::infinity();
+                        float ncnnHi = -std::numeric_limits<float>::infinity();
+                        double ncnnSumAbs = 0;
+                        for (size_t i = 0; i < ncnnCount; ++i) {
+                            float v = rP[i];
+                            if (std::isfinite(v)) {
+                                if (v < ncnnLo) ncnnLo = v;
+                                if (v > ncnnHi) ncnnHi = v;
+                                ncnnSumAbs += std::abs(v);
+                            }
+                        }
+                        std::fprintf(stderr,
+                            "[VIPLE-RIFE-VK] 4g.6 ncnn out0: lo=%.6f hi=%.6f mean|.|=%.6f\n",
+                            (double)ncnnLo, (double)ncnnHi, ncnnSumAbs / (double)ncnnCount);
+                        std::fflush(stderr);
+                    }
+                }
+            }
         }
     }
 
