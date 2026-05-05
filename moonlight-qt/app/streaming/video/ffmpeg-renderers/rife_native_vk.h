@@ -360,6 +360,17 @@ bool runPipelineCacheSmoke(const VulkanCtx& ctx);
 // raw .bin inspection).  Tears down cleanly.
 bool runBlobBufferPoolSmoke(const VulkanCtx& ctx, const QString& modelDir);
 
+// 4g.4: graph executor traversal smoke.  Combines pipelines (4g.2) +
+// buffers (4g.3), walks all 389 layers in declaration order, records
+// a vkCmdDispatch per non-trivial op (Conv2D / Deconv2D / BinaryOp /
+// Activation / Concat=Copy×N / Crop=Copy / PixelShuffle / Interp /
+// Eltwise / RifeWarp / Split=Copy×N).  Input layers are seeded with
+// deterministic synthetic data; MemoryData blobs were already
+// pre-filled at buffer-pool init.  Submit + fence wait completes
+// without VkResult errors → PASS.  Does not yet check output values
+// (that's 4g.6 vs ncnn).
+bool runGraphExecutorSmoke(const VulkanCtx& ctx, const QString& modelDir);
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.

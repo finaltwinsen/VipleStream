@@ -353,10 +353,10 @@ layout(set = 0, binding = 2) writeonly buffer Out { float y_buf[]; };
 
 layout(push_constant) uniform PC {
     uint count;       // total elements in a (== output count)
-    uint hw;          // h*w           (used in mode 1 channel broadcast)
+    uint hw;          // h*w           (used in modes 1 & 3)
     uint channels;    // C             (used in mode 1)
     int  op_type;     // ncnn op_type
-    int  mode;        // 0 same / 1 chan-bcast / 2 scalar
+    int  mode;        // 0 same / 1 chan-bcast / 2 scalar / 3 plane-bcast
     float scalar_b;   // mode 2 only
 } pc;
 
@@ -382,8 +382,11 @@ void main() {
     if (pc.mode == 2) {
         bb = pc.scalar_b;
     } else if (pc.mode == 1) {
-        // channel broadcast: i is linear NCHW index → channel = (i / hw) % C
+        // channel broadcast: a is (C, H, W), b is (C, 1, 1)
         bb = b_buf[(i / pc.hw) % pc.channels];
+    } else if (pc.mode == 3) {
+        // plane broadcast: a is (C, H, W), b is (1, H, W)
+        bb = b_buf[i % pc.hw];
     } else {
         bb = b_buf[i];
     }
@@ -2273,6 +2276,648 @@ bool runBlobBufferPoolSmoke(const VulkanCtx& ctx, const QString& modelDir) {
     return pass;
 }
 
+// ============================================================================
+// §J.3.e.X Phase 4g.4 — graph executor: dispatch all 389 layers.
+//
+// Combines PipelineCache (4g.2) + BufferPool (4g.3) + ShapeInference
+// (4g.1) into a single command buffer that records per-OpKind
+// dispatches in declaration order.  Compute-to-compute pipeline
+// barriers between every layer dispatch.
+// ============================================================================
+
+namespace {
+
+struct ExecState {
+    VkDevice  device     = VK_NULL_HANDLE;
+    VkQueue   queue      = VK_NULL_HANDLE;
+    uint32_t  qfi        = 0;
+    PipelineCache  pipelines;
+    BufferPool     buffers;
+    std::unordered_map<QString, BlobShape>* shapes = nullptr;
+    VkDescriptorPool descPool = VK_NULL_HANDLE;
+    VkCommandPool    cmdPool  = VK_NULL_HANDLE;
+    VkCommandBuffer  cmd      = VK_NULL_HANDLE;
+    // Cached recording PFNs.
+    PFN_vkAllocateDescriptorSets    pfnAllocDS  = nullptr;
+    PFN_vkUpdateDescriptorSets      pfnUpdateDS = nullptr;
+    PFN_vkCmdBindPipeline           pfnBindPipe = nullptr;
+    PFN_vkCmdBindDescriptorSets     pfnBindDS   = nullptr;
+    PFN_vkCmdPushConstants          pfnPushPC   = nullptr;
+    PFN_vkCmdDispatch               pfnDispatch = nullptr;
+    PFN_vkCmdCopyBuffer             pfnCopyBuf  = nullptr;
+    PFN_vkCmdPipelineBarrier        pfnBarrier  = nullptr;
+    PFN_vkDestroyDescriptorPool     pfnDestroyDP = nullptr;
+    PFN_vkDestroyCommandPool        pfnDestroyCP = nullptr;
+};
+
+void destroyExecState(ExecState& e) {
+    auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)nullptr; // not needed — we cached destroyers
+    if (e.descPool && e.pfnDestroyDP) e.pfnDestroyDP(e.device, e.descPool, nullptr);
+    if (e.cmdPool  && e.pfnDestroyCP) e.pfnDestroyCP(e.device, e.cmdPool,  nullptr);
+    destroyPipelineCache(e.pipelines);
+    destroyBufferPool(e.buffers);
+    e = {};
+}
+
+bool buildExecState(const VulkanCtx& ctx, const Model& m,
+                    std::unordered_map<QString, BlobShape>& shapes,
+                    ExecState& out)
+{
+    auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr;
+    auto instance = (VkInstance)ctx.instance;
+    auto device   = (VkDevice)ctx.device;
+    out.device = device;
+    out.queue  = (VkQueue)ctx.computeQueue;
+    out.qfi    = ctx.computeQueueFamily;
+    out.shapes = &shapes;
+
+    if (!buildPipelineCache(ctx, out.pipelines)) return false;
+    if (!buildBufferPool(ctx, m, shapes, out.buffers)) {
+        destroyPipelineCache(out.pipelines);
+        return false;
+    }
+
+    auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstancePA(instance, "vkGetDeviceProcAddr");
+    if (!pfnGetDevPa) return false;
+    auto getDev = [&](const char* n) -> PFN_vkVoidFunction { return pfnGetDevPa(device, n); };
+#define LOAD(NAME) auto pfn ## NAME = (PFN_vk ## NAME)getDev("vk" #NAME); \
+        if (!pfn ## NAME) { destroyExecState(out); return false; }
+    LOAD(CreateDescriptorPool)      LOAD(DestroyDescriptorPool)
+    LOAD(AllocateDescriptorSets)    LOAD(UpdateDescriptorSets)
+    LOAD(CreateCommandPool)         LOAD(DestroyCommandPool)
+    LOAD(AllocateCommandBuffers)
+    LOAD(BeginCommandBuffer)        LOAD(EndCommandBuffer)
+    LOAD(CmdBindPipeline)           LOAD(CmdBindDescriptorSets)
+    LOAD(CmdPushConstants)          LOAD(CmdDispatch)
+    LOAD(CmdCopyBuffer)             LOAD(CmdPipelineBarrier)
+#undef LOAD
+
+    // 1000 sets total, each with up to 4 storage buffer descriptors.
+    {
+        VkDescriptorPoolSize sz = {};
+        sz.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sz.descriptorCount = 4 * 1000;
+        VkDescriptorPoolCreateInfo dpCi = {};
+        dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpCi.maxSets = 1000;
+        dpCi.poolSizeCount = 1;
+        dpCi.pPoolSizes = &sz;
+        if (pfnCreateDescriptorPool(device, &dpCi, nullptr, &out.descPool) != VK_SUCCESS) {
+            destroyExecState(out);
+            return false;
+        }
+    }
+    {
+        VkCommandPoolCreateInfo cpCi = {};
+        cpCi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpCi.queueFamilyIndex = out.qfi;
+        cpCi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        if (pfnCreateCommandPool(device, &cpCi, nullptr, &out.cmdPool) != VK_SUCCESS) {
+            destroyExecState(out);
+            return false;
+        }
+    }
+    {
+        VkCommandBufferAllocateInfo cbai = {};
+        cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool = out.cmdPool;
+        cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        if (pfnAllocateCommandBuffers(device, &cbai, &out.cmd) != VK_SUCCESS) {
+            destroyExecState(out);
+            return false;
+        }
+    }
+    out.pfnAllocDS    = pfnAllocateDescriptorSets;
+    out.pfnUpdateDS   = pfnUpdateDescriptorSets;
+    out.pfnBindPipe   = pfnCmdBindPipeline;
+    out.pfnBindDS     = pfnCmdBindDescriptorSets;
+    out.pfnPushPC     = pfnCmdPushConstants;
+    out.pfnDispatch   = pfnCmdDispatch;
+    out.pfnCopyBuf    = pfnCmdCopyBuffer;
+    out.pfnBarrier    = pfnCmdPipelineBarrier;
+    out.pfnDestroyDP  = pfnDestroyDescriptorPool;
+    out.pfnDestroyCP  = pfnDestroyCommandPool;
+    return true;
+}
+
+// Compute-to-compute pipeline barrier (read-after-write across
+// dispatches).  Heavy-handed but correct.
+void emitComputeBarrier(ExecState& e) {
+    VkMemoryBarrier mb = {};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    e.pfnBarrier(e.cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 1, &mb, 0, nullptr, 0, nullptr);
+}
+
+const GpuBuffer* findBlob(ExecState& e, const QString& name) {
+    auto it = e.buffers.blobs.find(name);
+    return (it == e.buffers.blobs.end()) ? nullptr : &it->second;
+}
+const GpuBuffer* findTensor(ExecState& e, const QString& name) {
+    auto it = e.buffers.tensors.find(name);
+    return (it == e.buffers.tensors.end()) ? nullptr : &it->second;
+}
+const BlobShape* findShape(ExecState& e, const QString& name) {
+    if (!e.shapes) return nullptr;
+    auto it = e.shapes->find(name);
+    return (it == e.shapes->end()) ? nullptr : &it->second;
+}
+
+// Allocate descriptor set + write N storage buffer bindings + bind it.
+bool bindDispatch(ExecState& e, ShaderKind k,
+                  const VkBuffer* buffers, int bindingCount,
+                  const void* pcData, size_t pcSize,
+                  uint32_t dx, uint32_t dy, uint32_t dz)
+{
+    const CachedPipeline& cp = e.pipelines.pipelines[(int)k];
+    if (!cp.pipeline) return false;
+
+    VkDescriptorSetAllocateInfo dsai = {};
+    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dsai.descriptorPool = e.descPool;
+    dsai.descriptorSetCount = 1;
+    dsai.pSetLayouts = &cp.dsl;
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    if (e.pfnAllocDS(e.device, &dsai, &ds) != VK_SUCCESS) return false;
+
+    VkDescriptorBufferInfo dbi[8] = {};
+    VkWriteDescriptorSet  wds[8] = {};
+    for (int i = 0; i < bindingCount; ++i) {
+        dbi[i].buffer = buffers[i];
+        dbi[i].range  = VK_WHOLE_SIZE;
+        wds[i].sType  = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds[i].dstSet = ds;
+        wds[i].dstBinding = (uint32_t)i;
+        wds[i].descriptorCount = 1;
+        wds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        wds[i].pBufferInfo = &dbi[i];
+    }
+    e.pfnUpdateDS(e.device, (uint32_t)bindingCount, wds, 0, nullptr);
+    e.pfnBindPipe(e.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp.pipeline);
+    e.pfnBindDS(e.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp.layout, 0,
+                1, &ds, 0, nullptr);
+    if (pcData && pcSize > 0) {
+        e.pfnPushPC(e.cmd, cp.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                    (uint32_t)pcSize, pcData);
+    }
+    e.pfnDispatch(e.cmd, dx, dy, dz);
+    return true;
+}
+
+bool dispatchConvolution(ExecState& e, const Layer& L) {
+    const Layer& Lref = L;
+    int N      = paramInt(Lref, 0, 0);
+    int kW     = paramInt(Lref, 1, 0);
+    int kH     = paramInt(Lref, 11, kW);
+    int sW     = paramInt(Lref, 3, 1);
+    int sH     = paramInt(Lref, 13, sW);
+    int pad    = paramInt(Lref, 4, 0);
+    int hasB   = paramInt(Lref, 5, 0);
+    float lr   = leakyReluSlopeOf(Lref);
+
+    const GpuBuffer* in     = findBlob(e, L.inputs[0]);
+    const GpuBuffer* w      = findTensor(e, L.name + "/weight");
+    const GpuBuffer* b      = hasB ? findTensor(e, L.name + "/bias") : nullptr;
+    const GpuBuffer* out    = findBlob(e, L.outputs[0]);
+    const BlobShape* inS    = findShape(e, L.inputs[0]);
+    const BlobShape* outS   = findShape(e, L.outputs[0]);
+    if (!in || !w || !out || !inS || !outS) return false;
+    if (hasB && !b) return false;
+    // Bias buffer required by binding even if hasBias=0; reuse weight
+    // buffer placeholder — shader will skip due to hasB push-const flag.
+    VkBuffer bufs[4] = { in->buf, w->buf, b ? b->buf : w->buf, out->buf };
+    struct PC {
+        int32_t inDims[4]; int32_t outDims[4]; int32_t conv[4];
+        float   lr; int32_t _pad[3];
+    } pc{};
+    pc.inDims[0]  = inS->w;  pc.inDims[1]  = inS->h;
+    pc.inDims[2]  = inS->c;  pc.inDims[3]  = hasB;
+    pc.outDims[0] = outS->w; pc.outDims[1] = outS->h; pc.outDims[2] = outS->c;
+    pc.conv[0] = kW; pc.conv[1] = kH; pc.conv[2] = sW; pc.conv[3] = pad;
+    pc.lr = lr;
+    return bindDispatch(e, ShaderKind::Conv2D, bufs, 4, &pc, sizeof(pc),
+                        (uint32_t)((outS->w + 7) / 8),
+                        (uint32_t)((outS->h + 7) / 8),
+                        (uint32_t)outS->c);
+}
+
+bool dispatchDeconvolution(ExecState& e, const Layer& L) {
+    int N      = paramInt(L, 0, 0);
+    int kW     = paramInt(L, 1, 0);
+    int kH     = paramInt(L, 11, kW);
+    int sW     = paramInt(L, 3, 1);
+    int sH     = paramInt(L, 13, sW);
+    int pad    = paramInt(L, 4, 0);
+    int hasB   = paramInt(L, 5, 0);
+    const GpuBuffer* in   = findBlob(e, L.inputs[0]);
+    const GpuBuffer* w    = findTensor(e, L.name + "/weight");
+    const GpuBuffer* b    = hasB ? findTensor(e, L.name + "/bias") : nullptr;
+    const GpuBuffer* out  = findBlob(e, L.outputs[0]);
+    const BlobShape* inS  = findShape(e, L.inputs[0]);
+    const BlobShape* outS = findShape(e, L.outputs[0]);
+    if (!in || !w || !out || !inS || !outS) return false;
+    if (hasB && !b) return false;
+    VkBuffer bufs[4] = { in->buf, w->buf, b ? b->buf : w->buf, out->buf };
+    struct PC { int32_t inDims[4]; int32_t outDims[4]; int32_t conv[4]; } pc{};
+    pc.inDims[0]  = inS->w;  pc.inDims[1]  = inS->h;
+    pc.inDims[2]  = inS->c;  pc.inDims[3]  = hasB;
+    pc.outDims[0] = outS->w; pc.outDims[1] = outS->h; pc.outDims[2] = outS->c;
+    pc.conv[0] = kW; pc.conv[1] = kH; pc.conv[2] = sW; pc.conv[3] = pad;
+    return bindDispatch(e, ShaderKind::Deconv2D, bufs, 4, &pc, sizeof(pc),
+                        (uint32_t)((outS->w + 7) / 8),
+                        (uint32_t)((outS->h + 7) / 8),
+                        (uint32_t)outS->c);
+}
+
+bool dispatchBinaryOp(ExecState& e, const Layer& L) {
+    int op           = paramInt(L, 0, 0);
+    int withScalar   = paramInt(L, 1, 0);
+    auto bIt = L.params.find(2);
+    float scalarB = (bIt != L.params.end()) ? (float)bIt->second.f : 0.0f;
+
+    const GpuBuffer* a = findBlob(e, L.inputs[0]);
+    const GpuBuffer* out = findBlob(e, L.outputs[0]);
+    if (!a || !out) return false;
+    const BlobShape* aS = findShape(e, L.inputs[0]);
+    if (!aS) return false;
+    size_t count = (size_t)aS->c * aS->h * aS->w;
+
+    int mode = 2;  // scalar
+    int channels = 1, hw = 1;
+    const GpuBuffer* bbuf = nullptr;
+    if (withScalar == 0 && L.inputs.size() >= 2) {
+        bbuf = findBlob(e, L.inputs[1]);
+        if (!bbuf) return false;
+        const BlobShape* bS = findShape(e, L.inputs[1]);
+        if (!bS) return false;
+        bool sameShape    = (aS->c == bS->c && aS->h == bS->h && aS->w == bS->w);
+        bool channelBcast = (bS->c == aS->c && bS->h == 1 && bS->w == 1);
+        bool planeBcast   = (bS->c == 1 && bS->h == aS->h && bS->w == aS->w);
+        if (sameShape) {
+            mode = 0;
+        } else if (channelBcast) {
+            mode = 1; channels = aS->c; hw = aS->h * aS->w;
+        } else if (planeBcast) {
+            mode = 3; channels = aS->c; hw = aS->h * aS->w;
+        } else {
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] dispatchBinaryOp: unsupported broadcast for '%s' "
+                "a=(%d,%d,%d) b=(%d,%d,%d)\n",
+                qUtf8Printable(L.name),
+                aS->c, aS->h, aS->w, bS->c, bS->h, bS->w);
+            return false;
+        }
+    } else {
+        // Scalar form: binding 1 still needs a valid buffer; reuse a's.
+        bbuf = a;
+    }
+
+    VkBuffer bufs[3] = { a->buf, bbuf->buf, out->buf };
+    struct PC {
+        uint32_t count, hw, channels;
+        int32_t  op, mode;
+        float    scalar;
+        uint32_t _pad[2];
+    } pc{};
+    pc.count = (uint32_t)count;
+    pc.hw = (uint32_t)hw;
+    pc.channels = (uint32_t)channels;
+    pc.op = op;
+    pc.mode = mode;
+    pc.scalar = scalarB;
+    return bindDispatch(e, ShaderKind::BinaryOp, bufs, 3, &pc, sizeof(pc),
+                        (uint32_t)((count + 63) / 64), 1, 1);
+}
+
+bool dispatchActivation(ExecState& e, const Layer& L, int actType) {
+    const GpuBuffer* in = findBlob(e, L.inputs[0]);
+    const GpuBuffer* out = findBlob(e, L.outputs[0]);
+    const BlobShape* s = findShape(e, L.inputs[0]);
+    if (!in || !out || !s) return false;
+    size_t count = (size_t)s->c * s->h * s->w;
+
+    float slope = 0.0f;
+    if (actType == 0 /*ReLU*/) {
+        // ncnn ReLU param 0 = slope (default 0 = pure ReLU; nonzero = LeakyReLU).
+        auto it = L.params.find(0);
+        if (it != L.params.end()) slope = (float)it->second.f;
+    }
+    VkBuffer bufs[2] = { in->buf, out->buf };
+    struct PC { uint32_t count; int32_t actType; float slope; uint32_t _pad; } pc{};
+    pc.count = (uint32_t)count; pc.actType = actType; pc.slope = slope;
+    return bindDispatch(e, ShaderKind::Activation, bufs, 2, &pc, sizeof(pc),
+                        (uint32_t)((count + 63) / 64), 1, 1);
+}
+
+bool dispatchPixelShuffle(ExecState& e, const Layer& L) {
+    int r = paramInt(L, 0, 1);
+    const GpuBuffer* in = findBlob(e, L.inputs[0]);
+    const GpuBuffer* out = findBlob(e, L.outputs[0]);
+    const BlobShape* inS = findShape(e, L.inputs[0]);
+    const BlobShape* outS = findShape(e, L.outputs[0]);
+    if (!in || !out || !inS || !outS || r <= 0) return false;
+    VkBuffer bufs[2] = { in->buf, out->buf };
+    struct PC { int32_t inH, inW, outC, r; } pc{};
+    pc.inH = inS->h; pc.inW = inS->w; pc.outC = outS->c; pc.r = r;
+    return bindDispatch(e, ShaderKind::PixelShuffle, bufs, 2, &pc, sizeof(pc),
+                        (uint32_t)((outS->w + 7) / 8),
+                        (uint32_t)((outS->h + 7) / 8),
+                        (uint32_t)outS->c);
+}
+
+bool dispatchInterp(ExecState& e, const Layer& L) {
+    const GpuBuffer* in = findBlob(e, L.inputs[0]);
+    const GpuBuffer* out = findBlob(e, L.outputs[0]);
+    const BlobShape* inS = findShape(e, L.inputs[0]);
+    const BlobShape* outS = findShape(e, L.outputs[0]);
+    if (!in || !out || !inS || !outS) return false;
+    // 3 layers in flownet have only 0=2 set → identity (no scale, no
+    // output dim).  inferBlobShapes already resolved outDim = inDim
+    // for those, so a trivial dispatch with scale 1.0 produces the
+    // input verbatim.
+    VkBuffer bufs[2] = { in->buf, out->buf };
+    struct PC {
+        int32_t inH, inW, outH, outW, channels;
+        float   scaleH, scaleW;
+        uint32_t _pad;
+    } pc{};
+    pc.inH = inS->h; pc.inW = inS->w;
+    pc.outH = outS->h; pc.outW = outS->w;
+    pc.channels = inS->c;
+    pc.scaleH = (float)inS->h / (float)outS->h;
+    pc.scaleW = (float)inS->w / (float)outS->w;
+    return bindDispatch(e, ShaderKind::InterpBilinear, bufs, 2, &pc, sizeof(pc),
+                        (uint32_t)((outS->w + 7) / 8),
+                        (uint32_t)((outS->h + 7) / 8),
+                        (uint32_t)inS->c);
+}
+
+bool dispatchEltwise(ExecState& e, const Layer& L) {
+    // Only SUM (op=1) with coeffs is reachable in flownet.
+    const GpuBuffer* a = findBlob(e, L.inputs[0]);
+    const GpuBuffer* b = findBlob(e, L.inputs[1]);
+    const GpuBuffer* out = findBlob(e, L.outputs[0]);
+    const BlobShape* s = findShape(e, L.inputs[0]);
+    if (!a || !b || !out || !s) return false;
+    auto coeffIt = L.params.find(-23301);
+    float c0 = 1.0f, c1 = 1.0f;
+    if (coeffIt != L.params.end() && coeffIt->second.fa.size() >= 2) {
+        c0 = (float)coeffIt->second.fa[0];
+        c1 = (float)coeffIt->second.fa[1];
+    }
+    size_t count = (size_t)s->c * s->h * s->w;
+    VkBuffer bufs[3] = { a->buf, b->buf, out->buf };
+    struct PC { uint32_t count; float c0, c1; uint32_t _pad; } pc{};
+    pc.count = (uint32_t)count; pc.c0 = c0; pc.c1 = c1;
+    return bindDispatch(e, ShaderKind::EltwiseSum, bufs, 3, &pc, sizeof(pc),
+                        (uint32_t)((count + 63) / 64), 1, 1);
+}
+
+bool dispatchRifeWarp(ExecState& e, const Layer& L) {
+    const GpuBuffer* image = findBlob(e, L.inputs[0]);
+    const GpuBuffer* flow  = findBlob(e, L.inputs[1]);
+    const GpuBuffer* out   = findBlob(e, L.outputs[0]);
+    const BlobShape* s     = findShape(e, L.inputs[0]);
+    if (!image || !flow || !out || !s) return false;
+    VkBuffer bufs[3] = { image->buf, flow->buf, out->buf };
+    struct PC { int32_t w, h, c; uint32_t _pad; } pc{};
+    pc.w = s->w; pc.h = s->h; pc.c = s->c;
+    return bindDispatch(e, ShaderKind::RifeWarp, bufs, 3, &pc, sizeof(pc),
+                        (uint32_t)((s->w + 7) / 8),
+                        (uint32_t)((s->h + 7) / 8),
+                        (uint32_t)s->c);
+}
+
+bool dispatchCropOrCopy(ExecState& e, const Layer& L) {
+    // Crop in flownet: channel-axis slice [start:end].  Copy
+    // out[i] = in[start*hw + i] for i in [0, outElems).
+    const GpuBuffer* in = findBlob(e, L.inputs[0]);
+    const GpuBuffer* out = findBlob(e, L.outputs[0]);
+    const BlobShape* inS = findShape(e, L.inputs[0]);
+    const BlobShape* outS = findShape(e, L.outputs[0]);
+    if (!in || !out || !inS || !outS) return false;
+    auto itStart = L.params.find(-23309);
+    int cStart = 0;
+    if (itStart != L.params.end() && !itStart->second.ia.empty())
+        cStart = (int)itStart->second.ia[0];
+    size_t hw = (size_t)inS->h * inS->w;
+    size_t count = (size_t)outS->c * hw;
+    VkBuffer bufs[2] = { in->buf, out->buf };
+    struct PC { uint32_t count, srcOff, dstOff; uint32_t _pad; } pc{};
+    pc.count  = (uint32_t)count;
+    pc.srcOff = (uint32_t)((size_t)cStart * hw);
+    pc.dstOff = 0;
+    return bindDispatch(e, ShaderKind::Copy, bufs, 2, &pc, sizeof(pc),
+                        (uint32_t)((count + 63) / 64), 1, 1);
+}
+
+// Concat: N copy dispatches, each writing one input contiguously into
+// the output at a growing channel offset.  Barrier after each so
+// downstream ops see the full output.
+bool dispatchConcat(ExecState& e, const Layer& L) {
+    const GpuBuffer* out = findBlob(e, L.outputs[0]);
+    const BlobShape* outS = findShape(e, L.outputs[0]);
+    if (!out || !outS) return false;
+    size_t hw = (size_t)outS->h * outS->w;
+    size_t dstOffset = 0;
+    for (int i = 0; i < (int)L.inputs.size(); ++i) {
+        const GpuBuffer* in = findBlob(e, L.inputs[i]);
+        const BlobShape* inS = findShape(e, L.inputs[i]);
+        if (!in || !inS) return false;
+        size_t inElems = (size_t)inS->c * hw;
+        VkBuffer bufs[2] = { in->buf, out->buf };
+        struct PC { uint32_t count, srcOff, dstOff; uint32_t _pad; } pc{};
+        pc.count  = (uint32_t)inElems;
+        pc.srcOff = 0;
+        pc.dstOff = (uint32_t)dstOffset;
+        if (!bindDispatch(e, ShaderKind::Copy, bufs, 2, &pc, sizeof(pc),
+                          (uint32_t)((inElems + 63) / 64), 1, 1)) {
+            return false;
+        }
+        // Barrier between sub-dispatches so the next sub-dispatch sees
+        // the output as committed (copy in-place is technically RAW
+        // safe within a single dispatch, but we mix dispatches across
+        // different input tensors).
+        if (i + 1 < (int)L.inputs.size()) emitComputeBarrier(e);
+        dstOffset += inElems;
+    }
+    return true;
+}
+
+// Split: one input → N outputs, each identical.  Use vkCmdCopyBuffer
+// (cheaper than compute dispatch for raw memcpy).
+bool dispatchSplit(ExecState& e, const Layer& L) {
+    const GpuBuffer* in = findBlob(e, L.inputs[0]);
+    const BlobShape* s = findShape(e, L.inputs[0]);
+    if (!in || !s) return false;
+    size_t bytes = (size_t)s->c * s->h * s->w * sizeof(float);
+    for (const auto& outName : L.outputs) {
+        const GpuBuffer* out = findBlob(e, outName);
+        if (!out) return false;
+        VkBufferCopy region = {};
+        region.srcOffset = 0;
+        region.dstOffset = 0;
+        region.size = bytes;
+        e.pfnCopyBuf(e.cmd, in->buf, out->buf, 1, &region);
+    }
+    return true;
+}
+
+bool dispatchLayer(ExecState& e, const Layer& L) {
+    switch (L.kind) {
+    case OpKind::Input:        return true;  // pre-uploaded
+    case OpKind::MemoryData:   return true;  // pre-filled at boot
+    case OpKind::Split:        return dispatchSplit(e, L);
+    case OpKind::Convolution:  return dispatchConvolution(e, L);
+    case OpKind::Deconvolution:return dispatchDeconvolution(e, L);
+    case OpKind::BinaryOp:     return dispatchBinaryOp(e, L);
+    case OpKind::ReLU:         return dispatchActivation(e, L, /*ReLU*/0);
+    case OpKind::Sigmoid:      return dispatchActivation(e, L, /*Sigmoid*/1);
+    case OpKind::Crop:         return dispatchCropOrCopy(e, L);
+    case OpKind::Concat:       return dispatchConcat(e, L);
+    case OpKind::Interp:       return dispatchInterp(e, L);
+    case OpKind::PixelShuffle: return dispatchPixelShuffle(e, L);
+    case OpKind::Eltwise:      return dispatchEltwise(e, L);
+    case OpKind::RifeWarp:     return dispatchRifeWarp(e, L);
+    case OpKind::Unknown:
+    default:
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] dispatchLayer: unknown kind for '%s'",
+                     qUtf8Printable(L.name));
+        return false;
+    }
+}
+
+} // namespace
+
+bool runGraphExecutorSmoke(const VulkanCtx& ctx, const QString& modelDir) {
+    std::fprintf(stderr, "[VIPLE-RIFE-VK] GraphExecSmoke: start\n");
+    std::fflush(stderr);
+    // Load model + infer shapes.
+    Model m;
+    if (!parseParam(modelDir + "/flownet.param", m)
+        || !loadWeights(modelDir + "/flownet.bin", m)) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] GraphExecSmoke: model load failed\n");
+        return false;
+    }
+    InferInputs in{};
+    in.in0 = { 3, 256, 256 };
+    in.in1 = { 3, 256, 256 };
+    in.in2 = { 1,   1,   1 };
+    std::unordered_map<QString, BlobShape> shapes;
+    if (!inferBlobShapes(m, in, shapes)) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] GraphExecSmoke: inferBlobShapes failed\n");
+        return false;
+    }
+
+    ExecState e;
+    if (!buildExecState(ctx, m, shapes, e)) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] GraphExecSmoke: buildExecState failed\n");
+        return false;
+    }
+
+    // Seed Input blobs with deterministic synthetic data.  In production
+    // these would be uploaded from host (pre / curr frame + timestep).
+    auto seedInput = [&](const QString& name, uint32_t seed) {
+        auto it = e.buffers.blobs.find(name);
+        if (it == e.buffers.blobs.end()) return;
+        size_t count = it->second.size / sizeof(float);
+        uint32_t st = seed;
+        float* p = (float*)it->second.mapped;
+        for (size_t i = 0; i < count; ++i) {
+            st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+            p[i] = (float)(st & 0xFFFFFF) / (float)0xFFFFFF;
+        }
+    };
+    seedInput("in0", 0xA1A1A1A1u);
+    seedInput("in1", 0xB2B2B2B2u);
+    // in2 is the timestep; a single value 0.5 (mid-point interpolation).
+    {
+        auto it = e.buffers.blobs.find("in2");
+        if (it != e.buffers.blobs.end()) {
+            float t = 0.5f;
+            std::memcpy(it->second.mapped, &t, sizeof(float));
+        }
+    }
+
+    // Begin command buffer + record all 389 layer dispatches in order.
+    VkCommandBufferBeginInfo cbbi = {};
+    cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    auto pfnBegin = (PFN_vkBeginCommandBuffer)((PFN_vkGetDeviceProcAddr)((PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr)((VkInstance)ctx.instance, "vkGetDeviceProcAddr"))(e.device, "vkBeginCommandBuffer");
+    auto pfnEnd   = (PFN_vkEndCommandBuffer)((PFN_vkGetDeviceProcAddr)((PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr)((VkInstance)ctx.instance, "vkGetDeviceProcAddr"))(e.device, "vkEndCommandBuffer");
+    auto pfnSubmit = (PFN_vkQueueSubmit)((PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr)((VkInstance)ctx.instance, "vkQueueSubmit");
+    if (!pfnBegin || !pfnEnd || !pfnSubmit) {
+        destroyExecState(e);
+        return false;
+    }
+    if (pfnBegin(e.cmd, &cbbi) != VK_SUCCESS) {
+        destroyExecState(e);
+        return false;
+    }
+
+    int recorded = 0;
+    int skipped = 0;
+    for (const Layer& L : m.layers) {
+        if (L.kind == OpKind::Input || L.kind == OpKind::MemoryData) {
+            ++skipped;
+            continue;
+        }
+        if (!dispatchLayer(e, L)) {
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] GraphExecSmoke: dispatch FAILED at layer '%s' (%s) inputs=%d outputs=%d\n",
+                qUtf8Printable(L.name), opKindName(L.kind),
+                (int)L.inputs.size(), (int)L.outputs.size());
+            for (int j = 0; j < (int)L.inputs.size(); ++j) {
+                std::fprintf(stderr, "    in[%d]='%s'\n", j, qUtf8Printable(L.inputs[j]));
+            }
+            for (int j = 0; j < (int)L.outputs.size(); ++j) {
+                std::fprintf(stderr, "    out[%d]='%s'\n", j, qUtf8Printable(L.outputs[j]));
+            }
+            std::fflush(stderr);
+            pfnEnd(e.cmd);
+            destroyExecState(e);
+            return false;
+        }
+        emitComputeBarrier(e);
+        ++recorded;
+    }
+    pfnEnd(e.cmd);
+
+    // Submit + fence wait.
+    auto pfnCreateFence = (PFN_vkCreateFence)((PFN_vkGetDeviceProcAddr)((PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr)((VkInstance)ctx.instance, "vkGetDeviceProcAddr"))(e.device, "vkCreateFence");
+    auto pfnWaitFences  = (PFN_vkWaitForFences)((PFN_vkGetDeviceProcAddr)((PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr)((VkInstance)ctx.instance, "vkGetDeviceProcAddr"))(e.device, "vkWaitForFences");
+    auto pfnDestroyFence= (PFN_vkDestroyFence)((PFN_vkGetDeviceProcAddr)((PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr)((VkInstance)ctx.instance, "vkGetDeviceProcAddr"))(e.device, "vkDestroyFence");
+    VkFence fence = VK_NULL_HANDLE;
+    VkFenceCreateInfo fci = {};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    pfnCreateFence(e.device, &fci, nullptr, &fence);
+    VkSubmitInfo si = {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &e.cmd;
+    VkResult sr = pfnSubmit(e.queue, 1, &si, fence);
+    if (sr == VK_SUCCESS) pfnWaitFences(e.device, 1, &fence, VK_TRUE, UINT64_MAX);
+    pfnDestroyFence(e.device, fence, nullptr);
+    bool pass = (sr == VK_SUCCESS);
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] GraphExecSmoke: recorded=%d skipped=%d (Input+MemoryData) submit_rc=%d — %s",
+                recorded, skipped, (int)sr, pass ? "PASS" : "FAIL");
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] GraphExecSmoke: recorded=%d skipped=%d submit_rc=%d — %s\n",
+        recorded, skipped, (int)sr, pass ? "PASS" : "FAIL");
+    std::fflush(stderr);
+
+    destroyExecState(e);
+    return pass;
+}
+
 bool runConv2DGpuTest(const VulkanCtx& ctx,
                      const Model& m,
                      const QString& layerName,
@@ -4019,6 +4664,10 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
 
     // ---- Phase 4g.3 buffer pool smoke ----
     pass &= runBlobBufferPoolSmoke(ctx, modelDir);
+
+    // ---- Phase 4g.4 graph executor smoke (records + dispatches all
+    //      389 layers as one command buffer; no value check yet) ----
+    pass &= runGraphExecutorSmoke(ctx, modelDir);
 
     // ---- Phase 4g.1 shape inference smoke ----
     {
