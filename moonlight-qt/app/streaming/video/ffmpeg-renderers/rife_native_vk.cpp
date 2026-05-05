@@ -2912,7 +2912,53 @@ bool runGraphExecutorSmoke(const VulkanCtx& ctx, const QString& modelDir) {
     std::fprintf(stderr,
         "[VIPLE-RIFE-VK] GraphExecSmoke: recorded=%d skipped=%d submit_rc=%d — %s\n",
         recorded, skipped, (int)sr, pass ? "PASS" : "FAIL");
-    std::fflush(stderr);
+
+    // ---- Phase 4g.5: read back final output blob 'out0' + sanity-check.
+    // RIFE flownet output is interpolated RGB at the same resolution
+    // as the inputs.  Synthetic random in0/in1/timestep won't produce
+    // a sensible image, but the result must be NaN/Inf-free with a
+    // plausible magnitude.  Phase 4g.6 swaps in real frames + ncnn
+    // ground-truth comparison.
+    if (pass) {
+        auto outIt = e.buffers.blobs.find("out0");
+        if (outIt == e.buffers.blobs.end()) {
+            std::fprintf(stderr, "[VIPLE-RIFE-VK] 4g.5: out0 blob missing ✗\n");
+            pass = false;
+        } else {
+            const float* p = (const float*)outIt->second.mapped;
+            size_t count = outIt->second.size / sizeof(float);
+            int nanCount = 0, infCount = 0;
+            float lo = std::numeric_limits<float>::infinity();
+            float hi = -std::numeric_limits<float>::infinity();
+            double sumAbs = 0.0;
+            for (size_t i = 0; i < count; ++i) {
+                float v = p[i];
+                if (std::isnan(v)) { ++nanCount; continue; }
+                if (std::isinf(v)) { ++infCount; continue; }
+                if (v < lo) lo = v;
+                if (v > hi) hi = v;
+                sumAbs += std::abs(v);
+            }
+            double meanAbs = sumAbs / (double)count;
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] 4g.5: out0 (count=%zu) lo=%.6f hi=%.6f mean|.|=%.6f NaN=%d Inf=%d\n",
+                count, (double)lo, (double)hi, meanAbs, nanCount, infCount);
+            std::fflush(stderr);
+            // Sanity: no NaN/Inf, output magnitude bounded
+            // (synthetic input → expect approximately [-5, +5]
+            // range; the network is bounded by Conv weights and
+            // LeakyReLU but a stray Inf still indicates a math bug
+            // somewhere upstream).
+            bool sane = (nanCount == 0 && infCount == 0
+                         && std::isfinite(lo) && std::isfinite(hi)
+                         && std::abs(lo) < 1e6 && std::abs(hi) < 1e6);
+            if (!sane) pass = false;
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] 4g.5 sanity check: %s\n",
+                sane ? "PASS" : "FAIL");
+            std::fflush(stderr);
+        }
+    }
 
     destroyExecState(e);
     return pass;
