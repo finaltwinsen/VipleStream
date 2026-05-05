@@ -63,6 +63,9 @@ native），順便建立未來 perf 工程的乾淨基底。
 | 4Y.4 | `5edba90` | tiled shared-memory Conv2D for k=3 stride=1 pad=1 dilation=1（44/56 conv layers） | 24.0 → 21.5 ms | 4.0× |
 | 4Y.4-stride2 | `58d7268` | s=2 tiled 變體（**reverted from dispatch path**：per-channel barrier overhead 在小 output spatial dims 下勝過 bandwidth saving） | (revert) | 4.0× |
 | 4Y.5a | `4be1a6b` | fp16 weight storage + 4 個 conv/deconv shader 改 `float16_t w_buf[]` | 21.5 → ~22.5 ms (噪音範圍) | 4.0× |
+| 4Y.6 Step 1+2 | `2dabc1a` | cooperative_matrix probe + feature chain + 16×16 GEMM hello-world (offline-compiled SPIR-V，繞過 ncnn glslang) | (no perf Δ) | 4.0× |
+| 4Y.6 Step 3 | `a1f609c` | Conv2D-via-GEMM coopmat shader + isolated unit test | (smoke only) | 4.0× |
+| 4Y.6 Step 4 | `068c9b2` | dispatch path 整合為 opt-in（`VIPLE_RIFE_VK_COOPMAT=1`），預設關閉 | (default-OFF) | 4.0× |
 
 ### Per-phase profile（4Y.5a 後）
 
@@ -108,37 +111,93 @@ benchmark 拿冷機數字會誤判 ncnn 大勝。所有 §J.3.e.Y commit message
 run 是可信的（4Y.4 21.5 vs 4Y.1b 24.0 那種），但 cross-engine ratio 噪
 音很大。
 
-## 下一步：Tensor Core / cooperative_matrix（**新 session 工事**）
+## 4Y.6 Tensor Core / cooperative_matrix — opt-in，預設關閉
 
-§J.3.e.Y 4Y.6 的目標是利用 RTX 30/40 Tensor Core 進一步壓 GPU compute
-時間。涉及 `VK_KHR_cooperative_matrix` extension（or NV-specific
-`VK_NV_cooperative_matrix`）。Tensor Core 對 16×16 fp16 matrix mul
-有特殊指令，理論吞吐量是 fp32 ALU 的 8-16×。
+`VK_KHR_cooperative_matrix` 擴充 + `GL_KHR_cooperative_matrix` GLSL
+擴充已完整接通，Conv-via-GEMM coopmat shader 通過 isolated unit test。
+**但 end-to-end RIFE-v4-lite 上 perf 增益不夠抵 precision regression**，
+Step 4 落地為 opt-in（`VIPLE_RIFE_VK_COOPMAT=1` 啟用），預設仍走
+4Y.4 tiled path。
 
-### 關鍵 references
+### 完成的工程（4 個 commits）
 
-- Vulkan extension spec：[VK_KHR_cooperative_matrix](https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VK_KHR_cooperative_matrix.html)
-- GLSL extension：`GL_KHR_cooperative_matrix` 提供 `coopmat<T, scope, M, N, use>` 型別 + `coopMatLoad` / `coopMatStore` / `coopMatMulAdd` 內建函式
-- ncnn 的 `nihui/ncnn` 對應實作：`src/layer/vulkan/convolution_pack8.comp` (legacy) → `convolution_3x3_winograd23_transform_kernel.comp` (Winograd) → 後來 cooperative_matrix variants
-- rife-ncnn-vulkan 用的 pack8 fast path 在 RTX 3060 Laptop 是 ~30-45 ms/frame for RIFE 4.25-lite at 1080p；那條 path 走 cooperative_matrix
+| Step | Commit | 內容 | 結果 |
+|---|---|---|---|
+| 1+2 | `2dabc1a` | device probe + feature chain + offline-compiled hello-world SPIR-V | 11 shapes 列出，16×16×16 fp16-A/B fp32-C/D 可用，hello GEMM 對 CPU ref 4.77e-07 |
+| 3 | `a1f609c` | Conv2D-via-GEMM coopmat shader（im2col + 16×16 tile）+ runConv2DCoopMatGpuTest | Conv_18 7.78e-04 / Conv_50 7.36e-04 vs CPU ref，皆 PASS（2e-3 tol）|
+| 4 | `068c9b2` | dispatch path 整合 + best-effort pipeline build + env-var gate | default-OFF；opt-in 時 Final.1 mean 4.7e-5→3.2e-3，max 0.013→0.53，FAIL |
 
-### Phase 4Y.6 預期工程
+### 為什麼預設關閉（RTX 3060 Laptop 量到的 trade-off）
 
-1. **enable extension**：`VkPhysicalDeviceCooperativeMatrixFeaturesKHR::cooperativeMatrix = VK_TRUE`，要求 device support `VK_KHR_cooperative_matrix`（RTX 20/30/40 都支援；AMD RDNA3+ / Intel Arc 也有）
-2. **query supported matrix shapes**：`vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR` 回傳 (M, N, K, A type, B type, C type, D type, scope) tuples，挑符合 16×16×16 fp16-A/B fp32-C/D 的 properties
-3. **重寫 Conv shader**：把 conv reformulate 成 GEMM（im2col + matmul），用 `coopmat` 跑 16×16 tile
-4. **可能需要 layout 改動**：cooperative_matrix 要求 input/weight memory layout 16×16 對齊 + 特定 stride，跟現有 NCHW packed 不相容，要在 layer 邊界做轉置
-5. **correctness gate 重跑** 4g.6 + Final.1
-6. **benchmark vs ncnn pack8 cooperative_matrix path**
+| 指標 | coopmat OFF（4Y.4 path）| coopmat ON | 差距 |
+|---|---|---|---|
+| Final.1 mean abs err | 4.72e-05 | 3.21e-03 | 70× 差 |
+| Final.1 max abs err | 0.0135 | 0.530 | 39× 差 |
+| Final.1 frac > 1e-2 | 0.00% | 5.73% | 6 個百分點 |
+| 4g.6 verdict | PASS | FAIL | — |
+| Final.1 verdict | PASS | FAIL | — |
+| Final.3a native median | 19.25 ms | 17.95 ms | 7% 加速 |
 
-預期收益：1.5-2.5× 加速（22 → ~9-15 ms）。挑戰：cooperative_matrix shader
-寫起來 verbose，layout 對齊容易出 bug。
+**Precision regression 原因**：double-fp16 quantisation 累積。matA（fp16
+weight，從 .bin 直接讀）× matB（im2col 把 fp32 input cast 成 fp16）+
+fp32 acc，per-MAC quantisation 誤差 ~5e-4。RIFE-v4-lite 在 coopmat
+path 走 40 個 conv layers，σ_total = σ_per_layer × √N = 5e-4 × √40 ≈
+3.2e-3 — 與量到的 mean 完全吻合，是數學上可預期的 statistical
+accumulation，不是 shader bug。
 
-### 風險
+**Perf 只贏 7% 原因**：RIFE-v4-lite 每層 conv 已經夠小（總 forward
+~19 ms），Tensor Core 的 fixed-cost（per-tile im2col + fp32→fp16 cast +
+shared-memory barrier）平攤後吃掉大半 throughput 增量。這個架構需要
+**大 channel × 大 spatial** 的 conv 才會明顯贏，RIFE-v4-lite 的 56
+個 conv 平均 only ~80K MACs/layer 屬於小型範圍。
 
-- Hardware-specific：cooperative_matrix 在 NV 全支援，AMD RDNA3+ 才有，Intel Arc 部分支援。**需保留現有 4Y.4 tiled path 當 fallback**
-- Verification path：thermal noise 已壓不過 1.5× 量級的速度差。需要更嚴格的 benchmark protocol：手動 cool-down + lock GPU clocks via `nvidia-smi --lock-gpu-clocks` 取得穩定數字
-- ncnn 上游同樣的 path 已有不錯實作可參考（pack8 + cooperative_matrix），但跟我們 NCHW-packed 純 fp32 的架構基底差距大；要漸進式遷移避免一次寫太多 shader 帶來 correctness 風險
+### Device 上實際支援的 11 個 cooperative_matrix shapes（RTX 3060 Laptop, NV 596.84）
+
+| # | M×N×K | A | B | C | Result | scope |
+|---|---|---|---|---|---|---|
+| 0 | 16×16×16 | fp16 | fp16 | fp16 | fp16 | Subgroup |
+| 1 | 16×8×16 | fp16 | fp16 | fp16 | fp16 | Subgroup |
+| 2 | 16×8×8 | fp16 | fp16 | fp16 | fp16 | Subgroup |
+| **3** | **16×16×16** | **fp16** | **fp16** | **fp32** | **fp32** | **Subgroup** ← 我們選的 |
+| 4 | 16×8×16 | fp16 | fp16 | fp32 | fp32 | Subgroup |
+| 5 | 16×8×8 | fp16 | fp16 | fp32 | fp32 | Subgroup |
+| 6 | 16×16×32 | uint8 | uint8 | uint32 | uint32 | Subgroup |
+| 7 | 16×16×32 | sint8 | sint8 | sint32 | sint32 | Subgroup |
+| 8 | 16×8×32 | uint8 | uint8 | uint32 | uint32 | Subgroup |
+| 9 | 16×8×32 | sint8 | sint8 | sint32 | sint32 | Subgroup |
+| 10 | 16×16×16 | bf16 | bf16 | fp32 | fp32 | Subgroup |
+
+bf16 (#10) 看起來像是另一個選項，但 bf16 mantissa 只有 7 bits（fp16
+有 10 bits），per-MAC 誤差 ~2^-7 ≈ 8e-3 比 fp16 還大 8×；只有在 fp16
+**動態範圍** saturation 時才會贏（trained NN inference 在我們的 norm
+化 input 上不會 saturate），所以對 RIFE-v4-lite precision 沒幫助。
+int8 quantised path (#6-9) 是另一條工程支線，要 pre-quantise 全部
+weights/activations，是 separate 工事。
+
+### 後續優化方向（如果決定推 coopmat path）
+
+1. **shader 改 multi-subgroup WG**：目前 1 WG = 1 subgroup（32 thread）
+   produces 16×16 tile。RTX 3060 SM 有 1536 threads concurrent，現在
+   利用率僅 ~50%。改成 1 WG = 4 subgroups 共享 im2col tile load → 預期
+   1.5-2× 額外加速，把 Tensor Core 的 fixed-cost 攤掉
+2. **selective gating**：對 precision 敏感的 layer（網路邊界、output
+   head）keep 用 4Y.4 path，深層 mid-network conv 走 coopmat。需要對
+   error sensitivity 分析 + per-layer flag
+3. **接受 7% gain 不值**：thermal-throttle 噪音都 ~30%，7% 速度收益
+   遠小於這個 noise floor。`VIPLE_RIFE_VK_COOPMAT=1` 留著當 future
+   reference 但不主推
+
+目前選 (3)：留著 opt-in flag 當 known-working capability，未來如果
+需要往 4090 或更大 RIFE 模型推就有現成的 path 可以 build on。
+
+### 風險（已驗證）
+
+- **Hardware-specific**：cooperative_matrix 在 NV Turing+ / AMD RDNA3+ /
+  Intel Arc 部分支援。pipeline build 失敗時 best-effort 路徑會清空
+  `pipelines[Conv2D_CoopMat]` + 印一行 INFO log，**不影響其他 shader 建置**
+- **Verification path**：thermal noise 比 7% perf 差大很多，cold-GPU
+  reading 拿不到穩定 cross-engine 對比。要拿真正的 perf 增益判斷必須
+  `nvidia-smi --lock-gpu-clocks` + sustained workload
 
 ## 程式進入點
 
