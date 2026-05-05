@@ -344,6 +344,13 @@ bool inferBlobShapes(const Model& m,
                      const InferInputs& inputs,
                      std::unordered_map<QString, BlobShape>& blobShapes);
 
+// 4g.2: pipeline cache smoke.  Builds + tears down all 9 shader
+// pipelines (Conv2D / Deconv2D / BinaryOp / Activation / Copy /
+// PixelShuffle / InterpBilinear / EltwiseSum / RifeWarp) once, to
+// verify the persistent-pipeline path works against the live device.
+// 4g.3+ promotes the cache to executor lifetime ownership.
+bool runPipelineCacheSmoke(const VulkanCtx& ctx);
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.

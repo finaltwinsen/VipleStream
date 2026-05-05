@@ -1825,7 +1825,223 @@ bool runComputeOnce(const VulkanCtx& ctx, const RunComputeOptions& opts) {
     return vrSubmit == VK_SUCCESS;
 }
 
+// ============================================================================
+// §J.3.e.X Phase 4g.2 — persistent pipeline cache.
+//
+// runComputeOnce (above) compiles shader → builds pipeline → dispatches
+// → tears down on every call: fine for the per-op correctness gates
+// where we run each shader twice or three times, but unworkable for
+// the graph executor that dispatches 389 times PER FRAME.  The cache
+// holds 9 cached pipelines (one per ShaderKind) plus their layouts /
+// descriptor set layouts, built once at executor init.
+//
+// 4g.2 deliverable: build all 9 pipelines, verify all created without
+// VK errors, tear down cleanly.  4g.3+ promotes the same data
+// structures to executor-lifetime ownership.
+// ============================================================================
+
+enum class ShaderKind : int {
+    Conv2D = 0,
+    Deconv2D,
+    BinaryOp,
+    Activation,
+    Copy,
+    PixelShuffle,
+    InterpBilinear,
+    EltwiseSum,
+    RifeWarp,
+    Count
+};
+
+struct ShaderSpec {
+    const char* name;
+    const char* (*sourceFn)();
+    int         bindingCount;
+    uint32_t    pushConstantBytes;  // total push constant range size (already 16-byte aligned)
+};
+
+// Per-shader spec.  bindingCount + pushConstantBytes must match the
+// GLSL declarations + the C++ structs in runConv2DGpuTest /
+// runBinaryOpGpuTest / etc.  Drift here = pipeline build succeeds but
+// dispatches go to wrong descriptor slots.
+static const ShaderSpec kShaderSpecs[(int)ShaderKind::Count] = {
+    { "Conv2D",         getConv2DShaderGlsl,         4, 64 },
+    { "Deconv2D",       getDeconv2DShaderGlsl,       4, 48 },
+    { "BinaryOp",       getBinaryOpShaderGlsl,       3, 32 },
+    { "Activation",     getActivationShaderGlsl,     2, 16 },
+    { "Copy",           getCopyShaderGlsl,           2, 16 },
+    { "PixelShuffle",   getPixelShuffleShaderGlsl,   2, 16 },
+    { "InterpBilinear", getInterpBilinearShaderGlsl, 2, 32 },
+    { "EltwiseSum",     getEltwiseShaderGlsl,        3, 16 },
+    { "RifeWarp",       getRifeWarpShaderGlsl,       3, 16 },
+};
+
+struct CachedPipeline {
+    VkShaderModule        module   = VK_NULL_HANDLE;
+    VkDescriptorSetLayout dsl      = VK_NULL_HANDLE;
+    VkPipelineLayout      layout   = VK_NULL_HANDLE;
+    VkPipeline            pipeline = VK_NULL_HANDLE;
+    int                   bindings = 0;
+};
+
+struct PipelineCache {
+    VkDevice       device = VK_NULL_HANDLE;
+    CachedPipeline pipelines[(int)ShaderKind::Count] = {};
+    // Destroyer PFNs cached so cleanup doesn't re-load.
+    PFN_vkDestroyShaderModule        pfnDestroyShader = nullptr;
+    PFN_vkDestroyDescriptorSetLayout pfnDestroyDSL    = nullptr;
+    PFN_vkDestroyPipelineLayout      pfnDestroyPL     = nullptr;
+    PFN_vkDestroyPipeline            pfnDestroyPipe   = nullptr;
+};
+
+void destroyPipelineCache(PipelineCache& c) {
+    if (c.device == VK_NULL_HANDLE) return;
+    for (int i = 0; i < (int)ShaderKind::Count; ++i) {
+        auto& cp = c.pipelines[i];
+        if (cp.pipeline && c.pfnDestroyPipe) c.pfnDestroyPipe(c.device, cp.pipeline, nullptr);
+        if (cp.layout   && c.pfnDestroyPL)   c.pfnDestroyPL  (c.device, cp.layout,   nullptr);
+        if (cp.dsl      && c.pfnDestroyDSL)  c.pfnDestroyDSL (c.device, cp.dsl,      nullptr);
+        if (cp.module   && c.pfnDestroyShader) c.pfnDestroyShader(c.device, cp.module, nullptr);
+        cp = {};
+    }
+    c.device = VK_NULL_HANDLE;
+}
+
+bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out) {
+    auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr;
+    auto instance = (VkInstance)ctx.instance;
+    auto device   = (VkDevice)ctx.device;
+    if (!pfnGetInstancePA || !instance || !device) return false;
+    auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstancePA(instance, "vkGetDeviceProcAddr");
+    if (!pfnGetDevPa) return false;
+    auto getDev = [&](const char* n) -> PFN_vkVoidFunction { return pfnGetDevPa(device, n); };
+
+#define LOAD(NAME) auto pfn ## NAME = (PFN_vk ## NAME)getDev("vk" #NAME); \
+        if (!pfn ## NAME) return false;
+    LOAD(CreateShaderModule)        LOAD(DestroyShaderModule)
+    LOAD(CreateDescriptorSetLayout) LOAD(DestroyDescriptorSetLayout)
+    LOAD(CreatePipelineLayout)      LOAD(DestroyPipelineLayout)
+    LOAD(CreateComputePipelines)    LOAD(DestroyPipeline)
+#undef LOAD
+
+    out.device           = device;
+    out.pfnDestroyShader = pfnDestroyShaderModule;
+    out.pfnDestroyDSL    = pfnDestroyDescriptorSetLayout;
+    out.pfnDestroyPL     = pfnDestroyPipelineLayout;
+    out.pfnDestroyPipe   = pfnDestroyPipeline;
+
+    for (int i = 0; i < (int)ShaderKind::Count; ++i) {
+        const ShaderSpec& spec = kShaderSpecs[i];
+        CachedPipeline& cp = out.pipelines[i];
+
+        // 1. Compile GLSL → SPIR-V (ncnn glslang).
+        std::vector<uint32_t> spirv;
+        {
+            ncnn::Option opt;
+            if (ncnn::compile_spirv_module(spec.sourceFn(), opt, spirv) != 0
+                || spirv.empty()) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-RIFE-VK] PipelineCache: %s compile failed",
+                             spec.name);
+                destroyPipelineCache(out);
+                return false;
+            }
+        }
+
+        // 2. VkShaderModule
+        {
+            VkShaderModuleCreateInfo smCi = {};
+            smCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            smCi.codeSize = spirv.size() * sizeof(uint32_t);
+            smCi.pCode = spirv.data();
+            if (pfnCreateShaderModule(device, &smCi, nullptr, &cp.module) != VK_SUCCESS) {
+                destroyPipelineCache(out);
+                return false;
+            }
+        }
+
+        // 3. VkDescriptorSetLayout (N storage buffers)
+        cp.bindings = spec.bindingCount;
+        {
+            VkDescriptorSetLayoutBinding dslB[8] = {};
+            for (int b = 0; b < spec.bindingCount; ++b) {
+                dslB[b].binding = (uint32_t)b;
+                dslB[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                dslB[b].descriptorCount = 1;
+                dslB[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            }
+            VkDescriptorSetLayoutCreateInfo dslCi = {};
+            dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            dslCi.bindingCount = (uint32_t)spec.bindingCount;
+            dslCi.pBindings = dslB;
+            if (pfnCreateDescriptorSetLayout(device, &dslCi, nullptr, &cp.dsl) != VK_SUCCESS) {
+                destroyPipelineCache(out);
+                return false;
+            }
+        }
+
+        // 4. VkPipelineLayout (push constant range)
+        {
+            VkPushConstantRange pcRange = {};
+            pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            pcRange.size = spec.pushConstantBytes;
+            VkPipelineLayoutCreateInfo plCi = {};
+            plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            plCi.setLayoutCount = 1;
+            plCi.pSetLayouts = &cp.dsl;
+            plCi.pushConstantRangeCount = (spec.pushConstantBytes > 0) ? 1 : 0;
+            plCi.pPushConstantRanges    = (spec.pushConstantBytes > 0) ? &pcRange : nullptr;
+            if (pfnCreatePipelineLayout(device, &plCi, nullptr, &cp.layout) != VK_SUCCESS) {
+                destroyPipelineCache(out);
+                return false;
+            }
+        }
+
+        // 5. VkPipeline
+        {
+            VkComputePipelineCreateInfo cpCi = {};
+            cpCi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            cpCi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            cpCi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            cpCi.stage.module = cp.module;
+            cpCi.stage.pName = "main";
+            cpCi.layout = cp.layout;
+            if (pfnCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &cp.pipeline) != VK_SUCCESS) {
+                destroyPipelineCache(out);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 } // anonymous namespace
+
+bool runPipelineCacheSmoke(const VulkanCtx& ctx) {
+    PipelineCache cache;
+    if (!buildPipelineCache(ctx, cache)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] PipelineCacheSmoke: build FAILED");
+        std::fprintf(stderr,
+            "[VIPLE-RIFE-VK] PipelineCacheSmoke: build FAILED\n");
+        std::fflush(stderr);
+        return false;
+    }
+    int built = 0;
+    for (int i = 0; i < (int)ShaderKind::Count; ++i) {
+        if (cache.pipelines[i].pipeline != VK_NULL_HANDLE) ++built;
+    }
+    bool pass = (built == (int)ShaderKind::Count);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] PipelineCacheSmoke: %d/%d pipelines built — %s",
+                built, (int)ShaderKind::Count, pass ? "PASS" : "FAIL");
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] PipelineCacheSmoke: %d/%d pipelines built — %s\n",
+        built, (int)ShaderKind::Count, pass ? "PASS" : "FAIL");
+    std::fflush(stderr);
+    destroyPipelineCache(cache);
+    return pass;
+}
 
 bool runConv2DGpuTest(const VulkanCtx& ctx,
                      const Model& m,
@@ -3567,6 +3783,9 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
 
     // ---- Phase 4f rife.Warp coverage: 1 case (math is shape-agnostic) ----
     pass &= runRifeWarpGpuTest(ctx, /*channels*/8, /*H*/16, /*W*/16);
+
+    // ---- Phase 4g.2 pipeline cache smoke ----
+    pass &= runPipelineCacheSmoke(ctx);
 
     // ---- Phase 4g.1 shape inference smoke ----
     {
