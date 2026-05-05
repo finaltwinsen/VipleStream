@@ -4334,7 +4334,10 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
             VkQueryPoolCreateInfo qpCi = {};
             qpCi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
             qpCi.queryType  = VK_QUERY_TYPE_TIMESTAMP;
-            qpCi.queryCount = 2 * kFrucFramesInFlight;  // 2 timestamps per slot
+            // §J.3.g v2: 6 timestamps × kFrucFramesInFlight slots so we can
+            // attribute per-stage GPU time (NV12RGB / ME / Median / Warp /
+            // Copy).  Was 2 (chain start + end only).
+            qpCi.queryCount = 6 * kFrucFramesInFlight;
             if (pfnCreateQueryPool(m_Device, &qpCi, nullptr, &m_FrucTimerPool) != VK_SUCCESS) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VKFRUC] §J.3.e.2.i.6 timestamp pool create failed (non-fatal)");
@@ -4452,27 +4455,35 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     if (!pfnCmdBindPipeline || !pfnCmdBindDescSets || !pfnCmdPushConst
         || !pfnCmdDispatch || !pfnCmdPipelineBarrier || !pfnCmdCopyBuffer) return false;
 
-    // §J.3.e.2.i.6 — read PREVIOUS pass's timestamps for THIS slot (fence
-    // wait at start of renderFrameSw guarantees GPU finished).  Skip on
-    // first iteration when not yet armed.
+    // §J.3.e.2.i.6 / §J.3.g v2 — read PREVIOUS pass's 6 timestamps for THIS
+    // slot (fence wait at start of renderFrameSw guarantees GPU finished),
+    // compute 5 stage deltas + total, accumulate.  Skip on first iteration
+    // when not yet armed.
     const uint32_t timerSlot = m_FrucTimerSlot;
-    const uint32_t timerBase = timerSlot * 2;
+    const uint32_t timerBase = timerSlot * 6;
     if (m_FrucTimerPool && pfnGetQueryPoolResults && pfnCmdResetQueryPool
         && pfnCmdWriteTimestamp && m_FrucTimerArmed[timerSlot]) {
-        uint64_t ts[2] = {};
+        uint64_t ts[6] = {};
         VkResult qr = pfnGetQueryPoolResults(m_Device, m_FrucTimerPool,
-            timerBase, 2, sizeof(ts), ts, sizeof(uint64_t),
+            timerBase, 6, sizeof(ts), ts, sizeof(uint64_t),
             VK_QUERY_RESULT_64_BIT);
-        if (qr == VK_SUCCESS && ts[1] >= ts[0]) {
-            uint64_t deltaTicks = ts[1] - ts[0];
-            double deltaUs = (double)deltaTicks * m_FrucTimerNsPerTick / 1000.0;
-            m_FrucGpuUsAccum += deltaUs;
+        // ts[5] >= ts[0] is the only sanity check we need; intermediate
+        // stages may be equal on some drivers when stage compresses to
+        // ~0 ticks (e.g. Median copy on small mvBuf), and that's still
+        // a valid measurement — record 0us for that stage.
+        if (qr == VK_SUCCESS && ts[5] >= ts[0]) {
+            double ns2us = m_FrucTimerNsPerTick / 1000.0;
+            for (int i = 0; i < kFrucStageCount; ++i) {
+                uint64_t d = (ts[i + 1] >= ts[i]) ? (ts[i + 1] - ts[i]) : 0;
+                m_FrucGpuStageUsAccum[i] += (double)d * ns2us;
+            }
+            m_FrucGpuUsAccum += (double)(ts[5] - ts[0]) * ns2us;
             m_FrucGpuUsCount++;
         }
     }
-    // Reset queries for this slot before re-using.
+    // Reset 6 queries for this slot before re-using.
     if (m_FrucTimerPool && pfnCmdResetQueryPool) {
-        pfnCmdResetQueryPool(cmd, m_FrucTimerPool, timerBase, 2);
+        pfnCmdResetQueryPool(cmd, m_FrucTimerPool, timerBase, 6);
     }
     m_FrucTimerSlot = (m_FrucTimerSlot + 1) % kFrucFramesInFlight;
 
@@ -4503,7 +4514,10 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
     };
 
-    // §J.3.e.2.i.6 — write chain_start timestamp BEFORE first dispatch.
+    // §J.3.e.2.i.6 / §J.3.g v2 — write chain_start timestamp (ts[0])
+    // BEFORE first dispatch.  Intermediate timestamps follow each stage's
+    // bufBarrier, the chain end timestamp goes after the curr→prev copy
+    // barrier (see end of function).
     if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
         pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                              m_FrucTimerPool, timerBase + 0);
@@ -4536,6 +4550,11 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     }
     pfnCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
     computeBufBarrier(m_FrucCurrRgbBuf);
+    // §J.3.g v2 ts[1] — after NV12→RGB barrier
+    if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
+        pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             m_FrucTimerPool, timerBase + 1);
+    }
 
     // ---- Stage 1: motion estimation ----
     // Push constant layout MUST match shader's struct order exactly:
@@ -4555,6 +4574,11 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     }
     pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
     computeBufBarrier(m_FrucMvBuf);
+    // §J.3.g v2 ts[2] — after ME barrier
+    if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
+        pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             m_FrucTimerPool, timerBase + 2);
+    }
 
     // ---- Stage 2: MV median filter ----
     // §J.3.e.2.i.7 R5: 把 median compute pass 換成 cmdCopyBuffer
@@ -4567,6 +4591,11 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         pfnCmdCopyBuffer(cmd, m_FrucMvBuf, m_FrucMvFilteredBuf, 1, &cp);
     }
     computeBufBarrier(m_FrucMvFilteredBuf);
+    // §J.3.g v2 ts[3] — after Median (copy mode) barrier
+    if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
+        pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             m_FrucTimerPool, timerBase + 3);
+    }
 
     // ---- Stage 3: warp ----
     // Push constant layout MUST match shader's struct order exactly:
@@ -4593,6 +4622,12 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     // observation: 第二象限 only quadrant without flicker).
     pfnCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
     computeBufBarrier(m_FrucInterpRgbBuf);
+    // §J.3.g v2 ts[4] — after Warp barrier (this is the suspected hot
+    // spot at 4K — per-pixel bilinear sample × 8.3M threads).
+    if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
+        pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             m_FrucTimerPool, timerBase + 4);
+    }
 
     // ---- Stage 4 (i.4.1): currRGB → prevRGB for next frame's ME ----
     // ME shader reads (prevRGB, currRGB) — we want prevRGB to be the
@@ -4615,10 +4650,12 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 
-    // §J.3.e.2.i.6 — write chain_end timestamp AFTER last barrier.
+    // §J.3.e.2.i.6 / §J.3.g v2 ts[5] — chain_end timestamp AFTER curr→prev
+    // copy barrier.  This + ts[0] is the chain total; per-stage deltas are
+    // ts[i+1] - ts[i].
     if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
         pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                             m_FrucTimerPool, timerBase + 1);
+                             m_FrucTimerPool, timerBase + 5);
         m_FrucTimerArmed[timerSlot] = true;
     }
 
@@ -5448,7 +5485,22 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     // Skip on the very first frame (m_SwImageLayoutInited=false) — there's
     // nothing valid to copy from yet, FRUC just sees stale prevRGB once.
     if (useNativeDecode && m_FrucMode && m_FrucReady && !frucPausedThisFrame && m_SwImageLayoutInited) {
-        // m_SwUploadImage SHADER_READ_ONLY → TRANSFER_SRC_OPTIMAL
+        // §J.3.e.2.i.8 Phase 2.5 v2 (2026-05-05) — pre-copy barrier on
+        // m_SwFrucNv12Buf to drain prior frame's compute SHADER_READ before
+        // this frame's TRANSFER_WRITE.  Closes the residual cross-frame WAW
+        // race v1.3.275~277 acknowledged: with kFrucFramesInFlight=2 and a
+        // single shared NV12 mirror buffer, slot 0's compute may still be
+        // reading the buffer when slot 1's vkCmdCopyImageToBuffer
+        // overwrites it.  v1.3.276 measured "occasional blur" from this
+        // race over 2940+ frames; v1.3.276→277 tried per-slot buffer →
+        // reliable VK_ERROR_DEVICE_LOST after ~1380 frames on NV 596.84
+        // (driver-side descriptor set / buffer state-tracking issue).
+        // Single-buffer + barrier sidesteps the NV bug entirely while
+        // serialising the WAW at the command stream level — pipeline
+        // barriers respect submission order across cmd buffers on the
+        // same queue.  Folded into the same vkCmdPipelineBarrier call as
+        // the m_SwUploadImage SHADER_READ → TRANSFER_SRC layout transition
+        // so we don't pay an extra barrier dispatch.
         VkImageMemoryBarrier toSrcBar = {};
         toSrcBar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         toSrcBar.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
@@ -5461,10 +5513,20 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         toSrcBar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         toSrcBar.subresourceRange.levelCount = 1;
         toSrcBar.subresourceRange.layerCount = 1;
+        VkBufferMemoryBarrier preCopyBar = {};
+        preCopyBar.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        preCopyBar.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        preCopyBar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        preCopyBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        preCopyBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        preCopyBar.buffer = m_SwFrucNv12Buf;
+        preCopyBar.offset = 0;
+        preCopyBar.size   = VK_WHOLE_SIZE;
         m_RtPfn.CmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0, 0, nullptr, 0, nullptr, 1, &toSrcBar);
+            0, 0, nullptr, 1, &preCopyBar, 1, &toSrcBar);
 
         // Image → buffer copy.  Two regions for NV12 multi-plane image:
         //   region 0: PLANE_0 (Y) → buffer offset 0,        size W×H
@@ -5837,20 +5899,39 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                         sorted.size(), fps, mean,
                         pct(0.50), pct(0.95), pct(0.99), pct(0.999),
                         bucketSec);
-            // §J.3.e.2.i.6 — GPU compute chain timing (NV12->RGB + ME +
-            // Median + Warp), averaged over the window.
-            double gpuMeanUs = (m_FrucGpuUsCount > 0)
-                                ? (m_FrucGpuUsAccum / m_FrucGpuUsCount) : 0.0;
+            // §J.3.e.2.i.6 / §J.3.g v2 — GPU compute chain timing per stage,
+            // averaged over the window.  Stage attribution is what told us
+            // §J.3.g v1's ME-resolution-downsample experiment couldn't help
+            // (real bottleneck wasn't ME).  Now we report all 5 stages so
+            // the next optimisation lands on the actual hot one.
+            int gpuN = m_FrucGpuUsCount;
+            double gpuTotalMeanUs = (gpuN > 0) ? (m_FrucGpuUsAccum / gpuN) : 0.0;
+            double sNv12 = (gpuN > 0) ? (m_FrucGpuStageUsAccum[0] / gpuN) : 0.0;
+            double sMe   = (gpuN > 0) ? (m_FrucGpuStageUsAccum[1] / gpuN) : 0.0;
+            double sMed  = (gpuN > 0) ? (m_FrucGpuStageUsAccum[2] / gpuN) : 0.0;
+            double sWarp = (gpuN > 0) ? (m_FrucGpuStageUsAccum[3] / gpuN) : 0.0;
+            double sCopy = (gpuN > 0) ? (m_FrucGpuStageUsAccum[4] / gpuN) : 0.0;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-Stats] cumul real=%llu interp=%llu "
-                        "compute_gpu_mean=%.3fms (n=%d) "
+                        "compute_gpu_total=%.3fms (n=%d) "
                         "(swMode=%d frucMode=%d dualMode=%d)",
                         (unsigned long long)s_CumulReal,
                         (unsigned long long)s_CumulInterp,
-                        gpuMeanUs / 1000.0,
-                        m_FrucGpuUsCount,
+                        gpuTotalMeanUs / 1000.0,
+                        gpuN,
                         m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0);
+            // Per-stage breakdown (us, mean over window).  Look for the
+            // largest stage; share-of-total tells you where to optimise.
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-GPU-PROF] nv12rgb=%.0fus me=%.0fus "
+                        "median=%.0fus warp=%.0fus copy=%.0fus "
+                        "(total=%.0fus, n=%d)",
+                        sNv12, sMe, sMed, sWarp, sCopy,
+                        gpuTotalMeanUs, gpuN);
             m_FrucGpuUsAccum = 0.0;
+            for (int i = 0; i < kFrucStageCount; ++i) {
+                m_FrucGpuStageUsAccum[i] = 0.0;
+            }
             m_FrucGpuUsCount = 0;
 
             // §J.3.e.2.i.6 SW-PROF — emit per-phase breakdown when we have

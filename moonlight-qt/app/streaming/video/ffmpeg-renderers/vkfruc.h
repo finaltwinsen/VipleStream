@@ -711,17 +711,34 @@ private:
     SDL_Surface*     m_OverlayStashedSurface[kOverlayMax] = {};
     bool             m_OverlayStashedDisable[kOverlayMax] = {};
 
-    // §J.3.e.2.i.6 GPU timestamp queries — measures compute chain total
-    // GPU time (NV12->RGB + ME + Median + Warp).  2 timestamps per ring
-    // slot: chain_start (TOP_OF_PIPE before NV12RGB dispatch), chain_end
-    // (BOTTOM_OF_PIPE after Warp barrier).  Read at start of next frame
-    // for the SAME slot (after fence wait → GPU has finished prior pass).
+    // §J.3.e.2.i.6 GPU timestamp queries — measures compute chain GPU
+    // time per stage.
+    //
+    // §J.3.g v2 (2026-05-05): expanded from 2 timestamps (chain start + end)
+    // to 6 timestamps (5 stage boundaries) so we can attribute
+    // 4K120-FRUC-DUAL-stuck-at-77-84fps cost to a specific stage.  The
+    // first §J.3.g attempt assumed warp shader at 4K was the bottleneck
+    // and tried ME-resolution downsample → no fps change → real
+    // bottleneck unknown.  This profiling closes that gap.
+    //
+    // Per ring slot (kFrucFramesInFlight):
+    //   ts[0] TOP_OF_PIPE before NV12RGB dispatch
+    //   ts[1] after NV12→RGB barrier
+    //   ts[2] after ME barrier
+    //   ts[3] after Median (copy-mode) barrier
+    //   ts[4] after Warp barrier
+    //   ts[5] BOTTOM_OF_PIPE after curr→prev copy barrier
+    // Stages logged (us, p50/mean over stats bucket):
+    //   nv12rgb / me / median / warp / copy / total
+    // Read at start of next frame for the SAME slot (after fence wait →
+    // GPU has finished prior pass).
     VkQueryPool m_FrucTimerPool   = VK_NULL_HANDLE;
-    uint32_t    m_FrucTimerSlot   = 0;     // ring slot for queries
-    bool        m_FrucTimerArmed[kFrucFramesInFlight] = {};  // whether slot's timestamps were written
-    double      m_FrucTimerNsPerTick = 0.0;  // from VkPhysicalDeviceLimits.timestampPeriod
-    // Aggregated GPU time (us) — accumulated each frame, logged in stats window
-    double      m_FrucGpuUsAccum  = 0.0;
+    uint32_t    m_FrucTimerSlot   = 0;
+    bool        m_FrucTimerArmed[kFrucFramesInFlight] = {};
+    double      m_FrucTimerNsPerTick = 0.0;
+    static constexpr int kFrucStageCount = 5; // nv12rgb / me / median / warp / copy
+    double      m_FrucGpuUsAccum                    = 0.0;       // chain total
+    double      m_FrucGpuStageUsAccum[kFrucStageCount] = {};     // per-stage
     int         m_FrucGpuUsCount  = 0;
 
     // Loaded PFNs (we don't have the libplacebo wrapper's lookup; use
