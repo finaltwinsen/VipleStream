@@ -229,6 +229,26 @@ void referenceBinaryOp(const BinaryOpDesc& desc,
 
 const char* getBinaryOpShaderGlsl();
 
+// Phase 4c — element-wise Activation: ReLU/LeakyReLU + Sigmoid.  Covers
+// 40 ReLU layers (all slope=0.2 in this model) + 1 Sigmoid.  Note: the
+// 16 Conv layers with fused LeakyReLU are NOT routed through here —
+// their activation is folded into kConv2DShaderGlsl via leakyReluSlope.
+struct ActivationDesc {
+    int   actType = 0;       // 0 = ReLU/LeakyReLU; 1 = Sigmoid
+    float slope   = 0.0f;    // negative-side multiplier for ReLU; 0 for pure ReLU
+};
+bool runActivationGpuTest(const VulkanCtx& ctx,
+                          const ActivationDesc& desc,
+                          const std::vector<float>& a,
+                          float tolerance = 1e-5f);
+
+// CPU reference for Activation.  `out.size()` must equal `a.size()`.
+void referenceActivation(const ActivationDesc& desc,
+                         const float* a, size_t aCount,
+                         float* out);
+
+const char* getActivationShaderGlsl();
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.

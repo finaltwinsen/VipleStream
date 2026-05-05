@@ -366,6 +366,57 @@ const char* getBinaryOpShaderGlsl() {
     return kBinaryOpShaderGlsl;
 }
 
+// ============================================================================
+// §J.3.e.X Phase 4c — element-wise Activation (ReLU / LeakyReLU / Sigmoid).
+//
+// Covers 41 activation layers in rife-v4.25-lite/flownet.param:
+//   ReLU  × 40  — all with slope=0.2 (i.e. LeakyReLU 0.2)
+//   Sigmoid × 1  — output mask scaling at the very end of the network
+//
+// Note: 16 Convolution layers also fuse LeakyReLU 0.2 directly (already
+// handled by the Conv2D shader's `leakyReluSlope` push constant); this
+// shader is for the **standalone** ReLU layers + the single Sigmoid.
+//
+// One unified shader covers both via `actType` push constant:
+//   0 = ReLU / LeakyReLU  (slope param controls negative-side scale)
+//   1 = Sigmoid            (slope unused)
+//
+// Dispatch: 1D over total element count, local_size_x = 64.
+// ============================================================================
+
+static const char* kActivationShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer InBuf  { float in_buf[];  };
+layout(set = 0, binding = 1) writeonly buffer OutBuf { float out_buf[]; };
+
+layout(push_constant) uniform PC {
+    uint  count;
+    int   actType;    // 0 ReLU/LeakyReLU, 1 Sigmoid
+    float slope;      // negative-side multiplier for ReLU; ignored for Sigmoid
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    float x = in_buf[i];
+    float y;
+    if (pc.actType == 0) {
+        y = (x < 0.0) ? x * pc.slope : x;
+    } else if (pc.actType == 1) {
+        y = 1.0 / (1.0 + exp(-x));
+    } else {
+        y = x;
+    }
+    out_buf[i] = y;
+}
+)GLSL";
+
+const char* getActivationShaderGlsl() {
+    return kActivationShaderGlsl;
+}
+
 // IEEE-754 fp16 → fp32 conversion.  Handles ±0, normals, and ±inf/NaN.
 // Subnormals (e==0, m!=0) are flushed to ±0 — acceptable for trained
 // conv weights where we never see subnormals in practice.
@@ -1623,6 +1674,274 @@ bool runBinaryOpGpuTest(const VulkanCtx& ctx,
 }
 
 // ============================================================================
+// §J.3.e.X Phase 4c — Activation CPU reference + GPU correctness gate.
+// ============================================================================
+
+void referenceActivation(const ActivationDesc& desc,
+                         const float* a, size_t aCount,
+                         float* out)
+{
+    if (desc.actType == 0) {
+        const float s = desc.slope;
+        for (size_t i = 0; i < aCount; ++i) out[i] = a[i] < 0.0f ? a[i] * s : a[i];
+    } else if (desc.actType == 1) {
+        for (size_t i = 0; i < aCount; ++i) out[i] = 1.0f / (1.0f + std::exp(-a[i]));
+    } else {
+        for (size_t i = 0; i < aCount; ++i) out[i] = a[i];
+    }
+}
+
+bool runActivationGpuTest(const VulkanCtx& ctx,
+                          const ActivationDesc& desc,
+                          const std::vector<float>& a,
+                          float tolerance)
+{
+    auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr;
+    auto instance = (VkInstance)ctx.instance;
+    auto pd       = (VkPhysicalDevice)ctx.physicalDevice;
+    auto device   = (VkDevice)ctx.device;
+    auto queue    = (VkQueue)ctx.computeQueue;
+    if (!pfnGetInstancePA || !instance || !pd || !device || !queue) return false;
+
+    auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstancePA(instance, "vkGetDeviceProcAddr");
+    if (!pfnGetDevPa) return false;
+    auto getDev = [&](const char* n) -> PFN_vkVoidFunction {
+        return pfnGetDevPa(device, n);
+    };
+#define LOAD_PFN(NAME) auto pfn ## NAME = (PFN_vk ## NAME)getDev("vk" #NAME); \
+        if (!pfn ## NAME) { return false; }
+    LOAD_PFN(CreateShaderModule)        LOAD_PFN(DestroyShaderModule)
+    LOAD_PFN(CreateDescriptorSetLayout) LOAD_PFN(DestroyDescriptorSetLayout)
+    LOAD_PFN(CreatePipelineLayout)      LOAD_PFN(DestroyPipelineLayout)
+    LOAD_PFN(CreateComputePipelines)    LOAD_PFN(DestroyPipeline)
+    LOAD_PFN(CreateBuffer)              LOAD_PFN(DestroyBuffer)
+    LOAD_PFN(GetBufferMemoryRequirements)
+    LOAD_PFN(AllocateMemory)            LOAD_PFN(FreeMemory)
+    LOAD_PFN(BindBufferMemory)
+    LOAD_PFN(MapMemory)                 LOAD_PFN(UnmapMemory)
+    LOAD_PFN(CreateDescriptorPool)      LOAD_PFN(DestroyDescriptorPool)
+    LOAD_PFN(AllocateDescriptorSets)    LOAD_PFN(UpdateDescriptorSets)
+    LOAD_PFN(CreateCommandPool)         LOAD_PFN(DestroyCommandPool)
+    LOAD_PFN(AllocateCommandBuffers)
+    LOAD_PFN(BeginCommandBuffer)        LOAD_PFN(EndCommandBuffer)
+    LOAD_PFN(CmdBindPipeline)           LOAD_PFN(CmdBindDescriptorSets)
+    LOAD_PFN(CmdPushConstants)          LOAD_PFN(CmdDispatch)
+    LOAD_PFN(QueueSubmit)
+    LOAD_PFN(CreateFence)               LOAD_PFN(DestroyFence)
+    LOAD_PFN(WaitForFences)
+#undef LOAD_PFN
+    auto pfnGetPdMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)pfnGetInstancePA(
+        instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnGetPdMemProps) return false;
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPdMemProps(pd, &memProps);
+
+    std::vector<float> cpuOut(a.size());
+    referenceActivation(desc, a.data(), a.size(), cpuOut.data());
+
+    std::vector<uint32_t> spirv;
+    {
+        ncnn::Option opt;
+        if (ncnn::compile_spirv_module(getActivationShaderGlsl(), opt, spirv) != 0
+            || spirv.empty()) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] ActTest: compile_spirv_module failed");
+            return false;
+        }
+    }
+
+    VkShaderModule shaderMod = VK_NULL_HANDLE;
+    {
+        VkShaderModuleCreateInfo smCi = {};
+        smCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smCi.codeSize = spirv.size() * sizeof(uint32_t);
+        smCi.pCode = spirv.data();
+        if (pfnCreateShaderModule(device, &smCi, nullptr, &shaderMod) != VK_SUCCESS) return false;
+    }
+
+    VkDescriptorSetLayoutBinding dslB[2] = {};
+    for (int i = 0; i < 2; ++i) {
+        dslB[i].binding = (uint32_t)i;
+        dslB[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        dslB[i].descriptorCount = 1;
+        dslB[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    {
+        VkDescriptorSetLayoutCreateInfo dslCi = {};
+        dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslCi.bindingCount = 2;
+        dslCi.pBindings = dslB;
+        if (pfnCreateDescriptorSetLayout(device, &dslCi, nullptr, &dsl) != VK_SUCCESS) return false;
+    }
+
+    VkPushConstantRange pcRange = {};
+    pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcRange.size = 16;  // count (u32) + actType (i32) + slope (f32) = 12, round to 16
+    VkPipelineLayout pipeLay = VK_NULL_HANDLE;
+    {
+        VkPipelineLayoutCreateInfo plCi = {};
+        plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plCi.setLayoutCount = 1;
+        plCi.pSetLayouts = &dsl;
+        plCi.pushConstantRangeCount = 1;
+        plCi.pPushConstantRanges = &pcRange;
+        if (pfnCreatePipelineLayout(device, &plCi, nullptr, &pipeLay) != VK_SUCCESS) return false;
+    }
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    {
+        VkComputePipelineCreateInfo cpCi = {};
+        cpCi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpCi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpCi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpCi.stage.module = shaderMod;
+        cpCi.stage.pName = "main";
+        cpCi.layout = pipeLay;
+        if (pfnCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &pipeline) != VK_SUCCESS) return false;
+    }
+
+    GpuBuffer bufIn = {}, bufOut = {};
+    if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                          pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                          a.size() * sizeof(float), bufIn)) return false;
+    if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                          pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                          a.size() * sizeof(float), bufOut)) return false;
+    std::memcpy(bufIn.mapped, a.data(), bufIn.size);
+    std::memset(bufOut.mapped, 0, bufOut.size);
+
+    VkDescriptorPool descPool = VK_NULL_HANDLE;
+    {
+        VkDescriptorPoolSize sz = {};
+        sz.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sz.descriptorCount = 2;
+        VkDescriptorPoolCreateInfo dpCi = {};
+        dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpCi.maxSets = 1;
+        dpCi.poolSizeCount = 1;
+        dpCi.pPoolSizes = &sz;
+        if (pfnCreateDescriptorPool(device, &dpCi, nullptr, &descPool) != VK_SUCCESS) return false;
+    }
+    VkDescriptorSet descSet = VK_NULL_HANDLE;
+    {
+        VkDescriptorSetAllocateInfo dsai = {};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = descPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts = &dsl;
+        if (pfnAllocateDescriptorSets(device, &dsai, &descSet) != VK_SUCCESS) return false;
+    }
+    {
+        VkDescriptorBufferInfo dbi[2] = {};
+        dbi[0].buffer = bufIn.buf;  dbi[0].range = VK_WHOLE_SIZE;
+        dbi[1].buffer = bufOut.buf; dbi[1].range = VK_WHOLE_SIZE;
+        VkWriteDescriptorSet wds[2] = {};
+        for (int i = 0; i < 2; ++i) {
+            wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wds[i].dstSet = descSet;
+            wds[i].dstBinding = (uint32_t)i;
+            wds[i].descriptorCount = 1;
+            wds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            wds[i].pBufferInfo = &dbi[i];
+        }
+        pfnUpdateDescriptorSets(device, 2, wds, 0, nullptr);
+    }
+
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    {
+        VkCommandPoolCreateInfo cpCi = {};
+        cpCi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpCi.queueFamilyIndex = ctx.computeQueueFamily;
+        cpCi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        if (pfnCreateCommandPool(device, &cpCi, nullptr, &cmdPool) != VK_SUCCESS) return false;
+    }
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    {
+        VkCommandBufferAllocateInfo cbai = {};
+        cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool = cmdPool;
+        cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        if (pfnAllocateCommandBuffers(device, &cbai, &cmd) != VK_SUCCESS) return false;
+    }
+    {
+        VkCommandBufferBeginInfo cbbi = {};
+        cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (pfnBeginCommandBuffer(cmd, &cbbi) != VK_SUCCESS) return false;
+    }
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    pfnCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLay, 0,
+                             1, &descSet, 0, nullptr);
+    struct PC {
+        uint32_t count;
+        int32_t  actType;
+        float    slope;
+        uint32_t _pad;
+    } pcVal = {};
+    pcVal.count   = (uint32_t)a.size();
+    pcVal.actType = desc.actType;
+    pcVal.slope   = desc.slope;
+    pfnCmdPushConstants(cmd, pipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                        sizeof(pcVal), &pcVal);
+    uint32_t groups = (uint32_t)((a.size() + 63) / 64);
+    pfnCmdDispatch(cmd, groups, 1, 1);
+    pfnEndCommandBuffer(cmd);
+
+    VkFence fence = VK_NULL_HANDLE;
+    {
+        VkFenceCreateInfo fci = {};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        if (pfnCreateFence(device, &fci, nullptr, &fence) != VK_SUCCESS) return false;
+    }
+    {
+        VkSubmitInfo si = {};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+        if (pfnQueueSubmit(queue, 1, &si, fence) != VK_SUCCESS) return false;
+    }
+    pfnWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+
+    const float* gpuOut = reinterpret_cast<const float*>(bufOut.mapped);
+    float maxAbsErr = 0.0f;
+    int worstIdx = 0;
+    for (size_t i = 0; i < cpuOut.size(); ++i) {
+        float diff = std::abs(gpuOut[i] - cpuOut[i]);
+        if (diff > maxAbsErr) { maxAbsErr = diff; worstIdx = (int)i; }
+    }
+    bool pass = maxAbsErr <= tolerance;
+    const char* actName = (desc.actType == 0)
+        ? (desc.slope == 0.0f ? "ReLU" : "LeakyReLU")
+        : (desc.actType == 1 ? "Sigmoid" : "?");
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] ActTest %s slope=%.2f (count=%zu): "
+                "max_abs_err=%.6e — %s",
+                actName, (double)desc.slope, a.size(),
+                (double)maxAbsErr, pass ? "PASS" : "FAIL");
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] ActTest %s slope=%.2f (count=%zu): "
+        "max_abs_err=%.6e (worst idx=%d cpu=%.6f gpu=%.6f) — %s\n",
+        actName, (double)desc.slope, a.size(),
+        (double)maxAbsErr, worstIdx,
+        (double)cpuOut[worstIdx], (double)gpuOut[worstIdx],
+        pass ? "PASS" : "FAIL");
+    std::fflush(stderr);
+
+    pfnDestroyFence(device, fence, nullptr);
+    pfnDestroyCommandPool(device, cmdPool, nullptr);
+    destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, bufIn);
+    destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, bufOut);
+    pfnDestroyDescriptorPool(device, descPool, nullptr);
+    pfnDestroyPipeline(device, pipeline, nullptr);
+    pfnDestroyPipelineLayout(device, pipeLay, nullptr);
+    pfnDestroyDescriptorSetLayout(device, dsl, nullptr);
+    pfnDestroyShaderModule(device, shaderMod, nullptr);
+    return pass;
+}
+
+// ============================================================================
 // Phase 3b.2 standalone — replicates ncnnfruc::runExternalApiProbe's Vulkan
 // init pattern, hands handles to ncnn, runs runConv2DGpuTest, tears down.
 // Side-effect: claims+releases the ncnn process-singleton (same caveat as
@@ -1835,6 +2154,28 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
         // 4. scalar RSUB (Sub_519 pattern: 1.0 - x)
         BinaryOpDesc d4{}; d4.opType = 7; d4.mode = 2; d4.scalarB = 1.0f;
         pass &= runBinaryOpGpuTest(ctx, d4, a, {}, tolerance);
+    }
+
+    // ---- Phase 4c Activation coverage: LeakyReLU 0.2 (40 layers) + Sigmoid (1) ----
+    {
+        constexpr int N = 1024;
+        std::vector<float> a(N);
+        uint32_t st = 0xCAFEBABEu;
+        // Centered range [-3, +3] so we exercise both branches of ReLU
+        // and a meaningful slice of Sigmoid's curve.
+        for (auto& v : a) {
+            st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+            v = ((float)(st & 0xFFFFFF) / (float)0xFFFFFF - 0.5f) * 6.0f;
+        }
+        // 1. Pure ReLU (slope=0)
+        ActivationDesc r1{}; r1.actType = 0; r1.slope = 0.0f;
+        pass &= runActivationGpuTest(ctx, r1, a, tolerance);
+        // 2. LeakyReLU 0.2 (the 40-layer case)
+        ActivationDesc r2{}; r2.actType = 0; r2.slope = 0.2f;
+        pass &= runActivationGpuTest(ctx, r2, a, tolerance);
+        // 3. Sigmoid — fp32 transcendental, expect slightly looser tolerance
+        ActivationDesc r3{}; r3.actType = 1;
+        pass &= runActivationGpuTest(ctx, r3, a, 1e-6f);
     }
 
     // ---- Cleanup ----
