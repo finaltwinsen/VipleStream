@@ -57,6 +57,14 @@ Item {
 
         // Show the Qt window again to show quit segue
         window.visible = true
+        // VipleStream §K.4 GUI fix:On X11/Linux some WMs (verified on Ubuntu
+        // 26.04 GNOME Shell + Hyper-V virtio-gpu) don't restore the window
+        // to the taskbar / Alt-Tab list after a hide → show cycle —— it
+        // remains "withdrawn" from the WM's view even though Qt thinks
+        // visible=true.  raise() + requestActivate() force the WM to
+        // re-recognize it and place it on top with focus.
+        window.raise()
+        window.requestActivate()
     }
 
     function sessionFinished(portTestResult)
@@ -80,6 +88,11 @@ Item {
         else {
             // Show the Qt window again after streaming
             window.visible = true
+            // VipleStream §K.4 GUI fix: see quitStarting() comment —
+            // some Linux WMs (X11) drop window from taskbar / Alt-Tab
+            // after hide → show cycle.  Force WM re-attach + focus.
+            window.raise()
+            window.requestActivate()
 
             // Display any launch errors. We do this after
             // the Qt UI is visible again to prevent losing
