@@ -2716,14 +2716,20 @@ enum class ShaderKind : int {
     RifeWarp,
     Conv2D_3x3_s1,   // §J.3.e.Y 4Y.4         — tiled, k=3 stride=1 pad=1 dilation=1
     Conv2D_3x3_s2,   // §J.3.e.Y 4Y.4-stride2 — tiled, k=3 stride=2 pad=1 dilation=1
+    Conv2D_CoopMat,  // §J.3.e.Y 4Y.6         — Tensor Core via VK_KHR_cooperative_matrix
     Count
 };
 
 struct ShaderSpec {
-    const char* name;
-    const char* (*sourceFn)();
-    int         bindingCount;
-    uint32_t    pushConstantBytes;  // total push constant range size (already 16-byte aligned)
+    const char*     name;
+    const char*    (*sourceFn)();   // GLSL source for ncnn glslang (null if spirvBin set)
+    int             bindingCount;
+    uint32_t        pushConstantBytes;  // total push constant range size (already 16-byte aligned)
+    // §J.3.e.Y 4Y.6 — alternative path: pre-compiled SPIR-V binary,
+    // bypassing ncnn's bundled glslang (which doesn't speak
+    // GL_KHR_cooperative_matrix).  When non-null, sourceFn is ignored.
+    const uint32_t* spirvBin;
+    size_t          spirvWords;
 };
 
 // Per-shader spec.  bindingCount + pushConstantBytes must match the
@@ -2731,17 +2737,18 @@ struct ShaderSpec {
 // runBinaryOpGpuTest / etc.  Drift here = pipeline build succeeds but
 // dispatches go to wrong descriptor slots.
 static const ShaderSpec kShaderSpecs[(int)ShaderKind::Count] = {
-    { "Conv2D",         getConv2DShaderGlsl,         4, 64 },
-    { "Deconv2D",       getDeconv2DShaderGlsl,       4, 48 },
-    { "BinaryOp",       getBinaryOpShaderGlsl,       3, 32 },
-    { "Activation",     getActivationShaderGlsl,     2, 16 },
-    { "Copy",           getCopyShaderGlsl,           2, 16 },
-    { "PixelShuffle",   getPixelShuffleShaderGlsl,   2, 16 },
-    { "InterpBilinear", getInterpBilinearShaderGlsl, 2, 32 },
-    { "EltwiseSum",     getEltwiseShaderGlsl,        3, 16 },
-    { "RifeWarp",       getRifeWarpShaderGlsl,       3, 16 },
-    { "Conv2D_3x3_s1",  getConv2D_3x3_s1_ShaderGlsl, 4, 64 },
-    { "Conv2D_3x3_s2",  getConv2D_3x3_s2_ShaderGlsl, 4, 64 },
+    { "Conv2D",         getConv2DShaderGlsl,         4, 64, nullptr,         0 },
+    { "Deconv2D",       getDeconv2DShaderGlsl,       4, 48, nullptr,         0 },
+    { "BinaryOp",       getBinaryOpShaderGlsl,       3, 32, nullptr,         0 },
+    { "Activation",     getActivationShaderGlsl,     2, 16, nullptr,         0 },
+    { "Copy",           getCopyShaderGlsl,           2, 16, nullptr,         0 },
+    { "PixelShuffle",   getPixelShuffleShaderGlsl,   2, 16, nullptr,         0 },
+    { "InterpBilinear", getInterpBilinearShaderGlsl, 2, 32, nullptr,         0 },
+    { "EltwiseSum",     getEltwiseShaderGlsl,        3, 16, nullptr,         0 },
+    { "RifeWarp",       getRifeWarpShaderGlsl,       3, 16, nullptr,         0 },
+    { "Conv2D_3x3_s1",  getConv2D_3x3_s1_ShaderGlsl, 4, 64, nullptr,         0 },
+    { "Conv2D_3x3_s2",  getConv2D_3x3_s2_ShaderGlsl, 4, 64, nullptr,         0 },
+    { "Conv2D_CoopMat", nullptr,                     4, 64, kCoopMatConvSpv, kCoopMatConvSpvWords },
 };
 
 struct CachedPipeline {
@@ -2831,28 +2838,55 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out,
     for (int i = 0; i < (int)ShaderKind::Count; ++i) {
         const ShaderSpec& spec = kShaderSpecs[i];
         CachedPipeline& cp = out.pipelines[i];
+        // §J.3.e.Y 4Y.6 — Conv2D_CoopMat is best-effort: device may not
+        // support cooperative_matrix, in which case shader module / pipeline
+        // creation fails.  Disable just that entry (cp stays zeroed) and
+        // dispatchConvolution falls back to the non-coopmat shader.  All
+        // other shaders are mandatory — failure aborts.
+        const bool optional = (i == (int)ShaderKind::Conv2D_CoopMat);
+        auto failOptional = [&](const char* stage, VkResult vr) {
+            if (cp.layout)   { pfnDestroyPipelineLayout(device, cp.layout, nullptr);  cp.layout = VK_NULL_HANDLE; }
+            if (cp.dsl)      { pfnDestroyDescriptorSetLayout(device, cp.dsl, nullptr); cp.dsl    = VK_NULL_HANDLE; }
+            if (cp.module)   { pfnDestroyShaderModule(device, cp.module, nullptr);     cp.module = VK_NULL_HANDLE; }
+            cp.pipeline = VK_NULL_HANDLE;
+            cp.bindings = 0;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-RIFE-VK] PipelineCache: %s %s failed (rc=%d) — "
+                        "this is optional, falling back to non-coopmat path",
+                        spec.name, stage, (int)vr);
+        };
 
-        // 1. Compile GLSL → SPIR-V (ncnn glslang).
-        std::vector<uint32_t> spirv;
-        {
+        // 1. Acquire SPIR-V — either pre-compiled (4Y.6 coopmat) or via
+        //    ncnn glslang.
+        std::vector<uint32_t> spirvOwned;
+        const uint32_t* spirvPtr  = nullptr;
+        size_t          spirvWords = 0;
+        if (spec.spirvBin && spec.spirvWords > 0) {
+            spirvPtr   = spec.spirvBin;
+            spirvWords = spec.spirvWords;
+        } else {
             ncnn::Option opt;
-            if (ncnn::compile_spirv_module(spec.sourceFn(), opt, spirv) != 0
-                || spirv.empty()) {
+            if (ncnn::compile_spirv_module(spec.sourceFn(), opt, spirvOwned) != 0
+                || spirvOwned.empty()) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                              "[VIPLE-RIFE-VK] PipelineCache: %s compile failed",
                              spec.name);
                 destroyPipelineCache(out);
                 return false;
             }
+            spirvPtr   = spirvOwned.data();
+            spirvWords = spirvOwned.size();
         }
 
         // 2. VkShaderModule
         {
             VkShaderModuleCreateInfo smCi = {};
             smCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-            smCi.codeSize = spirv.size() * sizeof(uint32_t);
-            smCi.pCode = spirv.data();
-            if (pfnCreateShaderModule(device, &smCi, nullptr, &cp.module) != VK_SUCCESS) {
+            smCi.codeSize = spirvWords * sizeof(uint32_t);
+            smCi.pCode = spirvPtr;
+            VkResult vr = pfnCreateShaderModule(device, &smCi, nullptr, &cp.module);
+            if (vr != VK_SUCCESS) {
+                if (optional) { failOptional("CreateShaderModule", vr); continue; }
                 destroyPipelineCache(out);
                 return false;
             }
@@ -2872,7 +2906,9 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out,
             dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
             dslCi.bindingCount = (uint32_t)spec.bindingCount;
             dslCi.pBindings = dslB;
-            if (pfnCreateDescriptorSetLayout(device, &dslCi, nullptr, &cp.dsl) != VK_SUCCESS) {
+            VkResult vr = pfnCreateDescriptorSetLayout(device, &dslCi, nullptr, &cp.dsl);
+            if (vr != VK_SUCCESS) {
+                if (optional) { failOptional("CreateDescriptorSetLayout", vr); continue; }
                 destroyPipelineCache(out);
                 return false;
             }
@@ -2889,7 +2925,9 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out,
             plCi.pSetLayouts = &cp.dsl;
             plCi.pushConstantRangeCount = (spec.pushConstantBytes > 0) ? 1 : 0;
             plCi.pPushConstantRanges    = (spec.pushConstantBytes > 0) ? &pcRange : nullptr;
-            if (pfnCreatePipelineLayout(device, &plCi, nullptr, &cp.layout) != VK_SUCCESS) {
+            VkResult vr = pfnCreatePipelineLayout(device, &plCi, nullptr, &cp.layout);
+            if (vr != VK_SUCCESS) {
+                if (optional) { failOptional("CreatePipelineLayout", vr); continue; }
                 destroyPipelineCache(out);
                 return false;
             }
@@ -2904,10 +2942,17 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out,
             cpCi.stage.module = cp.module;
             cpCi.stage.pName = "main";
             cpCi.layout = cp.layout;
-            if (pfnCreateComputePipelines(device, out.vkCache, 1, &cpCi, nullptr, &cp.pipeline) != VK_SUCCESS) {
+            VkResult vr = pfnCreateComputePipelines(device, out.vkCache, 1, &cpCi, nullptr, &cp.pipeline);
+            if (vr != VK_SUCCESS) {
+                if (optional) { failOptional("CreateComputePipelines", vr); continue; }
                 destroyPipelineCache(out);
                 return false;
             }
+        }
+        if (optional) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-RIFE-VK] PipelineCache: %s built — Tensor Core path active",
+                        spec.name);
         }
     }
     return true;
@@ -3432,6 +3477,44 @@ bool dispatchConvolution(ExecState& e, const Layer& L) {
     pc.outDims[0] = outS->w; pc.outDims[1] = outS->h; pc.outDims[2] = outS->c;
     pc.conv[0] = kW; pc.conv[1] = kH; pc.conv[2] = sW; pc.conv[3] = pad;
     pc.lr = lr;
+
+    // §J.3.e.Y 4Y.6 — Tensor Core via cooperative_matrix, opt-in.
+    //
+    // Status: shader correctly produces output (validated against CPU
+    // referenceConv2D, runConv2DCoopMatGpuTest PASS at ~7.8e-4 max abs
+    // err on Conv_18/Conv_50).  But end-to-end RIFE-v4-lite has 40
+    // conv layers in the coopmat path, and the per-layer fp16
+    // quantisation of matB (im2col cast fp32→fp16) compounds through
+    // the network: Final.1 vs-ncnn jumps from mean=4.7e-5 max=0.013
+    // (PASS) to mean=3.2e-3 max=0.53 (FAIL — visible artifacts at
+    // worst pixels).  Net speedup is also marginal (~7%, 19.25 →
+    // 17.95 ms median on RTX 3060 at 256×256), because RIFE-v4-lite's
+    // conv layers are small and the per-tile im2col + fp32→fp16 cost
+    // eats most of the Tensor Core throughput win.
+    //
+    // Default-OFF until the precision regression is fixed.  Set
+    // VIPLE_RIFE_VK_COOPMAT=1 to opt in for benchmarking.
+    static const bool kCoopMatEnabled = []{
+        const char* s = std::getenv("VIPLE_RIFE_VK_COOPMAT");
+        return s && s[0] && s[0] != '0';
+    }();
+    if (kCoopMatEnabled) {
+        const int    K     = inS->c * kH * kW;
+        const int    outHW = outS->h * outS->w;
+        const bool   align = (outS->c % 16 == 0)
+                          && (outHW    % 16 == 0)
+                          && (K        % 16 == 0)
+                          && (sW == sH);
+        if (align
+            && e.pipelines.pipelines[(int)ShaderKind::Conv2D_CoopMat].pipeline
+               != VK_NULL_HANDLE)
+        {
+            return bindDispatch(e, ShaderKind::Conv2D_CoopMat, bufs, 4, &pc, sizeof(pc),
+                                (uint32_t)(outS->c / 16),
+                                (uint32_t)(outHW    / 16),
+                                1u);
+        }
+    }
 
     // §J.3.e.Y 4Y.4 — tiled k=3 s=1 specialised path covers 44 of 56
     // conv layers in flownet (the dominant case).  Stride=2 (12
