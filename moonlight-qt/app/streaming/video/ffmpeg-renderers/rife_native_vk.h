@@ -86,6 +86,29 @@ struct Layer {
     std::unordered_map<int, ParamValue> params; // param_id → value
 };
 
+enum class TensorDType : uint8_t {
+    Float32,    // raw fp32 stored in .bin
+    Float16,    // fp16 packed (preceded by 0x01306B47 flag in .bin; flag
+                // is consumed during load so byteOffset points at the
+                // first fp16 value, not the flag)
+};
+
+// One weight tensor consumed by a layer.  `byteOffset` indexes into
+// Model::weightBlob (a verbatim copy of .bin including flags), so
+// reading code must respect the type.
+struct WeightTensor {
+    QString     name;        // e.g. "Conv_16/weight" or "block0.convblock.0.beta"
+    int         layerIdx = -1;  // back-reference into Model::layers
+    int         n = 1;       // num_output (out channels)
+    int         c = 1;       // input channels
+    int         h = 1;
+    int         w = 1;
+    TensorDType dtype = TensorDType::Float32;
+    size_t      elemCount = 0;  // n * c * h * w
+    size_t      byteOffset = 0; // into weightBlob; points at first
+                                // value (not at the fp16 flag)
+};
+
 struct Model {
     int                magic = 0;       // expect 7767517
     int                layerCount = 0;
@@ -94,12 +117,46 @@ struct Model {
 
     // Stats (filled by parseParam)
     std::unordered_map<OpKind, int> opCounts;
+
+    // Filled by loadWeights: heap-resident copy of flownet.bin.
+    // Indices into this blob come from `tensors[i].byteOffset`.
+    std::vector<uint8_t> weightBlob;
+
+    // One tensor per layer-output that consumed weights from .bin.
+    // Order matches .param appearance (= .bin layout).  Each
+    // Convolution / Deconvolution layer contributes 1 weight tensor
+    // (and optionally 1 bias tensor when bias_term=1).  MemoryData
+    // contributes 1 tensor.  Indexed by name for executor lookup.
+    std::vector<WeightTensor>                  tensors;
+    std::unordered_map<QString, int>           tensorByName; // name → index
 };
 
 // Parses the ncnn-format text .param file at `path` into `out`.
 // Returns true on success; on failure logs an error and leaves `out`
 // in a partial state.
 bool parseParam(const QString& path, Model& out);
+
+// Reads `binPath` (raw fp32 packed, no per-tensor headers — the ncnn
+// "compact" .bin format produced by ncnn2bin / ncnn2int8 with the
+// no-header flag), walks `m.layers` in order to attribute byte ranges
+// to per-layer WeightTensor entries.  Convolution / Deconvolution /
+// MemoryData are weight-consuming.  Other ops (BinaryOp / ReLU / etc.)
+// don't read .bin.
+//
+// Layout (matches .param appearance order):
+//   • Convolution: param 6 = weight_data_size (n*c*h*w) → fp32 weights;
+//     if param 5 (bias_term) == 1, then num_output (param 0) more
+//     fp32 follow as bias.  param 1 = kernel size; in_channels =
+//     weight_data_size / (kernel*kernel*num_output).
+//   • Deconvolution: same layout as Convolution.  Note: weight order
+//     in ncnn for transposed conv is (in_ch, out_ch, kh, kw) — caller
+//     must transpose if shader expects (out_ch, in_ch, kh, kw).
+//   • MemoryData: param 0/1/2 = w/h/c → w*h*c fp32.
+//
+// On success, total bytes consumed must equal binPath file size; if
+// not, logs a mismatch and returns false (likely .param/.bin out of
+// sync — different model build).
+bool loadWeights(const QString& binPath, Model& m);
 
 // One-shot scaffold smoke — invoked by plvk.cpp init when
 // VIPLE_RIFE_NATIVE_VK_DUMP=1 is set.  Logs layer count / op

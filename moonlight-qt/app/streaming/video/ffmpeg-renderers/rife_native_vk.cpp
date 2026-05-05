@@ -11,6 +11,8 @@
 #include <QTextStream>
 #include <SDL.h>
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 
 namespace viple::rife_native_vk {
 
@@ -182,6 +184,160 @@ bool parseParam(const QString& path, Model& out) {
     return true;
 }
 
+// Helper: integer-typed param accessor with default.  ncnn writes ints
+// without a decimal point so our parser stored them as Int.
+static int64_t getInt(const Layer& L, int id, int64_t def = 0) {
+    auto it = L.params.find(id);
+    if (it == L.params.end()) return def;
+    if (it->second.kind == ParamValue::Int)   return it->second.i;
+    if (it->second.kind == ParamValue::Float) return (int64_t)it->second.f;
+    return def;
+}
+
+bool loadWeights(const QString& binPath, Model& m) {
+    QFile f(binPath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] loadWeights: cannot open %s",
+                     qUtf8Printable(binPath));
+        return false;
+    }
+    const qint64 fileSize = f.size();
+    m.weightBlob.resize((size_t)fileSize);
+    if (f.read(reinterpret_cast<char*>(m.weightBlob.data()), fileSize) != fileSize) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] loadWeights: short read from %s",
+                     qUtf8Printable(binPath));
+        m.weightBlob.clear();
+        return false;
+    }
+
+    m.tensors.clear();
+    m.tensorByName.clear();
+    size_t cursor = 0;
+
+    // ncnn fp16 magic: when a Convolution/Deconvolution weight tensor is
+    // saved from ncnn2bin in fp16 mode, its block in .bin starts with this
+    // 4-byte little-endian flag, then weight_data_size fp16 values.  Bias
+    // tensors and MemoryData stay raw fp32 (no flag).  Verified empirically
+    // for rife-v4.25-lite/flownet.bin (16128 fp32 MemoryData + 63 weight
+    // tensors with fp16 flag + 63 fp32 biases = 11,276,252 bytes exactly).
+    constexpr uint32_t kFp16Flag = 0x01306B47u;
+
+    auto pushFp32Tensor = [&](WeightTensor&& wt) {
+        wt.dtype     = TensorDType::Float32;
+        wt.elemCount = (size_t)wt.n * (size_t)wt.c * (size_t)wt.h * (size_t)wt.w;
+        wt.byteOffset = cursor;
+        cursor += wt.elemCount * sizeof(float);
+        m.tensorByName[wt.name] = (int)m.tensors.size();
+        m.tensors.push_back(std::move(wt));
+    };
+    auto pushConvWeightTensor = [&](WeightTensor&& wt) -> bool {
+        // Read the 4-byte flag first.
+        if (cursor + 4 > m.weightBlob.size()) return false;
+        uint32_t flag;
+        std::memcpy(&flag, m.weightBlob.data() + cursor, sizeof(flag));
+        cursor += 4;
+        if (flag != kFp16Flag && flag != 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-RIFE-VK] loadWeights: unexpected weight flag 0x%08X "
+                        "for layer '%s' (expected 0x01306B47 fp16 or 0x00000000 fp32)",
+                        flag, qUtf8Printable(wt.name));
+        }
+        wt.dtype     = (flag == kFp16Flag) ? TensorDType::Float16 : TensorDType::Float32;
+        wt.elemCount = (size_t)wt.n * (size_t)wt.c * (size_t)wt.h * (size_t)wt.w;
+        wt.byteOffset = cursor;
+        size_t bytesPerElem = (wt.dtype == TensorDType::Float16) ? 2 : 4;
+        cursor += wt.elemCount * bytesPerElem;
+        m.tensorByName[wt.name] = (int)m.tensors.size();
+        m.tensors.push_back(std::move(wt));
+        return true;
+    };
+
+    for (int idx = 0; idx < (int)m.layers.size(); ++idx) {
+        const Layer& L = m.layers[idx];
+        if (cursor > (size_t)fileSize) break;
+
+        if (L.kind == OpKind::MemoryData) {
+            // ncnn MemoryData params: 0=w, 1=h, 2=c.  Default 0 → 1.
+            int64_t w = std::max<int64_t>(1, getInt(L, 0, 1));
+            int64_t h = std::max<int64_t>(1, getInt(L, 1, 1));
+            int64_t c = std::max<int64_t>(1, getInt(L, 2, 1));
+            WeightTensor wt;
+            wt.name     = L.name;
+            wt.layerIdx = idx;
+            wt.n = (int)c; wt.c = 1; wt.h = (int)h; wt.w = (int)w;
+            pushFp32Tensor(std::move(wt));
+        } else if (L.kind == OpKind::Convolution || L.kind == OpKind::Deconvolution) {
+            // ncnn Convolution params:
+            //   0=num_output  1=kernel_w  (defaults: 11=k_w as 1)
+            //   2=dilation_w  3=stride_w  4=pad_left  5=bias_term
+            //   6=weight_data_size  9=activation_type
+            int64_t numOut = getInt(L, 0, 0);
+            int64_t kernel = getInt(L, 1, 1);
+            int64_t weightSize = getInt(L, 6, 0);
+            int64_t hasBias = getInt(L, 5, 0);
+            if (numOut <= 0 || weightSize <= 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-RIFE-VK] loadWeights: layer '%s' has bad numOut=%lld "
+                            "weightSize=%lld — skipping",
+                            qUtf8Printable(L.name), (long long)numOut, (long long)weightSize);
+                continue;
+            }
+            int64_t inChan = weightSize / (numOut * kernel * kernel);
+            if (inChan * numOut * kernel * kernel != weightSize) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-RIFE-VK] loadWeights: layer '%s' weight_size=%lld doesn't "
+                            "factor as numOut*kernel*kernel*in (numOut=%lld kernel=%lld) — using "
+                            "raw size, dim layout will be wrong",
+                            qUtf8Printable(L.name), (long long)weightSize,
+                            (long long)numOut, (long long)kernel);
+                inChan = 1;
+                kernel = (int64_t)std::sqrt((double)(weightSize / numOut));
+                if (kernel <= 0) kernel = 1;
+            }
+            WeightTensor wt;
+            wt.name     = L.name + "/weight";
+            wt.layerIdx = idx;
+            wt.n = (int)numOut;
+            wt.c = (int)inChan;
+            wt.h = (int)kernel;
+            wt.w = (int)kernel;
+            // Conv/Deconv weights have an fp16 flag header; biases don't.
+            if (!pushConvWeightTensor(std::move(wt))) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-RIFE-VK] loadWeights: ran out of bytes reading "
+                             "weight flag for layer '%s'", qUtf8Printable(L.name));
+                return false;
+            }
+            if (hasBias) {
+                WeightTensor wb;
+                wb.name     = L.name + "/bias";
+                wb.layerIdx = idx;
+                wb.n = (int)numOut;
+                wb.c = 1; wb.h = 1; wb.w = 1;
+                pushFp32Tensor(std::move(wb));
+            }
+        }
+        // Other op kinds (Input, Split, BinaryOp, ReLU, Crop, Concat,
+        // Interp, PixelShuffle, Sigmoid, Eltwise, RifeWarp, Unknown)
+        // do not consume .bin bytes.
+    }
+
+    if (cursor != (size_t)fileSize) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] loadWeights: byte mismatch — expected %lld bytes "
+                     "from %zu tensors, got file size %lld (delta=%lld)",
+                     (long long)cursor, m.tensors.size(),
+                     (long long)fileSize, (long long)fileSize - (long long)cursor);
+        return false;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] loadWeights OK: %zu tensors, %lld bytes (= .bin size)",
+                m.tensors.size(), (long long)fileSize);
+    return true;
+}
+
 void dumpModelSmoke(const QString& modelDir) {
     QString paramPath = modelDir + "/flownet.param";
     QString binPath   = modelDir + "/flownet.bin";
@@ -237,6 +393,45 @@ void dumpModelSmoke(const QString& modelDir) {
     for (int i = std::max(0, (int)m.layers.size() - 3); i < (int)m.layers.size(); ++i) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%s",
                     qUtf8Printable(layerLine(m.layers[i])));
+    }
+
+    // §J.3.e.X Phase 2 — load weights and verify total bytes match.
+    // Failure here signals .param/.bin out-of-sync (different model build).
+    if (!loadWeights(binPath, m)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] weight load FAILED — Phase 2 won't proceed");
+        return;
+    }
+    // Sample a few tensors so we can spot-check sizes line up with .param.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-RIFE-VK] first 3 weight tensors:");
+    for (int i = 0; i < (int)m.tensors.size() && i < 3; ++i) {
+        const auto& t = m.tensors[i];
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "  '%s' n=%d c=%d h=%d w=%d %s (%zu elems @ +%zu)",
+                    qUtf8Printable(t.name), t.n, t.c, t.h, t.w,
+                    t.dtype == TensorDType::Float16 ? "fp16" : "fp32",
+                    t.elemCount, t.byteOffset);
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-RIFE-VK] last 3 weight tensors:");
+    for (int i = std::max(0, (int)m.tensors.size() - 3); i < (int)m.tensors.size(); ++i) {
+        const auto& t = m.tensors[i];
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "  '%s' n=%d c=%d h=%d w=%d %s (%zu elems @ +%zu)",
+                    qUtf8Printable(t.name), t.n, t.c, t.h, t.w,
+                    t.dtype == TensorDType::Float16 ? "fp16" : "fp32",
+                    t.elemCount, t.byteOffset);
+    }
+    // Spot-check first MemoryData tensor's first 3 fp32 values against the
+    // hex inspection (0.022, 0.103, 0.053) to confirm raw-fp32 layout.
+    if (!m.tensors.empty()) {
+        const auto& t0 = m.tensors[0];
+        if (t0.byteOffset + 3 * sizeof(float) <= m.weightBlob.size()) {
+            const float* p = reinterpret_cast<const float*>(m.weightBlob.data() + t0.byteOffset);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-RIFE-VK] tensor[0] '%s' first 3 floats: %.6f %.6f %.6f "
+                        "(expect ~0.022 ~0.103 ~0.053 from raw .bin inspection)",
+                        qUtf8Printable(t0.name), p[0], p[1], p[2]);
+        }
     }
 }
 
