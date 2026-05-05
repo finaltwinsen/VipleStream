@@ -12,7 +12,9 @@
 
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
-| **Active (主戰場)** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限）|
+| **Active (主戰場)** | **§J.3.e.Y** native RIFE perf — Tensor Core 4Y.6 | 6 commit 86→22ms 4× cumulative；Final.1 vs-ncnn correctness 收緊到 mean 4.7e-5 (9× 改善)；下個 session 主戰場 4Y.6 `VK_KHR_cooperative_matrix` (RTX 30+ Tensor Core, fp16 GEMM) 預期 1.5-2.5×→9-15ms |
+| **Done (correctness)** | **§J.3.e.X** 手刻 RIFE Vulkan inference | 17 commits 8807886..cba641d，0 ncnn dep；通過 vs-ncnn correctness gate，標準 standalone via `VIPLE_RIFE_NATIVE_VK_TEST=1`；production NcnnFRUC integration (Final.3b) deferred |
+| **Active** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限）|
 | **Negative result (§J.3.g)** | **FRUC ME 解析度下放：不是 bottleneck** | 2026-05-03 實作完整 ME→1080p / 720p downsample，4K120 + FRUC 仍卡 75-81 fps；DUAL off 也一樣。ME / DUAL 都不是限制；推測 warp shader (per-pixel @ 4K) + memory bandwidth + sync barriers。需要 GPU per-stage timing 才能定位。實作已 revert |
 | **HW-pending** | **§I.D** Android Vulkan FRUC async compute | D.2.0–D.2.5 已 ship + Pixel 5 verify；剩自然 45fps→90Hz ideal 1:2 比例 — Pixel 5 panel 鎖 60/90Hz、GameManagerService 鎖 60fps，需 LTPO panel hw 才能驗 |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 3d.6 — AV1 native VK decode grey | 9 個 parser bug 修完仍 grey；NV driver 596.36 + AV1 vkCmdDecodeVideoKHR 黑/灰；§J.3.f ffmpeg 包裝路徑已 cover AV1，這條 deprecated |
@@ -216,16 +218,62 @@ Pixel 5 panel 只支援 60Hz/90Hz mode，GameManagerService 又把 app default f
 
 4K@120 SW decode 仍是 CPU codec-bound（H.264 90fps / AV1 76fps / HEVC 28fps），需要更新世代 CPU（Zen 5 / Raptor Lake）才有可能往上推；client SW path 的 Vulkan 上傳路徑本身已不是瓶頸（renderFrameSw 整段 < 3ms 即使 4K）。
 
-### §J.3.e.X 手刻 RIFE Vulkan pipeline（long-term）
+### §J.3.e.X 手刻 RIFE Vulkan pipeline（**✅ correctness milestone DONE 2026-05-05**）
 
-**動機：** 跳過 ncnn 整個依賴，自己用 ~10-15 個 raw VkPipeline 實作 RIFE forward；權重 mmap 進 VkBuffer，PipelineCache binary 開機建一次。
+**達成：** 從零實作 RIFE-v4.25-lite 全套 Vulkan inference，不依賴 ncnn。
+17 個 commit (`8807886..cba641d`) 涵蓋 .param parser → 11 種 op shader →
+389-layer graph executor → vs-ncnn correctness gate。完整 milestone 細節
+跟 commit map 在 [`docs/J.3.e.XY_native_rife_pipeline.md`](J.3.e.XY_native_rife_pipeline.md)。
 
-**預期：** latency 從 Path B 的 ~12ms 壓到 ~3-5ms。
+**Correctness：** Final.1 vs-ncnn `mean=4.72e-05 max=0.014 frac>1e-2=0.00%`
+（4Y.5a 後）。99.49% pixel diff ≤ 0.01 視覺等價，0% pixel diff > 0.01.
 
-**觸發條件：**
-- Path B 量測後 PCIe staging cost 占 budget 30%+
-- 或要推 1080p/4K
-- 或要砍 ncnn DLL 依賴
+**Production 整合狀態：** 標準的 standalone 路徑可由 env var
+`VIPLE_RIFE_NATIVE_VK_TEST=1` 觸發跑全套 self-test。production
+streaming 路徑**沒有改動**，仍走 NcnnFRUC. Final.3b（接成 NcnnFRUC
+的 Linux fallback）刻意 deferred 直到 Linux test VM 有 ncnn-build-fail
+環境可重現驗測。
+
+### §J.3.e.Y native RIFE perf optimisation（**🟡 active 2026-05-05..06**）
+
+**目標：** 把 §J.3.e.X 的 86 ms cold-GPU baseline 壓到比 ncnn 8.6 ms 還快。
+
+**目前進度：** 6 個 commit (`876ce45..4be1a6b`) 累積 4× 加速到 ~22 ms cold-GPU.
+詳細 phase map 在 [`docs/J.3.e.XY_native_rife_pipeline.md`](J.3.e.XY_native_rife_pipeline.md)
+的 §J.3.e.Y 段落.
+
+| Phase | 內容 | 結果 |
+|---|---|---|
+| 4Y.1a | `findHostVisibleMemoryType` 偏好 BAR/ReBAR | 86 → 43.6 ms (2.0×) |
+| 4Y.0 | per-phase wall-clock instrument | (no perf Δ, 找出 readback 是 24% 大頭) |
+| 4Y.1b | out0 host-cached staging buffer | 43.6 → 24.0 ms (3.6×) |
+| 4Y.4 | tiled shared-mem Conv2D for k=3 s=1 | 24.0 → 21.5 ms (4.0×) |
+| 4Y.4-stride2 | s=2 tiled (negative — barrier overhead) | (reverted) |
+| 4Y.5a | fp16 weight storage | 21.5 → ~22 ms (perf 持平), **vs-ncnn correctness 9× 收緊** |
+
+**Profile 後仍剩：** 89% 是純 GPU compute time. shader-level optimisation
+才有再壓的空間.
+
+**Thermal noise 警告：** GPU sustained workload vs short cold-GPU benchmark
+行為差很大 (ncnn 退化 10× vs native 2×). 進一步 1.5× 量級的優化 benchmark
+驗測需要 fixed clock (`nvidia-smi --lock-gpu-clocks`) 或 cool-down protocol.
+
+**下一步候選（依 ROI）：**
+
+- **4Y.6 Tensor Core / `VK_KHR_cooperative_matrix`** — RTX 30+ 16×16 fp16
+  matmul 硬體單元，預期 1.5-2.5× 加速到 ~9-15 ms. **下個 session 主戰
+  場.** 工程要點：enable `cooperativeMatrix` device feature, query
+  supported (M,N,K) tuples, 把 conv reformulate 成 GEMM (im2col),
+  保留 4Y.4 tiled path 當非-RTX fallback. 細節在 milestone doc 的
+  「下一步」段落.
+- **4Y.5b activation fp16 storage** — bandwidth 大頭，但 11 個 shader
+  的 input/output binding 全要改, 4-6h 工程, dynamic range 風險低
+  (activation magnitude profile 過 ~6, fp16 上限 65504).
+- **4Y.7 dispatch fusion** — Conv→ReLU→BinOp×beta chain 合併, 預期
+  1.1-1.2× (小, 但 shader 改動量適中).
+
+**Final.3b 接 NcnnFRUC**: 仍 deferred until Linux env. 預估 4-6h 工程,
+medium-high risk (動 production hot path).
 
 ### §J.3.f AV1 / HEVC / H.264 Vulkan hwaccel via ffmpeg（**✅ DONE 2026-05-03 / integration b2b7afd**）
 
