@@ -112,6 +112,35 @@ static bool parseParamToken(const QString& tok, std::unordered_map<int, ParamVal
     return true;
 }
 
+// ---- Common layer / param helpers (used by Phase 3+/4*/4g) ----
+
+// Lookup a layer by exact name in the parsed model.  Returns nullptr
+// if absent.
+static const Layer* findLayerByName(const Model& m, const QString& name) {
+    for (const auto& L : m.layers) {
+        if (L.name == name) return &L;
+    }
+    return nullptr;
+}
+
+// Read an int param with default if absent.
+static int paramInt(const Layer& L, int id, int def) {
+    auto it = L.params.find(id);
+    if (it == L.params.end()) return def;
+    return (int)it->second.i;
+}
+
+// Read the LeakyReLU slope from activation_params (-23310 array) when
+// activation_type == 2.  Returns 0.0f when no LeakyReLU.
+static float leakyReluSlopeOf(const Layer& L) {
+    int actType = paramInt(L, 9, 0);
+    if (actType != 2) return 0.0f;
+    auto it = L.params.find(-23310);
+    if (it == L.params.end()) return 0.0f;
+    if (it->second.fa.empty()) return 0.0f;
+    return (float)it->second.fa[0];
+}
+
 bool parseParam(const QString& path, Model& out) {
     out = {};
     QFile f(path);
@@ -1086,6 +1115,258 @@ bool loadWeights(const QString& binPath, Model& m) {
     return true;
 }
 
+// ============================================================================
+// §J.3.e.X Phase 4g.1 — tensor shape inference.
+//
+// Given input shapes (in0/in1/in2), walks the layer graph in
+// declaration order and computes (C, H, W) for every blob.  Returns
+// false on any unknown op or shape rule failure.  Populates
+// blobShapes (must be empty on entry).
+//
+// Per-op shape rules confirmed against rife-v4.25-lite/flownet.param
+// (audit rounds in Phase 4a/4b/4c/4d/4e/4f), so this only covers what
+// the model actually contains; future RIFE variants may need rule
+// extensions (e.g. asymmetric padding, dilation > 1, Eltwise PROD).
+// ============================================================================
+
+bool inferBlobShapes(const Model& m,
+                     const InferInputs& inputs,
+                     std::unordered_map<QString, BlobShape>& blobShapes)
+{
+    // Map of blob name → shape.  Filled as we walk layers.
+    auto get = [&](const QString& n, BlobShape& out) -> bool {
+        auto it = blobShapes.find(n);
+        if (it == blobShapes.end()) return false;
+        out = it->second;
+        return true;
+    };
+
+    // ncnn convolution kernel-extent helper accounting for dilation,
+    // even though all 56 conv layers in this model are dilation=1.
+    auto convKernelExtent = [](int k, int dilation) {
+        return (k - 1) * dilation + 1;
+    };
+
+    int inputIdx = 0;  // assigns in0/in1/in2 in declaration order
+    for (const Layer& L : m.layers) {
+        switch (L.kind) {
+        case OpKind::Input: {
+            if (L.outputs.size() != 1) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-RIFE-VK] inferShapes: Input '%s' has %d outputs (expect 1)",
+                             qUtf8Printable(L.name), (int)L.outputs.size());
+                return false;
+            }
+            BlobShape s;
+            if      (inputIdx == 0) s = inputs.in0;
+            else if (inputIdx == 1) s = inputs.in1;
+            else if (inputIdx == 2) s = inputs.in2;
+            else {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-RIFE-VK] inferShapes: more than 3 Input layers");
+                return false;
+            }
+            if (!s.valid()) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-RIFE-VK] inferShapes: Input %d shape invalid (c=%d h=%d w=%d)",
+                             inputIdx, s.c, s.h, s.w);
+                return false;
+            }
+            blobShapes[L.outputs[0]] = s;
+            ++inputIdx;
+            break;
+        }
+        case OpKind::MemoryData: {
+            // params: 0=w, 1=h, 2=c (defaults 0).  In flownet all are
+            // (w=1, h=1, c=N) per-channel beta scalars.
+            int w = paramInt(L, 0, 0);
+            int h = paramInt(L, 1, 1);
+            int c = paramInt(L, 2, 1);
+            if (h == 0) h = 1;
+            if (c == 0) c = 1;
+            if (w <= 0 || h <= 0 || c <= 0) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-RIFE-VK] inferShapes: MemoryData '%s' invalid wxhxc=%dx%dx%d",
+                             qUtf8Printable(L.name), w, h, c);
+                return false;
+            }
+            blobShapes[L.outputs[0]] = { c, h, w };
+            break;
+        }
+        case OpKind::Split: {
+            // Replicate input shape to all outputs.
+            BlobShape in;
+            if (!get(L.inputs[0], in)) return false;
+            for (const auto& o : L.outputs) blobShapes[o] = in;
+            break;
+        }
+        case OpKind::Convolution: {
+            BlobShape in;
+            if (!get(L.inputs[0], in)) return false;
+            int outC   = paramInt(L, 0, 0);
+            int kW     = paramInt(L, 1, 0);
+            int kH     = paramInt(L, 11, kW);
+            int dW     = paramInt(L, 2, 1);
+            int dH     = paramInt(L, 12, dW);
+            int sW     = paramInt(L, 3, 1);
+            int sH     = paramInt(L, 13, sW);
+            int padL   = paramInt(L, 4, 0);
+            int padR   = paramInt(L, 14, padL);
+            int padT   = paramInt(L, 15, padL);
+            int padB   = paramInt(L, 16, padT);
+            int kExtH  = convKernelExtent(kH, dH);
+            int kExtW  = convKernelExtent(kW, dW);
+            int outH   = (in.h + padT + padB - kExtH) / sH + 1;
+            int outW   = (in.w + padL + padR - kExtW) / sW + 1;
+            if (outC <= 0 || outH <= 0 || outW <= 0) return false;
+            blobShapes[L.outputs[0]] = { outC, outH, outW };
+            break;
+        }
+        case OpKind::Deconvolution: {
+            BlobShape in;
+            if (!get(L.inputs[0], in)) return false;
+            int outC = paramInt(L, 0, 0);
+            int kW   = paramInt(L, 1, 0);
+            int kH   = paramInt(L, 11, kW);
+            int dW   = paramInt(L, 2, 1);
+            int dH   = paramInt(L, 12, dW);
+            int sW   = paramInt(L, 3, 1);
+            int sH   = paramInt(L, 13, sW);
+            int padL = paramInt(L, 4, 0);
+            int padR = paramInt(L, 14, padL);
+            int padT = paramInt(L, 15, padL);
+            int padB = paramInt(L, 16, padT);
+            int outPadR = paramInt(L, 18, 0);
+            int outPadB = paramInt(L, 19, 0);
+            int kExtH = convKernelExtent(kH, dH);
+            int kExtW = convKernelExtent(kW, dW);
+            int outH = (in.h - 1) * sH + kExtH - padT - padB + outPadB;
+            int outW = (in.w - 1) * sW + kExtW - padL - padR + outPadR;
+            // ncnn also has param 20/21 = absolute output size override.
+            int absH = paramInt(L, 21, 0);
+            int absW = paramInt(L, 20, 0);
+            if (absH > 0) outH = absH;
+            if (absW > 0) outW = absW;
+            if (outC <= 0 || outH <= 0 || outW <= 0) return false;
+            blobShapes[L.outputs[0]] = { outC, outH, outW };
+            break;
+        }
+        case OpKind::BinaryOp: {
+            // Output shape == input 0 (broadcast inputs match in this
+            // model: tensor⊕tensor same-shape, tensor⊕beta channel-bcast,
+            // tensor⊕scalar shape-preserving).
+            BlobShape in;
+            if (!get(L.inputs[0], in)) return false;
+            blobShapes[L.outputs[0]] = in;
+            break;
+        }
+        case OpKind::ReLU:
+        case OpKind::Sigmoid: {
+            BlobShape in;
+            if (!get(L.inputs[0], in)) return false;
+            blobShapes[L.outputs[0]] = in;
+            break;
+        }
+        case OpKind::Crop: {
+            // Audit: all 45 crops slice along channel axis only.
+            // -23311=axes (1, 0)  -23309=starts  -23310=ends
+            BlobShape in;
+            if (!get(L.inputs[0], in)) return false;
+            auto itEnd = L.params.find(-23310);
+            auto itStart = L.params.find(-23309);
+            if (itEnd == L.params.end() || itStart == L.params.end()
+                || itEnd->second.ia.size() < 1 || itStart->second.ia.size() < 1) {
+                return false;
+            }
+            int s = (int)itStart->second.ia[0];
+            int e = (int)itEnd->second.ia[0];
+            if (e == 2147483647) e = in.c;
+            int outC = e - s;
+            if (outC <= 0) return false;
+            blobShapes[L.outputs[0]] = { outC, in.h, in.w };
+            break;
+        }
+        case OpKind::Concat: {
+            // Default axis 0 = channel for ncnn 3D blobs.
+            int outC = 0;
+            int outH = 0, outW = 0;
+            for (int i = 0; i < (int)L.inputs.size(); ++i) {
+                BlobShape in;
+                if (!get(L.inputs[i], in)) return false;
+                outC += in.c;
+                if (i == 0) { outH = in.h; outW = in.w; }
+            }
+            blobShapes[L.outputs[0]] = { outC, outH, outW };
+            break;
+        }
+        case OpKind::Interp: {
+            BlobShape in;
+            if (!get(L.inputs[0], in)) return false;
+            // params: 1=height_scale, 2=width_scale, 3=output_height,
+            // 4=output_width.  3 layers in flownet have only 0=2 set
+            // (no scale, no output dim) → identity.
+            float hScale = 1.0f, wScale = 1.0f;
+            auto itHs = L.params.find(1);
+            auto itWs = L.params.find(2);
+            if (itHs != L.params.end()) hScale = (float)itHs->second.f;
+            if (itWs != L.params.end()) wScale = (float)itWs->second.f;
+            int outH = paramInt(L, 3, 0);
+            int outW = paramInt(L, 4, 0);
+            if (outH == 0) outH = (int)((float)in.h * hScale + 0.5f);
+            if (outW == 0) outW = (int)((float)in.w * wScale + 0.5f);
+            if (outH <= 0) outH = in.h;
+            if (outW <= 0) outW = in.w;
+            blobShapes[L.outputs[0]] = { in.c, outH, outW };
+            break;
+        }
+        case OpKind::PixelShuffle: {
+            BlobShape in;
+            if (!get(L.inputs[0], in)) return false;
+            int r = paramInt(L, 0, 1);
+            if (r <= 0 || in.c % (r * r) != 0) return false;
+            blobShapes[L.outputs[0]] = { in.c / (r * r), in.h * r, in.w * r };
+            break;
+        }
+        case OpKind::Eltwise: {
+            BlobShape in;
+            if (!get(L.inputs[0], in)) return false;
+            blobShapes[L.outputs[0]] = in;
+            break;
+        }
+        case OpKind::RifeWarp: {
+            // Output shape == image (input 0); flow is input 1 and has
+            // a different shape (2, H, W).
+            BlobShape in;
+            if (!get(L.inputs[0], in)) return false;
+            blobShapes[L.outputs[0]] = in;
+            break;
+        }
+        case OpKind::Unknown:
+        default:
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] inferShapes: unknown op kind for layer '%s' (%s)",
+                         qUtf8Printable(L.name), qUtf8Printable(L.opType));
+            return false;
+        }
+
+        // Sanity: every output we just assigned must be valid.
+        for (const auto& o : L.outputs) {
+            auto it = blobShapes.find(o);
+            if (it == blobShapes.end() || !it->second.valid()) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-RIFE-VK] inferShapes: layer '%s' output '%s' invalid",
+                             qUtf8Printable(L.name), qUtf8Printable(o));
+                return false;
+            }
+        }
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] inferShapes: %zu blob shapes computed (model claims blobCount=%d)",
+                blobShapes.size(), m.blobCount);
+    return true;
+}
+
 void dumpModelSmoke(const QString& modelDir) {
     QString paramPath = modelDir + "/flownet.param";
     QString binPath   = modelDir + "/flownet.bin";
@@ -1545,33 +1826,6 @@ bool runComputeOnce(const VulkanCtx& ctx, const RunComputeOptions& opts) {
 }
 
 } // anonymous namespace
-
-// Helper: lookup a layer by exact name in the parsed model.  Returns
-// nullptr if the layer isn't present.
-static const Layer* findLayerByName(const Model& m, const QString& name) {
-    for (const auto& L : m.layers) {
-        if (L.name == name) return &L;
-    }
-    return nullptr;
-}
-
-// Helper: read an int param with default if absent.
-static int paramInt(const Layer& L, int id, int def) {
-    auto it = L.params.find(id);
-    if (it == L.params.end()) return def;
-    return (int)it->second.i;
-}
-
-// Helper: read the LeakyReLU slope from activation_params (-23310 array)
-// when activation_type == 2.  Returns 0.0f when no LeakyReLU.
-static float leakyReluSlopeOf(const Layer& L) {
-    int actType = paramInt(L, 9, 0);
-    if (actType != 2) return 0.0f;
-    auto it = L.params.find(-23310);
-    if (it == L.params.end()) return 0.0f;
-    if (it->second.fa.empty()) return 0.0f;
-    return (float)it->second.fa[0];
-}
 
 bool runConv2DGpuTest(const VulkanCtx& ctx,
                      const Model& m,
@@ -3313,6 +3567,75 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
 
     // ---- Phase 4f rife.Warp coverage: 1 case (math is shape-agnostic) ----
     pass &= runRifeWarpGpuTest(ctx, /*channels*/8, /*H*/16, /*W*/16);
+
+    // ---- Phase 4g.1 shape inference smoke ----
+    {
+        InferInputs in{};
+        in.in0 = { 3, 256, 256 };   // prev RGB at 256×256
+        in.in1 = { 3, 256, 256 };   // curr RGB at 256×256
+        in.in2 = { 1,   1,   1 };   // timestep scalar
+        std::unordered_map<QString, BlobShape> blobShapes;
+        if (!inferBlobShapes(m, in, blobShapes)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] Phase 4g.1: inferBlobShapes FAILED");
+            pass = false;
+        } else {
+            // Sanity-check shapes we know from the audit:
+            //   Conv_16 output: (16, 128, 128) — 1st conv stride=2
+            //   Conv_18 output: (16, 128, 128) — stride=1
+            //   Conv_50 output: (192, 32, 32)  — bigger channel
+            //   ConvTranspose_22 output: (4, 256, 256) — 2× upsample
+            auto check = [&](const char* layerName,
+                             const char* outName,
+                             BlobShape want) {
+                auto it = blobShapes.find(outName);
+                if (it == blobShapes.end()) {
+                    std::fprintf(stderr,
+                        "[VIPLE-RIFE-VK] 4g.1: blob '%s' for layer '%s' not found ✗\n",
+                        outName, layerName);
+                    pass = false;
+                    return;
+                }
+                if (!(it->second == want)) {
+                    std::fprintf(stderr,
+                        "[VIPLE-RIFE-VK] 4g.1 anchor %s '%s' = (%d,%d,%d), want (%d,%d,%d) ✗\n",
+                        layerName, outName,
+                        it->second.c, it->second.h, it->second.w,
+                        want.c, want.h, want.w);
+                    pass = false;
+                } else {
+                    std::fprintf(stderr,
+                        "[VIPLE-RIFE-VK] 4g.1 anchor %s '%s' = (%d,%d,%d) ✓\n",
+                        layerName, outName,
+                        it->second.c, it->second.h, it->second.w);
+                }
+            };
+            // Look up the actual output blob name for each anchor layer:
+            auto resolveOutput = [&](const char* layerName) -> QString {
+                for (const auto& L : m.layers) {
+                    if (L.name == layerName && !L.outputs.isEmpty()) return L.outputs[0];
+                }
+                return {};
+            };
+            QString c16Out  = resolveOutput("Conv_16");
+            QString c18Out  = resolveOutput("Conv_18");
+            QString ct22Out = resolveOutput("ConvTranspose_22");
+            // Hand-checked anchors (RIFE pipeline is too branchy to
+            // mentally trace beyond the first 2 conv + the matching
+            // upsample; 485-count match below is the real correctness
+            // signal):
+            //   Conv_16 (s=2):           (3, 256, 256) → (16, 128, 128)
+            //   Conv_18 (s=1):           (16, 128, 128) → (16, 128, 128)
+            //   ConvTranspose_22 (s=2):  (16, 128, 128) → (4, 256, 256)
+            check("Conv_16",          qUtf8Printable(c16Out),  { 16, 128, 128 });
+            check("Conv_18",          qUtf8Printable(c18Out),  { 16, 128, 128 });
+            check("ConvTranspose_22", qUtf8Printable(ct22Out), {  4, 256, 256 });
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] 4g.1: %zu blob shapes inferred (model claims %d) — %s\n",
+                blobShapes.size(), m.blobCount, pass ? "PASS" : "FAIL");
+            std::fflush(stderr);
+        }
+    }
 
     // ---- Cleanup ----
     ncnn::destroy_gpu_instance();

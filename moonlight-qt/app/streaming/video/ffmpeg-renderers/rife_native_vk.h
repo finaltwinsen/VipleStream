@@ -318,6 +318,32 @@ bool runRifeWarpGpuTest(const VulkanCtx& ctx,
                         int channels, int H, int W,
                         float tolerance = 1e-5f);
 
+// ===== Phase 4g graph executor — incremental rollout starts here =====
+//
+// 4g.1: tensor shape inference.  Given input shapes (in0/in1/in2),
+// propagates through every layer to compute each blob's (C, H, W) so
+// downstream phases (buffer pool, dispatch handlers, end-to-end gate)
+// have known sizes to allocate against.  Returns false on any
+// unrecognised op or unresolvable shape.
+
+struct BlobShape {
+    int c = 0;
+    int h = 0;
+    int w = 0;
+    bool valid() const { return c > 0 && h > 0 && w > 0; }
+    bool operator==(const BlobShape& o) const { return c == o.c && h == o.h && w == o.w; }
+};
+
+struct InferInputs {
+    BlobShape in0;  // prev RGB frame
+    BlobShape in1;  // curr RGB frame
+    BlobShape in2;  // timestep scalar (typically 1×1×1)
+};
+
+bool inferBlobShapes(const Model& m,
+                     const InferInputs& inputs,
+                     std::unordered_map<QString, BlobShape>& blobShapes);
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.
