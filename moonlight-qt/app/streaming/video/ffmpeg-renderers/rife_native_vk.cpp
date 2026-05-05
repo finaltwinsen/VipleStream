@@ -1522,6 +1522,35 @@ uint32_t findHostVisibleMemoryType(VkPhysicalDeviceMemoryProperties& mp,
     return UINT32_MAX;
 }
 
+// §J.3.e.Y 4Y.1b — find a memory type optimised for CPU READS (host-
+// cached, NOT device-local).  GPU writes still happen via a
+// vkCmdCopyBuffer from device-local source, so we don't need fast
+// GPU access here.  HOST_CACHED gives full DDR4 read bandwidth via
+// CPU cache; falls back to HOST_COHERENT (still cacheable on most
+// platforms, just no explicit cache bit) when CACHED isn't exposed.
+uint32_t findHostCachedMemoryType(VkPhysicalDeviceMemoryProperties& mp,
+                                    uint32_t typeBits) {
+    const VkMemoryPropertyFlags wantCached = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                                           | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    const VkMemoryPropertyFlags wantPlain  = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    // Reject device-local — that's where the WC slow-read trap lives.
+    auto isOk = [](VkMemoryPropertyFlags f, VkMemoryPropertyFlags want) {
+        return (f & want) == want
+            && (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0;
+    };
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+        if (!(typeBits & (1u << i))) continue;
+        if (isOk(mp.memoryTypes[i].propertyFlags, wantCached)) return i;
+    }
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+        if (!(typeBits & (1u << i))) continue;
+        if (isOk(mp.memoryTypes[i].propertyFlags, wantPlain)) return i;
+    }
+    return UINT32_MAX;
+}
+
 struct GpuBuffer {
     VkBuffer        buf = VK_NULL_HANDLE;
     VkDeviceMemory  mem = VK_NULL_HANDLE;
@@ -1550,6 +1579,42 @@ bool createHostBuffer(VkDevice device,
     VkMemoryRequirements mr = {};
     pfnGetReq(device, out.buf, &mr);
     uint32_t typeIdx = findHostVisibleMemoryType(mp, mr.memoryTypeBits);
+    if (typeIdx == UINT32_MAX) return false;
+    VkMemoryAllocateInfo mai = {};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize  = mr.size;
+    mai.memoryTypeIndex = typeIdx;
+    if (pfnAlloc(device, &mai, nullptr, &out.mem) != VK_SUCCESS) return false;
+    if (pfnBind(device, out.buf, out.mem, 0) != VK_SUCCESS) return false;
+    if (pfnMap(device, out.mem, 0, VK_WHOLE_SIZE, 0, &out.mapped) != VK_SUCCESS) return false;
+    return true;
+}
+
+// §J.3.e.Y 4Y.1b — same as createHostBuffer but routes the allocation
+// through findHostCachedMemoryType, picking host-cached system RAM
+// (NOT BAR / device-local) so CPU reads hit DDR4 cache speed.  Used
+// for the out0 readback staging.
+bool createCachedHostBuffer(VkDevice device,
+                            VkPhysicalDeviceMemoryProperties& mp,
+                            PFN_vkCreateBuffer pfnCreateBuffer,
+                            PFN_vkGetBufferMemoryRequirements pfnGetReq,
+                            PFN_vkAllocateMemory pfnAlloc,
+                            PFN_vkBindBufferMemory pfnBind,
+                            PFN_vkMapMemory pfnMap,
+                            VkDeviceSize size, GpuBuffer& out)
+{
+    out.size = (size_t)size;
+    VkBufferCreateInfo bci = {};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size  = size;
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+              | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+              | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (pfnCreateBuffer(device, &bci, nullptr, &out.buf) != VK_SUCCESS) return false;
+    VkMemoryRequirements mr = {};
+    pfnGetReq(device, out.buf, &mr);
+    uint32_t typeIdx = findHostCachedMemoryType(mp, mr.memoryTypeBits);
     if (typeIdx == UINT32_MAX) return false;
     VkMemoryAllocateInfo mai = {};
     mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -2122,12 +2187,19 @@ struct BufferPool {
     PFN_vkFreeMemory                          pfnFreeMem = nullptr;
     std::unordered_map<QString, GpuBuffer>    blobs;
     std::unordered_map<QString, GpuBuffer>    tensors;
+    // §J.3.e.Y 4Y.1b — host-cached staging for out0 readback.
+    // GPU writes out0 to the BAR-resident blob buffer, then a final
+    // vkCmdCopyBuffer at the tail of the command buffer mirrors it
+    // here.  CPU memcpy-out reads cached system RAM (~25 GB/s)
+    // instead of the WC BAR memory (~75 MB/s).
+    GpuBuffer                                 outReadback;
 };
 
 void destroyBufferPool(BufferPool& p) {
     if (p.device == VK_NULL_HANDLE) return;
     for (auto& kv : p.blobs)   destroyHostBuffer(p.device, p.pfnUnmap, p.pfnDestroyBuf, p.pfnFreeMem, kv.second);
     for (auto& kv : p.tensors) destroyHostBuffer(p.device, p.pfnUnmap, p.pfnDestroyBuf, p.pfnFreeMem, kv.second);
+    destroyHostBuffer(p.device, p.pfnUnmap, p.pfnDestroyBuf, p.pfnFreeMem, p.outReadback);
     p.blobs.clear();
     p.tensors.clear();
     p.device = VK_NULL_HANDLE;
@@ -2183,6 +2255,20 @@ bool buildBufferPool(const VulkanCtx& ctx,
         }
         std::memset(buf.mapped, 0, buf.size);
         out.blobs.emplace(name, buf);
+    }
+
+    // ---- §J.3.e.Y 4Y.1b out0 readback staging (host-cached) ----
+    {
+        auto outIt = out.blobs.find("out0");
+        if (outIt != out.blobs.end()) {
+            if (!createCachedHostBuffer(device, memProps,
+                                        pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                                        pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                                        outIt->second.size, out.outReadback)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-RIFE-VK] BufferPool: out0 staging alloc failed (continuing — readback will use BAR memory)");
+            }
+        }
     }
 
     // ---- Weight/bias tensor buffers (Conv / Deconv / MemoryData) ----
@@ -5221,6 +5307,21 @@ bool RifeNativeExecutor::runInference(const float* in0Data,
         }
         emitComputeBarrier(m_impl->state);
     }
+    // §J.3.e.Y 4Y.1b — copy out0 from BAR-resident blob to host-cached
+    // staging buffer so the post-fence CPU read hits cacheable memory.
+    if (m_impl->state.buffers.outReadback.buf != VK_NULL_HANDLE) {
+        auto outIt = m_impl->state.buffers.blobs.find("out0");
+        if (outIt != m_impl->state.buffers.blobs.end()) {
+            VkBufferCopy region = {};
+            region.srcOffset = 0;
+            region.dstOffset = 0;
+            region.size = outIt->second.size;
+            m_impl->state.pfnCopyBuf(m_impl->state.cmd,
+                                     outIt->second.buf,
+                                     m_impl->state.buffers.outReadback.buf,
+                                     1, &region);
+        }
+    }
     m_impl->pfnEnd(m_impl->state.cmd);
     auto tRecord = clk::now();
 
@@ -5233,12 +5334,20 @@ bool RifeNativeExecutor::runInference(const float* in0Data,
     m_impl->pfnWaitFc(m_impl->state.device, 1, &m_impl->fence, VK_TRUE, UINT64_MAX);
     auto tWait = clk::now();
 
-    auto outIt = m_impl->state.buffers.blobs.find("out0");
-    if (outIt == m_impl->state.buffers.blobs.end()) return false;
     size_t outBytes = (size_t)m_impl->outShape.c * m_impl->outShape.h
                                                   * m_impl->outShape.w * sizeof(float);
-    std::memcpy(out0Data, outIt->second.mapped,
-                std::min(outBytes, outIt->second.size));
+    // §J.3.e.Y 4Y.1b — read from host-cached staging when available
+    // (~25 GB/s cache), fall through to BAR-resident blob when the
+    // staging alloc was unavailable on this platform.
+    const GpuBuffer* readSrc = nullptr;
+    if (m_impl->state.buffers.outReadback.mapped != nullptr) {
+        readSrc = &m_impl->state.buffers.outReadback;
+    } else {
+        auto outIt = m_impl->state.buffers.blobs.find("out0");
+        if (outIt == m_impl->state.buffers.blobs.end()) return false;
+        readSrc = &outIt->second;
+    }
+    std::memcpy(out0Data, readSrc->mapped, std::min(outBytes, readSrc->size));
     auto tEnd = clk::now();
 
     m_impl->lastTiming.seedMs     = ms(tSeed   - t0);
