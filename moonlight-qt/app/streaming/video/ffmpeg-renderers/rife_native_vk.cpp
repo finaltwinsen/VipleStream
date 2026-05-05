@@ -254,12 +254,14 @@ bool parseParam(const QString& path, Model& out) {
 // cut the runtime ncnn dependency.
 static const char* kConv2DShaderGlsl = R"GLSL(
 #version 450
+#extension GL_EXT_shader_16bit_storage              : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer InputBuf  { float in_buf[];  };
-layout(set = 0, binding = 1) readonly buffer WeightBuf { float w_buf[];   };
-layout(set = 0, binding = 2) readonly buffer BiasBuf   { float bias_buf[]; };
-layout(set = 0, binding = 3) writeonly buffer OutputBuf { float out_buf[]; };
+layout(set = 0, binding = 0) readonly buffer InputBuf  { float     in_buf[];  };
+layout(set = 0, binding = 1) readonly buffer WeightBuf { float16_t w_buf[];   };
+layout(set = 0, binding = 2) readonly buffer BiasBuf   { float     bias_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { float    out_buf[]; };
 
 layout(push_constant) uniform PC {
     ivec4 inDims;     // (inW, inH, inC, hasBias)
@@ -304,7 +306,7 @@ void main() {
             for (int kx = 0; kx < kW; ++kx) {
                 int ix = ox * stride + kx - pad;
                 if (ix < 0 || ix >= inW) continue;
-                float wv = w_buf[wChanBase + ky * wRowStride + kx];
+                float wv = float(w_buf[wChanBase + ky * wRowStride + kx]);
                 float iv = in_buf[inChanBase + iy * inW + ix];
                 acc += wv * iv;
             }
@@ -346,6 +348,8 @@ const char* getConv2DShaderGlsl() {
 
 static const char* kConv2D_3x3_s1_ShaderGlsl = R"GLSL(
 #version 450
+#extension GL_EXT_shader_16bit_storage              : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 #define TILE_W       16
 #define TILE_H       16
@@ -356,10 +360,10 @@ static const char* kConv2D_3x3_s1_ShaderGlsl = R"GLSL(
 
 layout(local_size_x = TILE_W, local_size_y = TILE_H, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly  buffer InputBuf  { float in_buf[];  };
-layout(set = 0, binding = 1) readonly  buffer WeightBuf { float w_buf[];   };
-layout(set = 0, binding = 2) readonly  buffer BiasBuf   { float bias_buf[]; };
-layout(set = 0, binding = 3) writeonly buffer OutputBuf { float out_buf[]; };
+layout(set = 0, binding = 0) readonly  buffer InputBuf  { float     in_buf[];  };
+layout(set = 0, binding = 1) readonly  buffer WeightBuf { float16_t w_buf[];   };
+layout(set = 0, binding = 2) readonly  buffer BiasBuf   { float     bias_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { float     out_buf[]; };
 
 layout(push_constant) uniform PC {
     ivec4 inDims;     // (inW, inH, inC, hasBias)
@@ -429,16 +433,17 @@ void main() {
 
         if (ox < outW && oy < outH) {
             int wbase = (n * inC + c) * 9;  // 9 = kH * kW, hardcoded
-            // Manually unrolled 3×3 MAC.
-            float w0 = w_buf[wbase + 0];
-            float w1 = w_buf[wbase + 1];
-            float w2 = w_buf[wbase + 2];
-            float w3 = w_buf[wbase + 3];
-            float w4 = w_buf[wbase + 4];
-            float w5 = w_buf[wbase + 5];
-            float w6 = w_buf[wbase + 6];
-            float w7 = w_buf[wbase + 7];
-            float w8 = w_buf[wbase + 8];
+            // Manually unrolled 3×3 MAC; weights are fp16 in storage,
+            // cast to fp32 for accumulation.
+            float w0 = float(w_buf[wbase + 0]);
+            float w1 = float(w_buf[wbase + 1]);
+            float w2 = float(w_buf[wbase + 2]);
+            float w3 = float(w_buf[wbase + 3]);
+            float w4 = float(w_buf[wbase + 4]);
+            float w5 = float(w_buf[wbase + 5]);
+            float w6 = float(w_buf[wbase + 6]);
+            float w7 = float(w_buf[wbase + 7]);
+            float w8 = float(w_buf[wbase + 8]);
 
             int row0 = (oly + 0) * IN_TILE_W + olx;
             int row1 = (oly + 1) * IN_TILE_W + olx;
@@ -486,6 +491,8 @@ const char* getConv2D_3x3_s1_ShaderGlsl() { return kConv2D_3x3_s1_ShaderGlsl; }
 
 static const char* kConv2D_3x3_s2_ShaderGlsl = R"GLSL(
 #version 450
+#extension GL_EXT_shader_16bit_storage              : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 #define TILE_W       16
 #define TILE_H       16
@@ -497,10 +504,10 @@ static const char* kConv2D_3x3_s2_ShaderGlsl = R"GLSL(
 
 layout(local_size_x = TILE_W, local_size_y = TILE_H, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly  buffer InputBuf  { float in_buf[];  };
-layout(set = 0, binding = 1) readonly  buffer WeightBuf { float w_buf[];   };
-layout(set = 0, binding = 2) readonly  buffer BiasBuf   { float bias_buf[]; };
-layout(set = 0, binding = 3) writeonly buffer OutputBuf { float out_buf[]; };
+layout(set = 0, binding = 0) readonly  buffer InputBuf  { float     in_buf[];  };
+layout(set = 0, binding = 1) readonly  buffer WeightBuf { float16_t w_buf[];   };
+layout(set = 0, binding = 2) readonly  buffer BiasBuf   { float     bias_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { float     out_buf[]; };
 
 layout(push_constant) uniform PC {
     ivec4 inDims;     // (inW, inH, inC, hasBias)
@@ -561,15 +568,16 @@ void main() {
 
         if (ox < outW && oy < outH) {
             int wbase = (n * inC + c) * 9;
-            float w0 = w_buf[wbase + 0];
-            float w1 = w_buf[wbase + 1];
-            float w2 = w_buf[wbase + 2];
-            float w3 = w_buf[wbase + 3];
-            float w4 = w_buf[wbase + 4];
-            float w5 = w_buf[wbase + 5];
-            float w6 = w_buf[wbase + 6];
-            float w7 = w_buf[wbase + 7];
-            float w8 = w_buf[wbase + 8];
+            // fp16 weight read + cast to fp32 for fp32 accumulation.
+            float w0 = float(w_buf[wbase + 0]);
+            float w1 = float(w_buf[wbase + 1]);
+            float w2 = float(w_buf[wbase + 2]);
+            float w3 = float(w_buf[wbase + 3]);
+            float w4 = float(w_buf[wbase + 4]);
+            float w5 = float(w_buf[wbase + 5]);
+            float w6 = float(w_buf[wbase + 6]);
+            float w7 = float(w_buf[wbase + 7]);
+            float w8 = float(w_buf[wbase + 8]);
 
             int tile_y0 = 2 * oly + 0;
             int tile_y1 = 2 * oly + 1;
@@ -897,12 +905,14 @@ const char* getEltwiseShaderGlsl() { return kEltwiseShaderGlsl; }
 
 static const char* kDeconv2DShaderGlsl = R"GLSL(
 #version 450
+#extension GL_EXT_shader_16bit_storage              : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer InputBuf  { float in_buf[];   };
-layout(set = 0, binding = 1) readonly buffer WeightBuf { float w_buf[];    };
-layout(set = 0, binding = 2) readonly buffer BiasBuf   { float bias_buf[]; };
-layout(set = 0, binding = 3) writeonly buffer OutputBuf { float out_buf[]; };
+layout(set = 0, binding = 0) readonly buffer InputBuf  { float     in_buf[];   };
+layout(set = 0, binding = 1) readonly buffer WeightBuf { float16_t w_buf[];    };
+layout(set = 0, binding = 2) readonly buffer BiasBuf   { float     bias_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { float    out_buf[]; };
 
 layout(push_constant) uniform PC {
     ivec4 inDims;     // (inW, inH, inC, hasBias)
@@ -953,7 +963,7 @@ void main() {
                 if ((iwNum % strd) != 0) continue;
                 int iw = iwNum / strd;
                 if (iw >= inW) continue;
-                float wv = w_buf[wChanBase + ky * kW + kx];
+                float wv = float(w_buf[wChanBase + ky * kW + kx]);
                 float iv = in_buf[inChanBase + ih * inW + iw];
                 acc += wv * iv;
             }
@@ -1063,6 +1073,29 @@ static float fp16ToFp32(uint16_t h) {
     }
     float r;
     std::memcpy(&r, &v, sizeof(r));
+    return r;
+}
+
+// §J.3.e.Y 4Y.5a — return raw .bin bytes (fp16 for Conv/Deconv
+// weights, fp32 for biases / MemoryData) without unpacking.  Caller
+// uses this when feeding a shader binding that declares
+// `float16_t buf[]` so the buffer layout matches storage type.
+struct TensorRaw {
+    const uint8_t* data    = nullptr;
+    size_t         bytes   = 0;
+    bool           isFp16  = false;
+};
+TensorRaw getTensorRaw(const Model& m, const QString& tensorName) {
+    TensorRaw r;
+    auto it = m.tensorByName.find(tensorName);
+    if (it == m.tensorByName.end()) return r;
+    const WeightTensor& t = m.tensors[it->second];
+    if (t.byteOffset > m.weightBlob.size()) return r;
+    r.isFp16 = (t.dtype == TensorDType::Float16);
+    size_t elemBytes = r.isFp16 ? sizeof(uint16_t) : sizeof(float);
+    if (t.byteOffset + t.elemCount * elemBytes > m.weightBlob.size()) return r;
+    r.data  = m.weightBlob.data() + t.byteOffset;
+    r.bytes = t.elemCount * elemBytes;
     return r;
 }
 
@@ -1932,6 +1965,12 @@ struct ComputeBufferSpec {
     const float* hostInData = nullptr;  // null = leave zero-initialised
     size_t       elemCount  = 0;        // bytes = elemCount * sizeof(float); >0 required
     float*       readbackOut = nullptr; // null = skip readback for this binding
+    // §J.3.e.Y 4Y.5a — when set (>0), buffer is sized to bytesOverride
+    // and `hostInData` is treated as a raw byte pointer of that length.
+    // Used to feed fp16 weight buffers from raw .bin bytes.  Readback
+    // path still uses elemCount * sizeof(float) (output is fp32).
+    size_t       bytesOverride = 0;
+    const void*  hostInBytes   = nullptr;
 };
 
 struct RunComputeOptions {
@@ -2066,13 +2105,19 @@ bool runComputeOnce(const VulkanCtx& ctx, const RunComputeOptions& opts) {
     GpuBuffer bufs[8] = {};
     bool ok = true;
     for (int i = 0; i < opts.bindingCount; ++i) {
-        size_t bytes = opts.buffers[i].elemCount * sizeof(float);
+        size_t bytes = opts.buffers[i].bytesOverride > 0
+                       ? opts.buffers[i].bytesOverride
+                       : opts.buffers[i].elemCount * sizeof(float);
         if (bytes == 0) bytes = sizeof(float);  // empty buffer placeholder
         if (!createHostBuffer(device, memProps,
                               pfnCreateBuffer, pfnGetBufferMemoryRequirements,
                               pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
                               bytes, bufs[i])) { ok = false; break; }
-        if (opts.buffers[i].hostInData) {
+        if (opts.buffers[i].hostInBytes) {
+            std::memcpy(bufs[i].mapped,
+                        opts.buffers[i].hostInBytes,
+                        opts.buffers[i].bytesOverride);
+        } else if (opts.buffers[i].hostInData) {
             std::memcpy(bufs[i].mapped, opts.buffers[i].hostInData,
                         opts.buffers[i].elemCount * sizeof(float));
         } else {
@@ -2558,8 +2603,16 @@ bool buildBufferPool(const VulkanCtx& ctx,
     }
 
     // ---- Weight/bias tensor buffers (Conv / Deconv / MemoryData) ----
+    // §J.3.e.Y 4Y.5a — Conv/Deconv WEIGHT tensors are stored fp16 in
+    // .bin (with the 0x01306B47 fp16 flag header).  We now keep them
+    // fp16 in the GPU buffer too (half the bytes, half the bandwidth)
+    // and let the conv shaders read them as `float16_t` and cast to
+    // fp32 for accumulation.  Bias / MemoryData stay fp32 (already
+    // fp32 in .bin; small enough that bandwidth doesn't matter).
     for (const auto& t : m.tensors) {
-        size_t bytes = t.elemCount * sizeof(float);
+        const bool isFp16 = (t.dtype == TensorDType::Float16);
+        const size_t elemBytes = isFp16 ? sizeof(uint16_t) : sizeof(float);
+        size_t bytes = t.elemCount * elemBytes;
         if (bytes == 0) bytes = sizeof(float);
         GpuBuffer buf{};
         if (!createHostBuffer(device, memProps,
@@ -2572,10 +2625,14 @@ bool buildBufferPool(const VulkanCtx& ctx,
             destroyBufferPool(out);
             return false;
         }
-        // Pre-fill from .bin (handles fp16 unpack for Conv weights).
-        std::vector<float> fp32 = getTensorAsFp32(m, t.name);
-        if (!fp32.empty() && fp32.size() * sizeof(float) <= buf.size) {
-            std::memcpy(buf.mapped, fp32.data(), fp32.size() * sizeof(float));
+        // Copy raw .bin bytes verbatim — for fp16 tensors that's the
+        // packed half-floats (already past the 4-byte flag header in
+        // byteOffset); for fp32 tensors that's the plain floats.
+        if (t.elemCount > 0
+            && t.byteOffset + t.elemCount * elemBytes <= m.weightBlob.size()) {
+            std::memcpy(buf.mapped,
+                        m.weightBlob.data() + t.byteOffset,
+                        t.elemCount * elemBytes);
         }
         out.tensors.emplace(t.name, buf);
     }
@@ -2677,11 +2734,14 @@ bool runBlobBufferPoolSmoke(const VulkanCtx& ctx, const QString& modelDir) {
             "[VIPLE-RIFE-VK] BufferPoolSmoke: Conv_16/weight tensor missing ✗\n");
         pass = false;
     } else {
-        const float* p = (const float*)wit->second.mapped;
+        // §J.3.e.Y 4Y.5a — Conv weight buffers are now stored fp16.
+        // Read first half-float and unpack to fp32 for the anchor check.
+        const uint16_t* p16 = (const uint16_t*)wit->second.mapped;
+        float v0 = fp16ToFp32(p16[0]);
         std::fprintf(stderr,
             "[VIPLE-RIFE-VK] BufferPoolSmoke: 'Conv_16/weight' [0] = %.6f (expect ~0.036713)\n",
-            (double)p[0]);
-        if (std::abs(p[0] - 0.036713f) > 0.001f) {
+            (double)v0);
+        if (std::abs(v0 - 0.036713f) > 0.001f) {
             std::fprintf(stderr,
                 "[VIPLE-RIFE-VK] BufferPoolSmoke: weight anchor mismatch ✗\n");
             pass = false;
@@ -3740,13 +3800,24 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
         if (pfnCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &pipeline) != VK_SUCCESS) return false;
     }
 
+    // §J.3.e.Y 4Y.5a — Conv2D shader now reads weight as float16_t,
+    // so we feed it raw fp16 bytes from .bin (Conv weights are
+    // stored fp16 there).  CPU reference still gets fp32-unpacked
+    // weights via `weight` for the trusted comparison path.
+    TensorRaw wRaw = getTensorRaw(m, layerName + "/weight");
+    if (!wRaw.data || !wRaw.isFp16) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] GpuTest %s: weight not stored as fp16",
+                     qUtf8Printable(layerName));
+        return false;
+    }
     GpuBuffer bufIn = {}, bufW = {}, bufB = {}, bufOut = {};
     if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
                           pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
                           input.size() * sizeof(float), bufIn)) return false;
     if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
                           pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
-                          weight.size() * sizeof(float), bufW)) return false;
+                          wRaw.bytes, bufW)) return false;
     if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
                           pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
                           bias.size() * sizeof(float), bufB)) return false;
@@ -3754,7 +3825,7 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
                           pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
                           cpuOut.size() * sizeof(float), bufOut)) return false;
     std::memcpy(bufIn.mapped,  input.data(),  bufIn.size);
-    std::memcpy(bufW.mapped,   weight.data(), bufW.size);
+    std::memcpy(bufW.mapped,   wRaw.data,     wRaw.bytes);
     std::memcpy(bufB.mapped,   bias.data(),   bufB.size);
     std::memset(bufOut.mapped, 0,             bufOut.size);
 
@@ -4962,11 +5033,23 @@ bool runDeconv2DGpuTest(const VulkanCtx& ctx,
     std::vector<float> biasFallback(N, 0.0f);
     const float* biasPtr = hasBias ? bias.data() : biasFallback.data();
 
+    // §J.3.e.Y 4Y.5a — Deconv2D shader reads weights as float16_t.
+    // Feed raw fp16 bytes from .bin (Deconv weights are fp16 there).
+    TensorRaw wRaw = getTensorRaw(m, layerName + "/weight");
+    if (!wRaw.data || !wRaw.isFp16) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] DeconvTest %s: weight not stored as fp16",
+                     qUtf8Printable(layerName));
+        return false;
+    }
+
     RunComputeOptions opts{};
     opts.shaderGlsl   = getDeconv2DShaderGlsl();
     opts.bindingCount = 4;
     opts.buffers[0]   = { input.data(),   (size_t)C * H * W,                nullptr };
-    opts.buffers[1]   = { weight.data(),  weight.size(),                    nullptr };
+    opts.buffers[1]   = {};
+    opts.buffers[1].bytesOverride = wRaw.bytes;
+    opts.buffers[1].hostInBytes   = wRaw.data;
     opts.buffers[2]   = { biasPtr,        (size_t)N,                         nullptr };
     opts.buffers[3]   = { nullptr,        (size_t)N * OUT_H * OUT_W,         gpuOut.data() };
     opts.pcData       = &pc;
@@ -5149,13 +5232,24 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
         qci.queueFamilyIndex = computeQF;
         qci.queueCount = 1;
         qci.pQueuePriorities = &prio;
+
+        // §J.3.e.Y 4Y.5a — enable storageBuffer16BitAccess so conv /
+        // deconv shaders can declare `float16_t` storage buffers and
+        // halve weight memory bandwidth.  Core in Vulkan 1.1 (we use
+        // 1.2); driver fails CreateDevice if not actually supported,
+        // which would surface in the call below.
+        VkPhysicalDevice16BitStorageFeatures features16 = {};
+        features16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES;
+        features16.storageBuffer16BitAccess = VK_TRUE;
+
         VkDeviceCreateInfo dci = {};
         dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        dci.pNext = &features16;
         dci.queueCreateInfoCount = 1;
         dci.pQueueCreateInfos = &qci;
         if (pfnCreateDevice(vkPhys, &dci, nullptr, &vkDevice) != VK_SUCCESS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-RIFE-VK] standalone: vkCreateDevice failed");
+                         "[VIPLE-RIFE-VK] standalone: vkCreateDevice failed (storageBuffer16BitAccess?)");
             teardown();
             return false;
         }

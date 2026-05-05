@@ -192,10 +192,15 @@ struct VulkanCtx {
 // reads stride / pad / kernel / activation_type / activation_params
 // directly from `m.layers[layerName].params` so any conv layer in the
 // graph can be tested against the trusted CPU reference.
+// Default tolerance bumped from 1e-4 → 5e-4 in §J.3.e.Y 4Y.5a: fp16
+// weight storage adds ~5e-4 relative-precision floor that compounds
+// through ~3000 MAC accumulation to ~1e-4 max_err.  Production
+// vs-ncnn gate (Final.1) is unaffected — it uses its own thresholds
+// and actually got TIGHTER under fp16 (mean 4.23e-4 → 4.72e-5).
 bool runConv2DGpuTest(const VulkanCtx& ctx,
                       const Model& m,
                       const QString& layerName,
-                      float tolerance = 1e-4f);
+                      float tolerance = 5e-4f);
 
 // Phase 4b — element-wise BinaryOp: ADD/SUB/MUL/DIV/RSUB across three
 // broadcast modes.  Handles all 92 BinaryOp layers in rife-v4.25-lite.
@@ -307,7 +312,7 @@ void referenceDeconv2D(const float* in, int inW, int inH, int inC,
 bool runDeconv2DGpuTest(const VulkanCtx& ctx,
                         const Model& m,
                         const QString& layerName,
-                        float tolerance = 1e-4f);
+                        float tolerance = 5e-4f);  // see Conv2D tolerance note above
 
 // Phase 4f — rife.Warp custom op.  Optical-flow-driven bilinear sample.
 // 2 inputs: image (C,H,W) + flow (2,H,W); 1 output (C,H,W).
@@ -536,7 +541,10 @@ void dumpModelSmoke(const QString& modelDir);
 // modelDir is the rife-v4.25-lite directory containing flownet.param +
 // flownet.bin.  Returns true on PASS, false on any failure (logs all
 // diagnostics via SDL_Log[Info|Warn|Error]).
+//
+// Default tolerance bumped to 5e-4 in §J.3.e.Y 4Y.5a alongside fp16
+// weight storage; see Conv2D tolerance note above for full reasoning.
 bool runConv2DGpuTestStandalone(const QString& modelDir,
-                                float tolerance = 1e-4f);
+                                float tolerance = 5e-4f);
 
 } // namespace viple::rife_native_vk
