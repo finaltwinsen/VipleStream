@@ -2043,6 +2043,236 @@ bool runPipelineCacheSmoke(const VulkanCtx& ctx) {
     return pass;
 }
 
+// ============================================================================
+// §J.3.e.X Phase 4g.3 — buffer pool + MemoryData / weight prefill.
+//
+// One host-visible mapped buffer per blob (485 entries) and one per
+// weight/bias tensor (~118 entries).  Buffers are sized via the
+// Phase 4g.1 shape inference output for blobs, and via WeightTensor
+// elemCount for tensor buffers.  MemoryData blobs are filled from the
+// .bin's pre-loaded fp32 array; Convolution / Deconvolution weight +
+// bias buffers are filled from getTensorAsFp32 (handles fp16 unpack).
+//
+// Production executor will use device-local buffers + staging.  For
+// correctness gates at 256×256 (≈ tens of MB total) host-visible is
+// fast enough and simpler.
+// ============================================================================
+
+namespace {
+
+struct BufferPool {
+    VkDevice                                  device   = VK_NULL_HANDLE;
+    PFN_vkUnmapMemory                         pfnUnmap = nullptr;
+    PFN_vkDestroyBuffer                       pfnDestroyBuf = nullptr;
+    PFN_vkFreeMemory                          pfnFreeMem = nullptr;
+    std::unordered_map<QString, GpuBuffer>    blobs;
+    std::unordered_map<QString, GpuBuffer>    tensors;
+};
+
+void destroyBufferPool(BufferPool& p) {
+    if (p.device == VK_NULL_HANDLE) return;
+    for (auto& kv : p.blobs)   destroyHostBuffer(p.device, p.pfnUnmap, p.pfnDestroyBuf, p.pfnFreeMem, kv.second);
+    for (auto& kv : p.tensors) destroyHostBuffer(p.device, p.pfnUnmap, p.pfnDestroyBuf, p.pfnFreeMem, kv.second);
+    p.blobs.clear();
+    p.tensors.clear();
+    p.device = VK_NULL_HANDLE;
+}
+
+bool buildBufferPool(const VulkanCtx& ctx,
+                     const Model& m,
+                     const std::unordered_map<QString, BlobShape>& shapes,
+                     BufferPool& out)
+{
+    auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr;
+    auto instance = (VkInstance)ctx.instance;
+    auto pd       = (VkPhysicalDevice)ctx.physicalDevice;
+    auto device   = (VkDevice)ctx.device;
+    auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstancePA(instance, "vkGetDeviceProcAddr");
+    if (!pfnGetDevPa) return false;
+    auto getDev = [&](const char* n) -> PFN_vkVoidFunction { return pfnGetDevPa(device, n); };
+#define LOAD(NAME) auto pfn ## NAME = (PFN_vk ## NAME)getDev("vk" #NAME); \
+        if (!pfn ## NAME) return false;
+    LOAD(CreateBuffer)              LOAD(DestroyBuffer)
+    LOAD(GetBufferMemoryRequirements)
+    LOAD(AllocateMemory)            LOAD(FreeMemory)
+    LOAD(BindBufferMemory)
+    LOAD(MapMemory)                 LOAD(UnmapMemory)
+#undef LOAD
+    auto pfnGetPdMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)pfnGetInstancePA(
+        instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnGetPdMemProps) return false;
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPdMemProps(pd, &memProps);
+
+    out.device        = device;
+    out.pfnUnmap      = pfnUnmapMemory;
+    out.pfnDestroyBuf = pfnDestroyBuffer;
+    out.pfnFreeMem    = pfnFreeMemory;
+
+    // ---- Blob buffers (one per inferred shape) ----
+    for (const auto& kv : shapes) {
+        const QString& name = kv.first;
+        const BlobShape& s = kv.second;
+        size_t bytes = (size_t)s.c * s.h * s.w * sizeof(float);
+        if (bytes == 0) bytes = sizeof(float);
+        GpuBuffer buf{};
+        if (!createHostBuffer(device, memProps,
+                              pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                              pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                              bytes, buf)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] BufferPool: blob '%s' alloc failed (%zu B)",
+                         qUtf8Printable(name), bytes);
+            destroyBufferPool(out);
+            return false;
+        }
+        std::memset(buf.mapped, 0, buf.size);
+        out.blobs.emplace(name, buf);
+    }
+
+    // ---- Weight/bias tensor buffers (Conv / Deconv / MemoryData) ----
+    for (const auto& t : m.tensors) {
+        size_t bytes = t.elemCount * sizeof(float);
+        if (bytes == 0) bytes = sizeof(float);
+        GpuBuffer buf{};
+        if (!createHostBuffer(device, memProps,
+                              pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                              pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                              bytes, buf)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] BufferPool: tensor '%s' alloc failed (%zu B)",
+                         qUtf8Printable(t.name), bytes);
+            destroyBufferPool(out);
+            return false;
+        }
+        // Pre-fill from .bin (handles fp16 unpack for Conv weights).
+        std::vector<float> fp32 = getTensorAsFp32(m, t.name);
+        if (!fp32.empty() && fp32.size() * sizeof(float) <= buf.size) {
+            std::memcpy(buf.mapped, fp32.data(), fp32.size() * sizeof(float));
+        }
+        out.tensors.emplace(t.name, buf);
+    }
+
+    // ---- For MemoryData: also seed the matching BLOB buffer with the
+    //      same fp32 data (the layer's "output blob" name == its
+    //      tensor name, so dispatch handlers can read either; but
+    //      Phase 4g.4 will treat MemoryData as a no-op layer that
+    //      just relies on the blob being pre-filled).
+    for (const Layer& L : m.layers) {
+        if (L.kind != OpKind::MemoryData) continue;
+        if (L.outputs.isEmpty()) continue;
+        const QString& blobName = L.outputs[0];
+        // The MemoryData blob name == the tensor name in this model.
+        std::vector<float> fp32 = getTensorAsFp32(m, blobName);
+        auto blobIt = out.blobs.find(blobName);
+        if (blobIt != out.blobs.end() && !fp32.empty()
+            && fp32.size() * sizeof(float) <= blobIt->second.size) {
+            std::memcpy(blobIt->second.mapped,
+                        fp32.data(),
+                        fp32.size() * sizeof(float));
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+bool runBlobBufferPoolSmoke(const VulkanCtx& ctx, const QString& modelDir) {
+    Model m;
+    if (!parseParam(modelDir + "/flownet.param", m)
+        || !loadWeights(modelDir + "/flownet.bin", m)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] BufferPoolSmoke: model load failed");
+        return false;
+    }
+
+    InferInputs in{};
+    in.in0 = { 3, 256, 256 };
+    in.in1 = { 3, 256, 256 };
+    in.in2 = { 1,   1,   1 };
+    std::unordered_map<QString, BlobShape> shapes;
+    if (!inferBlobShapes(m, in, shapes)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] BufferPoolSmoke: shape inference failed");
+        return false;
+    }
+
+    BufferPool pool;
+    if (!buildBufferPool(ctx, m, shapes, pool)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] BufferPoolSmoke: pool build failed");
+        return false;
+    }
+
+    bool pass = true;
+    if ((int)pool.blobs.size() != m.blobCount) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] BufferPoolSmoke: blob count %zu != %d",
+                     pool.blobs.size(), m.blobCount);
+        pass = false;
+    }
+    if (pool.tensors.size() != m.tensors.size()) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] BufferPoolSmoke: tensor count %zu != %zu",
+                     pool.tensors.size(), m.tensors.size());
+        pass = false;
+    }
+
+    // Spot check: MemoryData blob 'block0.convblock.0.beta' first 3 fp32
+    // should be ~0.022, ~0.103, ~0.053 (matches dumpModelSmoke's Phase 2
+    // anchor from raw .bin inspection).
+    auto it = pool.blobs.find("block0.convblock.0.beta");
+    if (it == pool.blobs.end()) {
+        std::fprintf(stderr,
+            "[VIPLE-RIFE-VK] BufferPoolSmoke: MemoryData blob missing ✗\n");
+        pass = false;
+    } else {
+        const float* p = (const float*)it->second.mapped;
+        std::fprintf(stderr,
+            "[VIPLE-RIFE-VK] BufferPoolSmoke: 'block0.convblock.0.beta' first 3 = "
+            "%.6f %.6f %.6f (expect ~0.022 ~0.103 ~0.053)\n",
+            (double)p[0], (double)p[1], (double)p[2]);
+        // Anchor: matches the raw .bin first 3 fp32 from dumpModelSmoke.
+        if (!(std::abs(p[0] - 0.022f) < 0.01f
+              && std::abs(p[1] - 0.103f) < 0.01f
+              && std::abs(p[2] - 0.053f) < 0.01f)) {
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] BufferPoolSmoke: anchor mismatch ✗\n");
+            pass = false;
+        }
+    }
+
+    // Spot check: Conv_16/weight first value should match Phase 3a's
+    // anchor (fp16 0x28B3 → ~0.036713).
+    auto wit = pool.tensors.find("Conv_16/weight");
+    if (wit == pool.tensors.end()) {
+        std::fprintf(stderr,
+            "[VIPLE-RIFE-VK] BufferPoolSmoke: Conv_16/weight tensor missing ✗\n");
+        pass = false;
+    } else {
+        const float* p = (const float*)wit->second.mapped;
+        std::fprintf(stderr,
+            "[VIPLE-RIFE-VK] BufferPoolSmoke: 'Conv_16/weight' [0] = %.6f (expect ~0.036713)\n",
+            (double)p[0]);
+        if (std::abs(p[0] - 0.036713f) > 0.001f) {
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] BufferPoolSmoke: weight anchor mismatch ✗\n");
+            pass = false;
+        }
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] BufferPoolSmoke: %zu blobs + %zu tensors — %s",
+                pool.blobs.size(), pool.tensors.size(), pass ? "PASS" : "FAIL");
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] BufferPoolSmoke: %zu blobs + %zu tensors — %s\n",
+        pool.blobs.size(), pool.tensors.size(), pass ? "PASS" : "FAIL");
+    std::fflush(stderr);
+
+    destroyBufferPool(pool);
+    return pass;
+}
+
 bool runConv2DGpuTest(const VulkanCtx& ctx,
                      const Model& m,
                      const QString& layerName,
@@ -3786,6 +4016,9 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
 
     // ---- Phase 4g.2 pipeline cache smoke ----
     pass &= runPipelineCacheSmoke(ctx);
+
+    // ---- Phase 4g.3 buffer pool smoke ----
+    pass &= runBlobBufferPoolSmoke(ctx, modelDir);
 
     // ---- Phase 4g.1 shape inference smoke ----
     {

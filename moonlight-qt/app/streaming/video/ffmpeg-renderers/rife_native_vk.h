@@ -351,6 +351,15 @@ bool inferBlobShapes(const Model& m,
 // 4g.3+ promotes the cache to executor lifetime ownership.
 bool runPipelineCacheSmoke(const VulkanCtx& ctx);
 
+// 4g.3: buffer pool smoke.  Loads model + .bin, infers shapes for a
+// canonical 256×256 input, allocates one host-visible mapped buffer
+// per blob (485) and per weight/bias tensor (~118), pre-fills
+// MemoryData + Conv/Deconv weight/bias from the .bin blob.  Verifies
+// counts + a known-value spot check (block0.convblock.0.beta first 3
+// fp32 should be ~0.022, ~0.103, ~0.053 — the existing anchor from
+// raw .bin inspection).  Tears down cleanly.
+bool runBlobBufferPoolSmoke(const VulkanCtx& ctx, const QString& modelDir);
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.
