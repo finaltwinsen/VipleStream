@@ -160,6 +160,34 @@ void referenceConv2D(const float* in, int inW, int inH, int inC,
                      float leakyReluSlope,
                      float* out, int outW, int outH);
 
+// Vulkan handles + ProcAddr accessor needed to run a self-contained
+// compute test.  Caller (e.g. VkFrucRenderer / PlVkRenderer init) fills
+// these with already-initialised handles after ncnn handoff is alive.
+struct VulkanCtx {
+    void* /*VkInstance*/        instance = nullptr;
+    void* /*VkPhysicalDevice*/  physicalDevice = nullptr;
+    void* /*VkDevice*/          device = nullptr;
+    uint32_t                    computeQueueFamily = 0;
+    void* /*VkQueue*/           computeQueue = nullptr;
+    void* /*PFN_vkGetInstanceProcAddr*/ getInstanceProcAddr = nullptr;
+};
+
+// Phase 3b.2 — runs the Conv2D 3×3 GLSL compute shader on real Conv_16
+// weights against a deterministic 64×64×3 input, reads back GPU output,
+// and compares pixel-wise to the CPU reference (Phase 3a).  Returns true
+// only when every output element matches within `tolerance` (default
+// 1e-4 — fp32 accumulator + fp16 unpack quantisation).  Logs PASS/FAIL +
+// max-abs-error + first 5 GPU samples (for visual cross-check vs the
+// CPU samples already logged by runConv2DCpuSmoke).
+//
+// Requires: ncnn::create_gpu_instance() already called on this thread
+// (compile_spirv_module needs ncnn's glslang context) AND `ctx`'s
+// VkDevice has a compute queue.
+//
+// modelDir is the directory containing flownet.param + flownet.bin.
+bool runConv2DGpuTest(const VulkanCtx& ctx, const QString& modelDir,
+                      float tolerance = 1e-4f);
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.
@@ -218,5 +246,19 @@ bool loadWeights(const QString& binPath, Model& m);
 // modelDir is the rife-v4.25-lite directory containing
 // flownet.param + flownet.bin.
 void dumpModelSmoke(const QString& modelDir);
+
+// Phase 3b.2 — fully self-contained correctness gate.  Creates its own
+// VkInstance/VkPhysicalDevice/VkDevice/queue, hands them to ncnn via
+// create_gpu_instance_external (so ncnn::compile_spirv_module works),
+// runs runConv2DGpuTest against Conv_16 weights, then tears everything
+// down.  Designed as a CLI smoke target — invoked early in main.cpp when
+// VIPLE_RIFE_NATIVE_VK_TEST=1.  Does NOT need an active streaming
+// session or VkFrucRenderer.
+//
+// modelDir is the rife-v4.25-lite directory containing flownet.param +
+// flownet.bin.  Returns true on PASS, false on any failure (logs all
+// diagnostics via SDL_Log[Info|Warn|Error]).
+bool runConv2DGpuTestStandalone(const QString& modelDir,
+                                float tolerance = 1e-4f);
 
 } // namespace viple::rife_native_vk

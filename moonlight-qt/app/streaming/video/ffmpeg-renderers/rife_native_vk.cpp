@@ -13,6 +13,18 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+// Windows.h (pulled in transitively by vulkan.h on Win32) defines min/max
+// macros that break std::max / std::numeric_limits<>::max() in this TU.
+#ifdef _WIN32
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#endif
+#include <vulkan/vulkan.h>
+#include <ncnn/gpu.h>
+#ifndef _WIN32
+#  include <dlfcn.h>
+#endif
 
 namespace viple::rife_native_vk {
 
@@ -706,6 +718,597 @@ void dumpModelSmoke(const QString& modelDir) {
     // Conv_16 weights.  Verifies fp16 unpack + Conv math both correct
     // before we sink time into Vulkan dispatch infrastructure.
     runConv2DCpuSmoke(m);
+}
+
+// ============================================================================
+// §J.3.e.X Phase 3b.2 — Vulkan GPU compute test
+//
+// Runs Conv_16 on the GPU via the kConv2DShaderGlsl compute shader,
+// reads back the output, and compares to the trusted CPU reference
+// (referenceConv2D from Phase 3a).  Self-contained: builds its own
+// VkShaderModule / VkDescriptorSetLayout / VkPipeline / VkBuffers /
+// VkCommandPool against caller-supplied VkDevice, dispatches once,
+// verifies, tears everything down.
+//
+// Mimics the buildPipeline lambda pattern in vkfruc.cpp's
+// createFrucComputeResources for consistency with existing VkFrucRenderer
+// compute infrastructure.
+// ============================================================================
+
+namespace {
+
+uint32_t findHostVisibleMemoryType(VkPhysicalDeviceMemoryProperties& mp,
+                                    uint32_t typeBits) {
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+        if (!(typeBits & (1u << i))) continue;
+        VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        if ((mp.memoryTypes[i].propertyFlags & want) == want) return i;
+    }
+    return UINT32_MAX;
+}
+
+struct GpuBuffer {
+    VkBuffer        buf = VK_NULL_HANDLE;
+    VkDeviceMemory  mem = VK_NULL_HANDLE;
+    void*           mapped = nullptr;
+    size_t          size = 0;
+};
+
+bool createHostBuffer(VkDevice device,
+                      VkPhysicalDeviceMemoryProperties& mp,
+                      PFN_vkCreateBuffer pfnCreateBuffer,
+                      PFN_vkGetBufferMemoryRequirements pfnGetReq,
+                      PFN_vkAllocateMemory pfnAlloc,
+                      PFN_vkBindBufferMemory pfnBind,
+                      PFN_vkMapMemory pfnMap,
+                      VkDeviceSize size, GpuBuffer& out)
+{
+    out.size = (size_t)size;
+    VkBufferCreateInfo bci = {};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size  = size;
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+              | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+              | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (pfnCreateBuffer(device, &bci, nullptr, &out.buf) != VK_SUCCESS) return false;
+    VkMemoryRequirements mr = {};
+    pfnGetReq(device, out.buf, &mr);
+    uint32_t typeIdx = findHostVisibleMemoryType(mp, mr.memoryTypeBits);
+    if (typeIdx == UINT32_MAX) return false;
+    VkMemoryAllocateInfo mai = {};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize  = mr.size;
+    mai.memoryTypeIndex = typeIdx;
+    if (pfnAlloc(device, &mai, nullptr, &out.mem) != VK_SUCCESS) return false;
+    if (pfnBind(device, out.buf, out.mem, 0) != VK_SUCCESS) return false;
+    if (pfnMap(device, out.mem, 0, VK_WHOLE_SIZE, 0, &out.mapped) != VK_SUCCESS) return false;
+    return true;
+}
+
+void destroyHostBuffer(VkDevice device,
+                       PFN_vkUnmapMemory pfnUnmap,
+                       PFN_vkDestroyBuffer pfnDestroyBuf,
+                       PFN_vkFreeMemory pfnFreeMem,
+                       GpuBuffer& b)
+{
+    if (b.mapped && pfnUnmap)        pfnUnmap(device, b.mem);
+    if (b.buf  && pfnDestroyBuf)     pfnDestroyBuf(device, b.buf, nullptr);
+    if (b.mem  && pfnFreeMem)        pfnFreeMem(device, b.mem, nullptr);
+    b = {};
+}
+
+} // anonymous namespace
+
+bool runConv2DGpuTest(const VulkanCtx& ctx, const QString& modelDir, float tolerance) {
+    auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr;
+    auto instance = (VkInstance)ctx.instance;
+    auto pd       = (VkPhysicalDevice)ctx.physicalDevice;
+    auto device   = (VkDevice)ctx.device;
+    auto queue    = (VkQueue)ctx.computeQueue;
+    if (!pfnGetInstancePA || !instance || !pd || !device || !queue) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] GpuTest: VulkanCtx incomplete; skipping");
+        return false;
+    }
+
+    auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstancePA(instance, "vkGetDeviceProcAddr");
+    if (!pfnGetDevPa) return false;
+    auto getDev = [&](const char* n) -> PFN_vkVoidFunction {
+        return pfnGetDevPa(device, n);
+    };
+
+#define LOAD_PFN(NAME) auto pfn ## NAME = (PFN_vk ## NAME)getDev("vk" #NAME); \
+        if (!pfn ## NAME) { \
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-RIFE-VK] GpuTest: missing vk" #NAME); \
+            return false; \
+        }
+    LOAD_PFN(CreateShaderModule)
+    LOAD_PFN(DestroyShaderModule)
+    LOAD_PFN(CreateDescriptorSetLayout)
+    LOAD_PFN(DestroyDescriptorSetLayout)
+    LOAD_PFN(CreatePipelineLayout)
+    LOAD_PFN(DestroyPipelineLayout)
+    LOAD_PFN(CreateComputePipelines)
+    LOAD_PFN(DestroyPipeline)
+    LOAD_PFN(CreateBuffer)
+    LOAD_PFN(DestroyBuffer)
+    LOAD_PFN(GetBufferMemoryRequirements)
+    LOAD_PFN(AllocateMemory)
+    LOAD_PFN(FreeMemory)
+    LOAD_PFN(BindBufferMemory)
+    LOAD_PFN(MapMemory)
+    LOAD_PFN(UnmapMemory)
+    LOAD_PFN(CreateDescriptorPool)
+    LOAD_PFN(DestroyDescriptorPool)
+    LOAD_PFN(AllocateDescriptorSets)
+    LOAD_PFN(UpdateDescriptorSets)
+    LOAD_PFN(CreateCommandPool)
+    LOAD_PFN(DestroyCommandPool)
+    LOAD_PFN(AllocateCommandBuffers)
+    LOAD_PFN(BeginCommandBuffer)
+    LOAD_PFN(EndCommandBuffer)
+    LOAD_PFN(CmdBindPipeline)
+    LOAD_PFN(CmdBindDescriptorSets)
+    LOAD_PFN(CmdPushConstants)
+    LOAD_PFN(CmdDispatch)
+    LOAD_PFN(QueueSubmit)
+    LOAD_PFN(QueueWaitIdle)
+    LOAD_PFN(CreateFence)
+    LOAD_PFN(DestroyFence)
+    LOAD_PFN(WaitForFences)
+#undef LOAD_PFN
+    auto pfnGetPdMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)pfnGetInstancePA(
+        instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnGetPdMemProps) return false;
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPdMemProps(pd, &memProps);
+
+    // ---- 1. Load model + extract Conv_16 weights/bias ----
+    Model m;
+    if (!parseParam(modelDir + "/flownet.param", m)) return false;
+    if (!loadWeights(modelDir + "/flownet.bin", m)) return false;
+    auto weight = getTensorAsFp32(m, "Conv_16/weight");
+    auto bias   = getTensorAsFp32(m, "Conv_16/bias");
+    if (weight.size() != 432 || bias.size() != 16) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] GpuTest: Conv_16 weight/bias unexpected size %zu/%zu",
+                     weight.size(), bias.size());
+        return false;
+    }
+
+    // ---- 2. Generate deterministic input matching CpuSmoke ----
+    constexpr int W = 64, H = 64, C = 3;
+    constexpr int OUT_W = 32, OUT_H = 32, N = 16;
+    std::vector<float> input((size_t)C * H * W);
+    uint32_t st = 0x13371337u;
+    for (auto& v : input) {
+        st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+        v = (float)(st & 0xFFFFFF) / (float)0xFFFFFF;
+    }
+    std::vector<float> cpuOut((size_t)N * OUT_H * OUT_W);
+    referenceConv2D(input.data(), W, H, C,
+                    weight.data(), N, 3, 3,
+                    bias.data(),
+                    2, 2, 1, 1,
+                    0.2f,
+                    cpuOut.data(), OUT_W, OUT_H);
+
+    // ---- 3. Compile shader to SPIR-V ----
+    std::vector<uint32_t> spirv;
+    {
+        ncnn::Option opt;
+        if (ncnn::compile_spirv_module(getConv2DShaderGlsl(), opt, spirv) != 0
+            || spirv.empty()) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] GpuTest: compile_spirv_module failed "
+                         "(ncnn::create_gpu_instance not called?)");
+            return false;
+        }
+    }
+
+    // ---- 4. Build pipeline + buffers ----
+    VkShaderModule shaderMod = VK_NULL_HANDLE;
+    {
+        VkShaderModuleCreateInfo smCi = {};
+        smCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smCi.codeSize = spirv.size() * sizeof(uint32_t);
+        smCi.pCode = spirv.data();
+        if (pfnCreateShaderModule(device, &smCi, nullptr, &shaderMod) != VK_SUCCESS) return false;
+    }
+
+    VkDescriptorSetLayoutBinding dslB[4] = {};
+    for (int i = 0; i < 4; ++i) {
+        dslB[i].binding = (uint32_t)i;
+        dslB[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        dslB[i].descriptorCount = 1;
+        dslB[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    {
+        VkDescriptorSetLayoutCreateInfo dslCi = {};
+        dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslCi.bindingCount = 4;
+        dslCi.pBindings = dslB;
+        if (pfnCreateDescriptorSetLayout(device, &dslCi, nullptr, &dsl) != VK_SUCCESS) return false;
+    }
+
+    VkPushConstantRange pcRange = {};
+    pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcRange.size = 13 * sizeof(int32_t); // 3 ivec4 + 1 float, but pad to 16-byte boundary
+    if (pcRange.size < 64) pcRange.size = 64;
+    VkPipelineLayout pipeLay = VK_NULL_HANDLE;
+    {
+        VkPipelineLayoutCreateInfo plCi = {};
+        plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plCi.setLayoutCount = 1;
+        plCi.pSetLayouts = &dsl;
+        plCi.pushConstantRangeCount = 1;
+        plCi.pPushConstantRanges = &pcRange;
+        if (pfnCreatePipelineLayout(device, &plCi, nullptr, &pipeLay) != VK_SUCCESS) return false;
+    }
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    {
+        VkComputePipelineCreateInfo cpCi = {};
+        cpCi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpCi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpCi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpCi.stage.module = shaderMod;
+        cpCi.stage.pName = "main";
+        cpCi.layout = pipeLay;
+        if (pfnCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &pipeline) != VK_SUCCESS) return false;
+    }
+
+    GpuBuffer bufIn = {}, bufW = {}, bufB = {}, bufOut = {};
+    if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                          pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                          input.size() * sizeof(float), bufIn)) return false;
+    if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                          pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                          weight.size() * sizeof(float), bufW)) return false;
+    if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                          pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                          bias.size() * sizeof(float), bufB)) return false;
+    if (!createHostBuffer(device, memProps, pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                          pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                          cpuOut.size() * sizeof(float), bufOut)) return false;
+    std::memcpy(bufIn.mapped,  input.data(),  bufIn.size);
+    std::memcpy(bufW.mapped,   weight.data(), bufW.size);
+    std::memcpy(bufB.mapped,   bias.data(),   bufB.size);
+    std::memset(bufOut.mapped, 0,             bufOut.size);
+
+    // ---- 5. Descriptor set ----
+    VkDescriptorPool descPool = VK_NULL_HANDLE;
+    {
+        VkDescriptorPoolSize sz = {};
+        sz.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sz.descriptorCount = 4;
+        VkDescriptorPoolCreateInfo dpCi = {};
+        dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpCi.maxSets = 1;
+        dpCi.poolSizeCount = 1;
+        dpCi.pPoolSizes = &sz;
+        if (pfnCreateDescriptorPool(device, &dpCi, nullptr, &descPool) != VK_SUCCESS) return false;
+    }
+    VkDescriptorSet descSet = VK_NULL_HANDLE;
+    {
+        VkDescriptorSetAllocateInfo dsai = {};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = descPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts = &dsl;
+        if (pfnAllocateDescriptorSets(device, &dsai, &descSet) != VK_SUCCESS) return false;
+    }
+    {
+        VkDescriptorBufferInfo dbi[4] = {};
+        dbi[0].buffer = bufIn.buf;  dbi[0].range = VK_WHOLE_SIZE;
+        dbi[1].buffer = bufW.buf;   dbi[1].range = VK_WHOLE_SIZE;
+        dbi[2].buffer = bufB.buf;   dbi[2].range = VK_WHOLE_SIZE;
+        dbi[3].buffer = bufOut.buf; dbi[3].range = VK_WHOLE_SIZE;
+        VkWriteDescriptorSet wds[4] = {};
+        for (int i = 0; i < 4; ++i) {
+            wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wds[i].dstSet = descSet;
+            wds[i].dstBinding = (uint32_t)i;
+            wds[i].descriptorCount = 1;
+            wds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            wds[i].pBufferInfo = &dbi[i];
+        }
+        pfnUpdateDescriptorSets(device, 4, wds, 0, nullptr);
+    }
+
+    // ---- 6. Command buffer + dispatch ----
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    {
+        VkCommandPoolCreateInfo cpCi = {};
+        cpCi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpCi.queueFamilyIndex = ctx.computeQueueFamily;
+        cpCi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        if (pfnCreateCommandPool(device, &cpCi, nullptr, &cmdPool) != VK_SUCCESS) return false;
+    }
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    {
+        VkCommandBufferAllocateInfo cbai = {};
+        cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool = cmdPool;
+        cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        if (pfnAllocateCommandBuffers(device, &cbai, &cmd) != VK_SUCCESS) return false;
+    }
+    {
+        VkCommandBufferBeginInfo cbbi = {};
+        cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (pfnBeginCommandBuffer(cmd, &cbbi) != VK_SUCCESS) return false;
+    }
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    pfnCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLay, 0,
+                             1, &descSet, 0, nullptr);
+    // Push constants: 3 ivec4 + 1 float, packed to 13 ints = 52 bytes
+    // (we allocated 64 to satisfy 16-byte alignment).
+    struct PC {
+        int32_t inDims[4];   // (inW, inH, inC, hasBias)
+        int32_t outDims[4];  // (outW, outH, outChan, _pad)
+        int32_t conv[4];     // (kernelW, kernelH, stride, pad)
+        float   leakyReluSlope;
+        int32_t _pad[3];     // round to 16
+    } pcVal = {};
+    pcVal.inDims[0] = W; pcVal.inDims[1] = H; pcVal.inDims[2] = C; pcVal.inDims[3] = 1;
+    pcVal.outDims[0] = OUT_W; pcVal.outDims[1] = OUT_H; pcVal.outDims[2] = N;
+    pcVal.conv[0] = 3; pcVal.conv[1] = 3; pcVal.conv[2] = 2; pcVal.conv[3] = 1;
+    pcVal.leakyReluSlope = 0.2f;
+    pfnCmdPushConstants(cmd, pipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                        sizeof(pcVal), &pcVal);
+    pfnCmdDispatch(cmd, (OUT_W + 7) / 8, (OUT_H + 7) / 8, N);
+    pfnEndCommandBuffer(cmd);
+
+    VkFence fence = VK_NULL_HANDLE;
+    {
+        VkFenceCreateInfo fci = {};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        if (pfnCreateFence(device, &fci, nullptr, &fence) != VK_SUCCESS) return false;
+    }
+    {
+        VkSubmitInfo si = {};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+        VkResult vr = pfnQueueSubmit(queue, 1, &si, fence);
+        if (vr != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] GpuTest: vkQueueSubmit failed %d", (int)vr);
+            return false;
+        }
+    }
+    pfnWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+
+    // ---- 7. Read GPU output, compare to CPU reference ----
+    const float* gpuOut = reinterpret_cast<const float*>(bufOut.mapped);
+    float maxAbsErr = 0.0f;
+    int worstIdx = 0;
+    for (size_t i = 0; i < cpuOut.size(); ++i) {
+        float diff = std::abs(gpuOut[i] - cpuOut[i]);
+        if (diff > maxAbsErr) { maxAbsErr = diff; worstIdx = (int)i; }
+    }
+    bool pass = maxAbsErr <= tolerance;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] GpuTest Conv_16: max_abs_err=%.6e (worst idx=%d "
+                "cpu=%.6f gpu=%.6f), tolerance=%.6e — %s",
+                (double)maxAbsErr, worstIdx,
+                (double)cpuOut[worstIdx], (double)gpuOut[worstIdx],
+                (double)tolerance, pass ? "PASS" : "FAIL");
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] GpuTest output sample [0..4]: %.6f %.6f %.6f %.6f %.6f",
+                (double)gpuOut[0], (double)gpuOut[1], (double)gpuOut[2],
+                (double)gpuOut[3], (double)gpuOut[4]);
+    // SDL_Log on Windows can route to OutputDebugString instead of stderr
+    // before our log handler is wired up.  fprintf gives the standalone
+    // self-test (which runs pre-handler-install) a visible result line.
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] GpuTest Conv_16: max_abs_err=%.6e (worst idx=%d "
+        "cpu=%.6f gpu=%.6f), tolerance=%.6e — %s\n"
+        "[VIPLE-RIFE-VK] GpuTest output sample [0..4]: %.6f %.6f %.6f %.6f %.6f\n",
+        (double)maxAbsErr, worstIdx,
+        (double)cpuOut[worstIdx], (double)gpuOut[worstIdx],
+        (double)tolerance, pass ? "PASS" : "FAIL",
+        (double)gpuOut[0], (double)gpuOut[1], (double)gpuOut[2],
+        (double)gpuOut[3], (double)gpuOut[4]);
+    std::fflush(stderr);
+
+    // ---- 8. Cleanup ----
+    pfnDestroyFence(device, fence, nullptr);
+    pfnDestroyCommandPool(device, cmdPool, nullptr);
+    destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, bufIn);
+    destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, bufW);
+    destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, bufB);
+    destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, bufOut);
+    pfnDestroyDescriptorPool(device, descPool, nullptr);
+    pfnDestroyPipeline(device, pipeline, nullptr);
+    pfnDestroyPipelineLayout(device, pipeLay, nullptr);
+    pfnDestroyDescriptorSetLayout(device, dsl, nullptr);
+    pfnDestroyShaderModule(device, shaderMod, nullptr);
+    return pass;
+}
+
+// ============================================================================
+// Phase 3b.2 standalone — replicates ncnnfruc::runExternalApiProbe's Vulkan
+// init pattern, hands handles to ncnn, runs runConv2DGpuTest, tears down.
+// Side-effect: claims+releases the ncnn process-singleton (same caveat as
+// runExternalApiProbe — env var is dev-only, must abort streaming after
+// invoking).
+// ============================================================================
+
+bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] standalone GpuTest: starting (modelDir='%s')",
+                qUtf8Printable(modelDir));
+
+#ifdef _WIN32
+    HMODULE vkLib = ::GetModuleHandleW(L"vulkan-1.dll");
+    if (!vkLib) vkLib = ::LoadLibraryW(L"vulkan-1.dll");
+    if (!vkLib) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] standalone: vulkan-1.dll not loadable");
+        return false;
+    }
+    auto pfnGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        ::GetProcAddress(vkLib, "vkGetInstanceProcAddr"));
+#else
+    void* vkLib = dlopen("libvulkan.so.1", RTLD_NOW);
+    if (!vkLib) vkLib = dlopen("libvulkan.so", RTLD_NOW);
+    if (!vkLib) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] standalone: libvulkan not loadable");
+        return false;
+    }
+    auto pfnGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        dlsym(vkLib, "vkGetInstanceProcAddr"));
+#endif
+    if (!pfnGetInstanceProcAddr) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] standalone: vkGetInstanceProcAddr missing");
+        return false;
+    }
+    auto pfnCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+        pfnGetInstanceProcAddr(nullptr, "vkCreateInstance"));
+    if (!pfnCreateInstance) return false;
+
+    VkInstance vkInstance = VK_NULL_HANDLE;
+    VkPhysicalDevice vkPhys = VK_NULL_HANDLE;
+    VkDevice vkDevice = VK_NULL_HANDLE;
+    VkQueue vkQueue = VK_NULL_HANDLE;
+    uint32_t computeQF = UINT32_MAX;
+
+    PFN_vkDestroyInstance pfnDestroyInstance = nullptr;
+    PFN_vkDestroyDevice   pfnDestroyDevice   = nullptr;
+
+    auto teardown = [&]() {
+        if (vkDevice && pfnDestroyDevice) {
+            pfnDestroyDevice(vkDevice, nullptr);
+            vkDevice = VK_NULL_HANDLE;
+        }
+        if (vkInstance && pfnDestroyInstance) {
+            pfnDestroyInstance(vkInstance, nullptr);
+            vkInstance = VK_NULL_HANDLE;
+        }
+    };
+
+    // ---- VkInstance ----
+    {
+        VkApplicationInfo ai = {};
+        ai.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+        ai.pApplicationName = "VipleStream-RifeNativeVkSelfTest";
+        ai.apiVersion = VK_API_VERSION_1_2;
+        const char* exts[] = { "VK_KHR_get_physical_device_properties2" };
+        VkInstanceCreateInfo ici = {};
+        ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        ici.pApplicationInfo = &ai;
+        ici.enabledExtensionCount = 1;
+        ici.ppEnabledExtensionNames = exts;
+        if (pfnCreateInstance(&ici, nullptr, &vkInstance) != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] standalone: vkCreateInstance failed");
+            return false;
+        }
+    }
+    pfnDestroyInstance = (PFN_vkDestroyInstance)pfnGetInstanceProcAddr(vkInstance, "vkDestroyInstance");
+
+    // ---- Physical device + queue family ----
+    auto pfnEnumPhys = (PFN_vkEnumeratePhysicalDevices)pfnGetInstanceProcAddr(vkInstance, "vkEnumeratePhysicalDevices");
+    auto pfnGetPhysProps = (PFN_vkGetPhysicalDeviceProperties)pfnGetInstanceProcAddr(vkInstance, "vkGetPhysicalDeviceProperties");
+    auto pfnGetQFProps = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)pfnGetInstanceProcAddr(vkInstance, "vkGetPhysicalDeviceQueueFamilyProperties");
+    auto pfnCreateDevice = (PFN_vkCreateDevice)pfnGetInstanceProcAddr(vkInstance, "vkCreateDevice");
+    if (!pfnEnumPhys || !pfnGetPhysProps || !pfnGetQFProps || !pfnCreateDevice) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] standalone: missing instance entries");
+        teardown();
+        return false;
+    }
+    uint32_t physCount = 0;
+    pfnEnumPhys(vkInstance, &physCount, nullptr);
+    if (physCount == 0) { teardown(); return false; }
+    std::vector<VkPhysicalDevice> phys(physCount);
+    pfnEnumPhys(vkInstance, &physCount, phys.data());
+    vkPhys = phys[0];
+    VkPhysicalDeviceProperties physProps;
+    pfnGetPhysProps(vkPhys, &physProps);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] standalone: picked '%s' (api=%u.%u)",
+                physProps.deviceName,
+                VK_VERSION_MAJOR(physProps.apiVersion),
+                VK_VERSION_MINOR(physProps.apiVersion));
+    uint32_t qfCount = 0;
+    pfnGetQFProps(vkPhys, &qfCount, nullptr);
+    std::vector<VkQueueFamilyProperties> qfp(qfCount);
+    pfnGetQFProps(vkPhys, &qfCount, qfp.data());
+    for (uint32_t i = 0; i < qfCount; i++) {
+        if (qfp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { computeQF = i; break; }
+    }
+    if (computeQF == UINT32_MAX) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] standalone: no compute queue family");
+        teardown();
+        return false;
+    }
+
+    // ---- VkDevice ----
+    {
+        float prio = 1.0f;
+        VkDeviceQueueCreateInfo qci = {};
+        qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qci.queueFamilyIndex = computeQF;
+        qci.queueCount = 1;
+        qci.pQueuePriorities = &prio;
+        VkDeviceCreateInfo dci = {};
+        dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        dci.queueCreateInfoCount = 1;
+        dci.pQueueCreateInfos = &qci;
+        if (pfnCreateDevice(vkPhys, &dci, nullptr, &vkDevice) != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] standalone: vkCreateDevice failed");
+            teardown();
+            return false;
+        }
+    }
+    pfnDestroyDevice = (PFN_vkDestroyDevice)pfnGetInstanceProcAddr(vkInstance, "vkDestroyDevice");
+
+    auto pfnGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)pfnGetInstanceProcAddr(vkInstance, "vkGetDeviceProcAddr");
+    auto pfnGetDeviceQueue = (PFN_vkGetDeviceQueue)pfnGetDeviceProcAddr(vkDevice, "vkGetDeviceQueue");
+    pfnGetDeviceQueue(vkDevice, computeQF, 0, &vkQueue);
+
+    // ---- Hand to ncnn so compile_spirv_module works ----
+    int rc = ncnn::create_gpu_instance_external(
+        vkInstance, vkPhys, vkDevice,
+        computeQF, 1,
+        computeQF, 1,
+        computeQF, 1);
+    if (rc != 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] standalone: create_gpu_instance_external rc=%d", rc);
+        teardown();
+        return false;
+    }
+
+    // ---- Run the actual GPU correctness gate ----
+    VulkanCtx ctx{};
+    ctx.instance            = vkInstance;
+    ctx.physicalDevice      = vkPhys;
+    ctx.device              = vkDevice;
+    ctx.computeQueueFamily  = computeQF;
+    ctx.computeQueue        = vkQueue;
+    ctx.getInstanceProcAddr = (void*)pfnGetInstanceProcAddr;
+    bool pass = runConv2DGpuTest(ctx, modelDir, tolerance);
+
+    // ---- Cleanup ----
+    ncnn::destroy_gpu_instance();
+    teardown();
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] standalone GpuTest: %s",
+                pass ? "PASS" : "FAIL");
+    return pass;
 }
 
 } // namespace viple::rife_native_vk

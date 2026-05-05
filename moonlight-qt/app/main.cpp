@@ -570,6 +570,21 @@ int main(int argc, char *argv[])
         viple::rife_native_vk::dumpModelSmoke(fi.absolutePath());
     }
 
+    // VipleStream §J.3.e.X Phase 3b.2 standalone — when VIPLE_RIFE_NATIVE_VK_TEST=1
+    // is set, build a minimal VkInstance/Device, hand them to ncnn, run
+    // Conv_16 on the GPU, compare against the CPU reference (Phase 3a),
+    // log PASS/FAIL with max-abs-error, then exit.  Does not require
+    // streaming or VkFrucRenderer — fast iteration target for the
+    // hand-rolled RIFE inference pipeline.  Side-effect-heavy (claims
+    // ncnn singleton then destroys), so meant as a one-shot dev tool;
+    // we exit immediately after the test to keep the process clean.
+    if (qEnvironmentVariableIntValue("VIPLE_RIFE_NATIVE_VK_TEST") != 0) {
+        QString anchor = Path::getDataFilePath("rife-v4.25-lite/flownet.param");
+        QFileInfo fi(anchor);
+        bool ok = viple::rife_native_vk::runConv2DGpuTestStandalone(fi.absolutePath());
+        return ok ? 0 : 1;
+    }
+
 #ifdef Q_OS_WIN32
     // Grab the original std handles before we potentially redirect them later
     HANDLE oldConOut = GetStdHandle(STD_OUTPUT_HANDLE);
