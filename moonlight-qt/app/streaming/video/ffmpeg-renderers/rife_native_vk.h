@@ -160,6 +160,27 @@ void referenceConv2D(const float* in, int inW, int inH, int inC,
                      float leakyReluSlope,
                      float* out, int outW, int outH);
 
+// GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
+// + optional fused LeakyReLU.  Returned string is a complete shader,
+// ready to feed into ncnn::compile_spirv_module / glslangValidator.
+//
+// Binding layout (matches descriptor set 0):
+//   binding 0: readonly storage buffer  — input  (fp32, NCHW)
+//   binding 1: readonly storage buffer  — weight (fp32, NCHW)
+//   binding 2: readonly storage buffer  — bias   (fp32, [N], may be zero-len if no bias)
+//   binding 3: writeonly storage buffer — output (fp32, NCHW)
+//
+// Push constants (16 ints + 1 float = 68 bytes; round up to 80 for alignment):
+//   ivec4 inDims;   // x=inW, y=inH, z=inC, w=hasBias (0/1)
+//   ivec4 outDims;  // x=outW, y=outH, z=outChan, w=_pad
+//   ivec4 conv;     // x=kernelW, y=kernelH, z=strideW (or strideH if same), w=pad
+//   float leakyReluSlope;  // 0 = no activation
+//
+// Workgroup: local_size 8×8×1 (= 64 threads).  Dispatch
+//   ((outW + 7) / 8, (outH + 7) / 8, outChan).
+// Each thread computes one output element (n, oy, ox).
+const char* getConv2DShaderGlsl();
+
 // Phase 3a smoke — pulls Conv_16 weight+bias from the loaded Model,
 // generates a deterministic 64×64×3 random input, runs reference Conv
 // CPU, and logs first/min/max/mean output stats.  Catches any fp16-unpack

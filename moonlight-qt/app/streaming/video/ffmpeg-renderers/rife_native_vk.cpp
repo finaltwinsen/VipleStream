@@ -184,6 +184,98 @@ bool parseParam(const QString& path, Model& out) {
     return true;
 }
 
+// §J.3.e.X Phase 3b.1 — Conv2D 3×3 GLSL compute shader.
+//
+// Generic enough to handle any kernelW/kernelH (no compile-time
+// specialisation yet).  Dispatch covers N output channels in z-dim,
+// outH/8 in y-dim, outW/8 in x-dim.  Each thread reads (kernelH ×
+// kernelW × inC) input pixels and accumulates to one output pixel.
+//
+// Trade-offs accepted for Phase 3b.1 (will revisit as we profile):
+//   • No tiling / shared-memory cache — input read directly from
+//     storage buffer with O(kernel² × inC) reads per output thread.
+//     For 3×3 conv with inC=3 that's 27 reads (cheap); for inC=192
+//     residual block it's 1728 reads (potentially memory-bound).
+//   • No fp16 weight in shader yet — host pre-unpacks fp16→fp32 into
+//     the weight buffer.  Saves shader complexity at cost of 2× weight
+//     buffer memory.  fp16 in-shader is a Phase 3c optimisation.
+//   • Bounds-check at every load (instead of separate edge / interior
+//     dispatches).  Branchy but trivial cost on modern GPUs.
+//
+// Shader string is checked in here for source review; ncnn's
+// compile_spirv_module turns it into SPIR-V at runtime.  Future phase
+// will switch to glslangValidator at build time + embedded SPIR-V to
+// cut the runtime ncnn dependency.
+static const char* kConv2DShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuf  { float in_buf[];  };
+layout(set = 0, binding = 1) readonly buffer WeightBuf { float w_buf[];   };
+layout(set = 0, binding = 2) readonly buffer BiasBuf   { float bias_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { float out_buf[]; };
+
+layout(push_constant) uniform PC {
+    ivec4 inDims;     // (inW, inH, inC, hasBias)
+    ivec4 outDims;    // (outW, outH, outChan, _pad)
+    ivec4 conv;       // (kernelW, kernelH, stride, pad)
+    float leakyReluSlope;
+} pc;
+
+void main() {
+    int ox = int(gl_GlobalInvocationID.x);
+    int oy = int(gl_GlobalInvocationID.y);
+    int n  = int(gl_GlobalInvocationID.z);
+    if (ox >= pc.outDims.x || oy >= pc.outDims.y || n >= pc.outDims.z) {
+        return;
+    }
+    int inW   = pc.inDims.x;
+    int inH   = pc.inDims.y;
+    int inC   = pc.inDims.z;
+    int hasB  = pc.inDims.w;
+    int outW  = pc.outDims.x;
+    int outH  = pc.outDims.y;
+    int outN  = pc.outDims.z;
+    int kW    = pc.conv.x;
+    int kH    = pc.conv.y;
+    int stride = pc.conv.z;
+    int pad   = pc.conv.w;
+
+    float acc = (hasB != 0) ? bias_buf[n] : 0.0;
+
+    // weight indexed [n, c, ky, kx] in NCHW layout; flatten to
+    // ((n * inC + c) * kH + ky) * kW + kx.
+    int wRowStride = kW;
+    int wPlaneStride = kH * kW;
+    int wChanStride = inC * wPlaneStride;
+
+    for (int c = 0; c < inC; ++c) {
+        int wChanBase = n * wChanStride + c * wPlaneStride;
+        int inChanBase = c * inH * inW;
+        for (int ky = 0; ky < kH; ++ky) {
+            int iy = oy * stride + ky - pad;
+            if (iy < 0 || iy >= inH) continue;
+            for (int kx = 0; kx < kW; ++kx) {
+                int ix = ox * stride + kx - pad;
+                if (ix < 0 || ix >= inW) continue;
+                float wv = w_buf[wChanBase + ky * wRowStride + kx];
+                float iv = in_buf[inChanBase + iy * inW + ix];
+                acc += wv * iv;
+            }
+        }
+    }
+
+    if (pc.leakyReluSlope > 0.0 && acc < 0.0) {
+        acc *= pc.leakyReluSlope;
+    }
+    out_buf[(n * outH + oy) * outW + ox] = acc;
+}
+)GLSL";
+
+const char* getConv2DShaderGlsl() {
+    return kConv2DShaderGlsl;
+}
+
 // IEEE-754 fp16 → fp32 conversion.  Handles ±0, normals, and ±inf/NaN.
 // Subnormals (e==0, m!=0) are flushed to ±0 — acceptable for trained
 // conv weights where we never see subnormals in practice.
