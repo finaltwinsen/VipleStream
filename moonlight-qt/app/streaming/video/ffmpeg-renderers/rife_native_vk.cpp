@@ -1500,11 +1500,24 @@ namespace {
 
 uint32_t findHostVisibleMemoryType(VkPhysicalDeviceMemoryProperties& mp,
                                     uint32_t typeBits) {
+    // §J.3.e.Y 4Y.1a — prefer DEVICE_LOCAL | HOST_VISIBLE (BAR / ReBAR
+    // memory) over plain HOST_VISIBLE for ~3-10× faster GPU access on
+    // discrete GPUs.  RTX 30/40 + AMD RDNA2+ default-enable ReBAR which
+    // exposes the entire VRAM as both device-local AND host-visible
+    // (write-combined on the host side).  Older / smaller-BAR systems
+    // expose ~256 MB of this combined memory; our entire RIFE working
+    // set is ~30 MB so it fits.  Falls back to plain HOST_VISIBLE when
+    // BAR isn't available — same as v1.3.337 behaviour.
+    const VkMemoryPropertyFlags hostBits  = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                          | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    const VkMemoryPropertyFlags preferred = hostBits | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
         if (!(typeBits & (1u << i))) continue;
-        VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        if ((mp.memoryTypes[i].propertyFlags & want) == want) return i;
+        if ((mp.memoryTypes[i].propertyFlags & preferred) == preferred) return i;
+    }
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+        if (!(typeBits & (1u << i))) continue;
+        if ((mp.memoryTypes[i].propertyFlags & hostBits) == hostBits) return i;
     }
     return UINT32_MAX;
 }
