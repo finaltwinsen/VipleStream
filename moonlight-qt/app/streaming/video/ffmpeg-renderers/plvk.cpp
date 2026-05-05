@@ -13,6 +13,7 @@
 #include <ncnn/command.h>
 #include "ncnn_rife_warp.h"
 #include "path.h"
+#include "rife_native_vk.h"
 #include <QDir>
 
 // Implementation in plvk_c.c

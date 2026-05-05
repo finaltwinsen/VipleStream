@@ -438,13 +438,15 @@ libplacebo {
         streaming/video/ffmpeg-renderers/vkfruc.cpp \
         streaming/video/ffmpeg-renderers/vkfruc-decode.cpp \
         streaming/video/ffmpeg-renderers/vkfruc-aftermath.cpp \
-        streaming/video/ffmpeg-renderers/ncnn_rife_warp.cpp
+        streaming/video/ffmpeg-renderers/ncnn_rife_warp.cpp \
+        streaming/video/ffmpeg-renderers/rife_native_vk.cpp
     HEADERS += \
         streaming/video/ffmpeg-renderers/plvk.h \
         streaming/video/ffmpeg-renderers/vkfruc.h \
         streaming/video/ffmpeg-renderers/vkfruc-decode.h \
         streaming/video/ffmpeg-renderers/vkfruc-aftermath.h \
-        streaming/video/ffmpeg-renderers/ncnn_rife_warp.h
+        streaming/video/ffmpeg-renderers/ncnn_rife_warp.h \
+        streaming/video/ffmpeg-renderers/rife_native_vk.h
 }
 config_EGL {
     message(EGL renderer selected)

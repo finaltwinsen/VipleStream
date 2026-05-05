@@ -49,6 +49,7 @@
 #include "cli/pair.h"
 #include "cli/commandlineparser.h"
 #include "path.h"
+#include "streaming/video/ffmpeg-renderers/rife_native_vk.h"
 #include "utils.h"
 #include "gui/computermodel.h"
 #include "gui/appmodel.h"
@@ -556,6 +557,17 @@ int main(int argc, char *argv[])
     // Override the default QML cache directory with the one we chose
     if (qEnvironmentVariableIsEmpty("QML_DISK_CACHE_PATH")) {
         qputenv("QML_DISK_CACHE_PATH", Path::getQmlCacheDir().toUtf8());
+    }
+
+    // VipleStream §J.3.e.X scaffold smoke — when VIPLE_RIFE_NATIVE_VK_DUMP=1
+    // is set, parse rife-v4.25-lite/flownet.param at startup and log layer
+    // count + op distribution + head/tail layers.  No GPU work yet; future
+    // sub-phases (weight loader → first Conv2D → full graph → drop ncnn)
+    // build on this.  Does not require streaming, so easy to verify.
+    if (qEnvironmentVariableIntValue("VIPLE_RIFE_NATIVE_VK_DUMP") != 0) {
+        QString anchor = Path::getDataFilePath("rife-v4.25-lite/flownet.param");
+        QFileInfo fi(anchor);
+        viple::rife_native_vk::dumpModelSmoke(fi.absolutePath());
     }
 
 #ifdef Q_OS_WIN32
