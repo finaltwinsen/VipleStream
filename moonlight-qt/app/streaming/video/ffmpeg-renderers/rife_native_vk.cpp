@@ -469,6 +469,142 @@ void main() {
 const char* getConv2D_3x3_s1_ShaderGlsl() { return kConv2D_3x3_s1_ShaderGlsl; }
 
 // ============================================================================
+// §J.3.e.Y 4Y.4-stride2 — tiled shared-memory Conv2D for k=3 stride=2
+// pad=1 dilation=1 (the case for the remaining 12 of 56 conv layers
+// in flownet — encoder pyramid downsamples).
+//
+// 16×16 output pixels per workgroup → 32×32 input region + 1 halo
+// each side = 33×33 input tile.  Per channel: 1089 floats = 4356 B
+// shared memory (well under 32-48 KB limit).  Cooperative load: 256
+// threads × 5 strided passes covers 1280 ≥ 1089 elements.
+//
+// Each thread (olx, oly) computes output (wg*16+olx, wg*16+oly) by
+// reading 9 weights for (n, c) and 9 input samples from shared tile
+// at positions (2*oly+ky, 2*olx+kx) for (ky, kx) ∈ [0,3) — i.e.
+// stride=2 sub-sampling within the 33×33 tile.
+// ============================================================================
+
+static const char* kConv2D_3x3_s2_ShaderGlsl = R"GLSL(
+#version 450
+
+#define TILE_W       16
+#define TILE_H       16
+#define HALO         1
+#define IN_TILE_W    33
+#define IN_TILE_H    33
+#define IN_TILE_SIZE 1089
+#define WG_THREADS   256
+
+layout(local_size_x = TILE_W, local_size_y = TILE_H, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer InputBuf  { float in_buf[];  };
+layout(set = 0, binding = 1) readonly  buffer WeightBuf { float w_buf[];   };
+layout(set = 0, binding = 2) readonly  buffer BiasBuf   { float bias_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { float out_buf[]; };
+
+layout(push_constant) uniform PC {
+    ivec4 inDims;     // (inW, inH, inC, hasBias)
+    ivec4 outDims;    // (outW, outH, outChan, _pad)
+    ivec4 conv;       // unused — k/s/p hardcoded
+    float leakyReluSlope;
+} pc;
+
+shared float tile[IN_TILE_SIZE];
+
+void main() {
+    int olx = int(gl_LocalInvocationID.x);
+    int oly = int(gl_LocalInvocationID.y);
+    int wgx = int(gl_WorkGroupID.x);
+    int wgy = int(gl_WorkGroupID.y);
+    int n   = int(gl_WorkGroupID.z);
+
+    int outW = pc.outDims.x;
+    int outH = pc.outDims.y;
+    int inW  = pc.inDims.x;
+    int inH  = pc.inDims.y;
+    int inC  = pc.inDims.z;
+    int hasB = pc.inDims.w;
+
+    int ox = wgx * TILE_W + olx;
+    int oy = wgy * TILE_H + oly;
+
+    float acc = (hasB != 0) ? bias_buf[n] : 0.0;
+
+    // tile_x_base / tile_y_base are the input coords for tile[0,0].
+    // Stride=2 makes the workgroup cover [2*wg*16, 2*wg*16+31] outputs,
+    // so input window starts at 2*wg*16 - HALO = 32*wg - 1.
+    int tile_x_base = 2 * wgx * TILE_W - HALO;
+    int tile_y_base = 2 * wgy * TILE_H - HALO;
+
+    int thread_idx = oly * TILE_W + olx;  // 0..255
+
+    for (int c = 0; c < inC; ++c) {
+        int in_chan_base = c * inH * inW;
+
+        // Cooperative load 1089 elements over 5 strided passes.
+        for (int p = 0; p < 5; ++p) {
+            int idx = thread_idx + p * WG_THREADS;
+            if (idx < IN_TILE_SIZE) {
+                int ly = idx / IN_TILE_W;
+                int lx = idx - ly * IN_TILE_W;
+                int iy = tile_y_base + ly;
+                int ix = tile_x_base + lx;
+                float v = 0.0;
+                if (ix >= 0 && ix < inW && iy >= 0 && iy < inH) {
+                    v = in_buf[in_chan_base + iy * inW + ix];
+                }
+                tile[idx] = v;
+            }
+        }
+        memoryBarrierShared();
+        barrier();
+
+        if (ox < outW && oy < outH) {
+            int wbase = (n * inC + c) * 9;
+            float w0 = w_buf[wbase + 0];
+            float w1 = w_buf[wbase + 1];
+            float w2 = w_buf[wbase + 2];
+            float w3 = w_buf[wbase + 3];
+            float w4 = w_buf[wbase + 4];
+            float w5 = w_buf[wbase + 5];
+            float w6 = w_buf[wbase + 6];
+            float w7 = w_buf[wbase + 7];
+            float w8 = w_buf[wbase + 8];
+
+            int tile_y0 = 2 * oly + 0;
+            int tile_y1 = 2 * oly + 1;
+            int tile_y2 = 2 * oly + 2;
+            int tile_x0 = 2 * olx + 0;
+
+            int row0 = tile_y0 * IN_TILE_W + tile_x0;
+            int row1 = tile_y1 * IN_TILE_W + tile_x0;
+            int row2 = tile_y2 * IN_TILE_W + tile_x0;
+
+            acc += tile[row0 + 0] * w0;
+            acc += tile[row0 + 1] * w1;
+            acc += tile[row0 + 2] * w2;
+            acc += tile[row1 + 0] * w3;
+            acc += tile[row1 + 1] * w4;
+            acc += tile[row1 + 2] * w5;
+            acc += tile[row2 + 0] * w6;
+            acc += tile[row2 + 1] * w7;
+            acc += tile[row2 + 2] * w8;
+        }
+        barrier();
+    }
+
+    if (ox < outW && oy < outH) {
+        if (pc.leakyReluSlope > 0.0 && acc < 0.0) {
+            acc *= pc.leakyReluSlope;
+        }
+        out_buf[(n * outH + oy) * outW + ox] = acc;
+    }
+}
+)GLSL";
+
+const char* getConv2D_3x3_s2_ShaderGlsl() { return kConv2D_3x3_s2_ShaderGlsl; }
+
+// ============================================================================
 // §J.3.e.X Phase 4b — element-wise BinaryOp.
 //
 // Covers 92 BinaryOp layers in rife-v4.25-lite/flownet.param.  Audit:
@@ -2086,7 +2222,8 @@ enum class ShaderKind : int {
     InterpBilinear,
     EltwiseSum,
     RifeWarp,
-    Conv2D_3x3_s1,   // §J.3.e.Y 4Y.4 — tiled, k=3 stride=1 pad=1 dilation=1
+    Conv2D_3x3_s1,   // §J.3.e.Y 4Y.4         — tiled, k=3 stride=1 pad=1 dilation=1
+    Conv2D_3x3_s2,   // §J.3.e.Y 4Y.4-stride2 — tiled, k=3 stride=2 pad=1 dilation=1
     Count
 };
 
@@ -2112,6 +2249,7 @@ static const ShaderSpec kShaderSpecs[(int)ShaderKind::Count] = {
     { "EltwiseSum",     getEltwiseShaderGlsl,        3, 16 },
     { "RifeWarp",       getRifeWarpShaderGlsl,       3, 16 },
     { "Conv2D_3x3_s1",  getConv2D_3x3_s1_ShaderGlsl, 4, 64 },
+    { "Conv2D_3x3_s2",  getConv2D_3x3_s2_ShaderGlsl, 4, 64 },
 };
 
 struct CachedPipeline {
@@ -2789,13 +2927,18 @@ bool dispatchConvolution(ExecState& e, const Layer& L) {
     pc.lr = lr;
 
     // §J.3.e.Y 4Y.4 — tiled k=3 s=1 specialised path covers 44 of 56
-    // conv layers in flownet (the dominant case).  Stride=2 (12 layers)
-    // stays on generic shader until a future stride=2 tiled phase.
-    const bool tiled_eligible = (kW == 3 && kH == 3 && sW == 1 && sH == 1
-                                 && pad == 1
-                                 && paramInt(Lref, 2,  1) == 1   // dilation_w
-                                 && paramInt(Lref, 12, 1) == 1); // dilation_h
-    if (tiled_eligible) {
+    // conv layers in flownet (the dominant case).  Stride=2 (12
+    // layers) deliberately stays on generic shader: see 4Y.4-stride2
+    // experiment notes — for s=2 layers in this model the generic
+    // shader is faster than the naive tiled version because
+    // per-channel barrier overhead dominates when output spatial size
+    // is small (Conv_50 output 16×16 = 1 workgroup × 96 channels ×
+    // 192 = 18K barriers per frame just from that one layer).
+    const bool dilation1 = (paramInt(Lref, 2,  1) == 1
+                         && paramInt(Lref, 12, 1) == 1);
+    const bool tiled_k3p1d1_s1 = (kW == 3 && kH == 3 && pad == 1 && dilation1
+                                  && sW == 1 && sH == 1);
+    if (tiled_k3p1d1_s1) {
         return bindDispatch(e, ShaderKind::Conv2D_3x3_s1, bufs, 4, &pc, sizeof(pc),
                             (uint32_t)((outS->w + 15) / 16),
                             (uint32_t)((outS->h + 15) / 16),
