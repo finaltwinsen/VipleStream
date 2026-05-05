@@ -427,6 +427,21 @@ public:
                       float        timestep,
                       float*       out0Data);
 
+    // §J.3.e.Y 4Y.0 — per-phase wall-clock breakdown of the most
+    // recent runInference call.  Phases:
+    //   seedMs     — memcpy in0/in1/in2 from caller buffers into blobs
+    //   recordMs   — reset pools + record 389 dispatches into cmdbuf
+    //   gpuWaitMs  — submit + fence wait (= effective GPU compute time)
+    //   readbackMs — memcpy out0 blob into caller buffer
+    // Sum is the total wall-clock cost of runInference.
+    struct LastTiming {
+        double seedMs     = 0.0;
+        double recordMs   = 0.0;
+        double gpuWaitMs  = 0.0;
+        double readbackMs = 0.0;
+    };
+    LastTiming lastTiming() const;
+
 private:
     struct Impl;
     Impl* m_impl = nullptr;

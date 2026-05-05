@@ -5034,6 +5034,7 @@ struct RifeNativeExecutor::Impl {
     PFN_vkResetFences               pfnResetFc   = nullptr;
     VkFence                         fence        = VK_NULL_HANDLE;
     BlobShape                       outShape{};
+    RifeNativeExecutor::LastTiming  lastTiming{};
 };
 
 RifeNativeExecutor::RifeNativeExecutor() : m_impl(new Impl) {}
@@ -5180,6 +5181,12 @@ bool RifeNativeExecutor::runInference(const float* in0Data,
     if (!m_impl || !m_impl->initialized) return false;
     if (!in0Data || !in1Data || !out0Data) return false;
 
+    using clk = std::chrono::high_resolution_clock;
+    auto ms = [](clk::duration d) {
+        return std::chrono::duration<double, std::milli>(d).count();
+    };
+    auto t0 = clk::now();
+
     auto seed = [&](const QString& name, const float* src, size_t count) {
         auto it = m_impl->state.buffers.blobs.find(name);
         if (it == m_impl->state.buffers.blobs.end()) return;
@@ -5191,6 +5198,7 @@ bool RifeNativeExecutor::runInference(const float* in0Data,
     seed("in1", in1Data,
          (size_t)m_impl->opts.in1Shape.c * m_impl->opts.in1Shape.h * m_impl->opts.in1Shape.w);
     seed("in2", &timestep, 1);
+    auto tSeed = clk::now();
 
     // Reset descriptor + command pools so we can rebuild this frame's
     // dispatch sequence cleanly.
@@ -5214,6 +5222,7 @@ bool RifeNativeExecutor::runInference(const float* in0Data,
         emitComputeBarrier(m_impl->state);
     }
     m_impl->pfnEnd(m_impl->state.cmd);
+    auto tRecord = clk::now();
 
     m_impl->pfnResetFc(m_impl->state.device, 1, &m_impl->fence);
     VkSubmitInfo si = {};
@@ -5222,6 +5231,7 @@ bool RifeNativeExecutor::runInference(const float* in0Data,
     si.pCommandBuffers = &m_impl->state.cmd;
     if (m_impl->pfnSubmit(m_impl->state.queue, 1, &si, m_impl->fence) != VK_SUCCESS) return false;
     m_impl->pfnWaitFc(m_impl->state.device, 1, &m_impl->fence, VK_TRUE, UINT64_MAX);
+    auto tWait = clk::now();
 
     auto outIt = m_impl->state.buffers.blobs.find("out0");
     if (outIt == m_impl->state.buffers.blobs.end()) return false;
@@ -5229,7 +5239,17 @@ bool RifeNativeExecutor::runInference(const float* in0Data,
                                                   * m_impl->outShape.w * sizeof(float);
     std::memcpy(out0Data, outIt->second.mapped,
                 std::min(outBytes, outIt->second.size));
+    auto tEnd = clk::now();
+
+    m_impl->lastTiming.seedMs     = ms(tSeed   - t0);
+    m_impl->lastTiming.recordMs   = ms(tRecord - tSeed);
+    m_impl->lastTiming.gpuWaitMs  = ms(tWait   - tRecord);
+    m_impl->lastTiming.readbackMs = ms(tEnd    - tWait);
     return true;
+}
+
+RifeNativeExecutor::LastTiming RifeNativeExecutor::lastTiming() const {
+    return (m_impl && m_impl->initialized) ? m_impl->lastTiming : LastTiming{};
 }
 
 // ============================================================================
@@ -5491,6 +5511,8 @@ bool runProductionApiBenchmark(const VulkanCtx& ctx,
     for (int i = 0; i < warmup; ++i) (void)runOne();
     std::vector<double> nativeMs;
     nativeMs.reserve(iterations);
+    // §J.3.e.Y 4Y.0 — aggregate per-phase timing across iterations.
+    double seedSum = 0, recordSum = 0, gpuSum = 0, readSum = 0;
     for (int i = 0; i < iterations; ++i) {
         double t = runOne();
         if (t < 0) {
@@ -5499,7 +5521,16 @@ bool runProductionApiBenchmark(const VulkanCtx& ctx,
             return false;
         }
         nativeMs.push_back(t);
+        auto lt = exec.lastTiming();
+        seedSum   += lt.seedMs;
+        recordSum += lt.recordMs;
+        gpuSum    += lt.gpuWaitMs;
+        readSum   += lt.readbackMs;
     }
+    double seedAvg   = seedSum   / iterations;
+    double recordAvg = recordSum / iterations;
+    double gpuAvg    = gpuSum    / iterations;
+    double readAvg   = readSum   / iterations;
     exec.shutdown();
 
     auto stats = [](std::vector<double>& v) {
@@ -5574,12 +5605,14 @@ bool runProductionApiBenchmark(const VulkanCtx& ctx,
         "  init    native=%.1f ms   ncnn=%.1f ms\n"
         "  per-fwd native  min=%.2f  med=%.2f  max=%.2f  mean=%.2f ms\n"
         "  per-fwd ncnn    min=%.2f  med=%.2f  max=%.2f  mean=%.2f ms\n"
-        "  median speedup native vs ncnn = %.2fx\n",
+        "  median speedup native vs ncnn = %.2fx\n"
+        "  4Y.0 per-phase native (avg ms): seed=%.2f  record=%.2f  gpu=%.2f  readback=%.2f\n",
         iterations, warmup,
         nativeInitMs, ncnnInitMs,
         nat.minV, nat.medV, nat.maxV, nat.meanV,
         nc.minV,  nc.medV,  nc.maxV,  nc.meanV,
-        speedupMed);
+        speedupMed,
+        seedAvg, recordAvg, gpuAvg, readAvg);
     std::fflush(stderr);
 
     return true;
