@@ -555,6 +555,94 @@ void main() {
 )GLSL";
 const char* getEltwiseShaderGlsl() { return kEltwiseShaderGlsl; }
 
+// ============================================================================
+// §J.3.e.X Phase 4e — Deconvolution (transposed conv).
+//
+// Audit confirmed all 7 Deconv layers in flownet.param are uniform:
+//   k=4×4, stride=2, pad=1, bias=on, no activation, dilation=1.
+//   Output dim = (inDim - 1) * 2 + 4 - 2 = 2 * inDim  (exact 2× upsample)
+//
+// Weight layout for ncnn Deconvolution is (in_ch, out_ch, kH, kW),
+// i.e. axes 0/1 are SWAPPED relative to Convolution's (out_ch, in_ch,
+// kH, kW).  The shader's weight index reflects this.
+//
+// Math (standard transposed conv, reads input "backwards" through
+// stride):
+//   out[n, oh, ow] = bias[n]
+//     + Σ_{c, ky, kx} in[c, ih, iw] * weight[c, n, ky, kx]
+//   where  ih_num = oh + pad - ky;  iw_num = ow + pad - kx
+//          contribute only if (ih_num >= 0 && ih_num % stride == 0
+//                          && (ih = ih_num / stride) < inH)
+//          and same for iw.
+// ============================================================================
+
+static const char* kDeconv2DShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuf  { float in_buf[];   };
+layout(set = 0, binding = 1) readonly buffer WeightBuf { float w_buf[];    };
+layout(set = 0, binding = 2) readonly buffer BiasBuf   { float bias_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { float out_buf[]; };
+
+layout(push_constant) uniform PC {
+    ivec4 inDims;     // (inW, inH, inC, hasBias)
+    ivec4 outDims;    // (outW, outH, outChan, _pad)
+    ivec4 conv;       // (kernelW, kernelH, stride, pad)
+} pc;
+
+void main() {
+    int ow = int(gl_GlobalInvocationID.x);
+    int oh = int(gl_GlobalInvocationID.y);
+    int n  = int(gl_GlobalInvocationID.z);
+    if (ow >= pc.outDims.x || oh >= pc.outDims.y || n >= pc.outDims.z) return;
+
+    int inW   = pc.inDims.x;
+    int inH   = pc.inDims.y;
+    int inC   = pc.inDims.z;
+    int hasB  = pc.inDims.w;
+    int outW  = pc.outDims.x;
+    int outH  = pc.outDims.y;
+    int outN  = pc.outDims.z;
+    int kW    = pc.conv.x;
+    int kH    = pc.conv.y;
+    int strd  = pc.conv.z;
+    int pad   = pc.conv.w;
+
+    float acc = (hasB != 0) ? bias_buf[n] : 0.0;
+
+    // Weight indexed (c, n, ky, kx) (note ncnn Deconv has in_ch outer):
+    //   w[((c * outN + n) * kH + ky) * kW + kx]
+    int wPlaneStride = kH * kW;
+
+    for (int c = 0; c < inC; ++c) {
+        int wChanBase  = (c * outN + n) * wPlaneStride;
+        int inChanBase = c * inH * inW;
+        for (int ky = 0; ky < kH; ++ky) {
+            int ihNum = oh + pad - ky;
+            if (ihNum < 0) continue;
+            if ((ihNum % strd) != 0) continue;
+            int ih = ihNum / strd;
+            if (ih >= inH) continue;
+            for (int kx = 0; kx < kW; ++kx) {
+                int iwNum = ow + pad - kx;
+                if (iwNum < 0) continue;
+                if ((iwNum % strd) != 0) continue;
+                int iw = iwNum / strd;
+                if (iw >= inW) continue;
+                float wv = w_buf[wChanBase + ky * kW + kx];
+                float iv = in_buf[inChanBase + ih * inW + iw];
+                acc += wv * iv;
+            }
+        }
+    }
+
+    out_buf[(n * outH + oh) * outW + ow] = acc;
+}
+)GLSL";
+
+const char* getDeconv2DShaderGlsl() { return kDeconv2DShaderGlsl; }
+
 // IEEE-754 fp16 → fp32 conversion.  Handles ±0, normals, and ±inf/NaN.
 // Subnormals (e==0, m!=0) are flushed to ±0 — acceptable for trained
 // conv weights where we never see subnormals in practice.
@@ -640,6 +728,46 @@ void referenceConv2D(const float* in, int inW, int inH, int inC,
                     }
                 }
                 if (leakyReluSlope > 0.0f && acc < 0.0f) acc *= leakyReluSlope;
+                out[(n * outH + oy) * outW + ox] = acc;
+            }
+        }
+    }
+}
+
+// Phase 4e — Deconvolution (transposed conv) CPU reference.
+// Weight layout: (in_ch, out_ch, kH, kW) — note ic OUTER, swapped vs Conv.
+// Output dim: outH = (inH - 1) * strideH + kH - padH_top - padH_bottom
+//             (assumes padTop == padBottom == padH; same for W).
+void referenceDeconv2D(const float* in, int inW, int inH, int inC,
+                       const float* weight, int outChan, int kernelH, int kernelW,
+                       const float* bias,
+                       int strideH, int strideW, int padH, int padW,
+                       float* out, int outW, int outH) {
+    for (int n = 0; n < outChan; ++n) {
+        const float biasVal = bias ? bias[n] : 0.0f;
+        for (int oy = 0; oy < outH; ++oy) {
+            for (int ox = 0; ox < outW; ++ox) {
+                float acc = biasVal;
+                for (int c = 0; c < inC; ++c) {
+                    for (int ky = 0; ky < kernelH; ++ky) {
+                        int ihNum = oy + padH - ky;
+                        if (ihNum < 0) continue;
+                        if ((ihNum % strideH) != 0) continue;
+                        int ih = ihNum / strideH;
+                        if (ih >= inH) continue;
+                        for (int kx = 0; kx < kernelW; ++kx) {
+                            int iwNum = ox + padW - kx;
+                            if (iwNum < 0) continue;
+                            if ((iwNum % strideW) != 0) continue;
+                            int iw = iwNum / strideW;
+                            if (iw >= inW) continue;
+                            // Note ic-outer weight layout: w[c, n, ky, kx]
+                            float w = weight[((c * outChan + n) * kernelH + ky) * kernelW + kx];
+                            float v = in[(c * inH + ih) * inW + iw];
+                            acc += w * v;
+                        }
+                    }
+                }
                 out[(n * outH + oy) * outW + ox] = acc;
             }
         }
@@ -2650,6 +2778,89 @@ bool runInterpBilinearGpuTest(const VulkanCtx& ctx,
     return pass;
 }
 
+bool runDeconv2DGpuTest(const VulkanCtx& ctx,
+                        const Model& m,
+                        const QString& layerName,
+                        float tolerance)
+{
+    const Layer* L = findLayerByName(m, layerName);
+    if (!L || L->kind != OpKind::Deconvolution) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] DeconvTest: layer '%s' not found / not Deconvolution",
+                     qUtf8Printable(layerName));
+        return false;
+    }
+    const int N       = paramInt(*L, 0, 0);
+    const int kW      = paramInt(*L, 1, 0);
+    const int kH      = paramInt(*L, 11, kW);
+    const int strideW = paramInt(*L, 3, 1);
+    const int strideH = paramInt(*L, 13, strideW);
+    const int pad     = paramInt(*L, 4, 0);
+    const int hasBias = paramInt(*L, 5, 0);
+    const int wsize   = paramInt(*L, 6, 0);
+    if (N <= 0 || kW <= 0 || kH <= 0 || wsize <= 0) return false;
+    const int C = wsize / (N * kH * kW);  // input channels (ic-outer)
+    auto weight = getTensorAsFp32(m, layerName + "/weight");
+    auto bias   = hasBias ? getTensorAsFp32(m, layerName + "/bias")
+                          : std::vector<float>{};
+    if ((int)weight.size() != wsize) return false;
+
+    // Use a 16×16 input — outputs 32×32, modest memory.
+    constexpr int W = 16, H = 16;
+    const int OUT_H = (H - 1) * strideH + kH - 2 * pad;
+    const int OUT_W = (W - 1) * strideW + kW - 2 * pad;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] DeconvTest %s: in=%dx%dx%d → out=%dx%dx%d "
+                "(k=%dx%d s=%dx%d p=%d bias=%d)",
+                qUtf8Printable(layerName), W, H, C, OUT_W, OUT_H, N,
+                kW, kH, strideW, strideH, pad, hasBias);
+
+    auto input = deterministicInput((size_t)C * H * W, 0xDECDEC42u);
+    std::vector<float> cpuOut((size_t)N * OUT_H * OUT_W);
+    referenceDeconv2D(input.data(), W, H, C,
+                      weight.data(), N, kH, kW,
+                      hasBias ? bias.data() : nullptr,
+                      strideH, strideW, pad, pad,
+                      cpuOut.data(), OUT_W, OUT_H);
+
+    std::vector<float> gpuOut(cpuOut.size(), 0.0f);
+    struct PC {
+        int32_t inDims[4];
+        int32_t outDims[4];
+        int32_t conv[4];
+    } pc{};
+    pc.inDims[0]  = W; pc.inDims[1]  = H; pc.inDims[2]  = C; pc.inDims[3]  = hasBias;
+    pc.outDims[0] = OUT_W; pc.outDims[1] = OUT_H; pc.outDims[2] = N;
+    pc.conv[0]    = kW; pc.conv[1]    = kH; pc.conv[2]    = strideW; pc.conv[3] = pad;
+
+    // Bias buffer must be non-empty even when hasBias=0 (binding 2).
+    std::vector<float> biasFallback(N, 0.0f);
+    const float* biasPtr = hasBias ? bias.data() : biasFallback.data();
+
+    RunComputeOptions opts{};
+    opts.shaderGlsl   = getDeconv2DShaderGlsl();
+    opts.bindingCount = 4;
+    opts.buffers[0]   = { input.data(),   (size_t)C * H * W,                nullptr };
+    opts.buffers[1]   = { weight.data(),  weight.size(),                    nullptr };
+    opts.buffers[2]   = { biasPtr,        (size_t)N,                         nullptr };
+    opts.buffers[3]   = { nullptr,        (size_t)N * OUT_H * OUT_W,         gpuOut.data() };
+    opts.pcData       = &pc;
+    opts.pcSize       = sizeof(pc);
+    opts.dispX        = (uint32_t)((OUT_W + 7) / 8);
+    opts.dispY        = (uint32_t)((OUT_H + 7) / 8);
+    opts.dispZ        = (uint32_t)N;
+    if (!runComputeOnce(ctx, opts)) return false;
+
+    int worst = 0;
+    float err = compareF32(cpuOut.data(), gpuOut.data(), cpuOut.size(), &worst);
+    bool pass = err <= tolerance;
+    char label[96];
+    std::snprintf(label, sizeof(label),
+                  "DeconvTest %s n=%d ic=%d", qUtf8Printable(layerName), N, C);
+    logOpResult(label, err, worst, cpuOut[worst], gpuOut[worst], tolerance, pass);
+    return pass;
+}
+
 bool runEltwiseSumGpuTest(const VulkanCtx& ctx,
                           size_t count, float c0, float c1,
                           float tolerance)
@@ -2941,6 +3152,10 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
     pass &= runEltwiseSumGpuTest(ctx, /*count*/512, /*c0*/1.0f, /*c1*/4.0f);
     pass &= runEltwiseSumGpuTest(ctx, /*count*/512, /*c0*/1.0f, /*c1*/8.0f);
     pass &= runEltwiseSumGpuTest(ctx, /*count*/512, /*c0*/1.0f, /*c1*/16.0f);
+
+    // ---- Phase 4e Deconvolution coverage: smallest + largest weight ----
+    pass &= runDeconv2DGpuTest(ctx, m, "ConvTranspose_22");   // n=4   ic=16
+    pass &= runDeconv2DGpuTest(ctx, m, "ConvTranspose_84");   // n=52  ic=192
 
     // ---- Cleanup ----
     ncnn::destroy_gpu_instance();

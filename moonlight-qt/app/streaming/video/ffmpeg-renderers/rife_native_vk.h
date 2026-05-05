@@ -292,6 +292,23 @@ bool runEltwiseSumGpuTest(const VulkanCtx& ctx,
                           size_t count, float c0, float c1,
                           float tolerance = 1e-5f);
 
+// Phase 4e — Deconvolution (transposed conv).  All 7 Deconv layers in
+// flownet are k=4 s=2 p=1 bias=on no-activation; output is exactly 2×
+// upsample.  Weight layout in ncnn is (in_ch, out_ch, kH, kW) — note
+// the swap relative to Conv's (out_ch, in_ch, kH, kW).
+const char* getDeconv2DShaderGlsl();
+void referenceDeconv2D(const float* in, int inW, int inH, int inC,
+                       const float* weight, int outChan, int kernelH, int kernelW,
+                       const float* bias /* nullable */,
+                       int strideH, int strideW, int padH, int padW,
+                       float* out, int outW, int outH);
+// Reads stride / pad / kernel / bias_term from the named layer's
+// params; pulls weight + bias from the loaded model.
+bool runDeconv2DGpuTest(const VulkanCtx& ctx,
+                        const Model& m,
+                        const QString& layerName,
+                        float tolerance = 1e-4f);
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.
