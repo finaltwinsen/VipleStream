@@ -5,6 +5,7 @@
 
 #include "rife_native_vk.h"
 
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
@@ -1896,12 +1897,15 @@ struct CachedPipeline {
 
 struct PipelineCache {
     VkDevice       device = VK_NULL_HANDLE;
+    VkPipelineCache vkCache = VK_NULL_HANDLE;  // §J.3.e.X Final.2
     CachedPipeline pipelines[(int)ShaderKind::Count] = {};
     // Destroyer PFNs cached so cleanup doesn't re-load.
     PFN_vkDestroyShaderModule        pfnDestroyShader = nullptr;
     PFN_vkDestroyDescriptorSetLayout pfnDestroyDSL    = nullptr;
     PFN_vkDestroyPipelineLayout      pfnDestroyPL     = nullptr;
     PFN_vkDestroyPipeline            pfnDestroyPipe   = nullptr;
+    PFN_vkDestroyPipelineCache       pfnDestroyVkCache = nullptr;
+    PFN_vkGetPipelineCacheData       pfnGetVkCacheData = nullptr;
 };
 
 void destroyPipelineCache(PipelineCache& c) {
@@ -1914,10 +1918,15 @@ void destroyPipelineCache(PipelineCache& c) {
         if (cp.module   && c.pfnDestroyShader) c.pfnDestroyShader(c.device, cp.module, nullptr);
         cp = {};
     }
+    if (c.vkCache && c.pfnDestroyVkCache) {
+        c.pfnDestroyVkCache(c.device, c.vkCache, nullptr);
+        c.vkCache = VK_NULL_HANDLE;
+    }
     c.device = VK_NULL_HANDLE;
 }
 
-bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out) {
+bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out,
+                        const std::vector<uint8_t>* initialCacheData = nullptr) {
     auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr;
     auto instance = (VkInstance)ctx.instance;
     auto device   = (VkDevice)ctx.device;
@@ -1932,13 +1941,35 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out) {
     LOAD(CreateDescriptorSetLayout) LOAD(DestroyDescriptorSetLayout)
     LOAD(CreatePipelineLayout)      LOAD(DestroyPipelineLayout)
     LOAD(CreateComputePipelines)    LOAD(DestroyPipeline)
+    LOAD(CreatePipelineCache)       LOAD(DestroyPipelineCache)
+    LOAD(GetPipelineCacheData)
 #undef LOAD
 
-    out.device           = device;
-    out.pfnDestroyShader = pfnDestroyShaderModule;
-    out.pfnDestroyDSL    = pfnDestroyDescriptorSetLayout;
-    out.pfnDestroyPL     = pfnDestroyPipelineLayout;
-    out.pfnDestroyPipe   = pfnDestroyPipeline;
+    out.device            = device;
+    out.pfnDestroyShader  = pfnDestroyShaderModule;
+    out.pfnDestroyDSL     = pfnDestroyDescriptorSetLayout;
+    out.pfnDestroyPL      = pfnDestroyPipelineLayout;
+    out.pfnDestroyPipe    = pfnDestroyPipeline;
+    out.pfnDestroyVkCache = pfnDestroyPipelineCache;
+    out.pfnGetVkCacheData = pfnGetPipelineCacheData;
+
+    // §J.3.e.X Final.2 — VkPipelineCache for cold-start latency.
+    // Initial data must include valid header + GPU/driver fingerprint;
+    // Vulkan validates this and silently rejects mismatched bytes
+    // (cache stays usable, just empty until pipelines populate it).
+    {
+        VkPipelineCacheCreateInfo pcci = {};
+        pcci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+        if (initialCacheData && !initialCacheData->empty()) {
+            pcci.initialDataSize = initialCacheData->size();
+            pcci.pInitialData    = initialCacheData->data();
+        }
+        if (pfnCreatePipelineCache(device, &pcci, nullptr, &out.vkCache) != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-RIFE-VK] PipelineCache: vkCreatePipelineCache failed (continuing without cache)");
+            out.vkCache = VK_NULL_HANDLE;
+        }
+    }
 
     for (int i = 0; i < (int)ShaderKind::Count; ++i) {
         const ShaderSpec& spec = kShaderSpecs[i];
@@ -2016,7 +2047,7 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out) {
             cpCi.stage.module = cp.module;
             cpCi.stage.pName = "main";
             cpCi.layout = cp.layout;
-            if (pfnCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &cp.pipeline) != VK_SUCCESS) {
+            if (pfnCreateComputePipelines(device, out.vkCache, 1, &cpCi, nullptr, &cp.pipeline) != VK_SUCCESS) {
                 destroyPipelineCache(out);
                 return false;
             }
@@ -2328,7 +2359,8 @@ void destroyExecState(ExecState& e) {
 
 bool buildExecState(const VulkanCtx& ctx, const Model& m,
                     std::unordered_map<QString, BlobShape>& shapes,
-                    ExecState& out)
+                    ExecState& out,
+                    const std::vector<uint8_t>* initialPipelineCacheData = nullptr)
 {
     auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr;
     auto instance = (VkInstance)ctx.instance;
@@ -2338,7 +2370,7 @@ bool buildExecState(const VulkanCtx& ctx, const Model& m,
     out.qfi    = ctx.computeQueueFamily;
     out.shapes = &shapes;
 
-    if (!buildPipelineCache(ctx, out.pipelines)) return false;
+    if (!buildPipelineCache(ctx, out.pipelines, initialPipelineCacheData)) return false;
     if (!buildBufferPool(ctx, m, shapes, out.buffers)) {
         destroyPipelineCache(out.pipelines);
         return false;
@@ -5016,7 +5048,23 @@ bool RifeNativeExecutor::initialize(const InitOptions& opts) {
         return false;
     }
 
-    if (!buildExecState(opts.ctx, m_impl->model, m_impl->shapes, m_impl->state)) {
+    // §J.3.e.X Final.2 — load VkPipelineCache bytes from disk if available.
+    std::vector<uint8_t> initialCacheBytes;
+    if (!opts.pipelineCachePath.isEmpty()) {
+        QFile cacheFile(opts.pipelineCachePath);
+        if (cacheFile.open(QIODevice::ReadOnly)) {
+            QByteArray data = cacheFile.readAll();
+            initialCacheBytes.assign((const uint8_t*)data.constData(),
+                                     (const uint8_t*)data.constData() + data.size());
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-RIFE-VK] RifeNativeExecutor: loaded %zu bytes pipeline cache from %s",
+                        initialCacheBytes.size(),
+                        qUtf8Printable(opts.pipelineCachePath));
+        }
+    }
+
+    if (!buildExecState(opts.ctx, m_impl->model, m_impl->shapes, m_impl->state,
+                        initialCacheBytes.empty() ? nullptr : &initialCacheBytes)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "[VIPLE-RIFE-VK] RifeNativeExecutor: buildExecState failed");
         return false;
@@ -5065,6 +5113,38 @@ bool RifeNativeExecutor::initialize(const InitOptions& opts) {
 
 void RifeNativeExecutor::shutdown() {
     if (!m_impl) return;
+
+    // §J.3.e.X Final.2 — persist VkPipelineCache bytes to disk.  The
+    // accumulated cache may include new entries added since init (e.g.
+    // if the driver chose different optimisations after the first
+    // dispatch), so we save on shutdown rather than init.
+    if (m_impl->initialized
+        && !m_impl->opts.pipelineCachePath.isEmpty()
+        && m_impl->state.pipelines.vkCache != VK_NULL_HANDLE
+        && m_impl->state.pipelines.pfnGetVkCacheData != nullptr)
+    {
+        size_t cacheSize = 0;
+        m_impl->state.pipelines.pfnGetVkCacheData(
+            m_impl->state.device, m_impl->state.pipelines.vkCache,
+            &cacheSize, nullptr);
+        if (cacheSize > 0) {
+            std::vector<uint8_t> bytes(cacheSize);
+            if (m_impl->state.pipelines.pfnGetVkCacheData(
+                    m_impl->state.device, m_impl->state.pipelines.vkCache,
+                    &cacheSize, bytes.data()) == VK_SUCCESS) {
+                QFile cacheFile(m_impl->opts.pipelineCachePath);
+                if (cacheFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    cacheFile.write((const char*)bytes.data(), (qint64)cacheSize);
+                    cacheFile.close();
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-RIFE-VK] RifeNativeExecutor: wrote %zu bytes pipeline cache to %s",
+                                cacheSize,
+                                qUtf8Printable(m_impl->opts.pipelineCachePath));
+                }
+            }
+        }
+    }
+
     if (m_impl->fence != VK_NULL_HANDLE && m_impl->pfnDestroyFc) {
         m_impl->pfnDestroyFc(m_impl->state.device, m_impl->fence, nullptr);
         m_impl->fence = VK_NULL_HANDLE;
@@ -5143,13 +5223,22 @@ bool runProductionApiSmoke(const VulkanCtx& ctx, const QString& modelDir) {
     std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.1 ProductionApi: start\n");
     std::fflush(stderr);
 
+    // Final.2 — exercise pipeline cache path: 2 init/shutdown cycles
+    // sharing the same disk-persisted VkPipelineCache.  First cycle
+    // writes the cache, second loads it.  We verify file is created
+    // with non-zero bytes and that the second init uses the loaded
+    // cache without errors.
+    QString cachePath = QDir::tempPath() + "/viplestream_rife_pipeline_cache.bin";
+    QFile::remove(cachePath);  // start clean
+
     RifeNativeExecutor exec;
     RifeNativeExecutor::InitOptions opts;
-    opts.ctx       = ctx;
-    opts.modelDir  = modelDir;
-    opts.in0Shape  = { 3, 256, 256 };
-    opts.in1Shape  = { 3, 256, 256 };
-    opts.in2Shape  = { 1,   1,   1 };
+    opts.ctx               = ctx;
+    opts.modelDir          = modelDir;
+    opts.in0Shape          = { 3, 256, 256 };
+    opts.in1Shape          = { 3, 256, 256 };
+    opts.in2Shape          = { 1,   1,   1 };
+    opts.pipelineCachePath = cachePath;
     if (!exec.initialize(opts)) {
         std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.1: initialize FAILED\n");
         return false;
@@ -5269,7 +5358,44 @@ bool runProductionApiSmoke(const VulkanCtx& ctx, const QString& modelDir) {
     std::fflush(stderr);
 
     exec.shutdown();
-    return deterministic && match;
+
+    // Final.2 — first-cycle assertion: cache file should exist + non-empty.
+    QFileInfo cacheInfo(cachePath);
+    qint64 firstCacheSize = cacheInfo.size();
+    if (!cacheInfo.exists() || firstCacheSize <= 0) {
+        std::fprintf(stderr,
+            "[VIPLE-RIFE-VK] Final.2: cache file not created (path='%s' size=%lld) ✗\n",
+            qUtf8Printable(cachePath), (long long)firstCacheSize);
+        return false;
+    }
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] Final.2 cache write: %lld bytes at %s ✓\n",
+        (long long)firstCacheSize, qUtf8Printable(cachePath));
+
+    // Second init/run cycle to exercise the load path.  Output must
+    // still match (cached pipeline ≡ freshly compiled pipeline).
+    RifeNativeExecutor exec2;
+    if (!exec2.initialize(opts)) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.2: 2nd initialize FAILED\n");
+        return false;
+    }
+    std::vector<float> outC(outCount, 0.0f);
+    if (!exec2.runInference(in0.data(), in1.data(), 0.5f, outC.data())) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.2: 2nd runInference FAILED\n");
+        return false;
+    }
+    float maxAC = 0.0f;
+    for (size_t i = 0; i < outCount; ++i) {
+        float d = std::abs(outA[i] - outC[i]);
+        if (d > maxAC) maxAC = d;
+    }
+    bool cacheConsistent = (maxAC == 0.0f);
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] Final.2 cache reload: max diff vs first run = %.6e — %s\n",
+        (double)maxAC, cacheConsistent ? "PASS" : "FAIL");
+    exec2.shutdown();
+
+    return deterministic && match && cacheConsistent;
 }
 
 } // namespace viple::rife_native_vk

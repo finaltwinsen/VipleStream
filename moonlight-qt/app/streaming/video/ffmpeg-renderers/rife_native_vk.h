@@ -393,6 +393,15 @@ public:
         BlobShape  in0Shape;   // prev RGB frame  (typically (3, H, W))
         BlobShape  in1Shape;   // curr RGB frame  (matches in0Shape)
         BlobShape  in2Shape;   // timestep scalar (typically (1, 1, 1))
+        // Final.2: optional VkPipelineCache file path for cross-launch
+        // persistence.  "" = no persistence (every launch pays full
+        // SPIR-V → driver-binary translation cost ≈ 50-300 ms total
+        // for our 9 shaders).  When set, init loads existing cache
+        // bytes if the file exists, and shutdown writes back the
+        // accumulated cache (cheap; existing entries reused, new ones
+        // appended).  Cache binaries are GPU+driver-version specific
+        // — Vulkan validates header before using.
+        QString    pipelineCachePath;
     };
 
     RifeNativeExecutor();
