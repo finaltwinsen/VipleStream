@@ -12,6 +12,7 @@
 #include <QTextStream>
 #include <SDL.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 // Windows.h (pulled in transitively by vulkan.h on Win32) defines min/max
@@ -4893,6 +4894,9 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
     // ---- §J.3.e.X Final.1 — production API class smoke ----
     pass &= runProductionApiSmoke(ctx, modelDir);
 
+    // ---- §J.3.e.X Final.3a — native vs ncnn latency benchmark ----
+    pass &= runProductionApiBenchmark(ctx, modelDir, /*warmup*/3, /*iterations*/15);
+
     // ---- Phase 4g.1 shape inference smoke ----
     {
         InferInputs in{};
@@ -5396,6 +5400,176 @@ bool runProductionApiSmoke(const VulkanCtx& ctx, const QString& modelDir) {
     exec2.shutdown();
 
     return deterministic && match && cacheConsistent;
+}
+
+// ============================================================================
+// §J.3.e.X Final.3a — native vs ncnn per-frame latency benchmark.
+//
+// Measures wall-clock ms for a single forward pass at production input
+// shape (256×256 RGB pair + scalar timestep), comparing native
+// (RifeNativeExecutor) and ncnn (full-fp32 forward).  Reports
+// min / median / max over `iterations` runs after `warmup` discarded
+// runs.  Cache files are pre-warmed (Final.2 path) so the native
+// numbers reflect steady-state per-frame cost without cold-start
+// pipeline-build overhead.
+//
+// This phase is informational — the latency delta drives the
+// Final.3b decision (swap default to native if faster, else keep ncnn
+// while we optimise).  No pass/fail gate.
+// ============================================================================
+
+bool runProductionApiBenchmark(const VulkanCtx& ctx,
+                               const QString& modelDir,
+                               int warmup,
+                               int iterations)
+{
+    using clock = std::chrono::high_resolution_clock;
+    auto ms = [](clock::duration d) {
+        return std::chrono::duration<double, std::milli>(d).count();
+    };
+
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] Final.3a benchmark: warmup=%d iterations=%d (256×256 RGB)\n",
+        warmup, iterations);
+    std::fflush(stderr);
+
+    // Deterministic synthetic input shared by both engines.
+    auto buildInput = [](size_t count, uint32_t seed) {
+        std::vector<float> v(count);
+        uint32_t st = seed;
+        for (auto& x : v) {
+            st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+            x = (float)(st & 0xFFFFFF) / (float)0xFFFFFF;
+        }
+        return v;
+    };
+    constexpr int W = 256, H = 256, C = 3;
+    auto in0 = buildInput((size_t)C * H * W, 0xA1A1A1A1u);
+    auto in1 = buildInput((size_t)C * H * W, 0xB2B2B2B2u);
+
+    // ---- Native side ----
+    QString cachePath = QDir::tempPath() + "/viplestream_rife_pipeline_cache.bin";
+    RifeNativeExecutor exec;
+    RifeNativeExecutor::InitOptions opts;
+    opts.ctx               = ctx;
+    opts.modelDir          = modelDir;
+    opts.in0Shape          = { C, H, W };
+    opts.in1Shape          = { C, H, W };
+    opts.in2Shape          = { 1, 1, 1 };
+    opts.pipelineCachePath = cachePath;
+    auto nativeInitT0 = clock::now();
+    if (!exec.initialize(opts)) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.3a: native initialize FAILED\n");
+        return false;
+    }
+    double nativeInitMs = ms(clock::now() - nativeInitT0);
+
+    BlobShape outS = exec.outputShape();
+    size_t outCount = (size_t)outS.c * outS.h * outS.w;
+    std::vector<float> outBuf(outCount, 0.0f);
+
+    auto runOne = [&]() -> double {
+        auto t0 = clock::now();
+        bool ok = exec.runInference(in0.data(), in1.data(), 0.5f, outBuf.data());
+        auto t1 = clock::now();
+        return ok ? ms(t1 - t0) : -1.0;
+    };
+
+    for (int i = 0; i < warmup; ++i) (void)runOne();
+    std::vector<double> nativeMs;
+    nativeMs.reserve(iterations);
+    for (int i = 0; i < iterations; ++i) {
+        double t = runOne();
+        if (t < 0) {
+            std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.3a: native run %d FAILED\n", i);
+            exec.shutdown();
+            return false;
+        }
+        nativeMs.push_back(t);
+    }
+    exec.shutdown();
+
+    auto stats = [](std::vector<double>& v) {
+        std::sort(v.begin(), v.end());
+        struct S { double minV, medV, maxV, meanV; } s{};
+        s.minV = v.front();
+        s.maxV = v.back();
+        s.medV = v[v.size() / 2];
+        double sum = 0;
+        for (double x : v) sum += x;
+        s.meanV = sum / (double)v.size();
+        return s;
+    };
+    auto nat = stats(nativeMs);
+
+    // ---- ncnn side (same model, same inputs, full fp32) ----
+    auto ncnnInitT0 = clock::now();
+    ncnn::Net net;
+    net.opt.use_vulkan_compute  = true;
+    net.opt.use_fp16_storage    = false;
+    net.opt.use_fp16_arithmetic = false;
+    net.opt.use_fp16_packed     = false;
+    net.opt.use_packing_layout  = false;
+    net.opt.use_shader_pack8    = false;
+    net.opt.num_threads         = 1;
+    if (net.register_custom_layer("rife.Warp",
+                                  viple::createRifeWarp,
+                                  viple::destroyRifeWarp) != 0
+        || net.load_param(qUtf8Printable(modelDir + "/flownet.param")) != 0
+        || net.load_model(qUtf8Printable(modelDir + "/flownet.bin")) != 0) {
+        std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.3a: ncnn init FAILED\n");
+        return false;
+    }
+    double ncnnInitMs = ms(clock::now() - ncnnInitT0);
+
+    ncnn::Mat in0M(W, H, C);
+    ncnn::Mat in1M(W, H, C);
+    ncnn::Mat in2M(1, 1, 1);
+    std::memcpy(in0M.data, in0.data(), in0.size() * sizeof(float));
+    std::memcpy(in1M.data, in1.data(), in1.size() * sizeof(float));
+    *(float*)in2M.data = 0.5f;
+
+    auto runOneNcnn = [&]() -> double {
+        ncnn::Extractor ex = net.create_extractor();
+        ex.set_num_threads(1);
+        ex.input("in0", in0M);
+        ex.input("in1", in1M);
+        ex.input("in2", in2M);
+        ncnn::Mat out;
+        auto t0 = clock::now();
+        int rc = ex.extract("out0", out);
+        auto t1 = clock::now();
+        return rc == 0 ? ms(t1 - t0) : -1.0;
+    };
+
+    for (int i = 0; i < warmup; ++i) (void)runOneNcnn();
+    std::vector<double> ncnnMs;
+    ncnnMs.reserve(iterations);
+    for (int i = 0; i < iterations; ++i) {
+        double t = runOneNcnn();
+        if (t < 0) {
+            std::fprintf(stderr, "[VIPLE-RIFE-VK] Final.3a: ncnn run %d FAILED\n", i);
+            return false;
+        }
+        ncnnMs.push_back(t);
+    }
+    auto nc = stats(ncnnMs);
+
+    double speedupMed = nc.medV / nat.medV;
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] Final.3a results @ 256x256 over %d iter (warmup=%d):\n"
+        "  init    native=%.1f ms   ncnn=%.1f ms\n"
+        "  per-fwd native  min=%.2f  med=%.2f  max=%.2f  mean=%.2f ms\n"
+        "  per-fwd ncnn    min=%.2f  med=%.2f  max=%.2f  mean=%.2f ms\n"
+        "  median speedup native vs ncnn = %.2fx\n",
+        iterations, warmup,
+        nativeInitMs, ncnnInitMs,
+        nat.minV, nat.medV, nat.maxV, nat.meanV,
+        nc.minV,  nc.medV,  nc.maxV,  nc.meanV,
+        speedupMed);
+    std::fflush(stderr);
+
+    return true;
 }
 
 } // namespace viple::rife_native_vk

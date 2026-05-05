@@ -438,6 +438,19 @@ private:
 // leakage between frames).
 bool runProductionApiSmoke(const VulkanCtx& ctx, const QString& modelDir);
 
+// Final.3a: per-frame latency benchmark of RifeNativeExecutor at the
+// production input shape (typically 256×256 RGB pair + scalar t).
+// Runs `warmup` discarded iterations, then `iterations` timed runs;
+// reports min / median / max wall-clock ms.  Cross-checks against
+// ncnn (same input → same iterations → same metrics) so the caller
+// can see the relative perf difference before committing to the
+// runtime swap (Final.3b).  Returns true when both engines produce
+// metrics; the verdict is informational, not pass/fail.
+bool runProductionApiBenchmark(const VulkanCtx& ctx,
+                               const QString& modelDir,
+                               int warmup = 5,
+                               int iterations = 30);
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.
