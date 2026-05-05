@@ -172,20 +172,29 @@ struct VulkanCtx {
     void* /*PFN_vkGetInstanceProcAddr*/ getInstanceProcAddr = nullptr;
 };
 
-// Phase 3b.2 — runs the Conv2D 3×3 GLSL compute shader on real Conv_16
-// weights against a deterministic 64×64×3 input, reads back GPU output,
-// and compares pixel-wise to the CPU reference (Phase 3a).  Returns true
-// only when every output element matches within `tolerance` (default
-// 1e-4 — fp32 accumulator + fp16 unpack quantisation).  Logs PASS/FAIL +
-// max-abs-error + first 5 GPU samples (for visual cross-check vs the
-// CPU samples already logged by runConv2DCpuSmoke).
+// Phase 3b.2 / 4a — runs the Conv2D 3×3 GLSL compute shader on a chosen
+// Conv layer's weights against a deterministic 64×64×inC input (where
+// inC is read from the layer's weight tensor shape), reads back GPU
+// output, and compares pixel-wise to the CPU reference (Phase 3a).
+// Returns true only when every output element matches within
+// `tolerance` (default 1e-4 — fp32 accumulator + fp16 unpack
+// quantisation).  Logs PASS/FAIL + max-abs-error + first 5 GPU samples.
 //
 // Requires: ncnn::create_gpu_instance() already called on this thread
 // (compile_spirv_module needs ncnn's glslang context) AND `ctx`'s
-// VkDevice has a compute queue.
+// VkDevice has a compute queue.  `m` must be already loaded (parseParam
+// + loadWeights both succeeded).
 //
-// modelDir is the directory containing flownet.param + flownet.bin.
-bool runConv2DGpuTest(const VulkanCtx& ctx, const QString& modelDir,
+// The shader supports any (kernel, stride, pad, dilation, activation,
+// bias) values via push constants — Phase 4a audit confirmed all 56
+// Conv layers in rife-v4.25-lite are k=3 p=1 d=1 bias=on, with stride
+// in {1,2} and activation in {none, LeakyReLU 0.2}.  This function
+// reads stride / pad / kernel / activation_type / activation_params
+// directly from `m.layers[layerName].params` so any conv layer in the
+// graph can be tested against the trusted CPU reference.
+bool runConv2DGpuTest(const VulkanCtx& ctx,
+                      const Model& m,
+                      const QString& layerName,
                       float tolerance = 1e-4f);
 
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel

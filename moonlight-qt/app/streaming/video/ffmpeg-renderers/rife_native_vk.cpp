@@ -801,7 +801,37 @@ void destroyHostBuffer(VkDevice device,
 
 } // anonymous namespace
 
-bool runConv2DGpuTest(const VulkanCtx& ctx, const QString& modelDir, float tolerance) {
+// Helper: lookup a layer by exact name in the parsed model.  Returns
+// nullptr if the layer isn't present.
+static const Layer* findLayerByName(const Model& m, const QString& name) {
+    for (const auto& L : m.layers) {
+        if (L.name == name) return &L;
+    }
+    return nullptr;
+}
+
+// Helper: read an int param with default if absent.
+static int paramInt(const Layer& L, int id, int def) {
+    auto it = L.params.find(id);
+    if (it == L.params.end()) return def;
+    return (int)it->second.i;
+}
+
+// Helper: read the LeakyReLU slope from activation_params (-23310 array)
+// when activation_type == 2.  Returns 0.0f when no LeakyReLU.
+static float leakyReluSlopeOf(const Layer& L) {
+    int actType = paramInt(L, 9, 0);
+    if (actType != 2) return 0.0f;
+    auto it = L.params.find(-23310);
+    if (it == L.params.end()) return 0.0f;
+    if (it->second.fa.empty()) return 0.0f;
+    return (float)it->second.fa[0];
+}
+
+bool runConv2DGpuTest(const VulkanCtx& ctx,
+                     const Model& m,
+                     const QString& layerName,
+                     float tolerance) {
     auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr;
     auto instance = (VkInstance)ctx.instance;
     auto pd       = (VkPhysicalDevice)ctx.physicalDevice;
@@ -865,22 +895,55 @@ bool runConv2DGpuTest(const VulkanCtx& ctx, const QString& modelDir, float toler
     VkPhysicalDeviceMemoryProperties memProps = {};
     pfnGetPdMemProps(pd, &memProps);
 
-    // ---- 1. Load model + extract Conv_16 weights/bias ----
-    Model m;
-    if (!parseParam(modelDir + "/flownet.param", m)) return false;
-    if (!loadWeights(modelDir + "/flownet.bin", m)) return false;
-    auto weight = getTensorAsFp32(m, "Conv_16/weight");
-    auto bias   = getTensorAsFp32(m, "Conv_16/bias");
-    if (weight.size() != 432 || bias.size() != 16) {
+    // ---- 1. Look up the layer + extract its conv hyperparameters ----
+    const Layer* L = findLayerByName(m, layerName);
+    if (!L || L->kind != OpKind::Convolution) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "[VIPLE-RIFE-VK] GpuTest: Conv_16 weight/bias unexpected size %zu/%zu",
-                     weight.size(), bias.size());
+                     "[VIPLE-RIFE-VK] GpuTest: layer '%s' not found or not Convolution",
+                     qUtf8Printable(layerName));
+        return false;
+    }
+    const int N        = paramInt(*L, 0, 0);          // num_output
+    const int kW       = paramInt(*L, 1, 0);
+    const int kH       = paramInt(*L, 11, kW);
+    const int strideW  = paramInt(*L, 3, 1);
+    const int strideH  = paramInt(*L, 13, strideW);
+    const int pad      = paramInt(*L, 4, 0);
+    const int hasBias  = paramInt(*L, 5, 0);
+    const int wsize    = paramInt(*L, 6, 0);
+    const float lrSlope = leakyReluSlopeOf(*L);
+    if (N <= 0 || kW <= 0 || kH <= 0 || wsize <= 0 || N * kH * kW <= 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] GpuTest %s: invalid conv params (N=%d kHkW=%dx%d wsize=%d)",
+                     qUtf8Printable(layerName), N, kH, kW, wsize);
+        return false;
+    }
+    const int C = wsize / (N * kH * kW);  // input channels
+    auto weight = getTensorAsFp32(m, layerName + "/weight");
+    auto bias   = hasBias ? getTensorAsFp32(m, layerName + "/bias")
+                          : std::vector<float>{};
+    if ((int)weight.size() != wsize) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] GpuTest %s: weight size %zu != param wsize %d",
+                     qUtf8Printable(layerName), weight.size(), wsize);
+        return false;
+    }
+    if (hasBias && (int)bias.size() != N) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] GpuTest %s: bias size %zu != N %d",
+                     qUtf8Printable(layerName), bias.size(), N);
         return false;
     }
 
-    // ---- 2. Generate deterministic input matching CpuSmoke ----
-    constexpr int W = 64, H = 64, C = 3;
-    constexpr int OUT_W = 32, OUT_H = 32, N = 16;
+    // ---- 2. Generate deterministic 64×64×C input ----
+    constexpr int W = 64, H = 64;
+    const int OUT_W = (W + 2 * pad - kW) / strideW + 1;
+    const int OUT_H = (H + 2 * pad - kH) / strideH + 1;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] GpuTest %s: in=%dx%dx%d → out=%dx%dx%d "
+                "(k=%dx%d s=%dx%d p=%d bias=%d lr=%.2f)",
+                qUtf8Printable(layerName), W, H, C, OUT_W, OUT_H, N,
+                kW, kH, strideW, strideH, pad, hasBias, (double)lrSlope);
     std::vector<float> input((size_t)C * H * W);
     uint32_t st = 0x13371337u;
     for (auto& v : input) {
@@ -889,10 +952,10 @@ bool runConv2DGpuTest(const VulkanCtx& ctx, const QString& modelDir, float toler
     }
     std::vector<float> cpuOut((size_t)N * OUT_H * OUT_W);
     referenceConv2D(input.data(), W, H, C,
-                    weight.data(), N, 3, 3,
-                    bias.data(),
-                    2, 2, 1, 1,
-                    0.2f,
+                    weight.data(), N, kH, kW,
+                    hasBias ? bias.data() : nullptr,
+                    strideH, strideW, pad, pad,
+                    lrSlope,
                     cpuOut.data(), OUT_W, OUT_H);
 
     // ---- 3. Compile shader to SPIR-V ----
@@ -1055,10 +1118,13 @@ bool runConv2DGpuTest(const VulkanCtx& ctx, const QString& modelDir, float toler
         float   leakyReluSlope;
         int32_t _pad[3];     // round to 16
     } pcVal = {};
-    pcVal.inDims[0] = W; pcVal.inDims[1] = H; pcVal.inDims[2] = C; pcVal.inDims[3] = 1;
+    pcVal.inDims[0] = W; pcVal.inDims[1] = H; pcVal.inDims[2] = C; pcVal.inDims[3] = hasBias;
     pcVal.outDims[0] = OUT_W; pcVal.outDims[1] = OUT_H; pcVal.outDims[2] = N;
-    pcVal.conv[0] = 3; pcVal.conv[1] = 3; pcVal.conv[2] = 2; pcVal.conv[3] = 1;
-    pcVal.leakyReluSlope = 0.2f;
+    // Note: shader's `conv` ivec4 is (kernelW, kernelH, stride, pad) and
+    // assumes square stride / pad — verified by Phase 4a audit (all 56
+    // Conv layers in flownet are kH==kW, strideH==strideW, symmetric pad).
+    pcVal.conv[0] = kW; pcVal.conv[1] = kH; pcVal.conv[2] = strideW; pcVal.conv[3] = pad;
+    pcVal.leakyReluSlope = lrSlope;
     pfnCmdPushConstants(cmd, pipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                         sizeof(pcVal), &pcVal);
     pfnCmdDispatch(cmd, (OUT_W + 7) / 8, (OUT_H + 7) / 8, N);
@@ -1094,25 +1160,29 @@ bool runConv2DGpuTest(const VulkanCtx& ctx, const QString& modelDir, float toler
     }
     bool pass = maxAbsErr <= tolerance;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-RIFE-VK] GpuTest Conv_16: max_abs_err=%.6e (worst idx=%d "
+                "[VIPLE-RIFE-VK] GpuTest %s: max_abs_err=%.6e (worst idx=%d "
                 "cpu=%.6f gpu=%.6f), tolerance=%.6e — %s",
+                qUtf8Printable(layerName),
                 (double)maxAbsErr, worstIdx,
                 (double)cpuOut[worstIdx], (double)gpuOut[worstIdx],
                 (double)tolerance, pass ? "PASS" : "FAIL");
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-RIFE-VK] GpuTest output sample [0..4]: %.6f %.6f %.6f %.6f %.6f",
+                "[VIPLE-RIFE-VK] GpuTest %s output sample [0..4]: %.6f %.6f %.6f %.6f %.6f",
+                qUtf8Printable(layerName),
                 (double)gpuOut[0], (double)gpuOut[1], (double)gpuOut[2],
                 (double)gpuOut[3], (double)gpuOut[4]);
     // SDL_Log on Windows can route to OutputDebugString instead of stderr
     // before our log handler is wired up.  fprintf gives the standalone
     // self-test (which runs pre-handler-install) a visible result line.
     std::fprintf(stderr,
-        "[VIPLE-RIFE-VK] GpuTest Conv_16: max_abs_err=%.6e (worst idx=%d "
+        "[VIPLE-RIFE-VK] GpuTest %s: max_abs_err=%.6e (worst idx=%d "
         "cpu=%.6f gpu=%.6f), tolerance=%.6e — %s\n"
-        "[VIPLE-RIFE-VK] GpuTest output sample [0..4]: %.6f %.6f %.6f %.6f %.6f\n",
+        "[VIPLE-RIFE-VK] GpuTest %s output sample [0..4]: %.6f %.6f %.6f %.6f %.6f\n",
+        qUtf8Printable(layerName),
         (double)maxAbsErr, worstIdx,
         (double)cpuOut[worstIdx], (double)gpuOut[worstIdx],
         (double)tolerance, pass ? "PASS" : "FAIL",
+        qUtf8Printable(layerName),
         (double)gpuOut[0], (double)gpuOut[1], (double)gpuOut[2],
         (double)gpuOut[3], (double)gpuOut[4]);
     std::fflush(stderr);
@@ -1291,7 +1361,20 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
         return false;
     }
 
-    // ---- Run the actual GPU correctness gate ----
+    // ---- Load model once + run correctness gates against the trusted
+    //      CPU reference for representative Conv layers covering both
+    //      stride values, the ic=3 RGB entry path, the dominant
+    //      stride=1 path (44/56 conv layers), and the largest channel
+    //      count present in the model (n=192).  Phase 4a coverage. ----
+    Model m;
+    if (!parseParam(modelDir + "/flownet.param", m)
+        || !loadWeights(modelDir + "/flownet.bin", m)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] standalone: model load failed");
+        ncnn::destroy_gpu_instance();
+        teardown();
+        return false;
+    }
     VulkanCtx ctx{};
     ctx.instance            = vkInstance;
     ctx.physicalDevice      = vkPhys;
@@ -1299,7 +1382,10 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
     ctx.computeQueueFamily  = computeQF;
     ctx.computeQueue        = vkQueue;
     ctx.getInstanceProcAddr = (void*)pfnGetInstanceProcAddr;
-    bool pass = runConv2DGpuTest(ctx, modelDir, tolerance);
+    bool pass = true;
+    pass &= runConv2DGpuTest(ctx, m, "Conv_16", tolerance);  // s=2 ic=3  n=16  LeakyReLU
+    pass &= runConv2DGpuTest(ctx, m, "Conv_18", tolerance);  // s=1 ic=16 n=16  LeakyReLU
+    pass &= runConv2DGpuTest(ctx, m, "Conv_50", tolerance);  // s=2 ic=96 n=192 LeakyReLU
 
     // ---- Cleanup ----
     ncnn::destroy_gpu_instance();
