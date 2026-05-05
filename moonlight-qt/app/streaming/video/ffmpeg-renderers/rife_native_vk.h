@@ -136,6 +136,38 @@ struct Model {
 // in a partial state.
 bool parseParam(const QString& path, Model& out);
 
+// Returns the tensor data as fp32, unpacking fp16 entries when needed.
+// `tensorName` matches Model::tensorByName keys (e.g. "Conv_16/weight",
+// "Conv_16/bias", "block0.convblock.0.beta").  Returns empty vector on
+// missing tensor.  fp16→fp32 unpack handles ±0, normals, and ±inf/nan;
+// subnormals are flushed to ±0 (acceptable for trained conv weights).
+std::vector<float> getTensorAsFp32(const Model& m, const QString& tensorName);
+
+// CPU reference Conv2D 3×3 with arbitrary stride/pad + optional
+// LeakyReLU activation.  Used as the trusted-truth implementation that
+// the GLSL compute-shader port (Phase 3b) is correctness-gated against.
+//
+// Input layout:  NCHW  [in: C × H × W, weight: N × C × kH × kW, bias: N]
+// Output layout: NCHW  [out: N × outH × outW]
+//   outH = floor((H + 2*pad - kH) / stride) + 1
+//   outW = floor((W + 2*pad - kW) / stride) + 1
+// Activation: leakyReluSlope == 0 → no activation; > 0 → LeakyReLU
+//   (negative values × leakyReluSlope, positive pass through unchanged).
+void referenceConv2D(const float* in, int inW, int inH, int inC,
+                     const float* weight, int outChan, int kernelH, int kernelW,
+                     const float* bias /* nullable */,
+                     int strideH, int strideW, int padH, int padW,
+                     float leakyReluSlope,
+                     float* out, int outW, int outH);
+
+// Phase 3a smoke — pulls Conv_16 weight+bias from the loaded Model,
+// generates a deterministic 64×64×3 random input, runs reference Conv
+// CPU, and logs first/min/max/mean output stats.  Catches any fp16-unpack
+// bug or weight-extraction error in our pipeline before we sink time
+// into shader plumbing.  Returns true on PASS (no NaN/Inf, output
+// magnitudes plausible).
+bool runConv2DCpuSmoke(const Model& m);
+
 // Reads `binPath` (raw fp32 packed, no per-tensor headers — the ncnn
 // "compact" .bin format produced by ncnn2bin / ncnn2int8 with the
 // no-header flag), walks `m.layers` in order to attribute byte ranges

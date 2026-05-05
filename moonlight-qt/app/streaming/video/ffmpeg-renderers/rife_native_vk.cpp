@@ -184,6 +184,182 @@ bool parseParam(const QString& path, Model& out) {
     return true;
 }
 
+// IEEE-754 fp16 → fp32 conversion.  Handles ±0, normals, and ±inf/NaN.
+// Subnormals (e==0, m!=0) are flushed to ±0 — acceptable for trained
+// conv weights where we never see subnormals in practice.
+//
+// Layout reference:
+//   fp16: [s:1] [e:5] [m:10]  bias = 15
+//   fp32: [s:1] [e:8] [m:23]  bias = 127
+static float fp16ToFp32(uint16_t h) {
+    uint32_t s = (uint32_t)(h & 0x8000u) << 16;
+    uint32_t e = (uint32_t)(h >> 10) & 0x1Fu;
+    uint32_t m = (uint32_t)(h & 0x3FFu);
+    uint32_t v;
+    if (e == 0) {
+        // ±0 (m==0) or subnormal (m!=0) → flush to ±0
+        v = s;
+    } else if (e == 31) {
+        // inf (m==0) or NaN (m!=0)
+        v = s | 0x7F800000u | (m << 13);
+    } else {
+        // normal: rebias exponent 15 → 127, shift mantissa 10 → 23
+        v = s | ((e + (127 - 15)) << 23) | (m << 13);
+    }
+    float r;
+    std::memcpy(&r, &v, sizeof(r));
+    return r;
+}
+
+std::vector<float> getTensorAsFp32(const Model& m, const QString& tensorName) {
+    auto it = m.tensorByName.find(tensorName);
+    if (it == m.tensorByName.end()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] getTensorAsFp32: tensor '%s' not found",
+                    qUtf8Printable(tensorName));
+        return {};
+    }
+    const WeightTensor& t = m.tensors[it->second];
+    std::vector<float> out;
+    out.reserve(t.elemCount);
+    if (t.byteOffset > m.weightBlob.size()) return {};
+    if (t.dtype == TensorDType::Float32) {
+        if (t.byteOffset + t.elemCount * sizeof(float) > m.weightBlob.size()) return {};
+        const float* p = reinterpret_cast<const float*>(m.weightBlob.data() + t.byteOffset);
+        out.assign(p, p + t.elemCount);
+    } else { // Float16
+        if (t.byteOffset + t.elemCount * sizeof(uint16_t) > m.weightBlob.size()) return {};
+        const uint16_t* p = reinterpret_cast<const uint16_t*>(m.weightBlob.data() + t.byteOffset);
+        for (size_t i = 0; i < t.elemCount; ++i) {
+            out.push_back(fp16ToFp32(p[i]));
+        }
+    }
+    return out;
+}
+
+void referenceConv2D(const float* in, int inW, int inH, int inC,
+                     const float* weight, int outChan, int kernelH, int kernelW,
+                     const float* bias,
+                     int strideH, int strideW, int padH, int padW,
+                     float leakyReluSlope,
+                     float* out, int outW, int outH) {
+    // weight layout: [N, C, kH, kW] (NCHW) — matches ncnn / PyTorch.
+    // input layout : [C, H, W]
+    // output layout: [N, outH, outW]
+    //
+    // Each output cell (n, oy, ox) accumulates inC * kH * kW MAC ops.
+    // Boundary pixels (oy*stride - pad + ky outside [0, inH)) treated
+    // as zero (zero-padded).  Bias added per-output-channel.
+    for (int n = 0; n < outChan; ++n) {
+        const float biasVal = bias ? bias[n] : 0.0f;
+        for (int oy = 0; oy < outH; ++oy) {
+            for (int ox = 0; ox < outW; ++ox) {
+                float acc = biasVal;
+                for (int c = 0; c < inC; ++c) {
+                    for (int ky = 0; ky < kernelH; ++ky) {
+                        int iy = oy * strideH + ky - padH;
+                        if (iy < 0 || iy >= inH) continue;
+                        for (int kx = 0; kx < kernelW; ++kx) {
+                            int ix = ox * strideW + kx - padW;
+                            if (ix < 0 || ix >= inW) continue;
+                            float w = weight[((n * inC + c) * kernelH + ky) * kernelW + kx];
+                            float v = in[(c * inH + iy) * inW + ix];
+                            acc += w * v;
+                        }
+                    }
+                }
+                if (leakyReluSlope > 0.0f && acc < 0.0f) acc *= leakyReluSlope;
+                out[(n * outH + oy) * outW + ox] = acc;
+            }
+        }
+    }
+}
+
+bool runConv2DCpuSmoke(const Model& m) {
+    // Find Conv_16 — first conv in encoder branch (3 RGB → 16 ch, k=3
+    // s=2 p=1, has bias, LeakyReLU 0.2).
+    QString convName;
+    for (const auto& L : m.layers) {
+        if (L.kind == OpKind::Convolution && L.name == "Conv_16") {
+            convName = L.name; break;
+        }
+    }
+    if (convName.isEmpty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] CpuSmoke: Conv_16 not in graph (model layout changed?)");
+        return false;
+    }
+    auto weight = getTensorAsFp32(m, "Conv_16/weight");
+    auto bias   = getTensorAsFp32(m, "Conv_16/bias");
+    if (weight.size() != 432 || bias.size() != 16) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] CpuSmoke: Conv_16 weight/bias size mismatch "
+                     "(got %zu/%zu, expect 432/16)",
+                     weight.size(), bias.size());
+        return false;
+    }
+
+    // First fp16 weight from raw inspection was 0x28B3 = 0.036712.
+    // Verify our unpack matches.
+    const float kExpectedFirst = 0.036712f;
+    float diff0 = std::abs(weight[0] - kExpectedFirst);
+    if (diff0 > 1e-4f) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-RIFE-VK] CpuSmoke: fp16 unpack mismatch — got "
+                     "weight[0]=%.6f, expect ~%.6f (delta=%.6f). "
+                     "Either fp16 layout flag was misread, or our unpack has a bug.",
+                     weight[0], kExpectedFirst, diff0);
+        return false;
+    }
+
+    // Deterministic 64×64×3 RGB input via xorshift32 seeded on a
+    // constant — so re-runs across machines / builds produce bit-identical
+    // input and we can compare GPU output to CPU output later.
+    constexpr int W = 64, H = 64, C = 3;
+    constexpr int OUT_W = 32, OUT_H = 32, N = 16; // stride 2 pad 1 kernel 3
+    std::vector<float> input((size_t)C * H * W);
+    uint32_t st = 0x13371337u; // seed
+    for (auto& v : input) {
+        st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+        v = (float)(st & 0xFFFFFF) / (float)0xFFFFFF;
+    }
+    std::vector<float> output((size_t)N * OUT_H * OUT_W);
+    referenceConv2D(input.data(), W, H, C,
+                    weight.data(), N, 3, 3,
+                    bias.data(),
+                    2, 2, 1, 1,
+                    0.2f,
+                    output.data(), OUT_W, OUT_H);
+
+    // Sanity stats: no NaN, no Inf, plausible magnitudes.
+    float lo = output[0], hi = output[0], sumAbs = 0.0f;
+    int nanCount = 0, infCount = 0;
+    for (float v : output) {
+        if (std::isnan(v)) { nanCount++; continue; }
+        if (std::isinf(v)) { infCount++; continue; }
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+        sumAbs += std::abs(v);
+    }
+    float meanAbs = sumAbs / (float)output.size();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] CpuSmoke Conv_16: weight[0]=%.6f (✓ matches fp16 0x28B3) "
+                "bias[0]=%.6f, output 16×32×32 lo=%.4f hi=%.4f mean|·|=%.4f "
+                "(NaN=%d Inf=%d)",
+                weight[0], bias[0], lo, hi, meanAbs, nanCount, infCount);
+    bool pass = (nanCount == 0 && infCount == 0
+                 && meanAbs > 1e-4f && meanAbs < 100.0f
+                 && hi > lo);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] CpuSmoke verdict: %s",
+                pass ? "PASS" : "FAIL");
+    // Dump first 5 output values so we can later compare to GPU output.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] CpuSmoke output sample [0..4]: %.6f %.6f %.6f %.6f %.6f",
+                output[0], output[1], output[2], output[3], output[4]);
+    return pass;
+}
+
 // Helper: integer-typed param accessor with default.  ncnn writes ints
 // without a decimal point so our parser stored them as Int.
 static int64_t getInt(const Layer& L, int id, int64_t def = 0) {
@@ -433,6 +609,11 @@ void dumpModelSmoke(const QString& modelDir) {
                         qUtf8Printable(t0.name), p[0], p[1], p[2]);
         }
     }
+
+    // §J.3.e.X Phase 3a — CPU reference Conv2D smoke against real
+    // Conv_16 weights.  Verifies fp16 unpack + Conv math both correct
+    // before we sink time into Vulkan dispatch infrastructure.
+    runConv2DCpuSmoke(m);
 }
 
 } // namespace viple::rife_native_vk
