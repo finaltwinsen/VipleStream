@@ -643,6 +643,79 @@ void main() {
 
 const char* getDeconv2DShaderGlsl() { return kDeconv2DShaderGlsl; }
 
+// ============================================================================
+// §J.3.e.X Phase 4f — rife.Warp (custom op).
+//
+// Optical-flow-driven bilinear resample.  Math reverse-engineered from
+// ncnn_rife_warp.cpp's GLSL (kWarpComp) — itself a verbatim copy of
+// rife-ncnn-vulkan/src/warp.comp (BSD-3-Clause, nihui/ncnn).
+//
+// Inputs (NCHW, but packed flat fp32 in our layout):
+//   image (C, H, W)  — feature map to warp
+//   flow  (2, H, W)  — channel 0 = flow_x, channel 1 = flow_y
+//
+// For each output (c, y, x):
+//   sx = x + flow_x[y,x] ; sy = y + flow_y[y,x]
+//   x0,y0 = floor(sx,sy);  x1=x0+1; y1=y0+1
+//   clamp x0/x1 to [0, w-1] and y0/y1 to [0, h-1]
+//   alpha = sx - x0;  beta = sy - y0
+//   v = bilinear interp of image[c] at (x0..x1, y0..y1)
+//
+// 18 rife.Warp layers in flownet — all share identical math (the layer
+// has no learnable params, only the (w, h, c, cstep) push constants
+// derived from input shape at runtime).
+// ============================================================================
+
+static const char* kRifeWarpShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer ImageBuf { float img_buf[];  };
+layout(set = 0, binding = 1) readonly  buffer FlowBuf  { float flow_buf[]; };
+layout(set = 0, binding = 2) writeonly buffer OutBuf   { float out_buf[];  };
+
+layout(push_constant) uniform PC {
+    int w;
+    int h;
+    int c;
+} pc;
+
+void main() {
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int gz = int(gl_GlobalInvocationID.z);
+    if (gx >= pc.w || gy >= pc.h || gz >= pc.c) return;
+
+    int hw = pc.h * pc.w;
+    float fx = flow_buf[0 * hw + gy * pc.w + gx];
+    float fy = flow_buf[1 * hw + gy * pc.w + gx];
+
+    float sx = float(gx) + fx;
+    float sy = float(gy) + fy;
+    int x0 = int(floor(sx));
+    int y0 = int(floor(sy));
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+    x0 = clamp(x0, 0, pc.w - 1);
+    y0 = clamp(y0, 0, pc.h - 1);
+    x1 = clamp(x1, 0, pc.w - 1);
+    y1 = clamp(y1, 0, pc.h - 1);
+    float alpha = sx - float(x0);
+    float beta  = sy - float(y0);
+
+    int planeBase = gz * hw;
+    float v0 = img_buf[planeBase + y0 * pc.w + x0];
+    float v1 = img_buf[planeBase + y0 * pc.w + x1];
+    float v2 = img_buf[planeBase + y1 * pc.w + x0];
+    float v3 = img_buf[planeBase + y1 * pc.w + x1];
+    float v4 = v0 * (1.0 - alpha) + v1 * alpha;
+    float v5 = v2 * (1.0 - alpha) + v3 * alpha;
+    out_buf[planeBase + gy * pc.w + gx] = v4 * (1.0 - beta) + v5 * beta;
+}
+)GLSL";
+
+const char* getRifeWarpShaderGlsl() { return kRifeWarpShaderGlsl; }
+
 // IEEE-754 fp16 → fp32 conversion.  Handles ±0, normals, and ±inf/NaN.
 // Subnormals (e==0, m!=0) are flushed to ±0 — acceptable for trained
 // conv weights where we never see subnormals in practice.
@@ -2556,6 +2629,43 @@ void referenceEltwiseSum(const float* a, const float* b, float* out,
     for (size_t i = 0; i < count; ++i) out[i] = c0 * a[i] + c1 * b[i];
 }
 
+// Phase 4f — rife.Warp CPU reference (mirror of ncnn_rife_warp.cpp's
+// CPU fallback at line 338-371; verbatim algorithm).
+void referenceRifeWarp(const float* image, const float* flow,
+                       float* out, int channels, int H, int W) {
+    const int hw = H * W;
+    const float* fxptr_base = flow;            // flow channel 0
+    const float* fyptr_base = flow + hw;       // flow channel 1
+    for (int q = 0; q < channels; ++q) {
+        const float* imgPlane = image + (size_t)q * hw;
+        float* outPlane = out + (size_t)q * hw;
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                float fx = fxptr_base[y * W + x];
+                float fy = fyptr_base[y * W + x];
+                float sx = (float)x + fx;
+                float sy = (float)y + fy;
+                int x0 = (int)std::floor(sx);
+                int y0 = (int)std::floor(sy);
+                int x1 = x0 + 1, y1 = y0 + 1;
+                x0 = std::max(0, std::min(x0, W - 1));
+                y0 = std::max(0, std::min(y0, H - 1));
+                x1 = std::max(0, std::min(x1, W - 1));
+                y1 = std::max(0, std::min(y1, H - 1));
+                float alpha = sx - (float)x0;
+                float beta  = sy - (float)y0;
+                float v0 = imgPlane[y0 * W + x0];
+                float v1 = imgPlane[y0 * W + x1];
+                float v2 = imgPlane[y1 * W + x0];
+                float v3 = imgPlane[y1 * W + x1];
+                float v4 = v0 * (1.0f - alpha) + v1 * alpha;
+                float v5 = v2 * (1.0f - alpha) + v3 * alpha;
+                outPlane[y * W + x] = v4 * (1.0f - beta) + v5 * beta;
+            }
+        }
+    }
+}
+
 namespace {
 
 // Generate `n` deterministic random floats centered on 0 with magnitude
@@ -2774,6 +2884,50 @@ bool runInterpBilinearGpuTest(const VulkanCtx& ctx,
     std::snprintf(label, sizeof(label),
                   "InterpBilinear c=%d %dx%d → %dx%d",
                   channels, inH, inW, outH, outW);
+    logOpResult(label, err, worst, cpuOut[worst], gpuOut[worst], tolerance, pass);
+    return pass;
+}
+
+bool runRifeWarpGpuTest(const VulkanCtx& ctx,
+                        int channels, int H, int W,
+                        float tolerance)
+{
+    const size_t hw = (size_t)H * W;
+    const size_t imgCount  = (size_t)channels * hw;
+    const size_t flowCount = (size_t)2 * hw;
+    auto image = deterministicInput(imgCount,  0xF1F1F1F1u);
+    // Flow magnitude ~[-1.5, +1.5] so we exercise both +/- direction
+    // and edge-clamp.  RIFE optical flow is in pixel units.
+    auto flow  = deterministicInput(flowCount, 0xF2F2F2F2u);
+    for (auto& v : flow) v *= 3.0f;
+
+    std::vector<float> cpuOut(imgCount);
+    referenceRifeWarp(image.data(), flow.data(), cpuOut.data(),
+                      channels, H, W);
+
+    std::vector<float> gpuOut(imgCount, 0.0f);
+    struct PC { int32_t w, h, c; uint32_t _pad; } pc{};
+    pc.w = W; pc.h = H; pc.c = channels;
+
+    RunComputeOptions opts{};
+    opts.shaderGlsl   = getRifeWarpShaderGlsl();
+    opts.bindingCount = 3;
+    opts.buffers[0]   = { image.data(), imgCount,  nullptr };
+    opts.buffers[1]   = { flow.data(),  flowCount, nullptr };
+    opts.buffers[2]   = { nullptr,       imgCount,  gpuOut.data() };
+    opts.pcData       = &pc;
+    opts.pcSize       = sizeof(pc);
+    opts.dispX        = (uint32_t)((W + 7) / 8);
+    opts.dispY        = (uint32_t)((H + 7) / 8);
+    opts.dispZ        = (uint32_t)channels;
+    if (!runComputeOnce(ctx, opts)) return false;
+
+    int worst = 0;
+    float err = compareF32(cpuOut.data(), gpuOut.data(), imgCount, &worst);
+    bool pass = err <= tolerance;
+    char label[96];
+    std::snprintf(label, sizeof(label),
+                  "RifeWarp c=%d %dx%d", channels, H, W);
     logOpResult(label, err, worst, cpuOut[worst], gpuOut[worst], tolerance, pass);
     return pass;
 }
@@ -3156,6 +3310,9 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
     // ---- Phase 4e Deconvolution coverage: smallest + largest weight ----
     pass &= runDeconv2DGpuTest(ctx, m, "ConvTranspose_22");   // n=4   ic=16
     pass &= runDeconv2DGpuTest(ctx, m, "ConvTranspose_84");   // n=52  ic=192
+
+    // ---- Phase 4f rife.Warp coverage: 1 case (math is shape-agnostic) ----
+    pass &= runRifeWarpGpuTest(ctx, /*channels*/8, /*H*/16, /*W*/16);
 
     // ---- Cleanup ----
     ncnn::destroy_gpu_instance();

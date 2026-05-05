@@ -309,6 +309,15 @@ bool runDeconv2DGpuTest(const VulkanCtx& ctx,
                         const QString& layerName,
                         float tolerance = 1e-4f);
 
+// Phase 4f — rife.Warp custom op.  Optical-flow-driven bilinear sample.
+// 2 inputs: image (C,H,W) + flow (2,H,W); 1 output (C,H,W).
+const char* getRifeWarpShaderGlsl();
+void referenceRifeWarp(const float* image, const float* flow,
+                       float* out, int channels, int H, int W);
+bool runRifeWarpGpuTest(const VulkanCtx& ctx,
+                        int channels, int H, int W,
+                        float tolerance = 1e-5f);
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.
