@@ -1049,6 +1049,113 @@ void main() {
 
 const char* getRifeWarpShaderGlsl() { return kRifeWarpShaderGlsl; }
 
+// ============================================================================
+// §J.3.e.Y 4Y.6 Step 2 — minimal cooperative_matrix hello-world.
+//
+// One subgroup (32 threads on NV) computes a single 16×16 GEMM:
+//   C[16x16, fp32] = A[16x16, fp16] × B[16x16, fp16] + 0
+// This validates the GLSL → SPIR-V → driver pipeline before we tackle
+// the full im2col + Conv reformulation.  Layouts row-major both sides.
+//
+// Dispatch: 1 workgroup of 32 threads (= 1 subgroup on NV).  All 32
+// threads collectively execute the cooperative ops; each thread's ALU
+// state implicitly holds 1/32 of the matrix data per use, but the
+// programmer sees only the matrix-level coopMatLoad/MulAdd/Store ops.
+// ============================================================================
+
+// GLSL source kept as a comment for reference / future re-compilation
+// (e.g. when ncnn's bundled glslang is upgraded to support
+// GL_KHR_cooperative_matrix natively, we can switch back to the
+// runtime-compile path).  Current SPIR-V binary below was generated
+// via Vulkan SDK 1.4.341.1 glslangValidator with --target-env
+// vulkan1.3 -V from this exact source:
+//
+//   #version 460
+//   #extension GL_KHR_cooperative_matrix : require
+//   #extension GL_KHR_memory_scope_semantics : require
+//   #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+//   #extension GL_EXT_shader_16bit_storage : require
+//   layout(local_size_x = 32) in;
+//   layout(set=0, binding=0) readonly  buffer InA  { float16_t a_buf[]; };
+//   layout(set=0, binding=1) readonly  buffer InB  { float16_t b_buf[]; };
+//   layout(set=0, binding=2) writeonly buffer OutC { float     c_buf[]; };
+//   void main() {
+//       coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> matA;
+//       coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> matB;
+//       coopmat<float,     gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> matC =
+//           coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+//       coopMatLoad(matA, a_buf, 0, 16, gl_CooperativeMatrixLayoutRowMajor);
+//       coopMatLoad(matB, b_buf, 0, 16, gl_CooperativeMatrixLayoutRowMajor);
+//       matC = coopMatMulAdd(matA, matB, matC);
+//       coopMatStore(matC, c_buf, 0, 16, gl_CooperativeMatrixLayoutRowMajor);
+//   }
+//
+// Why pre-compiled: ncnn 20220729's bundled glslang predates the KHR
+// cooperative_matrix extension (2023-finalised) and also doesn't
+// recognise GL_NV_cooperative_matrix.  Vulkan SDK glslangValidator is
+// up-to-date with both.
+static const uint32_t kCoopMatHelloSpv[] = {
+    0x07230203,0x00010600,0x0008000b,0x00000036,0x00000000,0x00020011,0x00000001,0x00020011,
+    0x00000009,0x00020011,0x00001151,0x00020011,0x000014e1,0x00020011,0x00001786,0x0008000a,
+    0x5f565053,0x5f52484b,0x706f6f63,0x74617265,0x5f657669,0x7274616d,0x00007869,0x0006000b,
+    0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000003,
+    0x0008000f,0x00000005,0x00000004,0x6e69616d,0x00000000,0x00000018,0x00000025,0x00000030,
+    0x00060010,0x00000004,0x00000011,0x00000020,0x00000001,0x00000001,0x00030003,0x00000002,
+    0x000001cc,0x00080004,0x455f4c47,0x735f5458,0x65646168,0x36315f72,0x5f746962,0x726f7473,
+    0x00656761,0x000d0004,0x455f4c47,0x735f5458,0x65646168,0x78655f72,0x63696c70,0x615f7469,
+    0x68746972,0x6974656d,0x79745f63,0x5f736570,0x616f6c66,0x00363174,0x00080004,0x4b5f4c47,
+    0x635f5248,0x65706f6f,0x69746172,0x6d5f6576,0x69727461,0x00000078,0x00090004,0x4b5f4c47,
+    0x6d5f5248,0x726f6d65,0x63735f79,0x5f65706f,0x616d6573,0x6369746e,0x00000073,0x00040005,
+    0x00000004,0x6e69616d,0x00000000,0x00040005,0x0000000d,0x4374616d,0x00000000,0x00040005,
+    0x00000014,0x4174616d,0x00000000,0x00030005,0x00000016,0x00416e49,0x00050006,0x00000016,
+    0x00000000,0x75625f61,0x00000066,0x00030005,0x00000018,0x00000000,0x00040005,0x00000021,
+    0x4274616d,0x00000000,0x00030005,0x00000023,0x00426e49,0x00050006,0x00000023,0x00000000,
+    0x75625f62,0x00000066,0x00030005,0x00000025,0x00000000,0x00040005,0x0000002e,0x4374754f,
+    0x00000000,0x00050006,0x0000002e,0x00000000,0x75625f63,0x00000066,0x00030005,0x00000030,
+    0x00000000,0x00040047,0x00000015,0x00000006,0x00000002,0x00030047,0x00000016,0x00000002,
+    0x00040048,0x00000016,0x00000000,0x00000018,0x00050048,0x00000016,0x00000000,0x00000023,
+    0x00000000,0x00030047,0x00000018,0x00000018,0x00040047,0x00000018,0x00000021,0x00000000,
+    0x00040047,0x00000018,0x00000022,0x00000000,0x00040047,0x00000022,0x00000006,0x00000002,
+    0x00030047,0x00000023,0x00000002,0x00040048,0x00000023,0x00000000,0x00000018,0x00050048,
+    0x00000023,0x00000000,0x00000023,0x00000000,0x00030047,0x00000025,0x00000018,0x00040047,
+    0x00000025,0x00000021,0x00000001,0x00040047,0x00000025,0x00000022,0x00000000,0x00040047,
+    0x0000002d,0x00000006,0x00000004,0x00030047,0x0000002e,0x00000002,0x00040048,0x0000002e,
+    0x00000000,0x00000019,0x00050048,0x0000002e,0x00000000,0x00000023,0x00000000,0x00030047,
+    0x00000030,0x00000019,0x00040047,0x00000030,0x00000021,0x00000002,0x00040047,0x00000030,
+    0x00000022,0x00000000,0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,
+    0x00000006,0x00000020,0x00040015,0x00000007,0x00000020,0x00000000,0x0004002b,0x00000007,
+    0x00000008,0x00000003,0x0004002b,0x00000007,0x00000009,0x00000010,0x0004002b,0x00000007,
+    0x0000000a,0x00000002,0x00071168,0x0000000b,0x00000006,0x00000008,0x00000009,0x00000009,
+    0x0000000a,0x00040020,0x0000000c,0x00000007,0x0000000b,0x0004002b,0x00000006,0x0000000e,
+    0x00000000,0x0004002c,0x0000000b,0x0000000f,0x0000000e,0x00030016,0x00000010,0x00000010,
+    0x0004002b,0x00000007,0x00000011,0x00000000,0x00071168,0x00000012,0x00000010,0x00000008,
+    0x00000009,0x00000009,0x00000011,0x00040020,0x00000013,0x00000007,0x00000012,0x0003001d,
+    0x00000015,0x00000010,0x0003001e,0x00000016,0x00000015,0x00040020,0x00000017,0x0000000c,
+    0x00000016,0x0004003b,0x00000017,0x00000018,0x0000000c,0x00040015,0x00000019,0x00000020,
+    0x00000001,0x0004002b,0x00000019,0x0000001a,0x00000000,0x00040020,0x0000001b,0x0000000c,
+    0x00000010,0x0004002b,0x00000007,0x0000001e,0x00000001,0x00071168,0x0000001f,0x00000010,
+    0x00000008,0x00000009,0x00000009,0x0000001e,0x00040020,0x00000020,0x00000007,0x0000001f,
+    0x0003001d,0x00000022,0x00000010,0x0003001e,0x00000023,0x00000022,0x00040020,0x00000024,
+    0x0000000c,0x00000023,0x0004003b,0x00000024,0x00000025,0x0000000c,0x0003001d,0x0000002d,
+    0x00000006,0x0003001e,0x0000002e,0x0000002d,0x00040020,0x0000002f,0x0000000c,0x0000002e,
+    0x0004003b,0x0000002f,0x00000030,0x0000000c,0x00040020,0x00000031,0x0000000c,0x00000006,
+    0x00040017,0x00000033,0x00000007,0x00000003,0x0004002b,0x00000007,0x00000034,0x00000020,
+    0x0006002c,0x00000033,0x00000035,0x00000034,0x0000001e,0x0000001e,0x00050036,0x00000002,
+    0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x0004003b,0x0000000c,0x0000000d,
+    0x00000007,0x0004003b,0x00000013,0x00000014,0x00000007,0x0004003b,0x00000020,0x00000021,
+    0x00000007,0x0003003e,0x0000000d,0x0000000f,0x00060041,0x0000001b,0x0000001c,0x00000018,
+    0x0000001a,0x00000011,0x00071169,0x00000012,0x0000001d,0x0000001c,0x0000001a,0x00000009,
+    0x00000000,0x0003003e,0x00000014,0x0000001d,0x00060041,0x0000001b,0x00000026,0x00000025,
+    0x0000001a,0x00000011,0x00071169,0x0000001f,0x00000027,0x00000026,0x0000001a,0x00000009,
+    0x00000000,0x0003003e,0x00000021,0x00000027,0x0004003d,0x00000012,0x00000028,0x00000014,
+    0x0004003d,0x0000001f,0x00000029,0x00000021,0x0004003d,0x0000000b,0x0000002a,0x0000000d,
+    0x0006116b,0x0000000b,0x0000002b,0x00000028,0x00000029,0x0000002a,0x0003003e,0x0000000d,
+    0x0000002b,0x0004003d,0x0000000b,0x0000002c,0x0000000d,0x00060041,0x00000031,0x00000032,
+    0x00000030,0x0000001a,0x00000011,0x0006116a,0x00000032,0x0000002c,0x0000001a,0x00000009,
+    0x00000000,0x000100fd,0x00010038
+};
+constexpr size_t kCoopMatHelloSpvWords = sizeof(kCoopMatHelloSpv) / sizeof(uint32_t);
+
 // IEEE-754 fp16 → fp32 conversion.  Handles ±0, normals, and ±inf/NaN.
 // Subnormals (e==0, m!=0) are flushed to ±0 — acceptable for trained
 // conv weights where we never see subnormals in practice.
@@ -1974,7 +2081,12 @@ struct ComputeBufferSpec {
 };
 
 struct RunComputeOptions {
-    const char*       shaderGlsl   = nullptr;
+    const char*       shaderGlsl   = nullptr;  // GLSL source (compile via ncnn glslang)
+    // §J.3.e.Y 4Y.6 — alternative: pre-compiled SPIR-V binary.  Used
+    // when ncnn glslang doesn't speak the required extension (e.g.
+    // GL_KHR_cooperative_matrix).  When set, shaderGlsl is ignored.
+    const uint32_t*   spirv        = nullptr;
+    size_t            spirvWords   = 0;
     int               bindingCount = 0;
     ComputeBufferSpec buffers[8]   = {};
     const void*       pcData       = nullptr;
@@ -2026,24 +2138,46 @@ bool runComputeOnce(const VulkanCtx& ctx, const RunComputeOptions& opts) {
     VkPhysicalDeviceMemoryProperties memProps = {};
     pfnGetPdMemProps(pd, &memProps);
 
-    std::vector<uint32_t> spirv;
-    {
+    // §J.3.e.Y 4Y.6 — accept either pre-compiled SPIR-V binary (bypass
+    // ncnn glslang for extensions it doesn't understand, e.g.
+    // GL_KHR_cooperative_matrix) or GLSL source.
+    std::vector<uint32_t> spirvOwned;
+    const uint32_t* spirvPtr = nullptr;
+    size_t spirvWords = 0;
+    if (opts.spirv && opts.spirvWords > 0) {
+        spirvPtr   = opts.spirv;
+        spirvWords = opts.spirvWords;
+    } else {
         ncnn::Option opt;
-        if (ncnn::compile_spirv_module(opts.shaderGlsl, opt, spirv) != 0
-            || spirv.empty()) {
+        int rc = ncnn::compile_spirv_module(opts.shaderGlsl, opt, spirvOwned);
+        if (rc != 0 || spirvOwned.empty()) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-RIFE-VK] runComputeOnce: compile_spirv_module failed");
+                         "[VIPLE-RIFE-VK] runComputeOnce: compile_spirv_module failed (rc=%d, spv_size=%zu)",
+                         rc, spirvOwned.size());
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] runComputeOnce: compile_spirv_module FAILED rc=%d spv_size=%zu\n",
+                rc, spirvOwned.size());
+            std::fflush(stderr);
             return false;
         }
+        spirvPtr   = spirvOwned.data();
+        spirvWords = spirvOwned.size();
     }
 
     VkShaderModule shaderMod = VK_NULL_HANDLE;
     {
         VkShaderModuleCreateInfo smCi = {};
         smCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        smCi.codeSize = spirv.size() * sizeof(uint32_t);
-        smCi.pCode = spirv.data();
-        if (pfnCreateShaderModule(device, &smCi, nullptr, &shaderMod) != VK_SUCCESS) return false;
+        smCi.codeSize = spirvWords * sizeof(uint32_t);
+        smCi.pCode = spirvPtr;
+        VkResult vr = pfnCreateShaderModule(device, &smCi, nullptr, &shaderMod);
+        if (vr != VK_SUCCESS) {
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] runComputeOnce: vkCreateShaderModule FAILED rc=%d\n",
+                (int)vr);
+            std::fflush(stderr);
+            return false;
+        }
     }
 
     VkDescriptorSetLayoutBinding dslB[8] = {};
@@ -4974,6 +5108,113 @@ bool runRifeWarpGpuTest(const VulkanCtx& ctx,
     return pass;
 }
 
+// ============================================================================
+// §J.3.e.Y 4Y.6 Step 2 — minimal coopmat 16×16 GEMM correctness gate.
+// Self-contained: synthesises 16×16 fp16 A and B, dispatches 1
+// workgroup of 32 threads through kCoopMatHelloShaderGlsl, reads
+// back fp32 C, compares to CPU GEMM.  Validates that the GLSL
+// extension chain (KHR_cooperative_matrix + memory_scope_semantics +
+// fp16 storage) compiles and runs correctly on the live device.
+// ============================================================================
+
+static void cpuRefGemm16(const uint16_t* a, const uint16_t* b, float* c) {
+    for (int i = 0; i < 16; ++i) {
+        for (int j = 0; j < 16; ++j) {
+            float acc = 0.0f;
+            for (int k = 0; k < 16; ++k) {
+                float aij = fp16ToFp32(a[i * 16 + k]);
+                float bjk = fp16ToFp32(b[k * 16 + j]);
+                acc += aij * bjk;
+            }
+            c[i * 16 + j] = acc;
+        }
+    }
+}
+
+bool runCoopMatHelloSmoke(const VulkanCtx& ctx) {
+    std::fprintf(stderr, "[VIPLE-RIFE-VK] 4Y.6 Step 2 CoopMat hello: start\n");
+    std::fflush(stderr);
+
+    // Deterministic 16×16 fp16 input data — small enough to inspect
+    // by hand if anything goes wrong.  Use values in [-1, 1] range so
+    // GEMM accumulator output stays well under fp16 saturation and
+    // CPU vs GPU comparisons aren't dominated by overflow corner cases.
+    auto buildFp16Matrix = [](uint32_t seed) {
+        std::vector<uint16_t> v(16 * 16);
+        uint32_t st = seed;
+        for (auto& x : v) {
+            st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+            float f = (float)(st & 0xFFFFFF) / (float)0xFFFFFF * 2.0f - 1.0f;
+            // Convert fp32 → fp16 (round-to-nearest).  Quick path using
+            // float bits — for our range this is exact-enough.
+            uint32_t bits;
+            std::memcpy(&bits, &f, 4);
+            uint32_t sign = (bits >> 16) & 0x8000u;
+            int32_t  e32  = ((bits >> 23) & 0xFF) - 127;
+            uint32_t m23  = bits & 0x7FFFFFu;
+            uint16_t h;
+            if (e32 < -14) h = (uint16_t)sign;  // subnormal → 0
+            else if (e32 > 15) h = (uint16_t)(sign | 0x7C00u);  // inf
+            else {
+                int32_t e16 = e32 + 15;
+                uint32_t m10 = m23 >> 13;
+                h = (uint16_t)(sign | (uint32_t)(e16 << 10) | m10);
+            }
+            x = h;
+        }
+        return v;
+    };
+    auto aH = buildFp16Matrix(0xA1A1A1A1u);
+    auto bH = buildFp16Matrix(0xB2B2B2B2u);
+
+    std::vector<float> cpuC(16 * 16);
+    cpuRefGemm16(aH.data(), bH.data(), cpuC.data());
+
+    std::vector<float> gpuC(16 * 16, 0.0f);
+    RunComputeOptions opts{};
+    opts.spirv        = kCoopMatHelloSpv;
+    opts.spirvWords   = kCoopMatHelloSpvWords;
+    opts.bindingCount = 3;
+    opts.buffers[0]   = {};
+    opts.buffers[0].bytesOverride = aH.size() * sizeof(uint16_t);
+    opts.buffers[0].hostInBytes   = aH.data();
+    opts.buffers[1]   = {};
+    opts.buffers[1].bytesOverride = bH.size() * sizeof(uint16_t);
+    opts.buffers[1].hostInBytes   = bH.data();
+    opts.buffers[2]   = { nullptr, gpuC.size(), gpuC.data() };
+    opts.pcSize       = 0;  // no push constants
+    opts.dispX        = 1;
+    opts.dispY        = 1;
+    opts.dispZ        = 1;
+    if (!runComputeOnce(ctx, opts)) {
+        std::fprintf(stderr,
+            "[VIPLE-RIFE-VK] 4Y.6 Step 2 CoopMat hello: runComputeOnce FAILED "
+            "(shader compile or pipeline build error?)\n");
+        return false;
+    }
+
+    int worst = 0;
+    float err = compareF32(cpuC.data(), gpuC.data(), gpuC.size(), &worst);
+    // Tolerance: GEMM 16x16 with fp16 inputs and fp32 accumulator,
+    // worst-case 16 MACs of ~0.5 magnitude with 5e-4 relative fp16
+    // error → ~4e-3 absolute.  Tensor Core internal fp32 acc is exact;
+    // the error comes from the fp16 input quantisation.
+    constexpr float TOL = 5e-3f;
+    bool pass = err <= TOL;
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] 4Y.6 Step 2 CoopMat hello: max_abs_err=%.6e "
+        "(worst idx=%d cpu=%.6f gpu=%.6f) tol=%.1e — %s\n",
+        (double)err, worst, (double)cpuC[worst], (double)gpuC[worst],
+        (double)TOL, pass ? "PASS" : "FAIL");
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] 4Y.6 Step 2 first 5 elements: "
+        "cpu=[%.4f %.4f %.4f %.4f %.4f] gpu=[%.4f %.4f %.4f %.4f %.4f]\n",
+        (double)cpuC[0], (double)cpuC[1], (double)cpuC[2], (double)cpuC[3], (double)cpuC[4],
+        (double)gpuC[0], (double)gpuC[1], (double)gpuC[2], (double)gpuC[3], (double)gpuC[4]);
+    std::fflush(stderr);
+    return pass;
+}
+
 bool runDeconv2DGpuTest(const VulkanCtx& ctx,
                         const Model& m,
                         const QString& layerName,
@@ -5224,6 +5465,56 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
         return false;
     }
 
+    // §J.3.e.Y 4Y.6 — probe cooperative_matrix support BEFORE device
+    // creation.  ncnn's bundled glslang (20220729) doesn't speak the
+    // KHR variant (GL_KHR_cooperative_matrix is 2023+), so the actual
+    // shader path uses the older GL_NV_cooperative_matrix which targets
+    // VK_NV_cooperative_matrix.  We probe both because future glslang
+    // upgrades + cross-vendor work would want KHR; for now NV is what
+    // gets wired into the dispatch.
+    bool coopmatKhrExtAvailable = false;
+    bool coopmatNvExtAvailable = false;
+    bool memoryModelExtAvailable = false;
+    bool subgroupExtAvailable = false;
+    {
+        auto pfnEnumDevExts = (PFN_vkEnumerateDeviceExtensionProperties)pfnGetInstanceProcAddr(
+            vkInstance, "vkEnumerateDeviceExtensionProperties");
+        uint32_t extCount = 0;
+        pfnEnumDevExts(vkPhys, nullptr, &extCount, nullptr);
+        std::vector<VkExtensionProperties> exts(extCount);
+        pfnEnumDevExts(vkPhys, nullptr, &extCount, exts.data());
+        for (const auto& e : exts) {
+            if (std::strcmp(e.extensionName, "VK_KHR_cooperative_matrix") == 0)
+                coopmatKhrExtAvailable = true;
+            if (std::strcmp(e.extensionName, "VK_NV_cooperative_matrix") == 0)
+                coopmatNvExtAvailable = true;
+            if (std::strcmp(e.extensionName, "VK_KHR_vulkan_memory_model") == 0)
+                memoryModelExtAvailable = true;
+            if (std::strcmp(e.extensionName, "VK_KHR_shader_subgroup_extended_types") == 0)
+                subgroupExtAvailable = true;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] 4Y.6 probe: KHR_cooperative_matrix=%d "
+                    "NV_cooperative_matrix=%d vulkan_memory_model=%d "
+                    "subgroup_extended_types=%d",
+                    coopmatKhrExtAvailable, coopmatNvExtAvailable,
+                    memoryModelExtAvailable, subgroupExtAvailable);
+        std::fprintf(stderr,
+            "[VIPLE-RIFE-VK] 4Y.6 probe: KHR_cooperative_matrix=%d "
+            "NV_cooperative_matrix=%d vulkan_memory_model=%d "
+            "subgroup_extended_types=%d\n",
+            coopmatKhrExtAvailable, coopmatNvExtAvailable,
+            memoryModelExtAvailable, subgroupExtAvailable);
+        std::fflush(stderr);
+    }
+    // We need NV variant for current ncnn-glslang compatibility.  KHR
+    // is also probed so future tuners can switch when glslang is
+    // upgraded.  memoryModel + subgroupExtendedTypes are required by
+    // both extensions.
+    const bool coopmatPathEnable = coopmatNvExtAvailable
+                                && memoryModelExtAvailable
+                                && subgroupExtAvailable;
+
     // ---- VkDevice ----
     {
         float prio = 1.0f;
@@ -5233,28 +5524,111 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
         qci.queueCount = 1;
         qci.pQueuePriorities = &prio;
 
-        // §J.3.e.Y 4Y.5a — enable storageBuffer16BitAccess so conv /
-        // deconv shaders can declare `float16_t` storage buffers and
-        // halve weight memory bandwidth.  Core in Vulkan 1.1 (we use
-        // 1.2); driver fails CreateDevice if not actually supported,
-        // which would surface in the call below.
+        // §J.3.e.Y 4Y.5a — storageBuffer16BitAccess for fp16 weight buffers.
         VkPhysicalDevice16BitStorageFeatures features16 = {};
         features16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES;
         features16.storageBuffer16BitAccess = VK_TRUE;
+
+        // §J.3.e.Y 4Y.6 — vulkanMemoryModel + cooperativeMatrix.
+        // Chain: features16 → vulkanMemoryModel → coopmat features.
+        VkPhysicalDeviceVulkanMemoryModelFeatures memoryModelFeat = {};
+        memoryModelFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES;
+        memoryModelFeat.vulkanMemoryModel = VK_TRUE;
+
+        VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopmatFeat = {};
+        coopmatFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+        coopmatFeat.cooperativeMatrix = VK_TRUE;
+
+        VkPhysicalDeviceCooperativeMatrixFeaturesNV coopmatFeatNV = {};
+        coopmatFeatNV.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_NV;
+        coopmatFeatNV.cooperativeMatrix = VK_TRUE;
+
+        VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures subgroupFeat = {};
+        subgroupFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES;
+        subgroupFeat.shaderSubgroupExtendedTypes = VK_TRUE;
+
+        if (coopmatPathEnable) {
+            features16.pNext      = &memoryModelFeat;
+            memoryModelFeat.pNext = &subgroupFeat;
+            subgroupFeat.pNext    = &coopmatFeatNV;
+            coopmatFeatNV.pNext   = coopmatKhrExtAvailable ? (void*)&coopmatFeat : nullptr;
+        }
+
+        std::vector<const char*> deviceExts;
+        if (coopmatPathEnable) {
+            // Enable BOTH KHR (for future) and NV (for current shader path).
+            // Driver reports both for RTX cards; future cross-vendor work
+            // would walk back to KHR-only.
+            deviceExts.push_back("VK_NV_cooperative_matrix");
+            if (coopmatKhrExtAvailable) {
+                deviceExts.push_back("VK_KHR_cooperative_matrix");
+            }
+            deviceExts.push_back("VK_KHR_vulkan_memory_model");
+            deviceExts.push_back("VK_KHR_shader_subgroup_extended_types");
+        }
 
         VkDeviceCreateInfo dci = {};
         dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         dci.pNext = &features16;
         dci.queueCreateInfoCount = 1;
         dci.pQueueCreateInfos = &qci;
+        dci.enabledExtensionCount = (uint32_t)deviceExts.size();
+        dci.ppEnabledExtensionNames = deviceExts.empty() ? nullptr : deviceExts.data();
         if (pfnCreateDevice(vkPhys, &dci, nullptr, &vkDevice) != VK_SUCCESS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-RIFE-VK] standalone: vkCreateDevice failed (storageBuffer16BitAccess?)");
+                         "[VIPLE-RIFE-VK] standalone: vkCreateDevice failed "
+                         "(coopmatPath=%d storageBuffer16BitAccess?)",
+                         coopmatPathEnable);
             teardown();
             return false;
         }
     }
     pfnDestroyDevice = (PFN_vkDestroyDevice)pfnGetInstanceProcAddr(vkInstance, "vkDestroyDevice");
+
+    // §J.3.e.Y 4Y.6 — query supported cooperative matrix shapes after
+    // device is created.  We're looking for (M=16, N=16, K=16, A=fp16,
+    // B=fp16, C=fp32, result=fp32, scope=Subgroup) which is the canonical
+    // shape NV Tensor Cores expose.  Log all shapes found so future
+    // tuners can see what other variants the driver supports.
+    if (coopmatPathEnable) {
+        auto pfnGetCoopMatProps = (PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR)
+            pfnGetInstanceProcAddr(vkInstance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
+        if (!pfnGetCoopMatProps) {
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] 4Y.6: GetCoopMatProps PFN missing; coopmat path disabled\n");
+        } else {
+            uint32_t cmCount = 0;
+            pfnGetCoopMatProps(vkPhys, &cmCount, nullptr);
+            std::vector<VkCooperativeMatrixPropertiesKHR> cmProps(cmCount);
+            for (auto& p : cmProps) p.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+            pfnGetCoopMatProps(vkPhys, &cmCount, cmProps.data());
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] 4Y.6: %u cooperative_matrix shape(s) supported:\n",
+                cmCount);
+            bool wanted_shape_found = false;
+            for (uint32_t i = 0; i < cmCount; ++i) {
+                const auto& p = cmProps[i];
+                std::fprintf(stderr,
+                    "  [%u] M=%u N=%u K=%u  A=%d B=%d C=%d Result=%d  scope=%d  saturating=%d\n",
+                    i, p.MSize, p.NSize, p.KSize,
+                    (int)p.AType, (int)p.BType, (int)p.CType, (int)p.ResultType,
+                    (int)p.scope, p.saturatingAccumulation ? 1 : 0);
+                if (p.MSize == 16 && p.NSize == 16 && p.KSize == 16
+                    && p.AType == VK_COMPONENT_TYPE_FLOAT16_KHR
+                    && p.BType == VK_COMPONENT_TYPE_FLOAT16_KHR
+                    && p.CType == VK_COMPONENT_TYPE_FLOAT32_KHR
+                    && p.ResultType == VK_COMPONENT_TYPE_FLOAT32_KHR
+                    && p.scope == VK_SCOPE_SUBGROUP_KHR) {
+                    wanted_shape_found = true;
+                }
+            }
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] 4Y.6: 16x16x16 fp16-A/B fp32-C/D Subgroup-scope shape "
+                "→ %s\n",
+                wanted_shape_found ? "AVAILABLE" : "NOT AVAILABLE");
+            std::fflush(stderr);
+        }
+    }
 
     auto pfnGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)pfnGetInstanceProcAddr(vkInstance, "vkGetDeviceProcAddr");
     auto pfnGetDeviceQueue = (PFN_vkGetDeviceQueue)pfnGetDeviceProcAddr(vkDevice, "vkGetDeviceQueue");
@@ -5295,6 +5669,11 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
     ctx.computeQueue        = vkQueue;
     ctx.getInstanceProcAddr = (void*)pfnGetInstanceProcAddr;
     bool pass = true;
+    // ---- §J.3.e.Y 4Y.6 Step 2 — coopmat hello-world ----
+    // Validates GLSL → SPIR-V → driver pipeline for VK_KHR_cooperative_matrix
+    // before we tackle the full im2col + Conv reformulation in Step 3.
+    pass &= runCoopMatHelloSmoke(ctx);
+
     pass &= runConv2DGpuTest(ctx, m, "Conv_16", tolerance);  // s=2 ic=3  n=16  LeakyReLU
     pass &= runConv2DGpuTest(ctx, m, "Conv_18", tolerance);  // s=1 ic=16 n=16  LeakyReLU
     pass &= runConv2DGpuTest(ctx, m, "Conv_50", tolerance);  // s=2 ic=96 n=192 LeakyReLU
