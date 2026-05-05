@@ -417,6 +417,144 @@ const char* getActivationShaderGlsl() {
     return kActivationShaderGlsl;
 }
 
+// ============================================================================
+// §J.3.e.X Phase 4d — shape ops: Copy / PixelShuffle / InterpBilinear /
+// EltwiseSum.
+//
+// Coverage:
+//   Concat × 9    — N applications of kCopyShader, each writing one input
+//                   into output at growing channel offset.
+//   Crop  × 45    — single application of kCopyShader reading from a
+//                   channel-offset slice.  Audit confirmed all 45 crops
+//                   slice along channel axis only (no H/W cropping).
+//   Interp × 14   — bilinear resize, all resize_type=2.
+//   PixelShuffle × 5 — depth-to-space, all upscale_factor=2.
+//   Eltwise × 3   — weighted SUM of 2 inputs with coeffs (all in this
+//                   model are SUM with coeffs [1.0, k] for k ∈ {4, 8, 16}).
+// ============================================================================
+
+// Plain memcpy via compute shader, with src/dst element offsets.
+// Used by Concat (multi-pass) and Crop (single pass).
+static const char* kCopyShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly  buffer InBuf  { float in_buf[];  };
+layout(set = 0, binding = 1) writeonly buffer OutBuf { float out_buf[]; };
+layout(push_constant) uniform PC {
+    uint count;
+    uint srcOffset;
+    uint dstOffset;
+} pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    out_buf[pc.dstOffset + i] = in_buf[pc.srcOffset + i];
+}
+)GLSL";
+const char* getCopyShaderGlsl() { return kCopyShaderGlsl; }
+
+// Depth-to-space (PixelShuffle).  Input (Cin, Hin, Win) → output
+// (Cin/r², Hin*r, Win*r).  For each output pixel:
+//   c_in = c_out * r² + (h_out % r) * r + (w_out % r)
+//   h_in = h_out / r ; w_in = w_out / r
+static const char* kPixelShuffleShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly  buffer InBuf  { float in_buf[];  };
+layout(set = 0, binding = 1) writeonly buffer OutBuf { float out_buf[]; };
+layout(push_constant) uniform PC {
+    int inH;
+    int inW;
+    int outC;   // = inC / (r*r)
+    int r;
+} pc;
+void main() {
+    int ow = int(gl_GlobalInvocationID.x);
+    int oh = int(gl_GlobalInvocationID.y);
+    int oc = int(gl_GlobalInvocationID.z);
+    int outH = pc.inH * pc.r;
+    int outW = pc.inW * pc.r;
+    if (ow >= outW || oh >= outH || oc >= pc.outC) return;
+    int ic = oc * (pc.r * pc.r) + (oh % pc.r) * pc.r + (ow % pc.r);
+    int ih = oh / pc.r;
+    int iw = ow / pc.r;
+    float v = in_buf[(ic * pc.inH + ih) * pc.inW + iw];
+    out_buf[(oc * outH + oh) * outW + ow] = v;
+}
+)GLSL";
+const char* getPixelShuffleShaderGlsl() { return kPixelShuffleShaderGlsl; }
+
+// Bilinear resize (Interp), align_corners=false convention:
+//   in_f = (out + 0.5) * (inDim / outDim) - 0.5
+// Edge-clamp to [0, dim-1].
+static const char* kInterpBilinearShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly  buffer InBuf  { float in_buf[];  };
+layout(set = 0, binding = 1) writeonly buffer OutBuf { float out_buf[]; };
+layout(push_constant) uniform PC {
+    int   inH;
+    int   inW;
+    int   outH;
+    int   outW;
+    int   channels;
+    float scaleH;   // inH / outH
+    float scaleW;   // inW / outW
+} pc;
+void main() {
+    int ow = int(gl_GlobalInvocationID.x);
+    int oh = int(gl_GlobalInvocationID.y);
+    int c  = int(gl_GlobalInvocationID.z);
+    if (ow >= pc.outW || oh >= pc.outH || c >= pc.channels) return;
+
+    float inh_f = (float(oh) + 0.5) * pc.scaleH - 0.5;
+    float inw_f = (float(ow) + 0.5) * pc.scaleW - 0.5;
+    int   ih0   = int(floor(inh_f));
+    int   iw0   = int(floor(inw_f));
+    float fh    = inh_f - float(ih0);
+    float fw    = inw_f - float(iw0);
+    int   ih1   = ih0 + 1;
+    int   iw1   = iw0 + 1;
+    ih0 = clamp(ih0, 0, pc.inH - 1);
+    ih1 = clamp(ih1, 0, pc.inH - 1);
+    iw0 = clamp(iw0, 0, pc.inW - 1);
+    iw1 = clamp(iw1, 0, pc.inW - 1);
+
+    int planeBase = c * pc.inH * pc.inW;
+    float v00 = in_buf[planeBase + ih0 * pc.inW + iw0];
+    float v01 = in_buf[planeBase + ih0 * pc.inW + iw1];
+    float v10 = in_buf[planeBase + ih1 * pc.inW + iw0];
+    float v11 = in_buf[planeBase + ih1 * pc.inW + iw1];
+    float v0  = v00 * (1.0 - fw) + v01 * fw;
+    float v1  = v10 * (1.0 - fw) + v11 * fw;
+    float v   = v0  * (1.0 - fh) + v1  * fh;
+
+    out_buf[(c * pc.outH + oh) * pc.outW + ow] = v;
+}
+)GLSL";
+const char* getInterpBilinearShaderGlsl() { return kInterpBilinearShaderGlsl; }
+
+// Eltwise SUM with coefficients: out[i] = c0 * a[i] + c1 * b[i].
+// Only 2-input sum form is reachable in flownet (3 layers, all SUM).
+static const char* kEltwiseShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly  buffer InA  { float a_buf[]; };
+layout(set = 0, binding = 1) readonly  buffer InB  { float b_buf[]; };
+layout(set = 0, binding = 2) writeonly buffer Out  { float y_buf[]; };
+layout(push_constant) uniform PC {
+    uint  count;
+    float c0;
+    float c1;
+} pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    y_buf[i] = pc.c0 * a_buf[i] + pc.c1 * b_buf[i];
+}
+)GLSL";
+const char* getEltwiseShaderGlsl() { return kEltwiseShaderGlsl; }
+
 // IEEE-754 fp16 → fp32 conversion.  Handles ±0, normals, and ±inf/NaN.
 // Subnormals (e==0, m!=0) are flushed to ±0 — acceptable for trained
 // conv weights where we never see subnormals in practice.
@@ -926,6 +1064,283 @@ void destroyHostBuffer(VkDevice device,
     if (b.buf  && pfnDestroyBuf)     pfnDestroyBuf(device, b.buf, nullptr);
     if (b.mem  && pfnFreeMem)        pfnFreeMem(device, b.mem, nullptr);
     b = {};
+}
+
+// ============================================================================
+// §J.3.e.X Phase 4d helper — runComputeOnce.
+// Wraps the full "compile shader → build pipeline → alloc buffers →
+// dispatch → read back → tear down" boilerplate that Phase 3b/4a/4b/4c
+// repeated inline.  New per-op tests (Phase 4d+) build on this so the
+// per-op delta stays small.
+// ============================================================================
+
+struct ComputeBufferSpec {
+    const float* hostInData = nullptr;  // null = leave zero-initialised
+    size_t       elemCount  = 0;        // bytes = elemCount * sizeof(float); >0 required
+    float*       readbackOut = nullptr; // null = skip readback for this binding
+};
+
+struct RunComputeOptions {
+    const char*       shaderGlsl   = nullptr;
+    int               bindingCount = 0;
+    ComputeBufferSpec buffers[8]   = {};
+    const void*       pcData       = nullptr;
+    size_t            pcSize       = 0;
+    uint32_t          dispX        = 1;
+    uint32_t          dispY        = 1;
+    uint32_t          dispZ        = 1;
+};
+
+bool runComputeOnce(const VulkanCtx& ctx, const RunComputeOptions& opts) {
+    auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)ctx.getInstanceProcAddr;
+    auto instance = (VkInstance)ctx.instance;
+    auto pd       = (VkPhysicalDevice)ctx.physicalDevice;
+    auto device   = (VkDevice)ctx.device;
+    auto queue    = (VkQueue)ctx.computeQueue;
+    if (!pfnGetInstancePA || !instance || !pd || !device || !queue) return false;
+    if (opts.bindingCount <= 0 || opts.bindingCount > 8) return false;
+
+    auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstancePA(instance, "vkGetDeviceProcAddr");
+    if (!pfnGetDevPa) return false;
+    auto getDev = [&](const char* n) -> PFN_vkVoidFunction {
+        return pfnGetDevPa(device, n);
+    };
+#define LOAD(NAME) auto pfn ## NAME = (PFN_vk ## NAME)getDev("vk" #NAME); \
+        if (!pfn ## NAME) return false;
+    LOAD(CreateShaderModule)        LOAD(DestroyShaderModule)
+    LOAD(CreateDescriptorSetLayout) LOAD(DestroyDescriptorSetLayout)
+    LOAD(CreatePipelineLayout)      LOAD(DestroyPipelineLayout)
+    LOAD(CreateComputePipelines)    LOAD(DestroyPipeline)
+    LOAD(CreateBuffer)              LOAD(DestroyBuffer)
+    LOAD(GetBufferMemoryRequirements)
+    LOAD(AllocateMemory)            LOAD(FreeMemory)
+    LOAD(BindBufferMemory)
+    LOAD(MapMemory)                 LOAD(UnmapMemory)
+    LOAD(CreateDescriptorPool)      LOAD(DestroyDescriptorPool)
+    LOAD(AllocateDescriptorSets)    LOAD(UpdateDescriptorSets)
+    LOAD(CreateCommandPool)         LOAD(DestroyCommandPool)
+    LOAD(AllocateCommandBuffers)
+    LOAD(BeginCommandBuffer)        LOAD(EndCommandBuffer)
+    LOAD(CmdBindPipeline)           LOAD(CmdBindDescriptorSets)
+    LOAD(CmdPushConstants)          LOAD(CmdDispatch)
+    LOAD(QueueSubmit)
+    LOAD(CreateFence)               LOAD(DestroyFence)
+    LOAD(WaitForFences)
+#undef LOAD
+    auto pfnGetPdMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)pfnGetInstancePA(
+        instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnGetPdMemProps) return false;
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPdMemProps(pd, &memProps);
+
+    std::vector<uint32_t> spirv;
+    {
+        ncnn::Option opt;
+        if (ncnn::compile_spirv_module(opts.shaderGlsl, opt, spirv) != 0
+            || spirv.empty()) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-RIFE-VK] runComputeOnce: compile_spirv_module failed");
+            return false;
+        }
+    }
+
+    VkShaderModule shaderMod = VK_NULL_HANDLE;
+    {
+        VkShaderModuleCreateInfo smCi = {};
+        smCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smCi.codeSize = spirv.size() * sizeof(uint32_t);
+        smCi.pCode = spirv.data();
+        if (pfnCreateShaderModule(device, &smCi, nullptr, &shaderMod) != VK_SUCCESS) return false;
+    }
+
+    VkDescriptorSetLayoutBinding dslB[8] = {};
+    for (int i = 0; i < opts.bindingCount; ++i) {
+        dslB[i].binding = (uint32_t)i;
+        dslB[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        dslB[i].descriptorCount = 1;
+        dslB[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    {
+        VkDescriptorSetLayoutCreateInfo dslCi = {};
+        dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslCi.bindingCount = (uint32_t)opts.bindingCount;
+        dslCi.pBindings = dslB;
+        if (pfnCreateDescriptorSetLayout(device, &dslCi, nullptr, &dsl) != VK_SUCCESS) {
+            pfnDestroyShaderModule(device, shaderMod, nullptr);
+            return false;
+        }
+    }
+
+    VkPushConstantRange pcRange = {};
+    pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    // Round to 16-byte alignment.
+    size_t pcSizeAligned = (opts.pcSize + 15) & ~size_t(15);
+    pcRange.size = (uint32_t)pcSizeAligned;
+    VkPipelineLayout pipeLay = VK_NULL_HANDLE;
+    {
+        VkPipelineLayoutCreateInfo plCi = {};
+        plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plCi.setLayoutCount = 1;
+        plCi.pSetLayouts = &dsl;
+        plCi.pushConstantRangeCount = (opts.pcSize > 0) ? 1 : 0;
+        plCi.pPushConstantRanges    = (opts.pcSize > 0) ? &pcRange : nullptr;
+        if (pfnCreatePipelineLayout(device, &plCi, nullptr, &pipeLay) != VK_SUCCESS) {
+            pfnDestroyDescriptorSetLayout(device, dsl, nullptr);
+            pfnDestroyShaderModule(device, shaderMod, nullptr);
+            return false;
+        }
+    }
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    {
+        VkComputePipelineCreateInfo cpCi = {};
+        cpCi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpCi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpCi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpCi.stage.module = shaderMod;
+        cpCi.stage.pName = "main";
+        cpCi.layout = pipeLay;
+        if (pfnCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &pipeline) != VK_SUCCESS) {
+            pfnDestroyPipelineLayout(device, pipeLay, nullptr);
+            pfnDestroyDescriptorSetLayout(device, dsl, nullptr);
+            pfnDestroyShaderModule(device, shaderMod, nullptr);
+            return false;
+        }
+    }
+
+    GpuBuffer bufs[8] = {};
+    bool ok = true;
+    for (int i = 0; i < opts.bindingCount; ++i) {
+        size_t bytes = opts.buffers[i].elemCount * sizeof(float);
+        if (bytes == 0) bytes = sizeof(float);  // empty buffer placeholder
+        if (!createHostBuffer(device, memProps,
+                              pfnCreateBuffer, pfnGetBufferMemoryRequirements,
+                              pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
+                              bytes, bufs[i])) { ok = false; break; }
+        if (opts.buffers[i].hostInData) {
+            std::memcpy(bufs[i].mapped, opts.buffers[i].hostInData,
+                        opts.buffers[i].elemCount * sizeof(float));
+        } else {
+            std::memset(bufs[i].mapped, 0, bufs[i].size);
+        }
+    }
+    if (!ok) {
+        for (int i = 0; i < 8; ++i)
+            destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, bufs[i]);
+        pfnDestroyPipeline(device, pipeline, nullptr);
+        pfnDestroyPipelineLayout(device, pipeLay, nullptr);
+        pfnDestroyDescriptorSetLayout(device, dsl, nullptr);
+        pfnDestroyShaderModule(device, shaderMod, nullptr);
+        return false;
+    }
+
+    VkDescriptorPool descPool = VK_NULL_HANDLE;
+    {
+        VkDescriptorPoolSize sz = {};
+        sz.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sz.descriptorCount = (uint32_t)opts.bindingCount;
+        VkDescriptorPoolCreateInfo dpCi = {};
+        dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpCi.maxSets = 1;
+        dpCi.poolSizeCount = 1;
+        dpCi.pPoolSizes = &sz;
+        pfnCreateDescriptorPool(device, &dpCi, nullptr, &descPool);
+    }
+    VkDescriptorSet descSet = VK_NULL_HANDLE;
+    {
+        VkDescriptorSetAllocateInfo dsai = {};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = descPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts = &dsl;
+        pfnAllocateDescriptorSets(device, &dsai, &descSet);
+    }
+    {
+        VkDescriptorBufferInfo dbi[8] = {};
+        VkWriteDescriptorSet  wds[8] = {};
+        for (int i = 0; i < opts.bindingCount; ++i) {
+            dbi[i].buffer = bufs[i].buf;
+            dbi[i].range  = VK_WHOLE_SIZE;
+            wds[i].sType  = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wds[i].dstSet = descSet;
+            wds[i].dstBinding = (uint32_t)i;
+            wds[i].descriptorCount = 1;
+            wds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            wds[i].pBufferInfo = &dbi[i];
+        }
+        pfnUpdateDescriptorSets(device, (uint32_t)opts.bindingCount, wds, 0, nullptr);
+    }
+
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    {
+        VkCommandPoolCreateInfo cpCi = {};
+        cpCi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpCi.queueFamilyIndex = ctx.computeQueueFamily;
+        cpCi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        pfnCreateCommandPool(device, &cpCi, nullptr, &cmdPool);
+    }
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    {
+        VkCommandBufferAllocateInfo cbai = {};
+        cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool = cmdPool;
+        cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        pfnAllocateCommandBuffers(device, &cbai, &cmd);
+    }
+    {
+        VkCommandBufferBeginInfo cbbi = {};
+        cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        pfnBeginCommandBuffer(cmd, &cbbi);
+    }
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    pfnCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLay, 0,
+                             1, &descSet, 0, nullptr);
+    if (opts.pcSize > 0) {
+        pfnCmdPushConstants(cmd, pipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                            (uint32_t)opts.pcSize, opts.pcData);
+    }
+    pfnCmdDispatch(cmd, opts.dispX, opts.dispY, opts.dispZ);
+    pfnEndCommandBuffer(cmd);
+
+    VkFence fence = VK_NULL_HANDLE;
+    {
+        VkFenceCreateInfo fci = {};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        pfnCreateFence(device, &fci, nullptr, &fence);
+    }
+    VkResult vrSubmit;
+    {
+        VkSubmitInfo si = {};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+        vrSubmit = pfnQueueSubmit(queue, 1, &si, fence);
+    }
+    if (vrSubmit == VK_SUCCESS) {
+        pfnWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+        // Read back any bindings that asked for it.
+        for (int i = 0; i < opts.bindingCount; ++i) {
+            if (opts.buffers[i].readbackOut) {
+                std::memcpy(opts.buffers[i].readbackOut, bufs[i].mapped,
+                            opts.buffers[i].elemCount * sizeof(float));
+            }
+        }
+    }
+
+    pfnDestroyFence(device, fence, nullptr);
+    pfnDestroyCommandPool(device, cmdPool, nullptr);
+    for (int i = 0; i < opts.bindingCount; ++i) {
+        destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, bufs[i]);
+    }
+    pfnDestroyDescriptorPool(device, descPool, nullptr);
+    pfnDestroyPipeline(device, pipeline, nullptr);
+    pfnDestroyPipelineLayout(device, pipeLay, nullptr);
+    pfnDestroyDescriptorSetLayout(device, dsl, nullptr);
+    pfnDestroyShaderModule(device, shaderMod, nullptr);
+    return vrSubmit == VK_SUCCESS;
 }
 
 } // anonymous namespace
@@ -1942,6 +2357,334 @@ bool runActivationGpuTest(const VulkanCtx& ctx,
 }
 
 // ============================================================================
+// §J.3.e.X Phase 4d — CPU references + GPU correctness gates for the 5
+// shape ops.  Each test uses runComputeOnce (above) so the per-op delta
+// is small (~50 LOC each).
+// ============================================================================
+
+void referenceCopy(const float* in, float* out,
+                   size_t count, size_t srcOffset, size_t dstOffset)
+{
+    for (size_t i = 0; i < count; ++i) out[dstOffset + i] = in[srcOffset + i];
+}
+
+void referencePixelShuffle(const float* in, float* out,
+                           int inC, int inH, int inW, int r)
+{
+    int outC = inC / (r * r);
+    int outH = inH * r;
+    int outW = inW * r;
+    for (int oc = 0; oc < outC; ++oc) {
+        for (int oh = 0; oh < outH; ++oh) {
+            for (int ow = 0; ow < outW; ++ow) {
+                int ic = oc * (r * r) + (oh % r) * r + (ow % r);
+                int ih = oh / r;
+                int iw = ow / r;
+                out[(oc * outH + oh) * outW + ow] =
+                    in[(ic * inH + ih) * inW + iw];
+            }
+        }
+    }
+}
+
+void referenceInterpBilinear(const float* in, float* out,
+                             int channels, int inH, int inW,
+                             int outH, int outW)
+{
+    const float scaleH = (float)inH / (float)outH;
+    const float scaleW = (float)inW / (float)outW;
+    for (int c = 0; c < channels; ++c) {
+        for (int oh = 0; oh < outH; ++oh) {
+            for (int ow = 0; ow < outW; ++ow) {
+                float inh_f = ((float)oh + 0.5f) * scaleH - 0.5f;
+                float inw_f = ((float)ow + 0.5f) * scaleW - 0.5f;
+                int ih0 = (int)std::floor(inh_f);
+                int iw0 = (int)std::floor(inw_f);
+                float fh = inh_f - (float)ih0;
+                float fw = inw_f - (float)iw0;
+                int ih1 = ih0 + 1;
+                int iw1 = iw0 + 1;
+                ih0 = std::max(0, std::min(ih0, inH - 1));
+                ih1 = std::max(0, std::min(ih1, inH - 1));
+                iw0 = std::max(0, std::min(iw0, inW - 1));
+                iw1 = std::max(0, std::min(iw1, inW - 1));
+                int planeBase = c * inH * inW;
+                float v00 = in[planeBase + ih0 * inW + iw0];
+                float v01 = in[planeBase + ih0 * inW + iw1];
+                float v10 = in[planeBase + ih1 * inW + iw0];
+                float v11 = in[planeBase + ih1 * inW + iw1];
+                float v0  = v00 * (1.0f - fw) + v01 * fw;
+                float v1  = v10 * (1.0f - fw) + v11 * fw;
+                out[(c * outH + oh) * outW + ow]
+                    = v0 * (1.0f - fh) + v1 * fh;
+            }
+        }
+    }
+}
+
+void referenceEltwiseSum(const float* a, const float* b, float* out,
+                         size_t count, float c0, float c1)
+{
+    for (size_t i = 0; i < count; ++i) out[i] = c0 * a[i] + c1 * b[i];
+}
+
+namespace {
+
+// Generate `n` deterministic random floats centered on 0 with magnitude
+// roughly 0.5.  Shared by the 5 shape-op tests so each call site stays
+// short.
+std::vector<float> deterministicInput(size_t n, uint32_t seed) {
+    std::vector<float> v(n);
+    uint32_t st = seed ? seed : 0x12345678u;
+    for (auto& x : v) {
+        st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+        x = (float)(st & 0xFFFFFF) / (float)0xFFFFFF - 0.5f;
+    }
+    return v;
+}
+
+void logOpResult(const char* label,
+                 float maxErr, int worstIdx,
+                 float cpuVal, float gpuVal,
+                 float tolerance, bool pass)
+{
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] %s: max_abs_err=%.6e — %s",
+                label, (double)maxErr, pass ? "PASS" : "FAIL");
+    std::fprintf(stderr,
+        "[VIPLE-RIFE-VK] %s: max_abs_err=%.6e (worst idx=%d cpu=%.6f gpu=%.6f) — %s\n",
+        label, (double)maxErr, worstIdx,
+        (double)cpuVal, (double)gpuVal, pass ? "PASS" : "FAIL");
+    std::fflush(stderr);
+}
+
+float compareF32(const float* a, const float* b, size_t n, int* worstOut) {
+    float maxErr = 0.0f; int wi = 0;
+    for (size_t i = 0; i < n; ++i) {
+        float d = std::abs(a[i] - b[i]);
+        if (d > maxErr) { maxErr = d; wi = (int)i; }
+    }
+    if (worstOut) *worstOut = wi;
+    return maxErr;
+}
+
+} // anonymous namespace
+
+bool runCropGpuTest(const VulkanCtx& ctx,
+                    int inC, int inH, int inW,
+                    int cStart, int cEnd,
+                    float tolerance)
+{
+    const int outC = cEnd - cStart;
+    const size_t hw = (size_t)inH * inW;
+    const size_t inCount  = (size_t)inC  * hw;
+    const size_t outCount = (size_t)outC * hw;
+    auto in = deterministicInput(inCount, 0xC0DEC0DEu);
+    std::vector<float> cpuOut(outCount);
+    referenceCopy(in.data(), cpuOut.data(), outCount, (size_t)cStart * hw, 0);
+
+    std::vector<float> gpuOut(outCount, 0.0f);
+    struct PC { uint32_t count, srcOff, dstOff; uint32_t _pad; } pc{};
+    pc.count  = (uint32_t)outCount;
+    pc.srcOff = (uint32_t)((size_t)cStart * hw);
+    pc.dstOff = 0;
+
+    RunComputeOptions opts{};
+    opts.shaderGlsl   = getCopyShaderGlsl();
+    opts.bindingCount = 2;
+    opts.buffers[0]   = { in.data(),       inCount,  nullptr };
+    opts.buffers[1]   = { nullptr,         outCount, gpuOut.data() };
+    opts.pcData       = &pc;
+    opts.pcSize       = sizeof(pc);
+    opts.dispX        = (uint32_t)((outCount + 63) / 64);
+    if (!runComputeOnce(ctx, opts)) return false;
+
+    int worst = 0;
+    float err = compareF32(cpuOut.data(), gpuOut.data(), outCount, &worst);
+    bool pass = err <= tolerance;
+    char label[96];
+    std::snprintf(label, sizeof(label),
+                  "CropTest [%d:%d]/%d c=%dx%dx%d", cStart, cEnd, inC, outC, inH, inW);
+    logOpResult(label, err, worst, cpuOut[worst], gpuOut[worst], tolerance, pass);
+    return pass;
+}
+
+bool runConcatGpuTest(const VulkanCtx& ctx,
+                      int inA_C, int inB_C, int H, int W,
+                      float tolerance)
+{
+    const size_t hw = (size_t)H * W;
+    const size_t aCount = (size_t)inA_C * hw;
+    const size_t bCount = (size_t)inB_C * hw;
+    const size_t outCount = aCount + bCount;
+    auto inA = deterministicInput(aCount, 0xAAAA1234u);
+    auto inB = deterministicInput(bCount, 0xBBBB5678u);
+    std::vector<float> cpuOut(outCount);
+    referenceCopy(inA.data(), cpuOut.data(), aCount, 0, 0);
+    referenceCopy(inB.data(), cpuOut.data(), bCount, 0, aCount);
+
+    // Two dispatches, each writing one input into output.  We need to
+    // re-use runComputeOnce twice — but the helper allocates new
+    // buffers each call.  For correctness gate purposes that's fine;
+    // the graph executor will manage shared buffers across dispatches.
+    std::vector<float> gpuOut(outCount, 0.0f);
+
+    auto dispatchOne = [&](const std::vector<float>& src,
+                           size_t dstOffset) -> bool {
+        struct PC { uint32_t count, srcOff, dstOff; uint32_t _pad; } pc{};
+        pc.count  = (uint32_t)src.size();
+        pc.srcOff = 0;
+        pc.dstOff = (uint32_t)dstOffset;
+
+        // To verify Concat we need to *compose* the result across two
+        // dispatches: feed `gpuOut`-so-far as the output of pass 2 (so
+        // pass 2's writes leave pass 1's writes untouched).  The
+        // helper takes hostInData for buffer 1 as initial values.
+        RunComputeOptions opts{};
+        opts.shaderGlsl   = getCopyShaderGlsl();
+        opts.bindingCount = 2;
+        opts.buffers[0]   = { src.data(), src.size(), nullptr };
+        opts.buffers[1]   = { gpuOut.data(), outCount, gpuOut.data() };
+        opts.pcData       = &pc;
+        opts.pcSize       = sizeof(pc);
+        opts.dispX        = (uint32_t)((src.size() + 63) / 64);
+        return runComputeOnce(ctx, opts);
+    };
+    if (!dispatchOne(inA, 0))      return false;
+    if (!dispatchOne(inB, aCount)) return false;
+
+    int worst = 0;
+    float err = compareF32(cpuOut.data(), gpuOut.data(), outCount, &worst);
+    bool pass = err <= tolerance;
+    char label[96];
+    std::snprintf(label, sizeof(label),
+                  "ConcatTest %d+%d=%dch hw=%dx%d", inA_C, inB_C, inA_C+inB_C, H, W);
+    logOpResult(label, err, worst, cpuOut[worst], gpuOut[worst], tolerance, pass);
+    return pass;
+}
+
+bool runPixelShuffleGpuTest(const VulkanCtx& ctx,
+                            int inC, int inH, int inW, int r,
+                            float tolerance)
+{
+    if (inC % (r * r) != 0) return false;
+    const int outC = inC / (r * r);
+    const int outH = inH * r;
+    const int outW = inW * r;
+    const size_t inCount  = (size_t)inC  * inH * inW;
+    const size_t outCount = (size_t)outC * outH * outW;
+    auto in = deterministicInput(inCount, 0xD2D2D2D2u);
+    std::vector<float> cpuOut(outCount);
+    referencePixelShuffle(in.data(), cpuOut.data(), inC, inH, inW, r);
+
+    std::vector<float> gpuOut(outCount, 0.0f);
+    struct PC { int32_t inH, inW, outC, r; } pc{};
+    pc.inH = inH; pc.inW = inW; pc.outC = outC; pc.r = r;
+
+    RunComputeOptions opts{};
+    opts.shaderGlsl   = getPixelShuffleShaderGlsl();
+    opts.bindingCount = 2;
+    opts.buffers[0]   = { in.data(), inCount,  nullptr };
+    opts.buffers[1]   = { nullptr,    outCount, gpuOut.data() };
+    opts.pcData       = &pc;
+    opts.pcSize       = sizeof(pc);
+    opts.dispX        = (uint32_t)((outW + 7) / 8);
+    opts.dispY        = (uint32_t)((outH + 7) / 8);
+    opts.dispZ        = (uint32_t)outC;
+    if (!runComputeOnce(ctx, opts)) return false;
+
+    int worst = 0;
+    float err = compareF32(cpuOut.data(), gpuOut.data(), outCount, &worst);
+    bool pass = err <= tolerance;
+    char label[96];
+    std::snprintf(label, sizeof(label),
+                  "PixelShuffle r=%d in=%dx%dx%d → %dx%dx%d",
+                  r, inC, inH, inW, outC, outH, outW);
+    logOpResult(label, err, worst, cpuOut[worst], gpuOut[worst], tolerance, pass);
+    return pass;
+}
+
+bool runInterpBilinearGpuTest(const VulkanCtx& ctx,
+                              int channels, int inH, int inW,
+                              int outH, int outW,
+                              float tolerance)
+{
+    const size_t inCount  = (size_t)channels * inH  * inW;
+    const size_t outCount = (size_t)channels * outH * outW;
+    auto in = deterministicInput(inCount, 0xE3E3E3E3u);
+    std::vector<float> cpuOut(outCount);
+    referenceInterpBilinear(in.data(), cpuOut.data(),
+                            channels, inH, inW, outH, outW);
+
+    std::vector<float> gpuOut(outCount, 0.0f);
+    struct PC {
+        int32_t inH, inW, outH, outW, channels;
+        float   scaleH, scaleW;
+        uint32_t _pad;
+    } pc{};
+    pc.inH = inH; pc.inW = inW; pc.outH = outH; pc.outW = outW;
+    pc.channels = channels;
+    pc.scaleH = (float)inH / (float)outH;
+    pc.scaleW = (float)inW / (float)outW;
+
+    RunComputeOptions opts{};
+    opts.shaderGlsl   = getInterpBilinearShaderGlsl();
+    opts.bindingCount = 2;
+    opts.buffers[0]   = { in.data(), inCount,  nullptr };
+    opts.buffers[1]   = { nullptr,    outCount, gpuOut.data() };
+    opts.pcData       = &pc;
+    opts.pcSize       = sizeof(pc);
+    opts.dispX        = (uint32_t)((outW + 7) / 8);
+    opts.dispY        = (uint32_t)((outH + 7) / 8);
+    opts.dispZ        = (uint32_t)channels;
+    if (!runComputeOnce(ctx, opts)) return false;
+
+    int worst = 0;
+    float err = compareF32(cpuOut.data(), gpuOut.data(), outCount, &worst);
+    bool pass = err <= tolerance;
+    char label[96];
+    std::snprintf(label, sizeof(label),
+                  "InterpBilinear c=%d %dx%d → %dx%d",
+                  channels, inH, inW, outH, outW);
+    logOpResult(label, err, worst, cpuOut[worst], gpuOut[worst], tolerance, pass);
+    return pass;
+}
+
+bool runEltwiseSumGpuTest(const VulkanCtx& ctx,
+                          size_t count, float c0, float c1,
+                          float tolerance)
+{
+    auto a = deterministicInput(count, 0xFEEDF00Du);
+    auto b = deterministicInput(count, 0xDEADBEEFu);
+    std::vector<float> cpuOut(count);
+    referenceEltwiseSum(a.data(), b.data(), cpuOut.data(), count, c0, c1);
+
+    std::vector<float> gpuOut(count, 0.0f);
+    struct PC { uint32_t count; float c0, c1; uint32_t _pad; } pc{};
+    pc.count = (uint32_t)count; pc.c0 = c0; pc.c1 = c1;
+
+    RunComputeOptions opts{};
+    opts.shaderGlsl   = getEltwiseShaderGlsl();
+    opts.bindingCount = 3;
+    opts.buffers[0]   = { a.data(), count, nullptr };
+    opts.buffers[1]   = { b.data(), count, nullptr };
+    opts.buffers[2]   = { nullptr,   count, gpuOut.data() };
+    opts.pcData       = &pc;
+    opts.pcSize       = sizeof(pc);
+    opts.dispX        = (uint32_t)((count + 63) / 64);
+    if (!runComputeOnce(ctx, opts)) return false;
+
+    int worst = 0;
+    float err = compareF32(cpuOut.data(), gpuOut.data(), count, &worst);
+    bool pass = err <= tolerance;
+    char label[96];
+    std::snprintf(label, sizeof(label),
+                  "EltwiseSum count=%zu c0=%.2f c1=%.2f", count, (double)c0, (double)c1);
+    logOpResult(label, err, worst, cpuOut[worst], gpuOut[worst], tolerance, pass);
+    return pass;
+}
+
+// ============================================================================
 // Phase 3b.2 standalone — replicates ncnnfruc::runExternalApiProbe's Vulkan
 // init pattern, hands handles to ncnn, runs runConv2DGpuTest, tears down.
 // Side-effect: claims+releases the ncnn process-singleton (same caveat as
@@ -2177,6 +2920,27 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
         ActivationDesc r3{}; r3.actType = 1;
         pass &= runActivationGpuTest(ctx, r3, a, 1e-6f);
     }
+
+    // ---- Phase 4d shape-op coverage ----
+    // Crop  — slice channels [2:5] from a (8, 4, 4) tensor (covers
+    //         the largest distinct param sig in the audit: ic=8, slice
+    //         contiguous channel range).
+    pass &= runCropGpuTest(ctx, /*inC*/8, /*inH*/4, /*inW*/4,
+                                /*cStart*/2, /*cEnd*/5);
+    // Concat — concatenate (3,4,4) + (5,4,4) along channels.
+    pass &= runConcatGpuTest(ctx, /*inA_C*/3, /*inB_C*/5,
+                                  /*H*/4, /*W*/4);
+    // PixelShuffle r=2 — (16, 4, 4) → (4, 8, 8).
+    pass &= runPixelShuffleGpuTest(ctx, /*inC*/16, /*inH*/4, /*inW*/4, /*r*/2);
+    // Interp bilinear — (4, 8, 8) → (4, 16, 16) and (4, 16, 16) → (4, 4, 4).
+    pass &= runInterpBilinearGpuTest(ctx, /*c*/4, /*inH*/8,  /*inW*/8,
+                                          /*outH*/16, /*outW*/16);
+    pass &= runInterpBilinearGpuTest(ctx, /*c*/4, /*inH*/16, /*inW*/16,
+                                          /*outH*/4,  /*outW*/4);
+    // EltwiseSum — covers the 3 RIFE coeff variants [1.0, k] for k ∈ {4,8,16}.
+    pass &= runEltwiseSumGpuTest(ctx, /*count*/512, /*c0*/1.0f, /*c1*/4.0f);
+    pass &= runEltwiseSumGpuTest(ctx, /*count*/512, /*c0*/1.0f, /*c1*/8.0f);
+    pass &= runEltwiseSumGpuTest(ctx, /*count*/512, /*c0*/1.0f, /*c1*/16.0f);
 
     // ---- Cleanup ----
     ncnn::destroy_gpu_instance();

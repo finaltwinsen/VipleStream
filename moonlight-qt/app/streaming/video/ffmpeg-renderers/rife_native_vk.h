@@ -249,6 +249,49 @@ void referenceActivation(const ActivationDesc& desc,
 
 const char* getActivationShaderGlsl();
 
+// Phase 4d — shape ops.  See cpp for op-by-op coverage notes.
+
+// Linear copy with src/dst element offsets.  Powers Concat (multi-pass)
+// + Crop (single pass with srcOffset).  Pure positional shader, no
+// math — GPU/CPU output match exactly.
+const char* getCopyShaderGlsl();
+void referenceCopy(const float* in, float* out,
+                   size_t count, size_t srcOffset, size_t dstOffset);
+bool runCropGpuTest(const VulkanCtx& ctx,
+                    int inC, int inH, int inW,
+                    int cStart, int cEnd,
+                    float tolerance = 1e-5f);
+bool runConcatGpuTest(const VulkanCtx& ctx,
+                      int inA_C, int inB_C, int H, int W,
+                      float tolerance = 1e-5f);
+
+// Depth-to-space (PixelShuffle) with upscale factor r (audit: r=2 only
+// in flownet).  Input (Cin, Hin, Win) → output (Cin/r², Hin*r, Win*r).
+const char* getPixelShuffleShaderGlsl();
+void referencePixelShuffle(const float* in, float* out,
+                           int inC, int inH, int inW, int r);
+bool runPixelShuffleGpuTest(const VulkanCtx& ctx,
+                            int inC, int inH, int inW, int r,
+                            float tolerance = 1e-5f);
+
+// Bilinear resize (Interp resize_type=2, align_corners=false).
+const char* getInterpBilinearShaderGlsl();
+void referenceInterpBilinear(const float* in, float* out,
+                             int channels, int inH, int inW,
+                             int outH, int outW);
+bool runInterpBilinearGpuTest(const VulkanCtx& ctx,
+                              int channels, int inH, int inW,
+                              int outH, int outW,
+                              float tolerance = 1e-5f);
+
+// Weighted SUM of 2 inputs: out[i] = c0 * a[i] + c1 * b[i].
+const char* getEltwiseShaderGlsl();
+void referenceEltwiseSum(const float* a, const float* b, float* out,
+                         size_t count, float c0, float c1);
+bool runEltwiseSumGpuTest(const VulkanCtx& ctx,
+                          size_t count, float c0, float c1,
+                          float tolerance = 1e-5f);
+
 // GLSL compute shader source for Conv2D with arbitrary stride/pad/kernel
 // + optional fused LeakyReLU.  Returned string is a complete shader,
 // ready to feed into ncnn::compile_spirv_module / glslangValidator.
