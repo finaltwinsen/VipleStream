@@ -22,8 +22,9 @@ param(
     [int]    $CaptureSeconds = 60,
     [string] $Region = "800,450,320,180",  # x,y,w,h — assumes 1920×1080 fullscreen, central 320×180
     [ValidateSet("video", "ufo")]
-    [string] $Mode = "video",              # video: natural-content (PotPlayer); ufo: testufo trajectory
-    [switch] $SkipServerSetup,             # video mode auto-implies skip — your PotPlayer is already running
+    [string] $Mode = "video",              # video: PotPlayer auto-launch; ufo: testufo trajectory
+    [string] $VideoPath = "C:\Temp\videoplayback.webm",  # video mode: server-side video file
+    [switch] $SkipServerSetup,             # bypass auto server-side launch (use existing source)
     [switch] $NoFlow,                      # ufo mode only — skip OF magnitude (faster analyze)
     [string] $ServerHost = "192.168.51.226",
     [string] $StreamCodec = "H.264",
@@ -64,9 +65,21 @@ Write-Host "  server: $ServerHost ($StreamCodec)" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
 # ---- Step 1: server-side motion source ----
-# video mode auto-skips (PotPlayer / other player is user-managed)
-$skipServer = $SkipServerSetup -or ($Mode -eq "video")
-if (-not $skipServer) {
+# video mode: auto-launch PotPlayer fullscreen from 0:00 (reproducible content)
+# ufo mode: launch Edge fullscreen testufo
+# -SkipServerSetup: bypass both (use whatever's already running)
+if ($SkipServerSetup) {
+    Write-Host "`n[1/7] -SkipServerSetup → keeping existing server-side motion source" -ForegroundColor DarkYellow
+} elseif ($Mode -eq "video") {
+    Write-Host "`n[1/7] starting PotPlayer fullscreen from 0:00 on server …" -ForegroundColor Yellow
+    $startScript = Join-Path $PSScriptRoot "start_video_on_server.ps1"
+    & pwsh -ExecutionPolicy Bypass -File $startScript -VideoPath $VideoPath -ServerHost $ServerHost
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to launch PotPlayer on server (rc=$LASTEXITCODE)"
+        exit 1
+    }
+    Start-Sleep -Seconds 1  # extra time for PotPlayer to settle
+} else {
     Write-Host "`n[1/7] starting testufo on server via SSH …" -ForegroundColor Yellow
     try {
         ssh -o BatchMode=yes "final@$ServerHost" 'powershell -Command "Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 800; Start-Process msedge -ArgumentList ''--start-fullscreen'',''https://www.testufo.com''"' 2>&1 | Out-Null
@@ -75,12 +88,6 @@ if (-not $skipServer) {
         Write-Warning "SSH testufo launch failed: $_  (continuing anyway, you may need to set up testufo manually)"
     }
     Start-Sleep -Seconds 3
-} else {
-    if ($Mode -eq "video") {
-        Write-Host "`n[1/7] video mode — assuming PotPlayer / your video source is already running on server" -ForegroundColor DarkYellow
-    } else {
-        Write-Host "`n[1/7] -SkipServerSetup → assuming motion source already running on server" -ForegroundColor DarkYellow
-    }
 }
 
 # ---- Step 2: kill stale client + launch ----
