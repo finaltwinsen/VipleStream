@@ -20,9 +20,11 @@
 param(
     [string] $Label = "",
     [int]    $CaptureSeconds = 60,
-    [string] $Region = "800,540,320,180",  # x,y,w,h — assumes 1920×1080 fullscreen, UFO traverses
-    [switch] $SkipServerSetup,
-    [switch] $NoFlow,                      # skip optical flow (faster analyze)
+    [string] $Region = "800,450,320,180",  # x,y,w,h — assumes 1920×1080 fullscreen, central 320×180
+    [ValidateSet("video", "ufo")]
+    [string] $Mode = "video",              # video: natural-content (PotPlayer); ufo: testufo trajectory
+    [switch] $SkipServerSetup,             # video mode auto-implies skip — your PotPlayer is already running
+    [switch] $NoFlow,                      # ufo mode only — skip OF magnitude (faster analyze)
     [string] $ServerHost = "192.168.51.226",
     [string] $StreamCodec = "H.264",
     [int]    $StreamFps = 60
@@ -61,8 +63,10 @@ Write-Host "  capture: ${CaptureSeconds}s @ ${StreamFps}fps" -ForegroundColor Cy
 Write-Host "  server: $ServerHost ($StreamCodec)" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
-# ---- Step 1: server-side testufo ----
-if (-not $SkipServerSetup) {
+# ---- Step 1: server-side motion source ----
+# video mode auto-skips (PotPlayer / other player is user-managed)
+$skipServer = $SkipServerSetup -or ($Mode -eq "video")
+if (-not $skipServer) {
     Write-Host "`n[1/7] starting testufo on server via SSH …" -ForegroundColor Yellow
     try {
         ssh -o BatchMode=yes "final@$ServerHost" 'powershell -Command "Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 800; Start-Process msedge -ArgumentList ''--start-fullscreen'',''https://www.testufo.com''"' 2>&1 | Out-Null
@@ -72,7 +76,11 @@ if (-not $SkipServerSetup) {
     }
     Start-Sleep -Seconds 3
 } else {
-    Write-Host "`n[1/7] -SkipServerSetup → assuming testufo already running on server" -ForegroundColor DarkYellow
+    if ($Mode -eq "video") {
+        Write-Host "`n[1/7] video mode — assuming PotPlayer / your video source is already running on server" -ForegroundColor DarkYellow
+    } else {
+        Write-Host "`n[1/7] -SkipServerSetup → assuming motion source already running on server" -ForegroundColor DarkYellow
+    }
 }
 
 # ---- Step 2: kill stale client + launch ----
@@ -115,10 +123,10 @@ $timingScript = Join-Path $PSScriptRoot "analyze_fruc_timing.py"
 & python $timingScript --latest --label $Label
 
 # ---- Step 7: stage 2 motion analysis ----
-Write-Host "`n[7/7] analyzing UFO motion (Stage 2) …" -ForegroundColor Yellow
+Write-Host "`n[7/7] analyzing motion (Stage 2, mode=$Mode) …" -ForegroundColor Yellow
 $motionScript = Join-Path $PSScriptRoot "analyze_motion.py"
-$motionArgs = @($captureBin, "--label", $Label)
-if ($NoFlow) {
+$motionArgs = @($captureBin, "--label", $Label, "--mode", $Mode)
+if ($NoFlow -and $Mode -eq "ufo") {
     $motionArgs += "--no-flow"
 }
 & python $motionScript @motionArgs

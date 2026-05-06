@@ -32,6 +32,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+try:
+    from skimage.metrics import structural_similarity as ssim
+    HAS_SKIMAGE = True
+except ImportError:
+    HAS_SKIMAGE = False
 
 # CJK font for figure labels
 for _font in ["Microsoft JhengHei", "Microsoft YaHei", "MingLiU", "SimHei"]:
@@ -352,12 +357,401 @@ def make_figure(positions: list, metrics: dict, of_mags: list[float] | None,
     plt.close(fig)
 
 
+# =============================================================================
+# Video mode (PotPlayer / natural video) — 4 indicators
+# =============================================================================
+
+def detect_scene_cuts(gray: np.ndarray, ssim_threshold: float = 0.30) -> np.ndarray:
+    """
+    Returns boolean array (length N): True = frame i is a scene-cut frame
+    relative to frame i-1.  i==0 always False.
+
+    Strategy: SSIM(t, t-1) below threshold = cut.  Falls back to mean abs
+    diff > 60 (out of 255) if skimage missing.
+    """
+    n = gray.shape[0]
+    cuts = np.zeros(n, dtype=bool)
+    if n < 2:
+        return cuts
+
+    # Downsample for speed (SSIM on 320×180 is OK but faster on 80×45)
+    h, w = gray.shape[1:]
+    ds_h = max(45, h // 4)
+    ds_w = max(80, w // 4)
+    downs = np.zeros((n, ds_h, ds_w), dtype=np.uint8)
+    for i in range(n):
+        downs[i] = cv2.resize(gray[i], (ds_w, ds_h), interpolation=cv2.INTER_AREA)
+
+    if HAS_SKIMAGE:
+        for i in range(1, n):
+            s = ssim(downs[i-1], downs[i], data_range=255)
+            if s < ssim_threshold:
+                cuts[i] = True
+    else:
+        # fallback — mean absolute diff
+        for i in range(1, n):
+            d = float(np.mean(np.abs(downs[i].astype(np.int16) - downs[i-1].astype(np.int16))))
+            if d > 60:  # large jump = cut
+                cuts[i] = True
+
+    return cuts
+
+
+def compute_ssim_series(gray: np.ndarray) -> np.ndarray:
+    """Per-frame SSIM(t, t-1).  ssim[0] = NaN."""
+    n = gray.shape[0]
+    out = np.full(n, np.nan, dtype=np.float64)
+    if not HAS_SKIMAGE or n < 2:
+        return out
+    h, w = gray.shape[1:]
+    # SSIM on full sub-region resolution (320×180 is small)
+    for i in range(1, n):
+        out[i] = ssim(gray[i-1], gray[i], data_range=255)
+    return out
+
+
+def compute_of_magnitude_series(gray: np.ndarray) -> np.ndarray:
+    """Per-frame mean optical flow magnitude (Farneback).  out[0] = NaN."""
+    n = gray.shape[0]
+    out = np.full(n, np.nan, dtype=np.float64)
+    if n < 2:
+        return out
+    for i in range(1, n):
+        flow = cv2.calcOpticalFlowFarneback(
+            gray[i-1], gray[i], None,
+            pyr_scale=0.5, levels=2, winsize=15,
+            iterations=2, poly_n=5, poly_sigma=1.1, flags=0,
+        )
+        out[i] = float(np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2).mean())
+    return out
+
+
+def block_outlier_ratio_series(gray: np.ndarray, block: int = 16) -> np.ndarray:
+    """
+    For each frame pair (t-1, t): per-block OF magnitude, count blocks
+    deviating > 2σ from frame median, return outlier ratio per frame.
+    out[0] = NaN.
+    """
+    n = gray.shape[0]
+    out = np.full(n, np.nan, dtype=np.float64)
+    if n < 2:
+        return out
+    h, w = gray.shape[1:]
+    nby = h // block
+    nbx = w // block
+    if nby < 2 or nbx < 2:
+        return out
+
+    for i in range(1, n):
+        flow = cv2.calcOpticalFlowFarneback(
+            gray[i-1], gray[i], None,
+            pyr_scale=0.5, levels=2, winsize=15,
+            iterations=2, poly_n=5, poly_sigma=1.1, flags=0,
+        )
+        mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
+        # per-block mean
+        block_means = np.zeros(nby * nbx)
+        for by in range(nby):
+            for bx in range(nbx):
+                block_means[by * nbx + bx] = mag[
+                    by*block:(by+1)*block,
+                    bx*block:(bx+1)*block,
+                ].mean()
+        med = np.median(block_means)
+        std = np.std(block_means)
+        if std > 0:
+            outliers = np.abs(block_means - med) > 2 * std
+            out[i] = float(outliers.sum() / len(block_means))
+        else:
+            out[i] = 0.0
+    return out
+
+
+def fft_alternation_power(series: np.ndarray, fps: int, target_freq_hz: float = 30.0,
+                           band_hz: float = 1.0) -> dict:
+    """
+    Compute FFT of time series, return power around target_freq_hz vs total.
+    Higher target peak ratio = stronger alternation (= worse interp quality).
+
+    For 60fps capture with dual-present (real, interp, real, interp ...),
+    if interp differs from real, frame-to-frame metric oscillates at 30 Hz.
+    """
+    s = series[~np.isnan(series)]
+    s = s - np.mean(s)  # detrend
+    if len(s) < 8:
+        return {"target_power_ratio": 0.0, "target_freq_hz": target_freq_hz,
+                "peak_freq_hz": 0.0, "peak_power_ratio": 0.0}
+
+    n = len(s)
+    fft = np.fft.rfft(s * np.hanning(n))
+    freqs = np.fft.rfftfreq(n, d=1.0/fps)
+    power = np.abs(fft) ** 2
+    total = power.sum() if power.sum() > 0 else 1.0
+
+    # target band
+    in_band = (freqs >= target_freq_hz - band_hz) & (freqs <= target_freq_hz + band_hz)
+    target_power = float(power[in_band].sum() / total) if in_band.any() else 0.0
+
+    # peak (excluding DC)
+    if len(power) > 1:
+        peak_idx = 1 + int(np.argmax(power[1:]))
+        peak_freq = float(freqs[peak_idx])
+        peak_power_ratio = float(power[peak_idx] / total)
+    else:
+        peak_freq = 0.0
+        peak_power_ratio = 0.0
+
+    return {
+        "target_freq_hz": target_freq_hz,
+        "target_power_ratio": target_power,
+        "peak_freq_hz": peak_freq,
+        "peak_power_ratio": peak_power_ratio,
+    }
+
+
+def filter_series_by_cuts(series: np.ndarray, cuts: np.ndarray, buffer: int = 1) -> np.ndarray:
+    """Mask out scene-cut frames + buffer neighbours, return NaN-filled copy."""
+    n = len(series)
+    mask = np.zeros(n, dtype=bool)
+    cut_idx = np.where(cuts)[0]
+    for ci in cut_idx:
+        for j in range(max(0, ci - buffer), min(n, ci + buffer + 1)):
+            mask[j] = True
+    out = series.copy()
+    out[mask] = np.nan
+    return out
+
+
+def video_mode_analyze(frames: np.ndarray, gray: np.ndarray, fps: int) -> tuple[dict, dict]:
+    """
+    4-indicator pipeline for natural video content (PotPlayer / general).
+    Returns (metrics_dict, series_dict for plotting).
+    """
+    print("  detecting scene cuts …")
+    cuts = detect_scene_cuts(gray)
+    n_cuts = int(cuts.sum())
+    print(f"    found {n_cuts} scene cuts")
+
+    print("  computing per-frame SSIM(t, t-1) …")
+    ssim_series = compute_ssim_series(gray)
+
+    print("  computing per-frame OF magnitude …")
+    of_series = compute_of_magnitude_series(gray)
+
+    print("  computing per-frame block-OF outlier ratio …")
+    block_series = block_outlier_ratio_series(gray)
+
+    # Apply scene-cut filter
+    of_filt = filter_series_by_cuts(of_series, cuts, buffer=1)
+    ssim_filt = filter_series_by_cuts(ssim_series, cuts, buffer=1)
+    block_filt = filter_series_by_cuts(block_series, cuts, buffer=1)
+
+    def _stats(arr):
+        a = arr[~np.isnan(arr)]
+        if len(a) == 0:
+            return {"n": 0, "mean": 0, "std": 0, "cv": 0,
+                    "outlier_2s_ratio": 0.0, "min": 0, "max": 0}
+        m = float(np.mean(a))
+        s = float(np.std(a))
+        outl = float(np.sum(np.abs(a - m) > 2 * s) / len(a)) if s > 0 else 0.0
+        return {"n": int(len(a)), "mean": m, "std": s,
+                "cv": s / m if m > 0 else 0,
+                "outlier_2s_ratio": outl,
+                "min": float(a.min()), "max": float(a.max())}
+
+    of_stats = _stats(of_filt)
+    ssim_stats = _stats(ssim_filt)
+    block_stats = _stats(block_filt)
+
+    # FFT alternation analysis (use unfiltered series; FFT itself handles spikes)
+    of_fft = fft_alternation_power(of_series, fps)
+    ssim_fft = fft_alternation_power(ssim_series, fps)
+
+    metrics = {
+        "n_frames": int(gray.shape[0]),
+        "n_scene_cuts": n_cuts,
+        "scene_cut_rate_pct": float(n_cuts / gray.shape[0] * 100),
+        # Indicator 1: OF magnitude smoothness
+        "of_magnitude": of_stats,
+        # Indicator 2: OF FFT alternation
+        "of_fft": of_fft,
+        # Indicator 3: SSIM continuity
+        "ssim": ssim_stats,
+        "ssim_fft": ssim_fft,
+        # Indicator 4: block OF outlier
+        "block_outlier_ratio": block_stats,
+    }
+    series = {
+        "scene_cuts": cuts.tolist(),
+        "of": of_series.tolist(),
+        "of_filt": of_filt.tolist(),
+        "ssim": ssim_series.tolist(),
+        "ssim_filt": ssim_filt.tolist(),
+        "block_outlier": block_series.tolist(),
+    }
+    return metrics, series
+
+
+def build_video_report(metrics: dict, capture_path: Path, label: str, meta: dict) -> str:
+    lines = []
+    lines.append(f"# FRUC video-mode quality — `{label}`")
+    lines.append("")
+    lines.append(f"- **Capture**: `{capture_path}`")
+    lines.append(f"- **Generated**: {datetime.now().isoformat(timespec='seconds')}")
+    lines.append(f"- **Region**: {meta['width']}×{meta['height']} @ ({meta['x']},{meta['y']}) "
+                 f"@ {meta['fps']}fps × {meta['seconds']}s")
+    lines.append(f"- **Frames analyzed**: {metrics['n_frames']}")
+    lines.append(f"- **Scene cuts detected**: {metrics['n_scene_cuts']} "
+                 f"({metrics['scene_cut_rate_pct']:.1f}%)")
+    if metrics['n_scene_cuts'] > 0:
+        lines.append(f"  - cut frames + 1-frame buffer excluded from smoothness metrics")
+    lines.append("")
+
+    lines.append("## Indicator 1 — OF magnitude smoothness（filtered, 越平滑越好）")
+    lines.append("")
+    s = metrics["of_magnitude"]
+    cv_verdict = "✅ 平滑" if s["cv"] < 0.3 else ("⚠️ 中等" if s["cv"] < 0.6 else "❌ 不穩")
+    outlier_verdict = "✅" if s["outlier_2s_ratio"] < 0.05 else ("⚠️" if s["outlier_2s_ratio"] < 0.15 else "❌")
+    lines.append(f"- mean = {s['mean']:.3f} px/frame   range [{s['min']:.3f}, {s['max']:.3f}]")
+    lines.append(f"- std-dev = {s['std']:.3f}   **cv = {s['cv']:.3f}** ({cv_verdict})")
+    lines.append(f"- 2σ outlier ratio = {s['outlier_2s_ratio']*100:.2f}% ({outlier_verdict})")
+    lines.append("")
+
+    lines.append("## Indicator 2 — OF FFT alternation @ 30Hz（補幀差會出現此 spike）")
+    lines.append("")
+    f = metrics["of_fft"]
+    of_30hz = f["target_power_ratio"] * 100
+    of_30hz_verdict = "✅ 無 30Hz spike" if of_30hz < 1 else ("⚠️ 中等" if of_30hz < 3 else "❌ 強 alternation")
+    lines.append(f"- 30Hz band power / total = **{of_30hz:.3f}%** ({of_30hz_verdict})")
+    lines.append(f"- overall peak: {f['peak_freq_hz']:.2f}Hz @ {f['peak_power_ratio']*100:.3f}% of total")
+    lines.append("")
+
+    lines.append("## Indicator 3 — SSIM(t, t-1) frame continuity")
+    lines.append("")
+    s = metrics["ssim"]
+    ssim_verdict = "✅ 高連續性" if s["mean"] > 0.95 else ("⚠️ 中等" if s["mean"] > 0.85 else "❌ 低連續性")
+    lines.append(f"- mean SSIM = **{s['mean']:.4f}**   range [{s['min']:.4f}, {s['max']:.4f}] ({ssim_verdict})")
+    lines.append(f"- std-dev = {s['std']:.4f}")
+    lines.append(f"- 2σ outlier ratio = {s['outlier_2s_ratio']*100:.2f}%")
+    lines.append("")
+
+    lines.append("## Indicator 3b — SSIM FFT @ 30Hz（同樣，補幀差會 alternate）")
+    lines.append("")
+    f = metrics["ssim_fft"]
+    sf_30hz = f["target_power_ratio"] * 100
+    sf_30hz_verdict = "✅ 無" if sf_30hz < 1 else ("⚠️" if sf_30hz < 3 else "❌")
+    lines.append(f"- 30Hz band power / total = **{sf_30hz:.3f}%** ({sf_30hz_verdict})")
+    lines.append(f"- overall peak: {f['peak_freq_hz']:.2f}Hz @ {f['peak_power_ratio']*100:.3f}%")
+    lines.append("")
+
+    lines.append("## Indicator 4 — Block-level OF outlier ratio")
+    lines.append("")
+    b = metrics["block_outlier_ratio"]
+    block_verdict = "✅ 一致 motion" if b["mean"] < 0.10 else ("⚠️" if b["mean"] < 0.20 else "❌ 嚴重")
+    lines.append(f"- mean outlier block ratio = **{b['mean']*100:.2f}%** ({block_verdict})")
+    lines.append(f"- std-dev = {b['std']*100:.2f}%   range [{b['min']*100:.2f}%, {b['max']*100:.2f}%]")
+    lines.append("")
+
+    lines.append("## Verdict 概覽（4 個指標的綜合判定）")
+    lines.append("")
+    of_smooth_pass = metrics["of_magnitude"]["cv"] < 0.6
+    of_fft_pass = metrics["of_fft"]["target_power_ratio"] < 0.03  # < 3% at 30Hz
+    ssim_pass = metrics["ssim"]["mean"] > 0.85
+    block_pass = metrics["block_outlier_ratio"]["mean"] < 0.20
+    passes = sum([of_smooth_pass, of_fft_pass, ssim_pass, block_pass])
+    lines.append(f"| 指標 | 判定 |")
+    lines.append(f"|---|---|")
+    lines.append(f"| OF smoothness (cv < 0.6) | {'✅' if of_smooth_pass else '❌'} |")
+    lines.append(f"| OF 30Hz alt. (< 3%) | {'✅' if of_fft_pass else '❌'} |")
+    lines.append(f"| SSIM continuity (> 0.85) | {'✅' if ssim_pass else '❌'} |")
+    lines.append(f"| Block outlier (< 20%) | {'✅' if block_pass else '❌'} |")
+    lines.append(f"| **總分** | **{passes} / 4** |")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def make_video_figure(series: dict, metrics: dict, output: Path, label: str, fps: int):
+    cuts = np.array(series["scene_cuts"])
+    of = np.array(series["of"])
+    ssim_s = np.array(series["ssim"])
+    block_s = np.array(series["block_outlier"])
+    n = len(of)
+    idx = np.arange(n)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f"FRUC video-mode quality — {label}", fontsize=14)
+
+    # Panel 1: OF magnitude time series
+    ax = axes[0, 0]
+    ax.plot(idx, of, "navy", linewidth=0.6, alpha=0.7, label="raw")
+    ax.plot(idx, np.array(series["of_filt"]), "blue", linewidth=0.9, label="filtered")
+    cut_idx = np.where(cuts)[0]
+    for ci in cut_idx:
+        ax.axvline(ci, color="red", alpha=0.3, linewidth=0.5)
+    ax.set_xlabel("frame #")
+    ax.set_ylabel("mean OF magnitude")
+    ax.set_title(f"OF magnitude over time (red = scene cut, n={int(cuts.sum())})")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Panel 2: SSIM time series
+    ax = axes[0, 1]
+    ax.plot(idx, ssim_s, "green", linewidth=0.6, alpha=0.7, label="raw")
+    ax.plot(idx, np.array(series["ssim_filt"]), "darkgreen", linewidth=0.9, label="filtered")
+    for ci in cut_idx:
+        ax.axvline(ci, color="red", alpha=0.3, linewidth=0.5)
+    ax.set_xlabel("frame #")
+    ax.set_ylabel("SSIM(t, t-1)")
+    ax.set_title("SSIM frame continuity")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Panel 3: FFT power spectrum (OF)
+    ax = axes[1, 0]
+    of_clean = of[~np.isnan(of)]
+    if len(of_clean) >= 8:
+        s = of_clean - np.mean(of_clean)
+        fft = np.abs(np.fft.rfft(s * np.hanning(len(s)))) ** 2
+        freqs = np.fft.rfftfreq(len(s), d=1.0/fps)
+        ax.semilogy(freqs[1:], fft[1:], "purple", linewidth=0.8)
+        ax.axvline(30, color="red", linestyle="--", alpha=0.6, label="30Hz (real/interp alt.)")
+        ax.set_xlabel("freq (Hz)")
+        ax.set_ylabel("power (log)")
+        ax.set_title(f"OF magnitude FFT — 30Hz band {metrics['of_fft']['target_power_ratio']*100:.2f}%")
+        ax.legend()
+        ax.grid(True, alpha=0.3, which="both")
+
+    # Panel 4: Block outlier ratio
+    ax = axes[1, 1]
+    ax.plot(idx, block_s, "orange", linewidth=0.7, alpha=0.7)
+    for ci in cut_idx:
+        ax.axvline(ci, color="red", alpha=0.3, linewidth=0.5)
+    mean_b = metrics["block_outlier_ratio"]["mean"]
+    ax.axhline(mean_b, color="darkorange", linestyle="--", alpha=0.7,
+               label=f"mean {mean_b*100:.1f}%")
+    ax.set_xlabel("frame #")
+    ax.set_ylabel("outlier block ratio (16×16 grid)")
+    ax.set_title("Block-level OF outlier ratio")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+# =============================================================================
+
+
 def main():
     parser = argparse.ArgumentParser(description="FRUC motion analysis (Stage 2)")
     parser.add_argument("capture", help="Raw RGBA capture file (.bin)")
     parser.add_argument("--label", default=None)
+    parser.add_argument("--mode", choices=["ufo", "video"], default="video",
+                        help="ufo: testufo trajectory R²; video: 4 indicators for natural video (default)")
     parser.add_argument("--no-flow", action="store_true",
-                        help="Skip optical flow computation (faster)")
+                        help="(ufo mode only) Skip optical flow magnitude")
     parser.add_argument("--out-dir", default="temp/fruc_quality")
     args = parser.parse_args()
 
@@ -371,25 +765,10 @@ def main():
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     label = args.label or cap_path.stem
 
-    print(f"Analyzing {cap_path}")
+    print(f"Analyzing {cap_path} (mode={args.mode})")
     frames = load_frames(cap_path, meta)
     gray = to_gray(frames)
     print(f"  shape: {gray.shape}")
-
-    tpl_result = find_ufo_template(gray)
-    if tpl_result is None:
-        sys.exit("Could not find UFO template (frames too small or empty).")
-    template, init_pos = tpl_result
-
-    print("  tracking UFO …")
-    positions = track_ufo(gray, template, init_pos)
-
-    metrics = compute_velocity_metrics(positions, meta["fps"])
-
-    of_mags = None
-    if not args.no_flow:
-        print("  computing optical flow magnitude (sampled) …")
-        of_mags = compute_optical_flow_magnitude(gray)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -397,23 +776,62 @@ def main():
     png_out = out_dir / f"motion_{label}.png"
     json_out = out_dir / f"motion_{label}.json"
 
-    report = build_report(metrics, of_mags, cap_path, label, meta)
+    if args.mode == "ufo":
+        # ===== UFO trajectory mode (testufo content) =====
+        tpl_result = find_ufo_template(gray)
+        if tpl_result is None:
+            sys.exit("Could not find UFO template (frames too small or empty).")
+        template, init_pos = tpl_result
+
+        print("  tracking UFO …")
+        positions = track_ufo(gray, template, init_pos)
+        metrics = compute_velocity_metrics(positions, meta["fps"])
+
+        of_mags = None
+        if not args.no_flow:
+            print("  computing optical flow magnitude (sampled) …")
+            of_mags = compute_optical_flow_magnitude(gray)
+
+        report = build_report(metrics, of_mags, cap_path, label, meta)
+        md_out.write_text(report, encoding="utf-8")
+        print(f"  -> {md_out}")
+
+        make_figure(positions, metrics, of_mags, png_out, label)
+        print(f"  -> {png_out}")
+
+        json_out.write_text(json.dumps({
+            "mode": "ufo",
+            "metrics": metrics,
+            "of_magnitude_samples": of_mags,
+        }, indent=2), encoding="utf-8")
+        print(f"  -> {json_out}")
+
+        print(f"\nSUMMARY  R^2_x={metrics['trajectory_x_r2']:.4f}  "
+              f"speed_std={metrics['speed_std_px_per_frame']:.3f}  "
+              f"outlier_2sigma={metrics['outlier_ratio_2sigma']*100:.2f}%")
+        return
+
+    # ===== video mode (natural video / PotPlayer / general) =====
+    metrics, series = video_mode_analyze(frames, gray, meta["fps"])
+
+    report = build_video_report(metrics, cap_path, label, meta)
     md_out.write_text(report, encoding="utf-8")
-    print(f"  → {md_out}")
+    print(f"  -> {md_out}")
 
-    make_figure(positions, metrics, of_mags, png_out, label)
-    print(f"  → {png_out}")
+    make_video_figure(series, metrics, png_out, label, meta["fps"])
+    print(f"  -> {png_out}")
 
-    json_out.write_text(json.dumps({
-        "metrics": metrics,
-        "of_magnitude_samples": of_mags,
-    }, indent=2), encoding="utf-8")
-    print(f"  → {json_out}")
+    # JSON without the full series (too large) — keep just metrics
+    json_out.write_text(json.dumps({"mode": "video", "metrics": metrics}, indent=2),
+                        encoding="utf-8")
+    print(f"  -> {json_out}")
 
-    # One-line summary (ASCII only — Windows CP950 console can't print R^2 / sigma)
-    print(f"\nSUMMARY  R^2_x={metrics['trajectory_x_r2']:.4f}  "
-          f"speed_std={metrics['speed_std_px_per_frame']:.3f}  "
-          f"outlier_2sigma={metrics['outlier_ratio_2sigma']*100:.2f}%")
+    of_30hz = metrics["of_fft"]["target_power_ratio"] * 100
+    print(f"\nSUMMARY  ssim_mean={metrics['ssim']['mean']:.4f}  "
+          f"of_cv={metrics['of_magnitude']['cv']:.3f}  "
+          f"of_30Hz={of_30hz:.2f}%  "
+          f"block_outlier={metrics['block_outlier_ratio']['mean']*100:.1f}%  "
+          f"cuts={metrics['n_scene_cuts']}")
 
 
 if __name__ == "__main__":
