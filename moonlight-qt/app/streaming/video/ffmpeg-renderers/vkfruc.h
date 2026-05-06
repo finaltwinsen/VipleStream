@@ -120,6 +120,16 @@ private:
     // 走 fallback (block-matching ME).  Gated by VIPLE_VKFRUC_NV_OF=1.
     uint32_t m_OpticalFlowQueueFamily = UINT32_MAX;
     VkQueue  m_OpticalFlowQueue       = VK_NULL_HANDLE;
+    // §B-NVOF Phase 3 — NVIDIA Optical Flow SDK 5.0.7 Vulkan API.
+    // Loaded from system nvofapi64.dll (NV driver provides). funcList holds
+    // 9 PFNs: nvCreateOpticalFlowVk / nvOFInit / nvOFRegisterResourceVk /
+    // nvOFExecuteVk / etc.  Owned by VkFrucRenderer; NULL when extension not
+    // enabled or DLL load fails.  Forward-declared — actual struct size pulled
+    // in by vkfruc.cpp via nvOpticalFlowVulkan.h.
+    void* m_NvOfApiModule  = nullptr;   // HMODULE (Win) / dlopen handle (Linux)
+    void* m_NvOfFuncList   = nullptr;   // NV_OF_VK_API_FUNCTION_LIST*
+    bool loadNvOfApi();
+    void unloadNvOfApi();
 
     // §J.3.e.2.i.3.a — ffmpeg AVHWDeviceContext bridges our VkDevice
     // to ffmpeg's Vulkan video decoder so AVVkFrame.img[0] gets created

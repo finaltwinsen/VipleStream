@@ -24,6 +24,11 @@
 #include <mutex>
 #include <vector>
 
+// §B-NVOF Phase 3 — NVIDIA Optical Flow SDK 5.0.7 Vulkan interface.
+// Header lives in libs/windows/nvofa/include/. Loaded from system
+// nvofapi64.dll at runtime via LoadLibrary; no static link required.
+#include "nvOpticalFlowVulkan.h"
+
 // SSE2 intrinsics for renderFrameSw's YUV420P→NV12 UV-plane interleave
 // fast path.  All currently-supported moonlight-qt build targets are x86
 // with SSE2 available.
@@ -264,6 +269,7 @@ void VkFrucRenderer::teardown()
     destroyInterpGraphicsPipeline(); // §J.3.e.2.i.4.2
     destroyFrucComputeResources(); // §J.3.e.2.i.4
     destroySwUploadResources();   // §J.3.e.2.i.3.e-SW
+    unloadNvOfApi();              // §B-NVOF Phase 3 — release nvofapi64.dll handle
     destroyDescriptorPool();
     destroyInFlightRing();
     destroyGraphicsPipeline();
@@ -964,12 +970,82 @@ bool VkFrucRenderer::createLogicalDevice()
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-NVOF] OF queue fetched (QF=%u handle=%p)",
                     m_OpticalFlowQueueFamily, (void*)m_OpticalFlowQueue);
+        // §B-NVOF Phase 3 — load nvofapi64.dll + entry function list.
+        // Failure non-fatal: vkfruc falls back to block-matching ME path.
+        loadNvOfApi();
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.2 VkDevice created (%s, QF=%u, queue=%p)",
                 "KHR_swapchain + KHR_sampler_ycbcr_conversion",
                 m_QueueFamily, (void*)m_GraphicsQueue);
     return true;
+}
+
+// §B-NVOF Phase 3b 2026-05-06 — load nvofapi64.dll + populate funcList.
+// nvofapi64.dll is shipped by NVIDIA driver in C:\Windows\System32 (Linux:
+// libnvidia-opticalflow.so.1). Returns true if all PFN slots populated.
+// Non-fatal failure: caller falls back to block-matching ME path.
+bool VkFrucRenderer::loadNvOfApi()
+{
+#ifdef Q_OS_WIN32
+    HMODULE hMod = LoadLibraryA("nvofapi64.dll");
+    if (!hMod) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF] LoadLibraryA(nvofapi64.dll) failed err=%lu — "
+                    "falling back to block-matching ME",
+                    GetLastError());
+        return false;
+    }
+    typedef NV_OF_STATUS (NVOFAPI* PFNCreateInstanceVk)(uint32_t, NV_OF_VK_API_FUNCTION_LIST*);
+    auto pfnCreate = (PFNCreateInstanceVk)GetProcAddress(hMod, "NvOFAPICreateInstanceVk");
+    if (!pfnCreate) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF] GetProcAddress(NvOFAPICreateInstanceVk) returned NULL");
+        FreeLibrary(hMod);
+        return false;
+    }
+    auto* funcList = new NV_OF_VK_API_FUNCTION_LIST{};
+    NV_OF_STATUS st = pfnCreate(NV_OF_API_VERSION, funcList);
+    if (st != NV_OF_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF] NvOFAPICreateInstanceVk(apiVer=0x%x) failed status=%d",
+                    (unsigned)NV_OF_API_VERSION, (int)st);
+        delete funcList;
+        FreeLibrary(hMod);
+        return false;
+    }
+    m_NvOfApiModule = (void*)hMod;
+    m_NvOfFuncList  = (void*)funcList;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-NVOF] loaded nvofapi64.dll OK — funcList populated "
+                "(create=%p init=%p register=%p execute=%p destroy=%p)",
+                (void*)funcList->nvCreateOpticalFlowVk,
+                (void*)funcList->nvOFInit,
+                (void*)funcList->nvOFRegisterResourceVk,
+                (void*)funcList->nvOFExecuteVk,
+                (void*)funcList->nvOFDestroy);
+    return true;
+#else
+    // Linux: dlopen("libnvidia-opticalflow.so.1") path; deferred until §B-NVOF
+    // ships on Linux (nvofapi.so distribution differs across NV driver flavours).
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-NVOF] Linux nvofapi loading not yet wired");
+    return false;
+#endif
+}
+
+void VkFrucRenderer::unloadNvOfApi()
+{
+    if (m_NvOfFuncList) {
+        delete (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
+        m_NvOfFuncList = nullptr;
+    }
+#ifdef Q_OS_WIN32
+    if (m_NvOfApiModule) {
+        FreeLibrary((HMODULE)m_NvOfApiModule);
+        m_NvOfApiModule = nullptr;
+    }
+#endif
 }
 
 bool VkFrucRenderer::createSwapchain()
