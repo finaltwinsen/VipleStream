@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <string>
 #include <mutex>
 #include <vector>
 
@@ -1135,6 +1136,52 @@ bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
         funcList->nvOFDestroy(hOf);
         m_NvOfHandle = nullptr;
         return false;
+    }
+
+    // §B-NVOF Phase 7F 2026-05-06 — query device caps post-init for log /
+    // validation.  nvOFGetCaps requires nvOFInit to have completed first.
+    // If caps mismatch (e.g. driver bumped after we cached unsupported grid),
+    // log warn — session is already initialised so we don't reconfigure here,
+    // just provide diagnostic for future driver / GPU compat issues.
+    auto queryCaps = [&](NV_OF_CAPS capParam, std::vector<uint32_t>& out) -> bool {
+        uint32_t sz = 0;
+        if (funcList->nvOFGetCaps(hOf, capParam, nullptr, &sz) != NV_OF_SUCCESS || sz == 0) {
+            return false;
+        }
+        out.resize(sz);
+        return funcList->nvOFGetCaps(hOf, capParam, out.data(), &sz) == NV_OF_SUCCESS;
+    };
+    std::vector<uint32_t> supportedGrids;
+    std::vector<uint32_t> capsWidth, capsHeight, capsRoiSupported, capsRoiMaxNum;
+    if (queryCaps(NV_OF_CAPS_SUPPORTED_OUTPUT_GRID_SIZES, supportedGrids)
+        && !supportedGrids.empty()) {
+        std::string gridListStr;
+        for (uint32_t g : supportedGrids) {
+            if (!gridListStr.empty()) gridListStr += ",";
+            gridListStr += std::to_string(g);
+        }
+        bool found = false;
+        for (uint32_t g : supportedGrids) {
+            if (g == m_NvOfGridSize) { found = true; break; }
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF-CAPS] supported output grids [%s], using %u %s",
+                    gridListStr.c_str(), m_NvOfGridSize, found ? "(in-list)" : "(MISMATCH!)");
+    }
+    if (queryCaps(NV_OF_CAPS_WIDTH_MAX, capsWidth) && !capsWidth.empty() &&
+        queryCaps(NV_OF_CAPS_HEIGHT_MAX, capsHeight) && !capsHeight.empty()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF-CAPS] device max input %ux%u; "
+                    "stream %ux%u %s",
+                    capsWidth[0], capsHeight[0], width, height,
+                    (width <= capsWidth[0] && height <= capsHeight[0]) ? "OK" : "EXCEEDS!");
+    }
+    if (queryCaps(NV_OF_CAPS_SUPPORT_ROI, capsRoiSupported) && !capsRoiSupported.empty()) {
+        if (queryCaps(NV_OF_CAPS_SUPPORT_ROI_MAX_NUM, capsRoiMaxNum) && !capsRoiMaxNum.empty()) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF-CAPS] ROI support=%u maxNum=%u",
+                        capsRoiSupported[0], capsRoiMaxNum[0]);
+        }
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -4686,6 +4733,9 @@ void main() {
     ivec2 avgRaw = sum / int(count);
 
     // SFIXED5 / 16 = Q1 (pixel * 2).  Signed division rounds toward zero.
+    // §B-NVOF Phase 7A reverted (Q5 buffer attempt) — Q1's 0.5 px quantisation
+    // unintentionally smoothed temporal MV noise; Q5 sub-pixel precision
+    // exposed it (OF_30Hz 2.66% → 7.31% on testufo).  Back to /16 → Q1.
     ivec2 q1 = avgRaw / 16;
 
     uint outIdx = (mvY * p.mvW + mvX) * 2u;
@@ -5360,8 +5410,8 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         if (s_nvofChainLogged.compare_exchange_strong(exp, true)) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-NVOF] chain consumes HW OF flow this frame "
-                        "(flowDims=%ux%u → mv=%ux%u via 2x2 avg + SFIXED5→Q1)",
-                        flowW, flowH, mvW, mvH);
+                        "(flowDims=%ux%u → mv=%ux%u via %ux%u avg + SFIXED5→Q1)",
+                        flowW, flowH, mvW, mvH, flowW / mvW, flowH / mvH);
         }
     } else {
     // ---- Stage 1: motion estimation ----
