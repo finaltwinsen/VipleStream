@@ -63,12 +63,27 @@ def load_frames(bin_path: Path, meta: dict) -> np.ndarray:
 
 
 def to_gray(frames: np.ndarray) -> np.ndarray:
-    """Convert RGBA → grayscale (N, H, W) uint8."""
-    # ffmpeg writes RGBA byte order: byte 0=R, 1=G, 2=B, 3=A
-    # cv2 uses BGR order; use weighted Rec.709-ish formula
-    return (0.2126 * frames[..., 0] +
-            0.7152 * frames[..., 1] +
-            0.0722 * frames[..., 2]).astype(np.uint8)
+    """Convert RGBA → grayscale (N, H, W) uint8.
+
+    Process per-frame to keep peak memory bounded: full-array float64 promotion
+    blew up at 180fps × 60s 1920×40 captures (~50 GiB intermediate).
+    """
+    n, h, w, _ = frames.shape
+    out = np.empty((n, h, w), dtype=np.uint8)
+    # Use uint16 multiplier path → no float64 promotion; 16-bit fixed-point
+    # Rec.709 weights (×65536) yield 1-bit precision loss versus float, fine
+    # for downstream SSIM / OF.
+    rW = 13933  # 0.2126 × 65536 ≈ 13933
+    gW = 46871  # 0.7152 × 65536 ≈ 46871
+    bW = 4732   # 0.0722 × 65536 ≈ 4732
+    for i in range(n):
+        f = frames[i]
+        # Use uint32 accumulator (safe up to 255×65536 ≈ 16.7M)
+        y = (rW * f[..., 0].astype(np.uint32)
+             + gW * f[..., 1].astype(np.uint32)
+             + bW * f[..., 2].astype(np.uint32)) >> 16
+        out[i] = y.astype(np.uint8)
+    return out
 
 
 def find_ufo_template(gray: np.ndarray, frame_idx: int = 30) -> tuple[np.ndarray, tuple[int, int]] | None:
