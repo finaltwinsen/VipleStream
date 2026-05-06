@@ -1676,6 +1676,36 @@ void storeInterp(int x, int y, vec3 c) {
     interpFrame.data[idx + 2 * planeSize] = c.b;
 }
 
+// §B-quality (c1) 2026-05-06 — port of d3d11_warp_compute.hlsl Quality
+// `computeAdaptiveWeight`.  Forward/backward MV consistency + big-motion
+// 0.5 bias.  Vulkan port had only cheap-adaptive (Balanced) which lets
+// spurious vy=1 noise propagate to interp frame Y position → 30Hz Y jitter
+// on pure horizontal motion (testufo).  Quality fixes by giving 0 weight
+// to the side that fails self-consistency check.
+float computeAdaptiveWeight(vec2 pixelPos, vec2 mv) {
+    vec2 prevPos = pixelPos - mv * 0.5;
+    vec2 mvAtPrev = sampleMV(prevPos);
+    vec2 backFromPrev = prevPos + mvAtPrev * 0.5;
+    float fwdError = length(backFromPrev - pixelPos);
+
+    vec2 currPos = pixelPos + mv * 0.5;
+    vec2 mvAtCurr = sampleMV(currPos);
+    vec2 backFromCurr = currPos - mvAtCurr * 0.5;
+    float bwdError = length(backFromCurr - pixelPos);
+
+    float prevConf = 1.0 - smoothstep(1.0, 10.0, fwdError);
+    float currConf = 1.0 - smoothstep(1.0, 10.0, bwdError);
+
+    float totalConf = prevConf + currConf;
+    float w = (totalConf < 0.001) ? 0.5 : (currConf / totalConf);
+
+    // Big-motion bias toward 0.5 — large MVs are more likely wrong (occlusion
+    // / disocclusion).  Symmetric ghost > confident wrong-side pick.
+    float mvMag2 = dot(mv, mv);
+    float bigMotionBias = smoothstep(100.0, 400.0, mvMag2);
+    return mix(w, 0.5, bigMotionBias);
+}
+
 void main() {
     uint px = gl_GlobalInvocationID.x;
     uint py = gl_GlobalInvocationID.y;
@@ -1684,6 +1714,24 @@ void main() {
     vec2 pp   = vec2(float(px), float(py));
     vec2 dims = vec2(float(p.frameWidth), float(p.frameHeight));
     vec3 sameCurr = fetchCurrRGB(int(px), int(py));
+
+    // §B-quality (c2) 2026-05-06 — blendFactor > 1.5 → bypass ME entirely.
+    // 用來定位「上下抖動」是不是 ME 的 vy noise 引起的：直接 cross-fade
+    // 同 pixel 位置的 prev / curr，不取任何 MV warp.  UFO 會 ghost 但不會
+    // Y 軸 jitter（如果還抖代表問題不在 ME，而在 prev/curr buffer 或
+    // dual-present timing）.
+    if (p.blendFactor > 1.5) {
+        // §B-quality (c2) 2026-05-06 — no-MV cross-fade diagnostic mode:
+        // same pixel position mix(prev, curr, 0.5).  保留當 debug 工具，因
+        // 為仍可用來辨別「motion-related artifact」（c2 應只有 ghost 沒 jitter）
+        // 跟「pipeline-asymmetry artifact」（c2 也抖代表 RGB conversion 路徑
+        // 不一致）。本次抖動真兇定位完後，real path 改走 m_FrucCurrRgbBuf
+        // (§B-quality (d) in vkfruc.cpp) 已修好，c2 不再需要藍方塊 marker.
+        vec3 prevAtPP = fetchPrevRGB(int(px), int(py));
+        vec3 currAtPP = fetchCurrRGB(int(px), int(py));
+        storeInterp(int(px), int(py), mix(prevAtPP, currAtPP, 0.5));
+        return;
+    }
 
     vec2 mv = sampleMV(pp);
     mv = clamp(mv, vec2(-48.0, -48.0), vec2(48.0, 48.0));
@@ -1707,13 +1755,37 @@ void main() {
 
     vec3 result;
     if (prevValid && currValid) {
-        // Balanced "cheap adaptive": 0.5 base weight + luma-gap bias toward currSample.
-        float w = 0.5;
-        const vec3 YC = vec3(0.299, 0.587, 0.114);
-        float lg = abs(dot(prevSample, YC) - dot(currSample, YC));
-        float b = smoothstep(0.05, 0.25, lg);
-        vec3 blended = mix(prevSample, currSample, w);
-        result = mix(blended, currSample, b);
+        if (p.blendFactor < -1.5) {
+            // §B-quality (c1) 2026-05-06 — Quality adaptive blend (port of
+            // d3d11 Generic FRUC Quality preset).  Forward/backward MV
+            // self-consistency → confidence-weighted blend → bigMotion bias
+            // → luma-gap catastrophic backstop.  Skip the 2 extra sampleMV
+            // calls when |mv| < 2 px (weight ≈ 0.5 anyway, both warps land
+            // near-identical).
+            float weight = (dot(mv, mv) < 4.0) ? 0.5
+                                                : computeAdaptiveWeight(pp, mv);
+            result = mix(prevSample, currSample, weight);
+            // luma-gap catastrophic backstop (same as Balanced+Quality on d3d11)
+            const vec3 YC1 = vec3(0.299, 0.587, 0.114);
+            float lg1 = abs(dot(prevSample, YC1) - dot(currSample, YC1));
+            float b1 = smoothstep(0.05, 0.25, lg1);
+            result = mix(result, currSample, b1);
+        } else if (p.blendFactor >= 0.0) {
+            // §B-quality (c0) 2026-05-06 — fixed blend, no luma-gap bias.
+            // Cheap-adaptive 對 testufo 純水平 motion 視覺上會「上下抖動」：
+            // luma-gap 大的邊緣 pixel 直接 = currSample，序列變
+            // [F0, F1≈I0, F1, F2≈I1, F2, ...] → real frame stutter.
+            // 純 mix(prev, curr, 0.5) 在邊緣會 ghost 但不抖。
+            result = mix(prevSample, currSample, p.blendFactor);
+        } else {
+            // Balanced "cheap adaptive": 0.5 base weight + luma-gap bias toward currSample.
+            float w = 0.5;
+            const vec3 YC = vec3(0.299, 0.587, 0.114);
+            float lg = abs(dot(prevSample, YC) - dot(currSample, YC));
+            float b = smoothstep(0.05, 0.25, lg);
+            vec3 blended = mix(prevSample, currSample, w);
+            result = mix(blended, currSample, b);
+        }
     } else {
         result = prevValid ? prevSample
                : (currValid ? currSample : sameCurr);

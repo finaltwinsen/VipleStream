@@ -1747,13 +1747,18 @@ bool VkFrucRenderer::createInterpGraphicsPipeline()
         return false;
     }
 
-    // ---- Descriptor pool + set bound to interpRGB ----
+    // ---- Descriptor pool + 2 sets ----
+    // Set 1: m_InterpDescSet bound to m_FrucInterpRgbBuf  (interp slot)
+    // Set 2: m_RealCurrRgbDescSet bound to m_FrucCurrRgbBuf (real slot in
+    //        VIPLE_VKFRUC_REAL_USE_CRGB=1 path; both interp + real go through
+    //        compute-NV12→RGB so dual-present alternation no longer flickers
+    //        between two different NV12→RGB conversion paths).
     VkDescriptorPoolSize ps = {};
     ps.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    ps.descriptorCount = 1;
+    ps.descriptorCount = 2;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpCi.maxSets = 1;
+    dpCi.maxSets = 2;
     dpCi.poolSizeCount = 1;
     dpCi.pPoolSizes = &ps;
     if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_InterpDescPool) != VK_SUCCESS) return false;
@@ -1763,18 +1768,30 @@ bool VkFrucRenderer::createInterpGraphicsPipeline()
     asi.descriptorSetCount = 1;
     asi.pSetLayouts = &m_InterpDescSetLayout;
     if (pfnAllocDescSets(m_Device, &asi, &m_InterpDescSet) != VK_SUCCESS) return false;
-    VkDescriptorBufferInfo bi = {};
-    bi.buffer = m_FrucInterpRgbBuf;   // bound by FRUC compute init
-    bi.offset = 0;
-    bi.range  = VK_WHOLE_SIZE;
-    VkWriteDescriptorSet wds = {};
-    wds.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wds.dstSet          = m_InterpDescSet;
-    wds.dstBinding      = 0;
-    wds.descriptorCount = 1;
-    wds.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    wds.pBufferInfo     = &bi;
-    pfnUpdateDescSets(m_Device, 1, &wds, 0, nullptr);
+    if (pfnAllocDescSets(m_Device, &asi, &m_RealCurrRgbDescSet) != VK_SUCCESS) return false;
+
+    VkDescriptorBufferInfo biInterp = {};
+    biInterp.buffer = m_FrucInterpRgbBuf;
+    biInterp.offset = 0;
+    biInterp.range  = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo biCurr = {};
+    biCurr.buffer = m_FrucCurrRgbBuf;
+    biCurr.offset = 0;
+    biCurr.range  = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet wds[2] = {};
+    wds[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds[0].dstSet          = m_InterpDescSet;
+    wds[0].dstBinding      = 0;
+    wds[0].descriptorCount = 1;
+    wds[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wds[0].pBufferInfo     = &biInterp;
+    wds[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds[1].dstSet          = m_RealCurrRgbDescSet;
+    wds[1].dstBinding      = 0;
+    wds[1].descriptorCount = 1;
+    wds[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wds[1].pBufferInfo     = &biCurr;
+    pfnUpdateDescSets(m_Device, 2, wds, 0, nullptr);
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.4.2 interp pipeline ready (frag=%u B SPIR-V)",
@@ -4009,7 +4026,7 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
 {
     if (m_FrucReady || m_FrucDisabled) return m_FrucReady;
 
-    const uint32_t BLOCK_SIZE = 16;  // §B-quality (b) 8→16: noise-robust ME on PotPlayer/testufo content
+    const uint32_t BLOCK_SIZE = 8;  // §B-quality (b) reverted — block 16 在純水平 motion 引入強烈 Y 軸抖動
     const uint32_t mvW = ((uint32_t)width  + BLOCK_SIZE - 1) / BLOCK_SIZE;
     const uint32_t mvH = ((uint32_t)height + BLOCK_SIZE - 1) / BLOCK_SIZE;
     m_FrucMvWidth  = mvW;
@@ -4454,7 +4471,7 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
 
     const uint32_t mvW = m_FrucMvWidth;
     const uint32_t mvH = m_FrucMvHeight;
-    const uint32_t BLOCK_SIZE = 16;  // §B-quality (b) 8→16: noise-robust ME on PotPlayer/testufo content
+    const uint32_t BLOCK_SIZE = 8;  // §B-quality (b) reverted — block 16 在純水平 motion 引入強烈 Y 軸抖動
     const uint32_t MEDIAN_RADIUS = 1;
     const uint32_t frameNum = (uint32_t)(m_FrucFrameCount++);
 
@@ -4584,12 +4601,40 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeLay,
                        0, 1, &m_FrucWarpDescSet, 0, nullptr);
     {
+        // §B-quality 2026-05-06 — warp blend 分支由 push-constant blendFactor 控制：
+        //   > 1.5   → no-MV cross-fade (c2, 同 pixel pos 50/50，跳過 ME warp)
+        //   < -1.5  → Quality (c1, 雙向 MV 一致性 adaptive，port of d3d11 Quality)
+        //   < 0     → Balanced cheap-adaptive (current Vulkan default)
+        //   >= 0    → fixed blend (c0, 用該值當 mix weight)
+        // Env var 切換 (互斥優先序: NO_MV > QUALITY > PURE50 > default):
+        float blendFactor;
+        const char* modeName = "Balanced cheap-adaptive";
+        if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_NO_MV") != 0) {
+            blendFactor = 2.0f;
+            modeName = "c2 no-MV (DIAG)";
+        } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_QUALITY") != 0) {
+            blendFactor = -2.0f;
+            modeName = "c1 Quality adaptive";
+        } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_PURE50") != 0) {
+            blendFactor = 0.5f;
+            modeName = "c0 fixed 50/50";
+        } else {
+            blendFactor = -1.0f;
+        }
+        // One-shot log on first dispatch so we know which mode took effect.
+        static std::atomic<bool> s_warpModeLogged{false};
+        bool expected = false;
+        if (s_warpModeLogged.compare_exchange_strong(expected, true)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-WARP-MODE] blendFactor=%.1f mode='%s'",
+                        blendFactor, modeName);
+        }
         struct {
             uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
             float    blendFactor;
         } pcWarp = {
             (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
-            (uint32_t)mvW, (uint32_t)mvH, 0.5f
+            (uint32_t)mvW, (uint32_t)mvH, blendFactor
         };
         pfnCmdPushConst(cmd, m_FrucWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcWarp), &pcWarp);
     }
@@ -5097,19 +5142,25 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // dependency in the render pass + lenient NV driver let it work, but
     // we add it here for spec correctness on HW path.
     if (dualPresentThisFrame) {
-        VkBufferMemoryBarrier interpBufBar = {};
-        interpBufBar.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        interpBufBar.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        interpBufBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        interpBufBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        interpBufBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        interpBufBar.buffer = m_FrucInterpRgbBuf;
-        interpBufBar.offset = 0;
-        interpBufBar.size   = VK_WHOLE_SIZE;
+        // §B-quality (d) 2026-05-06 — barrier 同時保護 m_FrucInterpRgbBuf
+        // (interp pipeline reads) 和 m_FrucCurrRgbBuf (real pipeline reads
+        // when VIPLE_VKFRUC_REAL_USE_CRGB=1). 兩個都從 compute shader 寫入
+        // 變 fragment shader 讀取，跨 stage 需要 explicit barrier.
+        VkBufferMemoryBarrier rgbBufBars[2] = {};
+        rgbBufBars[0].sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        rgbBufBars[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        rgbBufBars[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        rgbBufBars[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        rgbBufBars[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        rgbBufBars[0].buffer = m_FrucInterpRgbBuf;
+        rgbBufBars[0].offset = 0;
+        rgbBufBars[0].size   = VK_WHOLE_SIZE;
+        rgbBufBars[1] = rgbBufBars[0];
+        rgbBufBars[1].buffer = m_FrucCurrRgbBuf;
         m_RtPfn.CmdPipelineBarrier(cmd,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            0, 0, nullptr, 1, &interpBufBar, 0, nullptr);
+            0, 0, nullptr, 2, rgbBufBars, 0, nullptr);
 
         // Resolve push-const PFN (m_RtPfn doesn't carry it).
         auto getDevPa2 = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
@@ -5158,11 +5209,58 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC] frame#0 CmdBeginRenderPass OK");
 
     //  6c. Bind pipeline + descriptor set, draw 3 vertices (fullscreen tri).
-    m_RtPfn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_GraphicsPipeline);
+    //
+    // §B-quality (d) 2026-05-06 — VIPLE_VKFRUC_REAL_USE_CRGB=1 path:
+    // dual-mode real frame uses m_InterpPipeline reading m_FrucCurrRgbBuf
+    // (compute-NV12→RGB output) instead of m_GraphicsPipeline (ycbcr sampler
+    // on vkf->img[0]).  Reason: dual-present alternates [interp, real] at
+    // 30Hz and the two NV12→RGB conversions (compute shader vs hardware
+    // ycbcr sampler) produce subtly different RGB on the same input —
+    // causing "上下抖動" even when interp content is identical to real.
+    // Routing both through compute-NV12→RGB removes the asymmetry.
+    // Single-mode (no FRUC) keeps original ycbcr path; no risk of regression.
+    static std::atomic<bool> s_realPathLogged{false};
+    // §B-quality (d) 2026-05-06 — default ON.  treat unset as 1; explicitly
+    // set VIPLE_VKFRUC_REAL_USE_CRGB=0 to fall back to old ycbcr-sampler path
+    // (escape hatch for colour-space regression observation).
+    QByteArray rcrgbEnv = qgetenv("VIPLE_VKFRUC_REAL_USE_CRGB");
+    bool rcrgbOn = rcrgbEnv.isEmpty() ? true : (rcrgbEnv.toInt() != 0);
+    bool useCrgbForReal = dualPresentThisFrame && m_FrucReady && rcrgbOn;
+    if (useCrgbForReal) {
+        m_RtPfn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
+        m_RtPfn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      m_InterpPipelineLayout, 0,
+                                      1, &m_RealCurrRgbDescSet, 0, nullptr);
+        struct { int srcW, srcH, _pad0, _pad1; } pcReal = {
+            frame ? frame->width : 0, frame ? frame->height : 0, 0, 0
+        };
+        auto getDevPa3 = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        auto pfnCmdPushConst3 = (PFN_vkCmdPushConstants)getDevPa3(m_Device, "vkCmdPushConstants");
+        if (pfnCmdPushConst3) {
+            pfnCmdPushConst3(cmd, m_InterpPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                             0, sizeof(pcReal), &pcReal);
+        }
+        bool expected = false;
+        if (s_realPathLogged.compare_exchange_strong(expected, true)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-REAL-PATH] dual-mode real frame using "
+                        "m_InterpPipeline + m_FrucCurrRgbBuf (compute-NV12→RGB)");
+        }
+    } else {
+        m_RtPfn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_GraphicsPipeline);
+        m_RtPfn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      m_GraphicsPipelineLayout, 0,
+                                      1, &m_SlotDescSet[slot], 0, nullptr);
+        bool expected = false;
+        if (dualPresentThisFrame &&
+            s_realPathLogged.compare_exchange_strong(expected, true)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-REAL-PATH] dual-mode real frame using "
+                        "m_GraphicsPipeline + ycbcr sampler (default)");
+        }
+    }
     if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC] frame#0 CmdBindPipeline OK");
-    m_RtPfn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                  m_GraphicsPipelineLayout, 0,
-                                  1, &m_SlotDescSet[slot], 0, nullptr);
     if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC] frame#0 CmdBindDescriptorSets OK");
     m_RtPfn.CmdDraw(cmd, 3, 1, 0, 0);
     if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC] frame#0 CmdDraw OK");

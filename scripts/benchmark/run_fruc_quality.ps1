@@ -92,7 +92,10 @@ $clientArgs = @(
     "stream", $ServerHost, "Desktop",
     "--1080", "--fps", $StreamFps,
     "--video-codec", $StreamCodec,
-    "--frame-interpolation"
+    "--frame-interpolation",
+    "--no-yuv444"   # 強制 4:2:0 — Vulkan video decode 不支援 4:4:4，
+                     # 否則 cascade 會 fall back 到 PlVkRenderer (libplacebo) 沒接 FRUC，
+                     # 導致 quality 跑出來其實是「無 FRUC」狀態。2026-05-06 踩雷。
 )
 $proc = Start-Process -FilePath $clientExe -ArgumentList $clientArgs -PassThru
 Write-Host "      PID=$($proc.Id) StartTime=$($proc.StartTime)" -ForegroundColor Green

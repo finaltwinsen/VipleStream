@@ -592,6 +592,13 @@ private:
     VkPipeline       m_InterpPipeline       = VK_NULL_HANDLE;
     VkDescriptorPool m_InterpDescPool       = VK_NULL_HANDLE;
     VkDescriptorSet  m_InterpDescSet        = VK_NULL_HANDLE;
+    // §B-quality (d) 2026-05-06 — second desc set sharing m_InterpDescSetLayout
+    // but binding 0 → m_FrucCurrRgbBuf.  Used when VIPLE_VKFRUC_REAL_USE_CRGB=1
+    // so dual-present's real frame goes through the same compute-NV12→RGB
+    // path as interp instead of the ycbcr sampler — eliminates the 30Hz
+    // "Y-axis jitter" caused by the two NV12→RGB conversions producing
+    // subtly different RGB on the same input NV12.
+    VkDescriptorSet  m_RealCurrRgbDescSet   = VK_NULL_HANDLE;
     bool createInterpGraphicsPipeline();
     void destroyInterpGraphicsPipeline();
 
