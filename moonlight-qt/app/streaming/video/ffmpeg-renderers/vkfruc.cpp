@@ -6330,28 +6330,38 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     if (dualPresentThisFrame) {
         // §B2 2026-05-06 — TRIPLE adds 4th wait sem (interp_2 acquire) +
         // 4th signal sem (interp_2 swapchain renderDone).  DUAL stays at 3.
-        const int kSemCount = triplePresentThisFrame ? 4 : 3;
-        VkSemaphore     waitSems[4]   = {
-            m_SlotAcquireSem[slot][0],   // interp #1 acquire
-            m_SlotAcquireSem[slot][1],   // real     acquire
-            triplePresentThisFrame ? m_SlotAcquireSem[slot][2]
-                                   : vkf->sem[0],  // TRIPLE: interp #2 acquire; DUAL: ffmpeg timeline
-            vkf->sem[0]                  // ffmpeg timeline (TRIPLE 4-th slot, ignored in DUAL)
-        };
-        VkPipelineStageFlags waitMasks[4] = {
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            triplePresentThisFrame ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                                   : (VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                                      | VK_PIPELINE_STAGE_TRANSFER_BIT),
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                | VK_PIPELINE_STAGE_TRANSFER_BIT,
-        };
-        uint64_t        waitVals[4]   = {
-            0, 0,
-            triplePresentThisFrame ? 0 : vkf->sem_value[0],
-            vkf->sem_value[0]
-        };
+        // §B-NVOF Phase 7B 2026-05-06 — when m_NvOfTimelineValue > 0 (= last
+        // frame's OF V_out signaled), add wait sem on m_NvOfTimelineSem so
+        // this frame's vkCmdCopyImage to (now-swapped) input image waits for
+        // last frame's OF to finish reading it.  Replaces CPU vkWaitSemaphores
+        // in nvOF kick-off block (saves ~3-5 ms/frame block-on-CPU).
+        bool waitNvOf = m_NvOfReady && m_NvOfTimelineValue > 0;
+        VkSemaphore          waitSems[5]   = {};
+        VkPipelineStageFlags waitMasks[5]  = {};
+        uint64_t             waitVals[5]   = {};
+        int wIdx = 0;
+        waitSems[wIdx]  = m_SlotAcquireSem[slot][0];
+        waitMasks[wIdx] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        waitVals[wIdx]  = 0; wIdx++;
+        waitSems[wIdx]  = m_SlotAcquireSem[slot][1];
+        waitMasks[wIdx] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        waitVals[wIdx]  = 0; wIdx++;
+        if (triplePresentThisFrame) {
+            waitSems[wIdx]  = m_SlotAcquireSem[slot][2];
+            waitMasks[wIdx] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            waitVals[wIdx]  = 0; wIdx++;
+        }
+        waitSems[wIdx]  = vkf->sem[0];
+        waitMasks[wIdx] = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                        | VK_PIPELINE_STAGE_TRANSFER_BIT;
+        waitVals[wIdx]  = vkf->sem_value[0]; wIdx++;
+        if (waitNvOf) {
+            waitSems[wIdx]  = m_NvOfTimelineSem;
+            waitMasks[wIdx] = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            waitVals[wIdx]  = m_NvOfTimelineValue; wIdx++;
+        }
+        const int kWaitCount = wIdx;
+        const int kSigCount  = triplePresentThisFrame ? 4 : 3;
         VkSemaphore     signalSems[4] = {
             m_SwapchainRenderDoneSem[imgIdxA],
             m_SwapchainRenderDoneSem[imgIdxB],
@@ -6367,19 +6377,19 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
 
         VkTimelineSemaphoreSubmitInfo tssi = {};
         tssi.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-        tssi.waitSemaphoreValueCount   = (uint32_t)kSemCount;
+        tssi.waitSemaphoreValueCount   = (uint32_t)kWaitCount;
         tssi.pWaitSemaphoreValues      = waitVals;
-        tssi.signalSemaphoreValueCount = (uint32_t)kSemCount;
+        tssi.signalSemaphoreValueCount = (uint32_t)kSigCount;
         tssi.pSignalSemaphoreValues    = signalVals;
         VkSubmitInfo si = {};
         si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.pNext                = &tssi;
-        si.waitSemaphoreCount   = (uint32_t)kSemCount;
+        si.waitSemaphoreCount   = (uint32_t)kWaitCount;
         si.pWaitSemaphores      = waitSems;
         si.pWaitDstStageMask    = waitMasks;
         si.commandBufferCount   = 1;
         si.pCommandBuffers      = &cmd;
-        si.signalSemaphoreCount = (uint32_t)kSemCount;
+        si.signalSemaphoreCount = (uint32_t)kSigCount;
         si.pSignalSemaphores    = signalSems;
         {
             std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
@@ -6511,21 +6521,13 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             }
             if (s == NV_OF_SUCCESS) {
                 m_NvOfTimelineValue = outSigVal;
-                // 3) §B-NVOF Phase 4b — synchronously wait OF to finish so we
-                // can safely swap curr↔prev (OF still reading otherwise races
-                // with next frame's vkCmdCopyImage write).  CPU-blocks ~3-5ms
-                // at 1080p.  Phase 4d will refactor to async.
-                auto pfnWaitSems = (PFN_vkWaitSemaphores)((PFN_vkGetDeviceProcAddr)
-                    m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr"))(
-                    m_Device, "vkWaitSemaphores");
-                if (pfnWaitSems) {
-                    VkSemaphoreWaitInfo wi = {};
-                    wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-                    wi.semaphoreCount = 1;
-                    wi.pSemaphores    = &m_NvOfTimelineSem;
-                    wi.pValues        = &outSigVal;
-                    pfnWaitSems(m_Device, &wi, 100ull * 1000 * 1000);  // 100ms timeout
-                }
+                // §B-NVOF Phase 7B 2026-05-06 — async cross-queue. Removed
+                // CPU vkWaitSemaphores (was ~3-5 ms/frame block at 1080p).
+                // Sync now via timeline sem in NEXT frame's main submit wait
+                // list (= m_NvOfTimelineValue) — when next frame's cmd buf
+                // executes vkCmdCopyImage to swapped input image, it blocks
+                // at TRANSFER_BIT until OF has finished reading the to-be-
+                // overwritten image. Eliminates the race CPU wait was guarding.
                 std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
                 std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
                 std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
