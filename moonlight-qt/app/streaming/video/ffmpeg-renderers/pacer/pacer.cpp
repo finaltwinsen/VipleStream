@@ -344,10 +344,11 @@ void Pacer::renderFrame(AVFrame* frame)
     m_VideoStats->totalRenderTimeUs += (afterRender - beforeRender);
     m_VideoStats->renderedFrames++;
 
-    // VipleStream: Track FRUC interpolated frames
-    if (m_VsyncRenderer->lastFrameHadFRUCInterp()) {
-        m_VideoStats->frucInterpolatedFrames++;
-    }
+    // VipleStream: Track FRUC interpolated frames.
+    // §B2 2026-05-06 — TRIPLE 模式 1 server frame 推 2 張 interp，必須 +2
+    // 才能讓 ffmpeg.cpp effectiveFps 算出正確「有效輸出幀率」.  接口
+    // lastFrameInterpolatedCount() 預設行為兼容 DUAL (回傳 1).
+    m_VideoStats->frucInterpolatedFrames += m_VsyncRenderer->lastFrameInterpolatedCount();
 
     // Wait until after next frame to free this one to ensure the GPU
     // doesn't stall or read garbage if the backing buffer gets returned

@@ -1578,6 +1578,15 @@ layout(push_constant) uniform Params {
     uint  mvWidth;
     uint  mvHeight;
     float blendFactor;
+    // §B2 2026-05-06 — TRIPLE 60→180 sample-offset 控制.
+    // tFraction in [0,1] = interp 在 prev↔curr 時間軸上的位置.
+    //   DUAL midpoint:   tFraction = 0.5
+    //   TRIPLE 1/3 點:   tFraction = 0.3333...
+    //   TRIPLE 2/3 點:   tFraction = 0.6666...
+    // 用法：prevPos = pp - mv*tFraction, currPos = pp + mv*(1-tFraction).
+    // blend default weight = tFraction （越接近 curr 給 curr 越多權重）.
+    float tFraction;
+    float _pcPad0;
 } p;
 
 vec3 fetchPrevRGB(int x, int y) {
@@ -1741,13 +1750,20 @@ void main() {
         return;
     }
 
-    vec2 prevUV = (pp - mv * 0.5 + 0.5) / dims;
-    vec2 currUV = (pp + mv * 0.5 + 0.5) / dims;
+    // §B2 2026-05-06 — sample offset 由 tFraction 決定：
+    //   DUAL  (tFraction=0.5):  prevPos = pp - mv*0.5,  currPos = pp + mv*0.5
+    //   TRIPLE 1/3 (tFraction=0.333): prevPos = pp - mv*0.333, currPos = pp + mv*0.667
+    //   TRIPLE 2/3 (tFraction=0.667): prevPos = pp - mv*0.667, currPos = pp + mv*0.333
+    float tF = clamp(p.tFraction, 0.0, 1.0);
+    vec2 prevOff = mv * tF;
+    vec2 currOff = mv * (1.0 - tF);
+    vec2 prevUV = (pp - prevOff + 0.5) / dims;
+    vec2 currUV = (pp + currOff + 0.5) / dims;
     vec3 prevSample = sampleBilinearPrev(prevUV);
     vec3 currSample = sampleBilinearCurr(currUV);
 
-    vec2 prevPos = pp - mv * 0.5;
-    vec2 currPos = pp + mv * 0.5;
+    vec2 prevPos = pp - prevOff;
+    vec2 currPos = pp + currOff;
     vec2 lo = vec2(0.5, 0.5);
     vec2 hi = vec2(float(p.frameWidth) - 0.5, float(p.frameHeight) - 0.5);
     bool prevValid = all(greaterThanEqual(prevPos, lo)) && all(lessThan(prevPos, hi));
@@ -1778,8 +1794,10 @@ void main() {
             // 純 mix(prev, curr, 0.5) 在邊緣會 ghost 但不抖。
             result = mix(prevSample, currSample, p.blendFactor);
         } else {
-            // Balanced "cheap adaptive": 0.5 base weight + luma-gap bias toward currSample.
-            float w = 0.5;
+            // Balanced "cheap adaptive": tFraction base weight + luma-gap bias toward currSample.
+            // §B2 2026-05-06 — w 由 hardcoded 0.5 改成 tFraction（DUAL 跟以前一樣
+            // 0.5；TRIPLE 1/3 用 0.333, 2/3 用 0.667）.
+            float w = tF;
             const vec3 YC = vec3(0.299, 0.587, 0.114);
             float lg = abs(dot(prevSample, YC) - dot(currSample, YC));
             float b = smoothstep(0.05, 0.25, lg);
@@ -3833,7 +3851,7 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
 
     VkShaderModule warpMod = VK_NULL_HANDLE; VkDescriptorSetLayout warpDsl = VK_NULL_HANDLE;
     VkPipelineLayout warpPL = VK_NULL_HANDLE; VkPipeline warpPipe = VK_NULL_HANDLE;
-    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 4, 24, warpMod, warpDsl, warpPL, warpPipe)) {
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 4, 32, warpMod, warpDsl, warpPL, warpPipe)) {
         m_FrucGenericDisabled = true; return false;
     }
     m_FrucWarpShaderMod = warpMod; m_FrucWarpDsl = warpDsl; m_FrucWarpPipeLay = warpPL; m_FrucWarpPipeline = warpPipe;

@@ -711,10 +711,14 @@ bool Session::initialize(QQuickWindow* qtWindow)
     // anyone pick 30 fps + FRUC) is left for the day someone actually
     // tries it.
     if (m_Preferences->enableFrameInterpolation) {
-        m_StreamConfig.fps = m_Preferences->fps / 2;
+        // §B2 2026-05-06 — VIPLE_VKFRUC_TRIPLE=1 切到 60→180 (3x) 模式：
+        // 改向 server 要 fps / 3 而非 fps / 2，client 端每 server frame
+        // 補 2 張 interp（1/3 點 + 2/3 點），共 3 張 present 給 180Hz display.
+        const int frucRatio = (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0) ? 3 : 2;
+        m_StreamConfig.fps = m_Preferences->fps / frucRatio;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] Requesting %d FPS from server (user setting: %d, FRUC 2x)",
-                    m_StreamConfig.fps, m_Preferences->fps);
+                    "[VIPLE-FRUC] Requesting %d FPS from server (user setting: %d, FRUC %dx)",
+                    m_StreamConfig.fps, m_Preferences->fps, frucRatio);
     }
     // §J.3.e.2.i.8 Phase 1.5c — note: ONLY mode + FRUC pref ON → FRUC pref
     // gives us 30fps stream (FRUC 2x halving above), which happens to match
@@ -1599,15 +1603,30 @@ void Session::toggleFRUC()
                 renderer->toggleFRUC();
 
                 // VipleStream: When FRUC is toggled, change the server's encoding FPS
-                // to match. FRUC ON = server sends fps/2 (FRUC doubles it).
+                // to match. FRUC ON = server sends fps/ratio (client interpolates the rest).
                 // FRUC OFF = server sends full fps (equivalent to settings disable).
-                if (m_OriginalFps > 0 && m_OriginalFps <= 180) {
+                //
+                // §B2 2026-05-06 — TRIPLE 60→180 不發 LiRequestFpsChange.
+                // 原因：Sunshine video.cpp:2154 提示 NVENC 的 framerate change
+                // 不會即時更新 encoder timebase（NVENC needs stream restart），
+                // 只能更新 capture timing.  Stream init 時 timebase=60 之後切
+                // 180 → 實測噴 ~120fps（user 觀察）+ 間歇卡頓.
+                // TRIPLE 模式下 FRUC OFF 直接讓 client single-present 顯示 server
+                // 60fps 即可，視覺從 180→60 但無 jitter.  DUAL 維持原邏輯
+                // (60↔30 切換對 NVENC timebase 衝擊小，使用者驗證過可行).
+                const int frucRatio = (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0) ? 3 : 2;
+                if (frucRatio == 2 && m_OriginalFps > 0 && m_OriginalFps <= 180) {
                     bool frucOff = renderer->m_FRUCPaused.load();
-                    int newServerFps = frucOff ? m_OriginalFps : (m_OriginalFps / 2);
+                    int newServerFps = frucOff ? m_OriginalFps : (m_OriginalFps / frucRatio);
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-FRUC] Requesting server FPS change: %d (FRUC %s)",
-                                newServerFps, frucOff ? "OFF" : "ON");
+                                "[VIPLE-FRUC] Requesting server FPS change: %d (FRUC %s, ratio=%dx)",
+                                newServerFps, frucOff ? "OFF" : "ON", frucRatio);
                     LiRequestFpsChange(newServerFps);
+                } else {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC] Skipping LiRequestFpsChange (ratio=%dx, "
+                                "NVENC timebase is fixed at stream init).",
+                                frucRatio);
                 }
             }
         }

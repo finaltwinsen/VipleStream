@@ -127,9 +127,15 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_HW") != 0) {
         m_SwMode = false;
     }
+    // §B2 2026-05-06 — TRIPLE 60→180 mode opt-in via env var.  Strictly
+    // upgrades dual-present to triple-present; only meaningful when both
+    // FRUC + DualMode are already on.
+    m_TripleMode = m_DualMode && m_FrucMode &&
+                   (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d, frucMode=%d, dualMode=%d, prefs=%s)",
+                "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d, frucMode=%d, dualMode=%d, tripleMode=%d, prefs=%s)",
                 pass, m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0,
+                m_TripleMode ? 1 : 0,
                 prefsWantVulkan ? "RS_VULKAN" : "n/a");
 }
 
@@ -201,6 +207,14 @@ bool VkFrucRenderer::isFRUCActive() const
 bool VkFrucRenderer::lastFrameHadFRUCInterp() const
 {
     return m_FrucMode && m_FrucReady && m_DualMode && !m_FRUCPaused.load();
+}
+
+// §B2 2026-05-06 — TRIPLE 60→180 推 2 張 interp/server frame，
+// pacer.cpp:349 累加 frucInterpolatedFrames 要 +2 才符合 effectiveFps 計算.
+int VkFrucRenderer::lastFrameInterpolatedCount() const
+{
+    if (!lastFrameHadFRUCInterp()) return 0;
+    return m_TripleMode ? 2 : 1;
 }
 
 const char* VkFrucRenderer::getFRUCBackendName() const
@@ -933,6 +947,13 @@ bool VkFrucRenderer::createSwapchain()
     if (m_DualMode) {
         // (std::max) parens defeat Windows.h max() macro pollution.
         uint32_t want = caps.minImageCount + 2;  // = 4 typically
+        if (want > imageCount) imageCount = want;
+    }
+    if (m_TripleMode) {
+        // §B2 2026-05-06 — TRIPLE 60→180 acquires 3 images per frame →
+        // need minImageCount + 3 (typically 5) to keep vkAcquireNextImageKHR
+        // from blocking when previous frame's 3 presents still in flight.
+        uint32_t want = caps.minImageCount + 3;  // = 5 typically
         if (want > imageCount) imageCount = want;
     }
     // §J.3.e.2.i.8 Phase 1.7e — see ctor comment; env renamed to *_DANGEROUS.
@@ -1747,18 +1768,16 @@ bool VkFrucRenderer::createInterpGraphicsPipeline()
         return false;
     }
 
-    // ---- Descriptor pool + 2 sets ----
-    // Set 1: m_InterpDescSet bound to m_FrucInterpRgbBuf  (interp slot)
-    // Set 2: m_RealCurrRgbDescSet bound to m_FrucCurrRgbBuf (real slot in
-    //        VIPLE_VKFRUC_REAL_USE_CRGB=1 path; both interp + real go through
-    //        compute-NV12→RGB so dual-present alternation no longer flickers
-    //        between two different NV12→RGB conversion paths).
+    // ---- Descriptor pool + 3 sets ----
+    // Set 1: m_InterpDescSet      → m_FrucInterpRgbBuf  (interp slot 1, midpoint or 1/3)
+    // Set 2: m_InterpDescSet2     → m_FrucInterpRgbBuf2 (interp slot 2 for TRIPLE 2/3)
+    // Set 3: m_RealCurrRgbDescSet → m_FrucCurrRgbBuf    (real slot in §B-quality (d) path)
     VkDescriptorPoolSize ps = {};
     ps.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    ps.descriptorCount = 2;
+    ps.descriptorCount = 3;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpCi.maxSets = 2;
+    dpCi.maxSets = 3;
     dpCi.poolSizeCount = 1;
     dpCi.pPoolSizes = &ps;
     if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_InterpDescPool) != VK_SUCCESS) return false;
@@ -1768,17 +1787,22 @@ bool VkFrucRenderer::createInterpGraphicsPipeline()
     asi.descriptorSetCount = 1;
     asi.pSetLayouts = &m_InterpDescSetLayout;
     if (pfnAllocDescSets(m_Device, &asi, &m_InterpDescSet) != VK_SUCCESS) return false;
+    if (pfnAllocDescSets(m_Device, &asi, &m_InterpDescSet2) != VK_SUCCESS) return false;
     if (pfnAllocDescSets(m_Device, &asi, &m_RealCurrRgbDescSet) != VK_SUCCESS) return false;
 
     VkDescriptorBufferInfo biInterp = {};
     biInterp.buffer = m_FrucInterpRgbBuf;
     biInterp.offset = 0;
     biInterp.range  = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo biInterp2 = {};
+    biInterp2.buffer = m_FrucInterpRgbBuf2;
+    biInterp2.offset = 0;
+    biInterp2.range  = VK_WHOLE_SIZE;
     VkDescriptorBufferInfo biCurr = {};
     biCurr.buffer = m_FrucCurrRgbBuf;
     biCurr.offset = 0;
     biCurr.range  = VK_WHOLE_SIZE;
-    VkWriteDescriptorSet wds[2] = {};
+    VkWriteDescriptorSet wds[3] = {};
     wds[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     wds[0].dstSet          = m_InterpDescSet;
     wds[0].dstBinding      = 0;
@@ -1786,12 +1810,18 @@ bool VkFrucRenderer::createInterpGraphicsPipeline()
     wds[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     wds[0].pBufferInfo     = &biInterp;
     wds[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wds[1].dstSet          = m_RealCurrRgbDescSet;
+    wds[1].dstSet          = m_InterpDescSet2;
     wds[1].dstBinding      = 0;
     wds[1].descriptorCount = 1;
     wds[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    wds[1].pBufferInfo     = &biCurr;
-    pfnUpdateDescSets(m_Device, 2, wds, 0, nullptr);
+    wds[1].pBufferInfo     = &biInterp2;
+    wds[2].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds[2].dstSet          = m_RealCurrRgbDescSet;
+    wds[2].dstBinding      = 0;
+    wds[2].descriptorCount = 1;
+    wds[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wds[2].pBufferInfo     = &biCurr;
+    pfnUpdateDescSets(m_Device, 3, wds, 0, nullptr);
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.4.2 interp pipeline ready (frag=%u B SPIR-V)",
@@ -2423,13 +2453,24 @@ bool VkFrucRenderer::createInFlightRing()
     fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
     for (uint32_t i = 0; i < kFrucFramesInFlight; i++) {
+        // §B2 2026-05-06 — m_SlotAcquireSem 第 3 個 [2] 給 TRIPLE 的第三張
+        // acquire；DUAL 只用 [0]/[1].  RenderDoneSem 維持 [2] 因為 dual-
+        // present 用 per-image m_SwapchainRenderDoneSem signal/wait（per-
+        // slot 的 RenderDoneSem 主要給 single-present mode 用）.
+        for (int p = 0; p < 3; p++) {
+            if (pfnCreateSem(m_Device, &sci, nullptr,
+                             &m_SlotAcquireSem[i][p]) != VK_SUCCESS) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-VKFRUC] §J.3.e.2.i.3.d vkCreateSemaphore acquire[%u][%d] failed",
+                             i, p);
+                return false;
+            }
+        }
         for (int p = 0; p < 2; p++) {
             if (pfnCreateSem(m_Device, &sci, nullptr,
-                             &m_SlotAcquireSem[i][p]) != VK_SUCCESS ||
-                pfnCreateSem(m_Device, &sci, nullptr,
                              &m_SlotRenderDoneSem[i][p]) != VK_SUCCESS) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                             "[VIPLE-VKFRUC] §J.3.e.2.i.3.d vkCreateSemaphore[%u][%d] failed",
+                             "[VIPLE-VKFRUC] §J.3.e.2.i.3.d vkCreateSemaphore renderDone[%u][%d] failed",
                              i, p);
                 return false;
             }
@@ -2472,11 +2513,13 @@ void VkFrucRenderer::destroyInFlightRing()
             pfnDestroyFence(m_Device, m_SlotInFlightFence[i], nullptr);
             m_SlotInFlightFence[i] = VK_NULL_HANDLE;
         }
-        for (int p = 0; p < 2; p++) {
+        for (int p = 0; p < 3; p++) {
             if (m_SlotAcquireSem[i][p] && pfnDestroySem) {
                 pfnDestroySem(m_Device, m_SlotAcquireSem[i][p], nullptr);
                 m_SlotAcquireSem[i][p] = VK_NULL_HANDLE;
             }
+        }
+        for (int p = 0; p < 2; p++) {
             if (m_SlotRenderDoneSem[i][p] && pfnDestroySem) {
                 pfnDestroySem(m_Device, m_SlotRenderDoneSem[i][p], nullptr);
                 m_SlotRenderDoneSem[i][p] = VK_NULL_HANDLE;
@@ -4146,7 +4189,7 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                         m_FrucMedianShaderMod, m_FrucMedianDsl, m_FrucMedianPipeLay, m_FrucMedianPipeline)) {
         m_FrucDisabled = true; return false;
     }
-    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 4, 24,
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 4, 32,
                         m_FrucWarpShaderMod, m_FrucWarpDsl, m_FrucWarpPipeLay, m_FrucWarpPipeline)) {
         m_FrucDisabled = true; return false;
     }
@@ -4214,6 +4257,12 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                      m_FrucPrevMvBuf, m_FrucPrevMvMem)
         || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                      m_FrucInterpRgbBuf, m_FrucInterpRgbMem)
+        // §B2 2026-05-06 — TRIPLE 第二份 interp output buffer.
+        // 在 createFrucComputeResources 永遠 alloc 一份（即使 dual mode 也
+        // 浪費一塊 buffer），保持 VkDescriptorSet update 邏輯簡單；single-
+        // present 模式已 short-circuit 不會 alloc 整個 FRUC chain.
+        || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                     m_FrucInterpRgbBuf2, m_FrucInterpRgbBuf2Mem)
         // §B1a — NV12 mirror, TRANSFER_DST so HW path's cmdCopyImageToBuffer
         // can write into it; STORAGE_BUFFER so NV12→RGB compute reads as
         // raw bytes via Y@offset 0 / UV@offset W*H.  No TRANSFER_SRC since
@@ -4226,17 +4275,18 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         return false;
     }
 
-    // === Descriptor pool: 5 sets × (2+2+4+2+4) = 14 storage-buffer descriptors ===
+    // === Descriptor pool: 6 sets × (2+2+4+2+4+4) = 18 storage-buffer descriptors ===
     // (i.4.1 added NV12→RGB with 2 bindings → 1 more set, 2 more descriptors)
     // (Phase 2.5 added 2nd NV12→RGB descriptor set whose binding 0 points at
     //  m_SwFrucNv12Buf for native-decode source → +1 set, +2 descriptors)
     // (v1.3.278 reverted Phase 2.5h per-slot variant — single descset only.)
+    // (§B2 2026-05-06 added 2nd warp desc set for TRIPLE → +1 set, +4 descriptors.)
     VkDescriptorPoolSize pSize = {};
     pSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pSize.descriptorCount = 14;
+    pSize.descriptorCount = 18;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpCi.maxSets = 5;
+    dpCi.maxSets = 6;
     dpCi.poolSizeCount = 1;
     dpCi.pPoolSizes = &pSize;
     if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_FrucDescPool) != VK_SUCCESS) {
@@ -4294,7 +4344,12 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                               m_FrucMedianDescSet)
         || !allocAndUpdateSet(m_FrucWarpDsl,
                               { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf, m_FrucInterpRgbBuf },
-                              m_FrucWarpDescSet)) {
+                              m_FrucWarpDescSet)
+        // §B2 2026-05-06 — TRIPLE 第二份 warp desc set，output binding 3
+        // → m_FrucInterpRgbBuf2，其它 binding 不變.
+        || !allocAndUpdateSet(m_FrucWarpDsl,
+                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf, m_FrucInterpRgbBuf2 },
+                              m_FrucWarpDescSet2)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: descriptor set alloc/update failed");
         m_FrucDisabled = true; return false;
@@ -4373,6 +4428,8 @@ void VkFrucRenderer::destroyFrucComputeResources()
     DESTROY_BUF(m_FrucMvFilteredBuf, m_FrucMvFilteredMem)
     DESTROY_BUF(m_FrucPrevMvBuf,     m_FrucPrevMvMem)
     DESTROY_BUF(m_FrucInterpRgbBuf,  m_FrucInterpRgbMem)
+    // §B2 2026-05-06 — TRIPLE 第二份 interp output buffer.
+    DESTROY_BUF(m_FrucInterpRgbBuf2, m_FrucInterpRgbBuf2Mem)
     // §B1a 2026-05-06 — m_SwFrucNv12Buf moved here from
     // destroySwUploadResources (FRUC-owned, used by both SW + HW path).
     DESTROY_BUF(m_SwFrucNv12Buf,     m_SwFrucNv12BufMem)
@@ -4594,59 +4651,68 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
 
     // ---- Stage 3: warp ----
     // Push constant layout MUST match shader's struct order exactly:
-    //   Warp shader (plvk.cpp:1563-1570): frameWidth, frameHeight,
-    //   mvBlockSize, mvWidth, mvHeight, blendFactor (float, NOT int)
-    //   — 24 bytes total.  blendFactor=0.5 = midpoint interpolation.
-    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeline);
-    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeLay,
-                       0, 1, &m_FrucWarpDescSet, 0, nullptr);
-    {
-        // §B-quality 2026-05-06 — warp blend 分支由 push-constant blendFactor 控制：
-        //   > 1.5   → no-MV cross-fade (c2, 同 pixel pos 50/50，跳過 ME warp)
-        //   < -1.5  → Quality (c1, 雙向 MV 一致性 adaptive，port of d3d11 Quality)
-        //   < 0     → Balanced cheap-adaptive (current Vulkan default)
-        //   >= 0    → fixed blend (c0, 用該值當 mix weight)
-        // Env var 切換 (互斥優先序: NO_MV > QUALITY > PURE50 > default):
-        float blendFactor;
-        const char* modeName = "Balanced cheap-adaptive";
-        if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_NO_MV") != 0) {
-            blendFactor = 2.0f;
-            modeName = "c2 no-MV (DIAG)";
-        } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_QUALITY") != 0) {
-            blendFactor = -2.0f;
-            modeName = "c1 Quality adaptive";
-        } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_PURE50") != 0) {
-            blendFactor = 0.5f;
-            modeName = "c0 fixed 50/50";
-        } else {
-            blendFactor = -1.0f;
-        }
-        // One-shot log on first dispatch so we know which mode took effect.
-        static std::atomic<bool> s_warpModeLogged{false};
-        bool expected = false;
-        if (s_warpModeLogged.compare_exchange_strong(expected, true)) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC-WARP-MODE] blendFactor=%.1f mode='%s'",
-                        blendFactor, modeName);
-        }
+    //   Warp shader (plvk.cpp:1574-1593): frameWidth, frameHeight,
+    //   mvBlockSize, mvWidth, mvHeight, blendFactor, tFraction, _pcPad0
+    //   — 32 bytes total.
+    //   tFraction=0.5 = DUAL midpoint, 1/3 + 2/3 = TRIPLE 兩張 interp.
+    //
+    // §B-quality 2026-05-06 — blendFactor 分支：
+    //   > 1.5   → c2 no-MV cross-fade
+    //   < -1.5  → c1 Quality adaptive
+    //   < 0     → Balanced cheap-adaptive (default)
+    //   >= 0    → c0 fixed blend (用該值當 mix weight)
+    // Env var: NO_MV > QUALITY > PURE50 > default.
+    float blendFactor;
+    const char* modeName = "Balanced cheap-adaptive";
+    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_NO_MV") != 0) {
+        blendFactor = 2.0f;
+        modeName = "c2 no-MV (DIAG)";
+    } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_QUALITY") != 0) {
+        blendFactor = -2.0f;
+        modeName = "c1 Quality adaptive";
+    } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_PURE50") != 0) {
+        blendFactor = 0.5f;
+        modeName = "c0 fixed 50/50";
+    } else {
+        blendFactor = -1.0f;
+    }
+    static std::atomic<bool> s_warpModeLogged{false};
+    bool warpExpected = false;
+    if (s_warpModeLogged.compare_exchange_strong(warpExpected, true)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-WARP-MODE] blendFactor=%.1f mode='%s' triple=%d",
+                    blendFactor, modeName, m_TripleMode ? 1 : 0);
+    }
+
+    auto dispatchWarp = [&](VkDescriptorSet descSet, VkBuffer outputBuf, float tFrac) {
+        pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeline);
+        pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeLay,
+                           0, 1, &descSet, 0, nullptr);
         struct {
             uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
             float    blendFactor;
+            float    tFraction;
+            float    _pcPad0;
         } pcWarp = {
             (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
-            (uint32_t)mvW, (uint32_t)mvH, blendFactor
+            (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac, 0.0f
         };
-        pfnCmdPushConst(cmd, m_FrucWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcWarp), &pcWarp);
+        pfnCmdPushConst(cmd, m_FrucWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                        0, sizeof(pcWarp), &pcWarp);
+        // Warp shader local_size = 8x8, one thread per pixel.
+        pfnCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+        computeBufBarrier(outputBuf);
+    };
+
+    if (m_TripleMode) {
+        // §B2 — TRIPLE 兩個 interp 點: 1/3 → InterpRgbBuf, 2/3 → InterpRgbBuf2.
+        dispatchWarp(m_FrucWarpDescSet,  m_FrucInterpRgbBuf,  1.0f / 3.0f);
+        dispatchWarp(m_FrucWarpDescSet2, m_FrucInterpRgbBuf2, 2.0f / 3.0f);
+    } else {
+        // DUAL midpoint.
+        dispatchWarp(m_FrucWarpDescSet,  m_FrucInterpRgbBuf,  0.5f);
     }
-    // Warp shader local_size = 8x8 (plvk.cpp:1551), one thread per pixel.
-    // Bug history: dispatched (W+15)/16 = W/16 workgroups → only covered
-    // 1/4 of interpRGB → top-left quadrant correct, other 3 quadrants left
-    // with stale/uninit garbage → visible flicker on dual-present (user
-    // observation: 第二象限 only quadrant without flicker).
-    pfnCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
-    computeBufBarrier(m_FrucInterpRgbBuf);
-    // §J.3.g v2 ts[4] — after Warp barrier (this is the suspected hot
-    // spot at 4K — per-pixel bilinear sample × 8.3M threads).
+    // §J.3.g v2 ts[4] — after Warp barrier (TRIPLE 是兩次 dispatch 後的 barrier).
     if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
         pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                              m_FrucTimerPool, timerBase + 4);
@@ -4860,12 +4926,17 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // ---- 3. Acquire next swapchain image(s) ----
     // §B1b 2026-05-06 — dualPresentThisFrame controls whether we acquire
     // 1 or 2 swapchain images.  Mirrors renderFrameSw line ~5511-5540.
-    // imgIdxA = interp slot (only used in dual mode)
-    // imgIdxB = real frame slot (always)
+    // §B2 2026-05-06 — triplePresentThisFrame extends to 3 images for
+    // 60→180 補幀×3.  Strictly subset of dualPresentThisFrame.
+    //   imgIdxA = interp_1 slot (1/3 點 in TRIPLE, midpoint in DUAL)
+    //   imgIdxB = real frame slot (always)
+    //   imgIdxC = interp_2 slot (only in TRIPLE, 2/3 點)
     const bool dualPresentThisFrame = m_DualMode && m_FrucMode && m_FrucReady
                                       && !m_FRUCPaused.load();
+    const bool triplePresentThisFrame = dualPresentThisFrame && m_TripleMode;
     uint32_t imgIdxA = 0;
     uint32_t imgIdxB = 0;
+    uint32_t imgIdxC = 0;
     VkResult vr;
     if (dualPresentThisFrame) {
         VkResult vrA = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
@@ -4885,6 +4956,17 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                          "[VIPLE-VKFRUC] dual: acquire real imgB failed (%d)", (int)vrB);
             m_RtPfn.ResetCommandBuffer(m_SlotCmdBuf[slot], 0);
             return;
+        }
+        if (triplePresentThisFrame) {
+            VkResult vrC = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
+                                                        m_SlotAcquireSem[slot][2],
+                                                        VK_NULL_HANDLE, &imgIdxC);
+            if (vrC != VK_SUCCESS && vrC != VK_SUBOPTIMAL_KHR) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-VKFRUC] triple: acquire interp2 imgC failed (%d)", (int)vrC);
+                m_RtPfn.ResetCommandBuffer(m_SlotCmdBuf[slot], 0);
+                return;
+            }
         }
     } else {
         vr = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
@@ -5142,11 +5224,12 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // dependency in the render pass + lenient NV driver let it work, but
     // we add it here for spec correctness on HW path.
     if (dualPresentThisFrame) {
-        // §B-quality (d) 2026-05-06 — barrier 同時保護 m_FrucInterpRgbBuf
-        // (interp pipeline reads) 和 m_FrucCurrRgbBuf (real pipeline reads
-        // when VIPLE_VKFRUC_REAL_USE_CRGB=1). 兩個都從 compute shader 寫入
-        // 變 fragment shader 讀取，跨 stage 需要 explicit barrier.
-        VkBufferMemoryBarrier rgbBufBars[2] = {};
+        // §B-quality (d) 2026-05-06 — barrier 保護所有 fragment-read storage
+        // buffers from compute write: m_FrucInterpRgbBuf (interp #1),
+        // m_FrucCurrRgbBuf (real path 走 §B-quality (d) 走 compute-NV12→RGB),
+        // §B2 m_FrucInterpRgbBuf2 (TRIPLE 第二張 interp).
+        const int kRgbBars = triplePresentThisFrame ? 3 : 2;
+        VkBufferMemoryBarrier rgbBufBars[3] = {};
         rgbBufBars[0].sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
         rgbBufBars[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         rgbBufBars[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -5157,10 +5240,12 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         rgbBufBars[0].size   = VK_WHOLE_SIZE;
         rgbBufBars[1] = rgbBufBars[0];
         rgbBufBars[1].buffer = m_FrucCurrRgbBuf;
+        rgbBufBars[2] = rgbBufBars[0];
+        rgbBufBars[2].buffer = m_FrucInterpRgbBuf2;
         m_RtPfn.CmdPipelineBarrier(cmd,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            0, 0, nullptr, 2, rgbBufBars, 0, nullptr);
+            0, 0, nullptr, (uint32_t)kRgbBars, rgbBufBars, 0, nullptr);
 
         // Resolve push-const PFN (m_RtPfn doesn't carry it).
         auto getDevPa2 = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
@@ -5193,6 +5278,43 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-HW] §B1b frame#0 dual: interp render pass OK (imgA=%u)",
                         imgIdxA);
+        }
+    }
+
+    // §B2 2026-05-06 — TRIPLE 第二張 interp render pass on imgC.  和 interp #1
+    // 共用 m_InterpPipeline，但 sample m_FrucInterpRgbBuf2 (binding via
+    // m_InterpDescSet2).  push constant {srcW, srcH} 跟 #1 一樣.
+    if (triplePresentThisFrame) {
+        auto getDevPa2t = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        auto pfnCmdPushConst2 = (PFN_vkCmdPushConstants)getDevPa2t(m_Device, "vkCmdPushConstants");
+
+        VkRenderPassBeginInfo rpbiC = {};
+        rpbiC.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpbiC.renderPass           = m_RenderPass;
+        rpbiC.framebuffer          = m_Framebuffers[imgIdxC];
+        rpbiC.renderArea.extent    = m_SwapchainExtent;
+        rpbiC.clearValueCount      = 1;
+        rpbiC.pClearValues         = &clearVal;
+        m_RtPfn.CmdBeginRenderPass(cmd, &rpbiC, VK_SUBPASS_CONTENTS_INLINE);
+        m_RtPfn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
+        m_RtPfn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      m_InterpPipelineLayout, 0,
+                                      1, &m_InterpDescSet2, 0, nullptr);
+        struct { int srcW, srcH, _pad0, _pad1; } pcInterp2 = {
+            frame ? frame->width : 0, frame ? frame->height : 0, 0, 0
+        };
+        if (pfnCmdPushConst2) {
+            pfnCmdPushConst2(cmd, m_InterpPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                             0, sizeof(pcInterp2), &pcInterp2);
+        }
+        m_RtPfn.CmdDraw(cmd, 3, 1, 0, 0);
+        drawOverlayInRenderPass(cmd);
+        m_RtPfn.CmdEndRenderPass(cmd);
+        if (firstFrame) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-HW] §B2 frame#0 triple: interp_2 render pass OK (imgC=%u)",
+                        imgIdxC);
         }
     }
 
@@ -5320,40 +5442,58 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // sem-reuse race when imgIdxA != imgIdxB and they get re-acquired in
     // a different order).  Single mode keeps original 2-sem submit.
     if (dualPresentThisFrame) {
-        VkSemaphore     waitSems[3]   = {
-            m_SlotAcquireSem[slot][0],   // interp acquire
-            m_SlotAcquireSem[slot][1],   // real  acquire
-            vkf->sem[0]                  // FFmpeg-vulkan timeline
+        // §B2 2026-05-06 — TRIPLE adds 4th wait sem (interp_2 acquire) +
+        // 4th signal sem (interp_2 swapchain renderDone).  DUAL stays at 3.
+        const int kSemCount = triplePresentThisFrame ? 4 : 3;
+        VkSemaphore     waitSems[4]   = {
+            m_SlotAcquireSem[slot][0],   // interp #1 acquire
+            m_SlotAcquireSem[slot][1],   // real     acquire
+            triplePresentThisFrame ? m_SlotAcquireSem[slot][2]
+                                   : vkf->sem[0],  // TRIPLE: interp #2 acquire; DUAL: ffmpeg timeline
+            vkf->sem[0]                  // ffmpeg timeline (TRIPLE 4-th slot, ignored in DUAL)
         };
-        VkPipelineStageFlags waitMasks[3] = {
+        VkPipelineStageFlags waitMasks[4] = {
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            triplePresentThisFrame ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                   : (VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                      | VK_PIPELINE_STAGE_TRANSFER_BIT),
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                | VK_PIPELINE_STAGE_TRANSFER_BIT,  // image-to-buffer copy waits too
+                | VK_PIPELINE_STAGE_TRANSFER_BIT,
         };
-        uint64_t        waitVals[3]   = { 0, 0, vkf->sem_value[0] };
-        VkSemaphore     signalSems[3] = {
+        uint64_t        waitVals[4]   = {
+            0, 0,
+            triplePresentThisFrame ? 0 : vkf->sem_value[0],
+            vkf->sem_value[0]
+        };
+        VkSemaphore     signalSems[4] = {
             m_SwapchainRenderDoneSem[imgIdxA],
             m_SwapchainRenderDoneSem[imgIdxB],
+            triplePresentThisFrame ? m_SwapchainRenderDoneSem[imgIdxC]
+                                   : vkf->sem[0],
             vkf->sem[0]
         };
-        uint64_t        signalVals[3] = { 0, 0, vkf->sem_value[0] + 1 };
+        uint64_t        signalVals[4] = {
+            0, 0,
+            triplePresentThisFrame ? 0 : (vkf->sem_value[0] + 1),
+            vkf->sem_value[0] + 1
+        };
 
         VkTimelineSemaphoreSubmitInfo tssi = {};
         tssi.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-        tssi.waitSemaphoreValueCount   = 3;
+        tssi.waitSemaphoreValueCount   = (uint32_t)kSemCount;
         tssi.pWaitSemaphoreValues      = waitVals;
-        tssi.signalSemaphoreValueCount = 3;
+        tssi.signalSemaphoreValueCount = (uint32_t)kSemCount;
         tssi.pSignalSemaphoreValues    = signalVals;
         VkSubmitInfo si = {};
         si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.pNext                = &tssi;
-        si.waitSemaphoreCount   = 3;
+        si.waitSemaphoreCount   = (uint32_t)kSemCount;
         si.pWaitSemaphores      = waitSems;
         si.pWaitDstStageMask    = waitMasks;
         si.commandBufferCount   = 1;
         si.pCommandBuffers      = &cmd;
-        si.signalSemaphoreCount = 3;
+        si.signalSemaphoreCount = (uint32_t)kSemCount;
         si.pSignalSemaphores    = signalSems;
         {
             std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
@@ -5361,7 +5501,8 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         }
         if (vr != VK_SUCCESS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC] dual: vkQueueSubmit failed (%d)", (int)vr);
+                         "[VIPLE-VKFRUC] %s: vkQueueSubmit failed (%d)",
+                         triplePresentThisFrame ? "triple" : "dual", (int)vr);
             if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
             return;
         }
@@ -5424,6 +5565,9 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
 
     // ---- 10. Present ----
+    // Order:
+    //   DUAL:   piA (interp midpoint) → piB (real)
+    //   TRIPLE: piA (interp 1/3) → piC (interp 2/3) → piB (real)
     if (dualPresentThisFrame) {
         VkPresentInfoKHR piA = {};
         piA.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -5438,7 +5582,27 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         }
         if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC] dual: present(interp) returned %d", (int)vr);
+                        "[VIPLE-VKFRUC] %s: present(interp%s) returned %d",
+                        triplePresentThisFrame ? "triple" : "dual",
+                        triplePresentThisFrame ? " 1/3" : "",
+                        (int)vr);
+        }
+        if (triplePresentThisFrame) {
+            VkPresentInfoKHR piC = {};
+            piC.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+            piC.waitSemaphoreCount = 1;
+            piC.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxC];
+            piC.swapchainCount     = 1;
+            piC.pSwapchains        = &m_Swapchain;
+            piC.pImageIndices      = &imgIdxC;
+            {
+                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piC);
+            }
+            if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] triple: present(interp 2/3) returned %d", (int)vr);
+            }
         }
         VkPresentInfoKHR piB = {};
         piB.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -5453,12 +5617,19 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         }
         if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC] dual: present(real) returned %d", (int)vr);
+                        "[VIPLE-VKFRUC] %s: present(real) returned %d",
+                        triplePresentThisFrame ? "triple" : "dual", (int)vr);
         }
         if (firstFrame) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC-HW] §B1b frame#0 DUAL OK — interp imgA=%u + real imgB=%u presented",
-                        imgIdxA, imgIdxB);
+            if (triplePresentThisFrame) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-HW] §B2 frame#0 TRIPLE OK — interp_1 imgA=%u + interp_2 imgC=%u + real imgB=%u presented",
+                            imgIdxA, imgIdxC, imgIdxB);
+            } else {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-HW] §B1b frame#0 DUAL OK — interp imgA=%u + real imgB=%u presented",
+                            imgIdxA, imgIdxB);
+            }
         }
     } else {
         VkPresentInfoKHR pi = {};
@@ -5502,7 +5673,11 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         }
         s_HwLastPresent = now;
         s_HwCumulReal++;
-        if (dualPresentThisFrame) s_HwCumulInterp++;
+        if (triplePresentThisFrame) {
+            s_HwCumulInterp += 2;  // §B2: TRIPLE 每 server frame 推 2 張 interp
+        } else if (dualPresentThisFrame) {
+            s_HwCumulInterp++;
+        }
 
         double bucketSec = duration_cast<duration<double>>(now - s_HwBucketStart).count();
         if (bucketSec >= 5.0 && !s_HwFrameMsRing.empty()) {

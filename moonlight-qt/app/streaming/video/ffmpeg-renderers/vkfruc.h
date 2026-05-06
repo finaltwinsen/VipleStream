@@ -59,6 +59,7 @@ public:
     // 累加 frucInterpolatedFrames，要正確才能算出補幀比例.
     bool isFRUCActive() const override;
     bool lastFrameHadFRUCInterp() const override;
+    int  lastFrameInterpolatedCount() const override;
     const char* getFRUCBackendName() const override;
 
     // VipleStream: Ctrl+Alt+Shift+F runtime toggle.  D3D11VARenderer 走
@@ -463,7 +464,9 @@ private:
     static constexpr uint32_t kFrucFramesInFlight = 2;
     VkCommandPool   m_CmdPool                = VK_NULL_HANDLE;
     VkCommandBuffer m_SlotCmdBuf[kFrucFramesInFlight]            = {};
-    VkSemaphore     m_SlotAcquireSem[kFrucFramesInFlight][2]     = {};
+    // §B2 2026-05-06 — TRIPLE 60→180 needs 3 acquire sems per slot (interp 1/3 +
+    // interp 2/3 + real). Slot [0]/[1] used in DUAL; [2] only used when TRIPLE.
+    VkSemaphore     m_SlotAcquireSem[kFrucFramesInFlight][3]     = {};
     VkSemaphore     m_SlotRenderDoneSem[kFrucFramesInFlight][2]  = {};
     VkFence         m_SlotInFlightFence[kFrucFramesInFlight]     = {};
     uint32_t        m_CurrentSlot            = 0;
@@ -586,6 +589,11 @@ private:
     //   5. end cmd, submit (waits both acquireSems, signals both renderDones)
     //   6. present imgA, present imgB
     bool             m_DualMode             = false;
+    // §B2 2026-05-06 — TRIPLE 60→180. Strictly subset of m_DualMode (i.e.
+    // m_TripleMode=true → m_DualMode=true). Enables 3-present (interp_1 at
+    // 1/3 + interp_2 at 2/3 + real) instead of 2-present. Gated by env var
+    // VIPLE_VKFRUC_TRIPLE=1; session.cpp also asks server for fps/3.
+    bool             m_TripleMode           = false;
     VkShaderModule   m_InterpFragShaderMod  = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_InterpDescSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_InterpPipelineLayout = VK_NULL_HANDLE;
@@ -599,6 +607,8 @@ private:
     // "Y-axis jitter" caused by the two NV12→RGB conversions producing
     // subtly different RGB on the same input NV12.
     VkDescriptorSet  m_RealCurrRgbDescSet   = VK_NULL_HANDLE;
+    // §B2 2026-05-06 — TRIPLE 第二張 interp 顯示用，binding 0 → m_FrucInterpRgbBuf2.
+    VkDescriptorSet  m_InterpDescSet2       = VK_NULL_HANDLE;
     bool createInterpGraphicsPipeline();
     void destroyInterpGraphicsPipeline();
 
@@ -669,6 +679,13 @@ private:
     VkDeviceMemory m_FrucPrevMvMem     = VK_NULL_HANDLE;
     VkBuffer       m_FrucInterpRgbBuf  = VK_NULL_HANDLE;
     VkDeviceMemory m_FrucInterpRgbMem  = VK_NULL_HANDLE;
+    // §B2 2026-05-06 — TRIPLE 60→180 路徑用第二個 interp buffer (1/3, 2/3 點).
+    // alloc 條件：m_TripleMode 開啟. dual mode 時保持 NULL.
+    VkBuffer       m_FrucInterpRgbBuf2 = VK_NULL_HANDLE;
+    VkDeviceMemory m_FrucInterpRgbBuf2Mem = VK_NULL_HANDLE;
+    // 第二份 warp desc set，binding 3 (output) → m_FrucInterpRgbBuf2.
+    // 其餘 binding 跟 m_FrucWarpDescSet 共用 (prev/curr/mv_filtered).
+    VkDescriptorSet m_FrucWarpDescSet2 = VK_NULL_HANDLE;
 
     VkDescriptorPool m_FrucDescPool = VK_NULL_HANDLE;
 

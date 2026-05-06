@@ -305,6 +305,12 @@ public:
     // VipleStream: FRUC frame interpolation queries
     virtual bool isFRUCActive() const { return false; }
     virtual bool lastFrameHadFRUCInterp() const { return false; }
+    // §B2 2026-05-06 — TRIPLE 60→180 一個 server frame 推 2 張 interp.
+    // 預設回傳 lastFrameHadFRUCInterp() ? 1 : 0 對 DUAL renderer 仍對；
+    // VkFrucRenderer triple mode 覆寫回 2.
+    virtual int lastFrameInterpolatedCount() const {
+        return lastFrameHadFRUCInterp() ? 1 : 0;
+    }
     virtual const char* getFRUCBackendName() const { return "None"; }
     virtual void toggleFRUC() {}
     std::atomic<bool> m_FRUCPaused{false};
