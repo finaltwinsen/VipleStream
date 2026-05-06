@@ -1212,10 +1212,103 @@ bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
         return false;
     }
 
+    // §B-NVOF Phase 4a — OF queue command pool + cmd buffer + timeline sem +
+    // flow staging buffer.  Per-frame chain (Phase 4b) records the OF cmd
+    // buffer once per server frame, submitted to m_OpticalFlowQueue.
+    auto pfnCreateCmdPool   = (PFN_vkCreateCommandPool)getDevPaOf(m_Device, "vkCreateCommandPool");
+    auto pfnAllocCmdBufs    = (PFN_vkAllocateCommandBuffers)getDevPaOf(m_Device, "vkAllocateCommandBuffers");
+    auto pfnCreateSem       = (PFN_vkCreateSemaphore)getDevPaOf(m_Device, "vkCreateSemaphore");
+    auto pfnCreateBuffer    = (PFN_vkCreateBuffer)getDevPaOf(m_Device, "vkCreateBuffer");
+    auto pfnGetBufMemReq    = (PFN_vkGetBufferMemoryRequirements)getDevPaOf(m_Device, "vkGetBufferMemoryRequirements");
+    auto pfnBindBufMem      = (PFN_vkBindBufferMemory)getDevPaOf(m_Device, "vkBindBufferMemory");
+    if (!pfnCreateCmdPool || !pfnAllocCmdBufs || !pfnCreateSem
+        || !pfnCreateBuffer || !pfnGetBufMemReq || !pfnBindBufMem) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF] Phase 4a PFN load failed");
+        destroyOpticalFlowSession();
+        return false;
+    }
+    {
+        VkCommandPoolCreateInfo cpi = {};
+        cpi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        cpi.queueFamilyIndex = m_OpticalFlowQueueFamily;
+        if (pfnCreateCmdPool(m_Device, &cpi, nullptr, &m_NvOfCmdPool) != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF] vkCreateCommandPool(OF queue) failed");
+            destroyOpticalFlowSession();
+            return false;
+        }
+        VkCommandBufferAllocateInfo cbai = {};
+        cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool        = m_NvOfCmdPool;
+        cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        if (pfnAllocCmdBufs(m_Device, &cbai, &m_NvOfCmdBuf) != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF] vkAllocateCommandBuffers(OF) failed");
+            destroyOpticalFlowSession();
+            return false;
+        }
+    }
+    {
+        VkSemaphoreTypeCreateInfo stci = {};
+        stci.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        stci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        stci.initialValue  = 0;
+        VkSemaphoreCreateInfo sci = {};
+        sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        sci.pNext = &stci;
+        if (pfnCreateSem(m_Device, &sci, nullptr, &m_NvOfTimelineSem) != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF] vkCreateSemaphore(timeline) failed");
+            destroyOpticalFlowSession();
+            return false;
+        }
+        m_NvOfTimelineValue = 0;
+    }
+    // Flow staging buffer: receives vkCmdCopyImageToBuffer of m_NvOfFlowImage.
+    // Size = flowW × flowH × 4 bytes (R16G16 = 2 × int16 = 4 B).
+    {
+        const uint32_t flowW = width / m_NvOfGridSize;
+        const uint32_t flowH = height / m_NvOfGridSize;
+        VkBufferCreateInfo bci = {};
+        bci.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size        = (VkDeviceSize)flowW * flowH * 4;
+        bci.usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (pfnCreateBuffer(m_Device, &bci, nullptr, &m_NvOfFlowStaging) != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF] vkCreateBuffer(flow staging) failed");
+            destroyOpticalFlowSession();
+            return false;
+        }
+        VkMemoryRequirements mr;
+        pfnGetBufMemReq(m_Device, m_NvOfFlowStaging, &mr);
+        int idx = findMemTypeOf(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (idx < 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF] findMemType(flow staging) failed");
+            destroyOpticalFlowSession();
+            return false;
+        }
+        VkMemoryAllocateInfo mai = {};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize  = mr.size;
+        mai.memoryTypeIndex = (uint32_t)idx;
+        if (pfnAllocMem(m_Device, &mai, nullptr, &m_NvOfFlowStagingMem) != VK_SUCCESS ||
+            pfnBindBufMem(m_Device, m_NvOfFlowStaging, m_NvOfFlowStagingMem, 0) != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF] flow staging memory alloc/bind failed");
+            destroyOpticalFlowSession();
+            return false;
+        }
+    }
+
     m_NvOfReady = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-NVOF] OF session READY — 3 images registered "
-                "(curr=%p prev=%p flow=%p)",
+                "(curr=%p prev=%p flow=%p) + cmdPool/cmdBuf/timelineSem/flowStaging",
                 m_NvOfHandleCurr, m_NvOfHandlePrev, m_NvOfHandleFlow);
     return true;
 }
@@ -1242,9 +1335,31 @@ void VkFrucRenderer::destroyOpticalFlowSession()
         auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
             m_Instance, "vkGetDeviceProcAddr");
         if (getDevPa) {
-            auto pfnDestroyImg = (PFN_vkDestroyImage)getDevPa(m_Device, "vkDestroyImage");
-            auto pfnDestroyView = (PFN_vkDestroyImageView)getDevPa(m_Device, "vkDestroyImageView");
-            auto pfnFreeMem    = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+            auto pfnDestroyImg     = (PFN_vkDestroyImage)getDevPa(m_Device, "vkDestroyImage");
+            auto pfnDestroyView    = (PFN_vkDestroyImageView)getDevPa(m_Device, "vkDestroyImageView");
+            auto pfnFreeMem        = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+            auto pfnDestroyBuf     = (PFN_vkDestroyBuffer)getDevPa(m_Device, "vkDestroyBuffer");
+            auto pfnDestroySem     = (PFN_vkDestroySemaphore)getDevPa(m_Device, "vkDestroySemaphore");
+            auto pfnDestroyCmdPool = (PFN_vkDestroyCommandPool)getDevPa(m_Device, "vkDestroyCommandPool");
+            // §B-NVOF Phase 4a — release cross-queue execution resources.
+            if (m_NvOfFlowStaging && pfnDestroyBuf) {
+                pfnDestroyBuf(m_Device, m_NvOfFlowStaging, nullptr);
+                m_NvOfFlowStaging = VK_NULL_HANDLE;
+            }
+            if (m_NvOfFlowStagingMem && pfnFreeMem) {
+                pfnFreeMem(m_Device, m_NvOfFlowStagingMem, nullptr);
+                m_NvOfFlowStagingMem = VK_NULL_HANDLE;
+            }
+            if (m_NvOfTimelineSem && pfnDestroySem) {
+                pfnDestroySem(m_Device, m_NvOfTimelineSem, nullptr);
+                m_NvOfTimelineSem = VK_NULL_HANDLE;
+            }
+            // m_NvOfCmdBuf freed implicitly when pool is destroyed.
+            if (m_NvOfCmdPool && pfnDestroyCmdPool) {
+                pfnDestroyCmdPool(m_Device, m_NvOfCmdPool, nullptr);
+                m_NvOfCmdPool = VK_NULL_HANDLE;
+                m_NvOfCmdBuf  = VK_NULL_HANDLE;
+            }
             if (m_NvOfFlowImageView && pfnDestroyView) {
                 pfnDestroyView(m_Device, m_NvOfFlowImageView, nullptr);
                 m_NvOfFlowImageView = VK_NULL_HANDLE;

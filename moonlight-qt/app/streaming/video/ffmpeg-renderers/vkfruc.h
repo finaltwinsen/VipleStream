@@ -148,6 +148,25 @@ private:
     uint32_t       m_NvOfHeight          = 0;
     uint32_t       m_NvOfGridSize        = 4;       // 1 / 2 / 4 (output grid)
     bool           m_NvOfReady           = false;
+    // §B-NVOF Phase 4a — cross-queue execution resources.
+    //   m_NvOfCmdPool / m_NvOfCmdBuf: independent command pool + buffer
+    //     for the optical-flow queue (queueFamilyIndex = m_OpticalFlowQueueFamily).
+    //     Used to record vkCmdCopyImage prev/curr-input copies + nvOFExecuteVk +
+    //     vkCmdCopyImageToBuffer flow→staging in one OF-queue submit per frame.
+    //   m_NvOfTimelineSem / m_NvOfTimelineValue: timeline semaphore that
+    //     paces graphics→OF→graphics handoff.  Per-frame value increments by 2
+    //     (one for "graphics finished writing inputs", one for "OF finished
+    //     writing flow"). Replaces ad-hoc binary semaphores so we don't have
+    //     to track sem reuse.
+    //   m_NvOfFlowStaging / Mem: storage buffer that receives flow image via
+    //     vkCmdCopyImageToBuffer; format converter compute shader (Phase 5)
+    //     reads it as raw int16x2 (Q10.5) and writes Q1 to m_FrucMvFilteredBuf.
+    VkCommandPool   m_NvOfCmdPool        = VK_NULL_HANDLE;
+    VkCommandBuffer m_NvOfCmdBuf         = VK_NULL_HANDLE;
+    VkSemaphore     m_NvOfTimelineSem    = VK_NULL_HANDLE;
+    uint64_t        m_NvOfTimelineValue  = 0;
+    VkBuffer        m_NvOfFlowStaging    = VK_NULL_HANDLE;
+    VkDeviceMemory  m_NvOfFlowStagingMem = VK_NULL_HANDLE;
     bool createOpticalFlowSession(uint32_t width, uint32_t height);
     void destroyOpticalFlowSession();
 
