@@ -1108,14 +1108,115 @@ bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-NVOF] OF session ready (W=%u H=%u grid=4 perf=MEDIUM "
-                "predFwd flowDims=%ux%u)",
+                "[VIPLE-VKFRUC-NVOF] OF session init OK (W=%u H=%u grid=4 perf=MEDIUM "
+                "predFwd flowDims=%ux%u) — allocating image resources",
                 width, height, width / m_NvOfGridSize, height / m_NvOfGridSize);
 
-    // §B-NVOF Phase 3d (next commit) — alloc prev/curr NV12 + flow output
-    // VkImages and call nvOFRegisterResourceVk × 3.  Without that, m_NvOfReady
-    // stays false and chain still uses block-matching ME.  This commit only
-    // proves session lifecycle works.
+    // §B-NVOF Phase 3d 2026-05-06 — allocate 3 VkImages and register them
+    // with the OF session as NvOFGPUBufferHandle.
+    //   m_NvOfInputCurr / m_NvOfInputPrev: NV12 (G8_B8R8_2PLANE_420_UNORM)
+    //     full source size, TRANSFER_DST (we copy vkf->img[0] into them
+    //     each frame). prev/curr swapped at end of chain.
+    //   m_NvOfFlowImage: R16G16_SFIXED5_NV (Q10.5 fixed-point), flow grid
+    //     dimensions, TRANSFER_SRC (we copy result to a staging buffer for
+    //     the format converter compute shader to consume in Q1 form).
+    auto getDevPaOf = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCreateImage  = (PFN_vkCreateImage)getDevPaOf(m_Device, "vkCreateImage");
+    auto pfnGetImgMemReq = (PFN_vkGetImageMemoryRequirements)getDevPaOf(m_Device, "vkGetImageMemoryRequirements");
+    auto pfnAllocMem     = (PFN_vkAllocateMemory)getDevPaOf(m_Device, "vkAllocateMemory");
+    auto pfnBindImgMem   = (PFN_vkBindImageMemory)getDevPaOf(m_Device, "vkBindImageMemory");
+    auto pfnGetPdMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnCreateImage || !pfnGetImgMemReq || !pfnAllocMem || !pfnBindImgMem || !pfnGetPdMemProps) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF] PFN load failed for image alloc");
+        funcList->nvOFDestroy(hOf);
+        m_NvOfHandle = nullptr;
+        return false;
+    }
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPdMemProps(m_PhysicalDevice, &memProps);
+    auto findMemTypeOf = [&](uint32_t typeBits, VkMemoryPropertyFlags wantFlags) -> int {
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+            if ((typeBits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & wantFlags) == wantFlags) {
+                return (int)i;
+            }
+        }
+        return -1;
+    };
+    auto allocImage = [&](VkFormat fmt, uint32_t w, uint32_t h, VkImageUsageFlags usage,
+                          VkImage& outImage, VkDeviceMemory& outMem) -> bool {
+        VkImageCreateInfo ici = {};
+        ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.imageType     = VK_IMAGE_TYPE_2D;
+        ici.format        = fmt;
+        ici.extent        = { w, h, 1 };
+        ici.mipLevels     = 1;
+        ici.arrayLayers   = 1;
+        ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage         = usage;
+        ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (pfnCreateImage(m_Device, &ici, nullptr, &outImage) != VK_SUCCESS) {
+            return false;
+        }
+        VkMemoryRequirements mr;
+        pfnGetImgMemReq(m_Device, outImage, &mr);
+        int idx = findMemTypeOf(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (idx < 0) return false;
+        VkMemoryAllocateInfo mai = {};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize  = mr.size;
+        mai.memoryTypeIndex = (uint32_t)idx;
+        if (pfnAllocMem(m_Device, &mai, nullptr, &outMem) != VK_SUCCESS) return false;
+        if (pfnBindImgMem(m_Device, outImage, outMem, 0) != VK_SUCCESS) return false;
+        return true;
+    };
+
+    const VkFormat NV12_FMT = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+    const VkFormat FLOW_FMT = VK_FORMAT_R16G16_S10_5_NV;
+    if (!allocImage(NV12_FMT, width, height, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                    m_NvOfInputCurr, m_NvOfInputCurrMem) ||
+        !allocImage(NV12_FMT, width, height, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                    m_NvOfInputPrev, m_NvOfInputPrevMem) ||
+        !allocImage(FLOW_FMT, width / m_NvOfGridSize, height / m_NvOfGridSize,
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                    m_NvOfFlowImage, m_NvOfFlowImageMem)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF] VkImage alloc failed");
+        destroyOpticalFlowSession();
+        return false;
+    }
+
+    auto registerImage = [&](VkImage img, VkFormat fmt, void*& outHandle) -> bool {
+        NV_OF_REGISTER_RESOURCE_PARAMS_VK params = {};
+        params.image       = img;
+        params.format      = fmt;
+        params.hOFGpuBuffer = (NvOFGPUBufferHandle*)&outHandle;
+        NV_OF_STATUS s = funcList->nvOFRegisterResourceVk(hOf, &params);
+        if (s != NV_OF_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF] nvOFRegisterResourceVk(format=%d) failed status=%d",
+                        (int)fmt, (int)s);
+            return false;
+        }
+        return true;
+    };
+    if (!registerImage(m_NvOfInputCurr, NV12_FMT, m_NvOfHandleCurr) ||
+        !registerImage(m_NvOfInputPrev, NV12_FMT, m_NvOfHandlePrev) ||
+        !registerImage(m_NvOfFlowImage, FLOW_FMT, m_NvOfHandleFlow)) {
+        destroyOpticalFlowSession();
+        return false;
+    }
+
+    m_NvOfReady = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-NVOF] OF session READY — 3 images registered "
+                "(curr=%p prev=%p flow=%p)",
+                m_NvOfHandleCurr, m_NvOfHandlePrev, m_NvOfHandleFlow);
     return true;
 }
 
@@ -1124,8 +1225,40 @@ void VkFrucRenderer::destroyOpticalFlowSession()
     if (!m_NvOfFuncList) return;
     auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
 
-    // §B-NVOF Phase 3d will populate handle/image teardown here too.
-    // For Phase 3c just destroy the session handle if any.
+    // §B-NVOF Phase 3d — unregister resources before destroying handles.
+    // Order: handles → images/memory → session.
+    auto unregisterIfAny = [&](void*& h) {
+        if (!h || !m_NvOfHandle) return;
+        NV_OF_UNREGISTER_RESOURCE_PARAMS_VK params = {};
+        params.hOFGpuBuffer = (NvOFGPUBufferHandle)h;
+        funcList->nvOFUnregisterResourceVk(&params);
+        h = nullptr;
+    };
+    unregisterIfAny(m_NvOfHandleCurr);
+    unregisterIfAny(m_NvOfHandlePrev);
+    unregisterIfAny(m_NvOfHandleFlow);
+
+    if (m_Device != VK_NULL_HANDLE) {
+        auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        if (getDevPa) {
+            auto pfnDestroyImg = (PFN_vkDestroyImage)getDevPa(m_Device, "vkDestroyImage");
+            auto pfnDestroyView = (PFN_vkDestroyImageView)getDevPa(m_Device, "vkDestroyImageView");
+            auto pfnFreeMem    = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+            if (m_NvOfFlowImageView && pfnDestroyView) {
+                pfnDestroyView(m_Device, m_NvOfFlowImageView, nullptr);
+                m_NvOfFlowImageView = VK_NULL_HANDLE;
+            }
+#define DESTROY_IMG_MEM(img, mem)                                            \
+            if (img && pfnDestroyImg) { pfnDestroyImg(m_Device, img, nullptr); img = VK_NULL_HANDLE; } \
+            if (mem && pfnFreeMem)    { pfnFreeMem(m_Device, mem, nullptr);    mem = VK_NULL_HANDLE; }
+            DESTROY_IMG_MEM(m_NvOfInputCurr,  m_NvOfInputCurrMem)
+            DESTROY_IMG_MEM(m_NvOfInputPrev,  m_NvOfInputPrevMem)
+            DESTROY_IMG_MEM(m_NvOfFlowImage,  m_NvOfFlowImageMem)
+#undef DESTROY_IMG_MEM
+        }
+    }
+
     if (m_NvOfHandle) {
         funcList->nvOFDestroy((NvOFHandle)m_NvOfHandle);
         m_NvOfHandle = nullptr;
