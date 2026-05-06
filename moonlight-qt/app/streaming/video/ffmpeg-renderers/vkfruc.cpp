@@ -4009,7 +4009,7 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
 {
     if (m_FrucReady || m_FrucDisabled) return m_FrucReady;
 
-    const uint32_t BLOCK_SIZE = 8;
+    const uint32_t BLOCK_SIZE = 16;  // §B-quality (b) 8→16: noise-robust ME on PotPlayer/testufo content
     const uint32_t mvW = ((uint32_t)width  + BLOCK_SIZE - 1) / BLOCK_SIZE;
     const uint32_t mvH = ((uint32_t)height + BLOCK_SIZE - 1) / BLOCK_SIZE;
     m_FrucMvWidth  = mvW;
@@ -4454,7 +4454,7 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
 
     const uint32_t mvW = m_FrucMvWidth;
     const uint32_t mvH = m_FrucMvHeight;
-    const uint32_t BLOCK_SIZE = 8;
+    const uint32_t BLOCK_SIZE = 16;  // §B-quality (b) 8→16: noise-robust ME on PotPlayer/testufo content
     const uint32_t MEDIAN_RADIUS = 1;
     const uint32_t frameNum = (uint32_t)(m_FrucFrameCount++);
 
