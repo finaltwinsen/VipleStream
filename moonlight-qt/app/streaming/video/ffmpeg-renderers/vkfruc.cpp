@@ -569,6 +569,25 @@ bool VkFrucRenderer::pickPhysicalDeviceAndQueue()
             break;
         }
     }
+    // §B2 follow-up 2026-05-06 — Optical Flow queue probe (VK_NV_optical_flow).
+    // VK_QUEUE_OPTICAL_FLOW_BIT_NV 的數值是 0x00000100 (bit 8). NV Ampere+
+    // 顯卡會 advertise 這個 queue family；用來 dispatch HW optical flow
+    // 取代 block-matching ME.  Probe-only at this phase, no enable yet.
+    constexpr VkQueueFlagBits OPTICAL_FLOW_BIT = (VkQueueFlagBits)0x00000100;
+    uint32_t opticalFlowQF = UINT32_MAX;
+    uint32_t opticalFlowQueueCount = 0;
+    for (uint32_t qf = 0; qf < qfCount; qf++) {
+        if (qfs[qf].queueFlags & OPTICAL_FLOW_BIT) {
+            opticalFlowQF = qf;
+            opticalFlowQueueCount = qfs[qf].queueCount;
+            break;
+        }
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-NVOF] §B2-followup queue probe: optical flow QF=%s%u count=%u",
+                opticalFlowQF == UINT32_MAX ? "(none) " : "",
+                opticalFlowQF == UINT32_MAX ? 0 : opticalFlowQF,
+                opticalFlowQueueCount);
     // §J.3.e.2.i.8 — VK_KHR_video_decode capability probe.  Query whether
     // this device supports H.264 / H.265 / AV1 decode via raw Vulkan API
     // (跳過 FFmpeg).  Probe only — actual decode session 在 i.8.* sub-phase
@@ -592,6 +611,10 @@ bool VkFrucRenderer::pickPhysicalDeviceAndQueue()
                 VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
                 VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
                 VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME,
+                // §B2 follow-up 2026-05-06 — NVIDIA hardware optical flow
+                // (Ampere+).  Used to replace block-matching ME (Stage 1 in
+                // FRUC compute chain) with HW OF for higher-quality MV.
+                "VK_NV_optical_flow",
             };
             for (const char* e : probeExts) {
                 bool found = false;
@@ -728,6 +751,42 @@ bool VkFrucRenderer::createLogicalDevice()
         qci.pQueuePriorities = &queuePriority;
         qcis.push_back(qci);
     }
+    // §B2 follow-up 2026-05-06 — Optical Flow queue create info (only when
+    // VIPLE_VKFRUC_NV_OF=1 + driver advertises the queue family).  Saved at
+    // m_OpticalFlowQueueFamily so subsequent OF session creation + cmd buf
+    // submission knows which queue to use.  Stored in member here, fetched
+    // queue handle below after vkCreateDevice.
+    bool wantNvOfQ = qEnvironmentVariableIntValue("VIPLE_VKFRUC_NV_OF") != 0;
+    m_OpticalFlowQueueFamily = UINT32_MAX;
+    if (wantNvOfQ) {
+        // Re-query queue family properties locally (qfs vector lives in
+        // pickPhysicalDevice's scope, not visible here).
+        auto pfnGetQFP_OF = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetPhysicalDeviceQueueFamilyProperties");
+        if (pfnGetQFP_OF) {
+            uint32_t qfCountOf = 0;
+            pfnGetQFP_OF(m_PhysicalDevice, &qfCountOf, nullptr);
+            std::vector<VkQueueFamilyProperties> qfsOf(qfCountOf);
+            pfnGetQFP_OF(m_PhysicalDevice, &qfCountOf, qfsOf.data());
+            constexpr VkQueueFlagBits kOFBit = (VkQueueFlagBits)0x00000100;
+            for (uint32_t qf = 0; qf < qfCountOf; qf++) {
+                if (qfsOf[qf].queueFlags & kOFBit) {
+                    m_OpticalFlowQueueFamily = qf;
+                    break;
+                }
+            }
+        }
+        if (m_OpticalFlowQueueFamily != UINT32_MAX
+            && m_OpticalFlowQueueFamily != m_QueueFamily
+            && m_OpticalFlowQueueFamily != m_DecodeQueueFamily) {
+            VkDeviceQueueCreateInfo qci = {};
+            qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+            qci.queueFamilyIndex = m_OpticalFlowQueueFamily;
+            qci.queueCount = 1;
+            qci.pQueuePriorities = &queuePriority;
+            qcis.push_back(qci);
+        }
+    }
 
     // §J.3.e.2.i.7 HW path：mirror libplacebo's k_OptionalDeviceExtensions
     // (plvk.cpp:38-69) — FFmpeg hwcontext_vulkan 期待這些 ext 已 enable
@@ -776,6 +835,14 @@ bool VkFrucRenderer::createLogicalDevice()
     if (VipleAftermath::IsActive()) {
         wantedDevExts.push_back(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
         wantedDevExts.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    }
+    // §B2 follow-up 2026-05-06 — VK_NV_optical_flow opt-in via env var.
+    // Used to replace block-matching ME with HW optical flow on NV Ampere+.
+    // Probe loop above already logged whether it's available — only enable
+    // when env var set so default builds stay extension-minimal.
+    bool wantNvOf = qEnvironmentVariableIntValue("VIPLE_VKFRUC_NV_OF") != 0;
+    if (wantNvOf) {
+        wantedDevExts.push_back(VK_NV_OPTICAL_FLOW_EXTENSION_NAME);
     }
 
     // Query device extensions supported on this physical device, filter
@@ -891,6 +958,13 @@ bool VkFrucRenderer::createLogicalDevice()
         return false;
     }
     pfnGetDeviceQueue(m_Device, m_QueueFamily, 0, &m_GraphicsQueue);
+    // §B2 follow-up 2026-05-06 — fetch OF queue handle if extension enabled.
+    if (m_OpticalFlowQueueFamily != UINT32_MAX) {
+        pfnGetDeviceQueue(m_Device, m_OpticalFlowQueueFamily, 0, &m_OpticalFlowQueue);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF] OF queue fetched (QF=%u handle=%p)",
+                    m_OpticalFlowQueueFamily, (void*)m_OpticalFlowQueue);
+    }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.2 VkDevice created (%s, QF=%u, queue=%p)",
                 "KHR_swapchain + KHR_sampler_ycbcr_conversion",
