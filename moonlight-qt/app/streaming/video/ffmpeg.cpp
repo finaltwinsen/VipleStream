@@ -1009,6 +1009,25 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
     const char* codecString;
     int ret;
 
+    // §B1b-DIAG 2026-05-06 — one-shot diagnostic for "FRUC overlay says
+    // 未啟用 even when stats log shows FRUC is running" investigation.
+    // Print actual m_FrontendRenderer pointer + getRendererType + isFRUCActive
+    // + getFRUCBackendName so we can compare to the active vkfruc instance.
+    static std::atomic<bool> s_DiagPrinted{false};
+    if (!s_DiagPrinted.exchange(true) && m_FrontendRenderer) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-DIAG-OVERLAY] stringifyVideoStats: frontend=%p backend=%p "
+            "(same=%d) frontendType=%d isFRUCActive=%d backendName=%s "
+            "FRUCPaused=%d renderedFrames=%u",
+            (void*)m_FrontendRenderer, (void*)m_BackendRenderer,
+            (m_FrontendRenderer == m_BackendRenderer) ? 1 : 0,
+            (int)m_FrontendRenderer->getRendererType(),
+            (int)m_FrontendRenderer->isFRUCActive(),
+            m_FrontendRenderer->getFRUCBackendName(),
+            (int)m_FrontendRenderer->m_FRUCPaused.load(),
+            stats.renderedFrames);
+    }
+
     // Start with an empty string
     output[offset] = 0;
 
