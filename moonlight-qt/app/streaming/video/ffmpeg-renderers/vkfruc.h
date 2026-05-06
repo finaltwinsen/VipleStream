@@ -146,7 +146,11 @@ private:
     void*          m_NvOfHandleFlow      = nullptr;
     uint32_t       m_NvOfWidth           = 0;
     uint32_t       m_NvOfHeight          = 0;
-    uint32_t       m_NvOfGridSize        = 4;       // 1 / 2 / 4 (output grid)
+    uint32_t       m_NvOfGridSize        = 2;       // 1 / 2 / 4 (output grid)
+                                                    // Default 2 chosen by §B-NVOF Phase 7CD benchmark: beats grid=4
+                                                    // (less precision loss SFIXED5→Q1) and beats grid=1 (less
+                                                    // over-smoothing of motion magnitude variation in converter).
+                                                    // Override via VIPLE_VKFRUC_NV_OF_GRID=1|2|4.
     bool           m_NvOfReady           = false;
     // §B-NVOF Phase 4a — cross-queue execution resources.
     //   m_NvOfCmdPool / m_NvOfCmdBuf: independent command pool + buffer

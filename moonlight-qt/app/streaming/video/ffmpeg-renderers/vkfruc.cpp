@@ -1087,30 +1087,61 @@ bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
     m_NvOfWidth  = width;
     m_NvOfHeight = height;
 
+    // §B-NVOF Phase 7C 2026-05-06 — VIPLE_VKFRUC_NV_OF_PERF env var
+    // (slow|medium|fast) maps to NV_OF_PERF_LEVEL.  SLOW=5 = best quality,
+    // MEDIUM=10 = default balance, FAST=20 = lowest GPU cost.
+    QByteArray perfEnv = qgetenv("VIPLE_VKFRUC_NV_OF_PERF");
+    NV_OF_PERF_LEVEL perfLevel = NV_OF_PERF_LEVEL_MEDIUM;
+    const char* perfLabel = "MEDIUM";
+    if (perfEnv == "slow" || perfEnv == "SLOW") {
+        perfLevel = NV_OF_PERF_LEVEL_SLOW;
+        perfLabel = "SLOW";
+    } else if (perfEnv == "fast" || perfEnv == "FAST") {
+        perfLevel = NV_OF_PERF_LEVEL_FAST;
+        perfLabel = "FAST";
+    }
+    // §B-NVOF Phase 7D 2026-05-06 — VIPLE_VKFRUC_NV_OF_GRID env var (1|2|4).
+    // Smaller grid = more flow vectors per frame = higher precision but
+    // more compute/bandwidth.  grid=4 default; grid=1 max precision (8x
+    // staging buffer at 1080p, 8x8 average per mv cell in converter).
+    QByteArray gridEnv = qgetenv("VIPLE_VKFRUC_NV_OF_GRID");
+    // Default grid=2 from §B-NVOF Phase 7CD benchmark (best precision /
+    // smoothing trade-off; beats both grid=1 and grid=4 on testufo).
+    NV_OF_OUTPUT_VECTOR_GRID_SIZE outGridSize = NV_OF_OUTPUT_VECTOR_GRID_SIZE_2;
+    m_NvOfGridSize = 2;
+    if (gridEnv == "1") {
+        outGridSize = NV_OF_OUTPUT_VECTOR_GRID_SIZE_1;
+        m_NvOfGridSize = 1;
+    } else if (gridEnv == "4") {
+        outGridSize = NV_OF_OUTPUT_VECTOR_GRID_SIZE_4;
+        m_NvOfGridSize = 4;
+    }
+
     NV_OF_INIT_PARAMS initParams = {};
     initParams.width             = width;
     initParams.height            = height;
-    initParams.outGridSize       = NV_OF_OUTPUT_VECTOR_GRID_SIZE_4;
+    initParams.outGridSize       = outGridSize;
     initParams.hintGridSize      = NV_OF_HINT_VECTOR_GRID_SIZE_8;  // unused unless enableExternalHints
     initParams.mode              = NV_OF_MODE_OPTICALFLOW;
-    initParams.perfLevel         = NV_OF_PERF_LEVEL_MEDIUM;
+    initParams.perfLevel         = perfLevel;
     initParams.predDirection     = NV_OF_PRED_DIRECTION_FORWARD;
     initParams.inputBufferFormat = NV_OF_BUFFER_FORMAT_NV12;
 
     st = funcList->nvOFInit(hOf, &initParams);
     if (st != NV_OF_SUCCESS) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-NVOF] nvOFInit (W=%u H=%u grid=4 NV12) failed status=%d",
-                    width, height, (int)st);
+                    "[VIPLE-VKFRUC-NVOF] nvOFInit (W=%u H=%u grid=%u perf=%s NV12) failed status=%d",
+                    width, height, m_NvOfGridSize, perfLabel, (int)st);
         funcList->nvOFDestroy(hOf);
         m_NvOfHandle = nullptr;
         return false;
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-NVOF] OF session init OK (W=%u H=%u grid=4 perf=MEDIUM "
+                "[VIPLE-VKFRUC-NVOF] OF session init OK (W=%u H=%u grid=%u perf=%s "
                 "predFwd flowDims=%ux%u) — allocating image resources",
-                width, height, width / m_NvOfGridSize, height / m_NvOfGridSize);
+                width, height, m_NvOfGridSize, perfLabel,
+                width / m_NvOfGridSize, height / m_NvOfGridSize);
 
     // §B-NVOF Phase 3d 2026-05-06 — allocate 3 VkImages and register them
     // with the OF session as NvOFGPUBufferHandle.
@@ -4599,9 +4630,9 @@ void main() {
 // V/32; Q1 = round(pixel * 2) = round(V/16).  Output written to existing
 // m_FrucMvFilteredBuf so downstream warp shader consumes unchanged.
 //
-// Dimension mapping: OF flow grid 4x4 → flowW=W/4, flowH=H/4 (1080p: 480x270).
-// Our existing mv buffer is BLOCK_SIZE=8 → mvW=W/8, mvH=H/8 (1080p: 240x135).
-// 2x2 flow vectors collapse into 1 mv cell (average + scale).
+// §B-NVOF Phase 7D 2026-05-06 — dynamic scale (flowW/mvW × flowH/mvH).
+// grid=4 → 2x2 average (4 reads); grid=2 → 4x4 (16 reads); grid=1 → 8x8
+// (64 reads). Loop runs at variable bounds determined by push constants.
 static const char* kVkFrucNvOfConvertShaderGlsl = R"GLSL(
 #version 450
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -4618,8 +4649,8 @@ layout(binding = 1, std430) writeonly buffer MvOut {
 } mvOut;
 
 layout(push_constant) uniform PC {
-    uint flowW;   // = mvW * 2 typically
-    uint flowH;   // = mvH * 2 typically
+    uint flowW;
+    uint flowH;
     uint mvW;
     uint mvH;
 } p;
@@ -4637,14 +4668,22 @@ void main() {
     uint mvY = gl_GlobalInvocationID.y;
     if (mvX >= p.mvW || mvY >= p.mvH) return;
 
-    // Average 2x2 flow cells centered on this mv cell.
-    uint fx = mvX * 2;
-    uint fy = mvY * 2;
-    ivec2 sum = readFlow(fx, fy)
-              + readFlow(fx + 1u, fy)
-              + readFlow(fx,      fy + 1u)
-              + readFlow(fx + 1u, fy + 1u);
-    ivec2 avgRaw = sum / 4;
+    // Dynamic scale based on grid choice (1/2/4):
+    //   grid=4 → flowW=mvW*2, scale=2 → 4 reads / mv cell
+    //   grid=2 → flowW=mvW*4, scale=4 → 16 reads / mv cell
+    //   grid=1 → flowW=mvW*8, scale=8 → 64 reads / mv cell
+    uint scaleX = p.flowW / p.mvW;
+    uint scaleY = p.flowH / p.mvH;
+    uint count  = scaleX * scaleY;
+    uint fxBase = mvX * scaleX;
+    uint fyBase = mvY * scaleY;
+    ivec2 sum = ivec2(0);
+    for (uint dy = 0u; dy < scaleY; dy++) {
+        for (uint dx = 0u; dx < scaleX; dx++) {
+            sum += readFlow(fxBase + dx, fyBase + dy);
+        }
+    }
+    ivec2 avgRaw = sum / int(count);
 
     // SFIXED5 / 16 = Q1 (pixel * 2).  Signed division rounds toward zero.
     ivec2 q1 = avgRaw / 16;
