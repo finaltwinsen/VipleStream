@@ -4546,15 +4546,28 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     }
 
     // ---- Stage 2: MV median filter ----
-    // §J.3.e.2.i.7 R5: 把 median compute pass 換成 cmdCopyBuffer
-    // (m_FrucMvBuf → m_FrucMvFilteredBuf)，等同 noop 過濾.  目標是測 median
-    // 對視覺品質的實際貢獻 vs GPU 時間節省 (median 預估佔 0.2-0.3ms).
-    // Warp 仍從 m_FrucMvFilteredBuf 讀，binding 不變.
+    // §J.3.e.2.i.7 R5 had this as a noop cmdCopyBuffer experiment,
+    // §B-quality (a) 2026-05-06 — re-enabled real 3×3 median dispatch.
+    // baseline_b1b_video showed OF 30Hz alternation = 5.95% (threshold
+    // 3% = "strong"), SSIM 30Hz = 5.40%; main suspect is ME's outlier
+    // MVs (block matching produces noisy MVs at low-texture / occluded
+    // regions).  Median smoothes those out before warp consumes them,
+    // making interp frame visually closer to the real frame in motion
+    // pattern.  GPU cost ≈ 0.2-0.3 ms (negligible vs 1.0 ms total
+    // chain).  See plvk.cpp:1482 kFrucMvMedianShaderGlsl for shader
+    // (3×3 9-element sorting network, local_size 8×8, edge-clamp
+    // sampling, fast-path for uniform / near-uniform neighbourhoods).
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeline);
+    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeLay,
+                       0, 1, &m_FrucMedianDescSet, 0, nullptr);
     {
-        VkBufferCopy cp = {};
-        cp.size = (VkDeviceSize)mvW * mvH * 2 * sizeof(int);  // mvX + mvY per block
-        pfnCmdCopyBuffer(cmd, m_FrucMvBuf, m_FrucMvFilteredBuf, 1, &cp);
+        struct {
+            uint32_t mvWidth, mvHeight, _pad0, _pad1;
+        } pcMed = { mvW, mvH, 0, 0 };
+        pfnCmdPushConst(cmd, m_FrucMedianPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                        0, sizeof(pcMed), &pcMed);
     }
+    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
     computeBufBarrier(m_FrucMvFilteredBuf);
     // §J.3.g v2 ts[3] — after Median (copy mode) barrier
     if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
