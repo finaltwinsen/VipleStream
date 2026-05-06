@@ -410,37 +410,30 @@ def compute_ssim_series(gray: np.ndarray) -> np.ndarray:
     return out
 
 
-def compute_of_magnitude_series(gray: np.ndarray) -> np.ndarray:
-    """Per-frame mean optical flow magnitude (Farneback).  out[0] = NaN."""
-    n = gray.shape[0]
-    out = np.full(n, np.nan, dtype=np.float64)
-    if n < 2:
-        return out
-    for i in range(1, n):
-        flow = cv2.calcOpticalFlowFarneback(
-            gray[i-1], gray[i], None,
-            pyr_scale=0.5, levels=2, winsize=15,
-            iterations=2, poly_n=5, poly_sigma=1.1, flags=0,
-        )
-        out[i] = float(np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2).mean())
-    return out
-
-
-def block_outlier_ratio_series(gray: np.ndarray, block: int = 16) -> np.ndarray:
+def compute_of_metrics_series(gray: np.ndarray, block: int = 16) -> tuple[np.ndarray, np.ndarray]:
     """
-    For each frame pair (t-1, t): per-block OF magnitude, count blocks
-    deviating > 2σ from frame median, return outlier ratio per frame.
-    out[0] = NaN.
+    Single Farneback OF pass — returns both:
+      - of_mag: per-frame mean magnitude (length N, [0]=NaN)
+      - block_outlier: per-frame ratio of blocks > 2σ from frame median
+    Replaces compute_of_magnitude_series + block_outlier_ratio_series
+    (saves 50% time vs running OF twice).
+
+    Block aggregation uses vectorised reshape + axis reduce (no Python
+    loop over blocks), much faster than nested for.
     """
     n = gray.shape[0]
-    out = np.full(n, np.nan, dtype=np.float64)
+    of_mag = np.full(n, np.nan, dtype=np.float64)
+    block_outlier = np.full(n, np.nan, dtype=np.float64)
     if n < 2:
-        return out
+        return of_mag, block_outlier
+
     h, w = gray.shape[1:]
     nby = h // block
     nbx = w // block
-    if nby < 2 or nbx < 2:
-        return out
+    use_blocks = nby >= 2 and nbx >= 2
+    # Crop to multiple of block for clean reshape
+    h_crop = nby * block
+    w_crop = nbx * block
 
     for i in range(1, n):
         flow = cv2.calcOpticalFlowFarneback(
@@ -449,22 +442,20 @@ def block_outlier_ratio_series(gray: np.ndarray, block: int = 16) -> np.ndarray:
             iterations=2, poly_n=5, poly_sigma=1.1, flags=0,
         )
         mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
-        # per-block mean
-        block_means = np.zeros(nby * nbx)
-        for by in range(nby):
-            for bx in range(nbx):
-                block_means[by * nbx + bx] = mag[
-                    by*block:(by+1)*block,
-                    bx*block:(bx+1)*block,
-                ].mean()
-        med = np.median(block_means)
-        std = np.std(block_means)
-        if std > 0:
-            outliers = np.abs(block_means - med) > 2 * std
-            out[i] = float(outliers.sum() / len(block_means))
-        else:
-            out[i] = 0.0
-    return out
+        of_mag[i] = float(mag.mean())
+
+        if use_blocks:
+            # Vectorised block-mean: reshape (h,w) -> (nby, block, nbx, block) -> mean over (1,3)
+            cropped = mag[:h_crop, :w_crop]
+            blocks = cropped.reshape(nby, block, nbx, block).mean(axis=(1, 3))
+            bm = blocks.flatten()
+            med = np.median(bm)
+            std = bm.std()
+            if std > 0:
+                block_outlier[i] = float((np.abs(bm - med) > 2 * std).sum() / len(bm))
+            else:
+                block_outlier[i] = 0.0
+    return of_mag, block_outlier
 
 
 def fft_alternation_power(series: np.ndarray, fps: int, target_freq_hz: float = 30.0,
@@ -535,11 +526,8 @@ def video_mode_analyze(frames: np.ndarray, gray: np.ndarray, fps: int) -> tuple[
     print("  computing per-frame SSIM(t, t-1) …")
     ssim_series = compute_ssim_series(gray)
 
-    print("  computing per-frame OF magnitude …")
-    of_series = compute_of_magnitude_series(gray)
-
-    print("  computing per-frame block-OF outlier ratio …")
-    block_series = block_outlier_ratio_series(gray)
+    print("  computing per-frame OF magnitude + block outlier (single pass) …")
+    of_series, block_series = compute_of_metrics_series(gray)
 
     # Apply scene-cut filter
     of_filt = filter_series_by_cuts(of_series, cuts, buffer=1)
