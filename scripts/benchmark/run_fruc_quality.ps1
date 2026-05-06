@@ -65,29 +65,22 @@ Write-Host "  server: $ServerHost ($StreamCodec)" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
 # ---- Step 1: server-side motion source ----
-# video mode: auto-launch PotPlayer fullscreen from 0:00 (reproducible content)
-# ufo mode: launch Edge fullscreen testufo
-# -SkipServerSetup: bypass both (use whatever's already running)
-if ($SkipServerSetup) {
-    Write-Host "`n[1/7] -SkipServerSetup → keeping existing server-side motion source" -ForegroundColor DarkYellow
-} elseif ($Mode -eq "video") {
-    Write-Host "`n[1/7] starting PotPlayer fullscreen from 0:00 on server …" -ForegroundColor Yellow
-    $startScript = Join-Path $PSScriptRoot "start_video_on_server.ps1"
-    & pwsh -ExecutionPolicy Bypass -File $startScript -VideoPath $VideoPath -ServerHost $ServerHost
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to launch PotPlayer on server (rc=$LASTEXITCODE)"
-        exit 1
-    }
-    Start-Sleep -Seconds 1  # extra time for PotPlayer to settle
+# Auto-launching GUI apps (PotPlayer / Edge) into a different Windows
+# session via SSH proved unreliable: even Sysinternals PsExec -i 1 reports
+# success but the streaming session sometimes captures the wrong session.
+# Just trust the user to set up the motion source manually on server,
+# and assume it's ready before this script runs.
+#
+# Acceptable sources:
+#   - testufo.com fullscreen in Chrome/Edge (best for synthetic motion)
+#   - PotPlayer / VLC fullscreen with a video file looping
+#   - any animation that fills 1080p screen
+if ($Mode -eq "video") {
+    Write-Host "`n[1/7] video mode — using user-managed motion source on server" -ForegroundColor DarkYellow
+    Write-Host "       (make sure your video / testufo / motion source is fullscreen + playing)" -ForegroundColor DarkGray
 } else {
-    Write-Host "`n[1/7] starting testufo on server via SSH …" -ForegroundColor Yellow
-    try {
-        ssh -o BatchMode=yes "final@$ServerHost" 'powershell -Command "Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 800; Start-Process msedge -ArgumentList ''--start-fullscreen'',''https://www.testufo.com''"' 2>&1 | Out-Null
-        Write-Host "      OK — Edge fullscreen testufo on server" -ForegroundColor Green
-    } catch {
-        Write-Warning "SSH testufo launch failed: $_  (continuing anyway, you may need to set up testufo manually)"
-    }
-    Start-Sleep -Seconds 3
+    Write-Host "`n[1/7] ufo mode — using user-managed testufo source on server" -ForegroundColor DarkYellow
+    Write-Host "       (open https://www.testufo.com fullscreen in browser before running)" -ForegroundColor DarkGray
 }
 
 # ---- Step 2: kill stale client + launch ----
