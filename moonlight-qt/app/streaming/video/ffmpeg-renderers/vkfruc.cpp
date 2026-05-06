@@ -890,9 +890,21 @@ bool VkFrucRenderer::createLogicalDevice()
     m_Sync2Feat = {};
     m_Sync2Feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
 
+    // §B-NVOF Phase 3c — VkPhysicalDeviceOpticalFlowFeaturesNV chain entry.
+    // Linked into pNext only if user opted into VIPLE_VKFRUC_NV_OF=1 AND
+    // device has OF queue family.  Otherwise skipped (extension not even
+    // enabled, struct sType would be invalid).
+    void* nextChain = (void*)&m_Sync2Feat;
+    if (m_OpticalFlowQueueFamily != UINT32_MAX) {
+        m_OfFeat = {};
+        m_OfFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_FEATURES_NV;
+        m_OfFeat.pNext = nextChain;
+        nextChain = (void*)&m_OfFeat;
+    }
+
     m_TimelineFeat = {};
     m_TimelineFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
-    m_TimelineFeat.pNext = &m_Sync2Feat;
+    m_TimelineFeat.pNext = nextChain;
 
     m_YcbcrFeat = {};
     m_YcbcrFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES;
@@ -1046,6 +1058,81 @@ void VkFrucRenderer::unloadNvOfApi()
         m_NvOfApiModule = nullptr;
     }
 #endif
+}
+
+// §B-NVOF Phase 3c 2026-05-06 — create OF session: nvCreateOpticalFlowVk +
+// nvOFInit + alloc NV12 prev/curr input images + R16G16_S10_5_NV flow output
+// image + nvOFRegisterResourceVk × 3.  Failure non-fatal: caller falls back.
+//
+// Image format choices follow SDK NvOFUtilsVulkan::NvOFBufferFormatToVkFormat:
+//   NV_OF_BUFFER_FORMAT_NV12     → VK_FORMAT_G8_B8R8_2PLANE_420_UNORM
+//   NV_OF_BUFFER_FORMAT_SHORT2   → VK_FORMAT_R16G16_S10_5_NV (Q10.5 fixed)
+//
+// Output grid 4 chosen per NV_OF_OUTPUT_VECTOR_GRID_SIZE_4 (4×4 px per MV).
+// At 1080p → flow image 480×270 = 129 600 vectors × 4 B = 518 KB.
+bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
+{
+    if (!m_NvOfFuncList) return false;
+    if (m_NvOfReady) return true;
+
+    auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
+    NvOFHandle hOf = nullptr;
+    NV_OF_STATUS st = funcList->nvCreateOpticalFlowVk(m_Instance, m_PhysicalDevice, m_Device, &hOf);
+    if (st != NV_OF_SUCCESS || !hOf) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF] nvCreateOpticalFlowVk failed status=%d", (int)st);
+        return false;
+    }
+    m_NvOfHandle = (void*)hOf;
+    m_NvOfWidth  = width;
+    m_NvOfHeight = height;
+
+    NV_OF_INIT_PARAMS initParams = {};
+    initParams.width             = width;
+    initParams.height            = height;
+    initParams.outGridSize       = NV_OF_OUTPUT_VECTOR_GRID_SIZE_4;
+    initParams.hintGridSize      = NV_OF_HINT_VECTOR_GRID_SIZE_8;  // unused unless enableExternalHints
+    initParams.mode              = NV_OF_MODE_OPTICALFLOW;
+    initParams.perfLevel         = NV_OF_PERF_LEVEL_MEDIUM;
+    initParams.predDirection     = NV_OF_PRED_DIRECTION_FORWARD;
+    initParams.inputBufferFormat = NV_OF_BUFFER_FORMAT_NV12;
+
+    st = funcList->nvOFInit(hOf, &initParams);
+    if (st != NV_OF_SUCCESS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF] nvOFInit (W=%u H=%u grid=4 NV12) failed status=%d",
+                    width, height, (int)st);
+        funcList->nvOFDestroy(hOf);
+        m_NvOfHandle = nullptr;
+        return false;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-NVOF] OF session ready (W=%u H=%u grid=4 perf=MEDIUM "
+                "predFwd flowDims=%ux%u)",
+                width, height, width / m_NvOfGridSize, height / m_NvOfGridSize);
+
+    // §B-NVOF Phase 3d (next commit) — alloc prev/curr NV12 + flow output
+    // VkImages and call nvOFRegisterResourceVk × 3.  Without that, m_NvOfReady
+    // stays false and chain still uses block-matching ME.  This commit only
+    // proves session lifecycle works.
+    return true;
+}
+
+void VkFrucRenderer::destroyOpticalFlowSession()
+{
+    if (!m_NvOfFuncList) return;
+    auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
+
+    // §B-NVOF Phase 3d will populate handle/image teardown here too.
+    // For Phase 3c just destroy the session handle if any.
+    if (m_NvOfHandle) {
+        funcList->nvOFDestroy((NvOFHandle)m_NvOfHandle);
+        m_NvOfHandle = nullptr;
+    }
+    m_NvOfReady  = false;
+    m_NvOfWidth  = 0;
+    m_NvOfHeight = 0;
 }
 
 bool VkFrucRenderer::createSwapchain()
@@ -4540,6 +4627,13 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                 "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: PASS — 3 pipelines + 6 buffers + 3 descSets ready "
                 "(sizeRGB=%llu, sizeMV=%llu)",
                 (unsigned long long)sizeRGB, (unsigned long long)sizeMV);
+
+    // §B-NVOF Phase 3c — best-effort OF session create.  Failure non-fatal
+    // (m_NvOfReady stays false → chain falls back to block-matching ME).
+    if (m_NvOfFuncList) {
+        createOpticalFlowSession((uint32_t)width, (uint32_t)height);
+    }
+
     return true;
 }
 
@@ -4547,6 +4641,10 @@ void VkFrucRenderer::destroyFrucComputeResources()
 {
     if (!m_FrucReady && !m_FrucMePipeline) return;
     if (m_Device == VK_NULL_HANDLE) return;
+
+    // §B-NVOF Phase 3c — destroy OF session before tearing down compute
+    // chain (so registered resources unwind in the correct order).
+    destroyOpticalFlowSession();
 
     auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetDeviceProcAddr");

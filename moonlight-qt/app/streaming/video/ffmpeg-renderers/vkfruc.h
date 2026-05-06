@@ -130,6 +130,26 @@ private:
     void* m_NvOfFuncList   = nullptr;   // NV_OF_VK_API_FUNCTION_LIST*
     bool loadNvOfApi();
     void unloadNvOfApi();
+    // §B-NVOF Phase 3c — OF session: owned NvOFHandle + per-frame image
+    // resources (curr/prev NV12 input, flow vector output).  Created lazily
+    // from createFrucComputeResources when m_NvOfFuncList non-null.
+    void* m_NvOfHandle              = nullptr;  // NvOFHandle
+    VkImage        m_NvOfInputCurr       = VK_NULL_HANDLE;
+    VkDeviceMemory m_NvOfInputCurrMem    = VK_NULL_HANDLE;
+    VkImage        m_NvOfInputPrev       = VK_NULL_HANDLE;
+    VkDeviceMemory m_NvOfInputPrevMem    = VK_NULL_HANDLE;
+    VkImage        m_NvOfFlowImage       = VK_NULL_HANDLE;
+    VkDeviceMemory m_NvOfFlowImageMem    = VK_NULL_HANDLE;
+    VkImageView    m_NvOfFlowImageView   = VK_NULL_HANDLE;
+    void*          m_NvOfHandleCurr      = nullptr;  // NvOFGPUBufferHandle
+    void*          m_NvOfHandlePrev      = nullptr;
+    void*          m_NvOfHandleFlow      = nullptr;
+    uint32_t       m_NvOfWidth           = 0;
+    uint32_t       m_NvOfHeight          = 0;
+    uint32_t       m_NvOfGridSize        = 4;       // 1 / 2 / 4 (output grid)
+    bool           m_NvOfReady           = false;
+    bool createOpticalFlowSession(uint32_t width, uint32_t height);
+    void destroyOpticalFlowSession();
 
     // §J.3.e.2.i.3.a — ffmpeg AVHWDeviceContext bridges our VkDevice
     // to ffmpeg's Vulkan video decoder so AVVkFrame.img[0] gets created
@@ -422,6 +442,12 @@ private:
     VkPhysicalDeviceTimelineSemaphoreFeatures         m_TimelineFeat = {};
     VkPhysicalDeviceSamplerYcbcrConversionFeatures    m_YcbcrFeat   = {};
     VkPhysicalDeviceFeatures2                         m_DevFeat2    = {};
+    // §B-NVOF Phase 3c — VkPhysicalDeviceOpticalFlowFeaturesNV (extension
+    // VK_NV_optical_flow). Linked into m_DevFeat2.pNext chain when
+    // m_OpticalFlowQueueFamily != UINT32_MAX. Required by NV driver: nvOFInit
+    // returns DEVICE_DOES_NOT_EXIST (status 3) if VkDevice was created
+    // without opticalFlow=VK_TRUE in pNext chain.
+    VkPhysicalDeviceOpticalFlowFeaturesNV             m_OfFeat      = {};
     static void  lockQueueStub(struct AVHWDeviceContext* ctx, uint32_t qf, uint32_t idx);
     static void  unlockQueueStub(struct AVHWDeviceContext* ctx, uint32_t qf, uint32_t idx);
 
