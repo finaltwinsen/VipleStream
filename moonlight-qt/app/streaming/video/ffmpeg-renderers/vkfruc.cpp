@@ -1305,6 +1305,50 @@ bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
         }
     }
 
+    // §B-NVOF Phase 5 — allocate + update converter desc set now that
+    // m_NvOfFlowStaging exists.  Pool is m_FrucDescPool sized for 7 sets,
+    // converter is the 7th (after NV12RGB normal + native + ME + Median +
+    // Warp + Warp2).
+    if (m_FrucNvOfConvertDsl != VK_NULL_HANDLE && m_FrucNvOfConvertPipeline != VK_NULL_HANDLE) {
+        auto pfnAllocDescSets = (PFN_vkAllocateDescriptorSets)getDevPaOf(
+            m_Device, "vkAllocateDescriptorSets");
+        auto pfnUpdateDescSets = (PFN_vkUpdateDescriptorSets)getDevPaOf(
+            m_Device, "vkUpdateDescriptorSets");
+        if (pfnAllocDescSets && pfnUpdateDescSets) {
+            VkDescriptorSetAllocateInfo asi = {};
+            asi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            asi.descriptorPool     = m_FrucDescPool;
+            asi.descriptorSetCount = 1;
+            asi.pSetLayouts        = &m_FrucNvOfConvertDsl;
+            if (pfnAllocDescSets(m_Device, &asi, &m_FrucNvOfConvertDescSet) == VK_SUCCESS) {
+                VkDescriptorBufferInfo bi[2] = {};
+                bi[0].buffer = m_NvOfFlowStaging;
+                bi[0].offset = 0;
+                bi[0].range  = VK_WHOLE_SIZE;
+                bi[1].buffer = m_FrucMvFilteredBuf;
+                bi[1].offset = 0;
+                bi[1].range  = VK_WHOLE_SIZE;
+                VkWriteDescriptorSet wds[2] = {};
+                for (int b = 0; b < 2; b++) {
+                    wds[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    wds[b].dstSet          = m_FrucNvOfConvertDescSet;
+                    wds[b].dstBinding      = (uint32_t)b;
+                    wds[b].descriptorCount = 1;
+                    wds[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    wds[b].pBufferInfo     = &bi[b];
+                }
+                pfnUpdateDescSets(m_Device, 2, wds, 0, nullptr);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-NVOF] NvOFConvert desc set alloc/update OK "
+                            "(staging→mv_filtered)");
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-NVOF] vkAllocateDescriptorSets(NvOFConvert) failed — "
+                            "OF result not consumed by chain");
+            }
+        }
+    }
+
     m_NvOfReady = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-NVOF] OF session READY — 3 images registered "
@@ -4548,6 +4592,69 @@ void main() {
 }
 )GLSL";
 
+// §B-NVOF Phase 5 2026-05-06 — SFIXED5 (Q10.5 fixed-point) → Q1 (×2 of integer
+// pixel) format converter.  Reads m_NvOfFlowStaging (storage buffer copy of
+// m_NvOfFlowImage VK_FORMAT_R16G16_S10_5_NV), 4 bytes/cell = packed int16
+// pair (low=x, high=y) in S10.5 fixed point.  SFIXED5 V represents pixel
+// V/32; Q1 = round(pixel * 2) = round(V/16).  Output written to existing
+// m_FrucMvFilteredBuf so downstream warp shader consumes unchanged.
+//
+// Dimension mapping: OF flow grid 4x4 → flowW=W/4, flowH=H/4 (1080p: 480x270).
+// Our existing mv buffer is BLOCK_SIZE=8 → mvW=W/8, mvH=H/8 (1080p: 240x135).
+// 2x2 flow vectors collapse into 1 mv cell (average + scale).
+static const char* kVkFrucNvOfConvertShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// flowIn.data[idx] = packed int16x2 (low 16 bit = x, high 16 bit = y), each
+// component is signed Q10.5 fixed-point flow vector.
+layout(binding = 0, std430) readonly buffer FlowIn {
+    int data[];
+} flowIn;
+
+// mvOut.data is pairs of int (Q1 x, Q1 y), matches m_FrucMvFilteredBuf.
+layout(binding = 1, std430) writeonly buffer MvOut {
+    int data[];
+} mvOut;
+
+layout(push_constant) uniform PC {
+    uint flowW;   // = mvW * 2 typically
+    uint flowH;   // = mvH * 2 typically
+    uint mvW;
+    uint mvH;
+} p;
+
+ivec2 readFlow(uint x, uint y) {
+    if (x >= p.flowW || y >= p.flowH) return ivec2(0);
+    int packed = flowIn.data[y * p.flowW + x];
+    int rawX = (packed << 16) >> 16;
+    int rawY = packed >> 16;
+    return ivec2(rawX, rawY);
+}
+
+void main() {
+    uint mvX = gl_GlobalInvocationID.x;
+    uint mvY = gl_GlobalInvocationID.y;
+    if (mvX >= p.mvW || mvY >= p.mvH) return;
+
+    // Average 2x2 flow cells centered on this mv cell.
+    uint fx = mvX * 2;
+    uint fy = mvY * 2;
+    ivec2 sum = readFlow(fx, fy)
+              + readFlow(fx + 1u, fy)
+              + readFlow(fx,      fy + 1u)
+              + readFlow(fx + 1u, fy + 1u);
+    ivec2 avgRaw = sum / 4;
+
+    // SFIXED5 / 16 = Q1 (pixel * 2).  Signed division rounds toward zero.
+    ivec2 q1 = avgRaw / 16;
+
+    uint outIdx = (mvY * p.mvW + mvX) * 2u;
+    mvOut.data[outIdx]      = q1.x;
+    mvOut.data[outIdx + 1u] = q1.y;
+}
+)GLSL";
+
 #include <ncnn/gpu.h>  // for ncnn::compile_spirv_module + ncnn::Option
 
 bool VkFrucRenderer::createFrucComputeResources(int width, int height)
@@ -4678,6 +4785,21 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                         m_FrucWarpShaderMod, m_FrucWarpDsl, m_FrucWarpPipeLay, m_FrucWarpPipeline)) {
         m_FrucDisabled = true; return false;
     }
+    // §B-NVOF Phase 5 — converter pipeline (only if NV OF wanted; cheap to
+    // always build when env var enabled even if OF session creation fails
+    // later).  4 push consts (uint flowW/H + uint mvW/H = 16 B), 2 storage
+    // buffer bindings (flow staging input + mv filtered output).
+    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_NV_OF") != 0) {
+        if (!buildPipeline("NvOFConvert", kVkFrucNvOfConvertShaderGlsl, 2, 16,
+                           m_FrucNvOfConvertShaderMod, m_FrucNvOfConvertDsl,
+                           m_FrucNvOfConvertPipeLay, m_FrucNvOfConvertPipeline)) {
+            // Non-fatal: just disable OF chain consumption.  Caller falls back
+            // to block-matching ME (m_FrucMePipeline already built above).
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF] NvOFConvert pipeline build failed — "
+                        "OF will still execute but result not consumed");
+        }
+    }
 
     // === Allocate buffers (DEVICE_LOCAL) ===
     VkPhysicalDeviceMemoryProperties memProps = {};
@@ -4760,7 +4882,9 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         return false;
     }
 
-    // === Descriptor pool: 6 sets × (2+2+4+2+4+4) = 18 storage-buffer descriptors ===
+    // === Descriptor pool: 7 sets × (2+2+4+2+4+4+2) = 20 storage-buffer descriptors ===
+    // (§B-NVOF Phase 5 added NvOFConvert desc set: 2 bindings (flow staging + mv filtered),
+    //  allocated lazily in createOpticalFlowSession after m_NvOfFlowStaging exists.)
     // (i.4.1 added NV12→RGB with 2 bindings → 1 more set, 2 more descriptors)
     // (Phase 2.5 added 2nd NV12→RGB descriptor set whose binding 0 points at
     //  m_SwFrucNv12Buf for native-decode source → +1 set, +2 descriptors)
@@ -4768,10 +4892,10 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // (§B2 2026-05-06 added 2nd warp desc set for TRIPLE → +1 set, +4 descriptors.)
     VkDescriptorPoolSize pSize = {};
     pSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pSize.descriptorCount = 18;
+    pSize.descriptorCount = 20;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpCi.maxSets = 6;
+    dpCi.maxSets = 7;
     dpCi.poolSizeCount = 1;
     dpCi.pPoolSizes = &pSize;
     if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_FrucDescPool) != VK_SUCCESS) {
@@ -5091,6 +5215,116 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                              m_FrucTimerPool, timerBase + 1);
     }
 
+    // §B-NVOF Phase 4d 2026-05-06 — when NV optical flow chain is ready and
+    // we have at least 1 prior OF execute (m_NvOfTimelineValue > 0), replace
+    // block-matching Stage 1+2 with HW OF result consumption:
+    //   1) vkCmdCopyImageToBuffer m_NvOfFlowImage → m_NvOfFlowStaging
+    //   2) format converter compute (SFIXED5 → Q1 + 2×2 average) writes
+    //      Q1 int2 to m_FrucMvFilteredBuf — same buffer Stage 2 (median)
+    //      writes, so Stage 3 warp consumes unchanged.
+    // Note: the flow data is from the PREVIOUS frame's OF execute (1-frame
+    // async lag, kicked off after main submit).  CPU vkWaitSemaphores at
+    // end of last frame ensures m_NvOfFlowImage is stable before this read.
+    const bool useNvOf = m_NvOfReady
+        && m_FrucNvOfConvertPipeline != VK_NULL_HANDLE
+        && m_FrucNvOfConvertDescSet  != VK_NULL_HANDLE
+        && m_NvOfTimelineValue > 0;
+
+    if (useNvOf) {
+        const uint32_t flowW = width  / m_NvOfGridSize;
+        const uint32_t flowH = height / m_NvOfGridSize;
+
+        // Image layout: SDK leaves m_NvOfFlowImage in GENERAL after exec
+        // (most NV drivers); transition GENERAL → TRANSFER_SRC for the copy.
+        VkImageMemoryBarrier flowToSrc = {};
+        flowToSrc.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        flowToSrc.srcAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;  // OF write
+        flowToSrc.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+        flowToSrc.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        flowToSrc.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        flowToSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        flowToSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        flowToSrc.image               = m_NvOfFlowImage;
+        flowToSrc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        flowToSrc.subresourceRange.levelCount = 1;
+        flowToSrc.subresourceRange.layerCount = 1;
+        pfnCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &flowToSrc);
+
+        // Copy flow image → staging buffer (4 bytes per pixel = R16G16).
+        auto pfnCmdCopyImageToBuffer = (PFN_vkCmdCopyImageToBuffer)getDevPa(
+            m_Device, "vkCmdCopyImageToBuffer");
+        if (pfnCmdCopyImageToBuffer) {
+            VkBufferImageCopy reg = {};
+            reg.bufferOffset      = 0;
+            reg.bufferRowLength   = flowW;
+            reg.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            reg.imageSubresource.layerCount = 1;
+            reg.imageExtent       = { flowW, flowH, 1 };
+            pfnCmdCopyImageToBuffer(cmd, m_NvOfFlowImage,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                m_NvOfFlowStaging, 1, &reg);
+        }
+
+        // Image back to GENERAL for next OF execute write.
+        VkImageMemoryBarrier flowToGeneral = flowToSrc;
+        flowToGeneral.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        flowToGeneral.dstAccessMask = 0;
+        flowToGeneral.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        flowToGeneral.newLayout     = VK_IMAGE_LAYOUT_GENERAL;
+        pfnCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &flowToGeneral);
+
+        // Staging buffer TRANSFER_WRITE → SHADER_READ for converter.
+        VkBufferMemoryBarrier stagingBar = {};
+        stagingBar.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        stagingBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        stagingBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        stagingBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        stagingBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        stagingBar.buffer = m_NvOfFlowStaging;
+        stagingBar.size   = VK_WHOLE_SIZE;
+        pfnCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, nullptr, 1, &stagingBar, 0, nullptr);
+
+        // Dispatch converter compute: read staging, write Q1 to mv_filtered.
+        pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucNvOfConvertPipeline);
+        pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucNvOfConvertPipeLay,
+                           0, 1, &m_FrucNvOfConvertDescSet, 0, nullptr);
+        {
+            struct { uint32_t flowW, flowH, mvW, mvH; } pcConv = {
+                flowW, flowH, mvW, mvH
+            };
+            pfnCmdPushConst(cmd, m_FrucNvOfConvertPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                            0, sizeof(pcConv), &pcConv);
+        }
+        pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
+        computeBufBarrier(m_FrucMvFilteredBuf);
+
+        // Both ts[2] and ts[3] still need to be written so per-stage timing
+        // in [VIPLE-VKFRUC-GPU-PROF] remains valid (stage 1 & 2 deltas will
+        // be 0 / converter time, but at least timestamps stay coherent).
+        if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
+            pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                 m_FrucTimerPool, timerBase + 2);
+            pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                 m_FrucTimerPool, timerBase + 3);
+        }
+        static std::atomic<bool> s_nvofChainLogged{false};
+        bool exp = false;
+        if (s_nvofChainLogged.compare_exchange_strong(exp, true)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF] chain consumes HW OF flow this frame "
+                        "(flowDims=%ux%u → mv=%ux%u via 2x2 avg + SFIXED5→Q1)",
+                        flowW, flowH, mvW, mvH);
+        }
+    } else {
     // ---- Stage 1: motion estimation ----
     // Push constant layout MUST match shader's struct order exactly:
     //   ME shader (plvk.cpp:1275-1282): frameWidth, frameHeight, blockSize,
@@ -5144,6 +5378,7 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                              m_FrucTimerPool, timerBase + 3);
     }
+    }  // end if (useNvOf) ... else block-match path
 
     // ---- Stage 3: warp ----
     // Push constant layout MUST match shader's struct order exactly:

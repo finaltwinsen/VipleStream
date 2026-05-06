@@ -726,6 +726,18 @@ private:
     VkPipeline            m_FrucWarpPipeline  = VK_NULL_HANDLE;
     VkDescriptorSet       m_FrucWarpDescSet   = VK_NULL_HANDLE;
 
+    // §B-NVOF Phase 5 — SFIXED5→Q1 format converter compute pipeline.
+    // Reads m_NvOfFlowStaging (storage buffer copy of m_NvOfFlowImage),
+    // 2x2 average + sign-extend + divide-by-16, writes Q1 int2 to
+    // m_FrucMvFilteredBuf (existing buffer warp shader consumes).  Built
+    // alongside the rest of the FRUC compute pipelines when
+    // m_NvOfFuncList non-null AND m_OpticalFlowQueueFamily set.
+    VkShaderModule        m_FrucNvOfConvertShaderMod = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_FrucNvOfConvertDsl       = VK_NULL_HANDLE;
+    VkPipelineLayout      m_FrucNvOfConvertPipeLay   = VK_NULL_HANDLE;
+    VkPipeline            m_FrucNvOfConvertPipeline  = VK_NULL_HANDLE;
+    VkDescriptorSet       m_FrucNvOfConvertDescSet   = VK_NULL_HANDLE;
+
     // Storage buffers (DEVICE_LOCAL).  All planar fp32 R/G/B.
     VkBuffer       m_FrucPrevRgbBuf    = VK_NULL_HANDLE;
     VkDeviceMemory m_FrucPrevRgbBufMem = VK_NULL_HANDLE;
