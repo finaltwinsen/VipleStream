@@ -285,6 +285,33 @@ opt-in 留著當 known-working capability，未來推 4090 或更大 RIFE 模型
 **Final.3b 接 NcnnFRUC：** 仍 deferred until Linux env。預估 4-6h 工程，
 medium-high risk（動 production hot path）。
 
+### §B Vulkan HW path FRUC integration（**🟡 active 2026-05-06**）
+
+直到 §B 之前，RS_VULKAN HW mode 雖然 frucMode/dualMode 都自動為 true，
+但 `renderFrame()` 從來沒接 `runFrucComputeChain` 或 dual-present —
+等於 production HW path 完全沒在補幀（解釋了使用者觀察「testufo
+30→60 補幀沒效果」的根因）。
+
+| Step | Commit | 內容 | 驗測 |
+|---|---|---|---|
+| A baseline | — | 1080p60 SW path 量 GPU-PROF baseline (15 samples) | nv12rgb=410 me=411 warp=214 total=1248us |
+| B1a | `03a962f` | HW path 加 image-to-buffer copy + FRUC chain dispatch | total=750us（比 SW 快 40%）；overlay 仍「未啟用」 |
+| B1b | `a86df9f` | HW path 加 dual-present（real + interp 兩次 swapchain acquire/render/present） | overlay「已啟用」、cumul real:interp = 1:1 |
+| **B-quality** | TBD | 補幀演算法品質優化（ME / median / warp / blend） | **active，待規劃驗測腳本** |
+| **B2** | TBD | TRIPLE FRUC 60→180（兩個 interp frame） | 推遲到 B-quality 完成後 |
+
+**B-quality 動機：** B1b ship 後 overlay 顯示正確、dual-present 跑了，
+但使用者主觀感覺補幀效果不夠好。需要客觀驗測 + 演算法疊代：
+- ME block size = 8（可能太小、產生 noisy MV）
+- MV median filter 目前是 noop copy（之前實驗為了量 GPU 時間留下的）
+- Warp blend factor = 0.5 hardcoded（沒有 motion confidence weighting）
+- 對 occluded / 新 pixel 沒特別處理
+
+**B2 TRIPLE 推遲到 B-quality 完成後：** A 階段量到 1080p60 GPU compute
+total 1.31ms (估 TRIPLE 1.58ms)，180fps budget 5.55ms 還剩 4ms，硬體
+完全 ready。但目前 DUAL 視覺品質都還沒滿意，TRIPLE 只會讓品質問題
+更嚴重（3 個 frame 中 2 個是 interp）。先把 DUAL 改好再推 TRIPLE。
+
 ### §J.3.f AV1 / HEVC / H.264 Vulkan hwaccel via ffmpeg（**✅ DONE 2026-05-03 / integration b2b7afd**）
 
 **達成：** rebuild 出 minimal FFmpeg 8.1 client DLL（`avcodec-62.dll` 5.2 MB），含 `--enable-vulkan --enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan --enable-libdav1d`。整合 commit `b2b7afd` 起，**RS_VULKAN preference 自動觸發 Vulkan HW decode + FRUC + DUAL**（不再需要 `VIPLE_USE_VK_DECODER=1` / `VIPLE_VK_FRUC_GENERIC` / `VIPLE_VKFRUC_HW` env 三件組）。env var 仍保留作 explicit override / debug fallback。
