@@ -5663,6 +5663,72 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             VK_IMAGE_LAYOUT_GENERAL,
             m_SwFrucNv12Buf, 2, regs);
 
+        // §B-NVOF Phase 4b 2026-05-06 — also copy vkf->img[0] image-to-image
+        // into m_NvOfInputCurr (NV12 multi-plane).  This is independent of
+        // the buffer copy above; both source-read in parallel.  After GPU
+        // signals m_NvOfTimelineSem (Phase 4c submit signal list), we kick
+        // off nvOFExecuteVk on the OF queue (kick-off-and-forget for now;
+        // chain integration in Phase 4d).
+        if (m_NvOfReady) {
+            // §B-NVOF Phase 4b 2026-05-06 — image transitions UNDEFINED→GENERAL
+            // on first use, then stays GENERAL forever.  GENERAL accepts both
+            // TRANSFER_WRITE (vkCmdCopyImage dst) and shader / OF SDK reads
+            // without further transitions.  Avoids TRANSFER_DST_OPTIMAL→
+            // expected-OF-layout transition (NV SDK didn't document expected
+            // layout; first attempt with TRANSFER_DST landed on DEVICE_LOST
+            // immediately after first nvOFExecuteVk).
+            VkImageMemoryBarrier ofImgBars[2] = {};
+            int ofBarCount = 0;
+            for (VkImage img : {m_NvOfInputCurr, m_NvOfInputPrev}) {
+                if (m_NvOfTimelineValue == 0) {
+                    auto& b = ofImgBars[ofBarCount++];
+                    b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    b.srcAccessMask       = 0;
+                    b.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT
+                                          | VK_ACCESS_TRANSFER_READ_BIT
+                                          | VK_ACCESS_SHADER_READ_BIT;
+                    b.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+                    b.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+                    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    b.image               = img;
+                    b.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                    b.subresourceRange.baseMipLevel   = 0;
+                    b.subresourceRange.levelCount     = 1;
+                    b.subresourceRange.baseArrayLayer = 0;
+                    b.subresourceRange.layerCount     = 1;
+                }
+            }
+            if (ofBarCount > 0) {
+                m_RtPfn.CmdPipelineBarrier(cmd,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT
+                        | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0, 0, nullptr, 0, nullptr,
+                    (uint32_t)ofBarCount, ofImgBars);
+            }
+            // PLANE_0 (Y) + PLANE_1 (UV) image→image copy. dst layout GENERAL.
+            VkImageCopy ofRegs[2] = {};
+            ofRegs[0].srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+            ofRegs[0].srcSubresource.layerCount = 1;
+            ofRegs[0].dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+            ofRegs[0].dstSubresource.layerCount = 1;
+            ofRegs[0].extent = { hwW, hwH, 1 };
+            ofRegs[1].srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+            ofRegs[1].srcSubresource.layerCount = 1;
+            ofRegs[1].dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+            ofRegs[1].dstSubresource.layerCount = 1;
+            ofRegs[1].extent = { hwW / 2, hwH / 2, 1 };
+            auto pfnCmdCopyImage = (PFN_vkCmdCopyImage)((PFN_vkGetDeviceProcAddr)
+                m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr"))(
+                m_Device, "vkCmdCopyImage");
+            if (pfnCmdCopyImage) {
+                pfnCmdCopyImage(cmd, vkf->img[0], VK_IMAGE_LAYOUT_GENERAL,
+                                m_NvOfInputCurr, VK_IMAGE_LAYOUT_GENERAL,
+                                2, ofRegs);
+            }
+        }
+
         // Buffer TRANSFER_WRITE → COMPUTE_SHADER_READ for FRUC's NV12→RGB.
         // No image transition back — vkf->img[0] stays in GENERAL; sampler
         // descriptor's SHADER_READ_ONLY_OPTIMAL spec is relaxed to GENERAL
@@ -6047,6 +6113,104 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     if (firstFrame) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] frame#0 vkQueueSubmit OK — first GPU work in flight");
+    }
+
+    // §B-NVOF Phase 4b/4c 2026-05-06 — kick off nvOFExecuteVk for this
+    // frame's NV12 input (vkCmdCopyImage above already populated
+    // m_NvOfInputCurr inside main cmd buf).  Pattern: small "marker" submit
+    // signals m_NvOfTimelineSem at V_in (queue order ensures it fires after
+    // main work completes).  nvOFExecuteVk waits V_in, signals V_out.
+    // CPU does NOT wait for V_out — fire-and-forget for now (Phase 4d/5
+    // will integrate the result into the chain).  Swap curr↔prev handles
+    // for next frame.
+    if (m_NvOfReady && m_NvOfFuncList) {
+        // §B-NVOF Phase 4b — skip the very first frame: m_NvOfInputPrev is
+        // still UNDEFINED (never written) so OF on (curr, prev) would read
+        // garbage from prev → undefined HW behaviour.  Use the first frame
+        // just to populate curr; on swap, that becomes prev for frame 1+.
+        static thread_local uint32_t s_NvOfFrameCount = 0;
+        const uint32_t frameNum = s_NvOfFrameCount++;
+        if (frameNum == 0) {
+            // first frame — only swap so frame 1 sees a valid prev.
+            std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
+            std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
+            std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+        }
+        if (frameNum > 0) {
+        const uint64_t inSigVal = m_NvOfTimelineValue + 1;
+        const uint64_t outSigVal = inSigVal + 1;
+        // 1) graphics-queue marker submit signaling V_in.
+        VkTimelineSemaphoreSubmitInfo tsMark = {};
+        tsMark.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        tsMark.signalSemaphoreValueCount = 1;
+        tsMark.pSignalSemaphoreValues    = &inSigVal;
+        VkSubmitInfo siMark = {};
+        siMark.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        siMark.pNext                = &tsMark;
+        siMark.commandBufferCount   = 0;
+        siMark.signalSemaphoreCount = 1;
+        siMark.pSignalSemaphores    = &m_NvOfTimelineSem;
+        VkResult vrMark;
+        {
+            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            vrMark = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siMark, VK_NULL_HANDLE);
+        }
+        if (vrMark == VK_SUCCESS) {
+            // 2) nvOFExecuteVk on OF queue (SDK auto-submits internally).
+            auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
+            NV_OF_SYNC_VK waitSync = {};
+            waitSync.semaphore = m_NvOfTimelineSem;
+            waitSync.value     = inSigVal;
+            NV_OF_SYNC_VK signalSync = {};
+            signalSync.semaphore = m_NvOfTimelineSem;
+            signalSync.value     = outSigVal;
+            NV_OF_EXECUTE_INPUT_PARAMS_VK ofIn = {};
+            ofIn.inputFrame      = (NvOFGPUBufferHandle)m_NvOfHandleCurr;
+            ofIn.referenceFrame  = (NvOFGPUBufferHandle)m_NvOfHandlePrev;
+            ofIn.disableTemporalHints = NV_OF_FALSE;
+            ofIn.numWaitSyncs    = 1;
+            ofIn.pWaitSyncs      = &waitSync;
+            NV_OF_EXECUTE_OUTPUT_PARAMS_VK ofOut = {};
+            ofOut.outputBuffer   = (NvOFGPUBufferHandle)m_NvOfHandleFlow;
+            ofOut.pSignalSync    = &signalSync;
+            NV_OF_STATUS s = funcList->nvOFExecuteVk((NvOFHandle)m_NvOfHandle, &ofIn, &ofOut);
+            // Periodic log: don't spam every frame; first frame + every ~5s.
+            static std::atomic<int> s_ofExecLogCount{0};
+            int n = s_ofExecLogCount.fetch_add(1, std::memory_order_relaxed);
+            if (n == 0 || (n % 300 == 0)) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-NVOF] nvOFExecuteVk #%d status=%d "
+                            "(V_in=%llu V_out=%llu)",
+                            n, (int)s,
+                            (unsigned long long)inSigVal,
+                            (unsigned long long)outSigVal);
+            }
+            if (s == NV_OF_SUCCESS) {
+                m_NvOfTimelineValue = outSigVal;
+                // 3) §B-NVOF Phase 4b — synchronously wait OF to finish so we
+                // can safely swap curr↔prev (OF still reading otherwise races
+                // with next frame's vkCmdCopyImage write).  CPU-blocks ~3-5ms
+                // at 1080p.  Phase 4d will refactor to async.
+                auto pfnWaitSems = (PFN_vkWaitSemaphores)((PFN_vkGetDeviceProcAddr)
+                    m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr"))(
+                    m_Device, "vkWaitSemaphores");
+                if (pfnWaitSems) {
+                    VkSemaphoreWaitInfo wi = {};
+                    wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                    wi.semaphoreCount = 1;
+                    wi.pSemaphores    = &m_NvOfTimelineSem;
+                    wi.pValues        = &outSigVal;
+                    pfnWaitSems(m_Device, &wi, 100ull * 1000 * 1000);  // 100ms timeout
+                }
+                std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
+                std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
+                std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+            }
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF] marker QueueSubmit failed vr=%d", (int)vrMark);
+        }
+        }  // end if (frameNum > 0)
     }
 
     // ---- 8. Update AVVkFrame state ----
