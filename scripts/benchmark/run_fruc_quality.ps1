@@ -20,7 +20,8 @@
 param(
     [string] $Label = "",
     [int]    $CaptureSeconds = 60,
-    [string] $Region = "800,450,320,180",  # x,y,w,h — assumes 1920×1080 fullscreen, central 320×180
+    [string] $Region = "0,510,1920,40",    # x,y,w,h — full-width 40px band on UFO trajectory (1080p y=510±20)
+                                            # central 320×180 noise too high vs sub-second UFO sweep phase
     [ValidateSet("video", "ufo")]
     [string] $Mode = "video",              # video: PotPlayer auto-launch; ufo: testufo trajectory
     [string] $VideoPath = "C:\Temp\videoplayback.webm",  # video mode: server-side video file
