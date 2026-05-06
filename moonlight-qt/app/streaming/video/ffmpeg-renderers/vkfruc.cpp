@@ -4799,19 +4799,47 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         m_SlotPendingView[slot] = VK_NULL_HANDLE;
     }
 
-    // ---- 3. Acquire next swapchain image ----
-    uint32_t imgIdx = 0;
-    VkResult vr = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
-                                              m_SlotAcquireSem[slot][0],
-                                              VK_NULL_HANDLE, &imgIdx);
-    if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "[VIPLE-VKFRUC] vkAcquireNextImageKHR failed (%d)", (int)vr);
-        // Re-sign the fence so next iteration doesn't deadlock; resize / recreate
-        // is i.6 work — for now just bail.
-        m_RtPfn.ResetCommandBuffer(m_SlotCmdBuf[slot], 0);
-        return;
+    // ---- 3. Acquire next swapchain image(s) ----
+    // §B1b 2026-05-06 — dualPresentThisFrame controls whether we acquire
+    // 1 or 2 swapchain images.  Mirrors renderFrameSw line ~5511-5540.
+    // imgIdxA = interp slot (only used in dual mode)
+    // imgIdxB = real frame slot (always)
+    const bool dualPresentThisFrame = m_DualMode && m_FrucMode && m_FrucReady
+                                      && !m_FRUCPaused.load();
+    uint32_t imgIdxA = 0;
+    uint32_t imgIdxB = 0;
+    VkResult vr;
+    if (dualPresentThisFrame) {
+        VkResult vrA = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
+                                                    m_SlotAcquireSem[slot][0],
+                                                    VK_NULL_HANDLE, &imgIdxA);
+        if (vrA != VK_SUCCESS && vrA != VK_SUBOPTIMAL_KHR) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] dual: acquire interp imgA failed (%d)", (int)vrA);
+            m_RtPfn.ResetCommandBuffer(m_SlotCmdBuf[slot], 0);
+            return;
+        }
+        VkResult vrB = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
+                                                    m_SlotAcquireSem[slot][1],
+                                                    VK_NULL_HANDLE, &imgIdxB);
+        if (vrB != VK_SUCCESS && vrB != VK_SUBOPTIMAL_KHR) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] dual: acquire real imgB failed (%d)", (int)vrB);
+            m_RtPfn.ResetCommandBuffer(m_SlotCmdBuf[slot], 0);
+            return;
+        }
+    } else {
+        vr = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
+                                          m_SlotAcquireSem[slot][0],
+                                          VK_NULL_HANDLE, &imgIdxB);
+        if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] vkAcquireNextImageKHR failed (%d)", (int)vr);
+            m_RtPfn.ResetCommandBuffer(m_SlotCmdBuf[slot], 0);
+            return;
+        }
     }
+    uint32_t imgIdx = imgIdxB;  // legacy alias for the real-frame render pass
 
     // ---- 4. Lock AVVkFrame, build image view ----
     // §J.3.e.2.i.3.e: lock_frame is documented as required when mutating
@@ -5040,13 +5068,71 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     drainOverlayStash();
     uploadPendingOverlay(cmd);
 
-    //  6b. Begin render pass — clear to opaque black.
     VkClearValue clearVal = {};
     clearVal.color.float32[0] = 0.0f;
     clearVal.color.float32[1] = 0.0f;
     clearVal.color.float32[2] = 0.0f;
     clearVal.color.float32[3] = 1.0f;
 
+    // §B1b 2026-05-06 — interp render pass (only in dual mode).
+    //
+    // FRUC compute chain above wrote m_FrucInterpRgbBuf via storage-buffer
+    // shader writes (compute stage).  Interp pipeline samples it as a
+    // storage buffer in fragment stage — Vulkan requires explicit cross-
+    // stage barrier (COMPUTE_SHADER write → FRAGMENT_SHADER read).  SW path
+    // doesn't issue this barrier explicitly because subpass external
+    // dependency in the render pass + lenient NV driver let it work, but
+    // we add it here for spec correctness on HW path.
+    if (dualPresentThisFrame) {
+        VkBufferMemoryBarrier interpBufBar = {};
+        interpBufBar.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        interpBufBar.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        interpBufBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        interpBufBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        interpBufBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        interpBufBar.buffer = m_FrucInterpRgbBuf;
+        interpBufBar.offset = 0;
+        interpBufBar.size   = VK_WHOLE_SIZE;
+        m_RtPfn.CmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 1, &interpBufBar, 0, nullptr);
+
+        // Resolve push-const PFN (m_RtPfn doesn't carry it).
+        auto getDevPa2 = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        auto pfnCmdPushConst = (PFN_vkCmdPushConstants)getDevPa2(m_Device, "vkCmdPushConstants");
+
+        VkRenderPassBeginInfo rpbiA = {};
+        rpbiA.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpbiA.renderPass           = m_RenderPass;
+        rpbiA.framebuffer          = m_Framebuffers[imgIdxA];
+        rpbiA.renderArea.extent    = m_SwapchainExtent;
+        rpbiA.clearValueCount      = 1;
+        rpbiA.pClearValues         = &clearVal;
+        m_RtPfn.CmdBeginRenderPass(cmd, &rpbiA, VK_SUBPASS_CONTENTS_INLINE);
+        m_RtPfn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
+        m_RtPfn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      m_InterpPipelineLayout, 0,
+                                      1, &m_InterpDescSet, 0, nullptr);
+        struct { int srcW, srcH, _pad0, _pad1; } pcInterp = {
+            frame ? frame->width : 0, frame ? frame->height : 0, 0, 0
+        };
+        if (pfnCmdPushConst) {
+            pfnCmdPushConst(cmd, m_InterpPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                            0, sizeof(pcInterp), &pcInterp);
+        }
+        m_RtPfn.CmdDraw(cmd, 3, 1, 0, 0);
+        drawOverlayInRenderPass(cmd);
+        m_RtPfn.CmdEndRenderPass(cmd);
+        if (firstFrame) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-HW] §B1b frame#0 dual: interp render pass OK (imgA=%u)",
+                        imgIdxA);
+        }
+    }
+
+    //  6b. Begin real-frame render pass — clear to opaque black.
     VkRenderPassBeginInfo rpbi = {};
     rpbi.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpbi.renderPass           = m_RenderPass;
@@ -5118,53 +5204,97 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                                 "[VIPLE-VKFRUC] frame#0 EndCommandBuffer returned %d", (int)endVr);
 
     // ---- 7. Submit ----
-    // Wait on (a) swapchain acquire (color attachment write must wait), and
-    // (b) AVVkFrame's timeline semaphore at the value FFmpeg signaled when
-    // decode finished (fragment shader read must wait).
-    VkSemaphore     waitSems[2]   = { m_SlotAcquireSem[slot][0], vkf->sem[0] };
-    VkPipelineStageFlags waitMasks[2] = {
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-    };
-    uint64_t        waitVals[2]   = { 0, vkf->sem_value[0] };
+    // §B1b 2026-05-06 — dual mode adds wait on second acquire sem +
+    // signal on second renderDone sem (per-image, not per-slot, to avoid
+    // sem-reuse race when imgIdxA != imgIdxB and they get re-acquired in
+    // a different order).  Single mode keeps original 2-sem submit.
+    if (dualPresentThisFrame) {
+        VkSemaphore     waitSems[3]   = {
+            m_SlotAcquireSem[slot][0],   // interp acquire
+            m_SlotAcquireSem[slot][1],   // real  acquire
+            vkf->sem[0]                  // FFmpeg-vulkan timeline
+        };
+        VkPipelineStageFlags waitMasks[3] = {
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                | VK_PIPELINE_STAGE_TRANSFER_BIT,  // image-to-buffer copy waits too
+        };
+        uint64_t        waitVals[3]   = { 0, 0, vkf->sem_value[0] };
+        VkSemaphore     signalSems[3] = {
+            m_SwapchainRenderDoneSem[imgIdxA],
+            m_SwapchainRenderDoneSem[imgIdxB],
+            vkf->sem[0]
+        };
+        uint64_t        signalVals[3] = { 0, 0, vkf->sem_value[0] + 1 };
 
-    // Signal (a) renderDoneSem (consumed by present), and (b) AVVkFrame
-    // timeline at sem_value[0]+1 so FFmpeg knows we're done with the frame.
-    VkSemaphore signalSems[2]     = { m_SlotRenderDoneSem[slot][0], vkf->sem[0] };
-    uint64_t    signalVals[2]     = { 0, vkf->sem_value[0] + 1 };
-
-    VkTimelineSemaphoreSubmitInfo tssi = {};
-    tssi.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    tssi.waitSemaphoreValueCount   = 2;
-    tssi.pWaitSemaphoreValues      = waitVals;
-    tssi.signalSemaphoreValueCount = 2;
-    tssi.pSignalSemaphoreValues    = signalVals;
-
-    VkSubmitInfo si = {};
-    si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.pNext                = &tssi;
-    si.waitSemaphoreCount   = 2;
-    si.pWaitSemaphores      = waitSems;
-    si.pWaitDstStageMask    = waitMasks;
-    si.commandBufferCount   = 1;
-    si.pCommandBuffers      = &cmd;
-    si.signalSemaphoreCount = 2;
-    si.pSignalSemaphores    = signalSems;
-
-    if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-VKFRUC] frame#0 about to QueueSubmit (queue=%p fence=%p sem[wait]=%p+%llu sem[signal]=%p+%llu)",
-                                (void*)m_GraphicsQueue, (void*)m_SlotInFlightFence[slot],
-                                (void*)vkf->sem[0], (unsigned long long)waitVals[1],
-                                (void*)vkf->sem[0], (unsigned long long)signalVals[1]);
-    {
-        std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
-        vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
-    }
-    if (vr != VK_SUCCESS) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "[VIPLE-VKFRUC] vkQueueSubmit failed (%d)", (int)vr);
-        if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
-        return;
+        VkTimelineSemaphoreSubmitInfo tssi = {};
+        tssi.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        tssi.waitSemaphoreValueCount   = 3;
+        tssi.pWaitSemaphoreValues      = waitVals;
+        tssi.signalSemaphoreValueCount = 3;
+        tssi.pSignalSemaphoreValues    = signalVals;
+        VkSubmitInfo si = {};
+        si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.pNext                = &tssi;
+        si.waitSemaphoreCount   = 3;
+        si.pWaitSemaphores      = waitSems;
+        si.pWaitDstStageMask    = waitMasks;
+        si.commandBufferCount   = 1;
+        si.pCommandBuffers      = &cmd;
+        si.signalSemaphoreCount = 3;
+        si.pSignalSemaphores    = signalSems;
+        {
+            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
+        }
+        if (vr != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] dual: vkQueueSubmit failed (%d)", (int)vr);
+            if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+            return;
+        }
+    } else {
+        VkSemaphore     waitSems[2]   = { m_SlotAcquireSem[slot][0], vkf->sem[0] };
+        VkPipelineStageFlags waitMasks[2] = {
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        };
+        uint64_t        waitVals[2]   = { 0, vkf->sem_value[0] };
+        VkSemaphore     signalSems[2] = { m_SlotRenderDoneSem[slot][0], vkf->sem[0] };
+        uint64_t        signalVals[2] = { 0, vkf->sem_value[0] + 1 };
+        VkTimelineSemaphoreSubmitInfo tssi = {};
+        tssi.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        tssi.waitSemaphoreValueCount   = 2;
+        tssi.pWaitSemaphoreValues      = waitVals;
+        tssi.signalSemaphoreValueCount = 2;
+        tssi.pSignalSemaphoreValues    = signalVals;
+        VkSubmitInfo si = {};
+        si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.pNext                = &tssi;
+        si.waitSemaphoreCount   = 2;
+        si.pWaitSemaphores      = waitSems;
+        si.pWaitDstStageMask    = waitMasks;
+        si.commandBufferCount   = 1;
+        si.pCommandBuffers      = &cmd;
+        si.signalSemaphoreCount = 2;
+        si.pSignalSemaphores    = signalSems;
+        if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-VKFRUC] frame#0 about to QueueSubmit (queue=%p fence=%p sem[wait]=%p+%llu sem[signal]=%p+%llu)",
+                                    (void*)m_GraphicsQueue, (void*)m_SlotInFlightFence[slot],
+                                    (void*)vkf->sem[0], (unsigned long long)waitVals[1],
+                                    (void*)vkf->sem[0], (unsigned long long)signalVals[1]);
+        {
+            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
+        }
+        if (vr != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC] vkQueueSubmit failed (%d)", (int)vr);
+            if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+            return;
+        }
     }
     if (firstFrame) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -5175,35 +5305,70 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // §J.3.e.2.i.3.e: tell FFmpeg the image's new state so it can issue
     // a correct barrier (GENERAL → DECODE_DPB) on its decode queue when
     // it re-uses this image as a reference frame.
-    vkf->access[0]     = (VkAccessFlagBits)0;            // matches dstAccess of releaseBar (some FFmpeg builds type access[] as VkAccessFlagBits not uint32_t)
-    vkf->layout[0]     = VK_IMAGE_LAYOUT_GENERAL;        // matches newLayout of releaseBar
-    // queue_family[0] kept as IGNORED (no QFOT was performed)
+    vkf->access[0]     = (VkAccessFlagBits)0;
+    vkf->layout[0]     = VK_IMAGE_LAYOUT_GENERAL;
     vkf->sem_value[0] += 1;
 
     // ---- 9. Unlock AVVkFrame ----
     if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
 
     // ---- 10. Present ----
-    VkPresentInfoKHR pi = {};
-    pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores    = &m_SlotRenderDoneSem[slot][0];
-    pi.swapchainCount     = 1;
-    pi.pSwapchains        = &m_Swapchain;
-    pi.pImageIndices      = &imgIdx;
-
-    {
-        std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
-        vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &pi);
-    }
-    if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC] vkQueuePresentKHR returned %d", (int)vr);
-        // Don't bail — outer caller may handle resize; defer to i.6.
-    }
-    if (firstFrame) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC] frame#0 vkQueuePresentKHR OK — first frame complete");
+    if (dualPresentThisFrame) {
+        VkPresentInfoKHR piA = {};
+        piA.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        piA.waitSemaphoreCount = 1;
+        piA.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxA];
+        piA.swapchainCount     = 1;
+        piA.pSwapchains        = &m_Swapchain;
+        piA.pImageIndices      = &imgIdxA;
+        {
+            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piA);
+        }
+        if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] dual: present(interp) returned %d", (int)vr);
+        }
+        VkPresentInfoKHR piB = {};
+        piB.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        piB.waitSemaphoreCount = 1;
+        piB.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxB];
+        piB.swapchainCount     = 1;
+        piB.pSwapchains        = &m_Swapchain;
+        piB.pImageIndices      = &imgIdxB;
+        {
+            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piB);
+        }
+        if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] dual: present(real) returned %d", (int)vr);
+        }
+        if (firstFrame) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-HW] §B1b frame#0 DUAL OK — interp imgA=%u + real imgB=%u presented",
+                        imgIdxA, imgIdxB);
+        }
+    } else {
+        VkPresentInfoKHR pi = {};
+        pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        pi.waitSemaphoreCount = 1;
+        pi.pWaitSemaphores    = &m_SlotRenderDoneSem[slot][0];
+        pi.swapchainCount     = 1;
+        pi.pSwapchains        = &m_Swapchain;
+        pi.pImageIndices      = &imgIdx;
+        {
+            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &pi);
+        }
+        if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] vkQueuePresentKHR returned %d", (int)vr);
+        }
+        if (firstFrame) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] frame#0 vkQueuePresentKHR OK — first frame complete");
+        }
     }
 
     // §B1a 2026-05-06 — periodic Stats / GPU-PROF emit, ported from
@@ -5226,7 +5391,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         }
         s_HwLastPresent = now;
         s_HwCumulReal++;
-        // B1b will set this when an interp frame is presented.
+        if (dualPresentThisFrame) s_HwCumulInterp++;
 
         double bucketSec = duration_cast<duration<double>>(now - s_HwBucketStart).count();
         if (bucketSec >= 5.0 && !s_HwFrameMsRing.empty()) {
