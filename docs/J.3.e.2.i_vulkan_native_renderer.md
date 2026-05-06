@@ -540,3 +540,127 @@ PARALLEL+SW upload 路徑 80+ ms/frame perf 限制、(d) 上游 D3D11+DXVA
   - 如果 NV sample 穩定 → 我們 client 的 sync pattern 還有 diff 沒抄到
 - Phase 3d.6 AV1 grey 同樣等 RenderDoc + NV sample diff
 
+---
+
+## §B-NVOF — VK_NV_optical_flow HW 整合（commits b9da1cc → 8daf9e2, 2026-05-06）
+
+§B2 TRIPLE 收尾後驗證發現 GenericFRUC 補幀視覺品質受 block-matching ME
+精度上限影響：testufo 小快速物體在 disocclusion 邊界 ME 噪聲 → warp
+ghost；user 主觀 60→180 vs 60fps 看不出明顯 smoothness 提升。新增 HW
+optical flow path（NVIDIA Optical Flow SDK 5.0.7 Vulkan API）取代
+block-matching ME stage，gated by `VIPLE_VKFRUC_NV_OF=1`。
+
+### 架構
+
+```
+graphics queue                                      OF queue
+─────────────                                       ────────
+[main cmd buf]
+  vkCmdCopyImage vkf->img[0] → m_NvOfInputCurr
+  Stage 0  NV12→RGB
+  Stage 3  warp (consumes m_FrucMvFilteredBuf)
+  Stage 4  curr_rgb → prev_rgb copy
+  ...
+[vkQueueSubmit graphics]
+[empty marker submit signal V_in]   ───signal──→    [SDK auto-submit]
+                                                    nvOFExecuteVk waits V_in
+                                                    reads (curr, prev) NV12
+                                                    writes m_NvOfFlowImage
+                                                    signals V_out
+[CPU vkWaitSemaphores V_out]   ←──signal────       (~3-5 ms 1080p)
+[swap m_NvOfInputCurr ↔ Prev for next frame]
+
+frame N+1:
+[main cmd buf]
+  vkCmdCopyImage vkf->img[0] → m_NvOfInputCurr (= old prev image)
+  Stage 0
+  ★ if (m_NvOfTimelineValue > 0):
+      vkCmdCopyImageToBuffer m_NvOfFlowImage → m_NvOfFlowStaging
+      dispatch NvOFConvert compute (SFIXED5→Q1, 2x2 avg) → m_FrucMvFilteredBuf
+    else (frame 0 fallback):
+      Stage 1 ME (block-matching) + Stage 2 Median → m_FrucMvFilteredBuf
+  Stage 3 warp 不知道 MV 來源
+```
+
+### 關鍵實作點
+
+- **`VkPhysicalDeviceOpticalFlowFeaturesNV.opticalFlow=VK_TRUE` 必須在
+  device create 時 pNext 鏈內** — 否則 `nvOFInit` 回 status=3
+  (DEVICE_DOES_NOT_EXIST)。query+enable 全套 features 透過
+  `vkGetPhysicalDeviceFeatures2`，OF feature 條件式塞進 chain 只在
+  `m_OpticalFlowQueueFamily != UINT32_MAX` 時。
+- **OF queue family probe** 用 bit `VK_QUEUE_OPTICAL_FLOW_BIT_NV =
+  0x00000100`，NV Ampere RTX 3060 Laptop 暴露在 QF=5 count=1。
+- **`nvofapi64.dll` runtime load**：NV driver shipped 在
+  `C:\Windows\System32`，repo 不需新增 binary blob，只 SDK 5.0.7 的
+  `nvOpticalFlowVulkan.h` 進 `libs/windows/nvofa/include/`。
+- **3 個 input/output VkImages**：
+  - `m_NvOfInputCurr` / `m_NvOfInputPrev`：`VK_FORMAT_G8_B8R8_2PLANE_420
+    _UNORM` (NV12), full source size, layout 永遠 GENERAL（first use
+    UNDEFINED→GENERAL，後續 stays），usage `TRANSFER_DST`。
+  - `m_NvOfFlowImage`：`VK_FORMAT_R16G16_S10_5_NV` (Q10.5 fixed-point)
+    flow grid 1/2/4 pixels per vec（我們選 grid=4），1080p flow
+    dimensions 480×270，usage `TRANSFER_SRC`。
+  - 三者 register 為 `NvOFGPUBufferHandle` via `nvOFRegisterResourceVk`.
+- **跨 queue sync** 用單一 timeline semaphore + counter (`m_NvOfTimelineSem`
+  + `m_NvOfTimelineValue`)。每幀 V_in/V_out 配對；CPU 在 swap 前
+  `vkWaitSemaphores` 等 V_out 確保 OF 完成 reading 兩個 input image，
+  swap 後 next frame 寫入舊 prev image (= 新 curr) 不會 race。
+- **1-frame async lag**：本幀 chain 用上一幀 OF result。第 0 幀 fallback
+  到 block-matching（`m_NvOfTimelineValue == 0`）穩定啟動。
+- **SFIXED5→Q1 format converter compute shader** (`kVkFrucNvOfConvertShaderGlsl`
+  in plvk.cpp)：讀 staging buffer，2×2 average + sign-extend 16 →
+  divide-by-16 (= SFIXED5/2 in Q-units = Q1 in Q-units)，寫 Q1 int2 到
+  既有 `m_FrucMvFilteredBuf`。warp shader 完全不用改。
+
+### Quality benchmark (testufo 1080p60, 60s capture)
+
+| Mode | SSIM | OF_30Hz | OF_cv | block_outlier |
+|---|---|---|---|---|
+| baseline_v3 (no median) | 0.89 | 5.56% | 1.62 | 4.91% |
+| algo_a_only (median + (d) fix) | 0.88 | 4.43% | 1.55 | 4.7% |
+| **algo_d_real_crgb (production)** | **0.998** | **2.75%** | 1.94 | 4.3% |
+| **algo_e_nvof_v2 (HW OF)** | **0.999** | 6.61% | **0.796** | 4.7% |
+
+- **SSIM 0.999** vs production 0.998：互角，frame-to-frame 連續性兩者
+  都接近完美。
+- **OF_cv 0.796** vs production 1.94：HW OF **明顯贏**（motion 軌跡
+  smoothness 大幅提升，frame-to-frame 變異小一半）。
+- **OF_30Hz 6.61%** vs production 2.75%：HW OF **輸**。30Hz alternation
+  比 production 高，推測因 SFIXED5(1/32 px) → Q1(1/2 px) 量化時 4× 精
+  度損失，sub-pixel snap 造成 alternate frame MV 跳動。
+- **block_outlier 4.7%** ≈ production 4.3%：兩者都極低，沒有 outlier
+  blocks 干擾。
+
+主觀視覺（user 直接切換 nvof vs production）：「都還不錯，細節好像不
+太一樣，說不出來」— 兩條 path 都達 production 可用品質，無明顯主觀
+差異。
+
+### env var
+- `VIPLE_VKFRUC_NV_OF=1` 啟用整條 HW OF chain（extension + queue + 
+  session + chain integration）。預設 OFF（chain 走 block-match Stage
+  1+2）。
+- 失敗 fallback 完整保留：DLL load / session create / image alloc /
+  register / pipeline build 任一步失敗 → log warn + chain 自動退回
+  block-matching。沒有 fatal path。
+
+### 已知限制 / 未來改進
+
+1. **SFIXED5→Q1 精度損失** — 4× 量化造成 OF_30Hz 升高。修法是把
+   `m_FrucMvFilteredBuf` 從 Q1 (1/2 px) 升到 Q5 或更高精度，warp shader
+   `loadMVRaw * 0.5` 改 `* (1/16.0)` 等對齊。要動 warp shader 跟 buffer
+   format，留下次。
+2. **CPU `vkWaitSemaphores` 阻塞 ~3-5 ms/frame** — Phase 4b 的 PoC 設計
+   選了同步等 OF 完成；重構成完整 1-frame async lag (no CPU block) 等
+   未來迭代。1080p60 預算 16.7 ms/frame，現況 5 ms 占用不超出但無法
+   上 4K120。
+3. **`perfLevel=MEDIUM` hardcoded** — 可加 env var
+   `VIPLE_VKFRUC_NV_OF_PERF=slow|medium|fast` 讓 user 試 SLOW 看是否
+   改善 OF_30Hz（trade-off：SLOW 耗時更多）。
+4. **Output grid hardcoded=4** — 可動態查 `nvOFGetCaps` 看 device 支援
+   grid=1（最高精度），1080p flow 變 1920×1080 = 8 MB/frame staging。
+5. **Linux/AMD fallback** — `VK_NV_optical_flow` 僅 NVIDIA Ampere+。
+   非 NV 機器 / 舊卡自動走 block-match 不受影響。Linux native nvofapi
+   path 已 stub，等 §B-NVOF Linux ship 才實作 dlopen
+   (`libnvidia-opticalflow.so.1`).
+
