@@ -286,16 +286,52 @@ real/interp 看 `diff(real_N, interp) / motion_mag` score 都 1.7-2.7（理想
 但接出來的圖被 bilinear up smooth 掉細節（高頻內容遺失）使得跟 1080p
 real frame 的 pixel-level diff 偏大。
 
-**下一步要做的事：**
-1. 修 `inferShapes` 的 PixelShuffle / Crop 鏈讓它在 inferH 不是 /128 倍數
-   時也能算對 a.h（解 Add_503 shape mismatch）→ 解鎖 inferDim ≥ 384，
-   下采損失大幅變小
-2. 或 implement asymmetric BinaryOp shader (center-crop a 至 b 的 spatial
-   dim) 當 fallback —— 不用碰 inferShapes 但每呼叫多一份 copy
-3. 跑 `compare_fruc_engines.ps1` 加新 row `07_vkfruc_native_rife` 跟既有
-   06_vkfruc_nvof / 03_d3d11_nvidia_of 直接 PK warp ratio
-4. β.3 TRIPLE 支援（兩次 inference call 在 t=1/3 / t=2/3）—— 需要 perf 先
-   降到 < 5.5ms 才划算（現在 256×128 hot 應 ~3-5ms 在 budget 內，可試）
+**已 ship（commits 67a7c89 → d5f2812 + 3.4 v6 dump-skip）：**
+
+- β.4 v4 解開 Add_503 root cause：`Resize_47` hardcoded /32 + 兩個 stride-2
+  conv = encoder /128 → decoder ×128，inputH 不是 /128 整除時 a.h round 上
+  跟 b.h 不對齊。修法 inferW/H round 到 /128 multiple（不是 /32）。
+- β.4 v5 timing instrumentation：runRifeNativeStage 寫 ts[2..4] 進
+  m_FrucTimerPool，[VIPLE-VKFRUC-GPU-PROF] 顯示 nv12rgb / DOWN / RIFE / UP /
+  copy 分別 latency.
+- β.4 v6 dump-skip：m_RifeNativeReady 時跳過 §B-DUMP 的 vkCmdCopyBuffer
+  流程（避免 m_FrucMvFilteredBuf 未寫 + interp barrier mask 對不上）。
+
+**Latency table on RTX 3060 Laptop (live test 量得)：**
+
+| inferDim | RIFE inference | total chain | 60fps DUAL 吃得起？ |
+|---|---|---|---|
+| 256×128 | 11.9ms | 12.4ms | ✓ 60fps 穩 |
+| 512×256 | 29.1ms | 29.7ms | ✗ ~33fps drop |
+| 768×384 | ~50ms 推估 | ~51ms 推估 | ✗ |
+| 1024×512 | ~80ms+ 推估 | ✗ |
+
+預設 256×128。更強 GPU 可 `VIPLE_VKFRUC_RIFE_INFER_DIM=512` 拉到 quality
+明顯提升的 dim（必須 /128，否則撞 Add_503）。
+
+**已知問題（**待修，使用者醒來時未必擋）：**
+
+- **SW decode mode + Path β 不穩定** —— compare_fruc_engines.ps1 啟動時 set
+  VIPLE_VKFRUC_DUMP_DIR 強制 m_SwMode=true，HW decode 跑得起的 Path β 在
+  SW path 跑 ~8 秒就 VK_ERROR_DEVICE_LOST + Aftermath GPU crash dump。
+  (a) 不影響使用者主用例（live streaming 走 HW decode m_SwMode=false 穩）
+  (b) 影響 §B-DUMP 自動量測流程 — 解決前 compare_fruc_engines 的
+       `07_vkfruc_native_rife` row 會 timeout
+  (c) v6 加的 dump-skip guard 只跳 dump 命令，不解 SW-mode 自身 instability
+  (d) 推測 cause: m_SwFrucNv12Buf state cross renderFrameSw cycle vs
+       Path β buffer sync 競爭，或 BAR 記憶體壓力（SW upload 4MB×2 + RIFE
+       blobs +/- bilinear down/up buffers）
+  (e) 修法候選：trace renderFrameSw cmd buffer flow 找競爭點；或 force HW
+       decode 即使 dump 開啟（要 hack m_SwMode 邏輯）
+
+**還沒做的下一步候選：**
+1. 修 SW-mode device lost — 使 §B-DUMP 自動驗測 work
+2. 修 inferShapes / dispatchBinaryOp 處理 asymmetric center-crop pattern →
+   解鎖 inferDim 不對齊 /128 的情形（解開更多 quality dim 可能性）
+3. β.3 TRIPLE 支援（兩次 inference call 在 t=1/3 / t=2/3）— 需要 perf 先
+   降到 < 8ms / call 才划算 (現在 256×128 11.9ms × 2 = 23.8ms 超 budget)
+4. 找更聰明的 upscaler（bicubic / 學習式）取代 bilinear up，減 8× 上採
+   blur
 
 ### §J.3.e.Y native RIFE perf optimisation（**✅ milestone DONE 2026-05-06**）
 
