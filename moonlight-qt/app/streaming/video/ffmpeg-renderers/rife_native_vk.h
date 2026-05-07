@@ -475,6 +475,27 @@ public:
                          float              timestep,
                          void* /*VkBuffer*/ out0Buf);
 
+    // §J.3.e.X Path β.5 — flow + mask extraction variant.  Same dispatch
+    // sequence as runInferenceGpu, but instead of copying the final out0
+    // RGB blend to the caller, copies two intermediate tensors:
+    //   • tensor 714 = Add_503 output (4ch fp32: flow_prev_xy + flow_curr_xy
+    //     concatenated along C axis at infer dim)
+    //   • tensor 727 = Sigmoid_516 output (1ch fp32: blend mask 0..1)
+    // Caller (VkFrucRenderer.runRifeNativeStage β.5) then upscales these
+    // small tensors to the source resolution and runs its own warp+blend
+    // at native res, avoiding the bilinear-up RGB blur that β.4 produced.
+    //
+    // flowOutBuf must be sized at least 4 * inferH * inferW * sizeof(float).
+    // maskOutBuf must be sized at least 1 * inferH * inferW * sizeof(float).
+    // Both must have TRANSFER_DST usage.
+    bool runInferenceGpuFlow(void* /*VkCommandBuffer*/ cmd,
+                             uint32_t           slotIdx,
+                             void* /*VkBuffer*/ in0Buf,
+                             void* /*VkBuffer*/ in1Buf,
+                             float              timestep,
+                             void* /*VkBuffer*/ flowOutBuf,
+                             void* /*VkBuffer*/ maskOutBuf);
+
     // §J.3.e.Y 4Y.0 — per-phase wall-clock breakdown of the most
     // recent runInference call.  Phases:
     //   seedMs     — memcpy in0/in1/in2 from caller buffers into blobs

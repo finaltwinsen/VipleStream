@@ -912,6 +912,45 @@ private:
     VkDescriptorSet       m_RifeBilinearDownCurrDs = VK_NULL_HANDLE;
     VkDescriptorSet       m_RifeBilinearUpInterpDs = VK_NULL_HANDLE;
 
+    // === §J.3.e.X Path β.5 — RIFE flow extraction + native-res warp ===
+    // Replaces β.4's bilinear-up-RGB approach with: extract RIFE flow + mask
+    // tensors (small, smooth) → bilinear up to source res → custom warp+blend
+    // at native res preserves real frame sharpness.  See plan-mode design at
+    // C:\Users\final\.claude\plans\session-elegant-squid.md.
+    bool m_Beta5Enabled = true;  // VIPLE_VKFRUC_RIFE_BETA5=0 → fallback to β.4
+
+    // Intermediate: RIFE outputs at infer dim
+    VkBuffer       m_RifeFlowOutBuf  = VK_NULL_HANDLE;  // 4ch fp32 = tensor 714
+    VkDeviceMemory m_RifeFlowOutMem  = VK_NULL_HANDLE;
+    VkBuffer       m_RifeMaskOutBuf  = VK_NULL_HANDLE;  // 1ch fp32 = tensor 727
+    VkDeviceMemory m_RifeMaskOutMem  = VK_NULL_HANDLE;
+    // Upscaled to source dim
+    VkBuffer       m_RifeFlow1080Buf = VK_NULL_HANDLE;  // 4ch fp32 @ src dim
+    VkDeviceMemory m_RifeFlow1080Mem = VK_NULL_HANDLE;
+    VkBuffer       m_RifeMask1080Buf = VK_NULL_HANDLE;  // 1ch fp32 @ src dim
+    VkDeviceMemory m_RifeMask1080Mem = VK_NULL_HANDLE;
+
+    // β.5 shader: bilinear up with flow magnitude scaling (channels 0/2 ×
+    // scaleX, channels 1/3 × scaleY).  Separate from m_RifeBilinearPipeline
+    // to keep that one's push-const struct small.
+    VkShaderModule        m_RifeFlowBilinearShaderMod = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_RifeFlowBilinearDsl       = VK_NULL_HANDLE;
+    VkPipelineLayout      m_RifeFlowBilinearPipeLay   = VK_NULL_HANDLE;
+    VkPipeline            m_RifeFlowBilinearPipeline  = VK_NULL_HANDLE;
+    // β.5 native-res warp+blend shader (= RIFE's internal Mul_517 + Sub_519
+    // + Mul_520 + Add_521 done at source res with bilinear-up'd flow/mask).
+    // 6 bindings: prev_1080p / curr_1080p / flow_prev_1080p / flow_curr_1080p
+    // / mask_1080p / interp_out_1080p (= m_FrucInterpRgbBuf).
+    VkShaderModule        m_RifeNativeWarpShaderMod = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_RifeNativeWarpDsl       = VK_NULL_HANDLE;
+    VkPipelineLayout      m_RifeNativeWarpPipeLay   = VK_NULL_HANDLE;
+    VkPipeline            m_RifeNativeWarpPipeline  = VK_NULL_HANDLE;
+
+    // β.5 desc sets
+    VkDescriptorSet       m_RifeBilinearUpFlowDs = VK_NULL_HANDLE;  // (flowOut → flow1080) via flow shader
+    VkDescriptorSet       m_RifeBilinearUpMaskDs = VK_NULL_HANDLE;  // (maskOut → mask1080) via base bilinear shader
+    VkDescriptorSet       m_RifeNativeWarpDs     = VK_NULL_HANDLE;  // 6-binding warp DS
+
     VkDescriptorPool m_FrucDescPool = VK_NULL_HANDLE;
 
     // §J.3.e.2.i — overlay rendering (Ctrl+Alt+Shift+S 效能資訊).

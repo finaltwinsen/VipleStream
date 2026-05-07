@@ -6895,6 +6895,144 @@ bool RifeNativeExecutor::runInferenceGpu(void* cmdRaw,
     return dispatchOk;
 }
 
+// §J.3.e.X Path β.5 — flow + mask extraction variant.  Identical to
+// runInferenceGpu in its dispatch sequence (run all 389 layers), differs
+// only in what gets copied to caller buffers at the end:
+//   • tensor "714" → flowOutBuf  (4ch fp32 = flow_prev_xy + flow_curr_xy)
+//   • tensor "727" → maskOutBuf  (1ch fp32 = blend mask, post-Sigmoid)
+// Caller does its own warp+blend at native source res using these.
+bool RifeNativeExecutor::runInferenceGpuFlow(void* cmdRaw,
+                                              uint32_t slotIdx,
+                                              void* in0BufRaw,
+                                              void* in1BufRaw,
+                                              float timestep,
+                                              void* flowOutBufRaw,
+                                              void* maskOutBufRaw)
+{
+    if (!m_impl || !m_impl->initialized) return false;
+    auto cmd        = (VkCommandBuffer)cmdRaw;
+    auto in0Buf     = (VkBuffer)in0BufRaw;
+    auto in1Buf     = (VkBuffer)in1BufRaw;
+    auto flowOutBuf = (VkBuffer)flowOutBufRaw;
+    auto maskOutBuf = (VkBuffer)maskOutBufRaw;
+    if (cmd == VK_NULL_HANDLE
+        || in0Buf  == VK_NULL_HANDLE
+        || in1Buf  == VK_NULL_HANDLE
+        || flowOutBuf == VK_NULL_HANDLE
+        || maskOutBuf == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (m_impl->slotDescPools.empty()) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-RIFE-VK] runInferenceGpuFlow requires InitOptions::numFrameSlots>1");
+        return false;
+    }
+    const uint32_t slot = slotIdx % (uint32_t)m_impl->slotDescPools.size();
+    auto& st = m_impl->state;
+
+    VkDescriptorPool savedDescPool = st.descPool;
+    st.descPool = m_impl->slotDescPools[slot];
+    m_impl->pfnResetDP(st.device, st.descPool, 0);
+
+    // Find blob buffers we need.  in0/in1/in2 for input seeding;
+    // tensor "714" for flow, "727" for mask, on the way out.
+    auto in0It    = st.buffers.blobs.find(QStringLiteral("in0"));
+    auto in1It    = st.buffers.blobs.find(QStringLiteral("in1"));
+    auto in2It    = st.buffers.blobs.find(QStringLiteral("in2"));
+    auto flowIt   = st.buffers.blobs.find(QStringLiteral("714"));
+    auto maskIt   = st.buffers.blobs.find(QStringLiteral("727"));
+    if (in0It == st.buffers.blobs.end() || in1It == st.buffers.blobs.end()
+        || in2It == st.buffers.blobs.end() || flowIt == st.buffers.blobs.end()
+        || maskIt == st.buffers.blobs.end()) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-RIFE-VK] runInferenceGpuFlow: in0/in1/in2/714/727 blob missing "
+            "(model schema mismatch — RIFE-v4.25-lite expected)");
+        st.descPool = savedDescPool;
+        return false;
+    }
+
+    VkCommandBuffer savedCmd = st.cmd;
+    st.cmd = cmd;
+
+    // Stage in0/in1 from caller's VkBuffers into RIFE blob buffers.
+    {
+        VkBufferCopy r0 = {}; r0.size = in0It->second.size;
+        VkBufferCopy r1 = {}; r1.size = in1It->second.size;
+        st.pfnCopyBuf(cmd, in0Buf, in0It->second.buf, 1, &r0);
+        st.pfnCopyBuf(cmd, in1Buf, in1It->second.buf, 1, &r1);
+    }
+    // in2 timestep via mapped HOST_COHERENT pointer.
+    if (in2It->second.mapped) {
+        std::memcpy(in2It->second.mapped, &timestep, sizeof(float));
+    }
+    // TRANSFER/HOST writes → COMPUTE_SHADER reads barrier.
+    {
+        VkBufferMemoryBarrier bmb[3] = {};
+        for (int i = 0; i < 3; ++i) {
+            bmb[i].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            bmb[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bmb[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bmb[i].size = VK_WHOLE_SIZE;
+            bmb[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+        bmb[0].buffer        = in0It->second.buf;
+        bmb[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bmb[1].buffer        = in1It->second.buf;
+        bmb[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bmb[2].buffer        = in2It->second.buf;
+        bmb[2].srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        st.pfnBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, nullptr, 3, bmb, 0, nullptr);
+    }
+
+    // Run all 389 dispatches (same as runInferenceGpu).  We could stop after
+    // Sigmoid_516 but the savings (~4 of 389 layers) aren't worth the
+    // model-version coupling.
+    bool dispatchOk = true;
+    for (const Layer& L : m_impl->model.layers) {
+        if (L.kind == OpKind::Input || L.kind == OpKind::MemoryData) continue;
+        if (!dispatchLayer(st, L)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] runInferenceGpuFlow: dispatch FAILED at '%s' (%s)",
+                qUtf8Printable(L.name), opKindName(L.kind));
+            dispatchOk = false;
+            break;
+        }
+        emitComputeBarrier(st);
+    }
+
+    if (dispatchOk) {
+        // Barrier flow + mask blob buffers SHADER_WRITE → TRANSFER_READ.
+        VkBufferMemoryBarrier obar[2] = {};
+        for (int i = 0; i < 2; ++i) {
+            obar[i].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            obar[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            obar[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            obar[i].size = VK_WHOLE_SIZE;
+            obar[i].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            obar[i].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        }
+        obar[0].buffer = flowIt->second.buf;
+        obar[1].buffer = maskIt->second.buf;
+        st.pfnBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 2, obar, 0, nullptr);
+
+        // Copy flow (4ch) + mask (1ch) blobs to caller's buffers.
+        VkBufferCopy flowCopy = {}; flowCopy.size = flowIt->second.size;
+        VkBufferCopy maskCopy = {}; maskCopy.size = maskIt->second.size;
+        st.pfnCopyBuf(cmd, flowIt->second.buf, flowOutBuf, 1, &flowCopy);
+        st.pfnCopyBuf(cmd, maskIt->second.buf, maskOutBuf, 1, &maskCopy);
+    }
+
+    st.cmd      = savedCmd;
+    st.descPool = savedDescPool;
+    return dispatchOk;
+}
+
 RifeNativeExecutor::LastTiming RifeNativeExecutor::lastTiming() const {
     return (m_impl && m_impl->initialized) ? m_impl->lastTiming : LastTiming{};
 }
