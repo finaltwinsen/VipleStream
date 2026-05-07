@@ -698,6 +698,19 @@ bool Session::initialize(QQuickWindow* qtWindow)
     m_StreamConfig.fps = m_Preferences->fps;
     m_OriginalFps = m_Preferences->fps;
 
+    // §B-DUMP — VIPLE_VKFRUC_DUMP_DIR forces enableFrameInterpolation so the
+    // dump path actually has interp frames to capture.  Without this, server
+    // sends full fps + client shows real-only → FRUC compute chain never runs
+    // → dump captures nothing.  This override survives until session ends.
+    if (!qgetenv("VIPLE_VKFRUC_DUMP_DIR").isEmpty()
+        && !m_Preferences->enableFrameInterpolation) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-DUMP] forcing enableFrameInterpolation=true "
+                    "(VIPLE_VKFRUC_DUMP_DIR set, otherwise server sends full fps "
+                    "and FRUC chain never runs)");
+        m_Preferences->enableFrameInterpolation = true;
+    }
+
     // VipleStream v1.2.56: When FRUC is enabled, request half the frame
     // rate from the server and interpolate the other half client-side.
     //
@@ -711,10 +724,14 @@ bool Session::initialize(QQuickWindow* qtWindow)
     // anyone pick 30 fps + FRUC) is left for the day someone actually
     // tries it.
     if (m_Preferences->enableFrameInterpolation) {
-        // §B2 2026-05-06 — VIPLE_VKFRUC_TRIPLE=1 切到 60→180 (3x) 模式：
-        // 改向 server 要 fps / 3 而非 fps / 2，client 端每 server frame
-        // 補 2 張 interp（1/3 點 + 2/3 點），共 3 張 present 給 180Hz display.
-        const int frucRatio = (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0) ? 3 : 2;
+        // §B2 2026-05-06 / UI 整合 2026-05-07 — TRIPLE 60→180 (3x) 模式
+        // 開關來源：env var `VIPLE_VKFRUC_TRIPLE` (escape hatch / dev override)
+        // 優先，沒設才看 settings.vkfrucEnableTriple (UI checkbox).
+        // 開了 TRIPLE → 向 server 要 fps/3，client 每 server frame 補兩張
+        // interp (1/3 + 2/3) 共 3 張 present 給 180Hz display.
+        const bool tripleOn = (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0)
+                              || (m_Preferences && m_Preferences->vkfrucEnableTriple);
+        const int frucRatio = tripleOn ? 3 : 2;
         m_StreamConfig.fps = m_Preferences->fps / frucRatio;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] Requesting %d FPS from server (user setting: %d, FRUC %dx)",
@@ -1614,7 +1631,9 @@ void Session::toggleFRUC()
                 // TRIPLE 模式下 FRUC OFF 直接讓 client single-present 顯示 server
                 // 60fps 即可，視覺從 180→60 但無 jitter.  DUAL 維持原邏輯
                 // (60↔30 切換對 NVENC timebase 衝擊小，使用者驗證過可行).
-                const int frucRatio = (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0) ? 3 : 2;
+                const bool tripleOn = (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0)
+                                      || (m_Preferences && m_Preferences->vkfrucEnableTriple);
+                const int frucRatio = tripleOn ? 3 : 2;
                 if (frucRatio == 2 && m_OriginalFps > 0 && m_OriginalFps <= 180) {
                     bool frucOff = renderer->m_FRUCPaused.load();
                     int newServerFps = frucOff ? m_OriginalFps : (m_OriginalFps / frucRatio);

@@ -30,6 +30,23 @@
 // nvofapi64.dll at runtime via LoadLibrary; no static link required.
 #include "nvOpticalFlowVulkan.h"
 
+// §B-DUMP 2026-05-07 — stb_image_write for PNG output (diagnostic frame
+// dump path). ncnn ships v1.15 in ncnn/build/native/include/.
+// IMPLEMENTATION defined here to inline the impl into vkfruc.cpp's TU.
+// ncnn.dll may also include the header internally but its symbols are
+// not exported, so no duplicate-symbol collision.
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "ncnn/stb_image_write.h"
+
+// §B-DUMP — mkdir for dump directory tree.  Windows uses _mkdir from
+// <direct.h>; POSIX uses mkdir from <sys/stat.h>.
+#ifdef Q_OS_WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
+
 // SSE2 intrinsics for renderFrameSw's YUV420P→NV12 UV-plane interleave
 // fast path.  All currently-supported moonlight-qt build targets are x86
 // with SSE2 available.
@@ -55,6 +72,23 @@ extern "C" {
 // contract).  ffmpeg may submit on multiple threads; our renderFrame is
 // single-threaded, but ffmpeg can submit decode work concurrently.
 static std::mutex s_VkFrucQueueLock;
+
+// §B-NVOF / §B2 UI 整合 2026-05-07 — env var 跟 settings 的 OR 合併查詢.
+// env var 優先 (dev escape hatch / regression bisect)，沒設 env var 才看
+// StreamingPreferences (使用者在 Settings UI 勾的). RS_D3D11 path 完全
+// ignore — 兩個 helper 只在 VkFrucRenderer 內部呼叫.
+static bool vkfrucWantNvOfFromUserOrEnv()
+{
+    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_NV_OF") != 0) return true;
+    auto* prefs = StreamingPreferences::get();
+    return prefs && prefs->vkfrucEnableNvOf;
+}
+static bool vkfrucWantTripleFromUserOrEnv()
+{
+    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0) return true;
+    auto* prefs = StreamingPreferences::get();
+    return prefs && prefs->vkfrucEnableTriple;
+}
 
 // §J.3.e.2.i.6 — process-wide ref count for ncnn::create_gpu_instance.
 // Multiple VkFrucRenderer instances (test probes + real) each call create
@@ -89,9 +123,15 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     auto* prefs = StreamingPreferences::get(nullptr);
     bool prefsWantVulkan = prefs && prefs->rendererSelection == StreamingPreferences::RS_VULKAN;
     bool prefsWantInterp = prefs && prefs->enableFrameInterpolation;
-    m_SwMode   = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW")   != 0;
-    m_FrucMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_FRUC") != 0 || (prefsWantVulkan && prefsWantInterp);
-    m_DualMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_DUAL") != 0 || (prefsWantVulkan && prefsWantInterp);
+    // §B-DUMP — VIPLE_VKFRUC_DUMP_DIR implicitly enables FRUC + DUAL so the
+    // dump path actually has interp frames to capture.  Without this, dump
+    // wouldn't activate when user only sets DUMP_DIR (their RS_D3D11 default
+    // disables FRUC, so m_FrucMode=false → createFrucComputeResources never
+    // called → initFrameDump never called → no captures).
+    bool envDumpDir = !qgetenv("VIPLE_VKFRUC_DUMP_DIR").isEmpty();
+    m_SwMode   = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW")   != 0 || envDumpDir;
+    m_FrucMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_FRUC") != 0 || (prefsWantVulkan && prefsWantInterp) || envDumpDir;
+    m_DualMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_DUAL") != 0 || (prefsWantVulkan && prefsWantInterp) || envDumpDir;
     // §J.3.e.2.i.8 Phase 3d.4i — diagnostic override: forces FRUC + dual mode
     // OFF so we can isolate whether the AV1 grey-green flicker comes from the
     // decode path or the FRUC interpolation/dual-present blending path.
@@ -136,8 +176,7 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     // §B2 2026-05-06 — TRIPLE 60→180 mode opt-in via env var.  Strictly
     // upgrades dual-present to triple-present; only meaningful when both
     // FRUC + DualMode are already on.
-    m_TripleMode = m_DualMode && m_FrucMode &&
-                   (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0);
+    m_TripleMode = m_DualMode && m_FrucMode && vkfrucWantTripleFromUserOrEnv();
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d, frucMode=%d, dualMode=%d, tripleMode=%d, prefs=%s)",
                 pass, m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0,
@@ -763,7 +802,7 @@ bool VkFrucRenderer::createLogicalDevice()
     // m_OpticalFlowQueueFamily so subsequent OF session creation + cmd buf
     // submission knows which queue to use.  Stored in member here, fetched
     // queue handle below after vkCreateDevice.
-    bool wantNvOfQ = qEnvironmentVariableIntValue("VIPLE_VKFRUC_NV_OF") != 0;
+    bool wantNvOfQ = vkfrucWantNvOfFromUserOrEnv();
     m_OpticalFlowQueueFamily = UINT32_MAX;
     if (wantNvOfQ) {
         // Re-query queue family properties locally (qfs vector lives in
@@ -847,7 +886,7 @@ bool VkFrucRenderer::createLogicalDevice()
     // Used to replace block-matching ME with HW optical flow on NV Ampere+.
     // Probe loop above already logged whether it's available — only enable
     // when env var set so default builds stay extension-minimal.
-    bool wantNvOf = qEnvironmentVariableIntValue("VIPLE_VKFRUC_NV_OF") != 0;
+    bool wantNvOf = vkfrucWantNvOfFromUserOrEnv();
     if (wantNvOf) {
         wantedDevExts.push_back(VK_NV_OPTICAL_FLOW_EXTENSION_NAME);
     }
@@ -1503,6 +1542,462 @@ void VkFrucRenderer::destroyOpticalFlowSession()
     m_NvOfReady  = false;
     m_NvOfWidth  = 0;
     m_NvOfHeight = 0;
+}
+
+// §B-DUMP 2026-05-07 — fp32 planar RGB → uint8 packed RGBA.  Source layout:
+// 3 contiguous planes [R-plane (W*H fp32)] [G-plane] [B-plane], each value
+// nominally 0..1 (clamped here).  Output layout: W*H × RGBA (4 bytes / pixel),
+// suitable for stbi_write_png.
+void VkFrucRenderer::planarFp32RgbToUint8Rgba(const float* src, uint8_t* dst,
+                                              uint32_t w, uint32_t h)
+{
+    const uint32_t plane = w * h;
+    const float* rPlane = src;
+    const float* gPlane = src + plane;
+    const float* bPlane = src + 2u * plane;
+    for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+            const uint32_t i = y * w + x;
+            float r = rPlane[i];
+            float g = gPlane[i];
+            float b = bPlane[i];
+            r = r < 0.0f ? 0.0f : (r > 1.0f ? 1.0f : r);
+            g = g < 0.0f ? 0.0f : (g > 1.0f ? 1.0f : g);
+            b = b < 0.0f ? 0.0f : (b > 1.0f ? 1.0f : b);
+            const uint32_t o = i * 4u;
+            dst[o + 0] = (uint8_t)(r * 255.0f + 0.5f);
+            dst[o + 1] = (uint8_t)(g * 255.0f + 0.5f);
+            dst[o + 2] = (uint8_t)(b * 255.0f + 0.5f);
+            dst[o + 3] = 0xFF;
+        }
+    }
+}
+
+// §B-DUMP 2026-05-07 — best-effort init: read env var, alloc per-slot
+// host-visible staging buffers, mkdir dump dir, spawn writer thread.
+// Returns true if dump enabled (caller can short-circuit per-frame copy when
+// false).  Failure non-fatal — disables m_DumpEnabled and lets the rest of
+// the renderer run unaffected.
+//
+// Layout note: 2026-05-07 unified to flat single-dir naming
+// (`frame_NNNN_real.bmp` / `frame_NNNN_interp.bmp`, or `_interp1` /
+// `_interp2` for TRIPLE) to match D3D11VARenderer's dump format.  Older
+// `all/` + `real/` subdir pair removed — caused asymmetric drops under
+// writer-thread backpressure (real always pushed first, all/ entries
+// systematically lost).
+bool VkFrucRenderer::initFrameDump()
+{
+    QByteArray dirEnv = qgetenv("VIPLE_VKFRUC_DUMP_DIR");
+    if (dirEnv.isEmpty()) {
+        m_DumpEnabled = false;
+        return false;
+    }
+    m_DumpDir = dirEnv.constData();
+    int n = qEnvironmentVariableIntValue("VIPLE_VKFRUC_DUMP_FRAMES");
+    if (n > 0) m_DumpFramesTotal = n;
+    int delay = qEnvironmentVariableIntValue("VIPLE_VKFRUC_DUMP_DELAY_MS");
+    if (delay > 0) m_DumpDelayMs = delay;
+    using namespace std::chrono;
+    m_DumpSessionStartMs = duration_cast<milliseconds>(
+        steady_clock::now().time_since_epoch()).count();
+
+    // mkdir dump dir (Windows _mkdir).  Tolerate "exists".  Flat layout
+    // — no subdirs (see note in dtor comment above).
+    auto mkdirIgnoreExists = [](const std::string& p) {
+#ifdef Q_OS_WIN32
+        _mkdir(p.c_str());
+#else
+        mkdir(p.c_str(), 0755);
+#endif
+    };
+    mkdirIgnoreExists(m_DumpDir);
+
+    // Reset flat-dir counter so each capture session starts at 0000.
+    m_DumpDisplayCounter = 0;
+
+    // Allocate staging buffers — sized for 1080p RGB fp32 (W*H*3*4 ≈ 25 MB).
+    // Same alloc helper as createOpticalFlowSession but bound to
+    // HOST_VISIBLE_COHERENT memory (no flush needed).
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCreateBuffer  = (PFN_vkCreateBuffer)getDevPa(m_Device, "vkCreateBuffer");
+    auto pfnGetBufMemReq  = (PFN_vkGetBufferMemoryRequirements)getDevPa(m_Device, "vkGetBufferMemoryRequirements");
+    auto pfnAllocMem      = (PFN_vkAllocateMemory)getDevPa(m_Device, "vkAllocateMemory");
+    auto pfnBindBufMem    = (PFN_vkBindBufferMemory)getDevPa(m_Device, "vkBindBufferMemory");
+    auto pfnMapMem        = (PFN_vkMapMemory)getDevPa(m_Device, "vkMapMemory");
+    auto pfnGetPdMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnCreateBuffer || !pfnGetBufMemReq || !pfnAllocMem || !pfnBindBufMem
+        || !pfnMapMem || !pfnGetPdMemProps) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-DUMP] PFN load failed — disabling dump");
+        return false;
+    }
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPdMemProps(m_PhysicalDevice, &memProps);
+    // §B-DUMP — CRUCIAL: prefer HOST_CACHED.  Without HOST_CACHED, NV
+    // driver maps coherent-only memory as Write-Combine, where CPU reads
+    // are ~200MB/s (uncached burst).  Reading 25MB staging at WC speed =
+    // 125ms — render thread chokes at 1-3fps during capture.  HOST_CACHED
+    // gives ~10GB/s reads (50× faster).  Most dGPUs expose CACHED+COHERENT;
+    // fall back to coherent-only (slow but correct) if not.
+    auto findHostVisibleType = [&](uint32_t bits) -> int {
+        const VkMemoryPropertyFlags preferred =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+            VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        const VkMemoryPropertyFlags fallback =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+            if ((bits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & preferred) == preferred) {
+                return (int)i;
+            }
+        }
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-DUMP] no HOST_CACHED memory available — "
+                    "falling back to WC; expect render-thread slowdown during dump");
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+            if ((bits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & fallback) == fallback) {
+                return (int)i;
+            }
+        }
+        return -1;
+    };
+
+    // Use exact source dimensions (matching m_FrucCurrRgbBuf alloc size in
+    // createFrucComputeResources).  Fall back to 1080p if not yet stamped.
+    uint32_t srcW = m_FrucSrcWidth  ? m_FrucSrcWidth  : 1920;
+    uint32_t srcH = m_FrucSrcHeight ? m_FrucSrcHeight : 1080;
+    m_DumpStagingSize = (VkDeviceSize)srcW * srcH * 3 * sizeof(float);
+
+    auto allocStaging = [&](VkBuffer& outBuf, VkDeviceMemory& outMem, void*& outMap) -> bool {
+        VkBufferCreateInfo bci = {};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size  = m_DumpStagingSize;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (pfnCreateBuffer(m_Device, &bci, nullptr, &outBuf) != VK_SUCCESS) return false;
+        VkMemoryRequirements mr;
+        pfnGetBufMemReq(m_Device, outBuf, &mr);
+        int idx = findHostVisibleType(mr.memoryTypeBits);
+        if (idx < 0) return false;
+        VkMemoryAllocateInfo mai = {};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize  = mr.size;
+        mai.memoryTypeIndex = (uint32_t)idx;
+        if (pfnAllocMem(m_Device, &mai, nullptr, &outMem) != VK_SUCCESS) return false;
+        if (pfnBindBufMem(m_Device, outBuf, outMem, 0) != VK_SUCCESS) return false;
+        if (pfnMapMem(m_Device, outMem, 0, VK_WHOLE_SIZE, 0, &outMap) != VK_SUCCESS) return false;
+        return true;
+    };
+    bool ok = true;
+    for (uint32_t s = 0; s < kFrucFramesInFlight; ++s) {
+        ok = ok && allocStaging(m_DumpStagingReal[s],    m_DumpStagingRealMem[s],    m_DumpStagingRealMap[s]);
+        ok = ok && allocStaging(m_DumpStagingInterp1[s], m_DumpStagingInterp1Mem[s], m_DumpStagingInterp1Map[s]);
+        ok = ok && allocStaging(m_DumpStagingInterp2[s], m_DumpStagingInterp2Mem[s], m_DumpStagingInterp2Map[s]);
+    }
+
+    // §B-DUMP MV — separate alloc with smaller size (mvW*mvH*2*int).
+    m_DumpStagingMvSize = (VkDeviceSize)m_FrucMvWidth * m_FrucMvHeight * 2u * sizeof(int);
+    auto allocMvStaging = [&](VkBuffer& outBuf, VkDeviceMemory& outMem, void*& outMap) -> bool {
+        VkBufferCreateInfo bci = {};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size  = m_DumpStagingMvSize;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (pfnCreateBuffer(m_Device, &bci, nullptr, &outBuf) != VK_SUCCESS) return false;
+        VkMemoryRequirements mr;
+        pfnGetBufMemReq(m_Device, outBuf, &mr);
+        int idx = findHostVisibleType(mr.memoryTypeBits);
+        if (idx < 0) return false;
+        VkMemoryAllocateInfo mai = {};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize  = mr.size;
+        mai.memoryTypeIndex = (uint32_t)idx;
+        if (pfnAllocMem(m_Device, &mai, nullptr, &outMem) != VK_SUCCESS) return false;
+        if (pfnBindBufMem(m_Device, outBuf, outMem, 0) != VK_SUCCESS) return false;
+        if (pfnMapMem(m_Device, outMem, 0, VK_WHOLE_SIZE, 0, &outMap) != VK_SUCCESS) return false;
+        return true;
+    };
+    for (uint32_t s = 0; s < kFrucFramesInFlight; ++s) {
+        ok = ok && allocMvStaging(m_DumpStagingMv[s], m_DumpStagingMvMem[s], m_DumpStagingMvMap[s]);
+    }
+    if (!ok) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-DUMP] staging buffer alloc failed — disabling dump");
+        teardownFrameDump();
+        return false;
+    }
+
+    // Spawn writer thread.
+    m_DumpWriterStop.store(false, std::memory_order_release);
+    m_DumpWriterThread = std::thread([this]() {
+        for (;;) {
+            DumpJob job;
+            {
+                std::unique_lock<std::mutex> lk(m_DumpQueueMutex);
+                m_DumpQueueCv.wait(lk, [&] {
+                    return !m_DumpQueue.empty()
+                        || m_DumpWriterStop.load(std::memory_order_acquire);
+                });
+                if (m_DumpQueue.empty()) break;  // stop requested
+                job = std::move(m_DumpQueue.front());
+                m_DumpQueue.pop();
+            }
+            // §B-DUMP — BMP not PNG.  PNG @ level 8 = 100-200ms / 1080p frame
+            // → writer thread can't keep up at 60fps × 2-3 buffers = 120-180
+            // BMPs/sec.  BMP is uncompressed (~5ms encode, file ~8MB).  Disk
+            // usage trade-off acceptable for short diagnostic capture.
+            int rc = stbi_write_bmp(job.path.c_str(),
+                                    (int)job.width, (int)job.height, 4,
+                                    job.rgba.data());
+            if (rc == 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-DUMP] stbi_write_bmp failed for %s",
+                            job.path.c_str());
+            } else {
+                // Log every write for visibility (volume is low: <= ~30 BMPs).
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-DUMP] wrote %s",
+                            job.path.c_str());
+            }
+            ++m_DumpFramesWritten;
+        }
+    });
+
+    m_DumpEnabled = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-DUMP] enabled — dir='%s' frames=%d delay=%lldms "
+                "format=BMP queueCap=%zu (staging %u×%u fp32 RGB ≈ %llu MB × "
+                "%u buffers, mem-type=HOST_CACHED preferred)",
+                m_DumpDir.c_str(), m_DumpFramesTotal,
+                (long long)m_DumpDelayMs, kDumpQueueCap,
+                srcW, srcH,
+                (unsigned long long)(m_DumpStagingSize / (1024 * 1024)),
+                kFrucFramesInFlight * 3u);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-DUMP] NOTE: dump captures the EXACT same "
+                "interp output as live streaming.  For low-motion content "
+                "(static desktop, sub-pixel motion) the production Balanced "
+                "mode collapses interp to curr, so 'interp ≈ real' is expected. "
+                "To see clear ghosting proof FRUC chain runs, add "
+                "VIPLE_VKFRUC_WARP_NO_MV=1 (forces 50/50 cross-fade, ignores MV).");
+    return true;
+}
+
+void VkFrucRenderer::teardownFrameDump()
+{
+    // Signal writer thread to drain + stop.
+    if (m_DumpWriterThread.joinable()) {
+        m_DumpWriterStop.store(true, std::memory_order_release);
+        m_DumpQueueCv.notify_all();
+        m_DumpWriterThread.join();
+    }
+    // Free GPU resources.
+    if (m_Device != VK_NULL_HANDLE && m_pfnGetInstanceProcAddr) {
+        auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        auto pfnDestroyBuf = getDevPa ? (PFN_vkDestroyBuffer)getDevPa(m_Device, "vkDestroyBuffer") : nullptr;
+        auto pfnFreeMem    = getDevPa ? (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory") : nullptr;
+        auto pfnUnmap      = getDevPa ? (PFN_vkUnmapMemory)getDevPa(m_Device, "vkUnmapMemory") : nullptr;
+        for (uint32_t s = 0; s < kFrucFramesInFlight; ++s) {
+#define DESTROY_DUMP_STAGING(buf, mem, map)                                 \
+            if (map && pfnUnmap) { pfnUnmap(m_Device, mem); map = nullptr; } \
+            if (buf && pfnDestroyBuf) { pfnDestroyBuf(m_Device, buf, nullptr); buf = VK_NULL_HANDLE; } \
+            if (mem && pfnFreeMem)    { pfnFreeMem(m_Device, mem, nullptr);    mem = VK_NULL_HANDLE; }
+            DESTROY_DUMP_STAGING(m_DumpStagingReal[s],    m_DumpStagingRealMem[s],    m_DumpStagingRealMap[s])
+            DESTROY_DUMP_STAGING(m_DumpStagingInterp1[s], m_DumpStagingInterp1Mem[s], m_DumpStagingInterp1Map[s])
+            DESTROY_DUMP_STAGING(m_DumpStagingInterp2[s], m_DumpStagingInterp2Mem[s], m_DumpStagingInterp2Map[s])
+            DESTROY_DUMP_STAGING(m_DumpStagingMv[s],       m_DumpStagingMvMem[s],       m_DumpStagingMvMap[s])
+#undef DESTROY_DUMP_STAGING
+        }
+    }
+    // Reset slot records.
+    for (uint32_t s = 0; s < kFrucFramesInFlight; ++s) {
+        m_DumpSlotRec[s] = { -1, false };
+    }
+    m_DumpEnabled = false;
+}
+
+// §B-DUMP — flush pending dump record at slot fence-wait reuse point.
+// Caller has just done WaitForFences(m_SlotInFlightFence[slotIdx]) → GPU
+// finished writing m_DumpStaging*[slotIdx]; host-coherent so no flush.
+//
+// Cost: ~3-8ms per call on render thread (fp32→uint8 conversion of 2-3
+// 1080p planes).  Runs only N times during 1s capture window — after
+// capture done, m_DumpFramesQueued >= total and we still flush remaining
+// pending records (drain ring), then quietly skip on subsequent calls.
+void VkFrucRenderer::flushDumpSlotIfPending(uint32_t slotIdx)
+{
+    if (!m_DumpEnabled) return;
+    if (slotIdx >= kFrucFramesInFlight) return;
+    DumpSlotRec rec = m_DumpSlotRec[slotIdx];
+    if (rec.serverFrameIdx < 0) return;
+
+    const uint32_t srcW = m_FrucSrcWidth  ? m_FrucSrcWidth  : 1920;
+    const uint32_t srcH = m_FrucSrcHeight ? m_FrucSrcHeight : 1080;
+    const size_t  rgbaBytes = (size_t)srcW * srcH * 4u;
+    char nbuf[64] = {};
+
+    // §B-DUMP layout (matches D3D11VARenderer.dumpBackbufferIfActive
+    // 2026-05-07): single flat dir, monotonic counter, suffix tells type.
+    // Sorted by name → display order:
+    //   DUAL   (60→120): file 2N = real_N,            file 2N+1 = interp(N,N+1)
+    //   TRIPLE (60→180): file 3N = real_N,            file 3N+1 = interp1, file 3N+2 = interp2
+    // analyze_fruc_compare.py's existing D3D11 forward-indexing path
+    // (interp at slot 2N+1 = mid(real_2N, real_2N+2)) just works with
+    // this layout — no vkfruc-specific code path needed downstream.
+    //
+    // First-cycle skip: we drop the interp(s) on the very first cycle
+    // (when counter == 0 going in, i.e. no real has been committed yet)
+    // because prev is undefined at that point so the warp output is
+    // garbage.  This mirrors NvOFFRUC's behavior (`hasInterp=false` on
+    // its first call) — D3D11 dump skips the first interp the same way.
+    // Result: file 0 is always real_0.
+    //
+    // Atomicity: previous design enqueued 3 (DUAL: 1 real + 2 all/) jobs
+    // independently into the queue.  When writer-thread couldn't keep up,
+    // each enqueue's `size >= cap` check made an independent drop decision,
+    // and because real/ was always pushed first it would systematically
+    // succeed while subsequent all/ jobs got dropped — so users saw
+    // real=55 / all=38 even though both should have been the same multiple
+    // of server-frame count.  Fix: build all candidates outside the queue
+    // lock, then take the lock once and either commit them all or drop
+    // them all.  Counter only advances on commit.
+    DumpJob candidates[3];
+    char    candPaths[3][96] = {};
+    int     candCount = 0;
+
+    auto buildCandidate = [&](const float* src, const char* path) {
+        DumpJob& job = candidates[candCount];
+        job.width  = srcW;
+        job.height = srcH;
+        job.rgba.resize(rgbaBytes);
+        planarFp32RgbToUint8Rgba(src, job.rgba.data(), srcW, srcH);
+        job.path = path;
+        ++candCount;
+    };
+
+    int        tentativeCounter = m_DumpDisplayCounter;
+    const bool firstCycle       = (m_DumpDisplayCounter == 0);
+
+    // Within each non-first cycle: interp(s) FIRST, then real — matches
+    // display order (interp shows between prev real and curr real, then
+    // curr real shows last).  Sorted by filename this produces the
+    // alternating pattern downstream tools expect:
+    //   firstCycle (no prev → no interp): file 0 = real_0
+    //   cycle 1: file 1 = interp(0,1),                file 2 = real_1
+    //   cycle 2: file 3 = interp(1,2),                file 4 = real_2
+    //   ...
+    // → file 2N = real_N, file 2N+1 = interp(real_2N, real_2N+2).  Same
+    // forward-indexing convention as D3D11VARenderer dumps.
+
+    if (!firstCycle) {
+        if (rec.wasTriple) {
+            snprintf(candPaths[0], sizeof(candPaths[0]),
+                     "%s/frame_%04d_interp1.bmp", m_DumpDir.c_str(), tentativeCounter++);
+            buildCandidate((const float*)m_DumpStagingInterp1Map[slotIdx], candPaths[0]);
+
+            snprintf(candPaths[1], sizeof(candPaths[1]),
+                     "%s/frame_%04d_interp2.bmp", m_DumpDir.c_str(), tentativeCounter++);
+            buildCandidate((const float*)m_DumpStagingInterp2Map[slotIdx], candPaths[1]);
+        } else {
+            snprintf(candPaths[0], sizeof(candPaths[0]),
+                     "%s/frame_%04d_interp.bmp", m_DumpDir.c_str(), tentativeCounter++);
+            buildCandidate((const float*)m_DumpStagingInterp1Map[slotIdx], candPaths[0]);
+        }
+    }
+
+    // Real (always — present last in the cycle).
+    char* realPath = candPaths[candCount];
+    snprintf(realPath, sizeof(candPaths[0]),
+             "%s/frame_%04d_real.bmp", m_DumpDir.c_str(), tentativeCounter++);
+    buildCandidate((const float*)m_DumpStagingRealMap[slotIdx], realPath);
+
+    // Atomic commit-or-drop under the queue lock.
+    bool dropped = false;
+    size_t queueSizeForLog = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_DumpQueueMutex);
+        if (m_DumpQueue.size() + (size_t)candCount > kDumpQueueCap) {
+            dropped = true;
+            queueSizeForLog = m_DumpQueue.size();
+        } else {
+            for (int i = 0; i < candCount; ++i) {
+                m_DumpQueue.push(std::move(candidates[i]));
+            }
+            m_DumpDisplayCounter = tentativeCounter;
+        }
+    }
+    if (dropped) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-DUMP] queue full (%zu/%zu) — dropping whole "
+            "frame (%d entries; counter held at %d, server frame=%d)",
+            queueSizeForLog, kDumpQueueCap, candCount,
+            m_DumpDisplayCounter, rec.serverFrameIdx);
+    } else {
+        m_DumpQueueCv.notify_all();
+    }
+
+    // §B-DUMP MV — analyze MV buffer + write summary.  Format: int32 pairs
+    // (mvX, mvY) in Q1 (×2 of pixel value, so mv=2 means 1 pixel actual).
+    if (m_DumpStagingMvMap[slotIdx] && m_FrucMvWidth && m_FrucMvHeight) {
+        const int32_t* mvData = (const int32_t*)m_DumpStagingMvMap[slotIdx];
+        const uint32_t mvCount = m_FrucMvWidth * m_FrucMvHeight;
+        int zeros = 0, nonzeros = 0;
+        int maxAbsX = 0, maxAbsY = 0;
+        long long sumAbsX = 0, sumAbsY = 0;
+        for (uint32_t i = 0; i < mvCount; ++i) {
+            int x = mvData[i * 2 + 0];
+            int y = mvData[i * 2 + 1];
+            if (x == 0 && y == 0) ++zeros; else ++nonzeros;
+            int ax = x < 0 ? -x : x;
+            int ay = y < 0 ? -y : y;
+            sumAbsX += ax; sumAbsY += ay;
+            if (ax > maxAbsX) maxAbsX = ax;
+            if (ay > maxAbsY) maxAbsY = ay;
+        }
+        double meanAbsX = (double)sumAbsX / mvCount;
+        double meanAbsY = (double)sumAbsY / mvCount;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-DUMP-MV] frame=%d mv=%ux%u zero=%d/%d (%.1f%%) "
+            "nonzero=%d mean|x|=%.2f mean|y|=%.2f max|x|=%d max|y|=%d "
+            "(Q1 units: 1 LSB = 0.5 pixel; >=2 needed for warp to engage)",
+            rec.serverFrameIdx, m_FrucMvWidth, m_FrucMvHeight,
+            zeros, mvCount, 100.0 * zeros / mvCount, nonzeros,
+            meanAbsX, meanAbsY, maxAbsX, maxAbsY);
+
+        // Also save the raw MV buffer as a binary file for later analysis.
+        snprintf(nbuf, sizeof(nbuf), "%s/mv_frame_%04d.bin",
+                 m_DumpDir.c_str(), rec.serverFrameIdx);
+        FILE* fp = fopen(nbuf, "wb");
+        if (fp) {
+            fwrite(mvData, 1, (size_t)m_DumpStagingMvSize, fp);
+            fclose(fp);
+        }
+    }
+
+    // Slot consumed — clear so we don't re-enqueue if writer thread is slow.
+    m_DumpSlotRec[slotIdx] = { -1, false };
+
+    // Done log: when both queue full + ring drained.
+    if (!m_DumpDoneLogged
+        && m_DumpFramesQueued >= m_DumpFramesTotal) {
+        bool allDrained = true;
+        for (uint32_t s = 0; s < kFrucFramesInFlight; ++s) {
+            if (m_DumpSlotRec[s].serverFrameIdx >= 0) { allDrained = false; break; }
+        }
+        if (allDrained) {
+            m_DumpDoneLogged = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-DUMP] capture complete — %d server frames "
+                "queued for PNG encode (PNG writer thread continues to drain "
+                "queue in background)", m_DumpFramesQueued);
+        }
+    }
 }
 
 bool VkFrucRenderer::createSwapchain()
@@ -4715,28 +5210,101 @@ void main() {
     uint mvY = gl_GlobalInvocationID.y;
     if (mvX >= p.mvW || mvY >= p.mvH) return;
 
-    // Dynamic scale based on grid choice (1/2/4):
-    //   grid=4 → flowW=mvW*2, scale=2 → 4 reads / mv cell
-    //   grid=2 → flowW=mvW*4, scale=4 → 16 reads / mv cell
-    //   grid=1 → flowW=mvW*8, scale=8 → 64 reads / mv cell
+    // §B-NVOF A'.2 2026-05-07 — consensus-max instead of plain average.
+    //
+    // Why: testufo + most game content has small fast-moving subjects (UFO,
+    // mouse cursor, particle, projectile) on mostly-static background.  An
+    // 8-px MV cell covers up to 64 source pixels = 16 NVOF flow cells (at
+    // grid=2).  When the subject occupies only 1-3 of those 16 cells, plain
+    // averaging dilutes its motion by 5-15× toward 0:
+    //
+    //   1 cell  with flow = 60 SFIXED5  (real UFO motion ~ 30 pixels)
+    //   15 cells with flow = 0          (static stars)
+    //   →  average = 60/16 = 3.75       (rounds to Q1=0 → cross-fade)
+    //
+    // The §B-DUMP-MV log on testufo confirmed this: 85% MV=0 + max only 5
+    // LSB Q1 across full 240×135 grid even though UFO moves 30+ px/frame.
+    //
+    // Fix:
+    //   1. Find max-magnitude flow cell (the strongest signal in the block)
+    //   2. Apply noise floor: ignore if max² < 16 (= < 0.125 px).  NVOF gives
+    //      random spikes of 4-8 LSB in low-contrast / repetitive textures
+    //      (star fields, gradient skies); these are noise, not real motion.
+    //   3. Consensus: count cells with mag² >= 0.25 * maxMag² (within half
+    //      magnitude of max).  ≥2 in agreement = real motion → average them
+    //      (smooths sub-pixel jitter); <2 = lone spike → use max as-is but
+    //      we already passed noise floor so likely UFO partially in cell.
+    //
+    // Trade-off vs plain max: consensus check rejects isolated noise spikes
+    // (lone cell with random 4-8 LSB on static background) but preserves
+    // genuine motion (multiple cells in similar direction on subject).
+
     uint scaleX = p.flowW / p.mvW;
     uint scaleY = p.flowH / p.mvH;
     uint count  = scaleX * scaleY;
     uint fxBase = mvX * scaleX;
     uint fyBase = mvY * scaleY;
-    ivec2 sum = ivec2(0);
+
+    // Read all flow cells + compute magnitudes.
+    // Buffer with worst-case grid=1 (64 cells) static array bounded.
+    const uint MAX_CELLS = 64u;
+    ivec2 cells[MAX_CELLS];
+    int   mag2s[MAX_CELLS];
+    uint  n = 0u;
+    int   maxMag2 = 0;
+    ivec2 maxFlow = ivec2(0);
     for (uint dy = 0u; dy < scaleY; dy++) {
         for (uint dx = 0u; dx < scaleX; dx++) {
-            sum += readFlow(fxBase + dx, fyBase + dy);
+            ivec2 v = readFlow(fxBase + dx, fyBase + dy);
+            int m2 = v.x * v.x + v.y * v.y;
+            if (n < MAX_CELLS) {
+                cells[n] = v;
+                mag2s[n] = m2;
+                n++;
+            }
+            if (m2 > maxMag2) {
+                maxMag2 = m2;
+                maxFlow = v;
+            }
         }
     }
-    ivec2 avgRaw = sum / int(count);
 
-    // SFIXED5 / 16 = Q1 (pixel * 2).  Signed division rounds toward zero.
-    // §B-NVOF Phase 7A reverted (Q5 buffer attempt) — Q1's 0.5 px quantisation
-    // unintentionally smoothed temporal MV noise; Q5 sub-pixel precision
-    // exposed it (OF_30Hz 2.66% → 7.31% on testufo).  Back to /16 → Q1.
-    ivec2 q1 = avgRaw / 16;
+    // Noise floor: SFIXED5 has 1/32 px resolution. mag² < 16 = magnitude < 4
+    // SFIXED5 = < 0.125 px.  Below this, treat as static (noise).
+    const int NOISE_FLOOR_MAG2 = 16;
+    if (maxMag2 < NOISE_FLOOR_MAG2) {
+        uint idx0 = (mvY * p.mvW + mvX) * 2u;
+        mvOut.data[idx0]      = 0;
+        mvOut.data[idx0 + 1u] = 0;
+        return;
+    }
+
+    // Consensus: gather cells with mag² >= maxMag² / 4 (within ±50% magnitude).
+    // Multiply threshold instead of float division for integer safety.
+    int threshScaled = maxMag2;  // compare 4 * mag² >= maxMag²
+    ivec2 consensusSum = ivec2(0);
+    int   consensusN   = 0;
+    for (uint i = 0u; i < n; i++) {
+        if (4 * mag2s[i] >= threshScaled) {
+            consensusSum += cells[i];
+            consensusN++;
+        }
+    }
+
+    // ≥2 cells in consensus = real subject motion (average them for sub-pixel
+    // smoothness).  Lone cell above noise floor = use max as-is (likely a
+    // UFO/cursor partially overlapping a single MV cell — better to keep the
+    // motion than zero it).
+    ivec2 chosen = (consensusN >= 2)
+                 ? (consensusSum / consensusN)
+                 : maxFlow;
+
+    // SFIXED5 (1/32 px) → Q1 (1/2 px).  Divide by 16, signed round-toward-0.
+    // §B-NVOF Phase 7A reverted Q5 attempt: per-cell Q5 was noisier than Q1
+    // averaging-then-quantising.  Now with consensus-max upstream, Q1 still
+    // adequate (warp threshold = 1 px = 2 LSB Q1).  Q5 sample-direct path
+    // remains a candidate if A'.2 still has dilution issues.
+    ivec2 q1 = chosen / 16;
 
     uint outIdx = (mvY * p.mvW + mvX) * 2u;
     mvOut.data[outIdx]      = q1.x;
@@ -4755,6 +5323,8 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     const uint32_t mvH = ((uint32_t)height + BLOCK_SIZE - 1) / BLOCK_SIZE;
     m_FrucMvWidth  = mvW;
     m_FrucMvHeight = mvH;
+    m_FrucSrcWidth  = (uint32_t)width;
+    m_FrucSrcHeight = (uint32_t)height;
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: enter (W=%d H=%d block=%u mv=%ux%u)",
@@ -4878,7 +5448,7 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // always build when env var enabled even if OF session creation fails
     // later).  4 push consts (uint flowW/H + uint mvW/H = 16 B), 2 storage
     // buffer bindings (flow staging input + mv filtered output).
-    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_NV_OF") != 0) {
+    if (vkfrucWantNvOfFromUserOrEnv()) {
         if (!buildPipeline("NvOFConvert", kVkFrucNvOfConvertShaderGlsl, 2, 16,
                            m_FrucNvOfConvertShaderMod, m_FrucNvOfConvertDsl,
                            m_FrucNvOfConvertPipeLay, m_FrucNvOfConvertPipeline)) {
@@ -5095,6 +5665,12 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         createOpticalFlowSession((uint32_t)width, (uint32_t)height);
     }
 
+    // §B-DUMP 2026-05-07 — best-effort diagnostic frame dump init
+    // (no-op if VIPLE_VKFRUC_DUMP_DIR unset).  Must be called AFTER
+    // m_FrucSrcWidth/Height stamped above and m_FrucCurrRgbBuf alloc'd
+    // (so dump staging size matches actual buffer size).
+    initFrameDump();
+
     return true;
 }
 
@@ -5102,6 +5678,9 @@ void VkFrucRenderer::destroyFrucComputeResources()
 {
     if (!m_FrucReady && !m_FrucMePipeline) return;
     if (m_Device == VK_NULL_HANDLE) return;
+
+    // §B-DUMP — tear down dump first (joins writer thread, frees staging).
+    teardownFrameDump();
 
     // §B-NVOF Phase 3c — destroy OF session before tearing down compute
     // chain (so registered resources unwind in the correct order).
@@ -5185,7 +5764,7 @@ void VkFrucRenderer::destroyFrucComputeResources()
 //   Median (16 bytes): int mvW,mvH,radius,reserved
 //   Warp   (24 bytes): int srcW,srcH,mvW,mvH,blockSize,frameNum
 bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, uint32_t height,
-                                          bool useNativeSrc)
+                                          bool useNativeSrc, uint32_t slotIdx)
 {
     if (!m_FrucReady) return false;
 
@@ -5568,6 +6147,78 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         m_FrucTimerArmed[timerSlot] = true;
     }
 
+    // §B-DUMP 2026-05-07 — diagnostic frame dump (after warmup elapsed).
+    // Records cmdCopyBuffer ops into THIS cmd buffer; staging fills happen
+    // GPU-side without blocking render thread.  Memcpy + queue push happen
+    // at next reuse of slot S (existing fence wait — zero extra sync).
+    //
+    // m_FrucCurrRgbBuf is already in TRANSFER_READ state (line 5770 barrier
+    // for the curr→prev copy).  Interp bufs are in COMPUTE_SHADER_WRITE,
+    // need a TRANSFER_READ barrier before we copy.  Both reads independent
+    // of downstream FRAGMENT_SHADER_READ in renderFrame's interp barrier
+    // (no write hazard — both are reads of same write).
+    if (m_DumpEnabled && slotIdx < kFrucFramesInFlight
+        && m_DumpFramesQueued < m_DumpFramesTotal) {
+        using namespace std::chrono;
+        int64_t nowMs = duration_cast<milliseconds>(
+            steady_clock::now().time_since_epoch()).count();
+        if (nowMs - m_DumpSessionStartMs >= m_DumpDelayMs) {
+            // Barrier interp bufs from compute_write → transfer_read.
+            bufBarrier(m_FrucInterpRgbBuf,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT);
+            if (m_TripleMode) {
+                bufBarrier(m_FrucInterpRgbBuf2,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT);
+            }
+            // Copy to per-slot staging.  Size matches m_FrucCurrRgbBuf alloc
+            // = width*height*3*fp32 = m_DumpStagingSize.
+            VkBufferCopy dumpRegion = {};
+            dumpRegion.size = m_DumpStagingSize;
+            pfnCmdCopyBuffer(cmd, m_FrucCurrRgbBuf,
+                             m_DumpStagingReal[slotIdx],    1, &dumpRegion);
+            pfnCmdCopyBuffer(cmd, m_FrucInterpRgbBuf,
+                             m_DumpStagingInterp1[slotIdx], 1, &dumpRegion);
+            if (m_TripleMode) {
+                pfnCmdCopyBuffer(cmd, m_FrucInterpRgbBuf2,
+                                 m_DumpStagingInterp2[slotIdx], 1, &dumpRegion);
+            }
+            // §B-DUMP MV — also copy m_FrucMvFilteredBuf for diagnostic.
+            // It's in COMPUTE_SHADER_READ state from warp; we need TRANSFER_READ.
+            bufBarrier(m_FrucMvFilteredBuf,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT);
+            VkBufferCopy mvRegion = {};
+            mvRegion.size = m_DumpStagingMvSize;
+            pfnCmdCopyBuffer(cmd, m_FrucMvFilteredBuf,
+                             m_DumpStagingMv[slotIdx], 1, &mvRegion);
+            // Record what's pending in this slot for memcpy at next reuse.
+            m_DumpSlotRec[slotIdx] = {
+                (int)m_DumpFramesQueued, m_TripleMode
+            };
+            ++m_DumpFramesQueued;
+            if (!m_DumpStarted) {
+                m_DumpStarted = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-DUMP] capture started — slot=%u "
+                    "(elapsed %lldms ≥ delay %lldms)",
+                    slotIdx, (long long)(nowMs - m_DumpSessionStartMs),
+                    (long long)m_DumpDelayMs);
+            }
+            if (m_DumpFramesQueued == m_DumpFramesTotal) {
+                // Drain ring (flush slots that still have pending records).
+                m_DumpCleanupExtra = (int)kFrucFramesInFlight;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -5736,6 +6387,12 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     m_RtPfn.WaitForFences(m_Device, 1, &m_SlotInFlightFence[slot],
                           VK_TRUE, UINT64_MAX);
     m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);
+
+    // §B-DUMP — fence signaled = GPU finished writing m_DumpStaging*[slot]
+    // for the prior use of this slot.  Convert + push to writer thread now,
+    // before next cmdbuf record may overwrite staging.  Cheap when no
+    // dump pending or m_DumpEnabled == false.
+    flushDumpSlotIfPending(slot);
 
     // ---- 2. Destroy slot's pending image view from prior frame ----
     if (m_SlotPendingView[slot] != VK_NULL_HANDLE) {
@@ -6071,7 +6728,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 0, nullptr, 1, &bufBar, 0, nullptr);
 
-        runFrucComputeChain(cmd, hwW, hwH, /*useNativeSrc*/ true);
+        runFrucComputeChain(cmd, hwW, hwH, /*useNativeSrc*/ true, slot);
         if (firstFrame) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-HW] §B1a frame#0 FRUC compute chain dispatched "
@@ -6855,6 +7512,8 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
             return;
         }
     }
+    // §B-DUMP — same fence-wait flush point as renderFrame (HW path).
+    flushDumpSlotIfPending(slot);
     _profT2 = std::chrono::steady_clock::now();
 
     // ---- 1b. memcpy/repack Y + UV into staging (NV12 layout) ----
@@ -7188,7 +7847,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     if (m_FrucMode && m_FrucReady && !frucPausedThisFrame) {
         // §J.3.e.2.i.8 Phase 2.5 — useNativeDecode gates FRUC's NV12 source.
         runFrucComputeChain(cmd, (uint32_t)m_SwImageWidth, (uint32_t)m_SwImageHeight,
-                            useNativeDecode);
+                            useNativeDecode, slot);
         if (firstFrame) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-SW] frame#%llu FRUC compute chain dispatched (%ux%u "

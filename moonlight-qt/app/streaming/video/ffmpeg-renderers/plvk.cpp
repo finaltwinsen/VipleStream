@@ -1292,25 +1292,55 @@ layout(push_constant) uniform Params {
     uint _pad0;
 } p;
 
-float loadR(int planeStart, int x, int y) {
+// §B-DUMP A'.1 2026-05-07 — luma instead of R-channel-only census.
+//
+// Why: testufo + most game content has subjects whose R-channel contrast
+// vs background is weak (UFO purple-blue on starry backdrop, mouse cursor
+// red-on-black, projectile yellow-on-grass).  Census-on-R then computes a
+// 9-bit pattern from R variation, which is noise on these subjects → all
+// candidate offsets give similar census distance → ME picks MV=0 (cost
+// rejection).  Luma (Y = 0.299R + 0.587G + 0.114B) reflects perceived
+// brightness which is what humans + ME need; UFO-on-stars has strong Y
+// contrast even when R is similar.
+//
+// Performance: extra 2 reads per loadR call (G + B planes), so per-pixel
+// ~3× cost.  Census descriptor is ~9 reads per query, ME does ~3-9 census
+// queries per block.  At 240×135 blocks, ME currently <1 ms/frame on RTX
+// 3060; 3× → ~3 ms which is still well under the 16 ms budget.
+//
+// Buffer layout: prevFrame and currFrame are planar fp32 RGB —
+//   plane 0 (R): offset 0
+//   plane 1 (G): offset W*H
+//   plane 2 (B): offset 2*W*H
+
+float loadPrevY(int x, int y) {
     int xx = clamp(x, 0, int(p.frameWidth) - 1);
     int yy = clamp(y, 0, int(p.frameHeight) - 1);
-    return prevFrame.data[planeStart + yy * int(p.frameWidth) + xx];
+    int idx = yy * int(p.frameWidth) + xx;
+    int planeSize = int(p.frameWidth) * int(p.frameHeight);
+    float r = prevFrame.data[idx];
+    float g = prevFrame.data[idx + planeSize];
+    float b = prevFrame.data[idx + 2 * planeSize];
+    return 0.299 * r + 0.587 * g + 0.114 * b;
 }
-float loadPrevR(int x, int y) { return loadR(0, x, y); }
-float loadCurrR(int x, int y) {
+float loadCurrY(int x, int y) {
     int xx = clamp(x, 0, int(p.frameWidth) - 1);
     int yy = clamp(y, 0, int(p.frameHeight) - 1);
-    return currFrame.data[yy * int(p.frameWidth) + xx];
+    int idx = yy * int(p.frameWidth) + xx;
+    int planeSize = int(p.frameWidth) * int(p.frameHeight);
+    float r = currFrame.data[idx];
+    float g = currFrame.data[idx + planeSize];
+    float b = currFrame.data[idx + 2 * planeSize];
+    return 0.299 * r + 0.587 * g + 0.114 * b;
 }
 
 uint censusDescriptorPrev(ivec2 pos) {
-    float center = loadPrevR(pos.x, pos.y);
+    float center = loadPrevY(pos.x, pos.y);
     uint bits = 0u; int bit = 0;
     for (int dy = -CENSUS_RADIUS; dy <= CENSUS_RADIUS; dy++) {
         for (int dx = -CENSUS_RADIUS; dx <= CENSUS_RADIUS; dx++) {
             if (dx == 0 && dy == 0) continue;
-            float nb = loadPrevR(pos.x + dx, pos.y + dy);
+            float nb = loadPrevY(pos.x + dx, pos.y + dy);
             bits |= ((nb < center) ? 1u : 0u) << bit;
             bit++;
         }
@@ -1318,12 +1348,12 @@ uint censusDescriptorPrev(ivec2 pos) {
     return bits;
 }
 uint censusDescriptorCurr(ivec2 pos) {
-    float center = loadCurrR(pos.x, pos.y);
+    float center = loadCurrY(pos.x, pos.y);
     uint bits = 0u; int bit = 0;
     for (int dy = -CENSUS_RADIUS; dy <= CENSUS_RADIUS; dy++) {
         for (int dx = -CENSUS_RADIUS; dx <= CENSUS_RADIUS; dx++) {
             if (dx == 0 && dy == 0) continue;
-            float nb = loadCurrR(pos.x + dx, pos.y + dy);
+            float nb = loadCurrY(pos.x + dx, pos.y + dy);
             bits |= ((nb < center) ? 1u : 0u) << bit;
             bit++;
         }
@@ -1424,13 +1454,29 @@ void main() {
     }
     bool temporalConverged = (bestCost < float(SAMPLE_COUNT * SAMPLE_COUNT));
 
-    // Diamond search (Balanced 2-step: 3, 1)
+    // §B-DUMP A'.1 2026-05-07 — DIAMOND_STEPS actually expanded now.
+    //
+    // Previous: comment claimed [16, 4, 1] but code was [3, 1] (±4 px range).
+    // §B-DUMP-MV log on testufo confirmed: max|MV| only 5 LSB Q1 = 2.5 px
+    // even though UFO moves 30+ px/frame between server frames at 30fps.
+    //
+    // Now: [32, 16, 8, 4, 2, 1] with cumulative reach ±63 px (covers 60fps
+    // server pan motion 15-25 px/frame, 30fps server pan motion 30-50 px/
+    // frame, and most worst-case game-camera-snap up to 60 px/frame).
+    //
+    // Cost: 6 steps × 8 candidates max = 48 cost evaluations per block in
+    // worst case (vs original 16).  ME currently <1 ms/frame on RTX 3060
+    // → ~3 ms expected, still under 16 ms budget.  MAX_CANDIDATES bumped
+    // to 48 to allow full 6-step diamond.
+    //
+    // Early-out preserved: if cost stops improving step-to-step, break out.
+    // Most blocks converge within 2-3 steps when motion is small/zero.
     if (!temporalConverged) {
-        const int MAX_CANDIDATES = 16;
+        const int MAX_CANDIDATES = 48;
         int candidateCount = 0;
         float prevStepBestCost = bestCost;
-        const int DIAMOND_STEPS[2] = int[2](3, 1);
-        const int DIAMOND_STEP_COUNT = 2;
+        const int DIAMOND_STEPS[6] = int[6](32, 16, 8, 4, 2, 1);
+        const int DIAMOND_STEP_COUNT = 6;
         for (int si = 0; si < DIAMOND_STEP_COUNT; si++) {
             int step = DIAMOND_STEPS[si];
             ivec2 prevBestMV = bestMV;
@@ -1745,8 +1791,27 @@ void main() {
     vec2 mv = sampleMV(pp);
     mv = clamp(mv, vec2(-48.0, -48.0), vec2(48.0, 48.0));
 
+    // §B-DUMP-MV-SIGN 2026-05-07 — ME shader (line ~1353) produces
+    // BACKWARD MV: candidate is offset s.t. prev[blockCenter+candidate]
+    // matches curr[blockCenter], so stored mv = prevPos - currPos =
+    // -(motion direction).  Warp's convention `prevPos = pp - mv*tF`
+    // assumes FORWARD MV.  Without negation, sparkle at output position
+    // pp samples prev/curr at OPPOSITE positions → interp shows reverse-
+    // direction motion (sparkle trail goes backward).  Negate here so
+    // downstream sample math gets forward MV.
+    mv = -mv;
+
+    // §B-DUMP-FALLBACK 2026-05-07 — when MV magnitude < 1 pixel, skip
+    // warp but still produce a visible midpoint blend.  Original code
+    // returned sameCurr which made interp pixel-identical to real_N
+    // for low-MV regions (= most of frame in typical content) → user
+    // perceived "FRUC isn't doing anything".  Now: mix(prev, curr, 0.5)
+    // at same pp.  For truly static pixels (prev == curr) blend = same;
+    // for sub-pixel motion blend produces subtle visible ghost.  No MV
+    // used → no reverse-direction artifact possible.
     if (dot(mv, mv) < 1.0) {
-        storeInterp(int(px), int(py), sameCurr);
+        vec3 prevAtPP = fetchPrevRGB(int(px), int(py));
+        storeInterp(int(px), int(py), mix(prevAtPP, sameCurr, 0.5));
         return;
     }
 
@@ -1782,9 +1847,14 @@ void main() {
                                                 : computeAdaptiveWeight(pp, mv);
             result = mix(prevSample, currSample, weight);
             // luma-gap catastrophic backstop (same as Balanced+Quality on d3d11)
+            // §B-DUMP-LUMA 2026-05-07 — was b1 (full bias to curr at 25%+
+            // luma gap), which collapsed all bright sparkle / high-contrast
+            // edges back to currSample → user sees "interp = real_N" for
+            // exactly the visually-interesting pixels.  Cap at 0.5 so worst
+            // case keeps half-strength midpoint blend, restoring visible FRUC.
             const vec3 YC1 = vec3(0.299, 0.587, 0.114);
             float lg1 = abs(dot(prevSample, YC1) - dot(currSample, YC1));
-            float b1 = smoothstep(0.05, 0.25, lg1);
+            float b1 = smoothstep(0.05, 0.25, lg1) * 0.5;
             result = mix(result, currSample, b1);
         } else if (p.blendFactor >= 0.0) {
             // §B-quality (c0) 2026-05-06 — fixed blend, no luma-gap bias.
@@ -1795,12 +1865,13 @@ void main() {
             result = mix(prevSample, currSample, p.blendFactor);
         } else {
             // Balanced "cheap adaptive": tFraction base weight + luma-gap bias toward currSample.
-            // §B2 2026-05-06 — w 由 hardcoded 0.5 改成 tFraction（DUAL 跟以前一樣
-            // 0.5；TRIPLE 1/3 用 0.333, 2/3 用 0.667）.
+            // §B-DUMP-LUMA 2026-05-07 — same fix as Quality path: cap luma
+            // bias at 0.5 so high-contrast moving pixels still get half-
+            // strength midpoint blend rather than collapsing to currSample.
             float w = tF;
             const vec3 YC = vec3(0.299, 0.587, 0.114);
             float lg = abs(dot(prevSample, YC) - dot(currSample, YC));
-            float b = smoothstep(0.05, 0.25, lg);
+            float b = smoothstep(0.05, 0.25, lg) * 0.5;
             vec3 blended = mix(prevSample, currSample, w);
             result = mix(blended, currSample, b);
         }

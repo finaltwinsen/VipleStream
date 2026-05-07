@@ -199,6 +199,12 @@ public:
     Q_PROPERTY(FrucBackend frucBackend MEMBER frucBackend NOTIFY frucBackendChanged)
     Q_PROPERTY(RendererSelection rendererSelection MEMBER rendererSelection NOTIFY rendererSelectionChanged)
     Q_PROPERTY(FrucQuality frucQuality MEMBER frucQuality NOTIFY frucQualityChanged)
+    // §B-NVOF UI 整合 2026-05-07 — Vulkan-only 補幀進階開關，跟既有的
+    // VIPLE_VKFRUC_NV_OF / VIPLE_VKFRUC_TRIPLE env var 平行：env var 優先
+    // (escape hatch / dev override)，沒設 env var 才看 settings.
+    // RS_D3D11 path 完全 ignore 這兩個 (UI 也只在 RS_VULKAN 時顯示).
+    Q_PROPERTY(bool vkfrucEnableNvOf MEMBER vkfrucEnableNvOf NOTIFY vkfrucEnableNvOfChanged)
+    Q_PROPERTY(bool vkfrucEnableTriple MEMBER vkfrucEnableTriple NOTIFY vkfrucEnableTripleChanged)
     Q_PROPERTY(DesignVariant designVariant MEMBER designVariant NOTIFY designVariantChanged)
     Q_PROPERTY(AppSortMode appSortMode MEMBER appSortMode NOTIFY appSortModeChanged)
     Q_PROPERTY(QString relayUrl MEMBER relayUrl NOTIFY relayUrlChanged)
@@ -250,6 +256,8 @@ public:
     FrucBackend frucBackend;
     RendererSelection rendererSelection;  // §J.3.e.2.i — D3D11 vs Vulkan renderer
     FrucQuality frucQuality;
+    bool vkfrucEnableNvOf;     // §B-NVOF — VK_NV_optical_flow 取代 software block-match ME
+    bool vkfrucEnableTriple;   // §B2 — TRIPLE 60→180 (兩 interp / server frame)
     DesignVariant designVariant;
     AppSortMode appSortMode;
     QString relayUrl;      // VipleStream: signaling relay WebSocket URL
@@ -299,6 +307,8 @@ signals:
     void frucBackendChanged();
     void rendererSelectionChanged();
     void frucQualityChanged();
+    void vkfrucEnableNvOfChanged();
+    void vkfrucEnableTripleChanged();
     void designVariantChanged();
     void appSortModeChanged();
     void relayUrlChanged();

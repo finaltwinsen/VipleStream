@@ -29,7 +29,13 @@ param(
     [switch] $NoFlow,                      # ufo mode only — skip OF magnitude (faster analyze)
     [string] $ServerHost = "192.168.51.226",
     [string] $StreamCodec = "H.264",
-    [int]    $StreamFps = 60
+    [int]    $StreamFps = 60,
+    # §B-NVOF / §B2 cross-test (Phase 7E) — opt-in flags propagated to client
+    # via the new --vk-nvof / --vk-triple CLI args (UI 整合 commit 2026-05-07).
+    # `-Triple` 自動把 StreamFps 升到 180 (TRIPLE 模式 client display target).
+    # 兩個都加 = TRIPLE × NVOF (Phase 7E 真正想量的 cross-test).
+    [switch] $NvOf,
+    [switch] $Triple
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,6 +54,13 @@ $rx = [int]$parts[0]
 $ry = [int]$parts[1]
 $rw = [int]$parts[2]
 $rh = [int]$parts[3]
+
+# §B2: TRIPLE 模式 client display target = 180fps; server fps 由 client 端
+# 算 user_fps/3.  其他模式維持 60fps (DUAL → server 30fps).  使用者可顯式
+# 指定 -StreamFps override.
+if ($Triple -and $PSBoundParameters.ContainsKey('StreamFps') -eq $false) {
+    $StreamFps = 180
+}
 
 $captureBin = Join-Path $repoRoot "temp\fruc_quality\capture_${Label}.bin"
 $clientExe  = Join-Path $repoRoot "temp\moonlight\VipleStream.exe"
@@ -92,17 +105,65 @@ $clientArgs = @(
     "stream", $ServerHost, "Desktop",
     "--1080", "--fps", $StreamFps,
     "--video-codec", $StreamCodec,
+    "--video-decoder", "hardware",   # 2026-05-07 Phase 7E debug: 沒 force HW
+                                      # AUTO cascade 會挑 SW H.264 + SDL renderer，
+                                      # SDL renderer **不支援 FRUC** → log 出
+                                      # "isFRUCActive=0 backendName=None"，整個
+                                      # 量測等於跑 raw 30fps stream，不是補幀.
+    "--display-mode", "fullscreen",  # explicit fullscreen — 沒指定就吃使用者
+                                      # QSettings 預設，可能是 windowed 小視窗，
+                                      # gdigrab 在固定 (0,510,1920,40) 抓不到串流內容.
+    "--renderer", "vulkan",          # §J.3.e.2.i — Phase 7E NVOF/TRIPLE 只在
+                                      # Vulkan path 生效；user 預設 RS_D3D11 會
+                                      # 讓 vk-nvof/vk-triple flag 完全沒用.
     "--frame-interpolation",
     "--no-yuv444"   # 強制 4:2:0 — Vulkan video decode 不支援 4:4:4，
                      # 否則 cascade 會 fall back 到 PlVkRenderer (libplacebo) 沒接 FRUC，
                      # 導致 quality 跑出來其實是「無 FRUC」狀態。2026-05-06 踩雷。
 )
+# §B-NVOF / §B2 — Phase 7E cross-test 用的 vk-only 進階 flag.  RS_D3D11 path
+# 完全 ignore，所以為 Vulkan 量測 dedicated.  這兩條跟既有的 Settings UI
+# checkbox 等價，只是腳本裡用 CLI 形式覆蓋 user 既有設定 (一次 run，不
+# 動 QSettings 永久值).
+if ($NvOf)   { $clientArgs += "--vk-nvof"  } else { $clientArgs += "--no-vk-nvof"  }
+if ($Triple) { $clientArgs += "--vk-triple" } else { $clientArgs += "--no-vk-triple" }
 $proc = Start-Process -FilePath $clientExe -ArgumentList $clientArgs -PassThru
-Write-Host "      PID=$($proc.Id) StartTime=$($proc.StartTime)" -ForegroundColor Green
+Write-Host "      PID=$($proc.Id) StartTime=$($proc.StartTime) (renderer=vulkan video-decoder=hardware vk-nvof=$NvOf vk-triple=$Triple)" -ForegroundColor Green
 
 # ---- Step 3: warm-up ----
 Write-Host "`n[3/7] warm-up 8s (let stream connect + first frames render) …" -ForegroundColor Yellow
 Start-Sleep -Seconds 8
+
+# ---- Step 3b: FRUC sanity gate ----
+# 2026-05-07 Phase 7E debug: 之前一次 run 全 4 個 config 都跑完才發現 client
+# 因為 saved RS_D3D11 + AUTO decode + windowed default 結果走 SDL fallback
+# renderer (沒 FRUC)、又被本機桌面遮住 — 4×60s 量測完全廢.
+# 解決：warmup 後直接 grep 最新 VipleStream log 的 stringifyVideoStats 行，
+# 確認 isFRUCActive=1 + backendName ≠ None.  否則直接 abort 不浪費 60s.
+$logDir = "$env:TEMP"
+$latestLog = Get-ChildItem $logDir -Filter "VipleStream-*.log" -ErrorAction SilentlyContinue |
+             Where-Object { $_.LastWriteTime -gt $proc.StartTime } |
+             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($latestLog) {
+    $stats = Select-String -Path $latestLog.FullName -Pattern 'isFRUCActive=(\d).+?backendName=(\w+).+?renderedFrames=(\d+)' |
+             Select-Object -Last 1
+    if ($stats) {
+        $active = $stats.Matches[0].Groups[1].Value
+        $backend = $stats.Matches[0].Groups[2].Value
+        $rendered = $stats.Matches[0].Groups[3].Value
+        Write-Host "  FRUC sanity: isFRUCActive=$active backendName=$backend renderedFrames=$rendered  (log=$($latestLog.Name))" -ForegroundColor DarkGray
+        if ($active -ne '1' -or $backend -eq 'None') {
+            Write-Host "  ❌ FRUC NOT ACTIVE — aborting capture (sample would be useless)" -ForegroundColor Red
+            Write-Host "     check log $($latestLog.FullName) — likely renderer cascade fell to SDL fallback" -ForegroundColor Red
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            exit 2
+        }
+    } else {
+        Write-Host "  ⚠ couldn't parse stringifyVideoStats from log $($latestLog.Name) yet — proceeding (may be too early)" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  ⚠ no VipleStream log found newer than client launch — proceeding blind" -ForegroundColor Yellow
+}
 
 # ---- Step 4: capture ----
 Write-Host "`n[4/7] ffmpeg gdigrab capture …" -ForegroundColor Yellow

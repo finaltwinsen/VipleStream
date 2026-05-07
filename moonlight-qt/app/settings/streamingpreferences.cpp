@@ -34,6 +34,8 @@
 #define SER_FRUCBACKEND "frucBackend"
 #define SER_RENDERERSEL "rendererSelection"
 #define SER_FRUCQUALITY "frucQuality"
+#define SER_VKFRUCNVOF  "vkfrucEnableNvOf"   // §B-NVOF UI 整合
+#define SER_VKFRUCTRIPLE "vkfrucEnableTriple" // §B2 UI 整合
 #define SER_DESIGNVARIANT "designVariant"
 #define SER_APPSORTMODE "appSortMode"
 #define SER_RELAYURL "relayUrl"
@@ -166,6 +168,17 @@ void StreamingPreferences::reload()
     // 仍依設定走 Vulkan。新 user 第一次啟動只會看到 D3D11。
     rendererSelection = static_cast<RendererSelection>(settings.value(SER_RENDERERSEL, static_cast<int>(RS_D3D11)).toInt());
     frucQuality = static_cast<FrucQuality>(settings.value(SER_FRUCQUALITY, static_cast<int>(FQ_BALANCED)).toInt());
+    // §B-NVOF / §B2 — Vulkan-renderer-only 補幀進階開關.  預設皆 OFF：
+    //   - NVOF (HW optical flow) 量化 testufo 三指標贏 software block-match
+    //     (commit 71d1592, c82196e)，但跟 D3D11 NvOFFRUC.dll 主觀比仍弱在
+    //     warp+blend pipeline (我們沒做 occlusion/confidence weighting).
+    //   - TRIPLE 60→180 infrastructure ship'd (commit bc88eba) 但只有 180Hz
+    //     panel 用得上，且補幀視覺品質 ceiling 受 §B-quality 限制.
+    // 兩個都先 opt-in，等 §B-quality (c) / NVOF UI 整合 + 4K 驗測完才考慮
+    // 預設 ON.  env var (`VIPLE_VKFRUC_NV_OF` / `VIPLE_VKFRUC_TRIPLE`) 仍是
+    // dev escape hatch (vkfruc.cpp 端 OR 兩條訊號).
+    vkfrucEnableNvOf   = settings.value(SER_VKFRUCNVOF, false).toBool();
+    vkfrucEnableTriple = settings.value(SER_VKFRUCTRIPLE, false).toBool();
     designVariant = static_cast<DesignVariant>(settings.value(SER_DESIGNVARIANT, static_cast<int>(DV_SAFE)).toInt());
     // VipleStream H Phase 2.2: default to ASM_RECENT so users see their
     // recently-played Steam games at the top — which is what they
@@ -378,6 +391,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_FRUCBACKEND, static_cast<int>(frucBackend));
     settings.setValue(SER_RENDERERSEL, static_cast<int>(rendererSelection));
     settings.setValue(SER_FRUCQUALITY, static_cast<int>(frucQuality));
+    settings.setValue(SER_VKFRUCNVOF, vkfrucEnableNvOf);
+    settings.setValue(SER_VKFRUCTRIPLE, vkfrucEnableTriple);
     settings.setValue(SER_DESIGNVARIANT, static_cast<int>(designVariant));
     settings.setValue(SER_APPSORTMODE, static_cast<int>(appSortMode));
     settings.setValue(SER_RELAYURL, relayUrl);

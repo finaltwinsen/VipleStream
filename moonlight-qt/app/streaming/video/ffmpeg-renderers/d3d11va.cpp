@@ -12,6 +12,13 @@
 #include <SDL_syswm.h>
 
 #include <dwmapi.h>
+#include <direct.h>  // §B-DUMP-D3D11: _mkdir for dump directory tree
+#include <chrono>
+
+// §B-DUMP-D3D11: stb_image_write for BMP output (matching VkFruc §B-DUMP).
+// IMPLEMENTATION already defined by vkfruc.cpp's TU; here we just use the
+// declarations.  Link path satisfied at app scope.
+#include "ncnn/stb_image_write.h"
 #include "nvofruc.h"
 #include "genericfruc.h"
 #include "directmlfruc.h"
@@ -103,8 +110,235 @@ void D3D11VARenderer::recordPresent(PresentBucket& b,
     b.lastPresent = callEnd;
 }
 
+// §B-DUMP-D3D11 2026-05-07 — in-renderer dump of swapchain backbuffer.
+// Triggered by VIPLE_RENDERER_DUMP_DIR env var.  Writes BMP captured
+// from the EXACT pixels that go to the screen (post-FRUC composite,
+// before Present()), avoiding gdigrab's compositor / fullscreen / sync
+// issues that produced duplicate captured frames.
+void D3D11VARenderer::initFrameDump()
+{
+    QByteArray dirEnv = qgetenv("VIPLE_RENDERER_DUMP_DIR");
+    if (dirEnv.isEmpty()) {
+        m_FrameDumpEnabled = false;
+        return;
+    }
+    m_FrameDumpDir = dirEnv.constData();
+    int n = qEnvironmentVariableIntValue("VIPLE_RENDERER_DUMP_FRAMES");
+    if (n > 0) m_FrameDumpFramesTotal = n;
+    int delay = qEnvironmentVariableIntValue("VIPLE_RENDERER_DUMP_DELAY_MS");
+    if (delay >= 0) m_FrameDumpDelayMs = delay;
+    using namespace std::chrono;
+    m_FrameDumpSessionStartMs = duration_cast<milliseconds>(
+        steady_clock::now().time_since_epoch()).count();
+
+    // mkdir tolerating existence
+    _mkdir(m_FrameDumpDir.c_str());
+
+    // Query actual backbuffer format/dimensions so staging matches.
+    // Swapchain may be R8G8B8A8 (typical 8bit) or R10G10B10A2 (HDR 10bit);
+    // CopyResource requires matching format.
+    DXGI_SWAP_CHAIN_DESC1 sc = {};
+    if (m_SwapChain) {
+        m_SwapChain->GetDesc1(&sc);
+    }
+    DXGI_FORMAT bbFormat = sc.Format;
+    UINT bbWidth  = sc.Width  ? sc.Width  : (UINT)m_DisplayWidth;
+    UINT bbHeight = sc.Height ? sc.Height : (UINT)m_DisplayHeight;
+
+    // For BMP output we need 8-bit BGRA or RGBA.  R10G10B10A2 isn't
+    // directly representable; downgrade to R8G8B8A8 staging and let
+    // CopyResource fail if mismatch (we'll skip dump for 10-bit).
+    bool fmtIs10Bit = (bbFormat == DXGI_FORMAT_R10G10B10A2_UNORM ||
+                       bbFormat == DXGI_FORMAT_R10G10B10A2_TYPELESS);
+    if (fmtIs10Bit) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-D3D11-DUMP] swapchain is 10-bit (format=%d) — dump not supported, disabling",
+                    (int)bbFormat);
+        return;
+    }
+    m_FrameDumpStagingFormat = bbFormat;
+    // R8G8B8A8 = bytes [R G B A], no swizzle for stbi.
+    // B8G8R8A8 = bytes [B G R A], need swap.
+    m_FrameDumpSwizzleBR = (bbFormat == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                            bbFormat == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+                            bbFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+
+    // Allocate staging texture matching backbuffer.
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width            = bbWidth;
+    desc.Height           = bbHeight;
+    desc.MipLevels        = 1;
+    desc.ArraySize        = 1;
+    desc.Format           = bbFormat;
+    desc.SampleDesc.Count = 1;
+    desc.Usage            = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags   = D3D11_CPU_ACCESS_READ;
+    HRESULT hr = m_RenderDevice->CreateTexture2D(&desc, nullptr, m_FrameDumpStaging.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-D3D11-DUMP] CreateTexture2D staging (format=%d %ux%u) failed hr=0x%x — disabling dump",
+                    (int)bbFormat, bbWidth, bbHeight, hr);
+        return;
+    }
+
+    // Spawn writer thread
+    m_FrameDumpStop.store(false, std::memory_order_release);
+    m_FrameDumpWriterThread = std::thread([this]() {
+        for (;;) {
+            FrameDumpJob job;
+            {
+                std::unique_lock<std::mutex> lk(m_FrameDumpQueueMutex);
+                m_FrameDumpQueueCv.wait(lk, [&] {
+                    return !m_FrameDumpQueue.empty()
+                        || m_FrameDumpStop.load(std::memory_order_acquire);
+                });
+                if (m_FrameDumpQueue.empty()) break;
+                job = std::move(m_FrameDumpQueue.front());
+                m_FrameDumpQueue.pop();
+            }
+            int rc = stbi_write_bmp(job.path.c_str(),
+                                    (int)job.width, (int)job.height, 4,
+                                    job.rgba.data());
+            if (rc == 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-D3D11-DUMP] stbi_write_bmp failed for %s",
+                            job.path.c_str());
+            } else {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-D3D11-DUMP] wrote %s",
+                            job.path.c_str());
+            }
+            ++m_FrameDumpFramesWritten;
+        }
+    });
+
+    m_FrameDumpEnabled = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-D3D11-DUMP] enabled — dir='%s' frames=%d delay=%lldms format=BMP "
+                "(staging %dx%d BGRA8 = %d MB)",
+                m_FrameDumpDir.c_str(), m_FrameDumpFramesTotal,
+                (long long)m_FrameDumpDelayMs,
+                m_DisplayWidth, m_DisplayHeight,
+                (m_DisplayWidth * m_DisplayHeight * 4) / (1024 * 1024));
+}
+
+void D3D11VARenderer::teardownFrameDump()
+{
+    if (m_FrameDumpWriterThread.joinable()) {
+        m_FrameDumpStop.store(true, std::memory_order_release);
+        m_FrameDumpQueueCv.notify_all();
+        m_FrameDumpWriterThread.join();
+    }
+    m_FrameDumpStaging.Reset();
+    m_FrameDumpEnabled = false;
+}
+
+void D3D11VARenderer::dumpBackbufferIfActive(const char* slotLabel)
+{
+    if (!m_FrameDumpEnabled) return;
+    if (m_FrameDumpFramesQueued >= m_FrameDumpFramesTotal) return;
+
+    using namespace std::chrono;
+    int64_t nowMs = duration_cast<milliseconds>(
+        steady_clock::now().time_since_epoch()).count();
+    if (nowMs - m_FrameDumpSessionStartMs < m_FrameDumpDelayMs) return;
+
+    // Get backbuffer (texture index 0 of swapchain).
+    ComPtr<ID3D11Texture2D> backbuffer;
+    HRESULT hr = m_SwapChain->GetBuffer(0, IID_PPV_ARGS(&backbuffer));
+    if (FAILED(hr)) return;
+
+    // Copy backbuffer → staging.  CopyResource is on the render device
+    // context (graphics queue).  m_FrameDumpStaging is sized to display.
+    m_RenderDeviceContext->CopyResource(m_FrameDumpStaging.Get(), backbuffer.Get());
+
+    // Map staging
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    hr = m_RenderDeviceContext->Map(m_FrameDumpStaging.Get(), 0,
+                                    D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) return;
+
+    // Backpressure: skip if writer queue full.
+    {
+        std::lock_guard<std::mutex> lk(m_FrameDumpQueueMutex);
+        if (m_FrameDumpQueue.size() >= kFrameDumpQueueCap) {
+            m_RenderDeviceContext->Unmap(m_FrameDumpStaging.Get(), 0);
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-D3D11-DUMP] queue full (%zu) — dropping frame",
+                m_FrameDumpQueue.size());
+            return;
+        }
+    }
+
+    // Build job from mapped pixels.  Use staging dimensions (== swapchain
+    // size, may differ from m_DisplayWidth in resized window cases).
+    D3D11_TEXTURE2D_DESC stDesc = {};
+    m_FrameDumpStaging->GetDesc(&stDesc);
+    FrameDumpJob job;
+    job.width  = stDesc.Width;
+    job.height = stDesc.Height;
+    job.rgba.resize((size_t)job.width * job.height * 4);
+    const uint8_t* src = (const uint8_t*)mapped.pData;
+    uint8_t* dst = job.rgba.data();
+    if (m_FrameDumpSwizzleBR) {
+        // BGRA backbuffer → swap R/B to RGBA for stbi_write_bmp.
+        for (uint32_t y = 0; y < job.height; ++y) {
+            const uint8_t* srcRow = src + y * mapped.RowPitch;
+            uint8_t* dstRow = dst + y * job.width * 4;
+            for (uint32_t x = 0; x < job.width; ++x) {
+                dstRow[x*4 + 0] = srcRow[x*4 + 2];  // R <- B
+                dstRow[x*4 + 1] = srcRow[x*4 + 1];  // G
+                dstRow[x*4 + 2] = srcRow[x*4 + 0];  // B <- R
+                dstRow[x*4 + 3] = 0xFF;
+            }
+        }
+    } else {
+        // RGBA backbuffer → straight copy (stbi expects RGBA).
+        for (uint32_t y = 0; y < job.height; ++y) {
+            memcpy(dst + y * job.width * 4,
+                   src + y * mapped.RowPitch,
+                   (size_t)job.width * 4);
+        }
+    }
+    m_RenderDeviceContext->Unmap(m_FrameDumpStaging.Get(), 0);
+
+    // Path
+    char nbuf[512];
+    snprintf(nbuf, sizeof(nbuf), "%s/frame_%04d_%s.bmp",
+             m_FrameDumpDir.c_str(), m_FrameDumpFramesQueued,
+             slotLabel ? slotLabel : "any");
+    job.path = nbuf;
+
+    // Push to writer queue
+    {
+        std::lock_guard<std::mutex> lk(m_FrameDumpQueueMutex);
+        m_FrameDumpQueue.push(std::move(job));
+    }
+    m_FrameDumpQueueCv.notify_one();
+
+    if (!m_FrameDumpStarted) {
+        m_FrameDumpStarted = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-D3D11-DUMP] capture started (elapsed %lldms ≥ delay %lldms)",
+            (long long)(nowMs - m_FrameDumpSessionStartMs),
+            (long long)m_FrameDumpDelayMs);
+    }
+
+    ++m_FrameDumpFramesQueued;
+
+    if (m_FrameDumpFramesQueued == m_FrameDumpFramesTotal && !m_FrameDumpDoneLogged) {
+        m_FrameDumpDoneLogged = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-D3D11-DUMP] capture complete — %d frames queued",
+            m_FrameDumpFramesQueued);
+    }
+}
+
 D3D11VARenderer::~D3D11VARenderer()
 {
+    // §B-DUMP-D3D11: tear down dump first (joins writer thread, frees staging).
+    teardownFrameDump();
+
     // VipleStream: Cleanup FRUC
     if (m_FRUC) {
         delete m_FRUC;
@@ -733,6 +967,11 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
+    // §B-DUMP-D3D11: best-effort init.  No-op if VIPLE_RENDERER_DUMP_DIR
+    // env var unset.  Must be after m_DisplayWidth/Height are set + render
+    // device + swapchain are created.
+    initFrameDump();
+
     return true;
 }
 
@@ -928,6 +1167,19 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
     // 10-frame warm-up stays to avoid tripping during decoder init.
     bool frameLate = (m_RenderFrameCount > 10) && (gapAvg * 2 > expectedMs * 5);
 
+    // §B-DUMP-BYPASS 2026-05-07 — when bypass-budget env is set (for ML
+    // diagnostic dump comparison), force-disable the late-frame skip so
+    // interp Present ALWAYS happens.  Without this, slow ML inference
+    // (e.g. DirectML RIFE 87ms) keeps gapAvg > 2.5× expected → continuous
+    // skip → BMP dump shows fewer interp frames than real frames, which
+    // defeats the diagnostic purpose.  Trade: visual stutter is worse,
+    // but user gets to SEE what each ML backend actually produces.
+    static const bool s_bypassBudget =
+        qEnvironmentVariableIntValue("VIPLE_FRUC_BYPASS_BUDGET") != 0;
+    if (s_bypassBudget) {
+        frameLate = false;
+    }
+
     // VipleStream: Check connection quality (3C — pause FRUC on poor connection)
     bool connectionPoor = false;
     if (Session::get()) {
@@ -957,6 +1209,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
             renderOverlay((Overlay::OverlayType)i);
         }
         {
+            dumpBackbufferIfActive("real");  // §B-DUMP-D3D11
             LARGE_INTEGER pBegin, pEnd;
             QueryPerformanceCounter(&pBegin);
             hr = m_SwapChain->Present(0, m_AllowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
@@ -1001,6 +1254,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
             }
             // FRUC: Present interpolated frame with V-sync
             {
+                dumpBackbufferIfActive("interp");  // §B-DUMP-D3D11
                 LARGE_INTEGER pBegin, pEnd;
                 QueryPerformanceCounter(&pBegin);
                 hr = m_SwapChain->Present(1, 0);
@@ -1029,6 +1283,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         }
         // FRUC requires V-sync to pace 2x presents across separate refresh intervals
         {
+            dumpBackbufferIfActive("real");  // §B-DUMP-D3D11
             LARGE_INTEGER pBegin, pEnd;
             QueryPerformanceCounter(&pBegin);
             hr = m_SwapChain->Present(1, 0);
@@ -1109,6 +1364,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
             QueryPerformanceCounter(&interpBlit1);
             // FRUC: Present interpolated frame with V-sync (1 vblank of pacing)
             {
+                dumpBackbufferIfActive("interp");  // §B-DUMP-D3D11
                 LARGE_INTEGER pBegin, pEnd;
                 QueryPerformanceCounter(&pBegin);
                 hr = m_SwapChain->Present(1, 0);
@@ -1141,6 +1397,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         QueryPerformanceCounter(&realBlit1);
         // FRUC requires V-sync to pace 2x presents across separate refresh intervals
         {
+            dumpBackbufferIfActive("real");  // §B-DUMP-D3D11
             LARGE_INTEGER pBegin, pEnd;
             QueryPerformanceCounter(&pBegin);
             hr = m_SwapChain->Present(1, 0);
@@ -1174,6 +1431,7 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
             renderOverlay((Overlay::OverlayType)i);
         }
         {
+            dumpBackbufferIfActive("real");  // §B-DUMP-D3D11
             LARGE_INTEGER pBegin, pEnd;
             QueryPerformanceCounter(&pBegin);
             hr = m_SwapChain->Present(0, flags);
@@ -2142,10 +2400,12 @@ bool D3D11VARenderer::initFRUC()
             std::string mode = (sz > 0) ? std::string(buf) : "auto";
             // Lowercase
             for (auto& c : mode) c = (char)tolower((unsigned char)c);
-            if      (mode == "fp16") modelCascade = {{ "fruc_fp16.onnx", "fp16" }};
-            else if (mode == "fp32") modelCascade = {{ "fruc.onnx",      "fp32" }};
-            else                     modelCascade = {{ "fruc_fp16.onnx", "fp16" },
-                                                     { "fruc.onnx",      "fp32" }};
+            if      (mode == "fp16")    modelCascade = {{ "fruc_fp16.onnx",       "fp16" }};
+            else if (mode == "fp32")    modelCascade = {{ "fruc.onnx",            "fp32" }};
+            else if (mode == "ifrnet")  modelCascade = {{ "fruc_ifrnet_s.onnx",   "ifrnet-s" }};
+            else                        modelCascade = {{ "fruc_ifrnet_s.onnx",   "ifrnet-s" },  // smallest/fastest first
+                                                        { "fruc_fp16.onnx",       "fp16"     },
+                                                        { "fruc.onnx",            "fp32"     }};
         }
 
         // Frame budget for half-rate FRUC.  v1.2.124 raises the safety
@@ -2188,10 +2448,21 @@ bool D3D11VARenderer::initFRUC()
                             "[VIPLE-FRUC] DML model %s: probe failed — try next", m.tag);
                 continue;
             }
-            if (ms <= budgetThresholdMs) {
+            // §B-DUMP-BYPASS 2026-05-07: VIPLE_FRUC_BYPASS_BUDGET=1 force-
+            // enables backend regardless of probe time (for diagnostic
+            // dump comparison; expect frame drops at runtime).
+            const bool bypassBudget =
+                qEnvironmentVariableIntValue("VIPLE_FRUC_BYPASS_BUDGET") != 0;
+            if (ms <= budgetThresholdMs || bypassBudget) {
                 picked    = dml;
                 pickedMs  = ms;
                 pickedTag = m.tag;
+                if (bypassBudget && ms > budgetThresholdMs) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] DML model %s: %.2fms EXCEEDS budget %.1fms but "
+                        "VIPLE_FRUC_BYPASS_BUDGET=1 — accepting anyway (expect frame drops)",
+                        m.tag, ms, budgetThresholdMs);
+                }
                 break;
             }
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2258,12 +2529,33 @@ bool D3D11VARenderer::initFRUC()
         ncnn->setModelDir("rife-v4.25-lite");
         if (ncnn->initialize(m_RenderDevice.Get(), fruW, fruH)) {
             const double ms = ncnn->probeInferenceCost(/*warmup=*/2, /*iterations=*/5);
-            if (ms > 0.0 && ms <= budgetThrMsN) {
+            // §B-DUMP-NCNN-CORRECTNESS — probe returns -2.0 sentinel when
+            // RIFE Vulkan forward outputs all-zero (broken on this driver).
+            // Reject hard regardless of bypass-budget; user has to set
+            // VIPLE_FRUC_NCNN_FORCE=1 to opt into broken backend.
+            if (ms == -2.0) {
+                delete ncnn;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] NCNN auto-rejected (RIFE produces all-zero "
+                    "output) — falling back to Generic compute");
+                // skip the rest of the NCNN block, fall through to Generic
+                goto ncnn_cascade_done;
+            }
+            // §B-DUMP-BYPASS: env override accepts NCNN regardless of probe time.
+            const bool bypassBudgetN =
+                qEnvironmentVariableIntValue("VIPLE_FRUC_BYPASS_BUDGET") != 0;
+            if (ms > 0.0 && (ms <= budgetThrMsN || bypassBudgetN)) {
                 m_GenericFRUC = ncnn;   // IFRUCBackend slot
                 createBlitVB();
                 boostLatency();
                 m_FrucTextureWidth  = (int)fruW;
                 m_FrucTextureHeight = (int)fruH;
+                if (bypassBudgetN && ms > budgetThrMsN) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] NCNN probe %.2fms EXCEEDS budget %.1fms but "
+                        "VIPLE_FRUC_BYPASS_BUDGET=1 — accepting anyway (expect frame drops)",
+                        ms, budgetThrMsN);
+                }
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-FRUC] NCNN backend ready: rife-v4.25-lite @ %ux%u, "
                             "probed %.2fms (budget %.1fms; display %dx%d)",
@@ -2280,6 +2572,7 @@ bool D3D11VARenderer::initFRUC()
                         "[VIPLE-FRUC] NCNN init failed (Vulkan loader missing or model not bundled) — falling back to Generic");
         }
     }
+ncnn_cascade_done:;
 
     // Default: GenericFRUC (D3D11 compute shader — low latency, cross-platform)
     auto* gen = new GenericFRUC();

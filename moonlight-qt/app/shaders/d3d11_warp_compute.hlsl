@@ -183,14 +183,27 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
     // MV range ±48 px matches the ME shader's actual search radius.
     mv = clamp(mv, float2(-48, -48), float2(48, 48));
 
-    // Static early-skip: D3 iter 6 — threshold raised from 0.25
-    // (0.5 px) to 1.0 (1 px). In the 0.5..1 px range interp vs.
-    // plain-copy is visually indistinguishable (sub-pixel shift
-    // against a 16.7 ms frame baseline), but skipping saves two
-    // bilinear samples + the blend on a much larger set of pixels.
-    // Biggest benefit on slow-scroll / subtle-motion content.
+    // §B-DUMP-MV-SIGN 2026-05-07 — ME (d3d11_motionest_compute.hlsl)
+    // produces BACKWARD MV: candidate s.t. prev[blockCenter+candidate]
+    // matches curr[blockCenter], so stored mv = prevPos - currPos.
+    // Warp convention `prevPos = pp - mv*tF` assumes FORWARD MV; without
+    // negation, output sparkle samples come from OPPOSITE-side positions
+    // → user sees reverse-direction motion in interp frames.
+    mv = -mv;
+
+    // Static early-skip: when MV magnitude < 1 px, skip warp.
+    //
+    // §B-DUMP-FALLBACK 2026-05-07 — was `interpFrame = sameCurr` which
+    // made interp visually identical to real_N for low-MV pixels (that's
+    // most of the frame in normal content) → user perceives "FRUC isn't
+    // doing anything".  Changed to mix(prev, curr, 0.5) at same pixel:
+    //   - For TRULY static pixels, prev == curr, mix = same (no diff)
+    //   - For sub-pixel-motion pixels (most common case), prev != curr,
+    //     mix produces subtle blend → interp visually distinct from real
+    //   - No MV used → no reverse-direction artifact possible
     if (dot(mv, mv) < 1.0) {
-        interpFrame[int2(px, py)] = sameCurr;
+        float4 prevAtPP = prevFrame.Load(int3(px, py, 0));
+        interpFrame[int2(px, py)] = lerp(prevAtPP, sameCurr, 0.5);
         return;
     }
 
@@ -228,10 +241,11 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
         // workload stays consistent, which fixes the p90=29.7 ms
         // tail we were seeing on Balanced.
         float w = 0.5;
-        // Run the luma-gap catastrophic check too.
+        // §B-DUMP-LUMA 2026-05-07 — cap luma bias at 0.5 so high-contrast
+        // edges keep half-strength midpoint instead of collapsing to curr.
         const float3 YC = float3(0.299, 0.587, 0.114);
         float lg = abs(dot(prevSample.rgb, YC) - dot(currSample.rgb, YC));
-        float b = smoothstep(0.05, 0.25, lg);
+        float b = smoothstep(0.05, 0.25, lg) * 0.5;
         result = lerp(lerp(prevSample, currSample, w), currSample, b);
 #elif ENABLE_ADAPTIVE_BLEND
         // computeAdaptiveWeight does 2 extra sampleMV() calls (each
@@ -249,9 +263,10 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
         // of the adaptive result. Cheap (2 dot products) and fixes
         // the worst residual ghosts.
         {
+            // §B-DUMP-LUMA 2026-05-07 — cap at 0.5
             const float3 YC = float3(0.299, 0.587, 0.114);
             float lg = abs(dot(prevSample.rgb, YC) - dot(currSample.rgb, YC));
-            float b = smoothstep(0.05, 0.25, lg);
+            float b = smoothstep(0.05, 0.25, lg) * 0.5;
             result = lerp(result, currSample, b);
         }
 #else
@@ -268,10 +283,10 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
         float currY = dot(currSample.rgb, YCOEF);
         float lumaDiff = abs(prevY - currY);
         // smoothstep(0.05, 0.25, lumaDiff) — starts responding at
-        // 5% luma gap, fully biased at 25%. Was linear-from-10%
-        // which left small-to-medium luma gaps producing partial
-        // ghosts. Smoothstep gives a nicer perceptual curve too.
-        float bias = smoothstep(0.05, 0.25, lumaDiff);
+        // 5% luma gap, fully biased at 25%.
+        // §B-DUMP-LUMA 2026-05-07 — cap at 0.5 so high-contrast edges
+        // keep half midpoint blend instead of collapsing to curr.
+        float bias = smoothstep(0.05, 0.25, lumaDiff) * 0.5;
         result = lerp(lerp(prevSample, currSample, 0.5), currSample, bias);
 #endif
     } else {

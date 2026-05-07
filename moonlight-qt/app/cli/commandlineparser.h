@@ -74,6 +74,7 @@ private:
     QMap<QString, StreamingPreferences::CaptureSysKeysMode> m_CaptureSysKeysModeMap;
     QMap<QString, StreamingPreferences::FrucBackend> m_FrucBackendMap;
     QMap<QString, StreamingPreferences::FrucQuality> m_FrucQualityMap;
+    QMap<QString, StreamingPreferences::RendererSelection> m_RendererSelectionMap;
 };
 
 class ListCommandLineParser

@@ -430,8 +430,28 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
         return false;
     }
 
+    // §B-DUMP-NCNN-FIX 2026-05-07 — when phase-B.4 shared path is OFF
+    // (default), m_OutputTex is only ever written via CopyResource from
+    // m_StagingOutTex on the SAME D3D11 device.  Empirically the
+    // SHARED_NTHANDLE | SHARED MiscFlags caused that CopyResource to
+    // silently produce zeros on the destination on this NV driver
+    // (interp BMPs all-black despite RIFE inference completing).
+    // Removing the share flags fixes the CPU-staging output path.
+    // Phase B.4 (VIPLE_FRUC_NCNN_SHARED=1) keeps the original flags so
+    // Vulkan import still works for that experimental path.
+    const bool wantShared =
+        qEnvironmentVariableIntValue("VIPLE_FRUC_NCNN_SHARED") != 0;
     D3D11_TEXTURE2D_DESC outDesc = renderDesc;
-    outDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    if (wantShared) {
+        // Phase B.4: Vulkan compute writes via shared NT handle → needs UAV
+        outDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    } else {
+        // CPU staging path: only ever sample via SRV, so drop UAV +
+        // SHARED.  Some D3D11 driver paths handle CopyResource differently
+        // for UAV-bound textures; simpler bind = more predictable.
+        outDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        outDesc.MiscFlags = 0;
+    }
     if (FAILED(m_Device->CreateTexture2D(&outDesc, nullptr, m_OutputTex.GetAddressOf())) ||
         FAILED(m_Device->CreateShaderResourceView(m_OutputTex.Get(), nullptr, m_OutputSRV.GetAddressOf()))) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -799,13 +819,17 @@ bool NcnnFRUC::loadModel()
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC-NCNN] loadModel: step 1/6 new ncnn::Net");
     m_Net = std::make_unique<ncnn::Net>();
     m_Net->opt.use_vulkan_compute  = true;
-    // RIFE 4.25-lite is fp16-trained without int8 calibration, so we
-    // can't use rife-ncnn-vulkan's int8_storage trick (without
-    // calibration ncnn does fp16→int8 round-trip with default scale,
-    // which is SLOWER than fp16-direct).  Stick with full fp16 path.
-    m_Net->opt.use_fp16_packed     = true;
-    m_Net->opt.use_fp16_storage    = true;
-    m_Net->opt.use_fp16_arithmetic = true;
+    // §B-DUMP-NCNN-FIX 2026-05-07 — fp16 path was returning all-zero
+    // output mat from RIFE on RTX 3060 Laptop (NV 596.144 driver) with
+    // ncnn 20220729.  Diagnostic confirms matToStaging+CopyResource
+    // pipeline works; RIFE itself outputs zeros.  Fall back to fp32 by
+    // default (~2× slower but correct).  Override with VIPLE_FRUC_NCNN_FP16=1
+    // if a future driver/ncnn fixes this and you want max speed.
+    const bool wantFp16 =
+        qEnvironmentVariableIntValue("VIPLE_FRUC_NCNN_FP16") != 0;
+    m_Net->opt.use_fp16_packed     = wantFp16;
+    m_Net->opt.use_fp16_storage    = wantFp16;
+    m_Net->opt.use_fp16_arithmetic = wantFp16;
     m_Net->opt.use_int8_storage    = false;
     m_Net->opt.use_int8_arithmetic = false;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC-NCNN] loadModel: step 2/6 set_vulkan_device(%d)", m_GpuIndex);
@@ -894,13 +918,37 @@ double NcnnFRUC::probeInferenceCost(int warmup, int iterations)
     in1.fill(0.50f);
     in2.fill(0.50f);
 
+    // §B-DUMP-NCNN-CORRECTNESS 2026-05-07 — track whether RIFE actually
+    // produced non-zero output during probe.  Without this, ncnn-vulkan
+    // RIFE forward pass that returns all-zero (known issue on RTX 3060
+    // Laptop + NV 596.144 + ncnn 20220729) still passes the timing probe
+    // and gets selected by cascade → user sees black interp frames.
+    // Caller checks `outputAllZero` and rejects backend if true.
+    bool outputAllZero = true;
     auto runOne = [&]() -> bool {
         ncnn::Extractor ex = m_Net->create_extractor();
         ex.input("in0", in0);
         ex.input("in1", in1);
         ex.input("in2", in2);
         ncnn::Mat out;
-        return ex.extract("out0", out) == 0;
+        if (ex.extract("out0", out) != 0) return false;
+        // Sample 4 representative pixels to confirm non-zero output.
+        // For probe inputs (in0=0.25, in1=0.50), midpoint output should
+        // be in 0.25..0.50 range — never exactly zero.
+        if (!out.empty() && out.c >= 3 && out.elemsize == 4) {
+            const int planeSize = out.w * out.h;
+            const float* r = (const float*)out.channel(0);
+            const float* g = (const float*)out.channel(1);
+            const float* b = (const float*)out.channel(2);
+            const int probes[4] = { 0, planeSize / 2, planeSize - 1, planeSize / 4 };
+            for (int p = 0; p < 4; ++p) {
+                if (r[probes[p]] > 0.001f || g[probes[p]] > 0.001f || b[probes[p]] > 0.001f) {
+                    outputAllZero = false;
+                    break;
+                }
+            }
+        }
+        return true;
     };
 
     // Warmup: ncnn lazily compiles SPIR-V on first dispatch, so the
@@ -949,6 +997,25 @@ double NcnnFRUC::probeInferenceCost(int warmup, int iterations)
                 m_Width, m_Height, med, *mn, *mx, iterations, warmup,
                 stagingMs, effective,
                 m_SharedPathReady ? "[shared path]" : "[CPU staging]");
+
+    // §B-DUMP-NCNN-CORRECTNESS — if all probe iterations returned zero
+    // pixels at sample positions, RIFE Vulkan forward pass is broken on
+    // this driver/GPU (see todo.md §B-DUMP NCNN known issue).  Return
+    // sentinel -2.0 so caller can distinguish from perf-budget rejection.
+    // Override with VIPLE_FRUC_NCNN_FORCE=1 if user wants the broken
+    // backend anyway (e.g. for diagnostic dump comparison).
+    if (outputAllZero
+        && qEnvironmentVariableIntValue("VIPLE_FRUC_NCNN_FORCE") == 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-FRUC-NCNN] probe REJECTED — RIFE output all-zero at "
+            "%dx%d on this GPU/driver/ncnn build (known issue, see "
+            "docs/todo.md §B-DUMP NCNN).  Cascade will fall back to "
+            "Generic compute.  Override with VIPLE_FRUC_NCNN_FORCE=1 if "
+            "you want black interp frames anyway.",
+            (int)m_Width, (int)m_Height);
+        m_LastInferenceMs = med;
+        return -2.0;  // sentinel for "init OK but output broken"
+    }
 
     m_LastInferenceMs = med;
     return effective;
@@ -2364,6 +2431,35 @@ bool NcnnFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp)
         m_PrevMat = curr_mat;
         m_FrameCount++;
         return false;
+    }
+
+    // §B-DUMP-NCNN-OUTPUT-CHECK 2026-05-07 — sanity check RIFE output
+    // is non-zero.  On RTX 3060 Laptop + NV 596.144 + ncnn 20220729,
+    // empirical: RIFE-v4.25-lite forward pass returns all-zero out_mat
+    // even with valid prev/curr inputs (verified via diagnostic magenta
+    // test that bypasses RIFE).  Probe time (~25ms) suggests Vulkan
+    // dispatch happens but produces zeros.  Possible causes:
+    //   - ncnn 20220729 + recent NV driver: known issue with rife.Warp
+    //     custom layer's pack4/pack8 SPIR-V
+    //   - fp16 path corruption with grid_sample-like bilinear
+    //   - rife.Warp pipeline uses set_optimal_local_size_xyz which on
+    //     some GPUs picks a workgroup size that produces zeros
+    // Workaround: log first occurrence so user sees in log; let
+    // Generic Compute pick up the slack.
+    static std::atomic<bool> s_zeroLogged{false};
+    {
+        const float r0 = ((const float*)out_mat.channel(0))[0];
+        const float g0 = ((const float*)out_mat.channel(1))[0];
+        const float b0 = ((const float*)out_mat.channel(2))[0];
+        const float c0 = ((const float*)out_mat.channel(0))[(out_mat.w * out_mat.h) / 2];
+        const bool allZero = (r0 == 0.0f && g0 == 0.0f && b0 == 0.0f && c0 == 0.0f);
+        if (allZero && !s_zeroLogged.exchange(true)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC-NCNN] RIFE output is all-zero — known issue with "
+                "ncnn-vulkan + rife.Warp on this driver/GPU.  Interp frames "
+                "will display black; use frucBackend=Generic (D3D11 compute) "
+                "for working FRUC.  See ncnn_rife_warp.cpp.");
+        }
     }
 
     // Output back to D3D11: fp32 → RGBA8 staging → CopyResource to

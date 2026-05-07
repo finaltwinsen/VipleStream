@@ -67,7 +67,21 @@ for %%F in (SDL2.dll SDL2_ttf.dll SDL3.dll avcodec-62.dll avutil-60.dll swscale-
 )
 
 :: ---- 2. D3D11 shaders + data files ----
-echo [pkg 2/5] Copying shaders and data files
+echo [pkg 2/5] Compiling + copying shaders and data files
+::
+:: §B-DUMP-BUILD 2026-05-07 — auto-recompile all .hlsl to .fxc before
+:: staging, so shipped binary matches latest source.  Previously only
+:: the manually-invoked build_hlsl.bat ran, letting .fxc drift behind
+:: edits.  Delegated to compile_d3d11_shaders.ps1 because cmd batch
+:: can't reliably escape /D macro args with embedded quotes.
+::
+where pwsh >nul 2>&1
+if errorlevel 1 (
+    powershell -ExecutionPolicy Bypass -File "%~dp0compile_d3d11_shaders.ps1"
+) else (
+    pwsh -ExecutionPolicy Bypass -File "%~dp0compile_d3d11_shaders.ps1"
+)
+
 ::
 :: IMPORTANT: GenericFRUC loads the _quality / _balanced / _performance
 :: variants of motionest and warp (one per preset, compiled from

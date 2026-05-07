@@ -20,7 +20,12 @@
 #include <vulkan/vulkan.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <map>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <thread>
 #include <vector>
 
 // §J.3.e.2.i.8 Phase 1.1d — forward decl from nvvideoparser; full def lives in
@@ -174,6 +179,7 @@ private:
     bool createOpticalFlowSession(uint32_t width, uint32_t height);
     void destroyOpticalFlowSession();
 
+    // §B-DUMP — definitions live below kFrucFramesInFlight (line ~600).
     // §J.3.e.2.i.3.a — ffmpeg AVHWDeviceContext bridges our VkDevice
     // to ffmpeg's Vulkan video decoder so AVVkFrame.img[0] gets created
     // on the same device our graphics pipeline samples from.
@@ -526,6 +532,89 @@ private:
     // Reverted back to 2.  The proper fix for the renderDone-sem-reuse race
     // is per-swapchain-image sems, deferred.
     static constexpr uint32_t kFrucFramesInFlight = 2;
+
+    // §B-DUMP 2026-05-07 — diagnostic frame dump for visual real-vs-interp
+    // comparison.  Triggered by VIPLE_VKFRUC_DUMP_DIR=path; copies real /
+    // interp_1 / interp_2 RGB compute buffers into host-visible staging
+    // (per-slot ring), then memcpy to writer thread queue post slot-fence-
+    // wait.  Single writer thread converts fp32 → uint8 RGBA → PNG offline
+    // — render thread sees only ~3 cmdCopyBuffer ops + 1 memcpy per dump
+    // frame, no fence wait beyond existing slot reuse, no PNG compression
+    // on render thread.  Zero overhead when env var unset.
+    bool           m_DumpEnabled        = false;
+    std::string    m_DumpDir;
+    int            m_DumpFramesTotal    = 10;     // server frames to dump (~0.17s @ 60fps)
+    int64_t        m_DumpDelayMs        = 10000;  // warmup before capture starts
+    static constexpr size_t kDumpQueueCap = 30;   // backpressure: skip when queue full
+    int64_t        m_DumpSessionStartMs = 0;
+    int            m_DumpFramesQueued   = 0;      // server frames cmdCopyBuffer-ed so far
+    int            m_DumpFramesWritten  = 0;      // PNGs flushed by writer thread
+    // Monotonic display-order counter for flat naming `frame_NNNN_<label>.bmp`
+    // (matches D3D11 dump layout — single dir, suffix distinguishes real vs
+    // interp).  Only advances when the whole frame's set of jobs (DUAL: 1
+    // interp + 1 real; TRIPLE: 2 interp + 1 real) fits into the writer
+    // queue and is committed atomically; on drop the counter stays put so
+    // file indices stay dense + alternation parity (even=interp / odd=real
+    // for DUAL after the first real) is preserved for analyzer downstream.
+    int            m_DumpDisplayCounter = 0;
+    bool           m_DumpDoneLogged     = false;
+    // 3 src × kFrucFramesInFlight slots = 6 staging buffers (per-slot ring
+    // matches existing chain rotation; slot S's staging stable when fence S
+    // signaled = at next reuse of slot S).  Sized for full source RGB fp32
+    // (1920×1080×3×4 ≈ 25 MB each at 1080p).
+    VkBuffer       m_DumpStagingReal[kFrucFramesInFlight]      = {};
+    VkDeviceMemory m_DumpStagingRealMem[kFrucFramesInFlight]   = {};
+    VkBuffer       m_DumpStagingInterp1[kFrucFramesInFlight]   = {};
+    VkDeviceMemory m_DumpStagingInterp1Mem[kFrucFramesInFlight] = {};
+    VkBuffer       m_DumpStagingInterp2[kFrucFramesInFlight]   = {};
+    VkDeviceMemory m_DumpStagingInterp2Mem[kFrucFramesInFlight] = {};
+    void*          m_DumpStagingRealMap[kFrucFramesInFlight]    = {};
+    void*          m_DumpStagingInterp1Map[kFrucFramesInFlight] = {};
+    void*          m_DumpStagingInterp2Map[kFrucFramesInFlight] = {};
+    VkDeviceSize   m_DumpStagingSize    = 0;
+    // §B-DUMP MV — also capture m_FrucMvFilteredBuf (mvW*mvH*2*int = ~256KB
+    // for 1080p) to diagnose whether ME produces real motion vectors.  If
+    // this buffer is all zeros, the issue is in ME or median; if it has
+    // real motion data, the bug is in warp.
+    VkBuffer       m_DumpStagingMv[kFrucFramesInFlight]    = {};
+    VkDeviceMemory m_DumpStagingMvMem[kFrucFramesInFlight] = {};
+    void*          m_DumpStagingMvMap[kFrucFramesInFlight] = {};
+    VkDeviceSize   m_DumpStagingMvSize  = 0;
+    // Per-slot record: which server frame index used this slot, and whether
+    // it was a triple frame (so memcpy reads 3 stagings vs 2 vs 1).
+    struct DumpSlotRec {
+        int  serverFrameIdx;  // -1 = no pending dump
+        bool wasTriple;
+    };
+    DumpSlotRec    m_DumpSlotRec[kFrucFramesInFlight] = { {-1, false}, {-1, false} };
+    bool           m_DumpStarted        = false;  // captured first frame this run
+    int            m_DumpCleanupExtra   = 0;      // post-capture frames to drain ring (= kFrucFramesInFlight)
+    // Writer thread: PNG conversion + disk write off render thread.
+    struct DumpJob {
+        std::vector<uint8_t> rgba;     // pre-converted uint8 RGBA, ready for stbi_write_png
+        uint32_t width = 0, height = 0;
+        std::string path;
+    };
+    std::thread                  m_DumpWriterThread;
+    std::mutex                   m_DumpQueueMutex;
+    std::condition_variable      m_DumpQueueCv;
+    std::queue<DumpJob>          m_DumpQueue;
+    std::atomic<bool>            m_DumpWriterStop{false};
+    bool initFrameDump();
+    void teardownFrameDump();
+    // Called at slot fence-wait reuse point (both renderFrame + renderFrameSw).
+    // If a dump record is pending for this slot, converts fp32 → uint8 RGBA
+    // (read from host-visible coherent staging) and pushes 2-3 DumpJobs to
+    // writer thread queue.  Resets slot record to -1.  Cheap when no record
+    // pending.  zero-cost when m_DumpEnabled == false.
+    void flushDumpSlotIfPending(uint32_t slotIdx);
+    // Helper: convert fp32 planar RGB (W*H*3 fp32, byte order [R-plane,
+    // G-plane, B-plane]) to uint8 RGBA (W*H*4 packed).  Caller-allocates
+    // dst (size W*H*4).  Used both by render-thread memcpy step (small)
+    // and worker thread (PNG encode).  Inline-able.
+    static void planarFp32RgbToUint8Rgba(const float* src, uint8_t* dst,
+                                          uint32_t w, uint32_t h);
+
     VkCommandPool   m_CmdPool                = VK_NULL_HANDLE;
     VkCommandBuffer m_SlotCmdBuf[kFrucFramesInFlight]            = {};
     // §B2 2026-05-06 — TRIPLE 60→180 needs 3 acquire sems per slot (interp 1/3 +
@@ -685,7 +774,7 @@ private:
     bool createFrucComputeResources(int width, int height);
     void destroyFrucComputeResources();
     bool runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, uint32_t height,
-                             bool useNativeSrc);
+                             bool useNativeSrc, uint32_t slotIdx = 0);
 
     bool     m_FrucMode      = false;
     bool     m_FrucReady     = false;
@@ -693,6 +782,8 @@ private:
     bool     m_NcnnInited    = false;  // §J.3.e.2.i.6: tracks ncnn::create_gpu_instance call
     uint32_t m_FrucMvWidth   = 0;   // ceil(W / 8)
     uint32_t m_FrucMvHeight  = 0;
+    uint32_t m_FrucSrcWidth  = 0;   // raw source W (1920 etc.) — used for dump sizing
+    uint32_t m_FrucSrcHeight = 0;
     uint64_t m_FrucFrameCount = 0;
 
     // §J.3.e.2.i.4.1 NV12 → planar fp32 RGB compute.  Reads raw NV12

@@ -1699,7 +1699,15 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
     auto* vkPrefs = StreamingPreferences::get(nullptr);
     bool prefsForceD3D11 = vkPrefs && vkPrefs->rendererSelection == StreamingPreferences::RS_D3D11;
     bool prefsWantVulkan = vkPrefs && vkPrefs->rendererSelection == StreamingPreferences::RS_VULKAN;
-    bool envForceVulkan  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0;
+    // §B-DUMP — VIPLE_VKFRUC_DUMP_DIR implicitly forces VkFrucRenderer SW
+    // path (overrides RS_D3D11 default).  Without this, dump code in
+    // vkfruc.cpp never executes because D3D11 renderer is selected.
+    bool envDumpDir      = !qgetenv("VIPLE_VKFRUC_DUMP_DIR").isEmpty();
+    bool envForceVulkan  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0 || envDumpDir;
+    // §B-DUMP — when DUMP_DIR set, SUPPRESS the Vulkan hwaccel cascade
+    // (RS_VULKAN normally triggers it).  hwaccel needs AVHWDeviceContext
+    // which our VkFruc SW path doesn't provide → cascade fails over to
+    // D3D11VA, where dump code doesn't live.  envDumpDir forces SW path.
     // §J.3.f override (2026-05-03) — when shouldPreferVulkanDecoderCascade()
     // is true, skip this short-circuit and let the standard cascade probe
     // Vulkan hwaccel via line 1620's §J.3.c.1 path.  ffmpeg 8.1 vulkan
@@ -1710,8 +1718,9 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
     // §J.3.f integration (2026-05-04) — RS_VULKAN now triggers this path
     // by default (no env var needed).  VIPLE_VKFRUC_SW=1 still forces SW
     // upload for debug.
-    bool wantVkDecoderInner = shouldPreferVulkanDecoderCascade();
-    if (!prefsForceD3D11 && !wantVkDecoderInner && (prefsWantVulkan || envForceVulkan)) {
+    bool wantVkDecoderInner = shouldPreferVulkanDecoderCascade() && !envDumpDir;
+    // envDumpDir overrides prefsForceD3D11 (dump diagnostics has highest priority)
+    if ((!prefsForceD3D11 || envDumpDir) && !wantVkDecoderInner && (prefsWantVulkan || envForceVulkan)) {
         // SW h264/hevc/av1 decoders default to YUV420P output.  We try
         // YUV420P unconditionally — if decoder_pix_fmts list is missing
         // (newer FFmpeg returns NULL for some SW decoders), iterating
@@ -2164,8 +2173,11 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
     auto* vkPrefs2 = StreamingPreferences::get(nullptr);
     bool prefsForceD3D11_2 = vkPrefs2 && vkPrefs2->rendererSelection == StreamingPreferences::RS_D3D11;
     bool prefsWantVulkan_2 = vkPrefs2 && vkPrefs2->rendererSelection == StreamingPreferences::RS_VULKAN;
-    bool envForceVulkan_2  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0;
-    bool envWantVkDecoder  = shouldPreferVulkanDecoderCascade();
+    // §B-DUMP — VIPLE_VKFRUC_DUMP_DIR implicitly forces VkFrucRenderer SW.
+    bool envDumpDir_2      = !qgetenv("VIPLE_VKFRUC_DUMP_DIR").isEmpty();
+    bool envForceVulkan_2  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0 || envDumpDir_2;
+    // §B-DUMP — same suppression as block 1.
+    bool envWantVkDecoder  = shouldPreferVulkanDecoderCascade() && !envDumpDir_2;
     if (envWantVkDecoder) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-SW] Vulkan decoder cascade active (RS_VULKAN "
@@ -2173,7 +2185,7 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
                     "block; standard cascade will probe Vulkan hwaccel first "
                     "(§J.3.f integration 2026-05-04)");
     }
-    if (!prefsForceD3D11_2 && !envWantVkDecoder && (prefsWantVulkan_2 || envForceVulkan_2)) {
+    if ((!prefsForceD3D11_2 || envDumpDir_2) && !envWantVkDecoder && (prefsWantVulkan_2 || envForceVulkan_2)) {
         // §J.3.e.2.i.8 Phase 3 — for AV1 the FFmpeg-internal `av1` decoder in
         // our avcodec-62 build is a HW-only stub ("Your platform doesn't
         // support hardware accelerated AV1 decoding" / "Failed to get pixel

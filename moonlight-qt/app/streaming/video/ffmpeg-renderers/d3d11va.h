@@ -4,6 +4,11 @@
 
 #include <atomic>
 #include <vector>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <string>
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
 
@@ -191,5 +196,44 @@ private:
     Microsoft::WRL::ComPtr<ID3D11PixelShader> m_OverlayPixelShader;
 
     AVBufferRef* m_HwDeviceContext;
+
+    // §B-DUMP-D3D11 2026-05-07 — diagnostic frame dump that reads the
+    // actual swapchain backbuffer (post-FRUC composite, immediately
+    // before Present()) and saves to BMP via writer thread.  This gives
+    // the EXACT same pixels the user sees on screen, unlike gdigrab
+    // which has compositor / fullscreen / sync issues.
+    //
+    // Triggered by env VIPLE_RENDERER_DUMP_DIR.  Same suffix-naming as
+    // VkFruc §B-DUMP — frame_NNNN.bmp sequential, directory pre-created.
+    bool           m_FrameDumpEnabled       = false;
+    std::string    m_FrameDumpDir;
+    int            m_FrameDumpFramesTotal   = 30;
+    int64_t        m_FrameDumpDelayMs       = 8000;
+    int64_t        m_FrameDumpSessionStartMs = 0;
+    int            m_FrameDumpFramesQueued  = 0;
+    int            m_FrameDumpFramesWritten = 0;
+    bool           m_FrameDumpStarted       = false;
+    bool           m_FrameDumpDoneLogged    = false;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_FrameDumpStaging;
+    DXGI_FORMAT    m_FrameDumpStagingFormat = DXGI_FORMAT_UNKNOWN;
+    bool           m_FrameDumpSwizzleBR     = false;  // true if format is BGRA → swap R/B for stbi
+    struct FrameDumpJob {
+        std::vector<uint8_t> rgba;  // pre-swizzled BGRA->RGBA, ready for stbi
+        uint32_t width = 0, height = 0;
+        std::string path;
+    };
+    std::thread                    m_FrameDumpWriterThread;
+    std::mutex                     m_FrameDumpQueueMutex;
+    std::condition_variable        m_FrameDumpQueueCv;
+    std::queue<FrameDumpJob>       m_FrameDumpQueue;
+    std::atomic<bool>              m_FrameDumpStop{false};
+    static constexpr size_t        kFrameDumpQueueCap = 30;
+    void initFrameDump();
+    void teardownFrameDump();
+    // Reads backbuffer pixels (BGRA8) → swizzles → pushes to writer queue.
+    // Called BEFORE each m_SwapChain->Present() so the staging copy
+    // happens while command buffer's writes are visible.  No-op when
+    // dump disabled or warmup not elapsed or quota reached.
+    void dumpBackbufferIfActive(const char* slotLabel);
 };
 

@@ -810,9 +810,15 @@ Flickable {
                 // §J.3.e.2.i — Vulkan renderer 用內建 compute 補幀引擎，不
                 //吃 frucBackend 選擇 (還沒接 IFRUCBackend 抽象)；D3D11 才需要
                 // 選 backend.  顯示提示讓使用者知道 Vulkan 等同 Generic.
+                //
+                // 用 StreamingPreferences.rendererSelection（enum 值）比對而不是
+                // currentIndex，因為 v1.3.308 起 model 順序跟 enum 不再 1:1
+                // (D3D11 在 index 0 / val=1，Vulkan 在 index 1 / val=0)。直接
+                // 吃 enum 值對 reorder 免疫。
                 Label {
                     width: parent.width
-                    visible: frameInterpolationCheck.checked && rendererSelectionCombo.currentIndex === 0
+                    visible: frameInterpolationCheck.checked
+                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
                     text: qsTr("Vulkan 渲染器使用內建補幀引擎（等同 Generic）。要選擇其他補幀引擎請切到 Direct3D 11。")
                     font.pointSize: 10
                     font.italic: true
@@ -824,7 +830,8 @@ Flickable {
                     id: frucBackendCombo
                     width: parent.width
                     // Vulkan renderer 的 compute 補幀內建,不需 frucBackend.
-                    visible: frameInterpolationCheck.checked && rendererSelectionCombo.currentIndex === 1
+                    visible: frameInterpolationCheck.checked
+                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_D3D11
                     font.pointSize: 12
                     textRole: "text"
                     model: ListModel {
@@ -868,7 +875,7 @@ Flickable {
                     // pipelines that don't take a quality hint.
                     // Vulkan renderer 走自己內建 compute，不吃 quality hint.
                     visible: frameInterpolationCheck.checked
-                             && rendererSelectionCombo.currentIndex === 1
+                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_D3D11
                              && frucBackendCombo.currentIndex === 0
                     font.pointSize: 12
                     textRole: "text"
@@ -888,6 +895,65 @@ Flickable {
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)\nBalanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)\nPerformance: 4-neighbor search + minimal processing (~6ms on iGPU)")
+                }
+
+                // §B-NVOF UI 整合 2026-05-07 — Vulkan-only HW optical flow (NVOFA).
+                // 取代 software block-match ME → testufo 1080p60 量化三指標贏 software
+                // (SSIM 0.999 / OF_30Hz 2.66% / cv 0.86, commit c82196e).  跟 D3D11 +
+                // NvOFFRUC.dll (engine 03) 主觀比仍弱在 warp+blend pipeline (我們沒接
+                // §B-quality (c) 的 occlusion / confidence weighting).
+                //
+                // 預設 OFF (opt-in)：4K120 stress / 自然 video 驗測沒做完；穩定後
+                // 預設可改 ON.  env var `VIPLE_VKFRUC_NV_OF` 仍是 dev escape hatch.
+                CheckBox {
+                    id: vkfrucNvOfCheck
+                    width: parent.width
+                    text: qsTr("使用 NVIDIA Optical Flow 硬體補幀 (實驗性)")
+                    font.pointSize: 12
+                    visible: frameInterpolationCheck.checked
+                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
+                    checked: StreamingPreferences.vkfrucEnableNvOf
+                    onCheckedChanged: {
+                        if (StreamingPreferences.vkfrucEnableNvOf !== checked) {
+                            StreamingPreferences.vkfrucEnableNvOf = checked
+                        }
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("使用 NVIDIA Turing+ (RTX 20/30/40) 內建的 Optical Flow Accelerator (NVOFA) 硬體取代軟體 block-match motion estimation。需要 NV driver 支援 VK_NV_optical_flow extension。\n\n量化勝過軟體 block-match (testufo 1080p60: SSIM 0.999 vs 0.998, motion smoothness cv 0.86 vs 1.94)，但 warp + blend pipeline 仍是我們自寫的 (沒做 occlusion handling)，主觀視覺仍輸給 D3D11 的 NvOFFRUC.dll 完整路徑。\n\n非 NVIDIA GPU / 不支援 extension 時自動 fallback 軟體 block-match，不會崩潰。")
+                }
+
+                // §B2 UI 整合 2026-05-07 — Vulkan-only TRIPLE 60→180 (3x interp).
+                // Infrastructure ship at commit bc88eba.  每 server frame compute
+                // 兩張 interp (1/3 + 2/3 點) + real，3 張 swapchain image present
+                // 給 180Hz display.  視覺品質 ceiling 受 §B-quality / §B-NVOF
+                // warp+blend 限制 — TRIPLE 只是 present 倍率 + tFraction sampling.
+                //
+                // 必要條件：180Hz panel (60Hz/120Hz panel 用了會 tearing/掉幀)；
+                // server fps 自動降為 user_fps/3 (DUAL 是 /2)；live FRUC toggle
+                // 在 TRIPLE 模式下不發 LiRequestFpsChange 避免 NVENC timebase 衝擊.
+                CheckBox {
+                    id: vkfrucTripleCheck
+                    width: parent.width
+                    text: qsTr("TRIPLE 補幀 60→180 (需 180Hz 顯示器，實驗性)")
+                    font.pointSize: 12
+                    visible: frameInterpolationCheck.checked
+                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
+                    checked: StreamingPreferences.vkfrucEnableTriple
+                    onCheckedChanged: {
+                        if (StreamingPreferences.vkfrucEnableTriple !== checked) {
+                            StreamingPreferences.vkfrucEnableTriple = checked
+                            // bitrate 預設沒跟 TRIPLE 變動 (server fps 已從 user_fps/2
+                            // 改 /3，總 bitrate budget 需求差不多)，所以不重算.
+                        }
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("DUAL 補幀 (預設) = 每張 server frame 補 1 張 interp，共 2 張 present。例：FPS 設 120 → server 送 60fps、client 顯示 120fps。\n\nTRIPLE 補幀 = 每張 server frame 補 2 張 interp (1/3 + 2/3 點)，共 3 張 present。例：FPS 設 180 → server 送 60fps、client 顯示 180fps。\n\n只在 180Hz / 144Hz panel 上開有意義 (60/120Hz 會 tearing 或卡)，且建議搭 NVOF 補幀引擎使用 (block-match ME 對快速物體噪聲明顯)。\n\n串流中 Ctrl+Alt+Shift+F 暫停補幀的功能在 TRIPLE 模式下會 fallback 為 client single-present 顯示 server 原 fps，避免 NVENC 動態切 timebase 卡頓。")
                 }
 
                 // VipleStream v1.2.92: 180 fps cap warning removed

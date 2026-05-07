@@ -3,8 +3,17 @@
 #include <QCommandLineParser>
 #include <QRegularExpression>
 
+#include <cstdio>
+#include <cstdlib>
+
 #if defined(Q_OS_WIN)
 #include <qt_windows.h>
+// Windows uses leading-underscore _exit; POSIX has unprefixed _exit in <unistd.h>.
+#  include <process.h>
+#  define VS_FAST_EXIT(code) ::_exit(code)
+#else
+#  include <unistd.h>
+#  define VS_FAST_EXIT(code) ::_exit(code)
 #endif
 
 static bool inRange(int value, int min, int max)
@@ -63,16 +72,40 @@ public:
         fputs(qPrintable(message), type == Info ? stdout : stderr);
     }
 
+    // VipleStream: --help / --version / parse-error paths bail out from
+    // deep inside main() *after* QGuiApplication, SDL_InitSubSystem(VIDEO),
+    // atexit(SDL_Quit), and file-scope static QRegularExpressions have all
+    // been set up.  Plain exit() runs atexit handlers + static destructors,
+    // and on Windows that hits an ordering trap: Qt's static cleanup logs
+    // a few messages on the way out, those go through main.cpp's
+    // logToLoggerStream() which calls QString::replace(k_RikeyRegex, ...),
+    // but k_RikeyRegex's destructor has already fired -> "called on an
+    // invalid QRegularExpression object" warning + a 0xC0000409 fail-fast
+    // ~10% of the time.  Running back-to-back also occasionally leaves a
+    // zombie process stuck inside SDL_Quit (see scripts/build_moonlight_
+    // package.cmd line 28's "zombie VipleStream.exe" warning).
+    //
+    // _exit() skips atexit + static destructors entirely, which is exactly
+    // what we want for these short fast-paths -- there's no per-process
+    // state worth flushing, and the help/error text was already written
+    // via fputs above so we just flush stdio buffers and bail.
+    [[ noreturn ]] void fastExit(int code) const
+    {
+        std::fflush(stdout);
+        std::fflush(stderr);
+        VS_FAST_EXIT(code);
+    }
+
     [[ noreturn ]] void showInfo(QString message) const
     {
         showMessage(message, Info);
-        exit(0);
+        fastExit(0);
     }
 
     [[ noreturn ]] void showError(QString message) const
     {
         showMessage(message + "\n\n" + helpText(), Error);
-        exit(1);
+        fastExit(1);
     }
 
     int getIntOption(QString name) const
@@ -332,6 +365,13 @@ StreamCommandLineParser::StreamCommandLineParser()
         {"balanced",    StreamingPreferences::FQ_BALANCED},
         {"performance", StreamingPreferences::FQ_PERFORMANCE},
     };
+    // §J.3.e.2.i — D3D11 vs Vulkan renderer.  CLI override added 2026-05-07
+    // for benchmark scripts that need to force RS_VULKAN regardless of saved
+    // user setting (Phase 7E NVOF/TRIPLE 只在 Vulkan path 生效).
+    m_RendererSelectionMap = {
+        {"vulkan", StreamingPreferences::RS_VULKAN},
+        {"d3d11",  StreamingPreferences::RS_D3D11},
+    };
 }
 
 StreamCommandLineParser::~StreamCommandLineParser()
@@ -382,6 +422,13 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addToggleOption("frame-interpolation", "frame interpolation (FRUC)");
     parser.addChoiceOption("fruc-backend", "FRUC backend", m_FrucBackendMap.keys());
     parser.addChoiceOption("fruc-quality", "FRUC quality preset", m_FrucQualityMap.keys());
+    // §B-NVOF / §B2 — Vulkan-only 補幀進階開關 (RS_VULKAN 才生效;
+    // RS_D3D11 設了會被忽略).  --vk-nvof / --no-vk-nvof 切換 NVIDIA
+    // Optical Flow 硬體 ME (取代 software block-match);
+    // --vk-triple / --no-vk-triple 切換 60→180 三倍補幀 mode (需 180Hz panel).
+    parser.addToggleOption("vk-nvof", "NVIDIA Optical Flow Vulkan path (Vulkan renderer only)");
+    parser.addToggleOption("vk-triple", "TRIPLE 60→180 frame interpolation (Vulkan renderer only, needs 180Hz panel)");
+    parser.addChoiceOption("renderer", "renderer selection (vulkan / d3d11)", m_RendererSelectionMap.keys());
     parser.addToggleOption("auto-bitrate", "adaptive bitrate for lossy networks");
     parser.addChoiceOption("capture-system-keys", "capture system key combos", m_CaptureSysKeysModeMap.keys());
     parser.addChoiceOption("video-codec", "video codec", m_VideoCodecMap.keys());
@@ -518,6 +565,18 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     // Resolve --fruc-quality option
     if (parser.isSet("fruc-quality")) {
         preferences->frucQuality = mapValue(m_FrucQualityMap, parser.getChoiceOptionValue("fruc-quality"));
+    }
+
+    // §B-NVOF / §B2 — Vulkan-only 補幀進階開關 CLI override (default=既有 prefs).
+    preferences->vkfrucEnableNvOf =
+        parser.getToggleOptionValue("vk-nvof",   preferences->vkfrucEnableNvOf);
+    preferences->vkfrucEnableTriple =
+        parser.getToggleOptionValue("vk-triple", preferences->vkfrucEnableTriple);
+
+    // Resolve --renderer option (override saved RS_D3D11 / RS_VULKAN).
+    if (parser.isSet("renderer")) {
+        preferences->rendererSelection = mapValue(m_RendererSelectionMap,
+                                                   parser.getChoiceOptionValue("renderer"));
     }
 
     // Resolve --auto-bitrate and --no-auto-bitrate options

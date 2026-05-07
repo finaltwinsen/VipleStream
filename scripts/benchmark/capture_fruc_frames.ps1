@@ -87,14 +87,26 @@ Start-Sleep -Seconds 3
 
 # ---- Run ffmpeg gdigrab ----
 # -f gdigrab        : Windows GDI screen capture
-# -framerate $Fps   : capture rate
+# -framerate $Fps   : INPUT-side capture rate request (gdigrab tries to deliver)
 # -offset_x/y       : top-left of sub-region
 # -video_size       : capture region size
 # -i desktop        : input = whole desktop, sub-rect via offset+size
-# -t $Seconds       : stop after N seconds
+# -t $Seconds       : stop after N seconds (OUTPUT-side, PTS-driven)
+# -r $Fps           : OUTPUT-side rate enforcement (drops/dups frames to match)
+# -frames:v $count  : HARD frame-count cap (independent of PTS / wall clock)
 # -c:v rawvideo     : no encoding, raw frames
 # -pix_fmt rgba     : 4 bytes/pixel, easy to numpy reshape
 # -y                : overwrite output
+#
+# 2026-05-07 §B-NVOF Phase 7E debug: at -framerate 90 on a 179Hz VDD client
+# display, gdigrab ignored -t and ran ~607 fps for 5+ minutes (188K frames /
+# 55 GB before cooldown kicked in).  Suspected reason: rawvideo output
+# muxer has no PTS so OUTPUT -t doesn't enforce; gdigrab + BitBlt at
+# small (1920×40) size can iterate much faster than -framerate request,
+# and ffmpeg does not throttle without -r enforcement.  Added two extra
+# safeguards: -frames:v as a hard count cap, and a wall-clock kill timeout
+# in the PowerShell wrapper below in case ffmpeg still runs away.
+$expectedFrames = $Fps * $Seconds
 $ffmpegArgs = @(
     "-f", "gdigrab",
     "-framerate", $Fps,
@@ -102,16 +114,34 @@ $ffmpegArgs = @(
     "-offset_y", $Y,
     "-video_size", "${Width}x${Height}",
     "-i", "desktop",
-    "-t", $Seconds,
+    "-r", $Fps,                       # force output rate = input target
+    "-t", $Seconds,                   # output wall-clock duration
+    "-frames:v", $expectedFrames,     # HARD frame-count cap (failsafe)
     "-c:v", "rawvideo",
     "-pix_fmt", "rgba",
-    "-f", "rawvideo",     # explicit output muxer (.bin extension is unrecognized)
+    "-f", "rawvideo",                 # explicit output muxer (.bin ext unrecognized)
     "-y",
     $Output
 )
 
+# Wall-clock kill: if ffmpeg somehow still doesn't exit within 1.5x the
+# requested duration, force terminate.  Otherwise a runaway like the one
+# above (5 min instead of 60s) can fill disk + skew benchmarks.
+$killAfterSec = [int]([math]::Ceiling($Seconds * 1.5)) + 10
+Write-Host "[capture] safeguards: -t $Seconds  -frames:v $expectedFrames  wallclock-kill ${killAfterSec}s" -ForegroundColor DarkGray
+
 $elapsed = Measure-Command {
-    & $ffmpeg @ffmpegArgs 2>&1 | Tee-Object -Variable ffmpegOutput | Out-Null
+    $ffProc = Start-Process -FilePath $ffmpeg -ArgumentList $ffmpegArgs `
+                            -PassThru -NoNewWindow `
+                            -RedirectStandardOutput "${Output}.ffstdout.log" `
+                            -RedirectStandardError  "${Output}.ffstderr.log"
+    $exited = $ffProc.WaitForExit($killAfterSec * 1000)
+    if (-not $exited) {
+        Write-Host "[capture] WARNING ffmpeg exceeded ${killAfterSec}s wall-clock — killing pid=$($ffProc.Id)" -ForegroundColor Yellow
+        Stop-Process -Id $ffProc.Id -Force -ErrorAction SilentlyContinue
+        $ffProc.WaitForExit(5000) | Out-Null
+    }
+    $ffmpegOutput = (Get-Content "${Output}.ffstderr.log" -ErrorAction SilentlyContinue) -join "`n"
 }
 
 # ---- Verify output ----

@@ -10,25 +10,28 @@
 
 ## 優先級總覽
 
+只列**待辦 / 進行中 / 等硬體 / 等驅動**的條目。已完成、negative result、won't-fix 移到下方對應章節。
+
+**2026-05-08 戰略 pivot 紀錄：**§B / §B-NVOF / §B2 自家 ME→warp→blend pipeline ceiling = ~20-30% warp ratio（即使做完 Path B 全套也是）。NvOFFRUC.dll 的 47.7% 是 **架構優勢無法用 tweaks 追平**（多 stage 整合 + NV 內部多年調教）。**ML-based interpolation (§J.3.e.X native RIFE)** 是 ceiling 60-80% 的唯一路。當前主推：**ship A' 當 Linux/AMD/Intel fallback + Native RIFE 接 production**。詳見 §B / §J.3.e.X 章節末尾。
+
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
-| **Done (perf milestone)** | **§J.3.e.Y** native RIFE perf — 4Y.1..4Y.6 全收尾 | 9 commit 86→22ms 4× cumulative + Final.1 vs-ncnn mean 4.7e-5；4Y.6 Tensor Core path 完整實作但**預設關閉**（perf 僅 7%、precision 70× 差），`VIPLE_RIFE_VK_COOPMAT=1` opt-in；後續往別的方向走 |
-| **Done (correctness)** | **§J.3.e.X** 手刻 RIFE Vulkan inference | 17 commits 8807886..cba641d，0 ncnn dep；通過 vs-ncnn correctness gate，標準 standalone via `VIPLE_RIFE_NATIVE_VK_TEST=1`；production NcnnFRUC integration (Final.3b) deferred |
-| **Active** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限）|
-| **Negative result (§J.3.g)** | **FRUC ME 解析度下放：不是 bottleneck** | 2026-05-03 實作完整 ME→1080p / 720p downsample，4K120 + FRUC 仍卡 75-81 fps；DUAL off 也一樣。ME / DUAL 都不是限制；推測 warp shader (per-pixel @ 4K) + memory bandwidth + sync barriers。需要 GPU per-stage timing 才能定位。實作已 revert |
+| **Active (next)** | **§J.3.e.X Final.3b** native RIFE production integration | Final.1/2/3a milestone done；接進 NcnnFRUC drop-in alternative（env-var gated），4-6h 工程 medium-high risk；ML 補幀路線唯一可超越 NvOFFRUC.dll 的 strategic investment |
+| **Active (next)** | **§J.3.e.Y 4Y.5b/4Y.6** native RIFE latency 優化 | 22ms → 10ms 內（符合 60fps DUAL 16.7ms budget）；候選 4Y.5b activation fp16 storage / 4Y.6 multi-subgroup WG / 4Y.7 dispatch fusion；1-2 週 |
+| **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
+| **Active** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限） |
+| **Maintenance** | **§B / §B-NVOF / §B2** 自家 ME→warp→blend pipeline | A' 修完 (luma + range + consensus-max) 從 0% 推到 7-23% warp ratio；UI 整合 + Phase 7E 都 ship；**Path B 全套不做**（ceiling ~30% 跟 ML 60-80% 沒法比）；現狀作 Linux/AMD/Intel fallback 已堪用 |
 | **HW-pending** | **§I.D** Android Vulkan FRUC async compute | D.2.0–D.2.5 已 ship + Pixel 5 verify；剩自然 45fps→90Hz ideal 1:2 比例 — Pixel 5 panel 鎖 60/90Hz、GameManagerService 鎖 60fps，需 LTPO panel hw 才能驗 |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 3d.6 — AV1 native VK decode grey | 9 個 parser bug 修完仍 grey；NV driver 596.36 + AV1 vkCmdDecodeVideoKHR 黑/灰；§J.3.f ffmpeg 包裝路徑已 cover AV1，這條 deprecated |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 1.7 ONLY-mode NVDEC device-lost | 5 個變體都繞不過，NV 596.36 結構性 bug，預設 PARALLEL 穩 |
-| **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
-| **Medium** | **§J.1** 路線 A (ID3D12 bridge) | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
-| **Done (v1.3.337)** | **§K.1** Linux x86_64 兩端 ship | `.deb` server + AppImage client 正式進入 release，五件對齊。fix 清單見 §K. 章節 |
-| **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | Pi 5 + V3DV mesa Vulkan + V4L2 HW decode + DRM/KMS render；上游 source-level 支援，沒 CI prebuilt；FRUC backend 全 disable（Vulkan 補幀 Pi 5 GPU 不夠力），純 streaming 應 OK |
+| **Deferred (driver-bound)** | **§B-DUMP NCNN** RIFE-Vulkan 輸出全 0 | RTX 3060 Laptop + NV 596.144 + ncnn 20220729 + RIFE-v4.25-lite forward pass 回傳全 0 mat；matToStaging/CopyResource/blit 都正常（magenta diag 驗過）；deferred 等 §J.3.e.X Final.3b 整合完取代 ncnn dependency |
 | **Deferred** | **§K.4** Wayland XDG portal teardown root-cause | `Restart=always` 緩解已 ship；需可重現 streaming 環境（GPU Linux 機）才能修進 wayland.cpp/portalgrab.cpp 的 EPIPE 路徑 |
-| **Low** | **§F** DirectML 搬 D3D12 / command bundles | 4K120 real-time 才需要 |
+| **Medium** | **§F** DirectML 搬 D3D12 / command bundles | 27.6% warp ratio 已驗（compare_fruc_engines 2026-05-07），但 latency 慢「不堪用」；搬 D3D12 + command bundles 後或可降到 ≤14ms 進入 60fps DUAL budget；§J.3.e.X native RIFE 完成前不啟動 |
+| **Medium** | **§J.1** 路線 A (ID3D12 bridge) | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
+| **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | Pi 5 + V3DV mesa Vulkan + V4L2 HW decode + DRM/KMS render；上游 source-level 支援，沒 CI prebuilt；FRUC backend 全 disable（Vulkan 補幀 Pi 5 GPU 不夠力），純 streaming 應 OK |
 | **Low** | **§G.1** RIFE v1 11-channel | A1000 launch overhead bound (§G.3 negative result)；RTX 30/40+ 才有意義 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
 | **Low** | **§D** HelpLauncher URL → 結構化 docs | docs/setup_guide.md + docs/troubleshooting.md 已寫；HelpLauncher 切過去等 doc site stand 起來 |
-| **Won't fix** | **§A.7** Wire-protocol 字串 | 動了等於跟 Moonlight 生態斷線，違背「混搭互聯」設計 |
 
 ---
 
@@ -234,6 +237,22 @@ streaming 路徑**沒有改動**，仍走 NcnnFRUC. Final.3b（接成 NcnnFRUC
 的 Linux fallback）刻意 deferred 直到 Linux test VM 有 ncnn-build-fail
 環境可重現驗測。
 
+**2026-05-08 strategic priority bump — Final.3b 升 active：** §B / §B-NVOF
+量化驗測（compare_fruc_engines warp ratio）發現我們所有自家 ME→warp→blend
+pipeline ceiling ~30%，跟 NvOFFRUC.dll 47.7% 沒法追平（架構性 N-stage gap）。
+**ML-based interpolation 是唯一 ceiling 60-80% 的路**。Final.3b 從 deferred
+升到 active，原 deferral reason（Linux test VM 驗測前不啟動）由「production
+default 切換前才需要 Linux 驗測」取代 — 現在先做 Windows production
+integration（env-var gated default-OFF），Linux 驗測併入後續 ship 流程。
+
+**Final.3b 工程計劃：**
+1. 在 NcnnFRUC 加 `RifeNativeExecutor` 替代路徑（drop-in，相同 input/output 介面）
+2. 由 env var `VIPLE_RIFE_NATIVE_VK_PROD=1` 切換 ncnn ↔ native，預設 ncnn 不變
+3. Per-frame 跑 native inference，輸出餵下游 D3D11→Vulkan upload + present 跟 NCNN path 共用
+4. 第一輪只在現有 RIFE-v4.25-lite model 跑 1080p / 720p，4K 等 §J.3.e.Y 4Y.5b/4Y.6 latency 優化降到 budget 內再 unlock
+
+**預期 warp ratio**：60-80%（基於 DirectML 同 RIFE 模型 27.6% baseline + 推估 native 沒 D3D 框架 overhead 的進一步贏面）。
+
 ### §J.3.e.Y native RIFE perf optimisation（**✅ milestone DONE 2026-05-06**）
 
 **達成：** §J.3.e.X 的 86 ms cold-GPU baseline 壓到 ~22 ms（4× 加速），
@@ -285,32 +304,189 @@ opt-in 留著當 known-working capability，未來推 4090 或更大 RIFE 模型
 **Final.3b 接 NcnnFRUC：** 仍 deferred until Linux env。預估 4-6h 工程，
 medium-high risk（動 production hot path）。
 
-### §B Vulkan HW path FRUC integration（**🟡 active 2026-05-06**）
+### §B Vulkan HW path FRUC integration（**📦 maintenance 2026-05-08，A' 收尾、Path B 不啟動**）
+
+**2026-05-08 strategic decision — pipeline 收尾 + ML pivot：**
+
+`compare_fruc_engines.ps1` 量化驗測 7 engines 後得 warp ratio：
+
+| Engine | Warp Ratio | 說明 |
+|---|---|---|
+| 03 d3d11_nvidia_of (NvOFFRUC.dll) | **47.7%** | 標竿，NV 私有 SDK 全套 N-stage pipeline |
+| 04 d3d11_directml (RIFE ML) | 27.6% | ML-based，但「慢到不堪用」latency |
+| **06 vkfruc_nvof (A' 修後)** | **7.5%** | A'.2 consensus-max NVOF converter |
+| **01 vkfruc_bm (A' 修後)** | **6.8%** | A'.1 luma + range expansion |
+| 02 d3d11_generic (HLSL 沒改) | 3.0% | A' 沒動到 D3D11 HLSL shader |
+| 05 d3d11_ncnn | 2.4% | known broken (§B-DUMP NCNN all-zero output) |
+
+**A' (commit `XXX`，2026-05-08)** 兩條 shader 改動：
+
+- **A'.1** [plvk.cpp ME shader](../moonlight-qt/app/streaming/video/ffmpeg-renderers/plvk.cpp)：R-channel-only census → luma census；diamond steps `[3, 1]` (±4 px) → `[32, 16, 8, 4, 2, 1]` (±63 px)
+- **A'.2** [vkfruc.cpp NVOF converter](../moonlight-qt/app/streaming/video/ffmpeg-renderers/vkfruc.cpp)：4×4 average → consensus-max with noise floor
+
+具體量化：MV stats `max|x|` 從 5 LSB Q1 (=2.5 px) → 58 LSB Q1 (=29 px)，符合 testufo / 遊戲場景 30+ px/frame UFO motion 的真實值。
+
+**Path B 預估完成後仍只 ~20% warp ratio**（occlusion mask + reverse-flow + multi-scale + Q5 sub-pixel 全做完，[詳細評估在這次 commit 的對話中]），跟 NvOFFRUC 47.7% / ML 60-80% 都差太遠。**結構性 capacity gap**：NvOFFRUC 是 8-stage 整合 pipeline + NV 多年調教，我們 4-stage stub-level 實作；加 4 stage 變 6-stage 仍不如 8-stage。
+
+**結論：A' 是現有 ME-based pipeline 的合理 ceiling。Path B 不啟動，資源轉投 ML 路線（§J.3.e.X Final.3b production integration）。**
+
+---
 
 直到 §B 之前，RS_VULKAN HW mode 雖然 frucMode/dualMode 都自動為 true，
 但 `renderFrame()` 從來沒接 `runFrucComputeChain` 或 dual-present —
 等於 production HW path 完全沒在補幀（解釋了使用者觀察「testufo
 30→60 補幀沒效果」的根因）。
 
-| Step | Commit | 內容 | 驗測 |
+| Step | Commit | 內容 | 狀態 |
 |---|---|---|---|
-| A baseline | — | 1080p60 SW path 量 GPU-PROF baseline (15 samples) | nv12rgb=410 me=411 warp=214 total=1248us |
-| B1a | `03a962f` | HW path 加 image-to-buffer copy + FRUC chain dispatch | total=750us（比 SW 快 40%）；overlay 仍「未啟用」 |
-| B1b | `a86df9f` | HW path 加 dual-present（real + interp 兩次 swapchain acquire/render/present） | overlay「已啟用」、cumul real:interp = 1:1 |
-| **B-quality** | TBD | 補幀演算法品質優化（ME / median / warp / blend） | **active，待規劃驗測腳本** |
-| **B2** | TBD | TRIPLE FRUC 60→180（兩個 interp frame） | 推遲到 B-quality 完成後 |
+| A baseline | — | 1080p60 SW path 量 GPU-PROF baseline (15 samples) | ✅ nv12rgb=410 me=411 warp=214 total=1248us |
+| B1a | `03a962f` | HW path 加 image-to-buffer copy + FRUC chain dispatch | ✅ total=750us（比 SW 快 40%） |
+| B1b | `a86df9f` | HW path 加 dual-present（real + interp 兩次 swapchain acquire/render/present） | ✅ overlay「已啟用」、cumul real:interp = 1:1 |
+| B-quality (a)(b)(d) | `cfe5396` `1f774b9` `24e9895` | 演算法品質里程碑（見子章節） | ✅ SSIM 0.88 → 0.998 |
+| B-quality benchmark infra | `8898e1d` `fa2a2fd` `1cf94ed` `c18d0a6` | 2-stage 抖動量測腳本 + analyze_motion.py + DIAG-OVERLAY log | ✅ ship |
+| **B2** TRIPLE 60→180 | `bc88eba` | infrastructure 全套（兩個 interp output / 第三 swapchain acquire / pacer +2） | ✅ env-var opt-in，**UI 整合 pending** |
+| **B-NVOF** | 11 commits Phase 1..7B | NVIDIA Optical Flow Vulkan extension 取代 software block-match ME | 🟡 7B async ship，**production 切換 + UI 整合 pending** |
 
-**B-quality 動機：** B1b ship 後 overlay 顯示正確、dual-present 跑了，
-但使用者主觀感覺補幀效果不夠好。需要客觀驗測 + 演算法疊代：
-- ME block size = 8（可能太小、產生 noisy MV）
-- MV median filter 目前是 noop copy（之前實驗為了量 GPU 時間留下的）
-- Warp blend factor = 0.5 hardcoded（沒有 motion confidence weighting）
-- 對 occluded / 新 pixel 沒特別處理
+#### §B-quality 補幀演算法品質（主要里程碑：commit `24e9895` algo_d）
 
-**B2 TRIPLE 推遲到 B-quality 完成後：** A 階段量到 1080p60 GPU compute
-total 1.31ms (估 TRIPLE 1.58ms)，180fps budget 5.55ms 還剩 4ms，硬體
-完全 ready。但目前 DUAL 視覺品質都還沒滿意，TRIPLE 只會讓品質問題
-更嚴重（3 個 frame 中 2 個是 interp）。先把 DUAL 改好再推 TRIPLE。
+**(d) real path 改走 compute-NV12→RGB（治本，2026-05-XX `24e9895`）**
+
+dual-present 兩條 path 之前用不同 NV12→RGB conversion：interp 走 compute
+shader 寫 fp32 buffer 經 vkfruc_interp.frag 顯示；real 直接吃
+`VkSamplerYcbcrConversion`。色彩矩陣 / chroma 上採樣 / sub-pixel 對齊都
+可能不一致，30Hz dual-present 交替時看到「同幀內容、不同 RGB convert」
+造成的 Y 軸抖動。先前的 warp 演算法疊代（cheap-adaptive / fixed 50/50 /
+d3d11 Quality / no-MV）全抖 — 因為跟 warp 完全無關。
+
+修法：real render pass 也改吃 `m_FrucCurrRgbBuf`（compute shader 的 fp32
+output），跟 interp 走同條 path。`VIPLE_VKFRUC_REAL_USE_CRGB` default ON，
+escape hatch 設 0 退舊 ycbcr。Single-mode 不抖（沒 dual-present），維持
+ycbcr sampler 路徑。
+
+量化（testufo 1080p60 1920×40 band，60s）：
+
+| run | SSIM | OF_30Hz |
+|---|---|---|
+| baseline_v3 (median noop) | 0.88 | 5.5% |
+| algo_a (median ON, `cfe5396`) | 0.88 | 4.4% |
+| algo_b (block 8→16, `1f774b9`) | 0.84 | 1.93%（block 16 對水平 motion Y 軸引 noise，後 (d) revert） |
+| **algo_d (real_use_crgb, `24e9895`)** | **0.998** | **2.75%** |
+
+User 主觀：「不抖、顏色看不出異常」。block_size 16 在 (d) 一併 revert 回 8。
+
+**還沒做的（B-quality 收尾）：**
+
+- (c) 從未 commit；blend factor 0.5 hardcoded、occluded/disocclusion 沒
+  特殊處理 —— `24e9895` 後改由 §B-NVOF 用 HW optical flow 取代 software
+  block-match 來解 ME 噪聲，`(c)` 概念上由 NVOF 路線吸收
+- 自然 video 驗測（目前都 testufo trajectory band，非真實內容）
+
+#### §B2 TRIPLE 60→180（infrastructure ship at `bc88eba`，opt-in）
+
+VkFrucRenderer dual-present (60→120) 擴展為 triple-present (60→180)。
+每 server frame compute 出 2 張 interp（1/3 + 2/3 點）+ real，3 張
+swapchain image present 給 180Hz display。`VIPLE_VKFRUC_TRIPLE=1` 啟用，
+gated by m_DualMode + m_FrucMode + 180Hz display，預設 OFF。
+
+關鍵改動 (`bc88eba`)：
+- warp shader push constant 6→8 欄，加 `tFraction` 控制 sample offset +
+  blend weight（0.5 = DUAL midpoint，1/3+2/3 = TRIPLE 兩張 interp）
+- `runFrucComputeChain` TRIPLE 模式 dispatch warp 兩次（不同 desc set +
+  tFraction，輸出 `m_FrucInterpRgbBuf` / `m_FrucInterpRgbBuf2`，GPU 並行）
+- `renderFrame` 加第三個 swapchain acquire (`m_SlotAcquireSem[][2]`) +
+  第三 render pass + submit 4-sem 變體 + 第三 present；order: interp_1 →
+  interp_2 → real
+- swapchain image count 4→5（防 burst-acquire 3 張撞 caps.minImageCount）
+- session.cpp：server fps = user_fps / 3（DUAL 時是 / 2）；toggle FRUC
+  在 TRIPLE 模式不發 LiRequestFpsChange（NVENC encoder timebase 不可動
+  態升 ~2× 上限會卡頓，Sunshine `video.cpp:2154` 提示需 stream restart）
+- `lastFrameInterpolatedCount()` 介面取代 `lastFrameHadFRUCInterp`，
+  TRIPLE 回傳 2 讓 effectiveFps 算對（overlay 顯示 ~180）
+- `scripts/benchmark/launch_warp.cmd` 加 triple 入口
+
+驗測（1080p60 testufo，`bc88eba`）：
+- GPU profile：warp 兩次 dispatch GPU 並行，total chain 0.93ms（DUAL ~0.9ms）
+- client present rate：cumul real:interp = 1:2，60+120 = 180 presents/sec
+- DIAG tint test：3 張 interp 確實獨立 present，紅 (interp_1) + 藍
+  (interp_2) + 正常 (real) 在 60Hz fusion 邊界 blend 為紫色點狀
+
+**已知限制（`bc88eba` 寫進 commit）：** block-matching ME 精度上限影響補幀
+品質 — testufo 小快速物體在 disocclusion 邊界 ME 噪聲 → warp ghost。User
+主觀對比 60→180 vs 60fps 看不出明顯 smoothness 提升（block-matching 本
+質限制，非實作 bug）。下一步：探勘 NVIDIA Optical Flow Vulkan extension
+取代 block-matching → §B-NVOF。
+
+**還沒做的（B2 收尾）：**
+
+- Settings UI 整合：`VIPLE_VKFRUC_TRIPLE` env var → SettingsView.qml
+  選項（與 fps mode 一起判斷顯示 / 隱藏）；目前只能 env-var 開
+- TRIPLE × NVOF cross-test（§B-NVOF Phase 7E，analyze_motion.py 已 fix
+  OOM bug `83157fa`，可跑了）
+- 自然 video 驗測（非 testufo）
+
+#### §B-NVOF NVIDIA Optical Flow Vulkan（**🟡 active，Phase 7B 最新 2026-05-07**）
+
+**動機：** §B2 TRIPLE 跟 §B-quality (d) 後，剩下的補幀品質瓶頸在
+software block-match ME 本身（411us / frame，但 disocclusion 邊界
+產 noisy MV，跨幀 alternation 高）。NV Ada / Ampere 起 Vulkan 新增
+`VK_NV_optical_flow` extension，可用 NVOFA HW 直接給 SFIXED5 (1/32 px)
+sub-pixel flow image。整套 §B-NVOF 把 Stage 1 (block-match ME) +
+Stage 2 (median) 替換成「flow image → SFIXED5→Q1 converter compute」，
+warp shader (Stage 3) 跟 mv_filtered buffer contract 不變，所以 §B-quality
+的 blend mode 都自動受惠。
+
+| Phase | Commit | 內容 |
+|---|---|---|
+| 1+2 | `b9da1cc` | VK_NV_optical_flow extension probe + queue scaffolding |
+| 3a+3b | `de2095e` | SDK header import + nvofapi64.dll load + funcList init |
+| 3c | `b7a19b5` | OF session lifecycle (`nvCreateOpticalFlowVk` + `nvOFInit`) |
+| 3d | `67f6146` | input/output VkImage alloc + `nvOFRegisterResourceVk` |
+| 4a | `fcb0e06` | OF queue cmd pool + timeline sem + flow staging buffer |
+| 4b | `61ea72e` | `nvOFExecuteVk` smoke test，OF runs each frame，SUCCESS |
+| 5 + 4d | `8daf9e2` | SFIXED5→Q1 converter compute shader + chain consumes HW OF flow |
+| 6 | `3de8507` | docs entry + 收尾，`VIPLE_VKFRUC_NV_OF=1` opt-in 整段 path |
+| 7C+7D | `71d1592` | `VIPLE_VKFRUC_NV_OF_PERF` (slow/medium/fast) + `_GRID` (1/2/4) env，**default grid=2 perf=med 是甜蜜點** |
+| 7F | `49b736c` | `nvOFGetCaps` device probe（informational log）+ Phase 7A Q5 嘗試 revert（precision != quality，Q1 quantisation 意外當 temporal smoother） |
+| 7B | `c82196e` | async cross-queue：CPU `vkWaitSemaphores` ~3-5ms 阻塞改 1-frame async lag，timeline sem 在下幀 main submit wait list 攔住 race |
+
+**Quality benchmark（testufo 1080p60 60s，2026-05-07）：**
+
+| 配置 | SSIM | OF_30Hz | OF_cv | block_outlier |
+|---|---|---|---|---|
+| production block-match (algo_d, `24e9895`) | 0.998 | 2.75% | 1.94 | 4.3% |
+| NVOF grid=4 perf=med（前預設）| 0.999 | 5.99% | 0.86 | 4.6% |
+| NVOF grid=4 perf=slow | 0.999 | 4.25% | 0.78 | 4.8% |
+| **NVOF grid=2 perf=med（新預設）🏆** | **0.999** | **2.66%** | **0.86** | 4.6% |
+| NVOF grid=1 perf=slow | 0.999 | 3.17% | 1.75 | 4.3% |
+
+NVOF grid=2 perf=med 在三個關鍵指標全面 ≤ production：OF_30Hz 終於不
+輸 block-match（2.66% < 2.75%），SSIM 持平（0.999 ≥ 0.998），motion
+smoothness 大幅勝（cv 0.86 << 1.94）。grid=1（更高解析度 flow）反而
+cv 升回接近 production，因 8×8 average 在 converter 過度 smoothing motion
+magnitude variation。**證明更高解析度 flow 不一定更好，要跟 converter 端
+averaging 互動。**
+
+**7B async（`c82196e`）後實測：**
+- nvOFExecuteVk #0/#300/#600/#900 status=0 持續成功
+- chain consumes HW OF flow each frame
+- 沒 VK_ERROR_DEVICE_LOST，沒 race
+- Frame timing: n=152 fps=30.24 ft_mean=33.07ms p50=33.36 p95=34.16 p99=46.72
+- p99 比 sync 路徑稍寬但無明顯 perf regression
+
+**還沒做的（§B-NVOF 收尾）：**
+
+- **Settings UI 整合**：`VIPLE_VKFRUC_NV_OF` / `_PERF` / `_GRID` env var →
+  SettingsView.qml；目前 env-var opt-in，production 預設仍走 block-match
+- **production 預設切換**：grid=2 perf=med 7B async 已贏 block-match，
+  穩定一段後可考慮 default ON（`m_NvOfReady` 自動偵測 + fallback 完整保留）
+- **Phase 7E TRIPLE × NVOF cross-test**：analyze_motion.py OOM 已 fix
+  (`83157fa` chunk to_gray uint32 acc)，benchmark 可跑了；但 60s × 180fps
+  Farneback OF 後分析 ~10+ min CPU，建議改 20s window 或 chunk OF
+- **4K120 × NVOF stress**：7B async 提供的 perf headroom 預計可吃 4K120，
+  未量過
+- **Linux nvofapi.so.1 dlopen 路徑**：目前 Windows-only，Linux 需要
+  `libnvidia-opticalflow.so.1` 找路徑（Sunshine apt deps 有 nvidia
+  driver 通常自帶）
 
 ### §J.3.f AV1 / HEVC / H.264 Vulkan hwaccel via ffmpeg（**✅ DONE 2026-05-03 / integration b2b7afd**）
 
@@ -424,6 +600,49 @@ AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame
 - `tools/android_vulkan_probe/` — Android Vulkan queue-family probe (probe.c + probe2.c)，cross-compile via NDK，用來在新硬體 verify §I.D 假設
 
 每個子 phase 的 commit message 用 `vX.Y.Z: §J.N.M — <短摘要>` 格式。
+
+---
+
+### §B-DUMP NCNN-Vulkan RIFE 輸出全 0 — known issue（**deferred 2026-05-07**）
+
+**症狀：** D3D11VARenderer + frucBackend=NCNN 在 RTX 3060 Laptop + NVIDIA
+596.144 driver + ncnn 20220729 build vintage 上：
+- NCNN init 全部 OK（model load PASS、Vulkan device PASS、phase B.3 shared
+  handle export PASS、probe `~25ms inference time` PASS）
+- 但 `ex.extract("out0", out_mat)` 回傳的 `out_mat` 是**全 0 fp32 buffer**
+- 結果：interp Present 出來的 BMP 全黑（只看得到 HUD overlay 在黑底上）
+
+**已驗：**
+1. `matToStaging → CopyResource → OutputSRV → blit` pipeline 完全正常
+   （`VIPLE_FRUC_NCNN_DIAG=1` 強制 out_mat 寫 magenta，BMP 確實顯示 magenta）
+2. fp16 → fp32 fallback (`VIPLE_FRUC_NCNN_FP16=0` default) 不能修，依然 0
+3. SHARED_NTHANDLE / UAV bind flag drop 無效
+4. Probe 25ms 是 GPU dispatch 時間，沒驗證 output 正確性 → 沒攔住 cascade
+
+**最可能元兇（沒實際確認）：**
+1. `rife.Warp` custom Vulkan layer 的 pack4/pack8 SPIR-V `set_optimal_local_size_xyz`
+   在這台 GPU 上挑到產生 0 的 workgroup size
+2. ncnn 20220729 跟 NV 596.144 driver 之間 fp16 storage path 有問題
+3. RIFE-v4.25-lite model 跟此 ncnn 版本的 op set 微小相容性差
+
+**為什麼 deferred：**
+- `§J.3.e.X / §J.3.e.Y` 的手刻 native RIFE Vulkan pipeline 已經 milestone
+  完成，準備在 production 路徑取代 NCNN（Final.3b NcnnFRUC integration）。
+  花時間修 NCNN-Vulkan dependence 是反方向。
+- D3D11 frucBackend=Generic + NVIDIA OF 兩條路在這台 GPU 上 production-ready，
+  使用者不需要 NCNN
+- 真要修需要：重新 compile rife.Warp Vulkan compute shaders 並強制 fixed
+  workgroup size + 寫 ncnn-vulkan output validation harness（pack1 fallback
+  vs pack4/pack8 的逐 pixel 比對）→ 1-2 天工程
+
+**現有 mitigation：**
+- 第一個觸發時 `[VIPLE-FRUC-NCNN] RIFE output is all-zero` warning log 印
+  在 SDL log，告訴 user 切去 Generic backend
+- frucBackend cascade 沒攔住但 user 切 backend 即可避開
+
+**清的時候要做的：**
+- Final.3b 整合 native RIFE pipeline 進 NcnnFRUC（drop ncnn-vulkan dep）
+- 同時把這條從 todo.md 拿掉，§J.3.e.X integration milestone 替代
 
 ---
 
