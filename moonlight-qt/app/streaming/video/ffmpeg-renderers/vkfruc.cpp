@@ -5877,8 +5877,16 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
     //
     // 修法：inferW/H 都 round 到 /128 multiple (NOT /32 as before).
     // Override via VIPLE_VKFRUC_RIFE_INFER_DIM=N (width; height auto by aspect).
+    // Default 256 → 256×128 for 1080p source.  Latency table on
+    // RTX 3060 Laptop (measured 2026-05-08 via [VIPLE-VKFRUC-GPU-PROF]):
+    //   256×128 = ~12ms total chain  ✓ fits 60fps DUAL budget (16.7ms)
+    //   512×256 = ~30ms total chain  ✗ over budget (drops fps)
+    //   768×384 / 1024×512 = even slower, unusable for live
+    // Quality scales the other direction (256 has heavy bilinear-up blur).
+    // Faster GPUs (RTX 4070+) likely fit 512×256 or higher; user opts in
+    // via VIPLE_VKFRUC_RIFE_INFER_DIM=512 / 768 / 1024 (must be /128).
     int inferW = qEnvironmentVariableIntValue("VIPLE_VKFRUC_RIFE_INFER_DIM");
-    if (inferW <= 0) inferW = 512;   // default 512 → 512×256 for 1080p source (2:1 aspect, mild stretch from 16:9)
+    if (inferW <= 0) inferW = 256;
     inferW = (inferW / 128) * 128;
     if (inferW < 128) inferW = 128;
     int inferH = (int)((double)inferW * (double)height / (double)width + 0.5);
@@ -6132,8 +6140,28 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
     auto pfnCmdBindDescSets    = (PFN_vkCmdBindDescriptorSets)getDevPa(m_Device, "vkCmdBindDescriptorSets");
     auto pfnCmdPushConst       = (PFN_vkCmdPushConstants)  getDevPa(m_Device, "vkCmdPushConstants");
     auto pfnCmdDispatch        = (PFN_vkCmdDispatch)       getDevPa(m_Device, "vkCmdDispatch");
+    auto pfnCmdWriteTimestamp  = (PFN_vkCmdWriteTimestamp) getDevPa(m_Device, "vkCmdWriteTimestamp");
     if (!pfnCmdPipelineBarrier || !pfnCmdBindPipeline || !pfnCmdBindDescSets
         || !pfnCmdPushConst || !pfnCmdDispatch) return false;
+
+    // β.4 timing — write into the existing m_FrucTimerPool's slot range
+    // [timerBase + 2, timerBase + 4] so the existing
+    // [VIPLE-VKFRUC-GPU-PROF] me=…us median=…us warp=…us log gets repurposed:
+    //   "me"     = bilinear DOWN time (ts[1] → ts[2])
+    //   "median" = RIFE inference time (ts[2] → ts[3])
+    //   "warp"   = bilinear UP time (ts[3] → ts[4])
+    // Caller (Site 4) computes timerBase from m_FrucTimerSlot but has
+    // already advanced the slot for next use.  We need the same base —
+    // recompute: the slot just used = (m_FrucTimerSlot + N - 1) % N.
+    const uint32_t writeTimerSlot = (m_FrucTimerSlot + kFrucFramesInFlight - 1)
+                                    % kFrucFramesInFlight;
+    const uint32_t timerBase = writeTimerSlot * 6;
+    auto writeTs = [&](uint32_t off) {
+        if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
+            pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                 m_FrucTimerPool, timerBase + off);
+        }
+    };
 
     auto bufBarrier = [&](VkBuffer b,
                           VkPipelineStageFlags srcStage,
@@ -6210,6 +6238,7 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
     bufBarrier(m_RifeDownCurr,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    writeTs(2);  // β.4 timing: after bilinear DOWN ("me" slot in GPU-PROF)
 
     // m_RifeDownInterp: previous-frame state is either COMPUTE_SHADER_READ
     // (from previous bilinear up read) or unwritten (first frame).  Will be
@@ -6231,6 +6260,8 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
         // Caller falls back to ME/median/warp.
         return false;
     }
+
+    writeTs(3);  // β.4 timing: after RIFE inference ("median" slot in GPU-PROF)
 
     // ---- Up step ----
     // RIFE left m_RifeDownInterp in TRANSFER_WRITE.  Bilinear up reads it as
@@ -6258,6 +6289,7 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
     // Existing renderFrame / renderFrameSw expects this state when binding
     // it as a fragment shader input later.
     computeBufBarrier(m_FrucInterpRgbBuf);
+    writeTs(4);  // β.4 timing: after bilinear UP ("warp" slot in GPU-PROF)
 
     return true;
 }
@@ -6401,17 +6433,10 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     if (m_RifeNativeReady) {
         if (runRifeNativeStage(cmd, width, height, slotIdx)) {
             rifeHandled = true;
-            // Synthesize ts[2..4] so [VIPLE-VKFRUC-GPU-PROF] log can still
-            // compute per-stage deltas — RIFE is one big stage so we
-            // collapse ts[2..4] to the same point right after RIFE finishes.
-            // 4Y.0 timing breakdown is available via
-            // m_RifeNative->lastTiming() if we need finer granularity.
-            if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
-                for (uint32_t i = 2; i <= 4; ++i) {
-                    pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                         m_FrucTimerPool, timerBase + i);
-                }
-            }
+            // β.4 timing — runRifeNativeStage writes ts[2..4] internally
+            // at meaningful points (down / RIFE / up).  [VIPLE-VKFRUC-GPU-PROF]
+            // labels are nv12rgb / me / median / warp / copy: when β path
+            // is active interpret as nv12rgb / DOWN / RIFE / UP / copy.
             static std::atomic<bool> s_rifeChainLogged{false};
             bool exp = false;
             if (s_rifeChainLogged.compare_exchange_strong(exp, true)) {
