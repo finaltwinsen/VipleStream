@@ -1,6 +1,6 @@
 # compare_fruc_engines.ps1 - 對所有 FRUC engine 截圖比對
 #
-# 對 7 種 engine 配置依序（或用 -Engine filter 跑單一 / 子集）：
+# 對 8 種 engine 配置依序（或用 -Engine filter 跑單一 / 子集）：
 #   1. 設 registry / CLI args 切換 engine
 #   2. 啟動 VipleStream.exe stream（fullscreen）
 #   3. 等 warmup
@@ -77,7 +77,13 @@ $engines = @(
     @{ name = "03_d3d11_nvidia_of";    rendererSel = 1; fi = "true";  backend = 1; vds = 2 },
     @{ name = "04_d3d11_directml";     rendererSel = 1; fi = "true";  backend = 2; vds = 2 },
     @{ name = "05_d3d11_ncnn";         rendererSel = 1; fi = "true";  backend = 3; vds = 2 },
-    @{ name = "06_vkfruc_nvof";        rendererSel = 0; fi = "true";  backend = 0; vds = 0; nvof = $true }
+    @{ name = "06_vkfruc_nvof";        rendererSel = 0; fi = "true";  backend = 0; vds = 0; nvof = $true },
+    # §J.3.e.X Path β (commits 67a7c89 β.1+β.2 / 20507da β.4) —— RIFE
+    # native Vulkan inference 接到 VkFrucRenderer 既有 VkInstance/VkDevice.
+    # 預設 inferDim 256×128 (其他 dim 撞 model 'Add_503' 約束).
+    # bilinear up 7.5× 損失約 4 MAE intensity；RIFE 推論本身有效 midpoint，
+    # 殘留主要來自 down/up roundtrip.  待 inferShapes 修好 解鎖 ≥ 384.
+    @{ name = "07_vkfruc_native_rife"; rendererSel = 0; fi = "true";  backend = 0; vds = 0; nativeRife = $true }
 )
 
 # Apply -Engine filter (wildcards via -like).  Empty = run all.
@@ -180,6 +186,18 @@ try {
             Remove-Item env:VIPLE_VKFRUC_NV_OF      -ErrorAction SilentlyContinue
             Remove-Item env:VIPLE_VKFRUC_NV_OF_PERF -ErrorAction SilentlyContinue
             Remove-Item env:VIPLE_VKFRUC_NV_OF_GRID -ErrorAction SilentlyContinue
+        }
+
+        # §J.3.e.X Path β: RIFE native Vulkan integration into VkFrucRenderer.
+        # Requires VIPLE_VKFRUC_FRUC + VIPLE_VKFRUC_NATIVE_RIFE both =1
+        # (DUAL is implicit when frame-interp pref enables).
+        if ($eng.nativeRife) {
+            $env:VIPLE_VKFRUC_FRUC         = "1"
+            $env:VIPLE_VKFRUC_DUAL         = "1"
+            $env:VIPLE_VKFRUC_NATIVE_RIFE  = "1"
+            Write-Host "  §J.3.e.X Path β: VIPLE_VKFRUC_NATIVE_RIFE=1 (default 256x128 infer dim)" -ForegroundColor DarkGray
+        } else {
+            Remove-Item env:VIPLE_VKFRUC_NATIVE_RIFE -ErrorAction SilentlyContinue
         }
 
         # 2. Kill stale process
