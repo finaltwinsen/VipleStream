@@ -887,6 +887,31 @@ private:
     bool runRifeNativeStage(VkCommandBuffer cmd, uint32_t width, uint32_t height,
                             uint32_t slotIdx);
 
+    // β.4 — downscale wrapper.  Full-res (1920×1080) RIFE blobs exhaust
+    // BAR-resident host-visible memory (blob '394' alloc 17.7MB fail).
+    // Downscale source pair via bilinear → infer at small dim → upscale
+    // result back to m_FrucInterpRgbBuf.  Default infer dim = 512×288
+    // (16:9 /32-aligned, ~14× smaller per area than 1080p so all RIFE
+    // blobs fit BAR).  Override via env var VIPLE_VKFRUC_RIFE_INFER_DIM
+    // (width only; height auto-derived to match source aspect, /32 round).
+    VkBuffer       m_RifeDownPrev    = VK_NULL_HANDLE;
+    VkDeviceMemory m_RifeDownPrevMem = VK_NULL_HANDLE;
+    VkBuffer       m_RifeDownCurr    = VK_NULL_HANDLE;
+    VkDeviceMemory m_RifeDownCurrMem = VK_NULL_HANDLE;
+    VkBuffer       m_RifeDownInterp  = VK_NULL_HANDLE;
+    VkDeviceMemory m_RifeDownInterpMem = VK_NULL_HANDLE;
+    // Bilinear up/downscale pipeline — dimensions selected via push constants
+    // each dispatch.  Built once in createFrucComputeResources.  Three desc
+    // sets bind {DownPrev←PrevRgbBuf}, {DownCurr←CurrRgbBuf} (downscale dest
+    // bindings 1) and {InterpRgbBuf←DownInterp} (upscale).
+    VkShaderModule        m_RifeBilinearShaderMod = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_RifeBilinearDsl       = VK_NULL_HANDLE;
+    VkPipelineLayout      m_RifeBilinearPipeLay   = VK_NULL_HANDLE;
+    VkPipeline            m_RifeBilinearPipeline  = VK_NULL_HANDLE;
+    VkDescriptorSet       m_RifeBilinearDownPrevDs = VK_NULL_HANDLE;
+    VkDescriptorSet       m_RifeBilinearDownCurrDs = VK_NULL_HANDLE;
+    VkDescriptorSet       m_RifeBilinearUpInterpDs = VK_NULL_HANDLE;
+
     VkDescriptorPool m_FrucDescPool = VK_NULL_HANDLE;
 
     // §J.3.e.2.i — overlay rendering (Ctrl+Alt+Shift+S 效能資訊).

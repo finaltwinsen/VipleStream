@@ -5477,6 +5477,26 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         }
     }
 
+    // §J.3.e.X Path β.4 — bilinear scale pipeline (down: source RGB →
+    // RIFE infer dim, up: RIFE output → m_FrucInterpRgbBuf).  Push consts
+    // = 28 bytes (5 ints + 2 floats) rounded to 32 for alignment, 2
+    // storage buffer bindings (in / out).  Shader text comes from
+    // rife_native_vk.cpp's getInterpBilinearShaderGlsl().
+    if (m_RifeNativeMode) {
+        if (!buildPipeline("RifeBilinear",
+                           viple::rife_native_vk::getInterpBilinearShaderGlsl(),
+                           2, 32,
+                           m_RifeBilinearShaderMod, m_RifeBilinearDsl,
+                           m_RifeBilinearPipeLay, m_RifeBilinearPipeline)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-RIFE-β] bilinear pipeline build failed — "
+                "RIFE init will fall back");
+            // Don't disable FRUC overall.  m_RifeNativeMode will be
+            // cleared in createRifeNativeResources when this pipeline
+            // isn't ready.
+        }
+    }
+
     // === Allocate buffers (DEVICE_LOCAL) ===
     VkPhysicalDeviceMemoryProperties memProps = {};
     pfnGetPdMemProps(m_PhysicalDevice, &memProps);
@@ -5579,10 +5599,13 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // (§B2 2026-05-06 added 2nd warp desc set for TRIPLE → +1 set, +4 descriptors.)
     VkDescriptorPoolSize pSize = {};
     pSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pSize.descriptorCount = 20;
+    // §J.3.e.X Path β.4 — 3 extra desc sets for bilinear down/up pipeline
+    // (DownPrev / DownCurr / UpInterp), each with 2 storage bindings → +6.
+    // Bumped maxSets 7 → 10, descriptorCount 20 → 26.
+    pSize.descriptorCount = 26;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpCi.maxSets = 7;
+    dpCi.maxSets = 10;
     dpCi.poolSizeCount = 1;
     dpCi.pPoolSizes = &pSize;
     if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_FrucDescPool) != VK_SUCCESS) {
@@ -5750,6 +5773,9 @@ void VkFrucRenderer::destroyFrucComputeResources()
     DESTROY_PIPE(m_FrucMePipeline,      m_FrucMePipeLay,      m_FrucMeDsl,      m_FrucMeShaderMod)
     DESTROY_PIPE(m_FrucMedianPipeline,  m_FrucMedianPipeLay,  m_FrucMedianDsl,  m_FrucMedianShaderMod)
     DESTROY_PIPE(m_FrucWarpPipeline,    m_FrucWarpPipeLay,    m_FrucWarpDsl,    m_FrucWarpShaderMod)
+    // §J.3.e.X Path β.4
+    DESTROY_PIPE(m_RifeBilinearPipeline, m_RifeBilinearPipeLay,
+                 m_RifeBilinearDsl,      m_RifeBilinearShaderMod)
 #undef DESTROY_PIPE
 
 #define DESTROY_BUF(b, m)                                          \
@@ -5829,11 +5855,52 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
         return false;
     }
 
-    // β.1: infer dim = source dim (full-res).  β.4 將改為 min(384, width)
-    // 並補上 bilinear down/up wrapper.  目前 init-only proof of life，full-res
-    // 即使 inference perf 不好也只在跑 chain 時才會痛 — β.1 不跑 chain.
-    m_RifeNativeInferW = width;
-    m_RifeNativeInferH = height;
+    // β.4 — pick infer dim small enough that all RIFE blobs fit BAR AND
+    // dodges the model-specific shape constraint we hit at higher dims.
+    //
+    // Default 256×128 (verified working on RIFE-v4.25-lite).  Other dims
+    // FAIL at layer 'Add_503' which has a fixed-shape internal residual
+    // stage that doesn't scale linearly with input dim — empirical fail
+    // matrix on 1080p source:
+    //   256×128: PASS  (chain swap active)
+    //   384×192: FAIL  (a=4×256×384 vs b=4×192×384)
+    //   448×224: FAIL  (a=4×256×512 vs b=4×224×448)
+    //   512×288: FAIL  (a=4×384×512 vs b=4×288×512)
+    // Pattern: at inferH ≥ ~160, the supplemental high-res stage emits a
+    // tensor with H=ceil(inferH × 4/3) that doesn't match the residual
+    // path's H=inferH.  Below ~160 the stage may not engage (fast path).
+    //
+    // Quality cost: 256×128 → bilinear up to 1920×1080 is ~7.5× per dim
+    // (~57× area).  Loses fine detail but RIFE's *flow* is what we need
+    // for interpolation; bilinear up smooths at edges, acceptable for
+    // mid-motion frames.  Long-term fix: extend dispatchBinaryOp to
+    // handle asymmetric center-crop / pad patterns, then bump default
+    // up to a higher dim.
+    //
+    // Override via VIPLE_VKFRUC_RIFE_INFER_DIM=N (width only; height auto).
+    int inferW = qEnvironmentVariableIntValue("VIPLE_VKFRUC_RIFE_INFER_DIM");
+    if (inferW <= 0) inferW = 256;
+    inferW = (inferW / 32) * 32;
+    if (inferW < 64) inferW = 64;
+    int inferH = (int)((double)inferW * (double)height / (double)width + 0.5);
+    inferH = (inferH / 32) * 32;
+    if (inferH < 32) inferH = 32;
+    m_RifeNativeInferW = inferW;
+    m_RifeNativeInferH = inferH;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-RIFE-β] β.4 infer dim chosen: %dx%d (source %dx%d, "
+        "down ratio %.2fx)",
+        inferW, inferH, width, height, (double)width / (double)inferW);
+
+    // β.4 prerequisite: bilinear pipeline must have built earlier in
+    // createFrucComputeResources.  Without it we can't down/upscale.
+    if (m_RifeBilinearPipeline == VK_NULL_HANDLE) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-RIFE-β] init failed: bilinear pipeline missing — "
+            "createFrucComputeResources didn't build it (m_RifeNativeMode "
+            "may have been false at that point)");
+        return false;
+    }
 
     viple::rife_native_vk::VulkanCtx ctx;
     ctx.instance            = m_Instance;
@@ -5896,12 +5963,146 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
         qUtf8Printable(modelDir),
         qUtf8Printable(opts.pipelineCachePath));
 
+    // β.4 — alloc 3 down/up intermediate buffers (DEVICE_LOCAL, planar
+    // fp32 CHW) at infer dim.
+    //   m_RifeDownPrev:   target of bilinear downscale of m_FrucPrevRgbBuf
+    //   m_RifeDownCurr:   target of bilinear downscale of m_FrucCurrRgbBuf
+    //   m_RifeDownInterp: target of RIFE inference (becomes source of
+    //                     bilinear upscale to m_FrucInterpRgbBuf).
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCreateBuffer    = (PFN_vkCreateBuffer)getDevPa(m_Device, "vkCreateBuffer");
+    auto pfnGetBufMemReq    = (PFN_vkGetBufferMemoryRequirements)getDevPa(m_Device, "vkGetBufferMemoryRequirements");
+    auto pfnAllocMem        = (PFN_vkAllocateMemory)getDevPa(m_Device, "vkAllocateMemory");
+    auto pfnBindBufMem      = (PFN_vkBindBufferMemory)getDevPa(m_Device, "vkBindBufferMemory");
+    auto pfnAllocDescSets   = (PFN_vkAllocateDescriptorSets)getDevPa(m_Device, "vkAllocateDescriptorSets");
+    auto pfnUpdateDescSets  = (PFN_vkUpdateDescriptorSets)getDevPa(m_Device, "vkUpdateDescriptorSets");
+    auto pfnGetPdMemProps   = (PFN_vkGetPhysicalDeviceMemoryProperties)
+        m_pfnGetInstanceProcAddr(m_Instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnCreateBuffer || !pfnGetBufMemReq || !pfnAllocMem || !pfnBindBufMem
+        || !pfnAllocDescSets || !pfnUpdateDescSets || !pfnGetPdMemProps) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-RIFE-β] β.4 PFN load failed");
+        m_RifeNative->shutdown();
+        delete m_RifeNative;
+        m_RifeNative = nullptr;
+        return false;
+    }
+
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    pfnGetPdMemProps(m_PhysicalDevice, &memProps);
+    auto pickMemType = [&](uint32_t typeBits, VkMemoryPropertyFlags want) -> int {
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+            if ((typeBits & (1u << i))
+                && (memProps.memoryTypes[i].propertyFlags & want) == want) return (int)i;
+        }
+        return -1;
+    };
+    auto allocBuf = [&](VkDeviceSize size, VkBufferUsageFlags usage,
+                        VkBuffer& outBuf, VkDeviceMemory& outMem) -> bool {
+        VkBufferCreateInfo bci = {};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size  = size;
+        bci.usage = usage;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (pfnCreateBuffer(m_Device, &bci, nullptr, &outBuf) != VK_SUCCESS) return false;
+        VkMemoryRequirements memReq = {};
+        pfnGetBufMemReq(m_Device, outBuf, &memReq);
+        int mti = pickMemType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (mti < 0) return false;
+        VkMemoryAllocateInfo mai = {};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize  = memReq.size;
+        mai.memoryTypeIndex = (uint32_t)mti;
+        if (pfnAllocMem(m_Device, &mai, nullptr, &outMem) != VK_SUCCESS) return false;
+        return pfnBindBufMem(m_Device, outBuf, outMem, 0) == VK_SUCCESS;
+    };
+    const VkDeviceSize sizeDown =
+        (VkDeviceSize)inferW * inferH * 3 * sizeof(float);
+    const VkBufferUsageFlags downUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                       | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                                       | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (!allocBuf(sizeDown, downUsage, m_RifeDownPrev,   m_RifeDownPrevMem)
+        || !allocBuf(sizeDown, downUsage, m_RifeDownCurr,   m_RifeDownCurrMem)
+        || !allocBuf(sizeDown, downUsage, m_RifeDownInterp, m_RifeDownInterpMem)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-RIFE-β] β.4 down-buffer alloc failed (size=%llu B each)",
+            (unsigned long long)sizeDown);
+        // Don't goto-cleanup — destroyRifeNativeResources picks up partial state.
+        m_RifeNative->shutdown();
+        delete m_RifeNative;
+        m_RifeNative = nullptr;
+        return false;
+    }
+
+    // Allocate 3 desc sets from m_FrucDescPool (already bumped to maxSets=10).
+    // Bindings: 0 = in, 1 = out (both STORAGE_BUFFER, read-only on 0, write on 1).
+    auto allocBilinearDs = [&](VkBuffer inBuf, VkBuffer outBuf,
+                                VkDescriptorSet& outDs) -> bool {
+        VkDescriptorSetAllocateInfo asi = {};
+        asi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        asi.descriptorPool = m_FrucDescPool;
+        asi.descriptorSetCount = 1;
+        asi.pSetLayouts = &m_RifeBilinearDsl;
+        if (pfnAllocDescSets(m_Device, &asi, &outDs) != VK_SUCCESS) return false;
+        VkDescriptorBufferInfo dbi[2] = {};
+        dbi[0].buffer = inBuf;  dbi[0].range = VK_WHOLE_SIZE;
+        dbi[1].buffer = outBuf; dbi[1].range = VK_WHOLE_SIZE;
+        VkWriteDescriptorSet wds[2] = {};
+        for (int i = 0; i < 2; ++i) {
+            wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wds[i].dstSet = outDs;
+            wds[i].dstBinding = (uint32_t)i;
+            wds[i].descriptorCount = 1;
+            wds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            wds[i].pBufferInfo = &dbi[i];
+        }
+        pfnUpdateDescSets(m_Device, 2, wds, 0, nullptr);
+        return true;
+    };
+    if (!allocBilinearDs(m_FrucPrevRgbBuf,  m_RifeDownPrev,    m_RifeBilinearDownPrevDs)
+        || !allocBilinearDs(m_FrucCurrRgbBuf,  m_RifeDownCurr,    m_RifeBilinearDownCurrDs)
+        || !allocBilinearDs(m_RifeDownInterp,  m_FrucInterpRgbBuf, m_RifeBilinearUpInterpDs)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-RIFE-β] β.4 bilinear desc set alloc failed");
+        m_RifeNative->shutdown();
+        delete m_RifeNative;
+        m_RifeNative = nullptr;
+        return false;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-RIFE-β] β.4 down/up resources ready: 3 buffers @ %llu B each, "
+        "3 bilinear desc sets bound",
+        (unsigned long long)sizeDown);
+
     m_RifeNativeReady = true;
     return true;
 }
 
 void VkFrucRenderer::destroyRifeNativeResources()
 {
+    // β.4 down/up buffers — free first (m_FrucDescPool is freed later
+    // by destroyFrucComputeResources, which auto-frees the desc sets).
+    if (m_Device != VK_NULL_HANDLE && m_pfnGetInstanceProcAddr) {
+        auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        auto pfnDestroyBuf = (PFN_vkDestroyBuffer)getDevPa(m_Device, "vkDestroyBuffer");
+        auto pfnFreeMem    = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
+        if (pfnDestroyBuf && pfnFreeMem) {
+#define DESTROY_BUF(b, m)                                          \
+            if (b) { pfnDestroyBuf(m_Device, b, nullptr); b = VK_NULL_HANDLE; } \
+            if (m) { pfnFreeMem(m_Device,    m, nullptr); m = VK_NULL_HANDLE; }
+            DESTROY_BUF(m_RifeDownPrev,   m_RifeDownPrevMem)
+            DESTROY_BUF(m_RifeDownCurr,   m_RifeDownCurrMem)
+            DESTROY_BUF(m_RifeDownInterp, m_RifeDownInterpMem)
+#undef DESTROY_BUF
+        }
+    }
+    m_RifeBilinearDownPrevDs = VK_NULL_HANDLE;
+    m_RifeBilinearDownCurrDs = VK_NULL_HANDLE;
+    m_RifeBilinearUpInterpDs = VK_NULL_HANDLE;
+
     if (!m_RifeNative) return;
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -5920,12 +6121,20 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
                                          uint32_t slotIdx)
 {
     if (!m_RifeNativeReady || !m_RifeNative) return false;
+    if (m_RifeBilinearPipeline == VK_NULL_HANDLE) return false;
+    if (m_RifeDownPrev == VK_NULL_HANDLE
+        || m_RifeDownCurr == VK_NULL_HANDLE
+        || m_RifeDownInterp == VK_NULL_HANDLE) return false;
 
     auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetDeviceProcAddr");
-    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(
-        m_Device, "vkCmdPipelineBarrier");
-    if (!pfnCmdPipelineBarrier) return false;
+    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
+    auto pfnCmdBindPipeline    = (PFN_vkCmdBindPipeline)   getDevPa(m_Device, "vkCmdBindPipeline");
+    auto pfnCmdBindDescSets    = (PFN_vkCmdBindDescriptorSets)getDevPa(m_Device, "vkCmdBindDescriptorSets");
+    auto pfnCmdPushConst       = (PFN_vkCmdPushConstants)  getDevPa(m_Device, "vkCmdPushConstants");
+    auto pfnCmdDispatch        = (PFN_vkCmdDispatch)       getDevPa(m_Device, "vkCmdDispatch");
+    if (!pfnCmdPipelineBarrier || !pfnCmdBindPipeline || !pfnCmdBindDescSets
+        || !pfnCmdPushConst || !pfnCmdDispatch) return false;
 
     auto bufBarrier = [&](VkBuffer b,
                           VkPipelineStageFlags srcStage,
@@ -5941,59 +6150,115 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
         bmb.size = VK_WHOLE_SIZE;
         pfnCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 1, &bmb, 0, nullptr);
     };
+    auto computeBufBarrier = [&](VkBuffer b) {
+        bufBarrier(b,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+    };
 
-    // Stage 0 (NV12→RGB) just left m_FrucCurrRgbBuf in COMPUTE_SHADER_WRITE
-    // (post-`computeBufBarrier(m_FrucCurrRgbBuf)` at chain line 6026 →
-    // dstAccess=SHADER_READ).  Promote to TRANSFER_READ for runInferenceGpu's
-    // vkCmdCopyBuffer into RIFE's "in1" blob.  Same for prev which is in
-    // COMPUTE_SHADER_READ from the previous frame's stage-4 barrier.
-    bufBarrier(m_FrucCurrRgbBuf,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-    bufBarrier(m_FrucPrevRgbBuf,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    // Push-constant struct must match getInterpBilinearShaderGlsl exactly
+    // (rife_native_vk.cpp:822-830): 5 ints + 2 floats = 28 bytes.
+    struct BilinearPC {
+        int32_t inH;
+        int32_t inW;
+        int32_t outH;
+        int32_t outW;
+        int32_t channels;
+        float   scaleH;
+        float   scaleW;
+    };
+    auto dispatchBilinear = [&](VkDescriptorSet ds,
+                                int inW, int inH, int outW, int outH) {
+        pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_RifeBilinearPipeline);
+        pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_RifeBilinearPipeLay,
+                           0, 1, &ds, 0, nullptr);
+        BilinearPC pc;
+        pc.inH = inH;  pc.inW = inW;  pc.outH = outH;  pc.outW = outW;
+        pc.channels = 3;
+        pc.scaleH = (float)inH / (float)outH;
+        pc.scaleW = (float)inW / (float)outW;
+        pfnCmdPushConst(cmd, m_RifeBilinearPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                        0, sizeof(pc), &pc);
+        // 8x8 workgroup; z = channels=3.
+        pfnCmdDispatch(cmd, ((uint32_t)outW + 7) / 8, ((uint32_t)outH + 7) / 8, 3);
+    };
 
-    // m_FrucInterpRgbBuf: caller will read it as TRANSFER_DST inside
-    // runInferenceGpu.  Previous frame's last touch was either
-    // computeBufBarrier (SHADER_READ) or this same TRANSFER_WRITE if RIFE
-    // path ran last frame.  Either way → TRANSFER_WRITE for the copy below.
-    bufBarrier(m_FrucInterpRgbBuf,
+    // ---- Down step ----
+    // Stage 0 left m_FrucCurrRgbBuf in COMPUTE_SHADER_BIT/SHADER_READ access
+    // (computeBufBarrier inside runFrucComputeChain).  Bilinear shader reads
+    // it as STORAGE_BUFFER → SHADER_READ.  Pipeline stage transition COMPUTE
+    // → COMPUTE is implicit (already at the right stage).  No explicit
+    // barrier needed for the read side.  Likewise m_FrucPrevRgbBuf is in
+    // COMPUTE_SHADER_BIT/SHADER_READ from the previous frame's stage-4
+    // barrier.
+
+    // Bilinear writes m_RifeDown{Prev,Curr} as STORAGE_BUFFER (write-only).
+    // No barrier needed before — these buffers are private and not yet
+    // touched this frame.  Caller's slot fence wait guarantees previous
+    // frame's GPU work on these buffers retired.
+    dispatchBilinear(m_RifeBilinearDownPrevDs,
+                     (int)width, (int)height,
+                     m_RifeNativeInferW, m_RifeNativeInferH);
+    dispatchBilinear(m_RifeBilinearDownCurrDs,
+                     (int)width, (int)height,
+                     m_RifeNativeInferW, m_RifeNativeInferH);
+
+    // Down outputs need to be visible to the RIFE inference's vkCmdCopyBuffer
+    // (TRANSFER_READ).  COMPUTE_SHADER_WRITE → TRANSFER_READ.
+    bufBarrier(m_RifeDownPrev,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    bufBarrier(m_RifeDownCurr,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+
+    // m_RifeDownInterp: previous-frame state is either COMPUTE_SHADER_READ
+    // (from previous bilinear up read) or unwritten (first frame).  Will be
+    // overwritten by RIFE's vkCmdCopyBuffer (TRANSFER_WRITE) so we just need
+    // any prior reads to complete.
+    bufBarrier(m_RifeDownInterp,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT);
 
-    // β.1 / β.2 共用：DUAL midpoint (t=0.5).  TRIPLE 因為 β.3 還沒做，
-    // m_RifeNativeMode 在 ctor 已被 force off 當 m_TripleMode 開啟，
-    // 所以這裡保證 dual-only.
+    // ---- RIFE inference ----
+    // β.1 / β.2 / β.4 共用：DUAL midpoint (t=0.5).  TRIPLE 還沒做，
+    // m_RifeNativeMode 在 ctor 已被 force off 當 m_TripleMode 開啟.
     const float t = 0.5f;
     if (!m_RifeNative->runInferenceGpu(cmd, slotIdx,
-            m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, t, m_FrucInterpRgbBuf)) {
-        // Inference failed — caller should fall back to ME/median/warp.
-        // Note: we already issued TRANSFER_READ barriers on prev/curr; the
-        // fallback chain will issue its own COMPUTE_SHADER_READ barriers
-        // implicitly via descriptor set + dispatch (read→read = no-op sync).
+            m_RifeDownPrev, m_RifeDownCurr, t, m_RifeDownInterp)) {
+        // Restore source buffers (down inputs untouched, no barrier needed).
+        // Caller falls back to ME/median/warp.
         return false;
     }
 
-    // RIFE just wrote m_FrucInterpRgbBuf (via internal vkCmdCopyBuffer of
-    // out0 blob → m_FrucInterpRgbBuf), leaving it in TRANSFER_WRITE state.
-    // Promote to COMPUTE_SHADER_READ so the existing renderFrame /
-    // renderFrameSw barrier (COMPUTE_SHADER → FRAGMENT_SHADER for interp
-    // display) sees the same starting state the warp shader leaves.
-    bufBarrier(m_FrucInterpRgbBuf,
+    // ---- Up step ----
+    // RIFE left m_RifeDownInterp in TRANSFER_WRITE.  Bilinear up reads it as
+    // SHADER_READ.  Promote.
+    bufBarrier(m_RifeDownInterp,
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 
-    // Restore curr/prev to COMPUTE_SHADER_READ to match the state stage 4
-    // barrier (curr→prev copy) expects.
-    bufBarrier(m_FrucCurrRgbBuf,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
-    bufBarrier(m_FrucPrevRgbBuf,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+    // m_FrucInterpRgbBuf: previous state may be COMPUTE_SHADER_READ from the
+    // last interp display, or TRANSFER_WRITE/SHADER_READ from previous β
+    // path.  Bilinear up writes to it; we need any prior reads done.
+    bufBarrier(m_FrucInterpRgbBuf,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+            | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT);
+
+    dispatchBilinear(m_RifeBilinearUpInterpDs,
+                     m_RifeNativeInferW, m_RifeNativeInferH,
+                     (int)width, (int)height);
+
+    // Promote m_FrucInterpRgbBuf to COMPUTE_SHADER_READ to match the state
+    // the warp shader leaves it in (post-stage-3 barrier in the legacy chain).
+    // Existing renderFrame / renderFrameSw expects this state when binding
+    // it as a fragment shader input later.
+    computeBufBarrier(m_FrucInterpRgbBuf);
 
     return true;
 }
@@ -6159,14 +6424,17 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                     lt.seedMs, lt.recordMs, lt.gpuWaitMs, lt.readbackMs);
             }
         } else {
-            static std::atomic<bool> s_rifeFailLogged{false};
-            bool exp = false;
-            if (s_rifeFailLogged.compare_exchange_strong(exp, true)) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-RIFE-β] runRifeNativeStage failed this "
-                    "frame — falling back to ME/median/warp for this and "
-                    "subsequent frames");
-            }
+            // First-frame failure (e.g. model shape mismatch at this dim)
+            // → permanently disable RIFE for this session to stop log spam
+            // and avoid wasted dispatch attempts.  Block-match takes over
+            // for subsequent frames.
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-RIFE-β] runRifeNativeStage failed at frame#%llu "
+                "— DISABLING Path β for this session, ME/median/warp takes "
+                "over (likely model shape mismatch; try smaller "
+                "VIPLE_VKFRUC_RIFE_INFER_DIM)",
+                (unsigned long long)m_FrucFrameCount);
+            m_RifeNativeReady = false;
         }
     }
 
