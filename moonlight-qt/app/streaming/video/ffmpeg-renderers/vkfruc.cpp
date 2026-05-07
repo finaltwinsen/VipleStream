@@ -5856,35 +5856,34 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
     }
 
     // β.4 — pick infer dim small enough that all RIFE blobs fit BAR AND
-    // dodges the model-specific shape constraint we hit at higher dims.
+    // matches the model's hardcoded /128 alignment requirement.
     //
-    // Default 256×128 (verified working on RIFE-v4.25-lite).  Other dims
-    // FAIL at layer 'Add_503' which has a fixed-shape internal residual
-    // stage that doesn't scale linearly with input dim — empirical fail
-    // matrix on 1080p source:
-    //   256×128: PASS  (chain swap active)
-    //   384×192: FAIL  (a=4×256×384 vs b=4×192×384)
-    //   448×224: FAIL  (a=4×256×512 vs b=4×224×448)
-    //   512×288: FAIL  (a=4×384×512 vs b=4×288×512)
-    // Pattern: at inferH ≥ ~160, the supplemental high-res stage emits a
-    // tensor with H=ceil(inferH × 4/3) that doesn't match the residual
-    // path's H=inferH.  Below ~160 the stage may not engage (fast path).
+    // RIFE-v4.25-lite root cause (確認 2026-05-08 via trace_rife_shapes.py):
+    //   Layer Resize_47 has hardcoded scale = 1/32 (param 1=2=3.125e-2),
+    //   followed by Conv_48 + Conv_50 each stride=2.  So the deepest
+    //   encoder feature is at input/128 spatial dim, then the decoder
+    //   upsamples by Resize_87 with hardcoded scale ×32 + ConvTranspose
+    //   stride 2 + PixelShuffle r=2 (= ×128 total).
     //
-    // Quality cost: 256×128 → bilinear up to 1920×1080 is ~7.5× per dim
-    // (~57× area).  Loses fine detail but RIFE's *flow* is what we need
-    // for interpolation; bilinear up smooths at edges, acceptable for
-    // mid-motion frames.  Long-term fix: extend dispatchBinaryOp to
-    // handle asymmetric center-crop / pad patterns, then bump default
-    // up to a higher dim.
+    //   Path A (encoder skip): input/128 × 128 = inputH if inputH /128 整除,
+    //   else integer-div rounds up giving H = ceil(input/128) × 128.
+    //   Path B (decoder direct): input/4 × 4 = input always.
+    //   For Add_503 to match, both must equal inputH → require inputH
+    //   to be /128 exactly.  Empirical fail matrix at 1080p source:
+    //     256×128: PASS (128 = 1×128)
+    //     384×192: FAIL (192 = 1.5×128 → 256 vs 192 mismatch)
+    //     448×224: FAIL (224 = 1.75×128 → 256 vs 224 mismatch)
+    //     512×288: FAIL (288 = 2.25×128 → 384 vs 288 mismatch)
     //
-    // Override via VIPLE_VKFRUC_RIFE_INFER_DIM=N (width only; height auto).
+    // 修法：inferW/H 都 round 到 /128 multiple (NOT /32 as before).
+    // Override via VIPLE_VKFRUC_RIFE_INFER_DIM=N (width; height auto by aspect).
     int inferW = qEnvironmentVariableIntValue("VIPLE_VKFRUC_RIFE_INFER_DIM");
-    if (inferW <= 0) inferW = 256;
-    inferW = (inferW / 32) * 32;
-    if (inferW < 64) inferW = 64;
+    if (inferW <= 0) inferW = 512;   // default 512 → 512×256 for 1080p source (2:1 aspect, mild stretch from 16:9)
+    inferW = (inferW / 128) * 128;
+    if (inferW < 128) inferW = 128;
     int inferH = (int)((double)inferW * (double)height / (double)width + 0.5);
-    inferH = (inferH / 32) * 32;
-    if (inferH < 32) inferH = 32;
+    inferH = (inferH / 128) * 128;
+    if (inferH < 128) inferH = 128;
     m_RifeNativeInferW = inferW;
     m_RifeNativeInferH = inferH;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
