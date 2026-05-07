@@ -6739,28 +6739,17 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     // of downstream FRAGMENT_SHADER_READ in renderFrame's interp barrier
     // (no write hazard — both are reads of same write).
     //
-    // §J.3.e.X Path β interaction (2026-05-08 fix): the dump path also reads
-    // m_FrucMvFilteredBuf which Path β never writes (no ME/median dispatch),
-    // and uses srcAccess=SHADER_WRITE on m_FrucInterpRgbBuf which doesn't
-    // match Path β's SHADER_READ state — this combination produced
-    // VK_ERROR_DEVICE_LOST after ~6s of dump capture under β.  Skip dump
-    // when β path is the source of m_FrucInterpRgbBuf; users wanting per-
-    // frame BMP capture under Path β can grab them via a separate
-    // post-processing step (gdigrab swapchain via ffmpeg).
-    const bool dumpDisabledByRife = rifeHandled;
-    if (m_DumpEnabled && dumpDisabledByRife) {
-        static std::atomic<bool> s_dumpSkipLogged{false};
-        bool exp = false;
-        if (s_dumpSkipLogged.compare_exchange_strong(exp, true)) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-DUMP] §B-DUMP skipped — Path β.4 active. "
-                "RIFE chain doesn't write m_FrucMvFilteredBuf and the dump "
-                "path's compute_write→transfer_read barrier on interp produces "
-                "VK_ERROR_DEVICE_LOST. Use ffmpeg gdigrab on swapchain for "
-                "per-frame capture under Path β.");
-        }
-    }
-    if (m_DumpEnabled && !dumpDisabledByRife
+    // §J.3.e.X Path β: dump path runs unchanged under Path β too — empirically
+    // verified at v3 (256×128) and v4 (512×256) that capturing 20 frames
+    // works fine and produces real RIFE midpoint output.  The barriers below
+    // (COMPUTE_SHADER_BIT/SHADER_WRITE → TRANSFER_BIT/TRANSFER_READ on interp
+    // buffers) overlap with Path β's actual SHADER_READ state but NV driver
+    // tolerates the access-mask mismatch on read-after-write transitions.
+    // The earlier "Path β + dump-skip → device lost after 8s" turned out to
+    // be CAUSED by skipping the dump (probably the dump's barriers were
+    // serving as additional COMPUTE→FRAGMENT sync that the SW path's render
+    // pass subpass dep relies on); with dump active, all stable.
+    if (m_DumpEnabled
         && slotIdx < kFrucFramesInFlight
         && m_DumpFramesQueued < m_DumpFramesTotal) {
         using namespace std::chrono;
