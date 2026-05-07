@@ -256,6 +256,27 @@ private:
     ncnn::Mat                  m_PrevMat;
     ncnn::Mat                  m_TimestepMat;
     int                        m_FrameCount = 0;
+
+    // §J.3.e.X Final.3b 2026-05-08 — native RIFE Vulkan executor as
+    // drop-in alternative to ncnn::Extractor.
+    //
+    // Gated by env var VIPLE_RIFE_NATIVE_VK_PROD=1.  Default-OFF → ncnn
+    // path unchanged.  When ON: lazy-init on first submitFrame, runs
+    // RifeNativeExecutor::runInference() per-frame instead of
+    // ncnn::Extractor::extract(); fall back to ncnn silently on any
+    // failure (init or per-frame).
+    //
+    // Owns its OWN VkInstance / VkDevice (separate from ncnn singleton)
+    // — runConv2DGpuTestStandalone-style setup.  Memory cost: ~50-100 MB
+    // extra Vulkan resources when active.  Strategically: this is the
+    // path to drop ncnn dependency entirely once Final.3b stabilises.
+    //
+    // Storage as void* avoids leaking rife_native_vk.h into ncnnfruc.h
+    // consumers — actual struct lives in anonymous namespace in
+    // ncnnfruc.cpp.
+    void*                      m_NativeImpl      = nullptr;  // RifeNativeBridge*
+    bool                       m_NativeAttempted = false;    // lazy-init one-shot
+    bool                       m_NativeReady     = false;    // executor 可用
 };
 
 #endif // _WIN32

@@ -4,6 +4,7 @@
 
 #include "ncnnfruc.h"
 #include "ncnn_rife_warp.h"
+#include "rife_native_vk.h"  // §J.3.e.X Final.3b — native RIFE Vulkan executor
 #include "vulkanvideo.h"  // §J.3.b.1 probe
 #include "path.h"
 
@@ -324,6 +325,166 @@ bool runExternalApiProbe()
     return ok;
 }
 } // namespace ncnnfruc
+
+// §J.3.e.X Final.3b 2026-05-08 — native RIFE Vulkan executor lazy-init bridge.
+//
+// Owns a dedicated VkInstance / VkDevice (independent of ncnn singleton) so
+// adding/removing this path doesn't affect ncnn lifecycle.  Per-frame I/O is
+// CPU-side via float* arrays; matches the ncnn::Mat layout already used at
+// the production submitFrame call.
+//
+// Lives in anonymous namespace, stored on NcnnFRUC as void* — header doesn't
+// drag in rife_native_vk.h.
+namespace {
+struct RifeNativeBridge {
+    // Owned Vulkan handles.
+    void*  vkLib              = nullptr;  // HMODULE (Win) / void* (Linux dlopen)
+    void*  pfnGetInstanceProcAddr = nullptr;  // PFN_vkGetInstanceProcAddr
+    VkInstance       vkInstance = VK_NULL_HANDLE;
+    VkPhysicalDevice vkPhys     = VK_NULL_HANDLE;
+    VkDevice         vkDevice   = VK_NULL_HANDLE;
+    VkQueue          vkQueue    = VK_NULL_HANDLE;
+    uint32_t         queueFamily = UINT32_MAX;
+    PFN_vkDestroyInstance pfnDestroyInstance = nullptr;
+    PFN_vkDestroyDevice   pfnDestroyDevice   = nullptr;
+
+    // The executor + reusable I/O staging buffers.
+    viple::rife_native_vk::RifeNativeExecutor executor;
+    std::vector<float> in0;   // CHW packed prev RGB
+    std::vector<float> in1;   // CHW packed curr RGB
+    std::vector<float> out;   // CHW packed interp RGB
+    int width  = 0;
+    int height = 0;
+};
+
+// Build a fresh VkInstance / VkDevice for native RIFE.  Mirrors
+// runConv2DGpuTestStandalone in rife_native_vk.cpp but without teardown
+// at end (caller owns lifetime).
+bool createDedicatedVulkanCtxForNativeRife(RifeNativeBridge& impl)
+{
+#ifdef _WIN32
+    HMODULE vkLib = ::GetModuleHandleW(L"vulkan-1.dll");
+    if (!vkLib) vkLib = ::LoadLibraryW(L"vulkan-1.dll");
+    if (!vkLib) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-FRUC-NCNN] Final.3b: vulkan-1.dll not loadable");
+        return false;
+    }
+    impl.vkLib = (void*)vkLib;
+    auto pfnGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        ::GetProcAddress(vkLib, "vkGetInstanceProcAddr"));
+#else
+    void* vkLib = dlopen("libvulkan.so.1", RTLD_NOW);
+    if (!vkLib) vkLib = dlopen("libvulkan.so", RTLD_NOW);
+    if (!vkLib) return false;
+    impl.vkLib = vkLib;
+    auto pfnGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        dlsym(vkLib, "vkGetInstanceProcAddr"));
+#endif
+    if (!pfnGetInstanceProcAddr) return false;
+    impl.pfnGetInstanceProcAddr = (void*)pfnGetInstanceProcAddr;
+
+    // VkInstance.
+    auto pfnCreateInstance = (PFN_vkCreateInstance)pfnGetInstanceProcAddr(nullptr, "vkCreateInstance");
+    if (!pfnCreateInstance) return false;
+    VkApplicationInfo ai = {};
+    ai.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    ai.pApplicationName = "VipleStream-RifeNativeProd";
+    ai.apiVersion = VK_API_VERSION_1_2;
+    const char* exts[] = { "VK_KHR_get_physical_device_properties2" };
+    VkInstanceCreateInfo ici = {};
+    ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ici.pApplicationInfo = &ai;
+    ici.enabledExtensionCount = 1;
+    ici.ppEnabledExtensionNames = exts;
+    if (pfnCreateInstance(&ici, nullptr, &impl.vkInstance) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-FRUC-NCNN] Final.3b: vkCreateInstance failed");
+        return false;
+    }
+    impl.pfnDestroyInstance = (PFN_vkDestroyInstance)pfnGetInstanceProcAddr(
+        impl.vkInstance, "vkDestroyInstance");
+
+    // Pick first discrete GPU; fall back to first available.
+    auto pfnEnumPhys = (PFN_vkEnumeratePhysicalDevices)pfnGetInstanceProcAddr(
+        impl.vkInstance, "vkEnumeratePhysicalDevices");
+    auto pfnGetPhysProps = (PFN_vkGetPhysicalDeviceProperties)pfnGetInstanceProcAddr(
+        impl.vkInstance, "vkGetPhysicalDeviceProperties");
+    auto pfnGetQFProps = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)pfnGetInstanceProcAddr(
+        impl.vkInstance, "vkGetPhysicalDeviceQueueFamilyProperties");
+    auto pfnCreateDevice = (PFN_vkCreateDevice)pfnGetInstanceProcAddr(
+        impl.vkInstance, "vkCreateDevice");
+    if (!pfnEnumPhys || !pfnGetPhysProps || !pfnGetQFProps || !pfnCreateDevice) {
+        return false;
+    }
+    uint32_t physCount = 0;
+    pfnEnumPhys(impl.vkInstance, &physCount, nullptr);
+    if (physCount == 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-FRUC-NCNN] Final.3b: no Vulkan physical device");
+        return false;
+    }
+    std::vector<VkPhysicalDevice> phys(physCount);
+    pfnEnumPhys(impl.vkInstance, &physCount, phys.data());
+    for (auto p : phys) {
+        VkPhysicalDeviceProperties props = {};
+        pfnGetPhysProps(p, &props);
+        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+            impl.vkPhys = p;
+            break;
+        }
+    }
+    if (impl.vkPhys == VK_NULL_HANDLE) impl.vkPhys = phys[0];
+
+    // Find compute-capable queue family.
+    uint32_t qfCount = 0;
+    pfnGetQFProps(impl.vkPhys, &qfCount, nullptr);
+    std::vector<VkQueueFamilyProperties> qfProps(qfCount);
+    pfnGetQFProps(impl.vkPhys, &qfCount, qfProps.data());
+    for (uint32_t i = 0; i < qfCount; i++) {
+        if (qfProps[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+            impl.queueFamily = i;
+            break;
+        }
+    }
+    if (impl.queueFamily == UINT32_MAX) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-FRUC-NCNN] Final.3b: no compute queue family");
+        return false;
+    }
+
+    // VkDevice with one compute queue.
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci = {};
+    qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    qci.queueFamilyIndex = impl.queueFamily;
+    qci.queueCount = 1;
+    qci.pQueuePriorities = &prio;
+    VkDeviceCreateInfo dci = {};
+    dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos = &qci;
+    if (pfnCreateDevice(impl.vkPhys, &dci, nullptr, &impl.vkDevice) != VK_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-FRUC-NCNN] Final.3b: vkCreateDevice failed");
+        return false;
+    }
+    impl.pfnDestroyDevice = (PFN_vkDestroyDevice)pfnGetInstanceProcAddr(
+        impl.vkInstance, "vkDestroyDevice");
+    auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstanceProcAddr(
+        impl.vkInstance, "vkGetDeviceProcAddr");
+    auto pfnGetDeviceQueue = (PFN_vkGetDeviceQueue)pfnGetDevPa(
+        impl.vkDevice, "vkGetDeviceQueue");
+    pfnGetDeviceQueue(impl.vkDevice, impl.queueFamily, 0, &impl.vkQueue);
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-FRUC-NCNN] Final.3b: dedicated Vulkan ctx built "
+                "(VkInstance=%p VkPhys=%p VkDevice=%p VkQueue=%p QF=%u)",
+                (void*)impl.vkInstance, (void*)impl.vkPhys,
+                (void*)impl.vkDevice, (void*)impl.vkQueue, impl.queueFamily);
+    return true;
+}
+} // namespace (anonymous)
 
 NcnnFRUC::NcnnFRUC() = default;
 
@@ -2400,19 +2561,117 @@ bool NcnnFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp)
     // RIFE 4.25-lite forward: in0=prev RGB, in1=curr RGB, in2=timestep
     // plane (constant 0.5 for midpoint).  out0 is the interpolated
     // RGB tensor at t=0.5 between prev and curr.
+    //
+    // §J.3.e.X Final.3b 2026-05-08 — env var VIPLE_RIFE_NATIVE_VK_PROD=1
+    // swaps the ncnn inference call for our native Vulkan executor.
+    // Lazy-init on first frame; on any failure (init or per-frame),
+    // silently fall back to ncnn.
     auto t0 = std::chrono::steady_clock::now();
-    ncnn::Extractor ex = m_Net->create_extractor();
-    ex.input("in0", m_PrevMat);
-    ex.input("in1", curr_mat);
-    ex.input("in2", m_TimestepMat);
     ncnn::Mat out_mat;
-    if (ex.extract("out0", out_mat) != 0) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC-NCNN] extract(out0) failed @ frame %d",
-                    m_FrameCount);
-        m_PrevMat = curr_mat;
-        m_FrameCount++;
-        return false;
+    bool nativeUsed = false;
+
+    static const bool s_useNative = qEnvironmentVariableIntValue("VIPLE_RIFE_NATIVE_VK_PROD") != 0;
+    if (s_useNative && !m_NativeAttempted) {
+        m_NativeAttempted = true;
+        auto* bridge = new RifeNativeBridge();
+        m_NativeImpl = bridge;
+        bridge->width  = (int)m_Width;
+        bridge->height = (int)m_Height;
+        const size_t plane = (size_t)m_Width * (size_t)m_Height;
+        bridge->in0.resize(3 * plane);
+        bridge->in1.resize(3 * plane);
+        bridge->out.resize(3 * plane);
+
+        if (createDedicatedVulkanCtxForNativeRife(*bridge)) {
+            viple::rife_native_vk::VulkanCtx ctx;
+            ctx.instance = bridge->vkInstance;
+            ctx.physicalDevice = bridge->vkPhys;
+            ctx.device = bridge->vkDevice;
+            ctx.computeQueueFamily = bridge->queueFamily;
+            ctx.computeQueue = bridge->vkQueue;
+            ctx.getInstanceProcAddr = bridge->pfnGetInstanceProcAddr;
+
+            QString modelDir = Path::getDataFilePath(QString::fromStdString(m_ModelDir));
+            viple::rife_native_vk::RifeNativeExecutor::InitOptions opts;
+            opts.ctx = ctx;
+            opts.modelDir = modelDir;
+            opts.in0Shape.c = 3; opts.in0Shape.h = (int)m_Height; opts.in0Shape.w = (int)m_Width;
+            opts.in1Shape.c = 3; opts.in1Shape.h = (int)m_Height; opts.in1Shape.w = (int)m_Width;
+            opts.in2Shape.c = 1; opts.in2Shape.h = 1;             opts.in2Shape.w = 1;
+            // Pipeline cache stored in user cache dir to amortise SPIR-V→
+            // driver compilation across launches (~50-300 ms savings on 9
+            // shaders).  Path::getCacheFileInfo gives the absolute path
+            // under VipleStream's cache root.
+            opts.pipelineCachePath = Path::getCacheFileInfo("rife_native_vk_pipe.cache").absoluteFilePath();
+
+            if (bridge->executor.initialize(opts)) {
+                m_NativeReady = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC-NCNN] Final.3b: native RIFE executor "
+                            "initialized — using native path for all subsequent frames");
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC-NCNN] Final.3b: native RIFE init failed — "
+                            "falling back to ncnn for this NcnnFRUC instance");
+            }
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] Final.3b: dedicated Vulkan ctx setup failed — "
+                        "falling back to ncnn");
+        }
+    }
+
+    if (m_NativeReady && m_NativeImpl) {
+        auto* bridge = static_cast<RifeNativeBridge*>(m_NativeImpl);
+        const int W = (int)m_Width, H = (int)m_Height;
+        const size_t plane = (size_t)W * (size_t)H;
+        // ncnn::Mat with c=3 stores planes contiguously: data[c=0,0..H*W-1] |
+        // data[c=1,0..H*W-1] | data[c=2,...].  But cstep may be padded;
+        // use channel(c) for safe per-plane access.
+        for (int c = 0; c < 3; c++) {
+            const float* srcP = (const float*)m_PrevMat.channel(c);
+            const float* srcC = (const float*)curr_mat.channel(c);
+            memcpy(bridge->in0.data() + c * plane, srcP, plane * sizeof(float));
+            memcpy(bridge->in1.data() + c * plane, srcC, plane * sizeof(float));
+        }
+        if (bridge->executor.runInference(
+                bridge->in0.data(),
+                bridge->in1.data(),
+                0.5f,
+                bridge->out.data())) {
+            // Build output ncnn::Mat that downstream matToStaging can read.
+            // Allocate once + memcpy planes back.
+            out_mat.create(W, H, 3);
+            for (int c = 0; c < 3; c++) {
+                float* dst = (float*)out_mat.channel(c);
+                memcpy(dst, bridge->out.data() + c * plane, plane * sizeof(float));
+            }
+            nativeUsed = true;
+        } else {
+            // runInference failed — log once and fall back to ncnn for this frame.
+            static std::atomic<bool> s_nativeFailLogged{false};
+            if (!s_nativeFailLogged.exchange(true)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] Final.3b: native runInference failed — "
+                    "falling back to ncnn for this frame and onward");
+            }
+        }
+    }
+
+    if (!nativeUsed) {
+        // Original ncnn path (unchanged).
+        ncnn::Extractor ex = m_Net->create_extractor();
+        ex.input("in0", m_PrevMat);
+        ex.input("in1", curr_mat);
+        ex.input("in2", m_TimestepMat);
+        if (ex.extract("out0", out_mat) != 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] extract(out0) failed @ frame %d",
+                        m_FrameCount);
+            m_PrevMat = curr_mat;
+            m_FrameCount++;
+            return false;
+        }
     }
     auto t1 = std::chrono::steady_clock::now();
     m_LastInferenceMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -2502,6 +2761,27 @@ void NcnnFRUC::destroy()
 {
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC-NCNN] destroy() called (initialized=%d, m_Net=%p)",
                 m_Initialized.load(std::memory_order_acquire) ? 1 : 0, (void*)m_Net.get());
+
+    // §J.3.e.X Final.3b — tear down native RIFE executor + dedicated VkDevice.
+    // Order: shutdown executor (frees all its VkBuffers / VkPipelines on
+    // bridge->vkDevice) → destroy VkDevice → destroy VkInstance →
+    // unload vulkan-1.dll handle (HMODULE pinned via LoadLibrary; OK to
+    // leak handle since system unloads at process exit).
+    if (m_NativeImpl) {
+        auto* bridge = static_cast<RifeNativeBridge*>(m_NativeImpl);
+        bridge->executor.shutdown();
+        if (bridge->vkDevice && bridge->pfnDestroyDevice) {
+            bridge->pfnDestroyDevice(bridge->vkDevice, nullptr);
+        }
+        if (bridge->vkInstance && bridge->pfnDestroyInstance) {
+            bridge->pfnDestroyInstance(bridge->vkInstance, nullptr);
+        }
+        delete bridge;
+        m_NativeImpl = nullptr;
+    }
+    m_NativeReady     = false;
+    m_NativeAttempted = false;
+
     // §J.1: release fence sync FIRST.  VkSemaphore must be destroyed
     // while VulkanDevice is alive; ID3D11Fence must be released before
     // m_Device.Reset().  Idempotent if createFenceSync didn't run.
