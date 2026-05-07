@@ -453,21 +453,43 @@ bool createDedicatedVulkanCtxForNativeRife(RifeNativeBridge& impl)
         return false;
     }
 
-    // VkDevice with one compute queue.
+    // VkDevice with one compute queue.  Try minimal first (no features pNext);
+    // some NV drivers report VK_ERROR_INITIALIZATION_FAILED on second VkDevice
+    // creation when the feature pNext chain has any check.  If minimal works,
+    // RifeNativeExecutor's shaders will use whatever core features are
+    // available on the physical device anyway.
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci = {};
     qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     qci.queueFamilyIndex = impl.queueFamily;
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
+
     VkDeviceCreateInfo dci = {};
     dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    if (pfnCreateDevice(impl.vkPhys, &dci, nullptr, &impl.vkDevice) != VK_SUCCESS) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "[VIPLE-FRUC-NCNN] Final.3b: vkCreateDevice failed");
-        return false;
+    VkResult dcRes = pfnCreateDevice(impl.vkPhys, &dci, nullptr, &impl.vkDevice);
+    if (dcRes != VK_SUCCESS) {
+        // Try with storageBuffer16BitAccess feature (4Y.5a needs it).
+        VkPhysicalDevice16BitStorageFeatures features16 = {};
+        features16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES;
+        features16.storageBuffer16BitAccess = VK_TRUE;
+        dci.pNext = &features16;
+        dcRes = pfnCreateDevice(impl.vkPhys, &dci, nullptr, &impl.vkDevice);
+        if (dcRes != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-FRUC-NCNN] Final.3b: vkCreateDevice failed VkResult=%d "
+                         "(QF=%u, both minimal and features16 attempts failed — "
+                         "NV driver may not allow 2nd VkDevice while ncnn holds one)",
+                         (int)dcRes, impl.queueFamily);
+            return false;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] Final.3b: vkCreateDevice succeeded with features16 fallback");
+    } else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] Final.3b: vkCreateDevice succeeded (minimal, no features pNext)");
     }
     impl.pfnDestroyDevice = (PFN_vkDestroyDevice)pfnGetInstanceProcAddr(
         impl.vkInstance, "vkDestroyDevice");
@@ -1165,8 +1187,16 @@ double NcnnFRUC::probeInferenceCost(int warmup, int iterations)
     // sentinel -2.0 so caller can distinguish from perf-budget rejection.
     // Override with VIPLE_FRUC_NCNN_FORCE=1 if user wants the broken
     // backend anyway (e.g. for diagnostic dump comparison).
+    //
+    // §J.3.e.X Final.3b 2026-05-08 — VIPLE_RIFE_NATIVE_VK_PROD=1 also
+    // bypasses this rejection: ncnn probe failing is irrelevant when
+    // production submitFrame swaps to native RifeNativeExecutor (which
+    // doesn't share ncnn's vulkan compute path that hits this bug).
+    const bool nativeProdActive =
+        qEnvironmentVariableIntValue("VIPLE_RIFE_NATIVE_VK_PROD") != 0;
     if (outputAllZero
-        && qEnvironmentVariableIntValue("VIPLE_FRUC_NCNN_FORCE") == 0) {
+        && qEnvironmentVariableIntValue("VIPLE_FRUC_NCNN_FORCE") == 0
+        && !nativeProdActive) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
             "[VIPLE-FRUC-NCNN] probe REJECTED — RIFE output all-zero at "
             "%dx%d on this GPU/driver/ncnn build (known issue, see "
@@ -1176,6 +1206,12 @@ double NcnnFRUC::probeInferenceCost(int warmup, int iterations)
             (int)m_Width, (int)m_Height);
         m_LastInferenceMs = med;
         return -2.0;  // sentinel for "init OK but output broken"
+    }
+    if (outputAllZero && nativeProdActive) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-FRUC-NCNN] probe all-zero detected but VIPLE_RIFE_NATIVE_VK_PROD=1 "
+            "→ probe rejection bypassed; production submitFrame will use native "
+            "RifeNativeExecutor (Final.3b)");
     }
 
     m_LastInferenceMs = med;
