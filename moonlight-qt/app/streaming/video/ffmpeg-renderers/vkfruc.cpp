@@ -5392,40 +5392,47 @@ void main() {
 }
 )GLSL";
 
-// §J.3.e.X Path β.5 — native-res warp+blend shader.  Reads:
-//   prev_1080p     (CHW fp32, 3 channels, source dim)
-//   curr_1080p     (CHW fp32, 3 channels, source dim)
-//   flow_prev_xyHW (2 channels = x then y, source dim, planar layout)
-//   flow_curr_xyHW (2 channels = x then y, source dim, planar layout)
-//   mask_HW        (1 channel, source dim)
+// §J.3.e.X Path β.5.1 — native-res warp+blend shader, samples flow + mask
+// at INFER DIM (no bilinear UP needed).  Saves 41 MB/frame allocation +
+// write bandwidth + 2 dispatches vs β.5.0.
+//
+// Reads:
+//   prev_1080p    (CHW fp32, 3 channels, source dim)
+//   curr_1080p    (CHW fp32, 3 channels, source dim)
+//   flow_inferDim (4 channels = prev_x, prev_y, curr_x, curr_y at infer dim)
+//   mask_inferDim (1 channel at infer dim)
 // Writes:
 //   interp_out (CHW fp32, 3 channels, source dim)
 //
-// Math (matches RIFE-v4 internal blend at lines 388-391 of flownet.param):
-//   prev_warped = sample prev_1080p at (x + flow_prev.xy)  (bilinear)
-//   curr_warped = sample curr_1080p at (x + flow_curr.xy)  (bilinear)
-//   m = mask[x, y]
-//   out = prev_warped * m + curr_warped * (1 - m)
-//
-// Note: input flow buffers are 4ch concat of (prev_x, prev_y, curr_x, curr_y)
-// each at source dim, planar layout.  prev_x at offset 0, prev_y at H*W,
-// curr_x at 2*H*W, curr_y at 3*H*W.
+// Per output pixel (x, y) at source dim:
+//   1. Compute infer-dim coordinates (xi, yi) = (x * inferW/srcW, y * inferH/srcH)
+//   2. Bilinear-sample flow at (xi, yi) → (dxP, dyP, dxC, dyC) at infer-dim units
+//   3. Scale flow by magScale = srcDim/inferDim → motion vectors at source-dim
+//   4. Bilinear-sample mask at (xi, yi) → m
+//   5. prev_warped = sample prev at (x + dxP * magScale, y + dyP * magScale)
+//   6. curr_warped = sample curr at (x + dxC * magScale, y + dyC * magScale)
+//   7. out = prev_warped * m + curr_warped * (1 - m)
 static const char* kRifeNativeWarpShaderGlsl = R"GLSL(
 #version 450
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set=0, binding=0) readonly  buffer PrevBuf { float prev_buf[]; };
 layout(set=0, binding=1) readonly  buffer CurrBuf { float curr_buf[]; };
-layout(set=0, binding=2) readonly  buffer FlowBuf { float flow_buf[]; };  // 4ch CHW: prev_x, prev_y, curr_x, curr_y
-layout(set=0, binding=3) readonly  buffer MaskBuf { float mask_buf[]; };  // 1ch HW
+layout(set=0, binding=2) readonly  buffer FlowBuf { float flow_buf[]; };  // 4ch CHW @ infer dim
+layout(set=0, binding=3) readonly  buffer MaskBuf { float mask_buf[]; };  // 1ch HW @ infer dim
 layout(set=0, binding=4) writeonly buffer OutBuf  { float out_buf[];  };
 layout(push_constant) uniform PC {
-    int W;
-    int H;
-    int _pad0;
-    int _pad1;
+    int   W;       // source width
+    int   H;       // source height
+    int   inferW;  // flow + mask width (infer dim)
+    int   inferH;  // flow + mask height
+    float magScaleX;  // = float(W) / float(inferW)  — flow magnitude scaling
+    float magScaleY;  // = float(H) / float(inferH)
+    int   _pad0;
+    int   _pad1;
 } pc;
 
-float sampleBilinearPrev(int channelBase, float x, float y) {
+// Bilinear sample helper for source-dim buffers (used by prev/curr)
+float sampleSrcPrev(int channelBase, float x, float y) {
     int x0 = int(floor(x)); int y0 = int(floor(y));
     int x1 = x0 + 1; int y1 = y0 + 1;
     float fx = x - float(x0); float fy = y - float(y0);
@@ -5439,7 +5446,7 @@ float sampleBilinearPrev(int channelBase, float x, float y) {
     float v1 = v10 * (1.0 - fx) + v11 * fx;
     return v0 * (1.0 - fy) + v1 * fy;
 }
-float sampleBilinearCurr(int channelBase, float x, float y) {
+float sampleSrcCurr(int channelBase, float x, float y) {
     int x0 = int(floor(x)); int y0 = int(floor(y));
     int x1 = x0 + 1; int y1 = y0 + 1;
     float fx = x - float(x0); float fy = y - float(y0);
@@ -5453,6 +5460,37 @@ float sampleBilinearCurr(int channelBase, float x, float y) {
     float v1 = v10 * (1.0 - fx) + v11 * fx;
     return v0 * (1.0 - fy) + v1 * fy;
 }
+// Bilinear sample helper for infer-dim flow buffer (4 channels packed CHW)
+float sampleFlowChan(int chanIdx, float x, float y) {
+    int x0 = int(floor(x)); int y0 = int(floor(y));
+    int x1 = x0 + 1; int y1 = y0 + 1;
+    float fx = x - float(x0); float fy = y - float(y0);
+    x0 = clamp(x0, 0, pc.inferW - 1); x1 = clamp(x1, 0, pc.inferW - 1);
+    y0 = clamp(y0, 0, pc.inferH - 1); y1 = clamp(y1, 0, pc.inferH - 1);
+    int base = chanIdx * pc.inferH * pc.inferW;
+    float v00 = flow_buf[base + y0 * pc.inferW + x0];
+    float v01 = flow_buf[base + y0 * pc.inferW + x1];
+    float v10 = flow_buf[base + y1 * pc.inferW + x0];
+    float v11 = flow_buf[base + y1 * pc.inferW + x1];
+    float v0 = v00 * (1.0 - fx) + v01 * fx;
+    float v1 = v10 * (1.0 - fx) + v11 * fx;
+    return v0 * (1.0 - fy) + v1 * fy;
+}
+// Bilinear sample for infer-dim mask (1 channel HW)
+float sampleMask(float x, float y) {
+    int x0 = int(floor(x)); int y0 = int(floor(y));
+    int x1 = x0 + 1; int y1 = y0 + 1;
+    float fx = x - float(x0); float fy = y - float(y0);
+    x0 = clamp(x0, 0, pc.inferW - 1); x1 = clamp(x1, 0, pc.inferW - 1);
+    y0 = clamp(y0, 0, pc.inferH - 1); y1 = clamp(y1, 0, pc.inferH - 1);
+    float v00 = mask_buf[y0 * pc.inferW + x0];
+    float v01 = mask_buf[y0 * pc.inferW + x1];
+    float v10 = mask_buf[y1 * pc.inferW + x0];
+    float v11 = mask_buf[y1 * pc.inferW + x1];
+    float v0 = v00 * (1.0 - fx) + v01 * fx;
+    float v1 = v10 * (1.0 - fx) + v11 * fx;
+    return v0 * (1.0 - fy) + v1 * fy;
+}
 
 void main() {
     int x = int(gl_GlobalInvocationID.x);
@@ -5460,22 +5498,24 @@ void main() {
     int c = int(gl_GlobalInvocationID.z);
     if (x >= pc.W || y >= pc.H || c >= 3) return;
 
-    int hwIdx = y * pc.W + x;
-    int hw    = pc.H * pc.W;
+    // Map source pixel → infer-dim sample position (centered).
+    // Use center-aligned convention: out pixel (x, y) center at (x+0.5, y+0.5)
+    // in source domain, that maps to infer-dim center at scale ratio.
+    float xi = (float(x) + 0.5) * float(pc.inferW) / float(pc.W) - 0.5;
+    float yi = (float(y) + 0.5) * float(pc.inferH) / float(pc.H) - 0.5;
 
-    // flow_buf layout: channel 0 = prev_x (offset 0), 1 = prev_y (offset hw),
-    // 2 = curr_x (offset 2*hw), 3 = curr_y (offset 3*hw).
-    float dxP = flow_buf[0 * hw + hwIdx];
-    float dyP = flow_buf[1 * hw + hwIdx];
-    float dxC = flow_buf[2 * hw + hwIdx];
-    float dyC = flow_buf[3 * hw + hwIdx];
-    float m   = mask_buf[hwIdx];
+    // Sample flow + mask at infer dim, scale flow magnitude to source-dim units.
+    float dxP = sampleFlowChan(0, xi, yi) * pc.magScaleX;
+    float dyP = sampleFlowChan(1, xi, yi) * pc.magScaleY;
+    float dxC = sampleFlowChan(2, xi, yi) * pc.magScaleX;
+    float dyC = sampleFlowChan(3, xi, yi) * pc.magScaleY;
+    float m   = sampleMask(xi, yi);
 
-    int channelBase = c * hw;
-    float pSamp = sampleBilinearPrev(channelBase, float(x) + dxP, float(y) + dyP);
-    float cSamp = sampleBilinearCurr(channelBase, float(x) + dxC, float(y) + dyC);
+    int channelBase = c * pc.H * pc.W;
+    float pSamp = sampleSrcPrev(channelBase, float(x) + dxP, float(y) + dyP);
+    float cSamp = sampleSrcCurr(channelBase, float(x) + dxC, float(y) + dyC);
 
-    out_buf[channelBase + hwIdx] = pSamp * m + cSamp * (1.0 - m);
+    out_buf[channelBase + y * pc.W + x] = pSamp * m + cSamp * (1.0 - m);
 }
 )GLSL";
 
@@ -5657,10 +5697,11 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                 "[VIPLE-VKFRUC-RIFE-β5] flow bilinear pipeline build failed — "
                 "β.5 flow path will fall back to β.4 bilinear-up RGB");
         }
-        // Native warp shader: 5 bindings, push const = 16 bytes (4 int).
+        // Native warp shader: 5 bindings, push const = 32 bytes
+        // (W, H, inferW, inferH ints + magScaleX, magScaleY floats + 2 pad ints).
         if (!buildPipeline("RifeNativeWarp",
                            kRifeNativeWarpShaderGlsl,
-                           5, 16,
+                           5, 32,
                            m_RifeNativeWarpShaderMod, m_RifeNativeWarpDsl,
                            m_RifeNativeWarpPipeLay, m_RifeNativeWarpPipeline)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -6269,19 +6310,17 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
         && m_RifeFlowBilinearPipeline != VK_NULL_HANDLE
         && m_RifeNativeWarpPipeline   != VK_NULL_HANDLE) {
 
-        // Buffer sizes
+        // β.5.1: sample flow + mask at infer dim directly in warp shader.
+        // Drops m_RifeFlow1080Buf (33 MB) + m_RifeMask1080Buf (8 MB) and
+        // 2 bilinear UP dispatches per frame.  Saves ~1ms chain time.
         const VkDeviceSize sizeFlowSmall  = (VkDeviceSize)inferW * inferH * 4 * sizeof(float);
         const VkDeviceSize sizeMaskSmall  = (VkDeviceSize)inferW * inferH * 1 * sizeof(float);
-        const VkDeviceSize sizeFlowLarge  = (VkDeviceSize)width  * height * 4 * sizeof(float);
-        const VkDeviceSize sizeMaskLarge  = (VkDeviceSize)width  * height * 1 * sizeof(float);
         const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                        | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
                                        | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
         if (allocBuf(sizeFlowSmall,  usage, m_RifeFlowOutBuf,  m_RifeFlowOutMem)
-         && allocBuf(sizeMaskSmall,  usage, m_RifeMaskOutBuf,  m_RifeMaskOutMem)
-         && allocBuf(sizeFlowLarge,  usage, m_RifeFlow1080Buf, m_RifeFlow1080Mem)
-         && allocBuf(sizeMaskLarge,  usage, m_RifeMask1080Buf, m_RifeMask1080Mem)) {
+         && allocBuf(sizeMaskSmall,  usage, m_RifeMaskOutBuf,  m_RifeMaskOutMem)) {
 
             // Helper to allocate descSet from m_FrucDescPool with arbitrary
             // binding count (= bufs.size()).  Bindings are STORAGE_BUFFER.
@@ -6312,30 +6351,20 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
                 return true;
             };
 
-            // β.5 desc sets:
-            // - UpFlow: 2-binding via flow shader DSL — flowOut → flow1080
-            // - UpMask: 2-binding via base bilinear DSL — maskOut → mask1080
-            //          (mask doesn't need magnitude scaling, magScale = 1.0
-            //           via push const path is via base bilinear shader where
-            //           those fields don't exist; use base shader instead)
-            // - NativeWarp: 5-binding via warp DSL — prev/curr/flow/mask → out
-            if (allocDsAnyN(m_RifeFlowBilinearDsl,
-                            { m_RifeFlowOutBuf, m_RifeFlow1080Buf },
-                            m_RifeBilinearUpFlowDs)
-             && allocDsAnyN(m_RifeBilinearDsl,
-                            { m_RifeMaskOutBuf, m_RifeMask1080Buf },
-                            m_RifeBilinearUpMaskDs)
-             && allocDsAnyN(m_RifeNativeWarpDsl,
+            // β.5.1: only NativeWarp DS — sample flow + mask at infer dim
+            // directly in shader, no bilinear UPs needed.  binding 2 = flow
+            // at infer dim, binding 3 = mask at infer dim.
+            if (allocDsAnyN(m_RifeNativeWarpDsl,
                             { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf,
-                              m_RifeFlow1080Buf, m_RifeMask1080Buf,
+                              m_RifeFlowOutBuf, m_RifeMaskOutBuf,
                               m_FrucInterpRgbBuf },
                             m_RifeNativeWarpDs)) {
                 beta5OK = true;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-RIFE-β5] β.5 ready: flow %llu B small + %llu B large, "
-                    "mask %llu B small + %llu B large, 3 desc sets bound",
-                    (unsigned long long)sizeFlowSmall, (unsigned long long)sizeFlowLarge,
-                    (unsigned long long)sizeMaskSmall, (unsigned long long)sizeMaskLarge);
+                    "[VIPLE-VKFRUC-RIFE-β5] β.5.1 ready: flow %llu B + mask %llu B at "
+                    "infer dim only (sampled in warp shader, no 1080p flow alloc)",
+                    (unsigned long long)sizeFlowSmall,
+                    (unsigned long long)sizeMaskSmall);
             } else {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-RIFE-β5] desc set alloc failed — falling back to β.4");
@@ -6536,14 +6565,9 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
     // warp+blend → produces sharp interp at 1080p instead of bilinear-up'd
     // RGB blur.  Falls back to β.4 if any β.5 resource is missing.
     if (m_Beta5Enabled
-        && m_RifeFlowBilinearPipeline != VK_NULL_HANDLE
         && m_RifeNativeWarpPipeline   != VK_NULL_HANDLE
         && m_RifeFlowOutBuf  != VK_NULL_HANDLE
         && m_RifeMaskOutBuf  != VK_NULL_HANDLE
-        && m_RifeFlow1080Buf != VK_NULL_HANDLE
-        && m_RifeMask1080Buf != VK_NULL_HANDLE
-        && m_RifeBilinearUpFlowDs != VK_NULL_HANDLE
-        && m_RifeBilinearUpMaskDs != VK_NULL_HANDLE
         && m_RifeNativeWarpDs     != VK_NULL_HANDLE) {
 
         if (!m_RifeNative->runInferenceGpuFlow(cmd, slotIdx,
@@ -6553,82 +6577,14 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
         }
         writeTs(3);  // β.5 timing: RIFE inference complete, "median" GPU-PROF slot
 
-        // Barriers: flow + mask outputs from RIFE are in TRANSFER_WRITE
-        // (vkCmdCopyBuffer'd into them inside runInferenceGpuFlow).
-        // Promote to SHADER_READ for bilinear up.
+        // β.5.1: skip bilinear UPs.  Just transition flow + mask + src buffers
+        // for the native warp shader which samples flow+mask at infer dim.
         bufBarrier(m_RifeFlowOutBuf,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
         bufBarrier(m_RifeMaskOutBuf,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-        // m_RifeFlow1080Buf / m_RifeMask1080Buf — previous frame's state was
-        // SHADER_READ (warp consumed them). Now writing → barrier RAW.
-        bufBarrier(m_RifeFlow1080Buf,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT);
-        bufBarrier(m_RifeMask1080Buf,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT);
-
-        // ---- Bilinear up flow (with magnitude scaling) ----
-        struct FlowBilinearPC {
-            int32_t inH, inW, outH, outW;
-            int32_t channels;
-            float   scaleH, scaleW;
-            float   magScaleX, magScaleY;
-        };
-        {
-            pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               m_RifeFlowBilinearPipeline);
-            pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               m_RifeFlowBilinearPipeLay, 0, 1,
-                               &m_RifeBilinearUpFlowDs, 0, nullptr);
-            FlowBilinearPC pcF;
-            pcF.inH = m_RifeNativeInferH; pcF.inW = m_RifeNativeInferW;
-            pcF.outH = (int)height;       pcF.outW = (int)width;
-            pcF.channels = 4;
-            pcF.scaleH = (float)pcF.inH / (float)pcF.outH;
-            pcF.scaleW = (float)pcF.inW / (float)pcF.outW;
-            pcF.magScaleX = (float)pcF.outW / (float)pcF.inW;
-            pcF.magScaleY = (float)pcF.outH / (float)pcF.inH;
-            pfnCmdPushConst(cmd, m_RifeFlowBilinearPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
-                            0, sizeof(pcF), &pcF);
-            pfnCmdDispatch(cmd, ((uint32_t)width + 7) / 8, ((uint32_t)height + 7) / 8, 4);
-        }
-        // ---- Bilinear up mask (no magnitude scaling — base bilinear shader) ----
-        struct MaskBilinearPC {
-            int32_t inH, inW, outH, outW;
-            int32_t channels;
-            float   scaleH, scaleW;
-        };
-        {
-            pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               m_RifeBilinearPipeline);
-            pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               m_RifeBilinearPipeLay, 0, 1,
-                               &m_RifeBilinearUpMaskDs, 0, nullptr);
-            MaskBilinearPC pcM;
-            pcM.inH = m_RifeNativeInferH; pcM.inW = m_RifeNativeInferW;
-            pcM.outH = (int)height;       pcM.outW = (int)width;
-            pcM.channels = 1;
-            pcM.scaleH = (float)pcM.inH / (float)pcM.outH;
-            pcM.scaleW = (float)pcM.inW / (float)pcM.outW;
-            pfnCmdPushConst(cmd, m_RifeBilinearPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
-                            0, sizeof(pcM), &pcM);
-            pfnCmdDispatch(cmd, ((uint32_t)width + 7) / 8, ((uint32_t)height + 7) / 8, 1);
-        }
-
-        // ---- Pre-warp barriers ----
-        bufBarrier(m_RifeFlow1080Buf,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-        bufBarrier(m_RifeMask1080Buf,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-        // m_FrucCurrRgbBuf / m_FrucPrevRgbBuf are still in TRANSFER_READ
-        // from the bilinear DOWN earlier (no DOWN dispatch wrote them).
-        // Promote to SHADER_READ for warp.
         bufBarrier(m_FrucCurrRgbBuf,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
@@ -6642,15 +6598,24 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_SHADER_WRITE_BIT);
 
-        // ---- Native-res warp+blend ----
-        struct WarpPC { int32_t W, H, _pad0, _pad1; };
+        // ---- Native-res warp+blend (β.5.1: samples flow at infer dim directly) ----
+        struct WarpPC {
+            int32_t W, H, inferW, inferH;
+            float   magScaleX, magScaleY;
+            int32_t _pad0, _pad1;
+        };
         {
             pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                m_RifeNativeWarpPipeline);
             pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                m_RifeNativeWarpPipeLay, 0, 1,
                                &m_RifeNativeWarpDs, 0, nullptr);
-            WarpPC pcW = { (int32_t)width, (int32_t)height, 0, 0 };
+            WarpPC pcW;
+            pcW.W = (int32_t)width;  pcW.H = (int32_t)height;
+            pcW.inferW = m_RifeNativeInferW;  pcW.inferH = m_RifeNativeInferH;
+            pcW.magScaleX = (float)width  / (float)pcW.inferW;
+            pcW.magScaleY = (float)height / (float)pcW.inferH;
+            pcW._pad0 = 0; pcW._pad1 = 0;
             pfnCmdPushConst(cmd, m_RifeNativeWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
                             0, sizeof(pcW), &pcW);
             pfnCmdDispatch(cmd, ((uint32_t)width + 7) / 8, ((uint32_t)height + 7) / 8, 3);
@@ -6662,9 +6627,9 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
         bool exp = false;
         if (s_b5LogOnce.compare_exchange_strong(exp, true)) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-RIFE-β5] β.5 chain active: RIFE flow %dx%d + mask → "
-                "bilinear up to %ux%u + native warp at source res "
-                "(eliminates β.4 bilinear-up-RGB blur)",
+                "[VIPLE-VKFRUC-RIFE-β5] β.5.1 chain active: RIFE flow+mask at "
+                "%dx%d (infer dim) → native warp samples bilinear in shader → "
+                "%ux%u interp out (no 1080p flow buffers, no separate UP dispatch)",
                 m_RifeNativeInferW, m_RifeNativeInferH, width, height);
         }
         return true;
