@@ -6456,9 +6456,20 @@ struct RifeNativeExecutor::Impl {
     PFN_vkDestroyFence              pfnDestroyFc = nullptr;
     PFN_vkWaitForFences             pfnWaitFc    = nullptr;
     PFN_vkResetFences               pfnResetFc   = nullptr;
+    PFN_vkCreateDescriptorPool      pfnCreateDP  = nullptr;
+    PFN_vkDestroyDescriptorPool     pfnDestroyDP = nullptr;
     VkFence                         fence        = VK_NULL_HANDLE;
     BlobShape                       outShape{};
     RifeNativeExecutor::LastTiming  lastTiming{};
+
+    // §J.3.e.X Path β.2 — per-frame-slot descriptor pools.  Empty when
+    // numFrameSlots <= 1 (synchronous runInference path uses state.descPool
+    // exclusively).  When > 1, runInferenceGpu(slotIdx) swaps state.descPool
+    // to slotDescPools[slotIdx % size()] and resets it; caller's fence wait
+    // guarantees safety of the reset.  state.descPool stays as the original
+    // synchronous pool (kept for runInference compatibility — never freed
+    // mid-flight by the GPU path).
+    std::vector<VkDescriptorPool>   slotDescPools;
 };
 
 RifeNativeExecutor::RifeNativeExecutor() : m_impl(new Impl) {}
@@ -6528,12 +6539,44 @@ bool RifeNativeExecutor::initialize(const InitOptions& opts) {
     m_impl->pfnDestroyFc = (PFN_vkDestroyFence)getDev("vkDestroyFence");
     m_impl->pfnWaitFc    = (PFN_vkWaitForFences)getDev("vkWaitForFences");
     m_impl->pfnResetFc   = (PFN_vkResetFences)getDev("vkResetFences");
+    m_impl->pfnCreateDP  = (PFN_vkCreateDescriptorPool)getDev("vkCreateDescriptorPool");
+    m_impl->pfnDestroyDP = (PFN_vkDestroyDescriptorPool)getDev("vkDestroyDescriptorPool");
     if (!m_impl->pfnResetDP || !m_impl->pfnResetCP
         || !m_impl->pfnBegin || !m_impl->pfnEnd  || !m_impl->pfnSubmit
         || !m_impl->pfnCreateFc || !m_impl->pfnDestroyFc
-        || !m_impl->pfnWaitFc || !m_impl->pfnResetFc) {
+        || !m_impl->pfnWaitFc || !m_impl->pfnResetFc
+        || !m_impl->pfnCreateDP || !m_impl->pfnDestroyDP) {
         shutdown();
         return false;
+    }
+
+    // §J.3.e.X Path β.2 — when numFrameSlots > 1, allocate one
+    // descPool per slot.  Pool size matches buildExecState's: 1000 maxSets
+    // / 4000 storage descriptors — plenty for the 389 dispatches RIFE
+    // emits per frame.
+    if (opts.numFrameSlots > 1) {
+        m_impl->slotDescPools.assign((size_t)opts.numFrameSlots, VK_NULL_HANDLE);
+        for (int s = 0; s < opts.numFrameSlots; ++s) {
+            VkDescriptorPoolSize sz = {};
+            sz.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            sz.descriptorCount = 4 * 1000;
+            VkDescriptorPoolCreateInfo dpCi = {};
+            dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            dpCi.maxSets = 1000;
+            dpCi.poolSizeCount = 1;
+            dpCi.pPoolSizes = &sz;
+            if (m_impl->pfnCreateDP(m_impl->state.device, &dpCi, nullptr,
+                                     &m_impl->slotDescPools[s]) != VK_SUCCESS) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] init: failed to allocate slot descPool %d/%d",
+                    s, opts.numFrameSlots);
+                shutdown();
+                return false;
+            }
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-RIFE-VK] β.2 per-slot descPools ready (%d slots × 1000 sets each)",
+            opts.numFrameSlots);
     }
 
     VkFenceCreateInfo fci = {};
@@ -6591,6 +6634,17 @@ void RifeNativeExecutor::shutdown() {
         m_impl->pfnDestroyFc(m_impl->state.device, m_impl->fence, nullptr);
         m_impl->fence = VK_NULL_HANDLE;
     }
+    // §J.3.e.X Path β.2 — release per-slot descPools (created lazily when
+    // numFrameSlots > 1; vector is empty for synchronous-only setups).
+    if (m_impl->pfnDestroyDP) {
+        for (VkDescriptorPool& p : m_impl->slotDescPools) {
+            if (p != VK_NULL_HANDLE) {
+                m_impl->pfnDestroyDP(m_impl->state.device, p, nullptr);
+                p = VK_NULL_HANDLE;
+            }
+        }
+    }
+    m_impl->slotDescPools.clear();
     destroyExecState(m_impl->state);
     m_impl->shapes.clear();
     m_impl->model = {};
@@ -6693,6 +6747,152 @@ bool RifeNativeExecutor::runInference(const float* in0Data,
     m_impl->lastTiming.gpuWaitMs  = ms(tWait   - tRecord);
     m_impl->lastTiming.readbackMs = ms(tEnd    - tWait);
     return true;
+}
+
+// §J.3.e.X Path β.2 — GPU-resident inference: record dispatches into
+// caller's cmd buffer instead of running our own submit/fence-wait cycle.
+// Used by VkFrucRenderer::runRifeNativeStage to fold RIFE inference into
+// the FRUC compute chain's existing single-submit cadence.
+bool RifeNativeExecutor::runInferenceGpu(void* cmdRaw,
+                                         uint32_t slotIdx,
+                                         void* in0BufRaw,
+                                         void* in1BufRaw,
+                                         float timestep,
+                                         void* out0BufRaw)
+{
+    if (!m_impl || !m_impl->initialized) return false;
+    auto cmd     = (VkCommandBuffer)cmdRaw;
+    auto in0Buf  = (VkBuffer)in0BufRaw;
+    auto in1Buf  = (VkBuffer)in1BufRaw;
+    auto out0Buf = (VkBuffer)out0BufRaw;
+    if (cmd == VK_NULL_HANDLE
+        || in0Buf  == VK_NULL_HANDLE
+        || in1Buf  == VK_NULL_HANDLE
+        || out0Buf == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (m_impl->slotDescPools.empty()) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-RIFE-VK] runInferenceGpu requires InitOptions::numFrameSlots>1");
+        return false;
+    }
+    const uint32_t slot = slotIdx % (uint32_t)m_impl->slotDescPools.size();
+
+    auto& st = m_impl->state;
+
+    // β.2 per-slot descPool: swap state.descPool to this slot's pool, reset
+    // (safe — caller's slot fence wait guarantees the previous cmd buffer
+    // referencing this slot's descSets has retired).  Other slots' pools
+    // are untouched, so cmd buffers for those slots stay valid.
+    VkDescriptorPool savedDescPool = st.descPool;
+    st.descPool = m_impl->slotDescPools[slot];
+    m_impl->pfnResetDP(st.device, st.descPool, 0);
+
+    auto in0It = st.buffers.blobs.find(QStringLiteral("in0"));
+    auto in1It = st.buffers.blobs.find(QStringLiteral("in1"));
+    auto in2It = st.buffers.blobs.find(QStringLiteral("in2"));
+    auto outIt = st.buffers.blobs.find(QStringLiteral("out0"));
+    if (in0It == st.buffers.blobs.end() || in1It == st.buffers.blobs.end()
+        || in2It == st.buffers.blobs.end() || outIt == st.buffers.blobs.end()) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-RIFE-VK] runInferenceGpu: in0/in1/in2/out0 blob missing");
+        st.descPool = savedDescPool;
+        return false;
+    }
+
+    // Swap caller's cmd buffer in temporarily so dispatchLayer records into
+    // it.  Restored before return.
+    VkCommandBuffer savedCmd = st.cmd;
+    st.cmd = cmd;
+
+    // Stage in0/in1 from caller's buffers into RIFE's blob buffers.  These
+    // are DEVICE_LOCAL so we use vkCmdCopyBuffer rather than CPU memcpy.
+    // Caller is responsible for placing in0/in1 in TRANSFER_SRC before
+    // calling (we add the TRANSFER_SRC barrier ourselves on out0Buf below).
+    {
+        VkBufferCopy r0 = {}; r0.size = in0It->second.size;
+        VkBufferCopy r1 = {}; r1.size = in1It->second.size;
+        st.pfnCopyBuf(cmd, in0Buf, in0It->second.buf, 1, &r0);
+        st.pfnCopyBuf(cmd, in1Buf, in1It->second.buf, 1, &r1);
+    }
+
+    // in2 is a single fp32 — write via mapped pointer (DEVICE_LOCAL with
+    // BAR-resident host pointer is the executor's standard config).  HOST
+    // write needs a HOST→COMPUTE_SHADER barrier visible to in2's storage
+    // buffer load.
+    if (in2It->second.mapped) {
+        std::memcpy(in2It->second.mapped, &timestep, sizeof(float));
+    } else {
+        // Fallback: blob not mapped (atypical path).  Skip — first frame
+        // will see stale t but executor still produces a valid frame.
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-RIFE-VK] runInferenceGpu: in2 blob not host-mapped — "
+            "timestep update skipped (first frame may use stale t)");
+    }
+
+    // Barrier to make TRANSFER_WRITE on in0/in1 + HOST_WRITE on in2 visible
+    // to first compute dispatch.
+    {
+        VkBufferMemoryBarrier bmb[3] = {};
+        for (int i = 0; i < 3; ++i) {
+            bmb[i].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            bmb[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bmb[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bmb[i].size = VK_WHOLE_SIZE;
+            bmb[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+        bmb[0].buffer        = in0It->second.buf;
+        bmb[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bmb[1].buffer        = in1It->second.buf;
+        bmb[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bmb[2].buffer        = in2It->second.buf;
+        bmb[2].srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        st.pfnBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, nullptr, 3, bmb, 0, nullptr);
+    }
+
+    // Run all 389 layers' dispatches.  emitComputeBarrier inserts the
+    // necessary read-after-write fence between consecutive dispatches.
+    bool dispatchOk = true;
+    for (const Layer& L : m_impl->model.layers) {
+        if (L.kind == OpKind::Input || L.kind == OpKind::MemoryData) continue;
+        if (!dispatchLayer(st, L)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] runInferenceGpu: dispatch FAILED at '%s' (%s)",
+                qUtf8Printable(L.name), opKindName(L.kind));
+            dispatchOk = false;
+            break;
+        }
+        emitComputeBarrier(st);
+    }
+
+    if (dispatchOk) {
+        // Barrier out0 blob SHADER_WRITE → TRANSFER_READ then copy into
+        // caller's out0Buf.  Caller is responsible for any further barrier
+        // (e.g. TRANSFER_WRITE → SHADER_READ for downstream display).
+        VkBufferMemoryBarrier obar = {};
+        obar.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        obar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        obar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        obar.size = VK_WHOLE_SIZE;
+        obar.buffer        = outIt->second.buf;
+        obar.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        obar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        st.pfnBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 1, &obar, 0, nullptr);
+
+        VkBufferCopy outRegion = {};
+        outRegion.size = outIt->second.size;
+        st.pfnCopyBuf(cmd, outIt->second.buf, out0Buf, 1, &outRegion);
+    }
+
+    st.cmd      = savedCmd;
+    st.descPool = savedDescPool;
+    return dispatchOk;
 }
 
 RifeNativeExecutor::LastTiming RifeNativeExecutor::lastTiming() const {

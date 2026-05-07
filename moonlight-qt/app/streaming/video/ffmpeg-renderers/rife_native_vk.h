@@ -407,6 +407,16 @@ public:
         // appended).  Cache binaries are GPU+driver-version specific
         // — Vulkan validates header before using.
         QString    pipelineCachePath;
+
+        // §J.3.e.X Path β.2 — number of in-flight frame slots the caller
+        // ring-rotates between when calling runInferenceGpu().  We allocate
+        // one descriptor pool per slot so each frame's descSets can be
+        // freed independently — the caller's slot fence wait guarantees
+        // the slot's prior cmd buffer has retired before reuse, which is
+        // exactly when it's safe to vkResetDescriptorPool that slot's pool.
+        // Default 1 retains the synchronous runInference() behavior.
+        // VkFrucRenderer passes kFrucFramesInFlight (= 2) here.
+        int        numFrameSlots = 1;
     };
 
     RifeNativeExecutor();
@@ -431,6 +441,39 @@ public:
                       const float* in1Data,
                       float        timestep,
                       float*       out0Data);
+
+    // §J.3.e.X Path β.2 — GPU-resident hand-off.  Records dispatches into
+    // caller's already-`vkBeginCommandBuffer`'d cmd buffer; caller owns
+    // submit + fence-wait.
+    //
+    //   cmd       — VkCommandBuffer in the recording state
+    //   in0Buf    — VkBuffer (DEVICE_LOCAL, fp32 CHW) sized
+    //               in0Shape.c * .h * .w * sizeof(float), TRANSFER_SRC usage
+    //   in1Buf    — same shape semantics, sized in1Shape
+    //   timestep  — fp32 scalar, [0..1] (DUAL midpoint = 0.5)
+    //   out0Buf   — VkBuffer (DEVICE_LOCAL, fp32 CHW) sized
+    //               outputShape().c * .h * .w * sizeof(float), TRANSFER_DST usage
+    //
+    // Internal blob buffers stay resident across calls (descriptor pool reset
+    // each call so descSets re-allocate cleanly).  Returns false if executor
+    // not initialized() or any layer dispatch fails.  Does NOT call
+    // vkEndCommandBuffer / vkQueueSubmit / vkWaitForFences — caller's
+    // responsibility.
+    //
+    // Pointer types are erased to void* so VkFrucRenderer / other callers
+    // don't need to leak vulkan.h into headers that pull in this one.
+    //
+    // slotIdx must be < InitOptions::numFrameSlots and identifies which
+    // descriptor pool to reset+allocate from.  Caller must guarantee that
+    // any prior runInferenceGpu(slotIdx=S, ...) submission has fully
+    // retired before the next call with the same S — typically by waiting
+    // the cmd buffer's in-flight fence at slot rotation time.
+    bool runInferenceGpu(void* /*VkCommandBuffer*/ cmd,
+                         uint32_t           slotIdx,
+                         void* /*VkBuffer*/ in0Buf,
+                         void* /*VkBuffer*/ in1Buf,
+                         float              timestep,
+                         void* /*VkBuffer*/ out0Buf);
 
     // §J.3.e.Y 4Y.0 — per-phase wall-clock breakdown of the most
     // recent runInference call.  Phases:

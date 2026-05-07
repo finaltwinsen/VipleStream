@@ -28,6 +28,13 @@
 #include <thread>
 #include <vector>
 
+// §J.3.e.X Path β — native RIFE Vulkan executor (re-uses VkFrucRenderer's
+// VkInstance / VkDevice / universal queue, avoiding the dual-VkDevice
+// VK_ERROR_INITIALIZATION_FAILED that NV driver 596.144 hits when ncnn
+// already holds one device).  Forward-declared via the existing header
+// (cheap include — uses Qt strings + STL only).
+#include "rife_native_vk.h"
+
 // §J.3.e.2.i.8 Phase 1.1d — forward decl from nvvideoparser; full def lives in
 // 3rdparty/nvvideoparser/include/vkvideo_parser/StdVideoPictureParametersSet.h
 // and is only pulled in by vkfruc-decode.cpp (keeps vkfruc.cpp's #include set
@@ -853,6 +860,32 @@ private:
     // 第二份 warp desc set，binding 3 (output) → m_FrucInterpRgbBuf2.
     // 其餘 binding 跟 m_FrucWarpDescSet 共用 (prev/curr/mv_filtered).
     VkDescriptorSet m_FrucWarpDescSet2 = VK_NULL_HANDLE;
+
+    // === §J.3.e.X Path β — native RIFE Vulkan integration ===
+    // 共用 VkFrucRenderer 的 m_Instance / m_PhysicalDevice / m_Device /
+    // m_GraphicsQueue 給 RifeNativeExecutor 用，規避 ncnnfruc Final.3b
+    // 在 NV driver 596.144 撞到的 dual-VkDevice INITIALIZATION_FAILED.
+    //
+    // β.1 (this scaffold): init-only proof-of-life — verifies
+    //   RifeNativeExecutor.initialize() works on VkFrucRenderer 的 VkDevice.
+    //   不換 chain；ME→median→warp 路徑保留.
+    // β.2 (next):           runInferenceGpu(cmd, in0Buf, in1Buf, t, outBuf)
+    //   接到 chain 上替換 ME/median/warp.
+    // Gated by VIPLE_VKFRUC_NATIVE_RIFE=1.
+    viple::rife_native_vk::RifeNativeExecutor* m_RifeNative = nullptr;
+    bool m_RifeNativeMode  = false;   // env var read at ctor
+    bool m_RifeNativeReady = false;   // initialize() returned true
+    int  m_RifeNativeInferW = 0;      // β.1 = src W, β.4 = 384
+    int  m_RifeNativeInferH = 0;
+    bool createRifeNativeResources(int width, int height);
+    void destroyRifeNativeResources();
+    // β.2 chain replacement: records vkCmdCopyBuffer (curr/prev → in0/in1)
+    // + RIFE inference dispatches + vkCmdCopyBuffer (out0 → m_FrucInterpRgbBuf)
+    // into `cmd`.  Caller (runFrucComputeChain) owns the cmd buffer; this
+    // does not submit.  Returns false if executor not ready or any layer
+    // dispatch fails — caller should fall back to ME/median/warp.
+    bool runRifeNativeStage(VkCommandBuffer cmd, uint32_t width, uint32_t height,
+                            uint32_t slotIdx);
 
     VkDescriptorPool m_FrucDescPool = VK_NULL_HANDLE;
 

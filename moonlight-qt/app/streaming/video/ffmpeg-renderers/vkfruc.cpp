@@ -3,6 +3,7 @@
 
 #include "vkfruc.h"
 #include "vkfruc-aftermath.h"
+#include "path.h"  // §J.3.e.X Path β — Path::getDataFilePath / getCacheFileInfo for RIFE model + pipeline cache
 #include "settings/streamingpreferences.h"
 
 // VipleStream §K.1: strncpy_s + _TRUNCATE are MSVC bounds-checked CRT.
@@ -177,10 +178,26 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     // upgrades dual-present to triple-present; only meaningful when both
     // FRUC + DualMode are already on.
     m_TripleMode = m_DualMode && m_FrucMode && vkfrucWantTripleFromUserOrEnv();
+
+    // §J.3.e.X Path β — native RIFE Vulkan integration env-var gate.
+    // β.1 stage = init-only proof of life; chain swap lands in β.2.
+    // Requires FRUC; conflicts with TRIPLE (β.3 lifts that).
+    m_RifeNativeMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_RIFE") != 0;
+    if (m_RifeNativeMode && !m_FrucMode) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-RIFE-β] VIPLE_VKFRUC_NATIVE_RIFE=1 requires FRUC; ignoring");
+        m_RifeNativeMode = false;
+    }
+    if (m_RifeNativeMode && m_TripleMode) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-RIFE-β] β.1/β.2 不支援 TRIPLE — 本次回到 block-match warp");
+        m_RifeNativeMode = false;   // β.3 lift
+    }
+
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d, frucMode=%d, dualMode=%d, tripleMode=%d, prefs=%s)",
+                "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d, frucMode=%d, dualMode=%d, tripleMode=%d, rifeNative=%d, prefs=%s)",
                 pass, m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0,
-                m_TripleMode ? 1 : 0,
+                m_TripleMode ? 1 : 0, m_RifeNativeMode ? 1 : 0,
                 prefsWantVulkan ? "RS_VULKAN" : "n/a");
 }
 
@@ -5521,13 +5538,24 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                      m_FrucMvFilteredBuf, m_FrucMvFilteredMem)
         || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                      m_FrucPrevMvBuf, m_FrucPrevMvMem)
-        || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        // §B-DUMP needs TRANSFER_SRC for vkCmdCopyBuffer interp → staging.
+        // §J.3.e.X Path β.2 需要 TRANSFER_DST 因為 RifeNativeExecutor.
+        // runInferenceGpu 內部 vkCmdCopyBuffer(out0_blob → m_FrucInterpRgbBuf)
+        // 把 RIFE 推論結果搬進來；warp shader 寫的時候是 STORAGE，但 RIFE
+        // 路徑改成 transfer write — 兩個 path 共用一個 buffer 都需要支援.
+        || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                            | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                            | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                      m_FrucInterpRgbBuf, m_FrucInterpRgbMem)
         // §B2 2026-05-06 — TRIPLE 第二份 interp output buffer.
         // 在 createFrucComputeResources 永遠 alloc 一份（即使 dual mode 也
         // 浪費一塊 buffer），保持 VkDescriptorSet update 邏輯簡單；single-
         // present 模式已 short-circuit 不會 alloc 整個 FRUC chain.
-        || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        // (TRANSFER_SRC/DST 同上 reasons — 即使 β.1/β.2 不用 TRIPLE，
+        // §B-DUMP 還是會 copy 它）.
+        || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                            | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                            | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                      m_FrucInterpRgbBuf2, m_FrucInterpRgbBuf2Mem)
         // §B1a — NV12 mirror, TRANSFER_DST so HW path's cmdCopyImageToBuffer
         // can write into it; STORAGE_BUFFER so NV12→RGB compute reads as
@@ -5671,6 +5699,18 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // (so dump staging size matches actual buffer size).
     initFrameDump();
 
+    // §J.3.e.X Path β — eager init of native RIFE executor (β.1 = init-only
+    // proof of life on this VkDevice; β.2 will wire it into runFrucComputeChain).
+    // Failure non-fatal: m_RifeNativeReady stays false, block-match remains active.
+    if (m_RifeNativeMode) {
+        if (!createRifeNativeResources(width, height)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-RIFE-β] init failed — block-match path remains active");
+            m_RifeNativeMode  = false;
+            m_RifeNativeReady = false;
+        }
+    }
+
     return true;
 }
 
@@ -5678,6 +5718,11 @@ void VkFrucRenderer::destroyFrucComputeResources()
 {
     if (!m_FrucReady && !m_FrucMePipeline) return;
     if (m_Device == VK_NULL_HANDLE) return;
+
+    // §J.3.e.X Path β — tear down native RIFE first.  Holds VkPipelines /
+    // VkBuffers tied to m_Device so it must release before the device-level
+    // teardown below.
+    destroyRifeNativeResources();
 
     // §B-DUMP — tear down dump first (joins writer thread, frees staging).
     teardownFrameDump();
@@ -5751,6 +5796,206 @@ void VkFrucRenderer::destroyFrucComputeResources()
     }
 
     m_FrucReady = false;
+}
+
+// =================================================================
+// §J.3.e.X Path β — native RIFE Vulkan integration
+// =================================================================
+//
+// β.1 (this scaffold): init-only proof of life.  Constructs a
+// RifeNativeExecutor on VkFrucRenderer 既有的 m_Instance / m_Device /
+// m_GraphicsQueue 並 call initialize().  Verifies that the Path β
+// premise holds —— ncnnfruc Final.3b 在 NV driver 596.144 撞到的
+// dual-VkDevice INITIALIZATION_FAILED 不再發生（因為 Path β
+// 完全跳過 ncnn::create_gpu_instance() 的 dedicated VkDevice）.
+//
+// 不換 chain；ME→median→warp 路徑保留．成功只會在 log 印一行
+// `[VIPLE-VKFRUC-RIFE-β] init OK ...`，跟著啟動 stream 後接 β.2.
+//
+// β.2 (next phase): adds runInferenceGpu(cmd, in0, in1, t, out)
+// public API on RifeNativeExecutor + Site 4 chain branch in
+// runFrucComputeChain.
+
+bool VkFrucRenderer::createRifeNativeResources(int width, int height)
+{
+    if (m_RifeNativeReady) return true;
+    if (m_Device == VK_NULL_HANDLE
+        || m_PhysicalDevice == VK_NULL_HANDLE
+        || m_Instance == VK_NULL_HANDLE
+        || m_GraphicsQueue == VK_NULL_HANDLE
+        || !m_pfnGetInstanceProcAddr) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-RIFE-β] handles not ready — abort init");
+        return false;
+    }
+
+    // β.1: infer dim = source dim (full-res).  β.4 將改為 min(384, width)
+    // 並補上 bilinear down/up wrapper.  目前 init-only proof of life，full-res
+    // 即使 inference perf 不好也只在跑 chain 時才會痛 — β.1 不跑 chain.
+    m_RifeNativeInferW = width;
+    m_RifeNativeInferH = height;
+
+    viple::rife_native_vk::VulkanCtx ctx;
+    ctx.instance            = m_Instance;
+    ctx.physicalDevice      = m_PhysicalDevice;
+    ctx.device              = m_Device;
+    ctx.computeQueueFamily  = m_QueueFamily;
+    ctx.computeQueue        = m_GraphicsQueue;
+    ctx.getInstanceProcAddr = (void*)m_pfnGetInstanceProcAddr;
+
+    QString modelDir = Path::getDataFilePath(QString::fromLatin1("rife-v4.25-lite"));
+    if (modelDir.isEmpty()) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-RIFE-β] init failed: rife-v4.25-lite model dir not found "
+            "(expected via Path::getDataFilePath)");
+        return false;
+    }
+
+    viple::rife_native_vk::RifeNativeExecutor::InitOptions opts;
+    opts.ctx = ctx;
+    opts.modelDir = modelDir;
+    opts.in0Shape.c = 3;
+    opts.in0Shape.h = m_RifeNativeInferH;
+    opts.in0Shape.w = m_RifeNativeInferW;
+    opts.in1Shape.c = 3;
+    opts.in1Shape.h = m_RifeNativeInferH;
+    opts.in1Shape.w = m_RifeNativeInferW;
+    opts.in2Shape.c = 1;
+    opts.in2Shape.h = 1;
+    opts.in2Shape.w = 1;
+    // Cross-launch pipeline cache — saves ~50-300ms on cold start once
+    // populated.  Distinct file from ncnnfruc Final.3b 的 cache so Path β
+    // 跟 NCNN swap 各自累積（GPU+driver 版本相依，不能跨用）.
+    opts.pipelineCachePath = Path::getCacheFileInfo(
+        QString::fromLatin1("rife_vkfruc_path_b_pipe.cache"))
+        .absoluteFilePath();
+    // β.2 — VkFrucRenderer 用 kFrucFramesInFlight (=2) 個 cmd buf ring.
+    // 對齊 RifeNativeExecutor 的 per-slot descPool 數量，這樣 runInferenceGpu
+    // 拿到 slotIdx 就能 reset 對應的 pool（前一個 cmd 已經 retire 過 fence wait）.
+    opts.numFrameSlots = (int)kFrucFramesInFlight;
+
+    m_RifeNative = new viple::rife_native_vk::RifeNativeExecutor();
+    if (!m_RifeNative->initialize(opts)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-RIFE-β] init failed: RifeNativeExecutor.initialize() "
+            "returned false (modelDir=%s, infer=%dx%d) — block-match path "
+            "remains active",
+            qUtf8Printable(modelDir),
+            m_RifeNativeInferW, m_RifeNativeInferH);
+        delete m_RifeNative;
+        m_RifeNative = nullptr;
+        return false;
+    }
+
+    auto outShape = m_RifeNative->outputShape();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-RIFE-β] init OK inferDim=%dx%d outShape=%dx%dx%d "
+        "modelDir=%s cache=%s",
+        m_RifeNativeInferW, m_RifeNativeInferH,
+        outShape.c, outShape.h, outShape.w,
+        qUtf8Printable(modelDir),
+        qUtf8Printable(opts.pipelineCachePath));
+
+    m_RifeNativeReady = true;
+    return true;
+}
+
+void VkFrucRenderer::destroyRifeNativeResources()
+{
+    if (!m_RifeNative) return;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-RIFE-β] tearing down native RIFE executor");
+
+    m_RifeNative->shutdown();
+    delete m_RifeNative;
+    m_RifeNative      = nullptr;
+    m_RifeNativeReady = false;
+    m_RifeNativeInferW = 0;
+    m_RifeNativeInferH = 0;
+}
+
+bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
+                                         uint32_t width, uint32_t height,
+                                         uint32_t slotIdx)
+{
+    if (!m_RifeNativeReady || !m_RifeNative) return false;
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(
+        m_Device, "vkCmdPipelineBarrier");
+    if (!pfnCmdPipelineBarrier) return false;
+
+    auto bufBarrier = [&](VkBuffer b,
+                          VkPipelineStageFlags srcStage,
+                          VkPipelineStageFlags dstStage,
+                          VkAccessFlags srcAcc, VkAccessFlags dstAcc) {
+        VkBufferMemoryBarrier bmb = {};
+        bmb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bmb.srcAccessMask = srcAcc;
+        bmb.dstAccessMask = dstAcc;
+        bmb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb.buffer = b;
+        bmb.size = VK_WHOLE_SIZE;
+        pfnCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 1, &bmb, 0, nullptr);
+    };
+
+    // Stage 0 (NV12→RGB) just left m_FrucCurrRgbBuf in COMPUTE_SHADER_WRITE
+    // (post-`computeBufBarrier(m_FrucCurrRgbBuf)` at chain line 6026 →
+    // dstAccess=SHADER_READ).  Promote to TRANSFER_READ for runInferenceGpu's
+    // vkCmdCopyBuffer into RIFE's "in1" blob.  Same for prev which is in
+    // COMPUTE_SHADER_READ from the previous frame's stage-4 barrier.
+    bufBarrier(m_FrucCurrRgbBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    bufBarrier(m_FrucPrevRgbBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+
+    // m_FrucInterpRgbBuf: caller will read it as TRANSFER_DST inside
+    // runInferenceGpu.  Previous frame's last touch was either
+    // computeBufBarrier (SHADER_READ) or this same TRANSFER_WRITE if RIFE
+    // path ran last frame.  Either way → TRANSFER_WRITE for the copy below.
+    bufBarrier(m_FrucInterpRgbBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT);
+
+    // β.1 / β.2 共用：DUAL midpoint (t=0.5).  TRIPLE 因為 β.3 還沒做，
+    // m_RifeNativeMode 在 ctor 已被 force off 當 m_TripleMode 開啟，
+    // 所以這裡保證 dual-only.
+    const float t = 0.5f;
+    if (!m_RifeNative->runInferenceGpu(cmd, slotIdx,
+            m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, t, m_FrucInterpRgbBuf)) {
+        // Inference failed — caller should fall back to ME/median/warp.
+        // Note: we already issued TRANSFER_READ barriers on prev/curr; the
+        // fallback chain will issue its own COMPUTE_SHADER_READ barriers
+        // implicitly via descriptor set + dispatch (read→read = no-op sync).
+        return false;
+    }
+
+    // RIFE just wrote m_FrucInterpRgbBuf (via internal vkCmdCopyBuffer of
+    // out0 blob → m_FrucInterpRgbBuf), leaving it in TRANSFER_WRITE state.
+    // Promote to COMPUTE_SHADER_READ so the existing renderFrame /
+    // renderFrameSw barrier (COMPUTE_SHADER → FRAGMENT_SHADER for interp
+    // display) sees the same starting state the warp shader leaves.
+    bufBarrier(m_FrucInterpRgbBuf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+    // Restore curr/prev to COMPUTE_SHADER_READ to match the state stage 4
+    // barrier (curr→prev copy) expects.
+    bufBarrier(m_FrucCurrRgbBuf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+    bufBarrier(m_FrucPrevRgbBuf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+    return true;
 }
 
 // §J.3.e.2.i.4 — record FRUC compute chain into the existing renderFrame
@@ -5883,6 +6128,49 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                              m_FrucTimerPool, timerBase + 1);
     }
 
+    // §J.3.e.X Path β.2 — RIFE inference replaces ME→median→warp.  Runs in
+    // place of stages 1+2+3 when m_RifeNativeReady; failure falls through
+    // to the existing block-match path (so RIFE init issues never crater
+    // the chain).  Stage 4 (curr→prev copy) still runs at the bottom of
+    // this function.
+    bool rifeHandled = false;
+    if (m_RifeNativeReady) {
+        if (runRifeNativeStage(cmd, width, height, slotIdx)) {
+            rifeHandled = true;
+            // Synthesize ts[2..4] so [VIPLE-VKFRUC-GPU-PROF] log can still
+            // compute per-stage deltas — RIFE is one big stage so we
+            // collapse ts[2..4] to the same point right after RIFE finishes.
+            // 4Y.0 timing breakdown is available via
+            // m_RifeNative->lastTiming() if we need finer granularity.
+            if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
+                for (uint32_t i = 2; i <= 4; ++i) {
+                    pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                         m_FrucTimerPool, timerBase + i);
+                }
+            }
+            static std::atomic<bool> s_rifeChainLogged{false};
+            bool exp = false;
+            if (s_rifeChainLogged.compare_exchange_strong(exp, true)) {
+                auto lt = m_RifeNative->lastTiming();
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-RIFE-β] chain swap active — RIFE replaces "
+                    "ME/median/warp (last: seed=%.1fms record=%.1fms gpuWait=%.1fms "
+                    "readback=%.1fms; β.2 GPU-resident path = no readback)",
+                    lt.seedMs, lt.recordMs, lt.gpuWaitMs, lt.readbackMs);
+            }
+        } else {
+            static std::atomic<bool> s_rifeFailLogged{false};
+            bool exp = false;
+            if (s_rifeFailLogged.compare_exchange_strong(exp, true)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-RIFE-β] runRifeNativeStage failed this "
+                    "frame — falling back to ME/median/warp for this and "
+                    "subsequent frames");
+            }
+        }
+    }
+
+    if (!rifeHandled) {
     // §B-NVOF Phase 4d 2026-05-06 — when NV optical flow chain is ready and
     // we have at least 1 prior OF execute (m_NvOfTimelineValue > 0), replace
     // block-matching Stage 1+2 with HW OF result consumption:
@@ -6116,6 +6404,7 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                              m_FrucTimerPool, timerBase + 4);
     }
+    }  // end if (!rifeHandled) — Path β.2 chain branch
 
     // ---- Stage 4 (i.4.1): currRGB → prevRGB for next frame's ME ----
     // ME shader reads (prevRGB, currRGB) — we want prevRGB to be the

@@ -16,7 +16,8 @@
 
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
-| **Active (next)** | **§J.3.e.X Final.3b** native RIFE production integration | Final.1/2/3a milestone done；接進 NcnnFRUC drop-in alternative（env-var gated），4-6h 工程 medium-high risk；ML 補幀路線唯一可超越 NvOFFRUC.dll 的 strategic investment |
+| **Active (next)** | **§J.3.e.X Path β** native RIFE → VkFrucRenderer 整合 | β.1/β.2 ship 2026-05-08（VkFrucRenderer 自帶 VkInstance/VkDevice，繞過 NCNN dual-VkDevice 卡關）；env-var `VIPLE_VKFRUC_NATIVE_RIFE=1` + `VIPLE_VKFRUC_FRUC=1` 啟用；β.4 downscale (1080p→384²) 還沒做，全 res 推論吃滿 16-20ms 60fps DUAL 邊緣，需待 β.4 才能 production default |
+| **Deferred (replaced by Path β)** | **§J.3.e.X Final.3b** native RIFE → NcnnFRUC drop-in | NV 596.144 driver 在 ncnn 已持有 VkDevice 時拒第二次 vkCreateDevice，這條死路；Path β 改成接 VkFrucRenderer 共用 VkDevice 走通了 |
 | **Active (next)** | **§J.3.e.Y 4Y.5b/4Y.6** native RIFE latency 優化 | 22ms → 10ms 內（符合 60fps DUAL 16.7ms budget）；候選 4Y.5b activation fp16 storage / 4Y.6 multi-subgroup WG / 4Y.7 dispatch fusion；1-2 週 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Active** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限） |
