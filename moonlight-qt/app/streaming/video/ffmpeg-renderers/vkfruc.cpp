@@ -6551,6 +6551,7 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
                 m_RifeFlowOutBuf, m_RifeMaskOutBuf)) {
             return false;
         }
+        writeTs(3);  // β.5 timing: RIFE inference complete, "median" GPU-PROF slot
 
         // Barriers: flow + mask outputs from RIFE are in TRANSFER_WRITE
         // (vkCmdCopyBuffer'd into them inside runInferenceGpuFlow).
@@ -6640,8 +6641,6 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_SHADER_WRITE_BIT);
-
-        writeTs(3);  // β.5 timing: after RIFE + flow up
 
         // ---- Native-res warp+blend ----
         struct WarpPC { int32_t W, H, _pad0, _pad1; };
