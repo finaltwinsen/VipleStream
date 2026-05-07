@@ -2741,19 +2741,36 @@ bool NcnnFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp)
     //     some GPUs picks a workgroup size that produces zeros
     // Workaround: log first occurrence so user sees in log; let
     // Generic Compute pick up the slack.
-    static std::atomic<bool> s_zeroLogged{false};
-    {
+    // §J.3.e.X Final.3b 2026-05-08 — when ncnn::Extractor produces all-zero
+    // output (known issue on RTX 3060 + NV 596.144 + ncnn 20220729 + rife.Warp
+    // pack4/pack8 SPIR-V), don't propagate the black frame downstream.  Pre-
+    // viously: extract returns 0, output validates OK shape, code presents
+    // black interp → user sees flicker.  Now: skip-interp this frame so
+    // pacer falls back to real-frame-only (perceived as 30fps stutter, not
+    // black flash).
+    //
+    // This becomes especially important when VIPLE_RIFE_NATIVE_VK_PROD=1 +
+    // probe-bypass active + Final.3b vkCreateDevice fails — that path lands
+    // here and would spam black interp every server frame without this gate.
+    if (!nativeUsed) {
+        static std::atomic<bool> s_zeroLogged{false};
         const float r0 = ((const float*)out_mat.channel(0))[0];
         const float g0 = ((const float*)out_mat.channel(1))[0];
         const float b0 = ((const float*)out_mat.channel(2))[0];
         const float c0 = ((const float*)out_mat.channel(0))[(out_mat.w * out_mat.h) / 2];
         const bool allZero = (r0 == 0.0f && g0 == 0.0f && b0 == 0.0f && c0 == 0.0f);
-        if (allZero && !s_zeroLogged.exchange(true)) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-FRUC-NCNN] RIFE output is all-zero — known issue with "
-                "ncnn-vulkan + rife.Warp on this driver/GPU.  Interp frames "
-                "will display black; use frucBackend=Generic (D3D11 compute) "
-                "for working FRUC.  See ncnn_rife_warp.cpp.");
+        if (allZero) {
+            if (!s_zeroLogged.exchange(true)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] RIFE output is all-zero — known issue with "
+                    "ncnn-vulkan + rife.Warp on this driver/GPU.  Skipping interp "
+                    "frame to prevent black-frame flicker; expect 30fps stutter "
+                    "instead.  Use frucBackend=Generic (D3D11 compute) for working "
+                    "FRUC; or wait for §J.3.e.X Final.3b ML route to land.");
+            }
+            m_PrevMat = curr_mat;
+            m_FrameCount++;
+            return false;  // skip interp this frame — no black flash
         }
     }
 
