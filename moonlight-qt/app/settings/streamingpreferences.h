@@ -207,10 +207,12 @@ public:
     Q_PROPERTY(bool vkfrucEnableTriple MEMBER vkfrucEnableTriple NOTIFY vkfrucEnableTripleChanged)
     // §J.3.e.X Path β — native RIFE Vulkan flow extraction + native-res warp.
     // Beta feature; opt-in default-OFF.  Quality much higher than block-match
-    // (5/5 score 0.95 ≈ perfect midpoint vs block-match 0% effective).  Known
-    // issue 2026-05-08: VK_ERROR_DEVICE_LOST after 30-60s sustained streaming
-    // on RTX 3060 + NV 596.144 driver — root cause needs Nsight Graphics
-    // analysis. RS_D3D11 path 完全 ignore (UI 也只在 RS_VULKAN 時顯示).
+    // (5/5 score 0.95 ≈ perfect midpoint vs block-match 0% effective).
+    // 2026-05-08 β.6 stability fix: VK_ERROR_DEVICE_LOST after 30-60s was
+    // overlay-resize use-after-free in drainOverlayStash; fixed with
+    // vkDeviceWaitIdle before destroying old VkImage on resize.  Beta tag
+    // retained pending multi-GPU / multi-driver validation.
+    // RS_D3D11 path 完全 ignore (UI 也只在 RS_VULKAN 時顯示).
     Q_PROPERTY(bool vkfrucEnableNativeRife MEMBER vkfrucEnableNativeRife NOTIFY vkfrucEnableNativeRifeChanged)
     Q_PROPERTY(int  vkfrucNativeRifeInferDim MEMBER vkfrucNativeRifeInferDim NOTIFY vkfrucNativeRifeInferDimChanged)
     Q_PROPERTY(DesignVariant designVariant MEMBER designVariant NOTIFY designVariantChanged)

@@ -3315,7 +3315,31 @@ void VkFrucRenderer::drainOverlayStash()
 
     // (Re)alloc image if size mismatched (or first time).
     if (m_OverlayWidth[type] != w || m_OverlayHeight[type] != h) {
-        // Free old (if any).
+        // §J.3.e.X Path β crash fix (Aftermath dump 2026-05-08, symbolized
+        // callstack VkFrucRenderer::drawOverlayInRenderPass) — wait for
+        // GPU to finish BEFORE destroying the old overlay image/view.  In
+        // dual-present + Path β path, the chain is 14ms vs block-match 4ms,
+        // so more cmd buffers are in flight per overlay update — multiple
+        // concurrent submits may still reference the old VkImageView via
+        // descriptor sets when surface dimensions change → fragment shader
+        // page-faults on the freed resource → VK_ERROR_DEVICE_LOST after
+        // 30-60s sustained streaming.  Only fires on actual overlay resize
+        // (rare during a stream — typically once at first overlay activation
+        // or when text content changes dim significantly).  Cost: ~1 frame
+        // worth of GPU wait, amortized ~zero per-frame.
+        if (m_OverlayImage[type]) {
+            auto pfnDeviceWaitIdle = (PFN_vkDeviceWaitIdle)
+                ((PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr"))
+                (m_Device, "vkDeviceWaitIdle");
+            if (pfnDeviceWaitIdle) {
+                pfnDeviceWaitIdle(m_Device);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] overlay resize %dx%d → %dx%d — "
+                    "vkDeviceWaitIdle before destroying old image (race fix)",
+                    m_OverlayWidth[type], m_OverlayHeight[type], w, h);
+            }
+        }
+        // Free old (if any) — now safe since GPU has drained any references.
         if (m_OverlayView[type])  { pfnDestroyView(m_Device, m_OverlayView[type], nullptr);   m_OverlayView[type] = VK_NULL_HANDLE; }
         if (m_OverlayImage[type]) { pfnDestroyImage(m_Device, m_OverlayImage[type], nullptr); m_OverlayImage[type] = VK_NULL_HANDLE; }
         if (m_OverlayMem[type])   { pfnFreeMem(m_Device, m_OverlayMem[type], nullptr);        m_OverlayMem[type] = VK_NULL_HANDLE; }

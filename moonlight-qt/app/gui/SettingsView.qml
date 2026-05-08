@@ -959,13 +959,15 @@ Flickable {
                 // §J.3.e.X Path β UI 整合 2026-05-08 — Vulkan-only RIFE
                 // native flow + native-res warp.  Quality 大躍進 vs block-match
                 // (verify_dump score 0.95 ≈ perfect midpoint vs block-match 0%).
-                // 已知 30-60s device-lost crash 在 RTX 3060 + NV 596.144 driver,
-                // 預設 OFF (beta opt-in).  env var VIPLE_VKFRUC_NATIVE_RIFE=1
-                // / VIPLE_VKFRUC_RIFE_INFER_DIM=N 仍是 dev escape hatch.
+                // 30-60s device-lost crash 已修補 (β.6 overlay resize race fix
+                // 2026-05-08，drainOverlayStash 加 vkDeviceWaitIdle 在 destroy
+                // 舊 VkImage 前)，預設仍 OFF (beta opt-in 直到多卡多 driver 驗測).
+                // env var VIPLE_VKFRUC_NATIVE_RIFE=1 /
+                // VIPLE_VKFRUC_RIFE_INFER_DIM=N 仍是 dev escape hatch.
                 CheckBox {
                     id: vkfrucNativeRifeCheck
                     width: parent.width
-                    text: qsTr("Native RIFE 補幀 (β beta — 30-60s 後可能崩潰)")
+                    text: qsTr("Native RIFE 補幀 (β beta)")
                     font.pointSize: 12
                     visible: frameInterpolationCheck.checked
                              && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
@@ -979,7 +981,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("§J.3.e.X Path β: 使用 RIFE-v4.25-lite ML 模型在 Vulkan compute pipeline 抽出 motion flow + blend mask，再在 native 1080p 跑自家 warp+blend shader。\n\n品質：實測 verify_dump_interp score 0.95 (≈ 1.0 perfect midpoint)，遠勝 block-match (frame doubling, 0% effective interpolation)。Edges 銳利度跟 real frame 完全匹配。\n\n延遲：256x128 推論 ~14ms (60fps DUAL OK)，128x128 推論 ~10ms (75fps server / 150fps display)。\n\n⚠ 已知問題 2026-05-08：在 RTX 3060 + NV driver 596.144 連續跑 30-60s 後 GPU device-lost crash (root cause 待 Nsight Graphics 分析)。建議短時段使用測試感受。\n\n非 NVIDIA GPU 或不支援的硬體會自動 fallback 到 block-match，不會崩潰。")
+                    ToolTip.text: qsTr("§J.3.e.X Path β: 使用 RIFE-v4.25-lite ML 模型在 Vulkan compute pipeline 抽出 motion flow + blend mask，再在 native 1080p 跑自家 warp+blend shader。\n\n品質：實測 verify_dump_interp score 0.95 (≈ 1.0 perfect midpoint)，遠勝 block-match (frame doubling, 0% effective interpolation)。Edges 銳利度跟 real frame 完全匹配。\n\n延遲：256x128 推論 ~14ms (60fps DUAL OK)，128x128 推論 ~10ms (75fps server / 150fps display)。\n\n2026-05-08 β.6 stability 修補：原本 30-60s 撞 VK_ERROR_DEVICE_LOST 的 overlay resize use-after-free 已用 vkDeviceWaitIdle 補住。Beta 標籤暫保留待多卡多 driver 驗測。\n\n非 NVIDIA GPU 或不支援的硬體會自動 fallback 到 block-match，不會崩潰。")
                 }
 
                 Label {

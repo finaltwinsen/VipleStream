@@ -181,10 +181,11 @@ void StreamingPreferences::reload()
     // dev escape hatch (vkfruc.cpp 端 OR 兩條訊號).
     vkfrucEnableNvOf   = settings.value(SER_VKFRUCNVOF, false).toBool();
     vkfrucEnableTriple = settings.value(SER_VKFRUCTRIPLE, false).toBool();
-    // §J.3.e.X Path β — opt-in default-OFF.  Beta feature with known
-    // 30-60s device-lost crash on RTX 3060 + NV 596.144 (root cause
-    // pending Nsight Graphics analysis).  Quality is dramatically better
-    // than block-match when stable (5/5 score 0.95 ≈ perfect midpoint).
+    // §J.3.e.X Path β — opt-in default-OFF.  Beta feature.  Original
+    // 30-60s VK_ERROR_DEVICE_LOST was overlay-resize use-after-free in
+    // drainOverlayStash; fixed 2026-05-08 (β.6 vkDeviceWaitIdle before
+    // destroying old VkImage on dim change).  Quality dramatically better
+    // than block-match (5/5 score 0.95 ≈ perfect midpoint vs 0%).
     vkfrucEnableNativeRife    = settings.value(SER_VKFRUCRIFEB, false).toBool();
     vkfrucNativeRifeInferDim  = settings.value(SER_VKFRUCRIFEDIM, 256).toInt();
     designVariant = static_cast<DesignVariant>(settings.value(SER_DESIGNVARIANT, static_cast<int>(DV_SAFE)).toInt());

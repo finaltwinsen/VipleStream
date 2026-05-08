@@ -20,7 +20,7 @@ ML model 抽出 motion flow + blend mask，再用自家 warp+blend shader 在 na
 
 ### UI
 
-`Settings → Video → Frame Interpolation` 勾「Native RIFE 補幀 (β beta — 30-60s 後可能崩潰)」。
+`Settings → Video → Frame Interpolation` 勾「Native RIFE 補幀 (β beta)」。
 僅在 Vulkan renderer 路徑（rendererSelection = RS_VULKAN）顯示.
 
 「RIFE 推論解析度」下拉選單 4 個選項：
@@ -91,57 +91,68 @@ warp 保留了原圖細節.
 
 ## 已知問題
 
-### 30-60s device-lost crash
+### ✅ RESOLVED: 30-60s device-lost crash (β.6 fix 2026-05-08)
 
-**症狀**：streaming ~30-60s 後 GPU 撞 `VK_ERROR_DEVICE_LOST`，FFmpeg HEVC 解碼
-失敗 → stream 終止. Aftermath 寫 `.nv-gpudmp` (~500 KB) 跟 shader debug
-(~3 KB) 到 `%TEMP%\VipleStream-aftermath-*`.
+**症狀（已修補）**：streaming ~30-60s 後 GPU 撞 `VK_ERROR_DEVICE_LOST`，
+FFmpeg HEVC 解碼失敗 → stream 終止.  Aftermath 寫 `.nv-gpudmp` (~500 KB)
+跟 shader debug (~3 KB) 到 `%TEMP%\VipleStream-aftermath-*`.
 
-**復現**：HW + SW decode mode 都會撞.  跨 inferDim (128/256/512) 都會撞.
-Block-match path 不會撞 — 排除 VkFrucRenderer 自身問題.  獨立於 fps (60fps server
-撞較晚 ~1m59s, 180fps server 撞較快 ~30s — 載荷越高越快).
+**root cause（透過 Nsight Graphics `nv-aftermath-format -p VipleStream.pdb -g
+shader-debug-info-search-path` symbolize 找出）**：
 
-**已嘗試但無效的 fix**：
-- β.5.0 → β.5.1 — 移除 41 MB 1080p flow buffers / 2 個 bilinear UP dispatches.
-  撐久一點但仍撞.
-- β.6 — descriptor set pre-alloc + cache 取消 per-frame churn.
-  Latency 反退化 9% 且仍撞 → reverted.
-
-**Aftermath crash dump 解碼結果（5 個 dump 100% 一致）**：
 ```
 "Faulted Warps": [{
   "Fault Description": "MMU Fault Error - shader instruction MMU fault accessing memory",
   "Shader GPU PC Address": "fragment_01 @ 0x00000150"
 }]
-"Shader infos": { "Shader name": "fragment_01", "Shader type": "Fragment" }
-"Page fault info": {
+Symbolized callstack:
+  fragment_01 → VkFrucRenderer::drawOverlayInRenderPass(VkCommandBuffer*)
+              → VkFrucRenderer::renderFrame(AVFrame*)
+              → Pacer::renderFrame(AVFrame*)
+              → Pacer::renderThread(void*)
+"Page fault info":
   "Resource": { "Destroyed": true, "Width": 930, "Height": 502, "Size": 1933312 }
-}
 ```
 
-`fragment_01` = `vkfruc.frag` (real-frame 顯示 shader, 採樣 AVVkFrame.img[0]
-透過 ycbcr sampler).  Fault PC 0x150 在 `OpImageSampleImplicitLod`.
-Resource 930×502 RGBA8 (= UV plane of HEVC 1860×1004 coded ref frame).
-"Destroyed=true" 是 post-mortem (engine reset 後 driver 清掉的)，故這個
-不直接代表 fault 時 resource 已 destroy.
+關鍵：`fragment_01` 不是 `vkfruc.frag` (real frame sampler)，而是
+`vkfruc_overlay.frag`，sampler bound 到 `m_OverlayView[type]`.  930×502 是
+overlay surface (perf overlay / SDL_TTF rendered text) 的尺寸，會隨字串長度
+動態變化.
 
-**修法嘗試（皆 reverted）**：
-1. `av_frame_clone(frame)` 持有 ref 跨 slot fence — 不撞了但 fps 30× 退化 (1.89 vs 60)
-2. `av_frame_alloc` + `av_frame_ref/unref` — 仍撞 + 同樣 fps 退化
-3. β.6 descSet cache pre-alloc — 不撞但 latency +9%, reverted
-4. β.6 周期性 vkDeviceWaitIdle 25s — crash 從 30-60s 略晚到 78s 仍撞
+`drainOverlayStash()` 偵測到 surface 尺寸變動就**立刻** destroy 舊的 VkImage /
+VkImageView — 但 descriptor set 仍指著舊 view，且尚未執行完的 cmd buffers
+（Pacer renderThread 同時可能有 2-3 個 in-flight）還會 sample 它，page-fault
+觸發 device-lost.  Block-match path chain 4ms in-flight 少所以撞不到，
+Path β chain 14ms in-flight 多所以一個 overlay resize 就有 race window.
 
-從 v1/v2 觀察 fps 退到 1.89 同時 crash 消失 (v1)：暗示 crash 是高 dispatch
-密度觸發，AVFrame ref 不是真正 root cause；ref-keep 只是「副作用」減壓.
+**修法（commit 待跑）**：`vkfruc.cpp::drainOverlayStash()` line 3317-3341，
+在 dim 變動時先 `vkDeviceWaitIdle(m_Device)` 再 destroy 舊 image，確保
+所有 in-flight cmd buffers 都已執行完 + descriptor set 之後 update 也安全.
+Cost: overlay resize 觸發時 ~1 frame GPU wait（一次 stream 通常 0-2 次）,
+hot-path 邊際 ~0.
 
-**短時段使用 OK** (< 30s). 完整修法需要：
-- Nsight Graphics（GUI 不只 aftermath_decode CLI）載 .nv-gpudmp 看 last
-  in-flight cmd buffer 完整 state 跟 page-fault 前的 access pattern
-- 或 NV driver 升版過 596.36 試
-- 或 RIFE-v4-lite 389 dispatch 重組成 fewer fused dispatches (大工程)
+**驗測（2026-05-08 17:00）**：8 min 連續 stream 1080p60 HEVC + dual-present
++ Path β rifeNative=1 inferDim=256，**0 crash, 0 dump, 0 device-lost log**.
+chain time 13.5ms 全程 ±0.1ms 穩定，fps 30.00 ±0.04，WS 317MB 無 leak.
+resize-fix 訊號剛好 fire 一次（perf overlay 從 845×502 縮到 835×502）.
 
-當前 ship 狀態：opt-in beta default-OFF，UI + docs 已備齊，使用者可短時段
-試用享受 quality 提升.
+**先前無效的 fix（皆 reverted）**：
+- β.5.0 → β.5.1 — 移除 41 MB 1080p flow buffers + 2 個 bilinear UP dispatches.
+  撐久一點但仍撞.
+- β.6 v1 — descSet pre-alloc + cache 取消 per-frame churn.
+  Latency +9% 且仍撞 → reverted.
+- β.6 v2 — 周期性 vkDeviceWaitIdle 25s.  Crash 從 30s 推到 78s 仍撞 → reverted.
+- AVFrame ref-keep v1/v2 (`av_frame_clone` / `av_frame_alloc+ref`) — v1 不撞
+  但 fps 30× 退化 (1.89 vs 60), v2 仍撞.  事後才知這只是「副作用減壓」
+  讓 race window 變窄, 不是 root cause.
+- 從 v1/v2 fps 退化同時 crash 消失暗示 race 是 dispatch 密度觸發 — 確實
+  正確（drainOverlayStash 每 perf overlay 文字長度變動觸發一次 = dispatch
+  rate 越高 race window 越大）.
+
+完整 root cause + 修法的 takeaway：Vulkan 對 in-flight resource 的 lifetime
+管理 driver 不保證自動 wait, 你必須自己 sync.  Nsight Graphics 的 PDB +
+shader debug info symbolization 直接抓到正確的 sampler 來源, aftermath
+JSON 自身只給 shader hash 不夠.
 
 ### TRIPLE 60→180 暫不支援
 
@@ -217,7 +228,10 @@ binary 編譯.
 - ✅ β.5 timing isolation (25fd4b1)
 - ✅ β.5.1 sample flow at infer dim (7d37f7a)
 - ❌ β.6 descSet cache (reverted; didn't fix crash)
-- ✅ β.8 prefs UI + docs (this commit)
-- ⏳ Crash root cause — needs Nsight Graphics
+- ❌ β.6 周期性 vkDeviceWaitIdle 25s (reverted; only delayed crash)
+- ❌ AVFrame ref-keep v1/v2 (reverted; fps 30× regression)
+- ✅ β.8 prefs UI + docs (commit 9d52afa)
+- ✅ **β.6 stability fix — overlay resize use-after-free in drainOverlayStash**
+  **(2026-05-08, this commit) — symbolized via Nsight Graphics nv-aftermath-format**
 - ⏳ β.9 TRIPLE 60→180
 - ⏳ β.10 Linux + AMD/Intel platform validation
