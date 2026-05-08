@@ -166,3 +166,169 @@ D3D11 d3d11_warp_compute.hlsl）。3 個 quality variant 重編。
 1. D3D11 path：通常是 swapchain format 跟 staging texture mismatch（修法：用 `m_SwapChain->GetDesc1()` 動態查 format）；10-bit HDR swapchain 不支援
 2. NCNN path：先看 log 有無「RIFE output is all-zero」warning（已修，cascade 會自動 fallback）
 3. 強制 verify pipeline：`VIPLE_FRUC_NCNN_DIAG=1` 寫 magenta，BMP 該變紫紅
+
+---
+
+## Android port (§B-DUMP-ANDROID, 2026-05-08)
+
+手機端 (`moonlight-android`) 平行實作的 frame dump。檔案命名與索引慣例
+跟 PC flat layout 完全相同，PC 分析腳本（`verify_dump_interp.py` /
+`analyze_fruc_compare.py` / `check_motion_direction.py`）已升級接受 PNG 與
+BMP 兩種格式，因此**兩端 dump 可進同一套 pipeline 比對**。
+
+實作於 `moonlight-android/app/src/main/java/com/limelight/binding/video/FrucDumpWriter.java`，
+hook 進 `FrucRenderer.onFrameAvailable()`。
+
+### 啟動方式（system property，非 env var）
+
+Android shell 沒有 env var 等價物，改用 `setprop`（反射呼叫
+`android.os.SystemProperties`，跟 `VkBackend.isOptedIn` 同樣模式，避開
+hidden-API）：
+
+```sh
+# Release build (com.piinsta) 或 debug build (com.piinsta.debug)
+adb shell setprop debug.viplestream.frucdump.dir /sdcard/Android/data/com.piinsta/files
+adb shell setprop debug.viplestream.frucdump.frames 10
+adb shell setprop debug.viplestream.frucdump.delay_ms 10000
+
+# 啟動 app → 連線 host → 串流，dump 在 warmup 後自動進行
+# 完成後：
+adb pull /sdcard/Android/data/com.piinsta/files/fruc_dump_<TIMESTAMP> .
+```
+
+注意：property 在 `FrucRenderer` ctor / `initialize()` 讀一次，**必須
+在串流開始前 `setprop`**。設定不會 persist 跨 reboot；release build 用
+此 property 仍有效（無 user-facing UI toggle）。
+
+### Property reference
+
+| Property | 預設 | 作用 |
+|---|---|---|
+| `debug.viplestream.frucdump.dir` | unset | 啟動 dump（unset = 完全 disabled，零 overhead） |
+| `debug.viplestream.frucdump.frames` | 10 | 抓多少 server frame（達標後自動停止） |
+| `debug.viplestream.frucdump.delay_ms` | 10000 | warmup 延遲（讓 ME shader / FPS 穩下來再 dump） |
+
+### 輸出 layout
+
+```
+fruc_dump_20260508_154233/
+  manifest.json                ← 裝置/解析度/quality preset/版本資訊
+  frame_0000_real.png          ← cycle 0: 第一幀 decoded 輸出（沒 interp）
+  frame_0001_interp.png        ← cycle 1: warp(real_0, real_1) 中間幀
+  frame_0002_real.png          ← cycle 1: real_1
+  frame_0003_interp.png        ← cycle 2: warp(real_1, real_2)
+  frame_0004_real.png          ← cycle 2: real_2
+  …
+  mv_frame_0001.bin            ← cycle 1 用的 MV field（int32 pair LE，Q1）
+  mv_frame_0003.bin
+  …
+```
+
+索引慣例 `file 2N=real_N, file 2N+1=interp(real_N, real_N+1)` 跟 PC
+flat layout 完全相同。
+
+### MV binary 格式（與 PC 兼容）
+
+PC 寫盤是 `int32 pair (mvX, mvY)`，每 block 8 bytes，Q1 unit
+（1 LSB = 0.5 px）。
+
+手機端 ME shader 寫的是 R32I texture 單一 packed `(x<<16) | (y & 0xFFFF)`，
+每 block 4 bytes。`FrucDumpWriter.writeMvBin()` 在 writer thread 把 packed
+int32 unpack 成 PC 格式（int32 pair LE）後寫盤。檔案因此 byte-for-byte
+跟 PC `mv_frame_NNNN.bin` 相容：
+
+```python
+import numpy as np
+mv = np.fromfile('mv_frame_0001.bin', dtype=np.int32).reshape(-1, 2)
+# mv[:,0] = x in Q1, mv[:,1] = y in Q1
+print('non-zero:', (mv != 0).any(axis=1).sum(), '/', len(mv))
+print('max abs:', np.abs(mv).max())  # 預期 <= 96 (clamp 上限)
+```
+
+### Manifest schema
+
+`manifest.json` 是 Android 端獨有 sidecar（PC dump 沒寫，資訊散在 SDL
+log），分析時直接讀 JSON 不必猜：
+
+```json
+{
+  "schema_version": 1,
+  "platform": "android",
+  "app_version_name": "1.3.339",
+  "app_version_code": 339,
+  "device_model": "Pixel 5",
+  "device_brand": "google",
+  "android_sdk": 33,
+  "gl_renderer": "Adreno (TM) 620",
+  "gl_version": "OpenGL ES 3.2 …",
+  "stream_width": 1920,
+  "stream_height": 1080,
+  "mv_width": 30,
+  "mv_height": 16,
+  "block_size": 64,
+  "quality_preset": 0,
+  "vsync_period_ns": 11111111,
+  "frames_requested": 10,
+  "delay_ms": 10000,
+  "started_at_unix_ms": 1715165553123,
+  "started_at_iso": "2026-05-08T07:32:33Z",
+  "image_format": "png",
+  "mv_format": "int32_pair_le",
+  "mv_unit": "Q1",
+  "index_convention": "file_2N=real_N, file_2N+1=interp(real_N, real_N+1)"
+}
+```
+
+### 端到端驗證 SOP
+
+```sh
+# 1. 連 phone (memory: 13151FDD40021A is the dev Pixel 5)
+adb -s 13151FDD40021A shell setprop debug.viplestream.frucdump.dir \
+    /sdcard/Android/data/com.piinsta/files
+
+# 2. 啟動 app, 串流 ~30 秒（足夠 10 frame * delay 10s + capture window）
+
+# 3. pull
+adb -s 13151FDD40021A pull \
+    /sdcard/Android/data/com.piinsta/files/fruc_dump_$(date +%Y%m%d)_* .
+
+# 4. 用 PC 端原有工具分析（不必改 script）
+python scripts/benchmark/verify_dump_interp.py fruc_dump_<TS>
+python scripts/benchmark/check_motion_direction.py fruc_dump_<TS>
+```
+
+期望輸出：
+- 目錄出現 ~10 對 `frame_NNNN_real.png` + `frame_NNNN_interp.png` 與
+  對應的 `mv_frame_NNNN.bin`
+- `manifest.json` 內容合理
+- `verify_dump_interp.py` 的 `interp_works_count` 在 motion 場景 ≥ 3/5
+  （手機端 GLES block-matching ME 在中等運動水位）
+- `check_motion_direction.py` 的 mean shift 與 real motion 同向（`>= 0`）
+
+### 跟 PC dump 的差異
+
+| 項目 | PC §B-DUMP | Android §B-DUMP-ANDROID |
+|---|---|---|
+| 觸發 | `VIPLE_VKFRUC_DUMP_DIR` env var | `debug.viplestream.frucdump.dir` system property |
+| 圖檔 | `.bmp` (uint8 RGBA, no compression) | `.png` (Bitmap.compress, ~4× 小) |
+| 寫盤 | 單一 writer thread, `kDumpQueueCap=12` | 同 (HandlerThread, queue cap 12) |
+| Readback | `vkCmdCopyBuffer` → HOST_CACHED staging | PBO ring (3 slot) + `glFenceSync` |
+| MV format | int32 pair LE (寫盤時就是這格式) | R32I packed → unpack 寫盤 (兼容) |
+| Manifest | 無 (資訊在 SDL log) | `manifest.json` |
+| Late-frame skip | N/A (PC 沒這條路徑) | 整 cycle 不 commit，counter 不前進 |
+
+### 風險 & 已知限制
+
+1. **MV readback driver 差異** — 部分 Mali driver 拒絕
+   `GL_RED_INTEGER + GL_INT` PBO readback。`FrucDumpWriter` 偵測到
+   `glGetError != GL_NO_ERROR` 時 graceful 跳過 MV dump（PNG 仍正常
+   產出），logcat 印 warning。
+2. **首次 cycle 索引 parity** — 手機端 `frameCount==1` 跳 warp，與 PC
+   `firstCycle` skip interp 對齊；兩端 file 0 都是 real_0。
+3. **Late-frame / poor-conn skip** — 手機獨有，dump 期間整 cycle 不
+   commit、counter 不動，保 2N/2N+1 慣例。代價：dump 蒐集時間可能
+   長於預期。
+4. **Property propagation 時機** — `FrucRenderer` ctor 讀一次；必須
+   pre-stream 設好。
+5. **磁碟空間** — 10 frame × 2 PNG (~2MB) + 10 mv.bin (~2KB) ≈ 40MB /
+   session，遠低於 app-private quota。

@@ -60,11 +60,12 @@ def analyze_engine(eng_dir):
     # old captures still parse.
     legacy_vkfruc = (eng_dir / 'all').is_dir() and (eng_dir / 'real').is_dir()
     if legacy_vkfruc:
-        pngs = sorted((eng_dir / 'all').glob('frame_*.bmp'))
+        pngs = sorted(list((eng_dir / 'all').glob('frame_*.bmp'))
+                    + list((eng_dir / 'all').glob('frame_*.png')))
     else:
-        pngs = sorted(eng_dir.glob('frame_*.bmp'))
-    if not pngs:
-        pngs = sorted(eng_dir.glob("frame_*.png"))
+        # 2026-05-08: union of bmp (PC) + png (Android port FrucDumpWriter).
+        pngs = sorted(list(eng_dir.glob('frame_*.bmp'))
+                    + list(eng_dir.glob('frame_*.png')))
     if len(pngs) < 6:
         return None
 
