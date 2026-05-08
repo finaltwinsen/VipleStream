@@ -673,6 +673,26 @@ bool VkFrucRenderer::pickPhysicalDeviceAndQueue()
                 opticalFlowQF == UINT32_MAX ? "(none) " : "",
                 opticalFlowQF == UINT32_MAX ? 0 : opticalFlowQF,
                 opticalFlowQueueCount);
+
+    // §J.3.e.2.i.10 Phase 2A — dedicated compute queue family probe.  Look for
+    // a QF with VK_QUEUE_COMPUTE_BIT set and VK_QUEUE_GRAPHICS_BIT cleared
+    // (i.e. truly dedicated, not the universal QF=0).  On NV Ampere/Ada this
+    // is typically QF=2.  When available, FRUC compute (Phase 2B+) gets
+    // submitted there so it can overlap with graphics-queue render+present.
+    // UINT32_MAX = none found → caller falls back to m_GraphicsQueue submit.
+    m_ComputeQueueFamily = UINT32_MAX;
+    for (uint32_t qf = 0; qf < qfCount; qf++) {
+        const auto flags = qfs[qf].queueFlags;
+        if ((flags & VK_QUEUE_COMPUTE_BIT) && !(flags & VK_QUEUE_GRAPHICS_BIT)) {
+            m_ComputeQueueFamily = qf;
+            break;
+        }
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A async-compute QF probe: %s%u%s",
+                m_ComputeQueueFamily == UINT32_MAX ? "(none — fallback to graphics QF=" : "QF=",
+                m_ComputeQueueFamily == UINT32_MAX ? m_QueueFamily : m_ComputeQueueFamily,
+                m_ComputeQueueFamily == UINT32_MAX ? ")" : " (dedicated COMPUTE_BIT, no GRAPHICS_BIT)");
     // §J.3.e.2.i.8 — VK_KHR_video_decode capability probe.  Query whether
     // this device supports H.264 / H.265 / AV1 decode via raw Vulkan API
     // (跳過 FFmpeg).  Probe only — actual decode session 在 i.8.* sub-phase
@@ -832,6 +852,19 @@ bool VkFrucRenderer::createLogicalDevice()
         VkDeviceQueueCreateInfo qci = {};
         qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         qci.queueFamilyIndex = m_DecodeQueueFamily;
+        qci.queueCount = 1;
+        qci.pQueuePriorities = &queuePriority;
+        qcis.push_back(qci);
+    }
+    // §J.3.e.2.i.10 Phase 2A — request dedicated compute queue when probe at
+    // pickPhysicalDeviceAndQueue() found one.  Skip when missing (fallback to
+    // graphics queue) or coincidentally same as graphics/decode QF.
+    if (m_ComputeQueueFamily != UINT32_MAX
+        && m_ComputeQueueFamily != m_QueueFamily
+        && m_ComputeQueueFamily != m_DecodeQueueFamily) {
+        VkDeviceQueueCreateInfo qci = {};
+        qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qci.queueFamilyIndex = m_ComputeQueueFamily;
         qci.queueCount = 1;
         qci.pQueuePriorities = &queuePriority;
         qcis.push_back(qci);
@@ -1064,6 +1097,17 @@ bool VkFrucRenderer::createLogicalDevice()
         // §B-NVOF Phase 3 — load nvofapi64.dll + entry function list.
         // Failure non-fatal: vkfruc falls back to block-matching ME path.
         loadNvOfApi();
+    }
+    // §J.3.e.2.i.10 Phase 2A — fetch dedicated compute queue handle when
+    // available + distinct from graphics/decode QFs.  m_ComputeQueue stays
+    // VK_NULL_HANDLE otherwise; Phase 2B+ check that handle for fallback.
+    if (m_ComputeQueueFamily != UINT32_MAX
+        && m_ComputeQueueFamily != m_QueueFamily
+        && m_ComputeQueueFamily != m_DecodeQueueFamily) {
+        pfnGetDeviceQueue(m_Device, m_ComputeQueueFamily, 0, &m_ComputeQueue);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A async-compute queue fetched (QF=%u handle=%p)",
+                    m_ComputeQueueFamily, (void*)m_ComputeQueue);
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.2 VkDevice created (%s, QF=%u, queue=%p)",
@@ -3654,6 +3698,71 @@ bool VkFrucRenderer::createInFlightRing()
                 "[VIPLE-VKFRUC] §J.3.e.2.i.3.d in-flight ring ready: %u slots × "
                 "(1 cmdbuf + 2 acquireSem + 2 renderDoneSem + 1 fence)",
                 (unsigned)kFrucFramesInFlight);
+
+    // §J.3.e.2.i.10 Phase 2A — async-compute queue per-slot resources.
+    // Created here so they share the slot ring lifecycle.  All non-fatal:
+    // any failure leaves m_ComputeCmdPool / m_ComputeTimelineSem at
+    // VK_NULL_HANDLE and Phase 2B+ falls back to graphics-queue submit.
+    if (m_ComputeQueue != VK_NULL_HANDLE
+        && m_ComputeQueueFamily != UINT32_MAX) {
+        VkCommandPoolCreateInfo cpci = {};
+        cpci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+                              | VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        cpci.queueFamilyIndex = m_ComputeQueueFamily;
+        if (pfnCreateCmdPool(m_Device, &cpci, nullptr, &m_ComputeCmdPool) == VK_SUCCESS) {
+            VkCommandBufferAllocateInfo ccbai = {};
+            ccbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            ccbai.commandPool        = m_ComputeCmdPool;
+            ccbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            ccbai.commandBufferCount = kFrucFramesInFlight;
+            if (pfnAllocCmdBufs(m_Device, &ccbai, m_ComputeCmdBuf) != VK_SUCCESS) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A vkAllocateCommandBuffers (compute) failed — fallback");
+                auto pfnDestroyCmdPoolFb = (PFN_vkDestroyCommandPool)pfnGetDeviceProcAddr(
+                    m_Device, "vkDestroyCommandPool");
+                if (pfnDestroyCmdPoolFb) pfnDestroyCmdPoolFb(m_Device, m_ComputeCmdPool, nullptr);
+                m_ComputeCmdPool = VK_NULL_HANDLE;
+            }
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A vkCreateCommandPool (compute) failed — fallback");
+            m_ComputeCmdPool = VK_NULL_HANDLE;
+        }
+
+        // Timeline semaphore — initial value 0; compute submits signal
+        // m_ComputeTimelineValue+=1, graphics submits wait that value.
+        // Vulkan 1.2 core feature (VkPhysicalDeviceVulkan12Features::
+        // timelineSemaphore must be enabled at device create — verify in
+        // Phase 2B before relying on it).
+        VkSemaphoreTypeCreateInfo tsci = {};
+        tsci.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        tsci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        tsci.initialValue  = 0;
+        VkSemaphoreCreateInfo tsem = {};
+        tsem.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        tsem.pNext = &tsci;
+        if (pfnCreateSem(m_Device, &tsem, nullptr, &m_ComputeTimelineSem) != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A timeline semaphore create failed — fallback");
+            m_ComputeTimelineSem = VK_NULL_HANDLE;
+        }
+        m_ComputeTimelineValue = 0;
+
+        const bool full = (m_ComputeCmdPool != VK_NULL_HANDLE
+                       && m_ComputeTimelineSem != VK_NULL_HANDLE);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A async-compute "
+                    "infrastructure %s (pool=%p sem=%p, %u cmd buffers)",
+                    full ? "READY" : "PARTIAL — fallback",
+                    (void*)m_ComputeCmdPool, (void*)m_ComputeTimelineSem,
+                    (unsigned)kFrucFramesInFlight);
+    } else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A async-compute "
+                    "skipped (no dedicated compute QF on this GPU; "
+                    "FRUC compute will use graphics queue)");
+    }
     return true;
 }
 
@@ -3697,6 +3806,22 @@ void VkFrucRenderer::destroyInFlightRing()
         pfnDestroyCmdPool(m_Device, m_CmdPool, nullptr);
         m_CmdPool = VK_NULL_HANDLE;
     }
+
+    // §J.3.e.2.i.10 Phase 2A — async-compute pool + timeline sem teardown.
+    // Cmd buffers are freed implicitly when the pool is destroyed.
+    for (uint32_t i = 0; i < kFrucFramesInFlight; i++) {
+        m_ComputeCmdBuf[i] = VK_NULL_HANDLE;
+    }
+    if (m_ComputeCmdPool && pfnDestroyCmdPool) {
+        pfnDestroyCmdPool(m_Device, m_ComputeCmdPool, nullptr);
+        m_ComputeCmdPool = VK_NULL_HANDLE;
+    }
+    if (m_ComputeTimelineSem && pfnDestroySem) {
+        pfnDestroySem(m_Device, m_ComputeTimelineSem, nullptr);
+        m_ComputeTimelineSem = VK_NULL_HANDLE;
+    }
+    m_ComputeTimelineValue = 0;
+
     m_RingInitialized = false;
 }
 

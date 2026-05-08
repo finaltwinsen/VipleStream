@@ -127,6 +127,22 @@ private:
     uint32_t m_DecodeQueueFamily = UINT32_MAX;  // VK_QUEUE_VIDEO_DECODE_BIT_KHR (separate on NV)
     uint32_t m_DecodeQueueCount  = 0;
     VkQueue  m_GraphicsQueue     = VK_NULL_HANDLE;
+    // §J.3.e.2.i.10 (2026-05-09) Phase 2A — async-compute queue infrastructure.
+    // RTX 3060 / Ampere-class NV GPUs expose a dedicated COMPUTE_BIT-only
+    // queue family (typically QF=2) that can run compute work in parallel
+    // with the universal graphics queue's render+present work.  Migrating
+    // FRUC compute (nv12rgb / ME / median / RIFE / warp) onto this queue
+    // lets the graphics queue dedicate itself to the final interp draw +
+    // 2× present so the two GPU lanes overlap.
+    //
+    // UINT32_MAX = no dedicated compute QF found (Intel iGPU, some AMD);
+    // fallback caller path keeps using m_GraphicsQueue for compute.  Phase
+    // 2A only stands up the resources; Phase 2B+ wire FRUC dispatches
+    // through this queue.  Per-slot cmd buffer + timeline sem live with
+    // the rest of the slot ring resources further down (after
+    // kFrucFramesInFlight is declared).
+    uint32_t   m_ComputeQueueFamily = UINT32_MAX;
+    VkQueue    m_ComputeQueue       = VK_NULL_HANDLE;
     // §B2 follow-up 2026-05-06 — VK_QUEUE_OPTICAL_FLOW_BIT_NV (NV Ampere+).
     // UINT32_MAX 表示沒啟用 / 不支援；handle = VK_NULL_HANDLE 在 OF 路徑
     // 走 fallback (block-matching ME).  Gated by VIPLE_VKFRUC_NV_OF=1.
@@ -654,6 +670,15 @@ private:
     VkSemaphore     m_SlotRenderDoneSem[kFrucFramesInFlight][2]  = {};
     VkFence         m_SlotInFlightFence[kFrucFramesInFlight]     = {};
     uint32_t        m_CurrentSlot            = 0;
+
+    // §J.3.e.2.i.10 (2026-05-09) Phase 2A — async-compute queue per-slot
+    // resources.  See header-top comment near m_ComputeQueueFamily.
+    // Empty / VK_NULL_HANDLE when no dedicated compute QF is available
+    // on the picked physical device (caller falls back to graphics queue).
+    VkCommandPool   m_ComputeCmdPool                              = VK_NULL_HANDLE;
+    VkCommandBuffer m_ComputeCmdBuf[kFrucFramesInFlight]          = {};
+    VkSemaphore     m_ComputeTimelineSem                          = VK_NULL_HANDLE;
+    uint64_t        m_ComputeTimelineValue                        = 0;
     bool            m_RingInitialized        = false;
 
     // §J.3.e.2.i.3.e — descriptor pool + per-slot descriptor sets that
