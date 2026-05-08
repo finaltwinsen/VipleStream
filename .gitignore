@@ -69,6 +69,14 @@ scripts/diag/
 # Linux build SOP belongs in docs/building.md once §K.1 cleanup is done.
 scripts/wsl_*.sh
 
+# ── 2026-05-08: scripts/ untracked wholesale (was leaking dev fingerprints
+# like LAN test-server IP 192.168.51.x in benchmark/diag helpers).  Build
+# infra moved to build-tools/ instead.  scripts/ stays as a developer-local
+# tooling dir (benchmark, deploy_, debug_pair, firewall_, scan_steam, etc.)
+# but no longer reaches the public repo.  See CLAUDE.md / docs/building.md
+# for build-tools/ paths.
+scripts/
+
 # ── External dependencies (auto-downloaded by build) ──
 vcpkg/
 Sunshine/node_modules/
