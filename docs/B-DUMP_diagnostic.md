@@ -279,17 +279,29 @@ log），分析時直接讀 JSON 不必猜：
 }
 ```
 
+### ⚠️ Privacy 注意
+
+Dump PNG 內容是 streaming pipeline 收到的 **host 完整畫面**（1080p × N
+張）。若 host 桌面上顯示密碼、訊息、瀏覽器分頁、財務資料等，這些會
+被原樣寫進 PNG 檔。預設 dump dir 是 app-private external storage（其他
+app 讀不到），但若你 `adb pull` 出來再分享分析結果，記得先檢查內容。
+Dump 機制是 debug-only（property unset 時 zero-overhead），不會在
+release build 自動啟用。
+
 ### 端到端驗證 SOP
 
 ```sh
-# 1. 連 phone (memory: 13151FDD40021A is the dev Pixel 5)
-adb -s 13151FDD40021A shell setprop debug.viplestream.frucdump.dir \
+# 把 <DEVICE> 換成你的 device serial（adb devices 第一欄）
+DEVICE=<DEVICE>
+
+# 1. 啟用 dump
+adb -s "$DEVICE" shell setprop debug.viplestream.frucdump.dir \
     /sdcard/Android/data/com.piinsta/files
 
-# 2. 啟動 app, 串流 ~30 秒（足夠 10 frame * delay 10s + capture window）
+# 2. 啟動 app, 串流 ~30 秒（足夠 10 frame × delay 10s + capture window）
 
 # 3. pull
-adb -s 13151FDD40021A pull \
+adb -s "$DEVICE" pull \
     /sdcard/Android/data/com.piinsta/files/fruc_dump_$(date +%Y%m%d)_* .
 
 # 4. 用 PC 端原有工具分析（不必改 script）
