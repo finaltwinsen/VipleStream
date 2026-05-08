@@ -19,7 +19,10 @@ else
 fi
 
 command -v qmake6 >/dev/null 2>&1 || fail "Unable to find 'qmake6' in your PATH!"
-command -v linuxdeployqt >/dev/null 2>&1 || fail "Unable to find 'linuxdeployqt' in your PATH!"
+# VipleStream §K.1: switched from upstream linuxdeployqt to linuxdeploy +
+# qt plugin (see line ~91 invocation).  Sanity-check the new binary
+# instead of the old one to actually catch a missing dep early.
+command -v linuxdeploy >/dev/null 2>&1 || fail "Unable to find 'linuxdeploy' in your PATH!"
 
 echo Cleaning output directories
 rm -rf $BUILD_FOLDER
