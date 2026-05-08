@@ -205,6 +205,14 @@ public:
     // RS_D3D11 path 完全 ignore 這兩個 (UI 也只在 RS_VULKAN 時顯示).
     Q_PROPERTY(bool vkfrucEnableNvOf MEMBER vkfrucEnableNvOf NOTIFY vkfrucEnableNvOfChanged)
     Q_PROPERTY(bool vkfrucEnableTriple MEMBER vkfrucEnableTriple NOTIFY vkfrucEnableTripleChanged)
+    // §J.3.e.X Path β — native RIFE Vulkan flow extraction + native-res warp.
+    // Beta feature; opt-in default-OFF.  Quality much higher than block-match
+    // (5/5 score 0.95 ≈ perfect midpoint vs block-match 0% effective).  Known
+    // issue 2026-05-08: VK_ERROR_DEVICE_LOST after 30-60s sustained streaming
+    // on RTX 3060 + NV 596.144 driver — root cause needs Nsight Graphics
+    // analysis. RS_D3D11 path 完全 ignore (UI 也只在 RS_VULKAN 時顯示).
+    Q_PROPERTY(bool vkfrucEnableNativeRife MEMBER vkfrucEnableNativeRife NOTIFY vkfrucEnableNativeRifeChanged)
+    Q_PROPERTY(int  vkfrucNativeRifeInferDim MEMBER vkfrucNativeRifeInferDim NOTIFY vkfrucNativeRifeInferDimChanged)
     Q_PROPERTY(DesignVariant designVariant MEMBER designVariant NOTIFY designVariantChanged)
     Q_PROPERTY(AppSortMode appSortMode MEMBER appSortMode NOTIFY appSortModeChanged)
     Q_PROPERTY(QString relayUrl MEMBER relayUrl NOTIFY relayUrlChanged)
@@ -258,6 +266,8 @@ public:
     FrucQuality frucQuality;
     bool vkfrucEnableNvOf;     // §B-NVOF — VK_NV_optical_flow 取代 software block-match ME
     bool vkfrucEnableTriple;   // §B2 — TRIPLE 60→180 (兩 interp / server frame)
+    bool vkfrucEnableNativeRife; // §J.3.e.X Path β — native RIFE flow + native warp (beta)
+    int  vkfrucNativeRifeInferDim; // 128/256/384/512 — must be /128 aligned for RIFE-v4.25-lite
     DesignVariant designVariant;
     AppSortMode appSortMode;
     QString relayUrl;      // VipleStream: signaling relay WebSocket URL
@@ -309,6 +319,8 @@ signals:
     void frucQualityChanged();
     void vkfrucEnableNvOfChanged();
     void vkfrucEnableTripleChanged();
+    void vkfrucEnableNativeRifeChanged();
+    void vkfrucNativeRifeInferDimChanged();
     void designVariantChanged();
     void appSortModeChanged();
     void relayUrlChanged();

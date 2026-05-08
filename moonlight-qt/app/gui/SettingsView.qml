@@ -956,6 +956,67 @@ Flickable {
                     ToolTip.text: qsTr("DUAL 補幀 (預設) = 每張 server frame 補 1 張 interp，共 2 張 present。例：FPS 設 120 → server 送 60fps、client 顯示 120fps。\n\nTRIPLE 補幀 = 每張 server frame 補 2 張 interp (1/3 + 2/3 點)，共 3 張 present。例：FPS 設 180 → server 送 60fps、client 顯示 180fps。\n\n只在 180Hz / 144Hz panel 上開有意義 (60/120Hz 會 tearing 或卡)，且建議搭 NVOF 補幀引擎使用 (block-match ME 對快速物體噪聲明顯)。\n\n串流中 Ctrl+Alt+Shift+F 暫停補幀的功能在 TRIPLE 模式下會 fallback 為 client single-present 顯示 server 原 fps，避免 NVENC 動態切 timebase 卡頓。")
                 }
 
+                // §J.3.e.X Path β UI 整合 2026-05-08 — Vulkan-only RIFE
+                // native flow + native-res warp.  Quality 大躍進 vs block-match
+                // (verify_dump score 0.95 ≈ perfect midpoint vs block-match 0%).
+                // 已知 30-60s device-lost crash 在 RTX 3060 + NV 596.144 driver,
+                // 預設 OFF (beta opt-in).  env var VIPLE_VKFRUC_NATIVE_RIFE=1
+                // / VIPLE_VKFRUC_RIFE_INFER_DIM=N 仍是 dev escape hatch.
+                CheckBox {
+                    id: vkfrucNativeRifeCheck
+                    width: parent.width
+                    text: qsTr("Native RIFE 補幀 (β beta — 30-60s 後可能崩潰)")
+                    font.pointSize: 12
+                    visible: frameInterpolationCheck.checked
+                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
+                    checked: StreamingPreferences.vkfrucEnableNativeRife
+                    onCheckedChanged: {
+                        if (StreamingPreferences.vkfrucEnableNativeRife !== checked) {
+                            StreamingPreferences.vkfrucEnableNativeRife = checked
+                        }
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("§J.3.e.X Path β: 使用 RIFE-v4.25-lite ML 模型在 Vulkan compute pipeline 抽出 motion flow + blend mask，再在 native 1080p 跑自家 warp+blend shader。\n\n品質：實測 verify_dump_interp score 0.95 (≈ 1.0 perfect midpoint)，遠勝 block-match (frame doubling, 0% effective interpolation)。Edges 銳利度跟 real frame 完全匹配。\n\n延遲：256x128 推論 ~14ms (60fps DUAL OK)，128x128 推論 ~10ms (75fps server / 150fps display)。\n\n⚠ 已知問題 2026-05-08：在 RTX 3060 + NV driver 596.144 連續跑 30-60s 後 GPU device-lost crash (root cause 待 Nsight Graphics 分析)。建議短時段使用測試感受。\n\n非 NVIDIA GPU 或不支援的硬體會自動 fallback 到 block-match，不會崩潰。")
+                }
+
+                Label {
+                    width: parent.width
+                    text: qsTr("RIFE 推論解析度:")
+                    font.pointSize: 12
+                    visible: vkfrucNativeRifeCheck.visible && vkfrucNativeRifeCheck.checked
+                }
+                ComboBox {
+                    id: vkfrucNativeRifeInferDimCombo
+                    width: parent.width / 2
+                    visible: vkfrucNativeRifeCheck.visible && vkfrucNativeRifeCheck.checked
+                    enabled: visible
+                    font.pointSize: 12
+                    textRole: "text"
+                    valueRole: "value"
+                    model: ListModel {
+                        ListElement { text: "128 (最快, ~10ms, 144-180Hz panel 用)";  value: 128 }
+                        ListElement { text: "256 (預設平衡, ~14ms, 60fps DUAL)";       value: 256 }
+                        ListElement { text: "384 (品質佳, ~25ms, RTX 4070+ 才順)";      value: 384 }
+                        ListElement { text: "512 (最高品質, ~40ms, 高階卡)";            value: 512 }
+                    }
+                    Component.onCompleted: {
+                        currentIndex = indexOfValue(StreamingPreferences.vkfrucNativeRifeInferDim)
+                        if (currentIndex < 0) currentIndex = 1  // default 256
+                    }
+                    onActivated: {
+                        if (StreamingPreferences.vkfrucNativeRifeInferDim !== currentValue) {
+                            StreamingPreferences.vkfrucNativeRifeInferDim = currentValue
+                        }
+                    }
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("RIFE 推論時的內部解析度。較高 = motion flow 更精確但 GPU 慢；較低 = 更快但 flow 較粗糙 (warp 仍在 native 1080p 跑所以 edges 都銳)。\n\n必須是 128 倍數 (RIFE-v4.25-lite 內部 hardcoded 32×downsample × 2 stride-2 conv = 128 對齊要求)。\n\n建議：1080p source 配 256；1440p+ 配 384；高刷 144/180Hz panel 配 128 (latency 減半換 fps)。")
+                }
+
                 // VipleStream v1.2.92: 180 fps cap warning removed
                 // along with the cap itself.  Generic FRUC happily
                 // does 240 fps on the benchmark machine; the old red

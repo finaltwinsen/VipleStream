@@ -36,6 +36,8 @@
 #define SER_FRUCQUALITY "frucQuality"
 #define SER_VKFRUCNVOF  "vkfrucEnableNvOf"   // §B-NVOF UI 整合
 #define SER_VKFRUCTRIPLE "vkfrucEnableTriple" // §B2 UI 整合
+#define SER_VKFRUCRIFEB  "vkfrucEnableNativeRife"   // §J.3.e.X Path β UI 整合
+#define SER_VKFRUCRIFEDIM "vkfrucNativeRifeInferDim" // β infer dim (/128 aligned)
 #define SER_DESIGNVARIANT "designVariant"
 #define SER_APPSORTMODE "appSortMode"
 #define SER_RELAYURL "relayUrl"
@@ -179,6 +181,12 @@ void StreamingPreferences::reload()
     // dev escape hatch (vkfruc.cpp 端 OR 兩條訊號).
     vkfrucEnableNvOf   = settings.value(SER_VKFRUCNVOF, false).toBool();
     vkfrucEnableTriple = settings.value(SER_VKFRUCTRIPLE, false).toBool();
+    // §J.3.e.X Path β — opt-in default-OFF.  Beta feature with known
+    // 30-60s device-lost crash on RTX 3060 + NV 596.144 (root cause
+    // pending Nsight Graphics analysis).  Quality is dramatically better
+    // than block-match when stable (5/5 score 0.95 ≈ perfect midpoint).
+    vkfrucEnableNativeRife    = settings.value(SER_VKFRUCRIFEB, false).toBool();
+    vkfrucNativeRifeInferDim  = settings.value(SER_VKFRUCRIFEDIM, 256).toInt();
     designVariant = static_cast<DesignVariant>(settings.value(SER_DESIGNVARIANT, static_cast<int>(DV_SAFE)).toInt());
     // VipleStream H Phase 2.2: default to ASM_RECENT so users see their
     // recently-played Steam games at the top — which is what they
@@ -393,6 +401,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_FRUCQUALITY, static_cast<int>(frucQuality));
     settings.setValue(SER_VKFRUCNVOF, vkfrucEnableNvOf);
     settings.setValue(SER_VKFRUCTRIPLE, vkfrucEnableTriple);
+    settings.setValue(SER_VKFRUCRIFEB, vkfrucEnableNativeRife);
+    settings.setValue(SER_VKFRUCRIFEDIM, vkfrucNativeRifeInferDim);
     settings.setValue(SER_DESIGNVARIANT, static_cast<int>(designVariant));
     settings.setValue(SER_APPSORTMODE, static_cast<int>(appSortMode));
     settings.setValue(SER_RELAYURL, relayUrl);

@@ -90,6 +90,21 @@ static bool vkfrucWantTripleFromUserOrEnv()
     auto* prefs = StreamingPreferences::get();
     return prefs && prefs->vkfrucEnableTriple;
 }
+// §J.3.e.X Path β — env var > prefs > default false.
+static bool vkfrucWantNativeRifeFromUserOrEnv()
+{
+    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_RIFE") != 0) return true;
+    auto* prefs = StreamingPreferences::get();
+    return prefs && prefs->vkfrucEnableNativeRife;
+}
+static int vkfrucNativeRifeInferDimFromUserOrEnv()
+{
+    int env = qEnvironmentVariableIntValue("VIPLE_VKFRUC_RIFE_INFER_DIM");
+    if (env > 0) return env;
+    auto* prefs = StreamingPreferences::get();
+    if (prefs && prefs->vkfrucNativeRifeInferDim > 0) return prefs->vkfrucNativeRifeInferDim;
+    return 256;  // default
+}
 
 // §J.3.e.2.i.6 — process-wide ref count for ncnn::create_gpu_instance.
 // Multiple VkFrucRenderer instances (test probes + real) each call create
@@ -179,10 +194,11 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     // FRUC + DualMode are already on.
     m_TripleMode = m_DualMode && m_FrucMode && vkfrucWantTripleFromUserOrEnv();
 
-    // §J.3.e.X Path β — native RIFE Vulkan integration env-var gate.
-    // β.1 stage = init-only proof of life; chain swap lands in β.2.
-    // Requires FRUC; conflicts with TRIPLE (β.3 lifts that).
-    m_RifeNativeMode = qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_RIFE") != 0;
+    // §J.3.e.X Path β — native RIFE Vulkan integration.  Reads env var
+    // OR prefs (env wins).  Default OFF (opt-in beta — known 30-60s
+    // device-lost crash on RTX 3060 + NV 596.144 driver, root cause needs
+    // Nsight Graphics analysis).
+    m_RifeNativeMode = vkfrucWantNativeRifeFromUserOrEnv();
     // §J.3.e.X Path β.5 — flow-extraction + native-res warp.  Default ON when
     // β is on; user can flip to '0' to fall back to β.4 bilinear-up-RGB.
     {
@@ -6104,9 +6120,9 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
     //   768×384 / 1024×512 = even slower, unusable for live
     // Quality scales the other direction (256 has heavy bilinear-up blur).
     // Faster GPUs (RTX 4070+) likely fit 512×256 or higher; user opts in
-    // via VIPLE_VKFRUC_RIFE_INFER_DIM=512 / 768 / 1024 (must be /128).
-    int inferW = qEnvironmentVariableIntValue("VIPLE_VKFRUC_RIFE_INFER_DIM");
-    if (inferW <= 0) inferW = 256;
+    // via UI (Settings → Video → Vulkan FRUC → Native RIFE infer dim) or
+    // VIPLE_VKFRUC_RIFE_INFER_DIM=512 / 768 / 1024 env var (must be /128).
+    int inferW = vkfrucNativeRifeInferDimFromUserOrEnv();
     inferW = (inferW / 128) * 128;
     if (inferW < 128) inferW = 128;
     int inferH = (int)((double)inferW * (double)height / (double)width + 0.5);
