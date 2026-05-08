@@ -5500,36 +5500,88 @@ float sampleSrcCurr(int channelBase, float x, float y) {
     float v1 = v10 * (1.0 - fx) + v11 * fx;
     return v0 * (1.0 - fy) + v1 * fy;
 }
-// Bilinear sample helper for infer-dim flow buffer (4 channels packed CHW)
-float sampleFlowChan(int chanIdx, float x, float y) {
-    int x0 = int(floor(x)); int y0 = int(floor(y));
-    int x1 = x0 + 1; int y1 = y0 + 1;
-    float fx = x - float(x0); float fy = y - float(y0);
-    x0 = clamp(x0, 0, pc.inferW - 1); x1 = clamp(x1, 0, pc.inferW - 1);
-    y0 = clamp(y0, 0, pc.inferH - 1); y1 = clamp(y1, 0, pc.inferH - 1);
-    int base = chanIdx * pc.inferH * pc.inferW;
-    float v00 = flow_buf[base + y0 * pc.inferW + x0];
-    float v01 = flow_buf[base + y0 * pc.inferW + x1];
-    float v10 = flow_buf[base + y1 * pc.inferW + x0];
-    float v11 = flow_buf[base + y1 * pc.inferW + x1];
-    float v0 = v00 * (1.0 - fx) + v01 * fx;
-    float v1 = v10 * (1.0 - fx) + v11 * fx;
-    return v0 * (1.0 - fy) + v1 * fy;
+// §J.3.e.X Path β.5.2 — Catmull-Rom bicubic upsampling for infer-dim
+// flow + mask (256x128 -> 1080p, 7.5x ratio).  Bilinear was visibly
+// blurring high-frequency content vs sharp real frame; bicubic 4x4
+// kernel preserves edges much better.  ~16 buffer reads + 20 ALU ops
+// per sample (vs bilinear 4 reads + 3 lerps), warp shader cost goes
+// from ~0.4ms to ~0.8ms on RTX 3060 — still well within 60fps DUAL
+// 16.7ms budget.  Catmull-Rom alpha=-0.5 (standard).
+//
+// sampleSrcPrev / sampleSrcCurr stay bilinear because those are source-
+// dim sub-pixel samples (not upsampling), where bilinear's smoothness
+// is correct (warp displacement isn't an edge-preserving operation).
+//
+// Mask is sigmoid output [0,1].  Catmull-Rom can overshoot at sharp
+// transitions; clamp to [0,1] at end of sampleMask.
+
+// Catmull-Rom weights for fractional offset fx in [0, 1).  Returns
+// weights for samples at integer offsets {-1, 0, +1, +2} relative to
+// floor(x).  alpha=-0.5 form:
+//   d in [0,1]: 1.5*d^3 - 2.5*d^2 + 1
+//   d in [1,2]: -0.5*d^3 + 2.5*d^2 - 4*d + 2
+vec4 catmullRomWeights(float fx) {
+    float d0 = 1.0 + fx;       // |sample(-1) - x| in [1, 2]
+    float d1 = fx;             // |sample( 0) - x| in [0, 1]
+    float d2 = 1.0 - fx;       // |sample(+1) - x| in [0, 1]
+    float d3 = 2.0 - fx;       // |sample(+2) - x| in [1, 2]
+    float w0 = -0.5 * d0*d0*d0 + 2.5 * d0*d0 - 4.0 * d0 + 2.0;
+    float w1 =  1.5 * d1*d1*d1 - 2.5 * d1*d1 + 1.0;
+    float w2 =  1.5 * d2*d2*d2 - 2.5 * d2*d2 + 1.0;
+    float w3 = -0.5 * d3*d3*d3 + 2.5 * d3*d3 - 4.0 * d3 + 2.0;
+    return vec4(w0, w1, w2, w3);
 }
-// Bilinear sample for infer-dim mask (1 channel HW)
+
+// Bicubic sample helper for infer-dim flow buffer (4 channels packed CHW)
+float sampleFlowChan(int chanIdx, float x, float y) {
+    int xi = int(floor(x));
+    int yi = int(floor(y));
+    float fx = x - float(xi);
+    float fy = y - float(yi);
+    vec4 wx = catmullRomWeights(fx);
+    vec4 wy = catmullRomWeights(fy);
+    int base = chanIdx * pc.inferH * pc.inferW;
+    int cx0 = clamp(xi - 1, 0, pc.inferW - 1);
+    int cx1 = clamp(xi    , 0, pc.inferW - 1);
+    int cx2 = clamp(xi + 1, 0, pc.inferW - 1);
+    int cx3 = clamp(xi + 2, 0, pc.inferW - 1);
+    float row[4];
+    for (int dy = 0; dy < 4; ++dy) {
+        int yc = clamp(yi - 1 + dy, 0, pc.inferH - 1);
+        int rowBase = base + yc * pc.inferW;
+        float v0 = flow_buf[rowBase + cx0];
+        float v1 = flow_buf[rowBase + cx1];
+        float v2 = flow_buf[rowBase + cx2];
+        float v3 = flow_buf[rowBase + cx3];
+        row[dy] = v0 * wx.x + v1 * wx.y + v2 * wx.z + v3 * wx.w;
+    }
+    return row[0] * wy.x + row[1] * wy.y + row[2] * wy.z + row[3] * wy.w;
+}
+// Bicubic sample for infer-dim mask (1 channel HW); clamps to [0,1]
+// because Catmull-Rom can overshoot at sigmoid sharp transitions.
 float sampleMask(float x, float y) {
-    int x0 = int(floor(x)); int y0 = int(floor(y));
-    int x1 = x0 + 1; int y1 = y0 + 1;
-    float fx = x - float(x0); float fy = y - float(y0);
-    x0 = clamp(x0, 0, pc.inferW - 1); x1 = clamp(x1, 0, pc.inferW - 1);
-    y0 = clamp(y0, 0, pc.inferH - 1); y1 = clamp(y1, 0, pc.inferH - 1);
-    float v00 = mask_buf[y0 * pc.inferW + x0];
-    float v01 = mask_buf[y0 * pc.inferW + x1];
-    float v10 = mask_buf[y1 * pc.inferW + x0];
-    float v11 = mask_buf[y1 * pc.inferW + x1];
-    float v0 = v00 * (1.0 - fx) + v01 * fx;
-    float v1 = v10 * (1.0 - fx) + v11 * fx;
-    return v0 * (1.0 - fy) + v1 * fy;
+    int xi = int(floor(x));
+    int yi = int(floor(y));
+    float fx = x - float(xi);
+    float fy = y - float(yi);
+    vec4 wx = catmullRomWeights(fx);
+    vec4 wy = catmullRomWeights(fy);
+    int cx0 = clamp(xi - 1, 0, pc.inferW - 1);
+    int cx1 = clamp(xi    , 0, pc.inferW - 1);
+    int cx2 = clamp(xi + 1, 0, pc.inferW - 1);
+    int cx3 = clamp(xi + 2, 0, pc.inferW - 1);
+    float row[4];
+    for (int dy = 0; dy < 4; ++dy) {
+        int yc = clamp(yi - 1 + dy, 0, pc.inferH - 1);
+        int rowBase = yc * pc.inferW;
+        float v0 = mask_buf[rowBase + cx0];
+        float v1 = mask_buf[rowBase + cx1];
+        float v2 = mask_buf[rowBase + cx2];
+        float v3 = mask_buf[rowBase + cx3];
+        row[dy] = v0 * wx.x + v1 * wx.y + v2 * wx.z + v3 * wx.w;
+    }
+    float r = row[0] * wy.x + row[1] * wy.y + row[2] * wy.z + row[3] * wy.w;
+    return clamp(r, 0.0, 1.0);
 }
 
 void main() {
