@@ -311,19 +311,23 @@ real frame 的 pixel-level diff 偏大。
 
 **已知問題（待修）：**
 
-- **Path β 30-60s device-lost crash**（HW + SW mode 都會撞，跨 inferDim 跨
-  β.4/β.5/β.5.1 都觸發；β.6 descSet cache 嘗試 → 沒解、latency 反退化 → revert）
-  - 推測 1：descSet alloc churn ❌ 已驗測排除（β.6 cache 不解）
-  - 推測 2：~23k 次/秒 vkCmdPipelineBarrier 觸發 NV driver state 累積問題
-  - 推測 3：BAR + DEVICE_LOCAL 共 ~150 MB Path β alloc 跟 HEVC HW decode
-    VRAM allocation 互相干擾；總壓力擠破 NV driver 內部 budget
-  - 推測 4：某個 RIFE shader 在特定 input data 觸發 GPU hang（Aftermath
-    shader debug 只 3 KB 表示單一 shader 有問題）
-  - 修法候選：
+- **Path β 30-90s device-lost crash**（HW + SW mode 都會撞，跨 inferDim 跨
+  β.4/β.5/β.5.1 都觸發；3 個嘗試都 reverted）
+  - 控制組 (commit 9d52afa 後測): block-match 跑滿 7m23s 不撞 → 確認 β-specific
+  - dispatch 密度差異：block-match 240 disp/s，Path β 23,580 disp/s (98×)
+  - 推測 1：descSet alloc churn ❌ 已排除（β.6 cache 嘗試 → latency 退化 9% 沒解 → revert）
+  - 推測 2：周期性 vkDeviceWaitIdle ❌ 已排除（β.6 workaround 嘗試 → 78s vs 30-60s 略晚但仍撞 → revert）
+  - 剩餘推測：
+    - ~23k 次/秒 vkCmdPipelineBarrier 觸發 NV driver state 累積（最高優先級）
+    - 某 RIFE shader 在特定 input 觸發 GPU 內部 hang (Aftermath shader debug
+      只 3 KB 表示單一 shader 涉入)
+  - 真正修法：
     - 需 Nsight Graphics 載 .nv-gpudmp 看 last-in-flight cmd
-    - dispatch 數量批次（fuse 連續 layers）減少 barrier 頻率 → 風險高
-    - 自動重啟 RIFE executor 每 25s（5s gap ×n times = bad UX）
-    - 等 NV driver 更新或換 hardware 驗測
+    - 或 NV driver 升版測試 (596.144 之後是否有相關 fix)
+    - 或 dispatch fusion 把 ~389 RIFE layers 批次 (Conv+Mul+Add+ReLU 合 1 層)
+      減少 dispatch + barrier 頻率到 < 5k/s (大工程)
+  - **目前 ship 策略**：opt-in beta default OFF (β.8)，UI 標 (β beta — 30-60s
+    後可能崩潰)，使用者短時段試用 OK
 
 - **SW decode mode + §B-DUMP 加速 crash**：dump 多 cmdCopyBuffer/barriers，
   SW mode 又比 HW mode 多了 m_SwFrucNv12Buf 跨 frame race。dump-skip guard
