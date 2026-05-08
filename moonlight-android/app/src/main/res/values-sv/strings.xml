@@ -272,4 +272,16 @@
     <string name="analogscroll_right">Höger analogspak</string>
     <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
     <string name="title_analog_scrolling">Använd en analog spak för att bläddra</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Bildinterpolering (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Dubblerar visad bildfrekvens genom att interpolera mellan serverbilder på enheten. Samma jämnhet med halva bandbredden.\n\nRekommenderat: ställ in värd-FPS till hälften av din skärmuppdateringsfrekvens (t.ex. 45 för 90 Hz, 60 för 120 Hz).</string>
+    <string name="title_fruc_quality">FRUC-kvalitetsförval</string>
+    <string name="summary_fruc_quality">Avvägning mellan rörelsespårningsprecision och GPU-belastning. Standard: Balanserad.</string>
+    <string name="title_fruc_backend_vulkan">Använd Vulkan FRUC-backend (experimentell)</string>
+    <string name="summary_fruc_backend_vulkan">Av (standard): använder OpenGL ES — väl testad. På: använder Vulkan compute pipeline — experimentell, kan thermal throttle på vissa enheter.</string>
+    <string-array name="fruc_quality_names">
+        <item>Kvalitet — bredaste rörelsesökning, kräver kraftfull GPU</item>
+        <item>Balanserad — rekommenderad</item>
+        <item>Prestanda — snabbast, svagare rörelsespårning</item>
+    </string-array>
 </resources>

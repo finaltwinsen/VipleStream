@@ -173,4 +173,16 @@
     <string name="summary_checkbox_usb_bind_all">Yerel Xbox oyun kumandası desteği mevcut olsa bile desteklenen tüm oyun kumandaları için Moonlight\'ın USB sürücüsünü kullan</string>
     <string name="summary_checkbox_flip_face_buttons">Oyun kumandaları ve ekran kontrolleri için A/B ve X/Y yüz düğmelerini değiştirir</string>
     <string name="summary_checkbox_absolute_mouse_mode">Bu fare hızlandırmanın uzak masaüstü kullanımı için daha doğal davranmasını sağlayabilir, ancak birçok oyunla uyumsuzdur.</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Kare ara değerleme (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Sunucu kareleri arasında cihaz üzerinde ara değerleme yaparak görüntülenen kare hızını iki katına çıkarır. Yarısı bant genişliğinde aynı pürüzsüzlük.\n\nÖnerilen: ana bilgisayar FPS\'sini ekran yenileme hızınızın yarısına ayarlayın (örn. 90 Hz için 45, 120 Hz için 60).</string>
+    <string name="title_fruc_quality">FRUC kalite ön ayarı</string>
+    <string name="summary_fruc_quality">Hareket izleme doğruluğu ile GPU yükü arasındaki denge. Varsayılan: Dengeli.</string>
+    <string name="title_fruc_backend_vulkan">Vulkan FRUC arka ucunu kullan (deneysel)</string>
+    <string name="summary_fruc_backend_vulkan">Kapalı (varsayılan): OpenGL ES kullanır — iyi test edilmiş. Açık: Vulkan compute pipeline kullanır — deneysel, bazı cihazlarda thermal throttle olabilir.</string>
+    <string-array name="fruc_quality_names">
+        <item>Kalite — en geniş hareket arama, güçlü GPU gerektirir</item>
+        <item>Dengeli — önerilen</item>
+        <item>Performans — en hızlı, daha zayıf hareket izleme</item>
+    </string-array>
 </resources>

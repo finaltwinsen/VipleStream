@@ -283,4 +283,16 @@
     <string name="summary_checkbox_gamepad_motion_fallback">如果您連線的手把或 Android 版本不支援手把感測器，請使用裝置內建的動態感測器。
 \n注意：啟用此選項可能會導致您的手把在主機被辨識為 PlayStation 控制器。</string>
     <string name="title_checkbox_gamepad_motion_fallback">模擬手把動態感測器支援</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">補幀（FRUC 2×）</string>
+    <string name="summary_enable_fruc">在裝置端補出中間幀，把顯示幀率翻倍。同樣的順暢度只需一半的網路頻寬。\n\n建議：把 host 的 FPS 設為螢幕更新率的一半（例如 90 Hz 螢幕設 45 FPS、120 Hz 螢幕設 60 FPS）。</string>
+    <string name="title_fruc_quality">補幀品質</string>
+    <string name="summary_fruc_quality">在 motion 追蹤準確度與 GPU 負擔之間取得平衡。預設：標準。</string>
+    <string name="title_fruc_backend_vulkan">使用 Vulkan 補幀後端（實驗性）</string>
+    <string name="summary_fruc_backend_vulkan">關閉（預設）：使用 OpenGL ES，已廣泛驗證。開啟：改用 Vulkan compute pipeline — 實驗性，部分裝置可能 thermal throttle。</string>
+    <string-array name="fruc_quality_names">
+        <item>高品質 — 最大 motion 搜尋範圍，需要強力 GPU</item>
+        <item>標準 — 建議</item>
+        <item>效能 — 最快，motion 追蹤較弱</item>
+    </string-array>
 </resources>

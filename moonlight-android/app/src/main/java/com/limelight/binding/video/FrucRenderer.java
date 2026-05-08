@@ -108,6 +108,12 @@ public class FrucRenderer implements IFrucBackend {
     private final Object frameSyncLock = new Object();
     private java.io.PrintWriter logWriter;
 
+    // §B-DUMP-ANDROID: optional cross-platform frame dump for cross-
+    // checking interp quality with the PC engines via the same Python
+    // analysis scripts. Null unless `debug.viplestream.frucdump.dir`
+    // is set; see FrucDumpWriter for activation + output schema.
+    private FrucDumpWriter frucDump;
+
     // FPS tracking
     private long fpsWindowStart = 0;
     private int fpsWindowPresents = 0;
@@ -226,6 +232,17 @@ public class FrucRenderer implements IFrucBackend {
             logToFile(msg);
             logToFile("GL_RENDERER: " + GLES31.glGetString(GLES31.GL_RENDERER));
             logToFile("GL_VERSION: " + GLES31.glGetString(GLES31.GL_VERSION));
+
+            // §B-DUMP-ANDROID: stand up the dump writer if the property
+            // is set. Returns null when disabled — zero overhead path.
+            int mvW = w / BLOCK_SIZE;
+            int mvH = h / BLOCK_SIZE;
+            frucDump = FrucDumpWriter.tryCreate(context, w, h, mvW, mvH,
+                                                qualityLevel, vsyncPeriodNs);
+            if (frucDump != null) {
+                frucDump.initGlResources();
+                logToFile("§B-DUMP active: " + frucDump.describe());
+            }
         } catch (Exception e) {
             String msg = "FRUC init failed: " + e.getMessage();
             Log.e(TAG, msg, e);
@@ -478,6 +495,13 @@ public class FrucRenderer implements IFrucBackend {
         // Convert OES → RGBA into currFrameTex
         convertOesToRgba(currFrameTex);
 
+        // §B-DUMP-ANDROID: latch dump-active state once per cycle so all
+        // hooks below see a consistent answer. Caller must always pair
+        // a kick with the matching commit (or skip both); flipping mid-
+        // cycle would desync the slot ring.
+        final boolean shouldDump = (frucDump != null) && frucDump.shouldCapture();
+        if (shouldDump) frucDump.kickReadbackReal(currFrameTex);
+
         if (frameCount <= 1) {
             copyTexture(currFrameTex, prevFrameTex);
             blitToScreen(currFrameTex);
@@ -485,6 +509,8 @@ public class FrucRenderer implements IFrucBackend {
             EGL14.eglSwapBuffers(eglDisplay, eglSurface);
             lastRenderTimeMs = android.os.SystemClock.elapsedRealtime();
             logToFile("frame=1: first frame stored, no interp");
+            // §B-DUMP-ANDROID: commit cycle 0 (real_0 only, no warp ran)
+            if (shouldDump) frucDump.commitFirstCycleReal();
             return false;
         }
 
@@ -507,6 +533,9 @@ public class FrucRenderer implements IFrucBackend {
             if (frameLate && frameCount % 100 == 0) {
                 logToFile("frame=" + frameCount + " SKIPPED (late=" + gap + "ms, poor=" + connectionPoor + ")");
             }
+            // §B-DUMP-ANDROID: drop the in-flight real readback — the
+            // PBO will be overwritten on the next normal cycle. No commit
+            // means counter doesn't advance, preserving 2N/2N+1 indexing.
             return false;
         }
 
@@ -533,6 +562,9 @@ public class FrucRenderer implements IFrucBackend {
             logToFile("frame=" + frameCount + " GL error after mvMedian: 0x" + Integer.toHexString(glErr));
         }
 
+        // §B-DUMP-ANDROID: snapshot the MV field warp will consume.
+        if (shouldDump) frucDump.kickReadbackMv(filteredMotionFieldTex);
+
         // Warp + blend → interpFrameTex (v17: adaptive blend)
         runWarp();
 
@@ -540,6 +572,9 @@ public class FrucRenderer implements IFrucBackend {
         if (glErr != GLES31.GL_NO_ERROR && frameCount <= 10) {
             logToFile("frame=" + frameCount + " GL error after warp: 0x" + Integer.toHexString(glErr));
         }
+
+        // §B-DUMP-ANDROID: snapshot the warp output before it's blitted.
+        if (shouldDump) frucDump.kickReadbackInterp(interpFrameTex);
 
         // §I.A1: tell the compositor explicitly when each buffer is meant to
         // hit the screen. The dual-present pattern previously relied solely on
@@ -581,6 +616,9 @@ public class FrucRenderer implements IFrucBackend {
         if (frameCount <= 5 || frameCount % 300 == 0) {
             logToFile("frame=" + frameCount + " interpolated (total=" + interpolatedCount + ") fps=" + currentOutputFps);
         }
+
+        // §B-DUMP-ANDROID: cycle complete — fence + drain ready slots.
+        if (shouldDump) frucDump.commitCycleAndDrainReady();
 
         return true;
     }
@@ -732,6 +770,14 @@ public class FrucRenderer implements IFrucBackend {
     @Override
     public void destroy() {
         logToFile("destroy: frames=" + frameCount + " interpolated=" + interpolatedCount);
+        // §B-DUMP-ANDROID: flush + tear down dump GL resources before we
+        // tear down the EGL context they were allocated against.
+        if (frucDump != null) {
+            try { frucDump.shutdown(); } catch (Throwable t) {
+                Log.w(TAG, "frucDump.shutdown failed: " + t);
+            }
+            frucDump = null;
+        }
         if (logWriter != null) { logWriter.close(); logWriter = null; }
         if (inputSurface != null) { inputSurface.release(); inputSurface = null; }
         if (surfaceTexture != null) { surfaceTexture.release(); surfaceTexture = null; }

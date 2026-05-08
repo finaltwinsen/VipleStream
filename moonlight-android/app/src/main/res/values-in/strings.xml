@@ -211,4 +211,16 @@
     <string name="title_checkbox_enable_pip">Aktifkan mode pengamat Gambar-dalam-Gambar</string>
     <string name="summary_language_list">Bahasa yang digunakan untuk Moonlight</string>
     <string name="summary_checkbox_enable_sops">Izinkan GFE mengubah setelan game untuk streaming yang optimal</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Interpolasi bingkai (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Menggandakan laju bingkai yang ditampilkan dengan menginterpolasi antara bingkai server di perangkat. Kelancaran yang sama dengan setengah bandwidth.\n\nDirekomendasikan: setel FPS host menjadi setengah dari laju penyegaran layar Anda (mis. 45 untuk 90 Hz, 60 untuk 120 Hz).</string>
+    <string name="title_fruc_quality">Praatur kualitas FRUC</string>
+    <string name="summary_fruc_quality">Kompromi antara akurasi pelacakan gerakan dan beban GPU. Default: Seimbang.</string>
+    <string name="title_fruc_backend_vulkan">Gunakan backend FRUC Vulkan (eksperimental)</string>
+    <string name="summary_fruc_backend_vulkan">Mati (default): menggunakan OpenGL ES — teruji baik. Aktif: menggunakan Vulkan compute pipeline — eksperimental, mungkin thermal throttle di beberapa perangkat.</string>
+    <string-array name="fruc_quality_names">
+        <item>Kualitas — pencarian gerakan terluas, memerlukan GPU yang kuat</item>
+        <item>Seimbang — direkomendasikan</item>
+        <item>Performa — tercepat, pelacakan gerakan lebih lemah</item>
+    </string-array>
 </resources>

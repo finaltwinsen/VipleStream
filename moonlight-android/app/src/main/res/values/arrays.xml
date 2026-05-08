@@ -133,9 +133,9 @@
     </string-array>
 
     <string-array name="fruc_quality_names">
-        <item>Quality (best visuals)</item>
-        <item>Balanced (recommended)</item>
-        <item>Performance (lowest latency)</item>
+        <item>Quality — widest motion search, requires powerful GPU</item>
+        <item>Balanced — recommended</item>
+        <item>Performance — fastest, weaker motion tracking</item>
     </string-array>
     <string-array name="fruc_quality_values" translatable="false">
         <item>0</item>

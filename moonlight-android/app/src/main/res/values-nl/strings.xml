@@ -223,4 +223,16 @@
     <string name="applist_menu_tv_channel">Toevoegen aan Kanaal</string>
     <!-- Array strings -->
     <string name="videoformat_hevcalways">Gebruik HEVC altijd (mogelijkheid tot crashes)</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Frame-interpolatie (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Verdubbelt de weergegeven framerate door tussen serverframes op het apparaat te interpoleren. Zelfde vloeiendheid met de helft van de bandbreedte.\n\nAanbevolen: stel de host-FPS in op de helft van uw schermverversingsfrequentie (bijv. 45 voor 90 Hz, 60 voor 120 Hz).</string>
+    <string name="title_fruc_quality">FRUC-kwaliteitsvoorinstelling</string>
+    <string name="summary_fruc_quality">Compromis tussen nauwkeurigheid van bewegingsdetectie en GPU-belasting. Standaard: Gebalanceerd.</string>
+    <string name="title_fruc_backend_vulkan">Vulkan FRUC-backend gebruiken (experimenteel)</string>
+    <string name="summary_fruc_backend_vulkan">Uit (standaard): gebruikt OpenGL ES — goed getest. Aan: gebruikt Vulkan compute pipeline — experimenteel, kan thermal throttle op sommige apparaten.</string>
+    <string-array name="fruc_quality_names">
+        <item>Kwaliteit — breedste bewegingszoekbereik, krachtige GPU vereist</item>
+        <item>Gebalanceerd — aanbevolen</item>
+        <item>Prestaties — snelst, zwakkere bewegingsdetectie</item>
+    </string-array>
 </resources>

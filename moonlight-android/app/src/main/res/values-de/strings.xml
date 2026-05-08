@@ -275,4 +275,16 @@
     <string name="analogscroll_none">Keine (beide Sticks bewegen die Maus)</string>
     <string name="analogscroll_right">Rechter Analogstick</string>
     <string name="analogscroll_left">Linker Analogstick</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Bildinterpolation (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Verdoppelt die angezeigte Bildrate, indem zwischen Server-Bildern auf dem Gerät interpoliert wird. Gleiche Glätte bei halber Bandbreite.\n\nEmpfohlen: Setze die Host-FPS auf die Hälfte deiner Display-Aktualisierungsrate (z. B. 45 für 90 Hz, 60 für 120 Hz).</string>
+    <string name="title_fruc_quality">FRUC-Qualitätsvoreinstellung</string>
+    <string name="summary_fruc_quality">Kompromiss zwischen Bewegungsverfolgungsgenauigkeit und GPU-Last. Standard: Ausgeglichen.</string>
+    <string name="title_fruc_backend_vulkan">Vulkan FRUC-Backend verwenden (experimentell)</string>
+    <string name="summary_fruc_backend_vulkan">Aus (Standard): OpenGL ES verwenden — gut getestet. Ein: Vulkan compute pipeline verwenden — experimentell, kann auf einigen Geräten thermal throttle.</string>
+    <string-array name="fruc_quality_names">
+        <item>Qualität — größter Bewegungssuchbereich, benötigt starke GPU</item>
+        <item>Ausgeglichen — empfohlen</item>
+        <item>Leistung — am schnellsten, schwächere Bewegungsverfolgung</item>
+    </string-array>
 </resources>

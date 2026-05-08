@@ -1,2 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources></resources>
+<resources>    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">تێکچوونی فرەیم (FRUC 2×)</string>
+    <string name="summary_enable_fruc">ڕێژەی فرەیمی پیشاندراو دووبەر دەکات بە تێکچوون لە نێوان فرەیمەکانی سێرڤەر لەسەر ئامێرەکە. هەمان نەرمی بە نیوەی پانی باند.\n\nپێشنیار دەکرێت: FPSی هۆست لە نیوەی ڕێژەی نوێکردنەوەی پەردەکەت دابنێ (نموونە 45 بۆ 90 Hz، 60 بۆ 120 Hz).</string>
+    <string name="title_fruc_quality">پێش‌ڕێکخستنی کوالێتی FRUC</string>
+    <string name="summary_fruc_quality">هاوسەنگی لە نێوان وردی شوێنکەوتنی جوڵە و باری GPU. بنەڕەت: هاوسەنگ.</string>
+    <string name="title_fruc_backend_vulkan">بەکارهێنانی Vulkan FRUC backend (تاقیکاری)</string>
+    <string name="summary_fruc_backend_vulkan">کوژاوە (بنەڕەت): OpenGL ES بەکار دەهێنێت — باش تاقیکراوە. هەڵکراو: Vulkan compute pipeline بەکار دەهێنێت — تاقیکاری، لەوانەیە لەسەر هەندێ ئامێر thermal throttle ڕووبدات.</string>
+    <string-array name="fruc_quality_names">
+        <item>کوالێتی — فراوانترین گەڕانی جوڵە، GPUی بەهێز پێویستە</item>
+        <item>هاوسەنگ — پێشنیارکراو</item>
+        <item>کارایی — خێراترین، شوێنکەوتنی جوڵەی لاوازتر</item>
+    </string-array>
+</resources>

@@ -140,4 +140,16 @@
     <string name="title_checkbox_touchscreen_trackpad">Използване на сензорния екран като тракпад</string>
     <string name="title_checkbox_multi_controller">Автоматично откриване на наличен контролер</string>
     <string name="summary_checkbox_multi_controller">Премахването на отметката от тази опция принуждава контролер винаги да присъства</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Интерполация на кадри (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Удвоява показваната честота на кадрите чрез интерполация между кадрите на сървъра на устройството. Същата плавност при половината честотна лента.\n\nПрепоръчително: задайте FPS на хоста на половината от честотата на опресняване на екрана (например 45 за 90 Hz, 60 за 120 Hz).</string>
+    <string name="title_fruc_quality">Предварителна настройка за качество на FRUC</string>
+    <string name="summary_fruc_quality">Компромис между точност на проследяване на движението и натоварване на GPU. По подразбиране: Балансирано.</string>
+    <string name="title_fruc_backend_vulkan">Използване на FRUC бекенд Vulkan (експериментално)</string>
+    <string name="summary_fruc_backend_vulkan">Изключено (по подразбиране): използва OpenGL ES — добре тестван. Включено: използва Vulkan compute pipeline — експериментален, може да thermal throttle на някои устройства.</string>
+    <string-array name="fruc_quality_names">
+        <item>Качество — най-широк диапазон на търсене на движение, изисква мощен GPU</item>
+        <item>Балансирано — препоръчително</item>
+        <item>Производителност — най-бързо, по-слабо проследяване на движението</item>
+    </string-array>
 </resources>

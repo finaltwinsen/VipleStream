@@ -178,4 +178,16 @@
     <string name="audioconf_51surround">Sunet Surround 5.1</string>
     <string name="audioconf_71surround">Sunet Surround 7.1</string>
     <string name="videoformat_hevcalways">Folosește HEVC mereu (se poate bloca)</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Interpolare cadre (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Dublează rata cadrelor afișate prin interpolarea între cadrele serverului pe dispozitiv. Aceeași fluiditate cu jumătate din lățimea de bandă.\n\nRecomandat: setați FPS-ul gazdei la jumătatea ratei de reîmprospătare a ecranului (ex. 45 pentru 90 Hz, 60 pentru 120 Hz).</string>
+    <string name="title_fruc_quality">Presetare calitate FRUC</string>
+    <string name="summary_fruc_quality">Compromis între precizia urmăririi mișcării și sarcina GPU. Implicit: Echilibrat.</string>
+    <string name="title_fruc_backend_vulkan">Utilizare backend FRUC Vulkan (experimental)</string>
+    <string name="summary_fruc_backend_vulkan">Dezactivat (implicit): utilizează OpenGL ES — bine testat. Activat: utilizează Vulkan compute pipeline — experimental, poate thermal throttle pe unele dispozitive.</string>
+    <string-array name="fruc_quality_names">
+        <item>Calitate — cea mai largă căutare a mișcării, necesită GPU puternic</item>
+        <item>Echilibrat — recomandat</item>
+        <item>Performanță — cel mai rapid, urmărire a mișcării mai slabă</item>
+    </string-array>
 </resources>

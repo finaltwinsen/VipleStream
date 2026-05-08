@@ -247,4 +247,16 @@
     <string name="title_frame_pacing">Frame pacing videa</string>
     <string name="summary_frame_pacing">Zvolte, jak vyvážit zpoždění videa a jeho plynulost</string>
     <string name="pacing_latency">Preferovat nejnižší zpoždění</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Interpolace snímků (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Zdvojnásobí zobrazenou snímkovou frekvenci interpolací mezi snímky serveru v zařízení. Stejná plynulost při polovičním datovém toku.\n\nDoporučeno: nastavte FPS hostitele na polovinu obnovovací frekvence vašeho displeje (např. 45 pro 90 Hz, 60 pro 120 Hz).</string>
+    <string name="title_fruc_quality">Předvolba kvality FRUC</string>
+    <string name="summary_fruc_quality">Kompromis mezi přesností sledování pohybu a zatížením GPU. Výchozí: Vyvážené.</string>
+    <string name="title_fruc_backend_vulkan">Použít backend FRUC Vulkan (experimentální)</string>
+    <string name="summary_fruc_backend_vulkan">Vypnuto (výchozí): používá OpenGL ES — dobře otestováno. Zapnuto: používá Vulkan compute pipeline — experimentální, na některých zařízeních může thermal throttle.</string>
+    <string-array name="fruc_quality_names">
+        <item>Kvalita — nejširší vyhledávání pohybu, vyžaduje výkonné GPU</item>
+        <item>Vyvážené — doporučeno</item>
+        <item>Výkon — nejrychlejší, slabší sledování pohybu</item>
+    </string-array>
 </resources>

@@ -233,4 +233,16 @@
     <string name="title_checkbox_enable_audiofx">Hỗ trợ bộ cân bằng của hệ thống</string>
     <string name="summary_checkbox_enable_audiofx">Cho phép hiệu ứng âm thanh hoạt động khi stream, nhưng có thể tăng độ trễ âm thanh</string>
     <string name="resolution_prefix_native_portrait">(Dọc)</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Nội suy khung hình (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Nhân đôi tốc độ khung hình hiển thị bằng cách nội suy giữa các khung hình của máy chủ trên thiết bị. Cùng độ mượt với một nửa băng thông.\n\nKhuyến nghị: đặt FPS của máy chủ bằng một nửa tần số làm mới màn hình của bạn (ví dụ: 45 cho màn 90 Hz, 60 cho 120 Hz).</string>
+    <string name="title_fruc_quality">Thiết lập sẵn chất lượng FRUC</string>
+    <string name="summary_fruc_quality">Đánh đổi giữa độ chính xác theo dõi chuyển động và tải GPU. Mặc định: Cân bằng.</string>
+    <string name="title_fruc_backend_vulkan">Sử dụng backend FRUC Vulkan (thử nghiệm)</string>
+    <string name="summary_fruc_backend_vulkan">Tắt (mặc định): sử dụng OpenGL ES — đã được kiểm tra kỹ. Bật: sử dụng Vulkan compute pipeline — thử nghiệm, có thể thermal throttle trên một số thiết bị.</string>
+    <string-array name="fruc_quality_names">
+        <item>Chất lượng — phạm vi tìm chuyển động rộng nhất, cần GPU mạnh</item>
+        <item>Cân bằng — khuyến nghị</item>
+        <item>Hiệu suất — nhanh nhất, theo dõi chuyển động yếu hơn</item>
+    </string-array>
 </resources>

@@ -25,15 +25,19 @@ root = Path(sys.argv[1])
 
 # Detect dump layout (flat new vs legacy real/+all/ subdirs).  See
 # verify_dump_interp.py for the same auto-detect.
-flat_reals   = sorted(root.glob("frame_*_real.bmp"))
-flat_interps = sorted(root.glob("frame_*_interp.bmp"))
+# 2026-05-08: also accept .png (Android FrucDumpWriter port).
+flat_reals   = sorted(list(root.glob("frame_*_real.bmp"))
+                    + list(root.glob("frame_*_real.png")))
+flat_interps = sorted(list(root.glob("frame_*_interp.bmp"))
+                    + list(root.glob("frame_*_interp.png")))
 legacy_real_dir = root / "real"
 legacy_all_dir  = root / "all"
 
 if flat_reals or flat_interps:
     layout = "flat"
     reals = flat_reals
-    alls  = sorted(root.glob("frame_*.bmp"))
+    alls  = sorted(list(root.glob("frame_*.bmp"))
+                 + list(root.glob("frame_*.png")))
 elif legacy_real_dir.is_dir() and legacy_all_dir.is_dir():
     layout = "legacy"
     reals = sorted(legacy_real_dir.glob("frame_*.bmp"))

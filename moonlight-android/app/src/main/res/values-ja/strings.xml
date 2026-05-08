@@ -137,4 +137,16 @@
     <string name="nettest_title_done">ネットワークテスト終了</string>
     <string name="pcview_menu_details">詳細を表示</string>
     <string name="nettest_title_waiting">ネットワーク接続テスト中</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">フレーム補間（FRUC 2×）</string>
+    <string name="summary_enable_fruc">サーバーフレーム間を端末側で補間し、表示フレームレートを2倍にします。同じ滑らかさで帯域は半分。\n\n推奨：ホストの FPS をディスプレイ更新レートの半分に設定（例：90 Hz は 45 FPS、120 Hz は 60 FPS）。</string>
+    <string name="title_fruc_quality">FRUC 品質プリセット</string>
+    <string name="summary_fruc_quality">モーション追跡精度と GPU 負荷のトレードオフ。デフォルト：バランス。</string>
+    <string name="title_fruc_backend_vulkan">Vulkan FRUC バックエンドを使用（実験的）</string>
+    <string name="summary_fruc_backend_vulkan">オフ（デフォルト）：OpenGL ES を使用、広くテスト済み。オン：Vulkan compute pipeline を使用 — 実験的、一部の機種で thermal throttle の可能性あり。</string>
+    <string-array name="fruc_quality_names">
+        <item>高品質 — 最大モーション検索範囲、強力な GPU が必要</item>
+        <item>バランス — 推奨</item>
+        <item>パフォーマンス — 最速、モーション追跡は弱め</item>
+    </string-array>
 </resources>

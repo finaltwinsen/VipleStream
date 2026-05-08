@@ -32,8 +32,14 @@ real_dir = root / "real"
 all_dir  = root / "all"
 
 # Detect layout.  Flat = new (2026-05-07), subdir = legacy.
-flat_reals   = sorted(root.glob("frame_*_real.bmp"))
-flat_interps = sorted(root.glob("frame_*_interp.bmp"))
+# 2026-05-08: also accept .png for the Android port (FrucDumpWriter.java);
+# both extensions sort identically by name index since the prefix is the
+# same. Mixing bmp + png in one dir isn't expected — Android writes only
+# png, PC only bmp — but the union glob is harmless if it ever happens.
+flat_reals   = sorted(list(root.glob("frame_*_real.bmp"))
+                    + list(root.glob("frame_*_real.png")))
+flat_interps = sorted(list(root.glob("frame_*_interp.bmp"))
+                    + list(root.glob("frame_*_interp.png")))
 legacy = real_dir.is_dir() and all_dir.is_dir()
 
 if flat_reals or flat_interps:
@@ -42,8 +48,9 @@ if flat_reals or flat_interps:
     # In flat layout, the analyzer needs the real frames bracketing each
     # interp — we reconstruct an "alls"-equivalent list (alternating real
     # at even, interp at odd) so the rest of the script stays unchanged.
-    # Sort all bmps together; their lex order = name index = display order.
-    alls = sorted(root.glob("frame_*.bmp"))
+    # Sort all images together; their lex order = name index = display order.
+    alls = sorted(list(root.glob("frame_*.bmp"))
+                + list(root.glob("frame_*.png")))
 elif legacy:
     layout = "legacy"
     reals = sorted(real_dir.glob("frame_*.bmp"))

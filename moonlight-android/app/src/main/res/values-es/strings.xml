@@ -287,4 +287,16 @@
     <string name="title_seekbar_vibrate_fallback_strength">Ajustar la intensidad del ruido emulado</string>
     <string name="summary_seekbar_vibrate_fallback_strength">Amplifica o reduce la intensidad de la vibración de tu dispositivo</string>
     <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Interpolación de fotogramas (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Duplica la tasa de fotogramas mostrada interpolando entre fotogramas del servidor en el dispositivo. Misma suavidad con la mitad del ancho de banda.\n\nRecomendado: ajusta el FPS del host a la mitad de la frecuencia de actualización de tu pantalla (p. ej. 45 para 90 Hz, 60 para 120 Hz).</string>
+    <string name="title_fruc_quality">Preajuste de calidad FRUC</string>
+    <string name="summary_fruc_quality">Compromiso entre precisión de seguimiento de movimiento y carga GPU. Predeterminado: Equilibrado.</string>
+    <string name="title_fruc_backend_vulkan">Usar backend FRUC Vulkan (experimental)</string>
+    <string name="summary_fruc_backend_vulkan">Desactivado (predeterminado): usa OpenGL ES — bien probado. Activado: usa Vulkan compute pipeline — experimental, puede thermal throttle en algunos dispositivos.</string>
+    <string-array name="fruc_quality_names">
+        <item>Calidad — búsqueda de movimiento más amplia, GPU potente requerida</item>
+        <item>Equilibrado — recomendado</item>
+        <item>Rendimiento — más rápido, seguimiento de movimiento más débil</item>
+    </string-array>
 </resources>
