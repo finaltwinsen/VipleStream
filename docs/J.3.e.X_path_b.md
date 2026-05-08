@@ -107,14 +107,41 @@ Block-match path 不會撞 — 排除 VkFrucRenderer 自身問題.  獨立於 fp
 - β.6 — descriptor set pre-alloc + cache 取消 per-frame churn.
   Latency 反退化 9% 且仍撞 → reverted.
 
-**剩餘推測**（待 Nsight Graphics 分析才能定）：
-1. 高頻 vkCmdPipelineBarrier (~23k/sec) 觸發 NV driver state 累積
-2. BAR + DEVICE_LOCAL ~150 MB Path β alloc 跟 HEVC HW decode VRAM 互擠
-3. 某 RIFE shader 在特定 input 觸發 GPU 內部 hang (Aftermath shader debug 只 3 KB
-   表示單一 shader 涉入)
+**Aftermath crash dump 解碼結果（5 個 dump 100% 一致）**：
+```
+"Faulted Warps": [{
+  "Fault Description": "MMU Fault Error - shader instruction MMU fault accessing memory",
+  "Shader GPU PC Address": "fragment_01 @ 0x00000150"
+}]
+"Shader infos": { "Shader name": "fragment_01", "Shader type": "Fragment" }
+"Page fault info": {
+  "Resource": { "Destroyed": true, "Width": 930, "Height": 502, "Size": 1933312 }
+}
+```
 
-**短時段使用 OK**（< 30s）— 本身架構驗證成功，問題在跨時段 NV driver
-state. 等 root cause 解開或換 NV driver 版本 / 換 hardware (4090) 重驗.
+`fragment_01` = `vkfruc.frag` (real-frame 顯示 shader, 採樣 AVVkFrame.img[0]
+透過 ycbcr sampler).  Fault PC 0x150 在 `OpImageSampleImplicitLod`.
+Resource 930×502 RGBA8 (= UV plane of HEVC 1860×1004 coded ref frame).
+"Destroyed=true" 是 post-mortem (engine reset 後 driver 清掉的)，故這個
+不直接代表 fault 時 resource 已 destroy.
+
+**修法嘗試（皆 reverted）**：
+1. `av_frame_clone(frame)` 持有 ref 跨 slot fence — 不撞了但 fps 30× 退化 (1.89 vs 60)
+2. `av_frame_alloc` + `av_frame_ref/unref` — 仍撞 + 同樣 fps 退化
+3. β.6 descSet cache pre-alloc — 不撞但 latency +9%, reverted
+4. β.6 周期性 vkDeviceWaitIdle 25s — crash 從 30-60s 略晚到 78s 仍撞
+
+從 v1/v2 觀察 fps 退到 1.89 同時 crash 消失 (v1)：暗示 crash 是高 dispatch
+密度觸發，AVFrame ref 不是真正 root cause；ref-keep 只是「副作用」減壓.
+
+**短時段使用 OK** (< 30s). 完整修法需要：
+- Nsight Graphics（GUI 不只 aftermath_decode CLI）載 .nv-gpudmp 看 last
+  in-flight cmd buffer 完整 state 跟 page-fault 前的 access pattern
+- 或 NV driver 升版過 596.36 試
+- 或 RIFE-v4-lite 389 dispatch 重組成 fewer fused dispatches (大工程)
+
+當前 ship 狀態：opt-in beta default-OFF，UI + docs 已備齊，使用者可短時段
+試用享受 quality 提升.
 
 ### TRIPLE 60→180 暫不支援
 
