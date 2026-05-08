@@ -6198,11 +6198,21 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
     // Faster GPUs (RTX 4070+) likely fit 512×256 or higher; user opts in
     // via UI (Settings → Video → Vulkan FRUC → Native RIFE infer dim) or
     // VIPLE_VKFRUC_RIFE_INFER_DIM=512 / 768 / 1024 env var (must be /128).
+    //
+    // §J.3.e.X β.5.3 (D-lite, 2026-05-08) — round UP instead of DOWN.
+    // Previously a user passing e.g. VIPLE_VKFRUC_RIFE_INFER_DIM=192
+    // (between 128 and 256) got snapped DOWN to 128 — the opposite of
+    // what they wanted (more quality than 128).  Round UP so 192 → 256
+    // (slight latency hit, more quality) better matches user intent.
+    // Full D (true 192 / 320 / 448 support via asymmetric Add center-
+    // crop in inferShapes + dispatchBinaryOp) deferred — the RIFE-v4-
+    // lite Add_503 mismatch needs careful per-layer center-crop logic
+    // that's a larger undertaking; backlog item, see TODO.md §J.3.e.X.
     int inferW = vkfrucNativeRifeInferDimFromUserOrEnv();
-    inferW = (inferW / 128) * 128;
+    inferW = ((inferW + 127) / 128) * 128;
     if (inferW < 128) inferW = 128;
     int inferH = (int)((double)inferW * (double)height / (double)width + 0.5);
-    inferH = (inferH / 128) * 128;
+    inferH = ((inferH + 127) / 128) * 128;
     if (inferH < 128) inferH = 128;
     m_RifeNativeInferW = inferW;
     m_RifeNativeInferH = inferH;
