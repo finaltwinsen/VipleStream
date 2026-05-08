@@ -13,6 +13,7 @@
 #include <QThreadPool>
 #include <QCoreApplication>
 #include <QRandomGenerator>
+#include <QDateTime>     // VipleStream §K.X — currentMSecsSinceEpoch for wake-cadence deadline
 
 #define SER_HOSTS "hosts"
 #define SER_HOSTS_BACKUP "hostsbackup"
@@ -24,11 +25,39 @@ class PcMonitorThread : public QThread
 #define TRIES_BEFORE_OFFLINING 2
 #define POLLS_PER_APPLIST_FETCH 10
 
+// VipleStream §K.X auto-wake fix — polling cadence selected per iteration
+// based on online state + autoWakeOnLan toggle + recent explicit-wake.
+//
+// The original 3 s cadence is fine for online hosts (UI must reflect a
+// state change quickly) and acceptable when autoWakeOnLan == true (user
+// opted in to the implicit Wake-on-Pattern-Match behavior caused by the
+// /serverinfo TCP SYN burst hitting a sleeping NIC).  When autoWakeOnLan
+// is false and the host is offline, drop to 60 s — well under the SYN
+// pattern threshold most NICs use to wake — so the toggle actually
+// stops the unwanted wake without forfeiting recovery latency once the
+// user explicitly clicks "Wake PC".
+#define POLL_INTERVAL_FAST_MS  3000     // online or wake-allowed offline
+#define POLL_INTERVAL_SLOW_MS  60000    // offline + autoWakeOnLan == false
+#define EXPLICIT_WAKE_TTL_MS   90000    // grace period after user-initiated wake
+
 public:
-    PcMonitorThread(NvComputer* computer)
-        : m_Computer(computer)
+    PcMonitorThread(NvComputer* computer, StreamingPreferences* prefs)
+        : m_Computer(computer),
+          m_Prefs(prefs),
+          m_ExplicitWakeUntil(0)
     {
         setObjectName("Polling thread for " + computer->name);
+    }
+
+    // Called from ComputerManager::notifyExplicitWake (any thread) to
+    // tell us the user just kicked off a manual wake on this host —
+    // we should switch back to fast cadence for EXPLICIT_WAKE_TTL_MS so
+    // they see the host come Online quickly, even if autoWakeOnLan == false.
+    void notifyExplicitWake()
+    {
+        QMutexLocker locker(&m_WakeMutex);
+        m_ExplicitWakeUntil = QDateTime::currentMSecsSinceEpoch() + EXPLICIT_WAKE_TTL_MS;
+        m_WakeCondition.wakeAll();   // also interrupts any in-progress slow sleep
     }
 
 private:
@@ -241,11 +270,51 @@ private:
                 emit computerStateChanged(m_Computer);
             }
 
-            // Wait a bit to poll again, but do it in 100 ms chunks
-            // so we can be interrupted reasonably quickly.
-            // FIXME: QWaitCondition would be better.
-            for (int i = 0; i < 30 && !isInterruptionRequested(); i++) {
-                QThread::msleep(100);
+            // VipleStream §K.X — pick this iteration's poll interval.
+            // Read prefs every iteration so flipping the autoWakeOnLan
+            // toggle while we're sleeping takes effect on the next loop
+            // (cap = current interval).  We also short-circuit to fast
+            // cadence inside the explicit-wake TTL so the right-click
+            // "Wake PC" path produces a visible online-state transition
+            // within seconds rather than up to a minute.
+            qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+            bool isOffline = (m_Computer->state != NvComputer::CS_ONLINE);
+            bool autoWake = (m_Prefs && m_Prefs->autoWakeOnLan);
+            bool explicitWakeActive;
+            {
+                QMutexLocker locker(&m_WakeMutex);
+                explicitWakeActive = (m_ExplicitWakeUntil > nowMs);
+            }
+            unsigned long sleepMs = POLL_INTERVAL_FAST_MS;
+            if (isOffline && !autoWake && !explicitWakeActive) {
+                sleepMs = POLL_INTERVAL_SLOW_MS;
+            }
+
+            // QWaitCondition replaces the previous 30×100 ms busy-poll
+            // (FIXME-noted in the original code).  We wake on either
+            // notifyExplicitWake() (explicit user "Wake PC") or — via
+            // the 1 s chunked timeout — on requestInterruption() at
+            // shutdown.  QThread::requestInterruption is non-virtual so
+            // we can't override it from ComputerPollingEntry's QThread*
+            // pointer; chunking caps shutdown latency at ~1 s while
+            // still letting a 60 s sleep be one ~no-op cv wait the rest
+            // of the time (no busy-poll cycles spent).
+            {
+                QMutexLocker locker(&m_WakeMutex);
+                qint64 deadlineMs = QDateTime::currentMSecsSinceEpoch() + (qint64)sleepMs;
+                bool wokenByCv = false;
+                while (!isInterruptionRequested() && !wokenByCv) {
+                    qint64 nowChunk = QDateTime::currentMSecsSinceEpoch();
+                    if (nowChunk >= deadlineMs) {
+                        break;
+                    }
+                    unsigned long remaining = (unsigned long)(deadlineMs - nowChunk);
+                    unsigned long chunkMs = remaining < 1000 ? remaining : 1000;
+                    // wait() returns true iff signaled before timeout.
+                    if (m_WakeCondition.wait(&m_WakeMutex, chunkMs)) {
+                        wokenByCv = true;
+                    }
+                }
             }
         }
     }
@@ -255,6 +324,10 @@ signals:
 
 private:
     NvComputer* m_Computer;
+    StreamingPreferences* m_Prefs;       // VipleStream §K.X — for autoWakeOnLan gating
+    qint64 m_ExplicitWakeUntil;          // wallclock ms; protected by m_WakeMutex
+    QMutex m_WakeMutex;
+    QWaitCondition m_WakeCondition;
 };
 
 ComputerManager::ComputerManager(StreamingPreferences* prefs)
@@ -508,11 +581,41 @@ void ComputerManager::startPollingComputer(NvComputer* computer)
     }
 
     if (!pollingEntry->isActive()) {
-        PcMonitorThread* thread = new PcMonitorThread(computer);
+        // VipleStream §K.X — pass the prefs handle so the thread can
+        // observe the autoWakeOnLan toggle each iteration and adjust
+        // its polling cadence accordingly (avoids relaunching the
+        // thread when the user flips the setting mid-session).
+        PcMonitorThread* thread = new PcMonitorThread(computer, m_Prefs);
         connect(thread, &PcMonitorThread::computerStateChanged,
                 this, &ComputerManager::handleComputerStateChanged);
         pollingEntry->setActiveThread(thread);
         thread->start();
+    }
+}
+
+// VipleStream §K.X auto-wake fix — invoked from ComputerModel::wakeComputer
+// (right-click "Wake PC") so the matching host's polling thread switches
+// back to fast cadence and sees the host come Online quickly even when
+// autoWakeOnLan is OFF.
+void ComputerManager::notifyExplicitWake(const QString& uuid)
+{
+    QReadLocker lock(&m_Lock);
+
+    auto it = m_PollEntries.find(uuid);
+    if (it == m_PollEntries.end() || it.value() == nullptr) {
+        return;
+    }
+
+    QThread* activeThread = it.value()->getActiveThread();
+    if (activeThread == nullptr) {
+        return;
+    }
+
+    // PcMonitorThread is fully declared in this translation unit, so the
+    // qobject_cast is safe.  No-op if cast fails (defensive).
+    PcMonitorThread* monitor = qobject_cast<PcMonitorThread*>(activeThread);
+    if (monitor != nullptr) {
+        monitor->notifyExplicitWake();
     }
 }
 

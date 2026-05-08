@@ -539,8 +539,20 @@ CenteredGridView {
                           ? qsTr("Auto Wake-on-LAN: ON")
                           : qsTr("Auto Wake-on-LAN: OFF")
                     onTriggered: {
+                        // VipleStream §K.X auto-wake fix — toggle now actually
+                        // gates BOTH (a) /serverinfo polling cadence on offline
+                        // hosts (was 3 s burst, now 60 s when OFF — see
+                        // PcMonitorThread::run) AND (b) the OFF→ON transition
+                        // explicitly fires magic packets to all wakeable
+                        // offline hosts so the toggle's "ON" promise of
+                        // "PCs grid wakes my hosts" is independent of NIC
+                        // pattern-match WoL behavior.
+                        var was_off = !StreamingPreferences.autoWakeOnLan
                         StreamingPreferences.autoWakeOnLan = !StreamingPreferences.autoWakeOnLan
                         StreamingPreferences.save()
+                        if (was_off && StreamingPreferences.autoWakeOnLan) {
+                            computerModel.wakeAllOfflineHosts()
+                        }
                     }
                     visible: model.wakeable
                 }

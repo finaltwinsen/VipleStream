@@ -163,6 +163,17 @@ public:
         return m_ActiveThread != nullptr;
     }
 
+    // VipleStream §K.X auto-wake fix — let ComputerManager fetch the live
+    // PcMonitorThread* so it can call notifyExplicitWake() to interrupt
+    // the offline-backoff sleep when the user explicitly clicks "Wake PC"
+    // (or otherwise issues a user-initiated wake).  Returns nullptr when
+    // no thread is active (e.g. polling stopped).
+    QThread* getActiveThread()
+    {
+        cleanInactiveList();
+        return m_ActiveThread;
+    }
+
     void setActiveThread(QThread* thread)
     {
         cleanInactiveList();
@@ -243,6 +254,15 @@ public:
     void renameHost(NvComputer* computer, QString name);
 
     void clientSideAttributeUpdated(NvComputer* computer);
+
+    // VipleStream §K.X auto-wake fix — when the user clicks "Wake PC" (or
+    // any other explicit user-initiated wake path), ping the matching
+    // host's polling thread so it switches back to fast cadence and
+    // notices the host coming online quickly.  Without this, an offline
+    // host being waked while autoWakeOnLan == false would stay 1-poll-
+    // per-60s for up to a minute before showing as Online in the grid.
+    // Safe to call with a uuid that has no active thread (no-op).
+    void notifyExplicitWake(const QString& uuid);
 
 signals:
     void computerStateChanged(NvComputer* computer);

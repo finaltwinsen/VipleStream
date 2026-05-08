@@ -199,8 +199,37 @@ void ComputerModel::wakeComputer(int computerIndex)
 {
     Q_ASSERT(computerIndex < m_Computers.count());
 
-    DeferredWakeHostTask* wakeTask = new DeferredWakeHostTask(m_Computers[computerIndex]);
+    NvComputer* computer = m_Computers[computerIndex];
+
+    DeferredWakeHostTask* wakeTask = new DeferredWakeHostTask(computer);
     QThreadPool::globalInstance()->start(wakeTask);
+
+    // VipleStream §K.X — also poke the polling thread for this host so it
+    // switches back to fast cadence and surfaces the Online state quickly
+    // (without this, autoWakeOnLan==false would leave the thread sleeping
+    // ~60 s after the magic packet was sent — host wakes but UI looks dead).
+    if (m_ComputerManager) {
+        m_ComputerManager->notifyExplicitWake(computer->uuid);
+    }
+}
+
+void ComputerModel::wakeAllOfflineHosts()
+{
+    // Batch-wake every paired+wakeable offline host.  Called from
+    // PcView.qml when the user toggles autoWakeOnLan OFF→ON to make
+    // the toggle's UX promise "ON = PCs page wakes my hosts" actually
+    // hold without relying on side-effects of /serverinfo polling.
+    for (NvComputer* computer : m_Computers) {
+        QReadLocker lock(&computer->lock);
+        if (computer->state != NvComputer::CS_ONLINE
+                && !computer->macAddress.isEmpty()) {
+            DeferredWakeHostTask* wakeTask = new DeferredWakeHostTask(computer);
+            QThreadPool::globalInstance()->start(wakeTask);
+            if (m_ComputerManager) {
+                m_ComputerManager->notifyExplicitWake(computer->uuid);
+            }
+        }
+    }
 }
 
 void ComputerModel::renameComputer(int computerIndex, QString name)

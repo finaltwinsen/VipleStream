@@ -45,6 +45,13 @@ public:
 
     Q_INVOKABLE void wakeComputer(int computerIndex);
 
+    // VipleStream §K.X auto-wake fix — batch-wake every paired+wakeable host
+    // currently in CS_OFFLINE.  Used from PcView.qml when the user flips
+    // the right-click "Auto Wake-on-LAN" toggle from OFF→ON, which restores
+    // the legacy "entering the PCs grid wakes my offline hosts" behavior
+    // without depending on NIC pattern-match WoL via TCP /serverinfo SYN.
+    Q_INVOKABLE void wakeAllOfflineHosts();
+
     Q_INVOKABLE void renameComputer(int computerIndex, QString name);
 
     Q_INVOKABLE Session* createSessionForCurrentGame(int computerIndex);
