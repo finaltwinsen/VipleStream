@@ -309,20 +309,25 @@ real frame 的 pixel-level diff 偏大。
 預設 256×128。更強 GPU 可 `VIPLE_VKFRUC_RIFE_INFER_DIM=512` 拉到 quality
 明顯提升的 dim（必須 /128，否則撞 Add_503）。
 
-**已知問題（**待修，使用者醒來時未必擋）：**
+**已知問題（待修）：**
 
-- **SW decode mode + Path β 不穩定** —— compare_fruc_engines.ps1 啟動時 set
-  VIPLE_VKFRUC_DUMP_DIR 強制 m_SwMode=true，HW decode 跑得起的 Path β 在
-  SW path 跑 ~8 秒就 VK_ERROR_DEVICE_LOST + Aftermath GPU crash dump。
-  (a) 不影響使用者主用例（live streaming 走 HW decode m_SwMode=false 穩）
-  (b) 影響 §B-DUMP 自動量測流程 — 解決前 compare_fruc_engines 的
-       `07_vkfruc_native_rife` row 會 timeout
-  (c) v6 加的 dump-skip guard 只跳 dump 命令，不解 SW-mode 自身 instability
-  (d) 推測 cause: m_SwFrucNv12Buf state cross renderFrameSw cycle vs
-       Path β buffer sync 競爭，或 BAR 記憶體壓力（SW upload 4MB×2 + RIFE
-       blobs +/- bilinear down/up buffers）
-  (e) 修法候選：trace renderFrameSw cmd buffer flow 找競爭點；或 force HW
-       decode 即使 dump 開啟（要 hack m_SwMode 邏輯）
+- **Path β 30-60s device-lost crash**（HW + SW mode 都會撞，跨 inferDim 跨
+  β.4/β.5/β.5.1 都觸發；β.6 descSet cache 嘗試 → 沒解、latency 反退化 → revert）
+  - 推測 1：descSet alloc churn ❌ 已驗測排除（β.6 cache 不解）
+  - 推測 2：~23k 次/秒 vkCmdPipelineBarrier 觸發 NV driver state 累積問題
+  - 推測 3：BAR + DEVICE_LOCAL 共 ~150 MB Path β alloc 跟 HEVC HW decode
+    VRAM allocation 互相干擾；總壓力擠破 NV driver 內部 budget
+  - 推測 4：某個 RIFE shader 在特定 input data 觸發 GPU hang（Aftermath
+    shader debug 只 3 KB 表示單一 shader 有問題）
+  - 修法候選：
+    - 需 Nsight Graphics 載 .nv-gpudmp 看 last-in-flight cmd
+    - dispatch 數量批次（fuse 連續 layers）減少 barrier 頻率 → 風險高
+    - 自動重啟 RIFE executor 每 25s（5s gap ×n times = bad UX）
+    - 等 NV driver 更新或換 hardware 驗測
+
+- **SW decode mode + §B-DUMP 加速 crash**：dump 多 cmdCopyBuffer/barriers，
+  SW mode 又比 HW mode 多了 m_SwFrucNv12Buf 跨 frame race。dump-skip guard
+  (commit 2a5732e) 已 ship 跳掉 dump cmd，但根本仍是 30-60s 那條 crash
 
 **還沒做的下一步候選：**
 1. 修 SW-mode device lost — 使 §B-DUMP 自動驗測 work
