@@ -10,29 +10,38 @@
 
 ## 優先級總覽
 
-只列**待辦 / 進行中 / 等硬體 / 等驅動**的條目。已完成、negative result、won't-fix 移到下方對應章節。
+只列**待辦 / 進行中 / 等硬體 / 等驅動**的條目。已完成、negative result、won't-fix 移到下方對應章節 OR git log。
 
-**2026-05-08 戰略 pivot 紀錄：**§B / §B-NVOF / §B2 自家 ME→warp→blend pipeline ceiling = ~20-30% warp ratio（即使做完 Path B 全套也是）。NvOFFRUC.dll 的 47.7% 是 **架構優勢無法用 tweaks 追平**（多 stage 整合 + NV 內部多年調教）。**ML-based interpolation (§J.3.e.X native RIFE)** 是 ceiling 60-80% 的唯一路。當前主推：**ship A' 當 Linux/AMD/Intel fallback + Native RIFE 接 production**。詳見 §B / §J.3.e.X 章節末尾。
+**戰略：** §B / §B-NVOF / §B2 自家 ME→warp→blend pipeline ceiling = ~20-30% warp ratio。NvOFFRUC.dll 47.7% 是架構性差距無法 tweak 追平。**ML-based interpolation (§J.3.e.X Native RIFE Path β)** 是 ceiling 60-80% 的唯一路 — **v1.4.0 已 ship**。current status: §B/§A' = Linux/AMD/Intel fallback；Path β = NV Vulkan flagship quality (beta opt-in)。
 
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
-| **Active (next)** | **§J.3.e.X Path β** native RIFE → VkFrucRenderer 整合 | β.1/β.2 ship 2026-05-08（VkFrucRenderer 自帶 VkInstance/VkDevice，繞過 NCNN dual-VkDevice 卡關）；env-var `VIPLE_VKFRUC_NATIVE_RIFE=1` + `VIPLE_VKFRUC_FRUC=1` 啟用；β.4 downscale (1080p→384²) 還沒做，全 res 推論吃滿 16-20ms 60fps DUAL 邊緣，需待 β.4 才能 production default |
-| **Deferred (replaced by Path β)** | **§J.3.e.X Final.3b** native RIFE → NcnnFRUC drop-in | NV 596.144 driver 在 ncnn 已持有 VkDevice 時拒第二次 vkCreateDevice，這條死路；Path β 改成接 VkFrucRenderer 共用 VkDevice 走通了 |
-| **Active (next)** | **§J.3.e.Y 4Y.5b/4Y.6** native RIFE latency 優化 | 22ms → 10ms 內（符合 60fps DUAL 16.7ms budget）；候選 4Y.5b activation fp16 storage / 4Y.6 multi-subgroup WG / 4Y.7 dispatch fusion；1-2 週 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Active** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限） |
+| **Active (β.9 post-ship)** | **§J.3.e.X Path β.9** TRIPLE 60→180 + Native RIFE | TRIPLE 需 2 次 RIFE inference，現 256×128 chain 13.8ms × 2 = 27.6ms 超 60fps server 16.7ms slot；需 graph executor 改成 timestep-shared 前段 + timestep-dependent 後段 split (~30% perf 省)；2-3 天工程 |
+| **Active (β.10 post-ship)** | **§J.3.e.X Path β.10** Linux / AMD / Intel 平台覆蓋 | Path β / NVOF 在 Ubuntu noble compile + link 已通過 (v1.4.0 §K.X 對齊)；待 native runtime smoke + AMD/Intel coopmat fallback 驗測 |
 | **Maintenance** | **§B / §B-NVOF / §B2** 自家 ME→warp→blend pipeline | A' 修完 (luma + range + consensus-max) 從 0% 推到 7-23% warp ratio；UI 整合 + Phase 7E 都 ship；**Path B 全套不做**（ceiling ~30% 跟 ML 60-80% 沒法比）；現狀作 Linux/AMD/Intel fallback 已堪用 |
 | **HW-pending** | **§I.D** Android Vulkan FRUC async compute | D.2.0–D.2.5 已 ship + Pixel 5 verify；剩自然 45fps→90Hz ideal 1:2 比例 — Pixel 5 panel 鎖 60/90Hz、GameManagerService 鎖 60fps，需 LTPO panel hw 才能驗 |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 3d.6 — AV1 native VK decode grey | 9 個 parser bug 修完仍 grey；NV driver 596.36 + AV1 vkCmdDecodeVideoKHR 黑/灰；§J.3.f ffmpeg 包裝路徑已 cover AV1，這條 deprecated |
 | **Deferred (driver-bound)** | **§J.3.e.2.i.8** Phase 1.7 ONLY-mode NVDEC device-lost | 5 個變體都繞不過，NV 596.36 結構性 bug，預設 PARALLEL 穩 |
-| **Deferred (driver-bound)** | **§B-DUMP NCNN** RIFE-Vulkan 輸出全 0 | RTX 3060 Laptop + NV 596.144 + ncnn 20220729 + RIFE-v4.25-lite forward pass 回傳全 0 mat；matToStaging/CopyResource/blit 都正常（magenta diag 驗過）；deferred 等 §J.3.e.X Final.3b 整合完取代 ncnn dependency |
 | **Deferred** | **§K.4** Wayland XDG portal teardown root-cause | `Restart=always` 緩解已 ship；需可重現 streaming 環境（GPU Linux 機）才能修進 wayland.cpp/portalgrab.cpp 的 EPIPE 路徑 |
-| **Medium** | **§F** DirectML 搬 D3D12 / command bundles | 27.6% warp ratio 已驗（compare_fruc_engines 2026-05-07），但 latency 慢「不堪用」；搬 D3D12 + command bundles 後或可降到 ≤14ms 進入 60fps DUAL budget；§J.3.e.X native RIFE 完成前不啟動 |
-| **Medium** | **§J.1** 路線 A (ID3D12 bridge) | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗 |
+| **Medium** | **§F** DirectML 搬 D3D12 / command bundles | 27.6% warp ratio 已驗，但 latency 慢「不堪用」；搬 D3D12 + command bundles 後或可降到 ≤14ms 進入 60fps DUAL budget；Path β 已是 Vulkan 端 ML flagship，DirectML 進一步推進優先級降低 |
+| **Medium** | **§J.1** 路線 A (ID3D12 bridge) | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗；Path β 走通後優先級降低 |
 | **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | Pi 5 + V3DV mesa Vulkan + V4L2 HW decode + DRM/KMS render；上游 source-level 支援，沒 CI prebuilt；FRUC backend 全 disable（Vulkan 補幀 Pi 5 GPU 不夠力），純 streaming 應 OK |
-| **Low** | **§G.1** RIFE v1 11-channel | A1000 launch overhead bound (§G.3 negative result)；RTX 30/40+ 才有意義 |
+| **Low** | **§G.1** RIFE v1 11-channel | A1000 launch overhead bound (§G.3 negative result)；RTX 30/40+ 才有意義；Path β shipped 後優先級降低 |
+| **Low** | **§J.3.e.Y 4Y.5b/4Y.7** native RIFE perf opt 候選 | 4Y.6 coopmat opt-in shipped，4Y.4 baseline 22ms；4Y.5b activation fp16 / 4Y.7 dispatch fusion 還沒做，60fps DUAL 已能跑就先 ship |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
 | **Low** | **§D** HelpLauncher URL → 結構化 docs | docs/setup_guide.md + docs/troubleshooting.md 已寫；HelpLauncher 切過去等 doc site stand 起來 |
+
+### v1.4.0 ship 帶走的條目（之前在 Active 表內）
+
+- ✅ **§J.3.e.X Path β** Native RIFE Vulkan FRUC backend — β.1/β.2 chain swap + β.4 down/up wrapper + β.5 RIFE flow + native warp + β.6 stability fix（`drainOverlayStash` `vkDeviceWaitIdle` race fix，7m49s 連測無 crash）+ β.8 prefs UI + docs
+- ✅ **§J.3.e.X Final.3b** Native RIFE→NcnnFRUC drop-in — replaced by Path β（NV dual-VkDevice block 走不通，改接 VkFrucRenderer 共用 VkDevice 通了）
+- ✅ **§J.3.e.Y 4Y.6** Tensor Core Conv2D path — coopmat shader 4 commit 完整實作 + `VIPLE_RIFE_VK_COOPMAT=1` opt-in default-OFF（perf +7% / precision -70× tradeoff documented）
+- ✅ **§B-DUMP NCNN 全 0 mat** — Path β 取代 NcnnFRUC 後不再依賴 ncnn forward pass
+- ✅ **§K.X auto-wake fix** — Auto Wake-on-LAN toggle 真的 gate `PcMonitorThread` polling
+- ✅ **§K.X Linux build alignment** — moonlight-qt Ubuntu noble + Qt 6 + g++ 13 完整 compile + link
+- ✅ **§A'-Android port** — luma census + hierarchical diamond + warp 50/50 fallback 對齊 Windows + §B-DUMP-Android cross-platform format + UI i18n × 27 locales + dev-machine serial redact
 
 ---
 
@@ -146,8 +155,8 @@ Pixel 5 panel 只支援 60Hz/90Hz mode，GameManagerService 又把 app default f
 
 ### 已就位的診斷工具
 
-- `scripts/benchmark/android/android_baseline.sh` — thermal + fps + jank 採集
-- `scripts/benchmark/android/analyze_baseline.py` — 30s bucket fps + pixel-thermal 高頻交叉驗證
+- `scripts/benchmark/android/android_baseline.sh` — thermal + fps + jank 採集（**local-only**，scripts/ 自 v1.4.0 起 gitignored）
+- `scripts/benchmark/android/analyze_baseline.py` — 30s bucket fps + pixel-thermal 高頻交叉驗證（**local-only**）
 - `debug.viplestream.vkprobe=1` system property — opt-in Vulkan FRUC backend
 - `debug.viplestream.mailbox=1` system property — opt-in MAILBOX present mode (D.2.5)
 - Settings UI toggle「FRUC 後端：GLES (預設) / Vulkan (實驗)」（v1.2.161 ship）
@@ -309,29 +318,11 @@ real frame 的 pixel-level diff 偏大。
 預設 256×128。更強 GPU 可 `VIPLE_VKFRUC_RIFE_INFER_DIM=512` 拉到 quality
 明顯提升的 dim（必須 /128，否則撞 Add_503）。
 
-**已知問題（待修）：**
+**已知問題：**
 
-- **Path β 30-90s device-lost crash**（HW + SW mode 都會撞，跨 inferDim 跨
-  β.4/β.5/β.5.1 都觸發；3 個嘗試都 reverted）
-  - 控制組 (commit 9d52afa 後測): block-match 跑滿 7m23s 不撞 → 確認 β-specific
-  - dispatch 密度差異：block-match 240 disp/s，Path β 23,580 disp/s (98×)
-  - 推測 1：descSet alloc churn ❌ 已排除（β.6 cache 嘗試 → latency 退化 9% 沒解 → revert）
-  - 推測 2：周期性 vkDeviceWaitIdle ❌ 已排除（β.6 workaround 嘗試 → 78s vs 30-60s 略晚但仍撞 → revert）
-  - 剩餘推測：
-    - ~23k 次/秒 vkCmdPipelineBarrier 觸發 NV driver state 累積（最高優先級）
-    - 某 RIFE shader 在特定 input 觸發 GPU 內部 hang (Aftermath shader debug
-      只 3 KB 表示單一 shader 涉入)
-  - 真正修法：
-    - 需 Nsight Graphics 載 .nv-gpudmp 看 last-in-flight cmd
-    - 或 NV driver 升版測試 (596.144 之後是否有相關 fix)
-    - 或 dispatch fusion 把 ~389 RIFE layers 批次 (Conv+Mul+Add+ReLU 合 1 層)
-      減少 dispatch + barrier 頻率到 < 5k/s (大工程)
-  - **目前 ship 策略**：opt-in beta default OFF (β.8)，UI 標 (β beta — 30-60s
-    後可能崩潰)，使用者短時段試用 OK
+- ~~**Path β 30-90s device-lost crash**~~ ✅ **RESOLVED v1.4.0 (β.6 stability fix)** — Nsight Graphics `nv-aftermath-format -p VipleStream.pdb -g <shader-dbg>` symbolize 出 `fragment_01` 不是 `vkfruc.frag` 而是 `vkfruc_overlay.frag`，page-fault site 是 `VkFrucRenderer::drawOverlayInRenderPass` 的 use-after-free（`drainOverlayStash` 在 perf overlay surface dim 變動時 immediate destroy 舊 `m_OverlayImage[type]`，但 Pacer renderThread 同時可能有 2-3 個 in-flight cmd buffer 還會 sample 舊 view）。Path β chain 14ms 比 block-match 4ms 多 in-flight cmd buffers，所以一個 overlay resize 就有 race window。修法：`drainOverlayStash` line 3317-3341 在 destroy 舊 image 前 `vkDeviceWaitIdle`。Cost: overlay resize 才 fire，一次 stream 通常 0-2 次。**驗測 7m49s 連續 0 crash 0 dump 0 device-lost log**。詳見 commit `a72b886`。
 
-- **SW decode mode + §B-DUMP 加速 crash**：dump 多 cmdCopyBuffer/barriers，
-  SW mode 又比 HW mode 多了 m_SwFrucNv12Buf 跨 frame race。dump-skip guard
-  (commit 2a5732e) 已 ship 跳掉 dump cmd，但根本仍是 30-60s 那條 crash
+- ~~**SW decode mode + §B-DUMP 加速 crash**~~ — 跟上一條同根因（drainOverlayStash race），β.6 fix 一併解。`commit 2a5732e` 的 dump-skip guard 仍保留作 belt-and-braces。
 
 **還沒做的下一步候選：**
 1. 修 SW-mode device lost — 使 §B-DUMP 自動驗測 work

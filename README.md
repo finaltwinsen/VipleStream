@@ -2,7 +2,7 @@
 
 A self-hosted game-streaming stack — a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients) with built-in NAT traversal, AI frame interpolation, Steam library auto-import, and a Traditional Chinese UI. Wire-protocol-compatible with vanilla Sunshine / Moonlight so VipleStream and upstream installs interoperate.
 
-> **Current version:** 1.3.312 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
+> **Current version:** 1.4.0 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
 
 Project home: <https://github.com/finaltwinsen/VipleStream>
 
@@ -35,18 +35,20 @@ Stream over the public internet with no port forwarding, UPnP, or VPN.
 - Fully ported to the Android client (RelayClient + RelayTcpTunnel)
 
 ### Frame Rate Up-Conversion (FRUC)
-2× frame interpolation, four independent backends with auto-cascade selection on PC client.
+2× frame interpolation, multiple backends with auto-cascade selection on PC client.
 
-| Backend | Algorithm | GPU requirement | Notes |
-|---|---|---|---|
-| **Generic** | HLSL block-match ME + warp compute | any D3D11 GPU | default; ~3-5 ms / frame; cross-vendor |
-| **NvOFFRUC** | NVIDIA Optical Flow SDK | RTX 20+ series, driver ≥ 522 | hardware accelerated; lowest latency on NV |
-| **DirectML** | RIFE 4.25-lite ONNX, fp16/fp32 cascade | strong NV GPU (Tensor Core RTX 30/40+) | model variants probed at native stream resolution; ORT-DML EP partition heuristics make it CPU-bound on mid-tier GPUs (e.g. RTX 3060 Laptop ~80ms vs ~25ms on 4070+) |
-| **NCNN-Vulkan** | RIFE 4.25-lite, custom-built ncnn 20220729 + pack8 + rife.Warp custom layer | any Vulkan-capable GPU | experimental (Path B shared-texture bridge pending); cross-vendor (NV/AMD/Intel); pack8 Tensor Core path retained |
+| Backend | Renderer | Algorithm | GPU | Notes |
+|---|---|---|---|---|
+| **Generic (block-match)** | D3D11 / Vulkan | HLSL/GLSL block-match ME + warp compute | any | default; ~3-5 ms; cross-vendor; frame-doubling fallback |
+| **NvOFFRUC** | D3D11 | NVIDIA Optical Flow SDK + NV proprietary blend | RTX 20+, driver ≥ 522 | HW-accelerated on NV; lowest latency; ~47% effective interp |
+| **DirectML** | D3D11 | RIFE 4.25-lite ONNX, fp16/fp32 cascade | RTX 30/40+ (Tensor Core) | ORT-DML EP partition makes it CPU-bound on mid-tier (~80ms RTX 3060 Laptop) |
+| **§J.3.e.X Path β — Native RIFE Vulkan** ⭐ v1.4.0 | Vulkan | RIFE 4.25-lite hand-rolled Vulkan compute pipeline (9 shaders + 389-layer graph executor) + native-res warp+blend | RTX 30+ recommended | beta opt-in; ~14ms @ 256×128 inferDim; quality 0.95 ≈ perfect midpoint |
+| **§B-NVOF — VK_NV_optical_flow** v1.4.0 | Vulkan | NVIDIA Optical Flow Vulkan extension hardware ME + own warp+blend | RTX 30+ | opt-in; async cross-queue; alternative to NvOFFRUC for Vulkan path |
+| **NCNN-Vulkan** (legacy) | D3D11 + ncnn | RIFE 4.25-lite, ncnn 20220729 + pack8 + rife.Warp | any Vulkan | superseded by Path β on Vulkan renderer; D3D11 path retained for cross-vendor fallback |
 
-PC client cascade (when `Generic Compute` is the user setting): tries the user-preferred backend first, falls through to Generic on failure / over-budget.
+PC client cascade picks the user-preferred backend first, falls through to Generic on failure / over-budget. Path β (Vulkan + Native RIFE) is the new flagship quality path as of v1.4.0; user opt-in via Settings → Video → Frame Interpolation → 「Native RIFE 補幀 (β beta)」.
 
-Android client uses a separate **Vulkan FRUC backend** (`vk_backend.c`) with AHardwareBuffer zero-copy import, smart-mode dual present (60→120 FPS), VK_GOOGLE_display_timing, in-flight ring, and SIGSEGV canary fallback to GLES on driver crash.
+Android client uses a separate **Vulkan FRUC backend** (`vk_backend.c`) with AHardwareBuffer zero-copy import, smart-mode dual present (60→120 FPS), VK_GOOGLE_display_timing, in-flight ring, and SIGSEGV canary fallback to GLES on driver crash. v1.4.0 ports §A' luma census + hierarchical diamond + warp 50/50 fallback to align with Windows + adds §B-DUMP cross-platform dump format.
 
 DirectML / NCNN diagnostics:
 - `VIPLE_DIRECTML_DEBUG=1` — D3D12 debug layer + DML validation
@@ -162,11 +164,21 @@ VipleStream/
 │           └── AppView.java           # apps grid + Spinner + SpinnerDialog
 ├── tools/viplestream-relay/
 │   └── relay_server.py                # PSK-authenticated WebSocket relay
-├── scripts/
+├── build-tools/                       # build-pipeline-critical helpers (tracked)
 │   ├── version.ps1                    # propagate version.json to all subprojects
+│   ├── propagate_version.cmd          # sync without bump
+│   ├── bump_version.cmd               # patch + propagate
+│   ├── build_moonlight_inner.cmd      # called by build_moonlight.cmd
 │   ├── build_moonlight_package.cmd    # canonical shader/DLL/windeployqt list
-│   ├── deploy_client.ps1              # local install for moonlight-qt
-│   └── benchmark/                     # FRUC quality + latency harness
+│   ├── build_sunshine_inner.sh        # MSYS2 inner build for sunshine
+│   ├── compile_d3d11_shaders.ps1      # HLSL → fxc compile step
+│   ├── compile_shader.cmd             # GLSL/HLSL invoker
+│   ├── apply_viplestream_i18n.py      # i18n string injection
+│   └── rebrand_sunshine_icons.sh      # icon rebrand pipeline
+├── docs/                              # tech docs + per-release notes archive
+│   ├── building.md / versioning.md
+│   ├── J.3.e.X_path_b.md              # Native RIFE Vulkan FRUC architecture
+│   └── releases/v1.4.0.md             # permanent per-release notes (latest)
 ├── build_all.cmd                      # one-command build (server + Qt client; auto-bumps patch)
 ├── build_sunshine.cmd                 # server only
 ├── build_moonlight.cmd                # Qt client only
@@ -174,6 +186,12 @@ VipleStream/
 ├── build-config.template.cmd          # copy → build-config.local.cmd, fill paths
 └── version.json                       # single source of truth for version number
 ```
+
+> Top-level **`scripts/`** is gitignored as of v1.4.0 — it's a developer-local
+> tooling dir (benchmark suites, deploy helpers, debug pairing tools, WSL
+> Linux-build scripts, VM diagnostic scripts, etc.) that doesn't ship in the
+> public repo. All build-pipeline-critical helpers were relocated to
+> `build-tools/` for that release.
 
 ---
 
@@ -213,12 +231,14 @@ notepad build-config.local.cmd
 | Show current version | `pwsh build-tools\version.ps1 get` |
 | Deploy a fresh Qt client to local install | `scripts\deploy_client_now.cmd` (local-only, gitignored) |
 
-Outputs land in `release/`:
+Outputs land in `release/`. v1.4.0 example:
 
 ```
-release/VipleStream-Server-1.3.24.zip   (~33 MB)
-release/VipleStream-Client-1.3.24.zip   (~116 MB)
-release/VipleStream-Android-1.3.24.apk  (~7 MB)
+release/VipleStream-Client-1.4.0.zip                       (~106 MB)  Windows client
+release/VipleStream-Server-1.4.0.zip                       (~34 MB)   Windows server
+release/VipleStream-Android-1.4.0.apk                      (~7 MB)    Android (debug-signed)
+release/VipleStream-Client-1.4.0-linux-x64.AppImage        (~59 MB)   Linux client (Ubuntu noble built)
+release/VipleStream-Server-1.4.0-linux-x64.deb             (~9 MB)    Linux server .deb
 ```
 
 ### Server deploy (Windows host)
@@ -322,8 +342,7 @@ The release zips in `release/` can be extracted directly on the same machine or 
 
 | Version | Changes |
 |---|---|
-| **1.4.0** | **Native RIFE Vulkan + Android FRUC port milestone.** §J.3.e.X Path β 完整 ship + β.6 device-lost crash 修補（Nsight Graphics symbolize 找出 `drainOverlayStash` overlay-resize use-after-free，加 `vkDeviceWaitIdle`；7m49s 連續無 crash 驗證）；§J.3.e.Y 4Y.6 Tensor Core path opt-in；§B-NVOF NVIDIA Optical Flow Vulkan（VK_NV_optical_flow + async cross-queue）；§B1/§B2 HW dual-present 60→120 production + TRIPLE 60→180 infra；Android §A'-port luma census + hierarchical diamond + warp 50/50 fallback 對齊 Windows + §B-DUMP-Android cross-platform dump format + UI i18n × 27 locales + dev-machine serial redact；§K.X Auto Wake-on-LAN toggle 真的 gate `PcMonitorThread` polling（offline+OFF cadence 3s→60s 避 NIC pattern-match 自動喚醒）；§K.X Linux build alignment moonlight-qt Ubuntu noble + Qt 6 + g++ 13 完整 compile + link；`scripts/` 整個 untrack 進開發者本機（build infra 搬遷至 `build-tools/`），public repo 不再含 dev/diagnostic helpers.  `v1.3.337..v1.4.0` 共 100+ commits / 20k LOC. |
-| 1.3.340 (β.8 internal — folded into 1.4.0) | §J.3.e.X Path β beta UI + docs initial — 已併入 1.4.0 release |
+| **1.4.0** | **Native RIFE Vulkan + Android FRUC port milestone.** §J.3.e.X Path β 完整 ship + β.6 device-lost crash 修補（Nsight Graphics symbolize 找出 `drainOverlayStash` overlay-resize use-after-free，加 `vkDeviceWaitIdle`；7m49s 連續無 crash 驗證）；§J.3.e.Y 4Y.6 Tensor Core path opt-in；§B-NVOF NVIDIA Optical Flow Vulkan（VK_NV_optical_flow + async cross-queue）；§B1/§B2 HW dual-present 60→120 production + TRIPLE 60→180 infra；Android §A'-port luma census + hierarchical diamond + warp 50/50 fallback 對齊 Windows + §B-DUMP-Android cross-platform dump format + UI i18n × 27 locales + dev-machine serial redact；§K.X Auto Wake-on-LAN toggle 真的 gate `PcMonitorThread` polling（offline+OFF cadence 3s→60s 避 NIC pattern-match 自動喚醒）；§K.X Linux build alignment moonlight-qt Ubuntu noble + Qt 6 + g++ 13 完整 compile + link；`scripts/` 整個 untrack 進開發者本機（build infra 搬遷至 `build-tools/`），public repo 不再含 dev/diagnostic helpers.  `v1.3.337..v1.4.0` 共 100+ commits / 20k LOC. 詳見 [`docs/releases/v1.4.0.md`](docs/releases/v1.4.0.md). |
 | **1.3.337** | §K.1 Linux 兩端正式 ship — Server `.deb` (9.4 MB) + Client AppImage (59 MB) 首次納入 GitHub release，五件對齊 (Win Client/Server, Android, Linux Server/Client)。Sunshine source 修：`std::max<long long>` 顯式 template、`closesocket(fd) (::close(fd))`、NVENC API v12/v13 dual-support、5 個 packaging 檔 `dev.lizardbyte.app.Sunshine.*` rename `app.viplestream.server.*`、`SUNSHINE_EXECUTABLE_PATH=/usr/bin/viplestream-server`、`.gitattributes` 鎖 dpkg maintainer 腳本 LF（避 `#!/bin/sh\r` ENOENT）、postinst 安裝後自動 `systemctl --user enable + loginctl enable-linger` 重開機自起、apps.json 預設清乾淨剩 `Desktop`。moonlight-qt source 修：plvk.h/cpp ncnn 整段 `#ifdef VIPLESTREAM_HAVE_NCNN` 隔離（Linux 用系統 `/usr/local/lib/libncnn.so`）、vkfruc.cpp POSIX 等價、3rdparty/nvvideoparser/nvvideoparser.pro `*-msvc` gate `/arch:AVX2`、build-appimage.sh `compiler_moc_source_make_all` 預生繞 qmake6 noble race、AppImage 三段式手工組裝（linuxdeploy + appimagetool）繞 linuxdeployqt-on-noble 失靈。**vkfruc `Ctrl+Alt+Shift+F` 補幀 hotkey 修正**：§J.3.f 後 RS_VULKAN 預設走 VkFrucRenderer，但漏 override `IFFmpegRenderer::toggleFRUC()`，base class no-op，使用者按 hotkey 畫面糊一下後仍維持補幀；fix VkFrucRenderer::toggleFRUC + renderFrameSw 6 個 runtime gate 用 frucPausedThisFrame snapshot。圖示 rebrand 完整收尾（round 2 + 3）：sunshine.exe / VipleStream.exe Windows resource ICO、Web UI favicon、tray state ICOs (playing/pausing/locked) 都從 viplestream_icon.svg 重生 multi-res；template_header `<title>` Sunshine→VipleStream。Wayland teardown 緩解（option A）：`wl_log_set_handler_client` 把 libwayland EPIPE 錯誤導進 boost::log + dispatch() 防護 + systemd `Restart=always StartLimitBurst=30`，client 斷線後 8 秒 server 自動回。Linux client GUI fix：StreamSegue.qml `sessionFinished/quitStarting` 補 `window.raise() + requestActivate()` 修 X11/GNOME Shell + virtio-gpu 上 hide→show 後 taskbar / Alt-Tab 找不到主視窗（withdrawn 狀態 WM 不重 register）|
 | **1.3.314–336** | §J.3.f FFmpeg 8.1 Vulkan hardware decode — rebuild minimal `avcodec-62.dll` (5.2 MB) 含 `--enable-vulkan --enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan`，搭 NV driver `vkCmdDecodeVideoKHR` 把 H.264 / HEVC / AV1 三 codec wired 進 Vulkan HW decode 路徑；1440p120 HEVC SW 50fps→HW 122fps（2.4×），decodeMean ~100ms→0.30ms（333×），networkDropped 34–51→0；4K120 + FRUC + DUAL × 3 codec H.264 92 / HEVC 101–103 / AV1 116–119（H.264 / HEVC 卡 host NVENC 編碼上限，AV1 受 NV driver dedicated_dpb 5ms 底線）；整合 commit `b2b7afd` 起 RS_VULKAN preference 自動觸發 Vulkan HW + FRUC + DUAL，env var 改 explicit override / debug fallback。同期 §J.3.e SW Vulkan path tightening（libdav1d threads + max_frame_delay=1、HEVC FRAME threading、per-slot staging buffer + async pipelining、SSE2 YUV420P→NV12，4K AV1 SW 62→76fps）；§I.D Android Vulkan FRUC async compute D.2.0–D.2.5 全 ship 並 Pixel 5 verify（multi-queue acquisition + dedicated computeQueue + cross-queue binary sem handoff、`debug.viplestream.mailbox=1` MAILBOX opt-in、dual entry threshold 1.05×→1.40×）；§J.3.g FRUC ME 解析度下放 negative result（已 revert，4K120 + FRUC bottleneck 不在 ME compute）|
 | **1.3.311–312** | §G.4 DirectML ONNX model on-demand download — `fruc.onnx` (22 MB) + `fruc_fp16.onnx` (11 MB) + `fruc_ifrnet_s.onnx` (5.5 MB) 不再隨 release zip 出貨 (zip 132 → 102 MB)，DirectML backend 第一次 init 時透過 `ModelFetcher` 從 GitHub release v1.3.310 attached assets 動態下載到 `%LOCALAPPDATA%\VipleStream\fruc_models\` 並 SHA-256 verify，失敗 retry 一次後 fallback 既有 inline DML blend graph |
