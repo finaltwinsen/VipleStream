@@ -152,14 +152,19 @@ void main() {
     // boundaries pulling stray pixels from far across the frame.
     mv = clamp(mv, vec2(-48.0), vec2(48.0));
 
-    // D3 iter 6: raise static-skip threshold 0.25 -> 1.0 (0.5 -> 1 px).
-    // A ≤1 px half-vector produces a warp that moves pixels by ≤0.5 px
-    // either side of pp; the bilinear texture filter already averages
-    // neighbours at that scale so the interp output is near-identical
-    // to currFrame. Skipping saves the full warp path (two texture
-    // samples + adaptive weight + blend + luma check).
+    // §A'-port (2026-05-08): small-MV fast-path now blends prev + curr
+    // 50/50 instead of copying curr verbatim. Previous behaviour (just
+    // sameCurr) made interp identical to the next real frame whenever
+    // ME failed to find motion — the §B-DUMP verify_dump_interp script
+    // judged this as "FRUC NOT interpolating" because score → 0. Even
+    // when MV is sub-pixel there's still genuine prev≠curr content (cursor
+    // blink, fade, scroll) and the blend produces a visible midpoint.
+    //
+    // PC b0999ae §A' applied the same change to d3d11_warp_compute.hlsl:
+    // `lerp(prevAtPP, sameCurr, 0.5)`.
     if (dot(mv, mv) < 1.0) {
-        imageStore(interpFrame, ivec2(px, py), sameCurr);
+        vec4 prevAtPP = texelFetch(prevFrame, ivec2(px, py), 0);
+        imageStore(interpFrame, ivec2(px, py), mix(prevAtPP, sameCurr, 0.5));
         return;
     }
 
@@ -191,21 +196,27 @@ void main() {
         // D2 iter 8: apply luma-gap catastrophic check on top of
         // adaptive blend — catches occlusion ghosts that slip past
         // the forward-backward consistency check.
+        // §A'-port (2026-05-08): cap bias at 0.5 — high-contrast edges
+        // shouldn't fully collapse to currSample (interp == real_N) which
+        // verify_dump_interp judges as "no interpolation". Half-strength
+        // ghost is more useful than a full curr-copy.
         {
             const vec3 YC = vec3(0.299, 0.587, 0.114);
             float lg = abs(dot(prevSample.rgb, YC) - dot(currSample.rgb, YC));
-            float b = smoothstep(0.05, 0.25, lg);
+            float b = smoothstep(0.05, 0.25, lg) * 0.5;
             result = mix(result, currSample, b);
         }
 #else
         // D2 iters 6+7: luma-weighted catastrophic-disagreement
         // fallback with smoothstep response curve. More perceptually
         // sensitive than RGB Euclidean, smoother ramp than linear.
+        // §A'-port (2026-05-08): bias capped at 0.5 — see ADAPTIVE branch
+        // above. Same rationale: avoid full collapse to currSample.
         const vec3 YC = vec3(0.299, 0.587, 0.114);
         float prevY = dot(prevSample.rgb, YC);
         float currY = dot(currSample.rgb, YC);
         float lumaDiff = abs(prevY - currY);
-        float bias = smoothstep(0.05, 0.25, lumaDiff);
+        float bias = smoothstep(0.05, 0.25, lumaDiff) * 0.5;
         result = mix(mix(prevSample, currSample, 0.5), currSample, bias);
 #endif
     } else {

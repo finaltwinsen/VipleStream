@@ -64,14 +64,23 @@ uniform uint blockSize;
 // related texture reads.
 uint currCensusCache[SAMPLE_COUNT_SQ];
 
+// §A'-port (2026-05-08): luma-weighted census instead of raw R channel.
+// On low-saturation desktop / text content the R channel alone has weak
+// gradient against grey backgrounds — every candidate MV ends up with
+// near-identical Hamming cost so the static-skip path wins and writes
+// MV=0. Rec.709 luma uses all three channels and recovers the gradient.
+const vec3 LUMA_RGB = vec3(0.299, 0.587, 0.114);
+
 uint censusDesc(sampler2D tex, ivec2 pos) {
-    float center = texelFetch(tex, clamp(pos, ivec2(0), ivec2(int(frameWidth)-1, int(frameHeight)-1)), 0).r;
+    ivec2 lo = ivec2(0);
+    ivec2 hi = ivec2(int(frameWidth)-1, int(frameHeight)-1);
+    float center = dot(texelFetch(tex, clamp(pos, lo, hi), 0).rgb, LUMA_RGB);
     uint bits = 0u;
     int bit = 0;
     for (int dy = -CENSUS_RADIUS; dy <= CENSUS_RADIUS; dy++) {
         for (int dx = -CENSUS_RADIUS; dx <= CENSUS_RADIUS; dx++) {
             if (dx == 0 && dy == 0) continue;
-            float nb = texelFetch(tex, clamp(pos + ivec2(dx,dy), ivec2(0), ivec2(int(frameWidth)-1, int(frameHeight)-1)), 0).r;
+            float nb = dot(texelFetch(tex, clamp(pos + ivec2(dx,dy), lo, hi), 0).rgb, LUMA_RGB);
             if (nb < center) bits |= (1u << uint(bit));
             bit++;
         }
@@ -149,7 +158,13 @@ void main() {
 
     // I1: raised static early-exit threshold. Catches the large
     // majority of background blocks, skips their whole search.
-    if (bestCost < float(SAMPLE_COUNT_SQ) * 0.5) {
+    // §A'-port (2026-05-08): tightened 0.5 → 0.3. Baseline showed 87%
+    // of blocks falling through this gate even when real motion existed
+    // (cursor moving through low-contrast desktop region). The 0.5 ratio
+    // misclassified faintly-textured motion as static; 0.3 reserves the
+    // skip for genuinely low-detail blocks where census descriptors are
+    // ambiguous regardless.
+    if (bestCost < float(SAMPLE_COUNT_SQ) * 0.3) {
         imageStore(motionField, ivec2(blockX, blockY), ivec4(0));
         return;
     }
@@ -182,20 +197,34 @@ void main() {
         // I6: diamond convergence check.
         // D3 iter 2: hard workload cap — prevents worst-case blocks
         // (texture-less / ambiguous) from consuming the full search.
-        // D3 iter 10: Balanced uses (3, 1) step sequence, Quality
-        // keeps (4, 2, 1), Performance uses (2, 1).
-        const int MAX_CANDIDATES = 16;
+        // §A'-port (2026-05-08): hierarchical pyramid search ports
+        // PC commit b0999ae's range expansion. Old (3,1) covered ±3 px
+        // which missed any motion above 1.5 px / frame — the dump
+        // baseline confirmed mean MV magnitude was 0.05 px, way below
+        // real motion of 14 luma diff. Coarse-to-fine schedule with
+        // abort-on-no-improvement keeps amortised cost manageable
+        // since most blocks converge in 2-3 stages.
+        const int MAX_CANDIDATES = 48;
         int candidateCount = 0;
         float prevStepBestCost = bestCost;
 #if QUALITY_LEVEL == 1
-        const int DIAMOND_STEPS[2] = int[2](3, 1);
-        const int DIAMOND_STEP_COUNT = 2;
+        // Balanced: ±31 px range, 5 stages.
+        // §A'-port: hierarchical pyramid restored to full [16,8,4,2,1].
+        // Earlier perf-tune to [8,4,1] was based on a misconfigured test
+        // (90 fps server on a 90Hz Pixel 5 display, leaving 11ms cycle
+        // budget — too tight for any meaningful ME work). At the proper
+        // 45 fps server / 90Hz display config the cycle budget is 22ms
+        // and Adreno 620 handles 5-stage hierarchical comfortably.
+        const int DIAMOND_STEPS[5] = int[5](16, 8, 4, 2, 1);
+        const int DIAMOND_STEP_COUNT = 5;
 #elif QUALITY_LEVEL == 2
-        const int DIAMOND_STEPS[2] = int[2](2, 1);
-        const int DIAMOND_STEP_COUNT = 2;
-#else
-        const int DIAMOND_STEPS[3] = int[3](4, 2, 1);
+        // Performance: ±13 px range, 3 stages (perf-friendly)
+        const int DIAMOND_STEPS[3] = int[3](8, 4, 1);
         const int DIAMOND_STEP_COUNT = 3;
+#else
+        // Quality: ±63 px range, 6 stages (matches PC §A')
+        const int DIAMOND_STEPS[6] = int[6](32, 16, 8, 4, 2, 1);
+        const int DIAMOND_STEP_COUNT = 6;
 #endif
         for (int ds = 0; ds < DIAMOND_STEP_COUNT; ds++) {
             int step = DIAMOND_STEPS[ds];
