@@ -209,9 +209,9 @@ notepad build-config.local.cmd
 | Build server only | `build_sunshine.cmd` |
 | Build Qt client only | `build_moonlight.cmd` |
 | Build Android APK only (no bump) | `build_android.cmd` |
-| Sync `version.json` to all subprojects (no bump, no build) | `pwsh scripts\version.ps1 propagate` |
-| Show current version | `pwsh scripts\version.ps1 get` |
-| Deploy a fresh Qt client to local install | `scripts\deploy_client_now.cmd` |
+| Sync `version.json` to all subprojects (no bump, no build) | `pwsh build-tools\version.ps1 propagate` |
+| Show current version | `pwsh build-tools\version.ps1 get` |
+| Deploy a fresh Qt client to local install | `scripts\deploy_client_now.cmd` (local-only, gitignored) |
 
 Outputs land in `release/`:
 

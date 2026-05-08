@@ -142,7 +142,7 @@ D3D11 d3d11_warp_compute.hlsl）。3 個 quality variant 重編。
 | `scripts/benchmark/check_motion_direction.py` | 檢查 interp 的 motion 方向是否跟 real_N-1 → real_N 同向（catches reverse-direction artifact） |
 | `scripts/benchmark/verify_dump_interp.py` | 詳細 per-frame midpoint analysis（real_N / interp / midpoint distance） |
 | `scripts/benchmark/restore_fruc_settings.ps1` | compare 中斷後 cleanup registry settings 回 user 預設 |
-| `scripts/compile_d3d11_shaders.ps1` | 重編所有 .hlsl 到 .fxc（已被 build_moonlight_package.cmd 自動呼叫） |
+| `build-tools/compile_d3d11_shaders.ps1` | 重編所有 .hlsl 到 .fxc（已被 build_moonlight_package.cmd 自動呼叫） |
 
 ## 常見診斷流程
 

@@ -5,5 +5,5 @@ setlocal
 set "ROOT=%~dp0.."
 for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 if not exist "%ROOT%\temp" mkdir "%ROOT%\temp"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\version.ps1" propagate > "%ROOT%\temp\current_version.txt"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\build-tools\version.ps1" propagate > "%ROOT%\temp\current_version.txt"
 endlocal

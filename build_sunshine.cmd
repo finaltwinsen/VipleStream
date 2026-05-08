@@ -43,17 +43,17 @@ if not exist "%MSYS2%" (
 :: -- 1. Resolve version (bump or just propagate) --
 if "%BUMP%"=="1" (
     echo [1/4] Bumping version...
-    call "%ROOT%\scripts\bump_version.cmd"
+    call "%ROOT%\build-tools\bump_version.cmd"
 ) else (
     echo [1/4] Propagating version ^(no bump^)...
-    call "%ROOT%\scripts\propagate_version.cmd"
+    call "%ROOT%\build-tools\propagate_version.cmd"
 )
 set /p VER=<"%ROOT%\temp\current_version.txt"
 echo   Version: %VER%
 
 :: -- 2. Compile via MSYS2 UCRT64 --
 echo [2/4] Compiling via MSYS2 UCRT64...
-"%MSYS2%" -l "%ROOT%\scripts\build_sunshine_inner.sh"
+"%MSYS2%" -l "%ROOT%\build-tools\build_sunshine_inner.sh"
 if errorlevel 1 (
     echo [ERROR] Compilation failed
     exit /b 1

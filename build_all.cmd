@@ -23,7 +23,7 @@ echo ===========================================================
 :: -- 1. Bump version once --
 echo.
 echo [Step 1] Bumping version...
-call "%ROOT%\scripts\bump_version.cmd"
+call "%ROOT%\build-tools\bump_version.cmd"
 set /p VER=<"%ROOT%\temp\current_version.txt"
 echo   Version: %VER%
 
@@ -43,7 +43,7 @@ if not exist "%MSYS2%" (
 )
 
 echo [S-1/2] Compiling via MSYS2 UCRT64...
-"%MSYS2%" -l "%ROOT%\scripts\build_sunshine_inner.sh"
+"%MSYS2%" -l "%ROOT%\build-tools\build_sunshine_inner.sh"
 if errorlevel 1 (
     echo [ERROR] Sunshine compilation failed
     exit /b 1
@@ -121,7 +121,7 @@ echo [M-2/3] Client build succeeded
 :: Delegate packaging (including the canonical shader list) to the
 :: VCS-tracked inner script so the shader manifest lives in one place.
 echo [M-3/3] Packaging...
-call "%ROOT%\scripts\build_moonlight_package.cmd"
+call "%ROOT%\build-tools\build_moonlight_package.cmd"
 if errorlevel 1 (
     echo [ERROR] Moonlight packaging failed
     exit /b 1

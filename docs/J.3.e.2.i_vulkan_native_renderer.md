@@ -491,7 +491,7 @@ vk_video_samples pattern ── 也壞。
 
 ### Phase 1.7c stale-binary 事故（v1.3.299 ~ v1.3.306）
 
-`scripts/build_moonlight_package.cmd` 的 staging step 之前**沒**檢查
+`build-tools/build_moonlight_package.cmd` 的 staging step 之前**沒**檢查
 errorlevel ── 如果 zombie `VipleStream.exe` process 卡住 file lock：
 
 - `rmdir /s /q "%TEMP_DIR%"` 無聲失敗

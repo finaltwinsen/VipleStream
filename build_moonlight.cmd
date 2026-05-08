@@ -5,7 +5,7 @@ setlocal enabledelayedexpansion
 ::  VipleStream Moonlight - Build + Package (root wrapper)
 ::
 ::  Per-machine paths come from build-config.local.cmd (gitignored).
-::  Canonical packaging list lives in scripts\build_moonlight_package.cmd
+::  Canonical packaging list lives in build-tools\build_moonlight_package.cmd
 ::  (VCS-tracked), so the shader set can be updated without touching each
 ::  developer's local copy of this file.
 ::
@@ -39,10 +39,10 @@ echo =========================================================
 :: -- 0. Resolve version (bump or just propagate) --
 if "%BUMP%"=="1" (
     echo [0/6] Bumping version...
-    call "%ROOT%\scripts\bump_version.cmd"
+    call "%ROOT%\build-tools\bump_version.cmd"
 ) else (
     echo [0/6] Propagating version ^(no bump^)...
-    call "%ROOT%\scripts\propagate_version.cmd"
+    call "%ROOT%\build-tools\propagate_version.cmd"
 )
 set /p VER=<"%ROOT%\temp\current_version.txt"
 echo   Version: %VER%
@@ -80,7 +80,7 @@ if not exist "%RELDIR%\VipleStream.exe" (
 echo [2/6] Build succeeded
 
 :: -- 3..6. Delegate packaging to VCS-tracked inner script --
-call "%ROOT%\scripts\build_moonlight_package.cmd"
+call "%ROOT%\build-tools\build_moonlight_package.cmd"
 if errorlevel 1 (
     echo [ERROR] Packaging failed
     exit /b 1

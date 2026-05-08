@@ -615,7 +615,7 @@ AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame
 
 - **rebuilt FFmpeg 8.1** in `moonlight-qt/libs/windows/{include,lib}/x64/`：`avcodec-62.dll` (5.2 MB)、`avutil-60.dll` (1.8 MB)、`swscale-9.dll` (2.7 MB) + matching `.lib` + headers (libavcodec 62.28.100)
 - **6 個 mingw runtime DLL**：`libdav1d-7.dll` / `libiconv-2.dll` / `zlib1.dll` / `libwinpthread-1.dll` / `libva.dll` / `libva_win32.dll`（總計 +5 MB ship）
-- [`scripts/build_moonlight_package.cmd`](../scripts/build_moonlight_package.cmd) 加上述 6 個 DLL 到 deploy allowlist
+- [`build-tools/build_moonlight_package.cmd`](../build-tools/build_moonlight_package.cmd) 加上述 6 個 DLL 到 deploy allowlist
 - [`ffmpeg.cpp:1590-1605`](../moonlight-qt/app/streaming/video/ffmpeg.cpp#L1590) + [`:2029-2096`](../moonlight-qt/app/streaming/video/ffmpeg.cpp#L2029) 兩處 SW-force escape：`VIPLE_USE_VK_DECODER=1` 時跳過短路
 - [`ffmpeg.cpp:2098+`](../moonlight-qt/app/streaming/video/ffmpeg.cpp#L2098) §J.3.f auto-prefer：`VIPLE_USE_VK_DECODER=1` 時自動走 native h264 / hevc / av1 by name（繞過 av_codec_iterate 不會走到 native 的問題）
 - [`plvk.cpp:4492-4540`](../moonlight-qt/app/streaming/video/ffmpeg-renderers/plvk.cpp#L4492) `prepareDecoderContextInGetFormat` override：在 get_format() callback 時 alloc `AVHWFramesContext`（鏡 d3d11va 同名 method），ffmpeg 的 *_vulkan hwaccel 才能 init
@@ -671,7 +671,7 @@ AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame
 2. **預設 D3D11 (v1.3.308 起)** — Vulkan 改實驗性次要選項。Phase J.5 真正切 Vulkan 為預設前，新 user 第一次啟動只看到 D3D11；既有 user 設定不被動。
 3. **D3D11 renderer 是穩定主線**（不再只是 legacy fallback）— Phase 1.7 系列確認 NV driver 596.36 對 native VK_KHR_video_decode + ONLY mode 有結構性 bug，五個變體都繞不過。D3D11 + DXVA hardware decode 是所有 NV / AMD / Intel Windows 環境的穩定路徑。
 4. **每 Phase 都要有 baseline 對比** — 沿用 §I 的 baseline.sh 設計，desktop 版見 `scripts/benchmark/vk_sw_codec_120.ps1` (v1.3.318 起)。
-5. **build script 不能無聲拿舊 binary** — `scripts/build_moonlight_package.cmd` 的 staging step 必須 errorlevel-check rmdir / copy，否則 zombie process 鎖檔會讓 release zip 內含過時 binary（v1.3.299~306 連 8 個 zip 都中招的事故，見 v1.3.307 commit message 5183cee）。
+5. **build script 不能無聲拿舊 binary** — `build-tools/build_moonlight_package.cmd` 的 staging step 必須 errorlevel-check rmdir / copy，否則 zombie process 鎖檔會讓 release zip 內含過時 binary（v1.3.299~306 連 8 個 zip 都中招的事故，見 v1.3.307 commit message 5183cee）。
 
 ### 已就位的診斷工具（會用到）
 

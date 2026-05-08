@@ -97,7 +97,7 @@ build_android.cmd
 ### 2.5 只同步版號、不建置
 
 ```cmd
-scripts\propagate_version.cmd
+build-tools\propagate_version.cmd
 ```
 
 把 `version.json` 目前的值同步到三個子專案的檔案（Sunshine CMakeLists.txt、
@@ -111,9 +111,9 @@ moonlight-qt/app/version.txt、moonlight-android/app/build.gradle）。不會 bu
 ### 2.6 Bump 版號（不建置）
 
 ```cmd
-scripts\bump_version.cmd                          :: patch + 1
-pwsh scripts\version.ps1 bump -Part minor         :: minor + 1, patch 歸 0
-pwsh scripts\version.ps1 bump -Part major         :: major + 1, minor/patch 歸 0
+build-tools\bump_version.cmd                          :: patch + 1
+pwsh build-tools\version.ps1 bump -Part minor         :: minor + 1, patch 歸 0
+pwsh build-tools\version.ps1 bump -Part major         :: major + 1, minor/patch 歸 0
 ```
 
 每個 build script 已經會自動呼叫 bump（除了 `build_android.cmd`）。這個 script
@@ -122,7 +122,7 @@ pwsh scripts\version.ps1 bump -Part major         :: major + 1, minor/patch 歸 
 ### 2.7 查目前版號
 
 ```cmd
-pwsh scripts\version.ps1 get
+pwsh build-tools\version.ps1 get
 ```
 
 ### 2.8 部署到本機
@@ -190,8 +190,8 @@ build_android.cmd
 ### 情境 E：發現設定畫面的版號跟 release 檔名不一致
 
 ```cmd
-pwsh scripts\version.ps1 get                :: 確認 version.json 值
-scripts\propagate_version.cmd               :: 強制同步下游
+pwsh build-tools\version.ps1 get                :: 確認 version.json 值
+build-tools\propagate_version.cmd               :: 強制同步下游
 build_moonlight.cmd                         :: 重 build
 ```
 
@@ -208,7 +208,7 @@ build_moonlight.cmd                         :: 重 build
 - ❌ 把 build output（`temp\`、`release\`）提交到 git — 都已 gitignored，但
   `.fxc` shader 檔是例外（VCS-tracked）
 - ❌ 用「一次性的 copy 命令」把新 shader 丟進 release zip — 改
-  `scripts\build_moonlight_package.cmd` 裡的 shader 清單（第 54 行左右的
+  `build-tools\build_moonlight_package.cmd` 裡的 shader 清單（第 54 行左右的
   `for %%F in (...)`），**讓 script 記住**這個檔案，下次建置才會自動包進去
 
 ## 6. Script 維護
@@ -217,11 +217,11 @@ build_moonlight.cmd                         :: 重 build
 
 | 要加的東西 | 改哪個 script |
 |---|---|
-| 新的 `.fxc` shader | `scripts\build_moonlight_package.cmd` 第 54 行的 `for %%F` 清單 |
+| 新的 `.fxc` shader | `build-tools\build_moonlight_package.cmd` 第 54 行的 `for %%F` 清單 |
 | 新的 DLL | 同檔第 37 行的 DLL 清單 |
 | 新的 Sunshine output | `build_sunshine.cmd` 第 60 行的 `for %%F` |
-| 新的子專案要同步版號 | `scripts\version.ps1` 的 `Propagate-Version` 新增 block |
-| 新的建置目標（如 iOS） | 建立 `build_ios.cmd`，呼叫 `scripts\version.ps1 propagate` + 實際建置 |
+| 新的子專案要同步版號 | `build-tools\version.ps1` 的 `Propagate-Version` 新增 block |
+| 新的建置目標（如 iOS） | 建立 `build_ios.cmd`，呼叫 `build-tools\version.ps1 propagate` + 實際建置 |
 
 Script 改動會被 git tracked，下次同事 `git pull` 就拿到新版清單，不需要他們
 重新調整機器設定。

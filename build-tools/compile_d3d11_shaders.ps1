@@ -1,7 +1,7 @@
 #requires -Version 5.1
 # §B-DUMP-BUILD 2026-05-07
 # Compiles all d3d11 .hlsl shaders to .fxc.  Called from
-# scripts/build_moonlight_package.cmd before staging step.  Wrote in
+# build-tools/build_moonlight_package.cmd before staging step.  Wrote in
 # PowerShell because cmd batch can't reliably escape /D macro args
 # with embedded quotes (the previous attempt silently dropped 2nd /D).
 #

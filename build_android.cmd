@@ -69,10 +69,10 @@ set "GRADLE_USER_PROPS=-Psdk.dir=%ANDROID_HOME%"
 
 :: -- 1. Propagate shared version.json into all three targets, including
 ::     moonlight-android\app\build.gradle.  Uses the central propagator
-::     in scripts\version.ps1 so the Sunshine / moonlight-qt / Android
+::     in build-tools\version.ps1 so the Sunshine / moonlight-qt / Android
 ::     versions can never drift apart here.
 echo [1/4] Syncing version (propagate from version.json)...
-for /f "delims=" %%V in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\version.ps1" propagate') do (
+for /f "delims=" %%V in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\build-tools\version.ps1" propagate') do (
     set "VER=%%V"
 )
 if not defined VER (
