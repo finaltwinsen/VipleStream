@@ -262,12 +262,18 @@ layout(set = 0, binding = 0) readonly buffer InputBuf  { float     in_buf[];  };
 layout(set = 0, binding = 1) readonly buffer WeightBuf { float16_t w_buf[];   };
 layout(set = 0, binding = 2) readonly buffer BiasBuf   { float     bias_buf[]; };
 layout(set = 0, binding = 3) writeonly buffer OutputBuf { float    out_buf[]; };
+// §J.3.e.Y 4Y.7 C.1 — beta_buf[c] = per-channel scale.  When
+// hasFusedBeta != 0, epilogue multiplies acc by beta_buf[n] before
+// storing.  Caller passes an arbitrary placeholder buffer when
+// hasFusedBeta == 0 (binding still required by descriptor set layout).
+layout(set = 0, binding = 4) readonly buffer BetaBuf   { float     beta_buf[]; };
 
 layout(push_constant) uniform PC {
     ivec4 inDims;     // (inW, inH, inC, hasBias)
     ivec4 outDims;    // (outW, outH, outChan, _pad)
     ivec4 conv;       // (kernelW, kernelH, stride, pad)
     float leakyReluSlope;
+    int   hasFusedBeta;  // 0 = no fusion, 1 = multiply by beta_buf[n]
 } pc;
 
 void main() {
@@ -315,6 +321,10 @@ void main() {
 
     if (pc.leakyReluSlope > 0.0 && acc < 0.0) {
         acc *= pc.leakyReluSlope;
+    }
+    // §J.3.e.Y 4Y.7 C.1 — fused Conv→Mul(per-channel beta) epilogue.
+    if (pc.hasFusedBeta != 0) {
+        acc *= beta_buf[n];
     }
     out_buf[(n * outH + oy) * outW + ox] = acc;
 }
@@ -364,12 +374,15 @@ layout(set = 0, binding = 0) readonly  buffer InputBuf  { float     in_buf[];  }
 layout(set = 0, binding = 1) readonly  buffer WeightBuf { float16_t w_buf[];   };
 layout(set = 0, binding = 2) readonly  buffer BiasBuf   { float     bias_buf[]; };
 layout(set = 0, binding = 3) writeonly buffer OutputBuf { float     out_buf[]; };
+// §J.3.e.Y 4Y.7 C.1 — beta_buf binding for Conv→Mul fusion (see Conv2D shader).
+layout(set = 0, binding = 4) readonly  buffer BetaBuf   { float     beta_buf[]; };
 
 layout(push_constant) uniform PC {
     ivec4 inDims;     // (inW, inH, inC, hasBias)
     ivec4 outDims;    // (outW, outH, outChan, _pad)
     ivec4 conv;       // unused for this specialised shader, kept for layout compat
     float leakyReluSlope;
+    int   hasFusedBeta;  // 0 = no fusion, 1 = multiply by beta_buf[n]
 } pc;
 
 shared float tile[IN_TILE_SIZE];
@@ -466,6 +479,10 @@ void main() {
         if (pc.leakyReluSlope > 0.0 && acc < 0.0) {
             acc *= pc.leakyReluSlope;
         }
+        // §J.3.e.Y 4Y.7 C.1 — fused Conv→Mul(per-channel beta) epilogue.
+        if (pc.hasFusedBeta != 0) {
+            acc *= beta_buf[n];
+        }
         out_buf[(n * outH + oy) * outW + ox] = acc;
     }
 }
@@ -508,12 +525,15 @@ layout(set = 0, binding = 0) readonly  buffer InputBuf  { float     in_buf[];  }
 layout(set = 0, binding = 1) readonly  buffer WeightBuf { float16_t w_buf[];   };
 layout(set = 0, binding = 2) readonly  buffer BiasBuf   { float     bias_buf[]; };
 layout(set = 0, binding = 3) writeonly buffer OutputBuf { float     out_buf[]; };
+// §J.3.e.Y 4Y.7 C.1 — beta_buf binding for Conv→Mul fusion (see Conv2D shader).
+layout(set = 0, binding = 4) readonly  buffer BetaBuf   { float     beta_buf[]; };
 
 layout(push_constant) uniform PC {
     ivec4 inDims;     // (inW, inH, inC, hasBias)
     ivec4 outDims;    // (outW, outH, outChan, _pad)
     ivec4 conv;       // unused — k/s/p hardcoded
     float leakyReluSlope;
+    int   hasFusedBeta;  // 0 = no fusion, 1 = multiply by beta_buf[n]
 } pc;
 
 shared float tile[IN_TILE_SIZE];
@@ -604,6 +624,10 @@ void main() {
     if (ox < outW && oy < outH) {
         if (pc.leakyReluSlope > 0.0 && acc < 0.0) {
             acc *= pc.leakyReluSlope;
+        }
+        // §J.3.e.Y 4Y.7 C.1 — fused Conv→Mul(per-channel beta) epilogue.
+        if (pc.hasFusedBeta != 0) {
+            acc *= beta_buf[n];
         }
         out_buf[(n * outH + oy) * outW + ox] = acc;
     }
@@ -2737,7 +2761,12 @@ struct ShaderSpec {
 // runBinaryOpGpuTest / etc.  Drift here = pipeline build succeeds but
 // dispatches go to wrong descriptor slots.
 static const ShaderSpec kShaderSpecs[(int)ShaderKind::Count] = {
-    { "Conv2D",         getConv2DShaderGlsl,         4, 64, nullptr,         0 },
+    // §J.3.e.Y 4Y.7 C.1 — Conv2D / Conv2D_3x3_s1 / Conv2D_3x3_s2 carry an
+    // extra binding (4 -> 5) for beta_buf to support fused Conv→Mul
+    // epilogue.  Push constant stays 64 B (hasFusedBeta reuses one of
+    // the original _pad[3] slots).  Coopmat variant keeps 4 bindings /
+    // 64 B (no fusion — analyzer skips coopmat-eligible Convs).
+    { "Conv2D",         getConv2DShaderGlsl,         5, 64, nullptr,         0 },
     { "Deconv2D",       getDeconv2DShaderGlsl,       4, 48, nullptr,         0 },
     { "BinaryOp",       getBinaryOpShaderGlsl,       3, 32, nullptr,         0 },
     { "Activation",     getActivationShaderGlsl,     2, 16, nullptr,         0 },
@@ -2746,8 +2775,8 @@ static const ShaderSpec kShaderSpecs[(int)ShaderKind::Count] = {
     { "InterpBilinear", getInterpBilinearShaderGlsl, 2, 32, nullptr,         0 },
     { "EltwiseSum",     getEltwiseShaderGlsl,        3, 16, nullptr,         0 },
     { "RifeWarp",       getRifeWarpShaderGlsl,       3, 16, nullptr,         0 },
-    { "Conv2D_3x3_s1",  getConv2D_3x3_s1_ShaderGlsl, 4, 64, nullptr,         0 },
-    { "Conv2D_3x3_s2",  getConv2D_3x3_s2_ShaderGlsl, 4, 64, nullptr,         0 },
+    { "Conv2D_3x3_s1",  getConv2D_3x3_s1_ShaderGlsl, 5, 64, nullptr,         0 },
+    { "Conv2D_3x3_s2",  getConv2D_3x3_s2_ShaderGlsl, 5, 64, nullptr,         0 },
     { "Conv2D_CoopMat", nullptr,                     4, 64, kCoopMatConvSpv, kCoopMatConvSpvWords },
 };
 
@@ -3446,6 +3475,94 @@ bool bindDispatch(ExecState& e, ShaderKind k,
     return true;
 }
 
+// §J.3.e.Y 4Y.7 C.1 — One-time analysis pass over the parsed model.
+// Detects Conv → BinaryOp(Mul, channel-broadcast beta) pairs that can
+// be fused into the Conv shader's epilogue.  Mutates the layer list:
+//   • Conv gets fuseMulBetaBlob (beta blob name) + fuseMulOverrideOutput
+//     (BinOp's output blob name), causing dispatchConvolution to bind
+//     beta_buf as binding 4 and write output to BinOp's blob.
+//   • BinOp gets isFusedAway=true, causing dispatchLayer to skip it.
+//
+// Fuses only when ALL of:
+//   1. Layer at i is Convolution with exactly 1 output
+//   2. Layer at i+1 is BinaryOp(op=Mul, mode=channelBcast)
+//   3. BinOp inputs[0] = Conv's output (consumes Conv output)
+//   4. BinOp inputs[1] shape = (convOutC, 1, 1) — per-channel broadcast
+//   5. coopmat path is OFF (VIPLE_RIFE_VK_COOPMAT not set) — coopmat
+//      shader has 4 bindings only and doesn't carry fusion support.
+//
+// Pattern in RIFE-v4.25-lite: 32 ResBlock Mul_NN per inference get
+// folded → 32 fewer dispatches + 32 fewer barriers per frame ≈ 1.5-2 ms
+// chain time savings on RTX 3060 Laptop.
+//
+// Returns count of fused pairs (logged for diagnostics).
+int analyzeFuseableConvBinOps(Model& model,
+                              const std::unordered_map<QString, BlobShape>& shapes)
+{
+    static const bool kCoopMatEnabled = []{
+        const char* s = std::getenv("VIPLE_RIFE_VK_COOPMAT");
+        return s && s[0] && s[0] != '0';
+    }();
+    if (kCoopMatEnabled) return 0;
+
+    auto findS = [&](const QString& n) -> const BlobShape* {
+        auto it = shapes.find(n);
+        return it == shapes.end() ? nullptr : &it->second;
+    };
+
+    // Safety: blob with multiple consumers can't be fused (other readers
+    // would see Conv's overridden-target buffer instead of the original).
+    // ncnn convention auto-inserts Split for multi-consumer; if Conv's
+    // output is consumed by exactly the next layer (1 consumer), no
+    // Split was needed and fusion is safe.  Pre-compute consumer counts.
+    std::unordered_map<QString, int> consumerCount;
+    for (const Layer& L : model.layers) {
+        for (const QString& in : L.inputs) {
+            consumerCount[in] += 1;
+        }
+    }
+
+    int fuseCount = 0;
+    for (size_t i = 0; i + 1 < model.layers.size(); ++i) {
+        Layer& conv = model.layers[i];
+        if (conv.kind != OpKind::Convolution) continue;
+        if (conv.outputs.size() != 1) continue;
+
+        Layer& binop = model.layers[i + 1];
+        if (binop.kind != OpKind::BinaryOp) continue;
+        if (binop.inputs.size() != 2 || binop.outputs.size() != 1) continue;
+
+        // BinaryOp op encoding (ncnn): 0=Add, 1=Sub, 2=Mul, 3=Div, ...
+        auto pit = binop.params.find(0);
+        if (pit == binop.params.end() || (int)pit->second.i != 2) continue;
+
+        if (binop.inputs[0] != conv.outputs[0]) continue;
+
+        // Conv output must have exactly 1 consumer (this BinOp).  Otherwise
+        // some downstream reader expects the un-multiplied value.
+        auto cit = consumerCount.find(conv.outputs[0]);
+        if (cit == consumerCount.end() || cit->second != 1) continue;
+
+        const BlobShape* aS = findS(conv.outputs[0]);
+        const BlobShape* bS = findS(binop.inputs[1]);
+        if (!aS || !bS) continue;
+        if (bS->c != aS->c || bS->h != 1 || bS->w != 1) continue;
+
+        conv.fuseMulBetaBlob       = binop.inputs[1];
+        conv.fuseMulOverrideOutput = binop.outputs[0];
+        binop.isFusedAway          = true;
+        ++fuseCount;
+    }
+
+    if (fuseCount > 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] 4Y.7 C.1 fusion: %d Conv→Mul(channel-bcast) "
+                    "pairs folded into Conv shader epilogue",
+                    fuseCount);
+    }
+    return fuseCount;
+}
+
 bool dispatchConvolution(ExecState& e, const Layer& L) {
     const Layer& Lref = L;
     int N      = paramInt(Lref, 0, 0);
@@ -3460,23 +3577,62 @@ bool dispatchConvolution(ExecState& e, const Layer& L) {
     const GpuBuffer* in     = findBlob(e, L.inputs[0]);
     const GpuBuffer* w      = findTensor(e, L.name + "/weight");
     const GpuBuffer* b      = hasB ? findTensor(e, L.name + "/bias") : nullptr;
-    const GpuBuffer* out    = findBlob(e, L.outputs[0]);
-    const BlobShape* inS    = findShape(e, L.inputs[0]);
-    const BlobShape* outS   = findShape(e, L.outputs[0]);
+
+    // §J.3.e.Y 4Y.7 C.1 — fused Conv→Mul(per-channel beta).  When this
+    // Conv was paired with an immediately-following BinaryOp(Mul) by the
+    // graph analyzer, write to the BinOp's output blob and multiply by
+    // the per-channel beta vector inside the Conv shader epilogue.
+    bool fuseBeta = !L.fuseMulBetaBlob.isEmpty()
+                 && !L.fuseMulOverrideOutput.isEmpty();
+    QString outBlobName = fuseBeta ? L.fuseMulOverrideOutput : L.outputs[0];
+    const GpuBuffer* out  = findBlob(e, outBlobName);
+    const BlobShape* inS  = findShape(e, L.inputs[0]);
+    const BlobShape* outS = findShape(e, outBlobName);
     if (!in || !w || !out || !inS || !outS) return false;
     if (hasB && !b) return false;
+
+    // Locate the beta blob (per-channel scale) when fused.  Fall back
+    // to weight buffer as a placeholder when no fusion (binding still
+    // required by descriptor set layout but shader will skip via
+    // hasFusedBeta=0).
+    const GpuBuffer* beta = nullptr;
+    if (fuseBeta) {
+        beta = findBlob(e, L.fuseMulBetaBlob);
+        if (!beta) {
+            // Beta blob missing — fall back to non-fused dispatch.  Will
+            // produce incorrect output unless the BinOp also runs (it
+            // won't if marked isFusedAway).  Log + abort to surface bug.
+            std::fprintf(stderr,
+                "[VIPLE-RIFE-VK] Conv fusion: beta blob '%s' not found "
+                "for layer '%s' — fusion broken\n",
+                qUtf8Printable(L.fuseMulBetaBlob),
+                qUtf8Printable(L.name));
+            return false;
+        }
+    }
+
     // Bias buffer required by binding even if hasBias=0; reuse weight
     // buffer placeholder — shader will skip due to hasB push-const flag.
-    VkBuffer bufs[4] = { in->buf, w->buf, b ? b->buf : w->buf, out->buf };
+    // Same trick for beta_buf when not fused.
+    VkBuffer bufs[5] = {
+        in->buf,
+        w->buf,
+        b ? b->buf : w->buf,
+        out->buf,
+        beta ? beta->buf : w->buf,
+    };
     struct PC {
         int32_t inDims[4]; int32_t outDims[4]; int32_t conv[4];
-        float   lr; int32_t _pad[3];
+        float   lr;
+        int32_t hasFusedBeta;  // §J.3.e.Y 4Y.7 C.1 — replaces _pad[0]
+        int32_t _pad[2];
     } pc{};
     pc.inDims[0]  = inS->w;  pc.inDims[1]  = inS->h;
     pc.inDims[2]  = inS->c;  pc.inDims[3]  = hasB;
     pc.outDims[0] = outS->w; pc.outDims[1] = outS->h; pc.outDims[2] = outS->c;
     pc.conv[0] = kW; pc.conv[1] = kH; pc.conv[2] = sW; pc.conv[3] = pad;
     pc.lr = lr;
+    pc.hasFusedBeta = fuseBeta ? 1 : 0;
 
     // §J.3.e.Y 4Y.6 — Tensor Core via cooperative_matrix, opt-in.
     //
@@ -3498,7 +3654,12 @@ bool dispatchConvolution(ExecState& e, const Layer& L) {
         const char* s = std::getenv("VIPLE_RIFE_VK_COOPMAT");
         return s && s[0] && s[0] != '0';
     }();
-    if (kCoopMatEnabled) {
+    if (kCoopMatEnabled && !fuseBeta) {
+        // §J.3.e.Y 4Y.7 C.1 — coopmat path doesn't carry fusion (its
+        // shader has 4 bindings + the precision-regressed im2col path).
+        // Analyzer should have refused fusion for any Conv that would
+        // route here, but defence-in-depth: never engage coopmat when
+        // fusion is set, since hasFusedBeta would silently get ignored.
         const int    K     = inS->c * kH * kW;
         const int    outHW = outS->h * outS->w;
         const bool   align = (outS->c % 16 == 0)
@@ -3529,12 +3690,12 @@ bool dispatchConvolution(ExecState& e, const Layer& L) {
     const bool tiled_k3p1d1_s1 = (kW == 3 && kH == 3 && pad == 1 && dilation1
                                   && sW == 1 && sH == 1);
     if (tiled_k3p1d1_s1) {
-        return bindDispatch(e, ShaderKind::Conv2D_3x3_s1, bufs, 4, &pc, sizeof(pc),
+        return bindDispatch(e, ShaderKind::Conv2D_3x3_s1, bufs, 5, &pc, sizeof(pc),
                             (uint32_t)((outS->w + 15) / 16),
                             (uint32_t)((outS->h + 15) / 16),
                             (uint32_t)outS->c);
     }
-    return bindDispatch(e, ShaderKind::Conv2D, bufs, 4, &pc, sizeof(pc),
+    return bindDispatch(e, ShaderKind::Conv2D, bufs, 5, &pc, sizeof(pc),
                         (uint32_t)((outS->w + 7) / 8),
                         (uint32_t)((outS->h + 7) / 8),
                         (uint32_t)outS->c);
@@ -3803,6 +3964,14 @@ bool dispatchSplit(ExecState& e, const Layer& L) {
 }
 
 bool dispatchLayer(ExecState& e, const Layer& L) {
+    // §J.3.e.Y 4Y.7 C.1 — layers folded into a previous Conv's epilogue
+    // by analyzeFuseableConvBinOps() get marked isFusedAway and are
+    // skipped here.  They are NOT removed from the layer vector to keep
+    // shape-inference / blob-name resolution intact for downstream layers
+    // that still reference the fused layer's nominal output blob (the
+    // Conv writes there directly via fuseMulOverrideOutput).
+    if (L.isFusedAway) return true;
+
     switch (L.kind) {
     case OpKind::Input:        return true;  // pre-uploaded
     case OpKind::MemoryData:   return true;  // pre-filled at boot
@@ -4287,8 +4456,12 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
         if (pfnCreateShaderModule(device, &smCi, nullptr, &shaderMod) != VK_SUCCESS) return false;
     }
 
-    VkDescriptorSetLayoutBinding dslB[4] = {};
-    for (int i = 0; i < 4; ++i) {
+    // §J.3.e.Y 4Y.7 C.1 — Conv2D shaders carry 5 bindings (in/W/B/out/beta).
+    // Test harness runs with hasFusedBeta=0 so binding 4 just needs to be
+    // a valid storage buffer (shader skips the read when flag is 0).  Reuse
+    // weight buffer as placeholder, mirroring the bias-placeholder pattern.
+    VkDescriptorSetLayoutBinding dslB[5] = {};
+    for (int i = 0; i < 5; ++i) {
         dslB[i].binding = (uint32_t)i;
         dslB[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         dslB[i].descriptorCount = 1;
@@ -4298,7 +4471,7 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
     {
         VkDescriptorSetLayoutCreateInfo dslCi = {};
         dslCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        dslCi.bindingCount = 4;
+        dslCi.bindingCount = 5;
         dslCi.pBindings = dslB;
         if (pfnCreateDescriptorSetLayout(device, &dslCi, nullptr, &dsl) != VK_SUCCESS) return false;
     }
@@ -4364,7 +4537,7 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
     {
         VkDescriptorPoolSize sz = {};
         sz.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        sz.descriptorCount = 4;
+        sz.descriptorCount = 5;  // §J.3.e.Y 4Y.7 C.1: bumped 4→5 (added beta_buf)
         VkDescriptorPoolCreateInfo dpCi = {};
         dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         dpCi.maxSets = 1;
@@ -4382,13 +4555,17 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
         if (pfnAllocateDescriptorSets(device, &dsai, &descSet) != VK_SUCCESS) return false;
     }
     {
-        VkDescriptorBufferInfo dbi[4] = {};
+        // §J.3.e.Y 4Y.7 C.1: 5 bindings now (added beta_buf at binding 4).
+        // Test runs with hasFusedBeta=0 so binding 4 just needs a valid
+        // storage buffer; reuse bufW as placeholder.
+        VkDescriptorBufferInfo dbi[5] = {};
         dbi[0].buffer = bufIn.buf;  dbi[0].range = VK_WHOLE_SIZE;
         dbi[1].buffer = bufW.buf;   dbi[1].range = VK_WHOLE_SIZE;
         dbi[2].buffer = bufB.buf;   dbi[2].range = VK_WHOLE_SIZE;
         dbi[3].buffer = bufOut.buf; dbi[3].range = VK_WHOLE_SIZE;
-        VkWriteDescriptorSet wds[4] = {};
-        for (int i = 0; i < 4; ++i) {
+        dbi[4].buffer = bufW.buf;   dbi[4].range = VK_WHOLE_SIZE;  // beta placeholder
+        VkWriteDescriptorSet wds[5] = {};
+        for (int i = 0; i < 5; ++i) {
             wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             wds[i].dstSet = descSet;
             wds[i].dstBinding = (uint32_t)i;
@@ -4396,7 +4573,7 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
             wds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             wds[i].pBufferInfo = &dbi[i];
         }
-        pfnUpdateDescriptorSets(device, 4, wds, 0, nullptr);
+        pfnUpdateDescriptorSets(device, 5, wds, 0, nullptr);
     }
 
     // ---- 6. Command buffer + dispatch ----
@@ -4426,14 +4603,15 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
     pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     pfnCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLay, 0,
                              1, &descSet, 0, nullptr);
-    // Push constants: 3 ivec4 + 1 float, packed to 13 ints = 52 bytes
-    // (we allocated 64 to satisfy 16-byte alignment).
+    // Push constants: 3 ivec4 + 1 float + hasFusedBeta + 2 pad = 64 bytes.
+    // §J.3.e.Y 4Y.7 C.1 — hasFusedBeta replaces _pad[0]; test runs with 0.
     struct PC {
         int32_t inDims[4];   // (inW, inH, inC, hasBias)
         int32_t outDims[4];  // (outW, outH, outChan, _pad)
         int32_t conv[4];     // (kernelW, kernelH, stride, pad)
         float   leakyReluSlope;
-        int32_t _pad[3];     // round to 16
+        int32_t hasFusedBeta;  // 0 = no fusion (test path)
+        int32_t _pad[2];     // round to 16
     } pcVal = {};
     pcVal.inDims[0] = W; pcVal.inDims[1] = H; pcVal.inDims[2] = C; pcVal.inDims[3] = hasBias;
     pcVal.outDims[0] = OUT_W; pcVal.outDims[1] = OUT_H; pcVal.outDims[2] = N;
@@ -4442,6 +4620,7 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
     // Conv layers in flownet are kH==kW, strideH==strideW, symmetric pad).
     pcVal.conv[0] = kW; pcVal.conv[1] = kH; pcVal.conv[2] = strideW; pcVal.conv[3] = pad;
     pcVal.leakyReluSlope = lrSlope;
+    pcVal.hasFusedBeta = 0;
     pfnCmdPushConstants(cmd, pipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                         sizeof(pcVal), &pcVal);
     pfnCmdDispatch(cmd, (OUT_W + 7) / 8, (OUT_H + 7) / 8, N);
@@ -6513,6 +6692,12 @@ bool RifeNativeExecutor::initialize(const InitOptions& opts) {
                      "[VIPLE-RIFE-VK] RifeNativeExecutor: shape inference failed");
         return false;
     }
+
+    // §J.3.e.Y 4Y.7 C.1 — fold Conv→Mul(per-channel beta) into Conv
+    // shader epilogue.  Mutates model.layers in-place: marks fused
+    // BinOp layers isFusedAway, sets Conv layers' fuseMulBetaBlob /
+    // fuseMulOverrideOutput.  No-op when VIPLE_RIFE_VK_COOPMAT=1.
+    analyzeFuseableConvBinOps(m_impl->model, m_impl->shapes);
 
     // §J.3.e.X Final.2 — load VkPipelineCache bytes from disk if available.
     std::vector<uint8_t> initialCacheBytes;

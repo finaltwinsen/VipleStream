@@ -84,6 +84,21 @@ struct Layer {
     QStringList   inputs;     // tensor names produced by earlier layers
     QStringList   outputs;    // tensor names this layer produces
     std::unordered_map<int, ParamValue> params; // param_id → value
+
+    // §J.3.e.Y 4Y.7 (C.1) — Conv→BinaryOp(Mul, channel-broadcast beta)
+    // fusion.  Set by analyzeFuseableConvBinOps() once after parseParam.
+    // When fuseMulBetaBlob is non-empty, the Conv layer's dispatch:
+    //   1. Binds the named beta blob as binding 4 (beta_buf[c]).
+    //   2. Sets hasFusedBeta=1 in push constant; shader epilogue
+    //      multiplies acc by beta_buf[outChannel] before storing.
+    //   3. Writes output to fuseMulOverrideOutput blob (= the BinOp's
+    //      output blob), bypassing the original Conv output blob.
+    // The follow-up BinOp layer is marked isFusedAway=true and skipped
+    // in the dispatch loop, eliminating ~32 dispatches per inference
+    // for RIFE-v4-lite ResBlock pattern.
+    QString fuseMulBetaBlob;        // beta tensor blob name, or "" if no fusion
+    QString fuseMulOverrideOutput;  // output blob name to write to (BinOp output)
+    bool    isFusedAway = false;    // skip this layer's dispatch (fused into prior)
 };
 
 enum class TensorDType : uint8_t {
