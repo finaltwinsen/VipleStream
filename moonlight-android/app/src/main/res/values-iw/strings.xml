@@ -152,4 +152,16 @@
     <string name="title_checkbox_enable_audiofx">הפעל תמיכה באקולייזר</string>
     <string name="category_input_settings">הגדרות קלט</string>
     <string name="title_checkbox_touchscreen_trackpad">השתמש במסך מגע כמשטח מגע</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">אינטרפולציה של פריימים (FRUC 2×)</string>
+    <string name="summary_enable_fruc">מכפיל את קצב הפריימים המוצג על ידי אינטרפולציה בין פריימי השרת במכשיר. אותה חלקות עם חצי מרוחב הפס.\n\nמומלץ: הגדר את ה-FPS של המארח לחצי מקצב הרענון של המסך שלך (למשל 45 ל-90 Hz, 60 ל-120 Hz).</string>
+    <string name="title_fruc_quality">הגדרה מראש לאיכות FRUC</string>
+    <string name="summary_fruc_quality">פשרה בין דיוק מעקב תנועה לעומס GPU. ברירת מחדל: מאוזן.</string>
+    <string name="title_fruc_backend_vulkan">השתמש ב-backend FRUC Vulkan (ניסיוני)</string>
+    <string name="summary_fruc_backend_vulkan">כבוי (ברירת מחדל): משתמש ב-OpenGL ES — נבדק היטב. דלוק: משתמש ב-Vulkan compute pipeline — ניסיוני, עשוי לבצע thermal throttle בחלק מהמכשירים.</string>
+    <string-array name="fruc_quality_names">
+        <item>איכות — חיפוש תנועה הרחב ביותר, דורש GPU חזק</item>
+        <item>מאוזן — מומלץ</item>
+        <item>ביצועים — המהיר ביותר, מעקב תנועה חלש יותר</item>
+    </string-array>
 </resources>

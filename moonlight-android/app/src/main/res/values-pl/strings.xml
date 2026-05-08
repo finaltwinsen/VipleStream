@@ -272,4 +272,16 @@
     <string name="videoformat_auto">Automatycznie (zalecane)</string>
     <string name="videoformat_av1always">Preferowany AV1 (eksperymentalny)</string>
     <string name="summary_setup_guide">Wyświetl instrukcje, jak skonfigurować komputer do gier do streamowania</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Interpolacja klatek (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Podwaja wyświetlaną liczbę klatek na sekundę poprzez interpolację między klatkami serwera na urządzeniu. Ta sama płynność przy połowie przepustowości.\n\nZalecane: ustaw FPS hosta na połowę częstotliwości odświeżania ekranu (np. 45 dla 90 Hz, 60 dla 120 Hz).</string>
+    <string name="title_fruc_quality">Ustawienie jakości FRUC</string>
+    <string name="summary_fruc_quality">Kompromis między dokładnością śledzenia ruchu a obciążeniem GPU. Domyślnie: Zrównoważona.</string>
+    <string name="title_fruc_backend_vulkan">Użyj backendu FRUC Vulkan (eksperymentalny)</string>
+    <string name="summary_fruc_backend_vulkan">Wyłączone (domyślnie): używa OpenGL ES — dobrze przetestowane. Włączone: używa Vulkan compute pipeline — eksperymentalne, może thermal throttle na niektórych urządzeniach.</string>
+    <string-array name="fruc_quality_names">
+        <item>Jakość — najszerszy zakres wyszukiwania ruchu, wymaga mocnego GPU</item>
+        <item>Zrównoważona — zalecana</item>
+        <item>Wydajność — najszybsza, słabsze śledzenie ruchu</item>
+    </string-array>
 </resources>

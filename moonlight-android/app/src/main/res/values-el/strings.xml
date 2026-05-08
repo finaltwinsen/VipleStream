@@ -212,4 +212,16 @@
 \nΔοκιμάστε να απενεργοποιήσετε τη λειτουργία HDR, να αλλάξετε την ανάλυση ροής ή να αλλάξετε την ανάλυση οθόνης του υπολογιστή φιλοξενίας.</string>
     <string name="pcview_menu_eol">Λήξη Υποστήριξης NVIDA GameStream</string>
     <string name="pair_pairing_help">Εάν ο υπολογιστής οικοδεσπότης χρησιμοποιεί το Sunshine, πλοηγηθείτε στην διαδικτυακή διεπαφή χρήστη του Sunshine για να εισάγετε το PIN.</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Παρεμβολή καρέ (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Διπλασιάζει τον ρυθμό καρέ που εμφανίζεται με παρεμβολή μεταξύ των καρέ του διακομιστή στη συσκευή. Ίδια ομαλότητα με το μισό εύρος ζώνης.\n\nΣυνιστάται: ορίστε το FPS του host στο μισό της συχνότητας ανανέωσης της οθόνης σας (π.χ. 45 για 90 Hz, 60 για 120 Hz).</string>
+    <string name="title_fruc_quality">Προεπιλογή ποιότητας FRUC</string>
+    <string name="summary_fruc_quality">Αντιστάθμιση μεταξύ ακρίβειας παρακολούθησης κίνησης και φορτίου GPU. Προεπιλογή: Ισορροπημένο.</string>
+    <string name="title_fruc_backend_vulkan">Χρήση backend FRUC Vulkan (πειραματικό)</string>
+    <string name="summary_fruc_backend_vulkan">Απενεργοποιημένο (προεπιλογή): χρησιμοποιεί OpenGL ES — καλά δοκιμασμένο. Ενεργοποιημένο: χρησιμοποιεί Vulkan compute pipeline — πειραματικό, μπορεί να thermal throttle σε ορισμένες συσκευές.</string>
+    <string-array name="fruc_quality_names">
+        <item>Ποιότητα — ευρύτερη αναζήτηση κίνησης, απαιτεί ισχυρή GPU</item>
+        <item>Ισορροπημένο — συνιστάται</item>
+        <item>Απόδοση — ταχύτερο, ασθενέστερη παρακολούθηση κίνησης</item>
+    </string-array>
 </resources>

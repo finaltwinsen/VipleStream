@@ -285,4 +285,16 @@
     <string name="title_seekbar_vibrate_fallback_strength">Ajuster l\'intensité de la vibration émulée</string>
     <string name="summary_seekbar_vibrate_fallback_strength">Amplifie ou réduit l\'intensité de la vibration sur votre appareil</string>
     <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Interpolation d\'images (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Double la fréquence d\'images affichée en interpolant entre les images du serveur sur l\'appareil. Même fluidité avec moitié moins de bande passante.\n\nRecommandé : réglez le FPS de l\'hôte à la moitié du taux de rafraîchissement de votre écran (par ex. 45 pour 90 Hz, 60 pour 120 Hz).</string>
+    <string name="title_fruc_quality">Préréglage de qualité FRUC</string>
+    <string name="summary_fruc_quality">Compromis entre la précision du suivi de mouvement et la charge GPU. Par défaut : Équilibré.</string>
+    <string name="title_fruc_backend_vulkan">Utiliser le backend FRUC Vulkan (expérimental)</string>
+    <string name="summary_fruc_backend_vulkan">Désactivé (par défaut) : utilise OpenGL ES — bien testé. Activé : utilise Vulkan compute pipeline — expérimental, peut thermal throttle sur certains appareils.</string>
+    <string-array name="fruc_quality_names">
+        <item>Qualité — recherche de mouvement la plus large, GPU puissant requis</item>
+        <item>Équilibré — recommandé</item>
+        <item>Performance — plus rapide, suivi de mouvement plus faible</item>
+    </string-array>
 </resources>

@@ -1,2 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources></resources>
+<resources>    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">درون‌یابی فریم (FRUC 2×)</string>
+    <string name="summary_enable_fruc">نرخ فریم نمایش داده شده را با درون‌یابی بین فریم‌های سرور در دستگاه دو برابر می‌کند. نرمی یکسان با نصف پهنای باند.\n\nتوصیه شده: FPS هاست را روی نصف نرخ نوسازی صفحه نمایش خود تنظیم کنید (مثلاً 45 برای 90 هرتز، 60 برای 120 هرتز).</string>
+    <string name="title_fruc_quality">پیش‌تنظیم کیفیت FRUC</string>
+    <string name="summary_fruc_quality">مصالحه بین دقت ردیابی حرکت و بار GPU. پیش‌فرض: متعادل.</string>
+    <string name="title_fruc_backend_vulkan">استفاده از بک‌اند FRUC Vulkan (آزمایشی)</string>
+    <string name="summary_fruc_backend_vulkan">خاموش (پیش‌فرض): از OpenGL ES استفاده می‌کند — به خوبی آزمایش شده. روشن: از Vulkan compute pipeline استفاده می‌کند — آزمایشی، ممکن است در برخی دستگاه‌ها thermal throttle رخ دهد.</string>
+    <string-array name="fruc_quality_names">
+        <item>کیفیت — وسیع‌ترین جستجوی حرکت، نیازمند GPU قدرتمند</item>
+        <item>متعادل — توصیه شده</item>
+        <item>عملکرد — سریع‌ترین، ردیابی حرکت ضعیف‌تر</item>
+    </string-array>
+</resources>

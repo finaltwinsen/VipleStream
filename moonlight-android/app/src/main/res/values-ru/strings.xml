@@ -254,4 +254,16 @@
     <string name="title_frame_pacing">Скорость вывода/отрисовки кадра</string>
     <string name="pacing_balanced_alt">Сбалансированно с лимитом FPS</string>
     <string name="resolution_480p">480p</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Интерполяция кадров (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Удваивает отображаемую частоту кадров путём интерполяции между кадрами сервера на устройстве. Та же плавность при половинной пропускной способности.\n\nРекомендуется: установите FPS хоста на половину частоты обновления вашего дисплея (например, 45 для 90 Hz, 60 для 120 Hz).</string>
+    <string name="title_fruc_quality">Предустановка качества FRUC</string>
+    <string name="summary_fruc_quality">Компромисс между точностью отслеживания движения и нагрузкой на GPU. По умолчанию: Сбалансированно.</string>
+    <string name="title_fruc_backend_vulkan">Использовать бэкенд FRUC Vulkan (экспериментальный)</string>
+    <string name="summary_fruc_backend_vulkan">Выключено (по умолчанию): использует OpenGL ES — хорошо протестирован. Включено: использует Vulkan compute pipeline — экспериментальный, на некоторых устройствах возможен thermal throttle.</string>
+    <string-array name="fruc_quality_names">
+        <item>Качество — самый широкий диапазон поиска движения, требуется мощный GPU</item>
+        <item>Сбалансированно — рекомендуется</item>
+        <item>Производительность — самое быстрое, более слабое отслеживание движения</item>
+    </string-array>
 </resources>

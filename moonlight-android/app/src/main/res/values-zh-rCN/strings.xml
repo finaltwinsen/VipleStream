@@ -291,4 +291,16 @@
     <string name="summary_analog_scrolling">在鼠标模式下选择用哪个摇杆控制鼠标移动</string>
     <string name="summary_seekbar_vibrate_fallback_strength">增强或减弱设备的震动强度</string>
     <string name="analogscroll_none">默认 (两个摇杆都控制鼠标)</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">补帧（FRUC 2×）</string>
+    <string name="summary_enable_fruc">在设备端补出中间帧，把显示帧率翻倍。同样的流畅度只需一半的网络带宽。\n\n建议：把 host 的 FPS 设为屏幕刷新率的一半（例如 90 Hz 屏幕设 45 FPS、120 Hz 屏幕设 60 FPS）。</string>
+    <string name="title_fruc_quality">补帧质量</string>
+    <string name="summary_fruc_quality">在 motion 追踪准确度与 GPU 负担之间取得平衡。默认：标准。</string>
+    <string name="title_fruc_backend_vulkan">使用 Vulkan 补帧后端（实验性）</string>
+    <string name="summary_fruc_backend_vulkan">关闭（默认）：使用 OpenGL ES，已广泛验证。开启：改用 Vulkan compute pipeline — 实验性，部分设备可能 thermal throttle。</string>
+    <string-array name="fruc_quality_names">
+        <item>高质量 — 最大 motion 搜索范围，需要强力 GPU</item>
+        <item>标准 — 建议</item>
+        <item>性能 — 最快，motion 追踪较弱</item>
+    </string-array>
 </resources>

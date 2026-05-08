@@ -259,4 +259,16 @@
     <string name="resolution_prefix_native_landscape">(Tájkép)</string>
     <string name="perf_overlay_hostprocessinglatency">Host feldolgozási késleltetés min/max/átlag: %1$.1f/%2$.1f/%3$.1f ms</string>
     <string name="pacing_latency">A legalacsonyabb késleltetés előnyben részesítése</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Képkocka-interpoláció (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Megduplázza a megjelenített képkockasebességet a kiszolgáló képkockái közötti interpolációval az eszközön. Ugyanaz a simaság fele sávszélességgel.\n\nJavasolt: állítsa a host FPS-ét a kijelző frissítési gyakoriságának felére (pl. 45 a 90 Hz-hez, 60 a 120 Hz-hez).</string>
+    <string name="title_fruc_quality">FRUC minőségi előbeállítás</string>
+    <string name="summary_fruc_quality">Kompromisszum a mozgáskövetés pontossága és a GPU terhelés között. Alapértelmezett: Kiegyensúlyozott.</string>
+    <string name="title_fruc_backend_vulkan">Vulkan FRUC backend használata (kísérleti)</string>
+    <string name="summary_fruc_backend_vulkan">Ki (alapértelmezett): OpenGL ES használata — jól tesztelt. Be: Vulkan compute pipeline használata — kísérleti, egyes eszközökön thermal throttle előfordulhat.</string>
+    <string-array name="fruc_quality_names">
+        <item>Minőség — legszélesebb mozgáskeresés, erős GPU-t igényel</item>
+        <item>Kiegyensúlyozott — javasolt</item>
+        <item>Teljesítmény — leggyorsabb, gyengébb mozgáskövetés</item>
+    </string-array>
 </resources>

@@ -254,4 +254,16 @@
     <string name="analogscroll_left">Stick analógico esquerdo</string>
     <string name="title_analog_scrolling">Usar um stick analógico para fazer scroll</string>
     <string name="summary_analog_scrolling">Selecciona um stick analógico para fazer scroll quando a emulação de rato está ativada</string>
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Interpolação de quadros (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Dobra a taxa de quadros exibida interpolando entre quadros do servidor no dispositivo. Mesma suavidade com metade da largura de banda.\n\nRecomendado: defina o FPS do host para metade da taxa de atualização da sua tela (ex. 45 para 90 Hz, 60 para 120 Hz).</string>
+    <string name="title_fruc_quality">Predefinição de qualidade FRUC</string>
+    <string name="summary_fruc_quality">Compromisso entre precisão de rastreamento de movimento e carga da GPU. Padrão: Balanceado.</string>
+    <string name="title_fruc_backend_vulkan">Usar backend FRUC Vulkan (experimental)</string>
+    <string name="summary_fruc_backend_vulkan">Desligado (padrão): usa OpenGL ES — bem testado. Ligado: usa Vulkan compute pipeline — experimental, pode thermal throttle em alguns dispositivos.</string>
+    <string-array name="fruc_quality_names">
+        <item>Qualidade — busca de movimento mais ampla, GPU potente necessária</item>
+        <item>Balanceado — recomendado</item>
+        <item>Desempenho — mais rápido, rastreamento de movimento mais fraco</item>
+    </string-array>
 </resources>

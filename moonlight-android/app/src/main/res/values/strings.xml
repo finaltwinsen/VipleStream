@@ -121,6 +121,14 @@
     <string name="perf_overlay_fruc_count">Interpolated: %1$d / %2$d (ratio: %3$.0f%%)</string>
     <string name="perf_overlay_fruc_effective_fps">Effective output: %1$.1f FPS</string>
 
+    <!-- FRUC Settings (preferences.xml) -->
+    <string name="title_enable_fruc">Frame interpolation (FRUC 2×)</string>
+    <string name="summary_enable_fruc">Doubles displayed frame rate by interpolating between server frames on-device. Same smoothness with half the bandwidth.\n\nRecommended: set host FPS to half your display refresh rate (e.g. 45 for a 90 Hz screen, 60 for 120 Hz).</string>
+    <string name="title_fruc_quality">FRUC quality preset</string>
+    <string name="summary_fruc_quality">Tradeoff between motion-tracking accuracy and GPU load. Default: Balanced.</string>
+    <string name="title_fruc_backend_vulkan">Use Vulkan FRUC backend (experimental)</string>
+    <string name="summary_fruc_backend_vulkan">Off (default): use OpenGL ES — well-tested across devices. On: use Vulkan compute pipeline — experimental, may thermal-throttle on some devices.</string>
+
     <!-- AppList activity -->
     <string name="applist_connect_msg">Connecting to PC…</string>
     <string name="applist_menu_resume">Resume Session</string>
