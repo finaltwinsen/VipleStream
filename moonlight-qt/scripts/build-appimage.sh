@@ -47,19 +47,34 @@ popd
 
 echo Compiling Moonlight in $BUILD_CONFIG configuration
 pushd $BUILD_FOLDER
-# VipleStream §K.1: qmake6 on Ubuntu noble emits a broken absolute path in
-# the .o rule's prereq list for source files that #include their own .moc
-# (boxartmanager.cpp / computermanager.cpp / computermodel.cpp).  The path
-# points to <SOURCE_ROOT>/app/release/<name>.moc which never exists, so
-# Make never triggers the moc rule, and the parallel .cpp compile races
-# ahead and fails with "<name>.moc: No such file or directory".
+# VipleStream §K.1 / §v1.4.0: qmake6 on Ubuntu noble emits a broken absolute
+# path in the .o rule's prereq list for source files that #include their
+# own .moc (boxartmanager.cpp / computermanager.cpp / computermodel.cpp).
+# The path points to <SOURCE_ROOT>/app/release/<name>.moc which never
+# exists, so make never triggers the moc rule, and the parallel .cpp
+# compile races ahead and fails with "<name>.moc: No such file or directory".
 #
 # Workaround: explicitly run compiler_moc_source_make_all (defined in
 # Makefile.Release / Makefile.Debug) before the main compile so all .moc
 # files are generated up-front.  Then the .cpp compile finds them via
 # the -Irelease path that's already in CXXFLAGS.
+#
+# Three preconditions for the workaround to actually do anything on a
+# fresh build dir:
+#   1. Top-level qmake6 has already produced $BUILD_FOLDER/Makefile (above).
+#   2. `make qmake_all` recurses qmake into each SUBDIR (app, AntiHooking,
+#      moonlight-common-c, qmdnsengine, h264bitstream, 3rdparty/nvvideoparser)
+#      so that $BUILD_FOLDER/app/Makefile.Release exists.  Skipping this
+#      step on a clean build dir → "make: app/Makefile.Release: No such
+#      file or directory" (v1.4.0 release run hit this).
+#   3. The make invocation must put `-C app` BEFORE `-f Makefile.Release`,
+#      otherwise make resolves `-f` against the post-`-C` cwd, looking for
+#      app/app/Makefile.Release.  Original syntax `-f app/Makefile.Release
+#      -C app` was wrong on both make 4.3 and 4.4 (silent path mismatch).
+echo "  Recursing qmake into subdirs so app/Makefile.Release exists"
+make -j$(nproc) qmake_all || fail "qmake recursion failed!"
 echo "  Pre-generating moc sources to work around qmake6 noble path bug"
-make -f app/Makefile.Release -C app -j$(nproc) compiler_moc_source_make_all \
+make -C app -f Makefile.Release -j$(nproc) compiler_moc_source_make_all \
     || fail "moc pre-generation failed!"
 make -j$(nproc) $(echo "$BUILD_CONFIG" | tr '[:upper:]' '[:lower:]') || fail "Make failed!"
 popd
