@@ -57,25 +57,20 @@ scripts/benchmark/results/
 # name + IP from VipleStream client log lines, so we keep them local-only.
 scripts/benchmark/output/
 
-# ── Per-developer diagnostic tools (pktmon SOP scripts etc.) ──
-# scripts/diag/*.ps1 / *.py / README.md typically hard-code the developer's
-# LAN IPs, NIC component ids, output paths, etc.  The public-facing SOP
-# lives in docs/diag_wire_loss.md; concrete tooling stays local.
-scripts/diag/
-
-# ── §K.1 Linux build probe scripts (per-developer WSL dev env) ──
-# wsl_*.sh hard-code ~/viplestream-build paths inside one specific WSL distro
-# and depend on /mnt/d/Mission/VipleStream/ Windows mount.  Public-facing
-# Linux build SOP belongs in docs/building.md once §K.1 cleanup is done.
-scripts/wsl_*.sh
-
-# ── 2026-05-08: scripts/ untracked wholesale (was leaking dev fingerprints
-# like LAN test-server IP 192.168.51.x in benchmark/diag helpers).  Build
-# infra moved to build-tools/ instead.  scripts/ stays as a developer-local
-# tooling dir (benchmark, deploy_, debug_pair, firewall_, scan_steam, etc.)
-# but no longer reaches the public repo.  See CLAUDE.md / docs/building.md
-# for build-tools/ paths.
-scripts/
+# ── 2026-05-08: top-level scripts/ untracked wholesale (was leaking dev
+# fingerprints like LAN test-server IP 192.168.51.x in benchmark/diag
+# helpers).  Build infra moved to build-tools/ instead.  scripts/ stays as
+# a developer-local tooling dir (benchmark, deploy_, debug_pair, firewall_,
+# scan_steam, fruc_*.py, wsl_*.sh, vm_*.sh, diag/, etc.) but no longer
+# reaches the public repo.  See CLAUDE.md / docs/building.md for
+# build-tools/ paths.
+#
+# Anchored to repo root with leading `/` so we don't accidentally ignore
+# upstream-Moonlight `moonlight-qt/scripts/` or `Sunshine/scripts/` etc.
+# (Found this footgun while landing the migration: an unanchored
+# `scripts/` pattern silently ignored all sub-`scripts/` dirs across the
+# tree, including upstream's build helpers.)
+/scripts/
 
 # ── External dependencies (auto-downloaded by build) ──
 vcpkg/
