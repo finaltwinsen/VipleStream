@@ -447,6 +447,29 @@ libplacebo {
         streaming/video/ffmpeg-renderers/vkfruc-aftermath.h \
         streaming/video/ffmpeg-renderers/ncnn_rife_warp.h \
         streaming/video/ffmpeg-renderers/rife_native_vk.h
+
+    # VipleStream §K.X — vkfruc.cpp #include "nvOpticalFlowVulkan.h" needs
+    # the NVIDIA Optical Flow SDK header on the include path.  win32 block
+    # already adds it (line 66), but the libplacebo path also gets compiled
+    # on Linux (WSL/native) so add it here for unix builds too.  Header is
+    # portable typedef-only (no Win32-specific definitions inside; the
+    # only #ifdef _WIN32 in nvOpticalFlowCommon.h is calling-convention
+    # NVOFAPI = __stdcall vs empty).  Runtime LoadLibraryA is already
+    # gated by Q_OS_WIN32 in vkfruc.cpp::loadNvOfApi (line 1081); Linux
+    # path returns false with "not yet wired" warning, env var defaults
+    # off so users won't notice.  See memory `reference_linux_build_pipeline.md`.
+    unix:!macx: INCLUDEPATH += $$PWD/../libs/windows/nvofa/include
+
+    # VipleStream §K.X — vkfruc.cpp #include "ncnn/stb_image_write.h" for the
+    # §B-DUMP diagnostic frame writer.  Windows ships this via the ncnn
+    # NuGet/prebuilt under libs/windows/ncnn/build/native/include/ncnn/
+    # (already on INCLUDEPATH via the win32 generic libs/windows/include).
+    # On Linux the apt/source-built ncnn does NOT install stb_image_write.h
+    # to /usr/local/include/ncnn/ (it's a build-dir internal header).  Mirror
+    # the Windows-shipped copy onto unix INCLUDEPATH; wsl_sync_to_ext4.sh
+    # rsyncs the headers across.  stb_image_write is a single-header library,
+    # zero portability concern.
+    unix:!macx: INCLUDEPATH += $$PWD/../libs/windows/ncnn/build/native/include
 }
 config_EGL {
     message(EGL renderer selected)
