@@ -578,12 +578,18 @@ int main(int argc, char *argv[])
     // hand-rolled RIFE inference pipeline.  Side-effect-heavy (claims
     // ncnn singleton then destroys), so meant as a one-shot dev tool;
     // we exit immediately after the test to keep the process clean.
+    //
+    // §K.X — Windows-only because impl needs ncnn::create_gpu_instance_external
+    // which only the VipleStream-fork ncnn (Windows build) exports.  See
+    // rife_native_vk.h declaration / memory reference_linux_build_pipeline.md.
+#if defined(_WIN32)
     if (qEnvironmentVariableIntValue("VIPLE_RIFE_NATIVE_VK_TEST") != 0) {
         QString anchor = Path::getDataFilePath("rife-v4.25-lite/flownet.param");
         QFileInfo fi(anchor);
         bool ok = viple::rife_native_vk::runConv2DGpuTestStandalone(fi.absolutePath());
         return ok ? 0 : 1;
     }
+#endif
 
 #ifdef Q_OS_WIN32
     // Grab the original std handles before we potentially redirect them later

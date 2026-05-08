@@ -608,7 +608,17 @@ void dumpModelSmoke(const QString& modelDir);
 //
 // Default tolerance bumped to 5e-4 in §J.3.e.Y 4Y.5a alongside fp16
 // weight storage; see Conv2D tolerance note above for full reasoning.
+//
+// VipleStream §K.X — gated to _WIN32 because the impl uses
+// `ncnn::create_gpu_instance_external` which lives in the
+// VipleStream-fork ncnn build only.  Upstream Tencent ncnn 20240820
+// (the version the WSL Linux pipeline pulls) does not export it, so
+// the Linux build cannot link against this dev-only standalone test.
+// Re-enable on Linux once we either (a) ship a matching ncnn fork in
+// `wsl_build_moonlight.sh` or (b) the upstream PR adding it lands.
+#if defined(_WIN32)
 bool runConv2DGpuTestStandalone(const QString& modelDir,
                                 float tolerance = 5e-4f);
+#endif
 
 } // namespace viple::rife_native_vk

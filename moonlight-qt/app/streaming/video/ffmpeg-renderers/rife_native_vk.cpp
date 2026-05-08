@@ -5899,7 +5899,18 @@ bool runEltwiseSumGpuTest(const VulkanCtx& ctx,
 // Side-effect: claims+releases the ncnn process-singleton (same caveat as
 // runExternalApiProbe — env var is dev-only, must abort streaming after
 // invoking).
+//
+// VipleStream §K.X — gated to _WIN32 because the body relies on
+// `ncnn::create_gpu_instance_external` (line ~6190), which only the
+// VipleStream-fork ncnn build (Windows) exports.  Linux WSL pipeline
+// pulls upstream Tencent ncnn 20240820 which lacks it, so the Linux
+// link step would fail.  Standalone test is dev-only (gated by
+// VIPLE_RIFE_NATIVE_VK_TEST=1 + immediate exit), losing it on Linux is
+// acceptable.  See memory `reference_linux_build_pipeline.md` for the
+// fix-options list when re-enabling on Linux.
 // ============================================================================
+
+#if defined(_WIN32)
 
 bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -6412,6 +6423,8 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
                 pass ? "PASS" : "FAIL");
     return pass;
 }
+
+#endif  // defined(_WIN32) — runConv2DGpuTestStandalone Linux gating end
 
 // ============================================================================
 // §J.3.e.X Final.1 — RifeNativeExecutor production API.
