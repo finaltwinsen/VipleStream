@@ -7359,6 +7359,16 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                      "[VIPLE-VKFRUC] frame#%llu DIAG_NOAVVKFRAME: clear-only path",
                                      (unsigned long long)fnum);
+        // §J.3.e.2.i.9 — at kFrucFramesInFlight=4 this single-present path
+        // can re-trigger VUID-vkQueueSubmit-pSignalSemaphores-00067 because
+        // it still uses per-slot m_SlotRenderDoneSem (signal/wait pair below),
+        // not the per-image m_SwapchainRenderDoneSem the production DUAL path
+        // moved to in Phase 1.5c-final.  Production never sets this env var;
+        // if you need DIAG with the bumped ring count, port the per-image
+        // sem pattern down here first.
+        static_assert(kFrucFramesInFlight <= 4,
+                      "DIAG_NOAVVKFRAME path uses per-slot renderDone sem; "
+                      "see vkfruc.h kFrucFramesInFlight comment.");
 
         uint32_t slot = m_CurrentSlot;
         m_CurrentSlot = (m_CurrentSlot + 1) % kFrucFramesInFlight;

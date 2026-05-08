@@ -534,11 +534,35 @@ private:
     // can use the [0] pair for the interp present and the [1] pair for
     // the real-frame present without cross-pass sync hazards.  i.3.e
     // single-present uses only the [0] pair.
-    // §J.3.e.2.i.8 Phase 1.5c — bumping to 4 made things worse (10s vs 40s
-    // crash) because more in-flight slots = more sem reuse opportunities.
-    // Reverted back to 2.  The proper fix for the renderDone-sem-reuse race
-    // is per-swapchain-image sems, deferred.
-    static constexpr uint32_t kFrucFramesInFlight = 2;
+    // §J.3.e.2.i.8 Phase 1.5c — first attempt to bump 2→4 hit
+    // VUID-vkQueueSubmit-pSignalSemaphores-00067 within 10s because per-slot
+    // m_SlotRenderDoneSem was being signaled before the previous wait
+    // consumed it.  Reverted to 2.
+    //
+    // §J.3.e.2.i.8 Phase 1.5c-final shipped per-swapchain-image renderDone
+    // sems (m_SwapchainRenderDoneSem, indexed by image idx returned by
+    // vkAcquireNextImageKHR).  DUAL/TRIPLE present + ONLY mode now use those
+    // for present wait; Vulkan swapchain reuse rule guarantees image idx X
+    // won't re-acquire until present consumed sem[X], so sem reuse is
+    // serialized.  This was the prerequisite the 1.5c attempt was missing.
+    //
+    // §J.3.e.2.i.9 (2026-05-09) — ring count bumped 2→4 to fix the post-v1.4.0
+    // 90fps server frame-latency issue.  Path β + native RIFE + 4Y.7 fusion +
+    // β.5.2 bicubic in v1.4.0 default chain pushed compute slot lifecycle
+    // ~18ms → ~28ms (decode + chain + 2× present @ 180Hz).  At 2 slots,
+    // sustained throughput = 2/28ms ≈ 71fps, breaking 90fps server target —
+    // observed [VIPLE-NET] networkDropped 17-51/sec + decodeMeanMs 70-130ms +
+    // [VIPLE-NET-WARN] "client decoder/pipeline can't keep up" firing every
+    // run.  Bumping to 4 → 4/28ms ≈ 143fps theoretical ceiling, ample margin
+    // for 90fps sustained.  Memory cost ≈ +10-16 MB GPU at 1080p.
+    //
+    // CAVEAT: the `DIAG_NOAVVKFRAME` debug path
+    // (VIPLE_VKFRUC_DIAG_NOAVVKFRAME=1, single-present, vkfruc.cpp ~7395)
+    // still uses per-slot m_SlotRenderDoneSem.  At kFrucFramesInFlight=4 it
+    // can re-trigger the original sem-reuse VUID.  Production never enables
+    // DIAG; keep the env var off when running with this ring size, or back-
+    // port per-image sem to that path before relying on it.
+    static constexpr uint32_t kFrucFramesInFlight = 4;
 
     // §B-DUMP 2026-05-07 — diagnostic frame dump for visual real-vs-interp
     // comparison.  Triggered by VIPLE_VKFRUC_DUMP_DIR=path; copies real /
