@@ -14,8 +14,11 @@ moonlight-qt/build/
 
 # ── qmake-generated files (embed machine-absolute paths & version) ──
 # Regenerated on every build from app.pro (VERSION, RC_ICONS, etc.). Tracking
-# them leaks per-machine workspace paths.
+# them leaks per-machine workspace paths AND causes spurious version drift
+# diffs between commits and post-bump qmake regeneration.  v1.4.0 release
+# run hit this for the renamed VipleStream_resource.rc — added now.
 moonlight-qt/app/Moonlight_resource.rc
+moonlight-qt/app/VipleStream_resource.rc
 moonlight-qt/app/qml_qmlcache.qrc
 
 # ── Temp / Release / Deploy ──
