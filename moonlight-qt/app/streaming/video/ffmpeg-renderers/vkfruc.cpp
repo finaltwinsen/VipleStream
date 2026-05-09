@@ -3769,6 +3769,46 @@ bool VkFrucRenderer::createInFlightRing()
                     "skipped (no dedicated compute QF on this GPU; "
                     "FRUC compute will use graphics queue)");
     }
+
+    // §J.3.e.2.i.10f Path D — early-release per-slot copy cmd buffers.
+    // Allocated from m_CmdPool (graphics queue) so they share lifecycle with
+    // m_SlotCmdBuf.  See header comment near m_SlotCopyCmdBuf for the
+    // two-submit pattern that releases AVFrame pool image after just the
+    // ~100us image copy instead of after the full ~20ms FRUC chain.
+    {
+        VkCommandBufferAllocateInfo copyCbai = {};
+        copyCbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        copyCbai.commandPool        = m_CmdPool;
+        copyCbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        copyCbai.commandBufferCount = kFrucFramesInFlight;
+        if (pfnAllocCmdBufs(m_Device, &copyCbai, m_SlotCopyCmdBuf) != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.10f Path D vkAllocateCommandBuffers (copy) failed — fallback to single-submit");
+            for (uint32_t i = 0; i < kFrucFramesInFlight; i++) m_SlotCopyCmdBuf[i] = VK_NULL_HANDLE;
+        } else {
+            // Timeline sem for cmd-buffer chaining (copy submit signals N,
+            // chain submit waits N).  Independent of m_ComputeTimelineSem.
+            VkSemaphoreTypeCreateInfo tsci = {};
+            tsci.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+            tsci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+            tsci.initialValue  = 0;
+            VkSemaphoreCreateInfo tsem = {};
+            tsem.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+            tsem.pNext = &tsci;
+            if (pfnCreateSem(m_Device, &tsem, nullptr, &m_CopyDoneSem) != VK_SUCCESS) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.10f Path D timeline sem create failed — fallback");
+                m_CopyDoneSem = VK_NULL_HANDLE;
+            }
+            m_CopyDoneNext.store(1);
+            const bool ok = (m_CopyDoneSem != VK_NULL_HANDLE);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.10f Path D early-release "
+                        "two-submit infra %s (sem=%p, %u copy cmd buffers)",
+                        ok ? "READY" : "PARTIAL — fallback",
+                        (void*)m_CopyDoneSem, (unsigned)kFrucFramesInFlight);
+        }
+    }
     return true;
 }
 
@@ -3827,6 +3867,17 @@ void VkFrucRenderer::destroyInFlightRing()
         m_ComputeTimelineSem = VK_NULL_HANDLE;
     }
     m_ComputeTimelineValue = 0;
+
+    // §J.3.e.2.i.10f Path D — copy cmd buffers (allocated from m_CmdPool,
+    // freed implicitly above when m_CmdPool destroyed) + timeline sem.
+    for (uint32_t i = 0; i < kFrucFramesInFlight; i++) {
+        m_SlotCopyCmdBuf[i] = VK_NULL_HANDLE;
+    }
+    if (m_CopyDoneSem && pfnDestroySem) {
+        pfnDestroySem(m_Device, m_CopyDoneSem, nullptr);
+        m_CopyDoneSem = VK_NULL_HANDLE;
+    }
+    m_CopyDoneNext.store(1);
 
     m_RingInitialized = false;
 }
@@ -7695,6 +7746,22 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     const bool dualPresentThisFrame = m_DualMode && m_FrucMode && m_FrucReady
                                       && !m_FRUCPaused.load();
     const bool triplePresentThisFrame = dualPresentThisFrame && m_TripleMode;
+    // §J.3.e.2.i.10f Path D — early AVFrame release.  Decide if we'll split
+    // renderFrame into two graphics-queue submits (1: image→buffer copy +
+    // signal vkf->sem early so FFmpeg pool can reuse pool image after just
+    // copy; 2: chain + presents with no vkf->img[0] access).  Only safe when
+    // the real-frame display path uses our m_FrucCurrRgbBuf via the
+    // m_RealCurrRgbDescSet (VIPLE_VKFRUC_REAL_USE_CRGB default ON in
+    // DUAL+FRUC mode).  Single-present + ycbcr-sampler path needs vkf
+    // alive whole cmd buffer for the fragment shader.
+    QByteArray rcrgbEnvEarly = qgetenv("VIPLE_VKFRUC_REAL_USE_CRGB");
+    const bool rcrgbOn = rcrgbEnvEarly.isEmpty() ? true : (rcrgbEnvEarly.toInt() != 0);
+    const bool useCrgbForReal = dualPresentThisFrame && m_FrucReady && rcrgbOn;
+    const bool pathDActive = useCrgbForReal
+                          && m_FrucMode && frame && frame->width > 0 && frame->height > 0
+                          && m_SlotCopyCmdBuf[slot] != VK_NULL_HANDLE
+                          && m_CopyDoneSem != VK_NULL_HANDLE;
+    uint64_t pathDCopyDoneVal = 0;
     uint32_t imgIdxA = 0;
     uint32_t imgIdxB = 0;
     uint32_t imgIdxC = 0;
@@ -7807,6 +7874,234 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     wds.pImageInfo      = &dii;
     m_RtPfn.UpdateDescriptorSets(m_Device, 1, &wds, 0, nullptr);
 
+    // §J.3.e.2.i.10f Path D — when active, FIRST record + submit a small
+    // copy cmd buffer that owns vkf->img[0] access (acquireBar + image
+    // copies + releaseBar) and signals vkf->sem[0]@V+1 immediately.
+    // FFmpeg pool can recycle the image after this ~100us submit instead
+    // of waiting for the full ~20ms chain.  The main cmd buffer below
+    // skips those ops + cross-syncs via m_CopyDoneSem timeline value.
+    if (pathDActive) {
+        pathDCopyDoneVal = m_CopyDoneNext.fetch_add(1, std::memory_order_acq_rel);
+        VkCommandBuffer copyCmd = m_SlotCopyCmdBuf[slot];
+        m_RtPfn.ResetCommandBuffer(copyCmd, 0);
+
+        VkCommandBufferBeginInfo cbbiC = {};
+        cbbiC.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        cbbiC.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        m_RtPfn.BeginCommandBuffer(copyCmd, &cbbiC);
+
+        // (a) acquire barrier: vkf->img[0] from decoder layout → GENERAL
+        VkImageMemoryBarrier acqBarC = {};
+        acqBarC.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        acqBarC.srcAccessMask       = 0;
+        acqBarC.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;  // copies only
+        acqBarC.oldLayout           = vkf->layout[0];
+        acqBarC.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        acqBarC.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        acqBarC.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        acqBarC.image               = vkf->img[0];
+        acqBarC.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        acqBarC.subresourceRange.baseMipLevel   = 0;
+        acqBarC.subresourceRange.levelCount     = 1;
+        acqBarC.subresourceRange.baseArrayLayer = 0;
+        acqBarC.subresourceRange.layerCount     = 1;
+        m_RtPfn.CmdPipelineBarrier(copyCmd,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &acqBarC);
+
+        // (b) drain prior frame's FRUC compute SHADER_READ on m_SwFrucNv12Buf
+        // before this frame's TRANSFER_WRITE.
+        VkBufferMemoryBarrier preCopyBarC = {};
+        preCopyBarC.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        preCopyBarC.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        preCopyBarC.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        preCopyBarC.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        preCopyBarC.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        preCopyBarC.buffer = m_SwFrucNv12Buf;
+        preCopyBarC.offset = 0;
+        preCopyBarC.size   = VK_WHOLE_SIZE;
+        m_RtPfn.CmdPipelineBarrier(copyCmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 1, &preCopyBarC, 0, nullptr);
+
+        // (c) cmdCopyImageToBuffer: vkf->img[0] (NV12 multi-plane) →
+        // m_SwFrucNv12Buf (PLANE_0 @ offset 0, PLANE_1 @ offset W*H).
+        const uint32_t hwWc = (uint32_t)frame->width;
+        const uint32_t hwHc = (uint32_t)frame->height;
+        VkBufferImageCopy regsC[2] = {};
+        regsC[0].bufferOffset      = 0;
+        regsC[0].bufferRowLength   = hwWc;
+        regsC[0].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        regsC[0].imageSubresource.layerCount = 1;
+        regsC[0].imageExtent       = { hwWc, hwHc, 1 };
+        regsC[1].bufferOffset      = (VkDeviceSize)hwWc * hwHc;
+        regsC[1].bufferRowLength   = hwWc / 2;
+        regsC[1].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+        regsC[1].imageSubresource.layerCount = 1;
+        regsC[1].imageExtent       = { hwWc / 2, hwHc / 2, 1 };
+        m_RtPfn.CmdCopyImageToBuffer(copyCmd, vkf->img[0],
+            VK_IMAGE_LAYOUT_GENERAL,
+            m_SwFrucNv12Buf, 2, regsC);
+
+        // (d) optional NvOf cmdCopyImage (mirror of original lines ~8004-8086).
+        if (m_NvOfReady) {
+            VkImageMemoryBarrier ofImgBars[2] = {};
+            int ofBarCount = 0;
+            for (VkImage img : {m_NvOfInputCurr, m_NvOfInputPrev}) {
+                if (m_NvOfTimelineValue == 0) {
+                    auto& b = ofImgBars[ofBarCount++];
+                    b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    b.srcAccessMask       = 0;
+                    b.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT
+                                          | VK_ACCESS_TRANSFER_READ_BIT
+                                          | VK_ACCESS_SHADER_READ_BIT;
+                    b.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+                    b.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+                    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    b.image               = img;
+                    b.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                    b.subresourceRange.baseMipLevel   = 0;
+                    b.subresourceRange.levelCount     = 1;
+                    b.subresourceRange.baseArrayLayer = 0;
+                    b.subresourceRange.layerCount     = 1;
+                }
+            }
+            if (ofBarCount > 0) {
+                m_RtPfn.CmdPipelineBarrier(copyCmd,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT
+                        | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0, 0, nullptr, 0, nullptr,
+                    (uint32_t)ofBarCount, ofImgBars);
+            }
+            VkImageCopy ofRegs[2] = {};
+            ofRegs[0].srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+            ofRegs[0].srcSubresource.layerCount = 1;
+            ofRegs[0].dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+            ofRegs[0].dstSubresource.layerCount = 1;
+            ofRegs[0].extent = { hwWc, hwHc, 1 };
+            ofRegs[1].srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+            ofRegs[1].srcSubresource.layerCount = 1;
+            ofRegs[1].dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+            ofRegs[1].dstSubresource.layerCount = 1;
+            ofRegs[1].extent = { hwWc / 2, hwHc / 2, 1 };
+            auto pfnCmdCopyImage_pd = (PFN_vkCmdCopyImage)((PFN_vkGetDeviceProcAddr)
+                m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr"))(
+                m_Device, "vkCmdCopyImage");
+            if (pfnCmdCopyImage_pd) {
+                pfnCmdCopyImage_pd(copyCmd, vkf->img[0], VK_IMAGE_LAYOUT_GENERAL,
+                                   m_NvOfInputCurr, VK_IMAGE_LAYOUT_GENERAL,
+                                   2, ofRegs);
+            }
+        }
+
+        // (e) m_SwFrucNv12Buf TRANSFER_WRITE → SHADER_READ for next submit's
+        // nv12rgb compute.  Cross-submit timeline sem provides ordering, but
+        // explicit barrier inside copy cmd buffer makes cache flush deterministic.
+        VkBufferMemoryBarrier postCopyBarC = {};
+        postCopyBarC.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        postCopyBarC.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        postCopyBarC.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        postCopyBarC.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        postCopyBarC.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        postCopyBarC.buffer = m_SwFrucNv12Buf;
+        postCopyBarC.offset = 0;
+        postCopyBarC.size   = VK_WHOLE_SIZE;
+        m_RtPfn.CmdPipelineBarrier(copyCmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, nullptr, 1, &postCopyBarC, 0, nullptr);
+
+        // (f) release barrier on vkf->img[0] (GENERAL → GENERAL, cache flush).
+        VkImageMemoryBarrier relBarC = {};
+        relBarC.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        relBarC.srcAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+        relBarC.dstAccessMask       = 0;
+        relBarC.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        relBarC.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        relBarC.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        relBarC.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        relBarC.image               = vkf->img[0];
+        relBarC.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        relBarC.subresourceRange.baseMipLevel   = 0;
+        relBarC.subresourceRange.levelCount     = 1;
+        relBarC.subresourceRange.baseArrayLayer = 0;
+        relBarC.subresourceRange.layerCount     = 1;
+        m_RtPfn.CmdPipelineBarrier(copyCmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &relBarC);
+
+        VkResult endCopyVr = m_RtPfn.EndCommandBuffer(copyCmd);
+        if (endCopyVr != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC-PATH-D] vkEndCommandBuffer (copy) failed (%d)", (int)endCopyVr);
+            if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+            return;
+        }
+
+        // Submit copy cmd buffer: wait vkf->sem[0]@V (decode-done from FFmpeg),
+        // signal vkf->sem[0]@V+1 (release-to-pool) + m_CopyDoneSem@N (chain
+        // to main submit).  No fence — main submit's slot fence covers the
+        // whole frame's GPU work for next slot's reuse purposes.
+        VkSemaphore     copyWaitSems[1]   = { vkf->sem[0] };
+        VkPipelineStageFlags copyWaitMasks[1] = { VK_PIPELINE_STAGE_TRANSFER_BIT };
+        uint64_t        copyWaitVals[1]   = { vkf->sem_value[0] };
+        VkSemaphore     copySigSems[2]    = { vkf->sem[0], m_CopyDoneSem };
+        uint64_t        copySigVals[2]    = { vkf->sem_value[0] + 1, pathDCopyDoneVal };
+        VkTimelineSemaphoreSubmitInfo copyTssi = {};
+        copyTssi.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        copyTssi.waitSemaphoreValueCount   = 1;
+        copyTssi.pWaitSemaphoreValues      = copyWaitVals;
+        copyTssi.signalSemaphoreValueCount = 2;
+        copyTssi.pSignalSemaphoreValues    = copySigVals;
+        VkSubmitInfo copySi = {};
+        copySi.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        copySi.pNext                = &copyTssi;
+        copySi.waitSemaphoreCount   = 1;
+        copySi.pWaitSemaphores      = copyWaitSems;
+        copySi.pWaitDstStageMask    = copyWaitMasks;
+        copySi.commandBufferCount   = 1;
+        copySi.pCommandBuffers      = &copyCmd;
+        copySi.signalSemaphoreCount = 2;
+        copySi.pSignalSemaphores    = copySigSems;
+        VkResult vrCopy;
+        {
+            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            vrCopy = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &copySi, VK_NULL_HANDLE);
+        }
+        if (vrCopy != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC-PATH-D] copy QueueSubmit failed (%d)", (int)vrCopy);
+            if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+            return;
+        }
+
+        // Mirror existing post-submit AVVkFrame state update (was at line ~8540).
+        // sem signal value bump must happen WHILE locked so subsequent FFmpeg
+        // pool readers see the new value.  After this, FFmpeg can reuse the
+        // pool image as soon as GPU reaches sem_value[0]+1 (a few hundred us).
+        vkf->access[0]     = (VkAccessFlagBits)0;
+        vkf->layout[0]     = VK_IMAGE_LAYOUT_GENERAL;
+        vkf->sem_value[0] += 1;
+
+        // Unlock AVFrame — submit 1 is the only thing that touches vkf
+        // metadata.  Submit 2 doesn't reference vkf at all.
+        if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+
+        static std::atomic<bool> s_pathDLogged{false};
+        bool exp = false;
+        if (s_pathDLogged.compare_exchange_strong(exp, true)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-PATH-D] active: image copy + sem signal in copy "
+                "cmd buffer; main cmd buffer skips vkf->img[0] access. "
+                "AVFrame pool can recycle pool image after ~100us copy GPU work.");
+        }
+    }
+
     // ---- 6. Record cmd buffer ----
     VkCommandBuffer cmd = m_SlotCmdBuf[slot];
     m_RtPfn.ResetCommandBuffer(cmd, 0);
@@ -7829,26 +8124,31 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // re-transitions on NV video-decode images.  GENERAL is universally
     // sample-compatible (less optimal than SHADER_READ_ONLY but the loss
     // is negligible vs the FRUC chain win).
-    VkImageMemoryBarrier acquireBar = {};
-    acquireBar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    acquireBar.srcAccessMask       = 0;
-    acquireBar.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT
-                                   | VK_ACCESS_TRANSFER_READ_BIT;
-    acquireBar.oldLayout           = vkf->layout[0];
-    acquireBar.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
-    acquireBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    acquireBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    acquireBar.image               = vkf->img[0];
-    acquireBar.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-    acquireBar.subresourceRange.baseMipLevel   = 0;
-    acquireBar.subresourceRange.levelCount     = 1;
-    acquireBar.subresourceRange.baseArrayLayer = 0;
-    acquireBar.subresourceRange.layerCount     = 1;
-    m_RtPfn.CmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-            | VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &acquireBar);
+    // §J.3.e.2.i.10f Path D — when active, this barrier was already
+    // emitted in the copy cmd buffer above; main cmd buffer skips it
+    // (vkf->img[0] not accessed in this submit).
+    if (!pathDActive) {
+        VkImageMemoryBarrier acquireBar = {};
+        acquireBar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        acquireBar.srcAccessMask       = 0;
+        acquireBar.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT
+                                       | VK_ACCESS_TRANSFER_READ_BIT;
+        acquireBar.oldLayout           = vkf->layout[0];
+        acquireBar.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        acquireBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        acquireBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        acquireBar.image               = vkf->img[0];
+        acquireBar.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        acquireBar.subresourceRange.baseMipLevel   = 0;
+        acquireBar.subresourceRange.levelCount     = 1;
+        acquireBar.subresourceRange.baseArrayLayer = 0;
+        acquireBar.subresourceRange.layerCount     = 1;
+        m_RtPfn.CmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &acquireBar);
+    }
     if (firstFrame) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] frame#0 cmd record: barrier issued (oldLayout=%d) "
@@ -7891,6 +8191,13 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         const uint32_t hwW = (uint32_t)frame->width;
         const uint32_t hwH = (uint32_t)frame->height;
 
+        // §J.3.e.2.i.10f Path D — when active, the entire image-copy
+        // sequence below (preCopyBar + cmdCopyImageToBuffer + NvOf
+        // copy + bufBar) was already done in the copy cmd buffer that
+        // ran in submit 1.  m_SwFrucNv12Buf is filled and visible to
+        // this submit via m_CopyDoneSem timeline-sem wait.  Skip down
+        // straight to runFrucComputeChain.
+        if (!pathDActive) {
         // acquireBar (above) put vkf->img[0] in GENERAL with TRANSFER_READ
         // already in dstAccessMask, so cmdCopyImageToBuffer can read it
         // directly without an additional image barrier.  Only need to
@@ -8011,6 +8318,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 0, nullptr, 1, &bufBar, 0, nullptr);
+        }  // end if (!pathDActive) — copy ops above already done in submit 1
 
         runFrucComputeChain(cmd, hwW, hwH, /*useNativeSrc*/ true, slot);
         if (firstFrame) {
@@ -8169,12 +8477,9 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // Routing both through compute-NV12→RGB removes the asymmetry.
     // Single-mode (no FRUC) keeps original ycbcr path; no risk of regression.
     static std::atomic<bool> s_realPathLogged{false};
-    // §B-quality (d) 2026-05-06 — default ON.  treat unset as 1; explicitly
-    // set VIPLE_VKFRUC_REAL_USE_CRGB=0 to fall back to old ycbcr-sampler path
-    // (escape hatch for colour-space regression observation).
-    QByteArray rcrgbEnv = qgetenv("VIPLE_VKFRUC_REAL_USE_CRGB");
-    bool rcrgbOn = rcrgbEnv.isEmpty() ? true : (rcrgbEnv.toInt() != 0);
-    bool useCrgbForReal = dualPresentThisFrame && m_FrucReady && rcrgbOn;
+    // §B-quality (d) 2026-05-06 — VIPLE_VKFRUC_REAL_USE_CRGB env reads now
+    // hoisted to top of renderFrame (line ~7757) for use by Path D too.
+    // Local `useCrgbForReal` const inherited from outer scope.
     if (useCrgbForReal) {
         m_RtPfn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
         m_RtPfn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -8238,26 +8543,32 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // is now a same-layout barrier — no transition — but still emits
     // the cache flush + execution dep needed before FFmpeg's next decode
     // queue submission re-uses the image.
-    VkImageMemoryBarrier releaseBar = {};
-    releaseBar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    releaseBar.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
-    releaseBar.dstAccessMask       = 0;
-    releaseBar.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
-    releaseBar.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
-    releaseBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    releaseBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    releaseBar.image               = vkf->img[0];
-    releaseBar.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-    releaseBar.subresourceRange.baseMipLevel   = 0;
-    releaseBar.subresourceRange.levelCount     = 1;
-    releaseBar.subresourceRange.baseArrayLayer = 0;
-    releaseBar.subresourceRange.layerCount     = 1;
-    m_RtPfn.CmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &releaseBar);
-    if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-VKFRUC] frame#0 release barrier issued (to GENERAL)");
+    // §J.3.e.2.i.10f Path D — when active, this main cmd buffer didn't
+    // touch vkf->img[0] (copy submit handled the image; main submit
+    // uses our m_FrucCurrRgbBuf for fragment shader).  The releaseBar
+    // for vkf->img[0] was already emitted in the copy cmd buffer.  Skip.
+    if (!pathDActive) {
+        VkImageMemoryBarrier releaseBar = {};
+        releaseBar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        releaseBar.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+        releaseBar.dstAccessMask       = 0;
+        releaseBar.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        releaseBar.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        releaseBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        releaseBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        releaseBar.image               = vkf->img[0];
+        releaseBar.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        releaseBar.subresourceRange.baseMipLevel   = 0;
+        releaseBar.subresourceRange.levelCount     = 1;
+        releaseBar.subresourceRange.baseArrayLayer = 0;
+        releaseBar.subresourceRange.layerCount     = 1;
+        m_RtPfn.CmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &releaseBar);
+        if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-VKFRUC] frame#0 release barrier issued (to GENERAL)");
+    }
 
     VkResult endVr = m_RtPfn.EndCommandBuffer(cmd);
     if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -8292,28 +8603,45 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             waitMasks[wIdx] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
             waitVals[wIdx]  = 0; wIdx++;
         }
-        waitSems[wIdx]  = vkf->sem[0];
-        waitMasks[wIdx] = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                        | VK_PIPELINE_STAGE_TRANSFER_BIT;
-        waitVals[wIdx]  = vkf->sem_value[0]; wIdx++;
+        // §J.3.e.2.i.10f Path D — when active, replace vkf->sem wait
+        // with m_CopyDoneSem wait (cross-submit chain to copy buffer).
+        // Stage mask = COMPUTE_SHADER (nv12rgb is the first consumer of
+        // m_SwFrucNv12Buf which copy buffer wrote).  vkf wait already
+        // satisfied in copy submit.
+        if (pathDActive) {
+            waitSems[wIdx]  = m_CopyDoneSem;
+            waitMasks[wIdx] = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            waitVals[wIdx]  = pathDCopyDoneVal; wIdx++;
+        } else {
+            waitSems[wIdx]  = vkf->sem[0];
+            waitMasks[wIdx] = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                            | VK_PIPELINE_STAGE_TRANSFER_BIT;
+            waitVals[wIdx]  = vkf->sem_value[0]; wIdx++;
+        }
         if (waitNvOf) {
             waitSems[wIdx]  = m_NvOfTimelineSem;
             waitMasks[wIdx] = VK_PIPELINE_STAGE_TRANSFER_BIT;
             waitVals[wIdx]  = m_NvOfTimelineValue; wIdx++;
         }
         const int kWaitCount = wIdx;
-        const int kSigCount  = triplePresentThisFrame ? 4 : 3;
+        // §J.3.e.2.i.10f Path D — drop vkf->sem[0] signal from signalSems
+        // (copy submit already signaled V+1).  TRIPLE: 4→3 sigs.  DUAL:
+        // 3→2 sigs.
+        const int kSigCount  = pathDActive ? (triplePresentThisFrame ? 3 : 2)
+                                           : (triplePresentThisFrame ? 4 : 3);
         VkSemaphore     signalSems[4] = {
             m_SwapchainRenderDoneSem[imgIdxA],
             m_SwapchainRenderDoneSem[imgIdxB],
+            // [2]: TRIPLE → renderDoneC; DUAL non-D → vkf->sem; DUAL+D → unused
             triplePresentThisFrame ? m_SwapchainRenderDoneSem[imgIdxC]
-                                   : vkf->sem[0],
-            vkf->sem[0]
+                                   : (pathDActive ? VK_NULL_HANDLE : vkf->sem[0]),
+            // [3]: TRIPLE non-D → vkf->sem; D-active → unused; DUAL → unused
+            pathDActive ? VK_NULL_HANDLE : vkf->sem[0]
         };
         uint64_t        signalVals[4] = {
             0, 0,
-            triplePresentThisFrame ? 0 : (vkf->sem_value[0] + 1),
-            vkf->sem_value[0] + 1
+            triplePresentThisFrame ? 0 : (pathDActive ? 0 : (vkf->sem_value[0] + 1)),
+            pathDActive ? 0 : (vkf->sem_value[0] + 1)
         };
 
         VkTimelineSemaphoreSubmitInfo tssi = {};
@@ -8340,7 +8668,8 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "[VIPLE-VKFRUC] %s: vkQueueSubmit failed (%d)",
                          triplePresentThisFrame ? "triple" : "dual", (int)vr);
-            if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+            // §J.3.e.2.i.10f Path D — already unlocked after copy submit; skip.
+            if (!pathDActive && vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
             return;
         }
     } else {
@@ -8484,12 +8813,17 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // §J.3.e.2.i.3.e: tell FFmpeg the image's new state so it can issue
     // a correct barrier (GENERAL → DECODE_DPB) on its decode queue when
     // it re-uses this image as a reference frame.
-    vkf->access[0]     = (VkAccessFlagBits)0;
-    vkf->layout[0]     = VK_IMAGE_LAYOUT_GENERAL;
-    vkf->sem_value[0] += 1;
+    // §J.3.e.2.i.10f Path D — when active, this state was already updated
+    // after the copy submit (vkf->sem_value[0] += 1, layout = GENERAL,
+    // unlock_frame called).  Skip both blocks.
+    if (!pathDActive) {
+        vkf->access[0]     = (VkAccessFlagBits)0;
+        vkf->layout[0]     = VK_IMAGE_LAYOUT_GENERAL;
+        vkf->sem_value[0] += 1;
 
-    // ---- 9. Unlock AVVkFrame ----
-    if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+        // ---- 9. Unlock AVVkFrame ----
+        if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+    }
 
     // ---- 10. Present ----
     // Order:

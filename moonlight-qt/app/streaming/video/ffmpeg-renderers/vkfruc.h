@@ -682,6 +682,27 @@ private:
     VkCommandBuffer m_ComputeCmdBuf[kFrucFramesInFlight]          = {};
     VkSemaphore     m_ComputeTimelineSem                          = VK_NULL_HANDLE;
     uint64_t        m_ComputeTimelineValue                        = 0;
+
+    // §J.3.e.2.i.10f (2026-05-09) Path D — early AVFrame release.
+    // Splits renderFrame into two submits on the graphics queue:
+    //   submit 1 (m_SlotCopyCmdBuf): cmdCopyImageToBuffer (vkf->img[0] →
+    //     m_SwFrucNv12Buf) + optional NvOf cmdCopyImage + acquire/release
+    //     barriers.  Signals vkf->sem[0] @ V+1 here (instead of at end of
+    //     full chain) so FFmpeg's hwcontext_vulkan pool can reuse the
+    //     image after just the ~100us copy completes, not after the full
+    //     ~20ms chain.  Also signals m_CopyDoneSem so submit 2 can wait.
+    //   submit 2 (m_SlotCmdBuf, unchanged): nv12rgb compute + ME +
+    //     median + RIFE + warp + 2-3 render passes + presents.  Waits
+    //     m_CopyDoneSem and the swapchain acquire sems.  No vkf->img[0]
+    //     access (DUAL+FRUC default uses m_FrucCurrRgbBuf via
+    //     m_RealCurrRgbDescSet for real-frame display per
+    //     VIPLE_VKFRUC_REAL_USE_CRGB code path).
+    // Used only when (useCrgbForReal && dualPresentThisFrame) — single-
+    // present mode keeps original ycbcr-sampler path that needs vkf
+    // alive throughout cmd buffer.
+    VkCommandBuffer m_SlotCopyCmdBuf[kFrucFramesInFlight]         = {};
+    VkSemaphore     m_CopyDoneSem                                 = VK_NULL_HANDLE;
+    std::atomic<uint64_t> m_CopyDoneNext                          {1};
     bool            m_RingInitialized        = false;
 
     // §J.3.e.2.i.3.e — descriptor pool + per-slot descriptor sets that
