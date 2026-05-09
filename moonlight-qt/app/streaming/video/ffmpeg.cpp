@@ -645,67 +645,56 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     m_VideoDecoderCtx->pkt_timebase.num = 1;
     m_VideoDecoderCtx->pkt_timebase.den = 90000;
 
-    // Allocate enough extra frames for Pacer to avoid stalling the decoder
-    m_VideoDecoderCtx->extra_hw_frames = PACER_MAX_OUTSTANDING_FRAMES;
-
-    // §J.3.f latency tune (2026-05-03) — AV1's vulkan hwaccel is hard-coded to
-    // dedicated_dpb mode in ffmpeg's vulkan_decode.c:1368
-    // (`if (dec->dedicated_dpb || avctx->codec_id == AV_CODEC_ID_AV1)`),
-    // meaning the OUTPUT image pool is separate from the DPB pool.  The
-    // pool size = max_ref_frames + 1 + extra_hw_frames; Pacer downstream
-    // holds K frames before render, so steady-state decode-ahead pipeline
-    // depth = pool_size - K.  At 120fps that's per-frame wall-clock
-    // latency = depth × 8.3ms.
+    // §J.3.f latency tune (round 1: 2026-05-03; round 3: 2026-05-09 §J.3.e.2.i.10b) —
+    // FFmpeg's vulkan_decode.c puts the AV1 codec in `dedicated_dpb` mode
+    // (separate output pool vs DPB pool), giving a pool size of
+    // `max_ref + 1 + extra_hw_frames`.  Pacer downstream holds K frames,
+    // so steady-state decode-ahead pipeline depth = pool_size − K.  At
+    // 90 fps each frame in that depth = ~11 ms latency.
     //
-    // HEVC vulkan uses in-place decode (DPB == output) on NV driver, so
-    // pipeline depth is bounded by ffmpeg's internal sequencing (~1 frame),
-    // hence 0.3ms per frame.  For AV1, with default extra_hw_frames=4 and
-    // 8 ref slots, pool=13, Pacer holds ~4 → decode runs 9 frames ahead →
-    // 75-100ms wall-clock latency observed.
+    // Round 1 (2026-05-03) found AV1 at extra_hw_frames=4 (the default)
+    // ran ~9 frames ahead → 75–100 ms decodeMeanMs observed.  Cutting
+    // extra_hw_frames to 1 collapsed the depth → ~5 ms, 20× faster.
+    // The same round annotated HEVC as "in-place decode (DPB == output),
+    // 0.3 ms per frame" — assumption based on driver advertising
+    // VK_VIDEO_CAPABILITY_DPB_AND_OUTPUT_COINCIDE_BIT_KHR.
     //
-    // 2026-05-03 round 1: extra_hw_frames=1 → 100ms→5ms (20× faster).
-    // 2026-05-03 round 2: try to push under 5ms toward HEVC's 0.3ms.
+    // Round 3 (2026-05-09): live-stream telemetry on RTX 3060 Laptop
+    // (NV driver 596.x) + 1080p HEVC + Vulkan path showed a stable
+    // decodeMeanMs ≈ 100 ms regardless of FRUC chain time (chain 5 ms
+    // at 128 dim or 19 ms at 256x256 — same 100 ms).  That rules out
+    // GPU compute oversubscription, queue contention, slot count, and
+    // RIFE chain.  The pattern (depth-bound latency independent of
+    // chain) matches exactly what AV1 hit in round 1 — meaning HEVC is
+    // ALSO running in dedicated_dpb mode on this driver/FFmpeg combo,
+    // contradicting the round 1 assumption.
     //
-    //  (a) extra_hw_frames=0 — tightest possible pool.  Decoder may stall
-    //      briefly on Pacer hold spike, but Pacer's own buffer absorbs
-    //      that.  Empirical risk: rare 1-frame stutter under heavy GPU
-    //      contention; acceptable trade for tighter latency.
-    //  (b) AV_CODEC_EXPORT_DATA_FILM_GRAIN — tells ffmpeg's AV1 hwaccel
-    //      to export film-grain metadata as side data instead of running
-    //      the in-decoder film grain synthesis pass on every frame
-    //      (vulkan_decode.c:832 sets filmGrainSupport = !flag).  Sunshine
-    //      streams have no film grain anyway (no codec config asks for
-    //      it), so synthesis is a no-op kernel that still costs GPU time.
-    //  (c) AV_CODEC_FLAG2_FAST — opts into "any decoder behavior that
-    //      sacrifices strict spec compliance for speed".  For AV1 this
-    //      enables some shortcut paths in deblocking/CDEF; quality cost
-    //      is imperceptible for game streaming workloads.
+    // Fix: apply the proven `extra_hw_frames = 1` setting to ALL codec
+    // paths, not just AV1.  This collapses the decode-ahead depth from
+    // ~9 frames → ~1 frame for any codec that ends up in dedicated_dpb
+    // mode.  When the codec actually IS in-place (e.g. older drivers),
+    // the smaller pool is harmless because in-place mode doesn't use
+    // extra_hw_frames for pipeline depth.
     //
-    // HEVC/H.264 unaffected (in-place path doesn't depend on
-    // extra_hw_frames for pipeline depth, and FILM_GRAIN flag has no
-    // effect on non-AV1 codecs).
-    //
-    // 2026-05-03 round 2 attempts (none beat round 1 stably):
+    // Round 2 attempts (kept for archival; round 3 supersedes):
     //   * extra_hw_frames=0 → 5→6.7ms steady + 78ms startup spike (pool
     //     starves Pacer on hold spike).
     //   * extra_hw_frames=2 + FLAG2_FAST → best moment 2.9ms but variance
     //     to 10ms; high jitter.
     //   * extra_hw_frames=1 + FLAG2_FAST → 5.3–6.3ms; FAST flag had no
-    //     measurable effect (sometimes 3ms moments visible but not
-    //     reproducible vs =1 alone).
+    //     measurable effect.
     //   * EXPORT_DATA_FILM_GRAIN → unstable, no improvement.
     //
-    // 5ms is the architectural floor for AV1 vulkan on NV driver.  It's
-    // the dedicated_dpb DPB→output copy cost (HEVC at 0.3ms uses in-place
-    // decode; AV1 hard-coded to dedicated_dpb in vulkan_decode.c:1368).
-    // To push lower needs either an ffmpeg patch (force in-place when
-    // driver advertises DPB_AND_OUTPUT_COINCIDE for AV1) or different GPU.
-    if ((m_VideoDecoderCtx->codec_id == AV_CODEC_ID_AV1) && m_HwDecodeCfg) {
-        m_VideoDecoderCtx->extra_hw_frames = 1;
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VK-VIDEO] §J.3.f AV1 hwaccel — extra_hw_frames "
-                    "tuned 4→1 (dedicated-DPB pipeline depth)");
-    }
+    // 5 ms is the architectural floor for dedicated_dpb on NV driver
+    // (DPB→output copy cost).  To push lower needs either an ffmpeg
+    // patch (force in-place when driver advertises COINCIDE) or a
+    // different GPU.
+    m_VideoDecoderCtx->extra_hw_frames = 1;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-VIDEO] §J.3.e.2.i.10b extra_hw_frames=1 (was %d) — "
+                "all codecs.  Round 3 (2026-05-09) — HEVC was hitting "
+                "100ms decodeMeanMs same as AV1 round 1; same fix applies.",
+                PACER_MAX_OUTSTANDING_FRAMES);
 
     // For non-hwaccel decoders, set the pix_fmt to hint to the decoder which
     // format should be used. This is necessary for certain decoders like the
