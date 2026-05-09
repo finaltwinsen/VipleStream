@@ -998,7 +998,14 @@ private:
     // β.5 desc sets
     VkDescriptorSet       m_RifeBilinearUpFlowDs = VK_NULL_HANDLE;  // (flowOut → flow1080) via flow shader
     VkDescriptorSet       m_RifeBilinearUpMaskDs = VK_NULL_HANDLE;  // (maskOut → mask1080) via base bilinear shader
-    VkDescriptorSet       m_RifeNativeWarpDs     = VK_NULL_HANDLE;  // 6-binding warp DS
+    VkDescriptorSet       m_RifeNativeWarpDs     = VK_NULL_HANDLE;  // 6-binding warp DS (DUAL: writes interp; TRIPLE: writes interp1 @ t=1/3)
+    // §J.3.e.2.i.10c (2026-05-09) Phase β.9 — TRIPLE 60→180 + Native RIFE.
+    // 第二個 warp desc set，跟 m_RifeNativeWarpDs 唯一差別 = output binding
+    // (idx 4) 從 m_FrucInterpRgbBuf 換成 m_FrucInterpRgbBuf2.  RIFE inference
+    // 跑 2 次 (t=1/3 → flow/mask, warp1 → interp1; t=2/3 → flow/mask, warp2
+    // → interp2).  flow/mask buf 在兩次 inference 間被 overwrite，warp1
+    // 必須在 inference 2 開始前完成 (read-after-write 障礙).
+    VkDescriptorSet       m_RifeNativeWarpDs2    = VK_NULL_HANDLE;  // TRIPLE only: writes interp2 @ t=2/3
 
     VkDescriptorPool m_FrucDescPool = VK_NULL_HANDLE;
 

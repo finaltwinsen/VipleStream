@@ -210,10 +210,16 @@ VkFrucRenderer::VkFrucRenderer(int pass)
             "[VIPLE-VKFRUC-RIFE-β] VIPLE_VKFRUC_NATIVE_RIFE=1 requires FRUC; ignoring");
         m_RifeNativeMode = false;
     }
+    // §J.3.e.2.i.10c (2026-05-09) Phase β.9 — TRIPLE + Native RIFE 互斥鎖
+    // 解除.  原 β.1/β.2 限制是因為當時 chain 14ms × 2 = 28ms > 60fps slot
+    // 16.7ms 不 fit；β.5.2 + 4Y.7 + bicubic 後 chain @ 128 dim ≈ 10ms × 2 =
+    // 20ms 仍超 16.7ms 但接近，搭 user UI fps=120 (server 60) + small dim
+    // 可勉強進 budget.  使用者承擔效能風險，不再 force off.
     if (m_RifeNativeMode && m_TripleMode) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-            "[VIPLE-VKFRUC-RIFE-β] β.1/β.2 不支援 TRIPLE — 本次回到 block-match warp");
-        m_RifeNativeMode = false;   // β.3 lift
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-RIFE-β9] TRIPLE + Native RIFE coexisting — chain "
+            "runs RIFE inference twice per server frame (t=1/3 + t=2/3).  "
+            "Recommended: inferDim=128 + UI fps=120 (server 60).");
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -6596,6 +6602,26 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-RIFE-β5] desc set alloc failed — falling back to β.4");
             }
+            // §J.3.e.2.i.10c Phase β.9 — TRIPLE 第二個 warp desc set.
+            // 唯一跟 m_RifeNativeWarpDs 不同：output binding (idx 4) 換成
+            // m_FrucInterpRgbBuf2 (TRIPLE 用的第二份 interp output).  alloc 失
+            // 敗 → m_RifeNativeWarpDs2 留 NULL_HANDLE，runRifeNativeStage 偵
+            // 測到會 fallback 不跑 t=2/3 inference (TRIPLE 退化成 DUAL output).
+            if (m_TripleMode && beta5OK
+                && m_FrucInterpRgbBuf2 != VK_NULL_HANDLE) {
+                if (allocDsAnyN(m_RifeNativeWarpDsl,
+                                { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf,
+                                  m_RifeFlowOutBuf, m_RifeMaskOutBuf,
+                                  m_FrucInterpRgbBuf2 },
+                                m_RifeNativeWarpDs2)) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-RIFE-β9] TRIPLE second warp DS ready (writes interp2)");
+                } else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-RIFE-β9] TRIPLE second warp DS alloc failed — "
+                        "RIFE will only run @ t=1/3, second present (t=2/3) reuses interp1");
+                }
+            }
         } else {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-RIFE-β5] flow/mask buffer alloc failed — falling back to β.4");
@@ -6781,74 +6807,118 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
         VK_ACCESS_TRANSFER_WRITE_BIT);
 
     // ---- RIFE inference ----
-    // β.1 / β.2 / β.4 共用：DUAL midpoint (t=0.5).  TRIPLE 還沒做，
-    // m_RifeNativeMode 在 ctor 已被 force off 當 m_TripleMode 開啟.
-    const float t = 0.5f;
-
+    // β.5.1 DUAL: 1× inference @ t=0.5 → 1 interp output (m_FrucInterpRgbBuf)
+    // β.9   TRIPLE: 2× inference @ t=1/3 + t=2/3 → 2 interp outputs
+    //               (m_FrucInterpRgbBuf + m_FrucInterpRgbBuf2)
     // §J.3.e.X Path β.5 — flow extraction + native-res warp path (default).
-    // Uses runInferenceGpuFlow which copies tensors 714 (4ch flow) + 727
-    // (1ch mask) to caller buffers instead of the final out0 RGB blend,
-    // then we bilinear-up flow + mask to source dim and run native-res
-    // warp+blend → produces sharp interp at 1080p instead of bilinear-up'd
-    // RGB blur.  Falls back to β.4 if any β.5 resource is missing.
     if (m_Beta5Enabled
         && m_RifeNativeWarpPipeline   != VK_NULL_HANDLE
         && m_RifeFlowOutBuf  != VK_NULL_HANDLE
         && m_RifeMaskOutBuf  != VK_NULL_HANDLE
         && m_RifeNativeWarpDs     != VK_NULL_HANDLE) {
 
-        if (!m_RifeNative->runInferenceGpuFlow(cmd, slotIdx,
-                m_RifeDownPrev, m_RifeDownCurr, t,
-                m_RifeFlowOutBuf, m_RifeMaskOutBuf)) {
-            return false;
-        }
-        writeTs(3);  // β.5 timing: RIFE inference complete, "median" GPU-PROF slot
-
-        // β.5.1: skip bilinear UPs.  Just transition flow + mask + src buffers
-        // for the native warp shader which samples flow+mask at infer dim.
-        bufBarrier(m_RifeFlowOutBuf,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-        bufBarrier(m_RifeMaskOutBuf,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+        // Source RGB buffers stay readable across both warp passes.  Promote
+        // once here.
         bufBarrier(m_FrucCurrRgbBuf,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
         bufBarrier(m_FrucPrevRgbBuf,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
-        bufBarrier(m_FrucInterpRgbBuf,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
-                | VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_ACCESS_SHADER_WRITE_BIT);
 
-        // ---- Native-res warp+blend (β.5.1: samples flow at infer dim directly) ----
         struct WarpPC {
             int32_t W, H, inferW, inferH;
             float   magScaleX, magScaleY;
             int32_t _pad0, _pad1;
         };
-        {
+        WarpPC pcW;
+        pcW.W = (int32_t)width;  pcW.H = (int32_t)height;
+        pcW.inferW = m_RifeNativeInferW;  pcW.inferH = m_RifeNativeInferH;
+        pcW.magScaleX = (float)width  / (float)pcW.inferW;
+        pcW.magScaleY = (float)height / (float)pcW.inferH;
+        pcW._pad0 = 0; pcW._pad1 = 0;
+
+        // Helper: run RIFE inference @ timestep t, then native warp →
+        // outBuf via the matching desc set.  Inserts the read-after-write
+        // barriers needed for flow/mask sharing across multiple timesteps.
+        // `firstPass` controls whether we also clear the prior content of
+        // outBuf (TRANSFER_WRITE / SHADER_READ → SHADER_WRITE).
+        auto runOneInferAndWarp = [&](float t,
+                                       VkBuffer outBuf,
+                                       VkDescriptorSet warpDs) -> bool {
+            // Inference fills flow/mask via vkCmdCopyBuffer (TRANSFER_WRITE).
+            // Caller has already arranged m_RifeDownPrev/Curr in TRANSFER_READ.
+            if (!m_RifeNative->runInferenceGpuFlow(cmd, slotIdx,
+                    m_RifeDownPrev, m_RifeDownCurr, t,
+                    m_RifeFlowOutBuf, m_RifeMaskOutBuf)) {
+                return false;
+            }
+            // Promote flow/mask: TRANSFER_WRITE → SHADER_READ for warp shader.
+            bufBarrier(m_RifeFlowOutBuf,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+            bufBarrier(m_RifeMaskOutBuf,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+            // Promote outBuf to writable.  Allowed prior states: previous-frame
+            // SHADER_READ from compositor / TRANSFER_WRITE from race window.
+            bufBarrier(outBuf,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                    | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT);
+
             pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                m_RifeNativeWarpPipeline);
             pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                m_RifeNativeWarpPipeLay, 0, 1,
-                               &m_RifeNativeWarpDs, 0, nullptr);
-            WarpPC pcW;
-            pcW.W = (int32_t)width;  pcW.H = (int32_t)height;
-            pcW.inferW = m_RifeNativeInferW;  pcW.inferH = m_RifeNativeInferH;
-            pcW.magScaleX = (float)width  / (float)pcW.inferW;
-            pcW.magScaleY = (float)height / (float)pcW.inferH;
-            pcW._pad0 = 0; pcW._pad1 = 0;
+                               &warpDs, 0, nullptr);
             pfnCmdPushConst(cmd, m_RifeNativeWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
                             0, sizeof(pcW), &pcW);
             pfnCmdDispatch(cmd, ((uint32_t)width + 7) / 8, ((uint32_t)height + 7) / 8, 3);
+            // Promote outBuf to SHADER_READ for downstream display use.
+            computeBufBarrier(outBuf);
+            return true;
+        };
+
+        // §J.3.e.2.i.10c Phase β.9 — TRIPLE: 2× inference @ t=1/3 + t=2/3.
+        // Between the two inferences, flow/mask must transition from
+        // SHADER_READ (warp1 finished consuming) back to TRANSFER_WRITE
+        // (inference 2's vkCmdCopyBuffer overwrites them).
+        const bool tripleAndDual = m_TripleMode
+                                && m_RifeNativeWarpDs2 != VK_NULL_HANDLE
+                                && m_FrucInterpRgbBuf2 != VK_NULL_HANDLE;
+        if (tripleAndDual) {
+            // Pass 1: t = 1/3 → m_FrucInterpRgbBuf
+            if (!runOneInferAndWarp(1.0f / 3.0f,
+                                    m_FrucInterpRgbBuf,
+                                    m_RifeNativeWarpDs)) {
+                return false;
+            }
+            // Recycle flow/mask buffers for pass 2: SHADER_READ → TRANSFER_WRITE.
+            bufBarrier(m_RifeFlowOutBuf,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            bufBarrier(m_RifeMaskOutBuf,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            // Pass 2: t = 2/3 → m_FrucInterpRgbBuf2
+            if (!runOneInferAndWarp(2.0f / 3.0f,
+                                    m_FrucInterpRgbBuf2,
+                                    m_RifeNativeWarpDs2)) {
+                return false;
+            }
+            writeTs(3);  // approx — single GPU-PROF slot covers both inferences
+            writeTs(4);
+        } else {
+            // DUAL midpoint (or TRIPLE-but-DS2-alloc-failed fallback).
+            if (!runOneInferAndWarp(0.5f, m_FrucInterpRgbBuf, m_RifeNativeWarpDs)) {
+                return false;
+            }
+            writeTs(3);  // β.5 timing: RIFE inference complete
+            writeTs(4);  // β.5 timing: after native warp
         }
-        computeBufBarrier(m_FrucInterpRgbBuf);
-        writeTs(4);  // β.5 timing: after native warp ("warp" slot in GPU-PROF)
 
         static std::atomic<bool> s_b5LogOnce{false};
         bool exp = false;
@@ -6856,15 +6926,17 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-RIFE-β5] β.5.1 chain active: RIFE flow+mask at "
                 "%dx%d (infer dim) → native warp samples bilinear in shader → "
-                "%ux%u interp out (no 1080p flow buffers, no separate UP dispatch)",
-                m_RifeNativeInferW, m_RifeNativeInferH, width, height);
+                "%ux%u interp out (%s; no 1080p flow buffers, no separate UP dispatch)",
+                m_RifeNativeInferW, m_RifeNativeInferH, width, height,
+                tripleAndDual ? "TRIPLE 2× inference" : "DUAL 1× inference");
         }
         return true;
     }
 
-    // β.4 fallback path
+    // β.4 fallback path — single inference @ midpoint, output to interp1.
+    // (TRIPLE only supported on β.5.1 path above; β.4 fallback stays DUAL.)
     if (!m_RifeNative->runInferenceGpu(cmd, slotIdx,
-            m_RifeDownPrev, m_RifeDownCurr, t, m_RifeDownInterp)) {
+            m_RifeDownPrev, m_RifeDownCurr, 0.5f, m_RifeDownInterp)) {
         // Restore source buffers (down inputs untouched, no barrier needed).
         // Caller falls back to ME/median/warp.
         return false;
