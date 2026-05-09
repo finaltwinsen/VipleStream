@@ -689,11 +689,22 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     // (DPB→output copy cost).  To push lower needs either an ffmpeg
     // patch (force in-place when driver advertises COINCIDE) or a
     // different GPU.
+    // §J.3.e.2.i.10b Round 3 (2026-05-09) — set to 1 for all codecs (was
+    // PACER_MAX_OUTSTANDING_FRAMES=4).  Round 4 (extra_hw_frames=8) was
+    // tried + reverted: bigger pool didn't lower decodeMeanMs because
+    // consumer-bound (FRUC chain ~20ms vs server slot 11-25ms) means
+    // pool just fills up + frames sit waiting in pool.  Round 3's
+    // smaller pool keeps depth lower (less time-in-pool per frame),
+    // even if it occasionally stalls.
+    //
+    // Real fix to decode latency is architectural (Path D: AVFrame
+    // early-release after cmdCopyImageToBuffer, requires render-pass +
+    // descriptor refactor so fragment shader doesn't sample vkf->img[0]
+    // for real frame display; deferred).
     m_VideoDecoderCtx->extra_hw_frames = 1;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VK-VIDEO] §J.3.e.2.i.10b extra_hw_frames=1 (was %d) — "
-                "all codecs.  Round 3 (2026-05-09) — HEVC was hitting "
-                "100ms decodeMeanMs same as AV1 round 1; same fix applies.",
+                "all codecs.  Round 4 (=8) tried + reverted (no effect).",
                 PACER_MAX_OUTSTANDING_FRAMES);
 
     // For non-hwaccel decoders, set the pix_fmt to hint to the decoder which

@@ -565,20 +565,23 @@ private:
     // §J.3.e.2.i.9 (2026-05-09) — ring count bumped 2→4 to fix the post-v1.4.0
     // 90fps server frame-latency issue.  Path β + native RIFE + 4Y.7 fusion +
     // β.5.2 bicubic in v1.4.0 default chain pushed compute slot lifecycle
-    // ~18ms → ~28ms (decode + chain + 2× present @ 180Hz).  At 2 slots,
-    // sustained throughput = 2/28ms ≈ 71fps, breaking 90fps server target —
-    // observed [VIPLE-NET] networkDropped 17-51/sec + decodeMeanMs 70-130ms +
-    // [VIPLE-NET-WARN] "client decoder/pipeline can't keep up" firing every
-    // run.  Bumping to 4 → 4/28ms ≈ 143fps theoretical ceiling, ample margin
-    // for 90fps sustained.  Memory cost ≈ +10-16 MB GPU at 1080p.
+    // ~18ms → ~28ms (decode + chain + 2× present @ 180Hz).  Throughput math
+    // assumed CPU pipelining — but Vulkan single-graphics-queue cmd buffers
+    // execute serially on GPU regardless of slot count.  More slots only let
+    // CPU prep ahead, NOT increase GPU throughput.
     //
-    // CAVEAT: the `DIAG_NOAVVKFRAME` debug path
-    // (VIPLE_VKFRUC_DIAG_NOAVVKFRAME=1, single-present, vkfruc.cpp ~7395)
-    // still uses per-slot m_SlotRenderDoneSem.  At kFrucFramesInFlight=4 it
-    // can re-trigger the original sem-reuse VUID.  Production never enables
-    // DIAG; keep the env var off when running with this ring size, or back-
-    // port per-image sem to that path before relying on it.
-    static constexpr uint32_t kFrucFramesInFlight = 4;
+    // §J.3.e.2.i.10e Round 5 (2026-05-09) — REVERT 4→2.  Live-trace root cause
+    // of vulkan + FRUC ON's 80-100ms decodeMeanMs (vs vulkan + FRUC OFF
+    // 0.3ms): each slot pins one AVFrame for the FULL chain duration
+    // (~20ms) until vkf->sem[0] @ V+1 signals at cmd buffer execution end.
+    // FFmpeg's hwcontext_vulkan pool gates new decode allocations on
+    // sem signal; with N slots × 20ms hold, decoder waits proportionally.
+    // 4 slots → 80ms hold cycle → matches observed decodeMeanMs.  Going
+    // back to 2 → 40ms hold cycle, still bad but ½ the latency.  Real fix
+    // (Path D: signal sem mid-chain via two-submit pattern) deferred until
+    // render-pass refactor lets fragment shader sample our RGB buffer
+    // instead of vkf->img[0] directly.
+    static constexpr uint32_t kFrucFramesInFlight = 2;
 
     // §B-DUMP 2026-05-07 — diagnostic frame dump for visual real-vs-interp
     // comparison.  Triggered by VIPLE_VKFRUC_DUMP_DIR=path; copies real /
