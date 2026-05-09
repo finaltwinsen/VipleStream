@@ -16,9 +16,10 @@
 
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
+| **Active (next)** | **§J.3.e.X Path β.11** FRUC interp 畫面糊 quality 修 | v1.4.9 後 decode 已穩定 < 30ms；使用者回報補幀畫面糊但未確認類型（整體糊 / 只 interp 糊 / 動態 ghosting / 糊+閃同時）。等使用者選類型後再對應修：bicubic source sampling / inferDim 升級 / mask blend tune / 色彩一致性 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Active** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限） |
-| **Active (β.9 post-ship)** | **§J.3.e.X Path β.9** TRIPLE 60→180 + Native RIFE | TRIPLE 需 2 次 RIFE inference，現 256×128 chain 13.8ms × 2 = 27.6ms 超 60fps server 16.7ms slot；需 graph executor 改成 timestep-shared 前段 + timestep-dependent 後段 split (~30% perf 省)；2-3 天工程 |
+| **Active (β.9 part 2 post-v1.4.6)** | **§J.3.e.X Path β.9** TRIPLE 60→180 graph-executor split | β.9 Phase 1 (互斥鎖解除 + 2× RIFE inference chain) 已 ship in v1.4.6 (99f86b5)；剩 β.9 Phase 2 — graph executor timestep-shared 前段 + timestep-dependent 後段 split 把 chain × 2 從 200% 降到 ~130%，2-3 天工程，使 chain @ 256x128 fit 60fps server 16.7ms slot |
 | **Active (β.10 post-ship)** | **§J.3.e.X Path β.10** Linux / AMD / Intel 平台覆蓋 | Path β / NVOF 在 Ubuntu noble compile + link 已通過 (v1.4.0 §K.X 對齊)；待 native runtime smoke + AMD/Intel coopmat fallback 驗測 |
 | **Maintenance** | **§B / §B-NVOF / §B2** 自家 ME→warp→blend pipeline | A' 修完 (luma + range + consensus-max) 從 0% 推到 7-23% warp ratio；UI 整合 + Phase 7E 都 ship；**Path B 全套不做**（ceiling ~30% 跟 ML 60-80% 沒法比）；現狀作 Linux/AMD/Intel fallback 已堪用 |
 | **HW-pending** | **§I.D** Android Vulkan FRUC async compute | D.2.0–D.2.5 已 ship + Pixel 5 verify；剩自然 45fps→90Hz ideal 1:2 比例 — Pixel 5 panel 鎖 60/90Hz、GameManagerService 鎖 60fps，需 LTPO panel hw 才能驗 |
@@ -29,7 +30,8 @@
 | **Medium** | **§J.1** 路線 A (ID3D12 bridge) | NV 596.84 對 D3D11_TEXTURE_BIT 死路；ID3D12Device intermediary 未驗；Path β 走通後優先級降低 |
 | **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | Pi 5 + V3DV mesa Vulkan + V4L2 HW decode + DRM/KMS render；上游 source-level 支援，沒 CI prebuilt；FRUC backend 全 disable（Vulkan 補幀 Pi 5 GPU 不夠力），純 streaming 應 OK |
 | **Low** | **§G.1** RIFE v1 11-channel | A1000 launch overhead bound (§G.3 negative result)；RTX 30/40+ 才有意義；Path β shipped 後優先級降低 |
-| **Low** | **§J.3.e.Y 4Y.5b/4Y.7** native RIFE perf opt 候選 | 4Y.6 coopmat opt-in shipped，4Y.4 baseline 22ms；4Y.5b activation fp16 / 4Y.7 dispatch fusion 還沒做，60fps DUAL 已能跑就先 ship |
+| **Low** | **§J.3.e.Y 4Y.5b** native RIFE activation fp16 | 2026-05-09 嘗試 + revert：256x256 (1080p 配 D-lite UP) 場景 chain +1.7ms 是負收益，跟 4Y.5a postmortem「weight L1-cache-bound 不是 bandwidth bound」結論吻合。重做要先解 D-lite asymmetric center-crop（§β.5.3 D 全套）讓小 dim 真的可選。完整 commit 在 wip/4Y.5b-activation-fp16 branch (82afee5) — 因走錯方向已砍 |
+| **Low** | **§J.3.e.Y 4Y.7** dispatch fusion (Conv→ReLU→BinOp 合併) | C.1 (Conv→Mul channel-bcast beta) 已 ship in 0e6240a；Conv→ReLU 合併還沒做，預估 chain -10%；目前 60fps DUAL 已能跑不擋使用 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
 | **Low** | **§D** HelpLauncher URL → 結構化 docs | docs/setup_guide.md + docs/troubleshooting.md 已寫；HelpLauncher 切過去等 doc site stand 起來 |
 
@@ -42,6 +44,25 @@
 - ✅ **§K.X auto-wake fix** — Auto Wake-on-LAN toggle 真的 gate `PcMonitorThread` polling
 - ✅ **§K.X Linux build alignment** — moonlight-qt Ubuntu noble + Qt 6 + g++ 13 完整 compile + link
 - ✅ **§A'-Android port** — luma census + hierarchical diamond + warp 50/50 fallback 對齊 Windows + §B-DUMP-Android cross-platform format + UI i18n × 27 locales + dev-machine serial redact
+
+### post-v1.4.0 patch series 帶走的條目（v1.4.1 → v1.4.9, 2026-05-09）
+
+主軸：**徹底解決「Vulkan + FRUC ON 解碼穩定卡 80-100ms」regression**。
+
+- ✅ **§J.3.e.X β.5.2** Catmull-Rom bicubic 上採 flow + mask（`a8b3204`，v1.4.1）— score 0.95 → 0.97-0.98，warp shader chain +0.4ms 仍進 budget
+- ✅ **§J.3.e.X β.5.3 D-lite** inferDim 從 DOWN-rounding 改 UP-rounding 到 /128 multiple（`9d4c237`，v1.4.1）— 解掉 RIFE-v4-lite Add_503 layer 在 inferDim 不是 /128 multiple 時 a.h round 不對齊撞 shape constraint 的問題；副作用是 1080p source 配 cfg 256 變 256x256 而不是 256x128（pixels 翻倍）
+- ✅ **§J.3.e.Y 4Y.7 C.1** Conv→BinaryOp(Mul, channel-bcast beta) fusion（`0e6240a`，v1.4.1）— 40 個 fuseable pair 由 Conv shader epilogue 吃掉，chain -2.6ms（13.8 → 11.2ms @ 256x128 baseline）
+- ✅ **§J.3.e.2.i.10** Phase 2A async-compute queue infrastructure（`24f6634`，v1.4.3）— probe + alloc dedicated compute QF (RTX 3060 QF=2) + cmd pool + timeline sem。pure plumbing，沒 functional change，留作 Phase 2B+ 把 RIFE compute 拆到 compute queue 用
+- ✅ **§J.3.e.2.i.10b** extra_hw_frames=1 for all codecs (HEVC included)（`f1692c1`，v1.4.4）— 防 NV driver 將來改回 dedicated_dpb HEVC 模式時的 latency regression（保險，2026-05-09 live test 證明對 user 的 100ms 沒直接幫助但 documentation-correct）
+- ✅ **§J.3.e.2.i.10c** Phase β.9 — TRIPLE 60→180 + Native RIFE coexist（`99f86b5`，v1.4.6）— 拿掉 ctor 的 `m_RifeNativeMode + m_TripleMode` 互斥鎖；β.5.1 chain 重構成 `runOneInferAndWarp(t, outBuf, ds)` helper，TRIPLE 跑 2 次 RIFE inference（t=1/3 + t=2/3）+ 2 個 warp DS 各寫 m_FrucInterpRgbBuf / m_FrucInterpRgbBuf2。β.9 Phase 2 (graph executor timestep-shared frontend split) 仍 active
+- ✅ **§J.3.e.2.i.10e** ROOT-CAUSE FIX — kFrucFramesInFlight 4→2（`6b9bb89`，v1.4.8）— v1.4.2 那個 2→4 bump 是錯的方向。Vulkan single-graphics-queue cmd buffer FIFO 序列執行，slot 多只展開 CPU pipelining、不增 GPU throughput。但每 slot 跑完整 chain (~20ms) 才 signal `vkf->sem[0]@V+1` 給 FFmpeg pool 釋放 image，所以 **AVFrame hold cycle = N × chain_time**。N=4 → 80ms hold cycle = 直接對應 user 看到的「decodeMeanMs 穩定 80-100ms」。改回 N=2 後 5-90ms bimodal、好的時段 5-15ms
+- ✅ **§J.3.e.2.i.10f Path D** early AVFrame release via two-submit pattern（`9fd8c22`，v1.4.9）— **最終解**。把 renderFrame 拆成兩段 graphics-queue submit。Submit 1 (m_SlotCopyCmdBuf, ~100us) 只做 image→buffer copy + sem signal `vkf->sem[0]@V+1`；submit 2 (m_SlotCmdBuf, ~20ms) 跑 chain + present，不碰 vkf。AVFrame hold cycle 從 40ms 變 ~0.2ms。**live test：decodeMeanMs 0.47-30ms typical，sub-ms 多次出現，跟 v339 / D3D11 / FRUC OFF 同等級**。能做到的關鍵是 §B-quality (d) 2026-05-06 已先把 DUAL+FRUC real-frame display 切換成 m_FrucCurrRgbBuf via m_RealCurrRgbDescSet（不再吃 vkf->img[0] ycbcr sampler），所以 vkf->img[0] 只在 chain 開頭 ~100us 用一次
+
+**Negative result (走錯後 revert)：**
+
+- ❌ **§J.3.e.Y 4Y.5b** activation fp16 storage — wip/4Y.5b-activation-fp16 branch 留檔 (82afee5)，main 已砍。256x256 場景 chain 反而 +1.7ms（4Y.5a postmortem 的 L1-cache-bound 結論在這裡套上 = bandwidth 不是 bottleneck）
+- ❌ **§J.3.e.2.i.9** kFrucFramesInFlight 2→4 bump — v1.4.2 (234d2aa) 走錯方向。在 v1.4.8 (6b9bb89) revert
+- ❌ **§J.3.e.2.i.10d** extra_hw_frames=8 (Round 4) — pool size 不是 dominant bottleneck，Round 5 確認後 revert 回 1
 
 ---
 
@@ -326,12 +347,20 @@ real frame 的 pixel-level diff 偏大。
 
 **還沒做的下一步候選：**
 1. 修 SW-mode device lost — 使 §B-DUMP 自動驗測 work
-2. 修 inferShapes / dispatchBinaryOp 處理 asymmetric center-crop pattern →
-   解鎖 inferDim 不對齊 /128 的情形（解開更多 quality dim 可能性）
-3. β.3 TRIPLE 支援（兩次 inference call 在 t=1/3 / t=2/3）— 需要 perf 先
-   降到 < 8ms / call 才划算 (現在 256×128 11.9ms × 2 = 23.8ms 超 budget)
-4. 找更聰明的 upscaler（bicubic / 學習式）取代 bilinear up，減 8× 上採
-   blur
+2. **§β.5.3 D 全套** — inferShapes / dispatchBinaryOp 處理 asymmetric
+   center-crop pattern 解開「inferDim 不對齊 /128 但仍 valid」的情形
+   （解開 192/320/448 中間 dim + 讓 4Y.5b 重做時有真的可選的小 dim）.
+   目前 D-lite UP-rounding (β.5.3, `9d4c237`) 是 stop-gap，副作用是
+   1080p source 配 cfg 256 變 256x256 不是 256x128（pixels 翻倍 + 4Y.5b
+   negative result 直接源於這個）.
+3. ~~β.3 TRIPLE 支援~~ ✅ **β.9 Phase 1 ship in v1.4.6 (`99f86b5`)** —
+   t=1/3 + t=2/3 兩次 inference 已落地，互斥鎖解除. 剩 β.9 Phase 2
+   (graph executor timestep-shared frontend split) active，使 chain × 2
+   從 200% 降到 ~130%
+4. 找更聰明的 upscaler 取代 bilinear up，減 8× 上採 blur — ✅ **β.5.2
+   Catmull-Rom bicubic ship in v1.4.1 (`a8b3204`)** for flow + mask
+   upsampling. warp shader 對 source RGB 仍用 bilinear，可進一步升 bicubic
+   （使用者回報的「補幀畫面糊」可能是這條造成）→ §β.11 active item
 
 ### §J.3.e.Y native RIFE perf optimisation（**✅ milestone DONE 2026-05-06**）
 
@@ -376,10 +405,17 @@ opt-in 留著當 known-working capability，未來推 4090 或更大 RIFE 模型
 - **4Y.6 shader 改 multi-subgroup WG** — 1 WG = 1 subgroup 的設計使 SM
   利用率僅 ~50%；改成 4 subgroups/WG 共享 im2col tile load 預期再 1.5-2×
   攤平 fixed cost。但 RIFE-v4-lite 規模太小，可能仍贏不過 4Y.4 多少
-- **4Y.5b activation fp16 storage** — bandwidth 大頭，但 11 個 shader 的
-  input/output binding 全要改，4-6h 工程，dynamic range 風險低
-- **4Y.7 dispatch fusion** — Conv→ReLU→BinOp×beta chain 合併，預期
-  1.1-1.2×（小，但 shader 改動量適中）
+- **4Y.7 Conv→ReLU dispatch fusion** — C.1 (Conv→Mul channel-bcast beta)
+  已 ship in 0e6240a (v1.4.1)；Conv→ReLU 合併還沒做，預估 chain -10%
+
+**Negative result (走錯後 revert，2026-05-09)：**
+
+- **4Y.5b activation fp16 storage** — wip/4Y.5b-activation-fp16 branch
+  留檔 (82afee5)。256x256 (1080p 配 D-lite UP) 場景下 chain 反而 +1.7ms
+  是負收益，跟 4Y.5a postmortem「weight L1-cache-bound 不是 bandwidth
+  bound」結論吻合。要重做必須先解 D-lite asymmetric center-crop（§β.5.3
+  D 全套）讓 256x128 真的可選；目前 cfg=256 強制變 256x256，bandwidth
+  mention 的 ~485 blobs × 2 reads + 1 write 跟 weight L1 比仍不是 dominant
 
 **Final.3b 接 NcnnFRUC：** 仍 deferred until Linux env。預估 4-6h 工程，
 medium-high risk（動 production hot path）。
