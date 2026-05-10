@@ -981,7 +981,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("§J.3.e.X Path β: 使用 RIFE-v4.25-lite ML 模型在 Vulkan compute pipeline 抽出 motion flow + blend mask，再在 native 1080p 跑自家 warp+blend shader。\n\n品質：實測 verify_dump_interp score 0.95 (≈ 1.0 perfect midpoint)，遠勝 block-match (frame doubling, 0% effective interpolation)。Edges 銳利度跟 real frame 完全匹配。\n\n延遲：256x128 推論 ~14ms (60fps DUAL OK)，128x128 推論 ~10ms (75fps server / 150fps display)。\n\n2026-05-08 β.6 stability 修補：原本 30-60s 撞 VK_ERROR_DEVICE_LOST 的 overlay resize use-after-free 已用 vkDeviceWaitIdle 補住。Beta 標籤暫保留待多卡多 driver 驗測。\n\n非 NVIDIA GPU 或不支援的硬體會自動 fallback 到 block-match，不會崩潰。")
+                    ToolTip.text: qsTr("§J.3.e.X Path β: 使用 RIFE-v4.25-lite ML 模型在 Vulkan compute pipeline 抽出 motion flow + blend mask，再在 native 1080p 跑自家 warp+blend shader。\n\n品質：dump 比較 verify score 0.95 (≈ 1.0 perfect midpoint)。但實測在 mid-range GPU (RTX 3060 Laptop) 上 inferDim=128 down ratio 15× 太激進，flow precision 接近 ME 8×8 block，使用者體感跟關 RIFE 無差異。inferDim=256 quality 較好但 chain 19.8ms > 16.7ms slot，fps 從 target 120 降到 45。\n\n建議：RTX 3060 Laptop 等 mid-range 預設保持關閉；RTX 4070+ 可開 inferDim=256 試 quality。\n\n2026-05-08 β.6 stability 修補：原本 30-60s 撞 VK_ERROR_DEVICE_LOST 的 overlay resize use-after-free 已用 vkDeviceWaitIdle 補住。Beta 標籤暫保留待多卡多 driver 驗測 + sweet-spot 解掉前不轉正。\n\n非 NVIDIA GPU 或不支援的硬體會自動 fallback 到 block-match，不會崩潰。")
                 }
 
                 Label {
@@ -999,14 +999,14 @@ Flickable {
                     textRole: "text"
                     valueRole: "value"
                     model: ListModel {
-                        ListElement { text: "128 (最快, ~10ms, 144-180Hz panel 用)";  value: 128 }
-                        ListElement { text: "256 (預設平衡, ~14ms, 60fps DUAL)";       value: 256 }
-                        ListElement { text: "384 (品質佳, ~25ms, RTX 4070+ 才順)";      value: 384 }
-                        ListElement { text: "512 (最高品質, ~40ms, 高階卡)";            value: 512 }
+                        ListElement { text: "128 (預設, ~10ms chain, RTX 3060 Laptop OK; quality 接近 ME)"; value: 128 }
+                        ListElement { text: "256 (~20ms chain, RTX 4070+ 才不掉 fps; quality 較佳)";     value: 256 }
+                        ListElement { text: "384 (~30ms chain, 高階卡限定)";                                value: 384 }
+                        ListElement { text: "512 (~40ms chain, 最高品質, 桌面級)";                          value: 512 }
                     }
                     Component.onCompleted: {
                         currentIndex = indexOfValue(StreamingPreferences.vkfrucNativeRifeInferDim)
-                        if (currentIndex < 0) currentIndex = 1  // default 256
+                        if (currentIndex < 0) currentIndex = 0  // default 128 (H.3 2026-05-10)
                     }
                     onActivated: {
                         if (StreamingPreferences.vkfrucNativeRifeInferDim !== currentValue) {
@@ -1016,7 +1016,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("RIFE 推論時的內部解析度。較高 = motion flow 更精確但 GPU 慢；較低 = 更快但 flow 較粗糙 (warp 仍在 native 1080p 跑所以 edges 都銳)。\n\n必須是 128 倍數 (RIFE-v4.25-lite 內部 hardcoded 32×downsample × 2 stride-2 conv = 128 對齊要求)。\n\n建議：1080p source 配 256；1440p+ 配 384；高刷 144/180Hz panel 配 128 (latency 減半換 fps)。")
+                    ToolTip.text: qsTr("RIFE 推論時的內部解析度。較高 = motion flow 更精確但 GPU 慢；較低 = 更快但 flow 較粗糙 (warp 仍在 native 1080p 跑所以 edges 都銳)。\n\n必須是 128 倍數 (RIFE-v4.25-lite 內部 hardcoded 32×downsample × 2 stride-2 conv = 128 對齊要求)。\n\n建議：mid-range GPU (RTX 3060 Laptop / 桌面 3060 / 內顯) 用 128 (default)，chain 約 10ms fit 16.7ms slot；高階卡 (RTX 4070+) 才開 256 拿 quality (chain ~20ms 在 60fps 仍勉強 fit，但 RTX 3060 會掉到 fps 45)。\n\n2026-05-10 H.3 實測：原本 default 256 在 RTX 3060 Laptop 上 compute_gpu_total = 19.8ms，dual-present fps 從 target 120 掉到 45 + p99 28ms judder，體感比關 RIFE 還差。default 已調降為 128。")
                 }
 
                 // VipleStream v1.2.92: 180 fps cap warning removed

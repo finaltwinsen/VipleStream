@@ -187,7 +187,16 @@ void StreamingPreferences::reload()
     // destroying old VkImage on dim change).  Quality dramatically better
     // than block-match (5/5 score 0.95 ≈ perfect midpoint vs 0%).
     vkfrucEnableNativeRife    = settings.value(SER_VKFRUCRIFEB, false).toBool();
-    vkfrucNativeRifeInferDim  = settings.value(SER_VKFRUCRIFEDIM, 256).toInt();
+    // §J.3.e.X Path β H.3 (2026-05-10) — default lowered 256 → 128.  Empirical
+    // measurement on RTX 3060 Laptop (representative mid-range mobile GPU):
+    //   inferDim=256 → compute_gpu_total = 19.8ms > 16.7ms slot → fps drops
+    //                  to 45 (target 120) + p99 28ms judder.  Net體感比關
+    //                  RIFE 還差.
+    //   inferDim=128 → chain ~10ms fits budget, fps 76 (still under target
+    //                  but stable), quality 接近 ME (down ratio 15× too aggressive).
+    // 256 仍可由 RTX 4070+ 使用者手動 opt-in.  Higher dims listed in
+    // SettingsView.qml ComboBox.  See plan §J for full diagnosis chain.
+    vkfrucNativeRifeInferDim  = settings.value(SER_VKFRUCRIFEDIM, 128).toInt();
     designVariant = static_cast<DesignVariant>(settings.value(SER_DESIGNVARIANT, static_cast<int>(DV_SAFE)).toInt());
     // VipleStream H Phase 2.2: default to ASM_RECENT so users see their
     // recently-played Steam games at the top — which is what they
