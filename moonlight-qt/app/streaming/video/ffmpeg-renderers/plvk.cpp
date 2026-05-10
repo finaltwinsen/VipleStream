@@ -1610,7 +1610,17 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #define QUALITY_LEVEL 1
 #define ENABLE_ADAPTIVE_BLEND 0
 #define ENABLE_CHEAP_ADAPTIVE 1
-#define EDGE_AWARE_MV_THRESHOLD 2.0
+// §β.11 (2026-05-10) — TRIPLE+ME 動態邊緣馬賽克 hypothesis fix.  原 2.0
+// (= 1.4 pixel L2 motion-vector diff) 對 8×8 block-match 邊緣太敏感：
+// 物體 vs 背景的相對速度通常 5-10 pixel，幾乎所有邊緣 block 都會觸發
+// boundary detect 切到 nearest pick mode，造成 motion vector field 上
+// 8×8 step-function → warp 後邊緣呈方塊狀馬賽克.  提高到 8.0
+// (= 2.83 pixel L2 diff) 過濾掉小 noise 邊緣維持 bilinear smooth，但
+// 大 motion boundary (>2.83 px diff) 仍會切 pick 保留物體 edge 銳利度.
+// 8.0 是 hypothesis baseline：太低 (< 4) 留馬賽克，太高 (> 16) 失 edge.
+// 待實測 + 主觀體感調整；下個 increment 可能改成 push constant runtime
+// tunable.
+#define EDGE_AWARE_MV_THRESHOLD 8.0
 
 layout(binding = 0) readonly  buffer PrevRGB { float data[]; } prevFrame;
 layout(binding = 1) readonly  buffer CurrRGB { float data[]; } currFrame;
