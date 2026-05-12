@@ -137,8 +137,21 @@
         <li v-for="client in clients" :key="client.uuid" class="list-group-item d-flex align-items-center">
           <div class="flex-grow-1">
             {{ client.name !== "" ? client.name : $t('troubleshooting.unpair_single_unknown') }}
+            <!-- VipleStream §M.1 — admin badge -->
+            <span v-if="client.is_admin" class="badge bg-primary ms-2">admin</span>
           </div>
-          <div class="form-check form-switch ms-2 mb-0">
+          <!-- VipleStream §M.1 — admin toggle: grants ability to take over or
+               force-cancel any paired device's session.  Off by default; turn
+               on only for devices you trust to evict other paired devices. -->
+          <div class="form-check form-switch ms-2 mb-0" title="Admin (can take over any session)">
+            <input class="form-check-input" type="checkbox" role="switch"
+                   :id="'admin-' + client.uuid"
+                   :checked="client.is_admin"
+                   :aria-checked="(client.is_admin || false).toString()"
+                   @change="toggleClientAdmin(client.uuid, !client.is_admin, client.enabled)">
+            <label class="form-check-label small text-muted" :for="'admin-' + client.uuid">Admin</label>
+          </div>
+          <div class="form-check form-switch ms-3 mb-0" title="Enabled">
             <input class="form-check-input" type="checkbox" role="switch"
                    :id="'toggle-' + client.uuid"
                    :checked="client.enabled"
@@ -471,6 +484,21 @@
               'Content-Type': 'application/json'
             },
             body: JSON.stringify({ uuid, enabled })
+          }).then(() => {
+            this.refreshClients();
+          });
+        },
+        // VipleStream §M.1 — toggle the admin flag on a paired device.  Reuses
+        // /api/clients/update which accepts is_admin alongside enabled; we
+        // re-send the current enabled state so the backend doesn't toggle it
+        // by accident on the same call.
+        toggleClientAdmin(uuid, is_admin, enabled) {
+          fetch("./api/clients/update", {
+            method: "POST",
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ uuid, enabled, is_admin })
           }).then(() => {
             this.refreshClients();
           });

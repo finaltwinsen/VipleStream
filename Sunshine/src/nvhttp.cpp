@@ -23,6 +23,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
+#include <openssl/ssl.h>
 #include <Simple-Web-Server/server_http.hpp>
 
 #ifdef _WIN32
@@ -149,6 +150,7 @@ namespace nvhttp {
     std::string uuid;
     std::string cert;
     bool enabled = true;
+    bool is_admin = false;  // VipleStream §M.1 — admin can takeover/cancel any session
   };
 
   struct client_t {
@@ -183,6 +185,72 @@ namespace nvhttp {
     return it->second;
   }
 
+  // VipleStream §M.1 — per-SSL caller uuid for multi-user ownership checks.
+  // The verify callback (1750+) is the only place that has the peer cert in hand;
+  // we stash the matched named_cert_t::uuid on the SSL object via OpenSSL ex_data
+  // so /launch /resume /cancel handlers can later cheap-lookup who is calling.
+  // Per-SSL lifetime — OpenSSL invokes the free_func on SSL_free, so no leaks.
+  static int g_ssl_caller_uuid_idx = -1;
+
+  static void ssl_caller_uuid_free(void * /*parent*/, void *ptr, CRYPTO_EX_DATA * /*ad*/,
+                                    int /*idx*/, long /*argl*/, void * /*argp*/) {
+    delete static_cast<std::string *>(ptr);
+  }
+
+  static void init_ssl_caller_uuid_idx() {
+    if (g_ssl_caller_uuid_idx >= 0) return;
+    g_ssl_caller_uuid_idx = SSL_get_ex_new_index(0, (void *) "viplestream_caller_uuid",
+                                                  nullptr, nullptr, &ssl_caller_uuid_free);
+  }
+
+  static void set_caller_uuid_on_ssl(SSL *ssl, std::string uuid) {
+    if (g_ssl_caller_uuid_idx < 0 || !ssl) return;
+    if (auto *prev = static_cast<std::string *>(SSL_get_ex_data(ssl, g_ssl_caller_uuid_idx))) {
+      SSL_set_ex_data(ssl, g_ssl_caller_uuid_idx, nullptr);
+      delete prev;
+    }
+    SSL_set_ex_data(ssl, g_ssl_caller_uuid_idx, new std::string(std::move(uuid)));
+  }
+
+  std::string caller_uuid_for(const req_https_t &request) {
+    if (g_ssl_caller_uuid_idx < 0 || !request) return {};
+    SSL *ssl = request->native_handle();
+    if (!ssl) return {};
+    auto *uuid = static_cast<std::string *>(SSL_get_ex_data(ssl, g_ssl_caller_uuid_idx));
+    return uuid ? *uuid : std::string {};
+  }
+
+  std::string caller_uuid_for(const req_http_t & /*request*/) {
+    // HTTP listener has no client certificate (relay localhost path or pair handshake).
+    return {};
+  }
+
+  std::string caller_name_for(const std::string &uuid) {
+    if (uuid.empty()) return {};
+    for (const auto &nc : client_root.named_devices) {
+      if (nc.uuid == uuid) return nc.name;
+    }
+    return {};
+  }
+
+  bool is_admin_device(const std::string &uuid) {
+    if (uuid.empty()) return false;
+    for (const auto &nc : client_root.named_devices) {
+      if (nc.uuid == uuid) {
+        // Task 5 promotes named_cert_t::is_admin; until then nobody is admin.
+        return nc.is_admin;
+      }
+    }
+    return false;
+  }
+
+  static std::string named_cert_uuid_for_pem(const std::string_view cert_pem) {
+    for (const auto &nc : client_root.named_devices) {
+      if (nc.cert == cert_pem) return nc.uuid;
+    }
+    return {};
+  }
+
   void save_state() {
     pt::ptree root;
 
@@ -208,6 +276,8 @@ namespace nvhttp {
       named_cert_node.put("cert"s, named_cert.cert);
       named_cert_node.put("uuid"s, named_cert.uuid);
       named_cert_node.put("enabled"s, named_cert.enabled);
+      // VipleStream §M.1 — paired device admin flag for multi-user takeover.
+      named_cert_node.put("is_admin"s, named_cert.is_admin);
       named_cert_nodes.push_back(std::make_pair(""s, named_cert_node));
     }
     root.add_child("root.named_devices"s, named_cert_nodes);
@@ -272,6 +342,9 @@ namespace nvhttp {
         named_cert.cert = el.get_child("cert").get_value<std::string>();
         named_cert.uuid = el.get_child("uuid").get_value<std::string>();
         named_cert.enabled = el.get<bool>("enabled", true);
+        // VipleStream §M.1 — default false for state files written before
+        // this patch, so old pairings remain non-admin until explicitly granted.
+        named_cert.is_admin = el.get<bool>("is_admin", false);
         client.named_devices.emplace_back(named_cert);
       }
     }
@@ -820,6 +893,8 @@ namespace nvhttp {
       named_cert_node["name"] = named_cert.name;
       named_cert_node["uuid"] = named_cert.uuid;
       named_cert_node["enabled"] = named_cert.enabled;
+      // VipleStream §M.1 — admin flag for the multi-user takeover dashboard.
+      named_cert_node["is_admin"] = named_cert.is_admin;
       named_cert_nodes.push_back(named_cert_node);
     }
 
@@ -934,13 +1009,56 @@ namespace nvhttp {
 
     auto appid = util::from_view(get_arg(args, "appid"));
 
+    // VipleStream §M.1 — multi-user ownership guard.  Identify the caller from
+    // its TLS client cert (cached in SSL ex_data by the verify callback) and
+    // compare to the owner of the currently-running app.  Behaviour:
+    //   - caller == owner               : proceed (same device re-launching)
+    //   - caller != owner + admin       : takeover; soft-detach Steam-source,
+    //                                     hard-terminate manual apps
+    //   - caller != owner + takeover=1  : same as admin path (caller explicitly
+    //                                     confirmed via Moonlight dialog)
+    //   - caller != owner + neither     : friendly 503 with owner name so the
+    //                                     Moonlight client can surface "X is
+    //                                     using the server, takeover?" UI
+    auto caller_uuid = caller_uuid_for(request);
+    auto caller_admin = is_admin_device(caller_uuid);
+
     auto current_appid = proc::proc.running();
     if (current_appid > 0) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 400);
-      tree.put("root.<xmlattr>.status_message", "An app is already running on this host");
+      auto owner_uuid = proc::proc.running_owner_uuid();
+      auto owner_name = proc::proc.running_owner_name();
+      bool same_caller = !caller_uuid.empty() && caller_uuid == owner_uuid;
+      bool takeover_requested = args.find("takeover"s) != std::end(args) && get_arg(args, "takeover") == "1";
 
-      return;
+      if (same_caller) {
+        BOOST_LOG(info) << "[VIPLE-MULTI] /launch by owner uuid="sv << caller_uuid
+                        << " — proceeding (re-launch)"sv;
+        // Fall through to standard launch path; execute() calls terminate() first.
+      } else if (caller_admin || takeover_requested) {
+        BOOST_LOG(info) << "[VIPLE-MULTI] /launch takeover by uuid="sv
+                        << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid})
+                        << " admin="sv << caller_admin
+                        << " takeover_param="sv << takeover_requested
+                        << " prior_owner="sv << owner_name;
+        rtsp_stream::terminate_sessions();
+        if (proc::proc.is_running_steam_source()) {
+          proc::proc.detach();
+        } else {
+          proc::proc.terminate();
+        }
+      } else {
+        BOOST_LOG(info) << "[VIPLE-MULTI] /launch denied — server in use by owner="sv
+                        << owner_name << " caller_uuid="sv
+                        << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid});
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 503);
+        tree.put("root.<xmlattr>.status_message",
+                 "Server in use by "s + (owner_name.empty() ? "another paired device"s : owner_name)
+                   + ". Confirm takeover and retry."s);
+        tree.put("root.BusyByDevice", owner_name);
+        tree.put("root.OwnerUuid", owner_uuid);
+        return;
+      }
     }
 
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
@@ -980,7 +1098,9 @@ namespace nvhttp {
     }
 
     if (appid > 0) {
-      auto err = proc::proc.execute((int) appid, launch_session);
+      // VipleStream §M.1 — record which paired device owns this launch.
+      auto owner_name = caller_name_for(caller_uuid);
+      auto err = proc::proc.execute((int) appid, launch_session, caller_uuid, owner_name);
       if (err) {
         tree.put("root.<xmlattr>.status_code", err);
         tree.put("root.<xmlattr>.status_message", "Failed to start the specified application");
@@ -1034,6 +1154,28 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "No running app to resume");
 
       return;
+    }
+
+    // VipleStream §M.1 — only the owner (or an admin) may resume.  Resume is
+    // reconnect-after-drop semantics, NOT takeover, so we never let a stranger
+    // hijack someone else's in-progress session via /resume.
+    {
+      auto caller_uuid = caller_uuid_for(request);
+      auto owner_uuid = proc::proc.running_owner_uuid();
+      bool same_caller = !caller_uuid.empty() && caller_uuid == owner_uuid;
+      bool caller_admin = is_admin_device(caller_uuid);
+      if (!same_caller && !caller_admin) {
+        auto owner_name = proc::proc.running_owner_name();
+        BOOST_LOG(info) << "[VIPLE-MULTI] /resume denied — owner="sv << owner_name
+                        << " caller_uuid="sv
+                        << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid});
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 403);
+        tree.put("root.<xmlattr>.status_message",
+                 "Cannot resume session owned by "s
+                   + (owner_name.empty() ? "another paired device"s : owner_name));
+        return;
+      }
     }
 
     auto args = request->parse_query_string();
@@ -1116,13 +1258,62 @@ namespace nvhttp {
       response->close_connection_after_response = true;
     });
 
+    // VipleStream §M.1 — multi-user ownership guard.  /cancel without an
+    // owner/admin check was the original bug: any paired device could blow
+    // away anyone else's session (including Steam game children).  Behaviour:
+    //   - caller == owner  : proceed (own /cancel)
+    //   - caller admin     : proceed (admin can kick anyone)
+    //   - otherwise        : 403, leave the running app alone
+    // The Web UI dashboard's "Force Disconnect" button does NOT come through
+    // here; it calls confighttp's /api/force_cancel which has its own admin
+    // auth.  No ?force=1 escape hatch on this endpoint by design — adding one
+    // would re-open the very bug we're fixing (any paired client could pass
+    // ?force=1 to kill another user's session).
+    auto caller_uuid = caller_uuid_for(request);
+    auto caller_admin = is_admin_device(caller_uuid);
+    auto owner_uuid = proc::proc.running_owner_uuid();
+    auto owner_name = proc::proc.running_owner_name();
+    bool same_caller = !caller_uuid.empty() && caller_uuid == owner_uuid;
+    bool app_running = proc::proc.running() > 0;
+
+    if (app_running && !same_caller && !caller_admin) {
+      BOOST_LOG(info) << "[VIPLE-MULTI] /cancel denied — owner="sv << owner_name
+                      << " caller_uuid="sv
+                      << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid});
+      tree.put("root.cancel", 0);
+      tree.put("root.<xmlattr>.status_code", 403);
+      tree.put("root.<xmlattr>.status_message",
+               "Cannot cancel session owned by "s
+                 + (owner_name.empty() ? "another paired device"s : owner_name));
+      tree.put("root.BusyByDevice", owner_name);
+      tree.put("root.OwnerUuid", owner_uuid);
+      return;
+    }
+
     tree.put("root.cancel", 1);
     tree.put("root.<xmlattr>.status_code", 200);
 
     rtsp_stream::terminate_sessions();
 
-    if (proc::proc.running() > 0) {
-      proc::proc.terminate();
+    if (app_running) {
+      // Soft handover for Steam-source apps when a non-owner takes over: Steam
+      // itself runs outside our Job Object via the URL handler, so detach()
+      // leaves it (and its game children) alive on the host even after our
+      // streaming session ends.  Manual apps may have undo_cmds that must fire
+      // (display/audio cleanup), so they fall through to terminate().
+      bool soft_handover = !same_caller && proc::proc.is_running_steam_source();
+      if (soft_handover) {
+        BOOST_LOG(info) << "[VIPLE-MULTI] /cancel soft-detach (steam-source) by uuid="sv
+                        << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid})
+                        << " prior_owner="sv << owner_name;
+        proc::proc.detach();
+      } else {
+        BOOST_LOG(info) << "[VIPLE-MULTI] /cancel terminate by uuid="sv
+                        << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid})
+                        << " owner="sv << owner_name
+                        << " admin="sv << caller_admin;
+        proc::proc.terminate();
+      }
     }
 
     // The config needs to be reverted regardless of whether "proc::proc.terminate()" was called or not.
@@ -1721,6 +1912,7 @@ namespace nvhttp {
 
   void start() {
     platf::set_thread_name("nvhttp");
+    init_ssl_caller_uuid_idx();  // VipleStream §M.1 — must run before any SSL_set_ex_data
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
 
     auto port_http = net::map_port(PORT_HTTP);
@@ -1793,6 +1985,13 @@ namespace nvhttp {
         BOOST_LOG(info) << "Client is disabled -- denied"sv;
         return verified;
       }
+
+      // VipleStream §M.1 — stash the caller's paired-device uuid on the SSL object
+      // so handlers can later identify who is making this request without re-walking
+      // the cert chain.  Empty uuid is possible for legacy/un-named entries; we still
+      // verify the cert in that case, just no ownership identity is established.
+      auto matched_uuid = named_cert_uuid_for_pem(pem);
+      set_caller_uuid_on_ssl(ssl, matched_uuid);
 
       verified = 1;
 
@@ -1934,6 +2133,49 @@ namespace nvhttp {
       }
     }
     return false;
+  }
+
+  bool set_client_admin(const std::string_view uuid, bool is_admin) {
+    client_t &client = client_root;
+    for (auto &named_cert : client.named_devices) {
+      if (named_cert.uuid == uuid) {
+        named_cert.is_admin = is_admin;
+        BOOST_LOG(info) << "[VIPLE-MULTI] device "sv << named_cert.name
+                        << " (uuid="sv << uuid << ") is_admin -> "sv << is_admin;
+        save_state();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  nlohmann::json get_current_session() {
+    nlohmann::json out;
+    auto app_id = proc::proc.running();
+    if (app_id <= 0) {
+      out["active"] = false;
+      return out;
+    }
+    out["active"] = true;
+    out["owner_uuid"] = proc::proc.running_owner_uuid();
+    out["owner_name"] = proc::proc.running_owner_name();
+    out["app_id"] = app_id;
+    out["app_name"] = proc::proc.get_last_run_app_name();
+    out["app_source"] = proc::proc.is_running_steam_source() ? "steam" : "";
+    out["started_at_s"] = proc::proc.running_started_unix_s();
+    return out;
+  }
+
+  bool force_cancel_current_session() {
+    if (proc::proc.running() <= 0) {
+      return false;
+    }
+    BOOST_LOG(info) << "[VIPLE-MULTI] /api/force_cancel admin force-disconnect, prior_owner="sv
+                    << proc::proc.running_owner_name();
+    rtsp_stream::terminate_sessions();
+    proc::proc.terminate();
+    display_device::revert_configuration();
+    return true;
   }
 
   bool is_client_enabled(const std::string_view cert_pem) {

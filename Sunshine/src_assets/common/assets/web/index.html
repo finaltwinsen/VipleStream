@@ -119,6 +119,41 @@
       </div>
     </div>
 
+    <!-- VipleStream §M.1 — Current Session dashboard.  Polls /api/current-session
+         every 5s and shows owner / app / started time.  The "Force Disconnect"
+         button calls /api/force-cancel which bypasses the per-paired-device
+         ownership check on /cancel — admin-authenticated via the Web UI. -->
+    <div class="card my-4">
+      <div class="card-body">
+        <h2>Current Session</h2>
+        <div v-if="currentSession && currentSession.active">
+          <div class="row">
+            <div class="col-md-6">
+              <p class="mb-1"><strong>Owner:</strong> {{ currentSession.owner_name || '(unnamed device)' }}</p>
+              <p class="mb-1"><strong>App:</strong> {{ currentSession.app_name }}</p>
+            </div>
+            <div class="col-md-6">
+              <p class="mb-1"><strong>Source:</strong> {{ currentSession.app_source === 'steam' ? 'Steam' : 'Manual' }}</p>
+              <p class="mb-1"><strong>Started:</strong> {{ formatStartedAt(currentSession.started_at_s) }} ({{ formatDuration(currentSession.started_at_s) }})</p>
+            </div>
+          </div>
+          <div class="alert alert-success my-3" v-if="forceCancelStatus === true">
+            Session disconnected.
+          </div>
+          <div class="alert alert-danger my-3" v-if="forceCancelStatus === false">
+            Failed to disconnect — see logs.
+          </div>
+          <button class="btn btn-danger" :disabled="forceCancelPressed" @click="forceCancel">
+            <alert-triangle :size="18" class="icon"></alert-triangle>
+            Force Disconnect
+          </button>
+        </div>
+        <div v-else>
+          <p class="text-muted mb-0"><em>No active streaming session.</em></p>
+        </div>
+      </div>
+    </div>
+
     <!-- Resources -->
     <div class="my-4">
       <Resource-Card></Resource-Card>
@@ -130,6 +165,7 @@
   import { createApp } from 'vue'
   import { marked } from 'marked'
   import { initApp } from './init'
+  import { apiFetch } from './fetch_utils'
   import Navbar from './Navbar.vue'
   import ResourceCard from './ResourceCard.vue'
   import SunshineVersion from './sunshine_version'
@@ -178,6 +214,11 @@
         platform: "",
         controllerEnabled: false,
         vigembus: null,
+        // VipleStream §M.1 — Current Session dashboard state
+        currentSession: null,
+        currentSessionInterval: null,
+        forceCancelPressed: false,
+        forceCancelStatus: null,
       }
     },
     async created() {
@@ -209,6 +250,18 @@
         console.error(e);
       }
       this.loading = false;
+
+      // VipleStream §M.1 — start polling current session for the dashboard card.
+      this.refreshCurrentSession();
+      this.currentSessionInterval = setInterval(() => {
+        this.refreshCurrentSession();
+      }, 5000);
+    },
+    beforeUnmount() {
+      if (this.currentSessionInterval) {
+        clearInterval(this.currentSessionInterval);
+        this.currentSessionInterval = null;
+      }
     },
     computed: {
       installedVersionNotStable() {
@@ -249,7 +302,52 @@
       convertMarkdownToHtml(markdown) {
         if (!markdown) return '';
         return marked.parse(markdown);
-      }
+      },
+      // VipleStream §M.1 — multi-user dashboard methods
+      async refreshCurrentSession() {
+        try {
+          const r = await fetch('./api/current-session').then((x) => x.json());
+          this.currentSession = r;
+        } catch (e) {
+          console.warn('refreshCurrentSession failed', e);
+        }
+      },
+      async forceCancel() {
+        if (this.forceCancelPressed) return;
+        this.forceCancelPressed = true;
+        this.forceCancelStatus = null;
+        try {
+          const r = await apiFetch('./api/force-cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+          }).then((x) => x.json());
+          this.forceCancelStatus = r.status === true;
+          // Refresh immediately so the dashboard reflects the disconnect.
+          this.refreshCurrentSession();
+          setTimeout(() => {
+            this.forceCancelStatus = null;
+          }, 5000);
+        } catch (e) {
+          console.error('forceCancel failed', e);
+          this.forceCancelStatus = false;
+        } finally {
+          this.forceCancelPressed = false;
+        }
+      },
+      formatStartedAt(unixSeconds) {
+        if (!unixSeconds) return '—';
+        const d = new Date(unixSeconds * 1000);
+        return d.toLocaleString();
+      },
+      formatDuration(unixSeconds) {
+        if (!unixSeconds) return '';
+        const seconds = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds);
+        if (seconds < 60) return `${seconds}s`;
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+        const hours = Math.floor(minutes / 60);
+        return `${hours}h ${minutes % 60}m`;
+      },
     }
   });
 

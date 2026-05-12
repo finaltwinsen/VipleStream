@@ -297,6 +297,24 @@ namespace SimpleWeb {
       CaseInsensitiveMultimap parse_query_string() const noexcept {
         return SimpleWeb::QueryString::parse(query_string);
       }
+
+      /// VipleStream §M.1 — expose the underlying socket's native handle
+      /// (e.g. SSL* for HTTPS) so request handlers can access per-connection
+      /// TLS state (ex_data, peer cert, etc.).  Mirrors the public-access
+      /// pattern used by remote_endpoint().  Returns null if the connection
+      /// is already gone or has no socket.
+      auto native_handle() const noexcept -> decltype(std::declval<socket_type>().native_handle()) {
+        try {
+          if(auto connection = this->connection.lock()) {
+            if(connection->socket) {
+              return connection->socket->native_handle();
+            }
+          }
+        }
+        catch(...) {
+        }
+        return decltype(std::declval<socket_type>().native_handle()) {};
+      }
     };
 
   protected:

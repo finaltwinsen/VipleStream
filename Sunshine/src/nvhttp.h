@@ -193,6 +193,36 @@ namespace nvhttp {
   bool set_client_enabled(std::string_view uuid, bool enabled);
 
   /**
+   * @brief Grant or revoke admin privileges on a paired client.
+   * Admin clients can take over or cancel sessions started by any other paired
+   * device.  Used by the Web UI multi-user dashboard.
+   * @param uuid The UUID of the client.
+   * @param is_admin Whether the client should be admin.
+   * @return true if the client was found and updated.
+   */
+  bool set_client_admin(std::string_view uuid, bool is_admin);
+
+  /**
+   * @brief Get information about the currently running app, if any.
+   * @return JSON describing the session — fields:
+   *   - active:           bool, whether a session is currently active
+   *   - owner_uuid:       string, paired-device uuid that launched the app
+   *   - owner_name:       string, paired-device display name
+   *   - app_id:           int, the app id from apps.json / Steam import
+   *   - app_name:         string, app display name
+   *   - app_source:       string, "steam" for auto-imported, "" for manual
+   *   - started_at_s:     int64, seconds since unix epoch
+   */
+  nlohmann::json get_current_session();
+
+  /**
+   * @brief Force the currently running app to stop, regardless of ownership.
+   * Used by the Web UI "Force Disconnect" button (admin-only path).
+   * @return true if there was a session to cancel.
+   */
+  bool force_cancel_current_session();
+
+  /**
    * @brief Get all paired clients.
    * @return The list of all paired clients.
    * @examples

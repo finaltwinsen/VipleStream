@@ -100,7 +100,8 @@ namespace proc {
         _apps(std::move(apps)) {
     }
 
-    int execute(int app_id, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    int execute(int app_id, std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
+                std::string owner_uuid = {}, std::string owner_name = {});
 
     /**
      * @return `_app_id` if a process is running, otherwise returns `0`
@@ -115,13 +116,46 @@ namespace proc {
     std::string get_last_run_app_name();
     void terminate();
 
+    // VipleStream §M.1 — multi-user ownership.
+    //
+    // running_owner_uuid()/_name() identify which paired device launched the
+    // currently-running app; empty when nothing is running or when the launch
+    // predates the ownership-tracking patch.
+    //
+    // detach() ends the streaming-session bookkeeping for the running app
+    // WITHOUT calling group.terminate() / undo_cmds / display revert.  Used
+    // for "soft handover" on /launch?takeover=1 and friendly /cancel by a
+    // non-owner: B's Steam game keeps running on the host (Steam runs outside
+    // Sunshine's Job Object via the URL handler anyway, see proc_t::running()
+    // placebo path) while the new caller takes the streaming session.
+    //
+    // is_running_steam_source() tells the endpoint guards whether the current
+    // app was auto-imported from Steam, in which case detach is the safe
+    // takeover path; manual apps may have prep_cmds whose undo step we must
+    // run, so they fall back to terminate().
+    const std::string &running_owner_uuid() const { return _owner_uuid; }
+    const std::string &running_owner_name() const { return _owner_name; }
+    bool is_running_steam_source() const;
+    void detach();
+
+    // Wall-clock time the current app was launched, in seconds since epoch.
+    // Returns 0 if no app is running.  Used by /api/current_session.
+    int64_t running_started_unix_s() const;
+
   private:
     int _app_id;
+
+    // VipleStream §M.1 — paired-device that owns the currently-running app.
+    std::string _owner_uuid;
+    std::string _owner_name;
 
     boost::process::v1::environment _env;
     std::vector<ctx_t> _apps;
     ctx_t _app;
     std::chrono::steady_clock::time_point _app_launch_time;
+    // VipleStream §M.1 — wall-clock launch time for Web UI session dashboard
+    // (steady_clock is monotonic, can't be converted to a calendar timestamp).
+    std::chrono::system_clock::time_point _app_launch_wall;
 
     // If no command associated with _app_id, yet it's still running
     bool placebo {};

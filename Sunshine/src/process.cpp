@@ -304,7 +304,8 @@ namespace proc {
     ++_steam_watchdog_gen;
   }
 
-  int proc_t::execute(int app_id, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+  int proc_t::execute(int app_id, std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
+                       std::string owner_uuid, std::string owner_name) {
     // Ensure starting from a clean slate
     terminate();
 
@@ -319,8 +320,16 @@ namespace proc {
 
     _app_id = app_id;
     _app = *iter;
+    _owner_uuid = std::move(owner_uuid);
+    _owner_name = std::move(owner_name);
     _app_prep_begin = std::begin(_app.prep_cmds);
     _app_prep_it = _app_prep_begin;
+
+    BOOST_LOG(info) << "[VIPLE-MULTI] launching app_id="sv << _app_id
+                    << " name="sv << _app.name
+                    << " source="sv << (_app.source.empty() ? "manual" : _app.source)
+                    << " owner_uuid="sv << (_owner_uuid.empty() ? "<unknown>" : _owner_uuid)
+                    << " owner_name="sv << (_owner_name.empty() ? "<unknown>" : _owner_name);
 
     // Add Stream-specific environment variables
     _env["SUNSHINE_APP_ID"] = std::to_string(_app_id);
@@ -432,6 +441,7 @@ namespace proc {
     }
 
     _app_launch_time = std::chrono::steady_clock::now();
+    _app_launch_wall = std::chrono::system_clock::now();
 
 #ifdef _WIN32
     // VipleStream H Phase 2.4: kick off the Steam game-exit watchdog
@@ -543,6 +553,64 @@ namespace proc {
     }
 
     _app_id = -1;
+    // VipleStream §M.1 — clear ownership so /launch /resume /cancel see no current owner.
+    _owner_uuid.clear();
+    _owner_name.clear();
+  }
+
+  bool proc_t::is_running_steam_source() const {
+    // Steam-source apps are auto-imported from the Steam library and run via
+    // the steam://rungameid/<id> URL handler.  See process.cpp ~line 1041 in
+    // refresh() where ctx.source is tagged.
+    return _app.source == "steam";
+  }
+
+  int64_t proc_t::running_started_unix_s() const {
+    if (_app_id <= 0) return 0;
+    using namespace std::chrono;
+    return duration_cast<seconds>(_app_launch_wall.time_since_epoch()).count();
+  }
+
+  void proc_t::detach() {
+    // VipleStream §M.1 — soft handover.  End the streaming session and forget
+    // the app, but skip terminate()'s destructive steps:
+    //   - no group.terminate()  (would only kill the URL-handler child anyway;
+    //                            Steam itself runs outside our Job Object)
+    //   - no undo_cmds          (those undo display/audio prep we'll redo
+    //                            immediately for the new owner)
+    //   - no display revert     (caller will configure their own display state)
+    //
+    // After detach(), running() returns 0 so /launch from another paired
+    // device proceeds normally.
+    BOOST_LOG(info) << "[VIPLE-MULTI] detaching app_id="sv << _app_id
+                    << " name="sv << _app.name
+                    << " source="sv << (_app.source.empty() ? "manual"sv : std::string_view {_app.source})
+                    << " prior_owner="sv << (_owner_name.empty() ? "<unknown>"sv : std::string_view {_owner_name});
+
+    placebo = false;
+    stop_steam_watchdog_();
+
+    // Release boost handles without terminating.
+    std::error_code ec;
+    if (_process_group.valid()) {
+      _process_group.detach();
+    }
+    if (_process.valid()) {
+      _process.detach();
+    }
+    _process = boost::process::v1::child();
+    _process_group = boost::process::v1::group();
+
+    _pipe.reset();
+
+    _app_id = -1;
+    _app = {};
+    // Re-seat the iterators on the empty _app to avoid leaving a dangling
+    // _app_prep_begin pointing into the previous _app.prep_cmds storage.
+    _app_prep_begin = std::begin(_app.prep_cmds);
+    _app_prep_it = _app_prep_begin;
+    _owner_uuid.clear();
+    _owner_name.clear();
   }
 
   const std::vector<ctx_t> &proc_t::get_apps() const {

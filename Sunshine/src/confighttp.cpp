@@ -886,9 +886,20 @@ namespace confighttp {
       nlohmann::json output_tree;
       std::string uuid = input_tree.value("uuid", "");
       bool enabled = input_tree.value("enabled", true);
-      output_tree["status"] = nvhttp::set_client_enabled(uuid, enabled);
+      bool ok = nvhttp::set_client_enabled(uuid, enabled);
 
-      if (!enabled && output_tree["status"]) {
+      // VipleStream §M.1 — optionally also update is_admin in the same call.
+      // The Web UI clients page sends both fields together when the admin
+      // toggle changes; legacy callers that only send {uuid, enabled} keep
+      // their existing behaviour.
+      if (input_tree.contains("is_admin")) {
+        bool is_admin = input_tree.value("is_admin", false);
+        ok = nvhttp::set_client_admin(uuid, is_admin) && ok;
+      }
+
+      output_tree["status"] = ok;
+
+      if (!enabled && ok) {
         rtsp_stream::terminate_sessions();
 
         if (rtsp_stream::session_count() == 0 && proc::proc.running() > 0) {
@@ -901,6 +912,48 @@ namespace confighttp {
       BOOST_LOG(warning) << "Update Client: "sv << e.what();
       bad_request(response, request, e.what());
     }
+  }
+
+  /**
+   * @brief VipleStream §M.1 — Get information about the currently running session.
+   * Used by the Web UI multi-user dashboard to show owner / app / start time
+   * and surface an admin "Force Disconnect" button.
+   *
+   * @api_examples{/api/current-session| GET| null}
+   */
+  void getCurrentSession(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json output_tree = nvhttp::get_current_session();
+    send_response(response, output_tree);
+  }
+
+  /**
+   * @brief VipleStream §M.1 — Admin force-cancel the currently running session.
+   * Bypasses the per-paired-device ownership check on /cancel because the
+   * admin authenticated through the Web UI (HTTP basic auth + CSRF) is by
+   * definition the host operator.
+   *
+   * @api_examples{/api/force-cancel| POST| null}
+   */
+  void forceCancelSession(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    std::string client_id = get_client_id(request);
+    if (!validate_csrf_token(response, request, client_id)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["status"] = nvhttp::force_cancel_current_session();
+    send_response(response, output_tree);
   }
 
   /**
@@ -1777,6 +1830,9 @@ namespace confighttp {
     server.resource["^/api/clients/unpair$"]["POST"] = unpair;
     server.resource["^/api/clients/unpair-all$"]["POST"] = unpairAll;
     server.resource["^/api/clients/update$"]["POST"] = updateClient;
+    // VipleStream §M.1 — multi-user dashboard endpoints.
+    server.resource["^/api/current-session$"]["GET"] = getCurrentSession;
+    server.resource["^/api/force-cancel$"]["POST"] = forceCancelSession;
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/config$"]["POST"] = saveConfig;
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
