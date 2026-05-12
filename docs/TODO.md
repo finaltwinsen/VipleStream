@@ -16,7 +16,8 @@
 
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
-| **Active (next)** | **§J.3.e.X Path β.11** FRUC interp 畫面糊 quality 修 | v1.4.9 後 decode 已穩定 < 30ms；使用者回報補幀畫面糊但未確認類型（整體糊 / 只 interp 糊 / 動態 ghosting / 糊+閃同時）。等使用者選類型後再對應修：bicubic source sampling / inferDim 升級 / mask blend tune / 色彩一致性 |
+| **Active (next)** | **§J.3.e.X Path β.11** FRUC interp quality 微調 | β.11 hypothesis 1 baseline (EDGE_AWARE_MV_THRESHOLD 2.0→8.0 動態邊緣 8×8 馬賽克 fix) ship in v1.4.11 (fa46a88)，待使用者實測決定：keep / 試 16 (仍馬賽克) / 退 4 (edge 變糊) / 改 push constant runtime tunable。其他 hypothesis (luma-gap backstop / big-motion bias / sub-pixel precision) 若需要再開 |
+| **Active (post-v1.4.12)** | **§M.2** Phase 2 雙 user 並發 streaming 驗測 | Ubuntu VM 上 per-user systemd + Xdummy + PipeWire 端到端跑通；NVENC 並發等實體機到位。等 §M.1 (v1.4.12) 取得使用者實測 sign-off 後開工 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Active** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限） |
 | **Active (β.9 part 2 post-v1.4.6)** | **§J.3.e.X Path β.9** TRIPLE 60→180 graph-executor split | β.9 Phase 1 (互斥鎖解除 + 2× RIFE inference chain) 已 ship in v1.4.6 (99f86b5)；剩 β.9 Phase 2 — graph executor timestep-shared 前段 + timestep-dependent 後段 split 把 chain × 2 從 200% 降到 ~130%，2-3 天工程，使 chain @ 256x128 fit 60fps server 16.7ms slot |
@@ -57,6 +58,9 @@
 - ✅ **§J.3.e.2.i.10c** Phase β.9 — TRIPLE 60→180 + Native RIFE coexist（`99f86b5`，v1.4.6）— 拿掉 ctor 的 `m_RifeNativeMode + m_TripleMode` 互斥鎖；β.5.1 chain 重構成 `runOneInferAndWarp(t, outBuf, ds)` helper，TRIPLE 跑 2 次 RIFE inference（t=1/3 + t=2/3）+ 2 個 warp DS 各寫 m_FrucInterpRgbBuf / m_FrucInterpRgbBuf2。β.9 Phase 2 (graph executor timestep-shared frontend split) 仍 active
 - ✅ **§J.3.e.2.i.10e** ROOT-CAUSE FIX — kFrucFramesInFlight 4→2（`6b9bb89`，v1.4.8）— v1.4.2 那個 2→4 bump 是錯的方向。Vulkan single-graphics-queue cmd buffer FIFO 序列執行，slot 多只展開 CPU pipelining、不增 GPU throughput。但每 slot 跑完整 chain (~20ms) 才 signal `vkf->sem[0]@V+1` 給 FFmpeg pool 釋放 image，所以 **AVFrame hold cycle = N × chain_time**。N=4 → 80ms hold cycle = 直接對應 user 看到的「decodeMeanMs 穩定 80-100ms」。改回 N=2 後 5-90ms bimodal、好的時段 5-15ms
 - ✅ **§J.3.e.2.i.10f Path D** early AVFrame release via two-submit pattern（`9fd8c22`，v1.4.9）— **最終解**。把 renderFrame 拆成兩段 graphics-queue submit。Submit 1 (m_SlotCopyCmdBuf, ~100us) 只做 image→buffer copy + sem signal `vkf->sem[0]@V+1`；submit 2 (m_SlotCmdBuf, ~20ms) 跑 chain + present，不碰 vkf。AVFrame hold cycle 從 40ms 變 ~0.2ms。**live test：decodeMeanMs 0.47-30ms typical，sub-ms 多次出現，跟 v339 / D3D11 / FRUC OFF 同等級**。能做到的關鍵是 §B-quality (d) 2026-05-06 已先把 DUAL+FRUC real-frame display 切換成 m_FrucCurrRgbBuf via m_RealCurrRgbDescSet（不再吃 vkf->img[0] ycbcr sampler），所以 vkf->img[0] 只在 chain 開頭 ~100us 用一次
+- ✅ **§J.2 H.3** vkfrucNativeRifeInferDim default 256 → 128 + UI honesty（`cf0df28`，v1.4.10）— mid-range GPU (RTX 3060 Laptop) 在 inferDim=256 chain ~20ms > 16.7ms (60fps slot)，dual-present 從 target 120 掉到 45.34 + p99 28ms judder；inferDim=128 chain ~10ms fit budget, fps 76.69，但 down ratio 15× 讓 flow precision 接近 ME 8×8 block (quality ≈ ME)。default 改 128，256 留給 RTX 4070+ opt-in。SettingsView.qml ComboBox text + RIFE checkbox ToolTip 一起對齊實測值。後續可考慮 async-compute (m_ComputeQueue infra v1.4.3 ready) 把 RIFE inference 搬出 graphics queue 讓 dim=256 fit budget；或 IFRNet-S 5.5MB 試 quality+perf sweet spot
+- ✅ **§J.3.e.X β.11** TRIPLE+ME EDGE_AWARE_MV_THRESHOLD 2.0 → 8.0（`fa46a88`，v1.4.11）— TRIPLE+ME 動態邊緣 8×8 馬賽克 fix。kFrucWarpShaderGlsl::sampleMV 內 edge-aware MV smoothing threshold 從 2.0 (1.4 px L2 diff) → 8.0 (2.83 px) 過濾 noise 維持 bilinear smooth；大 motion boundary (>2.83 px diff) 仍切 nearest pick 保 edge 銳利。Hypothesis 1 baseline，仍 active 等使用者實測（見 Active 表 §J.3.e.X Path β.11）
+- ✅ **§M.1** Multi-user ownership guards + Web UI session dashboard（`79c47f9`，v1.4.12）— 修「多人共用 server 時 A 客戶端意外殺到 B 的 Steam 遊戲」bug (詳 §M section)
 
 **Negative result (走錯後 revert)：**
 
@@ -759,6 +763,58 @@ AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame
 **清的時候要做的：**
 - Final.3b 整合 native RIFE pipeline 進 NcnnFRUC（drop ncnn-vulkan dep）
 - 同時把這條從 todo.md 拿掉，§J.3.e.X integration milestone 替代
+
+---
+
+## §M. 多使用者並發 streaming
+
+### §M.1 Phase 1 — Defensive guards + ownership（**✅ SHIPPED in v1.4.12, 2026-05-12**）
+
+修「多人共用 server 時 A 客戶端 (/cancel 或 /launch) 意外中斷 B 正在玩的 streaming session、連帶可能殺到 Steam 遊戲」的 bug。Root cause：Sunshine 三個 HTTPS endpoint (`/launch` `/resume` `/cancel`) 沒做 client identity check，任何 paired client 都能影響別人的 session。
+
+**主要改動：**
+- nvhttp.cpp 三個 endpoint 加 caller cert→uuid plumbing (SSL ex_data) + 比對 caller 與 proc_t.owner_uuid，非 owner / 非 admin 友善拒絕 (503/403) 附 owner_name
+- proc_t 加 `_owner_uuid` / `_owner_name` 欄位 + `detach()` 方法讓 Steam-source app takeover 走軟交接（不殺 process tree、跳過 undo_cmd 與 display revert）
+- named_cert_t 加 `is_admin` flag 持久化於 sunshine_state.json (load_state `get_optional` 預設 false 向下相容)
+- confighttp 新增 `/api/current-session` (GET) + `/api/force-cancel` (POST, admin-auth)
+- Web UI 首頁加 Current Session 卡片（poll 每 5 秒）+ Force Disconnect 按鈕；troubleshooting 頁面 paired devices 列表加 Admin toggle
+- Simple-Web-Server Request class 加 `native_handle()` public method 讓 handler 從 request 取 SSL handle
+
+**Phase 1 out of scope：**
+- Sunshine 仍 single-session（一次只跑一個 app；多 user 並發改造延後到 §M.2）
+- 不改 Moonlight client；非 admin 想 takeover 仍走 Web UI Force Disconnect（原生 Moonlight 不送 `?takeover=1`）
+
+**完整設計 + 測試 SOP：** `~/.claude/plans/steam-linked-volcano.md`
+
+### §M.2 Phase 2 — Ubuntu VM 雙 user 並發 streaming 驗測
+
+**目標：** 在 VipleStream 既有的 Ubuntu test VM (`<test-user>@<linux-test-vm>`) 上端到端跑通雙 user 並發 streaming 流程，驗證 Sunshine + per-user systemd + Xdummy/EVDI + PipeWire stack 可行。**不在 Phase 1 改 Sunshine multi-session、不在這階段驗 NVENC 並發 license — 那等實體測試機。**
+
+**前提：** 使用者「盡快生出測試用實體設備」表態 (2026-05-11)。
+
+**可在 VM 上驗（軟編碼路線，無 GPU passthrough）：**
+- 雙 user account 建立 (`viple_a`, `viple_b`)
+- 每 user systemd `--user` viplestream-server.service（port 47989 / 48089，利用 `network.cpp:197 map_port = config::sunshine.port + offset` 既有機制）
+- Xdummy virtual display per user (X server :1 / :2)
+- PipeWire per-user audio sink
+- udev rule per-user input device
+- 兩個 Moonlight client 同時連 → libx264 軟編 → 走通 RTSP / control / video / audio / input 全 path
+- 兩個 streaming session 之間是否互相干擾（display / audio / input 串擾）
+
+**必須等實體機（有 NVIDIA GPU passthrough 或 spare hardware）：**
+- NVENC 並發 2 session frame rate / latency / VRAM 占用 (RTX 5060 Ti, driver R522+ 支援 5 concurrent NVENC)
+- NVIDIA Linux driver Wayland 穩定性 (driver 545+ explicit sync GA)
+- 實際遊戲 Proton 相容性 / HDR / DLSS / RT / anti-cheat (areweanticheatyet.com)
+
+**進度：** v1.4.12 ship 後等 §M.1 取得使用者實測 sign-off (Task 11 Scenario 1-4) 再開工。
+
+**Phase 2 預期產出：**
+- `docs/multi-user-linux.md` setup SOP
+- `scripts/setup_second_user_linux.sh` 自動化雙 user setup（不入 git，per `reference_linux_build_pipeline.md`）
+
+### §M.3 Phase 3 — Linux host migration（待 §M.2 通過 + 實體機到位）
+
+延後規劃，視 §M.2 結果 + 使用者實體機到位後評估：distro 選擇 (Bazzite KDE NVIDIA / Ubuntu LTS / 其他) / X11 vs Wayland 路線 / Proton 相容性實測 / 是否真執行 host OS migration。
 
 ---
 
