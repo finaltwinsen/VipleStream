@@ -44,6 +44,8 @@
   // local includes
   #include "confighttp.h"
   #include "display_device.h"
+  #include "file_transfer.h"
+  #include "fs_picker.h"
   #include "logging.h"
   #include "platform/common.h"
   #include "process.h"
@@ -81,6 +83,77 @@ namespace system_tray {
     platf::restart();
   }
 
+  // VipleStream §N — file transfer tray callbacks ────────────────────────────
+  //
+  // 兩個 menu item 在 stream 未啟動時 disabled（由 update_tray_playing/stopped
+  // 同步切換）。Callback 進入時再做一次 race-safe 確認。
+  //
+  // 「Send to client」流程：
+  //   1. 確認 active stream + manager 沒 busy
+  //   2. 開 native file picker，使用者選一個檔
+  //   3. file_transfer::manager::queue_send_to_client → 命令塞入 client queue
+  //   4. Client 下次 poll 拿到命令、回頭 GET /transfer/blob?token=… 拉檔
+  //
+  // 「Receive from client」流程：
+  //   1. 確認 active stream
+  //   2. 把 list_dir 命令塞給 client → client 回 listing → manager 緩存
+  //   3. 開瀏覽器 http://localhost:<port>/transfer 給使用者挑檔（web UI）
+  //   4. Web UI 點 Pull → confighttp 接到後再 queue upload_from_client 命令
+  /**
+   * VipleStream §N — forward declared 給 tray xfer callbacks 用。實作在
+   * `tray` 變數宣告之後（line ~212）才合法 reference `tray`。
+   */
+  static void show_tray_balloon(const char *title, const char *text);
+
+  void tray_xfer_send_cb([[maybe_unused]] struct tray_menu *item) {
+    auto owner = proc::proc.running_owner_uuid();
+    if (proc::proc.running() <= 0 || owner.empty()) {
+      BOOST_LOG(info) << "[VIPLE-XFER] tray Send: no active stream / no owner uuid";
+      show_tray_balloon("File transfer", "No active stream. Start streaming first.");
+      return;
+    }
+    if (file_transfer::manager::instance().busy()) {
+      BOOST_LOG(info) << "[VIPLE-XFER] tray Send: another transfer in progress";
+      show_tray_balloon("File transfer", "Another transfer in progress. Wait for it to finish.");
+      return;
+    }
+    fs_picker::open_options opts;
+    opts.title = "VipleStream — Select file to send to client";
+    auto chosen = fs_picker::pick_open_file(opts);
+    if (!chosen) {
+      BOOST_LOG(info) << "[VIPLE-XFER] tray Send: user cancelled";
+      return;
+    }
+    auto token = file_transfer::manager::instance().queue_send_to_client(owner, *chosen);
+    if (token.empty()) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] tray Send: queue failed for " << chosen->string();
+      return;
+    }
+    BOOST_LOG(info) << "[VIPLE-XFER] tray Send: queued token=" << token
+                    << " owner=" << owner << " file=" << chosen->string();
+  }
+
+  void tray_xfer_recv_cb([[maybe_unused]] struct tray_menu *item) {
+    auto owner = proc::proc.running_owner_uuid();
+    if (proc::proc.running() <= 0 || owner.empty()) {
+      BOOST_LOG(info) << "[VIPLE-XFER] tray Receive: no active stream / no owner uuid";
+      show_tray_balloon("File transfer", "No active stream. Start streaming first.");
+      return;
+    }
+    if (file_transfer::manager::instance().busy()) {
+      BOOST_LOG(info) << "[VIPLE-XFER] tray Receive: another transfer in progress";
+      show_tray_balloon("File transfer", "Another transfer in progress. Wait for it to finish.");
+      return;
+    }
+    // 1. 先排 list_dir：client 下次 poll 會把 Downloads listing 回到 /transfer/result
+    file_transfer::manager::instance().queue_list_dir(owner);
+    // 2. 開瀏覽器到 confighttp 內部 /transfer 頁，使用者挑檔後 confighttp 排
+    //    upload_from_client 命令
+    BOOST_LOG(info) << "[VIPLE-XFER] tray Receive: opening transfer picker UI for owner="
+                    << owner;
+    launch_ui("/transfer"s);
+  }
+
   void tray_quit_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Quitting from system tray"sv;
 
@@ -104,9 +177,19 @@ namespace system_tray {
     {.text = nullptr}
   };
 
+  // VipleStream §N — index 持有的 menu item 位置（後面 update_tray_*
+  // 用來切換 disabled）。如果 menu 順序變動，**記得**同步更新這兩個 index。
+  static constexpr int k_xfer_send_idx = 2;
+  static constexpr int k_xfer_recv_idx = 3;
+
   static struct tray_menu tray_menu_items[] = {
     // todo - use boost/locale to translate menu strings
-    {.text = "Open Sunshine", .cb = tray_open_ui_cb},
+    {.text = "Open VipleStream", .cb = tray_open_ui_cb},
+    {.text = "-"},
+    // VipleStream §N — 兩項都預設 disabled，update_tray_playing 啟用、
+    // update_tray_stopped 關回 disabled。
+    {.text = "Send file to client...",     .disabled = 1, .cb = tray_xfer_send_cb},
+    {.text = "Receive file from client...", .disabled = 1, .cb = tray_xfer_recv_cb},
     {.text = "-"},
     {.text = "Donate", .submenu = donate_submenu},
     {.text = "-"},
@@ -126,6 +209,16 @@ namespace system_tray {
     .iconPathCount = 4,
     .allIconPaths = {TRAY_ICON, TRAY_ICON_LOCKED, TRAY_ICON_PLAYING, TRAY_ICON_PAUSING},
   };
+
+  // VipleStream §N — show_tray_balloon 實作，forward declared 在 line ~106。
+  static void show_tray_balloon(const char *title, const char *text) {
+    if (!tray_initialized) return;
+    tray.notification_title = title;
+    tray.notification_text = text;
+    tray.notification_icon = TRAY_ICON;
+    tray.notification_cb = nullptr;
+    tray_update(&tray);
+  }
 
   const char *GetResourcePath(const char *relativePath) {
   #ifdef __APPLE__
@@ -285,6 +378,10 @@ namespace system_tray {
       return;
     }
 
+    // VipleStream §N — stream 開始時啟用檔案傳輸 menu items
+    tray_menu_items[k_xfer_send_idx].disabled = 0;
+    tray_menu_items[k_xfer_recv_idx].disabled = 0;
+
     tray.notification_title = nullptr;
     tray.notification_text = nullptr;
     tray.notification_cb = nullptr;
@@ -326,6 +423,11 @@ namespace system_tray {
     if (!tray_initialized) {
       return;
     }
+
+    // VipleStream §N — stream 結束時 disable 檔案傳輸 menu items + 中止 in-flight
+    tray_menu_items[k_xfer_send_idx].disabled = 1;
+    tray_menu_items[k_xfer_recv_idx].disabled = 1;
+    file_transfer::manager::instance().abort_all("stream_stopped");
 
     tray.notification_title = nullptr;
     tray.notification_text = nullptr;

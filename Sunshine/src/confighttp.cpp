@@ -34,6 +34,7 @@
 #include "crypto.h"
 #include "display_device.h"
 #include "file_handler.h"
+#include "file_transfer.h"
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
@@ -912,6 +913,441 @@ namespace confighttp {
       BOOST_LOG(warning) << "Update Client: "sv << e.what();
       bad_request(response, request, e.what());
     }
+  }
+
+  /**
+   * @brief VipleStream §N — Receive file from client picker page.
+   *
+   * 流程：
+   *   1. 使用者在 stream 中右鍵 server tray → "Receive file from client..."
+   *   2. tray callback 已 queue 一個 LIST_DIR 命令給 client + 開瀏覽器到 /transfer
+   *   3. 本 endpoint 服務 HTML 頁，頁面 JS 每 1s 抓 /transfer/listing/latest
+   *      直到拿到 client 回傳的目錄列表，渲染成可選清單。
+   *   4. 使用者按 Pull → POST /transfer/pull?filename=foo → server 排
+   *      UPLOAD_FROM_CLIENT 命令；client 下次 poll 拿到、開始上傳。
+   *
+   * 採內聯 HTML/JS（不走 Vue 3 bundle）— 此頁只在 in-stream tray flow 用，
+   * 不需要跟 Web UI 主 SPA 整合。
+   */
+  void xferPage(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    static const std::string html = R"HTML(<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<title>VipleStream — Receive from client</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", system-ui; background: #1a1a1a; color: #e0e0e0; padding: 18px; margin: 0; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  .hint { color: #888; font-size: 12px; margin-bottom: 12px; }
+  .pathbar { display: flex; gap: 6px; margin-bottom: 8px; }
+  .pathbar input { flex: 1; background: #222; color: #eee; border: 1px solid #444; padding: 6px 10px; border-radius: 4px; font-family: monospace; font-size: 13px; }
+  .pathbar button { padding: 6px 14px; }
+  .breadcrumb { color: #888; font-size: 12px; margin-bottom: 8px; word-break: break-all; }
+  .breadcrumb a { color: #4a9eff; cursor: pointer; text-decoration: none; }
+  .breadcrumb a:hover { text-decoration: underline; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #2a2a2a; }
+  th { color: #888; font-size: 11px; text-transform: uppercase; }
+  tr:hover { background: #232323; }
+  td.name { display: flex; align-items: center; gap: 8px; }
+  td.name a { color: #79bdff; cursor: pointer; text-decoration: none; }
+  td.name a:hover { text-decoration: underline; }
+  .icon { display: inline-block; width: 16px; text-align: center; }
+  .size { color: #aaa; font-variant-numeric: tabular-nums; min-width: 80px; }
+  button { background: #4a9eff; color: white; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  button:hover { background: #5badff; }
+  button:disabled { background: #555; cursor: default; }
+  button.up { background: #555; }
+  #status { margin: 10px 0; padding: 8px 12px; background: #2a2a2a; border-radius: 4px; min-height: 1em; font-size: 13px; }
+  .err { color: #ff7777; }
+  .ok { color: #77ff77; }
+  #progress { margin: 8px 0; }
+  #progressBar { width: 100%; height: 6px; background: #333; border-radius: 3px; overflow: hidden; }
+  #progressFill { height: 100%; background: #4a9eff; width: 0%; transition: width 0.3s; }
+  #progressText { font-size: 12px; color: #aaa; margin-top: 4px; }
+</style>
+</head>
+<body>
+<h1>Receive from client</h1>
+<div class="hint">Browse client filesystem. Click a folder to enter; "Pull" downloads file or folder (folder is zipped first) to server's Downloads.</div>
+
+<div class="pathbar">
+  <button class="up" id="upBtn" title="Up one level">⬆</button>
+  <input type="text" id="pathInput" placeholder="Client absolute path (空白 = Downloads)" />
+  <button id="goBtn">Go</button>
+  <button id="homeBtn" title="Home (Downloads)">🏠</button>
+</div>
+<div class="breadcrumb" id="breadcrumb"></div>
+
+<div id="status">Loading…</div>
+<div id="progress" style="display:none">
+  <div id="progressBar"><div id="progressFill"></div></div>
+  <div id="progressText"></div>
+</div>
+
+<table id="filesTable" style="display:none">
+  <thead><tr><th>Name</th><th>Size</th><th></th></tr></thead>
+  <tbody id="filesBody"></tbody>
+</table>
+
+<script>
+const statusEl = document.getElementById('status');
+const table = document.getElementById('filesTable');
+const tbody = document.getElementById('filesBody');
+const progress = document.getElementById('progress');
+const progressFill = document.getElementById('progressFill');
+const progressText = document.getElementById('progressText');
+const pathInput = document.getElementById('pathInput');
+const breadcrumb = document.getElementById('breadcrumb');
+let currentPath = '';     // empty = client Downloads (server default)
+let currentSep = '\\';    // detected when listing arrives; defaults to backslash for Windows
+let activeToken = null;
+let progressTimer = null;
+let pollingTimer = null;
+
+function fmtSize(n) {
+  if (n < 0) return '-';
+  if (n < 1024) return n + ' B';
+  if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+  if (n < 1024*1024*1024) return (n/1024/1024).toFixed(1) + ' MB';
+  return (n/1024/1024/1024).toFixed(2) + ' GB';
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function detectSep(path) {
+  if (path.includes('\\')) return '\\';
+  if (path.includes('/')) return '/';
+  return currentSep;
+}
+
+function parentPath(path) {
+  if (!path) return '';
+  // Strip trailing separator
+  let p = path.replace(/[\\/]+$/, '');
+  const lastSep = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+  if (lastSep <= 0) return '';
+  // Special-case "C:\foo" -> "C:\" (keep the root)
+  if (lastSep === 2 && p[1] === ':') return p.slice(0, 3);
+  return p.slice(0, lastSep);
+}
+
+function joinPath(base, name) {
+  if (!base) return name;
+  const sep = currentSep;
+  const trimmed = base.replace(/[\\/]+$/, '');
+  return trimmed + sep + name;
+}
+
+function renderBreadcrumb(path) {
+  if (!path) {
+    breadcrumb.innerHTML = '<em>Client default Downloads</em>';
+    return;
+  }
+  const sep = detectSep(path);
+  currentSep = sep;
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  let cumulative = '';
+  const links = [];
+  for (let i = 0; i < parts.length; ++i) {
+    if (i === 0 && /^[A-Za-z]:$/.test(parts[0])) {
+      cumulative = parts[0] + sep;
+    } else {
+      cumulative = cumulative ? cumulative.replace(/[\\/]+$/, '') + sep + parts[i] : sep + parts[i];
+    }
+    const target = cumulative;
+    links.push(`<a data-path="${escapeHtml(target)}">${escapeHtml(parts[i])}</a>`);
+  }
+  breadcrumb.innerHTML = links.join(' <span style="color:#555">' + sep + '</span> ');
+  for (const a of breadcrumb.querySelectorAll('a')) {
+    a.onclick = () => navigateTo(a.dataset.path);
+  }
+}
+
+function navigateTo(path) {
+  currentPath = path || '';
+  pathInput.value = currentPath;
+  renderBreadcrumb(currentPath);
+  statusEl.textContent = 'Loading ' + (currentPath || 'Downloads') + '…';
+  table.style.display = 'none';
+  tbody.innerHTML = '';
+  // Ask server to refresh listing for this path
+  fetch('/transfer/listing/latest?path=' + encodeURIComponent(currentPath), { credentials: 'include' })
+      .catch(() => {});
+  if (pollingTimer) clearTimeout(pollingTimer);
+  pollingTimer = setTimeout(pollListing, 600);
+}
+
+async function pollListing() {
+  try {
+    const r = await fetch('/transfer/listing/latest', { credentials: 'include' });
+    if (r.status === 204) {
+      pollingTimer = setTimeout(pollListing, 800);
+      return;
+    }
+    if (!r.ok) {
+      statusEl.innerHTML = '<span class="err">Failed to fetch listing: '+r.status+'</span>';
+      return;
+    }
+    const entries = await r.json();
+    if (!Array.isArray(entries)) {
+      statusEl.innerHTML = '<span class="err">Bad listing payload</span>';
+      return;
+    }
+    // Sort: folders first, then files, both alphabetical
+    entries.sort((a, b) => {
+      if ((a.is_directory ? 1 : 0) !== (b.is_directory ? 1 : 0)) {
+        return a.is_directory ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
+    statusEl.textContent = entries.length + ' item(s) in ' + (currentPath || 'Downloads');
+    table.style.display = '';
+    tbody.innerHTML = '';
+    for (const e of entries) {
+      const tr = document.createElement('tr');
+      const tdName = document.createElement('td');
+      tdName.className = 'name';
+      const isDir = !!e.is_directory;
+      tdName.innerHTML = `<span class="icon">${isDir ? '📁' : '📄'}</span>`;
+      if (isDir) {
+        const a = document.createElement('a');
+        a.textContent = e.name;
+        a.onclick = () => navigateTo(joinPath(currentPath || (e.parent || ''), e.name));
+        tdName.appendChild(a);
+      } else {
+        const span = document.createElement('span');
+        span.textContent = e.name;
+        tdName.appendChild(span);
+      }
+      tr.appendChild(tdName);
+
+      const tdSize = document.createElement('td');
+      tdSize.className = 'size';
+      tdSize.textContent = isDir ? '-' : fmtSize(e.size);
+      tr.appendChild(tdSize);
+
+      const tdAct = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.textContent = isDir ? 'Pull as zip' : 'Pull';
+      btn.onclick = () => pull(e.name, e.size, isDir);
+      tdAct.appendChild(btn);
+      tr.appendChild(tdAct);
+
+      tbody.appendChild(tr);
+    }
+  } catch (err) {
+    statusEl.innerHTML = '<span class="err">Error: '+err+'</span>';
+  }
+}
+
+async function pull(filename, size, isDir) {
+  document.querySelectorAll('button').forEach(b => b.disabled = true);
+  try {
+    const params = new URLSearchParams();
+    params.set('filename', filename);
+    params.set('size', String(size || 0));
+    params.set('is_directory', isDir ? '1' : '0');
+    if (currentPath) params.set('path', currentPath);
+    const r = await fetch('/transfer/pull?' + params.toString(),
+                         { method: 'POST', credentials: 'include' });
+    if (!r.ok) {
+      statusEl.innerHTML = '<span class="err">Pull failed: '+r.status+'</span>';
+      document.querySelectorAll('button').forEach(b => b.disabled = false);
+      return;
+    }
+    const data = await r.json();
+    activeToken = data.token;
+    statusEl.textContent = (isDir ? 'Receiving folder (zipping on client): ' : 'Receiving ') + filename + '…';
+    progress.style.display = '';
+    progressTimer = setInterval(updateProgress, 800);
+  } catch (err) {
+    statusEl.innerHTML = '<span class="err">Pull error: '+err+'</span>';
+  }
+}
+
+async function updateProgress() {
+  if (!activeToken) return;
+  try {
+    const r = await fetch('/transfer/progress-proxy?token=' + activeToken, { credentials: 'include' });
+    if (!r.ok) return;
+    const t = await r.json();
+    if (t.total_bytes > 0) {
+      const pct = Math.floor(t.bytes_done * 100 / t.total_bytes);
+      progressFill.style.width = pct + '%';
+      progressText.textContent = pct + '% (' + fmtSize(t.bytes_done) + ' / ' + fmtSize(t.total_bytes) + ')';
+    } else {
+      progressFill.style.width = '50%';
+      progressText.textContent = fmtSize(t.bytes_done) + ' received';
+    }
+    if (t.state === 'done') {
+      clearInterval(progressTimer);
+      progressFill.style.width = '100%';
+      statusEl.innerHTML = '<span class="ok">完成：' + escapeHtml(t.filename) + ' → server Downloads</span>';
+      document.querySelectorAll('button').forEach(b => b.disabled = false);
+      activeToken = null;
+    } else if (t.state === 'failed' || t.state === 'canceled') {
+      clearInterval(progressTimer);
+      statusEl.innerHTML = '<span class="err">失敗：' + escapeHtml(t.error || t.state) + '</span>';
+      document.querySelectorAll('button').forEach(b => b.disabled = false);
+      activeToken = null;
+    }
+  } catch (err) { /* keep retrying */ }
+}
+
+document.getElementById('goBtn').onclick = () => navigateTo(pathInput.value.trim());
+document.getElementById('homeBtn').onclick = () => navigateTo('');
+document.getElementById('upBtn').onclick = () => navigateTo(parentPath(currentPath));
+pathInput.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') navigateTo(pathInput.value.trim());
+});
+
+renderBreadcrumb('');
+pollListing();
+</script>
+</body>
+</html>
+)HTML";
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "text/html; charset=utf-8");
+    response->write(SimpleWeb::StatusCode::success_ok, html, headers);
+  }
+
+  /**
+   * @brief VipleStream §N — return the cached listing for the current stream owner.
+   * 204 if not yet ready (client hasn't responded), 200 with JSON array otherwise.
+   *
+   * 額外：query `?path=...` 觸發換目錄（重新 queue list_dir 給 client，本次
+   * 回 204，下次 fetch 才能拿新 listing）。
+   */
+  void xferListing(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    auto owner = proc::proc.running_owner_uuid();
+    if (proc::proc.running() <= 0 || owner.empty()) {
+      response->write(SimpleWeb::StatusCode::client_error_conflict, R"({"error":"no_active_stream"})");
+      return;
+    }
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+
+    auto args = request->parse_query_string();
+    auto it = args.find("path");
+    if (it != args.end()) {
+      // Web UI 要求換目錄 — 重 queue list_dir + 立即回 204 讓 UI poll
+      file_transfer::manager::instance().queue_list_dir(owner, it->second);
+      response->write(SimpleWeb::StatusCode::success_no_content, std::string {}, headers);
+      return;
+    }
+
+    auto listing = file_transfer::manager::instance().take_listing(owner);
+    if (listing.empty()) {
+      response->write(SimpleWeb::StatusCode::success_no_content, std::string {}, headers);
+      return;
+    }
+    response->write(SimpleWeb::StatusCode::success_ok, listing, headers);
+  }
+
+  /**
+   * @brief VipleStream §N — user clicked "Pull" in the web UI; queue an
+   * UPLOAD_FROM_CLIENT command targeted at the current stream owner.
+   */
+  void xferPull(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    auto owner = proc::proc.running_owner_uuid();
+    if (proc::proc.running() <= 0 || owner.empty()) {
+      response->write(SimpleWeb::StatusCode::client_error_conflict, R"({"error":"no_active_stream"})");
+      return;
+    }
+    auto args = request->parse_query_string();
+    std::string filename;
+    std::string path;
+    std::uint64_t size = 0;
+    bool is_directory = false;
+    {
+      auto it = args.find("filename");
+      if (it == args.end() || it->second.empty()) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"missing_filename"})");
+        return;
+      }
+      filename = it->second;
+    }
+    {
+      auto it = args.find("path");
+      if (it != args.end()) path = it->second;
+    }
+    {
+      auto it = args.find("size");
+      if (it != args.end()) {
+        try { size = std::stoull(it->second); } catch (...) { size = 0; }
+      }
+    }
+    {
+      auto it = args.find("is_directory");
+      if (it != args.end()) {
+        is_directory = (it->second == "1" || it->second == "true");
+      }
+    }
+    auto token = file_transfer::manager::instance().queue_receive_from_client(
+        owner, path, filename, is_directory, size);
+    if (token.empty()) {
+      response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"bad_filename"})");
+      return;
+    }
+    nlohmann::json out;
+    out["token"] = token;
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    response->write(SimpleWeb::StatusCode::success_ok, out.dump(), headers);
+  }
+
+  /**
+   * @brief VipleStream §N — progress proxy for the web UI page (so it can
+   * read transfer progress without dealing with paired-cert HTTPS).
+   */
+  void xferProgressProxy(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    auto args = request->parse_query_string();
+    auto it = args.find("token");
+    if (it == args.end()) {
+      response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"missing_token"})");
+      return;
+    }
+    auto t = file_transfer::manager::instance().get_transfer(it->second);
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    if (!t) {
+      response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"unknown_token"})", headers);
+      return;
+    }
+    const char *state_str = "unknown";
+    switch (t->st) {
+      case file_transfer::state::pending: state_str = "pending"; break;
+      case file_transfer::state::running: state_str = "running"; break;
+      case file_transfer::state::done: state_str = "done"; break;
+      case file_transfer::state::canceled: state_str = "canceled"; break;
+      case file_transfer::state::failed: state_str = "failed"; break;
+    }
+    nlohmann::json out;
+    out["token"] = t->token;
+    out["state"] = state_str;
+    out["bytes_done"] = t->bytes_done;
+    out["total_bytes"] = t->total_bytes;
+    out["filename"] = t->display_name;
+    out["error"] = t->error_msg;
+    response->write(SimpleWeb::StatusCode::success_ok, out.dump(), headers);
   }
 
   /**
@@ -1846,6 +2282,12 @@ namespace confighttp {
     server.resource["^/api/restart$"]["POST"] = restart;
     server.resource["^/api/vigembus/status$"]["GET"] = getViGEmBusStatus;
     server.resource["^/api/vigembus/install$"]["POST"] = installViGEmBus;
+
+    // VipleStream §N — in-stream file transfer Receive picker UI
+    server.resource["^/transfer$"]["GET"]                = xferPage;
+    server.resource["^/transfer/listing/latest$"]["GET"] = xferListing;
+    server.resource["^/transfer/pull$"]["POST"]          = xferPull;
+    server.resource["^/transfer/progress-proxy$"]["GET"] = xferProgressProxy;
 
     // static/dynamic resources
     server.resource["^/images/sunshine.ico$"]["GET"] = getFaviconImage;

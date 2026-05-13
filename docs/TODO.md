@@ -17,6 +17,7 @@
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
 | **Active (next)** | **§J.3.e.X Path β.11** FRUC interp quality 微調 | β.11 hypothesis 1 baseline (EDGE_AWARE_MV_THRESHOLD 2.0→8.0 動態邊緣 8×8 馬賽克 fix) ship in v1.4.11 (fa46a88)，待使用者實測決定：keep / 試 16 (仍馬賽克) / 退 4 (edge 變糊) / 改 push constant runtime tunable。其他 hypothesis (luma-gap backstop / big-motion bias / sub-pixel precision) 若需要再開 |
+| **Active (P0, post-v1.4.33)** | **§M.1.f** stale ownership lock 自動 timeout | 2026-05-13 觀察：沒有任何人連線時新設備 /launch 仍被 deny「Server in use by another paired device」。Hypothesis：`proc::proc.running()` (used by §M.1 line 1063 owner check) 仍 true 但 `rtsp_stream::session_count() == 0`；client 異常斷線 (force-kill / WiFi drop / 設備睡) 沒清掉 owner_uuid。修法：proc_t 加 last_activity timestamp + /launch 路徑若 session_count==0 且 last_activity > N 秒前自動 takeover；或 timer thread 每 30s reconcile owner state vs session_count。產品 blocker — single user 自己也被誤鎖 |
 | **Active (post-v1.4.12)** | **§M.2** Phase 2 雙 user 並發 streaming 驗測 | Ubuntu VM 上 per-user systemd + Xdummy + PipeWire 端到端跑通；NVENC 並發等實體機到位。等 §M.1 (v1.4.12) 取得使用者實測 sign-off 後開工 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Active** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限） |
@@ -35,6 +36,11 @@
 | **Low** | **§J.3.e.Y 4Y.7** dispatch fusion (Conv→ReLU→BinOp 合併) | C.1 (Conv→Mul channel-bcast beta) 已 ship in 0e6240a；Conv→ReLU 合併還沒做，預估 chain -10%；目前 60fps DUAL 已能跑不擋使用 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
 | **Low** | **§D** HelpLauncher URL → 結構化 docs | docs/setup_guide.md + docs/troubleshooting.md 已寫；HelpLauncher 切過去等 doc site stand 起來 |
+| **Active (P0, post-v1.4.33)** | **§N.5.bug** Android file transfer SSL + server stale state | 2026-05-13 Pixel 5 實測：poll 第一次成功收 `download_to_client` cmd → client UI emit "下載 0%" notification → 39ms 後 GET `/transfer/blob` 立刻 SSL `TLSV1_ALERT_INTERNAL_ERROR`，後續 poll 也全 fail。Server log 沒任何 `[VIPLE-XFER] /transfer/blob GET`，表示 handler 沒跑到。**兩個 bug**：(a) client `NvHTTP.getLongConnectClient()` SSL trust manager fix 只在首個 request 生效，OkHttp keep-alive / HTTP/2 multiplex 跟 server `SSL_get_ex_data` caller_uuid lifetime 對不上；(b) server `file_transfer::manager` 對 `ok=false bytes=0` 的 finalize 沒清 state，下次 send 被 `[VIPLE-XFER] tray Send: another transfer in progress` 拒絕 |
+| **Active (post-v1.4.33)** | **§N.5** moonlight-android FileTransferClient runtime verify | 建置 + JNI hooked，但實機未測；接收方向 listing 走 MediaStore.Downloads 而非任意 path（v1 限制） |
+| **Low (post-v1.4.33)** | **§N.6** moonlight-qt Cancel hotkey (Ctrl+Alt+Shift+X) | Web UI 重新整理 + 等 stream 結束已可中止 transfer；in-session hotkey 還沒接到 session keystroke handler |
+| **Low** | **§N.7** Sunshine Linux fs_picker (zenity) | 「Send to client」要在 Linux server 才需要；Linux server 還是 rare-usage（§K.1 SHIPPED 但 host 通常在 Windows）|
+| **Low (post-v1.4.20+)** | **§H.4-perf** VkFrucRenderer AMD draw-time perf fix | OSD「(含 V-sync; 60Hz 下限 ~16.7ms)」標籤已 ship；m_FrucMode=false 真實 ~13ms (60Hz) 仍偏高，要先抓 `[VIPLE-VKFRUC-GPU-PROF]` 量化才能 dive in。AMD-only，NV 未複現 |
 
 ### v1.4.0 ship 帶走的條目（之前在 Active 表內）
 
@@ -62,11 +68,40 @@
 - ✅ **§J.3.e.X β.11** TRIPLE+ME EDGE_AWARE_MV_THRESHOLD 2.0 → 8.0（`fa46a88`，v1.4.11）— TRIPLE+ME 動態邊緣 8×8 馬賽克 fix。kFrucWarpShaderGlsl::sampleMV 內 edge-aware MV smoothing threshold 從 2.0 (1.4 px L2 diff) → 8.0 (2.83 px) 過濾 noise 維持 bilinear smooth；大 motion boundary (>2.83 px diff) 仍切 nearest pick 保 edge 銳利。Hypothesis 1 baseline，仍 active 等使用者實測（見 Active 表 §J.3.e.X Path β.11）
 - ✅ **§M.1** Multi-user ownership guards + Web UI session dashboard（`79c47f9`，v1.4.12）— 修「多人共用 server 時 A 客戶端意外殺到 B 的 Steam 遊戲」bug (詳 §M section)
 
+### post-v1.4.12 patch series 帶走的條目（v1.4.13 → v1.4.33, 2026-05-13）
+
+主軸：**§N in-stream 雙向檔案傳輸功能（Send to client / Receive from client）+ §H.4 AMD client 解析度退回 + OSD V-sync 標籤**。
+
+- ✅ **§H.4.send** AMD client 1920×1200 → 1920×1080 silent downgrade — Sunshine `/serverinfo` 加 `<DisplayMode>` 廣播 host primary display；moonlight-qt session.cpp 啟動 stream 前依 `m_Computer->displayModes` 自動 clamp；SettingsView 解析度 dropdown 透過新 `ComputerManager.getMaxHostDisplayMode()` 過濾掉 host 物理無法提供的解析度。NV server / 沒 `<DisplayMode>` 廣播自動 skip 不影響 vanilla 互通
+- ✅ **§H.4.osd** Frame draw time OSD 「(含 V-sync; 60Hz 下限 ~16.7ms)」標籤強化 — 解使用者「30ms 看起來很高」的困惑；60Hz 一張 frame 的 v-sync 期就 16.7ms，扣掉之後 AMD 真實 GPU work ~13ms（待 §H.4-perf 處理）
+- ✅ **§T.tray-i18n** Tray menu「Open Sunshine」→「Open VipleStream」rebrand（system_tray.cpp）
+- ✅ **§N.1** In-stream 檔案傳輸 server 端（Sunshine v1.4.14 → v1.4.32）
+  - 新 `src/file_transfer.{h,cpp}` manager — per-paired-client command queue + token registry + chunked I/O + path sanitize + active-user Downloads dir resolver (WTSGetActiveConsoleSessionId + WTSQueryUserToken)
+  - 5 個 HTTPS endpoints in `nvhttp.cpp`：`/transfer/poll`（non-blocking poll）/`/transfer/result`/`/transfer/blob`（GET 拉檔 + POST 推檔）/`/transfer/progress`
+  - 4 個 confighttp HTTPS endpoints：`/transfer`（HTML page）/`/transfer/listing/latest`（含 `?path=` 換目錄）/`/transfer/pull`（含 `path` + `is_directory` params）/`/transfer/progress-proxy`
+  - `src/system_tray.cpp` 加「Send file to client」/「Receive file from client」menu items + `update_tray_playing/stopped` 同步 disabled 狀態 + tray balloon UX 提示
+  - Windows native picker `src/platform/windows/fs_picker.cpp`（IFileOpenDialog COM wrapper）+ link `wtsapi32.lib`
+  - Receive UI 升級成檔案總管樣式：path input + 麵包屑 + Up/Home buttons + 資料夾可點進去 + folder 顯示「Pull as zip」+ 自動以 client 端 zip 後上傳（Windows PowerShell `Compress-Archive` / Linux `zip`）
+- ✅ **§N.2** In-stream 檔案傳輸 moonlight-qt client（v1.4.15 → v1.4.33）
+  - 新 `streaming/transfer/filetransferclient.{h,cpp}` — 2s 輪詢 + LIST_DIR / DOWNLOAD_TO_CLIENT / UPLOAD_FROM_CLIENT / CANCEL dispatcher
+  - **獨立 QThread + Qt event loop** — Session::exec() 跑 SDL main loop 整段 starve 主執行緒 Qt event loop，QTimer / QNAM 必須住自己的 thread 才會運作
+  - Stream-end teardown：先 clear QPointer 再 `abort()` 避免 same-thread synchronous `finished` signal callback 把 reply 提早 delete 造成 null deref crash
+  - SSL 端：onSslErrors connected，pinned `m_Computer->serverCert` 比對通過就 `ignoreSslErrors`（同 NvHTTP::handleSslErrors）；每次大檔 transfer 結束 `m_Nam->clearAccessCache()` 強制刷新連線池避免半關閉 socket 重用
+  - Folder zip 上傳：PowerShell `Compress-Archive` / Linux `zip` 跑 subprocess 把資料夾打包到 temp，上傳完自動清掉
+  - 進度 OSD：`OverlayManager::updateOverlayText(OverlayStatusUpdate, ...)` 每 5% 步進
+- ✅ **§N.3** In-stream 檔案傳輸 moonlight-android client（v1.4.19）
+  - 新 `transfer/FileTransferClient.java` — OkHttp polling + `MediaStore.Downloads` (scoped-storage) 讀寫 + streaming RequestBody
+  - `Game.java` lifecycle 掛載 + `displayTransientMessage` toast 進度
+  - `NvHTTP.java` 加 `getLongConnectClient()` getter
+- ✅ **§N.4** Server poll endpoint non-blocking bug — manager::poll(timeout=0) 被誤判為「`<=0` 用 30s default」而 block 30s，client 15s watchdog 永遠贏，polling 全 fail。改回真正 non-blocking 才解開整套
+- ✅ **§N.4b** Server downloads dir 寫到 SYSTEM profile bug — 服務 LocalSystem 帳號跑 `SHGetKnownFolderPath(nullptr)` 回 `C:\Windows\system32\config\systemprofile\Downloads`，使用者看不到。改用 active console user token 拿正確的 `C:\Users\<user>\Downloads`
+
 **Negative result (走錯後 revert)：**
 
 - ❌ **§J.3.e.Y 4Y.5b** activation fp16 storage — wip/4Y.5b-activation-fp16 branch 留檔 (82afee5)，main 已砍。256x256 場景 chain 反而 +1.7ms（4Y.5a postmortem 的 L1-cache-bound 結論在這裡套上 = bandwidth 不是 bottleneck）
 - ❌ **§J.3.e.2.i.9** kFrucFramesInFlight 2→4 bump — v1.4.2 (234d2aa) 走錯方向。在 v1.4.8 (6b9bb89) revert
 - ❌ **§J.3.e.2.i.10d** extra_hw_frames=8 (Round 4) — pool size 不是 dominant bottleneck，Round 5 確認後 revert 回 1
+- ❌ **§N.client.connection-cache** moonlight-qt FileTransferClient `ConnectionCacheExpiryTimeoutSecondsAttribute=0` — 仿照 NvHTTP 設這個 attribute（NvHTTP 是 GFE-compat 用），在 Sunshine + Qt 6.10 環境下反而讓第一次 poll 直接 hang 15s 被 watchdog 砍掉。已 revert，改在每次 transfer 結束後 `clearAccessCache()` 處理半關閉 socket 重用問題
 
 ---
 
@@ -786,6 +821,43 @@ AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame
 
 **完整設計 + 測試 SOP：** `~/.claude/plans/steam-linked-volcano.md`
 
+### §M.1.f Follow-up bug — stale ownership lock 沒 timeout（**Active P0**, 2026-05-13 觀察）
+
+**觀察：** 使用者實機回報「沒有任何人連線，其中一台設備要連線時顯示已有設備佔線」。即 single user 自己也被 §M.1 的 ownership check 誤鎖 — 上次 session 結束後 server 仍記得 `proc::proc.running_owner_uuid()`，新 /launch 走 line 1085 deny path「Server in use by another paired device. Confirm takeover and retry」。
+
+**Root cause hypothesis：**
+
+§M.1 在 `nvhttp.cpp:1063-1095` 的 /launch deny 邏輯只看 `proc::proc.running()` 跟 owner_uuid 比對 caller_uuid。沒檢查 `rtsp_stream::session_count()` 是否真的 > 0。當 client 異常斷線（強殺 app / WiFi drop / 設備睡 / TLS error 之類），server 端：
+
+- `rtsp_stream::session_count()` 可能歸 0（RTSP teardown handler 跑了）
+- 但 `proc::proc` 仍持有 owner_uuid（session detach 路徑沒走到 `proc.terminate()` / `proc.detach()` 清空 _owner_uuid）
+
+下個 client /launch 時，`proc.running() > 0 && owner_uuid != caller` → deny。
+
+對照：§M.1 takeover 邏輯需要 client 顯式送 `?takeover=1`（原生 Moonlight 不送），所以日常 single-user 場景沒有 retry 路徑。
+
+**修法方向（待設計階段決定走哪條，可組合）：**
+
+1. **倒空 owner on session-count-zero**：`rtsp_stream` session teardown handler 加 hook，若 session_count drop 到 0 → 呼叫 `proc::proc.clear_owner_uuid()`。最 surgical 但要找對 teardown 點。
+2. **/launch 自動 takeover 條件**：若 `proc.running()` 但 `rtsp_stream::session_count() == 0` → 視同 stale，直接允許新 caller takeover 不送 503。比 (1) 更防禦性。
+3. **last_activity timestamp**：proc_t 加 `_last_activity_ms` 欄位，rtsp_stream / control / video / input packet 收到時 bump。/launch 收到時若 last_activity > 30s ago (TODO: tune) → auto takeover。實作量最大但對所有 stale 路徑都有效。
+
+**建議實作順序：** 先做 (1) + (2) 組合 — (1) 從根本清掉 stale state，(2) 是防禦性 fallback。(3) 留給 Phase 2 多 session 時更精細的 idle detection 用。
+
+**檔案範圍：**
+- `Sunshine/src/nvhttp.cpp` line 1063-1095 (`launch` handler 加 session_count check)
+- `Sunshine/src/process.cpp` / `process.h` (`proc_t` 加 `clear_owner_uuid()` method)
+- `Sunshine/src/rtsp.cpp` (session teardown hook 呼叫 `clear_owner_uuid()`)
+
+**嚴重性：** 產品 blocker — 不影響 §M.1 多 user 用例的設計初衷（多人共用 server 時 ownership check 仍正確），但每次 single user 異常斷線都要等使用者手動「Force Disconnect via Web UI」或 server restart，日常使用體驗很差。
+
+**驗測 SOP（修完）：**
+1. Client A 連 → stream → 強殺 app (swipe out / adb kill)
+2. 等 5-10 秒
+3. Client A 重新 launch → 預期：自動 takeover、不出現「Server in use by another paired device」
+4. Web UI 「Current Session」卡片應顯示 active 或自動歸零
+5. Force Disconnect 按鈕仍保留作 admin 手動 override 路徑
+
 ### §M.2 Phase 2 — Ubuntu VM 雙 user 並發 streaming 驗測
 
 **目標：** 在 VipleStream 既有的 Ubuntu test VM (`<test-user>@<linux-test-vm>`) 上端到端跑通雙 user 並發 streaming 流程，驗證 Sunshine + per-user systemd + Xdummy/EVDI + PipeWire stack 可行。**不在 Phase 1 改 Sunshine multi-session、不在這階段驗 NVENC 並發 license — 那等實體測試機。**
@@ -815,6 +887,49 @@ AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame
 ### §M.3 Phase 3 — Linux host migration（待 §M.2 通過 + 實體機到位）
 
 延後規劃，視 §M.2 結果 + 使用者實體機到位後評估：distro 選擇 (Bazzite KDE NVIDIA / Ubuntu LTS / 其他) / X11 vs Wayland 路線 / Proton 相容性實測 / 是否真執行 host OS migration。
+
+---
+
+## §H. AMD client + 解析度誠實化
+
+§H.4.send / §H.4.osd 已 ship in v1.4.14 → v1.4.20 (詳見上面 patch series 條目)。剩下：
+
+### §H.4-perf VkFrucRenderer AMD draw-time perf fix
+
+**現況：** OSD 「Frame draw time (含 V-sync; 60Hz 下限 ~16.7ms)」標籤已說明 60Hz 為什麼一張 frame 至少 16.7ms。AMD client 上 m_FrucMode=false 的真實 GPU work 仍 ~13ms（NV 同 path 通常 ~2-4ms），明顯偏高。
+
+**何時清：** 需要 user 提供 `[VIPLE-VKFRUC-GPU-PROF]` + `[VIPLE-VKFRUC-SW-PROF]` 5-10 行 log 才能精準改 — 不知熱點落在 nv12rgb / descriptor update / pipeline barrier / present-block 哪段就盲改 9843 行的 hot path 太冒險。
+
+**修法分支：**
+- Step 2A `m_FrucMode=false` fast-path — 跳過 FRUC-only descriptor updates + cmd records（ME/median/warp/copy）
+- Step 2B 縮減冗餘 GPU pass — sampler chroma reconstruction LINEAR→NEAREST、tone-mapping `m_HdrActive` 守衛
+- Step 2C swapchain present mode — image_count ≥ 3 或 MAILBOX 避免 driver-side stall
+
+---
+
+## §N. In-stream 雙向檔案傳輸
+
+§N.1 / §N.2 / §N.3 / §N.4 / §N.4b 已 ship in v1.4.14 → v1.4.32 (詳見上面 patch series 條目)。剩下：
+
+### §N.5 moonlight-android FileTransferClient runtime verify
+
+**現況：** APK 建置 + JNI hooked + Game.java lifecycle 通；`MediaStore.Downloads` scoped-storage 路徑寫對；但實機未在串流 session 中真正跑過 Send/Receive flow，可能有 Pixel 5 / Pixel 9 specific Android quirks（譬如 backgrounding 中 OkHttp 連線維持、power manager 影響 polling）。
+
+**何時清：** 下次 Android client 整段 streaming session 驗測時順帶過一輪 Send 小檔 → 完成後再回頭看 Receive listing UI 是否需要任何 Android 端的調整（譬如 listing 預設路徑該不該是 `MediaStore.Downloads.EXTERNAL_CONTENT_URI` 而非 host-style absolute path）。
+
+### §N.6 moonlight-qt Cancel hotkey (Ctrl+Alt+Shift+X)
+
+**現況：** `FileTransferClient::cancelCurrent()` 已實作，會 abort reply + POST `kind=canceled` 到 server。但沒接到 SDL session keystroke handler，所以 user 在 stream 中無法用 hotkey 取消。目前的替代方案：透過 Web UI 重新整理（清掉狀態）或者結束 stream（觸發 abort_all）。
+
+**何時清：** 找到 session.cpp 中處理 Ctrl+Alt+Shift+* combo 的位置，把 X 也綁進去呼叫 `m_FileTransferClient->cancelCurrent()`。預估 ~10 行 code。
+
+### §N.7 Sunshine Linux fs_picker (zenity)
+
+**現況：** Windows server 端 `IFileOpenDialog` (COM) 已實作。Linux server 端「Send to client」流程觸發 file picker 還沒有實作 — `Sunshine/src/platform/linux/fs_picker.cpp` 該檔尚未建立，呼叫會回 nullopt → tray callback 直接 return（沒檔可送）。
+
+**何時清：** Linux server 真實使用者出現時。用 `zenity --file-selection` subprocess 做最簡解（跨 GTK/Qt/各 DE 都行），預估 ~80 行。
+
+**Receive 方向 Linux server 已可用：** 沒走 native file picker；server 端只負責接 client 上傳的 blob 寫到 `~/Downloads`，路徑解析跟 Windows 共用 `manager::downloads_dir()`（XDG_DOWNLOAD_DIR / HOME/Downloads fallback）。
 
 ---
 

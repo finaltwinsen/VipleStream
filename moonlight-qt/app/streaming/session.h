@@ -296,6 +296,9 @@ private:
 
     Overlay::OverlayManager m_OverlayManager;
 
+    // VipleStream §N — in-stream 雙向檔案傳輸 client（OWNS：session 生命週期內活著）
+    class FileTransferClient *m_FileTransferClient = nullptr;
+
     // VipleStream: connection quality for FRUC adaptive behavior
     std::atomic<bool> m_ConnectionPoor{false};
 

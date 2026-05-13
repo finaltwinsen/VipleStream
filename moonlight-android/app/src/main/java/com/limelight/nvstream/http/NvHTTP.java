@@ -190,6 +190,25 @@ public class NvHTTP {
                 .build();
     }
 
+    /**
+     * VipleStream §N — 提供已 SSL-pinned + paired-cert 配置的 OkHttpClient
+     * 給 FileTransferClient 重用。
+     *
+     * **重要**：NvHTTP 內部的 `httpClientLongConnectTimeout` 沒有掛 SSL
+     * trust manager，每次發 request 是經 `performAndroidTlsHack()` 動態
+     * `client.newBuilder().sslSocketFactory(...)` 才有 self-signed pinned
+     * cert 信任。直接 return 原 client 給 long-lived caller 用會踩
+     * `CertPathValidatorException: Trust anchor for certification path not
+     * found`。這裡跑一次 hack 把 SSL config baked-in 之後 cache 起來。
+     */
+    public OkHttpClient getLongConnectClient() {
+        if (longConnectTlsClient == null) {
+            longConnectTlsClient = performAndroidTlsHack(httpClientLongConnectTimeout);
+        }
+        return longConnectTlsClient;
+    }
+    private OkHttpClient longConnectTlsClient;
+
     public HttpUrl getHttpsUrl(boolean likelyOnline) throws IOException {
         if (httpsPort == 0) {
             // Fetch the HTTPS port if we don't have it already

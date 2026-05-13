@@ -82,6 +82,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/audio.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utf_utils.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utf_utils.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/fs_picker.cpp"
+        "${CMAKE_SOURCE_DIR}/src/fs_picker.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/steam_scanner.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/steam_scanner.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/vdf_parser.h"
@@ -116,6 +118,7 @@ if(MSVC)
             userenv
             ws2_32
             wsock32
+            wtsapi32
     )
 else()
     list(PREPEND PLATFORM_LIBRARIES
@@ -138,6 +141,7 @@ else()
             userenv
             ws2_32
             wsock32
+            wtsapi32
     )
 endif()
 

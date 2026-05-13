@@ -11,6 +11,7 @@
 #include <qmdnsengine/resolver.h>
 
 #include <QThread>
+#include <QSize>
 #include <QReadWriteLock>
 #include <QSettings>
 #include <QRunnable>
@@ -247,6 +248,14 @@ public:
     void quitRunningApp(NvComputer* computer);
 
     QVector<NvComputer*> getComputers();
+
+    // VipleStream §H.4 — return the largest host display mode advertised by any
+    // paired computer (Sunshine-based hosts only — NV/GFE servers advertise
+    // encoder-capable modes rather than physical display modes).  Used by the
+    // global SettingsView to filter the resolution dropdown so the user can't
+    // pick a size no paired host can physically deliver.  Returns QSize(0, 0)
+    // when no Sunshine host has advertised any DisplayMode yet (skip filter).
+    Q_INVOKABLE QSize getMaxHostDisplayMode();
 
     // computer is deleted inside this call
     void deleteHost(NvComputer* computer);

@@ -185,6 +185,20 @@ Flickable {
 
                             // Prune resolutions that are over the decoder's maximum
                             var max_pixels = SystemProperties.maximumResolution.width * SystemProperties.maximumResolution.height;
+
+                            // VipleStream §H.4 — also prune resolutions that exceed every
+                            // paired Sunshine host's largest physical display mode.  Returns
+                            // QSize(0,0) when no host has advertised DisplayMode yet (no
+                            // paired Viple host, or vanilla Sunshine without the §H.4 patch),
+                            // in which case we keep the original decoder-only filter.
+                            var host_max = ComputerManager.getMaxHostDisplayMode()
+                            var host_max_pixels = host_max.width * host_max.height
+                            if (host_max_pixels > 0) {
+                                if (max_pixels === 0 || host_max_pixels < max_pixels) {
+                                    max_pixels = host_max_pixels
+                                }
+                            }
+
                             if (max_pixels > 0) {
                                 for (var j = 0; j < resolutionComboBox.count; j++) {
                                     var existing_width = parseInt(resolutionListModel.get(j).video_width);

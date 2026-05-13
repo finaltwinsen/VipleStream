@@ -1018,6 +1018,14 @@ namespace rtsp_stream {
       return;
     }
 
+    // VipleStream §H.4 — record the negotiated client viewport so that any
+    // resolution mismatch ("client asked for 1920x1200 but host displays
+    // 1920x1080") shows up in the host log without having to attach a
+    // debugger.  Encoder-side configured size is logged separately in video.cpp.
+    BOOST_LOG(info) << "[VIPLE-RES] RTSP client viewport: " << config.monitor.width
+                    << "x" << config.monitor.height
+                    << " @ " << config.monitor.framerate << " fps";
+
     // When using stereo audio, the audio quality is (strangely) indicated by whether the Host field
     // in the RTSP message matches a local interface's IP address. Fortunately, Moonlight always sends
     // 0.0.0.0 when it wants low quality, so it is easy to check without enumerating interfaces.

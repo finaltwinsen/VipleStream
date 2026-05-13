@@ -1254,7 +1254,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                        // VipleStream: \u7DB2\u8DEF\u4E09\u9805\u5408\u4E00\u884C (\u4E1F\u5E40/\u6296\u52D5/\u5EF6\u9072)
                        u8"\u7DB2\u8DEF: \u4E1F\u5E40 %.2f%% / \u6296\u52D5 %.2f%% / \u5EF6\u9072 %s\n"
                        // VipleStream: \u5E73\u5747\u6642\u9593\u4E09\u9805\u5408\u4E00\u884C (\u89E3\u78BC/\u4F47\u5217/\u7E6A\u88FD)
-                       u8"\u5E73\u5747\u6642\u9593: \u89E3\u78BC %.2f / \u4F47\u5217 %.2f / \u7E6A\u88FD %.2f ms (\u542B V-sync)\n",
+                       u8"\u5E73\u5747\u6642\u9593: \u89E3\u78BC %.2f / \u4F47\u5217 %.2f / \u7E6A\u88FD %.2f ms (\u542B V-sync; 60Hz \u4E0B\u9650 ~16.7ms)\n",
                        (float)stats.networkDroppedFrames / stats.totalFrames * 100,
                        (float)stats.pacerDroppedFrames / stats.decodedFrames * 100,
                        rttString,

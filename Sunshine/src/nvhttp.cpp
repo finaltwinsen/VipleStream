@@ -7,6 +7,7 @@
 
 // standard includes
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <format>
 #include <map>
@@ -35,6 +36,7 @@
 #include "config.h"
 #include "display_device.h"
 #include "file_handler.h"
+#include "file_transfer.h"
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
@@ -877,6 +879,39 @@ namespace nvhttp {
     tree.put("root.PairStatus", pair_status);
     tree.put("root.currentgame", current_appid);
     tree.put("root.state", current_appid > 0 ? "SUNSHINE_SERVER_BUSY" : "SUNSHINE_SERVER_FREE");
+
+    // VipleStream §H.4 — expose host primary display mode(s) so the client
+    // can filter its resolution dropdown / clamp selections that exceed what
+    // the host display physically supports.  Upstream Sunshine omits these
+    // elements entirely; vanilla Moonlight's client parser treats them as
+    // optional, so adding them is wire-compat-safe.
+    {
+      const auto enumerated = display_device::enumerate_devices();
+      for (const auto &device : enumerated) {
+        if (!device.m_info || !device.m_info->m_primary) {
+          continue;  // skip inactive / non-primary outputs
+        }
+        const auto &res = device.m_info->m_resolution;
+        const double refresh = std::visit(
+          [](auto &&val) -> double {
+            using V = std::decay_t<decltype(val)>;
+            if constexpr (std::is_same_v<V, display_device::Rational>) {
+              return val.m_denominator ? static_cast<double>(val.m_numerator) / val.m_denominator : 60.0;
+            } else {
+              return static_cast<double>(val);
+            }
+          },
+          device.m_info->m_refresh_rate);
+        const int refresh_hz = static_cast<int>(std::lround(refresh > 0.0 ? refresh : 60.0));
+        pt::ptree mode;
+        mode.put("Width", res.m_width);
+        mode.put("Height", res.m_height);
+        mode.put("RefreshRate", refresh_hz);
+        tree.add_child("root.DisplayMode", mode);
+        BOOST_LOG(info) << "[VIPLE-RES] /serverinfo advertising primary display: "
+                        << res.m_width << "x" << res.m_height << " @ " << refresh_hz << "Hz";
+      }
+    }
 
     std::ostringstream data;
 
@@ -1910,6 +1945,210 @@ namespace nvhttp {
 
   bool is_client_enabled(const std::string_view cert_pem);
 
+  // ── VipleStream §N — In-stream 雙向檔案傳輸 endpoints ────────────────────
+  //
+  // 全部走既有 https_server，cert 驗證 + caller_uuid 識別。任一 endpoint 進入
+  // 都先 gate「stream is active」（proc::proc.running() > 0），沒 stream 就拒
+  // 409，避免閒置時被慢慢探測。
+  //
+  // 路徑表（全為 HTTPS、需 paired cert）：
+  //   GET  /transfer/poll                 client 長輪詢拿命令（非阻塞、空就 204）
+  //   POST /transfer/result               client 回傳 list_dir 或 final ack
+  //   GET  /transfer/blob?token=…         server→client：client 拉檔
+  //   POST /transfer/blob?token=…         client→server：client 推檔
+  //   GET  /transfer/progress?token=…     兩端拿即時進度（給 toast / web UI）
+  //
+  // Token 是 v4-style 36-byte UUID，由 manager 統一發；不暴露給未認證對端。
+
+  namespace {
+    bool xfer_gate_stream(resp_https_t resp) {
+      if (proc::proc.running() <= 0) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        resp->write(SimpleWeb::StatusCode::client_error_conflict, R"({"error":"no_active_stream"})", headers);
+        return false;
+      }
+      return true;
+    }
+
+    std::string xfer_caller(req_https_t request) {
+      return caller_uuid_for(request);
+    }
+  }  // namespace
+
+  void xfer_poll(resp_https_t response, req_https_t request) {
+    if (!xfer_gate_stream(response)) return;
+    auto uuid = xfer_caller(request);
+    if (uuid.empty()) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized,
+                      R"({"error":"unidentified_client"})");
+      return;
+    }
+    // 非阻塞 poll，client 自己每 2s 拉一次。
+    auto cmd = file_transfer::manager::instance().poll(uuid, std::chrono::milliseconds(0));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    if (!cmd) {
+      response->write(SimpleWeb::StatusCode::success_no_content, std::string {}, headers);
+      return;
+    }
+    const char *type_str = "unknown";
+    switch (cmd->type) {
+      case file_transfer::command_type::list_dir: type_str = "list_dir"; break;
+      case file_transfer::command_type::download_to_client: type_str = "download_to_client"; break;
+      case file_transfer::command_type::upload_from_client: type_str = "upload_from_client"; break;
+      case file_transfer::command_type::cancel: type_str = "cancel"; break;
+    }
+    nlohmann::json out;
+    out["type"] = type_str;
+    out["token"] = cmd->token;
+    out["filename"] = cmd->filename;
+    out["size"] = cmd->size;
+    out["path"] = cmd->path;
+    out["is_directory"] = cmd->is_directory;
+    response->write(SimpleWeb::StatusCode::success_ok, out.dump(), headers);
+  }
+
+  void xfer_result(resp_https_t response, req_https_t request) {
+    if (!xfer_gate_stream(response)) return;
+    auto uuid = xfer_caller(request);
+    if (uuid.empty()) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized,
+                      R"({"error":"unidentified_client"})");
+      return;
+    }
+    std::string body = request->content.string();
+    nlohmann::json j;
+    try {
+      j = nlohmann::json::parse(body);
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] /transfer/result bad JSON: " << e.what();
+      response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"bad_json"})");
+      return;
+    }
+    auto kind = j.value("kind", "");
+    if (kind == "listing") {
+      // Client 回傳 Downloads 目錄列表，存到 manager 給 web UI 取
+      auto entries = j.value("entries", nlohmann::json::array());
+      file_transfer::manager::instance().store_listing(uuid, entries.dump());
+      response->write(SimpleWeb::StatusCode::success_ok, R"({"ok":true})");
+      return;
+    } else if (kind == "done" || kind == "failed" || kind == "canceled") {
+      auto token = j.value("token", "");
+      auto err = j.value("error", "");
+      file_transfer::manager::instance().finalize(token, kind == "done", err);
+      response->write(SimpleWeb::StatusCode::success_ok, R"({"ok":true})");
+      return;
+    }
+    response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"unknown_kind"})");
+  }
+
+  void xfer_blob_get(resp_https_t response, req_https_t request) {
+    if (!xfer_gate_stream(response)) return;
+    auto args = request->parse_query_string();
+    auto token = get_arg(args, "token");
+    auto t = file_transfer::manager::instance().get_transfer(token);
+    if (!t) {
+      response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"unknown_token"})");
+      return;
+    }
+    if (t->dir != file_transfer::direction::to_client) {
+      response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"wrong_direction"})");
+      return;
+    }
+    std::ifstream in;
+    if (!file_transfer::manager::instance().open_for_send(token, in)) {
+      response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"open_failed"})");
+      return;
+    }
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/octet-stream");
+    headers.emplace("Content-Length", std::to_string(t->total_bytes));
+    headers.emplace("X-VipleStream-Token", token);
+    headers.emplace("X-VipleStream-Filename", t->display_name);
+    // 註：SimpleWeb 會把 `in` 串流推送，無需 buffer 整檔
+    response->write(SimpleWeb::StatusCode::success_ok, in, headers);
+    response->close_connection_after_response = true;
+    // 暫不在此 finalize（送完 client 會發 /transfer/result kind=done）
+    BOOST_LOG(info) << "[VIPLE-XFER] /transfer/blob GET token=" << token
+                    << " size=" << t->total_bytes;
+  }
+
+  void xfer_blob_post(resp_https_t response, req_https_t request) {
+    if (!xfer_gate_stream(response)) return;
+    auto args = request->parse_query_string();
+    auto token = get_arg(args, "token");
+    auto t = file_transfer::manager::instance().get_transfer(token);
+    if (!t) {
+      response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"unknown_token"})");
+      return;
+    }
+    if (t->dir != file_transfer::direction::from_client) {
+      response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"wrong_direction"})");
+      return;
+    }
+    std::ofstream out;
+    if (!file_transfer::manager::instance().open_for_receive(token, out)) {
+      response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"open_failed"})");
+      return;
+    }
+    auto &body = request->content;
+    constexpr std::size_t k_chunk = 64 * 1024;
+    std::vector<char> buf(k_chunk);
+    std::uint64_t total = 0;
+    while (body.good()) {
+      body.read(buf.data(), buf.size());
+      auto n = body.gcount();
+      if (n <= 0) break;
+      out.write(buf.data(), n);
+      if (!out.good()) {
+        BOOST_LOG(warning) << "[VIPLE-XFER] write failed mid-stream token=" << token;
+        file_transfer::manager::instance().finalize(token, false, "write_failed");
+        response->write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        R"({"error":"write_failed"})");
+        return;
+      }
+      file_transfer::manager::instance().report_progress(token, static_cast<std::uint64_t>(n));
+      total += static_cast<std::uint64_t>(n);
+    }
+    out.flush();
+    file_transfer::manager::instance().finalize(token, true);
+    BOOST_LOG(info) << "[VIPLE-XFER] /transfer/blob POST token=" << token
+                    << " received=" << total;
+    response->write(SimpleWeb::StatusCode::success_ok,
+                    nlohmann::json {{"ok", true}, {"bytes", total}}.dump());
+  }
+
+  void xfer_progress(resp_https_t response, req_https_t request) {
+    if (!xfer_gate_stream(response)) return;
+    auto args = request->parse_query_string();
+    auto token = get_arg(args, "token");
+    auto t = file_transfer::manager::instance().get_transfer(token);
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    if (!t) {
+      response->write(SimpleWeb::StatusCode::client_error_not_found,
+                      R"({"error":"unknown_token"})", headers);
+      return;
+    }
+    const char *state_str = "unknown";
+    switch (t->st) {
+      case file_transfer::state::pending: state_str = "pending"; break;
+      case file_transfer::state::running: state_str = "running"; break;
+      case file_transfer::state::done: state_str = "done"; break;
+      case file_transfer::state::canceled: state_str = "canceled"; break;
+      case file_transfer::state::failed: state_str = "failed"; break;
+    }
+    nlohmann::json out;
+    out["token"] = t->token;
+    out["state"] = state_str;
+    out["bytes_done"] = t->bytes_done;
+    out["total_bytes"] = t->total_bytes;
+    out["filename"] = t->display_name;
+    out["error"] = t->error_msg;
+    response->write(SimpleWeb::StatusCode::success_ok, out.dump(), headers);
+  }
+
   void start() {
     platf::set_thread_name("nvhttp");
     init_ssl_caller_uuid_idx();  // VipleStream §M.1 — must run before any SSL_set_ex_data
@@ -2027,6 +2266,15 @@ namespace nvhttp {
       resume<SunshineHTTPS>(host_audio, resp, req);
     };
     https_server.resource["^/cancel$"]["GET"] = cancel<SunshineHTTPS>;
+
+    // VipleStream §N — file transfer endpoints (paired HTTPS only, gated on
+    // active stream).  Detailed semantics live above each handler.
+    https_server.resource["^/transfer/poll$"]["GET"]     = xfer_poll;
+    https_server.resource["^/transfer/result$"]["POST"]  = xfer_result;
+    https_server.resource["^/transfer/blob$"]["GET"]     = xfer_blob_get;
+    https_server.resource["^/transfer/blob$"]["POST"]    = xfer_blob_post;
+    https_server.resource["^/transfer/progress$"]["GET"] = xfer_progress;
+
     // VipleStream H.4 — Steam profiles + account switch.  Both behind
     // the standard paired-cert HTTPS auth.
     https_server.resource["^/steamprofiles$"]["GET"]       = steamprofiles<SunshineHTTPS>;

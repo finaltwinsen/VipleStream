@@ -699,6 +699,26 @@ QVector<NvComputer*> ComputerManager::getComputers()
     return hosts;
 }
 
+QSize ComputerManager::getMaxHostDisplayMode()
+{
+    QReadLocker lock(&m_Lock);
+    int maxW = 0;
+    int maxH = 0;
+    for (NvComputer* host : std::as_const(m_KnownHosts)) {
+        if (host->isNvidiaServerSoftware) {
+            continue;  // GFE/NV advertises encoder modes, not display modes
+        }
+        for (const NvDisplayMode& mode : std::as_const(host->displayModes)) {
+            if (mode.width * mode.height > maxW * maxH) {
+                maxW = mode.width;
+                maxH = mode.height;
+            }
+        }
+    }
+    return QSize(maxW, maxH);
+}
+
+
 class DeferredHostDeletionTask : public QRunnable
 {
 public:

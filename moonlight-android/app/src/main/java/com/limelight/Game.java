@@ -118,6 +118,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
     private NvConnection conn;
     private SpinnerDialog spinner;
+    // VipleStream §N — in-stream file transfer client
+    private com.limelight.transfer.FileTransferClient fileTransferClient;
+    private String xferHost;
+    private int xferHttpsPort;
+    private X509Certificate xferServerCert;
     private boolean displayedFailureDialog = false;
     private boolean connecting = false;
     private boolean connected = false;
@@ -319,6 +324,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         boolean appSupportsHdr = Game.this.getIntent().getBooleanExtra(EXTRA_APP_HDR, false);
         byte[] derCertData = Game.this.getIntent().getByteArrayExtra(EXTRA_SERVER_CERT);
 
+        // VipleStream §N — 記下 host info 給 FileTransferClient 用（連線建好後在
+        // connectionStarted 內 instantiate）
+        xferHost = host;
+        xferHttpsPort = httpsPort;
+
         app = new NvApp(appName != null ? appName : "app", appId, appSupportsHdr);
 
         X509Certificate serverCert = null;
@@ -330,6 +340,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         } catch (CertificateException e) {
             e.printStackTrace();
         }
+        xferServerCert = serverCert;  // VipleStream §N — 給 FileTransferClient 認證用
 
         if (appId == StreamConfiguration.INVALID_APP_ID) {
             finish();
@@ -2234,7 +2245,49 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     public void stageComplete(String stage) {
     }
 
+    /**
+     * VipleStream §N — 啟動 in-stream file transfer client（每 2s polling
+     * server /transfer/poll）。必須在 stream 已連上且 NvHTTP 可用之後呼叫，
+     * 因此放在 connectionStarted 的 UI thread 區塊。
+     */
+    private void startFileTransferClient() {
+        if (fileTransferClient != null) return;
+        if (xferHost == null || xferHttpsPort == 0 || xferServerCert == null) {
+            android.util.Log.w("VipleXfer", "[VIPLE-XFER] missing host/port/cert — skipping");
+            return;
+        }
+        try {
+            String uniqueId = "0123456789ABCDEF";  // 跟 NvHTTP 一致
+            com.limelight.LimeLog.info("[VIPLE-XFER] starting client for " + xferHost + ":" + xferHttpsPort);
+            // 借 NvHTTP 那份 SSL-pinned OkHttpClient + HttpUrl
+            com.limelight.nvstream.http.NvHTTP http = new com.limelight.nvstream.http.NvHTTP(
+                    new com.limelight.nvstream.http.ComputerDetails.AddressTuple(xferHost, com.limelight.nvstream.http.NvHTTP.DEFAULT_HTTP_PORT),
+                    xferHttpsPort,
+                    uniqueId,
+                    xferServerCert,
+                    com.limelight.binding.PlatformBinding.getCryptoProvider(this));
+            okhttp3.HttpUrl base = http.getHttpsUrl(true);
+            okhttp3.OkHttpClient client = http.getLongConnectClient();
+            fileTransferClient = new com.limelight.transfer.FileTransferClient(
+                    getApplicationContext(), client, base,
+                    msg -> displayTransientMessage(msg));
+            fileTransferClient.start();
+        } catch (Exception e) {
+            android.util.Log.w("VipleXfer", "[VIPLE-XFER] startFileTransferClient failed", e);
+        }
+    }
+
+    private void stopFileTransferClient() {
+        if (fileTransferClient != null) {
+            fileTransferClient.stop();
+            fileTransferClient = null;
+        }
+    }
+
     private void stopConnection() {
+        // VipleStream §N — stop transfer polling before tearing down stream
+        stopFileTransferClient();
+
         if (connecting || connected) {
             connecting = connected = false;
             updatePipAutoEnter();
@@ -2454,6 +2507,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 UiHelper.notifyStreamConnected(Game.this);
 
                 hideSystemUi(1000);
+
+                // VipleStream §N — 連線建立後啟動 in-stream file transfer client
+                startFileTransferClient();
             }
         });
 

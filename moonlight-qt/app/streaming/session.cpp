@@ -1,9 +1,12 @@
 #include "session.h"
+#include "backend/identitymanager.h"
 #include "backend/relaylookup.h"
 #include "backend/relaytcptunnel.h"
 #include "backend/relayudptunnel.h"
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
+#include "streaming/transfer/filetransferclient.h"
+#include "streaming/video/overlaymanager.h"
 #include "backend/richpresencemanager.h"
 
 #include <Limelight.h>
@@ -667,6 +670,46 @@ bool Session::initialize(QQuickWindow* qtWindow)
     LiInitializeStreamConfiguration(&m_StreamConfig);
     m_StreamConfig.width = m_Preferences->width;
     m_StreamConfig.height = m_Preferences->height;
+
+    // VipleStream §H.4 — host-display-aware resolution clamp.
+    //
+    // The settings page is global (no per-host context), so the user can pick
+    // 1920×1200 even when the only paired host's primary display is 1920×1080.
+    // Without this guard the host silently captures+encodes at 1080 and the user
+    // is left wondering why their "1200p" stream is letterboxed.
+    //
+    // Sunshine builds advertise host-display modes in /serverinfo (see VipleStream
+    // §H.4 patch in nvhttp.cpp); GFE / NVIDIA servers advertise encoder-capable
+    // modes instead, so the clamp is gated on the non-NV path.
+    if (!m_Computer->isNvidiaServerSoftware && !m_Computer->displayModes.isEmpty()) {
+        int hostMaxW = 0;
+        int hostMaxH = 0;
+        for (const NvDisplayMode &mode : std::as_const(m_Computer->displayModes)) {
+            if (mode.width * mode.height > hostMaxW * hostMaxH) {
+                hostMaxW = mode.width;
+                hostMaxH = mode.height;
+            }
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RES] Stream config requested: %dx%d; host advertises max: %dx%d",
+                    m_StreamConfig.width, m_StreamConfig.height, hostMaxW, hostMaxH);
+        if (hostMaxW > 0 && hostMaxH > 0 &&
+            (long long)m_StreamConfig.width * m_StreamConfig.height >
+                (long long)hostMaxW * hostMaxH) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-RES] Requested %dx%d exceeds host display max %dx%d — "
+                        "clamping stream to host maximum to avoid silent letterbox",
+                        m_StreamConfig.width, m_StreamConfig.height, hostMaxW, hostMaxH);
+            m_StreamConfig.width = hostMaxW;
+            m_StreamConfig.height = hostMaxH;
+        }
+    } else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RES] Stream config requested: %dx%d (host-display clamp skipped: %s)",
+                    m_StreamConfig.width, m_StreamConfig.height,
+                    m_Computer->isNvidiaServerSoftware ? "NV server"
+                                                       : "host did not advertise DisplayMode");
+    }
 
     int x, y, width, height;
     getWindowDimensions(x, y, width, height);
@@ -1365,6 +1408,15 @@ private:
         // try to interact with APIs that can only be called between
         // LiStartConnection() and LiStopConnection().
         SDL_assert(m_Session->m_VideoDecoder == nullptr);
+
+        // VipleStream §N — 停 file transfer 之後再 LiStopConnection。stop() 內部
+        // 透過 BlockingQueuedConnection 等 worker thread cleanup 完才返回，所以
+        // 這邊直接同步 call 即可，不需要再 queue 到別的 thread。
+        if (m_Session->m_FileTransferClient) {
+            m_Session->m_FileTransferClient->stop();
+            m_Session->m_FileTransferClient->deleteLater();
+            m_Session->m_FileTransferClient = nullptr;
+        }
 
         // Finish cleanup of the connection state
         LiStopConnection();
@@ -2152,6 +2204,31 @@ bool Session::startConnectionAsync()
         // We already displayed an error dialog in the stage failure
         // listener.
         return false;
+    }
+
+    // VipleStream §N — 啟動 in-stream file transfer client。對應 server tray
+    // Send/Receive 行為，每 2s 對 host /transfer/poll 拿命令、透過 OSD overlay
+    // 顯示進度。FileTransferClient 內部會 spawn 自己的 QThread + Qt event loop
+    // —— 因為 Session::exec() 跑 SDL main loop，主執行緒的 Qt event loop 在
+    // streaming 期間整段被 starve，QTimer / QNAM 不會運作。
+    if (m_Computer && m_Computer->activeHttpsPort != 0) {
+        m_FileTransferClient = new FileTransferClient(
+            m_Computer->activeAddress.address(),
+            m_Computer->activeHttpsPort,
+            IdentityManager::get()->getSslConfig(),
+            m_Computer->serverCert,
+            nullptr);  // parent nullptr — 自己跑 thread，不掛 Session 的 child tree
+        connect(m_FileTransferClient, &FileTransferClient::statusChanged,
+                this, [this](const QString &status) {
+                    m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
+                                                       status.toUtf8().constData());
+                    m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+                });
+        m_FileTransferClient->start();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XFER] FileTransferClient started for %s:%u (worker thread)",
+                    m_Computer->activeAddress.address().toUtf8().constData(),
+                    m_Computer->activeHttpsPort);
     }
 
     emit connectionStarted();
