@@ -759,13 +759,18 @@ layout(set = 0, binding = 0) readonly  buffer InA { float a_buf[]; };
 layout(set = 0, binding = 1) readonly  buffer InB { float b_buf[]; };
 layout(set = 0, binding = 2) writeonly buffer Out { float y_buf[]; };
 
+// §J.3.e.Y 4Y.7 C.2 — push constant carries optional trailing-Activation
+// epilogue params.  When fuse_act_kind == -1 (default for standalone
+// BinaryOp test cases), behavior is unchanged from pre-C.2.
 layout(push_constant) uniform PC {
-    uint count;       // total elements in a (== output count)
-    uint hw;          // h*w           (used in modes 1 & 3)
-    uint channels;    // C             (used in mode 1)
-    int  op_type;     // ncnn op_type
-    int  mode;        // 0 same / 1 chan-bcast / 2 scalar / 3 plane-bcast
-    float scalar_b;   // mode 2 only
+    uint count;          // total elements in a (== output count)
+    uint hw;             // h*w           (used in modes 1 & 3)
+    uint channels;       // C             (used in mode 1)
+    int  op_type;        // ncnn op_type
+    int  mode;           // 0 same / 1 chan-bcast / 2 scalar / 3 plane-bcast
+    float scalar_b;      // mode 2 only
+    int  fuse_act_kind;  // -1 = no fusion, 0 = ReLU/LeakyReLU, 1 = Sigmoid
+    float fuse_act_slope;// LeakyReLU negative-side scale (0 = pure ReLU)
 } pc;
 
 float apply_op(float aa, float bb) {
@@ -780,6 +785,19 @@ float apply_op(float aa, float bb) {
     if (pc.op_type == 8) return bb / aa;          // RDIV
     if (pc.op_type == 9) return pow(bb, aa);      // RPOW
     return aa;
+}
+
+// §J.3.e.Y 4Y.7 C.2 — mirrors kActivationShaderGlsl.  Kept inline to
+// avoid GLSL include overhead.  ReLU/LeakyReLU: y = max(x, slope*x).
+// Sigmoid: y = 1 / (1 + exp(-x)).
+float apply_act(float x) {
+    if (pc.fuse_act_kind == 0) {
+        return max(x, pc.fuse_act_slope * x);
+    }
+    if (pc.fuse_act_kind == 1) {
+        return 1.0 / (1.0 + exp(-x));
+    }
+    return x;
 }
 
 void main() {
@@ -798,7 +816,11 @@ void main() {
     } else {
         bb = b_buf[i];
     }
-    y_buf[i] = apply_op(aa, bb);
+    float y = apply_op(aa, bb);
+    if (pc.fuse_act_kind >= 0) {
+        y = apply_act(y);
+    }
+    y_buf[i] = y;
 }
 )GLSL";
 
@@ -3652,6 +3674,90 @@ int analyzeFuseableConvBinOps(Model& model,
     return fuseCount;
 }
 
+// §J.3.e.Y 4Y.7 C.2 — analogous to analyzeFuseableConvBinOps but for the
+// BinaryOp → Activation pattern (covers all 40 standalone ReLU layers in
+// RIFE-v4.25-lite since the model emits BinaryOp→ReLU after every
+// ResBlock residual sum).  Marks BinaryOp.fuseActKind / fuseActSlope +
+// fuseMulOverrideOutput (so BinOp writes directly into the Activation's
+// output blob) and Activation.isFusedAway = true.
+//
+// Fuses only when ALL of:
+//   1. Layer at i is BinaryOp with exactly 1 output.
+//   2. Layer at i+1 is Activation (kind ReLU/LeakyReLU = 0, or Sigmoid = 1).
+//   3. Activation reads BinOp's output blob.
+//   4. BinOp output has exactly 1 consumer (this Activation).
+//   5. The BinOp is not already marked isFusedAway (defensive — C.1 doesn't
+//      fuse-away BinaryOps but a future fusion class might).
+//
+// Per-frame win: ~40 fewer dispatches + ~40 fewer barriers in
+// RIFE-v4-lite.  Per-fusion saving on RTX 3060 Laptop ≈ 50 µs each based
+// on the C.1 measurement (32 fusions → ~1.5-2 ms), so C.2 ceiling ≈ 2 ms
+// out of 19.83 ms current native GPU time = ~10% chain reduction.
+//
+// Returns count of fused pairs (logged for diagnostics).
+int analyzeFuseableBinOpAct(Model& model) {
+    static const bool kCoopMatEnabled = []{
+        const char* s = std::getenv("VIPLE_RIFE_VK_COOPMAT");
+        return s && s[0] && s[0] != '0';
+    }();
+    (void)kCoopMatEnabled;  // BinaryOp shader is not the coopmat path; fusion always safe here
+
+    // Pre-compute blob consumer counts (same approach as C.1).
+    std::unordered_map<QString, int> consumerCount;
+    for (const Layer& L : model.layers) {
+        for (const QString& in : L.inputs) {
+            consumerCount[in] += 1;
+        }
+    }
+
+    int fuseCount = 0;
+    int fuseRelu = 0, fuseSigmoid = 0;
+    for (size_t i = 0; i + 1 < model.layers.size(); ++i) {
+        Layer& binop = model.layers[i];
+        if (binop.kind != OpKind::BinaryOp) continue;
+        if (binop.outputs.size() != 1) continue;
+        if (binop.isFusedAway) continue;
+
+        Layer& act = model.layers[i + 1];
+        // Activation OpKinds that the BinaryOp shader epilogue supports.
+        // ReLU/LeakyReLU = OpKind::ReLU (ncnn lumps both).  Sigmoid = OpKind::Sigmoid.
+        // OpKind::Activation (generic) covers other types we don't fuse.
+        int actKind = -1;
+        float actSlope = 0.0f;
+        if (act.kind == OpKind::ReLU) {
+            actKind = 0;
+            // ncnn ReLU param 0 = slope (default 0 = pure ReLU; 0.2 = LeakyReLU 0.2).
+            auto it = act.params.find(0);
+            if (it != act.params.end()) actSlope = (float)it->second.f;
+        } else if (act.kind == OpKind::Sigmoid) {
+            actKind = 1;
+        }
+        if (actKind < 0) continue;
+
+        if (act.inputs.size() != 1 || act.outputs.size() != 1) continue;
+        if (act.inputs[0] != binop.outputs[0]) continue;
+
+        // BinOp output must have exactly 1 consumer (this Activation).
+        auto cit = consumerCount.find(binop.outputs[0]);
+        if (cit == consumerCount.end() || cit->second != 1) continue;
+
+        binop.fuseActKind         = actKind;
+        binop.fuseActSlope        = actSlope;
+        binop.fuseMulOverrideOutput = act.outputs[0];
+        act.isFusedAway           = true;
+        if (actKind == 0) ++fuseRelu; else ++fuseSigmoid;
+        ++fuseCount;
+    }
+
+    if (fuseCount > 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] 4Y.7 C.2 fusion: %d BinaryOp→Activation pairs "
+                    "folded (%d ReLU/LeakyReLU + %d Sigmoid)",
+                    fuseCount, fuseRelu, fuseSigmoid);
+    }
+    return fuseCount;
+}
+
 bool dispatchConvolution(ExecState& e, const Layer& L) {
     const Layer& Lref = L;
     int N      = paramInt(Lref, 0, 0);
@@ -3825,7 +3931,12 @@ bool dispatchBinaryOp(ExecState& e, const Layer& L) {
     float scalarB = (bIt != L.params.end()) ? (float)bIt->second.f : 0.0f;
 
     const GpuBuffer* a = findBlob(e, L.inputs[0]);
-    const GpuBuffer* out = findBlob(e, L.outputs[0]);
+    // §J.3.e.Y 4Y.7 C.2 — when fused with a trailing Activation, write
+    // directly into the Activation's output blob (skipping the BinOp's
+    // nominal output blob which has no other consumer).  Falls through to
+    // L.outputs[0] when no fusion.
+    QString outName = L.fuseMulOverrideOutput.isEmpty() ? L.outputs[0] : L.fuseMulOverrideOutput;
+    const GpuBuffer* out = findBlob(e, outName);
     if (!a || !out) return false;
     const BlobShape* aS = findShape(e, L.inputs[0]);
     if (!aS) return false;
@@ -3862,11 +3973,15 @@ bool dispatchBinaryOp(ExecState& e, const Layer& L) {
     }
 
     VkBuffer bufs[3] = { a->buf, bbuf->buf, out->buf };
+    // §J.3.e.Y 4Y.7 C.2 — replaced _pad[2] with fuse_act_kind + fuse_act_slope.
+    // Same total size (32 bytes); zero-init = no fusion, matching the
+    // standalone BinaryOp test PC layout (existing tests pass through unchanged).
     struct PC {
         uint32_t count, hw, channels;
         int32_t  op, mode;
         float    scalar;
-        uint32_t _pad[2];
+        int32_t  fuse_act_kind;
+        float    fuse_act_slope;
     } pc{};
     pc.count = (uint32_t)count;
     pc.hw = (uint32_t)hw;
@@ -3874,6 +3989,8 @@ bool dispatchBinaryOp(ExecState& e, const Layer& L) {
     pc.op = op;
     pc.mode = mode;
     pc.scalar = scalarB;
+    pc.fuse_act_kind  = L.fuseActKind;
+    pc.fuse_act_slope = L.fuseActSlope;
     return bindDispatch(e, ShaderKind::BinaryOp, bufs, 3, &pc, sizeof(pc),
                         (uint32_t)((count + 63) / 64), 1, 1);
 }
@@ -5059,7 +5176,11 @@ bool runBinaryOpGpuTest(const VulkanCtx& ctx,
         int32_t  opType;
         int32_t  mode;
         float    scalarB;
-        uint32_t _pad[2];   // round to 32 bytes for alignment safety
+        // §J.3.e.Y 4Y.7 C.2 — formerly _pad[2].  Standalone BinOpTest
+        // explicitly disables the fused-activation epilogue by setting
+        // fuse_act_kind = -1 (so we exercise pre-C.2 behavior here).
+        int32_t  fuse_act_kind;
+        float    fuse_act_slope;
     } pcVal = {};
     pcVal.count    = (uint32_t)a.size();
     pcVal.hw       = (uint32_t)desc.hw;
@@ -5067,6 +5188,8 @@ bool runBinaryOpGpuTest(const VulkanCtx& ctx,
     pcVal.opType   = desc.opType;
     pcVal.mode     = desc.mode;
     pcVal.scalarB  = desc.scalarB;
+    pcVal.fuse_act_kind  = -1;   // no fusion
+    pcVal.fuse_act_slope = 0.0f;
     pfnCmdPushConstants(cmd, pipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                         sizeof(pcVal), &pcVal);
     uint32_t groups = (uint32_t)((a.size() + 63) / 64);
@@ -6787,6 +6910,13 @@ bool RifeNativeExecutor::initialize(const InitOptions& opts) {
     // BinOp layers isFusedAway, sets Conv layers' fuseMulBetaBlob /
     // fuseMulOverrideOutput.  No-op when VIPLE_RIFE_VK_COOPMAT=1.
     analyzeFuseableConvBinOps(m_impl->model, m_impl->shapes);
+
+    // §J.3.e.Y 4Y.7 C.2 (v1.4.42) — fold BinaryOp→Activation pairs (e.g.
+    // ResBlock residual-sum + ReLU) into BinaryOp shader epilogue.  Must
+    // run AFTER C.1 because C.1 already marks BinOps that are themselves
+    // fused-away (Conv→Mul fusion side); we skip those to avoid wrong
+    // chained-fusion semantics.
+    analyzeFuseableBinOpAct(m_impl->model);
 
     // §J.3.e.X Final.2 — load VkPipelineCache bytes from disk if available.
     std::vector<uint8_t> initialCacheBytes;

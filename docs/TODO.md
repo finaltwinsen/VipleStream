@@ -33,7 +33,7 @@
 | **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | Pi 5 + V3DV mesa Vulkan + V4L2 HW decode + DRM/KMS render；上游 source-level 支援，沒 CI prebuilt；FRUC backend 全 disable（Vulkan 補幀 Pi 5 GPU 不夠力），純 streaming 應 OK |
 | **Low** | **§G.1** RIFE v1 11-channel | A1000 launch overhead bound (§G.3 negative result)；RTX 30/40+ 才有意義；Path β shipped 後優先級降低 |
 | **Low** | **§J.3.e.Y 4Y.5b** native RIFE activation fp16 | 2026-05-09 嘗試 + revert：256x256 (1080p 配 D-lite UP) 場景 chain +1.7ms 是負收益，跟 4Y.5a postmortem「weight L1-cache-bound 不是 bandwidth bound」結論吻合。重做要先解 D-lite asymmetric center-crop（§β.5.3 D 全套）讓小 dim 真的可選。完整 commit 在 wip/4Y.5b-activation-fp16 branch (82afee5) — 因走錯方向已砍 |
-| **Low** | **§J.3.e.Y 4Y.7** dispatch fusion (Conv→ReLU→BinOp 合併) | C.1 (Conv→Mul channel-bcast beta) 已 ship in 0e6240a；Conv→ReLU 合併還沒做，預估 chain -10%；目前 60fps DUAL 已能跑不擋使用 |
+| ~~**Low**~~ ✅ **C.1 + C.2 BOTH SHIPPED** | **§J.3.e.Y 4Y.7** dispatch fusion | C.1 (Conv→Mul channel-bcast beta) ship in v1.4.1 (`0e6240a`)；**C.2 (BinaryOp→Activation) ship in v1.4.42** (40 BinOp→ReLU pairs absorbed into BinaryOp shader epilogue + fuseMulOverrideOutput pointer chain reused; 實測 RTX 3060 Laptop @ 256×256 RGB chain mean −1.73ms (−8.3%), median **−12.1%** (19.90→17.50ms), record phase −32% (0.81→0.55ms), gpu phase −7.5% (19.83→18.35ms)；vs-ncnn correctness gate PASS 不變)。Conv→ReLU 看起來已被既有 Conv layer's `activation_type` 內建 fusion 含住 (.param parse time)，沒有獨立的 Conv→Act fusion 候選了。|
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
 | **Low** | **§D** HelpLauncher URL → 結構化 docs | docs/setup_guide.md + docs/troubleshooting.md 已寫；HelpLauncher 切過去等 doc site stand 起來 |
 | **Active (mouse, v1.4.42+)** / ~~overlay font~~ ✅ **FIXED v1.4.41** | **§N.5.linux** Linux client (Ubuntu VM) ↔ Windows host stream UX bugs | (1) **滑鼠 input forward 不 work** (still active) — keyboard 傳 host OK，mouse event 完全不傳。**Code analysis hypotheses (sorted by likelihood):** **H1 (most likely):** `SDL_SetRelativeMouseMode(SDL_TRUE)` 在 Hyper-V VM console 失敗，silently fall back 到 `m_FakeCaptureActive=true` (input.cpp:383)，但 fake-capture 只藏 cursor 不啟用 xrel/yrel 追蹤 → `LiSendMouseMoveEvent(0,0)` 全送 0 deltas → host 收「mouse 沒動」。**H2:** `SDL_CaptureMouse()` 在 xcb 無 `XCB_GRAB_POINTER` 權限被 deny。**H3:** Hyper-V synthetic input driver 只送 absolute coords，`event->xrel/yrel` 永遠 0。**H4:** SDL window 在 Hyper-V console 沒拿 `SDL_WINDOW_INPUT_FOCUS`，event loop early-return drop。**Fix roadmap:** (a) input.cpp:383 加 diagnostic log 印 `SDL_SetRelativeMouseMode` return + `SDL_GetError()` + fake-capture state；(b) 短期 workaround：Linux 平台預設啟用 absolute mouse mode；(c) 長期：偵測 Hyper-V 自動切 absolute。需 GUI Linux VM 驗測。 (2) ~~**Overlay 字元亂碼**~~ **✅ FIXED v1.4.41** — main.cpp 加 Linux-only `QFontDatabase::addApplicationFont(NotoSansCJK-Regular.ttc)` + build-appimage.sh 從 `/usr/share/fonts/opentype/noto/` bundle CJK font 進 AppDir，runtime 從 `$APPDIR/usr/share/fonts/opentype/` 載入。AppImage builder 需 `apt install fonts-noto-cjk` 才有 source；缺檔時 silent fallback 到 host fontconfig。 |
@@ -122,6 +122,16 @@ Phase 2 t-dep analysis (logging only)**.
   + BFS-based analyzeTimestepDependency() at end of parseParam。實測 RIFE-v4.25-lite
   split@48/389 + live-set 78 blobs，**負面結果**(見 negative-result section 上方)，
   full split implementation 不做。
+- ✅ **§J.3.e.Y 4Y.7 C.2** BinaryOp→Activation fusion (`rife_native_vk.{h,cpp}`) —
+  40 BinOp→ReLU pairs (RIFE-v4-lite ResBlock residual-sum 全部接 LeakyReLU 0.2)
+  folded into BinaryOp shader epilogue。Layer 加 `fuseActKind` + `fuseActSlope`
+  fields，BinaryOp shader PC 加 `fuse_act_kind` + `fuse_act_slope` (replace _pad[2])
+  + GLSL `apply_act(x)` epilogue 套 ReLU/LeakyReLU/Sigmoid，分發時透過 既有
+  `fuseMulOverrideOutput` mechanism 寫入 Activation 的 output blob，Activation 本身
+  isFusedAway=true 跳過。`analyzeFuseableBinOpAct(model)` 在 `initialize()` C.1
+  之後跑。實測 RTX 3060 Laptop @ 256×256：median per-fwd 19.90→17.50 ms (**−12.1%**)，
+  mean 20.89→19.15 ms (−8.3%)，record phase −32%，gpu phase −7.5%；vs-ncnn
+  correctness gate 全 PASS 不變。
 
 ### v1.4.41 ship 帶走的條目（2026-05-14, same day as v1.4.40 follow-up）
 

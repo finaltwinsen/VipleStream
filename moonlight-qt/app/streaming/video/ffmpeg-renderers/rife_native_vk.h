@@ -100,6 +100,24 @@ struct Layer {
     QString fuseMulOverrideOutput;  // output blob name to write to (BinOp output)
     bool    isFusedAway = false;    // skip this layer's dispatch (fused into prior)
 
+    // §J.3.e.Y 4Y.7 C.2 (v1.4.42) — fuse a trailing Activation into this
+    // layer's shader epilogue.  Set by analyzeFuseableBinOpAct() when this
+    // is a BinaryOp directly followed by a ReLU/LeakyReLU/Sigmoid whose
+    // output has exactly 1 consumer (the next layer).  fuseMulOverrideOutput
+    // is also set to the activation layer's output blob name (so the
+    // BinaryOp shader writes directly into the act layer's slot,
+    // bypassing the BinOp's nominal output blob).  The activation layer
+    // itself is marked isFusedAway=true.
+    //
+    //   fuseActKind  = -1 (none) / 0 (ReLU or LeakyReLU) / 1 (Sigmoid)
+    //   fuseActSlope = 0.0 for pure ReLU; ncnn's slope param for LeakyReLU
+    //                  (0.2 for the 40 BinaryOp→ReLU pairs in RIFE-v4-lite)
+    //
+    // Target: ~40 fewer dispatches + ~40 fewer barriers per inference on
+    // RIFE-v4-lite (all 40 standalone ReLU layers are post-BinaryOp).
+    int     fuseActKind  = -1;
+    float   fuseActSlope = 0.0f;
+
     // §J.3.e.X Path β.9 Phase 2 (v1.4.42) — set by
     // analyzeTimestepDependency() once after parseParam.  True iff this
     // layer transitively reads `in2` (the timestep scalar): direct
