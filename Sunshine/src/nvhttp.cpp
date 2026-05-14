@@ -2040,45 +2040,63 @@ namespace nvhttp {
   }
 
   void xfer_result(resp_https_t response, req_https_t request) {
-    // §N.5.bug diagnostic (2026-05-14) — postResult 也 SSL fail in same
-    // failure case as blob GET，ENTER log 看 handler 是否被 invoke.
+    // §N.5.bug Scenario A diagnostic (v1.4.42) — wrap whole body in
+    // try/catch so any std::exception in handler propagates to a
+    // structured WARN log line. v1.4.35 [VIPLE-VERIFY] proved TLS handshake
+    // succeeds; if alert fires here the WARN line will tell us why.
     void *ssl_ptr = request ? (void *)request->native_handle() : nullptr;
     BOOST_LOG(info) << "[VIPLE-XFER] result ENTER ssl="sv << ssl_ptr;
-    if (!xfer_gate_stream(response)) {
-      BOOST_LOG(info) << "[VIPLE-XFER] result EXIT gate_blocked ssl="sv << ssl_ptr;
-      return;
-    }
-    auto uuid = xfer_caller(request);
-    if (uuid.empty()) {
-      response->write(SimpleWeb::StatusCode::client_error_unauthorized,
-                      R"({"error":"unidentified_client"})");
-      BOOST_LOG(info) << "[VIPLE-XFER] result EXIT 401_unidentified ssl="sv << ssl_ptr;
-      return;
-    }
-    std::string body = request->content.string();
-    nlohmann::json j;
     try {
-      j = nlohmann::json::parse(body);
+      if (!xfer_gate_stream(response)) {
+        BOOST_LOG(info) << "[VIPLE-XFER] result EXIT gate_blocked ssl="sv << ssl_ptr;
+        return;
+      }
+      auto uuid = xfer_caller(request);
+      if (uuid.empty()) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized,
+                        R"({"error":"unidentified_client"})");
+        BOOST_LOG(info) << "[VIPLE-XFER] result EXIT 401_unidentified ssl="sv << ssl_ptr;
+        return;
+      }
+      std::string body = request->content.string();
+      nlohmann::json j;
+      try {
+        j = nlohmann::json::parse(body);
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "[VIPLE-XFER] /transfer/result bad JSON: " << e.what();
+        response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"bad_json"})");
+        BOOST_LOG(info) << "[VIPLE-XFER] result EXIT 400_bad_json ssl="sv << ssl_ptr;
+        return;
+      }
+      auto kind = j.value("kind", "");
+      if (kind == "listing") {
+        // Client 回傳 Downloads 目錄列表，存到 manager 給 web UI 取
+        auto entries = j.value("entries", nlohmann::json::array());
+        file_transfer::manager::instance().store_listing(uuid, entries.dump());
+        response->write(SimpleWeb::StatusCode::success_ok, R"({"ok":true})");
+        BOOST_LOG(info) << "[VIPLE-XFER] result EXIT 200_listing entries="sv
+                        << entries.size() << " ssl="sv << ssl_ptr;
+        return;
+      } else if (kind == "done" || kind == "failed" || kind == "canceled") {
+        auto token = j.value("token", "");
+        auto err = j.value("error", "");
+        file_transfer::manager::instance().finalize(token, kind == "done", err);
+        response->write(SimpleWeb::StatusCode::success_ok, R"({"ok":true})");
+        BOOST_LOG(info) << "[VIPLE-XFER] result EXIT 200_finalize kind="sv << kind
+                        << " token=" << token << " ssl="sv << ssl_ptr;
+        return;
+      }
+      response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"unknown_kind"})");
+      BOOST_LOG(info) << "[VIPLE-XFER] result EXIT 400_unknown_kind kind="sv << kind
+                      << " ssl="sv << ssl_ptr;
     } catch (const std::exception &e) {
-      BOOST_LOG(warning) << "[VIPLE-XFER] /transfer/result bad JSON: " << e.what();
-      response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"bad_json"})");
-      return;
+      BOOST_LOG(warning) << "[VIPLE-XFER] result EXCEPTION ssl="sv << ssl_ptr
+                         << " what="sv << e.what();
+      throw;
+    } catch (...) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] result EXCEPTION_unknown ssl="sv << ssl_ptr;
+      throw;
     }
-    auto kind = j.value("kind", "");
-    if (kind == "listing") {
-      // Client 回傳 Downloads 目錄列表，存到 manager 給 web UI 取
-      auto entries = j.value("entries", nlohmann::json::array());
-      file_transfer::manager::instance().store_listing(uuid, entries.dump());
-      response->write(SimpleWeb::StatusCode::success_ok, R"({"ok":true})");
-      return;
-    } else if (kind == "done" || kind == "failed" || kind == "canceled") {
-      auto token = j.value("token", "");
-      auto err = j.value("error", "");
-      file_transfer::manager::instance().finalize(token, kind == "done", err);
-      response->write(SimpleWeb::StatusCode::success_ok, R"({"ok":true})");
-      return;
-    }
-    response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"unknown_kind"})");
   }
 
   void xfer_blob_get(resp_https_t response, req_https_t request) {
@@ -2137,78 +2155,138 @@ namespace nvhttp {
   }
 
   void xfer_blob_post(resp_https_t response, req_https_t request) {
-    if (!xfer_gate_stream(response)) return;
-    auto args = request->parse_query_string();
-    auto token = get_arg(args, "token");
-    auto t = file_transfer::manager::instance().get_transfer(token);
-    if (!t) {
-      response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"unknown_token"})");
-      return;
-    }
-    if (t->dir != file_transfer::direction::from_client) {
-      response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"wrong_direction"})");
-      return;
-    }
-    std::ofstream out;
-    if (!file_transfer::manager::instance().open_for_receive(token, out)) {
-      response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"open_failed"})");
-      return;
-    }
-    auto &body = request->content;
-    constexpr std::size_t k_chunk = 64 * 1024;
-    std::vector<char> buf(k_chunk);
-    std::uint64_t total = 0;
-    while (body.good()) {
-      body.read(buf.data(), buf.size());
-      auto n = body.gcount();
-      if (n <= 0) break;
-      out.write(buf.data(), n);
-      if (!out.good()) {
-        BOOST_LOG(warning) << "[VIPLE-XFER] write failed mid-stream token=" << token;
-        file_transfer::manager::instance().finalize(token, false, "write_failed");
-        response->write(SimpleWeb::StatusCode::server_error_internal_server_error,
-                        R"({"error":"write_failed"})");
+    // §N.5.bug Scenario A diagnostic (v1.4.42) — full ENTER/EXIT/EXCEPTION
+    // wrapping mirrors xfer_blob_get/xfer_poll pattern. Per-MB progress
+    // logging makes it possible to see how far the upload got before the
+    // client-side SSL alert (TLSV1_ALERT_INTERNAL_ERROR post-handshake)
+    // fires, isolating whether the alert is request-start, mid-stream,
+    // or finalize-time.
+    void *ssl_ptr = request ? (void *)request->native_handle() : nullptr;
+    BOOST_LOG(info) << "[VIPLE-XFER] blob_post ENTER ssl="sv << ssl_ptr
+                    << " path="sv << (request ? request->path : std::string {})
+                    << " query="sv << (request ? request->query_string : std::string {});
+    try {
+      if (!xfer_gate_stream(response)) {
+        BOOST_LOG(info) << "[VIPLE-XFER] blob_post EXIT gate_blocked ssl="sv << ssl_ptr;
         return;
       }
-      file_transfer::manager::instance().report_progress(token, static_cast<std::uint64_t>(n));
-      total += static_cast<std::uint64_t>(n);
+      auto args = request->parse_query_string();
+      auto token = get_arg(args, "token");
+      auto t = file_transfer::manager::instance().get_transfer(token);
+      if (!t) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"unknown_token"})");
+        BOOST_LOG(info) << "[VIPLE-XFER] blob_post EXIT 404_unknown_token ssl="sv << ssl_ptr;
+        return;
+      }
+      if (t->dir != file_transfer::direction::from_client) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"wrong_direction"})");
+        BOOST_LOG(info) << "[VIPLE-XFER] blob_post EXIT 400_wrong_dir ssl="sv << ssl_ptr;
+        return;
+      }
+      std::ofstream out;
+      if (!file_transfer::manager::instance().open_for_receive(token, out)) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"open_failed"})");
+        BOOST_LOG(info) << "[VIPLE-XFER] blob_post EXIT 404_open_failed ssl="sv << ssl_ptr;
+        return;
+      }
+      auto &body = request->content;
+      constexpr std::size_t k_chunk = 64 * 1024;
+      std::vector<char> buf(k_chunk);
+      std::uint64_t total = 0;
+      std::uint64_t last_logged_mb = 0;
+      while (body.good()) {
+        body.read(buf.data(), buf.size());
+        auto n = body.gcount();
+        if (n <= 0) break;
+        out.write(buf.data(), n);
+        if (!out.good()) {
+          BOOST_LOG(warning) << "[VIPLE-XFER] blob_post write failed mid-stream token=" << token
+                             << " bytes_so_far=" << total << " ssl="sv << ssl_ptr;
+          file_transfer::manager::instance().finalize(token, false, "write_failed");
+          response->write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                          R"({"error":"write_failed"})");
+          BOOST_LOG(info) << "[VIPLE-XFER] blob_post EXIT 500_write_failed bytes=" << total
+                          << " ssl="sv << ssl_ptr;
+          return;
+        }
+        file_transfer::manager::instance().report_progress(token, static_cast<std::uint64_t>(n));
+        total += static_cast<std::uint64_t>(n);
+        std::uint64_t mb = total >> 20;
+        if (mb > last_logged_mb) {
+          last_logged_mb = mb;
+          BOOST_LOG(debug) << "[VIPLE-XFER] blob_post progress token=" << token
+                           << " bytes=" << total << " ssl="sv << ssl_ptr;
+        }
+      }
+      out.flush();
+      file_transfer::manager::instance().finalize(token, true);
+      BOOST_LOG(info) << "[VIPLE-XFER] /transfer/blob POST token=" << token
+                      << " received=" << total;
+      response->write(SimpleWeb::StatusCode::success_ok,
+                      nlohmann::json {{"ok", true}, {"bytes", total}}.dump());
+      BOOST_LOG(info) << "[VIPLE-XFER] blob_post EXIT 200_received bytes=" << total
+                      << " ssl="sv << ssl_ptr;
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] blob_post EXCEPTION ssl="sv << ssl_ptr
+                         << " what="sv << e.what();
+      throw;
+    } catch (...) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] blob_post EXCEPTION_unknown ssl="sv << ssl_ptr;
+      throw;
     }
-    out.flush();
-    file_transfer::manager::instance().finalize(token, true);
-    BOOST_LOG(info) << "[VIPLE-XFER] /transfer/blob POST token=" << token
-                    << " received=" << total;
-    response->write(SimpleWeb::StatusCode::success_ok,
-                    nlohmann::json {{"ok", true}, {"bytes", total}}.dump());
   }
 
   void xfer_progress(resp_https_t response, req_https_t request) {
-    if (!xfer_gate_stream(response)) return;
-    auto args = request->parse_query_string();
-    auto token = get_arg(args, "token");
-    auto t = file_transfer::manager::instance().get_transfer(token);
-    SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "application/json");
-    if (!t) {
-      response->write(SimpleWeb::StatusCode::client_error_not_found,
-                      R"({"error":"unknown_token"})", headers);
-      return;
+    // §N.5.bug Scenario A diagnostic (v1.4.42) — same wrap pattern as
+    // other xfer endpoints so any exception during /transfer/progress
+    // surfaces via WARN log. progress is called once per Android-client
+    // FileTransferClient poll iteration, so this endpoint sees the most
+    // traffic of all xfer endpoints during a live transfer.
+    void *ssl_ptr = request ? (void *)request->native_handle() : nullptr;
+    BOOST_LOG(debug) << "[VIPLE-XFER] progress ENTER ssl="sv << ssl_ptr;
+    try {
+      if (!xfer_gate_stream(response)) {
+        BOOST_LOG(debug) << "[VIPLE-XFER] progress EXIT gate_blocked ssl="sv << ssl_ptr;
+        return;
+      }
+      auto args = request->parse_query_string();
+      auto token = get_arg(args, "token");
+      auto t = file_transfer::manager::instance().get_transfer(token);
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      if (!t) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found,
+                        R"({"error":"unknown_token"})", headers);
+        BOOST_LOG(debug) << "[VIPLE-XFER] progress EXIT 404_unknown_token ssl="sv << ssl_ptr;
+        return;
+      }
+      const char *state_str = "unknown";
+      switch (t->st) {
+        case file_transfer::state::pending: state_str = "pending"; break;
+        case file_transfer::state::running: state_str = "running"; break;
+        case file_transfer::state::done: state_str = "done"; break;
+        case file_transfer::state::canceled: state_str = "canceled"; break;
+        case file_transfer::state::failed: state_str = "failed"; break;
+      }
+      nlohmann::json out;
+      out["token"] = t->token;
+      out["state"] = state_str;
+      out["bytes_done"] = t->bytes_done;
+      out["total_bytes"] = t->total_bytes;
+      out["filename"] = t->display_name;
+      out["error"] = t->error_msg;
+      response->write(SimpleWeb::StatusCode::success_ok, out.dump(), headers);
+      BOOST_LOG(debug) << "[VIPLE-XFER] progress EXIT 200_ok state="sv << state_str
+                       << " bytes=" << t->bytes_done << "/" << t->total_bytes
+                       << " ssl="sv << ssl_ptr;
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] progress EXCEPTION ssl="sv << ssl_ptr
+                         << " what="sv << e.what();
+      throw;
+    } catch (...) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] progress EXCEPTION_unknown ssl="sv << ssl_ptr;
+      throw;
     }
-    const char *state_str = "unknown";
-    switch (t->st) {
-      case file_transfer::state::pending: state_str = "pending"; break;
-      case file_transfer::state::running: state_str = "running"; break;
-      case file_transfer::state::done: state_str = "done"; break;
-      case file_transfer::state::canceled: state_str = "canceled"; break;
-      case file_transfer::state::failed: state_str = "failed"; break;
-    }
-    nlohmann::json out;
-    out["token"] = t->token;
-    out["state"] = state_str;
-    out["bytes_done"] = t->bytes_done;
-    out["total_bytes"] = t->total_bytes;
-    out["filename"] = t->display_name;
-    out["error"] = t->error_msg;
-    response->write(SimpleWeb::StatusCode::success_ok, out.dump(), headers);
   }
 
   void start() {
