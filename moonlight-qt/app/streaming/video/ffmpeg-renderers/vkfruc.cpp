@@ -3763,6 +3763,26 @@ bool VkFrucRenderer::createInFlightRing()
                     full ? "READY" : "PARTIAL — fallback",
                     (void*)m_ComputeCmdPool, (void*)m_ComputeTimelineSem,
                     (unsigned)kFrucFramesInFlight);
+
+        // §J.3.e.2.i.10 Phase 2B (v1.4.54) — record availability + env-var
+        // request gate.  Phase 2B branching in runRifeNativeStage / submit
+        // logic (to be wired in v1.4.55+) checks
+        //   (m_AsyncComputeRequested && m_AsyncComputeAvailable).
+        // Default OFF — opt-in via VIPLE_RIFE_VK_ASYNC_COMPUTE=1 for users
+        // who want to test the parallel-queue path before it's promoted to
+        // default.  Single-queue fallback stays bit-identical to v1.4.53.
+        m_AsyncComputeAvailable = full;
+        const char* asyncEnv = std::getenv("VIPLE_RIFE_VK_ASYNC_COMPUTE");
+        m_AsyncComputeRequested = (asyncEnv != nullptr
+                                   && asyncEnv[0] != '\0'
+                                   && asyncEnv[0] != '0');
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] Phase 2B async-compute gate: requested=%d "
+                    "available=%d → would-be-active=%d (env "
+                    "VIPLE_RIFE_VK_ASYNC_COMPUTE=%s); wiring lands v1.4.55+",
+                    (int)m_AsyncComputeRequested, (int)m_AsyncComputeAvailable,
+                    (int)(m_AsyncComputeRequested && m_AsyncComputeAvailable),
+                    asyncEnv ? asyncEnv : "(unset)");
     } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A async-compute "

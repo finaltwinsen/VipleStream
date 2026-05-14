@@ -683,6 +683,18 @@ private:
     VkSemaphore     m_ComputeTimelineSem                          = VK_NULL_HANDLE;
     uint64_t        m_ComputeTimelineValue                        = 0;
 
+    // §J.3.e.2.i.10 Phase 2B (v1.4.54) — opt-in env var gate.
+    // VIPLE_RIFE_VK_ASYNC_COMPUTE=1 enables the Phase 2B compute-queue
+    // submit path.  Default 0 keeps the single-queue (graphics-only) path
+    // unchanged, matching v1.4.53 behaviour.  Phase 2B wiring across
+    // multiple commits (v1.4.55+) will gate its runtime branching on
+    //   (m_AsyncComputeRequested && m_AsyncComputeAvailable)
+    // where m_AsyncComputeAvailable = Phase 2A infra fully READY
+    // (m_ComputeQueue != NULL && m_ComputeCmdPool != NULL &&
+    // m_ComputeTimelineSem != NULL).
+    bool            m_AsyncComputeRequested                       = false;
+    bool            m_AsyncComputeAvailable                       = false;
+
     // §J.3.e.2.i.10f (2026-05-09) Path D — early AVFrame release.
     // Splits renderFrame into two submits on the graphics queue:
     //   submit 1 (m_SlotCopyCmdBuf): cmdCopyImageToBuffer (vkf->img[0] →
