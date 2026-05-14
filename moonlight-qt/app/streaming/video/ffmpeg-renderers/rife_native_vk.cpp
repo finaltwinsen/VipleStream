@@ -4086,6 +4086,110 @@ int analyzeFuseableSplits(Model& model,
     return elideCount;
 }
 
+// §J.3.e.Y 4Y.7 C.6 (v1.4.52) — Crop elision via blob aliasing for the
+// channel-slice-starting-at-zero case.
+//
+// ncnn Crop with param 9 (-23309) = 0 (start) means the output blob's
+// data is bytewise identical to the input blob's first N×H×W floats
+// (where N = -23310 value = end channel).  Consumer reads inC=N channels
+// from the output blob; aliasing output → input lets consumer read
+// directly from the input's first N×H×W bytes WITHOUT any copy.
+//
+// RIFE-v4-lite has 45 Crop layers; 27 of them have start=0 — directly
+// alias-able. The remaining 18 (start ∈ {2, 4, 5}) need a channel offset
+// hint to each consumer's shader, deferred to a future C.6.1 patch
+// (would require per-shader push-constant + dispatch update across Conv /
+// BinaryOp / Concat / etc).
+//
+// Safety checks (same shape as C.3 Splits):
+//   1. Crop has 1 input + 1 output (regular crop, not a multi-output split).
+//   2. Crop's start channel param == 0 (otherwise data offset != 0 alias breaks).
+//   3. Crop's input blob has exactly 1 consumer (= this Crop).
+//   4. Crop's output blob has no other writers.
+//   5. Input blob is not overwritten by any layer AFTER this Crop.
+//
+// Each elided Crop saves 1 vkCmdCopyBuffer (via dispatchCropOrCopy) +
+// 1 emitComputeBarrier per inference.
+//
+// Returns count of elided Crops.
+int analyzeFuseableCrops(Model& model,
+                         std::unordered_map<QString, QString>& blobAlias) {
+    // Re-compute consumer/writer/latestWrite (analyzeFuseableSplits already
+    // ran and marked some layers isFusedAway; we want post-Split state).
+    std::unordered_map<QString, int> consumerCount;
+    std::unordered_map<QString, int> writerCount;
+    std::unordered_map<QString, int> latestWrite;
+    for (size_t i = 0; i < model.layers.size(); ++i) {
+        const Layer& L = model.layers[i];
+        if (L.kind == OpKind::Input || L.kind == OpKind::MemoryData) continue;
+        if (L.isFusedAway) continue;
+        for (const QString& in : L.inputs) consumerCount[in] += 1;
+        for (const QString& out : L.outputs) {
+            writerCount[out] += 1;
+            latestWrite[out] = (int)i;
+        }
+        if (!L.fuseMulOverrideOutput.isEmpty()) {
+            writerCount[L.fuseMulOverrideOutput] += 1;
+            latestWrite[L.fuseMulOverrideOutput] = (int)i;
+        }
+    }
+
+    int elideCount = 0;
+    int elideOpsRemoved = 0;
+    for (size_t i = 0; i < model.layers.size(); ++i) {
+        Layer& L = model.layers[i];
+        if (L.kind != OpKind::Crop) continue;
+        if (L.isFusedAway) continue;
+        if (L.inputs.size() != 1 || L.outputs.size() != 1) continue;
+
+        // (2) start channel param == 0
+        //   ncnn Crop encodes per-dim start in array param -23309
+        //   (negative ID kept literally as map key — see leakyReluSlopeOf
+        //   for the same pattern at -23310).  Layout: "-23309=1,<start>".
+        //   parseParamToken classifies as IntArray when values have no
+        //   '.', otherwise FloatArray — accept either since integer "0"
+        //   reads as int but channel offsets are conceptually integers.
+        auto sit = L.params.find(-23309);
+        if (sit == L.params.end()) continue;
+        int startCh = -1;
+        if (sit->second.kind == ParamValue::IntArray && !sit->second.ia.empty()) {
+            startCh = (int)sit->second.ia[0];
+        } else if (sit->second.kind == ParamValue::FloatArray && !sit->second.fa.empty()) {
+            startCh = (int)sit->second.fa[0];
+        }
+        if (startCh != 0) continue;
+
+        const QString& src = L.inputs[0];
+
+        // (3) src must have exactly 1 consumer (= this Crop).
+        auto cit = consumerCount.find(src);
+        if (cit == consumerCount.end() || cit->second != 1) continue;
+
+        // (4) Crop's output blob has no other writer.
+        auto wit = writerCount.find(L.outputs[0]);
+        if (wit == writerCount.end() || wit->second != 1) continue;
+
+        // (5) src must not be overwritten AFTER this Crop.
+        auto lit = latestWrite.find(src);
+        if (lit != latestWrite.end() && lit->second > (int)i) continue;
+
+        // All safe — alias output → input.  Consumer sees same first
+        // N×H×W bytes, knows inC=N from inferred shape, iterates correctly.
+        blobAlias[L.outputs[0]] = src;
+        L.isFusedAway = true;
+        ++elideCount;
+        ++elideOpsRemoved;  // 1 copy + 1 barrier per Crop
+    }
+
+    if (elideCount > 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] 4Y.7 C.6 Crop elision (start=0): %d Crops elided "
+                    "(%d copy ops + barriers eliminated)",
+                    elideCount, elideOpsRemoved);
+    }
+    return elideCount;
+}
+
 bool dispatchConvolution(ExecState& e, const Layer& L) {
     const Layer& Lref = L;
     int N      = paramInt(Lref, 0, 0);
@@ -7330,6 +7434,12 @@ bool RifeNativeExecutor::initialize(const InitOptions& opts) {
     // small slack — aliased Split-output blobs sit unused, ~5-10 MB
     // GPU memory waste).  findBlob() consults state.blobAlias.
     analyzeFuseableSplits(m_impl->model, m_impl->state.blobAlias);
+
+    // §J.3.e.Y 4Y.7 C.6 (v1.4.52) — Crop elision for channel-slice-from-zero
+    // cases.  Runs AFTER C.3 (so blobAlias map already has Split aliases —
+    // re-uses same plumbing).  RIFE-v4-lite: 27 of 45 Crops are start=0
+    // and pass safety checks.
+    analyzeFuseableCrops(m_impl->model, m_impl->state.blobAlias);
 
     auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)opts.ctx.getInstanceProcAddr;
     auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstancePA(
