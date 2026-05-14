@@ -74,6 +74,14 @@ extern "C" {
 // single-threaded, but ffmpeg can submit decode work concurrently.
 static std::mutex s_VkFrucQueueLock;
 
+// §J.3.e.2.i.10 Phase 2B step 5-6 (v1.4.56) — separate lock for the compute
+// queue submit path.  v1.4.56 ships all 3 chain submits on the graphics queue
+// (cmpCmd through this lock would still serialise behind s_VkFrucQueueLock),
+// so this lock is effectively dormant; v1.4.57 will switch the cmpCmd submit
+// to m_ComputeQueue and hold this lock instead — keeping CPU thread off
+// s_VkFrucQueueLock during compute submit so the two queues don't serialise.
+static std::mutex s_VkFrucComputeLock;
+
 // §B-NVOF / §B2 UI 整合 2026-05-07 — env var 跟 settings 的 OR 合併查詢.
 // env var 優先 (dev escape hatch / regression bisect)，沒設 env var 才看
 // StreamingPreferences (使用者在 Settings UI 勾的). RS_D3D11 path 完全
@@ -7165,6 +7173,224 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
     return true;
 }
 
+// §J.3.e.2.i.10 Phase 2B step 5-6 (v1.4.56) — DUAL-only β.5.1 split helpers.
+//
+// These mirror runRifeNativeStage's β.5.1 DUAL path (single inference @
+// t=0.5) sliced across 3 cmd buffers.  The renderFrame phase2BActive path
+// records each helper into preCmd / cmpCmd / postCmd respectively and
+// submits them as a chain (4 submits per frame counting the Path D copy
+// submit), connected via m_ComputeTimelineSem.
+//
+// v1.4.56 ships ALL three submits on the graphics queue (no cross-queue
+// hand-off yet) so this is purely a cmd-buf split validation step:
+// equivalent to the legacy single-cmd-buf path with extra cmd-buf
+// boundaries, expected bit-identical behaviour modulo NV driver cache
+// flush noise.  v1.4.57 will retarget the cmpCmd submit to m_ComputeQueue
+// — that's the step that actually parallelises with graphics work.
+
+bool VkFrucRenderer::recordRifeDown(VkCommandBuffer cmd, uint32_t width, uint32_t height,
+                                    uint32_t /*slotIdx*/)
+{
+    if (!m_RifeNativeReady || !m_RifeNative) return false;
+    if (m_RifeBilinearPipeline == VK_NULL_HANDLE) return false;
+    if (m_RifeDownPrev == VK_NULL_HANDLE
+        || m_RifeDownCurr == VK_NULL_HANDLE) return false;
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
+    auto pfnCmdBindPipeline    = (PFN_vkCmdBindPipeline)   getDevPa(m_Device, "vkCmdBindPipeline");
+    auto pfnCmdBindDescSets    = (PFN_vkCmdBindDescriptorSets)getDevPa(m_Device, "vkCmdBindDescriptorSets");
+    auto pfnCmdPushConst       = (PFN_vkCmdPushConstants)  getDevPa(m_Device, "vkCmdPushConstants");
+    auto pfnCmdDispatch        = (PFN_vkCmdDispatch)       getDevPa(m_Device, "vkCmdDispatch");
+    if (!pfnCmdPipelineBarrier || !pfnCmdBindPipeline || !pfnCmdBindDescSets
+        || !pfnCmdPushConst || !pfnCmdDispatch) return false;
+
+    auto bufBarrier = [&](VkBuffer b,
+                          VkPipelineStageFlags srcStage,
+                          VkPipelineStageFlags dstStage,
+                          VkAccessFlags srcAcc, VkAccessFlags dstAcc) {
+        VkBufferMemoryBarrier bmb = {};
+        bmb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bmb.srcAccessMask = srcAcc;
+        bmb.dstAccessMask = dstAcc;
+        bmb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb.buffer = b;
+        bmb.size = VK_WHOLE_SIZE;
+        pfnCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 1, &bmb, 0, nullptr);
+    };
+
+    struct BilinearPC {
+        int32_t inH, inW, outH, outW, channels;
+        float   scaleH, scaleW;
+    };
+    auto dispatchBilinear = [&](VkDescriptorSet ds,
+                                int inW, int inH, int outW, int outH) {
+        pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_RifeBilinearPipeline);
+        pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_RifeBilinearPipeLay,
+                           0, 1, &ds, 0, nullptr);
+        BilinearPC pc;
+        pc.inH = inH;  pc.inW = inW;  pc.outH = outH;  pc.outW = outW;
+        pc.channels = 3;
+        pc.scaleH = (float)inH / (float)outH;
+        pc.scaleW = (float)inW / (float)outW;
+        pfnCmdPushConst(cmd, m_RifeBilinearPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                        0, sizeof(pc), &pc);
+        pfnCmdDispatch(cmd, ((uint32_t)outW + 7) / 8, ((uint32_t)outH + 7) / 8, 3);
+    };
+
+    // m_FrucPrevRgbBuf / m_FrucCurrRgbBuf are in COMPUTE_SHADER_READ from
+    // the Stage 0 (nv12rgb) computeBufBarrier emitted earlier in preCmd
+    // (caller records nv12rgb just before calling us).  No additional
+    // barrier needed before the bilinear DOWN reads them as SHADER_READ.
+    dispatchBilinear(m_RifeBilinearDownPrevDs,
+                     (int)width, (int)height,
+                     m_RifeNativeInferW, m_RifeNativeInferH);
+    dispatchBilinear(m_RifeBilinearDownCurrDs,
+                     (int)width, (int)height,
+                     m_RifeNativeInferW, m_RifeNativeInferH);
+
+    // Promote DOWN outputs to TRANSFER_READ for runInferenceGpuFlow's
+    // vkCmdCopyBuffer (in cmpCmd).  Cross-cmd-buf execution dependency is
+    // provided by the timeline-sem chain on the submit boundary; this
+    // barrier handles the cache flush + access-mask transition.
+    bufBarrier(m_RifeDownPrev,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    bufBarrier(m_RifeDownCurr,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    return true;
+}
+
+bool VkFrucRenderer::recordRifeInferOnCompute(VkCommandBuffer cmd,
+                                               uint32_t /*width*/, uint32_t /*height*/,
+                                               uint32_t slotIdx)
+{
+    if (!m_RifeNativeReady || !m_RifeNative) return false;
+    if (m_RifeFlowOutBuf == VK_NULL_HANDLE
+        || m_RifeMaskOutBuf == VK_NULL_HANDLE) return false;
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
+    if (!pfnCmdPipelineBarrier) return false;
+
+    auto bufBarrier = [&](VkBuffer b,
+                          VkPipelineStageFlags srcStage,
+                          VkPipelineStageFlags dstStage,
+                          VkAccessFlags srcAcc, VkAccessFlags dstAcc) {
+        VkBufferMemoryBarrier bmb = {};
+        bmb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bmb.srcAccessMask = srcAcc;
+        bmb.dstAccessMask = dstAcc;
+        bmb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb.buffer = b;
+        bmb.size = VK_WHOLE_SIZE;
+        pfnCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 1, &bmb, 0, nullptr);
+    };
+
+    // DUAL midpoint only — TRIPLE gated out of phase2BActive in v1.4.56.
+    if (!m_RifeNative->runInferenceGpuFlow(cmd, slotIdx,
+            m_RifeDownPrev, m_RifeDownCurr, 0.5f,
+            m_RifeFlowOutBuf, m_RifeMaskOutBuf)) {
+        return false;
+    }
+    // Inference left flow/mask in TRANSFER_WRITE (vkCmdCopyBuffer into them).
+    // Promote to SHADER_READ for the warp shader (in postCmd).  Cross-cmd-buf
+    // execution dep is the timeline sem chain; access-mask flush is here.
+    bufBarrier(m_RifeFlowOutBuf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+    bufBarrier(m_RifeMaskOutBuf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+    return true;
+}
+
+bool VkFrucRenderer::recordRifeWarp(VkCommandBuffer cmd, uint32_t width, uint32_t height,
+                                    uint32_t /*slotIdx*/)
+{
+    if (!m_RifeNativeReady) return false;
+    if (m_RifeNativeWarpPipeline == VK_NULL_HANDLE
+        || m_RifeNativeWarpDs    == VK_NULL_HANDLE) return false;
+    if (m_FrucInterpRgbBuf == VK_NULL_HANDLE) return false;
+
+    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
+    auto pfnCmdBindPipeline    = (PFN_vkCmdBindPipeline)   getDevPa(m_Device, "vkCmdBindPipeline");
+    auto pfnCmdBindDescSets    = (PFN_vkCmdBindDescriptorSets)getDevPa(m_Device, "vkCmdBindDescriptorSets");
+    auto pfnCmdPushConst       = (PFN_vkCmdPushConstants)  getDevPa(m_Device, "vkCmdPushConstants");
+    auto pfnCmdDispatch        = (PFN_vkCmdDispatch)       getDevPa(m_Device, "vkCmdDispatch");
+    if (!pfnCmdPipelineBarrier || !pfnCmdBindPipeline || !pfnCmdBindDescSets
+        || !pfnCmdPushConst || !pfnCmdDispatch) return false;
+
+    auto bufBarrier = [&](VkBuffer b,
+                          VkPipelineStageFlags srcStage,
+                          VkPipelineStageFlags dstStage,
+                          VkAccessFlags srcAcc, VkAccessFlags dstAcc) {
+        VkBufferMemoryBarrier bmb = {};
+        bmb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bmb.srcAccessMask = srcAcc;
+        bmb.dstAccessMask = dstAcc;
+        bmb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb.buffer = b;
+        bmb.size = VK_WHOLE_SIZE;
+        pfnCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 1, &bmb, 0, nullptr);
+    };
+
+    // m_FrucPrev/CurrRgbBuf left in COMPUTE_SHADER_READ by Stage 0 chain
+    // (TRANSFER_READ promotion happens later in Stage 4 curr→prev copy).
+    // Warp shader reads them as SHADER_READ — no transition needed, but we
+    // still emit a memory barrier on m_FrucCurrRgbBuf to drain any stale
+    // COMPUTE writes from cross-cmd-buf boundary.  m_FrucPrevRgbBuf is in
+    // SHADER_READ from the previous frame's Stage 4 barrier (transfer
+    // write → shader read) so it's already cache-coherent for this read.
+    bufBarrier(m_FrucCurrRgbBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+    // Promote m_FrucInterpRgbBuf to SHADER_WRITE.  Prior state can be
+    // COMPUTE_SHADER_READ from compositor / TRANSFER_WRITE from prior
+    // race / SHADER_READ — cover all with broad src masks.
+    bufBarrier(m_FrucInterpRgbBuf,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+            | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT);
+
+    struct WarpPC {
+        int32_t W, H, inferW, inferH;
+        float   magScaleX, magScaleY;
+        int32_t _pad0, _pad1;
+    };
+    WarpPC pcW;
+    pcW.W = (int32_t)width;  pcW.H = (int32_t)height;
+    pcW.inferW = m_RifeNativeInferW;  pcW.inferH = m_RifeNativeInferH;
+    pcW.magScaleX = (float)width  / (float)pcW.inferW;
+    pcW.magScaleY = (float)height / (float)pcW.inferH;
+    pcW._pad0 = 0; pcW._pad1 = 0;
+
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_RifeNativeWarpPipeline);
+    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_RifeNativeWarpPipeLay,
+                       0, 1, &m_RifeNativeWarpDs, 0, nullptr);
+    pfnCmdPushConst(cmd, m_RifeNativeWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                    0, sizeof(pcW), &pcW);
+    pfnCmdDispatch(cmd, ((uint32_t)width + 7) / 8, ((uint32_t)height + 7) / 8, 3);
+
+    // Promote interp output to SHADER_READ for downstream fragment-shader
+    // sample (interp render pass below in postCmd).
+    bufBarrier(m_FrucInterpRgbBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+    return true;
+}
+
 // §J.3.e.2.i.4 — record FRUC compute chain into the existing renderFrame
 // command buffer (we don't use a separate compute queue/cmdpool — runs on
 // our universal graphics queue with explicit pipeline barriers).
@@ -7900,6 +8126,33 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                           && m_FrucMode && frame && frame->width > 0 && frame->height > 0
                           && m_SlotCopyCmdBuf[slot] != VK_NULL_HANDLE
                           && m_CopyDoneSem != VK_NULL_HANDLE;
+    // §J.3.e.2.i.10 Phase 2B step 5-6 (v1.4.56) — opt-in 3-cmd-buf split
+    // path.  Conditions (ALL must hold; any false → fallback to v1.4.55
+    // single-cmd path bit-identical):
+    //   • VIPLE_RIFE_VK_ASYNC_COMPUTE=1 (m_AsyncComputeRequested)
+    //   • Phase 2A async-compute infra fully READY (m_AsyncComputeAvailable)
+    //   • Path D copy submit active (pathDActive — needed because preCmd
+    //     skips image→buffer copy, copy submit owns it)
+    //   • DUAL present mode WITHOUT triple (TRIPLE adds a 2nd inference at
+    //     t=2/3 the cmpCmd split currently doesn't record; gate-excluded
+    //     in v1.4.56, may relax in v1.4.57+)
+    //   • RIFE native β.5.1 path is the inference engine (m_Beta5Enabled
+    //     + m_RifeNativeReady + warp pipeline/descset ready) — β.4
+    //     bilinear-up fallback isn't split in this version
+    //   • Per-slot pre/post + ComputeCmdBuf + timeline sem all allocated
+    const bool phase2BActive = m_AsyncComputeRequested
+                             && m_AsyncComputeAvailable
+                             && pathDActive
+                             && dualPresentThisFrame
+                             && !triplePresentThisFrame
+                             && m_Beta5Enabled
+                             && m_RifeNativeReady
+                             && m_RifeNativeWarpPipeline != VK_NULL_HANDLE
+                             && m_RifeNativeWarpDs       != VK_NULL_HANDLE
+                             && m_SlotPreCmdBuf[slot]    != VK_NULL_HANDLE
+                             && m_SlotPostCmdBuf[slot]   != VK_NULL_HANDLE
+                             && m_ComputeCmdBuf[slot]    != VK_NULL_HANDLE
+                             && m_ComputeTimelineSem     != VK_NULL_HANDLE;
     uint64_t pathDCopyDoneVal = 0;
     uint32_t imgIdxA = 0;
     uint32_t imgIdxB = 0;
@@ -8239,6 +8492,486 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 "cmd buffer; main cmd buffer skips vkf->img[0] access. "
                 "AVFrame pool can recycle pool image after ~100us copy GPU work.");
         }
+    }
+
+    // ===========================================================
+    // §J.3.e.2.i.10 Phase 2B step 5-6 (v1.4.56) — 3-cmd-buf split path
+    // ===========================================================
+    //
+    // phase2BActive gate (computed above) guarantees:
+    //   • DUAL present + Path D copy submit just ran (vkf released)
+    //   • RIFE β.5.1 path (1× inference @ t=0.5)
+    //   • pre/cmp/post cmd buffers + m_ComputeTimelineSem alloc'd
+    //
+    // Submit chain (v1.4.56 — ALL submits on graphics queue;
+    //               v1.4.57 will retarget cmpCmd to m_ComputeQueue):
+    //   1. (already submitted) Path D copy → vkf sem + m_CopyDoneSem@N
+    //   2. preCmd  : wait copy + acquire[A,B],   signal compute@V_pre
+    //   3. cmpCmd  : wait compute@V_pre,         signal compute@V_post
+    //   4. postCmd : wait compute@V_post,        signal renderDone[A,B] + fence
+    //
+    // Single-cmd path (env=0 / phase2BActive=false) untouched below.
+    if (phase2BActive) {
+        const uint64_t computeV_pre  = m_AsyncComputeNext.fetch_add(2, std::memory_order_acq_rel);
+        const uint64_t computeV_post = computeV_pre + 1;
+
+        VkCommandBuffer preCmd  = m_SlotPreCmdBuf[slot];
+        VkCommandBuffer cmpCmd  = m_ComputeCmdBuf[slot];
+        VkCommandBuffer postCmd = m_SlotPostCmdBuf[slot];
+
+        m_RtPfn.ResetCommandBuffer(preCmd, 0);
+        m_RtPfn.ResetCommandBuffer(cmpCmd, 0);
+        m_RtPfn.ResetCommandBuffer(postCmd, 0);
+
+        VkCommandBufferBeginInfo cbbi2B = {};
+        cbbi2B.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        cbbi2B.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        m_RtPfn.BeginCommandBuffer(preCmd,  &cbbi2B);
+        m_RtPfn.BeginCommandBuffer(cmpCmd,  &cbbi2B);
+        m_RtPfn.BeginCommandBuffer(postCmd, &cbbi2B);
+
+        auto getDevPaP2B = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        auto pfnCmdBindPipeline_p2b    = (PFN_vkCmdBindPipeline)getDevPaP2B(m_Device, "vkCmdBindPipeline");
+        auto pfnCmdBindDescSets_p2b    = (PFN_vkCmdBindDescriptorSets)getDevPaP2B(m_Device, "vkCmdBindDescriptorSets");
+        auto pfnCmdPushConst_p2b       = (PFN_vkCmdPushConstants)getDevPaP2B(m_Device, "vkCmdPushConstants");
+        auto pfnCmdDispatch_p2b        = (PFN_vkCmdDispatch)getDevPaP2B(m_Device, "vkCmdDispatch");
+        auto pfnCmdPipelineBarrier_p2b = (PFN_vkCmdPipelineBarrier)getDevPaP2B(m_Device, "vkCmdPipelineBarrier");
+        auto pfnCmdCopyBuffer_p2b      = (PFN_vkCmdCopyBuffer)getDevPaP2B(m_Device, "vkCmdCopyBuffer");
+
+        const uint32_t hwW = (uint32_t)frame->width;
+        const uint32_t hwH = (uint32_t)frame->height;
+
+        // ---- preCmd: Stage 0 (nv12rgb compute) + RIFE bilinear DOWN ----
+        // (image→buffer copy already done in Path D copy submit; preCmd
+        // skips image-related barriers.  m_SwFrucNv12Buf left in
+        // SHADER_READ by Path D postCopyBarC.)
+        pfnCmdBindPipeline_p2b(preCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucNv12RgbPipeline);
+        pfnCmdBindDescSets_p2b(preCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucNv12RgbPipeLay,
+                               0, 1, &m_FrucNv12RgbDescSetNative, 0, nullptr);
+        struct { int w, h, uvByteOffset, _pad; } pcN_p2b = {
+            (int)hwW, (int)hwH, (int)(hwW * hwH), 0
+        };
+        pfnCmdPushConst_p2b(preCmd, m_FrucNv12RgbPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                            0, sizeof(pcN_p2b), &pcN_p2b);
+        pfnCmdDispatch_p2b(preCmd, (hwW + 7) / 8, (hwH + 7) / 8, 1);
+        {
+            VkBufferMemoryBarrier b = {};
+            b.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.buffer = m_FrucCurrRgbBuf;
+            b.size = VK_WHOLE_SIZE;
+            pfnCmdPipelineBarrier_p2b(preCmd,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0, 0, nullptr, 1, &b, 0, nullptr);
+        }
+        if (!recordRifeDown(preCmd, hwW, hwH, slot)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B recordRifeDown FAILED — "
+                "permanently falling back to single-cmd path");
+            m_RtPfn.EndCommandBuffer(preCmd);
+            m_RtPfn.EndCommandBuffer(cmpCmd);
+            m_RtPfn.EndCommandBuffer(postCmd);
+            // Demote the gate for this session so we don't keep half-recording.
+            m_AsyncComputeAvailable = false;
+            // Fall through to single-cmd path below by re-acquiring frame
+            // state — but we've already done the path D copy submit which
+            // unlocked vkf, so it's safer to just bail this frame.
+            return;
+        }
+        m_RtPfn.EndCommandBuffer(preCmd);
+
+        // ---- cmpCmd: RIFE inference (graphics queue in v1.4.56) ----
+        if (!recordRifeInferOnCompute(cmpCmd, hwW, hwH, slot)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B recordRifeInferOnCompute "
+                "FAILED — disabling Phase 2B for this session");
+            m_RtPfn.EndCommandBuffer(cmpCmd);
+            m_RtPfn.EndCommandBuffer(postCmd);
+            m_AsyncComputeAvailable = false;
+            return;
+        }
+        m_RtPfn.EndCommandBuffer(cmpCmd);
+
+        // ---- postCmd: warp + Stage 4 + render passes ----
+        if (!recordRifeWarp(postCmd, hwW, hwH, slot)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B recordRifeWarp FAILED");
+            m_RtPfn.EndCommandBuffer(postCmd);
+            m_AsyncComputeAvailable = false;
+            return;
+        }
+
+        // Stage 4: curr→prev copy (mirror runFrucComputeChain end-block).
+        {
+            VkBufferMemoryBarrier b1 = {};
+            b1.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            b1.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            b1.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b1.buffer = m_FrucCurrRgbBuf;
+            b1.size = VK_WHOLE_SIZE;
+            pfnCmdPipelineBarrier_p2b(postCmd,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 0, nullptr, 1, &b1, 0, nullptr);
+            VkBufferMemoryBarrier b2 = b1;
+            b2.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            b2.buffer = m_FrucPrevRgbBuf;
+            pfnCmdPipelineBarrier_p2b(postCmd,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 0, nullptr, 1, &b2, 0, nullptr);
+        }
+        {
+            VkBufferCopy cpy = {};
+            cpy.size = (VkDeviceSize)hwW * hwH * 3 * sizeof(float);
+            pfnCmdCopyBuffer_p2b(postCmd, m_FrucCurrRgbBuf, m_FrucPrevRgbBuf, 1, &cpy);
+        }
+        {
+            // m_FrucPrevRgbBuf TRANSFER_WRITE → SHADER_READ for next frame's
+            // RIFE DOWN read.
+            VkBufferMemoryBarrier b = {};
+            b.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.buffer = m_FrucPrevRgbBuf;
+            b.size = VK_WHOLE_SIZE;
+            pfnCmdPipelineBarrier_p2b(postCmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0, 0, nullptr, 1, &b, 0, nullptr);
+        }
+
+        // Overlay drain + upload (cmdCopyBufferToImage must be outside render pass).
+        drainOverlayStash();
+        uploadPendingOverlay(postCmd);
+
+        // SHADER_WRITE → FRAGMENT_SHADER_READ for interp/curr (real path uses
+        // m_FrucCurrRgbBuf via m_RealCurrRgbDescSet — useCrgbForReal=true
+        // is guaranteed by phase2BActive gate).
+        {
+            VkBufferMemoryBarrier rgbBars[2] = {};
+            rgbBars[0].sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            rgbBars[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            rgbBars[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            rgbBars[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            rgbBars[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            rgbBars[0].buffer = m_FrucInterpRgbBuf;
+            rgbBars[0].size   = VK_WHOLE_SIZE;
+            rgbBars[1] = rgbBars[0];
+            // m_FrucCurrRgbBuf already in TRANSFER_READ from Stage 4 barrier
+            // above; the fragment shader needs SHADER_READ.  Use a separate
+            // transition for it.
+            rgbBars[1].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            rgbBars[1].buffer = m_FrucCurrRgbBuf;
+            pfnCmdPipelineBarrier_p2b(postCmd,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0, 0, nullptr, 2, rgbBars, 0, nullptr);
+        }
+
+        VkClearValue clearVal_p2b = {};
+        clearVal_p2b.color.float32[3] = 1.0f;
+
+        // Interp render pass on imgIdxA (DUAL midpoint).
+        {
+            VkRenderPassBeginInfo rpbiA = {};
+            rpbiA.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rpbiA.renderPass           = m_RenderPass;
+            rpbiA.framebuffer          = m_Framebuffers[imgIdxA];
+            rpbiA.renderArea.extent    = m_SwapchainExtent;
+            rpbiA.clearValueCount      = 1;
+            rpbiA.pClearValues         = &clearVal_p2b;
+            m_RtPfn.CmdBeginRenderPass(postCmd, &rpbiA, VK_SUBPASS_CONTENTS_INLINE);
+            m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
+            m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                          m_InterpPipelineLayout, 0,
+                                          1, &m_InterpDescSet, 0, nullptr);
+            struct { int srcW, srcH, _pad0, _pad1; } pcInterp = {
+                (int)hwW, (int)hwH, 0, 0
+            };
+            pfnCmdPushConst_p2b(postCmd, m_InterpPipelineLayout,
+                                VK_SHADER_STAGE_FRAGMENT_BIT,
+                                0, sizeof(pcInterp), &pcInterp);
+            m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
+            drawOverlayInRenderPass(postCmd);
+            m_RtPfn.CmdEndRenderPass(postCmd);
+        }
+
+        // Real-frame render pass on imgIdxB — useCrgbForReal route (m_InterpPipeline
+        // + m_RealCurrRgbDescSet reads m_FrucCurrRgbBuf).
+        {
+            VkRenderPassBeginInfo rpbiB = {};
+            rpbiB.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rpbiB.renderPass           = m_RenderPass;
+            rpbiB.framebuffer          = m_Framebuffers[imgIdxB];
+            rpbiB.renderArea.extent    = m_SwapchainExtent;
+            rpbiB.clearValueCount      = 1;
+            rpbiB.pClearValues         = &clearVal_p2b;
+            m_RtPfn.CmdBeginRenderPass(postCmd, &rpbiB, VK_SUBPASS_CONTENTS_INLINE);
+            m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
+            m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                          m_InterpPipelineLayout, 0,
+                                          1, &m_RealCurrRgbDescSet, 0, nullptr);
+            struct { int srcW, srcH, _pad0, _pad1; } pcReal = {
+                (int)hwW, (int)hwH, 0, 0
+            };
+            pfnCmdPushConst_p2b(postCmd, m_InterpPipelineLayout,
+                                VK_SHADER_STAGE_FRAGMENT_BIT,
+                                0, sizeof(pcReal), &pcReal);
+            m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
+            drawOverlayInRenderPass(postCmd);
+            m_RtPfn.CmdEndRenderPass(postCmd);
+        }
+
+        // releaseBar on vkf->img[0] already done in Path D copy submit; skip.
+        m_RtPfn.EndCommandBuffer(postCmd);
+
+        // ---- Submit 4-chain (path D copy submit already done above) ----
+        // §J.3.e.2.i.10 Phase 2B step 5-6 — v1.4.56 routes ALL three submits
+        // through m_GraphicsQueue (s_VkFrucQueueLock).  v1.4.57 will switch
+        // the cmpCmd submit to m_ComputeQueue (s_VkFrucComputeLock).
+        //
+        // preCmd submit: wait CopyDoneSem@N, signal compute@V_pre.
+        //                acquireSems wait moved to postCmd (only the render
+        //                pass cares about swapchain image availability).
+        {
+            VkSemaphore     waitS[1] = { m_CopyDoneSem };
+            VkPipelineStageFlags waitM[1] = { VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT };
+            uint64_t        waitV[1] = { pathDCopyDoneVal };
+            VkSemaphore     sigS[1]  = { m_ComputeTimelineSem };
+            uint64_t        sigV[1]  = { computeV_pre };
+            VkTimelineSemaphoreSubmitInfo tssi = {};
+            tssi.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            tssi.waitSemaphoreValueCount   = 1;
+            tssi.pWaitSemaphoreValues      = waitV;
+            tssi.signalSemaphoreValueCount = 1;
+            tssi.pSignalSemaphoreValues    = sigV;
+            VkSubmitInfo si = {};
+            si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            si.pNext                = &tssi;
+            si.waitSemaphoreCount   = 1;
+            si.pWaitSemaphores      = waitS;
+            si.pWaitDstStageMask    = waitM;
+            si.commandBufferCount   = 1;
+            si.pCommandBuffers      = &preCmd;
+            si.signalSemaphoreCount = 1;
+            si.pSignalSemaphores    = sigS;
+            VkResult vrPre;
+            {
+                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                vrPre = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, VK_NULL_HANDLE);
+            }
+            if (vrPre != VK_SUCCESS) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B preCmd submit failed (%d)", (int)vrPre);
+                return;
+            }
+        }
+        // cmpCmd submit: wait compute@V_pre, signal compute@V_post.
+        //   runInferenceGpuFlow's first op is vkCmdCopyBuffer (TRANSFER) so
+        //   the wait stage mask is TRANSFER.  v1.4.56: graphics queue +
+        //   s_VkFrucQueueLock.  v1.4.57: m_ComputeQueue + s_VkFrucComputeLock.
+        {
+            VkPipelineStageFlags waitM[1] = { VK_PIPELINE_STAGE_TRANSFER_BIT };
+            VkSemaphore     waitS[1] = { m_ComputeTimelineSem };
+            uint64_t        waitV[1] = { computeV_pre };
+            VkSemaphore     sigS[1]  = { m_ComputeTimelineSem };
+            uint64_t        sigV[1]  = { computeV_post };
+            VkTimelineSemaphoreSubmitInfo tssi = {};
+            tssi.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            tssi.waitSemaphoreValueCount   = 1;
+            tssi.pWaitSemaphoreValues      = waitV;
+            tssi.signalSemaphoreValueCount = 1;
+            tssi.pSignalSemaphoreValues    = sigV;
+            VkSubmitInfo si = {};
+            si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            si.pNext                = &tssi;
+            si.waitSemaphoreCount   = 1;
+            si.pWaitSemaphores      = waitS;
+            si.pWaitDstStageMask    = waitM;
+            si.commandBufferCount   = 1;
+            si.pCommandBuffers      = &cmpCmd;
+            si.signalSemaphoreCount = 1;
+            si.pSignalSemaphores    = sigS;
+            VkResult vrCmp;
+            {
+                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                vrCmp = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, VK_NULL_HANDLE);
+            }
+            if (vrCmp != VK_SUCCESS) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B cmpCmd submit failed (%d)", (int)vrCmp);
+                return;
+            }
+        }
+        // postCmd submit: wait compute@V_post + acquireSem[A,B], signal
+        //                  renderDone[A,B] + fence.
+        //   recordRifeWarp's first op is COMPUTE_SHADER (warp dispatch); the
+        //   downstream render pass is FRAGMENT_SHADER; Stage 4 + curr→prev
+        //   copy is TRANSFER; cover all three in the compute@V_post wait mask.
+        //   acquireSems block only the COLOR_ATTACHMENT_OUTPUT stage (render
+        //   pass writes), per swapchain image semantics.
+        {
+            VkPipelineStageFlags waitM[3] = {
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                    | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                    | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+            };
+            VkSemaphore     waitS[3] = { m_ComputeTimelineSem,
+                                          m_SlotAcquireSem[slot][0],
+                                          m_SlotAcquireSem[slot][1] };
+            uint64_t        waitV[3] = { computeV_post, 0, 0 };
+            VkSemaphore     sigS[2]  = { m_SwapchainRenderDoneSem[imgIdxA],
+                                          m_SwapchainRenderDoneSem[imgIdxB] };
+            uint64_t        sigV[2]  = { 0, 0 };
+            VkTimelineSemaphoreSubmitInfo tssi = {};
+            tssi.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            tssi.waitSemaphoreValueCount   = 3;
+            tssi.pWaitSemaphoreValues      = waitV;
+            tssi.signalSemaphoreValueCount = 2;
+            tssi.pSignalSemaphoreValues    = sigV;
+            VkSubmitInfo si = {};
+            si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            si.pNext                = &tssi;
+            si.waitSemaphoreCount   = 3;
+            si.pWaitSemaphores      = waitS;
+            si.pWaitDstStageMask    = waitM;
+            si.commandBufferCount   = 1;
+            si.pCommandBuffers      = &postCmd;
+            si.signalSemaphoreCount = 2;
+            si.pSignalSemaphores    = sigS;
+            VkResult vrPost;
+            {
+                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                vrPost = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
+            }
+            if (vrPost != VK_SUCCESS) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B postCmd submit failed (%d)", (int)vrPost);
+                return;
+            }
+        }
+
+        static std::atomic<bool> s_phase2BLogged{false};
+        bool expP2B = false;
+        if (s_phase2BLogged.compare_exchange_strong(expP2B, true)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B wiring active: 3-cmd-buf "
+                "chain (gfx-pre → gfx-cmp(v1.4.56) → gfx-post), timeline V_pre=%llu "
+                "V_post=%llu — cmpCmd retarget to compute queue lands in v1.4.57",
+                (unsigned long long)computeV_pre,
+                (unsigned long long)computeV_post);
+        }
+
+        // ---- NV-OF marker + execute (mirror of single-cmd path at ~8865) ----
+        // Path D copy submit already populated m_NvOfInputCurr; here we
+        // fire the OF queue execute and swap input handles, identical to
+        // single-cmd path so NV-OF state stays in sync across env toggles.
+        if (m_NvOfReady && m_NvOfFuncList) {
+            static thread_local uint32_t s_NvOfFrameCountP2B = 0;
+            const uint32_t frameNumP2B = s_NvOfFrameCountP2B++;
+            if (frameNumP2B == 0) {
+                std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
+                std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
+                std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+            }
+            if (frameNumP2B > 0) {
+                const uint64_t inSigVal  = m_NvOfTimelineValue + 1;
+                const uint64_t outSigVal = inSigVal + 1;
+                VkTimelineSemaphoreSubmitInfo tsMark = {};
+                tsMark.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+                tsMark.signalSemaphoreValueCount = 1;
+                tsMark.pSignalSemaphoreValues    = &inSigVal;
+                VkSubmitInfo siMark = {};
+                siMark.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                siMark.pNext                = &tsMark;
+                siMark.commandBufferCount   = 0;
+                siMark.signalSemaphoreCount = 1;
+                siMark.pSignalSemaphores    = &m_NvOfTimelineSem;
+                VkResult vrMark;
+                {
+                    std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                    vrMark = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siMark, VK_NULL_HANDLE);
+                }
+                if (vrMark == VK_SUCCESS) {
+                    auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
+                    NV_OF_SYNC_VK waitSync = {};
+                    waitSync.semaphore = m_NvOfTimelineSem;
+                    waitSync.value     = inSigVal;
+                    NV_OF_SYNC_VK signalSync = {};
+                    signalSync.semaphore = m_NvOfTimelineSem;
+                    signalSync.value     = outSigVal;
+                    NV_OF_EXECUTE_INPUT_PARAMS_VK ofIn = {};
+                    ofIn.inputFrame      = (NvOFGPUBufferHandle)m_NvOfHandleCurr;
+                    ofIn.referenceFrame  = (NvOFGPUBufferHandle)m_NvOfHandlePrev;
+                    ofIn.disableTemporalHints = NV_OF_FALSE;
+                    ofIn.numWaitSyncs    = 1;
+                    ofIn.pWaitSyncs      = &waitSync;
+                    NV_OF_EXECUTE_OUTPUT_PARAMS_VK ofOut = {};
+                    ofOut.outputBuffer = (NvOFGPUBufferHandle)m_NvOfHandleFlow;
+                    ofOut.pSignalSync  = &signalSync;
+                    NV_OF_STATUS s = funcList->nvOFExecuteVk((NvOFHandle)m_NvOfHandle,
+                                                              &ofIn, &ofOut);
+                    if (s == NV_OF_SUCCESS) {
+                        m_NvOfTimelineValue = outSigVal;
+                        std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
+                        std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
+                        std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+                    }
+                } else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VKFRUC-NVOF] §J.3.e.2.i.10 Phase 2B marker "
+                                "QueueSubmit failed vr=%d", (int)vrMark);
+                }
+            }
+        }
+
+        // ---- Present (DUAL only — TRIPLE excluded by gate) ----
+        {
+            VkPresentInfoKHR piA = {};
+            piA.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+            piA.waitSemaphoreCount = 1;
+            piA.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxA];
+            piA.swapchainCount     = 1;
+            piA.pSwapchains        = &m_Swapchain;
+            piA.pImageIndices      = &imgIdxA;
+            VkResult vrPA;
+            {
+                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                vrPA = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piA);
+            }
+            if (vrPA != VK_SUCCESS && vrPA != VK_SUBOPTIMAL_KHR) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B present(interp) returned %d", (int)vrPA);
+            }
+            VkPresentInfoKHR piB = {};
+            piB.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+            piB.waitSemaphoreCount = 1;
+            piB.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxB];
+            piB.swapchainCount     = 1;
+            piB.pSwapchains        = &m_Swapchain;
+            piB.pImageIndices      = &imgIdxB;
+            VkResult vrPB;
+            {
+                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                vrPB = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piB);
+            }
+            if (vrPB != VK_SUCCESS && vrPB != VK_SUBOPTIMAL_KHR) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B present(real) returned %d", (int)vrPB);
+            }
+        }
+
+        // AVFrame state already updated + unlocked in Path D copy submit
+        // (mandatory pathDActive prereq).  Nothing else to do.
+        return;
     }
 
     // ---- 6. Record cmd buffer ----

@@ -996,6 +996,29 @@ private:
     bool runRifeNativeStage(VkCommandBuffer cmd, uint32_t width, uint32_t height,
                             uint32_t slotIdx);
 
+    // §J.3.e.2.i.10 Phase 2B step 5-6 (v1.4.56) — DUAL-only β.5.1 split of
+    // runRifeNativeStage into 3 record helpers, one per cmd buffer in the
+    // pre/compute/post chain.  Caller (renderFrame phase2BActive path)
+    // BeginCommandBuffer's each cmd separately and feeds the matching helper:
+    //   recordRifeDown            → preCmd  (graphics QF): bilinear DOWN x2
+    //                                + RifeDownPrev/Curr → TRANSFER_READ barrier
+    //   recordRifeInferOnCompute  → cmpCmd  (graphics in v1.4.56, compute in
+    //                                v1.4.57+): runInferenceGpuFlow at t=0.5
+    //                                + flow/mask TRANSFER_WRITE → SHADER_READ
+    //   recordRifeWarp            → postCmd (graphics QF): m_FrucPrev/CurrRgbBuf
+    //                                TRANSFER_READ → SHADER_READ + interp prior
+    //                                → SHADER_WRITE + native warp dispatch
+    //                                + interp SHADER_WRITE → SHADER_READ
+    // TRIPLE (m_TripleMode) is unsupported in this split for v1.4.56 — the
+    // gate refuses phase2BActive when triplePresentThisFrame.  v1.4.57 may
+    // add it once the cross-queue submit lands.
+    bool recordRifeDown(VkCommandBuffer cmd, uint32_t width, uint32_t height,
+                        uint32_t slotIdx);
+    bool recordRifeInferOnCompute(VkCommandBuffer cmd, uint32_t width, uint32_t height,
+                                   uint32_t slotIdx);
+    bool recordRifeWarp(VkCommandBuffer cmd, uint32_t width, uint32_t height,
+                        uint32_t slotIdx);
+
     // β.4 — downscale wrapper.  Full-res (1920×1080) RIFE blobs exhaust
     // BAR-resident host-visible memory (blob '394' alloc 17.7MB fail).
     // Downscale source pair via bilinear → infer at small dim → upscale

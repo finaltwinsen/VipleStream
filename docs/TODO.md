@@ -145,6 +145,39 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.56 ship 帶走的條目（2026-05-14, post v1.4.55 Phase 2B plumbing）
+
+- 🟡 **§J.3.e.2.i.10 Phase 2B step 5-6（拆分版第一刀）** cmd-buf split
+  + 4-submit chain，但 cmpCmd 仍在 graphics queue 上（拿到 v1.4.57 才真正
+  切 compute queue）。改動範圍：`moonlight-qt/app/streaming/video/ffmpeg-renderers/vkfruc.{h,cpp}`。
+  - vkfruc.h 加 `recordRifeDown` / `recordRifeInferOnCompute` /
+    `recordRifeWarp` 三個 helper 宣告（DUAL β.5.1 only）
+  - vkfruc.cpp 加 `s_VkFrucComputeLock` static mutex（v1.4.57 才真正
+    用，本版只為了 commit 完整性引入；目前 cmpCmd submit 仍拿
+    s_VkFrucQueueLock）
+  - 三個 helper 實作：把既有 `runRifeNativeStage` β.5.1 DUAL path 切
+    DOWN（preCmd）/ inference（cmpCmd）/ warp（postCmd）三段。Cross-cmd-buf
+    barrier 由 timeline-sem chain 提供 execution dep，每段末端各自 emit
+    access-mask transition
+  - renderFrame 加 `phase2BActive` gate，**所有條件必須同時成立**：
+    `m_AsyncComputeRequested && m_AsyncComputeAvailable && pathDActive
+    && dualPresentThisFrame && !triplePresentThisFrame && m_Beta5Enabled
+    && m_RifeNativeReady && warp pipe/ds + pre/post/compute cmdbufs + 
+    m_ComputeTimelineSem 全 alloc 完成`。任何條件失敗 → fallback 到 v1.4.55
+    single-cmd path（bit-identical）
+  - phase2BActive 路徑下 record 3 cmd buf + submit 4 chain：
+    `Path D copy (既有) → preCmd (signal compute@V_pre) → cmpCmd
+    (wait V_pre, signal V_post, **graphics queue in v1.4.56**) → postCmd
+    (wait V_post + acquireSem[A,B], signal renderDone[A,B] + fence)`
+  - phase2BActive 路徑 mirror 既有 NV-OF marker submit + execute（不 mirror
+    會讓 m_NvOfInputCurr/Prev swap 失衡）
+  - **暫不 support 的範圍 (留 v1.4.57+)**: TRIPLE 兩次 inference cmpCmd
+    編排、SW path `renderFrameSw` mirror、β.4 bilinear-up fallback、真正
+    cmpCmd 切 m_ComputeQueue 拿 s_VkFrucComputeLock。第一版 phase2BActive
+    全 graphics queue 等價 v1.4.55 single-cmd + 額外 cmd-buf 邊界 cache
+    flush — 只驗 split 結構正確，**不期待 perf gain**
+  - env=0（預設）跟 v1.4.55 bit-identical（phase2BActive 短路為 false）
+
 ### v1.4.55 ship 帶走的條目（2026-05-14, post v1.4.54 Phase 2B step 1）
 
 - 🟡 **§J.3.e.2.i.10 Phase 2B step 2-4** async-compute plumbing
