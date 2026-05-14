@@ -17,7 +17,7 @@
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
 | **Active (next)** | **§J.3.e.X Path β.11** FRUC interp quality 微調 | β.11 hypothesis 1 baseline (EDGE_AWARE_MV_THRESHOLD 2.0→8.0 動態邊緣 8×8 馬賽克 fix) ship in v1.4.11 (fa46a88)，待使用者實測決定：keep / 試 16 (仍馬賽克) / 退 4 (edge 變糊) / 改 push constant runtime tunable。其他 hypothesis (luma-gap backstop / big-motion bias / sub-pixel precision) 若需要再開 |
-| ~~**Active (P0, post-v1.4.33)**~~ ✅ **FIXED v1.4.38** | **§M.1.f** stale ownership lock 自動 timeout | 2026-05-14 FIXED — root cause 是 client-side quit key combo 路徑不送 /cancel (`session.cpp:1395-1397` `quitAppAfter` pref 預設 false 把 `/cancel` send 跟 client app exit 兩件事綁同條件). Fix: (a) **client** `session.cpp` 拆 `shouldQuit` 成 `shouldNotifyServerCancel` (graceful exit always send /cancel) + `shouldQuitClientApp` (`quitAppAfter` pref). (b) **server defensive** `proc.clear_owner_uuid()` public method + `rtsp.cpp` `remove()` / `clear()` session-count==0 hook call it — covers client crash / WiFi drop / power-off 路徑. 詳細 plan `~/.claude/plans/lucky-petting-yeti.md` |
+| ~~**Active (P0, post-v1.4.33)**~~ ✅ **FIXED v1.4.38 + v1.4.40 Android leg** | **§M.1.f** stale ownership lock — 快捷鍵退出後 server-side 釋放 | 2026-05-14 FIXED — root cause 是 client-side quit key combo 路徑不送 /cancel (`session.cpp:1395-1397` `quitAppAfter` pref 預設 false 把 `/cancel` send 跟 client app exit 兩件事綁同條件). Fix: (a) **moonlight-qt v1.4.38** `session.cpp` 拆 `shouldQuit` 成 `shouldNotifyServerCancel` (graceful exit always send /cancel) + `shouldQuitClientApp` (`quitAppAfter` pref). (b) **moonlight-android v1.4.40** `Game.java stopConnection()` 加同 pattern：`conn.stop()` 之前先用 `xferHost / xferHttpsPort / xferServerCert` 建臨時 NvHTTP 呼叫 `quitApp()`。(c) **server defensive `clear_owner_uuid()` public method 保留** (供未來 timeout 機制用)，但 **rtsp.cpp `remove()`/`clear()` session-count==0 hook 在 v1.4.39 reverted**（race condition with normal stream setup — host log 顯示 hook 在 launch 跟 RTSP session insert 之間 fire 把 just-set owner 抹掉）. **§M.1.f.2 follow-up** active: `last_activity` timestamp + idle reconcile 機制（非 hook-on-teardown）補 client crash / WiFi drop / power off 異常路徑 |
 | **Active (post-v1.4.12)** | **§M.2** Phase 2 雙 user 並發 streaming 驗測 | Ubuntu VM 上 per-user systemd + Xdummy + PipeWire 端到端跑通；NVENC 並發等實體機到位。等 §M.1 (v1.4.12) 取得使用者實測 sign-off 後開工 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Active** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限） |
@@ -40,7 +40,7 @@
 | **Active (P0, post-v1.4.35)** | **§N.5.bug** Android file transfer client SSL `TLSV1_ALERT_INTERNAL_ERROR` post-handshake | (b) server stale state **✅ FIXED in v1.4.34 commit `550100d`** (sweep_stale_locked, 實測 06:11:22 age=59s pending→failed verified). (a) **仍 active** — v1.4.35 `[VIPLE-VERIFY]` diagnostic 證實 **Scenario B**：每個 client SSL request server-side `verify_callback` 都 `enter` + `OK uuid=XXXXXXXX-…`，**零 DENY**，TLS handshake + cert verify 全成功。但 client BoringSSL `tls_record.cc:572` 從 server 收到 internal_error alert. **意味 alert 在 TLS handshake 之後 application 層送**（SimpleWeb / boost-asio strand 處理 request 階段）。下一步 diagnostic options：(i) 在 xfer_poll/blob/result handler 加 entry/exit/try-catch BOOST_LOG 看 handler 是否 invoke + 是否 throw；(ii) host-side curl reproduction (需要 export Pixel 5 paired cert/key 到 host)；(iii) SimpleWeb internal read/write error verbose patch. 推薦先 (i) — 最 surgical |
 | **Active (post-v1.4.33)** | **§N.5** moonlight-android FileTransferClient runtime verify | 建置 + JNI hooked，但實機未測；接收方向 listing 走 MediaStore.Downloads 而非任意 path（v1 限制） |
 | **Low (post-v1.4.33)** | **§N.6** moonlight-qt Cancel hotkey (Ctrl+Alt+Shift+X) | Web UI 重新整理 + 等 stream 結束已可中止 transfer；in-session hotkey 還沒接到 session keystroke handler |
-| **Low** | **§N.7** Sunshine Linux fs_picker (zenity) | 「Send to client」要在 Linux server 才需要；Linux server 還是 rare-usage（§K.1 SHIPPED 但 host 通常在 Windows）|
+| **Low (partial-fixed v1.4.40)** | **§N.7** Sunshine Linux fs_picker (zenity) | v1.4.40 ship `src/platform/linux/fs_picker.cpp` **stub** (回 `std::nullopt`) 讓 Linux server build 能 link（`system_tray.cpp` 對 `fs_picker::pick_open_file` unconditional reference），tray「Send to client」目前 noop。real zenity subprocess 實作仍 TODO — 需 native Linux GUI session 驗測 DISPLAY / DBUS_SESSION_BUS_ADDRESS env 透過 sunshinesvc `CreateProcessAsUserW` 正確繼承|
 | **Low (post-v1.4.20+)** | **§H.4-perf** VkFrucRenderer AMD draw-time perf fix | OSD「(含 V-sync; 60Hz 下限 ~16.7ms)」標籤已 ship；m_FrucMode=false 真實 ~13ms (60Hz) 仍偏高，要先抓 `[VIPLE-VKFRUC-GPU-PROF]` 量化才能 dive in。AMD-only，NV 未複現 |
 
 ### v1.4.0 ship 帶走的條目（之前在 Active 表內）
@@ -103,6 +103,34 @@
 - ❌ **§J.3.e.2.i.9** kFrucFramesInFlight 2→4 bump — v1.4.2 (234d2aa) 走錯方向。在 v1.4.8 (6b9bb89) revert
 - ❌ **§J.3.e.2.i.10d** extra_hw_frames=8 (Round 4) — pool size 不是 dominant bottleneck，Round 5 確認後 revert 回 1
 - ❌ **§N.client.connection-cache** moonlight-qt FileTransferClient `ConnectionCacheExpiryTimeoutSecondsAttribute=0` — 仿照 NvHTTP 設這個 attribute（NvHTTP 是 GFE-compat 用），在 Sunshine + Qt 6.10 環境下反而讓第一次 poll 直接 hang 15s 被 watchdog 砍掉。已 revert，改在每次 transfer 結束後 `clearAccessCache()` 處理半關閉 socket 重用問題
+
+### v1.4.34 → v1.4.40 ship 帶走的條目（2026-05-14）
+
+主軸：**§M.1.f 快捷鍵退出後 server-side ownership 釋放（PC + Android）+ §N.5.bug
+server stale-state sweep + Linux server build linker fix**。
+
+- ✅ **§N.5.bug (b) server-side stale lock sweep** — `sweep_stale_locked` 60s
+  age 條件 pending→failed transition（commit `550100d`，v1.4.34）。實測
+  06:11:22 age=59s pending→failed verified
+- ✅ **§M.1.f client-side fix** — moonlight-qt `session.cpp` 拆 `shouldQuit`
+  為 `shouldNotifyServerCancel` + `shouldQuitClientApp`（commit `cd8f56a`，
+  v1.4.38）+ server-side `proc::proc.clear_owner_uuid()` public method
+  for 未來 idle reconcile 機制
+- ✅ **§N Android UX polish** — Toast → in-stream overlay (bottom-left
+  yellow-green text, 0-100% 全程可見, 完成 3s 後自動 hide)（v1.4.38）
+- ✅ **§M.1.f race fix revert** — rtsp.cpp `remove()` / `clear()`
+  session-count==0 → `clear_owner_uuid()` hook 因 race condition with
+  normal stream setup（host log 14:02:50 hook 在 14:02:47 launch 跟
+  14:02:50.197 RTSP session insert 之間 fire 把 just-set owner 抹掉）
+  → reverted（commit `8a70d6e`，v1.4.39）。`clear_owner_uuid()` method
+  保留供 §M.1.f.2 follow-up
+- ✅ **§M.1.f Android leg** — moonlight-android `Game.java
+  stopConnection()` 在 `conn.stop()` 之前先用 `xferHost / xferHttpsPort /
+  xferServerCert` 建臨時 NvHTTP 呼叫 `quitApp()`，best-effort try-catch
+  包住（commit `de2e4cb`，v1.4.40）
+- ✅ **§N.7 Linux server fs_picker stub** — `Sunshine/src/platform/linux/fs_picker.cpp`
+  回 `std::nullopt` 讓 Linux server build 能 link，`cmake/compile_definitions/linux.cmake`
+  加進 `PLATFORM_TARGET_FILES`（commit `de2e4cb`，v1.4.40）。real zenity 仍 TODO
 
 ---
 
