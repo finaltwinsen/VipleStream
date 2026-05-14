@@ -6292,6 +6292,21 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                             "(period=%.2f ns/tick, %u queries)",
                             m_FrucTimerNsPerTick, qpCi.queryCount);
             }
+            // §J.3.e.2.i.10 Phase 2B (v1.4.59) — second pool just for the
+            // 3-cmd-buf split path: 6 timestamps × kFrucFramesInFlight slots
+            // (preCmd start/end, cmpCmd start/end, postCmd start/end).
+            // Non-fatal — failure here just disables phase 2B profiling.
+            VkQueryPoolCreateInfo qpCi2B = qpCi;
+            qpCi2B.queryCount = 6 * kFrucFramesInFlight;
+            if (pfnCreateQueryPool(m_Device, &qpCi2B, nullptr, &m_Phase2BTimerPool) != VK_SUCCESS) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B timestamp pool create failed (non-fatal)");
+                m_Phase2BTimerPool = VK_NULL_HANDLE;
+            } else {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B timestamp pool "
+                            "ready (%u queries)", qpCi2B.queryCount);
+            }
         }
     }
 
@@ -6401,6 +6416,12 @@ void VkFrucRenderer::destroyFrucComputeResources()
         pfnDestroyQueryPool(m_Device, m_FrucTimerPool, nullptr);
         m_FrucTimerPool = VK_NULL_HANDLE;
     }
+    // §J.3.e.2.i.10 Phase 2B (v1.4.59) — phase2B-only timestamp pool
+    if (m_Phase2BTimerPool && pfnDestroyQueryPool) {
+        pfnDestroyQueryPool(m_Device, m_Phase2BTimerPool, nullptr);
+        m_Phase2BTimerPool = VK_NULL_HANDLE;
+    }
+    for (uint32_t i = 0; i < kFrucFramesInFlight; ++i) m_Phase2BTimerArmed[i] = false;
 
     // §J.3.e.2.i.6 teardown crash fix — when the last ref drops, call
     // ncnn::destroy_gpu_instance() so ncnn's internal Vulkan resources
@@ -8542,6 +8563,68 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         auto pfnCmdDispatch_p2b        = (PFN_vkCmdDispatch)getDevPaP2B(m_Device, "vkCmdDispatch");
         auto pfnCmdPipelineBarrier_p2b = (PFN_vkCmdPipelineBarrier)getDevPaP2B(m_Device, "vkCmdPipelineBarrier");
         auto pfnCmdCopyBuffer_p2b      = (PFN_vkCmdCopyBuffer)getDevPaP2B(m_Device, "vkCmdCopyBuffer");
+        auto pfnCmdResetQueryPool_p2b  = (PFN_vkCmdResetQueryPool)getDevPaP2B(m_Device, "vkCmdResetQueryPool");
+        auto pfnCmdWriteTimestamp_p2b  = (PFN_vkCmdWriteTimestamp)getDevPaP2B(m_Device, "vkCmdWriteTimestamp");
+        auto pfnGetQueryPoolResults_p2b = (PFN_vkGetQueryPoolResults)getDevPaP2B(m_Device, "vkGetQueryPoolResults");
+
+        // §J.3.e.2.i.10 Phase 2B (v1.4.59) GPU profiling — read previous
+        // pass's 6 timestamps for THIS p2b timer slot (slot fence already
+        // wait above guarantees the GPU finished the prior phase2BActive
+        // chain that wrote them).  Then accumulate + log every 60 samples.
+        const uint32_t p2bTimerSlot = m_Phase2BTimerSlot;
+        const uint32_t p2bTimerBase = p2bTimerSlot * 6;
+        if (m_Phase2BTimerPool && pfnGetQueryPoolResults_p2b
+            && m_Phase2BTimerArmed[p2bTimerSlot]) {
+            uint64_t ts[6] = {};
+            VkResult qrP2B = pfnGetQueryPoolResults_p2b(m_Device, m_Phase2BTimerPool,
+                p2bTimerBase, 6, sizeof(ts), ts, sizeof(uint64_t),
+                VK_QUERY_RESULT_64_BIT);
+            if (qrP2B == VK_SUCCESS && ts[5] >= ts[0]) {
+                const double ns2us = m_FrucTimerNsPerTick / 1000.0;
+                m_Phase2BGpuPreUsAccum   += (double)(ts[1] - ts[0]) * ns2us;
+                m_Phase2BGpuCmpUsAccum   += (double)(ts[3] - ts[2]) * ns2us;
+                m_Phase2BGpuPostUsAccum  += (double)(ts[5] - ts[4]) * ns2us;
+                m_Phase2BGpuTotalUsAccum += (double)(ts[5] - ts[0]) * ns2us;
+                m_Phase2BGpuCount++;
+                if (m_Phase2BGpuCount >= 60) {
+                    const double n = (double)m_Phase2BGpuCount;
+                    const double avgPre   = m_Phase2BGpuPreUsAccum   / n;
+                    const double avgCmp   = m_Phase2BGpuCmpUsAccum   / n;
+                    const double avgPost  = m_Phase2BGpuPostUsAccum  / n;
+                    const double avgTot   = m_Phase2BGpuTotalUsAccum / n;
+                    const double serial   = avgPre + avgCmp + avgPost;
+                    const double saving   = serial - avgTot;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-PHASE2B-PROF] preCmd=%.0fus cmpCmd=%.0fus "
+                        "postCmd=%.0fus chain=%.0fus serial_sum=%.0fus "
+                        "parallel_saving=%.0fus (n=%d, mean over last 60 frames)",
+                        avgPre, avgCmp, avgPost, avgTot, serial, saving,
+                        m_Phase2BGpuCount);
+                    m_Phase2BGpuPreUsAccum   = 0.0;
+                    m_Phase2BGpuCmpUsAccum   = 0.0;
+                    m_Phase2BGpuPostUsAccum  = 0.0;
+                    m_Phase2BGpuTotalUsAccum = 0.0;
+                    m_Phase2BGpuCount        = 0;
+                }
+            }
+        }
+        m_Phase2BTimerSlot = (m_Phase2BTimerSlot + 1) % kFrucFramesInFlight;
+
+        // §J.3.e.2.i.10 Phase 2B (v1.4.59) GPU profiling — reset 6 query
+        // slots in preCmd; each cmd buf writes its start timestamp at
+        // TOP_OF_PIPE.  Cross-queue write ordering is guaranteed by the
+        // timeline-sem chain (preCmd reset/write → cmpCmd wait+write →
+        // postCmd wait+write); per spec, reset+write must observe in-cmd
+        // execution order but may live in different queues.
+        if (m_Phase2BTimerPool && pfnCmdResetQueryPool_p2b && pfnCmdWriteTimestamp_p2b) {
+            pfnCmdResetQueryPool_p2b(preCmd, m_Phase2BTimerPool, p2bTimerBase, 6);
+            pfnCmdWriteTimestamp_p2b(preCmd,  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                      m_Phase2BTimerPool, p2bTimerBase + 0);
+            pfnCmdWriteTimestamp_p2b(cmpCmd,  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                      m_Phase2BTimerPool, p2bTimerBase + 2);
+            pfnCmdWriteTimestamp_p2b(postCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                      m_Phase2BTimerPool, p2bTimerBase + 4);
+        }
 
         const uint32_t hwW = (uint32_t)frame->width;
         const uint32_t hwH = (uint32_t)frame->height;
@@ -8586,6 +8669,10 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             // unlocked vkf, so it's safer to just bail this frame.
             return;
         }
+        if (m_Phase2BTimerPool && pfnCmdWriteTimestamp_p2b) {
+            pfnCmdWriteTimestamp_p2b(preCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                      m_Phase2BTimerPool, p2bTimerBase + 1);
+        }
         m_RtPfn.EndCommandBuffer(preCmd);
 
         // ---- cmpCmd: RIFE inference (graphics queue in v1.4.56) ----
@@ -8597,6 +8684,10 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             m_RtPfn.EndCommandBuffer(postCmd);
             m_AsyncComputeAvailable = false;
             return;
+        }
+        if (m_Phase2BTimerPool && pfnCmdWriteTimestamp_p2b) {
+            pfnCmdWriteTimestamp_p2b(cmpCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                      m_Phase2BTimerPool, p2bTimerBase + 3);
         }
         m_RtPfn.EndCommandBuffer(cmpCmd);
 
@@ -8733,6 +8824,10 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         }
 
         // releaseBar on vkf->img[0] already done in Path D copy submit; skip.
+        if (m_Phase2BTimerPool && pfnCmdWriteTimestamp_p2b) {
+            pfnCmdWriteTimestamp_p2b(postCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                      m_Phase2BTimerPool, p2bTimerBase + 5);
+        }
         m_RtPfn.EndCommandBuffer(postCmd);
 
         // ---- Submit 4-chain (path D copy submit already done above) ----
@@ -8987,6 +9082,13 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
 
         // AVFrame state already updated + unlocked in Path D copy submit
         // (mandatory pathDActive prereq).  Nothing else to do.
+
+        // §J.3.e.2.i.10 Phase 2B (v1.4.59) — mark this p2b timer slot armed
+        // so next time the same slot rotates around we read its 6 timestamps.
+        // Submit succeeded → GPU will write them.
+        if (m_Phase2BTimerPool) {
+            m_Phase2BTimerArmed[p2bTimerSlot] = true;
+        }
         return;
     }
 

@@ -1168,6 +1168,25 @@ private:
     double      m_FrucGpuStageUsAccum[kFrucStageCount] = {};     // per-stage
     int         m_FrucGpuUsCount  = 0;
 
+    // §J.3.e.2.i.10 Phase 2B step 5-6 (v1.4.59) — independent GPU timer
+    // pool for the phase2BActive split path.  6 timestamps × kFrucFramesInFlight
+    // slots, written in order: preCmd start/end, cmpCmd start/end, postCmd
+    // start/end.  Reset is emitted once in preCmd; the timeline-sem chain
+    // (preCmd signal V_pre → cmpCmd wait V_pre + signal V_post → postCmd
+    // wait V_post) gives the execution dep that lets later cmd buffers
+    // write into the same pool slots reset by preCmd, even across QFs.
+    // Read at start of next frame for SAME slot (slot fence guarantees
+    // GPU is done).  Reports preCmd/cmpCmd/postCmd GPU time + cross-queue
+    // handoff gaps + parallel savings every 60 frames.
+    VkQueryPool m_Phase2BTimerPool        = VK_NULL_HANDLE;
+    uint32_t    m_Phase2BTimerSlot        = 0;
+    bool        m_Phase2BTimerArmed[kFrucFramesInFlight] = {};
+    double      m_Phase2BGpuPreUsAccum    = 0.0;
+    double      m_Phase2BGpuCmpUsAccum    = 0.0;
+    double      m_Phase2BGpuPostUsAccum   = 0.0;
+    double      m_Phase2BGpuTotalUsAccum  = 0.0;
+    int         m_Phase2BGpuCount         = 0;
+
     // Loaded PFNs (we don't have the libplacebo wrapper's lookup; use
     // SDL_Vulkan_GetVkGetInstanceProcAddr + raw vk*ProcAddr chain).
     PFN_vkGetInstanceProcAddr m_pfnGetInstanceProcAddr = nullptr;

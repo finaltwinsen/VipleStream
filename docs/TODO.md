@@ -145,6 +145,33 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.59 ship 帶走的條目（2026-05-15, post v1.4.58 default ON）
+
+- 🟡 **§J.3.e.2.i.10 Phase 2B GPU profiling** — phase2BActive 路徑下 cmd-buf
+  邊界 GPU timing 量測。原本 v1.4.56 我選擇 phase2BActive 路徑下 timer 凍
+  結（不寫 m_FrucTimerPool），導致使用者開 phase 2B 後沒法看 chain
+  breakdown 確認 cross-queue parallel 效果。本版加獨立 `m_Phase2BTimerPool`
+  專屬 6 timestamps × kFrucFramesInFlight 給 phase 2B path 用。
+  - vkfruc.h 加 pool + slot ring + 4 個 accumulator (pre/cmp/post/total) +
+    sample count
+  - vkfruc.cpp createFrucComputeResources alloc pool（跟 m_FrucTimerPool 同
+    block，非 fatal failure），destroyFrucComputeResources 對稱 destroy
+  - phase2BActive block 開頭：
+    - 讀 previous p2b timer slot 的 6 timestamps（slot fence 已 wait 過保證
+      GPU 寫完），accumulate
+    - 每 60 frame 印一行 `[VIPLE-VKFRUC-PHASE2B-PROF] preCmd=Xus cmpCmd=Yus
+      postCmd=Zus chain=Tus serial_sum=Sus parallel_saving=Wus (n=60)`
+    - reset 6 query slots in preCmd（preCmd 在 graphics queue 上 reset，
+      timeline-sem chain 保證 cmpCmd / postCmd write 在 reset 之後 happen）
+    - 3 cmd buf 各自寫 TOP_OF_PIPE start ts (preCmd@ts[0] / cmpCmd@ts[2] /
+      postCmd@ts[4])
+  - preCmd / cmpCmd / postCmd EndCommandBuffer 之前各寫
+    BOTTOM_OF_PIPE end ts (ts[1] / ts[3] / ts[5])
+  - block return 之前 `m_Phase2BTimerArmed[slot] = true`
+  - 沒有 functional change；env=0 仍走 single-cmd path bit-identical
+  - **下一步**: 取得幾組 chain timing 數字後決定要不要做 fp16 RIFE
+    inference path (使用者選 v1.4.59 PROF 先量再 fp16)
+
 ### v1.4.58 ship 帶走的條目（2026-05-14, post v1.4.57 cmpCmd → compute queue）
 
 - 🟢 **§J.3.e.2.i.10 Phase 2B 預設 ON** — flip `VIPLE_RIFE_VK_ASYNC_COMPUTE`
