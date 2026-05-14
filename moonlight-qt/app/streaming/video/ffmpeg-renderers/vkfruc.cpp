@@ -3829,6 +3829,44 @@ bool VkFrucRenderer::createInFlightRing()
                         (void*)m_CopyDoneSem, (unsigned)kFrucFramesInFlight);
         }
     }
+
+    // §J.3.e.2.i.10 Phase 2B step 2 (v1.4.55) — alloc per-slot pre/post
+    // graphics-queue cmd buffers from m_CmdPool.  These carry the
+    // bilinear-DOWN (pre) and warp/UP/render-passes/present (post) halves
+    // of the 3-submit chain landed in v1.4.56+.  Allocation is gated on
+    // m_AsyncComputeAvailable so single-QF GPUs / Phase 2A failure don't
+    // burn 2 × N cmd buffers worth of GPU memory for an inactive path.
+    if (m_AsyncComputeAvailable) {
+        VkCommandBufferAllocateInfo preCbai = {};
+        preCbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        preCbai.commandPool        = m_CmdPool;
+        preCbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        preCbai.commandBufferCount = kFrucFramesInFlight;
+        if (pfnAllocCmdBufs(m_Device, &preCbai, m_SlotPreCmdBuf) != VK_SUCCESS) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B pre-cmd alloc "
+                        "failed — async-compute path will fall back to single-submit");
+            for (uint32_t i = 0; i < kFrucFramesInFlight; i++) m_SlotPreCmdBuf[i] = VK_NULL_HANDLE;
+            m_AsyncComputeAvailable = false;  // demote: pre/post mandatory for async path
+        } else {
+            VkCommandBufferAllocateInfo postCbai = preCbai;
+            if (pfnAllocCmdBufs(m_Device, &postCbai, m_SlotPostCmdBuf) != VK_SUCCESS) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B post-cmd alloc "
+                            "failed — async-compute path will fall back to single-submit");
+                for (uint32_t i = 0; i < kFrucFramesInFlight; i++) m_SlotPostCmdBuf[i] = VK_NULL_HANDLE;
+                m_AsyncComputeAvailable = false;
+            } else {
+                m_AsyncComputeNext.store(1);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B step 2 pre/post "
+                            "cmd buffers READY (%u pre + %u post on graphics QF, "
+                            "compute timeline V starts at 1)",
+                            (unsigned)kFrucFramesInFlight, (unsigned)kFrucFramesInFlight);
+            }
+        }
+    }
+
     return true;
 }
 
@@ -3898,6 +3936,15 @@ void VkFrucRenderer::destroyInFlightRing()
         m_CopyDoneSem = VK_NULL_HANDLE;
     }
     m_CopyDoneNext.store(1);
+
+    // §J.3.e.2.i.10 Phase 2B step 2 (v1.4.55) — pre/post cmd buffers
+    // (allocated from m_CmdPool, freed implicitly when pool destroyed
+    // above; we just null the handles so re-init doesn't see stale ones).
+    for (uint32_t i = 0; i < kFrucFramesInFlight; i++) {
+        m_SlotPreCmdBuf[i]  = VK_NULL_HANDLE;
+        m_SlotPostCmdBuf[i] = VK_NULL_HANDLE;
+    }
+    m_AsyncComputeNext.store(1);
 
     m_RingInitialized = false;
 }
@@ -6014,13 +6061,33 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         }
         return -1;
     };
+    // §J.3.e.2.i.10 Phase 2B step 4 (v1.4.55) — same CONCURRENT-sharing
+    // gate as createRifeNativeResources::allocBuf: cross-queue buffers
+    // span {graphics QF, compute QF} when async-compute infra is live.
+    // m_FrucInterpRgbBuf / m_FrucInterpRgbBuf2 are written by compute-
+    // queue warp dispatches and read by graphics-queue render-passes,
+    // so they need CONCURRENT just like the RIFE down/flow/mask
+    // buffers.  m_FrucPrevRgbBuf / m_FrucCurrRgbBuf / m_FrucMvBuf* stay
+    // single-queue (graphics-only nv12rgb + ME + median chain).
+    const bool sharingAcrossQfs2 = m_AsyncComputeAvailable
+                                && m_QueueFamily != UINT32_MAX
+                                && m_ComputeQueueFamily != UINT32_MAX
+                                && m_QueueFamily != m_ComputeQueueFamily;
+    const uint32_t crossQfs2[2] = { m_QueueFamily, m_ComputeQueueFamily };
     auto allocBuf = [&](VkDeviceSize size, VkBufferUsageFlags usage,
-                         VkBuffer& outBuf, VkDeviceMemory& outMem) -> bool {
+                         VkBuffer& outBuf, VkDeviceMemory& outMem,
+                         bool crossQueue = false) -> bool {
         VkBufferCreateInfo bci = {};
         bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bci.size = size;
         bci.usage = usage;
-        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (crossQueue && sharingAcrossQfs2) {
+            bci.sharingMode           = VK_SHARING_MODE_CONCURRENT;
+            bci.queueFamilyIndexCount = 2;
+            bci.pQueueFamilyIndices   = crossQfs2;
+        } else {
+            bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
         if (pfnCreateBuffer(m_Device, &bci, nullptr, &outBuf) != VK_SUCCESS) return false;
         VkMemoryRequirements memReq = {};
         pfnGetBufMemReq(m_Device, outBuf, &memReq);
@@ -6070,10 +6137,13 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         // runInferenceGpu 內部 vkCmdCopyBuffer(out0_blob → m_FrucInterpRgbBuf)
         // 把 RIFE 推論結果搬進來；warp shader 寫的時候是 STORAGE，但 RIFE
         // 路徑改成 transfer write — 兩個 path 共用一個 buffer 都需要支援.
+        // §J.3.e.2.i.10 Phase 2B step 4 (v1.4.55) — cross-queue: compute
+        // queue writes (warp dispatch from RIFE chain) → graphics queue
+        // reads (interp fragment-sample in render pass).
         || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                             | VK_BUFFER_USAGE_TRANSFER_DST_BIT
                             | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                     m_FrucInterpRgbBuf, m_FrucInterpRgbMem)
+                     m_FrucInterpRgbBuf, m_FrucInterpRgbMem, /*crossQueue=*/true)
         // §B2 2026-05-06 — TRIPLE 第二份 interp output buffer.
         // 在 createFrucComputeResources 永遠 alloc 一份（即使 dual mode 也
         // 浪費一塊 buffer），保持 VkDescriptorSet update 邏輯簡單；single-
@@ -6083,7 +6153,7 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         || !allocBuf(sizeRGB, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                             | VK_BUFFER_USAGE_TRANSFER_DST_BIT
                             | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                     m_FrucInterpRgbBuf2, m_FrucInterpRgbBuf2Mem)
+                     m_FrucInterpRgbBuf2, m_FrucInterpRgbBuf2Mem, /*crossQueue=*/true)
         // §B1a — NV12 mirror, TRANSFER_DST so HW path's cmdCopyImageToBuffer
         // can write into it; STORAGE_BUFFER so NV12→RGB compute reads as
         // raw bytes via Y@offset 0 / UV@offset W*H.  No TRANSFER_SRC since
@@ -6437,8 +6507,35 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
     ctx.instance            = m_Instance;
     ctx.physicalDevice      = m_PhysicalDevice;
     ctx.device              = m_Device;
-    ctx.computeQueueFamily  = m_QueueFamily;
-    ctx.computeQueue        = m_GraphicsQueue;
+    // §J.3.e.2.i.10 Phase 2B step 4 (v1.4.55) — when async-compute is
+    // wired (env=1 + dedicated compute QF + Phase 2A infra READY), route
+    // RIFE inference recording onto the compute queue/family so caller
+    // can later submit the cmpCmd buffer to m_ComputeQueue.  Without
+    // this hand-off, runInferenceGpu records onto whatever cmd buffer
+    // the caller provides; with this hand-off, RifeNativeExecutor's
+    // internal cmd pool (used by standalone smoke tests) also binds to
+    // the compute QF.  Falls back to graphics QF when async path is
+    // not requested or unavailable — bit-identical to v1.4.54.
+    const bool asyncCtxActive = m_AsyncComputeRequested
+                             && m_AsyncComputeAvailable
+                             && m_ComputeQueue != VK_NULL_HANDLE
+                             && m_ComputeQueueFamily != UINT32_MAX
+                             && m_QueueFamily != m_ComputeQueueFamily;
+    if (asyncCtxActive) {
+        ctx.computeQueueFamily = m_ComputeQueueFamily;
+        ctx.computeQueue       = m_ComputeQueue;
+        ctx.concurrentSharingQfs[0]  = m_QueueFamily;
+        ctx.concurrentSharingQfs[1]  = m_ComputeQueueFamily;
+        ctx.concurrentSharingQfCount = 2;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-RIFE-β] §J.3.e.2.i.10 Phase 2B ctx wired to "
+            "dedicated compute QF=%u queue=%p (graphics QF=%u); "
+            "CONCURRENT sharing across both for hand-off buffers",
+            m_ComputeQueueFamily, (void*)m_ComputeQueue, m_QueueFamily);
+    } else {
+        ctx.computeQueueFamily = m_QueueFamily;
+        ctx.computeQueue       = m_GraphicsQueue;
+    }
     ctx.getInstanceProcAddr = (void*)m_pfnGetInstanceProcAddr;
 
     QString modelDir = Path::getDataFilePath(QString::fromLatin1("rife-v4.25-lite"));
@@ -6529,13 +6626,35 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
         }
         return -1;
     };
+    // §J.3.e.2.i.10 Phase 2B step 4 (v1.4.55) — when async-compute is
+    // available, the down/flow/mask/interp buffers below are written by
+    // graphics-queue dispatches and read by compute-queue (or vice
+    // versa).  Skip explicit queue-family ownership transfer (QFOT)
+    // barrier paired-pair complexity by promoting these specific buffers
+    // to VK_SHARING_MODE_CONCURRENT spanning {graphics QF, compute QF}.
+    // Buffer is short-lived fp32 planar (256 KiB – 1.5 MiB), so the
+    // potential tile-layout perf cost on NV is negligible vs the
+    // silent-corruption risk of a wrong release/acquire pair.  Caller
+    // still needs access-mask + pipeline-stage barriers; CONCURRENT
+    // only waives the QF-ownership clause of VK_*_BARRIER structs.
+    const bool sharingAcrossQfs = m_AsyncComputeAvailable
+                               && m_QueueFamily != UINT32_MAX
+                               && m_ComputeQueueFamily != UINT32_MAX
+                               && m_QueueFamily != m_ComputeQueueFamily;
+    const uint32_t crossQfs[2] = { m_QueueFamily, m_ComputeQueueFamily };
     auto allocBuf = [&](VkDeviceSize size, VkBufferUsageFlags usage,
                         VkBuffer& outBuf, VkDeviceMemory& outMem) -> bool {
         VkBufferCreateInfo bci = {};
         bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bci.size  = size;
         bci.usage = usage;
-        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (sharingAcrossQfs) {
+            bci.sharingMode           = VK_SHARING_MODE_CONCURRENT;
+            bci.queueFamilyIndexCount = 2;
+            bci.pQueueFamilyIndices   = crossQfs;
+        } else {
+            bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
         if (pfnCreateBuffer(m_Device, &bci, nullptr, &outBuf) != VK_SUCCESS) return false;
         VkMemoryRequirements memReq = {};
         pfnGetBufMemReq(m_Device, outBuf, &memReq);

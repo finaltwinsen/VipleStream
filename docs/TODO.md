@@ -145,6 +145,41 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.55 ship 帶走的條目（2026-05-14, post v1.4.54 Phase 2B step 1）
+
+- 🟡 **§J.3.e.2.i.10 Phase 2B step 2-4** async-compute plumbing
+  (`moonlight-qt/app/streaming/video/ffmpeg-renderers/vkfruc.{h,cpp}` +
+  `rife_native_vk.h`)。預備 step 5-6 (3-submit chain) 落地前的所有基礎建設：
+  - `m_SlotPreCmdBuf[N]` + `m_SlotPostCmdBuf[N]` per-slot graphics
+    cmd buffer 陣列 alloc 在 `createInFlightRing`、destroy 對稱
+    cleanup；只在 `m_AsyncComputeAvailable` 時 alloc，alloc 失敗會
+    demote 回 `m_AsyncComputeAvailable=false` 走 single-submit fallback
+  - `m_AsyncComputeNext` atomic uint64 counter for timeline-sem chain
+  - `VulkanCtx::concurrentSharingQfs[2]` + `concurrentSharingQfCount`
+    新增於 `rife_native_vk.h`，表達 caller 跨多 QF 意圖（目前 RIFE 內
+    部 host-coherent blob 不需 CONCURRENT — spec 對 host-coherent 寬
+    鬆 + 從不 cross queue，所以 `rife_native_vk.cpp` 端不動）
+  - `vkfruc.cpp` createRifeNativeResources::allocBuf 跟
+    createFrucComputeResources::allocBuf 都加 sharingAcrossQfs gate：
+    當 `m_AsyncComputeAvailable && graphics QF != compute QF` 時，
+    cross-queue 對象 buffer 改 `VK_SHARING_MODE_CONCURRENT` 跨兩個 QF
+    (m_RifeDownPrev/Curr/Interp, m_RifeFlowOutBuf, m_RifeMaskOutBuf,
+    m_FrucInterpRgbBuf, m_FrucInterpRgbBuf2)，graphics-only 對象
+    (m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvBuf*, m_SwFrucNv12Buf)
+    保持 EXCLUSIVE
+  - createRifeNativeResources VulkanCtx 條件 binding：
+    `asyncCtxActive` 為 true 時 `ctx.computeQueue/Family` 改塞
+    `m_ComputeQueue/m_ComputeQueueFamily` 與 concurrentSharingQfs；否
+    則沿用 graphics queue (bit-identical fallback)
+  - env=0 (預設) 完全 bit-identical 跟 v1.4.54 — 所有改動 wrap 在
+    `m_AsyncComputeAvailable` 或 `asyncCtxActive` 條件下
+  - **真正的 3-submit chain wiring (Phase 2B step 5-6) 拆到 v1.4.56**:
+    runRifeNativeStage 拆三段 (recordRifeDown / recordRifeInferOnCompute /
+    recordRifeWarp)、renderFrame 加 pre→cmp→post submit chain、
+    s_VkFrucComputeLock、TRIPLE 兩次 inference cmpCmd 編排、SW path
+    mirror — 這些需要重寫 vkfruc.cpp `renderFrame` 1000+ 行 record +
+    submit 邏輯，單 commit 風險過高，分階段落地
+
 ### v1.4.49 ship 帶走的條目（2026-05-14 evening, post v1.4.42-batch）
 
 - ✅ **§J.3.e.Y 4Y.7 C.5** Conv → BinOp(Add residual) → Activation triple

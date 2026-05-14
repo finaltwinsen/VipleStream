@@ -255,6 +255,27 @@ struct VulkanCtx {
     uint32_t                    computeQueueFamily = 0;
     void* /*VkQueue*/           computeQueue = nullptr;
     void* /*PFN_vkGetInstanceProcAddr*/ getInstanceProcAddr = nullptr;
+
+    // §J.3.e.2.i.10 Phase 2B (v1.4.55) — when the caller intends to
+    // hand off RIFE inference recording onto the compute QF while still
+    // writing in0/in1 from a graphics QF cmd buffer (and later reading
+    // flow/mask outputs from another graphics QF cmd buffer), the
+    // VkBuffer hand-off resources must be created with
+    // VK_SHARING_MODE_CONCURRENT spanning both queue families.  When
+    // concurrentSharingQfCount > 0, RifeNativeExecutor's internal blob
+    // pool (in0/in1/in2 in particular) honours these queue families
+    // via VkBufferCreateInfo::sharingMode = CONCURRENT.
+    //   • Default (count = 0): single-queue EXCLUSIVE — current
+    //     behaviour, bit-identical to v1.4.54.
+    //   • count = 2 + qfs[0..1]: dual-QF CONCURRENT for the async-
+    //     compute Phase 2B path.  Caller fills {graphicsQF, computeQF}.
+    // We hard-cap at 2 because the only known use case is graphics ↔
+    // compute split; if a 3rd QF case ever arises we'll widen the
+    // array.  Buffers built before init (e.g. caller-side cross-queue
+    // staging) must be configured by the caller — this field only
+    // governs the executor-internal blob allocations.
+    uint32_t concurrentSharingQfs[2]  = {};
+    uint32_t concurrentSharingQfCount = 0;
 };
 
 // Phase 3b.2 / 4a — runs the Conv2D 3×3 GLSL compute shader on a chosen

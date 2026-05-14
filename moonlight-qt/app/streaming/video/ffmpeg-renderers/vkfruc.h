@@ -695,6 +695,30 @@ private:
     bool            m_AsyncComputeRequested                       = false;
     bool            m_AsyncComputeAvailable                       = false;
 
+    // §J.3.e.2.i.10 Phase 2B step 2-4 (v1.4.55) — per-slot pre/post
+    // graphics cmd buffers + timeline-sem counter.  Used by the 3-submit
+    // chain wiring landed in v1.4.56+:
+    //   m_SlotPreCmdBuf : graphics cmd recording nv12rgb + bilinear-DOWN,
+    //                     last submit before compute hands off to RIFE.
+    //                     Signals m_ComputeTimelineSem @ V.
+    //   m_SlotPostCmdBuf: graphics cmd recording bilinear-UP + native warp
+    //                     + render-pass + present.  Waits compute @ V+1.
+    //   m_ComputeCmdBuf  (Phase 2A) carries RIFE inference dispatches in
+    //                     between, waits V and signals V+1.
+    // Allocated from m_CmdPool (graphics QF) so they share lifecycle with
+    // m_SlotCmdBuf.  VK_NULL_HANDLE when async-compute infra unavailable
+    // (single-QF GPUs, alloc failure, etc.) — async path falls back to
+    // single-submit on graphics queue at the gate.
+    VkCommandBuffer m_SlotPreCmdBuf[kFrucFramesInFlight]          = {};
+    VkCommandBuffer m_SlotPostCmdBuf[kFrucFramesInFlight]         = {};
+
+    // §J.3.e.2.i.10 Phase 2B (v1.4.55) — monotonic counter for the
+    // m_ComputeTimelineSem chain.  Each DUAL frame consumes 2 values
+    // (V → V+1); TRIPLE still 2 (both inferences share one cmpCmd, one
+    // signal value at the end).  atomic so kFrucFramesInFlight=2 slots
+    // don't race incrementing under back-to-back renderFrame calls.
+    std::atomic<uint64_t> m_AsyncComputeNext                      {1};
+
     // §J.3.e.2.i.10f (2026-05-09) Path D — early AVFrame release.
     // Splits renderFrame into two submits on the graphics queue:
     //   submit 1 (m_SlotCopyCmdBuf): cmdCopyImageToBuffer (vkf->img[0] →
