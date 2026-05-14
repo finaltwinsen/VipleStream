@@ -921,6 +921,47 @@ int main(int argc, char *argv[])
         }
     }
 
+#if defined(Q_OS_LINUX)
+    // VipleStream §N.5.linux (v1.4.41) — AppImage doesn't carry the host
+    // fontconfig database, so QML / overlay text rendering at zh_TW locale
+    // falls back to whatever Qt's bundled fonts can do = boxes / garbled
+    // chars for CJK codepoints.  Bundle Noto Sans CJK Regular (TC variant
+    // covers TC + SC + JP + KR via Unihan range) at AppImage build time
+    // into usr/share/fonts/ (see scripts/build-appimage.sh) and load it
+    // explicitly here.  Silent skip if not found (e.g. .deb / native build
+    // where system fontconfig already covers CJK).  Must be AFTER
+    // QGuiApplication ctor — same Qt 6 ordering constraint as the bundled
+    // editorial fonts above.
+    {
+        QStringList candidatePaths;
+        // 1. AppImage relative — applicationDirPath() = AppDir/usr/bin/, font in usr/share/fonts/truetype/
+        candidatePaths << QCoreApplication::applicationDirPath() +
+            QStringLiteral("/../share/fonts/truetype/NotoSansCJK-Regular.ttc");
+        candidatePaths << QCoreApplication::applicationDirPath() +
+            QStringLiteral("/../share/fonts/opentype/NotoSansCJK-Regular.ttc");
+        // 2. System fontconfig path (.deb / native build) — Ubuntu / Debian
+        candidatePaths << QStringLiteral("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
+        candidatePaths << QStringLiteral("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc");
+
+        bool loaded = false;
+        for (const QString& p : candidatePaths) {
+            if (QFileInfo::exists(p)) {
+                int id = QFontDatabase::addApplicationFont(p);
+                if (id >= 0) {
+                    qInfo("Loaded CJK font: %s", qPrintable(p));
+                    loaded = true;
+                    break;
+                }
+            }
+        }
+        if (!loaded) {
+            qInfo("CJK font (NotoSansCJK) not found in AppImage or system; "
+                  "Traditional Chinese / Japanese / Korean text may render "
+                  "as fallback boxes.  apt install fonts-noto-cjk on .deb.");
+        }
+    }
+#endif
+
 #ifdef Q_OS_UNIX
     // Register signal handlers to arbitrate between SDL and Qt.
     // NB: This has to be done after the QGuiApplication is constructed to

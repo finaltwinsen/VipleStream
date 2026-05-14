@@ -90,6 +90,34 @@ echo Staging SDL3 library
 mkdir -p $DEPLOY_FOLDER/usr/lib
 cp /usr/local/lib/libSDL3.so.0 $DEPLOY_FOLDER/usr/lib/
 
+# VipleStream §N.5.linux (v1.4.41): bundle Noto Sans CJK so zh_TW / ja / ko
+# overlay text renders inside the AppImage even on hosts without
+# fonts-noto-cjk installed (and without inheriting host fontconfig, which
+# linuxdeploy + linuxdeploy-plugin-qt does NOT do).  main.cpp explicitly
+# loads this path via QFontDatabase::addApplicationFont at runtime; if
+# fontconfig already has CJK glyphs system-wide the load is harmless.
+# Silent skip if the source font isn't installed on the builder — the
+# AppImage then falls back to whatever the user's system has.
+echo Staging CJK font
+mkdir -p $DEPLOY_FOLDER/usr/share/fonts/opentype
+CJK_FONT_SRC=""
+for candidate in \
+    /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \
+    /usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc; do
+    if [ -f "$candidate" ]; then
+        CJK_FONT_SRC="$candidate"
+        break
+    fi
+done
+if [ -n "$CJK_FONT_SRC" ]; then
+    cp "$CJK_FONT_SRC" $DEPLOY_FOLDER/usr/share/fonts/opentype/NotoSansCJK-Regular.ttc
+    echo "  bundled $CJK_FONT_SRC"
+else
+    echo "  fonts-noto-cjk not installed on builder — AppImage will fall back to"
+    echo "  host fontconfig (CJK text may render as boxes on hosts without"
+    echo "  fonts-noto-cjk).  apt install fonts-noto-cjk to bundle next time."
+fi
+
 echo Creating AppImage
 pushd $INSTALLER_FOLDER
 # VipleStream §K.1: switched from linuxdeployqt to linuxdeploy + qt plugin.

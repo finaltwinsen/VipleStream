@@ -58,6 +58,12 @@ namespace proc {
   // process.h — see comment there explaining why this is static.
   std::atomic<uint64_t> proc_t::_steam_watchdog_gen {0};
 
+  // §M.1.f.2 idle reconcile (2026-05-14) — see process.h.  Static for
+  // the same reason _steam_watchdog_gen is: std::mutex / std::atomic
+  // aren't move-constructible and proc_t needs default move ops.
+  std::mutex proc_t::_owner_mutex;
+  std::atomic<uint64_t> proc_t::_idle_watchdog_gen {0};
+
   class deinit_t: public platf::deinit_t {
   public:
     ~deinit_t() {
@@ -320,8 +326,14 @@ namespace proc {
 
     _app_id = app_id;
     _app = *iter;
-    _owner_uuid = std::move(owner_uuid);
-    _owner_name = std::move(owner_name);
+    // §M.1.f.2 — set owner + reset activity timestamp under lock to keep
+    // the idle watchdog snapshot atomic.
+    {
+      std::lock_guard<std::mutex> lk(_owner_mutex);
+      _owner_uuid = std::move(owner_uuid);
+      _owner_name = std::move(owner_name);
+      _last_activity = std::chrono::steady_clock::now();
+    }
     _app_prep_begin = std::begin(_app.prep_cmds);
     _app_prep_it = _app_prep_begin;
 
@@ -330,6 +342,15 @@ namespace proc {
                     << " source="sv << (_app.source.empty() ? "manual" : _app.source)
                     << " owner_uuid="sv << (_owner_uuid.empty() ? "<unknown>" : _owner_uuid)
                     << " owner_name="sv << (_owner_name.empty() ? "<unknown>" : _owner_name);
+
+    // §M.1.f.2 — spawn idle reconcile watchdog (auto-release ownership
+    // after 60s with no RTSP session + no HTTP activity from owner, to
+    // cover client crash / WiFi drop / power off that never sent /cancel).
+    // stop_idle_watchdog_ is implicit via ++gen in any later execute() /
+    // clear_owner_uuid() / terminate() / detach().
+    if (!_owner_uuid.empty()) {
+      start_idle_watchdog_();
+    }
 
     // Add Stream-specific environment variables
     _env["SUNSHINE_APP_ID"] = std::to_string(_app_id);
@@ -553,9 +574,14 @@ namespace proc {
     }
 
     _app_id = -1;
-    // VipleStream §M.1 — clear ownership so /launch /resume /cancel see no current owner.
-    _owner_uuid.clear();
-    _owner_name.clear();
+    // VipleStream §M.1 — clear ownership so /launch /resume /cancel see
+    // no current owner.  §M.1.f.2: stop the idle watchdog too.
+    {
+      std::lock_guard<std::mutex> lk(_owner_mutex);
+      _owner_uuid.clear();
+      _owner_name.clear();
+    }
+    stop_idle_watchdog_();
   }
 
   bool proc_t::is_running_steam_source() const {
@@ -609,25 +635,137 @@ namespace proc {
     // _app_prep_begin pointing into the previous _app.prep_cmds storage.
     _app_prep_begin = std::begin(_app.prep_cmds);
     _app_prep_it = _app_prep_begin;
-    _owner_uuid.clear();
-    _owner_name.clear();
+    // §M.1.f.2 — clear owner + stop idle watchdog under lock.
+    {
+      std::lock_guard<std::mutex> lk(_owner_mutex);
+      _owner_uuid.clear();
+      _owner_name.clear();
+    }
+    stop_idle_watchdog_();
   }
 
   void proc_t::clear_owner_uuid() {
     // §M.1.f defensive fix (2026-05-14) — release ownership lock without
-    // touching app/process state.  Called from RTSP TEARDOWN session-count-
-    // zero hook to recover from client-side abnormal disconnects (crash /
-    // network drop / power-off) that never sent /cancel.  See process.h
-    // doc-comment.
-    if (_owner_uuid.empty() && _owner_name.empty()) {
-      return;  // nothing to clear
+    // touching app/process state.  Originally hooked to RTSP TEARDOWN
+    // session-count-zero (v1.4.38) but reverted in v1.4.39 due to race
+    // with normal stream setup.  Now driven by §M.1.f.2 idle watchdog
+    // (see start_idle_watchdog_) for the abnormal-disconnect coverage
+    // it was always meant to provide.  Also still callable from /cancel
+    // and similar admin endpoints if we want explicit owner release.
+    std::string prior_name, prior_uuid;
+    {
+      std::lock_guard<std::mutex> lk(_owner_mutex);
+      if (_owner_uuid.empty() && _owner_name.empty()) {
+        return;  // nothing to clear
+      }
+      prior_name = _owner_name;
+      prior_uuid = _owner_uuid;
+      _owner_uuid.clear();
+      _owner_name.clear();
     }
     BOOST_LOG(info) << "[VIPLE-MULTI] clear_owner_uuid: releasing owner="sv
-                    << (_owner_name.empty() ? "<unknown>"sv : std::string_view {_owner_name})
-                    << " uuid="sv << (_owner_uuid.empty() ? "<empty>"sv : std::string_view {_owner_uuid})
-                    << " (RTSP session_count dropped to 0)";
-    _owner_uuid.clear();
-    _owner_name.clear();
+                    << (prior_name.empty() ? "<unknown>"sv : std::string_view {prior_name})
+                    << " uuid="sv << (prior_uuid.empty() ? "<empty>"sv : std::string_view {prior_uuid});
+    // Cancel any in-flight idle watchdog (next tick will observe gen
+    // mismatch and exit).  Safe to call even if no watchdog running.
+    stop_idle_watchdog_();
+  }
+
+  std::string proc_t::running_owner_uuid() const {
+    std::lock_guard<std::mutex> lk(_owner_mutex);
+    return _owner_uuid;
+  }
+
+  std::string proc_t::running_owner_name() const {
+    std::lock_guard<std::mutex> lk(_owner_mutex);
+    return _owner_name;
+  }
+
+  void proc_t::touch_activity(const std::string &caller_uuid) {
+    // §M.1.f.2 idle reconcile — refresh _last_activity if caller is the
+    // current owner.  No-op when there's no owner, or when caller doesn't
+    // match (some other paired device's poll, vanilla Moonlight without
+    // UUID, etc).  Cheap enough to call on every authenticated request.
+    if (caller_uuid.empty()) return;
+    std::lock_guard<std::mutex> lk(_owner_mutex);
+    if (_owner_uuid.empty() || caller_uuid != _owner_uuid) return;
+    _last_activity = std::chrono::steady_clock::now();
+  }
+
+  int64_t proc_t::idle_seconds() const {
+    std::lock_guard<std::mutex> lk(_owner_mutex);
+    if (_owner_uuid.empty()) return -1;
+    auto delta = std::chrono::steady_clock::now() - _last_activity;
+    return std::chrono::duration_cast<std::chrono::seconds>(delta).count();
+  }
+
+  void proc_t::start_idle_watchdog_() {
+    // §M.1.f.2 idle reconcile (2026-05-14) — detached thread, polls every
+    // kPoll, auto-releases owner if it's been idle for kIdleTimeout AND
+    // no RTSP session is alive.  Pattern mirrors start_steam_watchdog_:
+    // generation atomic for cancel-without-join (joining would deadlock
+    // if the watchdog itself called clear_owner_uuid()).
+    using namespace std::chrono_literals;
+    constexpr auto kPoll = 10s;
+    constexpr auto kIdleTimeout = 60s;
+
+    uint64_t my_gen = ++_idle_watchdog_gen;
+
+    BOOST_LOG(info) << "[VIPLE-MULTI] idle watchdog start gen="sv << my_gen
+                    << " poll="sv << kPoll.count() << "s"sv
+                    << " timeout="sv << kIdleTimeout.count() << "s"sv;
+
+    std::thread([this, my_gen, kPoll, kIdleTimeout]() {
+      while (_idle_watchdog_gen.load() == my_gen) {
+        std::this_thread::sleep_for(kPoll);
+        if (_idle_watchdog_gen.load() != my_gen) break;
+
+        // Snapshot owner + last_activity under lock.
+        std::string cur_owner, cur_name;
+        std::chrono::steady_clock::time_point last_act;
+        {
+          std::lock_guard<std::mutex> lk(_owner_mutex);
+          cur_owner = _owner_uuid;
+          cur_name = _owner_name;
+          last_act = _last_activity;
+        }
+
+        if (cur_owner.empty()) {
+          BOOST_LOG(info) << "[VIPLE-MULTI] idle watchdog exit (no owner) gen="sv << my_gen;
+          return;
+        }
+
+        // RTSP session alive → owner is actively streaming, refresh
+        // activity timestamp ourselves so HTTP-quiet sessions (long
+        // gameplay without /serverinfo polls) don't trip the timeout.
+        if (rtsp_stream::session_count() > 0) {
+          std::lock_guard<std::mutex> lk(_owner_mutex);
+          _last_activity = std::chrono::steady_clock::now();
+          continue;
+        }
+
+        auto idle = std::chrono::steady_clock::now() - last_act;
+        if (idle < kIdleTimeout) continue;
+
+        BOOST_LOG(info) << "[VIPLE-MULTI] idle watchdog AUTO-RELEASE owner="sv
+                        << (cur_name.empty() ? "<unknown>"sv : std::string_view {cur_name})
+                        << " uuid="sv << cur_owner
+                        << " idle="sv << std::chrono::duration_cast<std::chrono::seconds>(idle).count() << "s"sv
+                        << " (no RTSP session for >="sv
+                        << kIdleTimeout.count() << "s, presumed abnormal disconnect)"sv;
+        // clear_owner_uuid() bumps gen so next iteration exits the loop
+        // — but we exit explicitly here too for clarity.
+        clear_owner_uuid();
+        return;
+      }
+      BOOST_LOG(debug) << "[VIPLE-MULTI] idle watchdog cancelled gen="sv << my_gen;
+    }).detach();
+  }
+
+  void proc_t::stop_idle_watchdog_() {
+    // §M.1.f.2 — cancel the in-flight idle watchdog (if any).  We do not
+    // join; see comment in start_idle_watchdog_ on deadlock risk.
+    ++_idle_watchdog_gen;
   }
 
   const std::vector<ctx_t> &proc_t::get_apps() const {

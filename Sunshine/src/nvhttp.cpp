@@ -1058,6 +1058,10 @@ namespace nvhttp {
     auto caller_uuid = caller_uuid_for(request);
     auto caller_admin = is_admin_device(caller_uuid);
 
+    // §M.1.f.2 idle reconcile — refresh activity for the current owner if
+    // caller matches.  No-op for non-owner / no-owner.
+    proc::proc.touch_activity(caller_uuid);
+
     auto current_appid = proc::proc.running();
     if (current_appid > 0) {
       auto owner_uuid = proc::proc.running_owner_uuid();
@@ -1196,6 +1200,8 @@ namespace nvhttp {
     // hijack someone else's in-progress session via /resume.
     {
       auto caller_uuid = caller_uuid_for(request);
+      // §M.1.f.2 idle reconcile — refresh activity if caller is the owner.
+      proc::proc.touch_activity(caller_uuid);
       auto owner_uuid = proc::proc.running_owner_uuid();
       bool same_caller = !caller_uuid.empty() && caller_uuid == owner_uuid;
       bool caller_admin = is_admin_device(caller_uuid);

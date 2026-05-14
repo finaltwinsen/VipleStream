@@ -10,6 +10,8 @@
 
 // standard includes
 #include <atomic>
+#include <chrono>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 
@@ -133,8 +135,12 @@ namespace proc {
     // app was auto-imported from Steam, in which case detach is the safe
     // takeover path; manual apps may have prep_cmds whose undo step we must
     // run, so they fall back to terminate().
-    const std::string &running_owner_uuid() const { return _owner_uuid; }
-    const std::string &running_owner_name() const { return _owner_name; }
+    // §M.1.f.2 (2026-05-14) — return by value snapshot under _owner_mutex,
+    // so cross-thread reads (HTTP handlers / idle watchdog) can't tear on a
+    // concurrent clear() in another thread.  Callers all `auto owner = ...`
+    // so no ABI change.
+    std::string running_owner_uuid() const;
+    std::string running_owner_name() const;
     bool is_running_steam_source() const;
     void detach();
 
@@ -155,6 +161,27 @@ namespace proc {
      * Web UI Force Disconnect.
      */
     void clear_owner_uuid();
+
+    /**
+     * §M.1.f.2 idle reconcile (2026-05-14) — refresh activity timestamp
+     * for the running owner.  Called from request handlers in nvhttp.cpp
+     * / confighttp.cpp; pass the SSL-cert uuid of whoever is making the
+     * request.  No-op unless caller_uuid matches _owner_uuid.
+     *
+     * Companion to the idle watchdog spawned by execute(): if the owner
+     * stops doing anything for kIdleTimeout AND no RTSP session is
+     * alive, watchdog calls clear_owner_uuid() to recover from
+     * abnormal disconnects (client crash / WiFi drop / power off) that
+     * never sent /cancel.  Thread-safe.
+     */
+    void touch_activity(const std::string &caller_uuid);
+
+    /**
+     * §M.1.f.2 — current idle duration (now - _last_activity) in
+     * seconds.  Returns -1 if no owner.  Exposed for /api/current_session
+     * Web UI display.  Thread-safe.
+     */
+    int64_t idle_seconds() const;
 
     // Wall-clock time the current app was launched, in seconds since epoch.
     // Returns 0 if no app is running.  Used by /api/current_session.
@@ -215,6 +242,32 @@ namespace proc {
     static std::atomic<uint64_t> _steam_watchdog_gen;
     void start_steam_watchdog_(uint32_t app_id);
     void stop_steam_watchdog_();
+
+    // §M.1.f.2 idle reconcile (2026-05-14) — owner activity bookkeeping
+    // + auto-release watchdog.  See process.h doc-comments on
+    // touch_activity() / idle_seconds() and process.cpp impl.
+    //
+    // _owner_mutex protects _owner_uuid / _owner_name / _last_activity
+    // for cross-thread access between HTTP request handlers, RTSP
+    // teardown, the idle watchdog itself, and execute() / detach() /
+    // terminate() called from main.
+    //
+    // Static for the same reason _steam_watchdog_gen is: std::mutex
+    // isn't move-constructible and proc_t needs default move ops
+    // (parse() returns std::optional<proc_t> and gets assigned to the
+    // singleton via std::move).  Functionally identical since `proc` is
+    // a singleton — only one proc_t exists program-wide.
+    //
+    // _idle_watchdog_gen mirrors the _steam_watchdog_gen pattern: each
+    // new execute() / clear_owner_uuid() / terminate() / detach() bumps
+    // it, so any pre-existing watchdog thread checks the gen and self-
+    // exits without joining (joining from clear_owner_uuid() would
+    // deadlock when the watchdog itself initiated the clear).
+    static std::mutex _owner_mutex;
+    std::chrono::steady_clock::time_point _last_activity {};
+    static std::atomic<uint64_t> _idle_watchdog_gen;
+    void start_idle_watchdog_();
+    void stop_idle_watchdog_();
   };
 
   /**
