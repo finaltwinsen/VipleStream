@@ -6853,7 +6853,15 @@ bool runConv2DGpuTestStandalone(const QString& modelDir, float tolerance) {
     pass &= runProductionApiSmoke(ctx, modelDir);
 
     // ---- §J.3.e.X Final.3a — native vs ncnn latency benchmark ----
-    pass &= runProductionApiBenchmark(ctx, modelDir, /*warmup*/3, /*iterations*/15);
+    // §J.3.e.Y 4Y.7 C.5 (v1.4.42) — bumped warmup 3→15, iterations 15→50 for
+    // cleaner per-fwd statistics.  v1.4.42 C.2/C.3 testing showed bimodal
+    // variance (fast-run med ~16.5 ms vs slow-run med ~20 ms) at warmup=3
+    // because the first 3 hot iterations weren't enough to settle GPU
+    // driver pipeline cache / power state.  At warmup=15 the cold-start
+    // outliers fall out of the measurement window; iterations=50 gives
+    // more samples for a robust median.  Cost: smoke now takes ~1 s longer
+    // (~50 ms × 50 iter × 2 engines vs ~17 ms × 15 iter × 2), tolerable.
+    pass &= runProductionApiBenchmark(ctx, modelDir, /*warmup*/15, /*iterations*/50);
 
     // ---- Phase 4g.1 shape inference smoke ----
     {
