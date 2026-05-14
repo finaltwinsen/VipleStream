@@ -145,6 +145,23 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.58 ship 帶走的條目（2026-05-14, post v1.4.57 cmpCmd → compute queue）
+
+- 🟢 **§J.3.e.2.i.10 Phase 2B 預設 ON** — flip `VIPLE_RIFE_VK_ASYNC_COMPUTE`
+  env gate default。改前 opt-in（env=1 啟用），改後 opt-out（unset 或
+  非 "0" 字串 = ON；env=0 才強制走 v1.4.55 single-cmd 路徑作為 bisect /
+  driver 退路）。
+  - 改動範圍：`vkfruc.cpp` ~5 LOC + log 字串
+  - phase2BActive gate 其他條件不變（仍需 DUAL + !TRIPLE + Path D +
+    β.5.1 + 所有 cmd buf/sem alloc 成功）；任何條件 false 仍走 v1.4.55
+    single-cmd path，所以 flip default 不會在 unsupported device 上
+    crash —— `m_AsyncComputeAvailable` 在 single-QF GPU / alloc 失敗時
+    自動 demote
+  - 跳過原 plan 的「real-stream 一週驗測」門檻 —— 使用者直接 flip 並
+    本機部署驗
+  - **TRIPLE / SW path renderFrameSw mirror / β.4 fallback 拆分** 仍留
+    v1.4.59+ 各自獨立 commit，看真實 stream 出問題的時候再說
+
 ### v1.4.57 ship 帶走的條目（2026-05-14, post v1.4.56 cmd-buf split）
 
 - 🟡 **§J.3.e.2.i.10 Phase 2B step 5-6（拆分版第二刀）** cmpCmd 真正切

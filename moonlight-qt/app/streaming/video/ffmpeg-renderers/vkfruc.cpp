@@ -3772,25 +3772,29 @@ bool VkFrucRenderer::createInFlightRing()
                     (void*)m_ComputeCmdPool, (void*)m_ComputeTimelineSem,
                     (unsigned)kFrucFramesInFlight);
 
-        // §J.3.e.2.i.10 Phase 2B (v1.4.54) — record availability + env-var
-        // request gate.  Phase 2B branching in runRifeNativeStage / submit
-        // logic (to be wired in v1.4.55+) checks
-        //   (m_AsyncComputeRequested && m_AsyncComputeAvailable).
-        // Default OFF — opt-in via VIPLE_RIFE_VK_ASYNC_COMPUTE=1 for users
-        // who want to test the parallel-queue path before it's promoted to
-        // default.  Single-queue fallback stays bit-identical to v1.4.53.
+        // §J.3.e.2.i.10 Phase 2B (v1.4.54 env stub; v1.4.55-57 wiring;
+        // v1.4.58 default flip).  Branching at the phase2BActive gate in
+        // renderFrame checks (m_AsyncComputeRequested && m_AsyncComputeAvailable).
+        //
+        // v1.4.58 — default ON.  VIPLE_RIFE_VK_ASYNC_COMPUTE=0 is now the
+        // explicit opt-out (bisect aid / driver-issue fallback); unset or
+        // any non-"0" value enables the async-compute path.  Path will
+        // still fall back to v1.4.55 single-cmd-buf flow whenever
+        // m_AsyncComputeAvailable demotes to false (single-QF GPU, alloc
+        // failure, etc.), so this flip can't cause a hard crash on
+        // unsupported devices.
         m_AsyncComputeAvailable = full;
         const char* asyncEnv = std::getenv("VIPLE_RIFE_VK_ASYNC_COMPUTE");
-        m_AsyncComputeRequested = (asyncEnv != nullptr
-                                   && asyncEnv[0] != '\0'
-                                   && asyncEnv[0] != '0');
+        m_AsyncComputeRequested = (asyncEnv == nullptr
+                                   || asyncEnv[0] == '\0'
+                                   || asyncEnv[0] != '0');
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] Phase 2B async-compute gate: requested=%d "
                     "available=%d → would-be-active=%d (env "
-                    "VIPLE_RIFE_VK_ASYNC_COMPUTE=%s); wiring lands v1.4.55+",
+                    "VIPLE_RIFE_VK_ASYNC_COMPUTE=%s, default ON v1.4.58)",
                     (int)m_AsyncComputeRequested, (int)m_AsyncComputeAvailable,
                     (int)(m_AsyncComputeRequested && m_AsyncComputeAvailable),
-                    asyncEnv ? asyncEnv : "(unset)");
+                    asyncEnv ? asyncEnv : "(unset, default ON)");
     } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A async-compute "
