@@ -4234,6 +4234,12 @@ bool dispatchConvolution(ExecState& e, const Layer& L) {
     // per-channel barrier overhead dominates when output spatial size
     // is small (Conv_50 output 16×16 = 1 workgroup × 96 channels ×
     // 192 = 18K barriers per frame just from that one layer).
+    //
+    // v1.4.51 re-tested with output >= 32 filter (post C.1/C.5 dispatch
+    // chain 50% shorter) — STILL ~+11% regression in mean per-fwd
+    // (16.16 → ~18 ms).  Verdict: original 4Y.4-stride2 conclusion holds
+    // even post-fusion; barrier overhead dominates for the s2 shapes
+    // we have, not just at 16×16.  Negative-result, not re-enabling.
     const bool dilation1 = (paramInt(Lref, 2,  1) == 1
                          && paramInt(Lref, 12, 1) == 1);
     const bool tiled_k3p1d1_s1 = (kW == 3 && kH == 3 && pad == 1 && dilation1
@@ -4244,10 +4250,6 @@ bool dispatchConvolution(ExecState& e, const Layer& L) {
                             (uint32_t)((outS->h + 15) / 16),
                             (uint32_t)outS->c);
     }
-    // stride=2 tiled variant — wire here in a future patch when C.5 needs to
-    // cover stride-2 Convs.  Currently RIFE-v4-lite's stride=2 layers
-    // (encoder downsamples) aren't in ResBlock pattern so don't trigger
-    // C.5 fusion anyway; they fall through to the generic Conv2D shader.
     return bindDispatch(e, ShaderKind::Conv2D, bufs, 6, &pc, sizeof(pc),
                         (uint32_t)((outS->w + 7) / 8),
                         (uint32_t)((outS->h + 7) / 8),
