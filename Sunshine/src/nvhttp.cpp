@@ -1977,44 +1977,76 @@ namespace nvhttp {
   }  // namespace
 
   void xfer_poll(resp_https_t response, req_https_t request) {
-    if (!xfer_gate_stream(response)) return;
-    auto uuid = xfer_caller(request);
-    if (uuid.empty()) {
-      response->write(SimpleWeb::StatusCode::client_error_unauthorized,
-                      R"({"error":"unidentified_client"})");
-      return;
+    // §N.5.bug diagnostic (2026-05-14) — Scenario B identified: TLS handshake
+    // 過 (verify_callback OK + uuid set) 但 client 收 TLSV1_ALERT_INTERNAL_ERROR
+    // 在 application 層送回.  此 try/catch + entry/exit log 看 handler 是否
+    // invoke (ENTER fire?) + 是否 throw (EXCEPTION fire?) + write 是否完成
+    // (EXIT fire?).  Spam ~2s 一次但 retest window 短 (1-2 min) 可接受，找完
+    // root cause 後升回 debug 級.
+    void *ssl_ptr = request ? (void *)request->native_handle() : nullptr;
+    BOOST_LOG(info) << "[VIPLE-XFER] poll ENTER ssl="sv << ssl_ptr;
+    try {
+      if (!xfer_gate_stream(response)) {
+        BOOST_LOG(info) << "[VIPLE-XFER] poll EXIT gate_blocked ssl="sv << ssl_ptr;
+        return;
+      }
+      auto uuid = xfer_caller(request);
+      if (uuid.empty()) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized,
+                        R"({"error":"unidentified_client"})");
+        BOOST_LOG(info) << "[VIPLE-XFER] poll EXIT 401_unidentified ssl="sv << ssl_ptr;
+        return;
+      }
+      // 非阻塞 poll，client 自己每 2s 拉一次。
+      auto cmd = file_transfer::manager::instance().poll(uuid, std::chrono::milliseconds(0));
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      if (!cmd) {
+        response->write(SimpleWeb::StatusCode::success_no_content, std::string {}, headers);
+        BOOST_LOG(info) << "[VIPLE-XFER] poll EXIT 204_no_cmd ssl="sv << ssl_ptr;
+        return;
+      }
+      const char *type_str = "unknown";
+      switch (cmd->type) {
+        case file_transfer::command_type::list_dir: type_str = "list_dir"; break;
+        case file_transfer::command_type::download_to_client: type_str = "download_to_client"; break;
+        case file_transfer::command_type::upload_from_client: type_str = "upload_from_client"; break;
+        case file_transfer::command_type::cancel: type_str = "cancel"; break;
+      }
+      nlohmann::json out;
+      out["type"] = type_str;
+      out["token"] = cmd->token;
+      out["filename"] = cmd->filename;
+      out["size"] = cmd->size;
+      out["path"] = cmd->path;
+      out["is_directory"] = cmd->is_directory;
+      response->write(SimpleWeb::StatusCode::success_ok, out.dump(), headers);
+      BOOST_LOG(info) << "[VIPLE-XFER] poll EXIT 200_cmd=" << type_str
+                      << " ssl="sv << ssl_ptr;
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] poll EXCEPTION ssl="sv << ssl_ptr
+                         << " what="sv << e.what();
+      throw;  // let SimpleWeb framework handle
+    } catch (...) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] poll EXCEPTION_unknown ssl="sv << ssl_ptr;
+      throw;
     }
-    // 非阻塞 poll，client 自己每 2s 拉一次。
-    auto cmd = file_transfer::manager::instance().poll(uuid, std::chrono::milliseconds(0));
-    SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "application/json");
-    if (!cmd) {
-      response->write(SimpleWeb::StatusCode::success_no_content, std::string {}, headers);
-      return;
-    }
-    const char *type_str = "unknown";
-    switch (cmd->type) {
-      case file_transfer::command_type::list_dir: type_str = "list_dir"; break;
-      case file_transfer::command_type::download_to_client: type_str = "download_to_client"; break;
-      case file_transfer::command_type::upload_from_client: type_str = "upload_from_client"; break;
-      case file_transfer::command_type::cancel: type_str = "cancel"; break;
-    }
-    nlohmann::json out;
-    out["type"] = type_str;
-    out["token"] = cmd->token;
-    out["filename"] = cmd->filename;
-    out["size"] = cmd->size;
-    out["path"] = cmd->path;
-    out["is_directory"] = cmd->is_directory;
-    response->write(SimpleWeb::StatusCode::success_ok, out.dump(), headers);
   }
 
   void xfer_result(resp_https_t response, req_https_t request) {
-    if (!xfer_gate_stream(response)) return;
+    // §N.5.bug diagnostic (2026-05-14) — postResult 也 SSL fail in same
+    // failure case as blob GET，ENTER log 看 handler 是否被 invoke.
+    void *ssl_ptr = request ? (void *)request->native_handle() : nullptr;
+    BOOST_LOG(info) << "[VIPLE-XFER] result ENTER ssl="sv << ssl_ptr;
+    if (!xfer_gate_stream(response)) {
+      BOOST_LOG(info) << "[VIPLE-XFER] result EXIT gate_blocked ssl="sv << ssl_ptr;
+      return;
+    }
     auto uuid = xfer_caller(request);
     if (uuid.empty()) {
       response->write(SimpleWeb::StatusCode::client_error_unauthorized,
                       R"({"error":"unidentified_client"})");
+      BOOST_LOG(info) << "[VIPLE-XFER] result EXIT 401_unidentified ssl="sv << ssl_ptr;
       return;
     }
     std::string body = request->content.string();
@@ -2044,34 +2076,58 @@ namespace nvhttp {
   }
 
   void xfer_blob_get(resp_https_t response, req_https_t request) {
-    if (!xfer_gate_stream(response)) return;
-    auto args = request->parse_query_string();
-    auto token = get_arg(args, "token");
-    auto t = file_transfer::manager::instance().get_transfer(token);
-    if (!t) {
-      response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"unknown_token"})");
-      return;
+    // §N.5.bug diagnostic (2026-05-14) — narrow: poll OK + 0% notification
+    // 出現後 client 端 download failed: SSL library (45ms 後). Server 端
+    // verify_callback 對應 blob GET request 完全沒 fire — 推測 handler 從
+    // 未 invoke，request 在 SimpleWeb 之前的 TLS / framework 層 reject.
+    // 加 ENTER log 確認 handler 是否真的被 invoke.
+    void *ssl_ptr = request ? (void *)request->native_handle() : nullptr;
+    BOOST_LOG(info) << "[VIPLE-XFER] blob_get ENTER ssl="sv << ssl_ptr
+                    << " path="sv << (request ? request->path : std::string {})
+                    << " query="sv << (request ? request->query_string : std::string {});
+    try {
+      if (!xfer_gate_stream(response)) {
+        BOOST_LOG(info) << "[VIPLE-XFER] blob_get EXIT gate_blocked ssl="sv << ssl_ptr;
+        return;
+      }
+      auto args = request->parse_query_string();
+      auto token = get_arg(args, "token");
+      auto t = file_transfer::manager::instance().get_transfer(token);
+      if (!t) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"unknown_token"})");
+        BOOST_LOG(info) << "[VIPLE-XFER] blob_get EXIT 404_unknown_token ssl="sv << ssl_ptr;
+        return;
+      }
+      if (t->dir != file_transfer::direction::to_client) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"wrong_direction"})");
+        BOOST_LOG(info) << "[VIPLE-XFER] blob_get EXIT 400_wrong_dir ssl="sv << ssl_ptr;
+        return;
+      }
+      std::ifstream in;
+      if (!file_transfer::manager::instance().open_for_send(token, in)) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"open_failed"})");
+        BOOST_LOG(info) << "[VIPLE-XFER] blob_get EXIT 404_open_failed ssl="sv << ssl_ptr;
+        return;
+      }
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/octet-stream");
+      headers.emplace("Content-Length", std::to_string(t->total_bytes));
+      headers.emplace("X-VipleStream-Token", token);
+      headers.emplace("X-VipleStream-Filename", t->display_name);
+      // 註：SimpleWeb 會把 `in` 串流推送，無需 buffer 整檔
+      response->write(SimpleWeb::StatusCode::success_ok, in, headers);
+      response->close_connection_after_response = true;
+      // 暫不在此 finalize（送完 client 會發 /transfer/result kind=done）
+      BOOST_LOG(info) << "[VIPLE-XFER] blob_get EXIT 200_streamed token=" << token
+                      << " size=" << t->total_bytes << " ssl="sv << ssl_ptr;
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] blob_get EXCEPTION ssl="sv << ssl_ptr
+                         << " what="sv << e.what();
+      throw;
+    } catch (...) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] blob_get EXCEPTION_unknown ssl="sv << ssl_ptr;
+      throw;
     }
-    if (t->dir != file_transfer::direction::to_client) {
-      response->write(SimpleWeb::StatusCode::client_error_bad_request, R"({"error":"wrong_direction"})");
-      return;
-    }
-    std::ifstream in;
-    if (!file_transfer::manager::instance().open_for_send(token, in)) {
-      response->write(SimpleWeb::StatusCode::client_error_not_found, R"({"error":"open_failed"})");
-      return;
-    }
-    SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "application/octet-stream");
-    headers.emplace("Content-Length", std::to_string(t->total_bytes));
-    headers.emplace("X-VipleStream-Token", token);
-    headers.emplace("X-VipleStream-Filename", t->display_name);
-    // 註：SimpleWeb 會把 `in` 串流推送，無需 buffer 整檔
-    response->write(SimpleWeb::StatusCode::success_ok, in, headers);
-    response->close_connection_after_response = true;
-    // 暫不在此 finalize（送完 client 會發 /transfer/result kind=done）
-    BOOST_LOG(info) << "[VIPLE-XFER] /transfer/blob GET token=" << token
-                    << " size=" << t->total_bytes;
   }
 
   void xfer_blob_post(resp_https_t response, req_https_t request) {
@@ -2179,6 +2235,17 @@ namespace nvhttp {
 
     // Verify certificates after establishing connection
     https_server.verify = [add_cert](SSL *ssl) {
+      // §N.5.bug diagnostic (2026-05-14) — entry log to detect whether
+      // verify_callback fires at all on subsequent TLS handshakes
+      // (client SSL TLSV1_ALERT_INTERNAL_ERROR on /transfer/* poll/blob).
+      // Scenario differentiation:
+      //   (A) verify_callback NOT fired → boost-asio rejected handshake
+      //       earlier (before verify), e.g. cipher / TLS version mismatch
+      //   (B) verify_callback fired + verified=1 → handler-level issue
+      //       (SSL_get_ex_data NULL / set_caller_uuid_on_ssl race)
+      //   (C) verify_callback fired + verified=0 → reject path triggered
+      BOOST_LOG(info) << "[VIPLE-VERIFY] enter ssl="sv << (void *)ssl;
+
       crypto::x509_t x509 {
 #if OPENSSL_VERSION_MAJOR >= 3
         SSL_get1_peer_certificate(ssl)
@@ -2187,7 +2254,7 @@ namespace nvhttp {
 #endif
       };
       if (!x509) {
-        BOOST_LOG(info) << "unknown -- denied"sv;
+        BOOST_LOG(info) << "[VIPLE-VERIFY] DENY no_peer_cert ssl="sv << (void *)ssl;
         return 0;
       }
 
@@ -2213,15 +2280,15 @@ namespace nvhttp {
 
       auto err_str = cert_chain.verify(x509.get());
       if (err_str) {
-        BOOST_LOG(warning) << "SSL Verification error :: "sv << err_str;
-
+        BOOST_LOG(warning) << "[VIPLE-VERIFY] DENY chain_verify_fail ssl="sv << (void *)ssl
+                           << " err="sv << err_str;
         return verified;
       }
 
       // Check if this client is enabled
       auto pem = crypto::pem(x509);
       if (!is_client_enabled(pem)) {
-        BOOST_LOG(info) << "Client is disabled -- denied"sv;
+        BOOST_LOG(info) << "[VIPLE-VERIFY] DENY client_disabled ssl="sv << (void *)ssl;
         return verified;
       }
 
@@ -2234,6 +2301,8 @@ namespace nvhttp {
 
       verified = 1;
 
+      BOOST_LOG(info) << "[VIPLE-VERIFY] OK ssl="sv << (void *)ssl
+                      << " uuid="sv << (matched_uuid.empty() ? "<unnamed>"sv : std::string_view {matched_uuid});
       return verified;
     };
 

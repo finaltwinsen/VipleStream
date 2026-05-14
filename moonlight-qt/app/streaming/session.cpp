@@ -1391,13 +1391,33 @@ private:
 
     void run() override
     {
-        // Only quit the running app if our session terminated gracefully
-        bool shouldQuit =
+        // §M.1.f fix (2026-05-14) — split the original `shouldQuit` into two
+        // independent concerns:
+        //   (a) shouldNotifyServerCancel — does the client need to tell the
+        //       server "stream is over" via HTTP /cancel?  Yes whenever this
+        //       was a graceful exit (quit key combo, window close, etc),
+        //       regardless of whether the client app itself is going to
+        //       quit afterwards.  Sending /cancel triggers server-side
+        //       proc.terminate() / proc.detach() which clears _owner_uuid,
+        //       allowing other paired devices to /launch.  Without it the
+        //       §M.1 ownership guard keeps rejecting the next client with
+        //       "Server in use by another paired device" 503.
+        //   (b) shouldQuitClientApp — does *this* moonlight-qt process exit
+        //       after the stream ends?  Controlled by the `quitAppAfter`
+        //       preference (default false).  Unchanged behaviour.
+        //
+        // Pre-fix code coupled these two concerns under one boolean, so
+        // when a user pressed the quit key combo with quitAppAfter=false
+        // (the default), /cancel was never sent and ownership stayed stuck
+        // on the host.  See TODO.md §M.1.f.
+        bool shouldNotifyServerCancel = !m_Session->m_UnexpectedTermination;
+        bool shouldQuitClientApp =
                 !m_Session->m_UnexpectedTermination &&
                 m_Session->m_Preferences->quitAppAfter;
 
-        // Notify the UI
-        if (shouldQuit) {
+        // Notify the UI (we'll emit sessionFinished later, after /cancel
+        // round-trip, when we go through the quit-client-app path)
+        if (shouldQuitClientApp) {
             emit m_Session->quitStarting();
         }
         else {
@@ -1431,8 +1451,11 @@ private:
             m_Session->m_UdpTunnel = nullptr;
         }
 
-        // Perform a best-effort app quit
-        if (shouldQuit) {
+        // §M.1.f fix: always notify server of graceful stream end via
+        // /cancel — this releases server-side ownership so other paired
+        // devices can /launch.  Independent of whether the client app
+        // itself is going to quit afterwards.
+        if (shouldNotifyServerCancel) {
             NvComputer* computer = m_Session->m_Computer;
             StreamingPreferences* prefs = m_Session->m_Preferences;
 
@@ -1461,8 +1484,11 @@ private:
                 } catch (const QtNetworkReplyException&) {
                 }
             }
+        }
 
-            // Session is finished now
+        if (shouldQuitClientApp) {
+            // Session is finished now (the earlier UI emit was quitStarting,
+            // emit the actual sessionFinished after the /cancel round-trip)
             emit m_Session->sessionFinished(m_Session->m_PortTestResults);
         }
 

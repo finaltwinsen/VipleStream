@@ -27,6 +27,7 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#include "process.h"  // §M.1.f — proc::proc.clear_owner_uuid() on session count drop to 0
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
@@ -579,6 +580,11 @@ namespace rtsp_stream {
           i++;
         }
       }
+      // §M.1.f defensive fix — see remove() comment.  Mass-teardown path
+      // (server shutdown, all=true) should also release ownership.
+      if (_session_slots->empty()) {
+        proc::proc.clear_owner_uuid();
+      }
     }
 
     /**
@@ -588,6 +594,14 @@ namespace rtsp_stream {
     void remove(const std::shared_ptr<stream::session_t> &session) {
       auto lg = _session_slots.lock();
       _session_slots->erase(session);
+      // §M.1.f defensive fix (2026-05-14) — when the last RTSP session ends
+      // (no /cancel ever received because of client crash / network drop /
+      // power-off), release the §M.1 ownership lock so the next /launch
+      // from any paired device is not blocked by a stale `_owner_uuid`.
+      // See process.h `clear_owner_uuid()` doc-comment.
+      if (_session_slots->empty()) {
+        proc::proc.clear_owner_uuid();
+      }
     }
 
     /**

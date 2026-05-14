@@ -202,12 +202,23 @@ public class NvHTTP {
      * found`。這裡跑一次 hack 把 SSL config baked-in 之後 cache 起來。
      */
     public OkHttpClient getLongConnectClient() {
-        if (longConnectTlsClient == null) {
-            longConnectTlsClient = performAndroidTlsHack(httpClientLongConnectTimeout);
-        }
-        return longConnectTlsClient;
+        // §N.5.bug fix (2026-05-14): 不再 cache OkHttpClient instance.
+        // 原 cache 行為使 FileTransferClient hold 同一 OkHttpClient 跑數十個
+        // request 整個 long-poll lifetime — Conscrypt/OkHttp 內部累積 SSL
+        // state 在第 K 個 request 之後 TLS handshake corrupt → ConscryptEngine
+        // throw TLSV1_ALERT_INTERNAL_ERROR (server-side verify_callback 完全
+        // 沒對應 fire，確認 TCP/TLS layer 之前 fail).
+        //
+        // NvHTTP 其他 endpoint (short-lived call e.g. /serverinfo /launch) 經
+        // openHttpConnection (line 474) 每次都 performAndroidTlsHack 新 wrap
+        // 一個 OkHttpClient — fresh SSLContext + SSLSocketFactory 一直工作正常.
+        // FileTransferClient 改成每次 newCall 之前 nvHttp.getLongConnectClient()
+        // 拿 fresh wrapped client，emulate 同 pattern.
+        //
+        // Trade-off: 每個 request 多一次 performAndroidTlsHack call (~10us)，
+        // 對 file transfer 整體 RTT 不影響.
+        return performAndroidTlsHack(httpClientLongConnectTimeout);
     }
-    private OkHttpClient longConnectTlsClient;
 
     public HttpUrl getHttpsUrl(boolean likelyOnline) throws IOException {
         if (httpsPort == 0) {

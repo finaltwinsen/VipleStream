@@ -54,4 +54,24 @@
         android:preferKeepClear="true"
         android:visibility="gone" />
 
+    <!-- VipleStream §N.5 — File transfer progress overlay (left-bottom).
+         獨立 view 不跟 connection status notificationOverlay (right-top) 衝突.
+         Stream 中收/送 file 進行時持續顯示 0-100% + 檔名，完成或失敗 3 秒後
+         自動 fade-out 避免長期擋畫面. -->
+    <TextView
+        android:id="@+id/fileTransferOverlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginLeft="10dp"
+        android:layout_marginStart="10dp"
+        android:layout_marginBottom="10dp"
+        android:layout_gravity="left|bottom"
+        android:textAppearance="?android:attr/textAppearanceMedium"
+        android:textColor="#FFD4FF3A"
+        android:gravity="left"
+        android:background="#B0141710"
+        android:padding="8dp"
+        android:preferKeepClear="true"
+        android:visibility="gone" />
+
 </merge>

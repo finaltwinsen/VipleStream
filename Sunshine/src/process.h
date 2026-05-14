@@ -138,6 +138,24 @@ namespace proc {
     bool is_running_steam_source() const;
     void detach();
 
+    /**
+     * §M.1.f defensive fix (2026-05-14) — clear `_owner_uuid` / `_owner_name`
+     * without touching the running process or app state.  Hook point for the
+     * RTSP TEARDOWN handler when `rtsp_stream::session_count()` drops to 0
+     * (i.e. all paired-client RTSP streams have ended).  Catches the case
+     * where moonlight-qt client crashes / loses network without sending the
+     * graceful /cancel — without this, ownership stays stuck on the host
+     * and the next /launch from any device gets 503 `Server in use by
+     * another paired device`.
+     *
+     * Why not terminate()/detach()?  Those tear down the running app, which
+     * is too aggressive — the app may legitimately still be running (Steam
+     * game continuing in background, manual app etc).  This only releases
+     * the ownership lock so a fresh /launch can take over without manual
+     * Web UI Force Disconnect.
+     */
+    void clear_owner_uuid();
+
     // Wall-clock time the current app was launched, in seconds since epoch.
     // Returns 0 if no app is running.  Used by /api/current_session.
     int64_t running_started_unix_s() const;

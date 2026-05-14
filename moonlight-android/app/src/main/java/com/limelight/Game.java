@@ -150,6 +150,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private boolean isHidingOverlays;
     private TextView notificationOverlayView;
     private int requestedNotificationOverlayVisibility = View.GONE;
+
+    // VipleStream §N.5 — File transfer progress overlay (left-bottom).
+    // 替代原 Toast 不打擾 stream，整個 transfer 期間持續顯示 0-100%.
+    private TextView fileTransferOverlayView;
+    private final java.util.concurrent.atomic.AtomicReference<Runnable> fileTransferHideTask =
+            new java.util.concurrent.atomic.AtomicReference<>(null);
     private TextView performanceOverlayView;
 
     private MediaCodecDecoderRenderer decoderRenderer;
@@ -275,6 +281,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         }
 
         notificationOverlayView = findViewById(R.id.notificationOverlay);
+
+        // VipleStream §N.5 — file transfer overlay (left-bottom)
+        fileTransferOverlayView = findViewById(R.id.fileTransferOverlay);
 
         performanceOverlayView = findViewById(R.id.performanceOverlay);
 
@@ -636,6 +645,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
                 performanceOverlayView.setVisibility(View.GONE);
                 notificationOverlayView.setVisibility(View.GONE);
+                // VipleStream §N.5 — file transfer overlay 也 PiP hide
+                if (fileTransferOverlayView != null) {
+                    fileTransferOverlayView.setVisibility(View.GONE);
+                }
 
                 // Disable sensors while in PiP mode
                 controllerHandler.disableSensors();
@@ -2267,10 +2280,16 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     xferServerCert,
                     com.limelight.binding.PlatformBinding.getCryptoProvider(this));
             okhttp3.HttpUrl base = http.getHttpsUrl(true);
-            okhttp3.OkHttpClient client = http.getLongConnectClient();
+            // §N.5.bug fix (2026-05-14): pass NvHTTP::getLongConnectClient as
+            // supplier so FileTransferClient pulls fresh wrapped OkHttpClient
+            // (new SSLContext) per newCall. Avoids cached SSL state corruption
+            // accumulating across N+ long-poll requests on Pixel 5 Conscrypt.
+            //
+            // §N.5 UX (2026-05-14): emit() 改走 fileTransferOverlay 替代原 Toast,
+            // 整個 transfer 期間持續可見 (0-100%), 完成或失敗 3 秒後自動 hide.
             fileTransferClient = new com.limelight.transfer.FileTransferClient(
-                    getApplicationContext(), client, base,
-                    msg -> displayTransientMessage(msg));
+                    getApplicationContext(), http::getLongConnectClient, base,
+                    this::showFileTransferOverlay);
             fileTransferClient.start();
         } catch (Exception e) {
             android.util.Log.w("VipleXfer", "[VIPLE-XFER] startFileTransferClient failed", e);
@@ -2545,6 +2564,46 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 }
             });
         }
+    }
+
+    /**
+     * VipleStream §N.5 (2026-05-14) — File transfer 進度 overlay 顯示.
+     *
+     * 替代原 Toast / Notification 不打擾 stream 視覺. Pattern：
+     *   - 整個 transfer 期間 ("Receiving file: ... 5%" / "Sending: ... 50%")
+     *     持續可見在左下角，使用者可以隨時看進度
+     *   - 完成/失敗訊息 ("Saved: ..." / "Sent: ..." / "File transfer cancelled")
+     *     顯示後 3 秒自動 fade-out 避免長期擋畫面
+     *   - 進度中如再收到 message (next 5% bucket) 取消既有 fade-out timer 重置
+     *
+     * 不跟 notificationOverlay (connection poor/slow) 衝突 — 獨立 view 左下 vs
+     * 右上.
+     */
+    private void showFileTransferOverlay(final String message) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (fileTransferOverlayView == null) return;
+                fileTransferOverlayView.setText(message);
+                if (!isHidingOverlays) {
+                    fileTransferOverlayView.setVisibility(View.VISIBLE);
+                }
+                // 取消既有 hide timer (進度更新時重置)
+                Runnable prev = fileTransferHideTask.getAndSet(null);
+                if (prev != null) fileTransferOverlayView.removeCallbacks(prev);
+                // 終態 (完成 / 取消 / 失敗) 3 秒後 hide；進行中保持顯示
+                boolean isTerminal = message != null && (
+                        message.startsWith("Saved")
+                     || message.startsWith("Sent")
+                     || message.startsWith("File transfer cancelled")
+                     || message.contains("failed"));
+                if (isTerminal) {
+                    Runnable hideTask = () -> fileTransferOverlayView.setVisibility(View.GONE);
+                    fileTransferHideTask.set(hideTask);
+                    fileTransferOverlayView.postDelayed(hideTask, 3000);
+                }
+            }
+        });
     }
 
     @Override

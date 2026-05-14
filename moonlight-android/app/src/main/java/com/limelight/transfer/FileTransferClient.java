@@ -56,7 +56,17 @@ public class FileTransferClient {
     }
 
     private final Context appContext;
-    private final OkHttpClient httpClient;
+    /**
+     * §N.5.bug fix (2026-05-14): Supplier 替代 OkHttpClient field. 原 cached
+     * OkHttpClient instance 用整個 FileTransferClient lifetime — Conscrypt/
+     * OkHttp 內部 SSL state 累積到第 K 個 request 後 TLS handshake corrupt,
+     * 報 TLSV1_ALERT_INTERNAL_ERROR (server-side verify_callback 沒對應 fire).
+     * 改成每次 newCall 之前 supplier.get() 拿 fresh wrapped client
+     * (NvHTTP.getLongConnectClient now returns fresh per call) — emulate
+     * NvHTTP short-lived call pattern (openHttpConnection 每次 fresh wrap)，
+     * 該 pattern 一直工作正常.
+     */
+    private final java.util.function.Supplier<OkHttpClient> clientSupplier;
     private final HttpUrl baseHttpsUrl;
     private final Listener listener;
     private final ScheduledExecutorService scheduler =
@@ -68,9 +78,10 @@ public class FileTransferClient {
     private final AtomicReference<String> activeToken = new AtomicReference<>(null);
     private volatile boolean started = false;
 
-    public FileTransferClient(Context appContext, OkHttpClient client, HttpUrl httpsBase, Listener listener) {
+    public FileTransferClient(Context appContext, java.util.function.Supplier<OkHttpClient> clientSupplier,
+                              HttpUrl httpsBase, Listener listener) {
         this.appContext = appContext.getApplicationContext();
-        this.httpClient = client;
+        this.clientSupplier = clientSupplier;
         this.baseHttpsUrl = httpsBase;
         this.listener = listener;
     }
@@ -114,7 +125,7 @@ public class FileTransferClient {
                     .url(baseHttpsUrl.newBuilder().addPathSegments("transfer/poll").build())
                     .get()
                     .build();
-            try (Response r = httpClient.newCall(req).execute()) {
+            try (Response r = clientSupplier.get().newCall(req).execute()) {
                 int code = r.code();
                 if (code == 204) return;
                 if (code != 200) {
@@ -243,10 +254,14 @@ public class FileTransferClient {
                         .addQueryParameter("token", token).build())
                 .get()
                 .build();
+        // §N.5.bug fix (2026-05-14): clientSupplier.get() returns fresh wrapped
+        // OkHttpClient per call (NvHTTP.getLongConnectClient cache removed).
+        // 不需要 evictAll() — fresh client 自帶 fresh SSL state.
+        OkHttpClient blobClient = clientSupplier.get();
         boolean ok = false;
         long total = 0;
         int lastBucket = -1;
-        try (Response resp = httpClient.newCall(req).execute();
+        try (Response resp = blobClient.newCall(req).execute();
              OutputStream out = cr.openOutputStream(uri)) {
             if (resp.code() != 200 || resp.body() == null || out == null) {
                 throw new IOException("HTTP " + resp.code());
@@ -270,7 +285,11 @@ public class FileTransferClient {
                 ok = true;
             }
         } catch (Exception e) {
-            Log.w(TAG, "[VIPLE-XFER] download failed: " + e.getMessage());
+            // §N.5.bug diagnostic (2026-05-14) — 29ms SSL fail too fast for
+            // TCP connect + TLS handshake. Need full stack trace to identify
+            // which layer (Dial / SSLSocketFactory.createSocket / SSL_read /
+            // HTTP/2 framing / etc) actually throws.
+            Log.w(TAG, "[VIPLE-XFER] download failed", e);
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -362,10 +381,10 @@ public class FileTransferClient {
                 .post(body)
                 .build();
         boolean ok = false;
-        try (Response resp = httpClient.newCall(req).execute()) {
+        try (Response resp = clientSupplier.get().newCall(req).execute()) {
             ok = resp.isSuccessful();
         } catch (Exception e) {
-            Log.w(TAG, "[VIPLE-XFER] upload failed: " + e.getMessage());
+            Log.w(TAG, "[VIPLE-XFER] upload failed", e);
         }
         if (ok) {
             emit("Sent: " + safeName);
@@ -400,11 +419,14 @@ public class FileTransferClient {
                     .url(baseHttpsUrl.newBuilder().addPathSegments("transfer/result").build())
                     .post(body)
                     .build();
-            try (Response r = httpClient.newCall(req).execute()) {
+            // §N.5.bug fix — fresh client per call (see field comment).
+            try (Response r = clientSupplier.get().newCall(req).execute()) {
                 // ignore body
             }
         } catch (Exception e) {
-            Log.d(TAG, "[VIPLE-XFER] postResult err: " + e.getMessage());
+            // §N.5.bug diagnostic — full stack trace, same root cause as
+            // handleDownload SSL fail.
+            Log.w(TAG, "[VIPLE-XFER] postResult err", e);
         }
     }
 

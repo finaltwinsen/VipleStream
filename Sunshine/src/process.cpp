@@ -613,6 +613,23 @@ namespace proc {
     _owner_name.clear();
   }
 
+  void proc_t::clear_owner_uuid() {
+    // §M.1.f defensive fix (2026-05-14) — release ownership lock without
+    // touching app/process state.  Called from RTSP TEARDOWN session-count-
+    // zero hook to recover from client-side abnormal disconnects (crash /
+    // network drop / power-off) that never sent /cancel.  See process.h
+    // doc-comment.
+    if (_owner_uuid.empty() && _owner_name.empty()) {
+      return;  // nothing to clear
+    }
+    BOOST_LOG(info) << "[VIPLE-MULTI] clear_owner_uuid: releasing owner="sv
+                    << (_owner_name.empty() ? "<unknown>"sv : std::string_view {_owner_name})
+                    << " uuid="sv << (_owner_uuid.empty() ? "<empty>"sv : std::string_view {_owner_uuid})
+                    << " (RTSP session_count dropped to 0)";
+    _owner_uuid.clear();
+    _owner_name.clear();
+  }
+
   const std::vector<ctx_t> &proc_t::get_apps() const {
     return _apps;
   }
