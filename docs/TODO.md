@@ -145,6 +145,42 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.61 ship 帶走的條目（2026-05-15, post v1.4.60 fp16 infra）
+
+- 🟡 **§J.3.e.Y 5Y fp16 path 啟用（第二刀，env opt-in）** — v1.4.60 infra
+  已 ship（applyBlobMacros + 11 shader markers），本版加 env gate
+  `VIPLE_RIFE_VK_FP16=1`，啟用後 RIFE 內部 blob 儲存 fp16、邊界 fp32↔fp16
+  conversion shader 串接外部 fp32 buffer。env=0（預設）跟 v1.4.60
+  bit-identical（也跟 v1.4.59 bit-identical）。
+  - `rife_native_vk.cpp`:
+    - `isFp16BlobEnabled()` static cached env-gate helper（pattern 沿用
+      `kCoopMatEnabled`）
+    - `fp32ToFp16(float)` IEEE 754 binary32→binary16 host 轉換 helper
+      （給 in2 timestep memcpy 用）
+    - `ShaderKind::Fp32ToFp16Copy` / `Fp16ToFp32Copy` 加 enum + 2 個 GLSL
+      shader source + ShaderSpec 表
+    - 5 個 `applyBlobMacros(..., false)` 站全改 `isFp16BlobEnabled()`：
+      buildPipelineCache / runComputeOnce / 3 個 gpu test entry
+    - Blob alloc loop（line ~3317）`bytes = s.c*s.h*s.w*sizeof(float)`
+      → `... * (isFp16BlobEnabled() ? sizeof(uint16_t) : sizeof(float))`。
+      env=1 時所有 RIFE internal blob 變 fp16 size（halve memory）
+    - `runInferenceGpuFlow` 入/出 boundary：env=1 時 4 個 `vkCmdCopyBuffer`
+      改 dispatch `Fp32ToFp16Copy`（in0/in1）+ `Fp16ToFp32Copy`（flow/mask）；
+      in2 timestep memcpy 寫 fp16 2 byte。Barrier dst stage 從 TRANSFER 改
+      COMPUTE 配合。env=0 仍走 `vkCmdCopyBuffer` 直 copy
+  - **沒動的部分**: weight/bias/beta buffers 仍 fp32（weight 已是 fp16
+    via §J.3.e.Y 4Y.1 weight pack）；Conv2D_CoopMat path 不動（pre-built
+    SPIR-V，本來就 fp16）；vkfruc.cpp caller side 不動（external 仍 fp32）
+  - **預期 perf gain (RTX 30 系列 Tensor Cores)**: RIFE inference chain
+    11ms → 6-8ms（storage bandwidth 砍 50%），dual-present 60→120 在
+    inferDim=256 真正 fit 16.7ms slot
+  - **失敗訊號**（v1.4.61 啟用後）: GLSL compile fail / SSBO binding type
+    mismatch / interp frame 視覺花屏 / cmpCmd 飆 >15ms → 表示
+    fp16 path 有 bug。退路：`set VIPLE_RIFE_VK_FP16=0` 重啟回 v1.4.60
+    fp32 path
+  - **下一步**: 使用者 real-stream `set VIPLE_RIFE_VK_FP16=1` 跑 30s 看
+    `[VIPLE-VKFRUC-PHASE2B-PROF]` log 確認 cmpCmd 數字 + 視覺品質
+
 ### v1.4.60 ship 帶走的條目（2026-05-15, post v1.4.59 PHASE2B-PROF）
 
 - 🟡 **§J.3.e.Y 5Y fp16 path infrastructure（第一刀，staged）** — v1.4.59

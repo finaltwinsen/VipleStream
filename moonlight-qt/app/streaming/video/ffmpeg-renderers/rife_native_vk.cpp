@@ -388,6 +388,40 @@ static std::string applyBlobMacros(const char* src, bool useFp16Blob)
     return s;
 }
 
+// §J.3.e.Y 5Y v1.4.61 — process-wide env-gate cache.  Pattern mirrors
+// kCoopMatEnabled (function-scope statics in dispatchConvolution etc.):
+// read VIPLE_RIFE_VK_FP16 once, cache in static.  All call sites
+// (applyBlobMacros at shader compile time, blob alloc, boundary
+// dispatch) read the same value, guaranteed consistent within a process.
+// env=0 (or unset) → false → v1.4.60 fp32 path (bit-identical).
+// env=non-zero non-"0" string → true → fp16 storage with fp32 arithmetic.
+static bool isFp16BlobEnabled() {
+    static const bool kEnabled = []{
+        const char* s = std::getenv("VIPLE_RIFE_VK_FP16");
+        return s && s[0] && s[0] != '0';
+    }();
+    return kEnabled;
+}
+
+// §J.3.e.Y 5Y v1.4.61 — IEEE 754 binary32 → binary16 conversion for the
+// in2 timestep memcpy in runInferenceGpuFlow.  Simple branch-based impl
+// (only invoked once per inference at fp16 mode; no hot path).  Returns
+// 16-bit pattern in uint16_t for byte-exact memcpy into mapped fp16 SSBO.
+static uint16_t fp32ToFp16(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, sizeof(x));
+    uint16_t sign     = (uint16_t)((x >> 31) & 0x1);
+    int32_t  expBits  = (int32_t)((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t mantissa = (x >> 13) & 0x3FF;
+    if (expBits <= 0) {
+        return (uint16_t)(sign << 15);                       // underflow → ±0
+    }
+    if (expBits >= 31) {
+        return (uint16_t)((sign << 15) | (0x1F << 10));      // overflow → ±inf
+    }
+    return (uint16_t)((sign << 15) | (uint32_t(expBits) << 10) | mantissa);
+}
+
 static const char* kConv2DShaderGlsl = R"GLSL(
 #version 450
 #extension GL_EXT_shader_16bit_storage              : require
@@ -1112,6 +1146,55 @@ void main() {
 }
 )GLSL";
 const char* getEltwiseShaderGlsl() { return kEltwiseShaderGlsl; }
+
+// ============================================================================
+// §J.3.e.Y 5Y (v1.4.61) — Fp32 ↔ Fp16 boundary conversion shaders.
+//
+// When VIPLE_RIFE_VK_FP16=1, RIFE internal blobs are allocated at half
+// size (fp16 storage).  External caller buffers (m_RifeDownPrev/Curr
+// inputs, m_RifeFlowOutBuf/MaskOutBuf outputs) remain fp32.  These two
+// shaders bridge: caller fp32 → internal fp16 (entry), internal fp16 →
+// caller fp32 (exit).  Replaces the vkCmdCopyBuffer the v1.4.60 fp32
+// path uses on those boundaries.
+//
+// Element count is identical across the boundary; only byte size halves.
+// Shader is purely a 1D dispatch over total element count.
+// ============================================================================
+
+static const char* kFp32ToFp16CopyShaderGlsl = R"GLSL(
+#version 450
+#extension GL_EXT_shader_16bit_storage              : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly  buffer InBuf  { float     in_buf[];  };
+layout(set = 0, binding = 1) writeonly buffer OutBuf { float16_t out_buf[]; };
+layout(push_constant) uniform PC { uint count; } pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    out_buf[i] = float16_t(in_buf[i]);
+}
+)GLSL";
+
+const char* getFp32ToFp16CopyShaderGlsl() { return kFp32ToFp16CopyShaderGlsl; }
+
+static const char* kFp16ToFp32CopyShaderGlsl = R"GLSL(
+#version 450
+#extension GL_EXT_shader_16bit_storage              : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly  buffer InBuf  { float16_t in_buf[];  };
+layout(set = 0, binding = 1) writeonly buffer OutBuf { float     out_buf[]; };
+layout(push_constant) uniform PC { uint count; } pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    out_buf[i] = float(in_buf[i]);
+}
+)GLSL";
+
+const char* getFp16ToFp32CopyShaderGlsl() { return kFp16ToFp32CopyShaderGlsl; }
+
 
 // ============================================================================
 // §J.3.e.X Phase 4e — Deconvolution (transposed conv).
@@ -2697,7 +2780,7 @@ bool runComputeOnce(const VulkanCtx& ctx, const RunComputeOptions& opts) {
         // standalone gpu-test harness (runConv2DGpuTest etc.) which feeds
         // shader source through opts.shaderGlsl.  v1.4.60 fp32-only.
         const std::string transformedSrc =
-            applyBlobMacros(opts.shaderGlsl, /*useFp16Blob*/ false);
+            applyBlobMacros(opts.shaderGlsl, isFp16BlobEnabled());
         ncnn::Option opt;
         int rc = ncnn::compile_spirv_module(transformedSrc.c_str(), opt, spirvOwned);
         if (rc != 0 || spirvOwned.empty()) {
@@ -2954,6 +3037,8 @@ enum class ShaderKind : int {
     Conv2D_3x3_s1,   // §J.3.e.Y 4Y.4         — tiled, k=3 stride=1 pad=1 dilation=1
     Conv2D_3x3_s2,   // §J.3.e.Y 4Y.4-stride2 — tiled, k=3 stride=2 pad=1 dilation=1
     Conv2D_CoopMat,  // §J.3.e.Y 4Y.6         — Tensor Core via VK_KHR_cooperative_matrix
+    Fp32ToFp16Copy,  // §J.3.e.Y 5Y v1.4.61   — boundary cast (external fp32 → internal fp16)
+    Fp16ToFp32Copy,  // §J.3.e.Y 5Y v1.4.61   — boundary cast (internal fp16 → external fp32)
     Count
 };
 
@@ -2991,6 +3076,10 @@ static const ShaderSpec kShaderSpecs[(int)ShaderKind::Count] = {
     { "Conv2D_3x3_s1",  getConv2D_3x3_s1_ShaderGlsl, 6, 80, nullptr,         0 },
     { "Conv2D_3x3_s2",  getConv2D_3x3_s2_ShaderGlsl, 6, 80, nullptr,         0 },
     { "Conv2D_CoopMat", nullptr,                     4, 64, kCoopMatConvSpv, kCoopMatConvSpvWords },
+    // §J.3.e.Y 5Y v1.4.61 — fp16 boundary conversion (only built/used when
+    // VIPLE_RIFE_VK_FP16 enabled; harmless to build in fp32 mode too).
+    { "Fp32ToFp16Copy", getFp32ToFp16CopyShaderGlsl, 2, 16, nullptr,         0 },
+    { "Fp16ToFp32Copy", getFp16ToFp32CopyShaderGlsl, 2, 16, nullptr,         0 },
 };
 
 struct CachedPipeline {
@@ -3115,7 +3204,7 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out,
             // v1.4.61 will wire the second arg to the env-gate-controlled
             // Impl::useFp16Blob flag.
             const std::string transformedSrc =
-                applyBlobMacros(spec.sourceFn(), /*useFp16Blob*/ false);
+                applyBlobMacros(spec.sourceFn(), isFp16BlobEnabled());
             ncnn::Option opt;
             if (ncnn::compile_spirv_module(transformedSrc.c_str(), opt, spirvOwned) != 0
                 || spirvOwned.empty()) {
@@ -3311,11 +3400,17 @@ bool buildBufferPool(const VulkanCtx& ctx,
     out.pfnFreeMem    = pfnFreeMemory;
 
     // ---- Blob buffers (one per inferred shape) ----
+    // §J.3.e.Y 5Y v1.4.61 — when VIPLE_RIFE_VK_FP16=1, blobs store fp16
+    // (2 bytes/elem) instead of fp32 (4 bytes/elem).  Halve buffer size.
+    // Weight/bias buffers are sized separately in createWeightBuffers via
+    // r.isFp16 (already handled — fp16 weights existed pre-v1.4.60).
+    const size_t blobElemBytes = isFp16BlobEnabled() ? sizeof(uint16_t)
+                                                      : sizeof(float);
     for (const auto& kv : shapes) {
         const QString& name = kv.first;
         const BlobShape& s = kv.second;
-        size_t bytes = (size_t)s.c * s.h * s.w * sizeof(float);
-        if (bytes == 0) bytes = sizeof(float);
+        size_t bytes = (size_t)s.c * s.h * s.w * blobElemBytes;
+        if (bytes == 0) bytes = blobElemBytes;
         GpuBuffer buf{};
         if (!createHostBuffer(device, memProps,
                               pfnCreateBuffer, pfnGetBufferMemoryRequirements,
@@ -5171,7 +5266,7 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
         // §J.3.e.Y 5Y (v1.4.60) — fp32 macro injection (consistent with
         // buildPipelineCache / runComputeOnce sites).
         const std::string transformedSrc =
-            applyBlobMacros(getConv2DShaderGlsl(), /*useFp16Blob*/ false);
+            applyBlobMacros(getConv2DShaderGlsl(), isFp16BlobEnabled());
         ncnn::Option opt;
         if (ncnn::compile_spirv_module(transformedSrc.c_str(), opt, spirv) != 0
             || spirv.empty()) {
@@ -5560,7 +5655,7 @@ bool runBinaryOpGpuTest(const VulkanCtx& ctx,
     {
         // §J.3.e.Y 5Y (v1.4.60) — fp32 macro injection.
         const std::string transformedSrc =
-            applyBlobMacros(getBinaryOpShaderGlsl(), /*useFp16Blob*/ false);
+            applyBlobMacros(getBinaryOpShaderGlsl(), isFp16BlobEnabled());
         ncnn::Option opt;
         if (ncnn::compile_spirv_module(transformedSrc.c_str(), opt, spirv) != 0
             || spirv.empty()) {
@@ -5865,7 +5960,7 @@ bool runActivationGpuTest(const VulkanCtx& ctx,
     {
         // §J.3.e.Y 5Y (v1.4.60) — fp32 macro injection.
         const std::string transformedSrc =
-            applyBlobMacros(getActivationShaderGlsl(), /*useFp16Blob*/ false);
+            applyBlobMacros(getActivationShaderGlsl(), isFp16BlobEnabled());
         ncnn::Option opt;
         if (ncnn::compile_spirv_module(transformedSrc.c_str(), opt, spirv) != 0
             || spirv.empty()) {
@@ -7979,18 +8074,56 @@ bool RifeNativeExecutor::runInferenceGpuFlow(void* cmdRaw,
     VkCommandBuffer savedCmd = st.cmd;
     st.cmd = cmd;
 
-    // Stage in0/in1 from caller's VkBuffers into RIFE blob buffers.
-    {
+    // §J.3.e.Y 5Y v1.4.61 — fp16 mode replaces external→internal byte copy
+    // with a compute dispatch that casts fp32→fp16.  Element count comes
+    // from external buffer size (caller-allocated as fp32, 4 B/elem); the
+    // internal blob (in0It->second.buf) is fp16-allocated (2 B/elem) at
+    // half the byte size but same element count.  Dispatch local size 64.
+    const bool fp16Mode = isFp16BlobEnabled();
+    if (fp16Mode) {
+        // Element count = internal blob fp16 size / 2 B = external fp32 size / 4 B.
+        const uint32_t elemCountIn0 =
+            (uint32_t)(in0It->second.size / sizeof(uint16_t));
+        const uint32_t elemCountIn1 =
+            (uint32_t)(in1It->second.size / sizeof(uint16_t));
+        struct PCFp16Cast { uint32_t count; } pc0 = { elemCountIn0 };
+        struct PCFp16Cast pc1 = { elemCountIn1 };
+        VkBuffer bufs0[2] = { in0Buf, in0It->second.buf };
+        VkBuffer bufs1[2] = { in1Buf, in1It->second.buf };
+        if (!bindDispatch(st, ShaderKind::Fp32ToFp16Copy, bufs0, 2,
+                           &pc0, sizeof(pc0), (elemCountIn0 + 63) / 64, 1, 1)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] runInferenceGpuFlow: Fp32ToFp16Copy in0 dispatch failed");
+            st.cmd = savedCmd; st.descPool = savedDescPool;
+            return false;
+        }
+        if (!bindDispatch(st, ShaderKind::Fp32ToFp16Copy, bufs1, 2,
+                           &pc1, sizeof(pc1), (elemCountIn1 + 63) / 64, 1, 1)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] runInferenceGpuFlow: Fp32ToFp16Copy in1 dispatch failed");
+            st.cmd = savedCmd; st.descPool = savedDescPool;
+            return false;
+        }
+    } else {
+        // fp32 path — straight byte copy as v1.4.60.
         VkBufferCopy r0 = {}; r0.size = in0It->second.size;
         VkBufferCopy r1 = {}; r1.size = in1It->second.size;
         st.pfnCopyBuf(cmd, in0Buf, in0It->second.buf, 1, &r0);
         st.pfnCopyBuf(cmd, in1Buf, in1It->second.buf, 1, &r1);
     }
-    // in2 timestep via mapped HOST_COHERENT pointer.
+    // in2 timestep via mapped HOST_COHERENT pointer.  fp16 mode: write 2 B
+    // fp16 (only first element matters — model uses in2[0] as scalar broadcast).
     if (in2It->second.mapped) {
-        std::memcpy(in2It->second.mapped, &timestep, sizeof(float));
+        if (fp16Mode) {
+            uint16_t ts16 = fp32ToFp16(timestep);
+            std::memcpy(in2It->second.mapped, &ts16, sizeof(uint16_t));
+        } else {
+            std::memcpy(in2It->second.mapped, &timestep, sizeof(float));
+        }
     }
-    // TRANSFER/HOST writes → COMPUTE_SHADER reads barrier.
+    // Writes → COMPUTE_SHADER reads barrier.  fp16 mode src stage =
+    // COMPUTE_SHADER (Fp32ToFp16Copy dispatch wrote in0/in1) + HOST (in2);
+    // fp32 mode src stage = TRANSFER (vkCmdCopyBuffer) + HOST.
     {
         VkBufferMemoryBarrier bmb[3] = {};
         for (int i = 0; i < 3; ++i) {
@@ -8000,14 +8133,18 @@ bool RifeNativeExecutor::runInferenceGpuFlow(void* cmdRaw,
             bmb[i].size = VK_WHOLE_SIZE;
             bmb[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         }
+        const VkAccessFlags inSrcMask = fp16Mode
+            ? VK_ACCESS_SHADER_WRITE_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
+        const VkPipelineStageFlags inSrcStage = fp16Mode
+            ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT;
         bmb[0].buffer        = in0It->second.buf;
-        bmb[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bmb[0].srcAccessMask = inSrcMask;
         bmb[1].buffer        = in1It->second.buf;
-        bmb[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bmb[1].srcAccessMask = inSrcMask;
         bmb[2].buffer        = in2It->second.buf;
         bmb[2].srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
         st.pfnBarrier(cmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+            inSrcStage | VK_PIPELINE_STAGE_HOST_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 0, nullptr, 3, bmb, 0, nullptr);
     }
@@ -8030,7 +8167,9 @@ bool RifeNativeExecutor::runInferenceGpuFlow(void* cmdRaw,
     }
 
     if (dispatchOk) {
-        // Barrier flow + mask blob buffers SHADER_WRITE → TRANSFER_READ.
+        // §J.3.e.Y 5Y v1.4.61 — fp16 mode: barrier dst stage = COMPUTE
+        // (Fp16ToFp32Copy reads internal fp16 blob via SHADER_READ);
+        // fp32 mode: barrier dst stage = TRANSFER (vkCmdCopyBuffer).
         VkBufferMemoryBarrier obar[2] = {};
         for (int i = 0; i < 2; ++i) {
             obar[i].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
@@ -8038,20 +8177,46 @@ bool RifeNativeExecutor::runInferenceGpuFlow(void* cmdRaw,
             obar[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             obar[i].size = VK_WHOLE_SIZE;
             obar[i].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            obar[i].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            obar[i].dstAccessMask = fp16Mode
+                ? VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_TRANSFER_READ_BIT;
         }
         obar[0].buffer = flowIt->second.buf;
         obar[1].buffer = maskIt->second.buf;
         st.pfnBarrier(cmd,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            fp16Mode ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                     : VK_PIPELINE_STAGE_TRANSFER_BIT,
             0, 0, nullptr, 2, obar, 0, nullptr);
 
-        // Copy flow (4ch) + mask (1ch) blobs to caller's buffers.
-        VkBufferCopy flowCopy = {}; flowCopy.size = flowIt->second.size;
-        VkBufferCopy maskCopy = {}; maskCopy.size = maskIt->second.size;
-        st.pfnCopyBuf(cmd, flowIt->second.buf, flowOutBuf, 1, &flowCopy);
-        st.pfnCopyBuf(cmd, maskIt->second.buf, maskOutBuf, 1, &maskCopy);
+        if (fp16Mode) {
+            // Cast internal fp16 flow/mask back to caller's fp32 buffers.
+            const uint32_t elemCountFlow =
+                (uint32_t)(flowIt->second.size / sizeof(uint16_t));
+            const uint32_t elemCountMask =
+                (uint32_t)(maskIt->second.size / sizeof(uint16_t));
+            struct PCFp16Cast { uint32_t count; } pcF = { elemCountFlow };
+            struct PCFp16Cast pcM = { elemCountMask };
+            VkBuffer bufsF[2] = { flowIt->second.buf, flowOutBuf };
+            VkBuffer bufsM[2] = { maskIt->second.buf, maskOutBuf };
+            if (!bindDispatch(st, ShaderKind::Fp16ToFp32Copy, bufsF, 2,
+                               &pcF, sizeof(pcF), (elemCountFlow + 63) / 64, 1, 1)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] runInferenceGpuFlow: Fp16ToFp32Copy flow dispatch failed");
+                dispatchOk = false;
+            }
+            if (dispatchOk && !bindDispatch(st, ShaderKind::Fp16ToFp32Copy, bufsM, 2,
+                                              &pcM, sizeof(pcM), (elemCountMask + 63) / 64, 1, 1)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] runInferenceGpuFlow: Fp16ToFp32Copy mask dispatch failed");
+                dispatchOk = false;
+            }
+        } else {
+            // fp32 path — straight byte copy as v1.4.60.
+            VkBufferCopy flowCopy = {}; flowCopy.size = flowIt->second.size;
+            VkBufferCopy maskCopy = {}; maskCopy.size = maskIt->second.size;
+            st.pfnCopyBuf(cmd, flowIt->second.buf, flowOutBuf, 1, &flowCopy);
+            st.pfnCopyBuf(cmd, maskIt->second.buf, maskOutBuf, 1, &maskCopy);
+        }
     }
 
     st.cmd      = savedCmd;
