@@ -145,6 +145,38 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.65 ship 帶走的條目（2026-05-15, post v1.4.64 RIFE init hotfix）
+
+- 🔴 **§J.3.e.Y 5Y fp16 path 預設關閉（v1.4.64 終於跑起來 fp16 看到真實
+  結果不可行）** — v1.4.64 修好 applyBlobMacros 之後，使用者第一次真的
+  跑到 fp16 path。實測結果：
+  - **cmpCmd 11ms (v1.4.59 fp32 baseline) → 21-37ms (fp16 active)，2-3×
+    更慢**。`[VIPLE-VKFRUC-PHASE2B-PROF]` log 顯示 preCmd 從 190us 飆
+    到 309-3325us（boundary conversion dispatch + driver pack/unpack
+    overhead）；postCmd 從 1200us 飆到 1395-7700us
+  - **視覺嚴重扭曲變形** — fp16 表達範圍不夠 RIFE 中間 activation 的
+    動態範圍，跟 §J.3.e.Y 4Y.6 coopmat 試過的「**precision 70× regression**」
+    相同 root cause（記在 project_4Y6_coopmat_opt_in memory）。RIFE
+    inference 是 compute-bound (RTX 3060 SM 算力 dominant)，fp16 storage
+    + fp32 arithmetic 在 NV SSBO 上 driver 每次 load/store 都要 pack/unpack
+    fp16↔fp32，反而 +overhead
+  - **修**：`isFp16BlobEnabled()` lambda 條件翻回 `s != nullptr && s[0]
+    != '\0' && s[0] != '0'`（v1.4.61 原樣 opt-in），env=0/unset 預設
+    走 fp32 path
+  - **保留**：v1.4.60-64 所有 fp16 infrastructure（11 shader markers、
+    applyBlobMacros、ShaderKind::Fp32ToFp16Copy/Fp16ToFp32Copy、blob
+    alloc 條件 halve、runInferenceGpuFlow boundary dispatch）。env=1
+    explicit opt-in 仍能啟用，給未來 RIFE-S 或更輕 model 用
+  - **這 turn 走 fp16 走錯了**：原本 plan 假設 RIFE memory-bound，
+    fp16 應該降 latency。實測證明 RIFE 在 RTX 3060 Laptop 上 compute-bound
+    + 模型對 fp16 precision 太敏感，從 §J.3.e.Y 4Y.6 coopmat 結果就該
+    預料到。回頭路徑：
+    1. 接受 v1.4.59 baseline (50-80 fps) 作為現狀
+    2. 縮 inferDim 256→192（0 code change，user UI 調 setting）
+    3. RIFE-S 更輕 model（model 換掉，~3-5 commits）
+    4. NV-OF flow + cheap warp 替代 RIFE（既有 infra，2-3 commits，
+       quality 跌但 chain ~3ms）
+
 ### v1.4.64 ship 帶走的條目（2026-05-15, post v1.4.63 vkfruc bilinear hotfix）
 
 - 🔴🔴 **§J.3.e.Y 5Y hotfix — applyBlobMacros 插錯位置（v1.4.60-63 全壞）**

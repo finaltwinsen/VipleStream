@@ -401,15 +401,26 @@ std::string applyBlobMacros(const char* src, bool useFp16Blob)
 // (applyBlobMacros at shader compile time, blob alloc, boundary
 // dispatch) read the same value, guaranteed consistent within a process.
 //
-// v1.4.62 — default flipped to ON (mirror v1.4.58 phase 2B default flip).
-// `unset` or any non-"0" string → true → fp16 storage with fp32 arithmetic.
-// Explicit opt-out via VIPLE_RIFE_VK_FP16=0 retained as bisect / driver
-// fallback to the v1.4.60 fp32 path (which is bit-identical to v1.4.59).
+// v1.4.65 — default flipped BACK to OFF after v1.4.64 hotfix surfaced
+// real fp16 behaviour on RTX 3060 Laptop + RIFE-v4.25-lite:
+//   • cmpCmd went 11ms (fp32 baseline v1.4.59) → 21-37ms (fp16 active).
+//     fp16 SSBO storage + fp32 arithmetic forces driver pack/unpack on
+//     every load/store; RIFE inference is compute-bound, not
+//     bandwidth-bound, so no gain materialised — pure overhead.
+//   • Visual output severely distorted — same precision regression that
+//     killed §J.3.e.Y 4Y.6 coopmat (70× SSIM loss noted in memory).
+//     RIFE activations carry wider dynamic range than fp16 can hold.
+//
+// Infrastructure (markers + applyBlobMacros + boundary shaders + blob
+// alloc gate + runInferenceGpuFlow dispatch) all retained for future
+// experimentation (e.g. RIFE-S or simpler model).  env=1 explicit
+// opt-in re-enables the path.  env=0 or unset → fp32 path bit-identical
+// to v1.4.59 (modulo the always-inert v1.4.60 macro-expansion pass).
 static bool isFp16BlobEnabled() {
     static const bool kEnabled = []{
         const char* s = std::getenv("VIPLE_RIFE_VK_FP16");
-        // unset / empty / any non-"0" → ON; explicit "0" → OFF.
-        return (s == nullptr || s[0] == '\0' || s[0] != '0');
+        // explicit non-"0" non-empty string → ON; unset/empty/"0" → OFF.
+        return (s != nullptr && s[0] != '\0' && s[0] != '0');
     }();
     return kEnabled;
 }
