@@ -118,6 +118,24 @@ struct Layer {
     int     fuseActKind  = -1;
     float   fuseActSlope = 0.0f;
 
+    // §J.3.e.Y 4Y.7 C.5 (v1.4.49) — Conv → BinaryOp(Add residual) →
+    // Activation triple fusion.  Set by analyzeFuseableConvAddAct() which
+    // runs AFTER C.1 Conv→Mul fusion.  When this Conv already carries
+    // C.1's fuseMulBetaBlob and is followed by BinOp(Add residual) +
+    // ReLU/LeakyReLU/Sigmoid pattern with single-consumer chain, all 3
+    // tail operations fold into the Conv shader epilogue:
+    //   1. Read `fuseAddResidualBlob` at (n, oy, ox), add to acc (binding 5).
+    //   2. Apply outer activation per fuseConvActKind/Slope.
+    // fuseMulOverrideOutput is updated to point at the Activation's
+    // output blob (was the BinOp(Mul) output before C.5).  BinaryOp(Add)
+    // and Activation both get isFusedAway=true.
+    //
+    // Distinct from fuseActKind/fuseActSlope above (which fuse activation
+    // into the BinaryOp shader's epilogue, NOT into Conv's).
+    QString fuseAddResidualBlob;     // "" = no residual fusion
+    int     fuseConvActKind  = 0;    // 0 = none, 1 = ReLU/LeakyReLU, 2 = Sigmoid
+    float   fuseConvActSlope = 0.0f;
+
     // §J.3.e.X Path β.9 Phase 2 (v1.4.42) — set by
     // analyzeTimestepDependency() once after parseParam.  True iff this
     // layer transitively reads `in2` (the timestep scalar): direct
