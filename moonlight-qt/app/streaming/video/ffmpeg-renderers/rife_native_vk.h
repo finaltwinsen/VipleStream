@@ -99,6 +99,19 @@ struct Layer {
     QString fuseMulBetaBlob;        // beta tensor blob name, or "" if no fusion
     QString fuseMulOverrideOutput;  // output blob name to write to (BinOp output)
     bool    isFusedAway = false;    // skip this layer's dispatch (fused into prior)
+
+    // §J.3.e.X Path β.9 Phase 2 (v1.4.42) — set by
+    // analyzeTimestepDependency() once after parseParam.  True iff this
+    // layer transitively reads `in2` (the timestep scalar): direct
+    // (rife.Warp 18 layers) or indirect via any blob that traces back to
+    // in2.  Front-end (dependsOnT==false) layers produce identical
+    // outputs for any timestep, so for TRIPLE 60→180 mode they can be
+    // run ONCE per source-frame-pair and their outputs cached, while
+    // back-end (dependsOnT==true) layers must re-run per output timestep.
+    // The actual front-end-cache + per-t-back-end runtime split is
+    // deferred to a follow-up — v1.4.42 just lands the analysis so the
+    // split point + live-set sizes can be measured on real models.
+    bool    dependsOnT = false;
 };
 
 enum class TensorDType : uint8_t {
@@ -132,6 +145,27 @@ struct Model {
 
     // Stats (filled by parseParam)
     std::unordered_map<OpKind, int> opCounts;
+
+    // §J.3.e.X Path β.9 Phase 2 (v1.4.42) — index of the first t-dependent
+    // layer in `layers`, i.e. the boundary between the t-agnostic
+    // front-end (layers [0..timestepDepLayerStart-1]) and the
+    // t-dependent back-end (layers [timestepDepLayerStart..end]).
+    // -1 = analysis hasn't run yet or no t-dependent layer found
+    // (the latter is impossible for a valid RIFE model because rife.Warp
+    // always reads timestep — only seen when the .param has no Input
+    // named "in2" at all).  Set by analyzeTimestepDependency() at end
+    // of parseParam().
+    int                timestepDepLayerStart = -1;
+
+    // §J.3.e.X Path β.9 Phase 2 (v1.4.42) — blobs whose value is written
+    // by front-end (layers before timestepDepLayerStart) AND read by
+    // back-end (layers ≥ timestepDepLayerStart).  These are the blobs
+    // whose data needs to be cached across the boundary so back-end can
+    // re-run with a fresh timestep without re-doing the front-end work.
+    // Filled by analyzeTimestepDependency() after dependsOnT marks.
+    // Stored as blob names; sizes are looked up from the executor's
+    // shape map at run time.
+    std::vector<QString> frontEndCacheBlobs;
 
     // Filled by loadWeights: heap-resident copy of flownet.bin.
     // Indices into this blob come from `tensors[i].byteOffset`.

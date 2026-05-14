@@ -15,6 +15,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <unordered_map>
+#include <unordered_set>
 // Windows.h (pulled in transitively by vulkan.h on Win32) defines min/max
 // macros that break std::max / std::numeric_limits<>::max() in this TU.
 #ifdef _WIN32
@@ -227,6 +229,93 @@ bool parseParam(const QString& path, Model& out) {
                     "[VIPLE-RIFE-VK] parseParam: parsed %zu layers but header says %d",
                     out.layers.size(), out.layerCount);
     }
+
+    // §J.3.e.X Path β.9 Phase 2 (v1.4.42) — analyze timestep (in2)
+    // dependency to find the front-end/back-end split point.  Runs once
+    // per model load; results stored in Layer.dependsOnT and
+    // Model.timestepDepLayerStart / Model.frontEndCacheBlobs.
+    //
+    // Algorithm:
+    //   1. Forward sweep marking blobs that transitively depend on "in2".
+    //      Seed set = {"in2"}.  For each non-input layer in declaration
+    //      order, if any input is in the t-dep blob set → mark layer
+    //      dependsOnT=true and add ALL its outputs to the t-dep blob set.
+    //   2. Boundary = first layer with dependsOnT==true.
+    //   3. Live-set (frontEndCacheBlobs) = blobs whose last front-end
+    //      write is later read by a back-end layer.  Track lastWrite[blob]
+    //      while iterating front-end; then scan back-end inputs.
+    //
+    // Note: in a fused pipeline (Conv→Mul fold marks isFusedAway), the
+    // fused-away BinOp's output blob is still produced by its preceding
+    // Conv (via fuseMulOverrideOutput), so liveness for that blob is
+    // still correct — we treat the Conv as also writing the BinOp's
+    // output.  analyzeFuseableConvBinOps() runs AFTER parseParam in
+    // RifeNativeExecutor::initialize, so this analysis sees the
+    // pre-fusion graph.  That's fine: the dep graph is identical pre
+    // and post fusion (fusion only changes how the data is computed,
+    // not which blobs depend on which).
+    {
+        std::unordered_set<QString> tDepBlobs = { QStringLiteral("in2") };
+        std::unordered_map<QString, int> lastFrontEndWrite; // blob → layer idx
+        int firstTLayer = -1;
+
+        for (size_t i = 0; i < out.layers.size(); ++i) {
+            Layer& L = out.layers[i];
+            // Input/MemoryData layers don't read inputs — skip the read
+            // check but still record their outputs as writes.  (Input
+            // "in2" needs to be seeded into tDepBlobs from the start,
+            // which we did above with the explicit insert.)
+            bool readsTDep = false;
+            if (L.kind != OpKind::Input && L.kind != OpKind::MemoryData) {
+                for (const QString& in : L.inputs) {
+                    if (tDepBlobs.count(in)) { readsTDep = true; break; }
+                }
+            }
+            if (readsTDep) {
+                L.dependsOnT = true;
+                for (const QString& outName : L.outputs) {
+                    tDepBlobs.insert(outName);
+                }
+                if (firstTLayer < 0) firstTLayer = (int)i;
+            } else {
+                // Front-end layer — track its writes for live-set analysis
+                for (const QString& outName : L.outputs) {
+                    lastFrontEndWrite[outName] = (int)i;
+                }
+            }
+        }
+
+        out.timestepDepLayerStart = firstTLayer;
+
+        // Live-set: any blob that has a front-end last-write AND is read
+        // by some back-end layer.
+        std::unordered_set<QString> aliveAtBoundary;
+        if (firstTLayer >= 0) {
+            for (size_t i = (size_t)firstTLayer; i < out.layers.size(); ++i) {
+                const Layer& L = out.layers[i];
+                for (const QString& in : L.inputs) {
+                    if (lastFrontEndWrite.count(in)) {
+                        aliveAtBoundary.insert(in);
+                    }
+                }
+            }
+        }
+        out.frontEndCacheBlobs.assign(aliveAtBoundary.begin(), aliveAtBoundary.end());
+        std::sort(out.frontEndCacheBlobs.begin(), out.frontEndCacheBlobs.end());
+
+        int tDepLayerCount = 0;
+        for (const Layer& L : out.layers) if (L.dependsOnT) ++tDepLayerCount;
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-RIFE-VK] β.9 Phase 2 t-dep analysis: split@%d/%zu "
+            "(front-end %d layers, back-end %d layers); "
+            "live-set %zu blobs cross boundary",
+            out.timestepDepLayerStart, out.layers.size(),
+            out.timestepDepLayerStart < 0 ? (int)out.layers.size() : out.timestepDepLayerStart,
+            tDepLayerCount,
+            out.frontEndCacheBlobs.size());
+    }
+
     return true;
 }
 

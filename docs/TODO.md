@@ -21,7 +21,7 @@
 | **Active (post-v1.4.12)** | **§M.2** Phase 2 雙 user 並發 streaming 驗測 | Ubuntu VM 上 per-user systemd + Xdummy + PipeWire 端到端跑通；NVENC 並發等實體機到位。等 §M.1 (v1.4.12) 取得使用者實測 sign-off 後開工 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Active** | **§J.3.e** SW Vulkan path 持續優化 | 1080p120 × 3 codec 全 PASS；4K AV1 SSE2 後 62→76fps；4K H.264/HEVC decoder-bound（CPU 上限） |
-| **Active (β.9 part 2 post-v1.4.6)** | **§J.3.e.X Path β.9** TRIPLE 60→180 graph-executor split | β.9 Phase 1 (互斥鎖解除 + 2× RIFE inference chain) 已 ship in v1.4.6 (99f86b5)；剩 β.9 Phase 2 — graph executor timestep-shared 前段 + timestep-dependent 後段 split 把 chain × 2 從 200% 降到 ~130%，2-3 天工程，使 chain @ 256x128 fit 60fps server 16.7ms slot |
+| ~~**Active (β.9 part 2 post-v1.4.6)**~~ ❌ **NEGATIVE RESULT v1.4.42** | **§J.3.e.X Path β.9** TRIPLE 60→180 graph-executor split | β.9 Phase 1 (互斥鎖解除 + 2× RIFE inference chain) 已 ship in v1.4.6 (99f86b5)。β.9 Phase 2 (graph executor t-shared front-end + t-dep back-end split) 在 v1.4.42 加入 t-dependency analysis (parseParam 後 BFS mark Layer.dependsOnT + Model.timestepDepLayerStart + frontEndCacheBlobs) 並實測 — **split@48/389** (front-end 12%, back-end 84%)。算盤: chain×2 = 200% baseline → split = 12%×1 + 84%×2 = **180%** (只省 20%)，加上 live-set 78 blobs ≈ 78+ MB GPU cache 開銷 + 400 LOC Vulkan/buffer refactor 風險。**ROI 太低，full split implementation 不做。** Analysis 數據保留在 `parseParam` log line `[VIPLE-RIFE-VK] β.9 Phase 2 t-dep analysis: split@N/M` 供未來模型版本變動時重新評估。要拿到原 plan 的 130% 目標需要 RIFE-v4.25-lite 內部結構翻新（讓 in2 propagation 延後到大部分 flow extraction 之後），那不是執行器可解決的。|
 | **Active (β.10 post-ship)** | **§J.3.e.X Path β.10** Linux / AMD / Intel 平台覆蓋 | Path β / NVOF 在 Ubuntu noble compile + link 已通過 (v1.4.0 §K.X 對齊)；待 native runtime smoke + AMD/Intel coopmat fallback 驗測 |
 | **Maintenance** | **§B / §B-NVOF / §B2** 自家 ME→warp→blend pipeline | A' 修完 (luma + range + consensus-max) 從 0% 推到 7-23% warp ratio；UI 整合 + Phase 7E 都 ship；**Path B 全套不做**（ceiling ~30% 跟 ML 60-80% 沒法比）；現狀作 Linux/AMD/Intel fallback 已堪用 |
 | **HW-pending** | **§I.D** Android Vulkan FRUC async compute | D.2.0–D.2.5 已 ship + Pixel 5 verify；剩自然 45fps→90Hz ideal 1:2 比例 — Pixel 5 panel 鎖 60/90Hz、GameManagerService 鎖 60fps，需 LTPO panel hw 才能驗 |
@@ -103,6 +103,25 @@
 - ❌ **§J.3.e.2.i.9** kFrucFramesInFlight 2→4 bump — v1.4.2 (234d2aa) 走錯方向。在 v1.4.8 (6b9bb89) revert
 - ❌ **§J.3.e.2.i.10d** extra_hw_frames=8 (Round 4) — pool size 不是 dominant bottleneck，Round 5 確認後 revert 回 1
 - ❌ **§N.client.connection-cache** moonlight-qt FileTransferClient `ConnectionCacheExpiryTimeoutSecondsAttribute=0` — 仿照 NvHTTP 設這個 attribute（NvHTTP 是 GFE-compat 用），在 Sunshine + Qt 6.10 環境下反而讓第一次 poll 直接 hang 15s 被 watchdog 砍掉。已 revert，改在每次 transfer 結束後 `clearAccessCache()` 處理半關閉 socket 重用問題
+- ❌ **§J.3.e.X Path β.9 Phase 2** graph executor split — v1.4.42 加 t-dependency analysis (Layer.dependsOnT + Model.timestepDepLayerStart + frontEndCacheBlobs) 實測 RIFE-v4.25-lite 模型 **split@48/389** (front-end 12%, back-end 84%); chain×2 = 200% → split = 12%×1 + 84%×2 = **180%** (只省 20%)，跟原 plan 130% 目標差很多，加上 live-set 78 blobs ≈ 78+ MB cache 開銷 + 400 LOC refactor 風險 = **ROI 太低不做**。Analysis logging 保留供未來模型版本評估。
+
+### v1.4.42 ship 帶走的條目（2026-05-14, same-day v1.4.41 follow-up）
+
+主軸：**§N.5.bug Scenario A diagnostic instrumentation + §J.3.e.X Path β.9
+Phase 2 t-dep analysis (logging only)**.
+
+- ✅ **§N.5.bug Scenario A diagnostic** — `Sunshine/src/nvhttp.cpp` `xfer_result` /
+  `xfer_blob_post` / `xfer_progress` 3 handlers 加 try-catch ENTER/EXIT/EXCEPTION
+  log wrappers (匹配既有 `xfer_poll` / `xfer_blob_get` pattern)。`xfer_blob_post`
+  chunk 迴圈加 per-MB progress log，下次 Android Pixel client 端 SSL
+  `TLSV1_ALERT_INTERNAL_ERROR` 觸發時 server log 可看到 alert 是 request 起
+  前 / chunk loop 中 (第幾 MB) / finalize 後哪一段送出。不需要 user 操作驗證
+  (compile pass = primary verify)。
+- ✅ **§J.3.e.X Path β.9 Phase 2 t-dep analysis logging** — `rife_native_vk.{h,cpp}`
+  加 `Layer.dependsOnT` + `Model.timestepDepLayerStart` + `Model.frontEndCacheBlobs`
+  + BFS-based analyzeTimestepDependency() at end of parseParam。實測 RIFE-v4.25-lite
+  split@48/389 + live-set 78 blobs，**負面結果**(見 negative-result section 上方)，
+  full split implementation 不做。
 
 ### v1.4.41 ship 帶走的條目（2026-05-14, same day as v1.4.40 follow-up）
 
