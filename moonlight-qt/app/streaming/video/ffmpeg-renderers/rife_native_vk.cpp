@@ -341,16 +341,63 @@ bool parseParam(const QString& path, Model& out) {
 // compile_spirv_module turns it into SPIR-V at runtime.  Future phase
 // will switch to glslangValidator at build time + embedded SPIR-V to
 // cut the runtime ncnn dependency.
+
+// §J.3.e.Y 5Y (v1.4.60) — BLOB_T / BLOB_R / BLOB_W macro injection
+// helper.  All 11 RIFE shaders below use these macros for their *blob*
+// SSBO bindings (intermediate activations) so we can switch blob storage
+// between fp32 and fp16 at pipeline-build time without source duplication.
+// Weight / bias / per-channel beta buffers stay fp32 (or fp16 for weight
+// which is already fp16 in SSBO via the §J.3.e.Y 4Y.1 weight-pack path).
+//
+// fp32 substitution (default in v1.4.60 — bit-identical fallback):
+//   BLOB_T     -> float
+//   BLOB_R(x)  -> (x)            // identity load
+//   BLOB_W(x)  -> (x)            // identity store
+//
+// fp16 substitution (v1.4.61 will wire env gate + Model::useFp16Blob):
+//   BLOB_T     -> float16_t      // requires GL_EXT_shader_16bit_storage
+//   BLOB_R(x)  -> float(x)       // upcast on load (arithmetic stays fp32)
+//   BLOB_W(x)  -> float16_t(x)   // downcast on store
+//
+// Injection happens immediately after the `#version` line.  The fp16
+// branch also injects `#extension GL_EXT_shader_16bit_storage` +
+// `GL_EXT_shader_explicit_arithmetic_types_float16` so each shader
+// doesn't need to declare them itself (some shaders already do — duplicate
+// `#extension` directives are harmless per GLSL spec §3.3).
+static std::string applyBlobMacros(const char* src, bool useFp16Blob)
+{
+    std::string s(src);
+    // Find end of first non-empty line (the `#version` line) so we
+    // inject macros right after.  Defensive: if no newline, append at
+    // end — shouldn't happen in practice as every shader starts with
+    // "#version 450\n".
+    size_t pos = s.find('\n');
+    if (pos == std::string::npos) return s;
+    pos += 1;  // insert *after* the newline
+    const char* fp32Block =
+        "#define BLOB_T  float\n"
+        "#define BLOB_R(x) (x)\n"
+        "#define BLOB_W(x) (x)\n";
+    const char* fp16Block =
+        "#extension GL_EXT_shader_16bit_storage              : require\n"
+        "#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require\n"
+        "#define BLOB_T  float16_t\n"
+        "#define BLOB_R(x) float(x)\n"
+        "#define BLOB_W(x) float16_t(x)\n";
+    s.insert(pos, useFp16Blob ? fp16Block : fp32Block);
+    return s;
+}
+
 static const char* kConv2DShaderGlsl = R"GLSL(
 #version 450
 #extension GL_EXT_shader_16bit_storage              : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer InputBuf  { float     in_buf[];  };
+layout(set = 0, binding = 0) readonly buffer InputBuf  { BLOB_T    in_buf[];  };
 layout(set = 0, binding = 1) readonly buffer WeightBuf { float16_t w_buf[];   };
 layout(set = 0, binding = 2) readonly buffer BiasBuf   { float     bias_buf[]; };
-layout(set = 0, binding = 3) writeonly buffer OutputBuf { float    out_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { BLOB_T   out_buf[]; };
 // §J.3.e.Y 4Y.7 C.1 — beta_buf[c] = per-channel scale.  When
 // hasFusedBeta != 0, epilogue multiplies acc by beta_buf[n] before
 // storing.  Caller passes an arbitrary placeholder buffer when
@@ -358,7 +405,7 @@ layout(set = 0, binding = 3) writeonly buffer OutputBuf { float    out_buf[]; };
 layout(set = 0, binding = 4) readonly buffer BetaBuf   { float     beta_buf[]; };
 // §J.3.e.Y 4Y.7 C.5 — residual_buf for Conv → BinOp(Add) → Act triple fusion.
 // Caller passes placeholder when hasFusedAdd == 0; shader only reads when nonzero.
-layout(set = 0, binding = 5) readonly buffer ResidualBuf { float    residual_buf[]; };
+layout(set = 0, binding = 5) readonly buffer ResidualBuf { BLOB_T   residual_buf[]; };
 
 layout(push_constant) uniform PC {
     ivec4 inDims;     // (inW, inH, inC, hasBias)
@@ -408,7 +455,7 @@ void main() {
                 int ix = ox * stride + kx - pad;
                 if (ix < 0 || ix >= inW) continue;
                 float wv = float(w_buf[wChanBase + ky * wRowStride + kx]);
-                float iv = in_buf[inChanBase + iy * inW + ix];
+                float iv = BLOB_R(in_buf[inChanBase + iy * inW + ix]);
                 acc += wv * iv;
             }
         }
@@ -423,7 +470,7 @@ void main() {
     }
     // §J.3.e.Y 4Y.7 C.5 — fused residual Add + outer Activation.
     if (pc.hasFusedAdd != 0) {
-        acc += residual_buf[(n * outH + oy) * outW + ox];
+        acc += BLOB_R(residual_buf[(n * outH + oy) * outW + ox]);
     }
     if (pc.fuseConvActKind == 1) {
         acc = max(acc, pc.fuseConvActSlope * acc);
@@ -431,7 +478,7 @@ void main() {
     else if (pc.fuseConvActKind == 2) {
         acc = 1.0 / (1.0 + exp(-acc));
     }
-    out_buf[(n * outH + oy) * outW + ox] = acc;
+    out_buf[(n * outH + oy) * outW + ox] = BLOB_W(acc);
 }
 )GLSL";
 
@@ -475,16 +522,16 @@ static const char* kConv2D_3x3_s1_ShaderGlsl = R"GLSL(
 
 layout(local_size_x = TILE_W, local_size_y = TILE_H, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly  buffer InputBuf  { float     in_buf[];  };
+layout(set = 0, binding = 0) readonly  buffer InputBuf  { BLOB_T    in_buf[];  };
 layout(set = 0, binding = 1) readonly  buffer WeightBuf { float16_t w_buf[];   };
 layout(set = 0, binding = 2) readonly  buffer BiasBuf   { float     bias_buf[]; };
-layout(set = 0, binding = 3) writeonly buffer OutputBuf { float     out_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { BLOB_T    out_buf[]; };
 // §J.3.e.Y 4Y.7 C.1 — beta_buf binding for Conv→Mul fusion (see Conv2D shader).
 layout(set = 0, binding = 4) readonly  buffer BetaBuf   { float     beta_buf[]; };
 // §J.3.e.Y 4Y.7 C.5 — residual_buf binding for Conv → BinOp(Add) → Act
 // triple fusion.  Caller passes any placeholder buffer when hasFusedAdd == 0;
 // shader only reads when hasFusedAdd != 0.
-layout(set = 0, binding = 5) readonly  buffer ResidualBuf { float   residual_buf[]; };
+layout(set = 0, binding = 5) readonly  buffer ResidualBuf { BLOB_T  residual_buf[]; };
 
 layout(push_constant) uniform PC {
     ivec4 inDims;     // (inW, inH, inC, hasBias)
@@ -538,7 +585,7 @@ void main() {
             int ix = tile_x_base + lx;
             float v = 0.0;
             if (ix >= 0 && ix < inW && iy >= 0 && iy < inH) {
-                v = in_buf[in_chan_base + iy * inW + ix];
+                v = BLOB_R(in_buf[in_chan_base + iy * inW + ix]);
             }
             tile[idx_a] = v;
         }
@@ -549,7 +596,7 @@ void main() {
             int ix = tile_x_base + lx;
             float v = 0.0;
             if (ix >= 0 && ix < inW && iy >= 0 && iy < inH) {
-                v = in_buf[in_chan_base + iy * inW + ix];
+                v = BLOB_R(in_buf[in_chan_base + iy * inW + ix]);
             }
             tile[idx_b] = v;
         }
@@ -597,7 +644,7 @@ void main() {
         }
         // §J.3.e.Y 4Y.7 C.5 — fused residual Add + outer Activation.
         if (pc.hasFusedAdd != 0) {
-            acc += residual_buf[(n * outH + oy) * outW + ox];
+            acc += BLOB_R(residual_buf[(n * outH + oy) * outW + ox]);
         }
         if (pc.fuseConvActKind == 1) {
             // ReLU / LeakyReLU (slope 0 = pure ReLU)
@@ -606,7 +653,7 @@ void main() {
         else if (pc.fuseConvActKind == 2) {
             acc = 1.0 / (1.0 + exp(-acc));
         }
-        out_buf[(n * outH + oy) * outW + ox] = acc;
+        out_buf[(n * outH + oy) * outW + ox] = BLOB_W(acc);
     }
 }
 )GLSL";
@@ -644,14 +691,14 @@ static const char* kConv2D_3x3_s2_ShaderGlsl = R"GLSL(
 
 layout(local_size_x = TILE_W, local_size_y = TILE_H, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly  buffer InputBuf  { float     in_buf[];  };
+layout(set = 0, binding = 0) readonly  buffer InputBuf  { BLOB_T    in_buf[];  };
 layout(set = 0, binding = 1) readonly  buffer WeightBuf { float16_t w_buf[];   };
 layout(set = 0, binding = 2) readonly  buffer BiasBuf   { float     bias_buf[]; };
-layout(set = 0, binding = 3) writeonly buffer OutputBuf { float     out_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { BLOB_T    out_buf[]; };
 // §J.3.e.Y 4Y.7 C.1 — beta_buf binding for Conv→Mul fusion (see Conv2D shader).
 layout(set = 0, binding = 4) readonly  buffer BetaBuf   { float     beta_buf[]; };
 // §J.3.e.Y 4Y.7 C.5 — residual_buf binding for Conv → Add → Act triple fusion.
-layout(set = 0, binding = 5) readonly  buffer ResidualBuf { float    residual_buf[]; };
+layout(set = 0, binding = 5) readonly  buffer ResidualBuf { BLOB_T   residual_buf[]; };
 
 layout(push_constant) uniform PC {
     ivec4 inDims;     // (inW, inH, inC, hasBias)
@@ -706,7 +753,7 @@ void main() {
                 int ix = tile_x_base + lx;
                 float v = 0.0;
                 if (ix >= 0 && ix < inW && iy >= 0 && iy < inH) {
-                    v = in_buf[in_chan_base + iy * inW + ix];
+                    v = BLOB_R(in_buf[in_chan_base + iy * inW + ix]);
                 }
                 tile[idx] = v;
             }
@@ -759,7 +806,7 @@ void main() {
         }
         // §J.3.e.Y 4Y.7 C.5 — fused residual Add + outer Activation.
         if (pc.hasFusedAdd != 0) {
-            acc += residual_buf[(n * outH + oy) * outW + ox];
+            acc += BLOB_R(residual_buf[(n * outH + oy) * outW + ox]);
         }
         if (pc.fuseConvActKind == 1) {
             acc = max(acc, pc.fuseConvActSlope * acc);
@@ -767,7 +814,7 @@ void main() {
         else if (pc.fuseConvActKind == 2) {
             acc = 1.0 / (1.0 + exp(-acc));
         }
-        out_buf[(n * outH + oy) * outW + ox] = acc;
+        out_buf[(n * outH + oy) * outW + ox] = BLOB_W(acc);
     }
 }
 )GLSL";
@@ -804,9 +851,9 @@ static const char* kBinaryOpShaderGlsl = R"GLSL(
 #version 450
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly  buffer InA { float a_buf[]; };
-layout(set = 0, binding = 1) readonly  buffer InB { float b_buf[]; };
-layout(set = 0, binding = 2) writeonly buffer Out { float y_buf[]; };
+layout(set = 0, binding = 0) readonly  buffer InA { BLOB_T a_buf[]; };
+layout(set = 0, binding = 1) readonly  buffer InB { BLOB_T b_buf[]; };
+layout(set = 0, binding = 2) writeonly buffer Out { BLOB_T y_buf[]; };
 
 // §J.3.e.Y 4Y.7 C.2 — push constant carries optional trailing-Activation
 // epilogue params.  When fuse_act_kind == -1 (default for standalone
@@ -852,24 +899,24 @@ float apply_act(float x) {
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.count) return;
-    float aa = a_buf[i];
+    float aa = BLOB_R(a_buf[i]);
     float bb;
     if (pc.mode == 2) {
         bb = pc.scalar_b;
     } else if (pc.mode == 1) {
         // channel broadcast: a is (C, H, W), b is (C, 1, 1)
-        bb = b_buf[(i / pc.hw) % pc.channels];
+        bb = BLOB_R(b_buf[(i / pc.hw) % pc.channels]);
     } else if (pc.mode == 3) {
         // plane broadcast: a is (C, H, W), b is (1, H, W)
-        bb = b_buf[i % pc.hw];
+        bb = BLOB_R(b_buf[i % pc.hw]);
     } else {
-        bb = b_buf[i];
+        bb = BLOB_R(b_buf[i]);
     }
     float y = apply_op(aa, bb);
     if (pc.fuse_act_kind >= 0) {
         y = apply_act(y);
     }
-    y_buf[i] = y;
+    y_buf[i] = BLOB_W(y);
 }
 )GLSL";
 
@@ -899,8 +946,8 @@ static const char* kActivationShaderGlsl = R"GLSL(
 #version 450
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly  buffer InBuf  { float in_buf[];  };
-layout(set = 0, binding = 1) writeonly buffer OutBuf { float out_buf[]; };
+layout(set = 0, binding = 0) readonly  buffer InBuf  { BLOB_T in_buf[];  };
+layout(set = 0, binding = 1) writeonly buffer OutBuf { BLOB_T out_buf[]; };
 
 layout(push_constant) uniform PC {
     uint  count;
@@ -911,7 +958,7 @@ layout(push_constant) uniform PC {
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.count) return;
-    float x = in_buf[i];
+    float x = BLOB_R(in_buf[i]);
     float y;
     if (pc.actType == 0) {
         y = (x < 0.0) ? x * pc.slope : x;
@@ -920,7 +967,7 @@ void main() {
     } else {
         y = x;
     }
-    out_buf[i] = y;
+    out_buf[i] = BLOB_W(y);
 }
 )GLSL";
 
@@ -949,8 +996,8 @@ const char* getActivationShaderGlsl() {
 static const char* kCopyShaderGlsl = R"GLSL(
 #version 450
 layout(local_size_x = 64) in;
-layout(set = 0, binding = 0) readonly  buffer InBuf  { float in_buf[];  };
-layout(set = 0, binding = 1) writeonly buffer OutBuf { float out_buf[]; };
+layout(set = 0, binding = 0) readonly  buffer InBuf  { BLOB_T in_buf[];  };
+layout(set = 0, binding = 1) writeonly buffer OutBuf { BLOB_T out_buf[]; };
 layout(push_constant) uniform PC {
     uint count;
     uint srcOffset;
@@ -959,7 +1006,7 @@ layout(push_constant) uniform PC {
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.count) return;
-    out_buf[pc.dstOffset + i] = in_buf[pc.srcOffset + i];
+    out_buf[pc.dstOffset + i] = BLOB_W(BLOB_R(in_buf[pc.srcOffset + i]));
 }
 )GLSL";
 const char* getCopyShaderGlsl() { return kCopyShaderGlsl; }
@@ -971,8 +1018,8 @@ const char* getCopyShaderGlsl() { return kCopyShaderGlsl; }
 static const char* kPixelShuffleShaderGlsl = R"GLSL(
 #version 450
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-layout(set = 0, binding = 0) readonly  buffer InBuf  { float in_buf[];  };
-layout(set = 0, binding = 1) writeonly buffer OutBuf { float out_buf[]; };
+layout(set = 0, binding = 0) readonly  buffer InBuf  { BLOB_T in_buf[];  };
+layout(set = 0, binding = 1) writeonly buffer OutBuf { BLOB_T out_buf[]; };
 layout(push_constant) uniform PC {
     int inH;
     int inW;
@@ -989,8 +1036,8 @@ void main() {
     int ic = oc * (pc.r * pc.r) + (oh % pc.r) * pc.r + (ow % pc.r);
     int ih = oh / pc.r;
     int iw = ow / pc.r;
-    float v = in_buf[(ic * pc.inH + ih) * pc.inW + iw];
-    out_buf[(oc * outH + oh) * outW + ow] = v;
+    float v = BLOB_R(in_buf[(ic * pc.inH + ih) * pc.inW + iw]);
+    out_buf[(oc * outH + oh) * outW + ow] = BLOB_W(v);
 }
 )GLSL";
 const char* getPixelShuffleShaderGlsl() { return kPixelShuffleShaderGlsl; }
@@ -1001,8 +1048,8 @@ const char* getPixelShuffleShaderGlsl() { return kPixelShuffleShaderGlsl; }
 static const char* kInterpBilinearShaderGlsl = R"GLSL(
 #version 450
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-layout(set = 0, binding = 0) readonly  buffer InBuf  { float in_buf[];  };
-layout(set = 0, binding = 1) writeonly buffer OutBuf { float out_buf[]; };
+layout(set = 0, binding = 0) readonly  buffer InBuf  { BLOB_T in_buf[];  };
+layout(set = 0, binding = 1) writeonly buffer OutBuf { BLOB_T out_buf[]; };
 layout(push_constant) uniform PC {
     int   inH;
     int   inW;
@@ -1032,15 +1079,15 @@ void main() {
     iw1 = clamp(iw1, 0, pc.inW - 1);
 
     int planeBase = c * pc.inH * pc.inW;
-    float v00 = in_buf[planeBase + ih0 * pc.inW + iw0];
-    float v01 = in_buf[planeBase + ih0 * pc.inW + iw1];
-    float v10 = in_buf[planeBase + ih1 * pc.inW + iw0];
-    float v11 = in_buf[planeBase + ih1 * pc.inW + iw1];
+    float v00 = BLOB_R(in_buf[planeBase + ih0 * pc.inW + iw0]);
+    float v01 = BLOB_R(in_buf[planeBase + ih0 * pc.inW + iw1]);
+    float v10 = BLOB_R(in_buf[planeBase + ih1 * pc.inW + iw0]);
+    float v11 = BLOB_R(in_buf[planeBase + ih1 * pc.inW + iw1]);
     float v0  = v00 * (1.0 - fw) + v01 * fw;
     float v1  = v10 * (1.0 - fw) + v11 * fw;
     float v   = v0  * (1.0 - fh) + v1  * fh;
 
-    out_buf[(c * pc.outH + oh) * pc.outW + ow] = v;
+    out_buf[(c * pc.outH + oh) * pc.outW + ow] = BLOB_W(v);
 }
 )GLSL";
 const char* getInterpBilinearShaderGlsl() { return kInterpBilinearShaderGlsl; }
@@ -1050,9 +1097,9 @@ const char* getInterpBilinearShaderGlsl() { return kInterpBilinearShaderGlsl; }
 static const char* kEltwiseShaderGlsl = R"GLSL(
 #version 450
 layout(local_size_x = 64) in;
-layout(set = 0, binding = 0) readonly  buffer InA  { float a_buf[]; };
-layout(set = 0, binding = 1) readonly  buffer InB  { float b_buf[]; };
-layout(set = 0, binding = 2) writeonly buffer Out  { float y_buf[]; };
+layout(set = 0, binding = 0) readonly  buffer InA  { BLOB_T a_buf[]; };
+layout(set = 0, binding = 1) readonly  buffer InB  { BLOB_T b_buf[]; };
+layout(set = 0, binding = 2) writeonly buffer Out  { BLOB_T y_buf[]; };
 layout(push_constant) uniform PC {
     uint  count;
     float c0;
@@ -1061,7 +1108,7 @@ layout(push_constant) uniform PC {
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.count) return;
-    y_buf[i] = pc.c0 * a_buf[i] + pc.c1 * b_buf[i];
+    y_buf[i] = BLOB_W(pc.c0 * BLOB_R(a_buf[i]) + pc.c1 * BLOB_R(b_buf[i]));
 }
 )GLSL";
 const char* getEltwiseShaderGlsl() { return kEltwiseShaderGlsl; }
@@ -1093,10 +1140,10 @@ static const char* kDeconv2DShaderGlsl = R"GLSL(
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer InputBuf  { float     in_buf[];   };
+layout(set = 0, binding = 0) readonly buffer InputBuf  { BLOB_T    in_buf[];   };
 layout(set = 0, binding = 1) readonly buffer WeightBuf { float16_t w_buf[];    };
 layout(set = 0, binding = 2) readonly buffer BiasBuf   { float     bias_buf[]; };
-layout(set = 0, binding = 3) writeonly buffer OutputBuf { float    out_buf[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { BLOB_T   out_buf[]; };
 
 layout(push_constant) uniform PC {
     ivec4 inDims;     // (inW, inH, inC, hasBias)
@@ -1148,13 +1195,13 @@ void main() {
                 int iw = iwNum / strd;
                 if (iw >= inW) continue;
                 float wv = float(w_buf[wChanBase + ky * kW + kx]);
-                float iv = in_buf[inChanBase + ih * inW + iw];
+                float iv = BLOB_R(in_buf[inChanBase + ih * inW + iw]);
                 acc += wv * iv;
             }
         }
     }
 
-    out_buf[(n * outH + oh) * outW + ow] = acc;
+    out_buf[(n * outH + oh) * outW + ow] = BLOB_W(acc);
 }
 )GLSL";
 
@@ -1187,9 +1234,9 @@ static const char* kRifeWarpShaderGlsl = R"GLSL(
 #version 450
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly  buffer ImageBuf { float img_buf[];  };
-layout(set = 0, binding = 1) readonly  buffer FlowBuf  { float flow_buf[]; };
-layout(set = 0, binding = 2) writeonly buffer OutBuf   { float out_buf[];  };
+layout(set = 0, binding = 0) readonly  buffer ImageBuf { BLOB_T img_buf[];  };
+layout(set = 0, binding = 1) readonly  buffer FlowBuf  { BLOB_T flow_buf[]; };
+layout(set = 0, binding = 2) writeonly buffer OutBuf   { BLOB_T out_buf[];  };
 
 layout(push_constant) uniform PC {
     int w;
@@ -1204,8 +1251,8 @@ void main() {
     if (gx >= pc.w || gy >= pc.h || gz >= pc.c) return;
 
     int hw = pc.h * pc.w;
-    float fx = flow_buf[0 * hw + gy * pc.w + gx];
-    float fy = flow_buf[1 * hw + gy * pc.w + gx];
+    float fx = BLOB_R(flow_buf[0 * hw + gy * pc.w + gx]);
+    float fy = BLOB_R(flow_buf[1 * hw + gy * pc.w + gx]);
 
     float sx = float(gx) + fx;
     float sy = float(gy) + fy;
@@ -1221,13 +1268,13 @@ void main() {
     float beta  = sy - float(y0);
 
     int planeBase = gz * hw;
-    float v0 = img_buf[planeBase + y0 * pc.w + x0];
-    float v1 = img_buf[planeBase + y0 * pc.w + x1];
-    float v2 = img_buf[planeBase + y1 * pc.w + x0];
-    float v3 = img_buf[planeBase + y1 * pc.w + x1];
+    float v0 = BLOB_R(img_buf[planeBase + y0 * pc.w + x0]);
+    float v1 = BLOB_R(img_buf[planeBase + y0 * pc.w + x1]);
+    float v2 = BLOB_R(img_buf[planeBase + y1 * pc.w + x0]);
+    float v3 = BLOB_R(img_buf[planeBase + y1 * pc.w + x1]);
     float v4 = v0 * (1.0 - alpha) + v1 * alpha;
     float v5 = v2 * (1.0 - alpha) + v3 * alpha;
-    out_buf[planeBase + gy * pc.w + gx] = v4 * (1.0 - beta) + v5 * beta;
+    out_buf[planeBase + gy * pc.w + gx] = BLOB_W(v4 * (1.0 - beta) + v5 * beta);
 }
 )GLSL";
 
@@ -2645,8 +2692,14 @@ bool runComputeOnce(const VulkanCtx& ctx, const RunComputeOptions& opts) {
         spirvPtr   = opts.spirv;
         spirvWords = opts.spirvWords;
     } else {
+        // §J.3.e.Y 5Y (v1.4.60) — same BLOB_T / BLOB_R / BLOB_W macro
+        // injection as buildPipelineCache; runComputeOnce is used by the
+        // standalone gpu-test harness (runConv2DGpuTest etc.) which feeds
+        // shader source through opts.shaderGlsl.  v1.4.60 fp32-only.
+        const std::string transformedSrc =
+            applyBlobMacros(opts.shaderGlsl, /*useFp16Blob*/ false);
         ncnn::Option opt;
-        int rc = ncnn::compile_spirv_module(opts.shaderGlsl, opt, spirvOwned);
+        int rc = ncnn::compile_spirv_module(transformedSrc.c_str(), opt, spirvOwned);
         if (rc != 0 || spirvOwned.empty()) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "[VIPLE-RIFE-VK] runComputeOnce: compile_spirv_module failed (rc=%d, spv_size=%zu)",
@@ -3054,8 +3107,17 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out,
             spirvPtr   = spec.spirvBin;
             spirvWords = spec.spirvWords;
         } else {
+            // §J.3.e.Y 5Y (v1.4.60) — inject BLOB_T / BLOB_R / BLOB_W
+            // macros after #version line so blob storage type can switch
+            // between fp32 and fp16 at compile time without source
+            // duplication.  v1.4.60 hard-codes useFp16Blob=false → fp32
+            // substitution (identity macros) → bit-identical to v1.4.59.
+            // v1.4.61 will wire the second arg to the env-gate-controlled
+            // Impl::useFp16Blob flag.
+            const std::string transformedSrc =
+                applyBlobMacros(spec.sourceFn(), /*useFp16Blob*/ false);
             ncnn::Option opt;
-            if (ncnn::compile_spirv_module(spec.sourceFn(), opt, spirvOwned) != 0
+            if (ncnn::compile_spirv_module(transformedSrc.c_str(), opt, spirvOwned) != 0
                 || spirvOwned.empty()) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                              "[VIPLE-RIFE-VK] PipelineCache: %s compile failed",
@@ -5106,8 +5168,12 @@ bool runConv2DGpuTest(const VulkanCtx& ctx,
     // ---- 3. Compile shader to SPIR-V ----
     std::vector<uint32_t> spirv;
     {
+        // §J.3.e.Y 5Y (v1.4.60) — fp32 macro injection (consistent with
+        // buildPipelineCache / runComputeOnce sites).
+        const std::string transformedSrc =
+            applyBlobMacros(getConv2DShaderGlsl(), /*useFp16Blob*/ false);
         ncnn::Option opt;
-        if (ncnn::compile_spirv_module(getConv2DShaderGlsl(), opt, spirv) != 0
+        if (ncnn::compile_spirv_module(transformedSrc.c_str(), opt, spirv) != 0
             || spirv.empty()) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "[VIPLE-RIFE-VK] GpuTest: compile_spirv_module failed "
@@ -5492,8 +5558,11 @@ bool runBinaryOpGpuTest(const VulkanCtx& ctx,
     // ---- 2. Compile shader ----
     std::vector<uint32_t> spirv;
     {
+        // §J.3.e.Y 5Y (v1.4.60) — fp32 macro injection.
+        const std::string transformedSrc =
+            applyBlobMacros(getBinaryOpShaderGlsl(), /*useFp16Blob*/ false);
         ncnn::Option opt;
-        if (ncnn::compile_spirv_module(getBinaryOpShaderGlsl(), opt, spirv) != 0
+        if (ncnn::compile_spirv_module(transformedSrc.c_str(), opt, spirv) != 0
             || spirv.empty()) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "[VIPLE-RIFE-VK] BinOpTest: compile_spirv_module failed");
@@ -5794,8 +5863,11 @@ bool runActivationGpuTest(const VulkanCtx& ctx,
 
     std::vector<uint32_t> spirv;
     {
+        // §J.3.e.Y 5Y (v1.4.60) — fp32 macro injection.
+        const std::string transformedSrc =
+            applyBlobMacros(getActivationShaderGlsl(), /*useFp16Blob*/ false);
         ncnn::Option opt;
-        if (ncnn::compile_spirv_module(getActivationShaderGlsl(), opt, spirv) != 0
+        if (ncnn::compile_spirv_module(transformedSrc.c_str(), opt, spirv) != 0
             || spirv.empty()) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "[VIPLE-RIFE-VK] ActTest: compile_spirv_module failed");

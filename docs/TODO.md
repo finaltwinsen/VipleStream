@@ -145,6 +145,44 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.60 ship 帶走的條目（2026-05-15, post v1.4.59 PHASE2B-PROF）
+
+- 🟡 **§J.3.e.Y 5Y fp16 path infrastructure（第一刀，staged）** — v1.4.59
+  PROF log 顯示 phase 2B cross-queue 沒平行 gain (parallel_saving 負 ~700us)，
+  真實 bottleneck 是 cmpCmd RIFE inference 自身 ~11ms steady，偶發 spike
+  13-19ms 超 60fps slot 16.7ms → server frame miss FIFO vsync slot →
+  display 落 80-90 fps。要砍 RIFE inference 自身 chain time 必須走 fp16
+  (Tensor Cores 砍 storage bandwidth 50%)。
+  - 由於 fp16 path 一次到位 risk 高（300+ LOC + 11 shader + GLSL compile
+    fail / SSBO binding type mismatch / VUID 各種錯），改成 **staged
+    2-commit approach**
+  - v1.4.60 = **infrastructure only**：純 macro substitution helper +
+    全 RIFE 11 shader 加 BLOB_T / BLOB_R / BLOB_W markers + pipeline build
+    hook + 3 個 standalone test compile site 也 hook
+  - rife_native_vk.cpp `applyBlobMacros(src, useFp16Blob)` helper：
+    在第一個 `\n` 後 (= `#version 450` 行結尾) inject `#define` block。
+    fp32 (default): `BLOB_T=float, BLOB_R(x)=(x), BLOB_W(x)=(x)`。
+    fp16 (v1.4.61 才啟用): `BLOB_T=float16_t, BLOB_R(x)=float(x),
+    BLOB_W(x)=float16_t(x)` + 2 個 `#extension` directive
+  - 11 RIFE shader sources 全加 markers：Conv2D / Conv2D_3x3_s1 /
+    Conv2D_3x3_s2 / Deconv2D / BinaryOp / Activation / Copy /
+    PixelShuffle / InterpBilinear / EltwiseSum / RifeWarp。skip
+    Conv2D_CoopMat (pre-compiled SPIR-V，不走 GLSL path)
+  - 對 weight/bias/beta 仍保 fp32 binding type；weight 已是 fp16 SSBO
+    (§J.3.e.Y 4Y.1 weight pack)
+  - 4 個 `compile_spirv_module` 呼叫站都 wrap `applyBlobMacros(..., false)`：
+    `buildPipelineCache`、`runComputeOnce` (gpu test 共用)、`runConv2DGpuTest`、
+    `runBinaryOpGpuTest`、`runActivationGpuTest`
+  - **v1.4.60 整 commit bit-identical to v1.4.59** — `useFp16Blob` hard
+    coded false，fp32 macro substitution 等同 identity，shader 二進位
+    產出跟 v1.4.59 一致（modulo ncnn glslang 解 `#define` 的 SPIR-V
+    canonicalisation 微差）
+  - v1.4.61 預計：env gate `VIPLE_RIFE_VK_FP16=1` 設 `Impl::useFp16Blob`、
+    blob alloc 改 fp16 size、2 個新 boundary conversion shader
+    (`Fp32ToFp16Copy` / `Fp16ToFp32Copy`)、`runInferenceGpuFlow` 入/出
+    boundary dispatch。Risk surface 縮到 blob alloc + boundary buffer
+    types
+
 ### v1.4.59 ship 帶走的條目（2026-05-15, post v1.4.58 default ON）
 
 - 🟡 **§J.3.e.2.i.10 Phase 2B GPU profiling** — phase2BActive 路徑下 cmd-buf
