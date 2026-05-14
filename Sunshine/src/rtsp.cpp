@@ -580,11 +580,9 @@ namespace rtsp_stream {
           i++;
         }
       }
-      // §M.1.f defensive fix — see remove() comment.  Mass-teardown path
-      // (server shutdown, all=true) should also release ownership.
-      if (_session_slots->empty()) {
-        proc::proc.clear_owner_uuid();
-      }
+      // §M.1.f race-condition — see remove() note.  Defensive auto-clear
+      // reverted; clear() runs during normal stream-setup cleanup of stale
+      // sessions and would wipe just-set owner_uuid.
     }
 
     /**
@@ -594,14 +592,19 @@ namespace rtsp_stream {
     void remove(const std::shared_ptr<stream::session_t> &session) {
       auto lg = _session_slots.lock();
       _session_slots->erase(session);
-      // §M.1.f defensive fix (2026-05-14) — when the last RTSP session ends
-      // (no /cancel ever received because of client crash / network drop /
-      // power-off), release the §M.1 ownership lock so the next /launch
-      // from any paired device is not blocked by a stale `_owner_uuid`.
-      // See process.h `clear_owner_uuid()` doc-comment.
-      if (_session_slots->empty()) {
-        proc::proc.clear_owner_uuid();
-      }
+      // §M.1.f race-condition note (2026-05-14):
+      // Earlier patch added `proc::proc.clear_owner_uuid()` here when slots
+      // dropped to 0, intending to cover client-crash / WiFi-drop paths
+      // where /cancel cannot be sent.  But evidence (host log 14:02:47
+      // launch → 14:02:50 release owner → 14:02:50 RTSP sessions actually
+      // insert) showed `clear()` and `remove()` both fire transiently
+      // during normal stream-setup teardown of stale prior sessions,
+      // wiping the *new* owner_uuid that was just set by /launch.
+      // Reverted; rely on client-side `shouldNotifyServerCancel` (always
+      // send /cancel on graceful exit) + existing proc.terminate() /
+      // proc.detach() in /cancel + /launch?takeover=1 handlers for normal
+      // cleanup.  Abnormal-disconnect coverage TBD via a timeout-based
+      // mechanism (TODO §M.1.f follow-up).
     }
 
     /**
