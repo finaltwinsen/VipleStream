@@ -364,7 +364,7 @@ bool parseParam(const QString& path, Model& out) {
 // `GL_EXT_shader_explicit_arithmetic_types_float16` so each shader
 // doesn't need to declare them itself (some shaders already do — duplicate
 // `#extension` directives are harmless per GLSL spec §3.3).
-static std::string applyBlobMacros(const char* src, bool useFp16Blob)
+std::string applyBlobMacros(const char* src, bool useFp16Blob)
 {
     std::string s(src);
     // Find end of first non-empty line (the `#version` line) so we

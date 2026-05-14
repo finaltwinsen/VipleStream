@@ -6025,9 +6025,18 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // = 28 bytes (5 ints + 2 floats) rounded to 32 for alignment, 2
     // storage buffer bindings (in / out).  Shader text comes from
     // rife_native_vk.cpp's getInterpBilinearShaderGlsl().
+    // §J.3.e.Y 5Y v1.4.63 — shader carries BLOB_T/R/W markers since
+    // v1.4.60; must wrap through applyBlobMacros before glslang.  Caller
+    // side (vkfruc) buffers are always fp32 (m_RifeDownPrev/Curr/Interp,
+    // m_FrucInterpRgbBuf) so pass useFp16Blob=false unconditionally; the
+    // fp32↔fp16 conversion lives inside the RIFE module's
+    // runInferenceGpuFlow boundary, not here.
     if (m_RifeNativeMode) {
+        const std::string bilinearSrc = viple::rife_native_vk::applyBlobMacros(
+            viple::rife_native_vk::getInterpBilinearShaderGlsl(),
+            /*useFp16Blob*/ false);
         if (!buildPipeline("RifeBilinear",
-                           viple::rife_native_vk::getInterpBilinearShaderGlsl(),
+                           bilinearSrc.c_str(),
                            2, 32,
                            m_RifeBilinearShaderMod, m_RifeBilinearDsl,
                            m_RifeBilinearPipeLay, m_RifeBilinearPipeline)) {

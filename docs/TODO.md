@@ -145,6 +145,27 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.63 ship 帶走的條目（2026-05-15, post v1.4.62 fp16 default ON）
+
+- 🔴 **§J.3.e.Y 5Y fp16 path hotfix — vkfruc.cpp 共用 shader BLOB_T 未展開**
+  v1.4.60 給 11 個 RIFE shader 加了 BLOB_T/R/W markers 但 vkfruc.cpp
+  自己 build `m_RifeBilinearPipeline` 共用 `getInterpBilinearShaderGlsl()`
+  的 source string，沒走 rife_native_vk 內部 `applyBlobMacros` 替換 →
+  glslang 看到 `BLOB_T` 未定義 → RifeBilinear compile fail → β.4 / β.5.1
+  path 全 disable → 使用者開 stream 看到 frame rate 暴跌（block-match
+  fallback）。本版 hotfix：
+  - `rife_native_vk.h` 公開 `applyBlobMacros(const char*, bool)` namespace
+    function（加 `<string>` include）
+  - `rife_native_vk.cpp` 移除 `static` 限定符，配合 header declaration
+  - `vkfruc.cpp:6030` build RifeBilinear 之前先呼叫
+    `viple::rife_native_vk::applyBlobMacros(src, /*useFp16Blob*/ false)`
+    產 fp32 expansion 再丟給 glslang。Caller-side buffer 永遠 fp32
+    (m_RifeDownPrev/Curr/Interp、m_FrucInterpRgbBuf)，fp32↔fp16 conversion
+    只在 RIFE module 內部 boundary 做
+  - Log 觀察：`[VIPLE-VKFRUC] §J.3.e.2.i.4 RifeBilinear: compile_spirv_module failed`
+    再加 `[VIPLE-VKFRUC-RIFE-β] init failed: bilinear pipeline missing`
+    重複多次 → 本版修
+
 ### v1.4.62 ship 帶走的條目（2026-05-15, post v1.4.61 fp16 env-opt-in）
 
 - 🟢 **§J.3.e.Y 5Y fp16 path 預設 ON** — flip `VIPLE_RIFE_VK_FP16` env

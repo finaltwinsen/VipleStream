@@ -38,6 +38,7 @@
 #include <unordered_map>
 #include <memory>
 #include <cstdint>
+#include <string>
 
 namespace viple::rife_native_vk {
 
@@ -387,6 +388,18 @@ bool runPixelShuffleGpuTest(const VulkanCtx& ctx,
 
 // Bilinear resize (Interp resize_type=2, align_corners=false).
 const char* getInterpBilinearShaderGlsl();
+
+// §J.3.e.Y 5Y v1.4.63 — public re-export of internal macro injection
+// helper.  RIFE shader sources (Conv2D/InterpBilinear/etc.) carry
+// BLOB_T / BLOB_R / BLOB_W markers since v1.4.60 to enable fp16 path
+// without source duplication; any external consumer (e.g. vkfruc.cpp's
+// caller-side bilinear DOWN/UP that reuses getInterpBilinearShaderGlsl)
+// MUST wrap the returned source through this helper before feeding to
+// glslang.  Pass useFp16Blob=false when the consuming buffers are fp32
+// (vkfruc's caller-side buffers are always fp32; the fp32↔fp16
+// conversion happens at the RIFE module boundary, not in caller-side
+// shaders).
+std::string applyBlobMacros(const char* src, bool useFp16Blob);
 void referenceInterpBilinear(const float* in, float* out,
                              int channels, int inH, int inW,
                              int outH, int outW);
