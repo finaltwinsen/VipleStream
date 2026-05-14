@@ -7232,6 +7232,13 @@ bool RifeNativeExecutor::runInference(const float* in0Data,
 
     for (const Layer& L : m_impl->model.layers) {
         if (L.kind == OpKind::Input || L.kind == OpKind::MemoryData) continue;
+        // §J.3.e.Y 4Y.7 C.4 — skip the per-layer compute barrier when the
+        // layer is fused-away (C.1 BinOp / C.2 Activation / C.3 Split) —
+        // those don't write anything new to a blob, so the next real
+        // dispatch's WRITE→READ barrier is redundant.  Eliminates ~136
+        // unnecessary vkCmdPipelineBarrier calls per inference (40 + 40 +
+        // 56 from C.1 / C.2 / C.3 in RIFE-v4-lite).
+        if (L.isFusedAway) continue;
         if (!dispatchLayer(m_impl->state, L)) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "[VIPLE-RIFE-VK] runInference: dispatch FAILED at '%s' (%s)",
@@ -7400,6 +7407,7 @@ bool RifeNativeExecutor::runInferenceGpu(void* cmdRaw,
     bool dispatchOk = true;
     for (const Layer& L : m_impl->model.layers) {
         if (L.kind == OpKind::Input || L.kind == OpKind::MemoryData) continue;
+        if (L.isFusedAway) continue;  // §J.3.e.Y 4Y.7 C.4 — skip redundant barrier too
         if (!dispatchLayer(st, L)) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-RIFE-VK] runInferenceGpu: dispatch FAILED at '%s' (%s)",
@@ -7535,6 +7543,7 @@ bool RifeNativeExecutor::runInferenceGpuFlow(void* cmdRaw,
     bool dispatchOk = true;
     for (const Layer& L : m_impl->model.layers) {
         if (L.kind == OpKind::Input || L.kind == OpKind::MemoryData) continue;
+        if (L.isFusedAway) continue;  // §J.3.e.Y 4Y.7 C.4 — skip redundant barrier too
         if (!dispatchLayer(st, L)) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-RIFE-VK] runInferenceGpuFlow: dispatch FAILED at '%s' (%s)",
