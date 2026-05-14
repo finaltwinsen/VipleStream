@@ -3410,6 +3410,17 @@ struct ExecState {
     PipelineCache  pipelines;
     BufferPool     buffers;
     std::unordered_map<QString, BlobShape>* shapes = nullptr;
+    // §J.3.e.Y 4Y.7 C.3 (v1.4.42) — Split elision. analyzeFuseableSplits()
+    // populates this with { split_output_blob → split_input_blob } for
+    // Splits whose input has exactly 1 consumer (= the Split) and whose
+    // outputs have no other writers (downstream layers only READ those
+    // blobs). findBlob() follows this map so dispatches that "read" the
+    // Split outputs actually read the original input buffer — eliminating
+    // ~56 Split layers' vkCmdCopyBuffer + barriers per RIFE-v4-lite
+    // inference.  Aliased Splits are marked isFusedAway=true so the
+    // dispatch loop skips them entirely.
+    std::unordered_map<QString, QString> blobAlias;
+
     VkDescriptorPool descPool = VK_NULL_HANDLE;
     VkCommandPool    cmdPool  = VK_NULL_HANDLE;
     VkCommandBuffer  cmd      = VK_NULL_HANDLE;
@@ -3532,7 +3543,17 @@ void emitComputeBarrier(ExecState& e) {
 }
 
 const GpuBuffer* findBlob(ExecState& e, const QString& name) {
-    auto it = e.buffers.blobs.find(name);
+    // §J.3.e.Y 4Y.7 C.3 — Split elision alias chain.  Follow up to 8 hops
+    // (defensive — RIFE-v4-lite never chains splits more than 1 deep, but
+    // future models might).  Cycle would be a bug; 8 caps it.
+    QString resolved = name;
+    for (int hops = 0; hops < 8; ++hops) {
+        auto ait = e.blobAlias.find(resolved);
+        if (ait == e.blobAlias.end()) break;
+        if (ait->second == resolved) break;  // self-alias = paranoia
+        resolved = ait->second;
+    }
+    auto it = e.buffers.blobs.find(resolved);
     return (it == e.buffers.blobs.end()) ? nullptr : &it->second;
 }
 const GpuBuffer* findTensor(ExecState& e, const QString& name) {
@@ -3756,6 +3777,104 @@ int analyzeFuseableBinOpAct(Model& model) {
                     fuseCount, fuseRelu, fuseSigmoid);
     }
     return fuseCount;
+}
+
+// §J.3.e.Y 4Y.7 C.3 — Split elision via blob aliasing.
+//
+// ncnn graphs insert Split layers whenever a tensor has > 1 consumer, to
+// give each consumer its own blob ID.  At runtime that's vkCmdCopyBuffer
+// from input → each output blob — ~3 copies + 2 barriers per Split on
+// average, ~56 Splits in RIFE-v4-lite = ~150 copy ops + ~110 barriers per
+// inference.  Each copy is small (256×256 fp32 ≈ 256 KB) but barrier
+// overhead and command-buffer recording dominate.
+//
+// Safe to elide a Split if BOTH:
+//   1. Its single input has exactly 1 consumer (= this Split).  Otherwise
+//      some other reader expects a separate blob name.
+//   2. All of its outputs have no OTHER writer in the graph (no layer
+//      writes to a Split output blob via L.outputs or
+//      fuseMulOverrideOutput).  Otherwise aliasing would let that
+//      writer's value bleed into the original input blob.
+//   3. The Split's input blob is not subsequently overwritten by any
+//      later layer.  Otherwise the alias would silently change value.
+//
+// When safe: mark Split.isFusedAway=true and add { each output → input }
+// to alias map.  findBlob() then resolves "X_split_N" → original input
+// blob's VkBuffer.
+//
+// `analyze*` runs AFTER C.1 + C.2 so we see the post-fusion graph (some
+// BinaryOps now write to former-ReLU output blobs via
+// fuseMulOverrideOutput; we treat those as actual writers).
+//
+// Returns count of elided Splits.
+int analyzeFuseableSplits(Model& model,
+                          std::unordered_map<QString, QString>& blobAlias) {
+    // 1) Per-blob: how many layers consume it (= count of input references)
+    //              how many layers write it (= count of output references +
+    //              fuseMulOverrideOutput from non-fused layers)
+    std::unordered_map<QString, int> consumerCount;
+    std::unordered_map<QString, int> writerCount;
+    for (const Layer& L : model.layers) {
+        if (L.kind == OpKind::Input || L.kind == OpKind::MemoryData) continue;
+        if (L.isFusedAway) continue;
+        for (const QString& in : L.inputs) consumerCount[in] += 1;
+        for (const QString& out : L.outputs) writerCount[out] += 1;
+        if (!L.fuseMulOverrideOutput.isEmpty()) writerCount[L.fuseMulOverrideOutput] += 1;
+    }
+
+    // 2) Per-blob: the index of the latest layer that writes to it.
+    //              Used to check the input blob isn't overwritten AFTER
+    //              the Split.
+    std::unordered_map<QString, int> latestWrite;
+    for (size_t i = 0; i < model.layers.size(); ++i) {
+        const Layer& L = model.layers[i];
+        if (L.kind == OpKind::Input || L.kind == OpKind::MemoryData) continue;
+        if (L.isFusedAway) continue;
+        for (const QString& out : L.outputs) latestWrite[out] = (int)i;
+        if (!L.fuseMulOverrideOutput.isEmpty()) latestWrite[L.fuseMulOverrideOutput] = (int)i;
+    }
+
+    int elideCount = 0;
+    int totalOutputs = 0;
+    for (size_t i = 0; i < model.layers.size(); ++i) {
+        Layer& L = model.layers[i];
+        if (L.kind != OpKind::Split) continue;
+        if (L.isFusedAway) continue;
+        if (L.inputs.size() != 1) continue;
+        const QString& src = L.inputs[0];
+
+        // (1) src must have exactly 1 consumer (this Split).
+        auto cit = consumerCount.find(src);
+        if (cit == consumerCount.end() || cit->second != 1) continue;
+
+        // (2) Each output must have writerCount == 1 (just this Split).
+        bool safe = true;
+        for (const QString& out : L.outputs) {
+            auto wit = writerCount.find(out);
+            if (wit == writerCount.end() || wit->second != 1) { safe = false; break; }
+        }
+        if (!safe) continue;
+
+        // (3) src must not be overwritten AFTER this Split.
+        auto lit = latestWrite.find(src);
+        if (lit != latestWrite.end() && lit->second > (int)i) continue;
+
+        // All safe — alias and elide.
+        for (const QString& out : L.outputs) {
+            blobAlias[out] = src;
+        }
+        L.isFusedAway = true;
+        ++elideCount;
+        totalOutputs += (int)L.outputs.size();
+    }
+
+    if (elideCount > 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] 4Y.7 C.3 Split elision: %d Splits elided "
+                    "(%d copy ops + barriers eliminated, alias map %zu entries)",
+                    elideCount, totalOutputs, blobAlias.size());
+    }
+    return elideCount;
 }
 
 bool dispatchConvolution(ExecState& e, const Layer& L) {
@@ -6939,6 +7058,12 @@ bool RifeNativeExecutor::initialize(const InitOptions& opts) {
                      "[VIPLE-RIFE-VK] RifeNativeExecutor: buildExecState failed");
         return false;
     }
+
+    // §J.3.e.Y 4Y.7 C.3 (v1.4.42) — Split elision via blob aliasing.  Runs
+    // AFTER buildExecState so the blob storage is already allocated (a
+    // small slack — aliased Split-output blobs sit unused, ~5-10 MB
+    // GPU memory waste).  findBlob() consults state.blobAlias.
+    analyzeFuseableSplits(m_impl->model, m_impl->state.blobAlias);
 
     auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)opts.ctx.getInstanceProcAddr;
     auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstancePA(

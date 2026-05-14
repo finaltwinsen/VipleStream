@@ -132,6 +132,18 @@ Phase 2 t-dep analysis (logging only)**.
   之後跑。實測 RTX 3060 Laptop @ 256×256：median per-fwd 19.90→17.50 ms (**−12.1%**)，
   mean 20.89→19.15 ms (−8.3%)，record phase −32%，gpu phase −7.5%；vs-ncnn
   correctness gate 全 PASS 不變。
+- ✅ **§J.3.e.Y 4Y.7 C.3** Split elision via blob aliasing
+  (`rife_native_vk.cpp`) — 56 Split layers (152 copy operations + barriers)
+  elided。ExecState 加 `std::unordered_map<QString,QString> blobAlias`，
+  `findBlob` 以 8-hop alias chain 解析。`analyzeFuseableSplits(model, alias)`
+  在 `initialize()` 的 buildExecState 後跑：每個 Split 通過三條安全檢查 (input
+  唯一 consumer = this Split / 各 output 唯一 writer = this Split / src blob 之後不
+  被覆寫) 才標 isFusedAway=true + 把 outputs 全部 alias 回 src 。  RIFE-v4-lite
+  全 56 Splits 都符合條件。實測 RTX 3060 Laptop @ 256×256：mean per-fwd
+  19.15→18.39 ms (-0.76 ms / -4.0%)，gpu phase 18.35→17.50 ms (-0.85 ms / -4.6%)，
+  min 17.29→15.98 ms (best-case -7.6%)；vs-ncnn correctness gate 全 PASS 不變。
+  **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
+  (**-11.8%**)。
 
 ### v1.4.41 ship 帶走的條目（2026-05-14, same day as v1.4.40 follow-up）
 
