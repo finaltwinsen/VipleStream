@@ -2323,6 +2323,33 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             // during the process of stopping this one.
             new Thread() {
                 public void run() {
+                    // §M.1.f fix (2026-05-14) — Android equivalent of moonlight-qt
+                    // session.cpp shouldNotifyServerCancel.  Send HTTP /cancel
+                    // before conn.stop() so server-side proc::proc.terminate()
+                    // releases _owner_uuid; without this the next paired
+                    // device's /launch gets 503 "Server in use by another paired
+                    // device".  conn.stop() alone only tears down the RTSP /
+                    // moonlight-common-c streaming session, not the host
+                    // ownership lock.
+                    try {
+                        if (xferHost != null && xferHttpsPort != 0 && xferServerCert != null) {
+                            String uniqueId = "0123456789ABCDEF";  // same value FileTransferClient uses
+                            com.limelight.nvstream.http.NvHTTP cancelHttp =
+                                new com.limelight.nvstream.http.NvHTTP(
+                                    new com.limelight.nvstream.http.ComputerDetails.AddressTuple(
+                                        xferHost, com.limelight.nvstream.http.NvHTTP.DEFAULT_HTTP_PORT),
+                                    xferHttpsPort,
+                                    uniqueId,
+                                    xferServerCert,
+                                    com.limelight.binding.PlatformBinding.getCryptoProvider(Game.this));
+                            cancelHttp.quitApp();
+                            android.util.Log.i("VipleStream", "[§M.1.f] /cancel sent to release server ownership");
+                        }
+                    } catch (Exception e) {
+                        // Best-effort — server may already be unreachable etc.
+                        // Defensive layer covers via RTSP teardown when implemented.
+                        android.util.Log.w("VipleStream", "[§M.1.f] /cancel failed: " + e.getMessage());
+                    }
                     conn.stop();
                 }
             }.start();

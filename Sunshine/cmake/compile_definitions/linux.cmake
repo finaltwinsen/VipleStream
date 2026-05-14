@@ -102,6 +102,11 @@ if(LIBDRM_FOUND AND LIBCAP_FOUND)
     list(APPEND SUNSHINE_DEFINITIONS EGL_NO_X11=1)
 endif()
 
+# §N.7 — file picker stub for Linux tray "Send file to client".  Real
+# zenity subprocess impl pending; stub returns nullopt to allow link.
+list(APPEND PLATFORM_TARGET_FILES
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/fs_picker.cpp")
+
 # evdev
 include(dependencies/libevdev_Sunshine)
 
