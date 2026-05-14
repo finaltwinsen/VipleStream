@@ -33,7 +33,7 @@
 | **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | Pi 5 + V3DV mesa Vulkan + V4L2 HW decode + DRM/KMS render；上游 source-level 支援，沒 CI prebuilt；FRUC backend 全 disable（Vulkan 補幀 Pi 5 GPU 不夠力），純 streaming 應 OK |
 | **Low** | **§G.1** RIFE v1 11-channel | A1000 launch overhead bound (§G.3 negative result)；RTX 30/40+ 才有意義；Path β shipped 後優先級降低 |
 | **Low** | **§J.3.e.Y 4Y.5b** native RIFE activation fp16 | 2026-05-09 嘗試 + revert：256x256 (1080p 配 D-lite UP) 場景 chain +1.7ms 是負收益，跟 4Y.5a postmortem「weight L1-cache-bound 不是 bandwidth bound」結論吻合。重做要先解 D-lite asymmetric center-crop（§β.5.3 D 全套）讓小 dim 真的可選。完整 commit 在 wip/4Y.5b-activation-fp16 branch (82afee5) — 因走錯方向已砍 |
-| ~~**Low**~~ ✅ **C.1 + C.2 BOTH SHIPPED** | **§J.3.e.Y 4Y.7** dispatch fusion | C.1 (Conv→Mul channel-bcast beta) ship in v1.4.1 (`0e6240a`)；**C.2 (BinaryOp→Activation) ship in v1.4.42** (40 BinOp→ReLU pairs absorbed into BinaryOp shader epilogue + fuseMulOverrideOutput pointer chain reused; 實測 RTX 3060 Laptop @ 256×256 RGB chain mean −1.73ms (−8.3%), median **−12.1%** (19.90→17.50ms), record phase −32% (0.81→0.55ms), gpu phase −7.5% (19.83→18.35ms)；vs-ncnn correctness gate PASS 不變)。Conv→ReLU 看起來已被既有 Conv layer's `activation_type` 內建 fusion 含住 (.param parse time)，沒有獨立的 Conv→Act fusion 候選了。|
+| ~~**Low**~~ ✅ **C.1 + C.2 + C.3 + C.5 ALL SHIPPED** | **§J.3.e.Y 4Y.7** dispatch fusion 全套 | C.1 (Conv→Mul ch-bcast) ship v1.4.1 (`0e6240a`)；C.2 (BinaryOp→Activation) ship v1.4.42；C.3 (Split elision via blob aliasing) ship v1.4.42；**C.5 (Conv→Add→Activation triple fusion) ship v1.4.49 (`fb77551`)** — 40 ResBlock tails 從 Conv→BinOp(Mul)→BinOp(Add)→ReLU 4 dispatch 壓成 1 Conv dispatch。實測 RTX 3060 @ 256×256 stable benchmark (warmup=15 iter=50): C.5 alone -10.7% median (18.10→16.17 ms)，record phase -49% (HALVED, 40 fewer dispatches)，gpu phase -8.9%。**累積 C.1+C.2+C.3+C.5 from session-start baseline**: mean 20.89→16.16 ms (**-22.6%**)，gpu 19.83→15.48 ms (**-21.9%**)，ncnn ratio 3.33×→2.58×。vs-ncnn correctness 全 PASS 不變 (mean=4.72e-05 max=1.35e-02)。剩餘 ROI 候選: Winograd Conv2D (~3-5× on 3×3 Conv, multi-day)、coopmat fp16 precision fix (-70× regression → fixable?)、pack-by-N channel packing。|
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
 | **Low** | **§D** HelpLauncher URL → 結構化 docs | docs/setup_guide.md + docs/troubleshooting.md 已寫；HelpLauncher 切過去等 doc site stand 起來 |
 | **Active (mouse, v1.4.42+)** / ~~overlay font~~ ✅ **FIXED v1.4.41** | **§N.5.linux** Linux client (Ubuntu VM) ↔ Windows host stream UX bugs | (1) **滑鼠 input forward 不 work** (still active) — keyboard 傳 host OK，mouse event 完全不傳。**Code analysis hypotheses (sorted by likelihood):** **H1 (most likely):** `SDL_SetRelativeMouseMode(SDL_TRUE)` 在 Hyper-V VM console 失敗，silently fall back 到 `m_FakeCaptureActive=true` (input.cpp:383)，但 fake-capture 只藏 cursor 不啟用 xrel/yrel 追蹤 → `LiSendMouseMoveEvent(0,0)` 全送 0 deltas → host 收「mouse 沒動」。**H2:** `SDL_CaptureMouse()` 在 xcb 無 `XCB_GRAB_POINTER` 權限被 deny。**H3:** Hyper-V synthetic input driver 只送 absolute coords，`event->xrel/yrel` 永遠 0。**H4:** SDL window 在 Hyper-V console 沒拿 `SDL_WINDOW_INPUT_FOCUS`，event loop early-return drop。**Fix roadmap:** (a) input.cpp:383 加 diagnostic log 印 `SDL_SetRelativeMouseMode` return + `SDL_GetError()` + fake-capture state；(b) 短期 workaround：Linux 平台預設啟用 absolute mouse mode；(c) 長期：偵測 Hyper-V 自動切 absolute。需 GUI Linux VM 驗測。 (2) ~~**Overlay 字元亂碼**~~ **✅ FIXED v1.4.41** — main.cpp 加 Linux-only `QFontDatabase::addApplicationFont(NotoSansCJK-Regular.ttc)` + build-appimage.sh 從 `/usr/share/fonts/opentype/noto/` bundle CJK font 進 AppDir，runtime 從 `$APPDIR/usr/share/fonts/opentype/` 載入。AppImage builder 需 `apt install fonts-noto-cjk` 才有 source；缺檔時 silent fallback 到 host fontconfig。 |
@@ -144,6 +144,29 @@ Phase 2 t-dep analysis (logging only)**.
   min 17.29→15.98 ms (best-case -7.6%)；vs-ncnn correctness gate 全 PASS 不變。
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
+
+### v1.4.49 ship 帶走的條目（2026-05-14 evening, post v1.4.42-batch）
+
+- ✅ **§J.3.e.Y 4Y.7 C.5** Conv → BinOp(Add residual) → Activation triple
+  fusion (`rife_native_vk.{h,cpp}`, commit `fb77551`)。把 RIFE-v4-lite 40 個
+  ResBlock tail (Conv → BinOp(Mul, ch-bcast beta) → BinOp(Add, residual) →
+  ReLU/LeakyReLU 0.2) 從 4-dispatch chain 壓成 1 Conv dispatch。Conv shader
+  3 個 variant (generic / 3x3-s1 tiled / 3x3-s2 tiled) 全 update: bindings
+  5→6 (加 residual_buf binding=5), PC 64→80 bytes (加 hasFusedAdd /
+  fuseConvActKind / fuseConvActSlope 3 fields), epilogue 加 conditional
+  residual add + outer activation。dispatchConvolution + standalone
+  runConv2DGpuTest 全 sync。`analyzeFuseableConvAddAct(model)` 在 C.1 後
+  C.2 前跑 (initialize() ordering); 3-layer pattern match + 6 safety
+  conditions (Conv has C.1 fusion / Conv-output single-consumer is BinOp(Add)
+  with op=0 / BinOp(Add)-output single-consumer is Activation / residual
+  blob written before Conv / etc)。**stable benchmark warmup=15 iter=50**：
+  mean per-fwd 18.10→16.16 ms (**-10.7%**)，median 18.10→16.17 ms (-10.7%)，
+  record phase 0.87→**0.44 ms** (HALVED, 40 fewer dispatches)，gpu phase
+  17.00→15.48 ms (-8.9%)。**累積 C.1+C.2+C.3+C.5 from session-start
+  baseline (pre-C.2)**: mean 20.89→16.16 ms (**-22.6%**)，gpu 19.83→15.48 ms
+  (**-21.9%**)，ncnn-vulkan ratio 3.33×→2.58×。vs-ncnn correctness 全 PASS
+  不變 (mean=4.72e-05 max=1.35e-02 frac>1e-2=0%); standalone Conv2D /
+  BinOp / Activation tests 全 PASS。
 
 ### v1.4.41 ship 帶走的條目（2026-05-14, same day as v1.4.40 follow-up）
 
