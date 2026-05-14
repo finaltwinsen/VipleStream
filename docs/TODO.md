@@ -36,7 +36,7 @@
 | **Low** | **§J.3.e.Y 4Y.7** dispatch fusion (Conv→ReLU→BinOp 合併) | C.1 (Conv→Mul channel-bcast beta) 已 ship in 0e6240a；Conv→ReLU 合併還沒做，預估 chain -10%；目前 60fps DUAL 已能跑不擋使用 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
 | **Low** | **§D** HelpLauncher URL → 結構化 docs | docs/setup_guide.md + docs/troubleshooting.md 已寫；HelpLauncher 切過去等 doc site stand 起來 |
-| **Active (post-v1.4.37)** | **§N.5.linux** Linux client (Ubuntu VM) ↔ Windows host stream UX bugs | 2026-05-14 實機 (Ubuntu 26.04 VM AppImage v1.4.37 ↔ host VipleStreamServer v1.4.37 192.168.x.y): (1) **滑鼠 input forward 不 work** — keyboard input 傳到 host OK 但 mouse event 完全不傳。Linux moonlight-qt SDL2 mouse capture / Qt pointer capture 跟 xcb session 互動異常 (VM 透過 Hyper-V Manager console / X11 fwd 跑)。(2) **Overlay 字元亂碼** — connection status / file transfer / performance overlay text 顯示 garbled chars。font fallback or charset encoding issue (zh_TW locale + AppImage bundled Qt fonts)。Cross-platform Linux client baseline mostly works (連 host + pair + stream session active) 但兩個 UX bug 影響 streaming 體驗。File transfer endpoint 可獨立測。檔案在 Phase 1 cross-platform test 階段，這兩條為 Linux 端後續清理 |
+| **Active (mouse, v1.4.42+)** / ~~overlay font~~ ✅ **FIXED v1.4.41** | **§N.5.linux** Linux client (Ubuntu VM) ↔ Windows host stream UX bugs | (1) **滑鼠 input forward 不 work** (still active) — keyboard 傳 host OK，mouse event 完全不傳。**Code analysis hypotheses (sorted by likelihood):** **H1 (most likely):** `SDL_SetRelativeMouseMode(SDL_TRUE)` 在 Hyper-V VM console 失敗，silently fall back 到 `m_FakeCaptureActive=true` (input.cpp:383)，但 fake-capture 只藏 cursor 不啟用 xrel/yrel 追蹤 → `LiSendMouseMoveEvent(0,0)` 全送 0 deltas → host 收「mouse 沒動」。**H2:** `SDL_CaptureMouse()` 在 xcb 無 `XCB_GRAB_POINTER` 權限被 deny。**H3:** Hyper-V synthetic input driver 只送 absolute coords，`event->xrel/yrel` 永遠 0。**H4:** SDL window 在 Hyper-V console 沒拿 `SDL_WINDOW_INPUT_FOCUS`，event loop early-return drop。**Fix roadmap:** (a) input.cpp:383 加 diagnostic log 印 `SDL_SetRelativeMouseMode` return + `SDL_GetError()` + fake-capture state；(b) 短期 workaround：Linux 平台預設啟用 absolute mouse mode；(c) 長期：偵測 Hyper-V 自動切 absolute。需 GUI Linux VM 驗測。 (2) ~~**Overlay 字元亂碼**~~ **✅ FIXED v1.4.41** — main.cpp 加 Linux-only `QFontDatabase::addApplicationFont(NotoSansCJK-Regular.ttc)` + build-appimage.sh 從 `/usr/share/fonts/opentype/noto/` bundle CJK font 進 AppDir，runtime 從 `$APPDIR/usr/share/fonts/opentype/` 載入。AppImage builder 需 `apt install fonts-noto-cjk` 才有 source；缺檔時 silent fallback 到 host fontconfig。 |
 | **Active (P0, post-v1.4.35)** | **§N.5.bug** Android file transfer client SSL `TLSV1_ALERT_INTERNAL_ERROR` post-handshake | (b) server stale state **✅ FIXED in v1.4.34 commit `550100d`** (sweep_stale_locked, 實測 06:11:22 age=59s pending→failed verified). (a) **仍 active** — v1.4.35 `[VIPLE-VERIFY]` diagnostic 證實 **Scenario B**：每個 client SSL request server-side `verify_callback` 都 `enter` + `OK uuid=XXXXXXXX-…`，**零 DENY**，TLS handshake + cert verify 全成功。但 client BoringSSL `tls_record.cc:572` 從 server 收到 internal_error alert. **意味 alert 在 TLS handshake 之後 application 層送**（SimpleWeb / boost-asio strand 處理 request 階段）。下一步 diagnostic options：(i) 在 xfer_poll/blob/result handler 加 entry/exit/try-catch BOOST_LOG 看 handler 是否 invoke + 是否 throw；(ii) host-side curl reproduction (需要 export Pixel 5 paired cert/key 到 host)；(iii) SimpleWeb internal read/write error verbose patch. 推薦先 (i) — 最 surgical |
 | **Active (post-v1.4.33)** | **§N.5** moonlight-android FileTransferClient runtime verify | 建置 + JNI hooked，但實機未測；接收方向 listing 走 MediaStore.Downloads 而非任意 path（v1 限制） |
 | **Low (post-v1.4.33)** | **§N.6** moonlight-qt Cancel hotkey (Ctrl+Alt+Shift+X) | Web UI 重新整理 + 等 stream 結束已可中止 transfer；in-session hotkey 還沒接到 session keystroke handler |
@@ -103,6 +103,41 @@
 - ❌ **§J.3.e.2.i.9** kFrucFramesInFlight 2→4 bump — v1.4.2 (234d2aa) 走錯方向。在 v1.4.8 (6b9bb89) revert
 - ❌ **§J.3.e.2.i.10d** extra_hw_frames=8 (Round 4) — pool size 不是 dominant bottleneck，Round 5 確認後 revert 回 1
 - ❌ **§N.client.connection-cache** moonlight-qt FileTransferClient `ConnectionCacheExpiryTimeoutSecondsAttribute=0` — 仿照 NvHTTP 設這個 attribute（NvHTTP 是 GFE-compat 用），在 Sunshine + Qt 6.10 環境下反而讓第一次 poll 直接 hang 15s 被 watchdog 砍掉。已 revert，改在每次 transfer 結束後 `clearAccessCache()` 處理半關閉 socket 重用問題
+
+### v1.4.41 ship 帶走的條目（2026-05-14, same day as v1.4.40 follow-up）
+
+主軸：**§M.1.f.2 idle reconcile (abnormal disconnect coverage) + §N.7 real
+zenity fs_picker + §N.5.linux overlay CJK font bundle**.
+
+- ✅ **§M.1.f.2** Idle reconcile watchdog (`Sunshine/src/process.{h,cpp}` +
+  `nvhttp.cpp`) — `_last_activity` + `static std::mutex _owner_mutex` +
+  detached watchdog thread (pattern mirrors `_steam_watchdog_gen`).
+  auto-release after 60s no-RTSP + no-HTTP activity from owner.
+  Static mutex needed because `proc_t` must remain move-constructible
+  (`parse()` returns `std::optional<proc_t>` assigned to singleton via
+  `std::move`); same constraint that makes `_steam_watchdog_gen`
+  static.
+- ✅ **§N.7** Linux server fs_picker — replaced v1.4.40 stub with real
+  `zenity --file-selection` subprocess via boost::process::v1.
+  per-user systemd service inherits `DISPLAY` / `DBUS_SESSION_BUS_ADDRESS`
+  so no extra session-handoff plumbing.
+- 🟡 **§N.5.linux overlay CJK** (partial) — `moonlight-qt/app/main.cpp`
+  Linux-only `QFontDatabase::addApplicationFont(NotoSansCJK-Regular.ttc)`
+  (after `QGuiApplication` ctor per v1.2.27 ordering rule); candidate
+  path list searches AppImage `$APPDIR/usr/share/fonts/opentype/` first,
+  then system paths.  `scripts/build-appimage.sh` has cp logic to bundle
+  font from builder's `/usr/share/fonts/opentype/noto/` but v1.4.41
+  builder lacked `fonts-noto-cjk` package, so this release's AppImage
+  falls back to user-system fontconfig.  Code path verified; bundling
+  re-test after `apt install fonts-noto-cjk` on builder = v1.4.42+
+  follow-up.
+
+**Out of scope, deferred to v1.4.42+:**
+
+- ❌ **§N.5.linux mouse forward** — visual verification needs GUI Linux
+  VM access (Hyper-V Manager console).  Read-only code analysis report
+  + 4-hypothesis ranking + fix roadmap recorded in §N.5.linux active
+  entry above for future iteration.
 
 ### v1.4.34 → v1.4.40 ship 帶走的條目（2026-05-14）
 
