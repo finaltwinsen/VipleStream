@@ -145,6 +145,24 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.57 ship 帶走的條目（2026-05-14, post v1.4.56 cmd-buf split）
+
+- 🟡 **§J.3.e.2.i.10 Phase 2B step 5-6（拆分版第二刀）** cmpCmd 真正切
+  到 `m_ComputeQueue` 拿 `s_VkFrucComputeLock`。改動範圍極小
+  (`vkfruc.cpp` ~10 LOC + log 字串)，但這是 Phase 2B 的核心 perf
+  gain 進入點 —— RIFE inference 真正在 compute QF 平行於 graphics
+  submit 跑。
+  - `vkQueueSubmit(m_GraphicsQueue, ...)` → `vkQueueSubmit(m_ComputeQueue, ...)`
+  - `std::lock_guard<std::mutex> lk(s_VkFrucQueueLock)` →
+    `s_VkFrucComputeLock`（v1.4.56 加但 dormant；此版啟用）
+  - init log 從 "gfx-cmp(v1.4.56)" 改成 "CMP(QF=%u)" 反映實際 QF
+  - **跨 queue sync 鐵三角已 ready**：m_ComputeTimelineSem (Phase 2A)
+    + CONCURRENT sharing on m_RifeDownPrev/Curr/Interp + m_RifeFlow/MaskOutBuf
+    (v1.4.55) + VulkanCtx::computeQueue/Family 條件 binding (v1.4.55)
+  - **TRIPLE / SW path / β.4 fallback / 預設 ON 留 v1.4.58+** 各自獨立
+    commit，先讓 NV driver cross-queue timeline sem 穩定性驗測一週
+  - env=0（預設）跟 v1.4.55 bit-identical（phase2BActive 短路為 false）
+
 ### v1.4.56 ship 帶走的條目（2026-05-14, post v1.4.55 Phase 2B plumbing）
 
 - 🟡 **§J.3.e.2.i.10 Phase 2B step 5-6（拆分版第一刀）** cmd-buf split

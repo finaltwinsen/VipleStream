@@ -8774,8 +8774,15 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         }
         // cmpCmd submit: wait compute@V_pre, signal compute@V_post.
         //   runInferenceGpuFlow's first op is vkCmdCopyBuffer (TRANSFER) so
-        //   the wait stage mask is TRANSFER.  v1.4.56: graphics queue +
-        //   s_VkFrucQueueLock.  v1.4.57: m_ComputeQueue + s_VkFrucComputeLock.
+        //   the wait stage mask is TRANSFER.  v1.4.57: now routed to
+        //   m_ComputeQueue under s_VkFrucComputeLock — async compute path
+        //   actually parallelises with graphics submits.  Cross-queue sync
+        //   relies on:
+        //     • m_ComputeTimelineSem (timeline binary across QFs, Phase 2A)
+        //     • CONCURRENT sharing on cross-queue buffers (Phase 2B v1.4.55):
+        //       m_RifeDownPrev/Curr/Interp, m_RifeFlow/MaskOutBuf
+        //     • VulkanCtx::computeQueue/Family set to m_Compute* when
+        //       asyncCtxActive (Phase 2B v1.4.55)
         {
             VkPipelineStageFlags waitM[1] = { VK_PIPELINE_STAGE_TRANSFER_BIT };
             VkSemaphore     waitS[1] = { m_ComputeTimelineSem };
@@ -8800,8 +8807,12 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             si.pSignalSemaphores    = sigS;
             VkResult vrCmp;
             {
-                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
-                vrCmp = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, VK_NULL_HANDLE);
+                // §J.3.e.2.i.10 Phase 2B step 5-6 (v1.4.57) — independent
+                // lock from s_VkFrucQueueLock so the compute QF submit
+                // doesn't serialise behind concurrent ffmpeg / graphics
+                // submits — that would defeat the parallelism we want.
+                std::lock_guard<std::mutex> lk(s_VkFrucComputeLock);
+                vrCmp = m_RtPfn.QueueSubmit(m_ComputeQueue, 1, &si, VK_NULL_HANDLE);
             }
             if (vrCmp != VK_SUCCESS) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -8864,8 +8875,9 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         if (s_phase2BLogged.compare_exchange_strong(expP2B, true)) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2B wiring active: 3-cmd-buf "
-                "chain (gfx-pre → gfx-cmp(v1.4.56) → gfx-post), timeline V_pre=%llu "
-                "V_post=%llu — cmpCmd retarget to compute queue lands in v1.4.57",
+                "chain (gfx-pre → CMP(QF=%u) → gfx-post), timeline V_pre=%llu "
+                "V_post=%llu — async-compute parallel with graphics (v1.4.57)",
+                (unsigned)m_ComputeQueueFamily,
                 (unsigned long long)computeV_pre,
                 (unsigned long long)computeV_post);
         }
