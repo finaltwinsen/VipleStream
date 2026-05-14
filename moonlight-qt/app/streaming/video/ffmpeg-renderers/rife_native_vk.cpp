@@ -393,12 +393,16 @@ static std::string applyBlobMacros(const char* src, bool useFp16Blob)
 // read VIPLE_RIFE_VK_FP16 once, cache in static.  All call sites
 // (applyBlobMacros at shader compile time, blob alloc, boundary
 // dispatch) read the same value, guaranteed consistent within a process.
-// env=0 (or unset) → false → v1.4.60 fp32 path (bit-identical).
-// env=non-zero non-"0" string → true → fp16 storage with fp32 arithmetic.
+//
+// v1.4.62 — default flipped to ON (mirror v1.4.58 phase 2B default flip).
+// `unset` or any non-"0" string → true → fp16 storage with fp32 arithmetic.
+// Explicit opt-out via VIPLE_RIFE_VK_FP16=0 retained as bisect / driver
+// fallback to the v1.4.60 fp32 path (which is bit-identical to v1.4.59).
 static bool isFp16BlobEnabled() {
     static const bool kEnabled = []{
         const char* s = std::getenv("VIPLE_RIFE_VK_FP16");
-        return s && s[0] && s[0] != '0';
+        // unset / empty / any non-"0" → ON; explicit "0" → OFF.
+        return (s == nullptr || s[0] == '\0' || s[0] != '0');
     }();
     return kEnabled;
 }

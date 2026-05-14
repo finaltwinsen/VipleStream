@@ -145,6 +145,20 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.62 ship 帶走的條目（2026-05-15, post v1.4.61 fp16 env-opt-in）
+
+- 🟢 **§J.3.e.Y 5Y fp16 path 預設 ON** — flip `VIPLE_RIFE_VK_FP16` env
+  gate default。改前 opt-in（env=1 啟用），改後 opt-out（unset 或非 "0"
+  字串 = ON；env=0 才強制走 v1.4.60 fp32 path 作為 bisect / driver 退路）。
+  - `rife_native_vk.cpp` `isFp16BlobEnabled()` 內部 lambda 條件翻反：
+    `s == nullptr || s[0] == '\0' || s[0] != '0'`
+  - 完全相同 pattern 跟 v1.4.58 Phase 2B 預設 ON 的 flip
+  - 跳過原 plan 的「real-stream 一週驗測」門檻 —— 使用者直接 flip 並
+    本機部署驗
+  - 退路：`set VIPLE_RIFE_VK_FP16=0` 重啟 client 回 v1.4.60 fp32 path
+    （bit-identical to v1.4.59）；永久 revert 用 `git revert f4d344c`
+    撤回 v1.4.61 啟用就回 v1.4.60 infra-only state
+
 ### v1.4.61 ship 帶走的條目（2026-05-15, post v1.4.60 fp16 infra）
 
 - 🟡 **§J.3.e.Y 5Y fp16 path 啟用（第二刀，env opt-in）** — v1.4.60 infra
