@@ -367,13 +367,20 @@ bool parseParam(const QString& path, Model& out) {
 std::string applyBlobMacros(const char* src, bool useFp16Blob)
 {
     std::string s(src);
-    // Find end of first non-empty line (the `#version` line) so we
-    // inject macros right after.  Defensive: if no newline, append at
-    // end — shouldn't happen in practice as every shader starts with
-    // "#version 450\n".
-    size_t pos = s.find('\n');
-    if (pos == std::string::npos) return s;
-    pos += 1;  // insert *after* the newline
+    // §J.3.e.Y 5Y v1.4.64 — find `#version` directive then the newline
+    // that ends that line, insert macros AFTER.  v1.4.60..v1.4.63 used
+    // `s.find('\n')` which returned position 0 because R-string sources
+    // start with a leading `\n` before `#version` — the macro block then
+    // landed BEFORE `#version`, violating GLSL spec § 3.3 (#version must
+    // be the first non-comment / non-whitespace directive) and rejecting
+    // every RIFE shader at glslang compile time.  Effect: RIFE β path
+    // silently disabled in v1.4.60..v1.4.63 — block-match fallback ran
+    // instead.  Fix is the entire fp16 / Phase 2B perf gain story.
+    size_t verStart = s.find("#version");
+    if (verStart == std::string::npos) return s;
+    size_t verEnd = s.find('\n', verStart);
+    if (verEnd == std::string::npos) return s;
+    verEnd += 1;  // insert AFTER the newline ending the #version line
     const char* fp32Block =
         "#define BLOB_T  float\n"
         "#define BLOB_R(x) (x)\n"
@@ -384,7 +391,7 @@ std::string applyBlobMacros(const char* src, bool useFp16Blob)
         "#define BLOB_T  float16_t\n"
         "#define BLOB_R(x) float(x)\n"
         "#define BLOB_W(x) float16_t(x)\n";
-    s.insert(pos, useFp16Blob ? fp16Block : fp32Block);
+    s.insert(verEnd, useFp16Blob ? fp16Block : fp32Block);
     return s;
 }
 

@@ -145,6 +145,31 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.64 ship 帶走的條目（2026-05-15, post v1.4.63 vkfruc bilinear hotfix）
+
+- 🔴🔴 **§J.3.e.Y 5Y hotfix — applyBlobMacros 插錯位置（v1.4.60-63 全壞）**
+  使用者回報 v1.4.63 still 看到 `RifeBilinear: compile_spirv_module failed`。
+  深入查 root cause：`applyBlobMacros` 用 `s.find('\n')` 找第一個 newline
+  插入 `#define BLOB_T...`，但 RIFE shader 的 raw string
+  `R"GLSL(\n#version 450\n...)GLSL"` 第一個字元是 `(` 後面 leading newline，
+  在 `#version` 之前。所以 `#define` 被插到 **`#version` 前面**，違反
+  GLSL spec § 3.3（`#version` 必須是第一個非註解 / 非空白 directive），
+  glslang 直接 reject 所有 11 個 RIFE shader。
+  - **v1.4.60-63 整個 fp16 / Phase 2B perf story 都沒發揮**：RIFE β path
+    自 v1.4.60 起 silently disabled → fallback block-match → 使用者
+    看到 frame rate 暴跌 + 波動。Smoke `--help` 看不出來（RIFE init 是
+    runtime 才嘗試）。
+  - vkfruc.cpp 也 trigger 同 bug：v1.4.63 hotfix 把 caller-side bilinear
+    過 applyBlobMacros，但 applyBlobMacros 本身錯插位置，所以 vkfruc
+    bilinear 也 compile fail。
+  - **修**：`applyBlobMacros` 改用 `s.find("#version")` 找 directive，
+    再 `s.find('\n', verStart)` 找該行結尾 newline，**插入 AFTER 該
+    newline**。GLSL spec 允許 `#define` 在 `#version` 之後任意位置。
+  - 影響範圍：rife_native_vk.cpp 內 applyBlobMacros 函式體 ~5 LOC 改動。
+  - **驗證**：成功 log 應出現 `[VIPLE-VKFRUC-RIFE-β5] β.5.1 chain active`
+    + `[VIPLE-VKFRUC-PHASE2B-PROF] preCmd=... cmpCmd=... postCmd=...`
+    （v1.4.59 之後第一次真的看到 RIFE 跑）
+
 ### v1.4.63 ship 帶走的條目（2026-05-15, post v1.4.62 fp16 default ON）
 
 - 🔴 **§J.3.e.Y 5Y fp16 path hotfix — vkfruc.cpp 共用 shader BLOB_T 未展開**
