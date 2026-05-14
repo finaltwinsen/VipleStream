@@ -7441,6 +7441,33 @@ bool RifeNativeExecutor::initialize(const InitOptions& opts) {
     // and pass safety checks.
     analyzeFuseableCrops(m_impl->model, m_impl->state.blobAlias);
 
+    // §J.3.e.Y 4Y.7 (v1.4.53) — diagnostic: dispatch-count breakdown by
+    // OpKind after ALL fusion analysis passes (C.1 / C.5 / C.2 / C.3 / C.6).
+    // Lets future optimization work see at-a-glance which shader is the
+    // remaining bottleneck.  Logged once per executor init.
+    {
+        std::unordered_map<OpKind, int> dispatchCount;
+        int totalDispatches = 0;
+        for (const Layer& L : m_impl->model.layers) {
+            if (L.kind == OpKind::Input || L.kind == OpKind::MemoryData) continue;
+            if (L.isFusedAway) continue;
+            dispatchCount[L.kind] += 1;
+            totalDispatches += 1;
+        }
+        // Print sorted-by-count descending (most-dispatched first).
+        std::vector<std::pair<OpKind, int>> sorted(dispatchCount.begin(), dispatchCount.end());
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        QString summary;
+        for (size_t i = 0; i < sorted.size() && i < 12; ++i) {
+            if (!summary.isEmpty()) summary += ", ";
+            summary += QString::asprintf("%s=%d", opKindName(sorted[i].first), sorted[i].second);
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RIFE-VK] post-fusion dispatch count: %d total (%s)",
+                    totalDispatches, qUtf8Printable(summary));
+    }
+
     auto pfnGetInstancePA = (PFN_vkGetInstanceProcAddr)opts.ctx.getInstanceProcAddr;
     auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)pfnGetInstancePA(
         (VkInstance)opts.ctx.instance, "vkGetDeviceProcAddr");
