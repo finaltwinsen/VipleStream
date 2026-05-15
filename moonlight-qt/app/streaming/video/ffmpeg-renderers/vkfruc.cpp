@@ -345,6 +345,11 @@ static PFN_vkGetDeviceProcAddr   s_RealGetDeviceProcAddr    = nullptr;
 static PFN_vkQueueSubmit         s_RealQueueSubmit          = nullptr;
 static PFN_vkQueueSubmit2        s_RealQueueSubmit2         = nullptr;
 static PFN_vkQueueSubmit2KHR     s_RealQueueSubmit2KHR      = nullptr;
+// §J.3.e.2.i.18 (v1.4.82) — Vulkan spec requires ALL VkQueue operations
+// externally synchronised, not just Submit.  Wrap Present + WaitIdle too.
+static PFN_vkQueuePresentKHR     s_RealQueuePresentKHR      = nullptr;
+static PFN_vkQueueWaitIdle       s_RealQueueWaitIdle        = nullptr;
+static PFN_vkQueueBindSparse     s_RealQueueBindSparse      = nullptr;
 
 static VKAPI_ATTR VkResult VKAPI_CALL vkfrucWrappedQueueSubmit(
     VkQueue queue, uint32_t submitCount, const VkSubmitInfo* pSubmits, VkFence fence)
@@ -367,31 +372,60 @@ static VKAPI_ATTR VkResult VKAPI_CALL vkfrucWrappedQueueSubmit2KHR(
     return s_RealQueueSubmit2KHR(queue, submitCount, pSubmits, fence);
 }
 
+// §J.3.e.2.i.18 (v1.4.82) — Wrap remaining VkQueue ops to fully satisfy
+// "VkQueue externally synchronised" Vulkan spec requirement.
+static VKAPI_ATTR VkResult VKAPI_CALL vkfrucWrappedQueuePresentKHR(
+    VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
+{
+    std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+    return s_RealQueuePresentKHR(queue, pPresentInfo);
+}
+static VKAPI_ATTR VkResult VKAPI_CALL vkfrucWrappedQueueWaitIdle(VkQueue queue)
+{
+    std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+    return s_RealQueueWaitIdle(queue);
+}
+static VKAPI_ATTR VkResult VKAPI_CALL vkfrucWrappedQueueBindSparse(
+    VkQueue queue, uint32_t bindInfoCount, const VkBindSparseInfo* pBindInfo, VkFence fence)
+{
+    std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+    return s_RealQueueBindSparse(queue, bindInfoCount, pBindInfo, fence);
+}
+
+// §J.3.e.2.i.18 macro to dedupe lookup + wrap pattern (3 instance-proc +
+// 3 device-proc copies = 6 sites × ~10 LOC each without macro).
+#define VKFRUC_PROC_WRAP_CACHE(REAL_TYPE, REAL_VAR, WRAPPER_FN, REAL_LOOKUP) \
+    if (!REAL_VAR) { REAL_VAR = reinterpret_cast<REAL_TYPE>(REAL_LOOKUP); }   \
+    return reinterpret_cast<PFN_vkVoidFunction>(&WRAPPER_FN)
+
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkfrucWrappedGetDeviceProcAddr(
     VkDevice device, const char* pName)
 {
     if (!s_RealGetDeviceProcAddr) return nullptr;
     if (pName != nullptr) {
         if (strcmp(pName, "vkQueueSubmit") == 0) {
-            if (!s_RealQueueSubmit) {
-                s_RealQueueSubmit = reinterpret_cast<PFN_vkQueueSubmit>(
-                    s_RealGetDeviceProcAddr(device, pName));
-            }
-            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit);
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueueSubmit, s_RealQueueSubmit,
+                vkfrucWrappedQueueSubmit, s_RealGetDeviceProcAddr(device, pName));
         }
         if (strcmp(pName, "vkQueueSubmit2") == 0) {
-            if (!s_RealQueueSubmit2) {
-                s_RealQueueSubmit2 = reinterpret_cast<PFN_vkQueueSubmit2>(
-                    s_RealGetDeviceProcAddr(device, pName));
-            }
-            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit2);
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueueSubmit2, s_RealQueueSubmit2,
+                vkfrucWrappedQueueSubmit2, s_RealGetDeviceProcAddr(device, pName));
         }
         if (strcmp(pName, "vkQueueSubmit2KHR") == 0) {
-            if (!s_RealQueueSubmit2KHR) {
-                s_RealQueueSubmit2KHR = reinterpret_cast<PFN_vkQueueSubmit2KHR>(
-                    s_RealGetDeviceProcAddr(device, pName));
-            }
-            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit2KHR);
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueueSubmit2KHR, s_RealQueueSubmit2KHR,
+                vkfrucWrappedQueueSubmit2KHR, s_RealGetDeviceProcAddr(device, pName));
+        }
+        if (strcmp(pName, "vkQueuePresentKHR") == 0) {
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueuePresentKHR, s_RealQueuePresentKHR,
+                vkfrucWrappedQueuePresentKHR, s_RealGetDeviceProcAddr(device, pName));
+        }
+        if (strcmp(pName, "vkQueueWaitIdle") == 0) {
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueueWaitIdle, s_RealQueueWaitIdle,
+                vkfrucWrappedQueueWaitIdle, s_RealGetDeviceProcAddr(device, pName));
+        }
+        if (strcmp(pName, "vkQueueBindSparse") == 0) {
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueueBindSparse, s_RealQueueBindSparse,
+                vkfrucWrappedQueueBindSparse, s_RealGetDeviceProcAddr(device, pName));
         }
     }
     return s_RealGetDeviceProcAddr(device, pName);
@@ -416,25 +450,28 @@ PFN_vkVoidFunction VkFrucRenderer::wrappedGetInstanceProcAddr(VkInstance instanc
             return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedGetDeviceProcAddr);
         }
         if (strcmp(pName, "vkQueueSubmit") == 0) {
-            if (!s_RealQueueSubmit) {
-                s_RealQueueSubmit = reinterpret_cast<PFN_vkQueueSubmit>(
-                    s_RealGetInstanceProcAddr(instance, pName));
-            }
-            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit);
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueueSubmit, s_RealQueueSubmit,
+                vkfrucWrappedQueueSubmit, s_RealGetInstanceProcAddr(instance, pName));
         }
         if (strcmp(pName, "vkQueueSubmit2") == 0) {
-            if (!s_RealQueueSubmit2) {
-                s_RealQueueSubmit2 = reinterpret_cast<PFN_vkQueueSubmit2>(
-                    s_RealGetInstanceProcAddr(instance, pName));
-            }
-            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit2);
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueueSubmit2, s_RealQueueSubmit2,
+                vkfrucWrappedQueueSubmit2, s_RealGetInstanceProcAddr(instance, pName));
         }
         if (strcmp(pName, "vkQueueSubmit2KHR") == 0) {
-            if (!s_RealQueueSubmit2KHR) {
-                s_RealQueueSubmit2KHR = reinterpret_cast<PFN_vkQueueSubmit2KHR>(
-                    s_RealGetInstanceProcAddr(instance, pName));
-            }
-            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit2KHR);
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueueSubmit2KHR, s_RealQueueSubmit2KHR,
+                vkfrucWrappedQueueSubmit2KHR, s_RealGetInstanceProcAddr(instance, pName));
+        }
+        if (strcmp(pName, "vkQueuePresentKHR") == 0) {
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueuePresentKHR, s_RealQueuePresentKHR,
+                vkfrucWrappedQueuePresentKHR, s_RealGetInstanceProcAddr(instance, pName));
+        }
+        if (strcmp(pName, "vkQueueWaitIdle") == 0) {
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueueWaitIdle, s_RealQueueWaitIdle,
+                vkfrucWrappedQueueWaitIdle, s_RealGetInstanceProcAddr(instance, pName));
+        }
+        if (strcmp(pName, "vkQueueBindSparse") == 0) {
+            VKFRUC_PROC_WRAP_CACHE(PFN_vkQueueBindSparse, s_RealQueueBindSparse,
+                vkfrucWrappedQueueBindSparse, s_RealGetInstanceProcAddr(instance, pName));
         }
     }
     return s_RealGetInstanceProcAddr(instance, pName);
@@ -5681,6 +5718,7 @@ void VkFrucRenderer::destroySwUploadResources()
 // Forward declarations — defined in plvk.cpp (external linkage; not
 // `static`).  Use C++ linkage to match the definitions there.
 extern const char* kFrucMotionEstShaderGlsl;
+extern const char* kFrucMotionEstBackwardShaderGlsl;  // §J.3.e.2.i.17 v1.4.82
 extern const char* kFrucMvMedianShaderGlsl;
 extern const char* kFrucWarpShaderGlsl;
 
@@ -6252,10 +6290,18 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                         m_FrucMedianShaderMod, m_FrucMedianDsl, m_FrucMedianPipeLay, m_FrucMedianPipeline)) {
         m_FrucDisabled = true; return false;
     }
-    // §J.3.e.2.i.15 (v1.4.80) — Warp bumped to 5 bindings (binding 4 = prev MV
-    // for temporal coherence fade).  Push const stays 32 byte (uint
-    // hasTemporalMv replaces float _pcPad0, both 4 byte).
-    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 5, 32,
+    // §J.3.e.2.i.17 (v1.4.82) — Backward ME pipeline (bidirectional Phase A).
+    // 4 bindings: prevRGB, currRGB, fwdMV (predictor), outBwdMV. Push const
+    // 24 byte (same struct as forward ME).
+    if (!buildPipeline("MEBackward", kFrucMotionEstBackwardShaderGlsl, 4, 24,
+                        m_FrucMeBackwardShaderMod, m_FrucMeBackwardDsl,
+                        m_FrucMeBackwardPipeLay, m_FrucMeBackwardPipeline)) {
+        m_FrucDisabled = true; return false;
+    }
+    // §J.3.e.2.i.17 (v1.4.82) — Warp bumped 5→6 bindings (binding 4=prevMV
+    // for temporal, 5=bwdMV for occlusion). Push const 32→36 byte (added uint
+    // hasBackwardMv).
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 6, 36,
                         m_FrucWarpShaderMod, m_FrucWarpDsl, m_FrucWarpPipeLay, m_FrucWarpPipeline)) {
         m_FrucDisabled = true; return false;
     }
@@ -6409,6 +6455,11 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
                             | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                      m_FrucMvFilteredBuf, m_FrucMvFilteredMem)
+        // §J.3.e.2.i.17 (v1.4.82) — Backward MV buffers (bidirectional Phase A).
+        || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_FrucMvBackwardBuf, m_FrucMvBackwardBufMem)
+        || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_FrucMvBackwardFilteredBuf, m_FrucMvBackwardFilteredMem)
         || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                      m_FrucPrevMvBuf, m_FrucPrevMvMem)
         // §B-DUMP needs TRANSFER_SRC for vkCmdCopyBuffer interp → staging.
@@ -6461,10 +6512,12 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // §J.3.e.X Path β.5 — 3 more sets: UpFlow (2 bindings), UpMask (2 bindings),
     // NativeWarp (5 bindings).  +9 storage descriptors.  Bumped 10→13, 26→35.
     // §J.3.e.2.i.15 (v1.4.80) — warp 2 sets each bumped 4→5 bindings = +2 desc.
-    pSize.descriptorCount = 37;
+    // §J.3.e.2.i.17 (v1.4.82) — +2 sets (MeBackward 4 bind + MedianBackward 2
+    // bind = 6 desc) + warp sets each bumped 5→6 bindings (+2 desc) = +8 desc.
+    pSize.descriptorCount = 45;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpCi.maxSets = 13;
+    dpCi.maxSets = 15;
     dpCi.poolSizeCount = 1;
     dpCi.pPoolSizes = &pSize;
     if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_FrucDescPool) != VK_SUCCESS) {
@@ -6520,17 +6573,28 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         || !allocAndUpdateSet(m_FrucMedianDsl,
                               { m_FrucMvBuf, m_FrucMvFilteredBuf },
                               m_FrucMedianDescSet)
-        // §J.3.e.2.i.15 (v1.4.80) — Warp now has 5 bindings: binding 4 =
-        // m_FrucPrevMvBuf (上一幀 mvFiltered, 透過 post-frame copy 寫進去).
+        // §J.3.e.2.i.17 (v1.4.82) — Backward ME desc set. binding 0/1 = RGB,
+        // 2 = fwd MV (m_FrucMvBuf, raw forward) as predictor, 3 = output bwd MV.
+        || !allocAndUpdateSet(m_FrucMeBackwardDsl,
+                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvBuf, m_FrucMvBackwardBuf },
+                              m_FrucMeBackwardDescSet)
+        // §J.3.e.2.i.17 (v1.4.82) — Backward median desc set: reuses median
+        // pipeline + DSL, just different I/O buffers.
+        || !allocAndUpdateSet(m_FrucMedianDsl,
+                              { m_FrucMvBackwardBuf, m_FrucMvBackwardFilteredBuf },
+                              m_FrucMedianBackwardDescSet)
+        // §J.3.e.2.i.17 (v1.4.82) — Warp now has 6 bindings:
+        //   4 = m_FrucPrevMvBuf (temporal coherence)
+        //   5 = m_FrucMvBackwardFilteredBuf (occlusion mask)
         || !allocAndUpdateSet(m_FrucWarpDsl,
                               { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf,
-                                m_FrucInterpRgbBuf, m_FrucPrevMvBuf },
+                                m_FrucInterpRgbBuf, m_FrucPrevMvBuf, m_FrucMvBackwardFilteredBuf },
                               m_FrucWarpDescSet)
         // §B2 2026-05-06 — TRIPLE 第二份 warp desc set，output binding 3
         // → m_FrucInterpRgbBuf2，其它 binding 不變.
         || !allocAndUpdateSet(m_FrucWarpDsl,
                               { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf,
-                                m_FrucInterpRgbBuf2, m_FrucPrevMvBuf },
+                                m_FrucInterpRgbBuf2, m_FrucPrevMvBuf, m_FrucMvBackwardFilteredBuf },
                               m_FrucWarpDescSet2)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: descriptor set alloc/update failed");
@@ -6737,6 +6801,9 @@ void VkFrucRenderer::destroyFrucComputeResources()
     DESTROY_PIPE(m_FrucMePipeline,      m_FrucMePipeLay,      m_FrucMeDsl,      m_FrucMeShaderMod)
     DESTROY_PIPE(m_FrucMedianPipeline,  m_FrucMedianPipeLay,  m_FrucMedianDsl,  m_FrucMedianShaderMod)
     DESTROY_PIPE(m_FrucWarpPipeline,    m_FrucWarpPipeLay,    m_FrucWarpDsl,    m_FrucWarpShaderMod)
+    // §J.3.e.2.i.17 (v1.4.82) — Backward ME pipeline
+    DESTROY_PIPE(m_FrucMeBackwardPipeline, m_FrucMeBackwardPipeLay,
+                 m_FrucMeBackwardDsl,      m_FrucMeBackwardShaderMod)
     // §J.3.e.X Path β.4
     DESTROY_PIPE(m_RifeBilinearPipeline, m_RifeBilinearPipeLay,
                  m_RifeBilinearDsl,      m_RifeBilinearShaderMod)
@@ -6755,6 +6822,9 @@ void VkFrucRenderer::destroyFrucComputeResources()
     DESTROY_BUF(m_FrucMvBuf,         m_FrucMvBufMem)
     DESTROY_BUF(m_FrucMvFilteredBuf, m_FrucMvFilteredMem)
     DESTROY_BUF(m_FrucPrevMvBuf,     m_FrucPrevMvMem)
+    // §J.3.e.2.i.17 (v1.4.82)
+    DESTROY_BUF(m_FrucMvBackwardBuf,         m_FrucMvBackwardBufMem)
+    DESTROY_BUF(m_FrucMvBackwardFilteredBuf, m_FrucMvBackwardFilteredMem)
     DESTROY_BUF(m_FrucInterpRgbBuf,  m_FrucInterpRgbMem)
     // §B2 2026-05-06 — TRIPLE 第二份 interp output buffer.
     DESTROY_BUF(m_FrucInterpRgbBuf2, m_FrucInterpRgbBuf2Mem)
@@ -8077,6 +8147,26 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                              m_FrucTimerPool, timerBase + 2);
     }
 
+    // ---- Stage 1b: Backward motion estimation (§J.3.e.2.i.17, v1.4.82) ----
+    // 用 raw forward MV (m_FrucMvBuf) 當 predictor 跑 curr→prev backward ME.
+    // 含 v1.4.82 三個 fast-path 修補 (forward-matching early-exit + tight
+    // [8,4,2,1] diamond + 寬鬆 high-cost threshold). 預期 ~1000us.
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMeBackwardPipeline);
+    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMeBackwardPipeLay,
+                       0, 1, &m_FrucMeBackwardDescSet, 0, nullptr);
+    {
+        struct {
+            uint32_t frameWidth, frameHeight, blockSize, mvWidth, mvHeight, _pad0;
+        } pcMeBwd = {
+            (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
+            (uint32_t)mvW, (uint32_t)mvH, 0
+        };
+        pfnCmdPushConst(cmd, m_FrucMeBackwardPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                        0, sizeof(pcMeBwd), &pcMeBwd);
+    }
+    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
+    computeBufBarrier(m_FrucMvBackwardBuf);
+
     // ---- Stage 2: MV median filter ----
     // §J.3.e.2.i.7 R5 had this as a noop cmdCopyBuffer experiment,
     // §B-quality (a) 2026-05-06 — re-enabled real 3×3 median dispatch.
@@ -8101,6 +8191,22 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     }
     pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
     computeBufBarrier(m_FrucMvFilteredBuf);
+
+    // ---- Stage 2b: Backward MV median (§J.3.e.2.i.17, v1.4.82) ----
+    // Same median pipeline, different descset (in=BackwardBuf, out=BackwardFilteredBuf).
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeline);
+    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeLay,
+                       0, 1, &m_FrucMedianBackwardDescSet, 0, nullptr);
+    {
+        struct {
+            uint32_t mvWidth, mvHeight, _pad0, _pad1;
+        } pcMedBwd = { mvW, mvH, 0, 0 };
+        pfnCmdPushConst(cmd, m_FrucMedianPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                        0, sizeof(pcMedBwd), &pcMedBwd);
+    }
+    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
+    computeBufBarrier(m_FrucMvBackwardFilteredBuf);
+
     // §J.3.g v2 ts[3] — after Median (copy mode) barrier
     if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
         pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
@@ -8147,21 +8253,20 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeline);
         pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeLay,
                            0, 1, &descSet, 0, nullptr);
-        // §J.3.e.2.i.15 (v1.4.80) — _pcPad0 (float) → hasTemporalMv (uint).
-        // Same 4-byte slot; temporal-coherence fade unconditionally on after
-        // first frame (m_FrucPrevMvBuf 從第 2 幀起含 valid 上一幀 mvFiltered).
-        // 第 1 幀 prevMV 仍是 zero-init buffer, temporal fade 退化成「mv 自己
-        // magnitude squared」trigger — 跟 v1.4.72 magnitude fade 等價,
-        // 但 ramp width [2, 8] 比 v1.4.72 的 [64, 256] 嚴格很多,實際 first frame
-        // effect minimal.
+        // §J.3.e.2.i.17 (v1.4.82) — push const expanded 32→36 byte. Adds
+        // uint hasBackwardMv at end. 9 fields × 4 byte = 36.
+        // Both temporal AND backward fade active in this pipeline; the two
+        // detectors target different failure modes (temporal: cross-frame
+        // motion change; backward: in-frame occlusion).
         struct {
             uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
             float    blendFactor;
             float    tFraction;
             uint32_t hasTemporalMv;
+            uint32_t hasBackwardMv;
         } pcWarp = {
             (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
-            (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac, 1u
+            (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac, 1u, 1u
         };
         pfnCmdPushConst(cmd, m_FrucWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
                         0, sizeof(pcWarp), &pcWarp);
