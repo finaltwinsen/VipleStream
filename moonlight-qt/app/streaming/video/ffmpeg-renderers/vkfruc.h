@@ -1295,6 +1295,31 @@ private:
     double      m_Phase2BGpuTotalUsAccum  = 0.0;
     int         m_Phase2BGpuCount         = 0;
 
+    // §J.3.e.2.i.33 (v1.4.95) — HW path frucChainAsyncActiveHw GPU
+    // timestamp benchmark.  4 timestamps × kFrucFramesInFlight slots:
+    //   ts[0] partA TOP_OF_PIPE start
+    //   ts[1] partA BOTTOM_OF_PIPE end (ownership release done)
+    //   ts[2] partC TOP_OF_PIPE start (= cmpCmd 完成 + acquire 開始)
+    //   ts[3] partC BOTTOM_OF_PIPE end (render passes + releaseBar done)
+    // 兩個 ts 都在 graphics QF (partA + partC), GPU timestamp 跨 cmd buf
+    // strictly ordered; cmpCmd 在 compute QF 不 write timestamps (避免改
+    // recordFrucChainOnCompute helper signature).  ts[2]-ts[1] 反映 GPU
+    // graphics QF idle 等 cmpCmd 完成的 effective wait time.
+    //   partA gpu = ts[1]-ts[0]
+    //   cmpCmd-effective-wait = ts[2]-ts[1]
+    //   partC gpu = ts[3]-ts[2]
+    //   total = ts[3]-ts[0]
+    // 每 60 frame 印 mean.  Reset 在 partA 開頭, 寫 4 個 timestamps 後在下
+    // 一輪 same slot 開始時 read (slot fence 保證 GPU 完成).
+    VkQueryPool m_FrucChainAsyncTimerPool        = VK_NULL_HANDLE;
+    uint32_t    m_FrucChainAsyncTimerSlot        = 0;
+    bool        m_FrucChainAsyncTimerArmed[kFrucFramesInFlight] = {};
+    double      m_FrucChainAsyncGpuPartAUsAccum  = 0.0;
+    double      m_FrucChainAsyncGpuCmpWaitUsAccum= 0.0;
+    double      m_FrucChainAsyncGpuPartCUsAccum  = 0.0;
+    double      m_FrucChainAsyncGpuTotalUsAccum  = 0.0;
+    int         m_FrucChainAsyncGpuCount         = 0;
+
     // Loaded PFNs (we don't have the libplacebo wrapper's lookup; use
     // SDL_Vulkan_GetVkGetInstanceProcAddr + raw vk*ProcAddr chain).
     PFN_vkGetInstanceProcAddr m_pfnGetInstanceProcAddr = nullptr;
