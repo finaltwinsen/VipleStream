@@ -967,6 +967,19 @@ private:
     VkDescriptorSet       m_FrucMeBackwardDescSet     = VK_NULL_HANDLE;
     VkDescriptorSet       m_FrucMedianBackwardDescSet = VK_NULL_HANDLE;
 
+    // §J.3.e.2.i.23 (v1.4.85) Pyramid — RGB ½ downscale + ½ res forward ME pipelines.
+    VkShaderModule        m_FrucDownscaleHalfShaderMod = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_FrucDownscaleHalfDsl       = VK_NULL_HANDLE;
+    VkPipelineLayout      m_FrucDownscaleHalfPipeLay   = VK_NULL_HANDLE;
+    VkPipeline            m_FrucDownscaleHalfPipeline  = VK_NULL_HANDLE;
+    VkDescriptorSet       m_FrucDownscaleHalfPrevDescSet = VK_NULL_HANDLE;  // prev → halfPrev
+    VkDescriptorSet       m_FrucDownscaleHalfCurrDescSet = VK_NULL_HANDLE;  // curr → halfCurr
+    VkShaderModule        m_FrucMeHalfShaderMod = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_FrucMeHalfDsl       = VK_NULL_HANDLE;
+    VkPipelineLayout      m_FrucMeHalfPipeLay   = VK_NULL_HANDLE;
+    VkPipeline            m_FrucMeHalfPipeline  = VK_NULL_HANDLE;
+    VkDescriptorSet       m_FrucMeHalfDescSet   = VK_NULL_HANDLE;
+
     // §J.3.e.2.i.19 (v1.4.83) Phase B — uncertainty flag + 4×4 fine ME pipelines.
     VkShaderModule        m_FrucFlagShaderMod    = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_FrucFlagDsl          = VK_NULL_HANDLE;
@@ -1012,6 +1025,14 @@ private:
     VkDeviceMemory m_FrucRefineFlagBufMem      = VK_NULL_HANDLE;
     VkBuffer       m_FrucMvFineBuf             = VK_NULL_HANDLE;  // (mvW*2)*(mvH*2)*2 int
     VkDeviceMemory m_FrucMvFineBufMem          = VK_NULL_HANDLE;
+
+    // §J.3.e.2.i.23 (v1.4.85) Pyramid — ½ res RGB + MV buffers.
+    VkBuffer       m_FrucPrevRgbHalfBuf        = VK_NULL_HANDLE;  // (W/2)*(H/2)*3*fp32
+    VkDeviceMemory m_FrucPrevRgbHalfBufMem     = VK_NULL_HANDLE;
+    VkBuffer       m_FrucCurrRgbHalfBuf        = VK_NULL_HANDLE;
+    VkDeviceMemory m_FrucCurrRgbHalfBufMem     = VK_NULL_HANDLE;
+    VkBuffer       m_FrucMvHalfBuf             = VK_NULL_HANDLE;  // (mvW/2)*(mvH/2)*2*int
+    VkDeviceMemory m_FrucMvHalfBufMem          = VK_NULL_HANDLE;
     VkBuffer       m_FrucInterpRgbBuf  = VK_NULL_HANDLE;
     VkDeviceMemory m_FrucInterpRgbMem  = VK_NULL_HANDLE;
     // §B2 2026-05-06 — TRIPLE 60→180 路徑用第二個 interp buffer (1/3, 2/3 點).

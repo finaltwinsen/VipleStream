@@ -1260,6 +1260,232 @@ void main() {
 // matching D3D11 shader's bestMV_Q1 convention).  Index =
 // (blockY * mvW + blockX) * 2.
 
+// §J.3.e.2.i.23 (v1.4.85) — Pyramid 第 1 階 RGB ½ res downscale.
+//
+// 2×2 box-average 砍 1×res RGB 到 ½ res. Output planar fp32 RGB (same layout).
+// Dispatch grid = (W/2 + 7) / 8 × (H/2 + 7) / 8, local_size = 8×8.
+// Cost ~50us.
+const char* kFrucRgbDownscaleHalfShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) readonly  buffer InRGB  { float data[]; } inFrame;
+layout(binding = 1) writeonly buffer OutRGB { float data[]; } outFrame;
+
+layout(push_constant) uniform Params {
+    uint inWidth;
+    uint inHeight;
+    uint outWidth;
+    uint outHeight;
+} p;
+
+float fetchInPlane(uint plane, int x, int y) {
+    int xx = clamp(x, 0, int(p.inWidth)  - 1);
+    int yy = clamp(y, 0, int(p.inHeight) - 1);
+    uint planeSize = p.inWidth * p.inHeight;
+    return inFrame.data[plane * planeSize + uint(yy) * p.inWidth + uint(xx)];
+}
+void storeOutPlane(uint plane, uint x, uint y, float v) {
+    uint planeSize = p.outWidth * p.outHeight;
+    outFrame.data[plane * planeSize + y * p.outWidth + x] = v;
+}
+
+void main() {
+    uint ox = gl_GlobalInvocationID.x;
+    uint oy = gl_GlobalInvocationID.y;
+    if (ox >= p.outWidth || oy >= p.outHeight) return;
+
+    int srcX = int(ox) * 2;
+    int srcY = int(oy) * 2;
+    for (uint plane = 0u; plane < 3u; plane++) {
+        float v = (fetchInPlane(plane, srcX,     srcY    ) +
+                   fetchInPlane(plane, srcX + 1, srcY    ) +
+                   fetchInPlane(plane, srcX,     srcY + 1) +
+                   fetchInPlane(plane, srcX + 1, srcY + 1)) * 0.25;
+        storeOutPlane(plane, ox, oy, v);
+    }
+}
+)GLSL";
+
+// §J.3.e.2.i.23 (v1.4.85) — Pyramid 第 2 階 ½ res forward ME.
+//
+// 跟 1× res forward ME 同 census Hamming diamond search，但跑在 ½ res RGB
+// + 8×8 block in ½ res (= 16×16 effective in 1× res).  Output MV 之後會被
+// 1× res forward ME 用作 initial guess.
+//
+// Diamond 步階 [16, 8, 4, 2, 1] = cumulative reach ±31 in ½ res = ±62 in 1×
+// res effective.  比 1× 的 [32,16,8,4,2,1] 少 1 step，但因 ½ res census
+// 評估成本是 ¼ (image bytes 1/4) — 整體 ½ res ME ≈ 1× res ME 的 25-35% time.
+const char* kFrucMotionEstHalfResShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#define SAMPLE_COUNT     3
+#define SAMPLE_STRIDE    2  // ½ res 用較短 stride (1× res 是 4)
+#define CENSUS_RADIUS    1
+
+layout(binding = 0) readonly  buffer PrevRGB { float data[]; } prevFrame;
+layout(binding = 1) readonly  buffer CurrRGB { float data[]; } currFrame;
+layout(binding = 2) writeonly buffer OutMV   { int   data[]; } outMV;
+
+layout(push_constant) uniform Params {
+    uint halfFrameWidth;
+    uint halfFrameHeight;
+    uint blockSize;          // 8 in ½ res
+    uint halfMvWidth;
+    uint halfMvHeight;
+    uint _pad0;
+} p;
+
+float loadPrevY(int x, int y) {
+    int xx = clamp(x, 0, int(p.halfFrameWidth) - 1);
+    int yy = clamp(y, 0, int(p.halfFrameHeight) - 1);
+    int idx = yy * int(p.halfFrameWidth) + xx;
+    int planeSize = int(p.halfFrameWidth) * int(p.halfFrameHeight);
+    float r = prevFrame.data[idx];
+    float g = prevFrame.data[idx + planeSize];
+    float b = prevFrame.data[idx + 2 * planeSize];
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+float loadCurrY(int x, int y) {
+    int xx = clamp(x, 0, int(p.halfFrameWidth) - 1);
+    int yy = clamp(y, 0, int(p.halfFrameHeight) - 1);
+    int idx = yy * int(p.halfFrameWidth) + xx;
+    int planeSize = int(p.halfFrameWidth) * int(p.halfFrameHeight);
+    float r = currFrame.data[idx];
+    float g = currFrame.data[idx + planeSize];
+    float b = currFrame.data[idx + 2 * planeSize];
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+uint censusDescriptorPrev(ivec2 pos) {
+    float center = loadPrevY(pos.x, pos.y);
+    uint bits = 0u; int bit = 0;
+    for (int dy = -CENSUS_RADIUS; dy <= CENSUS_RADIUS; dy++) {
+        for (int dx = -CENSUS_RADIUS; dx <= CENSUS_RADIUS; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            float nb = loadPrevY(pos.x + dx, pos.y + dy);
+            bits |= ((nb < center) ? 1u : 0u) << bit;
+            bit++;
+        }
+    }
+    return bits;
+}
+uint censusDescriptorCurr(ivec2 pos) {
+    float center = loadCurrY(pos.x, pos.y);
+    uint bits = 0u; int bit = 0;
+    for (int dy = -CENSUS_RADIUS; dy <= CENSUS_RADIUS; dy++) {
+        for (int dx = -CENSUS_RADIUS; dx <= CENSUS_RADIUS; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            float nb = loadCurrY(pos.x + dx, pos.y + dy);
+            bits |= ((nb < center) ? 1u : 0u) << bit;
+            bit++;
+        }
+    }
+    return bits;
+}
+
+uint hammingDist(uint a, uint b) { return bitCount(a ^ b); }
+
+uint currCensusCache[SAMPLE_COUNT * SAMPLE_COUNT];
+
+void buildCurrCensusCache(ivec2 curCenter) {
+    int half_s = (SAMPLE_COUNT * SAMPLE_STRIDE) / 2;
+    for (int y = 0; y < SAMPLE_COUNT; y++) {
+        for (int x = 0; x < SAMPLE_COUNT; x++) {
+            ivec2 offset = ivec2(x * SAMPLE_STRIDE - half_s, y * SAMPLE_STRIDE - half_s);
+            ivec2 cp = clamp(curCenter + offset,
+                             ivec2(0, 0),
+                             ivec2(int(p.halfFrameWidth) - 1, int(p.halfFrameHeight) - 1));
+            currCensusCache[y * SAMPLE_COUNT + x] = censusDescriptorCurr(cp);
+        }
+    }
+}
+
+float computeCensusCost(ivec2 refCenter, ivec2 curCenter, float abortAbove) {
+    float cost = 0.0;
+    int half_s = (SAMPLE_COUNT * SAMPLE_STRIDE) / 2;
+    for (int y = 0; y < SAMPLE_COUNT; y++) {
+        for (int x = 0; x < SAMPLE_COUNT; x++) {
+            ivec2 offset = ivec2(x * SAMPLE_STRIDE - half_s, y * SAMPLE_STRIDE - half_s);
+            ivec2 rp = clamp(refCenter + offset,
+                             ivec2(0, 0),
+                             ivec2(int(p.halfFrameWidth) - 1, int(p.halfFrameHeight) - 1));
+            cost += float(hammingDist(censusDescriptorPrev(rp),
+                                      currCensusCache[y * SAMPLE_COUNT + x]));
+        }
+        if (cost >= abortAbove) return cost;
+    }
+    return cost;
+}
+
+const ivec2 searchPattern[8] = ivec2[8](
+    ivec2(0,-1), ivec2(0,1), ivec2(-1,0), ivec2(1,0),
+    ivec2(-1,-1), ivec2(1,-1), ivec2(-1,1), ivec2(1,1)
+);
+
+void storeOutMV(int bx, int by, ivec2 v) {
+    int idx = (by * int(p.halfMvWidth) + bx) * 2;
+    outMV.data[idx]     = v.x;
+    outMV.data[idx + 1] = v.y;
+}
+
+void main() {
+    uint blockX = gl_GlobalInvocationID.x;
+    uint blockY = gl_GlobalInvocationID.y;
+    if (blockX >= p.halfMvWidth || blockY >= p.halfMvHeight) return;
+
+    int halfSample = (SAMPLE_COUNT * SAMPLE_STRIDE) / 2;
+    ivec2 blockCenter = ivec2(int(blockX * p.blockSize + p.blockSize / 2u),
+                              int(blockY * p.blockSize + p.blockSize / 2u));
+    blockCenter = clamp(blockCenter,
+                        ivec2(halfSample, halfSample),
+                        ivec2(int(p.halfFrameWidth)  - halfSample - 1,
+                              int(p.halfFrameHeight) - halfSample - 1));
+
+    buildCurrCensusCache(blockCenter);
+
+    ivec2 bestMV = ivec2(0, 0);
+    float bestCost = computeCensusCost(blockCenter, blockCenter, 1e9);
+    if (bestCost < float(SAMPLE_COUNT * SAMPLE_COUNT) * 0.5) {
+        storeOutMV(int(blockX), int(blockY), ivec2(0, 0));
+        return;
+    }
+
+    // Coarse diamond [16, 8, 4, 2, 1] = ±31 in ½ res = ±62 in 1× effective.
+    const int DIAMOND_STEPS[5] = int[5](16, 8, 4, 2, 1);
+    const int STEP_COUNT = 5;
+    float prevStepBestCost = bestCost;
+    for (int si = 0; si < STEP_COUNT; si++) {
+        int step = DIAMOND_STEPS[si];
+        ivec2 prevBestMV = bestMV;
+        for (int i = 0; i < 8; i++) {
+            ivec2 candidate = prevBestMV + searchPattern[i] * step;
+            ivec2 refCenter = blockCenter + candidate;
+            if (any(lessThan(refCenter, ivec2(halfSample, halfSample))) ||
+                any(greaterThanEqual(refCenter,
+                                      ivec2(int(p.halfFrameWidth)  - halfSample,
+                                            int(p.halfFrameHeight) - halfSample))))
+                continue;
+            float cost = computeCensusCost(refCenter, blockCenter, bestCost);
+            if (cost < bestCost) { bestCost = cost; bestMV = candidate; }
+        }
+        if (bestCost >= prevStepBestCost) break;
+        prevStepBestCost = bestCost;
+    }
+
+    // Output as Q1 (×2) in ½ res 座標.  之後 1× res ME scale 2× 進 1× space.
+    ivec2 bestMV_Q1;
+    if (bestCost > float(SAMPLE_COUNT * SAMPLE_COUNT) * 3.0) {
+        bestMV_Q1 = ivec2(0, 0);
+    } else {
+        bestMV_Q1 = bestMV * 2;
+        bestMV_Q1 = clamp(bestMV_Q1, ivec2(-64, -64), ivec2(64, 64));  // ½ res ±32 = 1× ±64
+    }
+    storeOutMV(int(blockX), int(blockY), bestMV_Q1);
+}
+)GLSL";
+
 // Motion estimation shader — Balanced (Q=1) variant.
 // Source: d3d11_motionest_compute.hlsl @ QUALITY_LEVEL=1.
 // 8-neighbor diamond, 3×3 sample (9 census points), no sub-pixel,
@@ -1282,6 +1508,10 @@ layout(binding = 0) readonly  buffer PrevRGB { float data[]; } prevFrame;
 layout(binding = 1) readonly  buffer CurrRGB { float data[]; } currFrame;
 layout(binding = 2) readonly  buffer PrevMV  { int   data[]; } prevMV;
 layout(binding = 3) writeonly buffer OutMV   { int   data[]; } outMV;
+// §J.3.e.2.i.23 (v1.4.85) Pyramid — ½ res MV predictor (optional).
+// hasHalfMvPredictor=1 啟用; 跳過寬範圍 diamond [32,16,8,4] 只跑 [4,2,1].
+// hasHalfMvPredictor=0 binding 4 仍綁定 stub buffer 但不讀.
+layout(binding = 4) readonly  buffer HalfMV  { int   data[]; } halfMV;
 
 layout(push_constant) uniform Params {
     uint frameWidth;
@@ -1289,7 +1519,7 @@ layout(push_constant) uniform Params {
     uint blockSize;
     uint mvWidth;
     uint mvHeight;
-    uint _pad0;
+    uint hasHalfMvPredictor;  // §J.3.e.2.i.23 (v1.4.85) Pyramid
 } p;
 
 // §B-DUMP A'.1 2026-05-07 — luma instead of R-channel-only census.
@@ -1471,12 +1701,48 @@ void main() {
     //
     // Early-out preserved: if cost stops improving step-to-step, break out.
     // Most blocks converge within 2-3 steps when motion is small/zero.
+    // §J.3.e.2.i.23 (v1.4.85) Pyramid — 用 ½ res MV 當 initial guess.
+    // halfMV buffer 是 ½ res mvWidth/2 × mvHeight/2 個 block (8×8 在 ½ res = 16×16
+    // effective in 1× res).  每 4 個 1× res 8×8 block 共享 1 個 ½ res block.
+    // ½ res MV unit Q1 = 1× res 1 pixel; scale ×2 取得 1× res Q1 → integer.
+    if (p.hasHalfMvPredictor != 0u) {
+        int halfMvW = int(p.mvWidth) / 2;
+        int halfBx = int(blockX) / 2;
+        int halfBy = int(blockY) / 2;
+        int halfIdx = (halfBy * halfMvW + halfBx) * 2;
+        ivec2 halfMV_Q1 = ivec2(halfMV.data[halfIdx], halfMV.data[halfIdx + 1]);
+        ivec2 halfMV_int = ivec2(
+            (halfMV_Q1.x >= 0 ? halfMV_Q1.x + 1 : halfMV_Q1.x - 1) / 2,
+            (halfMV_Q1.y >= 0 ? halfMV_Q1.y + 1 : halfMV_Q1.y - 1) / 2
+        );
+        ivec2 pyramidMV = halfMV_int * 2;  // ½ res integer → 1× res integer
+        ivec2 refCenterPyr = blockCenter + pyramidMV;
+        if (all(greaterThanEqual(refCenterPyr, ivec2(halfSample, halfSample))) &&
+            all(lessThan(refCenterPyr,
+                         ivec2(int(p.frameWidth) - halfSample,
+                               int(p.frameHeight) - halfSample)))) {
+            float pyrCost = computeCensusCost(refCenterPyr, blockCenter, bestCost);
+            if (pyrCost < bestCost) { bestCost = pyrCost; bestMV = pyramidMV; }
+        }
+    }
+
     if (!temporalConverged) {
         const int MAX_CANDIDATES = 48;
         int candidateCount = 0;
         float prevStepBestCost = bestCost;
-        const int DIAMOND_STEPS[6] = int[6](32, 16, 8, 4, 2, 1);
-        const int DIAMOND_STEP_COUNT = 6;
+        // §J.3.e.2.i.23 (v1.4.85) Pyramid — 有 half-res predictor 跳過寬 diamond
+        // [32,16,8] 直接 fine refine [4,2,1].  predictor 已抓 big motion.
+        const int DIAMOND_STEPS_FULL[6] = int[6](32, 16, 8, 4, 2, 1);
+        const int DIAMOND_STEPS_FINE[3] = int[3](4, 2, 1);
+        int DIAMOND_STEP_COUNT = (p.hasHalfMvPredictor != 0u) ? 3 : 6;
+        int DIAMOND_STEPS[6];
+        if (p.hasHalfMvPredictor != 0u) {
+            DIAMOND_STEPS[0] = DIAMOND_STEPS_FINE[0];
+            DIAMOND_STEPS[1] = DIAMOND_STEPS_FINE[1];
+            DIAMOND_STEPS[2] = DIAMOND_STEPS_FINE[2];
+        } else {
+            for (int k = 0; k < 6; k++) DIAMOND_STEPS[k] = DIAMOND_STEPS_FULL[k];
+        }
         for (int si = 0; si < DIAMOND_STEP_COUNT; si++) {
             int step = DIAMOND_STEPS[si];
             ivec2 prevBestMV = bestMV;
@@ -4657,7 +4923,10 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
 
     VkShaderModule meMod = VK_NULL_HANDLE; VkDescriptorSetLayout meDsl = VK_NULL_HANDLE;
     VkPipelineLayout mePL = VK_NULL_HANDLE; VkPipeline mePipe = VK_NULL_HANDLE;
-    if (!buildPipeline("ME", kFrucMotionEstShaderGlsl, 4, 24, meMod, meDsl, mePL, mePipe)) {
+    // §J.3.e.2.i.23 (v1.4.85) Pyramid — ME 4→5 bindings (binding 4 = ½ res MV),
+    // push const 24→28 byte (uint hasHalfMvPredictor).  plvk standalone path
+    // 不跑 pyramid; binding 4 stub-綁 prevMv 同 buffer, push const hasHalfMvPredictor=0.
+    if (!buildPipeline("ME", kFrucMotionEstShaderGlsl, 5, 28, meMod, meDsl, mePL, mePipe)) {
         m_FrucGenericDisabled = true; return false;
     }
     m_FrucMeShaderMod = meMod; m_FrucMeDsl = meDsl; m_FrucMePipeLay = mePL; m_FrucMePipeline = mePipe;
@@ -4733,11 +5002,11 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
     m_FrucPrevMvBuf = prevMv;          m_FrucPrevMvMem = prevMvMem;
     m_FrucInterpRgbBuf = interpRgb;    m_FrucInterpRgbMem = interpRgbMem;
 
-    // === Descriptor pool: 3 sets × varying bindings = 4+2+8 = 14 storage-buffer descriptors ===
-    // §J.3.e.2.i.19 (v1.4.83) Phase B — warp bumped 6→8 bindings (+2 descriptors).
+    // === Descriptor pool: 3 sets × varying bindings = 5+2+8 = 15 storage-buffer descriptors ===
+    // §J.3.e.2.i.23 (v1.4.85) Pyramid — ME bumped 4→5 bindings (+1 descriptor).
     VkDescriptorPoolSize pSize = {};
     pSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pSize.descriptorCount = 14;
+    pSize.descriptorCount = 15;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpCi.maxSets = 3;
@@ -4780,13 +5049,12 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
     };
 
     VkDescriptorSet meDs = VK_NULL_HANDLE, medDs = VK_NULL_HANDLE, warpDs = VK_NULL_HANDLE;
-    // ME bindings: 0 prevRgb, 1 currRgb (alias bufRGB), 2 prevMv, 3 outMv
+    // ME bindings: 0 prevRgb, 1 currRgb, 2 prevMv, 3 outMv,
+    //              4 halfMv (v1.4.85 stub-prevMv since pyramid 不啟用).
     // Warp bindings: 0 prevRgb, 1 currRgb, 2 mvFiltered, 3 interpRgb,
     //               4 prevMv (v1.4.80 temporal), 5 bwdMv (v1.4.82 stub-prevMv),
     //               6 fineMv (v1.4.83 stub-mvF), 7 refineFlag (v1.4.83 stub-mvF).
-    // plvk standalone path: hasBackwardMv=0 + hasFineMv=0 → shader skips both
-    // fine and occlusion paths; stub buffers OK since not read.
-    if (!allocAndUpdateSet(meDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, prevMv, mv }, meDs)
+    if (!allocAndUpdateSet(meDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, prevMv, mv, prevMv }, meDs)
         || !allocAndUpdateSet(medDsl, { mv, mvF }, medDs)
         || !allocAndUpdateSet(warpDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, mvF, interpRgb, prevMv, prevMv, mvF, mvF }, warpDs)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -4962,8 +5230,10 @@ bool PlVkRenderer::runFrucGenericComputePass(uint32_t width, uint32_t height)
     VkDescriptorSet meDs = (VkDescriptorSet)m_FrucMeDescSet;
     pfnBindDS(cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)m_FrucMePipeLay,
               0, 1, &meDs, 0, nullptr);
+    // §J.3.e.2.i.23 (v1.4.85) Pyramid — push const 28 byte: 6 uints.
+    // hasHalfMvPredictor=0 (plvk standalone 不跑 pyramid).
     struct MePc {
-        uint32_t frameWidth, frameHeight, blockSize, mvWidth, mvHeight, _pad0;
+        uint32_t frameWidth, frameHeight, blockSize, mvWidth, mvHeight, hasHalfMvPredictor;
     } mePc = { width, height, 8, m_FrucGenericMvWidth, m_FrucGenericMvHeight, 0 };
     pfnPushC(cb, (VkPipelineLayout)m_FrucMePipeLay,
              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mePc), &mePc);
