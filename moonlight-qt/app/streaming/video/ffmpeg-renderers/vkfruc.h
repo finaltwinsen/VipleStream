@@ -1328,6 +1328,21 @@ private:
     double      m_FrucChainAsyncGpuTotalUsAccum    = 0.0;
     int         m_FrucChainAsyncGpuCount           = 0;
 
+    // §J.3.e.2.i.36 (v1.4.98) — single-cmd HW path (frucChainAsyncActiveHw
+    // gate=OFF) 整 cmd buf GPU 時間量測, 跟 async PROF 對比量化 actual
+    // parallelism gain.  2 ts × kFrucFramesInFlight: ts[0] cmd buf TOP
+    // (BeginCmd 之後), ts[1] cmd buf BOTTOM (EndCmd 之前 含 chain dispatch
+    // + render passes + releaseBar).  Sync total = ts[1]-ts[0].
+    //
+    // User unset VIPLE_VKFRUC_FRUC_ASYNC 跑 sync mode → 拿
+    // [VIPLE-VKFRUC-FRUC-SYNC-PROF] log → 跟 [VIPLE-VKFRUC-FRUC-ASYNC-PROF]
+    // 的 total 對比, 算 async win = sync_total - async_total.
+    VkQueryPool m_FrucChainSyncTimerPool           = VK_NULL_HANDLE;
+    uint32_t    m_FrucChainSyncTimerSlot           = 0;
+    bool        m_FrucChainSyncTimerArmed[kFrucFramesInFlight] = {};
+    double      m_FrucChainSyncGpuTotalUsAccum     = 0.0;
+    int         m_FrucChainSyncGpuCount            = 0;
+
     // Loaded PFNs (we don't have the libplacebo wrapper's lookup; use
     // SDL_Vulkan_GetVkGetInstanceProcAddr + raw vk*ProcAddr chain).
     PFN_vkGetInstanceProcAddr m_pfnGetInstanceProcAddr = nullptr;

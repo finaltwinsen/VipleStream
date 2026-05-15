@@ -6796,6 +6796,20 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                             "[VIPLE-VKFRUC] §J.3.e.2.i.33 FRUC chain async timestamp pool "
                             "ready (%u queries)", qpCiFCA.queryCount);
             }
+            // §J.3.e.2.i.36 (v1.4.98) — fourth pool for sync (single-cmd HW
+            // path) total GPU benchmark: 2 timestamps × kFrucFramesInFlight.
+            // 跟 async PROF 對比量化 parallelism gain.  Non-fatal.
+            VkQueryPoolCreateInfo qpCiFCS = qpCi;
+            qpCiFCS.queryCount = 2 * kFrucFramesInFlight;
+            if (pfnCreateQueryPool(m_Device, &qpCiFCS, nullptr, &m_FrucChainSyncTimerPool) != VK_SUCCESS) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.36 FRUC chain sync timestamp pool create failed (non-fatal)");
+                m_FrucChainSyncTimerPool = VK_NULL_HANDLE;
+            } else {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC] §J.3.e.2.i.36 FRUC chain sync timestamp pool "
+                            "ready (%u queries)", qpCiFCS.queryCount);
+            }
         }
     }
 
@@ -7030,6 +7044,12 @@ void VkFrucRenderer::destroyFrucComputeResources()
         m_FrucChainAsyncTimerPool = VK_NULL_HANDLE;
     }
     for (uint32_t i = 0; i < kFrucFramesInFlight; ++i) m_FrucChainAsyncTimerArmed[i] = false;
+    // §J.3.e.2.i.36 (v1.4.98) — sync (single-cmd HW path) timestamp pool
+    if (m_FrucChainSyncTimerPool && pfnDestroyQueryPool) {
+        pfnDestroyQueryPool(m_Device, m_FrucChainSyncTimerPool, nullptr);
+        m_FrucChainSyncTimerPool = VK_NULL_HANDLE;
+    }
+    for (uint32_t i = 0; i < kFrucFramesInFlight; ++i) m_FrucChainSyncTimerArmed[i] = false;
 
     // §J.3.e.2.i.6 teardown crash fix — when the last ref drops, call
     // ncnn::destroy_gpu_instance() so ncnn's internal Vulkan resources
@@ -11053,6 +11073,52 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     m_RtPfn.BeginCommandBuffer(cmd, &cbbi);
 
+    // §J.3.e.2.i.36 (v1.4.98) — single-cmd HW path GPU 量測 (sync mode).
+    // gate=ON 時走 frucChainAsyncActiveHw 三 submit (early return 上方),
+    // 不走這段; gate=OFF 時走這個 single-cmd path, 量整 cmd buf GPU 時間
+    // 跟 async PROF 對比量化 parallelism gain.  共用同 m_FrucTimerNsPerTick.
+    auto getDevPaSct = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCmdResetQueryPool_sct  = (PFN_vkCmdResetQueryPool)getDevPaSct(m_Device, "vkCmdResetQueryPool");
+    auto pfnCmdWriteTimestamp_sct  = (PFN_vkCmdWriteTimestamp)getDevPaSct(m_Device, "vkCmdWriteTimestamp");
+    auto pfnGetQueryPoolResults_sct = (PFN_vkGetQueryPoolResults)getDevPaSct(m_Device, "vkGetQueryPoolResults");
+
+    const uint32_t fcsTimerSlot = m_FrucChainSyncTimerSlot;
+    const uint32_t fcsTimerBase = fcsTimerSlot * 2;
+    if (m_FrucChainSyncTimerPool && pfnGetQueryPoolResults_sct
+        && m_FrucChainSyncTimerArmed[fcsTimerSlot]) {
+        uint64_t ts[2] = {};
+        VkResult qrFCS = pfnGetQueryPoolResults_sct(m_Device, m_FrucChainSyncTimerPool,
+            fcsTimerBase, 2, sizeof(ts), ts, sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT);
+        if (qrFCS == VK_SUCCESS && ts[1] >= ts[0]) {
+            const double ns2us = m_FrucTimerNsPerTick / 1000.0;
+            m_FrucChainSyncGpuTotalUsAccum += (double)(ts[1] - ts[0]) * ns2us;
+            m_FrucChainSyncGpuCount++;
+            if (m_FrucChainSyncGpuCount >= 60) {
+                const double avgTot = m_FrucChainSyncGpuTotalUsAccum
+                                    / (double)m_FrucChainSyncGpuCount;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-FRUC-SYNC-PROF] total=%.0fus (n=%d, mean over "
+                    "last 60 frames; single-cmd HW path 整 cmd buf GPU 時間, "
+                    "= chain dispatch + render passes + barriers).  跟 "
+                    "[VIPLE-VKFRUC-FRUC-ASYNC-PROF] total 對比可算 async win "
+                    "= sync_total - async_total.",
+                    avgTot, m_FrucChainSyncGpuCount);
+                m_FrucChainSyncGpuTotalUsAccum = 0.0;
+                m_FrucChainSyncGpuCount        = 0;
+            }
+        }
+    }
+    m_FrucChainSyncTimerSlot = (m_FrucChainSyncTimerSlot + 1) % kFrucFramesInFlight;
+
+    // §J.3.e.2.i.36 — reset 2 queries + ts[0] = cmd buf TOP_OF_PIPE start.
+    if (m_FrucChainSyncTimerPool && pfnCmdResetQueryPool_sct && pfnCmdWriteTimestamp_sct) {
+        pfnCmdResetQueryPool_sct(cmd, m_FrucChainSyncTimerPool, fcsTimerBase, 2);
+        pfnCmdWriteTimestamp_sct(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                  m_FrucChainSyncTimerPool, fcsTimerBase + 0);
+    }
+
     //  6a. Pipeline barrier — layout transition only.  Use
     //      VK_QUEUE_FAMILY_IGNORED on both sides (PlVkRenderer pattern):
     //      AVVkFrame.sem timeline semaphore wait in vkQueueSubmit below
@@ -11512,6 +11578,13 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                                     "[VIPLE-VKFRUC] frame#0 release barrier issued (to GENERAL)");
     }
 
+    // §J.3.e.2.i.36 (v1.4.98) — ts[1] = cmd buf BOTTOM_OF_PIPE end (含 chain
+    // dispatch + render passes + releaseBar).  partC submit 成功之後 set armed.
+    if (m_FrucChainSyncTimerPool && pfnCmdWriteTimestamp_sct) {
+        pfnCmdWriteTimestamp_sct(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                  m_FrucChainSyncTimerPool, fcsTimerBase + 1);
+    }
+
     VkResult endVr = m_RtPfn.EndCommandBuffer(cmd);
     if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VKFRUC] frame#0 EndCommandBuffer returned %d", (int)endVr);
@@ -11765,6 +11838,13 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
 
         // ---- 9. Unlock AVVkFrame ----
         if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+    }
+
+    // §J.3.e.2.i.36 (v1.4.98) — single-cmd path submit succeeded → mark
+    // sync timer slot armed.  跑到這裡 vrPost / vr 已 success (vrPost 在
+    // line 10688+, vr 在 line 10729+; submit fail 已 early-return).
+    if (m_FrucChainSyncTimerPool) {
+        m_FrucChainSyncTimerArmed[fcsTimerSlot] = true;
     }
 
     // ---- 10. Present ----
