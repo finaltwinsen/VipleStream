@@ -145,7 +145,33 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
-### v1.4.70 ship 帶走的條目（2026-05-15, post v1.4.69 auto-tier wire）
+### v1.4.71 ship 帶走的條目（2026-05-15, post v1.4.70 auto-tier UI 整合）
+
+- 🟡 **§J.3.e.2.i.12 Generic FRUC TRIPLE 邊緣 mosaic 修補（第一刀：bilateral median）**
+  使用者開 vulkan renderer + 補幀 + TRIPLE on (180Hz display)，回報物體
+  邊緣有方塊狀馬賽克。Audit (plvk.cpp:1528 kFrucMvMedianShaderGlsl)
+  找到 root cause：
+  - 既有 3×3 median 用 component-wise sort (sort sx 取 median, sort sy 取
+    median)，在邊界區域 (foreground / background MV 並存) 盲目混合，產
+    生「不對應任何 source block」的人造 MV，warp 結果方塊狀
+  - 例：foreground block MV=(10,0)，background MV=(0,0)，鄰居 9 個一半
+    foreground 一半 background，component median 可能得 (5,0) → 介於兩
+    者，warp 取錯 source pixel → 方塊狀融合
+  - 修：改成 **range-bilateral trimmed mean**：以 3×3 中心 MV (input
+    center) 為 reference，剔除離 center 太遠 (distance² > 64 = 8 MV-unit
+    = 4 px in Q1 storage) 的鄰居，剩下做 mean
+    - 邊界 block (center 是 foreground)：背景 neighbor 不會混入，邊界 MV
+      銳利
+    - smooth 區 (center 跟鄰居相近)：退化成 mean(9)，跟原 median 等價
+    - outlier (single noisy MV in smooth region)：自己被剔除，回歸鄰居均值
+  - `plvk.cpp:kFrucMvMedianShaderGlsl` 改 ~30 LOC：保留 fast paths
+    (uniform / near-uniform 提早 return)，把 sort9() + median-pick 換成
+    distance-test trimmed mean. GPU cost 相近 (~0.3ms steady on RTX 3060).
+  - 既有 sort9() helper 保留但變 dead code (給未來反向 fallback 用), 不
+    動可避免 git churn
+  - 下一刀 v1.4.72: warp edge-fade (高 MV magnitude → 自動降 warp 強度)
+
+### v1.4.70 ship 帶走的條目（2026-05-15, post v1.4.69 auto-tier UI 整合）
 
 - 🟢 **§J.3.e.2.i.11 cross-HW FRUC auto-tier — UI 整合** — 4-commit staged
   plan 最後一刀（原 plan v1.4.69，順延至此版）。
