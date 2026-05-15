@@ -6780,11 +6780,13 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                             "ready (%u queries)", qpCi2B.queryCount);
             }
             // §J.3.e.2.i.33 (v1.4.95) — third pool for HW path frucChainAsyncActiveHw
-            // GPU benchmark: 4 timestamps × kFrucFramesInFlight slots (partA
-            // start/end + partC start/end).  Non-fatal — failure 只 disable
-            // async chain profiling, 不影響 functional path.
+            // GPU benchmark: 6 timestamps × kFrucFramesInFlight slots.
+            // §J.3.e.2.i.34 (v1.4.96) — 4 → 6 加 cmpCmd internal start/end
+            // (cross-QF timestamp).
+            // Non-fatal — failure 只 disable async chain profiling, 不影響
+            // functional path.
             VkQueryPoolCreateInfo qpCiFCA = qpCi;
-            qpCiFCA.queryCount = 4 * kFrucFramesInFlight;
+            qpCiFCA.queryCount = 6 * kFrucFramesInFlight;
             if (pfnCreateQueryPool(m_Device, &qpCiFCA, nullptr, &m_FrucChainAsyncTimerPool) != VK_SUCCESS) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VKFRUC] §J.3.e.2.i.33 FRUC chain async timestamp pool create failed (non-fatal)");
@@ -8110,7 +8112,9 @@ void VkFrucRenderer::acquireBufferOwnership(VkCommandBuffer cmd, VkBuffer buf,
 // cmpCmd 同 QF 內完成).
 bool VkFrucRenderer::recordFrucChainOnCompute(VkCommandBuffer cmpCmd,
                                                 uint32_t width, uint32_t height,
-                                                uint32_t slot)
+                                                uint32_t slot,
+                                                VkQueryPool timerPool,
+                                                uint32_t    timerBase)
 {
     if (!m_FrucChainAsyncAvailable) {
         return false;
@@ -8141,6 +8145,20 @@ bool VkFrucRenderer::recordFrucChainOnCompute(VkCommandBuffer cmpCmd,
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
             "[VIPLE-VKFRUC-FRUC-ASYNC] vkBeginCommandBuffer(cmpCmd) failed — demote");
         return false;
+    }
+
+    // §J.3.e.2.i.34 (v1.4.96) — optional cmpCmd internal GPU timestamp.
+    // Caller (HW path) 可傳 timerPool + timerBase 寫 ts[base+0] = cmpCmd
+    // TOP_OF_PIPE start (acquire ownership 之前) 跟 ts[base+1] = cmpCmd
+    // BOTTOM_OF_PIPE end (release ownership 之後).  SW caller 預設 NULL pool
+    // 不啟用.  cmpCmd 在 compute QF, 跟 graphics QF partA/partC 的 timestamp
+    // 跨 QF 比較依賴 driver clock sync (typically OK on same physical GPU).
+    auto getDevPaCT = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCmdWriteTimestamp_ct = (PFN_vkCmdWriteTimestamp)getDevPaCT(m_Device, "vkCmdWriteTimestamp");
+    if (timerPool != VK_NULL_HANDLE && pfnCmdWriteTimestamp_ct) {
+        pfnCmdWriteTimestamp_ct(cmpCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                 timerPool, timerBase + 0);
     }
 
     // Acquire input ownership (graphics → compute).
@@ -8188,6 +8206,12 @@ bool VkFrucRenderer::recordFrucChainOnCompute(VkCommandBuffer cmpCmd,
         VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+    // §J.3.e.2.i.34 (v1.4.96) — cmpCmd BOTTOM_OF_PIPE end timestamp.
+    if (timerPool != VK_NULL_HANDLE && pfnCmdWriteTimestamp_ct) {
+        pfnCmdWriteTimestamp_ct(cmpCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                 timerPool, timerBase + 1);
+    }
 
     if (m_RtPfn.EndCommandBuffer(cmpCmd) != VK_SUCCESS) {
         m_FrucChainAsyncAvailable = false;
@@ -10269,33 +10293,45 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         auto pfnGetQueryPoolResults_fca = (PFN_vkGetQueryPoolResults)getDevPaFCA(m_Device, "vkGetQueryPoolResults");
 
         const uint32_t fcaTimerSlot = m_FrucChainAsyncTimerSlot;
-        const uint32_t fcaTimerBase = fcaTimerSlot * 4;
+        const uint32_t fcaTimerBase = fcaTimerSlot * 6;
         if (m_FrucChainAsyncTimerPool && pfnGetQueryPoolResults_fca
             && m_FrucChainAsyncTimerArmed[fcaTimerSlot]) {
-            uint64_t ts[4] = {};
+            uint64_t ts[6] = {};
             VkResult qrFCA = pfnGetQueryPoolResults_fca(m_Device, m_FrucChainAsyncTimerPool,
-                fcaTimerBase, 4, sizeof(ts), ts, sizeof(uint64_t),
+                fcaTimerBase, 6, sizeof(ts), ts, sizeof(uint64_t),
                 VK_QUERY_RESULT_64_BIT);
-            if (qrFCA == VK_SUCCESS && ts[3] >= ts[0]) {
+            if (qrFCA == VK_SUCCESS && ts[5] >= ts[0]) {
                 const double ns2us = m_FrucTimerNsPerTick / 1000.0;
-                m_FrucChainAsyncGpuPartAUsAccum   += (double)(ts[1] - ts[0]) * ns2us;
-                m_FrucChainAsyncGpuCmpWaitUsAccum += (double)(ts[2] - ts[1]) * ns2us;
-                m_FrucChainAsyncGpuPartCUsAccum   += (double)(ts[3] - ts[2]) * ns2us;
-                m_FrucChainAsyncGpuTotalUsAccum   += (double)(ts[3] - ts[0]) * ns2us;
+                // ts[2]/ts[3] cross-QF (compute), 跟 ts[1]/ts[4] 比較依賴
+                // driver clock sync.  保險 clamp 為 0 if cross-QF 顯示負差
+                // (driver clock skew between QFs).
+                auto safeDur = [](uint64_t a, uint64_t b) -> uint64_t {
+                    return (b >= a) ? (b - a) : 0;
+                };
+                m_FrucChainAsyncGpuPartAUsAccum   += (double)safeDur(ts[0], ts[1]) * ns2us;
+                m_FrucChainAsyncGpuCmpDurUsAccum  += (double)safeDur(ts[2], ts[3]) * ns2us;
+                m_FrucChainAsyncGpuCmpWaitUsAccum += (double)safeDur(ts[1], ts[4]) * ns2us;
+                m_FrucChainAsyncGpuPartCUsAccum   += (double)safeDur(ts[4], ts[5]) * ns2us;
+                m_FrucChainAsyncGpuTotalUsAccum   += (double)safeDur(ts[0], ts[5]) * ns2us;
                 m_FrucChainAsyncGpuCount++;
                 if (m_FrucChainAsyncGpuCount >= 60) {
                     const double n = (double)m_FrucChainAsyncGpuCount;
                     const double avgA    = m_FrucChainAsyncGpuPartAUsAccum   / n;
+                    const double avgCmp  = m_FrucChainAsyncGpuCmpDurUsAccum  / n;
                     const double avgWait = m_FrucChainAsyncGpuCmpWaitUsAccum / n;
                     const double avgC    = m_FrucChainAsyncGpuPartCUsAccum   / n;
                     const double avgTot  = m_FrucChainAsyncGpuTotalUsAccum   / n;
+                    const double avgHandoff = avgWait - avgCmp;  // = handoff_in + handoff_out
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC-FRUC-ASYNC-PROF] partA=%.0fus cmpWait=%.0fus "
-                        "partC=%.0fus total=%.0fus (n=%d, mean over last 60 frames; "
-                        "cmpWait = graphics QF idle 等 cmpCmd 完成 effective time, "
-                        "= cmpCmd GPU dur 加 cross-QF handoff overhead)",
-                        avgA, avgWait, avgC, avgTot, m_FrucChainAsyncGpuCount);
+                        "[VIPLE-VKFRUC-FRUC-ASYNC-PROF] partA=%.0fus cmpDur=%.0fus "
+                        "cmpWait=%.0fus handoff=%.0fus partC=%.0fus total=%.0fus "
+                        "(n=%d, mean over last 60 frames; cmpDur = compute QF GPU "
+                        "time, cmpWait = graphics QF effective wait = cmpDur + cross-"
+                        "QF handoff sem signal/wait latency)",
+                        avgA, avgCmp, avgWait, avgHandoff, avgC, avgTot,
+                        m_FrucChainAsyncGpuCount);
                     m_FrucChainAsyncGpuPartAUsAccum   = 0.0;
+                    m_FrucChainAsyncGpuCmpDurUsAccum  = 0.0;
                     m_FrucChainAsyncGpuCmpWaitUsAccum = 0.0;
                     m_FrucChainAsyncGpuPartCUsAccum   = 0.0;
                     m_FrucChainAsyncGpuTotalUsAccum   = 0.0;
@@ -10318,10 +10354,12 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             return;
         }
 
-        // §J.3.e.2.i.33 (v1.4.95) — reset 4 queries for this slot + write
+        // §J.3.e.2.i.33 (v1.4.95) — reset 6 queries for this slot + write
         // ts[0] = partA TOP_OF_PIPE start.
+        // §J.3.e.2.i.34 (v1.4.96) — 4 → 6 queries (cmpCmd ts[2]/ts[3] 加在
+        // recordFrucChainOnCompute helper 內).
         if (m_FrucChainAsyncTimerPool && pfnCmdResetQueryPool_fca && pfnCmdWriteTimestamp_fca) {
-            pfnCmdResetQueryPool_fca(preCmd, m_FrucChainAsyncTimerPool, fcaTimerBase, 4);
+            pfnCmdResetQueryPool_fca(preCmd, m_FrucChainAsyncTimerPool, fcaTimerBase, 6);
             pfnCmdWriteTimestamp_fca(preCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                       m_FrucChainAsyncTimerPool, fcaTimerBase + 0);
         }
@@ -10486,8 +10524,14 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         }
 
         // ===== cmpCmd: recordFrucChainOnCompute =====
+        // §J.3.e.2.i.34 (v1.4.96) — 傳 timer pool + base + 2 給 helper, helper
+        // 內部寫 ts[base+2] = cmpCmd start (TOP) + ts[base+3] = cmpCmd end
+        // (BOTTOM).  Cross-QF (compute → graphics) timestamp 比較依賴 driver
+        // clock sync.
         m_RtPfn.ResetCommandBuffer(cmpCmd, 0);
-        if (!recordFrucChainOnCompute(cmpCmd, hwW, hwH, slot)) {
+        if (!recordFrucChainOnCompute(cmpCmd, hwW, hwH, slot,
+                                       m_FrucChainAsyncTimerPool,
+                                       fcaTimerBase + 2)) {
             // helper 已 demote m_FrucChainAsyncAvailable.
             // pathDActive 已 unlock; 非 pathDActive 才需要 unlock.
             if (!pathDActive && vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
@@ -10503,11 +10547,12 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             return;
         }
 
-        // §J.3.e.2.i.33 (v1.4.95) — ts[2] = partC TOP_OF_PIPE start (= cmpCmd
-        // 完成 + acquire 開始).
+        // §J.3.e.2.i.33 (v1.4.95) — ts[4] = partC TOP_OF_PIPE start (= cmpCmd
+        // 完成 + acquire 開始).  §J.3.e.2.i.34 (v1.4.96) — index 2 → 4 (cmpCmd
+        // ts[2]/[3] 在 helper 內).
         if (m_FrucChainAsyncTimerPool && pfnCmdWriteTimestamp_fca) {
             pfnCmdWriteTimestamp_fca(postCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                      m_FrucChainAsyncTimerPool, fcaTimerBase + 2);
+                                      m_FrucChainAsyncTimerPool, fcaTimerBase + 4);
         }
 
         // Acquire compute → graphics for interp / curr buffers (對應 cmpCmd
@@ -10655,10 +10700,11 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
             0, 0, nullptr, 0, nullptr, 1, &releaseBarD);
 
-        // §J.3.e.2.i.33 (v1.4.95) — ts[3] = partC BOTTOM_OF_PIPE end.
+        // §J.3.e.2.i.33 (v1.4.95) — ts[5] = partC BOTTOM_OF_PIPE end.
+        // §J.3.e.2.i.34 (v1.4.96) — index 3 → 5.
         if (m_FrucChainAsyncTimerPool && pfnCmdWriteTimestamp_fca) {
             pfnCmdWriteTimestamp_fca(postCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                      m_FrucChainAsyncTimerPool, fcaTimerBase + 3);
+                                      m_FrucChainAsyncTimerPool, fcaTimerBase + 5);
         }
 
         if (m_RtPfn.EndCommandBuffer(postCmd) != VK_SUCCESS) {
