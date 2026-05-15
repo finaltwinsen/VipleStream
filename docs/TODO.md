@@ -145,6 +145,31 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.73 ship 帶走的條目（2026-05-15, post v1.4.72 warp edge-fade）
+
+- 🔴 **§J.3.e.2.i.11 v1.4.68 benchmark 嚴重 bug 修補** — Real-stream
+  benchmark 驗測時發現使用者 QSettings 內 `vkfrucBenchmarkNs=493154300`
+  (493ms)，把 RTX 3060 Laptop 誤分到 ENTRY tier。深查 root cause：
+  `benchmarkInterpBilinearOnce` 在 v1.4.68 把 `chrono::steady_clock` wrap
+  在整個 `runComputeOnce` 呼叫外面，但 `runComputeOnce` 每次 full setup
+  (compile shader via ncnn glslang ~250ms + create VkPipeline ~100ms +
+  alloc buffers + dispatch + free)。Warmup pass 之後 measure pass 重做
+  同樣 setup —— 量到的 ns 99% 是 CPU compile/setup 不是 GPU dispatch.
+  Real-stream log 證實 RTX 3060 Laptop 實際 GPU dispatch 應該 1-2ms 範圍.
+  - 修：`RunComputeOptions` 加 `uint64_t* outSubmitWaitNs = nullptr` hook;
+    `runComputeOnce` 內部用 `chrono::steady_clock` 量 `vkQueueSubmit` 到
+    `WaitForFences` 回傳之間，寫到 outSubmitWaitNs (排除 CPU setup)
+  - `benchmarkInterpBilinearOnce` 改 measure pass 用 outSubmitWaitNs 拿
+    純 GPU dispatch 時間
+  - 加 cache invalidation: vkfrucBenchmarkNs > 50ms 視為 v1.4.68 buggy
+    measurement，強制 rerun benchmark (constexpr kSaneMaxNs = 50ms;
+    real GPU dispatch always <50ms even on weak iGPU)
+  - 預期 RTX 3060 Laptop 量到 1-2ms range → BALANCED tier (1-2.5ms band)
+    → auto-tier (if enabled) 套 inferDim=128 而非 buggy ENTRY 的 manual
+    fallback
+  - 注意：使用者 QSettings `vkfrucRifeAutoTier=false` (manual mode)，所以
+    auto-tier 結果只對 fresh install 或主動 enable auto-tier UI 的人生效
+
 ### v1.4.72 ship 帶走的條目（2026-05-15, post v1.4.71 bilateral median）
 
 - 🟡 **§J.3.e.2.i.12 Generic FRUC TRIPLE 邊緣 mosaic 修補（第二刀：warp

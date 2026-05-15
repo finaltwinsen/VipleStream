@@ -2748,6 +2748,15 @@ struct RunComputeOptions {
     uint32_t          dispX        = 1;
     uint32_t          dispY        = 1;
     uint32_t          dispZ        = 1;
+    // §J.3.e.2.i.11 (v1.4.73) — GPU dispatch-only wall-clock measurement
+    // hook for the auto-tier benchmark.  When non-null, runComputeOnce
+    // writes ns elapsed between vkQueueSubmit and WaitForFences return.
+    // EXCLUDES shader compile / pipeline create / buffer alloc / cmd
+    // record / cleanup (~490ms of those was wrongly classified as GPU
+    // time in v1.4.68's benchmark, putting RTX 3060 Laptop in ENTRY tier
+    // when it should be BALANCED).  Caller is responsible for ensuring
+    // GPU side state is warm (do warmup dispatch first, ignore that ns).
+    uint64_t*         outSubmitWaitNs = nullptr;
 };
 
 bool runComputeOnce(const VulkanCtx& ctx, const RunComputeOptions& opts) {
@@ -3005,6 +3014,13 @@ bool runComputeOnce(const VulkanCtx& ctx, const RunComputeOptions& opts) {
         pfnCreateFence(device, &fci, nullptr, &fence);
     }
     VkResult vrSubmit;
+    // §J.3.e.2.i.11 (v1.4.73) — wrap submit + wait in chrono::steady_clock
+    // when caller requested GPU dispatch time measurement.  This excludes
+    // shader compile / pipeline create / buffer alloc / cleanup, giving
+    // a clean GPU dispatch time signal for the auto-tier benchmark.
+    const auto submitT0 = (opts.outSubmitWaitNs != nullptr)
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
     {
         VkSubmitInfo si = {};
         si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -3014,6 +3030,11 @@ bool runComputeOnce(const VulkanCtx& ctx, const RunComputeOptions& opts) {
     }
     if (vrSubmit == VK_SUCCESS) {
         pfnWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+        if (opts.outSubmitWaitNs != nullptr) {
+            const auto submitT1 = std::chrono::steady_clock::now();
+            *opts.outSubmitWaitNs = (uint64_t)
+                std::chrono::duration_cast<std::chrono::nanoseconds>(submitT1 - submitT0).count();
+        }
         // Read back any bindings that asked for it.
         for (int i = 0; i < opts.bindingCount; ++i) {
             if (opts.buffers[i].readbackOut) {
@@ -3339,6 +3360,13 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out,
 // included.  Tier classifier should use range buckets, not expect µs
 // precision.  Returns ns; 0 on dispatch failure.
 uint64_t benchmarkInterpBilinearOnce(const VulkanCtx& ctx) {
+    // §J.3.e.2.i.11 (v1.4.73) — fixed measurement scope.  v1.4.68-72 把
+    // glslang compile (~250ms) + pipeline create (~100ms) + buffer alloc
+    // (~50ms) 一起算進「GPU 時間」，RTX 3060 Laptop 量到 493ms 被誤分
+    // 到 ENTRY tier。本版改用 outSubmitWaitNs hook，只量 vkQueueSubmit
+    // 到 WaitForFences 回傳之間的 wall-clock — 排除 CPU setup overhead，
+    // 主要 capture GPU dispatch + driver scheduling.
+    //
     // Wrap shader source through applyBlobMacros to expand BLOB_T /
     // BLOB_R / BLOB_W markers (caller-side buffers are fp32, useFp16Blob=false).
     const std::string src = applyBlobMacros(getInterpBilinearShaderGlsl(),
@@ -3370,28 +3398,31 @@ uint64_t benchmarkInterpBilinearOnce(const VulkanCtx& ctx) {
     opts.dispY  = (OUT_H + 7) / 8;
     opts.dispZ  = (uint32_t)CH;
 
-    // Warmup pass: discard wall-clock (cold cache / shader-compile overhead).
+    // Warmup pass: discard everything (cold driver state + cache miss).
+    // Don't request outSubmitWaitNs — we throw this measurement away.
     if (!runComputeOnce(ctx, opts)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 warmup dispatch failed");
         return 0;
     }
-    // Measure pass.
-    const auto t0 = std::chrono::steady_clock::now();
-    const bool ok = runComputeOnce(ctx, opts);
-    const auto t1 = std::chrono::steady_clock::now();
-    if (!ok) {
+    // Measure pass — request submit-wait time via outSubmitWaitNs.
+    // runComputeOnce 仍然會 rebuild pipeline / alloc buffers (since each
+    // call is independent)，但這部分的 CPU 時間 不算進 outSubmitWaitNs.
+    // 量到的 ns ≈ GPU dispatch 真實時間 + driver scheduling overhead (~50us).
+    uint64_t gpuNs = 0;
+    opts.outSubmitWaitNs = &gpuNs;
+    if (!runComputeOnce(ctx, opts)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 measure dispatch failed");
         return 0;
     }
-    const uint64_t ns = (uint64_t)
-        std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 InterpBilinear "
-                "256x256x16 → 512x512x16: %.3f ms (wall-clock w/ CPU overhead)",
-                (double)ns / 1.0e6);
-    return ns;
+                "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 v1.4.73 InterpBilinear "
+                "256x256x16 → 512x512x16: %.3f ms (GPU dispatch + driver "
+                "scheduling, excludes shader compile / pipeline create / "
+                "buffer alloc CPU overhead)",
+                (double)gpuNs / 1.0e6);
+    return gpuNs;
 }
 
 bool runPipelineCacheSmoke(const VulkanCtx& ctx) {

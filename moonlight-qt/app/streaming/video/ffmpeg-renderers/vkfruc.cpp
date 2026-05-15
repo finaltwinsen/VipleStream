@@ -6482,7 +6482,14 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
             m_Instance, "vkGetPhysicalDeviceProperties");
         if (pfnGetPDPropsBench) pfnGetPDPropsBench(m_PhysicalDevice, &pdpBench);
         const QString currentGpuName = QString::fromUtf8(pdpBench.deviceName);
+        // §J.3.e.2.i.11 (v1.4.73) — invalidate stale v1.4.68-72 cache where
+        // benchmark wrongly measured CPU compile time (~490ms on any HW).
+        // Real GPU dispatch is <50ms even on weak iGPU; treat anything
+        // larger as the broken v1.4.68 measurement and force rerun with
+        // the new outSubmitWaitNs-based accurate measurement.
+        constexpr qint64 kSaneMaxNs = 50LL * 1000LL * 1000LL;  // 50 ms
         const bool cacheValid = (prefs->vkfrucBenchmarkNs > 0)
+                             && (prefs->vkfrucBenchmarkNs < kSaneMaxNs)
                              && (prefs->vkfrucDetectedGpuName == currentGpuName);
         if (cacheValid) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
