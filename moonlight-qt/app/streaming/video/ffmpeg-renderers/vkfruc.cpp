@@ -4087,12 +4087,13 @@ bool VkFrucRenderer::createInFlightRing()
         //   v1.4.88: ownership barrier helper + recordFrucChainOnCompute stub.
         //   v1.4.89: recordFrucChainOnCompute helper 實作完整 (begin + acquire
         //            input + chain dispatches + release outputs + end + demote
-        //            on failure). 但 renderFrameSw 仍未接路徑, gate=ON 不會
-        //            真實啟用 (only logs would-be-active).
-        //   v1.4.90 預定: renderFrameSw 拆 partA/cmpCmd/partC 三 cmd buf +
-        //            三 submit 串 m_ComputeTimelineSem + pure-dispatch helper
-        //            隔離 timer/dynamic-tier 邏輯 (v1.4.89 仍直接 call
-        //            runFrucComputeChain, 同 frame 兩處 call 會 race).
+        //            on failure). renderFrameSw 仍未接路徑.
+        //   v1.4.90: renderFrameSw 接路徑 — frucChainAsyncActive 條件下走
+        //            partA (graphics, NV12 image→buffer copy + release ownership)
+        //            → cmpCmd (compute, recordFrucChainOnCompute)
+        //            → partC (graphics, acquire ownership + dual-present +
+        //            real-frame render pass) 三 submit 串 m_ComputeTimelineSem.
+        //            gate=ON 啟用 async path, gate=OFF 走 v1.4.86 single-cmd path.
         m_FrucChainAsyncAvailable = full;
         const char* frucAsyncEnv = std::getenv("VIPLE_VKFRUC_FRUC_ASYNC");
         m_FrucChainAsyncRequested = (frucAsyncEnv != nullptr
@@ -4101,7 +4102,8 @@ bool VkFrucRenderer::createInFlightRing()
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-FRUC-ASYNC] gate: requested=%d available=%d "
                     "→ would-be-active=%d (env VIPLE_VKFRUC_FRUC_ASYNC=%s, "
-                    "v1.4.89 record helper ready, renderFrameSw wiring lands v1.4.90)",
+                    "v1.4.90 renderFrameSw wiring active — partA/cmpCmd/partC "
+                    "three-submit chain on m_ComputeTimelineSem when gate=ON)",
                     (int)m_FrucChainAsyncRequested, (int)m_FrucChainAsyncAvailable,
                     (int)(m_FrucChainAsyncRequested && m_FrucChainAsyncAvailable),
                     frucAsyncEnv ? frucAsyncEnv : "(unset, default OFF)");
@@ -8048,17 +8050,13 @@ void VkFrucRenderer::acquireBufferOwnership(VkCommandBuffer cmd, VkBuffer buf,
 }
 
 // §J.3.e.2.i.27 (v1.4.89) — Record FRUC compute chain into compute QF cmpCmd.
+// §J.3.e.2.i.28 (v1.4.90) — caller (renderFrameSw) 接路徑.
 //
 // 角色: 把 runFrucComputeChain 的 dispatch 序列 record 進 compute queue cmd
 // buffer (m_ComputeCmdBuf[slot]), 開頭 acquire input buffer ownership
 // (graphics → compute), 結尾 release output buffer ownership (compute →
-// graphics). 預期由 v1.4.90 renderFrameSw 拆 cmd buf 三段時 caller 在 partA
-// 對稱 release input + partC 對稱 acquire outputs, 串 m_ComputeTimelineSem
-// 完成跨 QF 同步.
-//
-// 本 commit (v1.4.89) 純 helper 完整化: gate 預設 OFF, renderFrameSw 不接
-// 路徑, 此函式編譯後是 dead code (跟 v1.4.87/v1.4.88 framework commit cadence
-// 一致). v1.4.90 才接 renderFrameSw 三 submit 路徑 + timeline sem.
+// graphics). renderFrameSw frucChainAsyncActive 路徑下 partA 對稱 release
+// input + partC 對稱 acquire outputs, 串 m_ComputeTimelineSem 完成跨 QF 同步.
 //
 // 失敗時 demote m_FrucChainAsyncAvailable=false (永久禁用本 session async
 // path), caller 應退回 single-cmd path. demote 時機:
@@ -11268,6 +11266,446 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         }
     }
     uint32_t imgIdx = imgIdxB;  // legacy alias for the existing single-render code below
+
+    // §J.3.e.2.i.28 (v1.4.90) — FRUC chain async compute wiring.
+    //
+    // Gate 啟用時走三 cmd buf chain (跟 single-cmd path 互斥):
+    //   partA  (graphics, m_SlotPreCmdBuf[slot])  — NV12 image→buffer copy +
+    //                                              barriers + drain/upload
+    //                                              overlay + release
+    //                                              m_SwFrucNv12Buf ownership
+    //                                              (graphics → compute).
+    //                                              Wait: m_TimelineSem@decode
+    //                                              (TRANSFER stage).
+    //                                              Signal: m_ComputeTimelineSem
+    //                                              @V_pre.
+    //   cmpCmd (compute,  m_ComputeCmdBuf[slot]) — recordFrucChainOnCompute
+    //                                              (acquire input + chain
+    //                                              dispatches + release outputs).
+    //                                              Wait: m_ComputeTimelineSem
+    //                                              @V_pre (COMPUTE stage).
+    //                                              Signal: m_ComputeTimelineSem
+    //                                              @V_post.
+    //   partC  (graphics, m_SlotPostCmdBuf[slot]) — acquire interp/curr ownership
+    //                                              + dual-present render pass +
+    //                                              real-frame render pass.
+    //                                              Wait: m_ComputeTimelineSem
+    //                                              @V_post (FRAGMENT) +
+    //                                              m_SlotAcquireSem (COLOR_ATT).
+    //                                              Signal: renderDone[A,B] +
+    //                                              m_GfxTimelineSem +
+    //                                              fence m_SlotInFlightFence.
+    //
+    // 任何 record / submit 失敗 → demote m_FrucChainAsyncAvailable=false +
+    // return (該 frame 視覺斷掉一次, 下 frame gate 走 single-cmd path).
+    const bool frucChainAsyncActive = m_FrucChainAsyncRequested
+                                  && m_FrucChainAsyncAvailable
+                                  && useNativeDecodeEarly
+                                  && m_FrucMode && m_FrucReady && !frucPausedThisFrame
+                                  && m_SwImageLayoutInited
+                                  && m_ComputeTimelineSem != VK_NULL_HANDLE
+                                  && m_ComputeQueue       != VK_NULL_HANDLE
+                                  && m_ComputeQueueFamily != UINT32_MAX
+                                  && m_ComputeQueueFamily != m_QueueFamily
+                                  && m_SlotPreCmdBuf[slot]  != VK_NULL_HANDLE
+                                  && m_SlotPostCmdBuf[slot] != VK_NULL_HANDLE
+                                  && m_ComputeCmdBuf[slot]  != VK_NULL_HANDLE;
+
+    if (frucChainAsyncActive) {
+        VkCommandBuffer preCmd  = m_SlotPreCmdBuf[slot];
+        VkCommandBuffer cmpCmd  = m_ComputeCmdBuf[slot];
+        VkCommandBuffer postCmd = m_SlotPostCmdBuf[slot];
+
+        m_RtPfn.ResetCommandBuffer(preCmd, 0);
+        m_RtPfn.ResetCommandBuffer(postCmd, 0);
+        // (cmpCmd reset+begin+end 全在 recordFrucChainOnCompute 內.)
+
+        VkCommandBufferBeginInfo cbbi2C = {};
+        cbbi2C.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        cbbi2C.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        // ===== partA: NV12 image→buffer copy + ownership release =====
+        if (m_RtPfn.BeginCommandBuffer(preCmd, &cbbi2C) != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-FRUC-ASYNC] partA BeginCommandBuffer failed — demote async");
+            m_FrucChainAsyncAvailable = false;
+            return;
+        }
+
+        // m_SwUploadImage SHADER_READ → TRANSFER_SRC + m_SwFrucNv12Buf
+        // SHADER_READ → TRANSFER_WRITE (mirror single-cmd path 的 11266-11291).
+        VkImageMemoryBarrier toSrcBarA = {};
+        toSrcBarA.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toSrcBarA.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+        toSrcBarA.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+        toSrcBarA.oldLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        toSrcBarA.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toSrcBarA.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSrcBarA.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSrcBarA.image               = m_SwUploadImage;
+        toSrcBarA.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toSrcBarA.subresourceRange.levelCount = 1;
+        toSrcBarA.subresourceRange.layerCount = 1;
+        VkBufferMemoryBarrier preCopyBarA = {};
+        preCopyBarA.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        preCopyBarA.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        preCopyBarA.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        preCopyBarA.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        preCopyBarA.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        preCopyBarA.buffer = m_SwFrucNv12Buf;
+        preCopyBarA.offset = 0;
+        preCopyBarA.size   = VK_WHOLE_SIZE;
+        m_RtPfn.CmdPipelineBarrier(preCmd,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 1, &preCopyBarA, 1, &toSrcBarA);
+
+        // image→buffer copy (兩 region: PLANE_0 + PLANE_1).
+        VkBufferImageCopy regsA[2] = {};
+        regsA[0].bufferOffset      = 0;
+        regsA[0].bufferRowLength   = (uint32_t)W;
+        regsA[0].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        regsA[0].imageSubresource.layerCount = 1;
+        regsA[0].imageExtent       = { (uint32_t)W, (uint32_t)H, 1 };
+        regsA[1].bufferOffset      = (VkDeviceSize)W * H;
+        regsA[1].bufferRowLength   = (uint32_t)W / 2;
+        regsA[1].imageSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+        regsA[1].imageSubresource.layerCount = 1;
+        regsA[1].imageExtent       = { (uint32_t)W / 2, (uint32_t)H / 2, 1 };
+        m_RtPfn.CmdCopyImageToBuffer(preCmd, m_SwUploadImage,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            m_SwFrucNv12Buf, 2, regsA);
+
+        // m_SwUploadImage TRANSFER_SRC → SHADER_READ_ONLY (partC fragment shader 讀).
+        VkImageMemoryBarrier toShaderBarA = toSrcBarA;
+        toShaderBarA.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        toShaderBarA.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        toShaderBarA.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toShaderBarA.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        m_RtPfn.CmdPipelineBarrier(preCmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &toShaderBarA);
+
+        // overlay drain + upload (CPU + transfer cmd).
+        drainOverlayStash();
+        uploadPendingOverlay(preCmd);
+
+        // Release m_SwFrucNv12Buf ownership graphics → compute (對應 cmpCmd
+        // 內 acquireBufferOwnership at TRANSFER → COMPUTE 層級).
+        releaseBufferOwnership(preCmd, m_SwFrucNv12Buf,
+            m_QueueFamily, m_ComputeQueueFamily,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        if (m_RtPfn.EndCommandBuffer(preCmd) != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-FRUC-ASYNC] partA EndCommandBuffer failed — demote async");
+            m_FrucChainAsyncAvailable = false;
+            return;
+        }
+
+        // ===== cmpCmd: recordFrucChainOnCompute (begin + acquire + chain + release + end) =====
+        m_RtPfn.ResetCommandBuffer(cmpCmd, 0);
+        if (!recordFrucChainOnCompute(cmpCmd, (uint32_t)W, (uint32_t)H, slot)) {
+            // helper 已 demote m_FrucChainAsyncAvailable.
+            return;
+        }
+
+        // ===== partC: acquire ownership + dual-present + real-frame =====
+        if (m_RtPfn.BeginCommandBuffer(postCmd, &cbbi2C) != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-FRUC-ASYNC] partC BeginCommandBuffer failed — demote async");
+            m_FrucChainAsyncAvailable = false;
+            return;
+        }
+
+        // Acquire compute → graphics for interp / curr buffers (對應 cmpCmd
+        // 內 releaseBufferOwnership at COMPUTE → FRAGMENT 層級).
+        acquireBufferOwnership(postCmd, m_FrucInterpRgbBuf,
+            m_ComputeQueueFamily, m_QueueFamily,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        acquireBufferOwnership(postCmd, m_FrucInterpRgbBuf2,
+            m_ComputeQueueFamily, m_QueueFamily,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        acquireBufferOwnership(postCmd, m_FrucCurrRgbBuf,
+            m_ComputeQueueFamily, m_QueueFamily,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+        VkClearValue clearValC = {};
+        clearValC.color.float32[3] = 1.0f;
+
+        // dual-present render pass (mirror 11371-11407).
+        if (dualPresentThisFrame) {
+            auto getDevPaC2 = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+                m_Instance, "vkGetDeviceProcAddr");
+            auto pfnCmdPushConstC = (PFN_vkCmdPushConstants)getDevPaC2(m_Device, "vkCmdPushConstants");
+
+            VkRenderPassBeginInfo rpbiAC = {};
+            rpbiAC.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rpbiAC.renderPass           = m_RenderPass;
+            rpbiAC.framebuffer          = m_Framebuffers[imgIdxA];
+            rpbiAC.renderArea.extent    = m_SwapchainExtent;
+            rpbiAC.clearValueCount      = 1;
+            rpbiAC.pClearValues         = &clearValC;
+            m_RtPfn.CmdBeginRenderPass(postCmd, &rpbiAC, VK_SUBPASS_CONTENTS_INLINE);
+            m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
+            m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                          m_InterpPipelineLayout, 0,
+                                          1, &m_InterpDescSet, 0, nullptr);
+            struct { int srcW, srcH, _pad0, _pad1; } pcInterpC = {
+                (int)m_SwImageWidth, (int)m_SwImageHeight, 0, 0
+            };
+            if (pfnCmdPushConstC) {
+                pfnCmdPushConstC(postCmd, m_InterpPipelineLayout,
+                                  VK_SHADER_STAGE_FRAGMENT_BIT,
+                                  0, sizeof(pcInterpC), &pcInterpC);
+            }
+            m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
+            drawOverlayInRenderPass(postCmd);
+            m_RtPfn.CmdEndRenderPass(postCmd);
+        }
+
+        // real-frame render pass (mirror 11409-11427).
+        VkRenderPassBeginInfo rpbiC = {};
+        rpbiC.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpbiC.renderPass           = m_RenderPass;
+        rpbiC.framebuffer          = m_Framebuffers[imgIdx];
+        rpbiC.renderArea.extent    = m_SwapchainExtent;
+        rpbiC.clearValueCount      = 1;
+        rpbiC.pClearValues         = &clearValC;
+        m_RtPfn.CmdBeginRenderPass(postCmd, &rpbiC, VK_SUBPASS_CONTENTS_INLINE);
+        m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_GraphicsPipeline);
+        m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      m_GraphicsPipelineLayout, 0,
+                                      1, &m_SlotDescSet[slot], 0, nullptr);
+        m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
+        drawOverlayInRenderPass(postCmd);
+        m_RtPfn.CmdEndRenderPass(postCmd);
+
+        if (m_RtPfn.EndCommandBuffer(postCmd) != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-FRUC-ASYNC] partC EndCommandBuffer failed — demote async");
+            m_FrucChainAsyncAvailable = false;
+            return;
+        }
+
+        m_SwImageLayoutInited = true;
+
+        // ===== 三 submit + timeline sem chain =====
+        const uint64_t computeV_pre  = m_AsyncComputeNext.fetch_add(2, std::memory_order_acq_rel);
+        const uint64_t computeV_post = computeV_pre + 1;
+        uint64_t timelineWaitValueA = m_LastDecodeValue.load(std::memory_order_acquire);
+        uint64_t gfxSignalValC      = m_GfxTimelineNext.fetch_add(1, std::memory_order_acq_rel);
+
+        // ---- partA submit (graphics queue, decode wait → compute@V_pre) ----
+        {
+            VkPipelineStageFlags waitMA[1] = { VK_PIPELINE_STAGE_TRANSFER_BIT };
+            VkSemaphore          waitSA[1] = { m_TimelineSem };
+            uint64_t             waitVA[1] = { timelineWaitValueA };
+            VkSemaphore          sigSA[1]  = { m_ComputeTimelineSem };
+            uint64_t             sigVA[1]  = { computeV_pre };
+            VkTimelineSemaphoreSubmitInfo tssiA = {};
+            tssiA.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            tssiA.waitSemaphoreValueCount   = 1;
+            tssiA.pWaitSemaphoreValues      = waitVA;
+            tssiA.signalSemaphoreValueCount = 1;
+            tssiA.pSignalSemaphoreValues    = sigVA;
+            VkSubmitInfo siA = {};
+            siA.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            siA.pNext                = &tssiA;
+            siA.waitSemaphoreCount   = (timelineWaitValueA > 0) ? 1 : 0;
+            siA.pWaitSemaphores      = (timelineWaitValueA > 0) ? waitSA : nullptr;
+            siA.pWaitDstStageMask    = (timelineWaitValueA > 0) ? waitMA : nullptr;
+            siA.commandBufferCount   = 1;
+            siA.pCommandBuffers      = &preCmd;
+            siA.signalSemaphoreCount = 1;
+            siA.pSignalSemaphores    = sigSA;
+            VkResult vrA;
+            {
+                std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+                vrA = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siA, VK_NULL_HANDLE);
+            }
+            if (vrA != VK_SUCCESS) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-FRUC-ASYNC] partA QueueSubmit failed (%d) — demote", (int)vrA);
+                m_FrucChainAsyncAvailable = false;
+                if (vrA == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
+                return;
+            }
+        }
+
+        // ---- cmpCmd submit (compute queue, V_pre → V_post) ----
+        {
+            VkPipelineStageFlags waitMC[1] = { VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT };
+            VkSemaphore          waitSC[1] = { m_ComputeTimelineSem };
+            uint64_t             waitVC[1] = { computeV_pre };
+            VkSemaphore          sigSC[1]  = { m_ComputeTimelineSem };
+            uint64_t             sigVC[1]  = { computeV_post };
+            VkTimelineSemaphoreSubmitInfo tssiCmp = {};
+            tssiCmp.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            tssiCmp.waitSemaphoreValueCount   = 1;
+            tssiCmp.pWaitSemaphoreValues      = waitVC;
+            tssiCmp.signalSemaphoreValueCount = 1;
+            tssiCmp.pSignalSemaphoreValues    = sigVC;
+            VkSubmitInfo siCmp = {};
+            siCmp.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            siCmp.pNext                = &tssiCmp;
+            siCmp.waitSemaphoreCount   = 1;
+            siCmp.pWaitSemaphores      = waitSC;
+            siCmp.pWaitDstStageMask    = waitMC;
+            siCmp.commandBufferCount   = 1;
+            siCmp.pCommandBuffers      = &cmpCmd;
+            siCmp.signalSemaphoreCount = 1;
+            siCmp.pSignalSemaphores    = sigSC;
+            VkResult vrC;
+            {
+                std::lock_guard<std::mutex> lk(s_VkFrucComputeLock);
+                vrC = m_RtPfn.QueueSubmit(m_ComputeQueue, 1, &siCmp, VK_NULL_HANDLE);
+            }
+            if (vrC != VK_SUCCESS) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-FRUC-ASYNC] cmpCmd QueueSubmit failed (%d) — demote", (int)vrC);
+                m_FrucChainAsyncAvailable = false;
+                if (vrC == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
+                return;
+            }
+        }
+
+        // ---- partC submit (graphics queue, V_post + acquire → renderDone + gfx + fence) ----
+        {
+            VkPipelineStageFlags waitMP[3] = {
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            };
+            VkSemaphore waitSP[3] = {
+                m_ComputeTimelineSem,
+                m_SlotAcquireSem[slot][0],
+                m_SlotAcquireSem[slot][1],
+            };
+            uint64_t waitVP[3] = { computeV_post, 0, 0 };
+            const uint32_t nWaitP = dualPresentThisFrame ? 3 : 2;
+
+            VkSemaphore sigSPdual[3] = {
+                m_SwapchainRenderDoneSem[imgIdxA],
+                m_SwapchainRenderDoneSem[imgIdxB],
+                m_GfxTimelineSem,
+            };
+            uint64_t sigVPdual[3] = { 0, 0, gfxSignalValC };
+            VkSemaphore sigSPsingle[2] = {
+                m_SwapchainRenderDoneSem[imgIdx],
+                m_GfxTimelineSem,
+            };
+            uint64_t sigVPsingle[2] = { 0, gfxSignalValC };
+
+            VkSemaphore* sigSP = dualPresentThisFrame ? sigSPdual : sigSPsingle;
+            uint64_t*    sigVP = dualPresentThisFrame ? sigVPdual : sigVPsingle;
+            const uint32_t nSigP = dualPresentThisFrame ? 3 : 2;
+
+            VkTimelineSemaphoreSubmitInfo tssiP = {};
+            tssiP.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            tssiP.waitSemaphoreValueCount   = nWaitP;
+            tssiP.pWaitSemaphoreValues      = waitVP;
+            tssiP.signalSemaphoreValueCount = nSigP;
+            tssiP.pSignalSemaphoreValues    = sigVP;
+            VkSubmitInfo siP = {};
+            siP.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            siP.pNext                = &tssiP;
+            siP.waitSemaphoreCount   = nWaitP;
+            siP.pWaitSemaphores      = waitSP;
+            siP.pWaitDstStageMask    = waitMP;
+            siP.commandBufferCount   = 1;
+            siP.pCommandBuffers      = &postCmd;
+            siP.signalSemaphoreCount = nSigP;
+            siP.pSignalSemaphores    = sigSP;
+            VkResult vrP;
+            {
+                std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+                vrP = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siP, m_SlotInFlightFence[slot]);
+            }
+            if (vrP != VK_SUCCESS) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-FRUC-ASYNC] partC QueueSubmit failed (%d) — demote", (int)vrP);
+                m_FrucChainAsyncAvailable = false;
+                if (vrP == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
+                return;
+            }
+            m_LastGraphicsValue.store(gfxSignalValC, std::memory_order_release);
+        }
+
+        // First-frame log (mirror RIFE Phase 2B 9874+).
+        static std::atomic<bool> s_frucChainAsyncLogged{false};
+        bool expFC = false;
+        if (s_frucChainAsyncLogged.compare_exchange_strong(expFC, true)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-FRUC-ASYNC] §J.3.e.2.i.28 wiring active: 3-cmd-buf "
+                "chain (gfx-pre → CMP(QF=%u) → gfx-post), timeline V_pre=%llu "
+                "V_post=%llu — async-compute parallel with graphics (v1.4.90)",
+                (unsigned)m_ComputeQueueFamily,
+                (unsigned long long)computeV_pre,
+                (unsigned long long)computeV_post);
+        }
+
+        // ===== Present (mirror 11623-11716) =====
+        if (dualPresentThisFrame) {
+            VkPresentInfoKHR piA = {};
+            piA.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+            piA.waitSemaphoreCount = 1;
+            piA.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxA];
+            piA.swapchainCount     = 1;
+            piA.pSwapchains        = &m_Swapchain;
+            piA.pImageIndices      = &imgIdxA;
+            VkResult vrPA;
+            {
+                std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+                vrPA = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piA);
+            }
+            (void)vrPA;
+            VkPresentInfoKHR piB = {};
+            piB.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+            piB.waitSemaphoreCount = 1;
+            piB.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxB];
+            piB.swapchainCount     = 1;
+            piB.pSwapchains        = &m_Swapchain;
+            piB.pImageIndices      = &imgIdxB;
+            {
+                std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+                VkResult vrPB = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piB);
+                if (vrPB != VK_SUCCESS && vrPB != VK_SUBOPTIMAL_KHR) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-FRUC-ASYNC] dual: present(real) returned %d", (int)vrPB);
+                }
+            }
+        } else {
+            VkPresentInfoKHR pi = {};
+            pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+            pi.waitSemaphoreCount = 1;
+            pi.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdx];
+            pi.swapchainCount     = 1;
+            pi.pSwapchains        = &m_Swapchain;
+            pi.pImageIndices      = &imgIdx;
+            VkResult vrP;
+            {
+                std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+                vrP = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &pi);
+            }
+            if (vrP != VK_SUCCESS && vrP != VK_SUBOPTIMAL_KHR) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-FRUC-ASYNC] single: present returned %d", (int)vrP);
+            }
+        }
+
+        return;  // 跳過下方 single-cmd path.
+    }
 
     // ---- 4. Record cmd buffer ----
     VkCommandBuffer cmd = m_SlotCmdBuf[slot];
