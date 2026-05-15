@@ -10465,9 +10465,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-FRUC-ASYNC-PROF] partA=%.0fus cmpDur=%.0fus "
                         "cmpWait=%.0fus handoff=%.0fus partC=%.0fus total=%.0fus "
-                        "(n=%d, mean over last 60 frames; cmpDur = compute QF GPU "
-                        "time, cmpWait = graphics QF effective wait = cmpDur + cross-"
-                        "QF handoff sem signal/wait latency)",
+                        "(n=%d, mean/60f)",
                         avgA, avgCmp, avgWait, avgHandoff, avgC, avgTot,
                         m_FrucChainAsyncGpuCount);
                     m_FrucChainAsyncGpuPartAUsAccum   = 0.0;
@@ -11120,11 +11118,8 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 const double avgTot = m_FrucChainSyncGpuTotalUsAccum
                                     / (double)m_FrucChainSyncGpuCount;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-FRUC-SYNC-PROF] total=%.0fus (n=%d, mean over "
-                    "last 60 frames; single-cmd HW path 整 cmd buf GPU 時間, "
-                    "= chain dispatch + render passes + barriers).  跟 "
-                    "[VIPLE-VKFRUC-FRUC-ASYNC-PROF] total 對比可算 async win "
-                    "= sync_total - async_total.",
+                    "[VIPLE-VKFRUC-FRUC-SYNC-PROF] total=%.0fus (n=%d, mean/60f, "
+                    "single-cmd; async win = sync_total - async_total)",
                     avgTot, m_FrucChainSyncGpuCount);
                 m_FrucChainSyncGpuTotalUsAccum = 0.0;
                 m_FrucChainSyncGpuCount        = 0;
@@ -12394,7 +12389,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-FRUC-ASYNC-PROF-SW] partA=%.0fus cmpDur=%.0fus "
                         "cmpWait=%.0fus handoff=%.0fus partC=%.0fus total=%.0fus "
-                        "(n=%d, mean over last 60 frames; SW path renderFrameSw)",
+                        "(n=%d, mean/60f, SW)",
                         avgA, avgCmp, avgWait, avgHandoff, avgC, avgTot,
                         m_FrucChainAsyncGpuCount);
                     m_FrucChainAsyncGpuPartAUsAccum   = 0.0;
