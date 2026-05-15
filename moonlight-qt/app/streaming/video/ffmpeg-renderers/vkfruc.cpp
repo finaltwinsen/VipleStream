@@ -4102,10 +4102,11 @@ bool VkFrucRenderer::createInFlightRing()
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-FRUC-ASYNC] gate: requested=%d available=%d "
                     "→ would-be-active=%d (env VIPLE_VKFRUC_FRUC_ASYNC=%s, "
-                    "v1.4.93 SW + HW path wiring active — partA/cmpCmd/partC "
+                    "v1.4.94 SW + HW path wiring active — partA/cmpCmd/partC "
                     "three-submit chain on m_ComputeTimelineSem when gate=ON; "
-                    "HW path coexist pathDActive + triplePresent (partC 加 "
-                    "interp_2 render pass + piC); 互斥 phase2BActive/NvOf)",
+                    "HW path coexist pathDActive + triplePresent + NvOf "
+                    "(partA 加 image-to-image copy + marker submit); "
+                    "唯一互斥 phase2BActive)",
                     (int)m_FrucChainAsyncRequested, (int)m_FrucChainAsyncAvailable,
                     (int)(m_FrucChainAsyncRequested && m_FrucChainAsyncAvailable),
                     frucAsyncEnv ? frucAsyncEnv : "(unset, default OFF)");
@@ -9214,6 +9215,12 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     //                            interp_2 render pass + partC submit 加 4th
     //                            acquire wait + renderDone[imgIdxC] signal +
     //                            Present 加 piC.
+    // §J.3.e.2.i.32 (v1.4.94) — relax m_NvOfReady 互斥, partA 加 if
+    //                            (!pathDActive && m_NvOfReady) image-to-image
+    //                            copy vkf->img[0] → m_NvOfInputCurr + init
+    //                            barrier; partC submit 之後 fire NvOf marker
+    //                            submit + nvOFExecuteVk + swap handles (mirror
+    //                            phase2BActive line 10007-10068).
     //
     // Mirror v1.4.90 SW path frucChainAsyncActive but for HW path (renderFrame).
     // 走 partA (graphics) → cmpCmd (compute, recordFrucChainOnCompute) → partC
@@ -9240,13 +9247,10 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     //
     // 互斥 (尚未 relax):
     //   * !phase2BActive: phase2B 已用 cmpCmd 跑 RIFE inference, 衝突.
-    //   * !m_NvOfReady: NvOf 需要 image-to-image copy 到 m_NvOfInputCurr +
-    //     marker submit, 簡化 partA 暫時不支援; v1.4.94+ 才整合.
     //   * vkf 可用 + m_FrucMode + m_FrucReady + 非 paused.
     const bool frucChainAsyncActiveHw = m_FrucChainAsyncRequested
                                      && m_FrucChainAsyncAvailable
                                      && !phase2BActive
-                                     && !m_NvOfReady
                                      && m_FrucMode && m_FrucReady && !m_FRUCPaused.load()
                                      && vkf != nullptr
                                      && (frame ? (frame->width > 0 && frame->height > 0) : false)
@@ -10302,6 +10306,64 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             VK_IMAGE_LAYOUT_GENERAL,
             m_SwFrucNv12Buf, 2, regsHW);
 
+        // §J.3.e.2.i.32 (v1.4.94) — NvOf image-to-image copy vkf->img[0] →
+        // m_NvOfInputCurr (mirror single-cmd path line 10908-10972).  獨立於
+        // m_SwFrucNv12Buf buffer copy (兩 source-read parallel).  pathDActive
+        // 條件下 NvOf copy 也由 path D 處理 (跟 single-cmd 一致).
+        if (m_NvOfReady) {
+            // First-frame init barrier: UNDEFINED → GENERAL on m_NvOfInputCurr/Prev.
+            VkImageMemoryBarrier ofImgBarsHW[2] = {};
+            int ofBarCountHW = 0;
+            for (VkImage img : {m_NvOfInputCurr, m_NvOfInputPrev}) {
+                if (m_NvOfTimelineValue == 0) {
+                    auto& b = ofImgBarsHW[ofBarCountHW++];
+                    b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    b.srcAccessMask       = 0;
+                    b.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT
+                                          | VK_ACCESS_TRANSFER_READ_BIT
+                                          | VK_ACCESS_SHADER_READ_BIT;
+                    b.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+                    b.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+                    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    b.image               = img;
+                    b.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                    b.subresourceRange.baseMipLevel   = 0;
+                    b.subresourceRange.levelCount     = 1;
+                    b.subresourceRange.baseArrayLayer = 0;
+                    b.subresourceRange.layerCount     = 1;
+                }
+            }
+            if (ofBarCountHW > 0) {
+                m_RtPfn.CmdPipelineBarrier(preCmd,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT
+                        | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0, 0, nullptr, 0, nullptr,
+                    (uint32_t)ofBarCountHW, ofImgBarsHW);
+            }
+            // PLANE_0 (Y) + PLANE_1 (UV) image→image copy. dst layout GENERAL.
+            VkImageCopy ofRegsHW[2] = {};
+            ofRegsHW[0].srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+            ofRegsHW[0].srcSubresource.layerCount = 1;
+            ofRegsHW[0].dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+            ofRegsHW[0].dstSubresource.layerCount = 1;
+            ofRegsHW[0].extent = { hwW, hwH, 1 };
+            ofRegsHW[1].srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+            ofRegsHW[1].srcSubresource.layerCount = 1;
+            ofRegsHW[1].dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+            ofRegsHW[1].dstSubresource.layerCount = 1;
+            ofRegsHW[1].extent = { hwW / 2, hwH / 2, 1 };
+            auto pfnCmdCopyImageHW = (PFN_vkCmdCopyImage)((PFN_vkGetDeviceProcAddr)
+                m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr"))(
+                m_Device, "vkCmdCopyImage");
+            if (pfnCmdCopyImageHW) {
+                pfnCmdCopyImageHW(preCmd, vkf->img[0], VK_IMAGE_LAYOUT_GENERAL,
+                                   m_NvOfInputCurr, VK_IMAGE_LAYOUT_GENERAL,
+                                   2, ofRegsHW);
+            }
+        }
+
         // bufBar: m_SwFrucNv12Buf TRANSFER_WRITE → COMPUTE_SHADER_READ
         // (mirror line 10321-10333).  本身已涵蓋 access transition; 後面 release
         // ownership 才是跨 QF 的 transfer.
@@ -10697,6 +10759,69 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 (unsigned)m_ComputeQueueFamily,
                 (unsigned long long)computeV_preD,
                 (unsigned long long)computeV_postD);
+        }
+
+        // §J.3.e.2.i.32 (v1.4.94) — NV-OF marker submit + execute (mirror
+        // phase2BActive line 10007-10068).  Path D copy submit / partA cmd
+        // 已 populated m_NvOfInputCurr; here fire OF queue execute + swap
+        // input handles.
+        if (m_NvOfReady && m_NvOfFuncList) {
+            static thread_local uint32_t s_NvOfFrameCountFCAH = 0;
+            const uint32_t frameNumFCAH = s_NvOfFrameCountFCAH++;
+            if (frameNumFCAH == 0) {
+                std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
+                std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
+                std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+            }
+            if (frameNumFCAH > 0) {
+                const uint64_t inSigVal  = m_NvOfTimelineValue + 1;
+                const uint64_t outSigVal = inSigVal + 1;
+                VkTimelineSemaphoreSubmitInfo tsMarkH = {};
+                tsMarkH.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+                tsMarkH.signalSemaphoreValueCount = 1;
+                tsMarkH.pSignalSemaphoreValues    = &inSigVal;
+                VkSubmitInfo siMarkH = {};
+                siMarkH.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                siMarkH.pNext                = &tsMarkH;
+                siMarkH.commandBufferCount   = 0;
+                siMarkH.signalSemaphoreCount = 1;
+                siMarkH.pSignalSemaphores    = &m_NvOfTimelineSem;
+                VkResult vrMarkH;
+                {
+                    std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+                    vrMarkH = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siMarkH, VK_NULL_HANDLE);
+                }
+                if (vrMarkH == VK_SUCCESS) {
+                    auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
+                    NV_OF_SYNC_VK waitSync = {};
+                    waitSync.semaphore = m_NvOfTimelineSem;
+                    waitSync.value     = inSigVal;
+                    NV_OF_SYNC_VK signalSync = {};
+                    signalSync.semaphore = m_NvOfTimelineSem;
+                    signalSync.value     = outSigVal;
+                    NV_OF_EXECUTE_INPUT_PARAMS_VK ofIn = {};
+                    ofIn.inputFrame      = (NvOFGPUBufferHandle)m_NvOfHandleCurr;
+                    ofIn.referenceFrame  = (NvOFGPUBufferHandle)m_NvOfHandlePrev;
+                    ofIn.disableTemporalHints = NV_OF_FALSE;
+                    ofIn.numWaitSyncs    = 1;
+                    ofIn.pWaitSyncs      = &waitSync;
+                    NV_OF_EXECUTE_OUTPUT_PARAMS_VK ofOut = {};
+                    ofOut.outputBuffer = (NvOFGPUBufferHandle)m_NvOfHandleFlow;
+                    ofOut.pSignalSync  = &signalSync;
+                    NV_OF_STATUS s = funcList->nvOFExecuteVk((NvOFHandle)m_NvOfHandle,
+                                                              &ofIn, &ofOut);
+                    if (s == NV_OF_SUCCESS) {
+                        m_NvOfTimelineValue = outSigVal;
+                        std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
+                        std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
+                        std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+                    }
+                } else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VKFRUC-NVOF] §J.3.e.2.i.32 marker QueueSubmit "
+                                "failed vr=%d", (int)vrMarkH);
+                }
+            }
         }
 
         // ===== Present (mirror single-cmd path line 10878+, dual + triple + single) =====
