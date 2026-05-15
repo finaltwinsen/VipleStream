@@ -7952,8 +7952,58 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                 uint64_t d = (ts[i + 1] >= ts[i]) ? (ts[i + 1] - ts[i]) : 0;
                 m_FrucGpuStageUsAccum[i] += (double)d * ns2us;
             }
-            m_FrucGpuUsAccum += (double)(ts[5] - ts[0]) * ns2us;
+            double thisFrameChainUs = (double)(ts[5] - ts[0]) * ns2us;
+            m_FrucGpuUsAccum += thisFrameChainUs;
             m_FrucGpuUsCount++;
+
+            // §J.3.e.2.i.22 (v1.4.84) — 動態 TRIPLE/DUAL 降階偵測.
+            // 把這幀 chain time 寫進 60-frame ring, 算 mean.
+            // env VIPLE_VKFRUC_DYNAMIC_TIER:
+            //   0 = 完全關閉 (m_DynamicDualDowngrade 鎖在 false)
+            //   1 = 自動 (預設)
+            //   2 = 強制 DUAL (m_DynamicDualDowngrade 鎖在 true, debug)
+            double thisFrameChainMs = thisFrameChainUs / 1000.0;
+            m_ChainMeanMsRing[m_ChainMeanMsRingIdx] = thisFrameChainMs;
+            m_ChainMeanMsRingIdx = (m_ChainMeanMsRingIdx + 1) % kChainRingSize;
+            if (m_ChainMeanMsRingFilled < kChainRingSize) m_ChainMeanMsRingFilled++;
+
+            static const int s_DynamicTierMode =
+                qEnvironmentVariableIsSet("VIPLE_VKFRUC_DYNAMIC_TIER")
+                    ? qEnvironmentVariableIntValue("VIPLE_VKFRUC_DYNAMIC_TIER") : 1;
+            if (s_DynamicTierMode == 2) {
+                // 強制 DUAL (debug)
+                m_DynamicDualDowngrade.store(true);
+            } else if (s_DynamicTierMode == 1 && m_ChainMeanMsRingFilled >= kChainRingSize) {
+                double sum = 0.0;
+                for (int i = 0; i < kChainRingSize; ++i) sum += m_ChainMeanMsRing[i];
+                double meanMs = sum / kChainRingSize;
+                const bool currentlyDowngraded = m_DynamicDualDowngrade.load();
+                if (meanMs > 5.0 && !currentlyDowngraded) {
+                    if (++m_FramesAboveThreshold >= 30) {
+                        m_DynamicDualDowngrade.store(true);
+                        m_FramesAboveThreshold = 0;
+                        m_FramesBelowThreshold = 0;
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-AUTOTIER] TRIPLE → DUAL (chain mean=%.2fms > 5ms 連續 30 幀)",
+                            meanMs);
+                    }
+                } else if (meanMs < 3.0 && currentlyDowngraded) {
+                    if (++m_FramesBelowThreshold >= 60) {
+                        m_DynamicDualDowngrade.store(false);
+                        m_FramesAboveThreshold = 0;
+                        m_FramesBelowThreshold = 0;
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-AUTOTIER] DUAL → TRIPLE (chain mean=%.2fms < 3ms 連續 60 幀)",
+                            meanMs);
+                    }
+                } else {
+                    // 反向計數 reset (避免遠端 spike 累積太久觸發誤切)
+                    if (meanMs <= 5.0) m_FramesAboveThreshold = 0;
+                    if (meanMs >= 3.0) m_FramesBelowThreshold = 0;
+                }
+            } else if (s_DynamicTierMode == 0) {
+                m_DynamicDualDowngrade.store(false);
+            }
         }
     }
     // Reset 6 queries for this slot before re-using.
@@ -8373,7 +8423,12 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         computeBufBarrier(outputBuf);
     };
 
-    if (m_TripleMode) {
+    // §J.3.e.2.i.22 (v1.4.84) — effective TRIPLE 受動態降階旁路.
+    // 若 m_DynamicDualDowngrade=true (chain 過重觸發)，這幀降回 DUAL 模式:
+    // 只 dispatch 1 個 warp (中點 t=0.5)，省 1 個 warp time + 1 個 swapchain
+    // image acquire/present cycle (present logic 那邊也判同 flag).
+    const bool effectiveTriple = m_TripleMode && !m_DynamicDualDowngrade.load();
+    if (effectiveTriple) {
         // §B2 — TRIPLE 兩個 interp 點: 1/3 → InterpRgbBuf, 2/3 → InterpRgbBuf2.
         dispatchWarp(m_FrucWarpDescSet,  m_FrucInterpRgbBuf,  1.0f / 3.0f);
         dispatchWarp(m_FrucWarpDescSet2, m_FrucInterpRgbBuf2, 2.0f / 3.0f);
@@ -8722,7 +8777,10 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     //   imgIdxC = interp_2 slot (only in TRIPLE, 2/3 點)
     const bool dualPresentThisFrame = m_DualMode && m_FrucMode && m_FrucReady
                                       && !m_FRUCPaused.load();
-    const bool triplePresentThisFrame = dualPresentThisFrame && m_TripleMode;
+    // §J.3.e.2.i.22 (v1.4.84) — present 端也對齊動態降階,
+    // 否則 swapchain 仍 acquire 3 張 image 但 interp_2 內容是舊資料.
+    const bool triplePresentThisFrame = dualPresentThisFrame && m_TripleMode
+                                        && !m_DynamicDualDowngrade.load();
     // §J.3.e.2.i.10f Path D — early AVFrame release.  Decide if we'll split
     // renderFrame into two graphics-queue submits (1: image→buffer copy +
     // signal vkf->sem early so FFmpeg pool can reuse pool image after just

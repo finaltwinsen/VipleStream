@@ -592,6 +592,18 @@ private:
     // instead of vkf->img[0] directly.
     static constexpr uint32_t kFrucFramesInFlight = 2;
 
+    // §J.3.e.2.i.22 (v1.4.84) — 動態 TRIPLE/DUAL 降階狀態.
+    // 偵測 chain mean > 5ms 連續 30 幀 → 自動降 DUAL (省 1 個 warp dispatch +
+    // 1 個 swapchain image acquire); chain mean < 3ms 連續 60 幀 → 升回 TRIPLE.
+    // hysteresis 避免抖動.  Env VIPLE_VKFRUC_DYNAMIC_TIER=0 完全關閉自動降階.
+    std::atomic<bool> m_DynamicDualDowngrade{false};
+    static constexpr int kChainRingSize = 60;
+    double             m_ChainMeanMsRing[kChainRingSize] = {};
+    int                m_ChainMeanMsRingIdx     = 0;
+    int                m_ChainMeanMsRingFilled  = 0;
+    int                m_FramesAboveThreshold   = 0;
+    int                m_FramesBelowThreshold   = 0;
+
     // §B-DUMP 2026-05-07 — diagnostic frame dump for visual real-vs-interp
     // comparison.  Triggered by VIPLE_VKFRUC_DUMP_DIR=path; copies real /
     // interp_1 / interp_2 RGB compute buffers into host-visible staging
