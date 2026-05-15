@@ -4079,6 +4079,23 @@ bool VkFrucRenderer::createInFlightRing()
                     (int)m_AsyncComputeRequested, (int)m_AsyncComputeAvailable,
                     (int)(m_AsyncComputeRequested && m_AsyncComputeAvailable),
                     asyncEnv ? asyncEnv : "(unset, default ON)");
+
+        // §J.3.e.2.i.25 (v1.4.87) — FRUC chain async compute gate.
+        // 跟 RIFE path 共用底層 m_ComputeQueue + m_ComputeCmdBuf + m_ComputeTimelineSem,
+        // 但獨立的 enable flag.  v1.4.87 純框架 commit, gate 預設 0 (不啟用).
+        // v1.4.88 才真切 cmd buf + submit 到 compute queue + cross-QF barrier.
+        m_FrucChainAsyncAvailable = full;
+        const char* frucAsyncEnv = std::getenv("VIPLE_VKFRUC_FRUC_ASYNC");
+        m_FrucChainAsyncRequested = (frucAsyncEnv != nullptr
+                                     && frucAsyncEnv[0] != '\0'
+                                     && frucAsyncEnv[0] != '0');
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-FRUC-ASYNC] gate: requested=%d available=%d "
+                    "→ would-be-active=%d (env VIPLE_VKFRUC_FRUC_ASYNC=%s, "
+                    "v1.4.87 framework-only commit, dispatch wiring lands v1.4.88)",
+                    (int)m_FrucChainAsyncRequested, (int)m_FrucChainAsyncAvailable,
+                    (int)(m_FrucChainAsyncRequested && m_FrucChainAsyncAvailable),
+                    frucAsyncEnv ? frucAsyncEnv : "(unset, default OFF)");
     } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A async-compute "

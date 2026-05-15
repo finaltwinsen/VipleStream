@@ -716,6 +716,15 @@ private:
     bool            m_AsyncComputeRequested                       = false;
     bool            m_AsyncComputeAvailable                       = false;
 
+    // §J.3.e.2.i.25 (v1.4.87) — FRUC chain async compute gate.
+    // 跟 RIFE 路徑的 m_AsyncCompute* 分開: RIFE 是 inference 在 compute queue,
+    // FRUC chain 是 ME/median/warp 在 compute queue.  兩 path 互斥
+    // (m_RifeNativeReady=true 走 RIFE, false 走 FRUC), 所以兩 gate 可共用
+    // 底層 m_ComputeQueue + m_ComputeCmdBuf 但用獨立 enable flag.
+    // VIPLE_VKFRUC_FRUC_ASYNC=1 啟用; 預設 0 (v1.4.86 行為).
+    bool            m_FrucChainAsyncRequested                     = false;
+    bool            m_FrucChainAsyncAvailable                     = false;
+
     // §J.3.e.2.i.10 Phase 2B step 2-4 (v1.4.55) — per-slot pre/post
     // graphics cmd buffers + timeline-sem counter.  Used by the 3-submit
     // chain wiring landed in v1.4.56+:
