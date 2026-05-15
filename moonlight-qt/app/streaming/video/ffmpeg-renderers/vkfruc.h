@@ -922,6 +922,21 @@ private:
     bool runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, uint32_t height,
                              bool useNativeSrc, uint32_t slotIdx = 0);
 
+    // §J.3.e.2.i.26 (v1.4.88) — Cross-QF ownership transfer helpers (stub).
+    // v1.4.89 接到 runFrucComputeChain 拆 cmd buf 路徑.
+    void releaseBufferOwnership(VkCommandBuffer cmd, VkBuffer buf,
+                                  uint32_t srcQueueFamily, uint32_t dstQueueFamily,
+                                  VkAccessFlags srcAccess,
+                                  VkPipelineStageFlags srcStage,
+                                  VkPipelineStageFlags dstStage);
+    void acquireBufferOwnership(VkCommandBuffer cmd, VkBuffer buf,
+                                  uint32_t srcQueueFamily, uint32_t dstQueueFamily,
+                                  VkAccessFlags dstAccess,
+                                  VkPipelineStageFlags srcStage,
+                                  VkPipelineStageFlags dstStage);
+    bool recordFrucChainOnCompute(VkCommandBuffer cmpCmd, uint32_t width, uint32_t height,
+                                    uint32_t slot);
+
     bool     m_FrucMode      = false;
     bool     m_FrucReady     = false;
     bool     m_FrucDisabled  = false;

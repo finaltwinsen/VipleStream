@@ -7987,6 +7987,71 @@ bool VkFrucRenderer::recordRifeWarp(VkCommandBuffer cmd, uint32_t width, uint32_
     return true;
 }
 
+// §J.3.e.2.i.26 (v1.4.88) — Cross-queue-family ownership transfer helpers.
+//
+// Vulkan 規格: 跨 queue family 共享 VK_SHARING_MODE_EXCLUSIVE buffer 必須
+// release + acquire 對稱 pair.  release 在 src QF 的 cmd buf, acquire 在
+// dst QF 的 cmd buf.  兩 barrier 要對齊 (srcQF / dstQF / srcAccess / dstAccess
+// / pipeline stages).
+//
+// 用法: v1.4.89 把 FRUC chain 拆 cmd buf 時, currRgb (graphics→compute) 跟
+// interp (compute→graphics) 都要走 release/acquire pair.
+//
+// 這 commit (v1.4.87 框架延續) 加 helper 但不接到實際路徑 — 等 v1.4.89.
+void VkFrucRenderer::releaseBufferOwnership(VkCommandBuffer cmd, VkBuffer buf,
+                                              uint32_t srcQueueFamily, uint32_t dstQueueFamily,
+                                              VkAccessFlags srcAccess,
+                                              VkPipelineStageFlags srcStage,
+                                              VkPipelineStageFlags dstStage)
+{
+    if (srcQueueFamily == dstQueueFamily) return;  // 同 QF 不需 ownership transfer
+    VkBufferMemoryBarrier b = {};
+    b.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    b.srcAccessMask = srcAccess;
+    b.dstAccessMask = 0;  // release: dstAccessMask 必須 0
+    b.srcQueueFamilyIndex = srcQueueFamily;
+    b.dstQueueFamilyIndex = dstQueueFamily;
+    b.buffer = buf;
+    b.offset = 0;
+    b.size = VK_WHOLE_SIZE;
+    m_RtPfn.CmdPipelineBarrier(cmd, srcStage, dstStage,
+        0, 0, nullptr, 1, &b, 0, nullptr);
+}
+
+void VkFrucRenderer::acquireBufferOwnership(VkCommandBuffer cmd, VkBuffer buf,
+                                              uint32_t srcQueueFamily, uint32_t dstQueueFamily,
+                                              VkAccessFlags dstAccess,
+                                              VkPipelineStageFlags srcStage,
+                                              VkPipelineStageFlags dstStage)
+{
+    if (srcQueueFamily == dstQueueFamily) return;  // 同 QF 不需 ownership transfer
+    VkBufferMemoryBarrier b = {};
+    b.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    b.srcAccessMask = 0;  // acquire: srcAccessMask 必須 0
+    b.dstAccessMask = dstAccess;
+    b.srcQueueFamilyIndex = srcQueueFamily;
+    b.dstQueueFamilyIndex = dstQueueFamily;
+    b.buffer = buf;
+    b.offset = 0;
+    b.size = VK_WHOLE_SIZE;
+    m_RtPfn.CmdPipelineBarrier(cmd, srcStage, dstStage,
+        0, 0, nullptr, 1, &b, 0, nullptr);
+}
+
+// §J.3.e.2.i.26 (v1.4.88) — Stub: FRUC chain record on compute cmd buf.
+//
+// 計畫: 跟 runFrucComputeChain 一樣的 dispatch 序列, 但寫進 cmpCmd 而非
+// 主 render cmd, 且在開頭加 acquire ownership / 結尾加 release ownership.
+// 本 commit 純 stub return false (gate 未啟動). v1.4.89 才填實作 + 接路徑.
+bool VkFrucRenderer::recordFrucChainOnCompute(VkCommandBuffer /*cmpCmd*/,
+                                                uint32_t /*width*/, uint32_t /*height*/,
+                                                uint32_t /*slot*/)
+{
+    // v1.4.88 stub — v1.4.89 才實作真正 chain record + ownership transfer.
+    return false;
+}
+
+
 // §J.3.e.2.i.4 — record FRUC compute chain into the existing renderFrame
 // command buffer (we don't use a separate compute queue/cmdpool — runs on
 // our universal graphics queue with explicit pipeline barriers).
