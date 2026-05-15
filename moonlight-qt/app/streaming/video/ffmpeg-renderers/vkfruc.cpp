@@ -72,7 +72,17 @@ extern "C" {
 // Shared lock for ffmpeg vkQueueSubmit serialisation (per AVVulkanDeviceContext
 // contract).  ffmpeg may submit on multiple threads; our renderFrame is
 // single-threaded, but ffmpeg can submit decode work concurrently.
-static std::mutex s_VkFrucQueueLock;
+//
+// §J.3.e.2.i.16 (v1.4.81) — Changed from std::mutex to std::recursive_mutex:
+// FFmpeg 7.x bypasses lock_queue callback by using vkQueueSubmit2 (the
+// callback was designed for vkQueueSubmit v1.0 and is now marked deprecated
+// — see libavutil/hwcontext_vulkan.h line 178 "Deprecated: use
+// VK_KHR_internally_synchronized_queues").  We inject a custom get_proc_addr
+// that returns wrapping versions of vkQueueSubmit / 2 / 2KHR.  Those wrappers
+// acquire this lock — but our own code ALSO acquires it before calling
+// m_RtPfn.QueueSubmit, so a recursive_mutex is needed to avoid deadlock when
+// our path goes through the wrapped function pointer.
+static std::recursive_mutex s_VkFrucQueueLock;
 
 // §J.3.e.2.i.10 Phase 2B step 5-6 (v1.4.56) — separate lock for the compute
 // queue submit path.  v1.4.56 ships all 3 chain submits on the graphics queue
@@ -313,6 +323,121 @@ void VkFrucRenderer::lockQueueStub(struct AVHWDeviceContext*, uint32_t, uint32_t
 void VkFrucRenderer::unlockQueueStub(struct AVHWDeviceContext*, uint32_t, uint32_t)
 {
     s_VkFrucQueueLock.unlock();
+}
+
+// §J.3.e.2.i.16 (v1.4.81) — vkQueueSubmit2 lock injection.
+//
+// FFmpeg 7.x's hwcontext_vulkan uses vkQueueSubmit2 internally for Vulkan
+// Video decode submission, but the deprecated lock_queue callback (above)
+// only gets called around vkQueueSubmit v1.0 paths.  Result: FFmpeg's
+// decode thread submits to the same VkQueue as our render thread without
+// sync, triggering "[VVL] UNASSIGNED-Threading-MultipleThreads-Write"
+// violations.  Race manifests under heavier compute pressure as fps→1.
+//
+// Fix: pass a custom get_proc_addr to FFmpeg via AVVulkanDeviceContext
+// that returns OUR wrapping versions of vkQueueSubmit / 2 / 2KHR which
+// acquire s_VkFrucQueueLock before dispatching to the real driver.
+// s_VkFrucQueueLock is std::recursive_mutex to handle the case where our
+// own code (which already locks manually) ends up calling a wrapped PFN.
+
+static PFN_vkGetInstanceProcAddr s_RealGetInstanceProcAddr  = nullptr;
+static PFN_vkGetDeviceProcAddr   s_RealGetDeviceProcAddr    = nullptr;
+static PFN_vkQueueSubmit         s_RealQueueSubmit          = nullptr;
+static PFN_vkQueueSubmit2        s_RealQueueSubmit2         = nullptr;
+static PFN_vkQueueSubmit2KHR     s_RealQueueSubmit2KHR      = nullptr;
+
+static VKAPI_ATTR VkResult VKAPI_CALL vkfrucWrappedQueueSubmit(
+    VkQueue queue, uint32_t submitCount, const VkSubmitInfo* pSubmits, VkFence fence)
+{
+    std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+    return s_RealQueueSubmit(queue, submitCount, pSubmits, fence);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL vkfrucWrappedQueueSubmit2(
+    VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits, VkFence fence)
+{
+    std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+    return s_RealQueueSubmit2(queue, submitCount, pSubmits, fence);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL vkfrucWrappedQueueSubmit2KHR(
+    VkQueue queue, uint32_t submitCount, const VkSubmitInfo2KHR* pSubmits, VkFence fence)
+{
+    std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+    return s_RealQueueSubmit2KHR(queue, submitCount, pSubmits, fence);
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkfrucWrappedGetDeviceProcAddr(
+    VkDevice device, const char* pName)
+{
+    if (!s_RealGetDeviceProcAddr) return nullptr;
+    if (pName != nullptr) {
+        if (strcmp(pName, "vkQueueSubmit") == 0) {
+            if (!s_RealQueueSubmit) {
+                s_RealQueueSubmit = reinterpret_cast<PFN_vkQueueSubmit>(
+                    s_RealGetDeviceProcAddr(device, pName));
+            }
+            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit);
+        }
+        if (strcmp(pName, "vkQueueSubmit2") == 0) {
+            if (!s_RealQueueSubmit2) {
+                s_RealQueueSubmit2 = reinterpret_cast<PFN_vkQueueSubmit2>(
+                    s_RealGetDeviceProcAddr(device, pName));
+            }
+            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit2);
+        }
+        if (strcmp(pName, "vkQueueSubmit2KHR") == 0) {
+            if (!s_RealQueueSubmit2KHR) {
+                s_RealQueueSubmit2KHR = reinterpret_cast<PFN_vkQueueSubmit2KHR>(
+                    s_RealGetDeviceProcAddr(device, pName));
+            }
+            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit2KHR);
+        }
+    }
+    return s_RealGetDeviceProcAddr(device, pName);
+}
+
+PFN_vkVoidFunction VkFrucRenderer::wrappedGetInstanceProcAddr(VkInstance instance, const char* pName)
+{
+    if (!s_RealGetInstanceProcAddr) {
+        // Should never happen — we set s_RealGetInstanceProcAddr in
+        // prepareDecoderContext before assigning this wrapper.
+        return nullptr;
+    }
+    if (pName != nullptr) {
+        // §J.3.e.2.i.16 (v1.4.81) — FFmpeg + libplacebo use vkGetDeviceProcAddr
+        // for device-level functions (including vkQueueSubmit family).  Hand
+        // them our wrapping version so submits get serialised.
+        if (strcmp(pName, "vkGetDeviceProcAddr") == 0) {
+            if (!s_RealGetDeviceProcAddr) {
+                s_RealGetDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+                    s_RealGetInstanceProcAddr(instance, pName));
+            }
+            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedGetDeviceProcAddr);
+        }
+        if (strcmp(pName, "vkQueueSubmit") == 0) {
+            if (!s_RealQueueSubmit) {
+                s_RealQueueSubmit = reinterpret_cast<PFN_vkQueueSubmit>(
+                    s_RealGetInstanceProcAddr(instance, pName));
+            }
+            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit);
+        }
+        if (strcmp(pName, "vkQueueSubmit2") == 0) {
+            if (!s_RealQueueSubmit2) {
+                s_RealQueueSubmit2 = reinterpret_cast<PFN_vkQueueSubmit2>(
+                    s_RealGetInstanceProcAddr(instance, pName));
+            }
+            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit2);
+        }
+        if (strcmp(pName, "vkQueueSubmit2KHR") == 0) {
+            if (!s_RealQueueSubmit2KHR) {
+                s_RealQueueSubmit2KHR = reinterpret_cast<PFN_vkQueueSubmit2KHR>(
+                    s_RealGetInstanceProcAddr(instance, pName));
+            }
+            return reinterpret_cast<PFN_vkVoidFunction>(&vkfrucWrappedQueueSubmit2KHR);
+        }
+    }
+    return s_RealGetInstanceProcAddr(instance, pName);
 }
 
 // §J.3.e.2.i — FRUC status getters 給 perf overlay (ffmpeg.cpp:1073-1107) 跟
@@ -4237,7 +4362,12 @@ bool VkFrucRenderer::populateAvHwDeviceCtx(int videoFormat)
     hwDeviceContext->user_opaque = this;
 
     auto vkCtx = (AVVulkanDeviceContext*)hwDeviceContext->hwctx;
-    vkCtx->get_proc_addr = m_pfnGetInstanceProcAddr;
+    // §J.3.e.2.i.16 (v1.4.81) — inject wrappedGetInstanceProcAddr to serialise
+    // FFmpeg 7.x's vkQueueSubmit2 against our render-thread submits.
+    // s_RealGetInstanceProcAddr cached BEFORE assigning the wrapper so it
+    // can fall through to the real loader.
+    s_RealGetInstanceProcAddr = m_pfnGetInstanceProcAddr;
+    vkCtx->get_proc_addr = wrappedGetInstanceProcAddr;
     vkCtx->inst          = m_Instance;
     vkCtx->phys_dev      = m_PhysicalDevice;
     vkCtx->act_dev       = m_Device;
@@ -8309,7 +8439,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         si.signalSemaphoreCount = 1;
         si.pSignalSemaphores    = &m_SlotRenderDoneSem[slot][0];
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
 
@@ -8321,7 +8451,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         pi.pSwapchains        = &m_Swapchain;
         pi.pImageIndices      = &imgIdx;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &pi);
         }
         if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -8741,7 +8871,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         copySi.pSignalSemaphores    = copySigSems;
         VkResult vrCopy;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             vrCopy = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &copySi, VK_NULL_HANDLE);
         }
         if (vrCopy != VK_SUCCESS) {
@@ -9116,7 +9246,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             si.pSignalSemaphores    = sigS;
             VkResult vrPre;
             {
-                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
                 vrPre = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, VK_NULL_HANDLE);
             }
             if (vrPre != VK_SUCCESS) {
@@ -9213,7 +9343,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             si.pSignalSemaphores    = sigS;
             VkResult vrPost;
             {
-                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
                 vrPost = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
             }
             if (vrPost != VK_SUCCESS) {
@@ -9262,7 +9392,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 siMark.pSignalSemaphores    = &m_NvOfTimelineSem;
                 VkResult vrMark;
                 {
-                    std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                    std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
                     vrMark = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siMark, VK_NULL_HANDLE);
                 }
                 if (vrMark == VK_SUCCESS) {
@@ -9309,7 +9439,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             piA.pImageIndices      = &imgIdxA;
             VkResult vrPA;
             {
-                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
                 vrPA = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piA);
             }
             if (vrPA != VK_SUCCESS && vrPA != VK_SUBOPTIMAL_KHR) {
@@ -9325,7 +9455,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             piB.pImageIndices      = &imgIdxB;
             VkResult vrPB;
             {
-                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
                 vrPB = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piB);
             }
             if (vrPB != VK_SUCCESS && vrPB != VK_SUBOPTIMAL_KHR) {
@@ -9905,7 +10035,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         si.signalSemaphoreCount = (uint32_t)kSigCount;
         si.pSignalSemaphores    = signalSems;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
         if (vr != VK_SUCCESS) {
@@ -9948,7 +10078,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                                     (void*)vkf->sem[0], (unsigned long long)waitVals[1],
                                     (void*)vkf->sem[0], (unsigned long long)signalVals[1]);
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
         if (vr != VK_SUCCESS) {
@@ -10000,7 +10130,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         siMark.pSignalSemaphores    = &m_NvOfTimelineSem;
         VkResult vrMark;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             vrMark = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siMark, VK_NULL_HANDLE);
         }
         if (vrMark == VK_SUCCESS) {
@@ -10082,7 +10212,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         piA.pSwapchains        = &m_Swapchain;
         piA.pImageIndices      = &imgIdxA;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piA);
         }
         if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
@@ -10101,7 +10231,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             piC.pSwapchains        = &m_Swapchain;
             piC.pImageIndices      = &imgIdxC;
             {
-                std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+                std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
                 vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piC);
             }
             if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
@@ -10117,7 +10247,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         piB.pSwapchains        = &m_Swapchain;
         piB.pImageIndices      = &imgIdxB;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piB);
         }
         if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
@@ -10145,7 +10275,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         pi.pSwapchains        = &m_Swapchain;
         pi.pImageIndices      = &imgIdx;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &pi);
         }
         if (vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
@@ -10835,7 +10965,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         si.signalSemaphoreCount = 3;
         si.pSignalSemaphores    = signalSems;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
         if (vr != VK_SUCCESS) {
@@ -10858,7 +10988,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         piA.pSwapchains        = &m_Swapchain;
         piA.pImageIndices      = &imgIdxA;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piA);
         }
         VkPresentInfoKHR piB = {};
@@ -10869,7 +10999,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         piB.pSwapchains        = &m_Swapchain;
         piB.pImageIndices      = &imgIdxB;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             VkResult vrB = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piB);
             if (vrB != VK_SUCCESS && vrB != VK_SUBOPTIMAL_KHR) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -10908,7 +11038,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         si.signalSemaphoreCount = 2;
         si.pSignalSemaphores    = singleSignalSems;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
         _profT3 = std::chrono::steady_clock::now();
@@ -10930,7 +11060,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         pi.pSwapchains        = &m_Swapchain;
         pi.pImageIndices      = &imgIdx;
         {
-            std::lock_guard<std::mutex> lk(s_VkFrucQueueLock);
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
             vr = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &pi);
         }
         _profT4 = std::chrono::steady_clock::now();

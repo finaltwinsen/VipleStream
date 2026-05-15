@@ -507,6 +507,10 @@ private:
     VkPhysicalDeviceOpticalFlowFeaturesNV             m_OfFeat      = {};
     static void  lockQueueStub(struct AVHWDeviceContext* ctx, uint32_t qf, uint32_t idx);
     static void  unlockQueueStub(struct AVHWDeviceContext* ctx, uint32_t qf, uint32_t idx);
+    // §J.3.e.2.i.16 (v1.4.81) — Wrapping get_proc_addr for FFmpeg's hwcontext_vulkan.
+    // Returns our serialised wrappers for vkQueueSubmit / 2 / 2KHR so FFmpeg's
+    // decode-thread submits go through s_VkFrucQueueLock.
+    static PFN_vkVoidFunction VKAPI_CALL wrappedGetInstanceProcAddr(VkInstance instance, const char* pName);
 
     // §J.3.e.2.i.2.b — swapchain
     VkSwapchainKHR             m_Swapchain       = VK_NULL_HANDLE;
