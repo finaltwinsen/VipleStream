@@ -1923,23 +1923,50 @@ void main() {
                : (currValid ? currSample : sameCurr);
     }
 
-    // §J.3.e.2.i.12 (v1.4.72) — Edge-fade for high-magnitude MV regions.
-    // 高 |MV| 區域更可能是 ME 邊界 case (foreground / background boundary,
-    // occlusion / disocclusion)，warp 容易產生方塊狀撕裂。對結果做
-    // magnitude-based fade 朝 sameCurr (= 同位置原 pixel, 無 displacement),
-    // 高速 motion 邊緣穩定度 ↑，可見的 mosaic 抑制掉.  跟 v1.4.71 bilateral
-    // median 互補：median 在 MV-domain 移除 outlier，warp edge-fade 在
-    // pixel-domain 對殘餘 high-magnitude 區進一步 dampen.
+    // §J.3.e.2.i.13 (v1.4.74) — Edge-fade triggered by MV **gradient**, not magnitude.
     //
-    // smoothstep(64, 256, mvMagSq) ramp:
-    //   |MV|² < 64  (|MV| < 8 px)   → α=0    (no fade, warp 全強)
-    //   |MV|² > 256 (|MV| > 16 px)  → α=0.4  (40% sameCurr 抑制 mosaic)
-    //   in between                  → smooth
-    // 0.4 max 是 conservative tuning：不夠減 mosaic 可調高 (0.5-0.7); 太
-    // 多 (>0.5) 會讓快速移動物體失去 motion smoothness 跟「補幀關掉」一樣.
-    float mvMagSqFade = dot(mv, mv);
-    float edgeFade    = 0.4 * smoothstep(64.0, 256.0, mvMagSqFade);
-    result = mix(result, sameCurr, edgeFade);
+    // 為什麼之前 v1.4.72 magnitude-based 完全沒效：mosaic 不是出在「高速 MV
+    // 區域」，而是出在 MV 不連續區域 (foreground/background boundary, occlusion).
+    // 物體在畫面中均速大幅度移動 (|MV| 大但連續) 完全沒有 mosaic — warp 把
+    // 整個物體一致位移就好。mosaic 出現在 8×8 block-match 取樣對應到的物體
+    // 邊緣：邊緣這側 block 取了物體 MV、那側 block 取了背景 MV，sampleMV
+    // 用 edge-aware pick 後仍會在 8-pixel 步階上看到 step-function texture
+    // misalignment → 視覺上就是方塊狀 mosaic.
+    //
+    // 正確判據：4-neighbor MV **gradient** (max squared diff to 4 cardinal
+    // neighbors).  高 gradient ⟺ 跨越 motion boundary ⟺ warp 出 mosaic 的
+    // 危險區域。在這些區域 fade 朝 **no-MV crossfade** = mix(prev[pp], curr[pp], tF)
+    // — 同位置 prev/curr 時間插值，有 soft ghost 但絕無方塊。Tradeoff 是
+    // motion boundary 處看起來會「糊一圈」而非「整齊但抖動的方塊」，視覺
+    // 上後者刺眼很多。
+    //
+    // smoothstep(8, 64, mvGradSqMax) ramp:
+    //   max neighbor diff² < 8   (|Δmv| < 2.83 px)  → α=0    (warp 全強)
+    //   max neighbor diff² > 64  (|Δmv| > 8 px)     → α=0.85 (近全 crossfade)
+    //   in between                                 → smooth
+    // 0.85 max 是 aggressive tuning：要完全切到 1.0 會在乾淨 ME 邊緣失去
+    // FRUC 動作平滑感，留 15% warp 維持一些連續性。閾值 8 (= 2.83 px L2)
+    // 跟 sampleMV 的 EDGE_AWARE_MV_THRESHOLD=8.0 對齊：sampleMV pick 切換
+    // 跟 warp crossfade 切換同步發生。
+    float bs = float(p.mvBlockSize);
+    int blockX = int(float(px) / bs);
+    int blockY = int(float(py) / bs);
+    vec2 mvC4 = vec2(loadMVRaw(blockX,     blockY    )) * 0.5;
+    vec2 mvL4 = vec2(loadMVRaw(blockX - 1, blockY    )) * 0.5;
+    vec2 mvR4 = vec2(loadMVRaw(blockX + 1, blockY    )) * 0.5;
+    vec2 mvU4 = vec2(loadMVRaw(blockX,     blockY - 1)) * 0.5;
+    vec2 mvD4 = vec2(loadMVRaw(blockX,     blockY + 1)) * 0.5;
+    vec2 dL4 = mvC4 - mvL4;
+    vec2 dR4 = mvC4 - mvR4;
+    vec2 dU4 = mvC4 - mvU4;
+    vec2 dD4 = mvC4 - mvD4;
+    float mvGradSqMax = max(max(dot(dL4, dL4), dot(dR4, dR4)),
+                            max(dot(dU4, dU4), dot(dD4, dD4)));
+
+    vec3 prevAtPP    = fetchPrevRGB(int(px), int(py));
+    vec3 crossfadeNoMv = mix(prevAtPP, sameCurr, tF);
+    float edgeFade   = 0.85 * smoothstep(8.0, 64.0, mvGradSqMax);
+    result = mix(result, crossfadeNoMv, edgeFade);
 
     storeInterp(int(px), int(py), result);
 }
