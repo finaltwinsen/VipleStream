@@ -4102,10 +4102,10 @@ bool VkFrucRenderer::createInFlightRing()
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-FRUC-ASYNC] gate: requested=%d available=%d "
                     "→ would-be-active=%d (env VIPLE_VKFRUC_FRUC_ASYNC=%s, "
-                    "v1.4.92 SW + HW path wiring active — partA/cmpCmd/partC "
+                    "v1.4.93 SW + HW path wiring active — partA/cmpCmd/partC "
                     "three-submit chain on m_ComputeTimelineSem when gate=ON; "
-                    "HW path coexist pathDActive (partA skip NV12 copy + wait "
-                    "m_CopyDoneSem); 互斥 phase2BActive/triplePresent/NvOf)",
+                    "HW path coexist pathDActive + triplePresent (partC 加 "
+                    "interp_2 render pass + piC); 互斥 phase2BActive/NvOf)",
                     (int)m_FrucChainAsyncRequested, (int)m_FrucChainAsyncAvailable,
                     (int)(m_FrucChainAsyncRequested && m_FrucChainAsyncAvailable),
                     frucAsyncEnv ? frucAsyncEnv : "(unset, default OFF)");
@@ -9210,11 +9210,15 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // §J.3.e.2.i.29 (v1.4.91) — FRUC chain async compute gate (HW path).
     // §J.3.e.2.i.30 (v1.4.92) — relax pathDActive 互斥, partA 在 pathDActive
     //                            條件下 skip NV12 copy + wait m_CopyDoneSem.
+    // §J.3.e.2.i.31 (v1.4.93) — relax triplePresentThisFrame 互斥, partC 加
+    //                            interp_2 render pass + partC submit 加 4th
+    //                            acquire wait + renderDone[imgIdxC] signal +
+    //                            Present 加 piC.
     //
     // Mirror v1.4.90 SW path frucChainAsyncActive but for HW path (renderFrame).
     // 走 partA (graphics) → cmpCmd (compute, recordFrucChainOnCompute) → partC
-    // (graphics, acquire ownership + dual interp + real-frame render pass)
-    // 三 submit 串 m_ComputeTimelineSem.
+    // (graphics, acquire ownership + (interp_2 if TRIPLE) + dual interp +
+    // real-frame render pass) 三 submit 串 m_ComputeTimelineSem.
     //
     // partA 兩種 mode:
     //   pathDActive=true:  skip NV12 copy / acquireBar / bufBar (path D 已做),
@@ -9229,17 +9233,19 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     //                       AVVkFrame state update + unlock 在 partA submit
     //                       成功後執行.
     //
+    // partC dual / triple:
+    //   dualPresentThisFrame:    interp_1 (imgIdxA) + real (imgIdx).
+    //   triplePresentThisFrame:  interp_1 (imgIdxA) + interp_2 (imgIdxC) +
+    //                             real (imgIdx).
+    //
     // 互斥 (尚未 relax):
     //   * !phase2BActive: phase2B 已用 cmpCmd 跑 RIFE inference, 衝突.
-    //   * !triplePresentThisFrame: TRIPLE 有 3 presents (interp_1 + interp_2
-    //     + real), conservative 跳過; v1.4.93+ 才支援.
     //   * !m_NvOfReady: NvOf 需要 image-to-image copy 到 m_NvOfInputCurr +
-    //     marker submit, 簡化 partA 暫時不支援; v1.4.93+ 才整合.
+    //     marker submit, 簡化 partA 暫時不支援; v1.4.94+ 才整合.
     //   * vkf 可用 + m_FrucMode + m_FrucReady + 非 paused.
     const bool frucChainAsyncActiveHw = m_FrucChainAsyncRequested
                                      && m_FrucChainAsyncAvailable
                                      && !phase2BActive
-                                     && !triplePresentThisFrame
                                      && !m_NvOfReady
                                      && m_FrucMode && m_FrucReady && !m_FRUCPaused.load()
                                      && vkf != nullptr
@@ -10414,6 +10420,35 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             m_RtPfn.CmdEndRenderPass(postCmd);
         }
 
+        // §J.3.e.2.i.31 (v1.4.93) — TRIPLE 第 2 張 interp render pass on
+        // imgIdxC.  共用 m_InterpPipeline 但 sample m_FrucInterpRgbBuf2 (binding
+        // via m_InterpDescSet2).  Mirror single-cmd path line 10435-10467.
+        if (triplePresentThisFrame) {
+            VkRenderPassBeginInfo rpbiInterp2 = {};
+            rpbiInterp2.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rpbiInterp2.renderPass           = m_RenderPass;
+            rpbiInterp2.framebuffer          = m_Framebuffers[imgIdxC];
+            rpbiInterp2.renderArea.extent    = m_SwapchainExtent;
+            rpbiInterp2.clearValueCount      = 1;
+            rpbiInterp2.pClearValues         = &clearValD;
+            m_RtPfn.CmdBeginRenderPass(postCmd, &rpbiInterp2, VK_SUBPASS_CONTENTS_INLINE);
+            m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
+            m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                          m_InterpPipelineLayout, 0,
+                                          1, &m_InterpDescSet2, 0, nullptr);
+            struct { int srcW, srcH, _pad0, _pad1; } pcInterp2D = {
+                (int)hwW, (int)hwH, 0, 0
+            };
+            if (pfnCmdPushConstD) {
+                pfnCmdPushConstD(postCmd, m_InterpPipelineLayout,
+                                 VK_SHADER_STAGE_FRAGMENT_BIT,
+                                 0, sizeof(pcInterp2D), &pcInterp2D);
+            }
+            m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
+            drawOverlayInRenderPass(postCmd);
+            m_RtPfn.CmdEndRenderPass(postCmd);
+        }
+
         // real-frame render pass (mirror line 10470-10543).  useCrgbForReal
         // 分支沿用 single-cmd 邏輯.
         VkRenderPassBeginInfo rpbiRealD = {};
@@ -10582,27 +10617,40 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         }
 
         // ---- partC submit (graphics queue, computeTimeline@V_post + acquire → renderDone + fence) ----
+        // dual: 3 wait (computeTimeline + 2 acquire), 2 signal (renderDone[A,B]).
+        // triple: 4 wait (+ acquire[2]), 3 signal (+ renderDone[imgIdxC]).
+        // single: 2 wait (computeTimeline + acquire[0]), 1 signal (renderDone[imgIdx]).
         {
-            VkPipelineStageFlags waitMP[3] = {
+            VkPipelineStageFlags waitMP[4] = {
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             };
-            VkSemaphore waitSP[3] = {
+            VkSemaphore waitSP[4] = {
                 m_ComputeTimelineSem,
                 m_SlotAcquireSem[slot][0],
                 m_SlotAcquireSem[slot][1],
+                m_SlotAcquireSem[slot][2],
             };
-            uint64_t waitVP[3] = { computeV_postD, 0, 0 };
-            const uint32_t nWaitP = dualPresentThisFrame ? 3 : 2;
+            uint64_t waitVP[4] = { computeV_postD, 0, 0, 0 };
+            const uint32_t nWaitP = triplePresentThisFrame ? 4
+                                  : (dualPresentThisFrame ? 3 : 2);
 
+            VkSemaphore sigSPtripleHW[3] = {
+                m_SwapchainRenderDoneSem[imgIdxA],
+                m_SwapchainRenderDoneSem[imgIdxB],
+                m_SwapchainRenderDoneSem[imgIdxC],
+            };
             VkSemaphore sigSPdualHW[2] = {
                 m_SwapchainRenderDoneSem[imgIdxA],
                 m_SwapchainRenderDoneSem[imgIdxB],
             };
             VkSemaphore sigSPsingleHW[1] = { m_SwapchainRenderDoneSem[imgIdx] };
-            VkSemaphore* sigSP = dualPresentThisFrame ? sigSPdualHW : sigSPsingleHW;
-            const uint32_t nSigP = dualPresentThisFrame ? 2 : 1;
+            VkSemaphore* sigSP = triplePresentThisFrame ? sigSPtripleHW
+                               : (dualPresentThisFrame ? sigSPdualHW : sigSPsingleHW);
+            const uint32_t nSigP = triplePresentThisFrame ? 3
+                                 : (dualPresentThisFrame ? 2 : 1);
 
             VkSubmitInfo siPH = {};
             siPH.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -10616,7 +10664,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             // partC wait 含 timeline sem (computeTimeline@V_post) — 必須加
             // VkTimelineSemaphoreSubmitInfo (signal sems 全 binary, 不 signal
             // timeline value; 但 wait 需要 value).
-            uint64_t sigVP[2] = { 0, 0 };
+            uint64_t sigVP[3] = { 0, 0, 0 };
             VkTimelineSemaphoreSubmitInfo tssiPH = {};
             tssiPH.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
             tssiPH.waitSemaphoreValueCount   = nWaitP;
@@ -10651,7 +10699,8 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 (unsigned long long)computeV_postD);
         }
 
-        // ===== Present (mirror single-cmd path line 10878+, dual + single) =====
+        // ===== Present (mirror single-cmd path line 10878+, dual + triple + single) =====
+        // Order: piA (interp_1) → [piC (interp_2 if TRIPLE)] → piB (real).
         if (dualPresentThisFrame) {
             VkPresentInfoKHR piA = {};
             piA.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -10666,6 +10715,25 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 vrPAH = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piA);
             }
             (void)vrPAH;
+            // §J.3.e.2.i.31 (v1.4.93) — TRIPLE 第 2 張 interp present.
+            if (triplePresentThisFrame) {
+                VkPresentInfoKHR piC = {};
+                piC.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+                piC.waitSemaphoreCount = 1;
+                piC.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxC];
+                piC.swapchainCount     = 1;
+                piC.pSwapchains        = &m_Swapchain;
+                piC.pImageIndices      = &imgIdxC;
+                VkResult vrPCH;
+                {
+                    std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+                    vrPCH = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piC);
+                }
+                if (vrPCH != VK_SUCCESS && vrPCH != VK_SUBOPTIMAL_KHR) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-FRUC-ASYNC] HW triple: present(interp 2/3) returned %d", (int)vrPCH);
+                }
+            }
             VkPresentInfoKHR piB = {};
             piB.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
             piB.waitSemaphoreCount = 1;
@@ -10678,7 +10746,8 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 VkResult vrPBH = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piB);
                 if (vrPBH != VK_SUCCESS && vrPBH != VK_SUBOPTIMAL_KHR) {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC-FRUC-ASYNC] HW dual: present(real) returned %d", (int)vrPBH);
+                        "[VIPLE-VKFRUC-FRUC-ASYNC] HW %s: present(real) returned %d",
+                        triplePresentThisFrame ? "triple" : "dual", (int)vrPBH);
                 }
             }
         } else {
