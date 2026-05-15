@@ -4102,9 +4102,10 @@ bool VkFrucRenderer::createInFlightRing()
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-FRUC-ASYNC] gate: requested=%d available=%d "
                     "→ would-be-active=%d (env VIPLE_VKFRUC_FRUC_ASYNC=%s, "
-                    "v1.4.91 SW + HW path wiring active — partA/cmpCmd/partC "
+                    "v1.4.92 SW + HW path wiring active — partA/cmpCmd/partC "
                     "three-submit chain on m_ComputeTimelineSem when gate=ON; "
-                    "HW path 互斥 phase2BActive/pathDActive/triplePresent/NvOf)",
+                    "HW path coexist pathDActive (partA skip NV12 copy + wait "
+                    "m_CopyDoneSem); 互斥 phase2BActive/triplePresent/NvOf)",
                     (int)m_FrucChainAsyncRequested, (int)m_FrucChainAsyncAvailable,
                     (int)(m_FrucChainAsyncRequested && m_FrucChainAsyncAvailable),
                     frucAsyncEnv ? frucAsyncEnv : "(unset, default OFF)");
@@ -9207,25 +9208,37 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     uint64_t pathDCopyDoneVal = 0;
 
     // §J.3.e.2.i.29 (v1.4.91) — FRUC chain async compute gate (HW path).
+    // §J.3.e.2.i.30 (v1.4.92) — relax pathDActive 互斥, partA 在 pathDActive
+    //                            條件下 skip NV12 copy + wait m_CopyDoneSem.
     //
     // Mirror v1.4.90 SW path frucChainAsyncActive but for HW path (renderFrame).
-    // 走 partA (graphics, NV12 image→buffer copy + release ownership) → cmpCmd
-    // (compute, recordFrucChainOnCompute) → partC (graphics, acquire ownership +
-    // dual interp + real-frame render pass) 三 submit 串 m_ComputeTimelineSem.
+    // 走 partA (graphics) → cmpCmd (compute, recordFrucChainOnCompute) → partC
+    // (graphics, acquire ownership + dual interp + real-frame render pass)
+    // 三 submit 串 m_ComputeTimelineSem.
     //
-    // 互斥 (active 條件嚴格):
+    // partA 兩種 mode:
+    //   pathDActive=true:  skip NV12 copy / acquireBar / bufBar (path D 已做),
+    //                       partA 只 release m_SwFrucNv12Buf ownership; submit
+    //                       wait m_CopyDoneSem (path D copy submit 已 signal)
+    //                       + signal m_ComputeTimelineSem@V_pre 不 signal
+    //                       vkf->sem (path D 已 signal V+1).
+    //                       AVVkFrame state update + unlock 已在 path D 完成.
+    //   pathDActive=false: 完整 partA (acquireBar + NV12 copy + bufBar +
+    //                       release ownership); submit wait vkf->sem@V,
+    //                       signal computeTimelineSem@V_pre + vkf->sem@V+1;
+    //                       AVVkFrame state update + unlock 在 partA submit
+    //                       成功後執行.
+    //
+    // 互斥 (尚未 relax):
     //   * !phase2BActive: phase2B 已用 cmpCmd 跑 RIFE inference, 衝突.
-    //   * !pathDActive: pathDActive 用 separate copy submit, 不 fit 三 submit
-    //     pattern (frucChainAsyncActive 自己在 partA 做 NV12 copy).
-    //   * !triplePresentThisFrame: TRIPLE 有 3 presents (interp_1 + interp_2 +
-    //     real), conservative 跳過; v1.4.92+ 才支援.
+    //   * !triplePresentThisFrame: TRIPLE 有 3 presents (interp_1 + interp_2
+    //     + real), conservative 跳過; v1.4.93+ 才支援.
     //   * !m_NvOfReady: NvOf 需要 image-to-image copy 到 m_NvOfInputCurr +
-    //     marker submit, 簡化 partA 暫時不支援; v1.4.92+ 才整合.
+    //     marker submit, 簡化 partA 暫時不支援; v1.4.93+ 才整合.
     //   * vkf 可用 + m_FrucMode + m_FrucReady + 非 paused.
     const bool frucChainAsyncActiveHw = m_FrucChainAsyncRequested
                                      && m_FrucChainAsyncAvailable
                                      && !phase2BActive
-                                     && !pathDActive
                                      && !triplePresentThisFrame
                                      && !m_NvOfReady
                                      && m_FrucMode && m_FrucReady && !m_FRUCPaused.load()
@@ -10215,14 +10228,19 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         const uint32_t hwH = (uint32_t)frame->height;
 
         // ===== partA: acquireBar + NV12 image→buffer copy + ownership release =====
+        // §J.3.e.2.i.30 (v1.4.92) — pathDActive 條件下 path D copy submit 已
+        // 處理 vkf->img[0] acquireBar / NV12 copy / m_SwFrucNv12Buf bufBar +
+        // signal vkf->sem@V+1 + unlock_frame; partA 只 release ownership.
         if (m_RtPfn.BeginCommandBuffer(preCmd, &cbbi2D) != VK_SUCCESS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-FRUC-ASYNC] HW partA Begin failed — demote async");
             m_FrucChainAsyncAvailable = false;
-            if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+            // pathDActive 已 unlock; 非 pathDActive 才需要 unlock.
+            if (!pathDActive && vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
             return;
         }
 
+        if (!pathDActive) {
         // acquireBar: vkf->img[0] oldLayout → GENERAL (mirror line 10143-10164).
         VkImageMemoryBarrier acquireBarA = {};
         acquireBarA.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -10294,20 +10312,26 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 0, nullptr, 1, &bufBarHW, 0, nullptr);
+        }  // end if (!pathDActive) — pathDActive 跳過 acquireBar/NV12 copy/bufBar
 
-        // Release m_SwFrucNv12Buf ownership graphics → compute.  cmpCmd 內
-        // recordFrucChainOnCompute 對應 acquire (TRANSFER → COMPUTE 層級).
+        // Release m_SwFrucNv12Buf ownership graphics → compute.  always run
+        // (兩 mode 都需要 transfer ownership; cmpCmd 內 recordFrucChainOnCompute
+        // 對應 acquire).  非 pathDActive: srcAccess=TRANSFER_WRITE (剛 NV12
+        // copy + bufBar 轉 SHADER_READ).  pathDActive: m_SwFrucNv12Buf 在 path
+        // D 結尾已 SHADER_READ; release srcStage 改 COMPUTE_SHADER 對齊 path
+        // D 結尾 stage.
         releaseBufferOwnership(preCmd, m_SwFrucNv12Buf,
             m_QueueFamily, m_ComputeQueueFamily,
-            VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            pathDActive ? VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_TRANSFER_WRITE_BIT,
+            pathDActive ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                        : VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
         if (m_RtPfn.EndCommandBuffer(preCmd) != VK_SUCCESS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-FRUC-ASYNC] HW partA End failed — demote async");
             m_FrucChainAsyncAvailable = false;
-            if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+            if (!pathDActive && vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
             return;
         }
 
@@ -10315,7 +10339,8 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         m_RtPfn.ResetCommandBuffer(cmpCmd, 0);
         if (!recordFrucChainOnCompute(cmpCmd, hwW, hwH, slot)) {
             // helper 已 demote m_FrucChainAsyncAvailable.
-            if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+            // pathDActive 已 unlock; 非 pathDActive 才需要 unlock.
+            if (!pathDActive && vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
             return;
         }
 
@@ -10324,7 +10349,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-FRUC-ASYNC] HW partC Begin failed — demote async");
             m_FrucChainAsyncAvailable = false;
-            if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+            if (!pathDActive && vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
             return;
         }
 
@@ -10448,7 +10473,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-FRUC-ASYNC] HW partC End failed — demote async");
             m_FrucChainAsyncAvailable = false;
-            if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+            if (!pathDActive && vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
             return;
         }
 
@@ -10456,23 +10481,34 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         const uint64_t computeV_preD  = m_AsyncComputeNext.fetch_add(2, std::memory_order_acq_rel);
         const uint64_t computeV_postD = computeV_preD + 1;
 
-        // ---- partA submit (graphics queue, vkf->sem@V → computeTimeline@V_pre + vkf->sem@V+1) ----
-        // partA 結尾 vkf->img[0] 不再被 access (NV12 已 copy 到 m_SwFrucNv12Buf),
-        // 可以 signal vkf->sem@V+1 給 ffmpeg pool 重用.
+        // ---- partA submit (graphics queue) ----
+        // pathDActive=true:  wait m_CopyDoneSem (path D 已 signal vkf->sem+1),
+        //                     signal m_ComputeTimelineSem@V_pre only.
+        // pathDActive=false: wait vkf->sem@V, signal m_ComputeTimelineSem@V_pre
+        //                     + vkf->sem@V+1 (給 ffmpeg pool 重用 vkf).
         {
             VkPipelineStageFlags waitMA[1] = {
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                    | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                pathDActive ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                            : (VkPipelineStageFlags)(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                                     | VK_PIPELINE_STAGE_TRANSFER_BIT),
             };
-            VkSemaphore     waitSA[1] = { vkf->sem[0] };
-            uint64_t        waitVA[1] = { vkf->sem_value[0] };
+            VkSemaphore     waitSA[1] = {
+                pathDActive ? m_CopyDoneSem : vkf->sem[0],
+            };
+            uint64_t        waitVA[1] = {
+                pathDActive ? pathDCopyDoneVal : vkf->sem_value[0],
+            };
             VkSemaphore     sigSA[2]  = { m_ComputeTimelineSem, vkf->sem[0] };
-            uint64_t        sigVA[2]  = { computeV_preD, vkf->sem_value[0] + 1 };
+            uint64_t        sigVA[2]  = {
+                computeV_preD,
+                pathDActive ? 0 : (vkf->sem_value[0] + 1),
+            };
+            const uint32_t nSigA = pathDActive ? 1 : 2;
             VkTimelineSemaphoreSubmitInfo tssiAH = {};
             tssiAH.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
             tssiAH.waitSemaphoreValueCount   = 1;
             tssiAH.pWaitSemaphoreValues      = waitVA;
-            tssiAH.signalSemaphoreValueCount = 2;
+            tssiAH.signalSemaphoreValueCount = nSigA;
             tssiAH.pSignalSemaphoreValues    = sigVA;
             VkSubmitInfo siAH = {};
             siAH.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -10482,7 +10518,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             siAH.pWaitDstStageMask    = waitMA;
             siAH.commandBufferCount   = 1;
             siAH.pCommandBuffers      = &preCmd;
-            siAH.signalSemaphoreCount = 2;
+            siAH.signalSemaphoreCount = nSigA;
             siAH.pSignalSemaphores    = sigSA;
             VkResult vrAH;
             {
@@ -10494,17 +10530,19 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                     "[VIPLE-VKFRUC-FRUC-ASYNC] HW partA submit failed (%d) — demote", (int)vrAH);
                 m_FrucChainAsyncAvailable = false;
                 if (vrAH == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
-                if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+                if (!pathDActive && vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
                 return;
             }
         }
 
-        // partA submit 成功 → ffmpeg 即將能 reuse vkf (一旦 GPU 達到 sem_value+1).
-        // Update AVVkFrame state 跟 single-cmd path 結尾 (line 10866-10872) 一致.
-        vkf->access[0]     = (VkAccessFlagBits)0;
-        vkf->layout[0]     = VK_IMAGE_LAYOUT_GENERAL;
-        vkf->sem_value[0] += 1;
-        if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+        // partA submit 成功 → 非 pathDActive 才 update AVVkFrame state + unlock
+        // (pathDActive 已在 path D copy submit 結尾 line 9528-9533 完成).
+        if (!pathDActive) {
+            vkf->access[0]     = (VkAccessFlagBits)0;
+            vkf->layout[0]     = VK_IMAGE_LAYOUT_GENERAL;
+            vkf->sem_value[0] += 1;
+            if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
+        }
 
         // ---- cmpCmd submit (compute queue, computeTimeline@V_pre → @V_post) ----
         {
