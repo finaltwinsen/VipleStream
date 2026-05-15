@@ -1499,8 +1499,41 @@ void main() {
         }
     }
 
-    // No sub-pixel on Balanced — Q1 = ×2 of integer MV
-    ivec2 bestMV_Q1 = bestMV * 2;
+    // §J.3.e.2.i.20 (v1.4.84) Phase C — Half-pixel sub-pixel refinement.
+    //
+    // Plan: at integer minimum, fit parabola via 4 unit-step neighbor census
+    // costs (N/S/E/W in pixel grid).  Sub-pixel offset:
+    //   dx = 0.5 * (costL - costR) / (costL + costR - 2*bestCost)
+    // Bounded to [-0.5, 0.5].  Q1 stores integer × 2; half-pixel = Q1 unit 1.
+    // So map round(dx * 2) ∈ {-1, 0, 1} into Q1 offset.
+    //
+    // Conditional refine: only when integer cost low (< 1.5 × sample² = 13.5).
+    // High-cost blocks are likely garbage MV — refining amplifies error.
+    //
+    // Cost: 4 extra census evaluations per block ~50-100us GPU on RTX 3060.
+    ivec2 bestMV_Q1;
+    if (bestCost < float(SAMPLE_COUNT * SAMPLE_COUNT) * 1.5) {
+        float costL = computeCensusCost(blockCenter + bestMV + ivec2(-1, 0), blockCenter, 1e9);
+        float costR = computeCensusCost(blockCenter + bestMV + ivec2( 1, 0), blockCenter, 1e9);
+        float costU = computeCensusCost(blockCenter + bestMV + ivec2(0, -1), blockCenter, 1e9);
+        float costD = computeCensusCost(blockCenter + bestMV + ivec2(0,  1), blockCenter, 1e9);
+        float denomX = costL + costR - 2.0 * bestCost;
+        float denomY = costU + costD - 2.0 * bestCost;
+        int offsetX = 0, offsetY = 0;
+        if (denomX > 0.001) {
+            float dx = 0.5 * (costL - costR) / denomX;
+            dx = clamp(dx, -0.5, 0.5);
+            offsetX = int(round(dx * 2.0));  // Q1 unit = 0.5 pixel
+        }
+        if (denomY > 0.001) {
+            float dy = 0.5 * (costU - costD) / denomY;
+            dy = clamp(dy, -0.5, 0.5);
+            offsetY = int(round(dy * 2.0));
+        }
+        bestMV_Q1 = bestMV * 2 + ivec2(offsetX, offsetY);
+    } else {
+        bestMV_Q1 = bestMV * 2;
+    }
 
     // High-cost rejection → fallback to MV=0
     if (bestCost > float(SAMPLE_COUNT * SAMPLE_COUNT) * 3.0) {
@@ -1740,7 +1773,32 @@ void main() {
     if (bestCost > 100.0) {
         bestMV_Q1 = ivec2(0, 0);
     } else {
-        bestMV_Q1 = bestMV * 2;
+        // §J.3.e.2.i.20 (v1.4.84) Phase C — Half-pixel refinement (only on
+        // low-cost integer matches; bad MV refining amplifies error).
+        // Parabolic fit via 4 unit-step neighbors → Q1 sub-pixel offset.
+        // 跟 forward ME 同設計 (line ~1502).
+        if (bestCost < 13.5) {
+            float costL = computeCensusCost(blockCenter + bestMV + ivec2(-1, 0), blockCenter, 1e9);
+            float costR = computeCensusCost(blockCenter + bestMV + ivec2( 1, 0), blockCenter, 1e9);
+            float costU = computeCensusCost(blockCenter + bestMV + ivec2(0, -1), blockCenter, 1e9);
+            float costD = computeCensusCost(blockCenter + bestMV + ivec2(0,  1), blockCenter, 1e9);
+            float denomX = costL + costR - 2.0 * bestCost;
+            float denomY = costU + costD - 2.0 * bestCost;
+            int offsetX = 0, offsetY = 0;
+            if (denomX > 0.001) {
+                float dx = 0.5 * (costL - costR) / denomX;
+                dx = clamp(dx, -0.5, 0.5);
+                offsetX = int(round(dx * 2.0));
+            }
+            if (denomY > 0.001) {
+                float dy = 0.5 * (costU - costD) / denomY;
+                dy = clamp(dy, -0.5, 0.5);
+                offsetY = int(round(dy * 2.0));
+            }
+            bestMV_Q1 = bestMV * 2 + ivec2(offsetX, offsetY);
+        } else {
+            bestMV_Q1 = bestMV * 2;
+        }
         bestMV_Q1 = clamp(bestMV_Q1, ivec2(-96, -96), ivec2(96, 96));
     }
     storeOutMV(int(blockX), int(blockY), bestMV_Q1);
