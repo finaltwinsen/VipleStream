@@ -7916,6 +7916,20 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     if (!pfnCmdBindPipeline || !pfnCmdBindDescSets || !pfnCmdPushConst
         || !pfnCmdDispatch || !pfnCmdPipelineBarrier || !pfnCmdCopyBuffer) return false;
 
+    // §J.3.e.2.i.21 (v1.4.83) — Env gate VIPLE_VKFRUC_FRUC_LEVEL 控制補幀層級.
+    // 解碼延遲 vs 視覺品質 trade-off knob.
+    //   0: v1.4.74 行為 (只 spatial gradient fade)
+    //   1: v1.4.76 行為 (+ temporal coherence)
+    //   2: v1.4.80 行為 (+ bidirectional ME + occlusion mask)
+    //   3: v1.4.81 行為 (+ 4×4 adaptive ME) — v1.4.83 預設
+    //   4: v1.4.82 行為 (+ 半像素 subpix; v1.4.83 已撤, 預留 enum)
+    static const int s_FrucLevel =
+        qEnvironmentVariableIsSet("VIPLE_VKFRUC_FRUC_LEVEL")
+            ? qEnvironmentVariableIntValue("VIPLE_VKFRUC_FRUC_LEVEL") : 3;
+    const bool levelHasTemporal = (s_FrucLevel >= 1);
+    const bool levelHasBackward = (s_FrucLevel >= 2);
+    const bool levelHasFine4x4  = (s_FrucLevel >= 3);
+
     // §J.3.e.2.i.6 / §J.3.g v2 — read PREVIOUS pass's 6 timestamps for THIS
     // slot (fence wait at start of renderFrameSw guarantees GPU finished),
     // compute 5 stage deltas + total, accumulate.  Skip on first iteration
@@ -8192,23 +8206,24 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
 
     // ---- Stage 1b: Backward motion estimation (§J.3.e.2.i.17, v1.4.82) ----
     // 用 raw forward MV (m_FrucMvBuf) 當 predictor 跑 curr→prev backward ME.
-    // 含 v1.4.82 三個 fast-path 修補 (forward-matching early-exit + tight
-    // [8,4,2,1] diamond + 寬鬆 high-cost threshold). 預期 ~1000us.
-    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMeBackwardPipeline);
-    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMeBackwardPipeLay,
-                       0, 1, &m_FrucMeBackwardDescSet, 0, nullptr);
-    {
-        struct {
-            uint32_t frameWidth, frameHeight, blockSize, mvWidth, mvHeight, _pad0;
-        } pcMeBwd = {
-            (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
-            (uint32_t)mvW, (uint32_t)mvH, 0
-        };
-        pfnCmdPushConst(cmd, m_FrucMeBackwardPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
-                        0, sizeof(pcMeBwd), &pcMeBwd);
+    // §J.3.e.2.i.21 (v1.4.83) — 受 levelHasBackward 控制; level <= 1 跳過.
+    if (levelHasBackward) {
+        pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMeBackwardPipeline);
+        pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMeBackwardPipeLay,
+                           0, 1, &m_FrucMeBackwardDescSet, 0, nullptr);
+        {
+            struct {
+                uint32_t frameWidth, frameHeight, blockSize, mvWidth, mvHeight, _pad0;
+            } pcMeBwd = {
+                (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
+                (uint32_t)mvW, (uint32_t)mvH, 0
+            };
+            pfnCmdPushConst(cmd, m_FrucMeBackwardPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                            0, sizeof(pcMeBwd), &pcMeBwd);
+        }
+        pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
+        computeBufBarrier(m_FrucMvBackwardBuf);
     }
-    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
-    computeBufBarrier(m_FrucMvBackwardBuf);
 
     // ---- Stage 2: MV median filter ----
     // §J.3.e.2.i.7 R5 had this as a noop cmdCopyBuffer experiment,
@@ -8236,52 +8251,55 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     computeBufBarrier(m_FrucMvFilteredBuf);
 
     // ---- Stage 2b: Backward MV median (§J.3.e.2.i.17, v1.4.82) ----
-    // Same median pipeline, different descset (in=BackwardBuf, out=BackwardFilteredBuf).
-    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeline);
-    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeLay,
-                       0, 1, &m_FrucMedianBackwardDescSet, 0, nullptr);
-    {
-        struct {
-            uint32_t mvWidth, mvHeight, _pad0, _pad1;
-        } pcMedBwd = { mvW, mvH, 0, 0 };
-        pfnCmdPushConst(cmd, m_FrucMedianPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
-                        0, sizeof(pcMedBwd), &pcMedBwd);
+    // §J.3.e.2.i.21 (v1.4.83) — 受 levelHasBackward 控制 (跟 bwdME 配對).
+    if (levelHasBackward) {
+        pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeline);
+        pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeLay,
+                           0, 1, &m_FrucMedianBackwardDescSet, 0, nullptr);
+        {
+            struct {
+                uint32_t mvWidth, mvHeight, _pad0, _pad1;
+            } pcMedBwd = { mvW, mvH, 0, 0 };
+            pfnCmdPushConst(cmd, m_FrucMedianPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                            0, sizeof(pcMedBwd), &pcMedBwd);
+        }
+        pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
+        computeBufBarrier(m_FrucMvBackwardFilteredBuf);
     }
-    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
-    computeBufBarrier(m_FrucMvBackwardFilteredBuf);
 
-    // ---- Stage 2c: Phase B uncertainty flag pre-pass (§J.3.e.2.i.19, v1.4.83) ----
-    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFlagPipeline);
-    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFlagPipeLay,
-                       0, 1, &m_FrucFlagDescSet, 0, nullptr);
-    {
-        struct {
-            uint32_t mvWidth, mvHeight, _pad0, _pad1;
-        } pcFlag = { mvW, mvH, 0, 0 };
-        pfnCmdPushConst(cmd, m_FrucFlagPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
-                        0, sizeof(pcFlag), &pcFlag);
-    }
-    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
-    computeBufBarrier(m_FrucRefineFlagBuf);
+    // ---- Stage 2c+d: Phase B flag pre-pass + 4×4 fine ME (§J.3.e.2.i.19) ----
+    // §J.3.e.2.i.21 (v1.4.83) — 兩個都受 levelHasFine4x4 控制; level <= 2 跳過.
+    // 需要 bwdMV 才能算 flag (consistency error) — 兩個 stage 同 gate.
+    if (levelHasFine4x4 && levelHasBackward) {
+        pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFlagPipeline);
+        pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFlagPipeLay,
+                           0, 1, &m_FrucFlagDescSet, 0, nullptr);
+        {
+            struct {
+                uint32_t mvWidth, mvHeight, _pad0, _pad1;
+            } pcFlag = { mvW, mvH, 0, 0 };
+            pfnCmdPushConst(cmd, m_FrucFlagPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                            0, sizeof(pcFlag), &pcFlag);
+        }
+        pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
+        computeBufBarrier(m_FrucRefineFlagBuf);
 
-    // ---- Stage 2d: Phase B 4×4 fine ME (§J.3.e.2.i.19, v1.4.83) ----
-    // Dispatch grid = fine resolution (mvW*2 × mvH*2).  threads early-out if
-    // parent not flagged (just copy parent MV).
-    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFine4x4Pipeline);
-    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFine4x4PipeLay,
-                       0, 1, &m_FrucFine4x4DescSet, 0, nullptr);
-    {
-        struct {
-            uint32_t frameWidth, frameHeight, coarseBlockSize, coarseMvWidth, coarseMvHeight, _pad0;
-        } pcFine = {
-            (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
-            (uint32_t)mvW, (uint32_t)mvH, 0
-        };
-        pfnCmdPushConst(cmd, m_FrucFine4x4PipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
-                        0, sizeof(pcFine), &pcFine);
+        pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFine4x4Pipeline);
+        pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFine4x4PipeLay,
+                           0, 1, &m_FrucFine4x4DescSet, 0, nullptr);
+        {
+            struct {
+                uint32_t frameWidth, frameHeight, coarseBlockSize, coarseMvWidth, coarseMvHeight, _pad0;
+            } pcFine = {
+                (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
+                (uint32_t)mvW, (uint32_t)mvH, 0
+            };
+            pfnCmdPushConst(cmd, m_FrucFine4x4PipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                            0, sizeof(pcFine), &pcFine);
+        }
+        pfnCmdDispatch(cmd, (mvW * 2 + 7) / 8, (mvH * 2 + 7) / 8, 1);
+        computeBufBarrier(m_FrucMvFineBuf);
     }
-    pfnCmdDispatch(cmd, (mvW * 2 + 7) / 8, (mvH * 2 + 7) / 8, 1);
-    computeBufBarrier(m_FrucMvFineBuf);
 
     // §J.3.g v2 ts[3] — after all Stage-2 work (median fwd + median bwd + flag + fine4x4)
     if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
@@ -8329,8 +8347,11 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeline);
         pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeLay,
                            0, 1, &descSet, 0, nullptr);
-        // §J.3.e.2.i.19 (v1.4.83) Phase B — push const 36→40 byte (added uint
-        // hasFineMv).  10 fields × 4 byte = 40.  hasFineMv=1 — fine path active.
+        // §J.3.e.2.i.21 (v1.4.83) — push const flags 跟著 s_FrucLevel 走.
+        // level 0: all 0u (純 v1.4.74 spatial gradient fade)
+        // level 1: temporal=1, backward=0, fine=0
+        // level 2: temporal=1, backward=1, fine=0
+        // level 3+: 全 1 (預設)
         struct {
             uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
             float    blendFactor;
@@ -8340,7 +8361,10 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             uint32_t hasFineMv;
         } pcWarp = {
             (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
-            (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac, 1u, 1u, 1u
+            (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac,
+            (uint32_t)(levelHasTemporal ? 1u : 0u),
+            (uint32_t)(levelHasBackward ? 1u : 0u),
+            (uint32_t)(levelHasFine4x4  ? 1u : 0u)
         };
         pfnCmdPushConst(cmd, m_FrucWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
                         0, sizeof(pcWarp), &pcWarp);
