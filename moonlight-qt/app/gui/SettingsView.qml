@@ -978,13 +978,63 @@ Flickable {
                 // 舊 VkImage 前)，預設仍 OFF (beta opt-in 直到多卡多 driver 驗測).
                 // env var VIPLE_VKFRUC_NATIVE_RIFE=1 /
                 // VIPLE_VKFRUC_RIFE_INFER_DIM=N 仍是 dev escape hatch.
+
+                // §J.3.e.2.i.11 (v1.4.70) — auto-tier 主控 CheckBox.
+                // 預設 ON：根據啟動時偵測的 GPU tier 自動選 RIFE on/off +
+                // inferDim，無視底下的 Manual Native RIFE / inferDim
+                // 控制項。關掉才走 Manual。
                 CheckBox {
-                    id: vkfrucNativeRifeCheck
+                    id: vkfrucRifeAutoTierCheck
                     width: parent.width
-                    text: qsTr("Native RIFE 補幀 (β beta)")
+                    text: qsTr("FRUC 自動 GPU 分級（Auto-tier，推薦）")
                     font.pointSize: 12
                     visible: frameInterpolationCheck.checked
                              && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
+                    checked: StreamingPreferences.vkfrucRifeAutoTier
+                    onCheckedChanged: {
+                        if (StreamingPreferences.vkfrucRifeAutoTier !== checked) {
+                            StreamingPreferences.vkfrucRifeAutoTier = checked
+                        }
+                    }
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("§J.3.e.2.i.11 跨硬體補幀策略 — 啟動時跑 GPU benchmark 偵測你的顯卡強度，自動選 RIFE on/off + inferDim 給該 HW 最 stable 的 frame rate 體驗。\n\n四級 tier 自動套用：\n\n• ENTRY (內顯 / 老卡)：FRUC 全關，純 60→60 native present\n• PERFORMANCE (GTX 16xx, RX 5xxx)：block-match 補幀 only (~4ms chain, 有 30Hz 閃爍)\n• BALANCED (RTX 30, RX 6700+, Arc A7) — 預期 RTX 3060 Laptop 落這級：RIFE β.5.1 inferDim=128, chain ~10ms 穩定 fit slot，fps 110+ 不掉; 但 inferDim=128 quality 接近 ME, 補幀效果輕微\n• QUALITY (RTX 40+, RX 7800+)：RIFE β.5.1 inferDim=256, chain ~14ms 邊緣 fit 16.7ms slot，最佳品質\n\n關掉 auto-tier 走 Manual 模式：使用底下 Native RIFE CheckBox + 推論解析度 ComboBox 自己決定。\n\n注意：auto-tier 不會魔幻地讓任何顯卡跑出 RTX 4090 quality. 它是 graceful degradation —— 各 HW 拿到該 HW 上最 stable 的 trade-off.")
+                }
+
+                // §J.3.e.2.i.11 (v1.4.70) — auto-tier 偵測結果顯示 Label.
+                Label {
+                    width: parent.width
+                    visible: vkfrucRifeAutoTierCheck.visible && vkfrucRifeAutoTierCheck.checked
+                    font.pointSize: 11
+                    wrapMode: Text.Wrap
+                    text: {
+                        var tier = StreamingPreferences.vkfrucDetectedTier
+                        var tierName = tier === StreamingPreferences.VGT_ENTRY       ? "ENTRY (內顯/老卡 — FRUC 全關)"            :
+                                       tier === StreamingPreferences.VGT_PERFORMANCE ? "PERFORMANCE (block-match only, ~4ms)"   :
+                                       tier === StreamingPreferences.VGT_BALANCED    ? "BALANCED (RIFE inferDim=128, ~10ms)"     :
+                                       tier === StreamingPreferences.VGT_QUALITY     ? "QUALITY (RIFE inferDim=256, ~14ms)"      :
+                                                                                       "UNKNOWN (未偵測 — 重啟 client 觸發)"
+                        var gpu = StreamingPreferences.vkfrucDetectedGpuName === ""
+                                  ? "(尚未偵測)"
+                                  : StreamingPreferences.vkfrucDetectedGpuName
+                        var benchMs = StreamingPreferences.vkfrucBenchmarkNs > 0
+                                      ? (StreamingPreferences.vkfrucBenchmarkNs / 1e6).toFixed(2) + " ms"
+                                      : "(待測)"
+                        return qsTr("   偵測：") + tierName + "\n"
+                             + qsTr("   GPU：")  + gpu + "\n"
+                             + qsTr("   benchmark：") + benchMs
+                    }
+                }
+
+                CheckBox {
+                    id: vkfrucNativeRifeCheck
+                    width: parent.width
+                    text: qsTr("Native RIFE 補幀 (β beta) — Manual 模式")
+                    font.pointSize: 12
+                    visible: frameInterpolationCheck.checked
+                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
+                             && !vkfrucRifeAutoTierCheck.checked
                     checked: StreamingPreferences.vkfrucEnableNativeRife
                     onCheckedChanged: {
                         if (StreamingPreferences.vkfrucEnableNativeRife !== checked) {

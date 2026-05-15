@@ -145,6 +145,36 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.70 ship 帶走的條目（2026-05-15, post v1.4.69 auto-tier wire）
+
+- 🟢 **§J.3.e.2.i.11 cross-HW FRUC auto-tier — UI 整合** — 4-commit staged
+  plan 最後一刀（原 plan v1.4.69，順延至此版）。
+  - `SettingsView.qml`:
+    - Vulkan + FRUC 區段加 **"FRUC 自動 GPU 分級（Auto-tier，推薦）"**
+      CheckBox 在 Native RIFE CheckBox 之上，控
+      `StreamingPreferences.vkfrucRifeAutoTier` (default true).
+    - 加 status Label 顯示偵測結果 3 行：
+        偵測：BALANCED (RIFE inferDim=128, ~10ms)
+        GPU：NVIDIA GeForce RTX 3060 Laptop GPU
+        benchmark：1.42 ms
+      根據 `vkfrucDetectedTier` / `vkfrucDetectedGpuName` /
+      `vkfrucBenchmarkNs` 動態算出顯示文字
+    - 既有 Native RIFE CheckBox + 推論解析度 ComboBox 的 visibility 加
+      `&& !vkfrucRifeAutoTierCheck.checked`，意思 auto-tier 開啟時 hide
+      Manual controls; 關掉才顯示。原 RIFE CheckBox 改 label 加 "—
+      Manual 模式" 字尾澄清用途
+    - Auto-tier CheckBox ToolTip 列四級 tier 的取捨 + 不會魔幻地讓任何
+      顯卡跑出 RTX 4090 quality 的 honest disclaimer
+  - 至此 cross-HW FRUC auto-tier 4-commit staged plan 全部完成。
+    新使用者 / 升級者啟動 client 就走 auto-tier，UI 顯示偵測結果 +
+    可手動關掉切 Manual 模式。
+  - **這個 plan 完整目標達成**：跨硬體都可使用的補幀策略 — 各 HW 拿到
+    該 HW 上最 stable 的 trade-off，不需手動 tune setting，UI 透明
+    顯示偵測結果。**注意 plan 已預告 auto-tier 不會魔幻地解決所有
+    HW 的 quality+perf 兼得問題** — 在 RTX 3060 Laptop 上 user 仍會
+    看到 inferDim=128 「跟關 RIFE 無差異」的品質。要更好品質仍需換
+    GPU 或接受 manual override + fps 波動.
+
 ### v1.4.69 ship 帶走的條目（2026-05-15, post v1.4.68 benchmark dispatch）
 
 - 🟢 **§J.3.e.2.i.11 cross-HW FRUC auto-tier — wire tier 到 RIFE on/off
