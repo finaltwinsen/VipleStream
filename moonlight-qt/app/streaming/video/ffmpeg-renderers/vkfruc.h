@@ -942,15 +942,6 @@ private:
     VkPipeline            m_FrucWarpPipeline  = VK_NULL_HANDLE;
     VkDescriptorSet       m_FrucWarpDescSet   = VK_NULL_HANDLE;
 
-    // §J.3.e.2.i.14 (v1.4.75) — Backward ME pipeline + descriptor set.
-    // Reuses median pipeline for backward MV smoothing via separate descset.
-    VkShaderModule        m_FrucMeBackwardShaderMod  = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_FrucMeBackwardDsl        = VK_NULL_HANDLE;
-    VkPipelineLayout      m_FrucMeBackwardPipeLay    = VK_NULL_HANDLE;
-    VkPipeline            m_FrucMeBackwardPipeline   = VK_NULL_HANDLE;
-    VkDescriptorSet       m_FrucMeBackwardDescSet    = VK_NULL_HANDLE;
-    VkDescriptorSet       m_FrucMedianBackwardDescSet = VK_NULL_HANDLE;
-
     // §B-NVOF Phase 5 — SFIXED5→Q1 format converter compute pipeline.
     // Reads m_NvOfFlowStaging (storage buffer copy of m_NvOfFlowImage),
     // 2x2 average + sign-extend + divide-by-16, writes Q1 int2 to
@@ -974,14 +965,6 @@ private:
     VkDeviceMemory m_FrucMvFilteredMem = VK_NULL_HANDLE;
     VkBuffer       m_FrucPrevMvBuf     = VK_NULL_HANDLE;
     VkDeviceMemory m_FrucPrevMvMem     = VK_NULL_HANDLE;
-    // §J.3.e.2.i.14 (v1.4.75) — Backward MV buffers (curr→prev direction)
-    // same size as forward.  ME backward shader writes raw Q1 to MvBackwardBuf;
-    // median run produces MvBackwardFilteredBuf for warp shader to consume
-    // via binding 4.
-    VkBuffer       m_FrucMvBackwardBuf         = VK_NULL_HANDLE;
-    VkDeviceMemory m_FrucMvBackwardBufMem      = VK_NULL_HANDLE;
-    VkBuffer       m_FrucMvBackwardFilteredBuf = VK_NULL_HANDLE;
-    VkDeviceMemory m_FrucMvBackwardFilteredMem = VK_NULL_HANDLE;
     VkBuffer       m_FrucInterpRgbBuf  = VK_NULL_HANDLE;
     VkDeviceMemory m_FrucInterpRgbMem  = VK_NULL_HANDLE;
     // §B2 2026-05-06 — TRIPLE 60→180 路徑用第二個 interp buffer (1/3, 2/3 點).

@@ -5551,7 +5551,6 @@ void VkFrucRenderer::destroySwUploadResources()
 // Forward declarations — defined in plvk.cpp (external linkage; not
 // `static`).  Use C++ linkage to match the definitions there.
 extern const char* kFrucMotionEstShaderGlsl;
-extern const char* kFrucMotionEstBackwardShaderGlsl;  // §J.3.e.2.i.14 v1.4.75
 extern const char* kFrucMvMedianShaderGlsl;
 extern const char* kFrucWarpShaderGlsl;
 
@@ -6123,17 +6122,7 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                         m_FrucMedianShaderMod, m_FrucMedianDsl, m_FrucMedianPipeLay, m_FrucMedianPipeline)) {
         m_FrucDisabled = true; return false;
     }
-    // §J.3.e.2.i.14 (v1.4.75) — Backward ME: same push const layout as forward
-    // (24 byte), 4 bindings (prevRGB, currRGB, fwdMV, outMV).
-    if (!buildPipeline("MEBackward", kFrucMotionEstBackwardShaderGlsl, 4, 24,
-                        m_FrucMeBackwardShaderMod, m_FrucMeBackwardDsl,
-                        m_FrucMeBackwardPipeLay, m_FrucMeBackwardPipeline)) {
-        m_FrucDisabled = true; return false;
-    }
-    // §J.3.e.2.i.14 (v1.4.75) — Warp: bumped to 5 bindings (binding 4 = bwdMV
-    // filtered), push const stays 32 byte (uint hasBackwardMv replaces float
-    // _pcPad0, both 4 byte).
-    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 5, 32,
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 4, 32,
                         m_FrucWarpShaderMod, m_FrucWarpDsl, m_FrucWarpPipeLay, m_FrucWarpPipeline)) {
         m_FrucDisabled = true; return false;
     }
@@ -6286,13 +6275,6 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                      m_FrucMvFilteredBuf, m_FrucMvFilteredMem)
         || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                      m_FrucPrevMvBuf, m_FrucPrevMvMem)
-        // §J.3.e.2.i.14 (v1.4.75) — Backward MV buffers (curr→prev direction).
-        // 不需要 TRANSFER_SRC (median 用 dispatch 寫 filtered，不是 copy);
-        // TRANSFER_DST 維持 explicit zero init capability.
-        || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                     m_FrucMvBackwardBuf, m_FrucMvBackwardBufMem)
-        || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                     m_FrucMvBackwardFilteredBuf, m_FrucMvBackwardFilteredMem)
         // §B-DUMP needs TRANSFER_SRC for vkCmdCopyBuffer interp → staging.
         // §J.3.e.X Path β.2 需要 TRANSFER_DST 因為 RifeNativeExecutor.
         // runInferenceGpu 內部 vkCmdCopyBuffer(out0_blob → m_FrucInterpRgbBuf)
@@ -6342,13 +6324,10 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // Bumped maxSets 7 → 10, descriptorCount 20 → 26.
     // §J.3.e.X Path β.5 — 3 more sets: UpFlow (2 bindings), UpMask (2 bindings),
     // NativeWarp (5 bindings).  +9 storage descriptors.  Bumped 10→13, 26→35.
-    // §J.3.e.2.i.14 (v1.4.75) — +2 sets (MeBackward 4 bindings + MedianBackward
-    // 2 bindings = 6 descriptors) + warp sets bumped 4→5 bindings (×2 sets = 2
-    // extra descriptors) = +8 descriptors total. 13→15 sets, 35→43.
-    pSize.descriptorCount = 43;
+    pSize.descriptorCount = 35;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpCi.maxSets = 15;
+    dpCi.maxSets = 13;
     dpCi.poolSizeCount = 1;
     dpCi.pPoolSizes = &pSize;
     if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_FrucDescPool) != VK_SUCCESS) {
@@ -6404,28 +6383,13 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         || !allocAndUpdateSet(m_FrucMedianDsl,
                               { m_FrucMvBuf, m_FrucMvFilteredBuf },
                               m_FrucMedianDescSet)
-        // §J.3.e.2.i.14 (v1.4.75) — Backward ME desc set: binding 0/1 RGB
-        // (same as forward), binding 2 = fwdMV raw (m_FrucMvBuf, used as
-        // predictor), binding 3 = output backward MV.
-        || !allocAndUpdateSet(m_FrucMeBackwardDsl,
-                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvBuf, m_FrucMvBackwardBuf },
-                              m_FrucMeBackwardDescSet)
-        // §J.3.e.2.i.14 (v1.4.75) — Backward median desc set: reuses median
-        // pipeline + DSL, just different I/O buffers.
-        || !allocAndUpdateSet(m_FrucMedianDsl,
-                              { m_FrucMvBackwardBuf, m_FrucMvBackwardFilteredBuf },
-                              m_FrucMedianBackwardDescSet)
-        // §J.3.e.2.i.14 (v1.4.75) — Warp now has 5 bindings: binding 4 =
-        // filtered backward MV.
         || !allocAndUpdateSet(m_FrucWarpDsl,
-                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf,
-                                m_FrucInterpRgbBuf, m_FrucMvBackwardFilteredBuf },
+                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf, m_FrucInterpRgbBuf },
                               m_FrucWarpDescSet)
         // §B2 2026-05-06 — TRIPLE 第二份 warp desc set，output binding 3
         // → m_FrucInterpRgbBuf2，其它 binding 不變.
         || !allocAndUpdateSet(m_FrucWarpDsl,
-                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf,
-                                m_FrucInterpRgbBuf2, m_FrucMvBackwardFilteredBuf },
+                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf, m_FrucInterpRgbBuf2 },
                               m_FrucWarpDescSet2)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: descriptor set alloc/update failed");
@@ -6632,9 +6596,6 @@ void VkFrucRenderer::destroyFrucComputeResources()
     DESTROY_PIPE(m_FrucMePipeline,      m_FrucMePipeLay,      m_FrucMeDsl,      m_FrucMeShaderMod)
     DESTROY_PIPE(m_FrucMedianPipeline,  m_FrucMedianPipeLay,  m_FrucMedianDsl,  m_FrucMedianShaderMod)
     DESTROY_PIPE(m_FrucWarpPipeline,    m_FrucWarpPipeLay,    m_FrucWarpDsl,    m_FrucWarpShaderMod)
-    // §J.3.e.2.i.14 (v1.4.75) — Backward ME pipeline
-    DESTROY_PIPE(m_FrucMeBackwardPipeline, m_FrucMeBackwardPipeLay,
-                 m_FrucMeBackwardDsl,      m_FrucMeBackwardShaderMod)
     // §J.3.e.X Path β.4
     DESTROY_PIPE(m_RifeBilinearPipeline, m_RifeBilinearPipeLay,
                  m_RifeBilinearDsl,      m_RifeBilinearShaderMod)
@@ -6653,9 +6614,6 @@ void VkFrucRenderer::destroyFrucComputeResources()
     DESTROY_BUF(m_FrucMvBuf,         m_FrucMvBufMem)
     DESTROY_BUF(m_FrucMvFilteredBuf, m_FrucMvFilteredMem)
     DESTROY_BUF(m_FrucPrevMvBuf,     m_FrucPrevMvMem)
-    // §J.3.e.2.i.14 (v1.4.75)
-    DESTROY_BUF(m_FrucMvBackwardBuf,         m_FrucMvBackwardBufMem)
-    DESTROY_BUF(m_FrucMvBackwardFilteredBuf, m_FrucMvBackwardFilteredMem)
     DESTROY_BUF(m_FrucInterpRgbBuf,  m_FrucInterpRgbMem)
     // §B2 2026-05-06 — TRIPLE 第二份 interp output buffer.
     DESTROY_BUF(m_FrucInterpRgbBuf2, m_FrucInterpRgbBuf2Mem)
@@ -7978,26 +7936,6 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                              m_FrucTimerPool, timerBase + 2);
     }
 
-    // ---- Stage 1b: Backward motion estimation (§J.3.e.2.i.14, v1.4.75) ----
-    // 用 forward MV 當 predictor 跑 curr→prev backward ME，輸出寫 m_FrucMvBackwardBuf.
-    // Search window ±4 px around mirrored forward MV (cf full ±63 forward).
-    // Cost expected ~300us; small contribution vs forward ME ~1500us.
-    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMeBackwardPipeline);
-    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMeBackwardPipeLay,
-                       0, 1, &m_FrucMeBackwardDescSet, 0, nullptr);
-    {
-        struct {
-            uint32_t frameWidth, frameHeight, blockSize, mvWidth, mvHeight, _pad0;
-        } pcMeBwd = {
-            (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
-            (uint32_t)mvW, (uint32_t)mvH, 0
-        };
-        pfnCmdPushConst(cmd, m_FrucMeBackwardPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
-                        0, sizeof(pcMeBwd), &pcMeBwd);
-    }
-    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
-    computeBufBarrier(m_FrucMvBackwardBuf);
-
     // ---- Stage 2: MV median filter ----
     // §J.3.e.2.i.7 R5 had this as a noop cmdCopyBuffer experiment,
     // §B-quality (a) 2026-05-06 — re-enabled real 3×3 median dispatch.
@@ -8022,22 +7960,6 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     }
     pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
     computeBufBarrier(m_FrucMvFilteredBuf);
-
-    // ---- Stage 2b: Backward MV median (§J.3.e.2.i.14, v1.4.75) ----
-    // Same pipeline as Stage 2, different descset (in=BackwardBuf, out=BackwardFilteredBuf).
-    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeline);
-    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMedianPipeLay,
-                       0, 1, &m_FrucMedianBackwardDescSet, 0, nullptr);
-    {
-        struct {
-            uint32_t mvWidth, mvHeight, _pad0, _pad1;
-        } pcMed = { mvW, mvH, 0, 0 };
-        pfnCmdPushConst(cmd, m_FrucMedianPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
-                        0, sizeof(pcMed), &pcMed);
-    }
-    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
-    computeBufBarrier(m_FrucMvBackwardFilteredBuf);
-
     // §J.3.g v2 ts[3] — after Median (copy mode) barrier
     if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
         pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
@@ -8084,17 +8006,14 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeline);
         pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeLay,
                            0, 1, &descSet, 0, nullptr);
-        // §J.3.e.2.i.14 (v1.4.75) — _pcPad0 (float) → hasBackwardMv (uint).
-        // Same 4-byte slot; bwdMV path is unconditionally enabled in vkfruc
-        // (plvk.cpp standalone path sets 0).
         struct {
             uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
             float    blendFactor;
             float    tFraction;
-            uint32_t hasBackwardMv;
+            float    _pcPad0;
         } pcWarp = {
             (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
-            (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac, 1u
+            (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac, 0.0f
         };
         pfnCmdPushConst(cmd, m_FrucWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
                         0, sizeof(pcWarp), &pcWarp);
