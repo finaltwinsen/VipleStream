@@ -38,6 +38,12 @@
 #define SER_VKFRUCTRIPLE "vkfrucEnableTriple" // §B2 UI 整合
 #define SER_VKFRUCRIFEB  "vkfrucEnableNativeRife"   // §J.3.e.X Path β UI 整合
 #define SER_VKFRUCRIFEDIM "vkfrucNativeRifeInferDim" // β infer dim (/128 aligned)
+// §J.3.e.2.i.11 (v1.4.66) — auto-tier 偵測結果 cache。process 啟動時 vkfruc.cpp
+// 透過 StreamingPreferences::get() 寫入這三個 field 並 save()，下一次啟動
+// 讀 cache 跳過 benchmark（GPU name 沒變的話）。
+#define SER_VKFRUC_DETECTED_TIER     "vkfrucDetectedTier"
+#define SER_VKFRUC_DETECTED_GPU_NAME "vkfrucDetectedGpuName"
+#define SER_VKFRUC_BENCHMARK_NS      "vkfrucBenchmarkNs"
 #define SER_DESIGNVARIANT "designVariant"
 #define SER_APPSORTMODE "appSortMode"
 #define SER_RELAYURL "relayUrl"
@@ -197,6 +203,13 @@ void StreamingPreferences::reload()
     // 256 仍可由 RTX 4070+ 使用者手動 opt-in.  Higher dims listed in
     // SettingsView.qml ComboBox.  See plan §J for full diagnosis chain.
     vkfrucNativeRifeInferDim  = settings.value(SER_VKFRUCRIFEDIM, 128).toInt();
+    // §J.3.e.2.i.11 (v1.4.66) — auto-tier 偵測結果 cache 讀回。default
+    // VGT_UNKNOWN 表示「尚未偵測」，vkfruc.cpp 啟動時若見此值就跑一次
+    // heuristic + benchmark 再寫回 QSettings (via save())。
+    vkfrucDetectedTier     = static_cast<VkfrucGpuTier>(
+        settings.value(SER_VKFRUC_DETECTED_TIER, static_cast<int>(VGT_UNKNOWN)).toInt());
+    vkfrucDetectedGpuName  = settings.value(SER_VKFRUC_DETECTED_GPU_NAME, QString()).toString();
+    vkfrucBenchmarkNs      = settings.value(SER_VKFRUC_BENCHMARK_NS, qint64(0)).toLongLong();
     designVariant = static_cast<DesignVariant>(settings.value(SER_DESIGNVARIANT, static_cast<int>(DV_SAFE)).toInt());
     // VipleStream H Phase 2.2: default to ASM_RECENT so users see their
     // recently-played Steam games at the top — which is what they
@@ -413,6 +426,10 @@ void StreamingPreferences::save()
     settings.setValue(SER_VKFRUCTRIPLE, vkfrucEnableTriple);
     settings.setValue(SER_VKFRUCRIFEB, vkfrucEnableNativeRife);
     settings.setValue(SER_VKFRUCRIFEDIM, vkfrucNativeRifeInferDim);
+    // §J.3.e.2.i.11 (v1.4.66) — auto-tier 偵測結果 cache 寫入。
+    settings.setValue(SER_VKFRUC_DETECTED_TIER, static_cast<int>(vkfrucDetectedTier));
+    settings.setValue(SER_VKFRUC_DETECTED_GPU_NAME, vkfrucDetectedGpuName);
+    settings.setValue(SER_VKFRUC_BENCHMARK_NS, vkfrucBenchmarkNs);
     settings.setValue(SER_DESIGNVARIANT, static_cast<int>(designVariant));
     settings.setValue(SER_APPSORTMODE, static_cast<int>(appSortMode));
     settings.setValue(SER_RELAYURL, relayUrl);

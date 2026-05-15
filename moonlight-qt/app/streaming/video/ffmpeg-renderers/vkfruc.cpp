@@ -707,6 +707,103 @@ bool VkFrucRenderer::pickPhysicalDeviceAndQueue()
                 m_ComputeQueueFamily == UINT32_MAX ? "(none — fallback to graphics QF=" : "QF=",
                 m_ComputeQueueFamily == UINT32_MAX ? m_QueueFamily : m_ComputeQueueFamily,
                 m_ComputeQueueFamily == UINT32_MAX ? ")" : " (dedicated COMPUTE_BIT, no GRAPHICS_BIT)");
+
+    // §J.3.e.2.i.11 (v1.4.66) — cross-hardware FRUC auto-tier 偵測 (heuristic).
+    // 啟動時根據 GPU 強度自動選 path + inferDim，避免使用者手動 tune setting。
+    // v1.4.66 只做 deviceName / deviceType / limits 的 heuristic 粗判，存到
+    // StreamingPreferences::vkfrucDetectedTier 給 v1.4.68 wire 自動套用用。
+    // v1.4.67 會加 Conv2D micro-benchmark dispatch 細修這個結果。
+    //
+    // 分級邏輯 (粗略，accepts false-positive，benchmark 階段會修正)：
+    //   - INTEGRATED_GPU / CPU type           → ENTRY      (內顯 / 老卡 / 沒 DGPU)
+    //   - DISCRETE_GPU + deviceName 含 "RTX 40" / "RX 78" / "RX 79" / "Arc B"
+    //                                         → QUALITY    (高階卡)
+    //   - DISCRETE_GPU + deviceName 含 "RTX 30" / "RTX 20" / "RX 67" / "RX 6800"
+    //                                         / "RX 6900" / "Arc A7" / "Arc A580"
+    //                                         → BALANCED   (中階卡)
+    //   - DISCRETE_GPU + deviceName 含 "GTX 16" / "GTX 10" / "RX 5" / "RX 6500"
+    //                                         / "RX 6600" / "Arc A3" / "Arc A380"
+    //                                         → PERFORMANCE (入門 dGPU)
+    //   - 其他 DISCRETE_GPU 不識別            → BALANCED   (安全中位數)
+    //   - 任何 fail / unknown                 → ENTRY      (保守 fallback)
+    //
+    // v1.4.67 micro-benchmark 會根據實測 GPU time 重新分級，所以這個 heuristic
+    // 只是 v1.4.67 跑 benchmark 前的 placeholder + 給 v1.4.67 比對 sanity check。
+    auto deduceTierFromDeviceName = [](const VkPhysicalDeviceProperties& p)
+        -> StreamingPreferences::VkfrucGpuTier {
+        if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU
+            || p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+            return StreamingPreferences::VGT_ENTRY;
+        }
+        if (p.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+            return StreamingPreferences::VGT_ENTRY;
+        }
+        const QString name = QString::fromUtf8(p.deviceName);
+        auto contains = [&](const char* s) { return name.contains(QLatin1String(s),
+                                                                   Qt::CaseInsensitive); };
+        // Quality candidates (RTX 40-series / RDNA3 high-end / Arc Battlemage)
+        if (contains("RTX 40") || contains("RTX 50") || contains("RX 7800")
+            || contains("RX 7900") || contains("RX 9070") || contains("RX 9080")
+            || contains("RX 9090") || contains("Arc B")) {
+            return StreamingPreferences::VGT_QUALITY;
+        }
+        // Balanced candidates (RTX 20/30 / RDNA2 high-mid / Arc A7)
+        if (contains("RTX 30") || contains("RTX 20") || contains("RTX 16")
+            || contains("RX 6700") || contains("RX 6800") || contains("RX 6900")
+            || contains("RX 7600") || contains("RX 7700")
+            || contains("Arc A7") || contains("Arc A580") || contains("Arc A770")) {
+            return StreamingPreferences::VGT_BALANCED;
+        }
+        // Performance candidates (GTX 10/16-series / RDNA1 / RDNA2 low / Arc A3)
+        if (contains("GTX 16") || contains("GTX 10") || contains("RX 5")
+            || contains("RX 6500") || contains("RX 6600")
+            || contains("Arc A380") || contains("Arc A3") || contains("Arc A580")) {
+            return StreamingPreferences::VGT_PERFORMANCE;
+        }
+        // Unknown DISCRETE_GPU — assume Balanced (safe middle ground).  v1.4.67
+        // benchmark will refine.
+        return StreamingPreferences::VGT_BALANCED;
+    };
+    const StreamingPreferences::VkfrucGpuTier heuristicTier = deduceTierFromDeviceName(chosen);
+    m_DetectedGpuTier = (int)heuristicTier;
+    const char* tierName =
+        heuristicTier == StreamingPreferences::VGT_ENTRY       ? "ENTRY"       :
+        heuristicTier == StreamingPreferences::VGT_PERFORMANCE ? "PERFORMANCE" :
+        heuristicTier == StreamingPreferences::VGT_BALANCED    ? "BALANCED"    :
+        heuristicTier == StreamingPreferences::VGT_QUALITY     ? "QUALITY"     : "UNKNOWN";
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-TIER] §J.3.e.2.i.11 v1.4.66 heuristic: %s "
+                "(deviceName='%s' deviceType=%d) — not yet wired to RIFE on/off "
+                "or inferDim selection (v1.4.68 接通); v1.4.67 will refine via "
+                "Conv2D micro-benchmark",
+                tierName, chosen.deviceName, (int)chosen.deviceType);
+
+    // §J.3.e.2.i.11 (v1.4.66) — 寫回 StreamingPreferences cache，下次啟動可
+    // 跳過偵測直接讀 cache (除非 GPU name 變動).  GPU name 變動偵測 + cache
+    // 重跑邏輯由 v1.4.67 benchmark 完成；本版只負責填 heuristic + GPU name +
+    // save 一次.
+    if (auto* prefs = StreamingPreferences::get()) {
+        const QString currentGpuName = QString::fromUtf8(chosen.deviceName);
+        const bool gpuChanged = (prefs->vkfrucDetectedGpuName != currentGpuName);
+        const bool firstRun   = (prefs->vkfrucDetectedTier == StreamingPreferences::VGT_UNKNOWN);
+        if (firstRun || gpuChanged) {
+            prefs->vkfrucDetectedTier    = heuristicTier;
+            prefs->vkfrucDetectedGpuName = currentGpuName;
+            prefs->vkfrucBenchmarkNs     = 0;  // not measured yet (v1.4.67)
+            prefs->save();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-TIER] cache write (firstRun=%d gpuChanged=%d): "
+                        "tier=%s gpu='%s'",
+                        firstRun, gpuChanged, tierName,
+                        currentGpuName.toUtf8().constData());
+        } else {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-TIER] cache hit (gpu unchanged): tier=%s "
+                        "gpu='%s' benchmarkNs=%lld",
+                        tierName, currentGpuName.toUtf8().constData(),
+                        (long long)prefs->vkfrucBenchmarkNs);
+        }
+    }
     // §J.3.e.2.i.8 — VK_KHR_video_decode capability probe.  Query whether
     // this device supports H.264 / H.265 / AV1 decode via raw Vulkan API
     // (跳過 FFmpeg).  Probe only — actual decode session 在 i.8.* sub-phase

@@ -143,6 +143,11 @@ private:
     // kFrucFramesInFlight is declared).
     uint32_t   m_ComputeQueueFamily = UINT32_MAX;
     VkQueue    m_ComputeQueue       = VK_NULL_HANDLE;
+    // §J.3.e.2.i.11 (v1.4.66) — cross-hardware FRUC auto-tier 偵測結果。
+    // 在 pickPhysicalDeviceAndQueue 之後由 deviceName + limits heuristic 寫入；
+    // v1.4.67 加 Conv2D micro-benchmark 後再修正；v1.4.68 開始實際 wire 到
+    // m_RifeNativeMode + inferDim 自動套用。0 = unknown (尚未偵測).
+    int        m_DetectedGpuTier    = 0;  // matches StreamingPreferences::VkfrucGpuTier
     // §B2 follow-up 2026-05-06 — VK_QUEUE_OPTICAL_FLOW_BIT_NV (NV Ampere+).
     // UINT32_MAX 表示沒啟用 / 不支援；handle = VK_NULL_HANDLE 在 OF 路徑
     // 走 fallback (block-matching ME).  Gated by VIPLE_VKFRUC_NV_OF=1.

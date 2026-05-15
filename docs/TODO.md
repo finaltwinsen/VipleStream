@@ -145,6 +145,33 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.66 ship 帶走的條目（2026-05-15, post v1.4.65 fp16 default OFF）
+
+- 🟡 **§J.3.e.2.i.11 跨硬體補幀 auto-tier — heuristic 第一刀** — 使用者
+  v1.4.54-65 試過 phase 2B / fp16 / lighter model 全死路後，需求換成
+  「跨硬體都可使用」的補幀方案。沿用既有 block-match + RIFE β.5.1 兩
+  條跨 HW path，加一層「啟動時 GPU 偵測 → 自動分級 → 自動套用 path /
+  inferDim」。本版是 4-commit staged plan 的第一刀，純 data 蒐集，no
+  behaviour change。
+  - `streamingpreferences.{h,cpp}` 加 `VkfrucGpuTier` enum (UNKNOWN /
+    ENTRY / PERFORMANCE / BALANCED / QUALITY) + 3 個 cache field：
+    `vkfrucDetectedTier`、`vkfrucDetectedGpuName`、`vkfrucBenchmarkNs`。
+    全部 read-only Q_PROPERTY (UI 顯示用)。reload/save 加對應 SER_ keys。
+  - `vkfruc.h` 加 `m_DetectedGpuTier` member field。
+  - `vkfruc.cpp:pickPhysicalDeviceAndQueue` 之後加 heuristic：根據
+    `VkPhysicalDeviceProperties.deviceType + deviceName` 字串粗判 tier。
+    e.g. "RTX 40" / "RX 78" / "Arc B" → QUALITY；"RTX 30" / "RX 67" /
+    "Arc A7" → BALANCED；"GTX 16" / "RX 65" → PERFORMANCE；
+    INTEGRATED_GPU → ENTRY；其他 DISCRETE_GPU → BALANCED (safe middle).
+  - 結果寫回 `StreamingPreferences::vkfrucDetectedTier` + save QSettings，
+    GPU name 變動時重跑 heuristic + 清掉 benchmarkNs (給 v1.4.67 重量).
+  - 沒接 inferDim / m_RifeNativeMode (v1.4.68 才 wire)，所以 user 開
+    stream 行為跟 v1.4.65 完全一致；只在 log 多印一行
+    `[VIPLE-VKFRUC-TIER] v1.4.66 heuristic: BALANCED (deviceName='NVIDIA
+    GeForce RTX 3060 Laptop GPU' deviceType=1)`.
+  - 後續：v1.4.67 加 Conv2D micro-benchmark dispatch 細修 tier；
+    v1.4.68 wire 自動套用；v1.4.69 加 UI ComboBox 顯示。
+
 ### v1.4.65 ship 帶走的條目（2026-05-15, post v1.4.64 RIFE init hotfix）
 
 - 🔴 **§J.3.e.Y 5Y fp16 path 預設關閉（v1.4.64 終於跑起來 fp16 看到真實

@@ -151,6 +151,26 @@ public:
     };
     Q_ENUM(FrucQuality);
 
+    // §J.3.e.2.i.11 (v1.4.66) — cross-hardware FRUC auto-tier 分級。
+    // VkFrucRenderer 啟動時根據 GPU 強度自動選 path + inferDim，避免
+    // 使用者手動 tune 不同 HW 的 setting。Tier 由兩階段偵測決定：
+    //   1. v1.4.66: deviceName + limits heuristic (粗判)
+    //   2. v1.4.67: 1-shot Conv2D micro-benchmark (細修)
+    // 各 tier 自動套用的 path:
+    //   ENTRY        — 內顯 / 老卡 / Vulkan 1.1: 補幀全關
+    //   PERFORMANCE  — GTX 10xx / RX 5xx: block-match only (~4ms chain)
+    //   BALANCED     — RTX 30xx / RX 6700+: RIFE β.5.1 inferDim=128 (~10ms)
+    //   QUALITY      — RTX 40xx / RX 7800+: RIFE β.5.1 inferDim=256 (~14ms)
+    enum VkfrucGpuTier
+    {
+        VGT_UNKNOWN     = 0,
+        VGT_ENTRY       = 1,
+        VGT_PERFORMANCE = 2,
+        VGT_BALANCED    = 3,
+        VGT_QUALITY     = 4,
+    };
+    Q_ENUM(VkfrucGpuTier);
+
     // VipleStream editorial design variant selector.
     // DV_SAFE — quiet editorial grid (thin rules, monospace meta, 8pt-row layouts)
     // DV_BOLD — magazine-cover energy (oversized display type, wider mastheads)
@@ -215,6 +235,15 @@ public:
     // RS_D3D11 path 完全 ignore (UI 也只在 RS_VULKAN 時顯示).
     Q_PROPERTY(bool vkfrucEnableNativeRife MEMBER vkfrucEnableNativeRife NOTIFY vkfrucEnableNativeRifeChanged)
     Q_PROPERTY(int  vkfrucNativeRifeInferDim MEMBER vkfrucNativeRifeInferDim NOTIFY vkfrucNativeRifeInferDimChanged)
+    // §J.3.e.2.i.11 (v1.4.66) — auto-tier 偵測欄位。vkfrucDetectedTier 是
+    // process 啟動時被 vkfruc.cpp 寫入的偵測結果（heuristic + benchmark），
+    // 之後存進 QSettings 讓下一次啟動讀 cache。vkfrucDetectedGpuName 用來
+    // 判斷 GPU 是否變更（變了就重跑 benchmark）。vkfrucBenchmarkNs 是
+    // v1.4.67 micro-benchmark Conv2D dispatch 的實測 GPU time (ns)，給
+    // log + diagnostic 顯示用。三個都 read-only from QML side。
+    Q_PROPERTY(VkfrucGpuTier vkfrucDetectedTier MEMBER vkfrucDetectedTier NOTIFY vkfrucDetectedTierChanged)
+    Q_PROPERTY(QString vkfrucDetectedGpuName MEMBER vkfrucDetectedGpuName NOTIFY vkfrucDetectedGpuNameChanged)
+    Q_PROPERTY(qint64 vkfrucBenchmarkNs MEMBER vkfrucBenchmarkNs NOTIFY vkfrucBenchmarkNsChanged)
     Q_PROPERTY(DesignVariant designVariant MEMBER designVariant NOTIFY designVariantChanged)
     Q_PROPERTY(AppSortMode appSortMode MEMBER appSortMode NOTIFY appSortModeChanged)
     Q_PROPERTY(QString relayUrl MEMBER relayUrl NOTIFY relayUrlChanged)
@@ -270,6 +299,10 @@ public:
     bool vkfrucEnableTriple;   // §B2 — TRIPLE 60→180 (兩 interp / server frame)
     bool vkfrucEnableNativeRife; // §J.3.e.X Path β — native RIFE flow + native warp (beta)
     int  vkfrucNativeRifeInferDim; // 128/256/384/512 — must be /128 aligned for RIFE-v4.25-lite
+    // §J.3.e.2.i.11 (v1.4.66) — auto-tier 偵測結果 cache 欄位。
+    VkfrucGpuTier vkfrucDetectedTier;
+    QString       vkfrucDetectedGpuName;
+    qint64        vkfrucBenchmarkNs;
     DesignVariant designVariant;
     AppSortMode appSortMode;
     QString relayUrl;      // VipleStream: signaling relay WebSocket URL
@@ -323,6 +356,10 @@ signals:
     void vkfrucEnableTripleChanged();
     void vkfrucEnableNativeRifeChanged();
     void vkfrucNativeRifeInferDimChanged();
+    // §J.3.e.2.i.11 (v1.4.66) — auto-tier 偵測欄位 NOTIFY signals。
+    void vkfrucDetectedTierChanged();
+    void vkfrucDetectedGpuNameChanged();
+    void vkfrucBenchmarkNsChanged();
     void designVariantChanged();
     void appSortModeChanged();
     void relayUrlChanged();
