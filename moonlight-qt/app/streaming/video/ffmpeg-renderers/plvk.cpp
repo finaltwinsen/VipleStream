@@ -1523,249 +1523,6 @@ void main() {
 }
 )GLSL";
 
-// §J.3.e.2.i.14 (v1.4.75) — Backward ME shader.  Mirror of forward ME but:
-// (a) Block index (bx,by) addresses PREV-frame block centers (not curr-frame
-//     like forward).  Search candidate offsets are evaluated as
-//     curr[blockCenter + candidate] vs prev[blockCenter] (mirror swap).
-// (b) Initial guess = -fwdMV[bx, by] (mirror of forward MV for same block
-//     index, assuming small spatial displacement — valid for typical content
-//     under 8-pixel block size).
-// (c) Search window narrowed to ±4 (= 2 diamond steps of [4, 2]) around the
-//     fwd-guess, much cheaper than full ±63 forward search.  If census cost
-//     stays high after small-window search, fallback to ±16 diamond.
-// (d) No temporal predictor — fwdMV gives a much better starting point than
-//     last-frame's bwdMV.  Drops binding count from 4 to 4 (replace prevMV
-//     binding with fwdMV).
-//
-// Output buffer layout identical to forward ME (Q1 int format, ±96 clamp).
-// Bilateral-trimmed median (§J.3.e.2.i.11 v1.4.71) is run separately by the
-// caller on this output — same median shader, different descriptor set.
-const char* kFrucMotionEstBackwardShaderGlsl = R"GLSL(
-#version 450
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-
-#define SAMPLE_COUNT     3
-#define SAMPLE_STRIDE    4
-#define CENSUS_RADIUS    1
-
-layout(binding = 0) readonly  buffer PrevRGB { float data[]; } prevFrame;
-layout(binding = 1) readonly  buffer CurrRGB { float data[]; } currFrame;
-layout(binding = 2) readonly  buffer FwdMV   { int   data[]; } fwdMV;
-layout(binding = 3) writeonly buffer OutMV   { int   data[]; } outMV;
-
-layout(push_constant) uniform Params {
-    uint frameWidth;
-    uint frameHeight;
-    uint blockSize;
-    uint mvWidth;
-    uint mvHeight;
-    uint _pad0;
-} p;
-
-float loadPrevY(int x, int y) {
-    int xx = clamp(x, 0, int(p.frameWidth) - 1);
-    int yy = clamp(y, 0, int(p.frameHeight) - 1);
-    int idx = yy * int(p.frameWidth) + xx;
-    int planeSize = int(p.frameWidth) * int(p.frameHeight);
-    float r = prevFrame.data[idx];
-    float g = prevFrame.data[idx + planeSize];
-    float b = prevFrame.data[idx + 2 * planeSize];
-    return 0.299 * r + 0.587 * g + 0.114 * b;
-}
-float loadCurrY(int x, int y) {
-    int xx = clamp(x, 0, int(p.frameWidth) - 1);
-    int yy = clamp(y, 0, int(p.frameHeight) - 1);
-    int idx = yy * int(p.frameWidth) + xx;
-    int planeSize = int(p.frameWidth) * int(p.frameHeight);
-    float r = currFrame.data[idx];
-    float g = currFrame.data[idx + planeSize];
-    float b = currFrame.data[idx + 2 * planeSize];
-    return 0.299 * r + 0.587 * g + 0.114 * b;
-}
-
-uint censusDescriptorPrev(ivec2 pos) {
-    float center = loadPrevY(pos.x, pos.y);
-    uint bits = 0u; int bit = 0;
-    for (int dy = -CENSUS_RADIUS; dy <= CENSUS_RADIUS; dy++) {
-        for (int dx = -CENSUS_RADIUS; dx <= CENSUS_RADIUS; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            float nb = loadPrevY(pos.x + dx, pos.y + dy);
-            bits |= ((nb < center) ? 1u : 0u) << bit;
-            bit++;
-        }
-    }
-    return bits;
-}
-uint censusDescriptorCurr(ivec2 pos) {
-    float center = loadCurrY(pos.x, pos.y);
-    uint bits = 0u; int bit = 0;
-    for (int dy = -CENSUS_RADIUS; dy <= CENSUS_RADIUS; dy++) {
-        for (int dx = -CENSUS_RADIUS; dx <= CENSUS_RADIUS; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            float nb = loadCurrY(pos.x + dx, pos.y + dy);
-            bits |= ((nb < center) ? 1u : 0u) << bit;
-            bit++;
-        }
-    }
-    return bits;
-}
-
-uint hammingDist(uint a, uint b) { return bitCount(a ^ b); }
-
-// Mirror of forward ME: refCenter is in CURR frame, blockCenter is in PREV.
-// We're searching: where in CURR does the prev[blockCenter] block move TO?
-uint prevCensusCache[SAMPLE_COUNT * SAMPLE_COUNT];
-
-void buildPrevCensusCache(ivec2 blockCenter) {
-    int half_s = (SAMPLE_COUNT * SAMPLE_STRIDE) / 2;
-    for (int y = 0; y < SAMPLE_COUNT; y++) {
-        for (int x = 0; x < SAMPLE_COUNT; x++) {
-            ivec2 offset = ivec2(x * SAMPLE_STRIDE - half_s, y * SAMPLE_STRIDE - half_s);
-            ivec2 cp = clamp(blockCenter + offset,
-                             ivec2(0, 0),
-                             ivec2(int(p.frameWidth) - 1, int(p.frameHeight) - 1));
-            prevCensusCache[y * SAMPLE_COUNT + x] = censusDescriptorPrev(cp);
-        }
-    }
-}
-
-float computeCensusCost(ivec2 refCenterCurr, ivec2 blockCenterPrev, float abortAbove) {
-    float cost = 0.0;
-    int half_s = (SAMPLE_COUNT * SAMPLE_STRIDE) / 2;
-    for (int y = 0; y < SAMPLE_COUNT; y++) {
-        for (int x = 0; x < SAMPLE_COUNT; x++) {
-            ivec2 offset = ivec2(x * SAMPLE_STRIDE - half_s, y * SAMPLE_STRIDE - half_s);
-            ivec2 rp = clamp(refCenterCurr + offset,
-                             ivec2(0, 0),
-                             ivec2(int(p.frameWidth) - 1, int(p.frameHeight) - 1));
-            cost += float(hammingDist(censusDescriptorCurr(rp),
-                                      prevCensusCache[y * SAMPLE_COUNT + x]));
-        }
-        if (cost >= abortAbove) return cost;
-    }
-    return cost;
-}
-
-const ivec2 searchPattern[8] = ivec2[8](
-    ivec2(0,-1), ivec2(0,1), ivec2(-1,0), ivec2(1,0),
-    ivec2(-1,-1), ivec2(1,-1), ivec2(-1,1), ivec2(1,1)
-);
-
-ivec2 loadFwdMV(int bx, int by) {
-    int idx = (by * int(p.mvWidth) + bx) * 2;
-    return ivec2(fwdMV.data[idx], fwdMV.data[idx + 1]);
-}
-void storeOutMV(int bx, int by, ivec2 v) {
-    int idx = (by * int(p.mvWidth) + bx) * 2;
-    outMV.data[idx]     = v.x;
-    outMV.data[idx + 1] = v.y;
-}
-
-void main() {
-    uint blockX = gl_GlobalInvocationID.x;
-    uint blockY = gl_GlobalInvocationID.y;
-    if (blockX >= p.mvWidth || blockY >= p.mvHeight) return;
-
-    int halfSample = (SAMPLE_COUNT * SAMPLE_STRIDE) / 2;
-    ivec2 blockCenter = ivec2(int(blockX * p.blockSize + p.blockSize / 2u),
-                              int(blockY * p.blockSize + p.blockSize / 2u));
-    blockCenter = clamp(blockCenter,
-                        ivec2(halfSample, halfSample),
-                        ivec2(int(p.frameWidth) - halfSample - 1,
-                              int(p.frameHeight) - halfSample - 1));
-
-    buildPrevCensusCache(blockCenter);
-
-    // Initial guess = mirror of forward MV for same block index.
-    // fwdMV is Q1 (×2 integer), convert back to integer pixels.
-    ivec2 fwdMV_Q1 = loadFwdMV(int(blockX), int(blockY));
-    fwdMV_Q1 = clamp(fwdMV_Q1, ivec2(-96, -96), ivec2(96, 96));
-    ivec2 fwdMV_int = ivec2(
-        (fwdMV_Q1.x >= 0 ? fwdMV_Q1.x + 1 : fwdMV_Q1.x - 1) / 2,
-        (fwdMV_Q1.y >= 0 ? fwdMV_Q1.y + 1 : fwdMV_Q1.y - 1) / 2
-    );
-    ivec2 bestMV = -fwdMV_int;  // mirror
-
-    // Evaluate cost at initial guess (mirror of fwdMV) and at zero.
-    float bestCost = 1e9;
-    {
-        ivec2 refCenterCurr = blockCenter + bestMV;
-        if (all(greaterThanEqual(refCenterCurr, ivec2(halfSample, halfSample))) &&
-            all(lessThan(refCenterCurr,
-                         ivec2(int(p.frameWidth) - halfSample,
-                               int(p.frameHeight) - halfSample)))) {
-            bestCost = computeCensusCost(refCenterCurr, blockCenter, bestCost);
-        }
-    }
-    // Try MV=0 as fallback.
-    {
-        float zeroCost = computeCensusCost(blockCenter, blockCenter, bestCost);
-        if (zeroCost < bestCost) { bestCost = zeroCost; bestMV = ivec2(0, 0); }
-    }
-
-    // Local refinement: diamond search [4, 2, 1] centred on bestMV (= 24
-    // candidates worst case).  Most blocks converge in 1-2 steps since
-    // fwdMV mirror already lands near the true bwdMV.
-    bool foundGood = (bestCost < float(SAMPLE_COUNT * SAMPLE_COUNT) * 1.0);
-    if (!foundGood) {
-        const int LOCAL_STEPS[3] = int[3](4, 2, 1);
-        const int STEP_COUNT = 3;
-        float prevStepBestCost = bestCost;
-        for (int si = 0; si < STEP_COUNT; si++) {
-            int step = LOCAL_STEPS[si];
-            ivec2 prevBestMV = bestMV;
-            for (int i = 0; i < 8; i++) {
-                ivec2 candidate = prevBestMV + searchPattern[i] * step;
-                ivec2 refCenterCurr = blockCenter + candidate;
-                if (any(lessThan(refCenterCurr, ivec2(halfSample, halfSample))) ||
-                    any(greaterThanEqual(refCenterCurr,
-                                          ivec2(int(p.frameWidth) - halfSample,
-                                                int(p.frameHeight) - halfSample))))
-                    continue;
-                float cost = computeCensusCost(refCenterCurr, blockCenter, bestCost);
-                if (cost < bestCost) { bestCost = cost; bestMV = candidate; }
-            }
-            if (bestCost >= prevStepBestCost) break;
-            prevStepBestCost = bestCost;
-        }
-    }
-
-    // Fallback to wider search if still bad cost (forward MV was likely wrong).
-    if (bestCost > float(SAMPLE_COUNT * SAMPLE_COUNT) * 2.0) {
-        const int WIDE_STEPS[3] = int[3](16, 8, 4);
-        const int WIDE_COUNT = 3;
-        float prevStepBestCost = bestCost;
-        for (int si = 0; si < WIDE_COUNT; si++) {
-            int step = WIDE_STEPS[si];
-            ivec2 prevBestMV = bestMV;
-            for (int i = 0; i < 8; i++) {
-                ivec2 candidate = prevBestMV + searchPattern[i] * step;
-                ivec2 refCenterCurr = blockCenter + candidate;
-                if (any(lessThan(refCenterCurr, ivec2(halfSample, halfSample))) ||
-                    any(greaterThanEqual(refCenterCurr,
-                                          ivec2(int(p.frameWidth) - halfSample,
-                                                int(p.frameHeight) - halfSample))))
-                    continue;
-                float cost = computeCensusCost(refCenterCurr, blockCenter, bestCost);
-                if (cost < bestCost) { bestCost = cost; bestMV = candidate; }
-            }
-            if (bestCost >= prevStepBestCost) break;
-            prevStepBestCost = bestCost;
-        }
-    }
-
-    // High-cost rejection → MV=0 fallback (will produce occlusion mask in warp)
-    ivec2 bestMV_Q1;
-    if (bestCost > float(SAMPLE_COUNT * SAMPLE_COUNT) * 3.0) {
-        bestMV_Q1 = ivec2(0, 0);
-    } else {
-        bestMV_Q1 = bestMV * 2;
-        bestMV_Q1 = clamp(bestMV_Q1, ivec2(-96, -96), ivec2(96, 96));
-    }
-    storeOutMV(int(blockX), int(blockY), bestMV_Q1);
-}
-)GLSL";
-
 // MV median 3×3 filter shader.
 // Source: d3d11_mv_median.hlsl (no quality variants).
 const char* kFrucMvMedianShaderGlsl = R"GLSL(
@@ -1902,12 +1659,6 @@ layout(binding = 0) readonly  buffer PrevRGB { float data[]; } prevFrame;
 layout(binding = 1) readonly  buffer CurrRGB { float data[]; } currFrame;
 layout(binding = 2) readonly  buffer MV      { int   data[]; } motionField;
 layout(binding = 3) writeonly buffer InterpRGB { float data[]; } interpFrame;
-// §J.3.e.2.i.14 (v1.4.75) — Backward MV field (curr→prev direction).
-// 在 hasBackwardMv=1 時跟 binding 2 的 forward MV 配對做 occlusion mask;
-// hasBackwardMv=0 時這個 binding 仍須綁定 (descriptor consistency) 但
-// shader 不讀 — 通常 plvk.cpp standalone path 會重複綁定 binding 2 上來
-// 當 stub buffer (read OK, not used).
-layout(binding = 4) readonly  buffer BwdMV   { int   data[]; } backwardMotionField;
 
 layout(push_constant) uniform Params {
     uint  frameWidth;
@@ -1924,10 +1675,7 @@ layout(push_constant) uniform Params {
     // 用法：prevPos = pp - mv*tFraction, currPos = pp + mv*(1-tFraction).
     // blend default weight = tFraction （越接近 curr 給 curr 越多權重）.
     float tFraction;
-    // §J.3.e.2.i.14 (v1.4.75) — 1 = backward MV buffer (binding 4) 真實有效,
-    // 啟用 occlusion-mask fade.  0 = binding 4 仍要綁但不用 (stub), shader
-    // 直接保留 warp 結果（與 v1.4.74 行為等價 minus gradient-fade）.
-    uint  hasBackwardMv;
+    float _pcPad0;
 } p;
 
 vec3 fetchPrevRGB(int x, int y) {
@@ -1980,22 +1728,6 @@ ivec2 loadMVRaw(int bx, int by) {
     int idx = (by * int(p.mvWidth) + bx) * 2;
     return ivec2(motionField.data[idx], motionField.data[idx + 1]);
 }
-// §J.3.e.2.i.14 (v1.4.75) — Backward MV raw load.  Mirrors loadMVRaw layout
-// but reads from binding 4 backward MV field (curr→prev direction, stored
-// as +motion_vector in Q1; cf forward stored as -motion_vector).
-ivec2 loadBwdMVRaw(int bx, int by) {
-    bx = clamp(bx, 0, int(p.mvWidth)  - 1);
-    by = clamp(by, 0, int(p.mvHeight) - 1);
-    int idx = (by * int(p.mvWidth) + bx) * 2;
-    return ivec2(backwardMotionField.data[idx], backwardMotionField.data[idx + 1]);
-}
-// Bwd MV at block index (nearest, no bilinear — occlusion check is block-level
-// granular by nature).  Returned in pixel units (Q1→float / 2).
-vec2 sampleBwdMV(vec2 pixelPos) {
-    float bs = float(p.mvBlockSize);
-    ivec2 bp = ivec2(floor(pixelPos / bs));
-    return vec2(loadBwdMVRaw(bp.x, bp.y)) * 0.5;
-}
 
 vec2 sampleMV(vec2 pixelPos) {
     float bs = float(p.mvBlockSize);
@@ -2033,7 +1765,6 @@ vec2 sampleMV(vec2 pixelPos) {
     float t = isBoundary * smoothstep(threshSq, threshSq * 2.0, maxDiffSq);
     return mix(bilinear, pick, t);
 }
-)GLSL" R"GLSL(
 
 void storeInterp(int x, int y, vec3 c) {
     int idx = y * int(p.frameWidth) + x;
@@ -2192,43 +1923,50 @@ void main() {
                : (currValid ? currSample : sameCurr);
     }
 
-    // §J.3.e.2.i.14 (v1.4.75) — Bidirectional ME occlusion mask fade.
+    // §J.3.e.2.i.13 (v1.4.74) — Edge-fade triggered by MV **gradient**, not magnitude.
     //
-    // 之前 v1.4.74 gradient-fade 用 4-neighbor MV 差異當 mosaic detector，效
-    // 果只擋住了部分情況（user 實測：「變好很多但仍殘留一點點」）；30Hz
-    // alternation 飆到 15% (v1.4.74) 是 fade-target 用 tF 時間插值 + 邊界
-    // pixel 在 interp_1 / interp_2 不同 tF 看起來不同所引起的副作用.
+    // 為什麼之前 v1.4.72 magnitude-based 完全沒效：mosaic 不是出在「高速 MV
+    // 區域」，而是出在 MV 不連續區域 (foreground/background boundary, occlusion).
+    // 物體在畫面中均速大幅度移動 (|MV| 大但連續) 完全沒有 mosaic — warp 把
+    // 整個物體一致位移就好。mosaic 出現在 8×8 block-match 取樣對應到的物體
+    // 邊緣：邊緣這側 block 取了物體 MV、那側 block 取了背景 MV，sampleMV
+    // 用 edge-aware pick 後仍會在 8-pixel 步階上看到 step-function texture
+    // misalignment → 視覺上就是方塊狀 mosaic.
     //
-    // v1.4.75 改用「真正 occlusion mask」：
-    //   forward ME 算 fwdMV (curr-block 在 prev 的位置, stored = prev-curr)
-    //   backward ME 算 bwdMV (prev-block 在 curr 的位置, stored = curr-prev)
-    //   consistency: fwdMV + bwdMV ≈ 0 (mirror) ⟺ motion 一致, no occlusion
-    //   discrepancy: |fwdMV + bwdMV| 大 ⟺ ME failed (occlusion / disocclusion)
+    // 正確判據：4-neighbor MV **gradient** (max squared diff to 4 cardinal
+    // neighbors).  高 gradient ⟺ 跨越 motion boundary ⟺ warp 出 mosaic 的
+    // 危險區域。在這些區域 fade 朝 **no-MV crossfade** = mix(prev[pp], curr[pp], tF)
+    // — 同位置 prev/curr 時間插值，有 soft ghost 但絕無方塊。Tradeoff 是
+    // motion boundary 處看起來會「糊一圈」而非「整齊但抖動的方塊」，視覺
+    // 上後者刺眼很多。
     //
-    // 在 occluded pixel 退 no-MV crossfade — 同 v1.4.74 fade target 但只在
-    // 真正 occlusion 區觸發, 一致 motion 區完全不 fade (gradient-fade 會誤
-    // 觸發乾淨邊緣).  hasBackwardMv=0 時略過此 fade (plvk standalone path).
-    //
-    // smoothstep(2, 12, occlusionDist²) ramp:
-    //   |fwd+bwd|² < 2   (≈1.4 px error)   → α=0    (full warp, no fade)
-    //   |fwd+bwd|² > 12  (≈3.5 px error)   → α=0.85 (near-full crossfade)
-    //   in between                          → smooth
-    // 2px tolerance 容許 ME 整數量化雜訊;  3.5px 以上幾乎確定 occlusion.
-    if (p.hasBackwardMv != 0u) {
-        vec2 bwdMV = sampleBwdMV(pp);    // pixel units, NOT negated
-        // mv at this point is already negated (line ~1845 "mv = -mv;"), so
-        // mv represents +motion_direction.  bwdMV represents +motion_direction
-        // too (stored direction).  Consistent: mv ≈ bwdMV (NOT zero).
-        vec2 fwdMvFlipped = mv;  // = -fwdMV_stored = +motion_direction
-        // Discrepancy = (mv - bwdMV) -- both should be +motion_direction, equal
-        vec2 occlDiff = fwdMvFlipped - bwdMV;
-        float occlDistSq = dot(occlDiff, occlDiff);
+    // smoothstep(8, 64, mvGradSqMax) ramp:
+    //   max neighbor diff² < 8   (|Δmv| < 2.83 px)  → α=0    (warp 全強)
+    //   max neighbor diff² > 64  (|Δmv| > 8 px)     → α=0.85 (近全 crossfade)
+    //   in between                                 → smooth
+    // 0.85 max 是 aggressive tuning：要完全切到 1.0 會在乾淨 ME 邊緣失去
+    // FRUC 動作平滑感，留 15% warp 維持一些連續性。閾值 8 (= 2.83 px L2)
+    // 跟 sampleMV 的 EDGE_AWARE_MV_THRESHOLD=8.0 對齊：sampleMV pick 切換
+    // 跟 warp crossfade 切換同步發生。
+    float bs = float(p.mvBlockSize);
+    int blockX = int(float(px) / bs);
+    int blockY = int(float(py) / bs);
+    vec2 mvC4 = vec2(loadMVRaw(blockX,     blockY    )) * 0.5;
+    vec2 mvL4 = vec2(loadMVRaw(blockX - 1, blockY    )) * 0.5;
+    vec2 mvR4 = vec2(loadMVRaw(blockX + 1, blockY    )) * 0.5;
+    vec2 mvU4 = vec2(loadMVRaw(blockX,     blockY - 1)) * 0.5;
+    vec2 mvD4 = vec2(loadMVRaw(blockX,     blockY + 1)) * 0.5;
+    vec2 dL4 = mvC4 - mvL4;
+    vec2 dR4 = mvC4 - mvR4;
+    vec2 dU4 = mvC4 - mvU4;
+    vec2 dD4 = mvC4 - mvD4;
+    float mvGradSqMax = max(max(dot(dL4, dL4), dot(dR4, dR4)),
+                            max(dot(dU4, dU4), dot(dD4, dD4)));
 
-        vec3 prevAtPP      = fetchPrevRGB(int(px), int(py));
-        vec3 crossfadeNoMv = mix(prevAtPP, sameCurr, tF);
-        float occlFade     = 0.85 * smoothstep(2.0, 12.0, occlDistSq);
-        result = mix(result, crossfadeNoMv, occlFade);
-    }
+    vec3 prevAtPP    = fetchPrevRGB(int(px), int(py));
+    vec3 crossfadeNoMv = mix(prevAtPP, sameCurr, tF);
+    float edgeFade   = 0.85 * smoothstep(8.0, 64.0, mvGradSqMax);
+    result = mix(result, crossfadeNoMv, edgeFade);
 
     storeInterp(int(px), int(py), result);
 }
@@ -4272,11 +4010,7 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
 
     VkShaderModule warpMod = VK_NULL_HANDLE; VkDescriptorSetLayout warpDsl = VK_NULL_HANDLE;
     VkPipelineLayout warpPL = VK_NULL_HANDLE; VkPipeline warpPipe = VK_NULL_HANDLE;
-    // §J.3.e.2.i.14 (v1.4.75) — Warp bumped to 5 bindings (binding 4 = bwd MV).
-    // plvk standalone path doesn't run backward ME yet, so binding 4 is bound
-    // to forward MV as a stub and hasBackwardMv=0 is set in push const to skip
-    // occlusion-fade in shader.  Push const size remains 32 byte.
-    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 5, 32, warpMod, warpDsl, warpPL, warpPipe)) {
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 4, 32, warpMod, warpDsl, warpPL, warpPipe)) {
         m_FrucGenericDisabled = true; return false;
     }
     m_FrucWarpShaderMod = warpMod; m_FrucWarpDsl = warpDsl; m_FrucWarpPipeLay = warpPL; m_FrucWarpPipeline = warpPipe;
@@ -4334,11 +4068,10 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
     m_FrucPrevMvBuf = prevMv;          m_FrucPrevMvMem = prevMvMem;
     m_FrucInterpRgbBuf = interpRgb;    m_FrucInterpRgbMem = interpRgbMem;
 
-    // === Descriptor pool: 3 sets × varying bindings = 4+2+5 = 11 storage-buffer descriptors ===
-    // §J.3.e.2.i.14 (v1.4.75) — warp bumped 4→5 bindings (+1 descriptor).
+    // === Descriptor pool: 3 sets × varying bindings = 4+2+4 = 10 storage-buffer descriptors ===
     VkDescriptorPoolSize pSize = {};
     pSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pSize.descriptorCount = 11;
+    pSize.descriptorCount = 10;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpCi.maxSets = 3;
@@ -4382,13 +4115,9 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
 
     VkDescriptorSet meDs = VK_NULL_HANDLE, medDs = VK_NULL_HANDLE, warpDs = VK_NULL_HANDLE;
     // ME bindings: 0 prevRgb, 1 currRgb (alias bufRGB), 2 prevMv, 3 outMv
-    // Warp bindings: 0 prevRgb, 1 currRgb, 2 mvFiltered, 3 interpRgb,
-    //               4 bwdMV (§J.3.e.2.i.14 v1.4.75 — plvk stubs with mvFiltered
-    //                       since no backward ME on this path; hasBackwardMv=0
-    //                       in push const → shader skips occlusion fade).
     if (!allocAndUpdateSet(meDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, prevMv, mv }, meDs)
         || !allocAndUpdateSet(medDsl, { mv, mvF }, medDs)
-        || !allocAndUpdateSet(warpDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, mvF, interpRgb, mvF }, warpDs)) {
+        || !allocAndUpdateSet(warpDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, mvF, interpRgb }, warpDs)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VK-FRUC] §J.3.e.2.h.c init: descriptor set alloc/update failed");
         m_FrucGenericDisabled = true;
@@ -4595,17 +4324,10 @@ bool PlVkRenderer::runFrucGenericComputePass(uint32_t width, uint32_t height)
     VkDescriptorSet warpDs = (VkDescriptorSet)m_FrucWarpDescSet;
     pfnBindDS(cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)m_FrucWarpPipeLay,
               0, 1, &warpDs, 0, nullptr);
-    // §J.3.e.2.i.14 (v1.4.75) — push const now matches vkfruc.cpp 32-byte
-    // layout: 5 uints + 2 floats + 1 uint = 8*4 = 32.  plvk path has no
-    // backward ME, so hasBackwardMv=0 (shader skips occlusion fade).  Default
-    // tFraction=0.5 here matches old DUAL midpoint behavior.
     struct WarpPc {
         uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
         float    blendFactor;
-        float    tFraction;
-        uint32_t hasBackwardMv;
-    } warpPc = { width, height, 8, m_FrucGenericMvWidth, m_FrucGenericMvHeight,
-                 0.5f, 0.5f, 0u };
+    } warpPc = { width, height, 8, m_FrucGenericMvWidth, m_FrucGenericMvHeight, 0.5f };
     pfnPushC(cb, (VkPipelineLayout)m_FrucWarpPipeLay,
              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(warpPc), &warpPc);
     pfnDispatch(cb, (width + 7) / 8, (height + 7) / 8, 1);
