@@ -145,6 +145,31 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.72 ship 帶走的條目（2026-05-15, post v1.4.71 bilateral median）
+
+- 🟡 **§J.3.e.2.i.12 Generic FRUC TRIPLE 邊緣 mosaic 修補（第二刀：warp
+  edge-fade）** — v1.4.71 bilateral median 在 MV-domain 過濾 outlier;
+  本版加 warp shader 內 pixel-domain edge-fade 為第二層 safety net.
+  - root: 高 |MV| 區域更可能是 ME 邊界 case (foreground/background boundary
+    / occlusion / disocclusion)，warp 容易方塊狀撕裂. 既有
+    `EDGE_AWARE_MV_THRESHOLD=8` 在 sampleMV() 內已偵測 MV gradient 切
+    pick mode, 但 pick mode 對 8×8 block step function 仍 visible
+  - 修：在 main() 末端 storeInterp 之前加 magnitude-based fade，朝
+    `sameCurr` (同位置原 pixel, 無 displacement) 漸層
+    - `|MV|² < 64` (|MV| < 8 px): α=0, 全 warp
+    - `|MV|² > 256` (|MV| > 16 px): α=0.4, 40% sameCurr 抑制 mosaic
+    - 中間 smoothstep
+  - 0.4 max 是 conservative tuning：不夠減 mosaic 可調高 (0.5-0.7); 太
+    多 (>0.5) 會讓快速移動物體失去 motion smoothness, 跟補幀關掉一樣
+  - `plvk.cpp:kFrucWarpShaderGlsl` 加 ~15 LOC. No new push const / no
+    new binding, runtime cost minimal (1 dot product + smoothstep + mix
+    per pixel).
+  - 跟 v1.4.71 互補：median 在 MV-domain 移除 outlier; warp edge-fade
+    在 pixel-domain 對殘餘 high-magnitude 區進一步 dampen
+  - 至此 Generic FRUC TRIPLE 邊緣 mosaic 修補 plan 兩刀全完成. 預期
+    視覺改善 -40-60% mosaic visibility (audit 估計). 待使用者 real-stream
+    驗測.
+
 ### v1.4.71 ship 帶走的條目（2026-05-15, post v1.4.70 auto-tier UI 整合）
 
 - 🟡 **§J.3.e.2.i.12 Generic FRUC TRIPLE 邊緣 mosaic 修補（第一刀：bilateral median）**

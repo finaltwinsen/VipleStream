@@ -1923,6 +1923,24 @@ void main() {
                : (currValid ? currSample : sameCurr);
     }
 
+    // §J.3.e.2.i.12 (v1.4.72) — Edge-fade for high-magnitude MV regions.
+    // 高 |MV| 區域更可能是 ME 邊界 case (foreground / background boundary,
+    // occlusion / disocclusion)，warp 容易產生方塊狀撕裂。對結果做
+    // magnitude-based fade 朝 sameCurr (= 同位置原 pixel, 無 displacement),
+    // 高速 motion 邊緣穩定度 ↑，可見的 mosaic 抑制掉.  跟 v1.4.71 bilateral
+    // median 互補：median 在 MV-domain 移除 outlier，warp edge-fade 在
+    // pixel-domain 對殘餘 high-magnitude 區進一步 dampen.
+    //
+    // smoothstep(64, 256, mvMagSq) ramp:
+    //   |MV|² < 64  (|MV| < 8 px)   → α=0    (no fade, warp 全強)
+    //   |MV|² > 256 (|MV| > 16 px)  → α=0.4  (40% sameCurr 抑制 mosaic)
+    //   in between                  → smooth
+    // 0.4 max 是 conservative tuning：不夠減 mosaic 可調高 (0.5-0.7); 太
+    // 多 (>0.5) 會讓快速移動物體失去 motion smoothness 跟「補幀關掉」一樣.
+    float mvMagSqFade = dot(mv, mv);
+    float edgeFade    = 0.4 * smoothstep(64.0, 256.0, mvMagSqFade);
+    result = mix(result, sameCurr, edgeFade);
+
     storeInterp(int(px), int(py), result);
 }
 )GLSL";
