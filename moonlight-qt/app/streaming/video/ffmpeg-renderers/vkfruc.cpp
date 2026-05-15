@@ -6434,6 +6434,85 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // (so dump staging size matches actual buffer size).
     initFrameDump();
 
+    // §J.3.e.2.i.11 (v1.4.67) — cross-hardware FRUC auto-tier benchmark.
+    // 在 createRifeNativeResources 之前跑一次 InterpBilinear dispatch 量
+    // GPU wall-clock，根據結果分級 tier 並更新 QSettings.  Skip 條件：
+    //   1. 已 cache 過該 GPU 的 benchmark (prefs->vkfrucBenchmarkNs > 0
+    //      且 prefs->vkfrucDetectedGpuName 跟當前 GPU name 一致)
+    //   2. 缺 m_GraphicsQueue / m_Instance / m_PhysicalDevice / m_Device
+    // 失敗 (bench=0) fallback v1.4.66 heuristic tier 不覆寫.
+    //
+    // Threshold (wall-clock InterpBilinear 256→512×16ch on 3060L ≈ 1.5ms):
+    //   < 1.0 ms → QUALITY
+    //   1.0-2.5 ms → BALANCED
+    //   2.5-6.0 ms → PERFORMANCE
+    //   > 6.0 ms → ENTRY
+    // Wall-clock 包含 CPU enqueue + ncnn glslang compile + GPU dispatch +
+    // fence wait. 因為 warmup pass 已先吃掉 glslang compile cost，measure
+    // 主要是 GPU dispatch + CPU sync (~0.5ms 固定)。
+    if (auto* prefs = StreamingPreferences::get()) {
+        VkPhysicalDeviceProperties pdpBench = {};
+        auto pfnGetInstPa = (PFN_vkGetInstanceProcAddr)m_pfnGetInstanceProcAddr;
+        auto pfnGetPDPropsBench = (PFN_vkGetPhysicalDeviceProperties)pfnGetInstPa(
+            m_Instance, "vkGetPhysicalDeviceProperties");
+        if (pfnGetPDPropsBench) pfnGetPDPropsBench(m_PhysicalDevice, &pdpBench);
+        const QString currentGpuName = QString::fromUtf8(pdpBench.deviceName);
+        const bool cacheValid = (prefs->vkfrucBenchmarkNs > 0)
+                             && (prefs->vkfrucDetectedGpuName == currentGpuName);
+        if (cacheValid) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 v1.4.67 cache hit: "
+                "gpu='%s' benchmark=%.3fms tier=%d (cached, skipping rerun)",
+                currentGpuName.toUtf8().constData(),
+                (double)prefs->vkfrucBenchmarkNs / 1.0e6,
+                (int)prefs->vkfrucDetectedTier);
+        } else if (m_GraphicsQueue && m_PhysicalDevice && m_Device && m_Instance) {
+            viple::rife_native_vk::VulkanCtx benchCtx = {};
+            benchCtx.instance            = m_Instance;
+            benchCtx.physicalDevice      = m_PhysicalDevice;
+            benchCtx.device              = m_Device;
+            benchCtx.computeQueue        = m_GraphicsQueue;  // graphics QF supports compute
+            benchCtx.computeQueueFamily  = m_QueueFamily;
+            benchCtx.getInstanceProcAddr = (void*)m_pfnGetInstanceProcAddr;
+            const uint64_t benchNs = viple::rife_native_vk::benchmarkInterpBilinearOnce(benchCtx);
+            if (benchNs > 0) {
+                StreamingPreferences::VkfrucGpuTier benchTier;
+                if      (benchNs < 1'000'000ULL)        benchTier = StreamingPreferences::VGT_QUALITY;
+                else if (benchNs < 2'500'000ULL)        benchTier = StreamingPreferences::VGT_BALANCED;
+                else if (benchNs < 6'000'000ULL)        benchTier = StreamingPreferences::VGT_PERFORMANCE;
+                else                                    benchTier = StreamingPreferences::VGT_ENTRY;
+                const char* benchTierName =
+                    benchTier == StreamingPreferences::VGT_QUALITY     ? "QUALITY"     :
+                    benchTier == StreamingPreferences::VGT_BALANCED    ? "BALANCED"    :
+                    benchTier == StreamingPreferences::VGT_PERFORMANCE ? "PERFORMANCE" :
+                    benchTier == StreamingPreferences::VGT_ENTRY       ? "ENTRY"       : "UNKNOWN";
+                const char* heurTierName =
+                    prefs->vkfrucDetectedTier == StreamingPreferences::VGT_QUALITY     ? "QUALITY"     :
+                    prefs->vkfrucDetectedTier == StreamingPreferences::VGT_BALANCED    ? "BALANCED"    :
+                    prefs->vkfrucDetectedTier == StreamingPreferences::VGT_PERFORMANCE ? "PERFORMANCE" :
+                    prefs->vkfrucDetectedTier == StreamingPreferences::VGT_ENTRY       ? "ENTRY"       : "UNKNOWN";
+                const bool match = (benchTier == prefs->vkfrucDetectedTier);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 v1.4.67 measured: "
+                    "%.3fms → tier=%s (heuristic=%s, match=%d)",
+                    (double)benchNs / 1.0e6, benchTierName, heurTierName, match);
+                prefs->vkfrucBenchmarkNs   = (qint64)benchNs;
+                prefs->vkfrucDetectedTier  = benchTier;  // 以 benchmark 為主
+                prefs->vkfrucDetectedGpuName = currentGpuName;
+                prefs->save();
+                m_DetectedGpuTier = (int)benchTier;
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 v1.4.67 dispatch failed; "
+                    "falling back to v1.4.66 heuristic tier=%d", (int)prefs->vkfrucDetectedTier);
+            }
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 v1.4.67 skipped: "
+                "VulkanCtx incomplete (no graphics queue / device)");
+        }
+    }
+
     // §J.3.e.X Path β — eager init of native RIFE executor (β.1 = init-only
     // proof of life on this VkDevice; β.2 will wire it into runFrucComputeChain).
     // Failure non-fatal: m_RifeNativeReady stays false, block-match remains active.

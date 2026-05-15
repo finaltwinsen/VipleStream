@@ -2709,6 +2709,11 @@ void destroyHostBuffer(VkDevice device,
     b = {};
 }
 
+// §J.3.e.2.i.11 (v1.4.67) — cross-hardware FRUC auto-tier 的 GPU benchmark
+// helper.  Definition lives OUTSIDE the anonymous namespace (line ~3414)
+// so the symbol has external linkage and vkfruc.cpp can link to it.
+// See declaration in rife_native_vk.h.
+
 // ============================================================================
 // §J.3.e.X Phase 4d helper — runComputeOnce.
 // Wraps the full "compile shader → build pipeline → alloc buffers →
@@ -3321,6 +3326,73 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out,
 }
 
 } // anonymous namespace
+
+// §J.3.e.2.i.11 (v1.4.67) — cross-hardware FRUC auto-tier GPU benchmark.
+// External linkage (lives in viple::rife_native_vk namespace, NOT anon).
+// vkfruc.cpp::createFrucComputeResources links to this symbol.
+//
+// Dispatches InterpBilinear shader twice (warmup + measure):
+//   in  = 256×256×16 fp32   (4 MB) - synthetic zero-init
+//   out = 512×512×16 fp32   (16 MB)
+//   workload = 4-tap bilinear × 16ch × 512×512 output ≈ 40M ops
+// Wall-clock timing via std::chrono::steady_clock; CPU overhead ~0.5ms
+// included.  Tier classifier should use range buckets, not expect µs
+// precision.  Returns ns; 0 on dispatch failure.
+uint64_t benchmarkInterpBilinearOnce(const VulkanCtx& ctx) {
+    // Wrap shader source through applyBlobMacros to expand BLOB_T /
+    // BLOB_R / BLOB_W markers (caller-side buffers are fp32, useFp16Blob=false).
+    const std::string src = applyBlobMacros(getInterpBilinearShaderGlsl(),
+                                             /*useFp16Blob*/ false);
+
+    const int IN_W = 256, IN_H = 256, OUT_W = 512, OUT_H = 512, CH = 16;
+    const size_t inCount  = (size_t)IN_W  * IN_H  * CH;
+    const size_t outCount = (size_t)OUT_W * OUT_H * CH;
+
+    std::vector<float> outScratch(outCount, 0.0f);  // dummy readback target
+
+    RunComputeOptions opts = {};
+    opts.shaderGlsl   = src.c_str();
+    opts.bindingCount = 2;
+    opts.buffers[0].elemCount   = inCount;             // input fp32 (zero-init)
+    opts.buffers[1].elemCount   = outCount;
+    opts.buffers[1].readbackOut = outScratch.data();   // force GPU wait
+    struct InterpPC {
+        int   inH, inW, outH, outW, channels;
+        float scaleH, scaleW;
+    } pc = {
+        IN_H, IN_W, OUT_H, OUT_W, CH,
+        (float)IN_H / (float)OUT_H,
+        (float)IN_W / (float)OUT_W,
+    };
+    opts.pcData = &pc;
+    opts.pcSize = sizeof(pc);
+    opts.dispX  = (OUT_W + 7) / 8;
+    opts.dispY  = (OUT_H + 7) / 8;
+    opts.dispZ  = (uint32_t)CH;
+
+    // Warmup pass: discard wall-clock (cold cache / shader-compile overhead).
+    if (!runComputeOnce(ctx, opts)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 warmup dispatch failed");
+        return 0;
+    }
+    // Measure pass.
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = runComputeOnce(ctx, opts);
+    const auto t1 = std::chrono::steady_clock::now();
+    if (!ok) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 measure dispatch failed");
+        return 0;
+    }
+    const uint64_t ns = (uint64_t)
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 InterpBilinear "
+                "256x256x16 → 512x512x16: %.3f ms (wall-clock w/ CPU overhead)",
+                (double)ns / 1.0e6);
+    return ns;
+}
 
 bool runPipelineCacheSmoke(const VulkanCtx& ctx) {
     PipelineCache cache;

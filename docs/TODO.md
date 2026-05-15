@@ -145,6 +145,40 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.68 ship 帶走的條目（2026-05-15, post v1.4.66 GPU heuristic）
+
+- 🟡 **§J.3.e.2.i.11 cross-HW FRUC auto-tier — Conv2D-style benchmark
+  dispatch (InterpBilinear 實作)** — 4-commit staged plan 的第二刀，
+  純 data 蒐集 + log，no behaviour change。版號跳 1 個是因為第一輪
+  build 把函式定義放在 anonymous namespace 內，linker LNK2019 失敗
+  但已 bump 版號到 1.4.67；重 build 修好後是 1.4.68，沒對應的
+  「v1.4.67 ship」entry。後續 auto-tier wiring (原 plan v1.4.68) 順延
+  到 v1.4.69，UI ComboBox (原 plan v1.4.69) 順延到 v1.4.70。
+  - `rife_native_vk.{h,cpp}` 加 `benchmarkInterpBilinearOnce(VulkanCtx)`
+    helper：跑一次 InterpBilinear 256→512×16ch dispatch warmup + measure
+    (warmup 吃掉 cold cache + glslang compile 開銷)，回傳 wall-clock ns。
+    用 InterpBilinear 不用 Conv2D 為了避開 fp16 weight binding 設置；
+    4-tap bilinear x 16ch x 512×512 ≈ 40M ops 足夠區分 ENTRY/PERFORMANCE/
+    BALANCED/QUALITY 四級。
+  - `vkfruc.cpp:createFrucComputeResources` 在 RIFE init 之前加 benchmark
+    call site：
+    - cache hit (gpu name match + benchmarkNs>0)：skip rerun，log 印
+      cached value
+    - cache miss：build VulkanCtx with graphics queue (跨 HW 適用，沒
+      dedicated compute QF 也能跑)，dispatch benchmark，根據 ns 分級：
+        < 1.0 ms → QUALITY
+        1.0-2.5 ms → BALANCED
+        2.5-6.0 ms → PERFORMANCE
+        > 6.0 ms → ENTRY
+    - 寫回 `vkfrucDetectedTier` (覆寫 heuristic)、`vkfrucBenchmarkNs`、
+      `vkfrucDetectedGpuName` + save QSettings
+    - benchmark 失敗 → 保留 heuristic tier，log warn
+  - log `[VIPLE-VKFRUC-BENCH]` 印 measured ms / tier / heuristic 比對結果
+  - 仍 no behaviour change：tier 寫進 prefs 但 v1.4.66/.67 都不影響
+    m_RifeNativeMode / inferDim 自動選 (v1.4.68 才 wire)
+  - 預期 RTX 3060 Laptop 跑 InterpBilinear 256→512×16 約 1-2 ms (wall-clock
+    含 CPU overhead)，落 BALANCED tier，跟 v1.4.66 heuristic match
+
 ### v1.4.66 ship 帶走的條目（2026-05-15, post v1.4.65 fp16 default OFF）
 
 - 🟡 **§J.3.e.2.i.11 跨硬體補幀 auto-tier — heuristic 第一刀** — 使用者

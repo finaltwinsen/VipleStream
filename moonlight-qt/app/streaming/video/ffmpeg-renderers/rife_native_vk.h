@@ -400,6 +400,13 @@ const char* getInterpBilinearShaderGlsl();
 // conversion happens at the RIFE module boundary, not in caller-side
 // shaders).
 std::string applyBlobMacros(const char* src, bool useFp16Blob);
+
+// §J.3.e.2.i.11 (v1.4.67) — cross-hardware FRUC auto-tier benchmark.
+// 跑一次 InterpBilinear 256→512 upscale (16 channel, fp32 blob) 量
+// wall-clock 時間給 VkFrucRenderer 分級用。Warmup dispatch + measure
+// dispatch 各一次（warmup 結果丟掉）。回傳 measure 的 ns；失敗回 0.
+// 詳細 spec 見 rife_native_vk.cpp 內 forward decl 註釋。
+uint64_t benchmarkInterpBilinearOnce(const VulkanCtx& ctx);
 void referenceInterpBilinear(const float* in, float* out,
                              int channels, int inH, int inW,
                              int outH, int outW);
