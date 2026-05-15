@@ -98,20 +98,45 @@ static bool vkfrucWantTripleFromUserOrEnv()
     auto* prefs = StreamingPreferences::get();
     return prefs && prefs->vkfrucEnableTriple;
 }
-// §J.3.e.X Path β — env var > prefs > default false.
+// §J.3.e.X Path β — env var > auto-tier (if enabled) > manual prefs > default false.
+//
+// §J.3.e.2.i.11 (v1.4.69) — auto-tier 啟用後 (default true)，根據
+// vkfrucDetectedTier 自動決定 RIFE on/off：
+//   ENTRY        → RIFE OFF (no FRUC, native present)
+//   PERFORMANCE  → RIFE OFF (block-match path only, chain ~4ms)
+//   BALANCED     → RIFE ON  (β.5.1 path, inferDim=128, chain ~10ms)
+//   QUALITY      → RIFE ON  (β.5.1 path, inferDim=256, chain ~14ms)
+// VIPLE_VKFRUC_NATIVE_RIFE=1 env 仍當 escape hatch 強制開啟 (覆寫 auto-tier).
 static bool vkfrucWantNativeRifeFromUserOrEnv()
 {
     if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_RIFE") != 0) return true;
     auto* prefs = StreamingPreferences::get();
-    return prefs && prefs->vkfrucEnableNativeRife;
+    if (!prefs) return false;
+    if (prefs->vkfrucRifeAutoTier) {
+        // Auto-tier 主控：BALANCED / QUALITY → RIFE ON；其他 → OFF
+        return prefs->vkfrucDetectedTier == StreamingPreferences::VGT_BALANCED
+            || prefs->vkfrucDetectedTier == StreamingPreferences::VGT_QUALITY;
+    }
+    return prefs->vkfrucEnableNativeRife;
 }
 static int vkfrucNativeRifeInferDimFromUserOrEnv()
 {
     int env = qEnvironmentVariableIntValue("VIPLE_VKFRUC_RIFE_INFER_DIM");
     if (env > 0) return env;
     auto* prefs = StreamingPreferences::get();
-    if (prefs && prefs->vkfrucNativeRifeInferDim > 0) return prefs->vkfrucNativeRifeInferDim;
-    return 256;  // default
+    if (!prefs) return 128;
+    if (prefs->vkfrucRifeAutoTier) {
+        // Auto-tier 主控：BALANCED=128 (chain ~10ms fit slot), QUALITY=256
+        // (chain ~14ms 略邊緣). ENTRY/PERFORMANCE 仍給 128 即便 RIFE OFF
+        // (僅在 m_RifeNativeMode=true 時才會被讀).
+        switch (prefs->vkfrucDetectedTier) {
+            case StreamingPreferences::VGT_QUALITY: return 256;
+            case StreamingPreferences::VGT_BALANCED: return 128;
+            default:                                 return 128;
+        }
+    }
+    if (prefs->vkfrucNativeRifeInferDim > 0) return prefs->vkfrucNativeRifeInferDim;
+    return 256;  // legacy default for manual mode
 }
 
 // §J.3.e.2.i.6 — process-wide ref count for ncnn::create_gpu_instance.

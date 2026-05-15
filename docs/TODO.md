@@ -145,6 +145,37 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.69 ship 帶走的條目（2026-05-15, post v1.4.68 benchmark dispatch）
+
+- 🟢 **§J.3.e.2.i.11 cross-HW FRUC auto-tier — wire tier 到 RIFE on/off
+  + inferDim 自動選** — 4-commit staged plan 的第三刀。前兩刀 (v1.4.66
+  heuristic、v1.4.68 benchmark) 把 tier 寫進 QSettings 但沒影響 RIFE
+  init；本版終於 wire 起來。
+  - `streamingpreferences.{h,cpp}` 加 `vkfrucRifeAutoTier` bool 欄位
+    (default true) + Q_PROPERTY + reload/save。SER_VKFRUC_RIFE_AUTO_TIER
+    QSettings key
+  - `vkfruc.cpp:vkfrucWantNativeRifeFromUserOrEnv()` 邏輯改：
+    1. env `VIPLE_VKFRUC_NATIVE_RIFE=1` 仍當 escape hatch (force on)
+    2. else if `vkfrucRifeAutoTier==true` (default)：根據
+       `vkfrucDetectedTier` 自動決定 — ENTRY/PERFORMANCE → false，
+       BALANCED/QUALITY → true
+    3. else (manual mode)：用 prefs->vkfrucEnableNativeRife
+  - `vkfruc.cpp:vkfrucNativeRifeInferDimFromUserOrEnv()` 邏輯改：
+    1. env `VIPLE_VKFRUC_RIFE_INFER_DIM` 仍當 override
+    2. else if auto-tier：BALANCED→128、QUALITY→256
+    3. else (manual)：用 prefs->vkfrucNativeRifeInferDim
+  - **預期效果 (RTX 3060 Laptop, BALANCED tier auto detected)**：
+    - 上次升級的 user manual setting (inferDim=256) **被 auto-tier override**
+      回 inferDim=128, chain ~10ms 穩定 fit slot, fps 110+ 不掉
+    - 視覺品質回到 inferDim=128 (「跟關 RIFE 無差異」)
+    - 使用者若 prefer manual 256 + accept fps 波動，需在 UI (v1.4.70)
+      關掉 auto-tier
+  - **跨 HW 預期**：
+    - RTX 40+ (QUALITY tier): RIFE ON inferDim=256 (chain ~14ms 邊緣 fit)
+    - RTX 30/Arc A7 (BALANCED): RIFE ON inferDim=128 (~10ms 穩定)
+    - GTX 16/RX 5xx (PERFORMANCE): RIFE OFF, block-match only (~4ms 穩定)
+    - 內顯 (ENTRY): RIFE + FRUC 都 OFF, native 60→60 pass-through
+
 ### v1.4.68 ship 帶走的條目（2026-05-15, post v1.4.66 GPU heuristic）
 
 - 🟡 **§J.3.e.2.i.11 cross-HW FRUC auto-tier — Conv2D-style benchmark

@@ -244,6 +244,12 @@ public:
     Q_PROPERTY(VkfrucGpuTier vkfrucDetectedTier MEMBER vkfrucDetectedTier NOTIFY vkfrucDetectedTierChanged)
     Q_PROPERTY(QString vkfrucDetectedGpuName MEMBER vkfrucDetectedGpuName NOTIFY vkfrucDetectedGpuNameChanged)
     Q_PROPERTY(qint64 vkfrucBenchmarkNs MEMBER vkfrucBenchmarkNs NOTIFY vkfrucBenchmarkNsChanged)
+    // §J.3.e.2.i.11 (v1.4.69) — auto-tier 啟用開關。default=true：
+    // 新使用者 / 升級者啟動 client 後 RIFE on/off + inferDim 都改由
+    // vkfrucDetectedTier 自動決定，跳過 vkfrucEnableNativeRife /
+    // vkfrucNativeRifeInferDim manual setting.  使用者可在 UI (v1.4.70)
+    // 關掉 auto-tier 回 manual 控制.
+    Q_PROPERTY(bool vkfrucRifeAutoTier MEMBER vkfrucRifeAutoTier NOTIFY vkfrucRifeAutoTierChanged)
     Q_PROPERTY(DesignVariant designVariant MEMBER designVariant NOTIFY designVariantChanged)
     Q_PROPERTY(AppSortMode appSortMode MEMBER appSortMode NOTIFY appSortModeChanged)
     Q_PROPERTY(QString relayUrl MEMBER relayUrl NOTIFY relayUrlChanged)
@@ -303,6 +309,8 @@ public:
     VkfrucGpuTier vkfrucDetectedTier;
     QString       vkfrucDetectedGpuName;
     qint64        vkfrucBenchmarkNs;
+    // §J.3.e.2.i.11 (v1.4.69) — auto-tier 啟用開關 (default true)
+    bool          vkfrucRifeAutoTier;
     DesignVariant designVariant;
     AppSortMode appSortMode;
     QString relayUrl;      // VipleStream: signaling relay WebSocket URL
@@ -360,6 +368,7 @@ signals:
     void vkfrucDetectedTierChanged();
     void vkfrucDetectedGpuNameChanged();
     void vkfrucBenchmarkNsChanged();
+    void vkfrucRifeAutoTierChanged();
     void designVariantChanged();
     void appSortModeChanged();
     void relayUrlChanged();
