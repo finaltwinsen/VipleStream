@@ -4082,8 +4082,17 @@ bool VkFrucRenderer::createInFlightRing()
 
         // §J.3.e.2.i.25 (v1.4.87) — FRUC chain async compute gate.
         // 跟 RIFE path 共用底層 m_ComputeQueue + m_ComputeCmdBuf + m_ComputeTimelineSem,
-        // 但獨立的 enable flag.  v1.4.87 純框架 commit, gate 預設 0 (不啟用).
-        // v1.4.88 才真切 cmd buf + submit 到 compute queue + cross-QF barrier.
+        // 但獨立的 enable flag.
+        //   v1.4.87: gate flag + env var + log (framework only).
+        //   v1.4.88: ownership barrier helper + recordFrucChainOnCompute stub.
+        //   v1.4.89: recordFrucChainOnCompute helper 實作完整 (begin + acquire
+        //            input + chain dispatches + release outputs + end + demote
+        //            on failure). 但 renderFrameSw 仍未接路徑, gate=ON 不會
+        //            真實啟用 (only logs would-be-active).
+        //   v1.4.90 預定: renderFrameSw 拆 partA/cmpCmd/partC 三 cmd buf +
+        //            三 submit 串 m_ComputeTimelineSem + pure-dispatch helper
+        //            隔離 timer/dynamic-tier 邏輯 (v1.4.89 仍直接 call
+        //            runFrucComputeChain, 同 frame 兩處 call 會 race).
         m_FrucChainAsyncAvailable = full;
         const char* frucAsyncEnv = std::getenv("VIPLE_VKFRUC_FRUC_ASYNC");
         m_FrucChainAsyncRequested = (frucAsyncEnv != nullptr
@@ -4092,7 +4101,7 @@ bool VkFrucRenderer::createInFlightRing()
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-FRUC-ASYNC] gate: requested=%d available=%d "
                     "→ would-be-active=%d (env VIPLE_VKFRUC_FRUC_ASYNC=%s, "
-                    "v1.4.87 framework-only commit, dispatch wiring lands v1.4.88)",
+                    "v1.4.89 record helper ready, renderFrameSw wiring lands v1.4.90)",
                     (int)m_FrucChainAsyncRequested, (int)m_FrucChainAsyncAvailable,
                     (int)(m_FrucChainAsyncRequested && m_FrucChainAsyncAvailable),
                     frucAsyncEnv ? frucAsyncEnv : "(unset, default OFF)");
@@ -8038,17 +8047,131 @@ void VkFrucRenderer::acquireBufferOwnership(VkCommandBuffer cmd, VkBuffer buf,
         0, 0, nullptr, 1, &b, 0, nullptr);
 }
 
-// §J.3.e.2.i.26 (v1.4.88) — Stub: FRUC chain record on compute cmd buf.
+// §J.3.e.2.i.27 (v1.4.89) — Record FRUC compute chain into compute QF cmpCmd.
 //
-// 計畫: 跟 runFrucComputeChain 一樣的 dispatch 序列, 但寫進 cmpCmd 而非
-// 主 render cmd, 且在開頭加 acquire ownership / 結尾加 release ownership.
-// 本 commit 純 stub return false (gate 未啟動). v1.4.89 才填實作 + 接路徑.
-bool VkFrucRenderer::recordFrucChainOnCompute(VkCommandBuffer /*cmpCmd*/,
-                                                uint32_t /*width*/, uint32_t /*height*/,
-                                                uint32_t /*slot*/)
+// 角色: 把 runFrucComputeChain 的 dispatch 序列 record 進 compute queue cmd
+// buffer (m_ComputeCmdBuf[slot]), 開頭 acquire input buffer ownership
+// (graphics → compute), 結尾 release output buffer ownership (compute →
+// graphics). 預期由 v1.4.90 renderFrameSw 拆 cmd buf 三段時 caller 在 partA
+// 對稱 release input + partC 對稱 acquire outputs, 串 m_ComputeTimelineSem
+// 完成跨 QF 同步.
+//
+// 本 commit (v1.4.89) 純 helper 完整化: gate 預設 OFF, renderFrameSw 不接
+// 路徑, 此函式編譯後是 dead code (跟 v1.4.87/v1.4.88 framework commit cadence
+// 一致). v1.4.90 才接 renderFrameSw 三 submit 路徑 + timeline sem.
+//
+// 失敗時 demote m_FrucChainAsyncAvailable=false (永久禁用本 session async
+// path), caller 應退回 single-cmd path. demote 時機:
+//   - cmpCmd VK_NULL_HANDLE (alloc 失敗)
+//   - QF 設定不對 (無 dedicated compute QF, 或 compute QF == graphics QF)
+//   - vkBeginCommandBuffer / vkEndCommandBuffer 失敗
+//   - runFrucComputeChain dispatch sequence 失敗
+//
+// Ownership transfer 範圍:
+//   acquire (graphics → compute):
+//     • m_SwFrucNv12Buf  — graphics QF 用 vkCmdCopyImageToBuffer 寫入 NV12,
+//       compute QF chain Stage 0 (NV12→RGB) 讀.
+//   release (compute → graphics):
+//     • m_FrucInterpRgbBuf  — TRIPLE/DUAL interp slot 1 output, fragment
+//       shader 後續 sample.
+//     • m_FrucInterpRgbBuf2 — TRIPLE 第 2 interp slot output (2026-05-06 §B2),
+//       fragment shader 後續 sample (TRIPLE only).
+//     • m_FrucCurrRgbBuf    — §B-quality (d) real-frame render pass 也 sample
+//       這個 buffer (m_RealCurrRgbDescSet bind it).
+//
+// Note: m_FrucPrevRgbBuf / m_FrucMvBuf / m_FrucMvHalfBuf / m_FrucMvQuarterBuf
+// 等 chain intermediate buffers 只在 compute QF 內 access (graphics 不讀),
+// 不需要 ownership transfer — compute QF first-use 即取得 ownership (Vulkan
+// EXCLUSIVE buffer first access semantics; Stage 4 curr→prev copy 也在
+// cmpCmd 同 QF 內完成).
+bool VkFrucRenderer::recordFrucChainOnCompute(VkCommandBuffer cmpCmd,
+                                                uint32_t width, uint32_t height,
+                                                uint32_t slot)
 {
-    // v1.4.88 stub — v1.4.89 才實作真正 chain record + ownership transfer.
-    return false;
+    if (!m_FrucChainAsyncAvailable) {
+        return false;
+    }
+    if (cmpCmd == VK_NULL_HANDLE) {
+        m_FrucChainAsyncAvailable = false;
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-FRUC-ASYNC] cmpCmd is VK_NULL_HANDLE — demote async path");
+        return false;
+    }
+    if (m_ComputeQueueFamily == UINT32_MAX
+        || m_ComputeQueueFamily == m_QueueFamily) {
+        // 無 dedicated compute QF (single-QF GPU 或 alloc failure), 跨 QF 沒意義.
+        m_FrucChainAsyncAvailable = false;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-FRUC-ASYNC] no dedicated compute QF (compute=%u graphics=%u) "
+            "— demote async path",
+            (unsigned)m_ComputeQueueFamily, (unsigned)m_QueueFamily);
+        return false;
+    }
+
+    // Begin compute cmd buf (one-time submit, caller 已先 ResetCommandBuffer).
+    VkCommandBufferBeginInfo bi = {};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (m_RtPfn.BeginCommandBuffer(cmpCmd, &bi) != VK_SUCCESS) {
+        m_FrucChainAsyncAvailable = false;
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-FRUC-ASYNC] vkBeginCommandBuffer(cmpCmd) failed — demote");
+        return false;
+    }
+
+    // Acquire input ownership (graphics → compute).
+    // graphics-side partA 必須對稱 release m_SwFrucNv12Buf (srcAccess=
+    // TRANSFER_WRITE, srcStage=TRANSFER, dstStage=COMPUTE_SHADER) 才能對齊.
+    acquireBufferOwnership(cmpCmd, m_SwFrucNv12Buf,
+        m_QueueFamily, m_ComputeQueueFamily,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    // Record the FRUC chain dispatches.  runFrucComputeChain 接受 generic
+    // VkCommandBuffer, dispatches 在 cmpCmd 上 record 進 compute QF.
+    // useNativeSrc=true 對應 m_SwFrucNv12Buf binding (而非 host-coherent
+    // m_SwStagingBuffer), 跟 v1.4.86 useNativeDecode=true main-cmd path 一致.
+    //
+    // 已知限制 (v1.4.90 處理): runFrucComputeChain 內部 read previous
+    // timestamps + write timestamps + 非 atomic m_FrucTimerSlot += 1, 若 main
+    // path 同一幀也 call 會 race. 本 commit 不接路徑所以不踩; v1.4.90 接路徑
+    // 時必須抽出 pure-dispatch helper 隔離 timer/dynamic-tier 邏輯.
+    if (!runFrucComputeChain(cmpCmd, width, height,
+                              /*useNativeSrc*/true, slot)) {
+        m_RtPfn.EndCommandBuffer(cmpCmd);
+        m_FrucChainAsyncAvailable = false;
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-FRUC-ASYNC] runFrucComputeChain on cmpCmd failed — demote");
+        return false;
+    }
+
+    // Release output ownership (compute → graphics).
+    // graphics-side partC 必須對稱 acquire 這三個 buffer (dstAccess=
+    // SHADER_READ, dstStage=FRAGMENT_SHADER) 才能對齊.
+    releaseBufferOwnership(cmpCmd, m_FrucInterpRgbBuf,
+        m_ComputeQueueFamily, m_QueueFamily,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    releaseBufferOwnership(cmpCmd, m_FrucInterpRgbBuf2,
+        m_ComputeQueueFamily, m_QueueFamily,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    releaseBufferOwnership(cmpCmd, m_FrucCurrRgbBuf,
+        m_ComputeQueueFamily, m_QueueFamily,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+    if (m_RtPfn.EndCommandBuffer(cmpCmd) != VK_SUCCESS) {
+        m_FrucChainAsyncAvailable = false;
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-FRUC-ASYNC] vkEndCommandBuffer(cmpCmd) failed — demote");
+        return false;
+    }
+    return true;
 }
 
 
