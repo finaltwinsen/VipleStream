@@ -1659,6 +1659,11 @@ layout(binding = 0) readonly  buffer PrevRGB { float data[]; } prevFrame;
 layout(binding = 1) readonly  buffer CurrRGB { float data[]; } currFrame;
 layout(binding = 2) readonly  buffer MV      { int   data[]; } motionField;
 layout(binding = 3) writeonly buffer InterpRGB { float data[]; } interpFrame;
+// §J.3.e.2.i.15 (v1.4.80) — Temporal MV field (前一幀的 forward MV).
+// 在 hasTemporalMv=1 時用作 occlusion proxy (motion 對時間 gradient).
+// hasTemporalMv=0 時 binding 4 仍須綁定 (descriptor consistency) 但
+// shader 不讀 — 通常綁同一個 prevMV buffer 當 stub.
+layout(binding = 4) readonly  buffer PrevMV  { int   data[]; } prevMotionField;
 
 layout(push_constant) uniform Params {
     uint  frameWidth;
@@ -1675,7 +1680,10 @@ layout(push_constant) uniform Params {
     // 用法：prevPos = pp - mv*tFraction, currPos = pp + mv*(1-tFraction).
     // blend default weight = tFraction （越接近 curr 給 curr 越多權重）.
     float tFraction;
-    float _pcPad0;
+    // §J.3.e.2.i.15 (v1.4.80) — 1 = prev-frame MV buffer (binding 4) 真實有效,
+    // 啟用 temporal-coherence fade.  0 = binding 4 stub-綁同一 buffer (descriptor
+    // consistency), shader 跳過 temporal fade.
+    uint  hasTemporalMv;
 } p;
 
 vec3 fetchPrevRGB(int x, int y) {
@@ -1728,6 +1736,24 @@ ivec2 loadMVRaw(int bx, int by) {
     int idx = (by * int(p.mvWidth) + bx) * 2;
     return ivec2(motionField.data[idx], motionField.data[idx + 1]);
 }
+// §J.3.e.2.i.15 (v1.4.80) — Prev-frame MV raw load.
+// Same layout as loadMVRaw, reads from binding 4 (prevMotionField).
+ivec2 loadPrevMVRaw(int bx, int by) {
+    bx = clamp(bx, 0, int(p.mvWidth)  - 1);
+    by = clamp(by, 0, int(p.mvHeight) - 1);
+    int idx = (by * int(p.mvWidth) + bx) * 2;
+    return ivec2(prevMotionField.data[idx], prevMotionField.data[idx + 1]);
+}
+// Block-level sample of prev-frame MV (no bilinear — temporal coherence is
+// block-level coarse).  Stored convention is the same as forward MV
+// (Q1, -motion_direction).  Returned in pixel units (Q1→float / 2).
+// Caller compares with current-frame mv AFTER its `mv = -mv;` flip — so caller
+// should also flip this with `-` to match +motion_direction convention.
+vec2 samplePrevMV(vec2 pixelPos) {
+    float bs = float(p.mvBlockSize);
+    ivec2 bp = ivec2(floor(pixelPos / bs));
+    return vec2(loadPrevMVRaw(bp.x, bp.y)) * 0.5;
+}
 
 vec2 sampleMV(vec2 pixelPos) {
     float bs = float(p.mvBlockSize);
@@ -1765,6 +1791,7 @@ vec2 sampleMV(vec2 pixelPos) {
     float t = isBoundary * smoothstep(threshSq, threshSq * 2.0, maxDiffSq);
     return mix(bilinear, pick, t);
 }
+)GLSL" R"GLSL(
 
 void storeInterp(int x, int y, vec3 c) {
     int idx = y * int(p.frameWidth) + x;
@@ -1967,6 +1994,44 @@ void main() {
     vec3 crossfadeNoMv = mix(prevAtPP, sameCurr, tF);
     float edgeFade   = 0.85 * smoothstep(8.0, 64.0, mvGradSqMax);
     result = mix(result, crossfadeNoMv, edgeFade);
+
+    // §J.3.e.2.i.15 (v1.4.80) — Temporal coherence fade.
+    //
+    // 觀察：v1.4.74 spatial gradient-fade (above) 只看「同一幀內 4-neighbor MV
+    // 突變」當 occlusion proxy.  使用者目測「mosaic 大幅減少但仍殘留」— 仍
+    // 殘留是因為某些 block 在 spatial 上同 neighbor 一致 (MV gradient 低)
+    // 但實際是 disocclusion / 新出現物體 boundary，spatial 抓不到.
+    //
+    // v1.4.80 加 temporal trigger：比較 same block 在當前幀 vs 上一幀的
+    // forward MV.  正常移動 motion 連續變化幅度小 (|Δmv_t| < 1px / frame);
+    // 物體剛進畫面 / motion 突變 / occlusion 等 boundary 區，|Δmv_t| 變
+    // 大 (> 2px). 在這些 block 加額外 fade 朝 crossfadeNoMv (= 同 spatial
+    // fade 的 fade target,「no-MV 時間插值」soft ghost 無 mosaic).
+    //
+    // 兩個 fade 互補 (spatial + temporal)，max 都不到 1.0 所以乾淨 block
+    // 仍保留大部分 warp 結果. 因為都 fade 到同一 crossfadeNoMv target，
+    // 視覺上不會「閃」(target 一致, 只是 alpha 不同).
+    //
+    // smoothstep(2, 8, tempDistSq) ramp:
+    //   |Δmv_t|² < 2  (|Δmv| < 1.4 px / frame)   → α=0   (no fade)
+    //   |Δmv_t|² > 8  (|Δmv| > 2.83 px / frame)  → α=0.7 (70% crossfade)
+    //   between                                   → smooth
+    // 0.7 max < 0.85 (spatial)，因為 temporal 是「proxy of a proxy」，較
+    // 寬鬆避免靜止物體 stutter 觸發 fade.
+    //
+    // 0 dispatch / 0 new buffer (m_FrucPrevMvBuf 已配置且 ME shader 已用
+    // 它當 temporal predictor; warp 只多 1 個 binding 指向同 buffer).
+    // hasTemporalMv=0 時 (e.g. 第一幀 prev MV 還沒 populate) 跳過此 fade.
+    if (p.hasTemporalMv != 0u) {
+        // mv 此時是 +motion_direction (line ~1845 `mv = -mv;` 已 flip).
+        // samplePrevMV 回傳 stored convention (= -motion_direction), 要再
+        // flip 才能跟 mv 比.
+        vec2 mvPrevFrame = -samplePrevMV(pp);  // → +motion_direction
+        vec2 tempDiff    = mv - mvPrevFrame;
+        float tempDistSq = dot(tempDiff, tempDiff);
+        float tempFade   = 0.7 * smoothstep(2.0, 8.0, tempDistSq);
+        result = mix(result, crossfadeNoMv, tempFade);
+    }
 
     storeInterp(int(px), int(py), result);
 }
@@ -4010,7 +4075,9 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
 
     VkShaderModule warpMod = VK_NULL_HANDLE; VkDescriptorSetLayout warpDsl = VK_NULL_HANDLE;
     VkPipelineLayout warpPL = VK_NULL_HANDLE; VkPipeline warpPipe = VK_NULL_HANDLE;
-    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 4, 32, warpMod, warpDsl, warpPL, warpPipe)) {
+    // §J.3.e.2.i.15 (v1.4.80) — Warp bumped to 5 bindings (binding 4 = prev MV).
+    // Push const stays 32 byte (uint hasTemporalMv replaces float _pcPad0, both 4 byte).
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 5, 32, warpMod, warpDsl, warpPL, warpPipe)) {
         m_FrucGenericDisabled = true; return false;
     }
     m_FrucWarpShaderMod = warpMod; m_FrucWarpDsl = warpDsl; m_FrucWarpPipeLay = warpPL; m_FrucWarpPipeline = warpPipe;
@@ -4068,10 +4135,11 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
     m_FrucPrevMvBuf = prevMv;          m_FrucPrevMvMem = prevMvMem;
     m_FrucInterpRgbBuf = interpRgb;    m_FrucInterpRgbMem = interpRgbMem;
 
-    // === Descriptor pool: 3 sets × varying bindings = 4+2+4 = 10 storage-buffer descriptors ===
+    // === Descriptor pool: 3 sets × varying bindings = 4+2+5 = 11 storage-buffer descriptors ===
+    // §J.3.e.2.i.15 (v1.4.80) — warp bumped 4→5 bindings (+1 descriptor).
     VkDescriptorPoolSize pSize = {};
     pSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pSize.descriptorCount = 10;
+    pSize.descriptorCount = 11;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpCi.maxSets = 3;
@@ -4115,9 +4183,13 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
 
     VkDescriptorSet meDs = VK_NULL_HANDLE, medDs = VK_NULL_HANDLE, warpDs = VK_NULL_HANDLE;
     // ME bindings: 0 prevRgb, 1 currRgb (alias bufRGB), 2 prevMv, 3 outMv
+    // Warp bindings: 0 prevRgb, 1 currRgb, 2 mvFiltered, 3 interpRgb,
+    //               4 prevMv (§J.3.e.2.i.15 v1.4.80 — temporal coherence proxy;
+    //                       hasTemporalMv=1 since plvk path 已 copy mvFiltered→prevMv
+    //                       at end of chain).
     if (!allocAndUpdateSet(meDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, prevMv, mv }, meDs)
         || !allocAndUpdateSet(medDsl, { mv, mvF }, medDs)
-        || !allocAndUpdateSet(warpDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, mvF, interpRgb }, warpDs)) {
+        || !allocAndUpdateSet(warpDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, mvF, interpRgb, prevMv }, warpDs)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VK-FRUC] §J.3.e.2.h.c init: descriptor set alloc/update failed");
         m_FrucGenericDisabled = true;
@@ -4324,10 +4396,17 @@ bool PlVkRenderer::runFrucGenericComputePass(uint32_t width, uint32_t height)
     VkDescriptorSet warpDs = (VkDescriptorSet)m_FrucWarpDescSet;
     pfnBindDS(cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)m_FrucWarpPipeLay,
               0, 1, &warpDs, 0, nullptr);
+    // §J.3.e.2.i.15 (v1.4.80) — push const layout adds float tFraction +
+    // uint hasTemporalMv (32 bytes total, replacing missing tFraction/_pcPad0).
+    // plvk standalone path supplies prevMv buffer at binding 4 with valid
+    // last-frame data (post-frame mvFiltered→prevMv copy below line ~4347).
     struct WarpPc {
         uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
         float    blendFactor;
-    } warpPc = { width, height, 8, m_FrucGenericMvWidth, m_FrucGenericMvHeight, 0.5f };
+        float    tFraction;
+        uint32_t hasTemporalMv;
+    } warpPc = { width, height, 8, m_FrucGenericMvWidth, m_FrucGenericMvHeight,
+                 0.5f, 0.5f, 1u };
     pfnPushC(cb, (VkPipelineLayout)m_FrucWarpPipeLay,
              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(warpPc), &warpPc);
     pfnDispatch(cb, (width + 7) / 8, (height + 7) / 8, 1);

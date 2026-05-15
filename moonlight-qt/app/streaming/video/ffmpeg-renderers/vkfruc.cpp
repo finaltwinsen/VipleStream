@@ -6122,7 +6122,10 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                         m_FrucMedianShaderMod, m_FrucMedianDsl, m_FrucMedianPipeLay, m_FrucMedianPipeline)) {
         m_FrucDisabled = true; return false;
     }
-    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 4, 32,
+    // §J.3.e.2.i.15 (v1.4.80) — Warp bumped to 5 bindings (binding 4 = prev MV
+    // for temporal coherence fade).  Push const stays 32 byte (uint
+    // hasTemporalMv replaces float _pcPad0, both 4 byte).
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 5, 32,
                         m_FrucWarpShaderMod, m_FrucWarpDsl, m_FrucWarpPipeLay, m_FrucWarpPipeline)) {
         m_FrucDisabled = true; return false;
     }
@@ -6271,7 +6274,10 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
                             | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                      m_FrucMvBuf, m_FrucMvBufMem)
-        || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        // §J.3.e.2.i.15 (v1.4.80) — TRANSFER_SRC added: post-frame copy 此
+        // buffer 到 m_FrucPrevMvBuf 給下一幀 temporal coherence proxy 用.
+        || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                            | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                      m_FrucMvFilteredBuf, m_FrucMvFilteredMem)
         || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                      m_FrucPrevMvBuf, m_FrucPrevMvMem)
@@ -6324,7 +6330,8 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // Bumped maxSets 7 → 10, descriptorCount 20 → 26.
     // §J.3.e.X Path β.5 — 3 more sets: UpFlow (2 bindings), UpMask (2 bindings),
     // NativeWarp (5 bindings).  +9 storage descriptors.  Bumped 10→13, 26→35.
-    pSize.descriptorCount = 35;
+    // §J.3.e.2.i.15 (v1.4.80) — warp 2 sets each bumped 4→5 bindings = +2 desc.
+    pSize.descriptorCount = 37;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpCi.maxSets = 13;
@@ -6383,13 +6390,17 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         || !allocAndUpdateSet(m_FrucMedianDsl,
                               { m_FrucMvBuf, m_FrucMvFilteredBuf },
                               m_FrucMedianDescSet)
+        // §J.3.e.2.i.15 (v1.4.80) — Warp now has 5 bindings: binding 4 =
+        // m_FrucPrevMvBuf (上一幀 mvFiltered, 透過 post-frame copy 寫進去).
         || !allocAndUpdateSet(m_FrucWarpDsl,
-                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf, m_FrucInterpRgbBuf },
+                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf,
+                                m_FrucInterpRgbBuf, m_FrucPrevMvBuf },
                               m_FrucWarpDescSet)
         // §B2 2026-05-06 — TRIPLE 第二份 warp desc set，output binding 3
         // → m_FrucInterpRgbBuf2，其它 binding 不變.
         || !allocAndUpdateSet(m_FrucWarpDsl,
-                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf, m_FrucInterpRgbBuf2 },
+                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf,
+                                m_FrucInterpRgbBuf2, m_FrucPrevMvBuf },
                               m_FrucWarpDescSet2)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: descriptor set alloc/update failed");
@@ -8006,14 +8017,21 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeline);
         pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeLay,
                            0, 1, &descSet, 0, nullptr);
+        // §J.3.e.2.i.15 (v1.4.80) — _pcPad0 (float) → hasTemporalMv (uint).
+        // Same 4-byte slot; temporal-coherence fade unconditionally on after
+        // first frame (m_FrucPrevMvBuf 從第 2 幀起含 valid 上一幀 mvFiltered).
+        // 第 1 幀 prevMV 仍是 zero-init buffer, temporal fade 退化成「mv 自己
+        // magnitude squared」trigger — 跟 v1.4.72 magnitude fade 等價,
+        // 但 ramp width [2, 8] 比 v1.4.72 的 [64, 256] 嚴格很多,實際 first frame
+        // effect minimal.
         struct {
             uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
             float    blendFactor;
             float    tFraction;
-            float    _pcPad0;
+            uint32_t hasTemporalMv;
         } pcWarp = {
             (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
-            (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac, 0.0f
+            (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac, 1u
         };
         pfnCmdPushConst(cmd, m_FrucWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
                         0, sizeof(pcWarp), &pcWarp);
@@ -8055,6 +8073,25 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     // Make prev visible to next frame's compute reads (via implicit chain
     // — next frame's NV12→RGB writes currRGB, ME reads both).
     bufBarrier(m_FrucPrevRgbBuf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+    // §J.3.e.2.i.15 (v1.4.80) — mvFiltered → prevMv for next frame's
+    // temporal-coherence fade in warp shader (binding 4).  Also wakes up the
+    // forward ME shader's temporal predictor which already reads prevMv.
+    // Cost ~5-10us (256KB transfer at sizeMV=240*135*2*4=259KB).
+    bufBarrier(m_FrucMvFilteredBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    bufBarrier(m_FrucPrevMvBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    VkBufferCopy mvCpyRegion = {};
+    mvCpyRegion.srcOffset = 0;
+    mvCpyRegion.dstOffset = 0;
+    mvCpyRegion.size      = (VkDeviceSize)mvW * mvH * 2 * sizeof(int);
+    pfnCmdCopyBuffer(cmd, m_FrucMvFilteredBuf, m_FrucPrevMvBuf, 1, &mvCpyRegion);
+    bufBarrier(m_FrucPrevMvBuf,
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 
