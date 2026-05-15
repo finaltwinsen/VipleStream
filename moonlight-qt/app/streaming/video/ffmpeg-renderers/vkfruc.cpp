@@ -6310,8 +6310,9 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                         m_FrucDownscaleHalfPipeLay, m_FrucDownscaleHalfPipeline)) {
         m_FrucDisabled = true; return false;
     }
-    // §J.3.e.2.i.23 (v1.4.85) Pyramid — ½ res forward ME (3 bind, 24 byte pc).
-    if (!buildPipeline("MEHalf", kFrucMotionEstHalfResShaderGlsl, 3, 24,
+    // §J.3.e.2.i.24 (v1.4.86) 3-stage Pyramid — ½/¼ ME 共用同 pipeline
+    // (4 bind: prevRGB, currRGB, coarserMV, outMV; 28 byte pc with hasCoarserMvPredictor).
+    if (!buildPipeline("MEHalf", kFrucMotionEstHalfResShaderGlsl, 4, 28,
                         m_FrucMeHalfShaderMod, m_FrucMeHalfDsl,
                         m_FrucMeHalfPipeLay, m_FrucMeHalfPipeline)) {
         m_FrucDisabled = true; return false;
@@ -6508,6 +6509,16 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         || !allocBuf((VkDeviceSize)(mvW / 2) * (mvH / 2) * 2 * sizeof(int),
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                      m_FrucMvHalfBuf, m_FrucMvHalfBufMem)
+        // §J.3.e.2.i.24 (v1.4.86) 3-stage Pyramid — ¼ res RGB + MV (1/16 size).
+        || !allocBuf((VkDeviceSize)(width / 4) * (height / 4) * 3 * sizeof(float),
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_FrucPrevRgbQuarterBuf, m_FrucPrevRgbQuarterBufMem)
+        || !allocBuf((VkDeviceSize)(width / 4) * (height / 4) * 3 * sizeof(float),
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_FrucCurrRgbQuarterBuf, m_FrucCurrRgbQuarterBufMem)
+        || !allocBuf((VkDeviceSize)(mvW / 4) * (mvH / 4) * 2 * sizeof(int),
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_FrucMvQuarterBuf, m_FrucMvQuarterBufMem)
         || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                      m_FrucPrevMvBuf, m_FrucPrevMvMem)
         // §B-DUMP needs TRANSFER_SRC for vkCmdCopyBuffer interp → staging.
@@ -6566,10 +6577,13 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // = 8 desc) + warp sets each bumped 6→8 bindings (+4 desc) = +12 desc.
     // §J.3.e.2.i.23 (v1.4.85) Pyramid — +3 sets (DownscaleHalfPrev 2 +
     // DownscaleHalfCurr 2 + MEHalf 3 = 7 desc) + ME 4→5 bindings (+1 desc) = +8.
-    pSize.descriptorCount = 65;
+    // §J.3.e.2.i.24 (v1.4.86) 3-stage Pyramid — ½ ME bumped 3→4 bind (+1 desc
+    // ×1 set) + 3 new sets (DownscaleHalfPrevQuarter 2 + DownscaleHalfCurrQuarter 2
+    // + MEQuarter 4 = 8 desc) = +9 desc.  Total 65→74, sets 20→23.
+    pSize.descriptorCount = 74;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpCi.maxSets = 20;
+    dpCi.maxSets = 23;
     dpCi.poolSizeCount = 1;
     dpCi.pPoolSizes = &pSize;
     if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_FrucDescPool) != VK_SUCCESS) {
@@ -6632,10 +6646,23 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         || !allocAndUpdateSet(m_FrucDownscaleHalfDsl,
                               { m_FrucCurrRgbBuf, m_FrucCurrRgbHalfBuf },
                               m_FrucDownscaleHalfCurrDescSet)
-        // §J.3.e.2.i.23 (v1.4.85) Pyramid — ½ res ME desc set
+        // §J.3.e.2.i.23 (v1.4.85) Pyramid — ½ res ME desc set (4 bind incl. ¼ MV)
         || !allocAndUpdateSet(m_FrucMeHalfDsl,
-                              { m_FrucPrevRgbHalfBuf, m_FrucCurrRgbHalfBuf, m_FrucMvHalfBuf },
+                              { m_FrucPrevRgbHalfBuf, m_FrucCurrRgbHalfBuf, m_FrucMvQuarterBuf, m_FrucMvHalfBuf },
                               m_FrucMeHalfDescSet)
+        // §J.3.e.2.i.24 (v1.4.86) 3-stage Pyramid — downscale ½→¼ prev
+        || !allocAndUpdateSet(m_FrucDownscaleHalfDsl,
+                              { m_FrucPrevRgbHalfBuf, m_FrucPrevRgbQuarterBuf },
+                              m_FrucDownscaleHalfPrevQuarterDescSet)
+        // §J.3.e.2.i.24 — downscale ½→¼ curr
+        || !allocAndUpdateSet(m_FrucDownscaleHalfDsl,
+                              { m_FrucCurrRgbHalfBuf, m_FrucCurrRgbQuarterBuf },
+                              m_FrucDownscaleHalfCurrQuarterDescSet)
+        // §J.3.e.2.i.24 — ¼ res ME (reuse ½ ME pipeline, stub binding 2 ¼ MV)
+        // hasCoarserMvPredictor=0 so binding 2 not read; bind quarter MV self as stub.
+        || !allocAndUpdateSet(m_FrucMeHalfDsl,
+                              { m_FrucPrevRgbQuarterBuf, m_FrucCurrRgbQuarterBuf, m_FrucMvQuarterBuf, m_FrucMvQuarterBuf },
+                              m_FrucMeQuarterDescSet)
         || !allocAndUpdateSet(m_FrucMedianDsl,
                               { m_FrucMvBuf, m_FrucMvFilteredBuf },
                               m_FrucMedianDescSet)
@@ -6920,6 +6947,10 @@ void VkFrucRenderer::destroyFrucComputeResources()
     DESTROY_BUF(m_FrucPrevRgbHalfBuf, m_FrucPrevRgbHalfBufMem)
     DESTROY_BUF(m_FrucCurrRgbHalfBuf, m_FrucCurrRgbHalfBufMem)
     DESTROY_BUF(m_FrucMvHalfBuf,      m_FrucMvHalfBufMem)
+    // §J.3.e.2.i.24 (v1.4.86) 3-stage Pyramid
+    DESTROY_BUF(m_FrucPrevRgbQuarterBuf, m_FrucPrevRgbQuarterBufMem)
+    DESTROY_BUF(m_FrucCurrRgbQuarterBuf, m_FrucCurrRgbQuarterBufMem)
+    DESTROY_BUF(m_FrucMvQuarterBuf,      m_FrucMvQuarterBufMem)
     DESTROY_BUF(m_FrucInterpRgbBuf,  m_FrucInterpRgbMem)
     // §B2 2026-05-06 — TRIPLE 第二份 interp output buffer.
     DESTROY_BUF(m_FrucInterpRgbBuf2, m_FrucInterpRgbBuf2Mem)
@@ -8316,16 +8347,57 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         pfnCmdDispatch(cmd, (width / 2 + 7) / 8, (height / 2 + 7) / 8, 1);
         computeBufBarrier(m_FrucCurrRgbHalfBuf);
 
-        // §J.3.e.2.i.23 Stage 0b.3: ½ res forward ME → mvHalf
+        // §J.3.e.2.i.24 (v1.4.86) 3-stage Pyramid Stage 0b.3: ½→¼ downscale prev/curr
+        pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucDownscaleHalfPipeLay,
+                           0, 1, &m_FrucDownscaleHalfPrevQuarterDescSet, 0, nullptr);
+        {
+            struct {
+                uint32_t inWidth, inHeight, outWidth, outHeight;
+            } pcDs = { (uint32_t)(width / 2), (uint32_t)(height / 2),
+                       (uint32_t)(width / 4), (uint32_t)(height / 4) };
+            pfnCmdPushConst(cmd, m_FrucDownscaleHalfPipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcDs), &pcDs);
+        }
+        pfnCmdDispatch(cmd, (width / 4 + 7) / 8, (height / 4 + 7) / 8, 1);
+        computeBufBarrier(m_FrucPrevRgbQuarterBuf);
+
+        pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucDownscaleHalfPipeLay,
+                           0, 1, &m_FrucDownscaleHalfCurrQuarterDescSet, 0, nullptr);
+        {
+            struct {
+                uint32_t inWidth, inHeight, outWidth, outHeight;
+            } pcDs = { (uint32_t)(width / 2), (uint32_t)(height / 2),
+                       (uint32_t)(width / 4), (uint32_t)(height / 4) };
+            pfnCmdPushConst(cmd, m_FrucDownscaleHalfPipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcDs), &pcDs);
+        }
+        pfnCmdDispatch(cmd, (width / 4 + 7) / 8, (height / 4 + 7) / 8, 1);
+        computeBufBarrier(m_FrucCurrRgbQuarterBuf);
+
+        // §J.3.e.2.i.24 Stage 0b.4: ¼ res forward ME → mvQuarter
+        // (reuse MEHalf pipeline; hasCoarserMvPredictor=0 全範圍 [16,8,4,2,1])
         pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMeHalfPipeline);
+        pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMeHalfPipeLay,
+                           0, 1, &m_FrucMeQuarterDescSet, 0, nullptr);
+        {
+            struct {
+                uint32_t halfFrameWidth, halfFrameHeight, blockSize, halfMvWidth, halfMvHeight, hasCoarserMvPredictor;
+            } pcMeQ = {
+                (uint32_t)(width / 4), (uint32_t)(height / 4), (uint32_t)BLOCK_SIZE,
+                (uint32_t)(mvW / 4), (uint32_t)(mvH / 4), 0u  // ¼ res 沒有 coarser predictor
+            };
+            pfnCmdPushConst(cmd, m_FrucMeHalfPipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcMeQ), &pcMeQ);
+        }
+        pfnCmdDispatch(cmd, (mvW / 4 + 7) / 8, (mvH / 4 + 7) / 8, 1);
+        computeBufBarrier(m_FrucMvQuarterBuf);
+
+        // §J.3.e.2.i.23 Stage 0b.5: ½ res forward ME → mvHalf (用 ¼ MV 當 predictor)
         pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucMeHalfPipeLay,
                            0, 1, &m_FrucMeHalfDescSet, 0, nullptr);
         {
             struct {
-                uint32_t halfFrameWidth, halfFrameHeight, blockSize, halfMvWidth, halfMvHeight, _pad0;
+                uint32_t halfFrameWidth, halfFrameHeight, blockSize, halfMvWidth, halfMvHeight, hasCoarserMvPredictor;
             } pcMeHalf = {
                 (uint32_t)(width / 2), (uint32_t)(height / 2), (uint32_t)BLOCK_SIZE,
-                (uint32_t)(mvW / 2), (uint32_t)(mvH / 2), 0
+                (uint32_t)(mvW / 2), (uint32_t)(mvH / 2), 1u  // ½ res 用 ¼ MV 當 predictor
             };
             pfnCmdPushConst(cmd, m_FrucMeHalfPipeLay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcMeHalf), &pcMeHalf);
         }

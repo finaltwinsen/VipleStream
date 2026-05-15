@@ -979,6 +979,10 @@ private:
     VkPipelineLayout      m_FrucMeHalfPipeLay   = VK_NULL_HANDLE;
     VkPipeline            m_FrucMeHalfPipeline  = VK_NULL_HANDLE;
     VkDescriptorSet       m_FrucMeHalfDescSet   = VK_NULL_HANDLE;
+    // §J.3.e.2.i.24 (v1.4.86) 3-stage Pyramid — ¼ res descsets (reuse same pipelines)
+    VkDescriptorSet       m_FrucDownscaleHalfPrevQuarterDescSet = VK_NULL_HANDLE;  // halfPrev → quarterPrev
+    VkDescriptorSet       m_FrucDownscaleHalfCurrQuarterDescSet = VK_NULL_HANDLE;  // halfCurr → quarterCurr
+    VkDescriptorSet       m_FrucMeQuarterDescSet                = VK_NULL_HANDLE;  // ¼ res ME
 
     // §J.3.e.2.i.19 (v1.4.83) Phase B — uncertainty flag + 4×4 fine ME pipelines.
     VkShaderModule        m_FrucFlagShaderMod    = VK_NULL_HANDLE;
@@ -1033,6 +1037,13 @@ private:
     VkDeviceMemory m_FrucCurrRgbHalfBufMem     = VK_NULL_HANDLE;
     VkBuffer       m_FrucMvHalfBuf             = VK_NULL_HANDLE;  // (mvW/2)*(mvH/2)*2*int
     VkDeviceMemory m_FrucMvHalfBufMem          = VK_NULL_HANDLE;
+    // §J.3.e.2.i.24 (v1.4.86) 3-stage Pyramid — ¼ res RGB + MV buffers.
+    VkBuffer       m_FrucPrevRgbQuarterBuf     = VK_NULL_HANDLE;  // (W/4)*(H/4)*3*fp32
+    VkDeviceMemory m_FrucPrevRgbQuarterBufMem  = VK_NULL_HANDLE;
+    VkBuffer       m_FrucCurrRgbQuarterBuf     = VK_NULL_HANDLE;
+    VkDeviceMemory m_FrucCurrRgbQuarterBufMem  = VK_NULL_HANDLE;
+    VkBuffer       m_FrucMvQuarterBuf          = VK_NULL_HANDLE;  // (mvW/4)*(mvH/4)*2*int
+    VkDeviceMemory m_FrucMvQuarterBufMem       = VK_NULL_HANDLE;
     VkBuffer       m_FrucInterpRgbBuf  = VK_NULL_HANDLE;
     VkDeviceMemory m_FrucInterpRgbMem  = VK_NULL_HANDLE;
     // §B2 2026-05-06 — TRIPLE 60→180 路徑用第二個 interp buffer (1/3, 2/3 點).

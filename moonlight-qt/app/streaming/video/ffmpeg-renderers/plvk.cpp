@@ -1327,14 +1327,18 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(binding = 0) readonly  buffer PrevRGB { float data[]; } prevFrame;
 layout(binding = 1) readonly  buffer CurrRGB { float data[]; } currFrame;
 layout(binding = 2) writeonly buffer OutMV   { int   data[]; } outMV;
+// §J.3.e.2.i.24 (v1.4.86) — 3-stage pyramid 第 3 階 ¼ res MV predictor.
+// hasCoarserMvPredictor=1 啟用 — 此 shader 跑 ½ res 時讀 ¼ MV; 跑 ¼ res 時
+// 此 buffer stub-綁 (不讀).
+layout(binding = 3) readonly  buffer CoarserMV { int data[]; } coarserMV;
 
 layout(push_constant) uniform Params {
     uint halfFrameWidth;
     uint halfFrameHeight;
-    uint blockSize;          // 8 in ½ res
+    uint blockSize;
     uint halfMvWidth;
     uint halfMvHeight;
-    uint _pad0;
+    uint hasCoarserMvPredictor;  // §J.3.e.2.i.24 (v1.4.86) — 1 用 ¼ MV 當猜測
 } p;
 
 float loadPrevY(int x, int y) {
@@ -1452,9 +1456,44 @@ void main() {
         return;
     }
 
-    // Coarse diamond [16, 8, 4, 2, 1] = ±31 in ½ res = ±62 in 1× effective.
-    const int DIAMOND_STEPS[5] = int[5](16, 8, 4, 2, 1);
-    const int STEP_COUNT = 5;
+    // §J.3.e.2.i.24 (v1.4.86) Pyramid 3-stage — ¼ MV as predictor for ½ res ME.
+    // ¼ MV unit = 2 ¼ res pixel = 2 ½ res pixel.  Scale ×2 → ½ res integer.
+    if (p.hasCoarserMvPredictor != 0u) {
+        int coarserMvW = int(p.halfMvWidth) / 2;
+        int qBx = int(blockX) / 2;
+        int qBy = int(blockY) / 2;
+        int qIdx = (qBy * coarserMvW + qBx) * 2;
+        ivec2 quarterMV_Q1 = ivec2(coarserMV.data[qIdx], coarserMV.data[qIdx + 1]);
+        ivec2 quarterMV_int = ivec2(
+            (quarterMV_Q1.x >= 0 ? quarterMV_Q1.x + 1 : quarterMV_Q1.x - 1) / 2,
+            (quarterMV_Q1.y >= 0 ? quarterMV_Q1.y + 1 : quarterMV_Q1.y - 1) / 2
+        );
+        ivec2 predMV = quarterMV_int * 2;
+        ivec2 refCenterPred = blockCenter + predMV;
+        if (all(greaterThanEqual(refCenterPred, ivec2(halfSample, halfSample))) &&
+            all(lessThan(refCenterPred,
+                         ivec2(int(p.halfFrameWidth)  - halfSample,
+                               int(p.halfFrameHeight) - halfSample)))) {
+            float predCost = computeCensusCost(refCenterPred, blockCenter, bestCost);
+            if (predCost < bestCost) { bestCost = predCost; bestMV = predMV; }
+        }
+    }
+
+    // Diamond steps: 有 predictor 時縮 [4,2,1] (predictor 已抓 big motion),
+    // 無 predictor 時用 [16,8,4,2,1] = ±31 in res-space.
+    const int DIAMOND_STEPS_FULL[5] = int[5](16, 8, 4, 2, 1);
+    const int DIAMOND_STEPS_FINE[3] = int[3](4, 2, 1);
+    int DIAMOND_STEPS[5];
+    int STEP_COUNT;
+    if (p.hasCoarserMvPredictor != 0u) {
+        STEP_COUNT = 3;
+        DIAMOND_STEPS[0] = DIAMOND_STEPS_FINE[0];
+        DIAMOND_STEPS[1] = DIAMOND_STEPS_FINE[1];
+        DIAMOND_STEPS[2] = DIAMOND_STEPS_FINE[2];
+    } else {
+        STEP_COUNT = 5;
+        for (int k = 0; k < 5; k++) DIAMOND_STEPS[k] = DIAMOND_STEPS_FULL[k];
+    }
     float prevStepBestCost = bestCost;
     for (int si = 0; si < STEP_COUNT; si++) {
         int step = DIAMOND_STEPS[si];
