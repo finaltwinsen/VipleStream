@@ -939,6 +939,21 @@ private:
                                     VkQueryPool timerPool = VK_NULL_HANDLE,
                                     uint32_t    timerBase = 0);
 
+    // §J.3.e.2.i.37 (v1.4.99) — partC helpers shared SW + HW frucChainAsync paths.
+    // 抽 ~150 lines duplicate from renderFrameSw v1.4.90 / renderFrame v1.4.91+
+    // 兩 caller 共用同一份邏輯, future feature (例 v1.4.93 triple, v1.4.96
+    // PROF) 改 helper 一次兩 path 同時 benefit.
+    void recordFrucPartC_AcquireOutputs(VkCommandBuffer postCmd);
+    void recordFrucPartC_InterpRenderPass(VkCommandBuffer postCmd,
+                                            uint32_t imgIdx,
+                                            VkDescriptorSet descSet,
+                                            int srcW, int srcH);
+    void recordFrucPartC_RealFrameRenderPass(VkCommandBuffer postCmd,
+                                               uint32_t imgIdx,
+                                               int srcW, int srcH,
+                                               bool useCrgbForReal,
+                                               uint32_t slot);
+
     bool     m_FrucMode      = false;
     bool     m_FrucReady     = false;
     bool     m_FrucDisabled  = false;

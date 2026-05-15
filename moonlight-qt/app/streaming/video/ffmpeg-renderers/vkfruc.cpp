@@ -8242,6 +8242,126 @@ bool VkFrucRenderer::recordFrucChainOnCompute(VkCommandBuffer cmpCmd,
     return true;
 }
 
+// §J.3.e.2.i.37 (v1.4.99) — partC helpers shared by SW + HW
+// frucChainAsync paths.  抽 ~150 lines duplicate from renderFrameSw v1.4.90
+// / renderFrame v1.4.91+.
+
+// Acquire compute → graphics ownership for interp_1 / interp_2 / curr buffers
+// (對應 cmpCmd 內 recordFrucChainOnCompute releaseBufferOwnership at COMPUTE
+// → FRAGMENT 層級).  m_FrucInterpRgbBuf 給 dual interp render pass sample,
+// m_FrucInterpRgbBuf2 給 TRIPLE interp_2 render pass sample, m_FrucCurrRgbBuf
+// 給 §B-quality (d) HW path useCrgbForReal real-frame render pass sample.
+void VkFrucRenderer::recordFrucPartC_AcquireOutputs(VkCommandBuffer postCmd)
+{
+    acquireBufferOwnership(postCmd, m_FrucInterpRgbBuf,
+        m_ComputeQueueFamily, m_QueueFamily,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    acquireBufferOwnership(postCmd, m_FrucInterpRgbBuf2,
+        m_ComputeQueueFamily, m_QueueFamily,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    acquireBufferOwnership(postCmd, m_FrucCurrRgbBuf,
+        m_ComputeQueueFamily, m_QueueFamily,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+}
+
+// Interp render pass on imgIdx with given descSet (sample m_FrucInterpRgbBuf
+// or m_FrucInterpRgbBuf2 via descSet binding).  共用 m_InterpPipeline +
+// m_InterpPipelineLayout; push const {srcW, srcH}.  drawOverlayInRenderPass
+// 疊 overlay (跟 single-cmd 路徑一致).
+//   Dual mode caller: imgIdx=imgIdxA, descSet=m_InterpDescSet (interp_1).
+//   Triple mode caller (HW only): imgIdx=imgIdxC, descSet=m_InterpDescSet2
+//                                  (interp_2 @ §B2 2026-05-06).
+void VkFrucRenderer::recordFrucPartC_InterpRenderPass(VkCommandBuffer postCmd,
+                                                        uint32_t imgIdx,
+                                                        VkDescriptorSet descSet,
+                                                        int srcW, int srcH)
+{
+    VkClearValue clearVal = {};
+    clearVal.color.float32[3] = 1.0f;
+
+    auto getDevPaIRP = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+        m_Instance, "vkGetDeviceProcAddr");
+    auto pfnCmdPushConst = (PFN_vkCmdPushConstants)getDevPaIRP(m_Device, "vkCmdPushConstants");
+
+    VkRenderPassBeginInfo rpbi = {};
+    rpbi.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpbi.renderPass           = m_RenderPass;
+    rpbi.framebuffer          = m_Framebuffers[imgIdx];
+    rpbi.renderArea.extent    = m_SwapchainExtent;
+    rpbi.clearValueCount      = 1;
+    rpbi.pClearValues         = &clearVal;
+    m_RtPfn.CmdBeginRenderPass(postCmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
+    m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  m_InterpPipelineLayout, 0,
+                                  1, &descSet, 0, nullptr);
+    struct { int srcW, srcH, _pad0, _pad1; } pcInterp = { srcW, srcH, 0, 0 };
+    if (pfnCmdPushConst) {
+        pfnCmdPushConst(postCmd, m_InterpPipelineLayout,
+                         VK_SHADER_STAGE_FRAGMENT_BIT,
+                         0, sizeof(pcInterp), &pcInterp);
+    }
+    m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
+    drawOverlayInRenderPass(postCmd);
+    m_RtPfn.CmdEndRenderPass(postCmd);
+}
+
+// Real-frame render pass on imgIdx.  useCrgbForReal=true (HW §B-quality (d)
+// dual mode) 用 m_InterpPipeline + m_RealCurrRgbDescSet (sample
+// m_FrucCurrRgbBuf, compute-NV12→RGB output); =false 用 m_GraphicsPipeline +
+// m_SlotDescSet[slot] (sample vkf->img[0] / m_SwUploadImage via ycbcr sampler).
+//   SW caller: useCrgbForReal=false 永遠 (SW path 沒 §B-quality (d) 路徑).
+//   HW caller: useCrgbForReal 跟 useCrgbForReal var (env 控制) 一致.
+void VkFrucRenderer::recordFrucPartC_RealFrameRenderPass(VkCommandBuffer postCmd,
+                                                           uint32_t imgIdx,
+                                                           int srcW, int srcH,
+                                                           bool useCrgbForReal,
+                                                           uint32_t slot)
+{
+    VkClearValue clearVal = {};
+    clearVal.color.float32[3] = 1.0f;
+
+    VkRenderPassBeginInfo rpbi = {};
+    rpbi.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpbi.renderPass           = m_RenderPass;
+    rpbi.framebuffer          = m_Framebuffers[imgIdx];
+    rpbi.renderArea.offset    = { 0, 0 };
+    rpbi.renderArea.extent    = m_SwapchainExtent;
+    rpbi.clearValueCount      = 1;
+    rpbi.pClearValues         = &clearVal;
+    m_RtPfn.CmdBeginRenderPass(postCmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    if (useCrgbForReal) {
+        auto getDevPaRF = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+            m_Instance, "vkGetDeviceProcAddr");
+        auto pfnCmdPushConst = (PFN_vkCmdPushConstants)getDevPaRF(m_Device, "vkCmdPushConstants");
+
+        m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
+        m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      m_InterpPipelineLayout, 0,
+                                      1, &m_RealCurrRgbDescSet, 0, nullptr);
+        struct { int srcW, srcH, _pad0, _pad1; } pcReal = { srcW, srcH, 0, 0 };
+        if (pfnCmdPushConst) {
+            pfnCmdPushConst(postCmd, m_InterpPipelineLayout,
+                             VK_SHADER_STAGE_FRAGMENT_BIT,
+                             0, sizeof(pcReal), &pcReal);
+        }
+    } else {
+        m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_GraphicsPipeline);
+        m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      m_GraphicsPipelineLayout, 0,
+                                      1, &m_SlotDescSet[slot], 0, nullptr);
+    }
+    m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
+    drawOverlayInRenderPass(postCmd);
+    m_RtPfn.CmdEndRenderPass(postCmd);
+}
+
 
 // §J.3.e.2.i.4 — record FRUC compute chain into the existing renderFrame
 // command buffer (we don't use a separate compute queue/cmdpool — runs on
@@ -10575,129 +10695,30 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                                       m_FrucChainAsyncTimerPool, fcaTimerBase + 4);
         }
 
-        // Acquire compute → graphics for interp / curr buffers (對應 cmpCmd
-        // 內 releaseBufferOwnership at COMPUTE → FRAGMENT 層級).
-        acquireBufferOwnership(postCmd, m_FrucInterpRgbBuf,
-            m_ComputeQueueFamily, m_QueueFamily,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        acquireBufferOwnership(postCmd, m_FrucInterpRgbBuf2,
-            m_ComputeQueueFamily, m_QueueFamily,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        acquireBufferOwnership(postCmd, m_FrucCurrRgbBuf,
-            m_ComputeQueueFamily, m_QueueFamily,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        // §J.3.e.2.i.37 (v1.4.99) — refactored: 抽 3 個 partC helper.
+        recordFrucPartC_AcquireOutputs(postCmd);
 
         // Overlay drain + upload (CPU + transfer cmd; safe in partC because
         // overlay sample 在 dual / real render pass — partC 內 ordering OK).
         drainOverlayStash();
         uploadPendingOverlay(postCmd);
 
-        VkClearValue clearValD = {};
-        clearValD.color.float32[0] = 0.0f;
-        clearValD.color.float32[1] = 0.0f;
-        clearValD.color.float32[2] = 0.0f;
-        clearValD.color.float32[3] = 1.0f;
-
-        // Resolve push-const PFN.
-        auto getDevPaD = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
-            m_Instance, "vkGetDeviceProcAddr");
-        auto pfnCmdPushConstD = (PFN_vkCmdPushConstants)getDevPaD(m_Device, "vkCmdPushConstants");
-
-        // dual interp render pass (mirror line 10403-10429).
+        // dual interp render pass on imgIdxA (m_InterpDescSet sample
+        // m_FrucInterpRgbBuf).
         if (dualPresentThisFrame) {
-            VkRenderPassBeginInfo rpbiInterp = {};
-            rpbiInterp.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-            rpbiInterp.renderPass           = m_RenderPass;
-            rpbiInterp.framebuffer          = m_Framebuffers[imgIdxA];
-            rpbiInterp.renderArea.extent    = m_SwapchainExtent;
-            rpbiInterp.clearValueCount      = 1;
-            rpbiInterp.pClearValues         = &clearValD;
-            m_RtPfn.CmdBeginRenderPass(postCmd, &rpbiInterp, VK_SUBPASS_CONTENTS_INLINE);
-            m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
-            m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                          m_InterpPipelineLayout, 0,
-                                          1, &m_InterpDescSet, 0, nullptr);
-            struct { int srcW, srcH, _pad0, _pad1; } pcInterpD = {
-                (int)hwW, (int)hwH, 0, 0
-            };
-            if (pfnCmdPushConstD) {
-                pfnCmdPushConstD(postCmd, m_InterpPipelineLayout,
-                                 VK_SHADER_STAGE_FRAGMENT_BIT,
-                                 0, sizeof(pcInterpD), &pcInterpD);
-            }
-            m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
-            drawOverlayInRenderPass(postCmd);
-            m_RtPfn.CmdEndRenderPass(postCmd);
+            recordFrucPartC_InterpRenderPass(postCmd, imgIdxA, m_InterpDescSet,
+                                              (int)hwW, (int)hwH);
         }
-
         // §J.3.e.2.i.31 (v1.4.93) — TRIPLE 第 2 張 interp render pass on
-        // imgIdxC.  共用 m_InterpPipeline 但 sample m_FrucInterpRgbBuf2 (binding
-        // via m_InterpDescSet2).  Mirror single-cmd path line 10435-10467.
+        // imgIdxC (m_InterpDescSet2 sample m_FrucInterpRgbBuf2).
         if (triplePresentThisFrame) {
-            VkRenderPassBeginInfo rpbiInterp2 = {};
-            rpbiInterp2.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-            rpbiInterp2.renderPass           = m_RenderPass;
-            rpbiInterp2.framebuffer          = m_Framebuffers[imgIdxC];
-            rpbiInterp2.renderArea.extent    = m_SwapchainExtent;
-            rpbiInterp2.clearValueCount      = 1;
-            rpbiInterp2.pClearValues         = &clearValD;
-            m_RtPfn.CmdBeginRenderPass(postCmd, &rpbiInterp2, VK_SUBPASS_CONTENTS_INLINE);
-            m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
-            m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                          m_InterpPipelineLayout, 0,
-                                          1, &m_InterpDescSet2, 0, nullptr);
-            struct { int srcW, srcH, _pad0, _pad1; } pcInterp2D = {
-                (int)hwW, (int)hwH, 0, 0
-            };
-            if (pfnCmdPushConstD) {
-                pfnCmdPushConstD(postCmd, m_InterpPipelineLayout,
-                                 VK_SHADER_STAGE_FRAGMENT_BIT,
-                                 0, sizeof(pcInterp2D), &pcInterp2D);
-            }
-            m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
-            drawOverlayInRenderPass(postCmd);
-            m_RtPfn.CmdEndRenderPass(postCmd);
+            recordFrucPartC_InterpRenderPass(postCmd, imgIdxC, m_InterpDescSet2,
+                                              (int)hwW, (int)hwH);
         }
-
-        // real-frame render pass (mirror line 10470-10543).  useCrgbForReal
-        // 分支沿用 single-cmd 邏輯.
-        VkRenderPassBeginInfo rpbiRealD = {};
-        rpbiRealD.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rpbiRealD.renderPass           = m_RenderPass;
-        rpbiRealD.framebuffer          = m_Framebuffers[imgIdx];
-        rpbiRealD.renderArea.offset    = { 0, 0 };
-        rpbiRealD.renderArea.extent    = m_SwapchainExtent;
-        rpbiRealD.clearValueCount      = 1;
-        rpbiRealD.pClearValues         = &clearValD;
-        m_RtPfn.CmdBeginRenderPass(postCmd, &rpbiRealD, VK_SUBPASS_CONTENTS_INLINE);
-        if (useCrgbForReal) {
-            m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
-            m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                          m_InterpPipelineLayout, 0,
-                                          1, &m_RealCurrRgbDescSet, 0, nullptr);
-            struct { int srcW, srcH, _pad0, _pad1; } pcRealD = {
-                (int)hwW, (int)hwH, 0, 0
-            };
-            if (pfnCmdPushConstD) {
-                pfnCmdPushConstD(postCmd, m_InterpPipelineLayout,
-                                 VK_SHADER_STAGE_FRAGMENT_BIT,
-                                 0, sizeof(pcRealD), &pcRealD);
-            }
-        } else {
-            m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_GraphicsPipeline);
-            m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                          m_GraphicsPipelineLayout, 0,
-                                          1, &m_SlotDescSet[slot], 0, nullptr);
-        }
-        m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
-        drawOverlayInRenderPass(postCmd);
-        m_RtPfn.CmdEndRenderPass(postCmd);
+        // real-frame render pass (useCrgbForReal 分支由 helper handle).
+        recordFrucPartC_RealFrameRenderPass(postCmd, imgIdx,
+                                              (int)hwW, (int)hwH,
+                                              useCrgbForReal, slot);
 
         // releaseBar (vkf->img[0] GENERAL→GENERAL cache flush, mirror line
         // 10564-10581).  給 ffmpeg next decode reuse vkf 前先 cache flush.
@@ -12508,74 +12529,19 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                                       m_FrucChainAsyncTimerPool, fcaTimerBaseSw + 4);
         }
 
-        // Acquire compute → graphics for interp / curr buffers (對應 cmpCmd
-        // 內 releaseBufferOwnership at COMPUTE → FRAGMENT 層級).
-        acquireBufferOwnership(postCmd, m_FrucInterpRgbBuf,
-            m_ComputeQueueFamily, m_QueueFamily,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        acquireBufferOwnership(postCmd, m_FrucInterpRgbBuf2,
-            m_ComputeQueueFamily, m_QueueFamily,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        acquireBufferOwnership(postCmd, m_FrucCurrRgbBuf,
-            m_ComputeQueueFamily, m_QueueFamily,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        // §J.3.e.2.i.37 (v1.4.99) — refactored: 抽 3 個 partC helper.
+        recordFrucPartC_AcquireOutputs(postCmd);
 
-        VkClearValue clearValC = {};
-        clearValC.color.float32[3] = 1.0f;
-
-        // dual-present render pass (mirror 11371-11407).
+        // dual-present render pass (interp_1 on imgIdxA via m_InterpDescSet).
         if (dualPresentThisFrame) {
-            auto getDevPaC2 = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
-                m_Instance, "vkGetDeviceProcAddr");
-            auto pfnCmdPushConstC = (PFN_vkCmdPushConstants)getDevPaC2(m_Device, "vkCmdPushConstants");
-
-            VkRenderPassBeginInfo rpbiAC = {};
-            rpbiAC.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-            rpbiAC.renderPass           = m_RenderPass;
-            rpbiAC.framebuffer          = m_Framebuffers[imgIdxA];
-            rpbiAC.renderArea.extent    = m_SwapchainExtent;
-            rpbiAC.clearValueCount      = 1;
-            rpbiAC.pClearValues         = &clearValC;
-            m_RtPfn.CmdBeginRenderPass(postCmd, &rpbiAC, VK_SUBPASS_CONTENTS_INLINE);
-            m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
-            m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                          m_InterpPipelineLayout, 0,
-                                          1, &m_InterpDescSet, 0, nullptr);
-            struct { int srcW, srcH, _pad0, _pad1; } pcInterpC = {
-                (int)m_SwImageWidth, (int)m_SwImageHeight, 0, 0
-            };
-            if (pfnCmdPushConstC) {
-                pfnCmdPushConstC(postCmd, m_InterpPipelineLayout,
-                                  VK_SHADER_STAGE_FRAGMENT_BIT,
-                                  0, sizeof(pcInterpC), &pcInterpC);
-            }
-            m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
-            drawOverlayInRenderPass(postCmd);
-            m_RtPfn.CmdEndRenderPass(postCmd);
+            recordFrucPartC_InterpRenderPass(postCmd, imgIdxA, m_InterpDescSet,
+                                              (int)m_SwImageWidth, (int)m_SwImageHeight);
         }
-
-        // real-frame render pass (mirror 11409-11427).
-        VkRenderPassBeginInfo rpbiC = {};
-        rpbiC.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rpbiC.renderPass           = m_RenderPass;
-        rpbiC.framebuffer          = m_Framebuffers[imgIdx];
-        rpbiC.renderArea.extent    = m_SwapchainExtent;
-        rpbiC.clearValueCount      = 1;
-        rpbiC.pClearValues         = &clearValC;
-        m_RtPfn.CmdBeginRenderPass(postCmd, &rpbiC, VK_SUBPASS_CONTENTS_INLINE);
-        m_RtPfn.CmdBindPipeline(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_GraphicsPipeline);
-        m_RtPfn.CmdBindDescriptorSets(postCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                      m_GraphicsPipelineLayout, 0,
-                                      1, &m_SlotDescSet[slot], 0, nullptr);
-        m_RtPfn.CmdDraw(postCmd, 3, 1, 0, 0);
-        drawOverlayInRenderPass(postCmd);
-        m_RtPfn.CmdEndRenderPass(postCmd);
+        // real-frame render pass.  SW path 永遠 useCrgbForReal=false (沒
+        // §B-quality (d) 路徑).
+        recordFrucPartC_RealFrameRenderPass(postCmd, imgIdx,
+                                              (int)m_SwImageWidth, (int)m_SwImageHeight,
+                                              /*useCrgbForReal*/false, slot);
 
         // §J.3.e.2.i.35 — partC ts[5] end.
         if (m_FrucChainAsyncTimerPool && pfnCmdWriteTimestamp_swt) {
