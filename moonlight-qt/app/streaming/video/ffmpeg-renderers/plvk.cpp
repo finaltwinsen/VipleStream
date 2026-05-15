@@ -1747,6 +1747,287 @@ void main() {
 }
 )GLSL";
 
+// §J.3.e.2.i.19 (v1.4.83) — Phase B uncertainty flag pre-pass.
+//
+// 對每個 8×8 forward MV block 計算 (fwd + bwd) consistency error + 4-neighbor
+// MV gradient max.  高於 threshold 標 needRefine=1 (1 byte/block, 240×135 ≈
+// 32KB at 1080p mvW×mvH = 240×135).  下一階 4×4 fine ME shader 只對 flagged
+// blocks 跑 refinement,其他直接 copy parent 8×8 MV.
+//
+// Conservative threshold tuning: refine ratio 5-15% expected; over-refine
+// 會把 chain 推爆 TRIPLE slot.
+const char* kFrucMvUncertaintyFlagShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) readonly  buffer FwdMV     { int data[];  } fwdMV;
+layout(binding = 1) readonly  buffer BwdMV     { int data[];  } bwdMV;
+layout(binding = 2) writeonly buffer FlagBuf   { uint data[]; } flagBuf;
+
+layout(push_constant) uniform Params {
+    uint mvWidth;
+    uint mvHeight;
+    uint _pad0;
+    uint _pad1;
+} p;
+
+ivec2 loadFwdMV(int bx, int by) {
+    bx = clamp(bx, 0, int(p.mvWidth)  - 1);
+    by = clamp(by, 0, int(p.mvHeight) - 1);
+    int idx = (by * int(p.mvWidth) + bx) * 2;
+    return ivec2(fwdMV.data[idx], fwdMV.data[idx + 1]);
+}
+ivec2 loadBwdMV(int bx, int by) {
+    bx = clamp(bx, 0, int(p.mvWidth)  - 1);
+    by = clamp(by, 0, int(p.mvHeight) - 1);
+    int idx = (by * int(p.mvWidth) + bx) * 2;
+    return ivec2(bwdMV.data[idx], bwdMV.data[idx + 1]);
+}
+
+void main() {
+    uint bx = gl_GlobalInvocationID.x;
+    uint by = gl_GlobalInvocationID.y;
+    if (bx >= p.mvWidth || by >= p.mvHeight) return;
+
+    // (1) fwd + bwd consistency.  Stored convention: fwd = -motion, bwd = +motion,
+    // consistent: fwd + bwd ≈ 0.  Larger = ME failed (occlusion).
+    vec2 fwd = vec2(loadFwdMV(int(bx), int(by))) * 0.5;
+    vec2 bwdv = vec2(loadBwdMV(int(bx), int(by))) * 0.5;
+    vec2 consistDiff = fwd + bwdv;
+    float consistSq = dot(consistDiff, consistDiff);
+
+    // (2) 4-neighbor MV gradient max (forward only).
+    vec2 mvL = vec2(loadFwdMV(int(bx) - 1, int(by)    )) * 0.5;
+    vec2 mvR = vec2(loadFwdMV(int(bx) + 1, int(by)    )) * 0.5;
+    vec2 mvU = vec2(loadFwdMV(int(bx),     int(by) - 1)) * 0.5;
+    vec2 mvD = vec2(loadFwdMV(int(bx),     int(by) + 1)) * 0.5;
+    vec2 dL = fwd - mvL;
+    vec2 dR = fwd - mvR;
+    vec2 dU = fwd - mvU;
+    vec2 dD = fwd - mvD;
+    float gradSqMax = max(max(dot(dL, dL), dot(dR, dR)),
+                          max(dot(dU, dU), dot(dD, dD)));
+
+    // Threshold tuning: consistency_sq > 8 (≈2.83 px err) OR gradient_sq > 16
+    // (≈4 px MV jump).  These are conservative — only true ME failure regions
+    // get flagged.  Expect refine ratio 5-15%.
+    uint needRefine = (consistSq > 8.0 || gradSqMax > 16.0) ? 1u : 0u;
+
+    uint idx = by * p.mvWidth + bx;
+    flagBuf.data[idx] = needRefine;
+}
+)GLSL";
+
+// §J.3.e.2.i.19 (v1.4.83) — Phase B 4×4 fine ME shader.
+//
+// Dispatch grid = (mvW × 2, mvH × 2) — one thread per 4×4 fine block.
+// Parent 8×8 block index = fine_idx / 2.  讀 needRefineFlag at parent: if 0,
+// 直接 copy parent fwdMV (4 個 fine block 共 parent MV).  Else, 以 parent
+// fwdMV 為 initial guess, search ±2 px local diamond [2,1] = 16 candidates.
+//
+// 用 4×4 block center sampling (smaller window than 8×8) — census still 3×3
+// stride 4.  Output: fineMV buffer (size = mvW*2 * mvH*2 * 2 * sizeof(int)).
+const char* kFrucMotionEstFine4x4ShaderGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#define SAMPLE_COUNT     3
+#define SAMPLE_STRIDE    2   // 4×4 block: tighter sample stride than 8×8
+
+layout(binding = 0) readonly  buffer PrevRGB    { float data[]; } prevFrame;
+layout(binding = 1) readonly  buffer CurrRGB    { float data[]; } currFrame;
+layout(binding = 2) readonly  buffer FwdMV      { int   data[]; } fwdMV;
+layout(binding = 3) readonly  buffer FlagBuf    { uint  data[]; } flagBuf;
+layout(binding = 4) writeonly buffer FineMV     { int   data[]; } outFineMV;
+
+layout(push_constant) uniform Params {
+    uint frameWidth;
+    uint frameHeight;
+    uint coarseBlockSize;  // 8
+    uint coarseMvWidth;
+    uint coarseMvHeight;
+    uint _pad0;
+} p;
+
+float loadPrevY(int x, int y) {
+    int xx = clamp(x, 0, int(p.frameWidth) - 1);
+    int yy = clamp(y, 0, int(p.frameHeight) - 1);
+    int idx = yy * int(p.frameWidth) + xx;
+    int planeSize = int(p.frameWidth) * int(p.frameHeight);
+    float r = prevFrame.data[idx];
+    float g = prevFrame.data[idx + planeSize];
+    float b = prevFrame.data[idx + 2 * planeSize];
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+float loadCurrY(int x, int y) {
+    int xx = clamp(x, 0, int(p.frameWidth) - 1);
+    int yy = clamp(y, 0, int(p.frameHeight) - 1);
+    int idx = yy * int(p.frameWidth) + xx;
+    int planeSize = int(p.frameWidth) * int(p.frameHeight);
+    float r = currFrame.data[idx];
+    float g = currFrame.data[idx + planeSize];
+    float b = currFrame.data[idx + 2 * planeSize];
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+uint censusDescriptor3x3(float center, int x, int y, bool fromCurr) {
+    uint bits = 0u; int bit = 0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            float nb = fromCurr ? loadCurrY(x + dx, y + dy) : loadPrevY(x + dx, y + dy);
+            bits |= ((nb < center) ? 1u : 0u) << bit;
+            bit++;
+        }
+    }
+    return bits;
+}
+
+uint hammingDist(uint a, uint b) { return bitCount(a ^ b); }
+
+ivec2 loadFwdMV(int bx, int by) {
+    bx = clamp(bx, 0, int(p.coarseMvWidth)  - 1);
+    by = clamp(by, 0, int(p.coarseMvHeight) - 1);
+    int idx = (by * int(p.coarseMvWidth) + bx) * 2;
+    return ivec2(fwdMV.data[idx], fwdMV.data[idx + 1]);
+}
+
+uint loadFlag(int bx, int by) {
+    bx = clamp(bx, 0, int(p.coarseMvWidth)  - 1);
+    by = clamp(by, 0, int(p.coarseMvHeight) - 1);
+    return flagBuf.data[by * int(p.coarseMvWidth) + bx];
+}
+
+void storeFineMV(int fbx, int fby, ivec2 v) {
+    uint fineW = p.coarseMvWidth * 2u;
+    int idx = (fby * int(fineW) + fbx) * 2;
+    outFineMV.data[idx]     = v.x;
+    outFineMV.data[idx + 1] = v.y;
+}
+
+void main() {
+    uint fineBx = gl_GlobalInvocationID.x;
+    uint fineBy = gl_GlobalInvocationID.y;
+    uint fineW = p.coarseMvWidth  * 2u;
+    uint fineH = p.coarseMvHeight * 2u;
+    if (fineBx >= fineW || fineBy >= fineH) return;
+
+    // Parent 8×8 block.
+    int parentBx = int(fineBx) / 2;
+    int parentBy = int(fineBy) / 2;
+    ivec2 parentMV_Q1 = loadFwdMV(parentBx, parentBy);
+
+    // Early-out: if parent not flagged, just copy parent MV.
+    uint needRefine = loadFlag(parentBx, parentBy);
+    if (needRefine == 0u) {
+        storeFineMV(int(fineBx), int(fineBy), parentMV_Q1);
+        return;
+    }
+
+    // 4×4 block center: half of coarse blockSize (= 4) shift inside parent.
+    int fineBlockSize = int(p.coarseBlockSize) / 2;  // 4
+    ivec2 fineCenter = ivec2(int(fineBx) * fineBlockSize + fineBlockSize / 2,
+                             int(fineBy) * fineBlockSize + fineBlockSize / 2);
+    int halfSample = (SAMPLE_COUNT * SAMPLE_STRIDE) / 2;  // 3
+    fineCenter = clamp(fineCenter,
+                       ivec2(halfSample + 4, halfSample + 4),
+                       ivec2(int(p.frameWidth) - halfSample - 5,
+                             int(p.frameHeight) - halfSample - 5));
+
+    // Build curr census cache.
+    uint currCensusCache[SAMPLE_COUNT * SAMPLE_COUNT];
+    for (int y = 0; y < SAMPLE_COUNT; y++) {
+        for (int x = 0; x < SAMPLE_COUNT; x++) {
+            int sx = fineCenter.x + (x * SAMPLE_STRIDE - halfSample);
+            int sy = fineCenter.y + (y * SAMPLE_STRIDE - halfSample);
+            sx = clamp(sx, 0, int(p.frameWidth)  - 1);
+            sy = clamp(sy, 0, int(p.frameHeight) - 1);
+            float c = loadCurrY(sx, sy);
+            currCensusCache[y * SAMPLE_COUNT + x] = censusDescriptor3x3(c, sx, sy, true);
+        }
+    }
+
+    // Initial guess = parent integer MV.
+    ivec2 fwdMV_int = ivec2(
+        (parentMV_Q1.x >= 0 ? parentMV_Q1.x + 1 : parentMV_Q1.x - 1) / 2,
+        (parentMV_Q1.y >= 0 ? parentMV_Q1.y + 1 : parentMV_Q1.y - 1) / 2
+    );
+    ivec2 bestMV = fwdMV_int;
+    float bestCost = 1e9;
+
+    // Cost helper at given mv offset (in prev frame, refCenter = fineCenter + mv).
+    // (NB: forward ME convention — search in prev for curr.)
+    const ivec2 searchPattern[8] = ivec2[8](
+        ivec2(0,-1), ivec2(0,1), ivec2(-1,0), ivec2(1,0),
+        ivec2(-1,-1), ivec2(1,-1), ivec2(-1,1), ivec2(1,1)
+    );
+
+    // Initial cost at parent's guess.
+    {
+        ivec2 refCenter = fineCenter + bestMV;
+        if (all(greaterThanEqual(refCenter, ivec2(halfSample, halfSample))) &&
+            all(lessThan(refCenter,
+                         ivec2(int(p.frameWidth)  - halfSample,
+                               int(p.frameHeight) - halfSample)))) {
+            float cost = 0.0;
+            for (int y = 0; y < SAMPLE_COUNT; y++) {
+                for (int x = 0; x < SAMPLE_COUNT; x++) {
+                    int sx = refCenter.x + (x * SAMPLE_STRIDE - halfSample);
+                    int sy = refCenter.y + (y * SAMPLE_STRIDE - halfSample);
+                    sx = clamp(sx, 0, int(p.frameWidth)  - 1);
+                    sy = clamp(sy, 0, int(p.frameHeight) - 1);
+                    float c = loadPrevY(sx, sy);
+                    uint d = censusDescriptor3x3(c, sx, sy, false);
+                    cost += float(hammingDist(d, currCensusCache[y * SAMPLE_COUNT + x]));
+                }
+            }
+            bestCost = cost;
+        }
+    }
+
+    // ±2 px diamond [2,1] = 16 candidates max.
+    const int LOCAL_STEPS[2] = int[2](2, 1);
+    float prevStepBest = bestCost;
+    for (int si = 0; si < 2; si++) {
+        int step = LOCAL_STEPS[si];
+        ivec2 prevBestMV = bestMV;
+        for (int i = 0; i < 8; i++) {
+            ivec2 candidate = prevBestMV + searchPattern[i] * step;
+            ivec2 refCenter = fineCenter + candidate;
+            if (any(lessThan(refCenter, ivec2(halfSample, halfSample))) ||
+                any(greaterThanEqual(refCenter,
+                                      ivec2(int(p.frameWidth)  - halfSample,
+                                            int(p.frameHeight) - halfSample))))
+                continue;
+            float cost = 0.0;
+            bool aborted = false;
+            for (int y = 0; y < SAMPLE_COUNT && !aborted; y++) {
+                for (int x = 0; x < SAMPLE_COUNT; x++) {
+                    int sx = refCenter.x + (x * SAMPLE_STRIDE - halfSample);
+                    int sy = refCenter.y + (y * SAMPLE_STRIDE - halfSample);
+                    sx = clamp(sx, 0, int(p.frameWidth)  - 1);
+                    sy = clamp(sy, 0, int(p.frameHeight) - 1);
+                    float c = loadPrevY(sx, sy);
+                    uint d = censusDescriptor3x3(c, sx, sy, false);
+                    cost += float(hammingDist(d, currCensusCache[y * SAMPLE_COUNT + x]));
+                }
+                if (cost >= bestCost) { aborted = true; break; }
+            }
+            if (!aborted && cost < bestCost) {
+                bestCost = cost;
+                bestMV = candidate;
+            }
+        }
+        if (bestCost >= prevStepBest) break;
+        prevStepBest = bestCost;
+    }
+
+    // Store Q1 (×2 integer).
+    ivec2 bestMV_Q1 = clamp(bestMV * 2, ivec2(-96, -96), ivec2(96, 96));
+    storeFineMV(int(fineBx), int(fineBy), bestMV_Q1);
+}
+)GLSL";
+
 // MV median 3×3 filter shader.
 // Source: d3d11_mv_median.hlsl (no quality variants).
 const char* kFrucMvMedianShaderGlsl = R"GLSL(
@@ -1892,6 +2173,12 @@ layout(binding = 4) readonly  buffer PrevMV  { int   data[]; } prevMotionField;
 // stored = +motion). 用於真 bidirectional consistency check (occlusion mask).
 // hasBackwardMv=1 啟用; hasBackwardMv=0 stub-綁同 PrevMV buffer.
 layout(binding = 5) readonly  buffer BwdMV   { int   data[]; } backwardMotionField;
+// §J.3.e.2.i.19 (v1.4.83) Phase B — 4×4 fine MV (mvW*2 × mvH*2). 只在
+// flagged block 有 refined MV;其餘 block fine buf 含 parent 8×8 MV (從 fine
+// shader 直接 copy).  hasFineMv=1 啟用; =0 stub-綁同 fwdMV (binding 2).
+layout(binding = 6) readonly  buffer FineMV     { int  data[]; } fineMotionField;
+// §J.3.e.2.i.19 (v1.4.83) Phase B — needRefine flag (1 uint per 8×8 block).
+layout(binding = 7) readonly  buffer FlagBuf    { uint data[]; } refineFlagBuf;
 
 layout(push_constant) uniform Params {
     uint  frameWidth;
@@ -1912,8 +2199,11 @@ layout(push_constant) uniform Params {
     // 啟用 temporal-coherence fade.
     uint  hasTemporalMv;
     // §J.3.e.2.i.17 (v1.4.82) — 1 = backward MV buffer (binding 5) 真實有效,
-    // 啟用 occlusion-mask fade. push const 36 byte total (8 uints + 1 float).
+    // 啟用 occlusion-mask fade.
     uint  hasBackwardMv;
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — 1 = fine MV + flag buffer 真實有效,
+    // sampleMV 在 flagged block 走 4×4 fine 路徑. push const 40 byte total.
+    uint  hasFineMv;
 } p;
 
 vec3 fetchPrevRGB(int x, int y) {
@@ -2000,7 +2290,38 @@ vec2 sampleBwdMV(vec2 pixelPos) {
     return vec2(loadBwdMVRaw(bp.x, bp.y)) * 0.5;
 }
 
+// §J.3.e.2.i.19 (v1.4.83) Phase B — Fine 4×4 MV sample (nearest, no bilinear
+// since fine block 已是 4×4 already half coarse).  Caller checks needRefine
+// flag at parent 8×8 first.  Returned in pixel units (Q1→float / 2).
+vec2 sampleFineMV(vec2 pixelPos) {
+    float fineBs = float(p.mvBlockSize) * 0.5;  // 4
+    ivec2 fineIdx = ivec2(floor(pixelPos / fineBs));
+    int fineW = int(p.mvWidth)  * 2;
+    int fineH = int(p.mvHeight) * 2;
+    fineIdx = clamp(fineIdx, ivec2(0, 0), ivec2(fineW - 1, fineH - 1));
+    int idx = (fineIdx.y * fineW + fineIdx.x) * 2;
+    return vec2(fineMotionField.data[idx], fineMotionField.data[idx + 1]) * 0.5;
+}
+uint loadRefineFlag(int bx, int by) {
+    bx = clamp(bx, 0, int(p.mvWidth)  - 1);
+    by = clamp(by, 0, int(p.mvHeight) - 1);
+    return refineFlagBuf.data[by * int(p.mvWidth) + bx];
+}
+
 vec2 sampleMV(vec2 pixelPos) {
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — fine path on flagged blocks.
+    // Trade-off: nearest-neighbor fine sample loses bilinear smoothness, but
+    // 4-pixel granularity reduces edge mosaic substantially in flagged regions.
+    if (p.hasFineMv != 0u) {
+        float bs = float(p.mvBlockSize);
+        ivec2 parentIdx = ivec2(floor(pixelPos / bs));
+        parentIdx = clamp(parentIdx, ivec2(0, 0),
+                          ivec2(int(p.mvWidth) - 1, int(p.mvHeight) - 1));
+        if (loadRefineFlag(parentIdx.x, parentIdx.y) != 0u) {
+            return sampleFineMV(pixelPos);
+        }
+    }
+    // Coarse 8×8 bilinear path (existing v1.4.74 logic).
     float bs = float(p.mvBlockSize);
     vec2 mvPos = pixelPos / bs - 0.5;
     ivec2 mv00 = ivec2(floor(mvPos));
@@ -4343,11 +4664,11 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
 
     VkShaderModule warpMod = VK_NULL_HANDLE; VkDescriptorSetLayout warpDsl = VK_NULL_HANDLE;
     VkPipelineLayout warpPL = VK_NULL_HANDLE; VkPipeline warpPipe = VK_NULL_HANDLE;
-    // §J.3.e.2.i.17 (v1.4.82) — Warp bumped 5→6 bindings (binding 5 = bwdMV).
-    // Push const 32→36 byte (added uint hasBackwardMv).  plvk standalone path
-    // doesn't run backward ME so binding 5 stubs with prevMv buffer + sets
-    // hasBackwardMv=0 in push const → shader skips occlusion fade.
-    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 6, 36, warpMod, warpDsl, warpPL, warpPipe)) {
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — Warp bumped 6→8 bindings (binding 6 =
+    // fineMV, 7 = flag buf). Push const 36→40 byte (added uint hasFineMv).
+    // plvk path doesn't run fine ME so binding 6/7 stub-綁 mvF/prevMv +
+    // hasFineMv=0 — shader skips fine path.
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 8, 40, warpMod, warpDsl, warpPL, warpPipe)) {
         m_FrucGenericDisabled = true; return false;
     }
     m_FrucWarpShaderMod = warpMod; m_FrucWarpDsl = warpDsl; m_FrucWarpPipeLay = warpPL; m_FrucWarpPipeline = warpPipe;
@@ -4405,11 +4726,11 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
     m_FrucPrevMvBuf = prevMv;          m_FrucPrevMvMem = prevMvMem;
     m_FrucInterpRgbBuf = interpRgb;    m_FrucInterpRgbMem = interpRgbMem;
 
-    // === Descriptor pool: 3 sets × varying bindings = 4+2+6 = 12 storage-buffer descriptors ===
-    // §J.3.e.2.i.17 (v1.4.82) — warp bumped 5→6 bindings (+1 descriptor).
+    // === Descriptor pool: 3 sets × varying bindings = 4+2+8 = 14 storage-buffer descriptors ===
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — warp bumped 6→8 bindings (+2 descriptors).
     VkDescriptorPoolSize pSize = {};
     pSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pSize.descriptorCount = 12;
+    pSize.descriptorCount = 14;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpCi.maxSets = 3;
@@ -4454,12 +4775,13 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
     VkDescriptorSet meDs = VK_NULL_HANDLE, medDs = VK_NULL_HANDLE, warpDs = VK_NULL_HANDLE;
     // ME bindings: 0 prevRgb, 1 currRgb (alias bufRGB), 2 prevMv, 3 outMv
     // Warp bindings: 0 prevRgb, 1 currRgb, 2 mvFiltered, 3 interpRgb,
-    //               4 prevMv (§J.3.e.2.i.15 v1.4.80 — temporal coherence),
-    //               5 bwdMv (§J.3.e.2.i.17 v1.4.82 — stub-bound to prevMv
-    //                        since plvk path 不跑 backward ME, hasBackwardMv=0).
+    //               4 prevMv (v1.4.80 temporal), 5 bwdMv (v1.4.82 stub-prevMv),
+    //               6 fineMv (v1.4.83 stub-mvF), 7 refineFlag (v1.4.83 stub-mvF).
+    // plvk standalone path: hasBackwardMv=0 + hasFineMv=0 → shader skips both
+    // fine and occlusion paths; stub buffers OK since not read.
     if (!allocAndUpdateSet(meDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, prevMv, mv }, meDs)
         || !allocAndUpdateSet(medDsl, { mv, mvF }, medDs)
-        || !allocAndUpdateSet(warpDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, mvF, interpRgb, prevMv, prevMv }, warpDs)) {
+        || !allocAndUpdateSet(warpDsl, { prevRgb, (VkBuffer)m_FrucNv12RgbBufRGB, mvF, interpRgb, prevMv, prevMv, mvF, mvF }, warpDs)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VK-FRUC] §J.3.e.2.h.c init: descriptor set alloc/update failed");
         m_FrucGenericDisabled = true;
@@ -4666,16 +4988,18 @@ bool PlVkRenderer::runFrucGenericComputePass(uint32_t width, uint32_t height)
     VkDescriptorSet warpDs = (VkDescriptorSet)m_FrucWarpDescSet;
     pfnBindDS(cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)m_FrucWarpPipeLay,
               0, 1, &warpDs, 0, nullptr);
-    // §J.3.e.2.i.17 (v1.4.82) — push const 36-byte layout. hasBackwardMv=0
-    // (plvk path doesn't run backward ME, binding 5 is stubbed to prevMv).
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — push const 40-byte layout.  plvk path:
+    // hasTemporalMv=1 (mvFiltered→prevMv copy exists), hasBackwardMv=0,
+    // hasFineMv=0 (no fine ME pipeline on plvk standalone path).
     struct WarpPc {
         uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
         float    blendFactor;
         float    tFraction;
         uint32_t hasTemporalMv;
         uint32_t hasBackwardMv;
+        uint32_t hasFineMv;
     } warpPc = { width, height, 8, m_FrucGenericMvWidth, m_FrucGenericMvHeight,
-                 0.5f, 0.5f, 1u, 0u };
+                 0.5f, 0.5f, 1u, 0u, 0u };
     pfnPushC(cb, (VkPipelineLayout)m_FrucWarpPipeLay,
              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(warpPc), &warpPc);
     pfnDispatch(cb, (width + 7) / 8, (height + 7) / 8, 1);

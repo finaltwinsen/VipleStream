@@ -5718,7 +5718,9 @@ void VkFrucRenderer::destroySwUploadResources()
 // Forward declarations — defined in plvk.cpp (external linkage; not
 // `static`).  Use C++ linkage to match the definitions there.
 extern const char* kFrucMotionEstShaderGlsl;
-extern const char* kFrucMotionEstBackwardShaderGlsl;  // §J.3.e.2.i.17 v1.4.82
+extern const char* kFrucMotionEstBackwardShaderGlsl;     // §J.3.e.2.i.17 v1.4.82
+extern const char* kFrucMvUncertaintyFlagShaderGlsl;     // §J.3.e.2.i.19 v1.4.83
+extern const char* kFrucMotionEstFine4x4ShaderGlsl;      // §J.3.e.2.i.19 v1.4.83
 extern const char* kFrucMvMedianShaderGlsl;
 extern const char* kFrucWarpShaderGlsl;
 
@@ -6298,10 +6300,21 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                         m_FrucMeBackwardPipeLay, m_FrucMeBackwardPipeline)) {
         m_FrucDisabled = true; return false;
     }
-    // §J.3.e.2.i.17 (v1.4.82) — Warp bumped 5→6 bindings (binding 4=prevMV
-    // for temporal, 5=bwdMV for occlusion). Push const 32→36 byte (added uint
-    // hasBackwardMv).
-    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 6, 36,
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — Uncertainty flag pre-pass (3 bind, 16 byte pc).
+    if (!buildPipeline("Flag", kFrucMvUncertaintyFlagShaderGlsl, 3, 16,
+                        m_FrucFlagShaderMod, m_FrucFlagDsl,
+                        m_FrucFlagPipeLay, m_FrucFlagPipeline)) {
+        m_FrucDisabled = true; return false;
+    }
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — 4×4 fine ME (5 bind, 24 byte pc).
+    if (!buildPipeline("Fine4x4", kFrucMotionEstFine4x4ShaderGlsl, 5, 24,
+                        m_FrucFine4x4ShaderMod, m_FrucFine4x4Dsl,
+                        m_FrucFine4x4PipeLay, m_FrucFine4x4Pipeline)) {
+        m_FrucDisabled = true; return false;
+    }
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — Warp bumped 6→8 bindings (binding 6 =
+    // fineMV, binding 7 = flag buf). Push const 36→40 byte (added uint hasFineMv).
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 8, 40,
                         m_FrucWarpShaderMod, m_FrucWarpDsl, m_FrucWarpPipeLay, m_FrucWarpPipeline)) {
         m_FrucDisabled = true; return false;
     }
@@ -6460,6 +6473,14 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                      m_FrucMvBackwardBuf, m_FrucMvBackwardBufMem)
         || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                      m_FrucMvBackwardFilteredBuf, m_FrucMvBackwardFilteredMem)
+        // §J.3.e.2.i.19 (v1.4.83) Phase B — uncertainty flag buf (1 uint per
+        // 8×8 block) + fine MV buf (4× sizeMV at fine 4×4 resolution).
+        || !allocBuf((VkDeviceSize)mvW * mvH * sizeof(uint32_t),
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_FrucRefineFlagBuf, m_FrucRefineFlagBufMem)
+        || !allocBuf((VkDeviceSize)mvW * 2 * mvH * 2 * 2 * sizeof(int),
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     m_FrucMvFineBuf, m_FrucMvFineBufMem)
         || !allocBuf(sizeMV, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                      m_FrucPrevMvBuf, m_FrucPrevMvMem)
         // §B-DUMP needs TRANSFER_SRC for vkCmdCopyBuffer interp → staging.
@@ -6514,10 +6535,12 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // §J.3.e.2.i.15 (v1.4.80) — warp 2 sets each bumped 4→5 bindings = +2 desc.
     // §J.3.e.2.i.17 (v1.4.82) — +2 sets (MeBackward 4 bind + MedianBackward 2
     // bind = 6 desc) + warp sets each bumped 5→6 bindings (+2 desc) = +8 desc.
-    pSize.descriptorCount = 45;
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — +2 sets (Flag 3 bind + Fine4x4 5 bind
+    // = 8 desc) + warp sets each bumped 6→8 bindings (+4 desc) = +12 desc.
+    pSize.descriptorCount = 57;
     VkDescriptorPoolCreateInfo dpCi = {};
     dpCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpCi.maxSets = 15;
+    dpCi.maxSets = 17;
     dpCi.poolSizeCount = 1;
     dpCi.pPoolSizes = &pSize;
     if (pfnCreateDescPool(m_Device, &dpCi, nullptr, &m_FrucDescPool) != VK_SUCCESS) {
@@ -6583,18 +6606,30 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         || !allocAndUpdateSet(m_FrucMedianDsl,
                               { m_FrucMvBackwardBuf, m_FrucMvBackwardFilteredBuf },
                               m_FrucMedianBackwardDescSet)
-        // §J.3.e.2.i.17 (v1.4.82) — Warp now has 6 bindings:
-        //   4 = m_FrucPrevMvBuf (temporal coherence)
-        //   5 = m_FrucMvBackwardFilteredBuf (occlusion mask)
+        // §J.3.e.2.i.19 (v1.4.83) Phase B — Flag pre-pass desc set:
+        //   0 = fwdMV (filtered), 1 = bwdMV (filtered), 2 = flag buf out
+        || !allocAndUpdateSet(m_FrucFlagDsl,
+                              { m_FrucMvFilteredBuf, m_FrucMvBackwardFilteredBuf, m_FrucRefineFlagBuf },
+                              m_FrucFlagDescSet)
+        // §J.3.e.2.i.19 (v1.4.83) Phase B — Fine 4×4 ME desc set:
+        //   0 = prevRGB, 1 = currRGB, 2 = fwdMV (filtered, parent),
+        //   3 = flag buf, 4 = fine MV out
+        || !allocAndUpdateSet(m_FrucFine4x4Dsl,
+                              { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf,
+                                m_FrucRefineFlagBuf, m_FrucMvFineBuf },
+                              m_FrucFine4x4DescSet)
+        // §J.3.e.2.i.19 (v1.4.83) Phase B — Warp now has 8 bindings:
+        //   4 = prevMv (temporal), 5 = bwdMv (occlusion),
+        //   6 = fineMv (4×4 refined), 7 = refineFlag (parent gate)
         || !allocAndUpdateSet(m_FrucWarpDsl,
                               { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf,
-                                m_FrucInterpRgbBuf, m_FrucPrevMvBuf, m_FrucMvBackwardFilteredBuf },
+                                m_FrucInterpRgbBuf, m_FrucPrevMvBuf, m_FrucMvBackwardFilteredBuf,
+                                m_FrucMvFineBuf, m_FrucRefineFlagBuf },
                               m_FrucWarpDescSet)
-        // §B2 2026-05-06 — TRIPLE 第二份 warp desc set，output binding 3
-        // → m_FrucInterpRgbBuf2，其它 binding 不變.
         || !allocAndUpdateSet(m_FrucWarpDsl,
                               { m_FrucPrevRgbBuf, m_FrucCurrRgbBuf, m_FrucMvFilteredBuf,
-                                m_FrucInterpRgbBuf2, m_FrucPrevMvBuf, m_FrucMvBackwardFilteredBuf },
+                                m_FrucInterpRgbBuf2, m_FrucPrevMvBuf, m_FrucMvBackwardFilteredBuf,
+                                m_FrucMvFineBuf, m_FrucRefineFlagBuf },
                               m_FrucWarpDescSet2)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.4 init: descriptor set alloc/update failed");
@@ -6804,6 +6839,11 @@ void VkFrucRenderer::destroyFrucComputeResources()
     // §J.3.e.2.i.17 (v1.4.82) — Backward ME pipeline
     DESTROY_PIPE(m_FrucMeBackwardPipeline, m_FrucMeBackwardPipeLay,
                  m_FrucMeBackwardDsl,      m_FrucMeBackwardShaderMod)
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — flag + fine4x4 pipelines
+    DESTROY_PIPE(m_FrucFlagPipeline,    m_FrucFlagPipeLay,
+                 m_FrucFlagDsl,         m_FrucFlagShaderMod)
+    DESTROY_PIPE(m_FrucFine4x4Pipeline, m_FrucFine4x4PipeLay,
+                 m_FrucFine4x4Dsl,      m_FrucFine4x4ShaderMod)
     // §J.3.e.X Path β.4
     DESTROY_PIPE(m_RifeBilinearPipeline, m_RifeBilinearPipeLay,
                  m_RifeBilinearDsl,      m_RifeBilinearShaderMod)
@@ -6825,6 +6865,9 @@ void VkFrucRenderer::destroyFrucComputeResources()
     // §J.3.e.2.i.17 (v1.4.82)
     DESTROY_BUF(m_FrucMvBackwardBuf,         m_FrucMvBackwardBufMem)
     DESTROY_BUF(m_FrucMvBackwardFilteredBuf, m_FrucMvBackwardFilteredMem)
+    // §J.3.e.2.i.19 (v1.4.83) Phase B
+    DESTROY_BUF(m_FrucRefineFlagBuf, m_FrucRefineFlagBufMem)
+    DESTROY_BUF(m_FrucMvFineBuf,     m_FrucMvFineBufMem)
     DESTROY_BUF(m_FrucInterpRgbBuf,  m_FrucInterpRgbMem)
     // §B2 2026-05-06 — TRIPLE 第二份 interp output buffer.
     DESTROY_BUF(m_FrucInterpRgbBuf2, m_FrucInterpRgbBuf2Mem)
@@ -8207,7 +8250,40 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
     computeBufBarrier(m_FrucMvBackwardFilteredBuf);
 
-    // §J.3.g v2 ts[3] — after Median (copy mode) barrier
+    // ---- Stage 2c: Phase B uncertainty flag pre-pass (§J.3.e.2.i.19, v1.4.83) ----
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFlagPipeline);
+    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFlagPipeLay,
+                       0, 1, &m_FrucFlagDescSet, 0, nullptr);
+    {
+        struct {
+            uint32_t mvWidth, mvHeight, _pad0, _pad1;
+        } pcFlag = { mvW, mvH, 0, 0 };
+        pfnCmdPushConst(cmd, m_FrucFlagPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                        0, sizeof(pcFlag), &pcFlag);
+    }
+    pfnCmdDispatch(cmd, (mvW + 7) / 8, (mvH + 7) / 8, 1);
+    computeBufBarrier(m_FrucRefineFlagBuf);
+
+    // ---- Stage 2d: Phase B 4×4 fine ME (§J.3.e.2.i.19, v1.4.83) ----
+    // Dispatch grid = fine resolution (mvW*2 × mvH*2).  threads early-out if
+    // parent not flagged (just copy parent MV).
+    pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFine4x4Pipeline);
+    pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucFine4x4PipeLay,
+                       0, 1, &m_FrucFine4x4DescSet, 0, nullptr);
+    {
+        struct {
+            uint32_t frameWidth, frameHeight, coarseBlockSize, coarseMvWidth, coarseMvHeight, _pad0;
+        } pcFine = {
+            (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
+            (uint32_t)mvW, (uint32_t)mvH, 0
+        };
+        pfnCmdPushConst(cmd, m_FrucFine4x4PipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
+                        0, sizeof(pcFine), &pcFine);
+    }
+    pfnCmdDispatch(cmd, (mvW * 2 + 7) / 8, (mvH * 2 + 7) / 8, 1);
+    computeBufBarrier(m_FrucMvFineBuf);
+
+    // §J.3.g v2 ts[3] — after all Stage-2 work (median fwd + median bwd + flag + fine4x4)
     if (m_FrucTimerPool && pfnCmdWriteTimestamp) {
         pfnCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                              m_FrucTimerPool, timerBase + 3);
@@ -8253,20 +8329,18 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeline);
         pfnCmdBindDescSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucWarpPipeLay,
                            0, 1, &descSet, 0, nullptr);
-        // §J.3.e.2.i.17 (v1.4.82) — push const expanded 32→36 byte. Adds
-        // uint hasBackwardMv at end. 9 fields × 4 byte = 36.
-        // Both temporal AND backward fade active in this pipeline; the two
-        // detectors target different failure modes (temporal: cross-frame
-        // motion change; backward: in-frame occlusion).
+        // §J.3.e.2.i.19 (v1.4.83) Phase B — push const 36→40 byte (added uint
+        // hasFineMv).  10 fields × 4 byte = 40.  hasFineMv=1 — fine path active.
         struct {
             uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
             float    blendFactor;
             float    tFraction;
             uint32_t hasTemporalMv;
             uint32_t hasBackwardMv;
+            uint32_t hasFineMv;
         } pcWarp = {
             (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
-            (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac, 1u, 1u
+            (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac, 1u, 1u, 1u
         };
         pfnCmdPushConst(cmd, m_FrucWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
                         0, sizeof(pcWarp), &pcWarp);

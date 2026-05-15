@@ -955,6 +955,18 @@ private:
     VkDescriptorSet       m_FrucMeBackwardDescSet     = VK_NULL_HANDLE;
     VkDescriptorSet       m_FrucMedianBackwardDescSet = VK_NULL_HANDLE;
 
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — uncertainty flag + 4×4 fine ME pipelines.
+    VkShaderModule        m_FrucFlagShaderMod    = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_FrucFlagDsl          = VK_NULL_HANDLE;
+    VkPipelineLayout      m_FrucFlagPipeLay      = VK_NULL_HANDLE;
+    VkPipeline            m_FrucFlagPipeline     = VK_NULL_HANDLE;
+    VkDescriptorSet       m_FrucFlagDescSet      = VK_NULL_HANDLE;
+    VkShaderModule        m_FrucFine4x4ShaderMod = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_FrucFine4x4Dsl       = VK_NULL_HANDLE;
+    VkPipelineLayout      m_FrucFine4x4PipeLay   = VK_NULL_HANDLE;
+    VkPipeline            m_FrucFine4x4Pipeline  = VK_NULL_HANDLE;
+    VkDescriptorSet       m_FrucFine4x4DescSet   = VK_NULL_HANDLE;
+
     // §B-NVOF Phase 5 — SFIXED5→Q1 format converter compute pipeline.
     // Reads m_NvOfFlowStaging (storage buffer copy of m_NvOfFlowImage),
     // 2x2 average + sign-extend + divide-by-16, writes Q1 int2 to
@@ -983,6 +995,11 @@ private:
     VkDeviceMemory m_FrucMvBackwardBufMem      = VK_NULL_HANDLE;
     VkBuffer       m_FrucMvBackwardFilteredBuf = VK_NULL_HANDLE;
     VkDeviceMemory m_FrucMvBackwardFilteredMem = VK_NULL_HANDLE;
+    // §J.3.e.2.i.19 (v1.4.83) Phase B — uncertainty flag buffer + fine MV buffer.
+    VkBuffer       m_FrucRefineFlagBuf         = VK_NULL_HANDLE;  // mvW*mvH uint
+    VkDeviceMemory m_FrucRefineFlagBufMem      = VK_NULL_HANDLE;
+    VkBuffer       m_FrucMvFineBuf             = VK_NULL_HANDLE;  // (mvW*2)*(mvH*2)*2 int
+    VkDeviceMemory m_FrucMvFineBufMem          = VK_NULL_HANDLE;
     VkBuffer       m_FrucInterpRgbBuf  = VK_NULL_HANDLE;
     VkDeviceMemory m_FrucInterpRgbMem  = VK_NULL_HANDLE;
     // §B2 2026-05-06 — TRIPLE 60→180 路徑用第二個 interp buffer (1/3, 2/3 點).
