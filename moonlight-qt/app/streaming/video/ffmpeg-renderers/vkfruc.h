@@ -1233,8 +1233,18 @@ private:
     void uploadPendingOverlay(VkCommandBuffer cmd);  // call before render pass
     void drawOverlayInRenderPass(VkCommandBuffer cmd);  // call inside render pass
     static constexpr uint32_t kOverlayMax = 2;  // matches Overlay::OverlayMax
+    // §J.3.e.2.i.40 (v1.4.104) — overlay image alloc with slack capacity to
+    // avoid frequent vkDeviceWaitIdle on text size flicker.  m_OverlayWidth/
+    // Height 是 logical text size (用 quad NDC + uvMax), m_OverlayCapacityW/
+    // H 是 actual image alloc size (固定 max once).  Resize logic: 第一次
+    // alloc 用 max; subsequent 只 update logical w/h (no realloc, no wait
+    // idle).  唯一 fallback realloc: logical > max (rare, 4K+ overlay text).
+    static constexpr int kOverlayMaxWidth  = 2048;  // ≥ 1080p OSD stats max
+    static constexpr int kOverlayMaxHeight = 512;   // ≥ 2 行字 + padding
     int             m_OverlayWidth [kOverlayMax]    = {};
     int             m_OverlayHeight[kOverlayMax]    = {};
+    int             m_OverlayCapacityW[kOverlayMax] = {};  // image alloc width
+    int             m_OverlayCapacityH[kOverlayMax] = {};  // image alloc height
     int             m_OverlayPitch [kOverlayMax]    = {};
     bool            m_OverlayPending[kOverlayMax]   = {};  // staging has new data
     bool            m_OverlayHasContent[kOverlayMax]= {};  // image has valid content

@@ -3407,7 +3407,8 @@ bool VkFrucRenderer::createOverlayResources()
     // Pipeline layout: 16-byte push const for rect [vec2 min, vec2 max]
     VkPushConstantRange pcRange = {};
     pcRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    pcRange.size = 16;
+    // §J.3.e.2.i.40 (v1.4.104) — 16 → 24 bytes (vec2 rectMin/rectMax/uvMax).
+    pcRange.size = 24;
     VkPipelineLayoutCreateInfo plCi = {};
     plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plCi.setLayoutCount = 1;
@@ -3655,31 +3656,50 @@ void VkFrucRenderer::drainOverlayStash()
         return -1;
     };
 
-    // (Re)alloc image if size mismatched (or first time).
-    if (m_OverlayWidth[type] != w || m_OverlayHeight[type] != h) {
-        // §J.3.e.X Path β crash fix (Aftermath dump 2026-05-08, symbolized
-        // callstack VkFrucRenderer::drawOverlayInRenderPass) — wait for
-        // GPU to finish BEFORE destroying the old overlay image/view.  In
-        // dual-present + Path β path, the chain is 14ms vs block-match 4ms,
-        // so more cmd buffers are in flight per overlay update — multiple
-        // concurrent submits may still reference the old VkImageView via
-        // descriptor sets when surface dimensions change → fragment shader
-        // page-faults on the freed resource → VK_ERROR_DEVICE_LOST after
-        // 30-60s sustained streaming.  Only fires on actual overlay resize
-        // (rare during a stream — typically once at first overlay activation
-        // or when text content changes dim significantly).  Cost: ~1 frame
-        // worth of GPU wait, amortized ~zero per-frame.
-        if (m_OverlayImage[type]) {
+    // §J.3.e.2.i.40 (v1.4.104) — alloc image with slack capacity to avoid
+    // frequent vkDeviceWaitIdle on text size flicker (OSD stats text width
+    // ±12 px ↔ 1 字符寬, 5 分鐘 stream 量到 37 次 resize → 100-228ms decode
+    // spike per resize from vkDeviceWaitIdle 阻塞整個 device).
+    //
+    // 策略: 第一次 alloc 用 kOverlayMaxWidth × kOverlayMaxHeight; 後續 logical
+    // text size 變動但 ≤ cap 直接 reuse, 不 realloc 不 wait idle.  Logical
+    // text 在 image left-top, fragment shader push const uvMax 控制 sample
+    // 範圍 (logical_w/cap_w, logical_h/cap_h) 避免採到 stale padding.
+    //
+    // Realloc 只在 first time 或 logical > cap (rare, 4K+ overlay text) 時
+    // 發生; 後者保留 race-fix vkDeviceWaitIdle (Aftermath dump 2026-05-08,
+    // dual-present + Path β chain 14ms 多 cmd buf in flight 撞 freed view).
+    const bool needRealloc = !m_OverlayImage[type]
+                          || w > m_OverlayCapacityW[type]
+                          || h > m_OverlayCapacityH[type];
+    if (m_OverlayWidth[type] != w || m_OverlayHeight[type] != h || needRealloc) {
+        if (needRealloc && m_OverlayImage[type]) {
+            // Logical 超過 cap (rare) — fallback 老 race-fix path.
             auto pfnDeviceWaitIdle = (PFN_vkDeviceWaitIdle)
                 ((PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr"))
                 (m_Device, "vkDeviceWaitIdle");
             if (pfnDeviceWaitIdle) {
                 pfnDeviceWaitIdle(m_Device);
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC] overlay resize %dx%d → %dx%d — "
-                    "vkDeviceWaitIdle before destroying old image (race fix)",
-                    m_OverlayWidth[type], m_OverlayHeight[type], w, h);
+                    "[VIPLE-VKFRUC] overlay realloc %dx%d (cap %dx%d) → grow to fit %dx%d — "
+                    "vkDeviceWaitIdle before destroying old image (rare path, logical > cap)",
+                    m_OverlayWidth[type], m_OverlayHeight[type],
+                    m_OverlayCapacityW[type], m_OverlayCapacityH[type], w, h);
             }
+        }
+        if (!needRealloc) {
+            // Common path: logical text size 變動但 image cap 夠, 純 update
+            // logical w/h, 不 realloc 不 wait idle.  Staging buffer 重用 (size
+            // 已 cover cap), pitch 仍對 (= w * 4 RGBA), staging copy region
+            // 用 logical w/h.
+            m_OverlayWidth[type] = w;
+            m_OverlayHeight[type] = h;
+            m_OverlayPitch[type] = surface->pitch;
+            // Staging buffer alloc size 是 first-time 的 cap 大小; 新 logical
+            // text size ≤ cap, copy 用 surface->pitch * h ≤ stagingSize, OK.
+            m_OverlayStagingSize[type] = (size_t)surface->pitch * h;
+            // Skip 整段 alloc/view/desc/staging code 直接到 memcpy.
+            goto upload_to_staging;
         }
         // Free old (if any) — now safe since GPU has drained any references.
         if (m_OverlayView[type])  { pfnDestroyView(m_Device, m_OverlayView[type], nullptr);   m_OverlayView[type] = VK_NULL_HANDLE; }
@@ -3689,12 +3709,16 @@ void VkFrucRenderer::drainOverlayStash()
         if (m_OverlayStagingBuf[type]) { pfnDestroyBuffer(m_Device, m_OverlayStagingBuf[type], nullptr); m_OverlayStagingBuf[type] = VK_NULL_HANDLE; }
         if (m_OverlayStagingMem[type]) { pfnFreeMem(m_Device, m_OverlayStagingMem[type], nullptr); m_OverlayStagingMem[type] = VK_NULL_HANDLE; }
 
+        // §J.3.e.2.i.40 (v1.4.104) — alloc image with max(logical, kOverlayMax*)
+        // capacity for slack.  Subsequent text size flicker (≤ cap) reuse 不 realloc.
+        const int capW = (w > kOverlayMaxWidth)  ? w : kOverlayMaxWidth;
+        const int capH = (h > kOverlayMaxHeight) ? h : kOverlayMaxHeight;
         // VkImage RGBA8
         VkImageCreateInfo ici = {};
         ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         ici.imageType = VK_IMAGE_TYPE_2D;
         ici.format = VK_FORMAT_B8G8R8A8_UNORM;  // matches SDL_PIXELFORMAT_ARGB8888 byte order
-        ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+        ici.extent = { (uint32_t)capW, (uint32_t)capH, 1 };
         ici.mipLevels = 1;
         ici.arrayLayers = 1;
         ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -3731,8 +3755,11 @@ void VkFrucRenderer::drainOverlayStash()
             SDL_FreeSurface(surface); return;
         }
 
-        // Staging buffer (host-visible coherent)
-        VkDeviceSize stagingSize = (VkDeviceSize)surface->pitch * h;
+        // Staging buffer (host-visible coherent) — size 用 cap 對應, 不只 logical;
+        // 後續 reuse 時 staging buf 重用, copy region 用 logical w/h.
+        // Pitch 用 capW * 4 (BGRA) for staging layout consistency.
+        const VkDeviceSize stagingPitch = (VkDeviceSize)capW * 4;
+        VkDeviceSize stagingSize = stagingPitch * capH;
         VkBufferCreateInfo bci = {};
         bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bci.size = stagingSize;
@@ -3786,14 +3813,21 @@ void VkFrucRenderer::drainOverlayStash()
 
         m_OverlayWidth[type] = w;
         m_OverlayHeight[type] = h;
+        m_OverlayCapacityW[type] = capW;
+        m_OverlayCapacityH[type] = capH;
         m_OverlayPitch[type] = surface->pitch;
         m_OverlayStagingSize[type] = (size_t)stagingSize;
         m_OverlayLayoutInited[type] = false;  // first cmdCopyBufferToImage will UNDEFINED→DST
     }
 
-        // memcpy surface pixels to staging
+upload_to_staging:
+        // memcpy surface pixels to staging.  §J.3.e.2.i.40 (v1.4.104) — copy
+        // size 用 logical (surface->pitch * h), 不 cap; staging buffer 內超出
+        // logical 區域是 stale 但 vkCmdCopyBufferToImage region 也用 logical
+        // 不 copy 到 image 內, OK.
         if (m_OverlayStagingMapped[type] && surface->pixels) {
-            memcpy(m_OverlayStagingMapped[type], surface->pixels, m_OverlayStagingSize[type]);
+            const size_t logicalCopyBytes = (size_t)surface->pitch * surface->h;
+            memcpy(m_OverlayStagingMapped[type], surface->pixels, logicalCopyBytes);
             m_OverlayPending[type] = true;
             m_OverlayHasContent[type] = true;
         }
@@ -3892,7 +3926,21 @@ void VkFrucRenderer::drawOverlayInRenderPass(VkCommandBuffer cmd)
         m_RtPfn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                        m_OverlayPipelineLayout, 0,
                                        1, &m_OverlayDescSet[type], 0, nullptr);
-        struct { float xMin, yMin, xMax, yMax; } pcRect = { xMin, yMin, xMax, yMax };
+        // §J.3.e.2.i.40 (v1.4.104) — uvMax 是 logical / capacity 比例, 限制
+        // shader sample 範圍只到 image 內 logical text area, 避免採到 stale
+        // padding (image alloc with slack capacity, text 在 left-top).
+        // First-time alloc capacity 可能 = logical (no slack), uvMax=(1,1).
+        const float capW = (float)((m_OverlayCapacityW[type] > 0)
+                                   ? m_OverlayCapacityW[type] : m_OverlayWidth[type]);
+        const float capH = (float)((m_OverlayCapacityH[type] > 0)
+                                   ? m_OverlayCapacityH[type] : m_OverlayHeight[type]);
+        struct {
+            float xMin, yMin, xMax, yMax;
+            float uvMaxX, uvMaxY;
+        } pcRect = {
+            xMin, yMin, xMax, yMax,
+            ow / capW, oh / capH,
+        };
         if (pfnCmdPushConstants) {
             pfnCmdPushConstants(cmd, m_OverlayPipelineLayout,
                                 VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pcRect), &pcRect);
