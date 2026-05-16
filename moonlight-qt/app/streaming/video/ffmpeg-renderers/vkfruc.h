@@ -604,6 +604,18 @@ private:
     int                m_FramesAboveThreshold   = 0;
     int                m_FramesBelowThreshold   = 0;
 
+    // §J.3.e.2.i.41 (v1.4.105) — chain_level autotier 二次降階.
+    // 純 TRIPLE→DUAL (v1.4.84) 在 1080p60 高動 game content 下不夠救;
+    // chain compute 本身要降才能跟上 server rate. 偵測 DUAL 期間 mean
+    // > 8ms 連 30 幀 → effective level 由 s_FrucLevel 上限往下掉
+    // (3→2→1, 卸 Phase B 4×4 ME / bidirectional ME). 反向: mean
+    // < 2.5ms 連 60 幀升回, 直到回到 s_FrucLevel.
+    // sentinel -1: 第一個 chain frame 時從 env var s_FrucLevel 初始化.
+    std::atomic<int>   m_EffectiveChainLevel{-1};
+    int                m_InitialChainLevel              = -1;
+    int                m_FramesAboveChainLevelThresh    = 0;
+    int                m_FramesBelowChainLevelThresh    = 0;
+
     // §B-DUMP 2026-05-07 — diagnostic frame dump for visual real-vs-interp
     // comparison.  Triggered by VIPLE_VKFRUC_DUMP_DIR=path; copies real /
     // interp_1 / interp_2 RGB compute buffers into host-visible staging

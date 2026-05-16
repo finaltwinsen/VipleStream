@@ -8454,9 +8454,18 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     static const int s_FrucLevel =
         qEnvironmentVariableIsSet("VIPLE_VKFRUC_FRUC_LEVEL")
             ? qEnvironmentVariableIntValue("VIPLE_VKFRUC_FRUC_LEVEL") : 3;
-    const bool levelHasTemporal = (s_FrucLevel >= 1);
-    const bool levelHasBackward = (s_FrucLevel >= 2);
-    const bool levelHasFine4x4  = (s_FrucLevel >= 3);
+    // §J.3.e.2.i.41 (v1.4.105) — chain_level autotier 二次降階.
+    // s_FrucLevel 是 env-var 上限; m_EffectiveChainLevel 是 runtime-dynamic
+    // 值 (autotier 會在 chain mean 持續過高時往下降, 反向 recover).
+    // First-frame init: sentinel <0 → 從 s_FrucLevel 套.
+    if (m_EffectiveChainLevel.load(std::memory_order_relaxed) < 0) {
+        m_InitialChainLevel = s_FrucLevel;
+        m_EffectiveChainLevel.store(s_FrucLevel, std::memory_order_relaxed);
+    }
+    const int currentChainLevel = m_EffectiveChainLevel.load(std::memory_order_relaxed);
+    const bool levelHasTemporal = (currentChainLevel >= 1);
+    const bool levelHasBackward = (currentChainLevel >= 2);
+    const bool levelHasFine4x4  = (currentChainLevel >= 3);
 
     // §J.3.e.2.i.6 / §J.3.g v2 — read PREVIOUS pass's 6 timestamps for THIS
     // slot (fence wait at start of renderFrameSw guarantees GPU finished),
@@ -8515,7 +8524,10 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                             "[VIPLE-VKFRUC-AUTOTIER] TRIPLE → DUAL (chain mean=%.2fms > 5ms 連續 30 幀)",
                             meanMs);
                     }
-                } else if (meanMs < 3.0 && currentlyDowngraded) {
+                } else if (meanMs < 3.0 && currentlyDowngraded
+                           && currentChainLevel >= m_InitialChainLevel) {
+                    // 升回 TRIPLE 條件: chain level 已經回到 env-var 上限 (代表
+                    // chain compute 不是負擔), 且 mean < 3ms 連 60 幀.
                     if (++m_FramesBelowThreshold >= 60) {
                         m_DynamicDualDowngrade.store(false);
                         m_FramesAboveThreshold = 0;
@@ -8528,6 +8540,41 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                     // 反向計數 reset (避免遠端 spike 累積太久觸發誤切)
                     if (meanMs <= 5.0) m_FramesAboveThreshold = 0;
                     if (meanMs >= 3.0) m_FramesBelowThreshold = 0;
+                }
+
+                // §J.3.e.2.i.41 (v1.4.105) — chain_level autotier 二次降階.
+                // 已經 DUAL 還是 chain compute 過重 (mean > 8ms 連 30 幀) →
+                // 把 effective chain_level 從 3→2→1, 卸 Phase B 4×4 ME /
+                // bidirectional ME 等重活. 反向: mean < 2.5ms 連 60 幀升回.
+                // 只在 DUAL 期間 active (避免 TRIPLE 期間 chain level 降跟
+                // TRIPLE→DUAL 同時觸發, 抖動太快).
+                if (currentlyDowngraded) {
+                    if (meanMs > 8.0 && currentChainLevel > 1) {
+                        if (++m_FramesAboveChainLevelThresh >= 30) {
+                            int newLevel = currentChainLevel - 1;
+                            m_EffectiveChainLevel.store(newLevel, std::memory_order_relaxed);
+                            m_FramesAboveChainLevelThresh = 0;
+                            m_FramesBelowChainLevelThresh = 0;
+                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VKFRUC-AUTOTIER] chain_level %d → %d "
+                                "(chain mean=%.2fms > 8ms 連續 30 幀, in DUAL)",
+                                currentChainLevel, newLevel, meanMs);
+                        }
+                    } else if (meanMs < 2.5 && currentChainLevel < m_InitialChainLevel) {
+                        if (++m_FramesBelowChainLevelThresh >= 60) {
+                            int newLevel = currentChainLevel + 1;
+                            m_EffectiveChainLevel.store(newLevel, std::memory_order_relaxed);
+                            m_FramesAboveChainLevelThresh = 0;
+                            m_FramesBelowChainLevelThresh = 0;
+                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VKFRUC-AUTOTIER] chain_level %d → %d "
+                                "(chain mean=%.2fms < 2.5ms 連續 60 幀)",
+                                currentChainLevel, newLevel, meanMs);
+                        }
+                    } else {
+                        if (meanMs <= 8.0) m_FramesAboveChainLevelThresh = 0;
+                        if (meanMs >= 2.5) m_FramesBelowChainLevelThresh = 0;
+                    }
                 }
             } else if (s_DynamicTierMode == 0) {
                 m_DynamicDualDowngrade.store(false);
