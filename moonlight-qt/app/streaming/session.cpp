@@ -1688,6 +1688,24 @@ void Session::updateOptimalWindowDisplayMode()
     SDL_SetWindowDisplayMode(m_Window, &bestMode);
 }
 
+void Session::cancelFileTransfer()
+{
+    // §N.6 (v1.4.103) — in-session keystroke (Ctrl+Alt+Shift+T) hook.
+    // Web UI 重新整理 / 等 stream 結束本來就能中止 transfer; 本路徑加快 user
+    // 工作流程, 不必離開 stream session 切 Web UI.  m_FileTransferClient 在
+    // session 啟動時 alloc (line 2241), stream 結束 stopAndFreeRendererStuff()
+    // 內 stop+deleteLater (line 1435-1438).  null check 因 transfer client
+    // 可能尚未 init 或已 teardown.
+    if (m_FileTransferClient) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XFER] cancelFileTransfer hotkey invoked");
+        m_FileTransferClient->cancelCurrent();
+    } else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XFER] cancelFileTransfer hotkey: no active client");
+    }
+}
+
 void Session::toggleFRUC()
 {
     if (m_VideoDecoder) {

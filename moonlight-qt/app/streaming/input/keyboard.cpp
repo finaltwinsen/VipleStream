@@ -159,6 +159,13 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
         Session::get()->toggleFRUC();
         break;
 
+    case KeyComboCancelTransfer:
+        // §N.6 (v1.4.103) — Ctrl+Alt+Shift+T cancel current file transfer.
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XFER] Detected cancel transfer combo (Ctrl+Alt+Shift+T)");
+        Session::get()->cancelFileTransfer();
+        break;
+
     default:
         Q_UNREACHABLE();
     }

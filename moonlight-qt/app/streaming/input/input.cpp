@@ -121,6 +121,14 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     m_SpecialKeyCombos[KeyComboToggleFRUC].scanCode = SDL_SCANCODE_F;
     m_SpecialKeyCombos[KeyComboToggleFRUC].enabled = true;
 
+    // §N.6 (v1.4.103) — Ctrl+Alt+Shift+T: in-session cancel current file
+    // transfer (TODO.md 原寫 +X 但 X 已被 KeyComboToggleFullScreen 用,
+    // 改 T for Transfer cancel).
+    m_SpecialKeyCombos[KeyComboCancelTransfer].keyCombo = KeyComboCancelTransfer;
+    m_SpecialKeyCombos[KeyComboCancelTransfer].keyCode = SDLK_t;
+    m_SpecialKeyCombos[KeyComboCancelTransfer].scanCode = SDL_SCANCODE_T;
+    m_SpecialKeyCombos[KeyComboCancelTransfer].enabled = true;
+
     m_OldIgnoreDevices = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES);
     m_OldIgnoreDevicesExcept = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT);
 
