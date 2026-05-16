@@ -4095,21 +4095,25 @@ bool VkFrucRenderer::createInFlightRing()
         //            submit 額外 signal vkf->sem[0]@V+1 給 ffmpeg pool 重用.
         //            互斥 phase2BActive / pathDActive / triplePresent / m_NvOfReady.
         m_FrucChainAsyncAvailable = full;
+        // §J.3.e.2.i.39 (v1.4.101) — default ON, set =0 to opt out.  Mirror
+        // RIFE Phase 2B (VIPLE_RIFE_VK_ASYNC_COMPUTE) v1.4.58 default-ON
+        // pattern.  ME+MC quality 驗測通過 (v1.4.99-100, diff <5% within
+        // noise), GPU perf win ~500us/f confirmed.  Sync (single-cmd) path
+        // 仍保留為 fallback (沒 dedicated compute QF / record fail demote /
+        // phase2BActive 互斥 條件下走 single-cmd).
         const char* frucAsyncEnv = std::getenv("VIPLE_VKFRUC_FRUC_ASYNC");
-        m_FrucChainAsyncRequested = (frucAsyncEnv != nullptr
-                                     && frucAsyncEnv[0] != '\0'
-                                     && frucAsyncEnv[0] != '0');
+        m_FrucChainAsyncRequested = (frucAsyncEnv == nullptr
+                                     || frucAsyncEnv[0] == '\0'
+                                     || frucAsyncEnv[0] != '0');
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-FRUC-ASYNC] gate: requested=%d available=%d "
                     "→ would-be-active=%d (env VIPLE_VKFRUC_FRUC_ASYNC=%s, "
-                    "v1.4.94 SW + HW path wiring active — partA/cmpCmd/partC "
-                    "three-submit chain on m_ComputeTimelineSem when gate=ON; "
-                    "HW path coexist pathDActive + triplePresent + NvOf "
-                    "(partA 加 image-to-image copy + marker submit); "
-                    "唯一互斥 phase2BActive)",
+                    "v1.4.101 default ON — set =0 to opt out; partA/cmpCmd/partC "
+                    "three-submit chain on m_ComputeTimelineSem; sync single-cmd "
+                    "fallback when 沒 dedicated compute QF / demote / phase2BActive)",
                     (int)m_FrucChainAsyncRequested, (int)m_FrucChainAsyncAvailable,
                     (int)(m_FrucChainAsyncRequested && m_FrucChainAsyncAvailable),
-                    frucAsyncEnv ? frucAsyncEnv : "(unset, default OFF)");
+                    frucAsyncEnv ? frucAsyncEnv : "(unset, default ON v1.4.101)");
     } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A async-compute "
