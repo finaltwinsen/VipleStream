@@ -145,6 +145,138 @@ Phase 2 t-dep analysis (logging only)**.
   **C.1+C.2+C.3 累積**: mean 20.89→18.39 ms (**-12.0%**)，gpu phase 19.83→17.50 ms
   (**-11.8%**)。
 
+### v1.4.87 → v1.4.101 ship 帶走的條目（2026-05-15 → 2026-05-16, async chain wiring 系列）
+
+主軸：**FRUC compute chain 整段拆到 dedicated compute QF (cmpCmd) 跟 graphics
+queue (partA/partC) 並行**，~5% perf win @ 60fps + sync 保留為 fallback。15
+commit 完整 production rollout。
+
+**Framework (gate / helper / record path) — v1.4.87/88/89**
+
+- ✅ **§J.3.e.2.i.25** Async chain framework + env gate (`a0efdf1`, v1.4.87)
+  — 加 `m_FrucChainAsyncRequested` / `m_FrucChainAsyncAvailable` flag + env
+  var `VIPLE_VKFRUC_FRUC_ASYNC` (default OFF in this commit) + init log;
+  framework only, gate=OFF 行為等於 v1.4.86
+- ✅ **§J.3.e.2.i.26** Cross-QF ownership barrier helpers + stub
+  (`a3e72fd`, v1.4.88) — 加 `releaseBufferOwnership` / `acquireBufferOwnership`
+  helper (VkBufferMemoryBarrier with srcQueueFamily/dstQueueFamily); `record
+  FrucChainOnCompute` stub 函式 return false; 純 helper API 鋪路
+- ✅ **§J.3.e.2.i.27** `recordFrucChainOnCompute` helper 實作完整化
+  (`aad8dcd`, v1.4.89) — begin cmpCmd → acquire input ownership
+  (`m_SwFrucNv12Buf` graphics→compute) → `runFrucComputeChain` → release
+  output ownership (`m_FrucInterpRgbBuf` × 3 compute→graphics) → end cmpCmd;
+  失敗 demote `m_FrucChainAsyncAvailable=false`
+
+**Wiring SW + HW path — v1.4.90/91**
+
+- ✅ **§J.3.e.2.i.28** SW path renderFrameSw 接路徑 (`0680be3`, v1.4.90) —
+  `frucChainAsyncActive` gate 條件下走 partA (graphics, NV12 image→buffer
+  copy + release ownership) → cmpCmd (compute, recordFrucChainOnCompute) →
+  partC (graphics, acquire ownership + dual-present + real-frame render
+  pass) 三 submit 串 `m_ComputeTimelineSem`
+- ✅ **§J.3.e.2.i.29** HW path renderFrame 接路徑 (`e8afa7a`, v1.4.91) —
+  mirror SW pattern 但 NV12 source 是 `vkf->img[0]` (DPB image) 而非
+  `m_SwUploadImage`; partA submit 額外 signal `vkf->sem[0]@V+1` 給 ffmpeg
+  pool 重用 vkf; partC 結尾 releaseBar (vkf->img[0] GENERAL→GENERAL cache
+  flush). HW gate breakdown debug log 一次性印出條件值方便 user debug
+
+**Mutex relax — v1.4.92/93/94**
+
+- ✅ **§J.3.e.2.i.30** Relax pathDActive 互斥 (`50e262b`, v1.4.92) — partA
+  在 pathDActive 條件下 skip NV12 copy / acquireBar / bufBar (path D 已做)
+  + submit wait `m_CopyDoneSem` (path D 已 signal), 不 signal vkf->sem;
+  AVVkFrame state update + unlock 不重做 (path D 已 unlock).  user 預設
+  環境 (§B-quality (d) ON) 終於能 trigger active path
+- ✅ **§J.3.e.2.i.31** Relax triplePresentThisFrame 互斥 (`a068638`,
+  v1.4.93) — partC 加 interp_2 render pass on imgIdxC (m_InterpDescSet2
+  sample m_FrucInterpRgbBuf2) + partC submit 加 4th acquire wait +
+  renderDone[imgIdxC] signal + Present 加 piC.  TRIPLE 60→180 環境也能
+  跑 async chain
+- ✅ **§J.3.e.2.i.32** 整合 NvOf (`3f26661`, v1.4.94) — partA 加
+  image-to-image copy `vkf->img[0]` → `m_NvOfInputCurr` + 第一幀 init
+  barrier; partC submit 之後 fire NvOf marker submit + nvOFExecuteVk +
+  swap handles (mirror phase2BActive line 10007-10068).  唯一互斥條件
+  剩 phase2BActive
+
+**GPU benchmark — v1.4.95/96/97/98**
+
+- ✅ **§J.3.e.2.i.33** HW path GPU 量測 (`4f772c3`, v1.4.95) — 加
+  `m_FrucChainAsyncTimerPool` (4 ts × kFrucFramesInFlight slots): partA
+  TOP/BOTTOM + partC TOP/BOTTOM. CPU read prev slot + 60-frame mean log
+  `[VIPLE-VKFRUC-FRUC-ASYNC-PROF]`
+- ✅ **§J.3.e.2.i.34** cmpCmd internal GPU timestamp + 拆 cmpWait
+  (`3a89c27`, v1.4.96) — `recordFrucChainOnCompute` helper signature 加
+  `(VkQueryPool timerPool = VK_NULL_HANDLE, uint32_t timerBase = 0)` 默認
+  args; query pool 4→6 ts 加 cmpCmd start/end (cross-QF compute). 拆
+  cmpWait 為 cmpDur (compute QF 真 GPU 時間) + handoff (cross-QF sem
+  signal/wait latency). 實測 RTX 3060 Laptop steady cmpDur 3.4ms +
+  handoff 430us
+- ✅ **§J.3.e.2.i.35** SW path PROF 對稱 HW (`4e1db6d`, v1.4.97) — mirror
+  HW PROF wiring 進 SW path renderFrameSw frucChainAsyncActive block; 共用
+  m_FrucChainAsyncTimerPool / Slot / Armed / metrics (兩 path 互斥不會
+  race); log prefix `-PROF-SW` 區分. SW path 在 user 環境不 trigger 但
+  code complete 等 broader user base
+- ✅ **§J.3.e.2.i.36** Sync chain GPU 量測 + 對比 async PROF (`3a4313e`,
+  v1.4.98) — 加 `m_FrucChainSyncTimerPool` (2 ts) 量 single-cmd HW path
+  整 cmd buf GPU 時間. 實測 sync ~4500us vs async ~4042us steady,
+  **async win ~500us per frame (~5% @ 60fps)**
+
+**Refactor + polish — v1.4.99/100**
+
+- ✅ **§J.3.e.2.i.37** partC helper extraction (`bc1544b`, v1.4.99) — 抽
+  `recordFrucPartC_AcquireOutputs` / `_InterpRenderPass` / `_RealFrameRenderPass`
+  3 個 helpers 給 SW + HW 共用; net diff -19 lines (helpers +85 lines, SW
+  inline -60, HW inline -120)
+- ✅ **§J.3.e.2.i.38** PROF log 簡化 + milestone marker (`e291c62`,
+  v1.4.100) — 3 處 PROF log message 拿掉 trailing 註解 (各 ~150 chars),
+  log message 從 ~280 chars 降到 ~120 chars 仍 informative
+
+**Default ON rollout — v1.4.101**
+
+- ✅ **§J.3.e.2.i.39** frucChainAsync default ON (sync fallback 保留)
+  (`6db7a21`, v1.4.101) — env var default 從 OFF flip 到 ON; mirror RIFE
+  Phase 2B (`VIPLE_RIFE_VK_ASYNC_COMPUTE`) v1.4.58 default-ON pattern;
+  sync (single-cmd) path 仍保留為 fallback (沒 dedicated compute QF /
+  record fail demote / phase2BActive 互斥 條件下走 single-cmd); user
+  opt-out: `VIPLE_VKFRUC_FRUC_ASYNC=0`
+
+**ME+MC quality 驗測**（v1.4.99-100，腳本指標 sync vs async 對比）
+
+- 全 7-engine compare_fruc_engines.ps1 dump session, sync round + async
+  round 分別跑, analyze_fruc_compare.py 算 doubling_score + interp_r
+- VkFruc engines (01_vkfruc_bm / 06_vkfruc_nvof / 07_vkfruc_native_rife)
+  sync vs async diff <5% (06_vkfruc_nvof 最 fair 比較 diff 0.2%) — **no
+  ME+MC quality regression**
+- 順便 fix `compare_fruc_engines.ps1` registry key bug
+  (`videoDecoderSelection` → `videodec`, 3 處 fix) — local-only (`scripts/`
+  gitignored 不入 repo), user 本機已修
+
+### v1.4.74 → v1.4.86 ship 帶走的條目（2026-05-15, chain quality refinement + Pyramid ME）
+
+主軸：**block-match ME chain quality 漸進改善 + auto-tier + Pyramid ME 降延遲**。
+
+- ✅ **§J.3.e.2.i.13** warp edge-fade switch magnitude → gradient
+  (`c6369ff`, v1.4.74)
+- ✅ **§J.3.e.2.i.14/15** Phase A bidirectional ME + occlusion mask, A-lite
+  temporal coherence fade (`87deb41` / `cad9c43`, v1.4.76; reverted +
+  reapplied 兩次)
+- ✅ **§J.3.e.2.i.16** Vulkan thread sync fix via PFN wrap (`b60cae3`,
+  v1.4.78) — chain dispatch thread-safety
+- ✅ **§J.3.e.2.i.17/18** Phase A bidirectional ME + extended sync wrap
+  (`3cd8e43`, v1.4.80)
+- ✅ **§J.3.e.2.i.19** Phase B 4×4 adaptive ME (`6010626`, v1.4.81)
+- ✅ **§J.3.e.2.i.20** Phase C 半像素精修 (`50497f2`, v1.4.82) — sub-pixel
+  refinement
+- ✅ **§J.3.e.2.i.21** 補幀計算瘦身 (`bcb6dfe`, v1.4.83) — 解碼延遲補救
+- ✅ **§J.3.e.2.i.22** 動態 TRIPLE/DUAL 降階 (`2b0e652`, v1.4.84) — env
+  `VIPLE_VKFRUC_DYNAMIC_TIER` 控制 (預設 1=auto), chain mean ms ring
+  (60 frame window) > 5ms 連續 30 frame 觸發 TRIPLE→DUAL 降階; < 3ms 連
+  60 frame 升回
+- ✅ **§J.3.e.2.i.23** Pyramid 兩階 ME 降延遲 (`dde85db`, v1.4.85) — ½ res
+  forward ME + 全 res ME refine
+- ✅ **§J.3.e.2.i.24** 3-stage Pyramid ¼→½→1× coarse-to-fine (`c82363d`,
+  v1.4.86) — Pyramid 升級到 3 階, 加 ¼ res RGB + MV buffer
+
 ### v1.4.73 ship 帶走的條目（2026-05-15, post v1.4.72 warp edge-fade）
 
 - 🔴 **§J.3.e.2.i.11 v1.4.68 benchmark 嚴重 bug 修補** — Real-stream
