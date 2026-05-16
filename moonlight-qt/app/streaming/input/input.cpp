@@ -379,12 +379,29 @@ bool SdlInputHandler::isSystemKeyCaptureActive()
 void SdlInputHandler::setCaptureActive(bool active)
 {
     if (active) {
+        // §N.5.linux H1 diagnostic — Linux client (Hyper-V VM / Wayland / 某些
+        // desktop env) 可能 silent SDL_SetRelativeMouseMode fail 落 m_FakeCapture
+        // path; fake capture 不送 xrel/yrel → host 收 0 deltas → mouse 看似不傳.
+        // 拆 short-circuit 為獨立變數方便 log return value + SDL error 訊息.
+        const bool relModeSkipped = m_AbsoluteMouseMode;
+        const int  relModeResult  = relModeSkipped ? 0
+                                                   : SDL_SetRelativeMouseMode(SDL_TRUE);
+        const char* relModeErr    = (!relModeSkipped && relModeResult < 0)
+                                  ? SDL_GetError() : "";
         // If we're in relative mode, try to activate SDL's relative mouse mode
-        if (m_AbsoluteMouseMode || SDL_SetRelativeMouseMode(SDL_TRUE) < 0) {
+        if (relModeSkipped || relModeResult < 0) {
             // Relative mouse mode didn't work or was disabled, so we'll just hide the cursor
             SDL_ShowCursor(m_MouseCursorCapturedVisibilityState);
             m_FakeCaptureActive = true;
         }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-INPUT] §N.5.linux setCaptureActive: m_AbsoluteMouseMode=%d "
+            "SDL_SetRelativeMouseMode skipped=%d rc=%d err='%s' → "
+            "m_FakeCaptureActive=%d (fake capture 不送 xrel/yrel — Linux client "
+            "若 mouse 不傳, 看 m_FakeCaptureActive=1 + SDL err 是否 platform "
+            "constraint, 例 Hyper-V VM console 常見)",
+            (int)m_AbsoluteMouseMode, (int)relModeSkipped, relModeResult,
+            relModeErr, (int)m_FakeCaptureActive);
 
         // Synchronize the client and host cursor when activating absolute capture
         if (m_AbsoluteMouseMode) {
