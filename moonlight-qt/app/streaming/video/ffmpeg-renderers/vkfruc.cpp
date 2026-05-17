@@ -8843,13 +8843,18 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         }
     } else {
     // ---- Stage 0b: Pyramid ½ downscale + ½ res ME (§J.3.e.2.i.23, v1.4.85) ----
-    // 開啟條件: levelHasFine4x4 (≡ 預設 level 3+); 因為 pyramid 是 chain-saving 招式,
-    // 在更低 level 不會啟用 (反正那些 level chain 也輕).
+    // §J.3.e.2.i.43 (v1.4.107) — Pyramid 改 gate 在「有 ME 工作」(level>=1),
+    // 不再只綁 levelHasFine4x4. 原 v1.4.83 假設「低 level chain 也輕」在
+    // PixArk 等開放世界 game content 證偽 — 沒 pyramid 時 ME 做 1× res
+    // full search (9×9 → 33×33 candidates/block) chain 30-50ms; 加 pyramid
+    // 後降回 ~3-5ms. v1.4.106 autotier cool-down 把 chain stick 在 level 1
+    // 30s+ 暴露此 bug → 大量 networkDropped. Pyramid 對 forward ME 的
+    // chain-saving 在所有有 ME 的 level 都有效.
     // env VIPLE_VKFRUC_PYRAMID=0 完全關閉 pyramid (debug).
     static const int s_PyramidEnabled =
         qEnvironmentVariableIsSet("VIPLE_VKFRUC_PYRAMID")
             ? qEnvironmentVariableIntValue("VIPLE_VKFRUC_PYRAMID") : 1;
-    const bool usePyramid = (s_PyramidEnabled != 0) && levelHasFine4x4;
+    const bool usePyramid = (s_PyramidEnabled != 0) && (currentChainLevel >= 1);
     if (usePyramid) {
         // §J.3.e.2.i.23 Stage 0b.1: downscale prev RGB → halfPrev
         pfnCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_FrucDownscaleHalfPipeline);
