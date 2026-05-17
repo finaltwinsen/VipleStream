@@ -917,12 +917,14 @@ Flickable {
                 // NvOFFRUC.dll (engine 03) 主觀比仍弱在 warp+blend pipeline (我們沒接
                 // §B-quality (c) 的 occlusion / confidence weighting).
                 //
-                // 預設 OFF (opt-in)：4K120 stress / 自然 video 驗測沒做完；穩定後
-                // 預設可改 ON.  env var `VIPLE_VKFRUC_NV_OF` 仍是 dev escape hatch.
+                // §J.3.e.2.i.44 (v1.4.108) 預設改 ON：v1.4.107 4-hour PixArk
+                // session zero-drop + Pyramid 解耦修好 block-match fallback 也輕,
+                // NVOF init 失敗 / runtime 連 30 frame fail 自動 demote 走 block-
+                // match safe. env var `VIPLE_VKFRUC_NV_OF=0` 仍是 dev escape hatch.
                 CheckBox {
                     id: vkfrucNvOfCheck
                     width: parent.width
-                    text: qsTr("使用 NVIDIA Optical Flow 硬體補幀 (實驗性)")
+                    text: qsTr("使用 NVIDIA Optical Flow 硬體補幀 (NV GPU 預設啟用)")
                     font.pointSize: 12
                     visible: frameInterpolationCheck.checked
                              && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
@@ -936,7 +938,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("使用 NVIDIA Turing+ (RTX 20/30/40) 內建的 Optical Flow Accelerator (NVOFA) 硬體取代軟體 block-match motion estimation。需要 NV driver 支援 VK_NV_optical_flow extension。\n\n量化勝過軟體 block-match (testufo 1080p60: SSIM 0.999 vs 0.998, motion smoothness cv 0.86 vs 1.94)，但 warp + blend pipeline 仍是我們自寫的 (沒做 occlusion handling)，主觀視覺仍輸給 D3D11 的 NvOFFRUC.dll 完整路徑。\n\n非 NVIDIA GPU / 不支援 extension 時自動 fallback 軟體 block-match，不會崩潰。")
+                    ToolTip.text: qsTr("使用 NVIDIA Turing+ (RTX 20/30/40) 內建的 Optical Flow Accelerator (NVOFA) 硬體取代軟體 block-match motion estimation。需要 NV driver 支援 VK_NV_optical_flow extension。\n\nv1.4.108 起 NV GPU 預設啟用（4 小時 PixArk 串流驗測 zero-drop）。非 NVIDIA GPU 或不支援 extension 的設備自動 fallback 軟體 block-match，不會崩潰。runtime 連 30 frame 失敗也會自動切回 block-match。\n\n量化勝過軟體 block-match (testufo 1080p60: SSIM 0.999 vs 0.998, motion smoothness cv 0.86 vs 1.94)，但 warp + blend pipeline 仍是我們自寫的 (沒做 occlusion handling)，主觀視覺仍輸給 D3D11 的 NvOFFRUC.dll 完整路徑。")
                 }
 
                 // §B2 UI 整合 2026-05-07 — Vulkan-only TRIPLE 60→180 (3x interp).

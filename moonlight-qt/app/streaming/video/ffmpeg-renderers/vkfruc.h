@@ -208,6 +208,18 @@ private:
     bool createOpticalFlowSession(uint32_t width, uint32_t height);
     void destroyOpticalFlowSession();
 
+    // §J.3.e.2.i.44 (v1.4.108) — NVOF 穩定度 60s window log 累加器.
+    // dispatchCount / failCount 偵測 driver glitch / consecutive fail;
+    // chainMsAccum/Samples 量 useNvOf=true 時的 chain mean (跟 block-match
+    // 對比 quality). consecFails >= 30 → m_NvOfReady=false 自我 demote,
+    // 整 session 切回 block-match (production-grade self-healing).
+    uint64_t        m_NvOfProfDispatchCount = 0;
+    uint64_t        m_NvOfProfFailCount     = 0;
+    uint64_t        m_NvOfProfConsecFails   = 0;
+    double          m_NvOfProfChainMsAccum  = 0.0;
+    uint64_t        m_NvOfProfChainSamples  = 0;
+    std::chrono::steady_clock::time_point m_NvOfProfLastLog{};
+
     // §B-DUMP — definitions live below kFrucFramesInFlight (line ~600).
     // §J.3.e.2.i.3.a — ffmpeg AVHWDeviceContext bridges our VkDevice
     // to ffmpeg's Vulkan video decoder so AVVkFrame.img[0] gets created

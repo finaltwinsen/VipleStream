@@ -177,16 +177,21 @@ void StreamingPreferences::reload()
     // 仍依設定走 Vulkan。新 user 第一次啟動只會看到 D3D11。
     rendererSelection = static_cast<RendererSelection>(settings.value(SER_RENDERERSEL, static_cast<int>(RS_D3D11)).toInt());
     frucQuality = static_cast<FrucQuality>(settings.value(SER_FRUCQUALITY, static_cast<int>(FQ_BALANCED)).toInt());
-    // §B-NVOF / §B2 — Vulkan-renderer-only 補幀進階開關.  預設皆 OFF：
+    // §B-NVOF / §B2 — Vulkan-renderer-only 補幀進階開關.
     //   - NVOF (HW optical flow) 量化 testufo 三指標贏 software block-match
-    //     (commit 71d1592, c82196e)，但跟 D3D11 NvOFFRUC.dll 主觀比仍弱在
-    //     warp+blend pipeline (我們沒做 occlusion/confidence weighting).
+    //     (commit 71d1592, c82196e). §J.3.e.2.i.44 (v1.4.108) 預設改 ON
+    //     (NV GPU 自動啟用, 非 NV 沒 VK_NV_optical_flow extension 自動 fall
+    //     back block-match 不會 crash). 開 PROF log [VIPLE-VKFRUC-NVOF-PROF]
+    //     觀測 dispatches / fails / chain_mean. 連 30 frame nvOFExecuteVk
+    //     fail 自我 demote m_NvOfReady=false 整 session 走 block-match.
+    //     依據: v1.4.107 4-hour PixArk session zero-drop + Pyramid 解耦修好
+    //     block-match fallback 也夠輕 (cmpDur mean 4.29ms / 0% drop).
     //   - TRIPLE 60→180 infrastructure ship'd (commit bc88eba) 但只有 180Hz
-    //     panel 用得上，且補幀視覺品質 ceiling 受 §B-quality 限制.
-    // 兩個都先 opt-in，等 §B-quality (c) / NVOF UI 整合 + 4K 驗測完才考慮
-    // 預設 ON.  env var (`VIPLE_VKFRUC_NV_OF` / `VIPLE_VKFRUC_TRIPLE`) 仍是
-    // dev escape hatch (vkfruc.cpp 端 OR 兩條訊號).
-    vkfrucEnableNvOf   = settings.value(SER_VKFRUCNVOF, false).toBool();
+    //     panel 用得上, 仍 opt-in.
+    // env var (`VIPLE_VKFRUC_NV_OF` / `VIPLE_VKFRUC_TRIPLE`) 仍是 dev escape
+    // hatch — v1.4.108 起 helper 改用 qEnvironmentVariableIsSet, =0 真的
+    // 會 override prefs ON (之前 silently no-op).
+    vkfrucEnableNvOf   = settings.value(SER_VKFRUCNVOF, true).toBool();
     vkfrucEnableTriple = settings.value(SER_VKFRUCTRIPLE, false).toBool();
     // §J.3.e.X Path β — opt-in default-OFF.  Beta feature.  Original
     // 30-60s VK_ERROR_DEVICE_LOST was overlay-resize use-after-free in

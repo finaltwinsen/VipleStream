@@ -98,7 +98,14 @@ static std::mutex s_VkFrucComputeLock;
 // ignore — 兩個 helper 只在 VkFrucRenderer 內部呼叫.
 static bool vkfrucWantNvOfFromUserOrEnv()
 {
-    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_NV_OF") != 0) return true;
+    // §J.3.e.2.i.44 (v1.4.108) — 顯式設 env var 一律 override prefs (dev
+    // escape hatch). 未設才看 prefs (使用者 Settings checkbox).
+    // Mirror v1.4.84 VIPLE_VKFRUC_DYNAMIC_TIER 用 qEnvironmentVariableIsSet
+    // 的 pattern. 之前用 IntValue() != 0 沒辦法區分「未設」跟「設為 0」,
+    // =0 silently no-op (對 prefs ON 的使用者沒生效).
+    if (qEnvironmentVariableIsSet("VIPLE_VKFRUC_NV_OF")) {
+        return qEnvironmentVariableIntValue("VIPLE_VKFRUC_NV_OF") != 0;
+    }
     auto* prefs = StreamingPreferences::get();
     return prefs && prefs->vkfrucEnableNvOf;
 }
@@ -8430,6 +8437,23 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
 {
     if (!m_FrucReady) return false;
 
+    // §J.3.e.2.i.44 (v1.4.108) — 一次性 NVOF startup state log (Phase A).
+    // 讓「default flip 後 NVOF 有沒有實際啟動」一目了然.
+    static std::atomic<bool> s_nvOfInitLogged{false};
+    bool nvOfLogExp = false;
+    if (s_nvOfInitLogged.compare_exchange_strong(nvOfLogExp, true)) {
+        const bool wantedByUser = vkfrucWantNvOfFromUserOrEnv();
+        const char* reason = m_NvOfReady ? "ACTIVE"
+            : (!wantedByUser ? "disabled by user/env"
+            : (m_OpticalFlowQueueFamily == UINT32_MAX ? "no NV optical flow queue family"
+            : (!m_NvOfApiModule ? "nvofapi64.dll load failed"
+            : "session init failed")));
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-NVOF-PROF] startup: %s (m_NvOfReady=%d wantedByUser=%d)",
+            reason, (int)m_NvOfReady, (int)wantedByUser);
+        m_NvOfProfLastLog = std::chrono::steady_clock::now();
+    }
+
     auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetDeviceProcAddr");
     auto pfnCmdBindPipeline    = (PFN_vkCmdBindPipeline)getDevPa(m_Device, "vkCmdBindPipeline");
@@ -8502,6 +8526,15 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             double thisFrameChainMs = thisFrameChainUs / 1000.0;
             m_ChainMeanMsRing[m_ChainMeanMsRingIdx] = thisFrameChainMs;
             m_ChainMeanMsRingIdx = (m_ChainMeanMsRingIdx + 1) % kChainRingSize;
+
+            // §J.3.e.2.i.44 (v1.4.108) — NVOF chain mean tracking (Phase A).
+            // 用 m_NvOfReady 近似這幀是否走 NVOF (useNvOf 是 local bool 在
+            // line ~8745 才 compute, 但 m_NvOfReady 是 useNvOf 的 dominant
+            // condition; session 初期 1-2 幀差異可接受).
+            if (m_NvOfReady) {
+                m_NvOfProfChainMsAccum += thisFrameChainMs;
+                m_NvOfProfChainSamples++;
+            }
             if (m_ChainMeanMsRingFilled < kChainRingSize) m_ChainMeanMsRingFilled++;
 
             static const int s_DynamicTierMode =
@@ -8615,6 +8648,31 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                 }
             } else if (s_DynamicTierMode == 0) {
                 m_DynamicDualDowngrade.store(false);
+            }
+
+            // §J.3.e.2.i.44 (v1.4.108) — NVOF 穩定度 60s window flush log.
+            // 條件: 有 NVOF activity (dispatches 或 fails > 0) 才印, 避免
+            // block-match-only session log spam.  reset 累加器後重新計時.
+            const auto nowProf = std::chrono::steady_clock::now();
+            const auto elapsedSec = std::chrono::duration_cast<std::chrono::seconds>(
+                nowProf - m_NvOfProfLastLog).count();
+            if (elapsedSec >= 60 && (m_NvOfProfDispatchCount + m_NvOfProfFailCount) > 0) {
+                const uint64_t total = m_NvOfProfDispatchCount + m_NvOfProfFailCount;
+                const double failPct = 100.0 * (double)m_NvOfProfFailCount / (double)total;
+                const double meanChainMs = m_NvOfProfChainSamples
+                    ? m_NvOfProfChainMsAccum / (double)m_NvOfProfChainSamples : 0.0;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF-PROF] period=%llds dispatches=%llu fails=%llu (%.2f%%) "
+                    "chain_mean=%.2fms samples=%llu ready=%d grid=%u",
+                    (long long)elapsedSec, (unsigned long long)m_NvOfProfDispatchCount,
+                    (unsigned long long)m_NvOfProfFailCount, failPct,
+                    meanChainMs, (unsigned long long)m_NvOfProfChainSamples,
+                    (int)m_NvOfReady, m_NvOfGridSize);
+                m_NvOfProfDispatchCount = 0;
+                m_NvOfProfFailCount = 0;
+                m_NvOfProfChainMsAccum = 0.0;
+                m_NvOfProfChainSamples = 0;
+                m_NvOfProfLastLog = nowProf;
             }
         }
     }
@@ -10473,6 +10531,17 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                         std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
                         std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
                         std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+                        m_NvOfProfDispatchCount++;
+                        m_NvOfProfConsecFails = 0;
+                    } else {
+                        m_NvOfProfFailCount++;
+                        if (++m_NvOfProfConsecFails >= 30 && m_NvOfReady) {
+                            m_NvOfReady = false;
+                            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VKFRUC-NVOF-PROF] 30 consecutive nvOFExecuteVk "
+                                "fails (last status=%d), demoting m_NvOfReady=false, "
+                                "本 session 改走 block-match", (int)s);
+                        }
                     }
                 } else {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -11142,6 +11211,17 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                         std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
                         std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
                         std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+                        m_NvOfProfDispatchCount++;
+                        m_NvOfProfConsecFails = 0;
+                    } else {
+                        m_NvOfProfFailCount++;
+                        if (++m_NvOfProfConsecFails >= 30 && m_NvOfReady) {
+                            m_NvOfReady = false;
+                            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VKFRUC-NVOF-PROF] 30 consecutive nvOFExecuteVk "
+                                "fails (last status=%d), demoting m_NvOfReady=false, "
+                                "本 session 改走 block-match", (int)s);
+                        }
                     }
                 } else {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -11963,6 +12043,8 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             }
             if (s == NV_OF_SUCCESS) {
                 m_NvOfTimelineValue = outSigVal;
+                m_NvOfProfDispatchCount++;
+                m_NvOfProfConsecFails = 0;
                 // §B-NVOF Phase 7B 2026-05-06 — async cross-queue. Removed
                 // CPU vkWaitSemaphores (was ~3-5 ms/frame block at 1080p).
                 // Sync now via timeline sem in NEXT frame's main submit wait
@@ -11973,6 +12055,15 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
                 std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
                 std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+            } else {
+                m_NvOfProfFailCount++;
+                if (++m_NvOfProfConsecFails >= 30 && m_NvOfReady) {
+                    m_NvOfReady = false;
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-NVOF-PROF] 30 consecutive nvOFExecuteVk "
+                        "fails (last status=%d), demoting m_NvOfReady=false, "
+                        "本 session 改走 block-match", (int)s);
+                }
             }
         } else {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
