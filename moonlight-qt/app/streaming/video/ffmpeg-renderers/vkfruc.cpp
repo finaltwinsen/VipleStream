@@ -8507,17 +8507,44 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             static const int s_DynamicTierMode =
                 qEnvironmentVariableIsSet("VIPLE_VKFRUC_DYNAMIC_TIER")
                     ? qEnvironmentVariableIntValue("VIPLE_VKFRUC_DYNAMIC_TIER") : 1;
+            // §J.3.e.2.i.42 (v1.4.106) — anti-thrash tunables.
+            // _COOLDOWN_MS=0 退回 v1.4.105 行為 (沒 cool-down).
+            // _UPGRADE_FRAMES=60 退回 v1.4.105 行為 (1s 升回 window).
+            static const int s_CooldownMs =
+                qEnvironmentVariableIsSet("VIPLE_VKFRUC_AUTOTIER_COOLDOWN_MS")
+                    ? qEnvironmentVariableIntValue("VIPLE_VKFRUC_AUTOTIER_COOLDOWN_MS") : 30000;
+            static const int s_UpgradeFrames =
+                qEnvironmentVariableIsSet("VIPLE_VKFRUC_AUTOTIER_UPGRADE_FRAMES")
+                    ? qEnvironmentVariableIntValue("VIPLE_VKFRUC_AUTOTIER_UPGRADE_FRAMES") : 300;
             if (s_DynamicTierMode == 2) {
-                // 強制 DUAL (debug)
+                // 強制 DUAL (debug). 不 stamp m_LastDowngradeTime — 避免
+                // debug 強制污染 cool-down 狀態.
                 m_DynamicDualDowngrade.store(true);
             } else if (s_DynamicTierMode == 1 && m_ChainMeanMsRingFilled >= kChainRingSize) {
                 double sum = 0.0;
                 for (int i = 0; i < kChainRingSize; ++i) sum += m_ChainMeanMsRing[i];
                 double meanMs = sum / kChainRingSize;
                 const bool currentlyDowngraded = m_DynamicDualDowngrade.load();
+
+                // §J.3.e.2.i.42 (v1.4.106) — shared cool-down 計算.
+                // True-idle bypass: mean<1ms 連 600 frame (10s 真實 desktop
+                // idle) 視為 alt-tab 場景, 跳 cool-down 直接升回 (level 1 vs 3
+                // 視覺無差但避免 user「卡住低品質」不適感).
+                const auto now = std::chrono::steady_clock::now();
+                const auto sinceDowngradeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - m_LastDowngradeTime).count();
+                if (meanMs < 1.0) {
+                    if (m_FramesBelowIdleThreshold < 600) m_FramesBelowIdleThreshold++;
+                } else {
+                    m_FramesBelowIdleThreshold = 0;
+                }
+                const bool inCooldown = sinceDowngradeMs < s_CooldownMs
+                                        && m_FramesBelowIdleThreshold < 600;
+
                 if (meanMs > 5.0 && !currentlyDowngraded) {
                     if (++m_FramesAboveThreshold >= 30) {
                         m_DynamicDualDowngrade.store(true);
+                        m_LastDowngradeTime = now;   // shared cool-down stamp
                         m_FramesAboveThreshold = 0;
                         m_FramesBelowThreshold = 0;
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -8525,16 +8552,18 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                             meanMs);
                     }
                 } else if (meanMs < 3.0 && currentlyDowngraded
-                           && currentChainLevel >= m_InitialChainLevel) {
+                           && currentChainLevel >= m_InitialChainLevel
+                           && !inCooldown) {
                     // 升回 TRIPLE 條件: chain level 已經回到 env-var 上限 (代表
-                    // chain compute 不是負擔), 且 mean < 3ms 連 60 幀.
-                    if (++m_FramesBelowThreshold >= 60) {
+                    // chain compute 不是負擔), mean < 3ms 連 s_UpgradeFrames
+                    // 幀 (v1.4.106: 300 ≈ 5s), 且 cool-down 已過.
+                    if (++m_FramesBelowThreshold >= s_UpgradeFrames) {
                         m_DynamicDualDowngrade.store(false);
                         m_FramesAboveThreshold = 0;
                         m_FramesBelowThreshold = 0;
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-VKFRUC-AUTOTIER] DUAL → TRIPLE (chain mean=%.2fms < 3ms 連續 60 幀)",
-                            meanMs);
+                            "[VIPLE-VKFRUC-AUTOTIER] DUAL → TRIPLE (chain mean=%.2fms < 3ms 連續 %d 幀)",
+                            meanMs, s_UpgradeFrames);
                     }
                 } else {
                     // 反向計數 reset (避免遠端 spike 累積太久觸發誤切)
@@ -8545,31 +8574,39 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                 // §J.3.e.2.i.41 (v1.4.105) — chain_level autotier 二次降階.
                 // 已經 DUAL 還是 chain compute 過重 (mean > 8ms 連 30 幀) →
                 // 把 effective chain_level 從 3→2→1, 卸 Phase B 4×4 ME /
-                // bidirectional ME 等重活. 反向: mean < 2.5ms 連 60 幀升回.
-                // 只在 DUAL 期間 active (避免 TRIPLE 期間 chain level 降跟
-                // TRIPLE→DUAL 同時觸發, 抖動太快).
+                // bidirectional ME 等重活. 反向: mean < 2.5ms 連 s_UpgradeFrames
+                // 幀升回. 只在 DUAL 期間 active (避免 TRIPLE 期間 chain level
+                // 降跟 TRIPLE→DUAL 同時觸發, 抖動太快).
+                // v1.4.106: skip-level — level 3 + mean > 10ms 直接 3→1
+                // 跳過 level 2 (level 2 only 省 20-30%, 寧可一次到位).
+                // v1.4.106: upgrade 加 cool-down guard + 300 frame window.
                 if (currentlyDowngraded) {
                     if (meanMs > 8.0 && currentChainLevel > 1) {
                         if (++m_FramesAboveChainLevelThresh >= 30) {
-                            int newLevel = currentChainLevel - 1;
+                            const bool skipLevel =
+                                (currentChainLevel == 3 && meanMs > 10.0);
+                            int newLevel = skipLevel ? 1 : (currentChainLevel - 1);
                             m_EffectiveChainLevel.store(newLevel, std::memory_order_relaxed);
+                            m_LastDowngradeTime = now;   // shared cool-down stamp
                             m_FramesAboveChainLevelThresh = 0;
                             m_FramesBelowChainLevelThresh = 0;
                             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VKFRUC-AUTOTIER] chain_level %d → %d "
-                                "(chain mean=%.2fms > 8ms 連續 30 幀, in DUAL)",
-                                currentChainLevel, newLevel, meanMs);
+                                "(chain mean=%.2fms > 8ms 連續 30 幀, in DUAL%s)",
+                                currentChainLevel, newLevel, meanMs,
+                                skipLevel ? ", skip-to-1" : "");
                         }
-                    } else if (meanMs < 2.5 && currentChainLevel < m_InitialChainLevel) {
-                        if (++m_FramesBelowChainLevelThresh >= 60) {
+                    } else if (meanMs < 2.5 && currentChainLevel < m_InitialChainLevel
+                               && !inCooldown) {
+                        if (++m_FramesBelowChainLevelThresh >= s_UpgradeFrames) {
                             int newLevel = currentChainLevel + 1;
                             m_EffectiveChainLevel.store(newLevel, std::memory_order_relaxed);
                             m_FramesAboveChainLevelThresh = 0;
                             m_FramesBelowChainLevelThresh = 0;
                             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VKFRUC-AUTOTIER] chain_level %d → %d "
-                                "(chain mean=%.2fms < 2.5ms 連續 60 幀)",
-                                currentChainLevel, newLevel, meanMs);
+                                "(chain mean=%.2fms < 2.5ms 連續 %d 幀)",
+                                currentChainLevel, newLevel, meanMs, s_UpgradeFrames);
                         }
                     } else {
                         if (meanMs <= 8.0) m_FramesAboveChainLevelThresh = 0;

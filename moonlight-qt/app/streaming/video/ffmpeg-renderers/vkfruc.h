@@ -20,6 +20,7 @@
 #include <vulkan/vulkan.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <map>
 #include <mutex>
@@ -615,6 +616,19 @@ private:
     int                m_InitialChainLevel              = -1;
     int                m_FramesAboveChainLevelThresh    = 0;
     int                m_FramesBelowChainLevelThresh    = 0;
+
+    // §J.3.e.2.i.42 (v1.4.106) — anti-thrashing cool-down (shared 跨
+    // TRIPLE↔DUAL 與 chain_level 兩 loop). 任何 downgrade 後 stamp
+    // m_LastDowngradeTime; 所有 upgrade 加 (now - stamp) >= cooldownMs
+    // guard. 兩 loop 因果關聯 (chain_level 只在 DUAL 期間 active),
+    // shared timer 防止「chain recovered → 立刻 TRIPLE→DUAL 又 trigger」
+    // ping-pong. epoch default 代表「never downgraded」, 首次 upgrade
+    // (now - epoch ≈ years) 自然 > cooldown 不被 block. steady_clock
+    // 跨平台 monotonic, 不需 sleep/resume defensive.
+    // True-idle bypass: mean<1ms 連 600 frame (10s 真 desktop idle)
+    // 跳過 cool-down 直接 upgrade, 避免 alt-tab 桌面 30s 才恢復的呆滯感.
+    std::chrono::steady_clock::time_point m_LastDowngradeTime{};
+    int                m_FramesBelowIdleThreshold       = 0;
 
     // §B-DUMP 2026-05-07 — diagnostic frame dump for visual real-vs-interp
     // comparison.  Triggered by VIPLE_VKFRUC_DUMP_DIR=path; copies real /
