@@ -36,10 +36,10 @@
 | ~~**Low**~~ ✅ **C.1 + C.2 + C.3 + C.5 ALL SHIPPED** | **§J.3.e.Y 4Y.7** dispatch fusion 全套 | C.1 (Conv→Mul ch-bcast) ship v1.4.1 (`0e6240a`)；C.2 (BinaryOp→Activation) ship v1.4.42；C.3 (Split elision via blob aliasing) ship v1.4.42；**C.5 (Conv→Add→Activation triple fusion) ship v1.4.49 (`fb77551`)** — 40 ResBlock tails 從 Conv→BinOp(Mul)→BinOp(Add)→ReLU 4 dispatch 壓成 1 Conv dispatch。實測 RTX 3060 @ 256×256 stable benchmark (warmup=15 iter=50): C.5 alone -10.7% median (18.10→16.17 ms)，record phase -49% (HALVED, 40 fewer dispatches)，gpu phase -8.9%。**累積 C.1+C.2+C.3+C.5 from session-start baseline**: mean 20.89→16.16 ms (**-22.6%**)，gpu 19.83→15.48 ms (**-21.9%**)，ncnn ratio 3.33×→2.58×。vs-ncnn correctness 全 PASS 不變 (mean=4.72e-05 max=1.35e-02)。剩餘 ROI 候選: Winograd Conv2D (~3-5× on 3×3 Conv, multi-day)、coopmat fp16 precision fix (-70× regression → fixable?)、pack-by-N channel packing。|
 | **Low** | **§A.2 / §A.8** WiX installer / 內部 class rename | 沒用 MSI 出貨 / 純內部 |
 | **Low** | **§D** HelpLauncher URL → 結構化 docs | docs/setup_guide.md + docs/troubleshooting.md 已寫；HelpLauncher 切過去等 doc site stand 起來 |
-| **Active (mouse, v1.4.42+)** / ~~overlay font~~ ✅ **FIXED v1.4.41** | **§N.5.linux** Linux client (Ubuntu VM) ↔ Windows host stream UX bugs | (1) **滑鼠 input forward 不 work** (still active) — keyboard 傳 host OK，mouse event 完全不傳。**Code analysis hypotheses (sorted by likelihood):** **H1 (most likely):** `SDL_SetRelativeMouseMode(SDL_TRUE)` 在 Hyper-V VM console 失敗，silently fall back 到 `m_FakeCaptureActive=true` (input.cpp:383)，但 fake-capture 只藏 cursor 不啟用 xrel/yrel 追蹤 → `LiSendMouseMoveEvent(0,0)` 全送 0 deltas → host 收「mouse 沒動」。**H2:** `SDL_CaptureMouse()` 在 xcb 無 `XCB_GRAB_POINTER` 權限被 deny。**H3:** Hyper-V synthetic input driver 只送 absolute coords，`event->xrel/yrel` 永遠 0。**H4:** SDL window 在 Hyper-V console 沒拿 `SDL_WINDOW_INPUT_FOCUS`，event loop early-return drop。**Fix roadmap:** (a) input.cpp:383 加 diagnostic log 印 `SDL_SetRelativeMouseMode` return + `SDL_GetError()` + fake-capture state；(b) 短期 workaround：Linux 平台預設啟用 absolute mouse mode；(c) 長期：偵測 Hyper-V 自動切 absolute。需 GUI Linux VM 驗測。 (2) ~~**Overlay 字元亂碼**~~ **✅ FIXED v1.4.41** — main.cpp 加 Linux-only `QFontDatabase::addApplicationFont(NotoSansCJK-Regular.ttc)` + build-appimage.sh 從 `/usr/share/fonts/opentype/noto/` bundle CJK font 進 AppDir，runtime 從 `$APPDIR/usr/share/fonts/opentype/` 載入。AppImage builder 需 `apt install fonts-noto-cjk` 才有 source；缺檔時 silent fallback 到 host fontconfig。 |
+| **Active (mouse, post-v1.4.102 diagnostic)** / ~~overlay font~~ ✅ **FIXED v1.4.41** | **§N.5.linux** Linux client (Ubuntu VM) ↔ Windows host stream UX bugs | (1) **滑鼠 input forward 不 work** (still active) — keyboard 傳 host OK，mouse event 完全不傳。**Code analysis hypotheses (sorted by likelihood):** **H1 (most likely):** `SDL_SetRelativeMouseMode(SDL_TRUE)` 在 Hyper-V VM console 失敗，silently fall back 到 `m_FakeCaptureActive=true` (input.cpp:383)，但 fake-capture 只藏 cursor 不啟用 xrel/yrel 追蹤 → `LiSendMouseMoveEvent(0,0)` 全送 0 deltas → host 收「mouse 沒動」。**H2:** `SDL_CaptureMouse()` 在 xcb 無 `XCB_GRAB_POINTER` 權限被 deny。**H3:** Hyper-V synthetic input driver 只送 absolute coords，`event->xrel/yrel` 永遠 0。**H4:** SDL window 在 Hyper-V console 沒拿 `SDL_WINDOW_INPUT_FOCUS`，event loop early-return drop。**Fix roadmap:** ~~(a) input.cpp:383 加 diagnostic log~~ ✅ **shipped v1.4.102** — `setCaptureActive` split short-circuit eval into independent variables, log `relModeResult` + `relModeErr` + `m_FakeCaptureActive`；(b) 短期 workaround：Linux 平台預設啟用 absolute mouse mode (still TODO)；(c) 長期：偵測 Hyper-V 自動切 absolute (still TODO)。**Next step:** deploy v1.4.102+ AppImage 到 Linux VM 收 diagnostic log 確認 H1 vs H2/H3/H4. (2) ~~**Overlay 字元亂碼**~~ **✅ FIXED v1.4.41** — main.cpp 加 Linux-only `QFontDatabase::addApplicationFont(NotoSansCJK-Regular.ttc)` + build-appimage.sh 從 `/usr/share/fonts/opentype/noto/` bundle CJK font 進 AppDir，runtime 從 `$APPDIR/usr/share/fonts/opentype/` 載入。AppImage builder 需 `apt install fonts-noto-cjk` 才有 source；缺檔時 silent fallback 到 host fontconfig。 |
 | **Active (P0, post-v1.4.35)** | **§N.5.bug** Android file transfer client SSL `TLSV1_ALERT_INTERNAL_ERROR` post-handshake | (b) server stale state **✅ FIXED in v1.4.34 commit `550100d`** (sweep_stale_locked, 實測 06:11:22 age=59s pending→failed verified). (a) **仍 active** — v1.4.35 `[VIPLE-VERIFY]` diagnostic 證實 **Scenario B**：每個 client SSL request server-side `verify_callback` 都 `enter` + `OK uuid=XXXXXXXX-…`，**零 DENY**，TLS handshake + cert verify 全成功。但 client BoringSSL `tls_record.cc:572` 從 server 收到 internal_error alert. **意味 alert 在 TLS handshake 之後 application 層送**（SimpleWeb / boost-asio strand 處理 request 階段）。下一步 diagnostic options：(i) 在 xfer_poll/blob/result handler 加 entry/exit/try-catch BOOST_LOG 看 handler 是否 invoke + 是否 throw；(ii) host-side curl reproduction (需要 export Pixel 5 paired cert/key 到 host)；(iii) SimpleWeb internal read/write error verbose patch. 推薦先 (i) — 最 surgical |
 | **Active (post-v1.4.33)** | **§N.5** moonlight-android FileTransferClient runtime verify | 建置 + JNI hooked，但實機未測；接收方向 listing 走 MediaStore.Downloads 而非任意 path（v1 限制） |
-| **Low (post-v1.4.33)** | **§N.6** moonlight-qt Cancel hotkey (Ctrl+Alt+Shift+X) | Web UI 重新整理 + 等 stream 結束已可中止 transfer；in-session hotkey 還沒接到 session keystroke handler |
+| ~~**Low (post-v1.4.33)**~~ ✅ **SHIPPED v1.4.103** as Ctrl+Alt+Shift+T | **§N.6** moonlight-qt Cancel hotkey | v1.4.103 ship — X 衝突 `KeyComboToggleFullScreen`, 改 T (Transfer). `input.h` enum + `input.cpp` reg + `keyboard.cpp` case → `Session::cancelFileTransfer()` → `m_FileTransferClient->cancelCurrent()`. **Visual verify still TODO** (use Send to client + 按 hotkey 中間看 overlay text "取消" + server log "cancel triggered") |
 | **Low (partial-fixed v1.4.40)** | **§N.7** Sunshine Linux fs_picker (zenity) | v1.4.40 ship `src/platform/linux/fs_picker.cpp` **stub** (回 `std::nullopt`) 讓 Linux server build 能 link（`system_tray.cpp` 對 `fs_picker::pick_open_file` unconditional reference），tray「Send to client」目前 noop。real zenity subprocess 實作仍 TODO — 需 native Linux GUI session 驗測 DISPLAY / DBUS_SESSION_BUS_ADDRESS env 透過 sunshinesvc `CreateProcessAsUserW` 正確繼承|
 | **Low (post-v1.4.20+)** | **§H.4-perf** VkFrucRenderer AMD draw-time perf fix | OSD「(含 V-sync; 60Hz 下限 ~16.7ms)」標籤已 ship；m_FrucMode=false 真實 ~13ms (60Hz) 仍偏高，要先抓 `[VIPLE-VKFRUC-GPU-PROF]` 量化才能 dive in。AMD-only，NV 未複現 |
 
@@ -250,6 +250,51 @@ commit 完整 production rollout。
 - 順便 fix `compare_fruc_engines.ps1` registry key bug
   (`videoDecoderSelection` → `videodec`, 3 處 fix) — local-only (`scripts/`
   gitignored 不入 repo), user 本機已修
+
+### v1.4.102 → v1.4.105 ship 帶走的條目（2026-05-16 → 2026-05-17, post-async-rollout polish + lag fix）
+
+主軸：**async chain default ON 之後一系列收尾改動** — Linux mouse 診斷儀器, 取消檔案傳輸 hotkey, overlay decode spike 修, chain_level autotier 二次降階補救 1080p60 高動 game content 持續 lag.
+
+- ✅ **§N.5.linux H1 diagnostic** Linux mouse input forward 不 work
+  diagnostic (`v1.4.102`) — `input.cpp setCaptureActive()` 重構: 把
+  short-circuit `||` 拆成 `relModeSkipped` / `relModeResult` 獨立
+  variable, log `[VIPLE-INPUT-CAPTURE]` 印 `relModeResult` (SDL
+  return) + `relModeErr` (`SDL_GetError`) + `m_FakeCaptureActive`
+  state. 部署 AppImage 到 Linux VM 收 log 確認 H1 (silent fake-capture
+  fallback) vs H2/H3/H4 — verify pending.
+- ✅ **§N.6 Cancel hotkey** moonlight-qt in-stream Ctrl+Alt+Shift+T
+  cancel current file transfer (`v1.4.103`) — `input.h`
+  `KeyComboCancelTransfer` enum 加在 `KeyComboMax` 前; `input.cpp`
+  `SDLK_t` registration; `keyboard.cpp` dispatch case →
+  `Session::cancelFileTransfer()` → `m_FileTransferClient->cancelCurrent()`.
+  原 plan 是 X 但已被 `KeyComboToggleFullScreen` 占用, 改 T (Transfer
+  助記). Web UI / stream-end abort_all 仍是 fallback 路徑.
+- ✅ **§J.3.e.2.i.40 (v1.4.104)** Overlay image slack capacity 消除
+  vkDeviceWaitIdle decode spike (`520c551`) — User log 顯示 5 min
+  session decode 突然飆 100-228ms 共 37 次, root cause:
+  OverlayManager text size 隨秒數變動 (±12 px) 每次 vkDeviceWaitIdle
+  realloc image. Fix: image 用 `kOverlayMaxWidth=2048` /
+  `kOverlayMaxHeight=512` slack capacity 一次 alloc, 後續 reuse 走
+  upload_to_staging; `vkfruc_overlay.frag` push const 加 `uvMax` 只
+  sample logical `[0,uvMax]` portion 避免取到 stale padding. **實測:
+  decode spike >50ms 完全消失, overlay resize 37→0**.
+- ✅ **§J.3.e.2.i.41 (v1.4.105)** chain_level autotier 二次降階 (lag
+  根因 fix) — v1.4.104 user 再 report 1080p60 持續 lag, 跑 fresh log:
+  `networkDropped=17 frame/s` persistent, `cmpDur` 22-51ms (vs benchmark
+  3.4ms), 接收 52.46 / 解碼 52.46 / 繪製 26.72 FPS (render 半切), 繪製
+  平均 29.92ms >> 16.7ms (60fps budget). v1.4.84 autotier 13s 觸發
+  TRIPLE→DUAL 但 chain compute 本身工作量不變仍卡. **根因:**
+  `chain_level=3` (預設, Phase B 4×4 adaptive ME + Pyramid 3-stage)
+  在高動 game content 對 RTX 3060 Laptop 太重. **修法:** autotier 第二
+  段加 chain_level 階梯降階, `m_EffectiveChainLevel` atomic, DUAL 期間
+  chain mean > 8ms 連 30 幀 effective level 從 env-var 上限 (s_FrucLevel)
+  往下掉 3→2→1, mean < 2.5ms 連 60 幀升回. TRIPLE 升回 logic 多加
+  `currentChainLevel >= m_InitialChainLevel` guard 避免 chain compute 沒
+  recover 又被加 1 個 warp. **User runtime verify pending** — 下次串流
+  應該看到 `[VIPLE-VKFRUC-AUTOTIER] chain_level 3 → 2 (chain mean=Xms
+  > 8ms 連續 30 幀, in DUAL)` log, cmpDur 降回 5-10ms, networkDropped
+  歸 0. Opt-out: `VIPLE_VKFRUC_DYNAMIC_TIER=0` / force level:
+  `VIPLE_VKFRUC_FRUC_LEVEL=N`.
 
 ### v1.4.74 → v1.4.86 ship 帶走的條目（2026-05-15, chain quality refinement + Pyramid ME）
 
@@ -1671,11 +1716,11 @@ AV1 雖 throughput 達標，但 NV driver 的 `av1_vulkan` 解碼路徑單 frame
 
 **何時清：** 下次 Android client 整段 streaming session 驗測時順帶過一輪 Send 小檔 → 完成後再回頭看 Receive listing UI 是否需要任何 Android 端的調整（譬如 listing 預設路徑該不該是 `MediaStore.Downloads.EXTERNAL_CONTENT_URI` 而非 host-style absolute path）。
 
-### §N.6 moonlight-qt Cancel hotkey (Ctrl+Alt+Shift+X)
+### §N.6 moonlight-qt Cancel hotkey ✅ **SHIPPED v1.4.103** as Ctrl+Alt+Shift+T
 
-**現況：** `FileTransferClient::cancelCurrent()` 已實作，會 abort reply + POST `kind=canceled` 到 server。但沒接到 SDL session keystroke handler，所以 user 在 stream 中無法用 hotkey 取消。目前的替代方案：透過 Web UI 重新整理（清掉狀態）或者結束 stream（觸發 abort_all）。
+**Shipped in v1.4.103:** `input.h` 加 `KeyComboCancelTransfer` enum value; `input.cpp` `SDLK_t` registration (Ctrl+Alt+Shift+T — X 已被 `KeyComboToggleFullScreen` 占用); `keyboard.cpp` dispatch case → `Session::cancelFileTransfer()` → `m_FileTransferClient->cancelCurrent()`. Server-side 沒改 (沿用既有 abort reply + POST `kind=canceled` 路徑).
 
-**何時清：** 找到 session.cpp 中處理 Ctrl+Alt+Shift+* combo 的位置，把 X 也綁進去呼叫 `m_FileTransferClient->cancelCurrent()`。預估 ~10 行 code。
+**Visual verify still TODO:** 串流中用 Send to client 啟個大檔, 中間按 Ctrl+Alt+Shift+T, 確認 (a) overlay text 出現「取消」/「Canceled」, (b) server log `[VIPLE-XFER]` 收到 cancel POST. Web UI 重新整理 / stream 結束 都仍是 fallback 路徑.
 
 ### §N.7 Sunshine Linux fs_picker (zenity)
 
