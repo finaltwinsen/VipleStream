@@ -17,6 +17,7 @@
 | 優先級 | 條目 | 一句話 |
 |---|---|---|
 | **Active (next)** | **§J.3.e.X Path β.11** FRUC interp quality 微調 | β.11 hypothesis 1 baseline (EDGE_AWARE_MV_THRESHOLD 2.0→8.0 動態邊緣 8×8 馬賽克 fix) ship in v1.4.11 (fa46a88)，待使用者實測決定：keep / 試 16 (仍馬賽克) / 退 4 (edge 變糊) / 改 push constant runtime tunable。其他 hypothesis (luma-gap backstop / big-motion bias / sub-pixel precision) 若需要再開 |
+| **Active (Phase B unblock, post-v1.4.111)** | **§B-NVOF Phase B prerequisite** m_NvOfFlowImage double-buffer | v1.4.110 證實 NVOF + ASYNC early-kickoff 跟 single-buffer flow image **Vulkan 同步 hazard 不可調和** (cmpCmd READ 跟 frame N 的 NVOF WRITE 跨 QF 並發). 真正修法: 兩張 m_NvOfFlowImage ping-pong (frame N NVOF 寫 image_A, frame N+1 cmpCmd 讀 image_A, frame N+1 NVOF 寫 image_B), 加 ping-pong handle tracking + 同步 sem. 需新 VkImage + memory (~3MB for 1080p R16G16) + ~150 行 changes + 跨 SW/HW path. **Phase B autotier 整合 (NVOF 當 NV best tier) block 在這條** — 修通才能 reapply early-kickoff + 拿回 5% async perf win + 才有意義把 NVOF 列 best tier |
 | ~~**Active (P0, post-v1.4.33)**~~ ✅ **FIXED v1.4.38 + v1.4.40 Android leg** | **§M.1.f** stale ownership lock — 快捷鍵退出後 server-side 釋放 | 2026-05-14 FIXED — root cause 是 client-side quit key combo 路徑不送 /cancel (`session.cpp:1395-1397` `quitAppAfter` pref 預設 false 把 `/cancel` send 跟 client app exit 兩件事綁同條件). Fix: (a) **moonlight-qt v1.4.38** `session.cpp` 拆 `shouldQuit` 成 `shouldNotifyServerCancel` (graceful exit always send /cancel) + `shouldQuitClientApp` (`quitAppAfter` pref). (b) **moonlight-android v1.4.40** `Game.java stopConnection()` 加同 pattern：`conn.stop()` 之前先用 `xferHost / xferHttpsPort / xferServerCert` 建臨時 NvHTTP 呼叫 `quitApp()`。(c) **server defensive `clear_owner_uuid()` public method 保留** (供未來 timeout 機制用)，但 **rtsp.cpp `remove()`/`clear()` session-count==0 hook 在 v1.4.39 reverted**（race condition with normal stream setup — host log 顯示 hook 在 launch 跟 RTSP session insert 之間 fire 把 just-set owner 抹掉）. **§M.1.f.2 follow-up** active: `last_activity` timestamp + idle reconcile 機制（非 hook-on-teardown）補 client crash / WiFi drop / power off 異常路徑 |
 | **Active (post-v1.4.12)** | **§M.2** Phase 2 雙 user 並發 streaming 驗測 | Ubuntu VM 上 per-user systemd + Xdummy + PipeWire 端到端跑通；NVENC 並發等實體機到位。等 §M.1 (v1.4.12) 取得使用者實測 sign-off 後開工 |
 | **Active (long-running)** | **§J.3.e.2.i.8** Phase 2.5 — FRUC native source 整合 | per-slot buffer 改善大半，殘留小 race 等 J.5 整體切換時補完，不擋使用 |
@@ -250,6 +251,63 @@ commit 完整 production rollout。
 - 順便 fix `compare_fruc_engines.ps1` registry key bug
   (`videoDecoderSelection` → `videodec`, 3 處 fix) — local-only (`scripts/`
   gitignored 不入 repo), user 本機已修
+
+### v1.4.106 → v1.4.111 ship 帶走的條目（2026-05-17 → 2026-05-18, anti-thrash + NVOF Phase A + Vulkan sync hazard 學習）
+
+主軸：**lag fix 連鎖反應 — anti-thrash autotier + Pyramid 解耦 hot-fix + NVOF Phase A production 啟用 + early-kickoff regression revert**.
+
+學到的 lesson（值得記住）：**NVOF 跟 async chain 並行不能單純把 NVOF execute 提早 — `m_NvOfFlowImage` 是 single-buffer, frame N's NVOF write 跟 frame N+1's cmpCmd read 跨 QF 並發 access 同一張 image 就是 Vulkan synchronization hazard, 不是 wait stage / barrier 改一改就能繞過**. v1.4.110 試圖搬位置失敗, 真正修法要 m_NvOfFlowImage double-buffering（~150 行, future work, 為 Phase B autotier 整合的 prerequisite）.
+
+- ✅ **§J.3.e.2.i.42 (v1.4.106)** Autotier anti-thrash (cool-down + 長 upgrade
+  window + skip-level) — v1.4.105 22 min PixArk 186 次 transition
+  user 感受「延遲一直在變」. 加 (a) 30s shared cool-down 跨 TRIPLE↔DUAL
+  + chain_level 兩 loop, (b) upgrade window 60→300 frame, (c) chain_level
+  3→1 skip-to-1 (mean > 10ms), (d) true-idle bypass (mean < 1ms 連 600
+  frame). env `VIPLE_VKFRUC_AUTOTIER_COOLDOWN_MS` / `_UPGRADE_FRAMES`
+  可調. **預期 transition 從 8.5/min 降到 ~2/min**.
+- ✅ **§J.3.e.2.i.43 (v1.4.107)** Pyramid 解耦 chain_level (修 v1.4.106
+  hot-fix lag) — User v1.4.106 PixArk 31% 掉幀, cmpDur 在 chain_level=1
+  30-50ms (vs 預期 3-5ms). Root cause v1.4.83 留下 design bug: Pyramid
+  原本只 gate 在 level 3, 低 level 沒 pyramid → 1× res full search
+  (9×9→33×33 candidates/block) chain 暴衝. v1.4.106 cool-down 把 chain
+  stick 在 level 1 30s+ 暴露此 bug. 修法 1 行: `usePyramid` 改 gate 在
+  `currentChainLevel >= 1`. **4 小時 PixArk session 0% drop / 59.92 FPS
+  lock / chain_mean 4.29ms 驗證**.
+- ✅ **§J.3.e.2.i.44 (v1.4.108)** NVOF 預設啟用 + 穩定度量測 log (Phase A)
+  — `streamingpreferences.cpp:189` `vkfrucEnableNvOf` 預設 false→true
+  (fresh install / 沒勾 checkbox auto 啟用). `vkfruc.cpp:99-104`
+  `vkfrucWantNvOfFromUserOrEnv` 改用 `qEnvironmentVariableIsSet` 修
+  VIPLE_VKFRUC_NV_OF=0 silently no-op bug. `SettingsView.qml:925` 文字
+  「(實驗性)」→「(NV GPU 預設啟用)」. vkfruc.h 加 6 個 m_NvOfProf*
+  member, 3 處 nvOFExecuteVk 加 success/fail counter + 30-consecutive
+  demote (自我 protection). 加 first-frame startup log + 60s window
+  PROF flush log. **19 分鐘 session NVOF dispatches=3601/s fails=0, NVOF
+  chain_mean=0.94ms (vs block-match 3.79ms ~4× 快)**.
+- ✅ **§J.3.e.2.i.45 (v1.4.109)** handoff-aware sync fallback (誤診 GPU
+  低 clock, 實際是 NVOF dependency) — 量到 NVOF + async 持續 handoff
+  ~15ms, 加 m_FrucChainAsyncTempDisabled atomic + handoff ring + 30s
+  shared cool-down. handoff > 5ms 連 30 frame demote async → sync; 30s
+  cool-down 過試 re-enable. **HW + SW path 對稱**. 結果: 19 分鐘 64 次
+  ASYNC↔SYNC 互切 thrash 但 **0% drop / 59.96 FPS lock / 繪製 4.80ms**.
+- ❌ **§J.3.e.2.i.46 (v1.4.110)** NVOF early-kickoff (8.8% drops regression,
+  v1.4.111 revert) — 試圖把 NVOF execute 從 partC 之後搬到 partA 之後
+  讓 NVOF 跟 cmpCmd 並行跑 + cmpCmd 加 explicit wait on previous outSig.
+  實測 15 分鐘 session **8.8% drops (1343 frames)** 嚴重退化. Root cause
+  3 個因素疊加: (A) marker submit + nvOFExecuteVk CPU 1-15ms 變動塞在
+  critical path, (B) s_VkFrucQueueLock 持有時段擴張, (C) **最關鍵**:
+  cmpCmd 等 PREVIOUS frame N-1 outSig 但本幀 N 的 NVOF 正在 WRITE
+  m_NvOfFlowImage, cmpCmd READ vs frame N WRITE 跨 QF 並發 access 同
+  一張 image **Vulkan 同步 hazard**. Driver implicit wait OR undefined
+  results → 解釋 cmpDur 11.7ms spike + cascading drops.
+- ✅ **§J.3.e.2.i.47 (v1.4.111)** revert v1.4.110 (純 git checkout 1c4fe4f^
+  -- vkfruc.cpp). diff 83+/108- 跟 v1.4.110 108+/83- 反向, 100% pure
+  revert. 還原 v1.4.94 §J.3.e.2.i.32 設計 (NVOF execute 在 partC 之後,
+  cmpCmd 跟 frame N NVOF 不重疊無 race). **預期: 0% drops 回到 v1.4.109
+  baseline + handoff 鎖 11-15ms + autotier 30s 一次 thrash 可接受**.
+
+**Phase B autotier 整合 (NVOF 當 NV 最好 tier) 被 m_NvOfFlowImage double-buffer
+work block 住**. v1.4.108-111 完成 Phase A production-ready + lesson learned,
+但 Phase B 開工要先解決 NVOF + ASYNC 並行的 data race (見下方 future work).
 
 ### v1.4.102 → v1.4.105 ship 帶走的條目（2026-05-16 → 2026-05-17, post-async-rollout polish + lag fix）
 
@@ -1299,7 +1357,7 @@ medium-high risk（動 production hot path）。
 | B-quality (a)(b)(d) | `cfe5396` `1f774b9` `24e9895` | 演算法品質里程碑（見子章節） | ✅ SSIM 0.88 → 0.998 |
 | B-quality benchmark infra | `8898e1d` `fa2a2fd` `1cf94ed` `c18d0a6` | 2-stage 抖動量測腳本 + analyze_motion.py + DIAG-OVERLAY log | ✅ ship |
 | **B2** TRIPLE 60→180 | `bc88eba` | infrastructure 全套（兩個 interp output / 第三 swapchain acquire / pacer +2） | ✅ env-var opt-in，**UI 整合 pending** |
-| **B-NVOF** | 11 commits Phase 1..7B | NVIDIA Optical Flow Vulkan extension 取代 software block-match ME | 🟡 7B async ship，**production 切換 + UI 整合 pending** |
+| **B-NVOF** | Phase 1..7B + Phase A v1.4.108-111 | NVIDIA Optical Flow Vulkan extension 取代 software block-match ME | ✅ **Phase A production ship v1.4.108** (NV GPU 預設 ON + UI + PROF + 30-consec demote); ❌ v1.4.110 early-kickoff failed (data race on m_NvOfFlowImage), revert v1.4.111; 🔒 **Phase B autotier (NVOF 當 NV best tier) block 在 m_NvOfFlowImage double-buffer future work** |
 
 #### §B-quality 補幀演算法品質（主要里程碑：commit `24e9895` algo_d）
 
