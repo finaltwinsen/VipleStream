@@ -175,9 +175,20 @@ private:
     VkImage        m_NvOfFlowImage       = VK_NULL_HANDLE;
     VkDeviceMemory m_NvOfFlowImageMem    = VK_NULL_HANDLE;
     VkImageView    m_NvOfFlowImageView   = VK_NULL_HANDLE;
+    // §J.3.e.2.i.48 (v1.4.112) — second flow image for ping-pong
+    // (mirror m_NvOfInputCurr/Prev pattern). 語意:
+    //   m_NvOfFlowImage     = THIS frame's NVOF write target
+    //   m_NvOfFlowImagePrev = LAST frame's NVOF output (chain useNvOf 讀)
+    // 每次 nvOFExecuteVk 成功後 swap. v1.4.112 是純 plumbing, 跟
+    // v1.4.111 行為一致 (chain 仍讀 prev frame's flow, NVOF execute
+    // 位置不動). v1.4.113 會 reapply early-kickoff (NVOF 寫 m_NvOfFlowImage
+    // 跟 chain 讀 m_NvOfFlowImagePrev 平行跑, 不同 image 無 race).
+    VkImage        m_NvOfFlowImagePrev    = VK_NULL_HANDLE;
+    VkDeviceMemory m_NvOfFlowImagePrevMem = VK_NULL_HANDLE;
     void*          m_NvOfHandleCurr      = nullptr;  // NvOFGPUBufferHandle
     void*          m_NvOfHandlePrev      = nullptr;
     void*          m_NvOfHandleFlow      = nullptr;
+    void*          m_NvOfHandleFlowPrev  = nullptr;   // §J.3.e.2.i.48 v1.4.112 ping-pong
     uint32_t       m_NvOfWidth           = 0;
     uint32_t       m_NvOfHeight          = 0;
     uint32_t       m_NvOfGridSize        = 2;       // 1 / 2 / 4 (output grid)
