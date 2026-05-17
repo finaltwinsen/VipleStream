@@ -642,6 +642,21 @@ private:
     std::chrono::steady_clock::time_point m_LastDowngradeTime{};
     int                m_FramesBelowIdleThreshold       = 0;
 
+    // §J.3.e.2.i.45 (v1.4.109) — handoff-aware sync fallback.
+    // 偵測 cross-QF handoff (cmpWait - cmpDur) 持續過高 → 暫時切回
+    // single-cmd sync chain (拿掉跨 QF semaphore overhead). 觸發場景:
+    // GPU 低 clock 期間 (筆電 power-save mode / driver 升頻中), cmpDur
+    // 仍 ~3ms 但 cross-QF semaphore signal/wait 延遲爆衝到 5-14ms,
+    // autotier 用 m_ChainMeanMsRing 看不到 (只測 chain compute, 不含
+    // handoff). 共用 m_LastDowngradeTime cool-down (v1.4.106): demote
+    // 後等 30s 才試 re-enable. Re-enable 後若 GPU 仍低 clock, 30 frame
+    // 內 handoff 偵測會再 demote.
+    std::atomic<bool>  m_FrucChainAsyncTempDisabled{false};
+    double             m_HandoffMsRing[kChainRingSize] = {};
+    int                m_HandoffMsRingIdx              = 0;
+    int                m_HandoffMsRingFilled           = 0;
+    int                m_FramesAboveHandoffThresh      = 0;
+
     // §B-DUMP 2026-05-07 — diagnostic frame dump for visual real-vs-interp
     // comparison.  Triggered by VIPLE_VKFRUC_DUMP_DIR=path; copies real /
     // interp_1 / interp_2 RGB compute buffers into host-visible staging

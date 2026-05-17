@@ -8650,6 +8650,27 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                 m_DynamicDualDowngrade.store(false);
             }
 
+            // §J.3.e.2.i.45 (v1.4.109) — handoff-aware sync fallback re-enable.
+            // sync 模式期間 handoff 沒被量到 (async PROF block 跳過), 無法
+            // 偵測 GPU 是否升 clock 完成. 用 30s 共用 cool-down 一過就 flip
+            // 回 async; 如果 GPU 仍低 clock, 30 frame 內 handoff 偵測會再
+            // demote 回 sync. 沒做也 OK (session 就 stuck sync) 但浪費
+            // v1.4.101 5% perf win.
+            if (m_FrucChainAsyncTempDisabled.load(std::memory_order_relaxed)) {
+                const auto nowFca = std::chrono::steady_clock::now();
+                const auto sinceDgMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    nowFca - m_LastDowngradeTime).count();
+                if (sinceDgMs >= 30000) {
+                    m_FrucChainAsyncTempDisabled.store(false, std::memory_order_relaxed);
+                    m_HandoffMsRingFilled = 0;            // fresh measurement window
+                    m_FramesAboveHandoffThresh = 0;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-AUTOTIER] frucChainAsync → ASYNC "
+                        "(cool-down 30s 過, 試 async; 若 GPU 仍低 clock, "
+                        "30 frame 內 handoff 偵測會再 demote)");
+                }
+            }
+
             // §J.3.e.2.i.44 (v1.4.108) — NVOF 穩定度 60s window flush log.
             // 條件: 有 NVOF activity (dispatches 或 fails > 0) 才印, 避免
             // block-match-only session log spam.  reset 累加器後重新計時.
@@ -9634,6 +9655,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     //   * vkf 可用 + m_FrucMode + m_FrucReady + 非 paused.
     const bool frucChainAsyncActiveHw = m_FrucChainAsyncRequested
                                      && m_FrucChainAsyncAvailable
+                                     && !m_FrucChainAsyncTempDisabled.load(std::memory_order_relaxed)  // v1.4.109
                                      && !phase2BActive
                                      && m_FrucMode && m_FrucReady && !m_FRUCPaused.load()
                                      && vkf != nullptr
@@ -10664,6 +10686,39 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 m_FrucChainAsyncGpuPartCUsAccum   += (double)safeDur(ts[4], ts[5]) * ns2us;
                 m_FrucChainAsyncGpuTotalUsAccum   += (double)safeDur(ts[0], ts[5]) * ns2us;
                 m_FrucChainAsyncGpuCount++;
+
+                // §J.3.e.2.i.45 (v1.4.109) — per-frame handoff tracking + sync fallback.
+                // handoff = cmpWait - cmpDur (cross-QF semaphore signal/wait latency).
+                // GPU 低 clock 期間爆衝到 5-14ms, 但 chain compute (cmpDur) 仍 ~3ms
+                // 所以 autotier m_ChainMeanMsRing 看不到. 連 30 frame handoff mean
+                // > 5ms → demote async, 走 single-cmd sync chain.
+                const uint64_t cmpDurUsRaw = safeDur(ts[2], ts[3]);
+                const uint64_t cmpWaitUsRaw = safeDur(ts[1], ts[4]);
+                const uint64_t handoffUsRaw = (cmpWaitUsRaw >= cmpDurUsRaw)
+                    ? (cmpWaitUsRaw - cmpDurUsRaw) : 0;
+                const double thisFrameHandoffMs = (double)handoffUsRaw * ns2us / 1000.0;
+                m_HandoffMsRing[m_HandoffMsRingIdx] = thisFrameHandoffMs;
+                m_HandoffMsRingIdx = (m_HandoffMsRingIdx + 1) % kChainRingSize;
+                if (m_HandoffMsRingFilled < kChainRingSize) m_HandoffMsRingFilled++;
+                if (m_HandoffMsRingFilled >= kChainRingSize) {
+                    double sumH = 0.0;
+                    for (int i = 0; i < kChainRingSize; ++i) sumH += m_HandoffMsRing[i];
+                    const double handoffMeanMs = sumH / kChainRingSize;
+                    if (handoffMeanMs > 5.0) {
+                        if (++m_FramesAboveHandoffThresh >= 30) {
+                            m_FrucChainAsyncTempDisabled.store(true, std::memory_order_relaxed);
+                            m_LastDowngradeTime = std::chrono::steady_clock::now();
+                            m_FramesAboveHandoffThresh = 0;
+                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VKFRUC-AUTOTIER] frucChainAsync → SYNC "
+                                "(handoff mean=%.2fms > 5ms 連 30 幀, 可能 GPU 低 clock; "
+                                "30s cool-down 過後試 re-enable)",
+                                handoffMeanMs);
+                        }
+                    } else {
+                        m_FramesAboveHandoffThresh = 0;
+                    }
+                }
                 if (m_FrucChainAsyncGpuCount >= 60) {
                     const double n = (double)m_FrucChainAsyncGpuCount;
                     const double avgA    = m_FrucChainAsyncGpuPartAUsAccum   / n;
@@ -12557,6 +12612,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     // return (該 frame 視覺斷掉一次, 下 frame gate 走 single-cmd path).
     const bool frucChainAsyncActive = m_FrucChainAsyncRequested
                                   && m_FrucChainAsyncAvailable
+                                  && !m_FrucChainAsyncTempDisabled.load(std::memory_order_relaxed)  // v1.4.109
                                   && useNativeDecodeEarly
                                   && m_FrucMode && m_FrucReady && !frucPausedThisFrame
                                   && m_SwImageLayoutInited
@@ -12610,6 +12666,37 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                 m_FrucChainAsyncGpuPartCUsAccum   += (double)safeDurSw(ts[4], ts[5]) * ns2us;
                 m_FrucChainAsyncGpuTotalUsAccum   += (double)safeDurSw(ts[0], ts[5]) * ns2us;
                 m_FrucChainAsyncGpuCount++;
+
+                // §J.3.e.2.i.45 (v1.4.109) — SW path mirror handoff tracking + sync fallback.
+                // Mirror HW path 10666-10696 同邏輯, 共用 m_HandoffMsRing / counter /
+                // m_FrucChainAsyncTempDisabled / m_LastDowngradeTime (SW/HW 互斥, 不會 race).
+                const uint64_t cmpDurUsRawSw = safeDurSw(ts[2], ts[3]);
+                const uint64_t cmpWaitUsRawSw = safeDurSw(ts[1], ts[4]);
+                const uint64_t handoffUsRawSw = (cmpWaitUsRawSw >= cmpDurUsRawSw)
+                    ? (cmpWaitUsRawSw - cmpDurUsRawSw) : 0;
+                const double thisFrameHandoffMsSw = (double)handoffUsRawSw * ns2us / 1000.0;
+                m_HandoffMsRing[m_HandoffMsRingIdx] = thisFrameHandoffMsSw;
+                m_HandoffMsRingIdx = (m_HandoffMsRingIdx + 1) % kChainRingSize;
+                if (m_HandoffMsRingFilled < kChainRingSize) m_HandoffMsRingFilled++;
+                if (m_HandoffMsRingFilled >= kChainRingSize) {
+                    double sumHSw = 0.0;
+                    for (int i = 0; i < kChainRingSize; ++i) sumHSw += m_HandoffMsRing[i];
+                    const double handoffMeanMsSw = sumHSw / kChainRingSize;
+                    if (handoffMeanMsSw > 5.0) {
+                        if (++m_FramesAboveHandoffThresh >= 30) {
+                            m_FrucChainAsyncTempDisabled.store(true, std::memory_order_relaxed);
+                            m_LastDowngradeTime = std::chrono::steady_clock::now();
+                            m_FramesAboveHandoffThresh = 0;
+                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VKFRUC-AUTOTIER] frucChainAsync → SYNC "
+                                "(handoff mean=%.2fms > 5ms 連 30 幀, SW path; "
+                                "30s cool-down 過後試 re-enable)",
+                                handoffMeanMsSw);
+                        }
+                    } else {
+                        m_FramesAboveHandoffThresh = 0;
+                    }
+                }
                 if (m_FrucChainAsyncGpuCount >= 60) {
                     const double n = (double)m_FrucChainAsyncGpuCount;
                     const double avgA    = m_FrucChainAsyncGpuPartAUsAccum   / n;
