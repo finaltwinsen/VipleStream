@@ -11086,23 +11086,118 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             if (vkfc->unlock_frame) vkfc->unlock_frame(fc, vkf);
         }
 
+        // §J.3.e.2.i.46 (v1.4.110) — early NVOF kickoff, 解 NVOF + async
+        // dependency chain. 從 partC 之後 (原 line 11215) 搬到 partA 之後,
+        // 讓 NVOF GPU work 跟 cmpCmd / partC 平行跑.  cmpCmd 讀的是
+        // PREVIOUS frame 的 m_NvOfFlowImage (前一幀 outSig, 早就 done),
+        // explicit wait 0ms → handoff 從 15ms 降回 < 1ms.
+        // nvOfPrevOutSig 捕獲 m_NvOfTimelineValue 在更新前的值, 給下面
+        // cmpCmd submit 當 explicit wait value 用 (避免 driver implicit
+        // wait via image layout tracking 變成 15ms 卡頓).
+        uint64_t nvOfPrevOutSig = 0;
+        bool     nvOfKickedThisFrameD = false;
+        if (m_NvOfReady && m_NvOfFuncList) {
+            static thread_local uint32_t s_NvOfFrameCountFCAH = 0;
+            const uint32_t frameNumFCAH = s_NvOfFrameCountFCAH++;
+            if (frameNumFCAH == 0) {
+                // frame-0: m_NvOfInputPrev UNDEFINED, 只 swap 不 dispatch.
+                std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
+                std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
+                std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+            } else {
+                nvOfPrevOutSig = m_NvOfTimelineValue;   // capture before update
+                const uint64_t inSigVal  = m_NvOfTimelineValue + 1;
+                const uint64_t outSigVal = inSigVal + 1;
+
+                // marker submit on graphics QF — same-queue order 保證在 partA
+                // submit 之後 fire (partA 已 populate m_NvOfInputCurr).
+                VkTimelineSemaphoreSubmitInfo tsMarkE = {};
+                tsMarkE.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+                tsMarkE.signalSemaphoreValueCount = 1;
+                tsMarkE.pSignalSemaphoreValues    = &inSigVal;
+                VkSubmitInfo siMarkE = {};
+                siMarkE.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                siMarkE.pNext                = &tsMarkE;
+                siMarkE.commandBufferCount   = 0;
+                siMarkE.signalSemaphoreCount = 1;
+                siMarkE.pSignalSemaphores    = &m_NvOfTimelineSem;
+                VkResult vrMarkE;
+                {
+                    std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+                    vrMarkE = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siMarkE, VK_NULL_HANDLE);
+                }
+                if (vrMarkE == VK_SUCCESS) {
+                    auto* funcListE = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
+                    NV_OF_SYNC_VK waitSyncE = {};
+                    waitSyncE.semaphore = m_NvOfTimelineSem;
+                    waitSyncE.value     = inSigVal;
+                    NV_OF_SYNC_VK signalSyncE = {};
+                    signalSyncE.semaphore = m_NvOfTimelineSem;
+                    signalSyncE.value     = outSigVal;
+                    NV_OF_EXECUTE_INPUT_PARAMS_VK ofInE = {};
+                    ofInE.inputFrame      = (NvOFGPUBufferHandle)m_NvOfHandleCurr;
+                    ofInE.referenceFrame  = (NvOFGPUBufferHandle)m_NvOfHandlePrev;
+                    ofInE.disableTemporalHints = NV_OF_FALSE;
+                    ofInE.numWaitSyncs    = 1;
+                    ofInE.pWaitSyncs      = &waitSyncE;
+                    NV_OF_EXECUTE_OUTPUT_PARAMS_VK ofOutE = {};
+                    ofOutE.outputBuffer = (NvOFGPUBufferHandle)m_NvOfHandleFlow;
+                    ofOutE.pSignalSync  = &signalSyncE;
+                    NV_OF_STATUS sE = funcListE->nvOFExecuteVk(
+                        (NvOFHandle)m_NvOfHandle, &ofInE, &ofOutE);
+                    if (sE == NV_OF_SUCCESS) {
+                        m_NvOfTimelineValue = outSigVal;
+                        nvOfKickedThisFrameD = true;
+                        // SDK 已 capture handle by value, swap CPU pointer 安全.
+                        std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
+                        std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
+                        std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+                        m_NvOfProfDispatchCount++;
+                        m_NvOfProfConsecFails = 0;
+                    } else {
+                        m_NvOfProfFailCount++;
+                        if (++m_NvOfProfConsecFails >= 30 && m_NvOfReady) {
+                            m_NvOfReady = false;
+                            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VKFRUC-NVOF-PROF] 30 consecutive nvOFExecuteVk "
+                                "fails (last status=%d), demoting m_NvOfReady=false, "
+                                "本 session 改走 block-match", (int)sE);
+                        }
+                    }
+                } else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VKFRUC-NVOF] §J.3.e.2.i.46 early marker "
+                                "QueueSubmit failed vr=%d", (int)vrMarkE);
+                }
+            }
+        }
+
         // ---- cmpCmd submit (compute queue, computeTimeline@V_pre → @V_post) ----
+        // §J.3.e.2.i.46 (v1.4.110) — 加 explicit wait on m_NvOfTimelineSem at
+        // 前一幀 outSig (nvOfPrevOutSig). 讓 driver implicit wait via image
+        // layout tracking 不再插入 (同一 dependency 只 wait 一次).  cmpCmd 讀的
+        // 是前一幀 flow, 早就 done → explicit wait 0ms.
         {
-            VkPipelineStageFlags waitMC[1] = { VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT };
-            VkSemaphore          waitSC[1] = { m_ComputeTimelineSem };
-            uint64_t             waitVC[1] = { computeV_preD };
+            const bool addNvOfWaitC = nvOfKickedThisFrameD && nvOfPrevOutSig > 0;
+            VkPipelineStageFlags waitMC[2] = {
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            };
+            VkSemaphore          waitSC[2] = { m_ComputeTimelineSem, m_NvOfTimelineSem };
+            uint64_t             waitVC[2] = { computeV_preD, nvOfPrevOutSig };
+            const uint32_t       waitCountC = addNvOfWaitC ? 2 : 1;
             VkSemaphore          sigSC[1]  = { m_ComputeTimelineSem };
             uint64_t             sigVC[1]  = { computeV_postD };
             VkTimelineSemaphoreSubmitInfo tssiCH = {};
             tssiCH.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-            tssiCH.waitSemaphoreValueCount   = 1;
+            tssiCH.waitSemaphoreValueCount   = waitCountC;
             tssiCH.pWaitSemaphoreValues      = waitVC;
             tssiCH.signalSemaphoreValueCount = 1;
             tssiCH.pSignalSemaphoreValues    = sigVC;
             VkSubmitInfo siCH = {};
             siCH.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             siCH.pNext                = &tssiCH;
-            siCH.waitSemaphoreCount   = 1;
+            siCH.waitSemaphoreCount   = waitCountC;
             siCH.pWaitSemaphores      = waitSC;
             siCH.pWaitDstStageMask    = waitMC;
             siCH.commandBufferCount   = 1;
@@ -11212,79 +11307,9 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             m_FrucChainAsyncTimerArmed[fcaTimerSlot] = true;
         }
 
-        // §J.3.e.2.i.32 (v1.4.94) — NV-OF marker submit + execute (mirror
-        // phase2BActive line 10007-10068).  Path D copy submit / partA cmd
-        // 已 populated m_NvOfInputCurr; here fire OF queue execute + swap
-        // input handles.
-        if (m_NvOfReady && m_NvOfFuncList) {
-            static thread_local uint32_t s_NvOfFrameCountFCAH = 0;
-            const uint32_t frameNumFCAH = s_NvOfFrameCountFCAH++;
-            if (frameNumFCAH == 0) {
-                std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
-                std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
-                std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
-            }
-            if (frameNumFCAH > 0) {
-                const uint64_t inSigVal  = m_NvOfTimelineValue + 1;
-                const uint64_t outSigVal = inSigVal + 1;
-                VkTimelineSemaphoreSubmitInfo tsMarkH = {};
-                tsMarkH.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-                tsMarkH.signalSemaphoreValueCount = 1;
-                tsMarkH.pSignalSemaphoreValues    = &inSigVal;
-                VkSubmitInfo siMarkH = {};
-                siMarkH.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-                siMarkH.pNext                = &tsMarkH;
-                siMarkH.commandBufferCount   = 0;
-                siMarkH.signalSemaphoreCount = 1;
-                siMarkH.pSignalSemaphores    = &m_NvOfTimelineSem;
-                VkResult vrMarkH;
-                {
-                    std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
-                    vrMarkH = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siMarkH, VK_NULL_HANDLE);
-                }
-                if (vrMarkH == VK_SUCCESS) {
-                    auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
-                    NV_OF_SYNC_VK waitSync = {};
-                    waitSync.semaphore = m_NvOfTimelineSem;
-                    waitSync.value     = inSigVal;
-                    NV_OF_SYNC_VK signalSync = {};
-                    signalSync.semaphore = m_NvOfTimelineSem;
-                    signalSync.value     = outSigVal;
-                    NV_OF_EXECUTE_INPUT_PARAMS_VK ofIn = {};
-                    ofIn.inputFrame      = (NvOFGPUBufferHandle)m_NvOfHandleCurr;
-                    ofIn.referenceFrame  = (NvOFGPUBufferHandle)m_NvOfHandlePrev;
-                    ofIn.disableTemporalHints = NV_OF_FALSE;
-                    ofIn.numWaitSyncs    = 1;
-                    ofIn.pWaitSyncs      = &waitSync;
-                    NV_OF_EXECUTE_OUTPUT_PARAMS_VK ofOut = {};
-                    ofOut.outputBuffer = (NvOFGPUBufferHandle)m_NvOfHandleFlow;
-                    ofOut.pSignalSync  = &signalSync;
-                    NV_OF_STATUS s = funcList->nvOFExecuteVk((NvOFHandle)m_NvOfHandle,
-                                                              &ofIn, &ofOut);
-                    if (s == NV_OF_SUCCESS) {
-                        m_NvOfTimelineValue = outSigVal;
-                        std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
-                        std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
-                        std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
-                        m_NvOfProfDispatchCount++;
-                        m_NvOfProfConsecFails = 0;
-                    } else {
-                        m_NvOfProfFailCount++;
-                        if (++m_NvOfProfConsecFails >= 30 && m_NvOfReady) {
-                            m_NvOfReady = false;
-                            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-VKFRUC-NVOF-PROF] 30 consecutive nvOFExecuteVk "
-                                "fails (last status=%d), demoting m_NvOfReady=false, "
-                                "本 session 改走 block-match", (int)s);
-                        }
-                    }
-                } else {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-VKFRUC-NVOF] §J.3.e.2.i.32 marker QueueSubmit "
-                                "failed vr=%d", (int)vrMarkH);
-                }
-            }
-        }
+        // §J.3.e.2.i.46 (v1.4.110) — NVOF kickoff 已搬到 partA submit 之後
+        // (上方 nvOfPrevOutSig / nvOfKickedThisFrameD), 解 dependency chain.
+        // 原 v1.4.94 §J.3.e.2.i.32 在此處的 marker + execute block 整段移除.
 
         // ===== Present (mirror single-cmd path line 10878+, dual + triple + single) =====
         // Order: piA (interp_1) → [piC (interp_2 if TRIPLE)] → piB (real).
