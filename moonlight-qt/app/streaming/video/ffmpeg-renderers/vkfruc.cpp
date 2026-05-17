@@ -528,6 +528,18 @@ void VkFrucRenderer::toggleFRUC()
 
 void VkFrucRenderer::teardown()
 {
+    // §J.3.e.2.i.50 (v1.4.114) — teardown diagnostic log: 標記每個 destroy
+    // 函式進入點 + vkDeviceWaitIdle 計時, 為 v1.4.112 quit-hang regression
+    // 找確切位置. 下次再現 quit hang 時 grep [VIPLE-VKFRUC-TEARDOWN]
+    // 看哪個 step 卡住.
+    using TdClock = std::chrono::steady_clock;
+    auto tdStart = TdClock::now();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] enter");
+    auto tdMs = [&]() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            TdClock::now() - tdStart).count();
+    };
+
     // §J.3.e.2.i.3.e — drain GPU first.  Pending submits may still hold
     // image views / descriptor sets / cmd buffers; if we destroy them
     // mid-flight the driver will explode (or silently corrupt).
@@ -538,7 +550,11 @@ void VkFrucRenderer::teardown()
             auto pfnDeviceWaitIdle = (PFN_vkDeviceWaitIdle)pfnGetDevPa(
                 m_Device, "vkDeviceWaitIdle");
             if (pfnDeviceWaitIdle) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-TEARDOWN] vkDeviceWaitIdle start (t+%lldms)", (long long)tdMs());
                 pfnDeviceWaitIdle(m_Device);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-TEARDOWN] vkDeviceWaitIdle done (t+%lldms)", (long long)tdMs());
             }
         }
     }
@@ -549,23 +565,39 @@ void VkFrucRenderer::teardown()
     // set layout, so they go first; sampler-conversion holds the
     // immutable sampler used in descriptor set layout, so layouts go
     // before the sampler.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroyNvVideoParser (t+%lldms)", (long long)tdMs());
     destroyNvVideoParser();         // §J.3.e.2.i.8 native VK decode parser
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroyDecodeCommandResources (t+%lldms)", (long long)tdMs());
     destroyDecodeCommandResources(); // §J.3.e.2.i.8 Phase 1.3c decode cmd
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroyVideoSession (t+%lldms)", (long long)tdMs());
     destroyVideoSession();          // §J.3.e.2.i.8 native VK decode
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroyOverlayResources (t+%lldms)", (long long)tdMs());
     destroyOverlayResources();      // §J.3.e.2.i overlay
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroyInterpGraphicsPipeline (t+%lldms)", (long long)tdMs());
     destroyInterpGraphicsPipeline(); // §J.3.e.2.i.4.2
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroyFrucComputeResources (含 destroyOpticalFlowSession) (t+%lldms)", (long long)tdMs());
     destroyFrucComputeResources(); // §J.3.e.2.i.4
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroySwUploadResources (t+%lldms)", (long long)tdMs());
     destroySwUploadResources();   // §J.3.e.2.i.3.e-SW
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] unloadNvOfApi (t+%lldms)", (long long)tdMs());
     unloadNvOfApi();              // §B-NVOF Phase 3 — release nvofapi64.dll handle
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroyDescriptorPool (t+%lldms)", (long long)tdMs());
     destroyDescriptorPool();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroyInFlightRing (t+%lldms)", (long long)tdMs());
     destroyInFlightRing();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroyGraphicsPipeline (t+%lldms)", (long long)tdMs());
     destroyGraphicsPipeline();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroyRenderPassAndFramebuffers (t+%lldms)", (long long)tdMs());
     destroyRenderPassAndFramebuffers();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroyYcbcrSamplerAndLayouts (t+%lldms)", (long long)tdMs());
     destroyYcbcrSamplerAndLayouts();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] destroySwapchain (t+%lldms)", (long long)tdMs());
     destroySwapchain();
     if (m_Device != VK_NULL_HANDLE && m_pfnDestroyDevice) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] vkDestroyDevice start (t+%lldms)", (long long)tdMs());
         m_pfnDestroyDevice(m_Device, nullptr);
         m_Device = VK_NULL_HANDLE;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VKFRUC-TEARDOWN] vkDestroyDevice done (t+%lldms)", (long long)tdMs());
     }
     if (m_Surface != VK_NULL_HANDLE && m_pfnDestroySurfaceKHR) {
         m_pfnDestroySurfaceKHR(m_Instance, m_Surface, nullptr);
@@ -581,6 +613,8 @@ void VkFrucRenderer::teardown()
         m_pfnDestroyInstance(m_Instance, nullptr);
         m_Instance = VK_NULL_HANDLE;
     }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-TEARDOWN] exit (total t+%lldms)", (long long)tdMs());
 }
 
 bool VkFrucRenderer::createInstanceAndSurface(SDL_Window* window)
@@ -1867,18 +1901,36 @@ void VkFrucRenderer::destroyOpticalFlowSession()
     if (!m_NvOfFuncList) return;
     auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
 
+    // §J.3.e.2.i.50 (v1.4.114) — NVOF teardown 細部 timing log,
+    // 為 v1.4.112 quit-hang regression 找確切位置 (SDK call vs 純 Vulkan).
+    using NofClock = std::chrono::steady_clock;
+    auto nofStart = NofClock::now();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-TEARDOWN-NVOF] enter (m_NvOfHandle=%p Curr=%p Prev=%p Flow=%p)",
+        m_NvOfHandle, m_NvOfHandleCurr, m_NvOfHandlePrev, m_NvOfHandleFlow);
+    auto nofMs = [&]() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            NofClock::now() - nofStart).count();
+    };
+
     // §B-NVOF Phase 3d — unregister resources before destroying handles.
     // Order: handles → images/memory → session.
-    auto unregisterIfAny = [&](void*& h) {
+    auto unregisterIfAny = [&](void*& h, const char* name) {
         if (!h || !m_NvOfHandle) return;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TEARDOWN-NVOF] nvOFUnregisterResourceVk(%s) start (t+%lldms)",
+            name, (long long)nofMs());
         NV_OF_UNREGISTER_RESOURCE_PARAMS_VK params = {};
         params.hOFGpuBuffer = (NvOFGPUBufferHandle)h;
         funcList->nvOFUnregisterResourceVk(&params);
         h = nullptr;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TEARDOWN-NVOF] nvOFUnregisterResourceVk(%s) done (t+%lldms)",
+            name, (long long)nofMs());
     };
-    unregisterIfAny(m_NvOfHandleCurr);
-    unregisterIfAny(m_NvOfHandlePrev);
-    unregisterIfAny(m_NvOfHandleFlow);
+    unregisterIfAny(m_NvOfHandleCurr, "Curr");
+    unregisterIfAny(m_NvOfHandlePrev, "Prev");
+    unregisterIfAny(m_NvOfHandleFlow, "Flow");
 
     if (m_Device != VK_NULL_HANDLE) {
         auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
@@ -1924,12 +1976,18 @@ void VkFrucRenderer::destroyOpticalFlowSession()
     }
 
     if (m_NvOfHandle) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TEARDOWN-NVOF] nvOFDestroy start (t+%lldms)", (long long)nofMs());
         funcList->nvOFDestroy((NvOFHandle)m_NvOfHandle);
         m_NvOfHandle = nullptr;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TEARDOWN-NVOF] nvOFDestroy done (t+%lldms)", (long long)nofMs());
     }
     m_NvOfReady  = false;
     m_NvOfWidth  = 0;
     m_NvOfHeight = 0;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-TEARDOWN-NVOF] exit (total t+%lldms)", (long long)nofMs());
 }
 
 // §B-DUMP 2026-05-07 — fp32 planar RGB → uint8 packed RGBA.  Source layout:
