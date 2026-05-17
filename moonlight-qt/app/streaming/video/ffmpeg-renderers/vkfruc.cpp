@@ -1723,7 +1723,11 @@ bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
                     m_NvOfInputPrev, m_NvOfInputPrevMem) ||
         !allocImage(FLOW_FMT, width / m_NvOfGridSize, height / m_NvOfGridSize,
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                    m_NvOfFlowImage, m_NvOfFlowImageMem)) {
+                    m_NvOfFlowImage, m_NvOfFlowImageMem) ||
+        // §J.3.e.2.i.48 (v1.4.112) — second flow image for ping-pong
+        !allocImage(FLOW_FMT, width / m_NvOfGridSize, height / m_NvOfGridSize,
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                    m_NvOfFlowImagePrev, m_NvOfFlowImagePrevMem)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-NVOF] VkImage alloc failed");
         destroyOpticalFlowSession();
@@ -1746,7 +1750,9 @@ bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
     };
     if (!registerImage(m_NvOfInputCurr, NV12_FMT, m_NvOfHandleCurr) ||
         !registerImage(m_NvOfInputPrev, NV12_FMT, m_NvOfHandlePrev) ||
-        !registerImage(m_NvOfFlowImage, FLOW_FMT, m_NvOfHandleFlow)) {
+        !registerImage(m_NvOfFlowImage, FLOW_FMT, m_NvOfHandleFlow) ||
+        // §J.3.e.2.i.48 (v1.4.112) — ping-pong second flow handle
+        !registerImage(m_NvOfFlowImagePrev, FLOW_FMT, m_NvOfHandleFlowPrev)) {
         destroyOpticalFlowSession();
         return false;
     }
@@ -1931,6 +1937,7 @@ void VkFrucRenderer::destroyOpticalFlowSession()
     unregisterIfAny(m_NvOfHandleCurr, "Curr");
     unregisterIfAny(m_NvOfHandlePrev, "Prev");
     unregisterIfAny(m_NvOfHandleFlow, "Flow");
+    unregisterIfAny(m_NvOfHandleFlowPrev, "FlowPrev");   // §J.3.e.2.i.48 v1.4.112
 
     if (m_Device != VK_NULL_HANDLE) {
         auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
@@ -1971,6 +1978,7 @@ void VkFrucRenderer::destroyOpticalFlowSession()
             DESTROY_IMG_MEM(m_NvOfInputCurr,  m_NvOfInputCurrMem)
             DESTROY_IMG_MEM(m_NvOfInputPrev,  m_NvOfInputPrevMem)
             DESTROY_IMG_MEM(m_NvOfFlowImage,  m_NvOfFlowImageMem)
+            DESTROY_IMG_MEM(m_NvOfFlowImagePrev, m_NvOfFlowImagePrevMem)  // §J.3.e.2.i.48 v1.4.112
 #undef DESTROY_IMG_MEM
         }
     }
@@ -8888,7 +8896,10 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         const uint32_t flowW = width  / m_NvOfGridSize;
         const uint32_t flowH = height / m_NvOfGridSize;
 
-        // Image layout: SDK leaves m_NvOfFlowImage in GENERAL after exec
+        // §J.3.e.2.i.48 (v1.4.112) — ping-pong: chain 讀 m_NvOfFlowImagePrev
+        // (上一幀 NVOF 寫的, 已 done), 本幀 NVOF 寫 m_NvOfFlowImage (不同 image,
+        // v1.4.113 early-kickoff 啟用後 不會跟 chain READ 競爭).
+        // Image layout: SDK leaves m_NvOfFlowImagePrev in GENERAL after exec
         // (most NV drivers); transition GENERAL → TRANSFER_SRC for the copy.
         VkImageMemoryBarrier flowToSrc = {};
         flowToSrc.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -8898,7 +8909,7 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         flowToSrc.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         flowToSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         flowToSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        flowToSrc.image               = m_NvOfFlowImage;
+        flowToSrc.image               = m_NvOfFlowImagePrev;
         flowToSrc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         flowToSrc.subresourceRange.levelCount = 1;
         flowToSrc.subresourceRange.layerCount = 1;
@@ -8917,7 +8928,7 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             reg.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             reg.imageSubresource.layerCount = 1;
             reg.imageExtent       = { flowW, flowH, 1 };
-            pfnCmdCopyImageToBuffer(cmd, m_NvOfFlowImage,
+            pfnCmdCopyImageToBuffer(cmd, m_NvOfFlowImagePrev,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 m_NvOfFlowStaging, 1, &reg);
         }
@@ -10611,6 +10622,10 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                         std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
                         std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
                         std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+                        // §J.3.e.2.i.48 (v1.4.112) — flow ping-pong swap
+                        std::swap(m_NvOfFlowImage,    m_NvOfFlowImagePrev);
+                        std::swap(m_NvOfFlowImageMem, m_NvOfFlowImagePrevMem);
+                        std::swap(m_NvOfHandleFlow,   m_NvOfHandleFlowPrev);
                         m_NvOfProfDispatchCount++;
                         m_NvOfProfConsecFails = 0;
                     } else {
@@ -11324,6 +11339,10 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                         std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
                         std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
                         std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+                        // §J.3.e.2.i.48 (v1.4.112) — flow ping-pong swap
+                        std::swap(m_NvOfFlowImage,    m_NvOfFlowImagePrev);
+                        std::swap(m_NvOfFlowImageMem, m_NvOfFlowImagePrevMem);
+                        std::swap(m_NvOfHandleFlow,   m_NvOfHandleFlowPrev);
                         m_NvOfProfDispatchCount++;
                         m_NvOfProfConsecFails = 0;
                     } else {
@@ -12168,6 +12187,10 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
                 std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
                 std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+                // §J.3.e.2.i.48 (v1.4.112) — flow ping-pong swap
+                std::swap(m_NvOfFlowImage,    m_NvOfFlowImagePrev);
+                std::swap(m_NvOfFlowImageMem, m_NvOfFlowImagePrevMem);
+                std::swap(m_NvOfHandleFlow,   m_NvOfHandleFlowPrev);
             } else {
                 m_NvOfProfFailCount++;
                 if (++m_NvOfProfConsecFails >= 30 && m_NvOfReady) {
