@@ -1939,7 +1939,8 @@ bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
         }
     }
 
-    m_NvOfReady = true;
+    m_NvOfReady.store(true);
+    nvOfWorkerStart();  // §J.3.e.2.i.53 (v1.4.118) — start dispatch worker thread
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-NVOF] OF session READY — 3 images registered "
                 "(curr=%p prev=%p flow=%p) + cmdPool/cmdBuf/timelineSem/flowStaging",
@@ -1963,6 +1964,18 @@ void VkFrucRenderer::destroyOpticalFlowSession()
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             NofClock::now() - nofStart).count();
     };
+
+    // §J.3.e.2.i.53 (v1.4.118) — stop NVOF dispatch worker FIRST. Drain queue
+    // (worker finishes pending SDK calls), join worker thread. Must complete
+    // BEFORE unregister + destroy resources to avoid worker accessing freed
+    // SDK state.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-TEARDOWN-NVOF] nvOfWorkerStop start (t+%lldms)",
+        (long long)nofMs());
+    nvOfWorkerStop();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-TEARDOWN-NVOF] nvOfWorkerStop done (t+%lldms)",
+        (long long)nofMs());
 
     // §B-NVOF Phase 3d — unregister resources before destroying handles.
     // Order: handles → images/memory → session.
@@ -2036,11 +2049,103 @@ void VkFrucRenderer::destroyOpticalFlowSession()
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
             "[VIPLE-VKFRUC-TEARDOWN-NVOF] nvOFDestroy done (t+%lldms)", (long long)nofMs());
     }
-    m_NvOfReady  = false;
+    m_NvOfReady.store(false);
     m_NvOfWidth  = 0;
     m_NvOfHeight = 0;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
         "[VIPLE-VKFRUC-TEARDOWN-NVOF] exit (total t+%lldms)", (long long)nofMs());
+}
+
+// §J.3.e.2.i.53 (v1.4.118) — NVOF dispatch worker thread (Option B).
+// Render thread push request 後立刻 return; worker pop + 呼叫 SDK +
+// 更新 prof counters + 30-consec fail demote m_NvOfReady. 樂觀 swap
+// 邏輯在 render thread 端 (Block B push 前 swap), 失敗時下幀 chain
+// 讀 stale flow (1 frame artifact).
+void VkFrucRenderer::nvOfWorkerStart()
+{
+    m_NvOfWorkerStop.store(false);
+    m_NvOfWorker = std::thread(&VkFrucRenderer::nvOfWorkerLoop, this);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-NVOF] §J.3.e.2.i.53 worker thread started");
+}
+
+void VkFrucRenderer::nvOfWorkerStop()
+{
+    if (!m_NvOfWorker.joinable()) return;
+    {
+        std::lock_guard<std::mutex> lk(m_NvOfWorkerMutex);
+        m_NvOfWorkerStop.store(true);
+    }
+    m_NvOfWorkerCv.notify_all();
+    m_NvOfWorker.join();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-NVOF] §J.3.e.2.i.53 worker thread joined");
+}
+
+void VkFrucRenderer::nvOfWorkerSubmit(uint64_t inSig, uint64_t outSig,
+                                       void* curr, void* prev, void* flow)
+{
+    {
+        std::lock_guard<std::mutex> lk(m_NvOfWorkerMutex);
+        m_NvOfWorkerQueue.push({inSig, outSig, curr, prev, flow});
+    }
+    m_NvOfWorkerCv.notify_one();
+}
+
+void VkFrucRenderer::nvOfWorkerLoop()
+{
+    auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
+    if (!funcList) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-NVOF] §J.3.e.2.i.53 worker exit: null funcList");
+        return;
+    }
+    while (true) {
+        NvOfRequest req;
+        {
+            std::unique_lock<std::mutex> lk(m_NvOfWorkerMutex);
+            m_NvOfWorkerCv.wait(lk, [this]() {
+                return m_NvOfWorkerStop.load() || !m_NvOfWorkerQueue.empty();
+            });
+            if (m_NvOfWorkerStop.load() && m_NvOfWorkerQueue.empty()) {
+                break;  // shutdown + drained
+            }
+            req = m_NvOfWorkerQueue.front();
+            m_NvOfWorkerQueue.pop();
+        }
+        // Outside lock — actual SDK call.
+        NV_OF_SYNC_VK waitSync = {};
+        waitSync.semaphore = m_NvOfTimelineSem;
+        waitSync.value     = req.inSigVal;
+        NV_OF_SYNC_VK signalSync = {};
+        signalSync.semaphore = m_NvOfTimelineSem;
+        signalSync.value     = req.outSigVal;
+        NV_OF_EXECUTE_INPUT_PARAMS_VK ofIn = {};
+        ofIn.inputFrame      = (NvOFGPUBufferHandle)req.capturedCurr;
+        ofIn.referenceFrame  = (NvOFGPUBufferHandle)req.capturedPrev;
+        ofIn.disableTemporalHints = NV_OF_FALSE;
+        ofIn.numWaitSyncs    = 1;
+        ofIn.pWaitSyncs      = &waitSync;
+        NV_OF_EXECUTE_OUTPUT_PARAMS_VK ofOut = {};
+        ofOut.outputBuffer = (NvOFGPUBufferHandle)req.capturedFlow;
+        ofOut.pSignalSync  = &signalSync;
+        NV_OF_STATUS s = funcList->nvOFExecuteVk(
+            (NvOFHandle)m_NvOfHandle, &ofIn, &ofOut);
+        if (s == NV_OF_SUCCESS) {
+            m_NvOfProfDispatchCount.fetch_add(1, std::memory_order_relaxed);
+            m_NvOfProfConsecFails.store(0, std::memory_order_relaxed);
+        } else {
+            m_NvOfProfFailCount.fetch_add(1, std::memory_order_relaxed);
+            uint64_t newConsec = m_NvOfProfConsecFails.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (newConsec >= 30 && m_NvOfReady.load()) {
+                m_NvOfReady.store(false);
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF-PROF] §J.3.e.2.i.53 worker thread: 30 consecutive "
+                    "nvOFExecuteVk fails (last status=%d), demoting m_NvOfReady=false, "
+                    "本 session 改走 block-match", (int)s);
+            }
+        }
+    }
 }
 
 // §B-DUMP 2026-05-07 — fp32 planar RGB → uint8 packed RGBA.  Source layout:
@@ -8561,7 +8666,7 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             : "session init failed")));
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
             "[VIPLE-VKFRUC-NVOF-PROF] startup: %s (m_NvOfReady=%d wantedByUser=%d)",
-            reason, (int)m_NvOfReady, (int)wantedByUser);
+            reason, (int)m_NvOfReady.load(), (int)wantedByUser);
         m_NvOfProfLastLog = std::chrono::steady_clock::now();
     }
 
@@ -8788,20 +8893,25 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             const auto nowProf = std::chrono::steady_clock::now();
             const auto elapsedSec = std::chrono::duration_cast<std::chrono::seconds>(
                 nowProf - m_NvOfProfLastLog).count();
-            if (elapsedSec >= 60 && (m_NvOfProfDispatchCount + m_NvOfProfFailCount) > 0) {
-                const uint64_t total = m_NvOfProfDispatchCount + m_NvOfProfFailCount;
-                const double failPct = 100.0 * (double)m_NvOfProfFailCount / (double)total;
+            // §J.3.e.2.i.53 (v1.4.118) — atomic exchange(0) reads + resets
+            // 同時 (worker thread 可能正在 increment). Captures snapshot.
+            const uint64_t snapDispatch = m_NvOfProfDispatchCount.load(std::memory_order_relaxed);
+            const uint64_t snapFail     = m_NvOfProfFailCount.load(std::memory_order_relaxed);
+            if (elapsedSec >= 60 && (snapDispatch + snapFail) > 0) {
+                // Reset (worker may increment between load and store; minor undercount OK)
+                m_NvOfProfDispatchCount.fetch_sub(snapDispatch, std::memory_order_relaxed);
+                m_NvOfProfFailCount.fetch_sub(snapFail, std::memory_order_relaxed);
+                const uint64_t total = snapDispatch + snapFail;
+                const double failPct = 100.0 * (double)snapFail / (double)total;
                 const double meanChainMs = m_NvOfProfChainSamples
                     ? m_NvOfProfChainMsAccum / (double)m_NvOfProfChainSamples : 0.0;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-NVOF-PROF] period=%llds dispatches=%llu fails=%llu (%.2f%%) "
                     "chain_mean=%.2fms samples=%llu ready=%d grid=%u",
-                    (long long)elapsedSec, (unsigned long long)m_NvOfProfDispatchCount,
-                    (unsigned long long)m_NvOfProfFailCount, failPct,
+                    (long long)elapsedSec, (unsigned long long)snapDispatch,
+                    (unsigned long long)snapFail, failPct,
                     meanChainMs, (unsigned long long)m_NvOfProfChainSamples,
-                    (int)m_NvOfReady, m_NvOfGridSize);
-                m_NvOfProfDispatchCount = 0;
-                m_NvOfProfFailCount = 0;
+                    (int)m_NvOfReady.load(), m_NvOfGridSize);
                 m_NvOfProfChainMsAccum = 0.0;
                 m_NvOfProfChainSamples = 0;
                 m_NvOfProfLastLog = nowProf;
@@ -9797,7 +9907,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 "→ frucChainAsyncActiveHw=%d",
                 (int)m_FrucChainAsyncRequested, (int)m_FrucChainAsyncAvailable,
                 (int)phase2BActive, (int)pathDActive,
-                (int)triplePresentThisFrame, (int)m_NvOfReady,
+                (int)triplePresentThisFrame, (int)m_NvOfReady.load(),
                 (int)m_FrucMode, (int)m_FrucReady,
                 (int)m_FRUCPaused.load(),
                 (int)(vkf != nullptr),
@@ -10644,45 +10754,18 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                     vrMark = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siMark, VK_NULL_HANDLE);
                 }
                 if (vrMark == VK_SUCCESS) {
-                    auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
-                    NV_OF_SYNC_VK waitSync = {};
-                    waitSync.semaphore = m_NvOfTimelineSem;
-                    waitSync.value     = inSigVal;
-                    NV_OF_SYNC_VK signalSync = {};
-                    signalSync.semaphore = m_NvOfTimelineSem;
-                    signalSync.value     = outSigVal;
-                    NV_OF_EXECUTE_INPUT_PARAMS_VK ofIn = {};
-                    ofIn.inputFrame      = (NvOFGPUBufferHandle)m_NvOfHandleCurr;
-                    ofIn.referenceFrame  = (NvOFGPUBufferHandle)m_NvOfHandlePrev;
-                    ofIn.disableTemporalHints = NV_OF_FALSE;
-                    ofIn.numWaitSyncs    = 1;
-                    ofIn.pWaitSyncs      = &waitSync;
-                    NV_OF_EXECUTE_OUTPUT_PARAMS_VK ofOut = {};
-                    ofOut.outputBuffer = (NvOFGPUBufferHandle)m_NvOfHandleFlow;
-                    ofOut.pSignalSync  = &signalSync;
-                    NV_OF_STATUS s = funcList->nvOFExecuteVk((NvOFHandle)m_NvOfHandle,
-                                                              &ofIn, &ofOut);
-                    if (s == NV_OF_SUCCESS) {
-                        m_NvOfTimelineValue = outSigVal;
-                        std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
-                        std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
-                        std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
-                        // §J.3.e.2.i.48 (v1.4.112) — flow ping-pong swap
-                        std::swap(m_NvOfFlowImage,    m_NvOfFlowImagePrev);
-                        std::swap(m_NvOfFlowImageMem, m_NvOfFlowImagePrevMem);
-                        std::swap(m_NvOfHandleFlow,   m_NvOfHandleFlowPrev);
-                        m_NvOfProfDispatchCount++;
-                        m_NvOfProfConsecFails = 0;
-                    } else {
-                        m_NvOfProfFailCount++;
-                        if (++m_NvOfProfConsecFails >= 30 && m_NvOfReady) {
-                            m_NvOfReady = false;
-                            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-VKFRUC-NVOF-PROF] 30 consecutive nvOFExecuteVk "
-                                "fails (last status=%d), demoting m_NvOfReady=false, "
-                                "本 session 改走 block-match", (int)s);
-                        }
-                    }
+                    // §J.3.e.2.i.53 (v1.4.118) — Phase 2B path: dispatch to worker
+                    // thread (off render thread to消 1-15ms SDK CPU latency).
+                    nvOfWorkerSubmit(inSigVal, outSigVal,
+                                     m_NvOfHandleCurr, m_NvOfHandlePrev, m_NvOfHandleFlow);
+                    m_NvOfTimelineValue = outSigVal;
+                    std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
+                    std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
+                    std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+                    // §J.3.e.2.i.48 (v1.4.112) — flow ping-pong swap
+                    std::swap(m_NvOfFlowImage,    m_NvOfFlowImagePrev);
+                    std::swap(m_NvOfFlowImageMem, m_NvOfFlowImagePrevMem);
+                    std::swap(m_NvOfHandleFlow,   m_NvOfHandleFlowPrev);
                 } else {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VKFRUC-NVOF] §J.3.e.2.i.10 Phase 2B marker "
@@ -11378,45 +11461,22 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
                 std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
             } else if (nvOfMarkerOk_E) {
-                auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
-                NV_OF_SYNC_VK waitSync = {};
-                waitSync.semaphore = m_NvOfTimelineSem;
-                waitSync.value     = nvOfInSigVal_E;
-                NV_OF_SYNC_VK signalSync = {};
-                signalSync.semaphore = m_NvOfTimelineSem;
-                signalSync.value     = nvOfOutSigVal_E;
-                NV_OF_EXECUTE_INPUT_PARAMS_VK ofIn = {};
-                ofIn.inputFrame      = (NvOFGPUBufferHandle)m_NvOfHandleCurr;
-                ofIn.referenceFrame  = (NvOFGPUBufferHandle)m_NvOfHandlePrev;
-                ofIn.disableTemporalHints = NV_OF_FALSE;
-                ofIn.numWaitSyncs    = 1;
-                ofIn.pWaitSyncs      = &waitSync;
-                NV_OF_EXECUTE_OUTPUT_PARAMS_VK ofOut = {};
-                ofOut.outputBuffer = (NvOFGPUBufferHandle)m_NvOfHandleFlow;
-                ofOut.pSignalSync  = &signalSync;
-                NV_OF_STATUS s = funcList->nvOFExecuteVk((NvOFHandle)m_NvOfHandle,
-                                                          &ofIn, &ofOut);
-                if (s == NV_OF_SUCCESS) {
-                    m_NvOfTimelineValue = nvOfOutSigVal_E;
-                    std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
-                    std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
-                    std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
-                    // §J.3.e.2.i.48 (v1.4.112) — flow ping-pong swap
-                    std::swap(m_NvOfFlowImage,    m_NvOfFlowImagePrev);
-                    std::swap(m_NvOfFlowImageMem, m_NvOfFlowImagePrevMem);
-                    std::swap(m_NvOfHandleFlow,   m_NvOfHandleFlowPrev);
-                    m_NvOfProfDispatchCount++;
-                    m_NvOfProfConsecFails = 0;
-                } else {
-                    m_NvOfProfFailCount++;
-                    if (++m_NvOfProfConsecFails >= 30 && m_NvOfReady) {
-                        m_NvOfReady = false;
-                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-VKFRUC-NVOF-PROF] 30 consecutive nvOFExecuteVk "
-                            "fails (last status=%d), demoting m_NvOfReady=false, "
-                            "本 session 改走 block-match", (int)s);
-                    }
-                }
+                // §J.3.e.2.i.53 (v1.4.118) — Async dispatch to worker thread.
+                // Capture handle values NOW (before optimistic swap below) →
+                // push to worker → 樂觀 swap. Worker calls SDK off render thread,
+                // 消除 1-15ms SDK CPU latency from render critical path.
+                // SDK 失敗時 worker 自己 demote m_NvOfReady; chain 下幀讀 stale
+                // flow (1-frame artifact) 但 timeline values 仍 monotonic.
+                nvOfWorkerSubmit(nvOfInSigVal_E, nvOfOutSigVal_E,
+                                 m_NvOfHandleCurr, m_NvOfHandlePrev, m_NvOfHandleFlow);
+                m_NvOfTimelineValue = nvOfOutSigVal_E;
+                std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
+                std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
+                std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+                // §J.3.e.2.i.48 (v1.4.112) — flow ping-pong swap
+                std::swap(m_NvOfFlowImage,    m_NvOfFlowImagePrev);
+                std::swap(m_NvOfFlowImageMem, m_NvOfFlowImagePrevMem);
+                std::swap(m_NvOfHandleFlow,   m_NvOfHandleFlowPrev);
             }
             // else: Block A marker fail → skip this frame's NVOF execute.
             // Chain 下幀讀 m_NvOfFlowImagePrev 仍是上次成功的 flow data (stale 1 frame).
@@ -12203,63 +12263,34 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             vrMark = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siMark, VK_NULL_HANDLE);
         }
         if (vrMark == VK_SUCCESS) {
-            // 2) nvOFExecuteVk on OF queue (SDK auto-submits internally).
-            auto* funcList = (NV_OF_VK_API_FUNCTION_LIST*)m_NvOfFuncList;
-            NV_OF_SYNC_VK waitSync = {};
-            waitSync.semaphore = m_NvOfTimelineSem;
-            waitSync.value     = inSigVal;
-            NV_OF_SYNC_VK signalSync = {};
-            signalSync.semaphore = m_NvOfTimelineSem;
-            signalSync.value     = outSigVal;
-            NV_OF_EXECUTE_INPUT_PARAMS_VK ofIn = {};
-            ofIn.inputFrame      = (NvOFGPUBufferHandle)m_NvOfHandleCurr;
-            ofIn.referenceFrame  = (NvOFGPUBufferHandle)m_NvOfHandlePrev;
-            ofIn.disableTemporalHints = NV_OF_FALSE;
-            ofIn.numWaitSyncs    = 1;
-            ofIn.pWaitSyncs      = &waitSync;
-            NV_OF_EXECUTE_OUTPUT_PARAMS_VK ofOut = {};
-            ofOut.outputBuffer   = (NvOFGPUBufferHandle)m_NvOfHandleFlow;
-            ofOut.pSignalSync    = &signalSync;
-            NV_OF_STATUS s = funcList->nvOFExecuteVk((NvOFHandle)m_NvOfHandle, &ofIn, &ofOut);
+            // §J.3.e.2.i.53 (v1.4.118) — Single-cmd (sync chain) path: dispatch
+            // SDK call to worker thread (off render thread). Render thread does
+            // optimistic swap below.
+            nvOfWorkerSubmit(inSigVal, outSigVal,
+                             m_NvOfHandleCurr, m_NvOfHandlePrev, m_NvOfHandleFlow);
             // Periodic log: don't spam every frame; first frame + every ~5s.
             static std::atomic<int> s_ofExecLogCount{0};
             int n = s_ofExecLogCount.fetch_add(1, std::memory_order_relaxed);
             if (n == 0 || (n % 300 == 0)) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-VKFRUC-NVOF] nvOFExecuteVk #%d status=%d "
-                            "(V_in=%llu V_out=%llu)",
-                            n, (int)s,
+                            "[VIPLE-VKFRUC-NVOF] nvOFExecuteVk dispatched #%d "
+                            "(V_in=%llu V_out=%llu, single-cmd path, async to worker)",
+                            n,
                             (unsigned long long)inSigVal,
                             (unsigned long long)outSigVal);
             }
-            if (s == NV_OF_SUCCESS) {
-                m_NvOfTimelineValue = outSigVal;
-                m_NvOfProfDispatchCount++;
-                m_NvOfProfConsecFails = 0;
-                // §B-NVOF Phase 7B 2026-05-06 — async cross-queue. Removed
-                // CPU vkWaitSemaphores (was ~3-5 ms/frame block at 1080p).
-                // Sync now via timeline sem in NEXT frame's main submit wait
-                // list (= m_NvOfTimelineValue) — when next frame's cmd buf
-                // executes vkCmdCopyImage to swapped input image, it blocks
-                // at TRANSFER_BIT until OF has finished reading the to-be-
-                // overwritten image. Eliminates the race CPU wait was guarding.
-                std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
-                std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
-                std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
-                // §J.3.e.2.i.48 (v1.4.112) — flow ping-pong swap
-                std::swap(m_NvOfFlowImage,    m_NvOfFlowImagePrev);
-                std::swap(m_NvOfFlowImageMem, m_NvOfFlowImagePrevMem);
-                std::swap(m_NvOfHandleFlow,   m_NvOfHandleFlowPrev);
-            } else {
-                m_NvOfProfFailCount++;
-                if (++m_NvOfProfConsecFails >= 30 && m_NvOfReady) {
-                    m_NvOfReady = false;
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VKFRUC-NVOF-PROF] 30 consecutive nvOFExecuteVk "
-                        "fails (last status=%d), demoting m_NvOfReady=false, "
-                        "本 session 改走 block-match", (int)s);
-                }
-            }
+            m_NvOfTimelineValue = outSigVal;
+            // §B-NVOF Phase 7B 2026-05-06 — async cross-queue. Sync via timeline
+            // sem in NEXT frame's main submit wait list (= m_NvOfTimelineValue).
+            // §J.3.e.2.i.53 (v1.4.118) — 樂觀 swap, SDK 失敗 worker thread 自行
+            // demote m_NvOfReady, chain 下幀讀 stale flow (1-frame artifact).
+            std::swap(m_NvOfInputCurr,    m_NvOfInputPrev);
+            std::swap(m_NvOfInputCurrMem, m_NvOfInputPrevMem);
+            std::swap(m_NvOfHandleCurr,   m_NvOfHandlePrev);
+            // §J.3.e.2.i.48 (v1.4.112) — flow ping-pong swap
+            std::swap(m_NvOfFlowImage,    m_NvOfFlowImagePrev);
+            std::swap(m_NvOfFlowImageMem, m_NvOfFlowImagePrevMem);
+            std::swap(m_NvOfHandleFlow,   m_NvOfHandleFlowPrev);
         } else {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-NVOF] marker QueueSubmit failed vr=%d", (int)vrMark);

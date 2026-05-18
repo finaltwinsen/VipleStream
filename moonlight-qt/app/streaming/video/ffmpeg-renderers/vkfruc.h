@@ -196,7 +196,11 @@ private:
                                                     // (less precision loss SFIXED5→Q1) and beats grid=1 (less
                                                     // over-smoothing of motion magnitude variation in converter).
                                                     // Override via VIPLE_VKFRUC_NV_OF_GRID=1|2|4.
-    bool           m_NvOfReady           = false;
+    // §J.3.e.2.i.53 (v1.4.118) — atomic for cross-thread access.
+    // Render thread reads (many places), worker thread writes on 30-consec
+    // demote. v1.4.118 起 NVOF dispatch SDK 呼叫從 render thread 移到
+    // worker thread → 必須 atomic 避免 race.
+    std::atomic<bool> m_NvOfReady       {false};
     // §B-NVOF Phase 4a — cross-queue execution resources.
     //   m_NvOfCmdPool / m_NvOfCmdBuf: independent command pool + buffer
     //     for the optical-flow queue (queueFamilyIndex = m_OpticalFlowQueueFamily).
@@ -230,12 +234,41 @@ private:
     // chainMsAccum/Samples 量 useNvOf=true 時的 chain mean (跟 block-match
     // 對比 quality). consecFails >= 30 → m_NvOfReady=false 自我 demote,
     // 整 session 切回 block-match (production-grade self-healing).
-    uint64_t        m_NvOfProfDispatchCount = 0;
-    uint64_t        m_NvOfProfFailCount     = 0;
-    uint64_t        m_NvOfProfConsecFails   = 0;
+    // §J.3.e.2.i.53 (v1.4.118) — atomic for cross-thread access. Worker
+    // thread writes dispatchCount/failCount/consecFails; render thread
+    // reads them in PROF flush log + resets via .exchange(0).
+    std::atomic<uint64_t> m_NvOfProfDispatchCount {0};
+    std::atomic<uint64_t> m_NvOfProfFailCount     {0};
+    std::atomic<uint64_t> m_NvOfProfConsecFails   {0};
     double          m_NvOfProfChainMsAccum  = 0.0;
     uint64_t        m_NvOfProfChainSamples  = 0;
     std::chrono::steady_clock::time_point m_NvOfProfLastLog{};
+
+    // §J.3.e.2.i.53 (v1.4.118) — NVOF dispatch worker thread (Option B).
+    // Goal: render thread 不再被 nvOFExecuteVk SDK CPU call (1-15ms 變動)
+    // 阻塞. Render thread push request 後立刻 return; worker pop + 呼叫
+    // SDK + 更新 prof counters + 30-consec fail demote m_NvOfReady.
+    // Render thread 在 push 後做 "樂觀 swap" (假設 SDK 會成功): swap
+    // handles + 進 m_NvOfTimelineValue. SDK 失敗時下幀 chain 讀 stale
+    // flow (1 frame visual artifact), 但 timeline sig 仍 monotonic 不破.
+    // Worker drains queue + joins 必須在 NVOF resources destroy 之前.
+    struct NvOfRequest {
+        uint64_t inSigVal;
+        uint64_t outSigVal;
+        void*    capturedCurr;       // NvOFGPUBufferHandle (opaque)
+        void*    capturedPrev;
+        void*    capturedFlow;
+    };
+    std::thread             m_NvOfWorker;
+    std::mutex              m_NvOfWorkerMutex;
+    std::condition_variable m_NvOfWorkerCv;
+    std::queue<NvOfRequest> m_NvOfWorkerQueue;
+    std::atomic<bool>       m_NvOfWorkerStop {false};
+    void nvOfWorkerLoop();
+    void nvOfWorkerStart();
+    void nvOfWorkerStop();
+    void nvOfWorkerSubmit(uint64_t inSig, uint64_t outSig,
+                          void* curr, void* prev, void* flow);
 
     // §B-DUMP — definitions live below kFrucFramesInFlight (line ~600).
     // §J.3.e.2.i.3.a — ffmpeg AVHWDeviceContext bridges our VkDevice
