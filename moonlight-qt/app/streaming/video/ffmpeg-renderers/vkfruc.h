@@ -216,6 +216,12 @@ private:
     uint64_t        m_NvOfTimelineValue  = 0;
     VkBuffer        m_NvOfFlowStaging    = VK_NULL_HANDLE;
     VkDeviceMemory  m_NvOfFlowStagingMem = VK_NULL_HANDLE;
+    // §J.3.e.2.i.51 (v1.4.116) — NVOF frame counter for split early-kickoff
+    // (Phase B). v1.4.115 用 static thread_local 在單一 post-partC NVOF
+    // block; split 成 Block A (post-partA marker) + Block B (post-partC
+    // SDK call) 需跨兩 block 共用, promote 成 instance member.
+    // Render thread 單一執行緒 access pattern 不變.
+    uint32_t        m_NvOfFrameCountFCAH = 0;
     bool createOpticalFlowSession(uint32_t width, uint32_t height);
     void destroyOpticalFlowSession();
 
