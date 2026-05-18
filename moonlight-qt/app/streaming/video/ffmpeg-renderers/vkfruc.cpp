@@ -1686,7 +1686,9 @@ bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
         return -1;
     };
     auto allocImage = [&](VkFormat fmt, uint32_t w, uint32_t h, VkImageUsageFlags usage,
-                          VkImage& outImage, VkDeviceMemory& outMem) -> bool {
+                          VkImage& outImage, VkDeviceMemory& outMem,
+                          const uint32_t* concurrentQfs = nullptr,
+                          uint32_t concurrentQfCount = 0) -> bool {
         VkImageCreateInfo ici = {};
         ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         ici.imageType     = VK_IMAGE_TYPE_2D;
@@ -1697,7 +1699,20 @@ bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
         ici.samples       = VK_SAMPLE_COUNT_1_BIT;
         ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
         ici.usage         = usage;
-        ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        // §J.3.e.2.i.52 (v1.4.117) — CONCURRENT sharing mode for flow images
+        // 讓 driver 知道 image 允許多 QF 並發 access (OF QF 寫 + compute/
+        // graphics QF 讀), 不再插入 implicit cross-QF ownership wait.
+        // v1.4.115/116 bimodal handoff (134us 或 15ms) 推測是 driver
+        // EXCLUSIVE mode 下保守的 cross-QF layout wait, CONCURRENT mode
+        // 應消除. 代價: ~1-2% generic-path perf vs EXCLUSIVE-optimized,
+        // 但 textbook 多 QF 並發 use case 用 CONCURRENT 正確.
+        if (concurrentQfs && concurrentQfCount >= 2) {
+            ici.sharingMode           = VK_SHARING_MODE_CONCURRENT;
+            ici.queueFamilyIndexCount = concurrentQfCount;
+            ici.pQueueFamilyIndices   = concurrentQfs;
+        } else {
+            ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (pfnCreateImage(m_Device, &ici, nullptr, &outImage) != VK_SUCCESS) {
             return false;
@@ -1715,19 +1730,49 @@ bool VkFrucRenderer::createOpticalFlowSession(uint32_t width, uint32_t height)
         return true;
     };
 
+    // §J.3.e.2.i.52 (v1.4.117) — collect distinct QFs for flow image CONCURRENT
+    // sharing. Always include graphics QF (chain read) + OF QF (NVOF write).
+    // compute QF only if dedicated (跨 QF 才需要). Vulkan spec 要 distinct
+    // values + count >= 2 才合法 CONCURRENT.
+    uint32_t flowQfs[3];
+    uint32_t flowQfCount = 0;
+    flowQfs[flowQfCount++] = m_QueueFamily;
+    if (m_OpticalFlowQueueFamily != UINT32_MAX
+        && m_OpticalFlowQueueFamily != m_QueueFamily) {
+        flowQfs[flowQfCount++] = m_OpticalFlowQueueFamily;
+    }
+    if (m_ComputeQueueFamily != UINT32_MAX
+        && m_ComputeQueueFamily != m_QueueFamily
+        && m_ComputeQueueFamily != m_OpticalFlowQueueFamily) {
+        flowQfs[flowQfCount++] = m_ComputeQueueFamily;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-NVOF] §J.3.e.2.i.52 flow image CONCURRENT sharing: "
+        "qfCount=%u qfs=[%u, %u, %u] (graphics=%u OF=%u compute=%u)",
+        flowQfCount,
+        flowQfCount > 0 ? flowQfs[0] : 0u,
+        flowQfCount > 1 ? flowQfs[1] : 0u,
+        flowQfCount > 2 ? flowQfs[2] : 0u,
+        m_QueueFamily,
+        m_OpticalFlowQueueFamily,
+        m_ComputeQueueFamily);
+
     const VkFormat NV12_FMT = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
     const VkFormat FLOW_FMT = VK_FORMAT_R16G16_S10_5_NV;
     if (!allocImage(NV12_FMT, width, height, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                     m_NvOfInputCurr, m_NvOfInputCurrMem) ||
         !allocImage(NV12_FMT, width, height, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                     m_NvOfInputPrev, m_NvOfInputPrevMem) ||
+        // §J.3.e.2.i.52 (v1.4.117) — flow images use CONCURRENT sharing mode
         !allocImage(FLOW_FMT, width / m_NvOfGridSize, height / m_NvOfGridSize,
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                    m_NvOfFlowImage, m_NvOfFlowImageMem) ||
+                    m_NvOfFlowImage, m_NvOfFlowImageMem,
+                    flowQfs, flowQfCount) ||
         // §J.3.e.2.i.48 (v1.4.112) — second flow image for ping-pong
         !allocImage(FLOW_FMT, width / m_NvOfGridSize, height / m_NvOfGridSize,
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                    m_NvOfFlowImagePrev, m_NvOfFlowImagePrevMem)) {
+                    m_NvOfFlowImagePrev, m_NvOfFlowImagePrevMem,
+                    flowQfs, flowQfCount)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-NVOF] VkImage alloc failed");
         destroyOpticalFlowSession();
