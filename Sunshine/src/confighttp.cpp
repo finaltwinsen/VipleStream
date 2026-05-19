@@ -1835,13 +1835,37 @@ pollListing();
     try {
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss);
-      const std::string name = input_tree.value("name", "");
+      std::string name = input_tree.value("name", "");
       const std::string pin = input_tree.value("pin", "");
+
+      // VipleStream §M.1.f.3 (v1.4.139) — name 驗證.  Web UI 的 pin.html 有
+      // `required` 屬性但 client-side 不可靠 (whitespace 一個空白 / curl
+      // 直接打 / DOM 改掉 required 都能繞).  名字進到 named_devices.json 後
+      // 變成 owner_name → 之後 /launch 503 訊息 "Server in use by ..." 帶這
+      // 個 name, Web UI session 列表也顯示.  空白會變成「unnamed device」,
+      // 讓使用者完全不知道是哪台 device 卡住 owner lock.  Trim + 拒空白 +
+      // 長度上限保證進到 state 的 name 永遠有意義.
+      auto trim = [](std::string s) {
+        size_t b = s.find_first_not_of(" \t\r\n");
+        size_t e = s.find_last_not_of(" \t\r\n");
+        if (b == std::string::npos) return std::string {};
+        return s.substr(b, e - b + 1);
+      };
+      name = trim(name);
+      if (name.empty()) {
+        bad_request(response, request, "Device name is required (cannot be empty or whitespace-only)");
+        return;
+      }
+      if (name.size() > 64) {
+        bad_request(response, request, "Device name too long (max 64 characters)");
+        return;
+      }
 
       int _pin = 0;
       _pin = std::stoi(pin);
       if (_pin < 0 || _pin > 9999) {
         bad_request(response, request, "PIN must be between 0000 and 9999");
+        return;
       }
 
       output_tree["status"] = nvhttp::pin(pin, name);
