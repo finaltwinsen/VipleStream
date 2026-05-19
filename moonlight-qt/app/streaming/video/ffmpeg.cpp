@@ -2569,7 +2569,26 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         // Count time in avcodec_send_packet() and avcodec_receive_frame()
                         // as time spent decoding. Also count time spent in the decode unit
                         // queue because that's directly caused by decoder latency.
-                        m_ActiveWndVideoStats.totalDecodeTimeUs += (LiGetMicroseconds() - du.enqueueTimeUs);
+                        const uint64_t thisFrameDecodeUs =
+                            LiGetMicroseconds() - du.enqueueTimeUs;
+                        m_ActiveWndVideoStats.totalDecodeTimeUs += thisFrameDecodeUs;
+
+                        // §J.3.e.2.i.58 (v1.4.125) — per-frame decode latency publish
+                        // 給 vkfruc 的 adaptive throttle 用. ring-max of last 8 frames
+                        // (~130ms @ 60fps): 反應 spike 快 (vs 1s 平均要等下次 NET log),
+                        // 又比 raw 單幀穩 (outlier 不會 mask 後續高 latency, max 抓住).
+                        // Cost: 1 store + 7 max compares + 1 atomic store ≈ ~10 insns.
+                        static double s_DecodeLatencyRingMs[8] = {};
+                        static uint32_t s_DecodeLatencyRingIdx = 0;
+                        s_DecodeLatencyRingMs[s_DecodeLatencyRingIdx] =
+                            (double)thisFrameDecodeUs / 1000.0;
+                        s_DecodeLatencyRingIdx = (s_DecodeLatencyRingIdx + 1) & 7u;
+                        double maxLatMs = s_DecodeLatencyRingMs[0];
+                        for (int _i = 1; _i < 8; ++_i) {
+                            if (s_DecodeLatencyRingMs[_i] > maxLatMs)
+                                maxLatMs = s_DecodeLatencyRingMs[_i];
+                        }
+                        g_VkFrucDecodeLatencyMs.store(maxLatMs, std::memory_order_relaxed);
 
                         // Store the presentation time (90 kHz timebase)
                         frame->pts = (int64_t)du.rtpTimestamp;
@@ -2581,9 +2600,9 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         if ((m_FramesOut % 120) == 0) {
                             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                         "[VIPLE-DEC-DEPTH] queueDepth=%d "
-                                        "frameLatencyUs=%lld",
+                                        "frameLatencyUs=%lld latRingMaxMs=%.2f",
                                         m_FrameInfoQueue.size(),
-                                        (long long)(LiGetMicroseconds() - du.enqueueTimeUs));
+                                        (long long)thisFrameDecodeUs, maxLatMs);
                         }
                     }
 
@@ -2674,6 +2693,9 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         // [VIPLE-NET] expose per-second receive/decode/drop counters in the
         // log without requiring overlay enabled.  Diagnoses where the stream
         // rate cap is when server pushes 120 fps but client renders fewer.
+        const double decodeMeanMsLocal = m_ActiveWndVideoStats.decodedFrames > 0
+            ? (double)m_ActiveWndVideoStats.totalDecodeTimeUs / m_ActiveWndVideoStats.decodedFrames / 1000.0
+            : 0.0;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-NET] received=%u decoded=%u networkDropped=%u total=%u "
                     "decodeMeanMs=%.2f hostLatencyAvgMs=%.2f",
@@ -2681,12 +2703,13 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                     m_ActiveWndVideoStats.decodedFrames,
                     m_ActiveWndVideoStats.networkDroppedFrames,
                     m_ActiveWndVideoStats.totalFrames,
-                    m_ActiveWndVideoStats.decodedFrames > 0
-                        ? (double)m_ActiveWndVideoStats.totalDecodeTimeUs / m_ActiveWndVideoStats.decodedFrames / 1000.0
-                        : 0.0,
+                    decodeMeanMsLocal,
                     m_ActiveWndVideoStats.framesWithHostProcessingLatency > 0
                         ? (double)m_ActiveWndVideoStats.totalHostProcessingLatency / m_ActiveWndVideoStats.framesWithHostProcessingLatency / 10.0
                         : 0.0);
+        // §J.3.e.2.i.57 (v1.4.122) → §J.3.e.2.i.58 (v1.4.125): publish moved to
+        // per-frame ring-max site above (line ~2580+ in decode-success block).
+        // 1s 平均不再 publish, latency lag 從 ~1000ms 降到 ~16ms.
 
         // [VIPLE-NET-WARN] When receivedFrames < 75% of host target fps for 5 consecutive
         // seconds, emit a one-shot warning so users can self-diagnose decoder-throughput

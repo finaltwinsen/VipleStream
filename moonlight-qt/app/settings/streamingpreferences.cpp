@@ -166,16 +166,16 @@ void StreamingPreferences::reload()
     // enableFrameInterpolation already read above (before bitrate)
     // so getDefaultBitrate can be FRUC-aware.
     frucBackend = static_cast<FrucBackend>(settings.value(SER_FRUCBACKEND, static_cast<int>(FB_GENERIC)).toInt());
-    // §J.3.e.2.i (v1.3.308) — Vulkan 改為次要/實驗性。預設 fallback
-    // 從 RS_VULKAN 改成 RS_D3D11。Vulkan 路徑（VkFruc native VK_KHR_video_
-    // decode + SW upload）在 NV 596.36 driver 上有 ONLY-mode NVDEC
-    // device-lost (Phase 1.7 五個變體都無法繞過)、AMD Vega 10 上有
-    // ycbcr descriptor pool sizing 邊界情況、PARALLEL+SW 路徑單核 80+
-    // ms/frame 的 perf 限制。Direct3D 11 是上游 Moonlight 多年驗證的
-    // 穩定 renderer，且 FRUC backend 可選 Generic / NV-OF / DirectML /
-    // NCNN，覆蓋面更廣。舊 user 在 settings 已選 Vulkan 的不被改動，
-    // 仍依設定走 Vulkan。新 user 第一次啟動只會看到 D3D11。
-    rendererSelection = static_cast<RendererSelection>(settings.value(SER_RENDERERSEL, static_cast<int>(RS_D3D11)).toInt());
+    // §J.3.e.2.i (v1.4.137) — 預設改 RS_AUTO，走 ffmpeg 標準 cascade
+    // （Windows = D3D11VA 優先 → DXVA2 → Vulkan → SW），讓 ffmpeg 自己挑
+    // 第一個能 init 的 hwaccel。等同 upstream Moonlight 行為，user 不用
+    // 手動選 renderer 就拿到穩定 path.  歷史：v1.3.308 從 RS_VULKAN 退成
+    // RS_D3D11；本次加 RS_AUTO 並改成預設。Vulkan 路徑（VkFruc native
+    // VK_KHR_video_decode + SW upload）在 NV 596.36 driver 上有 ONLY-mode
+    // NVDEC device-lost、AMD APU 上 video session memory bind 226MB 階段
+    // driver crash、PARALLEL+SW 路徑單核 80+ ms/frame 的 perf 限制。
+    // 舊 user 在 settings 已選 Vulkan/D3D11 的不被改動，仍依設定走。
+    rendererSelection = static_cast<RendererSelection>(settings.value(SER_RENDERERSEL, static_cast<int>(RS_AUTO)).toInt());
     frucQuality = static_cast<FrucQuality>(settings.value(SER_FRUCQUALITY, static_cast<int>(FQ_BALANCED)).toInt());
     // §B-NVOF / §B2 — Vulkan-renderer-only 補幀進階開關.
     //   - NVOF (HW optical flow) 量化 testufo 三指標贏 software block-match

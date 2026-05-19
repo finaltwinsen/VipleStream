@@ -9,8 +9,10 @@
 #include "src/logging.h"
 
 #include <windows.h>
+#include <shlobj.h>      // SHGetKnownFolderPath, FOLDERID_Desktop
 #include <shobjidl.h>
 #include <shlwapi.h>
+#include <wtsapi32.h>    // WTSGetActiveConsoleSessionId / WTSQueryUserToken
 
 namespace fs_picker {
 
@@ -54,6 +56,33 @@ namespace fs_picker {
       return s;
     }
 
+    /**
+     * Resolve 互動使用者的 Desktop 路徑。Sunshine service 在 SYSTEM context
+     * 下 SHGetKnownFolderPath(nullptr) 會回 systemprofile\Desktop（user 不
+     * 能讀）。先抓 active console session 的 user token 用 user context 查。
+     * 失敗回傳空（呼叫方就不 SetFolder，由 OS dialog 自己決定）。
+     * 跟 file_transfer::manager::downloads_dir() 用同一個 pattern。
+     */
+    std::wstring active_user_desktop() {
+      DWORD session_id = WTSGetActiveConsoleSessionId();
+      if (session_id == 0xFFFFFFFF) {
+        return {};
+      }
+      HANDLE user_tok = nullptr;
+      if (!WTSQueryUserToken(session_id, &user_tok)) {
+        BOOST_LOG(debug) << "[VIPLE-XFER] fs_picker: WTSQueryUserToken err=" << GetLastError();
+        return {};
+      }
+      PWSTR path_w = nullptr;
+      std::wstring out;
+      if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, user_tok, &path_w)) && path_w) {
+        out = path_w;
+        CoTaskMemFree(path_w);
+      }
+      CloseHandle(user_tok);
+      return out;
+    }
+
   }  // namespace
 
   std::optional<std::filesystem::path> pick_open_file(const open_options &opts) {
@@ -80,10 +109,16 @@ namespace fs_picker {
       dlg->SetTitle(wt.c_str());
     }
 
+    // 決定 starting folder：caller 指定 > 互動使用者 Desktop > OS 預設
+    std::wstring start_dir;
     if (!opts.default_dir.empty()) {
-      auto wd = utf8_to_wide(opts.default_dir);
+      start_dir = utf8_to_wide(opts.default_dir);
+    } else {
+      start_dir = active_user_desktop();
+    }
+    if (!start_dir.empty()) {
       IShellItem *folder = nullptr;
-      if (SUCCEEDED(::SHCreateItemFromParsingName(wd.c_str(), nullptr, IID_IShellItem,
+      if (SUCCEEDED(::SHCreateItemFromParsingName(start_dir.c_str(), nullptr, IID_IShellItem,
                                                   reinterpret_cast<void **>(&folder)))) {
         dlg->SetFolder(folder);
         folder->Release();

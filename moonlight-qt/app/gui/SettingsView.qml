@@ -738,12 +738,11 @@ Flickable {
                     }
                 }
 
-                // §J.3.e.2.i (v1.3.308) — VipleStream renderer backend dropdown.
+                // §J.3.e.2.i (v1.4.137) — VipleStream renderer backend dropdown.
                 //
-                // 自 v1.3.308 起順序改為 D3D11 在前 (default)、Vulkan 在後
-                // 並標 [實驗性]。Enum 值 RS_VULKAN=0 / RS_D3D11=1 不變
-                // (避免 QSettings backwards-compat 災難)，但 model 順序
-                // 反過來 + currentIndex 用 lookup 對應 enum 值。
+                // Enum 值穩定：RS_VULKAN=0 / RS_D3D11=1 / RS_AUTO=2 (v1.4.137).
+                // Model 順序跟 enum 不再 1:1，currentIndex 用 lookup 對應.
+                // v1.4.137 加 RS_AUTO 並改成預設，行為 = 走標準 hwaccel cascade.
                 Label {
                     width: parent.width
                     text: qsTr("Renderer 渲染器")
@@ -760,8 +759,9 @@ Flickable {
                         id: rendererSelectionModel
                     }
                     Component.onCompleted: {
-                        rendererSelectionModel.append({text: qsTr("Direct3D 11 (推薦：穩定，可搭配 NV-OF / DirectML / NCNN 補幀引擎)"), val: 1})
-                        rendererSelectionModel.append({text: qsTr("Vulkan [實驗性] (內建補幀引擎，部分機種有相容性問題)"), val: 0})
+                        rendererSelectionModel.append({text: qsTr("自動 (Auto) — 推薦：讓系統挑最穩定的硬解路徑"), val: 2})
+                        rendererSelectionModel.append({text: qsTr("Direct3D 11 — 鎖死 D3D11VA，可搭配 NV-OF / DirectML / NCNN 補幀引擎"), val: 1})
+                        rendererSelectionModel.append({text: qsTr("Vulkan [實驗性] — 內建補幀，部分機種 (AMD APU / 舊 NV driver) 有相容性問題"), val: 0})
                         // Lookup currentIndex by val (enum value) — model
                         // order is no longer 1:1 with enum integer.
                         for (var i = 0; i < rendererSelectionModel.count; i++) {
@@ -778,7 +778,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Direct3D 11（推薦）：上游 Moonlight 穩定路徑，補幀引擎可選 Generic / NV-OF / DirectML / NCNN。\n\nVulkan [實驗性]：原生 Vulkan 渲染管線 + dual-present，補幀引擎內建（等同 Generic）。已知問題：NV driver 596.36 上 native vkCmdDecodeVideoKHR 在 ONLY mode 會 NVDEC device-lost；AMD 部分整合顯卡 ycbcr descriptor pool sizing 在舊版 driver 上失敗；PARALLEL+SW upload 路徑 perf 偏低（80+ ms/frame）。穩定後會回到推薦選項。")
+                    ToolTip.text: qsTr("自動（推薦）：等同上游 Moonlight 的 hwaccel cascade，由 ffmpeg 挑第一個能 init 的硬解（Windows 通常 = D3D11VA）。沒有特殊需求就選這個。\n\nDirect3D 11：明確鎖死 D3D11VA，補幀引擎可選 Generic / NV-OF / DirectML / NCNN。跟「自動」目前行為相同，但保留為將來「禁止 helper 切到 Vulkan」的 hard-pin.\n\nVulkan [實驗性]：強制 Vulkan-first cascade + 原生 Vulkan 渲染管線 + dual-present，補幀引擎內建（等同 Generic）。已知問題：NV driver 596.36 上 native vkCmdDecodeVideoKHR 在 ONLY mode 會 NVDEC device-lost；AMD APU 上 video session memory bind 226MB 階段 driver crash；PARALLEL+SW upload 路徑 perf 偏低（80+ ms/frame）。穩定後會回到推薦選項。")
                 }
 
                 CheckBox {
@@ -844,8 +844,10 @@ Flickable {
                     id: frucBackendCombo
                     width: parent.width
                     // Vulkan renderer 的 compute 補幀內建,不需 frucBackend.
+                    // RS_AUTO 走標準 cascade（實際也是 D3D11VA on Windows），
+                    // 所以跟 RS_D3D11 一樣需要選 backend.
                     visible: frameInterpolationCheck.checked
-                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_D3D11
+                             && StreamingPreferences.rendererSelection !== StreamingPreferences.RS_VULKAN
                     font.pointSize: 12
                     textRole: "text"
                     model: ListModel {
@@ -888,8 +890,9 @@ Flickable {
                     // Flow and DirectML both run their own internal
                     // pipelines that don't take a quality hint.
                     // Vulkan renderer 走自己內建 compute，不吃 quality hint.
+                    // RS_AUTO 跟 RS_D3D11 一樣會吃 Generic backend，顯示 quality.
                     visible: frameInterpolationCheck.checked
-                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_D3D11
+                             && StreamingPreferences.rendererSelection !== StreamingPreferences.RS_VULKAN
                              && frucBackendCombo.currentIndex === 0
                     font.pointSize: 12
                     textRole: "text"
@@ -911,111 +914,28 @@ Flickable {
                     ToolTip.text: qsTr("Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)\nBalanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)\nPerformance: 4-neighbor search + minimal processing (~6ms on iGPU)")
                 }
 
-                // §B-NVOF UI 整合 2026-05-07 — Vulkan-only HW optical flow (NVOFA).
-                // 取代 software block-match ME → testufo 1080p60 量化三指標贏 software
-                // (SSIM 0.999 / OF_30Hz 2.66% / cv 0.86, commit c82196e).  跟 D3D11 +
-                // NvOFFRUC.dll (engine 03) 主觀比仍弱在 warp+blend pipeline (我們沒接
-                // §B-quality (c) 的 occlusion / confidence weighting).
+                // §J.3.e.2.i.60 (v1.4.127) — Vulkan FRUC 子選項統一收進 autotier.
+                // 舊 5 個 CheckBox / ComboBox (NV-OF / TRIPLE / Auto-tier / Manual
+                // RIFE / inferDim) 全部移除. 啟用 FRUC = 直接走 unified autotier:
+                // GPU 偵測 + benchmark 決定 cap tier, runtime chain_mean / chainBusy /
+                // NVOF fails 沿 7 階梯 (T-1..T5) 動態升降. 各 GPU 在能力內最高品質.
+                // Env vars 保留作 dev override (VIPLE_VKFRUC_TIER_CAP / TIER / NV_OF /
+                // TRIPLE / NATIVE_RIFE / RIFE_INFER_DIM) — UI 不暴露.
                 //
-                // §J.3.e.2.i.44 (v1.4.108) 預設改 ON：v1.4.107 4-hour PixArk
-                // session zero-drop + Pyramid 解耦修好 block-match fallback 也輕,
-                // NVOF init 失敗 / runtime 連 30 frame fail 自動 demote 走 block-
-                // match safe. env var `VIPLE_VKFRUC_NV_OF=0` 仍是 dev escape hatch.
-                CheckBox {
-                    id: vkfrucNvOfCheck
-                    width: parent.width
-                    text: qsTr("使用 NVIDIA Optical Flow 硬體補幀 (NV GPU 預設啟用)")
-                    font.pointSize: 12
-                    visible: frameInterpolationCheck.checked
-                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
-                    checked: StreamingPreferences.vkfrucEnableNvOf
-                    onCheckedChanged: {
-                        if (StreamingPreferences.vkfrucEnableNvOf !== checked) {
-                            StreamingPreferences.vkfrucEnableNvOf = checked
-                        }
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 5000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("使用 NVIDIA Turing+ (RTX 20/30/40) 內建的 Optical Flow Accelerator (NVOFA) 硬體取代軟體 block-match motion estimation。需要 NV driver 支援 VK_NV_optical_flow extension。\n\nv1.4.108 起 NV GPU 預設啟用（4 小時 PixArk 串流驗測 zero-drop）。非 NVIDIA GPU 或不支援 extension 的設備自動 fallback 軟體 block-match，不會崩潰。runtime 連 30 frame 失敗也會自動切回 block-match。\n\n量化勝過軟體 block-match (testufo 1080p60: SSIM 0.999 vs 0.998, motion smoothness cv 0.86 vs 1.94)，但 warp + blend pipeline 仍是我們自寫的 (沒做 occlusion handling)，主觀視覺仍輸給 D3D11 的 NvOFFRUC.dll 完整路徑。")
-                }
-
-                // §B2 UI 整合 2026-05-07 — Vulkan-only TRIPLE 60→180 (3x interp).
-                // Infrastructure ship at commit bc88eba.  每 server frame compute
-                // 兩張 interp (1/3 + 2/3 點) + real，3 張 swapchain image present
-                // 給 180Hz display.  視覺品質 ceiling 受 §B-quality / §B-NVOF
-                // warp+blend 限制 — TRIPLE 只是 present 倍率 + tFraction sampling.
-                //
-                // 必要條件：180Hz panel (60Hz/120Hz panel 用了會 tearing/掉幀)；
-                // server fps 自動降為 user_fps/3 (DUAL 是 /2)；live FRUC toggle
-                // 在 TRIPLE 模式下不發 LiRequestFpsChange 避免 NVENC timebase 衝擊.
-                CheckBox {
-                    id: vkfrucTripleCheck
-                    width: parent.width
-                    text: qsTr("TRIPLE 補幀 60→180 (需 180Hz 顯示器，實驗性)")
-                    font.pointSize: 12
-                    visible: frameInterpolationCheck.checked
-                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
-                    checked: StreamingPreferences.vkfrucEnableTriple
-                    onCheckedChanged: {
-                        if (StreamingPreferences.vkfrucEnableTriple !== checked) {
-                            StreamingPreferences.vkfrucEnableTriple = checked
-                            // bitrate 預設沒跟 TRIPLE 變動 (server fps 已從 user_fps/2
-                            // 改 /3，總 bitrate budget 需求差不多)，所以不重算.
-                        }
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 5000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("DUAL 補幀 (預設) = 每張 server frame 補 1 張 interp，共 2 張 present。例：FPS 設 120 → server 送 60fps、client 顯示 120fps。\n\nTRIPLE 補幀 = 每張 server frame 補 2 張 interp (1/3 + 2/3 點)，共 3 張 present。例：FPS 設 180 → server 送 60fps、client 顯示 180fps。\n\n只在 180Hz / 144Hz panel 上開有意義 (60/120Hz 會 tearing 或卡)，且建議搭 NVOF 補幀引擎使用 (block-match ME 對快速物體噪聲明顯)。\n\n串流中 Ctrl+Alt+Shift+F 暫停補幀的功能在 TRIPLE 模式下會 fallback 為 client single-present 顯示 server 原 fps，避免 NVENC 動態切 timebase 卡頓。")
-                }
-
-                // §J.3.e.X Path β UI 整合 2026-05-08 — Vulkan-only RIFE
-                // native flow + native-res warp.  Quality 大躍進 vs block-match
-                // (verify_dump score 0.95 ≈ perfect midpoint vs block-match 0%).
-                // 30-60s device-lost crash 已修補 (β.6 overlay resize race fix
-                // 2026-05-08，drainOverlayStash 加 vkDeviceWaitIdle 在 destroy
-                // 舊 VkImage 前)，預設仍 OFF (beta opt-in 直到多卡多 driver 驗測).
-                // env var VIPLE_VKFRUC_NATIVE_RIFE=1 /
-                // VIPLE_VKFRUC_RIFE_INFER_DIM=N 仍是 dev escape hatch.
-
-                // §J.3.e.2.i.11 (v1.4.70) — auto-tier 主控 CheckBox.
-                // 預設 ON：根據啟動時偵測的 GPU tier 自動選 RIFE on/off +
-                // inferDim，無視底下的 Manual Native RIFE / inferDim
-                // 控制項。關掉才走 Manual。
-                CheckBox {
-                    id: vkfrucRifeAutoTierCheck
-                    width: parent.width
-                    text: qsTr("FRUC 自動 GPU 分級（Auto-tier，推薦）")
-                    font.pointSize: 12
-                    visible: frameInterpolationCheck.checked
-                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
-                    checked: StreamingPreferences.vkfrucRifeAutoTier
-                    onCheckedChanged: {
-                        if (StreamingPreferences.vkfrucRifeAutoTier !== checked) {
-                            StreamingPreferences.vkfrucRifeAutoTier = checked
-                        }
-                    }
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 8000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("§J.3.e.2.i.11 跨硬體補幀策略 — 啟動時跑 GPU benchmark 偵測你的顯卡強度，自動選 RIFE on/off + inferDim 給該 HW 最 stable 的 frame rate 體驗。\n\n四級 tier 自動套用：\n\n• ENTRY (內顯 / 老卡)：FRUC 全關，純 60→60 native present\n• PERFORMANCE (GTX 16xx, RX 5xxx)：block-match 補幀 only (~4ms chain, 有 30Hz 閃爍)\n• BALANCED (RTX 30, RX 6700+, Arc A7) — 預期 RTX 3060 Laptop 落這級：RIFE β.5.1 inferDim=128, chain ~10ms 穩定 fit slot，fps 110+ 不掉; 但 inferDim=128 quality 接近 ME, 補幀效果輕微\n• QUALITY (RTX 40+, RX 7800+)：RIFE β.5.1 inferDim=256, chain ~14ms 邊緣 fit 16.7ms slot，最佳品質\n\n關掉 auto-tier 走 Manual 模式：使用底下 Native RIFE CheckBox + 推論解析度 ComboBox 自己決定。\n\n注意：auto-tier 不會魔幻地讓任何顯卡跑出 RTX 4090 quality. 它是 graceful degradation —— 各 HW 拿到該 HW 上最 stable 的 trade-off.")
-                }
-
-                // §J.3.e.2.i.11 (v1.4.70) — auto-tier 偵測結果顯示 Label.
+                // 顯示 read-only 偵測結果 + 當前 tier (autotier 自動更新 detectedTier
+                // 給 UI 看; m_CurrentTier 是 runtime, 跑時才有意義).
                 Label {
                     width: parent.width
-                    visible: vkfrucRifeAutoTierCheck.visible && vkfrucRifeAutoTierCheck.checked
+                    visible: frameInterpolationCheck.checked
+                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
                     font.pointSize: 11
                     wrapMode: Text.Wrap
                     text: {
                         var tier = StreamingPreferences.vkfrucDetectedTier
-                        var tierName = tier === StreamingPreferences.VGT_ENTRY       ? "ENTRY (內顯/老卡 — FRUC 全關)"            :
-                                       tier === StreamingPreferences.VGT_PERFORMANCE ? "PERFORMANCE (block-match only, ~4ms)"   :
-                                       tier === StreamingPreferences.VGT_BALANCED    ? "BALANCED (RIFE inferDim=128, ~10ms)"     :
-                                       tier === StreamingPreferences.VGT_QUALITY     ? "QUALITY (RIFE inferDim=256, ~14ms)"      :
+                        var tierName = tier === StreamingPreferences.VGT_ENTRY       ? "ENTRY (內顯/老卡)"        :
+                                       tier === StreamingPreferences.VGT_PERFORMANCE ? "PERFORMANCE (GTX 16xx, RX 5xxx)" :
+                                       tier === StreamingPreferences.VGT_BALANCED    ? "BALANCED (RTX 20/30, RX 6700+, Arc A7)" :
+                                       tier === StreamingPreferences.VGT_QUALITY     ? "QUALITY (RTX 40+, RX 7800+)" :
                                                                                        "UNKNOWN (未偵測 — 重啟 client 觸發)"
                         var gpu = StreamingPreferences.vkfrucDetectedGpuName === ""
                                   ? "(尚未偵測)"
@@ -1023,67 +943,21 @@ Flickable {
                         var benchMs = StreamingPreferences.vkfrucBenchmarkNs > 0
                                       ? (StreamingPreferences.vkfrucBenchmarkNs / 1e6).toFixed(2) + " ms"
                                       : "(待測)"
-                        return qsTr("   偵測：") + tierName + "\n"
-                             + qsTr("   GPU：")  + gpu + "\n"
-                             + qsTr("   benchmark：") + benchMs
+                        return qsTr("FRUC 自動分級 (Vulkan unified autotier v1.4.127):") + "\n"
+                             + qsTr("   GPU：")       + gpu      + "\n"
+                             + qsTr("   偵測 tier：") + tierName + "\n"
+                             + qsTr("   benchmark：") + benchMs  + "\n\n"
+                             + qsTr("Runtime 沿 7 階 (T-1..T5) 自動升降:") + "\n"
+                             + qsTr("  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)") + "\n"
+                             + qsTr("  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)") + "\n"
+                             + qsTr("  T3 = NVOF + chain_lv2 (NVOF GPU 中 chain 偏重)") + "\n"
+                             + qsTr("  T2 = chain_lv2 (AMD/Intel 無 NVOF)") + "\n"
+                             + qsTr("  T1 = chain_lv1 (PERFORMANCE GPU)") + "\n"
+                             + qsTr("  T0 = SYNC chain (最低 FRUC)") + "\n"
+                             + qsTr("  T-1 = 暫停 FRUC (GPU 跑不動, hold 5min 重試)")
                     }
                 }
-
-                CheckBox {
-                    id: vkfrucNativeRifeCheck
-                    width: parent.width
-                    text: qsTr("Native RIFE 補幀 (β beta) — Manual 模式")
-                    font.pointSize: 12
-                    visible: frameInterpolationCheck.checked
-                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
-                             && !vkfrucRifeAutoTierCheck.checked
-                    checked: StreamingPreferences.vkfrucEnableNativeRife
-                    onCheckedChanged: {
-                        if (StreamingPreferences.vkfrucEnableNativeRife !== checked) {
-                            StreamingPreferences.vkfrucEnableNativeRife = checked
-                        }
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 5000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("§J.3.e.X Path β: 使用 RIFE-v4.25-lite ML 模型在 Vulkan compute pipeline 抽出 motion flow + blend mask，再在 native 1080p 跑自家 warp+blend shader。\n\n品質：dump 比較 verify score 0.95 (≈ 1.0 perfect midpoint)。但實測在 mid-range GPU (RTX 3060 Laptop) 上 inferDim=128 down ratio 15× 太激進，flow precision 接近 ME 8×8 block，使用者體感跟關 RIFE 無差異。inferDim=256 quality 較好但 chain 19.8ms > 16.7ms slot，fps 從 target 120 降到 45。\n\n建議：RTX 3060 Laptop 等 mid-range 預設保持關閉；RTX 4070+ 可開 inferDim=256 試 quality。\n\n2026-05-08 β.6 stability 修補：原本 30-60s 撞 VK_ERROR_DEVICE_LOST 的 overlay resize use-after-free 已用 vkDeviceWaitIdle 補住。Beta 標籤暫保留待多卡多 driver 驗測 + sweet-spot 解掉前不轉正。\n\n非 NVIDIA GPU 或不支援的硬體會自動 fallback 到 block-match，不會崩潰。")
-                }
-
-                Label {
-                    width: parent.width
-                    text: qsTr("RIFE 推論解析度:")
-                    font.pointSize: 12
-                    visible: vkfrucNativeRifeCheck.visible && vkfrucNativeRifeCheck.checked
-                }
-                ComboBox {
-                    id: vkfrucNativeRifeInferDimCombo
-                    width: parent.width / 2
-                    visible: vkfrucNativeRifeCheck.visible && vkfrucNativeRifeCheck.checked
-                    enabled: visible
-                    font.pointSize: 12
-                    textRole: "text"
-                    valueRole: "value"
-                    model: ListModel {
-                        ListElement { text: "128 (預設, ~10ms chain, RTX 3060 Laptop OK; quality 接近 ME)"; value: 128 }
-                        ListElement { text: "256 (~20ms chain, RTX 4070+ 才不掉 fps; quality 較佳)";     value: 256 }
-                        ListElement { text: "384 (~30ms chain, 高階卡限定)";                                value: 384 }
-                        ListElement { text: "512 (~40ms chain, 最高品質, 桌面級)";                          value: 512 }
-                    }
-                    Component.onCompleted: {
-                        currentIndex = indexOfValue(StreamingPreferences.vkfrucNativeRifeInferDim)
-                        if (currentIndex < 0) currentIndex = 0  // default 128 (H.3 2026-05-10)
-                    }
-                    onActivated: {
-                        if (StreamingPreferences.vkfrucNativeRifeInferDim !== currentValue) {
-                            StreamingPreferences.vkfrucNativeRifeInferDim = currentValue
-                        }
-                    }
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 5000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("RIFE 推論時的內部解析度。較高 = motion flow 更精確但 GPU 慢；較低 = 更快但 flow 較粗糙 (warp 仍在 native 1080p 跑所以 edges 都銳)。\n\n必須是 128 倍數 (RIFE-v4.25-lite 內部 hardcoded 32×downsample × 2 stride-2 conv = 128 對齊要求)。\n\n建議：mid-range GPU (RTX 3060 Laptop / 桌面 3060 / 內顯) 用 128 (default)，chain 約 10ms fit 16.7ms slot；高階卡 (RTX 4070+) 才開 256 拿 quality (chain ~20ms 在 60fps 仍勉強 fit，但 RTX 3060 會掉到 fps 45)。\n\n2026-05-10 H.3 實測：原本 default 256 在 RTX 3060 Laptop 上 compute_gpu_total = 19.8ms，dual-present fps 從 target 120 掉到 45 + p99 28ms judder，體感比關 RIFE 還差。default 已調降為 128。")
-                }
+                // (NV-OF / TRIPLE / Auto-tier / Manual RIFE / inferDim) 舊選項移除.
 
                 // VipleStream v1.2.92: 180 fps cap warning removed
                 // along with the cap itself.  Generic FRUC happily
@@ -2214,7 +2088,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("This unlocks extremely high video bitrates for use with Sunshine hosts. It should only be used when streaming over an Ethernet LAN connection.")
+                    ToolTip.text: qsTr("This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.")
                 }
 
                 CheckBox {

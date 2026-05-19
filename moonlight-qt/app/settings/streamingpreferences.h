@@ -128,18 +128,34 @@ public:
     Q_ENUM(FrucBackend);
 
     // §J.3.e.2.i — VipleStream renderer backend.  使用者在 Settings 下拉
-    // 選單裡切.  RS_VULKAN（預設）跑 VkFrucRenderer (SW upload + dual-
-    // present + Vulkan compute FRUC).  RS_D3D11 跑 D3D11VARenderer +
-    // FRUC backend (NV-OF / Generic / DirectML).
+    // 選單裡切.
     //
-    // FRUC engine 對應：RS_D3D11 用 frucBackend 設定的 backend；
+    // RS_AUTO（v1.4.137+ 預設）= 走標準 hwaccel cascade（Windows 上 D3D11VA
+    // 優先 → DXVA2 → Vulkan → SW），讓 ffmpeg 自己挑第一個能 init 的。等同
+    // upstream Moonlight 行為.  RS_AUTO 跟 RS_D3D11 目前在 ffmpeg.cpp 的
+    // helper 裡走同一條 path（shouldPreferVulkanDecoderCascade 都 false）—
+    // 將來若加 GPU-detect 邏輯（譬如 RTX 40 系列偏好 Vulkan native decode），
+    // 邏輯放在 helper 內判 RS_AUTO 即可，RS_D3D11 仍保 hard-pin D3D11 語意.
+    //
+    // RS_D3D11 = 跟 RS_AUTO 行為一樣，但使用者明確選了 D3D11；保留以後當
+    // 「不允許 helper 自動切到 Vulkan」的 hard-pin 用.
+    //
+    // RS_VULKAN = 強制 Vulkan-first cascade + VkFrucRenderer (SW upload +
+    // dual-present + Vulkan compute FRUC).  AMD APU / 部分機種 native vulkan
+    // video decode 不穩，user 自願承擔.
+    //
+    // FRUC engine 對應：RS_AUTO/RS_D3D11 用 frucBackend 設定的 backend；
     // RS_VULKAN 因為還沒接 IFRUCBackend 抽象，固定用 VkFruc 內建的 ME→
     // median→warp compute（行為等同 FB_GENERIC），UI 會把 frucBackend
     // dropdown disable + 顯示提示.
+    //
+    // Enum 值穩定（QSettings backwards-compat）：RS_VULKAN=0 / RS_D3D11=1 /
+    // RS_AUTO=2 是 v1.4.137 新增.
     enum RendererSelection
     {
-        RS_VULKAN,      // 預設：VkFrucRenderer (SW upload + dual-present + Vulkan compute FRUC)
-        RS_D3D11,       // D3D11VARenderer + frucBackend 選的補幀引擎
+        RS_VULKAN = 0,  // 強制 Vulkan-first cascade + VkFrucRenderer
+        RS_D3D11  = 1,  // 標準 cascade（D3D11VA 優先），hard-pin 不切 Vulkan
+        RS_AUTO   = 2,  // 預設：標準 cascade，未來可接 GPU-detect
     };
     Q_ENUM(RendererSelection);
 

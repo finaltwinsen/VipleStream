@@ -737,10 +737,10 @@ CenteredGridView {
                 }
             }
 
-            // Host helper + sunshine fallback copy
+            // Host helper + VipleStream-Server fallback copy
             Label {
                 Layout.maximumWidth: 420
-                text: qsTr("If your host PC is running Sunshine, navigate to the Sunshine web UI to enter the PIN.")
+                text: qsTr("If your host PC is running VipleStream-Server, navigate to the VipleStream-Server web UI to enter the PIN.")
                 font.pointSize: 10
                 color: "#8B8E7E"           // vs mute
                 wrapMode: Text.Wrap

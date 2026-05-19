@@ -240,6 +240,11 @@ private:
     std::atomic<uint64_t> m_NvOfProfDispatchCount {0};
     std::atomic<uint64_t> m_NvOfProfFailCount     {0};
     std::atomic<uint64_t> m_NvOfProfConsecFails   {0};
+    // §J.3.e.2.i.54 (v1.4.119) — drop counter for bounded worker queue.
+    // 每當 render thread 想 push 但 queue 已滿 (worker 還在跑上一筆) 就 inc.
+    // 高 drop rate = NVOF SDK throughput 跟不上 render 60fps → NVOF 實際 rate
+    // 是 1000ms / SDK_mean_ms, 視覺上 motion vector 更新頻率降低但不卡頓.
+    std::atomic<uint64_t> m_NvOfProfDroppedCount  {0};
     double          m_NvOfProfChainMsAccum  = 0.0;
     uint64_t        m_NvOfProfChainSamples  = 0;
     std::chrono::steady_clock::time_point m_NvOfProfLastLog{};
@@ -264,6 +269,32 @@ private:
     std::condition_variable m_NvOfWorkerCv;
     std::queue<NvOfRequest> m_NvOfWorkerQueue;
     std::atomic<bool>       m_NvOfWorkerStop {false};
+    // §J.3.e.2.i.54 (v1.4.119) — in-flight counter (含 queue 跟 SDK 正在跑的).
+    // Render thread 每 frame 在 partA NvOf copy 時 load == 0 判斷一次, 結果存
+    // m_NvOfActiveThisFrame 給後續 dispatch sites 用; 確保同一幀內 partA copy /
+    // marker submit / push 三 site 決策一致, 避免 worker 在 site 之間結束導致
+    // partA skip 但 dispatch 進行, worker 拿到 stale data 的 race.
+    // Increment 在 push (Submit 函式內, 在 lock 內); decrement 在 worker SDK
+    // call return 之後 (loop 內). 這樣 "in-flight = queued + executing".
+    std::atomic<int>        m_NvOfWorkerInFlight {0};
+    // Frame-level captured bool. Single render thread access, 不用 atomic.
+    // 在每 frame 第一個 NvOf copy site 設定 (path D copy OR HW chain partA OR
+    // single-cmd partA — 三 path 互斥), 之後 dispatch sites 讀此值. true 表示
+    // 本幀可安全 partA write + dispatch worker; false 表示 worker busy 或 NVOF
+    // 沒 ready, 本幀全 skip NVOF (chain 仍跑, 讀上次 flow ping-pong 結果).
+    bool                    m_NvOfActiveThisFrame {false};
+    // §J.3.e.2.i.55 (v1.4.120) — Option E: NVOF skip throttling. 計每 frame +
+    // 每 N 幀只 1 幀跑 NVOF (env VIPLE_VKFRUC_NVOF_EVERY_N_FRAMES, default 2).
+    // 動機: GPU 低 clock 時, NVOF + chain cmpCmd 並行搶 SM/power → chain_mean
+    // 1-7ms 不穩 (v1.4.119 觀察到啟動 4 分鐘後才 GPU 升 clock 拉穩, 不能依靠).
+    // 降頻 NVOF (N=2) 讓一半幀 chain 不跟 NVOF GPU 並行 → chain 預期穩定 <1ms.
+    // 代價: motion vector 更新從 60Hz 降 30Hz (FRUC 內插品質微降, 主觀影響極小).
+    uint32_t                m_NvOfThrottleCounter {0};
+    // Helper: compute m_NvOfActiveThisFrame for current frame.
+    // 整合 (a) m_NvOfReady (b) worker in-flight gate (race guard) (c) Option E
+    // throttle (d) first-frame init exception. 3 個 partA NvOf copy site 都呼叫
+    // 此 helper, 確保 counter 一致 + throttle 行為一致.
+    bool computeNvOfActiveThisFrame();
     void nvOfWorkerLoop();
     void nvOfWorkerStart();
     void nvOfWorkerStop();
@@ -693,19 +724,121 @@ private:
     int                m_FramesBelowIdleThreshold       = 0;
 
     // §J.3.e.2.i.45 (v1.4.109) — handoff-aware sync fallback.
-    // 偵測 cross-QF handoff (cmpWait - cmpDur) 持續過高 → 暫時切回
-    // single-cmd sync chain (拿掉跨 QF semaphore overhead). 觸發場景:
-    // GPU 低 clock 期間 (筆電 power-save mode / driver 升頻中), cmpDur
-    // 仍 ~3ms 但 cross-QF semaphore signal/wait 延遲爆衝到 5-14ms,
-    // autotier 用 m_ChainMeanMsRing 看不到 (只測 chain compute, 不含
-    // handoff). 共用 m_LastDowngradeTime cool-down (v1.4.106): demote
-    // 後等 30s 才試 re-enable. Re-enable 後若 GPU 仍低 clock, 30 frame
-    // 內 handoff 偵測會再 demote.
+    // §J.3.e.2.i.56 (v1.4.121) — REDESIGNED: 原 handoff metric (cmpWait - cmpDur)
+    // 把 swapchain acquire wait + vsync wait 算進去, 在 fast-chain GPU + 60Hz
+    // display 條件下 handoff 自然=14-15ms (vsync wait dominate), autotier 誤判
+    // 為 cross-QF 慢, 不停 ASYNC↔SYNC 抖. 改用 chainBusy = partA + cmpDur +
+    // partC (pure GPU active 不含任何 wait/cross-QF/vsync), 跟 server frame
+    // budget (1000/m_StreamFps) 比, 超過 72% 才視為 chain 太重 → SYNC fallback.
+    // 通用條件:
+    //   - chainBusy 是「實際 GPU 用了多少時間做 chain」, 跟 GPU 廠商 / 模型無關
+    //   - TRIPLE 自然有更高 partC (3 render passes), 同 threshold 帶 head-room
+    //   - server fps 動態套用: 60fps→12ms, 30fps→24ms, 90fps→8ms, 120fps→6ms
+    //   - SW path / HW chain async / single-cmd 都 sum ts[1]-ts[0]+ts[3]-ts[2]+
+    //     ts[5]-ts[4] 同公式, 三 path 通用
+    // 共用 m_LastDowngradeTime cool-down (v1.4.106): demote 後等 30s 才試
+    // re-enable. Member 名稱 m_HandoffMsRing 保留以減少 churn, 但語意是 chainBusy.
     std::atomic<bool>  m_FrucChainAsyncTempDisabled{false};
-    double             m_HandoffMsRing[kChainRingSize] = {};
+    double             m_HandoffMsRing[kChainRingSize] = {};  // v1.4.121: stores chainBusy ms
     int                m_HandoffMsRingIdx              = 0;
     int                m_HandoffMsRingFilled           = 0;
     int                m_FramesAboveHandoffThresh      = 0;
+    // §J.3.e.2.i.56 (v1.4.121) — server stream fps for chainBusy threshold.
+    // populated at init() from params->frameRate. Default 60 (safe for first
+    // frames before init runs, just slightly conservative threshold).
+    int                m_StreamFps                     = 60;
+
+    // §J.3.e.2.i.57 (v1.4.122) — adaptive latency-aware frame drop throttle.
+    // 偵測 max(decodeMeanMs, chain_mean) 過某 threshold 時, 每 N 幀主動 skip
+    // chain (decoder 仍 pull, FRUC chain 跳, present 維持上一幀). 預防 v1.4.115
+    // 觀察到的「decode latency 緩慢爬到 200ms 後 server-side 突然 drop 17 frame」
+    // 那個 burst pattern, 換成 smooth 1/N drop rate.
+    // 5 階梯 (latencyMs → drop every N frames):
+    //    <40ms      → N=0 (no drop)
+    //    40-60ms    → N=120 (~0.83% drop)
+    //    60-100ms   → N=60  (~1.67% drop)
+    //    100-140ms  → N=30  (~3.33% drop)
+    //    140-180ms  → N=20  (5.00% drop)
+    //    >180ms     → N=10  (10.00% drop)
+    // Recovery hysteresis: 進入較重 step 後, 5 秒內不降回較輕 step (避免在邊界
+    // 抖動). 從輕 step 升重 step 沒有 hold (對 latency spike 立刻反應).
+    // Step 0 = no drop, 1..5 = above ladders. m_LatencyThrottleStepEnteredMs
+    // 記錄當前 step 何時進入, 用來判斷 hold 期是否結束.
+    int                m_LatencyThrottleStep            = 0;
+    int64_t            m_LatencyThrottleStepEnteredMs   = 0;
+    uint32_t           m_LatencyThrottleCounter         = 0;
+    std::atomic<uint64_t> m_LatencyThrottleDroppedCount {0};
+    // §J.3.e.2.i.59 (v1.4.126) — latency slope tracking for predictive boost.
+    // 8-entry ring + current index. Per frame: write latency, advance index,
+    // compute (latency_now - latency_ring[idx_8_ago]) / 8 = slope per frame.
+    // Used in computeLatencyThrottleDrop() to boost target step under fast rise.
+    // 8-frame window ≈ 130ms @ 60fps - 短到能 catch 真實 spike, 長到 avoid 抖動.
+    // 模仿 s_DecodeLatencyRingMs[8] (ffmpeg.cpp:2580+) pattern. Cost: 1 store +
+    // 1 subtract + 1 compare/frame ≈ 5ns 可忽略.
+    double             m_LatencyHistMs[8]               = {};
+    uint32_t           m_LatencyHistIdx                 = 0;
+    bool               m_LatencyHistFilled              = false;
+    // PROF accumulator: log 每 60s window latency throttle state. Atomic 因為
+    // throttle counter inc 在 render thread, PROF flush 在不同處 (相同 thread
+    // 實際上, 但保險用 atomic).
+    bool computeLatencyThrottleDrop();  // 在 renderFrame top 叫. true=skip chain.
+
+    // §J.3.e.2.i.60 (v1.4.127) — unified Vulkan FRUC autotier.
+    // 7 tiers (DISABLED..T5). 取代 v1.4.121 之前 4 條獨立 autotier 分支
+    // (DUAL↔TRIPLE, chain_lv 1-3, ASYNC↔SYNC, NVOF demote) — 改成單一 ladder.
+    // Tier 決定 4 個 feature axis: NVOF on/off, chain_lv 1-3, ASYNC/SYNC,
+    // RIFE on/off+dim. TRIPLE/DUAL 仍是 orthogonal axis (chain_mean 觸發).
+    // §J.3.e.2.i.60 (v1.4.132) — redesigned tier hierarchy to avoid death spiral.
+    // v1.4.131 had T3→T2 dropping NVOF on chainBusy>14ms, but removing NVOF makes
+    // chain HEAVIER (falls back to GPU compute block-match ME, 80ms+ cmpDur).
+    // New T2: NVOF + chain_lv 1 (lightest NVOF tier). NVOF stays unless SDK fails.
+    enum class VkFrucTier : int {
+        DISABLED = -1,  // FRUC off, pass-through decode+present (no chain, no FRUC)
+        T0       =  0,  // last-resort: SYNC chain, chain_lv 1, no NVOF, no RIFE
+        T1       =  1,  // ASYNC, chain_lv 2, no NVOF, no RIFE (for non-NVOF BALANCED)
+        T2       =  2,  // ASYNC, chain_lv 1, NVOF, no RIFE (lightest NVOF tier)
+        T3       =  3,  // ASYNC, chain_lv 2, NVOF, RIFE dim=128
+        T4       =  4,  // ASYNC, chain_lv 3, NVOF, RIFE dim=128
+        T5       =  5,  // ASYNC, chain_lv 3, NVOF, RIFE dim=256
+    };
+    struct VkFrucTierConfig {
+        bool useNvOf;
+        bool useAsync;
+        int  chainLevel;   // 1, 2, or 3; 0 for DISABLED
+        bool useRife;
+        int  rifeInferDim; // 128 or 256; 0 if useRife=false
+    };
+    static VkFrucTierConfig tierConfig(VkFrucTier t);  // pure lookup, no side effect
+
+    // Runtime tier state. Atomic because render thread reads + autotier
+    // transition (also render thread) writes; defensive against future
+    // cross-thread access (e.g., UI changes pause toggle).
+    std::atomic<int>   m_CurrentTier   { (int)VkFrucTier::DISABLED };
+    int                m_TierCap       = (int)VkFrucTier::DISABLED;  // max achievable by GPU
+    int64_t            m_TierEnteredMs = 0;                          // current tier 何時進入
+    // T0 → T-1 trigger: 60s 滾動視窗內進 T0 >= 3 次 → 結構性跑不動 FRUC.
+    int64_t            m_T0EnterTimes[3]       = {0, 0, 0};
+    int                m_T0EnterIdx            = 0;
+    // T-1 hold: 進入 T-1 後 5 分鐘 hold, 之後重試 cap.
+    int64_t            m_TierDisabledEnteredMs = 0;
+
+    // Decide initial tier cap from GPU caps + detected tier + queue family.
+    // Called once at session init, sets m_TierCap. Runtime autotier 從 cap 開始.
+    int  detectInitialTierCap();
+    // Autotier transition decision: 每 frame 末叫 (在 chain measurement block).
+    // 讀 chain_mean / chainBusy / NVOF fails, 比對 thresholds + hysteresis,
+    // update m_CurrentTier. 取代既有 4 條 autotier 分支.
+    void runAutotierTransition();
+    // §J.3.e.2.i.60 (v1.4.127) — combined FRUC-disabled gate. true iff
+    // m_FRUCPaused OR current tier == DISABLED. 取代既有 m_FRUCPaused.load()
+    // 散落 check, 集中讓 T-1 跟 user Ctrl+Alt+Shift+F pause 同邏輯走 fallback.
+    bool isFrucEffectivelyDisabled() const {
+        return m_FRUCPaused.load(std::memory_order_relaxed)
+            || m_CurrentTier.load(std::memory_order_relaxed) == (int)VkFrucTier::DISABLED;
+    }
+
+    // PROF accumulator: 60s window tier transition counts.
+    std::atomic<uint64_t> m_TierTransitionCount {0};
 
     // §B-DUMP 2026-05-07 — diagnostic frame dump for visual real-vs-interp
     // comparison.  Triggered by VIPLE_VKFRUC_DUMP_DIR=path; copies real /
@@ -1489,5 +1622,14 @@ private:
         const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
         void* pUserData);
 };
+
+// §J.3.e.2.i.57 (v1.4.122) — shared atomic for decode latency throttle.
+// §J.3.e.2.i.58 (v1.4.125) — REDESIGNED: 從「每秒 1 次 publish 1s 平均」改成
+// 「每幀 publish 最近 8 幀 ring max」. lag 從 ~1000ms 降到 ~16ms, throttle 對
+// latency spike 反應更即時. ring-max 也避免 EMA outlier smear (要抓 worst).
+// Ring 跟 publish 邏輯都在 ffmpeg.cpp 端 (data 來源 thread), 算完直接 store
+// atomic; vkfruc renderFrame() throttle 決策時 atomic load 看到 max. Cost
+// ~10 instructions/frame (ring update + max scan + atomic store) = 可忽略.
+extern std::atomic<double> g_VkFrucDecodeLatencyMs;
 
 #endif // HAVE_LIBPLACEBO_VULKAN

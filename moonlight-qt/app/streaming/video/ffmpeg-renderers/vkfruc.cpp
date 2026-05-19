@@ -16,6 +16,12 @@
 
 #ifdef HAVE_LIBPLACEBO_VULKAN
 
+// §J.3.e.2.i.57 (v1.4.122) — shared atomic: per-frame decode latency for throttle.
+// §J.3.e.2.i.58 (v1.4.125) — ffmpeg.cpp 每幀 push 最近 8 幀 ring max (instant
+// 反應 latency spike, 不是 1s 平均). vkfruc renderFrame() 讀此值 + chain_mean
+// 取 max 做 adaptive frame drop. Initial 0.0 = warmup 期間不 throttle.
+std::atomic<double> g_VkFrucDecodeLatencyMs{0.0};
+
 #include <SDL.h>
 #include <SDL_vulkan.h>
 #include <algorithm>
@@ -498,7 +504,11 @@ bool VkFrucRenderer::isFRUCActive() const
 
 bool VkFrucRenderer::lastFrameHadFRUCInterp() const
 {
-    return m_FrucMode && m_FrucReady && m_DualMode && !m_FRUCPaused.load();
+    // §J.3.e.2.i.60 (v1.4.127) — T-1 (DISABLED tier) 算 FRUC-paused 同效果.
+    // Session / Pacer 看這個決定 effectiveFps; T-1 沒 interp 就照 server fps.
+    return m_FrucMode && m_FrucReady && m_DualMode
+        && !m_FRUCPaused.load()
+        && m_CurrentTier.load(std::memory_order_relaxed) != (int)VkFrucTier::DISABLED;
 }
 
 // §B2 2026-05-06 — TRIPLE 60→180 推 2 張 interp/server frame，
@@ -2082,12 +2092,550 @@ void VkFrucRenderer::nvOfWorkerStop()
         "[VIPLE-VKFRUC-NVOF] §J.3.e.2.i.53 worker thread joined");
 }
 
+// §J.3.e.2.i.60 (v1.4.127) — unified Vulkan FRUC autotier.
+// Tier 決定 4 個 feature axis (NVOF/chainLv/ASYNC/RIFE). Pure lookup, no side effect.
+// TRIPLE/DUAL 是 orthogonal axis 不在這裡決定 (chain_mean trigger, 既有邏輯).
+VkFrucRenderer::VkFrucTierConfig VkFrucRenderer::tierConfig(VkFrucTier t)
+{
+    // §J.3.e.2.i.60 (v1.4.132) — redesigned. T2 改成 NVOF+chain_lv 1 (lightest
+    // NVOF tier). T1 改成 no-NVOF+chain_lv 2 (for non-NVOF BALANCED).
+    // NVOF GPU 降階路徑: T5→T4→T3→T2→T0→T-1 (skip T1, 不走 block-match).
+    switch (t) {
+        case VkFrucTier::T5:       return {true,  true,  3, true,  256};
+        case VkFrucTier::T4:       return {true,  true,  3, true,  128};
+        case VkFrucTier::T3:       return {true,  true,  2, true,  128};
+        case VkFrucTier::T2:       return {true,  true,  1, false, 0};    // NEW: NVOF + chain_lv 1
+        case VkFrucTier::T1:       return {false, true,  2, false, 0};    // NEW: no NVOF + chain_lv 2
+        case VkFrucTier::T0:       return {false, false, 1, false, 0};
+        case VkFrucTier::DISABLED:
+        default:                   return {false, false, 0, false, 0};
+    }
+}
+
+// §J.3.e.2.i.60 (v1.4.127) — detect initial tier cap from GPU capability.
+// Called once at session init after capability probe done. Sets m_TierCap;
+// runtime autotier 從 cap 開始往下走 (升 / 降 都受 cap 限制).
+//
+// 規則 (per docs/plans/J3e2i60_unified_autotier_v1.4.127.md):
+//   - 沒 dedicated compute QF → 強制 T0 (single-cmd-buf SYNC only)
+//   - vkfrucDetectedTier == QUALITY + 有 OF QF → T5
+//   - vkfrucDetectedTier == QUALITY + 無 OF QF → T2 (no NVOF)
+//   - vkfrucDetectedTier == BALANCED + 有 OF QF → T4
+//   - vkfrucDetectedTier == BALANCED + 無 OF QF → T2
+//   - vkfrucDetectedTier == PERFORMANCE → T2
+//   - vkfrucDetectedTier == ENTRY → T1
+//   - vkfrucDetectedTier == UNKNOWN → T1 (safe fallback)
+//
+// Env var override: VIPLE_VKFRUC_TIER_CAP=N (force cap, 0..5; -1=disable).
+// Dev override 用, 不暴露 UI.
+int VkFrucRenderer::detectInitialTierCap()
+{
+    // Cache lookup avoid 每次 init 都讀 env var.
+    static const int s_EnvCapOverride = []() {
+        if (qEnvironmentVariableIsSet("VIPLE_VKFRUC_TIER_CAP")) {
+            return qEnvironmentVariableIntValue("VIPLE_VKFRUC_TIER_CAP");
+        }
+        return -2;  // sentinel: no override
+    }();
+    if (s_EnvCapOverride != -2) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TIER] §J.3.e.2.i.60 cap override via "
+            "VIPLE_VKFRUC_TIER_CAP=%d (range -1..5)", s_EnvCapOverride);
+        // Clamp 範圍以免亂值
+        int v = s_EnvCapOverride;
+        if (v < -1) v = -1;
+        if (v >  5) v =  5;
+        return v;
+    }
+
+    // 沒 dedicated compute QF → 連 ASYNC chain 都不能, cap = T0 (SYNC only).
+    // 注意: m_FrucChainAsyncAvailable 在 createFrucComputeResources 後才會 set,
+    // 此 helper 應該在 chain resources OK 之後叫.
+    if (!m_FrucChainAsyncAvailable) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TIER] §J.3.e.2.i.60 no dedicated compute QF (or "
+            "async chain setup failed), cap=T0 (single-cmd SYNC only)");
+        return (int)VkFrucTier::T0;
+    }
+
+    // 從 StreamingPreferences 拿偵測到的 GPU tier (heuristic + benchmark).
+    StreamingPreferences* prefs = StreamingPreferences::get();
+    const int detectedTier = prefs ? prefs->vkfrucDetectedTier
+                                   : (int)StreamingPreferences::VGT_UNKNOWN;
+    const bool hasOF = (m_OpticalFlowQueueFamily != UINT32_MAX);
+
+    // §J.3.e.2.i.60 (v1.4.132) — cap mapping for redesigned tier hierarchy.
+    // Key principle: NVOF GPU (hasOF=true) NEVER falls below T2 (where T2 is
+    // "NVOF + chain_lv 1"). NVOF is critical for non-block-match ME on weak GPUs.
+    int cap;
+    switch (detectedTier) {
+        case StreamingPreferences::VGT_QUALITY:
+            cap = hasOF ? (int)VkFrucTier::T5 : (int)VkFrucTier::T1;
+            break;
+        case StreamingPreferences::VGT_BALANCED:
+            cap = hasOF ? (int)VkFrucTier::T4 : (int)VkFrucTier::T1;
+            break;
+        case StreamingPreferences::VGT_PERFORMANCE:
+            // hasOF (RTX 16xx/20xx-class, RTX 3060 Laptop benchmark-cold-start) → T3
+            //   (NVOF + chain_lv 2 + RIFE 128). NVOF 卸載 ME 給 OFA hardware.
+            // no OF (AMD/Intel PERFORMANCE) → T0 (no FRUC interp, SYNC chain min)
+            cap = hasOF ? (int)VkFrucTier::T3 : (int)VkFrucTier::T0;
+            break;
+        case StreamingPreferences::VGT_ENTRY:
+            // hasOF (low-end discrete NV) → T2 (lightest NVOF tier)
+            // no OF (整顯 / 老卡) → T-1 (FRUC off, can't keep up)
+            cap = hasOF ? (int)VkFrucTier::T2 : (int)VkFrucTier::DISABLED;
+            break;
+        case StreamingPreferences::VGT_UNKNOWN:
+        default:
+            // 未知 GPU but hasOF → 保守 T2 (lightest NVOF)
+            cap = hasOF ? (int)VkFrucTier::T2 : (int)VkFrucTier::T0;
+            break;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[VIPLE-VKFRUC-TIER] §J.3.e.2.i.60 initial cap=T%d "
+        "(detectedTier=%d hasOF=%d frucChainAsyncAvailable=%d)",
+        cap, detectedTier, (int)hasOF, (int)m_FrucChainAsyncAvailable);
+    return cap;
+}
+
+// §J.3.e.2.i.60 (v1.4.127) — unified autotier transition.
+// 每 frame 在 chain measurement block 末叫一次. 讀 chain_mean / chainBusy /
+// NVOF fails, 比對 thresholds + hysteresis, update m_CurrentTier.
+// 取代之前 4 條獨立 autotier 分支 (DUAL↔TRIPLE 仍是 orthogonal 不在這).
+//
+// Downgrade thresholds (per docs/plans):
+//   T5/T4 → T_{cur-1}: chain_mean > 8ms 持續 30 frame (chain_lv 降階 trigger)
+//   T3 → T2: NVOF 連 fail 30 OR chainBusy mean > 14ms 持續 30 frame
+//   T2 → T1: chain_mean > 8ms 持續 30 frame
+//   T1 → T0: chainBusy mean > frameBudgetMs * 0.72 持續 30 frame
+//   T0 → DISABLED: 60s 滾動視窗內進 T0 >= 3 次
+// Upgrade: chain_mean < 2.5ms 持續 300 frame + 30s cool-down + cur < cap
+// True-idle bypass: chain_mean < 1ms 連 600 frame → 直接跳到 cap
+// DISABLED hold: 進入 5 分鐘後重試 cap
+void VkFrucRenderer::runAutotierTransition()
+{
+    using Clock = std::chrono::steady_clock;
+    const auto now = Clock::now();
+    const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count();
+
+    // Env var override: VIPLE_VKFRUC_TIER=N → 強制 tier, 跳過 autotier 邏輯
+    static const int s_EnvTierForce = []() {
+        if (qEnvironmentVariableIsSet("VIPLE_VKFRUC_TIER")) {
+            return qEnvironmentVariableIntValue("VIPLE_VKFRUC_TIER");
+        }
+        return -2;
+    }();
+    if (s_EnvTierForce != -2) {
+        int v = s_EnvTierForce;
+        if (v < -1) v = -1;
+        if (v >  5) v =  5;
+        const int cur = m_CurrentTier.load();
+        if (cur != v) {
+            m_CurrentTier.store(v);
+            m_TierEnteredMs = nowMs;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-TIER] T%d → T%d (env override "
+                "VIPLE_VKFRUC_TIER=%d)", cur, v, s_EnvTierForce);
+        }
+        return;
+    }
+
+    const int cur = m_CurrentTier.load();
+    int target = cur;
+
+    // Compute chain_mean from existing ring (v1.4.84 既有).
+    double chainMean = 0.0;
+    if (m_ChainMeanMsRingFilled >= kChainRingSize) {
+        double sum = 0.0;
+        for (int i = 0; i < kChainRingSize; ++i) sum += m_ChainMeanMsRing[i];
+        chainMean = sum / kChainRingSize;
+    }
+    // Compute chainBusy mean from existing ring (v1.4.121 既有).
+    double chainBusy = 0.0;
+    if (m_HandoffMsRingFilled >= kChainRingSize) {
+        double sum = 0.0;
+        for (int i = 0; i < kChainRingSize; ++i) sum += m_HandoffMsRing[i];
+        chainBusy = sum / kChainRingSize;
+    }
+    const uint64_t nvOfFails = m_NvOfProfConsecFails.load(std::memory_order_relaxed);
+    const double frameBudgetMs = 1000.0 / (double)m_StreamFps;
+    const double chainBusyThresh = frameBudgetMs * 0.72;  // T1→T0 trigger
+
+    // DISABLED hold: 5 分鐘後重試 cap
+    if (cur == (int)VkFrucTier::DISABLED) {
+        if (nowMs - m_TierDisabledEnteredMs >= 300000) {
+            target = m_TierCap;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-TIER] T-1 → T%d (5min hold passed, retry cap)",
+                target);
+            // Reset T0 entry tracking — start fresh
+            m_T0EnterTimes[0] = m_T0EnterTimes[1] = m_T0EnterTimes[2] = 0;
+            m_T0EnterIdx = 0;
+        }
+        if (target != cur) {
+            m_CurrentTier.store(target);
+            m_TierEnteredMs = nowMs;
+            m_TierTransitionCount.fetch_add(1, std::memory_order_relaxed);
+        }
+        return;  // 在 DISABLED 期間不算其他 downgrade/upgrade
+    }
+
+    // §J.3.e.2.i.60 (v1.4.132) — redesigned downgrade ladder.
+    // CRITICAL principle: NEVER drop NVOF on chainBusy alone (only on NVOF SDK
+    // 30 連 fail). v1.4.131 had T3→T2 drop NVOF on chainBusy>14ms, but losing
+    // NVOF made chain HEAVIER (block-match takes 80ms+ on RTX 3060 Laptop) →
+    // death spiral. New T2 keeps NVOF (chain_lv 1). NVOF GPU 降階 stays on
+    // NVOF until SDK fails.
+    //
+    // Downgrade ladder:
+    //   T5/T4 → T3: chain_mean > 8ms 30 frame (chain_lv 3→2, keep NVOF + RIFE)
+    //   T3 → T2: chain_mean > 8ms 30 frame (chain_lv 2→1, keep NVOF, drop RIFE)
+    //   T2 → T0: chainBusy > budget*0.72 30 frame (NVOF GPU 跳過 T1 直奔 T0
+    //            SYNC last-resort; T1 是 non-NVOF BALANCED 起點, 不走 NVOF→no-NVOF)
+    //   T3/T2 → T0: NVOF 30 連 fail (SDK 真壞了, 才放棄 NVOF)
+    //   T1 → T0: chainBusy > budget*0.72 30 frame
+    //   T0 → DISABLED: 60s 內 T0 entry >= 3 次
+    bool downgraded = false;
+    // T0 → DISABLED: 60s 內 T0 entry >= 3 次
+    if (cur == 0) {
+        int hits = 0;
+        for (int i = 0; i < 3; ++i) {
+            if (m_T0EnterTimes[i] > 0 && nowMs - m_T0EnterTimes[i] < 60000) {
+                hits++;
+            }
+        }
+        if (hits >= 3) {
+            target = (int)VkFrucTier::DISABLED;
+            m_TierDisabledEnteredMs = nowMs;
+            downgraded = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-TIER] T0 → T-1 (進 T0 三次/60s, 結構性跑不動 "
+                "FRUC; hold 5min then retry T%d)", m_TierCap);
+        }
+    }
+    // T2/T3 → T0: NVOF SDK 真的壞了 (30 連 fail)
+    if (!downgraded && (cur == 2 || cur == 3) && nvOfFails >= 30) {
+        target = 0;
+        downgraded = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TIER] T%d → T0 (NVOF SDK 30 連 fail, 跳 T1 直奔 "
+            "SYNC last-resort; nvofFails=%llu)",
+            cur, (unsigned long long)nvOfFails);
+    }
+    // T2 → T0: chainBusy 太重 (NVOF GPU skip T1, T1 是 non-NVOF tier)
+    if (!downgraded && cur == 2 && chainBusy > chainBusyThresh
+        && m_HandoffMsRingFilled >= kChainRingSize) {
+        if (m_FramesAboveHandoffThresh >= 30) {
+            target = 0;
+            downgraded = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-TIER] T2 → T0 (chainBusy=%.2fms > %.2fms 連 30 "
+                "frame, NVOF GPU skip T1 直奔 SYNC fallback)",
+                chainBusy, chainBusyThresh);
+            m_FramesAboveHandoffThresh = 0;
+        }
+    }
+    // T1 → T0: chainBusy 太重 (non-NVOF tier downgrade)
+    if (!downgraded && cur == 1 && chainBusy > chainBusyThresh
+        && m_HandoffMsRingFilled >= kChainRingSize) {
+        if (m_FramesAboveHandoffThresh >= 30) {
+            target = 0;
+            downgraded = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-TIER] T1 → T0 (chainBusy=%.2fms > %.2fms 連 30 "
+                "frame, non-NVOF tier downgrade)", chainBusy, chainBusyThresh);
+            m_FramesAboveHandoffThresh = 0;
+        }
+    }
+    // T5/T4 → cur-1: chain_mean 太重 (chain_lv 3→2 trigger, keep NVOF + RIFE)
+    if (!downgraded && (cur == 4 || cur == 5) && chainMean > 8.0
+        && m_ChainMeanMsRingFilled >= kChainRingSize) {
+        if (m_FramesAboveChainLevelThresh >= 30) {
+            target = cur - 1;
+            downgraded = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-TIER] T%d → T%d (chain_mean=%.2fms > 8ms 連 30 "
+                "frame, chain_lv downgrade 但 keep NVOF)", cur, target, chainMean);
+            m_FramesAboveChainLevelThresh = 0;
+        }
+    }
+    // T3 → T2: chain_mean 太重 (chain_lv 2→1, keep NVOF, drop RIFE)
+    if (!downgraded && cur == 3 && chainMean > 8.0
+        && m_ChainMeanMsRingFilled >= kChainRingSize) {
+        if (m_FramesAboveChainLevelThresh >= 30) {
+            target = 2;
+            downgraded = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-TIER] T3 → T2 (chain_mean=%.2fms > 8ms 連 30 "
+                "frame, chain_lv 2→1 但 keep NVOF)", chainMean);
+            m_FramesAboveChainLevelThresh = 0;
+        }
+    }
+
+    // Upgrade: chain_mean low + cool-down + cur < cap
+    if (!downgraded && cur < m_TierCap) {
+        const int64_t sinceEntered = nowMs - m_TierEnteredMs;
+        const bool coolDownOk = (sinceEntered >= 30000);
+        // True-idle bypass (chain mean < 1ms 連 600 frame) → 跳 cool-down 直接 cap
+        if (chainMean < 1.0 && m_FramesBelowIdleThreshold >= 600) {
+            if (cur < m_TierCap) {
+                target = m_TierCap;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-TIER] T%d → T%d (true-idle bypass: chain "
+                    "mean<1ms 連 600 frame, 跳 cool-down 升回 cap)",
+                    cur, target);
+            }
+        }
+        // 一般升階: < 2.5ms 持續 300 frame
+        else if (coolDownOk && chainMean < 2.5 && m_FramesBelowThreshold >= 300
+                 && m_ChainMeanMsRingFilled >= kChainRingSize) {
+            target = cur + 1;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-TIER] T%d → T%d (upgrade: chain_mean=%.2fms < "
+                "2.5ms 連 300 frame, cool-down 30s pass)", cur, target, chainMean);
+            m_FramesBelowThreshold = 0;
+        }
+    }
+
+    // Apply transition
+    if (target != cur) {
+        m_CurrentTier.store(target);
+        m_TierEnteredMs = nowMs;
+        m_TierTransitionCount.fetch_add(1, std::memory_order_relaxed);
+        // 進 T0 → 記錄到 T0 entry ring (給 T0→T-1 trigger 用)
+        if (target == 0) {
+            m_T0EnterTimes[m_T0EnterIdx] = nowMs;
+            m_T0EnterIdx = (m_T0EnterIdx + 1) % 3;
+        }
+        m_LastDowngradeTime = now;  // shared cool-down stamp (re-use 既有)
+    }
+
+    // §J.3.e.2.i.60 (v1.4.130) — sync m_EffectiveChainLevel + ASYNC/SYNC from tier
+    // 每 frame. Tier 是 authoritative source; 舊 autotier (chain_lv 3→2→1 +
+    // frucChainAsync→SYNC) 仍會獨立寫這些 state vars 但下幀就被 tier 覆寫.
+    // 確保 render path 讀到的 chain_level + TempDisabled 跟 tier 結果一致.
+    // T_DISABLED 不 sync (FRUC off, render 走 fallback).
+    const int finalTier = m_CurrentTier.load(std::memory_order_relaxed);
+    if (finalTier != (int)VkFrucTier::DISABLED) {
+        const auto cfgSync = tierConfig((VkFrucTier)finalTier);
+        if (cfgSync.chainLevel >= 1) {
+            m_EffectiveChainLevel.store(cfgSync.chainLevel, std::memory_order_relaxed);
+        }
+        // useAsync=false (T0) → TempDisabled=true (走 SYNC single-cmd);
+        // useAsync=true (T1+) → TempDisabled=false (走 ASYNC 3-cmd chain).
+        // 取代舊 chainBusy > 12ms 30 frame trigger; tier 控制更精準.
+        m_FrucChainAsyncTempDisabled.store(!cfgSync.useAsync, std::memory_order_relaxed);
+    }
+}
+
+// §J.3.e.2.i.57 (v1.4.122) — adaptive latency-aware frame drop throttle.
+// 偵測 latency 過某 threshold → 每 N frame 主動 skip chain (return true =
+// renderFrame 立刻 early-return, decoder pull + display 不變).
+// Latency = max(decodeMeanMs, chain_mean_ms): decodeMeanMs 來自 ffmpeg.cpp 每秒
+// 更新的 atomic (反映 decoder + Pacer queue 累積延遲), chain_mean 來自 m_HandoffMsRing
+// (本檔 chainBusy = partA + cmpDur + partC, 反映本 frame chain GPU 重不重).
+// 5 階梯 + recovery hysteresis (5 秒內不降回較輕 step).
+// User feedback: 「達到某個閥值時，每60幀丟1幀，達到下一個閥值變45幀丟1幀」.
+// 實作 6 step (含 step 0 不 drop):
+//    Step 0: latency <40ms  → N=0 (no drop)
+//    Step 1: latency 40-60ms → N=120 (~0.83% drop, 5fps loss @ 60fps server)
+//    Step 2: latency 60-100ms → N=60  (~1.67% drop, 10fps @ 60fps)
+//    Step 3: latency 100-140ms → N=30 (~3.33% drop, 20fps @ 60fps)
+//    Step 4: latency 140-180ms → N=20 (5.00% drop, 30fps @ 60fps)
+//    Step 5: latency >180ms → N=10 (10.00% drop, 60fps @ 60fps, last-resort)
+// Recovery: 升 step 無 hold (對 latency spike 立刻反應); 降 step 要 5s hold
+// (avoid 在 threshold 邊界抖動).
+bool VkFrucRenderer::computeLatencyThrottleDrop()
+{
+    using Clock = std::chrono::steady_clock;
+    const auto now = Clock::now();
+    const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count();
+
+    // --- 1) 算 latency = max(decodeMeanMs, chain_mean_ms) ---
+    const double decodeMs = g_VkFrucDecodeLatencyMs.load(std::memory_order_relaxed);
+    // chain_mean: m_HandoffMsRing 目前存 chainBusy ms (v1.4.121). 取已填的 ring
+    // 算平均, 不夠就用 0 (warmup 不 throttle).
+    double chainMs = 0.0;
+    if (m_HandoffMsRingFilled >= kChainRingSize) {
+        double sum = 0.0;
+        for (int i = 0; i < kChainRingSize; ++i) sum += m_HandoffMsRing[i];
+        chainMs = sum / kChainRingSize;
+    }
+    // Use parens around (std::max) to defeat Windows.h max macro contamination.
+    const double latencyMs = (decodeMs > chainMs) ? decodeMs : chainMs;
+
+    // §J.3.e.2.i.59 (v1.4.126) — slope-based step boost predictive throttle.
+    // 把當前 latency 推進 8-entry ring, slope = (current - 8 frame 前) / 8.
+    // ring 必須先填滿才算 slope, 避免 warmup 期間 (entries 預設 0) 誤判 spike.
+    const double oldestLatencyMs = m_LatencyHistMs[m_LatencyHistIdx];
+    m_LatencyHistMs[m_LatencyHistIdx] = latencyMs;
+    m_LatencyHistIdx = (m_LatencyHistIdx + 1) & 7u;  // mod 8
+    if (!m_LatencyHistFilled && m_LatencyHistIdx == 0) m_LatencyHistFilled = true;
+    const double slopeMsPerFrame = m_LatencyHistFilled
+        ? (latencyMs - oldestLatencyMs) / 8.0
+        : 0.0;
+
+    // --- 2) latency → target step ---
+    int targetStep;
+    int dropEveryN;
+    if      (latencyMs <  40.0) { targetStep = 0; dropEveryN = 0;   }
+    else if (latencyMs <  60.0) { targetStep = 1; dropEveryN = 120; }
+    else if (latencyMs < 100.0) { targetStep = 2; dropEveryN = 60;  }
+    else if (latencyMs < 140.0) { targetStep = 3; dropEveryN = 30;  }
+    else if (latencyMs < 180.0) { targetStep = 4; dropEveryN = 20;  }
+    else                        { targetStep = 5; dropEveryN = 10;  }
+
+    // §J.3.e.2.i.59 (v1.4.126) — slope-based step boost.
+    // latency 快速上升時 (slope > 5ms/frame ≈ 300ms/sec) base step + 1;
+    // 超陡 (> 10ms/frame ≈ 600ms/sec) + 2. cap step ≤ 5. 抓 transient
+    // spike, 搶在 server-side 200ms IDR threshold 觸發前 ramp 上 throttle.
+    // Env override: VIPLE_VKFRUC_THROTTLE_SLOPE_BOOST=0 退回 v1.4.125.
+    static const int s_SlopeBoostEnabled = []() {
+        return qEnvironmentVariableIsSet("VIPLE_VKFRUC_THROTTLE_SLOPE_BOOST")
+            ? qEnvironmentVariableIntValue("VIPLE_VKFRUC_THROTTLE_SLOPE_BOOST") : 1;
+    }();
+    int stepBoost = 0;
+    if (s_SlopeBoostEnabled != 0) {
+        if      (slopeMsPerFrame > 10.0) stepBoost = 2;
+        else if (slopeMsPerFrame >  5.0) stepBoost = 1;
+    }
+    if (stepBoost > 0) {
+        int boostedStep = targetStep + stepBoost;
+        if (boostedStep > 5) boostedStep = 5;
+        if (boostedStep > targetStep) {
+            targetStep = boostedStep;
+            dropEveryN = (targetStep == 1) ? 120 :
+                         (targetStep == 2) ? 60  :
+                         (targetStep == 3) ? 30  :
+                         (targetStep == 4) ? 20  : 10;
+        }
+    }
+
+    // --- 3) Apply step transition with recovery hysteresis ---
+    // 升 step (targetStep > current): 立即更新, stamp 新 enter time.
+    // 降 step (targetStep < current): 只在進入 current step 已 >5s 才允許下降.
+    constexpr int64_t kRecoveryHoldMs = 5000;
+    int newStep = m_LatencyThrottleStep;
+    if (targetStep > m_LatencyThrottleStep) {
+        newStep = targetStep;
+        m_LatencyThrottleStepEnteredMs = nowMs;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-THROTTLE] §J.3.e.2.i.57 step %d → %d "
+            "(latency=%.1fms decodeRingMax=%.1f chain=%.1f slope=%+.2fms/frame "
+            "boost=%d, drop every N=%d frame)",
+            m_LatencyThrottleStep, newStep, latencyMs, decodeMs, chainMs,
+            slopeMsPerFrame, stepBoost, dropEveryN);
+    } else if (targetStep < m_LatencyThrottleStep) {
+        const int64_t sinceEntered = nowMs - m_LatencyThrottleStepEnteredMs;
+        if (sinceEntered >= kRecoveryHoldMs) {
+            newStep = targetStep;
+            m_LatencyThrottleStepEnteredMs = nowMs;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-THROTTLE] §J.3.e.2.i.57 step %d → %d "
+                "(latency=%.1fms recovered, %lldms hold passed, drop every N=%d frame)",
+                m_LatencyThrottleStep, newStep, latencyMs,
+                (long long)sinceEntered,
+                newStep == 0 ? 0 :
+                newStep == 1 ? 120 : newStep == 2 ? 60 :
+                newStep == 3 ? 30  : newStep == 4 ? 20 : 10);
+        }
+        // 還在 hold: 維持當前 step
+    }
+    m_LatencyThrottleStep = newStep;
+
+    // --- 4) Drop decision based on CURRENT step (after transition) ---
+    bool drop = false;
+    if (newStep == 0) {
+        m_LatencyThrottleCounter = 0;  // reset counter when not throttling
+    } else {
+        const int activeDropN = (newStep == 1) ? 120 :
+                                (newStep == 2) ? 60  :
+                                (newStep == 3) ? 30  :
+                                (newStep == 4) ? 20  : 10;
+        const uint32_t cnt = m_LatencyThrottleCounter++;
+        drop = (cnt % activeDropN == 0);
+        if (drop) {
+            m_LatencyThrottleDroppedCount.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    // --- 5) Periodic PROF log (60s window) ---
+    // 在 helper 內印, 不被 drop / early-return 影響. 每 60s 印一次,
+    // 不論 step / drops 有沒. 提供 user 看 throttle 狀態 + recovery 動向.
+    static thread_local int64_t s_ThrottleLogLastMs = 0;
+    if (s_ThrottleLogLastMs == 0) s_ThrottleLogLastMs = nowMs;
+    if (nowMs - s_ThrottleLogLastMs >= 60000) {
+        const uint64_t snapDrop = m_LatencyThrottleDroppedCount.exchange(0,
+            std::memory_order_relaxed);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-THROTTLE-PROF] period=60s step=%d drops=%llu "
+            "latency=%.1fms (decodeRingMax=%.1f chain=%.1f) "
+            "slope=%+.2fms/frame (v1.4.126 boost: >5→+1, >10→+2) "
+            "ladder: <40/40-60/60-100/100-140/140-180/>180ms → "
+            "N=0/120/60/30/20/10",
+            m_LatencyThrottleStep, (unsigned long long)snapDrop,
+            latencyMs, decodeMs, chainMs, slopeMsPerFrame);
+        s_ThrottleLogLastMs = nowMs;
+    }
+    return drop;
+}
+
+// §J.3.e.2.i.55 (v1.4.120) — Option E: NVOF skip throttling.
+// 每 N 幀只 1 幀跑 NVOF (default N=2, env VIPLE_VKFRUC_NVOF_EVERY_N_FRAMES).
+// 整合 4 個 gate: m_NvOfReady, worker in-flight (race guard v1.4.119), throttle
+// counter (Option E), first-frame init exception (timelineValue==0 必須跑 partA
+// copy init barrier UNDEFINED→GENERAL).
+// 3 個 partA NvOf copy site (path D / HW chain / single-cmd, 互斥) 都呼叫此
+// helper, counter 每 frame 在 1 個 site 加 1, throttle 行為一致.
+bool VkFrucRenderer::computeNvOfActiveThisFrame()
+{
+    static const uint32_t s_NvOfEveryN = []() {
+        int v = qEnvironmentVariableIntValue("VIPLE_VKFRUC_NVOF_EVERY_N_FRAMES");
+        return v > 0 ? (uint32_t)v : 2u;  // default 2
+    }();
+    static std::atomic<bool> s_logged{false};
+    bool exp = false;
+    if (s_logged.compare_exchange_strong(exp, true)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-NVOF] §J.3.e.2.i.55 (v1.4.120) Option E NVOF throttle: "
+            "every-N=%u frames (env VIPLE_VKFRUC_NVOF_EVERY_N_FRAMES, default 2). "
+            "Goal: GPU 低 clock 時 chain_mean 穩定 <1ms (不依賴 GPU clock).",
+            s_NvOfEveryN);
+    }
+    const uint32_t cnt = m_NvOfThrottleCounter++;
+    const bool tickThisFrame = (cnt % s_NvOfEveryN == 0u);
+    // §J.3.e.2.i.60 (v1.4.130) — tier gate: T0-T2 不用 NVOF, T-1 完全停用 FRUC.
+    // 只有 T3-T5 走 NVOF path. tier=DISABLED 不會到這 (renderFrame top 已 early
+    // return), 但保險也檢查一次. cfg.useNvOf 是 pure lookup, no atomic 開銷.
+    const auto cfg = tierConfig((VkFrucTier)m_CurrentTier.load(std::memory_order_relaxed));
+    if (!cfg.useNvOf) {
+        return false;
+    }
+    return m_NvOfReady.load() &&
+           (m_NvOfWorkerInFlight.load(std::memory_order_acquire) == 0
+            || m_NvOfTimelineValue == 0) &&
+           (tickThisFrame || m_NvOfTimelineValue == 0);
+}
+
+// §J.3.e.2.i.54 (v1.4.119) — Bounded queue (drop-when-busy). 上一筆還在 in-flight
+// (queue 內 OR worker SDK 正在跑) 就 drop 這筆 push. 避免無限堆積 + 避免 partA
+// NvOf copy 跟 worker SDK call 跨 QF race (worker 還在讀 image, partA 又寫).
+// Caller (render thread) 應該在 push 前先檢查 m_NvOfWorkerInFlight.load()==0,
+// 並依結果 skip 整個 NVOF flow (含 partA 的 NvOf copy); 這裡也保留雙重 guard.
 void VkFrucRenderer::nvOfWorkerSubmit(uint64_t inSig, uint64_t outSig,
                                        void* curr, void* prev, void* flow)
 {
     {
         std::lock_guard<std::mutex> lk(m_NvOfWorkerMutex);
+        if (m_NvOfWorkerInFlight.load(std::memory_order_acquire) != 0) {
+            m_NvOfProfDroppedCount.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         m_NvOfWorkerQueue.push({inSig, outSig, curr, prev, flow});
+        m_NvOfWorkerInFlight.store(1, std::memory_order_release);
     }
     m_NvOfWorkerCv.notify_one();
 }
@@ -2145,6 +2693,10 @@ void VkFrucRenderer::nvOfWorkerLoop()
                     "本 session 改走 block-match", (int)s);
             }
         }
+        // §J.3.e.2.i.54 (v1.4.119) — clear in-flight only AFTER SDK call returns.
+        // 這是 render thread 用來判斷可不可以 push 下一筆 + 可不可以 partA 寫
+        // NvOfInputCurr 的依據; 必須等 SDK call 真的回來才能 release.
+        m_NvOfWorkerInFlight.store(0, std::memory_order_release);
     }
 }
 
@@ -2890,6 +3442,12 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
     m_VideoFormat = params->videoFormat;
+    // §J.3.e.2.i.56 (v1.4.121) — capture server stream fps for chainBusy threshold.
+    // params->frameRate 是 server fps (Sunshine 端推流速率), autotier 用
+    // 1000/m_StreamFps 算 frame budget, chainBusy > budget*0.72 視為 chain 太重.
+    if (params->frameRate > 0) {
+        m_StreamFps = params->frameRate;
+    }
     // §J.3.e.2.i.3.e-SW — skip AVHWDeviceContext + AVVulkanDeviceContext
     // setup when in software-upload mode; we don't bridge ffmpeg to our
     // VkDevice in that path (frames come in CPU memory as AV_PIX_FMT_NV12).
@@ -2909,16 +3467,25 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
     // FFmpeg-Vulkan bridge path (m_SwMode flag).  SW mode does FFmpeg→staging
     // upload for the *display* path, while native decode replaces the *decode*
     // step entirely (NAL bytes → vkCmdDecodeVideoKHR).  These two pipelines
-    // don't share VkImages, so we always provision native decode resources
-    // when the device exposes the required extensions; whether NAL units
-    // actually route through them is gated by acceptsNativeDecode() (env var
-    // VIPLE_VKFRUC_NATIVE_DECODE=1).
+    // don't share VkImages.
     //
-    // Until v1.3.221 this whole block lived inside `if (!m_SwMode)` — meaning
-    // native decode never instantiated when the user (typical) ran in SW
-    // mode.  The fix: lift it out so Phase 1.3d.1 vkCmdDecodeVideoKHR submits
-    // are reachable from the SW display pipeline as well.
-    if (!createVideoSession(m_VideoFormat)) {
+    // Until v1.3.221 this whole block lived inside `if (!m_SwMode)`.  v1.3.221
+    // lifted it out so SW display pipeline could also reach native decode.
+    // v1.4.137 gates it on env var VIPLE_VKFRUC_NATIVE_DECODE=1 instead:
+    // 對未 opt-in 的 user 還預先建 4096×4096/dpb=17 VkVideoSessionKHR + bind
+    // memory，會在 AMD 780M（也許其他 AMD APU）跟 FFmpeg 自己的 hwaccel
+    // session 並存時 driver crash —— 具體 repro 是 FFmpeg vulkan h264 hwaccel
+    // 呼 vkBindVideoSessionMemoryKHR(226 MB) 那刻 process abort 無 stack.
+    // 預設關閉 = 完全不建，跟 v1.3.221 之前的行為一致；要做 native decode
+    // dev work 才 opt-in.
+    static const bool s_provisionNativeDecode =
+        qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE") != 0;
+    if (!s_provisionNativeDecode) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 native decode chain SKIPPED "
+                    "(set VIPLE_VKFRUC_NATIVE_DECODE=1 to provision; default OFF "
+                    "post-v1.4.137 to avoid AMD APU concurrent-session driver crash).");
+    } else if (!createVideoSession(m_VideoFormat)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 createVideoSession failed — Phase 1 native decode 路徑 skip");
         destroyVideoSession();
@@ -3053,6 +3620,27 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
                          : "AVHWDeviceContext",
                 m_SwMode ? " (SW mode: AV_PIX_FMT_NV12 from CPU memory)"
                          : " (HW mode: AV_PIX_FMT_VULKAN)");
+
+    // §J.3.e.2.i.60 (v1.4.127) — compute initial tier cap + start tier at cap.
+    // 須在所有 capability detection 完之後 (chain async / NVOF / detectedTier)
+    // 才有正確值. Autotier transition 之後從 cap 開始往下走 / 升回.
+    if (m_FrucMode) {
+        m_TierCap = detectInitialTierCap();
+        m_CurrentTier.store(m_TierCap);
+        using Clock = std::chrono::steady_clock;
+        m_TierEnteredMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            Clock::now().time_since_epoch()).count();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TIER] §J.3.e.2.i.60 init: cap=T%d current=T%d "
+            "(autotier from cap; downgrade per chain_mean/chainBusy/NVOF fails, "
+            "upgrade per chain_mean<2.5ms 300f + 30s cool-down; T-1=FRUC off "
+            "pass-through, hold 5min before retry cap)",
+            m_TierCap, m_TierCap);
+    } else {
+        // FRUC 整個關 → tier 直接 DISABLED, autotier 不跑.
+        m_TierCap = (int)VkFrucTier::DISABLED;
+        m_CurrentTier.store((int)VkFrucTier::DISABLED);
+    }
 
     return true;
 }
@@ -7135,9 +7723,39 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         // larger as the broken v1.4.68 measurement and force rerun with
         // the new outSubmitWaitNs-based accurate measurement.
         constexpr qint64 kSaneMaxNs = 50LL * 1000LL * 1000LL;  // 50 ms
+        // §J.3.e.2.i.60 (v1.4.130) — invalidate v1.4.67-129 cache where threshold
+        // bucket 比 v1.4.130 嚴 (ENTRY <2.5ms vs <6ms). 舊 cache 的 7.27ms RTX 3060
+        // Laptop 被誤判 ENTRY, 在 unified autotier 下 cap=T1 砍 NVOF/TRIPLE 太兇.
+        // 重跑 benchmark 用新 threshold 修正 (cold-start 雖仍 ~7ms 但會被分到
+        // PERFORMANCE 而非 ENTRY, 對應 cap=T2 而非 T1).
+        // Invalidation strategy: 若 detectedTier == ENTRY but heuristic 認為更高
+        // (BALANCED/QUALITY) → 強制 re-benchmark. 避免擦掉真正 ENTRY GPU 的 cache.
+        bool forceRerunForThresholdChange = false;
+        // 注意: 此處 heuristicTier 在更前面的 v1.4.66 area 已設好 prefs;
+        // 若 prefs->vkfrucDetectedTier 被 v1.4.67-129 benchmark 覆寫成 ENTRY,
+        // 但 prefs 本身沒記 heuristicTier. 折衷: 若 cached benchmark > 5ms 且
+        // tier == ENTRY 且 GPU name 含 "RTX"/"GTX"/"Radeon"/"Arc"  (discrete GPU
+        // 字串), 推測是舊 threshold 誤判, 強制重量.
+        if (prefs->vkfrucBenchmarkNs > 5'000'000LL
+            && prefs->vkfrucDetectedTier == StreamingPreferences::VGT_ENTRY) {
+            const QString gpu = prefs->vkfrucDetectedGpuName;
+            if (gpu.contains("RTX", Qt::CaseInsensitive)
+                || gpu.contains("GTX", Qt::CaseInsensitive)
+                || gpu.contains("Radeon", Qt::CaseInsensitive)
+                || gpu.contains("Arc", Qt::CaseInsensitive)
+                || gpu.contains("GeForce", Qt::CaseInsensitive)) {
+                forceRerunForThresholdChange = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.60 v1.4.130 invalidating "
+                    "cache (was %lldns=ENTRY, GPU='%s' looks like discrete; "
+                    "舊 threshold <6ms 太嚴, 新 <10ms 重量)",
+                    (long long)prefs->vkfrucBenchmarkNs, qPrintable(gpu));
+            }
+        }
         const bool cacheValid = (prefs->vkfrucBenchmarkNs > 0)
                              && (prefs->vkfrucBenchmarkNs < kSaneMaxNs)
-                             && (prefs->vkfrucDetectedGpuName == currentGpuName);
+                             && (prefs->vkfrucDetectedGpuName == currentGpuName)
+                             && !forceRerunForThresholdChange;
         if (cacheValid) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-BENCH] §J.3.e.2.i.11 v1.4.67 cache hit: "
@@ -7155,11 +7773,17 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
             benchCtx.getInstanceProcAddr = (void*)m_pfnGetInstanceProcAddr;
             const uint64_t benchNs = viple::rife_native_vk::benchmarkInterpBilinearOnce(benchCtx);
             if (benchNs > 0) {
+                // §J.3.e.2.i.60 (v1.4.130) — relaxed thresholds. 觀察 v1.4.129
+                // RTX 3060 Laptop benchmark cold-start 量到 7.27ms (>6ms 舊 cutoff)
+                // 被誤判 ENTRY, 但實際 chain idle 0.74ms 應為 BALANCED-QUALITY.
+                // benchmark 對 GPU clock state / 首發 shader compilation 敏感,
+                // 用較寬鬆 threshold 容忍 cold-start. 真實過載仍由 runtime
+                // autotier (chain_mean 30 連幀 > 8ms 降階) 動態抓.
                 StreamingPreferences::VkfrucGpuTier benchTier;
-                if      (benchNs < 1'000'000ULL)        benchTier = StreamingPreferences::VGT_QUALITY;
-                else if (benchNs < 2'500'000ULL)        benchTier = StreamingPreferences::VGT_BALANCED;
-                else if (benchNs < 6'000'000ULL)        benchTier = StreamingPreferences::VGT_PERFORMANCE;
-                else                                    benchTier = StreamingPreferences::VGT_ENTRY;
+                if      (benchNs <  2'000'000ULL)       benchTier = StreamingPreferences::VGT_QUALITY;     // < 2ms
+                else if (benchNs <  5'000'000ULL)       benchTier = StreamingPreferences::VGT_BALANCED;    // 2-5ms
+                else if (benchNs < 10'000'000ULL)       benchTier = StreamingPreferences::VGT_PERFORMANCE; // 5-10ms
+                else                                    benchTier = StreamingPreferences::VGT_ENTRY;       // >= 10ms
                 const char* benchTierName =
                     benchTier == StreamingPreferences::VGT_QUALITY     ? "QUALITY"     :
                     benchTier == StreamingPreferences::VGT_BALANCED    ? "BALANCED"    :
@@ -8753,6 +9377,13 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             }
             if (m_ChainMeanMsRingFilled < kChainRingSize) m_ChainMeanMsRingFilled++;
 
+            // §J.3.e.2.i.60 (v1.4.127) — unified Vulkan FRUC autotier transition.
+            // 讀 chain_mean / chainBusy / NVOF fails, decide tier transition.
+            // 跟既有 4 條獨立 autotier 分支並存 (DUAL↔TRIPLE / chain_lv / ASYNC↔SYNC /
+            // NVOF demote) — incremental migration, 兩者目前都會跑.
+            // 之後階段會把舊分支移除, 全部由此單一 state machine 接管.
+            runAutotierTransition();
+
             static const int s_DynamicTierMode =
                 qEnvironmentVariableIsSet("VIPLE_VKFRUC_DYNAMIC_TIER")
                     ? qEnvironmentVariableIntValue("VIPLE_VKFRUC_DYNAMIC_TIER") : 1;
@@ -8867,11 +9498,10 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             }
 
             // §J.3.e.2.i.45 (v1.4.109) — handoff-aware sync fallback re-enable.
-            // sync 模式期間 handoff 沒被量到 (async PROF block 跳過), 無法
-            // 偵測 GPU 是否升 clock 完成. 用 30s 共用 cool-down 一過就 flip
-            // 回 async; 如果 GPU 仍低 clock, 30 frame 內 handoff 偵測會再
-            // demote 回 sync. 沒做也 OK (session 就 stuck sync) 但浪費
-            // v1.4.101 5% perf win.
+            // §J.3.e.2.i.56 (v1.4.121) — metric 改 chainBusy 但 re-enable 邏輯不變.
+            // sync 模式期間 chainBusy 沒被量到 (async PROF block 跳過), 用 30s
+            // 共用 cool-down 一過就 flip 回 async; 若 chain 仍重 (heavy compute /
+            // 低 clock / GPU 滿載), 30 frame 內 chainBusy 偵測會再 demote 回 sync.
             if (m_FrucChainAsyncTempDisabled.load(std::memory_order_relaxed)) {
                 const auto nowFca = std::chrono::steady_clock::now();
                 const auto sinceDgMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -8882,8 +9512,8 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                     m_FramesAboveHandoffThresh = 0;
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-AUTOTIER] frucChainAsync → ASYNC "
-                        "(cool-down 30s 過, 試 async; 若 GPU 仍低 clock, "
-                        "30 frame 內 handoff 偵測會再 demote)");
+                        "(cool-down 30s 過, 試 async; 若 chain 仍重, 30 frame "
+                        "內 chainBusy 偵測會再 demote)");
                 }
             }
 
@@ -8897,19 +9527,30 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             // 同時 (worker thread 可能正在 increment). Captures snapshot.
             const uint64_t snapDispatch = m_NvOfProfDispatchCount.load(std::memory_order_relaxed);
             const uint64_t snapFail     = m_NvOfProfFailCount.load(std::memory_order_relaxed);
-            if (elapsedSec >= 60 && (snapDispatch + snapFail) > 0) {
+            // §J.3.e.2.i.54 (v1.4.119) — drop counter snapshot.
+            const uint64_t snapDrop     = m_NvOfProfDroppedCount.load(std::memory_order_relaxed);
+            if (elapsedSec >= 60 && (snapDispatch + snapFail + snapDrop) > 0) {
                 // Reset (worker may increment between load and store; minor undercount OK)
                 m_NvOfProfDispatchCount.fetch_sub(snapDispatch, std::memory_order_relaxed);
                 m_NvOfProfFailCount.fetch_sub(snapFail, std::memory_order_relaxed);
+                m_NvOfProfDroppedCount.fetch_sub(snapDrop, std::memory_order_relaxed);
                 const uint64_t total = snapDispatch + snapFail;
-                const double failPct = 100.0 * (double)snapFail / (double)total;
+                const double failPct = total > 0
+                    ? 100.0 * (double)snapFail / (double)total : 0.0;
+                // §J.3.e.2.i.54 (v1.4.119) — drop ratio = dropped / (dispatches + drops).
+                // 高 drop% → SDK CPU 跟不上 render rate, NVOF 實效率 = 1 - drop%.
+                const uint64_t attempts = snapDispatch + snapFail + snapDrop;
+                const double dropPct = attempts > 0
+                    ? 100.0 * (double)snapDrop / (double)attempts : 0.0;
                 const double meanChainMs = m_NvOfProfChainSamples
                     ? m_NvOfProfChainMsAccum / (double)m_NvOfProfChainSamples : 0.0;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-NVOF-PROF] period=%llds dispatches=%llu fails=%llu (%.2f%%) "
+                    "dropped=%llu (%.2f%% busy-skip, v1.4.119 bounded-queue) "
                     "chain_mean=%.2fms samples=%llu ready=%d grid=%u",
                     (long long)elapsedSec, (unsigned long long)snapDispatch,
                     (unsigned long long)snapFail, failPct,
+                    (unsigned long long)snapDrop, dropPct,
                     meanChainMs, (unsigned long long)m_NvOfProfChainSamples,
                     (int)m_NvOfReady.load(), m_NvOfGridSize);
                 m_NvOfProfChainMsAccum = 0.0;
@@ -9621,6 +10262,15 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         return;
     }
 
+    // §J.3.e.2.i.57 (v1.4.122) — latency-aware adaptive frame drop throttle.
+    // 在所有渲染工作之前先決定本 frame 要不要 drop. drop = 不 acquire swapchain
+    // image, 不 chain, 不 present → display 自然 hold 上一 frame. decoder 那邊
+    // 仍當作這 frame 被 consume 了 (Pacer 不堵). 觸發條件: max(decodeMeanMs,
+    // chain_mean) > 40ms 開始; 5 階梯 + 5s recovery hold (見 computeLatencyThrottleDrop).
+    if (computeLatencyThrottleDrop()) {
+        return;
+    }
+
     static std::atomic<uint64_t> s_FrameCount{0};
     uint64_t fnum = s_FrameCount.fetch_add(1, std::memory_order_relaxed);
     bool firstFrame = (fnum < 3);   // log first 3 frames for bisect coverage
@@ -9787,8 +10437,10 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     //   imgIdxA = interp_1 slot (1/3 點 in TRIPLE, midpoint in DUAL)
     //   imgIdxB = real frame slot (always)
     //   imgIdxC = interp_2 slot (only in TRIPLE, 2/3 點)
+    // §J.3.e.2.i.60 (v1.4.127) — dualPresent 加 tier != DISABLED 條件.
+    // T-1 tier 整個 skip FRUC interp + dual-present, render fallback 走 single-cmd.
     const bool dualPresentThisFrame = m_DualMode && m_FrucMode && m_FrucReady
-                                      && !m_FRUCPaused.load();
+                                      && !isFrucEffectivelyDisabled();
     // §J.3.e.2.i.22 (v1.4.84) — present 端也對齊動態降階,
     // 否則 swapchain 仍 acquire 3 張 image 但 interp_2 內容是舊資料.
     const bool triplePresentThisFrame = dualPresentThisFrame && m_TripleMode
@@ -9877,11 +10529,17 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // 互斥 (尚未 relax):
     //   * !phase2BActive: phase2B 已用 cmpCmd 跑 RIFE inference, 衝突.
     //   * vkf 可用 + m_FrucMode + m_FrucReady + 非 paused.
+    // §J.3.e.2.i.60 (v1.4.127) — frucChainAsyncActiveHw 加 tier-aware ASYNC gate.
+    // tierConfig(currentTier).useAsync=false (T0 / DISABLED) 強制 fall back 到
+    // single-cmd path; useAsync=true 才走 3-cmd chain. 跟既有 TempDisabled 同
+    // 等效 (TempDisabled 之後會被 tier=T0 取代但暫時兩者共存以利 incremental migration).
+    const auto _tierCfgHw = tierConfig((VkFrucTier)m_CurrentTier.load(std::memory_order_relaxed));
     const bool frucChainAsyncActiveHw = m_FrucChainAsyncRequested
                                      && m_FrucChainAsyncAvailable
                                      && !m_FrucChainAsyncTempDisabled.load(std::memory_order_relaxed)  // v1.4.109
+                                     && _tierCfgHw.useAsync                                            // v1.4.127
                                      && !phase2BActive
-                                     && m_FrucMode && m_FrucReady && !m_FRUCPaused.load()
+                                     && m_FrucMode && m_FrucReady && !isFrucEffectivelyDisabled()     // v1.4.127
                                      && vkf != nullptr
                                      && (frame ? (frame->width > 0 && frame->height > 0) : false)
                                      && m_ComputeTimelineSem != VK_NULL_HANDLE
@@ -10105,7 +10763,11 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             m_SwFrucNv12Buf, 2, regsC);
 
         // (d) optional NvOf cmdCopyImage (mirror of original lines ~8004-8086).
-        if (m_NvOfReady) {
+        // §J.3.e.2.i.54 (v1.4.119) — 設定本幀 m_NvOfActiveThisFrame (path D path).
+        // §J.3.e.2.i.55 (v1.4.120) — helper 整合 Option E throttle (default N=2).
+        // 後續 Phase 2B 或 HW chain dispatch site 用此 flag 判斷要不要 marker+push.
+        m_NvOfActiveThisFrame = computeNvOfActiveThisFrame();
+        if (m_NvOfActiveThisFrame) {
             VkImageMemoryBarrier ofImgBars[2] = {};
             int ofBarCount = 0;
             for (VkImage img : {m_NvOfInputCurr, m_NvOfInputPrev}) {
@@ -10727,7 +11389,11 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         // Path D copy submit already populated m_NvOfInputCurr; here we
         // fire the OF queue execute and swap input handles, identical to
         // single-cmd path so NV-OF state stays in sync across env toggles.
-        if (m_NvOfReady && m_NvOfFuncList) {
+        // §J.3.e.2.i.54 (v1.4.119) — m_NvOfActiveThisFrame 在 path D copy 處設定.
+        // 若 worker 還在跑上一筆 → path D 已 skip NvOf copy → 這邊 marker+push
+        // 也要 skip (不然 worker 拿 stale data). Frame-0 swap 不受影響 (in-flight
+        // 此時=0). Frame N 內 m_NvOfActiveThisFrame 同 path D copy 一致.
+        if (m_NvOfActiveThisFrame && m_NvOfFuncList) {
             static thread_local uint32_t s_NvOfFrameCountP2B = 0;
             const uint32_t frameNumP2B = s_NvOfFrameCountP2B++;
             if (frameNumP2B == 0) {
@@ -10888,33 +11554,48 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                 m_FrucChainAsyncGpuTotalUsAccum   += (double)safeDur(ts[0], ts[5]) * ns2us;
                 m_FrucChainAsyncGpuCount++;
 
-                // §J.3.e.2.i.45 (v1.4.109) — per-frame handoff tracking + sync fallback.
-                // handoff = cmpWait - cmpDur (cross-QF semaphore signal/wait latency).
-                // GPU 低 clock 期間爆衝到 5-14ms, 但 chain compute (cmpDur) 仍 ~3ms
-                // 所以 autotier m_ChainMeanMsRing 看不到. 連 30 frame handoff mean
-                // > 5ms → demote async, 走 single-cmd sync chain.
+                // §J.3.e.2.i.45 (v1.4.109) — handoff-aware sync fallback (DEPRECATED metric).
+                // §J.3.e.2.i.56 (v1.4.121) — REDESIGNED: 用 chainBusy 取代 handoff.
+                // 舊 handoff = cmpWait - cmpDur 在 fast-chain + 60Hz vsync 下度量到的
+                // 主要是 swapchain acquire wait (partC TOP_OF_PIPE 等 vsync), 不是
+                // cross-QF semaphore 延遲. 結果 autotier 在 fast chain 環境下誤判,
+                // 不停 ASYNC↔SYNC 抖, 每 30s 一輪 cool-down.
+                // 新 chainBusy = partA_dur + cmpDur + partC_dur (pure GPU active, 排除
+                // 任何 wait/cross-QF/vsync). 跟 frame budget (1000/m_StreamFps) 比,
+                // 超過 72% 視為 chain 太重 → SYNC fallback (拿掉 cross-QF overhead,
+                // 雖然單 cmd buf 也要做同樣 GPU 工作, 但少了跨 QF 排程 + 雙 timeline
+                // sem signal/wait). 通用 GPU + TRIPLE (partC 自然較大) + 三 path 一致.
+                const uint64_t partAUsRaw  = safeDur(ts[0], ts[1]);
                 const uint64_t cmpDurUsRaw = safeDur(ts[2], ts[3]);
-                const uint64_t cmpWaitUsRaw = safeDur(ts[1], ts[4]);
-                const uint64_t handoffUsRaw = (cmpWaitUsRaw >= cmpDurUsRaw)
-                    ? (cmpWaitUsRaw - cmpDurUsRaw) : 0;
-                const double thisFrameHandoffMs = (double)handoffUsRaw * ns2us / 1000.0;
-                m_HandoffMsRing[m_HandoffMsRingIdx] = thisFrameHandoffMs;
+                const uint64_t partCUsRaw  = safeDur(ts[4], ts[5]);
+                const double thisFrameChainBusyMs =
+                    ((double)partAUsRaw + (double)cmpDurUsRaw + (double)partCUsRaw)
+                    * ns2us / 1000.0;
+                m_HandoffMsRing[m_HandoffMsRingIdx] = thisFrameChainBusyMs;
                 m_HandoffMsRingIdx = (m_HandoffMsRingIdx + 1) % kChainRingSize;
                 if (m_HandoffMsRingFilled < kChainRingSize) m_HandoffMsRingFilled++;
                 if (m_HandoffMsRingFilled >= kChainRingSize) {
                     double sumH = 0.0;
                     for (int i = 0; i < kChainRingSize; ++i) sumH += m_HandoffMsRing[i];
-                    const double handoffMeanMs = sumH / kChainRingSize;
-                    if (handoffMeanMs > 5.0) {
+                    const double chainBusyMeanMs = sumH / kChainRingSize;
+                    // §J.3.e.2.i.56 — server fps 動態 threshold. budget = 1000/fps,
+                    // 72% headroom (Andrew Glassner-ish ratio, 留 28% 給其他 GPU work
+                    // + driver overhead). 60fps→12ms, 30fps→24ms, 90fps→8ms, 120fps→6ms.
+                    const double frameBudgetMs = 1000.0 / (double)m_StreamFps;
+                    const double chainBusyThreshMs = frameBudgetMs * 0.72;
+                    if (chainBusyMeanMs > chainBusyThreshMs) {
                         if (++m_FramesAboveHandoffThresh >= 30) {
                             m_FrucChainAsyncTempDisabled.store(true, std::memory_order_relaxed);
                             m_LastDowngradeTime = std::chrono::steady_clock::now();
                             m_FramesAboveHandoffThresh = 0;
                             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VKFRUC-AUTOTIER] frucChainAsync → SYNC "
-                                "(handoff mean=%.2fms > 5ms 連 30 幀, 可能 GPU 低 clock; "
-                                "30s cool-down 過後試 re-enable)",
-                                handoffMeanMs);
+                                "(chainBusy mean=%.2fms > %.2fms threshold (%.0f%% of "
+                                "%.2fms %dfps budget) 連 30 幀, chain GPU 太重; "
+                                "30s cool-down 過後試 re-enable; HW chain)",
+                                chainBusyMeanMs, chainBusyThreshMs,
+                                100.0 * chainBusyThreshMs / frameBudgetMs,
+                                frameBudgetMs, m_StreamFps);
                         }
                     } else {
                         m_FramesAboveHandoffThresh = 0;
@@ -10928,11 +11609,15 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                     const double avgC    = m_FrucChainAsyncGpuPartCUsAccum   / n;
                     const double avgTot  = m_FrucChainAsyncGpuTotalUsAccum   / n;
                     const double avgHandoff = avgWait - avgCmp;  // = handoff_in + handoff_out
+                    // §J.3.e.2.i.56 (v1.4.121) — chainBusy = partA + cmpDur + partC.
+                    // 等同 autotier 用的 metric (sync fallback 判定依據).
+                    const double avgChainBusy = avgA + avgCmp + avgC;
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-FRUC-ASYNC-PROF] partA=%.0fus cmpDur=%.0fus "
-                        "cmpWait=%.0fus handoff=%.0fus partC=%.0fus total=%.0fus "
-                        "(n=%d, mean/60f)",
-                        avgA, avgCmp, avgWait, avgHandoff, avgC, avgTot,
+                        "cmpWait=%.0fus handoff=%.0fus partC=%.0fus chainBusy=%.0fus "
+                        "total=%.0fus (n=%d, mean/60f; chainBusy=partA+cmpDur+partC "
+                        "= autotier metric v1.4.121)",
+                        avgA, avgCmp, avgWait, avgHandoff, avgC, avgChainBusy, avgTot,
                         m_FrucChainAsyncGpuCount);
                     m_FrucChainAsyncGpuPartAUsAccum   = 0.0;
                     m_FrucChainAsyncGpuCmpDurUsAccum  = 0.0;
@@ -11024,11 +11709,15 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             VK_IMAGE_LAYOUT_GENERAL,
             m_SwFrucNv12Buf, 2, regsHW);
 
+        // §J.3.e.2.i.54 (v1.4.119) — frame-level capture into m_NvOfActiveThisFrame.
+        // §J.3.e.2.i.55 (v1.4.120) — helper 整合 race guard + Option E throttle.
+        // 同 frame 內 partA copy / marker / push 三 site 都讀同一 flag 保持一致.
+        m_NvOfActiveThisFrame = computeNvOfActiveThisFrame();
         // §J.3.e.2.i.32 (v1.4.94) — NvOf image-to-image copy vkf->img[0] →
         // m_NvOfInputCurr (mirror single-cmd path line 10908-10972).  獨立於
         // m_SwFrucNv12Buf buffer copy (兩 source-read parallel).  pathDActive
         // 條件下 NvOf copy 也由 path D 處理 (跟 single-cmd 一致).
-        if (m_NvOfReady) {
+        if (m_NvOfActiveThisFrame) {
             // First-frame init barrier: UNDEFINED → GENERAL on m_NvOfInputCurr/Prev.
             VkImageMemoryBarrier ofImgBarsHW[2] = {};
             int ofBarCountHW = 0;
@@ -11292,10 +11981,14 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         // queue 順序保證 marker GPU fires after partA done. NVOF GPU work
         // 可在 OF QF 早起跑. SDK nvOFExecuteVk 留在 post-partC (Block B 下面)
         // 不阻塞 cmpCmd CPU submit. Frame 0 不 fire (m_NvOfInputPrev UNDEFINED).
+        // §J.3.e.2.i.54 (v1.4.119) — 加 m_NvOfActiveThisFrame gate. 若 worker
+        // 仍在跑上一筆 (in-flight=1), partA 已 skip NvOf copy, marker 也跟著
+        // skip → Block B 的 nvOfMarkerOk_E=false → push+swap 也 skip. 三 site
+        // 一致 skip = worker 讀的 NvOfInputCurr 不會被 partA 寫 = no race.
         uint64_t nvOfInSigVal_E  = 0;
         uint64_t nvOfOutSigVal_E = 0;
         bool     nvOfMarkerOk_E  = false;
-        if (m_NvOfReady && m_NvOfFuncList && m_NvOfFrameCountFCAH > 0) {
+        if (m_NvOfActiveThisFrame && m_NvOfFuncList && m_NvOfFrameCountFCAH > 0) {
             nvOfInSigVal_E  = m_NvOfTimelineValue + 1;
             nvOfOutSigVal_E = nvOfInSigVal_E + 1;
             VkTimelineSemaphoreSubmitInfo tsMarkE = {};
@@ -11737,7 +12430,10 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         // signals m_NvOfTimelineSem (Phase 4c submit signal list), we kick
         // off nvOFExecuteVk on the OF queue (kick-off-and-forget for now;
         // chain integration in Phase 4d).
-        if (m_NvOfReady) {
+        // §J.3.e.2.i.54 (v1.4.119) — single-cmd path: 設定本幀 m_NvOfActiveThisFrame.
+        // §J.3.e.2.i.55 (v1.4.120) — helper 整合 race guard + Option E throttle.
+        m_NvOfActiveThisFrame = computeNvOfActiveThisFrame();
+        if (m_NvOfActiveThisFrame) {
             // §B-NVOF Phase 4b 2026-05-06 — image transitions UNDEFINED→GENERAL
             // on first use, then stays GENERAL forever.  GENERAL accepts both
             // TRANSFER_WRITE (vkCmdCopyImage dst) and shader / OF SDK reads
@@ -12230,7 +12926,9 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // CPU does NOT wait for V_out — fire-and-forget for now (Phase 4d/5
     // will integrate the result into the chain).  Swap curr↔prev handles
     // for next frame.
-    if (m_NvOfReady && m_NvOfFuncList) {
+    // §J.3.e.2.i.54 (v1.4.119) — m_NvOfActiveThisFrame 在 partA NvOf copy 處設定,
+    // 跟 partA copy 一致 skip / 一致 fire. Worker busy 時 skip 整個 NVOF flow.
+    if (m_NvOfActiveThisFrame && m_NvOfFuncList) {
         // §B-NVOF Phase 4b — skip the very first frame: m_NvOfInputPrev is
         // still UNDEFINED (never written) so OF on (curr, prev) would read
         // garbage from prev → undefined HW behaviour.  Use the first frame
@@ -12508,6 +13206,13 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
 //   5. submit (wait acquireSem, signal renderDoneSem + fence) + present
 void VkFrucRenderer::renderFrameSw(AVFrame* frame)
 {
+    // §J.3.e.2.i.57 (v1.4.122) — latency-aware adaptive frame drop (mirror HW path).
+    // 同 renderFrame: 偵測 latency 達 threshold 則 skip chain (decoder pull
+    // 不變, present 維持上一幀). 跟 HW path 共用 step state, 切 mode 不混亂.
+    if (computeLatencyThrottleDrop()) {
+        return;
+    }
+
     static std::atomic<uint64_t> s_FrameCountSw{0};
     uint64_t fnum = s_FrameCountSw.fetch_add(1, std::memory_order_relaxed);
     bool firstFrame = (fnum < 3);
@@ -12781,11 +13486,15 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     //
     // 任何 record / submit 失敗 → demote m_FrucChainAsyncAvailable=false +
     // return (該 frame 視覺斷掉一次, 下 frame gate 走 single-cmd path).
+    // §J.3.e.2.i.60 (v1.4.127) — same tier-aware ASYNC gate as HW path.
+    const auto _tierCfgSw = tierConfig((VkFrucTier)m_CurrentTier.load(std::memory_order_relaxed));
     const bool frucChainAsyncActive = m_FrucChainAsyncRequested
                                   && m_FrucChainAsyncAvailable
                                   && !m_FrucChainAsyncTempDisabled.load(std::memory_order_relaxed)  // v1.4.109
+                                  && _tierCfgSw.useAsync                                            // v1.4.127
                                   && useNativeDecodeEarly
                                   && m_FrucMode && m_FrucReady && !frucPausedThisFrame
+                                  && m_CurrentTier.load(std::memory_order_relaxed) != (int)VkFrucTier::DISABLED
                                   && m_SwImageLayoutInited
                                   && m_ComputeTimelineSem != VK_NULL_HANDLE
                                   && m_ComputeQueue       != VK_NULL_HANDLE
@@ -12839,30 +13548,38 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                 m_FrucChainAsyncGpuCount++;
 
                 // §J.3.e.2.i.45 (v1.4.109) — SW path mirror handoff tracking + sync fallback.
-                // Mirror HW path 10666-10696 同邏輯, 共用 m_HandoffMsRing / counter /
-                // m_FrucChainAsyncTempDisabled / m_LastDowngradeTime (SW/HW 互斥, 不會 race).
+                // §J.3.e.2.i.56 (v1.4.121) — REDESIGNED: 同 HW path, 用 chainBusy 取代
+                // handoff. partA+cmpDur+partC pure GPU active, 跟 frame budget 比.
+                // 共用 m_HandoffMsRing / counter / m_FrucChainAsyncTempDisabled /
+                // m_LastDowngradeTime (SW/HW 互斥, 不會 race).
+                const uint64_t partAUsRawSw  = safeDurSw(ts[0], ts[1]);
                 const uint64_t cmpDurUsRawSw = safeDurSw(ts[2], ts[3]);
-                const uint64_t cmpWaitUsRawSw = safeDurSw(ts[1], ts[4]);
-                const uint64_t handoffUsRawSw = (cmpWaitUsRawSw >= cmpDurUsRawSw)
-                    ? (cmpWaitUsRawSw - cmpDurUsRawSw) : 0;
-                const double thisFrameHandoffMsSw = (double)handoffUsRawSw * ns2us / 1000.0;
-                m_HandoffMsRing[m_HandoffMsRingIdx] = thisFrameHandoffMsSw;
+                const uint64_t partCUsRawSw  = safeDurSw(ts[4], ts[5]);
+                const double thisFrameChainBusyMsSw =
+                    ((double)partAUsRawSw + (double)cmpDurUsRawSw + (double)partCUsRawSw)
+                    * ns2us / 1000.0;
+                m_HandoffMsRing[m_HandoffMsRingIdx] = thisFrameChainBusyMsSw;
                 m_HandoffMsRingIdx = (m_HandoffMsRingIdx + 1) % kChainRingSize;
                 if (m_HandoffMsRingFilled < kChainRingSize) m_HandoffMsRingFilled++;
                 if (m_HandoffMsRingFilled >= kChainRingSize) {
                     double sumHSw = 0.0;
                     for (int i = 0; i < kChainRingSize; ++i) sumHSw += m_HandoffMsRing[i];
-                    const double handoffMeanMsSw = sumHSw / kChainRingSize;
-                    if (handoffMeanMsSw > 5.0) {
+                    const double chainBusyMeanMsSw = sumHSw / kChainRingSize;
+                    const double frameBudgetMsSw = 1000.0 / (double)m_StreamFps;
+                    const double chainBusyThreshMsSw = frameBudgetMsSw * 0.72;
+                    if (chainBusyMeanMsSw > chainBusyThreshMsSw) {
                         if (++m_FramesAboveHandoffThresh >= 30) {
                             m_FrucChainAsyncTempDisabled.store(true, std::memory_order_relaxed);
                             m_LastDowngradeTime = std::chrono::steady_clock::now();
                             m_FramesAboveHandoffThresh = 0;
                             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VKFRUC-AUTOTIER] frucChainAsync → SYNC "
-                                "(handoff mean=%.2fms > 5ms 連 30 幀, SW path; "
-                                "30s cool-down 過後試 re-enable)",
-                                handoffMeanMsSw);
+                                "(chainBusy mean=%.2fms > %.2fms threshold (%.0f%% of "
+                                "%.2fms %dfps budget) 連 30 幀, chain GPU 太重; "
+                                "30s cool-down 過後試 re-enable; SW path)",
+                                chainBusyMeanMsSw, chainBusyThreshMsSw,
+                                100.0 * chainBusyThreshMsSw / frameBudgetMsSw,
+                                frameBudgetMsSw, m_StreamFps);
                         }
                     } else {
                         m_FramesAboveHandoffThresh = 0;
@@ -12876,11 +13593,13 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                     const double avgC    = m_FrucChainAsyncGpuPartCUsAccum   / n;
                     const double avgTot  = m_FrucChainAsyncGpuTotalUsAccum   / n;
                     const double avgHandoff = avgWait - avgCmp;
+                    // §J.3.e.2.i.56 (v1.4.121) — chainBusy = autotier metric.
+                    const double avgChainBusy = avgA + avgCmp + avgC;
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VKFRUC-FRUC-ASYNC-PROF-SW] partA=%.0fus cmpDur=%.0fus "
-                        "cmpWait=%.0fus handoff=%.0fus partC=%.0fus total=%.0fus "
-                        "(n=%d, mean/60f, SW)",
-                        avgA, avgCmp, avgWait, avgHandoff, avgC, avgTot,
+                        "cmpWait=%.0fus handoff=%.0fus partC=%.0fus chainBusy=%.0fus "
+                        "total=%.0fus (n=%d, mean/60f, SW)",
+                        avgA, avgCmp, avgWait, avgHandoff, avgC, avgChainBusy, avgTot,
                         m_FrucChainAsyncGpuCount);
                     m_FrucChainAsyncGpuPartAUsAccum   = 0.0;
                     m_FrucChainAsyncGpuCmpDurUsAccum  = 0.0;

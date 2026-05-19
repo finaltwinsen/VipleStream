@@ -332,8 +332,8 @@
     </message>
     <message>
         <location filename="../gui/PcView.qml" line="301"/>
-        <source>If your host PC is running Sunshine, navigate to the Sunshine web UI to enter the PIN.</source>
-        <translation>若您的主機正在執行 Sunshine，請導覽至 Sunshine 網頁 UI 並輸入 PIN 碼。</translation>
+        <source>If your host PC is running VipleStream-Server, navigate to the VipleStream-Server web UI to enter the PIN.</source>
+        <translation>若您的主機正在執行 VipleStream-Server，請導覽至其網頁 UI 並輸入 PIN 碼。</translation>
     </message>
     <message>
         <location filename="../gui/PcView.qml" line="313"/>
@@ -1197,8 +1197,8 @@
     </message>
     <message>
         <location filename="../gui/SettingsView.qml" line="1702"/>
-        <source>This unlocks extremely high video bitrates for use with Sunshine hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
-        <translation>這個選項可解鎖讓 Sunshine 主機可使用極高影片位元率。但僅建議在有線區域網路（乙太網路）環境下串流時使用。</translation>
+        <source>This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
+        <translation>這個選項可解鎖讓 VipleStream-Server 主機可使用極高影片位元率。但僅建議在有線區域網路（乙太網路）環境下串流時使用。</translation>
     </message>
     <message>
         <location filename="../gui/SettingsView.qml" line="1708"/>
