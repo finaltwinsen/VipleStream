@@ -6,6 +6,7 @@
 #include "display_device/windows/settings_manager.h"
 
 // system includes
+#include <algorithm>
 #include <boost/scope/scope_exit.hpp>
 
 // local includes
@@ -167,15 +168,43 @@ namespace display_device {
     if (!cached_state->m_modified.m_original_primary_device.empty()) {
       const auto current_primary_device {win_utils::getPrimaryDevice(*m_dd_api, cached_state->m_modified.m_topology)};
       if (current_primary_device != cached_state->m_modified.m_original_primary_device) {
-        system_settings_touched = true;
+        // VIPLE patch (§K.dd.revert.1): 在 setAsPrimary 之前先確認原 primary device
+        // 還在 active topology 內。若 user 在 stream 期間手動 disable 該 monitor
+        // (Windows 顯示設定), device 會從 active enumeration 消失但 cached_state
+        // 還記得舊 GUID. 直接 setAsPrimary 到 ghost device 會讓 Windows display
+        // API 卡死, 連帶把 server 整個 web/RTSP listener thread group 拖死
+        // (process 不 crash 但 47984/47989/47990 全部 stop listening, log 停寫).
+        //
+        // 改成: enum available devices, 若原 primary 已不在 → log warning + skip
+        // 這步驟, 繼續其他 revert. 上層收到 Ok 就好, 不需要區分 "primary 真的
+        // restore 回去" vs "primary 因 device 不在而 skip", 因為 Sunshine 主流程
+        // 不會根據 RevertingPrimaryDeviceFailed 做 retry / 額外動作.
+        //
+        // 觀察根據: 2026-05-19 22:33:42 + 23:54:38 兩次 VipleStream-Server log
+        // 在 "Trying to change back the original primary device to {GUID}" 之後
+        // 完全停寫, 確認卡死點在 setAsPrimary call.
+        const auto available_devices {m_dd_api->enumAvailableDevices()};
+        const bool original_still_available {std::ranges::any_of(available_devices, [&](const auto &dev) {
+          return dev.m_device_id == cached_state->m_modified.m_original_primary_device;
+        })};
 
-        DD_LOG(info) << "Trying to change back the original primary device to: " << toJson(cached_state->m_modified.m_original_primary_device);
-        if (!m_dd_api->setAsPrimary(cached_state->m_modified.m_original_primary_device)) {
-          // Error already logged
-          return RevertResult::RevertingPrimaryDeviceFailed;
+        if (!original_still_available) {
+          DD_LOG(warning) << "Original primary device " << toJson(cached_state->m_modified.m_original_primary_device)
+                          << " is no longer available in the system (likely manually disabled by user during stream); "
+                          << "skipping primary device revert to avoid Windows API hang.";
+          // Fall through — 不呼叫 setAsPrimary, primary_guard_fn 保持 noopFn
+          // (沒實際改動所以沒東西要 guard).
+        } else {
+          system_settings_touched = true;
+
+          DD_LOG(info) << "Trying to change back the original primary device to: " << toJson(cached_state->m_modified.m_original_primary_device);
+          if (!m_dd_api->setAsPrimary(cached_state->m_modified.m_original_primary_device)) {
+            // Error already logged
+            return RevertResult::RevertingPrimaryDeviceFailed;
+          }
+
+          primary_guard_fn = win_utils::primaryGuardFn(*m_dd_api, current_primary_device);
         }
-
-        primary_guard_fn = win_utils::primaryGuardFn(*m_dd_api, current_primary_device);
       }
     }
 
