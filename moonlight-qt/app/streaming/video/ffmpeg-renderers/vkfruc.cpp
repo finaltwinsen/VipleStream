@@ -5,6 +5,7 @@
 #include "vkfruc-aftermath.h"
 #include "path.h"  // §J.3.e.X Path β — Path::getDataFilePath / getCacheFileInfo for RIFE model + pipeline cache
 #include "settings/streamingpreferences.h"
+#include "streaming/streamutils.h"  // v1.4.168 §R2-η-2 — StreamUtils::getDisplayRefreshRate
 
 // VipleStream §K.1: strncpy_s + _TRUNCATE are MSVC bounds-checked CRT.
 // snprintf is cross-platform, NUL-terminates, won't overflow dst buffer.
@@ -372,6 +373,19 @@ bool VkFrucRenderer::isPixelFormatSupported(int videoFormat, AVPixelFormat pixel
     // §J.3.e.2.i.7 HW path
     (void)videoFormat;
     return pixelFormat == AV_PIX_FMT_VULKAN;
+}
+
+// v1.4.168 §R2-η-2 — return the swapchain target display's refresh rate
+// (Hz).  ffmpeg.cpp's PASSIVE-mode ratio controller reads this so a 2x /
+// 3x bump that would land target_fps above display_Hz (e.g. server
+// 180fps × 2 = 360fps on a 180Hz panel — exactly what trashed perf in
+// the v1.4.167 log, T5→T0 within ~3s) gets refused.
+int VkFrucRenderer::getRendererDisplayHz() const
+{
+    if (!m_Window) {
+        return 0;
+    }
+    return StreamUtils::getDisplayRefreshRate(m_Window);
 }
 
 VkFrucRenderer::~VkFrucRenderer()

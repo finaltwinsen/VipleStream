@@ -323,6 +323,14 @@ public:
     // v1.4.156 §R2-ζ-3 — autotier 當前 tier 查詢 (給 overlay 顯示用).
     // -1 = DISABLED, 0..5 = T0..T5, < -1 = not applicable.
     virtual int  frucCurrentTier() const { return -2; }
+    // v1.4.168 §R2-η-2 — display refresh rate (Hz) for the renderer's
+    // swapchain target.  Used by ffmpeg.cpp's PASSIVE-mode ratio
+    // controller to reject ratio bumps that would alias against the
+    // monitor (e.g. server 180fps × 2 = 360fps on a 180Hz screen, which
+    // is exactly what just trashed perf on this client — see
+    // v1.4.167 log 1052→1072 latency spike T5→T0).  Returns 0 when the
+    // renderer can't determine; gate treats that as "skip check".
+    virtual int  getRendererDisplayHz() const { return 0; }
 
     // §J.3.e.2.i.8 — VipleStream native VK_KHR_video_decode hook.
     // 當 renderer 自己跑 decode (跳過 FFmpeg avcodec_send_packet)，

@@ -2800,11 +2800,53 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                     if (recvPct < 40.0) m_RecvBelow40Seconds++;  else m_RecvBelow40Seconds = 0;
                 }
 
+                // v1.4.168 §R2-η-2 — alignment gate: ratio bumps only allowed
+                // when server_fps × ratio fits the display.  v1.4.167 log
+                // (line 1052→1072) shows server_fps=180 + auto-bump to 2x
+                // → target 360fps on a 180Hz panel → GPU latency 0.4ms→93ms
+                // → tier T5→T0 within 3s.  The intended PASSIVE design
+                // (per reference_device_fps_caps memory) needs
+                // server_fps × ratio == display_Hz (1:N alignment).  If
+                // display Hz is unknown (renderer returned 0), fall back
+                // to the legacy unconditional bump — same as v1.4.167.
+                const int displayHz = m_FrontendRenderer
+                                      ? m_FrontendRenderer->getRendererDisplayHz()
+                                      : 0;
+                auto canBumpTo = [&](int targetRatio) -> bool {
+                    if (displayHz <= 0 || m_StreamFps <= 0) {
+                        return true;  // unknown — keep legacy behaviour
+                    }
+                    const int targetFps = m_StreamFps * targetRatio;
+                    // 5fps tolerance for refresh-rate rounding (165.001Hz etc.)
+                    return targetFps <= displayHz + 5;
+                };
+
                 int newRatio = curRatio;
                 if (m_RecvBelow40Seconds >= 3 && curRatio < 3) {
-                    newRatio = 3;
+                    if (canBumpTo(3)) {
+                        newRatio = 3;
+                    } else if (curRatio == 1 && canBumpTo(2)) {
+                        // 3x 不對齊但 2x 對齊 → 退而求其次
+                        newRatio = 2;
+                    } else {
+                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-RATIO] PASSIVE skip %dx→3x "
+                                    "(server_fps=%d × 3 = %d > display_Hz=%d) — "
+                                    "server fps 沒對齊 display/3, 不升避免 GPU overload",
+                                    curRatio, m_StreamFps, m_StreamFps * 3, displayHz);
+                    }
                 } else if (m_RecvBelow70Seconds >= 3 && curRatio < 2) {
-                    newRatio = 2;
+                    if (canBumpTo(2)) {
+                        newRatio = 2;
+                    } else {
+                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-RATIO] PASSIVE skip 1x→2x "
+                                    "(server_fps=%d × 2 = %d > display_Hz=%d) — "
+                                    "server fps 沒對齊 display/2, 不升避免 GPU overload. "
+                                    "建議 server fps 設成 display_Hz/2=%d 才能走 2x.",
+                                    m_StreamFps, m_StreamFps * 2, displayHz,
+                                    displayHz / 2);
+                    }
                 } else if (m_RecvAbove80Seconds >= 10 && curRatio > 1) {
                     newRatio = curRatio - 1;
                 }
@@ -2812,10 +2854,12 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                     m_FrontendRenderer->setEffectiveFrucRatio(newRatio);
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-RATIO] PASSIVE switch %dx → %dx (recv=%.0f%%, "
-                                "below40s=%d below70s=%d above80s=%d)",
+                                "below40s=%d below70s=%d above80s=%d, "
+                                "server_fps=%d display_Hz=%d target_fps=%d)",
                                 curRatio, newRatio, recvPct,
                                 m_RecvBelow40Seconds, m_RecvBelow70Seconds,
-                                m_RecvAbove80Seconds);
+                                m_RecvAbove80Seconds,
+                                m_StreamFps, displayHz, m_StreamFps * newRatio);
                     // reset 計數器避免連續觸發
                     m_RecvAbove80Seconds = m_RecvBelow70Seconds = m_RecvBelow40Seconds = 0;
                 }

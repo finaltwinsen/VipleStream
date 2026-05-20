@@ -129,6 +129,10 @@ public:
     int frucCurrentTier() const override {
         return m_CurrentTier.load(std::memory_order_relaxed);
     }
+    // v1.4.168 §R2-η-2 — display refresh rate for ffmpeg.cpp passive-mode
+    // ratio alignment gate.  Resolves via StreamUtils::getDisplayRefreshRate
+    // off m_Window (same path used by Pacer at render time).
+    int getRendererDisplayHz() const override;
 
     // §J.3.e.2.i.8 Phase 3a — VkFrucDecodeClient::DecodePicture needs to gate
     // on codec before reading the CodecSpecific union (hevc / av1 share storage).
