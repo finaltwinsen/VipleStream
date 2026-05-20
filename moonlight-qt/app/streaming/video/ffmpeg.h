@@ -130,11 +130,20 @@ private:
     // VipleStream v1.4.152 §R2-β-2 + v1.4.153 §R2-γ-5: recv-ratio adaptive controller.
     // ACTIVE: m_LowRecvRatioSeconds 5s warn once.
     // PASSIVE: above80 / below70 / below40 hysteresis counters drive ratio switch.
+    // v1.4.170 §R2-θ: metric changed from recv/server_fps to recv/display_Hz so
+    // the controller actually targets display refresh alignment (server fps may
+    // not equal display Hz — see plan 167-128-2x-1x-wiggly-lantern).  Counters
+    // reused, semantics now "recv against display × X%".
     int m_LowRecvRatioSeconds = 0;
     bool m_RatioWarnedOnce = false;
-    int m_RecvAbove80Seconds = 0;
-    int m_RecvBelow70Seconds = 0;
-    int m_RecvBelow40Seconds = 0;
+    int m_RecvAbove80Seconds = 0;  // recv ≥ 95% of display_Hz → step ratio down
+    int m_RecvBelow70Seconds = 0;  // recv < 80% of display_Hz → bump to 2x
+    int m_RecvBelow40Seconds = 0;  // recv < 40% of display_Hz → bump to 3x
+    // v1.4.170 §R2-θ — cooldown after LiRequestFpsChange.  Server encoder
+    // reconfig takes ~100-500ms; during that window received_fps will dip
+    // briefly even though the request landed.  We block further ratio
+    // transitions for 5s to avoid encoder-reconfig oscillation.
+    int m_FpsChangeCooldownSec = 0;
     bool m_NeedsSpsFixup;
     bool m_TestOnly;
     TestMode m_CurrentTestMode;

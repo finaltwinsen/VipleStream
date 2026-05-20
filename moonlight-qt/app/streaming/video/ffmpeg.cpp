@@ -2786,82 +2786,85 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                         (double)m_ActiveWndVideoStats.decodedFrames / (double)m_StreamFps * 100.0);
 
             if (passive) {
-                // §R2-γ-5: 被動模式 hysteresis state machine.
-                //   recv ≥ 80% 連 10s + currentRatio > 1 → 降 ratio (less interp).
-                //   recv < 70% 連 3s + currentRatio < 2 → 升至 2x dual.
-                //   recv < 40% 連 3s + currentRatio < 3 → 升至 3x triple.
-                if (recvPct >= 80.0) {
+                // v1.4.170 §R2-θ — PASSIVE 重寫. metric 從 recv/server_fps
+                // 改成 recv/display_Hz；升降 ratio 同時呼 LiRequestFpsChange
+                // 讓 server fps == display_Hz / ratio. 配合的話 target_fps =
+                // received × ratio == display_Hz 永遠對齊, GPU autotier 不會
+                // 像 v1.4.167 那樣升 2x 就爆 T0 (target 360fps on 180Hz panel).
+                //
+                // Trigger 表 (新):
+                //   recv ≥ 95% of display, 連 10s, ratio > 1 → 降 ratio + req server_fps↑
+                //   recv < 80% of display, 連 3s,  ratio < 2 → 升 2x   + req server_fps=display/2
+                //   recv < 40% of display, 連 3s,  ratio < 3 → 升 3x   + req server_fps=display/3
+                //   cooldown 5s 內任何切換都跳過 (encoder reconfig 需 100-500ms).
+                const int displayHz = m_FrontendRenderer
+                                      ? m_FrontendRenderer->getRendererDisplayHz()
+                                      : 0;
+                // recv against display.  Fallback to recv/server_fps when
+                // display Hz unknown (renderer doesn't expose it on some
+                // platforms) — preserves v1.4.169 behaviour.
+                const double recvPctOfDisplay = (displayHz > 0)
+                    ? ((double)m_ActiveWndVideoStats.receivedFrames / (double)displayHz * 100.0)
+                    : recvPct;  // legacy fallback
+
+                if (recvPctOfDisplay >= 95.0) {
                     m_RecvAbove80Seconds++;
                     m_RecvBelow70Seconds = 0;
                     m_RecvBelow40Seconds = 0;
                 } else {
                     m_RecvAbove80Seconds = 0;
-                    if (recvPct < 70.0) m_RecvBelow70Seconds++;  else m_RecvBelow70Seconds = 0;
-                    if (recvPct < 40.0) m_RecvBelow40Seconds++;  else m_RecvBelow40Seconds = 0;
+                    if (recvPctOfDisplay < 80.0) m_RecvBelow70Seconds++; else m_RecvBelow70Seconds = 0;
+                    if (recvPctOfDisplay < 40.0) m_RecvBelow40Seconds++; else m_RecvBelow40Seconds = 0;
                 }
 
-                // v1.4.168 §R2-η-2 — alignment gate: ratio bumps only allowed
-                // when server_fps × ratio fits the display.  v1.4.167 log
-                // (line 1052→1072) shows server_fps=180 + auto-bump to 2x
-                // → target 360fps on a 180Hz panel → GPU latency 0.4ms→93ms
-                // → tier T5→T0 within 3s.  The intended PASSIVE design
-                // (per reference_device_fps_caps memory) needs
-                // server_fps × ratio == display_Hz (1:N alignment).  If
-                // display Hz is unknown (renderer returned 0), fall back
-                // to the legacy unconditional bump — same as v1.4.167.
-                const int displayHz = m_FrontendRenderer
-                                      ? m_FrontendRenderer->getRendererDisplayHz()
-                                      : 0;
-                auto canBumpTo = [&](int targetRatio) -> bool {
-                    if (displayHz <= 0 || m_StreamFps <= 0) {
-                        return true;  // unknown — keep legacy behaviour
-                    }
-                    const int targetFps = m_StreamFps * targetRatio;
-                    // 5fps tolerance for refresh-rate rounding (165.001Hz etc.)
-                    return targetFps <= displayHz + 5;
-                };
+                // Cooldown tick — block all transitions until 0.
+                if (m_FpsChangeCooldownSec > 0) {
+                    m_FpsChangeCooldownSec--;
+                }
 
                 int newRatio = curRatio;
-                if (m_RecvBelow40Seconds >= 3 && curRatio < 3) {
-                    if (canBumpTo(3)) {
+                if (m_FpsChangeCooldownSec == 0) {
+                    if (m_RecvBelow40Seconds >= 3 && curRatio < 3) {
                         newRatio = 3;
-                    } else if (curRatio == 1 && canBumpTo(2)) {
-                        // 3x 不對齊但 2x 對齊 → 退而求其次
+                    } else if (m_RecvBelow70Seconds >= 3 && curRatio < 2) {
                         newRatio = 2;
-                    } else {
-                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                    "[VIPLE-RATIO] PASSIVE skip %dx→3x "
-                                    "(server_fps=%d × 3 = %d > display_Hz=%d) — "
-                                    "server fps 沒對齊 display/3, 不升避免 GPU overload",
-                                    curRatio, m_StreamFps, m_StreamFps * 3, displayHz);
+                    } else if (m_RecvAbove80Seconds >= 10 && curRatio > 1) {
+                        newRatio = curRatio - 1;
                     }
-                } else if (m_RecvBelow70Seconds >= 3 && curRatio < 2) {
-                    if (canBumpTo(2)) {
-                        newRatio = 2;
-                    } else {
-                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                    "[VIPLE-RATIO] PASSIVE skip 1x→2x "
-                                    "(server_fps=%d × 2 = %d > display_Hz=%d) — "
-                                    "server fps 沒對齊 display/2, 不升避免 GPU overload. "
-                                    "建議 server fps 設成 display_Hz/2=%d 才能走 2x.",
-                                    m_StreamFps, m_StreamFps * 2, displayHz,
-                                    displayHz / 2);
-                    }
-                } else if (m_RecvAbove80Seconds >= 10 && curRatio > 1) {
-                    newRatio = curRatio - 1;
                 }
+
                 if (newRatio != curRatio && m_FrontendRenderer) {
+                    // §R2-θ — request server to push display_Hz / newRatio so
+                    // target_fps stays aligned with display refresh.
+                    int targetServerFps = (displayHz > 0)
+                        ? (displayHz / newRatio)
+                        : m_StreamFps;
+                    // Clamp to LiRequestFpsChange's 10-360 range.
+                    if (targetServerFps < 10) targetServerFps = 10;
+                    if (targetServerFps > 360) targetServerFps = 360;
+
+                    if (displayHz > 0 && targetServerFps != m_StreamFps) {
+                        LiRequestFpsChange(targetServerFps);
+                        // Sync local m_StreamFps so subsequent overlay /
+                        // legacy recvRatio calculations show the new value.
+                        // Server's actual encoder reconfig is async; cooldown
+                        // covers the ~100-500ms transient.
+                        m_StreamFps = targetServerFps;
+                    }
                     m_FrontendRenderer->setEffectiveFrucRatio(newRatio);
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-RATIO] PASSIVE switch %dx → %dx (recv=%.0f%%, "
-                                "below40s=%d below70s=%d above80s=%d, "
-                                "server_fps=%d display_Hz=%d target_fps=%d)",
-                                curRatio, newRatio, recvPct,
+                                "[VIPLE-RATIO] PASSIVE switch %dx → %dx "
+                                "(recv_of_display=%.0f%%, below40s=%d below70s=%d "
+                                "above95s=%d, display_Hz=%d, req server_fps=%d, "
+                                "target_fps=%d)",
+                                curRatio, newRatio, recvPctOfDisplay,
                                 m_RecvBelow40Seconds, m_RecvBelow70Seconds,
                                 m_RecvAbove80Seconds,
-                                m_StreamFps, displayHz, m_StreamFps * newRatio);
-                    // reset 計數器避免連續觸發
+                                displayHz, targetServerFps,
+                                targetServerFps * newRatio);
+                    // Reset counters + arm cooldown.
                     m_RecvAbove80Seconds = m_RecvBelow70Seconds = m_RecvBelow40Seconds = 0;
+                    m_FpsChangeCooldownSec = 5;
                 }
             } else {
                 // ACTIVE: 一次性 warn 提示 (5s 連續 < 80%).
