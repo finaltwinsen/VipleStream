@@ -58,19 +58,31 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     // relative mode, the click event will trigger the mouse to be recaptured.
     SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
 
-    // VipleStream v1.4.171 §N.6 — 強制 relative mouse delta 走原始硬體
-    // 數字, 不套用 desktop env (X11 / Wayland) 的指標加速曲線.
+    // VipleStream v1.4.172 §N.6 — Linux 端滑鼠 raw delta 倍率補償.
     //
-    // 為什麼: Linux ubuntu 實機驗測 v1.4.169 觀察到串流中滑鼠速度跟本機
-    // 不一致 (使用者報「軌跡速度差異很大」). 原因是 SDL3 在 X11 上的
-    // relative mouse mode 預設經過 XInput2 transform_matrix → system
-    // pointer acceleration 已套一次, 再傳給 Windows host 又被 Pointer
-    // Ballistics 套第二次, 兩段加速疊起來就是使用者看到的差異.
+    // v1.4.171 加的 SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE="0" 實際是 no-op:
+    // SDL3 在 Linux X11 上 default 已經是 "0" (XInput2 RawMotion 走
+    // valuators_raw, 不套 X server 指標加速曲線). 使用者實機驗測 ubuntu
+    // 100.117.251.20 仍回報「感覺滑鼠還是慢一點, 不像 Windows 串流
+    // Windows 那麼無感」.
     //
-    // SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE = "0" 告訴 SDL 跳過 OS-level
-    // ballistics, 給 raw mickey delta. host 端再做一次曲線, 跟 Windows /
-    // macOS 既有行為一致.
-    SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE, "0");
+    // 真實 root cause 推測: Linux RawMotion 給的 mickey count 跟 desktop
+    // env 套加速後的 cursor 速度感不一致 — 使用者習慣 desktop accelerated
+    // cursor, 串流 raw delta 數字較小, Windows host ballistics 再加速一次
+    // 出來仍比 desktop 慢. SDL3 在 Windows / macOS 上沒踩到, 因為兩個平台
+    // 的 raw delta 跟 desktop 看到的數字本來就比較接近.
+    //
+    // Fix: 用 SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE 套 150% 倍率, 補回
+    // user 感受. 預設值是猜測 (沒實測 X11 raw delta 跟 Windows raw input
+    // 的精確 ratio), 第一輪 ship 看 user 反應再調 default. 之後可加
+    // Settings slider 給 user 自己拉; 不用 env var 給 user 設
+    // (見 feedback_no_env_var_config.md).
+    //
+    // Windows / macOS 不受影響 (兩平台這條 hint 預設值就是用不到 — Windows
+    // raw delta 已從 OS 級套了 ballistics, SDL3 不再 scale).
+#ifdef Q_OS_LINUX
+    SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE, "150");
+#endif
 
     // Enabling extended input reports allows rumble to function on Bluetooth PS4/PS5
     // controllers, but breaks DirectInput applications. We will enable it because
