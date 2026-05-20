@@ -1866,50 +1866,6 @@ Flickable {
                         StreamingPreferences.reverseScrollDirection = checked
                     }
                 }
-
-                // VipleStream v1.4.173 §N.6.linux — 滑鼠相對速度倍率
-                // (Linux 限定). SDL3 在 X11 上 RawMotion 給 raw mickey,
-                // 跟 desktop 端 X server 加速過的 cursor 速度感不同,
-                // 串流時若 cursor 動得太慢 (跟本機比) 拉這個 slider.
-                // 100 = raw, 150 = 1.5× (太快了的話拉回 120/130),
-                // 範圍 50-300%.
-                Row {
-                    spacing: 8
-                    visible: Qt.platform.os === "linux"
-                    width: parent.width
-
-                    Label {
-                        text: qsTr("Linux 滑鼠速度倍率")
-                        font.pointSize: 12
-                        anchors.verticalCenter: parent.verticalCenter
-                        color: "#F2F5E1"
-                    }
-
-                    Slider {
-                        id: mouseSpeedScaleLinuxSlider
-                        from: 50
-                        to: 300
-                        stepSize: 5
-                        value: StreamingPreferences.mouseSpeedScaleLinux
-                        width: parent.width - 240
-                        anchors.verticalCenter: parent.verticalCenter
-
-                        onValueChanged: {
-                            StreamingPreferences.mouseSpeedScaleLinux = Math.round(value)
-                        }
-
-                        ToolTip.visible: hovered
-                        ToolTip.text: qsTr("串流時 client 滑鼠 raw 位移送給 host 之前先乘上這個倍率。100% = 原始硬體 delta；150% = 1.5×（補回 X server desktop 加速過的速度感）。需要重啟串流才會生效。Windows / macOS 不受影響。")
-                    }
-
-                    Label {
-                        text: Math.round(mouseSpeedScaleLinuxSlider.value) + " %"
-                        font.pointSize: 12
-                        anchors.verticalCenter: parent.verticalCenter
-                        color: "#F2F5E1"
-                        width: 60
-                    }
-                }
             }
         }
 

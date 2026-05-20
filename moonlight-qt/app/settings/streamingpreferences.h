@@ -300,7 +300,6 @@ public:
     Q_PROPERTY(bool muteOnFocusLoss MEMBER muteOnFocusLoss NOTIFY muteOnFocusLossChanged)
     Q_PROPERTY(bool backgroundGamepad MEMBER backgroundGamepad NOTIFY backgroundGamepadChanged)
     Q_PROPERTY(bool reverseScrollDirection MEMBER reverseScrollDirection NOTIFY reverseScrollDirectionChanged)
-    Q_PROPERTY(int mouseSpeedScaleLinux MEMBER mouseSpeedScaleLinux NOTIFY mouseSpeedScaleLinuxChanged)
     Q_PROPERTY(bool swapFaceButtons MEMBER swapFaceButtons NOTIFY swapFaceButtonsChanged)
     Q_PROPERTY(bool keepAwake MEMBER keepAwake NOTIFY keepAwakeChanged)
     Q_PROPERTY(CaptureSysKeysMode captureSysKeysMode MEMBER captureSysKeysMode NOTIFY captureSysKeysModeChanged)
@@ -357,12 +356,6 @@ public:
     bool reverseScrollDirection;
     bool swapFaceButtons;
     bool keepAwake;
-    // VipleStream v1.4.173 §N.6.linux — Linux 端滑鼠相對位移倍率 (%).
-    // 100 = 直接送 SDL3 raw delta (XInput2 RawMotion valuators_raw);
-    // 150 = 套 1.5×, 補回 X server desktop accelerated cursor 速度感.
-    // 不影響 Windows / macOS (那兩個平台 SDL3 raw delta 跟 desktop 速度
-    // 本來就對齊). 走 SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE.
-    int mouseSpeedScaleLinux;
     int packetSize;
     AudioConfig audioConfig;
     VideoCodecConfig videoCodecConfig;
@@ -427,7 +420,6 @@ signals:
     void muteOnFocusLossChanged();
     void backgroundGamepadChanged();
     void reverseScrollDirectionChanged();
-    void mouseSpeedScaleLinuxChanged();
     void swapFaceButtonsChanged();
     void captureSysKeysModeChanged();
     void keepAwakeChanged();

@@ -58,30 +58,20 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     // relative mode, the click event will trigger the mouse to be recaptured.
     SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
 
-    // VipleStream v1.4.173 §N.6 — Linux 端滑鼠相對位移倍率, 由 Settings
-    // UI slider 控制 (StreamingPreferences::mouseSpeedScaleLinux).
+    // VipleStream v1.4.175 §N.6 — 移除 v1.4.171/172/173/174 加的 mouse
+    // hint 嘗試, 回到 SDL3 default. 嘗試紀錄 (forward-fix, 不 revert):
+    //   v1.4.171: SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE="0" → no-op
+    //             (SDL3 在 Linux X11 default 已是 "0")
+    //   v1.4.172: SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE="150" → user 報太快
+    //   v1.4.173/174: 改成 Settings UI slider, default 100 →
+    //                 user 報「不管用多少滑鼠都亂飄, 連 100 也飄」
     //
-    // 為什麼: SDL3 在 Linux X11 RawMotion 走 valuators_raw, 給原始 mickey
-    // count, 沒套 X server 指標加速. 使用者習慣 desktop 加速過的 cursor 速度,
-    // 串流 raw delta 數字較小 → Windows host ballistics 再加速一次仍比 desktop
-    // 慢. v1.4.172 寫死 150% 太快, v1.4.173 改成 user 可調.
+    // 推測 v1.4.174 亂飄是 SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE 在 SDL3
+    // 行為跟 SDL2 不同 (可能已 deprecated 或語意變了), 或者跟 SDL3 內部
+    // motion accumulator 衝突. 不再深追, 接受 SDL3 default 行為.
     //
-    // 100 = raw (跟 v1.4.171 一樣), 50-300 範圍由 streamingpreferences clamp,
-    // Settings UI slider 預設 100.
-    //
-    // Windows / macOS 不套這條 hint (兩平台 SDL3 raw delta 跟 desktop 速度
-    // 對齊, multiplier 無意義). 不用 env var 給 user 設 — 見
-    // feedback_no_env_var_config 規範.
-#ifdef Q_OS_LINUX
-    const int scaleLinux = prefs.mouseSpeedScaleLinux;
-    char scaleBuf[8];
-    SDL_snprintf(scaleBuf, sizeof(scaleBuf), "%d", scaleLinux);
-    SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE, scaleBuf);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-INPUT] §N.6 Linux mouse relative speed scale = %d%% "
-                "(StreamingPreferences.mouseSpeedScaleLinux, slider 50-300)",
-                scaleLinux);
-#endif
+    // 使用者明確 ack「滑鼠的部分不改了, 用原本的就好」, 回到 SDL3 預設
+    // (raw delta from XInput2 valuators_raw, 不套任何 multiplier).
 
     // Enabling extended input reports allows rumble to function on Bluetooth PS4/PS5
     // controllers, but breaks DirectInput applications. We will enable it because
