@@ -1,12 +1,31 @@
 package com.limelight.nvstream.http;
 
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 
 public class ComputerDetails {
     public enum State {
         ONLINE, OFFLINE, UNKNOWN
+    }
+
+    public static class DisplayMode {
+        public int width;
+        public int height;
+        public int refreshRate;
+
+        public DisplayMode(int width, int height, int refreshRate) {
+            this.width = width;
+            this.height = height;
+            this.refreshRate = refreshRate;
+        }
+
+        @Override
+        public String toString() {
+            return width + "x" + height + "@" + refreshRate + "Hz";
+        }
     }
 
     public static class AddressTuple {
@@ -87,6 +106,15 @@ public class ComputerDetails {
     public boolean isVipleStreamPeer;
     public String vipleStreamProtocol;
 
+    // VipleStream §M.parity Wire-W1/W2 (2026-05-20). Surface host
+    // codec capability bit field (SCM_*) + advertised primary display
+    // modes from /serverinfo so streamConfig negotiation can AND with
+    // server caps and the UI can hint host native resolution.  Both
+    // optional — vanilla Moonlight servers omit these elements and
+    // we degrade to current default behaviour (0 / empty list).
+    public int serverCodecModeSupport;
+    public List<DisplayMode> supportedDisplayModes = new ArrayList<>();
+
     public ComputerDetails() {
         // Use defaults
         state = State.UNKNOWN;
@@ -158,6 +186,10 @@ public class ComputerDetails {
         this.rawAppList = details.rawAppList;
         this.isVipleStreamPeer = details.isVipleStreamPeer;
         this.vipleStreamProtocol = details.vipleStreamProtocol;
+        this.serverCodecModeSupport = details.serverCodecModeSupport;
+        if (details.supportedDisplayModes != null && !details.supportedDisplayModes.isEmpty()) {
+            this.supportedDisplayModes = details.supportedDisplayModes;
+        }
     }
 
     @Override

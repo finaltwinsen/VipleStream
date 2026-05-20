@@ -11,6 +11,17 @@
             android:entries="@array/resolution_names"
             android:entryValues="@array/resolution_values"
             android:defaultValue="1280x720" />
+        <!-- VipleStream §M.parity U7: free-form WxH override used when
+             the list_resolution dropdown is set to the "custom" sentinel.
+             Always visible (Android Preference framework does not
+             support conditional show/hide via dependency) — the value
+             is ignored unless list_resolution == "custom". -->
+        <EditTextPreference
+            android:key="text_custom_resolution"
+            android:title="@string/title_custom_resolution"
+            android:summary="@string/summary_custom_resolution"
+            android:dialogMessage="@string/dialog_message_custom_resolution"
+            android:defaultValue="" />
         <ListPreference
             android:key="list_fps"
             android:title="@string/title_fps_list"
@@ -303,6 +314,30 @@
             android:title="@string/title_full_range"
             android:summary="@string/summary_full_range"
             android:defaultValue="false" />
+        <!-- VipleStream §M.parity W5: opt-in 4:4:4 chroma to mirror PC
+             moonlight-qt enableYUV444. Effective only when the
+             MediaCodec decoder advertises HEVCProfileMain444_*; on
+             typical mobile decoders this stays a no-op. -->
+        <CheckBoxPreference
+            android:key="checkbox_enable_yuv444"
+            android:title="@string/title_enable_yuv444"
+            android:summary="@string/summary_enable_yuv444"
+            android:defaultValue="false" />
+        <!-- VipleStream §M.parity W4: packet MTU, mirrors PC packetSize.
+             Default 1392 matches the previous hardcoded value (1500-byte
+             Ethernet minus IP/UDP/ENet headers); tune down to 1024 over
+             constrained links, up to 1500 on jumbo-frame LANs. -->
+        <com.limelight.preferences.SeekBarPreference
+            android:key="seekbar_packet_size"
+            seekbar:min="512"
+            android:max="1500"
+            seekbar:step="32"
+            seekbar:keyStep="32"
+            android:defaultValue="1392"
+            android:title="@string/title_packet_size"
+            android:summary="@string/summary_packet_size"
+            android:dialogMessage="@string/summary_packet_size"
+            android:text="@string/suffix_packet_size" />
         <CheckBoxPreference
             android:key="checkbox_enable_perf_overlay"
             android:title="@string/title_enable_perf_overlay"

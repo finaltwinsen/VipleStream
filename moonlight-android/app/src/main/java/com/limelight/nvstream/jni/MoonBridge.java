@@ -12,15 +12,21 @@ public class MoonBridge {
     public static final AudioConfiguration AUDIO_CONFIGURATION_71_SURROUND = new AudioConfiguration(8, 0x63F);
 
     public static final int VIDEO_FORMAT_H264 = 0x0001;
+    public static final int VIDEO_FORMAT_H264_HIGH8_444 = 0x0004;
     public static final int VIDEO_FORMAT_H265 = 0x0100;
     public static final int VIDEO_FORMAT_H265_MAIN10 = 0x0200;
+    public static final int VIDEO_FORMAT_H265_REXT8_444 = 0x0400;
+    public static final int VIDEO_FORMAT_H265_REXT10_444 = 0x0800;
     public static final int VIDEO_FORMAT_AV1_MAIN8 = 0x1000;
     public static final int VIDEO_FORMAT_AV1_MAIN10 = 0x2000;
+    public static final int VIDEO_FORMAT_AV1_HIGH8_444 = 0x4000;
+    public static final int VIDEO_FORMAT_AV1_HIGH10_444 = 0x8000;
 
     public static final int VIDEO_FORMAT_MASK_H264 = 0x000F;
     public static final int VIDEO_FORMAT_MASK_H265 = 0x0F00;
     public static final int VIDEO_FORMAT_MASK_AV1 = 0xF000;
-    public static final int VIDEO_FORMAT_MASK_10BIT = 0x2200;
+    public static final int VIDEO_FORMAT_MASK_10BIT = 0xAA00;
+    public static final int VIDEO_FORMAT_MASK_YUV444 = 0xCC04;
 
     public static final int BUFFER_TYPE_PICDATA = 0;
     public static final int BUFFER_TYPE_SPS = 1;

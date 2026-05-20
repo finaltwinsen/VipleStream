@@ -296,6 +296,26 @@
     <string name="resolution_1080p">1080p</string>
     <string name="resolution_1440p">1440p</string>
     <string name="resolution_4k">4K</string>
+    <string name="resolution_custom">Custom (set value below)</string>
+
+    <!-- VipleStream §M.parity U7 custom resolution -->
+    <string name="title_custom_resolution">Custom resolution</string>
+    <string name="summary_custom_resolution">Used when the resolution dropdown above is set to Custom. Format: width x height (e.g. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Enter a custom resolution as WIDTHxHEIGHT, e.g. 1600x900. Ignored unless the dropdown is set to Custom.</string>
+
+    <!-- VipleStream §M.parity W5 YUV 4:4:4 toggle -->
+    <string name="title_enable_yuv444">Prefer 4:4:4 chroma (YUV444)</string>
+    <string name="summary_enable_yuv444">Request 4:4:4 chroma when the device decoder advertises support. Most mobile decoders do not support this and the option becomes a no-op.</string>
+
+    <!-- VipleStream §M.parity U6 cancel file transfer prompt -->
+    <string name="title_cancel_file_transfer">Cancel file transfer?</string>
+    <string name="message_cancel_file_transfer">Stop the file transfer in progress?</string>
+    <string name="file_transfer_overlay_content_description">File transfer progress. Tap to cancel.</string>
+
+    <!-- VipleStream §M.parity W4 packet size -->
+    <string name="title_packet_size">Network packet size</string>
+    <string name="summary_packet_size">Maximum bytes per packet sent to the host. 1392 is the safe default for Ethernet LAN. Lower this for constrained links (Wi-Fi, VPN); raise it on jumbo-frame networks.</string>
+    <string name="suffix_packet_size">bytes</string>
 
     <string name="fps_30">30 FPS</string>
     <string name="fps_60">60 FPS</string>

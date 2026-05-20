@@ -72,6 +72,9 @@
         android:background="#B0141710"
         android:padding="8dp"
         android:preferKeepClear="true"
+        android:clickable="true"
+        android:focusable="true"
+        android:contentDescription="@string/file_transfer_overlay_content_description"
         android:visibility="gone" />
 
 </merge>

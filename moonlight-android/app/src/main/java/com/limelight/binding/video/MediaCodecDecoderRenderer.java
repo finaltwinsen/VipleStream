@@ -439,6 +439,46 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         return false;
     }
 
+    public boolean isHevcRext8_444Supported() {
+        if (hevcDecoder == null) {
+            return false;
+        }
+        for (MediaCodecInfo.CodecProfileLevel profileLevel : hevcDecoder.getCapabilitiesForType("video/hevc").profileLevels) {
+            // HEVCProfileMain444_8 = 2048 (constant defined in API 31+, hardcoded for older API compat)
+            if (profileLevel.profile == 2048) {
+                LimeLog.info("HEVC decoder "+hevcDecoder.getName()+" supports HEVC Main 4:4:4 8-bit");
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public boolean isHevcRext10_444Supported() {
+        if (hevcDecoder == null) {
+            return false;
+        }
+        for (MediaCodecInfo.CodecProfileLevel profileLevel : hevcDecoder.getCapabilitiesForType("video/hevc").profileLevels) {
+            // HEVCProfileMain444_10 = 4096 (constant defined in API 31+, hardcoded for older API compat)
+            if (profileLevel.profile == 4096) {
+                LimeLog.info("HEVC decoder "+hevcDecoder.getName()+" supports HEVC Main 4:4:4 10-bit");
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public boolean isAv1High8_444Supported() {
+        // Android CodecProfileLevel has no explicit AV1 High 4:4:4 profile constant
+        // through API 35; return false until Android API surfaces it.
+        return false;
+    }
+
+    public boolean isAv1High10_444Supported() {
+        // Android CodecProfileLevel has no explicit AV1 High 4:4:4 10-bit profile
+        // constant through API 35; return false until Android API surfaces it.
+        return false;
+    }
+
     public int getPreferredColorSpace() {
         // Default to Rec 709 which is probably better supported on modern devices.
         //

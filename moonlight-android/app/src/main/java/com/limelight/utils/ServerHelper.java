@@ -64,6 +64,9 @@ public class ServerHelper {
         intent.putExtra(Game.EXTRA_UNIQUEID, managerBinder.getUniqueId());
         intent.putExtra(Game.EXTRA_PC_UUID, computer.uuid);
         intent.putExtra(Game.EXTRA_PC_NAME, computer.name);
+        // VipleStream §M.parity W1: propagate server codec mode support
+        // so Game can intersect supportedVideoFormats with host caps.
+        intent.putExtra(Game.EXTRA_SERVER_CODEC_MODE_SUPPORT, computer.serverCodecModeSupport);
         // VipleStream: Pass STUN address for relay NAT traversal
         if (computer.stunAddress != null) {
             intent.putExtra(Game.EXTRA_STUN_ADDRESS, computer.stunAddress);

@@ -110,6 +110,14 @@ public class PreferenceConfiguration {
     private static final String RELAY_URL_PREF_STRING = "relay_url";
     private static final String RELAY_PSK_PREF_STRING = "relay_psk";
 
+    // VipleStream §M.parity W4/W5/U7 (2026-05-20). Mirror three PC
+    // (moonlight-qt) preferences that affect SDP / encoder negotiation
+    // and resolution flexibility: packet MTU, 4:4:4 chroma opt-in, and
+    // a free-form WxH escape hatch for the resolution dropdown.
+    private static final String PACKET_SIZE_PREF_STRING = "seekbar_packet_size";
+    private static final String ENABLE_YUV444_PREF_STRING = "checkbox_enable_yuv444";
+    private static final String CUSTOM_RESOLUTION_PREF_STRING = "text_custom_resolution";
+
     // VipleStream H Phase 2: app-list sort mode. Stored as the enum's
     // name() string ("DEFAULT" / "RECENT" / "PLAYTIME" / "NAME"). The
     // settings activity drives this via list_app_sort_mode in
@@ -156,6 +164,12 @@ public class PreferenceConfiguration {
     private static final boolean DEFAULT_GAMEPAD_TOUCHPAD_AS_MOUSE = false;
     private static final boolean DEFAULT_GAMEPAD_MOTION_SENSORS = true;
     private static final boolean DEFAULT_GAMEPAD_MOTION_FALLBACK = false;
+    // VipleStream §M.parity W4/W5 defaults — 1392 matches the long-time
+    // hardcoded value (1500-byte Ethernet MTU minus IP/UDP/ENet headers);
+    // YUV444 stays opt-in to preserve current behaviour on mobile decoders
+    // that do not advertise 4:4:4 profile support.
+    private static final int DEFAULT_PACKET_SIZE = 1392;
+    private static final boolean DEFAULT_ENABLE_YUV444 = false;
 
     public static final int FRAME_PACING_MIN_LATENCY = 0;
     public static final int FRAME_PACING_BALANCED = 1;
@@ -169,6 +183,10 @@ public class PreferenceConfiguration {
     public static final String RES_1440P = "2560x1440";
     public static final String RES_4K = "3840x2160";
     public static final String RES_NATIVE = "Native";
+    // VipleStream §M.parity U7: sentinel value indicating the user wants
+    // to use the value stored in CUSTOM_RESOLUTION_PREF_STRING instead of
+    // a fixed dropdown option.
+    public static final String RES_CUSTOM = "custom";
 
     public int width, height, fps;
     public int bitrate;
@@ -210,6 +228,9 @@ public class PreferenceConfiguration {
     public String relayUrl;
     public String relayPsk;
     public AppSortMode appSortMode;
+    // VipleStream §M.parity W4/W5 (2026-05-20).
+    public int packetSize;
+    public boolean enableYuv444;
 
     public static boolean isNativeResolution(int width, int height) {
         // It's not a native resolution if it matches an existing resolution option
@@ -571,6 +592,20 @@ public class PreferenceConfiguration {
             // Use the new preference location
             String resStr = prefs.getString(RESOLUTION_PREF_STRING, PreferenceConfiguration.DEFAULT_RESOLUTION);
 
+            // VipleStream §M.parity U7: when the dropdown sentinel is
+            // RES_CUSTOM, fall through to the EditTextPreference value.
+            // Malformed input (not "WxH" with positive ints) falls back
+            // to DEFAULT_RESOLUTION so the user never gets stuck with a
+            // launch that the server cannot honour.
+            if (RES_CUSTOM.equalsIgnoreCase(resStr)) {
+                String customStr = prefs.getString(CUSTOM_RESOLUTION_PREF_STRING, "").trim();
+                if (customStr.matches("(?i)\\d+x\\d+")) {
+                    resStr = customStr.toLowerCase();
+                } else {
+                    resStr = PreferenceConfiguration.DEFAULT_RESOLUTION;
+                }
+            }
+
             // Convert legacy resolution strings to the new style
             if (!resStr.contains("x")) {
                 resStr = PreferenceConfiguration.convertFromLegacyResolutionString(resStr);
@@ -674,6 +709,16 @@ public class PreferenceConfiguration {
         } catch (IllegalArgumentException e) {
             config.appSortMode = AppSortMode.RECENT;
         }
+
+        // VipleStream §M.parity W4/W5: packet MTU + YUV444 opt-in.
+        // Packet size clamped to a sane range so a user fat-fingering a
+        // sub-200 value cannot brick streaming.
+        int rawPacketSize = prefs.getInt(PACKET_SIZE_PREF_STRING, DEFAULT_PACKET_SIZE);
+        if (rawPacketSize < 256 || rawPacketSize > 1500) {
+            rawPacketSize = DEFAULT_PACKET_SIZE;
+        }
+        config.packetSize = rawPacketSize;
+        config.enableYuv444 = prefs.getBoolean(ENABLE_YUV444_PREF_STRING, DEFAULT_ENABLE_YUV444);
 
         return config;
     }

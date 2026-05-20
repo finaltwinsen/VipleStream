@@ -40,6 +40,7 @@ import com.limelight.utils.UiHelper;
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.PictureInPictureParams;
 import android.app.Service;
 import android.content.ComponentName;
@@ -192,6 +193,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     public static final String EXTRA_APP_HDR = "HDR";
     public static final String EXTRA_SERVER_CERT = "ServerCert";
     public static final String EXTRA_STUN_ADDRESS = "StunAddress"; // VipleStream: STUN endpoint for relay
+    // VipleStream §M.parity W1 (2026-05-20). Host codec capability bit
+    // field (SCM_* flags from Sunshine /serverinfo). 0 means the host
+    // did not advertise the field (vanilla GFE / older Sunshine) — in
+    // that case we don't AND the supportedVideoFormats so we match
+    // existing upstream behaviour.
+    public static final String EXTRA_SERVER_CODEC_MODE_SUPPORT = "ServerCodecModeSupport";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -284,6 +291,14 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         // VipleStream §N.5 — file transfer overlay (left-bottom)
         fileTransferOverlayView = findViewById(R.id.fileTransferOverlay);
+        // VipleStream §M.parity U6 (2026-05-20): tap the overlay to cancel
+        // the in-flight transfer (mobile-friendly equivalent of the PC
+        // moonlight-qt Ctrl+Alt+Shift+T hotkey, v1.4.103). cancelCurrent()
+        // is already idempotent and safe to call when no transfer is
+        // active.
+        if (fileTransferOverlayView != null) {
+            fileTransferOverlayView.setOnClickListener(v -> promptCancelFileTransfer());
+        }
 
         performanceOverlayView = findViewById(R.id.performanceOverlay);
 
@@ -444,6 +459,47 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_AV1_MAIN10;
             }
         }
+        // VipleStream §M.parity W3/W5: opt-in 4:4:4 chroma variants
+        // when the user requested it AND the MediaCodec decoder
+        // actually advertises the corresponding 4:4:4 profile. Mobile
+        // decoders usually don't, so this is a no-op for them — the
+        // codec_*_Supported() probes return false. AV1 4:4:4 has no
+        // Android profile constant through API 35 so the AV1 helpers
+        // hardcode false; we keep the bits wired so adding them later
+        // is a pure decoder-probe change.
+        if (prefConfig.enableYuv444) {
+            if (decoderRenderer.isHevcSupported()) {
+                if (decoderRenderer.isHevcRext8_444Supported()) {
+                    supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_H265_REXT8_444;
+                }
+                if (willStreamHdr && decoderRenderer.isHevcRext10_444Supported()) {
+                    supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_H265_REXT10_444;
+                }
+            }
+            if (decoderRenderer.isAv1Supported()) {
+                if (decoderRenderer.isAv1High8_444Supported()) {
+                    supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_AV1_HIGH8_444;
+                }
+                if (willStreamHdr && decoderRenderer.isAv1High10_444Supported()) {
+                    supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_AV1_HIGH10_444;
+                }
+            }
+        }
+        // VipleStream §M.parity W1: intersect with host-advertised
+        // SCM_* bit field if Sunshine sent one. Skipped when the host
+        // omitted ServerCodecModeSupport (vanilla GFE / older builds)
+        // so we don't accidentally rule out every codec.
+        int serverCodecModeSupport = Game.this.getIntent().getIntExtra(EXTRA_SERVER_CODEC_MODE_SUPPORT, 0);
+        if (serverCodecModeSupport != 0) {
+            int beforeMask = supportedVideoFormats;
+            supportedVideoFormats &= serverCodecModeSupport;
+            if (beforeMask != supportedVideoFormats) {
+                LimeLog.info("[VIPLE-PARITY] supportedVideoFormats masked by server caps 0x"
+                             + Integer.toHexString(beforeMask) + " -> 0x"
+                             + Integer.toHexString(supportedVideoFormats)
+                             + " (SCM=0x" + Integer.toHexString(serverCodecModeSupport) + ")");
+            }
+        }
 
         int gamepadMask = ControllerHandler.getAttachedControllerMask(this);
         if (!prefConfig.multiController) {
@@ -512,7 +568,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 .setBitrate(prefConfig.bitrate)
                 .setEnableSops(prefConfig.enableSops)
                 .enableLocalAudioPlayback(prefConfig.playHostAudio)
-                .setMaxPacketSize(1392)
+                .setMaxPacketSize(prefConfig.packetSize)
                 .setRemoteConfiguration(StreamConfiguration.STREAM_CFG_AUTO) // NvConnection will perform LAN and VPN detection
                 .setSupportedVideoFormats(supportedVideoFormats)
                 .setAttachedGamepadMask(gamepadMask)
@@ -2631,6 +2687,24 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 }
             }
         });
+    }
+
+    // VipleStream §M.parity U6 (2026-05-20). Confirm-dialog wrapped around
+    // FileTransferClient.cancelCurrent(). PC parity: moonlight-qt v1.4.103
+    // hotkey Ctrl+Alt+Shift+T does the same thing without confirmation,
+    // but mobile UX should guard accidental taps on the overlay.
+    private void promptCancelFileTransfer() {
+        if (fileTransferClient == null) return;
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.title_cancel_file_transfer)
+                .setMessage(R.string.message_cancel_file_transfer)
+                .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                    if (fileTransferClient != null) {
+                        fileTransferClient.cancelCurrent();
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
     }
 
     @Override

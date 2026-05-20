@@ -267,6 +267,69 @@ public class NvHTTP {
         this.pm = new PairingManager(this, cryptoProvider);
     }
 
+    // VipleStream §M.parity W2 (2026-05-20). Sunshine emits one
+    // <DisplayMode><Width/><Height/><RefreshRate/></DisplayMode> child
+    // per active primary display under <root>. getXmlString() only
+    // returns the first match so we need a dedicated multi-element
+    // parser. Returns empty list for vanilla / older hosts.
+    static java.util.List<ComputerDetails.DisplayMode> parseDisplayModes(String xml) throws XmlPullParserException, IOException {
+        java.util.List<ComputerDetails.DisplayMode> modes = new java.util.ArrayList<>();
+        XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
+        factory.setNamespaceAware(true);
+        XmlPullParser xpp = factory.newPullParser();
+        xpp.setInput(new StringReader(xml));
+        int eventType = xpp.getEventType();
+        boolean inMode = false;
+        int curW = 0, curH = 0, curR = 0;
+        String currentField = null;
+        while (eventType != XmlPullParser.END_DOCUMENT) {
+            switch (eventType) {
+                case XmlPullParser.START_TAG: {
+                    String name = xpp.getName();
+                    if ("DisplayMode".equals(name)) {
+                        inMode = true;
+                        curW = curH = curR = 0;
+                        currentField = null;
+                    } else if (inMode) {
+                        currentField = name;
+                    }
+                    break;
+                }
+                case XmlPullParser.TEXT: {
+                    if (inMode && currentField != null) {
+                        String text = xpp.getText();
+                        if (text != null) {
+                            try {
+                                int val = Integer.parseInt(text.trim());
+                                switch (currentField) {
+                                    case "Width":       curW = val; break;
+                                    case "Height":      curH = val; break;
+                                    case "RefreshRate": curR = val; break;
+                                }
+                            } catch (NumberFormatException ignored) {}
+                        }
+                    }
+                    break;
+                }
+                case XmlPullParser.END_TAG: {
+                    String name = xpp.getName();
+                    if ("DisplayMode".equals(name)) {
+                        if (curW > 0 && curH > 0) {
+                            modes.add(new ComputerDetails.DisplayMode(curW, curH, curR > 0 ? curR : 60));
+                        }
+                        inMode = false;
+                        currentField = null;
+                    } else if (inMode) {
+                        currentField = null;
+                    }
+                    break;
+                }
+            }
+            eventType = xpp.next();
+        }
+        return modes;
+    }
+
     static String getXmlString(Reader r, String tagname, boolean throwIfMissing) throws XmlPullParserException, IOException {
         XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
         factory.setNamespaceAware(true);
@@ -429,6 +492,23 @@ public class NvHTTP {
         details.vipleStreamProtocol = getXmlString(serverInfo, "VipleStreamProtocol", false);
         details.isVipleStreamPeer = details.vipleStreamProtocol != null
                                     && !details.vipleStreamProtocol.isEmpty();
+
+        // VipleStream §M.parity W1/W2 (2026-05-20). Surface host codec
+        // capability bit field + advertised primary display modes from
+        // /serverinfo so streamConfig negotiation can AND with server
+        // caps and the UI can hint host native resolution. Vanilla
+        // Sunshine emits since v1.4.x; older / non-VipleStream hosts
+        // leave the field at 0 / empty and we degrade to existing
+        // default behaviour.
+        String scmStr = getXmlString(serverInfo, "ServerCodecModeSupport", false);
+        if (scmStr != null) {
+            try {
+                details.serverCodecModeSupport = Integer.parseInt(scmStr.trim());
+            } catch (NumberFormatException ignored) {
+                details.serverCodecModeSupport = 0;
+            }
+        }
+        details.supportedDisplayModes = parseDisplayModes(serverInfo);
 
         // We could reach it so it's online
         details.state = ComputerDetails.State.ONLINE;
