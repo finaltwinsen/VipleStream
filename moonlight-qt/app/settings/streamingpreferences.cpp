@@ -66,6 +66,7 @@
 #define SER_DETECTNETBLOCKING "detectnetblocking"
 #define SER_SHOWPERFOVERLAY "showperfoverlay"
 #define SER_SWAPMOUSEBUTTONS "swapmousebuttons"
+#define SER_MOUSE_SPEED_SCALE_LINUX "mousespeedscalelinux"
 #define SER_MUTEONFOCUSLOSS "muteonfocusloss"
 #define SER_BACKGROUNDGAMEPAD "backgroundgamepad"
 #define SER_REVERSESCROLL "reversescroll"
@@ -242,6 +243,11 @@ void StreamingPreferences::reload()
     showPerformanceOverlay = settings.value(SER_SHOWPERFOVERLAY, false).toBool();
     packetSize = settings.value(SER_PACKETSIZE, 0).toInt();
     swapMouseButtons = settings.value(SER_SWAPMOUSEBUTTONS, false).toBool();
+    // VipleStream v1.4.173 §N.6.linux — Linux raw delta multiplier (%).
+    // Default 100 = 直接 raw, 50-300 範圍。Slider UI 只在 Linux 顯示。
+    mouseSpeedScaleLinux = settings.value(SER_MOUSE_SPEED_SCALE_LINUX, 100).toInt();
+    if (mouseSpeedScaleLinux < 50) mouseSpeedScaleLinux = 50;
+    if (mouseSpeedScaleLinux > 300) mouseSpeedScaleLinux = 300;
     muteOnFocusLoss = settings.value(SER_MUTEONFOCUSLOSS, false).toBool();
     backgroundGamepad = settings.value(SER_BACKGROUNDGAMEPAD, false).toBool();
     reverseScrollDirection = settings.value(SER_REVERSESCROLL, false).toBool();
@@ -469,6 +475,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_LANGUAGE, static_cast<int>(language));
     settings.setValue(SER_DEFAULTVER, CURRENT_DEFAULT_VER);
     settings.setValue(SER_SWAPMOUSEBUTTONS, swapMouseButtons);
+    settings.setValue(SER_MOUSE_SPEED_SCALE_LINUX, mouseSpeedScaleLinux);
     settings.setValue(SER_MUTEONFOCUSLOSS, muteOnFocusLoss);
     settings.setValue(SER_BACKGROUNDGAMEPAD, backgroundGamepad);
     settings.setValue(SER_REVERSESCROLL, reverseScrollDirection);
