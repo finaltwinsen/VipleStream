@@ -435,7 +435,27 @@ namespace nvhttp {
     map_id_sess.erase(sess.client.uniqueID);
   }
 
+  // VipleStream §pair-diag — readable name for PAIR_PHASE for log output.
+  // 配對流程靜默問題之前讓 server 一個字都不留，這個 helper 配合
+  // fail_pair / phase-entry BOOST_LOG 補上可診斷性。
+  inline std::string_view pair_phase_str(PAIR_PHASE p) {
+    switch (p) {
+      case PAIR_PHASE::NONE: return "NONE"sv;
+      case PAIR_PHASE::GETSERVERCERT: return "GETSERVERCERT"sv;
+      case PAIR_PHASE::CLIENTCHALLENGE: return "CLIENTCHALLENGE"sv;
+      case PAIR_PHASE::SERVERCHALLENGERESP: return "SERVERCHALLENGERESP"sv;
+      case PAIR_PHASE::CLIENTPAIRINGSECRET: return "CLIENTPAIRINGSECRET"sv;
+    }
+    return "UNKNOWN"sv;
+  }
+
   void fail_pair(pair_session_t &sess, pt::ptree &tree, const std::string status_msg) {
+    // VipleStream §pair-diag — 之前 fail_pair 純寫 XML response 不留 log，
+    // 配對失敗時 server 端完全靜默，無法事後查。加 warning level 印出
+    // uniqueID + 卡在哪 phase + 失敗原因，至少能對齊 client side timeline。
+    BOOST_LOG(warning) << "[PAIR-FAIL] uniqueID="sv << sess.client.uniqueID
+                       << " phase="sv << pair_phase_str(sess.last_phase)
+                       << " reason="sv << status_msg;
     tree.put("root.paired", 0);
     tree.put("root.<xmlattr>.status_code", 400);
     tree.put("root.<xmlattr>.status_message", status_msg);
@@ -443,6 +463,8 @@ namespace nvhttp {
   }
 
   void getservercert(pair_session_t &sess, pt::ptree &tree, const std::string &pin) {
+    BOOST_LOG(info) << "[PAIR-PHASE] getservercert enter uniqueID="sv << sess.client.uniqueID
+                    << " current_phase="sv << pair_phase_str(sess.last_phase);
     if (sess.last_phase != PAIR_PHASE::NONE) {
       fail_pair(sess, tree, "Out of order call to getservercert");
       return;
@@ -467,6 +489,8 @@ namespace nvhttp {
   }
 
   void clientchallenge(pair_session_t &sess, pt::ptree &tree, const std::string &challenge) {
+    BOOST_LOG(info) << "[PAIR-PHASE] clientchallenge enter uniqueID="sv << sess.client.uniqueID
+                    << " current_phase="sv << pair_phase_str(sess.last_phase);
     if (sess.last_phase != PAIR_PHASE::GETSERVERCERT) {
       fail_pair(sess, tree, "Out of order call to clientchallenge");
       return;
@@ -510,6 +534,8 @@ namespace nvhttp {
   }
 
   void serverchallengeresp(pair_session_t &sess, pt::ptree &tree, const std::string &encrypted_response) {
+    BOOST_LOG(info) << "[PAIR-PHASE] serverchallengeresp enter uniqueID="sv << sess.client.uniqueID
+                    << " current_phase="sv << pair_phase_str(sess.last_phase);
     if (sess.last_phase != PAIR_PHASE::CLIENTCHALLENGE) {
       fail_pair(sess, tree, "Out of order call to serverchallengeresp");
       return;
@@ -539,6 +565,8 @@ namespace nvhttp {
   }
 
   void clientpairingsecret(pair_session_t &sess, std::shared_ptr<safe::queue_t<crypto::x509_t>> &add_cert, pt::ptree &tree, const std::string &client_pairing_secret) {
+    BOOST_LOG(info) << "[PAIR-PHASE] clientpairingsecret enter uniqueID="sv << sess.client.uniqueID
+                    << " current_phase="sv << pair_phase_str(sess.last_phase);
     if (sess.last_phase != PAIR_PHASE::SERVERCHALLENGERESP) {
       fail_pair(sess, tree, "Out of order call to clientpairingsecret");
       return;
@@ -575,12 +603,21 @@ namespace nvhttp {
     bool same_hash = hash.size() == sess.clienthash.size() && std::equal(hash.begin(), hash.end(), sess.clienthash.begin());
     auto verify = crypto::verify256(crypto::x509(client.cert), secret, sign);
     if (same_hash && verify) {
+      // VipleStream §pair-diag — 配對最終成功的 info log，搭配前面 phase log
+      // 看 timeline 能對齊 client side。client.name 是 web UI 輸 PIN 時填的。
+      BOOST_LOG(info) << "[PAIR-OK] client paired uniqueID="sv << client.uniqueID
+                      << " name="sv << client.name;
       tree.put("root.paired", 1);
       add_cert->raise(crypto::x509(client.cert));
 
       // The client is now successfully paired and will be authorized to connect
       add_authorized_client(client.name, std::move(client.cert));
     } else {
+      // VipleStream §pair-diag — 把 MITM-suspect 失敗的兩個判定條件都印出來，
+      // 區分「PIN 錯」(same_hash=false) vs「cert 簽章不合法」(verify=false)。
+      BOOST_LOG(warning) << "[PAIR-FAIL] clientpairingsecret final verify failed uniqueID="sv
+                         << client.uniqueID << " same_hash="sv << same_hash
+                         << " verify="sv << verify << " (probable MITM or wrong PIN)"sv;
       tree.put("root.paired", 0);
     }
 
@@ -724,13 +761,21 @@ namespace nvhttp {
   }
 
   bool pin(std::string pin, std::string name) {
+    // VipleStream §pair-diag — pin() 是 Web UI 端送 PIN 進來的觸發點。
+    // 印 entry log 能確認「PIN 確實有送到 server」，再對齊 client side
+    // 的 getservercert request 看是不是同一個 session 起飛了。
+    BOOST_LOG(info) << "[PAIR-PIN] received name=\""sv << name
+                    << "\" pin_len="sv << pin.size()
+                    << " pending_sessions="sv << map_id_sess.size();
     pt::ptree tree;
     if (map_id_sess.empty()) {
+      BOOST_LOG(warning) << "[PAIR-PIN] no pending session — client side didn't initiate getservercert yet"sv;
       return false;
     }
 
     // ensure pin is 4 digits
     if (pin.size() != 4) {
+      BOOST_LOG(warning) << "[PAIR-PIN] reject: pin length="sv << pin.size() << " (must be 4)"sv;
       tree.put("root.paired", 0);
       tree.put("root.<xmlattr>.status_code", 400);
       tree.put(
@@ -742,6 +787,7 @@ namespace nvhttp {
 
     // ensure all pin characters are numeric
     if (!std::all_of(pin.begin(), pin.end(), ::isdigit)) {
+      BOOST_LOG(warning) << "[PAIR-PIN] reject: pin contains non-digit chars"sv;
       tree.put("root.paired", 0);
       tree.put("root.<xmlattr>.status_code", 400);
       tree.put("root.<xmlattr>.status_message", "Pin must be numeric");
@@ -1067,11 +1113,22 @@ namespace nvhttp {
       auto owner_uuid = proc::proc.running_owner_uuid();
       auto owner_name = proc::proc.running_owner_name();
       bool same_caller = !caller_uuid.empty() && caller_uuid == owner_uuid;
+      // VipleStream §M.1.f.4 — owner 空表示 idle watchdog 已釋放，但 placebo
+      // / process state 還在（見 cancel handler 同段註解）。視為「無主孤兒」
+      // 直接 fall-through 到 execute() —— execute() 內會 terminate() 收乾淨
+      // 再開新的，等同 takeover 但不走 503 confirmation flow。
+      bool no_owner = owner_uuid.empty();
       bool takeover_requested = args.find("takeover"s) != std::end(args) && get_arg(args, "takeover") == "1";
 
-      if (same_caller) {
-        BOOST_LOG(info) << "[VIPLE-MULTI] /launch by owner uuid="sv << caller_uuid
-                        << " — proceeding (re-launch)"sv;
+      if (same_caller || no_owner) {
+        if (no_owner) {
+          BOOST_LOG(info) << "[VIPLE-MULTI] /launch reclaiming orphan app (no owner) by uuid="sv
+                          << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid})
+                          << " — idle watchdog had released ownership but app state remained"sv;
+        } else {
+          BOOST_LOG(info) << "[VIPLE-MULTI] /launch by owner uuid="sv << caller_uuid
+                          << " — proceeding (re-launch)"sv;
+        }
         // Fall through to standard launch path; execute() calls terminate() first.
       } else if (caller_admin || takeover_requested) {
         BOOST_LOG(info) << "[VIPLE-MULTI] /launch takeover by uuid="sv
@@ -1198,14 +1255,19 @@ namespace nvhttp {
     // VipleStream §M.1 — only the owner (or an admin) may resume.  Resume is
     // reconnect-after-drop semantics, NOT takeover, so we never let a stranger
     // hijack someone else's in-progress session via /resume.
+    //
+    // §M.1.f.4 (2026-05-20) — owner 空 + app_running 是 idle watchdog 釋放
+    // 後的孤兒狀態，視為「無主」放行（resume code path 下面在 no_active_sessions
+    // 時會 reconfigure display + probe encoders 等同新 launch，由新 caller 接手）。
     {
       auto caller_uuid = caller_uuid_for(request);
       // §M.1.f.2 idle reconcile — refresh activity if caller is the owner.
       proc::proc.touch_activity(caller_uuid);
       auto owner_uuid = proc::proc.running_owner_uuid();
       bool same_caller = !caller_uuid.empty() && caller_uuid == owner_uuid;
+      bool no_owner = owner_uuid.empty();
       bool caller_admin = is_admin_device(caller_uuid);
-      if (!same_caller && !caller_admin) {
+      if (!no_owner && !same_caller && !caller_admin) {
         auto owner_name = proc::proc.running_owner_name();
         BOOST_LOG(info) << "[VIPLE-MULTI] /resume denied — owner="sv << owner_name
                         << " caller_uuid="sv
@@ -1216,6 +1278,11 @@ namespace nvhttp {
                  "Cannot resume session owned by "s
                    + (owner_name.empty() ? "another paired device"s : owner_name));
         return;
+      }
+      if (no_owner) {
+        BOOST_LOG(info) << "[VIPLE-MULTI] /resume reclaiming orphan app (no owner) by uuid="sv
+                        << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid})
+                        << " — idle watchdog had released ownership but app state remained"sv;
       }
     }
 
@@ -1304,6 +1371,7 @@ namespace nvhttp {
     // away anyone else's session (including Steam game children).  Behaviour:
     //   - caller == owner  : proceed (own /cancel)
     //   - caller admin     : proceed (admin can kick anyone)
+    //   - no owner         : proceed (orphan reclaim — see §M.1.f.4 below)
     //   - otherwise        : 403, leave the running app alone
     // The Web UI dashboard's "Force Disconnect" button does NOT come through
     // here; it calls confighttp's /api/force_cancel which has its own admin
@@ -1315,9 +1383,17 @@ namespace nvhttp {
     auto owner_uuid = proc::proc.running_owner_uuid();
     auto owner_name = proc::proc.running_owner_name();
     bool same_caller = !caller_uuid.empty() && caller_uuid == owner_uuid;
+    // VipleStream §M.1.f.4 (2026-05-20) — owner_uuid 為空表示 §M.1.f.2
+    // idle watchdog 在 abnormal disconnect 後 AUTO-RELEASE 過，但 placebo /
+    // process state 還沒收（watchdog 故意不動 app state，避免從 background
+    // thread 碰 display / system_tray UI IO）。這時 running() 還會 > 0。沒
+    // 這條 no_owner 旁路會把同一台 client 之後重連發的 /cancel 一律 403 擋
+    // 掉，使用者必須等 service 重啟才能再用。視為「無主孤兒」對任何已驗證
+    // caller 都允許收掉。
+    bool no_owner = owner_uuid.empty();
     bool app_running = proc::proc.running() > 0;
 
-    if (app_running && !same_caller && !caller_admin) {
+    if (app_running && !no_owner && !same_caller && !caller_admin) {
       BOOST_LOG(info) << "[VIPLE-MULTI] /cancel denied — owner="sv << owner_name
                       << " caller_uuid="sv
                       << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid});
@@ -1329,6 +1405,12 @@ namespace nvhttp {
       tree.put("root.BusyByDevice", owner_name);
       tree.put("root.OwnerUuid", owner_uuid);
       return;
+    }
+
+    if (app_running && no_owner) {
+      BOOST_LOG(info) << "[VIPLE-MULTI] /cancel reclaiming orphan app (no owner) by uuid="sv
+                      << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid})
+                      << " — idle watchdog had released ownership but app state remained"sv;
     }
 
     tree.put("root.cancel", 1);
