@@ -58,6 +58,20 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     // relative mode, the click event will trigger the mouse to be recaptured.
     SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
 
+    // VipleStream v1.4.171 §N.6 — 強制 relative mouse delta 走原始硬體
+    // 數字, 不套用 desktop env (X11 / Wayland) 的指標加速曲線.
+    //
+    // 為什麼: Linux ubuntu 實機驗測 v1.4.169 觀察到串流中滑鼠速度跟本機
+    // 不一致 (使用者報「軌跡速度差異很大」). 原因是 SDL3 在 X11 上的
+    // relative mouse mode 預設經過 XInput2 transform_matrix → system
+    // pointer acceleration 已套一次, 再傳給 Windows host 又被 Pointer
+    // Ballistics 套第二次, 兩段加速疊起來就是使用者看到的差異.
+    //
+    // SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE = "0" 告訴 SDL 跳過 OS-level
+    // ballistics, 給 raw mickey delta. host 端再做一次曲線, 跟 Windows /
+    // macOS 既有行為一致.
+    SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE, "0");
+
     // Enabling extended input reports allows rumble to function on Bluetooth PS4/PS5
     // controllers, but breaks DirectInput applications. We will enable it because
     // it's likely that working rumble is what the user is expecting. If they don't
