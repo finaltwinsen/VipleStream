@@ -56,6 +56,16 @@ struct IDXGIAdapter1;
 // from ballooning).
 class StdVideoPictureParametersSet;
 
+// X11's X.h defines `None` as a macro (`#define None 0L`), which Qt6's
+// Gui module transitively pulls in on Linux via xcb headers.  Our
+// `enum class CompositeMode { None, ... }` below would then get
+// preprocessed into `{ 0L, ... }` and the build fails with "expected
+// identifier before numeric constant".  Drop the macro before the
+// class definition — no moonlight-qt code uses the X11 `None` constant.
+#ifdef None
+#undef None
+#endif
+
 class VkFrucRenderer : public IFFmpegRenderer {
 public:
     // §B Phase B 重啟 — composite mode picked by ffmpeg.cpp cascade.
@@ -169,13 +179,16 @@ private:
     // only set by the new ffmpeg.cpp cascade branch in B8.
     CompositeMode m_CompositeMode = CompositeMode::None;
 
+#ifdef Q_OS_WIN32
     // §B Phase B 重啟 — D3D11→Vulkan bridge.  Only allocated when
     // m_CompositeMode == D3D11_HEVC; null on all other code paths
-    // (including ProbeOnly, which never reaches B3/B4).  unique_ptr
-    // with forward-declared T is fine because VkFrucRenderer's dtor
-    // body lives in vkfruc.cpp (where D3D11VkBridge is complete).
+    // (including ProbeOnly, which never reaches B3/B4).  Kept inside
+    // the Q_OS_WIN32 block so non-Windows TUs (which never #include
+    // d3d11_vk_bridge.h) don't drag the forward-declared bridge type
+    // into unique_ptr's default_delete — GCC instantiates the
+    // destructor at every ctor exit and rejects incomplete types
+    // (MSVC was more lenient and let v1.4.167 ship).
     std::unique_ptr<D3D11VkBridge> m_Bridge;
-#ifdef Q_OS_WIN32
     // Raw COM pointers — manually Release()'d in dtor.  These are
     // *owned* by VkFrucRenderer when composite mode is engaged (we
     // create our own D3D11 device just for the decode side so we can
