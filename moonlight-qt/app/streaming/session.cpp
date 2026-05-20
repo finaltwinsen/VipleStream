@@ -404,6 +404,34 @@ void Session::getDecoderInfo(SDL_Window* window,
 {
     IVideoDecoder* decoder;
 
+    // VIPLE patch (§K.dd.probe.1) — default-assume HW.
+    //
+    // 修兩個 historical bugs 造成 AMD APU / Intel new GPU client 啟動時誤出
+    // "No functioning hardware accelerated video decoder" popup (即使 stream
+    // 實際用 HW decode 順暢):
+    //
+    //   (a) DecoderInfoThread::run() 的 stack-local `bool hasHardwareAcceleration;`
+    //       沒初始化 (systemproperties.cpp:28). 若 getDecoderInfo cascade 任何
+    //       path 沒 explicit set `isHardwareAccelerated` (如所有 HEVC HW probe
+    //       fail 然後 fallthrough), local var 是 UB garbage, 可能 false.
+    //
+    //   (b) 原本 cascade design 中 AV1 HW probe success 只 set isHdrSupported,
+    //       *不* set isHardwareAccelerated (line 431). 對 AMD 780M 這種 HEVC HW
+    //       缺 ext 但 AV1/H.264 Vulkan video work 的 GPU, AV1 succeed 不算分,
+    //       最後落到 line 481 H.264 VDS_AUTO. 若 H.264 cascade race 到 SW path,
+    //       明確 set false → emit signal → popup 跳出.
+    //
+    // 觀察根據: AMD Radeon 780M (v1.4.158) client log 顯示 H.264 + AV1 Vulkan
+    // video HW 都 work + stream 順暢, 但 popup 還是出來.
+    //
+    // Patch:
+    //   1. 開頭 default isHardwareAccelerated = true (修 bug (a) 的 UB).
+    //   2. AV1 Main10 HW probe success 順便 set true (修 bug (b)).
+    // 兩道防線, 即使其中一道沒擋到 (e.g., AV1 在 AMD APU probe fail) 另一道
+    // (default true) 仍能保住 final value 是 true unless 真的全 HW path 都
+    // explicit set false.
+    isHardwareAccelerated = true;
+
     // Since AV1 support on the host side is in its infancy, let's not consider
     // _only_ a working AV1 decoder to be acceptable and still show the warning
     // dialog indicating lack of hardware decoding support.
@@ -429,6 +457,12 @@ void Session::getDecoderInfo(SDL_Window* window,
         // but we will still continue probing to get other attributes for HEVC or H.264
         // decoders. See the AV1 comment at the top of the function for more info.
         isHdrSupported = decoder->isHdrSupported();
+        // VIPLE patch (§K.dd.probe.1) bug (b) fix: AV1 HW probe success 也算
+        // HW acceleration. 對 AMD 780M / Intel new GPU 這種 HEVC HW 缺 ext
+        // 但 AV1 HW work 的 case, AV1 succeed 是真實 HW decode 證據.
+        if (decoder->isHardwareAccelerated()) {
+            isHardwareAccelerated = true;
+        }
         delete decoder;
     }
     else {
@@ -481,7 +515,14 @@ void Session::getDecoderInfo(SDL_Window* window,
     if (chooseDecoder(StreamingPreferences::VDS_AUTO,
                       window, VIDEO_FORMAT_H264, 1920, 1080, 60,
                       false, false, true, decoder)) {
-        isHardwareAccelerated = decoder->isHardwareAccelerated();
+        // VIPLE patch (§K.dd.probe.1) bug (c) fix: H.264 VDS_AUTO 可能 cascade
+        // 走到 SW path (VDS_AUTO 容許 SW fallback). 原本直接覆寫:
+        //   isHardwareAccelerated = decoder->isHardwareAccelerated();
+        // 會把前面 AV1 / HEVC HW probe success set 的 true 覆寫成 false.
+        // 改成 only-upgrade (HW set true, SW 不 demote), 保留前面 cascade 結果.
+        if (decoder->isHardwareAccelerated()) {
+            isHardwareAccelerated = true;
+        }
         isFullScreenOnly = decoder->isAlwaysFullScreen();
         maxResolution = decoder->getDecoderMaxResolution();
         delete decoder;
@@ -754,31 +795,55 @@ bool Session::initialize(QQuickWindow* qtWindow)
         m_Preferences->enableFrameInterpolation = true;
     }
 
-    // VipleStream v1.2.56: When FRUC is enabled, request half the frame
-    // rate from the server and interpolate the other half client-side.
+    // VipleStream v1.4.151 §R2-α-1: 還原 v1.4.145 半切邏輯 (R1-1 revert).
+    // FRUC dual-present 數學上要求 server_fps × ratio = display_fps.
     //
-    // Previous code had `&& fps <= 180` which silently disabled FRUC
-    // 2x halving above 180 fps — so 1080p244 or 4K120→240 setups were
-    // actually asking the server for the full user rate, overloading
-    // both server encode and network. That cap served no purpose once
-    // the client UI already allowed Custom FPS selection; removed so
-    // FRUC 2x kicks in at ALL rates where the user enabled it. A
-    // future "don't request < 30 fps from server" floor (should
-    // anyone pick 30 fps + FRUC) is left for the day someone actually
-    // tries it.
+    // VipleStream v1.4.152 §R2-β-1: smart initial ratio.
+    // VipleStream v1.4.153 §R2-γ-3: 主動 / 被動 兩條 server fps 路徑.
+    //   主動 (default): server fps = UI / ratio, always-on dual/triple present.
+    //   被動: server fps = UI (全推), client 端依 recv% 動態升 ratio.
     if (m_Preferences->enableFrameInterpolation) {
-        // §B2 2026-05-06 / UI 整合 2026-05-07 — TRIPLE 60→180 (3x) 模式
-        // 開關來源：env var `VIPLE_VKFRUC_TRIPLE` (escape hatch / dev override)
-        // 優先，沒設才看 settings.vkfrucEnableTriple (UI checkbox).
-        // 開了 TRIPLE → 向 server 要 fps/3，client 每 server frame 補兩張
-        // interp (1/3 + 2/3) 共 3 張 present 給 180Hz display.
-        const bool tripleOn = (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0)
-                              || (m_Preferences && m_Preferences->vkfrucEnableTriple);
-        const int frucRatio = tripleOn ? 3 : 2;
-        m_StreamConfig.fps = m_Preferences->fps / frucRatio;
+        const bool passive = m_Preferences && m_Preferences->vkfrucPassiveMode;
+        if (passive) {
+            m_StreamConfig.fps = m_Preferences->fps;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] mode=PASSIVE — server fps = %d (UI 全推), "
+                        "client 依 recv%% 動態升 ratio (≥70%% 1x, 40-70%% 2x, <40%% 3x)",
+                        m_StreamConfig.fps);
+        } else {
+            const bool tripleEnv = (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0)
+                                  || (m_Preferences && m_Preferences->vkfrucEnableTriple);
+            // 抓 primary display refresh (best-effort, multi-monitor 可能不準).
+            SDL_DisplayMode dispMode;
+            int displayHz = 0;
+            if (SDL_GetCurrentDisplayMode(0, &dispMode) == 0 && dispMode.refresh_rate > 0) {
+                displayHz = dispMode.refresh_rate;
+            }
+            int frucRatio = 2;
+            const char* reason = "default dual";
+            if (tripleEnv) {
+                frucRatio = 3;
+                reason = "user override (env/pref)";
+            } else if (displayHz >= 240 && m_Preferences->fps / 3 >= 30) {
+                frucRatio = 3;
+                reason = "auto-triple (high-refresh display)";
+            }
+            // Floor: server fps < 30 不允許, 改回 dual.
+            if (m_Preferences->fps / frucRatio < 30 && frucRatio == 3) {
+                frucRatio = 2;
+                reason = "ratio floor (server fps < 30)";
+            }
+            m_StreamConfig.fps = m_Preferences->fps / frucRatio;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] mode=ACTIVE — server fps = %d "
+                        "(UI %d fps target ÷ %dx FRUC, display=%dHz, reason: %s)",
+                        m_StreamConfig.fps, m_Preferences->fps, frucRatio,
+                        displayHz, reason);
+        }
+    } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC] Requesting %d FPS from server (user setting: %d, FRUC %dx)",
-                    m_StreamConfig.fps, m_Preferences->fps, frucRatio);
+                    "[VIPLE-FRUC] FRUC disabled — requesting %d FPS from server (pass-through).",
+                    m_StreamConfig.fps);
     }
     // §J.3.e.2.i.8 Phase 1.5c — note: ONLY mode + FRUC pref ON → FRUC pref
     // gives us 30fps stream (FRUC 2x halving above), which happens to match
@@ -1708,41 +1773,15 @@ void Session::cancelFileTransfer()
 
 void Session::toggleFRUC()
 {
+    // v1.4.151 §R2-α-1: 純切 renderer FRUC pause flag, 不再動 server fps.
+    // R1 加的 LiRequestFpsChange runtime toggle 移除 — 切 server fps 會 re-init
+    // NVENC, 卡 50ms+ 黑屏不划算. 純 client-side pause/resume interp 即可.
     if (m_VideoDecoder) {
         auto* ffmpegDecoder = dynamic_cast<FFmpegVideoDecoder*>(m_VideoDecoder);
         if (ffmpegDecoder) {
             auto* renderer = ffmpegDecoder->getBackendRenderer();
             if (renderer) {
                 renderer->toggleFRUC();
-
-                // VipleStream: When FRUC is toggled, change the server's encoding FPS
-                // to match. FRUC ON = server sends fps/ratio (client interpolates the rest).
-                // FRUC OFF = server sends full fps (equivalent to settings disable).
-                //
-                // §B2 2026-05-06 — TRIPLE 60→180 不發 LiRequestFpsChange.
-                // 原因：Sunshine video.cpp:2154 提示 NVENC 的 framerate change
-                // 不會即時更新 encoder timebase（NVENC needs stream restart），
-                // 只能更新 capture timing.  Stream init 時 timebase=60 之後切
-                // 180 → 實測噴 ~120fps（user 觀察）+ 間歇卡頓.
-                // TRIPLE 模式下 FRUC OFF 直接讓 client single-present 顯示 server
-                // 60fps 即可，視覺從 180→60 但無 jitter.  DUAL 維持原邏輯
-                // (60↔30 切換對 NVENC timebase 衝擊小，使用者驗證過可行).
-                const bool tripleOn = (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0)
-                                      || (m_Preferences && m_Preferences->vkfrucEnableTriple);
-                const int frucRatio = tripleOn ? 3 : 2;
-                if (frucRatio == 2 && m_OriginalFps > 0 && m_OriginalFps <= 180) {
-                    bool frucOff = renderer->m_FRUCPaused.load();
-                    int newServerFps = frucOff ? m_OriginalFps : (m_OriginalFps / frucRatio);
-                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-FRUC] Requesting server FPS change: %d (FRUC %s, ratio=%dx)",
-                                newServerFps, frucOff ? "OFF" : "ON", frucRatio);
-                    LiRequestFpsChange(newServerFps);
-                } else {
-                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-FRUC] Skipping LiRequestFpsChange (ratio=%dx, "
-                                "NVENC timebase is fixed at stream init).",
-                                frucRatio);
-                }
             }
         }
     }

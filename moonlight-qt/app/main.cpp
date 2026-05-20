@@ -65,11 +65,14 @@
 
 // Log to file or console dynamically for Windows builds
 #define LOG_TO_FILE
-#elif !defined(QT_DEBUG) && defined(Q_OS_DARWIN)
-// Log to file for release Mac builds
+#elif !defined(QT_DEBUG) && (defined(Q_OS_DARWIN) || defined(Q_OS_LINUX))
+// Log to file for release Mac/Linux builds (v1.4.142 — Linux 之前漏掉,
+// AppImage 跑無 console 時整個沒 log → 此修法讓 release Linux build
+// 也寫 /tmp/VipleStream-<unix_ts>.log, 跟 Windows / macOS 一致.
+// debug builds 仍走 console 方便開發者直接看)
 #define LOG_TO_FILE
 #else
-// Log to console for debug Mac builds
+// Log to console for debug builds
 #endif
 
 // StreamUtils::setAsyncLogging() exposes control of this to the Session

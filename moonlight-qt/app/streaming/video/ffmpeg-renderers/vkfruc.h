@@ -23,11 +23,25 @@
 #include <chrono>
 #include <condition_variable>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
+
+// §B Phase B 重啟 — composite D3D11VA-decode + Vulkan-render bridge.
+// Forward-declared so vkfruc.h doesn't pull in d3d11_4.h / dxgi for
+// every translation unit that includes us; the actual impl is reached
+// via std::unique_ptr through vkfruc.cpp.  Linux / macOS keep these
+// members null (composite path never engaged off Windows).
+class D3D11VkBridge;
+#ifdef Q_OS_WIN32
+struct ID3D11Device5;
+struct ID3D11DeviceContext4;
+struct IDXGIAdapter1;
+#endif
 
 // §J.3.e.X Path β — native RIFE Vulkan executor (re-uses VkFrucRenderer's
 // VkInstance / VkDevice / universal queue, avoiding the dual-VkDevice
@@ -44,11 +58,30 @@ class StdVideoPictureParametersSet;
 
 class VkFrucRenderer : public IFFmpegRenderer {
 public:
-    VkFrucRenderer(int pass);
+    // §B Phase B 重啟 — composite mode picked by ffmpeg.cpp cascade.
+    //   None       : 既有 SW upload + Vulkan-native HW decode 雙路徑
+    //                （由 m_SwMode 旗標 / RS_VULKAN preference 決定）
+    //   D3D11_HEVC : 走 D3D11VA HW decode → SHARED_NTHANDLE → Vulkan
+    //                import → VkFruc FRUC.  目標是 AMD 780M 這類沒
+    //                VK_KHR_video_decode_h265 driver 還是能拿 HW
+    //                decode + 補幀.
+    //   ProbeOnly  : pass=99 ctor 用，跑 device pick + extension probe
+    //                + teardown，只為填 s_VkVideoDecodeH265Unavailable
+    //                static，cost ~50ms.  ffmpeg.cpp cascade 第一次
+    //                看 HEVC 時呼叫；之後不再 probe.
+    enum class CompositeMode { None, D3D11_HEVC, ProbeOnly };
+
+    VkFrucRenderer(int pass, CompositeMode compositeMode = CompositeMode::None);
     ~VkFrucRenderer() override;
 
     bool initialize(PDECODER_PARAMETERS params) override;
     bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
+    // §B Phase B 重啟 — composite path needs the D3D11VA frames-context
+    // to carry SHARED|SHARED_NTHANDLE MiscFlags so the bridge can open
+    // each decoded array texture as a Vulkan import handle.  Override
+    // does nothing on the SW / Vulkan-native paths.
+    bool prepareDecoderContextInGetFormat(AVCodecContext* context,
+                                          AVPixelFormat pixelFormat) override;
     void renderFrame(AVFrame* frame) override;
 
     // §J.3.e.2.i.3.e-SW — software-decode pixel format hooks.  When the
@@ -83,6 +116,20 @@ public:
     // + FRUC compute chain，等同單影像直通顯示.
     void toggleFRUC() override;
 
+    // v1.4.153 §R2-γ-4 — runtime effective ratio control (passive mode).
+    // ffmpeg.cpp 1s tick 依 recv% 呼叫 setEffectiveRatio(1/2/3).
+    bool isPassiveFrucMode() const override { return m_PassiveMode; }
+    int  effectiveFrucRatio() const override { return m_EffectiveRatio.load(std::memory_order_acquire); }
+    void setEffectiveFrucRatio(int ratio) override {
+        if (ratio < 1) ratio = 1;
+        if (ratio > 3) ratio = 3;
+        m_EffectiveRatio.store(ratio, std::memory_order_release);
+    }
+    // v1.4.156 §R2-ζ-3 — autotier 當前 tier 查詢 (給 overlay 顯示用).
+    int frucCurrentTier() const override {
+        return m_CurrentTier.load(std::memory_order_relaxed);
+    }
+
     // §J.3.e.2.i.8 Phase 3a — VkFrucDecodeClient::DecodePicture needs to gate
     // on codec before reading the CodecSpecific union (hevc / av1 share storage).
     int  getVideoCodecMask() const { return m_VideoCodec; }
@@ -105,10 +152,46 @@ private:
     bool createSwUploadResources(int width, int height);
     void destroySwUploadResources();
     void renderFrameSw(AVFrame* frame);
+    // §B Phase B 重啟 — composite path renderFrame.  B7 stage: pure
+    // import + sync check (no swapchain present); B9 adds blit + FRUC.
+    void renderFrameD3D11Import(AVFrame* frame);
     void teardown();
 
     int m_Pass;
     InitFailureReason m_InitFailureReason = InitFailureReason::Unknown;
+
+    // §B Phase B 重啟 — see enum CompositeMode for semantics.  None for
+    // every existing callsite (default ctor arg); D3D11_HEVC / ProbeOnly
+    // only set by the new ffmpeg.cpp cascade branch in B8.
+    CompositeMode m_CompositeMode = CompositeMode::None;
+
+    // §B Phase B 重啟 — D3D11→Vulkan bridge.  Only allocated when
+    // m_CompositeMode == D3D11_HEVC; null on all other code paths
+    // (including ProbeOnly, which never reaches B3/B4).  unique_ptr
+    // with forward-declared T is fine because VkFrucRenderer's dtor
+    // body lives in vkfruc.cpp (where D3D11VkBridge is complete).
+    std::unique_ptr<D3D11VkBridge> m_Bridge;
+#ifdef Q_OS_WIN32
+    // Raw COM pointers — manually Release()'d in dtor.  These are
+    // *owned* by VkFrucRenderer when composite mode is engaged (we
+    // create our own D3D11 device just for the decode side so we can
+    // hold an ID3D11Device5 + ID3D11DeviceContext4 for the fence sync).
+    ID3D11Device5*        m_BridgeD3D11Device = nullptr;
+    ID3D11DeviceContext4* m_BridgeD3D11Ctx4   = nullptr;
+    IDXGIAdapter1*        m_BridgeAdapter     = nullptr;
+    // Imported-VkImage cache by FFmpeg D3D11VAFramesContext texture
+    // pointer (ID3D11Texture2D*).  Decoder reuses the same array
+    // texture across many frames; we vkCreateImage once per texture
+    // (B3) and pick slices via image-view layer index at draw time.
+    // VkImageView per slice is created lazily during renderFrame (B7).
+    struct BridgeImport {
+        VkImage        image  = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        uint32_t       arraySize = 0;
+        std::vector<VkImageView> sliceViews;  // one per layer, lazily
+    };
+    std::unordered_map<void*, BridgeImport> m_BridgeImports;
+#endif
 
     SDL_Window* m_Window = nullptr;
 
@@ -309,6 +392,14 @@ private:
     int          m_VideoFormat = 0;
     bool populateAvHwDeviceCtx(int videoFormat);
 
+    // §B Phase B 重啟 — D3D11VA hw_device_ctx 給 composite path 用.
+    // Only allocated when m_CompositeMode == D3D11_HEVC and the bridge
+    // initialisation succeeds (initializeCompositeD3D11).
+    AVBufferRef* m_BridgeHwDeviceCtx = nullptr;
+    bool         m_BridgeInitDone    = false;
+    bool initializeCompositeD3D11();
+    void teardownCompositeD3D11();
+
     // §J.3.e.2.i.7 HW path：actual extension list enabled at vkCreateDevice
     // (filtered wanted∩available).  populateAvHwDeviceCtx 把這個交給
     // FFmpeg's vkCtx->enabled_dev_extensions —— 要跟實際 enable 完全一致,
@@ -326,7 +417,11 @@ private:
     //   2. vkGetVideoSessionMemoryRequirementsKHR (多個 binding)
     //   3. vkAllocateMemory + vkBindVideoSessionMemoryKHR
     //   4. vkCreateVideoSessionParametersKHR (VPS/SPS/PPS, Phase 1.1 填)
-    bool createVideoSession(int videoFormat);
+    // v1.4.140 §J.3.e.2.i.55b — streamWidth / streamHeight 從 caller 傳入,
+    // 用來 round-up 算 maxCodedExtent. 之前寫死 4096×4096 在 AMD APU 上跟
+    // FFmpeg vulkan hwaccel session 並存時 driver crash; 收成 stream 尺寸後
+    // 兩個 session 共存 fit AMD APU video decode IP context budget.
+    bool createVideoSession(int videoFormat, uint32_t streamWidth, uint32_t streamHeight);
     bool createVideoSessionParameters(int videoFormat);  // Phase 1.1: empty
     void destroyVideoSession();
     VkVideoSessionKHR           m_VideoSession       = VK_NULL_HANDLE;
@@ -471,6 +566,7 @@ private:
     VkSemaphore           m_GfxTimelineSem    = VK_NULL_HANDLE;
     std::atomic<uint64_t> m_GfxTimelineNext   {1};   // next value to allocate
     std::atomic<uint64_t> m_LastGraphicsValue {0};   // last value signaled by graphics
+
     // §J.3.e.2.i.8 Phase 1.3d.2.d — single 2D_ARRAY view for video-decode
     // (NV vk_video_samples pattern).  vkCmdDecodeVideoKHR uses this view
     // with VkVideoPictureResourceInfoKHR.baseArrayLayer = slot index.
@@ -697,6 +793,11 @@ private:
     int                m_ChainMeanMsRingFilled  = 0;
     int                m_FramesAboveThreshold   = 0;
     int                m_FramesBelowThreshold   = 0;
+    // v1.4.155 §R2-ε-1: latency-driven tier transition counters.
+    // 跟 m_FramesAbove/BelowThreshold 不同來源 (那兩個是 TRIPLE/DUAL 用 chain
+    // mean > 5ms/< 3ms 判斷, 跟 tier 升降階是 orthogonal).
+    int                m_TierLatencyHighFrames  = 0;
+    int                m_TierLatencyLowFrames   = 0;
 
     // §J.3.e.2.i.41 (v1.4.105) — chain_level autotier 二次降階.
     // 純 TRIPLE→DUAL (v1.4.84) 在 1080p60 高動 game content 下不夠救;
@@ -1129,6 +1230,20 @@ private:
     // 1/3 + interp_2 at 2/3 + real) instead of 2-present. Gated by env var
     // VIPLE_VKFRUC_TRIPLE=1; session.cpp also asks server for fps/3.
     bool             m_TripleMode           = false;
+    // v1.4.153 §R2-γ-4 — passive mode flag (set at ctor from prefs).
+    //   true: passive (server pushes full UI fps, client adjusts ratio runtime)
+    //         → m_TripleMode forced true (swapchain alloc for max).
+    //         → m_EffectiveRatio runtime (1, 2, or 3) decides per-frame.
+    //   false: active (R2-α default, server pushes UI/ratio).
+    //          → m_EffectiveRatio fixed at ctor based on m_TripleMode.
+    bool             m_PassiveMode          = false;
+    // v1.4.153 §R2-γ-4 — runtime effective ratio for passive mode.
+    //   1 = no interp (pass-through)
+    //   2 = dual (1 real + 1 interp)
+    //   3 = triple (1 real + 2 interp)
+    // In ACTIVE mode set once at init from m_DualMode + m_TripleMode.
+    // In PASSIVE mode updated by ffmpeg.cpp 1s tick based on recv_ratio.
+    std::atomic<int> m_EffectiveRatio       {2};
     VkShaderModule   m_InterpFragShaderMod  = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_InterpDescSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_InterpPipelineLayout = VK_NULL_HANDLE;

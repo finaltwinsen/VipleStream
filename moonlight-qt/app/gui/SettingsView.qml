@@ -784,7 +784,7 @@ Flickable {
                 CheckBox {
                     id: frameInterpolationCheck
                     width: parent.width
-                    text: qsTr("Frame interpolation (FRUC 2x)")
+                    text: qsTr("Frame interpolation (FRUC)")
                     font.pointSize: 12
                     checked: StreamingPreferences.enableFrameInterpolation
                     // VipleStream: 180 fps cap removed in v1.2.57.  No
@@ -824,11 +824,6 @@ Flickable {
                 // §J.3.e.2.i — Vulkan renderer 用內建 compute 補幀引擎，不
                 //吃 frucBackend 選擇 (還沒接 IFRUCBackend 抽象)；D3D11 才需要
                 // 選 backend.  顯示提示讓使用者知道 Vulkan 等同 Generic.
-                //
-                // 用 StreamingPreferences.rendererSelection（enum 值）比對而不是
-                // currentIndex，因為 v1.3.308 起 model 順序跟 enum 不再 1:1
-                // (D3D11 在 index 0 / val=1，Vulkan 在 index 1 / val=0)。直接
-                // 吃 enum 值對 reorder 免疫。
                 Label {
                     width: parent.width
                     visible: frameInterpolationCheck.checked
@@ -838,6 +833,53 @@ Flickable {
                     font.italic: true
                     opacity: 0.75
                     wrapMode: Text.Wrap
+                }
+
+                // v1.4.153 §R2-γ — Vulkan 補幀模式: 主動 / 被動.
+                // 主動 (default): server 推 UI/ratio fps + always-on dual present.
+                //                  低 server 負載, 需要 client GPU 夠強.
+                // 被動: server 推 UI fps 全速, client 看 recv% 動態升 ratio.
+                //       適合 server 跟不上時, 從 1x pass-through → 2x → 3x 階梯升.
+                Row {
+                    width: parent.width
+                    spacing: 8
+                    visible: frameInterpolationCheck.checked
+                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
+                    Label {
+                        text: qsTr("補幀模式:")
+                        font.pointSize: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    RadioButton {
+                        id: frucActiveRadio
+                        text: qsTr("主動 (推薦)")
+                        font.pointSize: 12
+                        checked: !StreamingPreferences.vkfrucPassiveMode
+                        onCheckedChanged: {
+                            if (checked && StreamingPreferences.vkfrucPassiveMode) {
+                                StreamingPreferences.vkfrucPassiveMode = false
+                            }
+                        }
+                        ToolTip.delay: 1000
+                        ToolTip.timeout: 5000
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Server 推 UI fps / 2 (或 / 3 高刷新顯示器), client always-on dual/triple 補幀. 低 server 負載, 需 client GPU 夠強.")
+                    }
+                    RadioButton {
+                        id: frucPassiveRadio
+                        text: qsTr("被動")
+                        font.pointSize: 12
+                        checked: StreamingPreferences.vkfrucPassiveMode
+                        onCheckedChanged: {
+                            if (checked && !StreamingPreferences.vkfrucPassiveMode) {
+                                StreamingPreferences.vkfrucPassiveMode = true
+                            }
+                        }
+                        ToolTip.delay: 1000
+                        ToolTip.timeout: 5000
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Server 全力推 UI fps. 客戶端依 recv% 動態升 ratio: ≥ 70% pass-through, 40-70% 2x, < 40% 3x. 適合 server 不一定能滿推時.")
+                    }
                 }
 
                 ComboBox {

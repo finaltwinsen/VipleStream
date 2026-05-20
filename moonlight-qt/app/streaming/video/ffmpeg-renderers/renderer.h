@@ -315,6 +315,15 @@ public:
     virtual void toggleFRUC() {}
     std::atomic<bool> m_FRUCPaused{false};
 
+    // v1.4.153 §R2-γ — Vulkan 主動 / 被動補幀模式查詢 + ratio 控制.
+    // VkFrucRenderer override 提供真實實作; 其他 renderer 默認 active + 2x.
+    virtual bool isPassiveFrucMode() const { return false; }
+    virtual int  effectiveFrucRatio() const { return 2; }
+    virtual void setEffectiveFrucRatio(int /*ratio*/) {}
+    // v1.4.156 §R2-ζ-3 — autotier 當前 tier 查詢 (給 overlay 顯示用).
+    // -1 = DISABLED, 0..5 = T0..T5, < -1 = not applicable.
+    virtual int  frucCurrentTier() const { return -2; }
+
     // §J.3.e.2.i.8 — VipleStream native VK_KHR_video_decode hook.
     // 當 renderer 自己跑 decode (跳過 FFmpeg avcodec_send_packet)，
     // FFmpegVideoDecoder::submitDecodeUnit 會檢查 acceptsNativeDecode()，

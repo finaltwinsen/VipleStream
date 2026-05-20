@@ -515,6 +515,7 @@ win32:!winrt {
     SOURCES += \
         streaming/video/ffmpeg-renderers/dxva2.cpp \
         streaming/video/ffmpeg-renderers/d3d11va.cpp \
+        streaming/video/ffmpeg-renderers/d3d11_vk_bridge.cpp \
         streaming/video/ffmpeg-renderers/nvofruc.cpp \
         streaming/video/ffmpeg-renderers/genericfruc.cpp \
         streaming/video/ffmpeg-renderers/directmlfruc.cpp \
@@ -526,6 +527,7 @@ win32:!winrt {
     HEADERS += \
         streaming/video/ffmpeg-renderers/dxva2.h \
         streaming/video/ffmpeg-renderers/d3d11va.h \
+        streaming/video/ffmpeg-renderers/d3d11_vk_bridge.h \
         streaming/video/ffmpeg-renderers/nvofruc.h \
         streaming/video/ffmpeg-renderers/genericfruc.h \
         streaming/video/ffmpeg-renderers/directmlfruc.h \
@@ -688,7 +690,18 @@ unix:!macx: {
     appstream.files = deploy/linux/com.piinsta.appdata.xml
     appstream.path = $$PREFIX/$$DATADIR/metainfo/
 
-    INSTALLS += target desktop icons appstream
+    # VipleStream v1.4.143 — Linux AppImage 必須裝 rife model 才能跑 RIFE-β
+    # 補幀 path. 之前漏掉, runtime Path::getDataFilePath("rife-v4.25-lite/
+    # flownet.param") 全部 fallback miss 落到 ":/data/" QRC 路徑, 但 model
+    # 也沒進 resources.qrc 所以 parseParam 失敗 → 整個 RIFE-β 不可用 →
+    # 退到 block-match path (低一檔的補幀品質).  裝到 /usr/share/VipleStream/
+    # 這個位置, 因為 QCoreApplication::setApplicationName("VipleStream") 後
+    # QStandardPaths::AppDataLocation 會找這條路徑; AppImage mount 後路徑
+    # 對應 $APPDIR/usr/share/VipleStream/rife-v4.25-lite/.
+    rife_models.files = rife_models/rife-v4.25-lite
+    rife_models.path = $$PREFIX/$$DATADIR/VipleStream/
+
+    INSTALLS += target desktop icons appstream rife_models
 }
 win32 {
     RC_ICONS = moonlight.ico

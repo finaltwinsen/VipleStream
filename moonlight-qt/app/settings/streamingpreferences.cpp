@@ -36,6 +36,7 @@
 #define SER_FRUCQUALITY "frucQuality"
 #define SER_VKFRUCNVOF  "vkfrucEnableNvOf"   // §B-NVOF UI 整合
 #define SER_VKFRUCTRIPLE "vkfrucEnableTriple" // §B2 UI 整合
+#define SER_VKFRUCPASSIVE "vkfrucPassiveMode" // §R2-γ 主動/被動補幀切換
 #define SER_VKFRUCRIFEB  "vkfrucEnableNativeRife"   // §J.3.e.X Path β UI 整合
 #define SER_VKFRUCRIFEDIM "vkfrucNativeRifeInferDim" // β infer dim (/128 aligned)
 // §J.3.e.2.i.11 (v1.4.66) — auto-tier 偵測結果 cache。process 啟動時 vkfruc.cpp
@@ -193,6 +194,7 @@ void StreamingPreferences::reload()
     // 會 override prefs ON (之前 silently no-op).
     vkfrucEnableNvOf   = settings.value(SER_VKFRUCNVOF, true).toBool();
     vkfrucEnableTriple = settings.value(SER_VKFRUCTRIPLE, false).toBool();
+    vkfrucPassiveMode  = settings.value(SER_VKFRUCPASSIVE, false).toBool();
     // §J.3.e.X Path β — opt-in default-OFF.  Beta feature.  Original
     // 30-60s VK_ERROR_DEVICE_LOST was overlay-resize use-after-free in
     // drainOverlayStash; fixed 2026-05-08 (β.6 vkDeviceWaitIdle before
@@ -433,6 +435,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_FRUCQUALITY, static_cast<int>(frucQuality));
     settings.setValue(SER_VKFRUCNVOF, vkfrucEnableNvOf);
     settings.setValue(SER_VKFRUCTRIPLE, vkfrucEnableTriple);
+    settings.setValue(SER_VKFRUCPASSIVE, vkfrucPassiveMode);
     settings.setValue(SER_VKFRUCRIFEB, vkfrucEnableNativeRife);
     settings.setValue(SER_VKFRUCRIFEDIM, vkfrucNativeRifeInferDim);
     // §J.3.e.2.i.11 (v1.4.66) — auto-tier 偵測結果 cache 寫入。
@@ -476,12 +479,9 @@ void StreamingPreferences::save()
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444, bool fruc)
 {
-    // VipleStream: if FRUC is on and the target rate is within the
-    // FRUC-eligible range (<=180 fps — see session.cpp:703), the
-    // host side actually encodes at fps/2. Size the default bitrate
-    // against the host's encoded rate rather than the display rate,
-    // otherwise a user turning FRUC on would get an automatic +40%
-    // bitrate bump for pixels that never existed on the server.
+    // v1.4.151 §R2-α-2: 還原 v1.4.145 半切邏輯 (R1-2 revert).
+    // FRUC dual present 時 server 只推一半 fps real, bitrate 也對應半切.
+    // R1-2 不砍半的版本造成 default bitrate 高估, 浪費頻寬 + 加重 client decode 壓力.
     int effectiveFps = fps;
     if (fruc && fps <= 180) {
         effectiveFps = fps / 2;

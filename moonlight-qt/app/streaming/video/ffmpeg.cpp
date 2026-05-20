@@ -91,6 +91,23 @@ static inline bool shouldUseVkFrucRendererForVulkanHwaccel()
     return prefs && prefs->rendererSelection == StreamingPreferences::RS_VULKAN;
 }
 
+// VipleStream §B Phase B 重啟 — opt-in composite path (D3D11VA HEVC HW
+// decode → SHARED_NTHANDLE → Vulkan import → VkFrucRenderer FRUC) for
+// GPUs whose Vulkan driver lacks VK_KHR_video_decode_h265 (e.g. AMD
+// Radeon 780M Phoenix iGPU on older Adrenalin builds).  Env-gated only
+// at this stage — auto-detect from a VkVideoCapabilities probe is the
+// follow-up; until then AMD 780M users opt in with the env var and
+// every other GPU keeps the existing D3D11VA / Vulkan-native path.
+//   VIPLE_VKFRUC_D3D11_HEVC=1 → composite for HEVC streams
+//   VIPLE_VKFRUC_D3D11_HEVC=0 → force-disable (debug)
+//   unset                    → off (default)
+static inline bool shouldUseVkFrucForD3D11Composite()
+{
+    const char* e = SDL_getenv("VIPLE_VKFRUC_D3D11_HEVC");
+    if (e) return SDL_atoi(e) != 0;
+    return false;
+}
+
 bool FFmpegVideoDecoder::isHardwareAccelerated()
 {
     // §J.3.e.2.i.8 Phase 3d.3 — backend renderer reports native decode at a
@@ -273,8 +290,6 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
       m_LastFrameNumber(0),
       m_StreamFps(0),
       m_VideoFormat(0),
-      m_LowReceiveFpsSeconds(0),
-      m_LowReceiveFpsWarned(false),
       m_NeedsSpsFixup(false),
       m_TestOnly(testOnly),
       m_CurrentTestMode(TestMode::TestFrameOnly),
@@ -1269,40 +1284,60 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         offset += ret;
     }
 
-    // VipleStream: FRUC frame interpolation status
+    // VipleStream FRUC overlay (v1.4.151 \u00A7R2-\u03B1-6 \u2014 always-on dual \u4E09\u614B).
+    //   paused (Ctrl+Alt+Shift+F)  \u2192 \u5DF2\u66AB\u505C
+    //   active + frucInterpolatedFrames>0 \u2192 \u5DF2\u555F\u7528, \u88DC\u5E40\u7D71\u8A08
+    //   active \u4F46\u9084\u6C92\u5E40 \u2192 \u7B49\u5F85\u4E2D
+    //   FRUC off \u2192 \u672A\u555F\u7528
     if (m_FrontendRenderer != nullptr) {
-        bool frucActive = m_FrontendRenderer->isFRUCActive();
-        bool frucPaused = m_FrontendRenderer->m_FRUCPaused;
-        if (frucActive && !frucPaused && stats.renderedFrames > 0) {
-            double interpRatio = (double)stats.frucInterpolatedFrames / stats.renderedFrames * 100.0;
+        const bool frucPaused = m_FrontendRenderer->m_FRUCPaused;
+        const bool frucActive = m_FrontendRenderer->isFRUCActive();
+        const char* backendName = m_FrontendRenderer->getFRUCBackendName();
+
+        if (frucPaused) {
+            ret = snprintf(&output[offset], length - offset,
+                u8"--- \u88DC\u5E40 (FRUC) ---\n"
+                u8"\u72C0\u614B: \u5DF2\u66AB\u505C (Ctrl+Alt+Shift+F \u6062\u5FA9)\n");
+        } else if (frucActive && stats.renderedFrames > 0) {
+            // v1.4.159 \u00A7R2-\u03B7: \u62FF\u6389 frucInterpolatedFrames > 0 gate, \u88AB\u52D5 1x
+            // \u6A21\u5F0F (effRatio=1) interp \u8A08\u6578\u6B63\u78BA\u70BA 0, \u4E0D\u8A72\u6389\u5230\u300C\u7B49\u5F85\u4E2D\u300D\u5206\u652F.
+            // \u88DC\u5E40\u6578 0/N + \u6BD4\u4F8B 0% + \u6709\u6548\u8F38\u51FA = renderedFps \u662F\u6B63\u78BA\u986F\u793A.
+            double interpRatio  = (stats.renderedFrames > 0)
+                ? ((double)stats.frucInterpolatedFrames / stats.renderedFrames * 100.0)
+                : 0.0;
             double effectiveFps = stats.renderedFps + ((double)stats.frucInterpolatedFrames /
                 ((double)(LiGetMicroseconds() - stats.measurementStartUs) / 1000000.0));
-            const char* backendName = m_FrontendRenderer->getFRUCBackendName();
-            ret = snprintf(&output[offset],
-                           length - offset,
-                           u8"--- \u88DC\u5E40 (FRUC) ---\n"
-                           u8"\u72C0\u614B: \u5DF2\u555F\u7528 (%s)\n"
-                           u8"\u88DC\u5E40\u6578: %u / %u (\u6BD4\u4F8B: %.0f%%)\n"
-                           u8"\u6709\u6548\u8F38\u51FA\u5E40\u7387: %.1f FPS\n"
-                           u8"(Ctrl+Alt+Shift+F \u5207\u63DB)\n",
-                           backendName,
-                           stats.frucInterpolatedFrames,
-                           stats.renderedFrames,
-                           interpRatio,
-                           effectiveFps);
-        }
-        else if (frucPaused) {
-            ret = snprintf(&output[offset],
-                           length - offset,
-                           u8"--- \u88DC\u5E40 (FRUC) ---\n"
-                           u8"\u72C0\u614B: \u5DF2\u66AB\u505C (Ctrl+Alt+Shift+F \u6062\u5FA9)\n");
-        }
-        else {
-            ret = snprintf(&output[offset],
-                           length - offset,
-                           u8"--- \u88DC\u5E40 (FRUC) ---\n"
-                           u8"\u72C0\u614B: %s\n",
-                           frucActive ? u8"\u7B49\u5F85\u4E2D..." : u8"\u672A\u555F\u7528");
+            // v1.4.153 \u00A7R2-\u03B3-6: \u62FF\u6389\u6A19\u984C\u5C3E (Nx), \u6A21\u5F0F/ratio \u6539\u653E\u5167\u6587.
+            // v1.4.156 \u00A7R2-\u03B6-3: \u6A21\u5F0F\u884C\u52A0\u4E0A autotier \u7576\u524D tier.
+            const bool passive = m_FrontendRenderer && m_FrontendRenderer->isPassiveFrucMode();
+            const int  curRatio = m_FrontendRenderer ? m_FrontendRenderer->effectiveFrucRatio() : 2;
+            const int  curTier = m_FrontendRenderer ? m_FrontendRenderer->frucCurrentTier() : -2;
+            const double recvRatio = (m_StreamFps > 0)
+                ? ((double)stats.receivedFrames / (double)m_StreamFps) * 100.0
+                : 0.0;
+            // tier label: T-1=DISABLED, T0..T5 = \u5C0D\u61C9\u6578\u5B57; -2 = N/A (\u975E Vulkan renderer).
+            char tierLabel[16] = {0};
+            if (curTier == -1) snprintf(tierLabel, sizeof(tierLabel), "T-1");
+            else if (curTier >= 0 && curTier <= 5) snprintf(tierLabel, sizeof(tierLabel), "T%d", curTier);
+            else snprintf(tierLabel, sizeof(tierLabel), "N/A");
+            ret = snprintf(&output[offset], length - offset,
+                u8"--- \u88DC\u5E40 (FRUC) ---\n"
+                u8"\u72C0\u614B: \u5DF2\u555F\u7528 (%s)\n"
+                u8"\u6A21\u5F0F: %s (current %dx, autotier %s)\n"
+                u8"\u88DC\u5E40\u6578: %u / %u (\u6BD4\u4F8B: %.0f%%)\n"
+                u8"\u6709\u6548\u8F38\u51FA\u5E40\u7387: %.1f FPS\n"
+                u8"\u4F3A\u670D\u5668 fps: %d (\u5BE6\u6536 %u, %.0f%%)\n"
+                u8"(Ctrl+Alt+Shift+F \u5207\u63DB)\n",
+                backendName,
+                passive ? u8"\u88AB\u52D5" : u8"\u4E3B\u52D5",
+                curRatio, tierLabel,
+                stats.frucInterpolatedFrames, stats.renderedFrames,
+                interpRatio, effectiveFps, m_StreamFps, stats.receivedFrames, recvRatio);
+        } else {
+            ret = snprintf(&output[offset], length - offset,
+                u8"--- \u88DC\u5E40 (FRUC) ---\n"
+                u8"\u72C0\u614B: %s\n",
+                frucActive ? u8"\u7B49\u5F85\u4E2D..." : u8"\u672A\u555F\u7528");
         }
         if (ret >= 0 && ret < length - offset) {
             offset += ret;
@@ -1322,7 +1357,7 @@ void FFmpegVideoDecoder::logVideoStats(VIDEO_STATS& stats, const char* title)
     }
 }
 
-IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig* hwDecodeCfg, int pass)
+IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig* hwDecodeCfg, int pass, int videoFormat)
 {
     if (!(hwDecodeCfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
         return nullptr;
@@ -1335,6 +1370,22 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
         // DXVA2 appears in the hwaccel list before D3D11VA, so we only check for D3D11VA
         // on the first pass to ensure we prefer D3D11VA over DXVA2.
         case AV_HWDEVICE_TYPE_D3D11VA:
+#ifdef HAVE_LIBPLACEBO_VULKAN
+            // §B Phase B 重啟 — opt-in composite path for HEVC.  Lets users
+            // on GPUs without VK_KHR_video_decode_h265 (notably AMD 780M iGPU)
+            // still get HW decode + FRUC by routing through VkFrucRenderer.
+            // Falls back to plain D3D11VARenderer for other codecs / when env
+            // var is not set / on init failure (cascade pass=1 retry).
+            if ((videoFormat & VIDEO_FORMAT_MASK_H265) &&
+                shouldUseVkFrucForD3D11Composite() && pass == 0) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-COMPOSITE] §B cascade: D3D11VA HEVC HW "
+                            "decode → VkFrucRenderer composite "
+                            "(VIPLE_VKFRUC_D3D11_HEVC=1, pass=0)");
+                return new VkFrucRenderer(pass,
+                                          VkFrucRenderer::CompositeMode::D3D11_HEVC);
+            }
+#endif
             return new D3D11VARenderer(pass);
 #endif
 #ifdef Q_OS_DARWIN
@@ -1356,6 +1407,11 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
 #endif
 #ifdef HAVE_LIBPLACEBO_VULKAN
         case AV_HWDEVICE_TYPE_VULKAN:
+            // v1.4.161 §R2-ι-1: R2-θ-1 AV1 codec gate 已 revert.
+            // 真 root cause 是 VkFruc 本身的 native VkVideoSession 跟 ffmpeg's
+            // av1_vulkan hwaccel session 衝突 (AMD APU concurrent-session bug).
+            // 改成 lazy createVideoSession (§R2-ι-3) 解決, AV1+Vulkan path 恢復可用.
+            (void)videoFormat;  // 參數保留, 暫無 codec-specific gate
             // §J.3.e.2.i — VkFrucRenderer (Android architecture port;
             // bypasses libplacebo) returned for Vulkan hwaccel when user
             // picked RS_VULKAN OR set VIPLE_VK_FRUC_GENERIC=1.  Pass=0
@@ -1772,7 +1828,7 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
                             decoder->name, i);
                 IFFmpegRenderer::InitFailureReason failureReason;
                 if (tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, cfg, &failureReason,
-                                          [cfg]() -> IFFmpegRenderer* { return createHwAccelRenderer(cfg, 0); })) {
+                                          [cfg, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(cfg, 0, m_VideoFormat); })) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VK-VIDEO] §J.3.c.1 Vulkan-first override SUCCESS");
                     return true;
@@ -1804,7 +1860,7 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
                 // Initialize the hardware codec and submit a test frame if the renderer needs it
                 IFFmpegRenderer::InitFailureReason failureReason;
                 if (tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, config, &failureReason,
-                                          [config, pass]() -> IFFmpegRenderer* { return createHwAccelRenderer(config, pass); })) {
+                                          [config, pass, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(config, pass, m_VideoFormat); })) {
                     return true;
                 }
                 else if (failureReason == IFFmpegRenderer::InitFailureReason::NoHardwareSupport) {
@@ -2035,6 +2091,8 @@ bool FFmpegVideoDecoder::tryInitializeHwAccelDecoder(PDECODER_PARAMETERS params,
         // kicks in on pass=0 to avoid double-trying on subsequent passes.
         if (pass == 0) {
             if (shouldPreferVulkanDecoderCascade()) {
+                // v1.4.161 §R2-ι-2: R2-θ-2 AV1 skip 已 revert. AV1+Vulkan-first
+                // path 恢復可用; 真 fix 在 §R2-ι-3 (lazy native VkVideoSession).
                 for (int j = 0; ; ++j) {
                     const AVCodecHWConfig* cfg = avcodec_get_hw_config(decoder, j);
                     if (!cfg) break;
@@ -2045,7 +2103,7 @@ bool FFmpegVideoDecoder::tryInitializeHwAccelDecoder(PDECODER_PARAMETERS params,
                                 decoder->name, j);
                     IFFmpegRenderer::InitFailureReason failureReason;
                     if (tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, cfg, &failureReason,
-                                              [cfg]() -> IFFmpegRenderer* { return createHwAccelRenderer(cfg, 0); })) {
+                                              [cfg, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(cfg, 0, m_VideoFormat); })) {
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                     "[VIPLE-VK-VIDEO] §J.3.c.1 Vulkan-first override SUCCESS");
                         return true;
@@ -2070,7 +2128,7 @@ bool FFmpegVideoDecoder::tryInitializeHwAccelDecoder(PDECODER_PARAMETERS params,
             // Initialize the hardware codec and submit a test frame if the renderer needs it
             IFFmpegRenderer::InitFailureReason failureReason;
             if (tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, config, &failureReason,
-                                      [config, pass]() -> IFFmpegRenderer* { return createHwAccelRenderer(config, pass); })) {
+                                      [config, pass, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(config, pass, m_VideoFormat); })) {
                 return true;
             }
             else if (failureReason == IFFmpegRenderer::InitFailureReason::NoHardwareSupport) {
@@ -2707,33 +2765,76 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                     m_ActiveWndVideoStats.framesWithHostProcessingLatency > 0
                         ? (double)m_ActiveWndVideoStats.totalHostProcessingLatency / m_ActiveWndVideoStats.framesWithHostProcessingLatency / 10.0
                         : 0.0);
-        // §J.3.e.2.i.57 (v1.4.122) → §J.3.e.2.i.58 (v1.4.125): publish moved to
-        // per-frame ring-max site above (line ~2580+ in decode-success block).
-        // 1s 平均不再 publish, latency lag 從 ~1000ms 降到 ~16ms.
 
-        // [VIPLE-NET-WARN] When receivedFrames < 75% of host target fps for 5 consecutive
-        // seconds, emit a one-shot warning so users can self-diagnose decoder-throughput
-        // caps (e.g. 1440p120 HEVC SW decode ~50fps in VkFrucRenderer).  Wire-loss has
-        // been ruled out by pktmon at this rate threshold; the bottleneck is downstream
-        // of the NIC.  Reset/quiet logic: fps recovers above threshold → reset counter,
-        // warning re-armed only after a fresh 5s degradation window.
+        // VipleStream v1.4.152 §R2-β-2 + v1.4.153 §R2-γ-5: FRUC ratio telemetry + passive controller.
         if (m_StreamFps > 0) {
-            const unsigned int threshold = (unsigned int)((m_StreamFps * 75 + 99) / 100); // ceil(0.75 × fps)
-            if (m_ActiveWndVideoStats.receivedFrames < threshold) {
-                m_LowReceiveFpsSeconds++;
-                if (m_LowReceiveFpsSeconds >= 5 && !m_LowReceiveFpsWarned) {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-NET-WARN] received=%u fps < %u (%d%% of target %d) for 5s — "
-                                "client decoder/pipeline can't keep up.  This is NOT packet loss "
-                                "(verified via pktmon).  Try: switch to default D3D11 renderer, "
-                                "lower resolution to 1080p, or disable FRUC.",
-                                m_ActiveWndVideoStats.receivedFrames, threshold, 75, m_StreamFps);
-                    m_LowReceiveFpsWarned = true;
+            const double recvRatio = (double)m_ActiveWndVideoStats.receivedFrames / (double)m_StreamFps;
+            const double recvPct = recvRatio * 100.0;
+
+            // 取 renderer 端 passive mode + 當前 ratio 給 log + adaptive 用.
+            const bool passive = m_FrontendRenderer && m_FrontendRenderer->isPassiveFrucMode();
+            const int  curRatio = m_FrontendRenderer ? m_FrontendRenderer->effectiveFrucRatio() : 2;
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-RATIO] mode=%s ratio=%dx server_fps=%d recv=%u (%.0f%%) decoded=%u (%.0f%%)",
+                        passive ? "PASSIVE" : "ACTIVE",
+                        curRatio,
+                        m_StreamFps,
+                        m_ActiveWndVideoStats.receivedFrames,
+                        recvPct,
+                        m_ActiveWndVideoStats.decodedFrames,
+                        (double)m_ActiveWndVideoStats.decodedFrames / (double)m_StreamFps * 100.0);
+
+            if (passive) {
+                // §R2-γ-5: 被動模式 hysteresis state machine.
+                //   recv ≥ 80% 連 10s + currentRatio > 1 → 降 ratio (less interp).
+                //   recv < 70% 連 3s + currentRatio < 2 → 升至 2x dual.
+                //   recv < 40% 連 3s + currentRatio < 3 → 升至 3x triple.
+                if (recvPct >= 80.0) {
+                    m_RecvAbove80Seconds++;
+                    m_RecvBelow70Seconds = 0;
+                    m_RecvBelow40Seconds = 0;
+                } else {
+                    m_RecvAbove80Seconds = 0;
+                    if (recvPct < 70.0) m_RecvBelow70Seconds++;  else m_RecvBelow70Seconds = 0;
+                    if (recvPct < 40.0) m_RecvBelow40Seconds++;  else m_RecvBelow40Seconds = 0;
                 }
-            }
-            else {
-                m_LowReceiveFpsSeconds = 0;
-                m_LowReceiveFpsWarned = false;
+
+                int newRatio = curRatio;
+                if (m_RecvBelow40Seconds >= 3 && curRatio < 3) {
+                    newRatio = 3;
+                } else if (m_RecvBelow70Seconds >= 3 && curRatio < 2) {
+                    newRatio = 2;
+                } else if (m_RecvAbove80Seconds >= 10 && curRatio > 1) {
+                    newRatio = curRatio - 1;
+                }
+                if (newRatio != curRatio && m_FrontendRenderer) {
+                    m_FrontendRenderer->setEffectiveFrucRatio(newRatio);
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-RATIO] PASSIVE switch %dx → %dx (recv=%.0f%%, "
+                                "below40s=%d below70s=%d above80s=%d)",
+                                curRatio, newRatio, recvPct,
+                                m_RecvBelow40Seconds, m_RecvBelow70Seconds,
+                                m_RecvAbove80Seconds);
+                    // reset 計數器避免連續觸發
+                    m_RecvAbove80Seconds = m_RecvBelow70Seconds = m_RecvBelow40Seconds = 0;
+                }
+            } else {
+                // ACTIVE: 一次性 warn 提示 (5s 連續 < 80%).
+                if (recvRatio < 0.80) {
+                    m_LowRecvRatioSeconds++;
+                    if (m_LowRecvRatioSeconds == 5 && !m_RatioWarnedOnce) {
+                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-RATIO-WARN] ACTIVE mode + recv_ratio < 80%% 連續 5s "
+                                    "(server %d fps, 實收 %u). 建議切到「被動補幀」模式 "
+                                    "(Settings → Vulkan FRUC) 讓 client 動態 ratio.",
+                                    m_StreamFps,
+                                    m_ActiveWndVideoStats.receivedFrames);
+                        m_RatioWarnedOnce = true;
+                    }
+                } else {
+                    m_LowRecvRatioSeconds = 0;
+                }
             }
         }
 

@@ -86,7 +86,7 @@ private:
                                IFFmpegRenderer::InitFailureReason* failureReason,
                                std::function<IFFmpegRenderer*()> createRendererFunc);
 
-    static IFFmpegRenderer* createHwAccelRenderer(const AVCodecHWConfig* hwDecodeCfg, int pass);
+    static IFFmpegRenderer* createHwAccelRenderer(const AVCodecHWConfig* hwDecodeCfg, int pass, int videoFormat);
 
     bool initializeRendererInternal(IFFmpegRenderer* renderer, PDECODER_PARAMETERS params);
 
@@ -127,11 +127,14 @@ private:
     int m_OriginalVideoWidth;
     int m_OriginalVideoHeight;
     int m_VideoFormat;
-    // [VIPLE-NET-WARN] consecutive seconds where receivedFrames < 75% × m_StreamFps.
-    // Used to fire a single warning when client decoder can't keep up with host fps,
-    // so the user can self-diagnose (e.g. 1440p120 HEVC SW decode caps ~50fps).
-    int m_LowReceiveFpsSeconds;
-    bool m_LowReceiveFpsWarned;
+    // VipleStream v1.4.152 §R2-β-2 + v1.4.153 §R2-γ-5: recv-ratio adaptive controller.
+    // ACTIVE: m_LowRecvRatioSeconds 5s warn once.
+    // PASSIVE: above80 / below70 / below40 hysteresis counters drive ratio switch.
+    int m_LowRecvRatioSeconds = 0;
+    bool m_RatioWarnedOnce = false;
+    int m_RecvAbove80Seconds = 0;
+    int m_RecvBelow70Seconds = 0;
+    int m_RecvBelow40Seconds = 0;
     bool m_NeedsSpsFixup;
     bool m_TestOnly;
     TestMode m_CurrentTestMode;

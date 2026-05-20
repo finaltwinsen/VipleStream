@@ -2,7 +2,25 @@
 #include "path.h"
 
 #include <QFile>
+#include <QFileInfo>
 #include <QStringList>
+
+#include <utility>
+
+#ifdef _WIN32
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#else
+#  include <fcntl.h>
+#  include <sys/mman.h>
+#  include <sys/stat.h>
+#  include <unistd.h>
+#endif
 
 using namespace Overlay;
 
@@ -139,29 +157,211 @@ SDL_Surface* buildPerfHudSurface(TTF_Font* font, const char* text)
 }
 } // namespace
 
-// VipleStream: Try loading a CJK-capable system font for Traditional Chinese overlay.
-// Falls back to the built-in ModeSeven.ttf if the system font isn't available.
-static QByteArray loadCJKFontData()
+// ---------------------------------------------------------------------------
+// MappedFile — read-only cross-platform memory mapping.
+//
+// SDL_ttf takes a `SDL_RWops` over raw memory and dereferences that pointer
+// throughout the font's lifetime, so we hand it the mapped region directly
+// instead of `readAll()`-ing the font into the heap.  Saves ~15-20 MB of
+// resident bytes per OverlayManager.
+// ---------------------------------------------------------------------------
+
+MappedFile::MappedFile() noexcept
+    :
+#ifdef _WIN32
+      m_file(nullptr),
+      m_mapping(nullptr),
+#else
+      m_fd(-1),
+#endif
+      m_data(nullptr),
+      m_size(0)
+{
+}
+
+MappedFile::~MappedFile()
+{
+    close();
+}
+
+MappedFile::MappedFile(MappedFile&& other) noexcept
+    : MappedFile()
+{
+    *this = std::move(other);
+}
+
+MappedFile& MappedFile::operator=(MappedFile&& other) noexcept
+{
+    if (this != &other) {
+        close();
+#ifdef _WIN32
+        m_file = other.m_file;
+        m_mapping = other.m_mapping;
+        other.m_file = nullptr;
+        other.m_mapping = nullptr;
+#else
+        m_fd = other.m_fd;
+        other.m_fd = -1;
+#endif
+        m_data = other.m_data;
+        m_size = other.m_size;
+        other.m_data = nullptr;
+        other.m_size = 0;
+    }
+    return *this;
+}
+
+bool MappedFile::open(const QString& path)
+{
+    close();
+#ifdef _WIN32
+    HANDLE file = CreateFileW(reinterpret_cast<LPCWSTR>(path.utf16()),
+                              GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(file, &sz) || sz.QuadPart <= 0) {
+        CloseHandle(file);
+        return false;
+    }
+
+    HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY,
+                                        0, 0, nullptr);
+    if (!mapping) {
+        CloseHandle(file);
+        return false;
+    }
+
+    void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    if (!view) {
+        CloseHandle(mapping);
+        CloseHandle(file);
+        return false;
+    }
+
+    m_file = file;
+    m_mapping = mapping;
+    m_data = static_cast<const char*>(view);
+    m_size = static_cast<qint64>(sz.QuadPart);
+    return true;
+#else
+    const QByteArray pathBytes = QFile::encodeName(path);
+    int fd = ::open(pathBytes.constData(), O_RDONLY
+#  ifdef O_CLOEXEC
+                                          | O_CLOEXEC
+#  endif
+                    );
+    if (fd < 0) {
+        return false;
+    }
+
+    struct stat st;
+    if (::fstat(fd, &st) < 0 || st.st_size <= 0) {
+        ::close(fd);
+        return false;
+    }
+
+    void* view = ::mmap(nullptr, static_cast<size_t>(st.st_size),
+                        PROT_READ, MAP_PRIVATE, fd, 0);
+    if (view == MAP_FAILED) {
+        ::close(fd);
+        return false;
+    }
+
+    m_fd = fd;
+    m_data = static_cast<const char*>(view);
+    m_size = static_cast<qint64>(st.st_size);
+    return true;
+#endif
+}
+
+void MappedFile::close()
 {
 #ifdef _WIN32
-    // Microsoft JhengHei (微軟正黑體) — available on all modern Windows
-    QFile cjkFont("C:/Windows/Fonts/msjh.ttc");
-    if (cjkFont.open(QIODevice::ReadOnly)) {
-        QByteArray data = cjkFont.readAll();
-        if (!data.isEmpty()) {
-            return data;
-        }
+    if (m_data) {
+        UnmapViewOfFile(m_data);
+        m_data = nullptr;
+    }
+    if (m_mapping) {
+        CloseHandle(static_cast<HANDLE>(m_mapping));
+        m_mapping = nullptr;
+    }
+    if (m_file) {
+        CloseHandle(static_cast<HANDLE>(m_file));
+        m_file = nullptr;
+    }
+#else
+    if (m_data && m_size > 0) {
+        ::munmap(const_cast<char*>(m_data), static_cast<size_t>(m_size));
+        m_data = nullptr;
+    }
+    if (m_fd >= 0) {
+        ::close(m_fd);
+        m_fd = -1;
     }
 #endif
-    // Fallback to built-in ASCII font
-    return Path::readDataFile("ModeSeven.ttf");
+    m_size = 0;
+}
+
+// VipleStream: Try mapping a CJK-capable system font for Traditional Chinese
+// overlay.  Falls back to the built-in ModeSeven.ttf if the system font isn't
+// available (caller handles the fallback).
+// v1.4.142 — 之前 Linux / macOS 直接 fallback ModeSeven.ttf (ASCII-only retro
+// 字體) 導致 overlay 中文都變方框. 新增 Linux Noto / WQY 跟 macOS PingFang
+// 候選路徑, 找到就用; 全找不到才退 ModeSeven.
+static bool tryMapCJKFont(MappedFile& out)
+{
+    QStringList candidates;
+#ifdef _WIN32
+    // Microsoft JhengHei (微軟正黑體, Trad) — available on all modern Windows.
+    // 加 YaHei (Simp) / SimSun 當二三順位 fallback, 老版 Windows / Server SKU
+    // 缺 JhengHei 時還有得救.
+    candidates << "C:/Windows/Fonts/msjh.ttc"      // Microsoft JhengHei (Trad)
+               << "C:/Windows/Fonts/msyh.ttc"      // Microsoft YaHei (Simp)
+               << "C:/Windows/Fonts/simsun.ttc";   // SimSun
+#elif defined(Q_OS_DARWIN)
+    candidates << "/System/Library/Fonts/PingFang.ttc"
+               << "/System/Library/Fonts/STHeiti Light.ttc"
+               << "/Library/Fonts/Songti.ttc";
+#else
+    // Linux: Noto CJK 在 Ubuntu / Debian / Fedora 都是 default; WQY 是 fallback
+    // 給沒裝 Noto 的舊發行版.  Ubuntu deb path 通常是 opentype/noto/, fedora
+    // 也是 opentype/, 個別發行版可能落在 truetype/ — 兩個都試.
+    candidates << "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+               << "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+               << "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc"
+               << "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
+               << "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
+               << "/usr/share/fonts/truetype/arphic/uming.ttc";
+#endif
+    for (const QString& path : candidates) {
+        if (out.open(path)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-OVERLAY] CJK system font mmap'd: %s (%lld bytes)",
+                        path.toUtf8().constData(),
+                        (long long)out.size());
+            return true;
+        }
+    }
+    return false;
 }
 
 OverlayManager::OverlayManager() :
-    m_Renderer(nullptr),
-    m_FontData(loadCJKFontData())
+    m_Renderer(nullptr)
 {
     memset(m_Overlays, 0, sizeof(m_Overlays));
+
+    if (!tryMapCJKFont(m_MappedFont)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-OVERLAY] No CJK system font found — falling back to "
+                    "built-in ModeSeven.ttf; overlay CJK characters will render as "
+                    "boxes. Install: Linux → noto-fonts-cjk; macOS → System default.");
+        m_FallbackFont = Path::readDataFile("ModeSeven.ttf");
+    }
 
     // VipleStream in-stream HUD palette (editorial dark / electric-lime).
     //
@@ -295,14 +495,26 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
 
     // Construct the required font to render the overlay
     if (m_Overlays[type].font == nullptr) {
-        if (m_FontData.isEmpty()) {
+        // Prefer the mmap'd system CJK font; fall back to the embedded
+        // ModeSeven.ttf QByteArray when no system font was found.
+        const char* fontPtr = nullptr;
+        qint64 fontSize = 0;
+        if (m_MappedFont.isValid()) {
+            fontPtr = m_MappedFont.data();
+            fontSize = m_MappedFont.size();
+        } else if (!m_FallbackFont.isEmpty()) {
+            fontPtr = m_FallbackFont.constData();
+            fontSize = m_FallbackFont.size();
+        }
+        if (fontPtr == nullptr || fontSize <= 0) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "SDL overlay font failed to load");
             return;
         }
 
-        // m_FontData must stay around until the font is closed
-        m_Overlays[type].font = TTF_OpenFontRW(SDL_RWFromConstMem(m_FontData.constData(), m_FontData.size()),
+        // Backing storage (mmap region or QByteArray) outlives OverlayManager,
+        // so SDL_ttf can safely hold a pointer into it for the font's lifetime.
+        m_Overlays[type].font = TTF_OpenFontRW(SDL_RWFromConstMem(fontPtr, (int)fontSize),
                                                1,
                                                m_Overlays[type].fontSize);
         if (m_Overlays[type].font == nullptr) {

@@ -244,9 +244,10 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
     }
 
     if (m_PacingQueue.isEmpty()) {
-        // Wait for a frame to arrive or our V-sync timeout to expire
-        if (!m_PacingQueueNotEmpty.wait(&m_FrameQueueLock, SDL_max(timeUntilNextVsyncMillis, TIMER_SLACK_MS) - TIMER_SLACK_MS)) {
-            // Wait timed out - unlock and bail
+        // Wait for a frame to arrive or for V-Sync to elapse. If V-Sync
+        // elapses without a frame, just render the next image again.
+        if (!m_PacingQueueNotEmpty.wait(&m_FrameQueueLock,
+                SDL_max(timeUntilNextVsyncMillis, TIMER_SLACK_MS) - TIMER_SLACK_MS)) {
             m_FrameQueueLock.unlock();
             return;
         }

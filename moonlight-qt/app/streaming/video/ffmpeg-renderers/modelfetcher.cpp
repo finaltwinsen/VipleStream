@@ -29,10 +29,15 @@ constexpr int FETCH_TIMEOUT_MS = 60000;
 
 const ModelFetcher::ModelSpec* ModelFetcher::lookupSpec(const QString& filename)
 {
-    // SHA-256 hashes computed against the v1.3.310-tagged release assets.
-    // If a future release re-rolls a model, bump the URL tag + paste new
-    // hashes here.  Mismatched hashes cause one retry then fail to inline
-    // graph.  Static-local so the table can reference the private struct.
+    // SHA-256 hashes pinned to permanent ONNX asset tags.
+    // - fruc.onnx and fruc_ifrnet_s.onnx still come from the v1.3.310 release.
+    // - fruc_fp16.onnx was re-converted with onnxconverter_common 1.16, which
+    //   drops 72 nodes (-13%), most notably 13 GridSample, 56 Slice, 57 Add
+    //   and 52 Div ops.  Same byte-size on disk but much shallower DML
+    //   command list.  Re-rolled under tag `assets-onnx-v2`.
+    // Mismatched hashes cause one retry then fail to inline graph, so when a
+    // future release re-rolls a model: bump the URL tag + paste new hashes
+    // here in the same commit that uploads the asset.
     static const ModelSpec MODEL_TABLE[] = {
         {
             "fruc.onnx",
@@ -42,9 +47,9 @@ const ModelFetcher::ModelSpec* ModelFetcher::lookupSpec(const QString& filename)
         },
         {
             "fruc_fp16.onnx",
-            "24a63af0468f684645e7fcdf1e13608add25d704115255a6988c980365842f5e",
+            "50180cfc4aca7853daf8c44ace5fec4287f8c71c9dc2bc87551d8296965f182d",
             11396749,
-            "https://github.com/finaltwinsen/VipleStream/releases/download/v1.3.310/fruc_fp16.onnx"
+            "https://github.com/finaltwinsen/VipleStream/releases/download/assets-onnx-v2/fruc_fp16.onnx"
         },
         {
             "fruc_ifrnet_s.onnx",

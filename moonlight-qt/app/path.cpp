@@ -89,6 +89,21 @@ QString Path::getDataFilePath(QString fileName)
         return candidatePath;
     }
 
+    // VipleStream v1.4.143 — AppImage portable layout: 解 <bin>/../share/<AppName>/
+    // 對 /usr/share/<AppName>/.  AppImage 跑時 applicationDirPath = $APPDIR/usr/bin,
+    // 但 AppRun 沒 export XDG_DATA_DIRS, 所以 AppDataLocation 不會 hit
+    // $APPDIR/usr/share/<AppName>.  這條 candidate 補, 之後 installed deb 也
+    // 走 /usr/bin/../share/<AppName>/ = /usr/share/<AppName>/ 同條 path.
+    // 主要 use case: 補幀 RIFE-β 的 rife-v4.25-lite/flownet.{param,bin} model 檔.
+    candidatePath = QDir(QCoreApplication::applicationDirPath()
+                         + "/../share/"
+                         + QCoreApplication::applicationName())
+                        .absoluteFilePath(fileName);
+    if (QFile::exists(candidatePath)) {
+        qInfo() << "Found" << fileName << "at" << candidatePath;
+        return candidatePath;
+    }
+
     // Now try the directory of our app installation (for Windows, if current dir doesn't find it)
     candidatePath = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(fileName);
     if (QFile::exists(candidatePath)) {

@@ -62,9 +62,22 @@ std::atomic<double> g_VkFrucDecodeLatencyMs{0.0};
 #include <emmintrin.h>
 #endif
 
+// §B Phase B 重啟 — pull d3d11_4.h (via d3d11_vk_bridge.h) BEFORE the
+// extern "C" block.  hwcontext_d3d11va.h includes <d3d11.h> internally,
+// and d3d11.h has C++ inline operator overloads that the compiler
+// refuses to compile inside extern "C" linkage (C2733 on operator==/!=).
+// By pulling d3d11.h's include-guard down here first (in C++ scope), the
+// later include from hwcontext_d3d11va.h is a no-op.
+#ifdef Q_OS_WIN32
+#include "d3d11_vk_bridge.h"
+#endif
+
 extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vulkan.h>
+#ifdef Q_OS_WIN32
+#include <libavutil/hwcontext_d3d11va.h>
+#endif
 }
 
 // §J.3.e.2.i.3.a — FFmpeg 6.1 (LIBAVCODEC_VERSION_MAJOR=60) used a
@@ -121,6 +134,15 @@ static bool vkfrucWantTripleFromUserOrEnv()
     auto* prefs = StreamingPreferences::get();
     return prefs && prefs->vkfrucEnableTriple;
 }
+// v1.4.153 §R2-γ — 主動 vs 被動補幀模式 (Vulkan only).
+static bool vkfrucWantPassiveMode()
+{
+    if (qEnvironmentVariableIsSet("VIPLE_VKFRUC_PASSIVE")) {
+        return qEnvironmentVariableIntValue("VIPLE_VKFRUC_PASSIVE") != 0;
+    }
+    auto* prefs = StreamingPreferences::get();
+    return prefs && prefs->vkfrucPassiveMode;
+}
 // §J.3.e.X Path β — env var > auto-tier (if enabled) > manual prefs > default false.
 //
 // §J.3.e.2.i.11 (v1.4.69) — auto-tier 啟用後 (default true)，根據
@@ -171,10 +193,24 @@ static int vkfrucNativeRifeInferDimFromUserOrEnv()
 // run BEFORE the renderer's VkDevice is destroyed.
 static std::atomic<int> s_NcnnRefCount(0);
 
-VkFrucRenderer::VkFrucRenderer(int pass)
+VkFrucRenderer::VkFrucRenderer(int pass, CompositeMode compositeMode)
     : IFFmpegRenderer(RendererType::Vulkan)
     , m_Pass(pass)
+    , m_CompositeMode(compositeMode)
 {
+    // §B Phase B 重啟 — composite mode dispatch. None goes through the
+    // existing constructor body unchanged.  D3D11_HEVC / ProbeOnly are
+    // handled when initialize() runs (B6 onwards) — the ctor itself just
+    // records the mode so initialize() can branch.
+    if (compositeMode != CompositeMode::None) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-COMPOSITE] ctor pass=%d mode=%s",
+                    pass,
+                    compositeMode == CompositeMode::D3D11_HEVC ? "D3D11_HEVC" :
+                    compositeMode == CompositeMode::ProbeOnly  ? "ProbeOnly"  :
+                                                                 "?");
+    }
+
     // §J.3.e.2.i.3.e-SW — opt into software-decode upload path when 設定
     // 是 RS_VULKAN（v1.3.175 default）或 env var 是設的（dev / probe）.
     // Bypasses FFmpeg-Vulkan hwcontext entirely (currently broken; see
@@ -245,10 +281,20 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_HW") != 0) {
         m_SwMode = false;
     }
-    // §B2 2026-05-06 — TRIPLE 60→180 mode opt-in via env var.  Strictly
-    // upgrades dual-present to triple-present; only meaningful when both
-    // FRUC + DualMode are already on.
+    // §B2 2026-05-06 — TRIPLE 60→180 mode opt-in via env var or user pref.
     m_TripleMode = m_DualMode && m_FrucMode && vkfrucWantTripleFromUserOrEnv();
+
+    // v1.4.153 §R2-γ-4 — passive mode 強制 m_TripleMode=true (swapchain alloc max).
+    // m_EffectiveRatio 初始 1 (pass-through 不補幀), runtime 由 ffmpeg.cpp 升 2/3.
+    m_PassiveMode = m_FrucMode && m_DualMode && vkfrucWantPassiveMode();
+    if (m_PassiveMode) {
+        m_TripleMode = true;  // 強制 swapchain 預配 5 image 給 runtime triple
+        m_EffectiveRatio.store(1, std::memory_order_release);
+    } else {
+        // ACTIVE: 初始 ratio = m_TripleMode ? 3 : 2.
+        m_EffectiveRatio.store(m_TripleMode ? 3 : (m_DualMode ? 2 : 1),
+                               std::memory_order_release);
+    }
 
     // §J.3.e.X Path β — native RIFE Vulkan integration.  Reads env var
     // OR prefs (env wins).  Default OFF (opt-in beta — known 30-60s
@@ -279,9 +325,11 @@ VkFrucRenderer::VkFrucRenderer(int pass)
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d, frucMode=%d, dualMode=%d, tripleMode=%d, rifeNative=%d, prefs=%s)",
+                "[VIPLE-VKFRUC] §J.3.e.2.i.2 ctor (pass=%d, swMode=%d, frucMode=%d, dualMode=%d, tripleMode=%d, rifeNative=%d, passive=%d, effRatio=%d, prefs=%s)",
                 pass, m_SwMode ? 1 : 0, m_FrucMode ? 1 : 0, m_DualMode ? 1 : 0,
                 m_TripleMode ? 1 : 0, m_RifeNativeMode ? 1 : 0,
+                m_PassiveMode ? 1 : 0,
+                m_EffectiveRatio.load(std::memory_order_relaxed),
                 prefsWantVulkan ? "RS_VULKAN" : "n/a");
 }
 
@@ -292,6 +340,12 @@ VkFrucRenderer::VkFrucRenderer(int pass)
 // ignored anyway because Vulkan path goes through createHwAccelRenderer).
 AVPixelFormat VkFrucRenderer::getPreferredPixelFormat(int videoFormat)
 {
+    // §B Phase B 重啟 — composite path 用 D3D11VA HW decode, ffmpeg 把
+    // frames 寫進 ID3D11Texture2D array, AV_PIX_FMT_D3D11 是慣例 hwfmt.
+    if (m_CompositeMode == CompositeMode::D3D11_HEVC) {
+        (void)videoFormat;
+        return AV_PIX_FMT_D3D11;
+    }
     if (m_SwMode) {
         // FFmpeg software h264 / hevc / av1 decoders default to YUV420P
         // (3 planes: Y + U + V).  We accept both YUV420P and NV12 in
@@ -307,6 +361,11 @@ AVPixelFormat VkFrucRenderer::getPreferredPixelFormat(int videoFormat)
 
 bool VkFrucRenderer::isPixelFormatSupported(int videoFormat, AVPixelFormat pixelFormat)
 {
+    // §B Phase B 重啟 — composite path 只接 D3D11 hwfmt.
+    if (m_CompositeMode == CompositeMode::D3D11_HEVC) {
+        (void)videoFormat;
+        return pixelFormat == AV_PIX_FMT_D3D11;
+    }
     if (m_SwMode) {
         return pixelFormat == AV_PIX_FMT_YUV420P || pixelFormat == AV_PIX_FMT_NV12;
     }
@@ -319,6 +378,10 @@ VkFrucRenderer::~VkFrucRenderer()
 {
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.2 dtor");
+    // §B Phase B 重啟 — tear down composite resources BEFORE the main
+    // teardown() so the bridge can drop its imported VkImages while the
+    // VkDevice is still alive (teardown destroys the VkDevice).
+    teardownCompositeD3D11();
     teardown();
     if (m_HwDeviceCtx != nullptr) {
         av_buffer_unref(&m_HwDeviceCtx);
@@ -506,17 +569,26 @@ bool VkFrucRenderer::lastFrameHadFRUCInterp() const
 {
     // §J.3.e.2.i.60 (v1.4.127) — T-1 (DISABLED tier) 算 FRUC-paused 同效果.
     // Session / Pacer 看這個決定 effectiveFps; T-1 沒 interp 就照 server fps.
+    //
+    // v1.4.158 §R2-η: 加 m_EffectiveRatio >= 2 check. 被動模式 ratio=1x
+    // (pass-through, 沒 dual/triple present) 不算 interp; ratio=2x/3x 才算.
+    // 主動模式 effRatio 在 ctor 設成 2/3 不變, 行為等同舊邏輯.
     return m_FrucMode && m_FrucReady && m_DualMode
         && !m_FRUCPaused.load()
-        && m_CurrentTier.load(std::memory_order_relaxed) != (int)VkFrucTier::DISABLED;
+        && m_CurrentTier.load(std::memory_order_relaxed) != (int)VkFrucTier::DISABLED
+        && m_EffectiveRatio.load(std::memory_order_acquire) >= 2;
 }
 
 // §B2 2026-05-06 — TRIPLE 60→180 推 2 張 interp/server frame，
 // pacer.cpp:349 累加 frucInterpolatedFrames 要 +2 才符合 effectiveFps 計算.
+// v1.4.158 §R2-η: 用 m_EffectiveRatio (runtime) 取代 m_TripleMode (ctor flag).
+// 被動模式 m_TripleMode 強制 true 給 swapchain alloc, 但 ratio 仍可動態變
+// 1/2/3 — count 必須跟 runtime ratio 一致, 不能看 ctor flag.
 int VkFrucRenderer::lastFrameInterpolatedCount() const
 {
     if (!lastFrameHadFRUCInterp()) return 0;
-    return m_TripleMode ? 2 : 1;
+    const int eff = m_EffectiveRatio.load(std::memory_order_acquire);
+    return (eff == 3) ? 2 : 1;  // 2x → 1 interp, 3x → 2 interp
 }
 
 const char* VkFrucRenderer::getFRUCBackendName() const
@@ -2158,44 +2230,18 @@ int VkFrucRenderer::detectInitialTierCap()
         return (int)VkFrucTier::T0;
     }
 
-    // 從 StreamingPreferences 拿偵測到的 GPU tier (heuristic + benchmark).
-    StreamingPreferences* prefs = StreamingPreferences::get();
-    const int detectedTier = prefs ? prefs->vkfrucDetectedTier
-                                   : (int)StreamingPreferences::VGT_UNKNOWN;
+    // v1.4.154 §R2-δ-1: 拿掉 GPU heuristic tier mapping (硬體分類太粗),
+    // 改成永遠從 T5 起跑, 讓 runtime autotier 依實測 chain_mean / chainBusy
+    // / NVOF fails 動態降階. T2 → T1 → T0 → DISABLED 全部 latency-driven.
+    // NVOF QF probe 仍是硬性 capability (沒 OF QF 就不能 NVOF), 不歸 tier 管.
     const bool hasOF = (m_OpticalFlowQueueFamily != UINT32_MAX);
-
-    // §J.3.e.2.i.60 (v1.4.132) — cap mapping for redesigned tier hierarchy.
-    // Key principle: NVOF GPU (hasOF=true) NEVER falls below T2 (where T2 is
-    // "NVOF + chain_lv 1"). NVOF is critical for non-block-match ME on weak GPUs.
-    int cap;
-    switch (detectedTier) {
-        case StreamingPreferences::VGT_QUALITY:
-            cap = hasOF ? (int)VkFrucTier::T5 : (int)VkFrucTier::T1;
-            break;
-        case StreamingPreferences::VGT_BALANCED:
-            cap = hasOF ? (int)VkFrucTier::T4 : (int)VkFrucTier::T1;
-            break;
-        case StreamingPreferences::VGT_PERFORMANCE:
-            // hasOF (RTX 16xx/20xx-class, RTX 3060 Laptop benchmark-cold-start) → T3
-            //   (NVOF + chain_lv 2 + RIFE 128). NVOF 卸載 ME 給 OFA hardware.
-            // no OF (AMD/Intel PERFORMANCE) → T0 (no FRUC interp, SYNC chain min)
-            cap = hasOF ? (int)VkFrucTier::T3 : (int)VkFrucTier::T0;
-            break;
-        case StreamingPreferences::VGT_ENTRY:
-            // hasOF (low-end discrete NV) → T2 (lightest NVOF tier)
-            // no OF (整顯 / 老卡) → T-1 (FRUC off, can't keep up)
-            cap = hasOF ? (int)VkFrucTier::T2 : (int)VkFrucTier::DISABLED;
-            break;
-        case StreamingPreferences::VGT_UNKNOWN:
-        default:
-            // 未知 GPU but hasOF → 保守 T2 (lightest NVOF)
-            cap = hasOF ? (int)VkFrucTier::T2 : (int)VkFrucTier::T0;
-            break;
-    }
+    // hasOF=false 時 T5 還是會試 (tierConfig T5 useNvOf=true, 但 NvOf init 會 fail
+    // → m_NvOfReady 永遠 false, 自動繞 block-match path). 不需要 cap 預先降.
+    const int cap = (int)VkFrucTier::T5;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-        "[VIPLE-VKFRUC-TIER] §J.3.e.2.i.60 initial cap=T%d "
-        "(detectedTier=%d hasOF=%d frucChainAsyncAvailable=%d)",
-        cap, detectedTier, (int)hasOF, (int)m_FrucChainAsyncAvailable);
+        "[VIPLE-VKFRUC-TIER] §J.3.e.2.i.60 initial cap=T%d (latency-driven autotier, "
+        "no hardware heuristic; hasOF=%d frucChainAsyncAvailable=%d)",
+        cap, (int)hasOF, (int)m_FrucChainAsyncAvailable);
     return cap;
 }
 
@@ -2261,16 +2307,23 @@ void VkFrucRenderer::runAutotierTransition()
     }
     const uint64_t nvOfFails = m_NvOfProfConsecFails.load(std::memory_order_relaxed);
     const double frameBudgetMs = 1000.0 / (double)m_StreamFps;
-    const double chainBusyThresh = frameBudgetMs * 0.72;  // T1→T0 trigger
 
-    // DISABLED hold: 5 分鐘後重試 cap
+    // v1.4.155 §R2-ε-1: latency-driven autotier.
+    // latencyMs = max(decodeMs, chainMs): 取兩者最大. decodeMs 反映 HEVC decoder
+    // 壓力 (g_VkFrucDecodeLatencyMs 從 ffmpeg.cpp publish), chainMs 反映 FRUC
+    // compute 壓力. 任一過大都該降階.
+    const double decodeMsForTier = g_VkFrucDecodeLatencyMs.load(std::memory_order_relaxed);
+    const double latencyMs = (decodeMsForTier > chainMean) ? decodeMsForTier : chainMean;
+    const double demoteThreshMs  = frameBudgetMs * 0.40;
+    const double promoteThreshMs = frameBudgetMs * 0.20;
+
+    // DISABLED (T-1) hold: 5 分鐘後 retry cap.
     if (cur == (int)VkFrucTier::DISABLED) {
         if (nowMs - m_TierDisabledEnteredMs >= 300000) {
             target = m_TierCap;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-TIER] T-1 → T%d (5min hold passed, retry cap)",
                 target);
-            // Reset T0 entry tracking — start fresh
             m_T0EnterTimes[0] = m_T0EnterTimes[1] = m_T0EnterTimes[2] = 0;
             m_T0EnterIdx = 0;
         }
@@ -2279,123 +2332,86 @@ void VkFrucRenderer::runAutotierTransition()
             m_TierEnteredMs = nowMs;
             m_TierTransitionCount.fetch_add(1, std::memory_order_relaxed);
         }
-        return;  // 在 DISABLED 期間不算其他 downgrade/upgrade
+        return;
     }
 
-    // §J.3.e.2.i.60 (v1.4.132) — redesigned downgrade ladder.
-    // CRITICAL principle: NEVER drop NVOF on chainBusy alone (only on NVOF SDK
-    // 30 連 fail). v1.4.131 had T3→T2 drop NVOF on chainBusy>14ms, but losing
-    // NVOF made chain HEAVIER (block-match takes 80ms+ on RTX 3060 Laptop) →
-    // death spiral. New T2 keeps NVOF (chain_lv 1). NVOF GPU 降階 stays on
-    // NVOF until SDK fails.
+    // v1.4.155 §R2-ε-1: 統一 latency-driven 升降階規則.
+    //   Demote: latency > budget × 0.40 連 20 frame → cur - 1 (即時下降)
+    //   Promote: latency < budget × 0.20 連 60 frame + 自上次 demote 10s 冷卻 → cur + 1
+    //   NVOF SDK 30 連 fail → T0 (即時, capability 缺失非 latency)
+    //   T0 → DISABLED: env var opt-in (R2-α-4 floor 規則)
     //
-    // Downgrade ladder:
-    //   T5/T4 → T3: chain_mean > 8ms 30 frame (chain_lv 3→2, keep NVOF + RIFE)
-    //   T3 → T2: chain_mean > 8ms 30 frame (chain_lv 2→1, keep NVOF, drop RIFE)
-    //   T2 → T0: chainBusy > budget*0.72 30 frame (NVOF GPU 跳過 T1 直奔 T0
-    //            SYNC last-resort; T1 是 non-NVOF BALANCED 起點, 不走 NVOF→no-NVOF)
-    //   T3/T2 → T0: NVOF 30 連 fail (SDK 真壞了, 才放棄 NVOF)
-    //   T1 → T0: chainBusy > budget*0.72 30 frame
-    //   T0 → DISABLED: 60s 內 T0 entry >= 3 次
+    // 計數器 (per-frame caller 維護):
+    //   m_FramesAboveThreshold: latency > demote thresh
+    //   m_FramesBelowThreshold: latency < promote thresh
     bool downgraded = false;
-    // T0 → DISABLED: 60s 內 T0 entry >= 3 次
-    if (cur == 0) {
+    // NVOF SDK fail 路徑 (T2/T3 需要 NVOF, fail 30 連 → T0)
+    if ((cur == 2 || cur == 3) && nvOfFails >= 30) {
+        target = 0;
+        downgraded = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TIER] T%d → T0 (NVOF SDK 30 連 fail; nvofFails=%llu)",
+            cur, (unsigned long long)nvOfFails);
+    }
+    // env-gated T0 → T-1 (急救)
+    if (!downgraded && cur == 0
+        && qEnvironmentVariableIntValue("VIPLE_VKFRUC_ALLOW_T1_DEMOTE") != 0) {
         int hits = 0;
         for (int i = 0; i < 3; ++i) {
-            if (m_T0EnterTimes[i] > 0 && nowMs - m_T0EnterTimes[i] < 60000) {
-                hits++;
-            }
+            if (m_T0EnterTimes[i] > 0 && nowMs - m_T0EnterTimes[i] < 60000) hits++;
         }
         if (hits >= 3) {
             target = (int)VkFrucTier::DISABLED;
             m_TierDisabledEnteredMs = nowMs;
             downgraded = true;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-TIER] T0 → T-1 (進 T0 三次/60s, 結構性跑不動 "
-                "FRUC; hold 5min then retry T%d)", m_TierCap);
+                "[VIPLE-VKFRUC-TIER] T0 → T-1 (env-opt-in; 進 T0 三次/60s)");
         }
     }
-    // T2/T3 → T0: NVOF SDK 真的壞了 (30 連 fail)
-    if (!downgraded && (cur == 2 || cur == 3) && nvOfFails >= 30) {
-        target = 0;
-        downgraded = true;
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-            "[VIPLE-VKFRUC-TIER] T%d → T0 (NVOF SDK 30 連 fail, 跳 T1 直奔 "
-            "SYNC last-resort; nvofFails=%llu)",
-            cur, (unsigned long long)nvOfFails);
-    }
-    // T2 → T0: chainBusy 太重 (NVOF GPU skip T1, T1 是 non-NVOF tier)
-    if (!downgraded && cur == 2 && chainBusy > chainBusyThresh
-        && m_HandoffMsRingFilled >= kChainRingSize) {
-        if (m_FramesAboveHandoffThresh >= 30) {
-            target = 0;
-            downgraded = true;
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-TIER] T2 → T0 (chainBusy=%.2fms > %.2fms 連 30 "
-                "frame, NVOF GPU skip T1 直奔 SYNC fallback)",
-                chainBusy, chainBusyThresh);
-            m_FramesAboveHandoffThresh = 0;
-        }
-    }
-    // T1 → T0: chainBusy 太重 (non-NVOF tier downgrade)
-    if (!downgraded && cur == 1 && chainBusy > chainBusyThresh
-        && m_HandoffMsRingFilled >= kChainRingSize) {
-        if (m_FramesAboveHandoffThresh >= 30) {
-            target = 0;
-            downgraded = true;
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-TIER] T1 → T0 (chainBusy=%.2fms > %.2fms 連 30 "
-                "frame, non-NVOF tier downgrade)", chainBusy, chainBusyThresh);
-            m_FramesAboveHandoffThresh = 0;
-        }
-    }
-    // T5/T4 → cur-1: chain_mean 太重 (chain_lv 3→2 trigger, keep NVOF + RIFE)
-    if (!downgraded && (cur == 4 || cur == 5) && chainMean > 8.0
-        && m_ChainMeanMsRingFilled >= kChainRingSize) {
-        if (m_FramesAboveChainLevelThresh >= 30) {
-            target = cur - 1;
-            downgraded = true;
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-TIER] T%d → T%d (chain_mean=%.2fms > 8ms 連 30 "
-                "frame, chain_lv downgrade 但 keep NVOF)", cur, target, chainMean);
-            m_FramesAboveChainLevelThresh = 0;
-        }
-    }
-    // T3 → T2: chain_mean 太重 (chain_lv 2→1, keep NVOF, drop RIFE)
-    if (!downgraded && cur == 3 && chainMean > 8.0
-        && m_ChainMeanMsRingFilled >= kChainRingSize) {
-        if (m_FramesAboveChainLevelThresh >= 30) {
-            target = 2;
-            downgraded = true;
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-TIER] T3 → T2 (chain_mean=%.2fms > 8ms 連 30 "
-                "frame, chain_lv 2→1 但 keep NVOF)", chainMean);
-            m_FramesAboveChainLevelThresh = 0;
-        }
+    // 維護 latency-driven counters (per-call increment, 每 frame call 一次).
+    if (latencyMs > demoteThreshMs) {
+        if (m_TierLatencyHighFrames < 1000) m_TierLatencyHighFrames++;
+        m_TierLatencyLowFrames = 0;
+    } else if (latencyMs < promoteThreshMs) {
+        if (m_TierLatencyLowFrames < 1000) m_TierLatencyLowFrames++;
+        m_TierLatencyHighFrames = 0;
+    } else {
+        // 中間地帶 — 兩邊 counter 都不漲, 但也不重置 (保持 hysteresis)
     }
 
-    // Upgrade: chain_mean low + cool-down + cur < cap
+    // 統一 latency-driven demote (cur > T0, 不降到 disable; T0 floor 由 R2-α-4 保護).
+    // v1.4.156 §R2-ζ-2: 跳過 T1 (config 是 chainLv 2 + no NVOF, 比 T2 chainLv 1 還重,
+    // demote 經過 T1 反向增加負擔). T2 直接 → T0, T1→T0 仍照走.
+    if (!downgraded && cur > 0
+        && latencyMs > demoteThreshMs
+        && m_TierLatencyHighFrames >= 20) {
+        target = (cur == 2) ? 0 : (cur - 1);  // T2 skip T1 直接 T0
+        downgraded = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TIER] T%d → T%d (latency=%.2fms > %.2fms (budget*0.40) "
+            "連 20 frame; decode=%.2f chain=%.2f budget=%.2f)",
+            cur, target, latencyMs, demoteThreshMs,
+            decodeMsForTier, chainMean, frameBudgetMs);
+        m_TierLatencyHighFrames = 0;
+        m_TierLatencyLowFrames = 0;
+    }
+
+    // 統一 latency-driven promote (cur < cap, 冷卻 10s 自上次 demote).
+    // v1.4.156 §R2-ζ-2: 跳過 T1 (T0 直接 → T2). T1 永遠不會被 active 用到, 但仍
+    // 保留 enum 給 cap 計算正確.
     if (!downgraded && cur < m_TierCap) {
-        const int64_t sinceEntered = nowMs - m_TierEnteredMs;
-        const bool coolDownOk = (sinceEntered >= 30000);
-        // True-idle bypass (chain mean < 1ms 連 600 frame) → 跳 cool-down 直接 cap
-        if (chainMean < 1.0 && m_FramesBelowIdleThreshold >= 600) {
-            if (cur < m_TierCap) {
-                target = m_TierCap;
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-TIER] T%d → T%d (true-idle bypass: chain "
-                    "mean<1ms 連 600 frame, 跳 cool-down 升回 cap)",
-                    cur, target);
-            }
-        }
-        // 一般升階: < 2.5ms 持續 300 frame
-        else if (coolDownOk && chainMean < 2.5 && m_FramesBelowThreshold >= 300
-                 && m_ChainMeanMsRingFilled >= kChainRingSize) {
-            target = cur + 1;
+        const auto sinceLastDemoteMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - m_LastDowngradeTime).count();
+        const bool coolDownOk = (sinceLastDemoteMs >= 10000);
+        if (coolDownOk && latencyMs < promoteThreshMs && m_TierLatencyLowFrames >= 60) {
+            target = (cur == 0) ? 2 : (cur + 1);  // T0 skip T1 直接 T2
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-TIER] T%d → T%d (upgrade: chain_mean=%.2fms < "
-                "2.5ms 連 300 frame, cool-down 30s pass)", cur, target, chainMean);
-            m_FramesBelowThreshold = 0;
+                "[VIPLE-VKFRUC-TIER] T%d → T%d (promote: latency=%.2fms < %.2fms "
+                "(budget*0.20) 連 60 frame; decode=%.2f chain=%.2f budget=%.2f)",
+                cur, target, latencyMs, promoteThreshMs,
+                decodeMsForTier, chainMean, frameBudgetMs);
+            m_TierLatencyHighFrames = 0;
+            m_TierLatencyLowFrames = 0;
         }
     }
 
@@ -2409,7 +2425,14 @@ void VkFrucRenderer::runAutotierTransition()
             m_T0EnterTimes[m_T0EnterIdx] = nowMs;
             m_T0EnterIdx = (m_T0EnterIdx + 1) % 3;
         }
-        m_LastDowngradeTime = now;  // shared cool-down stamp (re-use 既有)
+        // v1.4.155 §R2-ε-1: 只在 demote (target < cur) 才 stamp 冷卻時間,
+        // promote 不重置 — promote 後若 latency 再升, demote 應立即 fire 不需冷卻.
+        if (target < cur) {
+            m_LastDowngradeTime = now;
+        }
+        // 任何 tier transition 都重置 latency counter (新 tier 換新觀察起點).
+        m_TierLatencyHighFrames = 0;
+        m_TierLatencyLowFrames = 0;
     }
 
     // §J.3.e.2.i.60 (v1.4.130) — sync m_EffectiveChainLevel + ASYNC/SYNC from tier
@@ -2417,6 +2440,11 @@ void VkFrucRenderer::runAutotierTransition()
     // frucChainAsync→SYNC) 仍會獨立寫這些 state vars 但下幀就被 tier 覆寫.
     // 確保 render path 讀到的 chain_level + TempDisabled 跟 tier 結果一致.
     // T_DISABLED 不 sync (FRUC off, render 走 fallback).
+    //
+    // v1.4.154 §R2-δ-2: tier 同步同時 toggle m_RifeNativeReady.
+    //   T3+ + RIFE pipeline 載入過 (m_RifeNative != nullptr) → ready=true.
+    //   T2 以下 → ready=false (跳過 RIFE dispatch, 救 weak GPU 像 780M).
+    //   Tier 升回 T3+ 時自動恢復 (pipeline 仍駐留, 不需要 re-init).
     const int finalTier = m_CurrentTier.load(std::memory_order_relaxed);
     if (finalTier != (int)VkFrucTier::DISABLED) {
         const auto cfgSync = tierConfig((VkFrucTier)finalTier);
@@ -2427,6 +2455,16 @@ void VkFrucRenderer::runAutotierTransition()
         // useAsync=true (T1+) → TempDisabled=false (走 ASYNC 3-cmd chain).
         // 取代舊 chainBusy > 12ms 30 frame trigger; tier 控制更精準.
         m_FrucChainAsyncTempDisabled.store(!cfgSync.useAsync, std::memory_order_relaxed);
+        // RIFE auto-toggle: tier 想要 RIFE + pipeline 已載入過 → ready.
+        if (m_RifeNative != nullptr) {
+            const bool newRifeReady = cfgSync.useRife;
+            if (m_RifeNativeReady != newRifeReady) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-TIER] tier=T%d → RIFE %s (auto by tier)",
+                    finalTier, newRifeReady ? "ON" : "OFF");
+                m_RifeNativeReady = newRifeReady;
+            }
+        }
     }
 }
 
@@ -3471,21 +3509,37 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
     //
     // Until v1.3.221 this whole block lived inside `if (!m_SwMode)`.  v1.3.221
     // lifted it out so SW display pipeline could also reach native decode.
-    // v1.4.137 gates it on env var VIPLE_VKFRUC_NATIVE_DECODE=1 instead:
-    // 對未 opt-in 的 user 還預先建 4096×4096/dpb=17 VkVideoSessionKHR + bind
-    // memory，會在 AMD 780M（也許其他 AMD APU）跟 FFmpeg 自己的 hwaccel
-    // session 並存時 driver crash —— 具體 repro 是 FFmpeg vulkan h264 hwaccel
-    // 呼 vkBindVideoSessionMemoryKHR(226 MB) 那刻 process abort 無 stack.
-    // 預設關閉 = 完全不建，跟 v1.3.221 之前的行為一致；要做 native decode
-    // dev work 才 opt-in.
-    static const bool s_provisionNativeDecode =
+    //
+    // v1.4.140 §J.3.e.2.i.55b — REAL fix for AMD APU concurrent-session crash:
+    // 之前 vsci.maxCodedExtent 寫死 {4096, 4096}, AMD APU video decode HW
+    // 用 maxCodedExtent 配 internal context (VRAM / SRAM blocks). 我們 4K
+    // 加上 FFmpeg vulkan hwaccel 它自己也創一個 ≈226 MB 4K session, 加起來
+    // 超過 AMD APU video decode IP 的 context budget → vkBindVideoSessionMemoryKHR
+    // 那刻 driver crash (process abort 無 stack, kernel log: segfault at 0).
+    // 修法: 把 maxCodedExtent 收成實際 stream 尺寸 (round up 到 codec
+    // pictureGranularity, 通常 16x16 / 128x128). 1080p stream → 1920×1088,
+    // session memory ~10× 小, 跟 FFmpeg 並存能 fit AMD APU context budget.
+    //
+    // v1.4.161 §R2-ι-3: lazy createVideoSession.
+    // 預設 VIPLE_VKFRUC_NATIVE_DECODE 沒設, native decode path 不會被啟用,
+    // 但若 session 已建, 即便 dormant 仍會跟 ffmpeg's vulkan hwaccel session
+    // 在 AMD APU 上競爭 device context budget → vkBindVideoSessionMemoryKHR
+    // 在 ffmpeg 端 access violation (§J.3.e.2.i.55b 同類別 bug, 之前用
+    // maxCodedExtent fix 緩解, 但 dormant session 仍佔位).
+    // 改成只在 env=1 時建 session, 預設保持 m_VideoSession = VK_NULL_HANDLE,
+    // ffmpeg av1_vulkan / hevc_vulkan / h264_vulkan 獨佔 device, 不再 crash.
+    static const bool wantNativeSession =
         qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE") != 0;
-    if (!s_provisionNativeDecode) {
+    if (!wantNativeSession) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 native decode chain SKIPPED "
-                    "(set VIPLE_VKFRUC_NATIVE_DECODE=1 to provision; default OFF "
-                    "post-v1.4.137 to avoid AMD APU concurrent-session driver crash).");
-    } else if (!createVideoSession(m_VideoFormat)) {
+                    "[VIPLE-VKFRUC] §R2-ι: native VkVideoSession skipped "
+                    "(VIPLE_VKFRUC_NATIVE_DECODE not set; ffmpeg vulkan hwaccel "
+                    "獨佔 device — avoids AMD APU concurrent-session crash).");
+        // m_VideoSession 保持 VK_NULL_HANDLE, acceptsNativeDecode() 自然回 false.
+        // parser / DPB pool / cmd buffers 也不需要建 (它們只在 native decode
+        // path active 時有用), 但為簡化 revert 範圍, 暫不動那些 — session 是
+        // 真 crash 點, session 不建就不會碰到 driver bug.
+    } else if (!createVideoSession(m_VideoFormat, params->width, params->height)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 createVideoSession failed — Phase 1 native decode 路徑 skip");
         destroyVideoSession();
@@ -3504,7 +3558,8 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
     } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] §J.3.e.2.i.8 native decode chain READY "
-                    "— session+params+cmd+parser+DPB-pool. Awaiting VIPLE_VKFRUC_NATIVE_DECODE=1 + NAL packets.");
+                    "— session+params+cmd+parser+DPB-pool. VIPLE_VKFRUC_NATIVE_DECODE=1, "
+                    "awaiting NAL packets.");
     }
     if (!createYcbcrSamplerAndLayouts()) {
         m_InitFailureReason = InitFailureReason::NoSoftwareSupport;
@@ -3621,27 +3676,33 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
                 m_SwMode ? " (SW mode: AV_PIX_FMT_NV12 from CPU memory)"
                          : " (HW mode: AV_PIX_FMT_VULKAN)");
 
-    // §J.3.e.2.i.60 (v1.4.127) — compute initial tier cap + start tier at cap.
-    // 須在所有 capability detection 完之後 (chain async / NVOF / detectedTier)
-    // 才有正確值. Autotier transition 之後從 cap 開始往下走 / 升回.
+    // §J.3.e.2.i.60 — initial tier = cap (always-on dual present 需要 FRUC ready).
+    // v1.4.151 §R2-α-3: legacy/new 區分拿掉 — R2 永遠 always-on dual, autotier
+    // 永遠從 cap 起跑. T0-floor (R2-α-4) 保證不會 demote 到 T-1.
     if (m_FrucMode) {
         m_TierCap = detectInitialTierCap();
-        m_CurrentTier.store(m_TierCap);
+        // v1.4.155 §R2-ε-1: 起始 tier = min(cap, T2). 從中段 T2 起跑, 讓
+        // latency-driven autotier 動態升降. T2 = NVOF + chain_lv 1 (no RIFE),
+        // 對 weak GPU 是安全起點; 強 GPU 會自動升 T3/T4/T5.
+        int initialTier = m_TierCap;
+        if (initialTier > (int)VkFrucTier::T2) initialTier = (int)VkFrucTier::T2;
+        m_CurrentTier.store(initialTier);
         using Clock = std::chrono::steady_clock;
         m_TierEnteredMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             Clock::now().time_since_epoch()).count();
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
             "[VIPLE-VKFRUC-TIER] §J.3.e.2.i.60 init: cap=T%d current=T%d "
-            "(autotier from cap; downgrade per chain_mean/chainBusy/NVOF fails, "
-            "upgrade per chain_mean<2.5ms 300f + 30s cool-down; T-1=FRUC off "
-            "pass-through, hold 5min before retry cap)",
-            m_TierCap, m_TierCap);
+            "(latency-driven autotier: demote @ latency>budget*0.40 連 20 frame, "
+            "promote @ latency<budget*0.20 連 60 frame + 10s cool-down; T0-floor)",
+            m_TierCap, initialTier);
     } else {
         // FRUC 整個關 → tier 直接 DISABLED, autotier 不跑.
         m_TierCap = (int)VkFrucTier::DISABLED;
         m_CurrentTier.store((int)VkFrucTier::DISABLED);
     }
 
+    // v1.4.151 §R2-α-3: m_TripleMode 由 ctor 階段拿 env/pref 決定, init 不改.
+    // (R1 把這條改成「新模式強制 disable triple」, R2 revert.)
     return true;
 }
 
@@ -5062,9 +5123,16 @@ bool VkFrucRenderer::createInFlightRing()
 
 void VkFrucRenderer::destroyInFlightRing()
 {
-    if (!m_RingInitialized || m_Device == VK_NULL_HANDLE) {
-        // Even if !initialized, drop the cmd pool if it leaked half-way through
-        // createInFlightRing failure.
+    // v1.4.141 §J.3.e.2.i.55c — teardown null-safety. 若 init 在
+    // SDL_Vulkan_GetVkGetInstanceProcAddr 那步 fail (Vulkan loader 沒載入),
+    // m_pfnGetInstanceProcAddr 為 null 且 m_Device 為 VK_NULL_HANDLE.  下方
+    // m_pfnGetInstanceProcAddr(...) 會直接呼叫 null function pointer → segfault.
+    // 此 bug 原本 if block 註解寫「drop the cmd pool if it leaked half-way」
+    // 但忘了加 return，整段 PFN 解析還是會跑.  init 那步 fail 時所有 handle
+    // 都還是 VK_NULL_HANDLE 沒 leak，安全 early return.
+    if (!m_pfnGetInstanceProcAddr || m_Device == VK_NULL_HANDLE) {
+        m_RingInitialized = false;
+        return;
     }
 
     auto pfnGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
@@ -5407,7 +5475,13 @@ bool VkFrucRenderer::populateAvHwDeviceCtx(int videoFormat)
 //   6. vkBindVideoSessionMemoryKHR 一次 bind 所有
 //
 // Phase 1.0 stops here.  m_VideoSessionParams 在 1.1 SPS/PPS parse 後才建.
-bool VkFrucRenderer::createVideoSession(int videoFormat)
+//
+// v1.4.140 §J.3.e.2.i.55b — streamWidth / streamHeight 從 caller 傳入, 用
+// 來算 maxCodedExtent (round up 到 codec pictureGranularity). 之前寫死
+// 4096×4096 在 AMD APU 上跟 FFmpeg 自己創的 4K hwaccel session 並存時
+// 超過 video decode IP context budget → driver crash. 收成 stream 尺寸
+// 後 session 記憶體小一個量級, 跟 FFmpeg 共存能 fit AMD APU.
+bool VkFrucRenderer::createVideoSession(int videoFormat, uint32_t streamWidth, uint32_t streamHeight)
 {
     auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetDeviceProcAddr");
@@ -5487,12 +5561,20 @@ bool VkFrucRenderer::createVideoSession(int videoFormat)
     stdHeaderVer.specVersion = stdVersion;
 
     // ── Step 3: vkCreateVideoSessionKHR ──
+    // v1.4.140 §J.3.e.2.i.55b — maxCodedExtent 收成實際 stream 尺寸, round up
+    // 到 codec pictureGranularity 對齊 (H.264/H.265 = 16, AV1 = 128, 都統一
+    // 用 128 align 保守安全). 之前寫死 4096×4096 在 AMD APU 上跟 FFmpeg 自己
+    // 創的 hwaccel session 並存時 driver 配 context 超 budget → crash.
+    // Stream 尺寸偶爾沒給 (0/0) 就 fallback 1920×1088 (1080p 常見值).
+    constexpr uint32_t kAlign = 128;
+    uint32_t alignedW = streamWidth  > 0 ? ((streamWidth  + kAlign - 1) / kAlign) * kAlign : 1920;
+    uint32_t alignedH = streamHeight > 0 ? ((streamHeight + kAlign - 1) / kAlign) * kAlign : 1088;
     VkVideoSessionCreateInfoKHR vsci = { VK_STRUCTURE_TYPE_VIDEO_SESSION_CREATE_INFO_KHR };
     vsci.queueFamilyIndex             = m_DecodeQueueFamily;
     vsci.flags                        = 0;
     vsci.pVideoProfile                = &profile;
     vsci.pictureFormat                = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;  // NV12
-    vsci.maxCodedExtent               = { 4096, 4096 };  // ≤4K, fits H.264/H.265 maxRefs probe
+    vsci.maxCodedExtent               = { alignedW, alignedH };
     vsci.referencePictureFormat       = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
     vsci.maxDpbSlots                  = maxDpbSlots;
     vsci.maxActiveReferencePictures   = maxRefs;
@@ -5506,8 +5588,8 @@ bool VkFrucRenderer::createVideoSession(int videoFormat)
         return false;
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i.8 VkVideoSessionKHR created (%s, dpb=%u refs=%u, max=4096x4096)",
-                codecName, maxDpbSlots, maxRefs);
+                "[VIPLE-VKFRUC] §J.3.e.2.i.8 VkVideoSessionKHR created (%s, dpb=%u refs=%u, max=%ux%u stream=%ux%u)",
+                codecName, maxDpbSlots, maxRefs, alignedW, alignedH, streamWidth, streamHeight);
 
     // ── Step 4-6: memory bindings ──
     uint32_t reqCount = 0;
@@ -6136,6 +6218,28 @@ void VkFrucRenderer::destroyDecodeCommandResources()
 bool VkFrucRenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary** options)
 {
     (void)options;
+    // §B Phase B 重啟 — composite path: lazy init the D3D11 device + bridge
+    // on first prepareDecoderContext, then bind D3D11VA hw_device_ctx so
+    // ffmpeg decodes into our SHARED_NTHANDLE-capable ID3D11Texture2D pool.
+    if (m_CompositeMode == CompositeMode::D3D11_HEVC) {
+        if (!m_BridgeInitDone && !initializeCompositeD3D11()) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC-COMPOSITE] prepareDecoderContext: "
+                         "initializeCompositeD3D11() failed — falling back");
+            return false;
+        }
+        if (!m_BridgeHwDeviceCtx) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC-COMPOSITE] prepareDecoderContext: "
+                         "m_BridgeHwDeviceCtx is null after init");
+            return false;
+        }
+        context->hw_device_ctx = av_buffer_ref(m_BridgeHwDeviceCtx);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-COMPOSITE] prepareDecoderContext OK — ffmpeg "
+                    "will decode into D3D11 NV12 array on our composite device");
+        return true;
+    }
     // §J.3.e.2.i.3.e-SW — software-upload mode: no hwaccel binding, ffmpeg
     // decodes in CPU into AV_PIX_FMT_NV12 frames that we upload via our
     // staging buffer.
@@ -6157,6 +6261,437 @@ bool VkFrucRenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary
                 "[VIPLE-VKFRUC] §J.3.e.2.i.3.a prepareDecoderContext OK — ffmpeg "
                 "will decode into AVVkFrame on our VkDevice");
     return true;
+}
+
+// §B Phase B 重啟 — composite path frames-context override.  Force
+// SHARED|SHARED_NTHANDLE on every decoder-allocated NV12 array texture so
+// the bridge can call CreateSharedHandle on them in B2 / B7.  Non-D3D11
+// modes (SW, Vulkan-native) leave the parent class default in place
+// (renderer.h base does nothing).
+bool VkFrucRenderer::prepareDecoderContextInGetFormat(AVCodecContext* context,
+                                                     AVPixelFormat pixelFormat)
+{
+#ifdef Q_OS_WIN32
+    if (m_CompositeMode == CompositeMode::D3D11_HEVC) {
+        av_buffer_unref(&context->hw_frames_ctx);
+        int err = avcodec_get_hw_frames_parameters(context, m_BridgeHwDeviceCtx,
+                                                   pixelFormat, &context->hw_frames_ctx);
+        if (err < 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC-COMPOSITE] B6 avcodec_get_hw_frames_parameters "
+                         "(D3D11VA) rc=%d", err);
+            return false;
+        }
+        auto* framesCtx = reinterpret_cast<AVHWFramesContext*>(context->hw_frames_ctx->data);
+        auto* d3dFrames = reinterpret_cast<AVD3D11VAFramesContext*>(framesCtx->hwctx);
+        d3dFrames->MiscFlags |= D3D11_RESOURCE_MISC_SHARED
+                              | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+        // BindFlags stay default; we never sample these from a D3D11
+        // shader (Vulkan side does the sampling via imported VkImage).
+
+        err = av_hwframe_ctx_init(context->hw_frames_ctx);
+        if (err < 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC-COMPOSITE] B6 av_hwframe_ctx_init rc=%d "
+                         "(SHARED_NTHANDLE allocation rejected by driver?)", err);
+            av_buffer_unref(&context->hw_frames_ctx);
+            return false;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-COMPOSITE] B6 prepareDecoderContextInGetFormat OK "
+                    "— D3D11VA frames-context with SHARED_NTHANDLE ready");
+        return true;
+    }
+#endif
+    // Other paths: defer to base (no-op).  Returning true mirrors the
+    // base-class default contract (caller's invariant: false → init fail).
+    (void)context;
+    (void)pixelFormat;
+    return true;
+}
+
+// §B Phase B 重啟 — composite path D3D11 device + bridge bring-up.
+// Called lazily from prepareDecoderContext the first time the cascade
+// hands us a D3D11_HEVC ctx.  Vulkan side (VkInstance/PhysicalDevice/
+// Device) is already created by initialize() upstream of cascade, so
+// LUID match has a real Vulkan side to compare against.
+//
+// Steps:
+//   1. CreateDXGIFactory1 → enumerate adapters, pick the one whose LUID
+//      matches our VkPhysicalDevice (typically the only iGPU/dGPU
+//      present, but laptop-hybrid-graphics setups can have multiple)
+//   2. D3D11CreateDevice with BGRA_SUPPORT + VIDEO_SUPPORT + MULTITHREADED,
+//      feature levels 11_1 → 10_0 fallback
+//   3. QI ID3D11Device5 + ID3D11DeviceContext4 — required for shared-NT
+//      fence (B4)
+//   4. av_hwdevice_ctx_alloc(D3D11VA) + populate AVD3D11VADeviceContext
+//      with our device + ctx + lock callbacks → av_hwdevice_ctx_init
+//   5. Construct D3D11VkBridge, initialize() with adapter+device5+vk
+//      handles, then createFenceSync()
+//
+// On any failure, partial cleanup happens here and returns false; caller
+// (prepareDecoderContext) propagates the failure and the cascade falls
+// back to PlVkRenderer or SW.
+bool VkFrucRenderer::initializeCompositeD3D11()
+{
+#ifndef Q_OS_WIN32
+    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                 "[VIPLE-VKFRUC-COMPOSITE] composite path is Windows-only");
+    return false;
+#else
+    if (m_BridgeInitDone) return true;
+
+    // §B B10 — sticky failure latch.  Once the first bring-up attempt
+    // fails, every subsequent prepareDecoderContext for this same
+    // VkFrucRenderer instance also fails fast (no retry).  This lets the
+    // cascade move on to pass=1 / D3D11VARenderer instead of re-running
+    // D3D11CreateDevice + LUID match every frame.
+    static thread_local bool s_BridgeBringupFailed = false;
+    if (s_BridgeBringupFailed) {
+        return false;
+    }
+    // RAII helper: on any early return below we mark the latch and let
+    // teardownCompositeD3D11 drop any partial state.
+    struct FailLatch {
+        VkFrucRenderer* self;
+        bool* flag;
+        bool armed = true;
+        ~FailLatch() {
+            if (armed) {
+                *flag = true;
+                self->teardownCompositeD3D11();
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VKFRUC-COMPOSITE] B10 bringup failed — "
+                            "cascade will fall through to D3D11VARenderer / SW");
+            }
+        }
+        void disarm() { armed = false; }
+    } latch{ this, &s_BridgeBringupFailed };
+
+    if (!m_Instance || !m_PhysicalDevice || !m_Device) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC-COMPOSITE] initializeCompositeD3D11 called "
+                     "before Vulkan device was created (inst=%p phys=%p dev=%p)",
+                     (void*)m_Instance, (void*)m_PhysicalDevice, (void*)m_Device);
+        return false;
+    }
+
+    // §B B6.1 — DXGI factory + LUID-matched adapter ----------------------
+    Microsoft::WRL::ComPtr<IDXGIFactory1> dxgiFactory;
+    HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory));
+    if (FAILED(hr)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC-COMPOSITE] CreateDXGIFactory1 rc=0x%08lx", hr);
+        return false;
+    }
+
+    // Vulkan side LUID
+    auto pfnGetPhysProps2 = (PFN_vkGetPhysicalDeviceProperties2)
+        m_pfnGetInstanceProcAddr(m_Instance, "vkGetPhysicalDeviceProperties2");
+    if (!pfnGetPhysProps2) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC-COMPOSITE] vkGetPhysicalDeviceProperties2 PFN missing");
+        return false;
+    }
+    VkPhysicalDeviceIDProperties idProps = {};
+    idProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+    VkPhysicalDeviceProperties2 props2 = {};
+    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props2.pNext = &idProps;
+    pfnGetPhysProps2(m_PhysicalDevice, &props2);
+    if (!idProps.deviceLUIDValid) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC-COMPOSITE] VkPhysicalDevice deviceLUIDValid=0");
+        return false;
+    }
+
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+    for (UINT i = 0; ; ++i) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> cand;
+        if (dxgiFactory->EnumAdapters1(i, &cand) == DXGI_ERROR_NOT_FOUND) break;
+        DXGI_ADAPTER_DESC1 d = {};
+        cand->GetDesc1(&d);
+        if (memcmp(&d.AdapterLuid, idProps.deviceLUID, sizeof(d.AdapterLuid)) == 0) {
+            adapter = cand;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-COMPOSITE] B6.1 LUID-matched adapter[%u] "
+                        "'%ls' vendor=0x%04x", i, d.Description, d.VendorId);
+            break;
+        }
+    }
+    if (!adapter) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC-COMPOSITE] no DXGI adapter matches Vulkan LUID");
+        return false;
+    }
+
+    // §B B6.2 — D3D11CreateDevice ----------------------------------------
+    const D3D_FEATURE_LEVEL fls[] = {
+        D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0,
+    };
+    Microsoft::WRL::ComPtr<ID3D11Device>        baseDevice;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> baseCtx;
+    UINT createFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT
+                     | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+    hr = D3D11CreateDevice(adapter.Get(),
+                           D3D_DRIVER_TYPE_UNKNOWN,  // because we passed an adapter
+                           nullptr, createFlags,
+                           fls, ARRAYSIZE(fls), D3D11_SDK_VERSION,
+                           &baseDevice, nullptr, &baseCtx);
+    if (FAILED(hr)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC-COMPOSITE] D3D11CreateDevice rc=0x%08lx", hr);
+        return false;
+    }
+
+    // Multithread protect — FFmpeg lock/unlock pair plus our render thread
+    // share this device context.
+    Microsoft::WRL::ComPtr<ID3D10Multithread> mt;
+    if (SUCCEEDED(baseDevice.As(&mt))) mt->SetMultithreadProtected(TRUE);
+
+    Microsoft::WRL::ComPtr<ID3D11Device5>        dev5;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext4> ctx4;
+    if (FAILED(baseDevice.As(&dev5)) || FAILED(baseCtx.As(&ctx4))) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC-COMPOSITE] QI ID3D11Device5 / "
+                     "ID3D11DeviceContext4 failed — D3D11.4 (Win10 1703+) needed");
+        return false;
+    }
+
+    // §B B6.3 — av_hwdevice_ctx_alloc(D3D11VA) ---------------------------
+    AVBufferRef* hwRef = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+    if (!hwRef) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC-COMPOSITE] av_hwdevice_ctx_alloc failed");
+        return false;
+    }
+    auto* deviceCtx = reinterpret_cast<AVHWDeviceContext*>(hwRef->data);
+    auto* d3dCtx    = reinterpret_cast<AVD3D11VADeviceContext*>(deviceCtx->hwctx);
+    // CopyTo bumps refcount so FFmpeg takes its own ref
+    dev5.CopyTo(&d3dCtx->device);
+    ctx4.CopyTo(&d3dCtx->device_context);
+    // Lock callbacks reuse the existing s_VkFrucQueueLock — FFmpeg's
+    // hwcontext_d3d11va.h expects void (*lock/unlock)(void*) and a
+    // user-data pointer.  s_VkFrucQueueLock is recursive so re-entrant
+    // calls (D3D11 then Vulkan submit etc.) are safe.
+    d3dCtx->lock = [](void*) { s_VkFrucQueueLock.lock(); };
+    d3dCtx->unlock = [](void*) { s_VkFrucQueueLock.unlock(); };
+    d3dCtx->lock_ctx = nullptr;
+
+    int rc = av_hwdevice_ctx_init(hwRef);
+    if (rc < 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VKFRUC-COMPOSITE] av_hwdevice_ctx_init(D3D11VA) "
+                     "rc=%d", rc);
+        av_buffer_unref(&hwRef);
+        return false;
+    }
+
+    // §B B6.4 — D3D11VkBridge initialize + fence sync --------------------
+    auto bridge = std::make_unique<D3D11VkBridge>();
+    if (!bridge->initialize(adapter.Get(), dev5.Get(),
+                            m_Instance, m_PhysicalDevice, m_Device,
+                            m_pfnGetInstanceProcAddr,
+                            D3D11VkBridge::resolveHandleModeFromEnv())) {
+        av_buffer_unref(&hwRef);
+        return false;
+    }
+    if (!bridge->createFenceSync()) {
+        av_buffer_unref(&hwRef);
+        return false;
+    }
+
+    // Hand off ownership.  These raw pointers are released in
+    // teardownCompositeD3D11 / dtor.
+    m_BridgeHwDeviceCtx = hwRef;
+    m_BridgeAdapter     = adapter.Detach();
+    m_BridgeD3D11Device = dev5.Detach();
+    m_BridgeD3D11Ctx4   = ctx4.Detach();
+    m_Bridge            = std::move(bridge);
+    m_BridgeInitDone    = true;
+
+    latch.disarm();  // §B B10 — successful path, don't trigger fail latch
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-COMPOSITE] B6 initializeCompositeD3D11 OK — "
+                "bridge ready, mode=%d", (int)m_Bridge->handleMode());
+    return true;
+#endif  // Q_OS_WIN32
+}
+
+// §B Phase B 重啟 — B7 minimal renderFrame for the composite path.  This
+// stage's job is just to prove the bridge can export+import the decoder
+// pool textures on AMD 780M without device-lost; once we see clean log
+// lines for ~60 seconds, B9 adds vkCmdBlitImage + FRUC chain on top.
+//
+// AVFrame layout for AV_PIX_FMT_D3D11:
+//   frame->data[0] = (ID3D11Texture2D*) decoder pool array texture
+//   frame->data[1] = (intptr_t)         slice index within the array
+//   frame->format  = AV_PIX_FMT_D3D11
+//
+// Per-frame work:
+//   1. Read (texArray, slice) from AVFrame
+//   2. bridge.exportTextureSlice → cached SHARED_NTHANDLE (B2)
+//   3. bridge.importToVulkan or cache hit → VkImage + VkDeviceMemory (B3)
+//   4. (B9 will wait fence N here, blit, signal N+1)
+//   5. Log first ~3 frames so we have evidence of bridge progress
+//
+// Failure handling: any step that fails logs once and returns. Stream
+// will look frozen (no present) but we'll see [VIPLE-VKFRUC-COMPOSITE]
+// log lines indicating where it died, telling us which ablation mode
+// to try next via VIPLE_VKFRUC_D3D11_HEVC_MODE.
+void VkFrucRenderer::renderFrameD3D11Import(AVFrame* frame)
+{
+#ifndef Q_OS_WIN32
+    (void)frame;
+    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                 "[VIPLE-VKFRUC-COMPOSITE] renderFrameD3D11Import called off-Windows");
+    return;
+#else
+    static std::atomic<uint64_t> s_FrameCount{0};
+    uint64_t fnum = s_FrameCount.fetch_add(1, std::memory_order_relaxed);
+    const bool logThisFrame = (fnum < 3) || (fnum % 60 == 0);  // 3 + per-second
+
+    if (!frame || frame->format != AV_PIX_FMT_D3D11) {
+        if (logThisFrame) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-COMPOSITE] frame#%llu unexpected format=%d "
+                        "(expected AV_PIX_FMT_D3D11=%d)",
+                        (unsigned long long)fnum,
+                        frame ? frame->format : -1,
+                        (int)AV_PIX_FMT_D3D11);
+        }
+        return;
+    }
+    if (!m_Bridge || !m_BridgeInitDone) {
+        if (logThisFrame) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VKFRUC-COMPOSITE] frame#%llu bridge not ready",
+                         (unsigned long long)fnum);
+        }
+        return;
+    }
+
+    auto* texArray = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
+    UINT  slice    = static_cast<UINT>(reinterpret_cast<intptr_t>(frame->data[1]));
+    if (!texArray) {
+        if (logThisFrame) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VKFRUC-COMPOSITE] frame#%llu texArray=null",
+                        (unsigned long long)fnum);
+        }
+        return;
+    }
+
+    // §B B7.1 — export shared handle (cached per array texture in B2).
+    HANDLE   shared    = nullptr;
+    uint32_t arraySize = 0;
+    if (!m_Bridge->exportTextureSlice(texArray, slice, &shared, &arraySize)) {
+        return;  // bridge already logged
+    }
+
+    // §B B7.2 — import to Vulkan (cached per array texture in m_BridgeImports).
+    auto it = m_BridgeImports.find(texArray);
+    if (it == m_BridgeImports.end()) {
+        D3D11_TEXTURE2D_DESC desc = {};
+        texArray->GetDesc(&desc);
+        // NV12 is the only format ffmpeg's D3D11VA decoder emits for HEVC
+        // (and h264/av1); P010 / Main10 HDR is gated separately.  Map to
+        // the 2-plane 4:2:0 8-bit ycbcr Vulkan format.
+        VkFormat vkFmt = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+        D3D11VkBridge::ImportedImage imp;
+        if (!m_Bridge->importToVulkan(shared, vkFmt, desc.Width, desc.Height,
+                                      arraySize, &imp)) {
+            return;
+        }
+        BridgeImport entry;
+        entry.image     = imp.image;
+        entry.memory    = imp.memory;
+        entry.arraySize = arraySize;
+        entry.sliceViews.resize(arraySize, VK_NULL_HANDLE);  // lazy per B9
+        m_BridgeImports.emplace(texArray, std::move(entry));
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-COMPOSITE] B7 first frame imported tex=%p "
+                    "size=%ux%u arraySize=%u — bridge round-trip OK",
+                    texArray, desc.Width, desc.Height, arraySize);
+    }
+
+    // §B B7.3 — fence sync demo.  In B9 the wait happens inside the
+    // graphics submit and the signal happens after present; for B7 we
+    // exercise both sides once per frame so the driver actually sees
+    // the timeline progress (otherwise it never validates the
+    // imported semaphore — silent passing tells us nothing).  We
+    // increment by 2 per round to match B9's wait=N / signal=N+1 layout.
+    if (m_BridgeD3D11Ctx4) {
+        uint64_t signalVal = m_Bridge->nextValue();  // pretend "D3D11 done at signalVal"
+        m_Bridge->signalFromD3D11(m_BridgeD3D11Ctx4, signalVal);
+        // §B9 will: vkQueueSubmit(wait sem=signalVal, signal sem=signalVal+1)
+        // §B9 then : ctx4->Wait(fence, signalVal+1)
+        // We skip the Vulkan-side hop here so we don't queue a submit on the
+        // imported image yet (defer the device-lost gate to B9).
+        m_Bridge->nextValue();  // bump counter once to keep parity with B9
+    }
+
+    if (logThisFrame) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-COMPOSITE] B7 frame#%llu tex=%p slice=%u "
+                    "fenceVal=%llu — no present this stage",
+                    (unsigned long long)fnum, texArray, slice,
+                    (unsigned long long)m_Bridge->currentValue());
+    }
+#endif  // Q_OS_WIN32
+}
+
+void VkFrucRenderer::teardownCompositeD3D11()
+{
+#ifdef Q_OS_WIN32
+    if (!m_BridgeInitDone && !m_Bridge && !m_BridgeHwDeviceCtx) {
+        return;
+    }
+
+    // Bridge first — closes shared NT handles and the imported VkSemaphore
+    // before we tear down the VkDevice via the main teardown() path.
+    m_Bridge.reset();
+
+    // Caller (renderFrame B7+) might have stashed imported VkImages /
+    // VkDeviceMemory in m_BridgeImports.  Destroy them via direct PFN
+    // lookup so we don't depend on the rest of the renderer state.
+    if (!m_BridgeImports.empty() && m_Device != VK_NULL_HANDLE) {
+        auto pfnGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)
+            m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr");
+        if (pfnGetDeviceProcAddr) {
+            auto pfnDestroyView = (PFN_vkDestroyImageView)
+                pfnGetDeviceProcAddr(m_Device, "vkDestroyImageView");
+            auto pfnDestroyImg  = (PFN_vkDestroyImage)
+                pfnGetDeviceProcAddr(m_Device, "vkDestroyImage");
+            auto pfnFreeMem     = (PFN_vkFreeMemory)
+                pfnGetDeviceProcAddr(m_Device, "vkFreeMemory");
+            for (auto& kv : m_BridgeImports) {
+                if (pfnDestroyView) {
+                    for (VkImageView v : kv.second.sliceViews) {
+                        if (v) pfnDestroyView(m_Device, v, nullptr);
+                    }
+                }
+                if (pfnDestroyImg && kv.second.image) {
+                    pfnDestroyImg(m_Device, kv.second.image, nullptr);
+                }
+                if (pfnFreeMem && kv.second.memory) {
+                    pfnFreeMem(m_Device, kv.second.memory, nullptr);
+                }
+            }
+        }
+        m_BridgeImports.clear();
+    }
+
+    if (m_BridgeHwDeviceCtx) {
+        av_buffer_unref(&m_BridgeHwDeviceCtx);
+        m_BridgeHwDeviceCtx = nullptr;
+    }
+    if (m_BridgeD3D11Ctx4)   { m_BridgeD3D11Ctx4->Release();   m_BridgeD3D11Ctx4   = nullptr; }
+    if (m_BridgeD3D11Device) { m_BridgeD3D11Device->Release(); m_BridgeD3D11Device = nullptr; }
+    if (m_BridgeAdapter)     { m_BridgeAdapter->Release();     m_BridgeAdapter     = nullptr; }
+    m_BridgeInitDone = false;
+#endif
 }
 
 // §J.3.e.2.i.3.e — descriptor pool sized for kFrucFramesInFlight
@@ -7819,8 +8354,48 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // §J.3.e.X Path β — eager init of native RIFE executor (β.1 = init-only
     // proof of life on this VkDevice; β.2 will wire it into runFrucComputeChain).
     // Failure non-fatal: m_RifeNativeReady stays false, block-match remains active.
+    //
+    // v1.4.145 §J.3.e.X Path β.12 — coopmat extension gate.  ncnn-vulkan
+    // (and our rife_native_vk fusion paths) emit cooperative_matrix shaders
+    // whenever model dtype = fp16 + matrix shape heuristic passes, WITHOUT
+    // re-checking VK_KHR_cooperative_matrix / VK_NV_cooperative_matrix at
+    // shader-compile time.  On RADV RAVEN (AMD Vega 10 / GFX9, 沒 WMMA ISA)
+    // emit 出 `v_wmma_f32_16x16x16_f16` → ACO 不認 → `Unsupported opcode`
+    // process abort.
+    //
+    // v1.4.144 嘗試用 tier=ENTRY 當 gate, 但 Vega 10 benchmark 4.64ms 被
+    // 分到 BALANCED tier — tier alone 跟 coopmat 能力不對齊.  改用真實的
+    // VK_*_cooperative_matrix extension 探測作 gate: 兩個 extension 都沒
+    // 才認定無 coopmat 支援, 直接 skip native RIFE init 退 block-match.
+    // 對 RTX 20+/RX 6700+/Arc A7 (KHR/NV coopmat 至少有一個) 完全不擋.
     if (m_RifeNativeMode) {
-        if (!createRifeNativeResources(width, height)) {
+        bool hasCoopmat = false;
+        if (m_pfnGetInstanceProcAddr && m_PhysicalDevice != VK_NULL_HANDLE) {
+            auto pfnEnumDevExts = (PFN_vkEnumerateDeviceExtensionProperties)
+                m_pfnGetInstanceProcAddr(m_Instance, "vkEnumerateDeviceExtensionProperties");
+            if (pfnEnumDevExts) {
+                uint32_t extCount = 0;
+                pfnEnumDevExts(m_PhysicalDevice, nullptr, &extCount, nullptr);
+                std::vector<VkExtensionProperties> exts(extCount);
+                pfnEnumDevExts(m_PhysicalDevice, nullptr, &extCount, exts.data());
+                for (const auto& e : exts) {
+                    if (std::strcmp(e.extensionName, "VK_KHR_cooperative_matrix") == 0 ||
+                        std::strcmp(e.extensionName, "VK_NV_cooperative_matrix") == 0) {
+                        hasCoopmat = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!hasCoopmat) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-RIFE-β] §β.12 no cooperative_matrix extension "
+                "(VK_KHR/VK_NV) on device — skipping native RIFE init "
+                "(ncnn-vulkan WMMA shader would crash RADV ACO on RAVEN/GFX9 "
+                "and similar pre-coopmat GPUs; block-match path remains active).");
+            m_RifeNativeMode  = false;
+            m_RifeNativeReady = false;
+        } else if (!createRifeNativeResources(width, height)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-RIFE-β] init failed — block-match path remains active");
             m_RifeNativeMode  = false;
@@ -9502,7 +10077,19 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             // sync 模式期間 chainBusy 沒被量到 (async PROF block 跳過), 用 30s
             // 共用 cool-down 一過就 flip 回 async; 若 chain 仍重 (heavy compute /
             // 低 clock / GPU 滿載), 30 frame 內 chainBusy 偵測會再 demote 回 sync.
-            if (m_FrucChainAsyncTempDisabled.load(std::memory_order_relaxed)) {
+            //
+            // §R2-θ-spam (本次 review 補強): 加 tier-aware guard.  §J.3.e.2.i.60
+            // (v1.4.130) 之後 tier 變成 authoritative source — line 2415 每幀
+            // store(!cfgSync.useAsync) 強制 align TempDisabled 跟 tier 設定.
+            // 沒這個 guard 的話, T0 tier (useAsync=false) 下 line 2415 每幀
+            // store(true), 而這段 cool-down recovery 每幀看到 true → store(false)
+            // → SDL_LogInfo, 形成每幀 spam log 死循環 (v1.4.157 一個 session
+            // 噴 786 次 ASYNC log).  改成只在 tier 允許 async 時才嘗試 recovery:
+            // T0 → line 2415 鎖 sync, 此 block 整段跳過, 不再 toggle TempDisabled.
+            // T1+ → 行為跟舊版相同 (chain busy 偵測 demote, cool-down 30s 後 re-enable).
+            const auto cfgRecov = tierConfig(
+                (VkFrucTier)m_CurrentTier.load(std::memory_order_relaxed));
+            if (cfgRecov.useAsync && m_FrucChainAsyncTempDisabled.load(std::memory_order_relaxed)) {
                 const auto nowFca = std::chrono::steady_clock::now();
                 const auto sinceDgMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     nowFca - m_LastDowngradeTime).count();
@@ -10255,11 +10842,25 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
 //  10. vkQueuePresentKHR waiting on renderDoneSem[0]
 void VkFrucRenderer::renderFrame(AVFrame* frame)
 {
+    // §B Phase B 重啟 — composite path dispatch.  B7 stage runs export
+    // + import + fence sync only (no blit / present) so we can verify
+    // AMD driver doesn't device-lost on imported VkImage operations
+    // before we wire FRUC chain on top (B9).
+    if (m_CompositeMode == CompositeMode::D3D11_HEVC) {
+        renderFrameD3D11Import(frame);
+        return;
+    }
     // §J.3.e.2.i.3.e-SW dispatch: software upload path validates i.3
     // graphics pipeline in isolation from FFmpeg-Vulkan hwcontext.
     if (m_SwMode) {
         renderFrameSw(frame);
         return;
+    }
+
+    // v1.4.156 §R2-ζ-1: 每 frame call autotier (本來只在 chain timer 量測 block 內 call,
+    // 對 chain 不持續量的情境 (e.g., 780M no NvOF + idle scene) autotier 永遠不 fire).
+    if (m_FrucMode && m_StreamFps > 0) {
+        runAutotierTransition();
     }
 
     // §J.3.e.2.i.57 (v1.4.122) — latency-aware adaptive frame drop throttle.
@@ -10439,12 +11040,18 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     //   imgIdxC = interp_2 slot (only in TRIPLE, 2/3 點)
     // §J.3.e.2.i.60 (v1.4.127) — dualPresent 加 tier != DISABLED 條件.
     // T-1 tier 整個 skip FRUC interp + dual-present, render fallback 走 single-cmd.
-    const bool dualPresentThisFrame = m_DualMode && m_FrucMode && m_FrucReady
-                                      && !isFrucEffectivelyDisabled();
-    // §J.3.e.2.i.22 (v1.4.84) — present 端也對齊動態降階,
-    // 否則 swapchain 仍 acquire 3 張 image 但 interp_2 內容是舊資料.
-    const bool triplePresentThisFrame = dualPresentThisFrame && m_TripleMode
-                                        && !m_DynamicDualDowngrade.load();
+    //
+    // v1.4.151 §R2-α-3: always-on dual present.
+    // v1.4.153 §R2-γ-4: m_EffectiveRatio runtime gate (passive mode 用).
+    //   ACTIVE: m_EffectiveRatio 固定 (ctor 算好), 等同 always-on dual/triple.
+    //   PASSIVE: m_EffectiveRatio 由 ffmpeg.cpp 1s tick 動態 update (1/2/3).
+    const int effRatioThisFrame = m_EffectiveRatio.load(std::memory_order_acquire);
+    const bool dualPresentThisFrame =
+        (effRatioThisFrame >= 2 && m_DualMode && m_FrucMode && m_FrucReady
+         && !isFrucEffectivelyDisabled());
+    const bool triplePresentThisFrame =
+        (effRatioThisFrame == 3 && dualPresentThisFrame && m_TripleMode
+         && !m_DynamicDualDowngrade.load());
     // §J.3.e.2.i.10f Path D — early AVFrame release.  Decide if we'll split
     // renderFrame into two graphics-queue submits (1: image→buffer copy +
     // signal vkf->sem early so FFmpeg pool can reuse pool image after just
@@ -13206,6 +13813,11 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
 //   5. submit (wait acquireSem, signal renderDoneSem + fence) + present
 void VkFrucRenderer::renderFrameSw(AVFrame* frame)
 {
+    // v1.4.156 §R2-ζ-1: SW path 也每 frame call autotier (見 renderFrame 同樣處理).
+    if (m_FrucMode && m_StreamFps > 0) {
+        runAutotierTransition();
+    }
+
     // §J.3.e.2.i.57 (v1.4.122) — latency-aware adaptive frame drop (mirror HW path).
     // 同 renderFrame: 偵測 latency 達 threshold 則 skip chain (decoder pull
     // 不變, present 維持上一幀). 跟 HW path 共用 step state, 切 mode 不混亂.
@@ -13248,7 +13860,11 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
     // atomic 值避免本幀內 partial state（例如 acquire 走 dual 但 submit
     // 走 single → 半個 swapchain image 沒 release 卡到下一幀）.
     const bool frucPausedThisFrame = m_FRUCPaused.load();
-    const bool dualPresentThisFrame = m_DualMode && !frucPausedThisFrame;
+    // v1.4.153 §R2-γ-4: m_EffectiveRatio runtime gate (SW path 同 HW).
+    const int effRatioThisFrameSw = m_EffectiveRatio.load(std::memory_order_acquire);
+    const bool dualPresentThisFrame =
+        (effRatioThisFrameSw >= 2 && m_DualMode && m_FrucMode && m_FrucReady
+         && !isFrucEffectivelyDisabled() && !frucPausedThisFrame);
     // §J.3.e.2.i.8 Phase 1.5 — gate logic:
     //   isSynthFrame   = data[0] is null (Phase 1.5 ffmpeg.cpp path)
     //   useNativeDecode = native chain has produced a sample-able m_SwUploadImage

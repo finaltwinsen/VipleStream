@@ -241,6 +241,13 @@ public:
     // RS_D3D11 path 完全 ignore 這兩個 (UI 也只在 RS_VULKAN 時顯示).
     Q_PROPERTY(bool vkfrucEnableNvOf MEMBER vkfrucEnableNvOf NOTIFY vkfrucEnableNvOfChanged)
     Q_PROPERTY(bool vkfrucEnableTriple MEMBER vkfrucEnableTriple NOTIFY vkfrucEnableTripleChanged)
+    // v1.4.153 §R2-γ — Vulkan FRUC 主動/被動模式切換.
+    //   false (default): 主動補幀 — server 砍半推 + always-on dual-present.
+    //                    可預期低 server 負載, 客戶端 GPU 必須夠強.
+    //   true: 被動補幀 — server 全推 UI fps, 客戶端依 recv% 動態升 ratio
+    //                    (recv ≥ 70% → 1x pass-through, 40-70% → 2x dual,
+    //                    < 40% → 3x triple). 適合 server 端不一定能滿推時.
+    Q_PROPERTY(bool vkfrucPassiveMode MEMBER vkfrucPassiveMode NOTIFY vkfrucPassiveModeChanged)
     // §J.3.e.X Path β — native RIFE Vulkan flow extraction + native-res warp.
     // Beta feature; opt-in default-OFF.  Quality much higher than block-match
     // (5/5 score 0.95 ≈ perfect midpoint vs block-match 0% effective).
@@ -319,6 +326,7 @@ public:
     FrucQuality frucQuality;
     bool vkfrucEnableNvOf;     // §B-NVOF — VK_NV_optical_flow 取代 software block-match ME
     bool vkfrucEnableTriple;   // §B2 — TRIPLE 60→180 (兩 interp / server frame)
+    bool vkfrucPassiveMode;    // §R2-γ — false=主動補幀, true=被動補幀 (依 recv% 動態 ratio)
     bool vkfrucEnableNativeRife; // §J.3.e.X Path β — native RIFE flow + native warp (beta)
     int  vkfrucNativeRifeInferDim; // 128/256/384/512 — must be /128 aligned for RIFE-v4.25-lite
     // §J.3.e.2.i.11 (v1.4.66) — auto-tier 偵測結果 cache 欄位。
@@ -378,6 +386,7 @@ signals:
     void frucQualityChanged();
     void vkfrucEnableNvOfChanged();
     void vkfrucEnableTripleChanged();
+    void vkfrucPassiveModeChanged();
     void vkfrucEnableNativeRifeChanged();
     void vkfrucNativeRifeInferDimChanged();
     // §J.3.e.2.i.11 (v1.4.66) — auto-tier 偵測欄位 NOTIFY signals。
