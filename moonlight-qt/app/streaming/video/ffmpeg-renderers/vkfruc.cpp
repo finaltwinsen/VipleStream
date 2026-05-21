@@ -2425,6 +2425,23 @@ void VkFrucRenderer::runAutotierTransition()
         // 中間地帶 — 兩邊 counter 都不漲, 但也不重置 (保持 hysteresis)
     }
 
+    // §R2-ζ-3: extreme latency floor.
+    // 正常降階（>budget×0.40 連 20 frame）從 T5 到 T0 最多需要 80×4=320 frame。
+    // 極端過載（>budget×2.0）時等 320 frame 太久，直接 floor T0。
+    // m_TierLatencyHighFrames 在 latency>demoteThreshMs（>0.40）時遞增，
+    // 超過 2.0×budget 一定也超過 0.40×budget，所以可直接複用同一計數器。
+    if (!downgraded && cur > 0
+        && latencyMs > frameBudgetMs * 2.0
+        && m_TierLatencyHighFrames >= 3) {
+        target = 0;
+        downgraded = true;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TIER] §R2-ζ-3 extreme floor T%d → T0 "
+            "(latency=%.2fms > budget×2=%.2fms 連 3 frame; decode=%.2f chain=%.2f budget=%.2f)",
+            cur, latencyMs, frameBudgetMs * 2.0, decodeMsForTier, chainMean, frameBudgetMs);
+        m_TierLatencyHighFrames = 0;
+        m_TierLatencyLowFrames = 0;
+    }
     // 統一 latency-driven demote (cur > T0, 不降到 disable; T0 floor 由 R2-α-4 保護).
     // v1.4.156 §R2-ζ-2: 跳過 T1 (config 是 chainLv 2 + no NVOF, 比 T2 chainLv 1 還重,
     // demote 經過 T1 反向增加負擔). T2 直接 → T0, T1→T0 仍照走.
