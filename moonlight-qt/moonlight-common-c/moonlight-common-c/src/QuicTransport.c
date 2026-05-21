@@ -6,12 +6,20 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include <picoquic.h>
 #include <picoquic_utils.h>
 #include <picosocks.h>
 
-// ── Internal state ───────────────────────────────────────────
+// ── Internal constants ──────────────────────────────────────
+
+#define PROBE_TIMEOUT_THRESHOLD  5     // consecutive probe failures → inactive
+#define HEALTH_CHECK_INTERVAL_US 500000 // 500ms between health checks
+#define STATS_UPDATE_INTERVAL_US 100000 // 100ms between stats refresh
+#define SESSION_TICKET_MAX_SIZE  4096
+
+// ── Internal state ──────────────────────────────────────────
 
 typedef struct _QUIC_SUBFLOW {
     int id;
@@ -20,13 +28,22 @@ typedef struct _QUIC_SUBFLOW {
     struct sockaddr_storage localAddr;
     SOCKADDR_LEN addrLen;
     bool active;
-    // Per-subflow stats (updated by picoquic callbacks)
+    int picoquicPathId;
+
+    // Per-subflow stats (updated from picoquic path stats)
     float rttMs;
     float throughputMbps;
     float lossPercent;
     float reorderPercent;
     char name[LC_NETIF_MAX_NAME];
     int type;
+
+    // Path health tracking
+    int consecutiveTimeouts;
+    uint64_t lastProbeTime;
+    uint64_t lastRecvTime;
+    uint64_t bytesSent;
+    uint64_t bytesRecv;
 } QUIC_SUBFLOW;
 
 typedef struct _QUIC_TRANSPORT_CTX {
@@ -38,10 +55,15 @@ typedef struct _QUIC_TRANSPORT_CTX {
     int nextSubflowId;
 
     int scheduler[4]; // index 0 = default, 1..3 = per QUIC_FLOW_*
+    int aggregateRRIndex; // round-robin index for AGGREGATE
 
     // Receive callback
     QuicRecvCallback recvCallback;
     void* recvContext;
+
+    // Failover callback
+    QuicFailoverCallback failoverCallback;
+    void* failoverContext;
 
     // Per-flow sequence counters (for datagram header)
     unsigned short seqCounters[4];
@@ -53,20 +75,35 @@ typedef struct _QUIC_TRANSPORT_CTX {
     // Server mode
     bool isServer;
     unsigned short serverPort;
+
+    // Health check timing
+    uint64_t lastHealthCheck;
+    uint64_t lastStatsUpdate;
+
+    // Congestion control algorithm
+    int congestionAlgo; // QUIC_CC_*
+
+    // 0-RTT session ticket
+    unsigned char sessionTicket[SESSION_TICKET_MAX_SIZE];
+    int sessionTicketLen;
+    bool ticketReady;
 } QUIC_TRANSPORT_CTX;
 
 static QUIC_TRANSPORT_CTX g_ctx;
 static bool g_initialized = false;
 
-// ── Forward declarations ─────────────────────────────────────
+// ── Forward declarations ────────────────────────────────────
 
 static void quicIoThreadProc(void* context);
 static int quicDgramCallback(picoquic_cnx_t* cnx,
     uint64_t stream_id, uint8_t* bytes, size_t length,
     picoquic_call_back_event_t fin_or_event, void* callback_ctx,
     void* stream_ctx);
+static int quicSelectPath(unsigned char flowType, int dataLen);
+static void quicUpdatePathStats(void);
+static void quicCheckPathHealth(void);
 
-// ── Lifecycle ────────────────────────────────────────────────
+// ── Lifecycle ───────────────────────────────────────────────
 
 int quicTransportInit(void) {
     if (g_initialized)
@@ -80,6 +117,8 @@ int quicTransportInit(void) {
     g_ctx.scheduler[QUIC_FLOW_VIDEO] = QUIC_SCHED_ECF;
     g_ctx.scheduler[QUIC_FLOW_AUDIO] = QUIC_SCHED_REDUNDANT;
     g_ctx.scheduler[QUIC_FLOW_CONTROL] = QUIC_SCHED_MIN_RTT;
+
+    g_ctx.congestionAlgo = QUIC_CC_BBR;
 
     g_initialized = true;
     Limelog("[VIPLE-MPQUIC] Transport subsystem initialized\n");
@@ -101,7 +140,7 @@ void quicTransportCleanup(void) {
     Limelog("[VIPLE-MPQUIC] Transport subsystem cleaned up\n");
 }
 
-// ── Client connection ────────────────────────────────────────
+// ── Client connection ───────────────────────────────────────
 
 int quicConnect(const QUIC_CONNECT_PARAMS* params) {
     struct sockaddr_storage serverAddr;
@@ -111,7 +150,7 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
     if (!g_initialized)
         return -1;
     if (g_ctx.cnx)
-        return -1; // already connected
+        return -1;
 
     currentTime = picoquic_current_time();
 
@@ -123,14 +162,9 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
         "viplestream",  // ALPN
         quicDgramCallback,
         &g_ctx,
-        NULL,           // cnx_id_callback
-        NULL,           // cnx_id_callback_ctx
-        NULL,           // reset_seed
+        NULL, NULL, NULL,
         currentTime,
-        NULL,           // simulated_time
-        NULL,           // ticket_file (we handle tickets ourselves)
-        NULL,           // ticket_encryption_key
-        0               // ticket_encryption_key_length
+        NULL, NULL, NULL, 0
     );
 
     if (!g_ctx.quic) {
@@ -138,11 +172,9 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
         return -1;
     }
 
-    // Enable QUIC datagram extension (RFC 9221)
     picoquic_set_default_datagram_option(g_ctx.quic, 1);
-
-    // Enable multipath (RFC 9443)
     picoquic_set_default_multipath_option(g_ctx.quic, 1);
+    quicApplyCongestionAlgo(g_ctx.quic);
 
     // Copy server address with negotiated QUIC port
     memcpy(&serverAddr, &params->remoteAddr, params->remoteAddrLen);
@@ -171,10 +203,7 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
         return -1;
     }
 
-    // Enable multipath on this connection
     picoquic_set_multipath_option(g_ctx.cnx, 1);
-
-    // Enable datagram on this connection
     picoquic_mark_datagram_ready(g_ctx.cnx, 1);
 
     // Apply 0-RTT session ticket if available
@@ -182,9 +211,15 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
         ret = picoquic_set_0rtt_ticket(g_ctx.cnx,
             params->sessionTicket, (uint16_t)params->sessionTicketLen);
         if (ret == 0) {
-            Limelog("[VIPLE-MPQUIC] Applied 0-RTT session ticket\n");
+            Limelog("[VIPLE-MPQUIC] Applied 0-RTT session ticket (%d bytes)\n",
+                    params->sessionTicketLen);
         }
     }
+
+    g_ctx.ticketReady = false;
+    g_ctx.sessionTicketLen = 0;
+    g_ctx.lastHealthCheck = currentTime;
+    g_ctx.lastStatsUpdate = currentTime;
 
     // Start the I/O thread
     g_ctx.ioRunning = true;
@@ -214,7 +249,6 @@ void quicDisconnect(void) {
         g_ctx.cnx = NULL;
     }
 
-    // Close all subflow sockets
     for (int i = 0; i < g_ctx.subflowCount; i++) {
         if (g_ctx.subflows[i].sock != INVALID_SOCKET) {
             closeSocket(g_ctx.subflows[i].sock);
@@ -234,7 +268,7 @@ bool quicIsConnected(void) {
            picoquic_get_cnx_state(g_ctx.cnx) == picoquic_state_ready;
 }
 
-// ── Server ───────────────────────────────────────────────────
+// ── Server ──────────────────────────────────────────────────
 
 int quicServerStart(unsigned short port, const char* certPath,
                     const char* keyPath) {
@@ -246,13 +280,10 @@ int quicServerStart(unsigned short port, const char* certPath,
     currentTime = picoquic_current_time();
 
     g_ctx.quic = picoquic_create(
-        128,            // max connections
-        certPath,
-        keyPath,
-        NULL,           // cert_root
-        "viplestream",  // ALPN
-        quicDgramCallback,
-        &g_ctx,
+        128,
+        certPath, keyPath,
+        NULL, "viplestream",
+        quicDgramCallback, &g_ctx,
         NULL, NULL, NULL,
         currentTime,
         NULL, NULL, NULL, 0
@@ -265,6 +296,7 @@ int quicServerStart(unsigned short port, const char* certPath,
 
     picoquic_set_default_datagram_option(g_ctx.quic, 1);
     picoquic_set_default_multipath_option(g_ctx.quic, 1);
+    quicApplyCongestionAlgo(g_ctx.quic);
 
     g_ctx.isServer = true;
     g_ctx.serverPort = port;
@@ -294,7 +326,92 @@ void quicServerStop(void) {
     g_ctx.isServer = false;
 }
 
-// ── Subflow management ───────────────────────────────────────
+// ── Scheduler: path selection ───────────────────────────────
+// Returns the index into g_ctx.subflows[] for the best path,
+// or -1 if no active subflow exists.
+
+static int quicSelectPath(unsigned char flowType, int dataLen) {
+    int strategy;
+    int i, bestIdx;
+
+    if (g_ctx.subflowCount == 0)
+        return -1;
+    if (g_ctx.subflowCount == 1)
+        return g_ctx.subflows[0].active ? 0 : -1;
+
+    // Resolve AUTO to per-flow default
+    strategy = g_ctx.scheduler[flowType];
+    if (strategy == QUIC_SCHED_AUTO) {
+        switch (flowType) {
+        case QUIC_FLOW_VIDEO:   strategy = QUIC_SCHED_ECF; break;
+        case QUIC_FLOW_AUDIO:   strategy = QUIC_SCHED_REDUNDANT; break;
+        case QUIC_FLOW_CONTROL: strategy = QUIC_SCHED_MIN_RTT; break;
+        default:                strategy = QUIC_SCHED_MIN_RTT; break;
+        }
+    }
+
+    switch (strategy) {
+
+    case QUIC_SCHED_MIN_RTT: {
+        float bestRtt = 1e9f;
+        bestIdx = -1;
+        for (i = 0; i < g_ctx.subflowCount; i++) {
+            if (g_ctx.subflows[i].active && g_ctx.subflows[i].rttMs < bestRtt) {
+                bestRtt = g_ctx.subflows[i].rttMs;
+                bestIdx = i;
+            }
+        }
+        return bestIdx;
+    }
+
+    case QUIC_SCHED_ECF: {
+        // Earliest Completion First: pick path where
+        // (data_len / throughput) + rtt/2 is smallest
+        float bestTime = 1e9f;
+        bestIdx = -1;
+        for (i = 0; i < g_ctx.subflowCount; i++) {
+            if (!g_ctx.subflows[i].active)
+                continue;
+            float tput = g_ctx.subflows[i].throughputMbps;
+            if (tput < 0.001f) tput = 0.001f;
+            float transferTime = ((float)dataLen * 8.0f) / (tput * 1e6f);
+            float completion = transferTime + (g_ctx.subflows[i].rttMs / 2000.0f);
+            if (completion < bestTime) {
+                bestTime = completion;
+                bestIdx = i;
+            }
+        }
+        return bestIdx;
+    }
+
+    case QUIC_SCHED_AGGREGATE: {
+        // Round-robin across active subflows
+        int start = g_ctx.aggregateRRIndex;
+        for (i = 0; i < g_ctx.subflowCount; i++) {
+            int idx = (start + i) % g_ctx.subflowCount;
+            if (g_ctx.subflows[idx].active) {
+                g_ctx.aggregateRRIndex = (idx + 1) % g_ctx.subflowCount;
+                return idx;
+            }
+        }
+        return -1;
+    }
+
+    case QUIC_SCHED_REDUNDANT:
+        // Caller handles redundant by iterating all active subflows
+        return -2; // sentinel: send on all
+
+    default:
+        // Fallback: first active
+        for (i = 0; i < g_ctx.subflowCount; i++) {
+            if (g_ctx.subflows[i].active)
+                return i;
+        }
+        return -1;
+    }
+}
+
+// ── Subflow management ──────────────────────────────────────
 
 int quicAddSubflow(int interfaceIndex,
                    const struct sockaddr_storage* localAddr,
@@ -327,6 +444,7 @@ int quicAddSubflow(int interfaceIndex,
     memcpy(&sf->localAddr, localAddr, addrLen);
     sf->addrLen = addrLen;
     sf->active = true;
+    sf->lastRecvTime = picoquic_current_time();
 
     // Register with picoquic multipath
     picoquic_probe_new_path(g_ctx.cnx,
@@ -334,24 +452,27 @@ int quicAddSubflow(int interfaceIndex,
         (const struct sockaddr*)&g_ctx.cnx->path[0]->peer_addr,
         picoquic_current_time());
 
+    // Map to picoquic path ID (current path count - 1 after probe)
+    sf->picoquicPathId = picoquic_get_cnx_nb_paths(g_ctx.cnx) - 1;
+
     g_ctx.subflowCount++;
-    Limelog("[VIPLE-MPQUIC] Added subflow %d on interface %d\n",
-            sf->id, interfaceIndex);
+    Limelog("[VIPLE-MPQUIC] Added subflow %d on interface %d (path %d)\n",
+            sf->id, interfaceIndex, sf->picoquicPathId);
     return sf->id;
 }
 
 int quicRemoveSubflow(int subflowId) {
     for (int i = 0; i < g_ctx.subflowCount; i++) {
         if (g_ctx.subflows[i].id == subflowId) {
+            Limelog("[VIPLE-MPQUIC] Removing subflow %d (if %d)\n",
+                    subflowId, g_ctx.subflows[i].interfaceIndex);
             if (g_ctx.subflows[i].sock != INVALID_SOCKET) {
                 closeSocket(g_ctx.subflows[i].sock);
             }
-            // Shift remaining subflows
             for (int j = i; j < g_ctx.subflowCount - 1; j++) {
                 g_ctx.subflows[j] = g_ctx.subflows[j + 1];
             }
             g_ctx.subflowCount--;
-            Limelog("[VIPLE-MPQUIC] Removed subflow %d\n", subflowId);
             return 0;
         }
     }
@@ -362,14 +483,42 @@ int quicSetScheduler(unsigned char flowType, int strategy) {
     if (flowType > 3 || strategy < 0 || strategy > QUIC_SCHED_ECF)
         return -1;
     g_ctx.scheduler[flowType] = strategy;
+    Limelog("[VIPLE-MPQUIC] Scheduler for flow %d set to %d\n",
+            flowType, strategy);
     return 0;
 }
 
-// ── Datagram I/O ─────────────────────────────────────────────
+void quicSetCongestionAlgo(int algo) {
+    if (algo < QUIC_CC_NEWRENO || algo > QUIC_CC_CUBIC)
+        algo = QUIC_CC_BBR;
+    g_ctx.congestionAlgo = algo;
+}
 
-int quicSendDatagram(unsigned char flowType,
-                     const unsigned char* data, int dataLen) {
-    unsigned char* frame;
+static void quicApplyCongestionAlgo(picoquic_quic_t* quic) {
+    const char* algoName;
+    switch (g_ctx.congestionAlgo) {
+    case QUIC_CC_NEWRENO:
+        picoquic_set_default_congestion_algorithm(quic, picoquic_newreno_algorithm);
+        algoName = "NewReno";
+        break;
+    case QUIC_CC_CUBIC:
+        picoquic_set_default_congestion_algorithm(quic, picoquic_cubic_algorithm);
+        algoName = "Cubic";
+        break;
+    case QUIC_CC_BBR:
+    default:
+        picoquic_set_default_congestion_algorithm(quic, picoquic_bbr_algorithm);
+        algoName = "BBR";
+        break;
+    }
+    Limelog("[VIPLE-MPQUIC] Congestion algorithm: %s\n", algoName);
+}
+
+// ── Datagram I/O ────────────────────────────────────────────
+
+static int quicSendOnPath(int pathIdx, unsigned char flowType,
+                          const unsigned char* data, int dataLen) {
+    unsigned char frame[2048];
     QUIC_DGRAM_HEADER hdr;
     int frameLen;
 
@@ -377,26 +526,59 @@ int quicSendDatagram(unsigned char flowType,
         return -1;
 
     frameLen = QUIC_DGRAM_HEADER_SIZE + dataLen;
-    frame = (unsigned char*)malloc(frameLen);
-    if (!frame)
+    if (frameLen > (int)sizeof(frame))
         return -1;
 
-    // Build datagram header
     hdr.flowType = flowType;
     hdr.reserved = 0;
     hdr.seq = htons(g_ctx.seqCounters[flowType]++);
     memcpy(frame, &hdr, QUIC_DGRAM_HEADER_SIZE);
     memcpy(frame + QUIC_DGRAM_HEADER_SIZE, data, dataLen);
 
-    int ret = picoquic_queue_datagram_frame(g_ctx.cnx, frameLen, frame);
-
-    free(frame);
-
-    if (ret != 0) {
-        return -1;
+    // picoquic handles multipath internally; we hint the preferred path
+    // by setting path affinity before queuing
+    if (pathIdx >= 0 && pathIdx < g_ctx.subflowCount) {
+        int pqPath = g_ctx.subflows[pathIdx].picoquicPathId;
+        picoquic_set_cnx_path_priority(g_ctx.cnx, pqPath, 1);
     }
 
-    return 0;
+    int ret = picoquic_queue_datagram_frame(g_ctx.cnx, frameLen, frame);
+    if (ret == 0 && pathIdx >= 0 && pathIdx < g_ctx.subflowCount) {
+        g_ctx.subflows[pathIdx].bytesSent += dataLen;
+    }
+    return (ret == 0) ? 0 : -1;
+}
+
+int quicSendDatagram(unsigned char flowType,
+                     const unsigned char* data, int dataLen) {
+    int pathIdx;
+
+    if (!quicIsConnected())
+        return -1;
+
+    pathIdx = quicSelectPath(flowType, dataLen);
+
+    if (pathIdx == -2) {
+        // REDUNDANT: send on every active subflow
+        int sent = 0;
+        for (int i = 0; i < g_ctx.subflowCount; i++) {
+            if (g_ctx.subflows[i].active) {
+                if (quicSendOnPath(i, flowType, data, dataLen) == 0)
+                    sent++;
+            }
+        }
+        return (sent > 0) ? 0 : -1;
+    }
+
+    if (pathIdx < 0) {
+        // No active path — try first subflow as last resort
+        if (g_ctx.subflowCount > 0)
+            pathIdx = 0;
+        else
+            return -1;
+    }
+
+    return quicSendOnPath(pathIdx, flowType, data, dataLen);
 }
 
 void quicSetRecvCallback(QuicRecvCallback callback, void* context) {
@@ -404,18 +586,116 @@ void quicSetRecvCallback(QuicRecvCallback callback, void* context) {
     g_ctx.recvContext = context;
 }
 
-// ── Reliable stream I/O ──────────────────────────────────────
+void quicSetFailoverCallback(QuicFailoverCallback callback, void* context) {
+    g_ctx.failoverCallback = callback;
+    g_ctx.failoverContext = context;
+}
+
+// ── Reliable stream I/O ─────────────────────────────────────
 
 int quicSendStream(const unsigned char* data, int dataLen) {
     if (!quicIsConnected())
         return -1;
 
-    // Stream 0 is reserved for reliable control data
     int ret = picoquic_add_to_stream(g_ctx.cnx, 0, data, dataLen, 0);
     return (ret == 0) ? 0 : -1;
 }
 
-// ── Monitoring ───────────────────────────────────────────────
+// ── Path stats update ───────────────────────────────────────
+// Pull RTT / throughput / loss from picoquic path objects
+
+static void quicUpdatePathStats(void) {
+    int pathCount;
+    uint64_t now;
+
+    if (!g_ctx.cnx)
+        return;
+
+    now = picoquic_current_time();
+    if (now - g_ctx.lastStatsUpdate < STATS_UPDATE_INTERVAL_US)
+        return;
+    g_ctx.lastStatsUpdate = now;
+
+    pathCount = picoquic_get_cnx_nb_paths(g_ctx.cnx);
+
+    for (int i = 0; i < g_ctx.subflowCount; i++) {
+        int pqPath = g_ctx.subflows[i].picoquicPathId;
+        if (pqPath < 0 || pqPath >= pathCount)
+            continue;
+
+        // RTT in microseconds from picoquic
+        uint64_t rttUs = picoquic_get_cnx_path_rtt(g_ctx.cnx, pqPath);
+        g_ctx.subflows[i].rttMs = (float)rttUs / 1000.0f;
+
+        // Estimate throughput from CWIN and RTT
+        uint64_t cwin = picoquic_get_cnx_path_cwin(g_ctx.cnx, pqPath);
+        if (rttUs > 0) {
+            // throughput ≈ CWIN / RTT (bytes/sec → Mbps)
+            double bps = ((double)cwin / (double)rttUs) * 1e6;
+            g_ctx.subflows[i].throughputMbps = (float)(bps / 1e6 * 8.0);
+        }
+    }
+}
+
+// ── Path health monitoring ──────────────────────────────────
+// Detect dead paths via increasing RTT or missing responses
+
+static void quicCheckPathHealth(void) {
+    uint64_t now;
+
+    if (!g_ctx.cnx)
+        return;
+
+    now = picoquic_current_time();
+    if (now - g_ctx.lastHealthCheck < HEALTH_CHECK_INTERVAL_US)
+        return;
+    g_ctx.lastHealthCheck = now;
+
+    for (int i = 0; i < g_ctx.subflowCount; i++) {
+        QUIC_SUBFLOW* sf = &g_ctx.subflows[i];
+
+        // Check if path has stalled (no data received for > 5x RTT or 3 seconds)
+        uint64_t stallThreshold = (uint64_t)(sf->rttMs * 5000.0f);
+        if (stallThreshold < 3000000) stallThreshold = 3000000; // min 3s
+
+        if (sf->active && sf->lastRecvTime > 0 &&
+            (now - sf->lastRecvTime) > stallThreshold) {
+            sf->consecutiveTimeouts++;
+
+            if (sf->consecutiveTimeouts >= PROBE_TIMEOUT_THRESHOLD) {
+                sf->active = false;
+                Limelog("[VIPLE-MPQUIC] Subflow %d (if %d) marked INACTIVE "
+                        "(%d consecutive timeouts, last recv %.1fs ago)\n",
+                        sf->id, sf->interfaceIndex,
+                        sf->consecutiveTimeouts,
+                        (float)(now - sf->lastRecvTime) / 1e6f);
+
+                if (g_ctx.failoverCallback) {
+                    g_ctx.failoverCallback(sf->id, sf->interfaceIndex,
+                                           false, g_ctx.failoverContext);
+                }
+            }
+        } else if (sf->active) {
+            sf->consecutiveTimeouts = 0;
+        }
+
+        // Re-activate a previously dead path if picoquic reports it alive
+        if (!sf->active && sf->lastRecvTime > 0 &&
+            (now - sf->lastRecvTime) < stallThreshold) {
+            sf->active = true;
+            sf->consecutiveTimeouts = 0;
+            Limelog("[VIPLE-MPQUIC] Subflow %d (if %d) re-activated\n",
+                    sf->id, sf->interfaceIndex);
+
+            if (g_ctx.failoverCallback) {
+                g_ctx.failoverCallback(sf->id, sf->interfaceIndex,
+                                       true, g_ctx.failoverContext);
+            }
+        }
+    }
+}
+
+// ── Monitoring ──────────────────────────────────────────────
 
 int quicGetSubflowStats(PQUIC_SUBFLOW_STATS out, int maxCount) {
     int count = g_ctx.subflowCount;
@@ -446,16 +726,35 @@ int quicGetActiveSubflowCount(void) {
     return count;
 }
 
-// ── Session ticket ───────────────────────────────────────────
+// ── Session ticket (0-RTT) ──────────────────────────────────
 
 int quicGetSessionTicket(unsigned char* buf, int bufLen) {
-    // TODO: Extract session ticket from picoquic after handshake
-    (void)buf;
-    (void)bufLen;
-    return 0;
+    if (!g_ctx.ticketReady || g_ctx.sessionTicketLen == 0)
+        return 0;
+    if (bufLen < g_ctx.sessionTicketLen)
+        return 0;
+    memcpy(buf, g_ctx.sessionTicket, g_ctx.sessionTicketLen);
+    return g_ctx.sessionTicketLen;
 }
 
-// ── picoquic callbacks ───────────────────────────────────────
+static void quicTryExtractTicket(void) {
+    const uint8_t* ticket;
+    uint16_t ticketLen;
+
+    if (g_ctx.ticketReady || !g_ctx.cnx)
+        return;
+
+    // picoquic stores the TLS session ticket after handshake
+    ticket = picoquic_get_app_message(g_ctx.cnx, &ticketLen);
+    if (ticket && ticketLen > 0 && ticketLen <= SESSION_TICKET_MAX_SIZE) {
+        memcpy(g_ctx.sessionTicket, ticket, ticketLen);
+        g_ctx.sessionTicketLen = ticketLen;
+        g_ctx.ticketReady = true;
+        Limelog("[VIPLE-MPQUIC] Session ticket captured (%d bytes)\n", ticketLen);
+    }
+}
+
+// ── picoquic callbacks ──────────────────────────────────────
 
 static int quicDgramCallback(picoquic_cnx_t* cnx,
     uint64_t stream_id, uint8_t* bytes, size_t length,
@@ -474,11 +773,23 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                 (int)(length - QUIC_DGRAM_HEADER_SIZE),
                 ctx->recvContext);
         }
+        // Update recv time on all subflows (we can't easily determine
+        // which picoquic path received this datagram from the callback)
+        {
+            uint64_t now = picoquic_current_time();
+            int pathId = picoquic_get_cnx_last_recv_path(cnx);
+            for (int i = 0; i < ctx->subflowCount; i++) {
+                if (ctx->subflows[i].picoquicPathId == pathId) {
+                    ctx->subflows[i].lastRecvTime = now;
+                    ctx->subflows[i].bytesRecv += length;
+                    break;
+                }
+            }
+        }
         break;
 
     case picoquic_callback_stream_data:
     case picoquic_callback_stream_fin:
-        // Reliable stream data (control channel on stream 0)
         if (stream_id == 0 && ctx->recvCallback) {
             ctx->recvCallback(QUIC_FLOW_CONTROL, bytes, (int)length,
                               ctx->recvContext);
@@ -486,12 +797,26 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
         break;
 
     case picoquic_callback_ready:
-        Limelog("[VIPLE-MPQUIC] Connection ready\n");
+        Limelog("[VIPLE-MPQUIC] Connection ready (handshake complete)\n");
+        quicTryExtractTicket();
         break;
 
     case picoquic_callback_close:
     case picoquic_callback_application_close:
         Limelog("[VIPLE-MPQUIC] Connection closed\n");
+        break;
+
+    case picoquic_callback_path_available:
+        Limelog("[VIPLE-MPQUIC] New path available (id=%d)\n",
+                (int)picoquic_get_cnx_nb_paths(cnx) - 1);
+        break;
+
+    case picoquic_callback_path_suspended:
+        Limelog("[VIPLE-MPQUIC] Path suspended\n");
+        break;
+
+    case picoquic_callback_path_deleted:
+        Limelog("[VIPLE-MPQUIC] Path deleted\n");
         break;
 
     default:
@@ -501,9 +826,7 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
     return 0;
 }
 
-// ── I/O thread ───────────────────────────────────────────────
-// Drives the picoquic event loop: polls sockets, processes
-// incoming packets, triggers sends.
+// ── I/O thread ──────────────────────────────────────────────
 
 static void quicIoThreadProc(void* context) {
     QUIC_TRANSPORT_CTX* ctx = (QUIC_TRANSPORT_CTX*)context;
@@ -538,66 +861,113 @@ static void quicIoThreadProc(void* context) {
     }
 
     while (ctx->ioRunning) {
-        int64_t deltaT = 0;
         struct sockaddr_storage peerAddr;
         SOCKADDR_LEN peerLen = sizeof(peerAddr);
         uint64_t currentTime = picoquic_current_time();
 
-        // Determine which socket to poll
-        SOCKET pollSock = INVALID_SOCKET;
-        if (ctx->isServer) {
-            pollSock = serverSock;
-        } else if (ctx->subflowCount > 0) {
-            pollSock = ctx->subflows[0].sock;
+        // Build fd_set for all subflow sockets + server socket
+        fd_set readSet;
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 1000; // 1ms poll
+        FD_ZERO(&readSet);
+
+        SOCKET maxSock = INVALID_SOCKET;
+
+        if (ctx->isServer && serverSock != INVALID_SOCKET) {
+            FD_SET(serverSock, &readSet);
+            maxSock = serverSock;
         }
 
-        if (pollSock != INVALID_SOCKET) {
-            // Non-blocking poll with short timeout
-            fd_set readSet;
-            struct timeval tv;
-            tv.tv_sec = 0;
-            tv.tv_usec = 1000; // 1ms poll
-            FD_ZERO(&readSet);
-            FD_SET(pollSock, &readSet);
+        // Poll ALL subflow sockets (multipath: each path has its own socket)
+        for (int i = 0; i < ctx->subflowCount; i++) {
+            if (ctx->subflows[i].sock != INVALID_SOCKET) {
+                FD_SET(ctx->subflows[i].sock, &readSet);
+                if (ctx->subflows[i].sock > maxSock || maxSock == INVALID_SOCKET) {
+                    maxSock = ctx->subflows[i].sock;
+                }
+            }
+        }
 
-            int selRet = select((int)(pollSock + 1), &readSet, NULL, NULL, &tv);
+        if (maxSock != INVALID_SOCKET) {
+            int selRet = select((int)(maxSock + 1), &readSet, NULL, NULL, &tv);
             if (selRet > 0) {
-                SOCK_RET recvLen = recvfrom(pollSock, (char*)recvBuf,
-                    sizeof(recvBuf), 0,
-                    (struct sockaddr*)&peerAddr, &peerLen);
+                // Check server socket
+                if (ctx->isServer && serverSock != INVALID_SOCKET &&
+                    FD_ISSET(serverSock, &readSet)) {
+                    peerLen = sizeof(peerAddr);
+                    SOCK_RET recvLen = recvfrom(serverSock, (char*)recvBuf,
+                        sizeof(recvBuf), 0,
+                        (struct sockaddr*)&peerAddr, &peerLen);
+                    if (recvLen > 0) {
+                        picoquic_incoming_packet(ctx->quic,
+                            recvBuf, (size_t)recvLen,
+                            (struct sockaddr*)&peerAddr,
+                            (struct sockaddr*)&((struct sockaddr_in6){
+                                .sin6_family = AF_INET6,
+                                .sin6_port = htons(ctx->serverPort),
+                                .sin6_addr = in6addr_any
+                            }),
+                            0, 0, currentTime);
+                    }
+                }
 
-                if (recvLen > 0) {
-                    picoquic_incoming_packet(ctx->quic,
-                        recvBuf, (size_t)recvLen,
-                        (struct sockaddr*)&peerAddr,
-                        NULL, // local addr (not needed for single-socket)
-                        0,    // if_index
-                        0,    // ECN
-                        currentTime);
+                // Check each subflow socket
+                for (int i = 0; i < ctx->subflowCount; i++) {
+                    SOCKET sf = ctx->subflows[i].sock;
+                    if (sf != INVALID_SOCKET && FD_ISSET(sf, &readSet)) {
+                        peerLen = sizeof(peerAddr);
+                        SOCK_RET recvLen = recvfrom(sf, (char*)recvBuf,
+                            sizeof(recvBuf), 0,
+                            (struct sockaddr*)&peerAddr, &peerLen);
+                        if (recvLen > 0) {
+                            picoquic_incoming_packet(ctx->quic,
+                                recvBuf, (size_t)recvLen,
+                                (struct sockaddr*)&peerAddr,
+                                (struct sockaddr*)&ctx->subflows[i].localAddr,
+                                ctx->subflows[i].interfaceIndex,
+                                0, currentTime);
+                        }
+                    }
                 }
             }
         } else {
             PltSleepMs(1);
         }
 
-        // Process picoquic state machine: generate outgoing packets
+        // Process picoquic state machine
         picoquic_cnx_t* iterCnx = picoquic_get_earliest_cnx_to_wake(
             ctx->quic, currentTime + 1000);
 
         while (iterCnx != NULL) {
-            struct sockaddr_storage destAddr;
+            struct sockaddr_storage destAddr, localAddr;
             SOCKADDR_LEN destLen = sizeof(destAddr);
+            SOCKADDR_LEN localLen = sizeof(localAddr);
             size_t sendLen = 0;
-            int ret;
 
-            ret = picoquic_prepare_next_packet(iterCnx,
+            int ret = picoquic_prepare_next_packet_ex(iterCnx,
                 picoquic_current_time(),
                 sendBuf, sizeof(sendBuf), &sendLen,
                 (struct sockaddr*)&destAddr, &destLen,
+                (struct sockaddr*)&localAddr, &localLen,
                 NULL, NULL, NULL);
 
             if (ret == 0 && sendLen > 0) {
-                SOCKET outSock = pollSock;
+                // Find matching subflow socket for the local address
+                SOCKET outSock = INVALID_SOCKET;
+                for (int i = 0; i < ctx->subflowCount; i++) {
+                    if (ctx->subflows[i].sock != INVALID_SOCKET &&
+                        ctx->subflows[i].localAddr.ss_family == localAddr.ss_family) {
+                        outSock = ctx->subflows[i].sock;
+                        break;
+                    }
+                }
+                if (outSock == INVALID_SOCKET && ctx->isServer) {
+                    outSock = serverSock;
+                }
+                if (outSock == INVALID_SOCKET && ctx->subflowCount > 0) {
+                    outSock = ctx->subflows[0].sock;
+                }
                 if (outSock != INVALID_SOCKET) {
                     sendto(outSock, (const char*)sendBuf, (int)sendLen, 0,
                            (struct sockaddr*)&destAddr, destLen);
@@ -606,6 +976,15 @@ static void quicIoThreadProc(void* context) {
 
             if (ret != 0 || sendLen == 0)
                 break;
+        }
+
+        // Periodic maintenance
+        quicUpdatePathStats();
+        quicCheckPathHealth();
+
+        // Try to extract session ticket (may become available after handshake)
+        if (!ctx->ticketReady) {
+            quicTryExtractTicket();
         }
     }
 

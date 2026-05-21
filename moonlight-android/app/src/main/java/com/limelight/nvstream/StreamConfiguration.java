@@ -28,6 +28,9 @@ public class StreamConfiguration {
     private int colorRange;
     private int colorSpace;
     private boolean persistGamepadsAfterDisconnect;
+    private boolean enableMpQuic;
+    private int mpQuicScheduler;
+    private int mpQuicPort = 48010;
 
     public static class Builder {
         private StreamConfiguration config = new StreamConfiguration();
@@ -128,6 +131,12 @@ public class StreamConfiguration {
             return this;
         }
 
+        public StreamConfiguration.Builder setMpQuic(boolean enable, int scheduler) {
+            config.enableMpQuic = enable;
+            config.mpQuicScheduler = scheduler;
+            return this;
+        }
+
         public StreamConfiguration build() {
             return config;
         }
@@ -220,5 +229,17 @@ public class StreamConfiguration {
 
     public int getColorSpace() {
         return colorSpace;
+    }
+
+    public boolean getMpQuicEnabled() {
+        return enableMpQuic;
+    }
+
+    public int getMpQuicScheduler() {
+        return mpQuicScheduler;
+    }
+
+    public int getMpQuicPort() {
+        return mpQuicPort;
     }
 }

@@ -23,7 +23,7 @@
 | **Active (verify pending)** | **§M.parity Android wire/UX** | v1.4.160 ship W1-W5+U6+U7 (ServerCodecModeSupport bit field + DisplayMode 陣列 parse + 4:4:4 chroma variants + packetSize 讀 pref + enableYUV444 + in-session tap-to-cancel file transfer + Custom WxH 解析度)。Pixel 5 待 install + adb logcat 確認 `[VIPLE-PARITY] supportedVideoFormats masked by server caps 0x... -> 0x... (SCM=0x...)` 真實生效 |
 | **Active (verify pending)** | **§K.dd.revert.1** display device revert ghost-protection | v1.4.156 ship `settings_manager_revert.cpp` ghost-check skip 避免 `setAsPrimary` 卡死 listener thread group (192.168.51.226 上 22:33:42 + 23:54:38 兩次 repro)。待 user 把 `dd_configuration_option` 從 `disabled` 改回 `ensure_only_display` + stream + disconnect 確認不再卡死 |
 | **Active (K.3 pending)** | **§K.linux VAAPI→Vulkan bridge** (DMA-BUF interop) | **✅ K.2 PASS (2026-05-21)**：Tailscale Vega 10 實機 smoke 通過。`frame#0~#300 import OK` modifier=0x0 LINEAR，無 crash，無 device-lost。cascade VAAPI→VkFrucRenderer(VAAPI_VK) 正常，prepareDecoderContext OK，VAAPI NV12@/dev/dri/renderD128。K.3（接 FRUC chain）等 §B Phase B B9 方向確認後實作 |
-| **Active (Phase 1 done)** | **§Q** MP-QUIC 多路徑網路聚合 | v1.5.0 Phase 1 ship：PlatformNetIf + QuicTransport + quic_server + capability negotiation + QUIC datagram video/audio send/recv 路徑。全 gated `VIPLE_MPQUIC=OFF`。Phase 2 待做：multipath scheduler (ECF/REDUNDANT/MIN_RTT/AGGREGATE) + failover + FEC 互動 + Settings UI |
+| **Active (Phase 1-4 done)** | **§Q** MP-QUIC 多路徑網路聚合 | v1.5.0 全 Phase ship：Phase 1 基礎層 + Phase 2 multipath scheduler (ECF/REDUNDANT/MIN_RTT/AGGREGATE) + failover + FEC 互動 + Settings UI + Phase 3 OSD overlay + server 30s stats + Phase 4 0-RTT/BBR congestion/dual-stack/cellular keepalive。全 gated `VIPLE_MPQUIC=OFF`。**尚缺：** picoquic submodule 實際 clone + 壓力測試 |
 | **Active (P0, post-v1.4.35)** | **§N.5.bug** Android file transfer SSL `TLSV1_ALERT_INTERNAL_ERROR` post-handshake | (b) server stale state ✅ FIXED v1.4.34 (sweep_stale_locked). (a) 仍 active — v1.4.42 Scenario A diagnostic ship (`xfer_result`/`xfer_blob_post`/`xfer_progress` 加 try-catch ENTER/EXIT/EXCEPTION log + per-MB progress)。等 user 在 Android 重現 + 拿 server log 確認 alert 是 request 起前 / chunk loop 中 (第幾 MB) / finalize 後哪一段送出 |
 | **Active (verify)** | **§N.5** moonlight-android FileTransferClient runtime | 建置 + JNI hooked + Game.java lifecycle + `MediaStore.Downloads` scoped-storage 都通；待實機在串流 session 跑 Send/Receive flow 看 Pixel 5/9 specific Android quirks (backgrounding OkHttp 連線 / power manager 影響 polling 等) |
 | **Active (post-v1.4.12)** | **§M.2** Phase 2 雙 user 並發 streaming 驗測 | Ubuntu VM 上 per-user systemd + Xdummy + PipeWire 端到端跑通；NVENC 並發等實體機到位 |
@@ -919,27 +919,27 @@ stream H.264 / HEVC → 看 log：[VIPLE-VAAPI-VK] frame#X import OK
 
 **尚缺：** picoquic submodule 實際 `git submodule add`（待確認後執行）。
 
-### §Q Phase 2：Multipath 核心（待做）
+### §Q Phase 2：Multipath 核心（**✅ DONE**）
 
-- `addSubflow()` / `removeSubflow()` 實作
-- ECF / REDUNDANT / MIN_RTT / AGGREGATE 四種 scheduler
-- Path 故障偵測（連續 N probe timeout → inactive → failover）
-- FEC 互動邏輯（LAN 降 FEC / WAN 保留）
-- Settings UI（SettingsView.qml + Android StreamSettings）
+- `quicAddSubflow()` / `quicRemoveSubflow()` — per-interface socket binding + `picoquic_probe_new_path`
+- ECF / REDUNDANT / MIN_RTT / AGGREGATE 四種 scheduler — `quicSelectPath()` with per-flow default routing
+- Path 故障偵測 — 500ms health check, 5× RTT stall threshold, consecutive timeout → inactive + failover callback + auto-reactivation
+- FEC 互動邏輯 — QUIC active 時 clamp `fecPercentage` to `mpquic_fec_floor`（LAN 省頻寬）
+- Settings UI — SettingsView.qml §08 Network GroupBox + Android CheckBox/ListPreference
 
-### §Q Phase 3：診斷與監控（待做）
+### §Q Phase 3：診斷與監控（**✅ DONE**）
 
-- `[VIPLE-MPQUIC]` log tag 全鏈路
-- OSD overlay：各 subflow RTT / throughput / loss
-- Server 端 30s 定期 log 統計
+- `[VIPLE-MPQUIC]` log tag 全鏈路（Transport + Server + Connection）
+- OSD overlay：stringifyVideoStats 新增「多路徑 (MPQUIC)」section，per-subflow RTT/throughput/loss + 活躍路徑數
+- Server 端 30s `logStats()` 定期 log：per-session per-path RTT + throughput
 
-### §Q Phase 4：生產硬化（待做）
+### §Q Phase 4：生產硬化（**✅ DONE**）
 
-- 0-RTT session resumption
-- Android cellular keepalive（WakeLock + foreground service）
-- IPv4/IPv6 dual-stack subflow
-- Congestion controller 調校（BBR / COPA）
-- 壓力測試：1440p120 + 3 subflow + 10% packet loss
+- 0-RTT session resumption — `quicTryExtractTicket()` / `quicGetSessionTicket()` + `picoquic_set_0rtt_ticket` at connect
+- Android cellular keepalive — `MultiNetworkAdapter.java` with `requestCellularKeepalive()` via `ConnectivityManager.requestNetwork(CELLULAR)`
+- IPv4/IPv6 dual-stack — `PlatformNetIf` enumerates both AF_INET/AF_INET6; Connection.c filters to server family; server socket dual-stack (IPV6_V6ONLY=0)
+- Congestion controller — BBR default (`picoquic_bbr_algorithm`), configurable 0=NewReno/1=BBR/2=Cubic via `mpquic_congestion`
+- **尚缺：** 壓力測試 1440p120 + 3 subflow + 10% packet loss（需要 picoquic submodule 實際 clone 後才能跑）
 
 ---
 

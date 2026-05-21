@@ -86,6 +86,11 @@ public class PreferenceConfiguration {
     // StreamingPreferences.designVariant.
     private static final String DESIGN_BOLD_PREF_STRING = "checkbox_design_bold";
     private static final boolean DEFAULT_DESIGN_BOLD = false;
+    // §Q MP-QUIC multipath transport
+    private static final String ENABLE_MPQUIC_PREF_STRING = "checkbox_enable_mpquic";
+    private static final boolean DEFAULT_ENABLE_MPQUIC = false;
+    private static final String MPQUIC_SCHEDULER_PREF_STRING = "list_mpquic_scheduler";
+    private static final String DEFAULT_MPQUIC_SCHEDULER = "0";
     private static final String ENABLE_PIP_PREF_STRING = "checkbox_enable_pip";
     private static final String ENABLE_PERF_OVERLAY_STRING = "checkbox_enable_perf_overlay";
     private static final String BIND_ALL_USB_STRING = "checkbox_usb_bind_all";
@@ -202,7 +207,9 @@ public class PreferenceConfiguration {
     public boolean enableHdr;
     public boolean enableFruc;
     public int frucQuality;  // 0=Quality, 1=Balanced, 2=Performance
-    public boolean frucBackendVulkan;  // §I.C.7 — false = GLES (default), true = Vulkan (experimental)
+    public boolean frucBackendVulkan;
+    public boolean enableMpQuic;
+    public int mpQuicScheduler;  // 0=Auto, 1=MinRTT, 2=Aggregate, 3=Redundant, 4=ECF  // §I.C.7 — false = GLES (default), true = Vulkan (experimental)
     public boolean designBold; // false = Safe, true = Bold editorial
     public boolean enablePip;
     public boolean enablePerfOverlay;
@@ -675,6 +682,8 @@ public class PreferenceConfiguration {
         config.enableFruc = prefs.getBoolean(ENABLE_FRUC_PREF_STRING, DEFAULT_ENABLE_FRUC);
         config.frucQuality = Integer.parseInt(prefs.getString(FRUC_QUALITY_PREF_STRING, DEFAULT_FRUC_QUALITY));
         config.frucBackendVulkan = prefs.getBoolean(FRUC_BACKEND_VULKAN_PREF_STRING, DEFAULT_FRUC_BACKEND_VULKAN);
+        config.enableMpQuic = prefs.getBoolean(ENABLE_MPQUIC_PREF_STRING, DEFAULT_ENABLE_MPQUIC);
+        config.mpQuicScheduler = Integer.parseInt(prefs.getString(MPQUIC_SCHEDULER_PREF_STRING, DEFAULT_MPQUIC_SCHEDULER));
         config.designBold = prefs.getBoolean(DESIGN_BOLD_PREF_STRING, DEFAULT_DESIGN_BOLD);
         config.enablePip = prefs.getBoolean(ENABLE_PIP_PREF_STRING, DEFAULT_ENABLE_PIP);
         config.enablePerfOverlay = prefs.getBoolean(ENABLE_PERF_OVERLAY_STRING, DEFAULT_ENABLE_PERF_OVERLAY);

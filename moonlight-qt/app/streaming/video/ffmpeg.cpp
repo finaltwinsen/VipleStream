@@ -5,6 +5,13 @@
 #include "streaming/session.h"
 #include "backend/nvcomputer.h"
 
+#ifdef VIPLE_MPQUIC
+extern "C" {
+#include <QuicTransport.h>
+#include <PlatformNetIf.h>
+}
+#endif
+
 #include <h264_stream.h>
 
 extern "C" {
@@ -1334,6 +1341,41 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
             offset += ret;
         }
     }
+
+#ifdef VIPLE_MPQUIC
+    // MP-QUIC multipath subflow stats overlay
+    if (StreamConfig.useQuicTransport) {
+        QUIC_SUBFLOW_STATS sfStats[QUIC_MAX_SUBFLOWS];
+        int sfCount = quicGetSubflowStats(sfStats, QUIC_MAX_SUBFLOWS);
+        if (sfCount > 0) {
+            ret = snprintf(&output[offset], length - offset,
+                u8"--- 多路徑 (MPQUIC) ---\n");
+            if (ret >= 0 && ret < length - offset)
+                offset += ret;
+
+            for (int i = 0; i < sfCount && offset < length - 1; i++) {
+                const char* stateStr = sfStats[i].active
+                    ? u8"✔"   // ✔
+                    : u8"✘";  // ✘
+                const char* typeName = lcNetIfTypeName(sfStats[i].interfaceType);
+                ret = snprintf(&output[offset], length - offset,
+                    u8"%s %s: %.1fms / %.1fMbps / %.1f%%\n",
+                    stateStr, typeName,
+                    sfStats[i].rttMs,
+                    sfStats[i].throughputMbps,
+                    sfStats[i].lossPercent);
+                if (ret >= 0 && ret < length - offset)
+                    offset += ret;
+            }
+
+            ret = snprintf(&output[offset], length - offset,
+                u8"活躍路徑: %d / %d\n",
+                quicGetActiveSubflowCount(), sfCount);
+            if (ret >= 0 && ret < length - offset)
+                offset += ret;
+        }
+    }
+#endif
 }
 
 void FFmpegVideoDecoder::logVideoStats(VIDEO_STATS& stats, const char* title)

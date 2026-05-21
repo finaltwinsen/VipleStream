@@ -2269,6 +2269,19 @@ bool Session::startConnectionAsync()
                     LocalControlPort);
     }
 
+#ifdef VIPLE_MPQUIC
+    // Wire MP-QUIC preferences into stream config for moonlight-common-c
+    if (m_Preferences->enableMpQuic && m_Computer->isMpQuicCapable) {
+        m_StreamConfig.useQuicTransport = 1;
+        m_StreamConfig.quicPort = 48010;
+        m_StreamConfig.quicScheduler = m_Preferences->mpQuicScheduler;
+        m_StreamConfig.quicCongestion = 1; // BBR default, optimal for streaming
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-MPQUIC] Enabled (scheduler=%d, port=%d, cc=BBR)",
+                    m_StreamConfig.quicScheduler, m_StreamConfig.quicPort);
+    }
+#endif
+
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
                                 NULL, 0, NULL, 0);

@@ -44,6 +44,13 @@ namespace quic_server {
            picoquic_get_cnx_state(_cnx) == picoquic_state_ready;
   }
 
+  // Scheduler constants (must match QuicTransport.h)
+  static constexpr int SCHED_AUTO      = 0;
+  static constexpr int SCHED_MIN_RTT   = 1;
+  static constexpr int SCHED_AGGREGATE = 2;
+  static constexpr int SCHED_REDUNDANT = 3;
+  static constexpr int SCHED_ECF       = 4;
+
   bool QuicSession::sendDatagram(uint8_t flowType,
                                   const uint8_t *data, size_t len) {
     if (!isReady())
@@ -61,6 +68,77 @@ namespace quic_server {
     int ret = picoquic_queue_datagram_frame(
         _cnx, frame.size(), frame.data());
     return ret == 0;
+  }
+
+  bool QuicSession::sendDatagramScheduled(uint8_t flowType,
+                                           const uint8_t *data, size_t len,
+                                           int scheduler) {
+    if (!isReady())
+      return false;
+
+    int pathCount = picoquic_get_cnx_nb_paths(_cnx);
+
+    // Resolve AUTO per flow type
+    if (scheduler == SCHED_AUTO) {
+      switch (flowType) {
+      case FLOW_VIDEO:   scheduler = SCHED_ECF; break;
+      case FLOW_AUDIO:   scheduler = SCHED_REDUNDANT; break;
+      case FLOW_CONTROL: scheduler = SCHED_MIN_RTT; break;
+      default:           scheduler = SCHED_MIN_RTT; break;
+      }
+    }
+
+    if (scheduler == SCHED_REDUNDANT && pathCount > 1) {
+      // Send on every path
+      bool sent = false;
+      for (int p = 0; p < pathCount; p++) {
+        std::vector<uint8_t> frame(DGRAM_HDR_SIZE + len);
+        QuicDgramHeader hdr{};
+        hdr.flowType = flowType;
+        hdr.reserved = 0;
+        hdr.seq = htons(_seqCounters[flowType]++);
+        std::memcpy(frame.data(), &hdr, DGRAM_HDR_SIZE);
+        std::memcpy(frame.data() + DGRAM_HDR_SIZE, data, len);
+
+        std::lock_guard<std::mutex> lock(_sendMutex);
+        picoquic_set_cnx_path_priority(_cnx, p, 1);
+        if (picoquic_queue_datagram_frame(_cnx, frame.size(), frame.data()) == 0)
+          sent = true;
+      }
+      return sent;
+    }
+
+    if (pathCount > 1) {
+      // Pick best path
+      int bestPath = 0;
+      float bestMetric = 1e9f;
+
+      for (int p = 0; p < pathCount; p++) {
+        float rttMs = (float)picoquic_get_cnx_path_rtt(_cnx, p) / 1000.0f;
+        uint64_t cwin = picoquic_get_cnx_path_cwin(_cnx, p);
+        float rttUs = (float)picoquic_get_cnx_path_rtt(_cnx, p);
+
+        float metric;
+        if (scheduler == SCHED_ECF) {
+          float tput = (rttUs > 0) ? ((float)cwin / rttUs * 1e6f) : 1.0f;
+          if (tput < 1.0f) tput = 1.0f;
+          metric = ((float)len / tput) + (rttMs / 2000.0f);
+        } else {
+          // MIN_RTT or AGGREGATE fallback
+          metric = rttMs;
+        }
+
+        if (metric < bestMetric) {
+          bestMetric = metric;
+          bestPath = p;
+        }
+      }
+
+      std::lock_guard<std::mutex> lock(_sendMutex);
+      picoquic_set_cnx_path_priority(_cnx, bestPath, 1);
+    }
+
+    return sendDatagram(flowType, data, len);
   }
 
   bool QuicSession::sendStream(const uint8_t *data, size_t len) {
@@ -81,13 +159,22 @@ namespace quic_server {
     if (!_cnx)
       return stats;
 
-    // Query picoquic for path stats
     int pathCount = picoquic_get_cnx_nb_paths(_cnx);
     for (int i = 0; i < pathCount; i++) {
       SubflowStats s{};
       s.pathId = i;
-      s.rttMs = (float)picoquic_get_cnx_path_rtt(_cnx, i) / 1000.0f;
+      uint64_t rttUs = picoquic_get_cnx_path_rtt(_cnx, i);
+      s.rttMs = (float)rttUs / 1000.0f;
       s.active = true;
+      s.bytesSent = 0;
+      s.bytesRecv = 0;
+
+      // Estimate throughput from CWIN / RTT
+      uint64_t cwin = picoquic_get_cnx_path_cwin(_cnx, i);
+      if (rttUs > 0) {
+        double bps = ((double)cwin / (double)rttUs) * 1e6;
+        s.throughputMbps = (float)(bps / 1e6 * 8.0);
+      }
       stats.push_back(s);
     }
 
@@ -131,9 +218,29 @@ namespace quic_server {
     picoquic_set_default_datagram_option(_quic, 1);
     picoquic_set_default_multipath_option(_quic, 1);
 
+    // Apply configured congestion control algorithm (BBR default)
+    switch (config::stream.mpquic_congestion) {
+      case 0:
+        picoquic_set_default_congestion_algorithm(_quic, picoquic_newreno_algorithm);
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] Congestion: NewReno";
+        break;
+      case 2:
+        picoquic_set_default_congestion_algorithm(_quic, picoquic_cubic_algorithm);
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] Congestion: Cubic";
+        break;
+      default:
+        picoquic_set_default_congestion_algorithm(_quic, picoquic_bbr_algorithm);
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] Congestion: BBR";
+        break;
+    }
+
     _port = port;
     _running.store(true);
     _ioThread = std::thread(&QuicListener::ioLoop, this);
+
+    // Start periodic stats logging (every 30s)
+    _statsRunning.store(true);
+    _statsThread = std::thread(&QuicListener::statsLoop, this);
 
     BOOST_LOG(info) << "[VIPLE-MPQUIC] Server listening on port " << port;
     return true;
@@ -144,8 +251,12 @@ namespace quic_server {
       return;
 
     _running.store(false);
+    _statsRunning.store(false);
+
     if (_ioThread.joinable())
       _ioThread.join();
+    if (_statsThread.joinable())
+      _statsThread.join();
 
     {
       std::lock_guard<std::mutex> lock(_sessionMutex);
@@ -366,6 +477,41 @@ namespace quic_server {
     }
 
     return 0;
+  }
+
+  void QuicListener::logStats() {
+    std::lock_guard<std::mutex> lock(_sessionMutex);
+    if (_sessions.empty())
+      return;
+
+    for (auto &[addr, session] : _sessions) {
+      if (!session || !session->isReady())
+        continue;
+
+      auto stats = session->getStats();
+      if (stats.empty())
+        continue;
+
+      std::string line = "[VIPLE-MPQUIC] stats " + addr + ": ";
+      for (size_t i = 0; i < stats.size(); i++) {
+        if (i > 0) line += " | ";
+        line += "path" + std::to_string(stats[i].pathId)
+              + " RTT=" + std::to_string((int)stats[i].rttMs) + "ms"
+              + " " + std::to_string((int)stats[i].throughputMbps) + "Mbps";
+      }
+      BOOST_LOG(info) << line;
+    }
+  }
+
+  void QuicListener::statsLoop() {
+    while (_statsRunning.load()) {
+      for (int i = 0; i < 300 && _statsRunning.load(); i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+      if (_statsRunning.load()) {
+        logStats();
+      }
+    }
   }
 
 }  // namespace quic_server

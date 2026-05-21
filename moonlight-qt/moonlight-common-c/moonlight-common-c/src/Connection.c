@@ -507,6 +507,7 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     if (StreamConfig.useQuicTransport) {
         Limelog("[VIPLE-MPQUIC] Initializing QUIC transport...\n");
         if (quicTransportInit() == 0) {
+            quicSetCongestionAlgo(StreamConfig.quicCongestion);
             QUIC_CONNECT_PARAMS qparams;
             memset(&qparams, 0, sizeof(qparams));
             memcpy(&qparams.remoteAddr, &RemoteAddr, AddrLen);
@@ -515,18 +516,30 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
             qparams.quicPort = (unsigned short)StreamConfig.quicPort;
 
             if (quicConnect(&qparams) == 0) {
-                // Enumerate local interfaces and add subflows
+                // Enumerate local interfaces and add subflows.
+                // Only add subflows whose address family matches the server,
+                // since picoquic path probes require matching families.
+                // On dual-stack hosts this creates one subflow per NIC per
+                // matching family (IPv4 or IPv6).
+                int serverFamily = RemoteAddr.ss_family;
                 LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
                 int ifCount = lcEnumNetInterfaces(interfaces, LC_NETIF_MAX_COUNT);
+                int added = 0;
                 for (int i = 0; i < ifCount; i++) {
-                    if (interfaces[i].up && interfaces[i].type != LC_NETIF_TYPE_LOOPBACK) {
-                        quicAddSubflow(interfaces[i].index,
+                    if (!interfaces[i].up)
+                        continue;
+                    if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK)
+                        continue;
+                    if (interfaces[i].family != serverFamily)
+                        continue;
+                    if (quicAddSubflow(interfaces[i].index,
                                        &interfaces[i].addr,
-                                       interfaces[i].addrLen);
+                                       interfaces[i].addrLen) >= 0) {
+                        added++;
                     }
                 }
-                Limelog("[VIPLE-MPQUIC] QUIC connected with %d subflow(s)\n",
-                        quicGetActiveSubflowCount());
+                Limelog("[VIPLE-MPQUIC] QUIC connected with %d subflow(s) (family=%s)\n",
+                        added, serverFamily == AF_INET6 ? "IPv6" : "IPv4");
             } else {
                 Limelog("[VIPLE-MPQUIC] QUIC connect failed, falling back to UDP\n");
                 StreamConfig.useQuicTransport = 0;

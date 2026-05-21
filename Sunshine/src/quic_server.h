@@ -38,6 +38,8 @@ namespace quic_server {
     float throughputMbps;
     float lossPercent;
     bool active;
+    uint64_t bytesSent;
+    uint64_t bytesRecv;
   };
 
   using RecvHandler = std::function<void(uint8_t flowType,
@@ -52,6 +54,10 @@ namespace quic_server {
     QuicSession &operator=(const QuicSession &) = delete;
 
     bool sendDatagram(uint8_t flowType, const uint8_t *data, size_t len);
+
+    // Scheduler-aware datagram send (picks best path based on strategy)
+    bool sendDatagramScheduled(uint8_t flowType, const uint8_t *data,
+                               size_t len, int scheduler);
 
     bool sendStream(const uint8_t *data, size_t len);
 
@@ -107,6 +113,9 @@ namespace quic_server {
     using SessionCallback = std::function<void(std::shared_ptr<QuicSession>)>;
     void setSessionCallback(SessionCallback cb);
 
+    // Log aggregate stats for all sessions (called periodically)
+    void logStats();
+
   private:
     void ioLoop();
 
@@ -123,6 +132,11 @@ namespace quic_server {
 
     SessionCallback _sessionCallback;
     uint16_t _port = 0;
+
+    // Periodic stats logging
+    std::thread _statsThread;
+    std::atomic<bool> _statsRunning{false};
+    void statsLoop();
   };
 
   // Global listener instance (created by stream.cpp when MP-QUIC is active)

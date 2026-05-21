@@ -108,6 +108,7 @@ typedef struct _STREAM_CONFIGURATION {
     int useQuicTransport;
     int quicPort;
     int quicScheduler;
+    int quicCongestion; // QUIC_CC_NEWRENO=0, QUIC_CC_BBR=1, QUIC_CC_CUBIC=2
 #endif
 } STREAM_CONFIGURATION, *PSTREAM_CONFIGURATION;
 

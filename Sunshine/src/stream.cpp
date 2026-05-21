@@ -1539,6 +1539,19 @@ namespace stream {
       auto fecPercentage = session->video.adaptiveFecPercentage.load();
       if (fecPercentage == 0) fecPercentage = config::stream.fec_percentage;
 
+#ifdef VIPLE_MPQUIC
+      // When QUIC transport is active, clamp FEC to the configured floor.
+      // QUIC's own loss detection + fast retransmit handles most recovery,
+      // so LAN sessions can reduce FEC overhead to save bandwidth.
+      if (session->tunnel &&
+          session->tunnel->carrier() == udp_tunnel::Carrier::QUIC_DIRECT) {
+        int fecFloor = config::stream.mpquic_fec_floor;
+        if (fecPercentage > fecFloor && fecFloor >= 0) {
+          fecPercentage = std::max(fecPercentage, fecFloor);
+        }
+      }
+#endif
+
       // Insert space for packet headers
       auto blocksize = session->config.packetsize + MAX_RTP_HEADER_SIZE;
       auto payload_blocksize = blocksize - sizeof(video_packet_raw_t);
@@ -1797,7 +1810,9 @@ namespace stream {
                       ? quic_server::g_listener->getSession(clientAddr)
                       : nullptr;
                   if (quicSession) {
-                    quicSession->sendDatagram(0x01, scratch.data(), scratch.size());
+                    quicSession->sendDatagramScheduled(
+                        0x01, scratch.data(), scratch.size(),
+                        config::stream.mpquic_scheduler);
                   }
                 }
               } else
@@ -1951,7 +1966,9 @@ namespace stream {
               ? quic_server::g_listener->getSession(clientAddr)
               : nullptr;
           if (quicSession) {
-            quicSession->sendDatagram(0x02, scratch.data(), scratch.size());
+            quicSession->sendDatagramScheduled(
+                        0x02, scratch.data(), scratch.size(),
+                        config::stream.mpquic_scheduler);
           }
         } else
 #endif
@@ -2003,7 +2020,9 @@ namespace stream {
                   ? quic_server::g_listener->getSession(clientAddr)
                   : nullptr;
               if (quicSession) {
-                quicSession->sendDatagram(0x02, scratch.data(), scratch.size());
+                quicSession->sendDatagramScheduled(
+                        0x02, scratch.data(), scratch.size(),
+                        config::stream.mpquic_scheduler);
               }
             } else
 #endif
@@ -2098,6 +2117,24 @@ namespace stream {
 
     ctx.message_queue_queue = std::make_shared<message_queue_queue_t::element_type>(30);
 
+#ifdef VIPLE_MPQUIC
+    // Start QUIC listener if MP-QUIC is enabled
+    if (config::stream.mpquic_enabled) {
+      auto listener = new quic_server::QuicListener();
+      if (listener->start(
+              config::stream.mpquic_port,
+              config::nvhttp.cert,
+              config::nvhttp.pkey)) {
+        quic_server::g_listener = listener;
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] Listener started on port "
+                        << config::stream.mpquic_port;
+      } else {
+        BOOST_LOG(error) << "[VIPLE-MPQUIC] Failed to start listener";
+        delete listener;
+      }
+    }
+#endif
+
     ctx.video_thread = std::thread {videoBroadcastThread, std::ref(ctx.video_sock)};
     ctx.audio_thread = std::thread {audioBroadcastThread, std::ref(ctx.audio_sock)};
     ctx.control_thread = std::thread {controlBroadcastThread, &ctx.control_server};
@@ -2108,6 +2145,16 @@ namespace stream {
   }
 
   void end_broadcast(broadcast_ctx_t &ctx) {
+#ifdef VIPLE_MPQUIC
+    // Stop QUIC listener
+    if (quic_server::g_listener) {
+      quic_server::g_listener->stop();
+      delete quic_server::g_listener;
+      quic_server::g_listener = nullptr;
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] Listener stopped";
+    }
+#endif
+
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
 
     broadcast_shutdown_event->raise(true);

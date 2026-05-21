@@ -24,6 +24,11 @@ extern "C" {
 #define QUIC_SCHED_REDUNDANT  3  // Duplicate on every subflow
 #define QUIC_SCHED_ECF        4  // Earliest Completion First
 
+// ── Congestion control algorithms ───────────────────────────
+#define QUIC_CC_NEWRENO  0
+#define QUIC_CC_BBR      1  // Bandwidth-based, preferred for low-latency streaming
+#define QUIC_CC_CUBIC    2
+
 // ── Subflow stats ────────────────────────────────────────────
 #define QUIC_MAX_SUBFLOWS 8
 
@@ -81,6 +86,12 @@ typedef void (*QuicRecvCallback)(unsigned char flowType,
                                  const unsigned char* data, int dataLen,
                                  void* context);
 
+// ── Failover callback ────────────────────────────────────────
+// Called when a subflow changes state (active ↔ inactive).
+// `reactivated` is true when a dead path comes back alive.
+typedef void (*QuicFailoverCallback)(int subflowId, int interfaceIndex,
+                                     bool reactivated, void* context);
+
 // ── Lifecycle ────────────────────────────────────────────────
 
 // Initialize the QUIC transport subsystem (call once at startup).
@@ -126,6 +137,10 @@ int quicRemoveSubflow(int subflowId);
 // or for all flows if flowType == 0.
 int quicSetScheduler(unsigned char flowType, int strategy);
 
+// Set the congestion control algorithm. Must be called before
+// quicConnect() or quicServerStart(). Default is QUIC_CC_BBR.
+void quicSetCongestionAlgo(int algo);
+
 // ── Datagram I/O ─────────────────────────────────────────────
 
 // Send an unreliable datagram tagged with the given flow type.
@@ -137,6 +152,9 @@ int quicSendDatagram(unsigned char flowType,
 // Register a callback for incoming datagrams.
 // Called on the QUIC I/O thread; must be non-blocking.
 void quicSetRecvCallback(QuicRecvCallback callback, void* context);
+
+// Register a callback for path failover events.
+void quicSetFailoverCallback(QuicFailoverCallback callback, void* context);
 
 // ── Reliable stream I/O (for control channel) ────────────────
 

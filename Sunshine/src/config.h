@@ -188,6 +188,7 @@ namespace config {
     int mpquic_port = 48010;
     int mpquic_scheduler = 0;     // 0=auto, 1=min_rtt, 2=aggregate, 3=redundant, 4=ecf
     int mpquic_fec_floor = 1;     // minimum FEC % when QUIC is active (LAN mode)
+    int mpquic_congestion = 1;    // 0=newreno, 1=bbr (default, bandwidth-based), 2=cubic
   };
 
   struct nvhttp_t {

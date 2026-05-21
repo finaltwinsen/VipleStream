@@ -1249,6 +1249,7 @@ namespace config {
     int_between_f(vars, "mpquic_port", stream.mpquic_port, {1024, 65535});
     int_between_f(vars, "mpquic_scheduler", stream.mpquic_scheduler, {0, 4});
     int_between_f(vars, "mpquic_fec_floor", stream.mpquic_fec_floor, {0, 100});
+    int_between_f(vars, "mpquic_congestion", stream.mpquic_congestion, {0, 2});
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 
