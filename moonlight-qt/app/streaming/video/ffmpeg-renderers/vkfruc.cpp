@@ -287,13 +287,8 @@ VkFrucRenderer::VkFrucRenderer(int pass, CompositeMode compositeMode)
         m_FrucMode = false;
         m_DualMode = false;
     }
-    // §J.3.e.2.i.7 HW path retry：VIPLE_VKFRUC_HW=1 強制走 FFmpeg-Vulkan
-    // hwcontext.  §J.3.f integration (2026-05-04) HW 變預設後此 env var
-    // 變 redundant (m_SwMode 預設已是 false)，但保留以防 user 設了
-    // VIPLE_VKFRUC_SW=1 又想用 VIPLE_VKFRUC_HW=1 強制蓋過.  HW 優先級高.
-    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_HW") != 0) {
-        m_SwMode = false;
-    }
+    // §J.3.e.2.i.7 HW path：§J.3.f (2026-05-04) 後 HW 是預設，m_SwMode
+    // 只在 VIPLE_VKFRUC_SW=1（dev debug）或 DUMP_DIR 模式下才 true。
     // §B2 2026-05-06 — TRIPLE 60→180 mode opt-in via env var or user pref.
     m_TripleMode = m_DualMode && m_FrucMode && vkfrucWantTripleFromUserOrEnv();
 
@@ -314,12 +309,8 @@ VkFrucRenderer::VkFrucRenderer(int pass, CompositeMode compositeMode)
     // device-lost crash on RTX 3060 + NV 596.144 driver, root cause needs
     // Nsight Graphics analysis).
     m_RifeNativeMode = vkfrucWantNativeRifeFromUserOrEnv();
-    // §J.3.e.X Path β.5 — flow-extraction + native-res warp.  Default ON when
-    // β is on; user can flip to '0' to fall back to β.4 bilinear-up-RGB.
-    {
-        QByteArray b5 = qgetenv("VIPLE_VKFRUC_RIFE_BETA5");
-        m_Beta5Enabled = b5.isEmpty() ? true : (b5.toInt() != 0);
-    }
+    // §J.3.e.X Path β.5 — flow-extraction + native-res warp.  Always ON.
+    m_Beta5Enabled = true;
     if (m_RifeNativeMode && !m_FrucMode) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
             "[VIPLE-VKFRUC-RIFE-β] VIPLE_VKFRUC_NATIVE_RIFE=1 requires FRUC; ignoring");
