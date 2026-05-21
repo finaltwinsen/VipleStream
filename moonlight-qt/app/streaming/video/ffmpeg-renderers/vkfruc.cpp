@@ -6492,17 +6492,18 @@ bool VkFrucRenderer::initializeCompositeD3D11()
     }
 
     // §B B6.2 — D3D11CreateDevice ----------------------------------------
+    // 精確對齊 D3D11VARenderer::setupSharedDevice 的 flags + feature levels：
+    //   VIDEO_SUPPORT only（BGRA_SUPPORT 是 render device 才需要，decode device 不用）
+    //   {11_1, 11_0} only（10.x fallback 在 AMD 780M 上會導致 HEVC GUID 查不到）
     const D3D_FEATURE_LEVEL fls[] = {
         D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
-        D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0,
     };
     Microsoft::WRL::ComPtr<ID3D11Device>        baseDevice;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> baseCtx;
-    UINT createFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT
-                     | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
     hr = D3D11CreateDevice(adapter.Get(),
                            D3D_DRIVER_TYPE_UNKNOWN,  // because we passed an adapter
-                           nullptr, createFlags,
+                           nullptr,
+                           D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                            fls, ARRAYSIZE(fls), D3D11_SDK_VERSION,
                            &baseDevice, nullptr, &baseCtx);
     if (FAILED(hr)) {
@@ -6516,13 +6517,16 @@ bool VkFrucRenderer::initializeCompositeD3D11()
     Microsoft::WRL::ComPtr<ID3D10Multithread> mt;
     if (SUCCEEDED(baseDevice.As(&mt))) mt->SetMultithreadProtected(TRUE);
 
+    // QI dev5/ctx4 for bridge operations (fence sync, SHARED_NTHANDLE).
+    // If QI fails (old Win10 build without D3D11.4), continue without fence sync
+    // — createFenceSync() already handles fenceless gracefully (AMD 780M).
     Microsoft::WRL::ComPtr<ID3D11Device5>        dev5;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext4> ctx4;
-    if (FAILED(baseDevice.As(&dev5)) || FAILED(baseCtx.As(&ctx4))) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "[VIPLE-VKFRUC-COMPOSITE] QI ID3D11Device5 / "
-                     "ID3D11DeviceContext4 failed — D3D11.4 (Win10 1703+) needed");
-        return false;
+    bool haveDev5 = SUCCEEDED(baseDevice.As(&dev5)) && SUCCEEDED(baseCtx.As(&ctx4));
+    if (!haveDev5) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-COMPOSITE] QI ID3D11Device5/DeviceContext4 failed "
+                    "— proceeding in fenceless mode");
     }
 
     // §B B6.3 — av_hwdevice_ctx_alloc(D3D11VA) ---------------------------
@@ -6534,9 +6538,10 @@ bool VkFrucRenderer::initializeCompositeD3D11()
     }
     auto* deviceCtx = reinterpret_cast<AVHWDeviceContext*>(hwRef->data);
     auto* d3dCtx    = reinterpret_cast<AVD3D11VADeviceContext*>(deviceCtx->hwctx);
-    // CopyTo bumps refcount so FFmpeg takes its own ref
-    dev5.CopyTo(&d3dCtx->device);
-    ctx4.CopyTo(&d3dCtx->device_context);
+    // 傳 base device（ID3D11Device）給 FFmpeg，對齊 D3D11VARenderer 做法。
+    // dev5（ID3D11Device5）只給 bridge 的 SHARED_NTHANDLE / fence 用，不傳 FFmpeg。
+    baseDevice.CopyTo(&d3dCtx->device);
+    baseCtx.CopyTo(&d3dCtx->device_context);
     // Lock callbacks reuse the existing s_VkFrucQueueLock — FFmpeg's
     // hwcontext_d3d11va.h expects void (*lock/unlock)(void*) and a
     // user-data pointer.  s_VkFrucQueueLock is recursive so re-entrant
@@ -6556,7 +6561,9 @@ bool VkFrucRenderer::initializeCompositeD3D11()
 
     // §B B6.4 — D3D11VkBridge initialize + fence sync --------------------
     auto bridge = std::make_unique<D3D11VkBridge>();
-    if (!bridge->initialize(adapter.Get(), dev5.Get(),
+    // dev5 是 SHARED_NTHANDLE / fence 所需；若 QI 失敗，bridge init 也會失敗
+    // 但 B4 fenceless 路徑已可接管（AMD 780M D3D12_FENCE 不支援情境）。
+    if (!bridge->initialize(adapter.Get(), haveDev5 ? dev5.Get() : nullptr,
                             m_Instance, m_PhysicalDevice, m_Device,
                             m_pfnGetInstanceProcAddr,
                             D3D11VkBridge::resolveHandleModeFromEnv())) {
