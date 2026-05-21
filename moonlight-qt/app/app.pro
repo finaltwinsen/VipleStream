@@ -357,8 +357,10 @@ libva {
 
     PKGCONFIG += libva
     DEFINES += HAVE_LIBVA
-    SOURCES += streaming/video/ffmpeg-renderers/vaapi.cpp
-    HEADERS += streaming/video/ffmpeg-renderers/vaapi.h
+    SOURCES += streaming/video/ffmpeg-renderers/vaapi.cpp \
+               streaming/video/ffmpeg-renderers/vaapi_vk_bridge.cpp
+    HEADERS += streaming/video/ffmpeg-renderers/vaapi.h \
+               streaming/video/ffmpeg-renderers/vaapi_vk_bridge.h
 }
 libva-x11 {
     message(VAAPI X11 support enabled)

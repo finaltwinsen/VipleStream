@@ -73,11 +73,22 @@ std::atomic<double> g_VkFrucDecodeLatencyMs{0.0};
 #include "d3d11_vk_bridge.h"
 #endif
 
+// §K.linux — VAAPI→Vulkan bridge header (Linux only).
+#if defined(HAVE_LIBVA) && !defined(Q_OS_WIN32)
+#include "vaapi_vk_bridge.h"
+#include <unistd.h>
+#endif
+
 extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vulkan.h>
 #ifdef Q_OS_WIN32
 #include <libavutil/hwcontext_d3d11va.h>
+#endif
+#if defined(HAVE_LIBVA) && !defined(Q_OS_WIN32)
+#include <libavutil/hwcontext_vaapi.h>
+#include <va/va.h>
+#include <va/va_drmcommon.h>
 #endif
 }
 
@@ -209,6 +220,7 @@ VkFrucRenderer::VkFrucRenderer(int pass, CompositeMode compositeMode)
                     pass,
                     compositeMode == CompositeMode::D3D11_HEVC ? "D3D11_HEVC" :
                     compositeMode == CompositeMode::ProbeOnly  ? "ProbeOnly"  :
+                    compositeMode == CompositeMode::VAAPI_VK   ? "VAAPI_VK"   :
                                                                  "?");
     }
 
@@ -347,6 +359,11 @@ AVPixelFormat VkFrucRenderer::getPreferredPixelFormat(int videoFormat)
         (void)videoFormat;
         return AV_PIX_FMT_D3D11;
     }
+    // §K.linux — composite path 用 VAAPI HW decode.
+    if (m_CompositeMode == CompositeMode::VAAPI_VK) {
+        (void)videoFormat;
+        return AV_PIX_FMT_VAAPI;
+    }
     if (m_SwMode) {
         // FFmpeg software h264 / hevc / av1 decoders default to YUV420P
         // (3 planes: Y + U + V).  We accept both YUV420P and NV12 in
@@ -366,6 +383,11 @@ bool VkFrucRenderer::isPixelFormatSupported(int videoFormat, AVPixelFormat pixel
     if (m_CompositeMode == CompositeMode::D3D11_HEVC) {
         (void)videoFormat;
         return pixelFormat == AV_PIX_FMT_D3D11;
+    }
+    // §K.linux — composite path 只接 VAAPI hwfmt.
+    if (m_CompositeMode == CompositeMode::VAAPI_VK) {
+        (void)videoFormat;
+        return pixelFormat == AV_PIX_FMT_VAAPI;
     }
     if (m_SwMode) {
         return pixelFormat == AV_PIX_FMT_YUV420P || pixelFormat == AV_PIX_FMT_NV12;
@@ -396,6 +418,9 @@ VkFrucRenderer::~VkFrucRenderer()
     // teardown() so the bridge can drop its imported VkImages while the
     // VkDevice is still alive (teardown destroys the VkDevice).
     teardownCompositeD3D11();
+#if defined(HAVE_LIBVA) && !defined(Q_OS_WIN32)
+    teardownCompositeVAAPI();
+#endif
     teardown();
     if (m_HwDeviceCtx != nullptr) {
         av_buffer_unref(&m_HwDeviceCtx);
@@ -6268,6 +6293,28 @@ bool VkFrucRenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary
                     "will decode into D3D11 NV12 array on our composite device");
         return true;
     }
+#if defined(HAVE_LIBVA) && !defined(Q_OS_WIN32)
+    // §K.linux — VAAPI composite path: lazy init on first prepareDecoderContext.
+    if (m_CompositeMode == CompositeMode::VAAPI_VK) {
+        if (!m_VAAPIBridgeInitDone && !initializeCompositeVAAPI()) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VAAPI-VK] prepareDecoderContext: "
+                         "initializeCompositeVAAPI() failed — falling back");
+            return false;
+        }
+        if (!m_BridgeVAAPIDevCtx) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VAAPI-VK] prepareDecoderContext: "
+                         "m_BridgeVAAPIDevCtx is null after init");
+            return false;
+        }
+        context->hw_device_ctx = av_buffer_ref(m_BridgeVAAPIDevCtx);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VAAPI-VK] prepareDecoderContext OK — ffmpeg "
+                    "will decode into VAAPI NV12 surfaces on /dev/dri/renderD128");
+        return true;
+    }
+#endif
     // §J.3.e.2.i.3.e-SW — software-upload mode: no hwaccel binding, ffmpeg
     // decodes in CPU into AV_PIX_FMT_NV12 frames that we upload via our
     // staging buffer.
@@ -6721,6 +6768,149 @@ void VkFrucRenderer::teardownCompositeD3D11()
     m_BridgeInitDone = false;
 #endif
 }
+
+// §K.linux ---------------------------------------------------------------
+#if defined(HAVE_LIBVA) && !defined(Q_OS_WIN32)
+
+bool VkFrucRenderer::initializeCompositeVAAPI()
+{
+    if (m_VAAPIBridgeInitDone) return true;
+
+    // 建立 VAAPI hw_device_ctx（FFmpeg 自動找 /dev/dri/renderD128 或第一個 VAAPI 裝置）。
+    int err = av_hwdevice_ctx_create(&m_BridgeVAAPIDevCtx,
+                                     AV_HWDEVICE_TYPE_VAAPI,
+                                     nullptr, nullptr, 0);
+    if (err < 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VAAPI-VK] initializeCompositeVAAPI: "
+                     "av_hwdevice_ctx_create(VAAPI) failed: %d", err);
+        return false;
+    }
+
+    m_VAAPIBridge = std::make_unique<VAAPIVkBridge>();
+    if (!m_VAAPIBridge->initialize(m_Instance, m_PhysicalDevice, m_Device,
+                                   m_pfnGetInstanceProcAddr)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VAAPI-VK] initializeCompositeVAAPI: bridge init failed");
+        av_buffer_unref(&m_BridgeVAAPIDevCtx);
+        m_VAAPIBridge.reset();
+        return false;
+    }
+
+    m_VAAPIBridgeInitDone = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VAAPI-VK] initializeCompositeVAAPI OK");
+    return true;
+}
+
+void VkFrucRenderer::teardownCompositeVAAPI()
+{
+    if (!m_VAAPIBridgeInitDone && !m_VAAPIBridge && !m_BridgeVAAPIDevCtx)
+        return;
+    m_VAAPIBridge.reset();
+    if (m_BridgeVAAPIDevCtx) {
+        av_buffer_unref(&m_BridgeVAAPIDevCtx);
+        m_BridgeVAAPIDevCtx = nullptr;
+    }
+    m_VAAPIBridgeInitDone = false;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VAAPI-VK] teardownCompositeVAAPI done");
+}
+
+void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
+{
+    static std::atomic<uint64_t> s_VFrameCount{0};
+    uint64_t fnum = s_VFrameCount.fetch_add(1, std::memory_order_relaxed);
+    const bool log = (fnum < 5) || (fnum % 60 == 0);
+
+    if (!frame || frame->format != AV_PIX_FMT_VAAPI) {
+        if (log) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VAAPI-VK] frame#%llu unexpected fmt=%d",
+                        (unsigned long long)fnum,
+                        frame ? frame->format : -1);
+        }
+        return;
+    }
+    if (!m_VAAPIBridge || !m_VAAPIBridgeInitDone) {
+        if (log) SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                              "[VIPLE-VAAPI-VK] frame#%llu bridge not ready",
+                              (unsigned long long)fnum);
+        return;
+    }
+
+    // 從 AVFrame 取出 VADisplay + VASurfaceID，匯出 DMA-BUF。
+    auto* hwFrameCtx = (AVHWFramesContext*)frame->hw_frames_ctx->data;
+    auto* vaDevCtx   = (AVVAAPIDeviceContext*)hwFrameCtx->device_ctx->hwctx;
+    VASurfaceID surfId = (VASurfaceID)(uintptr_t)frame->data[3];
+
+    VADRMPRIMESurfaceDescriptor drmDesc = {};
+    VAStatus st = vaExportSurfaceHandle(vaDevCtx->display, surfId,
+                                        VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                                        VA_EXPORT_SURFACE_READ_ONLY |
+                                        VA_EXPORT_SURFACE_COMPOSED_LAYERS,
+                                        &drmDesc);
+    if (st != VA_STATUS_SUCCESS) {
+        if (log) SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                              "[VIPLE-VAAPI-VK] frame#%llu vaExportSurfaceHandle failed: %d",
+                              (unsigned long long)fnum, st);
+        return;
+    }
+
+    st = vaSyncSurface(vaDevCtx->display, surfId);
+    if (st != VA_STATUS_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VAAPI-VK] frame#%llu vaSyncSurface failed: %d",
+                     (unsigned long long)fnum, st);
+        for (uint32_t i = 0; i < drmDesc.num_objects; i++) close(drmDesc.objects[i].fd);
+        return;
+    }
+
+    // num_objects == 1 (single NV12 buffer) confirmed by pre-req spike.
+    int      dmaFd   = drmDesc.objects[0].fd;
+    uint32_t dmaSize = (uint32_t)drmDesc.objects[0].size;
+    uint64_t modifier = drmDesc.objects[0].drm_format_modifier;
+
+    VAAPIVkBridge::ImportedFrame imp = {};
+    bool ok = m_VAAPIBridge->importFrame(dmaFd, dmaSize, modifier,
+                                         (uint32_t)frame->width,
+                                         (uint32_t)frame->height,
+                                         &imp);
+
+    // 關閉 VA export 的 fd（bridge 已 dup()）。
+    for (uint32_t i = 0; i < drmDesc.num_objects; i++) close(drmDesc.objects[i].fd);
+
+    if (!ok) {
+        if (log) SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                              "[VIPLE-VAAPI-VK] frame#%llu importFrame failed",
+                              (unsigned long long)fnum);
+        return;
+    }
+
+    if (log) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VAAPI-VK] frame#%llu import OK "
+                    "image=%p mem=%p %ux%u modifier=0x%llx — K.2 passthrough",
+                    (unsigned long long)fnum,
+                    (void*)imp.image, (void*)imp.memory,
+                    imp.width, imp.height,
+                    (unsigned long long)modifier);
+    }
+
+    // §K.2 passthrough：驗證 import 不 crash，尚未接入 FRUC chain（§K.3）。
+    // 釋放 imported VkImage（由 VkDevice 直接呼叫，不依賴 bridge 內部 PFN）。
+    auto pfnGDPA = (PFN_vkGetDeviceProcAddr)
+        m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr");
+    if (pfnGDPA) {
+        auto pfnFreeMemory   = (PFN_vkFreeMemory)  pfnGDPA(m_Device, "vkFreeMemory");
+        auto pfnDestroyImage = (PFN_vkDestroyImage)pfnGDPA(m_Device, "vkDestroyImage");
+        if (pfnFreeMemory)   pfnFreeMemory(m_Device, imp.memory, nullptr);
+        if (pfnDestroyImage) pfnDestroyImage(m_Device, imp.image, nullptr);
+    }
+}
+
+#endif  // HAVE_LIBVA && !Q_OS_WIN32
+// §K.linux end -----------------------------------------------------------
 
 // §J.3.e.2.i.3.e — descriptor pool sized for kFrucFramesInFlight
 // COMBINED_IMAGE_SAMPLER bindings (one per ring slot).  We pre-allocate
@@ -10878,6 +11068,13 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         renderFrameD3D11Import(frame);
         return;
     }
+#if defined(HAVE_LIBVA) && !defined(Q_OS_WIN32)
+    // §K.linux — VAAPI composite path dispatch.
+    if (m_CompositeMode == CompositeMode::VAAPI_VK) {
+        renderFrameVAAPIImport(frame);
+        return;
+    }
+#endif
     // §J.3.e.2.i.3.e-SW dispatch: software upload path validates i.3
     // graphics pipeline in isolation from FFmpeg-Vulkan hwcontext.
     if (m_SwMode) {

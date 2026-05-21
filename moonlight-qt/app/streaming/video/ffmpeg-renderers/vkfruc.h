@@ -37,6 +37,9 @@
 // via std::unique_ptr through vkfruc.cpp.  Linux / macOS keep these
 // members null (composite path never engaged off Windows).
 class D3D11VkBridge;
+
+// §K.linux VAAPI→Vulkan bridge. Linux only (HAVE_LIBVA).
+class VAAPIVkBridge;
 #ifdef Q_OS_WIN32
 struct ID3D11Device5;
 struct ID3D11DeviceContext4;
@@ -79,7 +82,10 @@ public:
     //                + teardown，只為填 s_VkVideoDecodeH265Unavailable
     //                static，cost ~50ms.  ffmpeg.cpp cascade 第一次
     //                看 HEVC 時呼叫；之後不再 probe.
-    enum class CompositeMode { None, D3D11_HEVC, ProbeOnly };
+    //   VAAPI_VK   : 走 VAAPI HW decode → DMA-BUF fd → Vulkan import →
+    //                VkFruc FRUC.  目標是 RADV/Vega 10 這類沒
+    //                VK_KHR_video_decode_* 但有 VAAPI 的 Linux 機器.
+    enum class CompositeMode { None, D3D11_HEVC, ProbeOnly, VAAPI_VK };
 
     VkFrucRenderer(int pass, CompositeMode compositeMode = CompositeMode::None);
     ~VkFrucRenderer() override;
@@ -416,6 +422,17 @@ private:
     bool         m_BridgeInitDone    = false;
     bool initializeCompositeD3D11();
     void teardownCompositeD3D11();
+
+#if defined(HAVE_LIBVA) && !defined(Q_OS_WIN32)
+    // §K.linux VAAPI→Vulkan bridge.
+    // Only allocated when m_CompositeMode == VAAPI_VK.
+    std::unique_ptr<VAAPIVkBridge> m_VAAPIBridge;
+    AVBufferRef* m_BridgeVAAPIDevCtx = nullptr;
+    bool         m_VAAPIBridgeInitDone = false;
+    bool initializeCompositeVAAPI();
+    void teardownCompositeVAAPI();
+    void renderFrameVAAPIImport(AVFrame* frame);
+#endif
 
     // §J.3.e.2.i.7 HW path：actual extension list enabled at vkCreateDevice
     // (filtered wanted∩available).  populateAvHwDeviceCtx 把這個交給
