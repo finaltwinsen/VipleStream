@@ -6546,6 +6546,37 @@ bool VkFrucRenderer::initializeCompositeD3D11()
                     "— proceeding in fenceless mode");
     }
 
+    // §B B6.2.5 — HEVC D3D11VA decoder pre-flight check ---------------------
+    // 避免每次連線都走 test decode 才發現「No decoder device for codec found」
+    // （AMD 780M 的 D3D11VA HEVC decoder config_count = 0 對所有 GUID）。
+    // 若 HEVC Main8 GUID + NV12 的 config_count = 0 → 提前 fail，讓 cascade
+    // 直接走 D3D11VARenderer / SW path，不用再建 AVHWDeviceContext 跑 test decode。
+    {
+        static const GUID kHevcMain = { // DXVA2_ModeHEVC_VLD_Main
+            0xd1c20509, 0xae7b, 0x4e72, { 0xae, 0x3b, 0x49, 0xf8, 0x8d, 0x58, 0x99, 0x2f }
+        };
+        Microsoft::WRL::ComPtr<ID3D11VideoDevice> videoDevice;
+        if (SUCCEEDED(baseDevice.As(&videoDevice))) {
+            D3D11_VIDEO_DECODER_DESC desc = {};
+            desc.Guid        = kHevcMain;
+            desc.SampleWidth  = 1920;  // 參考解析度 — 足夠做 pre-flight
+            desc.SampleHeight = 1080;
+            desc.OutputFormat = DXGI_FORMAT_NV12;
+            UINT cfgCount = 0;
+            videoDevice->GetVideoDecoderConfigCount(&desc, &cfgCount);
+            if (cfgCount == 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-COMPOSITE] B6.2.5 pre-flight: "
+                    "HEVC Main D3D11VA config_count=0 (AMD driver 不支援或需 driver 更新) "
+                    "— skipping composite, letting cascade fall to D3D11VARenderer");
+                return false;  // FailLatch → s_BridgeBringupFailed = true → 不再重試
+            }
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-COMPOSITE] B6.2.5 pre-flight OK: "
+                "HEVC Main config_count=%u at 1920×1080 NV12", cfgCount);
+        }
+    }
+
     // §B B6.3 — av_hwdevice_ctx_alloc(D3D11VA) ---------------------------
     AVBufferRef* hwRef = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
     if (!hwRef) {
