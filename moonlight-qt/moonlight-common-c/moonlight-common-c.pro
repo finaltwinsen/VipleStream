@@ -109,5 +109,9 @@ contains(DEFINES, VIPLE_MPQUIC) {
     HEADERS += \
         $$COMMON_C_DIR/src/PlatformNetIf.h \
         $$COMMON_C_DIR/src/QuicTransport.h
+    # picoquic submodule lives under Sunshine/third-party. Relative path
+    # from moonlight-qt/moonlight-common-c/ up two levels to repo root,
+    # then down into Sunshine.
+    INCLUDEPATH += $$PWD/../../Sunshine/third-party/picoquic/picoquic
     win32:LIBS += -liphlpapi
 }
