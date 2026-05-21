@@ -7,9 +7,12 @@
 #include "rife_native_vk.h"  // §J.3.e.X Final.3b — native RIFE Vulkan executor
 #include "vulkanvideo.h"  // §J.3.b.1 probe
 #include "path.h"
+#include "modelfetcher.h"  // §SLIM 2026-05-21 — lazy-fetch flownet.bin
 
 #include <SDL.h>
 #include <QDir>
+#include <QFile>        // §SLIM 2026-05-21 — ensureRifeModelDir cache copies
+#include <QFileInfo>    // §SLIM 2026-05-21 — model dir resolution
 
 #include <dxgi1_2.h>
 #include <d3d11_4.h>     // §J.1: ID3D11Device5, ID3D11Fence, ID3D11DeviceContext4
@@ -38,6 +41,71 @@
 #include <vector>
 
 namespace {
+
+// §SLIM 2026-05-21 — RIFE model dir resolver.  flownet.param ships in
+// the release zip (36 KB); flownet.bin (11 MB) is fetched on demand
+// via ModelFetcher and cached under %LOCALAPPDATA%\VipleStream\
+// fruc_models\rife-v4.25-lite\.
+//
+// Returns a directory containing both files (so callers that pass a
+// modelDir into the rife_native_vk executor or ncnn loader get a
+// single coherent path).  Resolution order:
+//   1. Data dir (legacy install / dev tree where both files bundled)
+//      — use directly with no copy.
+//   2. Hybrid: ModelFetcher fetches flownet.bin into the cache dir,
+//      then we copy flownet.param from the data dir into the same
+//      cache dir so the caller sees one self-contained model dir.
+//   3. Failure (no data, no network) — return empty; caller logs and
+//      the FRUC backend cascade picks the next available option
+//      (Generic / NvOFFRUC / DML).
+QString ensureRifeModelDir(const std::string& modelDir)
+{
+    QString modelSubdir = QString::fromStdString(modelDir);
+    QString paramRel = modelSubdir + "/flownet.param";
+    QString binRel   = modelSubdir + "/flownet.bin";
+
+    // 1. Full bundle in data dir?
+    QString dataParam = Path::getDataFilePath(paramRel);
+    QString dataBin   = Path::getDataFilePath(binRel);
+    if (!dataParam.isEmpty() && !dataBin.isEmpty()) {
+        return QFileInfo(dataParam).absolutePath();
+    }
+
+    // 2. Hybrid path needs at minimum flownet.param somewhere on disk —
+    // can't reconstruct that one over the network.
+    if (dataParam.isEmpty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] flownet.param missing from data dir; "
+                    "RIFE-based FRUC backends disabled this launch");
+        return QString();
+    }
+
+    // Lazy fetch flownet.bin (no-op if already cached + SHA-256 matches).
+    QString fetchedBin = ModelFetcher::ensureModelPath(binRel);
+    if (fetchedBin.isEmpty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] flownet.bin lazy fetch failed; cascade "
+                    "skips NCNN / Native-RIFE this launch (no network or hash "
+                    "mismatch — see [VIPLE-MODELFETCH] log lines for cause)");
+        return QString();
+    }
+
+    // Use the cache dir alongside the fetched .bin as the model dir, and
+    // make sure flownet.param sits next to it (caller treats modelDir as
+    // a self-contained bundle).
+    QString cacheModelDir = QFileInfo(fetchedBin).absolutePath();
+    QString cachedParam   = QDir(cacheModelDir).absoluteFilePath("flownet.param");
+    if (!QFile::exists(cachedParam)) {
+        if (!QFile::copy(dataParam, cachedParam)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-NCNN] failed to copy flownet.param into "
+                        "cache (%s -> %s)",
+                        qPrintable(dataParam), qPrintable(cachedParam));
+            return QString();
+        }
+    }
+    return cacheModelDir;
+}
 
 // Median of a small float vector (no need for nth_element optimisation).
 double median(std::vector<double> xs)
@@ -986,14 +1054,26 @@ bool NcnnFRUC::initialize(ID3D11Device* device, uint32_t width, uint32_t height)
 
 bool NcnnFRUC::loadModel()
 {
-    QString paramPath = Path::getDataFilePath(
-        QString::fromStdString(m_ModelDir + "/flownet.param"));
-    QString binPath = Path::getDataFilePath(
-        QString::fromStdString(m_ModelDir + "/flownet.bin"));
+    // §SLIM 2026-05-21 — flownet.bin is no longer in the release zip; the
+    // helper resolves the data-dir bundle when present (dev tree / legacy
+    // install) and otherwise materialises a cache-dir copy with the .bin
+    // lazy-fetched via ModelFetcher.  Returns "" only on hard failure (no
+    // data dir, no network) — in that case the cascade picks the next
+    // backend (Generic / NvOFFRUC / DML).
+    QString modelDir = ensureRifeModelDir(m_ModelDir);
+    if (modelDir.isEmpty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-NCNN] RIFE model unavailable (data + cache + "
+                    "lazy fetch all failed) for %s",
+                    m_ModelDir.c_str());
+        return false;
+    }
+    QString paramPath = QDir(modelDir).absoluteFilePath("flownet.param");
+    QString binPath   = QDir(modelDir).absoluteFilePath("flownet.bin");
 
     if (paramPath.isEmpty() || binPath.isEmpty()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC-NCNN] RIFE model not found in data path: %s",
+                    "[VIPLE-FRUC-NCNN] RIFE model paths empty after ensure: %s",
                     m_ModelDir.c_str());
         return false;
     }
@@ -2627,28 +2707,39 @@ bool NcnnFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp)
             ctx.computeQueue = bridge->vkQueue;
             ctx.getInstanceProcAddr = bridge->pfnGetInstanceProcAddr;
 
-            QString modelDir = Path::getDataFilePath(QString::fromStdString(m_ModelDir));
-            viple::rife_native_vk::RifeNativeExecutor::InitOptions opts;
-            opts.ctx = ctx;
-            opts.modelDir = modelDir;
-            opts.in0Shape.c = 3; opts.in0Shape.h = (int)m_Height; opts.in0Shape.w = (int)m_Width;
-            opts.in1Shape.c = 3; opts.in1Shape.h = (int)m_Height; opts.in1Shape.w = (int)m_Width;
-            opts.in2Shape.c = 1; opts.in2Shape.h = 1;             opts.in2Shape.w = 1;
-            // Pipeline cache stored in user cache dir to amortise SPIR-V→
-            // driver compilation across launches (~50-300 ms savings on 9
-            // shaders).  Path::getCacheFileInfo gives the absolute path
-            // under VipleStream's cache root.
-            opts.pipelineCachePath = Path::getCacheFileInfo("rife_native_vk_pipe.cache").absoluteFilePath();
-
-            if (bridge->executor.initialize(opts)) {
-                m_NativeReady = true;
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC-NCNN] Final.3b: native RIFE executor "
-                            "initialized — using native path for all subsequent frames");
-            } else {
+            // §SLIM 2026-05-21 — Native RIFE Vulkan also needs both
+            // flownet.param + flownet.bin in one dir; reuse the same
+            // helper as NcnnFRUC::loadModel so the lazy-fetch path is
+            // identical (and shares the on-disk cache).
+            QString modelDir = ensureRifeModelDir(m_ModelDir);
+            if (modelDir.isEmpty()) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-FRUC-NCNN] Final.3b: native RIFE init failed — "
-                            "falling back to ncnn for this NcnnFRUC instance");
+                            "[VIPLE-FRUC-NCNN] Final.3b: RIFE model "
+                            "unavailable for native executor — skipping");
+                m_NativeReady = false;
+            } else {
+                viple::rife_native_vk::RifeNativeExecutor::InitOptions opts;
+                opts.ctx = ctx;
+                opts.modelDir = modelDir;
+                opts.in0Shape.c = 3; opts.in0Shape.h = (int)m_Height; opts.in0Shape.w = (int)m_Width;
+                opts.in1Shape.c = 3; opts.in1Shape.h = (int)m_Height; opts.in1Shape.w = (int)m_Width;
+                opts.in2Shape.c = 1; opts.in2Shape.h = 1;             opts.in2Shape.w = 1;
+                // Pipeline cache stored in user cache dir to amortise SPIR-V→
+                // driver compilation across launches (~50-300 ms savings on 9
+                // shaders).  Path::getCacheFileInfo gives the absolute path
+                // under VipleStream's cache root.
+                opts.pipelineCachePath = Path::getCacheFileInfo("rife_native_vk_pipe.cache").absoluteFilePath();
+
+                if (bridge->executor.initialize(opts)) {
+                    m_NativeReady = true;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC-NCNN] Final.3b: native RIFE executor "
+                                "initialized — using native path for all subsequent frames");
+                } else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FRUC-NCNN] Final.3b: native RIFE init failed — "
+                                "falling back to ncnn for this NcnnFRUC instance");
+                }
             }
         } else {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,

@@ -246,19 +246,28 @@ if exist "%NCNN_DLL%" (
     echo   [WARN] ncnn.dll missing at %NCNN_DLL% - NCNN FRUC backend disabled
 )
 
-:: VipleStream v1.3.x: RIFE 4.25-lite NCNN model files.  Two files:
-:: flownet.param (architecture, ~36 KB ascii) + flownet.bin (weights,
-:: ~11 MB fp16).  Model bundled into release/ folder rife-v4.25-lite/
-:: subdir to match nihui's rife-ncnn-vulkan reference layout.  Caller
-:: side resolves Path::getDataFilePath("rife-v4.25-lite/flownet.param").
+:: VipleStream v1.3.x: RIFE 4.25-lite NCNN model architecture.
+:: §SLIM 2026-05-21 — only flownet.param (36 KB ascii) ships in the zip;
+:: flownet.bin (11 MB fp16 weights) is now lazy-fetched by ModelFetcher
+:: on first NCNN / Native-RIFE FRUC backend init.  See
+:: moonlight-qt/app/streaming/video/ffmpeg-renderers/ncnnfruc.cpp
+:: ensureRifeModelDir() — verifies SHA-256, caches under
+:: %LOCALAPPDATA%\VipleStream\fruc_models\rife-v4.25-lite\flownet.bin.
+:: Source: repo `raw` URL (file already committed to main).  One-time
+:: ~3-5 s pause on broadband at first FRUC backend probe.  Cascade
+:: degrades gracefully (NCNN / Native-RIFE off; Generic / NvOFFRUC /
+:: DML continue) if the fetch fails (no network, offline).
+::
+:: To revert to bundling the .bin (e.g. for offline-install media),
+:: uncomment the `copy ... flownet.bin` line below.
 set "RIFE_NCNN_DIR=%SRC%\app\rife_models\rife-v4.25-lite"
 if exist "%RIFE_NCNN_DIR%\flownet.param" (
     if not exist "%TEMP_DIR%\rife-v4.25-lite" mkdir "%TEMP_DIR%\rife-v4.25-lite"
     copy /y "%RIFE_NCNN_DIR%\flownet.param" "%TEMP_DIR%\rife-v4.25-lite\" >nul
-    copy /y "%RIFE_NCNN_DIR%\flownet.bin"   "%TEMP_DIR%\rife-v4.25-lite\" >nul
-    echo   rife-v4.25-lite/flownet.{param,bin}
+    :: copy /y "%RIFE_NCNN_DIR%\flownet.bin"   "%TEMP_DIR%\rife-v4.25-lite\" >nul
+    echo   rife-v4.25-lite/flownet.param  (flownet.bin lazy-fetched, see ensureRifeModelDir)
 ) else (
-    echo   [WARN] RIFE 4.25-lite NCNN model missing at %RIFE_NCNN_DIR% - NCNN FRUC backend disabled
+    echo   [WARN] RIFE 4.25-lite flownet.param missing at %RIFE_NCNN_DIR% - NCNN/Native-RIFE FRUC backend disabled
 )
 
 :: ---- 4b. Debug symbols (PDBs) → separate side-by-side zip ----
