@@ -1,4 +1,6 @@
 @echo off
+:: UTF-8 console so Chinese comments / echos parse cleanly under any locale.
+chcp 65001 >nul
 setlocal enabledelayedexpansion
 
 :: =============================================================================

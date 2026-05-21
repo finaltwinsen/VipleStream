@@ -1,4 +1,9 @@
 @echo off
+:: Switch console to UTF-8 so this script's UTF-8 Chinese comments / echos
+:: don't get re-decoded by the default ANSI codepage (CP950 / CP936 etc.) —
+:: the mis-decoded byte sequences can drop spurious `(` `^` chars into the
+:: parser and make cmd try to "run" parts of comments as commands.
+chcp 65001 >nul
 :: =============================================================================
 ::  VipleStream Moonlight - Packaging step (VCS-tracked)
 ::
@@ -182,25 +187,33 @@ if exist "%ORT_DLL%" (
     echo   [WARN] onnxruntime.dll missing - DirectML ONNX path disabled
 )
 
+goto :_after_fruc_doc
+:: ---------------------------------------------------------------------------
 :: VipleStream §G.4 — DirectML ONNX FRUC models 不再隨 release zip 出貨.
-:: -------------------------------------------------------------------
+::
 :: 從 v1.3.311 起，下面三個 model 改為 DirectML backend 第一次 init 時
-:: 透過 ModelFetcher (moonlight-qt/.../modelfetcher.cpp) 從 GitHub release
+:: 透過 ModelFetcher [moonlight-qt/.../modelfetcher.cpp] 從 GitHub release
 :: v1.3.310 attached assets 動態下載到
 ::   %LOCALAPPDATA%\VipleStream\fruc_models\
-:: 並 sha-256 verify.  Release zip 因此縮小 ~39 MB (132 → ~93 MB).
+:: 並 sha-256 verify.  Release zip 因此縮小 ~39 MB [132 → ~93 MB].
 ::
 :: 多數 user 走 NvOF / Generic / Vulkan-builtin FRUC backend，從沒踩到
 :: DML path；既有設計就為這條路徑準備了 inline DML blend graph fallback，
-:: 所以下載失敗 / 無網路也能跑（只是沒 RIFE 補幀）。
+:: 所以下載失敗 / 無網路也能跑 [只是沒 RIFE 補幀]。
 ::
 :: 三個 model:
-::   tools/fruc.onnx        22 MB  RIFE v4.25 lite v2 fp32 (7-channel)
-::   tools/fruc_fp16.onnx   11 MB  fp16 variant (Tensor Core 加速)
+::   tools/fruc.onnx        22 MB  RIFE v4.25 lite v2 fp32 [7-channel]
+::   tools/fruc_fp16.onnx   11 MB  fp16 variant [Tensor Core 加速]
 ::   tools/fruc_ifrnet_s.onnx 5.5 MB IFRNet-S 較輕量 variant
 ::
 :: dev 機本地仍可保留 tools/*.onnx，DirectMLFRUC 找 model 順序是先
 :: install / data dirs 再 cache，dev build 就直接在原位跑不必 download.
+::
+:: NOTE: 這段純文件註解用 goto: 跳過，因為 cmd parser 對 `::` 註解內的
+:: 中文 byte 序列有 mis-parse 行為 [在 console codepage CP950 下會把
+:: 部分 token 當成 command]; goto 直接 skip raw source, 100% 安全.
+:: ---------------------------------------------------------------------------
+:_after_fruc_doc
 
 :: VipleStream: NVIDIA Optical Flow FRUC helper DLL + its CUDA runtime
 :: dependency. NvOFRUCWrapper LoadLibraryW's NvOFFRUC.dll from the exe

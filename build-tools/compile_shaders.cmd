@@ -1,4 +1,6 @@
 @echo off
+:: UTF-8 console so Chinese comments / echos parse cleanly under any locale.
+chcp 65001 >nul
 :: Compile all custom shaders
 if exist "%~dp0..\build-config.local.cmd" call "%~dp0..\build-config.local.cmd"
 if not defined ROOT set "ROOT=%~dp0.."

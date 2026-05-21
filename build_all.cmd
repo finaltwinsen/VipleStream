@@ -3,8 +3,16 @@ setlocal enabledelayedexpansion
 
 :: =============================================================================
 ::  VipleStream - Build All (Server + Client)
-::  Bumps version ONCE, then builds both Sunshine and Moonlight
+::  Bumps version ONCE, then builds both Sunshine and Moonlight.
+::
+::  By default this bumps the patch version.  Pass --no-bump to skip the
+::  bump and rebuild at the version already in version.json (used when
+::  re-packaging at the same version, e.g. re-cutting a release after a
+::  packaging fix without polluting the version timeline).
 :: =============================================================================
+
+set "BUMP=1"
+if /i "%~1"=="--no-bump" set "BUMP=0"
 
 if exist "%~dp0build-config.local.cmd" (
     call "%~dp0build-config.local.cmd"
@@ -20,10 +28,15 @@ echo ===========================================================
 echo   VipleStream - Build All (Server + Client)
 echo ===========================================================
 
-:: -- 1. Bump version once --
+:: -- 1. Resolve version once (bump or just propagate) --
 echo.
-echo [Step 1] Bumping version...
-call "%ROOT%\build-tools\bump_version.cmd"
+if "%BUMP%"=="1" (
+    echo [Step 1] Bumping version...
+    call "%ROOT%\build-tools\bump_version.cmd"
+) else (
+    echo [Step 1] Propagating version ^(no bump^)...
+    call "%ROOT%\build-tools\propagate_version.cmd"
+)
 set /p VER=<"%ROOT%\temp\current_version.txt"
 echo   Version: %VER%
 
