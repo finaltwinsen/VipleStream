@@ -864,7 +864,11 @@ private:
     // §J.3.e.2.i.56 (v1.4.121) — server stream fps for chainBusy threshold.
     // populated at init() from params->frameRate. Default 60 (safe for first
     // frames before init runs, just slightly conservative threshold).
-    int                m_StreamFps                     = 60;
+    // VipleStream: §S.8 std::atomic to fix race between decoder-thread init()
+    // write and renderer-thread reads in runAutotierTransition() / frame
+    // budget calculations. Plain int was UB on dual-core reads, and a torn
+    // read of 0 would divide-by-zero in `1000.0 / m_StreamFps`.
+    std::atomic<int>   m_StreamFps {60};
 
     // §J.3.e.2.i.57 (v1.4.122) — adaptive latency-aware frame drop throttle.
     // 偵測 max(decodeMeanMs, chain_mean) 過某 threshold 時, 每 N 幀主動 skip

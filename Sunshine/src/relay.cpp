@@ -245,9 +245,19 @@ namespace relay {
         frame.push_back((uint8_t)((static_cast<uint64_t>(len) >> (i * 8)) & 0xFF));
       }
     }
+    // VipleStream: §S.16 RFC 6455 only requires the mask be unpredictable,
+    // not cryptographically random. std::random_device is a syscall (e.g.
+    // BCryptGenRandom on Windows, /dev/urandom on Linux) and was being called
+    // 4× per frame at kHz rates from the binary tunnel, costing real CPU and
+    // adding jitter. A thread-local mt19937 seeded once from random_device
+    // satisfies the spec at a fraction of the cost.
     uint8_t mask[4];
-    std::random_device rd;
-    for (int i = 0; i < 4; i++) mask[i] = (uint8_t)rd();
+    static thread_local std::mt19937 mask_rng(std::random_device {}());
+    uint32_t mask_word = mask_rng();
+    mask[0] = static_cast<uint8_t>(mask_word);
+    mask[1] = static_cast<uint8_t>(mask_word >> 8);
+    mask[2] = static_cast<uint8_t>(mask_word >> 16);
+    mask[3] = static_cast<uint8_t>(mask_word >> 24);
     frame.insert(frame.end(), mask, mask + 4);
     for (size_t i = 0; i < len; i++) {
       frame.push_back(data[i] ^ mask[i % 4]);
@@ -301,7 +311,12 @@ namespace relay {
       len = 0;
       for (int i = 0; i < 8; i++) len = (len << 8) | ext[i];
     }
-    if (len > 10 * 1024 * 1024) return f;  // cap at 10 MiB
+    // VipleStream: §S.17 lowered from 10 MiB → 1 MiB. WebSocket control
+    // signals are well under 64 KiB and binary tunnel datagrams (RTP) are
+    // MTU-bounded (<1500 B). 1 MiB still gives plenty of slack for batched
+    // frames while making it harder for a 2-byte spoofed header to trigger a
+    // 10 MB heap allocation per connection.
+    if (len > 1024 * 1024) return f;
 
     if (opcode == 0x8) { f.opcode = 0xFF; return f; }  // close
 

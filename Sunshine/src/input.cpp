@@ -84,6 +84,11 @@ namespace input {
 
   template<std::size_t N>
   void free_id(std::bitset<N> &gamepad_mask, int id) {
+    // VipleStream: §S.1 reject malformed gamepad id before bitset OOB write.
+    if (id < 0 || static_cast<std::size_t>(id) >= gamepad_mask.size()) {
+      BOOST_LOG(warning) << "free_id(): invalid gamepad id "sv << id;
+      return;
+    }
     gamepad_mask[id] = false;
   }
 
@@ -118,7 +123,15 @@ namespace input {
    * @return Clamped native endianess float value.
    */
   float from_clamped_netfloat(netfloat f, float min, float max) {
-    return std::clamp(from_netfloat(f), min, max);
+    // VipleStream: §S.2 std::clamp on NaN is UB (NaN < x is always false, so
+    // the precondition !(value < min) && !(max < value) is violated). A NaN
+    // can otherwise be smuggled into the platform touch / mouse APIs and crash
+    // the driver. Snap NaN to min as a safe fallback.
+    float v = from_netfloat(f);
+    if (std::isnan(v)) {
+      return min;
+    }
+    return std::clamp(v, min, max);
   }
 
   static task_pool_util::TaskPool::task_id_t key_press_repeat_id {};
@@ -1282,11 +1295,14 @@ namespace input {
     short deltaX;
     short deltaY;
 
-    // Batching is safe as long as the result doesn't overflow a 16-bit integer
-    if (!__builtin_add_overflow(util::endian::big(dest->deltaX), util::endian::big(src->deltaX), &deltaX)) {
+    // VipleStream: §S.3 __builtin_add_overflow returns true *on* overflow; the
+    // previous `!` inverted the test, terminating the batch on every safe add
+    // and silently merging on overflow. Drop the negation so we batch the
+    // common (no-overflow) case and only bail when the result would wrap.
+    if (__builtin_add_overflow(util::endian::big(dest->deltaX), util::endian::big(src->deltaX), &deltaX)) {
       return batch_result_e::terminate_batch;
     }
-    if (!__builtin_add_overflow(util::endian::big(dest->deltaY), util::endian::big(src->deltaY), &deltaY)) {
+    if (__builtin_add_overflow(util::endian::big(dest->deltaY), util::endian::big(src->deltaY), &deltaY)) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1322,8 +1338,8 @@ namespace input {
   batch_result_e batch(PNV_SCROLL_PACKET dest, PNV_SCROLL_PACKET src) {
     short scrollAmt;
 
-    // Batching is safe as long as the result doesn't overflow a 16-bit integer
-    if (!__builtin_add_overflow(util::endian::big(dest->scrollAmt1), util::endian::big(src->scrollAmt1), &scrollAmt)) {
+    // VipleStream: §S.3 see batch(PNV_REL_MOUSE_MOVE_PACKET) above; drop `!`.
+    if (__builtin_add_overflow(util::endian::big(dest->scrollAmt1), util::endian::big(src->scrollAmt1), &scrollAmt)) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1342,8 +1358,8 @@ namespace input {
   batch_result_e batch(PSS_HSCROLL_PACKET dest, PSS_HSCROLL_PACKET src) {
     short scrollAmt;
 
-    // Batching is safe as long as the result doesn't overflow a 16-bit integer
-    if (!__builtin_add_overflow(util::endian::big(dest->scrollAmount), util::endian::big(src->scrollAmount), &scrollAmt)) {
+    // VipleStream: §S.3 see batch(PNV_REL_MOUSE_MOVE_PACKET) above; drop `!`.
+    if (__builtin_add_overflow(util::endian::big(dest->scrollAmount), util::endian::big(src->scrollAmount), &scrollAmt)) {
       return batch_result_e::terminate_batch;
     }
 

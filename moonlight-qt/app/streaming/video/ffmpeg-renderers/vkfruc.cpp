@@ -2320,7 +2320,7 @@ void VkFrucRenderer::runAutotierTransition()
         chainBusy = sum / kChainRingSize;
     }
     const uint64_t nvOfFails = m_NvOfProfConsecFails.load(std::memory_order_relaxed);
-    const double frameBudgetMs = 1000.0 / (double)m_StreamFps;
+    const double frameBudgetMs = 1000.0 / (double)m_StreamFps.load(std::memory_order_relaxed);
 
     // v1.4.155 §R2-ε-1: latency-driven autotier.
     // latencyMs = max(decodeMs, chainMs): 取兩者最大. decodeMs 反映 HEVC decoder
@@ -3498,7 +3498,7 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
     // params->frameRate 是 server fps (Sunshine 端推流速率), autotier 用
     // 1000/m_StreamFps 算 frame budget, chainBusy > budget*0.72 視為 chain 太重.
     if (params->frameRate > 0) {
-        m_StreamFps = params->frameRate;
+        m_StreamFps.store(params->frameRate, std::memory_order_relaxed);
     }
     // §J.3.e.2.i.3.e-SW — skip AVHWDeviceContext + AVVulkanDeviceContext
     // setup when in software-upload mode; we don't bridge ffmpeg to our
@@ -10873,7 +10873,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
 
     // v1.4.156 §R2-ζ-1: 每 frame call autotier (本來只在 chain timer 量測 block 內 call,
     // 對 chain 不持續量的情境 (e.g., 780M no NvOF + idle scene) autotier 永遠不 fire).
-    if (m_FrucMode && m_StreamFps > 0) {
+    if (m_FrucMode && m_StreamFps.load(std::memory_order_relaxed) > 0) {
         runAutotierTransition();
     }
 
@@ -12202,7 +12202,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                     // §J.3.e.2.i.56 — server fps 動態 threshold. budget = 1000/fps,
                     // 72% headroom (Andrew Glassner-ish ratio, 留 28% 給其他 GPU work
                     // + driver overhead). 60fps→12ms, 30fps→24ms, 90fps→8ms, 120fps→6ms.
-                    const double frameBudgetMs = 1000.0 / (double)m_StreamFps;
+                    const double frameBudgetMs = 1000.0 / (double)m_StreamFps.load(std::memory_order_relaxed);
                     const double chainBusyThreshMs = frameBudgetMs * 0.72;
                     if (chainBusyMeanMs > chainBusyThreshMs) {
                         if (++m_FramesAboveHandoffThresh >= 30) {
@@ -12216,7 +12216,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                                 "30s cool-down 過後試 re-enable; HW chain)",
                                 chainBusyMeanMs, chainBusyThreshMs,
                                 100.0 * chainBusyThreshMs / frameBudgetMs,
-                                frameBudgetMs, m_StreamFps);
+                                frameBudgetMs, m_StreamFps.load(std::memory_order_relaxed));
                         }
                     } else {
                         m_FramesAboveHandoffThresh = 0;
@@ -13828,7 +13828,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
 void VkFrucRenderer::renderFrameSw(AVFrame* frame)
 {
     // v1.4.156 §R2-ζ-1: SW path 也每 frame call autotier (見 renderFrame 同樣處理).
-    if (m_FrucMode && m_StreamFps > 0) {
+    if (m_FrucMode && m_StreamFps.load(std::memory_order_relaxed) > 0) {
         runAutotierTransition();
     }
 
@@ -14195,7 +14195,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                     double sumHSw = 0.0;
                     for (int i = 0; i < kChainRingSize; ++i) sumHSw += m_HandoffMsRing[i];
                     const double chainBusyMeanMsSw = sumHSw / kChainRingSize;
-                    const double frameBudgetMsSw = 1000.0 / (double)m_StreamFps;
+                    const double frameBudgetMsSw = 1000.0 / (double)m_StreamFps.load(std::memory_order_relaxed);
                     const double chainBusyThreshMsSw = frameBudgetMsSw * 0.72;
                     if (chainBusyMeanMsSw > chainBusyThreshMsSw) {
                         if (++m_FramesAboveHandoffThresh >= 30) {
@@ -14209,7 +14209,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                                 "30s cool-down 過後試 re-enable; SW path)",
                                 chainBusyMeanMsSw, chainBusyThreshMsSw,
                                 100.0 * chainBusyThreshMsSw / frameBudgetMsSw,
-                                frameBudgetMsSw, m_StreamFps);
+                                frameBudgetMsSw, m_StreamFps.load(std::memory_order_relaxed));
                         }
                     } else {
                         m_FramesAboveHandoffThresh = 0;

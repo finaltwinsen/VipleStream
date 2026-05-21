@@ -2080,6 +2080,16 @@ namespace video {
       }
     }
 
+    // VipleStream: §S.19 IDR cooldown. Under heavy packet loss the client + ABR
+    // both raise idr_events at kHz rates, and IDR frames are 5-15× the size of
+    // P-frames — emitting one per request piles megabytes of keyframe onto an
+    // already-congested link and creates a self-reinforcing loss storm. Cap
+    // real submissions to one per IDR_COOLDOWN_MS; subsequent requests inside
+    // the window are coalesced (we already mark requested_idr_frame=true once,
+    // so callers get a fresh keyframe at the next window boundary).
+    constexpr auto IDR_COOLDOWN_MS = std::chrono::milliseconds {1500};
+    auto last_idr_emit = std::chrono::steady_clock::time_point::min();
+
     while (true) {
       // Break out of the encoding loop if any of the following are true:
       // a) The stream is ending
@@ -2106,7 +2116,16 @@ namespace video {
       }
 
       if (requested_idr_frame) {
-        session->request_idr_frame();
+        // VipleStream: §S.19 cooldown gate (see top of run() for rationale).
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_idr_emit >= IDR_COOLDOWN_MS) {
+          session->request_idr_frame();
+          last_idr_emit = now;
+        }
+        else {
+          requested_idr_frame = false;  // suppress for this iteration
+          BOOST_LOG(debug) << "[VIPLE-IDR] cooldown active, suppressing IDR request"sv;
+        }
       }
 
       // VipleStream: Adaptive Bitrate — apply new bitrate from control thread

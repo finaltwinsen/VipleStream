@@ -3,6 +3,7 @@
  * @brief Definitions for cryptography functions.
  */
 // lib includes
+#include <openssl/crypto.h>
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
 
@@ -336,6 +337,13 @@ namespace crypto {
 
     std::copy(std::begin(hsh), std::begin(hsh) + key.size(), std::begin(key));
 
+    // VipleStream: §S.13 scrub the plaintext PIN || salt buffer and the
+    // intermediate SHA-256 digest before they leave the stack frame. std::string
+    // / std::array destructors don't zero memory, so a core dump or process
+    // scrape would otherwise still recover the pairing PIN and key material.
+    OPENSSL_cleanse(salt_pin.data(), salt_pin.size());
+    OPENSSL_cleanse(hsh.data(), hsh.size());
+
     return key;
   }
 
@@ -505,12 +513,28 @@ namespace crypto {
   }
 
   std::string rand_alphabet(std::size_t bytes, const std::string_view &alphabet) {
-    auto value = rand(bytes);
-
-    for (std::size_t i = 0; i != value.size(); ++i) {
-      value[i] = alphabet[value[i] % alphabet.length()];
+    // VipleStream: §S.12 reject-sample to avoid modulo bias. Mapping a uniform
+    // [0,255] byte through `% alphabet.length()` skews probability toward the
+    // first (256 % len) entries — e.g. with a 62-char alphabet the first 4
+    // chars are 1.55× more likely than the rest, reducing key/PIN entropy.
+    // Discard bytes that fall in the partial bucket and resample instead.
+    std::string r;
+    r.reserve(bytes);
+    const std::size_t alpha_len = alphabet.length();
+    const unsigned int limit = 256u - (256u % static_cast<unsigned int>(alpha_len));
+    while (r.size() < bytes) {
+      auto tmp = rand(bytes - r.size());
+      for (char c : tmp) {
+        auto v = static_cast<unsigned char>(c);
+        if (v < limit) {
+          r.push_back(alphabet[v % alpha_len]);
+          if (r.size() == bytes) {
+            break;
+          }
+        }
+      }
     }
-    return value;
+    return r;
   }
 
 }  // namespace crypto

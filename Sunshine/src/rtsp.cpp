@@ -952,6 +952,13 @@ namespace rtsp_stream {
           begin = pos;
         }
       }
+      // VipleStream: §S.4a if the payload doesn't end with a newline (common
+      // when the SDP is built without a trailing CRLF) the final attribute
+      // would otherwise be silently dropped — e.g. `a=x-nv-video[0].maxFPS:60`
+      // would never reach `args` and the session would fall back to defaults.
+      if (begin != payload_end) {
+        lines.emplace_back(begin, payload_end - begin);
+      }
     }
 
     std::string_view client;
@@ -962,12 +969,19 @@ namespace rtsp_stream {
       if (type == "s="sv) {
         client = line.substr(2);
       } else if (type == "a=") {
+        // VipleStream: §S.4b a malformed `a=` line without ':' would otherwise
+        // make `pos = npos`, and the downstream `val[val.size() - 1]` access on
+        // a possibly-empty string_view is UB. Skip such lines instead of
+        // letting a single bad attribute drop the RTSP session.
         auto pos = line.find(':');
+        if (pos == std::string_view::npos) {
+          continue;
+        }
 
         auto name = line.substr(2, pos - 2);
         auto val = line.substr(pos + 1);
 
-        if (val[val.size() - 1] == ' ') {
+        if (!val.empty() && val[val.size() - 1] == ' ') {
           val = val.substr(0, val.size() - 1);
         }
         args.emplace(name, val);

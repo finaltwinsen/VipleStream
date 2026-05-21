@@ -6,6 +6,7 @@
 
 // standard includes
 #include <algorithm>
+#include <charconv>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -13,6 +14,7 @@
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -476,19 +478,22 @@ namespace util {
   }
 
   inline std::int64_t from_chars(const char *begin, const char *end) {
-    if (begin == end) {
+    // VipleStream: §S.6 the previous hand-rolled parser had no bounds check
+    // (begin > end walks the iterator backwards), no character validation
+    // (non-digits silently become garbage via `*end - '0'`), and no overflow
+    // guard (a 20-digit attacker-supplied SDP attribute wraps int64). Defer to
+    // std::from_chars which handles all three correctly and returns 0 on any
+    // parse failure — preserving the original "always returns a number" API
+    // shape for callers that don't check.
+    if (begin == nullptr || end == nullptr || begin >= end) {
       return 0;
     }
-
-    std::int64_t res {};
-    std::int64_t mul = 1;
-    while (begin != --end) {
-      res += (std::int64_t) (*end - '0') * mul;
-
-      mul *= 10;
+    std::int64_t value = 0;
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc {}) {
+      return 0;
     }
-
-    return *begin != '-' ? res + (std::int64_t) (*begin - '0') * mul : -res;
+    return value;
   }
 
   inline std::int64_t from_view(const std::string_view &number) {
