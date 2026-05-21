@@ -1,6 +1,8 @@
 # ── Build outputs ──
 Sunshine/build/
+Sunshine/build-*/
 Sunshine/build_mingw/
+moonlight-qt/**/*.a
 moonlight-qt/**/release/
 moonlight-qt/**/debug/
 moonlight-qt/**/Makefile

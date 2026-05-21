@@ -10,6 +10,24 @@
 
 #include <picoquic.h>
 #include <picoquic_utils.h>
+// Congestion algorithm symbols live in their own headers
+#include <picoquic_bbr.h>
+#include <picoquic_cubic.h>
+#include <picoquic_newreno.h>
+
+#ifdef _WIN32
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #pragma comment(lib, "ws2_32.lib")
+#else
+  #include <sys/socket.h>
+  #include <netinet/in.h>
+  #include <arpa/inet.h>
+  #include <unistd.h>
+  #define SOCKET int
+  #define INVALID_SOCKET (-1)
+  #define closesocket(fd) (::close(fd))
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -403,11 +421,12 @@ namespace quic_server {
 
   int QuicListener::picoquicCallback(picoquic_cnx_t *cnx,
       uint64_t stream_id, uint8_t *bytes, size_t length,
-      int fin_or_event, void *callback_ctx, void *stream_ctx) {
+      picoquic_call_back_event_t fin_or_event,
+      void *callback_ctx, void *stream_ctx) {
     auto *listener = static_cast<QuicListener *>(callback_ctx);
     (void)stream_ctx;
 
-    auto event = static_cast<picoquic_call_back_event_t>(fin_or_event);
+    auto event = fin_or_event;
 
     // Helper: look up the session bound to this cnx.
     auto findSession = [&](picoquic_cnx_t *c) -> std::shared_ptr<QuicSession> {

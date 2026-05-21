@@ -2,6 +2,7 @@ package com.limelight.binding.net;
 
 import android.content.Context;
 import android.net.ConnectivityManager;
+import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -119,10 +120,13 @@ public class MultiNetworkAdapter {
                     NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
             int bandwidth = caps.getLinkDownstreamBandwidthKbps();
 
-            // Get first non-loopback address
-            List<InetAddress> addresses = props.getAddresses();
+            // Get first non-loopback address.
+            // LinkProperties.getLinkAddresses() returns List<LinkAddress>
+            // (each LinkAddress wraps an InetAddress + prefix length).
+            List<LinkAddress> addresses = props.getLinkAddresses();
             InetAddress addr = null;
-            for (InetAddress a : addresses) {
+            for (LinkAddress la : addresses) {
+                InetAddress a = la.getAddress();
                 if (!a.isLoopbackAddress()) {
                     addr = a;
                     break;
@@ -177,9 +181,10 @@ public class MultiNetworkAdapter {
                         NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
                 int bandwidth = caps.getLinkDownstreamBandwidthKbps();
 
-                List<InetAddress> addresses = props.getAddresses();
+                List<LinkAddress> addresses = props.getLinkAddresses();
                 InetAddress addr = null;
-                for (InetAddress a : addresses) {
+                for (LinkAddress la : addresses) {
+                    InetAddress a = la.getAddress();
                     if (!a.isLoopbackAddress()) {
                         addr = a;
                         break;

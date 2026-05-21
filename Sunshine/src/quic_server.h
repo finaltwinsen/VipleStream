@@ -27,8 +27,9 @@
 
 #include <boost/asio.hpp>
 
-struct picoquic_quic_t;
-struct picoquic_cnx_t;
+// picoquic uses anonymous-enum typedefs and tag-name typedefs that
+// can't be forward-declared cleanly. Just include the full header.
+#include <picoquic.h>
 
 namespace quic_server {
 
@@ -132,7 +133,8 @@ namespace quic_server {
 
     static int picoquicCallback(picoquic_cnx_t *cnx,
         uint64_t stream_id, uint8_t *bytes, size_t length,
-        int fin_or_event, void *callback_ctx, void *stream_ctx);
+        picoquic_call_back_event_t fin_or_event,
+        void *callback_ctx, void *stream_ctx);
 
     picoquic_quic_t *_quic = nullptr;
     std::thread _ioThread;

@@ -11,6 +11,10 @@
 #include <picoquic.h>
 #include <picoquic_utils.h>
 #include <picosocks.h>
+// Congestion algorithm pointers live in their own headers in picoquic.
+#include <picoquic_bbr.h>
+#include <picoquic_cubic.h>
+#include <picoquic_newreno.h>
 
 // ── Internal constants ──────────────────────────────────────
 
@@ -112,6 +116,7 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
 static int quicSelectPath(unsigned char flowType, int dataLen);
 static void quicUpdatePathStats(void);
 static void quicCheckPathHealth(void);
+static void quicApplyCongestionAlgo(picoquic_quic_t* quic);
 
 // ── Lifecycle ───────────────────────────────────────────────
 
@@ -265,7 +270,6 @@ void quicDisconnect(void) {
         picoquic_close(g_ctx.cnx, 0);
         PltInterruptThread(&g_ctx.ioThread);
         PltJoinThread(&g_ctx.ioThread);
-        PltCloseThread(&g_ctx.ioThread);
 
         g_ctx.cnx = NULL;
     }
@@ -344,7 +348,6 @@ void quicServerStop(void) {
     if (g_ctx.quic) {
         PltInterruptThread(&g_ctx.ioThread);
         PltJoinThread(&g_ctx.ioThread);
-        PltCloseThread(&g_ctx.ioThread);
         picoquic_free(g_ctx.quic);
         g_ctx.quic = NULL;
     }
