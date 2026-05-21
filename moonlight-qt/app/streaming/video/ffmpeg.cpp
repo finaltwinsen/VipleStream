@@ -1388,16 +1388,19 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
 #ifdef HAVE_LIBVA
         case AV_HWDEVICE_TYPE_VAAPI:
 #if defined(HAVE_LIBPLACEBO_VULKAN) && !defined(Q_OS_WIN32)
-            // §K.linux — VAAPI→Vulkan DMA-BUF bridge：
+            // §K.linux — VAAPI→Vulkan DMA-BUF bridge（僅在 FRUC 啟用時）：
             // RADV/Vega 10 沒 VK_KHR_video_decode_*，但 VAAPI HW decode 正常。
             // VkFrucRenderer VAAPI_VK composite mode 讓 VAAPI decode output
             // 透過 DMA-BUF import 進 Vulkan 走 FRUC chain。
-            // 若 VkFrucRenderer init 失敗（Vulkan 不可用），cascade pass=1
-            // 會 retry 此 case 走 VAAPIRenderer fallback（下方 pass==1 block）。
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VAAPI-VK] §K cascade: VAAPI → "
-                        "VkFrucRenderer(VAAPI_VK) composite (pass=%d)", pass);
-            return new VkFrucRenderer(pass, VkFrucRenderer::CompositeMode::VAAPI_VK);
+            // FRUC 未啟用時改走 VAAPIRenderer（m_SwFrucNv12Buf 不會被配置，
+            // 進 VAAPI_VK path 會 crash）。
+            if (shouldUseVkFrucRendererForVulkanHwaccel()) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VAAPI-VK] §K cascade: VAAPI → "
+                            "VkFrucRenderer(VAAPI_VK) composite (pass=%d)", pass);
+                return new VkFrucRenderer(pass, VkFrucRenderer::CompositeMode::VAAPI_VK);
+            }
+            return new VAAPIRenderer(pass);
 #else
             return new VAAPIRenderer(pass);
 #endif

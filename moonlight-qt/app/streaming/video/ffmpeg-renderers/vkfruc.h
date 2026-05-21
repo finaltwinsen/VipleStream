@@ -432,6 +432,11 @@ private:
     bool initializeCompositeVAAPI();
     void teardownCompositeVAAPI();
     void renderFrameVAAPIImport(AVFrame* frame);
+    // §K.3 — per-slot imported VkImage cache (array declared after kFrucFramesInFlight).
+    struct VAAPISlotImport {
+        VkImage        image  = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+    };
 #endif
 
     // §J.3.e.2.i.7 HW path：actual extension list enabled at vkCreateDevice
@@ -1068,6 +1073,10 @@ private:
     VkSemaphore     m_SlotAcquireSem[kFrucFramesInFlight][3]     = {};
     VkSemaphore     m_SlotRenderDoneSem[kFrucFramesInFlight][2]  = {};
     VkFence         m_SlotInFlightFence[kFrucFramesInFlight]     = {};
+    // §K.3 — per-slot VAAPI import cache，在下次同 slot fence wait 後釋放。
+#if defined(HAVE_LIBVA) && !defined(Q_OS_WIN32)
+    VAAPISlotImport m_VAAPISlotImport[kFrucFramesInFlight] = {};
+#endif
     uint32_t        m_CurrentSlot            = 0;
 
     // §J.3.e.2.i.10 (2026-05-09) Phase 2A — async-compute queue per-slot

@@ -6861,6 +6861,23 @@ void VkFrucRenderer::teardownCompositeVAAPI()
 {
     if (!m_VAAPIBridgeInitDone && !m_VAAPIBridge && !m_BridgeVAAPIDevCtx)
         return;
+
+    // §K.3 — 清掉所有 slot 的 VAAPI import cache。
+    // 呼叫前呼叫方（teardown）應已 vkQueueWaitIdle，確保 GPU 閒置。
+    if (m_Device != VK_NULL_HANDLE) {
+        auto pfnGDPA = (PFN_vkGetDeviceProcAddr)
+            m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr");
+        if (pfnGDPA) {
+            auto pfnDestroyImage = (PFN_vkDestroyImage)pfnGDPA(m_Device, "vkDestroyImage");
+            auto pfnFreeMemory   = (PFN_vkFreeMemory)  pfnGDPA(m_Device, "vkFreeMemory");
+            for (auto& si : m_VAAPISlotImport) {
+                if (pfnDestroyImage && si.image)  pfnDestroyImage(m_Device, si.image,  nullptr);
+                if (pfnFreeMemory   && si.memory) pfnFreeMemory  (m_Device, si.memory, nullptr);
+                si = {};
+            }
+        }
+    }
+
     m_VAAPIBridge.reset();
     if (m_BridgeVAAPIDevCtx) {
         av_buffer_unref(&m_BridgeVAAPIDevCtx);
@@ -6877,13 +6894,16 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
     uint64_t fnum = s_VFrameCount.fetch_add(1, std::memory_order_relaxed);
     const bool log = (fnum < 5) || (fnum % 60 == 0);
 
+    // §K.3 — autotier + latency throttle，mirror renderFrameSw。
+    if (m_FrucMode && m_StreamFps.load(std::memory_order_relaxed) > 0) {
+        runAutotierTransition();
+    }
+    if (computeLatencyThrottleDrop()) return;
+
     if (!frame || frame->format != AV_PIX_FMT_VAAPI) {
-        if (log) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VAAPI-VK] frame#%llu unexpected fmt=%d",
-                        (unsigned long long)fnum,
-                        frame ? frame->format : -1);
-        }
+        if (log) SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-VAAPI-VK] frame#%llu unexpected fmt=%d",
+                             (unsigned long long)fnum, frame ? frame->format : -1);
         return;
     }
     if (!m_VAAPIBridge || !m_VAAPIBridgeInitDone) {
@@ -6891,6 +6911,42 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
                               "[VIPLE-VAAPI-VK] frame#%llu bridge not ready",
                               (unsigned long long)fnum);
         return;
+    }
+    if (m_DeviceLost.load(std::memory_order_acquire)) return;
+
+    const uint32_t W = (uint32_t)frame->width;
+    const uint32_t H = (uint32_t)frame->height;
+
+    // §K.3 — slot 輪換 + fence wait（GPU 完成前一輪同 slot 工作）。
+    uint32_t slot = m_CurrentSlot;
+    m_CurrentSlot = (m_CurrentSlot + 1) % kFrucFramesInFlight;
+
+    {
+        VkResult wf = m_RtPfn.WaitForFences(m_Device, 1, &m_SlotInFlightFence[slot], VK_TRUE, UINT64_MAX);
+        if (wf != VK_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VAAPI-VK] WaitForFences slot=%u rc=%d — device lost",
+                         slot, (int)wf);
+            m_DeviceLost.store(true, std::memory_order_release);
+            return;
+        }
+        m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);
+    }
+
+    // §K.3 — 釋放上一輪同 slot 的 VAAPI import（GPU 已完成 CopyImageToBuffer）。
+    {
+        VAAPISlotImport& prev = m_VAAPISlotImport[slot];
+        if (prev.image != VK_NULL_HANDLE || prev.memory != VK_NULL_HANDLE) {
+            auto pfnGDPA = (PFN_vkGetDeviceProcAddr)
+                m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr");
+            if (pfnGDPA) {
+                auto pfnFreeMemory   = (PFN_vkFreeMemory)  pfnGDPA(m_Device, "vkFreeMemory");
+                auto pfnDestroyImage = (PFN_vkDestroyImage)pfnGDPA(m_Device, "vkDestroyImage");
+                if (pfnDestroyImage && prev.image)  pfnDestroyImage(m_Device, prev.image,  nullptr);
+                if (pfnFreeMemory   && prev.memory) pfnFreeMemory  (m_Device, prev.memory, nullptr);
+            }
+            prev = {};
+        }
     }
 
     // 從 AVFrame 取出 VADisplay + VASurfaceID，匯出 DMA-BUF。
@@ -6920,16 +6976,12 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
         return;
     }
 
-    // num_objects == 1 (single NV12 buffer) confirmed by pre-req spike.
     int      dmaFd   = drmDesc.objects[0].fd;
     uint32_t dmaSize = (uint32_t)drmDesc.objects[0].size;
     uint64_t modifier = drmDesc.objects[0].drm_format_modifier;
 
     VAAPIVkBridge::ImportedFrame imp = {};
-    bool ok = m_VAAPIBridge->importFrame(dmaFd, dmaSize, modifier,
-                                         (uint32_t)frame->width,
-                                         (uint32_t)frame->height,
-                                         &imp);
+    bool ok = m_VAAPIBridge->importFrame(dmaFd, dmaSize, modifier, W, H, &imp);
 
     // 關閉 VA export 的 fd（bridge 已 dup()）。
     for (uint32_t i = 0; i < drmDesc.num_objects; i++) close(drmDesc.objects[i].fd);
@@ -6941,25 +6993,298 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
         return;
     }
 
+    // 快取匯入的 VkImage/VkDeviceMemory，下一輪同 slot fence wait 後才釋放。
+    m_VAAPISlotImport[slot] = { imp.image, imp.memory };
+
     if (log) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VAAPI-VK] frame#%llu import OK "
-                    "image=%p mem=%p %ux%u modifier=0x%llx — K.2 passthrough",
+                    "image=%p mem=%p %ux%u modifier=0x%llx — K.3",
                     (unsigned long long)fnum,
-                    (void*)imp.image, (void*)imp.memory,
-                    imp.width, imp.height,
+                    (void*)imp.image, (void*)imp.memory, W, H,
                     (unsigned long long)modifier);
     }
 
-    // §K.2 passthrough：驗證 import 不 crash，尚未接入 FRUC chain（§K.3）。
-    // 釋放 imported VkImage（由 VkDevice 直接呼叫，不依賴 bridge 內部 PFN）。
-    auto pfnGDPA = (PFN_vkGetDeviceProcAddr)
+    // §K.3 — 錄 command buffer。
+    VkCommandBuffer cmd = m_SlotCmdBuf[slot];
+    m_RtPfn.ResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo cbbi = {};
+    cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    m_RtPfn.BeginCommandBuffer(cmd, &cbbi);
+
+    // a. 轉換 imported LINEAR NV12: UNDEFINED → GENERAL，同時 drain 上一幀
+    //    m_SwFrucNv12Buf 的 COMPUTE_SHADER_READ（WAW barrier）。
+    VkImageMemoryBarrier importBar = {};
+    importBar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    importBar.srcAccessMask       = 0;
+    importBar.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+    importBar.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+    importBar.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    importBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    importBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    importBar.image               = imp.image;
+    importBar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    importBar.subresourceRange.levelCount = 1;
+    importBar.subresourceRange.layerCount = 1;
+
+    VkBufferMemoryBarrier preCopyBar = {};
+    preCopyBar.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    preCopyBar.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    preCopyBar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    preCopyBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preCopyBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preCopyBar.buffer = m_SwFrucNv12Buf;
+    preCopyBar.offset = 0;
+    preCopyBar.size   = VK_WHOLE_SIZE;
+
+    m_RtPfn.CmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 1, &preCopyBar, 1, &importBar);
+
+    // b. CopyImageToBuffer: LINEAR NV12 → m_SwFrucNv12Buf（Y @ offset 0，UV @ W×H）。
+    VkBufferImageCopy copyRegs[2] = {};
+    copyRegs[0].bufferOffset                    = 0;
+    copyRegs[0].bufferRowLength                 = W;
+    copyRegs[0].imageSubresource.aspectMask     = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    copyRegs[0].imageSubresource.layerCount     = 1;
+    copyRegs[0].imageExtent                     = { W, H, 1 };
+    copyRegs[1].bufferOffset                    = (VkDeviceSize)W * H;
+    copyRegs[1].bufferRowLength                 = W / 2;
+    copyRegs[1].imageSubresource.aspectMask     = VK_IMAGE_ASPECT_PLANE_1_BIT;
+    copyRegs[1].imageSubresource.layerCount     = 1;
+    copyRegs[1].imageExtent                     = { W / 2, H / 2, 1 };
+    m_RtPfn.CmdCopyImageToBuffer(cmd, imp.image, VK_IMAGE_LAYOUT_GENERAL,
+                                 m_SwFrucNv12Buf, 2, copyRegs);
+
+    // c. Buffer barrier: TRANSFER_WRITE → COMPUTE_SHADER_READ。
+    VkBufferMemoryBarrier bufBar = {};
+    bufBar.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bufBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bufBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    bufBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufBar.buffer = m_SwFrucNv12Buf;
+    bufBar.offset = 0;
+    bufBar.size   = VK_WHOLE_SIZE;
+    m_RtPfn.CmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 1, &bufBar, 0, nullptr);
+
+    // d. FRUC compute chain（NV12→RGB → ME → median → warp → RIFE/interp）。
+    const bool frucPausedThisFrame = m_FRUCPaused.load();
+    const int  effRatio = m_EffectiveRatio.load(std::memory_order_acquire);
+    const bool frucActive = m_FrucMode && m_FrucReady && !frucPausedThisFrame;
+    const bool dualPresentThisFrame =
+        (effRatio >= 2 && m_DualMode && frucActive && !isFrucEffectivelyDisabled());
+
+    if (frucActive) {
+        runFrucComputeChain(cmd, W, H, /*useNativeSrc*/true, slot);
+        if (fnum < 3) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VAAPI-VK] K.3 frame#%llu FRUC chain dispatched %ux%u",
+                        (unsigned long long)fnum, W, H);
+        }
+    }
+
+    // §K.3 — 取得 swapchain image（dual: 兩張；single: 一張）。
+    uint32_t imgIdxA = 0, imgIdxB = 0, imgIdx = 0;
+    if (dualPresentThisFrame) {
+        VkResult vrA = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
+                                                    m_SlotAcquireSem[slot][0],
+                                                    VK_NULL_HANDLE, &imgIdxA);
+        if (vrA != VK_SUCCESS && vrA != VK_SUBOPTIMAL_KHR) {
+            m_RtPfn.EndCommandBuffer(cmd);
+            if (log) SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                  "[VIPLE-VAAPI-VK] K.3 AcquireNextImage(A) failed %d", (int)vrA);
+            return;
+        }
+        VkResult vrB = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
+                                                    m_SlotAcquireSem[slot][1],
+                                                    VK_NULL_HANDLE, &imgIdxB);
+        if (vrB != VK_SUCCESS && vrB != VK_SUBOPTIMAL_KHR) {
+            m_RtPfn.EndCommandBuffer(cmd);
+            if (log) SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                  "[VIPLE-VAAPI-VK] K.3 AcquireNextImage(B) failed %d", (int)vrB);
+            return;
+        }
+        imgIdx = imgIdxB;
+    } else {
+        VkResult vrA = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
+                                                    m_SlotAcquireSem[slot][0],
+                                                    VK_NULL_HANDLE, &imgIdx);
+        if (vrA != VK_SUCCESS && vrA != VK_SUBOPTIMAL_KHR) {
+            m_RtPfn.EndCommandBuffer(cmd);
+            return;
+        }
+        imgIdxA = imgIdx;
+    }
+
+    // §K.3 — overlay + render pass(es)。
+    drainOverlayStash();
+    uploadPendingOverlay(cmd);
+
+    VkClearValue clearVal = {};
+    clearVal.color.float32[3] = 1.0f;
+
+    auto pfnGDPA2 = (PFN_vkGetDeviceProcAddr)
         m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr");
-    if (pfnGDPA) {
-        auto pfnFreeMemory   = (PFN_vkFreeMemory)  pfnGDPA(m_Device, "vkFreeMemory");
-        auto pfnDestroyImage = (PFN_vkDestroyImage)pfnGDPA(m_Device, "vkDestroyImage");
-        if (pfnFreeMemory)   pfnFreeMemory(m_Device, imp.memory, nullptr);
-        if (pfnDestroyImage) pfnDestroyImage(m_Device, imp.image, nullptr);
+    auto pfnCmdPushConst = pfnGDPA2
+        ? (PFN_vkCmdPushConstants)pfnGDPA2(m_Device, "vkCmdPushConstants")
+        : nullptr;
+    struct { int srcW, srcH, _pad0, _pad1; } pcInterp = { (int)W, (int)H, 0, 0 };
+
+    // Interp 幀（imgIdxA）— dual + frucActive + pipeline 存在才 render。
+    if (dualPresentThisFrame && frucActive
+        && m_InterpPipeline != VK_NULL_HANDLE && m_InterpDescSet != VK_NULL_HANDLE) {
+        VkRenderPassBeginInfo rpbiA = {};
+        rpbiA.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpbiA.renderPass        = m_RenderPass;
+        rpbiA.framebuffer       = m_Framebuffers[imgIdxA];
+        rpbiA.renderArea.extent = m_SwapchainExtent;
+        rpbiA.clearValueCount   = 1;
+        rpbiA.pClearValues      = &clearVal;
+        m_RtPfn.CmdBeginRenderPass(cmd, &rpbiA, VK_SUBPASS_CONTENTS_INLINE);
+        m_RtPfn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
+        m_RtPfn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      m_InterpPipelineLayout, 0, 1, &m_InterpDescSet, 0, nullptr);
+        if (pfnCmdPushConst) {
+            pfnCmdPushConst(cmd, m_InterpPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                            0, sizeof(pcInterp), &pcInterp);
+        }
+        m_RtPfn.CmdDraw(cmd, 3, 1, 0, 0);
+        drawOverlayInRenderPass(cmd);
+        m_RtPfn.CmdEndRenderPass(cmd);
+    }
+
+    // Real 幀（imgIdx / imgIdxB）— 若 frucActive 且 pipeline 存在，用 m_RealCurrRgbDescSet
+    // 顯示 m_FrucCurrRgbBuf（NV12→RGB Stage 0 輸出）；否則 clear-only。
+    VkRenderPassBeginInfo rpbi = {};
+    rpbi.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpbi.renderPass        = m_RenderPass;
+    rpbi.framebuffer       = m_Framebuffers[imgIdx];
+    rpbi.renderArea.extent = m_SwapchainExtent;
+    rpbi.clearValueCount   = 1;
+    rpbi.pClearValues      = &clearVal;
+    m_RtPfn.CmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    if (frucActive && m_InterpPipeline != VK_NULL_HANDLE
+        && m_RealCurrRgbDescSet != VK_NULL_HANDLE) {
+        m_RtPfn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_InterpPipeline);
+        m_RtPfn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      m_InterpPipelineLayout, 0, 1, &m_RealCurrRgbDescSet, 0, nullptr);
+        if (pfnCmdPushConst) {
+            pfnCmdPushConst(cmd, m_InterpPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                            0, sizeof(pcInterp), &pcInterp);
+        }
+        m_RtPfn.CmdDraw(cmd, 3, 1, 0, 0);
+    }
+    drawOverlayInRenderPass(cmd);
+    m_RtPfn.CmdEndRenderPass(cmd);
+    m_RtPfn.EndCommandBuffer(cmd);
+
+    // §K.3 — QueueSubmit + QueuePresentKHR。
+    // VAAPI path 無 FFmpeg Vulkan timeline，不需等 m_TimelineSem。
+    if (dualPresentThisFrame) {
+        VkSemaphore waitSems[2]   = { m_SlotAcquireSem[slot][0], m_SlotAcquireSem[slot][1] };
+        VkSemaphore signalSems[2] = { m_SwapchainRenderDoneSem[imgIdxA],
+                                      m_SwapchainRenderDoneSem[imgIdxB] };
+        VkPipelineStageFlags waitMasks[2] = {
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        };
+        VkSubmitInfo si = {};
+        si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.waitSemaphoreCount   = 2;
+        si.pWaitSemaphores      = waitSems;
+        si.pWaitDstStageMask    = waitMasks;
+        si.commandBufferCount   = 1;
+        si.pCommandBuffers      = &cmd;
+        si.signalSemaphoreCount = 2;
+        si.pSignalSemaphores    = signalSems;
+        VkResult vr;
+        {
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
+        }
+        if (vr != VK_SUCCESS) {
+            if (vr == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VAAPI-VK] K.3 dual QueueSubmit failed %d", (int)vr);
+            return;
+        }
+        VkPresentInfoKHR piA = {};
+        piA.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        piA.waitSemaphoreCount = 1;
+        piA.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxA];
+        piA.swapchainCount     = 1;
+        piA.pSwapchains        = &m_Swapchain;
+        piA.pImageIndices      = &imgIdxA;
+        {
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piA);
+        }
+        VkPresentInfoKHR piB = {};
+        piB.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        piB.waitSemaphoreCount = 1;
+        piB.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdxB];
+        piB.swapchainCount     = 1;
+        piB.pSwapchains        = &m_Swapchain;
+        piB.pImageIndices      = &imgIdxB;
+        {
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            VkResult vrB = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &piB);
+            if (vrB != VK_SUCCESS && vrB != VK_SUBOPTIMAL_KHR) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VAAPI-VK] K.3 dual present(real) returned %d", (int)vrB);
+            }
+        }
+    } else {
+        VkSemaphore waitSems[1]   = { m_SlotAcquireSem[slot][0] };
+        VkSemaphore signalSems[1] = { m_SwapchainRenderDoneSem[imgIdx] };
+        VkPipelineStageFlags waitMasks[1] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+        VkSubmitInfo si = {};
+        si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.waitSemaphoreCount   = 1;
+        si.pWaitSemaphores      = waitSems;
+        si.pWaitDstStageMask    = waitMasks;
+        si.commandBufferCount   = 1;
+        si.pCommandBuffers      = &cmd;
+        si.signalSemaphoreCount = 1;
+        si.pSignalSemaphores    = signalSems;
+        VkResult vr;
+        {
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
+        }
+        if (vr != VK_SUCCESS) {
+            if (vr == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "[VIPLE-VAAPI-VK] K.3 single QueueSubmit failed %d", (int)vr);
+            return;
+        }
+        VkPresentInfoKHR pi = {};
+        pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        pi.waitSemaphoreCount = 1;
+        pi.pWaitSemaphores    = &m_SwapchainRenderDoneSem[imgIdx];
+        pi.swapchainCount     = 1;
+        pi.pSwapchains        = &m_Swapchain;
+        pi.pImageIndices      = &imgIdx;
+        {
+            std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            VkResult vrP = m_RtPfn.QueuePresentKHR(m_GraphicsQueue, &pi);
+            if (vrP != VK_SUCCESS && vrP != VK_SUBOPTIMAL_KHR) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VAAPI-VK] K.3 single present returned %d", (int)vrP);
+            }
+        }
+    }
+
+    if (log) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VAAPI-VK] K.3 frame#%llu OK dual=%d fruc=%d %ux%u",
+                    (unsigned long long)fnum, (int)dualPresentThisFrame, (int)frucActive, W, H);
     }
 }
 
