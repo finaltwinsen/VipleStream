@@ -103,7 +103,22 @@ if exist "%SRC%\app\SDL_GameControllerDB\gamecontrollerdb.txt" copy /y "%SRC%\ap
 
 :: ---- 3. windeployqt ----
 echo [pkg 3/5] Running windeployqt
-"%WINDEPLOYQT%" --release --qmldir "%SRC%\app\gui" --no-translations --compiler-runtime "%TEMP_DIR%\VipleStream.exe" 2>nul
+::
+:: §SLIM 2026-05-21 — release zip size trim:
+::   - Drop `--compiler-runtime`: was pulling in vc_redist.x64.exe (~25 MB
+::     packed) which is a user-facing installer, NOT a runtime dependency
+::     of VipleStream.exe itself.  Modern Win10/11 ships VC++ 2015-2022
+::     redist via Windows Update; users on older systems are pointed at
+::     https://aka.ms/vs/17/release/vc_redist.x64.exe in README.
+::   - `--no-opengl-sw`: skip opengl32sw.dll (~7 MB packed) Mesa software
+::     OpenGL fallback.  Stream clients always have a GPU; the Qt Quick UI
+::     uses the D3D11 RHI backend on Windows, not OpenGL, so this path
+::     is never taken.
+::   - `--no-virtualkeyboard`: we never embed Qt Virtual Keyboard.
+::   - `--no-system-d3d-compiler`: we don't runtime-compile HLSL (all
+::     D3D11 shaders ship as pre-compiled .fxc — see compile_d3d11_shaders.ps1)
+::     and Qt Quick has no ShaderEffect items in our QML tree.
+"%WINDEPLOYQT%" --release --qmldir "%SRC%\app\gui" --no-translations --no-compiler-runtime --no-opengl-sw --no-virtualkeyboard --no-system-d3d-compiler "%TEMP_DIR%\VipleStream.exe" 2>nul
 
 :: ---- 4. DirectX runtime libs ----
 echo [pkg 4/5] Copying DirectX runtime
@@ -215,21 +230,28 @@ if exist "%RIFE_NCNN_DIR%\flownet.param" (
     echo   [WARN] RIFE 4.25-lite NCNN model missing at %RIFE_NCNN_DIR% - NCNN FRUC backend disabled
 )
 
-:: ---- 4b. Debug symbols (PDBs) ----
+:: ---- 4b. Debug symbols (PDBs) → separate side-by-side zip ----
 ::
-:: Ship PDBs next to the .exe so WinDbg / cdb can symbolicate minidumps
-:: without any symbol-path setup. Statically-linked submodules
-:: (moonlight-common-c, h264bitstream, qmdnsengine) merge their symbols
-:: into VipleStream.pdb at link time, so VipleStream.pdb alone covers all our
-:: first-party code. AntiHooking is a separate DLL so its PDB ships too.
-:: Third-party DLLs (FFmpeg, SDL, Qt, libcrypto, libplacebo) don't ship
-:: PDBs with their binaries so those stay unsymbolicated in the dump —
-:: which is fine, we rarely need internals of those.
-echo [pkg 4b/5] Copying PDBs for crash symbolication
+:: §SLIM 2026-05-21 — PDBs add ~9 MB packed to the main zip and are only
+:: needed when symbolicating a minidump (a rare, dev-side operation).
+:: Pack them into a separate `VipleStream-Client-X.Y.Z-debug.zip` next
+:: to the main release zip.  WinDbg / cdb workflow:
+::   1) unzip both client + debug zip into the SAME folder
+::   2) PDBs end up alongside VipleStream.exe — `_NT_SYMBOL_PATH` finds
+::      them automatically, same as before.
+::
+:: Statically-linked submodules (moonlight-common-c, h264bitstream,
+:: qmdnsengine) merge their symbols into VipleStream.pdb at link time, so
+:: VipleStream.pdb alone covers all our first-party code.  AntiHooking is
+:: a separate DLL so its PDB lives in the debug zip too.
+echo [pkg 4b/5] Staging PDBs into separate debug zip
+set "PDB_STAGE=%TEMP_DIR%\..\moonlight_pdb"
+if exist "%PDB_STAGE%" rmdir /s /q "%PDB_STAGE%"
+mkdir "%PDB_STAGE%"
 for %%F in ("%SRC%\app\release\VipleStream.pdb" "%SRC%\AntiHooking\release\AntiHooking.pdb") do (
     if exist %%F (
-        copy /y %%F "%TEMP_DIR%\" >nul
-        echo   %%~nxF
+        copy /y %%F "%PDB_STAGE%\" >nul
+        echo   %%~nxF (debug zip)
     ) else (
         echo   [WARN] %%~nxF missing - crash dumps will not symbolicate
     )
@@ -241,7 +263,16 @@ if not exist "%RELEASE%" mkdir "%RELEASE%"
 
 set "OUT_ZIP=%RELEASE%\VipleStream-Client-%VER%.zip"
 if exist "%OUT_ZIP%" del /f "%OUT_ZIP%"
-"%SEVENZIP%" a -tzip -mx=7 -mmt=on "%OUT_ZIP%" "%TEMP_DIR%\*" >nul
+"%SEVENZIP%" a -tzip -mx=9 -mmt=on "%OUT_ZIP%" "%TEMP_DIR%\*" >nul
+
+set "OUT_PDB_ZIP=%RELEASE%\VipleStream-Client-%VER%-debug.zip"
+if exist "%OUT_PDB_ZIP%" del /f "%OUT_PDB_ZIP%"
+if exist "%PDB_STAGE%\*.pdb" (
+    "%SEVENZIP%" a -tzip -mx=9 -mmt=on "%OUT_PDB_ZIP%" "%PDB_STAGE%\*" >nul
+    for %%A in ("%OUT_PDB_ZIP%") do set "PDBSIZE=%%~zA"
+    set /a "PDBSIZE_MB=!PDBSIZE! / 1048576"
+)
+rmdir /s /q "%PDB_STAGE%"
 
 for %%A in ("%OUT_ZIP%") do set "ZIPSIZE=%%~zA"
 set /a "ZIPSIZE_MB=!ZIPSIZE! / 1048576"
@@ -250,6 +281,7 @@ echo.
 echo =========================================================
 echo   VipleStream Client v%VER%
 echo   %OUT_ZIP% (!ZIPSIZE_MB! MB)
+if exist "%OUT_PDB_ZIP%" echo   %OUT_PDB_ZIP% (!PDBSIZE_MB! MB, debug symbols)
 echo =========================================================
 
 endlocal

@@ -231,15 +231,26 @@ notepad build-config.local.cmd
 | Show current version | `pwsh build-tools\version.ps1 get` |
 | Deploy a fresh Qt client to local install | `scripts\deploy_client_now.cmd` (local-only, gitignored) |
 
-Outputs land in `release/`. v1.4.0 example:
+Outputs land in `release/`. Post-v1.4.196 size (after §SLIM trim):
 
 ```
-release/VipleStream-Client-1.4.0.zip                       (~106 MB)  Windows client
-release/VipleStream-Server-1.4.0.zip                       (~34 MB)   Windows server
-release/VipleStream-Android-1.4.0.apk                      (~7 MB)    Android (debug-signed)
-release/VipleStream-Client-1.4.0-linux-x64.AppImage        (~59 MB)   Linux client (Ubuntu noble built)
-release/VipleStream-Server-1.4.0-linux-x64.deb             (~9 MB)    Linux server .deb
+release/VipleStream-Client-X.Y.Z.zip                       (~60 MB)   Windows client
+release/VipleStream-Client-X.Y.Z-debug.zip                 (~10 MB)   PDBs (unzip alongside the client zip for crash symbolication)
+release/VipleStream-Server-X.Y.Z.zip                       (~34 MB)   Windows server
+release/VipleStream-Android-X.Y.Z.apk                      (~7 MB)    Android (debug-signed)
+release/VipleStream-Client-X.Y.Z-linux-x64.AppImage        (~85 MB)   Linux client (Ubuntu noble built)
+release/VipleStream-Server-X.Y.Z-linux-x64.deb             (~9 MB)    Linux server .deb
 ```
+
+#### Windows client runtime prerequisites
+
+The Windows client zip no longer bundles `vc_redist.x64.exe` (saved ~25 MB).
+Modern Windows 10/11 already ships the Microsoft Visual C++ 2015-2022
+redistributable via Windows Update. If `VipleStream.exe` fails to launch
+with a missing `vcruntime140.dll` / `msvcp140.dll` error, install it from:
+
+- <https://aka.ms/vs/17/release/vc_redist.x64.exe>  (offline installer)
+- or `winget install Microsoft.VCRedist.2015+.x64`
 
 ### Server deploy (Windows host)
 
