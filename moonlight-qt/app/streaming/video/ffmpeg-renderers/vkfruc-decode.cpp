@@ -2345,13 +2345,10 @@ bool VkFrucRenderer::ensureDpbImagePool(int width, int height)
     auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetDeviceProcAddr");
     auto pfnCreateImage      = (PFN_vkCreateImage)getDevPa(m_Device, "vkCreateImage");
-    auto pfnDestroyImage     = (PFN_vkDestroyImage)getDevPa(m_Device, "vkDestroyImage");
     auto pfnGetImageMemReq   = (PFN_vkGetImageMemoryRequirements)getDevPa(m_Device, "vkGetImageMemoryRequirements");
     auto pfnAllocMem         = (PFN_vkAllocateMemory)getDevPa(m_Device, "vkAllocateMemory");
-    auto pfnFreeMem          = (PFN_vkFreeMemory)getDevPa(m_Device, "vkFreeMemory");
     auto pfnBindImageMem     = (PFN_vkBindImageMemory)getDevPa(m_Device, "vkBindImageMemory");
     auto pfnCreateImageView  = (PFN_vkCreateImageView)getDevPa(m_Device, "vkCreateImageView");
-    auto pfnDestroyImageView = (PFN_vkDestroyImageView)getDevPa(m_Device, "vkDestroyImageView");
     auto pfnGetMemProps      = (PFN_vkGetPhysicalDeviceMemoryProperties)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetPhysicalDeviceMemoryProperties");
     if (!pfnCreateImage || !pfnGetImageMemReq || !pfnAllocMem || !pfnBindImageMem

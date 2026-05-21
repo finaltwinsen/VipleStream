@@ -8953,18 +8953,15 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // Failure non-fatal: m_RifeNativeReady stays false, block-match remains active.
     //
     // v1.4.145 §J.3.e.X Path β.12 — coopmat extension gate.  ncnn-vulkan
-    // (and our rife_native_vk fusion paths) emit cooperative_matrix shaders
-    // whenever model dtype = fp16 + matrix shape heuristic passes, WITHOUT
-    // re-checking VK_KHR_cooperative_matrix / VK_NV_cooperative_matrix at
-    // shader-compile time.  On RADV RAVEN (AMD Vega 10 / GFX9, 沒 WMMA ISA)
-    // emit 出 `v_wmma_f32_16x16x16_f16` → ACO 不認 → `Unsupported opcode`
-    // process abort.
+    // 在 model dtype = fp16 + matrix shape 符合時 emit cooperative_matrix
+    // shaders（WMMA）。在 RADV RAVEN/GFX9（無 WMMA ISA）emit 出
+    // `v_wmma_f32_16x16x16_f16` → ACO `Unsupported opcode` → process abort。
     //
-    // v1.4.144 嘗試用 tier=ENTRY 當 gate, 但 Vega 10 benchmark 4.64ms 被
-    // 分到 BALANCED tier — tier alone 跟 coopmat 能力不對齊.  改用真實的
-    // VK_*_cooperative_matrix extension 探測作 gate: 兩個 extension 都沒
-    // 才認定無 coopmat 支援, 直接 skip native RIFE init 退 block-match.
-    // 對 RTX 20+/RX 6700+/Arc A7 (KHR/NV coopmat 至少有一個) 完全不擋.
+    // v1.4.189 §β.12 精化：crash 條件是「fp16 arithmetic + 無 coopmat」。
+    // 預設 fp32 路徑（isFp16BlobEnabled()=false，createRifeNativeResources
+    // 的 net.opt 三項 fp16 全 false）不觸發 WMMA，可安全嘗試 RIFE init。
+    // 只在「fp16 模式 + 無 coopmat」時才 hard-block；fp32 + 無 coopmat →
+    // 降為 warn + 嘗試 init（失敗 non-fatal，fallback 到 block-match）。
     if (m_RifeNativeMode) {
         bool hasCoopmat = false;
         if (m_pfnGetInstanceProcAddr && m_PhysicalDevice != VK_NULL_HANDLE) {
@@ -8984,14 +8981,30 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
                 }
             }
         }
-        if (!hasCoopmat) {
+        // isFp16BlobEnabled() 是 rife_native_vk.cpp 的 static，此 TU 不可見。
+        // 直接讀環境變數（邏輯與 isFp16BlobEnabled 一致）。
+        const char* fp16Env = std::getenv("VIPLE_RIFE_VK_FP16");
+        const bool fp16Enabled = (fp16Env && fp16Env[0] != '\0' && fp16Env[0] != '0');
+        if (!hasCoopmat && fp16Enabled) {
+            // fp16 + 無 coopmat → WMMA crash 必現，hard block。
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-RIFE-β] §β.12 no cooperative_matrix extension "
-                "(VK_KHR/VK_NV) on device — skipping native RIFE init "
-                "(ncnn-vulkan WMMA shader would crash RADV ACO on RAVEN/GFX9 "
-                "and similar pre-coopmat GPUs; block-match path remains active).");
+                "[VIPLE-VKFRUC-RIFE-β] §β.12 no coopmat ext + fp16 mode: "
+                "skipping RIFE init (WMMA shader 在 RAVEN/GFX9 會 crash)。"
+                "block-match path remains active.");
             m_RifeNativeMode  = false;
             m_RifeNativeReady = false;
+        } else if (!hasCoopmat) {
+            // fp32 + 無 coopmat：ncnn fp32 path 不走 WMMA，嘗試 init。
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-RIFE-β] §β.12 no coopmat ext but fp32 mode "
+                "— attempting RIFE init (fp32 avoids WMMA; non-fatal if fails).");
+            if (!createRifeNativeResources(width, height)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-RIFE-β] §β.12 fp32 init failed on non-coopmat "
+                    "device — block-match path remains active");
+                m_RifeNativeMode  = false;
+                m_RifeNativeReady = false;
+            }
         } else if (!createRifeNativeResources(width, height)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-RIFE-β] init failed — block-match path remains active");
