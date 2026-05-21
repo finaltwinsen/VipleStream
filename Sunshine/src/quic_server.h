@@ -75,6 +75,17 @@ namespace quic_server {
     std::mutex _sendMutex;
 
     uint16_t _seqCounters[4] = {};
+
+    // Picoquic does not expose a public "get number of paths" API, so we
+    // track active path ids ourselves via picoquic_callback_path_available
+    // / _suspended / _deleted. Path 0 is always present (the initial cnx
+    // path), so we start at 1.
+    mutable std::mutex _pathMutex;
+    std::vector<uint64_t> _activePaths{0};
+
+    // RR cursor for REDUNDANT scheduler (rotates the preferred path so
+    // picoquic spreads load across subflows over consecutive frames).
+    int _redundantRR = 0;
   };
 
   class QuicListener {

@@ -11,6 +11,7 @@
 #include <picoquic.h>
 #include <picoquic_utils.h>
 
+#include <algorithm>
 #include <cstring>
 
 using namespace std::chrono_literals;
@@ -76,7 +77,14 @@ namespace quic_server {
     if (!isReady())
       return false;
 
-    int pathCount = picoquic_get_cnx_nb_paths(_cnx);
+    // Snapshot the active path set (mutated by picoquic callbacks on the
+    // I/O thread).
+    std::vector<uint64_t> paths;
+    {
+      std::lock_guard<std::mutex> lock(_pathMutex);
+      paths = _activePaths;
+    }
+    int pathCount = (int)paths.size();
 
     // Resolve AUTO per flow type
     if (scheduler == SCHED_AUTO) {
@@ -88,66 +96,70 @@ namespace quic_server {
       }
     }
 
-    if (scheduler == SCHED_REDUNDANT && pathCount > 1) {
-      // NOTE: picoquic's queue_datagram_frame is per-cnx, not per-path, so
-      // queuing the same payload N times does NOT actually duplicate it on
-      // wire — picoquic dedups. True per-path datagram is a picoquic
-      // upstream feature gap. We still queue once with a single seq
-      // counter increment so the receiver sees one logical frame; once
-      // picoquic exposes per-path queue, swap this out.
-      // Tag a single path as preferred (rotates so all paths get used).
-      static thread_local int rrIdx = 0;
-      int preferredPath = rrIdx++ % pathCount;
-      std::vector<uint8_t> frame(DGRAM_HDR_SIZE + len);
-      QuicDgramHeader hdr{};
-      hdr.flowType = flowType;
-      hdr.reserved = 0;
-      hdr.seq = htons(_seqCounters[flowType]++);
-      std::memcpy(frame.data(), &hdr, DGRAM_HDR_SIZE);
-      std::memcpy(frame.data() + DGRAM_HDR_SIZE, data, len);
-
-      std::lock_guard<std::mutex> lock(_sendMutex);
-      for (int p = 0; p < pathCount; p++) {
-        picoquic_set_cnx_path_priority(_cnx, p,
-                                        (p == preferredPath) ? 16 : 1);
-      }
-      return picoquic_queue_datagram_frame(_cnx, frame.size(), frame.data()) == 0;
+    // Single-path: nothing to schedule, just send.
+    if (pathCount <= 1) {
+      return sendDatagram(flowType, data, len);
     }
 
-    if (pathCount > 1) {
-      // Pick best path
-      int bestPath = 0;
-      float bestMetric = 1e9f;
-
-      for (int p = 0; p < pathCount; p++) {
-        float rttMs = (float)picoquic_get_cnx_path_rtt(_cnx, p) / 1000.0f;
-        uint64_t cwin = picoquic_get_cnx_path_cwin(_cnx, p);
-        float rttUs = (float)picoquic_get_cnx_path_rtt(_cnx, p);
-
-        float metric;
-        if (scheduler == SCHED_ECF) {
-          float tput = (rttUs > 0) ? ((float)cwin / rttUs * 1e6f) : 1.0f;
-          if (tput < 1.0f) tput = 1.0f;
-          metric = ((float)len / tput) + (rttMs / 2000.0f);
-        } else {
-          // MIN_RTT or AGGREGATE fallback
-          metric = rttMs;
-        }
-
-        if (metric < bestMetric) {
-          bestMetric = metric;
-          bestPath = p;
-        }
-      }
-
+    if (scheduler == SCHED_REDUNDANT) {
+      // picoquic_queue_datagram_frame is per-cnx and dedupes identical
+      // payloads, so we can't actually queue the same frame on every
+      // path. Approximation: rotate which path picoquic prefers each
+      // frame via set_path_status; over N frames this spreads load.
+      // True per-path duplication needs an upstream picoquic feature.
+      int preferred = (_redundantRR++) % pathCount;
       std::lock_guard<std::mutex> lock(_sendMutex);
-      // Give the chosen path the highest priority and demote others, so
-      // picoquic's internal scheduler actually prefers it.
-      for (int p = 0; p < pathCount; p++) {
-        picoquic_set_cnx_path_priority(_cnx, p, (p == bestPath) ? 16 : 1);
+      for (int i = 0; i < pathCount; i++) {
+        picoquic_set_path_status(_cnx, paths[i],
+            (i == preferred) ? picoquic_path_status_available
+                             : picoquic_path_status_backup);
+      }
+      return sendDatagram(flowType, data, len);
+    }
+
+    if (scheduler == SCHED_AGGREGATE) {
+      // Mark all paths available; picoquic will spread datagrams.
+      std::lock_guard<std::mutex> lock(_sendMutex);
+      for (uint64_t p : paths) {
+        picoquic_set_path_status(_cnx, p, picoquic_path_status_available);
+      }
+      return sendDatagram(flowType, data, len);
+    }
+
+    // MIN_RTT / ECF: pick the best path by per-path quality
+    int bestIdx = 0;
+    float bestMetric = 1e9f;
+    for (int i = 0; i < pathCount; i++) {
+      picoquic_path_quality_t pq{};
+      if (picoquic_get_path_quality(_cnx, paths[i], &pq) != 0)
+        continue;
+
+      float rttMs = (float)pq.rtt / 1000.0f;
+      float metric;
+      if (scheduler == SCHED_ECF) {
+        // tput in Mbps from pacing_rate (bytes/sec)
+        float tput = (float)((double)pq.pacing_rate * 8.0 / 1e6);
+        if (tput < 0.001f) tput = 0.001f;
+        // (size in bits / throughput in bps) + half-RTT in seconds
+        float transferSec = ((float)len * 8.0f) / (tput * 1e6f);
+        metric = transferSec + (rttMs / 2000.0f);
+      } else {
+        metric = rttMs;
+      }
+      if (metric < bestMetric) {
+        bestMetric = metric;
+        bestIdx = i;
       }
     }
 
+    {
+      std::lock_guard<std::mutex> lock(_sendMutex);
+      for (int i = 0; i < pathCount; i++) {
+        picoquic_set_path_status(_cnx, paths[i],
+            (i == bestIdx) ? picoquic_path_status_available
+                           : picoquic_path_status_backup);
+      }
+    }
     return sendDatagram(flowType, data, len);
   }
 
@@ -169,25 +181,27 @@ namespace quic_server {
     if (!_cnx)
       return stats;
 
-    int pathCount = picoquic_get_cnx_nb_paths(_cnx);
-    // §Q-REVIEW-P1: picoquic_get_cnx_path_rtt / _cwin are placeholder
-    // API names. Real picoquic uses picoquic_get_path_quality(cnx, p, &pq)
-    // which fills a picoquic_path_quality_t with rtt / cwin / pacing_rate.
-    // Swap once picoquic submodule is added.
-    for (int i = 0; i < pathCount; i++) {
-      SubflowStats s{};
-      s.pathId = i;
-      uint64_t rttUs = picoquic_get_cnx_path_rtt(_cnx, i);
-      s.rttMs = (float)rttUs / 1000.0f;
-      s.active = true;
-      s.bytesSent = 0;
-      s.bytesRecv = 0;
+    std::vector<uint64_t> paths;
+    {
+      std::lock_guard<std::mutex> lock(_pathMutex);
+      paths = _activePaths;
+    }
 
-      uint64_t cwin = picoquic_get_cnx_path_cwin(_cnx, i);
-      if (rttUs > 0) {
-        double bps = ((double)cwin / (double)rttUs) * 1e6;
-        s.throughputMbps = (float)(bps / 1e6 * 8.0);
+    for (uint64_t pathId : paths) {
+      picoquic_path_quality_t pq{};
+      if (picoquic_get_path_quality(_cnx, pathId, &pq) != 0) {
+        continue;
       }
+      SubflowStats s{};
+      s.pathId = (int)pathId;
+      s.rttMs = (float)pq.rtt / 1000.0f;
+      s.throughputMbps = (float)((double)pq.pacing_rate * 8.0 / 1e6);
+      s.lossPercent = (pq.sent > 0)
+          ? (float)((double)pq.lost / (double)pq.sent * 100.0)
+          : 0.0f;
+      s.active = true;
+      s.bytesSent = pq.bytes_sent;
+      s.bytesRecv = pq.bytes_received;
       stats.push_back(s);
     }
 
@@ -211,24 +225,29 @@ namespace quic_server {
     uint64_t currentTime = picoquic_current_time();
 
     _quic = picoquic_create(
-        128,                       // max connections
+        128,                       // max_nb_connections
         certPath.c_str(),
         keyPath.c_str(),
         nullptr,                   // cert_root
-        "viplestream",             // ALPN
+        "viplestream",             // default ALPN
         QuicListener::picoquicCallback,
         this,
-        nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, // cnx_id_cb, reset_seed
         currentTime,
-        nullptr, nullptr, nullptr, 0);
+        nullptr,                   // simulated_time
+        nullptr,                   // ticket_file_name (server doesn't load)
+        nullptr, 0);               // ticket_encryption_key (default = random)
 
     if (!_quic) {
       BOOST_LOG(error) << "[VIPLE-MPQUIC] Failed to create QUIC server context";
       return false;
     }
 
-    // Enable datagram extension and multipath
-    picoquic_set_default_datagram_option(_quic, 1);
+    // Enable DATAGRAM by advertising a non-zero max_datagram_frame_size
+    // transport parameter (picoquic has no separate "enable datagram"
+    // option — it's purely TP-driven). Multipath enabled globally.
+    picoquic_set_default_tp_value(_quic,
+        picoquic_tp_max_datagram_frame_size, 65535);
     picoquic_set_default_multipath_option(_quic, 1);
 
     // Apply configured congestion control algorithm (BBR default)
@@ -390,6 +409,15 @@ namespace quic_server {
 
     auto event = static_cast<picoquic_call_back_event_t>(fin_or_event);
 
+    // Helper: look up the session bound to this cnx.
+    auto findSession = [&](picoquic_cnx_t *c) -> std::shared_ptr<QuicSession> {
+      std::lock_guard<std::mutex> lock(listener->_sessionMutex);
+      for (auto &[key, sess] : listener->_sessions) {
+        if (sess->_cnx == c) return sess;
+      }
+      return nullptr;
+    };
+
     switch (event) {
     case picoquic_callback_ready: {
       BOOST_LOG(info) << "[VIPLE-MPQUIC] Client connection ready";
@@ -397,9 +425,13 @@ namespace quic_server {
       auto session = std::make_shared<QuicSession>(cnx);
       picoquic_set_callback(cnx, QuicListener::picoquicCallback, listener);
 
-      // Store session keyed by peer address.
-      // picoquic_get_peer_addr writes a pointer into our local sockaddr*,
-      // it does NOT copy the address into a storage buffer.
+      // Mandatory: tell picoquic the app wants to send datagrams. Without
+      // this, the datagram outbound path is never polled.
+      picoquic_mark_datagram_ready(cnx, 1);
+
+      // Store session keyed by peer address. picoquic_get_peer_addr writes
+      // a sockaddr* through the out-pointer — it does NOT memcpy into a
+      // storage buffer.
       struct sockaddr *peerAddrPtr = nullptr;
       picoquic_get_peer_addr(cnx, &peerAddrPtr);
 
@@ -420,30 +452,45 @@ namespace quic_server {
 
       if (listener->_sessionCallback)
         listener->_sessionCallback(session);
+      break;
+    }
 
-      // Store session pointer as picoquic stream context for fast lookup
-      picoquic_set_callback(cnx, QuicListener::picoquicCallback, listener);
+    case picoquic_callback_path_available: {
+      // A new multipath path was probed and validated. picoquic passes
+      // the unique_path_id in stream_id for path events (per picoquic.h
+      // §"path event callbacks"). Track it in the session's path set.
+      auto session = findSession(cnx);
+      if (session) {
+        std::lock_guard<std::mutex> lock(session->_pathMutex);
+        if (std::find(session->_activePaths.begin(),
+                      session->_activePaths.end(), stream_id)
+            == session->_activePaths.end()) {
+          session->_activePaths.push_back(stream_id);
+        }
+      }
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] Path available: id=" << stream_id;
+      break;
+    }
+
+    case picoquic_callback_path_suspended:
+    case picoquic_callback_path_deleted: {
+      auto session = findSession(cnx);
+      if (session) {
+        std::lock_guard<std::mutex> lock(session->_pathMutex);
+        auto &v = session->_activePaths;
+        v.erase(std::remove(v.begin(), v.end(), stream_id), v.end());
+      }
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] Path "
+                      << (event == picoquic_callback_path_deleted ? "deleted" : "suspended")
+                      << ": id=" << stream_id;
       break;
     }
 
     case picoquic_callback_datagram: {
       if (length < DGRAM_HDR_SIZE)
         break;
-
       auto *hdr = reinterpret_cast<const QuicDgramHeader *>(bytes);
-
-      // Find the session for this connection
-      std::shared_ptr<QuicSession> session;
-      {
-        std::lock_guard<std::mutex> lock(listener->_sessionMutex);
-        for (auto &[key, sess] : listener->_sessions) {
-          if (sess->_cnx == cnx) {
-            session = sess;
-            break;
-          }
-        }
-      }
-
+      auto session = findSession(cnx);
       if (session && session->_recvHandler) {
         session->_recvHandler(
             hdr->flowType,
@@ -457,18 +504,7 @@ namespace quic_server {
     case picoquic_callback_stream_fin: {
       if (stream_id != 0)
         break;
-
-      std::shared_ptr<QuicSession> session;
-      {
-        std::lock_guard<std::mutex> lock(listener->_sessionMutex);
-        for (auto &[key, sess] : listener->_sessions) {
-          if (sess->_cnx == cnx) {
-            session = sess;
-            break;
-          }
-        }
-      }
-
+      auto session = findSession(cnx);
       if (session && session->_recvHandler) {
         session->_recvHandler(FLOW_CONTROL, bytes, length);
       }

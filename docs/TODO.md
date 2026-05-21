@@ -935,7 +935,7 @@ stream H.264 / HEVC → 看 log：[VIPLE-VAAPI-VK] frame#X import OK
 
 ### §Q Phase 4：生產硬化（**✅ DONE**）
 
-- 0-RTT session resumption — `quicTryExtractTicket()` / `quicGetSessionTicket()` + `picoquic_set_0rtt_ticket` at connect
+- 0-RTT session resumption — `picoquic_create()`'s `ticket_file_name` arg auto-loads/saves tickets; currently passed NULL (1-RTT only). Re-enable in Phase 5 by wiring a per-server-UUID app-data path
 - Android cellular keepalive — `MultiNetworkAdapter.java` with `requestCellularKeepalive()` via `ConnectivityManager.requestNetwork(CELLULAR)`
 - IPv4/IPv6 dual-stack — `PlatformNetIf` enumerates both AF_INET/AF_INET6; Connection.c filters to server family; server socket dual-stack (IPV6_V6ONLY=0)
 - Congestion controller — BBR default (`picoquic_bbr_algorithm`), configurable 0=NewReno/1=BBR/2=Cubic via `mpquic_congestion`
