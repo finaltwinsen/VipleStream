@@ -57,6 +57,20 @@ const ModelFetcher::ModelSpec* ModelFetcher::lookupSpec(const QString& filename)
             5783526,
             "https://github.com/finaltwinsen/VipleStream/releases/download/v1.3.310/fruc_ifrnet_s.onnx"
         },
+        // §SLIM 2026-05-21 — RIFE 4.25-lite NCNN model.  flownet.bin
+        // (11 MB) is the big half of the bundle; flownet.param (36 KB)
+        // is small enough to keep shipping inside the zip.  Pulled from
+        // the repo `raw` URL because the file is already committed to
+        // main — no separate release-asset upload required.  Cached
+        // at %LOCALAPPDATA%\VipleStream\fruc_models\rife-v4.25-lite\
+        // flownet.bin; first NCNN/Native-RIFE backend init sees a
+        // one-time ~3-5 s pause on broadband.
+        {
+            "rife-v4.25-lite/flownet.bin",
+            "350a15e464bea5ad378e06c0fb43996e90a0d35653d5a6ef6bc980d832538fb7",
+            11276252,
+            "https://github.com/finaltwinsen/VipleStream/raw/main/moonlight-qt/app/rife_models/rife-v4.25-lite/flownet.bin"
+        },
     };
     for (const auto& spec : MODEL_TABLE) {
         if (filename == QLatin1String(spec.filename)) {
@@ -244,6 +258,16 @@ QString ModelFetcher::ensureModelPath(const QString& filename)
         return QString();
     }
     QString destPath = QDir(dir).absoluteFilePath(filename);
+    // §SLIM 2026-05-21 — spec filenames may carry a subdir prefix
+    // (e.g. "rife-v4.25-lite/flownet.bin").  Ensure that subdir exists
+    // before downloadOnce tries to open the .partial file in it.
+    QString destParent = QFileInfo(destPath).absolutePath();
+    if (destParent != dir && !QDir().mkpath(destParent)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-MODELFETCH] cannot create model subdir: %s",
+                     qPrintable(destParent));
+        return QString();
+    }
 
     // Cache hit: file present + verified.
     if (verifyOnDisk(destPath, *spec)) {

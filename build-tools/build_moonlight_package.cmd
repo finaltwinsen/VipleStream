@@ -103,16 +103,73 @@ if exist "%SRC%\app\SDL_GameControllerDB\gamecontrollerdb.txt" copy /y "%SRC%\ap
 
 :: ---- 3. windeployqt ----
 echo [pkg 3/5] Running windeployqt
-"%WINDEPLOYQT%" --release --qmldir "%SRC%\app\gui" --no-translations --compiler-runtime "%TEMP_DIR%\VipleStream.exe" 2>nul
+::
+:: §SLIM 2026-05-21 — release zip size trim:
+::   - Drop `--compiler-runtime`: was pulling in vc_redist.x64.exe (~25 MB
+::     packed) which is a user-facing installer, NOT a runtime dependency
+::     of VipleStream.exe itself.  Modern Win10/11 ships VC++ 2015-2022
+::     redist via Windows Update; users on older systems are pointed at
+::     https://aka.ms/vs/17/release/vc_redist.x64.exe in README.
+::   - `--no-opengl-sw`: skip opengl32sw.dll (~7 MB packed) Mesa software
+::     OpenGL fallback.  Stream clients always have a GPU; the Qt Quick UI
+::     uses the D3D11 RHI backend on Windows, not OpenGL, so this path
+::     is never taken.
+::   - `--no-system-d3d-compiler`: we don't runtime-compile HLSL (all
+::     D3D11 shaders ship as pre-compiled .fxc — see compile_d3d11_shaders.ps1)
+::     and Qt Quick has no ShaderEffect items in our QML tree.
+::
+:: NB: Qt 6.10 windeployqt does NOT support `--no-virtualkeyboard`
+:: (the flag name is gone in this Qt version; QtVirtualKeyboard isn't
+:: imported by our QML so windeployqt won't add it regardless).  Adding
+:: that flag here would crash windeployqt with "Unknown option", which
+:: silently dropped ALL Qt DLLs from the zip in pre-fix builds because
+:: the previous invocation swallowed stderr via `2>nul`.
+"%WINDEPLOYQT%" --release --qmldir "%SRC%\app\gui" --no-translations --no-compiler-runtime --no-opengl-sw --no-system-d3d-compiler "%TEMP_DIR%\VipleStream.exe"
+if errorlevel 1 (
+    echo [ERROR] windeployqt failed with errorlevel %errorlevel% — Qt DLLs not deployed.
+    echo         Re-run after removing one of the --no-* flags above to identify the bad one.
+    exit /b 3
+)
+
+::
+:: §SLIM 2026-05-21 — prune unused Qt Quick Controls 2 styles.  main.cpp
+:: line 1140 explicitly QQuickStyle::setStyle("Material"); the other
+:: stock styles (Fusion / Imagine / Universal / FluentWinUI3) are never
+:: instantiated.  windeployqt deploys them unconditionally for safety,
+:: so we delete them post-hoc.  Total saving ~3 MB packed.
+::
+:: Basic style is kept because Qt Quick falls back to it when a Controls
+:: type isn't overridden by the active style — removing Basic risks
+:: subtle render glitches.  Windows native style impl is kept for same
+:: reason (some Controls subclasses default to it).
+echo [pkg 3b/5] Pruning unused QtQuick.Controls styles (Material-only)
+for %%S in (Fusion Imagine Universal FluentWinUI3) do (
+    if exist "%TEMP_DIR%\Qt6QuickControls2%%S.dll" del /f "%TEMP_DIR%\Qt6QuickControls2%%S.dll"
+    if exist "%TEMP_DIR%\Qt6QuickControls2%%SStyleImpl.dll" del /f "%TEMP_DIR%\Qt6QuickControls2%%SStyleImpl.dll"
+    if exist "%TEMP_DIR%\qml\QtQuick\Controls\%%S" rmdir /s /q "%TEMP_DIR%\qml\QtQuick\Controls\%%S"
+)
 
 :: ---- 4. DirectX runtime libs ----
-echo [pkg 4/5] Copying DirectX runtime
-for %%F in (dxcompiler.dll dxil.dll) do (
-    if exist "%WINSDK_D3D%\%%F" (
-        copy /y "%WINSDK_D3D%\%%F" "%TEMP_DIR%\" >nul
-        echo   %%F
-    )
-)
+::
+:: §SLIM 2026-05-21 — dxcompiler.dll + dxil.dll removed (~7 MB packed).
+:: These are the DXC (DirectX Shader Compiler) HLSL→DXIL toolchain used
+:: for runtime HLSL 6.0+ compilation under D3D12.  Our codebase only uses
+:: D3D11 with pre-compiled .fxc bytecode (compile_d3d11_shaders.ps1) and
+:: never calls DxcCreateInstance / IDxcCompiler at runtime — grep across
+:: moonlight-qt confirms no consumer (only this build script + docs
+:: references them).  Were originally bundled defensively alongside the
+:: DirectML / ORT-DML path but ORT-DML loads pre-compiled DML graphs via
+:: D3D12 directly and likewise doesn't need DXC.
+::
+:: If a future renderer path actually starts using DXC, re-add by
+:: dropping these lines back in.
+:: echo [pkg 4/5] Copying DirectX runtime
+:: for %%F in (dxcompiler.dll dxil.dll) do (
+::     if exist "%WINSDK_D3D%\%%F" (
+::         copy /y "%WINSDK_D3D%\%%F" "%TEMP_DIR%\" >nul
+::         echo   %%F
+::     )
+:: )
 
 :: VipleStream: ONNX Runtime DirectML DLL. Required at runtime ONLY
 :: when the user picks the DirectML FRUC backend. Ship it unconditionally
@@ -200,36 +257,54 @@ if exist "%NCNN_DLL%" (
     echo   [WARN] ncnn.dll missing at %NCNN_DLL% - NCNN FRUC backend disabled
 )
 
-:: VipleStream v1.3.x: RIFE 4.25-lite NCNN model files.  Two files:
-:: flownet.param (architecture, ~36 KB ascii) + flownet.bin (weights,
-:: ~11 MB fp16).  Model bundled into release/ folder rife-v4.25-lite/
-:: subdir to match nihui's rife-ncnn-vulkan reference layout.  Caller
-:: side resolves Path::getDataFilePath("rife-v4.25-lite/flownet.param").
+:: VipleStream v1.3.x: RIFE 4.25-lite NCNN model architecture.
+:: §SLIM 2026-05-21 — only flownet.param (36 KB ascii) ships in the zip;
+:: flownet.bin (11 MB fp16 weights) is now lazy-fetched by ModelFetcher
+:: on first NCNN / Native-RIFE FRUC backend init.  See
+:: moonlight-qt/app/streaming/video/ffmpeg-renderers/ncnnfruc.cpp
+:: ensureRifeModelDir() — verifies SHA-256, caches under
+:: %LOCALAPPDATA%\VipleStream\fruc_models\rife-v4.25-lite\flownet.bin.
+:: Source: repo `raw` URL (file already committed to main).  One-time
+:: ~3-5 s pause on broadband at first FRUC backend probe.  Cascade
+:: degrades gracefully (NCNN / Native-RIFE off; Generic / NvOFFRUC /
+:: DML continue) if the fetch fails (no network, offline).
+::
+:: To revert to bundling the .bin (e.g. for offline-install media),
+:: uncomment the `copy ... flownet.bin` line below.
 set "RIFE_NCNN_DIR=%SRC%\app\rife_models\rife-v4.25-lite"
 if exist "%RIFE_NCNN_DIR%\flownet.param" (
     if not exist "%TEMP_DIR%\rife-v4.25-lite" mkdir "%TEMP_DIR%\rife-v4.25-lite"
     copy /y "%RIFE_NCNN_DIR%\flownet.param" "%TEMP_DIR%\rife-v4.25-lite\" >nul
-    copy /y "%RIFE_NCNN_DIR%\flownet.bin"   "%TEMP_DIR%\rife-v4.25-lite\" >nul
-    echo   rife-v4.25-lite/flownet.{param,bin}
+    REM To revert to bundling flownet.bin (e.g. for offline-install media),
+    REM uncomment the next line:
+    REM copy /y "%RIFE_NCNN_DIR%\flownet.bin"   "%TEMP_DIR%\rife-v4.25-lite\" >nul
+    echo   rife-v4.25-lite/flownet.param  ^(flownet.bin lazy-fetched, see ensureRifeModelDir^)
 ) else (
-    echo   [WARN] RIFE 4.25-lite NCNN model missing at %RIFE_NCNN_DIR% - NCNN FRUC backend disabled
+    echo   [WARN] RIFE 4.25-lite flownet.param missing at %RIFE_NCNN_DIR% - NCNN/Native-RIFE FRUC backend disabled
 )
 
-:: ---- 4b. Debug symbols (PDBs) ----
+:: ---- 4b. Debug symbols (PDBs) → separate side-by-side zip ----
 ::
-:: Ship PDBs next to the .exe so WinDbg / cdb can symbolicate minidumps
-:: without any symbol-path setup. Statically-linked submodules
-:: (moonlight-common-c, h264bitstream, qmdnsengine) merge their symbols
-:: into VipleStream.pdb at link time, so VipleStream.pdb alone covers all our
-:: first-party code. AntiHooking is a separate DLL so its PDB ships too.
-:: Third-party DLLs (FFmpeg, SDL, Qt, libcrypto, libplacebo) don't ship
-:: PDBs with their binaries so those stay unsymbolicated in the dump —
-:: which is fine, we rarely need internals of those.
-echo [pkg 4b/5] Copying PDBs for crash symbolication
+:: §SLIM 2026-05-21 — PDBs add ~9 MB packed to the main zip and are only
+:: needed when symbolicating a minidump (a rare, dev-side operation).
+:: Pack them into a separate `VipleStream-Client-X.Y.Z-debug.zip` next
+:: to the main release zip.  WinDbg / cdb workflow:
+::   1) unzip both client + debug zip into the SAME folder
+::   2) PDBs end up alongside VipleStream.exe — `_NT_SYMBOL_PATH` finds
+::      them automatically, same as before.
+::
+:: Statically-linked submodules (moonlight-common-c, h264bitstream,
+:: qmdnsengine) merge their symbols into VipleStream.pdb at link time, so
+:: VipleStream.pdb alone covers all our first-party code.  AntiHooking is
+:: a separate DLL so its PDB lives in the debug zip too.
+echo [pkg 4b/5] Staging PDBs into separate debug zip
+set "PDB_STAGE=%TEMP_DIR%\..\moonlight_pdb"
+if exist "%PDB_STAGE%" rmdir /s /q "%PDB_STAGE%"
+mkdir "%PDB_STAGE%"
 for %%F in ("%SRC%\app\release\VipleStream.pdb" "%SRC%\AntiHooking\release\AntiHooking.pdb") do (
     if exist %%F (
-        copy /y %%F "%TEMP_DIR%\" >nul
-        echo   %%~nxF
+        copy /y %%F "%PDB_STAGE%\" >nul
+        echo   %%~nxF ^(debug zip^)
     ) else (
         echo   [WARN] %%~nxF missing - crash dumps will not symbolicate
     )
@@ -241,7 +316,16 @@ if not exist "%RELEASE%" mkdir "%RELEASE%"
 
 set "OUT_ZIP=%RELEASE%\VipleStream-Client-%VER%.zip"
 if exist "%OUT_ZIP%" del /f "%OUT_ZIP%"
-"%SEVENZIP%" a -tzip -mx=7 -mmt=on "%OUT_ZIP%" "%TEMP_DIR%\*" >nul
+"%SEVENZIP%" a -tzip -mx=9 -mmt=on "%OUT_ZIP%" "%TEMP_DIR%\*" >nul
+
+set "OUT_PDB_ZIP=%RELEASE%\VipleStream-Client-%VER%-debug.zip"
+if exist "%OUT_PDB_ZIP%" del /f "%OUT_PDB_ZIP%"
+if exist "%PDB_STAGE%\*.pdb" (
+    "%SEVENZIP%" a -tzip -mx=9 -mmt=on "%OUT_PDB_ZIP%" "%PDB_STAGE%\*" >nul
+    for %%A in ("%OUT_PDB_ZIP%") do set "PDBSIZE=%%~zA"
+    set /a "PDBSIZE_MB=!PDBSIZE! / 1048576"
+)
+rmdir /s /q "%PDB_STAGE%"
 
 for %%A in ("%OUT_ZIP%") do set "ZIPSIZE=%%~zA"
 set /a "ZIPSIZE_MB=!ZIPSIZE! / 1048576"
@@ -249,7 +333,8 @@ set /a "ZIPSIZE_MB=!ZIPSIZE! / 1048576"
 echo.
 echo =========================================================
 echo   VipleStream Client v%VER%
-echo   %OUT_ZIP% (!ZIPSIZE_MB! MB)
+echo   %OUT_ZIP% ^(!ZIPSIZE_MB! MB^)
+if exist "%OUT_PDB_ZIP%" echo   %OUT_PDB_ZIP% ^(!PDBSIZE_MB! MB, debug symbols^)
 echo =========================================================
 
 endlocal
