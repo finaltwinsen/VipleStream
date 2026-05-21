@@ -622,6 +622,26 @@ void VkFrucRenderer::toggleFRUC()
                 "[VIPLE-VKFRUC] FRUC %s via hotkey", paused ? "PAUSED" : "RESUMED");
 }
 
+// §P2-A: Device Lost teardown bypass helper.
+// 在 m_DeviceLost 已 set 的情況下跳過 vkDeviceWaitIdle，避免 GPU TDR 後
+// 主執行緒永久 hang。callsite 字串用於 log 定位。
+// 為什麼不用 function pointer hijack：libplacebo 內部也呼叫 vkDeviceWaitIdle，
+// 攔截全域會破壞它的 cleanup，選擇只改 vkfruc 自身的 callsite。
+static void waitDeviceIdleSafe(VkDevice device,
+                                PFN_vkGetDeviceProcAddr pfnGetDevPa,
+                                const std::atomic<bool>& deviceLost,
+                                const char* callsite)
+{
+    if (deviceLost.load(std::memory_order_acquire)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-VKFRUC-TEARDOWN] %s: skip vkDeviceWaitIdle — m_DeviceLost set",
+            callsite);
+        return;
+    }
+    auto pfn = (PFN_vkDeviceWaitIdle)pfnGetDevPa(device, "vkDeviceWaitIdle");
+    if (pfn) pfn(device);
+}
+
 void VkFrucRenderer::teardown()
 {
     // §J.3.e.2.i.50 (v1.4.114) — teardown diagnostic log: 標記每個 destroy
@@ -643,15 +663,11 @@ void VkFrucRenderer::teardown()
         auto pfnGetDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
             m_Instance, "vkGetDeviceProcAddr");
         if (pfnGetDevPa) {
-            auto pfnDeviceWaitIdle = (PFN_vkDeviceWaitIdle)pfnGetDevPa(
-                m_Device, "vkDeviceWaitIdle");
-            if (pfnDeviceWaitIdle) {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-TEARDOWN] vkDeviceWaitIdle start (t+%lldms)", (long long)tdMs());
-                pfnDeviceWaitIdle(m_Device);
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-TEARDOWN] vkDeviceWaitIdle done (t+%lldms)", (long long)tdMs());
-            }
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-TEARDOWN] vkDeviceWaitIdle start (t+%lldms)", (long long)tdMs());
+            waitDeviceIdleSafe(m_Device, pfnGetDevPa, m_DeviceLost, "teardown");
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VKFRUC-TEARDOWN] vkDeviceWaitIdle done (t+%lldms)", (long long)tdMs());
         }
     }
 
@@ -4560,17 +4576,16 @@ void VkFrucRenderer::drainOverlayStash()
                           || h > m_OverlayCapacityH[type];
     if (m_OverlayWidth[type] != w || m_OverlayHeight[type] != h || needRealloc) {
         if (needRealloc && m_OverlayImage[type]) {
-            // Logical 超過 cap (rare) — fallback 老 race-fix path.
-            auto pfnDeviceWaitIdle = (PFN_vkDeviceWaitIdle)
-                ((PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(m_Instance, "vkGetDeviceProcAddr"))
-                (m_Device, "vkDeviceWaitIdle");
-            if (pfnDeviceWaitIdle) {
-                pfnDeviceWaitIdle(m_Device);
+            // Logical 超過 cap (rare) — race-fix path (Aftermath dump 2026-05-08).
+            auto pfnGetDevPaOvl = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
+                m_Instance, "vkGetDeviceProcAddr");
+            if (pfnGetDevPaOvl) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC] overlay realloc %dx%d (cap %dx%d) → grow to fit %dx%d — "
                     "vkDeviceWaitIdle before destroying old image (rare path, logical > cap)",
                     m_OverlayWidth[type], m_OverlayHeight[type],
                     m_OverlayCapacityW[type], m_OverlayCapacityH[type], w, h);
+                waitDeviceIdleSafe(m_Device, pfnGetDevPaOvl, m_DeviceLost, "overlay-realloc");
             }
         }
         if (!needRealloc) {
@@ -6191,7 +6206,6 @@ void VkFrucRenderer::destroyDecodeCommandResources()
     }
     auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
         m_Instance, "vkGetDeviceProcAddr");
-    auto pfnDeviceWaitIdle    = (PFN_vkDeviceWaitIdle)getDevPa(m_Device, "vkDeviceWaitIdle");
     auto pfnDestroySemaphore  = (PFN_vkDestroySemaphore)getDevPa(m_Device, "vkDestroySemaphore");
     auto pfnDestroyFence      = (PFN_vkDestroyFence)getDevPa(m_Device, "vkDestroyFence");
     auto pfnFreeCommandBuffers= (PFN_vkFreeCommandBuffers)getDevPa(m_Device, "vkFreeCommandBuffers");
@@ -6199,7 +6213,7 @@ void VkFrucRenderer::destroyDecodeCommandResources()
 
     // Idle the device so any in-flight decode submission completes before we
     // free its referenced cmd buffer / fence.
-    if (pfnDeviceWaitIdle) pfnDeviceWaitIdle(m_Device);
+    if (getDevPa) waitDeviceIdleSafe(m_Device, getDevPa, m_DeviceLost, "destroy-decode-cmd");
 
     if (m_DecodeDoneSem  != VK_NULL_HANDLE && pfnDestroySemaphore)
         pfnDestroySemaphore(m_Device, m_DecodeDoneSem, nullptr);
