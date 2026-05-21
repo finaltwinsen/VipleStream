@@ -2014,6 +2014,10 @@ Flickable {
                     visible: enableMpQuicCheck.checked
                     Component.onCompleted: {
                         currentIndex = StreamingPreferences.mpQuicScheduler
+                        // 跟 resolution / fps dropdown 一樣顯式量寬, 不然
+                        // textWidth=0 → dropdown 只剩 padding+indicator,
+                        // 文字被截掉看不到內容.
+                        recalculateWidth()
                     }
                     model: [
                         qsTr("Auto (per stream type)"),
