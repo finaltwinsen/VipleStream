@@ -1,5 +1,10 @@
 #include "Limelight-internal.h"
 
+#ifdef VIPLE_MPQUIC
+#include "QuicTransport.h"
+#include "PlatformNetIf.h"
+#endif
+
 static int stage = STAGE_NONE;
 static ConnListenerConnectionTerminated originalTerminationCallback;
 static bool alreadyTerminated;
@@ -133,7 +138,9 @@ void LiStopConnection(void) {
         Limelog("done\n");
     }
     if (stage == STAGE_RTSP_HANDSHAKE) {
-        // Nothing to do
+#ifdef VIPLE_MPQUIC
+        quicTransportCleanup();
+#endif
         stage--;
     }
     if (stage == STAGE_AUDIO_STREAM_INIT) {
@@ -494,6 +501,42 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_RTSP_HANDSHAKE);
     ListenerCallbacks.stageComplete(STAGE_RTSP_HANDSHAKE);
     Limelog("done\n");
+
+#ifdef VIPLE_MPQUIC
+    // Initialize QUIC transport after RTSP handshake (which negotiates the QUIC port)
+    if (StreamConfig.useQuicTransport) {
+        Limelog("[VIPLE-MPQUIC] Initializing QUIC transport...\n");
+        if (quicTransportInit() == 0) {
+            QUIC_CONNECT_PARAMS qparams;
+            memset(&qparams, 0, sizeof(qparams));
+            memcpy(&qparams.remoteAddr, &RemoteAddr, AddrLen);
+            qparams.remoteAddrLen = AddrLen;
+            qparams.sni = RemoteAddrString;
+            qparams.quicPort = (unsigned short)StreamConfig.quicPort;
+
+            if (quicConnect(&qparams) == 0) {
+                // Enumerate local interfaces and add subflows
+                LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
+                int ifCount = lcEnumNetInterfaces(interfaces, LC_NETIF_MAX_COUNT);
+                for (int i = 0; i < ifCount; i++) {
+                    if (interfaces[i].up && interfaces[i].type != LC_NETIF_TYPE_LOOPBACK) {
+                        quicAddSubflow(interfaces[i].index,
+                                       &interfaces[i].addr,
+                                       interfaces[i].addrLen);
+                    }
+                }
+                Limelog("[VIPLE-MPQUIC] QUIC connected with %d subflow(s)\n",
+                        quicGetActiveSubflowCount());
+            } else {
+                Limelog("[VIPLE-MPQUIC] QUIC connect failed, falling back to UDP\n");
+                StreamConfig.useQuicTransport = 0;
+            }
+        } else {
+            Limelog("[VIPLE-MPQUIC] QUIC init failed, falling back to UDP\n");
+            StreamConfig.useQuicTransport = 0;
+        }
+    }
+#endif
 
     Limelog("Initializing control stream...");
     ListenerCallbacks.stageStarting(STAGE_CONTROL_STREAM_INIT);

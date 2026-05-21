@@ -100,6 +100,15 @@ typedef struct _STREAM_CONFIGURATION {
     // in /launch and /resume requests.
     char remoteInputAesKey[16];
     char remoteInputAesIv[16];
+
+#ifdef VIPLE_MPQUIC
+    // VipleStream: MP-QUIC multipath transport.
+    // Set useQuicTransport = 1 to use QUIC datagrams instead of raw UDP
+    // for video/audio, and a QUIC stream for control.
+    int useQuicTransport;
+    int quicPort;
+    int quicScheduler;
+#endif
 } STREAM_CONFIGURATION, *PSTREAM_CONFIGURATION;
 
 // Use this function to zero the stream configuration when allocated on the stack or heap

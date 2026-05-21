@@ -1,5 +1,9 @@
 #include "Limelight-internal.h"
 
+#ifdef VIPLE_MPQUIC
+#include "QuicTransport.h"
+#endif
+
 static SOCKET rtpSocket = INVALID_SOCKET;
 
 static LINKED_BLOCKING_QUEUE packetQueue;
@@ -24,6 +28,50 @@ static uint8_t opusHeaderByte;
 #endif
 
 #define MAX_PACKET_SIZE 1400
+
+#ifdef VIPLE_MPQUIC
+// QUIC receive ring buffer for audio datagrams
+#define QUIC_AUDIO_RING_SIZE 512
+
+static struct {
+    unsigned char data[QUIC_AUDIO_RING_SIZE][MAX_PACKET_SIZE];
+    int           len[QUIC_AUDIO_RING_SIZE];
+    volatile int  head;
+    volatile int  tail;
+} quicAudioRing;
+
+static void quicAudioRecvCallback(unsigned char flowType,
+                                   const unsigned char* data, int dataLen,
+                                   void* context) {
+    (void)context;
+    if (flowType != QUIC_FLOW_AUDIO)
+        return;
+    if (dataLen > MAX_PACKET_SIZE)
+        return;
+
+    int next = (quicAudioRing.head + 1) % QUIC_AUDIO_RING_SIZE;
+    if (next == quicAudioRing.tail)
+        return;
+
+    memcpy(quicAudioRing.data[quicAudioRing.head], data, dataLen);
+    quicAudioRing.len[quicAudioRing.head] = dataLen;
+    quicAudioRing.head = next;
+}
+
+static int quicAudioRecv(char* buf, int bufLen) {
+    if (quicAudioRing.tail == quicAudioRing.head)
+        return 0;
+
+    int len = quicAudioRing.len[quicAudioRing.tail];
+    if (len > bufLen)
+        len = bufLen;
+    memcpy(buf, quicAudioRing.data[quicAudioRing.tail], len);
+    quicAudioRing.tail = (quicAudioRing.tail + 1) % QUIC_AUDIO_RING_SIZE;
+    return len;
+}
+
+static bool useQuicAudio = false;
+#endif
 
 typedef struct _QUEUE_AUDIO_PACKET_HEADER {
     LINKED_BLOCKING_QUEUE_ENTRY lentry;
@@ -267,7 +315,19 @@ static void AudioReceiveThreadProc(void* context) {
             }
         }
 
-        packet->header.size = recvUdpSocket(rtpSocket, &packet->data[0], MAX_PACKET_SIZE, useSelect);
+#ifdef VIPLE_MPQUIC
+        if (useQuicAudio) {
+            packet->header.size = quicAudioRecv((char*)&packet->data[0], MAX_PACKET_SIZE);
+            if (packet->header.size == 0) {
+                PltSleepMs(1);
+                continue;
+            }
+        }
+        else
+#endif
+        {
+            packet->header.size = recvUdpSocket(rtpSocket, &packet->data[0], MAX_PACKET_SIZE, useSelect);
+        }
         if (packet->header.size < 0) {
             Limelog("Audio Receive: recvUdpSocket() failed: %d\n", (int)LastSocketError());
             ListenerCallbacks.connectionTerminated(LastSocketFail());
@@ -445,6 +505,15 @@ int startAudioStream(void* audioContext, int arFlags) {
     }
 
     AudioCallbacks.start();
+
+#ifdef VIPLE_MPQUIC
+    useQuicAudio = (StreamConfig.useQuicTransport && quicIsConnected());
+    if (useQuicAudio) {
+        quicAudioRing.head = 0;
+        quicAudioRing.tail = 0;
+        Limelog("[VIPLE-MPQUIC] Audio using QUIC datagram transport\n");
+    }
+#endif
 
     err = PltCreateThread("AudioRecv", AudioReceiveThreadProc, NULL, &receiveThread);
     if (err != 0) {

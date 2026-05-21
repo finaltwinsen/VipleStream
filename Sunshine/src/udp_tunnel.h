@@ -71,6 +71,7 @@ namespace udp_tunnel {
     DIRECT = 1,
     UDP_RELAY = 2,
     WS_RELAY = 3,
+    QUIC_DIRECT = 4,   // VipleStream: MP-QUIC multipath (direct, no relay)
   };
 
   const char *carrier_name(Carrier c);

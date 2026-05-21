@@ -99,3 +99,15 @@ CONFIG(debug, debug|release) {
 *-g++|*-clang* {
     QMAKE_CFLAGS_WARN_ON += -Wno-unused-parameter
 }
+
+# VipleStream: MP-QUIC multipath transport (opt-in)
+# Enable with: qmake DEFINES+=VIPLE_MPQUIC
+contains(DEFINES, VIPLE_MPQUIC) {
+    SOURCES += \
+        $$COMMON_C_DIR/src/PlatformNetIf.c \
+        $$COMMON_C_DIR/src/QuicTransport.c
+    HEADERS += \
+        $$COMMON_C_DIR/src/PlatformNetIf.h \
+        $$COMMON_C_DIR/src/QuicTransport.h
+    win32:LIBS += -liphlpapi
+}

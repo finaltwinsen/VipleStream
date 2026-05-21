@@ -38,6 +38,10 @@ extern "C" {
 #include "udp_tunnel.h"
 #include "utility.h"
 
+#ifdef VIPLE_MPQUIC
+#include "quic_server.h"
+#endif
+
 constexpr int IDX_START_A = 0;
 constexpr int IDX_START_B = 1;
 constexpr int IDX_INVALIDATE_REF_FRAMES = 2;
@@ -1762,10 +1766,42 @@ namespace stream {
               // tunnel, every shard goes out per-packet with the tunnel
               // header + HMAC prepended. Batched sendmsg/WSASendTo can't
               // be used because each packet needs its own auth header.
+#ifdef VIPLE_MPQUIC
+              const bool use_quic =
+                session->tunnel &&
+                session->tunnel->carrier() == udp_tunnel::Carrier::QUIC_DIRECT;
+#else
+              const bool use_quic = false;
+#endif
               const bool use_tunnel =
+                !use_quic &&
                 session->tunnel &&
                 session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
                 session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
+
+#ifdef VIPLE_MPQUIC
+              if (use_quic) {
+                // Send each shard as a QUIC DATAGRAM (flow type = video)
+                std::vector<uint8_t> scratch;
+                for (auto y = 0; y < current_batch_size; y++) {
+                  const auto idx = next_shard_to_send + y;
+                  const size_t pre = shards.prefixsize;
+                  const size_t dat = shards.blocksize;
+                  scratch.resize(pre + dat);
+                  std::memcpy(scratch.data(), shards.prefix(idx), pre);
+                  std::memcpy(scratch.data() + pre, shards.data(idx), dat);
+
+                  auto clientAddr = boost::asio::ip::make_address(
+                      session->video.peer.address().to_string());
+                  auto quicSession = quic_server::g_listener
+                      ? quic_server::g_listener->getSession(clientAddr)
+                      : nullptr;
+                  if (quicSession) {
+                    quicSession->sendDatagram(0x01, scratch.data(), scratch.size());
+                  }
+                }
+              } else
+#endif
               if (use_tunnel) {
                 const uint16_t server_port = net::map_port(VIDEO_STREAM_PORT);
                 const uint16_t peer_port = session->video.peer.port();
@@ -1888,11 +1924,37 @@ namespace stream {
 
       auto peer_address = session->audio.peer.address();
       try {
+#ifdef VIPLE_MPQUIC
+        const bool use_quic_audio =
+          session->tunnel &&
+          session->tunnel->carrier() == udp_tunnel::Carrier::QUIC_DIRECT;
+#else
+        const bool use_quic_audio = false;
+#endif
         const bool use_tunnel =
+          !use_quic_audio &&
           session->tunnel &&
           session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
           session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
         const uint16_t server_audio_port = net::map_port(AUDIO_STREAM_PORT);
+
+#ifdef VIPLE_MPQUIC
+        if (use_quic_audio) {
+          std::vector<uint8_t> scratch(sizeof(audio_packet) + bytes);
+          std::memcpy(scratch.data(), &audio_packet, sizeof(audio_packet));
+          std::memcpy(scratch.data() + sizeof(audio_packet),
+                      shards_p[sequenceNumber % RTPA_DATA_SHARDS], bytes);
+
+          auto clientAddr = boost::asio::ip::make_address(
+              session->audio.peer.address().to_string());
+          auto quicSession = quic_server::g_listener
+              ? quic_server::g_listener->getSession(clientAddr)
+              : nullptr;
+          if (quicSession) {
+            quicSession->sendDatagram(0x02, scratch.data(), scratch.size());
+          }
+        } else
+#endif
         if (use_tunnel) {
           std::vector<uint8_t> scratch(sizeof(audio_packet) + bytes);
           std::memcpy(scratch.data(), &audio_packet, sizeof(audio_packet));
@@ -1929,6 +1991,22 @@ namespace stream {
             fec_packet.rtp.sequenceNumber = util::endian::big<std::uint16_t>(sequenceNumber + x + 1);
             fec_packet.fecHeader.fecShardIndex = x;
 
+#ifdef VIPLE_MPQUIC
+            if (use_quic_audio) {
+              std::vector<uint8_t> scratch(sizeof(fec_packet) + bytes);
+              std::memcpy(scratch.data(), &fec_packet, sizeof(fec_packet));
+              std::memcpy(scratch.data() + sizeof(fec_packet),
+                          shards_p[RTPA_DATA_SHARDS + x], bytes);
+              auto clientAddr = boost::asio::ip::make_address(
+                  session->audio.peer.address().to_string());
+              auto quicSession = quic_server::g_listener
+                  ? quic_server::g_listener->getSession(clientAddr)
+                  : nullptr;
+              if (quicSession) {
+                quicSession->sendDatagram(0x02, scratch.data(), scratch.size());
+              }
+            } else
+#endif
             if (use_tunnel) {
               std::vector<uint8_t> scratch(sizeof(fec_packet) + bytes);
               std::memcpy(scratch.data(), &fec_packet, sizeof(fec_packet));
