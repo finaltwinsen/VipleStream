@@ -432,6 +432,13 @@ private:
     bool initializeCompositeVAAPI();
     void teardownCompositeVAAPI();
     void renderFrameVAAPIImport(AVFrame* frame);
+    // §K.3 — per-slot imported VkImage cache。在下次同 slot fence wait 後釋放，
+    // 確保 GPU 完成 CopyImageToBuffer 後才 vkDestroyImage。
+    struct VAAPISlotImport {
+        VkImage        image  = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+    };
+    VAAPISlotImport m_VAAPISlotImport[kFrucFramesInFlight] = {};
 #endif
 
     // §J.3.e.2.i.7 HW path：actual extension list enabled at vkCreateDevice
