@@ -91,22 +91,13 @@ static inline bool shouldUseVkFrucRendererForVulkanHwaccel()
     return prefs && prefs->rendererSelection == StreamingPreferences::RS_VULKAN;
 }
 
-// VipleStream §B Phase B 重啟 — opt-in composite path (D3D11VA HEVC HW
-// decode → SHARED_NTHANDLE → Vulkan import → VkFrucRenderer FRUC) for
-// GPUs whose Vulkan driver lacks VK_KHR_video_decode_h265 (e.g. AMD
-// Radeon 780M Phoenix iGPU on older Adrenalin builds).  Env-gated only
-// at this stage — auto-detect from a VkVideoCapabilities probe is the
-// follow-up; until then AMD 780M users opt in with the env var and
-// every other GPU keeps the existing D3D11VA / Vulkan-native path.
-//   VIPLE_VKFRUC_D3D11_HEVC=1 → composite for HEVC streams
-//   VIPLE_VKFRUC_D3D11_HEVC=0 → force-disable (debug)
-//   unset                    → off (default)
-static inline bool shouldUseVkFrucForD3D11Composite()
-{
-    const char* e = SDL_getenv("VIPLE_VKFRUC_D3D11_HEVC");
-    if (e) return SDL_atoi(e) != 0;
-    return false;
-}
+// (§B Phase B 重啟 — shouldUseVkFrucForD3D11Composite 已移除)
+// D3D11VA HEVC composite path 現在 auto-detect：
+// RS_VULKAN + HEVC 走到 D3D11VA case → 代表 Vulkan HEVC decode 失敗
+// → 改用 VkFrucRenderer(D3D11_HEVC) composite，讓 HEVC 也走 FRUC。
+// RS_D3D11 / RS_SW → shouldUseVkFrucRendererForVulkanHwaccel() false
+// → 走原本的 D3D11VARenderer，行為不變。
+// Debug ablation mode 仍走 VIPLE_VKFRUC_D3D11_HEVC_MODE env var（dev-only）。
 
 bool FFmpegVideoDecoder::isHardwareAccelerated()
 {
@@ -1371,17 +1362,18 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
         // on the first pass to ensure we prefer D3D11VA over DXVA2.
         case AV_HWDEVICE_TYPE_D3D11VA:
 #ifdef HAVE_LIBPLACEBO_VULKAN
-            // §B Phase B 重啟 — opt-in composite path for HEVC.  Lets users
-            // on GPUs without VK_KHR_video_decode_h265 (notably AMD 780M iGPU)
-            // still get HW decode + FRUC by routing through VkFrucRenderer.
-            // Falls back to plain D3D11VARenderer for other codecs / when env
-            // var is not set / on init failure (cascade pass=1 retry).
+            // §B Phase B 重啟 — auto-detect composite path for HEVC。
+            // RS_VULKAN + HEVC 走到這裡 = Vulkan HEVC decode 失敗（cascade
+            // 已先試過 Vulkan 但沒過），改走 VkFrucRenderer(D3D11_HEVC)：
+            // D3D11VA HW decode → SHARED_NTHANDLE → Vulkan import → FRUC。
+            // RS_D3D11 時 shouldUseVkFrucRendererForVulkanHwaccel() = false
+            // → 走原本的 D3D11VARenderer，行為不變。
+            // pass=1 retry 永遠走 D3D11VARenderer（下面 pass==1 block 處理）。
             if ((videoFormat & VIDEO_FORMAT_MASK_H265) &&
-                shouldUseVkFrucForD3D11Composite() && pass == 0) {
+                shouldUseVkFrucRendererForVulkanHwaccel() && pass == 0) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VKFRUC-COMPOSITE] §B cascade: D3D11VA HEVC HW "
-                            "decode → VkFrucRenderer composite "
-                            "(VIPLE_VKFRUC_D3D11_HEVC=1, pass=0)");
+                            "decode → VkFrucRenderer composite (RS_VULKAN auto, pass=0)");
                 return new VkFrucRenderer(pass,
                                           VkFrucRenderer::CompositeMode::D3D11_HEVC);
             }
