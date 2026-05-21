@@ -8952,21 +8952,19 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     // proof of life on this VkDevice; β.2 will wire it into runFrucComputeChain).
     // Failure non-fatal: m_RifeNativeReady stays false, block-match remains active.
     //
-    // v1.4.145 §J.3.e.X Path β.12 — coopmat extension gate.
+    // v1.4.145 §J.3.e.X Path β.12 — coopmat extension gate（已整合 §β.12.fix）。
     //
-    // 根本原因（v1.4.191 實機確認）：
-    //   ncnn 20240820 在 VkDevice 回報 fp16_arithmetic=1 時，無論 net.opt
-    //   的 use_fp16_arithmetic 設定為何，內部推理 Net 仍會 emit
-    //   `v_wmma_f32_16x16x16_f16`（WMMA，f32 accumulator + f16 inputs）。
-    //   Vega 10 (RADV RAVEN/GFX9) 的 ACO assembler 不認識此 opcode →
-    //   `ACO ERROR: Unsupported opcode: v_wmma_f32_16x16x16_f16` → SIGABRT。
-    //   ncnn 的 bug：應在 coopmat shapes 全為 0 時不 emit WMMA，但它
-    //   只看 fp16_arithmetic capability 就決定要不要走 WMMA path。
+    // 根本原因確認（v1.4.191 Vega 10 實機 crash）：
+    //   buildExecState → buildPipelineCache 在 RADV RAVEN/GFX9 上能成功建立
+    //   含 WMMA opcode 的 VkPipeline（SPIR-V 合法），但 GPU 執行到
+    //   v_wmma_f32_16x16x16_f16 時 ACO crash（SIGABRT）。
     //
-    // 正確 fix：在 RifeNativeExecutor 的推理 Net 明確關掉 fp16 arithmetic，
-    //   或等 ncnn 修好後重測。目前維持 hard-block：無 coopmat extension →
-    //   skip RIFE（fp32 路徑在 Vega 10 同樣會 crash，non-coopmat 系一律擋）。
-    //   §β.12.fix 追蹤。
+    // §β.12.fix（v1.4.192 实现）：
+    //   buildPipelineCache 在 physicalDevice 無 VK_KHR/NV_cooperative_matrix
+    //   時直接 skip Conv2D_CoopMat pipeline 建立（留 null）。
+    //   → dispatchConvolution 正確 fallback 到 tiled 路徑，無執行時 crash。
+    //
+    // 此處 gate 保留用來 log，但不再 hard-block（實際防護在 rife_native_vk.cpp）。
     if (m_RifeNativeMode) {
         bool hasCoopmat = false;
         if (m_pfnGetInstanceProcAddr && m_PhysicalDevice != VK_NULL_HANDLE) {
@@ -8988,14 +8986,11 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         }
         if (!hasCoopmat) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-RIFE-β] §β.12 no cooperative_matrix extension "
-                "(VK_KHR/VK_NV) on device — skipping native RIFE init "
-                "(ncnn 20240820 emits v_wmma_f32_16x16x16_f16 on fp16-capable "
-                "devices regardless of use_fp16_arithmetic setting; RADV RAVEN/GFX9 "
-                "ACO crashes on this opcode; block-match path remains active).");
-            m_RifeNativeMode  = false;
-            m_RifeNativeReady = false;
-        } else if (!createRifeNativeResources(width, height)) {
+                "[VIPLE-VKFRUC-RIFE-β] §β.12 no cooperative_matrix ext — "
+                "RIFE init will use tiled Conv fallback (§β.12.fix in rife_native_vk.cpp "
+                "skips CoopMat pipeline; fp32 path safe on non-coopmat devices).");
+        }
+        if (!createRifeNativeResources(width, height)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC-RIFE-β] init failed — block-match path remains active");
             m_RifeNativeMode  = false;

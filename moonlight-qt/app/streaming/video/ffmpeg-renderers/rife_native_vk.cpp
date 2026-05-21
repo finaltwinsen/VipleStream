@@ -3196,6 +3196,31 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out,
     out.pfnDestroyVkCache = pfnDestroyPipelineCache;
     out.pfnGetVkCacheData = pfnGetPipelineCacheData;
 
+    // §β.12.fix — cooperative_matrix 硬體探測。
+    // RADV RAVEN/GFX9 可建立包含 WMMA opcode 的 VkPipeline（SPIR-V 合法），
+    // 但 GPU 執行到 v_wmma_f32_16x16x16_f16 時 ACO crash。
+    // 只有在 device 真的有 VK_KHR/NV_cooperative_matrix 時才建立 Conv2D_CoopMat
+    // pipeline，否則 dispatchConvolution 正確 fallback 到 tiled 路徑。
+    bool deviceHasCoopMat = false;
+    {
+        auto physDev = (VkPhysicalDevice)ctx.physicalDevice;
+        auto pfnEnumDevExts = (PFN_vkEnumerateDeviceExtensionProperties)
+            pfnGetInstancePA(instance, "vkEnumerateDeviceExtensionProperties");
+        if (physDev && pfnEnumDevExts) {
+            uint32_t extCount = 0;
+            pfnEnumDevExts(physDev, nullptr, &extCount, nullptr);
+            std::vector<VkExtensionProperties> devExts(extCount);
+            pfnEnumDevExts(physDev, nullptr, &extCount, devExts.data());
+            for (const auto& ex : devExts) {
+                if (std::strcmp(ex.extensionName, "VK_KHR_cooperative_matrix") == 0 ||
+                    std::strcmp(ex.extensionName, "VK_NV_cooperative_matrix") == 0) {
+                    deviceHasCoopMat = true;
+                    break;
+                }
+            }
+        }
+    }
+
     // §J.3.e.X Final.2 — VkPipelineCache for cold-start latency.
     // Initial data must include valid header + GPU/driver fingerprint;
     // Vulkan validates this and silently rejects mismatched bytes
@@ -3217,12 +3242,26 @@ bool buildPipelineCache(const VulkanCtx& ctx, PipelineCache& out,
     for (int i = 0; i < (int)ShaderKind::Count; ++i) {
         const ShaderSpec& spec = kShaderSpecs[i];
         CachedPipeline& cp = out.pipelines[i];
+        const bool isCoopMatSlot = (i == (int)ShaderKind::Conv2D_CoopMat);
+
+        // §β.12.fix — 無 coopmat extension 時跳過 pipeline 建立（留 null）。
+        // 原本只靠 vkCreateShaderModule / vkCreateComputePipelines 失敗作
+        // fallback，但 RADV 能成功建立含 WMMA opcode 的 pipeline，要到
+        // GPU 執行才 crash。提前 skip 才能讓 dispatchConvolution 真的走
+        // tiled fallback。
+        if (isCoopMatSlot && !deviceHasCoopMat) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RIFE-VK] §β.12.fix: skipping Conv2D_CoopMat pipeline "
+                "(no VK_KHR/NV_cooperative_matrix on device) — tiled path active.");
+            continue;  // cp 維持 zeroed，pipeline=VK_NULL_HANDLE
+        }
+
         // §J.3.e.Y 4Y.6 — Conv2D_CoopMat is best-effort: device may not
         // support cooperative_matrix, in which case shader module / pipeline
         // creation fails.  Disable just that entry (cp stays zeroed) and
         // dispatchConvolution falls back to the non-coopmat shader.  All
         // other shaders are mandatory — failure aborts.
-        const bool optional = (i == (int)ShaderKind::Conv2D_CoopMat);
+        const bool optional = isCoopMatSlot;
         auto failOptional = [&](const char* stage, VkResult vr) {
             if (cp.layout)   { pfnDestroyPipelineLayout(device, cp.layout, nullptr);  cp.layout = VK_NULL_HANDLE; }
             if (cp.dsl)      { pfnDestroyDescriptorSetLayout(device, cp.dsl, nullptr); cp.dsl    = VK_NULL_HANDLE; }
