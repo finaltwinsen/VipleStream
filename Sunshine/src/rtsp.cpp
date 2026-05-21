@@ -473,12 +473,12 @@ namespace rtsp_stream {
         socket->session = launch_session;
         last_session = launch_session;  // Cache for tunnel reconnects
         socket->read();
-      } else if (last_session) {
+      } else if (auto cached = last_session.lock()) {  // §S.5a weak_ptr::lock()
         // VipleStream: Relay tunnel splits RTSP into multiple TCP connections.
         // After the first /launch session is consumed, subsequent SETUP requests
         // arrive as new TCP accepts. Reuse the cached session for these.
         BOOST_LOG(info) << "RTSP session reused from tunnel (no new launch event)";
-        socket->session = last_session;
+        socket->session = cached;
         socket->read();
       } else {
         BOOST_LOG(info) << "No pending session for incoming RTSP connection (closed)";
@@ -557,7 +557,7 @@ namespace rtsp_stream {
     }
 
     safe::event_t<std::shared_ptr<launch_session_t>> launch_event;
-    std::shared_ptr<launch_session_t> last_session;  // VipleStream: cached for tunnel multi-TCP reuse
+    std::weak_ptr<launch_session_t> last_session;  // §S.5a VipleStream: weak ref — session lifetime tied to connection
 
     /**
      * @brief Clear launch sessions.
