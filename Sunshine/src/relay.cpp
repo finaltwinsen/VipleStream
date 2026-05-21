@@ -1058,8 +1058,14 @@ namespace relay {
               } else if (tunnelMsg.find("ping") != std::string::npos) {
                 std::lock_guard<std::mutex> l(g_send_mtx);
                 ws_send(*transport, "{\"type\":\"pong\"}");
+              } else if (!tunnelMsg.empty()) {
+                // §RELAY-OBS: 非本 tunnel 的 control 訊息在 polling loop 內被讀到且無法
+                // route 給正確 handler（e.g. udp_tunnel_allocated 會讓 allocate_flow 死鎖）。
+                // 若此 log 出現在 prod，代表多 client 並發場景需要展開計畫一階段 A。
+                BOOST_LOG(warning) << "[RELAY-DISPATCH-WARN] non-tunnel msg dropped in tcp_tunnel "
+                                   << "polling loop (potential deadlock vector): "
+                                   << tunnelMsg.substr(0, 120);
               }
-              // Ignore endpoint updates, other messages during tunnel
             }
 
             // Check for data from local TCP (server → client)
