@@ -11238,13 +11238,10 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         // level 1: temporal=1, backward=0, fine=0
         // level 2: temporal=1, backward=1, fine=0
         // level 3+: 全 1 (預設)
-        // §β.11.b — EDGE_AWARE_MV_THRESHOLD 改為 push constant runtime tunable。
-        // 預設 8.0f（§β.11 hypothesis baseline）。
-        // Override：VIPLE_VKFRUC_EDGE_MV_THRESHOLD=N（整數 N > 0）。
-        // UI slider 等日後 Settings 擴充時再加；env var 先供除錯/調參用。
-        static const float edgeMvThreshold = []() -> float {
-            int env = qEnvironmentVariableIntValue("VIPLE_VKFRUC_EDGE_MV_THRESHOLD");
-            return (env > 0) ? (float)env : 8.0f;
+        // §β.11.b — 從 StreamingPreferences 讀 edge-aware MV 閾值（Settings UI 控制）。
+        const float edgeMvThreshold = [&]() -> float {
+            auto* p = StreamingPreferences::get();
+            return (p && p->vkfrucEdgeMvThreshold > 0.0f) ? p->vkfrucEdgeMvThreshold : 8.0f;
         }();
         struct {
             uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;

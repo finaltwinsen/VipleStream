@@ -1001,6 +1001,37 @@ Flickable {
                 }
                 // (NV-OF / TRIPLE / Auto-tier / Manual RIFE / inferDim) 舊選項移除.
 
+                // §β.11.b — edge-aware MV 閾值 slider（Vulkan 補幀 warp shader 參數）。
+                Row {
+                    width: parent.width
+                    spacing: 8
+                    visible: frameInterpolationCheck.checked
+                             && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
+                    Label {
+                        text: qsTr("邊緣 MV 閾值 (Edge MV threshold):")
+                        font.pointSize: 11
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    SpinBox {
+                        id: edgeMvThresholdSpinBox
+                        from: 2; to: 20
+                        value: Math.round(StreamingPreferences.vkfrucEdgeMvThreshold)
+                        font.pointSize: 11
+                        onValueChanged: {
+                            if (Math.abs(StreamingPreferences.vkfrucEdgeMvThreshold - value) > 0.01)
+                                StreamingPreferences.vkfrucEdgeMvThreshold = value
+                        }
+                        ToolTip.delay: 1000
+                        ToolTip.timeout: 7000
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Warp shader 的 motion vector 邊緣偵測閾值（L² diff 單位）。\n"
+                            + "預設 8（= 2.83px L2 diff）。\n"
+                            + "低值（4）：更多邊緣保護，抑制方塊 mosaic，但邊界可能偏糊。\n"
+                            + "高值（12-16）：邊緣更銳利，但高對比 motion boundary 可能殘留 mosaic。\n"
+                            + "建議先用預設值，若補幀邊緣有方塊感再降到 4-6。")
+                    }
+                }
+
                 // VipleStream v1.2.92: 180 fps cap warning removed
                 // along with the cap itself.  Generic FRUC happily
                 // does 240 fps on the benchmark machine; the old red

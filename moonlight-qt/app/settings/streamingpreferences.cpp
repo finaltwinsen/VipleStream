@@ -46,6 +46,7 @@
 #define SER_VKFRUC_DETECTED_GPU_NAME "vkfrucDetectedGpuName"
 #define SER_VKFRUC_BENCHMARK_NS      "vkfrucBenchmarkNs"
 #define SER_VKFRUC_RIFE_AUTO_TIER    "vkfrucRifeAutoTier"
+#define SER_VKFRUC_EDGE_MV_THRESHOLD "vkfrucEdgeMvThreshold"  // §β.11.b
 #define SER_DESIGNVARIANT "designVariant"
 #define SER_APPSORTMODE "appSortMode"
 #define SER_RELAYURL "relayUrl"
@@ -221,6 +222,7 @@ void StreamingPreferences::reload()
     // §J.3.e.2.i.11 (v1.4.69) — auto-tier 啟用開關 default true.  新使用者
     // 跟升級者 default 都走 auto-tier；要手動 override 用 UI (v1.4.70) 關.
     vkfrucRifeAutoTier     = settings.value(SER_VKFRUC_RIFE_AUTO_TIER, true).toBool();
+    vkfrucEdgeMvThreshold  = settings.value(SER_VKFRUC_EDGE_MV_THRESHOLD, 8.0f).toFloat();
     designVariant = static_cast<DesignVariant>(settings.value(SER_DESIGNVARIANT, static_cast<int>(DV_SAFE)).toInt());
     // VipleStream H Phase 2.2: default to ASM_RECENT so users see their
     // recently-played Steam games at the top — which is what they
@@ -443,6 +445,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_VKFRUC_DETECTED_GPU_NAME, vkfrucDetectedGpuName);
     settings.setValue(SER_VKFRUC_BENCHMARK_NS, vkfrucBenchmarkNs);
     settings.setValue(SER_VKFRUC_RIFE_AUTO_TIER, vkfrucRifeAutoTier);
+    settings.setValue(SER_VKFRUC_EDGE_MV_THRESHOLD, vkfrucEdgeMvThreshold);
     settings.setValue(SER_DESIGNVARIANT, static_cast<int>(designVariant));
     settings.setValue(SER_APPSORTMODE, static_cast<int>(appSortMode));
     settings.setValue(SER_RELAYURL, relayUrl);

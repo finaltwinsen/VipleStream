@@ -272,7 +272,10 @@ public:
     // vkfrucDetectedTier 自動決定，跳過 vkfrucEnableNativeRife /
     // vkfrucNativeRifeInferDim manual setting.  使用者可在 UI (v1.4.70)
     // 關掉 auto-tier 回 manual 控制.
-    Q_PROPERTY(bool vkfrucRifeAutoTier MEMBER vkfrucRifeAutoTier NOTIFY vkfrucRifeAutoTierChanged)
+    Q_PROPERTY(bool  vkfrucRifeAutoTier MEMBER vkfrucRifeAutoTier NOTIFY vkfrucRifeAutoTierChanged)
+    // §β.11.b (v1.4.194) — warp shader edge-aware MV 閾值（L2² diff 單位）。
+    // 預設 8.0（= 2.83px L2）。太低留馬賽克 / 太高失邊緣銳利度。UI slider 2-20。
+    Q_PROPERTY(float vkfrucEdgeMvThreshold MEMBER vkfrucEdgeMvThreshold NOTIFY vkfrucEdgeMvThresholdChanged)
     Q_PROPERTY(DesignVariant designVariant MEMBER designVariant NOTIFY designVariantChanged)
     Q_PROPERTY(AppSortMode appSortMode MEMBER appSortMode NOTIFY appSortModeChanged)
     Q_PROPERTY(QString relayUrl MEMBER relayUrl NOTIFY relayUrlChanged)
@@ -335,6 +338,7 @@ public:
     qint64        vkfrucBenchmarkNs;
     // §J.3.e.2.i.11 (v1.4.69) — auto-tier 啟用開關 (default true)
     bool          vkfrucRifeAutoTier;
+    float         vkfrucEdgeMvThreshold;  // §β.11.b — warp edge-aware MV 閾值，預設 8.0
     DesignVariant designVariant;
     AppSortMode appSortMode;
     QString relayUrl;      // VipleStream: signaling relay WebSocket URL
@@ -394,6 +398,7 @@ signals:
     void vkfrucDetectedGpuNameChanged();
     void vkfrucBenchmarkNsChanged();
     void vkfrucRifeAutoTierChanged();
+    void vkfrucEdgeMvThresholdChanged();
     void designVariantChanged();
     void appSortModeChanged();
     void relayUrlChanged();
