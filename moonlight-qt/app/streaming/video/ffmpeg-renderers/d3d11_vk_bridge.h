@@ -77,6 +77,10 @@ public:
 
     bool isInitialized() const { return m_Initialized; }
     HandleMode handleMode() const { return m_Mode; }
+    // B4 fence sync は D3D12_FENCE_BIT external semaphore が必要。
+    // AMD 780M 等 driver で未サポートの場合は false になる。
+    // signalFromD3D11/waitOnD3D11 は fence=null 時 no-op なので安全。
+    bool isFenceSyncAvailable() const { return m_VkSemaphore != VK_NULL_HANDLE; }
 
     // Resolve ablation mode from env VIPLE_VKFRUC_D3D11_HEVC_MODE (A1..A4),
     // defaulting to A1 if unset / invalid.

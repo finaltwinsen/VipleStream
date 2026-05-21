@@ -6563,9 +6563,17 @@ bool VkFrucRenderer::initializeCompositeD3D11()
         av_buffer_unref(&hwRef);
         return false;
     }
+    // §B B4 — fence sync optional. AMD 780M / 一些 driver 不支援
+    // VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT → createFenceSync()
+    // 回 false. 繼續 init; signalFromD3D11/waitOnD3D11 已有 null guard 是
+    // no-op. B7 匯入 + 驗 round-trip 在無 fence 下仍可跑（implicit sync
+    // via D3D11 shared texture + Vulkan image barrier）. B9 FRUC chain
+    // 要先確認 fenceless 模式下 60s 無 device-lost 再補 explicit sync 方案.
     if (!bridge->createFenceSync()) {
-        av_buffer_unref(&hwRef);
-        return false;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-COMPOSITE] B4 fence sync unavailable (driver "
+                    "不支援 D3D12_FENCE_BIT external semaphore) — continuing "
+                    "in fenceless mode; B7 import round-trip still valid");
     }
 
     // Hand off ownership.  These raw pointers are released in
