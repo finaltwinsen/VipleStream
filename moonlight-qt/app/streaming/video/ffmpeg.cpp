@@ -1343,8 +1343,11 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
     }
 
 #ifdef VIPLE_MPQUIC
-    // MP-QUIC multipath subflow stats overlay
-    if (StreamConfig.useQuicTransport) {
+    // MP-QUIC multipath subflow stats overlay.
+    // Use quicGetSubflowStats() as the gate — it returns 0 when QUIC is
+    // not active, so we don't need access to moonlight-common-c's
+    // internal StreamConfig global.
+    {
         QUIC_SUBFLOW_STATS sfStats[QUIC_MAX_SUBFLOWS];
         int sfCount = quicGetSubflowStats(sfStats, QUIC_MAX_SUBFLOWS);
         if (sfCount > 0) {

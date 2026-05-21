@@ -74,7 +74,8 @@ if(VIPLE_MPQUIC)
         list(APPEND PLATFORM_LIBRARIES picoquic-core)
     else()
         message(WARNING "VIPLE_MPQUIC=ON but third-party/picoquic not found. "
-                        "Run: git submodule add https://github.com/nicnl/picoquic third-party/picoquic")
+                        "Run: git submodule add https://github.com/private-octopus/picoquic.git "
+                        "third-party/picoquic && git submodule update --init --recursive")
     endif()
 
     list(APPEND PLATFORM_TARGET_FILES

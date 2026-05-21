@@ -1540,14 +1540,14 @@ namespace stream {
       if (fecPercentage == 0) fecPercentage = config::stream.fec_percentage;
 
 #ifdef VIPLE_MPQUIC
-      // When QUIC transport is active, clamp FEC to the configured floor.
+      // When QUIC transport is active, clamp FEC DOWN to the configured floor.
       // QUIC's own loss detection + fast retransmit handles most recovery,
       // so LAN sessions can reduce FEC overhead to save bandwidth.
       if (session->tunnel &&
           session->tunnel->carrier() == udp_tunnel::Carrier::QUIC_DIRECT) {
         int fecFloor = config::stream.mpquic_fec_floor;
-        if (fecPercentage > fecFloor && fecFloor >= 0) {
-          fecPercentage = std::max(fecPercentage, fecFloor);
+        if (fecFloor >= 0 && fecPercentage > fecFloor) {
+          fecPercentage = fecFloor;  // clamp DOWN to floor
         }
       }
 #endif

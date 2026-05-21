@@ -516,11 +516,17 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
             qparams.quicPort = (unsigned short)StreamConfig.quicPort;
 
             if (quicConnect(&qparams) == 0) {
+                // §Q-REVIEW-P2: This adds subflows immediately after
+                // quicConnect, but the TLS handshake hasn't finished yet
+                // — picoquic_probe_new_path on a non-ready path can fail
+                // silently or stash a probe that fires after handshake.
+                // Once we move to a real picoquic build, gate this block
+                // on picoquic_callback_ready (or a synchronous wait with
+                // timeout) so probes only fire on a ready connection.
+                //
                 // Enumerate local interfaces and add subflows.
-                // Only add subflows whose address family matches the server,
+                // Only add subflows whose address family matches the server
                 // since picoquic path probes require matching families.
-                // On dual-stack hosts this creates one subflow per NIC per
-                // matching family (IPv4 or IPv6).
                 int serverFamily = RemoteAddr.ss_family;
                 LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
                 int ifCount = lcEnumNetInterfaces(interfaces, LC_NETIF_MAX_COUNT);

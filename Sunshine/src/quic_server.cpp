@@ -89,23 +89,29 @@ namespace quic_server {
     }
 
     if (scheduler == SCHED_REDUNDANT && pathCount > 1) {
-      // Send on every path
-      bool sent = false;
-      for (int p = 0; p < pathCount; p++) {
-        std::vector<uint8_t> frame(DGRAM_HDR_SIZE + len);
-        QuicDgramHeader hdr{};
-        hdr.flowType = flowType;
-        hdr.reserved = 0;
-        hdr.seq = htons(_seqCounters[flowType]++);
-        std::memcpy(frame.data(), &hdr, DGRAM_HDR_SIZE);
-        std::memcpy(frame.data() + DGRAM_HDR_SIZE, data, len);
+      // NOTE: picoquic's queue_datagram_frame is per-cnx, not per-path, so
+      // queuing the same payload N times does NOT actually duplicate it on
+      // wire — picoquic dedups. True per-path datagram is a picoquic
+      // upstream feature gap. We still queue once with a single seq
+      // counter increment so the receiver sees one logical frame; once
+      // picoquic exposes per-path queue, swap this out.
+      // Tag a single path as preferred (rotates so all paths get used).
+      static thread_local int rrIdx = 0;
+      int preferredPath = rrIdx++ % pathCount;
+      std::vector<uint8_t> frame(DGRAM_HDR_SIZE + len);
+      QuicDgramHeader hdr{};
+      hdr.flowType = flowType;
+      hdr.reserved = 0;
+      hdr.seq = htons(_seqCounters[flowType]++);
+      std::memcpy(frame.data(), &hdr, DGRAM_HDR_SIZE);
+      std::memcpy(frame.data() + DGRAM_HDR_SIZE, data, len);
 
-        std::lock_guard<std::mutex> lock(_sendMutex);
-        picoquic_set_cnx_path_priority(_cnx, p, 1);
-        if (picoquic_queue_datagram_frame(_cnx, frame.size(), frame.data()) == 0)
-          sent = true;
+      std::lock_guard<std::mutex> lock(_sendMutex);
+      for (int p = 0; p < pathCount; p++) {
+        picoquic_set_cnx_path_priority(_cnx, p,
+                                        (p == preferredPath) ? 16 : 1);
       }
-      return sent;
+      return picoquic_queue_datagram_frame(_cnx, frame.size(), frame.data()) == 0;
     }
 
     if (pathCount > 1) {
@@ -135,7 +141,11 @@ namespace quic_server {
       }
 
       std::lock_guard<std::mutex> lock(_sendMutex);
-      picoquic_set_cnx_path_priority(_cnx, bestPath, 1);
+      // Give the chosen path the highest priority and demote others, so
+      // picoquic's internal scheduler actually prefers it.
+      for (int p = 0; p < pathCount; p++) {
+        picoquic_set_cnx_path_priority(_cnx, p, (p == bestPath) ? 16 : 1);
+      }
     }
 
     return sendDatagram(flowType, data, len);
@@ -160,6 +170,10 @@ namespace quic_server {
       return stats;
 
     int pathCount = picoquic_get_cnx_nb_paths(_cnx);
+    // §Q-REVIEW-P1: picoquic_get_cnx_path_rtt / _cwin are placeholder
+    // API names. Real picoquic uses picoquic_get_path_quality(cnx, p, &pq)
+    // which fills a picoquic_path_quality_t with rtt / cwin / pacing_rate.
+    // Swap once picoquic submodule is added.
     for (int i = 0; i < pathCount; i++) {
       SubflowStats s{};
       s.pathId = i;
@@ -169,7 +183,6 @@ namespace quic_server {
       s.bytesSent = 0;
       s.bytesRecv = 0;
 
-      // Estimate throughput from CWIN / RTT
       uint64_t cwin = picoquic_get_cnx_path_cwin(_cnx, i);
       if (rttUs > 0) {
         double bps = ((double)cwin / (double)rttUs) * 1e6;
@@ -337,28 +350,32 @@ namespace quic_server {
         }
       }
 
-      // Process outgoing packets
-      picoquic_cnx_t *iterCnx = picoquic_get_earliest_cnx_to_wake(
-          _quic, currentTime + 1000);
-
-      while (iterCnx) {
+      // Process outgoing packets.
+      // picoquic_prepare_next_packet takes the QUIC context (not a cnx)
+      // and walks the wake queue internally, returning the cnx it sent
+      // for via p_last_cnx.
+      while (true) {
         struct sockaddr_storage destAddr{};
-        socklen_t destLen = sizeof(destAddr);
+        struct sockaddr_storage fromAddr{};
+        int ifIndex = 0;
         size_t sendLen = 0;
+        picoquic_connection_id_t logCid{};
+        picoquic_cnx_t *lastCnx = nullptr;
 
         int ret = picoquic_prepare_next_packet(
-            iterCnx, picoquic_current_time(),
+            _quic, picoquic_current_time(),
             sendBuf, sizeof(sendBuf), &sendLen,
-            (struct sockaddr *)&destAddr, &destLen,
-            nullptr, nullptr, nullptr);
-
-        if (ret == 0 && sendLen > 0) {
-          sendto(sock, (const char *)sendBuf, (int)sendLen, 0,
-                 (struct sockaddr *)&destAddr, destLen);
-        }
+            &destAddr, &fromAddr,
+            &ifIndex, &logCid, &lastCnx);
 
         if (ret != 0 || sendLen == 0)
           break;
+
+        socklen_t destLen = (destAddr.ss_family == AF_INET)
+                              ? sizeof(sockaddr_in)
+                              : sizeof(sockaddr_in6);
+        sendto(sock, (const char *)sendBuf, (int)sendLen, 0,
+               (struct sockaddr *)&destAddr, destLen);
       }
     }
 
@@ -380,20 +397,22 @@ namespace quic_server {
       auto session = std::make_shared<QuicSession>(cnx);
       picoquic_set_callback(cnx, QuicListener::picoquicCallback, listener);
 
-      // Store session keyed by peer address
-      struct sockaddr_storage peerAddr{};
-      picoquic_get_peer_addr(cnx, (struct sockaddr **)&peerAddr);
+      // Store session keyed by peer address.
+      // picoquic_get_peer_addr writes a pointer into our local sockaddr*,
+      // it does NOT copy the address into a storage buffer.
+      struct sockaddr *peerAddrPtr = nullptr;
+      picoquic_get_peer_addr(cnx, &peerAddrPtr);
 
-      {
+      if (peerAddrPtr) {
         std::lock_guard<std::mutex> lock(listener->_sessionMutex);
-        char addrStr[INET6_ADDRSTRLEN];
-        if (peerAddr.ss_family == AF_INET) {
+        char addrStr[INET6_ADDRSTRLEN] = {};
+        if (peerAddrPtr->sa_family == AF_INET) {
           inet_ntop(AF_INET,
-                    &((struct sockaddr_in *)&peerAddr)->sin_addr,
+                    &reinterpret_cast<struct sockaddr_in *>(peerAddrPtr)->sin_addr,
                     addrStr, sizeof(addrStr));
-        } else {
+        } else if (peerAddrPtr->sa_family == AF_INET6) {
           inet_ntop(AF_INET6,
-                    &((struct sockaddr_in6 *)&peerAddr)->sin6_addr,
+                    &reinterpret_cast<struct sockaddr_in6 *>(peerAddrPtr)->sin6_addr,
                     addrStr, sizeof(addrStr));
         }
         listener->_sessions[addrStr] = session;

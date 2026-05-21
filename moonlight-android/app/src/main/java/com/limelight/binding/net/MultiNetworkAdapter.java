@@ -19,6 +19,16 @@ import java.util.List;
  * Enumerates available networks (WiFi, cellular, Ethernet) and monitors
  * connectivity changes for QUIC multipath subflow management.
  * Uses ConnectivityManager.getAllNetworks() + NetworkCapabilities.
+ *
+ * §Q-REVIEW-P2 — JNI bridge gap (tracked for Phase 5):
+ *   moonlight-common-c's PlatformNetIf.c on Android falls through to
+ *   lcSetNetInterfacesFromJni(), which expects this Java class to call
+ *   a native method that pushes the network list across. That native
+ *   method is not yet implemented. Currently the native side sees zero
+ *   subflows on Android (single-path QUIC still works, but multipath
+ *   does not). Phase 5: add nativeSetInterfaces(...) JNI method in
+ *   MoonBridge and call it from NvConnection.start() right after
+ *   listing available networks.
  */
 public class MultiNetworkAdapter {
     private static final String TAG = "VIPLE-MPQUIC-NET";
