@@ -11,6 +11,7 @@
 |---|---|---|
 | **Active (verify)** | **§β.11.b** warp edge MV threshold | Settings UI slider (2-20, default 8) 已上線 v1.4.195；待使用者實測：keep 8 / 試 4（更多邊緣保護）/ 試 12（更 smooth）|
 | **Active (Phase 1-4 done)** | **§Q** MP-QUIC 多路徑網路聚合 | v1.5.0-1.5.5 ship：Phase 1 基礎 + Phase 2 multipath scheduler (ECF/REDUNDANT/MIN_RTT/AGGREGATE) + failover + FEC 互動 + Settings UI + Phase 3 OSD overlay + server 30s stats + Phase 4 0-RTT/BBR congestion/dual-stack/cellular keepalive。picoquic submodule (private-octopus, d9c705a4) pinned。Linux WSL build PASS（moonlight-qt viplestream 54MB + Android app-debug.apk）。**待：** 真實兩台機器壓測 + Sunshine Windows MSVC 端 build 驗證 |
+| **Active (verify)** | **§SLIM** release zip 瘦身 (106→48 MB) | phase 1-4 已 ship；fresh install + 首次 NCNN / Native-RIFE backend 啟動實測 flownet.bin lazy fetch（GitHub raw URL）能否 3-5s 內完成 + SHA-256 PASS；無 VC++ Runtime 的 Win10 系統實測 missing vcruntime140 提示是否清楚 |
 | **Deferred (hw-bound)** | **§B Phase B** HEVC D3D11VA → Vulkan composite | Code 已 ship v1.4.184-185；阻塞：AMD 780M 測試機 HEVC D3D11VA 本身不可用。需換另一台 D3D11VA HEVC HW decode 可用的 AMD 機器驗 B7 import + B9 FRUC chain |
 | **Active (test pending)** | **§B-NVOF autotier** NVOF 成為 NV 最佳 tier | Code 已 ship v1.4.117-138；待使用者 PixArk 20+ 分鐘實測，看 NVOF-PROF drop% 是否接近 0%、chain_mean 是否穩定 < 2ms。若 OK → reapply early-kickoff + NVOF 列 NV best tier；若 drop% 高 → 需 Option E skip 機制 |
 | **Active (follow-up)** | **§R2 PASSIVE FRUC** ratio controller | v1.4.169-186 已 ship ratio alignment gate + extreme floor。剩：觀察 latency pattern 是否還有 T2→T0 大幅跳降；display Hz=0 legacy renderer fallback 是否需補 |
