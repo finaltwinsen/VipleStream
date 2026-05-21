@@ -114,11 +114,22 @@ echo [pkg 3/5] Running windeployqt
 ::     OpenGL fallback.  Stream clients always have a GPU; the Qt Quick UI
 ::     uses the D3D11 RHI backend on Windows, not OpenGL, so this path
 ::     is never taken.
-::   - `--no-virtualkeyboard`: we never embed Qt Virtual Keyboard.
 ::   - `--no-system-d3d-compiler`: we don't runtime-compile HLSL (all
 ::     D3D11 shaders ship as pre-compiled .fxc — see compile_d3d11_shaders.ps1)
 ::     and Qt Quick has no ShaderEffect items in our QML tree.
-"%WINDEPLOYQT%" --release --qmldir "%SRC%\app\gui" --no-translations --no-compiler-runtime --no-opengl-sw --no-virtualkeyboard --no-system-d3d-compiler "%TEMP_DIR%\VipleStream.exe" 2>nul
+::
+:: NB: Qt 6.10 windeployqt does NOT support `--no-virtualkeyboard`
+:: (the flag name is gone in this Qt version; QtVirtualKeyboard isn't
+:: imported by our QML so windeployqt won't add it regardless).  Adding
+:: that flag here would crash windeployqt with "Unknown option", which
+:: silently dropped ALL Qt DLLs from the zip in pre-fix builds because
+:: the previous invocation swallowed stderr via `2>nul`.
+"%WINDEPLOYQT%" --release --qmldir "%SRC%\app\gui" --no-translations --no-compiler-runtime --no-opengl-sw --no-system-d3d-compiler "%TEMP_DIR%\VipleStream.exe"
+if errorlevel 1 (
+    echo [ERROR] windeployqt failed with errorlevel %errorlevel% — Qt DLLs not deployed.
+    echo         Re-run after removing one of the --no-* flags above to identify the bad one.
+    exit /b 3
+)
 
 ::
 :: §SLIM 2026-05-21 — prune unused Qt Quick Controls 2 styles.  main.cpp
@@ -264,8 +275,10 @@ set "RIFE_NCNN_DIR=%SRC%\app\rife_models\rife-v4.25-lite"
 if exist "%RIFE_NCNN_DIR%\flownet.param" (
     if not exist "%TEMP_DIR%\rife-v4.25-lite" mkdir "%TEMP_DIR%\rife-v4.25-lite"
     copy /y "%RIFE_NCNN_DIR%\flownet.param" "%TEMP_DIR%\rife-v4.25-lite\" >nul
-    :: copy /y "%RIFE_NCNN_DIR%\flownet.bin"   "%TEMP_DIR%\rife-v4.25-lite\" >nul
-    echo   rife-v4.25-lite/flownet.param  (flownet.bin lazy-fetched, see ensureRifeModelDir)
+    REM To revert to bundling flownet.bin (e.g. for offline-install media),
+    REM uncomment the next line:
+    REM copy /y "%RIFE_NCNN_DIR%\flownet.bin"   "%TEMP_DIR%\rife-v4.25-lite\" >nul
+    echo   rife-v4.25-lite/flownet.param  ^(flownet.bin lazy-fetched, see ensureRifeModelDir^)
 ) else (
     echo   [WARN] RIFE 4.25-lite flownet.param missing at %RIFE_NCNN_DIR% - NCNN/Native-RIFE FRUC backend disabled
 )
@@ -291,7 +304,7 @@ mkdir "%PDB_STAGE%"
 for %%F in ("%SRC%\app\release\VipleStream.pdb" "%SRC%\AntiHooking\release\AntiHooking.pdb") do (
     if exist %%F (
         copy /y %%F "%PDB_STAGE%\" >nul
-        echo   %%~nxF (debug zip)
+        echo   %%~nxF ^(debug zip^)
     ) else (
         echo   [WARN] %%~nxF missing - crash dumps will not symbolicate
     )
@@ -320,8 +333,8 @@ set /a "ZIPSIZE_MB=!ZIPSIZE! / 1048576"
 echo.
 echo =========================================================
 echo   VipleStream Client v%VER%
-echo   %OUT_ZIP% (!ZIPSIZE_MB! MB)
-if exist "%OUT_PDB_ZIP%" echo   %OUT_PDB_ZIP% (!PDBSIZE_MB! MB, debug symbols)
+echo   %OUT_ZIP% ^(!ZIPSIZE_MB! MB^)
+if exist "%OUT_PDB_ZIP%" echo   %OUT_PDB_ZIP% ^(!PDBSIZE_MB! MB, debug symbols^)
 echo =========================================================
 
 endlocal
