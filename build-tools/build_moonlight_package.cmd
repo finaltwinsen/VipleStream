@@ -120,14 +120,45 @@ echo [pkg 3/5] Running windeployqt
 ::     and Qt Quick has no ShaderEffect items in our QML tree.
 "%WINDEPLOYQT%" --release --qmldir "%SRC%\app\gui" --no-translations --no-compiler-runtime --no-opengl-sw --no-virtualkeyboard --no-system-d3d-compiler "%TEMP_DIR%\VipleStream.exe" 2>nul
 
-:: ---- 4. DirectX runtime libs ----
-echo [pkg 4/5] Copying DirectX runtime
-for %%F in (dxcompiler.dll dxil.dll) do (
-    if exist "%WINSDK_D3D%\%%F" (
-        copy /y "%WINSDK_D3D%\%%F" "%TEMP_DIR%\" >nul
-        echo   %%F
-    )
+::
+:: §SLIM 2026-05-21 — prune unused Qt Quick Controls 2 styles.  main.cpp
+:: line 1140 explicitly QQuickStyle::setStyle("Material"); the other
+:: stock styles (Fusion / Imagine / Universal / FluentWinUI3) are never
+:: instantiated.  windeployqt deploys them unconditionally for safety,
+:: so we delete them post-hoc.  Total saving ~3 MB packed.
+::
+:: Basic style is kept because Qt Quick falls back to it when a Controls
+:: type isn't overridden by the active style — removing Basic risks
+:: subtle render glitches.  Windows native style impl is kept for same
+:: reason (some Controls subclasses default to it).
+echo [pkg 3b/5] Pruning unused QtQuick.Controls styles (Material-only)
+for %%S in (Fusion Imagine Universal FluentWinUI3) do (
+    if exist "%TEMP_DIR%\Qt6QuickControls2%%S.dll" del /f "%TEMP_DIR%\Qt6QuickControls2%%S.dll"
+    if exist "%TEMP_DIR%\Qt6QuickControls2%%SStyleImpl.dll" del /f "%TEMP_DIR%\Qt6QuickControls2%%SStyleImpl.dll"
+    if exist "%TEMP_DIR%\qml\QtQuick\Controls\%%S" rmdir /s /q "%TEMP_DIR%\qml\QtQuick\Controls\%%S"
 )
+
+:: ---- 4. DirectX runtime libs ----
+::
+:: §SLIM 2026-05-21 — dxcompiler.dll + dxil.dll removed (~7 MB packed).
+:: These are the DXC (DirectX Shader Compiler) HLSL→DXIL toolchain used
+:: for runtime HLSL 6.0+ compilation under D3D12.  Our codebase only uses
+:: D3D11 with pre-compiled .fxc bytecode (compile_d3d11_shaders.ps1) and
+:: never calls DxcCreateInstance / IDxcCompiler at runtime — grep across
+:: moonlight-qt confirms no consumer (only this build script + docs
+:: references them).  Were originally bundled defensively alongside the
+:: DirectML / ORT-DML path but ORT-DML loads pre-compiled DML graphs via
+:: D3D12 directly and likewise doesn't need DXC.
+::
+:: If a future renderer path actually starts using DXC, re-add by
+:: dropping these lines back in.
+:: echo [pkg 4/5] Copying DirectX runtime
+:: for %%F in (dxcompiler.dll dxil.dll) do (
+::     if exist "%WINSDK_D3D%\%%F" (
+::         copy /y "%WINSDK_D3D%\%%F" "%TEMP_DIR%\" >nul
+::         echo   %%F
+::     )
+:: )
 
 :: VipleStream: ONNX Runtime DirectML DLL. Required at runtime ONLY
 :: when the user picks the DirectML FRUC backend. Ship it unconditionally
