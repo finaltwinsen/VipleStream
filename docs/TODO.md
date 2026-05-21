@@ -845,25 +845,26 @@ Linux artifact 已正式進入 release：`VipleStream-Client-X.Y.Z-linux-x64.App
 
 §K.1 ship 了 systemd `Restart=always` 緩解 client 斷線後 server 死掉的問題（option A），但 libwayland EPIPE 從何處發出未根因。需可重現 streaming 環境（VM 沒 GPU 不能驗 encoder + portal grab combo）。Pi 5 / 真 GPU Linux 機驗到時再修進 `wayland.cpp` / `portalgrab.cpp` 的 EPIPE 路徑。
 
-### §K.linux VAAPI→Vulkan bridge (DMA-BUF interop)（**🟡 active，等獨立 dev session**）
+### §K.linux VAAPI→Vulkan bridge (DMA-BUF interop)（**🟡 K.2 smoke test pending**）
 
 **動機：** Ubuntu 100.117.251.20（RADV / Vega 10）跑 viplestream client 補幀未啟用。Root cause：RADV driver 對 Vega 10 沒實作 `VK_KHR_video_decode_h264/h265/av1` 三個 ext，FFmpeg vulkan hwaccel init fail，cascade 跌到 `VAAPIRenderer`（VAAPI HW decode 走 v4l2 path）— `VAAPIRenderer` 路徑沒接 VkFrucRenderer，補幀完全沒跑。
 
-**設計：** 類 §B Phase B restart 的 D3D11VA bridge 但走 Linux DMA-BUF interop。
+**Pre-req spike (2026-05-21) 結果：**
+- modifier = `DRM_FORMAT_MOD_LINEAR` (0x0) — `VK_IMAGE_TILING_LINEAR` 直接用
+- 全部需要的 Vulkan ext 確認 ✅（VK_KHR_external_memory_fd / VK_EXT_image_drm_format_modifier / VK_KHR_external_semaphore_fd / VK_KHR_bind_memory2）
 
-- `vaExportSurfaceHandle(VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2)` 把 VAAPI 解碼 output surface export 成 `VADRMPRIMESurfaceDescriptor`（DMA-BUF fd + format/modifier/plane info）
-- Vulkan 端 `VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT` import 那個 fd 變 `VkImage`
-- 餵給 VkFrucRenderer 既有的 FRUC chain + present path
-- VAAPI/Vulkan sync 用 implicit fence (DMA-BUF reservation) 或 explicit `VkSemaphore` from `VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT`
+**v1.4.180 K.1+K.2 ship（2026-05-21）：**
+- `vaapi_vk_bridge.{h,cpp}` — `importFrame(dmaFd, dmaSize, modifier)` → LINEAR NV12 VkImage
+- `VkFrucRenderer::CompositeMode::VAAPI_VK` — getPreferredPixelFormat / isPixelFormatSupported / prepareDecoderContext / renderFrameVAAPIImport (K.2 passthrough)
+- `ffmpeg.cpp` cascade — VAAPI pass==0 → VkFrucRenderer(VAAPI_VK)；pass==1 仍 VAAPIRenderer fallback
+- WSL Linux build PASS（g++ Ubuntu noble）
 
-**工程量估計：** ~250 LOC 新 file（`vaapi_vk_bridge.{h,cpp}` 雛形 + cascade 接入 vkfruc + ffmpeg-renderer wire），跟 §B Phase B restart 同等級。
+**K.2 smoke test（待 user AppImage 部署到 Tailscale）：**
+```
+stream H.264 / HEVC → 看 log：[VIPLE-VAAPI-VK] frame#X import OK
+```
 
-**Pre-req：**
-- 確認 RADV / Vega 10 export 出來的 DMA-BUF format/modifier 是否被 Vulkan 端接受（DRM format ↔ VkFormat 映射 + linear/tiling/AFBC modifier 處理）
-- 確認 VAAPI surface 在 export 期間生命週期管理（DMA-BUF dup 後可關 VA surface 嗎？）
-- Tailscale 上 Ubuntu Vega 10 機器有了，可以做 spike
-
-**獨立 session 做** — 跟現有 client codebase 改動正交，避免跟 §B Phase B restart D3D11 bridge 互相干擾 debug。
+**K.3（接 FRUC chain）** — 依賴 §B Phase B B9 完成（AMD 780M Windows side）。
 
 ### §K.2 Raspberry Pi 5 client（aarch64，等 §K.1 通後）
 
