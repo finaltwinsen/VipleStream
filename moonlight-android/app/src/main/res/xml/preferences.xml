@@ -338,6 +338,20 @@
             android:summary="@string/summary_packet_size"
             android:dialogMessage="@string/summary_packet_size"
             android:text="@string/suffix_packet_size" />
+        <!-- VipleStream §Q MP-QUIC: multipath transport toggle + scheduler -->
+        <CheckBoxPreference
+            android:key="checkbox_enable_mpquic"
+            android:title="@string/title_enable_mpquic"
+            android:summary="@string/summary_enable_mpquic"
+            android:defaultValue="false" />
+        <ListPreference
+            android:key="list_mpquic_scheduler"
+            android:title="@string/title_mpquic_scheduler"
+            android:summary="@string/summary_mpquic_scheduler"
+            android:entries="@array/mpquic_scheduler_names"
+            android:entryValues="@array/mpquic_scheduler_values"
+            android:defaultValue="0"
+            android:dependency="checkbox_enable_mpquic" />
         <CheckBoxPreference
             android:key="checkbox_enable_perf_overlay"
             android:title="@string/title_enable_perf_overlay"

@@ -246,8 +246,16 @@ private:
     // fallback caller path keeps using m_GraphicsQueue for compute.  Phase
     // 2A only stands up the resources; Phase 2B+ wire FRUC dispatches
     // through this queue.  Per-slot cmd buffer + timeline sem live with
-    // the rest of the slot ring resources further down (after
-    // kFrucFramesInFlight is declared).
+    // the rest of the slot ring resources further down.
+    //
+    // §K.linux K.3 build fix: hoisted kFrucFramesInFlight here so that the
+    // m_VAAPISlotImport[kFrucFramesInFlight] declaration at ~L441 (gated by
+    // HAVE_LIBVA && !Q_OS_WIN32) sees the constant. Non-function class
+    // members can't forward-reference later static constexpr members.
+    // Original declaration further down is removed; constant lives only
+    // here now.
+    static constexpr uint32_t kFrucFramesInFlight = 2;
+
     uint32_t   m_ComputeQueueFamily = UINT32_MAX;
     VkQueue    m_ComputeQueue       = VK_NULL_HANDLE;
     // §J.3.e.2.i.11 (v1.4.66) — cross-hardware FRUC auto-tier 偵測結果。
@@ -432,7 +440,11 @@ private:
     bool initializeCompositeVAAPI();
     void teardownCompositeVAAPI();
     void renderFrameVAAPIImport(AVFrame* frame);
-    // §K.3 — per-slot imported VkImage cache (array declared after kFrucFramesInFlight).
+    // §K.3 — per-slot imported VkImage cache。在下次同 slot fence wait 後釋放，
+    // 確保 GPU 完成 CopyImageToBuffer 後才 vkDestroyImage。
+    // (Actual array m_VAAPISlotImport[kFrucFramesInFlight] is declared
+    //  further down with the rest of the per-slot ring resources, after
+    //  kFrucFramesInFlight is in scope at the original location.)
     struct VAAPISlotImport {
         VkImage        image  = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -819,7 +831,8 @@ private:
     // (Path D: signal sem mid-chain via two-submit pattern) deferred until
     // render-pass refactor lets fragment shader sample our RGB buffer
     // instead of vkf->img[0] directly.
-    static constexpr uint32_t kFrucFramesInFlight = 2;
+    // (kFrucFramesInFlight declaration hoisted to ~L251 to satisfy
+    //  forward-reference rules — see comment there.)
 
     // §J.3.e.2.i.22 (v1.4.84) — 動態 TRIPLE/DUAL 降階狀態.
     // 偵測 chain mean > 5ms 連續 30 幀 → 自動降 DUAL (省 1 個 warp dispatch +

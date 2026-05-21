@@ -534,6 +534,16 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         err |= addAttributeString(&optionHead, "x-nv-video[0].encoderCscMode", payloadStr);
     }
 
+    // VipleStream: advertise MP-QUIC capability in SDP if enabled
+#ifdef VIPLE_MPQUIC
+    if (IS_SUNSHINE() && StreamConfig.useQuicTransport) {
+        err |= addAttributeString(&optionHead, "x-viple-mpquic", "1");
+
+        snprintf(payloadStr, sizeof(payloadStr), "%d", StreamConfig.quicPort);
+        err |= addAttributeString(&optionHead, "x-viple-mpquic-port", payloadStr);
+    }
+#endif
+
     if (err == 0) {
         return optionHead;
     }

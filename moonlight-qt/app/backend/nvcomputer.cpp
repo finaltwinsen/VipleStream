@@ -296,6 +296,10 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     this->vipleStreamProtocol = NvHTTP::getXmlString(serverInfo, "VipleStreamProtocol");
     this->isVipleStreamPeer = !this->vipleStreamProtocol.isEmpty();
 
+    // VipleStream MP-QUIC capability
+    this->vipleStreamMPQUIC = NvHTTP::getXmlString(serverInfo, "VipleStreamMPQUIC");
+    this->isMpQuicCapable = !this->vipleStreamMPQUIC.isEmpty();
+
     // Real Nvidia host software (GeForce Experience and RTX Experience) both use the 'Mjolnir'
     // codename in the state field and no version of Sunshine does. We can use this to bypass
     // some assumptions about Nvidia hardware that don't apply to Sunshine hosts.

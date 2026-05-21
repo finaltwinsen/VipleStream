@@ -1976,6 +1976,65 @@ Flickable {
         }
 
         GroupBox {
+            id: mpquicSettingsGroupBox
+            width: (parent.width - (parent.leftPadding + parent.rightPadding))
+            padding: 12
+            title: "<font color=\"#D4FF3A\">§ 08 · </font><font color=\"#F2F5E1\">" + qsTr("Network (MP-QUIC)") + "</font>"
+            font.pointSize: 12
+
+            Column {
+                anchors.fill: parent
+                spacing: 5
+
+                CheckBox {
+                    id: enableMpQuicCheck
+                    width: parent.width
+                    text: qsTr("Enable MP-QUIC multipath transport")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.enableMpQuic
+                    onCheckedChanged: {
+                        StreamingPreferences.enableMpQuic = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Uses QUIC multipath (RFC 9443) for streaming. Enables WiFi + cellular failover and dual-NIC bandwidth aggregation. Requires server support.")
+                }
+
+                Label {
+                    width: parent.width
+                    text: qsTr("Path scheduler")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                    visible: enableMpQuicCheck.checked
+                }
+
+                AutoResizingComboBox {
+                    visible: enableMpQuicCheck.checked
+                    Component.onCompleted: {
+                        currentIndex = StreamingPreferences.mpQuicScheduler
+                    }
+                    model: [
+                        qsTr("Auto (per stream type)"),
+                        qsTr("Lowest latency"),
+                        qsTr("Bandwidth aggregation"),
+                        qsTr("Redundant (all paths)"),
+                        qsTr("Earliest completion")
+                    ]
+                    onActivated: {
+                        StreamingPreferences.mpQuicScheduler = currentIndex
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Auto: video=ECF, audio=redundant, control=min-RTT. Aggregation: round-robin across all NICs for maximum bandwidth.")
+                }
+            }
+        }
+
+        GroupBox {
             id: advancedSettingsGroupBox
             width: (parent.width - (parent.leftPadding + parent.rightPadding))
             padding: 12

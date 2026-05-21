@@ -129,6 +129,10 @@ public:
     // unaffected (we still happily talk to vanilla hosts).
     bool isVipleStreamPeer = false;
     QString vipleStreamProtocol;  // version string from the marker
+
+    // VipleStream MP-QUIC multipath capability
+    bool isMpQuicCapable = false;
+    QString vipleStreamMPQUIC;
     // Remember to update isEqualSerialized() when adding fields here!
 
     // Synchronization

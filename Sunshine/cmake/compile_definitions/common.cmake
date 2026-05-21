@@ -59,6 +59,30 @@ include_directories(BEFORE SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nv-codec-head
 file(GLOB NVENC_SOURCES CONFIGURE_DEPENDS "src/nvenc/*.cpp" "src/nvenc/*.h")
 list(APPEND PLATFORM_TARGET_FILES ${NVENC_SOURCES})
 
+# VipleStream: MP-QUIC multipath transport (opt-in)
+option(VIPLE_MPQUIC "Enable MP-QUIC multipath transport" OFF)
+if(VIPLE_MPQUIC)
+    add_compile_definitions(VIPLE_MPQUIC=1)
+
+    # picoquic submodule
+    if(EXISTS "${CMAKE_SOURCE_DIR}/third-party/picoquic/CMakeLists.txt")
+        set(PICOQUIC_FETCH_PTLS OFF CACHE BOOL "" FORCE)
+        add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/picoquic" EXCLUDE_FROM_ALL)
+        include_directories(SYSTEM
+            "${CMAKE_SOURCE_DIR}/third-party/picoquic/picoquic"
+            "${CMAKE_SOURCE_DIR}/third-party/picoquic/picoquicfirst")
+        list(APPEND PLATFORM_LIBRARIES picoquic-core)
+    else()
+        message(WARNING "VIPLE_MPQUIC=ON but third-party/picoquic not found. "
+                        "Run: git submodule add https://github.com/private-octopus/picoquic.git "
+                        "third-party/picoquic && git submodule update --init --recursive")
+    endif()
+
+    list(APPEND PLATFORM_TARGET_FILES
+        "${CMAKE_SOURCE_DIR}/src/quic_server.h"
+        "${CMAKE_SOURCE_DIR}/src/quic_server.cpp")
+endif()
+
 set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Input.h"
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Rtsp.h"

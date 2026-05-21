@@ -848,6 +848,12 @@ namespace nvhttp {
     // the VipleStream-only features.
     tree.put("root.VipleStreamProtocol", "1");
 
+    // VipleStream MP-QUIC capability: advertise if enabled in config.
+    // Vanilla Moonlight clients ignore unknown XML elements.
+    if (config::stream.mpquic_enabled) {
+      tree.put("root.VipleStreamMPQUIC", "1");
+    }
+
     tree.put("root.appversion", VERSION);
     tree.put("root.GfeVersion", GFE_VERSION);
     tree.put("root.uniqueid", http::unique_id);

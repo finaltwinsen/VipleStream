@@ -1,5 +1,10 @@
 #include "Limelight-internal.h"
 
+#ifdef VIPLE_MPQUIC
+#include "QuicTransport.h"
+#include "PlatformNetIf.h"
+#endif
+
 static int stage = STAGE_NONE;
 static ConnListenerConnectionTerminated originalTerminationCallback;
 static bool alreadyTerminated;
@@ -133,7 +138,9 @@ void LiStopConnection(void) {
         Limelog("done\n");
     }
     if (stage == STAGE_RTSP_HANDSHAKE) {
-        // Nothing to do
+#ifdef VIPLE_MPQUIC
+        quicTransportCleanup();
+#endif
         stage--;
     }
     if (stage == STAGE_AUDIO_STREAM_INIT) {
@@ -494,6 +501,61 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_RTSP_HANDSHAKE);
     ListenerCallbacks.stageComplete(STAGE_RTSP_HANDSHAKE);
     Limelog("done\n");
+
+#ifdef VIPLE_MPQUIC
+    // Initialize QUIC transport after RTSP handshake (which negotiates the QUIC port)
+    if (StreamConfig.useQuicTransport) {
+        Limelog("[VIPLE-MPQUIC] Initializing QUIC transport...\n");
+        if (quicTransportInit() == 0) {
+            quicSetCongestionAlgo(StreamConfig.quicCongestion);
+            QUIC_CONNECT_PARAMS qparams;
+            memset(&qparams, 0, sizeof(qparams));
+            memcpy(&qparams.remoteAddr, &RemoteAddr, AddrLen);
+            qparams.remoteAddrLen = AddrLen;
+            qparams.sni = RemoteAddrString;
+            qparams.quicPort = (unsigned short)StreamConfig.quicPort;
+
+            if (quicConnect(&qparams) == 0) {
+                // §Q-REVIEW-P2: This adds subflows immediately after
+                // quicConnect, but the TLS handshake hasn't finished yet
+                // — picoquic_probe_new_path on a non-ready path can fail
+                // silently or stash a probe that fires after handshake.
+                // Once we move to a real picoquic build, gate this block
+                // on picoquic_callback_ready (or a synchronous wait with
+                // timeout) so probes only fire on a ready connection.
+                //
+                // Enumerate local interfaces and add subflows.
+                // Only add subflows whose address family matches the server
+                // since picoquic path probes require matching families.
+                int serverFamily = RemoteAddr.ss_family;
+                LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
+                int ifCount = lcEnumNetInterfaces(interfaces, LC_NETIF_MAX_COUNT);
+                int added = 0;
+                for (int i = 0; i < ifCount; i++) {
+                    if (!interfaces[i].up)
+                        continue;
+                    if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK)
+                        continue;
+                    if (interfaces[i].family != serverFamily)
+                        continue;
+                    if (quicAddSubflow(interfaces[i].index,
+                                       &interfaces[i].addr,
+                                       interfaces[i].addrLen) >= 0) {
+                        added++;
+                    }
+                }
+                Limelog("[VIPLE-MPQUIC] QUIC connected with %d subflow(s) (family=%s)\n",
+                        added, serverFamily == AF_INET6 ? "IPv6" : "IPv4");
+            } else {
+                Limelog("[VIPLE-MPQUIC] QUIC connect failed, falling back to UDP\n");
+                StreamConfig.useQuicTransport = 0;
+            }
+        } else {
+            Limelog("[VIPLE-MPQUIC] QUIC init failed, falling back to UDP\n");
+            StreamConfig.useQuicTransport = 0;
+        }
+    }
+#endif
 
     Limelog("Initializing control stream...");
     ListenerCallbacks.stageStarting(STAGE_CONTROL_STREAM_INIT);

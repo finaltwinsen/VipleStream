@@ -577,6 +577,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 .setColorSpace(decoderRenderer.getPreferredColorSpace())
                 .setColorRange(decoderRenderer.getPreferredColorRange())
                 .setPersistGamepadsAfterDisconnect(!prefConfig.multiController)
+                .setMpQuic(prefConfig.enableMpQuic, prefConfig.mpQuicScheduler)
                 .build();
 
         // Initialize the connection

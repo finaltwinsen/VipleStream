@@ -473,7 +473,15 @@ libplacebo {
     # the Windows-shipped copy onto unix INCLUDEPATH; wsl_sync_to_ext4.sh
     # rsyncs the headers across.  stb_image_write is a single-header library,
     # zero portability concern.
-    unix:!macx: INCLUDEPATH += $$PWD/../libs/windows/ncnn/build/native/include
+    # On Linux do NOT add libs/windows/ncnn to INCLUDEPATH: the Windows-shipped
+    # headers use __declspec(dllimport) (broken under gcc). Use the system
+    # libstb-dev + system ncnn instead. Build prereq for vkfruc §B-DUMP's
+    # <ncnn/stb_image_write.h> on Linux:
+    #   sudo apt-get install libstb-dev
+    #   sudo ln -s /usr/include/stb /usr/include/ncnn   # safe — system ncnn
+    #                                                     lives in /usr/local
+    # On Windows the libs/windows/include path (already added higher up) gives
+    # vkfruc the bundled <ncnn/stb_image_write.h> via the ncnn nuget.
 }
 config_EGL {
     message(EGL renderer selected)
@@ -632,6 +640,16 @@ else:unix: LIBS += -L$$OUT_PWD/../moonlight-common-c/ -lmoonlight-common-c
 
 INCLUDEPATH += $$PWD/../moonlight-common-c/moonlight-common-c/src
 DEPENDPATH += $$PWD/../moonlight-common-c/moonlight-common-c/src
+
+# VipleStream §Q: link picoquic + picotls when MP-QUIC is enabled.
+# Build via: cd Sunshine/third-party/picoquic && cmake -B build && ninja -C build
+# Order matters: picoquic-core first, then picotls-* (picoquic depends on picotls).
+contains(DEFINES, VIPLE_MPQUIC) {
+    PICOQUIC_BUILD = $$PWD/../../Sunshine/third-party/picoquic/build
+    LIBS += -L$$PICOQUIC_BUILD -lpicoquic-core
+    LIBS += -L$$PICOQUIC_BUILD/_deps/picotls-build -lpicotls-openssl -lpicotls-core -lpicotls-fusion -lpicotls-minicrypto
+    unix:!macx: LIBS += -lssl -lcrypto
+}
 
 win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../qmdnsengine/release/ -lqmdnsengine
 else:win32:CONFIG(debug, debug|release): LIBS += -L$$OUT_PWD/../qmdnsengine/debug/ -lqmdnsengine

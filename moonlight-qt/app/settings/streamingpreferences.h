@@ -285,6 +285,9 @@ public:
     Q_PROPERTY(bool absoluteMouseMode MEMBER absoluteMouseMode NOTIFY absoluteMouseModeChanged)
     Q_PROPERTY(bool absoluteTouchMode MEMBER absoluteTouchMode NOTIFY absoluteTouchModeChanged)
     Q_PROPERTY(bool framePacing MEMBER framePacing NOTIFY framePacingChanged)
+    // §Q MP-QUIC multipath transport
+    Q_PROPERTY(bool enableMpQuic MEMBER enableMpQuic NOTIFY enableMpQuicChanged)
+    Q_PROPERTY(int mpQuicScheduler MEMBER mpQuicScheduler NOTIFY mpQuicSchedulerChanged)
     Q_PROPERTY(bool connectionWarnings MEMBER connectionWarnings NOTIFY connectionWarningsChanged)
     Q_PROPERTY(bool configurationWarnings MEMBER configurationWarnings NOTIFY configurationWarningsChanged)
     Q_PROPERTY(bool richPresence MEMBER richPresence NOTIFY richPresenceChanged)
@@ -353,6 +356,8 @@ public:
     bool richPresence;
     bool gamepadMouse;
     bool detectNetworkBlocking;
+    bool enableMpQuic;
+    int mpQuicScheduler;
     bool showPerformanceOverlay;
     bool swapMouseButtons;
     bool muteOnFocusLoss;
@@ -420,6 +425,8 @@ signals:
     void richPresenceChanged();
     void gamepadMouseChanged();
     void detectNetworkBlockingChanged();
+    void enableMpQuicChanged();
+    void mpQuicSchedulerChanged();
     void showPerformanceOverlayChanged();
     void mouseButtonsChanged();
     void muteOnFocusLossChanged();

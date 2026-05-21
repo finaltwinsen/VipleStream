@@ -182,6 +182,13 @@ namespace config {
     //   "udp_tunnel" — always use relay UDP (useful for known-broken P2P paths)
     //   "ws_tunnel"  — always use relay WS (fallback when both direct and UDP fail)
     std::string udp_tunnel_mode;
+
+    // VipleStream: MP-QUIC multipath transport
+    bool mpquic_enabled = false;
+    int mpquic_port = 48010;
+    int mpquic_scheduler = 0;     // 0=auto, 1=min_rtt, 2=aggregate, 3=redundant, 4=ecf
+    int mpquic_fec_floor = 1;     // minimum FEC % when QUIC is active (LAN mode)
+    int mpquic_congestion = 1;    // 0=newreno, 1=bbr (default, bandwidth-based), 2=cubic
   };
 
   struct nvhttp_t {

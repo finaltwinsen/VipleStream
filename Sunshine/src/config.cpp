@@ -1244,6 +1244,13 @@ namespace config {
     // VipleStream: UDP tunnel preference (auto|direct|udp_tunnel|ws_tunnel)
     string_f(vars, "udp_tunnel_mode", stream.udp_tunnel_mode);
 
+    // VipleStream: MP-QUIC multipath transport
+    bool_f(vars, "mpquic_enabled", stream.mpquic_enabled);
+    int_between_f(vars, "mpquic_port", stream.mpquic_port, {1024, 65535});
+    int_between_f(vars, "mpquic_scheduler", stream.mpquic_scheduler, {0, 4});
+    int_between_f(vars, "mpquic_fec_floor", stream.mpquic_fec_floor, {0, 100});
+    int_between_f(vars, "mpquic_congestion", stream.mpquic_congestion, {0, 2});
+
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 
     // This config option will only be used by the UI

@@ -99,3 +99,19 @@ CONFIG(debug, debug|release) {
 *-g++|*-clang* {
     QMAKE_CFLAGS_WARN_ON += -Wno-unused-parameter
 }
+
+# VipleStream: MP-QUIC multipath transport (opt-in)
+# Enable with: qmake DEFINES+=VIPLE_MPQUIC
+contains(DEFINES, VIPLE_MPQUIC) {
+    SOURCES += \
+        $$COMMON_C_DIR/src/PlatformNetIf.c \
+        $$COMMON_C_DIR/src/QuicTransport.c
+    HEADERS += \
+        $$COMMON_C_DIR/src/PlatformNetIf.h \
+        $$COMMON_C_DIR/src/QuicTransport.h
+    # picoquic submodule lives under Sunshine/third-party. Relative path
+    # from moonlight-qt/moonlight-common-c/ up two levels to repo root,
+    # then down into Sunshine.
+    INCLUDEPATH += $$PWD/../../Sunshine/third-party/picoquic/picoquic
+    win32:LIBS += -liphlpapi
+}

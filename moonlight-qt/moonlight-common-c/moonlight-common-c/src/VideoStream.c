@@ -1,5 +1,9 @@
 #include "Limelight-internal.h"
 
+#ifdef VIPLE_MPQUIC
+#include "QuicTransport.h"
+#endif
+
 #define FIRST_FRAME_MAX 1500
 #define FIRST_FRAME_TIMEOUT_SEC 10
 
@@ -13,6 +17,53 @@ static SOCKET firstFrameSocket = INVALID_SOCKET;
 static PPLT_CRYPTO_CONTEXT decryptionCtx;
 
 static PLT_THREAD udpPingThread;
+
+#ifdef VIPLE_MPQUIC
+// QUIC receive ring buffer for video datagrams.
+// The QUIC I/O thread pushes via quicVideoRecvCallback();
+// VideoReceiveThreadProc polls this instead of the UDP socket.
+#define QUIC_VIDEO_RING_SIZE 4096
+#define QUIC_VIDEO_MAX_PKT   1500
+
+static struct {
+    unsigned char data[QUIC_VIDEO_RING_SIZE][QUIC_VIDEO_MAX_PKT];
+    int           len[QUIC_VIDEO_RING_SIZE];
+    volatile int  head;
+    volatile int  tail;
+} quicVideoRing;
+
+static void quicVideoRecvCallback(unsigned char flowType,
+                                   const unsigned char* data, int dataLen,
+                                   void* context) {
+    (void)context;
+    if (flowType != QUIC_FLOW_VIDEO)
+        return;
+    if (dataLen > QUIC_VIDEO_MAX_PKT)
+        return;
+
+    int next = (quicVideoRing.head + 1) % QUIC_VIDEO_RING_SIZE;
+    if (next == quicVideoRing.tail)
+        return; // ring full, drop
+
+    memcpy(quicVideoRing.data[quicVideoRing.head], data, dataLen);
+    quicVideoRing.len[quicVideoRing.head] = dataLen;
+    quicVideoRing.head = next;
+}
+
+static int quicVideoRecv(char* buf, int bufLen) {
+    if (quicVideoRing.tail == quicVideoRing.head)
+        return 0; // empty
+
+    int len = quicVideoRing.len[quicVideoRing.tail];
+    if (len > bufLen)
+        len = bufLen;
+    memcpy(buf, quicVideoRing.data[quicVideoRing.tail], len);
+    quicVideoRing.tail = (quicVideoRing.tail + 1) % QUIC_VIDEO_RING_SIZE;
+    return len;
+}
+
+static bool useQuicVideo = false;
+#endif
 static PLT_THREAD receiveThread;
 static PLT_THREAD decoderThread;
 
@@ -142,10 +193,21 @@ static void VideoReceiveThreadProc(void* context) {
             }
         }
 
-        err = recvUdpSocket(rtpSocket,
-                            encrypted ? encryptedBuffer : buffer,
-                            receiveSize,
-                            useSelect);
+#ifdef VIPLE_MPQUIC
+        if (useQuicVideo) {
+            err = quicVideoRecv(encrypted ? encryptedBuffer : buffer, receiveSize);
+            if (err == 0) {
+                PltSleepMs(1);
+            }
+        }
+        else
+#endif
+        {
+            err = recvUdpSocket(rtpSocket,
+                                encrypted ? encryptedBuffer : buffer,
+                                receiveSize,
+                                useSelect);
+        }
         if (err < 0) {
             Limelog("Video Receive: recvUdpSocket() failed: %d\n", (int)LastSocketError());
             ListenerCallbacks.connectionTerminated(LastSocketFail());
@@ -335,6 +397,18 @@ int startVideoStream(void* rendererContext, int drFlags) {
     if (err != 0) {
         return err;
     }
+
+#ifdef VIPLE_MPQUIC
+    useQuicVideo = (StreamConfig.useQuicTransport && quicIsConnected());
+    if (useQuicVideo) {
+        // Reset ring buffer and register callback
+        quicVideoRing.head = 0;
+        quicVideoRing.tail = 0;
+        quicSetRecvCallback(quicVideoRecvCallback, NULL);
+        Limelog("[VIPLE-MPQUIC] Video using QUIC datagram transport\n");
+        // Still bind UDP socket as fallback (needed for ping)
+    }
+#endif
 
     rtpSocket = bindUdpSocket(RemoteAddr.ss_family, &LocalAddr, AddrLen,
                               RTP_RECV_PACKETS_BUFFERED * (StreamConfig.packetSize + MAX_RTP_HEADER_SIZE),
