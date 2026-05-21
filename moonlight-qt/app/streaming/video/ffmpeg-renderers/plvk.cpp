@@ -2460,17 +2460,14 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #define QUALITY_LEVEL 1
 #define ENABLE_ADAPTIVE_BLEND 0
 #define ENABLE_CHEAP_ADAPTIVE 1
-// §β.11 (2026-05-10) — TRIPLE+ME 動態邊緣馬賽克 hypothesis fix.  原 2.0
-// (= 1.4 pixel L2 motion-vector diff) 對 8×8 block-match 邊緣太敏感：
-// 物體 vs 背景的相對速度通常 5-10 pixel，幾乎所有邊緣 block 都會觸發
-// boundary detect 切到 nearest pick mode，造成 motion vector field 上
-// 8×8 step-function → warp 後邊緣呈方塊狀馬賽克.  提高到 8.0
-// (= 2.83 pixel L2 diff) 過濾掉小 noise 邊緣維持 bilinear smooth，但
-// 大 motion boundary (>2.83 px diff) 仍會切 pick 保留物體 edge 銳利度.
-// 8.0 是 hypothesis baseline：太低 (< 4) 留馬賽克，太高 (> 16) 失 edge.
-// 待實測 + 主觀體感調整；下個 increment 可能改成 push constant runtime
-// tunable.
-#define EDGE_AWARE_MV_THRESHOLD 8.0
+// §β.11 (2026-05-10) — TRIPLE+ME 動態邊緣馬賽克 hypothesis fix.
+// 閾值含義（L2 squared diff 單位）：
+//   太低 (< 4, = <2px L2)：幾乎所有邊緣 block 觸發 pick → 方塊馬賽克
+//   基準 8.0 (= 2.83px L2)：過濾 noise，大邊界仍 pick 保 edge 銳利度
+//   太高 (> 16, = >4px L2)：pick 幾乎不觸發 → 邊緣 bilinear 糊
+// §β.11.b (v1.4.193) — 改為 push constant runtime tunable：從 C++ 傳入
+// p.edgeMvThreshold，預設 8.0f；日後 UI slider 直接改，不須重新編譯。
+// 同一個閾值同步套用到 sampleMV pick 切換 + warp crossfade smoothstep。
 
 layout(binding = 0) readonly  buffer PrevRGB { float data[]; } prevFrame;
 layout(binding = 1) readonly  buffer CurrRGB { float data[]; } currFrame;
@@ -2514,8 +2511,12 @@ layout(push_constant) uniform Params {
     // 啟用 occlusion-mask fade.
     uint  hasBackwardMv;
     // §J.3.e.2.i.19 (v1.4.83) Phase B — 1 = fine MV + flag buffer 真實有效,
-    // sampleMV 在 flagged block 走 4×4 fine 路徑. push const 40 byte total.
+    // sampleMV 在 flagged block 走 4×4 fine 路徑.
     uint  hasFineMv;
+    // §β.11.b — edge-aware MV 閾值（L2 squared diff 單位）。
+    // 預設 8.0（= 2.83px L2）；套用至 sampleMV pick 切換 + warp crossfade。
+    // push const 44 byte total（前版 40 byte）。
+    float edgeMvThreshold;
 } p;
 
 vec3 fetchPrevRGB(int x, int y) {
@@ -2663,7 +2664,7 @@ vec2 sampleMV(vec2 pixelPos) {
     vec2 pick = (frac_v.x < 0.5)
         ? ((frac_v.y < 0.5) ? v00 : v01)
         : ((frac_v.y < 0.5) ? v10 : v11);
-    float threshSq = EDGE_AWARE_MV_THRESHOLD * EDGE_AWARE_MV_THRESHOLD;
+    float threshSq = p.edgeMvThreshold * p.edgeMvThreshold;
     float isBoundary = step(threshSq, maxDiffSq)
                      * step(avgMagSq * 0.25, maxDiffSq);
     float t = isBoundary * smoothstep(threshSq, threshSq * 2.0, maxDiffSq);
@@ -2870,7 +2871,9 @@ void main() {
 
     vec3 prevAtPP    = fetchPrevRGB(int(px), int(py));
     vec3 crossfadeNoMv = mix(prevAtPP, sameCurr, tF);
-    float edgeFade   = 0.85 * smoothstep(8.0, 64.0, mvGradSqMax);
+    float edgeFade   = 0.85 * smoothstep(p.edgeMvThreshold,
+                                         p.edgeMvThreshold * p.edgeMvThreshold,
+                                         mvGradSqMax);
     result = mix(result, crossfadeNoMv, edgeFade);
 
     // §J.3.e.2.i.15 (v1.4.80) — Temporal coherence fade.

@@ -8357,7 +8357,8 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     }
     // §J.3.e.2.i.19 (v1.4.83) Phase B — Warp bumped 6→8 bindings (binding 6 =
     // fineMV, binding 7 = flag buf). Push const 36→40 byte (added uint hasFineMv).
-    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 8, 40,
+    // §β.11.b — Push const 40→44 byte (added float edgeMvThreshold).
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 8, 44,
                         m_FrucWarpShaderMod, m_FrucWarpDsl, m_FrucWarpPipeLay, m_FrucWarpPipeline)) {
         m_FrucDisabled = true; return false;
     }
@@ -11237,6 +11238,14 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         // level 1: temporal=1, backward=0, fine=0
         // level 2: temporal=1, backward=1, fine=0
         // level 3+: 全 1 (預設)
+        // §β.11.b — EDGE_AWARE_MV_THRESHOLD 改為 push constant runtime tunable。
+        // 預設 8.0f（§β.11 hypothesis baseline）。
+        // Override：VIPLE_VKFRUC_EDGE_MV_THRESHOLD=N（整數 N > 0）。
+        // UI slider 等日後 Settings 擴充時再加；env var 先供除錯/調參用。
+        static const float edgeMvThreshold = []() -> float {
+            int env = qEnvironmentVariableIntValue("VIPLE_VKFRUC_EDGE_MV_THRESHOLD");
+            return (env > 0) ? (float)env : 8.0f;
+        }();
         struct {
             uint32_t frameWidth, frameHeight, mvBlockSize, mvWidth, mvHeight;
             float    blendFactor;
@@ -11244,12 +11253,14 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             uint32_t hasTemporalMv;
             uint32_t hasBackwardMv;
             uint32_t hasFineMv;
+            float    edgeMvThreshold;
         } pcWarp = {
             (uint32_t)width, (uint32_t)height, (uint32_t)BLOCK_SIZE,
             (uint32_t)mvW, (uint32_t)mvH, blendFactor, tFrac,
             (uint32_t)(levelHasTemporal ? 1u : 0u),
             (uint32_t)(levelHasBackward ? 1u : 0u),
-            (uint32_t)(levelHasFine4x4  ? 1u : 0u)
+            (uint32_t)(levelHasFine4x4  ? 1u : 0u),
+            edgeMvThreshold
         };
         pfnCmdPushConst(cmd, m_FrucWarpPipeLay, VK_SHADER_STAGE_COMPUTE_BIT,
                         0, sizeof(pcWarp), &pcWarp);
