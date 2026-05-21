@@ -2875,11 +2875,39 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                     m_FpsChangeCooldownSec--;
                 }
 
+                // v1.5.6 §R2-ι — 升 ratio 必須 gate by client struggling 訊號.
+                // 之前 controller 只看 recv/display 比例 → 誤把 server 主動降
+                // fps [Sunshine static-frame mode: 畫面不動時自動把實際送出
+                // fps 壓低省 encode + bandwidth] 當成 client 跟不上，亂升 3x.
+                // 真正的 struggling signal 必須是 client GPU/CPU 真的跟不上.
+                //
+                // §R2-κ (v1.5.6) — 三訊號 OR, 避免單一訊號在某 decoder path 失準:
+                //   [H] g_VkFrucChainMs > budget*0.70 — VkFruc chain GPU 跑不動
+                //       [VkFruc 自己用 VkQueryPool 量, 在 Vulkan path 最準]
+                //   [F] m_FramesIn - m_FramesOut >= 3 — decoder queue 累積
+                //       [所有 decoder 通用. >=3 in-flight 代表 receive 跟不上 send]
+                //   [legacy] decodeMeanMs > budget*0.60 — 原 d3d11va path 仍適用
+                //       [但 Vulkan path 算出來 <1ms 是 timer 假象, 加 >1ms
+                //        reliability gate 避免誤升]
+                // 降 ratio 不 gate, 因為降 ratio 只在 client 真的跑得起 95%
+                // display 時才觸發, 沒有誤降風險.
+                const double frameBudgetMs = (displayHz > 0)
+                                             ? (1000.0 / (double)displayHz)
+                                             : 8.33;  // assume 120Hz fallback
+                const double chainMsLocal   = g_VkFrucChainMs.load(std::memory_order_relaxed);
+                const int    inFlightFrames = m_FramesIn - m_FramesOut;
+                const bool   decodeTimerReliable = decodeMeanMsLocal > 1.0;
+                const bool   strugglingChain  = (chainMsLocal > frameBudgetMs * 0.70);
+                const bool   strugglingQueue  = (inFlightFrames >= 3);
+                const bool   strugglingDecode = (decodeTimerReliable &&
+                                                 decodeMeanMsLocal > frameBudgetMs * 0.60);
+                const bool   clientStruggling = strugglingChain || strugglingQueue || strugglingDecode;
+
                 int newRatio = curRatio;
                 if (m_FpsChangeCooldownSec == 0) {
-                    if (m_RecvBelow40Seconds >= 3 && curRatio < 3) {
+                    if (m_RecvBelow40Seconds >= 3 && curRatio < 3 && clientStruggling) {
                         newRatio = 3;
-                    } else if (m_RecvBelow70Seconds >= 3 && curRatio < 2) {
+                    } else if (m_RecvBelow70Seconds >= 3 && curRatio < 2 && clientStruggling) {
                         newRatio = 2;
                     } else if (m_RecvAbove80Seconds >= 10 && curRatio > 1) {
                         newRatio = curRatio - 1;
@@ -2909,12 +2937,18 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                                 "[VIPLE-RATIO] PASSIVE switch %dx → %dx "
                                 "(recv_of_display=%.0f%%, below40s=%d below70s=%d "
                                 "above95s=%d, display_Hz=%d, req server_fps=%d, "
-                                "target_fps=%d)",
+                                "target_fps=%d, budget=%.2fms struggling=%d "
+                                "[chain=%.2f queue=%d decode=%.2f reliable=%d])",
                                 curRatio, newRatio, recvPctOfDisplay,
                                 m_RecvBelow40Seconds, m_RecvBelow70Seconds,
                                 m_RecvAbove80Seconds,
                                 displayHz, targetServerFps,
-                                targetServerFps * newRatio);
+                                targetServerFps * newRatio,
+                                frameBudgetMs,
+                                clientStruggling ? 1 : 0,
+                                chainMsLocal, inFlightFrames,
+                                decodeMeanMsLocal,
+                                decodeTimerReliable ? 1 : 0);
                     // Reset counters + arm cooldown.
                     m_RecvAbove80Seconds = m_RecvBelow70Seconds = m_RecvBelow40Seconds = 0;
                     m_FpsChangeCooldownSec = 5;

@@ -1807,4 +1807,10 @@ private:
 // ~10 instructions/frame (ring update + max scan + atomic store) = 可忽略.
 extern std::atomic<double> g_VkFrucDecodeLatencyMs;
 
+// §R2-κ (v1.5.6) — vkfruc chain mean (60-frame), published by hw / sw chain
+// finish callbacks. ffmpeg.cpp PASSIVE controller reads this as the accurate
+// "client GPU struggling" signal in Vulkan decoder path (where decode timer
+// is async / unreliable). 0.0 in warmup or non-VkFruc paths.
+extern std::atomic<double> g_VkFrucChainMs;
+
 #endif // HAVE_LIBPLACEBO_VULKAN

@@ -23,6 +23,15 @@
 // 取 max 做 adaptive frame drop. Initial 0.0 = warmup 期間不 throttle.
 std::atomic<double> g_VkFrucDecodeLatencyMs{0.0};
 
+// §R2-κ (v1.5.6) — vkfruc chain mean publish for ffmpeg.cpp PASSIVE controller's
+// clientStruggling judgment.  ffmpeg.cpp 的 g_VkFrucDecodeLatencyMs 在 Vulkan
+// hwaccel path 下不準 [avcodec_receive_frame 立即返回, GPU 還在背景 decode,
+// 算出來的 latency < 1ms].  chainMs 是 VkFruc 自己用 VkQueryPool TIMESTAMP
+// 量自己 FRUC compute pipeline 的 GPU time, 跟不上 frame budget 就是 client
+// struggling 的直接 + 準確訊號.  60-frame mean, 由 hw / sw chain finish 兩條
+// path 都 publish.  Initial 0.0 = warmup 或 d3d11va path 時 controller 應 ignore.
+std::atomic<double> g_VkFrucChainMs{0.0};
+
 #include <SDL.h>
 #include <SDL_vulkan.h>
 #include <algorithm>
@@ -12795,6 +12804,8 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                     double sumH = 0.0;
                     for (int i = 0; i < kChainRingSize; ++i) sumH += m_HandoffMsRing[i];
                     const double chainBusyMeanMs = sumH / kChainRingSize;
+                    // §R2-κ (v1.5.6) publish for ffmpeg.cpp PASSIVE controller.
+                    g_VkFrucChainMs.store(chainBusyMeanMs, std::memory_order_relaxed);
                     // §J.3.e.2.i.56 — server fps 動態 threshold. budget = 1000/fps,
                     // 72% headroom (Andrew Glassner-ish ratio, 留 28% 給其他 GPU work
                     // + driver overhead). 60fps→12ms, 30fps→24ms, 90fps→8ms, 120fps→6ms.
@@ -14791,6 +14802,8 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
                     double sumHSw = 0.0;
                     for (int i = 0; i < kChainRingSize; ++i) sumHSw += m_HandoffMsRing[i];
                     const double chainBusyMeanMsSw = sumHSw / kChainRingSize;
+                    // §R2-κ (v1.5.6) publish for ffmpeg.cpp PASSIVE controller.
+                    g_VkFrucChainMs.store(chainBusyMeanMsSw, std::memory_order_relaxed);
                     const double frameBudgetMsSw = 1000.0 / (double)m_StreamFps.load(std::memory_order_relaxed);
                     const double chainBusyThreshMsSw = frameBudgetMsSw * 0.72;
                     if (chainBusyMeanMsSw > chainBusyThreshMsSw) {
