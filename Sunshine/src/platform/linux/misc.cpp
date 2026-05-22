@@ -650,8 +650,12 @@ namespace platf {
 
     {
       // If GSO is not supported, use sendmmsg() instead.
-      std::vector<struct mmsghdr> msgs(send_info.block_count);
-      std::vector<struct iovec> iovs(send_info.block_count * (send_info.headers ? 2 : 1));
+      // [VIPLE-PERF] thread_local buffers retain capacity across batches —
+      // send_batch is called once per ~64-packet batch at 30-100 Hz.
+      static thread_local std::vector<struct mmsghdr> msgs;
+      static thread_local std::vector<struct iovec> iovs;
+      msgs.resize(send_info.block_count);
+      iovs.resize(send_info.block_count * (send_info.headers ? 2 : 1));
       int iov_idx = 0;
       for (size_t i = 0; i < send_info.block_count; i++) {
         msgs[i].msg_len = 0;

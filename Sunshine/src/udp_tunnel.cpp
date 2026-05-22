@@ -55,6 +55,32 @@ namespace udp_tunnel {
     std::memcpy(out, mac, HMAC_LEN);
   }
 
+  /**
+   * [VIPLE-PERF] Two-part HMAC-SHA256-128 — computes HMAC over two
+   * non-contiguous buffers without allocating an intermediate copy.
+   * Uses a thread_local HMAC_CTX to avoid per-call ctx allocation.
+   */
+  static void compute_hmac16_2part(
+      const std::array<uint8_t, TOKEN_LEN> &token,
+      const uint8_t *part1, size_t len1,
+      const uint8_t *part2, size_t len2,
+      uint8_t out[HMAC_LEN]) {
+    // Thread-local context reused across calls — avoids per-packet heap alloc.
+    static thread_local HMAC_CTX *s_ctx = HMAC_CTX_new();
+
+    HMAC_Init_ex(s_ctx, token.data(), static_cast<int>(token.size()),
+                 EVP_sha256(), nullptr);
+    HMAC_Update(s_ctx, part1, len1);
+    if (len2 > 0) {
+      HMAC_Update(s_ctx, part2, len2);
+    }
+
+    unsigned char mac[EVP_MAX_MD_SIZE];
+    unsigned int mac_len = 0;
+    HMAC_Final(s_ctx, mac, &mac_len);
+    std::memcpy(out, mac, HMAC_LEN);
+  }
+
   static void write_be16(std::vector<uint8_t> &buf, size_t offset, uint16_t v) {
     buf[offset]     = static_cast<uint8_t>((v >> 8) & 0xFF);
     buf[offset + 1] = static_cast<uint8_t>(v & 0xFF);
@@ -81,16 +107,10 @@ namespace udp_tunnel {
     if (payload_len) {
       std::memcpy(out.data() + HEADER_LEN, payload, payload_len);
     }
-    // Build the HMAC input: 8 header bytes + payload (HMAC slot itself is
-    // excluded, matching the wire spec).
-    std::vector<uint8_t> signed_buf;
-    signed_buf.reserve(8 + payload_len);
-    signed_buf.insert(signed_buf.end(), out.begin(), out.begin() + 8);
-    if (payload_len) {
-      signed_buf.insert(signed_buf.end(), payload, payload + payload_len);
-    }
+    // [VIPLE-PERF] Compute HMAC directly over the two non-contiguous parts
+    // (8-byte header + payload) without allocating an intermediate buffer.
     uint8_t hmac[HMAC_LEN];
-    compute_hmac16(flow.token, signed_buf.data(), signed_buf.size(), hmac);
+    compute_hmac16_2part(flow.token, out.data(), 8, payload, payload_len, hmac);
     std::memcpy(out.data() + 8, hmac, HMAC_LEN);
   }
 
@@ -109,14 +129,9 @@ namespace udp_tunnel {
     const uint8_t *payload  = data + HEADER_LEN;
     const size_t   payload_len = len - HEADER_LEN;
 
-    std::vector<uint8_t> signed_buf;
-    signed_buf.reserve(8 + payload_len);
-    signed_buf.insert(signed_buf.end(), data, data + 8);
-    if (payload_len) {
-      signed_buf.insert(signed_buf.end(), payload, payload + payload_len);
-    }
+    // [VIPLE-PERF] Two-part HMAC avoids per-packet heap allocation.
     uint8_t expected[HMAC_LEN];
-    compute_hmac16(flow.token, signed_buf.data(), signed_buf.size(), expected);
+    compute_hmac16_2part(flow.token, data, 8, payload, payload_len, expected);
     // Constant-time compare to avoid timing leaks on mismatch.
     unsigned diff = 0;
     for (size_t i = 0; i < HMAC_LEN; ++i) {

@@ -212,7 +212,9 @@ namespace tunnel_session {
       return false;
     }
 
-    std::vector<uint8_t> buf;
+    // [VIPLE-PERF] thread_local buffer reuses heap allocation across
+    // packets — send() is called per shard (3000+ times/sec at 120fps).
+    static thread_local std::vector<uint8_t> buf;
     udp_tunnel::encode_packet(_flow, src_port, dst_port,
                               payload, len, buf);
 

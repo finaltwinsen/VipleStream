@@ -230,8 +230,11 @@ namespace relay {
   // Returns true iff the full frame was written to the transport.
   static bool ws_send_frame(Transport &tr, uint8_t opcode,
                             const uint8_t *data, size_t len) {
-    std::vector<uint8_t> frame;
-    frame.reserve(len + 14);
+    // [VIPLE-PERF] thread_local buffer reuses heap allocation across
+    // frames — ws_send_frame is called per tunnel packet at kHz rates.
+    static thread_local std::vector<uint8_t> frame;
+    frame.clear();
+    if (frame.capacity() < len + 14) frame.reserve(len + 14);
     frame.push_back(0x80 | (opcode & 0x0F));  // FIN + opcode
     if (len < 126) {
       frame.push_back(0x80 | (uint8_t)len);
@@ -259,8 +262,22 @@ namespace relay {
     mask[2] = static_cast<uint8_t>(mask_word >> 16);
     mask[3] = static_cast<uint8_t>(mask_word >> 24);
     frame.insert(frame.end(), mask, mask + 4);
-    for (size_t i = 0; i < len; i++) {
-      frame.push_back(data[i] ^ mask[i % 4]);
+    // [VIPLE-PERF] Bulk XOR with direct memory write — avoids per-byte
+    // push_back (size check + capacity guard) across ~1500-byte payloads.
+    {
+      auto hdr_end = frame.size();
+      frame.resize(hdr_end + len);
+      uint8_t *dst = frame.data() + hdr_end;
+      size_t i = 0;
+      for (; i + 4 <= len; i += 4) {
+        dst[i]     = data[i]     ^ mask[0];
+        dst[i + 1] = data[i + 1] ^ mask[1];
+        dst[i + 2] = data[i + 2] ^ mask[2];
+        dst[i + 3] = data[i + 3] ^ mask[3];
+      }
+      for (; i < len; i++) {
+        dst[i] = data[i] ^ mask[i & 3];
+      }
     }
     int sent = tr.send(frame.data(), (int)frame.size());
     bool ok = (sent == (int)frame.size());

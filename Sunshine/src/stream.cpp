@@ -765,10 +765,20 @@ namespace stream {
           shards_p[data_shards + x] = (uint8_t *) &shards[(parity_shard_offset + x) * blocksize];
         }
 
-        // packets = parity_shards + data_shards
-        rs_t rs {reed_solomon_new((int) data_shards, (int) parity_shards)};
+        // [VIPLE-PERF] Cache the Reed-Solomon context across encode() calls.
+        // encode() is invoked 1-4× per frame (once per FEC block); consecutive
+        // blocks nearly always use the same (data_shards, parity_shards) pair.
+        // reed_solomon_encode() only reads the encoding matrix via gemm(), so
+        // reuse across calls is safe.
+        static thread_local rs_t s_rs{nullptr};
+        static thread_local int  s_ds = 0, s_ps = 0;
+        if ((int) data_shards != s_ds || (int) parity_shards != s_ps) {
+          s_rs.reset(reed_solomon_new((int) data_shards, (int) parity_shards));
+          s_ds = (int) data_shards;
+          s_ps = (int) parity_shards;
+        }
 
-        reed_solomon_encode(rs.get(), shards_p.begin(), (int) nr_shards, (int) blocksize);
+        reed_solomon_encode(s_rs.get(), shards_p.begin(), (int) nr_shards, (int) blocksize);
       }
 
       return {
@@ -787,17 +797,18 @@ namespace stream {
 
   /**
    * @brief Combines two buffers and inserts new buffers at each slice boundary of the result.
+   * @param result Output buffer — resized (never shrunk) to fit. Capacity is
+   *               reused across calls, avoiding per-frame heap allocation.
    * @param insert_size The number of bytes to insert.
    * @param slice_size The number of bytes between insertions.
    * @param data1 The first data buffer.
    * @param data2 The second data buffer.
    */
-  std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2) {
+  void concat_and_insert(std::vector<uint8_t> &result, uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2) {
     auto data_size = data1.size() + data2.size();
     auto pad = data_size % slice_size != 0;
     auto elements = data_size / slice_size + (pad ? 1 : 0);
 
-    std::vector<uint8_t> result;
     result.resize(elements * insert_size + data_size);
 
     auto next = std::begin(data1);
@@ -826,8 +837,6 @@ namespace stream {
         next += slice_size;
       }
     }
-
-    return result;
   }
 
   std::vector<uint8_t> replace(const std::string_view &original, const std::string_view &old, const std::string_view &_new) {
@@ -1465,6 +1474,16 @@ namespace stream {
     static thread_local std::chrono::steady_clock::time_point s_BcastBucketStart{};
     static thread_local uint32_t s_BcastBucketCount = 0;
     static thread_local uint64_t s_BcastBucketBytes = 0;
+
+    // [VIPLE-PERF] Reuse scratch buffer across frames for QUIC/tunnel
+    // shard assembly — avoids repeated heap alloc/free per frame.
+    std::vector<uint8_t> videoScratch;
+
+    // [VIPLE-PERF] Reuse payload assembly buffer across frames.
+    // concat_and_insert writes into this buffer; capacity persists so
+    // subsequent frames of similar size avoid heap allocation entirely.
+    std::vector<uint8_t> payloadAssemblyBuf;
+
     while (auto packet = packets->pop()) {
       if (shutdown_event->peek()) {
         break;
@@ -1555,9 +1574,9 @@ namespace stream {
       // Insert space for packet headers
       auto blocksize = session->config.packetsize + MAX_RTP_HEADER_SIZE;
       auto payload_blocksize = blocksize - sizeof(video_packet_raw_t);
-      auto payload_new = concat_and_insert(sizeof(video_packet_raw_t), payload_blocksize, std::string_view {(char *) &frame_header, sizeof(frame_header)}, payload);
+      concat_and_insert(payloadAssemblyBuf, sizeof(video_packet_raw_t), payload_blocksize, std::string_view {(char *) &frame_header, sizeof(frame_header)}, payload);
 
-      payload = std::string_view {(char *) payload_new.data(), payload_new.size()};
+      payload = std::string_view {(char *) payloadAssemblyBuf.data(), payloadAssemblyBuf.size()};
 
       // There are 2 bits for FEC block count for a maximum of 4 FEC blocks
       constexpr auto MAX_FEC_BLOCKS = 4;
@@ -1626,7 +1645,14 @@ namespace stream {
         // frame's packets get spread across the full inter-frame interval.
         // For 57 Mbps stream + 1500 B blocks: 57M × 1.25 / 8 / 1500 / 1000 =
         // ~6 packets/ms → 30 packets ≈ 5 ms send window vs 0.45 ms burst.
-        if (const char* env = std::getenv("VIPLE_SMOOTH_PACING"); env && (env[0] == '1' || env[0] == 't' || env[0] == 'T')) {
+        // [VIPLE-PERF] Cache env var as static const to avoid per-frame syscall.
+        // Process restart is required to change this setting (same as other
+        // VIPLE_* env vars cached in vkfruc.cpp / plvk.cpp).
+        static const bool s_smoothPacing = [] {
+          const char* env = std::getenv("VIPLE_SMOOTH_PACING");
+          return env && (env[0] == '1' || env[0] == 't' || env[0] == 'T');
+        }();
+        if (s_smoothPacing) {
           // session->video.configuredBitrateKbps is the original client-requested
           // bitrate in kbps; adaptiveBitrateKbps may have lowered it on packet loss.
           int br_kbps = session->video.adaptiveBitrateKbps.load();
@@ -1659,6 +1685,40 @@ namespace stream {
 
         size_t ratecontrol_frame_packets_sent = 0;
         size_t ratecontrol_group_packets_sent = 0;
+
+        // [VIPLE-PERF] Hoist transport-mode decision, QUIC session lookup,
+        // port lookups, and scratch buffer outside the per-FEC-block / per-shard
+        // loops.  These values are constant for the entire frame.
+#ifdef VIPLE_MPQUIC
+        const bool use_quic =
+          session->tunnel &&
+          session->tunnel->carrier() == udp_tunnel::Carrier::QUIC_DIRECT;
+#else
+        const bool use_quic = false;
+#endif
+        const bool use_tunnel =
+          !use_quic &&
+          session->tunnel &&
+          session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
+          session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
+
+#ifdef VIPLE_MPQUIC
+        // Cache QUIC session pointer for this frame — avoids per-shard
+        // hash-map lookup.
+        std::shared_ptr<quic_server::QuicSession> quicVideoSession;
+        if (use_quic && quic_server::g_listener) {
+          quicVideoSession = quic_server::g_listener->getSession(
+              session->video.peer.address());
+        }
+#endif
+
+        // Pre-resolve tunnel ports (constant for this session)
+        const uint16_t tunnel_video_server_port = use_tunnel ? net::map_port(VIDEO_STREAM_PORT) : 0;
+        const uint16_t tunnel_video_peer_port   = use_tunnel ? session->video.peer.port() : 0;
+
+        // Alias the pre-allocated scratch buffer (lives outside the
+        // per-frame loop to reuse capacity across frames).
+        auto &scratch = videoScratch;
 
         auto blockIndex = 0;
         std::for_each(fec_blocks_begin, fec_blocks_end, [&](std::string_view &current_payload) {
@@ -1779,23 +1839,13 @@ namespace stream {
               // tunnel, every shard goes out per-packet with the tunnel
               // header + HMAC prepended. Batched sendmsg/WSASendTo can't
               // be used because each packet needs its own auth header.
-#ifdef VIPLE_MPQUIC
-              const bool use_quic =
-                session->tunnel &&
-                session->tunnel->carrier() == udp_tunnel::Carrier::QUIC_DIRECT;
-#else
-              const bool use_quic = false;
-#endif
-              const bool use_tunnel =
-                !use_quic &&
-                session->tunnel &&
-                session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
-                session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
+              //
+              // [VIPLE-PERF] use_quic, use_tunnel, quicVideoSession,
+              // tunnel ports, and scratch are now hoisted before for_each.
 
 #ifdef VIPLE_MPQUIC
               if (use_quic) {
                 // Send each shard as a QUIC DATAGRAM (flow type = video)
-                std::vector<uint8_t> scratch;
                 for (auto y = 0; y < current_batch_size; y++) {
                   const auto idx = next_shard_to_send + y;
                   const size_t pre = shards.prefixsize;
@@ -1804,13 +1854,8 @@ namespace stream {
                   std::memcpy(scratch.data(), shards.prefix(idx), pre);
                   std::memcpy(scratch.data() + pre, shards.data(idx), dat);
 
-                  auto clientAddr = boost::asio::ip::make_address(
-                      session->video.peer.address().to_string());
-                  auto quicSession = quic_server::g_listener
-                      ? quic_server::g_listener->getSession(clientAddr)
-                      : nullptr;
-                  if (quicSession) {
-                    quicSession->sendDatagramScheduled(
+                  if (quicVideoSession) {
+                    quicVideoSession->sendDatagramScheduled(
                         0x01, scratch.data(), scratch.size(),
                         config::stream.mpquic_scheduler);
                   }
@@ -1818,9 +1863,6 @@ namespace stream {
               } else
 #endif
               if (use_tunnel) {
-                const uint16_t server_port = net::map_port(VIDEO_STREAM_PORT);
-                const uint16_t peer_port = session->video.peer.port();
-                std::vector<uint8_t> scratch;
                 for (auto y = 0; y < current_batch_size; y++) {
                   const auto idx = next_shard_to_send + y;
                   const size_t pre = shards.prefixsize;
@@ -1828,7 +1870,7 @@ namespace stream {
                   scratch.resize(pre + dat);
                   std::memcpy(scratch.data(), shards.prefix(idx), pre);
                   std::memcpy(scratch.data() + pre, shards.data(idx), dat);
-                  session->tunnel->send(server_port, peer_port,
+                  session->tunnel->send(tunnel_video_server_port, tunnel_video_peer_port,
                                         scratch.data(), scratch.size());
                 }
               } else if (!platf::send_batch(batch_info)) {
@@ -1908,6 +1950,10 @@ namespace stream {
     platf::set_thread_name("stream::audioBroadcast");
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
+    // [VIPLE-PERF] Reuse scratch buffer across audio packets — avoids
+    // repeated heap alloc/free (one per data packet + one per FEC shard).
+    std::vector<uint8_t> audioScratch;
+
     while (auto packet = packets->pop()) {
       if (shutdown_event->peek()) {
         break;
@@ -1954,31 +2000,37 @@ namespace stream {
         const uint16_t server_audio_port = net::map_port(AUDIO_STREAM_PORT);
 
 #ifdef VIPLE_MPQUIC
+        // [VIPLE-PERF] Cache QUIC session lookup for this audio packet —
+        // reused by both the data send and FEC shard sends below, avoiding
+        // per-shard hash-map lookup.
+        std::shared_ptr<quic_server::QuicSession> quicAudioSession;
+        if (use_quic_audio && quic_server::g_listener) {
+          quicAudioSession = quic_server::g_listener->getSession(
+              session->audio.peer.address());
+        }
+#endif
+
+#ifdef VIPLE_MPQUIC
         if (use_quic_audio) {
-          std::vector<uint8_t> scratch(sizeof(audio_packet) + bytes);
-          std::memcpy(scratch.data(), &audio_packet, sizeof(audio_packet));
-          std::memcpy(scratch.data() + sizeof(audio_packet),
+          audioScratch.resize(sizeof(audio_packet) + bytes);
+          std::memcpy(audioScratch.data(), &audio_packet, sizeof(audio_packet));
+          std::memcpy(audioScratch.data() + sizeof(audio_packet),
                       shards_p[sequenceNumber % RTPA_DATA_SHARDS], bytes);
 
-          auto clientAddr = boost::asio::ip::make_address(
-              session->audio.peer.address().to_string());
-          auto quicSession = quic_server::g_listener
-              ? quic_server::g_listener->getSession(clientAddr)
-              : nullptr;
-          if (quicSession) {
-            quicSession->sendDatagramScheduled(
-                        0x02, scratch.data(), scratch.size(),
+          if (quicAudioSession) {
+            quicAudioSession->sendDatagramScheduled(
+                        0x02, audioScratch.data(), audioScratch.size(),
                         config::stream.mpquic_scheduler);
           }
         } else
 #endif
         if (use_tunnel) {
-          std::vector<uint8_t> scratch(sizeof(audio_packet) + bytes);
-          std::memcpy(scratch.data(), &audio_packet, sizeof(audio_packet));
-          std::memcpy(scratch.data() + sizeof(audio_packet),
+          audioScratch.resize(sizeof(audio_packet) + bytes);
+          std::memcpy(audioScratch.data(), &audio_packet, sizeof(audio_packet));
+          std::memcpy(audioScratch.data() + sizeof(audio_packet),
                       shards_p[sequenceNumber % RTPA_DATA_SHARDS], bytes);
           session->tunnel->send(server_audio_port, session->audio.peer.port(),
-                                scratch.data(), scratch.size());
+                                audioScratch.data(), audioScratch.size());
         } else {
           auto send_info = platf::send_info_t {
             (const char *) &audio_packet,
@@ -2010,30 +2062,25 @@ namespace stream {
 
 #ifdef VIPLE_MPQUIC
             if (use_quic_audio) {
-              std::vector<uint8_t> scratch(sizeof(fec_packet) + bytes);
-              std::memcpy(scratch.data(), &fec_packet, sizeof(fec_packet));
-              std::memcpy(scratch.data() + sizeof(fec_packet),
+              audioScratch.resize(sizeof(fec_packet) + bytes);
+              std::memcpy(audioScratch.data(), &fec_packet, sizeof(fec_packet));
+              std::memcpy(audioScratch.data() + sizeof(fec_packet),
                           shards_p[RTPA_DATA_SHARDS + x], bytes);
-              auto clientAddr = boost::asio::ip::make_address(
-                  session->audio.peer.address().to_string());
-              auto quicSession = quic_server::g_listener
-                  ? quic_server::g_listener->getSession(clientAddr)
-                  : nullptr;
-              if (quicSession) {
-                quicSession->sendDatagramScheduled(
-                        0x02, scratch.data(), scratch.size(),
+              if (quicAudioSession) {
+                quicAudioSession->sendDatagramScheduled(
+                        0x02, audioScratch.data(), audioScratch.size(),
                         config::stream.mpquic_scheduler);
               }
             } else
 #endif
             if (use_tunnel) {
-              std::vector<uint8_t> scratch(sizeof(fec_packet) + bytes);
-              std::memcpy(scratch.data(), &fec_packet, sizeof(fec_packet));
-              std::memcpy(scratch.data() + sizeof(fec_packet),
+              audioScratch.resize(sizeof(fec_packet) + bytes);
+              std::memcpy(audioScratch.data(), &fec_packet, sizeof(fec_packet));
+              std::memcpy(audioScratch.data() + sizeof(fec_packet),
                           shards_p[RTPA_DATA_SHARDS + x], bytes);
               session->tunnel->send(server_audio_port,
                                     session->audio.peer.port(),
-                                    scratch.data(), scratch.size());
+                                    audioScratch.data(), audioScratch.size());
             } else {
               auto send_info = platf::send_info_t {
                 (const char *) &fec_packet,

@@ -75,7 +75,10 @@ namespace quic_server {
     if (!isReady())
       return false;
 
-    std::vector<uint8_t> frame(DGRAM_HDR_SIZE + len);
+    // [VIPLE-PERF] thread_local buffer reuses heap allocation across
+    // datagrams — sendDatagram is called per shard (3000+/sec at 120fps).
+    static thread_local std::vector<uint8_t> frame;
+    frame.resize(DGRAM_HDR_SIZE + len);
     QuicDgramHeader hdr{};
     hdr.flowType = flowType;
     hdr.reserved = 0;
@@ -96,8 +99,9 @@ namespace quic_server {
       return false;
 
     // Snapshot the active path set (mutated by picoquic callbacks on the
-    // I/O thread).
-    std::vector<uint64_t> paths;
+    // I/O thread). [VIPLE-PERF] thread_local vector retains capacity
+    // across calls — avoids per-datagram heap alloc/free for the copy.
+    static thread_local std::vector<uint64_t> paths;
     {
       std::lock_guard<std::mutex> lock(_pathMutex);
       paths = _activePaths;

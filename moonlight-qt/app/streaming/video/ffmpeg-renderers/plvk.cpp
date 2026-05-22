@@ -6203,7 +6203,16 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     pl_frame ourFrame = {};
     bool useOverride = false;
     pl_tex heldTex = nullptr;
-    const char* ovEnv = SDL_getenv("VIPLE_VK_FRUC_OUTPUT_OVERRIDE");
+    // [VIPLE-PERF] Cache env var as static const — renderFrame runs at
+    // 60-120 fps; SDL_getenv is a process-env scan on some platforms.
+    static const bool s_outputOverride = [] {
+        const char* e = SDL_getenv("VIPLE_VK_FRUC_OUTPUT_OVERRIDE");
+        return e && SDL_atoi(e) != 0;
+    }();
+    static const bool s_rifeOverride = [] {
+        const char* e = SDL_getenv("VIPLE_VK_FRUC_RIFE");
+        return e && SDL_atoi(e) != 0;
+    }();
     // §J.3.e.2.e2 Path B: dropped the `&& m_NcnnExternalReady` gate that the
     // pre-Path-B code used as a proxy for "ncnn ready".  Path B's initRifeModel
     // tears down the §J.3.e.1.d external handoff (sets m_NcnnExternalReady=false)
@@ -6214,7 +6223,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     // — only the RIFE Phase B does, and runFrucOverridePassWithRife checks
     // m_RifeReady internally.  Pass-through fallback (runFrucOverridePass)
     // doesn't touch ncnn at all.
-    if (ovEnv && SDL_atoi(ovEnv) != 0
+    if (s_outputOverride
         && frame->format == AV_PIX_FMT_VULKAN) {
         // Lazy-init §J.3.e.2.c forward + §J.3.e.2.d reverse + §J.3.e.2.e1
         // wrap/override resources (normally gated behind probe env vars).
@@ -6228,8 +6237,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         // model + VkMats.  Forward use lands in §J.3.e.2.e2b.  Init is decoupled
         // from override: even with RIFE init failed, override still works as
         // pass-through (§J.3.e.2.e1b path).
-        const char* rifeEnv = SDL_getenv("VIPLE_VK_FRUC_RIFE");
-        if (rifeEnv && SDL_atoi(rifeEnv) != 0
+        if (s_rifeOverride
             && m_FrucNv12RgbReady && !m_RifeReady && !m_RifeDisabled) {
             initRifeModel((uint32_t)frame->width, (uint32_t)frame->height);
         }

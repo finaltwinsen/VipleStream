@@ -1401,7 +1401,10 @@ namespace platf {
 
     auto const max_bufs_per_msg = send_info.payload_buffers.size() + (send_info.headers ? 1 : 0);
 
-    std::vector<WSABUF> bufs((send_info.headers ? send_info.block_count : 1) * max_bufs_per_msg);
+    // [VIPLE-PERF] thread_local buffer retains capacity across batches —
+    // send_batch is called once per ~64-packet batch at 30-100 Hz.
+    static thread_local std::vector<WSABUF> bufs;
+    bufs.resize((send_info.headers ? send_info.block_count : 1) * max_bufs_per_msg);
     DWORD bufcount = 0;
     if (send_info.headers) {
       // Interleave buffers for headers and payloads

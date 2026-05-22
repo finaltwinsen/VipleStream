@@ -364,7 +364,9 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
     }
 
     // Handle Start+Select+L1+R1 as a gamepad quit combo
-    if (state->buttons == (PLAY_FLAG | BACK_FLAG | LB_FLAG | RB_FLAG) && qgetenv("NO_GAMEPAD_QUIT") != "1") {
+    // [VIPLE-PERF] Cache env var — qgetenv allocates a QByteArray per call.
+    static const bool s_gamepadQuitEnabled = (qgetenv("NO_GAMEPAD_QUIT") != "1");
+    if (state->buttons == (PLAY_FLAG | BACK_FLAG | LB_FLAG | RB_FLAG) && s_gamepadQuitEnabled) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Detected quit gamepad button combo");
 

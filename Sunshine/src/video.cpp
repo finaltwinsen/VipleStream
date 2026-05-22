@@ -2200,9 +2200,18 @@ namespace video {
 
       session->request_normal_frame();
 
-      // While streaming check to see if the mouse is present and enable Mouse Keys to force the cursor to appear
-      // This is useful for KVM switch scenarios where mouse may disappear during streaming
-      platf::enable_mouse_keys();
+      // While streaming check to see if the mouse is present and enable Mouse Keys to force the cursor to appear.
+      // This is useful for KVM switch scenarios where mouse may disappear during streaming.
+      // [VIPLE-PERF] Throttle to once per ~5 seconds — mouse presence doesn't
+      // change at frame rate and GetSystemMetrics is a syscall per invocation.
+      {
+        static thread_local std::chrono::steady_clock::time_point s_lastMouseKeyCheck{};
+        auto now_mk = std::chrono::steady_clock::now();
+        if (now_mk - s_lastMouseKeyCheck >= 5s) {
+          platf::enable_mouse_keys();
+          s_lastMouseKeyCheck = now_mk;
+        }
+      }
     }
   }
 
