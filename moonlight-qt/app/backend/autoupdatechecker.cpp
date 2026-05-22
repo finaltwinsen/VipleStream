@@ -5,6 +5,16 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSettings>
+#include <QDateTime>
+
+// VIPLE §perf — autoupdate cache window.  GitHub Releases API has a 60
+// req/hour unauthenticated rate limit per IP; one request per app launch is
+// well within that, but users who restart the app multiple times in a day
+// (testing builds, quick reconnects) burn requests for no value.  24h is
+// plenty for an "is there a new release" check.
+#define AUTOUPDATE_LAST_CHECK_KEY      "autoupdate/lastCheckUnixSec"
+#define AUTOUPDATE_CACHE_WINDOW_SEC    (24 * 60 * 60)
 
 AutoUpdateChecker::AutoUpdateChecker(QObject *parent) :
     QObject(parent)
@@ -55,6 +65,27 @@ void AutoUpdateChecker::start()
     if (!m_Nam) {
         Q_ASSERT(m_Nam);
         return;
+    }
+
+    // VIPLE §perf — skip the GitHub API request if we already checked in the
+    // last 24 hours.  Cuts startup latency by ~50-300ms (no DNS + TLS + GET)
+    // and keeps us well clear of GitHub's 60 req/hour anonymous rate limit
+    // even when the user restarts the app many times a day.  The signal we
+    // skip (offering an update prompt) is at most ~24h late, which is fine.
+    {
+        QSettings settings;
+        qint64 lastCheck = settings.value(AUTOUPDATE_LAST_CHECK_KEY, 0).toLongLong();
+        qint64 now = QDateTime::currentSecsSinceEpoch();
+        if (lastCheck > 0 && now - lastCheck < AUTOUPDATE_CACHE_WINDOW_SEC) {
+            qDebug() << "AutoUpdateChecker: skipping (last check"
+                     << (now - lastCheck) << "sec ago, cache window"
+                     << AUTOUPDATE_CACHE_WINDOW_SEC << "sec)";
+            return;
+        }
+        // Record the attempt now (not after the reply) so a failed/dropped
+        // request still respects the cache window — we don't want a flaky
+        // network to mean we hammer GitHub on every restart.
+        settings.setValue(AUTOUPDATE_LAST_CHECK_KEY, now);
     }
 
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0) && QT_VERSION < QT_VERSION_CHECK(5, 15, 1) && !defined(QT_NO_BEARERMANAGEMENT)

@@ -51,7 +51,12 @@ BrowserPrivate::BrowserPrivate(Browser *browser, AbstractServer *server, const Q
     queryTimer.setInterval(60 * 1000);
     queryTimer.setSingleShot(true);
 
-    serviceTimer.setInterval(100);
+    // VIPLE §perf — was 100ms.  This is a single-shot debounce that batches
+    // service-discovery callbacks; 100ms forced a fire ~10x/sec under a busy
+    // LAN.  500ms still batches efficiently and adds at most ~0.4s to "new
+    // host appeared" UI feedback — below human perception threshold for a
+    // discovery flow that's already a slow async operation.
+    serviceTimer.setInterval(500);
     serviceTimer.setSingleShot(true);
 
     // Immediately begin browsing for services

@@ -6024,8 +6024,25 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     // points to fully-decoded VkImages on m_Vulkan->device.  §J.3.e.1+
     // will pass these handles to NCNN-Vulkan without any D3D11 bridge.
     if (frame->format == AV_PIX_FMT_VULKAN) {
-        const char* probe = SDL_getenv("VIPLE_VK_FRUC_PROBE");
-        if (probe && SDL_atoi(probe) != 0) {
+        // VIPLE §perf — snapshot env vars once at first entry (magic static,
+        // C++11 thread-safe init).  These probes are dev-only; the prior
+        // per-frame SDL_getenv() × 3 + SDL_atoi() × 3 path burned ~40-80µs
+        // per render call on hot streaming (60-120fps).  Snapshot reduces it
+        // to a single bool load per frame.
+        static const bool s_VkFrucProbeEnabled = []() {
+            const char* p = SDL_getenv("VIPLE_VK_FRUC_PROBE");
+            return p && SDL_atoi(p) != 0;
+        }();
+        static const bool s_VkFrucProbe2Enabled = []() {
+            const char* p = SDL_getenv("VIPLE_VK_FRUC_PROBE2");
+            return p && SDL_atoi(p) != 0;
+        }();
+        static const bool s_VkFrucProbe3Enabled = []() {
+            const char* p = SDL_getenv("VIPLE_VK_FRUC_PROBE3");
+            return p && SDL_atoi(p) != 0;
+        }();
+
+        if (s_VkFrucProbeEnabled) {
             static std::atomic<uint64_t> s_FrameCount{0};
             uint64_t n = s_FrameCount.fetch_add(1, std::memory_order_relaxed);
             if ((n % 60) == 0) {
@@ -6047,8 +6064,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         // of §J.3.e.0 (different env var).  Validates cross-queue-family ownership
         // transfer + VIDEO_DECODE_DPB → TRANSFER_SRC_OPTIMAL — primitive for
         // §J.3.e.2.b/c NV12→RGB compute shader.
-        const char* probe2 = SDL_getenv("VIPLE_VK_FRUC_PROBE2");
-        if (probe2 && SDL_atoi(probe2) != 0) {
+        if (s_VkFrucProbe2Enabled) {
             static std::atomic<uint64_t> s_Probe2FrameCount{0};
             uint64_t n = s_Probe2FrameCount.fetch_add(1, std::memory_order_relaxed);
             // First probe at frame 30 (give decoder time to stabilise),
@@ -6066,8 +6082,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         // First fire at frame 30 (init + first dispatch), then every 60 frames
         // after.  Per-instance counter so test-decode + reconnect cycles each
         // get a fresh window.
-        const char* probe3 = SDL_getenv("VIPLE_VK_FRUC_PROBE3");
-        if (probe3 && SDL_atoi(probe3) != 0 && m_NcnnExternalReady) {
+        if (s_VkFrucProbe3Enabled && m_NcnnExternalReady) {
             ++m_FrucNv12RgbFrameCount;
             uint64_t n = m_FrucNv12RgbFrameCount;
             if (n == 30 || (n > 30 && ((n - 30) % 60) == 0)) {

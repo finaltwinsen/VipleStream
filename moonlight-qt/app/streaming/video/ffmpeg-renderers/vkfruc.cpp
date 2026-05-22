@@ -2409,8 +2409,8 @@ void VkFrucRenderer::runAutotierTransition()
             cur, (unsigned long long)nvOfFails);
     }
     // env-gated T0 → T-1 (急救)
-    if (!downgraded && cur == 0
-        && qEnvironmentVariableIntValue("VIPLE_VKFRUC_ALLOW_T1_DEMOTE") != 0) {
+    static const int s_AllowT1Demote = qEnvironmentVariableIntValue("VIPLE_VKFRUC_ALLOW_T1_DEMOTE");
+    if (!downgraded && cur == 0 && s_AllowT1Demote != 0) {
         int hits = 0;
         for (int i = 0; i < 3; ++i) {
             if (m_T0EnterTimes[i] > 0 && nowMs - m_T0EnterTimes[i] < 60000) hits++;
@@ -7015,12 +7015,25 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
     }
 
     // §K.3 — 錄 command buffer。
+    // v1.5.6 crash diag: print state before each Vk call so AMD RADV crash
+    // site is pinned (log truncates at crash, last line = crash location).
     VkCommandBuffer cmd = m_SlotCmdBuf[slot];
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VAAPI-VK] §K.3 diag slot=%u cmd=%p NV12buf=%p RtPfnReset=%p",
+                slot, (void*)cmd, (void*)m_SwFrucNv12Buf,
+                (void*)(uintptr_t)m_RtPfn.ResetCommandBuffer);
+    if (!cmd || !m_RtPfn.ResetCommandBuffer) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VAAPI-VK] §K.3 null cmd or pfn — aborting frame");
+        return;
+    }
     m_RtPfn.ResetCommandBuffer(cmd, 0);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after ResetCommandBuffer");
     VkCommandBufferBeginInfo cbbi = {};
     cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     m_RtPfn.BeginCommandBuffer(cmd, &cbbi);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after BeginCommandBuffer");
 
     // a. 轉換 imported LINEAR NV12: UNDEFINED → GENERAL，同時 drain 上一幀
     //    m_SwFrucNv12Buf 的 COMPUTE_SHADER_READ（WAW barrier）。
@@ -7047,10 +7060,14 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
     preCopyBar.offset = 0;
     preCopyBar.size   = VK_WHOLE_SIZE;
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VAAPI-VK] §K.3 diag before CmdPipelineBarrier preCopyBar.buf=%p importBar.img=%p",
+                (void*)preCopyBar.buffer, (void*)importBar.image);
     m_RtPfn.CmdPipelineBarrier(cmd,
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         0, 0, nullptr, 1, &preCopyBar, 1, &importBar);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after CmdPipelineBarrier");
 
     // b. CopyImageToBuffer: LINEAR NV12 → m_SwFrucNv12Buf（Y @ offset 0，UV @ W×H）。
     VkBufferImageCopy copyRegs[2] = {};
@@ -7064,8 +7081,10 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
     copyRegs[1].imageSubresource.aspectMask     = VK_IMAGE_ASPECT_PLANE_1_BIT;
     copyRegs[1].imageSubresource.layerCount     = 1;
     copyRegs[1].imageExtent                     = { W / 2, H / 2, 1 };
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag before CmdCopyImageToBuffer");
     m_RtPfn.CmdCopyImageToBuffer(cmd, imp.image, VK_IMAGE_LAYOUT_GENERAL,
                                  m_SwFrucNv12Buf, 2, copyRegs);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after CmdCopyImageToBuffer");
 
     // c. Buffer barrier: TRANSFER_WRITE → COMPUTE_SHADER_READ。
     VkBufferMemoryBarrier bufBar = {};
@@ -11216,20 +11235,21 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     //   < 0     → Balanced cheap-adaptive (default)
     //   >= 0    → c0 fixed blend (用該值當 mix weight)
     // Env var: NO_MV > QUALITY > PURE50 > default.
-    float blendFactor;
-    const char* modeName = "Balanced cheap-adaptive";
-    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_NO_MV") != 0) {
-        blendFactor = 2.0f;
-        modeName = "c2 no-MV (DIAG)";
-    } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_QUALITY") != 0) {
-        blendFactor = -2.0f;
-        modeName = "c1 Quality adaptive";
-    } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_PURE50") != 0) {
-        blendFactor = 0.5f;
-        modeName = "c0 fixed 50/50";
-    } else {
-        blendFactor = -1.0f;
-    }
+    static const struct { float factor; const char* name; } s_WarpMode = []() {
+        struct { float factor; const char* name; } r;
+        if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_NO_MV") != 0) {
+            r = { 2.0f, "c2 no-MV (DIAG)" };
+        } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_QUALITY") != 0) {
+            r = { -2.0f, "c1 Quality adaptive" };
+        } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_PURE50") != 0) {
+            r = { 0.5f, "c0 fixed 50/50" };
+        } else {
+            r = { -1.0f, "Balanced cheap-adaptive" };
+        }
+        return r;
+    }();
+    float blendFactor = s_WarpMode.factor;
+    const char* modeName = s_WarpMode.name;
     static std::atomic<bool> s_warpModeLogged{false};
     bool warpExpected = false;
     if (s_warpModeLogged.compare_exchange_strong(warpExpected, true)) {
@@ -11504,7 +11524,8 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
 
     // §J.3.e.2.i.3.e DIAGNOSTIC: VIPLE_VKFRUC_DIAG_EMPTY=1 returns
     // immediately — pure ABI smoke test for IFFmpegRenderer interface.
-    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_DIAG_EMPTY") != 0) {
+    static const int s_DiagEmpty = qEnvironmentVariableIntValue("VIPLE_VKFRUC_DIAG_EMPTY");
+    if (s_DiagEmpty != 0) {
         if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                      "[VIPLE-VKFRUC] frame#%llu DIAG_EMPTY: empty return",
                                      (unsigned long long)fnum);
@@ -11517,7 +11538,8 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // the swapchain.  Isolates whether the v1.3.123-130 crash-after-frame#0 is
     // in the AVVkFrame interaction or in the cmd record/submit/present cycle
     // itself.
-    if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_DIAG_NOAVVKFRAME") != 0) {
+    static const int s_DiagNoAvVkFrame = qEnvironmentVariableIntValue("VIPLE_VKFRUC_DIAG_NOAVVKFRAME");
+    if (s_DiagNoAvVkFrame != 0) {
         if (firstFrame) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                      "[VIPLE-VKFRUC] frame#%llu DIAG_NOAVVKFRAME: clear-only path",
                                      (unsigned long long)fnum);
@@ -11679,8 +11701,11 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
     // m_RealCurrRgbDescSet (VIPLE_VKFRUC_REAL_USE_CRGB default ON in
     // DUAL+FRUC mode).  Single-present + ycbcr-sampler path needs vkf
     // alive whole cmd buffer for the fragment shader.
-    QByteArray rcrgbEnvEarly = qgetenv("VIPLE_VKFRUC_REAL_USE_CRGB");
-    const bool rcrgbOn = rcrgbEnvEarly.isEmpty() ? true : (rcrgbEnvEarly.toInt() != 0);
+    static const bool s_RcrgbOn = []() {
+        QByteArray v = qgetenv("VIPLE_VKFRUC_REAL_USE_CRGB");
+        return v.isEmpty() ? true : (v.toInt() != 0);
+    }();
+    const bool rcrgbOn = s_RcrgbOn;
     const bool useCrgbForReal = dualPresentThisFrame && m_FrucReady && rcrgbOn;
     const bool pathDActive = useCrgbForReal
                           && m_FrucMode && frame && frame->width > 0 && frame->height > 0

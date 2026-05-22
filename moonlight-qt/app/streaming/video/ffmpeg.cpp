@@ -2734,7 +2734,9 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     }
                     else {
                         // No output data or input data. Let's wait a little bit.
-                        SDL_Delay(2);
+                        // VIPLE §perf — was 2ms; 1ms halves EAGAIN polling latency
+                        // at 120fps (8.3ms budget → 1ms = 12% vs 24%).
+                        SDL_Delay(1);
                     }
                 }
                 else {

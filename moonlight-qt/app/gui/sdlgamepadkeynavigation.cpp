@@ -281,8 +281,12 @@ void SdlGamepadKeyNavigation::updateTimerState()
         // Flush events on the first poll
         m_FirstPoll = true;
 
-        // Poll every 50 ms for a new joystick event
-        m_PollingTimer->start(50);
+        // Poll every 100 ms for a new joystick event.
+        // VIPLE §perf — was 50 ms (20 Hz).  UI navigation only needs ~10 Hz to
+        // feel responsive; halving the poll rate cuts SDL_GameControllerUpdate
+        // calls without observable latency to a human pressing menu buttons.
+        // Streaming-time gamepad input goes through a separate higher-rate path.
+        m_PollingTimer->start(100);
     }
 }
 

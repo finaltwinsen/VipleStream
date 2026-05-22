@@ -129,14 +129,13 @@ pushd $INSTALLER_FOLDER
 
 export QML_SOURCES_PATHS="$SOURCE_ROOT/app/gui"
 export QMAKE=qmake6
-# linuxdeploy looks up the desktop file's Icon= entry by name across standard
-# search paths.  Place the icon at the canonical /usr/share/icons/hicolor/...
-# path (already there from `make install`) AND at AppDir root so linuxdeploy's
-# .DirIcon symlink + AppImage thumbnail both resolve.
-cp $DEPLOY_FOLDER/usr/share/icons/hicolor/scalable/apps/moonlight.svg $DEPLOY_FOLDER/moonlight.svg
+# linuxdeploy icon: use source-tree SVG which exists before make install.
+# DEPLOY_FOLDER icons are placed by linuxdeploy itself, so referencing them
+# as --icon-file causes a src==dst copy no-op and "suitable icon" validation
+# failure.  Source-tree icon is always present and outside AppDir.
 linuxdeploy --appdir $DEPLOY_FOLDER \
     --desktop-file $DEPLOY_FOLDER/usr/share/applications/com.piinsta.desktop \
-    --icon-file $DEPLOY_FOLDER/usr/share/icons/hicolor/scalable/apps/moonlight.svg \
+    --icon-file $SOURCE_ROOT/app/res/moonlight.svg \
     --icon-filename moonlight \
     --executable $DEPLOY_FOLDER/usr/lib/libSDL3.so.0 \
     --plugin qt \
