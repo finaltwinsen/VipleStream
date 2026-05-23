@@ -99,6 +99,12 @@ moonlight-qt/libs/mac/
 
 # ── Logs ──
 *.log
+# Root-level build log / capture files dropped here ad-hoc (build_log*.txt,
+# build_out.txt, build_sunshine_log.txt etc.).  Not in *.log because they're
+# saved as .txt — anchored to root so subprojects' own files aren't ignored.
+/build_*.txt
+/build_*.log
+/build_out.txt
 
 # ── Compiled objects / binaries ──
 *.obj
