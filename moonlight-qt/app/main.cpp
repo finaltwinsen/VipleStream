@@ -905,6 +905,18 @@ int main(int argc, char *argv[])
     // use this functionality and it can cause hangs when querying broken devices.
     SDL_SetHint("SDL_WINDOWS_DETECT_DEVICE_HOTPLUG", "0");
 
+    // VipleStream §K.4 (dev/cli-quic-linux): set the desktop file name
+    // BEFORE QGuiApplication construction.  Qt's xdg-desktop-portal
+    // Registry integration auto-registers with whatever id is set at
+    // construction time; calling setDesktopFileName() later does a
+    // second Register on the same D-Bus connection, which the portal
+    // rejects with "Could not register app ID: Connection already
+    // associated with an application ID" (the QDBusError that has
+    // been spamming every viplestream startup log).  Reading the id
+    // from the env var lets Qt do the right Register on the first
+    // (and only) call.
+    qputenv("QT_DESKTOP_FILE_NAME", "com.piinsta");
+
     QGuiApplication app(argc, argv);
 
     // VipleStream editorial font stack — ship Space Grotesk / Inter /
@@ -1107,7 +1119,19 @@ int main(int argc, char *argv[])
     // VipleStream FDO/desktop ID rebrand v1.2.93: was
     // com.moonlight_stream.Moonlight; now com.piinsta to match the
     // renamed .desktop / .appdata.xml files under deploy/linux/.
+    //
+    // VipleStream §K.4 (dev/cli-quic-linux): on Linux, the desktop file
+    // name is now seeded via QT_DESKTOP_FILE_NAME before the
+    // QGuiApplication constructor runs (see start of main()).  Calling
+    // setDesktopFileName here triggered a SECOND portal Register on the
+    // same D-Bus connection, which xdg-desktop-portal rejects with the
+    // "Connection already associated with an application ID" error
+    // that has been spamming every viplestream startup.  Keep the call
+    // for non-Linux platforms where the env-var path is a no-op (Qt
+    // only reads QT_DESKTOP_FILE_NAME on Linux/Wayland).
+#if !defined(Q_OS_LINUX) && !defined(Q_OS_FREEBSD)
     app.setDesktopFileName("com.piinsta");
+#endif
     qputenv("SDL_VIDEO_WAYLAND_WMCLASS", "com.piinsta");
     qputenv("SDL_VIDEO_X11_WMCLASS", "com.piinsta");
 
