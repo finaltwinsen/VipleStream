@@ -114,6 +114,21 @@ void quicDisconnect(void);
 // subflow is active.
 bool quicIsConnected(void);
 
+// Block up to `timeoutMs` waiting for the connection to reach
+// picoquic_state_ready (i.e. TLS handshake complete, AEAD contexts
+// installed).  Polls every 10 ms.  Returns 0 if ready, -1 on timeout,
+// -2 if the connection does not exist.
+//
+// §Q-REVIEW-P2 (v1.5.25+1, dev/cli-quic-linux): added because
+// quicAddSubflow's picoquic_probe_new_path used to fire before the
+// initial path's crypto context existed.  picoquic queued the probe
+// packet anyway, and the QuicIO thread crashed inside
+// picoquic_aead_get_checksum_length (NULL `algo` pointer in the
+// non-installed AEAD context) the moment it tried to prepare and
+// protect the probe.  Gating quicAddSubflow on this readiness
+// check eliminates the segfault.
+int quicWaitReady(unsigned int timeoutMs);
+
 // ── Server listener ──────────────────────────────────────────
 // (Used by Sunshine server — not called from moonlight-common-c
 // client code, but declared here for API completeness.)

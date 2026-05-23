@@ -516,21 +516,35 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
             qparams.quicPort = (unsigned short)StreamConfig.quicPort;
 
             if (quicConnect(&qparams) == 0) {
-                // §Q-REVIEW-P2: This adds subflows immediately after
-                // quicConnect, but the TLS handshake hasn't finished yet
-                // — picoquic_probe_new_path on a non-ready path can fail
-                // silently or stash a probe that fires after handshake.
-                // Once we move to a real picoquic build, gate this block
-                // on picoquic_callback_ready (or a synchronous wait with
-                // timeout) so probes only fire on a ready connection.
+                // §Q-REVIEW-P2 fix (dev/cli-quic-linux): split subflow
+                // setup into two phases around the TLS handshake.
                 //
-                // Enumerate local interfaces and add subflows.
-                // Only add subflows whose address family matches the server
-                // since picoquic path probes require matching families.
+                //   Phase A — BEFORE handshake (this block):
+                //     Add the FIRST matching local interface as the
+                //     initial subflow.  quicAddSubflow's first call
+                //     binds path 0 (cnx's initial path) and does NOT
+                //     call picoquic_probe_new_path, so no crypto
+                //     state is required.  Without this, QuicIO has no
+                //     socket to send the Client Hello on and the
+                //     handshake stalls in picoquic_state_client_init
+                //     forever.
+                //
+                //   Phase B — AFTER quicWaitReady() returns 0:
+                //     Add the remaining interfaces as additional
+                //     paths via picoquic_probe_new_path.  Those probes
+                //     fire packets immediately, and the AEAD context
+                //     for the path doesn't exist until the connection
+                //     reaches picoquic_state_ready — which is exactly
+                //     the segfault the original §Q-REVIEW-P2 comment
+                //     warned about.
+                //
+                //   The 5000 ms ceiling covers LAN (~30-60 ms) + WAN
+                //   (~150-500 ms) + Tailscale derp relay (1-3 s observed),
+                //   with headroom for slow Sunshine hosts.
                 int serverFamily = RemoteAddr.ss_family;
                 LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
                 int ifCount = lcEnumNetInterfaces(interfaces, LC_NETIF_MAX_COUNT);
-                int added = 0;
+                int initialIfIdx = -1;
                 for (int i = 0; i < ifCount; i++) {
                     if (!interfaces[i].up)
                         continue;
@@ -538,14 +552,44 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
                         continue;
                     if (interfaces[i].family != serverFamily)
                         continue;
-                    if (quicAddSubflow(interfaces[i].index,
-                                       &interfaces[i].addr,
-                                       interfaces[i].addrLen) >= 0) {
-                        added++;
-                    }
+                    initialIfIdx = i;
+                    break;
                 }
-                Limelog("[VIPLE-MPQUIC] QUIC connected with %d subflow(s) (family=%s)\n",
-                        added, serverFamily == AF_INET6 ? "IPv6" : "IPv4");
+                int addedInitial = 0;
+                if (initialIfIdx >= 0 &&
+                    quicAddSubflow(interfaces[initialIfIdx].index,
+                                   &interfaces[initialIfIdx].addr,
+                                   interfaces[initialIfIdx].addrLen) >= 0) {
+                    addedInitial = 1;
+                    Limelog("[VIPLE-MPQUIC] Initial subflow bound, waiting for handshake\n");
+                }
+                if (!addedInitial) {
+                    Limelog("[VIPLE-MPQUIC] No usable local interface, falling back to UDP\n");
+                    StreamConfig.useQuicTransport = 0;
+                } else if (quicWaitReady(5000) != 0) {
+                    Limelog("[VIPLE-MPQUIC] QUIC handshake didn't complete in 5000ms, falling back to UDP\n");
+                    StreamConfig.useQuicTransport = 0;
+                } else {
+                    Limelog("[VIPLE-MPQUIC] QUIC handshake complete, adding additional subflows\n");
+                    int added = 1;  // initial subflow already counted
+                    for (int i = 0; i < ifCount; i++) {
+                        if (i == initialIfIdx)
+                            continue;  // already added as path 0
+                        if (!interfaces[i].up)
+                            continue;
+                        if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK)
+                            continue;
+                        if (interfaces[i].family != serverFamily)
+                            continue;
+                        if (quicAddSubflow(interfaces[i].index,
+                                           &interfaces[i].addr,
+                                           interfaces[i].addrLen) >= 0) {
+                            added++;
+                        }
+                    }
+                    Limelog("[VIPLE-MPQUIC] QUIC connected with %d subflow(s) (family=%s)\n",
+                            added, serverFamily == AF_INET6 ? "IPv6" : "IPv4");
+                }
             } else {
                 Limelog("[VIPLE-MPQUIC] QUIC connect failed, falling back to UDP\n");
                 StreamConfig.useQuicTransport = 0;

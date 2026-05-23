@@ -1,4 +1,5 @@
 #include <Limelight.h>
+#include <atomic>
 #include <mutex>
 #include "ffmpeg.h"
 #include "utils.h"
@@ -59,6 +60,14 @@ extern "C" {
 #ifdef HAVE_LIBPLACEBO_VULKAN
 #include "ffmpeg-renderers/plvk.h"
 #include "ffmpeg-renderers/vkfruc.h"
+#else
+// VipleStream: when the libplacebo/vkfruc renderer isn't compiled in
+// (e.g. Linux test build without libplacebo + ncnn deps), the decoder
+// adaptive-throttle path below still writes to / reads from these
+// atomics. Provide local storage so the values are inert (always 0)
+// but the symbols resolve at link time.
+std::atomic<double> g_VkFrucDecodeLatencyMs{0.0};
+std::atomic<double> g_VkFrucChainMs{0.0};
 #endif
 
 // This is gross but it allows us to use sizeof()

@@ -75,6 +75,9 @@ private:
     QMap<QString, StreamingPreferences::FrucBackend> m_FrucBackendMap;
     QMap<QString, StreamingPreferences::FrucQuality> m_FrucQualityMap;
     QMap<QString, StreamingPreferences::RendererSelection> m_RendererSelectionMap;
+    // VipleStream §K — MP-QUIC scheduler selector. mpQuicScheduler is plain int
+    // (0=auto, 1=min-rtt, 2=aggregate, 3=redundant, 4=ecf — see QuicTransport.h).
+    QMap<QString, int> m_QuicSchedulerMap;
 };
 
 class ListCommandLineParser

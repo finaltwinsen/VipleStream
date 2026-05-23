@@ -203,6 +203,15 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
     picoquic_set_default_multipath_option(g_ctx.quic, 1);
     quicApplyCongestionAlgo(g_ctx.quic);
 
+    // §Q-REVIEW-P4 (dev/cli-quic-linux): VipleStream-Server uses the same
+    // self-signed Sunshine cert (config::nvhttp.cert) for its QUIC listener.
+    // Without disabling cert verification, picotls rejects the server hello
+    // and the connection silently stalls in client_init_sent.  The legacy
+    // Moonlight HTTPS path already cert-pins via NvHTTP::serverCert at the
+    // application layer, so trusting *any* peer cert on the QUIC layer is
+    // safe here — peer auth still depends on the pinned cert in NvComputer.
+    picoquic_set_null_verifier(g_ctx.quic);
+
     // Copy server address with negotiated QUIC port
     memcpy(&serverAddr, &params->remoteAddr, params->remoteAddrLen);
     if (serverAddr.ss_family == AF_INET) {
@@ -233,6 +242,25 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
         picoquic_free(g_ctx.quic);
         g_ctx.quic = NULL;
         return -1;
+    }
+
+    // §Q-REVIEW-P3 (dev/cli-quic-linux): picoquic_create_cnx only
+    // *allocates* the connection — it does not queue the Client
+    // Hello.  Without picoquic_start_client_cnx, the cnx stays in
+    // picoquic_state_client_init forever and the QuicIO thread's
+    // picoquic_prepare_next_packet returns sendLen=0 every time,
+    // so no Initial packet ever hits the wire.  All upstream
+    // sample/*.c clients call this immediately after create_cnx.
+    {
+        int startRet = picoquic_start_client_cnx(g_ctx.cnx);
+        if (startRet != 0) {
+            Limelog("[VIPLE-MPQUIC] picoquic_start_client_cnx failed: %d\n", startRet);
+            picoquic_delete_cnx(g_ctx.cnx);
+            g_ctx.cnx = NULL;
+            picoquic_free(g_ctx.quic);
+            g_ctx.quic = NULL;
+            return -1;
+        }
     }
 
     // Multipath is enabled per-quic-context via the default option set
@@ -291,6 +319,36 @@ void quicDisconnect(void) {
 bool quicIsConnected(void) {
     return g_ctx.cnx != NULL &&
            picoquic_get_cnx_state(g_ctx.cnx) == picoquic_state_ready;
+}
+
+int quicWaitReady(unsigned int timeoutMs) {
+    if (!g_ctx.cnx) {
+        return -2;
+    }
+    // Poll picoquic state from the caller thread.  10 ms granularity
+    // keeps wakeup latency low and total wall-clock work negligible
+    // (handshake on LAN is typically 30-60 ms; over Tailscale ~150 ms).
+    unsigned int elapsed = 0;
+    picoquic_state_enum lastSt = -1;
+    while (elapsed < timeoutMs) {
+        picoquic_state_enum st = picoquic_get_cnx_state(g_ctx.cnx);
+        if (st != lastSt) {
+            Limelog("[VIPLE-MPQUIC] handshake state -> %d (after %u ms)\n",
+                    (int)st, elapsed);
+            lastSt = st;
+        }
+        if (st == picoquic_state_ready) {
+            return 0;
+        }
+        if (st == picoquic_state_disconnected) {
+            return -1;
+        }
+        PltSleepMs(10);
+        elapsed += 10;
+    }
+    Limelog("[VIPLE-MPQUIC] handshake stalled at state %d after %u ms\n",
+            (int)lastSt, elapsed);
+    return -1;
 }
 
 // ── Server ──────────────────────────────────────────────────

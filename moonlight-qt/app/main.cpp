@@ -15,6 +15,7 @@
 #include <QElapsedTimer>
 #include <QTemporaryFile>
 #include <QRegularExpression>
+#include <QTimer>
 
 #ifdef Q_OS_UNIX
 #include <sys/socket.h>
@@ -567,11 +568,13 @@ int main(int argc, char *argv[])
     // count + op distribution + head/tail layers.  No GPU work yet; future
     // sub-phases (weight loader → first Conv2D → full graph → drop ncnn)
     // build on this.  Does not require streaming, so easy to verify.
+#ifdef HAVE_LIBPLACEBO_VULKAN
     if (qEnvironmentVariableIntValue("VIPLE_RIFE_NATIVE_VK_DUMP") != 0) {
         QString anchor = Path::getDataFilePath("rife-v4.25-lite/flownet.param");
         QFileInfo fi(anchor);
         viple::rife_native_vk::dumpModelSmoke(fi.absolutePath());
     }
+#endif
 
     // VipleStream §J.3.e.X Phase 3b.2 standalone — when VIPLE_RIFE_NATIVE_VK_TEST=1
     // is set, build a minimal VkInstance/Device, hand them to ncnn, run
@@ -867,7 +870,12 @@ int main(int argc, char *argv[])
 
     // Set our app name for SDL to use with PulseAudio and PipeWire. This matches what we
     // provide as our app name to libsoundio too. On SDL 2.0.18+, SDL_APP_NAME is also used
-    // for screensaver inhibitor reporting.
+    // for screensaver inhibitor reporting AND as the Wayland xdg_toplevel.set_app_id value,
+    // which GNOME's dash-to-dock matches against StartupWMClass= in com.piinsta.desktop to
+    // pick the launcher icon.  Keep the friendly "VipleStream" name for audio devices via
+    // the dedicated override, but use the reverse-DNS desktop ID for SDL_APP_NAME so the
+    // streaming window groups under com.piinsta.desktop in the dock instead of falling
+    // back to argv[0] (which then has no matching .desktop file).
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, "VipleStream");
     SDL_SetHint(SDL_HINT_APP_NAME, "VipleStream");
 
@@ -1166,7 +1174,11 @@ int main(int argc, char *argv[])
         break;
     case GlobalCommandLineParser::StreamRequested:
         {
-            initialView = "qrc:/gui/CliStartStreamSegue.qml";
+            // VipleStream: CLI stream — drive Launcher directly from C++ instead
+            // of waiting for QML StackView.onActivated, which didn't fire
+            // reliably under Wayland (CliStartStreamSegue.qml:36). The GUI is
+            // only needed once `sessionCreated` fires; until then we run
+            // headless and just write progress to stderr.
             StreamingPreferences* preferences = StreamingPreferences::get();
             StreamCommandLineParser streamParser;
             streamParser.parse(app.arguments(), preferences);
@@ -1174,6 +1186,63 @@ int main(int argc, char *argv[])
             QString appName = streamParser.getAppName();
             auto launcher   = new CliStartStream::Launcher(host, appName, preferences, &app);
             engine.rootContext()->setContextProperty("launcher", launcher);
+
+            QObject::connect(launcher, &CliStartStream::Launcher::searchingComputer,
+                             []() { fprintf(stderr, "Establishing connection to PC...\n"); });
+            QObject::connect(launcher, &CliStartStream::Launcher::searchingApp,
+                             []() { fprintf(stderr, "Loading app list...\n"); });
+            QObject::connect(launcher, &CliStartStream::Launcher::failed,
+                             [&app](QString text) {
+                                 fprintf(stderr, "Stream failed: %s\n", qPrintable(text));
+                                 app.exit(1);
+                             });
+            QObject::connect(launcher, &CliStartStream::Launcher::appQuitRequired,
+                             [&app](QString runningApp) {
+                                 fprintf(stderr,
+                                         "Another app ('%s') is running on host. "
+                                         "Run 'viplestream quit <host>' first or wait for it to end.\n",
+                                         qPrintable(runningApp));
+                                 app.exit(2);
+                             });
+            QObject::connect(launcher, &CliStartStream::Launcher::sessionCreated,
+                             &app,
+                             [&engine, &app](QString sessionAppName, Session* session) {
+                                 fprintf(stderr, "Session created for '%s'; loading renderer.\n",
+                                         qPrintable(sessionAppName));
+                                 // Hand off to main.qml + StreamSegue. Context
+                                 // properties tell CliStartStreamSegue.qml to
+                                 // skip its own launcher dance and push the
+                                 // StreamSegue immediately with the session we
+                                 // already created.  Defer engine.load to the
+                                 // next event-loop tick so we unwind the
+                                 // sessionCreated signal frame before the
+                                 // QML engine starts touching it — running
+                                 // engine.load inline from inside a Launcher
+                                 // signal handler triggers a heap-corruption
+                                 // assertion (observed on Ubuntu 26.04 +
+                                 // Qt 6.10 + SDL 2.32 + picoquic linked).
+                                 engine.rootContext()->setContextProperty(
+                                     "cliStreamSession", QVariant::fromValue(session));
+                                 engine.rootContext()->setContextProperty(
+                                     "cliStreamAppName", sessionAppName);
+                                 engine.rootContext()->setContextProperty(
+                                     "initialView",
+                                     QString("qrc:/gui/CliStartStreamSegue.qml"));
+                                 engine.rootContext()->setContextProperty("runConfigChecks", false);
+                                 QTimer::singleShot(0, &app, [&engine, &app]() {
+                                     engine.load(QUrl(QStringLiteral("qrc:/gui/main.qml")));
+                                     if (engine.rootObjects().isEmpty()) {
+                                         app.exit(-1);
+                                     }
+                                 });
+                             });
+
+            // Fire after the event loop is up so signal connections are live.
+            QTimer::singleShot(0, [launcher]() {
+                launcher->execute(new ComputerManager(StreamingPreferences::get()));
+            });
+
+            hasGUI = false;  // engine.load() deferred until sessionCreated
             break;
         }
     case GlobalCommandLineParser::QuitRequested:
@@ -1187,11 +1256,39 @@ int main(int argc, char *argv[])
         }
     case GlobalCommandLineParser::PairRequested:
         {
-            initialView = "qrc:/gui/CliPair.qml";
+            // VipleStream: CLI pair — pure C++, no QML lifecycle dependency.
+            // Original CliPair.qml StackView.onActivated did not fire under
+            // Wayland (window/portal interaction), leaving the process polling
+            // STUN forever without ever invoking Launcher::execute().
             PairCommandLineParser pairParser;
             pairParser.parse(app.arguments());
-            auto launcher = new CliPair::Launcher(pairParser.getHost(), pairParser.getPredefinedPin(), &app);
+            auto launcher = new CliPair::Launcher(pairParser.getHost(),
+                                                  pairParser.getPredefinedPin(), &app);
             engine.rootContext()->setContextProperty("launcher", launcher);
+
+            QObject::connect(launcher, &CliPair::Launcher::searchingComputer,
+                             []() { fprintf(stderr, "Establishing connection to PC...\n"); });
+            QObject::connect(launcher, &CliPair::Launcher::pairing,
+                             [](QString pcName, QString pin) {
+                                 fprintf(stderr, "Pairing... Please enter '%s' on %s.\n",
+                                         qPrintable(pin), qPrintable(pcName));
+                             });
+            QObject::connect(launcher, &CliPair::Launcher::failed,
+                             [&app](QString text) {
+                                 fprintf(stderr, "Pair failed: %s\n", qPrintable(text));
+                                 app.exit(1);
+                             });
+            QObject::connect(launcher, &CliPair::Launcher::success,
+                             [&app]() {
+                                 fprintf(stderr, "Pair succeeded.\n");
+                                 app.quit();
+                             });
+
+            QTimer::singleShot(0, [launcher]() {
+                launcher->execute(new ComputerManager(StreamingPreferences::get()));
+            });
+
+            hasGUI = false;
             break;
         }
     case GlobalCommandLineParser::ListRequested:

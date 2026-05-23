@@ -372,6 +372,16 @@ StreamCommandLineParser::StreamCommandLineParser()
         {"vulkan", StreamingPreferences::RS_VULKAN},
         {"d3d11",  StreamingPreferences::RS_D3D11},
     };
+    // VipleStream §K — MP-QUIC scheduler. Values match QuicTransport.h
+    // QUIC_SCHED_* constants (auto=0, min-rtt=1, aggregate=2, redundant=3,
+    // ecf=4). Names mirror the GUI dropdown in Settings → Network.
+    m_QuicSchedulerMap = {
+        {"auto",      0},
+        {"min-rtt",   1},
+        {"aggregate", 2},
+        {"redundant", 3},
+        {"ecf",       4},
+    };
 }
 
 StreamCommandLineParser::~StreamCommandLineParser()
@@ -433,6 +443,13 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addChoiceOption("capture-system-keys", "capture system key combos", m_CaptureSysKeysModeMap.keys());
     parser.addChoiceOption("video-codec", "video codec", m_VideoCodecMap.keys());
     parser.addChoiceOption("video-decoder", "video decoder", m_VideoDecoderMap.keys());
+
+    // VipleStream §K — MP-QUIC opt-in (capability-gated by server's
+    // <VipleStreamMPQUIC>1</...>). Hard-coded congestion control (BBR);
+    // expose --quic-cc only if observation reveals BBR underperforming.
+    parser.addToggleOption("quic", "MP-QUIC multipath transport");
+    parser.addChoiceOption("quic-scheduler", "MP-QUIC scheduler",
+                           m_QuicSchedulerMap.keys());
 
     if (!parser.parse(args)) {
         parser.showError(parser.errorText());
@@ -595,6 +612,17 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     // Resolve --video-decoder option
     if (parser.isSet("video-decoder")) {
         preferences->videoDecoderSelection = mapValue(m_VideoDecoderMap, parser.getChoiceOptionValue("video-decoder"));
+    }
+
+    // VipleStream §K — Resolve --quic / --no-quic and --quic-scheduler.
+    // session.cpp:2274 also requires m_Computer->isMpQuicCapable (i.e. host
+    // advertised <VipleStreamMPQUIC>1) before flipping useQuicTransport in
+    // the StreamConfig — so --quic on a vanilla Sunshine host is a no-op.
+    preferences->enableMpQuic =
+        parser.getToggleOptionValue("quic", preferences->enableMpQuic);
+    if (parser.isSet("quic-scheduler")) {
+        preferences->mpQuicScheduler =
+            mapValue(m_QuicSchedulerMap, parser.getChoiceOptionValue("quic-scheduler"));
     }
 
     // This method will not return and terminates the process if --version or

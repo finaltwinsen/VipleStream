@@ -33,7 +33,43 @@ Item {
         quitAppDialog.open()
     }
 
+    Component.onCompleted: {
+        // VipleStream: when CLI stream drives the launcher from C++ (see
+        // main.cpp StreamRequested), the session is already created by the
+        // time this view loads.  In that case, skip the launcher.execute()
+        // dance and push the StreamSegue directly with the pre-created
+        // session.  Avoids relying on StackView.onActivated which did not
+        // fire under Wayland headless CLI invocations.
+        //
+        // Use Qt.callLater so the push happens AFTER the current push of
+        // this view completes — calling stackView.push() while still
+        // mid-push throws "cannot replace while already in the process of
+        // completing a push".
+        if (typeof cliStreamSession !== "undefined" && cliStreamSession) {
+            toolBar.visible = false
+            // VipleStream: defer to event-loop tick.  Calling stackView.push
+            // synchronously from Component.onCompleted of a view that is
+            // itself mid-push throws "cannot replace while already in the
+            // process of completing a push" in Qt 6.10.
+            Qt.callLater(function() {
+                var comp = Qt.createComponent("StreamSegue.qml")
+                var segue = comp.createObject(stackView, {
+                    "appName":   cliStreamAppName,
+                    "session":   cliStreamSession,
+                    "quitAfter": true
+                })
+                stackView.push(segue)
+            })
+        }
+    }
+
     StackView.onActivated: {
+        // Legacy path — used when the launcher hasn't been driven from C++
+        // (no cliStreamSession context property).  Kept for compatibility
+        // with any non-CLI entry point that may still load this view.
+        if (typeof cliStreamSession !== "undefined" && cliStreamSession) {
+            return
+        }
         if (!launcher.isExecuted()) {
             toolBar.visible = false
 
