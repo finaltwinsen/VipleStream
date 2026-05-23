@@ -9,12 +9,12 @@
 
 | 優先級 | 條目 | 待做事項 |
 |---|---|---|
-| **Active (verify)** | **§β.11.b** warp edge MV threshold | Settings UI slider (2-20, default 8) 已上線 v1.4.195；待使用者實測：keep 8 / 試 4（更多邊緣保護）/ 試 12（更 smooth）|
-| **Active (Phase 1-4 done + Android port)** | **§Q** MP-QUIC 多路徑網路聚合 | v1.5.0-1.5.5 ship：Phase 1 基礎 + Phase 2 multipath scheduler (ECF/REDUNDANT/MIN_RTT/AGGREGATE) + failover + FEC 互動 + Settings UI + Phase 3 OSD overlay + server 30s stats + Phase 4 0-RTT/BBR congestion/dual-stack/cellular keepalive。picoquic submodule (private-octopus, d9c705a4) pinned。Linux WSL build PASS。**Android port：** common-c MPQUIC blocks + JNI bridge + Android.mk 條件式模組已同步；Java 層（Preferences/StreamConfig/Game/MultiNetworkAdapter）先前已到位。**待：** picoquic NDK cross-compile（arm64-v8a + armeabi-v7a prebuilt .a）→ 放入 picoquic/{ABI}/ 即自動啟用 + 真實兩台機器壓測 + Sunshine Windows MSVC 端 build 驗證 |
-| **Active (verify)** | **§SLIM** release zip 瘦身 (106→48 MB) | phase 1-4 已 ship；fresh install + 首次 NCNN / Native-RIFE backend 啟動實測 flownet.bin lazy fetch（GitHub raw URL）能否 3-5s 內完成 + SHA-256 PASS；無 VC++ Runtime 的 Win10 系統實測 missing vcruntime140 提示是否清楚 |
+| **Active (verify)** | **§β.11.b** warp edge MV threshold | Settings UI slider (2-20, default 8) 已上線 v1.4.195；setting 實機 confirm 生效 (2026-05-23, registry vkfrucEdgeMvThreshold=8 + ctor log)；剩主觀畫質比較：keep 8 / 試 4（更多邊緣保護）/ 試 12（更 smooth）|
+| **Active (server done, client build pending)** | **§Q** MP-QUIC 多路徑網路聚合 | v1.5.0-1.5.5 ship + Android prebuilt .a 已就位 (commit daccc4a, arm64-v8a + armeabi-v7a + picotls + wincompat MinGW guards)。**Server-side 完整驗測 PASS** (2026-05-23, Pixel 5 ↔ Twinsen-PC-WorkStation 53 分鐘 session：path0 RTT=1ms 795Mbps、§K.7 dgramPushed=dgramQueued 100% delivery、Phase 3 30s stats、Phase 4 clean teardown localErr=0x0 remoteErr=0x0)。**待：** (1) moonlight-qt Windows MSVC client rebuild with VIPLE_MPQUIC — 需先 setup build env (pkg-config + OpenSSL Windows dev + 可能 picoquic MSVC compat 修補)，目前 release build 沒含 picoquic link；(2) Sunshine Windows MSVC 端 build 驗證；(3) 多路徑壓測（雙 NIC / WiFi+ethernet 異質鏈路） |
+| **Active (verify, partial bug)** | **§SLIM** release zip 瘦身 (106→48 MB) | phase 1-4 已 ship。**NCNN backend lazy fetch path 確認接通** (ncnnfruc.cpp:1063/2714 → ensureRifeModelDir → ModelFetcher)。**⚠️ Bug：Vulkan Native RIFE 路徑沒接 ModelFetcher** — rife_native_vk.cpp 4 處 (line 3669/4998/7413/7705) 直接 modelDir+/flownet.bin 載入；2026-05-23 實機驗：cache 空時 RifeNativeExecutor init failed → fallback block-match path (鐵律 OK 不 crash)，但 lazy fetch 沒生效。**Fix：** VkFrucRenderer 對 RifeNativeExecutor::initialize 的 caller 端先 ensureRifeModelDir(opts.modelDir)。剩餘原項：無 VC++ Runtime Win10 系統實測 missing vcruntime140 提示 |
 | **Deferred (hw-bound)** | **§B Phase B** HEVC D3D11VA → Vulkan composite | Code 已 ship v1.4.184-185；阻塞：AMD 780M 測試機 HEVC D3D11VA 本身不可用。需換另一台 D3D11VA HEVC HW decode 可用的 AMD 機器驗 B7 import + B9 FRUC chain |
 | **Active (test pending)** | **§B-NVOF autotier** NVOF 成為 NV 最佳 tier | Code 已 ship v1.4.117-138；待使用者 PixArk 20+ 分鐘實測，看 NVOF-PROF drop% 是否接近 0%、chain_mean 是否穩定 < 2ms。若 OK → reapply early-kickoff + NVOF 列 NV best tier；若 drop% 高 → 需 Option E skip 機制 |
-| **Active (follow-up)** | **§R2 PASSIVE FRUC** ratio controller | v1.4.169-186 已 ship ratio alignment gate + extreme floor。剩：觀察 latency pattern 是否還有 T2→T0 大幅跳降；display Hz=0 legacy renderer fallback 是否需補 |
+| **Active (follow-up)** | **§R2 PASSIVE FRUC** ratio controller | v1.4.169-186 已 ship ratio alignment gate + extreme floor。**T2→T0 大幅跳降實機觀察 (2026-05-23)：** alignment gate ship 後僅在 stream 初期 1 次出現 (latency=409.31ms 屬 decode-warmup)，立刻被 promote 機制接住 (T0→T2→T3→T4)，stream 穩定階段未再出現 ✅。剩：display Hz=0 legacy renderer fallback 是否需補 |
 | **Active (verify)** | **§M.parity Android** wire/UX | v1.4.160 ship W1-W5+U6+U7；Pixel 5 待 install + adb logcat 確認 `[VIPLE-PARITY]` log 真實生效 |
 | **Active (verify)** | **§K.dd.revert.1** display device revert | v1.4.156 ghost-check fix 已 ship；待使用者把 `dd_configuration_option` 從 `disabled` 改回 `ensure_only_display`，stream + disconnect 確認不再卡死 |
 | **✅ Completed** | **§K.linux VAAPI→Vulkan bridge** | K.3 + §β.12.fix PASS v1.4.188-193：Vega 10 VAAPI + RIFE + FRUC dual-present end-to-end 通，frame#720 無 crash |
@@ -50,10 +50,45 @@ PixArk 20+ 分鐘測試後看 log：
 1. 串流 HEVC → log 出現 `initializeCompositeD3D11 OK` + `B7 first frame imported`
 2. 連續 60 秒不出錯 → 進 B9 (FRUC chain + present)
 
+### §Q Windows MSVC client picoquic build env setup
+
+2026-05-23 嘗試 cmake configure `Sunshine/third-party/picoquic` 與 MSVC + Ninja，
+撞兩面牆：
+
+1. PTLS not found → 加 `-DPICOQUIC_FETCH_PTLS=ON` 解（FetchContent 抓 picotls source 進 _deps/）
+2. picotls 自己的 CMakeLists.txt:12 找 PkgConfig 失敗
+
+本機環境缺：
+- pkg-config（Get-Command pkg-config 空）
+- OpenSSL Windows dev headers/libs（只有 Git MinGW 附 openssl.exe，非 dev）
+- vcpkg（D:\\Mission\\VipleStream\\vcpkg / C:\\vcpkg / D:\\vcpkg 都沒）
+
+已備齊：chocolatey、MSVC 2022 BuildTools、Qt 6.10.3 msvc2022_64、cmake 3.31、ninja。
+
+下一步（需 admin elevation）：
+
+1. `choco install pkgconfiglite -y`
+2. `choco install openssl -y` 或 `vcpkg install openssl:x64-windows`
+3. cmake configure 加 `OPENSSL_ROOT_DIR=<install path>`
+4. 對症處理 picoquic MSVC 端 compat（commit fca3a5b 已加 MinGW guards 但沒提 MSVC）
+5. 改 `build_moonlight.cmd` 加 `--mpquic` 開關（傳 `DEFINES+=VIPLE_MPQUIC` 給 qmake）
+6. bump version + rebuild + smoke test + stream verify [VIPLE-MPQUIC] client log
+
+### §SLIM Vulkan Native RIFE fix
+
+`ncnnfruc.cpp:61` 的 `ensureRifeModelDir(modelDir)` helper 是 anonymous namespace
+static。要：
+
+1. 把 helper expose（搬到 modelfetcher.h / 自己拉成 shared util）
+2. VkFrucRenderer 對 `RifeNativeExecutor::initialize(opts)` 的 caller 端先呼叫
+   `ensureRifeModelDir(opts.modelDir)`，把回傳的 cache dir 取代 `opts.modelDir`
+3. 驗測：清 `%LOCALAPPDATA%\\VipleStream\\fruc_models\\` → registry vkfrucEnableNativeRife=true → stream → 預期看 [VIPLE-MODELFETCH] download flownet.bin 5-10s + SHA-256 OK + RIFE init success
+
 ### §R2 PASSIVE FRUC 剩餘觀察項目
 
-- autotier T2→T0 大幅跳降是否還出現（alignment gate ship 後應少很多）
+- ~~autotier T2→T0 大幅跳降是否還出現~~ **2026-05-23 confirmed：alignment gate 後只在 stream 初期 decode-warmup 出現 1 次，立刻 promote 接回** ✅
 - 進 2x 後 server recv 從 ~180 掉 ~140 是否仍有（alignment gate 應消除）
+- display Hz=0 legacy renderer fallback 是否需補
 
 ### §M.2 雙使用者並發 VM 驗測清單
 
