@@ -36,6 +36,7 @@ cmake -S "$SRC" -B "$BUILD" \
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
     -DBUILD_TESTS=OFF \
     -DBUILD_DOCS=OFF \
+    -DVIPLE_MPQUIC=ON \
     -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-multiple-definition" \
     $EXTRA_FLAGS
 

@@ -5,6 +5,41 @@ include $(call all-subdir-makefiles)
 
 LOCAL_PATH := $(MY_LOCAL_PATH)
 
+# ── VipleStream §Q: picoquic + picotls static libraries ──────
+# When prebuilt .a exist under picoquic/$(TARGET_ARCH_ABI)/, enable
+# VIPLE_MPQUIC and link them.  Otherwise the MPQUIC code paths are
+# compiled out via #ifdef.
+PICOQUIC_LIB_DIR := $(LOCAL_PATH)/picoquic/$(TARGET_ARCH_ABI)
+PICOQUIC_AVAILABLE := $(wildcard $(PICOQUIC_LIB_DIR)/libpicoquic-core.a)
+
+ifneq ($(PICOQUIC_AVAILABLE),)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := picoquic-core
+LOCAL_SRC_FILES := picoquic/$(TARGET_ARCH_ABI)/libpicoquic-core.a
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/picoquic/include
+include $(PREBUILT_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := picotls-openssl
+LOCAL_SRC_FILES := picoquic/$(TARGET_ARCH_ABI)/libpicotls-openssl.a
+include $(PREBUILT_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := picotls-core
+LOCAL_SRC_FILES := picoquic/$(TARGET_ARCH_ABI)/libpicotls-core.a
+include $(PREBUILT_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := picotls-minicrypto
+LOCAL_SRC_FILES := picoquic/$(TARGET_ARCH_ABI)/libpicotls-minicrypto.a
+include $(PREBUILT_STATIC_LIBRARY)
+
+endif # PICOQUIC_AVAILABLE
+
+# ── moonlight-core ────────────────────────────────────────────
+LOCAL_PATH := $(MY_LOCAL_PATH)
+
 include $(CLEAR_VARS)
 LOCAL_MODULE    := moonlight-core
 
@@ -30,6 +65,8 @@ LOCAL_SRC_FILES := moonlight-common-c/src/AudioStream.c \
                    moonlight-common-c/src/SimpleStun.c \
                    moonlight-common-c/src/VideoDepacketizer.c \
                    moonlight-common-c/src/VideoStream.c \
+                   moonlight-common-c/src/PlatformNetIf.c \
+                   moonlight-common-c/src/QuicTransport.c \
                    moonlight-common-c/enet/callbacks.c \
                    moonlight-common-c/enet/compress.c \
                    moonlight-common-c/enet/host.c \
@@ -55,6 +92,12 @@ LOCAL_C_INCLUDES := $(LOCAL_PATH)/moonlight-common-c/enet/include \
 LOCAL_CFLAGS := -DHAS_SOCKLEN_T=1 -DLC_ANDROID -DHAVE_CLOCK_GETTIME=1 -DNDEBUG \
                 -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__
 
+# VipleStream §Q: enable MP-QUIC when picoquic prebuilt is available
+ifneq ($(PICOQUIC_AVAILABLE),)
+LOCAL_CFLAGS += -DVIPLE_MPQUIC=1
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/picoquic/include
+endif
+
 ifeq ($(NDK_DEBUG),1)
 LOCAL_CFLAGS += -DLC_DEBUG
 endif
@@ -62,6 +105,9 @@ endif
 LOCAL_LDLIBS := -llog -landroid
 
 LOCAL_STATIC_LIBRARIES := libopus libssl libcrypto cpufeatures
+ifneq ($(PICOQUIC_AVAILABLE),)
+LOCAL_STATIC_LIBRARIES += picoquic-core picotls-openssl picotls-core picotls-minicrypto
+endif
 LOCAL_LDFLAGS += -Wl,--exclude-libs,ALL
 
 LOCAL_BRANCH_PROTECTION := standard

@@ -5,6 +5,9 @@
 
 #include <Limelight.h>
 #include "HolePunch.h"  // VipleStream: LiHolePunch + LocalControlPort
+#ifdef VIPLE_MPQUIC
+#include "PlatformNetIf.h"
+#endif
 
 #include <opus_multistream.h>
 #include <android/log.h>
@@ -462,7 +465,9 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
                                                            jint clientRefreshRateX100,
                                                            jbyteArray riAesKey, jbyteArray riAesIv,
                                                            jint videoCapabilities,
-                                                           jint colorSpace, jint colorRange) {
+                                                           jint colorSpace, jint colorRange,
+                                                           jboolean enableMpQuic, jint mpQuicScheduler,
+                                                           jint mpQuicPort) {
     SERVER_INFORMATION serverInfo = {
             .address = (*env)->GetStringUTFChars(env, address, 0),
             .serverInfoAppVersion = (*env)->GetStringUTFChars(env, appVersion, 0),
@@ -482,7 +487,13 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
             .clientRefreshRateX100 = clientRefreshRateX100,
             .encryptionFlags = ENCFLG_AUDIO,
             .colorSpace = colorSpace,
-            .colorRange = colorRange
+            .colorRange = colorRange,
+#ifdef VIPLE_MPQUIC
+            .useQuicTransport = enableMpQuic ? 1 : 0,
+            .quicPort = mpQuicPort,
+            .quicScheduler = mpQuicScheduler,
+            .quicCongestion = 1, // BBR default, optimal for streaming
+#endif
     };
 
     jbyte* riAesKeyBuf = (*env)->GetByteArrayElements(env, riAesKey, NULL);
@@ -494,6 +505,13 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
     (*env)->ReleaseByteArrayElements(env, riAesIv, riAesIvBuf, JNI_ABORT);
 
     BridgeVideoRendererCallbacks.capabilities = videoCapabilities;
+
+#ifndef VIPLE_MPQUIC
+    // Suppress unused parameter warnings when MP-QUIC is not compiled in
+    (void)enableMpQuic;
+    (void)mpQuicScheduler;
+    (void)mpQuicPort;
+#endif
 
     // Enable all encryption features if the platform has fast AES support
     if (hasFastAes()) {
@@ -548,4 +566,77 @@ Java_com_limelight_nvstream_jni_MoonBridge_holePunch(JNIEnv *env, jclass clazz,
 JNIEXPORT jint JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_getLocalControlPort(JNIEnv *env, jclass clazz) {
     return (jint)LocalControlPort;
+}
+
+// VipleStream §Q: inject Android network interface list into native MPQUIC layer.
+// Called from Java before startConnection() so that lcEnumNetInterfaces() returns
+// the real WiFi / Cellular / Ethernet interfaces for QUIC subflow creation.
+JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_setNetInterfaces(JNIEnv *env, jclass clazz,
+                                                             jobjectArray names,
+                                                             jintArray types,
+                                                             jintArray families,
+                                                             jobjectArray addrs) {
+#ifdef VIPLE_MPQUIC
+    int count = (*env)->GetArrayLength(env, names);
+    if (count > LC_NETIF_MAX_COUNT)
+        count = LC_NETIF_MAX_COUNT;
+
+    jint *typeArr = (*env)->GetIntArrayElements(env, types, NULL);
+    jint *familyArr = (*env)->GetIntArrayElements(env, families, NULL);
+
+    LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
+    memset(interfaces, 0, sizeof(interfaces));
+
+    for (int i = 0; i < count; i++) {
+        // Name
+        jstring jname = (jstring)(*env)->GetObjectArrayElement(env, names, i);
+        const char *nameStr = (*env)->GetStringUTFChars(env, jname, NULL);
+        strncpy(interfaces[i].name, nameStr, LC_NETIF_MAX_NAME - 1);
+        (*env)->ReleaseStringUTFChars(env, jname, nameStr);
+
+        // Type (map Android NetworkCapabilities.TRANSPORT_* to LC_NETIF_TYPE_*)
+        switch (typeArr[i]) {
+            case 1:  interfaces[i].type = LC_NETIF_TYPE_WIFI;     break; // TRANSPORT_WIFI
+            case 0:  interfaces[i].type = LC_NETIF_TYPE_CELLULAR; break; // TRANSPORT_CELLULAR
+            case 3:  interfaces[i].type = LC_NETIF_TYPE_ETHERNET; break; // TRANSPORT_ETHERNET
+            case 4:  interfaces[i].type = LC_NETIF_TYPE_VPN;      break; // TRANSPORT_VPN
+            default: interfaces[i].type = LC_NETIF_TYPE_UNKNOWN;  break;
+        }
+
+        // Address family and sockaddr
+        interfaces[i].family = familyArr[i];
+        interfaces[i].up = true;
+        interfaces[i].index = i;
+
+        // Raw address bytes → sockaddr_storage
+        jbyteArray addrBytes = (jbyteArray)(*env)->GetObjectArrayElement(env, addrs, i);
+        jint addrLen = (*env)->GetArrayLength(env, addrBytes);
+        jbyte *addrBuf = (*env)->GetByteArrayElements(env, addrBytes, NULL);
+
+        if (familyArr[i] == AF_INET && addrLen >= 4) {
+            struct sockaddr_in *sin = (struct sockaddr_in *)&interfaces[i].addr;
+            sin->sin_family = AF_INET;
+            memcpy(&sin->sin_addr, addrBuf, 4);
+            interfaces[i].addrLen = sizeof(struct sockaddr_in);
+        } else if (familyArr[i] == AF_INET6 && addrLen >= 16) {
+            struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&interfaces[i].addr;
+            sin6->sin6_family = AF_INET6;
+            memcpy(&sin6->sin6_addr, addrBuf, 16);
+            interfaces[i].addrLen = sizeof(struct sockaddr_in6);
+        }
+
+        (*env)->ReleaseByteArrayElements(env, addrBytes, addrBuf, JNI_ABORT);
+    }
+
+    (*env)->ReleaseIntArrayElements(env, types, typeArr, JNI_ABORT);
+    (*env)->ReleaseIntArrayElements(env, families, familyArr, JNI_ABORT);
+
+    lcSetNetInterfacesFromJni(interfaces, count);
+
+    __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c",
+                        "[VIPLE-MPQUIC] setNetInterfaces: injected %d interface(s)", count);
+#else
+    (void)env; (void)clazz; (void)names; (void)types; (void)families; (void)addrs;
+#endif
 }

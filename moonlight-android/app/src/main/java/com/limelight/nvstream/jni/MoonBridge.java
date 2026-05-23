@@ -344,6 +344,15 @@ public class MoonBridge {
         MoonBridge.connectionListener = null;
     }
 
+    // VipleStream §Q: inject network interfaces into native MPQUIC layer.
+    // Must be called BEFORE startConnection() so QUIC subflows can be created.
+    // names: interface names (wlan0, rmnet0, etc.)
+    // types: NetworkCapabilities.TRANSPORT_* values (1=WIFI, 0=CELLULAR, 3=ETHERNET)
+    // families: AF_INET (2) or AF_INET6 (10) for each interface
+    // addrs: raw IP address bytes (4 bytes for IPv4, 16 for IPv6)
+    public static native void setNetInterfaces(String[] names, int[] types,
+                                                int[] families, byte[][] addrs);
+
     public static native int startConnection(String address, String appVersion, String gfeVersion,
                                               String rtspSessionUrl, int serverCodecModeSupport,
                                               int width, int height, int fps,
@@ -352,7 +361,9 @@ public class MoonBridge {
                                               int clientRefreshRateX100,
                                               byte[] riAesKey, byte[] riAesIv,
                                               int videoCapabilities,
-                                              int colorSpace, int colorRange);
+                                              int colorSpace, int colorRange,
+                                              boolean enableMpQuic, int mpQuicScheduler,
+                                              int mpQuicPort);
 
     // VipleStream: client-side NAT hole punch. Must be called BEFORE startConnection()
     // so LocalControlPort is set when ENet binds. Returns 0 on success, negative on failure.

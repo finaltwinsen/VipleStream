@@ -1690,9 +1690,37 @@ namespace stream {
         // port lookups, and scratch buffer outside the per-FEC-block / per-shard
         // loops.  These values are constant for the entire frame.
 #ifdef VIPLE_MPQUIC
-        const bool use_quic =
-          session->tunnel &&
-          session->tunnel->carrier() == udp_tunnel::Carrier::QUIC_DIRECT;
+        // §K.5 fix: use_quic 由 QUIC session 實際存在與否決定，
+        // 不再依賴 carrier type == QUIC_DIRECT。LAN 直連 (DIRECT)
+        // 也可以走 QUIC datagram 路徑，只要 client 已建立 QUIC session。
+        // 若 session 不存在則自動 fallback 到 tunnel 或直接 UDP。
+        std::shared_ptr<quic_server::QuicSession> quicVideoSession;
+        if (config::stream.mpquic_enabled && quic_server::g_listener) {
+          auto peerAddr = session->video.peer.address();
+          quicVideoSession = quic_server::g_listener->getSession(peerAddr);
+          // 診斷 log：session lookup 結果
+          {
+            static bool diag_once = false;
+            if (!diag_once) {
+              BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.5 diag: video peer="
+                              << peerAddr.to_string()
+                              << " is_v4=" << peerAddr.is_v4()
+                              << " is_v6=" << peerAddr.is_v6()
+                              << " session=" << (quicVideoSession ? "FOUND" : "NULL")
+                              << " listener=" << (quic_server::g_listener ? "OK" : "NULL");
+              diag_once = true;
+            }
+          }
+        }
+        const bool use_quic = (quicVideoSession != nullptr);
+        if (use_quic) {
+          static bool logged_once = false;
+          if (!logged_once) {
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.5 video routing via QUIC datagram (peer="
+                            << session->video.peer.address().to_string() << ")";
+            logged_once = true;
+          }
+        }
 #else
         const bool use_quic = false;
 #endif
@@ -1701,16 +1729,6 @@ namespace stream {
           session->tunnel &&
           session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
           session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
-
-#ifdef VIPLE_MPQUIC
-        // Cache QUIC session pointer for this frame — avoids per-shard
-        // hash-map lookup.
-        std::shared_ptr<quic_server::QuicSession> quicVideoSession;
-        if (use_quic && quic_server::g_listener) {
-          quicVideoSession = quic_server::g_listener->getSession(
-              session->video.peer.address());
-        }
-#endif
 
         // Pre-resolve tunnel ports (constant for this session)
         const uint16_t tunnel_video_server_port = use_tunnel ? net::map_port(VIDEO_STREAM_PORT) : 0;
@@ -1986,9 +2004,21 @@ namespace stream {
       auto peer_address = session->audio.peer.address();
       try {
 #ifdef VIPLE_MPQUIC
-        const bool use_quic_audio =
-          session->tunnel &&
-          session->tunnel->carrier() == udp_tunnel::Carrier::QUIC_DIRECT;
+        // §K.5 fix: 同 video 路徑 — 以 QUIC session 存在與否決定
+        std::shared_ptr<quic_server::QuicSession> quicAudioSession;
+        if (config::stream.mpquic_enabled && quic_server::g_listener) {
+          quicAudioSession = quic_server::g_listener->getSession(
+              session->audio.peer.address());
+        }
+        const bool use_quic_audio = (quicAudioSession != nullptr);
+        if (use_quic_audio) {
+          static bool logged_once = false;
+          if (!logged_once) {
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.5 audio routing via QUIC datagram (peer="
+                            << session->audio.peer.address().to_string() << ")";
+            logged_once = true;
+          }
+        }
 #else
         const bool use_quic_audio = false;
 #endif
@@ -1998,17 +2028,6 @@ namespace stream {
           session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
           session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
         const uint16_t server_audio_port = net::map_port(AUDIO_STREAM_PORT);
-
-#ifdef VIPLE_MPQUIC
-        // [VIPLE-PERF] Cache QUIC session lookup for this audio packet —
-        // reused by both the data send and FEC shard sends below, avoiding
-        // per-shard hash-map lookup.
-        std::shared_ptr<quic_server::QuicSession> quicAudioSession;
-        if (use_quic_audio && quic_server::g_listener) {
-          quicAudioSession = quic_server::g_listener->getSession(
-              session->audio.peer.address());
-        }
-#endif
 
 #ifdef VIPLE_MPQUIC
         if (use_quic_audio) {

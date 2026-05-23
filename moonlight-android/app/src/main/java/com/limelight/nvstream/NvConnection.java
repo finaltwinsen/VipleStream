@@ -614,6 +614,71 @@ public class NvConnection {
                                 + MoonBridge.getLocalControlPort());
                     }
 
+                    // VipleStream §Q: inject network interfaces before starting
+                    // so QUIC multipath can create subflows for WiFi + Cellular.
+                    if (context.streamConfig.getMpQuicEnabled()) {
+                        try {
+                            ConnectivityManager cm = (ConnectivityManager)
+                                    appContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+                            if (cm != null) {
+                                Network[] networks = cm.getAllNetworks();
+                                if (networks != null) {
+                                    java.util.ArrayList<String> nameList = new java.util.ArrayList<>();
+                                    java.util.ArrayList<Integer> typeList = new java.util.ArrayList<>();
+                                    java.util.ArrayList<Integer> familyList = new java.util.ArrayList<>();
+                                    java.util.ArrayList<byte[]> addrList = new java.util.ArrayList<>();
+
+                                    for (Network net : networks) {
+                                        NetworkCapabilities caps = cm.getNetworkCapabilities(net);
+                                        LinkProperties props = cm.getLinkProperties(net);
+                                        if (caps == null || props == null) continue;
+                                        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET))
+                                            continue;
+
+                                        int transport = -1;
+                                        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))
+                                            transport = NetworkCapabilities.TRANSPORT_WIFI;
+                                        else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))
+                                            transport = NetworkCapabilities.TRANSPORT_CELLULAR;
+                                        else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+                                            transport = NetworkCapabilities.TRANSPORT_ETHERNET;
+                                        if (transport < 0) continue;
+
+                                        String ifName = props.getInterfaceName();
+                                        if (ifName == null) ifName = "unknown";
+
+                                        for (android.net.LinkAddress la : props.getLinkAddresses()) {
+                                            InetAddress a = la.getAddress();
+                                            if (a.isLoopbackAddress()) continue;
+                                            byte[] raw = a.getAddress();
+                                            int family = (raw.length == 4) ? 2 : 10; // AF_INET=2, AF_INET6=10
+                                            nameList.add(ifName);
+                                            typeList.add(transport);
+                                            familyList.add(family);
+                                            addrList.add(raw);
+                                            LimeLog.info("[VIPLE-MPQUIC] Interface: " + ifName
+                                                    + " type=" + transport + " addr=" + a.getHostAddress());
+                                        }
+                                    }
+
+                                    if (!nameList.isEmpty()) {
+                                        String[] names = nameList.toArray(new String[0]);
+                                        int[] types = new int[typeList.size()];
+                                        int[] families = new int[familyList.size()];
+                                        for (int i = 0; i < typeList.size(); i++) {
+                                            types[i] = typeList.get(i);
+                                            families[i] = familyList.get(i);
+                                        }
+                                        byte[][] addrs = addrList.toArray(new byte[0][]);
+                                        MoonBridge.setNetInterfaces(names, types, families, addrs);
+                                    }
+                                }
+                            }
+                        } catch (Exception e) {
+                            LimeLog.warning("[VIPLE-MPQUIC] Failed to enumerate interfaces: " + e.getMessage());
+                        }
+                    }
+
                     int ret = MoonBridge.startConnection(context.serverAddress.address,
                             context.serverAppVersion, context.serverGfeVersion, context.rtspSessionUrl,
                             context.serverCodecModeSupport,
@@ -626,7 +691,10 @@ public class NvConnection {
                             context.riKey.getEncoded(), ib.array(),
                             context.videoCapabilities,
                             context.streamConfig.getColorSpace(),
-                            context.streamConfig.getColorRange());
+                            context.streamConfig.getColorRange(),
+                            context.streamConfig.getMpQuicEnabled(),
+                            context.streamConfig.getMpQuicScheduler(),
+                            context.streamConfig.getMpQuicPort());
                     if (ret != 0) {
                         // LiStartConnection() failed, so the caller is not expected
                         // to stop the connection themselves. We need to release their
