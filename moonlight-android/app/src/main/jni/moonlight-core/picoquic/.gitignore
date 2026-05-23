@@ -1,0 +1,8 @@
+# Build temporaries
+build-tmp/
+picotls-src/
+
+# Keep prebuilt .a and headers — these are committed
+!arm64-v8a/*.a
+!armeabi-v7a/*.a
+!include/*.h
