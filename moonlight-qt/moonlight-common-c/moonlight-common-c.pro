@@ -103,15 +103,17 @@ CONFIG(debug, debug|release) {
 # VipleStream: MP-QUIC multipath transport (opt-in)
 # Enable with: qmake DEFINES+=VIPLE_MPQUIC
 contains(DEFINES, VIPLE_MPQUIC) {
+    PICOQUIC_DIR = $$PWD/../../Sunshine/third-party/picoquic/picoquic
     SOURCES += \
         $$COMMON_C_DIR/src/PlatformNetIf.c \
         $$COMMON_C_DIR/src/QuicTransport.c
     HEADERS += \
         $$COMMON_C_DIR/src/PlatformNetIf.h \
         $$COMMON_C_DIR/src/QuicTransport.h
-    # picoquic submodule lives under Sunshine/third-party. Relative path
-    # from moonlight-qt/moonlight-common-c/ up two levels to repo root,
-    # then down into Sunshine.
-    INCLUDEPATH += $$PWD/../../Sunshine/third-party/picoquic/picoquic
-    win32:LIBS += -liphlpapi
+    INCLUDEPATH += $$PICOQUIC_DIR
+    win32 {
+        DEFINES += _WINDOWS
+        SOURCES += $$PICOQUIC_DIR/wintimeofday.c
+        LIBS += -liphlpapi
+    }
 }

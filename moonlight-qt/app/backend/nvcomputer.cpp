@@ -679,14 +679,17 @@ bool NvComputer::update(const NvComputer& that)
     // PcView badge / Steam profile dropdown never appear.
     ASSIGN_IF_CHANGED(isVipleStreamPeer);
     ASSIGN_IF_CHANGED(vipleStreamProtocol);
-    // VipleStream §K — MP-QUIC capability flag was parsed in the
-    // serverInfo ctor but never propagated through update(), so any
-    // poll after the QSettings-loaded NvComputer (which has the
-    // default isMpQuicCapable=false from nvcomputer.h:134) silently
-    // discarded the live serverinfo value.  Session::exec() then saw
-    // isMpQuicCapable==false at session.cpp:2274 and skipped the
-    // entire #ifdef VIPLE_MPQUIC config block even when the host
-    // advertised <VipleStreamMPQUIC>1</...>.
+    // VipleStream §K / §Q 2026-05-23 — Same root cause as the H.5 fix
+    // above:  MP-QUIC capability flag was parsed in the serverInfo ctor
+    // but never propagated through update(), so any poll after the
+    // QSettings-loaded NvComputer (which has the default
+    // isMpQuicCapable=false from nvcomputer.h:134) silently discarded
+    // the live serverinfo value.  Session::exec() then saw
+    // isMpQuicCapable==false at session.cpp:2274 and skipped the entire
+    // #ifdef VIPLE_MPQUIC config block even when the host advertised
+    // <VipleStreamMPQUIC>1</...>.  Found independently on Windows when
+    // the v1.5.30 build's [VIPLE-MPQUIC-DIAG] trace showed the field
+    // arriving as "" despite a 831-byte serverinfo with the tag.
     ASSIGN_IF_CHANGED(isMpQuicCapable);
     ASSIGN_IF_CHANGED(vipleStreamMPQUIC);
     ASSIGN_IF_CHANGED(maxLumaPixelsHEVC);

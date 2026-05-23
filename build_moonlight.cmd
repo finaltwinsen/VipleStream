@@ -16,7 +16,11 @@ setlocal enabledelayedexpansion
 :: =============================================================================
 
 set "BUMP=1"
-if /i "%~1"=="--no-bump" set "BUMP=0"
+set "MPQUIC=0"
+for %%a in (%*) do (
+    if /i "%%~a"=="--no-bump" set "BUMP=0"
+    if /i "%%~a"=="--mpquic" set "MPQUIC=1"
+)
 
 if exist "%~dp0build-config.local.cmd" (
     call "%~dp0build-config.local.cmd"
@@ -63,7 +67,12 @@ cd /d "%SRC%"
 :: Force qmake to regenerate Makefile (version.txt changed but .pro didn't)
 copy /b "%SRC%\app\app.pro"+,, "%SRC%\app\app.pro" >nul 2>&1
 
-qmake moonlight-qt.pro CONFIG+=release
+set "QMAKE_ARGS=moonlight-qt.pro CONFIG+=release"
+if "%MPQUIC%"=="1" (
+    set "QMAKE_ARGS=%QMAKE_ARGS% DEFINES+=VIPLE_MPQUIC"
+    echo   MP-QUIC: ENABLED
+)
+qmake %QMAKE_ARGS%
 if errorlevel 1 (
     echo [ERROR] qmake failed
     exit /b 1

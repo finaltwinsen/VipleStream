@@ -42,70 +42,13 @@
 
 namespace {
 
-// §SLIM 2026-05-21 — RIFE model dir resolver.  flownet.param ships in
-// the release zip (36 KB); flownet.bin (11 MB) is fetched on demand
-// via ModelFetcher and cached under %LOCALAPPDATA%\VipleStream\
-// fruc_models\rife-v4.25-lite\.
-//
-// Returns a directory containing both files (so callers that pass a
-// modelDir into the rife_native_vk executor or ncnn loader get a
-// single coherent path).  Resolution order:
-//   1. Data dir (legacy install / dev tree where both files bundled)
-//      — use directly with no copy.
-//   2. Hybrid: ModelFetcher fetches flownet.bin into the cache dir,
-//      then we copy flownet.param from the data dir into the same
-//      cache dir so the caller sees one self-contained model dir.
-//   3. Failure (no data, no network) — return empty; caller logs and
-//      the FRUC backend cascade picks the next available option
-//      (Generic / NvOFFRUC / DML).
-QString ensureRifeModelDir(const std::string& modelDir)
-{
-    QString modelSubdir = QString::fromStdString(modelDir);
-    QString paramRel = modelSubdir + "/flownet.param";
-    QString binRel   = modelSubdir + "/flownet.bin";
-
-    // 1. Full bundle in data dir?
-    QString dataParam = Path::getDataFilePath(paramRel);
-    QString dataBin   = Path::getDataFilePath(binRel);
-    if (!dataParam.isEmpty() && !dataBin.isEmpty()) {
-        return QFileInfo(dataParam).absolutePath();
-    }
-
-    // 2. Hybrid path needs at minimum flownet.param somewhere on disk —
-    // can't reconstruct that one over the network.
-    if (dataParam.isEmpty()) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC-NCNN] flownet.param missing from data dir; "
-                    "RIFE-based FRUC backends disabled this launch");
-        return QString();
-    }
-
-    // Lazy fetch flownet.bin (no-op if already cached + SHA-256 matches).
-    QString fetchedBin = ModelFetcher::ensureModelPath(binRel);
-    if (fetchedBin.isEmpty()) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-FRUC-NCNN] flownet.bin lazy fetch failed; cascade "
-                    "skips NCNN / Native-RIFE this launch (no network or hash "
-                    "mismatch — see [VIPLE-MODELFETCH] log lines for cause)");
-        return QString();
-    }
-
-    // Use the cache dir alongside the fetched .bin as the model dir, and
-    // make sure flownet.param sits next to it (caller treats modelDir as
-    // a self-contained bundle).
-    QString cacheModelDir = QFileInfo(fetchedBin).absolutePath();
-    QString cachedParam   = QDir(cacheModelDir).absoluteFilePath("flownet.param");
-    if (!QFile::exists(cachedParam)) {
-        if (!QFile::copy(dataParam, cachedParam)) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC-NCNN] failed to copy flownet.param into "
-                        "cache (%s -> %s)",
-                        qPrintable(dataParam), qPrintable(cachedParam));
-            return QString();
-        }
-    }
-    return cacheModelDir;
-}
+// §SLIM 2026-05-23 — ensureRifeModelDir() moved to modelfetcher.cpp so
+// VkFrucRenderer's Vulkan Native-RIFE path can share the same lazy-fetch
+// resolver.  Existing call sites in this file (line 1063 / 2714) keep
+// working unchanged because the free function is now declared in
+// modelfetcher.h (already #included on line 10).  Log prefix changed
+// [VIPLE-FRUC-NCNN] → [VIPLE-FRUC-MODEL] inside the helper now that both
+// backends share it.
 
 // Median of a small float vector (no need for nth_element optimisation).
 double median(std::vector<double> xs)

@@ -2,6 +2,7 @@
 // for the design rationale.
 
 #include "modelfetcher.h"
+#include "path.h"  // §SLIM 2026-05-23 — ensureRifeModelDir uses Path::getDataFilePath
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -293,4 +294,72 @@ QString ModelFetcher::ensureModelPath(const QString& filename)
                 "DirectML backend will fall back to inline blend graph",
                 spec->filename);
     return QString();
+}
+
+// §SLIM 2026-05-21 — RIFE model dir resolver.  See modelfetcher.h header
+// comment for resolution order and rationale.  Promoted from ncnnfruc.cpp's
+// anonymous namespace on 2026-05-23 so VkFrucRenderer can share the same
+// lazy-fetch path (previously rife_native_vk.cpp went straight to
+// modelDir+"/flownet.bin" via Path::getDataFilePath and failed on slim
+// releases where flownet.bin only lives in cache after first fetch).
+QString ensureRifeModelDir(const std::string& modelDir)
+{
+    QString modelSubdir = QString::fromStdString(modelDir);
+    QString paramRel = modelSubdir + "/flownet.param";
+    QString binRel   = modelSubdir + "/flownet.bin";
+
+    // 1. Full bundle in data dir?
+    //
+    // §SLIM 2026-05-23 — Path::getDataFilePath() also returns Qt resource
+    // paths (":/data/..." prefix) when the file is declared in app.qrc but
+    // not present on disk.  rife_native_vk / ncnn::Net both call QFile::open
+    // on the raw path which fails for Qt resource paths (the native loader
+    // does not understand Qt's vfs), so treat ":/" results as "not on disk"
+    // and fall through to lazy fetch.  Without this guard the helper falsely
+    // claims the deploy dir has flownet.bin and the executor opens a
+    // non-existent file (which is the exact bug §SLIM Phase 3 left behind
+    // for the Vulkan path).
+    QString dataParam = Path::getDataFilePath(paramRel);
+    QString dataBin   = Path::getDataFilePath(binRel);
+    bool paramOnDisk = !dataParam.isEmpty() && !dataParam.startsWith(QLatin1String(":/"));
+    bool binOnDisk   = !dataBin.isEmpty()   && !dataBin.startsWith(QLatin1String(":/"));
+    if (paramOnDisk && binOnDisk) {
+        return QFileInfo(dataParam).absolutePath();
+    }
+
+    // 2. Hybrid path needs at minimum flownet.param somewhere on disk —
+    // can't reconstruct that one over the network.
+    if (!paramOnDisk) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-MODEL] flownet.param missing from data dir "
+                    "(or only inside Qt resource bundle); RIFE-based FRUC "
+                    "backends disabled this launch");
+        return QString();
+    }
+
+    // Lazy fetch flownet.bin (no-op if already cached + SHA-256 matches).
+    QString fetchedBin = ModelFetcher::ensureModelPath(binRel);
+    if (fetchedBin.isEmpty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC-MODEL] flownet.bin lazy fetch failed; cascade "
+                    "skips NCNN / Native-RIFE this launch (no network or hash "
+                    "mismatch — see [VIPLE-MODELFETCH] log lines for cause)");
+        return QString();
+    }
+
+    // Use the cache dir alongside the fetched .bin as the model dir, and
+    // make sure flownet.param sits next to it (caller treats modelDir as
+    // a self-contained bundle).
+    QString cacheModelDir = QFileInfo(fetchedBin).absolutePath();
+    QString cachedParam   = QDir(cacheModelDir).absoluteFilePath("flownet.param");
+    if (!QFile::exists(cachedParam)) {
+        if (!QFile::copy(dataParam, cachedParam)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC-MODEL] failed to copy flownet.param into "
+                        "cache (%s -> %s)",
+                        qPrintable(dataParam), qPrintable(cachedParam));
+            return QString();
+        }
+    }
+    return cacheModelDir;
 }

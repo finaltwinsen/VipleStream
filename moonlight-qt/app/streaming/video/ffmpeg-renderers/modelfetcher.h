@@ -22,6 +22,31 @@
 
 #include <QString>
 
+#include <string>
+
+// §SLIM 2026-05-21 — RIFE model dir resolver.  flownet.param ships in
+// the release zip (36 KB); flownet.bin (11 MB) is fetched on demand
+// via ModelFetcher and cached under %LOCALAPPDATA%\VipleStream\
+// fruc_models\rife-v4.25-lite\.
+//
+// Returns a directory containing both files (so callers that pass a
+// modelDir into the rife_native_vk executor or ncnn loader get a
+// single coherent path).  Resolution order:
+//   1. Data dir (legacy install / dev tree where both files bundled)
+//      — use directly with no copy.
+//   2. Hybrid: ModelFetcher fetches flownet.bin into the cache dir,
+//      then we copy flownet.param from the data dir into the same
+//      cache dir so the caller sees one self-contained model dir.
+//   3. Failure (no data, no network) — return empty; caller logs and
+//      the FRUC backend cascade picks the next available option
+//      (Generic / NvOFFRUC / DML).
+//
+// §SLIM 2026-05-23 — promoted from ncnnfruc.cpp's anonymous namespace
+// so VkFrucRenderer (vkfruc.cpp) can use the same lazy-fetch path
+// instead of reading the deploy dir directly.  Both NCNN and Vulkan
+// Native-RIFE backends now share this resolver.
+QString ensureRifeModelDir(const std::string& modelDir);
+
 class ModelFetcher
 {
 public:

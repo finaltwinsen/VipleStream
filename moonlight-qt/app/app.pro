@@ -649,6 +649,12 @@ contains(DEFINES, VIPLE_MPQUIC) {
     LIBS += -L$$PICOQUIC_BUILD -lpicoquic-core
     LIBS += -L$$PICOQUIC_BUILD/_deps/picotls-build -lpicotls-openssl -lpicotls-core -lpicotls-fusion -lpicotls-minicrypto
     unix:!macx: LIBS += -lssl -lcrypto
+    win32 {
+        VCPKG_LIB = $$(VCPKG_ROOT)/installed/x64-windows/lib
+        LIBS += -L$$VCPKG_LIB -llibssl -llibcrypto
+        LIBS += -lws2_32 -lbcrypt -lcrypt32 -ladvapi32
+        INCLUDEPATH += $$(VCPKG_ROOT)/installed/x64-windows/include
+    }
 }
 
 win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../qmdnsengine/release/ -lqmdnsengine

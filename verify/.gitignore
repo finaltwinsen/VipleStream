@@ -1,0 +1,6 @@
+# Only the canonical build helper goes in git.
+# Local artifacts (logs, ad-hoc test scripts referring to per-developer
+# hosts/paths, downloaded build outputs) stay out.
+*
+!.gitignore
+!build_picoquic_msvc.cmd

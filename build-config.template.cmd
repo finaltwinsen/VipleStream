@@ -14,3 +14,4 @@ set "VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Au
 set "WINSDK_D3D=C:\Program Files (x86)\Windows Kits\10\Redist\D3D\x64"
 set "DEPLOY_CLIENT=C:\Program Files\Moonlight Game Streaming"
 set "DEPLOY_SERVER=C:\Program Files\Sunshine"
+set "VCPKG_ROOT=D:\vcpkg"

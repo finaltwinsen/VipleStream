@@ -4,6 +4,7 @@
 #include "vkfruc.h"
 #include "vkfruc-aftermath.h"
 #include "path.h"  // §J.3.e.X Path β — Path::getDataFilePath / getCacheFileInfo for RIFE model + pipeline cache
+#include "modelfetcher.h"  // §SLIM 2026-05-23 — ensureRifeModelDir shared with NCNN backend (lazy flownet.bin fetch)
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"  // v1.4.168 §R2-η-2 — StreamUtils::getDisplayRefreshRate
 
@@ -9297,11 +9298,21 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
     }
     ctx.getInstanceProcAddr = (void*)m_pfnGetInstanceProcAddr;
 
-    QString modelDir = Path::getDataFilePath(QString::fromLatin1("rife-v4.25-lite"));
+    // §SLIM 2026-05-23 — was: Path::getDataFilePath("rife-v4.25-lite")
+    // which only finds the bundle when the deploy dir ships flownet.bin.
+    // Slim releases (§SLIM Phase 3, commit 4456df5) drop flownet.bin from
+    // the zip and rely on ModelFetcher's lazy fetch — so we now share the
+    // same ensureRifeModelDir() resolver as NCNN backend (modelfetcher.h):
+    //   1. deploy dir has both .param + .bin → use it directly
+    //   2. deploy has .param only → fetch .bin into %LOCALAPPDATA% cache +
+    //      copy .param next to it, return cache dir
+    //   3. neither found / no network → empty; fallback block-match path.
+    QString modelDir = ensureRifeModelDir("rife-v4.25-lite");
     if (modelDir.isEmpty()) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-            "[VIPLE-VKFRUC-RIFE-β] init failed: rife-v4.25-lite model dir not found "
-            "(expected via Path::getDataFilePath)");
+            "[VIPLE-VKFRUC-RIFE-β] init failed: ensureRifeModelDir returned empty "
+            "(flownet.param missing OR flownet.bin lazy fetch failed; see "
+            "[VIPLE-FRUC-MODEL] / [VIPLE-MODELFETCH] log lines for cause)");
         return false;
     }
 
@@ -11235,18 +11246,20 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
     //   < 0     → Balanced cheap-adaptive (default)
     //   >= 0    → c0 fixed blend (用該值當 mix weight)
     // Env var: NO_MV > QUALITY > PURE50 > default.
-    static const struct { float factor; const char* name; } s_WarpMode = []() {
-        struct { float factor; const char* name; } r;
+    // §SLIM 2026-05-23 — 給 struct 命名 (WarpModeT)。原本兩個 anonymous
+    // struct (lambda 內 local `r` vs outer `s_WarpMode`) 在 MSVC 14.44+ 嚴格
+    // 規則下被視為不同 type，無法 return r 給 outer s_WarpMode (C2440)。
+    struct WarpModeT { float factor; const char* name; };
+    static const WarpModeT s_WarpMode = []() -> WarpModeT {
         if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_NO_MV") != 0) {
-            r = { 2.0f, "c2 no-MV (DIAG)" };
+            return { 2.0f, "c2 no-MV (DIAG)" };
         } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_QUALITY") != 0) {
-            r = { -2.0f, "c1 Quality adaptive" };
+            return { -2.0f, "c1 Quality adaptive" };
         } else if (qEnvironmentVariableIntValue("VIPLE_VKFRUC_WARP_PURE50") != 0) {
-            r = { 0.5f, "c0 fixed 50/50" };
+            return { 0.5f, "c0 fixed 50/50" };
         } else {
-            r = { -1.0f, "Balanced cheap-adaptive" };
+            return { -1.0f, "Balanced cheap-adaptive" };
         }
-        return r;
     }();
     float blendFactor = s_WarpMode.factor;
     const char* modeName = s_WarpMode.name;
