@@ -68,12 +68,27 @@ namespace quic_server {
 
     bool isReady() const;
 
+    // Drain all pending datagrams into picoquic — MUST be called from
+    // the IO thread only (picoquic is single-threaded).
+    void drainPendingToQuic();
+
   private:
     friend class QuicListener;
 
     picoquic_cnx_t *_cnx;
     RecvHandler _recvHandler;
-    std::mutex _sendMutex;
+
+    // §K.4 fix: video/audio threads enqueue into _pendingQueue;
+    // the IO thread drains it via drainPendingToQuic().
+    // All picoquic_queue_datagram_frame calls happen on the IO thread.
+    struct PendingDgram {
+      uint8_t flowType;
+      int scheduler;
+      bool isStream;          // true → reliable stream #0; false → datagram
+      std::vector<uint8_t> data;
+    };
+    std::mutex _pendingMutex;
+    std::vector<PendingDgram> _pendingQueue;
 
     uint16_t _seqCounters[4] = {};
 
@@ -87,6 +102,10 @@ namespace quic_server {
     // RR cursor for REDUNDANT scheduler (rotates the preferred path so
     // picoquic spreads load across subflows over consecutive frames).
     int _redundantRR = 0;
+
+    // §K.7 diag: datagram queue/send 計數器
+    std::atomic<uint64_t> _dgramQueued{0};
+    std::atomic<uint64_t> _dgramPushed{0};
   };
 
   class QuicListener {

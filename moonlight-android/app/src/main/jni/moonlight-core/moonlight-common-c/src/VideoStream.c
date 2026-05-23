@@ -1,5 +1,9 @@
 #include "Limelight-internal.h"
 
+#ifdef VIPLE_MPQUIC
+#include "QuicTransport.h"
+#endif
+
 #define FIRST_FRAME_MAX 1500
 #define FIRST_FRAME_TIMEOUT_SEC 10
 
@@ -13,6 +17,54 @@ static SOCKET firstFrameSocket = INVALID_SOCKET;
 static PPLT_CRYPTO_CONTEXT decryptionCtx;
 
 static PLT_THREAD udpPingThread;
+
+#ifdef VIPLE_MPQUIC
+// QUIC receive ring buffer for video datagrams.
+// The QUIC I/O thread pushes via quicVideoRecvCallback();
+// VideoReceiveThreadProc polls this instead of the UDP socket.
+#define QUIC_VIDEO_RING_SIZE 4096
+#define QUIC_VIDEO_MAX_PKT   1500
+
+static struct {
+    unsigned char data[QUIC_VIDEO_RING_SIZE][QUIC_VIDEO_MAX_PKT];
+    int           len[QUIC_VIDEO_RING_SIZE];
+    volatile int  head;
+    volatile int  tail;
+} quicVideoRing;
+
+static void quicVideoRecvCallback(unsigned char flowType,
+                                   const unsigned char* data, int dataLen,
+                                   void* context) {
+    (void)context;
+    if (flowType != QUIC_FLOW_VIDEO)
+        return;
+    if (dataLen > QUIC_VIDEO_MAX_PKT)
+        return;
+
+    int next = (quicVideoRing.head + 1) % QUIC_VIDEO_RING_SIZE;
+    if (next == quicVideoRing.tail)
+        return; // ring full, drop
+
+    memcpy(quicVideoRing.data[quicVideoRing.head], data, dataLen);
+    quicVideoRing.len[quicVideoRing.head] = dataLen;
+    quicVideoRing.head = next;
+}
+
+static int quicVideoRecv(char* buf, int bufLen) {
+    if (quicVideoRing.tail == quicVideoRing.head)
+        return 0; // empty
+
+    int len = quicVideoRing.len[quicVideoRing.tail];
+    if (len > bufLen)
+        len = bufLen;
+    memcpy(buf, quicVideoRing.data[quicVideoRing.tail], len);
+    quicVideoRing.tail = (quicVideoRing.tail + 1) % QUIC_VIDEO_RING_SIZE;
+    return len;
+}
+
+static bool useQuicVideo = false;
+#endif
+
 static PLT_THREAD receiveThread;
 static PLT_THREAD decoderThread;
 
@@ -25,14 +77,12 @@ static bool receivedFullFrame;
 // the RTP queue will wait for missing/reordered packets.
 #define RTP_QUEUE_DELAY 10
 
-// This is the desired number of video packets that can be
-// stored in the socket's receive buffer. 2048 is chosen
-// because it should be large enough for all reasonable
-// frame sizes (probably 2 or 3 frames) without using too
-// much kernel memory with larger packet sizes. It also
-// can smooth over transient pauses in network traffic
-// and subsequent packet/frame bursts that follow.
-#define RTP_RECV_PACKETS_BUFFERED 2048
+// VipleStream §J HEVC 1440p120 server-cap diagnosis: client RX side
+// was dropping ~50% of frames at high-bitrate-burst codecs (HEVC 1440p120 has
+// ~38 KB / 27 packets per frame in 0.4 ms server-side bursts).  Bumping from
+// 2048 → 8192 packets requested bumps the SO_RCVBUF target to ~12 MB at
+// 1500 B/packet.
+#define RTP_RECV_PACKETS_BUFFERED 8192
 
 // Initialize the video stream
 void initializeVideoStream(void) {
@@ -134,10 +184,21 @@ static void VideoReceiveThreadProc(void* context) {
             }
         }
 
-        err = recvUdpSocket(rtpSocket,
-                            encrypted ? encryptedBuffer : buffer,
-                            receiveSize,
-                            useSelect);
+#ifdef VIPLE_MPQUIC
+        if (useQuicVideo) {
+            err = quicVideoRecv(encrypted ? encryptedBuffer : buffer, receiveSize);
+            if (err == 0) {
+                PltSleepMs(1);
+            }
+        }
+        else
+#endif
+        {
+            err = recvUdpSocket(rtpSocket,
+                                encrypted ? encryptedBuffer : buffer,
+                                receiveSize,
+                                useSelect);
+        }
         if (err < 0) {
             Limelog("Video Receive: recvUdpSocket() failed: %d\n", (int)LastSocketError());
             ListenerCallbacks.connectionTerminated(LastSocketFail());
@@ -147,7 +208,17 @@ static void VideoReceiveThreadProc(void* context) {
             if (!receivedDataFromPeer) {
                 // If we wait many seconds without ever receiving a video packet,
                 // assume something is broken and terminate the connection.
+                //
+                // §K.9 修正：QUIC mode 每次 poll 只睡 1ms (PltSleepMs(1))，
+                // 若這裡仍加 UDP_RECV_POLL_TIMEOUT_MS (100ms)，
+                // 實際只過 100ms 就觸發 10 秒逾時，導致 QUIC 連線在
+                // server encoder 初始化期間（~1s）就斷線。
+                // 修正：QUIC mode 每次只累計實際等待的 1ms。
+#ifdef VIPLE_MPQUIC
+                waitingForVideoMs += useQuicVideo ? 1 : UDP_RECV_POLL_TIMEOUT_MS;
+#else
                 waitingForVideoMs += UDP_RECV_POLL_TIMEOUT_MS;
+#endif
                 if (waitingForVideoMs >= FIRST_FRAME_TIMEOUT_SEC * 1000) {
                     Limelog("Terminating connection due to lack of video traffic\n");
                     ListenerCallbacks.connectionTerminated(ML_ERROR_NO_VIDEO_TRAFFIC);
@@ -327,6 +398,18 @@ int startVideoStream(void* rendererContext, int drFlags) {
     if (err != 0) {
         return err;
     }
+
+#ifdef VIPLE_MPQUIC
+    useQuicVideo = (StreamConfig.useQuicTransport && quicIsConnected());
+    if (useQuicVideo) {
+        // Reset ring buffer and register callback
+        quicVideoRing.head = 0;
+        quicVideoRing.tail = 0;
+        quicSetRecvCallback(quicVideoRecvCallback, NULL);
+        Limelog("[VIPLE-MPQUIC] Video using QUIC datagram transport\n");
+        // Still bind UDP socket as fallback (needed for ping)
+    }
+#endif
 
     rtpSocket = bindUdpSocket(RemoteAddr.ss_family, &LocalAddr, AddrLen,
                               RTP_RECV_PACKETS_BUFFERED * (StreamConfig.packetSize + MAX_RTP_HEADER_SIZE),
