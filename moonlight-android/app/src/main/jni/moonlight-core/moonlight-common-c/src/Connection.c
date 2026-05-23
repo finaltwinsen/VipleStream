@@ -1,5 +1,10 @@
 #include "Limelight-internal.h"
 
+#ifdef VIPLE_MPQUIC
+#include "QuicTransport.h"
+#include "PlatformNetIf.h"
+#endif
+
 static int stage = STAGE_NONE;
 static ConnListenerConnectionTerminated originalTerminationCallback;
 static bool alreadyTerminated;
@@ -133,7 +138,9 @@ void LiStopConnection(void) {
         Limelog("done\n");
     }
     if (stage == STAGE_RTSP_HANDSHAKE) {
-        // Nothing to do
+#ifdef VIPLE_MPQUIC
+        quicTransportCleanup();
+#endif
         stage--;
     }
     if (stage == STAGE_AUDIO_STREAM_INIT) {
@@ -494,6 +501,66 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_RTSP_HANDSHAKE);
     ListenerCallbacks.stageComplete(STAGE_RTSP_HANDSHAKE);
     Limelog("done\n");
+
+#ifdef VIPLE_MPQUIC
+    // Initialize QUIC transport after RTSP handshake (which negotiates the QUIC port)
+    if (StreamConfig.useQuicTransport) {
+        Limelog("[VIPLE-MPQUIC] Initializing QUIC transport...\n");
+        if (quicTransportInit() == 0) {
+            quicSetCongestionAlgo(StreamConfig.quicCongestion);
+            QUIC_CONNECT_PARAMS qparams;
+            memset(&qparams, 0, sizeof(qparams));
+            memcpy(&qparams.remoteAddr, &RemoteAddr, AddrLen);
+            qparams.remoteAddrLen = AddrLen;
+            qparams.sni = RemoteAddrString;
+            qparams.quicPort = (unsigned short)StreamConfig.quicPort;
+
+            if (quicConnect(&qparams) == 0) {
+                // Wait for the TLS handshake to complete before adding
+                // subflows. picoquic_probe_new_path sends path challenges
+                // that require AEAD encryption — if the handshake hasn't
+                // finished yet, the AEAD context is NULL and we segfault.
+                int handshakeWaitMs = 0;
+                while (!quicIsConnected() && handshakeWaitMs < 5000) {
+                    PltSleepMs(50);
+                    handshakeWaitMs += 50;
+                }
+
+                if (!quicIsConnected()) {
+                    Limelog("[VIPLE-MPQUIC] Handshake timeout after %d ms, falling back to UDP\n",
+                            handshakeWaitMs);
+                    quicDisconnect();
+                    StreamConfig.useQuicTransport = 0;
+                } else {
+                    Limelog("[VIPLE-MPQUIC] Handshake complete in %d ms\n", handshakeWaitMs);
+
+                    // §K.10 修正：暫停額外 subflow 的添加。
+                    //
+                    // 問題根因：client 在 handshake 後立即對同一個 wlan0 介面（相同
+                    // IP, 不同 source port）添加 path 1。path 1 因 anti-amplification
+                    // 限制（server 只能發送 3x received bytes），造成 picoquic 在
+                    // frames.c:5387 的 "Deleting datagram" 分支被觸發：
+                    //   - 嘗試在 path 1 準備封包，但 available space < datagram size
+                    //   - is_first_in_packet = true → datagram 從 global queue **永久刪除**
+                    //   - path 0 也拿不到 → 50%+ datagram 消失 → FEC 失效 → 連線終止
+                    //
+                    // 解決方案：暫時停用同一介面 subflow 添加，改為 single-path 模式。
+                    // 真正的多路徑（WiFi + Cellular）須在不同介面（wlan0 vs rmnet0）上
+                    // 才有意義，待確認 OS 介面枚舉後再啟用。
+                    Limelog("[VIPLE-MPQUIC] §K.10 subflow addition disabled (single-path mode; anti-amplification fix)\n");
+                    Limelog("[VIPLE-MPQUIC] QUIC connected with 0 subflow(s) (family=%s, single-path)\n",
+                            RemoteAddr.ss_family == AF_INET6 ? "IPv6" : "IPv4");
+                }
+            } else {
+                Limelog("[VIPLE-MPQUIC] QUIC connect failed, falling back to UDP\n");
+                StreamConfig.useQuicTransport = 0;
+            }
+        } else {
+            Limelog("[VIPLE-MPQUIC] QUIC init failed, falling back to UDP\n");
+            StreamConfig.useQuicTransport = 0;
+        }
+    }
+#endif
 
     Limelog("Initializing control stream...");
     ListenerCallbacks.stageStarting(STAGE_CONTROL_STREAM_INIT);
