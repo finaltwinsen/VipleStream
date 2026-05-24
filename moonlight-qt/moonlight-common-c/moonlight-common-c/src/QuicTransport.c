@@ -106,6 +106,14 @@ typedef struct _QUIC_TRANSPORT_CTX {
 static QUIC_TRANSPORT_CTX g_ctx;
 static bool g_initialized = false;
 
+// §K.10 diag: per-flow 接收計數器（全域，IO thread + callback thread 共用）
+// index: 0=unused, 1=VIDEO, 2=AUDIO, 3=CONTROL
+static volatile uint64_t g_dgramsRecvByFlow[4] = {};
+static volatile uint64_t g_bytesRecvByFlow[4] = {};
+static uint64_t g_prevBytesRecvByFlow[4] = {};
+static uint64_t g_lastDiagLogTime = 0;
+#define DIAG_LOG_INTERVAL_US 5000000  // 5 秒
+
 // ── Forward declarations ────────────────────────────────────
 
 static void quicIoThreadProc(void* context);
@@ -134,6 +142,12 @@ int quicTransportInit(void) {
     g_ctx.scheduler[QUIC_FLOW_CONTROL] = QUIC_SCHED_MIN_RTT;
 
     g_ctx.congestionAlgo = QUIC_CC_BBR;
+
+    // §K.10 diag: 重置 per-flow 計數器
+    memset((void*)g_dgramsRecvByFlow, 0, sizeof(g_dgramsRecvByFlow));
+    memset((void*)g_bytesRecvByFlow, 0, sizeof(g_bytesRecvByFlow));
+    memset(g_prevBytesRecvByFlow, 0, sizeof(g_prevBytesRecvByFlow));
+    g_lastDiagLogTime = 0;
 
     g_initialized = true;
     Limelog("[VIPLE-MPQUIC] Transport subsystem initialized\n");
@@ -502,11 +516,28 @@ static int quicSelectPath(unsigned char flowType, int dataLen) {
 int quicAddSubflow(int interfaceIndex,
                    const struct sockaddr_storage* localAddr,
                    SOCKADDR_LEN addrLen) {
+    return quicAddSubflowEx(interfaceIndex, localAddr, addrLen, NULL, 0);
+}
+
+int quicAddSubflowEx(int interfaceIndex,
+                     const struct sockaddr_storage* localAddr,
+                     SOCKADDR_LEN addrLen,
+                     const struct sockaddr_storage* peerOverride,
+                     SOCKADDR_LEN peerOverrideLen) {
     QUIC_SUBFLOW* sf;
     SOCKET sock;
 
     if (!g_ctx.cnx || g_ctx.subflowCount >= QUIC_MAX_SUBFLOWS)
         return -1;
+
+    // Resolve effective peer for reachability probe + probe_new_path.
+    // Caller-supplied override takes precedence (path 1+ on alternate
+    // server endpoint); otherwise fall back to the global peerAddr that
+    // quicConnect cached for path 0.
+    const struct sockaddr_storage* effPeer =
+        (peerOverride && peerOverrideLen > 0) ? peerOverride : &g_ctx.peerAddr;
+    SOCKADDR_LEN effPeerLen =
+        (peerOverride && peerOverrideLen > 0) ? peerOverrideLen : g_ctx.peerAddrLen;
 
     sock = createSocket(localAddr->ss_family, SOCK_DGRAM, IPPROTO_UDP, false);
     if (sock == INVALID_SOCKET) {
@@ -520,6 +551,36 @@ int quicAddSubflow(int interfaceIndex,
                 interfaceIndex);
         closeSocket(sock);
         return -1;
+    }
+
+    // §Q-MP-REACH 2026-05-23 — Routing reachability probe.  UDP connect()
+    // doesn't put any bytes on the wire; it just walks the routing table
+    // and ARP/ND state for the destination, returning ENETUNREACH /
+    // EHOSTUNREACH if no route exists from this NIC.  Without this filter
+    // we accept every up NIC (Tailscale 100.x, WSL 172.28.x, Hyper-V
+    // default switch 172.20.x) into the subflow list, and the IO thread's
+    // first-IPv4-family-match sendto in quicIoThreadProc later happily
+    // hands picoquic-prepared packets to e.g. the Tailscale socket — which
+    // silently drops them because the destination 192.168.51.x isn't in
+    // any Tailscale subnet.  Probe against the EFFECTIVE peer (peerOverride
+    // for cross-endpoint subflows, otherwise the global path-0 peer).
+    // Server-mode subflows skip this check (effPeer family will be 0).
+    if (effPeer && effPeer->ss_family != 0 && effPeerLen > 0) {
+        if (connect(sock, (const struct sockaddr*)effPeer, effPeerLen) != 0) {
+            Limelog("[VIPLE-MPQUIC] Subflow on if %d cannot reach peer "
+                    "(route check failed); skipping path\n",
+                    interfaceIndex);
+            closeSocket(sock);
+            return -1;
+        }
+        // Disconnect (connect to AF_UNSPEC) so the socket falls back to
+        // unconnected-UDP semantics — sendto with arbitrary dest, recvfrom
+        // with arbitrary source.  picoquic uses sendto/recvfrom, not
+        // send/recv, so we MUST detach the connected state.
+        struct sockaddr_storage unspec;
+        memset(&unspec, 0, sizeof(unspec));
+        unspec.ss_family = AF_UNSPEC;
+        connect(sock, (const struct sockaddr*)&unspec, sizeof(unspec));
     }
 
     sf = &g_ctx.subflows[g_ctx.subflowCount];
@@ -541,8 +602,11 @@ int quicAddSubflow(int interfaceIndex,
         // picoquic_probe_new_path signature is (cnx, peer_addr, local_addr,
         // current_time) — peer first, local second. The Phase 1 code had
         // these swapped, which probed an invalid path.
+        // Use effPeer so cross-endpoint subflows (e.g. Tailscale → server
+        // Tailscale IP while path 0 uses LAN → server LAN IP) probe the
+        // right destination.
         int ret = picoquic_probe_new_path(g_ctx.cnx,
-            (const struct sockaddr*)&g_ctx.peerAddr,
+            (const struct sockaddr*)effPeer,
             (const struct sockaddr*)localAddr,
             picoquic_current_time());
         if (ret != 0) {
@@ -889,6 +953,21 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
     case picoquic_callback_datagram:
         if (length >= QUIC_DGRAM_HEADER_SIZE && ctx->recvCallback) {
             PQUIC_DGRAM_HEADER hdr = (PQUIC_DGRAM_HEADER)bytes;
+            // §K.10 diag: per-flow 接收計數
+            {
+                unsigned char ft = hdr->flowType;
+                if (ft < 4) {
+                    g_dgramsRecvByFlow[ft]++;
+                    g_bytesRecvByFlow[ft] += (uint64_t)length;
+                }
+                // 首筆 datagram 記錄
+                static int firstLogCount = 0;
+                if (firstLogCount < 3) {
+                    firstLogCount++;
+                    Limelog("[VIPLE-MPQUIC] §K.10 recv dgram flow=%d len=%d seq=%u\n",
+                            (int)ft, (int)length, (unsigned)ntohs(hdr->seq));
+                }
+            }
             ctx->recvCallback(
                 hdr->flowType,
                 bytes + QUIC_DGRAM_HEADER_SIZE,
@@ -1124,12 +1203,71 @@ static void quicIoThreadProc(void* context) {
                 ? (SOCKADDR_LEN)sizeof(struct sockaddr_in)
                 : (SOCKADDR_LEN)sizeof(struct sockaddr_in6);
 
+            // §Q-MP-DISPATCH 2026-05-23 — Pick the right subflow socket for
+            // the packet picoquic prepared.  Old logic was "first IPv4-or-
+            // IPv6-family socket wins" which always selected subflows[0]
+            // even when picoquic's chosen path was on a different NIC.
+            // That's how every multipath packet ended up funnelled through
+            // (e.g.) the Tailscale socket and silently dropped en route to
+            // a LAN destination.  New priority order:
+            //   1. ifIndex exact match — picoquic populates this with the
+            //      OS interface index of the path it scheduled
+            //   2. localAddr exact IP match — picoquic populates this with
+            //      the path's local endpoint when multipath is active
+            //   3. destination-family match — fallback for the initial
+            //      packet where path 0 is unvalidated and picoquic gives
+            //      INADDR_ANY / 0-ifIndex
+            //   4. subflows[0] — last resort to keep the cnx alive
             SOCKET outSock = INVALID_SOCKET;
-            for (int i = 0; i < ctx->subflowCount; i++) {
-                if (ctx->subflows[i].sock != INVALID_SOCKET &&
-                    ctx->subflows[i].localAddr.ss_family == localAddr.ss_family) {
-                    outSock = ctx->subflows[i].sock;
-                    break;
+
+            // 1. ifIndex match (most precise; populated for established paths)
+            if (ifIndex != 0) {
+                for (int i = 0; i < ctx->subflowCount; i++) {
+                    if (ctx->subflows[i].sock != INVALID_SOCKET &&
+                        ctx->subflows[i].interfaceIndex == ifIndex) {
+                        outSock = ctx->subflows[i].sock;
+                        break;
+                    }
+                }
+            }
+
+            // 2. localAddr exact IP match (multipath per-path local endpoint)
+            if (outSock == INVALID_SOCKET && localAddr.ss_family != 0) {
+                for (int i = 0; i < ctx->subflowCount; i++) {
+                    if (ctx->subflows[i].sock == INVALID_SOCKET) continue;
+                    if (ctx->subflows[i].localAddr.ss_family != localAddr.ss_family) continue;
+                    if (localAddr.ss_family == AF_INET) {
+                        const struct sockaddr_in* sa = (const struct sockaddr_in*)&ctx->subflows[i].localAddr;
+                        const struct sockaddr_in* sb = (const struct sockaddr_in*)&localAddr;
+                        if (sb->sin_addr.s_addr == 0) continue; // INADDR_ANY = no preference
+                        if (sa->sin_addr.s_addr == sb->sin_addr.s_addr) {
+                            outSock = ctx->subflows[i].sock;
+                            break;
+                        }
+                    } else if (localAddr.ss_family == AF_INET6) {
+                        const struct sockaddr_in6* sa = (const struct sockaddr_in6*)&ctx->subflows[i].localAddr;
+                        const struct sockaddr_in6* sb = (const struct sockaddr_in6*)&localAddr;
+                        // Treat all-zero IPv6 addr as unspecified
+                        static const uint8_t zero16[16] = {0};
+                        if (memcmp(&sb->sin6_addr, zero16, 16) == 0) continue;
+                        if (memcmp(&sa->sin6_addr, &sb->sin6_addr, 16) == 0) {
+                            outSock = ctx->subflows[i].sock;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 3. Destination-family match (legacy fallback; uses destAddr now
+            //    that the reachability probe in quicAddSubflow has already
+            //    pruned subflows whose interface can't reach the peer)
+            if (outSock == INVALID_SOCKET) {
+                for (int i = 0; i < ctx->subflowCount; i++) {
+                    if (ctx->subflows[i].sock != INVALID_SOCKET &&
+                        ctx->subflows[i].localAddr.ss_family == destAddr.ss_family) {
+                        outSock = ctx->subflows[i].sock;
+                        break;
+                    }
                 }
             }
             if (outSock == INVALID_SOCKET && ctx->isServer) {
@@ -1147,6 +1285,43 @@ static void quicIoThreadProc(void* context) {
         // Periodic maintenance
         quicUpdatePathStats();
         quicCheckPathHealth();
+
+        // §K.10 diag: 每 5 秒印出 per-flow 接收統計 + per-path 品質
+        {
+            uint64_t nowDiag = picoquic_current_time();
+            if (g_lastDiagLogTime == 0) g_lastDiagLogTime = nowDiag;
+            if (nowDiag - g_lastDiagLogTime >= DIAG_LOG_INTERVAL_US) {
+                double dtSec = (double)(nowDiag - g_lastDiagLogTime) / 1e6;
+                if (dtSec < 0.1) dtSec = 0.1;
+
+                Limelog("[VIPLE-MPQUIC] §K.10 RECV VIDEO: %llu dgrams %llu B (%.1f Mbps) | "
+                        "AUDIO: %llu dgrams %llu B (%.1f Mbps) | "
+                        "CTRL: %llu dgrams\n",
+                        (unsigned long long)g_dgramsRecvByFlow[1],
+                        (unsigned long long)g_bytesRecvByFlow[1],
+                        (double)(g_bytesRecvByFlow[1] - g_prevBytesRecvByFlow[1]) * 8.0 / dtSec / 1e6,
+                        (unsigned long long)g_dgramsRecvByFlow[2],
+                        (unsigned long long)g_bytesRecvByFlow[2],
+                        (double)(g_bytesRecvByFlow[2] - g_prevBytesRecvByFlow[2]) * 8.0 / dtSec / 1e6,
+                        (unsigned long long)g_dgramsRecvByFlow[3]);
+
+                // Per-path 摘要
+                for (int pi = 0; pi < ctx->subflowCount; pi++) {
+                    QUIC_SUBFLOW* sf = &ctx->subflows[pi];
+                    Limelog("[VIPLE-MPQUIC] §K.10 path[%d] if=%d %s RTT=%.1fms %.1fMbps loss=%.1f%% tx=%lluKB rx=%lluKB\n",
+                            pi, sf->interfaceIndex,
+                            sf->active ? "ACTIVE" : "DEAD",
+                            sf->rttMs, sf->throughputMbps, sf->lossPercent,
+                            (unsigned long long)(sf->bytesSent / 1024),
+                            (unsigned long long)(sf->bytesRecv / 1024));
+                }
+
+                g_prevBytesRecvByFlow[1] = g_bytesRecvByFlow[1];
+                g_prevBytesRecvByFlow[2] = g_bytesRecvByFlow[2];
+                g_prevBytesRecvByFlow[3] = g_bytesRecvByFlow[3];
+                g_lastDiagLogTime = nowDiag;
+            }
+        }
     }
 
     if (serverSock != INVALID_SOCKET) {

@@ -106,6 +106,14 @@ namespace quic_server {
     // §K.7 diag: datagram queue/send 計數器
     std::atomic<uint64_t> _dgramQueued{0};
     std::atomic<uint64_t> _dgramPushed{0};
+
+    // §K.10 diag: per-flow 計數器 (index = flowType: 0=unused, 1=video, 2=audio, 3=control)
+    std::atomic<uint64_t> _dgramQueuedByFlow[4]{};
+    std::atomic<uint64_t> _dgramFailedByFlow[4]{};
+    std::atomic<uint64_t> _bytesByFlow[4]{};
+    // 上次 stats snapshot（用於計算 delta 速率）
+    uint64_t _prevBytesByFlow[4] = {};
+    std::chrono::steady_clock::time_point _prevStatsTime = std::chrono::steady_clock::now();
   };
 
   class QuicListener {

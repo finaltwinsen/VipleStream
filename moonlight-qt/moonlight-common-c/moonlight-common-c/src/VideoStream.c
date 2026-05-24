@@ -195,8 +195,13 @@ static void VideoReceiveThreadProc(void* context) {
 
 #ifdef VIPLE_MPQUIC
         if (useQuicVideo) {
+            // §K.10: 不在此層加背壓 — ring buffer 必須盡快清空，
+            // 否則 QUIC IO 線程持續推入會讓 ring 溢出（4096 entries
+            // ≈ 5s @30fps），造成幀丟失。decode queue 容量 240
+            // 已足夠吸收解碼器啟動延遲。
             err = quicVideoRecv(encrypted ? encryptedBuffer : buffer, receiveSize);
             if (err == 0) {
+                // QUIC ring 空時 sleep 1ms，計時器按實際經過時間遞增
                 PltSleepMs(1);
             }
         }
@@ -217,7 +222,13 @@ static void VideoReceiveThreadProc(void* context) {
             if (!receivedDataFromPeer) {
                 // If we wait many seconds without ever receiving a video packet,
                 // assume something is broken and terminate the connection.
+#ifdef VIPLE_MPQUIC
+                // §K.10：QUIC 模式每圈只 sleep 1ms，UDP 模式每圈
+                // recvUdpSocket 阻塞 ~100ms。用正確的步進值。
+                waitingForVideoMs += useQuicVideo ? 1 : UDP_RECV_POLL_TIMEOUT_MS;
+#else
                 waitingForVideoMs += UDP_RECV_POLL_TIMEOUT_MS;
+#endif
                 if (waitingForVideoMs >= FIRST_FRAME_TIMEOUT_SEC * 1000) {
                     Limelog("Terminating connection due to lack of video traffic\n");
                     ListenerCallbacks.connectionTerminated(ML_ERROR_NO_VIDEO_TRAFFIC);

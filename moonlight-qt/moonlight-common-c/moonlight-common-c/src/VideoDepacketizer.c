@@ -25,6 +25,9 @@ static uint32_t firstPacketRtpTimestamp;
 static bool dropStatePending;
 static bool idrFrameProcessed;
 
+// §K.10 diag: dropFrameState 呼叫次數（移到頂部避免前向參照）
+static unsigned int dropFrameCallCount = 0;
+
 #define DR_CLEANUP -1000
 
 #define CONSECUTIVE_DROP_LIMIT 120
@@ -60,7 +63,13 @@ typedef struct _LENTRY_INTERNAL {
 
 // Init
 void initializeVideoDepacketizer(int pktSize) {
-    LbqInitializeLinkedBlockingQueue(&decodeUnitQueue, 15);
+    // §K.10 fix: QUIC 1ms 輪詢在解碼器初始化期間可瞬間灌入大量幀。
+    // 原本 capacity=15 → overflow → IDR wait 死循環。
+    // 240 幀 ≈ 4s @60fps / 8s @30fps，足以吸收 Vulkan 解碼器
+    // 首幀初始化延遲（可達 200-500ms），之後解碼器追上後
+    // 佇列自然排水。ring buffer (4096 entries ≈ 5s) 不做背壓，
+    // 避免 ring 溢出導致的幀丟失。
+    LbqInitializeLinkedBlockingQueue(&decodeUnitQueue, 240);
 
     nextFrameNumber = 1;
     startFrameNumber = 0;
@@ -78,6 +87,10 @@ void initializeVideoDepacketizer(int pktSize) {
     dropStatePending = false;
     idrFrameProcessed = false;
     strictIdrFrameWait = !isReferenceFrameInvalidationEnabled();
+    dropFrameCallCount = 0;
+    Limelog("[VIPLE-DEPACK] init: strictIdrFrameWait=%d (RFI %s)\n",
+            (int)strictIdrFrameWait,
+            strictIdrFrameWait ? "disabled" : "enabled");
 }
 
 // Free the NAL chain
@@ -96,16 +109,18 @@ static void cleanupFrameState(void) {
 }
 
 // Cleanup frame state and set that we're waiting for an IDR Frame
-static void dropFrameState(void) {
+// caller 參數用於診斷記錄（傳入 __LINE__）
+static void dropFrameStateFrom(int caller) {
     // This may only be called at frame boundaries
     LC_ASSERT(!decodingFrame);
 
     // We're dropping frame state now
     dropStatePending = false;
 
-    if (strictIdrFrameWait || !idrFrameProcessed || waitingForIdrFrame) {
-        // We'll need an IDR frame now if we're in non-RFI mode, if we've never
-        // received an IDR frame, or if we explicitly need an IDR frame.
+    bool wasWaiting = waitingForIdrFrame;
+    bool willWaitIdr = (strictIdrFrameWait || !idrFrameProcessed || waitingForIdrFrame);
+
+    if (willWaitIdr) {
         waitingForIdrFrame = true;
     }
     else {
@@ -114,6 +129,16 @@ static void dropFrameState(void) {
 
     // Count the number of consecutive frames dropped
     consecutiveFrameDrops++;
+
+    // §K.10 diag: 每 30 次或狀態翻轉時記錄
+    dropFrameCallCount++;
+    if (dropFrameCallCount <= 5 || (dropFrameCallCount % 30) == 0 || (!wasWaiting && willWaitIdr)) {
+        Limelog("[VIPLE-DEPACK] dropFrameState #%u from L%d: strict=%d idrProc=%d wasWait=%d → idr=%d rfi=%d consec=%u\n",
+                dropFrameCallCount, caller,
+                (int)strictIdrFrameWait, (int)idrFrameProcessed,
+                (int)wasWaiting, (int)waitingForIdrFrame, (int)waitingForRefInvalFrame,
+                consecutiveFrameDrops);
+    }
 
     // If we reach our limit, immediately request an IDR frame and reset
     if (consecutiveFrameDrops == CONSECUTIVE_DROP_LIMIT) {
@@ -129,6 +154,7 @@ static void dropFrameState(void) {
 
     cleanupFrameState();
 }
+#define dropFrameState() dropFrameStateFrom(__LINE__)
 
 // Cleanup the list of decode units
 static void freeDecodeUnitList(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
@@ -678,6 +704,9 @@ static void processAvcHevcRtpPayloadSlow(PBUFFER_DESC currentPos, PLENTRY_INTERN
 
         if (isSeqReferenceFrameStart(currentPos)) {
             // No longer waiting for an IDR frame
+            if (waitingForIdrFrame) {
+                Limelog("[VIPLE-DEPACK] IDR NAL → waitingForIdrFrame: 1→0\n");
+            }
             waitingForIdrFrame = false;
             waitingForRefInvalFrame = false;
 
@@ -1078,7 +1107,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         if (waitingForIdrFrame || waitingForRefInvalFrame) {
             // IDR wait takes priority over RFI wait (and an IDR frame will satisfy both)
             if (waitingForIdrFrame) {
-                Limelog("Waiting for IDR frame\n");
+                Limelog("Waiting for IDR frame (frame %d, type=%d)\n", frameIndex, frameType);
 
                 // We wait for the first fully received frame after a loss to approximate
                 // detection of the recovery of the network. Requesting an IDR frame while
@@ -1132,6 +1161,8 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
 void notifyFrameLost(unsigned int frameNumber, bool speculative) {
     // We may not invalidate frames that we've already received
     LC_ASSERT(frameNumber >= startFrameNumber);
+
+    Limelog("[VIPLE-DEPACK] notifyFrameLost: frame=%u spec=%d\n", frameNumber, (int)speculative);
 
     // Drop state and determine if we need an IDR frame or if RFI is okay
     dropFrameState();

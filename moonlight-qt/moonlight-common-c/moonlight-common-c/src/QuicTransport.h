@@ -145,6 +145,20 @@ int quicAddSubflow(int interfaceIndex,
                    const struct sockaddr_storage* localAddr,
                    SOCKADDR_LEN addrLen);
 
+// Same as quicAddSubflow but with an optional peer-address override.
+// When peerOverride is non-NULL, the routing reachability probe and the
+// picoquic_probe_new_path call both use this addr instead of the global
+// peerAddr cached in quicConnect.  This lets a single QUIC cnx span
+// multiple server endpoints — e.g. path 0 = server LAN IP via the LAN
+// NIC, path 1 = server Tailscale IP via the Tailscale tunnel, path 2 =
+// server WAN IP via cellular.  picoquic routes both paths to the same
+// cnx by connection ID, regardless of peer addr.
+int quicAddSubflowEx(int interfaceIndex,
+                     const struct sockaddr_storage* localAddr,
+                     SOCKADDR_LEN localAddrLen,
+                     const struct sockaddr_storage* peerOverride,
+                     SOCKADDR_LEN peerOverrideLen);
+
 // Remove a subflow by ID. Returns 0 on success, -1 if not found.
 int quicRemoveSubflow(int subflowId);
 

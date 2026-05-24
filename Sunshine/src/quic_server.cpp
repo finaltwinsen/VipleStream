@@ -256,8 +256,25 @@ namespace quic_server {
         }
       }
 
+      // §K.9 LAN 連續強制 path send_mtu = 1500 — §K.8 在 newconnection callback
+      // boost 過 path[0] 一次，但 picoquic 內部 PMTU 探測 / multipath migration /
+      // 新增 path 時會把 send_mtu reset 回 RFC 9000 safe initial 1232 (basic
+      // PMTUD 是 opportunistic，要等正常流量觸發才升)。Video frame ~1412 B 一
+      // 旦超過 path send_mtu - 21 (QUIC dgram hdr) - 8 (UDP hdr) = 1203，
+      // picoquic_queue_datagram_frame() 立即回 ret=1083 PICOQUIC_ERROR_DATAGRAM_TOO_LONG。
+      // 每次 queue 前 force boost 是 idempotent，且只對「< 1500」生效。
+      // LAN-only 假設：Ethernet std MTU = 1500，沒 PMTU 問題。將來支援 internet
+      // 場景時要改回 conditional / 等真正 PMTU probe 完成。
+      for (int i = 0; i < _cnx->nb_paths; i++) {
+        if (_cnx->path[i] != nullptr && _cnx->path[i]->send_mtu < 1500) {
+          _cnx->path[i]->send_mtu = 1500;
+        }
+      }
+
       int qret = picoquic_queue_datagram_frame(_cnx, dg.data.size(), dg.data.data());
+      uint8_t ft = dg.flowType < 4 ? dg.flowType : 0;
       if (qret != 0) {
+        _dgramFailedByFlow[ft]++;
         static int errCount = 0;
         if (errCount++ < 20) {
           size_t curMtu = (_cnx->nb_paths > 0 && _cnx->path[0])
@@ -271,6 +288,8 @@ namespace quic_server {
         }
       } else {
         _dgramQueued++;
+        _dgramQueuedByFlow[ft]++;
+        _bytesByFlow[ft] += dg.data.size();
         // §K.8 diag: 首筆 datagram 成功送出時記錄一次
         if (_dgramQueued == 1) {
           size_t curMtu = (_cnx->nb_paths > 0 && _cnx->path[0])
@@ -960,28 +979,59 @@ namespace quic_server {
     if (_sessions.empty())
       return;
 
+    static const char *flowNames[] = {"?", "VIDEO", "AUDIO", "CTRL"};
+
     for (auto &[addr, session] : _sessions) {
       if (!session || !session->isReady())
         continue;
 
-      auto stats = session->getStats();
-      if (stats.empty())
-        continue;
+      // §K.10 per-flow 累計 + delta 速率
+      auto now = std::chrono::steady_clock::now();
+      double dtSec = std::chrono::duration<double>(now - session->_prevStatsTime).count();
+      if (dtSec < 0.1) dtSec = 0.1; // 防除零
 
-      std::string line = "[VIPLE-MPQUIC] stats " + addr + ": ";
-      for (size_t i = 0; i < stats.size(); i++) {
-        if (i > 0) line += " | ";
-        line += "path" + std::to_string(stats[i].pathId)
-              + " RTT=" + std::to_string((int)stats[i].rttMs) + "ms"
-              + " " + std::to_string((int)stats[i].throughputMbps) + "Mbps";
+      std::string flowLine;
+      for (int f = 1; f <= 3; f++) {
+        uint64_t queued = session->_dgramQueuedByFlow[f].load();
+        uint64_t failed = session->_dgramFailedByFlow[f].load();
+        uint64_t bytes  = session->_bytesByFlow[f].load();
+        uint64_t prevBytes = session->_prevBytesByFlow[f];
+        double rateMbps = (double)(bytes - prevBytes) * 8.0 / dtSec / 1e6;
+
+        if (f > 1) flowLine += " | ";
+        flowLine += flowNames[f];
+        flowLine += ": q=" + std::to_string(queued);
+        if (failed > 0) flowLine += " FAIL=" + std::to_string(failed);
+        flowLine += " " + std::to_string((int)(rateMbps * 10) / 10.0).substr(0,5) + "Mbps";
+
+        session->_prevBytesByFlow[f] = bytes;
       }
-      BOOST_LOG(info) << line;
+      session->_prevStatsTime = now;
+
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.10 " << addr << " | " << flowLine;
+
+      // Per-path 品質明細
+      auto stats = session->getStats();
+      if (!stats.empty()) {
+        std::string pathLine;
+        for (size_t i = 0; i < stats.size(); i++) {
+          if (i > 0) pathLine += " | ";
+          pathLine += "p" + std::to_string(stats[i].pathId)
+                    + " RTT=" + std::to_string((int)stats[i].rttMs) + "ms"
+                    + " " + std::to_string((int)stats[i].throughputMbps) + "Mbps"
+                    + " loss=" + std::to_string((int)(stats[i].lossPercent * 10) / 10.0).substr(0,4) + "%"
+                    + " tx=" + std::to_string(stats[i].bytesSent / 1024) + "KB"
+                    + " rx=" + std::to_string(stats[i].bytesRecv / 1024) + "KB";
+        }
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.10 " << addr << " paths: " << pathLine;
+      }
     }
   }
 
   void QuicListener::statsLoop() {
     while (_statsRunning.load()) {
-      for (int i = 0; i < 300 && _statsRunning.load(); i++) {
+      // §K.10: 5 秒一次（之前 30 秒太慢，診斷時看不到即時變化）
+      for (int i = 0; i < 50 && _statsRunning.load(); i++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
       }
       if (_statsRunning.load()) {
