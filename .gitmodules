@@ -1,3 +1,4 @@
 [submodule "Sunshine/third-party/picoquic"]
 	path = Sunshine/third-party/picoquic
-	url = https://github.com/private-octopus/picoquic.git
+	url = https://github.com/finaltwinsen/picoquic.git
+	branch = viplestream-main
