@@ -189,3 +189,34 @@ endif()
 set_target_properties(viple_splash PROPERTIES
         OUTPUT_NAME "viple-splash"
 )
+
+# ── viple-fs-picker.exe ───────────────────────────────────────────────────────
+# VipleStream §N.x：file-transfer 「Send file to client」picker 的 helper
+# 子程序。viplestream-server.exe 跑 LocalSystem，直接 in-process 開
+# IFileOpenDialog 會踩到 shell 內部 worker thread 用 SYSTEM token 查
+# known-folder「Desktop」→ 解到 systemprofile\Desktop → 跳「位置無法
+# 使用」警示窗（即使主 thread 已 ImpersonateLoggedOnUser 也救不到 worker
+# thread）。
+#
+# 解：把 dialog 整個搬到獨立 process，由 viplestream-server.exe 透過
+# CreateProcessAsUserW spawn 進 active console user session，整個 process
+# token 都是 user，shell 不會看到 SYSTEM 路徑。Console subsystem (非 WIN32)
+# 但因為 IFileOpenDialog 自己會建 GUI window，所以對使用者可見的仍是
+# native file picker；console subsystem 純粹讓 fdopen / cout 之類在 debug
+# 時可用，正式運作走 --result <tempfile> IPC，不依賴 stdin/stdout 重導。
+add_executable(viple_fs_picker WIN32
+        "${CMAKE_SOURCE_DIR}/src/tools/viple_fs_picker.cpp"
+)
+if(MSVC)
+    target_link_libraries(viple_fs_picker PRIVATE shell32 ole32 shlwapi user32)
+else()
+    # 跟 viple_splash 同樣 pattern：MinGW + -static 需要明確列出 DLL，
+    # entry point 是 wWinMain (wide-char) 必須加 -municode 在 compile + link
+    # 兩端，否則 linker 找不到 WinMain（C runtime 預設找窄字元入口）。
+    target_link_libraries(viple_fs_picker PRIVATE shell32 ole32 shlwapi user32)
+    target_compile_options(viple_fs_picker PRIVATE -municode)
+    target_link_options(viple_fs_picker PRIVATE -municode)
+endif()
+set_target_properties(viple_fs_picker PROPERTIES
+        OUTPUT_NAME "viple-fs-picker"
+)

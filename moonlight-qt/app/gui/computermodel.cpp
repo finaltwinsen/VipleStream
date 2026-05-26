@@ -44,6 +44,8 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
         return computer->isSupportedServerVersion;
     case IsVipleStreamPeerRole:
         return computer->isVipleStreamPeer;
+    case DirectLaunchDesktopRole:
+        return computer->directLaunchDesktop;
     case DetailsRole: {
         QString state, pairState;
 
@@ -140,6 +142,7 @@ QHash<int, QByteArray> ComputerModel::roleNames() const
     names[StatusUnknownRole] = "statusUnknown";
     names[ServerSupportedRole] = "serverSupported";
     names[IsVipleStreamPeerRole] = "isVipleStreamPeer";
+    names[DirectLaunchDesktopRole] = "directLaunchDesktop";
     names[DetailsRole] = "details";
 
     return names;
@@ -237,6 +240,27 @@ void ComputerModel::renameComputer(int computerIndex, QString name)
     Q_ASSERT(computerIndex < m_Computers.count());
 
     m_ComputerManager->renameHost(m_Computers[computerIndex], name);
+}
+
+void ComputerModel::setDirectLaunchDesktop(int computerIndex, bool enabled)
+{
+    // VipleStream — per-host toggle: 點該 host tile 直接串流 Desktop（跳過 applist）。
+    // 改完 NvComputer 欄位後呼叫公開的 clientSideAttributeUpdated()，它會
+    // 經 handleComputerStateChanged 走「saveHost (mark dirty → DelayedFlushThread
+    // 落盤) + emit computerStateChanged」鏈，後者觸發本模型 handleComputerStateChanged
+    // → emit dataChanged，QML 自動 refresh，不必我手動 emit。
+    Q_ASSERT(computerIndex < m_Computers.count());
+
+    NvComputer* computer = m_Computers[computerIndex];
+    {
+        QWriteLocker lock(&computer->lock);
+        if (computer->directLaunchDesktop == enabled) {
+            return;  // no-op
+        }
+        computer->directLaunchDesktop = enabled;
+    }
+
+    m_ComputerManager->clientSideAttributeUpdated(computer);
 }
 
 QString ComputerModel::generatePinString()

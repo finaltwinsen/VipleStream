@@ -564,6 +564,22 @@ CenteredGridView {
                     }
                 }
 
+                // VipleStream — per-host toggle：點 host tile 直接串流 Desktop，
+                // 跳過 applist 中間頁。後台靠 NvComputer::directLaunchDesktop 持久
+                // 化（依 UUID）；AppModel::updateAppList 看到此 flag 就把名為
+                // "Desktop" 的 app 動態標成 directLaunch=true，沿用既有
+                // AppView::getDirectLaunchAppIndex auto-launch 路徑。離線 / 未配對
+                // 時隱藏（沒有 applist 可說的場景）。
+                NavigableMenuItem {
+                    text: model.directLaunchDesktop
+                          ? qsTr("點擊直接進桌面：開")
+                          : qsTr("點擊直接進桌面：關")
+                    onTriggered: {
+                        computerModel.setDirectLaunchDesktop(index, !model.directLaunchDesktop)
+                    }
+                    visible: model.online && model.paired
+                }
+
                 NavigableMenuItem {
                     text: qsTr("Rename PC")
                     onTriggered: {

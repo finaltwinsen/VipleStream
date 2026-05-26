@@ -118,6 +118,8 @@ public:
     QByteArray macAddress;
     QString name;
     bool hasCustomName;
+    // VipleStream — per-host: 點該 host tile 直接串流 Desktop，跳過 applist
+    bool directLaunchDesktop = false;
     QString uuid;
     QSslCertificate serverCert;
     QVector<NvApp> appList;

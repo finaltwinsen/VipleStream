@@ -20,6 +20,8 @@ class ComputerModel : public QAbstractListModel
         // <VipleStreamProtocol> tag in /serverinfo).  Used by PcView.qml
         // to render a small VipleStream badge on the host card.
         IsVipleStreamPeerRole,
+        // VipleStream — per-host toggle: 點該 host tile 跳過 applist 直接串流 Desktop
+        DirectLaunchDesktopRole,
         DetailsRole
     };
 
@@ -53,6 +55,11 @@ public:
     Q_INVOKABLE void wakeAllOfflineHosts();
 
     Q_INVOKABLE void renameComputer(int computerIndex, QString name);
+
+    // VipleStream — per-host toggle: 點該 host tile 直接串流 Desktop（跳過 applist）。
+    // PcView.qml 右鍵選單呼叫；持久化走 ComputerManager::saveHost()，UI 透過
+    // DirectLaunchDesktopRole 反映現值。
+    Q_INVOKABLE void setDirectLaunchDesktop(int computerIndex, bool enabled);
 
     Q_INVOKABLE Session* createSessionForCurrentGame(int computerIndex);
 

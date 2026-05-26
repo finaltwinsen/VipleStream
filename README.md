@@ -2,7 +2,7 @@
 
 A self-hosted game-streaming stack — a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients) with built-in NAT traversal, AI frame interpolation, Steam library auto-import, and a Traditional Chinese UI. Wire-protocol-compatible with vanilla Sunshine / Moonlight so VipleStream and upstream installs interoperate.
 
-> **Current version:** 1.5.108 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
+> **Current version:** 1.5.114 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
 
 Project home: <https://github.com/finaltwinsen/VipleStream>
 
@@ -128,6 +128,7 @@ PC client HDR is upstream Moonlight-Qt's existing HDR path (Sunshine `hdrMode=1`
 
 | Version | Changes |
 |---|---|
+| **1.5.114** | 每台主機獨立「點擊直接進桌面」開關（PcView 右鍵選單）+ Send file to client picker 改在 user session 內展開（解 LocalSystem 跳 systemprofile\Desktop 警示窗 + cmd 黑窗）。 |
 | **1.5.108** | MP-QUIC multi-path streaming + single-instance guard. Linux Client AppImage + Server `.deb` re-aligned in release. |
 | **1.4.41** | Idle reconcile watchdog (auto-release owner lock after 60s); real zenity `fs_picker` on Linux; CJK font bundle path wired. |
 | **1.4.40** | Vulkan+FRUC budget regression fix; multi-user ownership guards; in-stream bidirectional file transfer; quit-key release graceful exit. |

@@ -190,6 +190,26 @@ void AppModel::updateAppList(QVector<NvApp> newList)
 
     QVector<NvApp> newVisibleList = getVisibleApps(newList);
 
+    // VipleStream — per-host「點 host tile 直接串流 Desktop，跳過 applist」開關。
+    // 若該 host 啟用 directLaunchDesktop，將名為 "Desktop" 的 app（Sunshine/
+    // VipleStream apps.json 固定英文字面）動態標成 directLaunch=true。
+    // 套在 newVisibleList 上而非 m_VisibleApps，這樣後面的 diff loop 用同一份
+    // 旗標狀態跑 equality check，不會誤觸 spurious dataChanged。
+    // 設定為 OFF 時不套用，下次更新自動消失（不污染 NvApp 的持久化）。
+    bool perHostDirectLaunchDesktop;
+    {
+        QReadLocker lock(&m_Computer->lock);
+        perHostDirectLaunchDesktop = m_Computer->directLaunchDesktop;
+    }
+    if (perHostDirectLaunchDesktop) {
+        for (int i = 0; i < newVisibleList.count(); i++) {
+            if (newVisibleList[i].name == QStringLiteral("Desktop")) {
+                newVisibleList[i].directLaunch = true;
+                break;
+            }
+        }
+    }
+
     // Process removals and updates first
     for (int i = 0; i < m_VisibleApps.count(); i++) {
         const NvApp& existingApp = m_VisibleApps.at(i);

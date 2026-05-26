@@ -26,6 +26,8 @@
 #define SER_SRVCERT "srvcert"
 #define SER_CUSTOMNAME "customname"
 #define SER_NVIDIASOFTWARE "nvidiasw"
+// VipleStream — per-host toggle: 點該 host tile 直接串流 Desktop，跳過 applist
+#define SER_DIRECT_LAUNCH_DESKTOP "directlaunchdesktop"
 
 NvComputer::NvComputer(QSettings& settings)
 {
@@ -46,6 +48,7 @@ NvComputer::NvComputer(QSettings& settings)
                                     settings.value(SER_MANUALPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
     this->serverCert = QSslCertificate(settings.value(SER_SRVCERT).toByteArray());
     this->isNvidiaServerSoftware = settings.value(SER_NVIDIASOFTWARE).toBool();
+    this->directLaunchDesktop = settings.value(SER_DIRECT_LAUNCH_DESKTOP, false).toBool();
 
     int appCount = settings.beginReadArray(SER_APPLIST);
     this->appList.reserve(appCount);
@@ -102,6 +105,7 @@ void NvComputer::serialize(QSettings& settings, bool serializeApps) const
     settings.setValue(SER_STUNNATTYPE, stunNatType);
     settings.setValue(SER_SRVCERT, serverCert.toPem());
     settings.setValue(SER_NVIDIASOFTWARE, isNvidiaServerSoftware);
+    settings.setValue(SER_DIRECT_LAUNCH_DESKTOP, directLaunchDesktop);
 
     // Avoid deleting an existing applist if we couldn't get one
     if (!appList.isEmpty() && serializeApps) {
@@ -127,6 +131,7 @@ bool NvComputer::isEqualSerialized(const NvComputer &that) const
            this->manualAddress == that.manualAddress &&
            this->serverCert == that.serverCert &&
            this->isNvidiaServerSoftware == that.isNvidiaServerSoftware &&
+           this->directLaunchDesktop == that.directLaunchDesktop &&
            this->appList == that.appList;
 }
 
