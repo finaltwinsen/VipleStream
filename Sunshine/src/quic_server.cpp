@@ -188,6 +188,14 @@ namespace quic_server {
 
       if (++g.count == FEC_DATA_SHARDS) {
         flushFecParity(scheduler);
+        static bool fec_once = false;
+        if (!fec_once) {
+          BOOST_LOG(info) << "[VIPLE-MPQUIC] §5b FEC: first group encoded OK"
+                          << " baseSeq=" << g.baseSeq
+                          << " data=" << FEC_DATA_SHARDS
+                          << " parity=" << FEC_PARITY_SHARDS;
+          fec_once = true;
+        }
         g.count = 0;
       }
 
@@ -364,11 +372,15 @@ namespace quic_server {
 
     // §5d: 找 MIN_RTT 路徑，video datagram 路由到該 path 的 per-path queue。
     // 單路徑時 bestVideoPath=-1，fallback 到 cnx-level queue（向下相容）。
+    // §5d.fix: 排除 backup/demoted 路徑 — backup path 上的 per-path queue
+    //   不會被 picoquic 排程器發送，datagram 會堆積永遠送不出去。
     int bestVideoPath = -1;
     if (_cnx->nb_paths > 1) {
       uint64_t minRtt = UINT64_MAX;
       for (int i = 0; i < _cnx->nb_paths; i++) {
-        if (_cnx->path[i] != nullptr && !_cnx->path[i]->path_is_demoted &&
+        if (_cnx->path[i] != nullptr &&
+            !_cnx->path[i]->path_is_demoted &&
+            !_cnx->path[i]->path_is_backup &&
             _cnx->path[i]->smoothed_rtt < minRtt) {
           minRtt = _cnx->path[i]->smoothed_rtt;
           bestVideoPath = i;

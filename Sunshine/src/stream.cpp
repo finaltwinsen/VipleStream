@@ -2011,6 +2011,19 @@ namespace stream {
               session->audio.peer.address());
         }
         const bool use_quic_audio = (quicAudioSession != nullptr);
+        {
+          static bool diag_once = false;
+          if (!diag_once) {
+            auto audioPeer = session->audio.peer.address();
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.5 diag: audio peer="
+                            << audioPeer.to_string()
+                            << " is_v4=" << audioPeer.is_v4()
+                            << " is_v6=" << audioPeer.is_v6()
+                            << " session=" << (quicAudioSession ? "FOUND" : "NULL")
+                            << " listener=" << (quic_server::g_listener ? "OK" : "NULL");
+            diag_once = true;
+          }
+        }
         if (use_quic_audio) {
           static bool logged_once = false;
           if (!logged_once) {
