@@ -10,7 +10,7 @@
 | 優先級 | 條目 | 待做事項 |
 |---|---|---|
 | **Active (verify)** | **§β.11.b** warp edge MV threshold | Settings UI slider (2-20, default 8) 已上線 v1.4.195；setting 實機 confirm 生效 (2026-05-23, registry vkfrucEdgeMvThreshold=8 + ctor log)；剩主觀畫質比較：keep 8 / 試 4（更多邊緣保護）/ 試 12（更 smooth）|
-| **Active (verify + polish)** | **§Q** MP-QUIC 多路徑網路聚合 | Phase 5 全 Sprint 實作完成 + LAN 驗測通過 (v1.5.129)。**已驗證：** server FEC 4+2 encoding ✅、per-path queue routing (§5d.fix) ✅、0-RTT server ticket 跨重啟 ✅、1080p60 穩定 streaming ✅、Audio QUIC 傳輸 ✅、Client §5a Jitter buffer ✅、§K.16 cwnd 降頻 ✅、§5f client 0-RTT ticket save 修正 ✅。**待做：** ①Android 多路徑實機（Pixel 5 WiFi+cellular）②壓力測試 1440p120 ③Client 0-RTT ticket 驗測（v1.5.129 加了 save 需 build 確認） |
+| **Active (verify + polish)** | **§Q** MP-QUIC 多路徑網路聚合 | Phase 5 全 Sprint + §Q.path-recovery 實作完成 (v1.5.133)。**已驗證：** server FEC 4+2 encoding ✅、per-path queue routing ✅、0-RTT ticket ✅、1080p60 穩定 ✅、Audio QUIC ✅、Jitter buffer ✅、cwnd 降頻 ✅、WiFi failover ✅。**§Q.path-recovery：** 背景復原執行緒已實作（v1.5.133），每 10 秒掃描介面 + ICMP 探測 + rejected cache。**待做：** ①WiFi recovery 手動驗測（Windows 11 CLI 位置權限限制）②Android 多路徑（hw-bound）③壓力測試 1440p120 |
 | **Active (verify, partial bug)** | **§SLIM** release zip 瘦身 (106→48 MB) | phase 1-4 已 ship。**NCNN backend lazy fetch path 確認接通** (ncnnfruc.cpp:1063/2714 → ensureRifeModelDir → ModelFetcher)。**⚠️ Bug：Vulkan Native RIFE 路徑沒接 ModelFetcher** — rife_native_vk.cpp 4 處 (line 3669/4998/7413/7705) 直接 modelDir+/flownet.bin 載入；2026-05-23 實機驗：cache 空時 RifeNativeExecutor init failed → fallback block-match path (鐵律 OK 不 crash)，但 lazy fetch 沒生效。**Fix：** VkFrucRenderer 對 RifeNativeExecutor::initialize 的 caller 端先 ensureRifeModelDir(opts.modelDir)。剩餘原項：無 VC++ Runtime Win10 系統實測 missing vcruntime140 提示 |
 | **Deferred (hw-bound)** | **§B Phase B** HEVC D3D11VA → Vulkan composite | Code 已 ship v1.4.184-185；阻塞：AMD 780M 測試機 HEVC D3D11VA 本身不可用。需換另一台 D3D11VA HEVC HW decode 可用的 AMD 機器驗 B7 import + B9 FRUC chain |
 | **Active (test pending)** | **§B-NVOF autotier** NVOF 成為 NV 最佳 tier | Code 已 ship v1.4.117-138；待使用者 PixArk 20+ 分鐘實測，看 NVOF-PROF drop% 是否接近 0%、chain_mean 是否穩定 < 2ms。若 OK → reapply early-kickoff + NVOF 列 NV best tier；若 drop% 高 → 需 Option E skip 機制 |
@@ -72,15 +72,23 @@ PixArk 20+ 分鐘測試後看 log：
 - `AUDIO: 13340 dgrams 4749KB 0.9Mbps` — audio QUIC 傳輸 ✅（桌面有音訊時）
 - `§K.16 cwnd LOW` 降頻 ✅（5s rate limit，warning 從數百次降至 3 次）
 
+**WiFi 斷線 failover 測試（v1.5.130, 1080p60, 3 subflow）：**
+- ✅ **Failover 成功：** Disable-NetAdapter "Wi-Fi 2" → path[2] DEAD loss=100%，stream 靠 Ethernet path[0] 不中斷繼續 98.3Mbps
+- ✅ **FEC 過渡恢復：** recovered=16 failed=0，WiFi 斷開瞬間丟失封包全部由 FEC 恢復
+- ✅ **Tailscale 連帶偵測：** Tailscale (path[1]) 底層走 WiFi，同步標記 DEAD
+- ✅ **0-RTT ticket save (Q.r3)：** graceful close 時 `§5f ticket save: OK (ret=0)`，`quic-tickets.bin` 305 bytes 正確含 server IP + ALPN
+
+**§Q.path-recovery 實作（v1.5.133）：** 背景復原執行緒（`quicRecoveryThreadProc`）每 10 秒掃描介面，對 deleted / 新介面做 ICMP 探測 + `quicAddSubflowEx()`。含 rejected cache 避免重複探測不可達介面（如 Tailscale route-check fail），介面集合變動時自動清空快取重試。驗證：rejected cache 生效（Tailscale 只探測一次）、thread 優雅關閉。WiFi 實際 recovery 需手動連線後驗測（Windows 11 CLI 無法觸發 WiFi 掃描/連線）
+
 ### §Q 剩餘待做項目
 
 | # | 項目 | 優先級 | 狀態 |
 |---|---|---|---|
 | Q.r1 | Audio QUIC 傳輸 | — | ✅ **非 bug**。WASAPI loopback 在桌面無音訊時回傳 timeout → encodeThread 不產生封包。桌面播放音訊後 audio 立刻走 QUIC datagram（AUDIO: q=8611 0.9Mbps） |
-| Q.r2 | Client FEC decode + jitter buffer 驗證 | — | ✅ §5a Jitter buffer 確認運作（delivered=41817 reordered=1 dropped=0 timedOut=7）。§5b FEC decode 在 LAN loss=0% 下正確不觸發，需有 loss 環境才能驗 recovery |
-| Q.r3 | Client 端 0-RTT ticket store | — | ✅ 修正：`quicDisconnect()` 加入 `picoquic_save_session_tickets()` 呼叫（之前只有 auto-load 沒有 save）。待下次 build + streaming 測試驗證 `quic-tickets.bin` 產生 |
+| Q.r2 | Client FEC decode + jitter buffer 驗證 | — | ✅ §5a Jitter buffer 確認運作。§5b FEC decode ✅ v1.5.130 WiFi 斷線測試：recovered=16 failed=0，過渡期封包損失全由 FEC 恢復 |
+| Q.r3 | Client 端 0-RTT ticket store | — | ✅ v1.5.130 實機驗證通過。`quicDisconnect()` → `picoquic_save_session_tickets()` → `§5f ticket save: OK (ret=0)`。`quic-tickets.bin` 305 bytes 含 server IP + ALPN "viplestream" |
 | Q.r4 | §K.16 cwnd LOW warning 降頻 | — | ✅ 已修（quic_server.cpp 5 秒 rate limit），驗測期間 cwnd warning 從數百次降到 3 次 |
-| Q.r5 | Android 多路徑實機驗測 | **P2** | 待做。Pixel 5 WiFi + cellular 同時 available，確認 subflow 自動建立 + failover |
+| Q.r5 | Android 多路徑實機驗測 | **P2 (hw-bound)** | ⚠️ 阻塞。Pixel 5 無 SIM 卡（gsm.sim.state=ABSENT）→ cellular 不可用；gnirehtet v2.5.1 USB 反向網路共享在 Android 15 (API 35) VPN 建立失敗（app 靜默退出，tun0 未建立）。需：①插 SIM 卡走 WiFi+cellular 或 ②換 Android 12-13 裝置測 gnirehtet |
 | Q.r6 | 壓力測試 | **P3** | 待做。1440p120 + 3 subflow + 模擬 10% packet loss，確認 FEC recovery + jitter buffer 在極端條件下表現 |
 
 ### §Q Client picoquic build 備忘

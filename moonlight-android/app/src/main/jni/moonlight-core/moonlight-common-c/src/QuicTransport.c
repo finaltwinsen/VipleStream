@@ -32,6 +32,8 @@
 #define STATS_UPDATE_INTERVAL_US 100000 // 100ms between stats refresh
 #define PATH_RECHECK_INTERVAL_US 30000000 // 30s between interface re-enumeration
 #define ICMP_PROBE_TIMEOUT_MS    200      // ICMP probe timeout for reachability check
+#define RECOVERY_POLL_INTERVAL_S 10       // §Q.path-recovery: seconds between recovery checks
+#define RECOVERY_INITIAL_DELAY_S 30       // §Q.path-recovery: let Phase B finish before first check
 
 // §Q-MP-STANDBY: 延遲路徑降級閾值。
 // 如果新路徑的 ICMP RTT（Phase B 階段測得）超過 path 0 的 RTT 加
@@ -165,6 +167,12 @@ typedef struct _QUIC_TRANSPORT_CTX {
     // prepare_next_packet) 同時存取會破壞內部狀態，導致 ACK 路由
     // 錯誤→假性 loss→畫面靜止。
     PLT_MUTEX picoquicMutex;
+
+    // §Q.path-recovery: 背景復原執行緒。IO thread 不能做 ICMP（200ms
+    // 阻塞掉幀），此執行緒每 10 秒掃描介面，對 deleted/新介面做
+    // ICMP + quicAddSubflowEx（已 thread-safe via picoquicMutex）。
+    PLT_THREAD recoveryThread;
+    bool recoveryRunning;
 } QUIC_TRANSPORT_CTX;
 
 static QUIC_TRANSPORT_CTX g_ctx;
@@ -241,6 +249,7 @@ static uint64_t g_fecFailed = 0;
 // ── Forward declarations ────────────────────────────────────
 
 static void quicIoThreadProc(void* context);
+static void quicRecoveryThreadProc(void* context);
 static int quicDgramCallback(picoquic_cnx_t* cnx,
     uint64_t stream_id, uint8_t* bytes, size_t length,
     picoquic_call_back_event_t fin_or_event, void* callback_ctx,
@@ -488,11 +497,29 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
         return -1;
     }
 
+    // §Q.path-recovery: 啟動背景復原執行緒（ICMP 探測在此執行緒安全）
+    g_ctx.recoveryRunning = true;
+    ret = PltCreateThread("QuicRecovery", quicRecoveryThreadProc, &g_ctx,
+                          &g_ctx.recoveryThread);
+    if (ret != 0) {
+        Limelog("[VIPLE-MPQUIC] §Q.path-recovery: failed to create thread "
+                "(non-fatal, path recovery disabled)\n");
+        g_ctx.recoveryRunning = false;
+    }
+
     Limelog("[VIPLE-MPQUIC] Connection initiated to port %u\n", params->quicPort);
     return 0;
 }
 
 void quicDisconnect(void) {
+    // §Q.path-recovery: 先停復原執行緒（它可能正在 quicAddSubflowEx
+    // 裡持有 mutex，需要 cnx 存活），再停 IO thread。
+    if (g_ctx.recoveryRunning) {
+        g_ctx.recoveryRunning = false;
+        PltJoinThread(&g_ctx.recoveryThread);
+        Limelog("[VIPLE-MPQUIC] §Q.path-recovery: thread joined\n");
+    }
+
     if (g_ctx.cnx) {
         // §K.13 UAF fix 2026-05-26 — stop and JOIN the IO thread BEFORE
         // touching picoquic state.  Previously picoquic_close(cnx, 0) ran
@@ -1437,6 +1464,137 @@ static void quicRecheckPaths(void) {
         }
         (void)newIfCount;
     }
+}
+
+// §Q.path-recovery — 背景復原：掃描介面，對 deleted / 新介面做
+// ICMP 探測 + quicAddSubflowEx。只在 recovery thread 呼叫（安全
+// 做 200ms ICMP），不在 IO thread。
+//
+// rejectedIfs / rejectedCount：route-check 或 ICMP 失敗的介面快取。
+// 避免每 10 秒重複探測永遠到不了 server 的介面（如 Tailscale 100.x
+// 只能透過 alt peer 連）。當介面集合變動時清空快取重試。
+static void quicTryRecoverPaths(int* rejectedIfs, int* rejectedCount) {
+    if (!g_ctx.cnx)
+        return;
+
+    LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
+    int ifCount = lcEnumNetInterfaces(interfaces, LC_NETIF_MAX_COUNT);
+    if (ifCount <= 0)
+        return;
+
+    int serverFamily = g_ctx.peerAddr.ss_family;
+    int recovered = 0;
+
+    // 比較目前介面集合與上一輪——若有新增或消失，清空拒絕快取
+    // （網路拓撲變化可能讓之前不通的介面變通）
+    {
+        static int lastIfFingerprint = 0;
+        int fp = ifCount;
+        for (int i = 0; i < ifCount; i++)
+            fp = fp * 31 + interfaces[i].index;
+        if (fp != lastIfFingerprint) {
+            if (lastIfFingerprint != 0 && *rejectedCount > 0) {
+                Limelog("[VIPLE-MPQUIC] §Q.path-recovery: interface set changed, "
+                        "clearing %d rejected cache entries\n", *rejectedCount);
+                *rejectedCount = 0;
+            }
+            lastIfFingerprint = fp;
+        }
+    }
+
+    for (int i = 0; i < ifCount; i++) {
+        if (!interfaces[i].up)
+            continue;
+        if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK ||
+            interfaces[i].type == LC_NETIF_TYPE_VIRTUAL ||
+            interfaces[i].type == LC_NETIF_TYPE_UNKNOWN)
+            continue;
+        if (interfaces[i].family != serverFamily)
+            continue;
+
+        bool alreadyActive = false;
+        for (int s = 0; s < g_ctx.subflowCount; s++) {
+            if (g_ctx.subflows[s].interfaceIndex == interfaces[i].index &&
+                !g_ctx.subflows[s].picoquicDeleted) {
+                alreadyActive = true;
+                break;
+            }
+        }
+        if (alreadyActive)
+            continue;
+
+        // 跳過已知不可達的介面
+        bool rejected = false;
+        for (int r = 0; r < *rejectedCount; r++) {
+            if (rejectedIfs[r] == interfaces[i].index) {
+                rejected = true;
+                break;
+            }
+        }
+        if (rejected)
+            continue;
+
+        Limelog("[VIPLE-MPQUIC] §Q.path-recovery: probing if %d '%s' (%s)\n",
+                interfaces[i].index, interfaces[i].name,
+                lcNetIfTypeName(interfaces[i].type));
+
+        int ret = quicAddSubflowEx(
+            interfaces[i].index,
+            interfaces[i].name,
+            interfaces[i].type,
+            &interfaces[i].addr,
+            interfaces[i].addrLen,
+            NULL, 0);
+
+        if (ret >= 0) {
+            recovered++;
+            Limelog("[VIPLE-MPQUIC] §Q.path-recovery: recovered subflow %d "
+                    "on if %d '%s'\n",
+                    ret, interfaces[i].index, interfaces[i].name);
+
+            for (int r = 0; r < g_ctx.icmpRejectedCount; r++) {
+                if (g_ctx.icmpRejectedIfs[r] == interfaces[i].index) {
+                    for (int j = r; j < g_ctx.icmpRejectedCount - 1; j++)
+                        g_ctx.icmpRejectedIfs[j] = g_ctx.icmpRejectedIfs[j + 1];
+                    g_ctx.icmpRejectedCount--;
+                    break;
+                }
+            }
+        } else {
+            if (*rejectedCount < QUIC_MAX_SUBFLOWS) {
+                rejectedIfs[(*rejectedCount)++] = interfaces[i].index;
+                Limelog("[VIPLE-MPQUIC] §Q.path-recovery: if %d '%s' rejected, "
+                        "cached (%d total)\n",
+                        interfaces[i].index, interfaces[i].name, *rejectedCount);
+            }
+        }
+    }
+
+    if (recovered > 0) {
+        Limelog("[VIPLE-MPQUIC] §Q.path-recovery: %d path(s) recovered this cycle\n",
+                recovered);
+    }
+}
+
+static void quicRecoveryThreadProc(void* context) {
+    QUIC_TRANSPORT_CTX* ctx = (QUIC_TRANSPORT_CTX*)context;
+    int rejectedIfs[QUIC_MAX_SUBFLOWS];
+    int rejectedCount = 0;
+
+    for (int i = 0; i < RECOVERY_INITIAL_DELAY_S && ctx->recoveryRunning; i++)
+        PltSleepMs(1000);
+
+    Limelog("[VIPLE-MPQUIC] §Q.path-recovery: thread started "
+            "(poll every %d s)\n", RECOVERY_POLL_INTERVAL_S);
+
+    while (ctx->recoveryRunning) {
+        quicTryRecoverPaths(rejectedIfs, &rejectedCount);
+
+        for (int i = 0; i < RECOVERY_POLL_INTERVAL_S && ctx->recoveryRunning; i++)
+            PltSleepMs(1000);
+    }
+
+    Limelog("[VIPLE-MPQUIC] §Q.path-recovery: thread exiting\n");
 }
 
 void quicSetAltPeers(const struct sockaddr_storage* addrs,
