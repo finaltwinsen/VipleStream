@@ -31,10 +31,20 @@ moonlight-deploy/
 sunshine-backup/
 temp_*.cmd
 
-# ── Root-level scratch / per-machine cmds only (not the main build wrappers) ──
-# build_all.cmd / build_moonlight.cmd / build_sunshine.cmd / build-config.template.cmd
-# are generic wrappers (tracked). Only build-config.local.cmd holds per-machine paths.
+# ── 2026-05-26: build wrappers + build-tools/ + verify/ moved to dev-local ──
+# build_all.cmd / build_moonlight.cmd / build_sunshine.cmd / build_android.cmd
+# + build-config.{template,local}.cmd + build-tools/ + verify/ no longer ship
+# in the public repo.  Same reasoning as /scripts/ — developer-local tooling
+# that doesn't belong in the public mirror.  Each developer maintains their
+# own copies locally.
 /build-config.local.cmd
+/build-config.template.cmd
+/build_all.cmd
+/build_android.cmd
+/build_moonlight.cmd
+/build_sunshine.cmd
+/build-tools/
+/verify/
 
 # ── FRUC standalone test tool ──
 tools/fruc_test/
