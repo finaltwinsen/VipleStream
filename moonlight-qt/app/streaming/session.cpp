@@ -49,6 +49,15 @@
 #include <QGuiApplication>
 #include <QCursor>
 #include <QScreen>
+#include <QStandardPaths>
+#include <QDir>
+
+#ifdef VIPLE_MPQUIC
+// §Q Phase 5 (5f): 0-RTT ticket store setter from moonlight-common-c.
+// Forward-declared to avoid pulling QuicTransport.h (which transitively
+// includes picoquic platform headers that conflict with Qt's net stack).
+extern "C" void quicSetTicketStorePath(const char* path);
+#endif
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 #include <QQuickOpenGLUtils>
@@ -2336,6 +2345,24 @@ bool Session::startConnectionAsync()
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-MPQUIC]   altPeer[%d]: %s",
                             i, m_StreamConfig.quicAltPeers[i]);
+            }
+        }
+
+        // §5f: 0-RTT ticket store path. One file holds tickets for all
+        // SNIs (picoquic keys them internally); auto-loaded at
+        // quicConnect and auto-saved at disconnect.
+        {
+            QString base = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+            if (base.isEmpty()) {
+                base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+            }
+            if (!base.isEmpty() && QDir().mkpath(base)) {
+                QString ticketFile = base + "/quic-tickets.bin";
+                quicSetTicketStorePath(ticketFile.toUtf8().constData());
+            } else {
+                quicSetTicketStorePath(nullptr);
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-MPQUIC] No writable data dir; 0-RTT disabled");
             }
         }
     }

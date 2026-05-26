@@ -7,6 +7,8 @@
 #include "HolePunch.h"  // VipleStream: LiHolePunch + LocalControlPort
 #ifdef VIPLE_MPQUIC
 #include "PlatformNetIf.h"
+// §Q Phase 5 (5f) — forward decl, avoids pulling picoquic headers here.
+extern void quicSetTicketStorePath(const char* path);
 #endif
 
 #include <opus_multistream.h>
@@ -638,5 +640,27 @@ Java_com_limelight_nvstream_jni_MoonBridge_setNetInterfaces(JNIEnv *env, jclass 
                         "[VIPLE-MPQUIC] setNetInterfaces: injected %d interface(s)", count);
 #else
     (void)env; (void)clazz; (void)names; (void)types; (void)families; (void)addrs;
+#endif
+}
+
+// VipleStream §Q Phase 5 (5f): set 0-RTT ticket store file path.
+// Java computes Context.getFilesDir() + "/quic-tickets.bin" and calls
+// this BEFORE startConnection() so picoquic can auto-load any cached
+// session ticket and shave 1 RTT off the handshake.  Passing null
+// disables 0-RTT (default).
+JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_setQuicTicketStorePath(JNIEnv *env, jclass clazz,
+                                                                   jstring path) {
+#ifdef VIPLE_MPQUIC
+    (void)clazz;
+    if (path == NULL) {
+        quicSetTicketStorePath(NULL);
+        return;
+    }
+    const char* cpath = (*env)->GetStringUTFChars(env, path, NULL);
+    quicSetTicketStorePath(cpath);
+    (*env)->ReleaseStringUTFChars(env, path, cpath);
+#else
+    (void)env; (void)clazz; (void)path;
 #endif
 }

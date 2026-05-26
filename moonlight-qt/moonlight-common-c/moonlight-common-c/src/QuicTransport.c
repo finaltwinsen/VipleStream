@@ -191,6 +191,11 @@ static void quicCheckPathHealth(void);
 static void quicRecheckPaths(void);
 static void quicApplyCongestionAlgo(picoquic_quic_t* quic);
 
+// §Q Phase 5 (5f): 0-RTT ticket store path. picoquic auto-loads/saves
+// session tickets to this file across runs.  Set via
+// quicSetTicketStorePath() before the first quicConnect(); empty = off.
+static char s_ticketStorePath[512] = {0};
+
 // ── Lifecycle ───────────────────────────────────────────────
 
 int quicTransportInit(void) {
@@ -240,6 +245,20 @@ void quicTransportCleanup(void) {
     Limelog("[VIPLE-MPQUIC] Transport subsystem cleaned up\n");
 }
 
+void quicSetTicketStorePath(const char* path) {
+    if (path && *path) {
+        size_t len = strlen(path);
+        if (len >= sizeof(s_ticketStorePath))
+            len = sizeof(s_ticketStorePath) - 1;
+        memcpy(s_ticketStorePath, path, len);
+        s_ticketStorePath[len] = '\0';
+        Limelog("[VIPLE-MPQUIC] Ticket store: %s\n", s_ticketStorePath);
+    } else {
+        s_ticketStorePath[0] = '\0';
+        Limelog("[VIPLE-MPQUIC] Ticket store disabled\n");
+    }
+}
+
 // ── Client connection ───────────────────────────────────────
 
 int quicConnect(const QUIC_CONNECT_PARAMS* params) {
@@ -266,7 +285,7 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
         NULL, NULL, NULL,                           // cnx_id_cb, reset_seed (NULL → random)
         currentTime,
         NULL,                                       // simulated_time
-        NULL,                                       // ticket_file_name (TODO: persist)
+        s_ticketStorePath[0] ? s_ticketStorePath : NULL,  // ticket_file_name (0-RTT, §5f)
         NULL, 0                                     // ticket_encryption_key (server side only)
     );
 

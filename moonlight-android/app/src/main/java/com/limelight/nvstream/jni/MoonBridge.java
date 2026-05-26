@@ -353,6 +353,13 @@ public class MoonBridge {
     public static native void setNetInterfaces(String[] names, int[] types,
                                                 int[] families, byte[][] addrs);
 
+    // VipleStream §Q Phase 5 (5f): set the 0-RTT ticket store file.
+    // picoquic auto-loads cached tickets at quicConnect() and auto-saves new
+    // ones at disconnect, keyed by SNI — one file holds tickets for every
+    // server. Path should be inside Context.getFilesDir() (per-user, sandboxed).
+    // Pass null or empty to disable 0-RTT. Must be called BEFORE startConnection.
+    public static native void setQuicTicketStorePath(String path);
+
     public static native int startConnection(String address, String appVersion, String gfeVersion,
                                               String rtspSessionUrl, int serverCodecModeSupport,
                                               int width, int height, int fps,
