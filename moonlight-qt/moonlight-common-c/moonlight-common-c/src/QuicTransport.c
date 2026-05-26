@@ -47,13 +47,14 @@
 
 // §Q-MP-DYN-STANDBY: 動態 RTT 監測閾值（毫秒）。
 // 推導：jitter buffer timeout = QUIC_JITTER_MAX_WAIT_US（10ms）。
-// 若跨路徑 RTT 差超過 timeout / 2（5ms），WiFi OWD 在抖動時很容易
-// 突破 timeout，導致持續 timedOut → drop。
-// 設為 5ms 確保任何 RTT > primary+5ms 的路徑去 standby，
-// 保留至少 5ms 安全邊距給抖動吸收。
+// 若跨路徑 RTT excess > timeout/3（~3ms），WiFi OWD 抖動就可能讓
+// 部分封包突破 timeout 導致 timedOut → drop。
+// v1.5.141 實測 WiFi RTT=5.0ms excess=4.3ms 未觸發 5ms 閾值；
+// 降為 3ms 讓 LAN WiFi（典型 3-8ms RTT）更早進 standby。
+// 回復閾值 = threshold / 2 = 1.5ms（50% 遲滯防止震盪）。
 // （STANDBY_RTT_EXCESS_MS=10 留給初始 ICMP probe 的靜態判斷，
 //   不動；DYN_STANDBY_RTT_EXCESS_MS 只用在 live QUIC RTT 動態監測）
-#define DYN_STANDBY_RTT_EXCESS_MS  5
+#define DYN_STANDBY_RTT_EXCESS_MS  3
 
 // ── Internal state ──────────────────────────────────────────
 
@@ -1383,7 +1384,7 @@ static void quicCheckPathHealth(void) {
                             sf->rttMs, bestRttMs, excess,
                             DYN_STANDBY_RTT_EXCESS_MS);
                 } else if (sf->keepAsStandby &&
-                           excess <= (float)(DYN_STANDBY_RTT_EXCESS_MS / 2)) {
+                           excess <= ((float)DYN_STANDBY_RTT_EXCESS_MS / 2.0f)) {
                     // RTT 恢復：重新 available（50% 滯後防抖動）
                     sf->keepAsStandby = false;
                     picoquic_set_path_status(g_ctx.cnx, sf->picoquicPathId,
