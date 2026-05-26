@@ -2,7 +2,7 @@
 
 A self-hosted game-streaming stack — a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients) with built-in NAT traversal, AI frame interpolation, Steam library auto-import, and a Traditional Chinese UI. Wire-protocol-compatible with vanilla Sunshine / Moonlight so VipleStream and upstream installs interoperate.
 
-> **Current version:** 1.4.41 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
+> **Current version:** 1.5.108 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
 
 Project home: <https://github.com/finaltwinsen/VipleStream>
 
@@ -34,29 +34,24 @@ Stream over the public internet with no port forwarding, UPnP, or VPN.
 - **PSK auth** — relay rejects any client whose `HMAC-SHA256(psk, uuid)[:16]` doesn't match
 - Fully ported to the Android client (RelayClient + RelayTcpTunnel)
 
+### MP-QUIC multi-path streaming
+When the host advertises multiple reachable interfaces (e.g. Tailscale, Ethernet, WiFi), the client streams across all of them simultaneously for higher throughput and seamless failover when a single path degrades. Capability-negotiated — falls back to ENet transport against vanilla Moonlight / Sunshine.
+
 ### Frame Rate Up-Conversion (FRUC)
-2× frame interpolation, multiple backends with auto-cascade selection on PC client.
+2× frame interpolation on the PC client. Two renderer paths, each with its own backend menu:
 
-| Backend | Renderer | Algorithm | GPU | Notes |
-|---|---|---|---|---|
-| **Generic (block-match)** | D3D11 / Vulkan | HLSL/GLSL block-match ME + warp compute | any | default; ~3-5 ms; cross-vendor; frame-doubling fallback |
-| **NvOFFRUC** | D3D11 | NVIDIA Optical Flow SDK + NV proprietary blend | RTX 20+, driver ≥ 522 | HW-accelerated on NV; lowest latency; ~47% effective interp |
-| **DirectML** | D3D11 | RIFE 4.25-lite ONNX, fp16/fp32 cascade | RTX 30/40+ (Tensor Core) | ORT-DML EP partition makes it CPU-bound on mid-tier (~80ms RTX 3060 Laptop) |
-| **§J.3.e.X Path β — Native RIFE Vulkan** ⭐ v1.4.0 | Vulkan | RIFE 4.25-lite hand-rolled Vulkan compute pipeline (9 shaders + 389-layer graph executor) + native-res warp+blend | RTX 30+ recommended | beta opt-in; ~14ms @ 256×128 inferDim; quality 0.95 ≈ perfect midpoint |
-| **§B-NVOF — VK_NV_optical_flow** v1.4.0 | Vulkan | NVIDIA Optical Flow Vulkan extension hardware ME + own warp+blend | RTX 30+ | opt-in; async cross-queue; alternative to NvOFFRUC for Vulkan path |
-| **NCNN-Vulkan** (legacy) | D3D11 + ncnn | RIFE 4.25-lite, ncnn 20220729 + pack8 + rife.Warp | any Vulkan | superseded by Path β on Vulkan renderer; D3D11 path retained for cross-vendor fallback |
+| Renderer | Backends | Notes |
+|---|---|---|
+| **Direct3D 11** (default) | Generic Compute / NVIDIA Optical Flow / DirectML RIFE / NCNN-Vulkan RIFE | Generic is the recommended low-latency default; NVOF needs RTX 20+; DirectML / NCNN run RIFE 4.25-lite on capable GPUs |
+| **Vulkan** (experimental) | Built-in compute (Generic-equivalent) + Native RIFE β opt-in | Vulkan renderer bundles its own FRUC compute pipeline (9 shaders + 389-layer RIFE graph executor); Active / Passive mode toggle |
 
-PC client cascade picks the user-preferred backend first, falls through to Generic on failure / over-budget. Path β (Vulkan + Native RIFE) is the new flagship quality path as of v1.4.0; user opt-in via Settings → Video → Frame Interpolation → 「Native RIFE 補幀 (β beta)」.
-
-Android client uses a separate **Vulkan FRUC backend** (`vk_backend.c`) with AHardwareBuffer zero-copy import, smart-mode dual present (60→120 FPS), VK_GOOGLE_display_timing, in-flight ring, and SIGSEGV canary fallback to GLES on driver crash. v1.4.0 ports §A' luma census + hierarchical diamond + warp 50/50 fallback to align with Windows + adds §B-DUMP cross-platform dump format.
+Android client uses its own Vulkan FRUC backend (AHardwareBuffer zero-copy import, smart-mode dual present 60→120 FPS, VK_GOOGLE_display_timing, SIGSEGV canary fallback to GLES on driver crash).
 
 DirectML / NCNN diagnostics:
-- `VIPLE_DIRECTML_DEBUG=1` — D3D12 debug layer + DML validation
-- `VIPLE_DIRECTML_VERBOSE=1` — ORT session VERBOSE log (shows partitioner node-by-node EP assignment)
-- `VIPLE_DIRECTML_NO_CPU_FALLBACK=1` — diagnostic; force DML to claim every op
+- `VIPLE_DIRECTML_DEBUG=1` / `VIPLE_DIRECTML_VERBOSE=1` — D3D12 debug layer + ORT VERBOSE log
 - `VIPLE_DML_RES=540|720|1080|native` — caps DirectML tensor resolution
 - `VIPLE_FRUC_MODEL=fp16|fp32|auto` — overrides model cascade order
-- `[VIPLE-FRUC-DML]` / `[VIPLE-FRUC-NCNN]` log lines print per-stage timings
+- `[VIPLE-FRUC-DML]` / `[VIPLE-FRUC-NCNN]` / `[VIPLE-VKFRUC-Stats]` log lines print per-stage timings
 
 ### Steam library auto-import (host)
 Server scans the local Steam install at startup and auto-injects every installed game into `/applist` as a launchable app. No manual configuration — click `Counter-Strike 2` in the client and the host runs `steam://rungameid/730`.
@@ -85,6 +80,7 @@ End-to-end HDR pipeline on Android Vulkan FRUC backend:
 PC client HDR is upstream Moonlight-Qt's existing HDR path (Sunshine `hdrMode=1` launch param + MediaCodec / D3D11 HDR colorspace negotiation).
 
 ### Other
+- Single-instance guard on PC client — second launch shows a notice instead of silently fighting over QUIC ports / server session
 - Traditional Chinese UI translation (`qml_zh_TW.ts`) on PC client; Android pulls system locale
 - Web UI English + Traditional Chinese strings rebranded to VipleStream
 - Editorial-style PcView / AppView design with IBM Plex Mono + Space Grotesk + lime accent (`#D4FF3A`)
@@ -118,227 +114,6 @@ PC client HDR is upstream Moonlight-Qt's existing HDR path (Sunshine `hdrMode=1`
 
 ---
 
-## Repository layout
-
-```
-VipleStream/
-├── Sunshine/                          # Server (C++ / CMake / MinGW UCRT64)
-│   ├── src/
-│   │   ├── nvhttp.cpp                 # GameStream HTTP + steam profile/switch endpoints
-│   │   ├── relay.cpp / stun.cpp       # NAT traversal server-side
-│   │   ├── rtsp.cpp                   # RTSP with last_session cache for tunnel reuse
-│   │   ├── platform/windows/
-│   │   │   └── steam_scanner.{cpp,h}  # Steam library scanner (loginusers/libraryfolders/appmanifest)
-│   │   └── tools/viple_splash.cpp     # launch splash overlay (avoids "launching..." desktop leak)
-│   └── tools/sunshinesvc.cpp          # service helper (spawns viplestream-server.exe in user session)
-├── moonlight-qt/                      # PC client (C++ / Qt6 / MSVC)
-│   └── app/
-│       ├── backend/
-│       │   ├── nvhttp.cpp             # HTTP client + steam profile/switch endpoints
-│       │   ├── nvcomputer.cpp         # adds isVipleStreamPeer flag
-│       │   ├── relaylookup.cpp        # relay lookup + HTTP proxy
-│       │   └── relaytcptunnel.cpp     # RTSP TCP tunnel (native sockets)
-│       ├── gui/
-│       │   ├── AppView.qml            # apps grid + Steam profile dropdown + busy overlay
-│       │   └── appmodel.cpp           # /steamprofiles fetch + async switch poll loop
-│       └── streaming/video/ffmpeg-renderers/
-│           ├── nvofruc.cpp            # NVIDIA Optical Flow FRUC backend
-│           ├── directmlfruc.cpp       # DirectML RIFE backend (ORT / DML EP)
-│           ├── ncnnfruc.cpp           # NCNN-Vulkan RIFE backend (cross-vendor)
-│           ├── ncnn_rife_warp.cpp     # rife.Warp custom layer (extracted from rife-ncnn-vulkan, registered at runtime)
-│           └── d3d11va.cpp            # D3D11 renderer + FRUC cascade selection
-├── moonlight-android/                 # Android client (Java / Gradle + NDK)
-│   └── app/src/main/
-│       ├── jni/moonlight-core/
-│       │   └── vk_backend.c           # Vulkan FRUC backend (AHB import, smart-mode dual present, HDR)
-│       └── java/com/limelight/
-│           ├── nvstream/http/
-│           │   ├── NvHTTP.java        # HTTP client + steam endpoints
-│           │   ├── SteamProfile.java  # profile data class
-│           │   └── SteamSwitchStatus.java
-│           ├── relay/                 # NAT traversal Java port
-│           ├── binding/video/
-│           │   ├── VkBackend.java     # Vulkan FRUC backend Java wrapper + canary fallback
-│           │   ├── FrucRenderer.java  # GLES FRUC backend (legacy, fallback path)
-│           │   └── MediaCodecDecoderRenderer.java  # decoder + FRUC backend selection
-│           └── AppView.java           # apps grid + Spinner + SpinnerDialog
-├── tools/viplestream-relay/
-│   └── relay_server.py                # PSK-authenticated WebSocket relay
-├── build-tools/                       # build-pipeline-critical helpers (tracked)
-│   ├── version.ps1                    # propagate version.json to all subprojects
-│   ├── propagate_version.cmd          # sync without bump
-│   ├── bump_version.cmd               # patch + propagate
-│   ├── build_moonlight_inner.cmd      # called by build_moonlight.cmd
-│   ├── build_moonlight_package.cmd    # canonical shader/DLL/windeployqt list
-│   ├── build_sunshine_inner.sh        # MSYS2 inner build for sunshine
-│   ├── compile_d3d11_shaders.ps1      # HLSL → fxc compile step
-│   ├── compile_shader.cmd             # GLSL/HLSL invoker
-│   ├── apply_viplestream_i18n.py      # i18n string injection
-│   └── rebrand_sunshine_icons.sh      # icon rebrand pipeline
-├── docs/                              # tech docs + per-release notes archive
-│   ├── building.md / versioning.md
-│   ├── J.3.e.X_path_b.md              # Native RIFE Vulkan FRUC architecture
-│   └── releases/v1.4.0.md             # permanent per-release notes (latest)
-├── build_all.cmd                      # one-command build (server + Qt client; auto-bumps patch)
-├── build_sunshine.cmd                 # server only
-├── build_moonlight.cmd                # Qt client only
-├── build_android.cmd                  # Android APK only (debug-signed)
-├── build-config.template.cmd          # copy → build-config.local.cmd, fill paths
-└── version.json                       # single source of truth for version number
-```
-
-> Top-level **`scripts/`** is gitignored as of v1.4.0 — it's a developer-local
-> tooling dir (benchmark suites, deploy helpers, debug pairing tools, WSL
-> Linux-build scripts, VM diagnostic scripts, etc.) that doesn't ship in the
-> public repo. All build-pipeline-critical helpers were relocated to
-> `build-tools/` for that release.
-
----
-
-## Build
-
-> **Rule:** always go through the build scripts. They handle version propagation, qmake regeneration, shader manifests, windeployqt, PDB collection, CPack zipping, and APK signing — all things that quietly break when invoked piecewise. See [`docs/building.md`](docs/building.md) for full details.
-
-### Prerequisites
-
-| Build target | Requires |
-|---|---|
-| Server (`build_sunshine.cmd`) | MSYS2 + MinGW UCRT64 (GCC 13+), CMake 3.25+, Node 18+ (web UI assets) |
-| Qt client (`build_moonlight.cmd`) | Visual Studio 2022 Build Tools (MSVC), Qt 6.10+ (`msvc2022_64`), 7-Zip |
-| Android (`build_android.cmd`) | Android Studio or Gradle 8+, Android NDK r26+, JDK 17+ |
-| Relay server | Python 3.10+ (stdlib only) |
-
-### First-time setup
-
-```cmd
-git clone https://github.com/finaltwinsen/VipleStream.git
-cd VipleStream
-copy build-config.template.cmd build-config.local.cmd
-notepad build-config.local.cmd
-```
-
-`build-config.local.cmd` is gitignored — it holds `QT_DIR`, `VCVARS`, `MSYS2`, `SEVENZIP`, etc. Without it the build scripts fail fast with `[ERROR] build-config.local.cmd not found`.
-
-### Common operations
-
-| Goal | Command |
-|---|---|
-| Build server + Qt client (auto-bump patch) | `build_all.cmd` |
-| Build server only | `build_sunshine.cmd` |
-| Build Qt client only | `build_moonlight.cmd` |
-| Build Android APK only (no bump) | `build_android.cmd` |
-| Sync `version.json` to all subprojects (no bump, no build) | `pwsh build-tools\version.ps1 propagate` |
-| Show current version | `pwsh build-tools\version.ps1 get` |
-| Deploy a fresh Qt client to local install | `scripts\deploy_client_now.cmd` (local-only, gitignored) |
-
-Outputs land in `release/`. Post-v1.4.196 size (after §SLIM trim):
-
-```
-release/VipleStream-Client-X.Y.Z.zip                       (~60 MB)   Windows client
-release/VipleStream-Client-X.Y.Z-debug.zip                 (~10 MB)   PDBs (unzip alongside the client zip for crash symbolication)
-release/VipleStream-Server-X.Y.Z.zip                       (~34 MB)   Windows server
-release/VipleStream-Android-X.Y.Z.apk                      (~7 MB)    Android (debug-signed)
-release/VipleStream-Client-X.Y.Z-linux-x64.AppImage        (~85 MB)   Linux client (Ubuntu noble built)
-release/VipleStream-Server-X.Y.Z-linux-x64.deb             (~9 MB)    Linux server .deb
-```
-
-#### Windows client runtime prerequisites
-
-The Windows client zip no longer bundles `vc_redist.x64.exe` (saved ~25 MB).
-Modern Windows 10/11 already ships the Microsoft Visual C++ 2015-2022
-redistributable via Windows Update. If `VipleStream.exe` fails to launch
-with a missing `vcruntime140.dll` / `msvcp140.dll` error, install it from:
-
-- <https://aka.ms/vs/17/release/vc_redist.x64.exe>  (offline installer)
-- or `winget install Microsoft.VCRedist.2015+.x64`
-
-### Server deploy (Windows host)
-
-`temp/deploy_sunshine.ps1` (or your own variant) handles the host-side deploy: copies the zip contents to `C:\Program Files\VipleStream-Server\`, registers the `VipleStreamServer` service, force-kills any straggler `viplestream-server.exe` (which holds an open handle on its own .exe, blocking `Copy-Item`), and migrates a legacy `C:\Program Files\Sunshine\` install if present.
-
-### Relay server
-
-```bash
-python tools/viplestream-relay/relay_server.py --port 9999 --psk <your-psk>
-```
-
-For HTTPS/WSS termination, run behind Cloudflare Tunnel or nginx. Then in the client's **Settings → Relay**:
-
-- **Relay URL:** `wss://your-relay-domain/`
-- **Relay PSK:** must match `--psk` on the server
-
-The PSK is HMAC-only — the raw value is never transmitted.
-
----
-
-## NAT traversal protocol
-
-```
-Client                    Relay                     Server
-  |                         |                         |
-  |── register(uuid,role) ──►|◄── register(uuid,role)─|
-  |                         |                         |
-  |── lookup(server_uuid) ──►|                         |
-  |◄── {stun_ip, stun_port} ─|                         |
-  |                         |                         |
-  |── http_proxy(/launch) ──►│──── http_proxy ────────►|
-  |◄──────── 200 OK ─────────│◄───── response ─────────|
-  |                         |                         |
-  |── tcp_tunnel_open ──────►|◄── tcp_tunnel_open ─────|
-  |◄═══════ RTSP tunnel ════►│◄════ RTSP tunnel ════════|
-  |    (OPTIONS/DESCRIBE/    |    (7 TCP connections)  |
-  |     SETUP×3/PLAY)        |                         |
-  |                         |                         |
-  |◄══════════════ UDP hole-punch (video/audio) ═══════►|
-```
-
----
-
-## Steam switch protocol (v1.2.119+)
-
-```
-Client                                Server
-  |                                     |
-  |── GET /steamprofiles ──────────────►| (returns <profile> list + current_user, fresh-read)
-  |◄──────── 200 + XML ──────────────────|
-  |                                     |
-  |── GET /steamswitch?account=X ──────►| (creates SteamSwitchTask, spawns worker thread)
-  |◄────── 202 + task_id ────────────────| (returns within ~50 ms)
-  |                                     |
-  |    (worker thread runs:             |
-  |     count_steam_processes →         |
-  |     -shutdown + poll →              |
-  |     kill_steam stragglers →         |
-  |     -login <account> →              |
-  |     poll ActiveUser till target)    |
-  |                                     |
-  |── GET /steamswitch/status?id=X ────►| (every ~1 s)
-  |◄──── 200 + state + message ──────────|
-  |        ...                          |
-  |── GET /steamswitch/status?id=X ────►|
-  |◄──── 200 + state=done ───────────────| (or state=error)
-```
-
-States: `starting` → `shutting_down` → `logging_in` → `done` | `error` | `already_active`. Tasks are GC'd 60 s after reaching a terminal state.
-
----
-
-## Working on a second machine
-
-Everything needed to build + deploy is in the repo; only machine-specific paths live outside.
-
-```cmd
-git clone https://github.com/finaltwinsen/VipleStream.git
-cd VipleStream
-copy build-config.template.cmd build-config.local.cmd
-:: edit paths: MSVC vcvars64.bat, Qt 6.10 msvc2022_64, MSYS2, 7-Zip, Windows SDK D3D
-build_all.cmd
-```
-
-The release zips in `release/` can be extracted directly on the same machine or `scp`'d to another — no installer, just a folder of binaries.
-
----
-
 ## Security notes
 
 - **PSK auth** — every relay WebSocket connection must present `HMAC-SHA256(psk, uuid)[:16]`; without the right PSK the relay rejects registration.
@@ -353,38 +128,27 @@ The release zips in `release/` can be extracted directly on the same machine or 
 
 | Version | Changes |
 |---|---|
-| **1.5.108** | **MP-QUIC 多路徑串流 + 單一實例守門。** 主機有多條可用網路介面（Tailscale / Ethernet / WiFi）時，串流自動同時走多路徑提升頻寬並在單一路徑劣化時無縫切換。同一台機器同時只能執行一個 client，重複啟動會跳出提示而非靜默搶 port 與 host session。 |
-| **1.4.41** | **Idle reconcile + Linux fs_picker + Linux CJK fonts.** §M.1.f.2 server-side idle reconcile watchdog — auto-release owner lock after 60s of "no RTSP session + no owner HTTP activity" to cover client crash / WiFi drop / power-off paths that never send `/cancel`（v1.4.38/v1.4.40 §M.1.f 只覆蓋 graceful exit）。`Sunshine/src/process.{h,cpp}` 加 `_last_activity` + `static std::mutex _owner_mutex` + idle watchdog（pattern mirrors `_steam_watchdog_gen`，generation atomic cancel-without-join）；`nvhttp.cpp` `/launch` + `/resume` SSL-cert-UUID 站點呼叫新 `proc::proc.touch_activity(caller_uuid)`。§N.7 real zenity `fs_picker` on Linux — `Sunshine/src/platform/linux/fs_picker.cpp` 從 v1.4.40 stub 改成 spawn `zenity --file-selection` subprocess 真實檔案對話框，沒 zenity 時 log warning 並回 `nullopt`（Linux Sunshine 是 per-user systemd service，`DISPLAY` / `DBUS_SESSION_BUS_ADDRESS` 自動繼承）。§N.5.linux overlay CJK font (partial) — `moonlight-qt/app/main.cpp` 加 Linux-only `QFontDatabase::addApplicationFont(NotoSansCJK-Regular.ttc)`，`scripts/build-appimage.sh` 從 `/usr/share/fonts/opentype/noto/` bundle 進 AppDir 的邏輯就位；本次 release builder 缺 `fonts-noto-cjk` 套件，v1.4.41 AppImage 走 system fallback（Linux 桌面有 fonts-noto-cjk 自動載入 OK；無則仍亂碼，v1.4.42+ 重 bundle）。Linux mouse forward bug (Hyper-V VM) 留 v1.4.42+（visual verify 要 GUI VM 沒辦法自動）。詳見 [`docs/releases/v1.4.41.md`](docs/releases/v1.4.41.md)。 |
-| **1.4.40** | **Vulkan+FRUC budget fix + Multi-user + In-stream file transfer + Quit-key release.** §J.3.e.2.i.10 Path D（v1.4.8/9）解 Vulkan + FRUC ON 解碼穩定卡 80-100ms regression 的 root cause — `kFrucFramesInFlight` 4→2 revert + early AVFrame release via two-submit pattern（renderFrame 拆 `m_SlotCopyCmdBuf` ~100µs / `m_SlotCmdBuf` ~20ms 兩段 graphics-queue submit；AVFrame hold cycle 40ms→0.2ms；live test decodeMean 0.47-30ms typical 跟 D3D11 / FRUC OFF 同級）。§J.3.e.X β.5.2 / β.5.3 D-lite / β.9 / β.11 Path β 一系列 quality / latency 收尾（Catmull-Rom bicubic 上採 score 0.95→0.97-0.98 / `inferDim` /128 up-round 解 Add_503 layer shape 對齊 / TRIPLE 60→180 + Native RIFE 共存解互斥鎖 + EDGE_AWARE_MV_THRESHOLD 2.0→8.0 動態邊緣 8×8 馬賽克 fix）。§J.3.e.Y 4Y.7 C.1 Conv→BinaryOp(Mul) fusion chain -2.6ms。§H.3 `vkfrucNativeRifeInferDim` default 256→128 + UI 跟實測值對齊（mid-range GPU honesty）。§M.1 multi-user ownership guards + Web UI session dashboard（v1.4.12）— 多 paired devices 共用 server 場景 ownership lock，A 客戶端 /launch / /resume / /cancel 不影響 B 正在玩的 session；§M.1.f quit-key release（v1.4.38 / v1.4.40 Android leg）— moonlight-qt `session.cpp` 拆 `shouldQuit` 為 `shouldNotifyServerCancel` + `shouldQuitClientApp`，graceful exit 永遠送 /cancel 釋放 server `_owner_uuid`；moonlight-android `Game.java stopConnection()` 同 pattern。§N In-stream 雙向檔案傳輸（v1.4.13–34）— 完整 server (`file_transfer.cpp` + 9 HTTPS endpoints + Windows native fs_picker) + moonlight-qt client (`filetransferclient.cpp` 獨立 QThread + folder zip + 5% step OSD) + moonlight-android client (`FileTransferClient` + MediaStore + in-stream overlay)；§N.4 / §N.4b downloads-dir-to-active-user fix。§H.4 AMD client 1920×1200→1080 silent downgrade fix + frame draw OSD V-sync 16.7ms 標籤強化。§T.tray-i18n tray menu「Open Sunshine」→「Open VipleStream」。§N.7 Linux server `fs_picker` stub（v1.4.40）讓 Linux server build 能 link（real zenity 實作仍 TODO）。詳見 [`docs/releases/v1.4.40.md`](docs/releases/v1.4.40.md)。 |
-| **1.4.0** | **Native RIFE Vulkan + Android FRUC port milestone.** §J.3.e.X Path β 完整 ship + β.6 device-lost crash 修補（Nsight Graphics symbolize 找出 `drainOverlayStash` overlay-resize use-after-free，加 `vkDeviceWaitIdle`；7m49s 連續無 crash 驗證）；§J.3.e.Y 4Y.6 Tensor Core path opt-in；§B-NVOF NVIDIA Optical Flow Vulkan（VK_NV_optical_flow + async cross-queue）；§B1/§B2 HW dual-present 60→120 production + TRIPLE 60→180 infra；Android §A'-port luma census + hierarchical diamond + warp 50/50 fallback 對齊 Windows + §B-DUMP-Android cross-platform dump format + UI i18n × 27 locales + dev-machine serial redact；§K.X Auto Wake-on-LAN toggle 真的 gate `PcMonitorThread` polling（offline+OFF cadence 3s→60s 避 NIC pattern-match 自動喚醒）；§K.X Linux build alignment moonlight-qt Ubuntu noble + Qt 6 + g++ 13 完整 compile + link；`scripts/` 整個 untrack 進開發者本機（build infra 搬遷至 `build-tools/`），public repo 不再含 dev/diagnostic helpers.  `v1.3.337..v1.4.0` 共 100+ commits / 20k LOC. 詳見 [`docs/releases/v1.4.0.md`](docs/releases/v1.4.0.md). |
-| **1.3.337** | §K.1 Linux 兩端正式 ship — Server `.deb` (9.4 MB) + Client AppImage (59 MB) 首次納入 GitHub release，五件對齊 (Win Client/Server, Android, Linux Server/Client)。Sunshine source 修：`std::max<long long>` 顯式 template、`closesocket(fd) (::close(fd))`、NVENC API v12/v13 dual-support、5 個 packaging 檔 `dev.lizardbyte.app.Sunshine.*` rename `app.viplestream.server.*`、`SUNSHINE_EXECUTABLE_PATH=/usr/bin/viplestream-server`、`.gitattributes` 鎖 dpkg maintainer 腳本 LF（避 `#!/bin/sh\r` ENOENT）、postinst 安裝後自動 `systemctl --user enable + loginctl enable-linger` 重開機自起、apps.json 預設清乾淨剩 `Desktop`。moonlight-qt source 修：plvk.h/cpp ncnn 整段 `#ifdef VIPLESTREAM_HAVE_NCNN` 隔離（Linux 用系統 `/usr/local/lib/libncnn.so`）、vkfruc.cpp POSIX 等價、3rdparty/nvvideoparser/nvvideoparser.pro `*-msvc` gate `/arch:AVX2`、build-appimage.sh `compiler_moc_source_make_all` 預生繞 qmake6 noble race、AppImage 三段式手工組裝（linuxdeploy + appimagetool）繞 linuxdeployqt-on-noble 失靈。**vkfruc `Ctrl+Alt+Shift+F` 補幀 hotkey 修正**：§J.3.f 後 RS_VULKAN 預設走 VkFrucRenderer，但漏 override `IFFmpegRenderer::toggleFRUC()`，base class no-op，使用者按 hotkey 畫面糊一下後仍維持補幀；fix VkFrucRenderer::toggleFRUC + renderFrameSw 6 個 runtime gate 用 frucPausedThisFrame snapshot。圖示 rebrand 完整收尾（round 2 + 3）：sunshine.exe / VipleStream.exe Windows resource ICO、Web UI favicon、tray state ICOs (playing/pausing/locked) 都從 viplestream_icon.svg 重生 multi-res；template_header `<title>` Sunshine→VipleStream。Wayland teardown 緩解（option A）：`wl_log_set_handler_client` 把 libwayland EPIPE 錯誤導進 boost::log + dispatch() 防護 + systemd `Restart=always StartLimitBurst=30`，client 斷線後 8 秒 server 自動回。Linux client GUI fix：StreamSegue.qml `sessionFinished/quitStarting` 補 `window.raise() + requestActivate()` 修 X11/GNOME Shell + virtio-gpu 上 hide→show 後 taskbar / Alt-Tab 找不到主視窗（withdrawn 狀態 WM 不重 register）|
-| **1.3.314–336** | §J.3.f FFmpeg 8.1 Vulkan hardware decode — rebuild minimal `avcodec-62.dll` (5.2 MB) 含 `--enable-vulkan --enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan`，搭 NV driver `vkCmdDecodeVideoKHR` 把 H.264 / HEVC / AV1 三 codec wired 進 Vulkan HW decode 路徑；1440p120 HEVC SW 50fps→HW 122fps（2.4×），decodeMean ~100ms→0.30ms（333×），networkDropped 34–51→0；4K120 + FRUC + DUAL × 3 codec H.264 92 / HEVC 101–103 / AV1 116–119（H.264 / HEVC 卡 host NVENC 編碼上限，AV1 受 NV driver dedicated_dpb 5ms 底線）；整合 commit `b2b7afd` 起 RS_VULKAN preference 自動觸發 Vulkan HW + FRUC + DUAL，env var 改 explicit override / debug fallback。同期 §J.3.e SW Vulkan path tightening（libdav1d threads + max_frame_delay=1、HEVC FRAME threading、per-slot staging buffer + async pipelining、SSE2 YUV420P→NV12，4K AV1 SW 62→76fps）；§I.D Android Vulkan FRUC async compute D.2.0–D.2.5 全 ship 並 Pixel 5 verify（multi-queue acquisition + dedicated computeQueue + cross-queue binary sem handoff、`debug.viplestream.mailbox=1` MAILBOX opt-in、dual entry threshold 1.05×→1.40×）；§J.3.g FRUC ME 解析度下放 negative result（已 revert，4K120 + FRUC bottleneck 不在 ME compute）|
-| **1.3.311–312** | §G.4 DirectML ONNX model on-demand download — `fruc.onnx` (22 MB) + `fruc_fp16.onnx` (11 MB) + `fruc_ifrnet_s.onnx` (5.5 MB) 不再隨 release zip 出貨 (zip 132 → 102 MB)，DirectML backend 第一次 init 時透過 `ModelFetcher` 從 GitHub release v1.3.310 attached assets 動態下載到 `%LOCALAPPDATA%\VipleStream\fruc_models\` 並 SHA-256 verify，失敗 retry 一次後 fallback 既有 inline DML blend graph |
-| **1.3.295–310** | §J.3.e.2.i.8 Phase 1.6 NVIDIA Aftermath SDK 整合 + standalone `.nv-gpudmp` decoder CLI；Phase 1.7 五個變體確認 NV driver 596.36 對 native VK_KHR_video_decode + ONLY mode 有結構性 bug，**Vulkan renderer 改實驗性 / 預設 Direct3D 11**；AMD Vega 10 ycbcr descriptor pool sizing dynamic query；Sunshine Web UI brand consistency 收尾（HTTP Basic auth realm rebrand + 19 locales i18n bulk replace 1270 處）；SSH-based 一鍵 deploy server zip 到 streaming host |
-| **1.3.250–294** | §J.3.e.2.i.8 Phase 1.x H.265 + Phase 2 H.264 + Phase 3 AV1 native VK_KHR_video_decode：NvVideoParser + VkVideoSessionKHR + DPB pool + cross-queue timeline semaphore；84 fps PARALLEL stable / 5000+ frame ZERO device-lost；FRUC NV12 source 整合 native decode (per-slot buffer 修 WAW race) |
-| **1.3.40–249** | NCNN-Vulkan FRUC backend (cross-vendor RIFE)；custom-built ncnn 20220729 with pack8 + rife.Warp custom layer registered at runtime；CPU-staging submitFrame (Phase A.5) ~30ms staging overhead，Phase B shared-texture 因 NV 596.84 driver `D3D11_TEXTURE_BIT` reject 而轉向 §J native Vulkan |
-| **1.2.189** | HDR Phase 3 — fragment shader sRGB → linear → ST.2084 PQ encoding for SDR-on-HDR-swapchain colour correctness |
-| **1.2.188** | HDR Phase 2 — HDR10 swapchain (A2B10G10R10 + HDR10_ST2084) + vkSetHdrMetadataEXT BT.2020 / 1000 nits |
-| **1.2.186** | HDR Phase 1 — capability-gated VK_EXT_swapchain_colorspace + VK_EXT_hdr_metadata re-enable behind user opt-in |
-| **1.2.185** | SIGSEGV canary fallback — SharedPreferences flag survives JVM crash so Pixel 9-class driver bugs auto fall through to GLES on next launch |
-| **1.2.184** | Android perf overlay redesign (lime/ink2 monospace, PC §05 NET HUD style); FRUC Output FPS bug fix (was reporting input rate, now actual present rate) |
-| **1.2.180–183** | Pixel 9 Vulkan FRUC bisect chain — drop VK_EXT_hdr_metadata / VK_EXT_swapchain_colorspace / ANativeWindow_setFrameRate enable to clear vkCreateInstance/Device SIGSEGV on Mali-G715 driver |
-| **1.2.165–179** | Vulkan FRUC (Android) §I.C/D — smart-mode dual present (60→120 FPS), in-flight ring (VK_FRAMES_IN_FLIGHT=2), VK_GOOGLE_display_timing, flip-flop hysteresis fix, Java max-refresh propagation |
-| **1.2.150–164** | Vulkan FRUC (Android) §I.B — AHardwareBuffer zero-copy import via VK_ANDROID_external_memory_android_hardware_buffer + VkSamplerYcbcrConversion immutable sampler; graphics pipeline lazy init |
-| **1.2.124–149** | DirectML cascade rewrite — ditched the resolution-walking probe (720p→540p→480p→360p) for native-res model variant cascade (fp16→fp32→Generic); fp16 RIFE export with internal pad/crop fix; IFRNet-S negative result documented |
-| **1.2.123** | Android Steam-switch dropdown reaches feature parity with PC client; fix OkHttp `addPathSegment` URL-encoding `/` to `%2F` (use `addPathSegments` plural) |
-| **1.2.119** | `/steamswitch` rewritten async — server returns 202+task_id immediately, client polls `/steamswitch/status`; eliminates spurious "host disconnected" during the 9 s Steam restart |
-| **1.2.118** | Fix root cause of permanently empty `current_user`: `CreateProcessAsUserW` doesn't load the user profile, so HKCU points at `.DEFAULT`; switched to walking `HKEY_USERS` subhives |
-| **1.2.117** | Steam switch force-kills straggler `steam.exe` + `steamwebhelper.exe`; detects Steam Guard 2FA prompts |
-| **1.2.108–116** | Steam profile dropdown UI on PC client (Qt) — fetch / populate / async switch / busy overlay |
-| **1.2.93–96** | VipleStream rebrand: Sunshine→VipleStream-Server (`viplestream-server.exe` + `viplestream-svc.exe`), Moonlight-Qt→VipleStream (`VipleStream.exe`), Android `applicationId com.piinsta`; firewall rules / mDNS instance name / NVAPI profile / Linux `.desktop` ID all updated; `<VipleStreamProtocol>` capability marker added |
-| **1.2.86–91** | DirectML auto-cascade probe (720p→540p→480p→360p) + Generic fallback; default backend set to Generic |
-| **1.2.82–86** | DirectML reset-race fix: fence-gated allocator reset, multi-ring slots, submitFrame 50 ms → 3 ms |
-| **1.2.67** | Steam library auto-import (Phase 2): host scans Steam install + injects games into `/applist` |
-| **1.2.59–64** | DirectML RIFE backend ships real model; Option C interop optimization; `VIPLE_DML_RES` env var |
-| **1.1.60–80** | Full NAT traversal (PC + Android): relay lookup, HTTP proxy, RTSP TCP tunnel, UDP hole-punch |
-| **1.1.40s–50s** | NVIDIA Optical Flow FRUC; presets (quality/balanced/performance/ultra); adaptive bitrate |
-| **1.1.30s** | Initial VipleStream fork; Traditional Chinese UI |
+| **1.5.108** | MP-QUIC multi-path streaming + single-instance guard. Linux Client AppImage + Server `.deb` re-aligned in release. |
+| **1.4.41** | Idle reconcile watchdog (auto-release owner lock after 60s); real zenity `fs_picker` on Linux; CJK font bundle path wired. |
+| **1.4.40** | Vulkan+FRUC budget regression fix; multi-user ownership guards; in-stream bidirectional file transfer; quit-key release graceful exit. |
+| **1.4.0** | Native RIFE Vulkan ships (Path β); Android FRUC port aligned to Windows; NVIDIA Optical Flow Vulkan extension; UI i18n × 27 locales. |
+| **1.3.337** | First Linux ship — Server `.deb` + Client AppImage aligned in release; icon rebrand finalised; FRUC hotkey override fix. |
+| **1.3.314–336** | FFmpeg 8.1 Vulkan HW decode (`h264_vulkan` / `hevc_vulkan` / `av1_vulkan`); Android async-compute FRUC stable on Pixel 5. |
+| **1.3.311–312** | DirectML ONNX models moved out of release zip to on-demand fetch (`%LOCALAPPDATA%\VipleStream\fruc_models\`). |
+| **1.3.295–310** | NVIDIA Aftermath GPU crash decoder; Sunshine Web UI rebrand + 19-locale i18n; SSH one-tap server deploy. |
+| **1.3.250–294** | Native `VK_KHR_video_decode` integration (H.265 / H.264 / AV1); 84 fps PARALLEL stable / 5000+ frames zero device-lost. |
+| **1.3.40–249** | NCNN-Vulkan FRUC backend (cross-vendor RIFE) with custom `rife.Warp` layer. |
+| **1.2.186–189** | HDR end-to-end pipeline on Android (HDR10 swapchain + BT.2020 metadata + ST.2084 PQ encoding). |
+| **1.2.185** | SIGSEGV canary fallback — driver-crash auto fall through to GLES on next launch. |
+| **1.2.165–183** | Android Vulkan FRUC §I.C/D — smart-mode dual present 60→120 FPS + Pixel 9 Mali-G715 driver compatibility chain. |
+| **1.2.150–164** | Android Vulkan FRUC §I.B — AHardwareBuffer zero-copy import. |
+| **1.2.124–149** | DirectML cascade rewrite — native-res model variant cascade (fp16 → fp32 → Generic). |
+| **1.2.108–123** | Steam profile dropdown on PC + Android; Steam-switch async rewrite eliminates "host disconnected" during 9s restart. |
+| **1.2.93–96** | VipleStream rebrand — Sunshine→VipleStream-Server, Moonlight-Qt→VipleStream, Android `com.piinsta`; capability marker added. |
+| **1.2.59–91** | DirectML RIFE backend ships with auto-cascade probe; reset-race fix takes submitFrame 50ms → 3ms. |
+| **1.2.67** | Steam library auto-import (Phase 2) — host scans Steam install + injects games into `/applist`. |
+| **1.1.60–80** | Full NAT traversal (PC + Android) — relay lookup, HTTP proxy, RTSP TCP tunnel, UDP hole-punch. |
+| **1.1.30s–50s** | Initial VipleStream fork; Traditional Chinese UI; NVIDIA Optical Flow FRUC; presets + adaptive bitrate. |
 
 Full per-version notes: `git log --oneline`.
 
