@@ -57,7 +57,18 @@
 // 清除它，避免 OpenSSL dispose 對 minicrypto 結構做錯誤 cast。
 #include <picoquic_crypto_provider_api.h>
 
+extern "C" {
+#include "rswrapper.h"
+}
+
 using namespace std::chrono_literals;
+
+// §5b FEC constants for video datagrams
+static constexpr int FEC_DATA_SHARDS   = 4;
+static constexpr int FEC_PARITY_SHARDS = 2;
+static constexpr int FEC_TOTAL_SHARDS  = 6;
+static constexpr int FEC_SHARD_MAX     = 1500;
+static constexpr uint8_t FEC_PARITY_FLAG = 0x80;
 
 // Datagram frame header (must match moonlight-common-c QuicTransport.h)
 #pragma pack(push, 1)
@@ -81,9 +92,16 @@ namespace quic_server {
 
   // ── QuicSession ──────────────────────────────────────────
 
-  QuicSession::QuicSession(picoquic_cnx_t *cnx) : _cnx(cnx) {}
+  QuicSession::QuicSession(picoquic_cnx_t *cnx) : _cnx(cnx) {
+    _fecRs = reed_solomon_new(FEC_DATA_SHARDS, FEC_PARITY_SHARDS);
+  }
 
-  QuicSession::~QuicSession() = default;
+  QuicSession::~QuicSession() {
+    if (_fecRs) {
+      reed_solomon_release(_fecRs);
+      _fecRs = nullptr;
+    }
+  }
 
   bool QuicSession::isReady() const {
     return _cnx &&
@@ -145,6 +163,39 @@ namespace quic_server {
       }
     }
 
+    // §5b FEC: buffer video datagrams in groups of 4 and produce 2 parity shards
+    if (flowType == FLOW_VIDEO && _fecRs) {
+      auto &g = _fecGroup;
+      int si = g.count;
+
+      g.payloads[si].assign(data, data + len);
+      uint16_t seq = _seqCounters[flowType]++;
+      if (si == 0) g.baseSeq = seq;
+      g.seqs[si] = seq;
+
+      std::vector<uint8_t> frame(DGRAM_HDR_SIZE + len);
+      QuicDgramHeader hdr{};
+      hdr.flowType = flowType;
+      hdr.reserved = (uint8_t)(si + 1);   // fecInfo: data shard 1-4
+      hdr.seq = htons(seq);
+      std::memcpy(frame.data(), &hdr, DGRAM_HDR_SIZE);
+      std::memcpy(frame.data() + DGRAM_HDR_SIZE, data, len);
+
+      {
+        std::lock_guard<std::mutex> lock(_pendingMutex);
+        _pendingQueue.push_back({flowType, scheduler, false, std::move(frame)});
+      }
+
+      if (++g.count == FEC_DATA_SHARDS) {
+        flushFecParity(scheduler);
+        g.count = 0;
+      }
+
+      _dgramPushed++;
+      return true;
+    }
+
+    // Non-video or FEC unavailable: original path
     std::vector<uint8_t> frame(DGRAM_HDR_SIZE + len);
     QuicDgramHeader hdr{};
     hdr.flowType = flowType;
@@ -172,6 +223,55 @@ namespace quic_server {
       _pendingQueue.push_back({FLOW_CONTROL, 0, true, std::move(buf)});
     }
     return true;
+  }
+
+  void QuicSession::flushFecParity(int scheduler) {
+    auto &g = _fecGroup;
+
+    size_t maxLen = 0;
+    for (int i = 0; i < FEC_DATA_SHARDS; i++) {
+      if (g.payloads[i].size() > maxLen)
+        maxLen = g.payloads[i].size();
+    }
+    if (maxLen == 0 || maxLen > FEC_SHARD_MAX)
+      return;
+
+    uint8_t shardBufs[FEC_TOTAL_SHARDS][FEC_SHARD_MAX];
+    uint8_t *shards[FEC_TOTAL_SHARDS];
+    std::memset(shardBufs, 0, sizeof(shardBufs));
+
+    for (int i = 0; i < FEC_TOTAL_SHARDS; i++)
+      shards[i] = shardBufs[i];
+    for (int i = 0; i < FEC_DATA_SHARDS; i++)
+      std::memcpy(shardBufs[i], g.payloads[i].data(), g.payloads[i].size());
+
+    reed_solomon_encode(_fecRs, shards, FEC_TOTAL_SHARDS, (int)maxLen);
+
+    // Parity payload: [len0:2 BE][len1:2 BE][len2:2 BE][len3:2 BE][parity: maxLen]
+    static constexpr size_t META_SIZE = FEC_DATA_SHARDS * sizeof(uint16_t);
+
+    for (int p = 0; p < FEC_PARITY_SHARDS; p++) {
+      size_t payloadLen = META_SIZE + maxLen;
+      std::vector<uint8_t> frame(DGRAM_HDR_SIZE + payloadLen);
+
+      QuicDgramHeader hdr{};
+      hdr.flowType = FLOW_VIDEO;
+      hdr.reserved = FEC_PARITY_FLAG | (uint8_t)(p + 1);  // 0x81, 0x82
+      hdr.seq = htons(g.baseSeq);
+      std::memcpy(frame.data(), &hdr, DGRAM_HDR_SIZE);
+
+      uint8_t *meta = frame.data() + DGRAM_HDR_SIZE;
+      for (int i = 0; i < FEC_DATA_SHARDS; i++) {
+        uint16_t pl = htons((uint16_t)g.payloads[i].size());
+        std::memcpy(meta + i * 2, &pl, 2);
+      }
+      std::memcpy(meta + META_SIZE, shards[FEC_DATA_SHARDS + p], maxLen);
+
+      {
+        std::lock_guard<std::mutex> lock(_pendingMutex);
+        _pendingQueue.push_back({FLOW_VIDEO, scheduler, false, std::move(frame)});
+      }
+    }
   }
 
   void QuicSession::drainPendingToQuic() {
@@ -213,6 +313,16 @@ namespace quic_server {
         queueDepth++;
         dg = dg->next_misc_frame;
       }
+      // §5d: per-path queue 深度也計入
+      for (int pi = 0; pi < _cnx->nb_paths; pi++) {
+        if (_cnx->path[pi] != nullptr) {
+          dg = _cnx->path[pi]->first_datagram;
+          while (dg != NULL) {
+            queueDepth++;
+            dg = dg->next_misc_frame;
+          }
+        }
+      }
       if (queueDepth > 0) {
         _dgramPendingPeak = std::max(_dgramPendingPeak.load(), (uint64_t)queueDepth);
       }
@@ -252,76 +362,42 @@ namespace quic_server {
       }
     }
 
-    // 取得當前活躍路徑快照（供排程器使用）
-    std::vector<uint64_t> paths;
-    {
-      std::lock_guard<std::mutex> lock(_pathMutex);
-      paths = _activePaths;
+    // §5d: 找 MIN_RTT 路徑，video datagram 路由到該 path 的 per-path queue。
+    // 單路徑時 bestVideoPath=-1，fallback 到 cnx-level queue（向下相容）。
+    int bestVideoPath = -1;
+    if (_cnx->nb_paths > 1) {
+      uint64_t minRtt = UINT64_MAX;
+      for (int i = 0; i < _cnx->nb_paths; i++) {
+        if (_cnx->path[i] != nullptr && !_cnx->path[i]->path_is_demoted &&
+            _cnx->path[i]->smoothed_rtt < minRtt) {
+          minRtt = _cnx->path[i]->smoothed_rtt;
+          bestVideoPath = i;
+        }
+      }
     }
-    int pathCount = (int)paths.size();
 
     for (auto &dg : batch) {
-      // Stream 寫入（可靠控制通道 stream #0）
       if (dg.isStream) {
         picoquic_add_to_stream(_cnx, 0, dg.data.data(), dg.data.size(), 0);
         continue;
       }
 
-      // §MP-PRIMARY 2026-05-24: 不再 per-datagram 切換 path_status。
-      // picoquic_set_path_status 是長期路徑管理 API，不是 per-packet
-      // 路由提示。每次送 datagram 都遍歷路徑切換狀態會導致：
-      //   (a) ACK 路由混亂（per-path PN space 下 path 0 ACK 被延遲）
-      //   (b) video IDR frame 封包分散到不同 RTT 路徑
-      //   (c) depacketizer 因時序差異組裝失敗 → 畫面靜止
-      // Primary-path 模式：handshake 路徑 = available，其餘 = backup。
-      // picoquic 自動把所有 datagram 送到唯一 available 路徑。
-      // 應用層排程（ECF / AGGREGATE / REDUNDANT）待 Phase 5
-      // 實作 FEC + jitter buffer 後再啟用。
-      (void)pathCount;
-
-      // §MP-PRIMARY-GUARD: 防止 picoquic 自動升級 backup 路徑。
-      // picoquic 的 path_is_backup_locked 機制阻止 auto-promotion
-      // （paths.c），這裡做二次確認。
-      //
-      // §Q-MP-FAILBACK: 但需要尊重 client 透過 PATH_STATUS frame
-      // 明確升級的路徑（failover 時 client 會送 PATH_STATUS(available)
-      // → picoquic 更新 path_is_backup=0, locked=0）。只 re-lock
-      // picoquic auto-promoted 的路徑（backup=0 但 locked=1 是不一致
-      // 狀態，表示 auto-promotion），不動 client 明確升級的路徑
-      // （backup=0 AND locked=0）。
-      for (int i = 1; i < _cnx->nb_paths; i++) {
-        if (_cnx->path[i] != nullptr && !_cnx->path[i]->path_is_backup) {
-          if (_cnx->path[i]->path_is_backup_locked) {
-            // 不一致：locked=1 but backup=0 → auto-promotion，壓回
-            _cnx->path[i]->path_is_backup = 1;
-            static int guardCount = 0;
-            if (guardCount++ < 5) {
-              BOOST_LOG(warning) << "[VIPLE-MPQUIC] §MP-PRIMARY-GUARD: path["
-                                 << i << "] auto-promoted, re-locked as backup";
-            }
-          }
-          // else: backup=0 AND locked=0 → client 透過 PATH_STATUS
-          // 明確升級（failover），尊重不動
-        }
-      }
-
-      // §K.9 LAN 連續強制 path send_mtu = 1500 — §K.8 在 newconnection callback
-      // boost 過 path[0] 一次，但 picoquic 內部 PMTU 探測 / multipath migration /
-      // 新增 path 時會把 send_mtu reset 回 RFC 9000 safe initial 1232 (basic
-      // PMTUD 是 opportunistic，要等正常流量觸發才升)。Video frame ~1412 B 一
-      // 旦超過 path send_mtu - 21 (QUIC dgram hdr) - 8 (UDP hdr) = 1203，
-      // picoquic_queue_datagram_frame() 立即回 ret=1083 PICOQUIC_ERROR_DATAGRAM_TOO_LONG。
-      // 每次 queue 前 force boost 是 idempotent，且只對「< 1500」生效。
-      // LAN-only 假設：Ethernet std MTU = 1500，沒 PMTU 問題。將來支援 internet
-      // 場景時要改回 conditional / 等真正 PMTU probe 完成。
+      // §K.9 LAN MTU boost
       for (int i = 0; i < _cnx->nb_paths; i++) {
         if (_cnx->path[i] != nullptr && _cnx->path[i]->send_mtu < 1500) {
           _cnx->path[i]->send_mtu = 1500;
         }
       }
 
-      int qret = picoquic_queue_datagram_frame(_cnx, dg.data.size(), dg.data.data());
       uint8_t ft = dg.flowType < 4 ? dg.flowType : 0;
+      int qret;
+      // §5d: video → per-path queue (MIN_RTT path)；其餘 → cnx-level queue
+      if (ft == FLOW_VIDEO && bestVideoPath >= 0) {
+        qret = picoquic_queue_datagram_frame_on_path(
+            _cnx, bestVideoPath, dg.data.size(), dg.data.data());
+      } else {
+        qret = picoquic_queue_datagram_frame(_cnx, dg.data.size(), dg.data.data());
+      }
       if (qret != 0) {
         _dgramFailedByFlow[ft]++;
         static int errCount = 0;

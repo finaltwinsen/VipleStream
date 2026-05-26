@@ -178,6 +178,66 @@ static uint64_t g_prevBytesRecvByFlow[4] = {};
 static uint64_t g_lastDiagLogTime = 0;
 #define DIAG_LOG_INTERVAL_US 5000000  // 5 秒
 
+// ── §5a Jitter buffer ───────────────────────────────────────
+// Sliding-window reorder buffer for multipath QUIC datagrams.
+// When paths have different RTTs, datagrams arrive out of order.
+// The jitter buffer holds early arrivals and delivers in seq order.
+// In single-path (§MP-PRIMARY) mode, packets arrive in order and
+// the fast path (seq == deliverNextSeq) adds near-zero overhead.
+
+#define QUIC_JITTER_BUF_SIZE    256   // slots per flow (power of 2)
+#define QUIC_JITTER_BUF_MASK    (QUIC_JITTER_BUF_SIZE - 1)
+#define QUIC_JITTER_MAX_PKT     1500  // max datagram size
+#define QUIC_JITTER_MAX_WAIT_US 10000 // 10ms reorder timeout
+
+typedef struct _QUIC_JITTER_SLOT {
+    unsigned char data[QUIC_JITTER_MAX_PKT];
+    int len;            // 0 = empty
+    uint64_t arrivalUs;
+} QUIC_JITTER_SLOT;
+
+typedef struct _QUIC_JITTER_BUF {
+    QUIC_JITTER_SLOT slots[QUIC_JITTER_BUF_SIZE];
+    uint16_t deliverNextSeq;
+    int initialized;
+    uint64_t lastDeliverUs;
+    uint64_t delivered;
+    uint64_t reordered;  // arrived ahead of expected seq
+    uint64_t dropped;    // arrived after already delivered
+    uint64_t timedOut;   // skipped due to timeout
+} QUIC_JITTER_BUF;
+
+static QUIC_JITTER_BUF g_jitterBufs[4]; // per flow type
+
+// ── §5b FEC decoder (video only, RS 4+2) ────────────────────
+#include "rswrapper.h"
+
+#define QUIC_FEC_DATA_SHARDS   4
+#define QUIC_FEC_PARITY_SHARDS 2
+#define QUIC_FEC_TOTAL_SHARDS  6
+#define QUIC_FEC_MAX_GROUPS    8
+#define QUIC_FEC_SHARD_MAX     1500
+#define QUIC_FEC_PARITY_FLAG   0x80
+#define QUIC_FEC_META_SIZE     (QUIC_FEC_DATA_SHARDS * 2) // 4 × uint16_t BE
+
+typedef struct _QUIC_FEC_GROUP {
+    uint16_t baseSeq;
+    int active;
+    uint64_t createTimeUs;
+    uint8_t dataPresent;   // bitmask bits 0-3
+    uint8_t parityPresent; // bitmask bits 0-1
+    unsigned char shardBufs[QUIC_FEC_TOTAL_SHARDS][QUIC_FEC_SHARD_MAX];
+    int shardLens[QUIC_FEC_TOTAL_SHARDS];
+    uint16_t originalLens[QUIC_FEC_DATA_SHARDS]; // actual lengths from parity metadata
+    int maxShardLen;
+    uint64_t recovered;
+} QUIC_FEC_GROUP;
+
+static QUIC_FEC_GROUP g_fecGroups[QUIC_FEC_MAX_GROUPS];
+static reed_solomon* g_fecRs = NULL;
+static uint64_t g_fecRecovered = 0;
+static uint64_t g_fecFailed = 0;
+
 // ── Forward declarations ────────────────────────────────────
 
 static void quicIoThreadProc(void* context);
@@ -190,6 +250,12 @@ static void quicUpdatePathStats(void);
 static void quicCheckPathHealth(void);
 static void quicRecheckPaths(void);
 static void quicApplyCongestionAlgo(picoquic_quic_t* quic);
+static void quicJitterDeliver(QUIC_TRANSPORT_CTX* ctx, QUIC_JITTER_BUF* jb, unsigned char ft);
+static void quicJitterFlush(QUIC_TRANSPORT_CTX* ctx, QUIC_JITTER_BUF* jb, unsigned char ft);
+static void quicJitterInsert(QUIC_TRANSPORT_CTX* ctx, unsigned char ft, uint8_t* bytes, size_t length);
+static void quicFecOnShard(QUIC_TRANSPORT_CTX* ctx, unsigned char ft, uint8_t fecInfo,
+    uint16_t seq, uint8_t* payload, int payloadLen);
+static void quicFecTryRecover(QUIC_TRANSPORT_CTX* ctx, unsigned char ft, QUIC_FEC_GROUP* grp);
 
 // §Q Phase 5 (5f): 0-RTT ticket store path. picoquic auto-loads/saves
 // session tickets to this file across runs.  Set via
@@ -220,6 +286,17 @@ int quicTransportInit(void) {
     memset(g_prevBytesRecvByFlow, 0, sizeof(g_prevBytesRecvByFlow));
     g_lastDiagLogTime = 0;
 
+    // §5a: reset jitter buffers
+    memset(g_jitterBufs, 0, sizeof(g_jitterBufs));
+
+    // §5b: init FEC decoder
+    memset(g_fecGroups, 0, sizeof(g_fecGroups));
+    g_fecRecovered = 0;
+    g_fecFailed = 0;
+    if (!g_fecRs) {
+        g_fecRs = reed_solomon_new(QUIC_FEC_DATA_SHARDS, QUIC_FEC_PARITY_SHARDS);
+    }
+
     g_initialized = true;
     Limelog("[VIPLE-MPQUIC] Transport subsystem initialized\n");
     return 0;
@@ -240,6 +317,14 @@ void quicTransportCleanup(void) {
     // from a clean slate (avoids stale subflowCount / seqCounters /
     // sessionTicket carrying over into the next session).
     memset(&g_ctx, 0, sizeof(g_ctx));
+    memset(g_jitterBufs, 0, sizeof(g_jitterBufs));
+
+    // §5b: release FEC decoder
+    memset(g_fecGroups, 0, sizeof(g_fecGroups));
+    if (g_fecRs) {
+        reed_solomon_release(g_fecRs);
+        g_fecRs = NULL;
+    }
 
     g_initialized = false;
     Limelog("[VIPLE-MPQUIC] Transport subsystem cleaned up\n");
@@ -549,11 +634,9 @@ void quicServerStop(void) {
 // or -1 if no active subflow exists.
 
 static int quicSelectPath(unsigned char flowType, int dataLen) {
-    // §MP-PRIMARY 2026-05-24: primary-path 模式。所有 datagram
-    // 都走第一個 active subflow（通常是 path 0）。picoquic 的
-    // path_status 控制實際路由——path 0 = available，其餘 =
-    // backup。應用層排程（ECF / AGGREGATE / REDUNDANT）暫停，
-    // 等 Phase 5 實作 FEC + jitter buffer 後再啟用。
+    // §5c: client 出站（input/control）走 MIN_RTT — 回傳第一個
+    // active subflow。視訊/音訊是 server→client，由 server 端
+    // picoquic ECF scheduler 選路。
     (void)flowType;
     (void)dataLen;
 
@@ -1419,6 +1502,251 @@ int quicGetSessionTicket(unsigned char* buf, int bufLen) {
     return 0;
 }
 
+// ── §5a Jitter buffer implementation ────────────────────────
+
+static void quicJitterDeliver(QUIC_TRANSPORT_CTX* ctx,
+                              QUIC_JITTER_BUF* jb,
+                              unsigned char ft) {
+    while (1) {
+        int idx = jb->deliverNextSeq & QUIC_JITTER_BUF_MASK;
+        if (jb->slots[idx].len == 0)
+            break;
+
+        uint8_t* pkt = jb->slots[idx].data;
+        int pktLen = jb->slots[idx].len;
+
+        if (pktLen >= QUIC_DGRAM_HEADER_SIZE && ft < 4 && ctx->recvCallbacks[ft]) {
+            ctx->recvCallbacks[ft](
+                ft,
+                pkt + QUIC_DGRAM_HEADER_SIZE,
+                pktLen - QUIC_DGRAM_HEADER_SIZE,
+                ctx->recvContexts[ft]);
+        }
+
+        jb->delivered++;
+        jb->slots[idx].len = 0;
+        jb->lastDeliverUs = picoquic_current_time();
+        jb->deliverNextSeq++;
+    }
+}
+
+static void quicJitterFlush(QUIC_TRANSPORT_CTX* ctx,
+                            QUIC_JITTER_BUF* jb,
+                            unsigned char ft) {
+    for (int i = 0; i < QUIC_JITTER_BUF_SIZE; i++) {
+        uint16_t trySeq = (uint16_t)(jb->deliverNextSeq + i);
+        int idx = trySeq & QUIC_JITTER_BUF_MASK;
+        if (jb->slots[idx].len > 0) {
+            uint8_t* pkt = jb->slots[idx].data;
+            int pktLen = jb->slots[idx].len;
+            if (pktLen >= QUIC_DGRAM_HEADER_SIZE && ft < 4 && ctx->recvCallbacks[ft]) {
+                ctx->recvCallbacks[ft](
+                    ft,
+                    pkt + QUIC_DGRAM_HEADER_SIZE,
+                    pktLen - QUIC_DGRAM_HEADER_SIZE,
+                    ctx->recvContexts[ft]);
+            }
+            jb->delivered++;
+            jb->slots[idx].len = 0;
+        }
+    }
+}
+
+static void quicJitterInsert(QUIC_TRANSPORT_CTX* ctx,
+                             unsigned char ft,
+                             uint8_t* bytes, size_t length) {
+    if (ft >= 4 || length < QUIC_DGRAM_HEADER_SIZE || length > QUIC_JITTER_MAX_PKT)
+        return;
+
+    QUIC_JITTER_BUF* jb = &g_jitterBufs[ft];
+    PQUIC_DGRAM_HEADER hdr = (PQUIC_DGRAM_HEADER)bytes;
+    uint16_t seq = ntohs(hdr->seq);
+    uint64_t now = picoquic_current_time();
+
+    if (!jb->initialized) {
+        jb->deliverNextSeq = seq;
+        jb->initialized = 1;
+        jb->lastDeliverUs = now;
+    }
+
+    int16_t diff = (int16_t)(seq - jb->deliverNextSeq);
+
+    if (diff < 0) {
+        jb->dropped++;
+        return;
+    }
+
+    if (diff >= QUIC_JITTER_BUF_SIZE) {
+        quicJitterFlush(ctx, jb, ft);
+        jb->deliverNextSeq = seq;
+    }
+
+    int idx = seq & QUIC_JITTER_BUF_MASK;
+    if (jb->slots[idx].len == 0) {
+        memcpy(jb->slots[idx].data, bytes, length);
+        jb->slots[idx].len = (int)length;
+        jb->slots[idx].arrivalUs = now;
+    }
+
+    if (diff > 0)
+        jb->reordered++;
+
+    quicJitterDeliver(ctx, jb, ft);
+
+    if (now - jb->lastDeliverUs >= QUIC_JITTER_MAX_WAIT_US) {
+        for (int i = 0; i < QUIC_JITTER_BUF_SIZE; i++) {
+            uint16_t trySeq = (uint16_t)(jb->deliverNextSeq + i);
+            int tidx = trySeq & QUIC_JITTER_BUF_MASK;
+            if (jb->slots[tidx].len > 0) {
+                jb->timedOut += (uint64_t)(trySeq - jb->deliverNextSeq);
+                jb->deliverNextSeq = trySeq;
+                quicJitterDeliver(ctx, jb, ft);
+                break;
+            }
+        }
+    }
+}
+
+// ── §5b FEC decoder ────────────────────────────────────────
+
+static void quicFecTryRecover(QUIC_TRANSPORT_CTX* ctx, unsigned char ft, QUIC_FEC_GROUP* grp) {
+    if (!g_fecRs || grp->maxShardLen <= 0)
+        return;
+
+    uint8_t padBufs[QUIC_FEC_TOTAL_SHARDS][QUIC_FEC_SHARD_MAX];
+    uint8_t* shards[QUIC_FEC_TOTAL_SHARDS];
+    uint8_t marks[QUIC_FEC_TOTAL_SHARDS];
+    memset(padBufs, 0, sizeof(padBufs));
+
+    for (int i = 0; i < QUIC_FEC_DATA_SHARDS; i++) {
+        shards[i] = padBufs[i];
+        if (grp->dataPresent & (1 << i)) {
+            memcpy(padBufs[i], grp->shardBufs[i], grp->shardLens[i]);
+            marks[i] = 0;
+        } else {
+            marks[i] = 1;
+        }
+    }
+    for (int i = 0; i < QUIC_FEC_PARITY_SHARDS; i++) {
+        int si = QUIC_FEC_DATA_SHARDS + i;
+        shards[si] = padBufs[si];
+        if (grp->parityPresent & (1 << i)) {
+            memcpy(padBufs[si], grp->shardBufs[si], grp->shardLens[si]);
+            marks[si] = 0;
+        } else {
+            marks[si] = 1;
+        }
+    }
+
+    int ret = reed_solomon_decode(g_fecRs, shards, marks,
+                                  QUIC_FEC_TOTAL_SHARDS, grp->maxShardLen);
+    if (ret != 0) {
+        g_fecFailed++;
+        return;
+    }
+
+    for (int i = 0; i < QUIC_FEC_DATA_SHARDS; i++) {
+        if (!(grp->dataPresent & (1 << i))) {
+            int origLen = (int)grp->originalLens[i];
+            if (origLen <= 0 || origLen > QUIC_FEC_SHARD_MAX)
+                origLen = grp->maxShardLen;
+
+            uint8_t recoveredPkt[QUIC_DGRAM_HEADER_SIZE + QUIC_FEC_SHARD_MAX];
+            QUIC_DGRAM_HEADER recHdr;
+            recHdr.flowType = ft;
+            recHdr.reserved = (uint8_t)(i + 1);
+            recHdr.seq = htons((uint16_t)(grp->baseSeq + i));
+            memcpy(recoveredPkt, &recHdr, QUIC_DGRAM_HEADER_SIZE);
+            memcpy(recoveredPkt + QUIC_DGRAM_HEADER_SIZE, shards[i], origLen);
+
+            quicJitterInsert(ctx, ft, recoveredPkt,
+                             QUIC_DGRAM_HEADER_SIZE + origLen);
+            g_fecRecovered++;
+            grp->recovered++;
+            grp->dataPresent |= (1 << i);
+        }
+    }
+}
+
+static void quicFecOnShard(QUIC_TRANSPORT_CTX* ctx, unsigned char ft,
+    uint8_t fecInfo, uint16_t seq, uint8_t* payload, int payloadLen) {
+
+    int isParity = (fecInfo & QUIC_FEC_PARITY_FLAG) != 0;
+    int shardIndex;
+    uint16_t baseSeq;
+
+    if (isParity) {
+        shardIndex = QUIC_FEC_DATA_SHARDS + (fecInfo & 0x7F) - 1;
+        baseSeq = seq;
+    } else {
+        shardIndex = (fecInfo & 0x7F) - 1;
+        baseSeq = (uint16_t)(seq - shardIndex);
+    }
+
+    if (shardIndex < 0 || shardIndex >= QUIC_FEC_TOTAL_SHARDS)
+        return;
+
+    int gi = baseSeq % QUIC_FEC_MAX_GROUPS;
+    QUIC_FEC_GROUP* grp = &g_fecGroups[gi];
+    uint64_t now = picoquic_current_time();
+
+    if (grp->active && (grp->baseSeq != baseSeq ||
+                        now - grp->createTimeUs > 50000)) {
+        grp->active = 0;
+    }
+
+    if (!grp->active) {
+        memset(grp, 0, sizeof(*grp));
+        grp->baseSeq = baseSeq;
+        grp->active = 1;
+        grp->createTimeUs = now;
+    }
+
+    if (isParity) {
+        int pi = shardIndex - QUIC_FEC_DATA_SHARDS;
+        if (pi < QUIC_FEC_PARITY_SHARDS &&
+            !(grp->parityPresent & (1 << pi)) &&
+            payloadLen > QUIC_FEC_META_SIZE) {
+            for (int i = 0; i < QUIC_FEC_DATA_SHARDS; i++) {
+                uint16_t origLen;
+                memcpy(&origLen, payload + i * 2, 2);
+                grp->originalLens[i] = ntohs(origLen);
+            }
+            int parityDataLen = payloadLen - QUIC_FEC_META_SIZE;
+            if (parityDataLen > QUIC_FEC_SHARD_MAX)
+                parityDataLen = QUIC_FEC_SHARD_MAX;
+            memcpy(grp->shardBufs[shardIndex],
+                   payload + QUIC_FEC_META_SIZE, parityDataLen);
+            grp->shardLens[shardIndex] = parityDataLen;
+            if (parityDataLen > grp->maxShardLen)
+                grp->maxShardLen = parityDataLen;
+            grp->parityPresent |= (1 << pi);
+        }
+    } else {
+        if (!(grp->dataPresent & (1 << shardIndex))) {
+            int copyLen = payloadLen;
+            if (copyLen > QUIC_FEC_SHARD_MAX)
+                copyLen = QUIC_FEC_SHARD_MAX;
+            memcpy(grp->shardBufs[shardIndex], payload, copyLen);
+            grp->shardLens[shardIndex] = copyLen;
+            if (copyLen > grp->maxShardLen)
+                grp->maxShardLen = copyLen;
+            grp->dataPresent |= (1 << shardIndex);
+        }
+    }
+
+    int dataCount = 0, parityCount = 0;
+    for (int i = 0; i < QUIC_FEC_DATA_SHARDS; i++)
+        if (grp->dataPresent & (1 << i)) dataCount++;
+    for (int i = 0; i < QUIC_FEC_PARITY_SHARDS; i++)
+        if (grp->parityPresent & (1 << i)) parityCount++;
+
+    if (dataCount < QUIC_FEC_DATA_SHARDS &&
+        (dataCount + parityCount) >= QUIC_FEC_DATA_SHARDS) {
+        quicFecTryRecover(ctx, ft, grp);
+    }
+}
+
 // ── picoquic callbacks ──────────────────────────────────────
 
 static int quicDgramCallback(picoquic_cnx_t* cnx,
@@ -1447,13 +1775,20 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                             (int)ft, (int)length, (unsigned)ntohs(hdr->seq));
                 }
             }
-            // 分派到 per-flow callback
-            if (ft < 4 && ctx->recvCallbacks[ft]) {
-                ctx->recvCallbacks[ft](
-                    ft,
-                    bytes + QUIC_DGRAM_HEADER_SIZE,
-                    (int)(length - QUIC_DGRAM_HEADER_SIZE),
-                    ctx->recvContexts[ft]);
+            // §5b FEC + §5a jitter buffer dispatch
+            if (hdr->reserved == 0 || ft != QUIC_FLOW_VIDEO) {
+                quicJitterInsert(ctx, ft, bytes, (int)length);
+            } else if (hdr->reserved & QUIC_FEC_PARITY_FLAG) {
+                uint8_t* payload = bytes + QUIC_DGRAM_HEADER_SIZE;
+                int payloadLen = (int)(length - QUIC_DGRAM_HEADER_SIZE);
+                quicFecOnShard(ctx, ft, hdr->reserved,
+                               ntohs(hdr->seq), payload, payloadLen);
+            } else {
+                uint8_t* payload = bytes + QUIC_DGRAM_HEADER_SIZE;
+                int payloadLen = (int)(length - QUIC_DGRAM_HEADER_SIZE);
+                quicFecOnShard(ctx, ft, hdr->reserved,
+                               ntohs(hdr->seq), payload, payloadLen);
+                quicJitterInsert(ctx, ft, bytes, (int)length);
             }
         }
         // Per-subflow lastRecvTime is updated by the I/O thread directly
@@ -1498,22 +1833,16 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                     ctx->subflows[i].active = true;
                     ctx->subflows[i].lastRecvTime = picoquic_current_time();
 
-                    // §MP-PRIMARY 2026-05-24: 驗證通過的路徑維持
-                    // backup，不升級為 available。只有 path 0 是
-                    // available（primary-path 模式）。non-primary
-                    // 路徑已驗證、隨時可用，但 picoquic scheduler
-                    // 不會主動在上面分派 datagram，避免跨路徑 RTT
-                    // 差異導致 depacketizer 組裝失敗。failover 時
-                    // quicCheckPathHealth() 會把 backup 升級。
-                    // §MP-PRIMARY-LOCK: 驗證通過後明確設定 backup。
-                    // 初始 probe (quicAddSubflowEx) 已設過一次，
-                    // 但 picoquic 驗證過程可能清除 backup flag。
-                    // 這裡 re-assert 確保 picoquic 不會自動分派
-                    // datagram 到此路徑。
-                    if (i > 0) {
+                    // §5c: jitter buffer + FEC 就位後允許多路徑 available。
+                    // keepAsStandby 路徑（cellular 等）仍維持 standby。
+                    if (ctx->subflows[i].keepAsStandby) {
                         picoquic_set_path_status(
                             ctx->cnx, stream_id,
                             picoquic_path_status_backup);
+                    } else {
+                        picoquic_set_path_status(
+                            ctx->cnx, stream_id,
+                            picoquic_path_status_available);
                     }
 
                     if (ctx->subflows[i].keepAsStandby) {
@@ -1757,37 +2086,19 @@ static void quicIoThreadProc(void* context) {
             }
         }
 
-        // §MP-PRIMARY-GUARD: 確保 picoquic 只在一條路徑上送資料。
-        // 正常情況：path 0 = available，其餘 = backup。
-        // Failover 時：promoted path = available，path 0 = backup。
-        // 使用 failoverPromotedSlot 判斷當前哪條路徑應為 available。
-        //
-        // §K.13 UAF fix 2026-05-26 — 改用 picoquic_set_path_status API 而非
-        // 直接 access cnx->path[pi]->...。在主介面被 OS 強制 disable 觸發
-        // picoquic 內部 mass path-deletion 期間，直接 deref cnx->path[pi]
-        // 可能命中半 freed 的 picoquic_path_t（picoquic 在 delete_path 內
-        // 先 free path_x 再 shift 陣列，視窗很短但存在）。API 路徑會先用
-        // unique_path_id 找 array index，找不到就 no-op 返回，避免 dangling
-        // pointer access。額外 picoquicDeleted 旗標跳過已知刪除的 subflow。
+        // §5c: 多路徑 available guard — 所有 active non-standby 路徑
+        // 設為 available，讓 picoquic ECF scheduler 自行選路。
+        // §K.13 UAF fix: 使用 API 而非直接 access cnx->path[]。
         if (ctx->cnx != NULL && ctx->subflowCount > 1 &&
             picoquic_get_cnx_state(ctx->cnx) < picoquic_state_disconnecting) {
-            // 決定當前 active path 的 unique_path_id
-            uint64_t activePathUid =
-                ctx->subflows[0].picoquicPathId; // 預設 path 0
-            if (ctx->failoverPromotedSlot >= 0 &&
-                ctx->failoverPromotedSlot < ctx->subflowCount &&
-                !ctx->subflows[ctx->failoverPromotedSlot].picoquicDeleted) {
-                activePathUid =
-                    ctx->subflows[ctx->failoverPromotedSlot].picoquicPathId;
-            }
             for (int i = 0; i < ctx->subflowCount; i++) {
                 if (ctx->subflows[i].picoquicDeleted) continue;
-                picoquic_path_status_enum st =
-                    (ctx->subflows[i].picoquicPathId == activePathUid)
-                        ? picoquic_path_status_available
-                        : picoquic_path_status_backup;
-                // 內部會先用 unique_path_id 找 path_id；找不到（路徑已刪）
-                // 就直接 return 0 不 access cnx->path[]。
+                picoquic_path_status_enum st;
+                if (!ctx->subflows[i].active || ctx->subflows[i].keepAsStandby) {
+                    st = picoquic_path_status_backup;
+                } else {
+                    st = picoquic_path_status_available;
+                }
                 (void)picoquic_set_path_status(ctx->cnx,
                     ctx->subflows[i].picoquicPathId, st);
             }
@@ -1932,6 +2243,29 @@ static void quicIoThreadProc(void* context) {
                     Limelog("[VIPLE-MPQUIC] §K.10 videoRing depth=%d/%d drops=%llu\n",
                             ringDepth, ringCap,
                             (unsigned long long)ringDrops);
+                }
+
+                // §5a Jitter buffer 診斷
+                {
+                    const char* flowNames[] = {"VIDEO", "AUDIO", "CTRL", "INPUT"};
+                    for (int ji = 0; ji < 4; ji++) {
+                        QUIC_JITTER_BUF* jb = &g_jitterBufs[ji];
+                        if (jb->delivered || jb->reordered || jb->dropped || jb->timedOut) {
+                            Limelog("[VIPLE-MPQUIC] §5a Jitter[%s]: delivered=%llu reordered=%llu dropped=%llu timedOut=%llu\n",
+                                    flowNames[ji],
+                                    (unsigned long long)jb->delivered,
+                                    (unsigned long long)jb->reordered,
+                                    (unsigned long long)jb->dropped,
+                                    (unsigned long long)jb->timedOut);
+                        }
+                    }
+                }
+
+                // §5b FEC 診斷
+                if (g_fecRecovered || g_fecFailed) {
+                    Limelog("[VIPLE-MPQUIC] §5b FEC: recovered=%llu failed=%llu\n",
+                            (unsigned long long)g_fecRecovered,
+                            (unsigned long long)g_fecFailed);
                 }
 
                 // Per-path 摘要

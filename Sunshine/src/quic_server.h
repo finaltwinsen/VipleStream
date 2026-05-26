@@ -31,6 +31,8 @@
 // can't be forward-declared cleanly. Just include the full header.
 #include <picoquic.h>
 
+struct _reed_solomon;
+
 namespace quic_server {
 
   struct SubflowStats {
@@ -116,6 +118,17 @@ namespace quic_server {
     // 上次 stats snapshot（用於計算 delta 速率）
     uint64_t _prevBytesByFlow[4] = {};
     std::chrono::steady_clock::time_point _prevStatsTime = std::chrono::steady_clock::now();
+
+    // §5b FEC: video datagram RS encoding (4 data + 2 parity)
+    struct FecGroupState {
+      std::vector<uint8_t> payloads[4];
+      uint16_t seqs[4] = {};
+      int count = 0;
+      uint16_t baseSeq = 0;
+    };
+    FecGroupState _fecGroup;
+    ::_reed_solomon *_fecRs = nullptr;
+    void flushFecParity(int scheduler);
   };
 
   class QuicListener {

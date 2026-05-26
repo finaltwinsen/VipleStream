@@ -10,7 +10,7 @@
 | 優先級 | 條目 | 待做事項 |
 |---|---|---|
 | **Active (verify)** | **§β.11.b** warp edge MV threshold | Settings UI slider (2-20, default 8) 已上線 v1.4.195；setting 實機 confirm 生效 (2026-05-23, registry vkfrucEdgeMvThreshold=8 + ctor log)；剩主觀畫質比較：keep 8 / 試 4（更多邊緣保護）/ 試 12（更 smooth）|
-| **Active (Phase 5 進行中)** | **§Q** MP-QUIC 多路徑網路聚合 | v1.5.0-1.5.5 ship + Android prebuilt .a 已就位。**Server-side 完整驗測 PASS** (2026-05-23, Pixel 5 ↔ Twinsen-PC-WorkStation 53 分鐘 session：path0 RTT=1ms 795Mbps、dgramPushed=dgramQueued 100% delivery)。**§MP-PRIMARY 2026-05-24：** 應用層 scheduler 暫停（path 0 always available 其餘 backup），UI 5 個 scheduler 選項 wire 上等效——須等 Phase 5 jitter buffer + FEC 落地後才能恢復多路徑語意。**Phase 5 拆 5a-5f** 詳見下方補充。**Sprint 1 done (2026-05-26):** 5e Android JNI 探查發現早已實作只清舊註解；5f 0-RTT cross-restart（雙 client + Sunshine server 三處同步加 quicSetTicketStorePath setter + ticket_encryption_key 持久化）。**待：** (1) Sprint 1 build + 驗測（moonlight-qt 桌面 + Android prebuilt rebuild + Pixel 5 N interface > 1 + Sunshine restart 後 0-RTT 生效）；(2) Sprint 2 5a Jitter buffer 開工 |
+| **Active (build + verify)** | **§Q** MP-QUIC 多路徑網路聚合 | Phase 5 全 Sprint 實作完成 (2026-05-26)：5a jitter buffer、5b FEC (4+2 RS)、5c multipath scheduler re-enable、5d per-path datagram queue API (picoquic fork)。**待：** build_all + 實機驗測（Pixel 5 多路徑 session 穩定性 + 0-RTT cross-restart + FEC recovery log） |
 | **Active (verify, partial bug)** | **§SLIM** release zip 瘦身 (106→48 MB) | phase 1-4 已 ship。**NCNN backend lazy fetch path 確認接通** (ncnnfruc.cpp:1063/2714 → ensureRifeModelDir → ModelFetcher)。**⚠️ Bug：Vulkan Native RIFE 路徑沒接 ModelFetcher** — rife_native_vk.cpp 4 處 (line 3669/4998/7413/7705) 直接 modelDir+/flownet.bin 載入；2026-05-23 實機驗：cache 空時 RifeNativeExecutor init failed → fallback block-match path (鐵律 OK 不 crash)，但 lazy fetch 沒生效。**Fix：** VkFrucRenderer 對 RifeNativeExecutor::initialize 的 caller 端先 ensureRifeModelDir(opts.modelDir)。剩餘原項：無 VC++ Runtime Win10 系統實測 missing vcruntime140 提示 |
 | **Deferred (hw-bound)** | **§B Phase B** HEVC D3D11VA → Vulkan composite | Code 已 ship v1.4.184-185；阻塞：AMD 780M 測試機 HEVC D3D11VA 本身不可用。需換另一台 D3D11VA HEVC HW decode 可用的 AMD 機器驗 B7 import + B9 FRUC chain |
 | **Active (test pending)** | **§B-NVOF autotier** NVOF 成為 NV 最佳 tier | Code 已 ship v1.4.117-138；待使用者 PixArk 20+ 分鐘實測，看 NVOF-PROF drop% 是否接近 0%、chain_mean 是否穩定 < 2ms。若 OK → reapply early-kickoff + NVOF 列 NV best tier；若 drop% 高 → 需 Option E skip 機制 |
@@ -61,23 +61,21 @@ QuicTransport.c:938-940 記錄的三個失敗模式：
 | Sprint | 工作 | 解 | 狀態 |
 |---|---|---|---|
 | 1 | 5e Android JNI bridge + 5f 0-RTT cross-restart | 基礎建設 | **done 2026-05-26**（待實機驗測） |
-| 2 | 5a Jitter buffer | (c) reordering | pending |
-| 3 | 5b FEC（Reed-Solomon over 既有 nanors） | (c) IDR 重建 | pending |
-| 4 | 5c re-enable MIN_RTT / ECF（不開 AGGREGATE/REDUNDANT） | (c) 緩解 | pending |
-| 5 | 5d 真聚合：fork picoquic 加 per-path queue API | (a)(b)(c) | pending |
+| 2 | 5a Jitter buffer（sliding-window reorder, 10ms timeout） | (c) reordering | **done 2026-05-26** |
+| 3 | 5b FEC（4+2 Reed-Solomon, server encode / client decode） | (c) IDR 重建 | **done 2026-05-26** |
+| 4 | 5c re-enable multipath（standby/available, ECF scheduler） | (c) 緩解 | **done 2026-05-26** |
+| 5 | 5d per-path datagram queue（fork picoquic API） | (a)(b)(c) | **done 2026-05-26** |
 
-依賴：5a/5b → 5c → 5d；5e/5f 與其他獨立。
+依賴：5a/5b → 5c → 5d；5e/5f 與其他獨立。**全部完成 2026-05-26。**
 
 **路線決定 (2026-05-26)**：選路線 A（fork picoquic 加 per-path queue API）保
-mobility WiFi↔5G <10ms 切換、保 RFC 9443 完整語意。代價：永久 fork debt、動
-picoquic sender 內部要重跑 §K.10-K.16 那輪穩定化。替代路線 B（app-layer 多
-獨立 cnx）3 週工作量但失 CID 漫遊（切換 ~50-100ms 有感）。
+mobility WiFi↔5G <10ms 切換、保 RFC 9443 完整語意。
 
-**Sprint 1 驗測清單**：
-1. moonlight-qt build → 桌面 client 連 Sunshine 看 `[VIPLE-MPQUIC] Ticket store:` log
-2. Sunshine restart → 重連看 `[VIPLE-MPQUIC] Ticket key loaded` + 0-RTT path 生效
-3. moonlight-android prebuilt picoquic .a rebuild → Pixel 5 連線看
-   `setNetInterfaces: injected N interface(s)` N > 1
+**整合驗測清單**：
+1. `build_all.cmd` 通過（Client + Server 含 picoquic fork 新 API）
+2. Sunshine restart → 確認 `[VIPLE-MPQUIC]` log 正常、video per-path queue 運作
+3. 多路徑 session：Pixel 5 WiFi+5G 同時 available、FEC recovery 有生效
+4. 0-RTT cross-restart：Sunshine restart 後重連看 `[VIPLE-MPQUIC] Ticket key loaded`
 
 ### §Q Windows MSVC client picoquic build env setup
 
