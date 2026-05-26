@@ -816,18 +816,38 @@ int quicAddSubflowEx(int interfaceIndex,
         }
     }
 
-    // Find a usable slot: prefer the end of the array, but recycle
-    // slots whose path was permanently deleted by picoquic.
+    // §Q-SLOT-CLEANUP: 找可用 slot。優先順序：
+    //   1. 同介面的死 slot（path-recovery 重建時最常見，避免陣列堆積
+    //      重複 interfaceIndex 造成 overlay 顯示兩筆同名條目）
+    //   2. 任意死 slot（不同介面，回收空間）
+    //   3. 陣列尾端（容量未滿時 append）
     int slotIdx = -1;
-    if (g_ctx.subflowCount < QUIC_MAX_SUBFLOWS) {
-        slotIdx = g_ctx.subflowCount;
-    } else {
-        for (int i = 0; i < g_ctx.subflowCount; i++) {
-            if (g_ctx.subflows[i].picoquicDeleted) {
-                if (g_ctx.subflows[i].sock != INVALID_SOCKET)
-                    closeSocket(g_ctx.subflows[i].sock);
-                slotIdx = i;
-                break;
+
+    // Pass 1: 同介面的死 slot
+    for (int i = 0; i < g_ctx.subflowCount; i++) {
+        if (g_ctx.subflows[i].picoquicDeleted &&
+            g_ctx.subflows[i].interfaceIndex == interfaceIndex) {
+            if (g_ctx.subflows[i].sock != INVALID_SOCKET)
+                closeSocket(g_ctx.subflows[i].sock);
+            slotIdx = i;
+            Limelog("[VIPLE-MPQUIC] Recycling dead slot %d for same interface "
+                    "if %d\n", i, interfaceIndex);
+            break;
+        }
+    }
+
+    // Pass 2: 任意死 slot 或 append
+    if (slotIdx < 0) {
+        if (g_ctx.subflowCount < QUIC_MAX_SUBFLOWS) {
+            slotIdx = g_ctx.subflowCount;
+        } else {
+            for (int i = 0; i < g_ctx.subflowCount; i++) {
+                if (g_ctx.subflows[i].picoquicDeleted) {
+                    if (g_ctx.subflows[i].sock != INVALID_SOCKET)
+                        closeSocket(g_ctx.subflows[i].sock);
+                    slotIdx = i;
+                    break;
+                }
             }
         }
     }
@@ -1479,18 +1499,32 @@ static void quicRecheckPaths(void) {
     // IO 執行緒上的 recheck 僅做介面掃描 + 診斷日誌，不呼叫任何會觸發
     // server 端 multipath scheduler 改變的 API。已刪除的路徑等下次 session
     // 重新連線時在 Phase B 重新評估。
+    // §Q-SLOT-CLEANUP: 只計算「真正孤立」的死 slot（同介面沒有
+    // 活躍 subflow 頂替）。path-recovery 重建後，舊死 slot 已被同
+    // 介面的新 slot 取代，不算需要關注的 deleted path。
     {
-        int deletedCount = 0;
+        int orphanedCount = 0;
         for (int s = 0; s < g_ctx.subflowCount; s++) {
             QUIC_SUBFLOW* sf = &g_ctx.subflows[s];
             if (!sf->picoquicDeleted)
                 continue;
-            deletedCount++;
+            // 同介面是否已有活的 subflow？
+            bool replaced = false;
+            for (int r = 0; r < g_ctx.subflowCount; r++) {
+                if (r == s) continue;
+                if (g_ctx.subflows[r].interfaceIndex == sf->interfaceIndex &&
+                    !g_ctx.subflows[r].picoquicDeleted) {
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced)
+                orphanedCount++;
         }
-        if (deletedCount > 0) {
-            Limelog("[VIPLE-MPQUIC] Recheck: %d deleted path(s) — "
+        if (orphanedCount > 0) {
+            Limelog("[VIPLE-MPQUIC] Recheck: %d orphaned deleted path(s) — "
                     "not re-probing on IO thread (would require ICMP)\n",
-                    deletedCount);
+                    orphanedCount);
         }
     }
 
@@ -1691,23 +1725,28 @@ void quicSetAltPeers(const struct sockaddr_storage* addrs,
 // ── Monitoring ──────────────────────────────────────────────
 
 int quicGetSubflowStats(PQUIC_SUBFLOW_STATS out, int maxCount) {
-    int count = g_ctx.subflowCount;
-    if (count > maxCount)
-        count = maxCount;
+    // §Q-SLOT-CLEANUP: 跳過 picoquicDeleted 的死 slot。
+    // path-recovery 會在同介面重建新 subflow，舊 slot 標記 deleted
+    // 但仍留在陣列裡等回收。不過濾的話 overlay 會出現兩筆同名條目
+    // （例如「乙太網路」出現兩次——一個 ✘ 一個 ✔）。
+    int outIdx = 0;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < g_ctx.subflowCount && outIdx < maxCount; i++) {
         QUIC_SUBFLOW* sf = &g_ctx.subflows[i];
-        out[i].interfaceIndex = sf->interfaceIndex;
-        PltSafeStrcpy(out[i].interfaceName, sizeof(out[i].interfaceName), sf->name);
-        out[i].interfaceType = sf->type;
-        out[i].rttMs = sf->rttMs;
-        out[i].throughputMbps = sf->throughputMbps;
-        out[i].lossPercent = sf->lossPercent;
-        out[i].reorderPercent = sf->reorderPercent;
-        out[i].active = sf->active;
+        if (sf->picoquicDeleted)
+            continue;  // 死 slot，跳過
+        out[outIdx].interfaceIndex = sf->interfaceIndex;
+        PltSafeStrcpy(out[outIdx].interfaceName, sizeof(out[outIdx].interfaceName), sf->name);
+        out[outIdx].interfaceType = sf->type;
+        out[outIdx].rttMs = sf->rttMs;
+        out[outIdx].throughputMbps = sf->throughputMbps;
+        out[outIdx].lossPercent = sf->lossPercent;
+        out[outIdx].reorderPercent = sf->reorderPercent;
+        out[outIdx].active = sf->active;
+        outIdx++;
     }
 
-    return count;
+    return outIdx;
 }
 
 int quicGetActiveSubflowCount(void) {
