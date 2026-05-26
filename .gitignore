@@ -46,6 +46,19 @@ temp_*.cmd
 /build-tools/
 /verify/
 
+# ── 2026-05-26: tools/ dev-only subdirs + on-demand FRUC models ──
+# tools/viplestream-relay/ stays tracked (user-facing relay daemon).
+# Below are dev-only / source assets that don't belong in the public mirror:
+# - aftermath_decode/ + android_vulkan_probe/ — dev debug CLIs
+# - fruc*.onnx (~38 MB total) — fetched on-demand from permanent
+#   GitHub release tag (assets-onnx-v2 etc.) at first DML init, no need
+#   to ship the source binaries in the repo too.
+/tools/aftermath_decode/
+/tools/android_vulkan_probe/
+/tools/fruc.onnx
+/tools/fruc_fp16.onnx
+/tools/fruc_ifrnet_s.onnx
+
 # ── FRUC standalone test tool ──
 tools/fruc_test/
 
