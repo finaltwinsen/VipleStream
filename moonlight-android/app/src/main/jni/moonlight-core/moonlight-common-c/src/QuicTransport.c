@@ -43,7 +43,13 @@
 // 因延遲差異而組裝失敗。
 // 值 10ms：LAN RTT ~1ms + 10ms = 11ms 閾值。Tailscale 同 LAN
 // 通常 <5ms 能通過；跨 ISP 的 Tailscale relay 通常 >30ms 會被擋。
-#define STANDBY_RTT_EXCESS_MS    10
+#define STANDBY_RTT_EXCESS_MS     10
+
+// §Q-MP-DYN-STANDBY: 動態 RTT 監測閾值（毫秒）。
+// 推導：jitter buffer timeout = QUIC_JITTER_MAX_WAIT_US（10ms）。
+// 若跨路徑 RTT 差超過 timeout / 2（5ms），WiFi OWD 在抖動時很容易
+// 突破 timeout，導致持續 timedOut → drop。
+#define DYN_STANDBY_RTT_EXCESS_MS  5
 
 // ── Internal state ──────────────────────────────────────────
 
@@ -1000,6 +1006,13 @@ int quicAddSubflowEx(int interfaceIndex,
             sf->id, interfaceIndex, (unsigned long long)sf->picoquicPathId,
             slotIdx, sf->keepAsStandby ? "YES" : "no");
 
+    // §Q-MP-DYN-STANDBY: 訂閱此路徑的 RTT quality update。
+    if (g_ctx.cnx) {
+        uint64_t rttDeltaUs = (uint64_t)(DYN_STANDBY_RTT_EXCESS_MS) * 500;
+        picoquic_subscribe_to_quality_update_per_path(
+            g_ctx.cnx, sf->picoquicPathId, 0, rttDeltaUs);
+    }
+
     PltUnlockMutex(&g_ctx.picoquicMutex);
     return sf->id;
 }
@@ -1332,6 +1345,47 @@ static void quicCheckPathHealth(void) {
             }
         } else if (sf->active) {
             sf->consecutiveTimeouts = 0;
+        }
+
+        // §Q-MP-DYN-STANDBY: 動態 RTT 監測——若某路徑 QUIC RTT 超過
+        // 最快路徑 + STANDBY_RTT_EXCESS_MS，改為 standby 避免 jitter
+        // buffer timeout（10ms）被高 RTT 路徑拖垮。
+        // 恢復條件：RTT 降回閾值 50% 以下（滯後，防抖動）。
+        if (sf->active && sf->rttMs > 0 && i > 0) {
+            float bestRttMs = -1.0f;
+            for (int j = 0; j < g_ctx.subflowCount; j++) {
+                QUIC_SUBFLOW* best = &g_ctx.subflows[j];
+                if (j != i && best->active && !best->keepAsStandby &&
+                    !best->picoquicDeleted && best->rttMs > 0) {
+                    if (bestRttMs < 0 || best->rttMs < bestRttMs)
+                        bestRttMs = best->rttMs;
+                }
+            }
+            if (bestRttMs > 0) {
+                float excess = sf->rttMs - bestRttMs;
+                if (!sf->keepAsStandby &&
+                    excess > (float)DYN_STANDBY_RTT_EXCESS_MS) {
+                    sf->keepAsStandby = true;
+                    picoquic_set_path_status(g_ctx.cnx, sf->picoquicPathId,
+                                             picoquic_path_status_backup);
+                    Limelog("[VIPLE-MPQUIC] §Q-MP-DYN-STANDBY: subflow %d (if %d) "
+                            "→ standby (QUIC RTT=%.1fms, best=%.1fms, "
+                            "excess=%.1f > %dms)\n",
+                            sf->id, sf->interfaceIndex,
+                            sf->rttMs, bestRttMs, excess,
+                            DYN_STANDBY_RTT_EXCESS_MS);
+                } else if (sf->keepAsStandby &&
+                           excess <= (float)(DYN_STANDBY_RTT_EXCESS_MS / 2)) {
+                    sf->keepAsStandby = false;
+                    picoquic_set_path_status(g_ctx.cnx, sf->picoquicPathId,
+                                             picoquic_path_status_available);
+                    Limelog("[VIPLE-MPQUIC] §Q-MP-DYN-STANDBY: subflow %d (if %d) "
+                            "→ active (QUIC RTT=%.1fms, best=%.1fms, "
+                            "excess=%.1f recovered)\n",
+                            sf->id, sf->interfaceIndex,
+                            sf->rttMs, bestRttMs, excess);
+                }
+            }
         }
 
         // Re-activate a previously dead path if picoquic reports it alive
@@ -1781,8 +1835,11 @@ static void quicJitterInsert(QUIC_TRANSPORT_CTX* ctx,
             uint16_t trySeq = (uint16_t)(jb->deliverNextSeq + i);
             int tidx = trySeq & QUIC_JITTER_BUF_MASK;
             if (jb->slots[tidx].len > 0) {
-                jb->timedOut += (uint64_t)(trySeq - jb->deliverNextSeq);
-                jb->deliverNextSeq = trySeq;
+                // §5a.fix: i 是正確的跳過距離（uint16_t 模加法保證正）。
+                // 舊寫法 (uint64_t)(trySeq - deliverNextSeq) 在 uint16_t
+                // 邊界繞回時，int 升型導致負值轉 uint64_t 造成溢位。
+                jb->timedOut += (uint64_t)i;
+                jb->deliverNextSeq = (uint16_t)(jb->deliverNextSeq + i);
                 quicJitterDeliver(ctx, jb, ft);
                 break;
             }
@@ -2050,6 +2107,12 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                 break;
             }
         }
+        break;
+    }
+
+    case picoquic_callback_path_quality_changed: {
+        // §Q-MP-DYN-STANDBY: 強制 health check 立即重跑
+        ctx->lastHealthCheck = 0;
         break;
     }
 
