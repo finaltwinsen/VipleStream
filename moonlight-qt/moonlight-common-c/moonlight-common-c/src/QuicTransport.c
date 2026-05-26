@@ -791,6 +791,20 @@ int quicAddSubflowEx(int interfaceIndex,
     if (!g_ctx.cnx)
         return -1;
 
+    // §Q.link-local: WiFi enabled 但未連接 AP 時，Windows 分配 APIPA
+    // 169.254.x.x。connect() 路由檢查和 ICMP 探測都會透過 Ethernet NIC
+    // 成功，但 WiFi 實際上不通——picoquic 分配封包到該 path 後封包被丟棄，
+    // 造成嚴重的輸入延遲（滑鼠慢好幾秒）。
+    if (localAddr->ss_family == AF_INET) {
+        const struct sockaddr_in* sin = (const struct sockaddr_in*)localAddr;
+        uint32_t ip = ntohl(sin->sin_addr.s_addr);
+        if ((ip & 0xFFFF0000) == 0xA9FE0000) {
+            Limelog("[VIPLE-MPQUIC] Rejecting if %d: link-local 169.254.x.x "
+                    "(no real connectivity)\n", interfaceIndex);
+            return -1;
+        }
+    }
+
     // Find a usable slot: prefer the end of the array, but recycle
     // slots whose path was permanently deleted by picoquic.
     int slotIdx = -1;
@@ -1717,6 +1731,14 @@ static void quicJitterInsert(QUIC_TRANSPORT_CTX* ctx,
     if (ft >= 4 || length < QUIC_DGRAM_HEADER_SIZE || length > QUIC_JITTER_MAX_PKT)
         return;
 
+    // §5a.r2: Video 不再繞過 jitter buffer。之前的 bypass 造成多路徑
+    // 封包亂序直送 depacketizer，導致 97% 幀丟失（depacketizer 看到
+    // 後續幀封包就宣告當前幀不可恢復）。先前 jitter buffer 73% drop
+    // 的根因是 link-local 169.254.x.x 死路徑丟失 ~40% 封包（已在
+    // §Q.link-local 修復），不是 buffer 設計問題。
+    // 研究支持：IETF draft-amend-iccrg-multipath-reordering 推薦
+    // adaptive expiration reorder buffer 處理即時串流的多路徑亂序。
+
     QUIC_JITTER_BUF* jb = &g_jitterBufs[ft];
     PQUIC_DGRAM_HEADER hdr = (PQUIC_DGRAM_HEADER)bytes;
     uint16_t seq = ntohs(hdr->seq);
@@ -2406,7 +2428,7 @@ static void quicIoThreadProc(void* context) {
 
                 // §5a Jitter buffer 診斷
                 {
-                    const char* flowNames[] = {"VIDEO", "AUDIO", "CTRL", "INPUT"};
+                    const char* flowNames[] = {"(none)", "VIDEO", "AUDIO", "CTRL"};
                     for (int ji = 0; ji < 4; ji++) {
                         QUIC_JITTER_BUF* jb = &g_jitterBufs[ji];
                         if (jb->delivered || jb->reordered || jb->dropped || jb->timedOut) {
