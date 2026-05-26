@@ -443,14 +443,16 @@ libplacebo {
         streaming/video/ffmpeg-renderers/vkfruc-decode.cpp \
         streaming/video/ffmpeg-renderers/vkfruc-aftermath.cpp \
         streaming/video/ffmpeg-renderers/ncnn_rife_warp.cpp \
-        streaming/video/ffmpeg-renderers/rife_native_vk.cpp
+        streaming/video/ffmpeg-renderers/rife_native_vk.cpp \
+        streaming/video/ffmpeg-renderers/modelfetcher.cpp
     HEADERS += \
         streaming/video/ffmpeg-renderers/plvk.h \
         streaming/video/ffmpeg-renderers/vkfruc.h \
         streaming/video/ffmpeg-renderers/vkfruc-decode.h \
         streaming/video/ffmpeg-renderers/vkfruc-aftermath.h \
         streaming/video/ffmpeg-renderers/ncnn_rife_warp.h \
-        streaming/video/ffmpeg-renderers/rife_native_vk.h
+        streaming/video/ffmpeg-renderers/rife_native_vk.h \
+        streaming/video/ffmpeg-renderers/modelfetcher.h
 
     # VipleStream §K.X — vkfruc.cpp #include "nvOpticalFlowVulkan.h" needs
     # the NVIDIA Optical Flow SDK header on the include path.  win32 block
@@ -529,7 +531,6 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/nvofruc.cpp \
         streaming/video/ffmpeg-renderers/genericfruc.cpp \
         streaming/video/ffmpeg-renderers/directmlfruc.cpp \
-        streaming/video/ffmpeg-renderers/modelfetcher.cpp \
         streaming/video/ffmpeg-renderers/ncnnfruc.cpp \
         streaming/video/ffmpeg-renderers/vulkanvideo.cpp \
         streaming/video/ffmpeg-renderers/pacer/dxvsyncsource.cpp
@@ -541,7 +542,6 @@ win32:!winrt {
         streaming/video/ffmpeg-renderers/nvofruc.h \
         streaming/video/ffmpeg-renderers/genericfruc.h \
         streaming/video/ffmpeg-renderers/directmlfruc.h \
-        streaming/video/ffmpeg-renderers/modelfetcher.h \
         streaming/video/ffmpeg-renderers/ncnnfruc.h \
         streaming/video/ffmpeg-renderers/vulkanvideo.h \
         streaming/video/ffmpeg-renderers/ifrucbackend.h \

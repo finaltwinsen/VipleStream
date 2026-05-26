@@ -9,6 +9,7 @@
 #include <math.h>
 
 #include <picoquic.h>
+#include <picoquic_internal.h>
 #include <picoquic_utils.h>
 #include <picosocks.h>
 // Congestion algorithm pointers live in their own headers in picoquic.
@@ -16,11 +17,31 @@
 #include <picoquic_cubic.h>
 #include <picoquic_newreno.h>
 
+#ifdef LC_WINDOWS
+#include <icmpapi.h>
+// iphlpapi.lib 已在 PlatformNetIf.c 連結
+#endif
+
 // ── Internal constants ──────────────────────────────────────
 
-#define PROBE_TIMEOUT_THRESHOLD  5     // consecutive probe failures → inactive
+#define PROBE_TIMEOUT_THRESHOLD  2     // consecutive stall checks → inactive
+                                      // (2 × 500ms health check = 1s after first stall;
+                                      //  first stall at stallThreshold ≥ 3s → failover
+                                      //  triggers at ~4s, well before ENet 10s timeout)
 #define HEALTH_CHECK_INTERVAL_US 500000 // 500ms between health checks
 #define STATS_UPDATE_INTERVAL_US 100000 // 100ms between stats refresh
+#define PATH_RECHECK_INTERVAL_US 30000000 // 30s between interface re-enumeration
+#define ICMP_PROBE_TIMEOUT_MS    200      // ICMP probe timeout for reachability check
+
+// §Q-MP-STANDBY: 延遲路徑降級閾值。
+// 如果新路徑的 ICMP RTT（Phase B 階段測得）超過 path 0 的 RTT 加
+// 此閾值，path_available callback 不會把它升級為 available，而是
+// 維持 backup 作為 failover 備用。這防止 server 的 multipath
+// scheduler 把 video datagram 分到高延遲路徑上，造成 depacketizer
+// 因延遲差異而組裝失敗。
+// 值 10ms：LAN RTT ~1ms + 10ms = 11ms 閾值。Tailscale 同 LAN
+// 通常 <5ms 能通過；跨 ISP 的 Tailscale relay 通常 >30ms 會被擋。
+#define STANDBY_RTT_EXCESS_MS    10
 
 // ── Internal state ──────────────────────────────────────────
 
@@ -31,11 +52,18 @@ typedef struct _QUIC_SUBFLOW {
     struct sockaddr_storage localAddr;
     SOCKADDR_LEN addrLen;
     bool active;
+    bool picoquicDeleted;  // path permanently deleted by picoquic;
+                           // eligible for re-probe on next recheck cycle
     // picoquic's per-path identifier (uint64 in picoquic API). Set when we
     // probe a new path; -1 (UINT64_MAX) before that. Note: picoquic creates
     // path 0 automatically for the initial connection, so the first subflow
     // we add via probe_new_path gets id 1.
     uint64_t picoquicPathId;
+
+    // Which peer address this subflow was probed against (may differ from
+    // the connection's primary peerAddr when alt-peer is used).
+    struct sockaddr_storage peerUsed;
+    SOCKADDR_LEN peerUsedLen;
 
     // Per-subflow stats (updated from picoquic path stats via
     // picoquic_get_path_quality)
@@ -43,6 +71,9 @@ typedef struct _QUIC_SUBFLOW {
     float throughputMbps;
     float lossPercent;
     float reorderPercent;
+    // §K.19: 上一次更新的累積計數器，用於計算瞬時 loss%
+    uint64_t prevSent;
+    uint64_t prevLost;
     char name[LC_NETIF_MAX_NAME];
     int type;
 
@@ -52,6 +83,13 @@ typedef struct _QUIC_SUBFLOW {
     uint64_t lastRecvTime;
     uint64_t bytesSent;
     uint64_t bytesRecv;
+
+    // §Q-MP-STANDBY: Phase B 的 ICMP RTT（毫秒）。path 0 不做 ICMP
+    // 所以 icmpRttMs=0。path_available callback 比較此值和 path 0 的
+    // RTT 來決定是否保持 backup。
+    unsigned int icmpRttMs;
+    // 若為 true，path_available 不升級此路徑（維持 backup failover）
+    bool keepAsStandby;
 } QUIC_SUBFLOW;
 
 typedef struct _QUIC_TRANSPORT_CTX {
@@ -65,9 +103,11 @@ typedef struct _QUIC_TRANSPORT_CTX {
     int scheduler[4]; // index 0 = default, 1..3 = per QUIC_FLOW_*
     int aggregateRRIndex; // round-robin index for AGGREGATE
 
-    // Receive callback
-    QuicRecvCallback recvCallback;
-    void* recvContext;
+    // Per-flow receive callbacks (index = flow type: 0=unused,
+    // 1=VIDEO, 2=AUDIO, 3=CONTROL). 各 flow 獨立註冊，
+    // QUIC datagram 到達時根據 header 的 flowType 分派。
+    QuicRecvCallback recvCallbacks[4];
+    void*            recvContexts[4];
 
     // Failover callback
     QuicFailoverCallback failoverCallback;
@@ -87,6 +127,7 @@ typedef struct _QUIC_TRANSPORT_CTX {
     // Health check timing
     uint64_t lastHealthCheck;
     uint64_t lastStatsUpdate;
+    uint64_t lastPathRecheck; // periodic interface re-enumeration
 
     // Congestion control algorithm
     int congestionAlgo; // QUIC_CC_*
@@ -97,10 +138,33 @@ typedef struct _QUIC_TRANSPORT_CTX {
     struct sockaddr_storage peerAddr;
     SOCKADDR_LEN peerAddrLen;
 
+    // §MP-ADV: 伺服器的所有 alt peer 位址（供動態路徑管理用）。
+    struct sockaddr_storage altPeerAddrs[QUIC_MAX_ALT_PEERS];
+    SOCKADDR_LEN altPeerAddrLens[QUIC_MAX_ALT_PEERS];
+    int altPeerCount;
+
     // Path id counter for unique_path_id assignment. Picoquic path 0 is the
     // initial cnx path created by create_cnx; subsequent probes get
     // ids 1, 2, 3... in the order they're probed.
     uint64_t nextPicoquicPathId;
+
+    // §Q-MP-FAILBACK: failover 時記錄被升級的 standby subflow slot index。
+    // -1 = 沒有 failover 進行中。當原 primary（slot 0）恢復時，用此
+    // index 把 failover 路徑降級回 backup。
+    int failoverPromotedSlot;
+
+    // §Q-DYN-PATH ICMP 拒絕快取。Phase B（IO 執行緒啟動前）的 ICMP 探測
+    // 如果判定某介面不可達，記錄其 interfaceIndex。quicRecheckPaths 在 IO
+    // 執行緒上不能做 ICMP（200ms 阻塞會造成掉幀），用這個快取提供診斷資訊。
+    int icmpRejectedIfs[QUIC_MAX_SUBFLOWS];
+    int icmpRejectedCount;
+
+    // §MP-ADV-MUTEX 2026-05-24 — 保護 picoquic 狀態 + subflow 陣列。
+    // picoquic 不是 thread-safe；Connection thread 的 Phase B
+    // (picoquic_probe_new_path) 和 IO thread (incoming_packet /
+    // prepare_next_packet) 同時存取會破壞內部狀態，導致 ACK 路由
+    // 錯誤→假性 loss→畫面靜止。
+    PLT_MUTEX picoquicMutex;
 } QUIC_TRANSPORT_CTX;
 
 static QUIC_TRANSPORT_CTX g_ctx;
@@ -124,6 +188,7 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
 static int quicSelectPath(unsigned char flowType, int dataLen);
 static void quicUpdatePathStats(void);
 static void quicCheckPathHealth(void);
+static void quicRecheckPaths(void);
 static void quicApplyCongestionAlgo(picoquic_quic_t* quic);
 
 // ── Lifecycle ───────────────────────────────────────────────
@@ -134,6 +199,7 @@ int quicTransportInit(void) {
 
     memset(&g_ctx, 0, sizeof(g_ctx));
     g_ctx.nextSubflowId = 1;
+    g_ctx.failoverPromotedSlot = -1; // §Q-MP-FAILBACK: 無 failover 進行中
 
     // Default scheduler per flow type
     g_ctx.scheduler[0] = QUIC_SCHED_AUTO;
@@ -215,6 +281,10 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
     picoquic_set_default_tp_value(g_ctx.quic,
         picoquic_tp_max_datagram_frame_size, 65535);
     picoquic_set_default_multipath_option(g_ctx.quic, 1);
+    // §Q-MP-FIX 2026-05-24: 必須啟用 path callbacks，否則
+    // picoquic_callback_path_available / path_suspended / path_deleted
+    // 永遠不會觸發。picoquic 預設 are_path_callbacks_enabled=0。
+    picoquic_enable_path_callbacks_default(g_ctx.quic, 1);
     quicApplyCongestionAlgo(g_ctx.quic);
 
     // §Q-REVIEW-P4 (dev/cli-quic-linux): VipleStream-Server uses the same
@@ -288,12 +358,25 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
     g_ctx.nextPicoquicPathId = 0;
     g_ctx.lastHealthCheck = currentTime;
     g_ctx.lastStatsUpdate = currentTime;
+    g_ctx.lastPathRecheck = currentTime;  // 避免 IO thread 立刻觸發重掃，
+                                          // 讓 Connection.c Phase B 先完成
+
+    // §MP-ADV-MUTEX: 在 IO thread 啟動前初始化 mutex
+    if (PltCreateMutex(&g_ctx.picoquicMutex) != 0) {
+        Limelog("[VIPLE-MPQUIC] Failed to create picoquic mutex\n");
+        picoquic_delete_cnx(g_ctx.cnx);
+        g_ctx.cnx = NULL;
+        picoquic_free(g_ctx.quic);
+        g_ctx.quic = NULL;
+        return -1;
+    }
 
     // Start the I/O thread
     g_ctx.ioRunning = true;
     ret = PltCreateThread("QuicIO", quicIoThreadProc, &g_ctx, &g_ctx.ioThread);
     if (ret != 0) {
         Limelog("[VIPLE-MPQUIC] Failed to create I/O thread\n");
+        PltDeleteMutex(&g_ctx.picoquicMutex);
         picoquic_delete_cnx(g_ctx.cnx);
         g_ctx.cnx = NULL;
         picoquic_free(g_ctx.quic);
@@ -307,12 +390,25 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
 
 void quicDisconnect(void) {
     if (g_ctx.cnx) {
+        // §K.13 UAF fix 2026-05-26 — stop and JOIN the IO thread BEFORE
+        // touching picoquic state.  Previously picoquic_close(cnx, 0) ran
+        // before the join, racing with the IO thread that was still inside
+        // its mutex region calling picoquic_incoming_packet /
+        // picoquic_prepare_next_packet on the same cnx.  When an OS-level
+        // adapter disable forced picoquic into mass path-deletion, the
+        // half-modified cnx state observed by the IO thread post-close
+        // dereferenced a freed picoquic_path_t → 0xC0000005.
+        //
+        // The mutex inside the IO loop only protects READS / WRITES of
+        // picoquic state from one direction; calling picoquic_close from
+        // a different thread bypasses that protection.  Real fix is to
+        // make sure no other thread is in picoquic at all when we close.
         g_ctx.ioRunning = false;
-
-        picoquic_close(g_ctx.cnx, 0);
         PltInterruptThread(&g_ctx.ioThread);
         PltJoinThread(&g_ctx.ioThread);
 
+        // Safe now — the IO thread has fully exited.
+        picoquic_close(g_ctx.cnx, 0);
         g_ctx.cnx = NULL;
     }
 
@@ -328,6 +424,8 @@ void quicDisconnect(void) {
         picoquic_free(g_ctx.quic);
         g_ctx.quic = NULL;
     }
+
+    PltDeleteMutex(&g_ctx.picoquicMutex);
 }
 
 bool quicIsConnected(void) {
@@ -397,6 +495,7 @@ int quicServerStart(unsigned short port, const char* certPath,
     picoquic_set_default_tp_value(g_ctx.quic,
         picoquic_tp_max_datagram_frame_size, 65535);
     picoquic_set_default_multipath_option(g_ctx.quic, 1);
+    picoquic_enable_path_callbacks_default(g_ctx.quic, 1);
     quicApplyCongestionAlgo(g_ctx.quic);
 
     g_ctx.isServer = true;
@@ -431,104 +530,148 @@ void quicServerStop(void) {
 // or -1 if no active subflow exists.
 
 static int quicSelectPath(unsigned char flowType, int dataLen) {
-    int strategy;
-    int i, bestIdx;
+    // §MP-PRIMARY 2026-05-24: primary-path 模式。所有 datagram
+    // 都走第一個 active subflow（通常是 path 0）。picoquic 的
+    // path_status 控制實際路由——path 0 = available，其餘 =
+    // backup。應用層排程（ECF / AGGREGATE / REDUNDANT）暫停，
+    // 等 Phase 5 實作 FEC + jitter buffer 後再啟用。
+    (void)flowType;
+    (void)dataLen;
 
-    if (g_ctx.subflowCount == 0)
-        return -1;
-    if (g_ctx.subflowCount == 1)
-        return g_ctx.subflows[0].active ? 0 : -1;
-
-    // Resolve AUTO to per-flow default
-    strategy = g_ctx.scheduler[flowType];
-    if (strategy == QUIC_SCHED_AUTO) {
-        switch (flowType) {
-        case QUIC_FLOW_VIDEO:   strategy = QUIC_SCHED_ECF; break;
-        case QUIC_FLOW_AUDIO:   strategy = QUIC_SCHED_REDUNDANT; break;
-        case QUIC_FLOW_CONTROL: strategy = QUIC_SCHED_MIN_RTT; break;
-        default:                strategy = QUIC_SCHED_MIN_RTT; break;
-        }
+    for (int i = 0; i < g_ctx.subflowCount; i++) {
+        if (g_ctx.subflows[i].active)
+            return i;
     }
-
-    switch (strategy) {
-
-    case QUIC_SCHED_MIN_RTT: {
-        float bestRtt = 1e9f;
-        bestIdx = -1;
-        for (i = 0; i < g_ctx.subflowCount; i++) {
-            if (g_ctx.subflows[i].active && g_ctx.subflows[i].rttMs < bestRtt) {
-                bestRtt = g_ctx.subflows[i].rttMs;
-                bestIdx = i;
-            }
-        }
-        return bestIdx;
-    }
-
-    case QUIC_SCHED_ECF: {
-        // Earliest Completion First: pick path where
-        // (data_len / throughput) + rtt/2 is smallest
-        float bestTime = 1e9f;
-        bestIdx = -1;
-        for (i = 0; i < g_ctx.subflowCount; i++) {
-            if (!g_ctx.subflows[i].active)
-                continue;
-            float tput = g_ctx.subflows[i].throughputMbps;
-            if (tput < 0.001f) tput = 0.001f;
-            float transferTime = ((float)dataLen * 8.0f) / (tput * 1e6f);
-            float completion = transferTime + (g_ctx.subflows[i].rttMs / 2000.0f);
-            if (completion < bestTime) {
-                bestTime = completion;
-                bestIdx = i;
-            }
-        }
-        return bestIdx;
-    }
-
-    case QUIC_SCHED_AGGREGATE: {
-        // Round-robin across active subflows
-        int start = g_ctx.aggregateRRIndex;
-        for (i = 0; i < g_ctx.subflowCount; i++) {
-            int idx = (start + i) % g_ctx.subflowCount;
-            if (g_ctx.subflows[idx].active) {
-                g_ctx.aggregateRRIndex = (idx + 1) % g_ctx.subflowCount;
-                return idx;
-            }
-        }
-        return -1;
-    }
-
-    case QUIC_SCHED_REDUNDANT:
-        // Caller handles redundant by iterating all active subflows
-        return -2; // sentinel: send on all
-
-    default:
-        // Fallback: first active
-        for (i = 0; i < g_ctx.subflowCount; i++) {
-            if (g_ctx.subflows[i].active)
-                return i;
-        }
-        return -1;
-    }
+    return -1;
 }
 
 // ── Subflow management ──────────────────────────────────────
 
 int quicAddSubflow(int interfaceIndex,
+                   const char* interfaceName,
+                   int interfaceType,
                    const struct sockaddr_storage* localAddr,
                    SOCKADDR_LEN addrLen) {
-    return quicAddSubflowEx(interfaceIndex, localAddr, addrLen, NULL, 0);
+    return quicAddSubflowEx(interfaceIndex, interfaceName, interfaceType,
+                            localAddr, addrLen, NULL, 0);
+}
+
+// §Q-DYN-PATH ICMP reachability probe.
+// picoquic_probe_new_path() 一旦被呼叫，server 端的 picoquic 就會把
+// 新 path 加入 multipath scheduler 並開始往上面送 video datagram。如
+// 果該 path 實際上是死路（例如 UsbNcm → cellular → private LAN IP），
+// ~50% 的 datagram 會消失，造成 IDR frame 永遠無法組裝。
+//
+// 這個函式在呼叫 picoquic_probe_new_path 之前，用 Windows ICMP API
+// (IcmpSendEcho2Ex) 從指定介面 ping 目標 IP。如果 ping 成功（雙向
+// 連通），才允許進入 picoquic；如果 timeout（單向或完全不通），就擋
+// 下來。
+//
+// 限制：只支援 IPv4，IPv6 需要 Icmp6SendEcho2 另外處理。
+// 回傳值：0 = 失敗/不可達，>0 = 成功的 ICMP RTT（毫秒）。
+// §Q-MP-STANDBY: RTT 用於 path_available 判斷是否保持 standby。
+static unsigned int quicIcmpProbeReachable(
+    const struct sockaddr_storage* localAddr,
+    const struct sockaddr_storage* peerAddr,
+    unsigned int timeoutMs) {
+#ifdef LC_WINDOWS
+    if (localAddr->ss_family != AF_INET || peerAddr->ss_family != AF_INET)
+        return 1;  // 非 IPv4：不擋，回傳假 RTT=1ms
+
+    const struct sockaddr_in* src = (const struct sockaddr_in*)localAddr;
+    const struct sockaddr_in* dst = (const struct sockaddr_in*)peerAddr;
+
+    HANDLE hIcmp = IcmpCreateFile();
+    if (hIcmp == INVALID_HANDLE_VALUE) {
+        Limelog("[VIPLE-MPQUIC] IcmpCreateFile failed (%lu); skipping probe\n",
+                GetLastError());
+        return 1;  // 無法建立 ICMP handle → 不阻擋，假 RTT=1ms
+    }
+
+    char sendData[] = "VIPLE";
+    char replyBuf[sizeof(ICMP_ECHO_REPLY) + sizeof(sendData) + 16];
+    memset(replyBuf, 0, sizeof(replyBuf));
+
+    DWORD ret = IcmpSendEcho2Ex(hIcmp,
+        NULL, NULL, NULL,         // event / apc routine / apc context
+        src->sin_addr.s_addr,     // source IP（綁定介面）
+        dst->sin_addr.s_addr,     // destination IP
+        sendData, (WORD)sizeof(sendData),
+        NULL,                     // no IP options
+        replyBuf, (DWORD)sizeof(replyBuf),
+        timeoutMs);
+
+    IcmpCloseHandle(hIcmp);
+
+    if (ret > 0) {
+        PICMP_ECHO_REPLY reply = (PICMP_ECHO_REPLY)replyBuf;
+        if (reply->Status == IP_SUCCESS) {
+            unsigned int rtt = (unsigned int)reply->RoundTripTime;
+            if (rtt == 0) rtt = 1;  // 0ms 保留給失敗
+            Limelog("[VIPLE-MPQUIC] ICMP probe OK: %u.%u.%u.%u → %u.%u.%u.%u "
+                    "(RTT=%u ms)\n",
+                    (src->sin_addr.s_addr) & 0xFF,
+                    (src->sin_addr.s_addr >> 8) & 0xFF,
+                    (src->sin_addr.s_addr >> 16) & 0xFF,
+                    (src->sin_addr.s_addr >> 24) & 0xFF,
+                    (dst->sin_addr.s_addr) & 0xFF,
+                    (dst->sin_addr.s_addr >> 8) & 0xFF,
+                    (dst->sin_addr.s_addr >> 16) & 0xFF,
+                    (dst->sin_addr.s_addr >> 24) & 0xFF,
+                    rtt);
+            return rtt;
+        }
+    }
+    Limelog("[VIPLE-MPQUIC] ICMP probe FAILED: %u.%u.%u.%u → %u.%u.%u.%u "
+            "(timeout=%u ms)\n",
+            (src->sin_addr.s_addr) & 0xFF,
+            (src->sin_addr.s_addr >> 8) & 0xFF,
+            (src->sin_addr.s_addr >> 16) & 0xFF,
+            (src->sin_addr.s_addr >> 24) & 0xFF,
+            (dst->sin_addr.s_addr) & 0xFF,
+            (dst->sin_addr.s_addr >> 8) & 0xFF,
+            (dst->sin_addr.s_addr >> 16) & 0xFF,
+            (dst->sin_addr.s_addr >> 24) & 0xFF,
+            timeoutMs);
+    return 0;  // 失敗
+#else
+    // Linux/macOS: 暫不實作 ICMP probe，預設允許，假 RTT=1ms
+    (void)localAddr; (void)peerAddr; (void)timeoutMs;
+    return 1;
+#endif
 }
 
 int quicAddSubflowEx(int interfaceIndex,
+                     const char* interfaceName,
+                     int interfaceType,
                      const struct sockaddr_storage* localAddr,
                      SOCKADDR_LEN addrLen,
                      const struct sockaddr_storage* peerOverride,
                      SOCKADDR_LEN peerOverrideLen) {
     QUIC_SUBFLOW* sf;
     SOCKET sock;
+    unsigned int icmpRtt = 0;  // §Q-MP-STANDBY: 記錄 ICMP RTT 供 standby 判斷
 
-    if (!g_ctx.cnx || g_ctx.subflowCount >= QUIC_MAX_SUBFLOWS)
+    if (!g_ctx.cnx)
         return -1;
+
+    // Find a usable slot: prefer the end of the array, but recycle
+    // slots whose path was permanently deleted by picoquic.
+    int slotIdx = -1;
+    if (g_ctx.subflowCount < QUIC_MAX_SUBFLOWS) {
+        slotIdx = g_ctx.subflowCount;
+    } else {
+        for (int i = 0; i < g_ctx.subflowCount; i++) {
+            if (g_ctx.subflows[i].picoquicDeleted) {
+                if (g_ctx.subflows[i].sock != INVALID_SOCKET)
+                    closeSocket(g_ctx.subflows[i].sock);
+                slotIdx = i;
+                break;
+            }
+        }
+    }
+    if (slotIdx < 0)
+        return -1;  // all slots occupied by live paths
 
     // Resolve effective peer for reachability probe + probe_new_path.
     // Caller-supplied override takes precedence (path 1+ on alternate
@@ -539,11 +682,22 @@ int quicAddSubflowEx(int interfaceIndex,
     SOCKADDR_LEN effPeerLen =
         (peerOverride && peerOverrideLen > 0) ? peerOverrideLen : g_ctx.peerAddrLen;
 
-    sock = createSocket(localAddr->ss_family, SOCK_DGRAM, IPPROTO_UDP, false);
+    sock = createSocket(localAddr->ss_family, SOCK_DGRAM, IPPROTO_UDP, true);
     if (sock == INVALID_SOCKET) {
         Limelog("[VIPLE-MPQUIC] Failed to create subflow socket for if %d\n",
                 interfaceIndex);
         return -1;
+    }
+
+    // §Q-DYN-PATH: 給 subflow socket 足夠大的 recv buffer。
+    // Windows UDP 預設只有 8 KB（~5 個 datagram），IO thread 在呼叫
+    // GetAdaptersAddresses / picoquic_probe_new_path 時會短暫停滯，
+    // 如果 buffer 太小就會溢出丟封包。2 MB 足以容納 >1400 個
+    // 1412-byte datagram，能撐過 >1 秒的 IO 停滯。
+    {
+        int rcvBufSize = 2 * 1024 * 1024; // 2 MB
+        setsockopt(sock, SOL_SOCKET, SO_RCVBUF,
+                   (const char*)&rcvBufSize, sizeof(rcvBufSize));
     }
 
     if (bind(sock, (const struct sockaddr*)localAddr, addrLen) != 0) {
@@ -581,30 +735,69 @@ int quicAddSubflowEx(int interfaceIndex,
         memset(&unspec, 0, sizeof(unspec));
         unspec.ss_family = AF_UNSPEC;
         connect(sock, (const struct sockaddr*)&unspec, sizeof(unspec));
+
+        // §Q-DYN-PATH ICMP 連通性探測 — path 1+ 專用。
+        // UDP connect() 只檢查路由表，不驗證端對端連通性。擁有 default
+        // route 的介面（如 UsbNcm）永遠通過 connect()，但目的地可能根本
+        // 不可達。如果讓 picoquic_probe_new_path 在一條死路上執行，
+        // server 端的 picoquic 會把 ~50% video datagram 分到該死路，
+        // 造成 IDR frame 永遠無法組裝。
+        //
+        // ICMP ping 確認雙向連通：封包能到達 server 且 server 能回來。
+        // path 0 不做此檢查（它是 handshake 用的初始路徑）。
+        if (g_ctx.subflowCount > 0) {
+            icmpRtt = quicIcmpProbeReachable(localAddr, effPeer,
+                                              ICMP_PROBE_TIMEOUT_MS);
+            if (icmpRtt == 0) {
+                Limelog("[VIPLE-MPQUIC] Subflow on if %d cannot reach peer "
+                        "(ICMP probe failed); skipping path\n",
+                        interfaceIndex);
+                // 記入 ICMP 拒絕快取，quicRecheckPaths 可據此跳過
+                if (g_ctx.icmpRejectedCount < QUIC_MAX_SUBFLOWS) {
+                    bool alreadyCached = false;
+                    for (int r = 0; r < g_ctx.icmpRejectedCount; r++) {
+                        if (g_ctx.icmpRejectedIfs[r] == interfaceIndex) {
+                            alreadyCached = true;
+                            break;
+                        }
+                    }
+                    if (!alreadyCached) {
+                        g_ctx.icmpRejectedIfs[g_ctx.icmpRejectedCount++] = interfaceIndex;
+                    }
+                }
+                closeSocket(sock);
+                return -1;
+            }
+        }
     }
 
-    sf = &g_ctx.subflows[g_ctx.subflowCount];
+    // §MP-ADV-MUTEX: 保護 picoquic 狀態 + subflow 陣列。
+    // socket 建立 / bind / ICMP probe 已在上面完成（不碰 picoquic），
+    // 只有 probe_new_path + set_path_status + subflow 陣列寫入需要
+    // 和 IO thread 互斥。
+    PltLockMutex(&g_ctx.picoquicMutex);
+
+    sf = &g_ctx.subflows[slotIdx];
     memset(sf, 0, sizeof(*sf));
     sf->id = g_ctx.nextSubflowId++;
     sf->interfaceIndex = interfaceIndex;
+    if (interfaceName)
+        PltSafeStrcpy(sf->name, sizeof(sf->name), interfaceName);
+    sf->type = interfaceType;
     sf->sock = sock;
     memcpy(&sf->localAddr, localAddr, addrLen);
     sf->addrLen = addrLen;
-    sf->active = true;
-    sf->lastRecvTime = picoquic_current_time();
+    sf->picoquicDeleted = false;
+    memcpy(&sf->peerUsed, effPeer, effPeerLen);
+    sf->peerUsedLen = effPeerLen;
 
-    // The first subflow inherits picoquic's auto-created path 0 (the cnx's
-    // initial path bound to the addr we passed to picoquic_create_cnx).
-    // Subsequent subflows get a new path via probe_new_path.
     if (g_ctx.subflowCount == 0) {
+        sf->active = true;
+        sf->lastRecvTime = picoquic_current_time();
         sf->picoquicPathId = 0;
     } else {
-        // picoquic_probe_new_path signature is (cnx, peer_addr, local_addr,
-        // current_time) — peer first, local second. The Phase 1 code had
-        // these swapped, which probed an invalid path.
-        // Use effPeer so cross-endpoint subflows (e.g. Tailscale → server
-        // Tailscale IP while path 0 uses LAN → server LAN IP) probe the
-        // right destination.
+        sf->active = false;
+        sf->lastRecvTime = 0;
         int ret = picoquic_probe_new_path(g_ctx.cnx,
             (const struct sockaddr*)effPeer,
             (const struct sockaddr*)localAddr,
@@ -613,19 +806,51 @@ int quicAddSubflowEx(int interfaceIndex,
             Limelog("[VIPLE-MPQUIC] probe_new_path failed (%d) for if %d\n",
                     ret, interfaceIndex);
             closeSocket(sock);
+            PltUnlockMutex(&g_ctx.picoquicMutex);
             return -1;
         }
-        // Assign the path id picoquic will use for the freshly probed path.
-        // We track this ourselves rather than asking picoquic, since there
-        // is no public picoquic_get_cnx_nb_paths API; the probe path id
-        // matches the order in which we issued probes (1, 2, 3, ...).
         g_ctx.nextPicoquicPathId++;
         sf->picoquicPathId = g_ctx.nextPicoquicPathId;
+
+        picoquic_set_path_status(g_ctx.cnx, sf->picoquicPathId,
+                                 picoquic_path_status_backup);
     }
 
-    g_ctx.subflowCount++;
-    Limelog("[VIPLE-MPQUIC] Added subflow %d on interface %d (path %llu)\n",
-            sf->id, interfaceIndex, (unsigned long long)sf->picoquicPathId);
+    sf->icmpRttMs = icmpRtt;
+    sf->keepAsStandby = false;
+
+    if (interfaceType == LC_NETIF_TYPE_VPN &&
+        g_ctx.subflowCount > 0 &&
+        g_ctx.subflows[0].type != LC_NETIF_TYPE_VPN) {
+        sf->keepAsStandby = true;
+        Limelog("[VIPLE-MPQUIC] §Q-MP-STANDBY: subflow %d (if %d) "
+                "marked standby (VPN path, primary is non-VPN)\n",
+                sf->id, interfaceIndex);
+    } else if (icmpRtt > 0 && g_ctx.subflows[0].rttMs > 0.0f) {
+        if ((float)icmpRtt - g_ctx.subflows[0].rttMs >
+            (float)STANDBY_RTT_EXCESS_MS) {
+            sf->keepAsStandby = true;
+            Limelog("[VIPLE-MPQUIC] §Q-MP-STANDBY: subflow %d (if %d) "
+                    "marked standby (ICMP RTT=%u ms, path0 RTT=%.1f ms, "
+                    "excess > %d ms)\n",
+                    sf->id, interfaceIndex, icmpRtt,
+                    g_ctx.subflows[0].rttMs, STANDBY_RTT_EXCESS_MS);
+        }
+    } else if (icmpRtt > (unsigned int)STANDBY_RTT_EXCESS_MS) {
+        sf->keepAsStandby = true;
+        Limelog("[VIPLE-MPQUIC] §Q-MP-STANDBY: subflow %d (if %d) "
+                "marked standby (ICMP RTT=%u ms > %d ms absolute)\n",
+                sf->id, interfaceIndex, icmpRtt, STANDBY_RTT_EXCESS_MS);
+    }
+
+    if (slotIdx == g_ctx.subflowCount)
+        g_ctx.subflowCount++;
+    Limelog("[VIPLE-MPQUIC] Added subflow %d on interface %d (path %llu, "
+            "slot %d, standby=%s)\n",
+            sf->id, interfaceIndex, (unsigned long long)sf->picoquicPathId,
+            slotIdx, sf->keepAsStandby ? "YES" : "no");
+
+    PltUnlockMutex(&g_ctx.picoquicMutex);
     return sf->id;
 }
 
@@ -703,26 +928,26 @@ static int quicSendOnPath(int pathIdx, unsigned char flowType,
     memcpy(frame, &hdr, QUIC_DGRAM_HEADER_SIZE);
     memcpy(frame + QUIC_DGRAM_HEADER_SIZE, data, dataLen);
 
-    // picoquic_set_path_status is the public API for steering multipath
-    // scheduling. It's binary: "available" (use this path) vs "backup"
-    // (avoid unless others are unavailable). Tag the chosen subflow as
-    // available and the rest as backup so picoquic's internal scheduler
-    // routes this datagram on the path we picked.
-    if (pathIdx >= 0 && pathIdx < g_ctx.subflowCount) {
-        for (int i = 0; i < g_ctx.subflowCount; i++) {
-            if (!g_ctx.subflows[i].active)
-                continue;
-            picoquic_set_path_status(g_ctx.cnx,
-                g_ctx.subflows[i].picoquicPathId,
-                (i == pathIdx) ? picoquic_path_status_available
-                               : picoquic_path_status_backup);
-        }
-    }
+    // §MP-ADV-MUTEX: picoquic_queue_datagram_frame 修改 picoquic
+    // 內部狀態，需和 IO thread 互斥。
+    //
+    // §MP-PRIMARY 2026-05-24: 不再 per-datagram 切換 path_status。
+    // picoquic_set_path_status 是長期路徑管理 API（available vs
+    // backup），不是 per-packet 路由提示。每次送 datagram 都遍歷
+    // 所有路徑切換狀態會造成：
+    //   (a) picoquic 排程器無法收斂（連續 datagram 偏好相反）
+    //   (b) per-path PN space 下 ACK 路由混亂→假性 62% loss
+    //   (c) IDR frame 封包分散到不同 RTT 路徑→depacketizer 超時
+    // 改為 primary-path 模式：path 0 = available，其餘 = backup。
+    // picoquic 自動把所有 datagram 送到唯一 available 路徑。
+    PltLockMutex(&g_ctx.picoquicMutex);
 
     int ret = picoquic_queue_datagram_frame(g_ctx.cnx, frameLen, frame);
     if (ret == 0 && pathIdx >= 0 && pathIdx < g_ctx.subflowCount) {
         g_ctx.subflows[pathIdx].bytesSent += dataLen;
     }
+
+    PltUnlockMutex(&g_ctx.picoquicMutex);
     return (ret == 0) ? 0 : -1;
 }
 
@@ -771,8 +996,20 @@ int quicSendDatagram(unsigned char flowType,
 }
 
 void quicSetRecvCallback(QuicRecvCallback callback, void* context) {
-    g_ctx.recvCallback = callback;
-    g_ctx.recvContext = context;
+    // 後向相容：不帶 flow type 的呼叫設定所有 flow 的 callback。
+    // 新程式碼應改用 quicSetRecvCallbackForFlow。
+    for (int i = 0; i < 4; i++) {
+        g_ctx.recvCallbacks[i] = callback;
+        g_ctx.recvContexts[i] = context;
+    }
+}
+
+void quicSetRecvCallbackForFlow(unsigned char flowType,
+                                QuicRecvCallback callback, void* context) {
+    if (flowType < 4) {
+        g_ctx.recvCallbacks[flowType] = callback;
+        g_ctx.recvContexts[flowType] = context;
+    }
 }
 
 void quicSetFailoverCallback(QuicFailoverCallback callback, void* context) {
@@ -818,14 +1055,29 @@ static void quicUpdatePathStats(void) {
         // pq.rtt is in microseconds (smoothed estimate)
         g_ctx.subflows[i].rttMs = (float)pq.rtt / 1000.0f;
 
-        // Pacing rate is bytes/sec → Mbps (×8 bits, ÷1e6)
+        // Receive rate estimate is bytes/sec → Mbps (×8 bits, ÷1e6).
+        // Uses receive_rate_estimate (measured incoming throughput) instead
+        // of pacing_rate (BBR's theoretical send rate, unreliable on LAN).
         g_ctx.subflows[i].throughputMbps =
-            (float)((double)pq.pacing_rate * 8.0 / 1e6);
+            (float)((double)pq.receive_rate_estimate * 8.0 / 1e6);
 
-        // Loss percent from sent / lost counters
-        if (pq.sent > 0) {
-            g_ctx.subflows[i].lossPercent =
-                (float)((double)pq.lost / (double)pq.sent * 100.0);
+        // §K.19: 瞬時 loss% — 用 delta（本次 - 上次）而非累積值。
+        // 累積值包含連線初期的暫態丟包，長期趨近穩定值但不反映
+        // 當前路徑品質。每 STATS_UPDATE_INTERVAL_US（5 秒）更新一次。
+        {
+            uint64_t deltaSent = pq.sent - g_ctx.subflows[i].prevSent;
+            uint64_t deltaLost = pq.lost - g_ctx.subflows[i].prevLost;
+            if (deltaSent > 0) {
+                g_ctx.subflows[i].lossPercent =
+                    (float)((double)deltaLost / (double)deltaSent * 100.0);
+            } else if (g_ctx.subflows[i].prevSent == 0 && pq.sent > 0) {
+                // 第一次：用累積值作為初始值
+                g_ctx.subflows[i].lossPercent =
+                    (float)((double)pq.lost / (double)pq.sent * 100.0);
+            }
+            // 否則 deltaSent==0 表示這 5 秒沒送任何封包，保留上次的值
+            g_ctx.subflows[i].prevSent = pq.sent;
+            g_ctx.subflows[i].prevLost = pq.lost;
         }
 
         // Surface byte counters too so health monitor can see fresh activity
@@ -851,6 +1103,16 @@ static void quicCheckPathHealth(void) {
     for (int i = 0; i < g_ctx.subflowCount; i++) {
         QUIC_SUBFLOW* sf = &g_ctx.subflows[i];
 
+        // 被 picoquic 永久刪除的 slot 不需要 health check
+        if (sf->picoquicDeleted)
+            continue;
+
+        // §Q-MP-STANDBY: standby 路徑故意不接收應用資料，
+        // 不做 stall 偵測（否則會被誤判為 inactive）。
+        // 只要 picoquic 沒刪它，它就是活的。
+        if (sf->keepAsStandby)
+            continue;
+
         // Check if path has stalled (no data received for > 5x RTT or 3 seconds)
         uint64_t stallThreshold = (uint64_t)(sf->rttMs * 5000.0f);
         if (stallThreshold < 3000000) stallThreshold = 3000000; // min 3s
@@ -871,6 +1133,50 @@ static void quicCheckPathHealth(void) {
                     g_ctx.failoverCallback(sf->id, sf->interfaceIndex,
                                            false, g_ctx.failoverContext);
                 }
+
+                // §Q-MP-FAILBACK: 失效路徑降級為 backup，避免
+                // picoquic 繼續往死路徑排程。
+                picoquic_set_path_status(
+                    g_ctx.cnx, sf->picoquicPathId,
+                    picoquic_path_status_backup);
+
+                // §Q-MP-STANDBY: 主路徑失效 → 找第一個 standby
+                // 路徑升級為 available，讓 server 開始在它上面
+                // 送資料（failover）。
+                for (int j = 0; j < g_ctx.subflowCount; j++) {
+                    QUIC_SUBFLOW* candidate = &g_ctx.subflows[j];
+                    if (candidate->keepAsStandby &&
+                        candidate->active &&
+                        !candidate->picoquicDeleted) {
+                        candidate->keepAsStandby = false;
+
+                        // §Q-MP-FAILOVER-GRACE: 重置 health check 計時器，
+                        // 給新升級路徑足夠時間（≥ stallThreshold 3 秒）開始
+                        // 接收 server 資料，避免下次 health check 因為
+                        // lastRecvTime 來自路徑建立時（~250 秒前）而立即
+                        // 判定 INACTIVE。
+                        candidate->lastRecvTime = now;
+                        candidate->consecutiveTimeouts = 0;
+
+                        picoquic_set_path_status(
+                            g_ctx.cnx, candidate->picoquicPathId,
+                            picoquic_path_status_available);
+                        g_ctx.failoverPromotedSlot = j;
+                        Limelog("[VIPLE-MPQUIC] §Q-MP-FAILOVER: promoted "
+                                "standby subflow %d (if %d, slot %d) to "
+                                "available (primary if %d failed)\n",
+                                candidate->id,
+                                candidate->interfaceIndex, j,
+                                sf->interfaceIndex);
+                        if (g_ctx.failoverCallback) {
+                            g_ctx.failoverCallback(
+                                candidate->id,
+                                candidate->interfaceIndex,
+                                true, g_ctx.failoverContext);
+                        }
+                        break;  // 只升級一個
+                    }
+                }
             }
         } else if (sf->active) {
             sf->consecutiveTimeouts = 0;
@@ -888,7 +1194,155 @@ static void quicCheckPathHealth(void) {
                 g_ctx.failoverCallback(sf->id, sf->interfaceIndex,
                                        true, g_ctx.failoverContext);
             }
+
+            // §Q-MP-FAILBACK: 原 primary（slot 0）恢復 → 降級
+            // failover 路徑回 backup，恢復 primary-only 排程。
+            // 這防止兩條路徑同時 available 造成 server 分散
+            // datagram → depacketizer 組裝失敗。
+            if (i == 0 && g_ctx.failoverPromotedSlot >= 0) {
+                int fslot = g_ctx.failoverPromotedSlot;
+                QUIC_SUBFLOW* promoted = &g_ctx.subflows[fslot];
+                if (!promoted->picoquicDeleted) {
+                    promoted->keepAsStandby = true;
+                    picoquic_set_path_status(
+                        g_ctx.cnx, promoted->picoquicPathId,
+                        picoquic_path_status_backup);
+                    Limelog("[VIPLE-MPQUIC] §Q-MP-FAILBACK: primary "
+                            "if %d recovered, demoting failover "
+                            "subflow %d (if %d, slot %d) back to "
+                            "backup\n",
+                            sf->interfaceIndex,
+                            promoted->id,
+                            promoted->interfaceIndex, fslot);
+                }
+                // 恢復 primary 的 picoquic available 狀態
+                picoquic_set_path_status(
+                    g_ctx.cnx, sf->picoquicPathId,
+                    picoquic_path_status_available);
+                g_ctx.failoverPromotedSlot = -1;
+            }
         }
+    }
+}
+
+// ── §Q-DYN-PATH: 定期路徑重掃（v1.5.54+ 僅診斷模式） ─────────
+// 每 30 秒重新列舉系統網路介面，記錄異動但 **不做任何探測或加入**。
+//
+// 設計理由（v1.5.50~v1.5.53 系列實測）：
+//   • picoquic_probe_new_path() 一旦執行，server 端 picoquic 立刻把
+//     新路徑加入 multipath scheduler 並往上面送 ~50% 的 video datagram。
+//     若該路徑是死路，IDR frame 永遠無法組裝 → 畫面凍結。
+//   • 唯一可靠的預檢是 ICMP 探測（IcmpSendEcho2Ex），但 200ms timeout
+//     會阻塞 IO 執行緒 → depacketizer 收不到資料 → dropFrameState。
+//   • 安全策略：所有 picoquic_probe_new_path 只在 Phase B（IO 執行緒
+//     啟動前）呼叫，那裡可以安全做 ICMP。IO thread 上的 recheck 只做
+//     介面掃描 + 診斷日誌。
+
+static void quicRecheckPaths(void) {
+    uint64_t now;
+
+    if (!g_ctx.cnx)
+        return;
+
+    now = picoquic_current_time();
+    if (now - g_ctx.lastPathRecheck < PATH_RECHECK_INTERVAL_US)
+        return;
+    g_ctx.lastPathRecheck = now;
+
+    LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
+    int ifCount = lcEnumNetInterfaces(interfaces, LC_NETIF_MAX_COUNT);
+    if (ifCount <= 0)
+        return;
+
+    int serverFamily = g_ctx.peerAddr.ss_family;
+
+    // ── Phase 1: 記錄已被 picoquic 刪除的路徑（僅診斷，不重新探測） ──
+    // §Q-DYN-PATH 2026-05-24 — 不在 IO 執行緒呼叫 picoquic_probe_new_path。
+    // 原因：probe_new_path 讓 server 的 picoquic 知道新路徑並立刻把 ~50%
+    // 的 video datagram 排到上面。如果路徑是死路，那些 datagram 就丟了，
+    // IDR frame 永遠無法組裝。唯一可靠的預檢是 ICMP 探測（200ms timeout），
+    // 但這會阻塞 IO 執行緒造成掉幀（v1.5.53 實證：quicRecheckPaths 在
+    // 00:00:41 做 ICMP → dropFrameState）。
+    //
+    // 安全策略：Phase B（IO 執行緒啟動前）做 ICMP 驗證所有候選路徑。
+    // IO 執行緒上的 recheck 僅做介面掃描 + 診斷日誌，不呼叫任何會觸發
+    // server 端 multipath scheduler 改變的 API。已刪除的路徑等下次 session
+    // 重新連線時在 Phase B 重新評估。
+    {
+        int deletedCount = 0;
+        for (int s = 0; s < g_ctx.subflowCount; s++) {
+            QUIC_SUBFLOW* sf = &g_ctx.subflows[s];
+            if (!sf->picoquicDeleted)
+                continue;
+            deletedCount++;
+        }
+        if (deletedCount > 0) {
+            Limelog("[VIPLE-MPQUIC] Recheck: %d deleted path(s) — "
+                    "not re-probing on IO thread (would require ICMP)\n",
+                    deletedCount);
+        }
+    }
+
+    // ── Phase 2: 偵測新介面（僅診斷，不加入） ──
+    // §Q-DYN-PATH 2026-05-24 — 同上：quicAddSubflow/Ex 內的 ICMP 探測
+    // 會在 IO 執行緒阻塞 200ms。新介面在下次 session 的 Phase B 加入。
+    {
+        int newIfCount = 0;
+        for (int i = 0; i < ifCount; i++) {
+            if (!interfaces[i].up)
+                continue;
+            if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK ||
+                interfaces[i].type == LC_NETIF_TYPE_VIRTUAL ||
+                interfaces[i].type == LC_NETIF_TYPE_UNKNOWN)
+                continue;
+            if (interfaces[i].family != serverFamily)
+                continue;
+
+            // 檢查是否已經有 subflow 用了這個介面
+            bool alreadyTracked = false;
+            for (int s = 0; s < g_ctx.subflowCount; s++) {
+                if (g_ctx.subflows[s].interfaceIndex == interfaces[i].index &&
+                    !g_ctx.subflows[s].picoquicDeleted) {
+                    alreadyTracked = true;
+                    break;
+                }
+            }
+            if (alreadyTracked)
+                continue;
+
+            // 檢查是否在 ICMP 拒絕快取中
+            bool icmpRejected = false;
+            for (int r = 0; r < g_ctx.icmpRejectedCount; r++) {
+                if (g_ctx.icmpRejectedIfs[r] == interfaces[i].index) {
+                    icmpRejected = true;
+                    break;
+                }
+            }
+
+            newIfCount++;
+            Limelog("[VIPLE-MPQUIC] Recheck: new interface if %d '%s' "
+                    "(type=%s) detected but not added on IO thread%s\n",
+                    interfaces[i].index, interfaces[i].name,
+                    lcNetIfTypeName(interfaces[i].type),
+                    icmpRejected ? " (ICMP-rejected in Phase B)" : "");
+        }
+        (void)newIfCount;
+    }
+}
+
+void quicSetAltPeers(const struct sockaddr_storage* addrs,
+                     const SOCKADDR_LEN* addrLens,
+                     int count) {
+    if (count > QUIC_MAX_ALT_PEERS)
+        count = QUIC_MAX_ALT_PEERS;
+
+    g_ctx.altPeerCount = 0;
+    if (addrs && addrLens && count > 0) {
+        for (int i = 0; i < count; i++) {
+            memcpy(&g_ctx.altPeerAddrs[i], &addrs[i], addrLens[i]);
+            g_ctx.altPeerAddrLens[i] = addrLens[i];
+        }
+        g_ctx.altPeerCount = count;
     }
 }
 
@@ -923,6 +1377,12 @@ int quicGetActiveSubflowCount(void) {
     return count;
 }
 
+// ── Failover status ──────────────────────────────────────────
+
+int quicIsFailoverActive(void) {
+    return (g_ctx.failoverPromotedSlot >= 0) ? 1 : 0;
+}
+
 // ── Session ticket (0-RTT) ──────────────────────────────────
 
 int quicGetSessionTicket(unsigned char* buf, int bufLen) {
@@ -951,11 +1411,11 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
 
     switch (fin_or_event) {
     case picoquic_callback_datagram:
-        if (length >= QUIC_DGRAM_HEADER_SIZE && ctx->recvCallback) {
+        if (length >= QUIC_DGRAM_HEADER_SIZE) {
             PQUIC_DGRAM_HEADER hdr = (PQUIC_DGRAM_HEADER)bytes;
+            unsigned char ft = hdr->flowType;
             // §K.10 diag: per-flow 接收計數
             {
-                unsigned char ft = hdr->flowType;
                 if (ft < 4) {
                     g_dgramsRecvByFlow[ft]++;
                     g_bytesRecvByFlow[ft] += (uint64_t)length;
@@ -968,11 +1428,14 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                             (int)ft, (int)length, (unsigned)ntohs(hdr->seq));
                 }
             }
-            ctx->recvCallback(
-                hdr->flowType,
-                bytes + QUIC_DGRAM_HEADER_SIZE,
-                (int)(length - QUIC_DGRAM_HEADER_SIZE),
-                ctx->recvContext);
+            // 分派到 per-flow callback
+            if (ft < 4 && ctx->recvCallbacks[ft]) {
+                ctx->recvCallbacks[ft](
+                    ft,
+                    bytes + QUIC_DGRAM_HEADER_SIZE,
+                    (int)(length - QUIC_DGRAM_HEADER_SIZE),
+                    ctx->recvContexts[ft]);
+            }
         }
         // Per-subflow lastRecvTime is updated by the I/O thread directly
         // when recvfrom returns on a given socket (the I/O thread knows
@@ -983,9 +1446,10 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
 
     case picoquic_callback_stream_data:
     case picoquic_callback_stream_fin:
-        if (stream_id == 0 && ctx->recvCallback) {
-            ctx->recvCallback(QUIC_FLOW_CONTROL, bytes, (int)length,
-                              ctx->recvContext);
+        if (stream_id == 0 && ctx->recvCallbacks[QUIC_FLOW_CONTROL]) {
+            ctx->recvCallbacks[QUIC_FLOW_CONTROL](
+                QUIC_FLOW_CONTROL, bytes, (int)length,
+                ctx->recvContexts[QUIC_FLOW_CONTROL]);
         }
         break;
 
@@ -1013,6 +1477,39 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
             if (ctx->subflows[i].picoquicPathId == stream_id) {
                 if (!ctx->subflows[i].active) {
                     ctx->subflows[i].active = true;
+                    ctx->subflows[i].lastRecvTime = picoquic_current_time();
+
+                    // §MP-PRIMARY 2026-05-24: 驗證通過的路徑維持
+                    // backup，不升級為 available。只有 path 0 是
+                    // available（primary-path 模式）。non-primary
+                    // 路徑已驗證、隨時可用，但 picoquic scheduler
+                    // 不會主動在上面分派 datagram，避免跨路徑 RTT
+                    // 差異導致 depacketizer 組裝失敗。failover 時
+                    // quicCheckPathHealth() 會把 backup 升級。
+                    // §MP-PRIMARY-LOCK: 驗證通過後明確設定 backup。
+                    // 初始 probe (quicAddSubflowEx) 已設過一次，
+                    // 但 picoquic 驗證過程可能清除 backup flag。
+                    // 這裡 re-assert 確保 picoquic 不會自動分派
+                    // datagram 到此路徑。
+                    if (i > 0) {
+                        picoquic_set_path_status(
+                            ctx->cnx, stream_id,
+                            picoquic_path_status_backup);
+                    }
+
+                    if (ctx->subflows[i].keepAsStandby) {
+                        Limelog("[VIPLE-MPQUIC] Path %llu validated, "
+                                "backup/standby (if %d, ICMP RTT=%u ms)\n",
+                                (unsigned long long)stream_id,
+                                ctx->subflows[i].interfaceIndex,
+                                ctx->subflows[i].icmpRttMs);
+                    } else {
+                        Limelog("[VIPLE-MPQUIC] Path %llu validated, "
+                                "backup/failover-ready (if %d)\n",
+                                (unsigned long long)stream_id,
+                                ctx->subflows[i].interfaceIndex);
+                    }
+
                     if (ctx->failoverCallback) {
                         ctx->failoverCallback(ctx->subflows[i].id,
                             ctx->subflows[i].interfaceIndex,
@@ -1033,13 +1530,17 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                 (unsigned long long)stream_id);
         for (int i = 0; i < ctx->subflowCount; i++) {
             if (ctx->subflows[i].picoquicPathId == stream_id) {
-                if (ctx->subflows[i].active) {
-                    ctx->subflows[i].active = false;
-                    if (ctx->failoverCallback) {
-                        ctx->failoverCallback(ctx->subflows[i].id,
-                            ctx->subflows[i].interfaceIndex,
-                            false, ctx->failoverContext);
-                    }
+                ctx->subflows[i].active = false;
+                if (fin_or_event == picoquic_callback_path_deleted) {
+                    // §Q-DYN-PATH: 標記為 picoquic 永久刪除。slot 會在
+                    // 下一次 quicRecheckPaths() 週期中被回收（重新探測
+                    // 同一介面）或讓出給新介面使用。
+                    ctx->subflows[i].picoquicDeleted = true;
+                }
+                if (ctx->failoverCallback) {
+                    ctx->failoverCallback(ctx->subflows[i].id,
+                        ctx->subflows[i].interfaceIndex,
+                        false, ctx->failoverContext);
                 }
                 break;
             }
@@ -1117,63 +1618,160 @@ static void quicIoThreadProc(void* context) {
             }
         }
 
+        int selRet = 0;
         if (maxSock != INVALID_SOCKET) {
-            int selRet = select((int)(maxSock + 1), &readSet, NULL, NULL, &tv);
-            if (selRet > 0) {
-                // Check server socket
-                if (ctx->isServer && serverSock != INVALID_SOCKET &&
-                    FD_ISSET(serverSock, &readSet)) {
-                    peerLen = sizeof(peerAddr);
-                    SOCK_RET recvLen = recvfrom(serverSock, (char*)recvBuf,
-                        sizeof(recvBuf), 0,
-                        (struct sockaddr*)&peerAddr, &peerLen);
-                    if (recvLen > 0) {
-                        picoquic_incoming_packet(ctx->quic,
-                            recvBuf, (size_t)recvLen,
-                            (struct sockaddr*)&peerAddr,
-                            (struct sockaddr*)&((struct sockaddr_in6){
-                                .sin6_family = AF_INET6,
-                                .sin6_port = htons(ctx->serverPort),
-                                .sin6_addr = in6addr_any
-                            }),
-                            0, 0, currentTime);
-                    }
-                }
+            selRet = select((int)(maxSock + 1), &readSet, NULL, NULL, &tv);
+        } else {
+            PltSleepMs(1);
+        }
 
-                // Check each subflow socket. We know exactly which subflow
-                // received this packet (the socket fd that fired), which
-                // gives us per-subflow lastRecvTime tracking that the
-                // picoquic callback can't provide.
-                for (int i = 0; i < ctx->subflowCount; i++) {
-                    SOCKET sf = ctx->subflows[i].sock;
-                    if (sf != INVALID_SOCKET && FD_ISSET(sf, &readSet)) {
+        // §MP-ADV-MUTEX: picoquic 不是 thread-safe。Connection thread
+        // 的 Phase B (quicAddSubflowEx → picoquic_probe_new_path) 和
+        // 送出 thread (quicSendOnPath → picoquic_queue_datagram_frame)
+        // 可能同時存取 picoquic 內部狀態。Lock 涵蓋所有 picoquic 呼叫：
+        // incoming_packet、prepare_next_packet、get_path_quality 等。
+        // select() 和 fd_set 建構在 lock 外（不碰 picoquic 狀態）。
+        PltLockMutex(&g_ctx.picoquicMutex);
+
+        // §K.13 UAF fix 2026-05-26 — 防 picoquic 內部 mass path-deletion
+        // 期間 cnx->path[0]->first_tuple-> ... NULL deref（sender.c:826
+        // picoquic_predict_packet_header_length 已實證命中）。兩道 bail：
+        //
+        // (a) cnx state 已進 disconnecting/disconnected — picoquic 自己
+        //     在 close 流程，再 prepare_next_packet 一定踩雷。
+        // (b) cnx state 還是 ready 但所有 subflow path 都被 picoquic 刪
+        //     完了——這時 picoquic 內部 cnx->path[0] 可能 transient 為
+        //     NULL/half-freed（callback 已 fire，但 array shift 還沒
+        //     原子完成）。用 picoquic_get_path_quality 對任一未刪 subflow
+        //     的 unique_path_id 查一次：成功表示 picoquic 真的還持有它，
+        //     全部都 fail 表示 picoquic 已沒可用 path 但 cnx 還來不及變
+        //     disconnecting，我們就主動 bail。
+        if (ctx->cnx == NULL ||
+            picoquic_get_cnx_state(ctx->cnx) >= picoquic_state_disconnecting) {
+            PltUnlockMutex(&g_ctx.picoquicMutex);
+            Limelog("[VIPLE-MPQUIC] §K.13 IO loop bail: cnx state >= "
+                    "disconnecting, stopping cleanly\n");
+            ctx->ioRunning = false;
+            break;
+        }
+        {
+            int alivePaths = 0;
+            for (int i = 0; i < ctx->subflowCount; i++) {
+                if (ctx->subflows[i].picoquicDeleted) continue;
+                picoquic_path_quality_t pq;
+                memset(&pq, 0, sizeof(pq));
+                if (picoquic_get_path_quality(ctx->cnx,
+                        ctx->subflows[i].picoquicPathId, &pq) == 0) {
+                    alivePaths = 1;
+                    break;
+                }
+                // get_path_quality fail 表示 picoquic 已不認 unique_path_id
+                // (路徑被刪但 callback 還沒 fire / 我們 picoquicDeleted 旗
+                // 標還沒設)。標起來避免下次 iteration 再查。
+                ctx->subflows[i].picoquicDeleted = true;
+            }
+            if (alivePaths == 0 && ctx->subflowCount > 0) {
+                PltUnlockMutex(&g_ctx.picoquicMutex);
+                Limelog("[VIPLE-MPQUIC] §K.13 IO loop bail: picoquic has 0 "
+                        "alive paths but cnx state=%d, stopping before "
+                        "next picoquic_prepare_next_packet hits a NULL "
+                        "path[0]\n",
+                        (int)picoquic_get_cnx_state(ctx->cnx));
+                ctx->ioRunning = false;
+                break;
+            }
+        }
+
+        if (selRet > 0) {
+            // Check server socket
+            if (ctx->isServer && serverSock != INVALID_SOCKET &&
+                FD_ISSET(serverSock, &readSet)) {
+                peerLen = sizeof(peerAddr);
+                SOCK_RET recvLen = recvfrom(serverSock, (char*)recvBuf,
+                    sizeof(recvBuf), 0,
+                    (struct sockaddr*)&peerAddr, &peerLen);
+                if (recvLen > 0) {
+                    picoquic_incoming_packet(ctx->quic,
+                        recvBuf, (size_t)recvLen,
+                        (struct sockaddr*)&peerAddr,
+                        (struct sockaddr*)&((struct sockaddr_in6){
+                            .sin6_family = AF_INET6,
+                            .sin6_port = htons(ctx->serverPort),
+                            .sin6_addr = in6addr_any
+                        }),
+                        0, 0, currentTime);
+                }
+            }
+
+            // Check each subflow socket — drain pending packets.
+            // Sockets are non-blocking; the inner loop exits on
+            // EWOULDBLOCK. Reading multiple packets per select
+            // reduces the overhead of mutex unlock → fd_set rebuild
+            // → select → mutex lock per packet. After each batch,
+            // picoquic_prepare_next_packet sends ACKs promptly.
+            for (int i = 0; i < ctx->subflowCount; i++) {
+                SOCKET sf = ctx->subflows[i].sock;
+                if (sf != INVALID_SOCKET && FD_ISSET(sf, &readSet)) {
+                    int pktsThisSocket = 0;
+                    while (pktsThisSocket < 16) {
                         peerLen = sizeof(peerAddr);
                         SOCK_RET recvLen = recvfrom(sf, (char*)recvBuf,
                             sizeof(recvBuf), 0,
                             (struct sockaddr*)&peerAddr, &peerLen);
-                        if (recvLen > 0) {
-                            ctx->subflows[i].lastRecvTime = currentTime;
-                            ctx->subflows[i].bytesRecv += (uint64_t)recvLen;
-                            // If a previously-dead path comes back, mark
-                            // it active immediately so the scheduler can
-                            // start using it without waiting for the next
-                            // health-check window.
-                            if (!ctx->subflows[i].active) {
-                                ctx->subflows[i].active = true;
-                                ctx->subflows[i].consecutiveTimeouts = 0;
-                            }
-                            picoquic_incoming_packet(ctx->quic,
-                                recvBuf, (size_t)recvLen,
-                                (struct sockaddr*)&peerAddr,
-                                (struct sockaddr*)&ctx->subflows[i].localAddr,
-                                ctx->subflows[i].interfaceIndex,
-                                0, currentTime);
+                        if (recvLen <= 0)
+                            break;
+                        pktsThisSocket++;
+                        ctx->subflows[i].lastRecvTime = currentTime;
+                        ctx->subflows[i].bytesRecv += (uint64_t)recvLen;
+                        if (!ctx->subflows[i].active) {
+                            ctx->subflows[i].active = true;
+                            ctx->subflows[i].consecutiveTimeouts = 0;
                         }
+                        picoquic_incoming_packet(ctx->quic,
+                            recvBuf, (size_t)recvLen,
+                            (struct sockaddr*)&peerAddr,
+                            (struct sockaddr*)&ctx->subflows[i].localAddr,
+                            ctx->subflows[i].interfaceIndex,
+                            0, currentTime);
                     }
                 }
             }
-        } else {
-            PltSleepMs(1);
+        }
+
+        // §MP-PRIMARY-GUARD: 確保 picoquic 只在一條路徑上送資料。
+        // 正常情況：path 0 = available，其餘 = backup。
+        // Failover 時：promoted path = available，path 0 = backup。
+        // 使用 failoverPromotedSlot 判斷當前哪條路徑應為 available。
+        //
+        // §K.13 UAF fix 2026-05-26 — 改用 picoquic_set_path_status API 而非
+        // 直接 access cnx->path[pi]->...。在主介面被 OS 強制 disable 觸發
+        // picoquic 內部 mass path-deletion 期間，直接 deref cnx->path[pi]
+        // 可能命中半 freed 的 picoquic_path_t（picoquic 在 delete_path 內
+        // 先 free path_x 再 shift 陣列，視窗很短但存在）。API 路徑會先用
+        // unique_path_id 找 array index，找不到就 no-op 返回，避免 dangling
+        // pointer access。額外 picoquicDeleted 旗標跳過已知刪除的 subflow。
+        if (ctx->cnx != NULL && ctx->subflowCount > 1 &&
+            picoquic_get_cnx_state(ctx->cnx) < picoquic_state_disconnecting) {
+            // 決定當前 active path 的 unique_path_id
+            uint64_t activePathUid =
+                ctx->subflows[0].picoquicPathId; // 預設 path 0
+            if (ctx->failoverPromotedSlot >= 0 &&
+                ctx->failoverPromotedSlot < ctx->subflowCount &&
+                !ctx->subflows[ctx->failoverPromotedSlot].picoquicDeleted) {
+                activePathUid =
+                    ctx->subflows[ctx->failoverPromotedSlot].picoquicPathId;
+            }
+            for (int i = 0; i < ctx->subflowCount; i++) {
+                if (ctx->subflows[i].picoquicDeleted) continue;
+                picoquic_path_status_enum st =
+                    (ctx->subflows[i].picoquicPathId == activePathUid)
+                        ? picoquic_path_status_available
+                        : picoquic_path_status_backup;
+                // 內部會先用 unique_path_id 找 path_id；找不到（路徑已刪）
+                // 就直接 return 0 不 access cnx->path[]。
+                (void)picoquic_set_path_status(ctx->cnx,
+                    ctx->subflows[i].picoquicPathId, st);
+            }
         }
 
         // Process picoquic state machine.
@@ -1276,6 +1874,7 @@ static void quicIoThreadProc(void* context) {
             if (outSock == INVALID_SOCKET && ctx->subflowCount > 0) {
                 outSock = ctx->subflows[0].sock;
             }
+
             if (outSock != INVALID_SOCKET) {
                 sendto(outSock, (const char*)sendBuf, (int)sendLen, 0,
                        (struct sockaddr*)&destAddr, destLen);
@@ -1285,6 +1884,7 @@ static void quicIoThreadProc(void* context) {
         // Periodic maintenance
         quicUpdatePathStats();
         quicCheckPathHealth();
+        quicRecheckPaths();  // §Q-DYN-PATH: 定期重掃介面（僅診斷日誌，不探測/加入）
 
         // §K.10 diag: 每 5 秒印出 per-flow 接收統計 + per-path 品質
         {
@@ -1305,6 +1905,16 @@ static void quicIoThreadProc(void* context) {
                         (double)(g_bytesRecvByFlow[2] - g_prevBytesRecvByFlow[2]) * 8.0 / dtSec / 1e6,
                         (unsigned long long)g_dgramsRecvByFlow[3]);
 
+                // Video ring buffer 診斷
+                {
+                    int ringDepth = 0, ringCap = 0;
+                    uint64_t ringDrops = 0;
+                    quicVideoGetRingStats(&ringDepth, &ringCap, &ringDrops);
+                    Limelog("[VIPLE-MPQUIC] §K.10 videoRing depth=%d/%d drops=%llu\n",
+                            ringDepth, ringCap,
+                            (unsigned long long)ringDrops);
+                }
+
                 // Per-path 摘要
                 for (int pi = 0; pi < ctx->subflowCount; pi++) {
                     QUIC_SUBFLOW* sf = &ctx->subflows[pi];
@@ -1322,6 +1932,8 @@ static void quicIoThreadProc(void* context) {
                 g_lastDiagLogTime = nowDiag;
             }
         }
+
+        PltUnlockMutex(&g_ctx.picoquicMutex);
     }
 
     if (serverSock != INVALID_SOCKET) {

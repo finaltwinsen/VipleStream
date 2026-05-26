@@ -187,6 +187,91 @@ namespace platf {
     return "00:00:00:00:00:00"s;
   }
 
+  /**
+   * @brief §MP-ADV 列舉本機所有可用網路介面（Windows 實作）。
+   * 複用 get_adapteraddrs() helper，遍歷 UnicastAddress 收集 IPv4。
+   * 過濾規則對齊客戶端 PlatformNetIf.c 的 classifyWindowsAdapter()。
+   */
+  std::vector<advertised_interface> enum_net_interfaces() {
+    std::vector<advertised_interface> result;
+    adapteraddrs_t adapters = get_adapteraddrs();
+
+    for (auto adapter = adapters.get(); adapter != nullptr; adapter = adapter->Next) {
+      // 跳過非 UP 介面
+      if (!(adapter->OperStatus == IfOperStatusUp))
+        continue;
+
+      // 跳過 loopback
+      if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+        continue;
+
+      // 分類介面 — 參考 PlatformNetIf.c classifyWindowsAdapter()
+      std::wstring desc(adapter->Description);
+      std::string name;
+      std::string type;
+
+      // 虛擬介面過濾（跳過）
+      bool isVirtual = false;
+      if (desc.find(L"Hyper-V") != std::wstring::npos ||
+          desc.find(L"vEthernet") != std::wstring::npos ||
+          desc.find(L"VMware") != std::wstring::npos ||
+          desc.find(L"VirtualBox") != std::wstring::npos ||
+          desc.find(L"Docker") != std::wstring::npos ||
+          desc.find(L"WSL") != std::wstring::npos ||
+          desc.find(L"Virtual Adapter") != std::wstring::npos) {
+        isVirtual = true;
+      }
+      if (isVirtual) continue;
+
+      // 取得介面友善名稱
+      if (adapter->FriendlyName) {
+        std::wstring wname(adapter->FriendlyName);
+        // 簡易 wstring → string 轉換（介面名通常是 ASCII）
+        name.assign(wname.begin(), wname.end());
+      } else {
+        name = "Unknown";
+      }
+
+      // VPN 偵測
+      if (desc.find(L"Tailscale") != std::wstring::npos ||
+          desc.find(L"WireGuard") != std::wstring::npos ||
+          desc.find(L"Cloudflare") != std::wstring::npos ||
+          desc.find(L"ZeroTier") != std::wstring::npos ||
+          adapter->IfType == IF_TYPE_TUNNEL) {
+        type = "vpn";
+      } else if (adapter->IfType == IF_TYPE_IEEE80211) {
+        type = "wifi";
+      } else if (adapter->IfType == IF_TYPE_ETHERNET_CSMACD) {
+        type = "ethernet";
+      } else {
+        type = "other";
+      }
+
+      // 遍歷 unicast 位址，只收 IPv4
+      for (auto addr = adapter->FirstUnicastAddress; addr != nullptr; addr = addr->Next) {
+        auto sa = addr->Address.lpSockaddr;
+        if (sa->sa_family != AF_INET) continue;
+
+        char addrStr[INET_ADDRSTRLEN] = {};
+        inet_ntop(AF_INET, &((sockaddr_in *)sa)->sin_addr, addrStr, sizeof(addrStr));
+
+        // 跳過 link-local (169.254.x.x)
+        if (strncmp(addrStr, "169.254.", 8) == 0) continue;
+        // 跳過 loopback
+        if (strncmp(addrStr, "127.", 4) == 0) continue;
+
+        result.push_back({std::string(addrStr), name, type});
+      }
+    }
+
+    BOOST_LOG(info) << "[VIPLE-MPADV] Enumerated " << result.size() << " network interface(s) for advertisement";
+    for (const auto &iface : result) {
+      BOOST_LOG(info) << "[VIPLE-MPADV]   " << iface.name << " (" << iface.type << "): " << iface.address;
+    }
+
+    return result;
+  }
+
   HDESK syncThreadDesktop() {
     auto hDesk = OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK, FALSE, GENERIC_ALL);
     if (!hDesk) {

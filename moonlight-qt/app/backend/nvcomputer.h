@@ -133,6 +133,11 @@ public:
     // VipleStream MP-QUIC multipath capability
     bool isMpQuicCapable = false;
     QString vipleStreamMPQUIC;
+
+    // §MP-ADV: 伺服器透過 /serverinfo 廣告的所有網路介面。
+    // 客戶端用這些位址取代猜測式的 alt peer，實現伺服器驅動的多路徑探測。
+    QVector<NvNetworkInterface> serverAdvertisedInterfaces;
+
     // Remember to update isEqualSerialized() when adding fields here!
 
     // Synchronization

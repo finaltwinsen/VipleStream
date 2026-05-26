@@ -28,6 +28,24 @@ public:
 };
 Q_DECLARE_TYPEINFO(NvDisplayMode, Q_PRIMITIVE_TYPE);
 
+// VipleStream §MP-ADV: 伺服器透過 /serverinfo 廣告的網路介面。
+// 客戶端用這些位址作為 MP-QUIC 多路徑的 alt peer 候選。
+class NvNetworkInterface
+{
+public:
+    bool operator==(const NvNetworkInterface& other) const
+    {
+        return address == other.address &&
+                name == other.name &&
+                type == other.type;
+    }
+
+    QString address;  // IPv4 字串，如 "192.168.51.226"
+    QString name;     // 介面名稱，如 "Ethernet", "Tailscale"
+    QString type;     // "ethernet", "wifi", "vpn"
+};
+Q_DECLARE_TYPEINFO(NvNetworkInterface, Q_MOVABLE_TYPE);
+
 class GfeHttpResponseException : public std::exception
 {
 public:
@@ -246,6 +264,11 @@ public:
     static
     QVector<NvDisplayMode>
     getDisplayModeList(QString serverInfo);
+
+    // §MP-ADV 解析伺服器廣告的網路介面清單
+    static
+    QVector<NvNetworkInterface>
+    getNetworkInterfaceList(QString serverInfo);
 
     QUrl m_BaseUrlHttp;
     QUrl m_BaseUrlHttps;

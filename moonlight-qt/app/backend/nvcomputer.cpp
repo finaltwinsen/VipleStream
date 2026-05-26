@@ -248,6 +248,15 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
                 (uint64_t)mode2.width * mode2.height * mode2.refreshRate;
     });
 
+    // §MP-ADV: 解析伺服器廣告的網路介面清單
+    this->serverAdvertisedInterfaces = NvHTTP::getNetworkInterfaceList(serverInfo);
+    if (!this->serverAdvertisedInterfaces.isEmpty()) {
+        qInfo() << "Server advertised" << this->serverAdvertisedInterfaces.size() << "network interface(s):";
+        for (const auto& iface : std::as_const(this->serverAdvertisedInterfaces)) {
+            qInfo() << "  " << iface.name << "(" << iface.type << "):" << iface.address;
+        }
+    }
+
     // We can get an IPv4 loopback address if we're using the GS IPv6 Forwarder
     this->localAddress = NvAddress(NvHTTP::getXmlString(serverInfo, "LocalIP"), http.httpPort());
     if (this->localAddress.address().startsWith("127.")) {
@@ -696,6 +705,7 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED(gpuModel);
     ASSIGN_IF_CHANGED_AND_NONNULL(serverCert);
     ASSIGN_IF_CHANGED_AND_NONEMPTY(displayModes);
+    ASSIGN_IF_CHANGED_AND_NONEMPTY(serverAdvertisedInterfaces);
 
     if (!that.appList.isEmpty()) {
         // updateAppList() handles merging client-side attributes

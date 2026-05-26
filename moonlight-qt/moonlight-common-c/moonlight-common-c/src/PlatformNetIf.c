@@ -13,6 +13,7 @@ const char* lcNetIfTypeName(int type) {
         case LC_NETIF_TYPE_CELLULAR: return "Cellular";
         case LC_NETIF_TYPE_LOOPBACK: return "Loopback";
         case LC_NETIF_TYPE_VPN:      return "VPN";
+        case LC_NETIF_TYPE_VIRTUAL:  return "Virtual";
         default:                     return "Unknown";
     }
 }
@@ -25,7 +26,52 @@ const char* lcNetIfTypeName(int type) {
 
 #pragma comment(lib, "iphlpapi.lib")
 
-static int classifyWindowsAdapter(DWORD ifType) {
+// §SINGLE-INST-NET: 用 adapter Description (driver 名稱) 辨識
+// 純虛擬（host-internal）網路介面。這些介面的 IfType 通常報為
+// IF_TYPE_ETHERNET_CSMACD (6)，跟實體 Ethernet 一模一樣，
+// 無法光靠 IfType 區分。
+//
+// 注意：USB tethering (UsbNcm / RNDIS) 不在此列——它們是透過
+// 實體 USB 線提供的真實網路連線，具備完整路由能力。能不能到達
+// 特定 server 應該由可達性探測決定，不該在介面分類階段就擋掉。
+static bool isVirtualAdapterByDescription(const WCHAR* desc) {
+    if (!desc) return false;
+    // Hyper-V virtual switches (WSL, Default Switch, etc.)
+    if (wcsstr(desc, L"Hyper-V") != NULL) return true;
+    // VMware virtual adapters
+    if (wcsstr(desc, L"VMware") != NULL) return true;
+    // VirtualBox Host-Only
+    if (wcsstr(desc, L"VirtualBox") != NULL) return true;
+    // Docker / WSL2 internal
+    if (wcsstr(desc, L"vEthernet") != NULL) return true;
+    return false;
+}
+
+// Description-based VPN detection for adapters that don't use
+// standard IfType values (Tailscale uses a WinTun adapter that
+// reports as IF_TYPE_PROP_VIRTUAL, not IF_TYPE_TUNNEL).
+static bool isVpnAdapterByDescription(const WCHAR* desc) {
+    if (!desc) return false;
+    if (wcsstr(desc, L"Tailscale") != NULL) return true;
+    if (wcsstr(desc, L"WireGuard") != NULL) return true;
+    if (wcsstr(desc, L"Cloudflare") != NULL) return true;
+    if (wcsstr(desc, L"ZeroTier") != NULL) return true;
+    return false;
+}
+
+static int classifyWindowsAdapter(DWORD ifType, const WCHAR* description) {
+    // Description-based check catches adapters that report IfType=6
+    // (Ethernet) but are actually virtual/USB. Must run before the
+    // IfType switch so these don't get misclassified as Ethernet.
+    if (isVirtualAdapterByDescription(description))
+        return LC_NETIF_TYPE_VIRTUAL;
+
+    // VPN adapters often use non-standard IfType values; classify
+    // by description so they appear as LC_NETIF_TYPE_VPN and are
+    // eligible for multipath via alt-peer.
+    if (isVpnAdapterByDescription(description))
+        return LC_NETIF_TYPE_VPN;
+
     switch (ifType) {
         case IF_TYPE_ETHERNET_CSMACD:
         case IF_TYPE_GIGABITETHERNET:
@@ -83,7 +129,7 @@ int lcEnumNetInterfaces(PLC_NET_INTERFACE out, int maxCount) {
         if (adapter->OperStatus != IfOperStatusUp)
             continue;
 
-        ifType = classifyWindowsAdapter(adapter->IfType);
+        ifType = classifyWindowsAdapter(adapter->IfType, adapter->Description);
         if (ifType == LC_NETIF_TYPE_LOOPBACK)
             continue;
 

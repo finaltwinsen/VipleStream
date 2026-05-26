@@ -39,6 +39,12 @@ static void purgeListEntries(PRTPV_QUEUE_LIST list) {
 void RtpvCleanupQueue(PRTP_VIDEO_QUEUE queue) {
     purgeListEntries(&queue->pendingFecBlockList);
     purgeListEntries(&queue->completedFecBlockList);
+
+    // §K.17: Free any deferred packets from grace period
+    for (int i = 0; i < queue->deferredCount; i++) {
+        free(queue->deferredPackets[i].packet);
+    }
+    queue->deferredCount = 0;
 }
 
 static void insertEntryIntoList(PRTPV_QUEUE_LIST list, PRTPV_QUEUE_ENTRY entry) {
@@ -541,7 +547,133 @@ uint32_t RtpvGetCurrentFrameNumber(PRTP_VIDEO_QUEUE queue) {
     return queue->currentFrameNumber;
 }
 
+// §K.17: Internal implementation of RtpvAddPacket, used for recursive processing
+// of deferred packets during grace period resolution.
+static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry);
+
 int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry) {
+    // §K.17: Handle deferred packets from grace period.
+    // When we detect a new frame but the old frame is close to complete (missing ≤ 1
+    // shard for FEC recovery), we defer up to RTPV_MAX_GRACE_PACKETS new-frame packets
+    // to give the missing shard a chance to arrive. This is critical at 180fps where
+    // BBR pacing spreads shards across the entire 5.55ms frame interval.
+    if (queue->deferredCount > 0) {
+        int dataOffset = sizeof(*packet);
+        if (packet->header & FLAG_EXTENSION) {
+            dataOffset += 4;
+        }
+        if (length < dataOffset + (int)sizeof(NV_VIDEO_PACKET)) {
+            // Too short to peek — can't be a valid video packet.
+            // Let RtpvAddPacketInternal handle rejection.
+            return RtpvAddPacketInternal(queue, packet, length, packetEntry);
+        }
+        PNV_VIDEO_PACKET peekNv = (PNV_VIDEO_PACKET)(((char*)packet) + dataOffset);
+        uint32_t peekFrame = LE32(peekNv->frameIndex);
+
+        if (peekFrame == queue->currentFrameNumber) {
+            // The missing shard arrived! Process it for the old frame first.
+            int savedCount = queue->deferredCount;
+            struct {
+                PRTP_PACKET packet;
+                PRTPV_QUEUE_ENTRY entry;
+                int length;
+            } saved[RTPV_MAX_GRACE_PACKETS];
+            memcpy(saved, queue->deferredPackets, sizeof(saved[0]) * savedCount);
+            queue->deferredCount = 0;
+
+            Limelog("§K.17 grace: frame %u recovered — late shard arrived after %d deferred packet(s)\n",
+                    queue->currentFrameNumber, savedCount);
+
+            // Process the old frame's missing shard
+            int ret = RtpvAddPacketInternal(queue, packet, length, packetEntry);
+
+            // Now process all deferred packets (they belong to the next frame)
+            for (int i = 0; i < savedCount; i++) {
+                int dret = RtpvAddPacketInternal(queue, saved[i].packet, saved[i].length, saved[i].entry);
+                if (dret != RTPF_RET_QUEUED) {
+                    free(saved[i].packet);
+                }
+            }
+
+            return ret;
+        }
+        else {
+            // Not the missing shard. Could be more new-frame packets or even
+            // a frame beyond the deferred one.
+            if (peekFrame == queue->deferredFrameNumber &&
+                queue->deferredCount < RTPV_MAX_GRACE_PACKETS) {
+                // Same new frame, still within grace budget — defer this one too
+                queue->deferredPackets[queue->deferredCount].packet = packet;
+                queue->deferredPackets[queue->deferredCount].entry = packetEntry;
+                queue->deferredPackets[queue->deferredCount].length = length;
+                queue->deferredCount++;
+                return RTPF_RET_QUEUED;
+            }
+
+            // Grace period exhausted (budget full or different frame entirely).
+            // Give up on the old frame and process all deferred + this packet.
+            int savedCount = queue->deferredCount;
+            struct {
+                PRTP_PACKET packet;
+                PRTPV_QUEUE_ENTRY entry;
+                int length;
+            } saved[RTPV_MAX_GRACE_PACKETS];
+            memcpy(saved, queue->deferredPackets, sizeof(saved[0]) * savedCount);
+            queue->deferredCount = 0;
+
+            Limelog("§K.17 grace: frame %u NOT recovered after %d deferred packet(s), giving up\n",
+                    queue->currentFrameNumber, savedCount);
+
+            // Process deferred packets first (triggers old frame discard + new frame init)
+            for (int i = 0; i < savedCount; i++) {
+                int dret = RtpvAddPacketInternal(queue, saved[i].packet, saved[i].length, saved[i].entry);
+                if (dret != RTPF_RET_QUEUED) {
+                    free(saved[i].packet);
+                }
+            }
+
+            // Fall through to process this packet normally
+        }
+    }
+
+    // §K.17: Check if we should INITIATE grace period for the current frame.
+    // This must be done here (in the wrapper, before RtpvAddPacketInternal)
+    // because the internal function does in-place LE32 conversion on packet
+    // fields. Doing the grace check after conversion would cause double
+    // conversion when the deferred packet is later re-processed.
+    if (queue->deferredCount == 0 &&
+        queue->pendingFecBlockList.count != 0) {
+        int peekOffset = sizeof(*packet);
+        if (packet->header & FLAG_EXTENSION) {
+            peekOffset += 4;
+        }
+        if (length >= peekOffset + (int)sizeof(NV_VIDEO_PACKET)) {
+            PNV_VIDEO_PACKET peekNv = (PNV_VIDEO_PACKET)(((char*)packet) + peekOffset);
+            uint32_t peekFrame = LE32(peekNv->frameIndex);
+
+            if (peekFrame != queue->currentFrameNumber &&
+                !isBefore16(peekFrame, queue->currentFrameNumber)) {
+                // New frame arriving while old frame is still pending.
+                // Check if old frame is close to FEC-recoverable (deficit ≤ 1).
+                uint32_t totalReceived = queue->receivedDataPackets + queue->receivedParityPackets;
+                uint32_t totalNeeded = queue->bufferDataPackets;
+                if (totalReceived + 1 >= totalNeeded && totalReceived < totalNeeded) {
+                    // Only 1 more packet (data or parity) needed for FEC recovery.
+                    queue->deferredPackets[0].packet = packet;
+                    queue->deferredPackets[0].entry = packetEntry;
+                    queue->deferredPackets[0].length = length;
+                    queue->deferredCount = 1;
+                    queue->deferredFrameNumber = peekFrame;
+                    return RTPF_RET_QUEUED;
+                }
+            }
+        }
+    }
+
+    return RtpvAddPacketInternal(queue, packet, length, packetEntry);
+}
+
+static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry) {
     if (isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber)) {
         // Reject packets behind our current buffer window
         return RTPF_RET_REJECTED;

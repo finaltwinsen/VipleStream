@@ -32,6 +32,8 @@ static struct {
     volatile int  tail;
 } quicVideoRing;
 
+static volatile uint64_t quicVideoRingDrops = 0;
+
 static void quicVideoRecvCallback(unsigned char flowType,
                                    const unsigned char* data, int dataLen,
                                    void* context) {
@@ -42,8 +44,10 @@ static void quicVideoRecvCallback(unsigned char flowType,
         return;
 
     int next = (quicVideoRing.head + 1) % QUIC_VIDEO_RING_SIZE;
-    if (next == quicVideoRing.tail)
-        return; // ring full, drop
+    if (next == quicVideoRing.tail) {
+        quicVideoRingDrops++;
+        return;
+    }
 
     memcpy(quicVideoRing.data[quicVideoRing.head], data, dataLen);
     quicVideoRing.len[quicVideoRing.head] = dataLen;
@@ -63,6 +67,14 @@ static int quicVideoRecv(char* buf, int bufLen) {
 }
 
 static bool useQuicVideo = false;
+
+void quicVideoGetRingStats(int* depth, int* capacity, uint64_t* drops) {
+    int h = quicVideoRing.head;
+    int t = quicVideoRing.tail;
+    *depth = (h - t + QUIC_VIDEO_RING_SIZE) % QUIC_VIDEO_RING_SIZE;
+    *capacity = QUIC_VIDEO_RING_SIZE;
+    *drops = quicVideoRingDrops;
+}
 #endif
 static PLT_THREAD receiveThread;
 static PLT_THREAD decoderThread;
@@ -415,7 +427,7 @@ int startVideoStream(void* rendererContext, int drFlags) {
         // Reset ring buffer and register callback
         quicVideoRing.head = 0;
         quicVideoRing.tail = 0;
-        quicSetRecvCallback(quicVideoRecvCallback, NULL);
+        quicSetRecvCallbackForFlow(QUIC_FLOW_VIDEO, quicVideoRecvCallback, NULL);
         Limelog("[VIPLE-MPQUIC] Video using QUIC datagram transport\n");
         // Still bind UDP socket as fallback (needed for ping)
     }

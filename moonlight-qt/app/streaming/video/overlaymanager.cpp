@@ -85,7 +85,7 @@ SDL_Surface* buildPerfHudSurface(TTF_Font* font, const char* text)
     // Layout constants.
     const int padH     = 18;
     const int padV     = 14;
-    const int colGap   = 18;
+    const int colGap   = 8;
     const int rowGap   = 6;
     const int strapH   = lineH + 10;
     int W = padH * 2 + labelW + colGap + valueW;

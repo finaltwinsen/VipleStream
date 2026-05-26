@@ -346,12 +346,21 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
 
 void quicDisconnect(void) {
     if (g_ctx.cnx) {
+        // §K.13 UAF fix 2026-05-26 — stop and JOIN the IO thread BEFORE
+        // touching picoquic state.  Previously picoquic_close(cnx, 0) ran
+        // before the join, racing with the IO thread that was still inside
+        // picoquic_incoming_packet / picoquic_prepare_next_packet on the
+        // same cnx.  When an OS-level adapter disable forces picoquic into
+        // mass path-deletion, the half-modified cnx state observed by the
+        // IO thread post-close dereferences a freed picoquic_path_t →
+        // 0xC0000005 (Windows) / SIGSEGV (Android).  Aligned with the PC
+        // moonlight-qt fix to keep both client codebases consistent.
         g_ctx.ioRunning = false;
-
-        picoquic_close(g_ctx.cnx, 0);
         PltInterruptThread(&g_ctx.ioThread);
         PltJoinThread(&g_ctx.ioThread);
 
+        // Safe now — the IO thread has fully exited.
+        picoquic_close(g_ctx.cnx, 0);
         g_ctx.cnx = NULL;
     }
 
@@ -1118,6 +1127,47 @@ static void quicIoThreadProc(void* context) {
             }
         } else {
             PltSleepMs(1);
+        }
+
+        // §K.13 UAF fix 2026-05-26 — 防 picoquic 內部 mass path-deletion
+        // 期間 cnx->path[0]->first_tuple-> ... NULL deref（sender.c:826
+        // picoquic_predict_packet_header_length 已實證命中，PC moonlight-qt
+        // 端的 v1.5.106 dmp 為證）。兩道 bail：
+        //
+        // (a) cnx state 已 disconnecting/disconnected — picoquic 自己在
+        //     close 流程，再 prepare_next_packet 一定踩雷。
+        // (b) cnx state 還是 ready 但 picoquic 已沒任何 alive path——這時
+        //     cnx->path[0] 可能 transient NULL/half-freed。用
+        //     picoquic_get_path_quality 對每個 subflow 的 unique_path_id
+        //     查；全部 fail 表示 picoquic 已沒可用 path，主動 bail 而不是
+        //     繼續呼 picoquic_prepare_next_packet 撞 UAF。
+        if (ctx->cnx != NULL &&
+            picoquic_get_cnx_state(ctx->cnx) >= picoquic_state_disconnecting) {
+            Limelog("[VIPLE-MPQUIC] §K.13 IO loop bail: cnx state >= "
+                    "disconnecting, stopping cleanly\n");
+            ctx->ioRunning = false;
+            break;
+        }
+        if (ctx->cnx != NULL && ctx->subflowCount > 0) {
+            int alivePaths = 0;
+            for (int i = 0; i < ctx->subflowCount; i++) {
+                picoquic_path_quality_t pq;
+                memset(&pq, 0, sizeof(pq));
+                if (picoquic_get_path_quality(ctx->cnx,
+                        ctx->subflows[i].picoquicPathId, &pq) == 0) {
+                    alivePaths = 1;
+                    break;
+                }
+            }
+            if (alivePaths == 0) {
+                Limelog("[VIPLE-MPQUIC] §K.13 IO loop bail: picoquic has 0 "
+                        "alive paths but cnx state=%d, stopping before "
+                        "next picoquic_prepare_next_packet hits a NULL "
+                        "path[0]\n",
+                        (int)picoquic_get_cnx_state(ctx->cnx));
+                ctx->ioRunning = false;
+                break;
+            }
         }
 
         // Process picoquic state machine.

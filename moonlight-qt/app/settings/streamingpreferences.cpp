@@ -156,6 +156,10 @@ void StreamingPreferences::reload()
     // read this after bitrate; moving it up is the minimum change
     // to let the default be FRUC-aware without restructuring load.
     enableFrameInterpolation = settings.value(SER_FRAMEINTERP, false).toBool();
+    qInfo() << "[VIPLE-PREFS] reload: fps =" << fps
+            << "enableFrameInterpolation =" << enableFrameInterpolation
+            << "(raw registry: fps=" << settings.value(SER_FPS).toString()
+            << "frameInterp=" << settings.value(SER_FRAMEINTERP).toString() << ")";
     bitrateKbps = settings.value(SER_BITRATE,
         getDefaultBitrate(width, height, fps, enableYUV444,
                           enableFrameInterpolation)).toInt();
@@ -436,6 +440,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_MDNS, enableMdns);
     settings.setValue(SER_AUTOWOL, autoWakeOnLan);
     settings.setValue(SER_FRAMEINTERP, enableFrameInterpolation);
+    qInfo() << "[VIPLE-PREFS] save: enableFrameInterpolation ="
+            << enableFrameInterpolation;
     settings.setValue(SER_FRUCBACKEND, static_cast<int>(frucBackend));
     settings.setValue(SER_RENDERERSEL, static_cast<int>(rendererSelection));
     settings.setValue(SER_FRUCQUALITY, static_cast<int>(frucQuality));
@@ -484,6 +490,14 @@ void StreamingPreferences::save()
     settings.setValue(SER_SWAPFACEBUTTONS, swapFaceButtons);
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);
+
+    // §K.15: force immediate write to registry / plist / INI.
+    // Without sync(), QSettings delays the flush and a crash or
+    // kill during streaming loses the user's changes (e.g. FRUC
+    // toggle reverts to the pre-session value on next launch).
+    settings.sync();
+    qInfo() << "[VIPLE-PREFS] save: sync complete, fps =" << fps
+            << "enableFrameInterpolation =" << enableFrameInterpolation;
 }
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444, bool fruc)

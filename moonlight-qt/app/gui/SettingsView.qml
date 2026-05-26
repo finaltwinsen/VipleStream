@@ -672,29 +672,45 @@ Flickable {
                             }
 
                             // VipleStream: if saved_fps isn't in the
-                            // restricted list (e.g. user previously set
-                            // 120 on a 60 Hz display, or 144 on a
-                            // 120 Hz display), fall back to the highest
-                            // supported value that's ≤ saved_fps. If
-                            // saved_fps is lower than any option, pick
-                            // the lowest. Also writes the preference
-                            // back so the next launch loads a valid
-                            // value directly.
+                            // display-reported list (e.g. user set
+                            // Custom 180 FPS on a 60 Hz panel), show
+                            // it inside the Custom entry instead of
+                            // clamping down.  The previous code
+                            // overwrote StreamingPreferences.fps with
+                            // the nearest lower rate, silently
+                            // destroying the user's choice every time
+                            // Settings was opened (§K.15 bug).
                             if (!found) {
-                                var bestIdx = 0
-                                var bestFps = parseInt(model.get(0).video_fps)
+                                // Update the Custom entry to reflect the
+                                // user's saved value so the dropdown
+                                // displays "Custom (180 FPS)" correctly.
+                                var customFound = false
                                 for (var k = 0; k < model.count; k++) {
-                                    var opt_fps = parseInt(model.get(k).video_fps)
-                                    // Prefer the largest value that doesn't
-                                    // exceed the user's saved choice; if
-                                    // none qualifies, keep the smallest.
-                                    if (opt_fps <= saved_fps && opt_fps >= bestFps) {
-                                        bestFps = opt_fps
-                                        bestIdx = k
+                                    if (fpsListModel.get(k).is_custom) {
+                                        fpsListModel.setProperty(k, "video_fps", ""+saved_fps)
+                                        fpsListModel.setProperty(k, "text", qsTr("Custom (%1 FPS)").arg(saved_fps))
+                                        currentIndex = k
+                                        customFound = true
+                                        break
                                     }
                                 }
-                                currentIndex = bestIdx
-                                StreamingPreferences.fps = bestFps
+                                // Fallback: if no Custom entry exists
+                                // (shouldn't happen), pick the closest
+                                // without overwriting the preference.
+                                if (!customFound) {
+                                    var bestIdx = 0
+                                    var bestFps = parseInt(model.get(0).video_fps)
+                                    for (var j = 0; j < model.count; j++) {
+                                        var opt_fps = parseInt(model.get(j).video_fps)
+                                        if (opt_fps <= saved_fps && opt_fps >= bestFps) {
+                                            bestFps = opt_fps
+                                            bestIdx = j
+                                        }
+                                    }
+                                    currentIndex = bestIdx
+                                    // DO NOT overwrite StreamingPreferences.fps —
+                                    // the user's saved value is intentional.
+                                }
                             }
 
                             recalculateWidth()
@@ -792,6 +808,9 @@ Flickable {
                     // (especially Generic) handles 240 fps + on the
                     // benchmark machine.  Settings UI follows suit.
                     onCheckedChanged: {
+                        console.log("[VIPLE-PREFS] FRUC checkbox onCheckedChanged:"
+                            + " checked=" + checked
+                            + " model=" + StreamingPreferences.enableFrameInterpolation)
                         // VipleStream: FRUC on/off changes the host-side
                         // encode fps (ON → fps/2) AND adds a source-
                         // quality headroom multiplier to the default
@@ -802,6 +821,9 @@ Flickable {
                         // Otherwise respect their pinned value — matches
                         // how YUV444 / resolution / fps toggles behave.
                         if (StreamingPreferences.enableFrameInterpolation != checked) {
+                            console.log("[VIPLE-PREFS] FRUC model updated: "
+                                + StreamingPreferences.enableFrameInterpolation
+                                + " → " + checked)
                             StreamingPreferences.enableFrameInterpolation = checked
                             if (StreamingPreferences.autoAdjustBitrate) {
                                 StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(

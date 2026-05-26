@@ -284,6 +284,37 @@ NvHTTP::getDisplayModeList(QString serverInfo)
     return modes;
 }
 
+// §MP-ADV 解析伺服器廣告的 <NetworkInterface> 元素。
+// 結構與 getDisplayModeList 完全相同：每遇到 <NetworkInterface>
+// 開頭就 append 新元素，後續子元素填入欄位。舊版伺服器不含此
+// 元素時回傳空 vector，客戶端 fallback 到既有 localAddress 等。
+QVector<NvNetworkInterface>
+NvHTTP::getNetworkInterfaceList(QString serverInfo)
+{
+    QXmlStreamReader xmlReader(serverInfo);
+    QVector<NvNetworkInterface> ifaces;
+
+    while (!xmlReader.atEnd()) {
+        while (xmlReader.readNextStartElement()) {
+            auto name = xmlReader.name();
+            if (name == QString("NetworkInterface")) {
+                ifaces.append(NvNetworkInterface());
+            }
+            else if (name == QString("Address") && !ifaces.isEmpty()) {
+                ifaces.last().address = xmlReader.readElementText();
+            }
+            else if (name == QString("Name") && !ifaces.isEmpty()) {
+                ifaces.last().name = xmlReader.readElementText();
+            }
+            else if (name == QString("Type") && !ifaces.isEmpty()) {
+                ifaces.last().type = xmlReader.readElementText();
+            }
+        }
+    }
+
+    return ifaces;
+}
+
 QVector<NvApp>
 NvHTTP::getAppList()
 {

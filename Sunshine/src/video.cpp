@@ -2193,6 +2193,18 @@ namespace video {
         }
       }
 
+      // VipleStream §K.14: 開機 IDR 重試。第一個 IDR frame 在 BBR
+      // slow-start 階段發送時 cwnd 可能不足，導致 client 端部分
+      // datagram 丟失而無法組裝完整 IDR。15 frame 後（30fps 下
+      // ≈500ms）cwnd 已充分爬升，自動送出第二個 IDR 確保 client
+      // 收到完整關鍵幀。配合 §K.14 的握手後 cwnd 重設使用。
+      constexpr int STARTUP_IDR_RETRY_FRAME = 16;
+      if (frame_nr == STARTUP_IDR_RETRY_FRAME) {
+        session->request_idr_frame();
+        last_idr_emit = std::chrono::steady_clock::now();
+        BOOST_LOG(info) << "[VIPLE-IDR] §K.14 startup IDR retry at frame " << frame_nr;
+      }
+
       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         return;
@@ -2448,6 +2460,13 @@ namespace video {
           if (ctx->idr_events->peek()) {
             pos->session->request_idr_frame();
             ctx->idr_events->pop();
+          }
+
+          // VipleStream §K.14: async 路徑的開機 IDR 重試（同 sync 路徑）。
+          constexpr int STARTUP_IDR_RETRY_FRAME_ASYNC = 16;
+          if (ctx->frame_nr == STARTUP_IDR_RETRY_FRAME_ASYNC) {
+            pos->session->request_idr_frame();
+            BOOST_LOG(info) << "[VIPLE-IDR] §K.14 startup IDR retry (async) at frame " << ctx->frame_nr;
           }
 
           if (frame_captured && pos->session->convert(*img)) {

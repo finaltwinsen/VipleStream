@@ -1,6 +1,10 @@
 #include "Limelight-internal.h"
 #include "HolePunch.h"  // VipleStream: for LocalControlPort (NAT-pinhole preservation)
 
+#ifdef VIPLE_MPQUIC
+#include "QuicTransport.h"
+#endif
+
 // This is a private header, but it just contains some time macros
 #include <enet/time.h>
 
@@ -1212,6 +1216,13 @@ static void controlReceiveThreadFunc(void* context) {
                         // assume the server died tragically, so go ahead and tear down.
                         PltUnlockMutex(&enetMutex);
                         Limelog("Disconnect event timeout expired\n");
+#ifdef VIPLE_MPQUIC
+                        if (quicIsFailoverActive()) {
+                            Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: ENet timeout during "
+                                    "QUIC failover — suppressing connectionTerminated\n");
+                            return;
+                        }
+#endif
                         ListenerCallbacks.connectionTerminated(-1);
                         return;
                     }
@@ -1413,6 +1424,17 @@ static void controlReceiveThreadFunc(void* context) {
             free(ctlHdr);
         }
         else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+#ifdef VIPLE_MPQUIC
+            // §Q-ENET-GRACE: 當 QUIC failover 正在進行中，ENet 斷線不立即
+            // 終止串流。QUIC 已將 video/audio 切到備援路徑，串流仍然活著。
+            // 控制輸入（滑鼠 / 鍵盤）暫時中斷，直到用戶重新串流。
+            if (quicIsFailoverActive()) {
+                Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: ENet disconnected during "
+                        "QUIC failover — suppressing connectionTerminated. "
+                        "Stream continues on backup path (control input lost)\n");
+                return;
+            }
+#endif
             Limelog("Control stream received unexpected disconnect event\n");
             ListenerCallbacks.connectionTerminated(-1);
             return;

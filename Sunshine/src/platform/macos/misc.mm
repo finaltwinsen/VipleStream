@@ -11,6 +11,7 @@
 // standard includes
 #include <fcntl.h>
 #include <ifaddrs.h>
+#include <net/if.h>  // IFF_UP, IFF_LOOPBACK for §MP-ADV enum_net_interfaces
 
 // platform includes
 #include <arpa/inet.h>
@@ -132,6 +133,57 @@ namespace platf {
     }
 
     return {port, std::string {data}};
+  }
+
+  /**
+   * @brief §MP-ADV 列舉本機所有可用網路介面（macOS 實作）。
+   * 使用 getifaddrs()，過濾 loopback / 虛擬介面 / link-local。
+   */
+  std::vector<advertised_interface> enum_net_interfaces() {
+    std::vector<advertised_interface> result;
+    auto ifa = get_ifaddrs();
+
+    for (auto pos = ifa.get(); pos != nullptr; pos = pos->ifa_next) {
+      if (!pos->ifa_addr) continue;
+      if (pos->ifa_addr->sa_family != AF_INET) continue;
+      if (!(pos->ifa_flags & IFF_UP)) continue;
+      if (pos->ifa_flags & IFF_LOOPBACK) continue;
+
+      std::string ifname(pos->ifa_name);
+
+      // 跳過 macOS 上的虛擬介面
+      if (ifname.find("bridge") != std::string::npos ||
+          ifname.find("vmnet") != std::string::npos ||
+          ifname.find("vboxnet") != std::string::npos) {
+        continue;
+      }
+
+      char addrStr[INET_ADDRSTRLEN] = {};
+      inet_ntop(AF_INET, &((sockaddr_in *)pos->ifa_addr)->sin_addr, addrStr, sizeof(addrStr));
+
+      if (strncmp(addrStr, "169.254.", 8) == 0) continue;
+
+      std::string type;
+      if (ifname.find("utun") == 0 || ifname.find("tun") == 0 ||
+          ifname.find("tap") == 0 || ifname.find("wg") == 0) {
+        type = "vpn";
+      } else if (ifname.find("en0") == 0) {
+        type = "wifi";  // macOS 上 en0 通常是 WiFi
+      } else if (ifname.find("en") == 0) {
+        type = "ethernet";
+      } else {
+        type = "other";
+      }
+
+      result.push_back({std::string(addrStr), ifname, type});
+    }
+
+    BOOST_LOG(info) << "[VIPLE-MPADV] Enumerated " << result.size() << " network interface(s) for advertisement";
+    for (const auto &iface : result) {
+      BOOST_LOG(info) << "[VIPLE-MPADV]   " << iface.name << " (" << iface.type << "): " << iface.address;
+    }
+
+    return result;
   }
 
   std::string get_mac_address(const std::string_view &address) {

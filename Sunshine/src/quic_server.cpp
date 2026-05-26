@@ -12,6 +12,7 @@
 #include <picoquic_utils.h>
 #include <filesystem>
 #include <iomanip>
+#include <string>
 
 // OpenSSL for ECDSA cert generation
 #include <openssl/ec.h>
@@ -29,13 +30,13 @@
 //  Workaround: create picoquic context with NULL cert/key, then manually
 //  load cert via ptls_load_certificates and key via minicrypto.)
 #include <picoquic_internal.h>
-#include <picoquic_set_textlog.h>
 #include <picotls.h>
 #include <picotls/minicrypto.h>
 
 #ifdef _WIN32
   #include <winsock2.h>
   #include <ws2tcpip.h>
+  #include <mswsock.h>   // LPFN_WSARECVMSG, WSAID_WSARECVMSG
   #pragma comment(lib, "ws2_32.lib")
 #else
   #include <sys/socket.h>
@@ -188,6 +189,68 @@ namespace quic_server {
     if (batch.empty() || !_cnx)
       return;
 
+    // §K.13 UAF guard 2026-05-26 — 對齊 PC 端 moonlight-qt §K.13 fix。
+    // drainPendingToQuic 在 server send-side thread 跑，跟 picoquic ioLoop
+    // 是 cross-thread。如果 cnx 已進 disconnecting/disconnected（client
+    // 突然斷線觸發 picoquic 內部 mass path-deletion），下面直接 access
+    // _cnx->path[i]->... 跟 picoquic 內部 cleanup race，可能命中 transient
+    // freed picoquic_path_t。client 端 v1.5.106 dmp 已實證在
+    // sender.c:826 picoquic_predict_packet_header_length 命中此 NULL deref。
+    // 在 drain 入口先 bail 一次，避免進入後續路徑 mutation 區。
+    if (picoquic_get_cnx_state(_cnx) >= picoquic_state_disconnecting) {
+      return;
+    }
+
+    // §K.11 DIAG: 監控 picoquic datagram queue 深度和 cwnd 狀態。
+    // v1.5.74 的 aggressive flush 在 slow-start 階段砍掉了 IDR
+    // frame 的 shards（cwnd ~14KB 只能送 ~10 shards，剩下的被
+    // 下一輪 flush 清掉），造成黑畫面。改為純診斷——不 drop。
+    {
+      int queueDepth = 0;
+      picoquic_misc_frame_header_t* dg = _cnx->first_datagram;
+      while (dg != NULL) {
+        queueDepth++;
+        dg = dg->next_misc_frame;
+      }
+      if (queueDepth > 0) {
+        _dgramPendingPeak = std::max(_dgramPendingPeak.load(), (uint64_t)queueDepth);
+      }
+      uint64_t cwnd = 0, inFlight = 0;
+      if (_cnx->nb_paths > 0 && _cnx->path[0] != nullptr) {
+        cwnd = _cnx->path[0]->cwin;
+        inFlight = _cnx->path[0]->bytes_in_transit;
+      }
+      // 每 500 筆 batch 印一次（約每秒），或 queue > 50 時每次印，
+      // 或 cwnd 低於 IDR frame × 2 警戒值（~200KB）時每次印
+      // §K.16: BBRMinPipeCwnd = 128，地板 ~185KB
+      static int diagCounter = 0;
+      bool cwndAlert = (cwnd > 0 && cwnd < 200000);
+      if (++diagCounter >= 500 || queueDepth > 50 || cwndAlert) {
+        diagCounter = 0;
+        // §K.12: 增加 BBR 狀態診斷——recovery / pto / loss 計數
+        uint64_t nbLosses = 0, nbRetransmit = 0, totalBytesLost = 0;
+        if (_cnx->nb_paths > 0 && _cnx->path[0] != nullptr) {
+          nbLosses = _cnx->path[0]->nb_losses_found;
+          nbRetransmit = _cnx->path[0]->nb_retransmit;
+          totalBytesLost = _cnx->path[0]->total_bytes_lost;
+        }
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.11 drain: pending=" << queueDepth
+                        << " batch=" << batch.size()
+                        << " cwnd=" << cwnd
+                        << " inFlight=" << inFlight
+                        << " headroom=" << (int64_t)(cwnd - inFlight)
+                        << " losses=" << nbLosses
+                        << " retx=" << nbRetransmit
+                        << " lostB=" << totalBytesLost;
+        if (cwndAlert) {
+          BOOST_LOG(warning) << "[VIPLE-MPQUIC] §K.16 cwnd LOW: " << cwnd
+                             << " (floor=" << (48 * (_cnx->nb_paths > 0 && _cnx->path[0]
+                                ? _cnx->path[0]->send_mtu : 1500))
+                             << ") pending=" << queueDepth;
+        }
+      }
+    }
+
     // 取得當前活躍路徑快照（供排程器使用）
     std::vector<uint64_t> paths;
     {
@@ -203,56 +266,41 @@ namespace quic_server {
         continue;
       }
 
-      // 多路徑排程：設定 path_status 後送出 datagram
-      if (pathCount > 1) {
-        switch (dg.scheduler) {
-        case SCHED_REDUNDANT: {
-          int preferred = (_redundantRR++) % pathCount;
-          for (int i = 0; i < pathCount; i++) {
-            picoquic_set_path_status(_cnx, paths[i],
-                (i == preferred) ? picoquic_path_status_available
-                                 : picoquic_path_status_backup);
-          }
-          break;
-        }
-        case SCHED_AGGREGATE: {
-          for (uint64_t p : paths) {
-            picoquic_set_path_status(_cnx, p, picoquic_path_status_available);
-          }
-          break;
-        }
-        case SCHED_MIN_RTT:
-        case SCHED_ECF: {
-          int bestIdx = 0;
-          float bestMetric = 1e9f;
-          for (int i = 0; i < pathCount; i++) {
-            picoquic_path_quality_t pq{};
-            if (picoquic_get_path_quality(_cnx, paths[i], &pq) != 0)
-              continue;
-            float rttMs = (float)pq.rtt / 1000.0f;
-            float metric;
-            if (dg.scheduler == SCHED_ECF) {
-              float tput = (float)((double)pq.pacing_rate * 8.0 / 1e6);
-              if (tput < 0.001f) tput = 0.001f;
-              float transferSec = ((float)dg.data.size() * 8.0f) / (tput * 1e6f);
-              metric = transferSec + (rttMs / 2000.0f);
-            } else {
-              metric = rttMs;
-            }
-            if (metric < bestMetric) {
-              bestMetric = metric;
-              bestIdx = i;
+      // §MP-PRIMARY 2026-05-24: 不再 per-datagram 切換 path_status。
+      // picoquic_set_path_status 是長期路徑管理 API，不是 per-packet
+      // 路由提示。每次送 datagram 都遍歷路徑切換狀態會導致：
+      //   (a) ACK 路由混亂（per-path PN space 下 path 0 ACK 被延遲）
+      //   (b) video IDR frame 封包分散到不同 RTT 路徑
+      //   (c) depacketizer 因時序差異組裝失敗 → 畫面靜止
+      // Primary-path 模式：handshake 路徑 = available，其餘 = backup。
+      // picoquic 自動把所有 datagram 送到唯一 available 路徑。
+      // 應用層排程（ECF / AGGREGATE / REDUNDANT）待 Phase 5
+      // 實作 FEC + jitter buffer 後再啟用。
+      (void)pathCount;
+
+      // §MP-PRIMARY-GUARD: 防止 picoquic 自動升級 backup 路徑。
+      // picoquic 的 path_is_backup_locked 機制阻止 auto-promotion
+      // （paths.c），這裡做二次確認。
+      //
+      // §Q-MP-FAILBACK: 但需要尊重 client 透過 PATH_STATUS frame
+      // 明確升級的路徑（failover 時 client 會送 PATH_STATUS(available)
+      // → picoquic 更新 path_is_backup=0, locked=0）。只 re-lock
+      // picoquic auto-promoted 的路徑（backup=0 但 locked=1 是不一致
+      // 狀態，表示 auto-promotion），不動 client 明確升級的路徑
+      // （backup=0 AND locked=0）。
+      for (int i = 1; i < _cnx->nb_paths; i++) {
+        if (_cnx->path[i] != nullptr && !_cnx->path[i]->path_is_backup) {
+          if (_cnx->path[i]->path_is_backup_locked) {
+            // 不一致：locked=1 but backup=0 → auto-promotion，壓回
+            _cnx->path[i]->path_is_backup = 1;
+            static int guardCount = 0;
+            if (guardCount++ < 5) {
+              BOOST_LOG(warning) << "[VIPLE-MPQUIC] §MP-PRIMARY-GUARD: path["
+                                 << i << "] auto-promoted, re-locked as backup";
             }
           }
-          for (int i = 0; i < pathCount; i++) {
-            picoquic_set_path_status(_cnx, paths[i],
-                (i == bestIdx) ? picoquic_path_status_available
-                               : picoquic_path_status_backup);
-          }
-          break;
-        }
-        default:
-          break;
+          // else: backup=0 AND locked=0 → client 透過 PATH_STATUS
+          // 明確升級（failover），尊重不動
         }
       }
 
@@ -492,29 +540,15 @@ namespace quic_server {
     // accepts incoming Initial packets instead of replying SERVER_BUSY.
     picoquic_enforce_client_only(_quic, 0);
 
-    // ── picoquic 內建文字日誌 ──
-    // 寫出完整 TLS handshake 追蹤（含 ptls_handshake 回傳值、
-    // CRYPTO frame 內容）到 server 端指定路徑，用來定位
-    // ServerHello 為何不產生。
-    {
-      std::string textlogPath = (configDir / "quic_textlog.txt").string();
-      int logRet = picoquic_set_textlog(_quic, textlogPath.c_str());
-      if (logRet == 0) {
-        BOOST_LOG(info) << "[VIPLE-MPQUIC] picoquic textlog enabled: "
-                        << textlogPath;
-      } else {
-        BOOST_LOG(warning) << "[VIPLE-MPQUIC] picoquic_set_textlog failed: "
-                           << logRet;
-      }
-      picoquic_set_log_level(_quic, 1);  // 基本 TLS 追蹤
-    }
-
     // Enable DATAGRAM by advertising a non-zero max_datagram_frame_size
     // transport parameter (picoquic has no separate "enable datagram"
     // option — it's purely TP-driven). Multipath enabled globally.
     picoquic_set_default_tp_value(_quic,
         picoquic_tp_max_datagram_frame_size, 65535);
     picoquic_set_default_multipath_option(_quic, 1);
+    // §Q-MP-FIX 2026-05-24: 必須啟用 path callbacks，否則
+    // path_available / path_suspended / path_deleted 不會觸發。
+    picoquic_enable_path_callbacks_default(_quic, 1);
 
     // §K.7 修正：開啟 PMTU 探測 (basic, opportunistic) 並提高 max MTU
     // 上限至 1500，讓 picoquic 在 LAN 環境下探測到完整 Ethernet MTU。
@@ -622,6 +656,18 @@ namespace quic_server {
     setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY,
                (const char *)&v6only, sizeof(v6only));
 
+    // §Q-MP-PKTINFO: 啟用 PKTINFO 讓 WSARecvMsg 回報封包到達的
+    // 實際本地地址。沒有這個，addr_to 永遠是 in6addr_any，
+    // picoquic 無法區分不同本地介面的 PATH_CHALLENGE，multipath
+    // 的 path validation 會完全失敗。
+    {
+      int yes = 1;
+      setsockopt(sock, IPPROTO_IPV6, IPV6_PKTINFO,
+                 (const char *)&yes, sizeof(yes));
+      setsockopt(sock, IPPROTO_IP, IP_PKTINFO,
+                 (const char *)&yes, sizeof(yes));
+    }
+
     if (bind(sock, (struct sockaddr *)&listenAddr,
              sizeof(listenAddr)) != 0) {
       BOOST_LOG(error) << "[VIPLE-MPQUIC] Failed to bind server socket on port "
@@ -630,8 +676,25 @@ namespace quic_server {
       return;
     }
 
+#ifdef _WIN32
+    // §Q-MP-PKTINFO: 動態載入 WSARecvMsg（Windows 要求透過
+    // WSAIoctl 取得函式指標，無法直接呼叫）。
+    LPFN_WSARECVMSG WSARecvMsgFn = nullptr;
+    {
+      GUID wsaRecvMsgGuid = WSAID_WSARECVMSG;
+      DWORD dwBytesReturned = 0;
+      WSAIoctl(sock, SIO_GET_EXTENSION_FUNCTION_POINTER,
+               &wsaRecvMsgGuid, sizeof(wsaRecvMsgGuid),
+               &WSARecvMsgFn, sizeof(WSARecvMsgFn),
+               &dwBytesReturned, nullptr, nullptr);
+      if (!WSARecvMsgFn) {
+        BOOST_LOG(warning) << "[VIPLE-MPQUIC] WSARecvMsg not available; "
+                           << "multipath PATH_CHALLENGE will use fallback addr_to";
+      }
+    }
+#endif
+
     uint64_t totalRecv = 0, totalSent = 0;
-    bool loggedFirstPacket = false;
     uint64_t loopIter = 0;
     auto loopStart = std::chrono::steady_clock::now();
     BOOST_LOG(info) << "[VIPLE-MPQUIC] ioLoop started, _running=" << _running.load();
@@ -651,25 +714,86 @@ namespace quic_server {
 
       int selRet = select((int)(sock + 1), &readSet, nullptr, nullptr, &tv);
       if (selRet > 0) {
-        int recvLen = recvfrom(sock, (char *)recvBuf, sizeof(recvBuf), 0,
-                               (struct sockaddr *)&peerAddr, &peerLen);
+        // §Q-MP-PKTINFO: 用 WSARecvMsg 取得封包到達的實際本地
+        // 地址，讓 picoquic 正確辨識 multipath PATH_CHALLENGE。
+        int recvLen = 0;
+        struct sockaddr_storage localDest{};
+        int recvIfIndex = 0;
+
+#ifdef _WIN32
+        if (WSARecvMsgFn) {
+          WSABUF dataBuf;
+          dataBuf.buf = (char *)recvBuf;
+          dataBuf.len = sizeof(recvBuf);
+
+          char controlBuf[256];
+          WSAMSG wsaMsg{};
+          wsaMsg.name = (LPSOCKADDR)&peerAddr;
+          wsaMsg.namelen = (INT)sizeof(peerAddr);
+          wsaMsg.lpBuffers = &dataBuf;
+          wsaMsg.dwBufferCount = 1;
+          wsaMsg.Control.buf = controlBuf;
+          wsaMsg.Control.len = sizeof(controlBuf);
+          wsaMsg.dwFlags = 0;
+
+          DWORD bytesRecv = 0;
+          int wsaRet = WSARecvMsgFn(sock, &wsaMsg, &bytesRecv,
+                                     nullptr, nullptr);
+          if (wsaRet == 0 && bytesRecv > 0) {
+            recvLen = (int)bytesRecv;
+            peerLen = wsaMsg.namelen;
+
+            // 從 control message 提取到達地址
+            for (WSACMSGHDR *cmsg = WSA_CMSG_FIRSTHDR(&wsaMsg);
+                 cmsg != nullptr;
+                 cmsg = WSA_CMSG_NXTHDR(&wsaMsg, cmsg)) {
+              if (cmsg->cmsg_level == IPPROTO_IPV6 &&
+                  cmsg->cmsg_type == IPV6_PKTINFO) {
+                auto *info = (struct in6_pktinfo *)WSA_CMSG_DATA(cmsg);
+                auto *sa6 = (struct sockaddr_in6 *)&localDest;
+                sa6->sin6_family = AF_INET6;
+                sa6->sin6_addr = info->ipi6_addr;
+                sa6->sin6_port = htons(_port);
+                recvIfIndex = (int)info->ipi6_ifindex;
+                break;
+              }
+              if (cmsg->cmsg_level == IPPROTO_IP &&
+                  cmsg->cmsg_type == IP_PKTINFO) {
+                auto *info = (struct in_pktinfo *)WSA_CMSG_DATA(cmsg);
+                // 收到 IPv4 封包 → 轉成 IPv4-mapped IPv6 以匹配
+                // 我們的 AF_INET6 dual-stack 語意
+                auto *sa6 = (struct sockaddr_in6 *)&localDest;
+                memset(sa6, 0, sizeof(*sa6));
+                sa6->sin6_family = AF_INET6;
+                sa6->sin6_port = htons(_port);
+                // ::ffff:a.b.c.d
+                sa6->sin6_addr.s6_addr[10] = 0xFF;
+                sa6->sin6_addr.s6_addr[11] = 0xFF;
+                memcpy(&sa6->sin6_addr.s6_addr[12],
+                       &info->ipi_addr, 4);
+                recvIfIndex = (int)info->ipi_ifindex;
+                break;
+              }
+            }
+          }
+        } else
+#endif
+        {
+          // fallback: WSARecvMsg 不可用時用 recvfrom（addr_to
+          // 退回 listenAddr，multipath 會失敗但單路正常）
+          recvLen = recvfrom(sock, (char *)recvBuf, sizeof(recvBuf), 0,
+                             (struct sockaddr *)&peerAddr, &peerLen);
+          memcpy(&localDest, &listenAddr, sizeof(listenAddr));
+        }
+
         if (recvLen > 0) {
           totalRecv++;
-          if (!loggedFirstPacket) {
-            char peerStr[INET6_ADDRSTRLEN] = {};
-            if (peerAddr.ss_family == AF_INET)
-              inet_ntop(AF_INET, &((struct sockaddr_in*)&peerAddr)->sin_addr, peerStr, sizeof(peerStr));
-            else
-              inet_ntop(AF_INET6, &((struct sockaddr_in6*)&peerAddr)->sin6_addr, peerStr, sizeof(peerStr));
-            BOOST_LOG(info) << "[VIPLE-MPQUIC] First packet from " << peerStr
-                            << " len=" << recvLen;
-            loggedFirstPacket = true;
-          }
+
           int pktRet = picoquic_incoming_packet(
               _quic, recvBuf, (size_t)recvLen,
               (struct sockaddr *)&peerAddr,
-              (struct sockaddr *)&listenAddr,
-              0, 0, currentTime);
+              (struct sockaddr *)&localDest,
+              recvIfIndex, 0, currentTime);
           if (pktRet != 0) {
             BOOST_LOG(error) << "[VIPLE-MPQUIC] picoquic_incoming_packet failed: "
                              << pktRet;
@@ -698,6 +822,7 @@ namespace quic_server {
       // picoquic_prepare_next_packet takes the QUIC context (not a cnx)
       // and walks the wake queue internally, returning the cnx it sent
       // for via p_last_cnx.
+      int pktsSentThisCycle = 0;
       while (true) {
         struct sockaddr_storage destAddr{};
         struct sockaddr_storage fromAddr{};
@@ -743,6 +868,7 @@ namespace quic_server {
                (struct sockaddr *)&actualDest, destLen);
         if (sendResult > 0) {
           totalSent++;
+          pktsSentThisCycle++;
           if (totalSent <= 3) {
             BOOST_LOG(info) << "[VIPLE-MPQUIC] Sent pkt #" << totalSent
                             << " len=" << sendLen;
@@ -765,6 +891,7 @@ namespace quic_server {
           BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.7 session=" << addr
                           << " dgramPushed=" << session->_dgramPushed.load()
                           << " dgramQueued=" << session->_dgramQueued.load()
+                          << " pendingPeak=" << session->_dgramPendingPeak.load()
                           << " ready=" << session->isReady();
         }
       }
@@ -815,6 +942,20 @@ namespace quic_server {
         cnx->path[0]->send_mtu = 1500;
         BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.8 path[0] send_mtu boosted: "
                         << oldMtu << " → 1500";
+
+        // VipleStream §K.14: 重設 BBR cwnd 和 lower bounds。
+        // 握手期間 CRYPTO frame 遺失（LAN 上常見 RACK 假陽性）
+        // 會使 BBR 的 cwnd 從初始 15360 崩塌到 ~5891。
+        // 第一個 video IDR frame 需要 ~50KB (36 datagrams)，
+        // cwnd 不足會造成大部分 datagram 無法送出。
+        // 在此重設讓 BBR slow-start 從乾淨狀態重新爬升。
+        uint64_t oldCwnd = cnx->path[0]->cwin;
+        if (cnx->congestion_alg == picoquic_bbr_algorithm) {
+          picoquic_bbr_reset_after_handshake(cnx);
+          BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.14 BBR reset after handshake: cwnd "
+                          << oldCwnd << " → " << cnx->path[0]->cwin
+                          << " (inflight_lo/bw_lo → UINT64_MAX)";
+        }
       }
 
       auto session = std::make_shared<QuicSession>(cnx);
@@ -857,9 +998,12 @@ namespace quic_server {
     }
 
     case picoquic_callback_path_available: {
-      // A new multipath path was probed and validated. picoquic passes
-      // the unique_path_id in stream_id for path events (per picoquic.h
-      // §"path event callbacks"). Track it in the session's path set.
+      // §MP-PRIMARY 2026-05-24: 新路徑驗證通過後追蹤但維持 backup。
+      // 只有 handshake 路徑（path 0）是 available。non-primary 路徑
+      // 不參與 datagram 排程，僅供 failover 使用。如果不設 backup，
+      // picoquic 預設把驗證通過的路徑視為 available，scheduler 會
+      // 把 video datagram 分散到多條 RTT 不同的路徑，depacketizer
+      // 因時序差異而組裝失敗 → 畫面靜止。
       auto session = findSession(cnx);
       if (session) {
         std::lock_guard<std::mutex> lock(session->_pathMutex);
@@ -869,7 +1013,9 @@ namespace quic_server {
           session->_activePaths.push_back(stream_id);
         }
       }
-      BOOST_LOG(info) << "[VIPLE-MPQUIC] Path available: id=" << stream_id;
+      picoquic_set_path_status(cnx, stream_id, picoquic_path_status_backup);
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] Path available: id=" << stream_id
+                      << " (set to backup, failover-ready)";
       break;
     }
 
@@ -1008,7 +1154,9 @@ namespace quic_server {
       }
       session->_prevStatsTime = now;
 
-      BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.10 " << addr << " | " << flowLine;
+      uint64_t peak = session->_dgramPendingPeak.load();
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.10 " << addr << " | " << flowLine
+                      << " | pendingPeak=" << peak;
 
       // Per-path 品質明細
       auto stats = session->getStats();

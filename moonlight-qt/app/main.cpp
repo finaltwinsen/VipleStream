@@ -19,7 +19,10 @@
 
 #ifdef Q_OS_UNIX
 #include <sys/socket.h>
+#include <sys/file.h>
 #include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
 #endif
 
 // Don't let SDL hook our main function, since Qt is already
@@ -430,6 +433,75 @@ void configureSignalHandlers()
 int main(int argc, char *argv[])
 {
     SDL_SetMainReady();
+
+    // ── §SINGLE-INST: 單一實例守門 ─────────────────────────
+    // 防止同時開啟多個 VipleStream client 實例。多重實例會搶
+    // QUIC port、搶 server session、log 混在一起，造成難以診
+    // 斷的問題（v1.5.39 實測踩到三個實例同時連線）。
+    //
+    // --help / --version 不需要串流，不受此限。
+    // CLI 模式（帶 stream/pair/list/quit 動詞）→ stderr 提示；
+    // GUI 模式（無動詞、雙擊啟動）→ MessageBox 提示。
+    {
+        // 快速掃描 argv，判斷是否為純資訊查詢 + 是否為 CLI 模式
+        bool isInfoOnly = false;
+        bool isCliMode = false;
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0 ||
+                strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
+                isInfoOnly = true;
+            }
+            if (strcmp(argv[i], "stream") == 0 || strcmp(argv[i], "pair") == 0 ||
+                strcmp(argv[i], "list") == 0 || strcmp(argv[i], "quit") == 0) {
+                isCliMode = true;
+            }
+        }
+        if (!isInfoOnly) {
+#if defined(Q_OS_WIN32)
+            HANDLE hMutex = CreateMutexW(NULL, FALSE, L"VipleStream_SingleInstance_Mutex");
+            if (hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
+                if (isCliMode) {
+                    // CLI 模式：attach 到父 console 輸出錯誤訊息
+                    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+                        FILE* fp;
+                        freopen_s(&fp, "CONOUT$", "w", stderr);
+                    }
+                    fprintf(stderr,
+                        "Error: VipleStream is already running.\n"
+                        "Close the existing instance before starting a new session.\n"
+                        "  (If you can't find the window, terminate VipleStream.exe in Task Manager)\n");
+                } else {
+                    // GUI 模式：彈出 MessageBox
+                    MessageBoxA(NULL,
+                        "VipleStream is already running.\n\n"
+                        "Please close the existing window before starting a new one.\n"
+                        "(If you can't find the window, terminate VipleStream.exe in Task Manager)",
+                        "VipleStream - Already Running",
+                        MB_OK | MB_ICONWARNING);
+                }
+                if (hMutex) CloseHandle(hMutex);
+                return 1;
+            }
+            // hMutex 故意不 CloseHandle — 保持到 process 結束時
+            // 自動釋放，確保整個生命週期內其他實例都會被擋。
+#elif defined(Q_OS_UNIX)
+            const char* lockPath = "/tmp/viplestream-client.lock";
+            int lockFd = open(lockPath, O_CREAT | O_RDWR, 0600);
+            if (lockFd >= 0) {
+                if (flock(lockFd, LOCK_EX | LOCK_NB) != 0) {
+                    fprintf(stderr,
+                        "Error: VipleStream is already running.\n"
+                        "Close the existing instance before starting a new session.\n"
+                        "  pkill -f VipleStream\n");
+                    close(lockFd);
+                    return 1;
+                }
+                // lockFd 故意不 close — 保持到 process 結束，
+                // flock 會自動在 fd 關閉時釋放。
+            }
+#endif
+        }
+    }
 
     // Set the app version for the QCommandLineParser's showVersion() command
     QCoreApplication::setApplicationVersion(VERSION_STR);

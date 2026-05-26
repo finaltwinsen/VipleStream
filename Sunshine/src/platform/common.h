@@ -591,6 +591,18 @@ namespace platf {
 
   std::string get_mac_address(const std::string_view &address);
 
+  /**
+   * @brief §MP-ADV 伺服器介面廣告 — 列舉本機所有可用網路介面。
+   * 回傳的清單會透過 /serverinfo XML 廣告給客戶端，供 MP-QUIC
+   * 多路徑探測使用。過濾 loopback、虛擬介面（Hyper-V、VMware、Docker）等。
+   */
+  struct advertised_interface {
+    std::string address;  // IPv4 字串，如 "192.168.51.226"
+    std::string name;     // 介面名稱，如 "Ethernet", "Tailscale"
+    std::string type;     // "ethernet", "wifi", "vpn"
+  };
+  std::vector<advertised_interface> enum_net_interfaces();
+
   std::string from_sockaddr(const sockaddr *const);
   std::pair<std::uint16_t, std::string> from_sockaddr_ex(const sockaddr *const);
 

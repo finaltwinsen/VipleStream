@@ -106,6 +106,8 @@ namespace quic_server {
     // §K.7 diag: datagram queue/send 計數器
     std::atomic<uint64_t> _dgramQueued{0};
     std::atomic<uint64_t> _dgramPushed{0};
+    std::atomic<uint64_t> _dgramDroppedStale{0};
+    std::atomic<uint64_t> _dgramPendingPeak{0};
 
     // §K.10 diag: per-flow 計數器 (index = flowType: 0=unused, 1=video, 2=audio, 3=control)
     std::atomic<uint64_t> _dgramQueuedByFlow[4]{};

@@ -965,6 +965,21 @@ namespace nvhttp {
       }
     }
 
+    // VipleStream §MP-ADV — 廣告伺服器所有可用介面 IP，供客戶端
+    // MP-QUIC 多路徑探測。客戶端會從中篩選可達的 IP，為每個可達
+    // 的 client-NIC × server-IP 組合建立 QUIC path。舊客戶端的
+    // XML parser 會忽略未知元素，不影響相容性。
+    if (config::stream.mpquic_enabled) {
+      auto net_ifaces = platf::enum_net_interfaces();
+      for (const auto &iface : net_ifaces) {
+        pt::ptree node;
+        node.put("Address", iface.address);
+        node.put("Name", iface.name);
+        node.put("Type", iface.type);
+        tree.add_child("root.NetworkInterface", node);
+      }
+    }
+
     std::ostringstream data;
 
     pt::write_xml(data, tree);

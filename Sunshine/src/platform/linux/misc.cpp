@@ -19,6 +19,7 @@
 #include <dlfcn.h>
 #include <gio/gio.h>  // For RTKit
 #include <ifaddrs.h>
+#include <net/if.h>  // IFF_UP, IFF_LOOPBACK for §MP-ADV enum_net_interfaces
 #include <netinet/in.h>
 #include <netinet/udp.h>
 #include <pwd.h>
@@ -232,6 +233,60 @@ namespace platf {
     }
 
     return {port, std::string {data}};
+  }
+
+  /**
+   * @brief §MP-ADV 列舉本機所有可用網路介面（Linux 實作）。
+   * 使用 getifaddrs()，過濾 loopback / 虛擬介面 / link-local。
+   */
+  std::vector<advertised_interface> enum_net_interfaces() {
+    std::vector<advertised_interface> result;
+    auto ifa = get_ifaddrs();
+
+    for (auto pos = ifa.get(); pos != nullptr; pos = pos->ifa_next) {
+      if (!pos->ifa_addr) continue;
+      if (pos->ifa_addr->sa_family != AF_INET) continue;  // 只收 IPv4
+      if (!(pos->ifa_flags & IFF_UP)) continue;
+      if (pos->ifa_flags & IFF_LOOPBACK) continue;
+
+      std::string ifname(pos->ifa_name);
+
+      // 跳過虛擬介面
+      if (ifname.find("docker") != std::string::npos ||
+          ifname.find("br-") != std::string::npos ||
+          ifname.find("veth") != std::string::npos ||
+          ifname.find("virbr") != std::string::npos) {
+        continue;
+      }
+
+      char addrStr[INET_ADDRSTRLEN] = {};
+      inet_ntop(AF_INET, &((sockaddr_in *)pos->ifa_addr)->sin_addr, addrStr, sizeof(addrStr));
+
+      // 跳過 link-local
+      if (strncmp(addrStr, "169.254.", 8) == 0) continue;
+
+      // 分類介面
+      std::string type;
+      if (ifname.find("tun") == 0 || ifname.find("tap") == 0 ||
+          ifname.find("wg") == 0 || ifname.find("tailscale") == 0) {
+        type = "vpn";
+      } else if (ifname.find("wl") == 0) {
+        type = "wifi";
+      } else if (ifname.find("eth") == 0 || ifname.find("en") == 0) {
+        type = "ethernet";
+      } else {
+        type = "other";
+      }
+
+      result.push_back({std::string(addrStr), ifname, type});
+    }
+
+    BOOST_LOG(info) << "[VIPLE-MPADV] Enumerated " << result.size() << " network interface(s) for advertisement";
+    for (const auto &iface : result) {
+      BOOST_LOG(info) << "[VIPLE-MPADV]   " << iface.name << " (" << iface.type << "): " << iface.address;
+    }
+
+    return result;
   }
 
   std::string get_mac_address(const std::string_view &address) {

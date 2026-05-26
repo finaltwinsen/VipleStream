@@ -1,4 +1,5 @@
 #include "session.h"
+#include "backend/nvcomputer.h"
 #include "backend/identitymanager.h"
 #include "backend/relaylookup.h"
 #include "backend/relaytcptunnel.h"
@@ -779,6 +780,13 @@ bool Session::initialize(QQuickWindow* qtWindow)
     LiInitializeVideoCallbacks(&m_VideoCallbacks);
     m_VideoCallbacks.setup = drSetup;
 
+    // §K.15: checkpoint-save preferences before streaming starts.
+    // If the app crashes during streaming, QSettings' lazy flush may
+    // lose the user's last Settings-page changes (fps, FRUC toggle,
+    // etc.).  Saving here guarantees the registry reflects the values
+    // we are about to use for this session.
+    m_Preferences->save();
+
     m_StreamConfig.fps = m_Preferences->fps;
     m_OriginalFps = m_Preferences->fps;
 
@@ -802,6 +810,11 @@ bool Session::initialize(QQuickWindow* qtWindow)
     // VipleStream v1.4.153 §R2-γ-3: 主動 / 被動 兩條 server fps 路徑.
     //   主動 (default): server fps = UI / ratio, always-on dual/triple present.
     //   被動: server fps = UI (全推), client 端依 recv% 動態升 ratio.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-PREFS] session FRUC gate: enableFrameInterpolation=%d "
+                "(prefs ptr=%p)",
+                (int)m_Preferences->enableFrameInterpolation,
+                (void*)m_Preferences);
     if (m_Preferences->enableFrameInterpolation) {
         const bool passive = m_Preferences && m_Preferences->vkfrucPassiveMode;
         if (passive) {
@@ -2276,9 +2289,55 @@ bool Session::startConnectionAsync()
         m_StreamConfig.quicPort = 48010;
         m_StreamConfig.quicScheduler = m_Preferences->mpQuicScheduler;
         m_StreamConfig.quicCongestion = 1; // BBR default, optimal for streaming
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-MPQUIC] Enabled (scheduler=%d, port=%d, cc=BBR)",
-                    m_StreamConfig.quicScheduler, m_StreamConfig.quicPort);
+
+        // §MP-ADV: 收集 server 的所有已知 IP 作為 alt peer。
+        // 優先使用伺服器透過 /serverinfo 廣告的介面（最權威來源），
+        // 再 fallback 到客戶端自己探測到的位址（向後相容舊版伺服器）。
+        {
+            QString activeAddr = m_Computer->activeAddress.address();
+            m_StreamConfig.quicAltPeerCount = 0;
+
+            auto tryAdd = [&](const QString& ip) {
+                if (ip.isEmpty()) return;
+                if (ip == activeAddr) return;  // 跳過當前使用的位址
+                // 去重：檢查是否已加入
+                for (int i = 0; i < m_StreamConfig.quicAltPeerCount; i++) {
+                    if (ip == QString::fromUtf8(m_StreamConfig.quicAltPeers[i])) return;
+                }
+                if (m_StreamConfig.quicAltPeerCount >= QUIC_MAX_ALT_PEERS) return;
+                QByteArray utf8 = ip.toUtf8();
+                if (utf8.size() >= QUIC_ALT_PEER_LEN) return;
+                memcpy(m_StreamConfig.quicAltPeers[m_StreamConfig.quicAltPeerCount],
+                       utf8.constData(), utf8.size() + 1);
+                m_StreamConfig.quicAltPeerCount++;
+            };
+
+            auto tryAddAddr = [&](const NvAddress& addr) {
+                if (addr.isNull()) return;
+                tryAdd(addr.address());
+            };
+
+            // 第一優先：伺服器廣告的介面（/serverinfo 的 NetworkInterface）
+            for (const auto& iface : std::as_const(m_Computer->serverAdvertisedInterfaces)) {
+                tryAdd(iface.address);
+            }
+
+            // 第二優先：客戶端探測到的位址（向後相容無 §MP-ADV 的舊版伺服器）
+            tryAddAddr(m_Computer->localAddress);
+            tryAddAddr(m_Computer->remoteAddress);
+            tryAddAddr(m_Computer->manualAddress);
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-MPQUIC] Enabled (scheduler=%d, port=%d, cc=BBR, altPeers=%d, serverAdvertised=%d)",
+                        m_StreamConfig.quicScheduler, m_StreamConfig.quicPort,
+                        m_StreamConfig.quicAltPeerCount,
+                        m_Computer->serverAdvertisedInterfaces.size());
+            for (int i = 0; i < m_StreamConfig.quicAltPeerCount; i++) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-MPQUIC]   altPeer[%d]: %s",
+                            i, m_StreamConfig.quicAltPeers[i]);
+            }
+        }
     }
 #endif
 

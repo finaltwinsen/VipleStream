@@ -109,6 +109,15 @@ typedef struct _STREAM_CONFIGURATION {
     int quicPort;
     int quicScheduler;
     int quicCongestion; // QUIC_CC_NEWRENO=0, QUIC_CC_BBR=1, QUIC_CC_CUBIC=2
+
+    // Alt peer addresses for multipath — server 的所有可用 IP。
+    // §MP-ADV: 由 Qt 層優先從伺服器廣告的 NetworkInterface 填入，
+    // 再 fallback 到 NvComputer 的 localAddress / remoteAddress 等。
+    // 從 4 擴大到 8，因為伺服器可能有多張介面（LAN×2 + WiFi + Tailscale + WireGuard 等）。
+    #define QUIC_MAX_ALT_PEERS 8
+    #define QUIC_ALT_PEER_LEN  64
+    char quicAltPeers[QUIC_MAX_ALT_PEERS][QUIC_ALT_PEER_LEN];
+    int quicAltPeerCount;
 #endif
 } STREAM_CONFIGURATION, *PSTREAM_CONFIGURATION;
 
