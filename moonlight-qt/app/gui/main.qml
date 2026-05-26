@@ -459,6 +459,7 @@ ApplicationWindow {
 
             NavigableToolButton {
                 property string browserUrl: ""
+                property string newVersion: ""
 
                 id: updateButton
 
@@ -472,15 +473,18 @@ ApplicationWindow {
                 // an update is available
                 visible: false
 
+                // VipleStream Phase B — 點擊不再只是開 browser，改成觸發
+                // updateDialog 跑 download → swap-via-helper → relaunch 的
+                // 完整流程。Updater backend 處理檔案鎖 / UAC / AppImage
+                // mv-and-restart 三條 platform-specific path。
                 onClicked: {
-                    if (SystemProperties.hasBrowser) {
-                        Qt.openUrlExternally(browserUrl);
-                    }
+                    updateDialog.openForVersion(newVersion, browserUrl)
                 }
 
                 function updateAvailable(version, url)
                 {
                     ToolTip.text = qsTr("Update available for VipleStream: Version %1").arg(version)
+                    updateButton.newVersion = version
                     updateButton.browserUrl = url
                     updateButton.visible = true
                 }
@@ -517,7 +521,9 @@ ApplicationWindow {
                 }
 
                 // TODO need to make sure browser is brought to foreground.
-                onClicked: Qt.openUrlExternally("https://github.com/moonlight-stream/moonlight-docs/wiki/Setup-Guide");
+                // VipleStream rebrand: 與 Android 端 HelpLauncher.launchSetupGuide
+                // 對齊，導向 fork 的 README；upstream moonlight-docs/wiki 已不適用。
+                onClicked: Qt.openUrlExternally("https://github.com/finaltwinsen/VipleStream#readme");
 
                 Keys.onDownPressed: {
                     stackView.currentItem.forceActiveFocus(Qt.TabFocus)
@@ -590,6 +596,10 @@ ApplicationWindow {
         onAccepted: {
             Qt.openUrlExternally("https://github.com/moonlight-stream/moonlight-qt/releases");
         }
+    }
+
+    UpdateDialog {
+        id: updateDialog
     }
 
     ErrorMessageDialog {
