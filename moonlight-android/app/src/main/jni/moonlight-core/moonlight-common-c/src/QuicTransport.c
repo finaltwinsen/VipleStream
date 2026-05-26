@@ -525,6 +525,13 @@ void quicDisconnect(void) {
     g_ctx.subflowCount = 0;
 
     if (g_ctx.quic) {
+        // §5f: save 0-RTT session tickets before freeing context
+        if (s_ticketStorePath[0]) {
+            int saveRet = picoquic_save_session_tickets(g_ctx.quic, s_ticketStorePath);
+            Limelog("[VIPLE-MPQUIC] §5f ticket save: %s (ret=%d)\n",
+                    saveRet == 0 ? "OK" : "FAILED", saveRet);
+        }
+
         picoquic_free(g_ctx.quic);
         g_ctx.quic = NULL;
     }
@@ -1488,16 +1495,10 @@ int quicIsFailoverActive(void) {
 // ── Session ticket (0-RTT) ──────────────────────────────────
 
 int quicGetSessionTicket(unsigned char* buf, int bufLen) {
-    // 0-RTT session-ticket persistence is delegated to picoquic via the
-    // ticket_file_name parameter passed to picoquic_create. When that
-    // parameter is non-NULL, picoquic auto-saves tickets to that file on
-    // disconnect and auto-loads them on the next connect — no app-level
-    // get/set is needed.
-    //
-    // We currently pass NULL (no file), which disables 0-RTT resumption
-    // but keeps regular 1-RTT TLS handshake fully functional. To re-enable
-    // 0-RTT, set ticket_file_name in quicConnect to a platform-appropriate
-    // app-data path (per-user, per-server-UUID). Tracked in §Q Phase 5.
+    // §5f: 0-RTT ticket persistence is handled by picoquic file I/O:
+    // - Load: picoquic_create() auto-loads from s_ticketStorePath
+    // - Save: quicDisconnect() calls picoquic_save_session_tickets()
+    // This stub remains for the legacy API surface.
     (void)buf; (void)bufLen;
     return 0;
 }

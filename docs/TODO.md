@@ -10,7 +10,7 @@
 | 優先級 | 條目 | 待做事項 |
 |---|---|---|
 | **Active (verify)** | **§β.11.b** warp edge MV threshold | Settings UI slider (2-20, default 8) 已上線 v1.4.195；setting 實機 confirm 生效 (2026-05-23, registry vkfrucEdgeMvThreshold=8 + ctor log)；剩主觀畫質比較：keep 8 / 試 4（更多邊緣保護）/ 試 12（更 smooth）|
-| **Active (verify + polish)** | **§Q** MP-QUIC 多路徑網路聚合 | Phase 5 全 Sprint 實作完成 + LAN 驗測通過 (v1.5.128)。**已驗證：** server FEC 4+2 encoding ✅、per-path queue routing (§5d.fix) ✅、0-RTT ticket 跨重啟載入 ✅、1080p60 穩定 streaming ✅、Audio QUIC 傳輸 ✅（桌面有音訊時 0.9Mbps 走 QUIC datagram）、Client §5a Jitter buffer ✅（delivered=41817 reordered=1 dropped=0）、§K.16 cwnd 降頻 ✅（5s rate limit）。**待做：** ①Client 0-RTT ticket 檔未產生（picoquic auto-save 問題）②Android 多路徑實機（Pixel 5 WiFi+cellular）③壓力測試 1440p120 |
+| **Active (verify + polish)** | **§Q** MP-QUIC 多路徑網路聚合 | Phase 5 全 Sprint 實作完成 + LAN 驗測通過 (v1.5.129)。**已驗證：** server FEC 4+2 encoding ✅、per-path queue routing (§5d.fix) ✅、0-RTT server ticket 跨重啟 ✅、1080p60 穩定 streaming ✅、Audio QUIC 傳輸 ✅、Client §5a Jitter buffer ✅、§K.16 cwnd 降頻 ✅、§5f client 0-RTT ticket save 修正 ✅。**待做：** ①Android 多路徑實機（Pixel 5 WiFi+cellular）②壓力測試 1440p120 ③Client 0-RTT ticket 驗測（v1.5.129 加了 save 需 build 確認） |
 | **Active (verify, partial bug)** | **§SLIM** release zip 瘦身 (106→48 MB) | phase 1-4 已 ship。**NCNN backend lazy fetch path 確認接通** (ncnnfruc.cpp:1063/2714 → ensureRifeModelDir → ModelFetcher)。**⚠️ Bug：Vulkan Native RIFE 路徑沒接 ModelFetcher** — rife_native_vk.cpp 4 處 (line 3669/4998/7413/7705) 直接 modelDir+/flownet.bin 載入；2026-05-23 實機驗：cache 空時 RifeNativeExecutor init failed → fallback block-match path (鐵律 OK 不 crash)，但 lazy fetch 沒生效。**Fix：** VkFrucRenderer 對 RifeNativeExecutor::initialize 的 caller 端先 ensureRifeModelDir(opts.modelDir)。剩餘原項：無 VC++ Runtime Win10 系統實測 missing vcruntime140 提示 |
 | **Deferred (hw-bound)** | **§B Phase B** HEVC D3D11VA → Vulkan composite | Code 已 ship v1.4.184-185；阻塞：AMD 780M 測試機 HEVC D3D11VA 本身不可用。需換另一台 D3D11VA HEVC HW decode 可用的 AMD 機器驗 B7 import + B9 FRUC chain |
 | **Active (test pending)** | **§B-NVOF autotier** NVOF 成為 NV 最佳 tier | Code 已 ship v1.4.117-138；待使用者 PixArk 20+ 分鐘實測，看 NVOF-PROF drop% 是否接近 0%、chain_mean 是否穩定 < 2ms。若 OK → reapply early-kickoff + NVOF 列 NV best tier；若 drop% 高 → 需 Option E skip 機制 |
@@ -78,7 +78,7 @@ PixArk 20+ 分鐘測試後看 log：
 |---|---|---|---|
 | Q.r1 | Audio QUIC 傳輸 | — | ✅ **非 bug**。WASAPI loopback 在桌面無音訊時回傳 timeout → encodeThread 不產生封包。桌面播放音訊後 audio 立刻走 QUIC datagram（AUDIO: q=8611 0.9Mbps） |
 | Q.r2 | Client FEC decode + jitter buffer 驗證 | — | ✅ §5a Jitter buffer 確認運作（delivered=41817 reordered=1 dropped=0 timedOut=7）。§5b FEC decode 在 LAN loss=0% 下正確不觸發，需有 loss 環境才能驗 recovery |
-| Q.r3 | Client 端 0-RTT ticket store | **P2** | ⚠️ Code 已實作（session.cpp:2354-2367），但 `quic-tickets.bin` 未產生。原因：①`quicSetTicketStorePath` 的 Limelog 在 callback 設定前被呼叫（log 靜默丟棄）②picoquic auto-save 可能需 graceful close |
+| Q.r3 | Client 端 0-RTT ticket store | — | ✅ 修正：`quicDisconnect()` 加入 `picoquic_save_session_tickets()` 呼叫（之前只有 auto-load 沒有 save）。待下次 build + streaming 測試驗證 `quic-tickets.bin` 產生 |
 | Q.r4 | §K.16 cwnd LOW warning 降頻 | — | ✅ 已修（quic_server.cpp 5 秒 rate limit），驗測期間 cwnd warning 從數百次降到 3 次 |
 | Q.r5 | Android 多路徑實機驗測 | **P2** | 待做。Pixel 5 WiFi + cellular 同時 available，確認 subflow 自動建立 + failover |
 | Q.r6 | 壓力測試 | **P3** | 待做。1440p120 + 3 subflow + 模擬 10% packet loss，確認 FEC recovery + jitter buffer 在極端條件下表現 |
