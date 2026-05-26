@@ -21,15 +21,14 @@ import java.util.List;
  * connectivity changes for QUIC multipath subflow management.
  * Uses ConnectivityManager.getAllNetworks() + NetworkCapabilities.
  *
- * §Q-REVIEW-P2 — JNI bridge gap (tracked for Phase 5):
- *   moonlight-common-c's PlatformNetIf.c on Android falls through to
- *   lcSetNetInterfacesFromJni(), which expects this Java class to call
- *   a native method that pushes the network list across. That native
- *   method is not yet implemented. Currently the native side sees zero
- *   subflows on Android (single-path QUIC still works, but multipath
- *   does not). Phase 5: add nativeSetInterfaces(...) JNI method in
- *   MoonBridge and call it from NvConnection.start() right after
- *   listing available networks.
+ * Cellular keepalive (requestCellularKeepalive) is used during a session
+ * to keep the cellular radio active when WiFi is the primary path, so a
+ * WiFi → cellular failover does not have to wait for the cell to spin up.
+ *
+ * Note: the native interface injection used by QUIC subflow creation lives
+ * in NvConnection.start() (inline ConnectivityManager enumeration calling
+ * MoonBridge.setNetInterfaces). This class is the long-running monitor and
+ * keepalive helper, not the one-shot enumerator.
  */
 public class MultiNetworkAdapter {
     private static final String TAG = "VIPLE-MPQUIC-NET";

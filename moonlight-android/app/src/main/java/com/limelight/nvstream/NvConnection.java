@@ -677,6 +677,22 @@ public class NvConnection {
                         } catch (Exception e) {
                             LimeLog.warning("[VIPLE-MPQUIC] Failed to enumerate interfaces: " + e.getMessage());
                         }
+
+                        // §5f: per-user 0-RTT ticket cache (sandboxed app storage).
+                        // picoquic keys tickets by SNI so a single file handles all servers.
+                        try {
+                            java.io.File ticketDir = appContext.getFilesDir();
+                            if (ticketDir != null) {
+                                String ticketPath = ticketDir.getAbsolutePath() + "/quic-tickets.bin";
+                                MoonBridge.setQuicTicketStorePath(ticketPath);
+                                LimeLog.info("[VIPLE-MPQUIC] Ticket store: " + ticketPath);
+                            } else {
+                                MoonBridge.setQuicTicketStorePath(null);
+                            }
+                        } catch (Exception e) {
+                            LimeLog.warning("[VIPLE-MPQUIC] Ticket store unavailable: " + e.getMessage());
+                            MoonBridge.setQuicTicketStorePath(null);
+                        }
                     }
 
                     int ret = MoonBridge.startConnection(context.serverAddress.address,

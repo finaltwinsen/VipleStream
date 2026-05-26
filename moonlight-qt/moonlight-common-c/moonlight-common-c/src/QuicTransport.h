@@ -233,9 +233,16 @@ int quicIsFailoverActive(void);
 
 // ── Session ticket (0-RTT) ───────────────────────────────────
 
-// After a successful connection, retrieve the session ticket
-// for future 0-RTT resumption. Returns ticket length, or 0
-// if no ticket is available. Caller provides buffer.
+// Set the ticket store file path. picoquic auto-loads existing tickets
+// at quicConnect() and auto-saves new ones at disconnect. The same file
+// can hold tickets for many SNIs (picoquic keys them internally).
+// Must be called BEFORE quicConnect() to take effect.
+// Pass NULL or empty string to disable 0-RTT (default).
+void quicSetTicketStorePath(const char* path);
+
+// Deprecated: picoquic now persists tickets to disk via the file set by
+// quicSetTicketStorePath(); the application no longer needs to extract
+// the ticket blob manually. Kept for ABI compatibility — returns 0.
 int quicGetSessionTicket(unsigned char* buf, int bufLen);
 
 #ifdef __cplusplus

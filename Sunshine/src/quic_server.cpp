@@ -18,6 +18,7 @@
 #include <openssl/ec.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <openssl/rand.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 // Congestion algorithm symbols live in their own headers
@@ -451,6 +452,47 @@ namespace quic_server {
                     << " certExists=" << fs::exists(ecCert)
                     << " keyExists=" << fs::exists(ecKey);
 
+    // §Q Phase 5 (5f): persistent ticket encryption key so 0-RTT tickets
+    // issued to clients survive a Sunshine restart. Without this picoquic
+    // generates a fresh random key per process, invalidating every
+    // client's cached ticket the moment the server is restarted.
+    static uint8_t s_ticketKey[64];
+    static size_t s_ticketKeyLen = 0;
+    {
+      std::string ticketKeyFile = (configDir / "quic_ticket_key.bin").string();
+      if (s_ticketKeyLen == 0) {
+        FILE *fk = fopen(ticketKeyFile.c_str(), "rb");
+        if (fk) {
+          size_t n = fread(s_ticketKey, 1, sizeof(s_ticketKey), fk);
+          fclose(fk);
+          if (n == sizeof(s_ticketKey)) {
+            s_ticketKeyLen = n;
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] Ticket key loaded: " << ticketKeyFile;
+          } else {
+            BOOST_LOG(warning) << "[VIPLE-MPQUIC] Ticket key size mismatch ("
+                               << n << " bytes); regenerating";
+          }
+        }
+      }
+      if (s_ticketKeyLen == 0) {
+        if (RAND_bytes(s_ticketKey, sizeof(s_ticketKey)) == 1) {
+          s_ticketKeyLen = sizeof(s_ticketKey);
+          FILE *fw = fopen(ticketKeyFile.c_str(), "wb");
+          if (fw) {
+            fwrite(s_ticketKey, 1, sizeof(s_ticketKey), fw);
+            fclose(fw);
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] Ticket key generated: " << ticketKeyFile;
+          } else {
+            BOOST_LOG(warning) << "[VIPLE-MPQUIC] Failed to write " << ticketKeyFile
+                               << " — 0-RTT will not survive restart";
+          }
+        } else {
+          BOOST_LOG(warning) << "[VIPLE-MPQUIC] RAND_bytes failed; "
+                             << "falling back to picoquic-internal random key";
+        }
+      }
+    }
+
     uint64_t currentTime = picoquic_current_time();
 
     // CRITICAL: pass NULL cert/key to picoquic_create().
@@ -471,7 +513,8 @@ namespace quic_server {
         currentTime,
         nullptr,                   // simulated_time
         nullptr,                   // ticket_file_name (server doesn't load)
-        nullptr, 0);               // ticket_encryption_key (default = random)
+        s_ticketKeyLen > 0 ? s_ticketKey : nullptr,
+        s_ticketKeyLen);           // ticket_encryption_key (§5f persistent)
 
     if (!_quic) {
       BOOST_LOG(error) << "[VIPLE-MPQUIC] Failed to create QUIC server context";
