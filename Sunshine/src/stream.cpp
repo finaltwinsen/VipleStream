@@ -1972,7 +1972,29 @@ namespace stream {
     // repeated heap alloc/free (one per data packet + one per FEC shard).
     std::vector<uint8_t> audioScratch;
 
+    // §Q.r1 diag: 確認 audioBroadcast 進入 pop 等待
+    BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q.r1 audioBroadcast: waiting for packets"
+                    << " queue=" << (packets ? "OK" : "NULL")
+                    << " shutdown=" << (shutdown_event->peek() ? "YES" : "NO");
+
     while (auto packet = packets->pop()) {
+      // §Q.r1 diag: 在 shutdown check 之前
+      {
+        static bool entered_once = false;
+        if (!entered_once) {
+          BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q.r1 audioBroadcast: FIRST PACKET"
+                          << " mpquic_enabled=" << config::stream.mpquic_enabled
+#ifdef VIPLE_MPQUIC
+                          << " VIPLE_MPQUIC=ON"
+                          << " g_listener=" << (quic_server::g_listener ? "OK" : "NULL")
+#else
+                          << " VIPLE_MPQUIC=OFF"
+#endif
+                          ;
+          entered_once = true;
+        }
+      }
+
       if (shutdown_event->peek()) {
         break;
       }

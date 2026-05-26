@@ -10,7 +10,7 @@
 | 優先級 | 條目 | 待做事項 |
 |---|---|---|
 | **Active (verify)** | **§β.11.b** warp edge MV threshold | Settings UI slider (2-20, default 8) 已上線 v1.4.195；setting 實機 confirm 生效 (2026-05-23, registry vkfrucEdgeMvThreshold=8 + ctor log)；剩主觀畫質比較：keep 8 / 試 4（更多邊緣保護）/ 試 12（更 smooth）|
-| **Active (build + verify)** | **§Q** MP-QUIC 多路徑網路聚合 | Phase 5 全 Sprint 實作完成 (2026-05-26)：5a jitter buffer、5b FEC (4+2 RS)、5c multipath scheduler re-enable、5d per-path datagram queue API (picoquic fork)。**待：** build_all + 實機驗測（Pixel 5 多路徑 session 穩定性 + 0-RTT cross-restart + FEC recovery log） |
+| **Active (verify + polish)** | **§Q** MP-QUIC 多路徑網路聚合 | Phase 5 全 Sprint 實作完成 + LAN 驗測通過 (v1.5.128)。**已驗證：** server FEC 4+2 encoding ✅、per-path queue routing (§5d.fix) ✅、0-RTT ticket 跨重啟載入 ✅、1080p60 穩定 streaming ✅、Audio QUIC 傳輸 ✅（桌面有音訊時 0.9Mbps 走 QUIC datagram）、Client §5a Jitter buffer ✅（delivered=41817 reordered=1 dropped=0）、§K.16 cwnd 降頻 ✅（5s rate limit）。**待做：** ①Client 0-RTT ticket 檔未產生（picoquic auto-save 問題）②Android 多路徑實機（Pixel 5 WiFi+cellular）③壓力測試 1440p120 |
 | **Active (verify, partial bug)** | **§SLIM** release zip 瘦身 (106→48 MB) | phase 1-4 已 ship。**NCNN backend lazy fetch path 確認接通** (ncnnfruc.cpp:1063/2714 → ensureRifeModelDir → ModelFetcher)。**⚠️ Bug：Vulkan Native RIFE 路徑沒接 ModelFetcher** — rife_native_vk.cpp 4 處 (line 3669/4998/7413/7705) 直接 modelDir+/flownet.bin 載入；2026-05-23 實機驗：cache 空時 RifeNativeExecutor init failed → fallback block-match path (鐵律 OK 不 crash)，但 lazy fetch 沒生效。**Fix：** VkFrucRenderer 對 RifeNativeExecutor::initialize 的 caller 端先 ensureRifeModelDir(opts.modelDir)。剩餘原項：無 VC++ Runtime Win10 系統實測 missing vcruntime140 提示 |
 | **Deferred (hw-bound)** | **§B Phase B** HEVC D3D11VA → Vulkan composite | Code 已 ship v1.4.184-185；阻塞：AMD 780M 測試機 HEVC D3D11VA 本身不可用。需換另一台 D3D11VA HEVC HW decode 可用的 AMD 機器驗 B7 import + B9 FRUC chain |
 | **Active (test pending)** | **§B-NVOF autotier** NVOF 成為 NV 最佳 tier | Code 已 ship v1.4.117-138；待使用者 PixArk 20+ 分鐘實測，看 NVOF-PROF drop% 是否接近 0%、chain_mean 是否穩定 < 2ms。若 OK → reapply early-kickoff + NVOF 列 NV best tier；若 drop% 高 → 需 Option E skip 機制 |
@@ -50,56 +50,47 @@ PixArk 20+ 分鐘測試後看 log：
 1. 串流 HEVC → log 出現 `initializeCompositeD3D11 OK` + `B7 first frame imported`
 2. 連續 60 秒不出錯 → 進 B9 (FRUC chain + present)
 
-### §Q Phase 5 sub-phase 拆解（2026-05-26 規劃，路線 A）
+### §Q Phase 5 完成狀態（2026-05-26, v1.5.126）
 
-§MP-PRIMARY 2026-05-24 起應用層 scheduler 暫停。要恢復多路徑語意需先解
-QuicTransport.c:938-940 記錄的三個失敗模式：
-(a) picoquic 排程器無法收斂（連續 datagram 偏好相反）
-(b) per-path PN space 下 ACK 路由混亂 → 假性 62% loss
-(c) IDR frame 封包分散到不同 RTT 路徑 → depacketizer 超時
+全部 5 Sprint 實作完成 + LAN 實機驗測通過。
 
-| Sprint | 工作 | 解 | 狀態 |
+| Sprint | 工作 | 狀態 |
+|---|---|---|
+| 1 | 5e Android JNI bridge + 5f 0-RTT ticket 持久化 | ✅ done + server 跨重啟驗證 |
+| 2 | 5a Jitter buffer（sliding-window reorder, 10ms timeout） | ✅ done + client log 確認（delivered=41817 reordered=1 dropped=0 timedOut=7） |
+| 3 | 5b FEC（4+2 Reed-Solomon, server encode / client decode） | ✅ server encode 驗證 + client decode 就緒（LAN loss=0% 無觸發機會，屬預期） |
+| 4 | 5c re-enable multipath（standby/available, ECF scheduler） | ✅ done |
+| 5 | 5d per-path datagram queue（picoquic fork API） | ✅ done + §5d.fix backup path exclusion |
+
+**LAN 驗測結果（v1.5.128, 1080p60 40Mbps）：**
+- `pendingPeak=0`（§5d.fix 前 2160）
+- `p0 RTT=0.5ms 18Mbps loss=0.0%` — active path 穩定（3 subflow: Ethernet + Tailscale standby + Wi-Fi）
+- `p1 tx=2KB` — Tailscale standby 正確閒置
+- `FEC 4+2 RS ratio=1.5x` server encode confirmed
+- `Ticket key loaded` 跨 service 重啟成功
+- `§5a Jitter[AUDIO]: delivered=41817 reordered=1 dropped=0 timedOut=7` — client jitter buffer ✅
+- `AUDIO: 13340 dgrams 4749KB 0.9Mbps` — audio QUIC 傳輸 ✅（桌面有音訊時）
+- `§K.16 cwnd LOW` 降頻 ✅（5s rate limit，warning 從數百次降至 3 次）
+
+### §Q 剩餘待做項目
+
+| # | 項目 | 優先級 | 狀態 |
 |---|---|---|---|
-| 1 | 5e Android JNI bridge + 5f 0-RTT cross-restart | 基礎建設 | **done 2026-05-26**（待實機驗測） |
-| 2 | 5a Jitter buffer（sliding-window reorder, 10ms timeout） | (c) reordering | **done 2026-05-26** |
-| 3 | 5b FEC（4+2 Reed-Solomon, server encode / client decode） | (c) IDR 重建 | **done 2026-05-26** |
-| 4 | 5c re-enable multipath（standby/available, ECF scheduler） | (c) 緩解 | **done 2026-05-26** |
-| 5 | 5d per-path datagram queue（fork picoquic API） | (a)(b)(c) | **done 2026-05-26** |
+| Q.r1 | Audio QUIC 傳輸 | — | ✅ **非 bug**。WASAPI loopback 在桌面無音訊時回傳 timeout → encodeThread 不產生封包。桌面播放音訊後 audio 立刻走 QUIC datagram（AUDIO: q=8611 0.9Mbps） |
+| Q.r2 | Client FEC decode + jitter buffer 驗證 | — | ✅ §5a Jitter buffer 確認運作（delivered=41817 reordered=1 dropped=0 timedOut=7）。§5b FEC decode 在 LAN loss=0% 下正確不觸發，需有 loss 環境才能驗 recovery |
+| Q.r3 | Client 端 0-RTT ticket store | **P2** | ⚠️ Code 已實作（session.cpp:2354-2367），但 `quic-tickets.bin` 未產生。原因：①`quicSetTicketStorePath` 的 Limelog 在 callback 設定前被呼叫（log 靜默丟棄）②picoquic auto-save 可能需 graceful close |
+| Q.r4 | §K.16 cwnd LOW warning 降頻 | — | ✅ 已修（quic_server.cpp 5 秒 rate limit），驗測期間 cwnd warning 從數百次降到 3 次 |
+| Q.r5 | Android 多路徑實機驗測 | **P2** | 待做。Pixel 5 WiFi + cellular 同時 available，確認 subflow 自動建立 + failover |
+| Q.r6 | 壓力測試 | **P3** | 待做。1440p120 + 3 subflow + 模擬 10% packet loss，確認 FEC recovery + jitter buffer 在極端條件下表現 |
 
-依賴：5a/5b → 5c → 5d；5e/5f 與其他獨立。**全部完成 2026-05-26。**
+### §Q Client picoquic build 備忘
 
-**路線決定 (2026-05-26)**：選路線 A（fork picoquic 加 per-path queue API）保
-mobility WiFi↔5G <10ms 切換、保 RFC 9443 完整語意。
+Client 端 picoquic 已透過 moonlight-common-c 整合（QuicTransport.c + 靜態連結
+picoquic），build_moonlight.cmd 在 `VIPLE_MPQUIC=ON` 時帶入。LAN 實測 client 端
+QUIC streaming 正常運作（v1.5.126 驗證）。
 
-**整合驗測清單**：
-1. `build_all.cmd` 通過（Client + Server 含 picoquic fork 新 API）
-2. Sunshine restart → 確認 `[VIPLE-MPQUIC]` log 正常、video per-path queue 運作
-3. 多路徑 session：Pixel 5 WiFi+5G 同時 available、FEC recovery 有生效
-4. 0-RTT cross-restart：Sunshine restart 後重連看 `[VIPLE-MPQUIC] Ticket key loaded`
-
-### §Q Windows MSVC client picoquic build env setup
-
-2026-05-23 嘗試 cmake configure `Sunshine/third-party/picoquic` 與 MSVC + Ninja，
-撞兩面牆：
-
-1. PTLS not found → 加 `-DPICOQUIC_FETCH_PTLS=ON` 解（FetchContent 抓 picotls source 進 _deps/）
-2. picotls 自己的 CMakeLists.txt:12 找 PkgConfig 失敗
-
-本機環境缺：
-- pkg-config（Get-Command pkg-config 空）
-- OpenSSL Windows dev headers/libs（只有 Git MinGW 附 openssl.exe，非 dev）
-- vcpkg（D:\\Mission\\VipleStream\\vcpkg / C:\\vcpkg / D:\\vcpkg 都沒）
-
-已備齊：chocolatey、MSVC 2022 BuildTools、Qt 6.10.3 msvc2022_64、cmake 3.31、ninja。
-
-下一步（需 admin elevation）：
-
-1. `choco install pkgconfiglite -y`
-2. `choco install openssl -y` 或 `vcpkg install openssl:x64-windows`
-3. cmake configure 加 `OPENSSL_ROOT_DIR=<install path>`
-4. 對症處理 picoquic MSVC 端 compat（commit fca3a5b 已加 MinGW guards 但沒提 MSVC）
-5. 改 `build_moonlight.cmd` 加 `--mpquic` 開關（傳 `DEFINES+=VIPLE_MPQUIC` 給 qmake）
-6. bump version + rebuild + smoke test + stream verify [VIPLE-MPQUIC] client log
+若需 standalone cmake configure picoquic（除錯 picoquic 本身），需安裝
+pkg-config + OpenSSL dev headers。一般開發走 build script 不需額外安裝。
 
 ### §SLIM Vulkan Native RIFE fix
 

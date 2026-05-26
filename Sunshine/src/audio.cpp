@@ -125,6 +125,16 @@ namespace audio {
 
       packet.fake_resize(bytes);
       packets->raise(channel_data, std::move(packet));
+
+      // §Q.r1 diag: 確認 encodeThread 有在 push packet
+      {
+        static bool encode_once = false;
+        if (!encode_once) {
+          BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q.r1 encodeThread: first audio packet pushed"
+                          << " bytes=" << bytes;
+          encode_once = true;
+        }
+      }
     }
   }
 

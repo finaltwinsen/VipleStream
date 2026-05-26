@@ -339,14 +339,11 @@ namespace quic_server {
         cwnd = _cnx->path[0]->cwin;
         inFlight = _cnx->path[0]->bytes_in_transit;
       }
-      // 每 500 筆 batch 印一次（約每秒），或 queue > 50 時每次印，
-      // 或 cwnd 低於 IDR frame × 2 警戒值（~200KB）時每次印
-      // §K.16: BBRMinPipeCwnd = 128，地板 ~185KB
+      // 每 500 筆 batch 印一次（約每秒），或 queue > 50 時每次印
       static int diagCounter = 0;
       bool cwndAlert = (cwnd > 0 && cwnd < 200000);
-      if (++diagCounter >= 500 || queueDepth > 50 || cwndAlert) {
+      if (++diagCounter >= 500 || queueDepth > 50) {
         diagCounter = 0;
-        // §K.12: 增加 BBR 狀態診斷——recovery / pto / loss 計數
         uint64_t nbLosses = 0, nbRetransmit = 0, totalBytesLost = 0;
         if (_cnx->nb_paths > 0 && _cnx->path[0] != nullptr) {
           nbLosses = _cnx->path[0]->nb_losses_found;
@@ -361,7 +358,13 @@ namespace quic_server {
                         << " losses=" << nbLosses
                         << " retx=" << nbRetransmit
                         << " lostB=" << totalBytesLost;
-        if (cwndAlert) {
+      }
+      // §K.16: cwnd 警戒每 5 秒最多 log 一次（之前每 30ms 噴一次太吵）
+      if (cwndAlert) {
+        static auto lastCwndWarn = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastCwndWarn >= std::chrono::seconds(5)) {
+          lastCwndWarn = now;
           BOOST_LOG(warning) << "[VIPLE-MPQUIC] §K.16 cwnd LOW: " << cwnd
                              << " (floor=" << (48 * (_cnx->nb_paths > 0 && _cnx->path[0]
                                 ? _cnx->path[0]->send_mtu : 1500))
