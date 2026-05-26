@@ -1218,12 +1218,14 @@ static void quicUpdatePathStats(void) {
             uint64_t deltaSent = pq.sent - g_ctx.subflows[i].prevSent;
             uint64_t deltaLost = pq.lost - g_ctx.subflows[i].prevLost;
             if (deltaSent > 0) {
-                g_ctx.subflows[i].lossPercent =
-                    (float)((double)deltaLost / (double)deltaSent * 100.0);
+                float lp = (float)((double)deltaLost / (double)deltaSent * 100.0);
+                // §K.19.clamp: 路徑死亡時 picoquic 把所有未 ACK 封包計為 lost，
+                // 導致 deltaLost > deltaSent（loss > 100%）。Clamp 避免顯示誤導。
+                g_ctx.subflows[i].lossPercent = lp > 100.0f ? 100.0f : lp;
             } else if (g_ctx.subflows[i].prevSent == 0 && pq.sent > 0) {
                 // 第一次：用累積值作為初始值
-                g_ctx.subflows[i].lossPercent =
-                    (float)((double)pq.lost / (double)pq.sent * 100.0);
+                float lp = (float)((double)pq.lost / (double)pq.sent * 100.0);
+                g_ctx.subflows[i].lossPercent = lp > 100.0f ? 100.0f : lp;
             }
             // 否則 deltaSent==0 表示這 5 秒沒送任何封包，保留上次的值
             g_ctx.subflows[i].prevSent = pq.sent;
