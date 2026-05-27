@@ -1245,6 +1245,19 @@ static void controlReceiveThreadFunc(void* context) {
 
             err = LastSocketFail();
             Limelog("Control stream connection failed: %d\n", err);
+#ifdef VIPLE_MPQUIC
+            // §Q-ENET-GRACE 2026-05-27: ENet socket 綁在 primary interface
+            // IP，failover 時 underlying interface 消失，socket 不能遷移所以
+            // send/recv 直接失敗（typical WSAEWOULDBLOCK 10035）。
+            // 不可彈 "Connection terminated" dialog——QUIC failover 已把
+            // video/audio 轉到備援路徑，使用者只損失控制輸入。
+            if (quicIsFailoverActive()) {
+                Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: control stream "
+                        "connection failed (%d) during QUIC failover — "
+                        "suppressing connectionTerminated\n", err);
+                return;
+            }
+#endif
             ListenerCallbacks.connectionTerminated(err);
             return;
         }
@@ -1469,6 +1482,16 @@ static void lossStatsThreadFunc(void* context) {
                                          ENET_PACKET_FLAG_UNSEQUENCED,
                                          LbqGetItemCount(&frameFecStatusQueue) > 0)) {
                         Limelog("Loss Stats: Sending frame FEC status message failed: %d\n", (int)LastSocketError());
+#ifdef VIPLE_MPQUIC
+                        if (quicIsFailoverActive()) {
+                            Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: FEC stats "
+                                    "send failed during QUIC failover — "
+                                    "stopping lossStats thread (suppressing "
+                                    "connectionTerminated)\n");
+                            free(queuedFrameStatus);
+                            return;
+                        }
+#endif
                         ListenerCallbacks.connectionTerminated(LastSocketFail());
                         free(queuedFrameStatus);
                         return;
@@ -1491,6 +1514,14 @@ static void lossStatsThreadFunc(void* context) {
                                       ENET_PACKET_FLAG_RELIABLE,
                                       false)) {
                 Limelog("Loss Stats: Transaction failed: %d\n", (int)LastSocketError());
+#ifdef VIPLE_MPQUIC
+                if (quicIsFailoverActive()) {
+                    Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: periodic ping "
+                            "failed during QUIC failover — stopping "
+                            "lossStats thread (suppressing connectionTerminated)\n");
+                    return;
+                }
+#endif
                 ListenerCallbacks.connectionTerminated(LastSocketFail());
                 return;
             }
@@ -1532,6 +1563,14 @@ static void lossStatsThreadFunc(void* context) {
                                       false)) {
                 free(lossStatsPayload);
                 Limelog("Loss Stats: Transaction failed: %d\n", (int)LastSocketError());
+#ifdef VIPLE_MPQUIC
+                if (quicIsFailoverActive()) {
+                    Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: legacy loss stats "
+                            "send failed during QUIC failover — stopping "
+                            "lossStats thread (suppressing connectionTerminated)\n");
+                    return;
+                }
+#endif
                 ListenerCallbacks.connectionTerminated(LastSocketFail());
                 return;
             }
@@ -1571,6 +1610,14 @@ static void requestIdrFrame(void) {
                                         ENET_PACKET_FLAG_RELIABLE,
                                         false)) {
             Limelog("Request IDR Frame: Transaction failed: %d\n", (int)LastSocketError());
+#ifdef VIPLE_MPQUIC
+            if (quicIsFailoverActive()) {
+                Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: IDR (via invalidate) "
+                        "failed during QUIC failover — IDR request dropped "
+                        "(suppressing connectionTerminated)\n");
+                return;
+            }
+#endif
             ListenerCallbacks.connectionTerminated(LastSocketFail());
             return;
         }
@@ -1584,6 +1631,14 @@ static void requestIdrFrame(void) {
                                         ENET_PACKET_FLAG_RELIABLE,
                                         false)) {
             Limelog("Request IDR Frame: Transaction failed: %d\n", (int)LastSocketError());
+#ifdef VIPLE_MPQUIC
+            if (quicIsFailoverActive()) {
+                Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: IDR request "
+                        "failed during QUIC failover — IDR request dropped "
+                        "(suppressing connectionTerminated)\n");
+                return;
+            }
+#endif
             ListenerCallbacks.connectionTerminated(LastSocketFail());
             return;
         }
@@ -1609,6 +1664,14 @@ static void requestInvalidateReferenceFrames(uint32_t startFrame, uint32_t endFr
                                     ENET_PACKET_FLAG_RELIABLE,
                                     false)) {
         Limelog("Request Invalidate Reference Frames: Transaction failed: %d\n", (int)LastSocketError());
+#ifdef VIPLE_MPQUIC
+        if (quicIsFailoverActive()) {
+            Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: invalidate-ref-frames "
+                    "failed during QUIC failover — request dropped "
+                    "(suppressing connectionTerminated)\n");
+            return;
+        }
+#endif
         ListenerCallbacks.connectionTerminated(LastSocketFail());
         return;
     }
@@ -1631,6 +1694,14 @@ static void confirmLongtermReferenceFrame(uint32_t frameIndex) {
                               ENET_PACKET_FLAG_RELIABLE,
                               false)) {
         Limelog("LTR frame ACK: Transaction failed: %d\n", (int)LastSocketError());
+#ifdef VIPLE_MPQUIC
+        if (quicIsFailoverActive()) {
+            Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: LTR ACK send "
+                    "failed during QUIC failover — ACK dropped "
+                    "(suppressing connectionTerminated)\n");
+            return;
+        }
+#endif
         ListenerCallbacks.connectionTerminated(LastSocketFail());
         return;
     }
