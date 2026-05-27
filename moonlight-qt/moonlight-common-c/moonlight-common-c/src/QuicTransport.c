@@ -2173,8 +2173,16 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                 fin_or_event == picoquic_callback_path_deleted
                     ? "deleted" : "suspended",
                 (unsigned long long)stream_id);
+        bool wasNonStandbyActive = false;
+        int killedIfIdx = -1;
         for (int i = 0; i < ctx->subflowCount; i++) {
             if (ctx->subflows[i].picoquicPathId == stream_id) {
+                // 紀錄這個被刪/暫停的路徑是不是 non-standby 活躍路徑——
+                // 若是，下面要做緊急 standby 升級。
+                wasNonStandbyActive = ctx->subflows[i].active &&
+                                      !ctx->subflows[i].keepAsStandby;
+                killedIfIdx = ctx->subflows[i].interfaceIndex;
+
                 ctx->subflows[i].active = false;
                 if (fin_or_event == picoquic_callback_path_deleted) {
                     // §Q-DYN-PATH: 標記為 picoquic 永久刪除。slot 會在
@@ -2188,6 +2196,54 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                         false, ctx->failoverContext);
                 }
                 break;
+            }
+        }
+
+        // §Q-MP-EMERGENCY-PROMOTE 2026-05-27:
+        // picoquic 直接刪除一個 non-standby active 路徑時，繞過了 health
+        // check 的 5-timeout failover 邏輯。檢查是否還有其他 non-standby
+        // 活躍路徑；若沒有，立即升級任意 standby 路徑頂上。
+        //
+        // 歷史教訓：v1.5.143 1080p180 串流，主路徑（Ethernet）被 picoquic
+        // 刪除後，Tailscale standby 路徑始終閒置（rx=1KB 整場），
+        // 串流陷入 "Waiting for IDR frame" 死亡螺旋 1 分鐘以上。
+        if (wasNonStandbyActive) {
+            int activeNonStandbyCount = 0;
+            for (int j = 0; j < ctx->subflowCount; j++) {
+                QUIC_SUBFLOW* sf = &ctx->subflows[j];
+                if (sf->active && !sf->keepAsStandby && !sf->picoquicDeleted)
+                    activeNonStandbyCount++;
+            }
+            if (activeNonStandbyCount == 0) {
+                for (int j = 0; j < ctx->subflowCount; j++) {
+                    QUIC_SUBFLOW* candidate = &ctx->subflows[j];
+                    if (candidate->keepAsStandby &&
+                        candidate->active &&
+                        !candidate->picoquicDeleted) {
+                        candidate->keepAsStandby = false;
+                        candidate->lastRecvTime = picoquic_current_time();
+                        candidate->consecutiveTimeouts = 0;
+                        picoquic_set_path_status(
+                            ctx->cnx, candidate->picoquicPathId,
+                            picoquic_path_status_available);
+                        ctx->failoverPromotedSlot = j;
+                        Limelog("[VIPLE-MPQUIC] §Q-MP-EMERGENCY-PROMOTE: "
+                                "primary if %d killed by picoquic, no other "
+                                "active non-standby paths — promoting "
+                                "standby subflow %d (if %d, slot %d) to "
+                                "available\n",
+                                killedIfIdx,
+                                candidate->id,
+                                candidate->interfaceIndex, j);
+                        if (ctx->failoverCallback) {
+                            ctx->failoverCallback(
+                                candidate->id,
+                                candidate->interfaceIndex,
+                                true, ctx->failoverContext);
+                        }
+                        break;  // 一次只升級一個
+                    }
+                }
             }
         }
         break;
