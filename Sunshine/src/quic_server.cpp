@@ -377,16 +377,56 @@ namespace quic_server {
     // 單路徑時 bestVideoPath=-1，fallback 到 cnx-level queue（向下相容）。
     // §5d.fix: 排除 backup/demoted 路徑 — backup path 上的 per-path queue
     //   不會被 picoquic 排程器發送，datagram 會堆積永遠送不出去。
+    //
+    // §Q-CWND-WARM 2026-05-27: cwnd-aware 兩階段選擇
+    //   Pass 1: 在 cwin >= MIN_WARM_CWND 的「warm」path 中挑 min RTT
+    //   Pass 2: 若都 cold，挑 cwin 最大的（最少受 BBR slow-start 限制）
+    //
+    // 動機：v1.5.143 死亡螺旋根因之一是新探到 / 剛 EMERGENCY-PROMOTE
+    // 的 path cwin 從 ~15KB 起步，BBR pacing rate 也低。若立刻被選為
+    // primary 灌入 30Mbps video，bytes_in_transit 撐爆 cwin → 大量丟包
+    // → BBR 降速 → 死亡螺旋。MIN_WARM_CWND=64KB 大約是 4 個 IW 後的
+    // 容量（slow-start 1-2 RTT 後達到，BBR 從 startup 進 ProbeBW 前的
+    // 典型值）。
+    constexpr uint64_t MIN_WARM_CWND = 64 * 1024;
     int bestVideoPath = -1;
     if (_cnx->nb_paths > 1) {
+      // Pass 1: warm paths, min RTT
       uint64_t minRtt = UINT64_MAX;
       for (int i = 0; i < _cnx->nb_paths; i++) {
         if (_cnx->path[i] != nullptr &&
             !_cnx->path[i]->path_is_demoted &&
             !_cnx->path[i]->path_is_backup &&
+            _cnx->path[i]->cwin >= MIN_WARM_CWND &&
             _cnx->path[i]->smoothed_rtt < minRtt) {
           minRtt = _cnx->path[i]->smoothed_rtt;
           bestVideoPath = i;
+        }
+      }
+      // Pass 2: fallback — no warm path; pick largest cwin to ride out
+      // the cold-start phase with least loss probability.
+      if (bestVideoPath < 0) {
+        uint64_t maxCwin = 0;
+        for (int i = 0; i < _cnx->nb_paths; i++) {
+          if (_cnx->path[i] != nullptr &&
+              !_cnx->path[i]->path_is_demoted &&
+              !_cnx->path[i]->path_is_backup &&
+              _cnx->path[i]->cwin > maxCwin) {
+            maxCwin = _cnx->path[i]->cwin;
+            bestVideoPath = i;
+          }
+        }
+        // 降速時打一次警告（throttled），方便診斷死亡螺旋前兆
+        static uint64_t lastColdWarn = 0;
+        uint64_t nowTime = picoquic_current_time();
+        if (bestVideoPath >= 0 && nowTime - lastColdWarn > 5000000) {
+          lastColdWarn = nowTime;
+          BOOST_LOG(warning) << "[VIPLE-MPQUIC] §Q-CWND-WARM: no warm path "
+                             << "(all cwin < " << MIN_WARM_CWND
+                             << ") — using path " << bestVideoPath
+                             << " cwin=" << _cnx->path[bestVideoPath]->cwin
+                             << " bytes_in_transit="
+                             << _cnx->path[bestVideoPath]->bytes_in_transit;
         }
       }
     }
