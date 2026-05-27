@@ -105,6 +105,11 @@ namespace quic_server {
     // picoquic spreads load across subflows over consecutive frames).
     int _redundantRR = 0;
 
+    // §Q-PATH-SWITCH 2026-05-27: track bestVideoPath transitions for
+    // mid-stream diagnostic logging. -2 = uninitialized, -1 = fallback
+    // to cnx-level queue (single path), 0+ = picoquic path index.
+    int _lastVideoPath = -2;
+
     // §K.7 diag: datagram queue/send 計數器
     std::atomic<uint64_t> _dgramQueued{0};
     std::atomic<uint64_t> _dgramPushed{0};

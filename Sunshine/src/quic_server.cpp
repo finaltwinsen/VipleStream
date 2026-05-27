@@ -431,6 +431,27 @@ namespace quic_server {
       }
     }
 
+    // §Q-PATH-SWITCH 2026-05-27: 記錄 bestVideoPath 切換事件，便於
+    // 診斷 mid-stream 路徑漂移（例如 EMERGENCY-PROMOTE 觸發後新 path
+    // 被選為 video primary，或反向 FAILBACK 切回原 path）。
+    if (bestVideoPath != _lastVideoPath) {
+      uint64_t prevPathId = (_lastVideoPath >= 0 && _lastVideoPath < _cnx->nb_paths
+                             && _cnx->path[_lastVideoPath])
+          ? _cnx->path[_lastVideoPath]->unique_path_id : UINT64_MAX;
+      uint64_t newPathId = (bestVideoPath >= 0 && _cnx->path[bestVideoPath])
+          ? _cnx->path[bestVideoPath]->unique_path_id : UINT64_MAX;
+      uint64_t newRtt = (bestVideoPath >= 0 && _cnx->path[bestVideoPath])
+          ? _cnx->path[bestVideoPath]->smoothed_rtt : 0;
+      uint64_t newCwin = (bestVideoPath >= 0 && _cnx->path[bestVideoPath])
+          ? _cnx->path[bestVideoPath]->cwin : 0;
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-PATH-SWITCH: bestVideoPath "
+                      << _lastVideoPath << "(id=" << prevPathId << ") -> "
+                      << bestVideoPath << "(id=" << newPathId
+                      << ", rtt=" << (newRtt / 1000) << "ms"
+                      << ", cwin=" << newCwin << "B)";
+      _lastVideoPath = bestVideoPath;
+    }
+
     for (auto &dg : batch) {
       if (dg.isStream) {
         picoquic_add_to_stream(_cnx, 0, dg.data.data(), dg.data.size(), 0);
