@@ -1,6 +1,10 @@
 #include "Limelight-internal.h"
 #include "HolePunch.h"  // VipleStream: for LocalControlPort (NAT-pinhole preservation)
 
+#ifdef VIPLE_MPQUIC
+#include "QuicTransport.h"
+#endif
+
 // This is a private header, but it just contains some time macros
 #include <enet/time.h>
 
@@ -114,6 +118,9 @@ static int lastIntervalLossPercentage;
 static int lastConnectionStatusUpdate;
 static uint32_t currentEnetSequenceNumber;
 static uint64_t firstFrameTimeMs;
+#ifdef VIPLE_MPQUIC
+static volatile int enetReconnectPending;
+#endif
 
 static LINKED_BLOCKING_QUEUE referenceFrameControlQueue;
 static LINKED_BLOCKING_QUEUE frameFecStatusQueue;
@@ -362,6 +369,9 @@ int initializeControlStream(void) {
     lastConnectionStatusUpdate = CONN_STATUS_OKAY;
     firstFrameTimeMs = 0;
     currentEnetSequenceNumber = 0;
+#ifdef VIPLE_MPQUIC
+    enetReconnectPending = 0;
+#endif
     usePeriodicPing = APP_VERSION_AT_LEAST(7, 1, 415);
     encryptionCtx = PltCreateCryptoContext();
     decryptionCtx = PltCreateCryptoContext();
@@ -788,6 +798,17 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
         PltLockMutex(&enetMutex);
     }
 
+#ifdef VIPLE_MPQUIC
+    // §Q-ENET-RECONNECT v1.5.183: peer/client 在 reconnect 等待期間
+    // 被銷毀。其他 thread（lossStats 每 100ms、asyncCallback）仍會
+    // 呼叫 sendMessageEnet，必須在解引用 peer 前檢查。
+    if (!peer || !client) {
+        PltUnlockMutex(&enetMutex);
+        enet_packet_destroy(enetPacket);
+        return false;
+    }
+#endif
+
     volatile bool packetFreed = false;
 
     // Set a callback to use to let us know if the packet has been freed.
@@ -1144,6 +1165,9 @@ static void controlReceiveThreadFunc(void* context) {
         return;
     }
 
+#ifdef VIPLE_MPQUIC
+enet_main_loop:
+#endif
     while (!PltIsThreadInterrupted(&controlReceiveThread)) {
         ENetEvent event;
         enet_uint32 waitTimeMs;
@@ -1212,6 +1236,14 @@ static void controlReceiveThreadFunc(void* context) {
                         // assume the server died tragically, so go ahead and tear down.
                         PltUnlockMutex(&enetMutex);
                         Limelog("Disconnect event timeout expired\n");
+#ifdef VIPLE_MPQUIC
+                        if (quicIsFailoverActive()) {
+                            Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: ENet timeout during "
+                                    "QUIC failover — suppressing connectionTerminated\n");
+                            enetReconnectPending = 1;
+                            goto enet_reconnect_wait;
+                        }
+#endif
                         ListenerCallbacks.connectionTerminated(-1);
                         return;
                     }
@@ -1234,6 +1266,20 @@ static void controlReceiveThreadFunc(void* context) {
 
             err = LastSocketFail();
             Limelog("Control stream connection failed: %d\n", err);
+#ifdef VIPLE_MPQUIC
+            // §Q-ENET-GRACE 2026-05-27: ENet socket 綁在 primary interface
+            // IP，failover 時 underlying interface 消失，socket 不能遷移所以
+            // send/recv 直接失敗（typical WSAEWOULDBLOCK 10035）。
+            // 不可彈 "Connection terminated" dialog——QUIC failover 已把
+            // video/audio 轉到備援路徑，使用者只損失控制輸入。
+            if (quicIsFailoverActive()) {
+                Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: control stream "
+                        "connection failed (%d) during QUIC failover — "
+                        "suppressing connectionTerminated\n", err);
+                enetReconnectPending = 1;
+                goto enet_reconnect_wait;
+            }
+#endif
             ListenerCallbacks.connectionTerminated(err);
             return;
         }
@@ -1413,11 +1459,141 @@ static void controlReceiveThreadFunc(void* context) {
             free(ctlHdr);
         }
         else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+#ifdef VIPLE_MPQUIC
+            // §Q-ENET-GRACE: 當 QUIC failover 正在進行中，ENet 斷線不立即
+            // 終止串流。QUIC 已將 video/audio 切到備援路徑，串流仍然活著。
+            // 控制輸入（滑鼠 / 鍵盤）暫時中斷，直到用戶重新串流。
+            if (quicIsFailoverActive()) {
+                Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: ENet disconnected during "
+                        "QUIC failover — suppressing connectionTerminated. "
+                        "Stream continues on backup path (control input lost)\n");
+                enetReconnectPending = 1;
+                goto enet_reconnect_wait;
+            }
+#endif
             Limelog("Control stream received unexpected disconnect event\n");
             ListenerCallbacks.connectionTerminated(-1);
             return;
         }
     }
+
+#ifdef VIPLE_MPQUIC
+enet_reconnect_wait:
+    // §Q-ENET-RECONNECT v1.5.182: ENet 斷線後等待 Ethernet QUIC path
+    // 恢復，然後自動重建 ENet 連線。加密 sequence number 不重置，
+    // 重連後 AES-GCM IV 從斷點繼續遞增。
+    if (enetReconnectPending) {
+        // 注意：這裡 *** 不 *** 立即把 enetReconnectPending 清零。
+        // 保持 = 1 讓 lossStatsThread 偵測到並退出（Fix F）。
+        // 清零在 500ms 等待後、銷毀 peer/client 前才做。
+
+        Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: waiting for Ethernet "
+                "interface recovery (up to 120s, checking OS interface state)...\n");
+
+        // §Q-ENET-RECONNECT v1.5.183 Fix G: 給 lossStatsThread 時間
+        // 偵測 enetReconnectPending 並退出（每 100ms 醒一次，500ms 足夠）。
+        // 之後才安全銷毀 peer/client。Fix E 的 null guard 是額外防線。
+        PltSleepMs(500);
+
+        enetReconnectPending = 0;
+
+        // 銷毀舊 ENet 資源（lossStatsThread 已退出，安全）
+        PltLockMutex(&enetMutex);
+        if (peer) { enet_peer_reset(peer); peer = NULL; }
+        if (client) { enet_host_destroy(client); client = NULL; }
+        PltUnlockMutex(&enetMutex);
+
+        // v1.5.185 Fix H: 30→120 秒。使用者重新啟用 Ethernet 可能需要
+        // 30-60 秒；v1.5.184 測試 30s timeout 差 4 秒就到期。
+        // 等待期間 video/audio 正常走 QUIC 備援路徑，只有 input 暫停。
+        int waitSec = 0;
+        while (!stopping && !PltIsThreadInterrupted(&controlReceiveThread) && waitSec < 120) {
+            PltSleepMs(1000);
+            waitSec++;
+
+            // v1.5.185 Fix H: 改用 OS 層介面偵測。
+            // quicGetSubflowStats() 跳過 picoquicDeleted 的 subflow，
+            // 偵測不到已被 picoquic 刪除的 Ethernet path。
+            // lcEnumNetInterfaces() 直接問 OS（Windows: GetAdaptersAddresses），
+            // 介面 UP 就回傳，不受 QUIC 內部狀態影響。
+            LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
+            int ifCount = lcEnumNetInterfaces(interfaces, LC_NETIF_MAX_COUNT);
+            int ethernetAlive = 0;
+            for (int i = 0; i < ifCount; i++) {
+                if (interfaces[i].type == LC_NETIF_TYPE_ETHERNET) {
+                    ethernetAlive = 1;
+                    break;
+                }
+            }
+            if (!ethernetAlive) continue;
+
+            // Ethernet 介面恢復 → 嘗試 ENet 重連
+            Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: Ethernet interface "
+                    "detected (OS-level) after %d s, attempting ENet reconnect\n", waitSec);
+
+            {
+                ENetAddress remoteAddress, localAddress;
+                ENetEvent reconnEvent;
+
+                enet_address_set_address(&localAddress, (struct sockaddr *)&LocalAddr, AddrLen);
+                enet_address_set_port(&localAddress, 0);  // OS 分配新 port
+
+                enet_address_set_address(&remoteAddress, (struct sockaddr *)&RemoteAddr, AddrLen);
+                enet_address_set_port(&remoteAddress, ControlPortNumber);
+
+                PltLockMutex(&enetMutex);
+                client = enet_host_create(RemoteAddr.ss_family,
+                                          LocalAddr.ss_family != 0 ? &localAddress : NULL,
+                                          1, CTRL_CHANNEL_COUNT, 0, 0);
+                if (!client) {
+                    PltUnlockMutex(&enetMutex);
+                    Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: enet_host_create "
+                            "failed, retrying...\n");
+                    continue;  // 1 秒後重試
+                }
+
+                client->intercept = ignoreDisconnectIntercept;
+                enet_socket_set_option(client->socket, ENET_SOCKOPT_QOS, 1);
+
+                peer = enet_host_connect(client, &remoteAddress,
+                                         CTRL_CHANNEL_COUNT, ControlConnectData);
+                PltUnlockMutex(&enetMutex);
+
+                if (!peer) {
+                    PltLockMutex(&enetMutex);
+                    enet_host_destroy(client); client = NULL;
+                    PltUnlockMutex(&enetMutex);
+                    Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: enet_host_connect "
+                            "failed, retrying...\n");
+                    continue;
+                }
+
+                // 等待連線完成（5 秒超時）
+                int cErr = serviceEnetHost(client, &reconnEvent, 5000);
+                if (cErr > 0 && reconnEvent.type == ENET_EVENT_TYPE_CONNECT) {
+                    enet_host_flush(client);
+                    enet_peer_timeout(peer, 2, 10000, 10000);
+                    Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: ENet reconnected! "
+                            "(seq continues from %u)\n", currentEnetSequenceNumber);
+                    goto enet_main_loop;  // 回到主事件迴圈
+                }
+
+                // 連線失敗 → 清理，下一秒重試
+                PltLockMutex(&enetMutex);
+                if (peer) { enet_peer_reset(peer); peer = NULL; }
+                if (client) { enet_host_destroy(client); client = NULL; }
+                PltUnlockMutex(&enetMutex);
+                Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: connect attempt failed "
+                        "(err=%d), retrying...\n", cErr);
+            }
+        }
+
+        if (waitSec >= 120) {
+            Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: 120s timeout — giving up "
+                    "(input permanently lost for this session)\n");
+        }
+    }
+#endif
 }
 
 static void lossStatsThreadFunc(void* context) {
@@ -1434,6 +1610,17 @@ static void lossStatsThreadFunc(void* context) {
             // For Sunshine servers, send the more detailed per-frame FEC messages
             if (IS_SUNSHINE()) {
                 PQUEUED_FRAME_FEC_STATUS queuedFrameStatus;
+
+#ifdef VIPLE_MPQUIC
+                // §Q-ENET-RECONNECT v1.5.183: controlReceiveThread 正在等待
+                // Ethernet 恢復 → peer/client 即將被銷毀，lossStatsThread
+                // 繼續送 FEC/ping 會 NULL crash。提前退出。
+                if (enetReconnectPending) {
+                    Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: lossStats thread "
+                            "exiting (reconnect pending)\n");
+                    return;
+                }
+#endif
 
                 // Sunshine should always use ENet for control messages
                 LC_ASSERT(peer != NULL);

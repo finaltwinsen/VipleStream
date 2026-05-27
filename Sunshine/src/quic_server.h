@@ -62,6 +62,18 @@ namespace quic_server {
     bool sendDatagramScheduled(uint8_t flowType, const uint8_t *data,
                                size_t len, int scheduler);
 
+    // §Q-REINJECT v1.5.172: 對所有 active path 同送同一個 datagram
+    // （XLINK SIGCOMM 2021 reinjection 模式）。用於 PATH-SWITCH 後
+    // 送 IDR frame，確保至少一條 path 送達。client depacketizer 用
+    // sequence number 去重，先到的勝出。
+    bool sendDatagramReinject(uint8_t flowType, const uint8_t *data,
+                              size_t len);
+
+    // §Q-REINJECT v1.5.172: 判定當前是否在 PATH-SWITCH 後 2 秒
+    // reinjection 視窗內。stream.cpp 偵測 IDR frame 時，若此函式回
+    // true 就用 sendDatagramReinject 送 IDR shards。
+    bool isInReinjectionWindow() const;
+
     bool sendStream(const uint8_t *data, size_t len);
 
     void setRecvHandler(RecvHandler handler);
@@ -87,6 +99,9 @@ namespace quic_server {
       uint8_t flowType;
       int scheduler;
       bool isStream;          // true → reliable stream #0; false → datagram
+      bool reinject;          // §Q-REINJECT v1.5.172: true → 對所有 active path
+                              //   同送 datagram（XLINK reinjection 模式，用於
+                              //   PATH-SWITCH 後送 IDR 提高送達率）
       std::vector<uint8_t> data;
     };
     std::mutex _pendingMutex;
@@ -110,9 +125,22 @@ namespace quic_server {
     // to cnx-level queue (single path), 0+ = picoquic path index.
     int _lastVideoPath = -2;
 
+    // §Q-PATH-SWITCH-STICKY 2026-05-27: bestVideoPath 一旦選定就 sticky，
+    // 只在當前路徑不健康時才允許切換。v1.5.163 實測：dwell 時間策略
+    // 只延遲震盪不防止震盪 → 改為無條件 sticky。
+    // _lastPathSwitchTime 僅用於 diagnostic log。
+    uint64_t _lastPathSwitchTime = 0;  // picoquic_current_time() µs
+
     // §Q-PATH-SWITCH-IDR 2026-05-27: bestVideoPath 切換時自動要求 IDR。
     // drainPendingToQuic() 設 flag → stream.cpp video 送出迴圈消費。
     std::atomic<bool> _pathSwitchIdrNeeded{false};
+
+    // §Q-FAILOVER-CNXQ 2026-05-27: failover 期間改用 cnx-level datagram
+    // queue（不用 per-path queue）。picoquic 對剛從 backup 升級的路徑
+    // 有 scheduler 排程缺陷——per-path queue 的資料堆積但不被排程發送。
+    // 改用 cnx-level queue 讓 picoquic 內部排程器自行路由到可用路徑。
+    // Pass 3 / EMERGENCY-PROMOTE 設 true；Pass 1（warm 健康路徑）清除。
+    bool _failoverCnxQueue = false;
   public:
     // stream.cpp 調用：若 bestVideoPath 切換過則回 true 並清除 flag
     bool consumePathSwitchIdr() {
@@ -125,6 +153,44 @@ namespace quic_server {
     std::atomic<uint64_t> _dgramPushed{0};
     std::atomic<uint64_t> _dgramDroppedStale{0};
     std::atomic<uint64_t> _dgramPendingPeak{0};
+
+    // §Q-STALE 2026-05-27: approximate picoquic video queue depth tracking.
+    // 防止 picoquic datagram queue 無限堆積。server 以 120-156fps 編碼
+    // 但 picoquic 只能送 ~60fps → 差額 FIFO 堆積 → 200K+ datagrams →
+    // client 看到 2 分鐘前的畫面 → 滑鼠「慢半拍、越來越差」。
+    // approxVideoQueueDepth 用 bytes_sent delta 估算 picoquic 已送量，
+    // 超過 MAX 就丟棄多餘 video datagram 不入 picoquic queue。
+    int64_t _approxVideoQueueDepth = 0;
+    uint64_t _lastTotalBytesSent = 0;
+    static constexpr int64_t MAX_VIDEO_QUEUE_DEPTH = 60; // ~4 frames × 14 dgrams/frame
+
+    // §Q-PATH-SWITCH-FLUSH 2026-05-27: PATH-SWITCH 後寬限期計數器。
+    // 非零期間 §Q-STALE 不丟 video datagram，確保 IDR 通過。
+    int _pathSwitchGraceCycles = 0;
+
+    // §Q-STALE-SAFETY-VALVE v1.5.181: video stall 偵測計時器。
+    // 當 §Q-STALE 持續丟棄 video 超過 3 秒，表示陷入死亡螺旋
+    // （沒有 PATH-SWITCH → grace 不重設 → 永遠丟棄）。
+    // 安全閥重設 approxVQ + 恢復 grace 來打破循環。
+    uint64_t _staleStallStart = 0;
+
+    // §Q-GRACE-FIX 2026-05-27 (v1.5.172): per-failover-episode grace
+    // 重設邏輯。原版每次 PATH-SWITCH 都重設 grace → 振盪期間 grace
+    // 永不過期 → §Q-STALE 失效。改為「同 episode 內振盪不續命」。
+    uint64_t _failoverEpisodeStartTime = 0;
+
+    // §Q-REINJECT-WINDOW 2026-05-27 (v1.5.172 bug fix)：reinject 視窗
+    // 只在「真正的 failover 切換」開（_lastVideoPath ≥ 0 → 新 path ≥ 0）。
+    // 不能用 _lastPathSwitchTime，因為連線剛建立時的初始 path 選定
+    // （-2 → -1 → 0）也會觸發 PATH-SWITCH 邏輯，誤把 reinject 開了
+    // → IDR 推到所有 standby path 的 picoquic queue → 堆積塞爆。
+    uint64_t _reinjectWindowUntil = 0;
+
+    // §Q-PROMOTE-DEBOUNCE 2026-05-27: 防止 Pass 3 emergency-promote
+    // 對同一 path 在短時間內重複呼叫。picoquic_set_path_status 是
+    // async，期間 path 仍顯示 backup，會觸發 Pass 3 連續多次 promote。
+    uint64_t _lastEmergencyPromoteTime = 0;
+    uint64_t _lastEmergencyPromotedId = UINT64_MAX;
 
     // §K.10 diag: per-flow 計數器 (index = flowType: 0=unused, 1=video, 2=audio, 3=control)
     std::atomic<uint64_t> _dgramQueuedByFlow[4]{};

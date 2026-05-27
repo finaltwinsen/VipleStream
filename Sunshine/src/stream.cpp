@@ -664,6 +664,40 @@ namespace stream {
           break;
         case ENET_EVENT_TYPE_DISCONNECT:
           BOOST_LOG(info) << "CLIENT DISCONNECTED"sv;
+#ifdef VIPLE_MPQUIC
+          // §Q-SERVER-GRACE 2026-05-27: 若 QUIC multipath 仍有可用路徑，
+          // 不立即 teardown session。ENet 死了只是失去控制通道（input），
+          // 視訊 / 音訊繼續透過 QUIC 備援路徑送出。
+          // 對應 client 端 §Q-ENET-GRACE（壓住 connectionTerminated 對話框）。
+          if (config::stream.mpquic_enabled && quic_server::g_listener) {
+            auto quicSession = quic_server::g_listener->getSession(
+                session->video.peer.address());
+            if (quicSession && quicSession->isReady()) {
+              BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-SERVER-GRACE: ENet disconnected "
+                  << "but QUIC session still alive — keeping stream active "
+                  << "(input lost, video/audio continue on backup path)";
+
+              // §Q-ENET-RECONNECT v1.5.182: 清除舊 peer，讓後續 client
+              // 重連時 get_session() 的慢速路徑能匹配到同一 session。
+              // 不清除的話 line 562 `if (session_p->control.peer)` 會
+              // skip 這個 session → 重連被拒絕。
+              // connect_data 不清除，用於匹配重連的新 peer。
+              {
+                auto ptslg = _peer_to_session.lock();
+                _peer_to_session->erase(session->control.peer);
+              }
+              enet_peer_reset(session->control.peer);
+              session->control.peer = nullptr;
+              BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-ENET-RECONNECT: cleared stale "
+                  << "control.peer — ready for client ENet reconnect";
+
+              // 延長 pingTimeout 30 秒，等 client 重連
+              session->pingTimeout = std::chrono::steady_clock::now()
+                  + std::chrono::seconds(30);
+              break;
+            }
+          }
+#endif
           // No more clients to send video data to ^_^
           if (session->state == session::state_e::RUNNING) {
             session::stop(*session);
@@ -1259,9 +1293,31 @@ namespace stream {
           auto session = *pos;
 
           if (now > session->pingTimeout) {
-            auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
-            BOOST_LOG(info) << address << ": Ping Timeout"sv;
-            session::stop(*session);
+#ifdef VIPLE_MPQUIC
+            // §Q-SERVER-GRACE: QUIC 仍活著時延長 ping timeout，不 teardown。
+            // QUIC connection close 後 getSession() 回 nullptr → 下輪自然 teardown。
+            if (config::stream.mpquic_enabled && quic_server::g_listener) {
+              auto quicSession = quic_server::g_listener->getSession(
+                  session->video.peer.address());
+              if (quicSession && quicSession->isReady()) {
+                session->pingTimeout = now + std::chrono::seconds(5);
+                BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-SERVER-GRACE: ping timeout "
+                    << "suppressed — QUIC session still alive, extending +5s";
+                // 不 stop，continue 到下一個 session
+              }
+              else {
+                auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
+                BOOST_LOG(info) << address << ": Ping Timeout (QUIC also dead)"sv;
+                session::stop(*session);
+              }
+            }
+            else
+#endif
+            {
+              auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
+              BOOST_LOG(info) << address << ": Ping Timeout"sv;
+              session::stop(*session);
+            }
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
@@ -1720,14 +1776,77 @@ namespace stream {
                             << session->video.peer.address().to_string() << ")";
             logged_once = true;
           }
-          // §Q-PATH-SWITCH-IDR 2026-05-27：QUIC bestVideoPath 切換時
-          // 自動觸發 IDR。client 的 ENet 控制通道在 failover 時已死，
-          // 無法自行請求 IDR → server 必須主動送出。
-          if (quicVideoSession->consumePathSwitchIdr()) {
-            BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-PATH-SWITCH-IDR: "
-                            << "bestVideoPath changed — requesting IDR "
-                            << "for decoder re-sync";
-            session->video.idr_events->raise(true);
+          // §Q-IDR-VIA-QUIC v1.5.177 (server 端)：註冊 QUIC stream #0
+          // recv handler，處理 client 透過 QUIC 送來的 IDR request。
+          // Client 的 ENet 控制通道在 failover 時已死（根因 D），
+          // 改走 QUIC stream #0 確保 IDR request 送達。
+          {
+            static bool recvHandlerSet = false;
+            if (!recvHandlerSet && quicVideoSession) {
+              auto idrEvt = session->video.idr_events;
+              quicVideoSession->setRecvHandler(
+                  [idrEvt](uint8_t flowType, const uint8_t *data, size_t len) {
+                    // flowType 0x03 = FLOW_CONTROL (QUIC stream #0)
+                    // data[0] == 0x49 ('I') = IDR request marker
+                    if (flowType == 0x03 && len >= 1 && data[0] == 0x49) {
+                      BOOST_LOG(info)
+                          << "[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: received IDR "
+                          << "request from client via QUIC stream #0";
+                      idrEvt->raise(true);
+                    }
+                  });
+              recvHandlerSet = true;
+              BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: "
+                              << "recv handler registered on QUIC session";
+            }
+          }
+          // §Q-FAILOVER-IDR-LOOP v1.5.177：PATH-SWITCH 後 10 秒內每
+          // 500ms 強制送一次 IDR。不依賴 client 的 IDR request（ENet
+          // 可能已死——根因 D）。單次 IDR 在 WiFi cwnd 冷啟動期幾乎
+          // 一定送不完（根因 E，0.45 Mbps vs 200KB IDR），持續重送
+          // 讓 cwnd slow start 有時間成長，後面的 IDR 成功率指數增加。
+          //
+          // 取代 v1.5.172-176 的 §Q-PATH-SWITCH-IDR 一次性觸發。
+          {
+            static auto failoverIdrLoopStart = std::chrono::steady_clock::time_point{};
+            static auto lastFailoverIdr      = std::chrono::steady_clock::time_point{};
+            static int  failoverIdrCount     = 0;
+            constexpr auto IDR_LOOP_DURATION = std::chrono::seconds(10);
+            constexpr auto IDR_LOOP_INTERVAL = std::chrono::milliseconds(500);
+
+            if (quicVideoSession->consumePathSwitchIdr()) {
+              // PATH-SWITCH 觸發 → 開始 IDR loop
+              failoverIdrLoopStart = std::chrono::steady_clock::now();
+              lastFailoverIdr = {};
+              failoverIdrCount = 0;
+              session->video.idr_events->raise(true);
+              BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-FAILOVER-IDR-LOOP: started "
+                              << "(10s window, 500ms interval)";
+            }
+
+            // Loop 期間：每 500ms 再送一次 IDR
+            auto loopNow = std::chrono::steady_clock::now();
+            if (failoverIdrLoopStart.time_since_epoch().count() > 0 &&
+                (loopNow - failoverIdrLoopStart) < IDR_LOOP_DURATION) {
+              if (lastFailoverIdr.time_since_epoch().count() == 0 ||
+                  (loopNow - lastFailoverIdr) >= IDR_LOOP_INTERVAL) {
+                lastFailoverIdr = loopNow;
+                failoverIdrCount++;
+                session->video.idr_events->raise(true);
+                // 節流 log：前 5 次 + 之後每 4 次印一次
+                if (failoverIdrCount <= 5 || (failoverIdrCount % 4) == 0) {
+                  BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-FAILOVER-IDR-LOOP: "
+                                  << "periodic IDR #" << failoverIdrCount;
+                }
+              }
+            } else if (failoverIdrLoopStart.time_since_epoch().count() > 0 &&
+                       (loopNow - failoverIdrLoopStart) >= IDR_LOOP_DURATION) {
+              // Loop 到期，清除
+              BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-FAILOVER-IDR-LOOP: ended "
+                              << "after " << failoverIdrCount << " IDRs";
+              failoverIdrLoopStart = {};
+              failoverIdrCount = 0;
+            }
           }
         }
 #else
@@ -1872,6 +1991,23 @@ namespace stream {
 
 #ifdef VIPLE_MPQUIC
               if (use_quic) {
+                // §Q-REINJECT v1.5.172: IDR frame + PATH-SWITCH 2 秒
+                // 視窗內走 reinject 模式（多路同送），確保 client 能拿
+                // 到完整 IDR 重新同步。其他狀況沿用單路 datagram。
+                // 偵測一次（per-frame），不必每個 shard 檢查。
+                const bool use_reinject =
+                    quicVideoSession &&
+                    packet->is_idr() &&
+                    quicVideoSession->isInReinjectionWindow();
+
+                static int reinjectFrameLogged = 0;
+                if (use_reinject && reinjectFrameLogged++ < 20) {
+                  BOOST_LOG(info)
+                      << "[VIPLE-MPQUIC] §Q-REINJECT: IDR frame, "
+                      << "shards=" << current_batch_size
+                      << ", path-switch active — sending on all paths";
+                }
+
                 // Send each shard as a QUIC DATAGRAM (flow type = video)
                 for (auto y = 0; y < current_batch_size; y++) {
                   const auto idx = next_shard_to_send + y;
@@ -1882,9 +2018,14 @@ namespace stream {
                   std::memcpy(scratch.data() + pre, shards.data(idx), dat);
 
                   if (quicVideoSession) {
-                    quicVideoSession->sendDatagramScheduled(
-                        0x01, scratch.data(), scratch.size(),
-                        config::stream.mpquic_scheduler);
+                    if (use_reinject) {
+                      quicVideoSession->sendDatagramReinject(
+                          0x01, scratch.data(), scratch.size());
+                    } else {
+                      quicVideoSession->sendDatagramScheduled(
+                          0x01, scratch.data(), scratch.size(),
+                          config::stream.mpquic_scheduler);
+                    }
                   }
                 }
               } else

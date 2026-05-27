@@ -56,6 +56,12 @@
 //   不動；DYN_STANDBY_RTT_EXCESS_MS 只用在 live QUIC RTT 動態監測）
 #define DYN_STANDBY_RTT_EXCESS_MS  3
 
+// §Q-PATH-RECOVERY-STANDBY: 恢復路徑的 standby 寬限期（秒）。
+// 路徑恢復後，立即標為 standby 不讓 server 切影片過去。寬限期內
+// DYN-STANDBY 不會 promote，讓 server 繼續用已穩定的路徑。
+// 5 秒 ≈ picoquic slow-start 需要的 warm-up 時間。
+#define RECOVERY_STANDBY_GRACE_S   5
+
 // ── Internal state ──────────────────────────────────────────
 
 typedef struct _QUIC_SUBFLOW {
@@ -103,6 +109,11 @@ typedef struct _QUIC_SUBFLOW {
     unsigned int icmpRttMs;
     // 若為 true，path_available 不升級此路徑（維持 backup failover）
     bool keepAsStandby;
+    // §Q-PATH-RECOVERY-STANDBY 2026-05-27: 恢復的路徑以 standby 加入，
+    // 設寬限期（5 秒）讓 cwnd warm up，防止 server 端 bestVideoPath
+    // 立即切回低 RTT 但 cwnd 冷的恢復路徑導致震盪。
+    // DYN-STANDBY promotion 在此時間前不執行。0 = 不受限。
+    uint64_t recoveryStandbyUntil;
 } QUIC_SUBFLOW;
 
 typedef struct _QUIC_TRANSPORT_CTX {
@@ -207,7 +218,12 @@ static uint64_t g_lastDiagLogTime = 0;
 #define QUIC_JITTER_BUF_SIZE    256   // slots per flow (power of 2)
 #define QUIC_JITTER_BUF_MASK    (QUIC_JITTER_BUF_SIZE - 1)
 #define QUIC_JITTER_MAX_PKT     1500  // max datagram size
-#define QUIC_JITTER_MAX_WAIT_US 10000 // 10ms reorder timeout
+// §Q-IDR-JITTER-RELAX v1.5.177：正常 10ms，failover 期間 200ms。
+// WiFi cwnd 冷啟動只有 ~0.45 Mbps（根因 E），IDR shard 到達間距
+// 可能 >> 10ms。放寬 timeout 讓 jitter buffer 等更久，讓 IDR 的
+// 所有 shard 有機會到齊。failover 結束後自動回到 10ms。
+#define QUIC_JITTER_MAX_WAIT_NORMAL_US   10000  // 10ms 正常
+#define QUIC_JITTER_MAX_WAIT_FAILOVER_US 200000 // 200ms failover
 
 typedef struct _QUIC_JITTER_SLOT {
     unsigned char data[QUIC_JITTER_MAX_PKT];
@@ -1007,6 +1023,20 @@ int quicAddSubflowEx(int interfaceIndex,
         Limelog("[VIPLE-MPQUIC] §Q-MP-STANDBY: subflow %d (if %d) "
                 "marked standby (VPN path, primary is non-VPN)\n",
                 sf->id, interfaceIndex);
+    } else if (interfaceType == LC_NETIF_TYPE_WIFI &&
+               g_ctx.subflowCount > 0 &&
+               g_ctx.subflows[0].type == LC_NETIF_TYPE_ETHERNET) {
+        // §Q-MP-WIFI-STANDBY v1.5.179: WiFi 在 Ethernet primary 存在時
+        // 一律標 standby。WiFi jitter 變異量不可控（beacon、interference、
+        // driver delay），即使 RTT 低（1.9ms），突發 spike 仍超過 jitter
+        // buffer 的 10ms timeout → 跨路徑 shard timeout → frame 無法
+        // FEC 重建 → IDR wait → 凍結。
+        // WiFi 的價值在 failover 備援，不是正常操作分流。
+        sf->keepAsStandby = true;
+        Limelog("[VIPLE-MPQUIC] §Q-MP-WIFI-STANDBY: subflow %d (if %d) "
+                "marked standby (WiFi path, primary is Ethernet — "
+                "WiFi jitter risk exceeds 10ms timeout)\n",
+                sf->id, interfaceIndex);
     } else if (icmpRtt > 0 && g_ctx.subflows[0].rttMs > 0.0f) {
         if ((float)icmpRtt - g_ctx.subflows[0].rttMs >
             (float)STANDBY_RTT_EXCESS_MS) {
@@ -1303,8 +1333,67 @@ static void quicCheckPathHealth(void) {
         // §Q-MP-STANDBY: standby 路徑故意不接收應用資料，
         // 不做 stall 偵測（否則會被誤判為 inactive）。
         // 只要 picoquic 沒刪它，它就是活的。
-        if (sf->keepAsStandby)
-            continue;
+        //
+        // §Q-DYN-STANDBY-ALIVE 2026-05-27: 但要先檢查所有非 standby
+        // 參考路徑是否都已死亡。若是，此 standby 路徑是唯一存活者，
+        // 必須 promote 為 available，否則 server 無法送 video 到它。
+        //
+        // §Q-VPN-LAST 2026-05-27 (v1.5.171 實測修正)：VPN 路徑（Tailscale
+        // 等）物理上常依賴主介面的網路堆疊。主介面死掉時，VPN 跟著失效，
+        // 直到 VPN daemon 切到 WiFi 才恢復。所以 promote 順序：
+        //   1. 先找非 VPN 的 standby（WiFi 等）
+        //   2. 都沒有才促升 VPN standby
+        // 若此 path 是 VPN，先掃描有沒有非 VPN 的 standby 候選，有 → skip。
+        if (sf->keepAsStandby) {
+            if (sf->active && i > 0) {
+                bool anyAliveRef = false;
+                for (int j = 0; j < g_ctx.subflowCount; j++) {
+                    QUIC_SUBFLOW* ref = &g_ctx.subflows[j];
+                    if (j != i && ref->active && !ref->keepAsStandby &&
+                        !ref->picoquicDeleted &&
+                        ref->consecutiveTimeouts == 0 &&
+                        ref->lastRecvTime > 0 &&
+                        (now - ref->lastRecvTime) < 2000000) {
+                        anyAliveRef = true;
+                        break;
+                    }
+                }
+                // §Q-VPN-LAST：若此 path 是 VPN，先看有沒有非 VPN standby
+                bool deferToNonVpn = false;
+                if (!anyAliveRef && sf->type == LC_NETIF_TYPE_VPN) {
+                    for (int j = 0; j < g_ctx.subflowCount; j++) {
+                        QUIC_SUBFLOW* alt = &g_ctx.subflows[j];
+                        if (j != i && alt->active && alt->keepAsStandby &&
+                            !alt->picoquicDeleted &&
+                            alt->type != LC_NETIF_TYPE_VPN) {
+                            deferToNonVpn = true;
+                            break;
+                        }
+                    }
+                }
+                if (!anyAliveRef && !deferToNonVpn) {
+                    // 所有參考路徑都死了 → promote
+                    sf->keepAsStandby = false;
+                    sf->recoveryStandbyUntil = 0;
+                    sf->lastRecvTime = now;  // 防止 stall detection 立即判 inactive
+                    sf->consecutiveTimeouts = 0;
+                    picoquic_set_path_status(g_ctx.cnx, sf->picoquicPathId,
+                                             picoquic_path_status_available);
+                    g_ctx.failoverPromotedSlot = i;
+                    Limelog("[VIPLE-MPQUIC] §Q-DYN-STANDBY-ALIVE: subflow %d "
+                            "(if %d, slot %d, %s) → active (no valid reference "
+                            "path — all others dead/stale, RTT=%.1fms)\n",
+                            sf->id, sf->interfaceIndex, i,
+                            (sf->type == LC_NETIF_TYPE_VPN) ? "VPN-fallback" : "non-VPN",
+                            sf->rttMs);
+                    // 不 continue — fall through 到正常 health check
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
 
         // Check if path has stalled (no data received for > 5x RTT or 3 seconds)
         uint64_t stallThreshold = (uint64_t)(sf->rttMs * 5000.0f);
@@ -1372,6 +1461,7 @@ static void quicCheckPathHealth(void) {
                 if (bestJ >= 0) {
                     QUIC_SUBFLOW* candidate = &g_ctx.subflows[bestJ];
                     candidate->keepAsStandby = false;
+                    candidate->recoveryStandbyUntil = 0; // failover 覆蓋 recovery grace
 
                     // §Q-MP-FAILOVER-GRACE: 重置 health check 計時器，
                     // 給新升級路徑足夠時間（≥ stallThreshold 3 秒）開始
@@ -1413,11 +1503,19 @@ static void quicCheckPathHealth(void) {
         // 恢復條件：RTT 降回閾值 50% 以下（滯後，防抖動）。
         if (sf->active && sf->rttMs > 0 && i > 0) {
             // 找最快的 non-standby active path（通常是 slot 0）
+            // §Q-DYN-STANDBY-ALIVE 2026-05-27: 排除已超時或近期無收到
+            // 資料的路徑。死亡路徑保留快取的低 RTT（如乙太網路 0.5ms），
+            // 會把存活的 WiFi 路徑（5.3ms）誤判為「excess > 3ms」而踢成
+            // standby，導致 failover 時唯一存活路徑被停用 → 影像凍結。
+            // 加入 consecutiveTimeouts==0 + lastRecvTime 2 秒新鮮度檢查。
             float bestRttMs = -1.0f;
             for (int j = 0; j < g_ctx.subflowCount; j++) {
                 QUIC_SUBFLOW* best = &g_ctx.subflows[j];
                 if (j != i && best->active && !best->keepAsStandby &&
-                    !best->picoquicDeleted && best->rttMs > 0) {
+                    !best->picoquicDeleted && best->rttMs > 0 &&
+                    best->consecutiveTimeouts == 0 &&
+                    best->lastRecvTime > 0 &&
+                    (now - best->lastRecvTime) < 2000000) {
                     if (bestRttMs < 0 || best->rttMs < bestRttMs)
                         bestRttMs = best->rttMs;
                 }
@@ -1426,6 +1524,29 @@ static void quicCheckPathHealth(void) {
                 float excess = sf->rttMs - bestRttMs;
                 if (!sf->keepAsStandby &&
                     excess > (float)DYN_STANDBY_RTT_EXCESS_MS) {
+                    // §Q-DYN-STANDBY-FAILOVER-GUARD v1.5.181: Ethernet primary
+                    // dead/stale → 不降級任何 active path。failover 期間所有
+                    // active path 都珍貴，即使 RTT 較高也保留冗餘。避免 server
+                    // 收到 PATH_STATUS=backup 後失去 fallback path →
+                    // §Q-STALE 死亡螺旋 → video 永久停止。
+                    int ethernetDead = 0;
+                    if (g_ctx.subflowCount > 0 &&
+                        g_ctx.subflows[0].type == LC_NETIF_TYPE_ETHERNET &&
+                        (!g_ctx.subflows[0].active ||
+                         g_ctx.subflows[0].consecutiveTimeouts > 0 ||
+                         g_ctx.subflows[0].picoquicDeleted ||
+                         (g_ctx.subflows[0].lastRecvTime > 0 &&
+                          (now - g_ctx.subflows[0].lastRecvTime) > 2000000))) {
+                        ethernetDead = 1;
+                    }
+                    if (ethernetDead) {
+                        Limelog("[VIPLE-MPQUIC] §Q-DYN-STANDBY-FAILOVER-GUARD: "
+                                "subflow %d (if %d) skip demote — Ethernet primary "
+                                "dead/stale, keeping all active paths for failover "
+                                "(RTT=%.1fms, best=%.1fms, excess=%.1f)\n",
+                                sf->id, sf->interfaceIndex,
+                                sf->rttMs, bestRttMs, excess);
+                    } else {
                     sf->keepAsStandby = true;
                     picoquic_set_path_status(g_ctx.cnx, sf->picoquicPathId,
                                              picoquic_path_status_backup);
@@ -1435,18 +1556,58 @@ static void quicCheckPathHealth(void) {
                             sf->id, sf->interfaceIndex,
                             sf->rttMs, bestRttMs, excess,
                             DYN_STANDBY_RTT_EXCESS_MS);
+                    }
                 } else if (sf->keepAsStandby &&
                            excess <= ((float)DYN_STANDBY_RTT_EXCESS_MS / 2.0f)) {
-                    // RTT 恢復：重新 available（50% 滯後防抖動）
-                    sf->keepAsStandby = false;
-                    picoquic_set_path_status(g_ctx.cnx, sf->picoquicPathId,
-                                             picoquic_path_status_available);
-                    Limelog("[VIPLE-MPQUIC] §Q-MP-DYN-STANDBY: subflow %d (if %d) "
-                            "→ active (QUIC RTT=%.1fms, best=%.1fms, "
-                            "excess=%.1f recovered)\n",
-                            sf->id, sf->interfaceIndex,
-                            sf->rttMs, bestRttMs, excess);
+                    // §Q-MP-WIFI-STANDBY guard v1.5.179: WiFi 在 Ethernet primary
+                    // 仍活躍時不 promote。WiFi 只在 failover/emergency 時才升級。
+                    // 檢查條件：Ethernet primary 活著、非 standby、無連續 timeout。
+                    if (sf->type == LC_NETIF_TYPE_WIFI &&
+                        g_ctx.subflowCount > 0 &&
+                        g_ctx.subflows[0].type == LC_NETIF_TYPE_ETHERNET &&
+                        g_ctx.subflows[0].active && !g_ctx.subflows[0].keepAsStandby &&
+                        !g_ctx.subflows[0].picoquicDeleted &&
+                        g_ctx.subflows[0].consecutiveTimeouts == 0) {
+                        // Ethernet primary alive → WiFi 維持 standby，不 promote
+                    }
+                    // §Q-PATH-RECOVERY-STANDBY: 寬限期內不 promote
+                    else if (sf->recoveryStandbyUntil > 0 &&
+                        picoquic_current_time() < sf->recoveryStandbyUntil) {
+                        // 寬限期未過，維持 standby
+                    } else {
+                        // RTT 恢復：重新 available（50% 滯後防抖動）
+                        sf->keepAsStandby = false;
+                        sf->recoveryStandbyUntil = 0;
+                        picoquic_set_path_status(g_ctx.cnx, sf->picoquicPathId,
+                                                 picoquic_path_status_available);
+                        Limelog("[VIPLE-MPQUIC] §Q-MP-DYN-STANDBY: subflow %d (if %d) "
+                                "→ active (QUIC RTT=%.1fms, best=%.1fms, "
+                                "excess=%.1f recovered)\n",
+                                sf->id, sf->interfaceIndex,
+                                sf->rttMs, bestRttMs, excess);
+                    }
                 }
+            }
+
+            // §Q-MP-WIFI-STANDBY re-demote v1.5.179: Failover 曾升級 WiFi 為 active，
+            // 但 Ethernet primary 已復原 → 把 WiFi 重新降為 standby。
+            // 條件：WiFi 目前是 active（keepAsStandby==false）、Ethernet primary 活躍
+            // 且最近 2 秒內有收到封包（確認是真的活著不是剛 re-activate 的空殼）。
+            if (!sf->keepAsStandby &&
+                sf->type == LC_NETIF_TYPE_WIFI &&
+                g_ctx.subflowCount > 0 &&
+                g_ctx.subflows[0].type == LC_NETIF_TYPE_ETHERNET &&
+                g_ctx.subflows[0].active && !g_ctx.subflows[0].keepAsStandby &&
+                !g_ctx.subflows[0].picoquicDeleted &&
+                g_ctx.subflows[0].consecutiveTimeouts == 0 &&
+                g_ctx.subflows[0].lastRecvTime > 0 &&
+                (now - g_ctx.subflows[0].lastRecvTime) < 2000000) {
+                sf->keepAsStandby = true;
+                picoquic_set_path_status(g_ctx.cnx, sf->picoquicPathId,
+                                         picoquic_path_status_backup);
+                Limelog("[VIPLE-MPQUIC] §Q-MP-WIFI-STANDBY: subflow %d (if %d) "
+                        "→ re-standby (WiFi, Ethernet primary recovered)\n",
+                        sf->id, sf->interfaceIndex);
             }
         }
 
@@ -1698,6 +1859,34 @@ static void quicTryRecoverPaths(int* rejectedIfs, int* rejectedCount) {
                     "on if %d '%s'\n",
                     ret, interfaces[i].index, interfaces[i].name);
 
+            // §Q-PATH-RECOVERY-STANDBY 2026-05-27: 恢復的路徑強制以
+            // standby 加入，設 5 秒寬限期。防止 server 端 bestVideoPath
+            // 立即切到 cwnd 冷的恢復路徑，造成震盪 + IDR 風暴。
+            // v1.5.161 實測：Ethernet 恢復後 cwin=72KB 勉強過 64KB 門檻，
+            // 但 RTT 與 WiFi 相近（都 ~1ms），server 每 3-8ms 在兩者間
+            // 切換 bestVideoPath → 每次都觸發 IDR → 影像永久凍結。
+            PltLockMutex(&g_ctx.picoquicMutex);
+            for (int s = 0; s < g_ctx.subflowCount; s++) {
+                if (g_ctx.subflows[s].id == ret) {
+                    g_ctx.subflows[s].keepAsStandby = true;
+                    g_ctx.subflows[s].recoveryStandbyUntil =
+                        picoquic_current_time() +
+                        (uint64_t)RECOVERY_STANDBY_GRACE_S * 1000000;
+                    if (g_ctx.cnx) {
+                        picoquic_set_path_status(
+                            g_ctx.cnx,
+                            g_ctx.subflows[s].picoquicPathId,
+                            picoquic_path_status_backup);
+                    }
+                    Limelog("[VIPLE-MPQUIC] §Q-PATH-RECOVERY-STANDBY: "
+                            "subflow %d forced standby for %d seconds "
+                            "(cwnd warm-up grace)\n",
+                            ret, RECOVERY_STANDBY_GRACE_S);
+                    break;
+                }
+            }
+            PltUnlockMutex(&g_ctx.picoquicMutex);
+
             for (int r = 0; r < g_ctx.icmpRejectedCount; r++) {
                 if (g_ctx.icmpRejectedIfs[r] == interfaces[i].index) {
                     for (int j = r; j < g_ctx.icmpRejectedCount - 1; j++)
@@ -1911,7 +2100,11 @@ static void quicJitterInsert(QUIC_TRANSPORT_CTX* ctx,
 
     quicJitterDeliver(ctx, jb, ft);
 
-    if (now - jb->lastDeliverUs >= QUIC_JITTER_MAX_WAIT_US) {
+    // §Q-IDR-JITTER-RELAX v1.5.177：failover 期間放寬 jitter timeout
+    int jitterMaxWait = quicIsFailoverActive()
+        ? QUIC_JITTER_MAX_WAIT_FAILOVER_US
+        : QUIC_JITTER_MAX_WAIT_NORMAL_US;
+    if (now - jb->lastDeliverUs >= (uint64_t)jitterMaxWait) {
         for (int i = 0; i < QUIC_JITTER_BUF_SIZE; i++) {
             uint16_t trySeq = (uint16_t)(jb->deliverNextSeq + i);
             int tidx = trySeq & QUIC_JITTER_BUF_MASK;
@@ -2283,6 +2476,7 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                     QUIC_SUBFLOW* candidate = &ctx->subflows[bestJ];
                     int j = bestJ;
                     candidate->keepAsStandby = false;
+                    candidate->recoveryStandbyUntil = 0; // emergency 覆蓋 recovery grace
                     candidate->lastRecvTime = picoquic_current_time();
                     candidate->consecutiveTimeouts = 0;
                     picoquic_set_path_status(
