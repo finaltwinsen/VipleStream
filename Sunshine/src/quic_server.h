@@ -110,6 +110,16 @@ namespace quic_server {
     // to cnx-level queue (single path), 0+ = picoquic path index.
     int _lastVideoPath = -2;
 
+    // §Q-PATH-SWITCH-IDR 2026-05-27: bestVideoPath 切換時自動要求 IDR。
+    // drainPendingToQuic() 設 flag → stream.cpp video 送出迴圈消費。
+    std::atomic<bool> _pathSwitchIdrNeeded{false};
+  public:
+    // stream.cpp 調用：若 bestVideoPath 切換過則回 true 並清除 flag
+    bool consumePathSwitchIdr() {
+      return _pathSwitchIdrNeeded.exchange(false, std::memory_order_acq_rel);
+    }
+  private:
+
     // §K.7 diag: datagram queue/send 計數器
     std::atomic<uint64_t> _dgramQueued{0};
     std::atomic<uint64_t> _dgramPushed{0};

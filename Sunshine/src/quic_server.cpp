@@ -441,6 +441,36 @@ namespace quic_server {
                              << _cnx->path[bestVideoPath]->bytes_in_transit;
         }
       }
+      // §Q-FAILOVER-PROMOTE 2026-05-27：Pass 1/2 都找不到
+      // 非 backup 且 ACK-fresh 的路徑 → 所有 active path 都在 RTO。
+      // 緊急掃描 backup path，挑 RTT 最小的 promote 為 available，
+      // 讓 video datagram 能繼續送出。不 promote 的話 picoquic 排程器
+      // 不會對 backup path 送任何 datagram。
+      if (bestVideoPath < 0) {
+        uint64_t bestRtt = UINT64_MAX;
+        int bestBackupIdx = -1;
+        uint64_t bestBackupPathId = 0;
+        for (int i = 0; i < _cnx->nb_paths; i++) {
+          if (_cnx->path[i] != nullptr &&
+              !_cnx->path[i]->path_is_demoted &&
+              _cnx->path[i]->path_is_backup &&
+              _cnx->path[i]->smoothed_rtt < bestRtt) {
+            bestRtt = _cnx->path[i]->smoothed_rtt;
+            bestBackupIdx = i;
+            bestBackupPathId = _cnx->path[i]->unique_path_id;
+          }
+        }
+        if (bestBackupIdx >= 0) {
+          picoquic_set_path_status(_cnx, bestBackupPathId,
+                                   picoquic_path_status_available);
+          bestVideoPath = bestBackupIdx;
+          BOOST_LOG(info)
+              << "[VIPLE-MPQUIC] §Q-FAILOVER-PROMOTE: "
+              << "no healthy non-backup path — promoting backup path "
+              << bestBackupPathId << " (idx=" << bestBackupIdx
+              << ", rtt=" << (bestRtt / 1000) << "ms) to available";
+        }
+      }
     }
 
     // §Q-PATH-SWITCH 2026-05-27: 記錄 bestVideoPath 切換事件，便於
@@ -461,6 +491,9 @@ namespace quic_server {
                       << bestVideoPath << "(id=" << newPathId
                       << ", rtt=" << (newRtt / 1000) << "ms"
                       << ", cwin=" << newCwin << "B)";
+      // §Q-PATH-SWITCH-IDR：路徑切換時自動要求 IDR，因為 client 端
+      // 的 ENet 控制通道可能已死，無法自行請求 IDR。
+      _pathSwitchIdrNeeded.store(true, std::memory_order_release);
       _lastVideoPath = bestVideoPath;
     }
 

@@ -1720,6 +1720,15 @@ namespace stream {
                             << session->video.peer.address().to_string() << ")";
             logged_once = true;
           }
+          // §Q-PATH-SWITCH-IDR 2026-05-27：QUIC bestVideoPath 切換時
+          // 自動觸發 IDR。client 的 ENet 控制通道在 failover 時已死，
+          // 無法自行請求 IDR → server 必須主動送出。
+          if (quicVideoSession->consumePathSwitchIdr()) {
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-PATH-SWITCH-IDR: "
+                            << "bestVideoPath changed — requesting IDR "
+                            << "for decoder re-sync";
+            session->video.idr_events->raise(true);
+          }
         }
 #else
         const bool use_quic = false;
