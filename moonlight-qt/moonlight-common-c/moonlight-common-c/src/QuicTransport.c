@@ -1333,41 +1333,73 @@ static void quicCheckPathHealth(void) {
                     g_ctx.cnx, sf->picoquicPathId,
                     picoquic_path_status_backup);
 
-                // §Q-MP-STANDBY: 主路徑失效 → 找第一個 standby
-                // 路徑升級為 available，讓 server 開始在它上面
-                // 送資料（failover）。
-                for (int j = 0; j < g_ctx.subflowCount; j++) {
-                    QUIC_SUBFLOW* candidate = &g_ctx.subflows[j];
-                    if (candidate->keepAsStandby &&
-                        candidate->active &&
-                        !candidate->picoquicDeleted) {
-                        candidate->keepAsStandby = false;
+                // §Q-MP-FAILOVER: 主路徑失效 → 升級 standby 路徑頂上。
+                //
+                // §Q-FAILOVER-VPN-LAST 2026-05-27 (使用者洞察)：VPN 路徑
+                // （Tailscale 等）物理上常依賴主介面的網路堆疊。主介面
+                // 死掉時，VPN 也會跟著失效一段時間直到 VPN daemon 切到
+                // 另一個底層介面（WiFi）才恢復。
+                //
+                // 所以升級優先順序：
+                //   1. 非 VPN standby（WiFi 等）裡 RTT 最低的
+                //   2. 若沒有非 VPN，才升級 VPN standby
+                int bestJ = -1;
+                float bestRttMs = 1e9f;
+                bool preferNonVpn = true;
 
-                        // §Q-MP-FAILOVER-GRACE: 重置 health check 計時器，
-                        // 給新升級路徑足夠時間（≥ stallThreshold 3 秒）開始
-                        // 接收 server 資料，避免下次 health check 因為
-                        // lastRecvTime 來自路徑建立時（~250 秒前）而立即
-                        // 判定 INACTIVE。
-                        candidate->lastRecvTime = now;
-                        candidate->consecutiveTimeouts = 0;
+                for (int pass = 0; pass < 2 && bestJ < 0; pass++) {
+                    for (int j = 0; j < g_ctx.subflowCount; j++) {
+                        QUIC_SUBFLOW* candidate = &g_ctx.subflows[j];
+                        if (!candidate->keepAsStandby ||
+                            !candidate->active ||
+                            candidate->picoquicDeleted)
+                            continue;
+                        bool isVpn = (candidate->type == LC_NETIF_TYPE_VPN);
+                        // Pass 0: only non-VPN; Pass 1: VPN-fallback
+                        if (preferNonVpn && pass == 0 && isVpn) continue;
+                        if (pass == 1 && !isVpn) continue;
 
-                        picoquic_set_path_status(
-                            g_ctx.cnx, candidate->picoquicPathId,
-                            picoquic_path_status_available);
-                        g_ctx.failoverPromotedSlot = j;
-                        Limelog("[VIPLE-MPQUIC] §Q-MP-FAILOVER: promoted "
-                                "standby subflow %d (if %d, slot %d) to "
-                                "available (primary if %d failed)\n",
-                                candidate->id,
-                                candidate->interfaceIndex, j,
-                                sf->interfaceIndex);
-                        if (g_ctx.failoverCallback) {
-                            g_ctx.failoverCallback(
-                                candidate->id,
-                                candidate->interfaceIndex,
-                                true, g_ctx.failoverContext);
+                        float effRtt = (candidate->rttMs > 0)
+                            ? candidate->rttMs
+                            : (float)candidate->icmpRttMs;
+                        if (effRtt < bestRttMs) {
+                            bestRttMs = effRtt;
+                            bestJ = j;
                         }
-                        break;  // 只升級一個
+                    }
+                }
+
+                if (bestJ >= 0) {
+                    QUIC_SUBFLOW* candidate = &g_ctx.subflows[bestJ];
+                    candidate->keepAsStandby = false;
+
+                    // §Q-MP-FAILOVER-GRACE: 重置 health check 計時器，
+                    // 給新升級路徑足夠時間（≥ stallThreshold 3 秒）開始
+                    // 接收 server 資料，避免下次 health check 因為
+                    // lastRecvTime 來自路徑建立時（~250 秒前）而立即
+                    // 判定 INACTIVE。
+                    candidate->lastRecvTime = now;
+                    candidate->consecutiveTimeouts = 0;
+
+                    picoquic_set_path_status(
+                        g_ctx.cnx, candidate->picoquicPathId,
+                        picoquic_path_status_available);
+                    g_ctx.failoverPromotedSlot = bestJ;
+                    Limelog("[VIPLE-MPQUIC] §Q-MP-FAILOVER: promoted "
+                            "standby subflow %d (if %d, slot %d, %s, "
+                            "RTT=%.1fms) to available (primary if %d "
+                            "failed)\n",
+                            candidate->id,
+                            candidate->interfaceIndex, bestJ,
+                            (candidate->type == LC_NETIF_TYPE_VPN)
+                                ? "VPN-fallback" : "non-VPN",
+                            bestRttMs,
+                            sf->interfaceIndex);
+                    if (g_ctx.failoverCallback) {
+                        g_ctx.failoverCallback(
+                            candidate->id,
+                            candidate->interfaceIndex,
+                            true, g_ctx.failoverContext);
                     }
                 }
             }
@@ -2215,18 +2247,28 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                     activeNonStandbyCount++;
             }
             if (activeNonStandbyCount == 0) {
-                // §Q-MP-EMERGENCY-PROMOTE v2 (2026-05-27)：挑「最佳 RTT」
-                // 的 standby candidate，不是「第一個」。例如同時有 Tailscale
-                // (1.2ms RTT) 和 WiFi (16.8ms) 兩個 standby 時，應該升級
-                // Tailscale，slot 順序可能讓 WiFi 排在前面誤被選中。
+                // §Q-MP-EMERGENCY-PROMOTE v3 (2026-05-27)：兩階段挑選——
+                // 先在「非 VPN」standby 裡挑 best-RTT；若無，再 fallback
+                // 到 VPN standby。
+                //
+                // 使用者洞察：VPN（Tailscale 等）物理上常走主介面的網路
+                // 堆疊。主介面死掉時 VPN 也會跟著失效一段時間。所以
+                // EMERGENCY-PROMOTE 不該優先挑 VPN，即使其 RTT 較低
+                // （那個 RTT 是底層健康時測到的，已經失效）。
                 int bestJ = -1;
                 float bestRttMs = 1e9f;
-                for (int j = 0; j < ctx->subflowCount; j++) {
-                    QUIC_SUBFLOW* candidate = &ctx->subflows[j];
-                    if (candidate->keepAsStandby &&
-                        candidate->active &&
-                        !candidate->picoquicDeleted) {
-                        // 用目前的 QUIC RTT（若有）或 ICMP RTT 作為排序依據
+
+                for (int pass = 0; pass < 2 && bestJ < 0; pass++) {
+                    for (int j = 0; j < ctx->subflowCount; j++) {
+                        QUIC_SUBFLOW* candidate = &ctx->subflows[j];
+                        if (!candidate->keepAsStandby ||
+                            !candidate->active ||
+                            candidate->picoquicDeleted)
+                            continue;
+                        bool isVpn = (candidate->type == LC_NETIF_TYPE_VPN);
+                        if (pass == 0 && isVpn) continue;       // 跳過 VPN
+                        if (pass == 1 && !isVpn) continue;      // 只看 VPN
+
                         float effRtt = (candidate->rttMs > 0)
                             ? candidate->rttMs
                             : (float)candidate->icmpRttMs;
@@ -2236,6 +2278,7 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                         }
                     }
                 }
+
                 if (bestJ >= 0) {
                     QUIC_SUBFLOW* candidate = &ctx->subflows[bestJ];
                     int j = bestJ;
@@ -2248,12 +2291,15 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                     ctx->failoverPromotedSlot = j;
                     Limelog("[VIPLE-MPQUIC] §Q-MP-EMERGENCY-PROMOTE: "
                             "primary if %d killed by picoquic, no other "
-                            "active non-standby paths — promoting best-RTT "
-                            "standby subflow %d (if %d, slot %d, RTT=%.1fms) "
-                            "to available\n",
+                            "active non-standby paths — promoting "
+                            "standby subflow %d (if %d, slot %d, %s, "
+                            "RTT=%.1fms) to available\n",
                             killedIfIdx,
                             candidate->id,
-                            candidate->interfaceIndex, j, bestRttMs);
+                            candidate->interfaceIndex, j,
+                            (candidate->type == LC_NETIF_TYPE_VPN)
+                                ? "VPN-fallback" : "non-VPN",
+                            bestRttMs);
                     if (ctx->failoverCallback) {
                         ctx->failoverCallback(
                             candidate->id,
