@@ -443,6 +443,9 @@ static void inputSendThreadProc(void* context) {
                 // Encrypt and send the split packet
                 if (!sendInputPacket(holder, more)) {
                     freePacketHolder(holder);
+#ifdef VIPLE_MPQUIC
+                    if (quicIsFailoverActive()) goto enet_input_reconnect_wait;
+#endif
                     return;
                 }
 
@@ -623,6 +626,9 @@ static void inputSendThreadProc(void* context) {
                 // Encrypt and send the split packet
                 if (!sendInputPacket(&splitPacket, i + 1 < totalLength)) {
                     freePacketHolder(holder);
+#ifdef VIPLE_MPQUIC
+                    if (quicIsFailoverActive()) goto enet_input_reconnect_wait;
+#endif
                     return;
                 }
 
@@ -636,10 +642,30 @@ static void inputSendThreadProc(void* context) {
         // Encrypt and send the input packet
         if (!sendInputPacket(holder, LbqGetItemCount(&packetQueue) > 0)) {
             freePacketHolder(holder);
+#ifdef VIPLE_MPQUIC
+            if (quicIsFailoverActive()) goto enet_input_reconnect_wait;
+#endif
             return;
         }
 
         freePacketHolder(holder);
+
+#ifdef VIPLE_MPQUIC
+        continue;  // 正常流程跳過 wait label
+    enet_input_reconnect_wait:
+        // §Q-ENET-RECONNECT v1.5.186 Fix I: 等待 controlReceiveThread
+        // 重建 ENet 連線。peer/client 變回 non-NULL 就代表重連成功。
+        Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: inputSendThread waiting "
+                "for ENet reconnection...\n");
+        while (!PltIsThreadInterrupted(&inputSendThread)) {
+            PltSleepMs(100);
+            if (isEnetConnected()) {
+                Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: inputSendThread "
+                        "resumed after ENet reconnection\n");
+                break;
+            }
+        }
+#endif
     }
 }
 

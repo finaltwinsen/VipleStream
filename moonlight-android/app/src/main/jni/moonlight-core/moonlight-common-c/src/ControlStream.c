@@ -1927,10 +1927,26 @@ int sendInputPacketOnControlStream(unsigned char* data, int length, uint8_t chan
 void flushInputOnControlStream(void) {
     if (AppVersionQuad[0] >= 5) {
         PltLockMutex(&enetMutex);
-        enet_host_flush(client);
+        // v1.5.186 Fix J: reconnect wait 銷毀 client 後，
+        // inputSendThread 的 mouse batching 可能呼叫 flush。
+        if (client) {
+            enet_host_flush(client);
+        }
         PltUnlockMutex(&enetMutex);
     }
 }
+
+#ifdef VIPLE_MPQUIC
+// v1.5.186 Fix I: inputSendThread 用來等待 ENet 重連的查詢函數。
+// 回傳 true 表示 peer 和 client 都已重建。
+bool isEnetConnected(void) {
+    bool ret;
+    PltLockMutex(&enetMutex);
+    ret = (peer != NULL && client != NULL);
+    PltUnlockMutex(&enetMutex);
+    return ret;
+}
+#endif
 
 bool isControlDataInTransit(void) {
     bool ret = false;

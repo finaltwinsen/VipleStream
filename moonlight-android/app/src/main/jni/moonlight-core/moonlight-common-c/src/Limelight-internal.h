@@ -128,6 +128,9 @@ void connectionSendFrameFecStatus(PSS_FRAME_FEC_STATUS fecStatus);
 int sendInputPacketOnControlStream(unsigned char* data, int length, uint8_t channelId, uint32_t flags, bool moreData);
 void flushInputOnControlStream(void);
 bool isControlDataInTransit(void);
+#ifdef VIPLE_MPQUIC
+bool isEnetConnected(void);
+#endif
 
 int performRtspHandshake(PSERVER_INFORMATION serverInfo);
 
