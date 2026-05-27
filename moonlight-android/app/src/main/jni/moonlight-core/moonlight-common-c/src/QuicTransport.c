@@ -2202,33 +2202,48 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                     activeNonStandbyCount++;
             }
             if (activeNonStandbyCount == 0) {
+                // §Q-MP-EMERGENCY-PROMOTE v2 (2026-05-27)：挑「最佳 RTT」
+                // 的 standby candidate，不是「第一個」。例如同時有 Tailscale
+                // (1.2ms RTT) 和 WiFi (16.8ms) 兩個 standby 時應升 Tailscale。
+                int bestJ = -1;
+                float bestRttMs = 1e9f;
                 for (int j = 0; j < ctx->subflowCount; j++) {
                     QUIC_SUBFLOW* candidate = &ctx->subflows[j];
                     if (candidate->keepAsStandby &&
                         candidate->active &&
                         !candidate->picoquicDeleted) {
-                        candidate->keepAsStandby = false;
-                        candidate->lastRecvTime = picoquic_current_time();
-                        candidate->consecutiveTimeouts = 0;
-                        picoquic_set_path_status(
-                            ctx->cnx, candidate->picoquicPathId,
-                            picoquic_path_status_available);
-                        ctx->failoverPromotedSlot = j;
-                        Limelog("[VIPLE-MPQUIC] §Q-MP-EMERGENCY-PROMOTE: "
-                                "primary if %d killed by picoquic, no other "
-                                "active non-standby paths — promoting "
-                                "standby subflow %d (if %d, slot %d) to "
-                                "available\n",
-                                killedIfIdx,
-                                candidate->id,
-                                candidate->interfaceIndex, j);
-                        if (ctx->failoverCallback) {
-                            ctx->failoverCallback(
-                                candidate->id,
-                                candidate->interfaceIndex,
-                                true, ctx->failoverContext);
+                        float effRtt = (candidate->rttMs > 0)
+                            ? candidate->rttMs
+                            : (float)candidate->icmpRttMs;
+                        if (effRtt < bestRttMs) {
+                            bestRttMs = effRtt;
+                            bestJ = j;
                         }
-                        break;
+                    }
+                }
+                if (bestJ >= 0) {
+                    QUIC_SUBFLOW* candidate = &ctx->subflows[bestJ];
+                    int j = bestJ;
+                    candidate->keepAsStandby = false;
+                    candidate->lastRecvTime = picoquic_current_time();
+                    candidate->consecutiveTimeouts = 0;
+                    picoquic_set_path_status(
+                        ctx->cnx, candidate->picoquicPathId,
+                        picoquic_path_status_available);
+                    ctx->failoverPromotedSlot = j;
+                    Limelog("[VIPLE-MPQUIC] §Q-MP-EMERGENCY-PROMOTE: "
+                            "primary if %d killed by picoquic, no other "
+                            "active non-standby paths — promoting best-RTT "
+                            "standby subflow %d (if %d, slot %d, RTT=%.1fms) "
+                            "to available\n",
+                            killedIfIdx,
+                            candidate->id,
+                            candidate->interfaceIndex, j, bestRttMs);
+                    if (ctx->failoverCallback) {
+                        ctx->failoverCallback(
+                            candidate->id,
+                            candidate->interfaceIndex,
+                            true, ctx->failoverContext);
                     }
                 }
             }
