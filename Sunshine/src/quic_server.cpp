@@ -1164,6 +1164,56 @@ namespace quic_server {
       BOOST_LOG(info) << "[VIPLE-MPQUIC] Path "
                       << (event == picoquic_callback_path_deleted ? "deleted" : "suspended")
                       << ": id=" << stream_id;
+
+      // §Q-MP-EMERGENCY-PROMOTE 2026-05-27（server 對稱版）：
+      // server 預設把所有新探到的路徑設成 backup（§MP-PRIMARY 規則，
+      // 避免 video datagram 跨 path 排程造成 depacketizer 組裝失敗）。
+      // 當原 primary（通常是 path 0 / Ethernet）被 picoquic 刪除後，
+      // bestVideoPath 掃描會跳過所有 backup path → 回傳 -1 → video
+      // 退到 cnx-level queue。client 端雖然透過 PATH_AVAILABLE 框架
+      // 通報它認為某路徑現在 available，但 server 本地的 path_is_backup
+      // 旗標不會自動翻轉，picoquic 內建排程器照樣不選那條路。
+      //
+      // 修正：path 被刪後掃描剩餘路徑，若所有 surviving path 都 backup，
+      // 挑 smoothed_rtt 最小的那條 promote 成 available。維持單一 primary
+      // 的設計，但補上失效時的 failover。
+      if (cnx && cnx->nb_paths > 0) {
+        bool anyNonBackup = false;
+        for (int i = 0; i < cnx->nb_paths; i++) {
+          if (cnx->path[i] != nullptr &&
+              !cnx->path[i]->path_is_demoted &&
+              !cnx->path[i]->path_is_backup) {
+            anyNonBackup = true;
+            break;
+          }
+        }
+        if (!anyNonBackup) {
+          int bestIdx = -1;
+          uint64_t bestRtt = UINT64_MAX;
+          uint64_t bestPathId = 0;
+          for (int i = 0; i < cnx->nb_paths; i++) {
+            if (cnx->path[i] != nullptr &&
+                !cnx->path[i]->path_is_demoted &&
+                cnx->path[i]->path_is_backup &&
+                cnx->path[i]->smoothed_rtt < bestRtt) {
+              bestRtt = cnx->path[i]->smoothed_rtt;
+              bestIdx = i;
+              bestPathId = cnx->path[i]->unique_path_id;
+            }
+          }
+          if (bestIdx >= 0) {
+            picoquic_set_path_status(cnx, bestPathId,
+                                     picoquic_path_status_available);
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-MP-EMERGENCY-PROMOTE: "
+                            << "primary path " << stream_id
+                            << " killed, no other non-backup paths — "
+                            << "promoting backup path " << bestPathId
+                            << " (idx=" << bestIdx
+                            << ", rtt=" << (bestRtt / 1000) << "ms) "
+                            << "to available";
+          }
+        }
+      }
       break;
     }
 
