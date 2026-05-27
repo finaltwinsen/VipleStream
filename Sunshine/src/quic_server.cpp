@@ -391,26 +391,38 @@ namespace quic_server {
     constexpr uint64_t MIN_WARM_CWND = 64 * 1024;
     int bestVideoPath = -1;
     if (_cnx->nb_paths > 1) {
-      // Pass 1: warm paths, min RTT
+      // §Q-PATH-FRESH 2026-05-27：picoquic 的 path_is_demoted 在 client
+      // 端 interface 死掉時不會立即更新（要等 server 端累積夠多 RTO 才
+      // 標 demoted）。中間幾秒 cwin 仍顯示 healthy 但 nb_retransmit > 0，
+      // bestVideoPath 還 stuck 在死 path 上 → 大量 video datagram 排進
+      // 沒人收的 per-path queue。
+      //
+      // 加 `nb_retransmit == 0` 過濾：path 進 RTO 狀態（連續沒收到 ACK）
+      // 時直接踢出 best 選擇，讓資料流向其他活路徑。nb_retransmit 收到
+      // ACK 後會自動歸零，正常 transient loss 不會誤判。
+      //
+      // Pass 1: warm paths, min RTT, no active retransmit
       uint64_t minRtt = UINT64_MAX;
       for (int i = 0; i < _cnx->nb_paths; i++) {
         if (_cnx->path[i] != nullptr &&
             !_cnx->path[i]->path_is_demoted &&
             !_cnx->path[i]->path_is_backup &&
+            _cnx->path[i]->nb_retransmit == 0 &&
             _cnx->path[i]->cwin >= MIN_WARM_CWND &&
             _cnx->path[i]->smoothed_rtt < minRtt) {
           minRtt = _cnx->path[i]->smoothed_rtt;
           bestVideoPath = i;
         }
       }
-      // Pass 2: fallback — no warm path; pick largest cwin to ride out
-      // the cold-start phase with least loss probability.
+      // Pass 2: fallback — no warm path; pick largest cwin among
+      // ACK-fresh paths to ride out the cold-start phase.
       if (bestVideoPath < 0) {
         uint64_t maxCwin = 0;
         for (int i = 0; i < _cnx->nb_paths; i++) {
           if (_cnx->path[i] != nullptr &&
               !_cnx->path[i]->path_is_demoted &&
               !_cnx->path[i]->path_is_backup &&
+              _cnx->path[i]->nb_retransmit == 0 &&
               _cnx->path[i]->cwin > maxCwin) {
             maxCwin = _cnx->path[i]->cwin;
             bestVideoPath = i;
