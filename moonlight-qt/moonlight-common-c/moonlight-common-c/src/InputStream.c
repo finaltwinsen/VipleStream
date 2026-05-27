@@ -1,5 +1,9 @@
 #include "Limelight-internal.h"
 
+#ifdef VIPLE_MPQUIC
+#include "QuicTransport.h"
+#endif
+
 static SOCKET inputSock = INVALID_SOCKET;
 static unsigned char currentAesIv[16];
 static bool initialized;
@@ -246,7 +250,15 @@ static bool sendInputPacket(PPACKET_HOLDER holder, bool moreData) {
                                                         moreData);
         if (err < 0) {
             Limelog("Input: sendInputPacketOnControlStream() failed: %d\n", (int) err);
-            ListenerCallbacks.connectionTerminated(err);
+#ifdef VIPLE_MPQUIC
+            if (quicIsFailoverActive()) {
+                Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: input send failed during QUIC failover "
+                        "— suppressing connectionTerminated (input lost, video/audio continue)\n");
+            } else
+#endif
+            {
+                ListenerCallbacks.connectionTerminated(err);
+            }
             return false;
         }
     }
@@ -275,7 +287,15 @@ static bool sendInputPacket(PPACKET_HOLDER holder, bool moreData) {
                 (int) (encryptedSize + sizeof(encryptedLengthPrefix)), 0);
             if (err <= 0) {
                 Limelog("Input: send() failed: %d\n", (int) LastSocketError());
-                ListenerCallbacks.connectionTerminated(LastSocketFail());
+#ifdef VIPLE_MPQUIC
+                if (quicIsFailoverActive()) {
+                    Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: input TCP send failed during QUIC failover "
+                            "— suppressing connectionTerminated\n");
+                } else
+#endif
+                {
+                    ListenerCallbacks.connectionTerminated(LastSocketFail());
+                }
                 return false;
             }
         }
@@ -297,7 +317,15 @@ static bool sendInputPacket(PPACKET_HOLDER holder, bool moreData) {
                                                             moreData);
             if (err < 0) {
                 Limelog("Input: sendInputPacketOnControlStream() failed: %d\n", (int) err);
-                ListenerCallbacks.connectionTerminated(err);
+#ifdef VIPLE_MPQUIC
+                if (quicIsFailoverActive()) {
+                    Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: input send failed during QUIC failover "
+                            "— suppressing connectionTerminated (input lost, video/audio continue)\n");
+                } else
+#endif
+                {
+                    ListenerCallbacks.connectionTerminated(err);
+                }
                 return false;
             }
         }
