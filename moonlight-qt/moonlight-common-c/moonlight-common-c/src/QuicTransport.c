@@ -124,21 +124,21 @@ typedef struct _QUIC_TRANSPORT_CTX {
     int subflowCount;
     int nextSubflowId;
 
-    int scheduler[4]; // index 0 = default, 1..3 = per QUIC_FLOW_*
+    int scheduler[QUIC_FLOW_COUNT]; // index 0 = default, 1..4 = per QUIC_FLOW_*
     int aggregateRRIndex; // round-robin index for AGGREGATE
 
     // Per-flow receive callbacks (index = flow type: 0=unused,
     // 1=VIDEO, 2=AUDIO, 3=CONTROL). 各 flow 獨立註冊，
     // QUIC datagram 到達時根據 header 的 flowType 分派。
-    QuicRecvCallback recvCallbacks[4];
-    void*            recvContexts[4];
+    QuicRecvCallback recvCallbacks[QUIC_FLOW_COUNT];
+    void*            recvContexts[QUIC_FLOW_COUNT];
 
     // Failover callback
     QuicFailoverCallback failoverCallback;
     void* failoverContext;
 
     // Per-flow sequence counters (for datagram header)
-    unsigned short seqCounters[4];
+    unsigned short seqCounters[QUIC_FLOW_COUNT];
 
     // I/O thread
     PLT_THREAD ioThread;
@@ -201,10 +201,10 @@ static QUIC_TRANSPORT_CTX g_ctx;
 static bool g_initialized = false;
 
 // §K.10 diag: per-flow 接收計數器（全域，IO thread + callback thread 共用）
-// index: 0=unused, 1=VIDEO, 2=AUDIO, 3=CONTROL
-static volatile uint64_t g_dgramsRecvByFlow[4] = {};
-static volatile uint64_t g_bytesRecvByFlow[4] = {};
-static uint64_t g_prevBytesRecvByFlow[4] = {};
+// index: 0=unused, 1=VIDEO, 2=AUDIO, 3=CONTROL, 4=INPUT
+static volatile uint64_t g_dgramsRecvByFlow[QUIC_FLOW_COUNT] = {};
+static volatile uint64_t g_bytesRecvByFlow[QUIC_FLOW_COUNT] = {};
+static uint64_t g_prevBytesRecvByFlow[QUIC_FLOW_COUNT] = {};
 static uint64_t g_lastDiagLogTime = 0;
 #define DIAG_LOG_INTERVAL_US 5000000  // 5 秒
 
@@ -242,7 +242,7 @@ typedef struct _QUIC_JITTER_BUF {
     uint64_t timedOut;   // skipped due to timeout
 } QUIC_JITTER_BUF;
 
-static QUIC_JITTER_BUF g_jitterBufs[4]; // per flow type
+static QUIC_JITTER_BUF g_jitterBufs[QUIC_FLOW_COUNT]; // per flow type
 
 // ── §5b FEC decoder (video only, RS 4+2) ────────────────────
 #include "rswrapper.h"
@@ -313,6 +313,7 @@ int quicTransportInit(void) {
     g_ctx.scheduler[QUIC_FLOW_VIDEO] = QUIC_SCHED_ECF;
     g_ctx.scheduler[QUIC_FLOW_AUDIO] = QUIC_SCHED_REDUNDANT;
     g_ctx.scheduler[QUIC_FLOW_CONTROL] = QUIC_SCHED_MIN_RTT;
+    g_ctx.scheduler[QUIC_FLOW_INPUT] = QUIC_SCHED_MIN_RTT;
 
     g_ctx.congestionAlgo = QUIC_CC_BBR;
 
@@ -1094,7 +1095,7 @@ int quicRemoveSubflow(int subflowId) {
 }
 
 int quicSetScheduler(unsigned char flowType, int strategy) {
-    if (flowType > 3 || strategy < 0 || strategy > QUIC_SCHED_ECF)
+    if (flowType >= QUIC_FLOW_COUNT || strategy < 0 || strategy > QUIC_SCHED_ECF)
         return -1;
     g_ctx.scheduler[flowType] = strategy;
     Limelog("[VIPLE-MPQUIC] Scheduler for flow %d set to %d\n",
@@ -1219,7 +1220,7 @@ int quicSendDatagram(unsigned char flowType,
 void quicSetRecvCallback(QuicRecvCallback callback, void* context) {
     // 後向相容：不帶 flow type 的呼叫設定所有 flow 的 callback。
     // 新程式碼應改用 quicSetRecvCallbackForFlow。
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < QUIC_FLOW_COUNT; i++) {
         g_ctx.recvCallbacks[i] = callback;
         g_ctx.recvContexts[i] = context;
     }
@@ -1227,7 +1228,7 @@ void quicSetRecvCallback(QuicRecvCallback callback, void* context) {
 
 void quicSetRecvCallbackForFlow(unsigned char flowType,
                                 QuicRecvCallback callback, void* context) {
-    if (flowType < 4) {
+    if (flowType < QUIC_FLOW_COUNT) {
         g_ctx.recvCallbacks[flowType] = callback;
         g_ctx.recvContexts[flowType] = context;
     }
@@ -2014,7 +2015,7 @@ static void quicJitterDeliver(QUIC_TRANSPORT_CTX* ctx,
         uint8_t* pkt = jb->slots[idx].data;
         int pktLen = jb->slots[idx].len;
 
-        if (pktLen >= QUIC_DGRAM_HEADER_SIZE && ft < 4 && ctx->recvCallbacks[ft]) {
+        if (pktLen >= QUIC_DGRAM_HEADER_SIZE && ft < QUIC_FLOW_COUNT && ctx->recvCallbacks[ft]) {
             ctx->recvCallbacks[ft](
                 ft,
                 pkt + QUIC_DGRAM_HEADER_SIZE,
@@ -2038,7 +2039,7 @@ static void quicJitterFlush(QUIC_TRANSPORT_CTX* ctx,
         if (jb->slots[idx].len > 0) {
             uint8_t* pkt = jb->slots[idx].data;
             int pktLen = jb->slots[idx].len;
-            if (pktLen >= QUIC_DGRAM_HEADER_SIZE && ft < 4 && ctx->recvCallbacks[ft]) {
+            if (pktLen >= QUIC_DGRAM_HEADER_SIZE && ft < QUIC_FLOW_COUNT && ctx->recvCallbacks[ft]) {
                 ctx->recvCallbacks[ft](
                     ft,
                     pkt + QUIC_DGRAM_HEADER_SIZE,
@@ -2277,7 +2278,7 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
             unsigned char ft = hdr->flowType;
             // §K.10 diag: per-flow 接收計數
             {
-                if (ft < 4) {
+                if (ft < QUIC_FLOW_COUNT) {
                     g_dgramsRecvByFlow[ft]++;
                     g_bytesRecvByFlow[ft] += (uint64_t)length;
                 }
@@ -2836,14 +2837,15 @@ static void quicIoThreadProc(void* context) {
 
                 Limelog("[VIPLE-MPQUIC] §K.10 RECV VIDEO: %llu dgrams %llu B (%.1f Mbps) | "
                         "AUDIO: %llu dgrams %llu B (%.1f Mbps) | "
-                        "CTRL: %llu dgrams\n",
+                        "CTRL: %llu dgrams | INPUT: %llu dgrams\n",
                         (unsigned long long)g_dgramsRecvByFlow[1],
                         (unsigned long long)g_bytesRecvByFlow[1],
                         (double)(g_bytesRecvByFlow[1] - g_prevBytesRecvByFlow[1]) * 8.0 / dtSec / 1e6,
                         (unsigned long long)g_dgramsRecvByFlow[2],
                         (unsigned long long)g_bytesRecvByFlow[2],
                         (double)(g_bytesRecvByFlow[2] - g_prevBytesRecvByFlow[2]) * 8.0 / dtSec / 1e6,
-                        (unsigned long long)g_dgramsRecvByFlow[3]);
+                        (unsigned long long)g_dgramsRecvByFlow[3],
+                        (unsigned long long)g_dgramsRecvByFlow[4]);
 
                 // Video ring buffer 診斷
                 {
@@ -2857,8 +2859,8 @@ static void quicIoThreadProc(void* context) {
 
                 // §5a Jitter buffer 診斷
                 {
-                    const char* flowNames[] = {"(none)", "VIDEO", "AUDIO", "CTRL"};
-                    for (int ji = 0; ji < 4; ji++) {
+                    const char* flowNames[] = {"(none)", "VIDEO", "AUDIO", "CTRL", "INPUT"};
+                    for (int ji = 0; ji < QUIC_FLOW_COUNT; ji++) {
                         QUIC_JITTER_BUF* jb = &g_jitterBufs[ji];
                         if (jb->delivered || jb->reordered || jb->dropped || jb->timedOut) {
                             Limelog("[VIPLE-MPQUIC] §5a Jitter[%s]: delivered=%llu reordered=%llu dropped=%llu timedOut=%llu\n",
@@ -2889,9 +2891,9 @@ static void quicIoThreadProc(void* context) {
                             (unsigned long long)(sf->bytesRecv / 1024));
                 }
 
-                g_prevBytesRecvByFlow[1] = g_bytesRecvByFlow[1];
-                g_prevBytesRecvByFlow[2] = g_bytesRecvByFlow[2];
-                g_prevBytesRecvByFlow[3] = g_bytesRecvByFlow[3];
+                for (int bi = 1; bi < QUIC_FLOW_COUNT; bi++) {
+                    g_prevBytesRecvByFlow[bi] = g_bytesRecvByFlow[bi];
+                }
                 g_lastDiagLogTime = nowDiag;
             }
         }

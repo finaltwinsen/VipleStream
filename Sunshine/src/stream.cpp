@@ -1785,7 +1785,7 @@ namespace stream {
             if (!recvHandlerSet && quicVideoSession) {
               auto idrEvt = session->video.idr_events;
               quicVideoSession->setRecvHandler(
-                  [idrEvt](uint8_t flowType, const uint8_t *data, size_t len) {
+                  [idrEvt, session](uint8_t flowType, const uint8_t *data, size_t len) {
                     // flowType 0x03 = FLOW_CONTROL (QUIC stream #0)
                     // data[0] == 0x49 ('I') = IDR request marker
                     if (flowType == 0x03 && len >= 1 && data[0] == 0x49) {
@@ -1793,6 +1793,18 @@ namespace stream {
                           << "[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: received IDR "
                           << "request from client via QUIC stream #0";
                       idrEvt->raise(true);
+                    }
+                    // §Q-INPUT-QUIC-FALLBACK v1.5.189 Fix K: failover 期間
+                    // client 把加密 input packet 改走 QUIC datagram 送過來。
+                    // data 格式 = NVCTL_ENCRYPTED_PACKET_HEADER + ciphertext，
+                    // 與 ENet 收到的完全一致 → 餵給 control server 解密 + 處理。
+                    else if (flowType == 0x04 && len >= 4) {
+                      auto type = *(std::uint16_t *)data;
+                      std::string_view payload{
+                          (char *)data + sizeof(type),
+                          len - sizeof(type)
+                      };
+                      session->broadcast_ref->control_server.call(type, session, payload, false);
                     }
                   });
               recvHandlerSet = true;

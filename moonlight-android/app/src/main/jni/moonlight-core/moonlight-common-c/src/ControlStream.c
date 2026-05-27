@@ -804,6 +804,23 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
     // 呼叫 sendMessageEnet，必須在解引用 peer 前檢查。
     if (!peer || !client) {
         PltUnlockMutex(&enetMutex);
+        // §Q-INPUT-QUIC-FALLBACK v1.5.189 Fix K：ENet 不可用時，
+        // 加密後的 input packet 改走 QUIC datagram 送出。
+        // enetMutex 已 unlock → 不會跟 picoquicMutex 交叉 deadlock。
+        // enetPacket->data 在行 760-782 已完成 AES-GCM 加密，
+        // 內容 = NVCTL_ENCRYPTED_PACKET_HEADER + tag + ciphertext，
+        // 與 ENet 送出的完全一致。
+        if (quicIsFailoverActive()) {
+            int ret = quicSendDatagram(QUIC_FLOW_INPUT,
+                                        enetPacket->data,
+                                        (int)enetPacket->dataLength);
+            enet_packet_destroy(enetPacket);
+            if (ret == 0) {
+                return true;
+            }
+            // QUIC 也送不出去 → fall through 到 return false
+            return false;
+        }
         enet_packet_destroy(enetPacket);
         return false;
     }

@@ -16,6 +16,8 @@ extern "C" {
 #define QUIC_FLOW_VIDEO   0x01
 #define QUIC_FLOW_AUDIO   0x02
 #define QUIC_FLOW_CONTROL 0x03
+#define QUIC_FLOW_INPUT   0x04  // §Q-INPUT-QUIC-FALLBACK: failover 時鍵鼠走 QUIC datagram
+#define QUIC_FLOW_COUNT   5     // 0=default, 1-4=per flow
 
 // ── Scheduler strategies ─────────────────────────────────────
 #define QUIC_SCHED_AUTO       0  // Per-flow default (ECF video, redundant audio, min-RTT control)
