@@ -122,7 +122,11 @@ static uint64_t firstFrameTimeMs;
 static volatile int enetReconnectPending;
 // §Q-BYPASS-LOG-RESET v1.5.197 Fix P.2：提升到 file-scope，
 // ENet 重連時重置，讓下一次 failover 的 bypass 動作可見。
-static int bypassLogCount;
+// §Q-REVIEW 2026-05-29：volatile — 由 sendMessageEnet（lossStats/控制 thread）
+// 讀寫、由 reconnect 路徑歸零，跨執行緒。純診斷計數器，volatile 對齊同檔
+// enetReconnectPending 的寫法，避免編譯器快取造成計數失準（非嚴格 atomic，
+// 但對 log gate 足夠）。
+static volatile int bypassLogCount;
 #endif
 
 static LINKED_BLOCKING_QUEUE referenceFrameControlQueue;

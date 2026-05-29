@@ -1298,9 +1298,14 @@ static void quicUpdatePathStats(void) {
         return;
     g_ctx.lastStatsUpdate = now;
 
-    // §5a.r3 v1.5.198 Fix Q：追蹤 active non-deleted subflow 的最大 RTT，
-    // 給 jitter buffer 做自適應 reorder timeout。
-    float maxActiveRttMs = 0.0f;
+    // §5a.r5 v1.5.204 優化：取「吞吐量最高的 active path」(= 實際載 video
+    // 的路徑) 的 RTT 給 jitter reorder timeout，而非所有 active subflow 的
+    // MAX。實測 6 場串流發現：閒置 standby（WiFi 29ms / Tailscale）會把 MAX
+    // 拉到 25-40ms，即使 video 全走 1.7ms 的 Ethernet → reorder 等待被不必要
+    // 拉長。改用 video 路徑 RTT 後多路徑回到 floor；單路徑該路徑即最高吞吐，
+    // 行為不變（遠端 WARP/Tailscale 單路徑仍得 ~40ms 自適應）。
+    float videoPathRttMs = 0.0f;
+    float maxThroughputMbps = -1.0f;
 
     for (int i = 0; i < g_ctx.subflowCount; i++) {
         picoquic_path_quality_t pq;
@@ -1316,17 +1321,19 @@ static void quicUpdatePathStats(void) {
         // pq.rtt is in microseconds (smoothed estimate)
         g_ctx.subflows[i].rttMs = (float)pq.rtt / 1000.0f;
 
-        // §5a.r3 Fix Q：納入 active non-deleted subflow 的 RTT 取最大值
-        if (g_ctx.subflows[i].active && !g_ctx.subflows[i].picoquicDeleted &&
-            g_ctx.subflows[i].rttMs > maxActiveRttMs) {
-            maxActiveRttMs = g_ctx.subflows[i].rttMs;
-        }
-
         // Receive rate estimate is bytes/sec → Mbps (×8 bits, ÷1e6).
         // Uses receive_rate_estimate (measured incoming throughput) instead
         // of pacing_rate (BBR's theoretical send rate, unreliable on LAN).
         g_ctx.subflows[i].throughputMbps =
             (float)((double)pq.receive_rate_estimate * 8.0 / 1e6);
+
+        // §5a.r5：選吞吐量最高的 active non-deleted path（= 實際載 video
+        // 的路徑），記其 RTT 供 jitter reorder timeout 使用。
+        if (g_ctx.subflows[i].active && !g_ctx.subflows[i].picoquicDeleted &&
+            g_ctx.subflows[i].throughputMbps > maxThroughputMbps) {
+            maxThroughputMbps = g_ctx.subflows[i].throughputMbps;
+            videoPathRttMs = g_ctx.subflows[i].rttMs;
+        }
 
         // §K.19: 瞬時 loss% — 用 delta（本次 - 上次）而非累積值。
         // 累積值包含連線初期的暫態丟包，長期趨近穩定值但不反映
@@ -1354,9 +1361,12 @@ static void quicUpdatePathStats(void) {
         g_ctx.subflows[i].bytesRecv = pq.bytes_received;
     }
 
-    // §5a.r3 Fix Q：發佈代表性 RTT（us）給 jitter buffer。0 表示尚無
-    // 有效 RTT（quicJitterInsert 會 fallback 到 10ms floor）。
-    g_ctx.jitterReorderRttUs = (uint32_t)(maxActiveRttMs * 1000.0f);
+    // §5a.r5：只在有實際載 video 的 path（吞吐 > 1 Mbps）時，用該路徑 RTT
+    // 更新 jitter reorder timeout；否則保留前值（從未設定時 quicJitterInsert
+    // fallback 到 10ms floor）。避免閒置 standby 的高 RTT 污染 reorder 等待。
+    if (maxThroughputMbps > 1.0f) {
+        g_ctx.jitterReorderRttUs = (uint32_t)(videoPathRttMs * 1000.0f);
+    }
 }
 
 // ── Path health monitoring ──────────────────────────────────

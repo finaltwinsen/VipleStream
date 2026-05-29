@@ -631,12 +631,14 @@ namespace quic_server {
       uint64_t prevPathId = (_lastVideoPath >= 0 && _lastVideoPath < _cnx->nb_paths
                              && _cnx->path[_lastVideoPath])
           ? _cnx->path[_lastVideoPath]->unique_path_id : UINT64_MAX;
-      uint64_t newPathId = (bestVideoPath >= 0 && _cnx->path[bestVideoPath])
-          ? _cnx->path[bestVideoPath]->unique_path_id : UINT64_MAX;
-      uint64_t newRtt = (bestVideoPath >= 0 && _cnx->path[bestVideoPath])
-          ? _cnx->path[bestVideoPath]->smoothed_rtt : 0;
-      uint64_t newCwin = (bestVideoPath >= 0 && _cnx->path[bestVideoPath])
-          ? _cnx->path[bestVideoPath]->cwin : 0;
+      // §Q-REVIEW 2026-05-29：補 < nb_paths 上界檢查（對齊上面 _lastVideoPath
+      // 的防禦寫法）。bestVideoPath 實務上由 i<nb_paths 迴圈選出必在界內，
+      // 但這裡缺上界與隔壁不一致；補齊避免任何路徑刪除 race 下 OOB 讀。
+      bool bestValid = (bestVideoPath >= 0 && bestVideoPath < _cnx->nb_paths
+                        && _cnx->path[bestVideoPath]);
+      uint64_t newPathId = bestValid ? _cnx->path[bestVideoPath]->unique_path_id : UINT64_MAX;
+      uint64_t newRtt    = bestValid ? _cnx->path[bestVideoPath]->smoothed_rtt : 0;
+      uint64_t newCwin   = bestValid ? _cnx->path[bestVideoPath]->cwin : 0;
       BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-PATH-SWITCH: bestVideoPath "
                       << _lastVideoPath << "(id=" << prevPathId << ") -> "
                       << bestVideoPath << "(id=" << newPathId
