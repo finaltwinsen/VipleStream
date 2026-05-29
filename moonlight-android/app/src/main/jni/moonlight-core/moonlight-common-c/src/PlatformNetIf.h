@@ -18,6 +18,7 @@ extern "C" {
 #define LC_NETIF_TYPE_CELLULAR  3
 #define LC_NETIF_TYPE_LOOPBACK  4
 #define LC_NETIF_TYPE_VPN       5
+#define LC_NETIF_TYPE_VIRTUAL   6  // Hyper-V, UsbNcm, VMware, etc.
 
 typedef struct _LC_NET_INTERFACE {
     char name[LC_NETIF_MAX_NAME];

@@ -1245,6 +1245,11 @@ namespace stream {
 
         BOOST_LOG(error) << "Failed to verify tag"sv;
 
+        // §Q-INPUT-DIAG v1.5.195 Fix N: 解密失敗時記錄額外診斷資訊
+        BOOST_LOG(error) << "[VIPLE-MPQUIC] §Q-INPUT-DIAG: decrypt FAILED "
+                         << "(seq=" << seq << ", tagged_cipher_len="
+                         << tagged_cipher_length << ")";
+
         session::stop(*session);
         return;
       }
@@ -1260,6 +1265,15 @@ namespace stream {
 
       // IDX_INPUT_DATA callback will attempt to decrypt unencrypted data, therefore we need pass it directly
       if (type == packetTypes[IDX_INPUT_DATA]) {
+        // §Q-INPUT-DIAG v1.5.195 Fix N: one-shot 確認 input 解密成功
+        static bool inputDecryptOkLogged = false;
+        if (!inputDecryptOkLogged) {
+          BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-INPUT-DIAG: first input "
+                          << "decrypt OK (type=0x"
+                          << util::hex(type).to_string_view()
+                          << ", plaintext_len=" << plaintext.size() << ")";
+          inputDecryptOkLogged = true;
+        }
         plaintext.erase(std::begin(plaintext), std::begin(plaintext) + 4);
         input::passthrough(session->input, std::move(plaintext));
       } else {
@@ -1799,6 +1813,16 @@ namespace stream {
                     // data 格式 = NVCTL_ENCRYPTED_PACKET_HEADER + ciphertext，
                     // 與 ENet 收到的完全一致 → 餵給 control server 解密 + 處理。
                     else if (flowType == 0x04 && len >= 4) {
+                      // §Q-INPUT-DIAG v1.5.195 Fix N: one-shot log 確認
+                      // server 有收到 QUIC input datagram 並進入 handler
+                      static bool loggedOnce = false;
+                      if (!loggedOnce) {
+                        BOOST_LOG(info)
+                            << "[VIPLE-MPQUIC] §Q-INPUT-DIAG: first QUIC "
+                            << "input datagram received (len=" << len
+                            << "), routing to control_server";
+                        loggedOnce = true;
+                      }
                       auto type = *(std::uint16_t *)data;
                       std::string_view payload{
                           (char *)data + sizeof(type),

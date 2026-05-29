@@ -2565,6 +2565,20 @@ bool VkFrucRenderer::computeLatencyThrottleDrop()
     const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         now.time_since_epoch()).count();
 
+    // §J.3.e.2.i.57.warmup v1.5.200 (Fix Q.3)：startup grace。第一批影格的
+    // "decode latency" = (now - enqueueTimeUs) 含 ~1-2s 解碼器/Vulkan 初始化
+    // 等待 + 排空 init 期間積壓的 catch-up → 一次性 spike（實測 ~1584ms），
+    // 會把 throttle 誤推到 step 5 + 5s recovery hold → 啟動前 ~5 秒虛假丟幀
+    // （畫面間歇性模糊/judder）。pipeline 在實時跑滿 grace 視窗前不啟用
+    // throttle。grace 結束後 latency 已恢復穩態，throttle 才開始正常評估。
+    constexpr int64_t kStartupGraceMs = 3000;
+    if (m_ThrottleStartMs < 0) m_ThrottleStartMs = nowMs;
+    if (nowMs - m_ThrottleStartMs < kStartupGraceMs) {
+        m_LatencyThrottleStep = 0;
+        m_LatencyThrottleCounter = 0;
+        return false;  // grace 期間不丟幀
+    }
+
     // --- 1) 算 latency = max(decodeMeanMs, chain_mean_ms) ---
     const double decodeMs = g_VkFrucDecodeLatencyMs.load(std::memory_order_relaxed);
     // chain_mean: m_HandoffMsRing 目前存 chainBusy ms (v1.4.121). 取已填的 ring

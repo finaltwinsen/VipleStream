@@ -32,6 +32,8 @@ static struct {
     volatile int  tail;
 } quicVideoRing;
 
+static volatile uint64_t quicVideoRingDrops = 0;
+
 static void quicVideoRecvCallback(unsigned char flowType,
                                    const unsigned char* data, int dataLen,
                                    void* context) {
@@ -42,8 +44,10 @@ static void quicVideoRecvCallback(unsigned char flowType,
         return;
 
     int next = (quicVideoRing.head + 1) % QUIC_VIDEO_RING_SIZE;
-    if (next == quicVideoRing.tail)
-        return; // ring full, drop
+    if (next == quicVideoRing.tail) {
+        quicVideoRingDrops++;
+        return;
+    }
 
     memcpy(quicVideoRing.data[quicVideoRing.head], data, dataLen);
     quicVideoRing.len[quicVideoRing.head] = dataLen;
@@ -63,8 +67,15 @@ static int quicVideoRecv(char* buf, int bufLen) {
 }
 
 static bool useQuicVideo = false;
-#endif
 
+void quicVideoGetRingStats(int* depth, int* capacity, uint64_t* drops) {
+    int h = quicVideoRing.head;
+    int t = quicVideoRing.tail;
+    *depth = (h - t + QUIC_VIDEO_RING_SIZE) % QUIC_VIDEO_RING_SIZE;
+    *capacity = QUIC_VIDEO_RING_SIZE;
+    *drops = quicVideoRingDrops;
+}
+#endif
 static PLT_THREAD receiveThread;
 static PLT_THREAD decoderThread;
 
@@ -77,11 +88,21 @@ static bool receivedFullFrame;
 // the RTP queue will wait for missing/reordered packets.
 #define RTP_QUEUE_DELAY 10
 
-// VipleStream §J HEVC 1440p120 server-cap diagnosis: client RX side
+// This is the desired number of video packets that can be
+// stored in the socket's receive buffer. 2048 is chosen
+// because it should be large enough for all reasonable
+// frame sizes (probably 2 or 3 frames) without using too
+// much kernel memory with larger packet sizes. It also
+// can smooth over transient pauses in network traffic
+// and subsequent packet/frame bursts that follow.
+// VipleStream §J HEVC 1440p120 server-cap diagnosis (TODO §J): client RX side
 // was dropping ~50% of frames at high-bitrate-burst codecs (HEVC 1440p120 has
 // ~38 KB / 27 packets per frame in 0.4 ms server-side bursts).  Bumping from
 // 2048 → 8192 packets requested bumps the SO_RCVBUF target to ~12 MB at
-// 1500 B/packet.
+// 1500 B/packet — still capped by Windows AFD's max but should land at
+// 1-2 MB instead of the default ~256 KB Windows cap on the original 3 MB
+// request.  Verify-via-getsockopt below is now always-on so we can read
+// the actual realized buffer size from the log instead of guessing.
 #define RTP_RECV_PACKETS_BUFFERED 8192
 
 // Initialize the video stream
@@ -186,8 +207,13 @@ static void VideoReceiveThreadProc(void* context) {
 
 #ifdef VIPLE_MPQUIC
         if (useQuicVideo) {
+            // §K.10: 不在此層加背壓 — ring buffer 必須盡快清空，
+            // 否則 QUIC IO 線程持續推入會讓 ring 溢出（4096 entries
+            // ≈ 5s @30fps），造成幀丟失。decode queue 容量 240
+            // 已足夠吸收解碼器啟動延遲。
             err = quicVideoRecv(encrypted ? encryptedBuffer : buffer, receiveSize);
             if (err == 0) {
+                // QUIC ring 空時 sleep 1ms，計時器按實際經過時間遞增
                 PltSleepMs(1);
             }
         }
@@ -208,13 +234,9 @@ static void VideoReceiveThreadProc(void* context) {
             if (!receivedDataFromPeer) {
                 // If we wait many seconds without ever receiving a video packet,
                 // assume something is broken and terminate the connection.
-                //
-                // §K.9 修正：QUIC mode 每次 poll 只睡 1ms (PltSleepMs(1))，
-                // 若這裡仍加 UDP_RECV_POLL_TIMEOUT_MS (100ms)，
-                // 實際只過 100ms 就觸發 10 秒逾時，導致 QUIC 連線在
-                // server encoder 初始化期間（~1s）就斷線。
-                // 修正：QUIC mode 每次只累計實際等待的 1ms。
 #ifdef VIPLE_MPQUIC
+                // §K.10：QUIC 模式每圈只 sleep 1ms，UDP 模式每圈
+                // recvUdpSocket 阻塞 ~100ms。用正確的步進值。
                 waitingForVideoMs += useQuicVideo ? 1 : UDP_RECV_POLL_TIMEOUT_MS;
 #else
                 waitingForVideoMs += UDP_RECV_POLL_TIMEOUT_MS;
@@ -405,7 +427,7 @@ int startVideoStream(void* rendererContext, int drFlags) {
         // Reset ring buffer and register callback
         quicVideoRing.head = 0;
         quicVideoRing.tail = 0;
-        quicSetRecvCallback(quicVideoRecvCallback, NULL);
+        quicSetRecvCallbackForFlow(QUIC_FLOW_VIDEO, quicVideoRecvCallback, NULL);
         Limelog("[VIPLE-MPQUIC] Video using QUIC datagram transport\n");
         // Still bind UDP socket as fallback (needed for ping)
     }

@@ -4,6 +4,7 @@
  */
 #include "UdpTunnel.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "PlatformCrypto.h"

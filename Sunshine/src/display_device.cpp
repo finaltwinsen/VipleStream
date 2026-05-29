@@ -765,6 +765,29 @@ namespace display_device {
   void configure_display(const config::video_t &video_config, const rtsp_stream::launch_session_t &session) {
     const auto result {parse_configuration(video_config, session)};
     if (const auto *parsed_config {std::get_if<SingleDisplayConfiguration>(&result)}; parsed_config) {
+      // §K.dd.fallback v1.5.201 (Fix Q.4)：套用前驗證目標顯示器存在。
+      // output_name GUID 對不到實體顯示器（拔除/錯 GUID）時，ensure_only_display
+      // 的 Windows 顯示器拓樸 API 會無限卡死 → scheduler thread 阻塞 → 整個服務
+      // deadlock（實測 .226 log 停寫 35 分鐘、無法串流）。改成：偵測到指定顯示器
+      // 不存在就跳過 DD 設定 + revert + 用預設顯示器繼續串流，而非 brick 服務。
+      if (!parsed_config->m_device_id.empty()) {
+        const auto devices {enumerate_devices()};
+        bool available {false};
+        for (const auto &d : devices) {
+          if (d.m_device_id == parsed_config->m_device_id) {
+            available = true;
+            break;
+          }
+        }
+        if (!available) {
+          BOOST_LOG(warning) << "[VIPLE-DD] §K.dd.fallback: configured display device '"
+                             << parsed_config->m_device_id
+                             << "' not available — skipping display-device configuration "
+                                "and continuing on the default display (avoids Windows API hang).";
+          revert_configuration();
+          return;
+        }
+      }
       configure_display(*parsed_config);
       return;
     }

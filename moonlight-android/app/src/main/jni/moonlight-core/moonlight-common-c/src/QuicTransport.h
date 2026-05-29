@@ -116,6 +116,21 @@ void quicDisconnect(void);
 // subflow is active.
 bool quicIsConnected(void);
 
+// Block up to `timeoutMs` waiting for the connection to reach
+// picoquic_state_ready (i.e. TLS handshake complete, AEAD contexts
+// installed).  Polls every 10 ms.  Returns 0 if ready, -1 on timeout,
+// -2 if the connection does not exist.
+//
+// §Q-REVIEW-P2 (v1.5.25+1, dev/cli-quic-linux): added because
+// quicAddSubflow's picoquic_probe_new_path used to fire before the
+// initial path's crypto context existed.  picoquic queued the probe
+// packet anyway, and the QuicIO thread crashed inside
+// picoquic_aead_get_checksum_length (NULL `algo` pointer in the
+// non-installed AEAD context) the moment it tried to prepare and
+// protect the probe.  Gating quicAddSubflow on this readiness
+// check eliminates the segfault.
+int quicWaitReady(unsigned int timeoutMs);
+
 // ── Server listener ──────────────────────────────────────────
 // (Used by Sunshine server — not called from moonlight-common-c
 // client code, but declared here for API completeness.)
@@ -127,13 +142,39 @@ void quicServerStop(void);
 // ── Subflow management ───────────────────────────────────────
 
 // Add a new subflow bound to the given local interface.
+// interfaceName / interfaceType are stored for overlay display.
 // Returns subflow ID (>= 0) on success, -1 on failure.
 int quicAddSubflow(int interfaceIndex,
+                   const char* interfaceName,
+                   int interfaceType,
                    const struct sockaddr_storage* localAddr,
                    SOCKADDR_LEN addrLen);
 
+// Same as quicAddSubflow but with an optional peer-address override.
+// When peerOverride is non-NULL, the routing reachability probe and the
+// picoquic_probe_new_path call both use this addr instead of the global
+// peerAddr cached in quicConnect.  This lets a single QUIC cnx span
+// multiple server endpoints — e.g. path 0 = server LAN IP via the LAN
+// NIC, path 1 = server Tailscale IP via the Tailscale tunnel, path 2 =
+// server WAN IP via cellular.  picoquic routes both paths to the same
+// cnx by connection ID, regardless of peer addr.
+int quicAddSubflowEx(int interfaceIndex,
+                     const char* interfaceName,
+                     int interfaceType,
+                     const struct sockaddr_storage* localAddr,
+                     SOCKADDR_LEN localAddrLen,
+                     const struct sockaddr_storage* peerOverride,
+                     SOCKADDR_LEN peerOverrideLen);
+
 // Remove a subflow by ID. Returns 0 on success, -1 if not found.
 int quicRemoveSubflow(int subflowId);
+
+// §MP-ADV: 儲存伺服器的所有 alt peer 位址（供未來動態路徑管理用）。
+// Connection.c Phase B 透過 quicAddSubflowEx 的 peerOverride 直接傳入，
+// 這裡的儲存是為了 quicRecheckPaths 將來需要時可用。
+void quicSetAltPeers(const struct sockaddr_storage* addrs,
+                     const SOCKADDR_LEN* addrLens,
+                     int count);
 
 // Set the scheduling strategy for a specific flow type,
 // or for all flows if flowType == 0.
@@ -151,9 +192,17 @@ void quicSetCongestionAlgo(int algo);
 int quicSendDatagram(unsigned char flowType,
                      const unsigned char* data, int dataLen);
 
-// Register a callback for incoming datagrams.
+// Register a callback for incoming datagrams (all flow types).
 // Called on the QUIC I/O thread; must be non-blocking.
+// 後向相容：設定所有 flow type 的 callback。新程式碼應用
+// quicSetRecvCallbackForFlow 按 flow type 各別註冊。
 void quicSetRecvCallback(QuicRecvCallback callback, void* context);
+
+// Register a callback for a specific flow type (QUIC_FLOW_VIDEO,
+// QUIC_FLOW_AUDIO, or QUIC_FLOW_CONTROL).  Each flow type has its
+// own callback slot; datagrams are dispatched by flowType header.
+void quicSetRecvCallbackForFlow(unsigned char flowType,
+                                QuicRecvCallback callback, void* context);
 
 // Register a callback for path failover events.
 void quicSetFailoverCallback(QuicFailoverCallback callback, void* context);
@@ -172,6 +221,22 @@ int quicGetSubflowStats(PQUIC_SUBFLOW_STATS out, int maxCount);
 
 // Return the number of currently active subflows.
 int quicGetActiveSubflowCount(void);
+
+// ── Video ring buffer diagnostics ────────────────────────────
+// Called by IO thread's §K.10 diagnostic to report ring depth/drops.
+void quicVideoGetRingStats(int* depth, int* capacity, uint64_t* drops);
+
+// ── Failover status ─────────────────────────────────────────
+
+// §Q-MP-FAILBACK: 查詢是否正在進行 failover。
+// ControlStream 用此判斷是否要延遲 connectionTerminated。
+// Returns 1 if a failover is in progress (primary dead, standby active).
+int quicIsFailoverActive(void);
+
+// Fix M v1.5.194: 查詢 primary path（slot 0）是否確認有問題。
+// Returns 1 if primary is deleted/inactive/has timeouts; 0 if healthy.
+// Fix L bypass 用此做二次驗證：只在 primary 確認壞掉時才繞過 ENet。
+int quicIsPrimaryPathUnhealthy(void);
 
 // ── Session ticket (0-RTT) ───────────────────────────────────
 

@@ -10,13 +10,13 @@
 | 優先級 | 條目 | 待做事項 |
 |---|---|---|
 | **Active (verify)** | **§β.11.b** warp edge MV threshold | Settings UI slider (2-20, default 8) 已上線 v1.4.195；setting 實機 confirm 生效 (2026-05-23, registry vkfrucEdgeMvThreshold=8 + ctor log)；剩主觀畫質比較：keep 8 / 試 4（更多邊緣保護）/ 試 12（更 smooth）|
-| **Active (verify + polish)** | **§Q** MP-QUIC 多路徑網路聚合 | Phase 5 全 Sprint + §Q.path-recovery 實作完成 (v1.5.133)。**已驗證：** server FEC 4+2 encoding ✅、per-path queue routing ✅、0-RTT ticket ✅、1080p60 穩定 ✅、Audio QUIC ✅、Jitter buffer ✅、cwnd 降頻 ✅、WiFi failover ✅。**§Q.path-recovery：** 背景復原執行緒已實作（v1.5.133），每 10 秒掃描介面 + ICMP 探測 + rejected cache。**待做：** ①WiFi recovery 手動驗測（Windows 11 CLI 位置權限限制）②Android 多路徑（hw-bound）③壓力測試 1440p120 |
+| **Active (verify + polish)** | **§Q** MP-QUIC 多路徑網路聚合 | Phase 5 全 Sprint + §Q.path-recovery 完成 (v1.5.133)。Fix L–Q.5 (v1.5.192–202) 完成 failover/failback + 遠端單路徑韌性：Fix P IDR-QUIC-FIRST、Fix Q RTT 自適應 jitter timeout (1.5×RTT 夾 10-40ms)、Fix Q.2 §Q-STALE headroom gate（修 cwnd 健康卻丟光 video 的死亡螺旋）、Fix Q.3 FRUC throttle startup grace（修啟動 5s 模糊）、Fix Q.4 顯示器 graceful fallback + NVENC vbvInitialDelay（修啟動畫質）、Fix Q.5 lateAfterSkip/fecRedundantLate 診斷分離。**已驗證：** server FEC ✅、per-path queue ✅、0-RTT ticket ✅、1080p60 穩定 ✅、Audio QUIC ✅、Jitter buffer ✅、Ethernet failover/failback ✅ (v1.5.196)、遠端 WARP/Tailscale 單路徑 ✅ (v1.5.199 §Q-STALE 修後)、**Android moonlight-common-c 全量對齊 + Pixel 5 實機 MP-QUIC 串流驗證 ✅** (v1.5.201-202，lateAfterSkip=0/fecRedundantLate 實機確認)。**待做：** 壓力測試 1440p120；遠端高碼率若仍吃緊再評估 ABR（自適應 bitrate）|
 | **Active (verify, partial bug)** | **§SLIM** release zip 瘦身 (106→48 MB) | phase 1-4 已 ship。**NCNN backend lazy fetch path 確認接通** (ncnnfruc.cpp:1063/2714 → ensureRifeModelDir → ModelFetcher)。**⚠️ Bug：Vulkan Native RIFE 路徑沒接 ModelFetcher** — rife_native_vk.cpp 4 處 (line 3669/4998/7413/7705) 直接 modelDir+/flownet.bin 載入；2026-05-23 實機驗：cache 空時 RifeNativeExecutor init failed → fallback block-match path (鐵律 OK 不 crash)，但 lazy fetch 沒生效。**Fix：** VkFrucRenderer 對 RifeNativeExecutor::initialize 的 caller 端先 ensureRifeModelDir(opts.modelDir)。剩餘原項：無 VC++ Runtime Win10 系統實測 missing vcruntime140 提示 |
 | **Deferred (hw-bound)** | **§B Phase B** HEVC D3D11VA → Vulkan composite | Code 已 ship v1.4.184-185；阻塞：AMD 780M 測試機 HEVC D3D11VA 本身不可用。需換另一台 D3D11VA HEVC HW decode 可用的 AMD 機器驗 B7 import + B9 FRUC chain |
 | **Active (test pending)** | **§B-NVOF autotier** NVOF 成為 NV 最佳 tier | Code 已 ship v1.4.117-138；待使用者 PixArk 20+ 分鐘實測，看 NVOF-PROF drop% 是否接近 0%、chain_mean 是否穩定 < 2ms。若 OK → reapply early-kickoff + NVOF 列 NV best tier；若 drop% 高 → 需 Option E skip 機制 |
 | **Active (follow-up)** | **§R2 PASSIVE FRUC** ratio controller | v1.4.169-186 已 ship ratio alignment gate + extreme floor。**T2→T0 大幅跳降實機觀察 (2026-05-23)：** alignment gate ship 後僅在 stream 初期 1 次出現 (latency=409.31ms 屬 decode-warmup)，立刻被 promote 機制接住 (T0→T2→T3→T4)，stream 穩定階段未再出現 ✅。剩：display Hz=0 legacy renderer fallback 是否需補 |
 | **Active (verify)** | **§M.parity Android** wire/UX | v1.4.160 ship W1-W5+U6+U7；Pixel 5 待 install + adb logcat 確認 `[VIPLE-PARITY]` log 真實生效 |
-| **Active (verify)** | **§K.dd.revert.1** display device revert | v1.4.156 ghost-check fix 已 ship；待使用者把 `dd_configuration_option` 從 `disabled` 改回 `ensure_only_display`，stream + disconnect 確認不再卡死 |
+| **Active (verify)** | **§K.dd.revert.1 / §K.dd.fallback** display device | v1.4.156 ghost-check + v1.5.201 §K.dd.fallback（configure_display apply 前用 enumerate_devices 驗證 output_name 存在；不存在→跳過 DD 設定 + 用預設顯示器續行，避免 Windows 拓樸 API 卡死）已 ship。.226 指定顯示器曾卡死服務 (v1.5.200 期間，log 停寫 35 分鐘)，已暫設 `disabled` 解卡。待重設 `ensure_only_display` + 指定有效顯示器，確認 fallback 生效不卡死 |
 | **✅ Completed** | **§K.linux VAAPI→Vulkan bridge** | K.3 + §β.12.fix PASS v1.4.188-193：Vega 10 VAAPI + RIFE + FRUC dual-present end-to-end 通，frame#720 無 crash |
 | **Active (P0)** | **§N.5.bug** Android 檔案傳輸 SSL 錯誤 | 待使用者在 Android 重現 + 拿 server log，確認錯誤在哪個階段送出 |
 | **Active (verify)** | **§N.5** Android FileTransferClient runtime | 待實機在串流 session 跑 Send/Receive flow，確認 Pixel 5 Android quirks |
@@ -78,6 +78,13 @@ PixArk 20+ 分鐘測試後看 log：
 - ✅ **Tailscale 連帶偵測：** Tailscale (path[1]) 底層走 WiFi，同步標記 DEAD
 - ✅ **0-RTT ticket save (Q.r3)：** graceful close 時 `§5f ticket save: OK (ret=0)`，`quic-tickets.bin` 305 bytes 正確含 server IP + ALPN
 
+**Ethernet 斷線 failover + failback 測試（v1.5.196, 1080p60, 3 subflow）：**
+- ✅ **Failover 成功：** 關閉乙太網路 → §Q-MP-FAILOVER-DEDUP 跳過 VPN promotion → WiFi 成為唯一 available path → video 在 WiFi 上存活
+- ✅ **Failback 成功：** 恢復乙太網路 → §Q-INTERFACE-FAILBACK 偵測介面回歸 → Ethernet 恢復為 primary → 串流正常
+- ✅ **FAILOVER-DEDUP (Fix O)：** 防止 DYN-STANDBY-ALIVE + FAILOVER 雙重 promotion（WiFi 已 promote 時不再 promote 底層依賴 Ethernet 的 VPN）
+- ✅ **FAILBACK slot 修正 (Fix N)：** §Q-INTERFACE-FAILBACK 用 interfaceIndex 匹配 path-recovery 建立的 subflow
+- ⚠️ **已知：** VPN（Tailscale）底層路由走 Ethernet → Ethernet 斷 = VPN 也斷。FAILOVER-DEDUP 正確處理此情境
+
 **§Q.path-recovery 實作（v1.5.133）：** 背景復原執行緒（`quicRecoveryThreadProc`）每 10 秒掃描介面，對 deleted / 新介面做 ICMP 探測 + `quicAddSubflowEx()`。含 rejected cache 避免重複探測不可達介面（如 Tailscale route-check fail），介面集合變動時自動清空快取重試。驗證：rejected cache 生效（Tailscale 只探測一次）、thread 優雅關閉。WiFi 實際 recovery 需手動連線後驗測（Windows 11 CLI 無法觸發 WiFi 掃描/連線）
 
 ### §Q 剩餘待做項目
@@ -90,6 +97,10 @@ PixArk 20+ 分鐘測試後看 log：
 | Q.r4 | §K.16 cwnd LOW warning 降頻 | — | ✅ 已修（quic_server.cpp 5 秒 rate limit），驗測期間 cwnd warning 從數百次降到 3 次 |
 | Q.r5 | Android 多路徑實機驗測 | **P2 (hw-bound)** | ⚠️ 阻塞。Pixel 5 無 SIM 卡（gsm.sim.state=ABSENT）→ cellular 不可用；gnirehtet v2.5.1 USB 反向網路共享在 Android 15 (API 35) VPN 建立失敗（app 靜默退出，tun0 未建立）。需：①插 SIM 卡走 WiFi+cellular 或 ②換 Android 12-13 裝置測 gnirehtet |
 | Q.r6 | 壓力測試 | **P3** | 待做。1440p120 + 3 subflow + 模擬 10% packet loss，確認 FEC recovery + jitter buffer 在極端條件下表現 |
+| Q.r7 | Fix L.2 IDR request via QUIC datagram | — | ✅ v1.5.193。video 降級時 client 送 IDR request（×3 重複）要求 server 送新關鍵幀，加速畫面恢復 |
+| Q.r8 | Fix M DYN-STANDBY-ALIVE + failover promotion | — | ✅ v1.5.194。standby 路徑在 primary stale 時自動 promote；FAILOVER 搜尋 standby 候選 |
+| Q.r9 | Fix N FAILBACK slot + input 診斷 + log 降噪 | — | ✅ v1.5.195。§Q-INTERFACE-FAILBACK 用 interfaceIndex 匹配；§Q-INPUT-DIAG server/client 雙端計數器；DYN-STANDBY-FAILOVER-GUARD 改 state-transition log |
+| Q.r10 | Fix O FAILOVER-DEDUP + secondary failover + server 診斷 | — | ✅ v1.5.196。防止雙重 promotion（WiFi 已 available 時跳過 VPN）；非 primary 路徑全死時嘗試二次 failover；server §Q-SERVER-PATH-DIAG 追蹤 path status 變化 |
 
 ### §Q Client picoquic build 備忘
 

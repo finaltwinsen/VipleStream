@@ -653,8 +653,9 @@ static void inputSendThreadProc(void* context) {
 #ifdef VIPLE_MPQUIC
         continue;  // 正常流程跳過 wait label
     enet_input_reconnect_wait:
-        // §Q-ENET-RECONNECT v1.5.186 Fix I: 等待 controlReceiveThread
-        // 重建 ENet 連線。peer/client 變回 non-NULL 就代表重連成功。
+        // §Q-ENET-RECONNECT v1.5.186 Fix I: inputSendThread 在 send
+        // 失敗後不退出，等待 controlReceiveThread 重建 ENet 連線。
+        // peer/client 變回 non-NULL 代表重連成功，繼續送封包。
         Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: inputSendThread waiting "
                 "for ENet reconnection...\n");
         while (!PltIsThreadInterrupted(&inputSendThread)) {

@@ -516,40 +516,173 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
             qparams.quicPort = (unsigned short)StreamConfig.quicPort;
 
             if (quicConnect(&qparams) == 0) {
-                // Wait for the TLS handshake to complete before adding
-                // subflows. picoquic_probe_new_path sends path challenges
-                // that require AEAD encryption — if the handshake hasn't
-                // finished yet, the AEAD context is NULL and we segfault.
-                int handshakeWaitMs = 0;
-                while (!quicIsConnected() && handshakeWaitMs < 5000) {
-                    PltSleepMs(50);
-                    handshakeWaitMs += 50;
+                // §Q-REVIEW-P2 fix (dev/cli-quic-linux): split subflow
+                // setup into two phases around the TLS handshake.
+                //
+                //   Phase A — BEFORE handshake (this block):
+                //     Add the FIRST matching local interface as the
+                //     initial subflow.  quicAddSubflow's first call
+                //     binds path 0 (cnx's initial path) and does NOT
+                //     call picoquic_probe_new_path, so no crypto
+                //     state is required.  Without this, QuicIO has no
+                //     socket to send the Client Hello on and the
+                //     handshake stalls in picoquic_state_client_init
+                //     forever.
+                //
+                //   Phase B — AFTER quicWaitReady() returns 0:
+                //     Add the remaining interfaces as additional
+                //     paths via picoquic_probe_new_path.  Those probes
+                //     fire packets immediately, and the AEAD context
+                //     for the path doesn't exist until the connection
+                //     reaches picoquic_state_ready — which is exactly
+                //     the segfault the original §Q-REVIEW-P2 comment
+                //     warned about.
+                //
+                //   The 5000 ms ceiling covers LAN (~30-60 ms) + WAN
+                //   (~150-500 ms) + Tailscale derp relay (1-3 s observed),
+                //   with headroom for slow Sunshine hosts.
+                int serverFamily = RemoteAddr.ss_family;
+                LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
+                int ifCount = lcEnumNetInterfaces(interfaces, LC_NETIF_MAX_COUNT);
+
+                // §SINGLE-INST-NET diag: dump all enumerated interfaces
+                Limelog("[VIPLE-MPQUIC] Enumerated %d network interfaces:\n", ifCount);
+                for (int i = 0; i < ifCount; i++) {
+                    char addrStr[64] = "?";
+                    if (interfaces[i].family == AF_INET) {
+                        struct sockaddr_in* sa4 = (struct sockaddr_in*)&interfaces[i].addr;
+                        inet_ntop(AF_INET, &sa4->sin_addr, addrStr, sizeof(addrStr));
+                    }
+                    Limelog("[VIPLE-MPQUIC]   if=%d '%s' type=%s(%d) family=%s addr=%s up=%d\n",
+                            interfaces[i].index, interfaces[i].name,
+                            lcNetIfTypeName(interfaces[i].type), interfaces[i].type,
+                            interfaces[i].family == AF_INET ? "IPv4" : "IPv6",
+                            addrStr, (int)interfaces[i].up);
                 }
 
-                if (!quicIsConnected()) {
-                    Limelog("[VIPLE-MPQUIC] Handshake timeout after %d ms, falling back to UDP\n",
-                            handshakeWaitMs);
-                    quicDisconnect();
+                // §Q-MP-REACH 2026-05-23 — Pick the FIRST interface that can
+                // actually reach the peer.  Skip virtual/unknown adapters
+                // (Hyper-V, UsbNcm, VMware) for initial path — they typically
+                // can't reach the LAN peer and waste probe time.
+                int addedInitial = 0;
+                int initialIfIdx = -1;
+                for (int i = 0; i < ifCount; i++) {
+                    if (!interfaces[i].up)
+                        continue;
+                    if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK)
+                        continue;
+                    if (interfaces[i].type == LC_NETIF_TYPE_VIRTUAL ||
+                        interfaces[i].type == LC_NETIF_TYPE_UNKNOWN)
+                        continue;
+                    if (interfaces[i].family != serverFamily)
+                        continue;
+                    if (quicAddSubflow(interfaces[i].index,
+                                       interfaces[i].name,
+                                       interfaces[i].type,
+                                       &interfaces[i].addr,
+                                       interfaces[i].addrLen) >= 0) {
+                        initialIfIdx = i;
+                        addedInitial = 1;
+                        Limelog("[VIPLE-MPQUIC] Initial subflow bound on if %d, waiting for handshake\n",
+                                interfaces[i].index);
+                        break;
+                    }
+                    // Probe failed (no route to peer) — try next interface.
+                }
+                if (!addedInitial) {
+                    Limelog("[VIPLE-MPQUIC] No usable local interface, falling back to UDP\n");
+                    StreamConfig.useQuicTransport = 0;
+                } else if (quicWaitReady(5000) != 0) {
+                    Limelog("[VIPLE-MPQUIC] QUIC handshake didn't complete in 5000ms, falling back to UDP\n");
                     StreamConfig.useQuicTransport = 0;
                 } else {
-                    Limelog("[VIPLE-MPQUIC] Handshake complete in %d ms\n", handshakeWaitMs);
+                    Limelog("[VIPLE-MPQUIC] QUIC handshake complete, adding additional subflows\n");
+                    int added = 1;  // initial subflow already counted
 
-                    // §K.10 修正：暫停額外 subflow 的添加。
-                    //
-                    // 問題根因：client 在 handshake 後立即對同一個 wlan0 介面（相同
-                    // IP, 不同 source port）添加 path 1。path 1 因 anti-amplification
-                    // 限制（server 只能發送 3x received bytes），造成 picoquic 在
-                    // frames.c:5387 的 "Deleting datagram" 分支被觸發：
-                    //   - 嘗試在 path 1 準備封包，但 available space < datagram size
-                    //   - is_first_in_packet = true → datagram 從 global queue **永久刪除**
-                    //   - path 0 也拿不到 → 50%+ datagram 消失 → FEC 失效 → 連線終止
-                    //
-                    // 解決方案：暫時停用同一介面 subflow 添加，改為 single-path 模式。
-                    // 真正的多路徑（WiFi + Cellular）須在不同介面（wlan0 vs rmnet0）上
-                    // 才有意義，待確認 OS 介面枚舉後再啟用。
-                    Limelog("[VIPLE-MPQUIC] §K.10 subflow addition disabled (single-path mode; anti-amplification fix)\n");
-                    Limelog("[VIPLE-MPQUIC] QUIC connected with 0 subflow(s) (family=%s, single-path)\n",
-                            RemoteAddr.ss_family == AF_INET6 ? "IPv6" : "IPv4");
+                    // §MP-ADV 2026-05-24 — 解析所有 alt peer（伺服器廣告
+                    // 的介面 IP + 客戶端探測到的位址）。每個 alt peer 都
+                    // 會在 Phase B 迴圈中與每個客戶端介面嘗試配對。
+                    struct sockaddr_storage altPeers[QUIC_MAX_ALT_PEERS];
+                    SOCKADDR_LEN altPeerLens[QUIC_MAX_ALT_PEERS];
+                    int altPeerCount = 0;
+
+                    for (int ap = 0; ap < StreamConfig.quicAltPeerCount && ap < QUIC_MAX_ALT_PEERS; ap++) {
+                        const char* apStr = StreamConfig.quicAltPeers[ap];
+                        if (apStr[0] == '\0') continue;
+                        struct sockaddr_in* sa4 = (struct sockaddr_in*)&altPeers[altPeerCount];
+                        memset(sa4, 0, sizeof(struct sockaddr_in));
+                        if (inet_pton(AF_INET, apStr, &sa4->sin_addr) == 1) {
+                            sa4->sin_family = AF_INET;
+                            sa4->sin_port = htons((unsigned short)StreamConfig.quicPort);
+                            altPeerLens[altPeerCount] = (SOCKADDR_LEN)sizeof(struct sockaddr_in);
+                            Limelog("[VIPLE-MPQUIC] Alt peer[%d]: %s:%u\n",
+                                    altPeerCount, apStr, (unsigned)StreamConfig.quicPort);
+                            altPeerCount++;
+                        }
+                    }
+
+                    // 儲存到全域狀態，供未來 quicRecheckPaths 動態路徑管理用
+                    if (altPeerCount > 0) {
+                        quicSetAltPeers(altPeers, altPeerLens, altPeerCount);
+                    }
+
+                    for (int i = 0; i < ifCount; i++) {
+                        if (i == initialIfIdx)
+                            continue;  // already added as path 0
+                        if (!interfaces[i].up)
+                            continue;
+                        if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK)
+                            continue;
+                        // §SINGLE-INST-NET: skip virtual/unknown adapters in
+                        // Phase B — they create dead paths that waste picoquic
+                        // probes and can interfere with the initial data flow.
+                        if (interfaces[i].type == LC_NETIF_TYPE_VIRTUAL ||
+                            interfaces[i].type == LC_NETIF_TYPE_UNKNOWN) {
+                            Limelog("[VIPLE-MPQUIC] Skipping if %d '%s' for multipath (type=%s)\n",
+                                    interfaces[i].index, interfaces[i].name,
+                                    lcNetIfTypeName(interfaces[i].type));
+                            continue;
+                        }
+                        if (interfaces[i].family != serverFamily)
+                            continue;
+                        // §Q-MP-ALT-PEER 2026-05-24 — Try BOTH primary
+                        // AND alt endpoint for each interface.  UsbNcm
+                        // (USB tethering) has a default route through the
+                        // phone, so UDP connect() passes for ANY dest —
+                        // the old "primary fails → try alt" fallback never
+                        // triggers.  By trying both we cover:
+                        //   • Phone on LAN WiFi → primary peer works
+                        //   • Phone on cellular → alt peer (Tailscale) works
+                        // Each attempt creates a separate socket (bound to
+                        // the same local addr, different ephemeral port) and
+                        // a separate picoquic path.  picoquic validates
+                        // which paths are alive; dead ones get marked
+                        // inactive without affecting live paths.
+                        int rc = quicAddSubflow(interfaces[i].index,
+                                                interfaces[i].name,
+                                                interfaces[i].type,
+                                                &interfaces[i].addr,
+                                                interfaces[i].addrLen);
+                        if (rc >= 0) {
+                            added++;
+                        }
+                        // §MP-ADV: 嘗試所有 alt peer（不只一個）
+                        for (int ap = 0; ap < altPeerCount; ap++) {
+                            int rc2 = quicAddSubflowEx(interfaces[i].index,
+                                                       interfaces[i].name,
+                                                       interfaces[i].type,
+                                                       &interfaces[i].addr,
+                                                       interfaces[i].addrLen,
+                                                       &altPeers[ap], altPeerLens[ap]);
+                            if (rc2 >= 0) {
+                                Limelog("[VIPLE-MPQUIC] Subflow on if %d joined via alt peer[%d]\n",
+                                        interfaces[i].index, ap);
+                                added++;
+                            }
+                        }
+                    }
+                    Limelog("[VIPLE-MPQUIC] QUIC connected with %d subflow(s) (family=%s)\n",
+                            added, serverFamily == AF_INET6 ? "IPv6" : "IPv4");
                 }
             } else {
                 Limelog("[VIPLE-MPQUIC] QUIC connect failed, falling back to UDP\n");

@@ -923,6 +923,9 @@ private:
     // 記錄當前 step 何時進入, 用來判斷 hold 期是否結束.
     int                m_LatencyThrottleStep            = 0;
     int64_t            m_LatencyThrottleStepEnteredMs   = 0;
+    // §Q.3 (v1.5.200)：第一次 throttle 評估的時間戳（startup grace 用）。
+    // -1 = 尚未評估過；新 renderer 物件 = 每次連線重新計時。
+    int64_t            m_ThrottleStartMs                = -1;
     uint32_t           m_LatencyThrottleCounter         = 0;
     std::atomic<uint64_t> m_LatencyThrottleDroppedCount {0};
     // §J.3.e.2.i.59 (v1.4.126) — latency slope tracking for predictive boost.

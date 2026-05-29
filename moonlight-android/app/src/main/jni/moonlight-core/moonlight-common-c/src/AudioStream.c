@@ -511,6 +511,7 @@ int startAudioStream(void* audioContext, int arFlags) {
     if (useQuicAudio) {
         quicAudioRing.head = 0;
         quicAudioRing.tail = 0;
+        quicSetRecvCallbackForFlow(QUIC_FLOW_AUDIO, quicAudioRecvCallback, NULL);
         Limelog("[VIPLE-MPQUIC] Audio using QUIC datagram transport\n");
     }
 #endif

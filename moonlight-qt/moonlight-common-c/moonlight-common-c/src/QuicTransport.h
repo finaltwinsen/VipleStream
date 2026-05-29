@@ -233,6 +233,11 @@ void quicVideoGetRingStats(int* depth, int* capacity, uint64_t* drops);
 // Returns 1 if a failover is in progress (primary dead, standby active).
 int quicIsFailoverActive(void);
 
+// Fix M v1.5.194: 查詢 primary path（slot 0）是否確認有問題。
+// Returns 1 if primary is deleted/inactive/has timeouts; 0 if healthy.
+// Fix L bypass 用此做二次驗證：只在 primary 確認壞掉時才繞過 ENet。
+int quicIsPrimaryPathUnhealthy(void);
+
 // ── Session ticket (0-RTT) ───────────────────────────────────
 
 // Set the ticket store file path. picoquic auto-loads existing tickets

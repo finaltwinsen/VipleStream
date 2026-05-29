@@ -385,21 +385,34 @@ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCK
             }
         }
 
-#if defined(LC_DEBUG)
+        // VipleStream §J: always log the actual realized SO_RCVBUF (was
+        // gated on LC_DEBUG which is off in release builds, hiding the fact
+        // that Windows clamps a 3-12 MB setsockopt request down to as little
+        // as 256 KB silently).  At 38 Mbps streaming, 256 KB is only ~50 ms
+        // of buffering — bursty per-frame sends overrun it before the app
+        // reads.  Surfacing the actual size makes the gap visible without
+        // a debug rebuild.
+        int requestedBufSize = bufferSize;
         if (err == 0) {
             Limelog("Selected receive buffer size: %d\n", bufferSize);
         }
         else {
             Limelog("Unable to set receive buffer size: %d\n", LastSocketError());
         }
-
         {
-            SOCKADDR_LEN len = sizeof(bufferSize);
-            if (getsockopt(s, SOL_SOCKET, SO_RCVBUF, (char*)&bufferSize, &len) == 0) {
-                Limelog("Actual receive buffer size: %d\n", bufferSize);
+            int actualBufSize = 0;
+            SOCKADDR_LEN len = sizeof(actualBufSize);
+            if (getsockopt(s, SOL_SOCKET, SO_RCVBUF, (char*)&actualBufSize, &len) == 0) {
+                Limelog("Actual receive buffer size: %d (requested: %d)\n",
+                        actualBufSize, requestedBufSize);
+                if (actualBufSize > 0 && actualBufSize < requestedBufSize / 2) {
+                    Limelog("WARNING: OS clamped SO_RCVBUF — burst-heavy codecs "
+                            "(e.g. HEVC 1440p120) may see RX-side packet drops; "
+                            "consider raising HKLM\\System\\CurrentControlSet\\Services\\AFD\\Parameters\\"
+                            "DefaultReceiveWindow on Windows or net.core.rmem_max on Linux\n");
+                }
             }
         }
-#endif
     }
 
     return s;

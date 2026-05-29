@@ -694,6 +694,22 @@ namespace quic_server {
     if (_pathSwitchGraceCycles > 0)
       _pathSwitchGraceCycles--;
 
+    // §Q-STALE-HEADROOM-GATE v1.5.199：只在 picoquic 真的塞住（cwnd 滿）時
+    // 才讓 §Q-STALE 丟 video。實測（8 Mbps/1080p30）§Q-STALE 在 cwnd 健康
+    // （headroom ~250K）、pending=0 下仍誤判 _approxVideoQueueDepth 爆量而
+    // 丟光 video → 死亡螺旋（丟 video → bytes_sent 只剩 audio → 估計值扣得
+    // 極慢卡死）。真正的 backpressure 訊號是 cwin - bytes_in_transit <= 0。
+    // O(1) 計算，不做昂貴的 datagram queue 遍歷（§K.11-PERF 教訓）。
+    int64_t videoPathHeadroom = INT64_MAX; // 預設未知 → 視為有空間（不丟）
+    {
+      int hp = (bestVideoPath >= 0) ? bestVideoPath : 0;
+      if (hp < _cnx->nb_paths && _cnx->path[hp] != nullptr) {
+        videoPathHeadroom = (int64_t)_cnx->path[hp]->cwin
+                          - (int64_t)_cnx->path[hp]->bytes_in_transit;
+      }
+    }
+    bool quicBackpressured = (videoPathHeadroom <= 0);
+
     for (auto &dg : batch) {
       if (dg.isStream) {
         picoquic_add_to_stream(_cnx, 0, dg.data.data(), dg.data.size(), 0);
@@ -715,7 +731,7 @@ namespace quic_server {
       // 防止 WiFi 短暫 stall → §Q-STALE 死亡螺旋 → video 永久停止。
       // 因果鏈：所有 non-backup path 暫時無法送 → bestVideoPath=-1 →
       // 沒有 PATH-SWITCH → grace 不重設 → §Q-STALE 永不解除。
-      if (ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 &&
+      if (ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 && quicBackpressured &&
           _approxVideoQueueDepth > MAX_VIDEO_QUEUE_DEPTH) {
         uint64_t nowStale = picoquic_current_time();
         if (_staleStallStart == 0) {
@@ -748,7 +764,7 @@ namespace quic_server {
       // video datagram 格式相同（都是 FLOW_VIDEO）。若 approxVQ 仍高
       // （舊路徑堆積的 stale P-frame 從 encoder pipeline 持續入隊），
       // IDR datagram 會被丟棄 → client 永遠收不到 IDR → 影像凍結。
-      if (ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 &&
+      if (ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 && quicBackpressured &&
           _approxVideoQueueDepth > MAX_VIDEO_QUEUE_DEPTH) {
         _dgramDroppedStale++;
         continue;
@@ -1544,6 +1560,21 @@ namespace quic_server {
       picoquic_set_path_status(cnx, stream_id, picoquic_path_status_backup);
       BOOST_LOG(info) << "[VIPLE-MPQUIC] Path available: id=" << stream_id
                       << " (set to backup, failover-ready)";
+
+      // §Q-SERVER-PATH-DIAG v1.5.196 Fix O：path event 快照
+      if (cnx) {
+        for (int pi = 0; pi < cnx->nb_paths; pi++) {
+          if (cnx->path[pi] != nullptr) {
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-SERVER-PATH-DIAG: "
+                            << "path[" << pi << "] id="
+                            << cnx->path[pi]->unique_path_id
+                            << " backup=" << cnx->path[pi]->path_is_backup
+                            << " demoted=" << cnx->path[pi]->path_is_demoted
+                            << " rtt=" << (cnx->path[pi]->smoothed_rtt / 1000)
+                            << "ms";
+          }
+        }
+      }
       break;
     }
 
@@ -1558,6 +1589,23 @@ namespace quic_server {
       BOOST_LOG(info) << "[VIPLE-MPQUIC] Path "
                       << (event == picoquic_callback_path_deleted ? "deleted" : "suspended")
                       << ": id=" << stream_id;
+
+      // §Q-SERVER-PATH-DIAG v1.5.196 Fix O：path event 時印出 server
+      // 端所有存活路徑的狀態快照，幫助診斷 failover 期間 server 的
+      // 排程行為（例如：server 是否把 WiFi 設為 available？）
+      if (cnx) {
+        for (int pi = 0; pi < cnx->nb_paths; pi++) {
+          if (cnx->path[pi] != nullptr) {
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-SERVER-PATH-DIAG: "
+                            << "path[" << pi << "] id="
+                            << cnx->path[pi]->unique_path_id
+                            << " backup=" << cnx->path[pi]->path_is_backup
+                            << " demoted=" << cnx->path[pi]->path_is_demoted
+                            << " rtt=" << (cnx->path[pi]->smoothed_rtt / 1000)
+                            << "ms";
+          }
+        }
+      }
 
       // §Q-MP-EMERGENCY-PROMOTE 2026-05-27（server 對稱版）：
       // server 預設把所有新探到的路徑設成 backup（§MP-PRIMARY 規則，
@@ -1621,6 +1669,20 @@ namespace quic_server {
       auto *hdr = reinterpret_cast<const QuicDgramHeader *>(bytes);
       auto session = findSession(cnx);
       if (session && session->_recvHandler) {
+        // §Q-INPUT-DIAG v1.5.195 Fix N: server 端 QUIC input 接收計數
+        if (hdr->flowType == 0x04) {
+          static std::atomic<int> inputReceived{0};
+          static auto lastDiag = std::chrono::steady_clock::now();
+          int count = ++inputReceived;
+          auto now = std::chrono::steady_clock::now();
+          if (now - lastDiag > std::chrono::seconds(5) && count > 0) {
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-INPUT-DIAG: server "
+                            << "received " << count
+                            << " QUIC input datagrams (last 5s)";
+            inputReceived = 0;
+            lastDiag = now;
+          }
+        }
         session->_recvHandler(
             hdr->flowType,
             bytes + DGRAM_HDR_SIZE,

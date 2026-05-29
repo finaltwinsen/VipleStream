@@ -263,6 +263,12 @@ namespace nvenc {
       if (config.vbv_percentage_increase > 0) {
         enc_config.rcParams.vbvBufferSize += enc_config.rcParams.vbvBufferSize * config.vbv_percentage_increase / 100;
       }
+      // §K.nvenc.vbvinit v1.5.201 (Fix Q.4)：vbvInitialDelay 預設 0 → VBV buffer
+      // 啟動時是空的 → 第一個 GOP 幾乎沒有 bit 配額 → 串流前幾秒嚴重壓縮（模糊），
+      // 之後 buffer 充飽才銳利。設為 = vbvBufferSize（啟動時視 buffer 為滿）讓第一個
+      // GOP 拿到完整配額 → 一開始就銳利。額外啟動延遲僅 ~1.2 frame（可忽略），
+      // 驅動不支援自訂 initial delay 會自動 clamp。
+      enc_config.rcParams.vbvInitialDelay = enc_config.rcParams.vbvBufferSize;
     }
 
     auto set_h264_hevc_common_format_config = [&](auto &format_config) {
