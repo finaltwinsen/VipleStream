@@ -646,7 +646,13 @@ namespace quic_server {
                       << ", cwin=" << newCwin << "B)";
       // §Q-PATH-SWITCH-IDR：路徑切換時自動要求 IDR，因為 client 端
       // 的 ENet 控制通道可能已死，無法自行請求 IDR。
-      _pathSwitchIdrNeeded.store(true, std::memory_order_release);
+      // §Q-IDR-INIT-FIX 2026-06-05：搬到下方 isRealFailover 區塊。
+      // 原本在這裡無條件 store(true)，連線建立時的初始 path 選定
+      // （-2 → -1 → 0）也會觸發 → §Q-FAILOVER-IDR-LOOP 在每次串流
+      // 開頭跑滿 10 秒、每 500ms 一個 IDR → cooldown 過濾後每 1.5s
+      // 一個多餘 IDR → 啟動期畫面以 1.5s 週期在模糊↔清晰間震盪
+      // 6-7 遍。§Q-REINJECT-WINDOW 早就修過同一個誤觸發（v1.5.172），
+      // 這顆 flag 漏掉了。
 
       // §Q-PATH-SWITCH-FLUSH 2026-05-27: 路徑切換時重設 approxVQ 和
       // 設定寬限期。failover 期間舊路徑死亡 → bytes_sent 不增長 →
@@ -682,6 +688,10 @@ namespace quic_server {
       }
 
       if (isRealFailover) {
+        // §Q-IDR-INIT-FIX：只在真正的 failover 切換才要求 IDR loop。
+        // 初始 path 選定（-2 → -1 → 0）不觸發（見上方註解）。
+        _pathSwitchIdrNeeded.store(true, std::memory_order_release);
+
         // 開 2 秒 reinject 視窗（XLINK 模式）
         constexpr uint64_t REINJECT_WINDOW_US = 2000000;
         _reinjectWindowUntil = nowUsForEpisode + REINJECT_WINDOW_US;

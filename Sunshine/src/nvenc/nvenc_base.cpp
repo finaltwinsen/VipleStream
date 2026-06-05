@@ -415,6 +415,11 @@ namespace nvenc {
       return false;
     }
 
+    // VipleStream §ABR: deep-copy init params for mid-stream reconfigure
+    stored_enc_config = enc_config;
+    stored_init_params = init_params;
+    stored_init_params.encodeConfig = &stored_enc_config;
+
     if (async_event_handle) {
       NV_ENC_EVENT_PARAMS event_params = {min_struct_version(NV_ENC_EVENT_PARAMS_VER)};
       event_params.completionEvent = async_event_handle;
@@ -673,6 +678,42 @@ namespace nvenc {
       }
     }
 
+    return true;
+  }
+
+  // VipleStream §ABR: mid-stream bitrate reconfigure via NvEncReconfigureEncoder
+  bool nvenc_base::reconfigure_bitrate(int bitrate_kbps, int framerate) {
+    if (!encoder || !nvenc) {
+      BOOST_LOG(error) << "[VIPLE-ABR] NvEnc: reconfigure called on uninitialized encoder";
+      return false;
+    }
+
+    uint32_t old_avg = stored_enc_config.rcParams.averageBitRate;
+    uint32_t old_vbv = stored_enc_config.rcParams.vbvBufferSize;
+    uint32_t new_avg = static_cast<uint32_t>(bitrate_kbps) * 1000;
+
+    stored_enc_config.rcParams.averageBitRate = new_avg;
+    if (old_avg > 0 && old_vbv > 0) {
+      stored_enc_config.rcParams.vbvBufferSize = static_cast<uint32_t>(
+        static_cast<uint64_t>(new_avg) * old_vbv / old_avg);
+      stored_enc_config.rcParams.vbvInitialDelay = stored_enc_config.rcParams.vbvBufferSize;
+    }
+
+    NV_ENC_RECONFIGURE_PARAMS reconfigure_params = {min_struct_version(NV_ENC_RECONFIGURE_PARAMS_VER)};
+    reconfigure_params.reInitEncodeParams = stored_init_params;
+    reconfigure_params.resetEncoder = 1;
+    reconfigure_params.forceIDR = 1;
+
+    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params))) {
+      BOOST_LOG(error) << "[VIPLE-ABR] NvEnc: NvEncReconfigureEncoder() failed: " << last_nvenc_error_string;
+      stored_enc_config.rcParams.averageBitRate = old_avg;
+      stored_enc_config.rcParams.vbvBufferSize = old_vbv;
+      stored_enc_config.rcParams.vbvInitialDelay = old_vbv;
+      return false;
+    }
+
+    BOOST_LOG(info) << "[VIPLE-ABR] NvEnc: bitrate reconfigured to " << bitrate_kbps << " kbps"
+                    << " (vbv=" << stored_enc_config.rcParams.vbvBufferSize << ")";
     return true;
   }
 

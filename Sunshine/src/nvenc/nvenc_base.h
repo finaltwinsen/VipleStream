@@ -69,6 +69,14 @@ namespace nvenc {
      */
     bool invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame);
 
+    /**
+     * @brief Reconfigure encoder bitrate mid-stream without recreating the session.
+     * @param bitrate_kbps New target bitrate in kilobits per second.
+     * @param framerate Current framerate (for VBV buffer calculation).
+     * @return `true` on success, `false` on error.
+     */
+    bool reconfigure_bitrate(int bitrate_kbps, int framerate);
+
   protected:
     /**
      * @brief Required. Used for loading NvEnc library and setting `nvenc` variable with `NvEncodeAPICreateInstance()`.
@@ -143,6 +151,10 @@ namespace nvenc {
   private:
     NV_ENC_OUTPUT_PTR output_bitstream = nullptr;
     uint32_t minimum_api_version = 0;
+
+    // VipleStream §ABR: stored for mid-stream NvEncReconfigureEncoder() calls
+    NV_ENC_INITIALIZE_PARAMS stored_init_params {};
+    NV_ENC_CONFIG stored_enc_config {};
 
     struct {
       uint64_t last_encoded_frame_index = 0;

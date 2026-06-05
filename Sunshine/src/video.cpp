@@ -426,6 +426,11 @@ namespace video {
       return result;
     }
 
+    // VipleStream §ABR: expose for mid-stream bitrate reconfigure
+    platf::nvenc_encode_device_t *get_nvenc_device() const {
+      return device.get();
+    }
+
   private:
     std::unique_ptr<platf::nvenc_encode_device_t> device;
     bool force_idr = false;
@@ -1600,6 +1605,15 @@ namespace video {
       BOOST_LOG(error) << "NvENC frame index mismatch " << frame_nr << " " << encoded_frame.frame_index;
     }
 
+    // VipleStream §QLOG: IDR 診斷 log（v1.5.218 §Q-IDR-INIT-FIX 的驗證手段，
+    // 保留供日後診斷 IDR 風暴/畫質震盪）。只記 IDR frame：頻率異常
+    // （例如週期性 EMIT）即代表有非法 IDR 觸發源，搭配 IDR-REQ/IDR-EMIT/
+    // IDR-SUPPRESS 行可定位來源。
+    if (encoded_frame.idr) {
+      BOOST_LOG(info) << "[VIPLE-QLOG] f=" << frame_nr
+        << " sz=" << encoded_frame.data.size() << " IDR";
+    }
+
     auto packet = std::make_unique<packet_raw_generic>(std::move(encoded_frame.data), encoded_frame.frame_index, encoded_frame.idr);
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
@@ -2106,6 +2120,8 @@ namespace video {
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
+          BOOST_LOG(info) << "[VIPLE-QLOG] REF-INVAL f=" << frame_nr
+            << " [" << frames->first << "," << frames->second << "]";
           session->invalidate_ref_frames(frames->first, frames->second);
         }
       }
@@ -2113,6 +2129,8 @@ namespace video {
       if (idr_events->peek()) {
         requested_idr_frame = true;
         idr_events->pop();
+        // §QLOG: IDR 被 idr_events 觸發（來自 AIMD / client 請求 / §K.14 外的其他路徑）
+        BOOST_LOG(info) << "[VIPLE-QLOG] IDR-REQ via idr_events f=" << frame_nr;
       }
 
       if (requested_idr_frame) {
@@ -2121,10 +2139,11 @@ namespace video {
         if (now - last_idr_emit >= IDR_COOLDOWN_MS) {
           session->request_idr_frame();
           last_idr_emit = now;
+          BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr << " (cooldown OK)";
         }
         else {
           requested_idr_frame = false;  // suppress for this iteration
-          BOOST_LOG(debug) << "[VIPLE-IDR] cooldown active, suppressing IDR request"sv;
+          BOOST_LOG(info) << "[VIPLE-QLOG] IDR-SUPPRESS f=" << frame_nr << " (cooldown active)";
         }
       }
 
@@ -2140,7 +2159,16 @@ namespace video {
             if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
               ctx->rc_buffer_size = newBitrate / config.framerate;
             }
-            BOOST_LOG(info) << "[VIPLE-ABR] Encoder bitrate updated to " << *newBitrateKbps << " kbps";
+            BOOST_LOG(info) << "[VIPLE-ABR] AVCodec bitrate updated to " << *newBitrateKbps << " kbps";
+          }
+          else {
+            auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(session.get());
+            if (nvenc_session) {
+              auto nvenc_dev = nvenc_session->get_nvenc_device();
+              if (nvenc_dev && nvenc_dev->nvenc) {
+                nvenc_dev->nvenc->reconfigure_bitrate(*newBitrateKbps, config.framerate);
+              }
+            }
           }
         }
       }
