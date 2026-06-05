@@ -1,18 +1,33 @@
-; §SC-HID: VipleSCHid.inf — UMDF2 virtual Steam Controller HID device
+; SC-HID: VipleSCHid.inf -- UMDF2 virtual Steam Controller HID device
 ; Installs via: pnputil /add-driver VipleSCHid.inf /install
-;               devcon install VipleSCHid.inf Viple\SteamController
 ;
 ; The UMDF2 minidriver DLL (VipleSCHid_Driver.dll) is hosted by the in-box,
-; already-signed Microsoft reflector mshidumdf.sys.  No kernel driver signing
-; required — only admin rights.
+; already-signed Microsoft reflector mshidumdf.sys. No kernel driver signing
+; required -- only admin rights.
+;
+; NOTE: This INF is intentionally ASCII-only. INF parsers (Inf2Cat in
+; particular) are encoding-sensitive and choke on UTF-8-without-BOM multibyte
+; sequences (error 22.9.11, section parse failure). Keep all comments ASCII;
+; the Chinese rationale lives in the commit message and the .cpp/.ps1 files.
 
 [Version]
-Signature  = "$WINDOWS NT$"
-Class      = HIDClass
-ClassGUID  = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
-Provider   = %Viple%
+Signature   = "$WINDOWS NT$"
+Class       = HIDClass
+ClassGUID   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Provider    = %Viple%
 CatalogFile = VipleSCHid.cat
-DriverVer  = 06/05/2026,1.0.0.0
+DriverVer   = 06/05/2026,1.0.0.0
+PnpLockdown = 1
+
+; Every file named in a CopyFiles section must be declared in
+; [SourceDisksFiles] (which references a disk id in [SourceDisksNames]),
+; otherwise pnputil /add-driver rejects the package and the DLL is never
+; copied to %12%\UMDF (device cannot start).
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+VipleSCHid_Driver.dll = 1
 
 [Manufacturer]
 %Viple% = VipleSC,NTamd64
@@ -33,22 +48,24 @@ AddReg = VipleSC_AddReg_HW
 HKR,,"LowerFilters",0x00010008,"mshidumdf"
 
 [VipleSC_Install.NT.Services]
-; UMDF2 function driver service = WUDFRd（kernel reflector，載入 WUDFHost.exe 再跑 DLL）
+; UMDF2 function-driver service = WUDFRd (kernel reflector; loads WUDFHost.exe
+; which in turn runs our user-mode DLL).
 AddService = WUDFRd, 0x000001fa, WUDFRd_ServiceInstall
 
 [WUDFRd_ServiceInstall]
-DisplayName   = %WUDFRd_DisplayName%
-ServiceType   = 1
-StartType     = 3
-ErrorControl  = 1
-ServiceBinary = %12%\WUDFRd.sys
+DisplayName    = %WUDFRd_DisplayName%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\WUDFRd.sys
+LoadOrderGroup = WdfLoadGroup
 
 [VipleSC_Install.NT.Wdf]
-UmdfService            = VipleSCHid,VipleSCHid_Install
-UmdfServiceOrder       = VipleSCHid
+UmdfService                = VipleSCHid,VipleSCHid_Install
+UmdfServiceOrder           = VipleSCHid
 UmdfKernelModeClientPolicy = AllowKernelModeClients
-UmdfFileObjectPolicy   = AllowNullAndUnknownFileObjects
-UmdfFsContextUsePolicy = CanUseFsContext2
+UmdfFileObjectPolicy       = AllowNullAndUnknownFileObjects
+UmdfFsContextUsePolicy     = CanUseFsContext2
 
 [VipleSCHid_Install]
 UmdfLibraryVersion = 2.33.0
@@ -59,5 +76,6 @@ VipleSC_CopyFiles = 12,UMDF
 
 [Strings]
 Viple              = "VipleStream"
+DiskName           = "VipleStream SC HID Install Disk"
 VipleSC.DevDesc    = "VipleStream Steam Controller (Virtual)"
 WUDFRd_DisplayName = "Windows Driver Foundation - User-mode Driver Framework Reflector"

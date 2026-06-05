@@ -68,17 +68,24 @@ EVT_WDF_DRIVER_DEVICE_ADD                   EvtDeviceAdd;
 EVT_WDF_IO_QUEUE_IO_INTERNAL_DEVICE_CONTROL EvtIoInternalDeviceControl;
 
 // ── DriverEntry ───────────────────────────────────────────────────────────────
-NTSTATUS DriverEntry(IN WDFDRIVER Driver, IN PWDFDRIVER_CONFIG Config) {
-    UNREFERENCED_PARAMETER(Driver);
-    WDF_DRIVER_CONFIG_INIT(Config, EvtDeviceAdd);
-    return STATUS_SUCCESS;
+// UMDF2 的進入點契約：簽章必須是 (PDRIVER_OBJECT, PUNICODE_STRING) 且為 extern "C"
+// —— WdfDriverStubUm.lib 以未修飾 C 名稱、用 PDRIVER_OBJECT 呼叫它。若用 C++
+// 連結（會 name-mangle）或用 (WDFDRIVER, PWDFDRIVER_CONFIG) 簽章，會 LNK2019。
+// 並且必須實際呼叫 WdfDriverCreate 註冊 EvtDeviceAdd，否則框架永不初始化。
+extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
+                                _In_ PUNICODE_STRING RegistryPath) {
+    WDF_DRIVER_CONFIG config;
+    WDF_DRIVER_CONFIG_INIT(&config, EvtDeviceAdd);
+    return WdfDriverCreate(DriverObject, RegistryPath,
+                           WDF_NO_OBJECT_ATTRIBUTES, &config, WDF_NO_HANDLE);
 }
 
 // ── EvtDeviceAdd ──────────────────────────────────────────────────────────────
 NTSTATUS EvtDeviceAdd(IN WDFDRIVER Driver, IN PWDFDEVICE_INIT DeviceInit) {
     UNREFERENCED_PARAMETER(Driver);
 
-    WdfDeviceInitSetDeviceType(DeviceInit, FILE_DEVICE_UNKNOWN);
+    // 注意：UMDF2 沒有 WdfDeviceInitSetDeviceType（KMDF-only API，UMDF2 標頭
+    // 不提供 → C3861）。HID minidriver 不需要設定 device type，省略即可。
 
     // 裝置上下文大小
     WDF_OBJECT_ATTRIBUTES devAttrs;
