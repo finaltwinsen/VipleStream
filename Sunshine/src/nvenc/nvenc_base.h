@@ -73,9 +73,11 @@ namespace nvenc {
      * @brief Reconfigure encoder bitrate mid-stream without recreating the session.
      * @param bitrate_kbps New target bitrate in kilobits per second.
      * @param framerate Current framerate (for VBV buffer calculation).
+     * @param force_idr §ABR-RAMP：true = reset encoder + 強制 IDR（降速/擁塞救援，
+     *        快速收斂到新碼率）；false = 平滑過渡（回升，不打斷畫面）。
      * @return `true` on success, `false` on error.
      */
-    bool reconfigure_bitrate(int bitrate_kbps, int framerate);
+    bool reconfigure_bitrate(int bitrate_kbps, int framerate, bool force_idr);
 
   protected:
     /**

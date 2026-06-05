@@ -1000,6 +1000,7 @@ namespace rtsp_stream {
     args.try_emplace("x-nv-vqos[0].qosTrafficType"sv, "5"sv);
     args.try_emplace("x-nv-aqos.qosTrafficType"sv, "4"sv);
     args.try_emplace("x-ml-video.configuredBitrateKbps"sv, "0"sv);
+    args.try_emplace("x-ml-video.autoAdjustBitrate"sv, "1"sv);
     args.try_emplace("x-ss-general.encryptionEnabled"sv, "0"sv);
     args.try_emplace("x-ss-video[0].chromaSamplingType"sv, "0"sv);
     args.try_emplace("x-ss-video[0].intraRefresh"sv, "0"sv);
@@ -1044,6 +1045,7 @@ namespace rtsp_stream {
       config.monitor.enableIntraRefresh = (int) util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
 
       configuredBitrateKbps = util::from_view(args.at("x-ml-video.configuredBitrateKbps"sv));
+      config.autoAdjustBitrate = util::from_view(args.at("x-ml-video.autoAdjustBitrate"sv)) != 0;
     } catch (std::out_of_range &) {
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
       return;

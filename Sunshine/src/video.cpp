@@ -2104,6 +2104,10 @@ namespace video {
     constexpr auto IDR_COOLDOWN_MS = std::chrono::milliseconds {1500};
     auto last_idr_emit = std::chrono::steady_clock::time_point::min();
 
+    // §ABR-RAMP：追蹤上次套用的 bitrate，判斷本次變更是降速（cut，需
+    // forceIDR 快速收斂）還是回升（ramp，平滑過渡不打斷畫面）
+    int last_applied_bitrate_kbps = config.bitrate;
+
     while (true) {
       // Break out of the encoding loop if any of the following are true:
       // a) The stream is ending
@@ -2148,8 +2152,13 @@ namespace video {
       }
 
       // VipleStream: Adaptive Bitrate — apply new bitrate from control thread
+      // §ABR-RAMP：依方向決定 IDR 策略——降速（擁塞救援）reset + forceIDR
+      // 快速收斂；回升平滑過渡不打斷畫面（修掉舊版回升路上每步閃 IDR）。
       if (bitrate_events->peek()) {
         if (auto newBitrateKbps = bitrate_events->pop(0ms)) {
+          bool isDecrease = *newBitrateKbps < last_applied_bitrate_kbps;
+          last_applied_bitrate_kbps = *newBitrateKbps;
+
           auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(session.get());
           if (avcodec_session && avcodec_session->avcodec_ctx) {
             auto &ctx = avcodec_session->avcodec_ctx;
@@ -2159,14 +2168,15 @@ namespace video {
             if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
               ctx->rc_buffer_size = newBitrate / config.framerate;
             }
-            BOOST_LOG(info) << "[VIPLE-ABR] AVCodec bitrate updated to " << *newBitrateKbps << " kbps";
+            BOOST_LOG(info) << "[VIPLE-ABR] AVCodec bitrate updated to " << *newBitrateKbps
+                            << " kbps (" << (isDecrease ? "cut" : "ramp") << ")";
           }
           else {
             auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(session.get());
             if (nvenc_session) {
               auto nvenc_dev = nvenc_session->get_nvenc_device();
               if (nvenc_dev && nvenc_dev->nvenc) {
-                nvenc_dev->nvenc->reconfigure_bitrate(*newBitrateKbps, config.framerate);
+                nvenc_dev->nvenc->reconfigure_bitrate(*newBitrateKbps, config.framerate, isDecrease);
               }
             }
           }

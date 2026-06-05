@@ -59,6 +59,12 @@ constexpr int IDX_SET_RGB_LED = 14;
 constexpr int IDX_SET_ADAPTIVE_TRIGGERS = 15;
 constexpr int IDX_FPS_CHANGE = 16;  // VipleStream: dynamic FPS change
 
+// VipleStream §ABR: SS_FRAME_FEC_PTYPE from moonlight-common-c.
+// Client sends per-frame FEC status on this packet type.
+// Upstream Sunshine uses 0x5502 for server→client RGB LED, but it has
+// no client→server handler mapped — so we claim it for ABR input.
+constexpr short SS_FRAME_FEC_PTYPE_VALUE = 0x5502;
+
 static const short packetTypes[] = {
   0x0305,  // Start A
   0x0307,  // Start B
@@ -426,9 +432,28 @@ namespace stream {
       int zeroLossStreak{0};
 
       // VipleStream: adaptive bitrate (AIMD) based on client loss reports
+      // §ABR-RAMP v1.5.218：target / applied 分離。
+      // adaptiveBitrateKbps = 已套用到 encoder 的值（video.cpp 讀這個）；
+      // targetBitrateKbps   = AIMD 追蹤的目標（無 hysteresis，回升累積用）。
+      // 舊版單一值 + 10% hysteresis 會讓 +5%max 的回升在 current > 50%max
+      // 時永遠過不了門檻 → bitrate 卡在半山腰回不去。
       std::atomic<int> adaptiveBitrateKbps{0};  // 0 = use configured bitrate
+      std::atomic<int> targetBitrateKbps{0};    // 0 = uninitialized
       int configuredBitrateKbps{0};             // original client-requested bitrate
       int bitrateZeroLossStreak{0};
+      bool autoAdjustBitrate{true};
+
+      // VipleStream §ABR: accumulated FEC loss stats from SS_FRAME_FEC_PTYPE
+      std::atomic<int> fecLossAccum{0};
+      std::atomic<int> fecFrameAccum{0};
+      std::chrono::steady_clock::time_point fecAccumStart{std::chrono::steady_clock::now()};
+
+      // §ABR-RAMP-TICK：periodic ping 驅動的零丟包 tick 節流（500ms 一輪）。
+      // client 只在有 missing 時送 FEC status，零丟包輪由 ping handler 合成。
+      std::chrono::steady_clock::time_point lastAbrPingTick{};
+      // 上次收到 FEC status 的時刻（ENet 或 QUIC）。ping tick 以此判斷
+      // 「FEC 回報是否活躍」：>600ms 無 status = 上個窗口零 missing。
+      std::chrono::steady_clock::time_point lastFecStatusTime{};
     } video;
 
     struct {
@@ -1030,9 +1055,98 @@ namespace stream {
     return 0;
   }
 
+  // VipleStream §ABR-RAMP v1.5.218：三個 loss-feedback handler（0x0201
+  // loss stats / ENet SS_FRAME_FEC / QUIC FEC）共用的 AIMD bitrate 調整。
+  // 之前三份 copy-paste 造成修一處漏兩處。
+  //
+  // target / applied 分離：AIMD 每輪更新 target（無 hysteresis），只在
+  // |target - applied| > 10% applied 時真正 reconfigure。舊版單一值 +
+  // hysteresis 會讓 +5%max 的回升步伐在 current > 50%max 時永遠過不了
+  // 10% 門檻且 streak 白白歸零 → bitrate 卡在半山腰永遠回不到滿速。
+  //
+  // 不在此 raise idr_events：降速時 NVENC reconfigure 內建 forceIDR
+  // （video.cpp 依方向決定）；回升平滑過渡不需要 IDR。舊版的 raise 造成
+  // 每次 bitrate 變更雙重 IDR（reconfigure 一個 + cooldown 後再一個）。
+  void run_abr_aimd(session_t *session, int lossCount, long long elapsedMs, const char *src) {
+    int maxBr = session->video.configuredBitrateKbps;
+    if (maxBr <= 0 || !session->video.autoAdjustBitrate) {
+      return;
+    }
+
+    int applied = session->video.adaptiveBitrateKbps.load();
+    if (applied <= 0) applied = maxBr;
+    int target = session->video.targetBitrateKbps.load();
+    if (target <= 0) target = applied;
+
+    int minBr = std::max(2000, maxBr * 15 / 100);  // floor: 2 Mbps or 15%
+
+    if (lossCount > 0) {
+      // 丟包：放棄回升累積（target 收斂回 applied），按嚴重度乘法削減
+      float lossPerSec = lossCount * 1000.0f / std::max<long long>(elapsedMs, 1);
+      int base = std::min(target, applied);
+      if (lossPerSec > 30) {
+        target = base * 50 / 100;  // heavy loss → halve
+      } else if (lossPerSec > 10) {
+        target = base * 70 / 100;  // moderate → -30%
+      } else if (lossPerSec > 3) {
+        target = base * 85 / 100;  // mild → -15%
+      } else {
+        target = base;  // 輕微（≤3/s）→ hold，不升不降
+      }
+      session->video.bitrateZeroLossStreak = 0;
+    } else {
+      session->video.bitrateZeroLossStreak++;
+      if (session->video.bitrateZeroLossStreak >= 5) {
+        target += maxBr * 5 / 100;  // additive increase: +5% of max
+        session->video.bitrateZeroLossStreak = 0;
+      }
+    }
+
+    target = std::max(minBr, std::min(target, maxBr));
+    session->video.targetBitrateKbps.store(target);
+
+    // 只在偏離已套用值 >10% 時真正 reconfigure（防抖動）。
+    // 回升累積在 target，數輪後必過門檻 → 能一路回到 max。
+    if (std::abs(target - applied) > applied / 10) {
+      session->video.adaptiveBitrateKbps.store(target);
+
+      auto bitrateEvents = session->mail->event<int>(mail::bitrate_change);
+      bitrateEvents->raise(target);
+
+      BOOST_LOG(info) << "[VIPLE-ABR] Bitrate: " << applied << " -> " << target
+        << " kbps (" << (target < applied ? "cut" : "ramp")
+        << ", loss=" << lossCount << " in " << elapsedMs << "ms, src=" << src << ")";
+    }
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
+
+      // §ABR-RAMP-TICK v1.5.218：client 的 reportFinalFrameFecStatus 只在
+      // frame 有 missing/丟棄/FEC 異常時才送 SS_FRAME_FEC status——零丟包
+      // 期間 server 收不到任何 loss feedback，AIMD 的零丟包 streak 永不
+      // 累積，bitrate 降速後結構上不可能回升（驗測實證：190 秒零丟包期
+      // 零 FEC status；cut 到 2548 後 75 秒無 ramp）。
+      //
+      // 修法：借 client 每 100ms 的 periodic ping 當零丟包 tick。距上次
+      // FEC 排空（fecAccumStart）> 600ms 代表上個窗口無 missing → 餵
+      // count=0 給 AIMD。自身節流到 500ms 一輪，與 FEC 路徑步調一致
+      // （+5% max / 2.5s）。丟包期間 FEC status 持續刷新 fecAccumStart
+      // （間隔 ≤500ms），tick 自動讓位，不會與 cut 路徑打架。
+      {
+        using namespace std::chrono_literals;
+        auto now = std::chrono::steady_clock::now();
+        if (now - session->video.lastFecStatusTime > 600ms &&
+            now - session->video.lastAbrPingTick >= 500ms) {
+          session->video.lastAbrPingTick = now;
+          // 排掉丟包尾巴殘留的 accum（最後一批 status 進來時 elapsed<500ms
+          // 沒觸發排空），避免滯留污染下次計算；通常為 0。
+          int residual = session->video.fecLossAccum.exchange(0);
+          session->video.fecFrameAccum.exchange(0);
+          run_abr_aimd(session, residual, 500, residual > 0 ? "ping-tick-residual" : "ping-tick");
+        }
+      }
     });
 
     server->map(packetTypes[IDX_START_A], [&](session_t *session, const std::string_view &payload) {
@@ -1086,52 +1200,8 @@ namespace stream {
         }
       }
 
-      // VipleStream: Adaptive Bitrate (AIMD) — reduce bitrate on loss, recover on no-loss
-      {
-        int maxBr = session->video.configuredBitrateKbps;
-        if (maxBr > 0) {  // only run if initialized
-
-        int currentBr = session->video.adaptiveBitrateKbps.load();
-        if (currentBr <= 0) currentBr = maxBr;
-
-        int minBr = std::max(2000, maxBr * 15 / 100);  // floor: 2 Mbps or 15%
-        int newBr = currentBr;
-
-        if (count > 0) {
-          float timeS = std::max<long long>(t.count(), 1ll) / 1000.0f;
-          float lossPerSec = count / timeS;
-
-          if (lossPerSec > 30) {
-            newBr = currentBr * 50 / 100;       // heavy loss → halve
-          } else if (lossPerSec > 10) {
-            newBr = currentBr * 70 / 100;       // moderate → -30%
-          } else if (lossPerSec > 3) {
-            newBr = currentBr * 85 / 100;       // mild → -15%
-          }
-          session->video.bitrateZeroLossStreak = 0;
-        } else {
-          session->video.bitrateZeroLossStreak++;
-          if (session->video.bitrateZeroLossStreak >= 5) {
-            newBr = currentBr + maxBr * 5 / 100;  // additive increase: +5% of max
-            session->video.bitrateZeroLossStreak = 0;
-          }
-        }
-
-        newBr = std::max(minBr, std::min(newBr, maxBr));
-
-        // Only apply if change > 10% to avoid oscillation
-        if (std::abs(newBr - currentBr) > currentBr / 10) {
-          session->video.adaptiveBitrateKbps.store(newBr);
-          session->video.idr_events->raise(true);  // clean start at new bitrate
-
-          auto bitrateEvents = session->mail->event<int>(mail::bitrate_change);
-          bitrateEvents->raise(newBr);
-
-          BOOST_LOG(info) << "[VIPLE-ABR] Bitrate: " << currentBr << " -> " << newBr
-            << " kbps (loss=" << count << " in " << t.count() << "ms)";
-        }
-        }  // if (maxBr > 0)
-      }
+      // VipleStream: Adaptive Bitrate (AIMD) — 共用 §ABR-RAMP 邏輯
+      run_abr_aimd(session, count, t.count(), "loss-stats");
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
@@ -1160,6 +1230,79 @@ namespace stream {
 
       // Request IDR frame for clean transition at new framerate
       session->video.idr_events->raise(true);
+    });
+
+    // VipleStream §ABR: handle per-frame FEC status from Sunshine-protocol clients.
+    // The client sends these instead of legacy 0x0201 loss stats when usePeriodicPing
+    // is true (always true for Sunshine). Accumulate loss counts and run AIMD
+    // periodically rather than per-frame to avoid thrashing.
+    server->map(SS_FRAME_FEC_PTYPE_VALUE, [&](session_t *session, const std::string_view &payload) {
+      // SS_FRAME_FEC_STATUS layout (big-endian, 21 bytes):
+      //  0: frameIndex (u32)
+      //  4: highestReceivedSequenceNumber (u16)
+      //  6: nextContiguousSequenceNumber (u16)
+      //  8: missingPacketsBeforeHighestReceived (u16)
+      // 10: totalDataPackets (u16)
+      // 12: totalParityPackets (u16)
+      // 14: receivedDataPackets (u16)
+      // 16: receivedParityPackets (u16)
+      // 18: fecPercentage (u8), multiFecBlockIndex (u8), multiFecBlockCount (u8)
+      if (payload.size() < 18) return;
+
+      auto *fec = reinterpret_cast<const uint8_t *>(payload.data());
+      uint16_t missing = (uint16_t(fec[8]) << 8) | fec[9];
+
+      // Use missingPacketsBeforeHighestReceived as loss signal.
+      // Even when FEC repairs them, missing packets indicate congestion.
+      int lost = missing;
+
+      session->video.fecLossAccum.fetch_add(lost);
+      session->video.fecFrameAccum.fetch_add(1);
+
+      auto now = std::chrono::steady_clock::now();
+      session->video.lastFecStatusTime = now;  // §ABR-RAMP-TICK：ping tick 讓位依據
+      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - session->video.fecAccumStart).count();
+
+      // Run AIMD every ~500ms worth of accumulated frames
+      if (elapsed >= 500) {
+        int count = session->video.fecLossAccum.exchange(0);
+        int frames = session->video.fecFrameAccum.exchange(0);
+        session->video.fecAccumStart = now;
+
+        (void)frames;  // available for future per-frame-loss-rate computation
+
+        // Feed the same AIMD algorithm as IDX_LOSS_STATS handler
+        auto currentFec = session->video.adaptiveFecPercentage.load();
+        if (currentFec == 0) currentFec = config::stream.fec_percentage;
+
+        if (count > 0) {
+          int newFec = std::min(currentFec + 10, 50);
+          if (newFec != currentFec) {
+            session->video.adaptiveFecPercentage.store(newFec);
+            BOOST_LOG(info) << "[VIPLE-FEC] FEC status: " << count << " lost in " << elapsed
+              << "ms, FEC: " << currentFec << "% -> " << newFec << "%";
+          }
+          session->video.lastLossTime = now;
+          session->video.zeroLossStreak = 0;
+        } else {
+          session->video.zeroLossStreak++;
+          auto sinceLastLoss = std::chrono::duration_cast<std::chrono::seconds>(
+            now - session->video.lastLossTime).count();
+          if (sinceLastLoss > 5 && session->video.zeroLossStreak >= 3) {
+            int baseFec = config::stream.fec_percentage;
+            int newFec = std::max(currentFec - 5, baseFec);
+            if (newFec != currentFec) {
+              session->video.adaptiveFecPercentage.store(newFec);
+              BOOST_LOG(info) << "[VIPLE-FEC] No loss for " << sinceLastLoss
+                << "s, FEC: " << currentFec << "% -> " << newFec << "%";
+            }
+          }
+        }
+
+        // AIMD bitrate adjustment — 共用 §ABR-RAMP 邏輯
+        run_abr_aimd(session, count, elapsed, "enet-fec");
+      }
     });
 
     server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [&](session_t *session, const std::string_view &payload) {
@@ -1768,18 +1911,14 @@ namespace stream {
         if (config::stream.mpquic_enabled && quic_server::g_listener) {
           auto peerAddr = session->video.peer.address();
           quicVideoSession = quic_server::g_listener->getSession(peerAddr);
-          // 診斷 log：session lookup 結果
+          // §Q-REMOTE Fix R.1: per-session diag
           {
-            static bool diag_once = false;
-            if (!diag_once) {
               BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.5 diag: video peer="
                               << peerAddr.to_string()
                               << " is_v4=" << peerAddr.is_v4()
                               << " is_v6=" << peerAddr.is_v6()
                               << " session=" << (quicVideoSession ? "FOUND" : "NULL")
                               << " listener=" << (quic_server::g_listener ? "OK" : "NULL");
-              diag_once = true;
-            }
           }
         }
         const bool use_quic = (quicVideoSession != nullptr);
@@ -1807,6 +1946,80 @@ namespace stream {
                           << "[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: received IDR "
                           << "request from client via QUIC stream #0";
                       idrEvt->raise(true);
+                    }
+                    // §Q-REMOTE Fix R.2: FEC status via QUIC stream #0
+                    // Client 的 lossStatsThread 在 ENet 不通時改走 QUIC。
+                    // marker 0x55 ('U') + SS_FRAME_FEC_STATUS payload (18+ bytes)
+                    else if (flowType == 0x03 && len >= 19 && data[0] == 0x55) {
+                      auto *fec = data + 1; // skip marker byte
+                      size_t fecLen = len - 1;
+                      if (fecLen >= 18) {
+                        uint16_t missing = (uint16_t(fec[8]) << 8) | fec[9];
+                        session->video.fecLossAccum.fetch_add(missing);
+                        session->video.fecFrameAccum.fetch_add(1);
+                        session->video.lastFecStatusTime = std::chrono::steady_clock::now();  // §ABR-RAMP-TICK
+
+                        static bool loggedOnce = false;
+                        if (!loggedOnce) {
+                          BOOST_LOG(info)
+                              << "[VIPLE-MPQUIC] §Q-REMOTE Fix R.2: first FEC "
+                              << "status received via QUIC (missing=" << missing
+                              << ", len=" << fecLen << ")";
+                          loggedOnce = true;
+                        }
+
+                        // Run same AIMD cycle as ENet SS_FRAME_FEC handler
+                        auto now = std::chrono::steady_clock::now();
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          now - session->video.fecAccumStart).count();
+                        if (elapsed >= 500) {
+                          int count = session->video.fecLossAccum.exchange(0);
+                          session->video.fecFrameAccum.exchange(0);
+                          session->video.fecAccumStart = now;
+
+                          // Adaptive FEC
+                          auto currentFec = session->video.adaptiveFecPercentage.load();
+                          if (currentFec == 0) currentFec = config::stream.fec_percentage;
+                          if (count > 0) {
+                            int newFec = std::min(currentFec + 10, 50);
+                            if (newFec != currentFec) {
+                              session->video.adaptiveFecPercentage.store(newFec);
+                              BOOST_LOG(info) << "[VIPLE-FEC] QUIC FEC status: " << count
+                                << " lost in " << elapsed << "ms, FEC: " << currentFec
+                                << "% -> " << newFec << "%";
+                            }
+                            session->video.lastLossTime = now;
+                            session->video.zeroLossStreak = 0;
+                          } else {
+                            session->video.zeroLossStreak++;
+                            auto sinceLastLoss = std::chrono::duration_cast<std::chrono::seconds>(
+                              now - session->video.lastLossTime).count();
+                            if (sinceLastLoss > 5 && session->video.zeroLossStreak >= 3) {
+                              int baseFec = config::stream.fec_percentage;
+                              int newFec = std::max(currentFec - 5, baseFec);
+                              if (newFec != currentFec) {
+                                session->video.adaptiveFecPercentage.store(newFec);
+                              }
+                            }
+                          }
+
+                          // AIMD bitrate — 共用 §ABR-RAMP 邏輯
+                          run_abr_aimd(session, count, elapsed, "quic-fec");
+                        }
+                      }
+                    }
+                    // §Q-REMOTE Fix R.2: periodic ping via QUIC stream #0
+                    // marker 0x50 ('P') — keeps session alive (extends pingTimeout)
+                    else if (flowType == 0x03 && len >= 1 && data[0] == 0x50) {
+                      session->pingTimeout = std::chrono::steady_clock::now()
+                          + config::stream.ping_timeout;
+                      static bool loggedOnce = false;
+                      if (!loggedOnce) {
+                        BOOST_LOG(info)
+                            << "[VIPLE-MPQUIC] §Q-REMOTE Fix R.2: first periodic "
+                            << "ping received via QUIC stream #0";
+                        loggedOnce = true;
+                      }
                     }
                     // §Q-INPUT-QUIC-FALLBACK v1.5.189 Fix K: failover 期間
                     // client 把加密 input packet 改走 QUIC datagram 送過來。
@@ -2220,8 +2433,8 @@ namespace stream {
         }
         const bool use_quic_audio = (quicAudioSession != nullptr);
         {
-          static bool diag_once = false;
-          if (!diag_once) {
+          // §Q-REMOTE Fix R.1: per-session diag（不用 static，每次新連線都印）
+          {
             auto audioPeer = session->audio.peer.address();
             BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.5 diag: audio peer="
                             << audioPeer.to_string()
@@ -2229,7 +2442,6 @@ namespace stream {
                             << " is_v6=" << audioPeer.is_v6()
                             << " session=" << (quicAudioSession ? "FOUND" : "NULL")
                             << " listener=" << (quic_server::g_listener ? "OK" : "NULL");
-            diag_once = true;
           }
         }
         if (use_quic_audio) {
@@ -2599,6 +2811,7 @@ namespace stream {
 
     // VipleStream: store configured bitrate for adaptive bitrate algorithm
     session->video.configuredBitrateKbps = session->config.monitor.bitrate;
+    session->video.autoAdjustBitrate = session->config.autoAdjustBitrate;
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
     video::capture(session->mail, session->config.monitor, session);
@@ -2613,9 +2826,30 @@ namespace stream {
     while_starting_do_nothing(session->state);
 
     auto ref = broadcast.ref();
-    auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
-    if (error < 0) {
-      return;
+
+#ifdef VIPLE_MPQUIC
+    // §Q-REMOTE Fix R.1: QUIC 模式下跳過 UDP audio ping 等待。
+    // 遠端 (Tailscale/WAN) 連線只有 QUIC port 打洞成功，UDP 48000 不通
+    // → recv_ping() timeout → audioBroadcastThread 直接 return → 零音訊。
+    // QUIC session 存在即可確認 client reachability，不需要 UDP ping。
+    bool quicAudioBypass = false;
+    if (config::stream.mpquic_enabled && quic_server::g_listener) {
+      auto quicSess = quic_server::g_listener->getSession(
+          session->audio.peer.address());
+      if (quicSess && quicSess->isReady()) {
+        quicAudioBypass = true;
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-REMOTE Fix R.1: QUIC audio session "
+            << "active (peer=" << session->audio.peer.address().to_string()
+            << ") — skipping UDP audio ping, entering capture directly";
+      }
+    }
+    if (!quicAudioBypass)
+#endif
+    {
+      auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
+      if (error < 0) {
+        return;
+      }
     }
 
     // Enable local prioritization and QoS tagging on audio traffic if requested by the client

@@ -682,7 +682,9 @@ namespace nvenc {
   }
 
   // VipleStream §ABR: mid-stream bitrate reconfigure via NvEncReconfigureEncoder
-  bool nvenc_base::reconfigure_bitrate(int bitrate_kbps, int framerate) {
+  // §ABR-RAMP: force_idr 由呼叫端依方向決定——降速（擁塞救援）reset + IDR
+  // 快速收斂；回升不 reset 平滑過渡（NVENC 支援動態改 rcParams），畫面無感。
+  bool nvenc_base::reconfigure_bitrate(int bitrate_kbps, int framerate, bool force_idr) {
     if (!encoder || !nvenc) {
       BOOST_LOG(error) << "[VIPLE-ABR] NvEnc: reconfigure called on uninitialized encoder";
       return false;
@@ -701,8 +703,8 @@ namespace nvenc {
 
     NV_ENC_RECONFIGURE_PARAMS reconfigure_params = {min_struct_version(NV_ENC_RECONFIGURE_PARAMS_VER)};
     reconfigure_params.reInitEncodeParams = stored_init_params;
-    reconfigure_params.resetEncoder = 1;
-    reconfigure_params.forceIDR = 1;
+    reconfigure_params.resetEncoder = force_idr ? 1 : 0;
+    reconfigure_params.forceIDR = force_idr ? 1 : 0;
 
     if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params))) {
       BOOST_LOG(error) << "[VIPLE-ABR] NvEnc: NvEncReconfigureEncoder() failed: " << last_nvenc_error_string;
@@ -713,7 +715,8 @@ namespace nvenc {
     }
 
     BOOST_LOG(info) << "[VIPLE-ABR] NvEnc: bitrate reconfigured to " << bitrate_kbps << " kbps"
-                    << " (vbv=" << stored_enc_config.rcParams.vbvBufferSize << ")";
+                    << " (vbv=" << stored_enc_config.rcParams.vbvBufferSize
+                    << (force_idr ? ", reset+IDR" : ", smooth") << ")";
     return true;
   }
 

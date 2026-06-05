@@ -35,6 +35,8 @@ namespace stream {
 
     uint32_t encryptionFlagsEnabled;
 
+    bool autoAdjustBitrate = true;
+
     std::optional<int> gcmap;
   };
 
