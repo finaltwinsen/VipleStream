@@ -1,0 +1,12 @@
+# §SC-HID driver build outputs — produced by Build-ScHidDriver.ps1, never committed.
+# Driver binaries are built (needs WDK headers/libs) + self-signed at package time.
+out/
+*.obj
+*.exp
+*.lib
+*.pdb
+*.cer
+*.cdf
+# Module-root copies the script drops for Sunshine packaging
+VipleSCHid_Driver.dll
+VipleSCHid.cat
