@@ -33,15 +33,8 @@ AddReg = VipleSC_AddReg_HW
 HKR,,"LowerFilters",0x00010008,"mshidumdf"
 
 [VipleSC_Install.NT.Services]
-AddService = WUDFRd,0x000001fa,%WUDFRd_ServiceInstall%
-AddService = VipleSCHidService,,VipleSCHid_ServiceInstall
-
-[VipleSCHid_ServiceInstall]
-DisplayName    = %VipleSCHid_ServiceDesc%
-ServiceType    = 1
-StartType      = 3
-ErrorControl   = 1
-ServiceBinary  = %12%\WUDFRd.sys
+; UMDF2 function driver service = WUDFRd（kernel reflector，載入 WUDFHost.exe 再跑 DLL）
+AddService = WUDFRd, 0x000001fa, WUDFRd_ServiceInstall
 
 [WUDFRd_ServiceInstall]
 DisplayName   = %WUDFRd_DisplayName%
@@ -67,5 +60,4 @@ VipleSC_CopyFiles = 12,UMDF
 [Strings]
 Viple              = "VipleStream"
 VipleSC.DevDesc    = "VipleStream Steam Controller (Virtual)"
-VipleSCHid_ServiceDesc = "VipleStream SC HID UMDF Service"
 WUDFRd_DisplayName = "Windows Driver Foundation - User-mode Driver Framework Reflector"
