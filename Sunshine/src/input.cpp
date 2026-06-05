@@ -40,6 +40,9 @@ extern "C" {
 #include "platform/common.h"
 #include "thread_pool.h"
 #include "utility.h"
+#ifdef _WIN32
+#  include "platform/windows/sc_hid_driver/VipleSCHid.h"
+#endif
 
 // Win32 WHEEL_DELTA constant
 #ifndef WHEEL_DELTA
@@ -219,6 +222,19 @@ namespace input {
 
     int32_t accumulated_vscroll_delta;
     int32_t accumulated_hscroll_delta;
+
+#ifdef _WIN32
+    // §SC-HID: handle to the virtual Steam Controller HID device (may be null
+    // if the UMDF2 driver is not installed or device enumeration failed)
+    VIPLE_SCHID_HANDLE sc_hid_handle = nullptr;
+
+    ~input_t() {
+      if (sc_hid_handle) {
+        VipleSCHidClose(sc_hid_handle);
+        sc_hid_handle = nullptr;
+      }
+    }
+#endif
   };
 
   /**
@@ -1164,6 +1180,28 @@ namespace input {
     platf::gamepad_battery(platf_input, battery);
   }
 
+#ifdef _WIN32
+  // §SC-HID: forward raw Steam Controller input report to the virtual HID device
+  void passthrough_sc_hid_input(std::shared_ptr<input_t> &input, PSS_SC_HID_INPUT_PACKET packet) {
+    if (!input->sc_hid_handle) {
+      // Lazy-open the virtual HID device on first packet
+      input->sc_hid_handle = VipleSCHidOpen();
+      if (!input->sc_hid_handle) {
+        BOOST_LOG(warning) << "[SC-HID] Virtual Steam Controller device not found. "
+                              "Is the VipleSCHid driver installed?";
+        return;
+      }
+      BOOST_LOG(info) << "[SC-HID] Virtual Steam Controller device opened";
+    }
+
+    if (!VipleSCHidWrite(input->sc_hid_handle, packet->data, 64)) {
+      BOOST_LOG(debug) << "[SC-HID] Write failed — device disconnected?";
+      VipleSCHidClose(input->sc_hid_handle);
+      input->sc_hid_handle = nullptr;
+    }
+  }
+#endif
+
   void passthrough(std::shared_ptr<input_t> &input, PNV_MULTI_CONTROLLER_PACKET packet) {
     if (!config::input.controller) {
       return;
@@ -1661,6 +1699,11 @@ namespace input {
         case SS_CONTROLLER_BATTERY_MAGIC:
           passthrough(input, (PSS_CONTROLLER_BATTERY_PACKET) payload);
           break;
+#ifdef _WIN32
+        case SS_SC_HID_INPUT_MAGIC:
+          passthrough_sc_hid_input(input, (PSS_SC_HID_INPUT_PACKET) payload);
+          break;
+#endif
       }
     }
   }

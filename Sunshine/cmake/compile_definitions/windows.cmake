@@ -87,6 +87,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/steam_scanner.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/steam_scanner.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/vdf_parser.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/sc_hid_driver/VipleSCHid.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/sc_hid_driver/VipleSCHid.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/src/ViGEmClient.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include/ViGEm/Client.h"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include/ViGEm/Common.h"

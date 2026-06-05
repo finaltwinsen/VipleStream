@@ -7,6 +7,7 @@
 #include <opus_multistream.h>
 #include "settings/streamingpreferences.h"
 #include "input/input.h"
+#include "input/sc_hid.h"
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
 #include "video/overlaymanager.h"
@@ -129,6 +130,10 @@ public:
 
     // VipleStream: original user-requested FPS (before FRUC halving)
     int getOriginalFps() const { return m_OriginalFps; }
+
+    // VipleStream §ABR: expose stream config for overlay
+    int getConfiguredBitrateKbps() const { return m_StreamConfig.bitrate; }
+    bool getAutoAdjustBitrate() const { return m_StreamConfig.autoAdjustBitrate != 0; }
 
     void flushWindowEvents();
 
@@ -274,6 +279,7 @@ private:
     QQuickWindow* m_QtWindow;
     bool m_UnexpectedTermination;
     SdlInputHandler* m_InputHandler;
+    ScHidPassthrough m_ScHid;
     int m_MouseEmulationRefCount;
     int m_FlushingWindowEventsRef;
     QStringList m_LaunchWarnings;

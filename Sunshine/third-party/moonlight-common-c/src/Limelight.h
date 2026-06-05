@@ -773,6 +773,7 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 #define LI_CTYPE_XBOX     0x01
 #define LI_CTYPE_PS       0x02
 #define LI_CTYPE_NINTENDO 0x03
+#define LI_CTYPE_STEAM    0x04
 #define LI_CCAP_ANALOG_TRIGGERS 0x01 // Reports values between 0x00 and 0xFF for trigger axes
 #define LI_CCAP_RUMBLE          0x02 // Can rumble in response to ConnListenerRumble() callback
 #define LI_CCAP_TRIGGER_RUMBLE  0x04 // Can rumble triggers in response to ConnListenerRumbleTriggers() callback
@@ -819,6 +820,11 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
 #define LI_BATTERY_STATE_FULL         0x05
 #define LI_BATTERY_PERCENTAGE_UNKNOWN 0xFF
 int LiSendControllerBatteryEvent(uint8_t controllerNumber, uint8_t batteryState, uint8_t batteryPercentage);
+
+// §SC-HID: Send a raw 64-byte Steam Controller HID input report to the host.
+// data must point to exactly 64 bytes (SS_SC_HID_REPORT_MAX).
+// This is a VipleStream protocol extension; returns LI_ERR_UNSUPPORTED on GFE.
+int LiSendScHidInputReport(const uint8_t* data, int dataLen);
 
 // This function queues a vertical scroll event to the remote server.
 // The number of "clicks" is multiplied by WHEEL_DELTA (120) before

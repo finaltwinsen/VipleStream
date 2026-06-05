@@ -101,6 +101,10 @@ typedef struct _STREAM_CONFIGURATION {
     char remoteInputAesKey[16];
     char remoteInputAesIv[16];
 
+    // VipleStream §ABR: enable server-side adaptive bitrate (AIMD).
+    // 1 = enabled (default), 0 = fixed bitrate.
+    int autoAdjustBitrate;
+
 #ifdef VIPLE_MPQUIC
     // VipleStream: MP-QUIC multipath transport.
     // Set useQuicTransport = 1 to use QUIC datagrams instead of raw UDP
@@ -800,6 +804,7 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 #define LI_CTYPE_XBOX     0x01
 #define LI_CTYPE_PS       0x02
 #define LI_CTYPE_NINTENDO 0x03
+#define LI_CTYPE_STEAM    0x04
 #define LI_CCAP_ANALOG_TRIGGERS 0x01 // Reports values between 0x00 and 0xFF for trigger axes
 #define LI_CCAP_RUMBLE          0x02 // Can rumble in response to ConnListenerRumble() callback
 #define LI_CCAP_TRIGGER_RUMBLE  0x04 // Can rumble triggers in response to ConnListenerRumbleTriggers() callback
@@ -846,6 +851,9 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
 #define LI_BATTERY_STATE_FULL         0x05
 #define LI_BATTERY_PERCENTAGE_UNKNOWN 0xFF
 int LiSendControllerBatteryEvent(uint8_t controllerNumber, uint8_t batteryState, uint8_t batteryPercentage);
+
+// §SC-HID: Send a raw 64-byte Steam Controller HID input report to the host.
+int LiSendScHidInputReport(const uint8_t* data, int dataLen);
 
 // This function queues a vertical scroll event to the remote server.
 // The number of "clicks" is multiplied by WHEEL_DELTA (120) before

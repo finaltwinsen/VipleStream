@@ -15,6 +15,9 @@
 #include "SDL_compat.h"
 #include "utils.h"
 
+#include <map>
+#include <tuple>
+
 #ifdef HAVE_FFMPEG
 #include "video/ffmpeg.h"
 #endif
@@ -549,6 +552,28 @@ Session::getDecoderAvailability(SDL_Window* window,
                                 StreamingPreferences::VideoDecoderSelection vds,
                                 int videoFormat, int width, int height, int frameRate)
 {
+    // §STARTUP-PERF: cache probe results to avoid redundant VkFrucRenderer
+    // init/teardown cycles. Key = {videoFormat, vds} — resolution/fps don't
+    // change decoder availability within a session.
+    struct ProbeKey {
+        int format; int vds;
+        bool operator<(const ProbeKey& o) const {
+            return std::tie(format, vds) < std::tie(o.format, o.vds);
+        }
+    };
+    static std::map<ProbeKey, DecoderAvailability> s_probeCache;
+
+    ProbeKey key{videoFormat, (int)vds};
+    auto it = s_probeCache.find(key);
+    if (it != s_probeCache.end()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-CACHE] decoder probe cache hit format=0x%x vds=%d -> %s",
+                    videoFormat, (int)vds,
+                    it->second == DecoderAvailability::Hardware ? "HARDWARE" :
+                    it->second == DecoderAvailability::Software ? "SOFTWARE" : "None");
+        return it->second;
+    }
+
     IVideoDecoder* decoder;
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -559,6 +584,7 @@ Session::getDecoderAvailability(SDL_Window* window,
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-DIAG] getDecoderAvailability: chooseDecoder returned FALSE for format=0x%x -> None",
                     videoFormat);
+        s_probeCache[key] = DecoderAvailability::None;
         return DecoderAvailability::None;
     }
 
@@ -570,7 +596,9 @@ Session::getDecoderAvailability(SDL_Window* window,
 
     delete decoder;
 
-    return hw ? DecoderAvailability::Hardware : DecoderAvailability::Software;
+    auto result = hw ? DecoderAvailability::Hardware : DecoderAvailability::Software;
+    s_probeCache[key] = result;
+    return result;
 }
 
 bool Session::populateDecoderProperties(SDL_Window* window)
@@ -875,6 +903,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
     // throttling to match swapchain/display rate; deferred.
 
     m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
+    m_StreamConfig.autoAdjustBitrate = m_Preferences->autoAdjustBitrate ? 1 : 0;
 
 #ifndef STEAM_LINK
     // Opt-in to all encryption features if we detect that the platform
@@ -1524,6 +1553,9 @@ private:
             m_Session->m_FileTransferClient->deleteLater();
             m_Session->m_FileTransferClient = nullptr;
         }
+
+        // §SC-HID: Stop Steam Controller passthrough before LiStopConnection
+        m_Session->m_ScHid.stop();
 
         // Finish cleanup of the connection state
         LiStopConnection();
@@ -2412,6 +2444,9 @@ bool Session::startConnectionAsync()
                     m_Computer->activeAddress.address().toUtf8().constData(),
                     m_Computer->activeHttpsPort);
     }
+
+    // §SC-HID: Start Steam Controller passthrough after connection is established
+    m_ScHid.start();
 
     emit connectionStarted();
     return true;

@@ -76,6 +76,8 @@ typedef struct _PACKET_HOLDER {
         SS_CONTROLLER_TOUCH_PACKET controllerTouch;
         SS_CONTROLLER_MOTION_PACKET controllerMotion;
         SS_CONTROLLER_BATTERY_PACKET controllerBattery;
+        SS_SC_HID_INPUT_PACKET scHidInput;
+        SS_SC_HID_FEATURE_PACKET scHidFeature;
         NV_UNICODE_PACKET unicode;
     } packet;
 } PACKET_HOLDER, *PPACKET_HOLDER;
@@ -1671,6 +1673,45 @@ int LiSendControllerBatteryEvent(uint8_t controllerNumber, uint8_t batteryState,
     holder->packet.controllerBattery.batteryState = batteryState;
     holder->packet.controllerBattery.batteryPercentage = batteryPercentage;
     memset(holder->packet.controllerBattery.zero, 0, sizeof(holder->packet.controllerBattery.zero));
+
+    err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+    if (err != LBQ_SUCCESS) {
+        LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+        Limelog("Input queue reached maximum size limit\n");
+        freePacketHolder(holder);
+    }
+
+    return err;
+}
+
+// §SC-HID: Send a raw 64-byte Steam Controller input report to the host.
+int LiSendScHidInputReport(const uint8_t* data, int dataLen) {
+    PPACKET_HOLDER holder;
+    int err;
+
+    if (!initialized) {
+        return -2;
+    }
+
+    if (!IS_SUNSHINE()) {
+        return LI_ERR_UNSUPPORTED;
+    }
+
+    if (dataLen != SS_SC_HID_REPORT_MAX) {
+        return -3;
+    }
+
+    holder = allocatePacketHolder(0);
+    if (holder == NULL) {
+        return -1;
+    }
+
+    holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE;
+    holder->enetPacketFlags = ENET_PACKET_FLAG_UNSEQUENCED;
+
+    holder->packet.scHidInput.header.size = BE32(sizeof(SS_SC_HID_INPUT_PACKET) - sizeof(uint32_t));
+    holder->packet.scHidInput.header.magic = LE32(SS_SC_HID_INPUT_MAGIC);
+    memcpy(holder->packet.scHidInput.data, data, SS_SC_HID_REPORT_MAX);
 
     err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
     if (err != LBQ_SUCCESS) {

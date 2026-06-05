@@ -195,4 +195,23 @@ typedef struct _SS_CONTROLLER_BATTERY_PACKET {
     uint8_t zero[1]; // Alignment/reserved
 } SS_CONTROLLER_BATTERY_PACKET, *PSS_CONTROLLER_BATTERY_PACKET;
 
+// §SC-HID: raw Steam Controller HID passthrough packets
+// 0x55000008 HOST->CLIENT: feature/output report tunnel (lizard-mode ctrl, haptics)
+// 0x55000009 CLIENT->HOST: raw 64-byte input report from Steam Controller
+#define SS_SC_HID_FEATURE_MAGIC 0x55000008
+#define SS_SC_HID_REPORT_MAX 64
+typedef struct _SS_SC_HID_FEATURE_PACKET {
+    NV_INPUT_HEADER header;
+    uint8_t reportId;
+    uint8_t reportType; // 0=output 1=feature
+    uint8_t zero[2];
+    uint8_t data[SS_SC_HID_REPORT_MAX];
+} SS_SC_HID_FEATURE_PACKET, *PSS_SC_HID_FEATURE_PACKET;
+
+#define SS_SC_HID_INPUT_MAGIC 0x55000009
+typedef struct _SS_SC_HID_INPUT_PACKET {
+    NV_INPUT_HEADER header;
+    uint8_t data[SS_SC_HID_REPORT_MAX];
+} SS_SC_HID_INPUT_PACKET, *PSS_SC_HID_INPUT_PACKET;
+
 #pragma pack(pop)
