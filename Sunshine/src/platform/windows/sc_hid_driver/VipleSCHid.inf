@@ -1,14 +1,26 @@
 ; SC-HID: VipleSCHid.inf -- UMDF2 virtual Steam Controller HID device
-; Installs via: pnputil /add-driver VipleSCHid.inf /install
+; Install via Install-VipleSCHid.ps1 (pnputil /add-driver + SetupAPI root devnode).
 ;
-; The UMDF2 minidriver DLL (VipleSCHid_Driver.dll) is hosted by the in-box,
-; already-signed Microsoft reflector mshidumdf.sys. No kernel driver signing
-; required -- only admin rights.
+; Device stack (top -> bottom):
+;   MsHidUmdf.sys  (function driver / ASSOCSERVICE) -- presents the virtual HID
+;                  device to HIDClass and reflects HID IOCTLs down to UMDF.
+;   WUDFRd.sys     (lower filter)  -- hosts VipleSCHid_Driver.dll (our UMDF2 handler).
+;   Root PDO       (ROOT\HIDCLASS\nnnn, HWID Viple\SteamController)
 ;
-; NOTE: This INF is intentionally ASCII-only. INF parsers (Inf2Cat in
-; particular) are encoding-sensitive and choke on UTF-8-without-BOM multibyte
-; sequences (error 22.9.11, section parse failure). Keep all comments ASCII;
-; the Chinese rationale lives in the commit message and the .cpp/.ps1 files.
+; WHY we register MsHidUmdf/WUDFRd ourselves instead of Include/Needs of the
+; inbox MsHidUmdf.inf / WUDFRD.inf:
+;   The target host is Windows 10 (19045). On Win10 the inbox *.inf files
+;   MsHidUmdf.inf and WUDFRD.inf DO NOT EXIST (only the .sys binaries ship), so
+;   any "Include = MsHidUmdf.inf" fails with "Could not include" -> the ASSOCSERVICE
+;   AddService is never processed -> the device installs as a NULL driver
+;   (0xE0000219 ERROR_NO_ASSOCIATED_SERVICE) and never starts. Declaring the
+;   AddService directives directly here works on both Win10 and Win11 because the
+;   two .sys binaries are present in %12% (drivers dir) on every supported OS.
+;   The NOCLOBBER flag bits (0x1f8) keep us from disturbing the services if the
+;   OS already registered them.
+;
+; NOTE: ASCII-only on purpose. Inf2Cat chokes on UTF-8 multibyte sequences; keep
+; the Chinese rationale in the commit message, not in this file.
 
 [Version]
 Signature   = "$WINDOWS NT$"
@@ -16,13 +28,9 @@ Class       = HIDClass
 ClassGUID   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
 Provider    = %Viple%
 CatalogFile = VipleSCHid.cat
-DriverVer   = 06/05/2026,1.0.0.0
+DriverVer   = 06/06/2026,1.0.0.0
 PnpLockdown = 1
 
-; Every file named in a CopyFiles section must be declared in
-; [SourceDisksFiles] (which references a disk id in [SourceDisksNames]),
-; otherwise pnputil /add-driver rejects the package and the DLL is never
-; copied to %12%\UMDF (device cannot start).
 [SourceDisksNames]
 1 = %DiskName%
 
@@ -38,22 +46,29 @@ VipleSCHid_Driver.dll = 1
 [VipleSC_Install.NT]
 CopyFiles = VipleSC_CopyFiles
 
-[VipleSC_CopyFiles]
-VipleSCHid_Driver.dll
-
-[VipleSC_Install.NT.hw]
+[VipleSC_Install.NT.HW]
 AddReg = VipleSC_AddReg_HW
 
 [VipleSC_AddReg_HW]
-HKR,,"LowerFilters",0x00010008,"mshidumdf"
+; WUDFRd as the LOWER filter (REG_MULTI_SZ). MsHidUmdf (the ASSOCSERVICE below)
+; is the function driver, so it does not belong in the filter list.
+HKR,,"LowerFilters",0x00010000,"WUDFRd"
 
 [VipleSC_Install.NT.Services]
-; UMDF2 function-driver service = WUDFRd (kernel reflector; loads WUDFHost.exe
-; which in turn runs our user-mode DLL).
-AddService = WUDFRd, 0x000001fa, WUDFRd_ServiceInstall
+; MsHidUmdf = function driver (0x1fa includes SPSVCINST_ASSOCSERVICE = 0x2).
+; WUDFRd    = lower-filter service     (0x1f8, same NOCLOBBER bits, no ASSOCSERVICE).
+AddService = MsHidUmdf, 0x000001fa, MsHidUmdf_ServiceInstall
+AddService = WUDFRd,    0x000001f8, WUDFRd_ServiceInstall
+
+[MsHidUmdf_ServiceInstall]
+DisplayName   = "Pass-through HID to UMDF Filter Driver"
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %12%\MsHidUmdf.sys
 
 [WUDFRd_ServiceInstall]
-DisplayName    = %WUDFRd_DisplayName%
+DisplayName    = "Windows Driver Foundation - User-mode Driver Framework Reflector"
 ServiceType    = 1
 StartType      = 3
 ErrorControl   = 1
@@ -61,21 +76,26 @@ ServiceBinary  = %12%\WUDFRd.sys
 LoadOrderGroup = WdfLoadGroup
 
 [VipleSC_Install.NT.Wdf]
-UmdfService                = VipleSCHid,VipleSCHid_Install
+UmdfService                = VipleSCHid, VipleSCHid_Install
 UmdfServiceOrder           = VipleSCHid
 UmdfKernelModeClientPolicy = AllowKernelModeClients
 UmdfFileObjectPolicy       = AllowNullAndUnknownFileObjects
+; METHOD_NEITHER IOCTLs (GET_DEVICE_DESCRIPTOR/REPORT_DESCRIPTOR/ATTRIBUTES) must
+; reach the driver; without Copy, UMDF rejects them and START fails.
+UmdfMethodNeitherAction    = Copy
 UmdfFsContextUsePolicy     = CanUseFsContext2
 
 [VipleSCHid_Install]
-UmdfLibraryVersion = 2.33.0
+UmdfLibraryVersion = 2.15.0
 ServiceBinary      = %12%\UMDF\VipleSCHid_Driver.dll
+
+[VipleSC_CopyFiles]
+VipleSCHid_Driver.dll
 
 [DestinationDirs]
 VipleSC_CopyFiles = 12,UMDF
 
 [Strings]
-Viple              = "VipleStream"
-DiskName           = "VipleStream SC HID Install Disk"
-VipleSC.DevDesc    = "VipleStream Steam Controller (Virtual)"
-WUDFRd_DisplayName = "Windows Driver Foundation - User-mode Driver Framework Reflector"
+Viple           = "VipleStream"
+DiskName        = "VipleStream SC HID Install Disk"
+VipleSC.DevDesc = "VipleStream Steam Controller (Virtual)"

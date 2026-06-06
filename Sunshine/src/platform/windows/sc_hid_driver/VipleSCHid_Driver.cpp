@@ -25,34 +25,48 @@
 #include <wdf.h>
 #include <hidport.h>   // IOCTL_HID_* codes + HID_DESCRIPTOR / HID_DEVICE_ATTRIBUTES
 
-// Steam Controller wired USB 識別碼
+// gen-2 (2025/2026) Steam Controller 識別碼。0x1302 = 控制器本體（USB 直連），
+// 0x1303 = Bluetooth LE，0x1304 = Puck（無線接收器）。我們對 host 一律呈現 0x1302，
+// 讓 host Steam 把它當「直連的新 SC」並套用 gen-2 Steam Input profile。
+// （舊 2015 SC 是 0x1102，本驅動不再對準它。）
 #define SC_VID  0x28DE
-#define SC_PID  0x1102
+#define SC_PID  0x1302
 
-// Steam Controller HID report descriptor（vendor-defined 64-byte）
-// Interface 2 的 wired 格式。Steam Input 用 VID/PID allowlist 識別，
-// 不靠 descriptor Usage items，所以用 vendor-defined page 即可。
+// gen-2 Steam Controller 的 vendor gamepad input report 用 **Report ID 0x45 (69)**，
+// 介面 UsagePage 0xFF00 / Usage 0x01。實測（在 .195 直接讀實體 0x1302）：不論本機 Steam
+// 開或關，device 都串流 report id 0x45、54 bytes（= 1 id + 53 data）；byte0 固定 0x45、
+// 其餘隨輸入變動。HidP caps 另外宣告一個 report 0x42(66)（有對應 HID usage）但**不串流**，
+// 真正吐 gamepad 資料的是 0x45（vendor-opaque raw）。host Steam 靠 VID/PID(0x1302) 識別並
+// 自行解析 raw report 0x45，所以欄位內容用 vendor-opaque（53 byte）即可、不需逐欄定義。
+// Output=64、Feature=64（feature 實際 report id 為 0x01，haptics 下行時再細修；input passthrough
+// 不需要）。
 static const UCHAR g_HidReportDescriptor[] = {
     0x06, 0x00, 0xFF,  // Usage Page (Vendor-Defined 0xFF00)
-    0x09, 0x01,        // Usage (Vendor Usage 1)
+    0x09, 0x01,        // Usage (0x01)
     0xA1, 0x01,        // Collection (Application)
-    // Input report：64 bytes
-    0x09, 0x02,        //   Usage (Vendor Usage 2)
+    0x85, 0x45,        //   Report ID (0x45 / 69) — gen-2 SC streamed gamepad report
+    0x09, 0x01,        //   Usage (0x01)
     0x15, 0x00,        //   Logical Minimum (0)
     0x26, 0xFF, 0x00,  //   Logical Maximum (255)
     0x75, 0x08,        //   Report Size (8)
-    0x95, 0x40,        //   Report Count (64)
+    0x95, 0x35,        //   Report Count (53)  → Input  = id + 53 = 54 bytes
     0x81, 0x02,        //   Input (Data, Var, Abs)
-    // Feature report：64 bytes（lizard-mode 控制 + haptics 下行通道）
-    0x09, 0x03,        //   Usage (Vendor Usage 3)
+    0x09, 0x01,        //   Usage (0x01)
+    0x95, 0x3F,        //   Report Count (63)  → Output = id + 63 = 64 bytes
+    0x91, 0x02,        //   Output (Data, Var, Abs)
+    0x09, 0x01,        //   Usage (0x01)
+    0x95, 0x3F,        //   Report Count (63)  → Feature = id + 63 = 64 bytes
     0xB1, 0x02,        //   Feature (Data, Var, Abs)
     0xC0               // End Collection
 };
 
+// gen-2 SC streamed gamepad report id (confirmed by reading the real device)
+#define SC_REPORT_ID  0x45
+
 static HID_DEVICE_ATTRIBUTES g_Attributes = {
     sizeof(HID_DEVICE_ATTRIBUTES),
     SC_VID,   // VendorID
-    SC_PID,   // ProductID
+    SC_PID,   // ProductID  (0x1302 = gen-2 SC)
     0x0100    // VersionNumber
 };
 
@@ -64,8 +78,8 @@ typedef struct _DEVICE_CONTEXT {
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, GetDeviceContext)
 
 // ── WDF 事件宣告 ─────────────────────────────────────────────────────────────
-EVT_WDF_DRIVER_DEVICE_ADD                   EvtDeviceAdd;
-EVT_WDF_IO_QUEUE_IO_INTERNAL_DEVICE_CONTROL EvtIoInternalDeviceControl;
+EVT_WDF_DRIVER_DEVICE_ADD        EvtDeviceAdd;
+EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL EvtIoDeviceControl;
 
 // ── DriverEntry ───────────────────────────────────────────────────────────────
 // UMDF2 的進入點契約：簽章必須是 (PDRIVER_OBJECT, PUNICODE_STRING) 且為 extern "C"
@@ -84,8 +98,10 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 NTSTATUS EvtDeviceAdd(IN WDFDRIVER Driver, IN PWDFDEVICE_INIT DeviceInit) {
     UNREFERENCED_PARAMETER(Driver);
 
-    // 注意：UMDF2 沒有 WdfDeviceInitSetDeviceType（KMDF-only API，UMDF2 標頭
-    // 不提供 → C3861）。HID minidriver 不需要設定 device type，省略即可。
+    // mshidumdf.sys 做為 lower filter 把 IOCTL_HID_* Internal IOCTL 轉送給本 UMDF driver，
+    // 本 driver 是 FDO 之上的 filter——必須呼叫 WdfFdoInitSetFilter，否則 WdfDeviceCreate
+    // 會以為我們要獨佔 FDO stack 的 DO，WUDFHost 載入時 HID class driver 拒絕 START。
+    WdfFdoInitSetFilter(DeviceInit);
 
     // 裝置上下文大小
     WDF_OBJECT_ATTRIBUTES devAttrs;
@@ -100,7 +116,9 @@ NTSTATUS EvtDeviceAdd(IN WDFDRIVER Driver, IN PWDFDEVICE_INIT DeviceInit) {
     // ── Default queue：處理描述符 IOCTL（parallel dispatch）────────────────
     WDF_IO_QUEUE_CONFIG queueCfg;
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueCfg, WdfIoQueueDispatchParallel);
-    queueCfg.EvtIoInternalDeviceControl = EvtIoInternalDeviceControl;
+    // mshidumdf.sys 將 HID Internal IOCTL 轉成普通 DeviceControl 再上送 UMDF layer；
+    // UMDF2 的 queue 必須掛 EvtIoDeviceControl（不是 Internal），否則 IOCTL 永不分派。
+    queueCfg.EvtIoDeviceControl = EvtIoDeviceControl;
 
     WDFQUEUE defaultQueue;
     status = WdfIoQueueCreate(device, &queueCfg, WDF_NO_OBJECT_ATTRIBUTES, &defaultQueue);
@@ -112,8 +130,10 @@ NTSTATUS EvtDeviceAdd(IN WDFDRIVER Driver, IN PWDFDEVICE_INIT DeviceInit) {
     return status;
 }
 
-// ── EvtIoInternalDeviceControl ────────────────────────────────────────────────
-VOID EvtIoInternalDeviceControl(
+// ── EvtIoDeviceControl ────────────────────────────────────────────────────────
+// mshidumdf.sys 把所有 IOCTL_HID_* Internal IOCTLs 轉為普通 DeviceControl 上送；
+// UMDF2 driver 只看得到 DeviceControl，不會收到 InternalDeviceControl。
+VOID EvtIoDeviceControl(
     IN WDFQUEUE   Queue,
     IN WDFREQUEST Request,
     IN size_t     OutputBufferLength,
@@ -178,7 +198,7 @@ VOID EvtIoInternalDeviceControl(
         if (!NT_SUCCESS(fwdStatus)) {
             WdfRequestComplete(Request, fwdStatus);
         }
-        return; // 不呼叫下方的 WdfRequestCompleteWithInformation
+        return; // 不呼叫下方的 WdfRequestSetInformation / WdfRequestComplete
     }
 
     // ── Write report：Sunshine 的 WriteFile 觸發這個 IOCTL ────────────────
@@ -197,17 +217,22 @@ VOID EvtIoInternalDeviceControl(
         NTSTATUS   deqStatus   = WdfIoQueueRetrieveNextRequest(ctx->PendingReadQueue, &readRequest);
 
         if (NT_SUCCESS(deqStatus) && readRequest != nullptr) {
+            // gen-2 SC：output 與 input 同用 report id 66，byte0 即 report id。
+            // 不再跳過 leading 0（那是舊 0x1102 的 report-id-0 模型）。把 Sunshine 寫進來
+            // 的 64-byte output report 前緣（含 report id 66）原樣餵給等待中的 input read；
+            // input report 長度 54 (= id + 53)，host Steam 讀到 [66][53 data]，與實體 gen-2
+            // SC 一致。copy 量取 read buffer 與 write buffer 的較小者。
             WDFMEMORY readMem = nullptr;
+            size_t    readLen = 0;
             if (NT_SUCCESS(WdfRequestRetrieveOutputMemory(readRequest, &readMem))) {
-                // HID write 前面有 1-byte report ID（0），跳過它
-                PUCHAR src    = (PUCHAR)writeData;
-                SIZE_T srcOff = (writeSize > 0 && src[0] == 0) ? 1 : 0;
-                SIZE_T toCopy = min((SIZE_T)64, writeSize - srcOff);
+                (void)WdfMemoryGetBuffer(readMem, &readLen);
+                SIZE_T toCopy = min((SIZE_T)readLen, (SIZE_T)writeSize);
                 if (toCopy > 0) {
-                    WdfMemoryCopyFromBuffer(readMem, 0, src + srcOff, toCopy);
+                    WdfMemoryCopyFromBuffer(readMem, 0, writeData, toCopy);
                 }
             }
-            WdfRequestCompleteWithInformation(readRequest, STATUS_SUCCESS, 64);
+            WdfRequestSetInformation(readRequest, readLen);  // input report 實際長度（54）
+            WdfRequestComplete(readRequest, STATUS_SUCCESS);
         }
         // write request 本身永遠成功
         status = STATUS_SUCCESS;
@@ -226,5 +251,6 @@ VOID EvtIoInternalDeviceControl(
         break;
     }
 
-    WdfRequestCompleteWithInformation(Request, status, transferred);
+    WdfRequestSetInformation(Request, transferred);
+    WdfRequestComplete(Request, status);
 }

@@ -1,9 +1,10 @@
 /*
  * §SC-HID: VipleSCHid.cpp — User-mode client for the UMDF2 virtual HID device
  *
- * After the driver is installed (pnputil /add-driver + devcon install), this
- * code opens the device's HID interface via CreateFile, writes 64-byte input
- * reports, and receives feature/output reports via a completion-port thread.
+ * After the driver is installed (Install-VipleSCHid.ps1: pnputil /add-driver +
+ * SetupAPI root-devnode creation), this code opens the device's HID interface
+ * via CreateFile, writes 64-byte input reports, and receives feature/output
+ * reports via a completion-port thread.
  */
 
 #include "VipleSCHid.h"
@@ -19,9 +20,10 @@
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "shell32.lib")
 
-// Valve Steam Controller USB identifiers
+// gen-2 Steam Controller — our virtual device presents 0x28DE/0x1302.
+// (On the host there is no real SC, so matching 0x1302 finds our virtual device.)
 static constexpr USHORT SC_VID = 0x28DE;
-static constexpr USHORT SC_PID = 0x1102;
+static constexpr USHORT SC_PID = 0x1302;
 
 struct VipleSCHidCtx {
     HANDLE hDev;
@@ -123,16 +125,20 @@ VIPLE_SCHID_HANDLE VipleSCHidOpen(void) {
 }
 
 BOOL VipleSCHidWrite(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
-    if (!h || len != 64) return FALSE;
+    if (!h || len <= 0) return FALSE;
     auto* ctx = static_cast<VipleSCHidCtx*>(h);
 
-    // HID write: prepend 1-byte report ID 0 (no report IDs in raw mode)
-    uint8_t buf[65] = {};
-    buf[0] = 0;
-    memcpy(buf + 1, data, 64);
+    // gen-2 SC: the forwarded wire payload already begins with HID report id 66
+    // (0x42) at byte 0 — it IS a report-id'd report. So we do NOT prepend a 0
+    // (that was the old 0x1102 report-id-0 convention). Write it as a 64-byte
+    // OUTPUT report (OutputReportByteLength=64); the driver takes the leading
+    // 54 bytes ([66]+53 data) to complete the pending INPUT read.
+    uint8_t buf[64] = {};
+    int n = (len > 64) ? 64 : len;
+    memcpy(buf, data, n);
 
     DWORD written = 0;
-    return WriteFile(ctx->hDev, buf, 65, &written, nullptr);
+    return WriteFile(ctx->hDev, buf, sizeof(buf), &written, nullptr);
 }
 
 void VipleSCHidSetFeatureCb(VIPLE_SCHID_HANDLE h, VipleSCHidFeatureCb cb, void* ctx_) {

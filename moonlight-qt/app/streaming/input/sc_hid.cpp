@@ -8,15 +8,14 @@ extern "C" {
 #include <Limelight.h>
 }
 
-// Steam Controller USB identifiers
-static constexpr unsigned short SC_VID = 0x28DE;
-static constexpr unsigned short SC_PID_USB = 0x1102;  // wired direct
-
-// HID feature report IDs for lizard-mode control (sent from host side via
-// the host's virtual device driver, but the client also sends these once
-// at startup to mute the physical controller's own lizard-mode output so
-// we get clean raw gamepad reports instead of spurious kbd/mouse events).
-static constexpr uint8_t SC_ID_CLEAR_DIGITAL_MAPPINGS = 0x81;
+// Valve vendor id. The gen-2 (2025) Steam Controller exposes its gamepad data
+// on a vendor-defined HID interface (UsagePage 0xFF00 / Usage 0x01) carrying
+// HID report id 66 (0x42). We select the device by that usage rather than by a
+// hard-coded product id, so all transports are handled by one code path:
+//   0x1302 = USB-direct, 0x1303 = Bluetooth LE, 0x1304 = Puck (wireless).
+static constexpr unsigned short SC_VID        = 0x28DE;
+static constexpr unsigned short SC_USAGE_PAGE = 0xFF00;
+static constexpr unsigned short SC_USAGE      = 0x0001;
 
 ScHidPassthrough::ScHidPassthrough() = default;
 
@@ -33,21 +32,41 @@ void ScHidPassthrough::start() {
         return;
     }
 
-    m_dev = SDL_hid_open(SC_VID, SC_PID_USB, nullptr);
-    if (!m_dev) {
+    // Find the Steam Controller's vendor gamepad interface across ANY transport
+    // (USB-direct / Puck / Bluetooth) by enumerating VID 0x28DE and matching the
+    // vendor usage, rather than a fixed product id.
+    SDL_hid_device_info* devs = SDL_hid_enumerate(SC_VID, 0x0);
+    m_devCount = 0;
+    for (SDL_hid_device_info* d = devs; d != nullptr && m_devCount < MAX_SC_DEVS; d = d->next) {
+        if (d->usage_page == SC_USAGE_PAGE && d->usage == SC_USAGE && d->path != nullptr) {
+            SDL_hid_device* h = SDL_hid_open_path(d->path, 0 /* shared */);
+            if (h != nullptr) {
+                SDL_hid_set_nonblocking(h, 1);  // non-blocking: we poll all handles
+                m_devs[m_devCount++] = h;
+            }
+        }
+    }
+    if (devs != nullptr) {
+        SDL_hid_free_enumeration(devs);
+    }
+
+    if (m_devCount == 0) {
         // No Steam Controller attached — that's fine
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-            "[SC-HID] No Steam Controller found (0x28DE:0x1102)");
+            "[SC-HID] No Steam Controller vendor interface found (0x28DE FF00/01)");
         return;
     }
 
-    // Disable lizard mode on the physical controller so we only receive raw
-    // gamepad input reports (not spurious keyboard/mouse HID events).
-    uint8_t lizardOff[65] = {};  // report ID 0 prepended (HID API convention)
-    lizardOff[1] = SC_ID_CLEAR_DIGITAL_MAPPINGS;
-    SDL_hid_send_feature_report(m_dev, lizardOff, 65);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "[SC-HID] Opened %d Steam Controller vendor interface(s)", m_devCount);
 
-    SDL_hid_set_nonblocking(m_dev, 0);  // blocking reads in the thread
+    // The gen-2 Steam Controller needs NO enable command -- it streams its
+    // reports by default. The earlier difficulty was reading the wrong (idle
+    // Puck slot) interface; opening them all and polling each (above/below)
+    // solves it. CAVEAT: if Steam Input is running locally it can claim or
+    // reconfigure the controller (changing which report it streams), which
+    // interferes with passthrough -- the local machine should not be running
+    // Steam on this controller. See project memory project-sc-hid-passthrough.
 
     m_running = true;
     m_thread = SDL_CreateThread(readThreadFunc, "SC-HID", this);
@@ -67,24 +86,27 @@ void ScHidPassthrough::stop() {
     if (!m_running) return;
     m_running = false;
 
-    // Unblock the read thread by closing the device; SDL_hid_read will return
-    // an error and the thread will exit.
-    if (m_dev) {
-        SDL_hid_close(m_dev);
-        m_dev = nullptr;
-    }
-
+    // Reads are non-blocking, so the thread exits on its own once m_running is
+    // cleared. Join first, then close the handles it was polling.
     if (m_thread) {
         SDL_WaitThread(m_thread, nullptr);
         m_thread = nullptr;
     }
+
+    for (int i = 0; i < m_devCount; i++) {
+        if (m_devs[i]) {
+            SDL_hid_close(m_devs[i]);
+            m_devs[i] = nullptr;
+        }
+    }
+    m_devCount = 0;
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
         "[SC-HID] Steam Controller passthrough stopped");
 }
 
 bool ScHidPassthrough::isActive() const {
-    return m_running && m_dev != nullptr;
+    return m_running && m_devCount > 0;
 }
 
 int SDLCALL ScHidPassthrough::readThreadFunc(void* ctx) {
@@ -96,21 +118,26 @@ void ScHidPassthrough::readLoop() {
     uint8_t buf[64];
 
     while (m_running) {
-        int n = SDL_hid_read(m_dev, buf, sizeof(buf));
-        if (n < 0) {
-            // Device was closed or error
-            break;
-        }
-        if (n == 0) {
-            // Timeout (shouldn't happen in blocking mode, but be safe)
-            continue;
+        bool gotAny = false;
+
+        // Poll every opened vendor interface; only the active controller's
+        // interface actually delivers reports (the others stay silent).
+        for (int i = 0; i < m_devCount; i++) {
+            int n = SDL_hid_read(m_devs[i], buf, sizeof(buf));
+            if (n <= 0) {
+                continue;  // 0 = no data (non-blocking); <0 = error on this handle
+            }
+            gotAny = true;
+
+            // Pad short reads to exactly SS_SC_HID_REPORT_MAX (64) for the wire.
+            if (n < SS_SC_HID_REPORT_MAX) {
+                memset(buf + n, 0, SS_SC_HID_REPORT_MAX - n);
+            }
+            LiSendScHidInputReport(buf, 64);
         }
 
-        // Pad short reads to exactly 64 bytes
-        if (n < SS_SC_HID_REPORT_MAX) {
-            memset(buf + n, 0, SS_SC_HID_REPORT_MAX - n);
+        if (!gotAny) {
+            SDL_Delay(1);  // nothing pending on any interface -- yield briefly
         }
-
-        LiSendScHidInputReport(buf, 64);
     }
 }

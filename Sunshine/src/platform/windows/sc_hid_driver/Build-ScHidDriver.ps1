@@ -44,8 +44,11 @@ if (-not $SdkVer) {
     exit 1
 }
 
-# ── 偵測 UMDF 版本（對齊 INF 的 UmdfLibraryVersion=2.33）─────────────────────
-$UmdfVer = "2.33"   # 必須與 VipleSCHid.inf 的 UmdfLibraryVersion 一致
+# ── 偵測 UMDF 版本（對齊 INF 的 UmdfLibraryVersion）──────────────────────────
+# 用 2.15（最低、相容性最廣）：本 minidriver 只用基本 WDF API，全部 2.15 就有。
+# 曾用 2.33 建置 → 載入失敗（setupapi 退回 schema 2.23、WUDFHost event 2007
+# 0xD000000D 版本綁定被拒）。必須與 VipleSCHid.inf 的 UmdfLibraryVersion 一致。
+$UmdfVer = "2.15"
 $stubLib = "$KitRoot\Lib\wdf\umdf\x64\$UmdfVer\WdfDriverStubUm.lib"
 if (-not (Test-Path $stubLib)) {
     $UmdfVer = (Get-ChildItem "$KitRoot\Lib\wdf\umdf\x64" -Directory -ErrorAction SilentlyContinue |

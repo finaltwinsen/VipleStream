@@ -1,17 +1,21 @@
 /*
  * §SC-HID: VipleStream Steam Controller Virtual HID Device (UMDF2)
  *
- * Creates a synthetic USB HID device with Valve's VID 0x28DE / PID 0x1102
- * so that Steam on the host recognises it as a real Steam Controller and
- * applies Steam Input configuration (trackpads, gyro, haptics).
+ * Creates a synthetic USB HID device with Valve's VID 0x28DE / PID 0x1302
+ * (gen-2 / 2025 "new" Steam Controller) so that Steam on the host recognises
+ * it as a real Steam Controller and applies Steam Input configuration
+ * (trackpads, gyro, touch, haptics). Its vendor report uses HID report id 66.
  *
  * Implementation: UMDF2 HID minidriver hosted by the in-box, already-signed
  * mshidumdf.sys reflector.  The DLL itself runs in user-mode; no kernel
  * signing is required — only admin rights for the initial installation.
  *
- * INSTALL (one-time, requires elevation):
- *   pnputil /add-driver VipleSCHid.inf /install
- *   devcon install VipleSCHid.inf Viple\SteamController
+ * INSTALL (one-time, requires elevation) — handled by Install-VipleSCHid.ps1:
+ *   1. pnputil /add-driver VipleSCHid.inf /install   (stage package into store)
+ *   2. create a ROOT devnode with HWID "Viple\SteamController" via SetupAPI
+ *      (DIF_REGISTERDEVICE + UpdateDriverForPlugAndPlayDevices) so the driver
+ *      binds. This is what `devcon install` does internally; the script does it
+ *      without devcon so no WDK tools are required on the host.
  *
  * USAGE (from Sunshine):
  *   VipleSCHidOpen()   — create/find the virtual device, return handle
