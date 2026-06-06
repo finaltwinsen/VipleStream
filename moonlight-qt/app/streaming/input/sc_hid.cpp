@@ -3,10 +3,16 @@
 #include "sc_hid.h"
 #include "SDL_compat.h"
 #include <SDL_hidapi.h>
+#include <cstring>   // memset / memcpy
 
 extern "C" {
 #include <Limelight.h>
 }
+
+// Fixed wire report size (SS_SC_HID_REPORT_MAX in moonlight-common-c's internal
+// Input.h, which is not on the app include path). LiSendScHidInputReport always
+// sends exactly this many bytes.
+static constexpr int SC_HID_WIRE_BYTES = 64;
 
 // Valve vendor id. The gen-2 (2025) Steam Controller exposes its gamepad data
 // on a vendor-defined HID interface (UsagePage 0xFF00 / Usage 0x01) carrying
@@ -74,8 +80,11 @@ void ScHidPassthrough::start() {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
             "[SC-HID] Failed to create read thread: %s", SDL_GetError());
         m_running = false;
-        SDL_hid_close(m_dev);
-        m_dev = nullptr;
+        for (int i = 0; i < m_devCount; i++) {
+            SDL_hid_close(m_devs[i]);
+            m_devs[i] = nullptr;
+        }
+        m_devCount = 0;
     } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
             "[SC-HID] Steam Controller passthrough started");
@@ -129,11 +138,11 @@ void ScHidPassthrough::readLoop() {
             }
             gotAny = true;
 
-            // Pad short reads to exactly SS_SC_HID_REPORT_MAX (64) for the wire.
-            if (n < SS_SC_HID_REPORT_MAX) {
-                memset(buf + n, 0, SS_SC_HID_REPORT_MAX - n);
+            // Pad short reads to exactly the fixed wire report size.
+            if (n < SC_HID_WIRE_BYTES) {
+                memset(buf + n, 0, SC_HID_WIRE_BYTES - n);
             }
-            LiSendScHidInputReport(buf, 64);
+            LiSendScHidInputReport(buf, SC_HID_WIRE_BYTES);
         }
 
         if (!gotAny) {

@@ -8,6 +8,7 @@
  */
 
 #include "VipleSCHid.h"
+#include <windows.h>   // implementation needs the full Win32 API (HANDLE, CreateFileW, ...)
 #include <hidsdi.h>
 #include <setupapi.h>
 #include <devguid.h>
@@ -15,6 +16,7 @@
 #include <hidclass.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <strsafe.h>   // StringCchPrintfW — portable safe printf (MSVC + MinGW)
 
 #pragma comment(lib, "hid.lib")
 #pragma comment(lib, "setupapi.lib")
@@ -87,14 +89,16 @@ static void tryInstallDriver(void) {
     if (!lastSlash) return;
     *(lastSlash + 1) = L'\0';
 
+    // StringCchPrintfW (strsafe.h) rather than MSVC-only _snwprintf_s or the
+    // MinGW-gated swprintf — this file compiles under both MSVC and MinGW/UCRT.
     wchar_t scriptPath[MAX_PATH] = {};
-    _snwprintf_s(scriptPath, MAX_PATH, _TRUNCATE, L"%ssc_hid_driver\\Install-VipleSCHid.ps1", exePath);
+    StringCchPrintfW(scriptPath, MAX_PATH, L"%lssc_hid_driver\\Install-VipleSCHid.ps1", exePath);
 
     if (GetFileAttributesW(scriptPath) == INVALID_FILE_ATTRIBUTES) return;
 
     wchar_t params[MAX_PATH * 2] = {};
-    _snwprintf_s(params, _countof(params), _TRUNCATE,
-        L"-ExecutionPolicy Bypass -NonInteractive -File \"%s\"", scriptPath);
+    StringCchPrintfW(params, MAX_PATH * 2,
+        L"-ExecutionPolicy Bypass -NonInteractive -File \"%ls\"", scriptPath);
 
     SHELLEXECUTEINFOW sei = {};
     sei.cbSize       = sizeof(sei);
@@ -124,15 +128,15 @@ VIPLE_SCHID_HANDLE VipleSCHidOpen(void) {
     return ctx;
 }
 
-BOOL VipleSCHidWrite(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
+int VipleSCHidWrite(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
     if (!h || len <= 0) return FALSE;
     auto* ctx = static_cast<VipleSCHidCtx*>(h);
 
-    // gen-2 SC: the forwarded wire payload already begins with HID report id 66
-    // (0x42) at byte 0 — it IS a report-id'd report. So we do NOT prepend a 0
+    // gen-2 SC: the forwarded wire payload already begins with the HID report id
+    // (0x45) at byte 0 — it IS a report-id'd report, so we do NOT prepend a 0
     // (that was the old 0x1102 report-id-0 convention). Write it as a 64-byte
     // OUTPUT report (OutputReportByteLength=64); the driver takes the leading
-    // 54 bytes ([66]+53 data) to complete the pending INPUT read.
+    // 54 bytes ([0x45]+53 data) to complete the pending INPUT read.
     uint8_t buf[64] = {};
     int n = (len > 64) ? 64 : len;
     memcpy(buf, data, n);

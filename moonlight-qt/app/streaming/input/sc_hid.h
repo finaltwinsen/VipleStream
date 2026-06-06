@@ -1,9 +1,12 @@
 #pragma once
 
+#include <SDL_hidapi.h>   // SDL_hid_device + SDLCALL (via begin_code.h)
+#include <SDL_thread.h>   // SDL_Thread + SDL_ThreadFunction
+
 // §SC-HID: Steam Controller raw-HID passthrough (client side)
 // Manages a background thread that reads raw HID input reports from a locally
 // connected gen-2 Steam Controller — selected by its vendor interface
-// (VID 0x28DE, UsagePage 0xFF00 / Usage 0x01, report id 66), so USB-direct
+// (VID 0x28DE, UsagePage 0xFF00 / Usage 0x01, report id 0x45), so USB-direct
 // (0x1302), Puck (0x1304) and Bluetooth (0x1303) are all handled — and forwards
 // each report to the host via LiSendScHidInputReport().
 
@@ -32,8 +35,8 @@ private:
     // and poll each non-blocking, forwarding from whichever actually streams —
     // so direct/Puck/Bluetooth connections are all covered without guessing.
     static constexpr int MAX_SC_DEVS = 8;
-    struct SDL_hid_device* m_devs[MAX_SC_DEVS] = {};
+    SDL_hid_device* m_devs[MAX_SC_DEVS] = {};
     int m_devCount = 0;
-    struct SDL_Thread* m_thread = nullptr;
+    SDL_Thread* m_thread = nullptr;
     volatile bool m_running = false;
 };

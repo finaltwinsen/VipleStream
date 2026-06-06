@@ -205,10 +205,25 @@ if (-not $Reinstall -and $present -gt 0) {
     }
 }
 
-# ---- Reinstall: tear down existing nodes for a clean bind ----------------
-if ($Reinstall -and $present -gt 0) {
-    $removed = [VipleDevNode]::RemoveNodes($hwid)
-    Write-Host "[SC-HID] removed $removed existing Viple\SteamController node(s)."
+# ---- Reinstall: tear down existing nodes + driver packages for a clean bind --
+if ($Reinstall) {
+    if ($present -gt 0) {
+        $removed = [VipleDevNode]::RemoveNodes($hwid)
+        Write-Host "[SC-HID] removed $removed existing Viple\SteamController node(s)."
+    }
+    # Delete any previously-published VipleSCHid driver PACKAGE(s) from the store.
+    # Without this, pnputil /add-driver sees the old package as "already exists in
+    # the system" and SILENTLY SKIPS importing the new DLL (the bug that left an
+    # old DLL bound after a rebuild). Also clears oem* leftovers from prior rounds.
+    # Locale-independent: match the value 'vipleschid.inf', not the (localized)
+    # field labels.
+    $enum = (& pnputil /enum-drivers 2>&1) -join "`n"
+    foreach ($blk in ($enum -split "(?m)^\s*$")) {
+        if ($blk -match 'vipleschid\.inf' -and $blk -match '(oem\d+\.inf)') {
+            Write-Host "[SC-HID] delete old driver package $($matches[1]) ..."
+            & pnputil /delete-driver $matches[1] /uninstall /force 2>&1 | Write-Host
+        }
+    }
     Start-Sleep -Milliseconds 500
 }
 

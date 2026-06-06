@@ -110,11 +110,13 @@ if(MSVC)
             D3DCompiler
             dwmapi
             dxgi
+            hid
             iphlpapi
             ksuser
             ${MINHOOK_LIBRARY}
             ntdll
             setupapi
+            shell32
             shlwapi
             synchronization.lib
             userenv
@@ -130,6 +132,7 @@ else()
             D3DCompiler
             dwmapi
             dxgi
+            hid
             iphlpapi
             ksuser
             libssp.a
@@ -138,6 +141,7 @@ else()
             minhook::minhook
             ntdll
             setupapi
+            shell32
             shlwapi
             synchronization.lib
             userenv
