@@ -26,7 +26,8 @@
 
 param(
     [string]$DriverDir = $PSScriptRoot,
-    [switch]$Reinstall
+    [switch]$Reinstall,
+    [switch]$Diag        # diagnose why the server's openHidByVidPid can't open the virtual device
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +38,69 @@ $desc = "VipleStream Steam Controller (Virtual)"
 
 function Write-Result($obj) {
     Write-Host ("RESULT:" + ($obj | ConvertTo-Json -Compress))
+}
+
+# ---- -Diag: replicate Sunshine's openHidByVidPid(0x28DE,0x1302) to find out
+#      WHY the server can't open the virtual device to inject reports. -------
+if ($Diag) {
+    $diagCs = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class VHidDiag {
+  [StructLayout(LayoutKind.Sequential)] struct DID { public uint cbSize; public Guid g; public uint Flags; public IntPtr Reserved; }
+  [StructLayout(LayoutKind.Sequential)] public struct ATTR { public uint Size; public ushort VendorID; public ushort ProductID; public ushort VersionNumber; }
+  [StructLayout(LayoutKind.Sequential)] public struct CAPS { public ushort Usage; public ushort UsagePage; public ushort InLen; public ushort OutLen; public ushort FeatLen;
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst=17)] public ushort[] R; public ushort a,b,c,d,e,f,g,h,i,j,k; }
+  [DllImport("hid.dll")] static extern void HidD_GetHidGuid(out Guid g);
+  [DllImport("hid.dll")] static extern bool HidD_GetAttributes(IntPtr h, ref ATTR a);
+  [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
+  [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr pp);
+  [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr pp, ref CAPS caps);
+  [DllImport("setupapi.dll", CharSet=CharSet.Unicode)] static extern IntPtr SetupDiGetClassDevsW(ref Guid g, IntPtr e, IntPtr p, uint f);
+  [DllImport("setupapi.dll")] static extern bool SetupDiEnumDeviceInterfaces(IntPtr s, IntPtr d, ref Guid g, uint i, ref DID d2);
+  [DllImport("setupapi.dll", CharSet=CharSet.Unicode)] static extern bool SetupDiGetDeviceInterfaceDetailW(IntPtr s, ref DID d, IntPtr det, uint sz, ref uint req, IntPtr dd);
+  [DllImport("setupapi.dll")] static extern bool SetupDiDestroyDeviceInfoList(IntPtr s);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint c, uint f, IntPtr t);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  const uint PRES=0x2, DIF=0x10, GR=0x80000000, GW=0x40000000, SH=0x3, OE=3, OVL=0x40000000;
+  static IntPtr Op(string p, uint a){ return CreateFileW(p, a, SH, IntPtr.Zero, OE, OVL, IntPtr.Zero); }
+  static string En(int e){ if(e==5)return "ACCESS_DENIED"; if(e==32)return "SHARING_VIOLATION"; if(e==2)return "FILE_NOT_FOUND"; if(e==0)return ""; return ""; }
+  public static string Go() {
+    var sb=new StringBuilder(); Guid hg; HidD_GetHidGuid(out hg);
+    IntPtr set=SetupDiGetClassDevsW(ref hg, IntPtr.Zero, IntPtr.Zero, PRES|DIF);
+    var did=new DID(); did.cbSize=(uint)Marshal.SizeOf(did); int n=0;
+    for(uint i=0; SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref hg, i, ref did); i++){
+      uint req=0; SetupDiGetDeviceInterfaceDetailW(set, ref did, IntPtr.Zero, 0, ref req, IntPtr.Zero);
+      did.cbSize=(uint)Marshal.SizeOf(did); if(req==0) continue;
+      IntPtr det=Marshal.AllocHGlobal((int)req); Marshal.WriteInt32(det, IntPtr.Size==8?8:6);
+      string path=null;
+      if(SetupDiGetDeviceInterfaceDetailW(set, ref did, det, req, ref req, IntPtr.Zero)) path=Marshal.PtrToStringUni((IntPtr)((long)det+4));
+      Marshal.FreeHGlobal(det); if(path==null) continue;
+      IntPtr h0=Op(path,0); if(h0==(IntPtr)(-1)) h0=Op(path,GR); if(h0==(IntPtr)(-1)) continue;
+      var a=new ATTR(); a.Size=(uint)Marshal.SizeOf(a); bool gA=HidD_GetAttributes(h0, ref a); CloseHandle(h0);
+      if(!(gA && a.VendorID==0x28DE)) continue; n++;
+      var caps=new CAPS(); IntPtr pp; string cs="";
+      IntPtr hc=Op(path,GR); if(hc!=(IntPtr)(-1)){ if(HidD_GetPreparsedData(hc, out pp)){ HidP_GetCaps(pp, ref caps); HidD_FreePreparsedData(pp);} CloseHandle(hc); cs=String.Format("UP=0x{0:X4}/U=0x{1:X2} In={2}", caps.UsagePage, caps.Usage, caps.InLen); }
+      IntPtr hrw=Op(path,GR|GW); int erw=(hrw==(IntPtr)(-1))?Marshal.GetLastWin32Error():0; if(hrw!=(IntPtr)(-1)) CloseHandle(hrw);
+      IntPtr hr =Op(path,GR);    int er =(hr ==(IntPtr)(-1))?Marshal.GetLastWin32Error():0; if(hr !=(IntPtr)(-1)) CloseHandle(hr);
+      sb.AppendLine(String.Format("PID=0x{0:X4} {1}", a.ProductID, cs));
+      sb.AppendLine("    open R+W (== server openHidByVidPid): "+(erw==0?"OK":("FAIL err="+erw+" "+En(erw))));
+      sb.AppendLine("    open R-only                        : "+(er ==0?"OK":("FAIL err="+er +" "+En(er ))));
+    }
+    SetupDiDestroyDeviceInfoList(set);
+    if(n==0) sb.AppendLine("(no 0x28DE HID interface enumerated -> server would also see 'not found')");
+    return sb.ToString();
+  }
+}
+'@
+    Add-Type -TypeDefinition $diagCs -Language CSharp
+    Write-Host "=== SC-HID server-open diagnostic (replicates openHidByVidPid) ==="
+    Write-Host ([VHidDiag]::Go())
+    $steam = Get-Process steam -ErrorAction SilentlyContinue
+    Write-Host ("Steam on host: " + $(if ($steam) { "running (PID " + ($steam.Id -join ',') + ")" } else { "NOT running" }))
+    Write-Host "(server runs as the VipleStreamServer service. If R+W fails but R-only OK -> write/sharing; if both fail -> access/session; if no device -> enumeration.)"
+    exit 0
 }
 
 if (-not (Test-Path $inf)) {

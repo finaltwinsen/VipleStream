@@ -1187,8 +1187,8 @@ namespace input {
       // Lazy-open the virtual HID device on first packet
       input->sc_hid_handle = VipleSCHidOpen();
       if (!input->sc_hid_handle) {
-        BOOST_LOG(warning) << "[SC-HID] Virtual Steam Controller device not found. "
-                              "Is the VipleSCHid driver installed?";
+        BOOST_LOG(warning) << "[SC-HID] Virtual Steam Controller device not found: "
+                           << VipleSCHidLastDiag();
         return;
       }
       BOOST_LOG(info) << "[SC-HID] Virtual Steam Controller device opened";

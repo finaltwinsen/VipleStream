@@ -17,6 +17,9 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <strsafe.h>   // StringCchPrintfW — portable safe printf (MSVC + MinGW)
+#include <cstdio>      // vsnprintf (server-open diagnostic)
+#include <cstdarg>     // va_list
+#include <cstring>     // strlen, wcsstr
 
 #pragma comment(lib, "hid.lib")
 #pragma comment(lib, "setupapi.lib")
@@ -33,19 +36,37 @@ struct VipleSCHidCtx {
     void* featureCtx;
 };
 
+// §SC-HID server-open diagnostic: openHidByVidPid records WHY it failed (enum
+// count, per-Valve-interface CreateFileW error, attrs) so a failing host can be
+// diagnosed from sunshine.log via VipleSCHidLastDiag() instead of guessing.
+static char g_diag[2048] = {};
+static void diagAppend(const char* fmt, ...) {
+    size_t len = strlen(g_diag);
+    if (len >= sizeof(g_diag) - 80) return;
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(g_diag + len, sizeof(g_diag) - len, fmt, ap);
+    va_end(ap);
+}
+
 // Enumerate HID devices and return the first that matches VID/PID.
 static HANDLE openHidByVidPid(USHORT vid, USHORT pid) {
+    g_diag[0] = '\0';
     GUID hidGuid;
     HidD_GetHidGuid(&hidGuid);
 
     HDEVINFO devInfo = SetupDiGetClassDevs(&hidGuid, nullptr, nullptr,
                                             DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (devInfo == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+    if (devInfo == INVALID_HANDLE_VALUE) {
+        diagAppend("SetupDiGetClassDevs failed err=%lu", (unsigned long)GetLastError());
+        return INVALID_HANDLE_VALUE;
+    }
 
     SP_DEVICE_INTERFACE_DATA ifaceData = {};
     ifaceData.cbSize = sizeof(ifaceData);
 
+    int total = 0, valve = 0;
     for (DWORD i = 0; SetupDiEnumDeviceInterfaces(devInfo, nullptr, &hidGuid, i, &ifaceData); ++i) {
+        total++;
         DWORD requiredSize = 0;
         SetupDiGetDeviceInterfaceDetail(devInfo, &ifaceData, nullptr, 0, &requiredSize, nullptr);
         if (requiredSize == 0) continue;
@@ -56,29 +77,45 @@ static HANDLE openHidByVidPid(USHORT vid, USHORT pid) {
         detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
 
         if (SetupDiGetDeviceInterfaceDetailW(devInfo, &ifaceData, detail, requiredSize, nullptr, nullptr)) {
+            // The device path carries the VID even when the open fails, so we can
+            // spot Valve (0x28DE) interfaces regardless of access.
+            bool isValve = (wcsstr(detail->DevicePath, L"vid_28de") != nullptr) ||
+                           (wcsstr(detail->DevicePath, L"VID_28DE") != nullptr);
             HANDLE h = CreateFileW(detail->DevicePath,
                 GENERIC_READ | GENERIC_WRITE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+            DWORD openErr = (h == INVALID_HANDLE_VALUE) ? GetLastError() : 0;
 
             if (h != INVALID_HANDLE_VALUE) {
                 HIDD_ATTRIBUTES attrs = {};
                 attrs.Size = sizeof(attrs);
-                if (HidD_GetAttributes(h, &attrs) &&
-                    attrs.VendorID == vid && attrs.ProductID == pid) {
+                bool gotA = HidD_GetAttributes(h, &attrs);
+                if (isValve) {
+                    valve++;
+                    diagAppend("[valve openOK pid=0x%04X] ", gotA ? attrs.ProductID : 0);
+                }
+                if (gotA && attrs.VendorID == vid && attrs.ProductID == pid) {
                     HeapFree(GetProcessHeap(), 0, detail);
                     SetupDiDestroyDeviceInfoList(devInfo);
                     return h;
                 }
                 CloseHandle(h);
+            } else if (isValve) {
+                valve++;
+                diagAppend("[valve openFAIL err=%lu] ", (unsigned long)openErr);
             }
         }
         HeapFree(GetProcessHeap(), 0, detail);
     }
 
+    diagAppend("(enum=%d valveIfaces=%d, no %04X:%04X opened)", total, valve, vid, pid);
     SetupDiDestroyDeviceInfoList(devInfo);
     return INVALID_HANDLE_VALUE;
 }
+
+// Returns a human-readable reason for the last openHidByVidPid result (for logs).
+const char* VipleSCHidLastDiag(void) { return g_diag; }
 
 // Try to install the UMDF2 driver if not already present.
 // Expects Install-VipleSCHid.ps1 in the same directory as the binary.

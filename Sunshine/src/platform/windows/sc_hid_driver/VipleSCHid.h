@@ -52,6 +52,10 @@ void VipleSCHidSetFeatureCb(VIPLE_SCHID_HANDLE h, VipleSCHidFeatureCb cb, void* 
 
 void VipleSCHidClose(VIPLE_SCHID_HANDLE h);
 
+// Diagnostic: human-readable reason for the last VipleSCHidOpen() device-open
+// attempt (enum count, per-Valve-interface CreateFileW error, etc.) — for logs.
+const char* VipleSCHidLastDiag(void);
+
 #ifdef __cplusplus
 }
 #endif
