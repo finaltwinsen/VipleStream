@@ -66,6 +66,16 @@ static const UCHAR g_HidReportDescriptor[] = {
     0x75, 0x08,        //   Report Size (8)
     0x95, 0x3F,        //   Report Count (63)  → Feature = id + 63 = 64 bytes
     0xB1, 0x02,        //   Feature (Data, Var, Abs)
+    // --- Feature seed: report id 0x02 (internal Sunshine → driver seed channel) ---
+    // §SC-HID: Sunshine uses SET_FEATURE(0x02) to pre-seed a valid firmware response
+    // so Steam's GET_FEATURE(0x01) returns real data instead of Steam's own query echo.
+    0x85, 0x02,        //   Report ID (0x02) — server firmware-response seed
+    0x09, 0x01,
+    0x15, 0x00,
+    0x26, 0xFF, 0x00,
+    0x75, 0x08,
+    0x95, 0x3F,        //   Report Count (63)  → Feature = id + 63 = 64 bytes
+    0xB1, 0x02,        //   Feature (Data, Var, Abs)
     0xC0               // End Collection
 };
 
@@ -79,13 +89,16 @@ static HID_DEVICE_ATTRIBUTES g_Attributes = {
     0x0100    // VersionNumber
 };
 
-// 裝置上下文：存放等待中 ReadReport 的 manual queue + 最近一次 Feature 交換狀態
+// 裝置上下文：存放等待中 ReadReport 的 manual queue + Feature 交換狀態
 typedef struct _DEVICE_CONTEXT {
     WDFQUEUE PendingReadQueue;
-    // 最後一次 SET_FEATURE 的完整 payload（64 bytes）。
-    // GET_FEATURE 回傳這份資料（byte[0] 強制設為 0x01）作為 echo，
-    // 讓 Steam 的 CGetControllerInfoWorkItem 離開無窮重試迴圈。
+    // Steam's SET_FEATURE(query) 的 echo buffer（report ID 0x01）
     UCHAR LastFeatureCmd[64];
+    // §SC-HID Phase 2：Sunshine 透過 SET_FEATURE(report ID 0x02) 預先種入的
+    // 真實韌體回應。GET_FEATURE 優先回傳這份資料（一次性消費），之後再回 echo。
+    // 這樣 Steam SET_FEATURE(query) 就無法覆蓋 Sunshine 的預種資料。
+    UCHAR    ServerSeedBuf[64];
+    BOOLEAN  ServerSeedValid;
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, GetDeviceContext)
@@ -142,9 +155,13 @@ NTSTATUS EvtDeviceAdd(IN WDFDRIVER Driver, IN PWDFDEVICE_INIT DeviceInit) {
     status = WdfIoQueueCreate(device, &queueCfg, WDF_NO_OBJECT_ATTRIBUTES, &ctx->PendingReadQueue);
     if (!NT_SUCCESS(status)) return status;
 
-    // 初始化 feature echo buffer：byte[0]=0x01（Triton feature report id），其餘 0
+    // 初始化 feature echo buffer
     RtlZeroMemory(ctx->LastFeatureCmd, sizeof(ctx->LastFeatureCmd));
     ctx->LastFeatureCmd[0] = 0x01;
+    // 初始化 server seed buffer（§SC-HID Phase 2）
+    RtlZeroMemory(ctx->ServerSeedBuf, sizeof(ctx->ServerSeedBuf));
+    ctx->ServerSeedBuf[0] = 0x01;
+    ctx->ServerSeedValid  = FALSE;
     return STATUS_SUCCESS;
 }
 
@@ -270,10 +287,18 @@ VOID EvtIoDeviceControl(
         size_t inLen = 0;
         if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &inBuf, &inLen))) {
             size_t n = inLen < 64 ? inLen : 64;
-            RtlCopyMemory(ctx->LastFeatureCmd, inBuf, n);
-            // byte[0] must always be 0x01 (Triton feature report ID) so that
-            // GET_FEATURE returns the correct report-ID for Steam's parser.
-            ctx->LastFeatureCmd[0] = 0x01;
+            UCHAR reportId = ((UCHAR*)inBuf)[0];
+            if (reportId == 0x02) {
+                // §SC-HID Phase 2：Sunshine 用 report ID 0x02 預種真實韌體回應。
+                // 存入 ServerSeedBuf，byte[0] 修正為 0x01（Steam GET_FEATURE 期望的 ID）。
+                RtlCopyMemory(ctx->ServerSeedBuf, inBuf, n);
+                ctx->ServerSeedBuf[0] = 0x01;
+                ctx->ServerSeedValid  = TRUE;
+            } else {
+                // Steam 的 SET_FEATURE query echo（report ID 0x01）。
+                RtlCopyMemory(ctx->LastFeatureCmd, inBuf, n);
+                ctx->LastFeatureCmd[0] = 0x01;
+            }
         }
         status = STATUS_SUCCESS;
         break;
@@ -283,7 +308,13 @@ VOID EvtIoDeviceControl(
         size_t outLen = 0;
         if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 64, &outBuf, &outLen))) {
             size_t n = outLen < 64 ? outLen : 64;
-            RtlCopyMemory(outBuf, ctx->LastFeatureCmd, n);
+            if (ctx->ServerSeedValid) {
+                // §SC-HID Phase 2：回傳 Sunshine 預種的真實韌體回應（一次性消費）
+                RtlCopyMemory(outBuf, ctx->ServerSeedBuf, n);
+                ctx->ServerSeedValid = FALSE;
+            } else {
+                RtlCopyMemory(outBuf, ctx->LastFeatureCmd, n);
+            }
             transferred = n;
         }
         status = STATUS_SUCCESS;

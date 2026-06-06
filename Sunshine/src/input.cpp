@@ -1208,7 +1208,10 @@ namespace input {
     // Route to VipleSCHidSetFeature to prime the driver echo buffer so Steam's
     // GET_FEATURE returns real data (needed for GetControllerInfo handshake / SC mode).
     if (packet->data[0] != 0x45) {
-      VipleSCHidSetFeature(input->sc_hid_handle, packet->data, 64);
+      int sf = VipleSCHidSetFeature(input->sc_hid_handle, packet->data, 64);
+      BOOST_LOG(info) << "[SC-HID] SetFeature primed by client: reportId=0x"
+                      << util::hex((uint8_t)packet->data[0]).to_string_view()
+                      << " result=" << sf;
       return;
     }
 

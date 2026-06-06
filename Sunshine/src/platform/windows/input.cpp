@@ -1213,8 +1213,10 @@ namespace platf {
       BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (auto-selected by client-reported type)"sv;
       selectedGamepadType = DualShock4Wired;
     } else if (metadata.type == LI_CTYPE_STEAM) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " is Steam Controller (Xbox 360 fallback until HIDMaestro integration)"sv;
-      selectedGamepadType = Xbox360Wired;
+      // §SC-HID Phase 2B：Steam Controller 走 VipleSCHid passthrough，不建 ViGEm Xbox360。
+      // 建了 Xbox360 Steam 就只看到 Xbox 360 而非真實 SC；跳過即可讓 Steam 直接認 28DE:1302。
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " is Steam Controller — skipping ViGEm, using VipleSCHid passthrough"sv;
+      return 0;
     } else if (metadata.type == LI_CTYPE_XBOX) {
       BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Xbox 360 controller (auto-selected by client-reported type)"sv;
       selectedGamepadType = Xbox360Wired;

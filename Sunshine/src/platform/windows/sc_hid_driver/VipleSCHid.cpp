@@ -382,7 +382,10 @@ int VipleSCHidSetFeature(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
     uint8_t buf[64] = {};
     int n = (len > 64) ? 64 : len;
     memcpy(buf, data, n);
-    // HidD_SetFeature: buf[0]=report ID, rest=data; total=64 (report length incl. ID)
+    // §SC-HID Phase 2：用 report ID 0x02 路由到 driver 的 ServerSeedBuf，
+    // 避免 Steam 後續 SET_FEATURE(query) 覆蓋這份真實韌體回應。
+    // driver 收到 0x02 後會把 byte[0] 修正回 0x01 再存入 ServerSeedBuf。
+    buf[0] = 0x02;
     return HidD_SetFeature(ctx->hDev, buf, sizeof(buf)) ? 1 : 0;
 }
 
