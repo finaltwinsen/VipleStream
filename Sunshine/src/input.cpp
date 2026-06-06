@@ -230,6 +230,7 @@ namespace input {
 
     ~input_t() {
       if (sc_hid_handle) {
+        BOOST_LOG(info) << "[SC-HID] Session ended, final write stats: " << VipleSCHidWriteDiag();
         VipleSCHidClose(sc_hid_handle);
         sc_hid_handle = nullptr;
       }
@@ -1201,13 +1202,22 @@ namespace input {
     }
 
     int wr = VipleSCHidWrite(input->sc_hid_handle, packet->data, 64);
-    if (wr < 0) {
+    if (wr > 0) {
+      // Log first successful injection as positive evidence of end-to-end flow.
+      static bool firstInject = true;
+      if (firstInject) {
+        firstInject = false;
+        BOOST_LOG(info) << "[SC-HID] First report injected (id=0x" << std::hex
+                        << (unsigned)packet->data[0] << std::dec << ")";
+      }
+    }
+    else if (wr < 0) {
       // Fatal (device gone) — close and let the next packet lazy re-open.
       BOOST_LOG(warning) << "[SC-HID] Write fatal, reopening: " << VipleSCHidWriteDiag();
       VipleSCHidClose(input->sc_hid_handle);
       input->sc_hid_handle = nullptr;
     }
-    else if (wr == 0) {
+    else {
       // Recoverable failure (e.g. HIDClass parameter rejection) — KEEP the
       // handle (closing on every failure caused a reopen storm that dropped
       // all input). Rate-limit: reports arrive at ~100 Hz.
