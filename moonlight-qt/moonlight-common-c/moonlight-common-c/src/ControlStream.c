@@ -88,6 +88,10 @@ typedef struct _QUEUED_ASYNC_CALLBACK {
             uint8_t left[DS_EFFECT_PAYLOAD_SIZE];
             uint8_t right[DS_EFFECT_PAYLOAD_SIZE];
         } dsAdaptiveTrigger;
+        struct {
+            uint8_t reportId;
+            uint8_t reportType;  // 1=GET_FEATURE 0=output
+        } scHidFeatureRequest;  // §SC-HID feature tunnel
     } data;
     LINKED_BLOCKING_QUEUE_ENTRY entry;
 } QUEUED_ASYNC_CALLBACK, *PQUEUED_ASYNC_CALLBACK;
@@ -156,6 +160,7 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_SET_RGB_LED 11
 #define IDX_DS_ADAPTIVE_TRIGGERS 12
 #define IDX_FPS_CHANGE 13  // VipleStream: dynamic FPS change (client→server)
+#define IDX_SC_HID_FEATURE_REQ 14  // VipleStream §SC-HID: feature tunnel request (server→client)
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -175,6 +180,7 @@ static const short packetTypesGen3[] = {
     -1,     // Set RGB LED (unused)
     -1,     // Adaptive triggers (unused)
     -1,     // FPS change (unused)
+    -1,     // SC-HID feature request (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -191,6 +197,7 @@ static const short packetTypesGen4[] = {
     -1,     // Set RGB LED (unused)
     -1,     // Adaptive triggers (unused)
     -1,     // FPS change (unused)
+    -1,     // SC-HID feature request (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -207,6 +214,7 @@ static const short packetTypesGen5[] = {
     -1,     // Set RGB LED (unused)
     -1,     // Adaptive triggers (unused)
     -1,     // FPS change (unused)
+    -1,     // SC-HID feature request (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -223,6 +231,7 @@ static const short packetTypesGen7[] = {
     -1,     // Set RGB LED (unused)
     -1,     // Adaptive triggers (unused)
     -1,     // FPS change (unused)
+    -1,     // SC-HID feature request (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -239,6 +248,7 @@ static const short packetTypesGen7Enc[] = {
     0x5502, // Set RGB LED (Sunshine protocol extension)
     0x5503, // Set Adaptive Triggers (Sunshine protocol extension)
     0x5504, // FPS change (VipleStream protocol extension)
+    0x5505, // SC-HID feature tunnel request (VipleStream §SC-HID)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -1144,6 +1154,13 @@ static void asyncCallbackThreadFunc(void* context) {
                                                   queuedCb->data.dsAdaptiveTrigger.left,
                                                   queuedCb->data.dsAdaptiveTrigger.right);
             break;
+        case IDX_SC_HID_FEATURE_REQ:
+            // §SC-HID: forward to sc_hid.cpp to probe real SC and send response
+            if (ListenerCallbacks.scHidFeatureRequest != NULL) {
+                ListenerCallbacks.scHidFeatureRequest(queuedCb->data.scHidFeatureRequest.reportId,
+                                                      queuedCb->data.scHidFeatureRequest.reportType);
+            }
+            break;
         default:
             // Unhandled packet type from queueAsyncCallback()
             LC_ASSERT(false);
@@ -1160,7 +1177,8 @@ static bool needsAsyncCallback(unsigned short packetType) {
            packetType == packetTypes[IDX_SET_MOTION_EVENT] ||
            packetType == packetTypes[IDX_SET_RGB_LED] ||
            packetType == packetTypes[IDX_HDR_INFO] ||
-           packetType == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS];
+           packetType == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS] ||
+           (packetTypes[IDX_SC_HID_FEATURE_REQ] != -1 && packetType == packetTypes[IDX_SC_HID_FEATURE_REQ]);
 }
 
 static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLength) {
@@ -1220,6 +1238,13 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.left, DS_EFFECT_PAYLOAD_SIZE);
         BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.right, DS_EFFECT_PAYLOAD_SIZE);
         queuedCb->typeIndex = IDX_DS_ADAPTIVE_TRIGGERS;
+    }
+    else if (packetTypes[IDX_SC_HID_FEATURE_REQ] != -1 &&
+             ctlHdr->type == packetTypes[IDX_SC_HID_FEATURE_REQ]) {
+        // §SC-HID: server requests a feature report from the real SC
+        BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.reportId);
+        BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.reportType);
+        queuedCb->typeIndex = IDX_SC_HID_FEATURE_REQ;
     }
     else {
         // Unhandled packet type from needsAsyncCallback()

@@ -1199,6 +1199,17 @@ namespace input {
       // Include the probe trail on success too — it records which strategy
       // (setupdi vs cfgmgr fallback) and which access mode finally worked.
       BOOST_LOG(info) << "[SC-HID] Virtual Steam Controller device opened: " << VipleSCHidLastDiag();
+      // Ask client to probe feature report from real SC → prime driver echo buffer.
+      input->feedback_queue->raise(
+          platf::gamepad_feedback_msg_t::make_sc_hid_feature_request(0x01, 1));
+    }
+
+    // Non-0x45 packets = feature/status reports from the real SC forwarded by the client.
+    // Route to VipleSCHidSetFeature to prime the driver echo buffer so Steam's
+    // GET_FEATURE returns real data (needed for GetControllerInfo handshake / SC mode).
+    if (packet->data[0] != 0x45) {
+      VipleSCHidSetFeature(input->sc_hid_handle, packet->data, 64);
+      return;
     }
 
     int wr = VipleSCHidWrite(input->sc_hid_handle, packet->data, 64);

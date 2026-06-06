@@ -107,6 +107,7 @@ namespace platf {
     set_motion_event_state,  ///< Set motion event state
     set_rgb_led,  ///< Set RGB LED
     set_adaptive_triggers,  ///< Set adaptive triggers
+    sc_hid_feature_request,  ///< §SC-HID: request client to forward feature report from real SC
   };
 
   struct gamepad_feedback_msg_t {
@@ -184,7 +185,20 @@ namespace platf {
         std::array<uint8_t, 10> left;
         std::array<uint8_t, 10> right;
       } adaptive_triggers;
+
+      struct {
+        uint8_t reportId;
+        uint8_t reportType;  // 1 = GET_FEATURE (probe real SC), 0 = SET/write
+      } sc_hid_feature;
     } data;
+
+    static gamepad_feedback_msg_t make_sc_hid_feature_request(uint8_t reportId, uint8_t reportType) {
+      gamepad_feedback_msg_t msg;
+      msg.type = gamepad_feedback_e::sc_hid_feature_request;
+      msg.id = 0;
+      msg.data.sc_hid_feature = {reportId, reportType};
+      return msg;
+    }
   };
 
   using feedback_queue_t = safe::mail_raw_t::queue_t<gamepad_feedback_msg_t>;

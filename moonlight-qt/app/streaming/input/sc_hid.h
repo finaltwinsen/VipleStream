@@ -26,6 +26,12 @@ public:
 
     bool isActive() const;
 
+    // §SC-HID Phase 2: Forward a feature report request from the host.
+    // Calls SDL_hid_get_feature_report on the real SC and sends the result
+    // back via LiSendScHidInputReport so the host can prime the virtual
+    // device's GET_FEATURE echo buffer (reportType: 1=GET 0=output).
+    void forwardFeatureRequest(uint8_t reportId, uint8_t reportType);
+
 private:
     static int SDLCALL readThreadFunc(void* ctx);
     void readLoop();

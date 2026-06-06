@@ -41,6 +41,10 @@ typedef void* VIPLE_SCHID_HANDLE;
 // Returns NULL on failure.
 VIPLE_SCHID_HANDLE VipleSCHidOpen(void);
 
+// Prime the VipleSCHid driver's GET_FEATURE echo buffer via HidD_SetFeature.
+// data[0] = HID report ID; len must be 64. Returns 1 on success, 0 on failure.
+int VipleSCHidSetFeature(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len);
+
 // Inject a Steam Controller input report (gen-2: 54-byte report id 0x45).
 // Returns:  1 = injected (or skipped: a non-0x45 report the virtual device
 //               does not declare — writing those would always be rejected),

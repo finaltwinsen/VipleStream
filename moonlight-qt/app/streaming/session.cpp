@@ -81,7 +81,8 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clRumbleTriggers,
     Session::clSetMotionEventState,
     Session::clSetControllerLED,
-    Session::clSetAdaptiveTriggers
+    Session::clSetAdaptiveTriggers,
+    Session::clScHidFeatureRequest  // §SC-HID feature tunnel
 };
 
 Session* Session::s_ActiveSession;
@@ -299,6 +300,15 @@ void Session::clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlag
 
     setControllerLEDEvent.user.data2 = (void *) state;
     SDL_PushEvent(&setControllerLEDEvent);
+}
+
+void Session::clScHidFeatureRequest(uint8_t reportId, uint8_t reportType) {
+    // §SC-HID Phase 2: host wants a feature report from the real SC.
+    // forwardFeatureRequest calls SDL_hid_get_feature_report and sends
+    // the result back via LiSendScHidInputReport (non-0x45 → VipleSCHidSetFeature).
+    if (s_ActiveSession != nullptr) {
+        s_ActiveSession->m_ScHid.forwardFeatureRequest(reportId, reportType);
+    }
 }
 
 

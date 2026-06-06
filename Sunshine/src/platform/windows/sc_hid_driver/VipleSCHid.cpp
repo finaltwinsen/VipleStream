@@ -376,6 +376,16 @@ int VipleSCHidWrite(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
     }
 }
 
+int VipleSCHidSetFeature(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
+    if (!h || len <= 0) return 0;
+    auto* ctx = static_cast<VipleSCHidCtx*>(h);
+    uint8_t buf[64] = {};
+    int n = (len > 64) ? 64 : len;
+    memcpy(buf, data, n);
+    // HidD_SetFeature: buf[0]=report ID, rest=data; total=64 (report length incl. ID)
+    return HidD_SetFeature(ctx->hDev, buf, sizeof(buf)) ? 1 : 0;
+}
+
 void VipleSCHidSetFeatureCb(VIPLE_SCHID_HANDLE h, VipleSCHidFeatureCb cb, void* ctx_) {
     if (!h) return;
     auto* ctx = static_cast<VipleSCHidCtx*>(h);

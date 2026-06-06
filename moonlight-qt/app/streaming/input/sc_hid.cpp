@@ -123,6 +123,47 @@ int SDLCALL ScHidPassthrough::readThreadFunc(void* ctx) {
     return 0;
 }
 
+void ScHidPassthrough::forwardFeatureRequest(uint8_t reportId, uint8_t reportType) {
+    if (m_devCount == 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "[SC-HID] forwardFeatureRequest: no device open");
+        return;
+    }
+
+    uint8_t buf[SC_HID_WIRE_BYTES];
+
+    for (int i = 0; i < m_devCount; i++) {
+        memset(buf, 0, sizeof(buf));
+        buf[0] = reportId;
+
+        int n = -1;
+        if (reportType == 1) {
+            // GET_FEATURE: read feature report from real SC
+            n = SDL_hid_get_feature_report(m_devs[i], buf, sizeof(buf));
+        } else {
+            // output report (e.g. haptics): nothing to proxy back
+            SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                "[SC-HID] forwardFeatureRequest: output type ignored (id=0x%02x)", reportId);
+            return;
+        }
+
+        if (n > 0) {
+            if (n < SC_HID_WIRE_BYTES) {
+                memset(buf + n, 0, SC_HID_WIRE_BYTES - n);
+            }
+            // buf[0] == reportId (non-0x45) → server routes to VipleSCHidSetFeature
+            LiSendScHidInputReport(buf, SC_HID_WIRE_BYTES);
+            SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                "[SC-HID] Feature report 0x%02x forwarded (%d bytes)", reportId, n);
+            return;  // first successful response is enough
+        }
+    }
+
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+        "[SC-HID] forwardFeatureRequest: GET_FEATURE 0x%02x failed on all %d device(s)",
+        reportId, m_devCount);
+}
+
 void ScHidPassthrough::readLoop() {
     uint8_t buf[64];
 

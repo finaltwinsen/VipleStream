@@ -58,6 +58,7 @@ constexpr int IDX_SET_MOTION_EVENT = 13;
 constexpr int IDX_SET_RGB_LED = 14;
 constexpr int IDX_SET_ADAPTIVE_TRIGGERS = 15;
 constexpr int IDX_FPS_CHANGE = 16;  // VipleStream: dynamic FPS change
+constexpr int IDX_SC_HID_FEATURE_REQ = 17;  // VipleStream §SC-HID: feature tunnel (server→client)
 
 // VipleStream §ABR: SS_FRAME_FEC_PTYPE from moonlight-common-c.
 // Client sends per-frame FEC status on this packet type.
@@ -83,6 +84,7 @@ static const short packetTypes[] = {
   0x5502,  // Set RGB LED (Sunshine protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
   0x5504,  // FPS change (VipleStream protocol extension)
+  0x5505,  // SC-HID feature tunnel request (VipleStream §SC-HID)
 };
 
 namespace asio = boost::asio;
@@ -217,6 +219,13 @@ namespace stream {
     std::uint8_t type_right;
     std::uint8_t left[DS_EFFECT_PAYLOAD_SIZE];
     std::uint8_t right[DS_EFFECT_PAYLOAD_SIZE];
+  };
+
+  struct control_sc_hid_feature_req_t {
+    control_header_v2 header;
+    uint8_t reportId;
+    uint8_t reportType;  // 1=GET_FEATURE(read), 0=SET/output
+    uint8_t padding[2];
   };
 
   struct control_hdr_mode_t {
@@ -1006,6 +1015,21 @@ namespace stream {
       std::ranges::copy(msg.data.adaptive_triggers.left, plaintext.left);
       plaintext.type_right = msg.data.adaptive_triggers.type_right;
       std::ranges::copy(msg.data.adaptive_triggers.right, plaintext.right);
+
+      std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
+        encrypted_payload;
+
+      payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    } else if (msg.type == platf::gamepad_feedback_e::sc_hid_feature_request) {
+      control_sc_hid_feature_req_t plaintext {};
+      plaintext.header.type = packetTypes[IDX_SC_HID_FEATURE_REQ];
+      plaintext.header.payloadLength = sizeof(plaintext) - sizeof(control_header_v2);
+      plaintext.reportId = msg.data.sc_hid_feature.reportId;
+      plaintext.reportType = msg.data.sc_hid_feature.reportType;
+
+      BOOST_LOG(info) << "[SC-HID] Sending feature request to client: reportId=0x"sv
+                      << util::hex(msg.data.sc_hid_feature.reportId).to_string_view()
+                      << " type="sv << (unsigned)msg.data.sc_hid_feature.reportType;
 
       std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
         encrypted_payload;
