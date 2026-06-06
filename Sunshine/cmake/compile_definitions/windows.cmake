@@ -106,6 +106,7 @@ if(MSVC)
     list(PREPEND PLATFORM_LIBRARIES
             ${CURL_STATIC_LIBRARIES}
             avrt
+            cfgmgr32
             d3d11
             D3DCompiler
             dwmapi
@@ -128,6 +129,7 @@ else()
     list(PREPEND PLATFORM_LIBRARIES
             ${CURL_STATIC_LIBRARIES}
             avrt
+            cfgmgr32
             d3d11
             D3DCompiler
             dwmapi

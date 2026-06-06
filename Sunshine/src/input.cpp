@@ -1187,17 +1187,34 @@ namespace input {
       // Lazy-open the virtual HID device on first packet
       input->sc_hid_handle = VipleSCHidOpen();
       if (!input->sc_hid_handle) {
-        BOOST_LOG(warning) << "[SC-HID] Virtual Steam Controller device not found: "
-                           << VipleSCHidLastDiag();
+        // Empty diag = throttled attempt (VipleSCHidOpen retries at most every
+        // 5 s); only log real probe trails or the log drowns at report rate.
+        const char* diag = VipleSCHidLastDiag();
+        if (diag[0] != '\0') {
+          BOOST_LOG(warning) << "[SC-HID] Virtual Steam Controller device not found: " << diag;
+        }
         return;
       }
-      BOOST_LOG(info) << "[SC-HID] Virtual Steam Controller device opened";
+      // Include the probe trail on success too — it records which strategy
+      // (setupdi vs cfgmgr fallback) and which access mode finally worked.
+      BOOST_LOG(info) << "[SC-HID] Virtual Steam Controller device opened: " << VipleSCHidLastDiag();
     }
 
-    if (!VipleSCHidWrite(input->sc_hid_handle, packet->data, 64)) {
-      BOOST_LOG(debug) << "[SC-HID] Write failed — device disconnected?";
+    int wr = VipleSCHidWrite(input->sc_hid_handle, packet->data, 64);
+    if (wr < 0) {
+      // Fatal (device gone) — close and let the next packet lazy re-open.
+      BOOST_LOG(warning) << "[SC-HID] Write fatal, reopening: " << VipleSCHidWriteDiag();
       VipleSCHidClose(input->sc_hid_handle);
       input->sc_hid_handle = nullptr;
+    }
+    else if (wr == 0) {
+      // Recoverable failure (e.g. HIDClass parameter rejection) — KEEP the
+      // handle (closing on every failure caused a reopen storm that dropped
+      // all input). Rate-limit: reports arrive at ~100 Hz.
+      static unsigned long fail_count = 0;
+      if (++fail_count <= 3 || fail_count % 500 == 0) {
+        BOOST_LOG(warning) << "[SC-HID] Write failed (keeping handle): " << VipleSCHidWriteDiag();
+      }
     }
   }
 #endif

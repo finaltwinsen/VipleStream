@@ -42,8 +42,16 @@ typedef void* VIPLE_SCHID_HANDLE;
 VIPLE_SCHID_HANDLE VipleSCHidOpen(void);
 
 // Inject a Steam Controller input report (gen-2: 54-byte report id 0x45).
-// Returns non-zero on success (0 on failure).
+// Returns:  1 = injected (or skipped: a non-0x45 report the virtual device
+//               does not declare — writing those would always be rejected),
+//           0 = write failed but the handle is likely still usable (e.g.
+//               HIDClass parameter rejection) — caller should KEEP the handle,
+//          -1 = fatal (device gone) — caller should close and re-open.
 int VipleSCHidWrite(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len);
+
+// Diagnostic: short snapshot of write-path stats (written/skipped counts and
+// the last WriteFile error code) — for rate-limited log lines.
+const char* VipleSCHidWriteDiag(void);
 
 // Send a feature report to the virtual device (forwarded back to client).
 // Used to relay host->controller commands (haptics etc.) back over the wire.
