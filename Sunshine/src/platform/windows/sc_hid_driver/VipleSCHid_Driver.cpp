@@ -44,6 +44,7 @@ static const UCHAR g_HidReportDescriptor[] = {
     0x06, 0x00, 0xFF,  // Usage Page (Vendor-Defined 0xFF00)
     0x09, 0x01,        // Usage (0x01)
     0xA1, 0x01,        // Collection (Application)
+    // --- Input/Output: vendor gamepad report id 0x45 ---
     0x85, 0x45,        //   Report ID (0x45 / 69) — gen-2 SC streamed gamepad report
     0x09, 0x01,        //   Usage (0x01)
     0x15, 0x00,        //   Logical Minimum (0)
@@ -54,7 +55,15 @@ static const UCHAR g_HidReportDescriptor[] = {
     0x09, 0x01,        //   Usage (0x01)
     0x95, 0x3F,        //   Report Count (63)  → Output = id + 63 = 64 bytes
     0x91, 0x02,        //   Output (Data, Var, Abs)
+    // --- Feature: Triton control report id 0x01 (separate from gamepad id 0x45) ---
+    // Steam's CGetControllerInfoWorkItem sends SET_FEATURE + polls GET_FEATURE(0x01).
+    // Keeping Feature under id 0x45 caused it to retry indefinitely (wrong id);
+    // id 0x01 matches what Triton actually advertises.
+    0x85, 0x01,        //   Report ID (0x01) — Triton feature/control report
     0x09, 0x01,        //   Usage (0x01)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x26, 0xFF, 0x00,  //   Logical Maximum (255)
+    0x75, 0x08,        //   Report Size (8)
     0x95, 0x3F,        //   Report Count (63)  → Feature = id + 63 = 64 bytes
     0xB1, 0x02,        //   Feature (Data, Var, Abs)
     0xC0               // End Collection
@@ -70,9 +79,13 @@ static HID_DEVICE_ATTRIBUTES g_Attributes = {
     0x0100    // VersionNumber
 };
 
-// 裝置上下文：存放等待中 ReadReport 的 manual queue
+// 裝置上下文：存放等待中 ReadReport 的 manual queue + 最近一次 Feature 交換狀態
 typedef struct _DEVICE_CONTEXT {
     WDFQUEUE PendingReadQueue;
+    // 最後一次 SET_FEATURE 的完整 payload（64 bytes）。
+    // GET_FEATURE 回傳這份資料（byte[0] 強制設為 0x01）作為 echo，
+    // 讓 Steam 的 CGetControllerInfoWorkItem 離開無窮重試迴圈。
+    UCHAR LastFeatureCmd[64];
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, GetDeviceContext)
@@ -127,7 +140,12 @@ NTSTATUS EvtDeviceAdd(IN WDFDRIVER Driver, IN PWDFDEVICE_INIT DeviceInit) {
     // ── Manual queue：存放等待中的 IOCTL_HID_READ_REPORT────────────────────
     WDF_IO_QUEUE_CONFIG_INIT(&queueCfg, WdfIoQueueDispatchManual);
     status = WdfIoQueueCreate(device, &queueCfg, WDF_NO_OBJECT_ATTRIBUTES, &ctx->PendingReadQueue);
-    return status;
+    if (!NT_SUCCESS(status)) return status;
+
+    // 初始化 feature echo buffer：byte[0]=0x01（Triton feature report id），其餘 0
+    RtlZeroMemory(ctx->LastFeatureCmd, sizeof(ctx->LastFeatureCmd));
+    ctx->LastFeatureCmd[0] = 0x01;
+    return STATUS_SUCCESS;
 }
 
 // ── EvtIoDeviceControl ────────────────────────────────────────────────────────
@@ -217,11 +235,10 @@ VOID EvtIoDeviceControl(
         NTSTATUS   deqStatus   = WdfIoQueueRetrieveNextRequest(ctx->PendingReadQueue, &readRequest);
 
         if (NT_SUCCESS(deqStatus) && readRequest != nullptr) {
-            // gen-2 SC：output 與 input 同用 report id 66，byte0 即 report id。
-            // 不再跳過 leading 0（那是舊 0x1102 的 report-id-0 模型）。把 Sunshine 寫進來
-            // 的 64-byte output report 前緣（含 report id 66）原樣餵給等待中的 input read；
-            // input report 長度 54 (= id + 53)，host Steam 讀到 [66][53 data]，與實體 gen-2
-            // SC 一致。copy 量取 read buffer 與 write buffer 的較小者。
+            // gen-2 SC：output 與 input 同用 report id 0x45（69），byte0 即 report id。
+            // 把 Sunshine 寫進來的 64-byte output report 前緣（含 report id 0x45）原樣
+            // 餵給等待中的 input read；input report 長度 54 (= id + 53)，host Steam 讀到
+            // [0x45][53 data]，與實體 gen-2 SC 一致。copy 量取兩 buffer 較小者。
             WDFMEMORY readMem = nullptr;
             size_t    readLen = 0;
             if (NT_SUCCESS(WdfRequestRetrieveOutputMemory(readRequest, &readMem))) {
@@ -239,12 +256,39 @@ VOID EvtIoDeviceControl(
         break;
     }
 
-    // ── Feature report（lizard-mode 控制 / haptics 下行）─────────────────
-    // 目前先回傳 success；完整 haptics 下行在 SS_SC_HID_FEATURE 路徑實作
-    case IOCTL_HID_GET_FEATURE:
-    case IOCTL_HID_SET_FEATURE:
+    // ── Feature report：GET echo + SET store ─────────────────────────────
+    // Steam 的 CGetControllerInfoWorkItem 流程：
+    //   1. SET_FEATURE（送指令，如 0x83 = GET_STRING_ATTRIBUTE）
+    //   2. 迴圈 GET_FEATURE(reportId=0x01) 直到拿到非空回應
+    // 舊實作兩個 case 都回傳 transferred=0 → Steam 無窮重試（每隔 ~5 s 一輪）。
+    // 修法：SET 時把 payload 存入 ctx->LastFeatureCmd（byte[0] 固定 0x01）；
+    //       GET 時把 LastFeatureCmd 直接填回 output buffer。
+    // 未來完整 tunnel：改為 park GET 進 PendingFeatureGetQueue，
+    //   透過 wire 把指令送到 client → 實體 SC → 回傳，再 complete parked request。
+    case IOCTL_HID_SET_FEATURE: {
+        PVOID inBuf  = nullptr;
+        size_t inLen = 0;
+        if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &inBuf, &inLen))) {
+            size_t n = inLen < 64 ? inLen : 64;
+            RtlCopyMemory(ctx->LastFeatureCmd, inBuf, n);
+            // byte[0] must always be 0x01 (Triton feature report ID) so that
+            // GET_FEATURE returns the correct report-ID for Steam's parser.
+            ctx->LastFeatureCmd[0] = 0x01;
+        }
         status = STATUS_SUCCESS;
         break;
+    }
+    case IOCTL_HID_GET_FEATURE: {
+        PVOID outBuf  = nullptr;
+        size_t outLen = 0;
+        if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 64, &outBuf, &outLen))) {
+            size_t n = outLen < 64 ? outLen : 64;
+            RtlCopyMemory(outBuf, ctx->LastFeatureCmd, n);
+            transferred = n;
+        }
+        status = STATUS_SUCCESS;
+        break;
+    }
 
     default:
         status = STATUS_NOT_SUPPORTED;
