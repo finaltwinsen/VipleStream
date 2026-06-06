@@ -287,11 +287,49 @@ void SdlInputHandler::updatePointerRegionLock()
         dst.x = dst.y = 0;
         SDL_GetWindowSize(m_Window, &dst.w, &dst.h);
 
+        // VipleStream §INPUT.linux: GNOME/X11 fullscreen timing guard.
+        //
+        // On GNOME with X11, SDL_GetWindowSize() can transiently return a
+        // size smaller than the full display (e.g. 3072x1680 instead of
+        // 3072x1728) when the top panel or dock is momentarily visible
+        // during fullscreen transitions or focus changes.  If we lock the
+        // mouse rect to this smaller region, the cursor gets physically
+        // stuck above the bottom edge — and the rect is never updated
+        // because no further window event fires after GNOME re-hides the
+        // panel.
+        //
+        // Fix: when in fullscreen mode, cross-check SDL_GetWindowSize()
+        // against the desktop display mode.  If the window reports smaller
+        // than the display, use the display dimensions instead.
+        Uint32 fullscreenFlags = SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP;
+        if (fullscreenFlags != 0) {
+            int displayIndex = SDL_GetWindowDisplayIndex(m_Window);
+            SDL_DisplayMode desktopMode;
+            if (displayIndex >= 0 && SDL_GetDesktopDisplayMode(displayIndex, &desktopMode) == 0) {
+                if (dst.w < desktopMode.w || dst.h < desktopMode.h) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-INPUT] Pointer region lock: SDL_GetWindowSize returned %dx%d "
+                                "but display mode is %dx%d — using display mode to prevent cursor "
+                                "from being stuck above the bottom edge (GNOME panel timing issue)",
+                                dst.w, dst.h, desktopMode.w, desktopMode.h);
+                    dst.w = desktopMode.w;
+                    dst.h = desktopMode.h;
+                }
+            }
+        }
+
         // Use the stream and window sizes to determine the video region
         StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
 
         // SDL 2.0.18 lets us lock the cursor to a specific region
         SDL_SetWindowMouseRect(m_Window, &dst);
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-INPUT] Pointer region lock SET: rect={%d,%d,%d,%d} "
+                    "stream=%dx%d absMode=%d",
+                    dst.x, dst.y, dst.w, dst.h,
+                    m_StreamWidth, m_StreamHeight,
+                    (int)m_AbsoluteMouseMode);
 #elif SDL_VERSION_ATLEAST(2, 0, 15)
         // SDL 2.0.15 only lets us lock the cursor to the whole window
         SDL_SetWindowMouseGrab(m_Window, SDL_TRUE);

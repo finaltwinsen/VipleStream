@@ -710,7 +710,8 @@ public class NvConnection {
                             context.streamConfig.getColorRange(),
                             context.streamConfig.getMpQuicEnabled(),
                             context.streamConfig.getMpQuicScheduler(),
-                            context.streamConfig.getMpQuicPort());
+                            context.streamConfig.getMpQuicPort(),
+                            context.streamConfig.getAutoAdjustBitrate());
                     if (ret != 0) {
                         // LiStartConnection() failed, so the caller is not expected
                         // to stop the connection themselves. We need to release their

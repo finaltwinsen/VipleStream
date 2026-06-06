@@ -1034,45 +1034,41 @@ bool VkFrucRenderer::pickPhysicalDeviceAndQueue()
             break;
         }
     }
-    // §B2 follow-up 2026-05-06 — Optical Flow queue probe (VK_NV_optical_flow).
-    // VK_QUEUE_OPTICAL_FLOW_BIT_NV 的數值是 0x00000100 (bit 8). NV Ampere+
-    // 顯卡會 advertise 這個 queue family；用來 dispatch HW optical flow
-    // 取代 block-matching ME.  Probe-only at this phase, no enable yet.
+    // §STARTUP-PERF: OF + async-compute probes only needed when FRUC is active.
+    // When frucMode=false these queues are never used — skip the probe to save
+    // ~100ms per VkFrucRenderer init (OF DLL load + compute queue alloc).
     constexpr VkQueueFlagBits OPTICAL_FLOW_BIT = (VkQueueFlagBits)0x00000100;
     uint32_t opticalFlowQF = UINT32_MAX;
     uint32_t opticalFlowQueueCount = 0;
-    for (uint32_t qf = 0; qf < qfCount; qf++) {
-        if (qfs[qf].queueFlags & OPTICAL_FLOW_BIT) {
-            opticalFlowQF = qf;
-            opticalFlowQueueCount = qfs[qf].queueCount;
-            break;
-        }
-    }
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC-NVOF] §B2-followup queue probe: optical flow QF=%s%u count=%u",
-                opticalFlowQF == UINT32_MAX ? "(none) " : "",
-                opticalFlowQF == UINT32_MAX ? 0 : opticalFlowQF,
-                opticalFlowQueueCount);
-
-    // §J.3.e.2.i.10 Phase 2A — dedicated compute queue family probe.  Look for
-    // a QF with VK_QUEUE_COMPUTE_BIT set and VK_QUEUE_GRAPHICS_BIT cleared
-    // (i.e. truly dedicated, not the universal QF=0).  On NV Ampere/Ada this
-    // is typically QF=2.  When available, FRUC compute (Phase 2B+) gets
-    // submitted there so it can overlap with graphics-queue render+present.
-    // UINT32_MAX = none found → caller falls back to m_GraphicsQueue submit.
     m_ComputeQueueFamily = UINT32_MAX;
-    for (uint32_t qf = 0; qf < qfCount; qf++) {
-        const auto flags = qfs[qf].queueFlags;
-        if ((flags & VK_QUEUE_COMPUTE_BIT) && !(flags & VK_QUEUE_GRAPHICS_BIT)) {
-            m_ComputeQueueFamily = qf;
-            break;
+
+    if (m_FrucMode || m_DualMode) {
+        for (uint32_t qf = 0; qf < qfCount; qf++) {
+            if (qfs[qf].queueFlags & OPTICAL_FLOW_BIT) {
+                opticalFlowQF = qf;
+                opticalFlowQueueCount = qfs[qf].queueCount;
+                break;
+            }
         }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-NVOF] §B2-followup queue probe: optical flow QF=%s%u count=%u",
+                    opticalFlowQF == UINT32_MAX ? "(none) " : "",
+                    opticalFlowQF == UINT32_MAX ? 0 : opticalFlowQF,
+                    opticalFlowQueueCount);
+
+        for (uint32_t qf = 0; qf < qfCount; qf++) {
+            const auto flags = qfs[qf].queueFlags;
+            if ((flags & VK_QUEUE_COMPUTE_BIT) && !(flags & VK_QUEUE_GRAPHICS_BIT)) {
+                m_ComputeQueueFamily = qf;
+                break;
+            }
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A async-compute QF probe: %s%u%s",
+                    m_ComputeQueueFamily == UINT32_MAX ? "(none — fallback to graphics QF=" : "QF=",
+                    m_ComputeQueueFamily == UINT32_MAX ? m_QueueFamily : m_ComputeQueueFamily,
+                    m_ComputeQueueFamily == UINT32_MAX ? ")" : " (dedicated COMPUTE_BIT, no GRAPHICS_BIT)");
     }
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VKFRUC] §J.3.e.2.i.10 Phase 2A async-compute QF probe: %s%u%s",
-                m_ComputeQueueFamily == UINT32_MAX ? "(none — fallback to graphics QF=" : "QF=",
-                m_ComputeQueueFamily == UINT32_MAX ? m_QueueFamily : m_ComputeQueueFamily,
-                m_ComputeQueueFamily == UINT32_MAX ? ")" : " (dedicated COMPUTE_BIT, no GRAPHICS_BIT)");
 
     // §J.3.e.2.i.11 (v1.4.66) — cross-hardware FRUC auto-tier 偵測 (heuristic).
     // 啟動時根據 GPU 強度自動選 path + inferDim，避免使用者手動 tune setting。
@@ -1351,7 +1347,8 @@ bool VkFrucRenderer::createLogicalDevice()
     // m_OpticalFlowQueueFamily so subsequent OF session creation + cmd buf
     // submission knows which queue to use.  Stored in member here, fetched
     // queue handle below after vkCreateDevice.
-    bool wantNvOfQ = vkfrucWantNvOfFromUserOrEnv();
+    // §STARTUP-PERF: OF extension only useful when FRUC is active
+    bool wantNvOfQ = (m_FrucMode || m_DualMode) && vkfrucWantNvOfFromUserOrEnv();
     m_OpticalFlowQueueFamily = UINT32_MAX;
     if (wantNvOfQ) {
         // Re-query queue family properties locally (qfs vector lives in

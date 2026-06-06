@@ -1212,6 +1212,9 @@ namespace platf {
     } else if (metadata.type == LI_CTYPE_PS) {
       BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (auto-selected by client-reported type)"sv;
       selectedGamepadType = DualShock4Wired;
+    } else if (metadata.type == LI_CTYPE_STEAM) {
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " is Steam Controller (Xbox 360 fallback until HIDMaestro integration)"sv;
+      selectedGamepadType = Xbox360Wired;
     } else if (metadata.type == LI_CTYPE_XBOX) {
       BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Xbox 360 controller (auto-selected by client-reported type)"sv;
       selectedGamepadType = Xbox360Wired;

@@ -238,6 +238,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         prefConfig = PreferenceConfiguration.readPreferences(this);
         tombstonePrefs = Game.this.getSharedPreferences("DecoderTombstone", 0);
 
+        // VipleStream CLI mode: override prefConfig with intent extras from CliStreamActivity
+        applyCliOverrides(prefConfig, getIntent());
+
         // Enter landscape unless we're on a square screen
         setPreferredOrientationForCurrentDisplay();
 
@@ -578,6 +581,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 .setColorRange(decoderRenderer.getPreferredColorRange())
                 .setPersistGamepadsAfterDisconnect(!prefConfig.multiController)
                 .setMpQuic(prefConfig.enableMpQuic, prefConfig.mpQuicScheduler)
+                .setAutoAdjustBitrate(cliAutoAdjustBitrate != null ? cliAutoAdjustBitrate : true)
                 .build();
 
         // Initialize the connection
@@ -2926,6 +2930,55 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 return handleKeyMultiple(keyEvent);
             default:
                 return false;
+        }
+    }
+
+    // VipleStream CLI mode: override stream preferences with intent extras
+    private Boolean cliAutoAdjustBitrate = null;
+
+    private void applyCliOverrides(PreferenceConfiguration pref, Intent intent) {
+        if (intent.hasExtra("cli_bitrate")) {
+            int v = intent.getIntExtra("cli_bitrate", 0);
+            if (v > 0) { pref.bitrate = v; LimeLog.info("[VIPLE-CLI] bitrate=" + v); }
+        }
+        if (intent.hasExtra("cli_fps")) {
+            int v = intent.getIntExtra("cli_fps", 0);
+            if (v > 0) { pref.fps = v; LimeLog.info("[VIPLE-CLI] fps=" + v); }
+        }
+        if (intent.hasExtra("cli_width")) {
+            int v = intent.getIntExtra("cli_width", 0);
+            if (v > 0) { pref.width = v; LimeLog.info("[VIPLE-CLI] width=" + v); }
+        }
+        if (intent.hasExtra("cli_height")) {
+            int v = intent.getIntExtra("cli_height", 0);
+            if (v > 0) { pref.height = v; LimeLog.info("[VIPLE-CLI] height=" + v); }
+        }
+        if (intent.hasExtra("cli_codec")) {
+            int v = intent.getIntExtra("cli_codec", -1);
+            if (v >= 0) {
+                switch (v) {
+                    case 0: pref.videoFormat = PreferenceConfiguration.FormatOption.FORCE_H264; break;
+                    case 1: pref.videoFormat = PreferenceConfiguration.FormatOption.FORCE_HEVC; break;
+                    case 2: pref.videoFormat = PreferenceConfiguration.FormatOption.FORCE_AV1; break;
+                }
+                LimeLog.info("[VIPLE-CLI] codec=" + v);
+            }
+        }
+        if (intent.hasExtra("cli_enableMpQuic")) {
+            pref.enableMpQuic = intent.getBooleanExtra("cli_enableMpQuic", false);
+            LimeLog.info("[VIPLE-CLI] enableMpQuic=" + pref.enableMpQuic);
+        }
+        if (intent.hasExtra("cli_enableFruc")) {
+            pref.enableFruc = intent.getBooleanExtra("cli_enableFruc", false);
+            LimeLog.info("[VIPLE-CLI] enableFruc=" + pref.enableFruc);
+        }
+        if (intent.hasExtra("cli_perfOverlay")) {
+            pref.enablePerfOverlay = intent.getBooleanExtra("cli_perfOverlay", false);
+            LimeLog.info("[VIPLE-CLI] perfOverlay=" + pref.enablePerfOverlay);
+        }
+        if (intent.hasExtra("cli_autoAdjustBitrate")) {
+            cliAutoAdjustBitrate = intent.getBooleanExtra("cli_autoAdjustBitrate", true);
+            LimeLog.info("[VIPLE-CLI] autoAdjustBitrate=" + cliAutoAdjustBitrate);
         }
     }
 }

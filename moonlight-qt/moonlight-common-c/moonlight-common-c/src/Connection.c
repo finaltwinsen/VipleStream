@@ -560,34 +560,109 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
                             addrStr, (int)interfaces[i].up);
                 }
 
-                // §Q-MP-REACH 2026-05-23 — Pick the FIRST interface that can
+                // §Q-RT-PREFER 2026-05-30 — Route-table-preferred interface.
+                //
+                // LocalAddr was resolved at STAGE_NAME_RESOLUTION via
+                // getLocalAddressByUdpConnect(), which does unbound UDP
+                // connect()+getsockname() to ask the kernel: "which local
+                // IP would you use to reach RemoteAddr?"  Match that IP
+                // against the enumerated interfaces to find the one the
+                // kernel actually prefers.  If found, try it first as
+                // path 0 — this avoids the "WiFi before Tailscale"
+                // misordering that causes handshake stalls when the server
+                // is on a VPN overlay (100.x CGNAT) but WiFi is enumerated
+                // first.
+                int routePreferredIdx = -1;
+                for (int i = 0; i < ifCount; i++) {
+                    if (!interfaces[i].up) continue;
+                    if (interfaces[i].family != serverFamily) continue;
+                    // Compare only IP, ignore port (LocalAddr has RTSP port set)
+                    if (serverFamily == AF_INET) {
+                        struct sockaddr_in* la = (struct sockaddr_in*)&LocalAddr;
+                        struct sockaddr_in* ia = (struct sockaddr_in*)&interfaces[i].addr;
+                        if (la->sin_addr.s_addr == ia->sin_addr.s_addr) {
+                            routePreferredIdx = i;
+                            break;
+                        }
+                    } else if (serverFamily == AF_INET6) {
+                        struct sockaddr_in6* la = (struct sockaddr_in6*)&LocalAddr;
+                        struct sockaddr_in6* ia = (struct sockaddr_in6*)&interfaces[i].addr;
+                        if (memcmp(&la->sin6_addr, &ia->sin6_addr, 16) == 0) {
+                            routePreferredIdx = i;
+                            break;
+                        }
+                    }
+                }
+                Limelog("[VIPLE-MPQUIC] Route-preferred interface: %s\n",
+                        routePreferredIdx >= 0
+                            ? interfaces[routePreferredIdx].name
+                            : "(none, using first-match)");
+
+                // §Q-MP-REACH 2026-05-23 — Pick the interface that can
                 // actually reach the peer.  Skip virtual/unknown adapters
                 // (Hyper-V, UsbNcm, VMware) for initial path — they typically
                 // can't reach the LAN peer and waste probe time.
+                //
+                // Two-pass selection:
+                //   Pass 1: Try the route-preferred interface (§Q-RT-PREFER)
+                //   Pass 2: Fallback to first-match scan (original behavior)
                 int addedInitial = 0;
                 int initialIfIdx = -1;
-                for (int i = 0; i < ifCount; i++) {
-                    if (!interfaces[i].up)
-                        continue;
-                    if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK)
-                        continue;
-                    if (interfaces[i].type == LC_NETIF_TYPE_VIRTUAL ||
-                        interfaces[i].type == LC_NETIF_TYPE_UNKNOWN)
-                        continue;
-                    if (interfaces[i].family != serverFamily)
-                        continue;
-                    if (quicAddSubflow(interfaces[i].index,
-                                       interfaces[i].name,
-                                       interfaces[i].type,
-                                       &interfaces[i].addr,
-                                       interfaces[i].addrLen) >= 0) {
-                        initialIfIdx = i;
-                        addedInitial = 1;
-                        Limelog("[VIPLE-MPQUIC] Initial subflow bound on if %d, waiting for handshake\n",
-                                interfaces[i].index);
-                        break;
+
+                // Pass 1: Route-preferred interface
+                if (routePreferredIdx >= 0) {
+                    int rp = routePreferredIdx;
+                    if (interfaces[rp].up &&
+                        interfaces[rp].type != LC_NETIF_TYPE_LOOPBACK &&
+                        interfaces[rp].type != LC_NETIF_TYPE_VIRTUAL &&
+                        interfaces[rp].type != LC_NETIF_TYPE_UNKNOWN &&
+                        interfaces[rp].family == serverFamily) {
+                        if (quicAddSubflow(interfaces[rp].index,
+                                           interfaces[rp].name,
+                                           interfaces[rp].type,
+                                           &interfaces[rp].addr,
+                                           interfaces[rp].addrLen) >= 0) {
+                            initialIfIdx = rp;
+                            addedInitial = 1;
+                            Limelog("[VIPLE-MPQUIC] Initial subflow bound on "
+                                    "route-preferred if %d '%s', waiting for handshake\n",
+                                    interfaces[rp].index, interfaces[rp].name);
+                        } else {
+                            Limelog("[VIPLE-MPQUIC] Route-preferred if %d '%s' "
+                                    "failed subflow add; trying other interfaces\n",
+                                    interfaces[rp].index, interfaces[rp].name);
+                        }
                     }
-                    // Probe failed (no route to peer) — try next interface.
+                }
+
+                // Pass 2: Fallback — first-match scan (original behavior)
+                if (!addedInitial) {
+                    for (int i = 0; i < ifCount; i++) {
+                        if (i == routePreferredIdx)
+                            continue;  // already tried in Pass 1
+                        if (!interfaces[i].up)
+                            continue;
+                        if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK)
+                            continue;
+                        if (interfaces[i].type == LC_NETIF_TYPE_VIRTUAL ||
+                            interfaces[i].type == LC_NETIF_TYPE_UNKNOWN)
+                            continue;
+                        if (interfaces[i].family != serverFamily)
+                            continue;
+                        if (quicAddSubflow(interfaces[i].index,
+                                           interfaces[i].name,
+                                           interfaces[i].type,
+                                           &interfaces[i].addr,
+                                           interfaces[i].addrLen) >= 0) {
+                            initialIfIdx = i;
+                            addedInitial = 1;
+                            Limelog("[VIPLE-MPQUIC] Initial subflow bound on "
+                                    "if %d (first-match fallback), waiting for handshake\n",
+                                    interfaces[i].index);
+                            break;
+                        }
+                        // Probe failed (no route to peer) — try next interface.
+                    }
                 }
                 if (!addedInitial) {
                     Limelog("[VIPLE-MPQUIC] No usable local interface, falling back to UDP\n");

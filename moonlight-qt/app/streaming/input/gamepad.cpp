@@ -698,7 +698,11 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             type = LI_CTYPE_NINTENDO;
             break;
         default:
-            type = LI_CTYPE_UNKNOWN;
+            if (SDL_GameControllerGetVendor(state->controller) == 0x28DE) {
+                type = LI_CTYPE_STEAM;
+            } else {
+                type = LI_CTYPE_UNKNOWN;
+            }
             break;
         }
 

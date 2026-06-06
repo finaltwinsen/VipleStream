@@ -71,6 +71,9 @@ namespace platf::gamepad {
     } else if (metadata.type == LI_CTYPE_PS) {
       BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 5 controller (auto-selected by client-reported type)"sv;
       selectedGamepadType = DualSenseWired;
+    } else if (metadata.type == LI_CTYPE_STEAM) {
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " is Steam Controller (Xbox One fallback until native support)"sv;
+      selectedGamepadType = XboxOneWired;
     } else if (metadata.type == LI_CTYPE_NINTENDO) {
       BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Nintendo Pro controller (auto-selected by client-reported type)"sv;
       selectedGamepadType = SwitchProWired;

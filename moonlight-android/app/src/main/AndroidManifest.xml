@@ -110,6 +110,12 @@
                 <category android:name="tv.ouya.intent.category.APP" />
             </intent-filter>
         </activity>
+        <!-- VipleStream CLI streaming entry point (adb am start) -->
+        <activity
+            android:name=".CliStreamActivity"
+            android:noHistory="true"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
         <!-- Small hack to support launcher shortcuts without relaunching over and over again when the back button is pressed -->
         <activity
             android:name=".ShortcutTrampoline"

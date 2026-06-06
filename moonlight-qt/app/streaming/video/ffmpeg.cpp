@@ -1291,6 +1291,22 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         offset += ret;
     }
 
+    // VipleStream \u00A7ABR overlay
+    {
+        auto* session = Session::get();
+        if (session) {
+            int configuredBr = session->getConfiguredBitrateKbps();
+            bool abrEnabled = session->getAutoAdjustBitrate();
+            ret = snprintf(&output[offset], length - offset,
+                           u8"ABR: %s (\u8A2D\u5B9A %d Mbps)\n",
+                           abrEnabled ? u8"\u5DF2\u555F\u7528" : u8"\u672A\u555F\u7528",
+                           configuredBr / 1000);
+            if (ret >= 0 && ret < length - offset) {
+                offset += ret;
+            }
+        }
+    }
+
     // VipleStream FRUC overlay (v1.4.151 \u00A7R2-\u03B1-6 \u2014 always-on dual \u4E09\u614B).
     //   paused (Ctrl+Alt+Shift+F)  \u2192 \u5DF2\u66AB\u505C
     //   active + frucInterpolatedFrames>0 \u2192 \u5DF2\u555F\u7528, \u88DC\u5E40\u7D71\u8A08

@@ -31,6 +31,7 @@ public class StreamConfiguration {
     private boolean enableMpQuic;
     private int mpQuicScheduler;
     private int mpQuicPort = 48010;
+    private boolean autoAdjustBitrate = true;
 
     public static class Builder {
         private StreamConfiguration config = new StreamConfiguration();
@@ -137,6 +138,11 @@ public class StreamConfiguration {
             return this;
         }
 
+        public StreamConfiguration.Builder setAutoAdjustBitrate(boolean enable) {
+            config.autoAdjustBitrate = enable;
+            return this;
+        }
+
         public StreamConfiguration build() {
             return config;
         }
@@ -233,6 +239,10 @@ public class StreamConfiguration {
 
     public boolean getMpQuicEnabled() {
         return enableMpQuic;
+    }
+
+    public boolean getAutoAdjustBitrate() {
+        return autoAdjustBitrate;
     }
 
     public int getMpQuicScheduler() {

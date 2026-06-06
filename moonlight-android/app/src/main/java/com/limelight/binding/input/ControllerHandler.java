@@ -3071,6 +3071,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 case 0x057e: // Nintendo
                     type = MoonBridge.LI_CTYPE_NINTENDO;
                     break;
+                case 0x28de: // Valve (Steam Controller)
+                    type = MoonBridge.LI_CTYPE_STEAM;
+                    break;
                 default:
                     // Consult SDL's controller type list to see if it knows
                     type = MoonBridge.guessControllerType(inputDevice.getVendorId(), inputDevice.getProductId());

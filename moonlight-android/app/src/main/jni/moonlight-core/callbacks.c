@@ -469,7 +469,8 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
                                                            jint videoCapabilities,
                                                            jint colorSpace, jint colorRange,
                                                            jboolean enableMpQuic, jint mpQuicScheduler,
-                                                           jint mpQuicPort) {
+                                                           jint mpQuicPort,
+                                                           jboolean autoAdjustBitrate) {
     SERVER_INFORMATION serverInfo = {
             .address = (*env)->GetStringUTFChars(env, address, 0),
             .serverInfoAppVersion = (*env)->GetStringUTFChars(env, appVersion, 0),
@@ -490,6 +491,7 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
             .encryptionFlags = ENCFLG_AUDIO,
             .colorSpace = colorSpace,
             .colorRange = colorRange,
+            .autoAdjustBitrate = autoAdjustBitrate ? 1 : 0,
 #ifdef VIPLE_MPQUIC
             .useQuicTransport = enableMpQuic ? 1 : 0,
             .quicPort = mpQuicPort,

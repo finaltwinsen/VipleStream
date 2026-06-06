@@ -369,6 +369,10 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         if (IS_SUNSHINE()) {
             snprintf(payloadStr, sizeof(payloadStr), "%u", StreamConfig.bitrate);
             err |= addAttributeString(&optionHead, "x-ml-video.configuredBitrateKbps", payloadStr);
+
+            // VipleStream §ABR: tell server whether client wants adaptive bitrate
+            snprintf(payloadStr, sizeof(payloadStr), "%d", StreamConfig.autoAdjustBitrate);
+            err |= addAttributeString(&optionHead, "x-ml-video.autoAdjustBitrate", payloadStr);
         }
     }
     else {

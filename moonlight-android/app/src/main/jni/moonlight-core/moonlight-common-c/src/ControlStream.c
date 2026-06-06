@@ -1694,34 +1694,58 @@ static void lossStatsThreadFunc(void* context) {
                 PQUEUED_FRAME_FEC_STATUS queuedFrameStatus;
 
 #ifdef VIPLE_MPQUIC
-                // §Q-ENET-RECONNECT v1.5.183: controlReceiveThread 正在等待
-                // Ethernet 恢復 → peer/client 即將被銷毀，lossStatsThread
-                // 繼續送 FEC/ping 會 NULL crash。提前退出。
-                if (enetReconnectPending) {
+                // §Q-ENET-RECONNECT v1.5.183: peer/client 即將被銷毀。
+                // 但如果 QUIC 還活著，改走 QUIC 送 FEC status，不退出。
+                if (enetReconnectPending && !quicIsConnected()) {
                     Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: lossStats thread "
-                            "exiting (reconnect pending)\n");
+                            "exiting (reconnect pending, no QUIC)\n");
                     return;
                 }
 #endif
 
-                // Sunshine should always use ENet for control messages
-                LC_ASSERT(peer != NULL);
-
+                // §Q-REMOTE Fix R.2: 決定送 FEC status 的方式
+                // ENet 可用就走 ENet（低延遲）；ENet 不通改走 QUIC stream #0。
                 while (LbqPollQueueElement(&frameFecStatusQueue, (void**)&queuedFrameStatus) == LBQ_SUCCESS) {
-                    // Send as an unreliable packet, since it's not a critical message
-                    if (!sendMessageEnet(SS_FRAME_FEC_PTYPE,
-                                         sizeof(queuedFrameStatus->fecStatus),
-                                         &queuedFrameStatus->fecStatus,
-                                         CTRL_CHANNEL_GENERIC,
-                                         ENET_PACKET_FLAG_UNSEQUENCED,
-                                         LbqGetItemCount(&frameFecStatusQueue) > 0)) {
+                    int sent = 0;
+#ifdef VIPLE_MPQUIC
+                    if (enetReconnectPending || !peer) {
+                        // ENet 確定不通 → 直接走 QUIC，不嘗試 ENet
+                        if (quicIsConnected()) {
+                            unsigned char buf[1 + sizeof(queuedFrameStatus->fecStatus)];
+                            buf[0] = 0x55; // 'U' = FEC status marker
+                            memcpy(buf + 1, &queuedFrameStatus->fecStatus,
+                                   sizeof(queuedFrameStatus->fecStatus));
+                            sent = (quicSendStream(buf, sizeof(buf)) == 0) ? 1 : 0;
+                            if (sent) {
+                                static int quicFecLogCount = 0;
+                                if (quicFecLogCount < 3) {
+                                    Limelog("[VIPLE-MPQUIC] §Q-REMOTE Fix R.2: FEC "
+                                            "status sent via QUIC stream #0 "
+                                            "(count=%d)\n", ++quicFecLogCount);
+                                }
+                            }
+                        }
+                    } else
+#endif
+                    {
+                        // ENet path (original)
+                        sent = sendMessageEnet(SS_FRAME_FEC_PTYPE,
+                                     sizeof(queuedFrameStatus->fecStatus),
+                                     &queuedFrameStatus->fecStatus,
+                                     CTRL_CHANNEL_GENERIC,
+                                     ENET_PACKET_FLAG_UNSEQUENCED,
+                                     LbqGetItemCount(&frameFecStatusQueue) > 0) ? 1 : 0;
+                    }
+
+                    if (!sent) {
                         Limelog("Loss Stats: Sending frame FEC status message failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
+                        if (quicIsConnected()) {
+                            // QUIC 還活著 → 下輪再試，不終止 thread
+                            free(queuedFrameStatus);
+                            break;
+                        }
                         if (quicIsFailoverActive()) {
-                            Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: FEC stats "
-                                    "send failed during QUIC failover — "
-                                    "stopping lossStats thread (suppressing "
-                                    "connectionTerminated)\n");
                             free(queuedFrameStatus);
                             return;
                         }
@@ -1735,29 +1759,46 @@ static void lossStatsThreadFunc(void* context) {
                 }
             }
 
-            // Send the message (and don't expect a response)
-            //
-            // NB: We send this periodic message as reliable to ensure the RTT is recomputed
-            // regularly. This only happens when an ACK is received to a reliable packet.
-            // Since the other traffic on this channel is unsequenced, it doesn't really
-            // cause any negative HOL blocking side-effects.
-            if (!sendMessageAndForget(0x0200,
-                                      sizeof(periodicPingPayload),
-                                      periodicPingPayload,
-                                      CTRL_CHANNEL_GENERIC,
-                                      ENET_PACKET_FLAG_RELIABLE,
-                                      false)) {
-                Limelog("Loss Stats: Transaction failed: %d\n", (int)LastSocketError());
+            // §Q-REMOTE Fix R.2: periodic ping — 同樣加 QUIC fallback
+            {
+                int pingSent = 0;
 #ifdef VIPLE_MPQUIC
-                if (quicIsFailoverActive()) {
-                    Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: periodic ping "
-                            "failed during QUIC failover — stopping "
-                            "lossStats thread (suppressing connectionTerminated)\n");
-                    return;
-                }
+                if (enetReconnectPending || !peer) {
+                    if (quicIsConnected()) {
+                        static const unsigned char pingMarker = 0x50; // 'P'
+                        pingSent = (quicSendStream(&pingMarker, 1) == 0) ? 1 : 0;
+                        static int quicPingLogCount = 0;
+                        if (pingSent && quicPingLogCount < 3) {
+                            Limelog("[VIPLE-MPQUIC] §Q-REMOTE Fix R.2: periodic "
+                                    "ping sent via QUIC stream #0 "
+                                    "(count=%d)\n", ++quicPingLogCount);
+                        }
+                    }
+                } else
 #endif
-                ListenerCallbacks.connectionTerminated(LastSocketFail());
-                return;
+                {
+                    pingSent = sendMessageAndForget(0x0200,
+                                          sizeof(periodicPingPayload),
+                                          periodicPingPayload,
+                                          CTRL_CHANNEL_GENERIC,
+                                          ENET_PACKET_FLAG_RELIABLE,
+                                          false) ? 1 : 0;
+                }
+
+                if (!pingSent) {
+                    Limelog("Loss Stats: Transaction failed: %d\n", (int)LastSocketError());
+#ifdef VIPLE_MPQUIC
+                    if (quicIsConnected()) {
+                        // QUIC still alive — continue loop, don't terminate
+                    } else if (quicIsFailoverActive()) {
+                        return;
+                    } else
+#endif
+                    {
+                        ListenerCallbacks.connectionTerminated(LastSocketFail());
+                        return;
+                    }
+                }
             }
 
             // Wait a bit

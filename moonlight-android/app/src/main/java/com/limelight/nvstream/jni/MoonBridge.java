@@ -108,6 +108,7 @@ public class MoonBridge {
     public static final byte LI_CTYPE_XBOX     = 0x01;
     public static final byte LI_CTYPE_PS       = 0x02;
     public static final byte LI_CTYPE_NINTENDO = 0x03;
+    public static final byte LI_CTYPE_STEAM    = 0x04;
 
     public static final short LI_CCAP_ANALOG_TRIGGERS = 0x01;
     public static final short LI_CCAP_RUMBLE          = 0x02;
@@ -370,7 +371,8 @@ public class MoonBridge {
                                               int videoCapabilities,
                                               int colorSpace, int colorRange,
                                               boolean enableMpQuic, int mpQuicScheduler,
-                                              int mpQuicPort);
+                                              int mpQuicPort,
+                                              boolean autoAdjustBitrate);
 
     // VipleStream: client-side NAT hole punch. Must be called BEFORE startConnection()
     // so LocalControlPort is set when ENet binds. Returns 0 on success, negative on failure.

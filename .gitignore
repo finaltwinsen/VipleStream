@@ -170,6 +170,9 @@ tools/android_vulkan_probe/vk_probe2
 CLAUDE.md
 AGENTS.md
 .cursorrules
+# .mcp.json carries the CoworkMCP hub URL + Bearer token (per-machine secret) —
+# never commit. Each machine drops its own (.195 → 127.0.0.1, Linux → Tailscale IP).
+.mcp.json
 
 # ── Per-release scratch notes ──
 # release-notes.md is generated per-release and uploaded via gh release
