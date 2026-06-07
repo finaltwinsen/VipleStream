@@ -66,6 +66,23 @@ void ScHidPassthrough::start() {
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
         "[SC-HID] Opened %d Steam Controller vendor interface(s)", m_devCount);
 
+    // §SC-HID Phase 2C 暖機：向伺服器端主動送一次 feature 0x01 快取，讓 server
+    // 在 Steam 第一次查 GetControllerInfo 之前就有真實 SC 的 firmware 資料。
+    // 即使實體 SC 不支援 cold GET_FEATURE(0x01) 這也是 best-effort — worst case
+    // 是送一包 zeros，proxy 的正常 SET+GET 輪回仍能在數百 ms 內完成真正填充。
+    for (int i = 0; i < m_devCount; i++) {
+        uint8_t buf[SC_HID_WIRE_BYTES] = {};
+        buf[0] = 0x01;  // feature report id
+        int n = SDL_hid_get_feature_report(m_devs[i], buf, sizeof(buf));
+        if (n > 0) {
+            if (n < SC_HID_WIRE_BYTES) memset(buf + n, 0, SC_HID_WIRE_BYTES - n);
+            LiSendScHidFeatureReport(0 /*seq*/, 0x01 /*reportId*/, buf, SC_HID_WIRE_BYTES);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[SC-HID] Proactive cache prime sent (dev=%d, %d bytes)", i, n);
+            break;
+        }
+    }
+
     // The gen-2 Steam Controller needs NO enable command -- it streams its
     // reports by default. The earlier difficulty was reading the wrong (idle
     // Puck slot) interface; opening them all and polling each (above/below)

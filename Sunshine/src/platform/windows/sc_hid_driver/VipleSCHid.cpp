@@ -283,6 +283,88 @@ static void tryInstallDriver(void) {
     }
 }
 
+// Throttle timestamp for VipleSCHidOpen (file-scope so VipleSCHidResetOpenThrottle can reset it).
+static ULONGLONG g_openLastAttempt = 0;
+
+void VipleSCHidResetOpenThrottle(void) {
+    g_openLastAttempt = 0;
+}
+
+// Opens a direct handle bypassing the per-session throttle.
+// Use only for the dedicated polling thread that manages its own handle lifecycle.
+VIPLE_SCHID_HANDLE VipleSCHidOpenDirect(void) {
+    HANDLE h = openHidByVidPid(SC_VID, SC_PID);
+    if (h == INVALID_HANDLE_VALUE) return nullptr;
+    return new VipleSCHidCtx{h, nullptr, nullptr};
+}
+
+// Force Steam to re-enumerate VipleSCHid by disabling and re-enabling its
+// root-enumerated PDO. This makes Steam re-run GetControllerInfo handshake
+// with a newly-connected proxy already in place.
+// Returns 1 on success, 0 if the device could not be found or cycled.
+int VipleSCHidForceReconnect(void) {
+    GUID hidGuid;
+    HidD_GetHidGuid(&hidGuid);
+
+    HDEVINFO devInfo = SetupDiGetClassDevs(&hidGuid, nullptr, nullptr,
+                                            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (devInfo == INVALID_HANDLE_VALUE) return 0;
+
+    DEVINST targetInst = 0;
+    bool found = false;
+
+    for (DWORD i = 0; !found; ++i) {
+        SP_DEVICE_INTERFACE_DATA ifaceData = {};
+        ifaceData.cbSize = sizeof(ifaceData);
+        if (!SetupDiEnumDeviceInterfaces(devInfo, nullptr, &hidGuid, i, &ifaceData)) break;
+
+        DWORD requiredSize = 0;
+        SetupDiGetDeviceInterfaceDetailW(devInfo, &ifaceData, nullptr, 0, &requiredSize, nullptr);
+        if (!requiredSize) continue;
+
+        auto* detail = static_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(
+            HeapAlloc(GetProcessHeap(), 0, requiredSize));
+        if (!detail) continue;
+        detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+
+        SP_DEVINFO_DATA devInfoData = {};
+        devInfoData.cbSize = sizeof(devInfoData);
+        if (SetupDiGetDeviceInterfaceDetailW(devInfo, &ifaceData, detail, requiredSize, nullptr, &devInfoData)) {
+            HANDLE h0 = CreateFileW(detail->DevicePath, 0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (h0 != INVALID_HANDLE_VALUE) {
+                HIDD_ATTRIBUTES attrs = {}; attrs.Size = sizeof(attrs);
+                if (HidD_GetAttributes(h0, &attrs) &&
+                    attrs.VendorID == SC_VID && attrs.ProductID == SC_PID) {
+                    targetInst = devInfoData.DevInst;
+                    found = true;
+                }
+                CloseHandle(h0);
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, detail);
+    }
+    SetupDiDestroyDeviceInfoList(devInfo);
+
+    if (!found) return 0;
+
+    // Navigate up to the root-enumerated PDO (parent of the HIDClass PDO).
+    DEVINST parentInst = 0;
+    if (CM_Get_Parent(&parentInst, targetInst, 0) != CR_SUCCESS)
+        parentInst = targetInst;  // fallback: cycle the HIDClass PDO itself
+
+    // Cycle the device: Steam receives DeviceRemoved + DeviceAdded notifications
+    // and re-runs GetControllerInfo with our proxy now active.
+    CM_Disable_DevNode(parentInst, 0);
+    Sleep(150);
+    CM_Enable_DevNode(parentInst, 0);
+    Sleep(300);
+
+    // Allow VipleSCHidOpen to proceed immediately after re-enumeration.
+    VipleSCHidResetOpenThrottle();
+    return 1;
+}
+
 VIPLE_SCHID_HANDLE VipleSCHidOpen(void) {
     // The caller lazy-opens on EVERY incoming report while the device stays
     // unopenable — without a throttle that is a full enumeration + probe storm
@@ -290,13 +372,12 @@ VIPLE_SCHID_HANDLE VipleSCHidOpen(void) {
     // Sleep(2000) per report, which is where the "retry every 2s" cadence in
     // the logs came from). Real attempts at most every 5 s; throttled calls
     // leave the diag empty so the caller knows not to log them.
-    static ULONGLONG lastAttempt = 0;
     ULONGLONG now = GetTickCount64();
-    if (lastAttempt != 0 && now - lastAttempt < 5000) {
+    if (g_openLastAttempt != 0 && now - g_openLastAttempt < 5000) {
         g_diag[0] = '\0';
         return nullptr;
     }
-    lastAttempt = now;
+    g_openLastAttempt = now;
 
     HANDLE hDev = openHidByVidPid(SC_VID, SC_PID);
     if (hDev == INVALID_HANDLE_VALUE) {

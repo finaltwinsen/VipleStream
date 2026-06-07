@@ -84,6 +84,20 @@ void VipleSCHidClose(VIPLE_SCHID_HANDLE h);
 // attempt (enum count, per-Valve-interface CreateFileW error, etc.) — for logs.
 const char* VipleSCHidLastDiag(void);
 
+// Reset the 5-second open throttle so the next VipleSCHidOpen() call runs
+// immediately. Call after a forced device reconnect.
+void VipleSCHidResetOpenThrottle(void);
+
+// Open a direct handle bypassing the per-session throttle.
+// Intended for the dedicated polling thread that manages its own handle.
+VIPLE_SCHID_HANDLE VipleSCHidOpenDirect(void);
+
+// Disable + re-enable the VipleSCHid root PDO via CM API so that Steam
+// receives a DeviceRemoved + DeviceAdded event and re-runs GetControllerInfo.
+// Should be called ~500 ms after session start, after the feature proxy is
+// active. Returns 1 on success, 0 if the device node was not found.
+int VipleSCHidForceReconnect(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -22,6 +22,7 @@ extern "C" {
 }
 
 // standard includes
+#include <atomic>
 #include <bitset>
 #include <chrono>
 #include <cmath>
@@ -228,7 +229,18 @@ namespace input {
     // if the UMDF2 driver is not installed or device enumeration failed)
     VIPLE_SCHID_HANDLE sc_hid_handle = nullptr;
 
+    // Dedicated polling thread: forwards Steam feature events every 20 ms
+    // independently of SC input packet flow, and triggers a one-shot device
+    // reconnect 500 ms after session start so Steam re-runs GetControllerInfo
+    // with the proxy already active.
+    std::thread sc_hid_poll_thread;
+    std::atomic<bool> sc_hid_thread_active{false};
+
     ~input_t() {
+      // Stop polling thread before closing the handle it may be using.
+      sc_hid_thread_active.store(false, std::memory_order_relaxed);
+      if (sc_hid_poll_thread.joinable()) sc_hid_poll_thread.join();
+
       if (sc_hid_handle) {
         BOOST_LOG(info) << "[SC-HID] Session ended, final write stats: " << VipleSCHidWriteDiag();
         VipleSCHidClose(sc_hid_handle);
@@ -1198,10 +1210,71 @@ namespace input {
       }
       input->feedback_queue->raise(
           platf::gamepad_feedback_msg_t::make_sc_hid_feature_request(reportId, op, seq, query, (uint8_t)qlen));
-      BOOST_LOG(debug) << "[SC-HID] Steam feature op forwarded to client: op=" << (unsigned)op
-                       << " reportId=0x" << util::hex(reportId).to_string_view()
-                       << " seq=" << (unsigned)seq << " qlen=" << qlen;
+      BOOST_LOG(info) << "[SC-HID] Steam feature op → client: op=" << (unsigned)op
+                      << " reportId=0x" << util::hex(reportId).to_string_view()
+                      << " seq=" << (unsigned)seq << " qlen=" << qlen;
     }
+  }
+
+  // §SC-HID 專用輪詢執行緒：每 20 ms 用獨立 handle 輪詢 driver feature 事件，
+  // 不依賴 input 封包流量（解決 Steam 在第一個 input 封包到達前就查 GetControllerInfo 的時序問題）。
+  // 啟動 500 ms 後觸發一次 device reconnect，讓 Steam 在 proxy 就緒後重跑握手。
+  static void sc_hid_poll_loop(std::weak_ptr<input_t> weak_inp) {
+    VIPLE_SCHID_HANDLE poll_h = VipleSCHidOpenDirect();
+    if (poll_h) {
+      BOOST_LOG(info) << "[SC-HID] Polling thread started, handle open";
+    }
+
+    bool reconnect_done = false;
+    int iter = 0;
+
+    while (true) {
+      auto inp = weak_inp.lock();
+      if (!inp || !inp->sc_hid_thread_active.load(std::memory_order_relaxed)) break;
+
+      // Reopen if handle was closed by reconnect or device removal.
+      if (!poll_h) {
+        poll_h = VipleSCHidOpenDirect();
+        if (poll_h) {
+          BOOST_LOG(info) << "[SC-HID] Polling thread handle reopened: " << VipleSCHidLastDiag();
+        }
+      }
+
+      // Forward any pending Steam feature events.
+      if (poll_h) {
+        uint8_t op = 0, reportId = 0, seq = 0, query[64] = {};
+        int qlen = 0;
+        for (int i = 0; i < 4; i++) {
+          if (!VipleSCHidPollNotify(poll_h, &op, &reportId, &seq, query, &qlen)) break;
+          inp->feedback_queue->raise(
+              platf::gamepad_feedback_msg_t::make_sc_hid_feature_request(reportId, op, seq, query, (uint8_t)qlen));
+          BOOST_LOG(info) << "[SC-HID] Poll-thread: Steam feature → client: op=" << (unsigned)op
+                          << " reportId=0x" << util::hex(reportId).to_string_view()
+                          << " seq=" << (unsigned)seq;
+        }
+      }
+
+      // One-shot reconnect at t ≈ 500 ms: forces Steam to re-enumerate the
+      // virtual device and re-run GetControllerInfo after the proxy is active.
+      if (!reconnect_done && ++iter >= 25) {
+        reconnect_done = true;
+        BOOST_LOG(info) << "[SC-HID] Triggering device reconnect to reset Steam GetControllerInfo";
+        if (poll_h) { VipleSCHidClose(poll_h); poll_h = nullptr; }
+        int rc = VipleSCHidForceReconnect();
+        BOOST_LOG(info) << "[SC-HID] Device reconnect result=" << rc;
+        if (rc) {
+          poll_h = VipleSCHidOpenDirect();
+          if (poll_h) {
+            BOOST_LOG(info) << "[SC-HID] Poll handle reopened post-reconnect: " << VipleSCHidLastDiag();
+          }
+        }
+      }
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    if (poll_h) VipleSCHidClose(poll_h);
+    BOOST_LOG(info) << "[SC-HID] Polling thread exited";
   }
 
   void passthrough_sc_hid_input(std::shared_ptr<input_t> &input, PSS_SC_HID_INPUT_PACKET packet) {
@@ -1220,6 +1293,13 @@ namespace input {
       // Include the probe trail on success too — it records which strategy
       // (setupdi vs cfgmgr fallback) and which access mode finally worked.
       BOOST_LOG(info) << "[SC-HID] Virtual Steam Controller device opened: " << VipleSCHidLastDiag();
+
+      // Start the dedicated polling thread (one per session).
+      if (!input->sc_hid_thread_active.load()) {
+        input->sc_hid_thread_active.store(true);
+        std::weak_ptr<input_t> weak = input;
+        input->sc_hid_poll_thread = std::thread([weak]() { sc_hid_poll_loop(std::move(weak)); });
+      }
     }
 
     // 轉送 Steam 的待辦 feature 事件（透明 proxy 的 driver→client 方向）。
@@ -1263,9 +1343,9 @@ namespace input {
       return;  // 尚未開啟虛擬裝置（不該發生，feature 回應總在 input 之後）
     }
     int dr = VipleSCHidDeliverResponse(input->sc_hid_handle, packet->seq, packet->data, 64);
-    BOOST_LOG(debug) << "[SC-HID] Feature response delivered: seq=" << (unsigned)packet->seq
-                     << " reportId=0x" << util::hex(packet->reportId).to_string_view()
-                     << " result=" << dr;
+    BOOST_LOG(info) << "[SC-HID] Feature response delivered: seq=" << (unsigned)packet->seq
+                    << " reportId=0x" << util::hex(packet->reportId).to_string_view()
+                    << " result=" << dr;
     // 順手再 poll 一次 notify（Steam 可能在等回應後緊接著下一個 op）。
     poll_sc_hid_notify(input);
   }
