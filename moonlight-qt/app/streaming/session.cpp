@@ -302,12 +302,13 @@ void Session::clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlag
     SDL_PushEvent(&setControllerLEDEvent);
 }
 
-void Session::clScHidFeatureRequest(uint8_t reportId, uint8_t reportType) {
-    // §SC-HID Phase 2: host wants a feature report from the real SC.
-    // forwardFeatureRequest calls SDL_hid_get_feature_report and sends
-    // the result back via LiSendScHidInputReport (non-0x45 → VipleSCHidSetFeature).
+void Session::clScHidFeatureRequest(uint8_t reportId, uint8_t op, uint8_t seq,
+                                    const uint8_t* query, uint8_t queryLen) {
+    // §SC-HID Phase 2C: host relays a Steam feature op to the real SC (transparent
+    // proxy). forwardFeatureRequest replays it and returns the SC's response via
+    // LiSendScHidFeatureReport (0x55000008), tagged with the same seq.
     if (s_ActiveSession != nullptr) {
-        s_ActiveSession->m_ScHid.forwardFeatureRequest(reportId, reportType);
+        s_ActiveSession->m_ScHid.forwardFeatureRequest(reportId, op, seq, query, queryLen);
     }
 }
 

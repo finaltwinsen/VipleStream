@@ -221,11 +221,15 @@ namespace stream {
     std::uint8_t right[DS_EFFECT_PAYLOAD_SIZE];
   };
 
+  // §SC-HID Phase 2C：透明 feature proxy 請求（server→client，0x5505）。
+  // 帶上 Steam 實際送出的 query bytes + seq，讓 client 原樣轉發給實體 SC。
   struct control_sc_hid_feature_req_t {
     control_header_v2 header;
-    uint8_t reportId;
-    uint8_t reportType;  // 1=GET_FEATURE(read), 0=SET/output
-    uint8_t padding[2];
+    uint8_t reportId;     // HID report id Steam targeted (0x01)
+    uint8_t op;           // 1=GET (read real SC), 2=SET (forward query to real SC)
+    uint8_t seq;          // round-trip cookie
+    uint8_t queryLen;     // valid bytes in query (op=SET)
+    uint8_t query[64];    // bytes Steam sent via SET_FEATURE
   };
 
   struct control_hdr_mode_t {
@@ -1025,11 +1029,15 @@ namespace stream {
       plaintext.header.type = packetTypes[IDX_SC_HID_FEATURE_REQ];
       plaintext.header.payloadLength = sizeof(plaintext) - sizeof(control_header_v2);
       plaintext.reportId = msg.data.sc_hid_feature.reportId;
-      plaintext.reportType = msg.data.sc_hid_feature.reportType;
+      plaintext.op = msg.data.sc_hid_feature.op;
+      plaintext.seq = msg.data.sc_hid_feature.seq;
+      plaintext.queryLen = msg.data.sc_hid_feature.queryLen;
+      for (int i = 0; i < 64; i++) plaintext.query[i] = msg.data.sc_hid_feature.query[i];
 
-      BOOST_LOG(info) << "[SC-HID] Sending feature request to client: reportId=0x"sv
+      BOOST_LOG(debug) << "[SC-HID] Sending feature request to client: reportId=0x"sv
                       << util::hex(msg.data.sc_hid_feature.reportId).to_string_view()
-                      << " type="sv << (unsigned)msg.data.sc_hid_feature.reportType;
+                      << " op="sv << (unsigned)msg.data.sc_hid_feature.op
+                      << " seq="sv << (unsigned)msg.data.sc_hid_feature.seq;
 
       std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
         encrypted_payload;

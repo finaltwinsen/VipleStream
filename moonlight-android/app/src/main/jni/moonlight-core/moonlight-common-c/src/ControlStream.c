@@ -90,7 +90,10 @@ typedef struct _QUEUED_ASYNC_CALLBACK {
         } dsAdaptiveTrigger;
         struct {
             uint8_t reportId;
-            uint8_t reportType;
+            uint8_t op;        // §SC-HID Phase 2C: 1=GET 2=SET
+            uint8_t seq;
+            uint8_t queryLen;
+            uint8_t query[64];
         } scHidFeatureRequest;  // §SC-HID feature tunnel
     } data;
     LINKED_BLOCKING_QUEUE_ENTRY entry;
@@ -1157,7 +1160,10 @@ static void asyncCallbackThreadFunc(void* context) {
         case IDX_SC_HID_FEATURE_REQ:
             if (ListenerCallbacks.scHidFeatureRequest != NULL) {
                 ListenerCallbacks.scHidFeatureRequest(queuedCb->data.scHidFeatureRequest.reportId,
-                                                      queuedCb->data.scHidFeatureRequest.reportType);
+                                                      queuedCb->data.scHidFeatureRequest.op,
+                                                      queuedCb->data.scHidFeatureRequest.seq,
+                                                      queuedCb->data.scHidFeatureRequest.query,
+                                                      queuedCb->data.scHidFeatureRequest.queryLen);
             }
             break;
         default:
@@ -1241,7 +1247,10 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
     else if (packetTypes[IDX_SC_HID_FEATURE_REQ] != -1 &&
              ctlHdr->type == packetTypes[IDX_SC_HID_FEATURE_REQ]) {
         BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.reportId);
-        BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.reportType);
+        BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.op);
+        BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.seq);
+        BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.queryLen);
+        BbGetBytes(&bb, queuedCb->data.scHidFeatureRequest.query, 64);
         queuedCb->typeIndex = IDX_SC_HID_FEATURE_REQ;
     }
     else {

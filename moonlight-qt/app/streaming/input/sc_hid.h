@@ -26,11 +26,14 @@ public:
 
     bool isActive() const;
 
-    // §SC-HID Phase 2: Forward a feature report request from the host.
-    // Calls SDL_hid_get_feature_report on the real SC and sends the result
-    // back via LiSendScHidInputReport so the host can prime the virtual
-    // device's GET_FEATURE echo buffer (reportType: 1=GET 0=output).
-    void forwardFeatureRequest(uint8_t reportId, uint8_t reportType);
+    // §SC-HID Phase 2C: transparent feature proxy. The host relays a Steam
+    // feature op against the real SC:
+    //   op==2 (SET): SDL_hid_send_feature_report(query) then read back
+    //   op==1 (GET): SDL_hid_get_feature_report(reportId)
+    // The real SC's response is returned to the host via LiSendScHidFeatureReport
+    // tagged with the same seq.
+    void forwardFeatureRequest(uint8_t reportId, uint8_t op, uint8_t seq,
+                               const uint8_t* query, uint8_t queryLen);
 
 private:
     static int SDLCALL readThreadFunc(void* ctx);

@@ -497,6 +497,8 @@ CenteredGridView {
             anchors.leftMargin: 10
             anchors.rightMargin: 10
             anchors.bottom: parent.bottom
+            // 底部留 22px 給 serverVersion 小字（isVipleStreamPeer 時才顯示）
+            anchors.bottomMargin: model.isVipleStreamPeer ? 22 : 4
             // Bold: cover-story display type. Safe: editorial heading.
             font.pointSize: pcGrid.bold ? 26 : 18
             font.family: "Space Grotesk"
@@ -506,6 +508,26 @@ CenteredGridView {
             horizontalAlignment: Text.AlignLeft
             verticalAlignment: Text.AlignTop
             wrapMode: Text.Wrap
+            elide: Text.ElideRight
+        }
+
+        // VipleStream server build version（只在 VipleStream-Server 主機顯示）
+        Text {
+            id: pcServerVersionText
+            visible: model.isVipleStreamPeer && model.serverVersion !== ""
+            text: visible ? ("v" + model.serverVersion) : ""
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: 10
+            anchors.rightMargin: 10
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 7
+
+            font.family: "IBM Plex Mono"
+            font.pointSize: 9
+            color: "#7A8A5A"    // muted olive，呼應 vs 配色
+            horizontalAlignment: Text.AlignLeft
             elide: Text.ElideRight
         }
 

@@ -196,12 +196,14 @@ typedef struct _SS_CONTROLLER_BATTERY_PACKET {
 } SS_CONTROLLER_BATTERY_PACKET, *PSS_CONTROLLER_BATTERY_PACKET;
 
 // §SC-HID: raw Steam Controller HID passthrough packets
+// §SC-HID Phase 2C: 0x55000008 now carries the client→server feature RESPONSE
+// (the real SC's GET_FEATURE result) for the transparent feature proxy.
 #define SS_SC_HID_FEATURE_MAGIC 0x55000008
 #define SS_SC_HID_REPORT_MAX 64
 typedef struct _SS_SC_HID_FEATURE_PACKET {
     NV_INPUT_HEADER header;
-    uint8_t reportId;
-    uint8_t reportType; // 0=output 1=feature
+    uint8_t seq;        // echoes the request seq (round-trip cookie)
+    uint8_t reportId;   // HID report id this response is for
     uint8_t zero[2];
     uint8_t data[SS_SC_HID_REPORT_MAX];
 } SS_SC_HID_FEATURE_PACKET, *PSS_SC_HID_FEATURE_PACKET;

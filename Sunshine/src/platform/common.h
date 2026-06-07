@@ -186,17 +186,30 @@ namespace platf {
         std::array<uint8_t, 10> right;
       } adaptive_triggers;
 
+      // §SC-HID Phase 2C：透明 feature proxy 的「Steam 待辦事件」轉發到 client。
       struct {
-        uint8_t reportId;
-        uint8_t reportType;  // 1 = GET_FEATURE (probe real SC), 0 = SET/write
+        uint8_t reportId;   // HID report id Steam targeted (0x01)
+        uint8_t op;         // 1 = GET (client re-reads real SC), 2 = SET (forward query to SC)
+        uint8_t seq;        // round-trip cookie
+        uint8_t queryLen;   // valid bytes in query (op=SET)
+        uint8_t query[64];  // bytes Steam sent via SET_FEATURE
       } sc_hid_feature;
     } data;
 
-    static gamepad_feedback_msg_t make_sc_hid_feature_request(uint8_t reportId, uint8_t reportType) {
+    static gamepad_feedback_msg_t make_sc_hid_feature_request(uint8_t reportId, uint8_t op,
+                                                              uint8_t seq, const uint8_t *query,
+                                                              uint8_t queryLen) {
       gamepad_feedback_msg_t msg;
       msg.type = gamepad_feedback_e::sc_hid_feature_request;
       msg.id = 0;
-      msg.data.sc_hid_feature = {reportId, reportType};
+      msg.data.sc_hid_feature.reportId = reportId;
+      msg.data.sc_hid_feature.op = op;
+      msg.data.sc_hid_feature.seq = seq;
+      uint8_t n = queryLen > 64 ? 64 : queryLen;
+      msg.data.sc_hid_feature.queryLen = n;
+      for (uint8_t i = 0; i < 64; i++) {
+        msg.data.sc_hid_feature.query[i] = (query && i < n) ? query[i] : 0;
+      }
       return msg;
     }
   };

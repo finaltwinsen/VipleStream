@@ -243,7 +243,8 @@ private:
     void clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlags, uint8_t typeLeft, uint8_t typeRight, uint8_t *left, uint8_t *right);
 
     static
-    void clScHidFeatureRequest(uint8_t reportId, uint8_t reportType);  // §SC-HID
+    void clScHidFeatureRequest(uint8_t reportId, uint8_t op, uint8_t seq,
+                               const uint8_t* query, uint8_t queryLen);  // §SC-HID
 
     static
     int arInit(int audioConfiguration,

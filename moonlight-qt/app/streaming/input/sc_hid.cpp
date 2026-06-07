@@ -123,45 +123,59 @@ int SDLCALL ScHidPassthrough::readThreadFunc(void* ctx) {
     return 0;
 }
 
-void ScHidPassthrough::forwardFeatureRequest(uint8_t reportId, uint8_t reportType) {
+void ScHidPassthrough::forwardFeatureRequest(uint8_t reportId, uint8_t op, uint8_t seq,
+                                             const uint8_t* query, uint8_t queryLen) {
     if (m_devCount == 0) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
             "[SC-HID] forwardFeatureRequest: no device open");
         return;
     }
 
+    // §SC-HID Phase 2C — transparent proxy. We replay EXACTLY what Steam did on
+    // the host against the real SC, so any GetControllerInfo query sequence works
+    // without hard-coding command bytes:
+    //   op==2 (SET): write Steam's query to the SC, then read its feature report.
+    //   op==1 (GET): just read the SC's current feature report.
+    // The first interface that yields a response wins; its bytes go back tagged
+    // with the same seq via the dedicated feature channel (0x55000008).
     uint8_t buf[SC_HID_WIRE_BYTES];
 
     for (int i = 0; i < m_devCount; i++) {
+        if (op == 2 /* SET */) {
+            uint8_t qbuf[SC_HID_WIRE_BYTES] = {};
+            qbuf[0] = reportId;
+            int qn = queryLen;
+            if (qn > SC_HID_WIRE_BYTES) qn = SC_HID_WIRE_BYTES;
+            if (query && qn > 0) memcpy(qbuf, query, qn);
+            qbuf[0] = reportId;   // ensure report id is correct in byte 0
+            SDL_hid_send_feature_report(m_devs[i], qbuf, sizeof(qbuf));
+            SDL_Delay(20);        // let the SC process the query before reading back
+        }
+
         memset(buf, 0, sizeof(buf));
         buf[0] = reportId;
-
-        int n = -1;
-        if (reportType == 1) {
-            // GET_FEATURE: read feature report from real SC
-            n = SDL_hid_get_feature_report(m_devs[i], buf, sizeof(buf));
-        } else {
-            // output report (e.g. haptics): nothing to proxy back
-            SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
-                "[SC-HID] forwardFeatureRequest: output type ignored (id=0x%02x)", reportId);
-            return;
-        }
+        int n = SDL_hid_get_feature_report(m_devs[i], buf, sizeof(buf));
 
         if (n > 0) {
             if (n < SC_HID_WIRE_BYTES) {
                 memset(buf + n, 0, SC_HID_WIRE_BYTES - n);
             }
-            // buf[0] == reportId (non-0x45) → server routes to VipleSCHidSetFeature
-            LiSendScHidInputReport(buf, SC_HID_WIRE_BYTES);
+            LiSendScHidFeatureReport(seq, reportId, buf, SC_HID_WIRE_BYTES);
             SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
-                "[SC-HID] Feature report 0x%02x forwarded (%d bytes)", reportId, n);
+                "[SC-HID] Feature response forwarded: id=0x%02x op=%u seq=%u (%d bytes)",
+                reportId, op, seq, n);
             return;  // first successful response is enough
         }
     }
 
+    // No interface produced a response. Still answer the host (zeros) so its
+    // seq round-trip completes and Steam's GET_FEATURE doesn't hang on a retry.
+    memset(buf, 0, sizeof(buf));
+    buf[0] = reportId;
+    LiSendScHidFeatureReport(seq, reportId, buf, SC_HID_WIRE_BYTES);
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-        "[SC-HID] forwardFeatureRequest: GET_FEATURE 0x%02x failed on all %d device(s)",
-        reportId, m_devCount);
+        "[SC-HID] forwardFeatureRequest: GET 0x%02x empty on all %d device(s) (op=%u seq=%u)",
+        reportId, m_devCount, op, seq);
 }
 
 void ScHidPassthrough::readLoop() {

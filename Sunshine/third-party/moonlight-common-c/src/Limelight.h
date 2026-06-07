@@ -826,6 +826,10 @@ int LiSendControllerBatteryEvent(uint8_t controllerNumber, uint8_t batteryState,
 // This is a VipleStream protocol extension; returns LI_ERR_UNSUPPORTED on GFE.
 int LiSendScHidInputReport(const uint8_t* data, int dataLen);
 
+// §SC-HID Phase 2C: Send the real SC's 64-byte feature RESPONSE back to the host
+// (transparent feature proxy). seq echoes the request; reportId is the HID report id.
+int LiSendScHidFeatureReport(uint8_t seq, uint8_t reportId, const uint8_t* data, int dataLen);
+
 // This function queues a vertical scroll event to the remote server.
 // The number of "clicks" is multiplied by WHEEL_DELTA (120) before
 // being sent to the PC.

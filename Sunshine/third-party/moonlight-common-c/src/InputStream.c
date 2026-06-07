@@ -1668,3 +1668,48 @@ int LiSendScHidInputReport(const uint8_t* data, int dataLen) {
 
     return err;
 }
+
+// §SC-HID Phase 2C: Send the real SC's feature RESPONSE back to the host
+// (0x55000008) so the host's virtual device can answer Steam's GET_FEATURE.
+// seq echoes the request; reportId is the HID report id; data is 64 bytes.
+int LiSendScHidFeatureReport(uint8_t seq, uint8_t reportId, const uint8_t* data, int dataLen) {
+    PPACKET_HOLDER holder;
+    int err;
+
+    if (!initialized) {
+        return -2;
+    }
+
+    if (!IS_SUNSHINE()) {
+        return LI_ERR_UNSUPPORTED;
+    }
+
+    if (dataLen != SS_SC_HID_REPORT_MAX) {
+        return -3;
+    }
+
+    holder = allocatePacketHolder(0);
+    if (holder == NULL) {
+        return -1;
+    }
+
+    holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE;
+    holder->enetPacketFlags = ENET_PACKET_FLAG_UNSEQUENCED;
+
+    holder->packet.scHidFeature.header.size = BE32(sizeof(SS_SC_HID_FEATURE_PACKET) - sizeof(uint32_t));
+    holder->packet.scHidFeature.header.magic = LE32(SS_SC_HID_FEATURE_MAGIC);
+    holder->packet.scHidFeature.seq = seq;
+    holder->packet.scHidFeature.reportId = reportId;
+    holder->packet.scHidFeature.zero[0] = 0;
+    holder->packet.scHidFeature.zero[1] = 0;
+    memcpy(holder->packet.scHidFeature.data, data, SS_SC_HID_REPORT_MAX);
+
+    err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+    if (err != LBQ_SUCCESS) {
+        LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+        Limelog("Input queue reached maximum size limit\n");
+        freePacketHolder(holder);
+    }
+
+    return err;
+}

@@ -548,6 +548,21 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             return;
         }
 
+        // §SC-HID：若 raw HID passthrough 已啟動且此手把是 Valve Steam Controller (VID 0x28DE)，
+        // 抑制標準 SDL gamepad 路徑。保留此路徑會讓 host 同時有 VipleSCHid 虛擬裝置 ＋
+        // ViGEm Xbox360，Steam 顯示 Xbox360 而非 Steam Controller。
+        // 改為只走 raw HID：input 透過 VipleSCHid 注入，Steam 透過 VID/PID + GetControllerInfo 識別。
+        if (SDL_GameControllerGetVendor(controller) == 0x28DE) {
+            Session* sess = Session::get();
+            if (sess != nullptr && sess->m_ScHid.isActive()) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[SC-HID] Suppressing SDL gamepad for Steam Controller "
+                            "(VID 0x28DE) — raw HID passthrough active, skipping ViGEm path");
+                SDL_GameControllerClose(controller);
+                return;
+            }
+        }
+
         state = &m_GamepadState[i];
         if (m_MultiController) {
             state->index = i;

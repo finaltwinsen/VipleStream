@@ -506,8 +506,13 @@ typedef void(*ConnListenerSetAdaptiveTriggers)(uint16_t controllerNumber, uint8_
 // This callback is invoked to set a controller's RGB LED (if present).
 typedef void(*ConnListenerSetControllerLED)(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b);
 
-// §SC-HID: invoked when the host requests a feature report from the real SC.
-typedef void(*ConnListenerScHidFeatureRequest)(uint8_t reportId, uint8_t reportType);
+// §SC-HID Phase 2C: invoked when the host relays a Steam feature op to the real SC
+// (transparent proxy). op: 1=GET (SDL_hid_get_feature_report on the real SC),
+// 2=SET (SDL_hid_send_feature_report(query) to the real SC, then read back).
+// reportId: HID report id; seq: round-trip cookie; query/queryLen: bytes Steam sent.
+// The client forwards the real SC's response via LiSendScHidFeatureReport(seq, ...).
+typedef void(*ConnListenerScHidFeatureRequest)(uint8_t reportId, uint8_t op, uint8_t seq,
+                                               const uint8_t* query, uint8_t queryLen);
 
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
@@ -858,6 +863,10 @@ int LiSendControllerBatteryEvent(uint8_t controllerNumber, uint8_t batteryState,
 
 // §SC-HID: Send a raw 64-byte Steam Controller HID input report to the host.
 int LiSendScHidInputReport(const uint8_t* data, int dataLen);
+
+// §SC-HID Phase 2C: Send the real SC's 64-byte feature RESPONSE back to the host
+// (transparent feature proxy). seq echoes the request; reportId is the HID report id.
+int LiSendScHidFeatureReport(uint8_t seq, uint8_t reportId, const uint8_t* data, int dataLen);
 
 // This function queues a vertical scroll event to the remote server.
 // The number of "clicks" is multiplied by WHEEL_DELTA (120) before

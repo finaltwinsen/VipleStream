@@ -848,6 +848,11 @@ namespace nvhttp {
     // the VipleStream-only features.
     tree.put("root.VipleStreamProtocol", "1");
 
+    // VipleStream server version — actual build version (e.g. "1.5.229").
+    // Displayed in the client's host card so operators can verify which
+    // build is running without leaving the UI.
+    tree.put("root.VipleStreamVersion", PROJECT_VERSION);
+
     // VipleStream MP-QUIC capability: advertise if enabled in config.
     // Vanilla Moonlight clients ignore unknown XML elements.
     if (config::stream.mpquic_enabled) {

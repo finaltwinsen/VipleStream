@@ -3,7 +3,7 @@
  *
  * 呈現虛擬 USB HID 裝置：
  *   VendorID  = 0x28DE  (Valve)
- *   ProductID = 0x1102  (Steam Controller wired)
+ *   ProductID = 0x1302  (gen-2 Steam Controller "Triton", wired)
  *
  * 由 in-box Microsoft-signed mshidumdf.sys reflector 托管，
  * 不需要 kernel driver 簽章；只需 admin + 自簽憑證安裝。
@@ -35,11 +35,16 @@
 // gen-2 Steam Controller 的 vendor gamepad input report 用 **Report ID 0x45 (69)**，
 // 介面 UsagePage 0xFF00 / Usage 0x01。實測（在 .195 直接讀實體 0x1302）：不論本機 Steam
 // 開或關，device 都串流 report id 0x45、54 bytes（= 1 id + 53 data）；byte0 固定 0x45、
-// 其餘隨輸入變動。HidP caps 另外宣告一個 report 0x42(66)（有對應 HID usage）但**不串流**，
-// 真正吐 gamepad 資料的是 0x45（vendor-opaque raw）。host Steam 靠 VID/PID(0x1302) 識別並
-// 自行解析 raw report 0x45，所以欄位內容用 vendor-opaque（53 byte）即可、不需逐欄定義。
-// Output=64、Feature=64（feature 實際 report id 為 0x01，haptics 下行時再細修；input passthrough
-// 不需要）。
+// 其餘隨輸入變動。host Steam 靠 VID/PID(0x1302) 識別並自行解析 raw report 0x45。
+//
+// §SC-HID Phase 2C：透明雙向 feature proxy。為了讓 Steam 的 GetControllerInfo 握手
+// 能拿到實體 SC 的真實回應，driver 多開兩條「控制」report（都維持 64-byte，避免動到
+// FeatureReportByteLength/OutputReportByteLength 影響 Steam 的 0x01 / 既有 0x45 注入）：
+//   0x45  Input(54)/Output(64) — 實體 SC gamepad 注入（Sunshine WriteFile）
+//   0x01  Feature(64)          — Steam 握手讀；driver 回 ctx->LastResponse
+//   0x03  Feature(64)          — Sunshine GetFeature(0x03) 取 Steam 待辦 feature 事件（notify）
+//   0x04  Output(64)           — Sunshine WriteFile(0x04) 交付實體 SC 的 feature 回應
+// （舊 0x02「seed」假通道已移除：它靠 HidD_SetFeature，實機回 result=0 失敗，改走 0x04 WriteFile。）
 static const UCHAR g_HidReportDescriptor[] = {
     0x06, 0x00, 0xFF,  // Usage Page (Vendor-Defined 0xFF00)
     0x09, 0x01,        // Usage (0x01)
@@ -55,10 +60,7 @@ static const UCHAR g_HidReportDescriptor[] = {
     0x09, 0x01,        //   Usage (0x01)
     0x95, 0x3F,        //   Report Count (63)  → Output = id + 63 = 64 bytes
     0x91, 0x02,        //   Output (Data, Var, Abs)
-    // --- Feature: Triton control report id 0x01 (separate from gamepad id 0x45) ---
-    // Steam's CGetControllerInfoWorkItem sends SET_FEATURE + polls GET_FEATURE(0x01).
-    // Keeping Feature under id 0x45 caused it to retry indefinitely (wrong id);
-    // id 0x01 matches what Triton actually advertises.
+    // --- Feature: Triton control report id 0x01 (Steam's GetControllerInfo polls this) ---
     0x85, 0x01,        //   Report ID (0x01) — Triton feature/control report
     0x09, 0x01,        //   Usage (0x01)
     0x15, 0x00,        //   Logical Minimum (0)
@@ -66,16 +68,22 @@ static const UCHAR g_HidReportDescriptor[] = {
     0x75, 0x08,        //   Report Size (8)
     0x95, 0x3F,        //   Report Count (63)  → Feature = id + 63 = 64 bytes
     0xB1, 0x02,        //   Feature (Data, Var, Abs)
-    // --- Feature seed: report id 0x02 (internal Sunshine → driver seed channel) ---
-    // §SC-HID: Sunshine uses SET_FEATURE(0x02) to pre-seed a valid firmware response
-    // so Steam's GET_FEATURE(0x01) returns real data instead of Steam's own query echo.
-    0x85, 0x02,        //   Report ID (0x02) — server firmware-response seed
+    // --- Feature notify: report id 0x03 (driver → Sunshine; carries pending Steam feature op) ---
+    0x85, 0x03,        //   Report ID (0x03)
     0x09, 0x01,
     0x15, 0x00,
     0x26, 0xFF, 0x00,
     0x75, 0x08,
     0x95, 0x3F,        //   Report Count (63)  → Feature = id + 63 = 64 bytes
     0xB1, 0x02,        //   Feature (Data, Var, Abs)
+    // --- Output delivery: report id 0x04 (Sunshine → driver; real SC feature response) ---
+    0x85, 0x04,        //   Report ID (0x04)
+    0x09, 0x01,
+    0x15, 0x00,
+    0x26, 0xFF, 0x00,
+    0x75, 0x08,
+    0x95, 0x3F,        //   Report Count (63)  → Output = id + 63 = 64 bytes
+    0x91, 0x02,        //   Output (Data, Var, Abs)
     0xC0               // End Collection
 };
 
@@ -89,16 +97,35 @@ static HID_DEVICE_ATTRIBUTES g_Attributes = {
     0x0100    // VersionNumber
 };
 
-// 裝置上下文：存放等待中 ReadReport 的 manual queue + Feature 交換狀態
+// §SC-HID Phase 2C：driver → Sunshine 的待辦事件 ring buffer。
+// Steam 對 report 0x01 做 SET_FEATURE / GET_FEATURE 時，driver push 一筆事件；
+// Sunshine 以 GetFeature(report 0x03) 在 input 流量上 piggyback 輪詢 pop。
+// 每筆事件塞進一個 64-byte notify report：[0x03][op][reportId][seq][queryLen][query…]
+#define SC_EVT_OP_NONE 0
+#define SC_EVT_OP_GET  1   // Steam GET_FEATURE(0x01) — 請 client 重讀實體 SC 刷新回應
+#define SC_EVT_OP_SET  2   // Steam SET_FEATURE(0x01, query) — 請 client 轉送 query 給實體 SC
+#define SC_EVT_QUERY_MAX 59   // 64 - 5(id,op,reportId,seq,queryLen)
+#define SC_EVT_RING 16
+
+typedef struct _SC_EVT {
+    UCHAR op;
+    UCHAR reportId;
+    UCHAR seq;
+    UCHAR queryLen;
+    UCHAR query[SC_EVT_QUERY_MAX];
+} SC_EVT;
+
+// 裝置上下文：等待中 ReadReport 的 manual queue + feature proxy 狀態
 typedef struct _DEVICE_CONTEXT {
     WDFQUEUE PendingReadQueue;
-    // Steam's SET_FEATURE(query) 的 echo buffer（report ID 0x01）
-    UCHAR LastFeatureCmd[64];
-    // §SC-HID Phase 2：Sunshine 透過 SET_FEATURE(report ID 0x02) 預先種入的
-    // 真實韌體回應。GET_FEATURE 優先回傳這份資料（一次性消費），之後再回 echo。
-    // 這樣 Steam SET_FEATURE(query) 就無法覆蓋 Sunshine 的預種資料。
-    UCHAR    ServerSeedBuf[64];
-    BOOLEAN  ServerSeedValid;
+    // Steam GET_FEATURE(report 0x01) 回傳的資料 = 實體 SC 經 Sunshine WriteFile(0x04) 交付的回應。
+    // byte[0] 固定 0x01。未交付前回 zeros（Steam 會重試直到拿到真實資料）。
+    UCHAR LastResponse[64];
+    // 待辦事件 ring（Steam 動作 → Sunshine 輪詢取走）
+    SC_EVT  EvtRing[SC_EVT_RING];
+    ULONG   EvtHead;   // pop 位置
+    ULONG   EvtTail;   // push 位置
+    UCHAR   SeqCtr;
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, GetDeviceContext)
@@ -155,14 +182,31 @@ NTSTATUS EvtDeviceAdd(IN WDFDRIVER Driver, IN PWDFDEVICE_INIT DeviceInit) {
     status = WdfIoQueueCreate(device, &queueCfg, WDF_NO_OBJECT_ATTRIBUTES, &ctx->PendingReadQueue);
     if (!NT_SUCCESS(status)) return status;
 
-    // 初始化 feature echo buffer
-    RtlZeroMemory(ctx->LastFeatureCmd, sizeof(ctx->LastFeatureCmd));
-    ctx->LastFeatureCmd[0] = 0x01;
-    // 初始化 server seed buffer（§SC-HID Phase 2）
-    RtlZeroMemory(ctx->ServerSeedBuf, sizeof(ctx->ServerSeedBuf));
-    ctx->ServerSeedBuf[0] = 0x01;
-    ctx->ServerSeedValid  = FALSE;
+    // 初始化 feature proxy 狀態（§SC-HID Phase 2C）
+    RtlZeroMemory(ctx->LastResponse, sizeof(ctx->LastResponse));
+    ctx->LastResponse[0] = 0x01;   // report id Steam reads
+    RtlZeroMemory(ctx->EvtRing, sizeof(ctx->EvtRing));
+    ctx->EvtHead = 0;
+    ctx->EvtTail = 0;
+    ctx->SeqCtr  = 0;
     return STATUS_SUCCESS;
+}
+
+// Push 一筆待辦事件給 Sunshine（Steam SET/GET on report 0x01 時呼叫）。
+// ring 滿就覆蓋最舊（drop oldest）——Sunshine 以 input 流量輪詢，正常不會滿。
+static void ScPushEvent(PDEVICE_CONTEXT ctx, UCHAR op, UCHAR reportId,
+                        const UCHAR* query, ULONG queryLen) {
+    SC_EVT* e = &ctx->EvtRing[ctx->EvtTail % SC_EVT_RING];
+    e->op       = op;
+    e->reportId = reportId;
+    e->seq      = ++ctx->SeqCtr;
+    ULONG n = queryLen > SC_EVT_QUERY_MAX ? SC_EVT_QUERY_MAX : queryLen;
+    e->queryLen = (UCHAR)n;
+    RtlZeroMemory(e->query, sizeof(e->query));
+    if (query && n) RtlCopyMemory(e->query, query, n);
+    ctx->EvtTail++;
+    // 若 tail 追過 head（ring 滿），head 跟進丟掉最舊一筆
+    if (ctx->EvtTail - ctx->EvtHead > SC_EVT_RING) ctx->EvtHead = ctx->EvtTail - SC_EVT_RING;
 }
 
 // ── EvtIoDeviceControl ────────────────────────────────────────────────────────
@@ -247,7 +291,20 @@ VOID EvtIoDeviceControl(
         size_t  writeSize = 0;
         PVOID   writeData = WdfMemoryGetBuffer(writeMem, &writeSize);
 
-        // 嘗試取出等待中的 read request
+        // §SC-HID Phase 2C：report id 0x04 = Sunshine 交付實體 SC 的 feature 回應。
+        // 不完成任何 read，只把資料存進 LastResponse 供 Steam GET_FEATURE(0x01) 取用。
+        // wire 上 byte[0]=0x04，其後 63 bytes 為實體 SC 回應的 byte[1..63]（byte0 是
+        // report id，由本端重建為 0x01）。
+        if (writeSize >= 1 && ((UCHAR*)writeData)[0] == 0x04) {
+            ctx->LastResponse[0] = 0x01;
+            size_t copyN = writeSize > 64 ? 63 : (writeSize - 1);
+            if (copyN > 63) copyN = 63;
+            if (copyN > 0) RtlCopyMemory(ctx->LastResponse + 1, (UCHAR*)writeData + 1, copyN);
+            status = STATUS_SUCCESS;
+            break;
+        }
+
+        // 嘗試取出等待中的 read request（report id 0x45 input 注入）
         WDFREQUEST readRequest = nullptr;
         NTSTATUS   deqStatus   = WdfIoQueueRetrieveNextRequest(ctx->PendingReadQueue, &readRequest);
 
@@ -273,49 +330,77 @@ VOID EvtIoDeviceControl(
         break;
     }
 
-    // ── Feature report：GET echo + SET store ─────────────────────────────
-    // Steam 的 CGetControllerInfoWorkItem 流程：
-    //   1. SET_FEATURE（送指令，如 0x83 = GET_STRING_ATTRIBUTE）
-    //   2. 迴圈 GET_FEATURE(reportId=0x01) 直到拿到非空回應
-    // 舊實作兩個 case 都回傳 transferred=0 → Steam 無窮重試（每隔 ~5 s 一輪）。
-    // 修法：SET 時把 payload 存入 ctx->LastFeatureCmd（byte[0] 固定 0x01）；
-    //       GET 時把 LastFeatureCmd 直接填回 output buffer。
-    // 未來完整 tunnel：改為 park GET 進 PendingFeatureGetQueue，
-    //   透過 wire 把指令送到 client → 實體 SC → 回傳，再 complete parked request。
-    case IOCTL_HID_SET_FEATURE: {
+    // ── Feature report：透明雙向 proxy（§SC-HID Phase 2C）────────────────
+    // Steam 的 CGetControllerInfoWorkItem 流程：SET_FEATURE(0x01, query) 再
+    // 迴圈 GET_FEATURE(0x01) 取回應。我們不在本地造假，而是把 Steam 的動作 push
+    // 成事件、由 Sunshine（輪詢 report 0x03）轉送到實體 SC，回應再經 WriteFile(0x04)
+    // 寫回 ctx->LastResponse；Steam 的 GET_FEATURE(0x01) 取走它（Steam 會重試直到非空）。
+    //   report 0x01 = Steam 握手；report 0x03 = Sunshine 取待辦事件（notify）。
+    //
+    // 根本原因（§SC-HID root-cause）：UMDF2 minidriver 收到的 feature IOCTL code 是
+    // IOCTL_UMDF_HID_SET/GET_FEATURE（HID_CTL_CODE(20/21)），而非 KM 用的
+    // IOCTL_HID_SET/GET_FEATURE。兩者數值不同，故只列 KM code 的 switch 永遠落入
+    // default → STATUS_NOT_SUPPORTED（host 診斷 err=50）。
+    // 另一個關鍵：UMDF feature IOCTL 傳遞的 buffer 是 HID_XFER_PACKET 結構體
+    //（{ PUCHAR reportBuffer; ULONG reportBufferLen; UCHAR reportId; }），
+    // 而非原始 report bytes——reportId 在結構末尾，reportBuffer 是指向實際資料的指標。
+    // vhidmini2 範例確認：兩種 code 共用同一處理函式，皆用 HID_XFER_PACKET 存取。
+    case IOCTL_HID_SET_FEATURE:        // KM path（防禦性，UMDF 中不會觸發）
+    case IOCTL_UMDF_HID_SET_FEATURE: { // UMDF path（mshidumdf.sys 實際送來的 code）
         PVOID inBuf  = nullptr;
         size_t inLen = 0;
-        if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &inBuf, &inLen))) {
-            size_t n = inLen < 64 ? inLen : 64;
-            UCHAR reportId = ((UCHAR*)inBuf)[0];
-            if (reportId == 0x02) {
-                // §SC-HID Phase 2：Sunshine 用 report ID 0x02 預種真實韌體回應。
-                // 存入 ServerSeedBuf，byte[0] 修正為 0x01（Steam GET_FEATURE 期望的 ID）。
-                RtlCopyMemory(ctx->ServerSeedBuf, inBuf, n);
-                ctx->ServerSeedBuf[0] = 0x01;
-                ctx->ServerSeedValid  = TRUE;
-            } else {
-                // Steam 的 SET_FEATURE query echo（report ID 0x01）。
-                RtlCopyMemory(ctx->LastFeatureCmd, inBuf, n);
-                ctx->LastFeatureCmd[0] = 0x01;
+        if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, sizeof(HID_XFER_PACKET), &inBuf, &inLen))) {
+            PHID_XFER_PACKET pkt = (PHID_XFER_PACKET)inBuf;
+            UCHAR reqId = pkt->reportId;
+            if (reqId == 0x01 && pkt->reportBuffer != nullptr && pkt->reportBufferLen > 0) {
+                // Steam 送 query 給控制器 → 轉成 SET 事件交給 Sunshine 轉發到實體 SC。
+                ULONG qn = pkt->reportBufferLen > SC_EVT_QUERY_MAX
+                           ? SC_EVT_QUERY_MAX : pkt->reportBufferLen;
+                ScPushEvent(ctx, SC_EVT_OP_SET, 0x01, (const UCHAR*)pkt->reportBuffer, qn);
             }
+            // 其餘 report id 忽略。
         }
         status = STATUS_SUCCESS;
         break;
     }
-    case IOCTL_HID_GET_FEATURE: {
+    case IOCTL_HID_GET_FEATURE:        // KM path（防禦性，UMDF 中不會觸發）
+    case IOCTL_UMDF_HID_GET_FEATURE: { // UMDF path（mshidumdf.sys 實際送來的 code）
         PVOID outBuf  = nullptr;
         size_t outLen = 0;
-        if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 64, &outBuf, &outLen))) {
-            size_t n = outLen < 64 ? outLen : 64;
-            if (ctx->ServerSeedValid) {
-                // §SC-HID Phase 2：回傳 Sunshine 預種的真實韌體回應（一次性消費）
-                RtlCopyMemory(outBuf, ctx->ServerSeedBuf, n);
-                ctx->ServerSeedValid = FALSE;
-            } else {
-                RtlCopyMemory(outBuf, ctx->LastFeatureCmd, n);
+        if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, sizeof(HID_XFER_PACKET), &outBuf, &outLen))) {
+            PHID_XFER_PACKET pkt = (PHID_XFER_PACKET)outBuf;
+            UCHAR  reqId       = pkt->reportId;
+            PVOID  reportBuf   = pkt->reportBuffer;
+            ULONG  reportBufLen = pkt->reportBufferLen;
+            if (reportBuf != nullptr && reportBufLen > 0) {
+                size_t n = reportBufLen < 64 ? reportBufLen : 64;
+                if (reqId == 0x03) {
+                    // Sunshine 輪詢待辦事件。有事件就 pop 一筆填回；沒有則 op=NONE。
+                    RtlZeroMemory(reportBuf, n);
+                    ((UCHAR*)reportBuf)[0] = 0x03;
+                    if (ctx->EvtHead != ctx->EvtTail && n >= 5) {
+                        SC_EVT* e = &ctx->EvtRing[ctx->EvtHead % SC_EVT_RING];
+                        ctx->EvtHead++;
+                        UCHAR* o = (UCHAR*)reportBuf;
+                        o[1] = e->op;
+                        o[2] = e->reportId;
+                        o[3] = e->seq;
+                        o[4] = e->queryLen;
+                        size_t qcopy = e->queryLen;
+                        if (qcopy > n - 5) qcopy = n - 5;
+                        if (qcopy > 0) RtlCopyMemory(o + 5, e->query, qcopy);
+                    } else {
+                        ((UCHAR*)reportBuf)[1] = SC_EVT_OP_NONE;
+                    }
+                } else {
+                    // Steam 讀 report 0x01：回傳實體 SC 的最新回應，並 push 一筆 GET 事件
+                    // 讓 Sunshine 請 client 重讀 SC 刷新（Steam 重試時就會拿到最新值）。
+                    if (reqId == 0x01) ScPushEvent(ctx, SC_EVT_OP_GET, 0x01, nullptr, 0);
+                    size_t copyN = n < sizeof(ctx->LastResponse) ? n : sizeof(ctx->LastResponse);
+                    RtlCopyMemory(reportBuf, ctx->LastResponse, copyN);
+                }
+                transferred = reportBufLen;  // 告知 HidClass 實際寫入的位元組數
             }
-            transferred = n;
         }
         status = STATUS_SUCCESS;
         break;

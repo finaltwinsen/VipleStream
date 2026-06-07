@@ -22,7 +22,8 @@ class ComputerModel : public QAbstractListModel
         IsVipleStreamPeerRole,
         // VipleStream — per-host toggle: 點該 host tile 跳過 applist 直接串流 Desktop
         DirectLaunchDesktopRole,
-        DetailsRole
+        DetailsRole,
+        ServerVersionRole
     };
 
 public:

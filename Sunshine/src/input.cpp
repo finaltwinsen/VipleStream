@@ -1183,6 +1183,27 @@ namespace input {
 
 #ifdef _WIN32
   // §SC-HID: forward raw Steam Controller input report to the virtual HID device
+  // §SC-HID Phase 2C：在 input 流量上 piggyback 輪詢 driver 的待辦 Steam feature
+  // 事件（Steam 對虛擬裝置做 SET/GET_FEATURE 時 driver 會 push）。有事件就經 0x5505
+  // 控制訊息把「Steam 實際的 query」轉給 client → 實體 SC。Steam 的 feature 動作不頻繁，
+  // 用 ~100Hz 的 input rate 輪詢延遲足夠低，且省掉一條背景執行緒。
+  void poll_sc_hid_notify(std::shared_ptr<input_t> &input) {
+    if (!input->sc_hid_handle) return;
+    uint8_t op = 0, reportId = 0, seq = 0, query[64] = {};
+    int qlen = 0;
+    // 一次最多取幾筆，避免單次呼叫卡住（ring 通常只有 0~1 筆）。
+    for (int i = 0; i < 4; i++) {
+      if (!VipleSCHidPollNotify(input->sc_hid_handle, &op, &reportId, &seq, query, &qlen)) {
+        break;
+      }
+      input->feedback_queue->raise(
+          platf::gamepad_feedback_msg_t::make_sc_hid_feature_request(reportId, op, seq, query, (uint8_t)qlen));
+      BOOST_LOG(debug) << "[SC-HID] Steam feature op forwarded to client: op=" << (unsigned)op
+                       << " reportId=0x" << util::hex(reportId).to_string_view()
+                       << " seq=" << (unsigned)seq << " qlen=" << qlen;
+    }
+  }
+
   void passthrough_sc_hid_input(std::shared_ptr<input_t> &input, PSS_SC_HID_INPUT_PACKET packet) {
     if (!input->sc_hid_handle) {
       // Lazy-open the virtual HID device on first packet
@@ -1199,22 +1220,15 @@ namespace input {
       // Include the probe trail on success too — it records which strategy
       // (setupdi vs cfgmgr fallback) and which access mode finally worked.
       BOOST_LOG(info) << "[SC-HID] Virtual Steam Controller device opened: " << VipleSCHidLastDiag();
-      // Ask client to probe feature report from real SC → prime driver echo buffer.
-      input->feedback_queue->raise(
-          platf::gamepad_feedback_msg_t::make_sc_hid_feature_request(0x01, 1));
     }
 
-    // Non-0x45 packets = feature/status reports from the real SC forwarded by the client.
-    // Route to VipleSCHidSetFeature to prime the driver echo buffer so Steam's
-    // GET_FEATURE returns real data (needed for GetControllerInfo handshake / SC mode).
-    if (packet->data[0] != 0x45) {
-      int sf = VipleSCHidSetFeature(input->sc_hid_handle, packet->data, 64);
-      BOOST_LOG(info) << "[SC-HID] SetFeature primed by client: reportId=0x"
-                      << util::hex((uint8_t)packet->data[0]).to_string_view()
-                      << " result=" << sf;
-      return;
-    }
+    // 轉送 Steam 的待辦 feature 事件（透明 proxy 的 driver→client 方向）。
+    poll_sc_hid_notify(input);
 
+    // All 0x55000009 packets carry live SC input reports. VipleSCHidWrite injects
+    // 0x45 (the gen-2 gamepad report) and harmlessly skips any other report id the
+    // virtual device does not declare (e.g. 0x43 battery). Feature *responses* no
+    // longer come on this magic — they arrive on SS_SC_HID_FEATURE_MAGIC.
     int wr = VipleSCHidWrite(input->sc_hid_handle, packet->data, 64);
     if (wr > 0) {
       // Log first successful injection as positive evidence of end-to-end flow.
@@ -1240,6 +1254,20 @@ namespace input {
         BOOST_LOG(warning) << "[SC-HID] Write failed (keeping handle): " << VipleSCHidWriteDiag();
       }
     }
+  }
+
+  // §SC-HID Phase 2C：client 經 SS_SC_HID_FEATURE_MAGIC (0x55000008) 回傳實體 SC 的
+  // feature 回應 → 交付給 driver（WriteFile output 0x04）→ Steam GET_FEATURE(0x01) 取走。
+  void passthrough_sc_hid_feature(std::shared_ptr<input_t> &input, PSS_SC_HID_FEATURE_PACKET packet) {
+    if (!input->sc_hid_handle) {
+      return;  // 尚未開啟虛擬裝置（不該發生，feature 回應總在 input 之後）
+    }
+    int dr = VipleSCHidDeliverResponse(input->sc_hid_handle, packet->seq, packet->data, 64);
+    BOOST_LOG(debug) << "[SC-HID] Feature response delivered: seq=" << (unsigned)packet->seq
+                     << " reportId=0x" << util::hex(packet->reportId).to_string_view()
+                     << " result=" << dr;
+    // 順手再 poll 一次 notify（Steam 可能在等回應後緊接著下一個 op）。
+    poll_sc_hid_notify(input);
   }
 #endif
 
@@ -1743,6 +1771,9 @@ namespace input {
 #ifdef _WIN32
         case SS_SC_HID_INPUT_MAGIC:
           passthrough_sc_hid_input(input, (PSS_SC_HID_INPUT_PACKET) payload);
+          break;
+        case SS_SC_HID_FEATURE_MAGIC:
+          passthrough_sc_hid_feature(input, (PSS_SC_HID_FEATURE_PACKET) payload);
           break;
 #endif
       }

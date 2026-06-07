@@ -1213,9 +1213,11 @@ namespace platf {
       BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (auto-selected by client-reported type)"sv;
       selectedGamepadType = DualShock4Wired;
     } else if (metadata.type == LI_CTYPE_STEAM) {
-      // §SC-HID Phase 2B：Steam Controller 走 VipleSCHid passthrough，不建 ViGEm Xbox360。
-      // 建了 Xbox360 Steam 就只看到 Xbox 360 而非真實 SC；跳過即可讓 Steam 直接認 28DE:1302。
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " is Steam Controller — skipping ViGEm, using VipleSCHid passthrough"sv;
+      // §SC-HID：Steam Controller 走 VipleSCHid 虛擬裝置 (28DE:1302) 讓 Steam 識別，
+      // 遊戲 input 透過 Steam Input 層取得（Steam 識別到 SC 後自動生效）。
+      // 不建 ViGEm Xbox360——否則 Steam 會優先顯示 Xbox360 而非 Steam Controller。
+      // all update paths guard on !gamepad.gp so null gp is safe.
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " is Steam Controller — skip ViGEm (VipleSCHid handles identity + Steam Input handles game input)"sv;
       return 0;
     } else if (metadata.type == LI_CTYPE_XBOX) {
       BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Xbox 360 controller (auto-selected by client-reported type)"sv;

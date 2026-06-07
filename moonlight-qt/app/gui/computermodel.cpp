@@ -46,6 +46,8 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
         return computer->isVipleStreamPeer;
     case DirectLaunchDesktopRole:
         return computer->directLaunchDesktop;
+    case ServerVersionRole:
+        return computer->vipleStreamVersion;
     case DetailsRole: {
         QString state, pairState;
 
@@ -144,6 +146,7 @@ QHash<int, QByteArray> ComputerModel::roleNames() const
     names[IsVipleStreamPeerRole] = "isVipleStreamPeer";
     names[DirectLaunchDesktopRole] = "directLaunchDesktop";
     names[DetailsRole] = "details";
+    names[ServerVersionRole] = "serverVersion";
 
     return names;
 }

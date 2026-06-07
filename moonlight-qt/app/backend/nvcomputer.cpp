@@ -314,6 +314,9 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     this->vipleStreamMPQUIC = NvHTTP::getXmlString(serverInfo, "VipleStreamMPQUIC");
     this->isMpQuicCapable = !this->vipleStreamMPQUIC.isEmpty();
 
+    // VipleStream server build version
+    this->vipleStreamVersion = NvHTTP::getXmlString(serverInfo, "VipleStreamVersion");
+
     // Real Nvidia host software (GeForce Experience and RTX Experience) both use the 'Mjolnir'
     // codename in the state field and no version of Sunshine does. We can use this to bypass
     // some assumptions about Nvidia hardware that don't apply to Sunshine hosts.
@@ -706,6 +709,7 @@ bool NvComputer::update(const NvComputer& that)
     // arriving as "" despite a 831-byte serverinfo with the tag.
     ASSIGN_IF_CHANGED(isMpQuicCapable);
     ASSIGN_IF_CHANGED(vipleStreamMPQUIC);
+    ASSIGN_IF_CHANGED(vipleStreamVersion);
     ASSIGN_IF_CHANGED(maxLumaPixelsHEVC);
     ASSIGN_IF_CHANGED(gpuModel);
     ASSIGN_IF_CHANGED_AND_NONNULL(serverCert);

@@ -41,9 +41,25 @@ typedef void* VIPLE_SCHID_HANDLE;
 // Returns NULL on failure.
 VIPLE_SCHID_HANDLE VipleSCHidOpen(void);
 
-// Prime the VipleSCHid driver's GET_FEATURE echo buffer via HidD_SetFeature.
-// data[0] = HID report ID; len must be 64. Returns 1 on success, 0 on failure.
-int VipleSCHidSetFeature(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len);
+// §SC-HID Phase 2C — transparent feature proxy.
+//
+// Poll the driver for the next pending Steam feature op (GET_FEATURE(0x03)).
+// Returns 1 if an event was popped (out params filled), 0 if none / error.
+//   *op       : SC_EVT_OP_GET(1) = Steam read → ask client to refresh from real SC
+//               SC_EVT_OP_SET(2) = Steam sent a query → forward it to real SC
+//   *reportId : HID report id Steam targeted (0x01)
+//   *seq      : round-trip cookie
+//   query/qlen: up to 59 query bytes Steam sent (op=SET). query must be >=64 bytes.
+int VipleSCHidPollNotify(VIPLE_SCHID_HANDLE h, uint8_t* op, uint8_t* reportId,
+                         uint8_t* seq, uint8_t* query, int* qlen);
+
+// Deliver the real SC's feature response back into the driver via WriteFile
+// (output report id 0x04) — used instead of HidD_SetFeature, which fails
+// (result=0) on this UMDF reflector. `data` is the real SC's 64-byte feature
+// response (data[0] is its report id); the driver stores data[1..63] as the
+// reply Steam's GET_FEATURE(0x01) returns. Returns 1 on success, 0 on failure.
+int VipleSCHidDeliverResponse(VIPLE_SCHID_HANDLE h, uint8_t seq,
+                              const uint8_t* data, int len);
 
 // Inject a Steam Controller input report (gen-2: 54-byte report id 0x45).
 // Returns:  1 = injected (or skipped: a non-0x45 report the virtual device

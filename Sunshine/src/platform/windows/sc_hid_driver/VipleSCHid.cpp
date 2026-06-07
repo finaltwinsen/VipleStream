@@ -376,17 +376,46 @@ int VipleSCHidWrite(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
     }
 }
 
-int VipleSCHidSetFeature(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
-    if (!h || len <= 0) return 0;
+// §SC-HID Phase 2C：輪詢 driver 的待辦 Steam feature 事件（report 0x03）。
+// 注意：用 input 流量 piggyback 呼叫，頻率約 input rate；driver 端有 ring 緩衝。
+int VipleSCHidPollNotify(VIPLE_SCHID_HANDLE h, uint8_t* op, uint8_t* reportId,
+                         uint8_t* seq, uint8_t* query, int* qlen) {
+    if (!h) return 0;
     auto* ctx = static_cast<VipleSCHidCtx*>(h);
     uint8_t buf[64] = {};
-    int n = (len > 64) ? 64 : len;
-    memcpy(buf, data, n);
-    // §SC-HID Phase 2：用 report ID 0x02 路由到 driver 的 ServerSeedBuf，
-    // 避免 Steam 後續 SET_FEATURE(query) 覆蓋這份真實韌體回應。
-    // driver 收到 0x02 後會把 byte[0] 修正回 0x01 再存入 ServerSeedBuf。
-    buf[0] = 0x02;
-    return HidD_SetFeature(ctx->hDev, buf, sizeof(buf)) ? 1 : 0;
+    buf[0] = 0x03;  // requested report id = notify channel
+    if (!HidD_GetFeature(ctx->hDev, buf, sizeof(buf))) return 0;
+    // layout: [0x03][op][reportId][seq][queryLen][query…]; op==0 → 無事件
+    if (buf[1] == 0) return 0;
+    if (op)       *op       = buf[1];
+    if (reportId) *reportId = buf[2];
+    if (seq)      *seq      = buf[3];
+    int n = buf[4];
+    if (n > 59) n = 59;
+    if (query && qlen) {
+        memcpy(query, buf + 5, n);
+        *qlen = n;
+    } else if (qlen) {
+        *qlen = n;
+    }
+    return 1;
+}
+
+// §SC-HID Phase 2C：把實體 SC 的 feature 回應交付給 driver（output report 0x04）。
+// 走 WriteFile（proven），不走壞掉的 HidD_SetFeature。data 是實體 SC 的 64-byte
+// feature 回應（data[0] 是它的 report id）；只送 data[1..63]，driver 重建 byte0=0x01。
+int VipleSCHidDeliverResponse(VIPLE_SCHID_HANDLE h, uint8_t seq,
+                              const uint8_t* data, int len) {
+    if (!h || !data || len <= 0) return 0;
+    (void)seq;  // Option B：driver 只存最新回應，seq 暫不參與比對（保留供未來 parking 用）
+    auto* ctx = static_cast<VipleSCHidCtx*>(h);
+    uint8_t buf[64] = {};
+    buf[0] = 0x04;  // output report id = response-delivery channel
+    int n = (len > 64) ? 63 : (len - 1);
+    if (n > 63) n = 63;
+    if (n > 0) memcpy(buf + 1, data + 1, n);
+    DWORD written = 0;
+    return WriteFile(ctx->hDev, buf, sizeof(buf), &written, nullptr) ? 1 : 0;
 }
 
 void VipleSCHidSetFeatureCb(VIPLE_SCHID_HANDLE h, VipleSCHidFeatureCb cb, void* ctx_) {
