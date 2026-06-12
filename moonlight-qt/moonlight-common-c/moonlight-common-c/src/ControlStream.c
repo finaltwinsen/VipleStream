@@ -134,6 +134,32 @@ static volatile int enetReconnectPending;
 // enetReconnectPending 的寫法，避免編譯器快取造成計數失準（非嚴格 atomic，
 // 但對 log gate 足夠）。
 static volatile int bypassLogCount;
+
+// §Q-REMOTE Fix R.3 (v1.5.235)：「ENet 死、QUIC 活」韌性缺口修補。
+// 實測（2026-06-12 port 級封 ENet 47999、QUIC 48010 健康）：所有
+// §Q-ENET-GRACE / R.2 / Fix K / Fix P 的觸發鏈都閘在 quicIsFailoverActive()，
+// QUIC 主路徑健康（無 failover）時 ENet 一斷就 connectionTerminated——
+// 健康的 QUIC 通道沒被用來撐住 session。真實世界觸發：port-specific
+// NAT/QoS/防火牆對 47999 與 48010 行為不同。
+//
+// 修法：控制平面的 fallback 條件統一改為「failover 進行中 *或* QUIC
+// 傳輸活著」。MPQUIC 未啟用時 quicIsConnected() 恆 false，行為不變。
+static bool quicControlFallbackAvailable(void) {
+    return quicIsFailoverActive() || quicIsConnected();
+}
+
+// §Q-REMOTE Fix R.3：整段 ENet 重連期間為 1（含每次 5 秒連線嘗試中
+// peer 短暫非 NULL 的窗口），重連成功才歸零。若沒有這個旗標，IDR
+// 恰落在嘗試窗口會經 sendMessageEnet 失敗路徑走 INPUT datagram
+// （server 靜默丟棄）——Fix P 陷阱的 5 秒殘餘版本。
+static volatile int enetReconnecting;
+
+// §Q-REMOTE Fix R.3：ENet 控制通道目前不可用（reconnect 進行中或
+// peer 已銷毀）。peer 無鎖讀取與 lossStatsThread 既有寫法一致
+// （指標讀取，做為路由提示足夠）。
+static bool enetControlChannelDown(void) {
+    return enetReconnectPending || enetReconnecting || peer == NULL;
+}
 #endif
 
 static LINKED_BLOCKING_QUEUE referenceFrameControlQueue;
@@ -391,6 +417,7 @@ int initializeControlStream(void) {
     currentEnetSequenceNumber = 0;
 #ifdef VIPLE_MPQUIC
     enetReconnectPending = 0;
+    enetReconnecting = 0; // §Q-REMOTE Fix R.3
 #endif
     usePeriodicPing = APP_VERSION_AT_LEAST(7, 1, 415);
     encryptionCtx = PltCreateCryptoContext();
@@ -827,7 +854,8 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
         // §Q-INPUT-QUIC-FALLBACK v1.5.189 Fix K: ENet 不可用時
         // 改走 QUIC datagram。加密已在上方完成，enetPacket->data
         // 包含完整的 NVCTL encrypted header + AES-GCM tag + ciphertext。
-        if (quicIsFailoverActive()) {
+        // §Q-REMOTE Fix R.3：放寬到「QUIC 活著」即可（不限 failover）。
+        if (quicControlFallbackAvailable()) {
             // Fix L.2 v1.5.193: diagnostic log（one-shot，避免每封包都印）
             static int nullGuardLogCount = 0;
             if (nullGuardLogCount < 3) {
@@ -945,7 +973,8 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
         // 也嘗試 QUIC datagram fallback。Fix K 只在 null guard 攔截，但
         // peer/client 在重連嘗試期間非 NULL（controlReceiveThread 已重建），
         // enet_peer_send 才是實際失敗點。enetMutex 已在上方 unlock。
-        if (!packetQueued && quicIsFailoverActive()) {
+        // §Q-REMOTE Fix R.3：放寬到「QUIC 活著」即可（不限 failover）。
+        if (!packetQueued && quicControlFallbackAvailable()) {
             int ret = quicSendDatagram(QUIC_FLOW_INPUT,
                                         enetPacket->data,
                                         (int)enetPacket->dataLength);
@@ -1349,9 +1378,10 @@ enet_main_loop:
                         PltUnlockMutex(&enetMutex);
                         Limelog("Disconnect event timeout expired\n");
 #ifdef VIPLE_MPQUIC
-                        if (quicIsFailoverActive()) {
-                            Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: ENet timeout during "
-                                    "QUIC failover — suppressing connectionTerminated\n");
+                        // §Q-REMOTE Fix R.3：failover 或 QUIC 健康都壓制
+                        if (quicControlFallbackAvailable()) {
+                            Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: ENet timeout while "
+                                    "QUIC transport alive — suppressing connectionTerminated\n");
                             enetReconnectPending = 1;
                             goto enet_reconnect_wait;
                         }
@@ -1384,9 +1414,10 @@ enet_main_loop:
             // send/recv 直接失敗（typical WSAEWOULDBLOCK 10035）。
             // 不可彈 "Connection terminated" dialog——QUIC failover 已把
             // video/audio 轉到備援路徑，使用者只損失控制輸入。
-            if (quicIsFailoverActive()) {
+            // §Q-REMOTE Fix R.3：failover 或 QUIC 健康都壓制
+            if (quicControlFallbackAvailable()) {
                 Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: control stream "
-                        "connection failed (%d) during QUIC failover — "
+                        "connection failed (%d) while QUIC transport alive — "
                         "suppressing connectionTerminated\n", err);
                 enetReconnectPending = 1;
                 goto enet_reconnect_wait;
@@ -1575,10 +1606,11 @@ enet_main_loop:
             // §Q-ENET-GRACE: 當 QUIC failover 正在進行中，ENet 斷線不立即
             // 終止串流。QUIC 已將 video/audio 切到備援路徑，串流仍然活著。
             // 控制輸入（滑鼠 / 鍵盤）暫時中斷，直到用戶重新串流。
-            if (quicIsFailoverActive()) {
-                Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: ENet disconnected during "
-                        "QUIC failover — suppressing connectionTerminated. "
-                        "Stream continues on backup path (control input lost)\n");
+            // §Q-REMOTE Fix R.3：failover 或 QUIC 健康都壓制
+            if (quicControlFallbackAvailable()) {
+                Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: ENet disconnected while "
+                        "QUIC transport alive — suppressing connectionTerminated. "
+                        "Stream continues over QUIC (ENet reconnect pending)\n");
                 enetReconnectPending = 1;
                 goto enet_reconnect_wait;
             }
@@ -1595,6 +1627,7 @@ enet_reconnect_wait:
     // 恢復，然後自動重建 ENet 連線。加密 sequence number 不重置，
     // 重連後 AES-GCM IV 從斷點繼續遞增。
     if (enetReconnectPending) {
+        enetReconnecting = 1; // §Q-REMOTE Fix R.3：覆蓋整段重連期
         // 注意：這裡 *** 不 *** 立即把 enetReconnectPending 清零。
         // 保持 = 1 讓 lossStatsThread 偵測到並退出（Fix F）。
         // 清零在 500ms 等待後、銷毀 peer/client 前才做。
@@ -1689,6 +1722,7 @@ enet_reconnect_wait:
                     // 重置 bypass log 計數器，讓下次 failover 的
                     // bypass 動作可見（診斷改善）。
                     bypassLogCount = 0;
+                    enetReconnecting = 0; // §Q-REMOTE Fix R.3：控制平面切回 ENet
                     Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: ENet reconnected! "
                             "(seq continues from %u)\n", currentEnetSequenceNumber);
                     goto enet_main_loop;  // 回到主事件迴圈
@@ -1873,9 +1907,9 @@ static void lossStatsThreadFunc(void* context) {
                 free(lossStatsPayload);
                 Limelog("Loss Stats: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
-                if (quicIsFailoverActive()) {
+                if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
                     Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: legacy loss stats "
-                            "send failed during QUIC failover — stopping "
+                            "send failed while QUIC transport alive — stopping "
                             "lossStats thread (suppressing connectionTerminated)\n");
                     return;
                 }
@@ -1901,11 +1935,16 @@ static void requestIdrFrame(void) {
     // control message 送成 QUIC_FLOW_INPUT datagram → server 的
     // INPUT handler 不認識 IDR → 靜默丟棄。bypass 回傳 true →
     // 上層以為成功 → §Q-IDR-VIA-QUIC fallback 永遠不觸發。
-    if (quicIsFailoverActive() && quicIsPrimaryPathUnhealthy()) {
+    // §Q-REMOTE Fix R.3：加入「ENet 控制通道不可用 + QUIC 活著」分支。
+    // 不能交給 sendMessageEnet 的 null-guard——它會把 IDR 當 INPUT
+    // datagram 送（server 靜默丟棄）且回報成功，fallback 永不觸發
+    // （Fix P v1.5.197 的根因，勿重演）。
+    if ((quicIsFailoverActive() && quicIsPrimaryPathUnhealthy()) ||
+        (enetControlChannelDown() && quicIsConnected())) {
         static const unsigned char idrMarker = 0x49; // 'I'
         if (quicSendStream(&idrMarker, 1) == 0) {
             Limelog("[VIPLE-MPQUIC] §Q-IDR-QUIC-FIRST: IDR request "
-                    "sent via QUIC stream (failover active, primary unhealthy)\n");
+                    "sent via QUIC stream (ENet down or failover)\n");
         } else {
             Limelog("[VIPLE-MPQUIC] §Q-IDR-QUIC-FIRST: QUIC stream "
                     "send failed — IDR request dropped\n");
@@ -1941,7 +1980,7 @@ static void requestIdrFrame(void) {
                                         false)) {
             Limelog("Request IDR Frame: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
-            if (quicIsFailoverActive()) {
+            if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
                 // §Q-IDR-VIA-QUIC v1.5.177：ENet 死了但 QUIC 還活著。
                 // 改走 QUIC stream #0 送 IDR request 給 server，
                 // 不再靜默丟棄（根因 D 修正）。
@@ -1970,7 +2009,7 @@ static void requestIdrFrame(void) {
                                         false)) {
             Limelog("Request IDR Frame: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
-            if (quicIsFailoverActive()) {
+            if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
                 // §Q-IDR-VIA-QUIC v1.5.177：同上，改走 QUIC stream #0
                 static const unsigned char idrMarker = 0x49;
                 if (quicSendStream(&idrMarker, 1) == 0) {
@@ -1999,11 +2038,14 @@ static void requestInvalidateReferenceFrames(uint32_t startFrame, uint32_t endFr
     // §Q-IDR-QUIC-FIRST v1.5.197 Fix P.1：同 requestIdrFrame()，
     // failover 期間直接走 QUIC stream #0，不走 sendMessageEnet()
     // 的 early bypass（會把 RFI 當 INPUT datagram 送，server 不認識）。
-    if (quicIsFailoverActive() && quicIsPrimaryPathUnhealthy()) {
+    // §Q-REMOTE Fix R.3：同 requestIdrFrame()——ENet 控制通道不可用
+    // 且 QUIC 活著時直接走 stream #0，避開 INPUT-datagram 陷阱。
+    if ((quicIsFailoverActive() && quicIsPrimaryPathUnhealthy()) ||
+        (enetControlChannelDown() && quicIsConnected())) {
         static const unsigned char idrMarker = 0x49; // 'I'
         if (quicSendStream(&idrMarker, 1) == 0) {
             Limelog("[VIPLE-MPQUIC] §Q-IDR-QUIC-FIRST: RFI request "
-                    "sent via QUIC stream (failover active, primary unhealthy)\n");
+                    "sent via QUIC stream (ENet down or failover)\n");
         } else {
             Limelog("[VIPLE-MPQUIC] §Q-IDR-QUIC-FIRST: QUIC stream "
                     "send failed — RFI request dropped\n");
@@ -2026,7 +2068,7 @@ static void requestInvalidateReferenceFrames(uint32_t startFrame, uint32_t endFr
                                     false)) {
         Limelog("Request Invalidate Reference Frames: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
-        if (quicIsFailoverActive()) {
+        if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
             // §Q-IDR-VIA-QUIC v1.5.177：RFI 也走 QUIC fallback。
             // RFI 效果等同 IDR request，server 收到 0x49 就送 IDR。
             static const unsigned char idrMarker = 0x49;
@@ -2063,9 +2105,9 @@ static void confirmLongtermReferenceFrame(uint32_t frameIndex) {
                               false)) {
         Limelog("LTR frame ACK: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
-        if (quicIsFailoverActive()) {
+        if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
             Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: LTR ACK send "
-                    "failed during QUIC failover — ACK dropped "
+                    "failed while QUIC transport alive — ACK dropped "
                     "(suppressing connectionTerminated)\n");
             return;
         }

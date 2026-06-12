@@ -53,7 +53,8 @@ PixArk 20+ 分鐘測試後看 log：
 | # | 項目 | 優先級 | 狀態 |
 |---|---|---|---|
 | Q.r5 | Android 多路徑實機驗測 | **P2 (hw-bound)** | ⚠️ 阻塞。Pixel 5 無 SIM (gsm.sim.state=ABSENT) → cellular 不可用；gnirehtet v2.5.1 在 Android 15 (API 35) VPN 建立失敗。**單路徑已驗 OK (v1.5.202 Pixel 5 實機 adb)**。需 ①插 SIM 走 WiFi+cellular 或 ②換 Android 12-13 裝置 |
-| Q.r6 | 壓力測試 | **P3** | 部分完成（v1.5.233 §Q-PERF 輪）：1080p120/40Mbps 高 pps 壓測 PASS（jitter/ring 全零異常）。**剩**：模擬 10% packet loss 場景——卡注入能力（本機 clumsy 需 admin；host worker 無 net-throttle op），補上後複驗 FEC bucket 修復的有損恢復率 + R.2 端對端 |
+| Q.r6 | 壓力測試 | ✅ **完成** | v1.5.233-235 三輪：1080p120/40Mbps 高 pps PASS；clumsy 8% 丟包驗 FEC bucket 修復（recovered 5074/failed 0，evicted 落數學極限）；§Q-PERF.7 FEC-aware skip 砍 lateAfterSkip 100%、不可恢復幀 −61% |
+| Q.r14 | R.3 殭屍態 | **P2** | v1.5.235 T6b 發現：整 IP 封鎖觸發 QUIC failover 後，解封後 video 未自動恢復、§K.10 停印、ENet 反覆 grace+reconnect。疑 QUIC cnx 在兩 path 長時間 DEAD 後 picoquic idle-close，或 R.3 grace（quicIsConnected 過寬）致 cnx 殭屍時仍 suppress。需 server collect（bestVideoPath/cnx 狀態）對症 |
 | Q.r11 | 遠端高碼率 ABR | **P3** | 遠端 WARP/Tailscale 單路徑碼率須 ≤ 路徑可承載 (~8-15 Mbps)。若要更高碼率穩定 → 評估自適應 bitrate（client 偵測持續丟包 → server 動態降碼，兩端工程量中大）|
 | Q.r12 | §Q-PERF 殘餘候選 | **P3** | v1.5.233 盤點留存：server 送端 fromAddr 來源綁定（WSASendMsg+PKTINFO，多介面送端成立）、audio failover 冗餘（scheduler 死碼活化或移除）、FEC parity 自適應（4+0/4+1/4+2 依 loss）、lossStatsThread 退出後不重生、session map 純 IP key 衝突、UDP socket SO_RCVBUF/non-blocking |
 | Q.r13 | 驗測基礎設施 | **P2** | host worker 包補 net-throttle op + COWORK_TASK_SPEC 注入（collect 參數化）；failover_test_auto.ps1 加 log 收集/斷言/IP 參數化 |

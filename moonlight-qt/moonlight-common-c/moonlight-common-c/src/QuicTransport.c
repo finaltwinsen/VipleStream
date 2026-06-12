@@ -275,6 +275,13 @@ typedef struct _QUIC_JITTER_BUF {
     // 呼叫，用這個計數讓「buffer 為空」的常見情況 O(1) 提前返回。
     // 只在 IO thread 讀寫（insert/deliver/flush 全在 IO thread）。
     int      bufferedCount;
+    // §Q-PERF.7 診斷：timeout 想跳過但缺口屬於仍可重建的 FEC 群組而
+    // 延後的次數（每 tick 計一次）。
+    uint64_t fecDeferred;
+    // §Q-PERF.8 診斷：FEC 重建完成但該 seq 已被跳過/交付的次數——
+    // 與 lateAfterSkip（真實封包遲到）分開，T2 實測 906/910 全是這類，
+    // 混在一起會誤判 timeout 過於激進。
+    uint64_t fecRecoveredLate;
 } QUIC_JITTER_BUF;
 
 static QUIC_JITTER_BUF g_jitterBufs[QUIC_FLOW_COUNT]; // per flow type
@@ -314,6 +321,9 @@ static uint64_t g_fecFailed = 0;
 // §Q-PERF.3 診斷：群組未湊齊（dataPresent != 0xF）就被新群組驅逐或過期
 // 的次數。修復 bucket 碰撞前這個值在高碼率有損路徑會快速累積。
 static uint64_t g_fecEvictedIncomplete = 0;
+// §Q-PERF.8: 標記「目前的 quicJitterInsert 來自 FEC 重建」，讓 diff<0
+// 分支把重建遲到與真實封包遲到分開計數。只在 IO thread 讀寫。
+static int g_fecInsertingRecovered = 0;
 
 // ── Forward declarations ────────────────────────────────────
 
@@ -337,6 +347,8 @@ static void quicJitterPoll(QUIC_TRANSPORT_CTX* ctx);
 static void quicFecOnShard(QUIC_TRANSPORT_CTX* ctx, unsigned char ft, uint8_t fecInfo,
     uint16_t seq, uint8_t* payload, int payloadLen);
 static void quicFecTryRecover(QUIC_TRANSPORT_CTX* ctx, unsigned char ft, QUIC_FEC_GROUP* grp);
+static int  quicFecGapStillCompletable(uint16_t startSeq, int count,
+    uint64_t now, int jitterMaxWaitUs);
 
 // §Q-PERF.2: picoquic_set_path_status 的去重 wrapper。picoquic 端每次
 // 呼叫都無條件排一個 PATH_AVAILABLE/PATH_BACKUP misc frame（sequence
@@ -2299,6 +2311,12 @@ static void quicJitterInsert(QUIC_TRANSPORT_CTX* ctx,
 
     if (diff < 0) {
         jb->dropped++;
+        // §Q-PERF.8：FEC 重建插入但該 seq 已被跳過/交付——獨立計數，
+        // 不汙染 lateAfterSkip（「timeout 過於激進」訊號）。
+        if (g_fecInsertingRecovered) {
+            jb->fecRecoveredLate++;
+            return;
+        }
         // §5a.r4 v1.5.202 Fix Q.5：區分兩種「已交付過的遲到封包」：
         //  (a) 真的被 timeout 跳過的 seq 又遲到 → lateAfterSkip（timeout 太
         //      激進的訊號，應 ~0）。判定：seq 落在最近一次 timeout 跳過的
@@ -2369,6 +2387,18 @@ static void quicJitterCheckTimeout(QUIC_TRANSPORT_CTX* ctx, QUIC_JITTER_BUF* jb,
             uint16_t trySeq = (uint16_t)(jb->deliverNextSeq + i);
             int tidx = trySeq & QUIC_JITTER_BUF_MASK;
             if (jb->slots[tidx].len > 0) {
+                // §Q-PERF.7: 跳過前先看缺口是否屬於「仍有機會重建」的
+                // FEC 群組——是的話讓一拍（quicJitterPoll 每 ~1ms 再來），
+                // 否則 timeout 把馬上能重建的封包跳掉，重建變 late 插入
+                // 白做工（T2 實測 8% 丟包下 906 次輸給 10ms floor）。
+                // 絕對上限 3×maxWait 防止 parity 也全丟時卡住交付。
+                if (ft == QUIC_FLOW_VIDEO &&
+                    now - jb->lastDeliverUs < (uint64_t)jitterMaxWait * 3 &&
+                    quicFecGapStillCompletable(jb->deliverNextSeq, i, now,
+                                               jitterMaxWait)) {
+                    jb->fecDeferred++;
+                    return;
+                }
                 // §5a.fix: i 是正確的跳過距離（uint16_t 模加法保證正）。
                 // 舊寫法 (uint64_t)(trySeq - deliverNextSeq) 在 uint16_t
                 // 邊界繞回時，int 升型導致負值轉 uint64_t 造成溢位。
@@ -2406,6 +2436,37 @@ static void quicJitterPoll(QUIC_TRANSPORT_CTX* ctx) {
 }
 
 // ── §5b FEC decoder ────────────────────────────────────────
+
+// §Q-PERF.7: timeout 跳過前的 FEC 完成度檢查。skip 範圍 [startSeq,
+// startSeq+count) 內任一缺漏 data seq 若屬於 active、年齡 ≤ 2×maxWait、
+// 且尚未湊滿 4 個 shard 的群組 → 回傳 1（該再等，重建可能馬上發生）。
+// 群組的 6 個 shard 在線路上只跨 ~1ms，年齡超過 2×maxWait 還沒湊齊
+// 就是真的丟了不值得等。已湊滿（含已重建）的群組不影響 skip。
+static int quicFecGapStillCompletable(uint16_t startSeq, int count,
+                                      uint64_t now, int jitterMaxWaitUs) {
+    uint64_t ageCap = (uint64_t)jitterMaxWaitUs * 2;
+    for (int g = 0; g < QUIC_FEC_MAX_GROUPS; g++) {
+        QUIC_FEC_GROUP* grp = &g_fecGroups[g];
+        if (!grp->active || now - grp->createTimeUs > ageCap)
+            continue;
+        int have = 0;
+        for (int b = 0; b < QUIC_FEC_DATA_SHARDS; b++)
+            if (grp->dataPresent & (1 << b)) have++;
+        if (have == QUIC_FEC_DATA_SHARDS)
+            continue; // 完整或已重建
+        for (int b = 0; b < QUIC_FEC_PARITY_SHARDS; b++)
+            if (grp->parityPresent & (1 << b)) have++;
+        if (have >= QUIC_FEC_DATA_SHARDS)
+            continue; // 已達重建門檻（quicFecOnShard 會立即重建）
+        for (int b = 0; b < QUIC_FEC_DATA_SHARDS; b++) {
+            if (grp->dataPresent & (1 << b)) continue;
+            uint16_t missSeq = (uint16_t)(grp->baseSeq + b);
+            if ((uint16_t)(missSeq - startSeq) < (uint16_t)count)
+                return 1;
+        }
+    }
+    return 0;
+}
 
 static void quicFecTryRecover(QUIC_TRANSPORT_CTX* ctx, unsigned char ft, QUIC_FEC_GROUP* grp) {
     if (!g_fecRs || grp->maxShardLen <= 0)
@@ -2457,8 +2518,10 @@ static void quicFecTryRecover(QUIC_TRANSPORT_CTX* ctx, unsigned char ft, QUIC_FE
             memcpy(recoveredPkt, &recHdr, QUIC_DGRAM_HEADER_SIZE);
             memcpy(recoveredPkt + QUIC_DGRAM_HEADER_SIZE, shards[i], origLen);
 
+            g_fecInsertingRecovered = 1; // §Q-PERF.8
             quicJitterInsert(ctx, ft, recoveredPkt,
                              QUIC_DGRAM_HEADER_SIZE + origLen);
+            g_fecInsertingRecovered = 0;
             g_fecRecovered++;
             grp->recovered++;
             grp->dataPresent |= (1 << i);
@@ -3166,7 +3229,7 @@ static void quicIoThreadProc(void* context) {
                             // §5a.r3 v1.5.198 Fix Q：加印 maxWait（實際採用的
                             // RTT 自適應 timeout）、maxReorder（reorder 距離峰值）、
                             // toEvents（timeout 事件數）、lateAfterSkip（過早跳過偵測）
-                            Limelog("[VIPLE-MPQUIC] §5a Jitter[%s]: delivered=%llu reordered=%llu dropped=%llu timedOut=%llu maxWait=%uus maxReorder=%u toEvents=%llu lateAfterSkip=%llu fecRedundantLate=%llu\n",
+                            Limelog("[VIPLE-MPQUIC] §5a Jitter[%s]: delivered=%llu reordered=%llu dropped=%llu timedOut=%llu maxWait=%uus maxReorder=%u toEvents=%llu lateAfterSkip=%llu fecRedundantLate=%llu fecDeferred=%llu fecRecoveredLate=%llu\n",
                                     flowNames[ji],
                                     (unsigned long long)jb->delivered,
                                     (unsigned long long)jb->reordered,
@@ -3176,7 +3239,9 @@ static void quicIoThreadProc(void* context) {
                                     jb->maxReorderDist,
                                     (unsigned long long)jb->timeoutEvents,
                                     (unsigned long long)jb->lateAfterSkip,
-                                    (unsigned long long)jb->fecRedundantLate);
+                                    (unsigned long long)jb->fecRedundantLate,
+                                    (unsigned long long)jb->fecDeferred,
+                                    (unsigned long long)jb->fecRecoveredLate);
                         }
                     }
                 }
