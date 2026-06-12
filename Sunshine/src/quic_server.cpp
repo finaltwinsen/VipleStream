@@ -238,8 +238,9 @@ namespace quic_server {
   // 初始 path 選定（-2 → -1 → 0）不開，否則 reinject 會把 IDR 推到
   // standby path 的 picoquic queue → 堆積塞爆。
   bool QuicSession::isInReinjectionWindow() const {
-    if (_reinjectWindowUntil == 0) return false;
-    return picoquic_current_time() < _reinjectWindowUntil;
+    uint64_t until = _reinjectWindowUntil.load(std::memory_order_acquire);
+    if (until == 0) return false;
+    return picoquic_current_time() < until;
   }
 
   // §Q-REINJECT v1.5.172: XLINK SIGCOMM 2021 reinjection 模式。
@@ -694,7 +695,8 @@ namespace quic_server {
 
         // 開 2 秒 reinject 視窗（XLINK 模式）
         constexpr uint64_t REINJECT_WINDOW_US = 2000000;
-        _reinjectWindowUntil = nowUsForEpisode + REINJECT_WINDOW_US;
+        _reinjectWindowUntil.store(nowUsForEpisode + REINJECT_WINDOW_US,
+                                   std::memory_order_release);
         BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-REINJECT-WINDOW: opened (2s) for failover switch";
       }
 
@@ -722,17 +724,20 @@ namespace quic_server {
     }
     bool quicBackpressured = (videoPathHeadroom <= 0);
 
+    // §K.9 LAN MTU boost
+    // §Q-PERF：提出 per-datagram 迴圈——舊位置對 batch 中每個 datagram
+    // 都遍歷全部 path 重設（14 dgrams/frame × 60fps × nb_paths ≈ 每秒
+    // 數千次冗餘寫入）。每次 drain 檢查一次就足夠。
+    for (int i = 0; i < _cnx->nb_paths; i++) {
+      if (_cnx->path[i] != nullptr && _cnx->path[i]->send_mtu < 1500) {
+        _cnx->path[i]->send_mtu = 1500;
+      }
+    }
+
     for (auto &dg : batch) {
       if (dg.isStream) {
         picoquic_add_to_stream(_cnx, 0, dg.data.data(), dg.data.size(), 0);
         continue;
-      }
-
-      // §K.9 LAN MTU boost
-      for (int i = 0; i < _cnx->nb_paths; i++) {
-        if (_cnx->path[i] != nullptr && _cnx->path[i]->send_mtu < 1500) {
-          _cnx->path[i]->send_mtu = 1500;
-        }
       }
 
       uint8_t ft = dg.flowType < 4 ? dg.flowType : 0;

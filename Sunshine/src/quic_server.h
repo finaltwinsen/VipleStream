@@ -184,7 +184,10 @@ namespace quic_server {
     // 不能用 _lastPathSwitchTime，因為連線剛建立時的初始 path 選定
     // （-2 → -1 → 0）也會觸發 PATH-SWITCH 邏輯，誤把 reinject 開了
     // → IDR 推到所有 standby path 的 picoquic queue → 堆積塞爆。
-    uint64_t _reinjectWindowUntil = 0;
+    // §Q-PERF：atomic——IO 執行緒在 drain 內寫入，video 執行緒經
+    // isInReinjectionWindow()（stream.cpp 每 frame）讀取，裸 uint64_t
+    // 是跨執行緒 data race（與 _pathSwitchIdrNeeded 同型問題）。
+    std::atomic<uint64_t> _reinjectWindowUntil{0};
 
     // §Q-PROMOTE-DEBOUNCE 2026-05-27: 防止 Pass 3 emergency-promote
     // 對同一 path 在短時間內重複呼叫。picoquic_set_path_status 是
