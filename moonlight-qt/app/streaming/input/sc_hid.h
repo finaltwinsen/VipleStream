@@ -3,6 +3,9 @@
 #include <SDL_hidapi.h>   // SDL_hid_device + SDLCALL (via begin_code.h)
 #include <SDL_thread.h>   // SDL_Thread + SDL_ThreadFunction
 
+#include <atomic>   // §SC-DEV-LOCK-FIX (review batch 2)
+#include <mutex>    // §SC-DEV-LOCK-FIX (review batch 2)
+
 // §SC-HID: Steam Controller raw-HID passthrough (client side)
 // Manages a background thread that reads raw HID input reports from a locally
 // connected gen-2 Steam Controller — selected by its vendor interface
@@ -45,7 +48,15 @@ private:
     // so direct/Puck/Bluetooth connections are all covered without guessing.
     static constexpr int MAX_SC_DEVS = 8;
     SDL_hid_device* m_devs[MAX_SC_DEVS] = {};
-    int m_devCount = 0;
+    // §SC-DEV-LOCK-FIX：atomic——isActive() 在 SDL 事件執行緒無鎖讀，
+    // 與 start()/stop() 鎖內寫並發；其餘存取都在 m_devMutex 內。
+    std::atomic<int> m_devCount{0};
     SDL_Thread* m_thread = nullptr;
-    volatile bool m_running = false;
+    std::atomic<bool> m_running{false};
+
+    // §SC-DEV-LOCK-FIX (review batch 2)：保護 m_devs/m_devCount 與所有
+    // hidapi 呼叫。readLoop（SC-HID 執行緒）、forwardFeatureRequest
+    // （control stream async callback 執行緒）與 start()/stop() 會碰同
+    // 一組 handle；hidapi 同 handle 跨執行緒並發是 UB。
+    std::mutex m_devMutex;
 };

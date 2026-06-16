@@ -667,9 +667,16 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
                 if (!addedInitial) {
                     Limelog("[VIPLE-MPQUIC] No usable local interface, falling back to UDP\n");
                     StreamConfig.useQuicTransport = 0;
+                    quicDisconnect(); // §Q-FALLBACK-CLEANUP-FIX (review)
                 } else if (quicWaitReady(5000) != 0) {
                     Limelog("[VIPLE-MPQUIC] QUIC handshake didn't complete in 5000ms, falling back to UDP\n");
                     StreamConfig.useQuicTransport = 0;
+                    // §Q-FALLBACK-CLEANUP-FIX (review)：必須關閉背景 QUIC 連線。
+                    // 否則 IO thread 續跑、handshake 可能 5-30s 後才完成 →
+                    // quicIsConnected() 變 true 但 video/audio 已走 UDP，server
+                    // 端看到健康 QUIC session 後把 video 路由進沒人消費的
+                    // datagram → 黑畫面；且 ControlStream 的 R.3 閘門被誤觸發。
+                    quicDisconnect();
                 } else {
                     Limelog("[VIPLE-MPQUIC] QUIC handshake complete, adding additional subflows\n");
                     int added = 1;  // initial subflow already counted
@@ -762,6 +769,7 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
             } else {
                 Limelog("[VIPLE-MPQUIC] QUIC connect failed, falling back to UDP\n");
                 StreamConfig.useQuicTransport = 0;
+                quicDisconnect(); // §Q-FALLBACK-CLEANUP-FIX：idempotent，確保無殘留 cnx
             }
         } else {
             Limelog("[VIPLE-MPQUIC] QUIC init failed, falling back to UDP\n");

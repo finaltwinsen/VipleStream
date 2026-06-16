@@ -154,7 +154,10 @@ namespace crypto {
       // Calling with cipher == nullptr results in a parameter change
       // without requiring a reallocation of the internal cipher ctx.
       if (EVP_DecryptInit_ex(decrypt_ctx.get(), nullptr, nullptr, nullptr, iv->data()) != 1) {
-        return false;
+        // §S11 (review batch 2)：原本誤寫 return false（int 函式中等於
+        // return 0 = 成功碼），DecryptInit 失敗會被當解密成功、以空
+        // plaintext 繼續處理。與同函式其他失敗路徑一致改回 -1。
+        return -1;
       }
 
       auto cipher = tagged_cipher.substr(tag_size);

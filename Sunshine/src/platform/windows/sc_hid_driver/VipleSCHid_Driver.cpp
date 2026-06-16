@@ -166,9 +166,18 @@ NTSTATUS EvtDeviceAdd(IN WDFDRIVER Driver, IN PWDFDEVICE_INIT DeviceInit) {
 
     PDEVICE_CONTEXT ctx = GetDeviceContext(device);
 
-    // ── Default queue：處理描述符 IOCTL（parallel dispatch）────────────────
+    // ── Default queue：處理描述符 / report IOCTL（sequential dispatch）──────
+    // §SC-QUEUE-SERIAL-FIX (review batch 2)：Parallel dispatch 下 Steam 的
+    // GET/SET_FEATURE(0x01)、Sunshine 的 GET_FEATURE(0x03) 輪詢與
+    // WriteFile(0x45/0x04) 會多執行緒並發進 EvtIoDeviceControl，而
+    // EvtRing/EvtHead/EvtTail/SeqCtr/LastResponse 全部無鎖——ScPushEvent
+    // 與 0x03 pop 並發會撕裂 ring（重複 pop、跳號、半寫入事件）。本
+    // driver 所有 handler 都是短同步操作；唯一的長命 request
+    // （IOCTL_HID_READ_REPORT）立刻 forward 進 manual queue，forward 即
+    // 釋放 sequential 配額，不會卡住 queue。Sequential 一次消除全部
+    // 競態，比逐段加 WDFSPINLOCK 更不易漏。
     WDF_IO_QUEUE_CONFIG queueCfg;
-    WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueCfg, WdfIoQueueDispatchParallel);
+    WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueCfg, WdfIoQueueDispatchSequential);
     // mshidumdf.sys 將 HID Internal IOCTL 轉成普通 DeviceControl 再上送 UMDF layer；
     // UMDF2 的 queue 必須掛 EvtIoDeviceControl（不是 Internal），否則 IOCTL 永不分派。
     queueCfg.EvtIoDeviceControl = EvtIoDeviceControl;

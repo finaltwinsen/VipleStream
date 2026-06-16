@@ -127,6 +127,8 @@ moonlight-qt/libs/mac/
 # saved as .txt — anchored to root so subprojects' own files aren't ignored.
 /build_*.txt
 /build_*.log
+/build_*.out
+/build_*.err
 /build_out.txt
 
 # ── Compiled objects / binaries ──

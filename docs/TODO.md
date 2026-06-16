@@ -19,7 +19,7 @@
 | **Active (verify)** | **§K.dd.revert.1 / §K.dd.fallback** display device | v1.4.156 ghost-check + v1.5.201 §K.dd.fallback（configure_display apply 前用 enumerate_devices 驗證 output_name 存在；不存在→跳過 DD 設定 + 用預設顯示器續行，避免 Windows 拓樸 API 卡死）已 ship。.226 指定顯示器曾卡死服務 (v1.5.200 期間，log 停寫 35 分鐘)，已暫設 `disabled` 解卡。待重設 `ensure_only_display` + 指定有效顯示器，確認 fallback 生效不卡死 |
 | **Active (P0)** | **§N.5.bug** Android 檔案傳輸 SSL 錯誤 | 待使用者在 Android 重現 + 拿 server log，確認錯誤在哪個階段送出 |
 | **Active (verify)** | **§N.5** Android FileTransferClient runtime | 待實機在串流 session 跑 Send/Receive flow，確認 Pixel 5 Android quirks |
-| **Active (post-v1.4.12)** | **§M.2** 雙使用者並發 streaming 驗測 | Ubuntu VM 軟編碼路線可先跑；NVENC 並發等實體機 |
+| **Active (batch 2 待 commit)** | **§M.2** session ownership cleanup | Fix 1（idle watchdog→terminate）/ Fix 3（serverinfo owner XML）/ Fix 4（client takeover UI）已 committed b83c9807。Fix 2（QUIC idle timeout 30s）在 batch 2 working tree。驗測 2026-06-16 全過：L1 smoke ✅ L2 R.3 ✅ L3 reconnect×3 ✅。待洩漏 grep → commit batch 2。原 VM 並發驗測仍 deferred |
 | **Active (long-running)** | **§J.3.e.2.i.8 Phase 2.5** FRUC native source | 殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Active (β.10)** | **§J.3.e.X Path β.10** Linux/AMD/Intel 覆蓋 | §β.12.fix v1.4.193 PASS；剩：視覺品質主觀確認（tiled Conv vs coopmat）+ Intel iGPU 驗測 |
 | **Deferred (driver-bound)** | **§K.4** Wayland portal teardown | `Restart=always` 緩解已 ship；需可重現串流環境（有 GPU 的 Linux 機）才能根治。dev/cli-quic-linux branch hygiene fix：startup portal warning 的雙 register noise 改用 QT_DESKTOP_FILE_NAME env var 預設 + Linux 上 gate 掉 app.setDesktopFileName()——但 Qt 內部仍會 double-register，warning 沒完全消，且這是 client startup noise，跟 server-side PipeWire portal teardown 是不同層問題 |
@@ -54,10 +54,13 @@ PixArk 20+ 分鐘測試後看 log：
 |---|---|---|---|
 | Q.r5 | Android 多路徑實機驗測 | **P2 (hw-bound)** | ⚠️ 阻塞。Pixel 5 無 SIM (gsm.sim.state=ABSENT) → cellular 不可用；gnirehtet v2.5.1 在 Android 15 (API 35) VPN 建立失敗。**單路徑已驗 OK (v1.5.202 Pixel 5 實機 adb)**。需 ①插 SIM 走 WiFi+cellular 或 ②換 Android 12-13 裝置 |
 | Q.r6 | 壓力測試 | ✅ **完成** | v1.5.233-235 三輪：1080p120/40Mbps 高 pps PASS；clumsy 8% 丟包驗 FEC bucket 修復（recovered 5074/failed 0，evicted 落數學極限）；§Q-PERF.7 FEC-aware skip 砍 lateAfterSkip 100%、不可恢復幀 −61% |
-| Q.r14 | R.3 殭屍態 | **P2** | v1.5.235 T6b 發現：整 IP 封鎖觸發 QUIC failover 後，解封後 video 未自動恢復、§K.10 停印、ENet 反覆 grace+reconnect。疑 QUIC cnx 在兩 path 長時間 DEAD 後 picoquic idle-close，或 R.3 grace（quicIsConnected 過寬）致 cnx 殭屍時仍 suppress。需 server collect（bestVideoPath/cnx 狀態）對症 |
+| Q.r14 | R.3 殭屍態 | ✅ **Verified (2026-06-16)** | §Q-RECOVERY-IDR-FIX（1s dwell threshold）修復確認。R.3 防火牆測試（雙向封鎖 UDP 47998-48010）：封鎖時正確凍結、解封時正確恢復。server log 確認 §Q-SERVER-GRACE 觸發（11:07:30）+ loss 0%→3.1% + video 17→2 Mbps → 解封後恢復串流。根因：原 v1.5.235 是只封 QUIC port / 單向封鎖，multipath failover 繞過；正確測法需雙向封鎖全 UDP 47998-48010 |
 | Q.r11 | 遠端高碼率 ABR | **P3** | 遠端 WARP/Tailscale 單路徑碼率須 ≤ 路徑可承載 (~8-15 Mbps)。若要更高碼率穩定 → 評估自適應 bitrate（client 偵測持續丟包 → server 動態降碼，兩端工程量中大）|
 | Q.r12 | §Q-PERF 殘餘候選 | **P3** | v1.5.233 盤點留存：server 送端 fromAddr 來源綁定（WSASendMsg+PKTINFO，多介面送端成立）、audio failover 冗餘（scheduler 死碼活化或移除）、FEC parity 自適應（4+0/4+1/4+2 依 loss）、lossStatsThread 退出後不重生、session map 純 IP key 衝突、UDP socket SO_RCVBUF/non-blocking |
 | Q.r13 | 驗測基礎設施 | **P2** | host worker 包補 net-throttle op + COWORK_TASK_SPEC 注入（collect 參數化）；failover_test_auto.ps1 加 log 收集/斷言/IP 參數化 |
+| Q.r15 | Android common-c 對齊（batch 1+2） | ✅ **完成 (v1.5.241)** | QuicTransport.c/ControlStream.c/Connection.c/InputStream.c 四檔整檔對齊（Android 原停在 v1.5.224-233 各快照、blob 比對證實無 Android 特化分歧；PlatformNetIf.h 的 JNI 注入宣告為 Android 專有、保留）；APK 建置通過。**實機驗測未做**（Pixel 5 串流複查待 host 空出） |
+| Q.r17 | §SC-HID driver 簽章重建 | **P1（部署前必做）** | §SC-QUEUE-SERIAL-FIX 已進 driver 原始碼且編譯通過，但 signtool 以 LocalMachine 憑證簽署需管理員 shell（本輪簽章失敗、copy-back 未跑）→ **Server zip 裡打包的 driver DLL 仍是舊 Parallel 版**。需管理員 PowerShell 跑 `Sunshine\src\platform\windows\sc_hid_driver\Build-ScHidDriver.ps1` 再重跑 build_sunshine。建議順手給 build_sunshine.cmd 加 driver DLL 過期檢查（cpp mtime > dll mtime 即 fail），落實鐵律 4 |
+| Q.r16 | review batch 2 已知殘留（驗測觀察項） | **P3** | **驗測 PASS (2026-06-16)**：L1 30s smoke ✅、L2 R.3 firewall ✅、L3 kill+reconnect×3 ✅。殘留觀察項（不阻 commit）：①S5 stats 快取 idle 凍結（§K.10 log 顯示舊值，診斷限定）②invokeRecvHandler heap alloc per datagram（可改 shared_ptr+atomic swap）③LiGetEstimatedRttInfo 無鎖讀 peer（pre-existing TOCTOU）④A1 tick 在 video 全死但 control 活時仍 ramp（既有假設）|
 
 備註：standalone cmake configure picoquic（除錯 picoquic 本身）需 pkg-config + OpenSSL dev headers；一般走 build script 不需。
 
@@ -77,8 +80,13 @@ static。要：
 - ~~display Hz=0 legacy renderer fallback 是否需補~~ **2026-05-29 程式碼確認：不需補。** ffmpeg.cpp ratio controller 對 displayHz 全程守 `>0`：Hz=0 時 `recvPctOfDisplay` fallback 到 recvPct (2874)、`frameBudgetMs` fallback 120Hz=8.33ms (2909)、server-fps 變更請求被 `if (displayHz>0 ...)` 跳過 (2942) 但本地 `setEffectiveFrucRatio` 仍正常 (2950)，無除零 ✅
 - 進 2x 後 server recv 從 ~180 掉 ~140 是否仍有（alignment gate 應消除，待串流複查）
 
-### §M.2 雙使用者並發 VM 驗測清單
+### §M.2 Session Ownership 修復狀態
 
+**已 committed (b83c9807)：** Fix 1（idle watchdog→terminate）+ Fix 3（serverinfo owner XML）+ Fix 4（client takeover UI 含 QML 對話框）。
+**在 batch 2 working tree：** Fix 2（quic_server.cpp `picoquic_set_default_idle_timeout` 30s）。
+**驗測 (2026-06-16 自動化 + 手動 R.3)：** L1 smoke PASS / L2 R.3 防火牆 PASS / L3 kill+reconnect×3 PASS。
+
+原 §M.2 雙使用者並發 VM 驗測（deferred）：
 - 雙 user account + per-user systemd service（不同 port）
 - Xdummy virtual display per user
 - 兩個 client 同時連 → 確認 display / audio / input 不串擾

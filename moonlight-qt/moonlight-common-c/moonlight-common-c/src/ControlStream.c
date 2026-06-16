@@ -947,11 +947,22 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
                 PltSleepMs(1);
                 PltLockMutex(&enetMutex);
 
+                // §Q-ENET-RECONNECT-GUARD (review)：放鎖睡眠期間
+                // §Q-ENET-RECONNECT 路徑可能在持鎖下 enet_peer_reset(peer)
+                // + enet_host_destroy(client) 並設 NULL。重取鎖後若資源已
+                // 被銷毀，enet_host_service(NULL) 會立即 NULL 解參考、
+                // 讀 peer->state 也是 NULL deref。入口 null-guard 只檢查一次、
+                // 覆蓋不到迴圈內（對照 flushInputOnControlStream 的 Fix J）。
+                if (!peer || !client) {
+                    err = -1;
+                    break;
+                }
+
                 // Try to send the packet again
                 err = enet_host_service(client, NULL, 0);
             }
 
-            if (err >= 0 && peer->state == ENET_PEER_STATE_CONNECTED && !packetFreed && !isPacketSentWaitingForAck(enetPacket)) {
+            if (peer && err >= 0 && peer->state == ENET_PEER_STATE_CONNECTED && !packetFreed && !isPacketSentWaitingForAck(enetPacket)) {
                 Limelog("Control message took over 10 ms to send (net latency: %u ms | packet loss: %f%%)\n",
                         peer->roundTripTime, peer->packetLoss / (float)ENET_PEER_PACKET_LOSS_SCALE);
             }
@@ -1679,6 +1690,17 @@ enet_reconnect_wait:
             {
                 ENetAddress remoteAddress, localAddress;
                 ENetEvent reconnEvent;
+                // §Q-ENET-LOCAL-PUBLISH-FIX (review batch 2)：連線嘗試期間
+                // 不發布全域 client/peer。舊版在鎖內先寫全域再解鎖，接著無鎖
+                // 跑 serviceEnetHost(…, 5000)——此時 enetReconnectPending 已歸
+                // 零、peer 非 NULL，inputSendThread / lossStatsThread 會在鎖內
+                // 對同一個 ENetHost 做 enet_peer_send / enet_host_service，與
+                // 本執行緒的無鎖 serviceEnetHost 形成資料競爭（ENet 非
+                // thread-safe）。改用區域變數：物件在 CONNECT 完成前只有本
+                // 執行緒看得到，無鎖 service 是安全的；其他執行緒這段期間
+                // 看到 peer==NULL，照既有 Fix K / Fix R.2 路徑走 QUIC fallback。
+                ENetHost* newClient;
+                ENetPeer* newPeer;
 
                 enet_address_set_address(&localAddress, (struct sockaddr *)&LocalAddr, AddrLen);
                 enet_address_set_port(&localAddress, 0);  // OS 分配新 port
@@ -1686,53 +1708,71 @@ enet_reconnect_wait:
                 enet_address_set_address(&remoteAddress, (struct sockaddr *)&RemoteAddr, AddrLen);
                 enet_address_set_port(&remoteAddress, ControlPortNumber);
 
-                PltLockMutex(&enetMutex);
-                client = enet_host_create(RemoteAddr.ss_family,
-                                          LocalAddr.ss_family != 0 ? &localAddress : NULL,
-                                          1, CTRL_CHANNEL_COUNT, 0, 0);
-                if (!client) {
-                    PltUnlockMutex(&enetMutex);
+                // 區域物件尚未發布 → 不需要 enetMutex
+                newClient = enet_host_create(RemoteAddr.ss_family,
+                                             LocalAddr.ss_family != 0 ? &localAddress : NULL,
+                                             1, CTRL_CHANNEL_COUNT, 0, 0);
+                if (!newClient) {
                     Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: enet_host_create "
                             "failed, retrying...\n");
                     continue;  // 1 秒後重試
                 }
 
-                client->intercept = ignoreDisconnectIntercept;
-                enet_socket_set_option(client->socket, ENET_SOCKOPT_QOS, 1);
+                newClient->intercept = ignoreDisconnectIntercept;
+                enet_socket_set_option(newClient->socket, ENET_SOCKOPT_QOS, 1);
 
-                peer = enet_host_connect(client, &remoteAddress,
-                                         CTRL_CHANNEL_COUNT, ControlConnectData);
-                PltUnlockMutex(&enetMutex);
-
-                if (!peer) {
-                    PltLockMutex(&enetMutex);
-                    enet_host_destroy(client); client = NULL;
-                    PltUnlockMutex(&enetMutex);
+                newPeer = enet_host_connect(newClient, &remoteAddress,
+                                            CTRL_CHANNEL_COUNT, ControlConnectData);
+                if (!newPeer) {
+                    enet_host_destroy(newClient);
                     Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: enet_host_connect "
                             "failed, retrying...\n");
                     continue;
                 }
 
-                // 等待連線完成（5 秒超時）
-                int cErr = serviceEnetHost(client, &reconnEvent, 5000);
+                // 等待連線完成（5 秒超時）。物件僅本執行緒可見，無鎖安全。
+                int cErr = serviceEnetHost(newClient, &reconnEvent, 5000);
                 if (cErr > 0 && reconnEvent.type == ENET_EVENT_TYPE_CONNECT) {
-                    enet_host_flush(client);
-                    enet_peer_timeout(peer, 2, 10000, 10000);
+                    // 仍在未發布狀態下完成 flush 與 timeout 設定
+                    enet_host_flush(newClient);
+                    enet_peer_timeout(newPeer, 2, 10000, 10000);
+
+                    // 連線完成 → 鎖內一次性發布給其他執行緒
+                    PltLockMutex(&enetMutex);
+                    client = newClient;
+                    peer = newPeer;
                     // §Q-BYPASS-LOG-RESET v1.5.197 Fix P.2：ENet 重連後
                     // 重置 bypass log 計數器，讓下次 failover 的
                     // bypass 動作可見（診斷改善）。
                     bypassLogCount = 0;
-                    enetReconnecting = 0; // §Q-REMOTE Fix R.3：控制平面切回 ENet
+                    // §Q-DISCONNECT-PENDING-FIX (review)：清掉重連前殘留的
+                    // disconnectPending。若由 server DISCONNECT 觸發重連
+                    //（timeout/DISCONNECT 事件路徑進入時旗標已為 true），
+                    // 不歸零會讓重連成功後第一個安靜輪次立刻走 disconnect
+                    // 分支 → 拆掉剛建好的連線 → 每 ~1s 重連活鎖、輸入脈衝震盪。
+                    // pending disconnect 屬於已在上方銷毀的舊 peer；新連線
+                    // 若真收到新 DISCONNECT，intercept hook 會重新設 true。
+                    disconnectPending = false;
+                    // §Q-REMOTE Fix R.3：發布完成後才打開控制平面的 ENet 路徑
+                    //（順序刻意：先讓 peer 非 NULL、再清 reconnecting；無鎖
+                    // 讀者不論看到哪種交錯，至少一個條件成立都會安全走 QUIC）。
+                    enetReconnecting = 0;
+                    PltUnlockMutex(&enetMutex);
                     Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: ENet reconnected! "
                             "(seq continues from %u)\n", currentEnetSequenceNumber);
                     goto enet_main_loop;  // 回到主事件迴圈
                 }
 
-                // 連線失敗 → 清理，下一秒重試
-                PltLockMutex(&enetMutex);
-                if (peer) { enet_peer_reset(peer); peer = NULL; }
-                if (client) { enet_host_destroy(client); client = NULL; }
-                PltUnlockMutex(&enetMutex);
+                // 連線失敗 → 清理區域物件（未發布、僅本執行緒可見，無鎖
+                // 即可；thread 中斷時 serviceEnetHost 回 -1 也走這裡，無洩漏）
+                if (cErr > 0 && reconnEvent.type == ENET_EVENT_TYPE_RECEIVE &&
+                    reconnEvent.packet) {
+                    // 防禦：理論上 verify-connect 前不會收到 RECEIVE，但若
+                    // 發生，packet 不銷毀會洩漏
+                    enet_packet_destroy(reconnEvent.packet);
+                }
+                enet_peer_reset(newPeer);
+                enet_host_destroy(newClient);
                 Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: connect attempt failed "
                         "(err=%d), retrying...\n", cErr);
             }

@@ -78,6 +78,17 @@ namespace quic_server {
 
     void setRecvHandler(RecvHandler handler);
 
+    // §Q-RECVHANDLER-FIX (review)：handler 是否已註冊。stream.cpp 原本
+    // 用 process 級 static 旗標守註冊，導致第二條 session 起的新
+    // QuicSession 永遠拿不到 handler（QUIC failover/IDR/FEC/ping 全
+    // 靜默失效）。改由各 session 自身狀態回報，呼叫端每幀檢查重註冊。
+    bool hasRecvHandler() const;
+
+    // §Q-RECVHANDLER-FIX：IO thread 在 callback 內呼叫 handler，與
+    // broadcast thread 的 setRecvHandler 賦值跨執行緒——透過此函式
+    // 在鎖內取一份 copy 再於鎖外呼叫，避免 std::function 撕裂讀。
+    void invokeRecvHandler(uint8_t flowType, const uint8_t *data, size_t len);
+
     std::vector<SubflowStats> getStats() const;
 
     bool isReady() const;
@@ -89,8 +100,19 @@ namespace quic_server {
   private:
     friend class QuicListener;
 
+    // §Q-CNX-ATOMIC-FIX (review batch 2)：_cnx 僅限 IO 執行緒存取
+    // （drainPendingToQuic / picoquicCallback / stop() join 之後）。
+    // sender / stats 執行緒一律改讀 _ready——IO 執行緒在 callback_close
+    // 寫 nullptr 後 picoquic 隨即 free cnx，跨執行緒讀是 TOCTOU UAF。
     picoquic_cnx_t *_cnx;
+
+    // §Q-CNX-ATOMIC-FIX：連線是否 ready。IO 執行緒在 session 建立時
+    // 設 true、偵測到 disconnecting / callback_close / stop() 設 false；
+    // 其他執行緒只讀此 atomic，不得 dereference _cnx。
+    std::atomic<bool> _ready{false};
+
     RecvHandler _recvHandler;
+    mutable std::mutex _recvHandlerMutex; // §Q-RECVHANDLER-FIX：保護 _recvHandler 跨執行緒讀寫
 
     // §K.4 fix: video/audio threads enqueue into _pendingQueue;
     // the IO thread drains it via drainPendingToQuic().
@@ -116,6 +138,15 @@ namespace quic_server {
     mutable std::mutex _pathMutex;
     std::vector<uint64_t> _activePaths{0};
 
+    // §Q-STATS-CACHE-FIX (review batch 2)：path quality 快取。
+    // picoquic_get_path_quality 只能在 IO 執行緒呼叫（picoquic 單執行緒
+    // 約束）；statsLoop 原本直接呼叫會與 ioLoop 並行走訪可能正被刪除
+    // 的 path 物件。改由 IO 執行緒在 drainPendingToQuic 的 §K.11 限頻
+    // 區塊內更新快取，getStats() 只讀快取。
+    mutable std::mutex _statsCacheMutex;
+    std::vector<SubflowStats> _statsCache;
+    void updateStatsCache();  // 僅限 IO 執行緒呼叫
+
     // RR cursor for REDUNDANT scheduler (rotates the preferred path so
     // picoquic spreads load across subflows over consecutive frames).
     int _redundantRR = 0;
@@ -130,6 +161,20 @@ namespace quic_server {
     // 只延遲震盪不防止震盪 → 改為無條件 sticky。
     // _lastPathSwitchTime 僅用於 diagnostic log。
     uint64_t _lastPathSwitchTime = 0;  // picoquic_current_time() µs
+
+    // §Q-RECOVERY-IDR-FIX (review batch 2)：是否曾經選定過有效 video
+    // path（bestVideoPath ≥ 0）。用於區分「初始 path 選定的 -1 → 0」
+    // （不可觸發 IDR——見 §Q-IDR-INIT-FIX 啟動期 IDR 風暴教訓）與
+    // 「全 path 失效後恢復的 -1 → M」（必須觸發 IDR + reinject 視窗，
+    // 否則 client decoder 凍結，R.3 殭屍態）。僅 IO 執行緒
+    // （drainPendingToQuic）讀寫，不需同步。
+    bool _hadVideoPathBefore = false;
+
+    // §Q-RECOVERY-IDR-FIX：M → -1 轉換的時刻（µs）。-1 → M 恢復時
+    // 要求 -1 駐留 ≥1s 才觸發 IDR loop——亞秒級的全 path 抖動（單輪
+    // RTO spike、nb_paths 縮放）期間 video 仍經 cnx-level queue 正常
+    // 送出，不需要 IDR。僅 IO 執行緒讀寫。
+    uint64_t _videoPathLostTime = 0;
 
     // §Q-PATH-SWITCH-IDR 2026-05-27: bestVideoPath 切換時自動要求 IDR。
     // drainPendingToQuic() 設 flag → stream.cpp video 送出迴圈消費。

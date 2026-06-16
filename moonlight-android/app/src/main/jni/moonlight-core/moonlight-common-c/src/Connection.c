@@ -561,10 +561,22 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
                 }
 
                 // §Q-RT-PREFER 2026-05-30 — Route-table-preferred interface.
+                //
+                // LocalAddr was resolved at STAGE_NAME_RESOLUTION via
+                // getLocalAddressByUdpConnect(), which does unbound UDP
+                // connect()+getsockname() to ask the kernel: "which local
+                // IP would you use to reach RemoteAddr?"  Match that IP
+                // against the enumerated interfaces to find the one the
+                // kernel actually prefers.  If found, try it first as
+                // path 0 — this avoids the "WiFi before Tailscale"
+                // misordering that causes handshake stalls when the server
+                // is on a VPN overlay (100.x CGNAT) but WiFi is enumerated
+                // first.
                 int routePreferredIdx = -1;
                 for (int i = 0; i < ifCount; i++) {
                     if (!interfaces[i].up) continue;
                     if (interfaces[i].family != serverFamily) continue;
+                    // Compare only IP, ignore port (LocalAddr has RTSP port set)
                     if (serverFamily == AF_INET) {
                         struct sockaddr_in* la = (struct sockaddr_in*)&LocalAddr;
                         struct sockaddr_in* ia = (struct sockaddr_in*)&interfaces[i].addr;
@@ -586,12 +598,18 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
                             ? interfaces[routePreferredIdx].name
                             : "(none, using first-match)");
 
-                // §Q-MP-REACH — Two-pass initial subflow selection:
-                //   Pass 1: Route-preferred interface (§Q-RT-PREFER)
-                //   Pass 2: First-match fallback (original behavior)
+                // §Q-MP-REACH 2026-05-23 — Pick the interface that can
+                // actually reach the peer.  Skip virtual/unknown adapters
+                // (Hyper-V, UsbNcm, VMware) for initial path — they typically
+                // can't reach the LAN peer and waste probe time.
+                //
+                // Two-pass selection:
+                //   Pass 1: Try the route-preferred interface (§Q-RT-PREFER)
+                //   Pass 2: Fallback to first-match scan (original behavior)
                 int addedInitial = 0;
                 int initialIfIdx = -1;
 
+                // Pass 1: Route-preferred interface
                 if (routePreferredIdx >= 0) {
                     int rp = routePreferredIdx;
                     if (interfaces[rp].up &&
@@ -617,10 +635,11 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
                     }
                 }
 
+                // Pass 2: Fallback — first-match scan (original behavior)
                 if (!addedInitial) {
                     for (int i = 0; i < ifCount; i++) {
                         if (i == routePreferredIdx)
-                            continue;
+                            continue;  // already tried in Pass 1
                         if (!interfaces[i].up)
                             continue;
                         if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK)
@@ -642,14 +661,22 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
                                     interfaces[i].index);
                             break;
                         }
+                        // Probe failed (no route to peer) — try next interface.
                     }
                 }
                 if (!addedInitial) {
                     Limelog("[VIPLE-MPQUIC] No usable local interface, falling back to UDP\n");
                     StreamConfig.useQuicTransport = 0;
+                    quicDisconnect(); // §Q-FALLBACK-CLEANUP-FIX (review)
                 } else if (quicWaitReady(5000) != 0) {
                     Limelog("[VIPLE-MPQUIC] QUIC handshake didn't complete in 5000ms, falling back to UDP\n");
                     StreamConfig.useQuicTransport = 0;
+                    // §Q-FALLBACK-CLEANUP-FIX (review)：必須關閉背景 QUIC 連線。
+                    // 否則 IO thread 續跑、handshake 可能 5-30s 後才完成 →
+                    // quicIsConnected() 變 true 但 video/audio 已走 UDP，server
+                    // 端看到健康 QUIC session 後把 video 路由進沒人消費的
+                    // datagram → 黑畫面；且 ControlStream 的 R.3 閘門被誤觸發。
+                    quicDisconnect();
                 } else {
                     Limelog("[VIPLE-MPQUIC] QUIC handshake complete, adding additional subflows\n");
                     int added = 1;  // initial subflow already counted
@@ -742,6 +769,7 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
             } else {
                 Limelog("[VIPLE-MPQUIC] QUIC connect failed, falling back to UDP\n");
                 StreamConfig.useQuicTransport = 0;
+                quicDisconnect(); // §Q-FALLBACK-CLEANUP-FIX：idempotent，確保無殘留 cnx
             }
         } else {
             Limelog("[VIPLE-MPQUIC] QUIC init failed, falling back to UDP\n");

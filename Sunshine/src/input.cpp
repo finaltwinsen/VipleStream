@@ -1227,6 +1227,15 @@ namespace input {
 
     bool reconnect_done = false;
     int iter = 0;
+    // §SC-REOPEN-BACKOFF-FIX (review batch 2)：reopen 退避。
+    // VipleSCHidOpenDirect 刻意繞過 VipleSCHidOpen 的 5s 節流（poll
+    // thread 自管 handle 生命週期），但裝置長期缺席時每輪（20ms）重開
+    // = 每秒 ~50 次 SetupDiGetClassDevs 全列舉 + CreateFile 探測。
+    // 策略：前 25 次失敗（~500ms）維持每輪快速重試（涵蓋 ForceReconnect
+    // 後 PnP 重新列舉、與裝置剛消失的窗口），之後每 50 輪（~1s）一次，
+    // 連續 >75 次再放慢到每 250 輪（~5s）。裝置一開成功即全部歸零。
+    int reopen_fail_streak = 0;
+    int reopen_cooldown = 0;   // 還要跳過幾輪才再嘗試 reopen
 
     while (true) {
       auto inp = weak_inp.lock();
@@ -1234,9 +1243,21 @@ namespace input {
 
       // Reopen if handle was closed by reconnect or device removal.
       if (!poll_h) {
-        poll_h = VipleSCHidOpenDirect();
-        if (poll_h) {
-          BOOST_LOG(info) << "[SC-HID] Polling thread handle reopened: " << VipleSCHidLastDiag();
+        if (reopen_cooldown > 0) {
+          --reopen_cooldown;
+        }
+        else {
+          poll_h = VipleSCHidOpenDirect();
+          if (poll_h) {
+            reopen_fail_streak = 0;
+            BOOST_LOG(info) << "[SC-HID] Polling thread handle reopened: " << VipleSCHidLastDiag();
+          }
+          else {
+            ++reopen_fail_streak;
+            if (reopen_fail_streak > 75) reopen_cooldown = 250;       // ~5s
+            else if (reopen_fail_streak > 25) reopen_cooldown = 50;   // ~1s
+            // else：不退避，下一輪（20ms）再試——剛消失/剛 reconnect 要快
+          }
         }
       }
 
@@ -1262,6 +1283,11 @@ namespace input {
         if (poll_h) { VipleSCHidClose(poll_h); poll_h = nullptr; }
         int rc = VipleSCHidForceReconnect();
         BOOST_LOG(info) << "[SC-HID] Device reconnect result=" << rc;
+        // §SC-REOPEN-BACKOFF-FIX (review batch 2)：reconnect 後重置退避，
+        // 重啟快速重試窗口——PnP 重新列舉通常 <500ms 完成，poll handle
+        // 要能立刻接回。
+        reopen_fail_streak = 0;
+        reopen_cooldown = 0;
         if (rc) {
           poll_h = VipleSCHidOpenDirect();
           if (poll_h) {

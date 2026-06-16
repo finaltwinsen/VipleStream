@@ -6,6 +6,7 @@
 // standard includes
 #include <fstream>
 #include <future>
+#include <mutex>  // §S11 (review batch 2)：decryptMutex / abrMutex
 #include <queue>
 
 // lib includes
@@ -419,7 +420,11 @@ namespace stream {
     std::thread audioThread;
     std::thread videoThread;
 
-    std::chrono::steady_clock::time_point pingTimeout;
+    // §S11-PING-ATOMIC-FIX (review batch 2)：QUIC stream #0 的 0x50 ping
+    // handler 在 picoquic ioLoop 執行緒寫入，與 controlBroadcastThread 的
+    // 讀寫（ping timeout 檢查 / §Q-SERVER-GRACE 延長）競態。atomic 的
+    // operator= 與隱式轉換讓既有呼叫點語法零改動。
+    std::atomic<std::chrono::steady_clock::time_point> pingTimeout;
 
     safe::shared_t<broadcast_ctx_t>::ptr_t broadcast_ref;
 
@@ -467,6 +472,15 @@ namespace stream {
       // 上次收到 FEC status 的時刻（ENet 或 QUIC）。ping tick 以此判斷
       // 「FEC 回報是否活躍」：>600ms 無 status = 上個窗口零 missing。
       std::chrono::steady_clock::time_point lastFecStatusTime{};
+
+      // §S11-ABR-LOCK-FIX (review batch 2)：ABR / adaptive-FEC 狀態鎖。
+      // QUIC recv handler 在 picoquic ioLoop 執行緒跑 FEC 調整 +
+      // run_abr_aimd，與 controlBroadcastThread 的 loss-stats /
+      // SS_FRAME_FEC / ping-tick 併發——zeroLossStreak、lastLossTime、
+      // fecAccumStart、lastFecStatusTime、bitrateZeroLossStreak 與
+      // target/applied 的 check-then-act 全是 data race。所有 AIMD / FEC
+      // 入口一律先取這把鎖（run_abr_aimd 由呼叫者持鎖呼叫）。
+      std::mutex abrMutex;
     } video;
 
     struct {
@@ -500,6 +514,14 @@ namespace stream {
 
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
+
+      // §S11-DECRYPT-LOCK-FIX (review batch 2)：control 解密狀態鎖。
+      // cipher（EVP ctx）與 incoming_iv 由 controlBroadcastThread（ENet）
+      // 與 picoquic ioLoop 執行緒（§Q-INPUT-QUIC-FALLBACK 經
+      // control_server.call 重入 IDX_ENCRYPTED handler）共用——併發解密
+      // 會撕裂 IV / EVP 內部狀態 → 'Failed to verify tag' →
+      // session::stop() 誤殺整條串流。
+      std::mutex decryptMutex;
     } control;
 
     std::uint32_t launch_session_id;
@@ -1099,6 +1121,11 @@ namespace stream {
   // 不在此 raise idr_events：降速時 NVENC reconfigure 內建 forceIDR
   // （video.cpp 依方向決定）；回升平滑過渡不需要 IDR。舊版的 raise 造成
   // 每次 bitrate 變更雙重 IDR（reconfigure 一個 + cooldown 後再一個）。
+  //
+  // §S11-ABR-LOCK-FIX (review batch 2)：呼叫者必須持有
+  // session->video.abrMutex（bitrateZeroLossStreak 與 target/applied 的
+  // check-then-act 非原子）。內部的 bitrateEvents->raise 自帶 event 鎖、
+  // 不回呼任何會取 abrMutex 的程式碼，無鎖序問題。
   void run_abr_aimd(session_t *session, int lossCount, long long elapsedMs, const char *src) {
     int maxBr = session->video.configuredBitrateKbps;
     if (maxBr <= 0 || !session->video.autoAdjustBitrate) {
@@ -1110,7 +1137,11 @@ namespace stream {
     int target = session->video.targetBitrateKbps.load();
     if (target <= 0) target = applied;
 
-    int minBr = std::max(2000, maxBr * 15 / 100);  // floor: 2 Mbps or 15%
+    // §ABR-FLOOR-FIX (review): floor 不可超過 cap。使用者設定低碼率
+    // （rtsp 扣 FEC/audio/overhead 後 maxBr < 2000，行動網路常見）時，
+    // 舊式 max(2000, …) 會讓 floor > cap → clamp 後 target 恆等於 2000，
+    // 反而把 encoder 拉到超過使用者上限且 AIMD 削減完全失效。
+    int minBr = std::min(maxBr, std::max(2000, maxBr * 15 / 100));  // floor: 2 Mbps 或 15%，且 ≤ cap
 
     if (lossCount > 0) {
       // 丟包：放棄回升累積（target 收斂回 applied），按嚴重度乘法削減
@@ -1151,6 +1182,34 @@ namespace stream {
     }
   }
 
+  // §A1-QUIC-TICK-FIX (review batch 2)：零丟包 AIMD tick 共用實作。
+  // 原 §ABR-RAMP-TICK v1.5.218 只掛在 ENet 的 IDX_PERIODIC_PING——
+  // QUIC-only（ENet 斷線）期間 client 的 periodic ping 改走 QUIC
+  // stream #0（0x50，~100ms 一次；見 ControlStream.c lossStatsThreadFunc），
+  // server 端收不到任何零丟包輪 → AIMD cut 後永不回升。抽成共用，
+  // ENet / QUIC 兩個 ping 入口都呼叫。
+  //
+  // 執行緒不限（ENet=controlBroadcastThread、QUIC=picoquic ioLoop），
+  // 內部以 video.abrMutex 序列化（§S11-ABR-LOCK-FIX）；呼叫者不可持鎖。
+  void abr_zero_loss_tick(session_t *session) {
+    using namespace std::chrono_literals;
+    std::lock_guard<std::mutex> lk(session->video.abrMutex);
+    auto now = std::chrono::steady_clock::now();
+    // 距上次 FEC status > 600ms = 上個窗口零 missing；自身節流 500ms
+    // 一輪，與 FEC 路徑步調一致（+5% max / 2.5s）。丟包期間 FEC status
+    // 持續刷新 lastFecStatusTime → tick 自動讓位，不與 cut 路徑打架。
+    if (now - session->video.lastFecStatusTime > 600ms &&
+        now - session->video.lastAbrPingTick >= 500ms) {
+      session->video.lastAbrPingTick = now;
+      // 排掉丟包尾巴殘留的 accum（最後一批 status 進來時 elapsed<500ms
+      // 沒觸發排空），避免滯留污染下次計算；通常為 0。
+      int residual = session->video.fecLossAccum.exchange(0);
+      session->video.fecFrameAccum.exchange(0);
+      run_abr_aimd(session, residual, 500,
+                   residual > 0 ? "ping-tick-residual" : "ping-tick");
+    }
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1166,19 +1225,10 @@ namespace stream {
       // count=0 給 AIMD。自身節流到 500ms 一輪，與 FEC 路徑步調一致
       // （+5% max / 2.5s）。丟包期間 FEC status 持續刷新 fecAccumStart
       // （間隔 ≤500ms），tick 自動讓位，不會與 cut 路徑打架。
-      {
-        using namespace std::chrono_literals;
-        auto now = std::chrono::steady_clock::now();
-        if (now - session->video.lastFecStatusTime > 600ms &&
-            now - session->video.lastAbrPingTick >= 500ms) {
-          session->video.lastAbrPingTick = now;
-          // 排掉丟包尾巴殘留的 accum（最後一批 status 進來時 elapsed<500ms
-          // 沒觸發排空），避免滯留污染下次計算；通常為 0。
-          int residual = session->video.fecLossAccum.exchange(0);
-          session->video.fecFrameAccum.exchange(0);
-          run_abr_aimd(session, residual, 500, residual > 0 ? "ping-tick-residual" : "ping-tick");
-        }
-      }
+      //
+      // §A1-QUIC-TICK-FIX (review batch 2)：抽成共用函式，QUIC 0x50 ping
+      // 入口也呼叫；邏輯不變，詳見 abr_zero_loss_tick。
+      abr_zero_loss_tick(session);
     });
 
     server->map(packetTypes[IDX_START_A], [&](session_t *session, const std::string_view &payload) {
@@ -1203,6 +1253,10 @@ namespace stream {
         << "time in milli since last report [" << t.count() << ']' << std::endl
         << "last good frame [" << lastGoodFrame << ']' << std::endl
         << "---end stats---";
+
+      // §S11-ABR-LOCK-FIX (review batch 2)：FEC / AIMD 狀態統一上鎖
+      //（與 QUIC recv handler 的 quic-fec 路徑、ping-tick 互斥）。
+      std::lock_guard<std::mutex> lk(session->video.abrMutex);
 
       // VipleStream: Adaptive FEC — adjust based on loss reports
       auto now = std::chrono::steady_clock::now();
@@ -1288,6 +1342,11 @@ namespace stream {
       // Even when FEC repairs them, missing packets indicate congestion.
       int lost = missing;
 
+      // §S11-ABR-LOCK-FIX (review batch 2)：FEC / AIMD 狀態統一上鎖
+      //（lastFecStatusTime 寫入、500ms 排空、FEC 調整、run_abr_aimd
+      // 全在鎖內，與 QUIC quic-fec 路徑、ping-tick 互斥）。
+      std::lock_guard<std::mutex> lk(session->video.abrMutex);
+
       session->video.fecLossAccum.fetch_add(lost);
       session->video.fecFrameAccum.fetch_add(1);
 
@@ -1357,20 +1416,28 @@ namespace stream {
       std::string_view tagged_cipher {payload.data() + sizeof(tagged_cipher_length), (size_t) tagged_cipher_length};
 
       std::vector<uint8_t> plaintext;
-
-      auto &cipher = session->control.cipher;
-      auto &iv = session->control.legacy_input_enc_iv;
-      if (cipher.decrypt(tagged_cipher, plaintext, &iv)) {
+      bool decryptFailed;
+      {
+        // §S11-DECRYPT-LOCK-FIX (review batch 2)：與 IDX_ENCRYPTED 共用
+        // 同一把鎖（同一個 cipher EVP ctx）。legacy 路徑理論上不會與
+        // QUIC fallback 重疊（fallback 只存在於 v2 加密 client），純防禦。
+        std::lock_guard<std::mutex> lk(session->control.decryptMutex);
+        auto &cipher = session->control.cipher;
+        auto &iv = session->control.legacy_input_enc_iv;
+        decryptFailed = cipher.decrypt(tagged_cipher, plaintext, &iv) != 0;
+        if (!decryptFailed && tagged_cipher_length >= 16 + iv.size()) {
+          // legacy 鏈式 IV 更新必須留在鎖內（順序敏感），且維持
+          // 「解密成功才更新」語意。
+          std::copy(payload.end() - 16, payload.end(), std::begin(iv));
+        }
+      }
+      if (decryptFailed) {
         // something went wrong :(
 
         BOOST_LOG(error) << "Failed to verify tag"sv;
 
         session::stop(*session);
         return;
-      }
-
-      if (tagged_cipher_length >= 16 + iv.size()) {
-        std::copy(payload.end() - 16, payload.end(), std::begin(iv));
       }
 
       input::passthrough(session->input, std::move(plaintext));
@@ -1392,30 +1459,39 @@ namespace stream {
       auto tagged_cipher_length = length - 4;
       std::string_view tagged_cipher {(char *) header->payload(), (size_t) tagged_cipher_length};
 
-      auto &cipher = session->control.cipher;
-      auto &iv = session->control.incoming_iv;
-      if (session->config.encryptionFlagsEnabled & SS_ENC_CONTROL_V2) {
-        // We use the deterministic IV construction algorithm specified in NIST SP 800-38D
-        // Section 8.2.1. The sequence number is our "invocation" field and the 'CC' in the
-        // high bytes is the "fixed" field. Because each client provides their own unique
-        // key, our values in the fixed field need only uniquely identify each independent
-        // use of the client's key with AES-GCM in our code.
-        //
-        // The sequence number is 32 bits long which allows for 2^32 control stream messages
-        // to be received from each client before the IV repeats.
-        iv.resize(12);
-        std::copy_n((uint8_t *) &seq, sizeof(seq), std::begin(iv));
-        iv[10] = 'C';  // Client originated
-        iv[11] = 'C';  // Control stream
-      } else {
-        // Nvidia's old style encryption uses a 16-byte IV
-        iv.resize(16);
-
-        iv[0] = (std::uint8_t) seq;
-      }
-
       std::vector<uint8_t> plaintext;
-      if (cipher.decrypt(tagged_cipher, plaintext, &iv)) {
+      bool decryptFailed;
+      {
+        // §S11-DECRYPT-LOCK-FIX (review batch 2)：序列化 ENet / QUIC 兩條
+        // 路徑的 control 解密。GCM 的 IV 完全由 packet seq 決定（per-packet
+        // 獨立），序列化即正確、無順序問題；鎖只包 IV 構造 + decrypt，
+        // 後續 dispatch（input::passthrough / server->call）在鎖外。
+        std::lock_guard<std::mutex> lk(session->control.decryptMutex);
+        auto &cipher = session->control.cipher;
+        auto &iv = session->control.incoming_iv;
+        if (session->config.encryptionFlagsEnabled & SS_ENC_CONTROL_V2) {
+          // We use the deterministic IV construction algorithm specified in NIST SP 800-38D
+          // Section 8.2.1. The sequence number is our "invocation" field and the 'CC' in the
+          // high bytes is the "fixed" field. Because each client provides their own unique
+          // key, our values in the fixed field need only uniquely identify each independent
+          // use of the client's key with AES-GCM in our code.
+          //
+          // The sequence number is 32 bits long which allows for 2^32 control stream messages
+          // to be received from each client before the IV repeats.
+          iv.resize(12);
+          std::copy_n((uint8_t *) &seq, sizeof(seq), std::begin(iv));
+          iv[10] = 'C';  // Client originated
+          iv[11] = 'C';  // Control stream
+        } else {
+          // Nvidia's old style encryption uses a 16-byte IV
+          iv.resize(16);
+
+          iv[0] = (std::uint8_t) seq;
+        }
+
+        decryptFailed = cipher.decrypt(tagged_cipher, plaintext, &iv) != 0;
+      }
+      if (decryptFailed) {
         // something went wrong :(
 
         BOOST_LOG(error) << "Failed to verify tag"sv;
@@ -1481,7 +1557,9 @@ namespace stream {
 
           auto session = *pos;
 
-          if (now > session->pingTimeout) {
+          // §S11-PING-ATOMIC-FIX：比較點需顯式 load——time_point 的
+          // operator> 是 template，不會對 atomic 做隱式轉換推導。
+          if (now > session->pingTimeout.load()) {
 #ifdef VIPLE_MPQUIC
             // §Q-SERVER-GRACE: QUIC 仍活著時延長 ping timeout，不 teardown。
             // QUIC connection close 後 getSession() 回 nullptr → 下輪自然 teardown。
@@ -1943,14 +2021,23 @@ namespace stream {
         if (config::stream.mpquic_enabled && quic_server::g_listener) {
           auto peerAddr = session->video.peer.address();
           quicVideoSession = quic_server::g_listener->getSession(peerAddr);
-          // §Q-REMOTE Fix R.1: per-session diag
+          // §Q-REMOTE Fix R.1 diag——§K.5-LOG-FIX (review)：此區塊在
+          // per-frame 迴圈內（60-120/s），原本無節流會在整場串流洪水
+          // 數百 MB log。改為僅在「session 找到/找不到」狀態轉變時印一次。
           {
-              BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.5 diag: video peer="
-                              << peerAddr.to_string()
-                              << " is_v4=" << peerAddr.is_v4()
-                              << " is_v6=" << peerAddr.is_v6()
-                              << " session=" << (quicVideoSession ? "FOUND" : "NULL")
-                              << " listener=" << (quic_server::g_listener ? "OK" : "NULL");
+              static bool lastFound = false;
+              static bool everLogged = false;
+              bool found = (quicVideoSession != nullptr);
+              if (!everLogged || found != lastFound) {
+                  BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.5 diag: video peer="
+                                  << peerAddr.to_string()
+                                  << " is_v4=" << peerAddr.is_v4()
+                                  << " is_v6=" << peerAddr.is_v6()
+                                  << " session=" << (found ? "FOUND" : "NULL")
+                                  << " listener=" << (quic_server::g_listener ? "OK" : "NULL");
+                  lastFound = found;
+                  everLogged = true;
+              }
           }
         }
         const bool use_quic = (quicVideoSession != nullptr);
@@ -1966,8 +2053,11 @@ namespace stream {
           // Client 的 ENet 控制通道在 failover 時已死（根因 D），
           // 改走 QUIC stream #0 確保 IDR request 送達。
           {
-            static bool recvHandlerSet = false;
-            if (!recvHandlerSet && quicVideoSession) {
+            // §Q-RECVHANDLER-FIX (review)：改用 per-session 查詢取代
+            // process 級 static——舊式 static 讓 host 第一次串流後，
+            // 之後每條 session 的新 QuicSession 都拿不到 handler，
+            // QUIC IDR/FEC status/ping/input fallback 全靜默失效。
+            if (quicVideoSession && !quicVideoSession->hasRecvHandler()) {
               auto idrEvt = session->video.idr_events;
               quicVideoSession->setRecvHandler(
                   [idrEvt, session](uint8_t flowType, const uint8_t *data, size_t len) {
@@ -1987,6 +2077,10 @@ namespace stream {
                       size_t fecLen = len - 1;
                       if (fecLen >= 18) {
                         uint16_t missing = (uint16_t(fec[8]) << 8) | fec[9];
+                        // §S11-ABR-LOCK-FIX (review batch 2)：本 lambda 在
+                        // picoquic ioLoop 執行緒執行，與 controlBroadcastThread
+                        // 的 ENet FEC / loss-stats / ping-tick 共用 ABR 狀態。
+                        std::lock_guard<std::mutex> lk(session->video.abrMutex);
                         session->video.fecLossAccum.fetch_add(missing);
                         session->video.fecFrameAccum.fetch_add(1);
                         session->video.lastFecStatusTime = std::chrono::steady_clock::now();  // §ABR-RAMP-TICK
@@ -2045,6 +2139,13 @@ namespace stream {
                     else if (flowType == 0x03 && len >= 1 && data[0] == 0x50) {
                       session->pingTimeout = std::chrono::steady_clock::now()
                           + config::stream.ping_timeout;
+                      // §A1-QUIC-TICK-FIX (review batch 2)：QUIC-only 模式的
+                      // 零丟包 AIMD tick。client 只在 ENet 不通時才送 QUIC
+                      // ping（ControlStream.c: enetReconnectPending || !peer），
+                      // 與 ENet IDX_PERIODIC_PING 的 tick 不會同時活躍；即使
+                      // 過渡期短暫重疊，也由 lastAbrPingTick 在 abrMutex 內
+                      // 節流到 500ms 一輪，不會雙倍計步。
+                      abr_zero_loss_tick(session);
                       static bool loggedOnce = false;
                       if (!loggedOnce) {
                         BOOST_LOG(info)
@@ -2076,7 +2177,8 @@ namespace stream {
                       session->broadcast_ref->control_server.call(type, session, payload, false);
                     }
                   });
-              recvHandlerSet = true;
+              // §Q-RECVHANDLER-FIX：不再用 process-static 旗標——hasRecvHandler()
+              // 已在迴圈條件判斷，註冊後自然不重入；新 session 會重新註冊。
               BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: "
                               << "recv handler registered on QUIC session";
             }
@@ -2465,15 +2567,22 @@ namespace stream {
         }
         const bool use_quic_audio = (quicAudioSession != nullptr);
         {
-          // §Q-REMOTE Fix R.1: per-session diag（不用 static，每次新連線都印）
-          {
+          // §K.5-LOG-FIX (review)：此區塊在 per-packet 迴圈內（~200/s），
+          // 原本無節流（註解誤寫「不用 static」）會在整場串流洪水百 MB
+          // log + audio 熱路徑 heap 配置。改為僅在 session 狀態轉變時印。
+          static bool lastFound = false;
+          static bool everLogged = false;
+          bool found = (quicAudioSession != nullptr);
+          if (!everLogged || found != lastFound) {
             auto audioPeer = session->audio.peer.address();
             BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.5 diag: audio peer="
                             << audioPeer.to_string()
                             << " is_v4=" << audioPeer.is_v4()
                             << " is_v6=" << audioPeer.is_v6()
-                            << " session=" << (quicAudioSession ? "FOUND" : "NULL")
+                            << " session=" << (found ? "FOUND" : "NULL")
                             << " listener=" << (quic_server::g_listener ? "OK" : "NULL");
+            lastFound = found;
+            everLogged = true;
           }
         }
         if (use_quic_audio) {
@@ -2942,6 +3051,24 @@ namespace stream {
       // handler, "set up" a tunnel on the dead session, and leave the
       // new session without one.
       relay::set_allocated_notify_handler({});
+
+#ifdef VIPLE_MPQUIC
+      // §Q-RECVHANDLER-CLEAR-FIX (review batch 2)：清掉 QUIC recv
+      // handler——lambda 捕獲裸 session_t*（與上面 relay listener 同型
+      // 問題）。client 的 QUIC cnx 可在 server 端 session 拆除後存活
+      // （每 100ms 仍送 0x50 ping），不清會對已解構的 session 上鎖
+      // abrMutex / 寫 pingTimeout / 解參考 broadcast_ref（UAF）。
+      // invokeRecvHandler 的鎖內 copy 把殘餘競態縮到「正在執行中的
+      // 單次 callback」；handler 清空後 hasRecvHandler() 回 false，
+      // 下一條 session 會重新註冊（§Q-RECVHANDLER-FIX 語意不變）。
+      if (config::stream.mpquic_enabled && quic_server::g_listener) {
+        auto quicSession = quic_server::g_listener->getSession(
+            session.video.peer.address());
+        if (quicSession) {
+          quicSession->setRecvHandler({});
+        }
+      }
+#endif
       // Tear the tunnel down explicitly too so its WS binary handler
       // is unregistered before the relay thread tries to deliver to a
       // dead TunnelSession.

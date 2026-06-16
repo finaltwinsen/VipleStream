@@ -151,6 +151,14 @@ typedef struct _QUIC_TRANSPORT_CTX {
     // I/O thread
     PLT_THREAD ioThread;
     bool ioRunning;
+    // §Q-K13-ZOMBIE-FIX (review)：§K.13 bail（picoquic 0 alive path 或
+    // cnx>=disconnecting）讓 IO thread 永久退出，但 cnx 沒被 close、
+    // state 凍結在 ready → quicIsConnected() 仍回 true → ControlStream
+    // 的 quicControlFallbackAvailable 永遠判 QUIC 可用，control/input
+    // 走一條沒有 IO thread 在送收的死管道，recovery thread 也照常 probe
+    // 但封包永遠送不出 → 不可自癒殭屍態（TODO Q.r14）。bail 時設此旗標，
+    // 讓 quicIsConnected() 立即回 false、recovery thread 退出。
+    volatile int ioDead;
 
     // Server mode
     bool isServer;
@@ -588,6 +596,7 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
 
     // Start the I/O thread
     g_ctx.ioRunning = true;
+    g_ctx.ioDead = 0; // §Q-K13-ZOMBIE-FIX：新連線清除殭屍旗標
     ret = PltCreateThread("QuicIO", quicIoThreadProc, &g_ctx, &g_ctx.ioThread);
     if (ret != 0) {
         Limelog("[VIPLE-MPQUIC] Failed to create I/O thread\n");
@@ -669,7 +678,10 @@ void quicDisconnect(void) {
 }
 
 bool quicIsConnected(void) {
-    return g_ctx.cnx != NULL &&
+    // §Q-K13-ZOMBIE-FIX：IO thread §K.13 bail 後 cnx state 凍結在 ready，
+    // 但已無人收送封包——ioDead 讓上層（ControlStream fallback 閘門、
+    // VideoStream/AudioStream 路由）正確判定 QUIC 已死。
+    return g_ctx.cnx != NULL && !g_ctx.ioDead &&
            picoquic_get_cnx_state(g_ctx.cnx) == picoquic_state_ready;
 }
 
@@ -915,11 +927,20 @@ int quicAddSubflowEx(int interfaceIndex,
     int slotIdx = -1;
 
     // Pass 1: 同介面的死 slot
-    for (int i = 0; i < g_ctx.subflowCount; i++) {
+    // §Q-SLOT0-FAILBACK-FIX (review)：跳過 slot 0。slot 0 是初始 primary，
+    // 若被回收重生會被 §Q-PATH-RECOVERY-STANDBY 強制 keepAsStandby，而所有
+    // 把 standby promote 回 available 的 health-check 分支都以 i>0 排除
+    // slot 0 → primary 物理恢復後永久卡 standby、failoverPromotedSlot 永不
+    // 清除（quicIsFailoverActive 永久成立 → 200ms jitter timeout 鎖死、
+    // video 永走次優路徑）。讓恢復落在新 slot，§Q-INTERFACE-FAILBACK
+    //（i>0 + interfaceIndex 匹配 slot 0）才能 promote 新 slot 並清 failover。
+    for (int i = 1; i < g_ctx.subflowCount; i++) {
         if (g_ctx.subflows[i].picoquicDeleted &&
             g_ctx.subflows[i].interfaceIndex == interfaceIndex) {
-            if (g_ctx.subflows[i].sock != INVALID_SOCKET)
+            if (g_ctx.subflows[i].sock != INVALID_SOCKET) {
                 closeSocket(g_ctx.subflows[i].sock);
+                g_ctx.subflows[i].sock = INVALID_SOCKET; // §Q-SLOT-HANDLE-FIX
+            }
             slotIdx = i;
             Limelog("[VIPLE-MPQUIC] Recycling dead slot %d for same interface "
                     "if %d\n", i, interfaceIndex);
@@ -932,10 +953,14 @@ int quicAddSubflowEx(int interfaceIndex,
         if (g_ctx.subflowCount < QUIC_MAX_SUBFLOWS) {
             slotIdx = g_ctx.subflowCount;
         } else {
+            // 容量已滿才回收任意死 slot（含 slot 0——耗盡保護優先於
+            // 上述 slot0-failback 偏好，避免直接 return -1 失敗）。
             for (int i = 0; i < g_ctx.subflowCount; i++) {
                 if (g_ctx.subflows[i].picoquicDeleted) {
-                    if (g_ctx.subflows[i].sock != INVALID_SOCKET)
+                    if (g_ctx.subflows[i].sock != INVALID_SOCKET) {
                         closeSocket(g_ctx.subflows[i].sock);
+                        g_ctx.subflows[i].sock = INVALID_SOCKET; // §Q-SLOT-HANDLE-FIX
+                    }
                     slotIdx = i;
                     break;
                 }
@@ -2205,6 +2230,21 @@ int quicGetActiveSubflowCount(void) {
 // ── Failover status ──────────────────────────────────────────
 
 int quicIsFailoverActive(void) {
+    // §Q-NOQUIC-STALE-FLAG-FIX (review batch 2 驗測發現)：QUIC 從未連線
+    // （--no-quic、或 quicConnect 還沒跑）時 g_ctx 是零值初始化——
+    // failoverPromotedSlot 的「無 failover」哨兵值是 -1，但只在
+    // quicConnect 內設定；零值 0 會被當成「slot 0 已 promote」→
+    // quicIsFailoverActive() 誤回 1，配上 subflowCount==0 讓
+    // quicIsPrimaryPathUnhealthy() 也回 1 → Fix L bypass 在 --no-quic
+    // 模式的第一個 control 訊息就走 QUIC（必失敗）→ 連線啟動即死。
+    // v1.5.192 Fix L 以來 --no-quic 一直壞在這裡（驗測都走 QUIC 沒踩到）。
+    if (g_ctx.cnx == NULL)
+        return 0;
+    // §Q-K13-ZOMBIE-FIX：IO thread 已 §K.13 bail 時，QUIC 整體已廢，
+    // 不可再讓 control fallback 閘門（quicControlFallbackAvailable）
+    // 因殘留的 failoverPromotedSlot 而繼續 suppress connectionTerminated。
+    if (g_ctx.ioDead)
+        return 0;
     return (g_ctx.failoverPromotedSlot >= 0) ? 1 : 0;
 }
 
@@ -2936,6 +2976,15 @@ static void quicIoThreadProc(void* context) {
         int selRet = 0;
         if (maxSock != INVALID_SOCKET) {
             selRet = select((int)(maxSock + 1), &readSet, NULL, NULL, &tv);
+            // §Q-SELECT-GUARD-FIX (review)：select() 若集合含無效 fd 會立即
+            // 回 SOCKET_ERROR（Windows WSAENOTSOCK）且不消耗 timeout——下方
+            // recv 區塊被 selRet>0 gate 住全部跳過、迴圈無延遲空轉燒滿一核。
+            // 主因（回收死 slot 留壞 handle）已於 quicAddSubflowEx 修掉，此處
+            // 為防禦縱深：select 失敗時睡 1ms 避免 busy-spin（下一輪 fd_set
+            // 重建，瞬時一次失敗無害）。
+            if (selRet < 0) {
+                PltSleepMs(1);
+            }
         } else {
             PltSleepMs(1);
         }
@@ -2967,6 +3016,8 @@ static void quicIoThreadProc(void* context) {
             Limelog("[VIPLE-MPQUIC] §K.13 IO loop bail: cnx state >= "
                     "disconnecting, stopping cleanly\n");
             ctx->ioRunning = false;
+            ctx->ioDead = 1;          // §Q-K13-ZOMBIE-FIX：通知上層 QUIC 已死
+            ctx->recoveryRunning = false; // 停掉 recovery thread 的無效 probe
             break;
         }
         {
@@ -2993,6 +3044,8 @@ static void quicIoThreadProc(void* context) {
                         "path[0]\n",
                         (int)picoquic_get_cnx_state(ctx->cnx));
                 ctx->ioRunning = false;
+                ctx->ioDead = 1;          // §Q-K13-ZOMBIE-FIX：通知上層 QUIC 已死
+                ctx->recoveryRunning = false; // 停掉 recovery thread 的無效 probe
                 break;
             }
         }

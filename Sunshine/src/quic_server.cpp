@@ -104,8 +104,10 @@ namespace quic_server {
   }
 
   bool QuicSession::isReady() const {
-    return _cnx &&
-           picoquic_get_cnx_state(_cnx) == picoquic_state_ready;
+    // §Q-CNX-ATOMIC-FIX (review batch 2)：sender/stats 執行緒不碰 _cnx，
+    // 只讀 IO 執行緒維護的 atomic（舊版讀 _cnx + picoquic_get_cnx_state
+    // 與 callback_close 的 _cnx=nullptr / picoquic free 是 TOCTOU UAF）。
+    return _ready.load(std::memory_order_acquire);
   }
 
   // Scheduler constants (must match QuicTransport.h)
@@ -144,9 +146,9 @@ namespace quic_server {
     if (!isReady()) {
       static int notReadyCount = 0;
       if (notReadyCount++ < 5) {
+        // §Q-CNX-ATOMIC-FIX：不得在 sender 執行緒讀 _cnx（cnxState 移除）
         BOOST_LOG(warning) << "[VIPLE-MPQUIC] §K.7 sendDatagramScheduled: NOT READY"
-                           << " flow=" << (int)flowType << " len=" << len
-                           << " cnxState=" << (_cnx ? (int)picoquic_get_cnx_state(_cnx) : -1);
+                           << " flow=" << (int)flowType << " len=" << len;
       }
       return false;
     }
@@ -254,6 +256,23 @@ namespace quic_server {
     if (!isReady())
       return false;
 
+    // §Q-REINJECT-FECGAP-FIX (review batch 2)：reinject 遞增共用的
+    // _seqCounters[FLOW_VIDEO] 但繞過 _fecGroup。若當下 group 已有
+    // 1..3 個 data shard，burst 後續入組的 shard seq 會跳號——client
+    // 以 baseSeq = seq - shardIndex 推回 group，跳號使同一 group 被拆
+    // 成兩個 bucket：前半配上 parity 會以「已被 burst 占用的 seq」
+    // 重建出錯位封包（靠 jitter buffer 去重吸收），後半永遠湊不滿 →
+    // failover 後 2 秒（最需要 FEC 時）跨 burst 的 group 必定無法恢復。
+    // 修法：先放棄未滿的 group（不發 parity；已送出的 data shard 照常
+    // 交付、僅失去 FEC 保護），讓下一個 data shard 從 si=0、新 baseSeq
+    // 重新開組，保證 group 內 4 個 data shard seq 連續。
+    // 執行緒歸屬：sendDatagramReinject 與 sendDatagramScheduled(VIDEO)
+    // 都只在 video broadcast 執行緒呼叫（stream.cpp 同一送出迴圈），
+    // _fecGroup 為該執行緒所限，不需加鎖。
+    if (flowType == FLOW_VIDEO) {
+      _fecGroup.count = 0;
+    }
+
     // 組好 frame（同 sendDatagram 的 header 格式）。Reinject 期間
     // 多份 datagram 共用同一個 sequence number，由 client 端去重。
     std::vector<uint8_t> frame(DGRAM_HDR_SIZE + len);
@@ -348,6 +367,10 @@ namespace quic_server {
     // sender.c:826 picoquic_predict_packet_header_length 命中此 NULL deref。
     // 在 drain 入口先 bail 一次，避免進入後續路徑 mutation 區。
     if (picoquic_get_cnx_state(_cnx) >= picoquic_state_disconnecting) {
+      // §Q-CNX-ATOMIC-FIX (review batch 2)：舊版 isReady 直接讀 cnx state，
+      // disconnecting 當下 sender 自然停止；改 atomic 後在此補回同等
+      // 語意，避免 close callback 到達前 _pendingQueue 持續堆積。
+      _ready.store(false, std::memory_order_release);
       return;
     }
 
@@ -445,6 +468,11 @@ namespace quic_server {
                 << ") pending=" << queueDepth;
           }
         }
+        // §Q-STATS-CACHE-FIX (review batch 2)：在 IO 執行緒更新 path
+        // quality 快取。500 次 drain ≈ 0.5-1 秒一次，statsLoop 每 5 秒
+        // 讀一次綽綽有餘；放限頻區塊內避免高頻 picoquic 走訪
+        // （§K.11-PERF 教訓）。
+        updateStatsCache();
       }
     }
 
@@ -676,7 +704,29 @@ namespace quic_server {
       // **只在真正的 failover 切換時開啟**（從一個有效 path 切到另一個
       // 有效 path）。初始連線時 _lastVideoPath = -2/-1，不該開 reinject，
       // 否則 IDR 會被推到 standby path 塞爆 picoquic queue。
-      bool isRealFailover = (_lastVideoPath >= 0 && bestVideoPath >= 0);
+      // §Q-RECOVERY-IDR-FIX (review batch 2)：補上「N → -1 → M」恢復
+      // 轉換。整 IP 封鎖情境：所有 path 失效 → bestVideoPath=-1 →
+      // _lastVideoPath 被寫成 -1；解除封鎖後恢復是 -1 → M，舊閘門判為
+      // 非 failover → 不發 IDR、不開 reinject 視窗 → client decoder
+      // 凍結（R.3 殭屍態）。_hadVideoPathBefore 在首次選到有效 path
+      // 之前恆為 false，因此初始 -2 → -1 → 0 序列仍然不會觸發
+      // （行為與 §Q-IDR-INIT-FIX 一致）。
+      //
+      // 駐留門檻（adversarial review 補強）：bestVideoPath==-1 不等於
+      // 視訊停止——-1 是 cnx-level queue fallback，video 照常送出。
+      // 瞬時抖動（lossy 鏈路上單輪 RTO spike 把唯一 path 踢出、或
+      // client 關第二介面 nb_paths 縮到 1 再恢復）也會走 M→-1→M，
+      // 若無門檻，每次都重啟 10s IDR loop → 不穩定鏈路上 IDR 風暴
+      // 常駐。真正的 R.3 殭屍態（整 IP 封鎖）至少持續數秒，要求
+      // -1 駐留 ≥1s 才視為「恢復」，亞秒級抖動不觸發。
+      constexpr uint64_t RECOVERY_MIN_DOWN_US = 1000000;  // 1 秒
+      bool recoveredFromTotalLoss =
+          _lastVideoPath == -1 && _hadVideoPathBefore &&
+          _videoPathLostTime != 0 &&
+          (nowUsForEpisode - _videoPathLostTime) >= RECOVERY_MIN_DOWN_US;
+      bool isRealFailover =
+          (_lastVideoPath >= 0 || recoveredFromTotalLoss) &&
+          bestVideoPath >= 0;
 
       if (newEpisode) {
         _failoverEpisodeStartTime = nowUsForEpisode;
@@ -698,6 +748,28 @@ namespace quic_server {
         _reinjectWindowUntil.store(nowUsForEpisode + REINJECT_WINDOW_US,
                                    std::memory_order_release);
         BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-REINJECT-WINDOW: opened (2s) for failover switch";
+
+        // §Q-RECOVERY-IDR-FIX (adversarial review 補強)：同 episode 內的
+        // real failover（如 5 秒內的 -1→M 恢復）不會走 newEpisode 的
+        // grace 重設——若前段 grace 已耗盡且 approxVQ 堆高 + cwnd 滿，
+        // 這次要送的 IDR 會被 §Q-STALE 丟掉，修復的「恢復必發 IDR」
+        // 保證失效。給一個最低 grace 下限確保 IDR 通過（300 次 drain
+        // ≈ 2-3 秒，足夠 IDR loop 前幾發；不像 newEpisode 的 2000 那麼
+        // 寬，避免振盪期間 §Q-STALE 失效的老問題）。
+        if (_pathSwitchGraceCycles < 300) {
+          _pathSwitchGraceCycles = 300;
+        }
+      }
+
+      // §Q-RECOVERY-IDR-FIX：必須在 isRealFailover 判定之後才設旗標，
+      // 初始 -1 → 0 轉換當下旗標仍為 false，不會誤觸發啟動期 IDR。
+      if (bestVideoPath >= 0) {
+        _hadVideoPathBefore = true;
+        _videoPathLostTime = 0;  // 恢復 → 清除 -1 進入時刻
+      }
+      else if (_lastVideoPath >= 0) {
+        // M → -1：記錄全 path 失效的起點，供 -1 → M 恢復時計算駐留時間
+        _videoPathLostTime = nowUsForEpisode;
       }
 
       _lastVideoPath = bestVideoPath;
@@ -766,8 +838,12 @@ namespace quic_server {
           _dgramDroppedStale++;
           continue;
         }
-      } else {
-        _staleStallStart = 0;  // 非 stale 狀態 → 重置計時器
+      } else if (ft == FLOW_VIDEO) {
+        // §Q-STALE-VALVE-FIX (review)：只在「video flow 非 stale」時重置
+        // 計時器。原本無條件 else 會被每個 audio datagram（~5-10ms 一個、
+        // 不受 §Q-STALE 丟棄）清零 → stall 計時永遠累積不到 3 秒 → 安全閥
+        // 在 audio 開啟的所有實際場景中是死的（與 R.3 殭屍態症狀相符）。
+        _staleStallStart = 0;  // video 非 stale 狀態 → 重置計時器
       }
 
       // §Q-STALE: video datagram 佇列深度超限 → 丟棄，不入 picoquic queue。
@@ -871,13 +947,33 @@ namespace quic_server {
   }
 
   void QuicSession::setRecvHandler(RecvHandler handler) {
+    std::lock_guard<std::mutex> lk(_recvHandlerMutex);
     _recvHandler = std::move(handler);
   }
 
-  std::vector<SubflowStats> QuicSession::getStats() const {
-    std::vector<SubflowStats> stats;
+  bool QuicSession::hasRecvHandler() const {
+    std::lock_guard<std::mutex> lk(_recvHandlerMutex);
+    return (bool)_recvHandler;
+  }
+
+  // §Q-RECVHANDLER-FIX：鎖內 copy handler、鎖外呼叫（避免持鎖時
+  // 跑使用者 callback 造成鎖序問題，亦避免 std::function 撕裂讀）。
+  void QuicSession::invokeRecvHandler(uint8_t flowType, const uint8_t *data, size_t len) {
+    RecvHandler h;
+    {
+      std::lock_guard<std::mutex> lk(_recvHandlerMutex);
+      h = _recvHandler;
+    }
+    if (h)
+      h(flowType, data, len);
+  }
+
+  // §Q-STATS-CACHE-FIX (review batch 2)：僅限 IO 執行緒呼叫
+  // （drainPendingToQuic §K.11 限頻區塊）。在 IO 執行緒上安全走訪
+  // picoquic path 物件，結果入快取。
+  void QuicSession::updateStatsCache() {
     if (!_cnx)
-      return stats;
+      return;
 
     std::vector<uint64_t> paths;
     {
@@ -885,6 +981,7 @@ namespace quic_server {
       paths = _activePaths;
     }
 
+    std::vector<SubflowStats> fresh;
     for (uint64_t pathId : paths) {
       picoquic_path_quality_t pq{};
       if (picoquic_get_path_quality(_cnx, pathId, &pq) != 0) {
@@ -900,10 +997,19 @@ namespace quic_server {
       s.active = true;
       s.bytesSent = pq.bytes_sent;
       s.bytesRecv = pq.bytes_received;
-      stats.push_back(s);
+      fresh.push_back(s);
     }
 
-    return stats;
+    std::lock_guard<std::mutex> lock(_statsCacheMutex);
+    _statsCache.swap(fresh);
+  }
+
+  std::vector<SubflowStats> QuicSession::getStats() const {
+    // §Q-STATS-CACHE-FIX：只讀 IO 執行緒維護的快取，不碰 picoquic API
+    // （舊版在 statsLoop 執行緒呼叫 picoquic_get_path_quality，與 ioLoop
+    // 並行走訪可能正被刪除的 path 物件——違反 picoquic 單執行緒約束）。
+    std::lock_guard<std::mutex> lock(_statsCacheMutex);
+    return _statsCache;
   }
 
   // ── QuicListener ─────────────────────────────────────────
@@ -1107,6 +1213,15 @@ namespace quic_server {
     picoquic_set_default_tp_value(_quic,
         picoquic_tp_max_datagram_frame_size, 65535);
     picoquic_set_default_multipath_option(_quic, 1);
+
+    // §M.2 (2026-06-16) — 設定 QUIC idle timeout。未設定時 picoquic 預設
+    // 無 idle timeout，client 異常斷線後 server 端 QUIC session 可存活
+    // 30-120+ 秒（等 retx 全超時），配合 §Q-SERVER-GRACE 會無限延長 ping
+    // timeout → session 不會被 stop → idle watchdog 永遠 refresh → server
+    // 永遠 BUSY。30 秒對正常串流無影響（持續有 video datagram 流量），
+    // 只有 client 完全消失時才觸發。
+    picoquic_set_default_idle_timeout(_quic, 30000);  // 30s in ms
+
     // §Q-MP-FIX 2026-05-24: 必須啟用 path callbacks，否則
     // path_available / path_suspended / path_deleted 不會觸發。
     picoquic_enable_path_callbacks_default(_quic, 1);
@@ -1161,6 +1276,17 @@ namespace quic_server {
 
     {
       std::lock_guard<std::mutex> lock(_sessionMutex);
+      // §Q-CNX-ATOMIC-FIX (review batch 2)：listener 停止時明確標記所有
+      // session 不可用，外部仍持有 shared_ptr 的執行緒（stream.cpp 的
+      // quicVideoSession 等）不再往 _pendingQueue 入隊。ioThread 已
+      // join，此處等效於 IO 執行緒，可安全清 _cnx（picoquic_free 在
+      // 後面才執行）。
+      for (auto &[addr, session] : _sessions) {
+        if (session) {
+          session->_ready.store(false, std::memory_order_release);
+          session->_cnx = nullptr;
+        }
+      }
       _sessions.clear();
     }
 
@@ -1520,6 +1646,9 @@ namespace quic_server {
       }
 
       auto session = std::make_shared<QuicSession>(cnx);
+      // §Q-CNX-ATOMIC-FIX (review batch 2)：IO 執行緒標記 ready；sender
+      // 執行緒（video/audio/stats）由此判定，不再 dereference _cnx。
+      session->_ready.store(true, std::memory_order_release);
       picoquic_set_callback(cnx, QuicListener::picoquicCallback, listener);
 
       // §K.6: 我們使用 push 模型 (picoquic_queue_datagram_frame)
@@ -1550,6 +1679,16 @@ namespace quic_server {
         auto normalizedKey = normalizeAddrStr(addrStr);
         BOOST_LOG(info) << "[VIPLE-MPQUIC] Session stored: key=\""
                         << normalizedKey << "\" (raw=\"" << addrStr << "\")";
+        // §Q-CNX-ATOMIC-FIX (review batch 2)：同 IP 重連會覆蓋 map
+        // entry，被擠出的舊 session 之後在 callback_close 以 _cnx==cnx
+        // 走訪 map 找不到自己（已不在 map）→ _ready 殘留 true、_cnx
+        // 懸空。在覆蓋前明確標記舊 session 不可用（IO 執行緒上安全）。
+        auto oldIt = listener->_sessions.find(normalizedKey);
+        if (oldIt != listener->_sessions.end() && oldIt->second &&
+            oldIt->second != session) {
+          oldIt->second->_ready.store(false, std::memory_order_release);
+          oldIt->second->_cnx = nullptr;
+        }
         listener->_sessions[normalizedKey] = session;
       }
 
@@ -1685,7 +1824,7 @@ namespace quic_server {
         break;
       auto *hdr = reinterpret_cast<const QuicDgramHeader *>(bytes);
       auto session = findSession(cnx);
-      if (session && session->_recvHandler) {
+      if (session) {
         // §Q-INPUT-DIAG v1.5.195 Fix N: server 端 QUIC input 接收計數
         if (hdr->flowType == 0x04) {
           static std::atomic<int> inputReceived{0};
@@ -1700,7 +1839,8 @@ namespace quic_server {
             lastDiag = now;
           }
         }
-        session->_recvHandler(
+        // §Q-RECVHANDLER-FIX：經 invokeRecvHandler 鎖內 copy + 鎖外呼叫
+        session->invokeRecvHandler(
             hdr->flowType,
             bytes + DGRAM_HDR_SIZE,
             length - DGRAM_HDR_SIZE);
@@ -1713,8 +1853,8 @@ namespace quic_server {
       if (stream_id != 0)
         break;
       auto session = findSession(cnx);
-      if (session && session->_recvHandler) {
-        session->_recvHandler(FLOW_CONTROL, bytes, length);
+      if (session) {
+        session->invokeRecvHandler(FLOW_CONTROL, bytes, length); // §Q-RECVHANDLER-FIX
       }
       break;
     }
@@ -1734,6 +1874,9 @@ namespace quic_server {
       for (auto it = listener->_sessions.begin();
            it != listener->_sessions.end(); ++it) {
         if (it->second->_cnx == cnx) {
+          // §Q-CNX-ATOMIC-FIX：先清 ready 再清 _cnx——sender 執行緒只讀
+          // _ready，store 之後不會再進入任何 send 路徑。
+          it->second->_ready.store(false, std::memory_order_release);
           it->second->_cnx = nullptr;
           listener->_sessions.erase(it);
           break;
@@ -1782,13 +1925,24 @@ namespace quic_server {
   }
 
   void QuicListener::logStats() {
-    std::lock_guard<std::mutex> lock(_sessionMutex);
-    if (_sessions.empty())
-      return;
+    // §Q-STATS-LOCK-FIX (review batch 2)：鎖內只 snapshot session 清單，
+    // 組字串 + BOOST_LOG I/O 移到鎖外。原本整段持 _sessionMutex，
+    // ioLoop 的 callback（findSession 等）要拿同一把鎖，stats 期間會
+    // 阻塞 IO 執行緒。shared_ptr 保證 session 在鎖外仍存活。
+    std::vector<std::pair<std::string, std::shared_ptr<QuicSession>>> snapshot;
+    {
+      std::lock_guard<std::mutex> lock(_sessionMutex);
+      if (_sessions.empty())
+        return;
+      snapshot.reserve(_sessions.size());
+      for (auto &[addr, session] : _sessions) {
+        snapshot.emplace_back(addr, session);
+      }
+    }
 
     static const char *flowNames[] = {"?", "VIDEO", "AUDIO", "CTRL"};
 
-    for (auto &[addr, session] : _sessions) {
+    for (auto &[addr, session] : snapshot) {
       if (!session || !session->isReady())
         continue;
 

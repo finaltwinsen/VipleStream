@@ -662,9 +662,19 @@ static void inputSendThreadProc(void* context) {
                 "for ENet reconnection...\n");
         while (!PltIsThreadInterrupted(&inputSendThread)) {
             PltSleepMs(100);
-            if (isEnetConnected()) {
+            // §Q-INPUT-QUIC-ESCAPE-FIX (review batch 2)：加 QUIC 逃生
+            // 條件。§Q-ENET-LOCAL-PUBLISH-FIX 之後，重連嘗試期間全域
+            // peer/client 維持 NULL（舊版 racy 提前發布意外提供了
+            // liveness）——若 ENet 反覆連不上（介面 UP 但 47999 被擋、
+            // 正是 R.3 場景），單靠 isEnetConnected() 會讓輸入凍結整段
+            // 120s、give-up 後永久喪失。QUIC 活著就恢復送：break 後
+            // sendInputPacket 走 sendMessageEnet 的 null-guard QUIC
+            // fallback（Fix K）；若 QUIC 又瞬時失敗且 failover 仍
+            // active，會回到本 wait，行為收斂、不忙轉。
+            if (isEnetConnected() || quicIsConnected()) {
                 Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: inputSendThread "
-                        "resumed after ENet reconnection\n");
+                        "resumed (%s)\n",
+                        isEnetConnected() ? "ENet reconnected" : "QUIC escape");
                 break;
             }
         }

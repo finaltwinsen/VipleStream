@@ -42,6 +42,12 @@ void ScHidPassthrough::start() {
     // (USB-direct / Puck / Bluetooth) by enumerating VID 0x28DE and matching the
     // vendor usage, rather than a fixed product id.
     SDL_hid_device_info* devs = SDL_hid_enumerate(SC_VID, 0x0);
+
+    // §SC-DEV-LOCK-FIX (review batch 2)：LiStartConnection 成功後 control
+    // stream 已在跑，clScHidFeatureRequest 可能在 start() 進行中抵達——
+    // m_devs/m_devCount 的填充、暖機 get_feature 與失敗清理都要在鎖內。
+    // SDL_CreateThread 在鎖內呼叫無妨——readLoop 第一輪會等鎖釋放。
+    std::lock_guard<std::mutex> lock(m_devMutex);
     m_devCount = 0;
     for (SDL_hid_device_info* d = devs; d != nullptr && m_devCount < MAX_SC_DEVS; d = d->next) {
         if (d->usage_page == SC_USAGE_PAGE && d->usage == SC_USAGE && d->path != nullptr) {
@@ -64,7 +70,7 @@ void ScHidPassthrough::start() {
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-        "[SC-HID] Opened %d Steam Controller vendor interface(s)", m_devCount);
+        "[SC-HID] Opened %d Steam Controller vendor interface(s)", m_devCount.load());
 
     // §SC-HID Phase 2C 暖機：向伺服器端主動送一次 feature 0x01 快取，讓 server
     // 在 Steam 第一次查 GetControllerInfo 之前就有真實 SC 的 firmware 資料。
@@ -114,18 +120,28 @@ void ScHidPassthrough::stop() {
 
     // Reads are non-blocking, so the thread exits on its own once m_running is
     // cleared. Join first, then close the handles it was polling.
+    // 順序鐵律：先 SDL_WaitThread 再拿鎖——若先拿鎖再 join，readLoop
+    // 卡在搶鎖會 deadlock。
     if (m_thread) {
         SDL_WaitThread(m_thread, nullptr);
         m_thread = nullptr;
     }
 
-    for (int i = 0; i < m_devCount; i++) {
-        if (m_devs[i]) {
-            SDL_hid_close(m_devs[i]);
-            m_devs[i] = nullptr;
+    // §SC-DEV-LOCK-FIX (review batch 2)：close 必須在 m_devMutex 內做。
+    // stop() 在 LiStopConnection 之前被呼叫（session.cpp cleanup task），
+    // common-c 的 async callback 執行緒此時還活著，forwardFeatureRequest
+    // 仍可能抵達；持鎖 + 它在鎖內檢查 m_running/m_devCount，保證不會
+    // use-after-close。
+    {
+        std::lock_guard<std::mutex> lock(m_devMutex);
+        for (int i = 0; i < m_devCount; i++) {
+            if (m_devs[i]) {
+                SDL_hid_close(m_devs[i]);
+                m_devs[i] = nullptr;
+            }
         }
+        m_devCount = 0;
     }
-    m_devCount = 0;
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
         "[SC-HID] Steam Controller passthrough stopped");
@@ -142,7 +158,13 @@ int SDLCALL ScHidPassthrough::readThreadFunc(void* ctx) {
 
 void ScHidPassthrough::forwardFeatureRequest(uint8_t reportId, uint8_t op, uint8_t seq,
                                              const uint8_t* query, uint8_t queryLen) {
-    if (m_devCount == 0) {
+    // §SC-DEV-LOCK-FIX (review batch 2)：整段持鎖——與 readLoop / stop()
+    // 互斥。SET 路徑的 SDL_Delay(20) 也在鎖內：feature op 只在 Steam 握手
+    // 時出現（低頻），期間實體 SC 的 input report 由 OS HIDClass ring
+    // buffer 暫存，不會掉資料。鎖內檢查 m_running 防 stop() 後的
+    // use-after-close（stop 先 join read thread 再持鎖 close handle）。
+    std::lock_guard<std::mutex> lock(m_devMutex);
+    if (!m_running || m_devCount == 0) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
             "[SC-HID] forwardFeatureRequest: no device open");
         return;
@@ -192,7 +214,7 @@ void ScHidPassthrough::forwardFeatureRequest(uint8_t reportId, uint8_t op, uint8
     LiSendScHidFeatureReport(seq, reportId, buf, SC_HID_WIRE_BYTES);
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
         "[SC-HID] forwardFeatureRequest: GET 0x%02x empty on all %d device(s) (op=%u seq=%u)",
-        reportId, m_devCount, op, seq);
+        reportId, m_devCount.load(), op, seq);
 }
 
 void ScHidPassthrough::readLoop() {
@@ -201,20 +223,28 @@ void ScHidPassthrough::readLoop() {
     while (m_running) {
         bool gotAny = false;
 
-        // Poll every opened vendor interface; only the active controller's
-        // interface actually delivers reports (the others stay silent).
-        for (int i = 0; i < m_devCount; i++) {
-            int n = SDL_hid_read(m_devs[i], buf, sizeof(buf));
-            if (n <= 0) {
-                continue;  // 0 = no data (non-blocking); <0 = error on this handle
-            }
-            gotAny = true;
+        {
+            // §SC-DEV-LOCK-FIX (review batch 2)：每輪 sweep 持鎖，與
+            // forwardFeatureRequest / stop() 互斥。read 是 non-blocking
+            // （start() 已 SDL_hid_set_nonblocking），不會在鎖內久待；
+            // SDL_Delay 留在鎖外，feature 請求不會被餓死。
+            std::lock_guard<std::mutex> lock(m_devMutex);
 
-            // Pad short reads to exactly the fixed wire report size.
-            if (n < SC_HID_WIRE_BYTES) {
-                memset(buf + n, 0, SC_HID_WIRE_BYTES - n);
+            // Poll every opened vendor interface; only the active controller's
+            // interface actually delivers reports (the others stay silent).
+            for (int i = 0; i < m_devCount; i++) {
+                int n = SDL_hid_read(m_devs[i], buf, sizeof(buf));
+                if (n <= 0) {
+                    continue;  // 0 = no data (non-blocking); <0 = error on this handle
+                }
+                gotAny = true;
+
+                // Pad short reads to exactly the fixed wire report size.
+                if (n < SC_HID_WIRE_BYTES) {
+                    memset(buf + n, 0, SC_HID_WIRE_BYTES - n);
+                }
+                LiSendScHidInputReport(buf, SC_HID_WIRE_BYTES);
             }
-            LiSendScHidInputReport(buf, SC_HID_WIRE_BYTES);
         }
 
         if (!gotAny) {
