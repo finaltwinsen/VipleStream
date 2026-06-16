@@ -662,7 +662,8 @@ bool Session::populateDecoderProperties(SDL_Window* window)
     return true;
 }
 
-Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences)
+Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences,
+                 bool takeover)
     : m_Preferences(preferences ? preferences : StreamingPreferences::get()),
       m_IsFullScreen(m_Preferences->windowMode != StreamingPreferences::WM_WINDOWED || !WMUtils::isRunningDesktopEnvironment()),
       m_Computer(computer),
@@ -682,7 +683,8 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_OpusDecoder(nullptr),
       m_AudioRenderer(nullptr),
       m_AudioSampleCount(0),
-      m_DropAudioEndTime(0)
+      m_DropAudioEndTime(0),
+      m_Takeover(takeover)
 {
 }
 
@@ -1987,7 +1989,8 @@ bool Session::startConnectionAsync()
             .arg(m_Preferences->playAudioOnHost ? 1 : 0)
             .arg(SURROUNDAUDIOINFO_FROM_AUDIO_CONFIGURATION(m_StreamConfig.audioConfiguration))
             .arg(m_InputHandler->getAttachedGamepadMask())
-            + "&corever=1";  // Required for encrypted RTSP (rtspenc://)
+            + "&corever=1"  // Required for encrypted RTSP (rtspenc://)
+            + (m_Takeover ? "&takeover=1" : "");
 
         // Pre-cancel any app the previous session left running. The
         // normal quitApp() path goes through direct HTTPS which the
@@ -2064,7 +2067,8 @@ bool Session::startConnectionAsync()
                           m_Preferences->playAudioOnHost,
                           m_InputHandler->getAttachedGamepadMask(),
                           !m_Preferences->multiController,
-                          rtspSessionUrl);
+                          rtspSessionUrl,
+                          m_Takeover);
         } catch (const QtNetworkReplyException&) {
             // Direct launch failed — try via relay proxy as fallback.
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,

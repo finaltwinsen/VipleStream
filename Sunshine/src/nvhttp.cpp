@@ -937,6 +937,17 @@ namespace nvhttp {
     tree.put("root.currentgame", current_appid);
     tree.put("root.state", current_appid > 0 ? "SUNSHINE_SERVER_BUSY" : "SUNSHINE_SERVER_FREE");
 
+    // §M.2 (2026-06-16) — expose session owner info in serverinfo so the
+    // client can distinguish "busy by device X" from "orphan session
+    // (no owner, reclaimable)".  Wire-compat-safe: vanilla Moonlight
+    // ignores unknown XML elements.
+    if (current_appid > 0) {
+      auto owner_uuid = proc::proc.running_owner_uuid();
+      auto owner_name = proc::proc.running_owner_name();
+      tree.put("root.SessionOwnerUuid", owner_uuid);
+      tree.put("root.SessionOwnerName", owner_name);
+    }
+
     // VipleStream §H.4 — expose host primary display mode(s) so the client
     // can filter its resolution dropdown / clamp selections that exceed what
     // the host display physically supports.  Upstream Sunshine omits these

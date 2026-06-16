@@ -535,9 +535,26 @@ CenteredGridView {
             }
         }
 
-        function launchOrResumeSelectedApp(quitExistingApp)
+        function launchOrResumeSelectedApp(quitExistingApp, takeover)
         {
             var runningId = appModel.getRunningAppId()
+
+            // §M.2: 檢查 session 是否被其他裝置佔用
+            if (runningId !== 0 && !takeover) {
+                var ownerUuid = appModel.getSessionOwnerUuid()
+                var ownerName = appModel.getSessionOwnerName()
+                var localUuid = appModel.getLocalUniqueId()
+
+                // owner 非空且不是自己 → 需要接管確認
+                if (ownerUuid !== "" && ownerUuid !== localUuid) {
+                    takeoverDialog.ownerName = ownerName || ownerUuid
+                    takeoverDialog.targetAppName = model.name
+                    takeoverDialog.targetAppIndex = index
+                    takeoverDialog.open()
+                    return
+                }
+            }
+
             if (runningId !== 0 && runningId !== model.appid) {
                 if (quitExistingApp) {
                     quitAppDialog.appName = appModel.getRunningAppName()
@@ -553,7 +570,7 @@ CenteredGridView {
             var component = Qt.createComponent("StreamSegue.qml")
             var segue = component.createObject(stackView, {
                                                    "appName": model.name,
-                                                   "session": appModel.createSessionForApp(index),
+                                                   "session": appModel.createSessionForApp(index, takeover || false),
                                                    "isResume": runningId === model.appid
                                                })
             stackView.push(segue)
@@ -715,6 +732,27 @@ CenteredGridView {
         }
 
         onAccepted: quitApp()
+    }
+
+    // §M.2: 接管被其他裝置佔用的 session 確認對話框
+    NavigableMessageDialog {
+        id: takeoverDialog
+        property string ownerName: ""
+        property string targetAppName: ""
+        property int targetAppIndex: 0
+        text: qsTr("%1 is currently using this host. Do you want to take over the session? Their session will be disconnected.").arg(ownerName)
+        standardButtons: Dialog.Yes | Dialog.No
+
+        onAccepted: {
+            // 以 takeover=true 重新呼叫 launch
+            var component = Qt.createComponent("StreamSegue.qml")
+            var segue = component.createObject(stackView, {
+                                                   "appName": targetAppName,
+                                                   "session": appModel.createSessionForApp(targetAppIndex, true),
+                                                   "isResume": false
+                                               })
+            stackView.push(segue)
+        }
     }
 
     ScrollBar.vertical: ScrollBar {}

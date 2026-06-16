@@ -753,9 +753,24 @@ namespace proc {
                         << " idle="sv << std::chrono::duration_cast<std::chrono::seconds>(idle).count() << "s"sv
                         << " (no RTSP session for >="sv
                         << kIdleTimeout.count() << "s, presumed abnormal disconnect)"sv;
-        // clear_owner_uuid() bumps gen so next iteration exits the loop
-        // — but we exit explicitly here too for clarity.
-        clear_owner_uuid();
+        // §M.2 (2026-06-16) — idle watchdog 必須呼叫 terminate()（而非
+        // 只有 clear_owner_uuid()）。舊版只清 owner 但留下 _app_id > 0
+        // （特別是 Steam placebo 模式），導致 serverinfo 永遠回 BUSY，
+        // 其他 client 看到 host 被佔用無法連線。
+        //
+        // terminate() 清 _app_id / placebo / owner / 停 watchdog，讓
+        // running() 回 0、serverinfo 回 FREE。在 detached thread 執行
+        // 避免 deadlock（terminate() 內部 bump _idle_watchdog_gen，
+        // 若在同 thread 會自我 cancel）。模式同 start_steam_watchdog_
+        // line 295-300。
+        std::thread([]() {
+          if (proc.running() > 0) {
+            BOOST_LOG(info) << "[VIPLE-MULTI] idle watchdog → terminate() "
+                               "to fully release server state"sv;
+            proc.terminate();
+          }
+          display_device::revert_configuration();
+        }).detach();
         return;
       }
       BOOST_LOG(debug) << "[VIPLE-MULTI] idle watchdog cancelled gen="sv << my_gen;

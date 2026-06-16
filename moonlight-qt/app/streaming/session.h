@@ -99,7 +99,8 @@ class Session : public QObject
     friend class AsyncConnectionStartThread;
 
 public:
-    explicit Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences = nullptr);
+    explicit Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences = nullptr,
+                     bool takeover = false);
     virtual ~Session();
 
     Q_INVOKABLE bool initialize(QQuickWindow* qtWindow);
@@ -319,6 +320,9 @@ private:
 
     // VipleStream: original user-requested FPS (before FRUC halving)
     int m_OriginalFps = 0;
+
+    // §M.2: 使用者確認接管被他人佔用的 session
+    bool m_Takeover;
 
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
     static Session* s_ActiveSession;

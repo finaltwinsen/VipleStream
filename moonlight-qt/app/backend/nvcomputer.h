@@ -99,6 +99,8 @@ public:
     NvAddress activeAddress;
     uint16_t activeHttpsPort;
     int currentGameId;
+    QString sessionOwnerUuid;   // §M.2: who owns the running session (empty = orphan/free)
+    QString sessionOwnerName;   // §M.2: display name of the session owner
     QString gfeVersion;
     QString appVersion;
     QVector<NvDisplayMode> displayModes;

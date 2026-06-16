@@ -1,4 +1,5 @@
 #include "appmodel.h"
+#include "backend/identitymanager.h"
 
 // VipleStream H.4 v1.2.119: poll-loop in requestSteamSwitch needs these.
 #include <QCoreApplication>
@@ -49,12 +50,27 @@ QString AppModel::getRunningAppName()
     return nullptr;
 }
 
-Session* AppModel::createSessionForApp(int appIndex)
+Session* AppModel::createSessionForApp(int appIndex, bool takeover)
 {
     Q_ASSERT(appIndex < m_VisibleApps.count());
     NvApp app = m_VisibleApps.at(appIndex);
 
-    return new Session(m_Computer, app);
+    return new Session(m_Computer, app, nullptr, takeover);
+}
+
+QString AppModel::getSessionOwnerUuid()
+{
+    return m_Computer->sessionOwnerUuid;
+}
+
+QString AppModel::getSessionOwnerName()
+{
+    return m_Computer->sessionOwnerName;
+}
+
+QString AppModel::getLocalUniqueId()
+{
+    return IdentityManager::get()->getUniqueId();
 }
 
 int AppModel::getDirectLaunchAppIndex()

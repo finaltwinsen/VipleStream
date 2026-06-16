@@ -29,13 +29,18 @@ public:
     // Must be called before any QAbstractListModel functions
     Q_INVOKABLE void initialize(ComputerManager* computerManager, int computerIndex, bool showHiddenGames);
 
-    Q_INVOKABLE Session* createSessionForApp(int appIndex);
+    Q_INVOKABLE Session* createSessionForApp(int appIndex, bool takeover = false);
 
     Q_INVOKABLE int getDirectLaunchAppIndex();
 
     Q_INVOKABLE int getRunningAppId();
 
     Q_INVOKABLE QString getRunningAppName();
+
+    // §M.2: 查詢目前佔用 session 的 owner 資訊（供 QML takeover 對話框使用）
+    Q_INVOKABLE QString getSessionOwnerUuid();
+    Q_INVOKABLE QString getSessionOwnerName();
+    Q_INVOKABLE QString getLocalUniqueId();
 
     Q_INVOKABLE void quitRunningApp();
 

@@ -325,6 +325,11 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     this->pairState = NvHTTP::getXmlString(serverInfo, "PairStatus") == "1" ?
                 PS_PAIRED : PS_NOT_PAIRED;
     this->currentGameId = NvHTTP::getCurrentGame(serverInfo);
+
+    // §M.2: 從 serverinfo 解析 session owner 資訊（VipleStream 擴充欄位）
+    this->sessionOwnerUuid = NvHTTP::getXmlString(serverInfo, "SessionOwnerUuid");
+    this->sessionOwnerName = NvHTTP::getXmlString(serverInfo, "SessionOwnerName");
+
     this->appVersion = NvHTTP::getXmlString(serverInfo, "appversion");
     this->gfeVersion = NvHTTP::getXmlString(serverInfo, "GfeVersion");
     this->gpuModel = NvHTTP::getXmlString(serverInfo, "gputype");
@@ -683,6 +688,8 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED(pairState);
     ASSIGN_IF_CHANGED(serverCodecModeSupport);
     ASSIGN_IF_CHANGED(currentGameId);
+    ASSIGN_IF_CHANGED(sessionOwnerUuid);
+    ASSIGN_IF_CHANGED(sessionOwnerName);
     ASSIGN_IF_CHANGED(activeAddress);
     ASSIGN_IF_CHANGED(state);
     ASSIGN_IF_CHANGED(gfeVersion);
