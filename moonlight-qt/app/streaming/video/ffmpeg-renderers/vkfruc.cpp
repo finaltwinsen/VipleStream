@@ -633,7 +633,19 @@ int VkFrucRenderer::lastFrameInterpolatedCount() const
 
 const char* VkFrucRenderer::getFRUCBackendName() const
 {
-    return "VkFruc-Vulkan compute";
+    // §FRUC-XPLAT 2026-06-17 — report the ACTUAL interpolation method, not the
+    // generic renderer name. The old "Vulkan compute" string hid whether NVOF /
+    // RIFE / block-match was live, which made every diagnosis ambiguous. Derive
+    // from the current tier (T3+ = RIFE, T2 = NVOF, T1/T0 = block-match) + the
+    // runtime ready flags.
+    const auto cfg = tierConfig((VkFrucTier)m_CurrentTier.load(std::memory_order_relaxed));
+    if (cfg.useRife && m_RifeNativeReady) {
+        return (m_RifeNativeInferW >= 256) ? "VkFruc-RIFE@256" : "VkFruc-RIFE@128";
+    }
+    if (cfg.useNvOf && m_NvOfReady.load(std::memory_order_relaxed)) {
+        return "VkFruc-NVOF(HW flow)";
+    }
+    return "VkFruc-block-match";
 }
 
 // VipleStream: Ctrl+Alt+Shift+F hotkey 翻轉 m_FRUCPaused，下一幀
