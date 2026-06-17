@@ -135,6 +135,9 @@ int runFrucOffline(const FrucOfflineCommandLineParser& args)
     }
 
     int fed = 0;
+    // §FRUC-GENERIC 2026-06-17 — feed 節流可調（見迴圈內註解）。預設 60ms。
+    int feedMs = qEnvironmentVariableIntValue("VIPLE_FRUC_OFFLINE_FEED_MS");
+    if (feedMs <= 0) feedMs = 60;
     for (const QString& name : frames) {
         QImage img(dir.filePath(name));
         if (img.isNull()) {
@@ -168,12 +171,16 @@ int runFrucOffline(const FrucOfflineCommandLineParser& args)
         av_frame_free(&frame);
         fed++;
 
-        // 模擬 ~60fps 間隔，避免 latency throttle / autotier 誤判而 skip chain。
-        SDL_Delay(16);
+        // §FRUC-GENERIC 2026-06-17 — feed 節流（VIPLE_FRUC_OFFLINE_FEED_MS，預設 60ms）。
+        // 原 16ms 對「較慢的 warp（如 Quality computeAdaptiveWeight）」會讓 §B-DUMP 的
+        // 6 個 staging buffer + disk writer 跟不上 → tail 幀(~9+)捕捉到 stale buffer、
+        // real/interp 皆 corrupt、量測非決定性（同 exe 兩跑後段幀不同）。放慢到 ≥ writer
+        // 每幀耗時（3×~10MB BMP）即決定性。TIER 強制下放慢 pacing 不影響 chain 正確性。
+        SDL_Delay(feedMs);
     }
 
     fprintf(stderr, "[fruc-offline] fed %d frames; flushing dump...\n", fed);
-    SDL_Delay(750);  // 給 §B-DUMP writer thread 時間把最後幾幀寫完
+    SDL_Delay(3000);  // §FRUC-GENERIC — 加長 flush，確保 writer 把 tail 幀全寫完
 
     sws_freeContext(sws);
     delete renderer;  // dtor 收掉 writer thread + teardown Vulkan
