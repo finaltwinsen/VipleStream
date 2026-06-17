@@ -14,6 +14,8 @@ public:
         QuitRequested,
         PairRequested,
         ListRequested,
+        // VipleStream §FRUC-VALIDATE — 離線 FRUC 品質量測模式（dev-only）。
+        FrucOfflineRequested,
     };
 
     GlobalCommandLineParser();
@@ -96,4 +98,28 @@ private:
     QString m_Host;
     bool m_PrintCSV;
     bool m_Verbose;
+};
+
+// VipleStream §FRUC-VALIDATE — 離線 FRUC 品質量測（dev-only）。
+// 用法：viplestream fruc-offline <input_dir> <dump_dir> <width> <height>
+// 把 input_dir 的 PNG 序列當輸入幀，餵真實 VkFrucRenderer（SW + FRUC + dump），
+// dump 出 real/interp 幀到 dump_dir，供 fruc_metrics.py 對 GT 比對。
+class FrucOfflineCommandLineParser
+{
+public:
+    FrucOfflineCommandLineParser();
+    virtual ~FrucOfflineCommandLineParser();
+
+    void parse(const QStringList &args);
+
+    QString getInputDir() const;
+    QString getDumpDir() const;
+    int getWidth() const;
+    int getHeight() const;
+
+private:
+    QString m_InputDir;
+    QString m_DumpDir;
+    int m_Width = 0;
+    int m_Height = 0;
 };

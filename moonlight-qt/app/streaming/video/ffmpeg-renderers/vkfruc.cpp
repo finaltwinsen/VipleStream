@@ -15584,10 +15584,16 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         // Timeline values: 0 ignored for binary sems; real value for timeline.
         uint64_t waitVals[3]   = { 0, 0, timelineWaitValue };
         uint64_t signalVals[3] = { 0, 0, gfxSignalVal };
+        // §FRUC-VALIDATE：SW dump 模式（無 native decode）下 createDecodeCommandResources
+        // 未執行 → m_GfxTimelineSem = VK_NULL_HANDLE。不可把 null sem 放進 signal 清單
+        // （NV driver 在 vkQueueSubmit 解 null timeline sem 時會 null-deref crash，
+        // 見 §FRUC-VALIDATE frame#0 crash）。正常串流 / native decode 下 sem 非 null，
+        // 行為不變（count=3）；SW dump 模式無 decode thread 等此 timeline，少 signal 無害。
+        const uint32_t dualSigCount = (m_GfxTimelineSem != VK_NULL_HANDLE) ? 3u : 2u;
         VkTimelineSemaphoreSubmitInfo tssi = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
         tssi.waitSemaphoreValueCount   = 3;
         tssi.pWaitSemaphoreValues      = waitVals;
-        tssi.signalSemaphoreValueCount = 3;
+        tssi.signalSemaphoreValueCount = dualSigCount;
         tssi.pSignalSemaphoreValues    = signalVals;
         VkSubmitInfo si = {};
         si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -15597,7 +15603,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         si.pWaitDstStageMask    = waitMasks;
         si.commandBufferCount   = 1;
         si.pCommandBuffers      = &cmd;
-        si.signalSemaphoreCount = 3;
+        si.signalSemaphoreCount = dualSigCount;
         si.pSignalSemaphores    = signalSems;
         {
             std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
@@ -15657,10 +15663,12 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         };
         uint64_t singleWaitVals[2]   = { 0, timelineWaitValue };
         uint64_t singleSignalVals[2] = { 0, gfxSignalVal };
+        // §FRUC-VALIDATE：同 dual-present，SW dump 模式 m_GfxTimelineSem 為 null 時不 signal。
+        const uint32_t singleSigCount = (m_GfxTimelineSem != VK_NULL_HANDLE) ? 2u : 1u;
         VkTimelineSemaphoreSubmitInfo singleTssi = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
         singleTssi.waitSemaphoreValueCount   = 2;
         singleTssi.pWaitSemaphoreValues      = singleWaitVals;
-        singleTssi.signalSemaphoreValueCount = 2;
+        singleTssi.signalSemaphoreValueCount = singleSigCount;
         singleTssi.pSignalSemaphoreValues    = singleSignalVals;
         VkSubmitInfo si = {};
         si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -15670,7 +15678,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         si.pWaitDstStageMask    = singleWaitMasks;
         si.commandBufferCount   = 1;
         si.pCommandBuffers      = &cmd;
-        si.signalSemaphoreCount = 2;
+        si.signalSemaphoreCount = singleSigCount;
         si.pSignalSemaphores    = singleSignalSems;
         {
             std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);

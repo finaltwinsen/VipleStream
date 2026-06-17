@@ -194,6 +194,7 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
         "  quit            Quit the currently running app\n"
         "  stream          Start streaming an app\n"
         "  pair            Pair a new host\n"
+        "  fruc-offline    Offline FRUC quality measurement (dev-only)\n"
         "\n"
         "See 'moonlight <action> --help' for help of specific action."
     );
@@ -225,6 +226,8 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
                 return PairRequested;
             } else if (action == "list") {
                 return ListRequested;
+            } else if (action == "fruc-offline") {
+                return FrucOfflineRequested;
             }
         }
 
@@ -710,3 +713,58 @@ bool ListCommandLineParser::isVerbose() const
 {
     return m_Verbose;
 }
+
+// VipleStream §FRUC-VALIDATE — 離線 FRUC 品質量測（dev-only）。
+FrucOfflineCommandLineParser::FrucOfflineCommandLineParser()
+{
+}
+
+FrucOfflineCommandLineParser::~FrucOfflineCommandLineParser()
+{
+}
+
+void FrucOfflineCommandLineParser::parse(const QStringList &args)
+{
+    CommandLineParser parser;
+    parser.setupCommonOptions();
+    parser.setApplicationDescription(
+        "\n"
+        "Offline FRUC quality measurement (dev-only).\n"
+        "Feeds a PNG sequence through the real VkFrucRenderer (software upload +\n"
+        "FRUC + frame dump) and writes real/interp BMPs to <dump_dir> for\n"
+        "comparison against ground-truth frames by fruc_metrics.py."
+    );
+    parser.addPositionalArgument("fruc-offline", "offline FRUC measurement");
+    parser.addPositionalArgument("input_dir", "directory of input PNG frames", "<input_dir>");
+    parser.addPositionalArgument("dump_dir", "output directory for real/interp dumps", "<dump_dir>");
+    parser.addPositionalArgument("width", "frame width in pixels", "<width>");
+    parser.addPositionalArgument("height", "frame height in pixels", "<height>");
+
+    if (!parser.parse(args)) {
+        parser.showError(parser.errorText());
+    }
+
+    parser.handleUnknownOptions();
+
+    // This method will not return and terminates the process if --version or
+    // --help is specified
+    parser.handleHelpAndVersionOptions();
+
+    auto posArgs = parser.positionalArguments();
+    if (posArgs.length() < 5) {
+        parser.showError("Usage: fruc-offline <input_dir> <dump_dir> <width> <height>");
+    }
+    m_InputDir = posArgs.at(1);
+    m_DumpDir  = posArgs.at(2);
+    m_Width    = posArgs.at(3).toInt();
+    m_Height   = posArgs.at(4).toInt();
+
+    if (m_Width <= 0 || m_Height <= 0) {
+        parser.showError("Invalid width/height (must be positive integers)");
+    }
+}
+
+QString FrucOfflineCommandLineParser::getInputDir() const { return m_InputDir; }
+QString FrucOfflineCommandLineParser::getDumpDir() const { return m_DumpDir; }
+int FrucOfflineCommandLineParser::getWidth() const { return m_Width; }
+int FrucOfflineCommandLineParser::getHeight() const { return m_Height; }

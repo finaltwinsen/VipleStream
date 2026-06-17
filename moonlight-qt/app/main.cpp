@@ -52,6 +52,7 @@
 #include "cli/startstream.h"
 #include "cli/pair.h"
 #include "cli/commandlineparser.h"
+#include "cli/frucoffline.h"
 #include "path.h"
 #include "streaming/video/ffmpeg-renderers/rife_native_vk.h"
 #include "utils.h"
@@ -1401,6 +1402,17 @@ int main(int argc, char *argv[])
             launcher->execute(new ComputerManager(StreamingPreferences::get()));
             hasGUI = false;
             break;
+        }
+    case GlobalCommandLineParser::FrucOfflineRequested:
+        {
+            // VipleStream §FRUC-VALIDATE — 離線 FRUC 品質量測（dev-only）。
+            // 同步跑完即離，不進 QML / app.exec()。用 std::_Exit 跳過 static
+            // destructor（與 commandlineparser.cpp 的 --help fast-path 同理，
+            // 避開 main.cpp file-scope 物件銷毀時的 QRegularExpression race）。
+            FrucOfflineCommandLineParser frucParser;
+            frucParser.parse(app.arguments());
+            int rc = runFrucOffline(frucParser);
+            std::_Exit(rc);
         }
     }
 
