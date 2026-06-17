@@ -3,8 +3,8 @@
 //   1. 設 VIPLE_VKFRUC_DUMP_DIR（必須在 new VkFrucRenderer 之前——dump dir
 //      會自動觸發 m_SwMode + FRUC + DUAL + dump，見 vkfruc.cpp:263）。
 //   2. 建隱藏 SDL Vulkan window → new VkFrucRenderer(0) → initialize()。
-//   3. 讀 PNG 序列 → sws_scale RGB→NV12（BT.601 limited，對齊 renderer 預設）
-//      → renderFrame()。real/interp 幀由 §B-DUMP 寫成 BMP。
+//   3. 讀 PNG 序列 → sws_scale RGB→NV12（BT.709 narrow，對齊引擎 ycbcr sampler
+//      model=BT709 range=narrow）→ renderFrame()。real/interp 幀由 §B-DUMP 寫成 BMP。
 //   4. flush dump、teardown。
 
 #include "frucoffline.h"
@@ -114,8 +114,8 @@ int runFrucOffline(const FrucOfflineCommandLineParser& args)
     }
     fprintf(stderr, "[fruc-offline] renderer initialized; feeding frames...\n");
 
-    // RGB24 → NV12，BT.601 limited（對齊 IFFmpegRenderer 預設 REC_601 / limited，
-    // 讓 dump 端的 YUV→RGB 還原與這裡的 RGB→YUV 對稱，避免色彩偏差吃掉指標）。
+    // RGB24 → NV12，BT.709 narrow（對齊引擎 NV12→RGB sampler 的 BT.709 narrow，見下方
+    // sws_setColorspaceDetails；601/709 不一致會全幀色偏吃掉數 dB passthrough PSNR）。
     struct SwsContext* sws = sws_getContext(
         width, height, AV_PIX_FMT_RGB24,
         width, height, AV_PIX_FMT_NV12,
