@@ -2288,9 +2288,16 @@ int VkFrucRenderer::detectInitialTierCap()
     // / NVOF fails 動態降階. T2 → T1 → T0 → DISABLED 全部 latency-driven.
     // NVOF QF probe 仍是硬性 capability (沒 OF QF 就不能 NVOF), 不歸 tier 管.
     const bool hasOF = (m_OpticalFlowQueueFamily != UINT32_MAX);
-    // hasOF=false 時 T5 還是會試 (tierConfig T5 useNvOf=true, 但 NvOf init 會 fail
-    // → m_NvOfReady 永遠 false, 自動繞 block-match path). 不需要 cap 預先降.
-    const int cap = (int)VkFrucTier::T5;
+    // §FRUC-XPLAT 2026-06-17 — non-NVOF (AMD/Intel, or NVOF env-disabled): RIFE is
+    // the only felt path (no NVOF fast-path to prefer). Proven via NVOF-disabled
+    // stream test that RIFE@128 stays engaged + healthy (30fps, no drops, decode
+    // ~0.3ms), but RIFE@256 (T5, ~18ms TRIPLE) is too heavy → cap at T4 (RIFE@128)
+    // so the autotier never promotes into the unshippable 256 path. (NVIDIA keeps
+    // T5: NVOF dominates there anyway and RIFE is only a brief promote.)
+    const bool noNvof = !hasOF
+        || (qEnvironmentVariableIsSet("VIPLE_VKFRUC_NV_OF")
+            && qEnvironmentVariableIntValue("VIPLE_VKFRUC_NV_OF") == 0);
+    const int cap = noNvof ? (int)VkFrucTier::T4 : (int)VkFrucTier::T5;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
         "[VIPLE-VKFRUC-TIER] §J.3.e.2.i.60 initial cap=T%d (latency-driven autotier, "
         "no hardware heuristic; hasOF=%d frucChainAsyncAvailable=%d)",
@@ -3768,8 +3775,23 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
         // v1.4.155 §R2-ε-1: 起始 tier = min(cap, T2). 從中段 T2 起跑, 讓
         // latency-driven autotier 動態升降. T2 = NVOF + chain_lv 1 (no RIFE),
         // 對 weak GPU 是安全起點; 強 GPU 會自動升 T3/T4/T5.
-        int initialTier = m_TierCap;
-        if (initialTier > (int)VkFrucTier::T2) initialTier = (int)VkFrucTier::T2;
+        // §FRUC-XPLAT 2026-06-17 — non-NVOF (AMD/Intel, or NVOF env-disabled): start
+        // DIRECTLY at T3 (RIFE@128) instead of T2+slow-ramp. On non-NVOF, T2 = block-
+        // match (NVOF can't engage) and the ~19s promote ramp delays felt RIFE; we
+        // proved RIFE@128 stays engaged + healthy there, so engage it immediately.
+        // The autotier still demotes T3→T2 (→block-match) if RIFE@128 is too slow on
+        // a weak GPU — graceful degradation preserved.
+        const bool noNvof = (m_OpticalFlowQueueFamily == UINT32_MAX)
+            || (qEnvironmentVariableIsSet("VIPLE_VKFRUC_NV_OF")
+                && qEnvironmentVariableIntValue("VIPLE_VKFRUC_NV_OF") == 0);
+        int initialTier;
+        if (noNvof) {
+            initialTier = (int)VkFrucTier::T3;   // RIFE@128 immediately
+        } else {
+            initialTier = m_TierCap;
+            if (initialTier > (int)VkFrucTier::T2) initialTier = (int)VkFrucTier::T2;
+        }
+        if (initialTier > m_TierCap) initialTier = m_TierCap;  // never exceed cap
         m_CurrentTier.store(initialTier);
         using Clock = std::chrono::steady_clock;
         m_TierEnteredMs = std::chrono::duration_cast<std::chrono::milliseconds>(
