@@ -9315,6 +9315,29 @@ bool VkFrucRenderer::createRifeNativeResources(int width, int height)
     // lite Add_503 mismatch needs careful per-layer center-crop logic
     // that's a larger undertaking; backlog item, see TODO.md §J.3.e.X.
     int inferW = vkfrucNativeRifeInferDimFromUserOrEnv();
+    // §FRUC-XPLAT 2026-06-18 — on non-NVIDIA, cap inferDim at 128 to match the
+    // autotier's non-NVOF cap (detectInitialTierCap → T4 = "RIFE@128"). The
+    // inferDim heuristic (vkfrucNativeRifeInferDimFromUserOrEnv) is otherwise
+    // DECOUPLED from the autotier and can pick 256 (AMD live stream ran 256 even
+    // though the tier was T4) — too heavy on weak iGPUs at high fps. Respect an
+    // explicit env override; NVIDIA unaffected (native RIFE is off there anyway).
+    if (m_pfnGetInstanceProcAddr && m_PhysicalDevice != VK_NULL_HANDLE
+            && qEnvironmentVariableIntValue("VIPLE_VKFRUC_RIFE_INFER_DIM") <= 0
+            && inferW > 128) {
+        auto pfnGetProps = (PFN_vkGetPhysicalDeviceProperties)
+            m_pfnGetInstanceProcAddr(m_Instance, "vkGetPhysicalDeviceProperties");
+        if (pfnGetProps) {
+            VkPhysicalDeviceProperties props{};
+            pfnGetProps(m_PhysicalDevice, &props);
+            if (props.vendorID != 0x10DE) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-RIFE-β] §FRUC-XPLAT non-NVIDIA GPU → capping "
+                    "inferDim %d → 128 (match autotier T4 cap; lighter on weak iGPU)",
+                    inferW);
+                inferW = 128;
+            }
+        }
+    }
     inferW = ((inferW + 127) / 128) * 128;
     if (inferW < 128) inferW = 128;
     int inferH = (int)((double)inferW * (double)height / (double)width + 0.5);
