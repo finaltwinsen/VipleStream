@@ -111,11 +111,16 @@
             </intent-filter>
         </activity>
         <!-- VipleStream CLI streaming entry point (adb am start) -->
+        <!-- Translucent (invisible) rather than NoDisplay: CliStreamActivity does
+             its host/app resolve on a background thread and only calls finish()
+             after launching Game, which happens AFTER onResume(). Theme.NoDisplay
+             forbids reaching onResume() without finish() → "did not call finish()
+             prior to onResume() completing" crash. Translucent has no such rule. -->
         <activity
             android:name=".CliStreamActivity"
             android:noHistory="true"
             android:exported="true"
-            android:theme="@android:style/Theme.NoDisplay" />
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <!-- Small hack to support launcher shortcuts without relaunching over and over again when the back button is pressed -->
         <activity
             android:name=".ShortcutTrampoline"

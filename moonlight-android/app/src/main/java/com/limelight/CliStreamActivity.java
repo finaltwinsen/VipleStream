@@ -95,10 +95,27 @@ public class CliStreamActivity extends Activity {
             addr = new ComputerDetails.AddressTuple(host, NvHTTP.DEFAULT_HTTP_PORT);
         }
 
+        // §N.5 fix (2026-06-18): computer.httpsPort loaded from the local DB is
+        // often 0 — the normal UI populates it via a serverinfo poll before
+        // launching Game, but the CLI path skipped that. httpsPort==0 makes
+        // Game.startFileTransferClient() bail with "missing host/port/cert".
+        // Poll serverinfo here so the in-stream file transfer client can start.
+        int httpsPort = computer.httpsPort;
+        if (httpsPort == 0) {
+            try {
+                NvHTTP probe = new NvHTTP(addr, 0, uniqueId, computer.serverCert,
+                        PlatformBinding.getCryptoProvider(this));
+                httpsPort = probe.getComputerDetails(true).httpsPort;
+                LimeLog.info("[VIPLE-CLI] resolved httpsPort=" + httpsPort + " via serverinfo");
+            } catch (Exception e) {
+                LimeLog.warning("[VIPLE-CLI] httpsPort serverinfo fetch failed: " + e.getMessage());
+            }
+        }
+
         Intent gameIntent = new Intent(this, Game.class);
         gameIntent.putExtra(Game.EXTRA_HOST, addr.address);
         gameIntent.putExtra(Game.EXTRA_PORT, addr.port);
-        gameIntent.putExtra(Game.EXTRA_HTTPS_PORT, computer.httpsPort);
+        gameIntent.putExtra(Game.EXTRA_HTTPS_PORT, httpsPort);
         gameIntent.putExtra(Game.EXTRA_APP_NAME, app.getAppName());
         gameIntent.putExtra(Game.EXTRA_APP_ID, app.getAppId());
         gameIntent.putExtra(Game.EXTRA_APP_HDR, app.isHdrSupported());
