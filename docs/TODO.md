@@ -10,7 +10,9 @@
 | 優先級 | 條目 | 待做事項 |
 |---|---|---|
 | **Active (verify)** | **§β.11.b** warp edge MV threshold | Settings UI slider (2-20, default 8) 已上線 v1.4.195；setting 實機 confirm 生效 (2026-05-23, registry vkfrucEdgeMvThreshold=8 + ctor log)；剩主觀畫質比較：keep 8 / 試 4（更多邊緣保護）/ 試 12（更 smooth）|
-| **Active (Phase 2.1 — 方法學成形)** | **§FRUC-VALIDATE** FRUC 科學驗測方案（科學數據優先、體感降第二線）| drop-and-reconstruct vs GT 取代體感。**Phase 1 已 commit (4833c02d / v1.5.247)：** app 內 `fruc-offline` CLI harness（走真 renderFrame(AVFrame*) + §B-DUMP）+ vkfruc.cpp SW-dump null-timeline-sem crash 修。**Phase 2.1（2026-06-17，scripts/ 本機）強結論：** 結構化內容（make_shapes_pan 硬邊+平滑底剛性平移）+ 公平 NV12 控制（用引擎自己 dump 的 real 幀，修 measurement asymmetry）+ paired bootstrap CI + 驗過的 oracle（warp 正確性 ✓、光流改用閉式解因 Farneback 失效）+ gate 敏感度負對照下，**RIFE@256 在全部 4 標準指標（PSNR/SSIM/IE/LPIPS）+ temporal 一致性上統計顯著勝過 naive-blend，且優勢隨運動難度成長**（slow 36px→fast：PSNR +2.73→+4.08）。**誠實：** block-match-8 在 12-36px 全域運動誠實輸 blend（標準指標），只在 M3 edge-IE（獎勵 source-res 銳利邊）贏；inferDim 是關鍵 cross-engine 共變量（128→256 翻 3 指標）。tooling：fruc_metrics/decimate/compare_dump/oracle_pass/inject_regression/run_validate_round（gitignored，跑 .venv）。**seq-VMAF 已加**（RIFE@256 68 vs blend 42）。**NVOF 改走真實串流驗測成功**（取代 SW renderer 手術——判定那不是小修）：register win-builder + .226 host，throwaway client 串流 TIER=5 → log 證 NVOF execute + 餵 warp（chainBusy ~1.6ms 最快）。**6 引擎覆蓋：** Vulkan 家族 3 引擎完整（block-match/RIFE GT-quality + 全 3 真路徑 perf，NVOF 解鎖）；**D3D11 家族（Generic/NVOF/DirectML）此自動化 session 不可達**（client 硬選 VkFruc，需互動桌面）。**剩：** D3D11 家族（互動桌面）、L1 端到端 GT-quality、跨 build σ。|
+| **Active (Phase 2.1 完成 / v1.5.249 61f8b0fd)** | **§FRUC-VALIDATE** FRUC 科學驗測方案（科學數據優先、體感降第二線）| drop-and-reconstruct vs GT 取代體感。**Phase 1 已 commit (4833c02d / v1.5.247)：** app 內 `fruc-offline` CLI harness（走真 renderFrame(AVFrame*) + §B-DUMP）+ vkfruc.cpp SW-dump null-timeline-sem crash 修。**Phase 2.1（2026-06-17，scripts/ 本機）強結論：** 結構化內容（make_shapes_pan 硬邊+平滑底剛性平移）+ 公平 NV12 控制（用引擎自己 dump 的 real 幀，修 measurement asymmetry）+ paired bootstrap CI + 驗過的 oracle（warp 正確性 ✓、光流改用閉式解因 Farneback 失效）+ gate 敏感度負對照下，**RIFE@256 在全部 4 標準指標（PSNR/SSIM/IE/LPIPS）+ temporal 一致性上統計顯著勝過 naive-blend，且優勢隨運動難度成長**（slow 36px→fast：PSNR +2.73→+4.08）。**誠實：** block-match-8 在 12-36px 全域運動誠實輸 blend（標準指標），只在 M3 edge-IE（獎勵 source-res 銳利邊）贏；inferDim 是關鍵 cross-engine 共變量（128→256 翻 3 指標）。tooling：fruc_metrics/decimate/compare_dump/oracle_pass/inject_regression/run_validate_round（gitignored，跑 .venv）。**seq-VMAF 已加**（RIFE@256 68 vs blend 42）。**NVOF 改走真實串流驗測成功**（取代 SW renderer 手術——判定那不是小修）：register win-builder + .226 host，throwaway client 串流 TIER=5 → log 證 NVOF execute + 餵 warp（chainBusy ~1.6ms 最快）。**6 引擎覆蓋：** Vulkan 家族 3 引擎完整（block-match/RIFE GT-quality + 全 3 真路徑 perf，NVOF 解鎖）；**D3D11 家族（Generic/NVOF/DirectML）此自動化 session 不可達**（client 硬選 VkFruc，需互動桌面）。**剩：** D3D11 家族（互動桌面）、L1 端到端 GT-quality、跨 build σ。|
+| **Active (verify, hw-blocked)** | **§FRUC-XPLAT** 非-NVIDIA RIFE 跨平台啟用 | **已 ship v1.5.249**（1b213e8f / ca05f64b / e4523449 / 7aa47d62）：非-NVOF 設備直起 RIFE@128 + 非-NVIDIA 自動啟用 native RIFE（vendor-gate 綁 hardware 0x10DE，避開 NV 的 device-lost）+ inferDim cap 128 + overlay 顯示真實補幀引擎名。AMD RADV live stream 已證 RIFE 真 engage（frucMode=1 / rifeNative=1 / T3 穩定）惟當時跑 inferDim=256（cap commit 前）。**剩：** inferDim=128 在 AMD 的經驗驗測（offline + 串流 + fps + 補幀數）卡在 **AMD GPU errno -13**（headless 筆電蓋著→logind seat-ACL 缺→amdgpu ACCEL_WORKING 失敗→llvmpipe）。決定性值已 deterministic+committed |
+| **Planned (designed, 未動工)** | **§FRUC-GENERIC** 通用 block-match 畫質改良 | plan-mode 計畫已成形：分階段 in-place 改 Vulkan block-match（1A 邊緣不退 crossfade→occlusion-gated 單向 warp／1B in-shader sub-pixel parabolic refine／1C bilinear→Catmull-Rom），每步用 §FRUC-VALIDATE 離線 GT harness 客觀量、贏過 naive blend 即停。根因已讀碼確認（warp 邊緣三層 fade 退回 crossfade＝在邊緣做 naive blend，是輸 blend 主因）。零新 dispatch、binding 不變、純 fp32 跨廠商 |
 | **Active (verify + polish)** | **§Q** MP-QUIC 多路徑網路聚合 | Phase 5 全 Sprint + §Q.path-recovery 完成 (v1.5.133)。Fix L–Q.5 (v1.5.192–202) 完成 failover/failback + 遠端單路徑韌性：Fix P IDR-QUIC-FIRST、Fix Q RTT 自適應 jitter timeout (1.5×RTT 夾 10-40ms)、Fix Q.2 §Q-STALE headroom gate（修 cwnd 健康卻丟光 video 的死亡螺旋）、Fix Q.3 FRUC throttle startup grace（修啟動 5s 模糊）、Fix Q.4 顯示器 graceful fallback + NVENC vbvInitialDelay（修啟動畫質）、Fix Q.5 lateAfterSkip/fecRedundantLate 診斷分離。**已驗證：** server FEC ✅、per-path queue ✅、0-RTT ticket ✅、1080p60 穩定 ✅、Audio QUIC ✅、Jitter buffer ✅、Ethernet failover/failback ✅ (v1.5.196)、遠端 WARP/Tailscale 單路徑 ✅ (v1.5.199 §Q-STALE 修後)、**Android moonlight-common-c 全量對齊 + Pixel 5 實機 MP-QUIC 串流驗證 ✅** (v1.5.201-202，lateAfterSkip=0/fecRedundantLate 實機確認)。**待做：** 壓力測試 1440p120；遠端高碼率若仍吃緊再評估 ABR（自適應 bitrate）|
 | **Active (verify)** | **§SLIM** release zip 瘦身 (106→48 MB) | phase 1-4 已 ship。**Lazy fetch 兩路徑皆已接 ModelFetcher（2026-05-29 程式碼確認）：** NCNN (ncnnfruc.cpp → ensureRifeModelDir) + Vulkan Native RIFE (vkfruc.cpp:9324 在 RifeNativeExecutor::initialize 前呼叫 ensureRifeModelDir，回傳 empty→block-match fallback 不 crash)。`ensureRifeModelDir` 已 expose 到 modelfetcher.h 兩端共用。**剩（環境受限）：** 無 VC++ Runtime 的乾淨 Win10 系統實測 missing vcruntime140 提示 |
 | **Deferred (hw-bound)** | **§B Phase B** HEVC D3D11VA → Vulkan composite | Code 已 ship v1.4.184-185；阻塞：AMD 780M 測試機 HEVC D3D11VA 本身不可用。需換另一台 D3D11VA HEVC HW decode 可用的 AMD 機器驗 B7 import + B9 FRUC chain |
@@ -20,7 +22,6 @@
 | **Active (verify)** | **§K.dd.revert.1 / §K.dd.fallback** display device | v1.4.156 ghost-check + v1.5.201 §K.dd.fallback（configure_display apply 前用 enumerate_devices 驗證 output_name 存在；不存在→跳過 DD 設定 + 用預設顯示器續行，避免 Windows 拓樸 API 卡死）已 ship。.226 指定顯示器曾卡死服務 (v1.5.200 期間，log 停寫 35 分鐘)，已暫設 `disabled` 解卡。待重設 `ensure_only_display` + 指定有效顯示器，確認 fallback 生效不卡死 |
 | **Active (P0)** | **§N.5.bug** Android 檔案傳輸 SSL 錯誤 | 待使用者在 Android 重現 + 拿 server log，確認錯誤在哪個階段送出 |
 | **Active (verify)** | **§N.5** Android FileTransferClient runtime | 待實機在串流 session 跑 Send/Receive flow，確認 Pixel 5 Android quirks |
-| **Active (batch 2 待 commit)** | **§M.2** session ownership cleanup | Fix 1（idle watchdog→terminate）/ Fix 3（serverinfo owner XML）/ Fix 4（client takeover UI）已 committed b83c9807。Fix 2（QUIC idle timeout 30s）在 batch 2 working tree。驗測 2026-06-16 全過：L1 smoke ✅ L2 R.3 ✅ L3 reconnect×3 ✅。待洩漏 grep → commit batch 2。原 VM 並發驗測仍 deferred |
 | **Active (long-running)** | **§J.3.e.2.i.8 Phase 2.5** FRUC native source | 殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Active (β.10)** | **§J.3.e.X Path β.10** Linux/AMD/Intel 覆蓋 | §β.12.fix v1.4.193 PASS；剩：視覺品質主觀確認（tiled Conv vs coopmat）+ Intel iGPU 驗測 |
 | **Deferred (driver-bound)** | **§K.4** Wayland portal teardown | `Restart=always` 緩解已 ship；需可重現串流環境（有 GPU 的 Linux 機）才能根治。dev/cli-quic-linux branch hygiene fix：startup portal warning 的雙 register noise 改用 QT_DESKTOP_FILE_NAME env var 預設 + Linux 上 gate 掉 app.setDesktopFileName()——但 Qt 內部仍會 double-register，warning 沒完全消，且這是 client startup noise，跟 server-side PipeWire portal teardown 是不同層問題 |
@@ -54,13 +55,10 @@ PixArk 20+ 分鐘測試後看 log：
 | # | 項目 | 優先級 | 狀態 |
 |---|---|---|---|
 | Q.r5 | Android 多路徑實機驗測 | **P2 (hw-bound)** | ⚠️ 阻塞。Pixel 5 無 SIM (gsm.sim.state=ABSENT) → cellular 不可用；gnirehtet v2.5.1 在 Android 15 (API 35) VPN 建立失敗。**單路徑已驗 OK (v1.5.202 Pixel 5 實機 adb)**。需 ①插 SIM 走 WiFi+cellular 或 ②換 Android 12-13 裝置 |
-| Q.r6 | 壓力測試 | ✅ **完成** | v1.5.233-235 三輪：1080p120/40Mbps 高 pps PASS；clumsy 8% 丟包驗 FEC bucket 修復（recovered 5074/failed 0，evicted 落數學極限）；§Q-PERF.7 FEC-aware skip 砍 lateAfterSkip 100%、不可恢復幀 −61% |
-| Q.r14 | R.3 殭屍態 | ✅ **Verified (2026-06-16)** | §Q-RECOVERY-IDR-FIX（1s dwell threshold）修復確認。R.3 防火牆測試（雙向封鎖 UDP 47998-48010）：封鎖時正確凍結、解封時正確恢復。server log 確認 §Q-SERVER-GRACE 觸發（11:07:30）+ loss 0%→3.1% + video 17→2 Mbps → 解封後恢復串流。根因：原 v1.5.235 是只封 QUIC port / 單向封鎖，multipath failover 繞過；正確測法需雙向封鎖全 UDP 47998-48010 |
 | Q.r11 | 遠端高碼率 ABR | **P3** | 遠端 WARP/Tailscale 單路徑碼率須 ≤ 路徑可承載 (~8-15 Mbps)。若要更高碼率穩定 → 評估自適應 bitrate（client 偵測持續丟包 → server 動態降碼，兩端工程量中大）|
 | Q.r12 | §Q-PERF 殘餘候選 | **P3** | v1.5.233 盤點留存：server 送端 fromAddr 來源綁定（WSASendMsg+PKTINFO，多介面送端成立）、audio failover 冗餘（scheduler 死碼活化或移除）、FEC parity 自適應（4+0/4+1/4+2 依 loss）、lossStatsThread 退出後不重生、session map 純 IP key 衝突、UDP socket SO_RCVBUF/non-blocking |
 | Q.r13 | 驗測基礎設施 | **P2** | host worker 包補 net-throttle op + COWORK_TASK_SPEC 注入（collect 參數化）；failover_test_auto.ps1 加 log 收集/斷言/IP 參數化 |
-| Q.r15 | Android common-c 對齊（batch 1+2） | ✅ **完成 (v1.5.241)** | QuicTransport.c/ControlStream.c/Connection.c/InputStream.c 四檔整檔對齊（Android 原停在 v1.5.224-233 各快照、blob 比對證實無 Android 特化分歧；PlatformNetIf.h 的 JNI 注入宣告為 Android 專有、保留）；APK 建置通過。**實機驗測未做**（Pixel 5 串流複查待 host 空出） |
-| Q.r17 | §SC-HID driver 簽章重建 | **P1（部署前必做）** | §SC-QUEUE-SERIAL-FIX 已進 driver 原始碼且編譯通過，但 signtool 以 LocalMachine 憑證簽署需管理員 shell（本輪簽章失敗、copy-back 未跑）→ **Server zip 裡打包的 driver DLL 仍是舊 Parallel 版**。需管理員 PowerShell 跑 `Sunshine\src\platform\windows\sc_hid_driver\Build-ScHidDriver.ps1` 再重跑 build_sunshine。建議順手給 build_sunshine.cmd 加 driver DLL 過期檢查（cpp mtime > dll mtime 即 fail），落實鐵律 4 |
+| Q.r17 | §SC-HID driver 簽章重建 | ✅ **完成（working tree，待 commit）** | **2026-06-18 git/簽章核實：** §SC-QUEUE-SERIAL-FIX 已編入 DLL（DLL 6/12 23:37 比 source 20:36 新）+ `Get-AuthenticodeSignature`=**Valid**（CN=VipleStream SC HID Driver，到 2036）。**build 防呆已加+測試：** 守門腳本放**追蹤位置** `Sunshine/src/platform/windows/sc_hid_driver/check_schid_driver_fresh.ps1`（版控、跨機；精準只追 `VipleSCHid_Driver.*`，排除 server-side `VipleSCHid.cpp` 避免誤判），build_sunshine.cmd 打包前呼叫它（source 比 DLL 新→`exit /b 1` 中止打包，鐵律 4）。**注意：** build_sunshine.cmd 與 build-tools/ 本身 gitignore（local-only by design），故「呼叫點」留在本機、不入 repo；守門邏輯本身已入 repo。驗測：5 case 單測（fresh/stale/missing/server-edit）+ 批次整合（fresh→continue、stale→abort）+ 搬移後複測全 PASS、現況不誤判 |
 | Q.r16 | review batch 2 已知殘留（驗測觀察項） | **P3** | **驗測 PASS (2026-06-16)**：L1 30s smoke ✅、L2 R.3 firewall ✅、L3 kill+reconnect×3 ✅。殘留觀察項（不阻 commit）：①S5 stats 快取 idle 凍結（§K.10 log 顯示舊值，診斷限定）②invokeRecvHandler heap alloc per datagram（可改 shared_ptr+atomic swap）③LiGetEstimatedRttInfo 無鎖讀 peer（pre-existing TOCTOU）④A1 tick 在 video 全死但 control 活時仍 ramp（既有假設）|
 
 備註：standalone cmake configure picoquic（除錯 picoquic 本身）需 pkg-config + OpenSSL dev headers；一般走 build script 不需。
@@ -81,16 +79,9 @@ static。要：
 - ~~display Hz=0 legacy renderer fallback 是否需補~~ **2026-05-29 程式碼確認：不需補。** ffmpeg.cpp ratio controller 對 displayHz 全程守 `>0`：Hz=0 時 `recvPctOfDisplay` fallback 到 recvPct (2874)、`frameBudgetMs` fallback 120Hz=8.33ms (2909)、server-fps 變更請求被 `if (displayHz>0 ...)` 跳過 (2942) 但本地 `setEffectiveFrucRatio` 仍正常 (2950)，無除零 ✅
 - 進 2x 後 server recv 從 ~180 掉 ~140 是否仍有（alignment gate 應消除，待串流複查）
 
-### §M.2 Session Ownership 修復狀態
+### §M.2 Session Ownership（已完成 → git log；僅存 deferred 驗測）
 
-**已 committed (b83c9807)：** Fix 1（idle watchdog→terminate）+ Fix 3（serverinfo owner XML）+ Fix 4（client takeover UI 含 QML 對話框）。
-**在 batch 2 working tree：** Fix 2（quic_server.cpp `picoquic_set_default_idle_timeout` 30s）。
-**驗測 (2026-06-16 自動化 + 手動 R.3)：** L1 smoke PASS / L2 R.3 防火牆 PASS / L3 kill+reconnect×3 PASS。
-
-原 §M.2 雙使用者並發 VM 驗測（deferred）：
-- 雙 user account + per-user systemd service（不同 port）
-- Xdummy virtual display per user
-- 兩個 client 同時連 → 確認 display / audio / input 不串擾
+四項修復已 ship（b83c9807 + d56d2e8a / v1.5.246），L1/L2(R.3)/L3 驗測 2026-06-16 全過。**唯一 deferred（低）：** 雙使用者並發 VM 驗測 — 雙 user account + per-user service（不同 port）+ Xdummy per user + 兩 client 同連確認 display/audio/input 不串擾。
 
 ### §N.5 Android 檔案傳輸驗測
 
@@ -98,6 +89,10 @@ static。要：
 - Receive listing UI 路徑是否需要調整
 
 ---
+
+### 已排除（驗證後不再重查）
+
+- **串流底部撕裂（最下一排像素重複好幾排、間歇）** — 2026-06-18 雙來源讀碼確認 **HEAD（6f2411f9）無此機制**。FRUC 整條（NV12→RGB buffer／warp `frameHeight`／interp 輸出 buffer／libplacebo override 貼圖／present crop／原生 `vkfruc_interp.frag`）高度全鎖同一個 `frame->height`（`vkfruc.cpp:6972-73 / 11394 / 8556`，`plvk.cpp:5421 / 6300-02 / 6331`）；warp `clamp(y,0,frameHeight-1)`（`plvk.cpp:2522-39`）+ interp.frag 正規化 UV 取樣 + `clamp(y,0,srcH-1)`→ 顯示高度永不超過 buffer 高度，無從複製。y-clamp 自 **v1.3.113** 就在；FRUC renderer 無任何 commit 在修此 artifact（「23X 後變少」非 code fix，推測係 §FRUC-XPLAT 後 block-match 不再是主力引擎）。唯一理論殘餘（某解碼器把 `frame->height` 報成 coded 1088）會是**每幀穩定**、非間歇，與症狀不符故排除。實修代價：無（不需改）。
 
 ## 鐵律（任何改動都不能破壞）
 
