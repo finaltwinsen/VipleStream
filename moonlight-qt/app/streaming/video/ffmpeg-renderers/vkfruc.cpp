@@ -9040,6 +9040,35 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     //   → dispatchConvolution 正確 fallback 到 tiled 路徑，無執行時 crash。
     //
     // 此處 gate 保留用來 log，但不再 hard-block（實際防護在 rife_native_vk.cpp）。
+
+    // §FRUC-XPLAT 2026-06-18 — auto-enable native RIFE on non-NVIDIA GPUs.
+    // 背景：native RIFE 預設關，只是因為 NVIDIA 特定的 device-lost crash
+    // (RTX 3060 + NV 596.144)。在 AMD/Intel 上 (a) 沒有 NVOF → RIFE 是唯一
+    // 有感路徑，(b) 那個 NVIDIA crash 不適用，(c) 早期 RADV coopmat crash 已由
+    // §β.12.fix 修掉 (tiled fallback，offline 在 RADV RAVEN 實測乾淨跑通)。
+    // 沒有這段，autotier 雖然在 non-NVOF 升到 RIFE VkFrucTier，但 m_RifeNativeMode
+    // 仍是 0 → 實際跑 block-match（real-stream 驗測 rifeNative=0 證實）。
+    // **必須 gate 在硬體 vendor，不能 gate 在 noNvof**：NVIDIA + VIPLE_VKFRUC_NV_OF=0
+    // 也會讓 noNvof=true，但在 NVIDIA 上開 native RIFE 會撞 device-lost crash。
+    if (!m_RifeNativeMode && m_FrucMode
+            && m_pfnGetInstanceProcAddr && m_PhysicalDevice != VK_NULL_HANDLE) {
+        auto pfnGetProps = (PFN_vkGetPhysicalDeviceProperties)
+            m_pfnGetInstanceProcAddr(m_Instance, "vkGetPhysicalDeviceProperties");
+        if (pfnGetProps) {
+            VkPhysicalDeviceProperties props{};
+            pfnGetProps(m_PhysicalDevice, &props);
+            const bool isNvidia = (props.vendorID == 0x10DE);
+            if (!isNvidia) {
+                m_RifeNativeMode = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-RIFE-β] §FRUC-XPLAT non-NVIDIA GPU "
+                    "(vendorID=0x%04x '%s') → auto-enabling native RIFE (no NVOF here; "
+                    "NVIDIA device-lost crash N/A; coopmat crash fixed via §β.12.fix "
+                    "tiled fallback)", props.vendorID, props.deviceName);
+            }
+        }
+    }
+
     if (m_RifeNativeMode) {
         bool hasCoopmat = false;
         if (m_pfnGetInstanceProcAddr && m_PhysicalDevice != VK_NULL_HANDLE) {
