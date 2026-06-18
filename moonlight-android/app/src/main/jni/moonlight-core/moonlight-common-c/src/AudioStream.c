@@ -120,6 +120,22 @@ int initializeAudioStream(void) {
     receivedDataFromPeer = false;
     pingThreadStarted = false;
     firstReceiveTime = 0;
+
+#ifdef VIPLE_MPQUIC
+    // §Q-AUDIO-RING: 防禦性清空 — 排除 process 存活跨 session 時
+    // ring buffer 殘留前 session datagram 的所有可能性。
+    // startAudioStream() 也有 reset，但 initializeAudioStream() 會先
+    // 設定新的 avRiKeyId；若在 init→start 之間有遲到 callback 寫入，
+    // start 的 reset 會丟掉它，但 defense-in-depth 在此也清一次更安全。
+    if (quicAudioRing.head != quicAudioRing.tail) {
+        Limelog("[VIPLE-MPQUIC] AudioStream init: flushing %d stale QUIC audio packets\n",
+                (quicAudioRing.head - quicAudioRing.tail + QUIC_AUDIO_RING_SIZE) % QUIC_AUDIO_RING_SIZE);
+    }
+    quicAudioRing.head = 0;
+    quicAudioRing.tail = 0;
+    useQuicAudio = false;
+#endif
+
     audioDecryptionCtx = PltCreateCryptoContext();
 #ifdef LC_DEBUG
     opusHeaderByte = INVALID_OPUS_HEADER;
@@ -477,6 +493,18 @@ void stopAudioStream(void) {
     if ((AudioCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
         PltJoinThread(&decoderThread);
     }
+
+#ifdef VIPLE_MPQUIC
+    // §Q-AUDIO-RING: session 結束後立即取消 QUIC audio callback，
+    // 防止 QUIC I/O 執行緒在 session 間隙繼續向 ring 寫入遲到封包。
+    // 下一次 startAudioStream() 會重新註冊。
+    if (useQuicAudio) {
+        quicSetRecvCallbackForFlow(QUIC_FLOW_AUDIO, NULL, NULL);
+    }
+    quicAudioRing.head = 0;
+    quicAudioRing.tail = 0;
+    useQuicAudio = false;
+#endif
 
     AudioCallbacks.cleanup();
 }

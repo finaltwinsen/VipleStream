@@ -113,6 +113,18 @@ void initializeVideoStream(void) {
     receivedDataFromPeer = false;
     firstDataTimeMs = 0;
     receivedFullFrame = false;
+
+#ifdef VIPLE_MPQUIC
+    // §Q-VIDEO-RING: 防禦性清空 — 與 AudioStream 同理。
+    if (quicVideoRing.head != quicVideoRing.tail) {
+        Limelog("[VIPLE-MPQUIC] VideoStream init: flushing %d stale QUIC video packets\n",
+                (quicVideoRing.head - quicVideoRing.tail + QUIC_VIDEO_RING_SIZE) % QUIC_VIDEO_RING_SIZE);
+    }
+    quicVideoRing.head = 0;
+    quicVideoRing.tail = 0;
+    quicVideoRingDrops = 0;
+    useQuicVideo = false;
+#endif
 }
 
 // Clean up the video stream
@@ -402,6 +414,16 @@ void stopVideoStream(void) {
         closeSocket(rtpSocket);
         rtpSocket = INVALID_SOCKET;
     }
+
+#ifdef VIPLE_MPQUIC
+    // §Q-VIDEO-RING: session 結束後取消 QUIC video callback + 清空 ring。
+    if (useQuicVideo) {
+        quicSetRecvCallbackForFlow(QUIC_FLOW_VIDEO, NULL, NULL);
+    }
+    quicVideoRing.head = 0;
+    quicVideoRing.tail = 0;
+    useQuicVideo = false;
+#endif
 
     VideoCallbacks.cleanup();
 }
