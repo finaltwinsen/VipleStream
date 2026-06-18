@@ -2456,7 +2456,16 @@ void VkFrucRenderer::runAutotierTransition()
     // 極端過載（>budget×2.0）時等 320 frame 太久，直接 floor T0。
     // m_TierLatencyHighFrames 在 latency>demoteThreshMs（>0.40）時遞增，
     // 超過 2.0×budget 一定也超過 0.40×budget，所以可直接複用同一計數器。
+    // §R2-ζ-3b (v1.5.249, startup grace): 啟動前 3s 的 decode-warmup spike
+    // (例如首 IDR ~481ms) 會讓 latencyMs=max(decode,chain) 暴衝觸發 immediate
+    // floor T→T0；但 (a) 那是瞬態、(b) 降 FRUC tier 只減 chain、救不了 decoder
+    // warmup → 白白掉 ~12s 畫質才爬回。grace 內「只」跳過即時 floor；真正過載
+    // 仍由下方 >=20 frame 的漸進 demote 接住 (gentle path 在 grace 內照跑)，故
+    // 弱 GPU 不會失去保護，只是不再被單次啟動尖峰一步打到 T0。
+    const bool inStartupGrace =
+        (m_AutotierStartMs > 0) && (nowMs - m_AutotierStartMs < 3000);
     if (!downgraded && cur > 0
+        && !inStartupGrace
         && latencyMs > frameBudgetMs * 2.0
         && m_TierLatencyHighFrames >= 3) {
         target = 0;
@@ -3808,6 +3817,7 @@ bool VkFrucRenderer::initialize(PDECODER_PARAMETERS params)
         using Clock = std::chrono::steady_clock;
         m_TierEnteredMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             Clock::now().time_since_epoch()).count();
+        m_AutotierStartMs = m_TierEnteredMs;  // §R2-ζ-3b: startup-grace 基準 (只設一次)
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
             "[VIPLE-VKFRUC-TIER] §J.3.e.2.i.60 init: cap=T%d current=T%d "
             "(latency-driven autotier: demote @ latency>budget*0.40 連 20 frame, "

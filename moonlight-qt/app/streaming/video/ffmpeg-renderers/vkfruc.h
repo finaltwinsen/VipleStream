@@ -976,6 +976,7 @@ private:
     std::atomic<int>   m_CurrentTier   { (int)VkFrucTier::DISABLED };
     int                m_TierCap       = (int)VkFrucTier::DISABLED;  // max achievable by GPU
     int64_t            m_TierEnteredMs = 0;                          // current tier 何時進入
+    int64_t            m_AutotierStartMs = 0;  // §R2-ζ-3b: autotier 首次啟動時刻 (startup grace 基準)
     // T0 → T-1 trigger: 60s 滾動視窗內進 T0 >= 3 次 → 結構性跑不動 FRUC.
     int64_t            m_T0EnterTimes[3]       = {0, 0, 0};
     int                m_T0EnterIdx            = 0;
