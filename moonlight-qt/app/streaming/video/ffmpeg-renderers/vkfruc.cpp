@@ -7078,9 +7078,17 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
                 "[VIPLE-VAAPI-VK] §K.3 diag slot=%u cmd=%p NV12buf=%p RtPfnReset=%p",
                 slot, (void*)cmd, (void*)m_SwFrucNv12Buf,
                 (void*)(uintptr_t)m_RtPfn.ResetCommandBuffer);
-    if (!cmd || !m_RtPfn.ResetCommandBuffer) {
+    // §K.3-FIX (v1.5.252): m_SwFrucNv12Buf 可能在 renderer 重選 / teardown 競態下
+    // 變回 VK_NULL_HANDLE —— AMD VAAPI-VK 路徑在串流 re-init（auto-prefer 改選
+    // libplacebo）的瞬間，舊 VkFrucRenderer 的 NV12 staging buffer 已釋放，但仍
+    // 有一幀走進 renderFrameVAAPIImport。原 guard 只檢查 cmd/pfn，漏了 buffer →
+    // 下面 CmdCopyImageToBuffer(…, m_SwFrucNv12Buf=nil, …) 在 driver 內解參考空
+    // handle → segfault（自 v1.5.6 §K.3 diag 起即在追的 AMD RADV crash）。補上
+    // buffer null 守門：buffer 還沒（重新）配置好就跳過該幀，交給新 renderer 接手。
+    if (!cmd || !m_RtPfn.ResetCommandBuffer || m_SwFrucNv12Buf == VK_NULL_HANDLE) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "[VIPLE-VAAPI-VK] §K.3 null cmd or pfn — aborting frame");
+                     "[VIPLE-VAAPI-VK] §K.3 null cmd/pfn/NV12buf (buf=%p) — aborting frame",
+                     (void*)m_SwFrucNv12Buf);
         return;
     }
     m_RtPfn.ResetCommandBuffer(cmd, 0);
