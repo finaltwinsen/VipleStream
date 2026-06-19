@@ -8462,6 +8462,39 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
         }
     }
 
+    // §FRUC-XPLAT 2026-06-19 — auto-enable native RIFE on non-NVIDIA GPUs.
+    // ★ MUST run BEFORE the m_RifeNativeMode-gated bilinear/warp pipeline
+    // builds below.  此偵測原本放在 createFrucComputeResources 的「尾端」
+    // （bilinear build 之後），導致非-NVIDIA 且沒下 VIPLE_VKFRUC_NATIVE_RIFE
+    // 時，bilinear pipeline 在此處被 skip（m_RifeNativeMode 當下仍=0）→
+    // 之後 createRifeNativeResources 因「bilinear pipeline missing」失敗 →
+    // 默默退回 block-match（AMD RADV offline9 2026-06-18 實證 auto-enable
+    // 完全跑不到 RIFE）。把 vendor 偵測提前到這裡，下面的 gate 才看得到正確值。
+    // 背景：native RIFE 預設關，只因 NVIDIA 特定 device-lost crash (RTX 3060 +
+    // NV 596.144)。AMD/Intel 上 (a) 無 NVOF → RIFE 是唯一有感路徑，(b) 那個
+    // NVIDIA crash 不適用，(c) 早期 RADV coopmat crash 已由 §β.12.fix 修掉
+    // (tiled fallback)。必須 gate 在硬體 vendor，不能 gate 在 noNvof：NVIDIA +
+    // VIPLE_VKFRUC_NV_OF=0 也會 noNvof=true，但在 NVIDIA 開 native RIFE 會撞
+    // device-lost crash。
+    if (!m_RifeNativeMode && m_FrucMode
+            && m_pfnGetInstanceProcAddr && m_PhysicalDevice != VK_NULL_HANDLE) {
+        auto pfnGetProps = (PFN_vkGetPhysicalDeviceProperties)
+            m_pfnGetInstanceProcAddr(m_Instance, "vkGetPhysicalDeviceProperties");
+        if (pfnGetProps) {
+            VkPhysicalDeviceProperties props{};
+            pfnGetProps(m_PhysicalDevice, &props);
+            const bool isNvidia = (props.vendorID == 0x10DE);
+            if (!isNvidia) {
+                m_RifeNativeMode = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-RIFE-β] §FRUC-XPLAT non-NVIDIA GPU "
+                    "(vendorID=0x%04x '%s') → auto-enabling native RIFE (no NVOF here; "
+                    "NVIDIA device-lost crash N/A; coopmat crash fixed via §β.12.fix "
+                    "tiled fallback)", props.vendorID, props.deviceName);
+            }
+        }
+    }
+
     // §J.3.e.X Path β.4 — bilinear scale pipeline (down: source RGB →
     // RIFE infer dim, up: RIFE output → m_FrucInterpRgbBuf).  Push consts
     // = 28 bytes (5 ints + 2 floats) rounded to 32 for alignment, 2
@@ -9051,34 +9084,12 @@ bool VkFrucRenderer::createFrucComputeResources(int width, int height)
     //
     // 此處 gate 保留用來 log，但不再 hard-block（實際防護在 rife_native_vk.cpp）。
 
-    // §FRUC-XPLAT 2026-06-18 — auto-enable native RIFE on non-NVIDIA GPUs.
-    // 背景：native RIFE 預設關，只是因為 NVIDIA 特定的 device-lost crash
-    // (RTX 3060 + NV 596.144)。在 AMD/Intel 上 (a) 沒有 NVOF → RIFE 是唯一
-    // 有感路徑，(b) 那個 NVIDIA crash 不適用，(c) 早期 RADV coopmat crash 已由
-    // §β.12.fix 修掉 (tiled fallback，offline 在 RADV RAVEN 實測乾淨跑通)。
-    // 沒有這段，autotier 雖然在 non-NVOF 升到 RIFE VkFrucTier，但 m_RifeNativeMode
-    // 仍是 0 → 實際跑 block-match（real-stream 驗測 rifeNative=0 證實）。
-    // **必須 gate 在硬體 vendor，不能 gate 在 noNvof**：NVIDIA + VIPLE_VKFRUC_NV_OF=0
-    // 也會讓 noNvof=true，但在 NVIDIA 上開 native RIFE 會撞 device-lost crash。
-    if (!m_RifeNativeMode && m_FrucMode
-            && m_pfnGetInstanceProcAddr && m_PhysicalDevice != VK_NULL_HANDLE) {
-        auto pfnGetProps = (PFN_vkGetPhysicalDeviceProperties)
-            m_pfnGetInstanceProcAddr(m_Instance, "vkGetPhysicalDeviceProperties");
-        if (pfnGetProps) {
-            VkPhysicalDeviceProperties props{};
-            pfnGetProps(m_PhysicalDevice, &props);
-            const bool isNvidia = (props.vendorID == 0x10DE);
-            if (!isNvidia) {
-                m_RifeNativeMode = true;
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VKFRUC-RIFE-β] §FRUC-XPLAT non-NVIDIA GPU "
-                    "(vendorID=0x%04x '%s') → auto-enabling native RIFE (no NVOF here; "
-                    "NVIDIA device-lost crash N/A; coopmat crash fixed via §β.12.fix "
-                    "tiled fallback)", props.vendorID, props.deviceName);
-            }
-        }
-    }
-
+    // §FRUC-XPLAT 2026-06-19 — 非-NVIDIA native-RIFE 自動啟用偵測已「上移」到
+    // bilinear/warp pipeline build 之前（搜尋 "auto-enable native RIFE on
+    // non-NVIDIA GPUs"）。它必須在那些 build 之前跑；原本放在這裡（build 之後）
+    // 會讓 bilinear pipeline 沒被建 → createRifeNativeResources 因
+    // "bilinear pipeline missing" 失敗 → 默默退回 block-match。到這裡
+    // m_RifeNativeMode 已是正確值，直接進 createRifeNativeResources。
     if (m_RifeNativeMode) {
         bool hasCoopmat = false;
         if (m_pfnGetInstanceProcAddr && m_PhysicalDevice != VK_NULL_HANDLE) {
