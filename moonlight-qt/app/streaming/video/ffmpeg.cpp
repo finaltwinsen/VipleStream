@@ -1468,11 +1468,44 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
             // 透過 DMA-BUF import 進 Vulkan 走 FRUC chain。
             // FRUC 未啟用時改走 VAAPIRenderer（m_SwFrucNv12Buf 不會被配置，
             // 進 VAAPI_VK path 會 crash）。
-            if (shouldUseVkFrucRendererForVulkanHwaccel()) {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-VAAPI-VK] §K cascade: VAAPI → "
-                            "VkFrucRenderer(VAAPI_VK) composite (pass=%d)", pass);
-                return new VkFrucRenderer(pass, VkFrucRenderer::CompositeMode::VAAPI_VK);
+            // §K.3b (v1.5.249) — 10-bit gate: VAAPI_VK 橋整條寫死 8-bit NV12
+            // LINEAR（vaapi_vk_bridge.cpp:119 format G8_B8R8_2PLANE_420_UNORM
+            // + :101 拒非-LINEAR modifier；§K.3 copy region + m_SwFrucNv12Buf
+            // size + NV12→RGB shader 全 8-bit）。HEVC/AV1 Main10 → VA-API 回
+            // P010（2 bytes/sample、常 tiled）→ 格式/stride/size 全不符 → crash。
+            // 鏡像 createFrontendRenderer 的 HDR gate：10-bit 改走純 VAAPIRenderer
+            // （能正確處理 P010）；代價是 10-bit 在 RADV 暫無 FRUC，但不再 crash。
+            // §K.3c (v1.5.253) — VAAPI_VK 兩道 gate（缺一就退純 VAAPIRenderer）：
+            //  (1) 10-bit：VAAPI_VK 橋整條寫死 8-bit NV12 LINEAR
+            //      (vaapi_vk_bridge.cpp:119 G8_B8R8_2PLANE_420_UNORM + :101 拒非-LINEAR)。
+            //      HEVC/AV1 Main10 → VA-API 回 P010（2 bytes/sample、常 tiled）→
+            //      格式/stride/size 全不符 → crash。10-bit 改走純 VAAPIRenderer（能處理 P010）。
+            //  (2) FRUC 關：VAAPI_VK 把 VAAPI NV12 import 進 m_SwFrucNv12Buf 餵 FRUC chain，
+            //      但 m_SwFrucNv12Buf 只在 FRUC 啟用時 (createFrucComputeResources) 配置。
+            //      enableFrameInterpolation=false 時它永遠 VK_NULL_HANDLE →
+            //      renderFrameVAAPIImport 整片被 §K.3 守門跳過 → 黑畫面（此 GPU 無 Vulkan
+            //      解碼佇列、硬解走 VAAPI 時必中；實機 2026-06-19 AMD Vega 確認）。上面註解
+            //      (1465) 早寫明「FRUC 未啟用時改走 VAAPIRenderer」，但 gate 用的
+            //      shouldUseVkFrucRendererForVulkanHwaccel() 只看 RS_VULKAN、沒看 FRUC → 漏掉。
+            //  兩種情況都退純 VAAPIRenderer（= RS_AUTO 的 VAAPI 路徑，已實機確認可顯示，
+            //  只是沒補幀），不再 crash／黑畫面。
+            {
+                auto* frucPrefs = StreamingPreferences::get(nullptr);
+                const bool frucOn  = frucPrefs && frucPrefs->enableFrameInterpolation;
+                const bool is10bit = (videoFormat & VIDEO_FORMAT_MASK_10BIT) != 0;
+                if (shouldUseVkFrucRendererForVulkanHwaccel() && !is10bit && frucOn) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VAAPI-VK] §K cascade: VAAPI → "
+                                "VkFrucRenderer(VAAPI_VK) composite (pass=%d)", pass);
+                    return new VkFrucRenderer(pass, VkFrucRenderer::CompositeMode::VAAPI_VK);
+                }
+                if (shouldUseVkFrucRendererForVulkanHwaccel()) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VAAPI-VK] §K.3c: VAAPI_VK 跳過 (10bit=%d frucOff=%d "
+                                "videoFormat=0x%x) → 純 VAAPIRenderer（避免 P010 crash / 無 "
+                                "NV12 buffer 黑畫面）",
+                                is10bit ? 1 : 0, frucOn ? 0 : 1, videoFormat);
+                }
             }
             return new VAAPIRenderer(pass);
 #else
