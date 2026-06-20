@@ -8,9 +8,6 @@
 #include <cstring>
 #include <vector>
 
-// DRM_FORMAT_MOD_LINEAR = 0
-static constexpr uint64_t k_ModLinear = 0;
-
 VAAPIVkBridge::VAAPIVkBridge()  = default;
 VAAPIVkBridge::~VAAPIVkBridge() = default;
 
@@ -90,6 +87,7 @@ bool VAAPIVkBridge::loadPFNs_()
 
 bool VAAPIVkBridge::importFrame(int dmaFd, uint32_t dmaSize, uint64_t modifier,
                                 uint32_t width, uint32_t height,
+                                const PlaneLayout planes[2],
                                 ImportedFrame* out)
 {
     if (!m_Initialized) {
@@ -98,18 +96,28 @@ bool VAAPIVkBridge::importFrame(int dmaFd, uint32_t dmaSize, uint64_t modifier,
         return false;
     }
 
-    if (modifier != k_ModLinear) {
-        // pre-req spike 確認 Vega 10 是 LINEAR；non-linear 路徑留待未來擴充。
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "[VIPLE-VAAPI-VK] importFrame: non-linear modifier "
-                     "0x%016llx not yet supported",
-                     (unsigned long long)modifier);
-        return false;
-    }
+    // §K.3.fix — 使用 VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT + 顯式 plane
+    // layout，讓 RADV 的 image 內部 plane offset/pitch 與 DMA-BUF 實際佈局一致。
+    // 舊版用 VK_IMAGE_TILING_LINEAR 時，RADV 自己決定 plane 位置，可能與
+    // VAAPI(radeonsi) 的 BO 佈局不同 → UV offset 錯位 → green line + ghosting。
 
-    // --- 建立 LINEAR NV12 VkImage ---
+    // 把 DMA-BUF plane layout 填入 VkSubresourceLayout（spec：size/arrayPitch/
+    // depthPitch 被忽略，只看 offset + rowPitch）。
+    VkSubresourceLayout planeLayouts[2] = {};
+    planeLayouts[0].offset   = (VkDeviceSize)planes[0].offset;
+    planeLayouts[0].rowPitch = (VkDeviceSize)planes[0].pitch;
+    planeLayouts[1].offset   = (VkDeviceSize)planes[1].offset;
+    planeLayouts[1].rowPitch = (VkDeviceSize)planes[1].pitch;
+
+    VkImageDrmFormatModifierExplicitCreateInfoEXT drmModInfo = {};
+    drmModInfo.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
+    drmModInfo.drmFormatModifier          = modifier;
+    drmModInfo.drmFormatModifierPlaneCount = 2;   // NV12 = 2-plane
+    drmModInfo.pPlaneLayouts              = planeLayouts;
+
     VkExternalMemoryImageCreateInfo extInfo = {};
     extInfo.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+    extInfo.pNext       = &drmModInfo;   // chain DRM modifier info
     extInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 
     VkImageCreateInfo imgInfo = {};
@@ -121,8 +129,8 @@ bool VAAPIVkBridge::importFrame(int dmaFd, uint32_t dmaSize, uint64_t modifier,
     imgInfo.mipLevels     = 1;
     imgInfo.arrayLayers   = 1;
     imgInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
-    imgInfo.tiling        = VK_IMAGE_TILING_LINEAR;
-    imgInfo.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    imgInfo.tiling        = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    imgInfo.usage         = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     imgInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
     imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -130,7 +138,12 @@ bool VAAPIVkBridge::importFrame(int dmaFd, uint32_t dmaSize, uint64_t modifier,
     VkResult res = m_pfnCreateImage(m_Device, &imgInfo, nullptr, &image);
     if (res != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "[VIPLE-VAAPI-VK] vkCreateImage failed: %d", res);
+                     "[VIPLE-VAAPI-VK] vkCreateImage(DRM_FORMAT_MODIFIER) failed: %d "
+                     "(mod=0x%llx Y={off=%u,pitch=%u} UV={off=%u,pitch=%u} %ux%u)",
+                     (int)res, (unsigned long long)modifier,
+                     planes[0].offset, planes[0].pitch,
+                     planes[1].offset, planes[1].pitch,
+                     width, height);
         return false;
     }
 

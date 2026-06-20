@@ -12,7 +12,7 @@
 // Pre-req spike (2026-05-21, RADV RAVEN Mesa 26.0.3):
 //   modifier = DRM_FORMAT_MOD_LINEAR (0x0)  ← 確認，VK_IMAGE_TILING_LINEAR 直接用
 //   VK_KHR_external_memory_fd              ✅
-//   VK_EXT_image_drm_format_modifier       ✅ (linear path 不需要，保留備用)
+//   VK_EXT_image_drm_format_modifier       ✅ (§K.3.fix — 顯式 plane layout 必須)
 //   VK_KHR_external_semaphore_fd           ✅ (本次不用，留給未來顯式 sync)
 
 #pragma once
@@ -28,6 +28,12 @@ public:
         VkDeviceMemory memory;
         uint32_t       width;
         uint32_t       height;
+    };
+
+    // DMA-BUF plane 佈局（從 VADRMPRIMESurfaceDescriptor.layers[] 取得）。
+    struct PlaneLayout {
+        uint32_t offset;   // 該 plane 在 DMA-BUF 內的 byte offset
+        uint32_t pitch;    // 每列 byte 數（可能因對齊 > width）
     };
 
     VAAPIVkBridge();
@@ -47,8 +53,11 @@ public:
 
     bool isInitialized() const { return m_Initialized; }
 
-    // 每幀：DMA-BUF fd + modifier + 尺寸 → 匯入為 VkImage。
+    // 每幀：DMA-BUF fd + modifier + 尺寸 + plane 佈局 → 匯入為 VkImage。
     // 前置條件：caller 已完成 vaSyncSurface()（確保 decode done）。
+    // planes[0]=Y, planes[1]=UV（NV12 二平面）。
+    // 使用 VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT + 顯式 plane layout，
+    // 確保 Vulkan image 的 plane offset/pitch 與 DMA-BUF 實際佈局一致。
     // 語義：bridge 內部 dup() fd 傳給 vkAllocateMemory；caller 的 dmaFd
     //       仍需自行 close()（va surface 生命週期由 caller 管理）。
     // 回傳 true：out->image / out->memory 由 caller 負責
@@ -56,6 +65,7 @@ public:
     //   vkFreeMemory(device, out->memory, nullptr)
     bool importFrame(int dmaFd, uint32_t dmaSize, uint64_t modifier,
                      uint32_t width, uint32_t height,
+                     const PlaneLayout planes[2],
                      ImportedFrame* out);
 
 private:

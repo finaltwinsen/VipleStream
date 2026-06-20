@@ -7045,8 +7045,69 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
     uint32_t dmaSize = (uint32_t)drmDesc.objects[0].size;
     uint64_t modifier = drmDesc.objects[0].drm_format_modifier;
 
+    // §K.3-DESC — 完整 DRM 描述符 dump（前 3 幀）。客觀確認「所有 plane 都在
+    // objects[0]」的單一 object 假設：若任一 plane 的 object_index != 0，import
+    // 只匯入 objects[0] 的 fd → 該 plane 讀錯記憶體 → green line 依舊。同時印出
+    // 真實 modifier 值（驗證 explicit DRM-modifier import 的 planeCount/layout）。
+    if (fnum < 3) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VAAPI-VK] §K.3-DESC frame#%llu fourcc=0x%08x num_objects=%u num_layers=%u",
+                    (unsigned long long)fnum, drmDesc.fourcc,
+                    drmDesc.num_objects, drmDesc.num_layers);
+        for (uint32_t o = 0; o < drmDesc.num_objects && o < 4; o++) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VAAPI-VK] §K.3-DESC   object[%u] fd=%d size=%u modifier=0x%llx",
+                        o, drmDesc.objects[o].fd, (uint32_t)drmDesc.objects[o].size,
+                        (unsigned long long)drmDesc.objects[o].drm_format_modifier);
+        }
+        for (uint32_t l = 0; l < drmDesc.num_layers && l < 4; l++) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VAAPI-VK] §K.3-DESC   layer[%u] drm_format=0x%08x num_planes=%u",
+                        l, drmDesc.layers[l].drm_format, drmDesc.layers[l].num_planes);
+            for (uint32_t p = 0; p < drmDesc.layers[l].num_planes && p < 4; p++) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VAAPI-VK] §K.3-DESC     plane[%u] object_index=%u offset=%u pitch=%u",
+                            p, drmDesc.layers[l].object_index[p],
+                            drmDesc.layers[l].offset[p], drmDesc.layers[l].pitch[p]);
+            }
+        }
+    }
+
+    // §K.3.fix — 從 DRM descriptor 抽出每個 plane 的 offset/pitch。
+    // VA_EXPORT_SURFACE_COMPOSED_LAYERS → num_layers=1, layers[0].num_planes=2 (NV12 Y+UV)。
+    // 之前忽略了這些資訊，直接用 VK_IMAGE_TILING_LINEAR 讓 RADV 自己推斷 plane
+    // 佈局，結果 UV plane offset 可能與 VAAPI 實際 BO 佈局不一致 → green line。
+    VAAPIVkBridge::PlaneLayout planes[2] = {};
+    if (drmDesc.num_layers >= 1 && drmDesc.layers[0].num_planes >= 2) {
+        planes[0].offset = drmDesc.layers[0].offset[0];
+        planes[0].pitch  = drmDesc.layers[0].pitch[0];
+        planes[1].offset = drmDesc.layers[0].offset[1];
+        planes[1].pitch  = drmDesc.layers[0].pitch[1];
+    } else {
+        // 理論上 NV12 composed export 一定有 2 plane；fallback 用 packed 假設。
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VAAPI-VK] frame#%llu DRM desc layers=%u planes=%u — "
+                    "using packed NV12 fallback",
+                    (unsigned long long)fnum,
+                    drmDesc.num_layers,
+                    drmDesc.num_layers >= 1 ? drmDesc.layers[0].num_planes : 0);
+        planes[0].offset = 0;
+        planes[0].pitch  = W;
+        planes[1].offset = W * H;
+        planes[1].pitch  = W;
+    }
+
+    if (fnum < 3) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VAAPI-VK] §K.3 DMA-BUF %ux%u mod=0x%llx "
+                    "Y={off=%u,pitch=%u} UV={off=%u,pitch=%u} packed_UV_off=%u",
+                    W, H, (unsigned long long)modifier,
+                    planes[0].offset, planes[0].pitch,
+                    planes[1].offset, planes[1].pitch, W * H);
+    }
+
     VAAPIVkBridge::ImportedFrame imp = {};
-    bool ok = m_VAAPIBridge->importFrame(dmaFd, dmaSize, modifier, W, H, &imp);
+    bool ok = m_VAAPIBridge->importFrame(dmaFd, dmaSize, modifier, W, H, planes, &imp);
 
     // 關閉 VA export 的 fd（bridge 已 dup()）。
     for (uint32_t i = 0; i < drmDesc.num_objects; i++) close(drmDesc.objects[i].fd);

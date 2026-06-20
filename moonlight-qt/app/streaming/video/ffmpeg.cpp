@@ -60,6 +60,9 @@ extern "C" {
 #ifdef HAVE_LIBPLACEBO_VULKAN
 #include "ffmpeg-renderers/plvk.h"
 #include "ffmpeg-renderers/vkfruc.h"
+#ifndef Q_OS_WIN32
+#include <dlfcn.h>   // §K.4: dlopen/dlsym for Vulkan video decode queue probe
+#endif
 #else
 // VipleStream: when the libplacebo/vkfruc renderer isn't compiled in
 // (e.g. Linux test build without libplacebo + ncnn deps), the decoder
@@ -78,6 +81,94 @@ std::atomic<double> g_VkFrucChainMs{0.0};
 #define MAX_SPS_EXTRA_SIZE 16
 
 #define FAILED_DECODES_RESET_THRESHOLD 20
+
+// §K.4 — 一次性 Vulkan video decode queue 探測（啟動延遲防護）
+//
+// 在 AMD Vega (RADV) 等無 VK_QUEUE_VIDEO_DECODE_BIT_KHR 的 GPU 上，
+// §J.3.c.1 的 Vulkan-first decoder cascade 每次嘗試都要建立完整的
+// VkFrucRenderer + FFmpeg VkDevice stack (~2.5s/次，含 swapchain +
+// shader 編譯 + teardown）。4 次失敗 × ~2.5s = ~10s 啟動黑屏才回退
+// 到 VAAPI。此探測只跑一次 (~3ms)，快取結果後讓所有 Vulkan hwaccel
+// 嘗試在無 decode queue 時直接跳過，VAAPI 立即命中。
+#ifdef HAVE_LIBPLACEBO_VULKAN
+static bool hasVulkanVideoDecodeQueue()
+{
+    static std::atomic<int> s_cached{-1};
+    int c = s_cached.load(std::memory_order_acquire);
+    if (c >= 0) return c != 0;
+
+    bool found = false;
+    uint32_t pdCount = 0;
+
+    // 動態載入 Vulkan 函式庫、取得 vkGetInstanceProcAddr
+    PFN_vkGetInstanceProcAddr pfnGIPA = nullptr;
+#ifdef Q_OS_WIN32
+    HMODULE vkLib = LoadLibraryA("vulkan-1.dll");
+    if (vkLib)
+        pfnGIPA = (PFN_vkGetInstanceProcAddr)GetProcAddress(vkLib, "vkGetInstanceProcAddr");
+#else
+    void* vkLib = dlopen("libvulkan.so.1", RTLD_LAZY);
+    if (vkLib)
+        pfnGIPA = (PFN_vkGetInstanceProcAddr)dlsym(vkLib, "vkGetInstanceProcAddr");
+#endif
+
+    VkInstance inst = VK_NULL_HANDLE;
+    PFN_vkDestroyInstance pfnDI = nullptr;
+
+    if (pfnGIPA) {
+        auto pfnCI = (PFN_vkCreateInstance)pfnGIPA(VK_NULL_HANDLE, "vkCreateInstance");
+        if (pfnCI) {
+            VkApplicationInfo ai = {};
+            ai.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+            ai.apiVersion = VK_API_VERSION_1_0;
+            VkInstanceCreateInfo ici = {};
+            ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+            ici.pApplicationInfo = &ai;
+
+            if (pfnCI(&ici, nullptr, &inst) == VK_SUCCESS && inst) {
+                pfnDI = (PFN_vkDestroyInstance)pfnGIPA(inst, "vkDestroyInstance");
+                auto pfnEPD = (PFN_vkEnumeratePhysicalDevices)
+                    pfnGIPA(inst, "vkEnumeratePhysicalDevices");
+                auto pfnQFP = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)
+                    pfnGIPA(inst, "vkGetPhysicalDeviceQueueFamilyProperties");
+
+                if (pfnEPD && pfnQFP) {
+                    pfnEPD(inst, &pdCount, nullptr);
+                    if (pdCount > 0) {
+                        std::vector<VkPhysicalDevice> pds(pdCount);
+                        pfnEPD(inst, &pdCount, pds.data());
+                        for (uint32_t d = 0; d < pdCount && !found; d++) {
+                            uint32_t qfCount = 0;
+                            pfnQFP(pds[d], &qfCount, nullptr);
+                            std::vector<VkQueueFamilyProperties> qfs(qfCount);
+                            pfnQFP(pds[d], &qfCount, qfs.data());
+                            for (uint32_t q = 0; q < qfCount; q++) {
+                                if (qfs[q].queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (pfnDI && inst) pfnDI(inst, nullptr);
+    // 不 unload vkLib — renderer 稍後會用到
+
+    s_cached.store(found ? 1 : 0, std::memory_order_release);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VK-VIDEO] §K.4 Vulkan video decode queue probe: %s "
+                "(%u physical device%s checked)",
+                found ? "FOUND" : "NOT FOUND",
+                pdCount, pdCount == 1 ? "" : "s");
+    return found;
+}
+#else
+static inline bool hasVulkanVideoDecodeQueue() { return false; }
+#endif
 
 // §J.3.f integration (2026-05-04) — fold three env-var gates into Settings:
 // when user picked RS_VULKAN, we now default to the Vulkan hwaccel decoder
@@ -1522,6 +1613,14 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
 #endif
 #ifdef HAVE_LIBPLACEBO_VULKAN
         case AV_HWDEVICE_TYPE_VULKAN:
+            // §K.4: GPU 無 Vulkan video decode queue 時跳過（避免昂貴
+            // 的 VkFrucRenderer + FFmpeg VkDevice 初始化失敗循環）
+            if (!hasVulkanVideoDecodeQueue()) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VK-VIDEO] §K.4: skipping Vulkan hwaccel — "
+                            "no video decode queue on any GPU");
+                return nullptr;
+            }
             // v1.4.161 §R2-ι-1: R2-θ-1 AV1 codec gate 已 revert.
             // 真 root cause 是 VkFruc 本身的 native VkVideoSession 跟 ffmpeg's
             // av1_vulkan hwaccel session 衝突 (AMD APU concurrent-session bug).
@@ -1922,7 +2021,7 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
         // first and try it before the regular cascade.  Falls through to
         // standard order if Vulkan path fails — keeps RS_D3D11 default
         // safe (D3D11VA still primary for those users).
-        if (shouldPreferVulkanDecoderCascade()) {
+        if (shouldPreferVulkanDecoderCascade() && hasVulkanVideoDecodeQueue()) {
             // §J.3.f recon — track whether we actually found a Vulkan
             // hw_config so we can distinguish "decoder doesn't expose
             // Vulkan hwaccel at all" (e.g. AV1 today via libdav1d
@@ -2178,7 +2277,7 @@ bool FFmpegVideoDecoder::tryInitializeHwAccelDecoder(PDECODER_PARAMETERS params,
         // which DOES have VK_KHR_video_decode_av1 in its hw_configs.
         // Without this skip, libdav1d wins decoder selection and Vulkan
         // path never gets tried.
-        if (shouldPreferVulkanDecoderCascade()) {
+        if (shouldPreferVulkanDecoderCascade() && hasVulkanVideoDecodeQueue()) {
             bool decoderHasVulkan = false;
             for (int j = 0; ; ++j) {
                 const AVCodecHWConfig* cfg = avcodec_get_hw_config(decoder, j);
@@ -2205,7 +2304,7 @@ bool FFmpegVideoDecoder::tryInitializeHwAccelDecoder(PDECODER_PARAMETERS params,
         // first before the regular cascade order picks D3D11VA.  Only
         // kicks in on pass=0 to avoid double-trying on subsequent passes.
         if (pass == 0) {
-            if (shouldPreferVulkanDecoderCascade()) {
+            if (shouldPreferVulkanDecoderCascade() && hasVulkanVideoDecodeQueue()) {
                 // v1.4.161 §R2-ι-2: R2-θ-2 AV1 skip 已 revert. AV1+Vulkan-first
                 // path 恢復可用; 真 fix 在 §R2-ι-3 (lazy native VkVideoSession).
                 for (int j = 0; ; ++j) {
