@@ -88,7 +88,21 @@ popd
 # cannot see the dependency via ldd when it looks at SDL2-compat.
 echo Staging SDL3 library
 mkdir -p $DEPLOY_FOLDER/usr/lib
-cp /usr/local/lib/libSDL3.so.0 $DEPLOY_FOLDER/usr/lib/
+# VipleStream §K.1.fix (2026-06-20): SDL3 may live in /usr/local/lib (built from
+# source) OR /usr/lib/<triplet> (distro sdl2-compat package).  Hardcoding
+# /usr/local/lib/libSDL3.so.0 silently no-ops the cp on hosts where SDL3 came
+# from apt (cp has no '|| fail'), then linuxdeploy --executable aborts later with
+# "No such file: .../usr/lib/libSDL3.so.0".  Locate it, and fail loudly if absent.
+SDL3_LIB=""
+for cand in \
+    /usr/local/lib/libSDL3.so.0 \
+    /usr/lib/x86_64-linux-gnu/libSDL3.so.0 \
+    /usr/lib/libSDL3.so.0; do
+    if [ -e "$cand" ]; then SDL3_LIB="$cand"; break; fi
+done
+[ -z "$SDL3_LIB" ] && SDL3_LIB=$(find /usr/local/lib /usr/lib -name 'libSDL3.so.0' 2>/dev/null | head -1)
+[ -n "$SDL3_LIB" ] || fail "libSDL3.so.0 not found (is SDL3 / sdl2-compat installed?)"
+cp "$SDL3_LIB" $DEPLOY_FOLDER/usr/lib/libSDL3.so.0
 
 # VipleStream §N.5.linux (v1.4.41): bundle Noto Sans CJK so zh_TW / ja / ko
 # overlay text renders inside the AppImage even on hosts without
@@ -139,10 +153,27 @@ if [ -f $DEPLOY_FOLDER/usr/share/applications/com.piinsta.desktop ]; then
     DESKTOP_STASH=$(mktemp)
     mv $DEPLOY_FOLDER/usr/share/applications/com.piinsta.desktop "$DESKTOP_STASH"
 fi
+# VipleStream §K.1.fix (2026-06-20): libncnn.so.1 is built from source into a
+# non-standard prefix (~/.local/ncnn/lib, or /usr/local/lib that only ships the
+# unversioned libncnn.so without the libncnn.so.1 soname symlink), so it is NOT
+# on ldconfig's default search path.  linuxdeploy's ldd-based dependency scan
+# then aborts the whole AppImage build with
+#   "Could not find dependency: libncnn.so.1".
+# Locate libncnn.so.1 and expose its dir on LD_LIBRARY_PATH for the linuxdeploy
+# invocation ONLY (scoped, so the later appimagetool/strip steps are unaffected).
+NCNN_LIB_DIR=""
+for d in "$HOME/.local/ncnn/lib" /usr/local/lib /usr/lib /usr/lib/x86_64-linux-gnu; do
+    if [ -e "$d/libncnn.so.1" ]; then NCNN_LIB_DIR="$d"; break; fi
+done
+if [ -z "$NCNN_LIB_DIR" ]; then
+    NCNN_LIB_DIR=$(dirname "$(find "$HOME/.local" -name 'libncnn.so.1' 2>/dev/null | head -1)" 2>/dev/null)
+fi
+
+LD_LIBRARY_PATH="${NCNN_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}" \
 linuxdeploy --appdir $DEPLOY_FOLDER \
     --executable $DEPLOY_FOLDER/usr/lib/libSDL3.so.0 \
     --plugin qt \
-    || fail "linuxdeploy Qt bundling failed!"
+    || fail "linuxdeploy Qt bundling failed! (libncnn.so.1 findable? NCNN_LIB_DIR='$NCNN_LIB_DIR')"
 # Restore desktop file
 if [ -n "$DESKTOP_STASH" ] && [ -f "$DESKTOP_STASH" ]; then
     mv "$DESKTOP_STASH" $DEPLOY_FOLDER/usr/share/applications/com.piinsta.desktop
