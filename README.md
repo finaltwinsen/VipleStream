@@ -128,6 +128,7 @@ PC client HDR is upstream Moonlight-Qt's existing HDR path (Sunshine `hdrMode=1`
 
 | Version | Changes |
 |---|---|
+| **1.5.254** | §Q MP-QUIC 多路徑 failover/failback + Reed–Solomon FEC / jitter buffer 強化（控制通道故障改走 QUIC stream #0）；§FRUC-XPLAT 跨平台補幀（NVIDIA NVOF/RIFE、AMD RADV native RIFE、Android GLES compute）；§ABR 自適應位元率（AIMD + 方向性 IDR + ping-tick 零丟包回升）；§SC-HID Steam Controller HID 轉發；§K AMD VAAPI-VK / RADV 串流修復（nil-buffer 守門、綠線 plane layout、10-bit 黑畫面、Vulkan decode-queue probe）。五平台（Win Client/Server、Android、Linux Client AppImage / Server .deb）同版號釋出。 |
 | **1.5.114** | 每台主機獨立「點擊直接進桌面」開關（PcView 右鍵選單）+ Send file to client picker 改在 user session 內展開（解 LocalSystem 跳 systemprofile\Desktop 警示窗 + cmd 黑窗）。 |
 | **1.5.108** | MP-QUIC multi-path streaming + single-instance guard. Linux Client AppImage + Server `.deb` re-aligned in release. |
 | **1.4.41** | Idle reconcile watchdog (auto-release owner lock after 60s); real zenity `fs_picker` on Linux; CJK font bundle path wired. |
