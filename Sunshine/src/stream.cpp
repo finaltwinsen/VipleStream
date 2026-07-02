@@ -481,6 +481,17 @@ namespace stream {
       // target/applied 的 check-then-act 全是 data race。所有 AIMD / FEC
       // 入口一律先取這把鎖（run_abr_aimd 由呼叫者持鎖呼叫）。
       std::mutex abrMutex;
+
+      // §Q-ABR-FLOOR-ESCAPE 2026-07-02 (Fix C)：ABR 低檔困死偵測狀態。
+      // 2026-07-01 事故：VPN 路徑持續 loss → AIMD cut/hold 平衡點
+      // ~11Mbps（31% of max，注意不是 floor）釘死 90 分鐘。持續 loss
+      // 是「路徑品質問題」不是壅塞，永遠餓死位元率沒有意義——target
+      // 貼著 low band（max(floor, 35% max)）≥30s 且期間 ≥20 輪有 loss
+      // → 請求 MP-QUIC 層重評估路徑（§Q-STICKY-ESCAPE），每 30s 至多
+      // 一發。abrMutex 保護。
+      std::chrono::steady_clock::time_point abrLowSince{};
+      std::chrono::steady_clock::time_point abrLastFloorSignal{};
+      int abrLowLossRounds{0};
     } video;
 
     struct {
@@ -1179,6 +1190,53 @@ namespace stream {
       BOOST_LOG(info) << "[VIPLE-ABR] Bitrate: " << applied << " -> " << target
         << " kbps (" << (target < applied ? "cut" : "ramp")
         << ", loss=" << lossCount << " in " << elapsedMs << "ms, src=" << src << ")";
+    }
+
+    // §Q-ABR-FLOOR-ESCAPE 2026-07-02 (Fix C)：低檔困死偵測。持續 loss
+    // 讓零丟包 streak 永遠湊不滿 5 輪、+5% 回升永不觸發——AIMD 對
+    // 「壞路徑」無解，把訊號交給 MP-QUIC 層去換路徑。
+    // 嚴格 target==floor 永不觸發（事故釘死點是 cut/hold 平衡不是
+    // floor），用 35% low band；band 隨 maxBr 縮放，低碼率設定不誤觸。
+    {
+      using namespace std::chrono_literals;
+      int lowBand = std::max(minBr, maxBr * 35 / 100);
+      auto nowTp = std::chrono::steady_clock::now();
+      if (target > lowBand) {
+        session->video.abrLowSince = {};
+        session->video.abrLowLossRounds = 0;
+      } else {
+        if (session->video.abrLowSince.time_since_epoch().count() == 0) {
+          session->video.abrLowSince = nowTp;
+          session->video.abrLowLossRounds = 0;
+        }
+        if (lossCount > 0) {
+          session->video.abrLowLossRounds++;
+        }
+        // AIMD ~500ms 一輪：30s 內 ≥20 輪有 loss = 確實是持續丟包，
+        // 不是壅塞尾巴。每 30s 至多發一次（持續 stuck 會重複發）。
+        if (nowTp - session->video.abrLowSince >= 30s &&
+            session->video.abrLowLossRounds >= 20 &&
+            (session->video.abrLastFloorSignal.time_since_epoch().count() == 0 ||
+             nowTp - session->video.abrLastFloorSignal >= 30s)) {
+          session->video.abrLastFloorSignal = nowTp;
+          session->video.abrLowLossRounds = 0;
+          auto lowSecs = std::chrono::duration_cast<std::chrono::seconds>(
+              nowTp - session->video.abrLowSince).count();
+          BOOST_LOG(warning) << "[VIPLE-ABR] floor-stuck: target=" << target
+            << "kbps <= low-band " << lowBand << "kbps (floor=" << minBr
+            << ") for " << lowSecs << "s with persistent loss (src=" << src
+            << ") — requesting MP-QUIC path re-evaluation";
+#ifdef VIPLE_MPQUIC
+          if (config::stream.mpquic_enabled && quic_server::g_listener) {
+            auto quicSession = quic_server::g_listener->getSession(
+                session->video.peer.address());
+            if (quicSession) {
+              quicSession->requestPathReevaluation();
+            }
+          }
+#endif
+        }
+      }
     }
   }
 
@@ -2194,23 +2252,33 @@ namespace stream {
             static auto failoverIdrLoopStart = std::chrono::steady_clock::time_point{};
             static auto lastFailoverIdr      = std::chrono::steady_clock::time_point{};
             static int  failoverIdrCount     = 0;
-            constexpr auto IDR_LOOP_DURATION = std::chrono::seconds(10);
+            // §Q-STICKY-ESCAPE 2026-07-02: IDR loop 視窗依 kind 決定——
+            // full（真 failover）= 10s；light（escape 主動切往已驗證的
+            // 更好路徑）= 2s（1 發立即 + 最多 3 發 500ms 補發）。escape
+            // 的目標路徑低 RTT、零 loss、client 已驗證，不需要 10s 風暴；
+            // 但 ENet 可能已死（IDR loop 存在的理由），純單發不保險。
+            static auto idrLoopWindow        = std::chrono::milliseconds(10000);
             constexpr auto IDR_LOOP_INTERVAL = std::chrono::milliseconds(500);
 
-            if (quicVideoSession->consumePathSwitchIdr()) {
+            int idrKind = quicVideoSession->consumePathSwitchIdr();
+            if (idrKind != 0) {
               // PATH-SWITCH 觸發 → 開始 IDR loop
               failoverIdrLoopStart = std::chrono::steady_clock::now();
               lastFailoverIdr = {};
               failoverIdrCount = 0;
+              idrLoopWindow = (idrKind == 2) ? std::chrono::milliseconds(2000)
+                                             : std::chrono::milliseconds(10000);
               session->video.idr_events->raise(true);
               BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-FAILOVER-IDR-LOOP: started "
-                              << "(10s window, 500ms interval)";
+                              << ((idrKind == 2)
+                                      ? "(light, 2s window, 500ms interval)"
+                                      : "(10s window, 500ms interval)");
             }
 
             // Loop 期間：每 500ms 再送一次 IDR
             auto loopNow = std::chrono::steady_clock::now();
             if (failoverIdrLoopStart.time_since_epoch().count() > 0 &&
-                (loopNow - failoverIdrLoopStart) < IDR_LOOP_DURATION) {
+                (loopNow - failoverIdrLoopStart) < idrLoopWindow) {
               if (lastFailoverIdr.time_since_epoch().count() == 0 ||
                   (loopNow - lastFailoverIdr) >= IDR_LOOP_INTERVAL) {
                 lastFailoverIdr = loopNow;
@@ -2223,7 +2291,7 @@ namespace stream {
                 }
               }
             } else if (failoverIdrLoopStart.time_since_epoch().count() > 0 &&
-                       (loopNow - failoverIdrLoopStart) >= IDR_LOOP_DURATION) {
+                       (loopNow - failoverIdrLoopStart) >= idrLoopWindow) {
               // Loop 到期，清除
               BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-FAILOVER-IDR-LOOP: ended "
                               << "after " << failoverIdrCount << " IDRs";

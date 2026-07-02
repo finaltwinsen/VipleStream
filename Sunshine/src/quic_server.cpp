@@ -516,12 +516,10 @@ namespace quic_server {
           bestVideoPath = i;
         }
       }
-      // §Q-FAILOVER-CNXQ: Pass 1 找到 warm 健康路徑 → 回歸 per-path queue
-      if (bestVideoPath >= 0 && _failoverCnxQueue) {
-        _failoverCnxQueue = false;
-        BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-FAILOVER-CNXQ: warm path "
-                        << bestVideoPath << " found — resuming per-path queue";
-      }
+      // §Q-FAILOVER-CNXQ 清除點已移到選路之後（2026-07-02 review 補強）：
+      // 原本「Pass 1 找到任何 warm 路徑就清除」在 §Q-STICKY-ESCAPE 切到
+      // 冷路徑後會被還 warm 的舊路徑立刻清掉，冷路徑落回有排程缺陷的
+      // per-path queue。改為「目前載視訊的路徑本身 warm 且健康」才回歸。
       // Pass 2: fallback — no warm path; pick largest cwin among
       // ACK-fresh paths to ride out the cold-start phase.
       if (bestVideoPath < 0) {
@@ -602,6 +600,158 @@ namespace quic_server {
       }
     }
 
+    // §Q-FAILOVER-CNXQ resume 2026-07-02（review 補強）：目前載視訊的
+    // 路徑本身 warm 且健康 → 回歸 per-path queue。放在選路 Pass 之後、
+    // escape override 之前：此時 _lastVideoPath 仍指向「上一輪實際載
+    // 視訊」的路徑（escape/failover 本輪才會改寫它）。
+    // §Q-CNXQ-WARMUP：另須過 3 秒時間下限——新 path 初始 cwin ~72KB
+    // 本來就 ≥64KB，純 cwin 門檻會立即誤判 warm。
+    if (_failoverCnxQueue && _lastVideoPath >= 0 &&
+        picoquic_current_time() >= _cnxQueueMinUntil &&
+        _lastVideoPath < _cnx->nb_paths && _cnx->path[_lastVideoPath] &&
+        !_cnx->path[_lastVideoPath]->path_is_demoted &&
+        !_cnx->path[_lastVideoPath]->path_is_backup &&
+        _cnx->path[_lastVideoPath]->nb_retransmit == 0 &&
+        _cnx->path[_lastVideoPath]->cwin >= MIN_WARM_CWND) {
+      _failoverCnxQueue = false;
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-FAILOVER-CNXQ: current video path "
+                      << _lastVideoPath << " warm — resuming per-path queue";
+    }
+
+    // §Q-STICKY-ESCAPE 2026-07-02: sticky 選路的品質逃生門——評估段。
+    // 2026-07-01 事故：failover 到 VPN 後乙太網路恢復，但 sticky
+    // 「不死不換」+ Pass 1 warm-cwin 門檻（閒置 path 永遠冷）讓視訊
+    // 留在持續 loss 的 VPN 上 86 分鐘，ABR 被壓死在 ~11Mbps。
+    // 機制：每 500ms 對每條 path 取 nb_losses_found delta（含 FEC 已
+    // 修復的 loss——正是「FEC 修掉但 ABR 持續看到 missing」的路徑品質
+    // 訊號），以 unique_path_id 為 key 維護 6 視窗 lossy 位元圖。
+    // 當前路徑近 6 視窗 ≥4 有 loss，且存在「6 視窗零 loss + RTT ≤ 當前
+    // 一半且差 ≥1ms + 已驗證非 backup」的候選 → 連續 3 輪 + 距上次
+    // PATH-SWITCH ≥10s + escape 冷卻 30s → 記下候選，sticky 之後顯式
+    // override。Fix C（ABR floor-stuck）訊號放寬 streak/冷卻，但不放寬
+    // 候選品質與 10s 駐留。
+    int escapeCandidate = -1;
+    if (_cnx->nb_paths > 1) {
+      uint64_t nowEsc = picoquic_current_time();
+      if (nowEsc - _lastEscapeEval >= 500000) {
+        _lastEscapeEval = nowEsc;
+        bool reeval = _pathReevalRequested.exchange(false, std::memory_order_acq_rel);
+
+        // 1) 更新 per-path loss 視窗（unique_path_id 為 key，防 index 漂移）
+        bool seen[16] = {};
+        for (int i = 0; i < _cnx->nb_paths; i++) {
+          auto* p = _cnx->path[i];
+          if (p == nullptr) continue;
+          int k = -1, freeK = -1;
+          for (int s = 0; s < 16; s++) {
+            if (_escSnaps[s].used && _escSnaps[s].pathId == p->unique_path_id) {
+              k = s;
+              break;
+            }
+            if (!_escSnaps[s].used && freeK < 0) freeK = s;
+          }
+          if (k < 0) {
+            if (freeK < 0) continue;  // 槽滿（>16 條 path 不現實）
+            _escSnaps[freeK] = EscSnap{};
+            _escSnaps[freeK].used = true;
+            _escSnaps[freeK].pathId = p->unique_path_id;
+            _escSnaps[freeK].lossSnap = p->nb_losses_found;  // 首見只建 baseline
+            seen[freeK] = true;
+            continue;
+          }
+          seen[k] = true;
+          uint64_t delta = p->nb_losses_found - _escSnaps[k].lossSnap;
+          _escSnaps[k].lossSnap = p->nb_losses_found;
+          _escSnaps[k].lossyBits =
+              (uint8_t)((_escSnaps[k].lossyBits << 1) | (delta ? 1u : 0u));
+          if (_escSnaps[k].samples < 0xFF) _escSnaps[k].samples++;
+        }
+        for (int s = 0; s < 16; s++) {
+          if (_escSnaps[s].used && !seen[s]) _escSnaps[s] = EscSnap{};  // path 已消失
+        }
+
+        // 近 6 視窗的 lossy 視窗數；-1 = 無資料或觀測不足（不可信）
+        auto lossyWin = [this](uint64_t pathId) -> int {
+          for (int s = 0; s < 16; s++) {
+            if (_escSnaps[s].used && _escSnaps[s].pathId == pathId) {
+              if (_escSnaps[s].samples < 6) return -1;
+              int c = 0;
+              for (int b = 0; b < 6; b++) c += (_escSnaps[s].lossyBits >> b) & 1;
+              return c;
+            }
+          }
+          return -1;
+        };
+
+        // 2) 逃生評估
+        picoquic_path_t* cur =
+            (_lastVideoPath >= 0 && _lastVideoPath < _cnx->nb_paths)
+                ? _cnx->path[_lastVideoPath] : nullptr;
+        int curLossy = cur ? lossyWin(cur->unique_path_id) : -1;
+        // 一般模式：≥4/6 視窗有 loss；ABR floor-stuck 模式：≥1 即可
+        bool distress = (cur != nullptr) && curLossy >= (reeval ? 1 : 4);
+        if (distress) {
+          int best = -1;
+          uint64_t bestRtt = UINT64_MAX;
+          for (int i = 0; i < _cnx->nb_paths; i++) {
+            auto* p = _cnx->path[i];
+            if (i == _lastVideoPath || p == nullptr) continue;
+            if (p->path_is_demoted || p->path_is_backup) continue;
+            if (!p->first_tuple->challenge_verified) continue;
+            if (p->nb_retransmit != 0) continue;
+            if (lossyWin(p->unique_path_id) != 0) continue;  // 6 視窗零 loss
+            // RTT ≤ 當前一半且絕對差 ≥1ms（sub-ms 雜訊不觸發）
+            if (p->smoothed_rtt * 2 > cur->smoothed_rtt) continue;
+            if (cur->smoothed_rtt - p->smoothed_rtt < 1000) continue;
+            // 故意不要求 warm cwin：閒置候選 cwin 永遠冷（雞生蛋——
+            // 要 warm 才被選、要被選才會 warm）。切換後 LAN 亞秒級
+            // slow-start + light IDR 吸收瞬間凹陷。
+            if (p->smoothed_rtt < bestRtt) {
+              bestRtt = p->smoothed_rtt;
+              best = i;
+            }
+          }
+          if (best >= 0) {
+            uint64_t bestId = _cnx->path[best]->unique_path_id;
+            if (bestId == _escLastCandidateId) {
+              _escapeStreak++;
+            } else {
+              _escapeStreak = 1;
+              _escLastCandidateId = bestId;
+            }
+            bool streakOk = _escapeStreak >= (reeval ? 1 : 3);
+            bool dwellOk = (_lastPathSwitchTime == 0) ||
+                           (nowEsc - _lastPathSwitchTime >= 10000000);
+            bool coolOk = reeval || _lastEscapeSwitch == 0 ||
+                          (nowEsc - _lastEscapeSwitch >= 30000000);
+            if (streakOk && dwellOk && coolOk) {
+              escapeCandidate = best;
+              BOOST_LOG(info)
+                  << "[VIPLE-MPQUIC] §Q-STICKY-ESCAPE: leaving path "
+                  << _lastVideoPath << " (rtt=" << (cur->smoothed_rtt / 1000)
+                  << "ms, lossy " << curLossy << "/6 win) -> path " << best
+                  << " (rtt=" << (bestRtt / 1000)
+                  << "ms, 0 loss/6 win) streak=" << _escapeStreak
+                  << (reeval ? " [abr-distress]" : "");
+            }
+          } else {
+            _escapeStreak = 0;
+            _escLastCandidateId = 0;
+            if (reeval && nowEsc - _escNoCandWarn >= 30000000) {
+              _escNoCandWarn = nowEsc;
+              BOOST_LOG(info)
+                  << "[VIPLE-MPQUIC] §Q-STICKY-ESCAPE: re-eval requested "
+                  << "(ABR floor-stuck) but no better candidate path — "
+                  << "staying on path " << _lastVideoPath;
+            }
+          }
+        } else {
+          _escapeStreak = 0;
+          _escLastCandidateId = 0;
+        }
+      }
+    }
+
     // §Q-PATH-SWITCH-STICKY 2026-05-27: bestVideoPath 一旦選定就不換，
     // 除非當前路徑不健康。v1.5.163 實測發現：原本的 3 秒 dwell 時間
     // 只是延遲震盪，dwell 過期後同樣的 RTT 比較再次觸發切換 → IDR
@@ -653,6 +803,22 @@ namespace quic_server {
           bestVideoPath = _lastVideoPath;
         }
       }
+    }
+
+    // §Q-STICKY-ESCAPE：顯式 override。必須放在 sticky 之後——候選
+    // path 的 cwin 是冷的（閒置不會 warm），Pass 1 的 warm 門檻選不到
+    // 它、Pass 2 又偏好大 cwin 的當前路徑，sticky 也會把結果黏回去；
+    // 唯一出路是評估通過後直接指定。
+    if (escapeCandidate >= 0 && escapeCandidate != bestVideoPath) {
+      bestVideoPath = escapeCandidate;
+      _lastEscapeSwitch = picoquic_current_time();
+      _escapeStreak = 0;
+      _escLastCandidateId = 0;
+      _escapeIdrLight = true;  // isRealFailover 區塊消費 → light IDR
+      // 剛切上去的路徑 cwin 冷，per-path queue 對這種路徑有排程缺陷
+      // （§Q-FAILOVER-CNXQ 教訓，該 path 剛被 client 從 backup 升回）
+      // → 先走 cnx-level queue，Pass 1 偵測到 warm 後自動清除。
+      _failoverCnxQueue = true;
     }
 
     // §Q-PATH-SWITCH: 記錄 bestVideoPath 切換事件
@@ -741,7 +907,22 @@ namespace quic_server {
       if (isRealFailover) {
         // §Q-IDR-INIT-FIX：只在真正的 failover 切換才要求 IDR loop。
         // 初始 path 選定（-2 → -1 → 0）不觸發（見上方註解）。
-        _pathSwitchIdrNeeded.store(true, std::memory_order_release);
+        // §Q-STICKY-ESCAPE：escape 主動切往「已驗證、低 RTT、零 loss」
+        // 的更好路徑 → light kind（2s 短視窗），不需要完整 10s 風暴。
+        _pathSwitchIdrKind.store(_escapeIdrLight ? 2 : 1,
+                                 std::memory_order_release);
+
+        // §Q-CNXQ-WARMUP 2026-07-02（round 4 IDR 風暴根因之一）：任何
+        // real failover 切換後先走 cnx-level queue 至少 3 秒。切換目標
+        // 常是「剛從 backup 升級」的路徑——per-path queue 對這種路徑有
+        // 排程缺陷（§Q-FAILOVER-CNXQ 教訓：資料堆積不被發送），且新
+        // path 初始 cwin ~72KB 會騙過 64KB warm 門檻讓清除條件立即成立
+        // → 資料送不出去 → client 3s stall → 判死降 backup → 切回 →
+        // 再升級 → 每 ~10s 一輪 PATH-SWITCH + 完整 IDR loop 的風暴。
+        // cnx-level queue 由 picoquic 內部排程器路由（無此缺陷），3 秒
+        // 足夠讓目標路徑真正開始收發。
+        _failoverCnxQueue = true;
+        _cnxQueueMinUntil = nowUsForEpisode + 3000000;  // 3s 下限
 
         // 開 2 秒 reinject 視窗（XLINK 模式）
         constexpr uint64_t REINJECT_WINDOW_US = 2000000;
@@ -774,6 +955,7 @@ namespace quic_server {
 
       _lastVideoPath = bestVideoPath;
       _lastPathSwitchTime = nowUsForEpisode;
+      _escapeIdrLight = false;  // §Q-STICKY-ESCAPE: kind 已消費，清除
     }
 
     // §Q-PATH-SWITCH-FLUSH: 每次 drain 遞減寬限計數

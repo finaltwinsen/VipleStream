@@ -178,18 +178,58 @@ namespace quic_server {
 
     // §Q-PATH-SWITCH-IDR 2026-05-27: bestVideoPath 切換時自動要求 IDR。
     // drainPendingToQuic() 設 flag → stream.cpp video 送出迴圈消費。
-    std::atomic<bool> _pathSwitchIdrNeeded{false};
+    // §Q-STICKY-ESCAPE 2026-07-02: bool 改為 kind——
+    //   0 = 無、1 = full（真 failover，10s IDR loop）、
+    //   2 = light（escape 主動切往已驗證的更好路徑，2s 短視窗）。
+    std::atomic<int> _pathSwitchIdrKind{0};
 
     // §Q-FAILOVER-CNXQ 2026-05-27: failover 期間改用 cnx-level datagram
     // queue（不用 per-path queue）。picoquic 對剛從 backup 升級的路徑
     // 有 scheduler 排程缺陷——per-path queue 的資料堆積但不被排程發送。
     // 改用 cnx-level queue 讓 picoquic 內部排程器自行路由到可用路徑。
-    // Pass 3 / EMERGENCY-PROMOTE 設 true；Pass 1（warm 健康路徑）清除。
+    // Pass 3 / EMERGENCY-PROMOTE / 任何 real failover 切換設 true；
+    // 現載流路徑 warm 且過 §Q-CNXQ-WARMUP 時間下限後清除。
     bool _failoverCnxQueue = false;
+    // §Q-CNXQ-WARMUP 2026-07-02: cnx-level queue 的最短持續時刻。新
+    // path 初始 cwin ~72KB 會騙過 64KB warm 門檻，需要時間下限。
+    uint64_t _cnxQueueMinUntil = 0;
+
+    // §Q-STICKY-ESCAPE 2026-07-02: sticky 選路品質逃生門的狀態。
+    // 2026-07-01 事故：failover 到 VPN 後乙太恢復，sticky「不死不換」+
+    // Pass 1 warm-cwin 門檻（閒置 path 永遠冷）讓視訊留在持續 loss 的
+    // VPN 上 86 分鐘。每 500ms 對每條 path 取 nb_losses_found delta，
+    // 以 unique_path_id 為 key（防 path 增刪 index 漂移）維護 6 視窗
+    // lossy 位元圖。僅 IO 執行緒讀寫。
+    struct EscSnap {
+      bool used = false;
+      uint64_t pathId = 0;
+      uint64_t lossSnap = 0;
+      uint8_t lossyBits = 0;   // bit0 = 最近視窗是否有 loss
+      uint8_t samples = 0;     // 已觀測視窗數（新 path 需滿 6 才可信）
+    };
+    EscSnap _escSnaps[16] {};
+    uint64_t _lastEscapeEval = 0;      // 上次評估時刻（500ms 節流）
+    int _escapeStreak = 0;             // 連續滿足逃生條件的輪數
+    uint64_t _escLastCandidateId = 0;  // streak 綁定的候選 path id
+    uint64_t _lastEscapeSwitch = 0;    // escape 專屬 30s 冷卻
+    uint64_t _escNoCandWarn = 0;       // 「無候選」log 節流
+    bool _escapeIdrLight = false;      // 本輪切換使用 light IDR
+
+    // §Q-ABR-FLOOR-ESCAPE (Fix C): stream.cpp ABR 執行緒設，IO 執行緒
+    // 的 escape 評估消費。true = 放寬 hysteresis（streak 1、免 30s 冷
+    // 卻；候選品質與 10s 駐留不放寬）。
+    std::atomic<bool> _pathReevalRequested{false};
   public:
-    // stream.cpp 調用：若 bestVideoPath 切換過則回 true 並清除 flag
-    bool consumePathSwitchIdr() {
-      return _pathSwitchIdrNeeded.exchange(false, std::memory_order_acq_rel);
+    // stream.cpp 調用：若 bestVideoPath 切換過則回非 0 並清除 flag。
+    // 回傳值 = IDR kind（1=full 10s loop、2=light 2s 視窗）。
+    int consumePathSwitchIdr() {
+      return _pathSwitchIdrKind.exchange(0, std::memory_order_acq_rel);
+    }
+
+    // §Q-ABR-FLOOR-ESCAPE (Fix C): ABR 在 floor-stuck（低檔 + 持續
+    // loss ≥30s）時呼叫，請求 MP-QUIC 層重評估視訊路徑。
+    void requestPathReevaluation() {
+      _pathReevalRequested.store(true, std::memory_order_release);
     }
   private:
 
