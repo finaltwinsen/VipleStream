@@ -33,7 +33,15 @@ param(
 $ErrorActionPreference = "Stop"
 $inf  = Join-Path $DriverDir "VipleSCHid.inf"
 $cer  = Join-Path $DriverDir "VipleSCHid_SelfSign.cer"
-$hwid = "Viple\SteamController"
+# SC-HID identity fix 2026-07-02：HWID 必須內嵌 VID/PID。HIDClass 對
+# root-enumerated 裝置的子 HID 節點 hardware id = 父 HWID 去掉 enumerator
+# 前綴、加上 "HID\" —— 舊 HWID "Viple\SteamController" 讓子節點變成
+# "HID\SteamController"（無 VID/PID、interface path 無 vid_28de），Steam
+# 的控制器枚舉因此不認得它。改成 Viple\VID_28DE&PID_1302 之後子節點是
+# "HID\VID_28DE&PID_1302"、path 是 hid#vid_28de&pid_1302#...，與實體
+# gen-2 SC（USB 直連）一致。
+$hwid = "Viple\VID_28DE&PID_1302"
+$legacyHwid = "Viple\SteamController"   # 2026-07-02 之前的舊 HWID，見上
 $desc = "VipleStream Steam Controller (Virtual)"
 
 function Write-Result($obj) {
@@ -217,7 +225,15 @@ public static class VipleDevNode {
         try {
             SP_DEVINFO_DATA dd = new SP_DEVINFO_DATA();
             dd.cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
-            if (!SetupDiCreateDeviceInfoW(di, "HIDClass", ref HIDClass, null, IntPtr.Zero, DICD_GENERATE_ID, ref dd))
+            // SC-HID identity fix 2026-07-02: the device-name segment here becomes
+            // the ROOT instance id (ROOT\VID_28DE&PID_1302\000x). HIDClass reuses
+            // the parent's device-name segment for the child HID PDO instance id,
+            // which in turn becomes the interface path. With the old "HIDClass"
+            // name the child path was \\?\hid#hidclass#... -- no vid/pid in the
+            // path, and Steam's controller identification parses the path string.
+            // Now the child path is \\?\hid#vid_28de&pid_1302#..., matching a
+            // real gen-2 Steam Controller.
+            if (!SetupDiCreateDeviceInfoW(di, "VID_28DE&PID_1302", ref HIDClass, null, IntPtr.Zero, DICD_GENERATE_ID, ref dd))
                 return ((uint)Marshal.GetLastWin32Error()) | 0x20000000u;
             byte[] buf = Encoding.Unicode.GetBytes(hwid + "\0\0"); // REG_MULTI_SZ
             if (!SetupDiSetDeviceRegistryPropertyW(di, ref dd, SPDRP_HARDWAREID, buf, (uint)buf.Length))
@@ -254,6 +270,14 @@ if (Test-Path $cer) {
     }
 }
 
+# ---- 0) Legacy HWID cleanup（無條件）：舊 HWID 的節點身分錯誤（子節點
+#      無 VID/PID），留著只會讓 Steam 看到一個「不是 Steam Controller」的
+#      裝置，一律移除。----------------------------------------------------
+$legacyRemoved = [VipleDevNode]::RemoveNodes($legacyHwid)
+if ($legacyRemoved -gt 0) {
+    Write-Host "[SC-HID] removed $legacyRemoved legacy $legacyHwid node(s) (pre-identity-fix)."
+}
+
 $present = [VipleDevNode]::CountNodes($hwid)
 
 if (-not $Reinstall -and $present -gt 0) {
@@ -263,7 +287,7 @@ if (-not $Reinstall -and $present -gt 0) {
            Where-Object { $_.FriendlyName -like "*Steam Controller*" } | Select-Object -First 1
     if ($dev -and $dev.Status -eq "OK") {
         Write-Result @{ ok = $true; op = "install"; skipped = $true
-                        note = "healthy Viple\SteamController node already present"
+                        note = "healthy $hwid node already present"
                         status = "$($dev.Status)"; instanceId = "$($dev.InstanceId)" }
         exit 0
     }
@@ -273,7 +297,7 @@ if (-not $Reinstall -and $present -gt 0) {
 if ($Reinstall) {
     if ($present -gt 0) {
         $removed = [VipleDevNode]::RemoveNodes($hwid)
-        Write-Host "[SC-HID] removed $removed existing Viple\SteamController node(s)."
+        Write-Host "[SC-HID] removed $removed existing $hwid node(s)."
     }
     # Delete any previously-published VipleSCHid driver PACKAGE(s) from the store.
     # Without this, pnputil /add-driver sees the old package as "already exists in

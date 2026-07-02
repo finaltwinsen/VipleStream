@@ -90,11 +90,18 @@ static const UCHAR g_HidReportDescriptor[] = {
 // gen-2 SC streamed gamepad report id (confirmed by reading the real device)
 #define SC_REPORT_ID  0x45
 
+// SC-HID identity fix 2026-07-02：VersionNumber 對齊實體 gen-2 SC（USB 直連
+// bcdDevice = 0x0307，實測 .195 的 HID\VID_28DE&PID_1302&REV_0307）。
+// 注意：Steam 端「看得到 VID/PID」的關鍵不在這個結構（HidD_GetAttributes 一直
+// 都回 28DE:1302），而在裝置的 hardware id / interface path——HIDClass 對
+// root-enumerated 裝置是拿「父節點 HWID 去掉 enumerator、前綴 HID\」當子節點
+// hardware id。所以 INF/Install script 的 HWID 必須是 Viple\VID_28DE&PID_1302
+//（見 VipleSCHid.inf 頂部說明）。
 static HID_DEVICE_ATTRIBUTES g_Attributes = {
     sizeof(HID_DEVICE_ATTRIBUTES),
     SC_VID,   // VendorID
     SC_PID,   // ProductID  (0x1302 = gen-2 SC)
-    0x0100    // VersionNumber
+    0x0307    // VersionNumber = 實體 REV_0307
 };
 
 // §SC-HID Phase 2C：driver → Sunshine 的待辦事件 ring buffer。
@@ -274,6 +281,28 @@ VOID EvtIoDeviceControl(
         if (NT_SUCCESS(WdfRequestRetrieveOutputMemory(Request, &mem))) {
             WdfMemoryCopyFromBuffer(mem, 0, &g_Attributes, sizeof(g_Attributes));
             transferred = sizeof(g_Attributes);
+        }
+        status = STATUS_SUCCESS;
+        break;
+    }
+
+    // ── HID string 查詢（SC-HID identity fix 2026-07-02）──────────────────
+    // 實體 gen-2 SC 的 iProduct = "Steam Controller"；Steam/SDL 的列舉會讀
+    // product string 來顯示與識別，虛擬裝置之前沒實作 → HidD_GetProductString
+    // 失敗，是「Steam 看到裝置但不當它是 SC」的候選因素之一。
+    // 註：IOCTL_HID_GET_STRING 的 string id 放在 Type3InputBuffer 的指標值
+    // 本身（METHOD_NEITHER 慣例），UMDF 的 Copy 動作拿不到它——一律回
+    // product string。manufacturer/serial 查詢也會拿到同字串，只是顯示
+    // 層面的小瑕疵，不影響識別。
+    case IOCTL_HID_GET_STRING:
+    case IOCTL_HID_GET_INDEXED_STRING: {
+        static const WCHAR kProduct[] = L"Steam Controller";
+        if (NT_SUCCESS(WdfRequestRetrieveOutputMemory(Request, &mem))) {
+            size_t cap = 0;
+            WdfMemoryGetBuffer(mem, &cap);
+            size_t n = sizeof(kProduct) <= cap ? sizeof(kProduct) : cap;
+            WdfMemoryCopyFromBuffer(mem, 0, const_cast<WCHAR*>(kProduct), n);
+            transferred = n;
         }
         status = STATUS_SUCCESS;
         break;

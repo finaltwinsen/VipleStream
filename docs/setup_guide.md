@@ -170,6 +170,29 @@ input latency.
   Settings dropdown (currently labeled "experimental"; production
   default flips to Vulkan in TODO §J.5).
 
+#### Steam Controller passthrough on Linux (§SC-HID)
+
+The desktop client forwards a physical Steam Controller's raw HID stream
+to the host so the host's Steam sees a real Steam Controller (instead of
+an emulated Xbox pad). The code ships enabled on Linux, but reading the
+controller needs `/dev/hidraw*` access, which is root-only by default:
+
+1. If Steam (or your distro's `steam-devices` package) is installed on
+   the client machine, its udev rules already grant access — nothing to do.
+2. Otherwise install our rule and replug the controller:
+
+   ```
+   sudo cp moonlight-qt/scripts/linux/60-viplestream-steam-controller.rules /etc/udev/rules.d/
+   sudo udevadm control --reload-rules && sudo udevadm trigger
+   ```
+
+Diagnosis: start a stream and check the client log — `[SC-HID] Opened N
+Steam Controller vendor interface(s)` means passthrough is active;
+`Found N ... but could not open any` means the udev rule is missing.
+Note: do not run Steam Input against the same controller on the client
+machine while streaming — it reconfigures the device and interferes with
+passthrough.
+
 ---
 
 ## Where to file issues

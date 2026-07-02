@@ -44,6 +44,7 @@ static jmethodID BridgeClSetHdrModeMethod;
 static jmethodID BridgeClRumbleTriggersMethod;
 static jmethodID BridgeClSetMotionEventStateMethod;
 static jmethodID BridgeClSetControllerLEDMethod;
+static jmethodID BridgeClScHidFeatureRequestMethod;
 static jbyteArray DecodedFrameBuffer;
 static jshortArray DecodedAudioBuffer;
 
@@ -108,6 +109,7 @@ Java_com_limelight_nvstream_jni_MoonBridge_init(JNIEnv *env, jclass clazz) {
     BridgeClRumbleTriggersMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClRumbleTriggers", "(SSS)V");
     BridgeClSetMotionEventStateMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetMotionEventState", "(SBS)V");
     BridgeClSetControllerLEDMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetControllerLED", "(SBBB)V");
+    BridgeClScHidFeatureRequestMethod = (*env)->GetStaticMethodID(env, clazz, "scHidFeatureRequest", "(BBB[BB)V");
 }
 
 int BridgeDrSetup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
@@ -395,6 +397,35 @@ void BridgeClSetControllerLED(uint16_t controllerNumber, uint8_t r, uint8_t g, u
     }
 }
 
+// §SC-HID Phase 2C: the host relays a Steam feature op (GET/SET) that must be
+// replayed against the real Steam Controller. Route it to the Java side, which
+// performs the HID control transfers and answers via sendScHidFeatureReport().
+void BridgeClScHidFeatureRequest(uint8_t reportId, uint8_t op, uint8_t seq,
+                                 const uint8_t* query, uint8_t queryLen) {
+    JNIEnv* env = GetThreadEnv();
+
+    jbyteArray queryArray = NULL;
+    if (query != NULL && queryLen > 0) {
+        queryArray = (*env)->NewByteArray(env, queryLen);
+        (*env)->SetByteArrayRegion(env, queryArray, 0, queryLen, (const jbyte*)query);
+    }
+
+    // The jbyte casts are necessary to satisfy CheckJNI
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClScHidFeatureRequestMethod,
+                                 (jbyte)reportId, (jbyte)op, (jbyte)seq, queryArray, (jbyte)queryLen);
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+        return;
+    }
+
+    if (queryArray != NULL) {
+        // Feature ops recur throughout the session on a long-lived callback
+        // thread, so drop the local ref instead of letting them accumulate.
+        (*env)->DeleteLocalRef(env, queryArray);
+    }
+}
+
 void BridgeClLogMessage(const char* format, ...) {
     va_list va;
     va_start(va, format);
@@ -432,6 +463,7 @@ static CONNECTION_LISTENER_CALLBACKS BridgeConnListenerCallbacks = {
         .rumbleTriggers = BridgeClRumbleTriggers,
         .setMotionEventState = BridgeClSetMotionEventState,
         .setControllerLED = BridgeClSetControllerLED,
+        .scHidFeatureRequest = BridgeClScHidFeatureRequest,  // §SC-HID feature tunnel
 };
 
 static bool

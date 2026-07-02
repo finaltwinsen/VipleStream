@@ -97,6 +97,32 @@ Java_com_limelight_nvstream_jni_MoonBridge_sendControllerBatteryEvent(JNIEnv *en
     return LiSendControllerBatteryEvent(controllerNumber, batteryState, batteryPercentage);
 }
 
+// §SC-HID: forward a raw Steam Controller HID input report to the host.
+// The Java side pads reports to exactly 64 bytes (SS_SC_HID_REPORT_MAX).
+JNIEXPORT jint JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_sendScHidInputReport(JNIEnv *env, jclass clazz,
+                                                                jbyteArray data) {
+    jsize dataLen = (*env)->GetArrayLength(env, data);
+    jbyte* dataPtr = (*env)->GetByteArrayElements(env, data, NULL);
+    int err = LiSendScHidInputReport((const uint8_t*)dataPtr, dataLen);
+    (*env)->ReleaseByteArrayElements(env, data, dataPtr, JNI_ABORT);
+    return err;
+}
+
+// §SC-HID Phase 2C: forward the real SC's feature report RESPONSE back to the
+// host. seq echoes the request cookie from the scHidFeatureRequest callback.
+JNIEXPORT jint JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_sendScHidFeatureReport(JNIEnv *env, jclass clazz,
+                                                                  jbyte seq, jbyte reportId,
+                                                                  jbyteArray data) {
+    jsize dataLen = (*env)->GetArrayLength(env, data);
+    jbyte* dataPtr = (*env)->GetByteArrayElements(env, data, NULL);
+    int err = LiSendScHidFeatureReport((uint8_t)seq, (uint8_t)reportId,
+                                       (const uint8_t*)dataPtr, dataLen);
+    (*env)->ReleaseByteArrayElements(env, data, dataPtr, JNI_ABORT);
+    return err;
+}
+
 JNIEXPORT void JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_sendKeyboardInput(JNIEnv *env, jclass clazz, jshort keyCode, jbyte keyAction, jbyte modifiers, jbyte flags) {
     LiSendKeyboardEvent2(keyCode, keyAction, modifiers, flags);

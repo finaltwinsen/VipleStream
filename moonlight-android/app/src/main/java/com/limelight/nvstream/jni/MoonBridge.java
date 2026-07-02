@@ -131,9 +131,18 @@ public class MoonBridge {
 
     public static final byte LI_BATTERY_PERCENTAGE_UNKNOWN = (byte)0xFF;
 
+    // §SC-HID: handler for feature report requests relayed by the host
+    // (Steam's GetControllerInfo handshake replayed against the real SC).
+    // Implemented by SteamControllerDriver; registered while a Steam
+    // Controller is claimed over USB.
+    public interface ScHidFeatureRequestHandler {
+        void onScHidFeatureRequest(byte reportId, byte op, byte seq, byte[] query, byte queryLen);
+    }
+
     private static AudioRenderer audioRenderer;
     private static VideoDecoderRenderer videoRenderer;
     private static NvConnectionListener connectionListener;
+    private static volatile ScHidFeatureRequestHandler scHidFeatureRequestHandler;
 
     static {
         System.loadLibrary("moonlight-core");
@@ -333,6 +342,28 @@ public class MoonBridge {
         }
     }
 
+    // §SC-HID: invoked by the native connection listener (callbacks.c) when the
+    // host relays a Steam feature op to the real Steam Controller. May be called
+    // on an arbitrary native callback thread.
+    public static void scHidFeatureRequest(byte reportId, byte op, byte seq, byte[] query, byte queryLen) {
+        ScHidFeatureRequestHandler handler = scHidFeatureRequestHandler;
+        if (handler != null) {
+            handler.onScHidFeatureRequest(reportId, op, seq, query, queryLen);
+        }
+    }
+
+    public static void setScHidFeatureRequestHandler(ScHidFeatureRequestHandler handler) {
+        scHidFeatureRequestHandler = handler;
+    }
+
+    // Clears the handler only if it is still the given one, so a stale driver
+    // shutting down late can't unregister its replacement.
+    public static void clearScHidFeatureRequestHandler(ScHidFeatureRequestHandler handler) {
+        if (scHidFeatureRequestHandler == handler) {
+            scHidFeatureRequestHandler = null;
+        }
+    }
+
     public static void setupBridge(VideoDecoderRenderer videoRenderer, AudioRenderer audioRenderer, NvConnectionListener connectionListener) {
         MoonBridge.videoRenderer = videoRenderer;
         MoonBridge.audioRenderer = audioRenderer;
@@ -416,6 +447,14 @@ public class MoonBridge {
     public static native int sendControllerMotionEvent(byte controllerNumber, byte motionType, float x, float y, float z);
 
     public static native int sendControllerBatteryEvent(byte controllerNumber, byte batteryState, byte batteryPercentage);
+
+    // §SC-HID: send a raw Steam Controller HID input report to the host.
+    // data must be exactly 64 bytes (zero-padded by the caller).
+    public static native int sendScHidInputReport(byte[] data);
+
+    // §SC-HID Phase 2C: send the real SC's 64-byte feature report response back
+    // to the host. seq echoes the cookie from scHidFeatureRequest().
+    public static native int sendScHidFeatureReport(byte seq, byte reportId, byte[] data);
 
     public static native void sendKeyboardInput(short keyMap, byte keyDirection, byte modifier, byte flags);
 

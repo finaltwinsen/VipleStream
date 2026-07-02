@@ -5,7 +5,18 @@
 ;   MsHidUmdf.sys  (function driver / ASSOCSERVICE) -- presents the virtual HID
 ;                  device to HIDClass and reflects HID IOCTLs down to UMDF.
 ;   WUDFRd.sys     (lower filter)  -- hosts VipleSCHid_Driver.dll (our UMDF2 handler).
-;   Root PDO       (ROOT\HIDCLASS\nnnn, HWID Viple\SteamController)
+;   Root PDO       (ROOT\HIDCLASS\nnnn, HWID Viple\VID_28DE&PID_1302)
+;
+; SC-HID identity fix (2026-07-02): the HWID *must* embed VID_28DE&PID_1302.
+; HIDClass derives the child HID PDO hardware id by stripping the enumerator
+; prefix from the PARENT hwid and prepending "HID\". With the old hwid
+; "Viple\SteamController" the child enumerated as "HID\SteamController" --
+; no VID/PID in the hardware id or the interface path, so Steam's controller
+; enumeration never identified it as a Steam Controller (host observation:
+; child hwids were only HID\SteamController + HID\VID_28DE&UP:FF00_U:0001).
+; With "Viple\VID_28DE&PID_1302" the child becomes "HID\VID_28DE&PID_1302"
+; and the interface path "\\?\hid#vid_28de&pid_1302#..." -- matching what a
+; real gen-2 Steam Controller (USB direct) presents.
 ;
 ; WHY we register MsHidUmdf/WUDFRd ourselves instead of Include/Needs of the
 ; inbox MsHidUmdf.inf / WUDFRD.inf:
@@ -28,7 +39,7 @@ Class       = HIDClass
 ClassGUID   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
 Provider    = %Viple%
 CatalogFile = VipleSCHid.cat
-DriverVer   = 06/06/2026,1.0.3.0
+DriverVer   = 07/02/2026,1.0.4.0
 PnpLockdown = 1
 
 [SourceDisksNames]
@@ -41,7 +52,7 @@ VipleSCHid_Driver.dll = 1
 %Viple% = VipleSC,NTamd64
 
 [VipleSC.NTamd64]
-%VipleSC.DevDesc% = VipleSC_Install,Viple\SteamController
+%VipleSC.DevDesc% = VipleSC_Install,Viple\VID_28DE&PID_1302
 
 [VipleSC_Install.NT]
 CopyFiles = VipleSC_CopyFiles

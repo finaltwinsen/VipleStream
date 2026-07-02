@@ -14,6 +14,10 @@ extern "C" {
 // sends exactly this many bytes.
 static constexpr int SC_HID_WIRE_BYTES = 64;
 
+// gen-2 SC 的 vendor gamepad 串流 report id（server 端虛擬裝置的 report
+// descriptor 只宣告這個 input id；其他 id 是 puck 無線狀態等雜訊，不轉發）
+static constexpr uint8_t SC_REPORT_ID_GAMEPAD = 0x45;
+
 // Valve vendor id. The gen-2 (2025) Steam Controller exposes its gamepad data
 // on a vendor-defined HID interface (UsagePage 0xFF00 / Usage 0x01) carrying
 // HID report id 66 (0x42). We select the device by that usage rather than by a
@@ -49,8 +53,10 @@ void ScHidPassthrough::start() {
     // SDL_CreateThread 在鎖內呼叫無妨——readLoop 第一輪會等鎖釋放。
     std::lock_guard<std::mutex> lock(m_devMutex);
     m_devCount = 0;
+    int matched = 0;  // §SC-HID Linux 對齊：列舉到但開不了 = 權限問題可診斷
     for (SDL_hid_device_info* d = devs; d != nullptr && m_devCount < MAX_SC_DEVS; d = d->next) {
         if (d->usage_page == SC_USAGE_PAGE && d->usage == SC_USAGE && d->path != nullptr) {
+            matched++;
             SDL_hid_device* h = SDL_hid_open_path(d->path, 0 /* shared */);
             if (h != nullptr) {
                 SDL_hid_set_nonblocking(h, 1);  // non-blocking: we poll all handles
@@ -63,9 +69,26 @@ void ScHidPassthrough::start() {
     }
 
     if (m_devCount == 0) {
-        // No Steam Controller attached — that's fine
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-            "[SC-HID] No Steam Controller vendor interface found (0x28DE FF00/01)");
+        if (matched > 0) {
+            // §SC-HID Linux 對齊 2026-07-02：列舉得到（udev 列舉不需權限）
+            // 但一個都開不起來 = 幾乎必是 /dev/hidraw* 權限（預設 0600
+            // root-only）。給出可操作的提示，不要靜默降級。
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[SC-HID] Found %d Steam Controller vendor interface(s) but "
+                "could not open any"
+#ifdef __linux__
+                " — likely missing hidraw permissions. Install the udev rule "
+                "(see docs/setup_guide.md, scripts/linux/"
+                "60-viplestream-steam-controller.rules) or the distro's "
+                "steam-devices package, then replug the controller"
+#endif
+                , matched);
+        }
+        else {
+            // No Steam Controller attached — that's fine
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[SC-HID] No Steam Controller vendor interface found (0x28DE FF00/01)");
+        }
         return;
     }
 
@@ -238,6 +261,25 @@ void ScHidPassthrough::readLoop() {
                     continue;  // 0 = no data (non-blocking); <0 = error on this handle
                 }
                 gotAny = true;
+
+                // §SC-HID 0x45 filter 2026-07-02：只轉發 gamepad 流（report id
+                // 0x45）。同機的 puck（PID 0x1304）閒置 slot 介面會吐無線狀態
+                // 封包（實測 server 端曾注入到 id=0x42）——虛擬裝置的 report
+                // descriptor 只宣告 input 0x45，把雜訊灌進去只會干擾 Steam
+                // 對虛擬裝置的解讀。非 0x45 的 report 丟棄（每個 id 首見時
+                // log 一次供診斷）。
+                if (buf[0] != SC_REPORT_ID_GAMEPAD) {
+                    static uint32_t seenMask[8];  // id 0..255 bitmap
+                    uint8_t id = buf[0];
+                    if (!(seenMask[id >> 5] & (1u << (id & 31)))) {
+                        seenMask[id >> 5] |= (1u << (id & 31));
+                        SDL_LogInfo(SDL_LOG_CATEGORY_INPUT,
+                                    "[SC-HID] Skipping non-gamepad report id=0x%02x "
+                                    "(dev=%d, %d bytes) — not forwarding",
+                                    id, i, n);
+                    }
+                    continue;
+                }
 
                 // Pad short reads to exactly the fixed wire report size.
                 if (n < SC_HID_WIRE_BYTES) {

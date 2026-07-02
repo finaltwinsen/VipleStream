@@ -1303,29 +1303,40 @@ namespace input {
     BOOST_LOG(info) << "[SC-HID] Polling thread exited";
   }
 
-  void passthrough_sc_hid_input(std::shared_ptr<input_t> &input, PSS_SC_HID_INPUT_PACKET packet) {
+  // §SC-HID eager-poll 2026-07-02：lazy-open 虛擬裝置 handle——input 與
+  // feature-response 兩條路徑共用。回應交付不能依賴「input 先來過」：
+  // 實體控制器閒置入睡時不吐 0x45，但 Steam 的 GetControllerInfo 握手
+  // （feature 流量）照常發生，回應必須能在零 input 的情況下送進 driver。
+  static bool ensure_sc_hid_handle(std::shared_ptr<input_t> &input) {
+    if (input->sc_hid_handle) {
+      return true;
+    }
+    input->sc_hid_handle = VipleSCHidOpen();
     if (!input->sc_hid_handle) {
-      // Lazy-open the virtual HID device on first packet
-      input->sc_hid_handle = VipleSCHidOpen();
-      if (!input->sc_hid_handle) {
-        // Empty diag = throttled attempt (VipleSCHidOpen retries at most every
-        // 5 s); only log real probe trails or the log drowns at report rate.
-        const char* diag = VipleSCHidLastDiag();
-        if (diag[0] != '\0') {
-          BOOST_LOG(warning) << "[SC-HID] Virtual Steam Controller device not found: " << diag;
-        }
-        return;
+      // Empty diag = throttled attempt (VipleSCHidOpen retries at most every
+      // 5 s); only log real probe trails or the log drowns at report rate.
+      const char* diag = VipleSCHidLastDiag();
+      if (diag[0] != '\0') {
+        BOOST_LOG(warning) << "[SC-HID] Virtual Steam Controller device not found: " << diag;
       }
-      // Include the probe trail on success too — it records which strategy
-      // (setupdi vs cfgmgr fallback) and which access mode finally worked.
-      BOOST_LOG(info) << "[SC-HID] Virtual Steam Controller device opened: " << VipleSCHidLastDiag();
+      return false;
+    }
+    // Include the probe trail on success too — it records which strategy
+    // (setupdi vs cfgmgr fallback) and which access mode finally worked.
+    BOOST_LOG(info) << "[SC-HID] Virtual Steam Controller device opened: " << VipleSCHidLastDiag();
 
-      // Start the dedicated polling thread (one per session).
-      if (!input->sc_hid_thread_active.load()) {
-        input->sc_hid_thread_active.store(true);
-        std::weak_ptr<input_t> weak = input;
-        input->sc_hid_poll_thread = std::thread([weak]() { sc_hid_poll_loop(std::move(weak)); });
-      }
+    // Fallback（正常情況 poll thread 已於 session alloc 啟動）。
+    if (!input->sc_hid_thread_active.load()) {
+      input->sc_hid_thread_active.store(true);
+      std::weak_ptr<input_t> weak = input;
+      input->sc_hid_poll_thread = std::thread([weak]() { sc_hid_poll_loop(std::move(weak)); });
+    }
+    return true;
+  }
+
+  void passthrough_sc_hid_input(std::shared_ptr<input_t> &input, PSS_SC_HID_INPUT_PACKET packet) {
+    if (!ensure_sc_hid_handle(input)) {
+      return;
     }
 
     // 轉送 Steam 的待辦 feature 事件（透明 proxy 的 driver→client 方向）。
@@ -1365,8 +1376,11 @@ namespace input {
   // §SC-HID Phase 2C：client 經 SS_SC_HID_FEATURE_MAGIC (0x55000008) 回傳實體 SC 的
   // feature 回應 → 交付給 driver（WriteFile output 0x04）→ Steam GET_FEATURE(0x01) 取走。
   void passthrough_sc_hid_feature(std::shared_ptr<input_t> &input, PSS_SC_HID_FEATURE_PACKET packet) {
-    if (!input->sc_hid_handle) {
-      return;  // 尚未開啟虛擬裝置（不該發生，feature 回應總在 input 之後）
+    // §SC-HID eager-poll 2026-07-02：改為自行 lazy-open——舊註解「feature
+    // 回應總在 input 之後」在控制器睡眠情境不成立（只有握手、沒有 input），
+    // 早退會把 client 轉發回來的實體 SC 回應整批丟掉。
+    if (!ensure_sc_hid_handle(input)) {
+      return;
     }
     int dr = VipleSCHidDeliverResponse(input->sc_hid_handle, packet->seq, packet->data, 64);
     BOOST_LOG(info) << "[SC-HID] Feature response delivered: seq=" << (unsigned)packet->seq
@@ -1952,6 +1966,20 @@ namespace input {
       mail->event<input::touch_port_t>(mail::touch_port),
       mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
     );
+
+#ifdef _WIN32
+    // §SC-HID eager-poll 2026-07-02：輪詢執行緒改為 session 建立即啟動。
+    // 舊設計「第一個 SC input 封包才啟動」在實體控制器閒置入睡（不吐
+    // 0x45）時形成死鎖：Steam 的 GetControllerInfo 沒人轉發、input 又
+    // 因為沒人按而永遠不來。feature 請求是 host 主動發起的（睡眠中的
+    // 實體 SC 仍會回 feature 查詢），不該被 input 流量閘住。
+    // 無控制器的 session 只多一條 20ms 輪詢執行緒（裝置缺席時有退避）。
+    input->sc_hid_thread_active.store(true);
+    {
+      std::weak_ptr<input_t> weak = input;
+      input->sc_hid_poll_thread = std::thread([weak]() { sc_hid_poll_loop(std::move(weak)); });
+    }
+#endif
 
     // Workaround to ensure new frames will be captured when a client connects
     task_pool.pushDelayed([]() {

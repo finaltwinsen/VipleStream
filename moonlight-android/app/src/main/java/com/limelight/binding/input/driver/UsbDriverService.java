@@ -38,6 +38,13 @@ public class UsbDriverService extends Service implements UsbDriverListener {
 
     private final ArrayList<AbstractController> controllers = new ArrayList<>();
 
+    // §SC-HID: Steam Controller passthrough drivers live in their own list
+    // because they are not AbstractControllers — they forward raw HID reports
+    // to the host instead of reporting parsed button state, so they must never
+    // be announced to the UsbDriverListener (the host creates its own virtual
+    // Steam Controller device on the other end).
+    private final ArrayList<SteamControllerDriver> steamControllers = new ArrayList<>();
+
     private UsbDriverListener listener;
     private UsbDriverStateListener stateListener;
     private int nextDeviceId;
@@ -183,6 +190,24 @@ public class UsbDriverService extends Service implements UsbDriverListener {
             }
 
 
+            // §SC-HID: Steam Controller gen-2 raw passthrough (outside the
+            // AbstractController lifecycle, see steamControllers above)
+            if (SteamControllerDriver.canClaimDevice(device)) {
+                SteamControllerDriver scDriver = new SteamControllerDriver(device, connection,
+                        new SteamControllerDriver.Listener() {
+                            @Override
+                            public void onStopped(SteamControllerDriver driver) {
+                                steamControllers.remove(driver);
+                            }
+                        });
+                if (!scDriver.start()) {
+                    connection.close();
+                    return;
+                }
+                steamControllers.add(scDriver);
+                return;
+            }
+
             AbstractController controller;
 
             if (XboxOneController.canClaimDevice(device)) {
@@ -278,7 +303,13 @@ public class UsbDriverService extends Service implements UsbDriverListener {
         return ((!kernelSupportsXboxOne() || !isRecognizedInputDevice(device) || claimAllAvailable) && XboxOneController.canClaimDevice(device)) ||
                 ((!isRecognizedInputDevice(device) || claimAllAvailable) && Xbox360Controller.canClaimDevice(device)) ||
                 // We must not call isRecognizedInputDevice() because wireless controllers don't share the same product ID as the dongle
-                ((!kernelSupportsXbox360W() || claimAllAvailable) && Xbox360WirelessDongle.canClaimDevice(device));
+                ((!kernelSupportsXbox360W() || claimAllAvailable) && Xbox360WirelessDongle.canClaimDevice(device)) ||
+                // §SC-HID: always claim gen-2 Steam Controllers for raw passthrough,
+                // even if the kernel exposes an InputDevice for them — the host needs
+                // the raw vendor HID reports, which the Android input stack doesn't
+                // deliver. Claiming detaches the kernel driver, so the InputDevice
+                // goes away on its own (no extra suppression needed in ControllerHandler).
+                SteamControllerDriver.canClaimDevice(device);
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
@@ -323,6 +354,13 @@ public class UsbDriverService extends Service implements UsbDriverListener {
         while (controllers.size() > 0) {
             // Stop and remove the controller
             controllers.remove(0).stop();
+        }
+
+        // §SC-HID: stop all Steam Controller passthrough drivers. Remove before
+        // stopping — the driver's onStopped callback also removes itself, which
+        // would be a no-op here.
+        while (steamControllers.size() > 0) {
+            steamControllers.remove(0).stop();
         }
     }
 

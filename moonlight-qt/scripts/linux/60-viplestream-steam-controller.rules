@@ -1,0 +1,23 @@
+# VipleStream Linux client — Steam Controller HID passthrough 權限
+#
+# §SC-HID 需要以 hidraw 直接讀取實體 Steam Controller 的 vendor 介面
+# （VID 28DE，UsagePage 0xFF00）。/dev/hidraw* 預設 0600 root-only，
+# 沒有這條規則時 SDL_hid_open_path 會失敗，client 只會靜默退回標準
+# gamepad 路徑（server 端看到的是 ViGEm Xbox360，不是 Steam Controller）。
+#
+# 安裝：
+#   sudo cp 60-viplestream-steam-controller.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   重新插拔控制器（或重開機）
+#
+# 註：已安裝 Steam 或發行版 steam-devices 套件的機器通常已有等效規則
+# （Valve 官方 steam-devices 涵蓋 28DE 全系列），本檔為無 Steam 環境準備。
+# 涵蓋：gen-2 Steam Controller USB 直連(1302) / BLE(1303) / Puck 接收器(1304)
+# 與 legacy SC(1102/1142)——比照 steam-devices 直接放行整個 28DE。
+
+# USB 裝置節點（feature report 經 usbfs 時需要）
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="28de", TAG+="uaccess"
+
+# hidraw 節點（SDL hidapi 的 Linux 後端讀寫用）
+KERNEL=="hidraw*", ATTRS{idVendor}=="28de", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", KERNELS=="*28DE:*", MODE="0660", TAG+="uaccess"
