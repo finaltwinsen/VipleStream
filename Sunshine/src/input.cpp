@@ -25,6 +25,7 @@ extern "C" {
 #include <atomic>
 #include <bitset>
 #include <chrono>
+#include <mutex>
 #include <cmath>
 #include <list>
 #include <thread>
@@ -236,10 +237,38 @@ namespace input {
     std::thread sc_hid_poll_thread;
     std::atomic<bool> sc_hid_thread_active{false};
 
+    // §SC-KEEPALIVE 2026-07-02：Steam 的 CGetControllerInfoWorkItem 需要
+    // input pipe 有資料——真實有線 SC 醒著時持續吐 0x45，read 乾涸時
+    // Steam 每秒 Read failure、11 秒逾時就把控制器踢掉（disconnect/
+    // reconnect 循環，使用者端表現為「偵測不到任何手把」）。實體控制器
+    // 閒置入睡（不吐 0x45）或短暫沒人按時就會發生。poll thread 在
+    // 「500ms 內無真實注入」時以 4Hz 重放快取的最後一筆真實 report
+    // （沒有就用中性零值 0x45），session 結束即停止 → host 端自然斷開。
+    std::atomic<int64_t> sc_last_real_inject_us{0};
+    std::mutex sc_last_report_mutex;
+    uint8_t sc_last_report[64] = {};   // byte0=0x45 由首筆真實 report 帶入
+
     ~input_t() {
       // Stop polling thread before closing the handle it may be using.
       sc_hid_thread_active.store(false, std::memory_order_relaxed);
-      if (sc_hid_poll_thread.joinable()) sc_hid_poll_thread.join();
+      if (sc_hid_poll_thread.joinable()) {
+        // §SC-TEARDOWN-FIX 2026-07-02：eager-poll（session alloc 即啟動
+        // poll thread）之後，poll thread 每輪的 weak_ptr.lock() 可能成為
+        // session 的最後一個 shared_ptr 持有者——此時本解構子會在 poll
+        // thread 自己身上執行，join 自己會拋 std::system_error
+        // （resource_deadlock_would_occur）→ 解構子內未捕捉 → terminate
+        // → service 崩潰。實測指紋：v1.5.261/262 每場 session 結束後
+        // sunshine.log 都重新開始（service 自動重啟）、session 期間的
+        // [SC-HID] 記錄全數隨舊 log 消失。在自己執行緒上改 detach：
+        // active 旗標已為 false，poll loop 下一輪 weak lock 失敗即自然
+        // 退出；detach 後 thread 物件可安全解構。
+        if (sc_hid_poll_thread.get_id() == std::this_thread::get_id()) {
+          sc_hid_poll_thread.detach();
+        }
+        else {
+          sc_hid_poll_thread.join();
+        }
+      }
 
       if (sc_hid_handle) {
         BOOST_LOG(info) << "[SC-HID] Session ended, final write stats: " << VipleSCHidWriteDiag();
@@ -1275,6 +1304,35 @@ namespace input {
         }
       }
 
+      // §SC-KEEPALIVE：500ms 內無真實注入 → 以 4Hz 重放最後一筆真實
+      // report（或中性零值），維持 Steam 的 read pipe 活性。見 input_t
+      // 內欄位註解。
+      if (poll_h) {
+        static thread_local int64_t lastKeepaliveUs = 0;
+        static thread_local bool keepaliveLogged = false;
+        int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        int64_t lastReal = inp->sc_last_real_inject_us.load(std::memory_order_relaxed);
+        if ((nowUs - lastReal) > 500000 && (nowUs - lastKeepaliveUs) >= 250000) {
+          lastKeepaliveUs = nowUs;
+          uint8_t buf[64];
+          {
+            std::lock_guard<std::mutex> lk(inp->sc_last_report_mutex);
+            memcpy(buf, inp->sc_last_report, sizeof(buf));
+          }
+          if (buf[0] != 0x45) {
+            memset(buf, 0, sizeof(buf));
+            buf[0] = 0x45;  // 中性 idle report（本 session 尚無真實資料）
+          }
+          int wr = VipleSCHidWrite(poll_h, buf, sizeof(buf));
+          if (wr > 0 && !keepaliveLogged) {
+            keepaliveLogged = true;
+            BOOST_LOG(info) << "[SC-HID] Keepalive active (4Hz idle 0x45 replay; "
+                            << "suppressed while real input flows)";
+          }
+        }
+      }
+
       // One-shot reconnect at t ≈ 500 ms: forces Steam to re-enumerate the
       // virtual device and re-run GetControllerInfo after the proxy is active.
       if (!reconnect_done && ++iter >= 25) {
@@ -1354,6 +1412,15 @@ namespace input {
         firstInject = false;
         BOOST_LOG(info) << "[SC-HID] First report injected (id=0x" << std::hex
                         << (unsigned)packet->data[0] << std::dec << ")";
+      }
+      // §SC-KEEPALIVE：記錄真實注入時刻與內容，poll thread 據此讓位/重放
+      input->sc_last_real_inject_us.store(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now().time_since_epoch()).count(),
+          std::memory_order_relaxed);
+      {
+        std::lock_guard<std::mutex> lk(input->sc_last_report_mutex);
+        memcpy(input->sc_last_report, packet->data, sizeof(input->sc_last_report));
       }
     }
     else if (wr < 0) {
