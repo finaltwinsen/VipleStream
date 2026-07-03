@@ -128,6 +128,7 @@ PC client HDR is upstream Moonlight-Qt's existing HDR path (Sunshine `hdrMode=1`
 
 | Version | Changes |
 |---|---|
+| **1.5.263** | §Q-REGAIN MP-QUIC failover 後路徑自動回歸（standby 回歸 / INACTIVE 復活 / rejected 快取 TTL + 斷路器；server sticky 逃生門 + ABR floor 脫困 + CNXQ 暖機）——修有線 LAN 瞬斷後視訊困在 VPN 備援造成的間歇變糊；§SC-HID 虛擬裝置身分修復（`HID\VID_28DE&PID_1302` HWID/path + product string），host Steam 正式辨識為 Steam Controller，附 read-pipe keepalive 與 session 收尾崩潰修復；SC passthrough 對齊 Linux（hidraw udev rules）與 Android（USB 驅動 + feature tunnel）。五平台同版號釋出。 |
 | **1.5.254** | §Q MP-QUIC 多路徑 failover/failback + Reed–Solomon FEC / jitter buffer 強化（控制通道故障改走 QUIC stream #0）；§FRUC-XPLAT 跨平台補幀（NVIDIA NVOF/RIFE、AMD RADV native RIFE、Android GLES compute）；§ABR 自適應位元率（AIMD + 方向性 IDR + ping-tick 零丟包回升）；§SC-HID Steam Controller HID 轉發；§K AMD VAAPI-VK / RADV 串流修復（nil-buffer 守門、綠線 plane layout、10-bit 黑畫面、Vulkan decode-queue probe）。五平台（Win Client/Server、Android、Linux Client AppImage / Server .deb）同版號釋出。 |
 | **1.5.114** | 每台主機獨立「點擊直接進桌面」開關（PcView 右鍵選單）+ Send file to client picker 改在 user session 內展開（解 LocalSystem 跳 systemprofile\Desktop 警示窗 + cmd 黑窗）。 |
 | **1.5.108** | MP-QUIC multi-path streaming + single-instance guard. Linux Client AppImage + Server `.deb` re-aligned in release. |
