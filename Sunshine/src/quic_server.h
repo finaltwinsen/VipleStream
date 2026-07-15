@@ -43,6 +43,11 @@ namespace quic_server {
     bool active;
     uint64_t bytesSent;
     uint64_t bytesRecv;
+    // §ABR-SHADOW 2026-07-16：delay/throughput 觀測欄位（僅 log，不進
+    // 控制迴路）。為下一輪 delay-based ABR 訊號設計累積實測數據——
+    // rtt 對 rttMin 的膨脹量是壅塞指標，receiveRate 是對端實收估計。
+    float rttMinMs;
+    float receiveRateMbps;
   };
 
   using RecvHandler = std::function<void(uint8_t flowType,
@@ -231,6 +236,30 @@ namespace quic_server {
     void requestPathReevaluation() {
       _pathReevalRequested.store(true, std::memory_order_release);
     }
+
+    // §ABR-QSTALE-FEEDBACK 2026-07-16：把 §Q-STALE 在 server 端丟棄的
+    // video datagram 量回饋給 ABR。07-15 事故：DERP 窄路徑（2-3Mbps）
+    // 上 §Q-STALE 以「整幀」為單位丟掉 ~85% video，client 的整幀跳號
+    // 只發 RFI 不發 FEC status → run_abr_aimd 看不到 99% 丟失，
+    // bitrate 釘死 max。server 自己丟的量是下行壅塞最直接的證據。
+    // ABR 執行緒（持 abrMutex）每輪 consume；exchange 語意讓視窗自動
+    // 對齊「上次 AIMD 輪至今」。
+    uint64_t consumeStaleDropsForAbr() {
+      return _staleDropsForAbr.exchange(0, std::memory_order_acq_rel);
+    }
+
+    // §ABR-RAMP-GATE 2026-07-16：近 windowUs 內是否觀測過 QUIC 壅塞
+    // （cwin 滿的 backpressure 或 §Q-STALE 丟棄）。ABR 用來凍結零丟包
+    // 回升——§Q-STALE-SAFETY-VALVE 的 3s grace 期間丟棄暫停，但
+    // backpressure 持續刷新，不會出現誤回升空窗。recency 設計只寫
+    // 不清，時間窗自動過期，session 收尾不會把回升凍死。
+    bool isRecentlyCongested(uint64_t windowUs = 2000000) const {
+      uint64_t now = picoquic_current_time();
+      uint64_t bp = _lastBackpressureUs.load(std::memory_order_acquire);
+      uint64_t sd = _lastStaleDropUs.load(std::memory_order_acquire);
+      return (bp != 0 && now - bp < windowUs) ||
+             (sd != 0 && now - sd < windowUs);
+    }
   private:
 
     // §K.7 diag: datagram queue/send 計數器
@@ -238,6 +267,13 @@ namespace quic_server {
     std::atomic<uint64_t> _dgramPushed{0};
     std::atomic<uint64_t> _dgramDroppedStale{0};
     std::atomic<uint64_t> _dgramPendingPeak{0};
+
+    // §ABR-QSTALE-FEEDBACK：ABR 專用 consume 計數器。不重用
+    // _dgramDroppedStale——它是累積診斷值且會在 §Q-GRACE-FIX 新
+    // episode 時歸零，delta 會失真。IO 執行緒 ++，ABR 執行緒 exchange。
+    std::atomic<uint64_t> _staleDropsForAbr{0};
+    std::atomic<uint64_t> _lastBackpressureUs{0};  // IO 執行緒 drain 判定 backpressure 時刷新
+    std::atomic<uint64_t> _lastStaleDropUs{0};     // IO 執行緒 §Q-STALE 丟棄時刷新
 
     // §Q-STALE 2026-05-27: approximate picoquic video queue depth tracking.
     // 防止 picoquic datagram queue 無限堆積。server 以 120-156fps 編碼

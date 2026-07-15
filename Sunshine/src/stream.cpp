@@ -1160,9 +1160,32 @@ namespace stream {
     // 落在窄路徑 goodput 內。
     int minBr = std::min(maxBr, std::max(config::stream.abr_floor_kbps, maxBr * 8 / 100));  // floor ≤ cap
 
-    if (lossCount > 0) {
+    // §ABR-QSTALE-FEEDBACK 2026-07-16：把 server 自己在 §Q-STALE 丟掉的
+    // video datagram 量納入 AIMD 訊號。07-15 事故：DERP 窄路徑上 server
+    // 端丟 ~85% video（整幀消失），client 整幀跳號只發 RFI 不發 FEC
+    // status，AIMD 只看得到 <1% 丟失且 ping-tick 持續誤判零丟包回升 →
+    // bitrate 釘死 max、video 實收 7fps。
+    // 取 max 而非相加：§FRZ-GAP-FEC（client 端）上線後，同一批 server
+    // 丟棄的幀 client 也會以 FEC status 回報，sum 會雙倍計算 lossPerSec。
+    uint64_t staleDrops = 0;
+    bool quicCongested = false;
+#ifdef VIPLE_MPQUIC
+    if (config::stream.mpquic_enabled && quic_server::g_listener) {
+      auto quicSession = quic_server::g_listener->getSession(
+          session->video.peer.address());
+      if (quicSession) {
+        staleDrops = quicSession->consumeStaleDropsForAbr();
+        quicCongested = quicSession->isRecentlyCongested();
+      }
+    }
+#endif
+    int effectiveLoss = (int) std::min<uint64_t>(
+        std::max<uint64_t>((uint64_t) std::max(lossCount, 0), staleDrops),
+        (uint64_t) std::numeric_limits<int>::max());
+
+    if (effectiveLoss > 0) {
       // 丟包：放棄回升累積（target 收斂回 applied），按嚴重度乘法削減
-      float lossPerSec = lossCount * 1000.0f / std::max<long long>(elapsedMs, 1);
+      float lossPerSec = effectiveLoss * 1000.0f / std::max<long long>(elapsedMs, 1);
       int base = std::min(target, applied);
       if (lossPerSec > 30) {
         target = base * 50 / 100;  // heavy loss → halve
@@ -1174,6 +1197,11 @@ namespace stream {
         target = base;  // 輕微（≤3/s）→ hold，不升不降
       }
       session->video.bitrateZeroLossStreak = 0;
+    } else if (quicCongested) {
+      // §ABR-RAMP-GATE 2026-07-16：QUIC 近 2s 內有 backpressure 或
+      // §Q-STALE 丟棄 → 凍結零丟包回升（hold）。streak 保留不清零，
+      // 壅塞解除後 1-2 輪即恢復爬升，不需重新累積。防止 ping-tick 在
+      // 「server 丟棄但 client 無 missing」的窄路徑情境把 bitrate 推回 max。
     } else {
       session->video.bitrateZeroLossStreak++;
       if (session->video.bitrateZeroLossStreak >= 5) {
@@ -1195,7 +1223,8 @@ namespace stream {
 
       BOOST_LOG(info) << "[VIPLE-ABR] Bitrate: " << applied << " -> " << target
         << " kbps (" << (target < applied ? "cut" : "ramp")
-        << ", loss=" << lossCount << " in " << elapsedMs << "ms, src=" << src << ")";
+        << ", loss=" << lossCount << " staleDrops=" << staleDrops
+        << " in " << elapsedMs << "ms, src=" << src << ")";
     }
 
     // §Q-ABR-FLOOR-ESCAPE 2026-07-02 (Fix C)：低檔困死偵測。持續 loss
@@ -1215,7 +1244,9 @@ namespace stream {
           session->video.abrLowSince = nowTp;
           session->video.abrLowLossRounds = 0;
         }
-        if (lossCount > 0) {
+        // §ABR-QSTALE-FEEDBACK：server 端丟棄也算持續 loss（floor-stuck
+        // 偵測要涵蓋「client 無 missing 但 server 一直丟」的窄路徑情境）
+        if (effectiveLoss > 0) {
           session->video.abrLowLossRounds++;
         }
         // AIMD ~500ms 一輪：30s 內 ≥20 輪有 loss = 確實是持續丟包，

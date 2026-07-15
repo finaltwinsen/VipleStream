@@ -977,6 +977,12 @@ namespace quic_server {
       }
     }
     bool quicBackpressured = (videoPathHeadroom <= 0);
+    // §ABR-RAMP-GATE 2026-07-16：backpressure 時戳供 ABR 凍結零丟包
+    // 回升。§Q-STALE-SAFETY-VALVE 的 3s grace 期間丟棄會暫停，但
+    // backpressure 持續刷新這個時戳，回升 gate 不會出現空窗。
+    if (quicBackpressured) {
+      _lastBackpressureUs.store(picoquic_current_time(), std::memory_order_release);
+    }
 
     // §K.9 LAN MTU boost
     // §Q-PERF：提出 per-datagram 迴圈——舊位置對 batch 中每個 datagram
@@ -1018,6 +1024,9 @@ namespace quic_server {
         } else {
           // 仍在 3 秒內 → 照常丟棄
           _dgramDroppedStale++;
+          // §ABR-QSTALE-FEEDBACK：丟棄量回饋 ABR
+          _staleDropsForAbr++;
+          _lastStaleDropUs.store(picoquic_current_time(), std::memory_order_release);
           continue;
         }
       } else if (ft == FLOW_VIDEO) {
@@ -1042,6 +1051,11 @@ namespace quic_server {
       if (ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 && quicBackpressured &&
           _approxVideoQueueDepth > MAX_VIDEO_QUEUE_DEPTH) {
         _dgramDroppedStale++;
+        // §ABR-QSTALE-FEEDBACK 2026-07-16：server 自己丟掉的 video
+        // datagram = 下行壅塞最直接的證據，回饋 run_abr_aimd（client
+        // 的整幀跳號不發 FEC status，ABR 對這批丟失原本全盲）。
+        _staleDropsForAbr++;
+        _lastStaleDropUs.store(picoquic_current_time(), std::memory_order_release);
         continue;
       }
 
@@ -1179,6 +1193,9 @@ namespace quic_server {
       s.active = true;
       s.bytesSent = pq.bytes_sent;
       s.bytesRecv = pq.bytes_received;
+      // §ABR-SHADOW：觀測欄位（僅 log 用）
+      s.rttMinMs = (float)pq.rtt_min / 1000.0f;
+      s.receiveRateMbps = (float)((double)pq.receive_rate_estimate * 8.0 / 1e6);
       fresh.push_back(s);
     }
 
@@ -2163,7 +2180,9 @@ namespace quic_server {
           if (i > 0) pathLine += " | ";
           pathLine += "p" + std::to_string(stats[i].pathId)
                     + " RTT=" + std::to_string((int)stats[i].rttMs) + "ms"
+                    + " rttMin=" + std::to_string((int)stats[i].rttMinMs) + "ms"
                     + " " + std::to_string((int)stats[i].throughputMbps) + "Mbps"
+                    + " recvEst=" + std::to_string((int)stats[i].receiveRateMbps) + "Mbps"
                     + " loss=" + std::to_string((int)(stats[i].lossPercent * 10) / 10.0).substr(0,4) + "%"
                     + " tx=" + std::to_string(stats[i].bytesSent / 1024) + "KB"
                     + " rx=" + std::to_string(stats[i].bytesRecv / 1024) + "KB";
