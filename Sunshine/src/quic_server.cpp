@@ -988,9 +988,33 @@ namespace quic_server {
     // §Q-PERF：提出 per-datagram 迴圈——舊位置對 batch 中每個 datagram
     // 都遍歷全部 path 重設（14 dgrams/frame × 60fps × nb_paths ≈ 每秒
     // 數千次冗餘寫入）。每次 drain 檢查一次就足夠。
+    // §K.9-PMTUD-FIX 2026-07-16：無條件蓋 1500 會癱瘓 picoquic 的 MTU
+    // 黑洞自癒——loss_recovery.c 在 full-size 包重複丟失後會
+    // picoquic_reset_path_mtu() 降回基礎值重探，舊碼每次 drain 立即蓋回
+    // 1500 → VPN/Tailscale(1280) 類路徑上 >MTU 的 coalesced 包永久黑洞
+    // （07-15 事故：audio 2/3 系統性丟失）。改為驗證式：一旦觀測到該
+    // path 有 MTU-loss 證據（nb_mtu_losses>0，含 PTO），將其
+    // unique_path_id 列入黑名單、永久停止 boost，讓 PMTUD（required
+    // 模式）收斂真實 MTU。真 1500 路徑上偶發 full-size 丟包會提早停
+    // boost，但 callback_ready 的一次性 boost + PMTUD 探測已足夠維持
+    // 1500；path 重生（新 path id）自然重新嘗試。
+    // 註：不能直接用 nb_mtu_losses==0 當 boost 條件——它在 mtu-size 包
+    // 被 ACK 時歸零，會形成 boost→黑洞→reset→ACK 歸零→boost 震盪。
     for (int i = 0; i < _cnx->nb_paths; i++) {
-      if (_cnx->path[i] != nullptr && _cnx->path[i]->send_mtu < 1500) {
-        _cnx->path[i]->send_mtu = 1500;
+      auto *p = _cnx->path[i];
+      if (p == nullptr) {
+        continue;
+      }
+      uint64_t pid = p->unique_path_id;
+      if (p->nb_mtu_losses > 0 && !_mtuBoostBlocked.count(pid)) {
+        _mtuBoostBlocked.insert(pid);
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.9 PMTUD takeover: path=" << i
+                        << " id=" << pid << " send_mtu=" << p->send_mtu
+                        << " mtuLosses=" << p->nb_mtu_losses
+                        << " — stop forcing 1500, PMTUD converges real MTU";
+      }
+      if (p->send_mtu < 1500 && !_mtuBoostBlocked.count(pid)) {
+        p->send_mtu = 1500;
       }
     }
 
@@ -1828,6 +1852,14 @@ namespace quic_server {
         cnx->path[0]->send_mtu = 1500;
         BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.8 path[0] send_mtu boosted: "
                         << oldMtu << " → 1500";
+
+        // §K.9-PMTUD-FIX 2026-07-16：立即積極 PMTUD。boost 假設路徑
+        // MTU=1500，但 VPN/Tailscale(1280)/PPPoE 路徑更小——07-15 事故
+        // 中 audio 多個 datagram coalesce 成 ~1455B UDP 包在 Tailscale
+        // 上整包黑洞（video 單 datagram ~1080B 倖存），造成音訊 2/3
+        // 系統性丟失（92% FEC block 呈「前 2 到、後 4 滅」指紋）。
+        // required 模式讓 PMTUD 儘早收斂真實 MTU，縮短誠實化窗口。
+        picoquic_cnx_set_pmtud_policy(cnx, picoquic_pmtud_required);
 
         // VipleStream §K.14: 重設 BBR cwnd 和 lower bounds。
         // 握手期間 CRYPTO frame 遺失（LAN 上常見 RACK 假陽性）

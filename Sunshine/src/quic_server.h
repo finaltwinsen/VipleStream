@@ -23,6 +23,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <boost/asio.hpp>
@@ -294,6 +295,12 @@ namespace quic_server {
     // （沒有 PATH-SWITCH → grace 不重設 → 永遠丟棄）。
     // 安全閥重設 approxVQ + 恢復 grace 來打破循環。
     uint64_t _staleStallStart = 0;
+
+    // §K.9-PMTUD-FIX 2026-07-16：MTU boost 黑名單（unique_path_id）。
+    // 某 path 一旦觀測到 nb_mtu_losses>0，永久停止對它強制 send_mtu=1500，
+    // 讓 picoquic 的 reset_path_mtu + PMTUD（required）收斂真實 MTU。
+    // 僅 IO 執行緒（drainPendingToQuic）存取，無鎖需求。
+    std::unordered_set<uint64_t> _mtuBoostBlocked;
 
     // §Q-GRACE-FIX 2026-05-27 (v1.5.172): per-failover-episode grace
     // 重設邏輯。原版每次 PATH-SWITCH 都重設 grace → 振盪期間 grace
