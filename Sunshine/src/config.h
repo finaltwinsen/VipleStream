@@ -189,6 +189,7 @@ namespace config {
     int mpquic_scheduler = 0;     // 0=auto, 1=min_rtt, 2=aggregate, 3=redundant, 4=ecf
     int mpquic_fec_floor = 1;     // minimum FEC % when QUIC is active (LAN mode)
     int mpquic_congestion = 1;    // 0=newreno, 1=bbr (default, bandwidth-based), 2=cubic
+    int abr_floor_kbps = 1500;    // §ABR-FLOOR-DERP: AIMD 絕對下限（窄路徑 2-3Mbps goodput 要餵得飽）
   };
 
   struct nvhttp_t {

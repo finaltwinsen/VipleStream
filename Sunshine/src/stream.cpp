@@ -1152,7 +1152,13 @@ namespace stream {
     // （rtsp 扣 FEC/audio/overhead 後 maxBr < 2000，行動網路常見）時，
     // 舊式 max(2000, …) 會讓 floor > cap → clamp 後 target 恆等於 2000，
     // 反而把 encoder 拉到超過使用者上限且 AIMD 削減完全失效。
-    int minBr = std::min(maxBr, std::max(2000, maxBr * 15 / 100));  // floor: 2 Mbps 或 15%，且 ≤ cap
+    // §ABR-FLOOR-DERP 2026-07-16：floor 從 2000/15% 下修為 abr_floor_kbps
+    // （預設 1500）/8%。DERP/VPN 類窄路徑實測 goodput 僅 2-3Mbps，舊 floor
+    // （~2596kbps @20Mbps 設定）加 FEC 與 audio 後的線上需求超過 goodput，
+    // AIMD 降到 floor 仍持續丟包、§Q-STALE 照丟 → 永遠回不升。
+    // 1500kbps + 1% FEC（§K.5-FEC-CLAMP-FIX 後）+ audio ≈ 1.85Mbps，
+    // 落在窄路徑 goodput 內。
+    int minBr = std::min(maxBr, std::max(config::stream.abr_floor_kbps, maxBr * 8 / 100));  // floor ≤ cap
 
     if (lossCount > 0) {
       // 丟包：放棄回升累積（target 收斂回 applied），按嚴重度乘法削減
@@ -1940,13 +1946,31 @@ namespace stream {
       if (fecPercentage == 0) fecPercentage = config::stream.fec_percentage;
 
 #ifdef VIPLE_MPQUIC
-      // When QUIC transport is active, clamp FEC DOWN to the configured floor.
-      // QUIC's own loss detection + fast retransmit handles most recovery,
-      // so LAN sessions can reduce FEC overhead to save bandwidth.
-      if (session->tunnel &&
-          session->tunnel->carrier() == udp_tunnel::Carrier::QUIC_DIRECT) {
+      // [VIPLE-PERF] QUIC session 查找從發送段（§K.5 區塊）hoist 到
+      // packetize 之前——FEC clamp 與發送路徑共用同一次 per-frame 查找。
+      std::shared_ptr<quic_server::QuicSession> quicVideoSession;
+      if (config::stream.mpquic_enabled && quic_server::g_listener) {
+        quicVideoSession = quic_server::g_listener->getSession(
+            session->video.peer.address());
+      }
+
+      // §K.5-FEC-CLAMP-FIX 2026-07-16：QUIC 傳輸時把 RTP FEC clamp 到
+      // mpquic_fec_floor。原條件檢查 tunnel->carrier()==QUIC_DIRECT，但
+      // 全 repo 從未 store 過 QUIC_DIRECT（§K.5 已改用「QuicSession 是否
+      // 存在」判定 use_quic）→ 這個 clamp 一直是死碼：壅塞時 adaptive FEC
+      // 升到 50% 全數打到線上，把 ABR floor 的線上需求推高 1.5 倍，
+      // 窄路徑（DERP/VPN 2-3Mbps goodput）永遠餵不飽。QUIC datagram 層
+      // 已有 §5b 4+2 FEC，RTP 層再疊 adaptive FEC 是重複開銷。
+      if (quicVideoSession) {
         int fecFloor = config::stream.mpquic_fec_floor;
         if (fecFloor >= 0 && fecPercentage > fecFloor) {
+          static bool fecClampLogged = false;
+          if (!fecClampLogged) {
+            BOOST_LOG(info) << "[VIPLE-FEC] §K.5-FEC-CLAMP-FIX: QUIC active, "
+                            << "clamping RTP FEC " << fecPercentage << "% -> "
+                            << fecFloor << "%";
+            fecClampLogged = true;
+          }
           fecPercentage = fecFloor;  // clamp DOWN to floor
         }
       }
@@ -2075,27 +2099,25 @@ namespace stream {
         // 不再依賴 carrier type == QUIC_DIRECT。LAN 直連 (DIRECT)
         // 也可以走 QUIC datagram 路徑，只要 client 已建立 QUIC session。
         // 若 session 不存在則自動 fallback 到 tunnel 或直接 UDP。
-        std::shared_ptr<quic_server::QuicSession> quicVideoSession;
+        // §K.5-FEC-CLAMP-FIX：quicVideoSession 查找已 hoist 到 packetize
+        // 段（FEC clamp 共用同一次查找），這裡只留狀態轉變 diag log。
         if (config::stream.mpquic_enabled && quic_server::g_listener) {
-          auto peerAddr = session->video.peer.address();
-          quicVideoSession = quic_server::g_listener->getSession(peerAddr);
           // §Q-REMOTE Fix R.1 diag——§K.5-LOG-FIX (review)：此區塊在
           // per-frame 迴圈內（60-120/s），原本無節流會在整場串流洪水
           // 數百 MB log。改為僅在「session 找到/找不到」狀態轉變時印一次。
-          {
-              static bool lastFound = false;
-              static bool everLogged = false;
-              bool found = (quicVideoSession != nullptr);
-              if (!everLogged || found != lastFound) {
-                  BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.5 diag: video peer="
-                                  << peerAddr.to_string()
-                                  << " is_v4=" << peerAddr.is_v4()
-                                  << " is_v6=" << peerAddr.is_v6()
-                                  << " session=" << (found ? "FOUND" : "NULL")
-                                  << " listener=" << (quic_server::g_listener ? "OK" : "NULL");
-                  lastFound = found;
-                  everLogged = true;
-              }
+          auto peerAddr = session->video.peer.address();
+          static bool lastFound = false;
+          static bool everLogged = false;
+          bool found = (quicVideoSession != nullptr);
+          if (!everLogged || found != lastFound) {
+              BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.5 diag: video peer="
+                              << peerAddr.to_string()
+                              << " is_v4=" << peerAddr.is_v4()
+                              << " is_v6=" << peerAddr.is_v6()
+                              << " session=" << (found ? "FOUND" : "NULL")
+                              << " listener=" << (quic_server::g_listener ? "OK" : "NULL");
+              lastFound = found;
+              everLogged = true;
           }
         }
         const bool use_quic = (quicVideoSession != nullptr);
