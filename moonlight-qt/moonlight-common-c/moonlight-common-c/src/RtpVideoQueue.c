@@ -822,6 +822,49 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
                 // frame it saw.
                 notifyFrameLost(nvPacket->frameIndex - 1, false);
             }
+
+            // §FRZ-GAP-FEC 2026-07-16：整幀消失也要向 server 回報 FEC status。
+            // 舊行為只發 RFI——server 端 §Q-STALE 以整幀為單位丟棄時（窄路徑
+            // 壅塞），client 收到的幀序跳號但手上沒有部分幀，07-15 事故 60s
+            // 內 ~3000 幀消失只產生 16 份 FEC status，ABR 對 99% 丟失全盲、
+            // ping-tick 誤判零丟包持續回升。這裡以「上一幀 shard 數 × 消失
+            // 幀數」估算 missing 補發一份 synthetic status（0x5502 既有格式，
+            // wire 不變；server 只讀 missingPacketsBeforeHighestReceived）。
+            // 附帶效益：刷新 server 端 lastFecStatusTime → ping-tick 自動讓位。
+            {
+                uint32_t gap = nvPacket->frameIndex - queue->currentFrameNumber;
+                if (queue->currentFrameNumber + 1 == nvPacket->frameIndex && queue->reportedLostFrame) {
+                    gap = 0;  // 唯一消失的幀已由 speculative 路徑回報過
+                }
+                else if (queue->reportedLostFrame) {
+                    gap--;    // 扣掉已回報的那一幀，其餘照算
+                }
+                if (gap > 4096) {
+                    gap = 4096;  // frameIndex 毒化防護（§FRZ-B3 同類教訓）
+                }
+                if (gap > 0) {
+                    // 此刻 bufferDataPackets/bufferParityPackets 仍是上一幀的
+                    // 值（下方才重設為本幀），是消失幀發送量最貼近的估計。
+                    uint32_t shardsPerFrame = (uint32_t)queue->bufferDataPackets + queue->bufferParityPackets;
+                    uint64_t estMissing;
+                    SS_FRAME_FEC_STATUS fecStatus;
+
+                    if (shardsPerFrame == 0) {
+                        shardsPerFrame = 10;  // 首幀前無歷史資料時的保守估值
+                    }
+                    estMissing = (uint64_t)gap * shardsPerFrame;
+
+                    memset(&fecStatus, 0, sizeof(fecStatus));
+                    fecStatus.frameIndex = BE32(nvPacket->frameIndex - 1);
+                    fecStatus.missingPacketsBeforeHighestReceived =
+                        BE16((uint16_t)(estMissing > UINT16_MAX ? UINT16_MAX : estMissing));
+                    fecStatus.totalDataPackets = BE16(queue->bufferDataPackets);
+                    fecStatus.totalParityPackets = BE16(queue->bufferParityPackets);
+                    fecStatus.fecPercentage = (uint8_t)queue->fecPercentage;
+                    fecStatus.multiFecBlockCount = 1;
+                    connectionSendFrameFecStatus(&fecStatus);
+                }
+            }
         }
 
         queue->currentFrameNumber = nvPacket->frameIndex;

@@ -213,10 +213,18 @@ static bool queuePacketToLbq(PQUEUED_AUDIO_PACKET* packet) {
             *packet = NULL;
         }
         else if (err == LBQ_BOUND_EXCEEDED) {
+            void* oldestPacket;
+
             Limelog("Audio packet queue overflow\n");
 
-            // The audio queue is full, so free all existing items and try again
-            freePacketList(LbqFlushQueueItems(&packetQueue));
+            // §AUD-OVFL-POP1 2026-07-16：舊行為是 LbqFlushQueueItems 整隊
+            // 傾倒——30 包 = 150ms 音訊一次全丟（07-15 事故 259 次 overflow
+            // ≈ 39 秒音訊被整段拋棄）。改為只彈出最舊 1 包再重試：上游
+            // （jitter buffer flush / FEC 批次吐出）突發灌入時，每包只
+            // 犧牲 5ms 最舊音訊，保留其餘連續性。
+            if (LbqPollQueueElement(&packetQueue, &oldestPacket) == LBQ_SUCCESS) {
+                free(oldestPacket);
+            }
         }
     } while (err == LBQ_BOUND_EXCEEDED);
 
