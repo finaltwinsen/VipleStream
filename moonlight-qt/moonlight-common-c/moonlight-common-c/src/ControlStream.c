@@ -1426,7 +1426,15 @@ enet_main_loop:
             // 不可彈 "Connection terminated" dialog——QUIC failover 已把
             // video/audio 轉到備援路徑，使用者只損失控制輸入。
             // §Q-REMOTE Fix R.3：failover 或 QUIC 健康都壓制
-            if (quicControlFallbackAvailable()) {
+            // §FRZ-TEARDOWN 2026-07-06：使用者主動退出時 input/audio 收線
+            // 會先弄斷 ENet 等待（err=10004，早於 controlReceiveThread 被
+            // interrupt），原本誤入 grace/reconnect 流程（印「等介面恢復
+            // 120s」的誤導 log）。用連線層級的 ConnectionInterrupted 判斷
+            // ——它在 LiStopConnection 一開始就設起（Connection.c），
+            // teardown 走原始收尾（connectionTerminated 此時本就 no-op）。
+            if (quicControlFallbackAvailable() &&
+                !ConnectionInterrupted &&
+                !PltIsThreadInterrupted(&controlReceiveThread)) {
                 Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: control stream "
                         "connection failed (%d) while QUIC transport alive — "
                         "suppressing connectionTerminated\n", err);
@@ -1966,6 +1974,30 @@ static void lossStatsThreadFunc(void* context) {
     }
 }
 
+#ifdef VIPLE_MPQUIC
+// §FRZ-RFI-LIMIT 2026-07-06：failover 期間 depacketizer 每個 lost frame
+// 都會排一筆 RFI/IDR 請求，QUIC 路徑原本無節流（事故實測一秒 100+ 筆
+// 洪水，server 端全是同一個意圖「給我 IDR」）。200ms 節流對恢復延遲
+// 無感（server 產出 IDR 本身要數十 ms），但把洪水壓掉。marker 對
+// server 而言等效，被節流的請求直接視為已送出。
+static void quicSendIdrMarkerRateLimited(const char* tag, const char* what) {
+    static uint64_t lastMarkerSentMs;
+    uint64_t nowMs = PltGetMillis();
+    if (lastMarkerSentMs != 0 && nowMs - lastMarkerSentMs < 200) {
+        return;
+    }
+    static const unsigned char idrMarker = 0x49; // 'I'
+    if (quicSendStream(&idrMarker, 1) == 0) {
+        lastMarkerSentMs = nowMs;
+        Limelog("[VIPLE-MPQUIC] %s: %s request sent via QUIC stream\n",
+                tag, what);
+    } else {
+        Limelog("[VIPLE-MPQUIC] %s: QUIC stream send failed — %s request "
+                "dropped\n", tag, what);
+    }
+}
+#endif
+
 static void requestIdrFrame(void) {
 #ifdef VIPLE_MPQUIC
     // §Q-IDR-QUIC-FIRST v1.5.197 Fix P.1：在 QUIC failover 期間，
@@ -1981,14 +2013,7 @@ static void requestIdrFrame(void) {
     // （Fix P v1.5.197 的根因，勿重演）。
     if ((quicIsFailoverActive() && quicIsPrimaryPathUnhealthy()) ||
         (enetControlChannelDown() && quicIsConnected())) {
-        static const unsigned char idrMarker = 0x49; // 'I'
-        if (quicSendStream(&idrMarker, 1) == 0) {
-            Limelog("[VIPLE-MPQUIC] §Q-IDR-QUIC-FIRST: IDR request "
-                    "sent via QUIC stream (ENet down or failover)\n");
-        } else {
-            Limelog("[VIPLE-MPQUIC] §Q-IDR-QUIC-FIRST: QUIC stream "
-                    "send failed — IDR request dropped\n");
-        }
+        quicSendIdrMarkerRateLimited("§Q-IDR-QUIC-FIRST", "IDR");
         return;
     }
 #endif
@@ -2024,14 +2049,7 @@ static void requestIdrFrame(void) {
                 // §Q-IDR-VIA-QUIC v1.5.177：ENet 死了但 QUIC 還活著。
                 // 改走 QUIC stream #0 送 IDR request 給 server，
                 // 不再靜默丟棄（根因 D 修正）。
-                static const unsigned char idrMarker = 0x49; // 'I'
-                if (quicSendStream(&idrMarker, 1) == 0) {
-                    Limelog("[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: IDR request "
-                            "routed through QUIC stream #0\n");
-                } else {
-                    Limelog("[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: QUIC stream "
-                            "send also failed — IDR request dropped\n");
-                }
+                quicSendIdrMarkerRateLimited("§Q-IDR-VIA-QUIC", "IDR");
                 return;
             }
 #endif
@@ -2051,14 +2069,7 @@ static void requestIdrFrame(void) {
 #ifdef VIPLE_MPQUIC
             if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
                 // §Q-IDR-VIA-QUIC v1.5.177：同上，改走 QUIC stream #0
-                static const unsigned char idrMarker = 0x49;
-                if (quicSendStream(&idrMarker, 1) == 0) {
-                    Limelog("[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: IDR request "
-                            "routed through QUIC stream #0\n");
-                } else {
-                    Limelog("[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: QUIC stream "
-                            "send also failed — IDR request dropped\n");
-                }
+                quicSendIdrMarkerRateLimited("§Q-IDR-VIA-QUIC", "IDR");
                 return;
             }
 #endif
@@ -2074,6 +2085,16 @@ static void requestInvalidateReferenceFrames(uint32_t startFrame, uint32_t endFr
     LC_ASSERT(startFrame <= endFrame);
     LC_ASSERT(isReferenceFrameInvalidationEnabled());
 
+    // §FRZ-B3: 反轉範圍（start > end）只可能來自上游狀態毒化（release 版
+    // LC_ASSERT 無效；毒化事故實測送出過 "(369149 to 328438)"）。與 server
+    // 端 nvenc 防衛（invalid rfi → IDR）對稱：改送 IDR，不送無效範圍上線。
+    if (startFrame > endFrame) {
+        Limelog("Invalid RFI range (%u to %u) — requesting IDR frame instead\n",
+                startFrame, endFrame);
+        requestIdrFrame();
+        return;
+    }
+
 #ifdef VIPLE_MPQUIC
     // §Q-IDR-QUIC-FIRST v1.5.197 Fix P.1：同 requestIdrFrame()，
     // failover 期間直接走 QUIC stream #0，不走 sendMessageEnet()
@@ -2082,14 +2103,7 @@ static void requestInvalidateReferenceFrames(uint32_t startFrame, uint32_t endFr
     // 且 QUIC 活著時直接走 stream #0，避開 INPUT-datagram 陷阱。
     if ((quicIsFailoverActive() && quicIsPrimaryPathUnhealthy()) ||
         (enetControlChannelDown() && quicIsConnected())) {
-        static const unsigned char idrMarker = 0x49; // 'I'
-        if (quicSendStream(&idrMarker, 1) == 0) {
-            Limelog("[VIPLE-MPQUIC] §Q-IDR-QUIC-FIRST: RFI request "
-                    "sent via QUIC stream (ENet down or failover)\n");
-        } else {
-            Limelog("[VIPLE-MPQUIC] §Q-IDR-QUIC-FIRST: QUIC stream "
-                    "send failed — RFI request dropped\n");
-        }
+        quicSendIdrMarkerRateLimited("§Q-IDR-QUIC-FIRST", "RFI");
         return;
     }
 #endif
@@ -2111,14 +2125,7 @@ static void requestInvalidateReferenceFrames(uint32_t startFrame, uint32_t endFr
         if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
             // §Q-IDR-VIA-QUIC v1.5.177：RFI 也走 QUIC fallback。
             // RFI 效果等同 IDR request，server 收到 0x49 就送 IDR。
-            static const unsigned char idrMarker = 0x49;
-            if (quicSendStream(&idrMarker, 1) == 0) {
-                Limelog("[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: RFI request "
-                        "routed through QUIC stream #0\n");
-            } else {
-                Limelog("[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: QUIC stream "
-                        "send also failed — RFI request dropped\n");
-            }
+            quicSendIdrMarkerRateLimited("§Q-IDR-VIA-QUIC", "RFI");
             return;
         }
 #endif

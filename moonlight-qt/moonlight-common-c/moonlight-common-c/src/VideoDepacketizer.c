@@ -28,6 +28,12 @@ static bool idrFrameProcessed;
 // §K.10 diag: dropFrameState 呼叫次數（移到頂部避免前向參照）
 static unsigned int dropFrameCallCount = 0;
 
+// §FRZ-WATCHDOG (2026-07-06 凍結事故)：最近一次完整幀產出時刻與幀號
+// 重對齊旗標。VideoStream 的斷糧 watchdog 使用；兩者皆只在 VideoRecv
+// 執行緒觸碰，無競爭。
+static uint64_t lastQueuedFrameTimeUs;
+static bool resyncFrameNumberPending;
+
 #define DR_CLEANUP -1000
 
 #define CONSECUTIVE_DROP_LIMIT 120
@@ -88,6 +94,8 @@ void initializeVideoDepacketizer(int pktSize) {
     idrFrameProcessed = false;
     strictIdrFrameWait = !isReferenceFrameInvalidationEnabled();
     dropFrameCallCount = 0;
+    lastQueuedFrameTimeUs = 0;          // §FRZ-WATCHDOG
+    resyncFrameNumberPending = false;   // §FRZ-WATCHDOG
     Limelog("[VIPLE-DEPACK] init: strictIdrFrameWait=%d (RFI %s)\n",
             (int)strictIdrFrameWait,
             strictIdrFrameWait ? "disabled" : "enabled");
@@ -564,6 +572,10 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
                 LiCompleteVideoFrame(qdu, VideoCallbacks.submitDecodeUnit(&qdu->decodeUnit));
             }
 
+            // §FRZ-WATCHDOG: 任何完整幀產出（queued 或 direct-submit）
+            // 都刷新，供斷糧 watchdog 判斷解碼管線是否還活著。
+            lastQueuedFrameTimeUs = PltGetMicroseconds();
+
             // Notify the control connection
             connectionReceivedCompleteFrame(frameNumber, frameIsLTR);
 
@@ -760,6 +772,17 @@ void requestDecoderRefresh(void) {
     LiRequestIdrFrame();
 }
 
+// §FRZ-WATCHDOG: 供 VideoStream 的斷糧 watchdog 查詢最近一次完整幀
+// 產出時刻，以及要求幀號重對齊（adopt-next：在下一個收到的封包上
+// 直接採用其 frameIndex 為新基準）。
+uint64_t videoDepacketizerLastFrameTimeUs(void) {
+    return lastQueuedFrameTimeUs;
+}
+
+void videoDepacketizerRequestResync(void) {
+    resyncFrameNumberPending = true;
+}
+
 // Return 1 if packet is the first one in the frame
 static bool isFirstPacket(uint8_t flags, uint8_t fecBlockNumber) {
     // Clear the picture data flag
@@ -802,6 +825,18 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
     LC_ASSERT_VT((flags & ~(FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA)) == 0);
 
     streamPacketIndex = videoPacket->streamPacketIndex;
+
+    // §FRZ-WATCHDOG: 斷糧 watchdog 要求重新對齊幀號——採用「下一個收到
+    // 的幀」為新基準（adopt-next），避免直接賦值與下面的 isBefore32 防衛
+    // 互咬；RFI 窗口（startFrameNumber）一併前移，防止產生反轉範圍。
+    if (resyncFrameNumberPending) {
+        resyncFrameNumberPending = false;
+        Limelog("[VIPLE-DEPACK] §FRZ-WATCHDOG: frame number resync %u → %u\n",
+                nextFrameNumber, frameIndex);
+        nextFrameNumber = frameIndex;
+        if (isBefore32(startFrameNumber, frameIndex))
+            startFrameNumber = frameIndex;
+    }
 
     // Drop packets from a previously corrupt frame
     if (isBefore32(frameIndex, nextFrameNumber)) {
@@ -1161,6 +1196,15 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
 void notifyFrameLost(unsigned int frameNumber, bool speculative) {
     // We may not invalidate frames that we've already received
     LC_ASSERT(frameNumber >= startFrameNumber);
+
+    // §FRZ-B2: 上面的 LC_ASSERT 在 release 版是 no-op。毒化事故中 stale
+    // frame 編號（5 分鐘前的舊事故殘留）從這裡把 nextFrameNumber 倒帶
+    // 4 萬幀並送出反轉範圍 RFI。stale 通知直接忽略，不倒帶、不送 RFI。
+    if (isBefore32(frameNumber, startFrameNumber)) {
+        Limelog("[VIPLE-DEPACK] notifyFrameLost: stale frame=%u (start=%u) — ignored\n",
+                frameNumber, startFrameNumber);
+        return;
+    }
 
     Limelog("[VIPLE-DEPACK] notifyFrameLost: frame=%u spec=%d\n", frameNumber, (int)speculative);
 

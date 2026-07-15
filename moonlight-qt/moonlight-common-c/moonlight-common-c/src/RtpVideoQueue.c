@@ -651,8 +651,10 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
             PNV_VIDEO_PACKET peekNv = (PNV_VIDEO_PACKET)(((char*)packet) + peekOffset);
             uint32_t peekFrame = LE32(peekNv->frameIndex);
 
+            // §FRZ-B1: frameIndex 是 32-bit 單調遞增，必須用 isBefore32。
+            // isBefore16 在差距 >32768 幀時會迴繞誤判（毒化事故根因）。
             if (peekFrame != queue->currentFrameNumber &&
-                !isBefore16(peekFrame, queue->currentFrameNumber)) {
+                !isBefore32(peekFrame, queue->currentFrameNumber)) {
                 // New frame arriving while old frame is still pending.
                 // Check if old frame is close to FEC-recoverable (deficit ≤ 1).
                 uint32_t totalReceived = queue->receivedDataPackets + queue->receivedParityPackets;
@@ -707,7 +709,11 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
     }
 
 #ifndef LC_FUZZING
-    if (isBefore16(nvPacket->frameIndex, queue->currentFrameNumber)) {
+    // §FRZ-B1: 原本用 isBefore16 —— frameIndex 是 32-bit 單調遞增，差距
+    // >32768 幀的舊 datagram（path failback 時 server 端佇列殘留排出）會被
+    // 迴繞誤判成「未來幀」接受，倒帶 currentFrameNumber 後所有新鮮幀反被
+    // 判過期 REJECTED → 解碼器斷糧、畫面永久凍結。isBefore32 根治。
+    if (isBefore32(nvPacket->frameIndex, queue->currentFrameNumber)) {
         // Reject frames behind our current frame number
         return RTPF_RET_REJECTED;
     }

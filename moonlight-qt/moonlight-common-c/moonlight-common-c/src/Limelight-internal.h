@@ -140,6 +140,9 @@ void queueRtpPacket(PRTPV_QUEUE_ENTRY queueEntry);
 void stopVideoDepacketizer(void);
 void requestDecoderRefresh(void);
 void notifyFrameLost(unsigned int frameNumber, bool speculative);
+// §FRZ-WATCHDOG: VideoStream 斷糧 watchdog 用（皆 VideoRecv 執行緒）
+uint64_t videoDepacketizerLastFrameTimeUs(void);
+void videoDepacketizerRequestResync(void);
 
 void initializeVideoStream(void);
 void destroyVideoStream(void);

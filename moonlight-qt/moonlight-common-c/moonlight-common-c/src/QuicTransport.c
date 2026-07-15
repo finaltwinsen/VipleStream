@@ -76,6 +76,19 @@
 #define REGAIN_FLAP_WINDOW_S   60
 #define REGAIN_FLAP_MAX        3
 
+// §Q-LOSS-DEMOTE 2026-07-06 凍結事故：zombie 路徑的 loss 降級準則。
+// 事故：乙太鏈路劣化成「ICMP 通、UDP 大流量 77~100% 丟包」，slot 0 卡在
+// ACTIVE 十二分鐘不降級——stall 偵測只看 lastRecvTime，而 IO 迴圈收到
+// 任一 UDP 封包（含 ACK/控制面零星封包）就刷新它。補 loss 準則：合格
+// 樣本（每 100ms stats tick 至少 LOSS_MIN_DELTA_SENT 個送出封包）的瞬時
+// loss 連續 ≥ LOSS_DEMOTE_PCT 達 LOSS_DEMOTE_HOLD_US、且存在替代路徑
+// （健康 available 或 probe 新鮮的 standby）→ 走既有 INACTIVE 序列降級。
+// 40% 門檻遠高於 ABR 較勁的典型 loss（<20%、亞秒級），不會誤殺。
+#define LOSS_DEMOTE_PCT        40.0f
+#define LOSS_DEMOTE_HOLD_US    4000000ull   // 4s（promote 後 probation 內 2s）
+#define LOSS_MIN_DELTA_SENT    20
+#define LOSS_PROBATION_US      10000000ull  // 促升後 10s probation
+
 // ── Internal state ──────────────────────────────────────────
 
 typedef struct _QUIC_SUBFLOW {
@@ -145,6 +158,20 @@ typedef struct _QUIC_SUBFLOW {
     // 無應用流量且跳過 stall 偵測，光靠計時器無法證明路徑活著——REGAIN
     // 要求此章新鮮（<25s）才升級。0 = 尚未通過或最近一次探測失敗。
     uint64_t lastStandbyProbeOk;
+
+    // §Q-LOSS-DEMOTE (2026-07-06 凍結事故)：瞬時 loss 首次越檻
+    // （LOSS_DEMOTE_PCT）的時刻；0 = 目前不超標。合格樣本
+    // （deltaSent ≥ LOSS_MIN_DELTA_SENT）低於門檻即歸零 → 等效
+    // 「連續超標」，天然濾掉 ABR/BBR 探測造成的秒級 loss 尖峰。
+    uint64_t lossBadSinceUs;
+    // §Q-LOSS-DEMOTE：最近一次 picoquic_get_path_quality 成功時刻。
+    // 查詢失敗時 rttMs/lossPercent 凍結為舊值（事故中 zombie 路徑 RTT
+    // 卡在 570ms 十二分鐘），此欄位供 stats 過期診斷。0 = 從未成功。
+    uint64_t statsUpdatedUs;
+    // §Q-LOSS-DEMOTE：最近一次被促升為 available 的時刻。促升後
+    // LOSS_PROBATION_US 內 loss 越檻的降級 hold 減半（4s → 2s），
+    // 讓 REGAIN 促升到壞路徑的停格更短。
+    uint64_t lastPromotedAtUs;
 } QUIC_SUBFLOW;
 
 typedef struct _QUIC_TRANSPORT_CTX {
@@ -228,6 +255,20 @@ typedef struct _QUIC_TRANSPORT_CTX {
     // 缺陷），持續重升只會製造 PATH-SWITCH + IDR 風暴；斷路後留在
     // 當前可用路徑，五分鐘後（狀態沉澱）再試。0 = 未斷路。
     uint64_t regainSuspendedUntil;
+
+    // §Q-BREAKER-ESC (2026-07-06 凍結事故)：斷路器遞增。原本 300s 到期
+    // flapCount 歸零，同一顆壞介面每 5-6 分鐘重演「3 次 flap（= 3 次
+    // 停格）→ 斷路」。改為同介面重複跳閘 → 暫停 300s×4^(n-1)、上限
+    // 1800s；期滿 regainFlapCount 照舊歸零但 tripCount 保留，單次 flap
+    // 即再斷路（不必再付 3 次停格）。forgiveness：斷路之後真的有一次
+    // regain 且存活滿 flap 視窗才全赦（見 quicMaybeRegainStandby）。
+    int breakerTripCount;
+    int lastBreakerIf;       // -1 = 尚無跳閘紀錄
+    uint64_t lastBreakerTripTime;
+
+    // §Q-FAILOVER-SETTLED (Fix A6)：failover 承載者連續健康的起算時刻。
+    // 連續健康 30s → failoverPromotedSlot=-1 宣告新常態（不切路徑）。
+    uint64_t failoverHealthySinceUs;
 
     // §Q-DYN-PATH ICMP 拒絕快取。Phase B（IO 執行緒啟動前）的 ICMP 探測
     // 如果判定某介面不可達，記錄其 interfaceIndex。quicRecheckPaths 在 IO
@@ -411,6 +452,17 @@ static int quicSetPathStatusTracked(QUIC_SUBFLOW* sf, picoquic_path_status_enum 
     return ret;
 }
 
+// §Q-LOSS-DEMOTE: 促升點統一重置健康欄位。五個促升處（REGAIN /
+// MP-FAILOVER / SECONDARY / EMERGENCY / DYN-STANDBY-ALIVE）原本各自
+// 重複 lastRecvTime/consecutiveTimeouts 兩行，抽 helper 統一追加
+// loss 計時歸零與 probation 起算，避免日後新增促升點漏改。
+static void quicResetSubflowHealthOnPromote(QUIC_SUBFLOW* sf, uint64_t now) {
+    sf->lastRecvTime = now;        // §Q-MP-FAILOVER-GRACE: 防立即 stall 誤判
+    sf->consecutiveTimeouts = 0;
+    sf->lossBadSinceUs = 0;        // 舊任期的 loss 帳不帶入新任期
+    sf->lastPromotedAtUs = now;    // §Q-LOSS-DEMOTE probation 起算
+}
+
 // §Q Phase 5 (5f): 0-RTT ticket store path. picoquic auto-loads/saves
 // session tickets to this file across runs.  Set via
 // quicSetTicketStorePath() before the first quicConnect(); empty = off.
@@ -426,6 +478,7 @@ int quicTransportInit(void) {
     g_ctx.nextSubflowId = 1;
     g_ctx.failoverPromotedSlot = -1; // §Q-MP-FAILBACK: 無 failover 進行中
     g_ctx.lastRegainIf = -1;         // §Q-STANDBY-REGAIN: 尚無 regain 紀錄
+    g_ctx.lastBreakerIf = -1;        // §Q-BREAKER-ESC: 尚無跳閘紀錄
 
     // Default scheduler per flow type
     g_ctx.scheduler[0] = QUIC_SCHED_AUTO;
@@ -1439,8 +1492,22 @@ static void quicUpdatePathStats(void) {
         // path id is invalid (e.g., path got deleted out from under us).
         if (picoquic_get_path_quality(g_ctx.cnx,
                 g_ctx.subflows[i].picoquicPathId, &pq) != 0) {
+            // §Q-LOSS-DEMOTE: 查詢失敗時 rttMs/lossPercent 凍結為舊值
+            // （2026-07-06 事故中 zombie 的 RTT 卡在 570ms 十二分鐘）。
+            // 首次越過 3s 過期線時印一次診斷（100ms tick，窗口判斷即可）。
+            if (g_ctx.subflows[i].statsUpdatedUs != 0 &&
+                (now - g_ctx.subflows[i].statsUpdatedUs) > 3000000 &&
+                (now - g_ctx.subflows[i].statsUpdatedUs) <
+                    3000000 + STATS_UPDATE_INTERVAL_US * 2) {
+                Limelog("[VIPLE-MPQUIC] §Q-LOSS-DEMOTE: subflow %d (if %d) "
+                        "path quality stats stale >3s (query failing) — "
+                        "rtt/loss values frozen\n",
+                        g_ctx.subflows[i].id,
+                        g_ctx.subflows[i].interfaceIndex);
+            }
             continue;
         }
+        g_ctx.subflows[i].statsUpdatedUs = now;
 
         // pq.rtt is in microseconds (smoothed estimate)
         g_ctx.subflows[i].rttMs = (float)pq.rtt / 1000.0f;
@@ -1461,7 +1528,7 @@ static void quicUpdatePathStats(void) {
 
         // §K.19: 瞬時 loss% — 用 delta（本次 - 上次）而非累積值。
         // 累積值包含連線初期的暫態丟包，長期趨近穩定值但不反映
-        // 當前路徑品質。每 STATS_UPDATE_INTERVAL_US（5 秒）更新一次。
+        // 當前路徑品質。每 STATS_UPDATE_INTERVAL_US（100ms）更新一次。
         {
             uint64_t deltaSent = pq.sent - g_ctx.subflows[i].prevSent;
             uint64_t deltaLost = pq.lost - g_ctx.subflows[i].prevLost;
@@ -1475,7 +1542,20 @@ static void quicUpdatePathStats(void) {
                 float lp = (float)((double)pq.lost / (double)pq.sent * 100.0);
                 g_ctx.subflows[i].lossPercent = lp > 100.0f ? 100.0f : lp;
             }
-            // 否則 deltaSent==0 表示這 5 秒沒送任何封包，保留上次的值
+            // 否則 deltaSent==0 表示這段期間沒送任何封包，保留上次的值
+
+            // §Q-LOSS-DEMOTE: 合格樣本（≥LOSS_MIN_DELTA_SENT 封包）的越檻
+            // 計時。任一合格樣本低於門檻即歸零 → 等效「連續超標」，天然
+            // 濾掉 ABR/BBR 探測造成的秒級 loss 尖峰；樣本不足不改判。
+            if (deltaSent >= LOSS_MIN_DELTA_SENT) {
+                if (g_ctx.subflows[i].lossPercent >= LOSS_DEMOTE_PCT) {
+                    if (g_ctx.subflows[i].lossBadSinceUs == 0)
+                        g_ctx.subflows[i].lossBadSinceUs = now;
+                } else {
+                    g_ctx.subflows[i].lossBadSinceUs = 0;
+                }
+            }
+
             g_ctx.subflows[i].prevSent = pq.sent;
             g_ctx.subflows[i].prevLost = pq.lost;
         }
@@ -1545,20 +1625,43 @@ static void quicNoteRegainFlap(int ifIdx, uint64_t now) {
                 ifIdx, (float)(now - g_ctx.lastRegainTime) / 1e6f,
                 g_ctx.regainFlapCount,
                 REGAIN_HEALTH_S << g_ctx.regainFlapCount);
-        if (g_ctx.regainFlapCount >= REGAIN_FLAP_MAX) {
-            g_ctx.regainSuspendedUntil = now + 300000000ull;  // 5 分鐘
-            Limelog("[VIPLE-MPQUIC] §Q-REGAIN-BREAKER: if %d flapped %d "
-                    "times — suspending regain/revive for 300s (staying "
-                    "on current path)\n",
-                    ifIdx, g_ctx.regainFlapCount);
+
+        // §Q-BREAKER-ESC 2026-07-06：曾跳閘過的同一介面，單次 flap 即再
+        // 斷路（期滿後不必再付 3 次停格才重新斷路）；暫停時長 300s×4^(n-1)
+        // 上限 1800s。原本 300s 到期 flapCount 歸零，同一顆壞介面每 5-6
+        // 分鐘重演「3 次 flap = 3 次停格 → 斷路」無限循環。
+        {
+            bool trip = (g_ctx.regainFlapCount >= REGAIN_FLAP_MAX) ||
+                        (g_ctx.breakerTripCount > 0 &&
+                         ifIdx == g_ctx.lastBreakerIf);
+            bool suspended = (g_ctx.regainSuspendedUntil != 0 &&
+                              now < g_ctx.regainSuspendedUntil);
+            if (trip && !suspended) {
+                g_ctx.breakerTripCount =
+                    (ifIdx == g_ctx.lastBreakerIf)
+                        ? g_ctx.breakerTripCount + 1 : 1;
+                g_ctx.lastBreakerIf = ifIdx;
+                g_ctx.lastBreakerTripTime = now;
+                uint64_t suspendS = 300;
+                for (int t = 1; t < g_ctx.breakerTripCount && suspendS < 1800; t++)
+                    suspendS *= 4;
+                if (suspendS > 1800) suspendS = 1800;
+                g_ctx.regainSuspendedUntil = now + suspendS * 1000000ull;
+                Limelog("[VIPLE-MPQUIC] §Q-REGAIN-BREAKER: if %d flapped "
+                        "(flapCount=%d, trip #%d) — suspending regain/revive "
+                        "for %llus (staying on current path)\n",
+                        ifIdx, g_ctx.regainFlapCount, g_ctx.breakerTripCount,
+                        (unsigned long long)suspendS);
+            }
         }
     }
 }
 
 // §Q-STANDBY-REGAIN 2026-07-02: standby 路徑的自動回歸評估。
-// 前提：呼叫端已確認 sf->keepAsStandby、sf->active、slot > 0，且存在
-// 至少一條健康 available 參考路徑（anyAliveRef）——即「failover 後
-// 恢復的路徑躺在 standby、次佳路徑載著視訊」的情境。
+// 前提：呼叫端已確認 sf->keepAsStandby、sf->active（2026-07-06 起含
+// slot 0——復活統一走 standby 之後 primary 也可能以 standby 身份回歸），
+// 且存在至少一條健康 available 參考路徑（anyAliveRef）——即「failover
+// 後恢復的路徑躺在 standby、次佳路徑載著視訊」的情境。
 // 觸發條件（全部成立才動作）：
 //   1. 健康駐留期滿（regainEligibleAt；flap 退避 ×2^regainFlapCount）
 //   2. 所有健康 available 路徑的介面 rank 都嚴格比 sf 差
@@ -1576,6 +1679,8 @@ static void quicMaybeRegainStandby(QUIC_SUBFLOW* sf, int slot, uint64_t now) {
             return;
         g_ctx.regainSuspendedUntil = 0;   // 斷路期滿，重新開放
         g_ctx.regainFlapCount = 0;
+        // §Q-BREAKER-ESC：breakerTripCount 刻意不歸零——期滿後同介面
+        // 單次 flap 即再斷路，且暫停時長遞增（見 quicNoteRegainFlap）。
     }
 
     // flap 計數在最近一次 regain 存活滿視窗後歸零
@@ -1585,10 +1690,27 @@ static void quicMaybeRegainStandby(QUIC_SUBFLOW* sf, int slot, uint64_t now) {
         g_ctx.regainFlapCount = 0;
     }
 
+    // §Q-BREAKER-ESC forgiveness：斷路「之後」真的有一次 regain 且存活
+    // 滿 flap 視窗才全赦。沒有 lastRegainTime > lastBreakerTripTime 這個
+    // 條件，斷路期間沒有任何 regain、lastRegainTime 陳舊，會被視窗條件
+    // 誤當「存活滿視窗」而立刻大赦。
+    if (g_ctx.breakerTripCount > 0 && g_ctx.lastRegainTime > 0 &&
+        g_ctx.lastRegainTime > g_ctx.lastBreakerTripTime &&
+        (now - g_ctx.lastRegainTime) >
+            (uint64_t)REGAIN_FLAP_WINDOW_S * 1000000) {
+        Limelog("[VIPLE-MPQUIC] §Q-BREAKER-ESC: if %d survived full flap "
+                "window after breaker — forgiving trip history\n",
+                g_ctx.lastBreakerIf);
+        g_ctx.breakerTripCount = 0;
+        g_ctx.lastBreakerIf = -1;
+    }
+
     // 駐留武裝：進 standby 後第一次評估時設定（涵蓋 path-recovery 之外
     // 的 standby 來源，例如啟動時的 §Q-MP-STANDBY）。
     if (sf->regainEligibleAt == 0) {
         int backoff = g_ctx.regainFlapCount;
+        // §Q-BREAKER-ESC：斷路期滿後的第一次嘗試直接用最大 dwell（80s）
+        if (g_ctx.breakerTripCount > 0) backoff = REGAIN_FLAP_MAX;
         if (backoff > REGAIN_FLAP_MAX) backoff = REGAIN_FLAP_MAX;
         sf->regainEligibleAt = now +
             ((uint64_t)REGAIN_HEALTH_S << backoff) * 1000000;
@@ -1635,8 +1757,7 @@ static void quicMaybeRegainStandby(QUIC_SUBFLOW* sf, int slot, uint64_t now) {
     sf->keepAsStandby = false;
     sf->recoveryStandbyUntil = 0;
     sf->regainEligibleAt = 0;
-    sf->lastRecvTime = now;   // §Q-MP-FAILOVER-GRACE 同款：防立即 stall 誤判
-    sf->consecutiveTimeouts = 0;
+    quicResetSubflowHealthOnPromote(sf, now);
     quicSetPathStatusTracked(sf, picoquic_path_status_available);
 
     // 把 rank 較差的健康 available 路徑降回 standby
@@ -1725,7 +1846,10 @@ static void quicCheckPathHealth(void) {
         //   2. 都沒有才促升 VPN standby
         // 若此 path 是 VPN，先掃描有沒有非 VPN 的 standby 候選，有 → skip。
         if (sf->keepAsStandby) {
-            if (sf->active && i > 0) {
+            // §Q-REVIVE-STANDBY (Fix A4): 原本排除 slot 0（i > 0）——但復活
+            // 統一走 standby 之後，slot 0 也可能以 standby 身份存在，全滅
+            // 時必須能被促升，否則 last-resort 復活的 primary 永遠閒置。
+            if (sf->active) {
                 bool anyAliveRef = false;
                 for (int j = 0; j < g_ctx.subflowCount; j++) {
                     QUIC_SUBFLOW* ref = &g_ctx.subflows[j];
@@ -1762,10 +1886,14 @@ static void quicCheckPathHealth(void) {
                     // 所有參考路徑都死了 → promote
                     sf->keepAsStandby = false;
                     sf->recoveryStandbyUntil = 0;
-                    sf->lastRecvTime = now;  // 防止 stall detection 立即判 inactive
-                    sf->consecutiveTimeouts = 0;
+                    quicResetSubflowHealthOnPromote(sf, now);
                     quicSetPathStatusTracked(sf, picoquic_path_status_available);
-                    g_ctx.failoverPromotedSlot = i;
+                    // §Q-REVIVE-STANDBY (Fix A4): slot 0 本身是 preferred
+                    // primary——促升自己不算 failover（設 0 會讓
+                    // §Q-FALSE-POSITIVE-FAILBACK 與 quicIsFailoverActive()
+                    // 語意錯亂）。
+                    if (i > 0)
+                        g_ctx.failoverPromotedSlot = i;
                     Limelog("[VIPLE-MPQUIC] §Q-DYN-STANDBY-ALIVE: subflow %d "
                             "(if %d, slot %d, %s) → active (no valid reference "
                             "path — all others dead/stale, RTT=%.1fms)\n",
@@ -1784,7 +1912,10 @@ static void quicCheckPathHealth(void) {
                     continue;
                 }
             } else {
-                continue;
+                // §Q-REVIVE-STANDBY (Fix A5): inactive 的 standby 路徑不再
+                // continue——fall through 到下面的 re-activate 區塊
+                // （lastRecvTime 新鮮時復活，維持 standby 身份）。
+                // 其餘區塊皆以 sf->active 為閘，inactive 路徑不受影響。
             }
         }
 
@@ -1792,9 +1923,52 @@ static void quicCheckPathHealth(void) {
         uint64_t stallThreshold = (uint64_t)(sf->rttMs * 5000.0f);
         if (stallThreshold < 3000000) stallThreshold = 3000000; // min 3s
 
-        if (sf->active && sf->lastRecvTime > 0 &&
-            (now - sf->lastRecvTime) > stallThreshold) {
+        bool stalled = sf->active && sf->lastRecvTime > 0 &&
+                       (now - sf->lastRecvTime) > stallThreshold;
+
+        // §Q-LOSS-DEMOTE (2026-07-06 凍結事故)：zombie 準則。stall 偵測
+        // 只看 lastRecvTime，而 IO 迴圈收到任一 UDP 封包（含 ACK/控制面
+        // 零星封包）就刷新它——「ICMP 通、UDP 大流量死」的半死鏈路永遠
+        // 不 INACTIVE（事故中 slot 0 卡 ACTIVE loss=100% 十二分鐘）。
+        // loss 持續越檻（hold 4s；促升後 probation 內 2s）且存在替代路徑
+        // （健康 available 或 probe 章新鮮的 standby——後者必含，否則
+        // 「zombie primary + 只剩 standby」的事故場景永遠不降級）→ 走
+        // 同一個 INACTIVE 序列。無替代路徑不降（爛路徑也比沒路徑好）。
+        bool lossCritical = false;
+        if (sf->active && !stalled && sf->lossBadSinceUs != 0) {
+            uint64_t hold = LOSS_DEMOTE_HOLD_US;
+            if (sf->lastPromotedAtUs != 0 &&
+                (now - sf->lastPromotedAtUs) < LOSS_PROBATION_US)
+                hold /= 2;
+            if ((now - sf->lossBadSinceUs) >= hold) {
+                for (int j = 0; j < g_ctx.subflowCount; j++) {
+                    QUIC_SUBFLOW* alt = &g_ctx.subflows[j];
+                    if (j == i || alt->picoquicDeleted || !alt->active)
+                        continue;
+                    bool healthyAvail = !alt->keepAsStandby &&
+                        alt->consecutiveTimeouts == 0 &&
+                        alt->lastRecvTime > 0 &&
+                        (now - alt->lastRecvTime) < 3000000;
+                    bool freshStandby = alt->keepAsStandby &&
+                        alt->lastStandbyProbeOk != 0 &&
+                        (now - alt->lastStandbyProbeOk) < 25000000;
+                    if (healthyAvail || freshStandby) {
+                        lossCritical = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (stalled || lossCritical) {
             sf->consecutiveTimeouts++;
+            if (lossCritical && !stalled && sf->consecutiveTimeouts == 1) {
+                Limelog("[VIPLE-MPQUIC] §Q-LOSS-DEMOTE: subflow %d (if %d) "
+                        "loss=%.1f%% sustained %.1fs with alternative path "
+                        "available — demoting\n",
+                        sf->id, sf->interfaceIndex, sf->lossPercent,
+                        (float)(now - sf->lossBadSinceUs) / 1e6f);
+            }
 
             if (sf->consecutiveTimeouts >= PROBE_TIMEOUT_THRESHOLD) {
                 sf->active = false;
@@ -1815,6 +1989,17 @@ static void quicCheckPathHealth(void) {
                 // §Q-MP-FAILBACK: 失效路徑降級為 backup，避免
                 // picoquic 繼續往死路徑排程。
                 quicSetPathStatusTracked(sf, picoquic_path_status_backup);
+
+                // §Q-REVIVE-STANDBY (Fix A1): 狀態與旗標一致化——上面已把
+                // picoquic status 設成 backup，但 keepAsStandby 原本留在
+                // false：復活後 §5c guard 每 ~1ms 就把 status 翻回
+                // available、§Q-INTERFACE-FAILBACK 也隨即放行，dwell 與
+                // cwnd 暖身全被繞過（2026-07-06 三次停格事故根因）。補上
+                // 旗標，讓復活統一走 §Q-STANDBY-REGAIN 的 dwell+liveness。
+                sf->keepAsStandby = true;
+                sf->regainEligibleAt = 0;     // 新 standby episode
+                sf->lastStandbyProbeOk = 0;   // 章重蓋
+                sf->lossBadSinceUs = 0;       // §Q-LOSS-DEMOTE 計時歸零
 
                 // §Q-MP-FAILOVER: 主路徑失效 → 升級 standby 路徑頂上。
                 //
@@ -1890,8 +2075,7 @@ static void quicCheckPathHealth(void) {
                     // 接收 server 資料，避免下次 health check 因為
                     // lastRecvTime 來自路徑建立時（~250 秒前）而立即
                     // 判定 INACTIVE。
-                    candidate->lastRecvTime = now;
-                    candidate->consecutiveTimeouts = 0;
+                    quicResetSubflowHealthOnPromote(candidate, now);
 
                     quicSetPathStatusTracked(candidate,
                                              picoquic_path_status_available);
@@ -1958,8 +2142,7 @@ static void quicCheckPathHealth(void) {
                             QUIC_SUBFLOW* cand = &g_ctx.subflows[secBestJ];
                             cand->keepAsStandby = false;
                             cand->recoveryStandbyUntil = 0;
-                            cand->lastRecvTime = now;
-                            cand->consecutiveTimeouts = 0;
+                            quicResetSubflowHealthOnPromote(cand, now);
                             quicSetPathStatusTracked(cand,
                                 picoquic_path_status_available);
                             g_ctx.failoverPromotedSlot = secBestJ;
@@ -2138,41 +2321,32 @@ static void quicCheckPathHealth(void) {
             }
         }
 
-        // Re-activate a previously dead path if picoquic reports it alive
+        // Re-activate a previously dead path if picoquic reports it alive.
+        // §Q-REVIVE-STANDBY (Fix A5): 復活一律以 standby 身份回歸。原
+        // §Q-MP-FAILBACK「slot 0 復活即立刻降級 failover 路徑、自己升回
+        // available」已移除——那條路完全不查 dwell/breaker/cwnd 暖身，
+        // 半死鏈路（ICMP 通、UDP 大量丟包）每 ~10s 就被切回一次，每次
+        // 3 秒視訊斷糧（2026-07-06 三次停格事故）。回歸統一由
+        // quicMaybeRegainStandby 的 dwell + liveness 決定。這裡同時是
+        // 「inactive 但旗標為 false」漏網來源（如 IO 迴圈封包驅動復活）
+        // 的防禦網。
         if (!sf->active && sf->lastRecvTime > 0 &&
             (now - sf->lastRecvTime) < stallThreshold) {
             sf->active = true;
             sf->consecutiveTimeouts = 0;
-            Limelog("[VIPLE-MPQUIC] Subflow %d (if %d) re-activated\n",
+            if (!sf->keepAsStandby) {
+                sf->keepAsStandby = true;
+                sf->regainEligibleAt = 0;
+                sf->lastStandbyProbeOk = 0;
+            }
+            quicSetPathStatusTracked(sf, picoquic_path_status_backup);
+            Limelog("[VIPLE-MPQUIC] Subflow %d (if %d) re-activated into "
+                    "standby (promotion gated by REGAIN)\n",
                     sf->id, sf->interfaceIndex);
 
             if (g_ctx.failoverCallback) {
                 g_ctx.failoverCallback(sf->id, sf->interfaceIndex,
                                        true, g_ctx.failoverContext);
-            }
-
-            // §Q-MP-FAILBACK: 原 primary（slot 0）恢復 → 降級
-            // failover 路徑回 backup，恢復 primary-only 排程。
-            // 這防止兩條路徑同時 available 造成 server 分散
-            // datagram → depacketizer 組裝失敗。
-            if (i == 0 && g_ctx.failoverPromotedSlot >= 0) {
-                int fslot = g_ctx.failoverPromotedSlot;
-                QUIC_SUBFLOW* promoted = &g_ctx.subflows[fslot];
-                if (!promoted->picoquicDeleted) {
-                    promoted->keepAsStandby = true;
-                    quicSetPathStatusTracked(promoted,
-                                             picoquic_path_status_backup);
-                    Limelog("[VIPLE-MPQUIC] §Q-MP-FAILBACK: primary "
-                            "if %d recovered, demoting failover "
-                            "subflow %d (if %d, slot %d) back to "
-                            "backup\n",
-                            sf->interfaceIndex,
-                            promoted->id,
-                            promoted->interfaceIndex, fslot);
-                }
-                // 恢復 primary 的 picoquic available 狀態
-                quicSetPathStatusTracked(sf, picoquic_path_status_available);
-                g_ctx.failoverPromotedSlot = -1;
             }
         }
 
@@ -2207,32 +2381,43 @@ static void quicCheckPathHealth(void) {
             g_ctx.failoverPromotedSlot = -1;
         }
 
-        // §Q-INTERFACE-FAILBACK v1.5.195 Fix N：path-recovery 在新 slot
-        // 恢復了原始 primary 的介面。§Q-MP-FAILBACK 只看 slot 0，看不到
-        // 恢復在新 slot 的子流，所以 failoverPromotedSlot 永遠不清除。
-        // 這裡用 interfaceIndex 匹配：如果某個非 slot-0 的子流在原始
-        // primary 同介面上恢復為健康狀態，視為 primary 恢復。
-        if (i > 0 && g_ctx.failoverPromotedSlot >= 0 &&
-            sf->active && !sf->keepAsStandby &&
-            !sf->picoquicDeleted &&
-            sf->consecutiveTimeouts == 0 &&
-            sf->interfaceIndex == g_ctx.subflows[0].interfaceIndex &&
-            sf->lastRecvTime > 0 &&
-            (now - sf->lastRecvTime) < stallThreshold) {
-            int fslot = g_ctx.failoverPromotedSlot;
-            QUIC_SUBFLOW* promoted = &g_ctx.subflows[fslot];
-            if (!promoted->picoquicDeleted) {
-                promoted->keepAsStandby = true;
-                quicSetPathStatusTracked(promoted, picoquic_path_status_backup);
-            }
-            // 新 slot 成為新 primary
-            quicSetPathStatusTracked(sf, picoquic_path_status_available);
+        // §Q-INTERFACE-FAILBACK（v1.5.195 Fix N）已於 2026-07-06 移除：
+        // 它在 revive 的介面匹配 primary 時「立刻」清 failover 並促升，
+        // 不查 dwell/breaker/暖身——正是三次停格事故的 failback 引擎。
+        // 其正當情境（primary 介面在新 slot 恢復）已由 path-recovery →
+        // §Q-PATH-RECOVERY-STANDBY → §Q-STANDBY-REGAIN 完整覆蓋。
+    }
+
+    // §Q-FAILOVER-SETTLED (Fix A6)：failover 承載者連續健康 30 秒 →
+    // 宣告新常態（failoverPromotedSlot=-1，不切路徑）。解決兩個殘留：
+    // 1) 同 rank 情境 REGAIN 刻意不動（防 ping-pong）→ failover 旗標
+    //    永掛，200ms jitter relax 與 Fix L ENet 繞道永久生效；
+    // 2) dwell/breaker 期間 failover 狀態掛著的持續時間上界。
+    // 復活的同級路徑留在 standby 當備援。
+    if (g_ctx.failoverPromotedSlot >= 0 &&
+        g_ctx.failoverPromotedSlot < g_ctx.subflowCount) {
+        QUIC_SUBFLOW* pf = &g_ctx.subflows[g_ctx.failoverPromotedSlot];
+        uint64_t pfStall = (uint64_t)(pf->rttMs * 5000.0f);
+        if (pfStall < 3000000) pfStall = 3000000;
+        bool pfHealthy = pf->active && !pf->keepAsStandby &&
+                         !pf->picoquicDeleted &&
+                         pf->consecutiveTimeouts == 0 &&
+                         pf->lastRecvTime > 0 &&
+                         (now - pf->lastRecvTime) < pfStall;
+        if (!pfHealthy) {
+            g_ctx.failoverHealthySinceUs = 0;
+        } else if (g_ctx.failoverHealthySinceUs == 0) {
+            g_ctx.failoverHealthySinceUs = now;
+        } else if (now - g_ctx.failoverHealthySinceUs > 30000000) {
+            Limelog("[VIPLE-MPQUIC] §Q-FAILOVER-SETTLED: promoted subflow "
+                    "%d (if %d, slot %d) healthy for 30s — declaring new "
+                    "normal, failover state cleared (no path switch)\n",
+                    pf->id, pf->interfaceIndex, g_ctx.failoverPromotedSlot);
             g_ctx.failoverPromotedSlot = -1;
-            Limelog("[VIPLE-MPQUIC] §Q-INTERFACE-FAILBACK: recovered subflow "
-                    "%d (if %d, slot %d) matches primary interface — "
-                    "clearing failover, demoting slot %d back to backup\n",
-                    sf->id, sf->interfaceIndex, i, fslot);
+            g_ctx.failoverHealthySinceUs = 0;
         }
+    } else {
+        g_ctx.failoverHealthySinceUs = 0;
     }
 }
 
@@ -2325,9 +2510,16 @@ static void quicTryRecoverPaths(int* rejectedIfs, int* rejectedCount) {
     // backup，復活條件是「收到封包」，但 backup 路徑上 server 不會送任
     // 何東西 → 永遠不復活（recovery thread 的 alreadyActive 檢查也會跳
     // 過同介面未刪除的 slot）。這裡對 inactive 未刪除的 subflow（含
-    // slot 0）做同一套 ICMP 檢查：連續兩輪 OK（防半死鏈路 ping-pong）
-    // → 刷新 lastRecvTime，讓 health check 既有的 revive 區塊自然觸發
-    // （re-activate → §Q-MP-FAILBACK / §Q-INTERFACE-FAILBACK 鏈）。
+    // slot 0）做同一套 ICMP 檢查。
+    //
+    // §Q-REVIVE-STANDBY 2026-07-06（三次停格+凍結事故）：復活方式改為
+    // 「直接以 standby 身份復活」。原本只刷 lastRecvTime 讓 health check
+    // 的 re-activate → §Q-INTERFACE-FAILBACK 鏈接手——那條鏈完全不查
+    // dwell/breaker/cwnd 暖身，「ICMP 通、UDP 大量丟包」的半死鏈路每
+    // ~10s 就被切回 primary 一次、3 秒斷糧後又死，dwell 20s/40s 形同虛設。
+    // 改為 standby 復活後，促升唯一出口是 quicMaybeRegainStandby
+    // （dwell + liveness + rank）；全滅 last-resort 時單輪 ICMP OK 即
+    // 復活並交給 §Q-DYN-STANDBY-ALIVE 立即促升（無 dwell）。
     for (int s = 0; s < g_ctx.subflowCount; s++) {
         QUIC_SUBFLOW* sf = &g_ctx.subflows[s];
         if (sf->picoquicDeleted)
@@ -2355,24 +2547,53 @@ static void quicTryRecoverPaths(int* rejectedIfs, int* rejectedCount) {
         if (ifUp && rtt > 0) {
             uint64_t prevOk = sf->lastStandbyProbeOk;
             sf->lastStandbyProbeOk = nowP;
-            if (inactiveRevivable && prevOk != 0 &&
-                (nowP - prevOk) < 15000000 &&
-                // §Q-REGAIN-BREAKER：斷路中不 revive（ICMP 通不代表
-                // QUIC 通；round 4 實測反覆 revive 造成 IDR 風暴）
-                (g_ctx.regainSuspendedUntil == 0 ||
-                 nowP >= g_ctx.regainSuspendedUntil)) {
-                // 連續兩輪（~10s 間隔）ICMP OK → 視為路徑已復活。
-                // 刷新 lastRecvTime，health check（≤500ms 後）的
-                // 「Re-activate a previously dead path」區塊會接手。
+
+            // §Q-REVIVE-STANDBY last-resort (Fix A3)：若不存在任何健康的
+            // available 路徑（全滅），跳過「連續兩輪 OK」與斷路器——
+            // 爛路徑也比沒路徑好。促升交給 ≤500ms 後 health check 的
+            // §Q-DYN-STANDBY-ALIVE 全滅分支（無 dwell）。
+            bool anyAliveRef = false;
+            for (int j = 0; j < g_ctx.subflowCount; j++) {
+                QUIC_SUBFLOW* ref = &g_ctx.subflows[j];
+                if (j != s && ref->active && !ref->keepAsStandby &&
+                    !ref->picoquicDeleted &&
+                    ref->consecutiveTimeouts == 0 &&
+                    ref->lastRecvTime > 0) {
+                    uint64_t refStall = (uint64_t)(ref->rttMs * 5000.0f);
+                    if (refStall < 3000000) refStall = 3000000;
+                    if ((nowP - ref->lastRecvTime) < refStall) {
+                        anyAliveRef = true;
+                        break;
+                    }
+                }
+            }
+
+            if (inactiveRevivable &&
+                (!anyAliveRef ||
+                 (prevOk != 0 && (nowP - prevOk) < 15000000 &&
+                  // §Q-REGAIN-BREAKER：斷路中不 revive（ICMP 通不代表
+                  // QUIC 通；round 4 實測反覆 revive 造成 IDR 風暴）
+                  (g_ctx.regainSuspendedUntil == 0 ||
+                   nowP >= g_ctx.regainSuspendedUntil)))) {
+                // §Q-REVIVE-STANDBY (Fix A2)：以 standby 身份復活。
+                sf->active = true;
+                sf->keepAsStandby = true;
+                sf->consecutiveTimeouts = 0;
                 sf->lastRecvTime = nowP;
+                sf->regainEligibleAt = 0;  // REGAIN 第一次評估時武裝 dwell
+                if (g_ctx.cnx) {
+                    quicSetPathStatusTracked(sf, picoquic_path_status_backup);
+                }
                 // revive 也計入 flap 帳（若它稍後又死，quicNoteRegainFlap
                 // 才有基準；純 revive 循環也要能觸發斷路器）
                 g_ctx.lastRegainTime = nowP;
                 g_ctx.lastRegainIf = sf->interfaceIndex;
-                Limelog("[VIPLE-MPQUIC] §Q-INACTIVE-REVIVE: subflow %d "
-                        "(if %d, slot %d) ICMP OK twice (RTT=%ums) — "
-                        "marking alive for health-check revive\n",
-                        sf->id, sf->interfaceIndex, s, rtt);
+                Limelog("[VIPLE-MPQUIC] §Q-REVIVE-STANDBY: subflow %d "
+                        "(if %d, slot %d) ICMP OK %s (RTT=%ums) — revived "
+                        "into standby, promotion gated by REGAIN\n",
+                        sf->id, sf->interfaceIndex, s,
+                        anyAliveRef ? "twice" : "once (no alive ref — last resort)",
+                        rtt);
             }
         } else {
             sf->lastStandbyProbeOk = 0;
@@ -2456,6 +2677,9 @@ static void quicTryRecoverPaths(int* rejectedIfs, int* rejectedCount) {
                     // 升回 available。
                     {
                         int backoff = g_ctx.regainFlapCount;
+                        // §Q-BREAKER-ESC：跳閘史存在 → 直接用最大 dwell
+                        if (g_ctx.breakerTripCount > 0)
+                            backoff = REGAIN_FLAP_MAX;
                         if (backoff > REGAIN_FLAP_MAX)
                             backoff = REGAIN_FLAP_MAX;
                         g_ctx.subflows[s].regainEligibleAt =
@@ -2602,6 +2826,17 @@ int quicIsPrimaryPathUnhealthy(void) {
     QUIC_SUBFLOW* sf = &g_ctx.subflows[0];
     if (sf->picoquicDeleted || !sf->active) return 1;
     if (sf->consecutiveTimeouts > 0) return 1;
+    // §Q-REVIVE-STANDBY: slot 0 復活後躺在 standby（dwell 未滿）期間，
+    // 視訊仍在備援路徑上——control 面應維持 failover 行為（Fix L bypass
+    // / §Q-IDR-QUIC-FIRST）。
+    if (sf->keepAsStandby) return 1;
+    // §Q-LOSS-DEMOTE: zombie 判定——loss 持續越檻即視為不健康，即使
+    // lastRecvTime 被零星控制面封包保鮮（2026-07-06 事故中此函式被
+    // zombie 騙過 → 凍結期間 RFI 沒有 QUIC 備援管道）。
+    if (sf->lossBadSinceUs != 0) {
+        uint64_t nowU = picoquic_current_time();
+        if (nowU - sf->lossBadSinceUs >= LOSS_DEMOTE_HOLD_US) return 1;
+    }
     return 0;
 }
 
@@ -3159,6 +3394,14 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                     // 同一介面）或讓出給新介面使用。
                     ctx->subflows[i].picoquicDeleted = true;
                 }
+                else {
+                    // §Q-REVIVE-STANDBY (Fix A5): suspended（未刪除）的
+                    // 路徑之後可能復活——與 INACTIVE 標記一致，先進
+                    // standby，促升走 REGAIN 的 dwell + liveness。
+                    ctx->subflows[i].keepAsStandby = true;
+                    ctx->subflows[i].regainEligibleAt = 0;
+                    ctx->subflows[i].lastStandbyProbeOk = 0;
+                }
                 // §Q-STANDBY-REGAIN: 剛 regain 的介面被 picoquic 判死
                 // → flap 退避
                 quicNoteRegainFlap(ctx->subflows[i].interfaceIndex,
@@ -3225,8 +3468,8 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
                     int j = bestJ;
                     candidate->keepAsStandby = false;
                     candidate->recoveryStandbyUntil = 0; // emergency 覆蓋 recovery grace
-                    candidate->lastRecvTime = picoquic_current_time();
-                    candidate->consecutiveTimeouts = 0;
+                    quicResetSubflowHealthOnPromote(candidate,
+                                                    picoquic_current_time());
                     quicSetPathStatusTracked(candidate,
                                              picoquic_path_status_available);
                     ctx->failoverPromotedSlot = j;

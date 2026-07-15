@@ -279,6 +279,36 @@ static void VideoReceiveThreadProc(void* context) {
                 break;
             }
         }
+
+        // §FRZ-WATCHDOG 2026-07-06 凍結事故的最後防線：封包持續進來
+        // （此區塊只在 err > 0 時執行）但解碼器 >2s 沒有任何完整幀產出。
+        // 事故中 RtpVideoQueue 被 stale datagram 毒化（isBefore16 迴繞
+        // 盲區）後把所有新鮮幀判為過期，29 秒零解碼直到使用者退出。
+        // isBefore32 修復已根治已知路徑；這裡把任何未知毒化模式的凍結
+        // 上限壓到 ~2 秒：重置 RTP 佇列 + 重新對齊 depacketizer 幀號 +
+        // 要求 IDR。誤觸（server 出 IDR 慢於 2s）僅多要一張 IDR。
+        if (receivedFullFrame) {
+            static uint64_t lastWatchdogCheckUs, lastWatchdogFireUs;
+            uint64_t nowUs = PltGetMicroseconds();
+            if (nowUs - lastWatchdogCheckUs > 250000) {
+                lastWatchdogCheckUs = nowUs;
+                uint64_t lastFrameUs = videoDepacketizerLastFrameTimeUs();
+                if (lastFrameUs != 0 &&
+                    nowUs - lastFrameUs > 2000000 &&
+                    nowUs - lastWatchdogFireUs > 1000000) {
+                    lastWatchdogFireUs = nowUs;
+                    Limelog("[VIPLE-VIDEO] §FRZ-WATCHDOG: packets flowing but "
+                            "no decode unit for %.1fs (queue frame=%u) — "
+                            "resetting RTP queue and requesting IDR\n",
+                            (float)(nowUs - lastFrameUs) / 1e6f,
+                            RtpvGetCurrentFrameNumber(&rtpQueue));
+                    RtpvCleanupQueue(&rtpQueue);
+                    RtpvInitializeQueue(&rtpQueue);
+                    videoDepacketizerRequestResync();
+                    requestDecoderRefresh();
+                }
+            }
+        }
 #endif
 
         if (err < minSize) {
