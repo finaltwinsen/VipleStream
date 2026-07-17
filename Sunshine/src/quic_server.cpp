@@ -409,9 +409,16 @@ namespace quic_server {
       if (++diagCounter >= 500) {
         diagCounter = 0;
         int queueDepth = 0;
+        // §AUD-Q-POISON-FIX 2026-07-17：approxVQ 的校正值只能算 video。
+        // 舊版把整條佇列（含 audio）寫進 _approxVideoQueueDepth——07-17
+        // 事故中 audio 積壓上千，把 video 的 stale 判定（門檻 60）永久
+        // 打穿，所有 video datagram 被 §Q-STALE 整批丟棄（4101 個），
+        // client「packets flowing but no decode unit」凍結 13.9s。
+        int videoQueueDepth = 0;
         picoquic_misc_frame_header_t* dg = _cnx->first_datagram;
         while (dg != NULL) {
           queueDepth++;
+          if (picoquic_queued_datagram_flow(dg) == FLOW_VIDEO) videoQueueDepth++;
           dg = dg->next_misc_frame;
         }
         // §5d: per-path queue 深度也計入
@@ -420,6 +427,7 @@ namespace quic_server {
             dg = _cnx->path[pi]->first_datagram;
             while (dg != NULL) {
               queueDepth++;
+              if (picoquic_queued_datagram_flow(dg) == FLOW_VIDEO) videoQueueDepth++;
               dg = dg->next_misc_frame;
             }
           }
@@ -428,7 +436,7 @@ namespace quic_server {
           _dgramPendingPeak = std::max(_dgramPendingPeak.load(), (uint64_t)queueDepth);
         }
         // §Q-STALE: 用實際遍歷值校正估計量，防止 bytes_sent 估算偏移
-        _approxVideoQueueDepth = queueDepth;
+        _approxVideoQueueDepth = videoQueueDepth;
         // 用 _lastVideoPath（上一次 drain cycle 的結果），因為此處
         // 新一輪的 bestVideoPath 還沒計算（Pass 1/2/3 在 §K.11 之後）。
         int diagPathIdx = (_lastVideoPath >= 0) ? _lastVideoPath : 0;
@@ -1000,24 +1008,70 @@ namespace quic_server {
     // 1500；path 重生（新 path id）自然重新嘗試。
     // 註：不能直接用 nb_mtu_losses==0 當 boost 條件——它在 mtu-size 包
     // 被 ACK 時歸零，會形成 boost→黑洞→reset→ACK 歸零→boost 震盪。
+    uint64_t paroleNowUs = picoquic_current_time();
     for (int i = 0; i < _cnx->nb_paths; i++) {
       auto *p = _cnx->path[i];
       if (p == nullptr) {
         continue;
       }
       uint64_t pid = p->unique_path_id;
-      if (p->nb_mtu_losses > 0 && !_mtuBoostBlocked.count(pid)) {
+      // §K.9-LATCH-THRESH 2026-07-17：門檻 >0 → >=10。LAN 握手期的 RACK
+      // 假陽性會讓 nb_mtu_losses 到 1-2（07-17 LAN 迴歸實測：latch 誤觸發
+      // → send_mtu 打回 1232 → PMTUD 重爬升窗口內 1420B video shard 被
+      // DATAGRAM_TOO_LONG 拒絕、首張 IDR 陣亡）。session 開頭的真黑洞由
+      // §K.9-PAROLE 在 1.5s 內收口。
+      //
+      // §K.9-LATCH-CONFIRMED-EXEMPT：已有 ≥1300B ACK 實證的路徑不 latch。
+      // LAN 迴歸 r2 實測：quit teardown 的 PTO burst 讓 mtuLosses 衝到 13
+      // 觸發 takeover——若同樣 burst 發生在串流中的短暫斷訊，路徑會被
+      // 永久打回 1232 且 PMTUD 受 client TP 上限 1440 也救不回 1449B 的
+      // video datagram → LAN video 永久死亡。大包通過過的路徑，PTO burst
+      // 是壅塞/斷訊證據而非 MTU 黑洞證據。
+      if (p->nb_mtu_losses >= 10 &&
+          p->max_acked_packet_size < MTU_PAROLE_CONFIRM_LEN &&
+          !_mtuBoostBlocked.count(pid)) {
         _mtuBoostBlocked.insert(pid);
         BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.9 PMTUD takeover: path=" << i
                         << " id=" << pid << " send_mtu=" << p->send_mtu
                         << " mtuLosses=" << p->nb_mtu_losses
                         << " — stop forcing 1500, PMTUD converges real MTU";
       }
+      // §K.9-PAROLE 2026-07-17：boost 需要正向確認。nb_mtu_losses 的
+      // 遞增條件在 RACK 支配的路徑上實質失聰（07-17 事故拖了 60s 才
+      // takeover）；改為 boost 納管後 1.5s 內沒有任何 ≥1300B 封包被
+      // ACK（該 path 的 max_acked_packet_size），即認定大包被黑洞：
+      // 撤銷 boost + reset_path_mtu + 黑名單，讓 PMTUD（required，
+      // §K.8 ready 時已設）收斂真實 MTU。一旦有大包 ACK 過，條件
+      // 永久不成立（max 只增不減），boost 維持。
+      if (!_mtuBoostBlocked.count(pid)) {
+        auto it = _mtuBoostParoleStartUs.find(pid);
+        if (it == _mtuBoostParoleStartUs.end()) {
+          _mtuBoostParoleStartUs.emplace(pid, paroleNowUs);
+        } else if (p->bytes_sent < MTU_PAROLE_MIN_SENT_BYTES) {
+          // §K.9-PAROLE-IDLE 2026-07-17：路徑還沒實際送過量（standby /
+          // 剛建立），缺少大包 ACK 不是黑洞證據——推遲假釋時鐘，等
+          // 晉升載流後再驗（07-17 LAN 迴歸：閒置 path=1 被誤撤銷）。
+          it->second = paroleNowUs;
+        } else if (p->max_acked_packet_size < MTU_PAROLE_CONFIRM_LEN &&
+                   paroleNowUs - it->second > MTU_PAROLE_TIMEOUT_US) {
+          _mtuBoostBlocked.insert(pid);
+          picoquic_reset_path_mtu(p);
+          BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.9-PAROLE revoke: path=" << i
+                          << " id=" << pid
+                          << " no >=" << MTU_PAROLE_CONFIRM_LEN
+                          << "B ACK within " << (MTU_PAROLE_TIMEOUT_US / 1000)
+                          << "ms (maxAcked=" << p->max_acked_packet_size
+                          << ") — send_mtu reset to " << p->send_mtu
+                          << ", PMTUD converges real MTU";
+          continue;
+        }
+      }
       if (p->send_mtu < 1500 && !_mtuBoostBlocked.count(pid)) {
         p->send_mtu = 1500;
       }
     }
 
+    bool audioQueuedThisBatch = false;
     for (auto &dg : batch) {
       if (dg.isStream) {
         picoquic_add_to_stream(_cnx, 0, dg.data.data(), dg.data.size(), 0);
@@ -1153,6 +1207,8 @@ namespace quic_server {
         _bytesByFlow[ft] += dg.data.size();
         // §Q-STALE: 追蹤 approximate queue depth
         if (ft == FLOW_VIDEO) _approxVideoQueueDepth++;
+        // §AUD-Q-TRIM: 本批有 audio 入隊 → 批尾修剪 audio 佇列
+        if (ft == FLOW_AUDIO) audioQueuedThisBatch = true;
         // §K.8 diag: 首筆 datagram 成功送出時記錄一次
         if (_dgramQueued == 1) {
           size_t curMtu = (_cnx->nb_paths > 0 && _cnx->path[0])
@@ -1161,6 +1217,27 @@ namespace quic_server {
                           << " len=" << dg.data.size()
                           << " mtu=" << curMtu
                           << " flow=" << (int)dg.flowType;
+        }
+      }
+    }
+
+    // §AUD-Q-TRIM 2026-07-17：audio 佇列 stale 淘汰（從最舊端）。
+    // audio 豁免 §Q-STALE，窄路徑壅塞時在 picoquic FIFO 積壓數秒再
+    // 爆量排空（07-17 事故 93→715 dgram/s 吃滿 DERP、擠死 video）。
+    // 即時媒體遲到 >250ms 沒有播放價值：每次有 audio 入隊就把 audio
+    // 佇列修剪到最新 AUDIO_QUEUE_MAX_DEPTH 個。
+    // §K.11-PERF 同型防護：trim 是 O(N) 佇列走訪，不能每批都跑
+    //（v1.5.159 教訓：87K 節點 × 每 drain 走訪 = 正反饋螺旋）。1/8
+    // 頻率下 staleness 上限 ≈ 250ms + 8×drain 間隔，仍遠低於危害線。
+    static int audioTrimTick = 0;
+    if (audioQueuedThisBatch && (++audioTrimTick & 7) == 0) {
+      int evicted = picoquic_trim_datagram_flow(_cnx, FLOW_AUDIO, AUDIO_QUEUE_MAX_DEPTH);
+      if (evicted > 0) {
+        uint64_t total = (_dgramTrimmedStaleAudio += evicted);
+        static int trimLogCount = 0;
+        if (trimLogCount++ < 20 || total % 1000 < (uint64_t)evicted) {
+          BOOST_LOG(info) << "[VIPLE-MPQUIC] §AUD-Q-TRIM: evicted " << evicted
+                          << " stale audio dgrams (total=" << total << ")";
         }
       }
     }

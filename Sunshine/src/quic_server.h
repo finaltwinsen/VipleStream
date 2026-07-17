@@ -302,6 +302,32 @@ namespace quic_server {
     // 僅 IO 執行緒（drainPendingToQuic）存取，無鎖需求。
     std::unordered_set<uint64_t> _mtuBoostBlocked;
 
+    // §K.9-PAROLE 2026-07-17：boost 假釋制。07-17 事故證實 nb_mtu_losses
+    // 的遞增條件在 RACK 支配的路徑上實質聾了 60 秒（只計「丟失包長度
+    // 精確 ==send_mtu」或 PTO；coalesced 1281-1499B 黑洞包一律不計，
+    // 而 boost 鎖 1500=mtu_max 又讓 PMTUD probe 永不發送）。改為正向
+    // 確認：path 首次被 boost 納管時記錄時刻，1.5 秒內沒觀測到任何
+    // ≥1300B 封包被 ACK（picoquic path->max_acked_packet_size），就
+    // 撤銷 boost + reset_path_mtu + 黑名單，交還 PMTUD（required）。
+    // 真 1500 路徑上 video 大包毫秒級就會被 ACK，不受影響；誤撤銷的
+    // 代價只是 PMTUD 花幾個 RTT 探回 1500。僅 IO 執行緒存取。
+    std::unordered_map<uint64_t, uint64_t> _mtuBoostParoleStartUs;
+    static constexpr uint64_t MTU_PAROLE_TIMEOUT_US = 1500000;   // 1.5s（遠端 RTT 300ms ≈ 5 RTT）
+    static constexpr size_t MTU_PAROLE_CONFIRM_LEN = 1300;       // > Tailscale/DERP 1280
+    // §K.9-PAROLE-IDLE：路徑累計送量低於此值（約一張 IDR）視為閒置，
+    // 假釋時鐘不啟動——standby 路徑沒送過大包，不能當黑洞證據。
+    static constexpr uint64_t MTU_PAROLE_MIN_SENT_BYTES = 65536;
+
+    // §AUD-Q-TRIM 2026-07-17：audio datagram 佇列 stale 淘汰上限。
+    // audio 豁免 §Q-STALE（丟 video 的邏輯），但在窄路徑壅塞時會在
+    // picoquic cnx FIFO 無上限積壓數秒、再以 2.4× 實時排空吃滿頻寬
+    //（07-17 事故：93→715 dgram/s、2.03Mbps，把 video 擠到餓死）。
+    // 每次 drain 完把 audio 佇列修剪到最新 75 個（HQ 5ms + 4+2 parity
+    // ≈ 300 dgram/s → 約 250ms），從最舊端淘汰——遲到 250ms 的 audio
+    // 本來就沒有播放價值。
+    static constexpr size_t AUDIO_QUEUE_MAX_DEPTH = 75;
+    std::atomic<uint64_t> _dgramTrimmedStaleAudio{0};
+
     // §Q-GRACE-FIX 2026-05-27 (v1.5.172): per-failover-episode grace
     // 重設邏輯。原版每次 PATH-SWITCH 都重設 grace → 振盪期間 grace
     // 永不過期 → §Q-STALE 失效。改為「同 episode 內振盪不續命」。

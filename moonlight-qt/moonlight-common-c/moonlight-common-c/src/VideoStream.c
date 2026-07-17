@@ -302,8 +302,31 @@ static void VideoReceiveThreadProc(void* context) {
                             "resetting RTP queue and requesting IDR\n",
                             (float)(nowUs - lastFrameUs) / 1e6f,
                             RtpvGetCurrentFrameNumber(&rtpQueue));
-                    RtpvCleanupQueue(&rtpQueue);
-                    RtpvInitializeQueue(&rtpQueue);
+                    // §FRZ-GAP-FIX 2026-07-17：reset 只為清掉可能毒化的
+                    // 佇列內容，幀號連續性必須保留。RtpvInitializeQueue
+                    // 會把 currentFrameNumber 打回 1，下一個到達的幀
+                    // （index 數千）會被 §FRZ-GAP-FEC 判成 gap≈4096 的
+                    // 整幀消失、送出 missing 數萬的 synthetic FEC status
+                    // → server AIMD 被假訊號釘死在 floor（07-17 事故的
+                    // 自我維持凍結迴圈：watchdog 每秒 fire 一次假訊號）。
+                    //
+                    // 分級復原（review 補強）：只在「上次 fire 之後有過
+                    // 解碼進展」時保留幀號；連續 fire 且期間零解碼代表
+                    // 保留救不了（可能幀號本身被前向毒化——watchdog 的
+                    // 原始守備範圍），退回完整 reset（=1）。此時的假 gap
+                    // 已被 gap≤4096、wire u16、server §FRZ-GAP-CLAMP
+                    // 三層封頂。
+                    {
+                        static uint64_t prevFireLastFrameUs;
+                        bool madeProgress = (lastFrameUs != prevFireLastFrameUs);
+                        uint32_t savedFrameNumber = RtpvGetCurrentFrameNumber(&rtpQueue);
+                        prevFireLastFrameUs = lastFrameUs;
+                        RtpvCleanupQueue(&rtpQueue);
+                        RtpvInitializeQueue(&rtpQueue);
+                        if (madeProgress) {
+                            rtpQueue.currentFrameNumber = savedFrameNumber;
+                        }
+                    }
                     videoDepacketizerRequestResync();
                     requestDecoderRefresh();
                 }

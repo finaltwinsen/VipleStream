@@ -464,6 +464,12 @@ namespace stream {
       // VipleStream §ABR: accumulated FEC loss stats from SS_FRAME_FEC_PTYPE
       std::atomic<int> fecLossAccum{0};
       std::atomic<int> fecFrameAccum{0};
+      // §FRZ-GAP-CLAMP 2026-07-17：同窗口實際送出的 video shard 數。
+      // client 的 §FRZ-GAP-FEC synthetic status 在 RTP 佇列重置後可能
+      // 虛報數萬 missing（07-17 事故：watchdog reset → frameNumber=1
+      // → gap clamp 4096 × shards）。任何窗口的真實丟失不可能超過
+      // 實發量，排空時以此為 count 上限。與 fecLossAccum 同步歸零。
+      std::atomic<int> videoShardsSentAccum{0};
       std::chrono::steady_clock::time_point fecAccumStart{std::chrono::steady_clock::now()};
 
       // §ABR-RAMP-TICK：periodic ping 驅動的零丟包 tick 節流（500ms 一輪）。
@@ -1300,6 +1306,17 @@ namespace stream {
       // 沒觸發排空），避免滯留污染下次計算；通常為 0。
       int residual = session->video.fecLossAccum.exchange(0);
       session->video.fecFrameAccum.exchange(0);
+      // §FRZ-GAP-CLAMP：residual 同樣以同期實發 shard 數為上限。
+      // 只在 residual>0 時 exchange——零丟包的 ping-tick（常態）不切碎
+      // clamp 的基準視窗，讓安靜期後第一個真實 loss burst 對上的是完整
+      // 累積窗（review：無條件 exchange 會把剛好跨窗的 burst clamp 到
+      // 近 0）。防溢位：counter 超過 1M（≈45 分鐘無 flush）強制排空。
+      if (residual > 0) {
+        int sentWindow = session->video.videoShardsSentAccum.exchange(0);
+        if (residual > sentWindow) residual = sentWindow;
+      } else if (session->video.videoShardsSentAccum.load(std::memory_order_relaxed) > 1000000) {
+        session->video.videoShardsSentAccum.exchange(0);
+      }
       run_abr_aimd(session, residual, 500,
                    residual > 0 ? "ping-tick-residual" : "ping-tick");
     }
@@ -1454,9 +1471,22 @@ namespace stream {
       if (elapsed >= 500) {
         int count = session->video.fecLossAccum.exchange(0);
         int frames = session->video.fecFrameAccum.exchange(0);
+        int sentWindow = session->video.videoShardsSentAccum.exchange(0);
         session->video.fecAccumStart = now;
 
         (void)frames;  // available for future per-frame-loss-rate computation
+
+        // §FRZ-GAP-CLAMP：client 回報的 missing 不可能超過同期實發量
+        //（synthetic gap status 在 client 佇列重置後會虛報數萬）。
+        if (count > sentWindow) {
+          static int clampLogCount = 0;
+          if (clampLogCount++ < 20) {
+            BOOST_LOG(info) << "[VIPLE-FEC] §FRZ-GAP-CLAMP: reported missing "
+              << count << " > shards sent " << sentWindow
+              << " this window — clamped";
+          }
+          count = sentWindow;
+        }
 
         // Feed the same AIMD algorithm as IDX_LOSS_STATS handler
         auto currentFec = session->video.adaptiveFecPercentage.load();
@@ -2212,7 +2242,20 @@ namespace stream {
                         if (elapsed >= 500) {
                           int count = session->video.fecLossAccum.exchange(0);
                           session->video.fecFrameAccum.exchange(0);
+                          int sentWindow = session->video.videoShardsSentAccum.exchange(0);
                           session->video.fecAccumStart = now;
+
+                          // §FRZ-GAP-CLAMP：同 ENet 路徑——missing 以同期
+                          // 實發 shard 數為上限，擋 synthetic 虛報。
+                          if (count > sentWindow) {
+                            static int clampLogCount = 0;
+                            if (clampLogCount++ < 20) {
+                              BOOST_LOG(info) << "[VIPLE-FEC] §FRZ-GAP-CLAMP (QUIC): "
+                                << "reported missing " << count << " > shards sent "
+                                << sentWindow << " this window — clamped";
+                            }
+                            count = sentWindow;
+                          }
 
                           // Adaptive FEC
                           auto currentFec = session->video.adaptiveFecPercentage.load();
@@ -2564,6 +2607,10 @@ namespace stream {
                 }
               }
               frame_send_batch_latency_logger.second_point_now_and_log();
+
+              // §FRZ-GAP-CLAMP：記錄實發 shard 數（所有傳輸路徑共同點）
+              session->video.videoShardsSentAccum.fetch_add(
+                current_batch_size, std::memory_order_relaxed);
 
               ratecontrol_group_packets_sent += current_batch_size;
               ratecontrol_frame_packets_sent += current_batch_size;
