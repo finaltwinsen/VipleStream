@@ -310,12 +310,19 @@ static void VideoReceiveThreadProc(void* context) {
                     // → server AIMD 被假訊號釘死在 floor（07-17 事故的
                     // 自我維持凍結迴圈：watchdog 每秒 fire 一次假訊號）。
                     //
-                    // 分級復原（review 補強）：只在「上次 fire 之後有過
+                    // 分級復原 v2（07-20 修正）：只在「上次 fire 之後有過
                     // 解碼進展」時保留幀號；連續 fire 且期間零解碼代表
                     // 保留救不了（可能幀號本身被前向毒化——watchdog 的
-                    // 原始守備範圍），退回完整 reset（=1）。此時的假 gap
-                    // 已被 gap≤4096、wire u16、server §FRZ-GAP-CLAMP
-                    // 三層封頂。
+                    // 原始守備範圍），需要完整 reset。
+                    //
+                    // v1 的完整 reset 退回 1，結果 07-20 事故實證：凍結期間
+                    // 封包持續流入，reset-to-1 → 下一幀 index 數萬 →
+                    // §FRZ-GAP-FEC 合成 gap=4096 假回報 → server AIMD 每窗
+                    // 被打滿額 cut（§FRZ-GAP-CLAMP 只封頂不歸零）→ 07-17
+                    // 互咬迴圈部分回歸（log 實證 queue frame=1 連續 fire）。
+                    // v2 改用哨兵 0：「無基準幀號」，下一個到達幀被靜默採納
+                    //（RtpVideoQueue 的 GAP-FEC 遇哨兵跳過合成回報）——毒化
+                    // 值一樣被丟棄，且永不製造假 gap。
                     {
                         static uint64_t prevFireLastFrameUs;
                         bool madeProgress = (lastFrameUs != prevFireLastFrameUs);
@@ -325,6 +332,10 @@ static void VideoReceiveThreadProc(void* context) {
                         RtpvInitializeQueue(&rtpQueue);
                         if (madeProgress) {
                             rtpQueue.currentFrameNumber = savedFrameNumber;
+                        }
+                        else {
+                            // §FRZ-RESYNC-SENTINEL：無基準，採納下一個到達幀
+                            rtpQueue.currentFrameNumber = 0;
                         }
                     }
                     videoDepacketizerRequestResync();

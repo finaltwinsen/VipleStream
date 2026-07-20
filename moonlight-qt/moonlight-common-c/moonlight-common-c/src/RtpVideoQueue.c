@@ -833,7 +833,14 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
             // 附帶效益：刷新 server 端 lastFecStatusTime → ping-tick 自動讓位。
             {
                 uint32_t gap = nvPacket->frameIndex - queue->currentFrameNumber;
-                if (queue->currentFrameNumber + 1 == nvPacket->frameIndex && queue->reportedLostFrame) {
+                if (queue->currentFrameNumber == 0) {
+                    // §FRZ-RESYNC-SENTINEL 2026-07-20：watchdog 完整 reset
+                    // 後的哨兵——無基準幀號，靜默採納本幀，不合成 gap 回報
+                    //（07-20 事故：reset-to-1 讓每次 watchdog fire 都合成
+                    // gap=4096 假回報，server AIMD 被釘死）。
+                    gap = 0;
+                }
+                else if (queue->currentFrameNumber + 1 == nvPacket->frameIndex && queue->reportedLostFrame) {
                     gap = 0;  // 唯一消失的幀已由 speculative 路徑回報過
                 }
                 else if (queue->reportedLostFrame) {

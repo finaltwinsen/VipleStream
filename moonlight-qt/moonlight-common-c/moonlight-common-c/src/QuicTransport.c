@@ -324,10 +324,15 @@ static uint64_t g_lastDiagLogTime = 0;
 #define QUIC_JITTER_MAX_WAIT_NORMAL_US   10000  // 10ms 正常（floor）
 #define QUIC_JITTER_MAX_WAIT_FAILOVER_US 200000 // 200ms failover
 // §5a.r3 v1.5.198 Fix Q：正常模式改成 RTT 自適應（1.5×RTT，夾在
-// floor 10ms ~ cap 40ms）。寫死 10ms 在 ~30ms RTT 遠端路徑會把「會晚到
-// 的重排封包」過早跳過 → 過早 unrecoverable frame + lag。CAP 把額外
-// 重排等待壓在一個 ~16ms frame 量級內，避免延遲爆掉。
-#define QUIC_JITTER_MAX_WAIT_CAP_US      40000  // 40ms 上限
+// floor 10ms ~ cap）。寫死 10ms 在 ~30ms RTT 遠端路徑會把「會晚到
+// 的重排封包」過早跳過 → 過早 unrecoverable frame + lag。
+//
+// §5a-CAP-REMOTE 2026-07-20：cap 40ms → 250ms。07-17/07-20 遠端事故
+// （RTT 89-300ms）實證：40ms cap 把 1.5×RTT 應有的 130-450ms 等待窗
+// 截斷，3-31% 的遲到/重排 shard 被人工判丟 → 幀組不齊 → 凍結。
+// cap 只在「有缺口等待時」才生效（LAN 1.5×RTT≈10ms floor 不受影響）；
+// 遠端寧可多等一個 RTT 也不要把可用 shard 丟掉——凍結比延遲糟。
+#define QUIC_JITTER_MAX_WAIT_CAP_US      250000  // 250ms 上限
 
 typedef struct _QUIC_JITTER_SLOT {
     unsigned char data[QUIC_JITTER_MAX_PKT];

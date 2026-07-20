@@ -827,7 +827,13 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
             // 附帶效益：刷新 server 端 lastFecStatusTime → ping-tick 自動讓位。
             {
                 uint32_t gap = nvPacket->frameIndex - queue->currentFrameNumber;
-                if (queue->currentFrameNumber + 1 == nvPacket->frameIndex && queue->reportedLostFrame) {
+                if (queue->currentFrameNumber == 0) {
+                    // §FRZ-RESYNC-SENTINEL 2026-07-20：完整 reset 後的哨兵
+                    // ——無基準幀號，靜默採納本幀，不合成 gap 回報（與 qt
+                    // 副本對齊；Android 無 watchdog，目前不會設 0，防禦性同步）。
+                    gap = 0;
+                }
+                else if (queue->currentFrameNumber + 1 == nvPacket->frameIndex && queue->reportedLostFrame) {
                     gap = 0;  // 唯一消失的幀已由 speculative 路徑回報過
                 }
                 else if (queue->reportedLostFrame) {

@@ -286,6 +286,19 @@ namespace quic_server {
     uint64_t _lastTotalBytesSent = 0;
     static constexpr int64_t MAX_VIDEO_QUEUE_DEPTH = 60; // ~4 frames × 14 dgrams/frame
 
+    // §Q-STALE-STARVE 2026-07-17：pacing 飢餓型無條件淘汰門檻。
+    // 07-17 晚間 lag 事故：BBR bw_lo 自陷讓 pacing 掐死輸出，
+    // inFlight=0、cwnd 未滿 → quicBackpressured 恆假 → §Q-STALE
+    // 不觸發，video 佇列 20 秒 1471→8652 無界成長（秒級畫面延遲）。
+    // 佇列深過此值（≈0.5-1 秒份量，遠大於單張大 IDR 的 ~36-40 個
+    // dgram burst）就不看 backpressure 直接淘汰。
+    static constexpr int64_t STALE_STARVE_THRESHOLD = 240;
+
+    // §K.16-BBR-REVIVE 2026-07-17：BBR 崩塌偵測狀態（連續兩次
+    // 500-drain 取樣成立才觸發 reset；10 秒限頻）。
+    int _bbrCollapseSamples = 0;
+    uint64_t _lastBbrReviveUs = 0;
+
     // §Q-PATH-SWITCH-FLUSH 2026-05-27: PATH-SWITCH 後寬限期計數器。
     // 非零期間 §Q-STALE 不丟 video datagram，確保 IDR 通過。
     int _pathSwitchGraceCycles = 0;

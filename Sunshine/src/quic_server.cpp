@@ -476,6 +476,34 @@ namespace quic_server {
                 << ") pending=" << queueDepth;
           }
         }
+        // §K.16-BBR-REVIVE 2026-07-17：cwnd/pacing 崩塌矯正。07-17 晚間
+        // lag 事故：LAN RACK 假陽性把 BBR bw_lo 閂低 → BBRBoundBWForModel
+        // 取 min(max_bw, bw_lo) → pacing 掐死輸出（inFlight≈0、cwnd 釘
+        // 48×MTU floor）→ delivery rate 樣本永遠低 → max_bw filter 窗口
+        // 老化後跟著沉底，自陷永不恢復（encoder 33-55fps 產出、client 只
+        // 收 11fps）。§K.14 只在握手後清一次閂；這裡補 mid-session 版：
+        // 「cwnd 低於警戒線 + video 佇列超標 + 送出端近乎閒置」連續兩次
+        // 500-drain 取樣成立 → 清 bw_lo/inflight_lo + cwin 回初始。
+        // 已知限制：picoquic_bbr_reset_after_handshake 只動 path[0]；
+        // bestVideoPath≠0 時需 picoquic fork 加 per-path 版（後續）。
+        if (cwndAlert && _approxVideoQueueDepth > MAX_VIDEO_QUEUE_DEPTH &&
+            inFlight < cwnd / 4 &&
+            _cnx->congestion_alg == picoquic_bbr_algorithm) {
+          if (++_bbrCollapseSamples >= 2) {
+            _bbrCollapseSamples = 0;
+            uint64_t nowReviveUs = picoquic_current_time();
+            if (nowReviveUs - _lastBbrReviveUs > 10000000) {
+              _lastBbrReviveUs = nowReviveUs;
+              picoquic_bbr_reset_after_handshake(_cnx);
+              BOOST_LOG(warning) << "[VIPLE-MPQUIC] §K.16-BBR-REVIVE: cwnd=" << cwnd
+                  << " inFlight=" << inFlight
+                  << " videoQ=" << _approxVideoQueueDepth
+                  << " — clearing BBR bw_lo/inflight_lo latch (path[0]), cwin restored";
+            }
+          }
+        } else {
+          _bbrCollapseSamples = 0;
+        }
         // §Q-STATS-CACHE-FIX (review batch 2)：在 IO 執行緒更新 path
         // quality 快取。500 次 drain ≈ 0.5-1 秒一次，statsLoop 每 5 秒
         // 讀一次綽綽有餘；放限頻區塊內避免高頻 picoquic 走訪
@@ -1086,8 +1114,13 @@ namespace quic_server {
       // 防止 WiFi 短暫 stall → §Q-STALE 死亡螺旋 → video 永久停止。
       // 因果鏈：所有 non-backup path 暫時無法送 → bestVideoPath=-1 →
       // 沒有 PATH-SWITCH → grace 不重設 → §Q-STALE 永不解除。
-      if (ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 && quicBackpressured &&
-          _approxVideoQueueDepth > MAX_VIDEO_QUEUE_DEPTH) {
+      // §Q-STALE-STARVE 2026-07-17：淘汰條件加 pacing 飢餓分支——
+      // 佇列深過 STALE_STARVE_THRESHOLD 時不看 backpressure 直接淘汰
+      //（BBR bw_lo 自陷時 inFlight=0、cwnd 未滿，quicBackpressured 恆假，
+      // 原條件漏接 → 佇列無界成長 → 秒級畫面延遲）。
+      if (ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 &&
+          ((quicBackpressured && _approxVideoQueueDepth > MAX_VIDEO_QUEUE_DEPTH) ||
+           _approxVideoQueueDepth > STALE_STARVE_THRESHOLD)) {
         uint64_t nowStale = picoquic_current_time();
         if (_staleStallStart == 0) {
           _staleStallStart = nowStale;
@@ -1126,8 +1159,9 @@ namespace quic_server {
       // video datagram 格式相同（都是 FLOW_VIDEO）。若 approxVQ 仍高
       // （舊路徑堆積的 stale P-frame 從 encoder pipeline 持續入隊），
       // IDR datagram 會被丟棄 → client 永遠收不到 IDR → 影像凍結。
-      if (ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 && quicBackpressured &&
-          _approxVideoQueueDepth > MAX_VIDEO_QUEUE_DEPTH) {
+      if (ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 &&
+          ((quicBackpressured && _approxVideoQueueDepth > MAX_VIDEO_QUEUE_DEPTH) ||
+           _approxVideoQueueDepth > STALE_STARVE_THRESHOLD)) {
         _dgramDroppedStale++;
         // §ABR-QSTALE-FEEDBACK 2026-07-16：server 自己丟掉的 video
         // datagram = 下行壅塞最直接的證據，回饋 run_abr_aimd（client
