@@ -149,9 +149,9 @@ export QMAKE=qmake6
 # even without --desktop-file.  Hide the desktop file during bundling
 # to prevent the broken SVG icon validation from aborting the run.
 DESKTOP_STASH=""
-if [ -f $DEPLOY_FOLDER/usr/share/applications/com.piinsta.desktop ]; then
+if [ -f $DEPLOY_FOLDER/usr/share/applications/viplestream.desktop ]; then
     DESKTOP_STASH=$(mktemp)
-    mv $DEPLOY_FOLDER/usr/share/applications/com.piinsta.desktop "$DESKTOP_STASH"
+    mv $DEPLOY_FOLDER/usr/share/applications/viplestream.desktop "$DESKTOP_STASH"
 fi
 # VipleStream §K.1.fix (2026-06-20): libncnn.so.1 is built from source into a
 # non-standard prefix (~/.local/ncnn/lib, or /usr/local/lib that only ships the
@@ -176,15 +176,18 @@ linuxdeploy --appdir $DEPLOY_FOLDER \
     || fail "linuxdeploy Qt bundling failed! (libncnn.so.1 findable? NCNN_LIB_DIR='$NCNN_LIB_DIR')"
 # Restore desktop file
 if [ -n "$DESKTOP_STASH" ] && [ -f "$DESKTOP_STASH" ]; then
-    mv "$DESKTOP_STASH" $DEPLOY_FOLDER/usr/share/applications/com.piinsta.desktop
+    mv "$DESKTOP_STASH" $DEPLOY_FOLDER/usr/share/applications/viplestream.desktop
 fi
 
 # Step 2: Hand-craft AppDir root (desktop, icon, AppRun)
 # Fix CRLF→LF (source tree may have Windows line endings from /mnt/d sync)
-cp $SOURCE_ROOT/app/deploy/linux/com.piinsta.desktop $DEPLOY_FOLDER/com.piinsta.desktop
-sed -i 's/\r$//' $DEPLOY_FOLDER/com.piinsta.desktop
+cp $SOURCE_ROOT/app/deploy/linux/viplestream.desktop $DEPLOY_FOLDER/viplestream.desktop
+sed -i 's/\r$//' $DEPLOY_FOLDER/viplestream.desktop
 mkdir -p $DEPLOY_FOLDER/usr/share/applications
-cp $DEPLOY_FOLDER/com.piinsta.desktop $DEPLOY_FOLDER/usr/share/applications/
+cp $DEPLOY_FOLDER/viplestream.desktop $DEPLOY_FOLDER/usr/share/applications/
+# §K.4-DESKTOP-ID 改名遺留：清掉舊 AppDir 可能殘存的 com.piinsta.desktop，
+# 避免同一個 AppImage 桌面整合出現兩個 entry
+rm -f $DEPLOY_FOLDER/com.piinsta.desktop $DEPLOY_FOLDER/usr/share/applications/com.piinsta.desktop
 
 # Icon: SVG in hicolor as viplestream.svg (matches Icon=viplestream in .desktop)
 # Also keep moonlight.svg for backwards compat with older .desktop files

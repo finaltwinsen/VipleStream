@@ -942,14 +942,11 @@ int main(int argc, char *argv[])
     // the mouse motion exactly how it was given to us.
     SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SCALING, "0");
 
-    // Set our app name for SDL to use with PulseAudio and PipeWire. This matches what we
-    // provide as our app name to libsoundio too. On SDL 2.0.18+, SDL_APP_NAME is also used
-    // for screensaver inhibitor reporting AND as the Wayland xdg_toplevel.set_app_id value,
-    // which GNOME's dash-to-dock matches against StartupWMClass= in com.piinsta.desktop to
-    // pick the launcher icon.  Keep the friendly "VipleStream" name for audio devices via
-    // the dedicated override, but use the reverse-DNS desktop ID for SDL_APP_NAME so the
-    // streaming window groups under com.piinsta.desktop in the dock instead of falling
-    // back to argv[0] (which then has no matching .desktop file).
+    // SDL 的 app name：給 PulseAudio / PipeWire 的裝置名稱與 screensaver
+    // inhibitor 顯示用，兩者都是人類可讀名稱。串流視窗在 dock 的
+    // WM_CLASS / app_id 分組「不是」靠這裡——那由後面的
+    // SDL_VIDEO_{WAYLAND,X11}_WMCLASS env（=viplestream）決定，
+    // 對齊 viplestream.desktop。
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, "VipleStream");
     SDL_SetHint(SDL_HINT_APP_NAME, "VipleStream");
 
@@ -979,17 +976,29 @@ int main(int argc, char *argv[])
     // use this functionality and it can cause hangs when querying broken devices.
     SDL_SetHint("SDL_WINDOWS_DETECT_DEVICE_HOTPLUG", "0");
 
-    // VipleStream §K.4 (dev/cli-quic-linux): set the desktop file name
-    // BEFORE QGuiApplication construction.  Qt's xdg-desktop-portal
-    // Registry integration auto-registers with whatever id is set at
-    // construction time; calling setDesktopFileName() later does a
-    // second Register on the same D-Bus connection, which the portal
-    // rejects with "Could not register app ID: Connection already
-    // associated with an application ID" (the QDBusError that has
-    // been spamming every viplestream startup log).  Reading the id
-    // from the env var lets Qt do the right Register on the first
-    // (and only) call.
-    qputenv("QT_DESKTOP_FILE_NAME", "com.piinsta");
+    // VipleStream §K.4-DESKTOP-ID (2026-07-21)：desktop id 必須在
+    // QGuiApplication 建構「之前」用 static setter 設好。
+    //
+    // 舊做法 qputenv("QT_DESKTOP_FILE_NAME", ...) 是無效 no-op——qtbase /
+    // qtwayland 6.8 全樹 grep 證實 Qt 從未讀過這個環境變數（疑似與 X11 的
+    // RESOURCE_NAME 以訛傳訛）。後果：Linux 上 desktopFileName 一直是空
+    // 的，Wayland app_id 落到 binary 名、xcb 不寫 _GTK_APPLICATION_ID，
+    // GNOME 對不到已安裝的 .desktop → dock / app grid 無圖示。
+    //
+    // setDesktopFileName 是純靜態 setter（qtbase qguiapplication.cpp：
+    // 靜態 QString，各平台視窗建立時才讀取），建構前呼叫合法且不觸發
+    // portal Register；Qt 建構時的自動 Register 會直接帶上這個 id，維持
+    // §K.4 的「單次 Register」不變式（建構後才呼叫會觸發第二次 Register
+    // 被 xdg-desktop-portal 拒絕、噴 QDBusError）。
+    //
+    // id 用 "viplestream"（= binary 名，不再用 com.piinsta）：GNOME Shell
+    // 視窗→app 匹配的第一優先是 WM_CLASS/app_id ↔ .desktop 檔名，而 xcb
+    // 下 WM_CLASS instance 永遠是 argv[0] basename（Qt 不會拿
+    // desktopFileName 當 WM_CLASS），所以 id 對齊 binary 名可讓每一層
+    // （xcb WM_CLASS 捷徑、Wayland app_id、Qt 6.7+ 的 _GTK_APPLICATION_ID、
+    // portal Register）都命中 viplestream.desktop。Android applicationId
+    // 的 com.piinsta 是獨立命名空間，不受影響。
+    QGuiApplication::setDesktopFileName("viplestream");
 
     QGuiApplication app(argc, argv);
 
@@ -1189,25 +1198,14 @@ int main(int argc, char *argv[])
     app.setWindowIcon(QIcon(":/res/moonlight.svg"));
 #endif
 
-    // This is necessary to show our icon correctly on Wayland.
-    // VipleStream FDO/desktop ID rebrand v1.2.93: was
-    // com.moonlight_stream.Moonlight; now com.piinsta to match the
-    // renamed .desktop / .appdata.xml files under deploy/linux/.
-    //
-    // VipleStream §K.4 (dev/cli-quic-linux): on Linux, the desktop file
-    // name is now seeded via QT_DESKTOP_FILE_NAME before the
-    // QGuiApplication constructor runs (see start of main()).  Calling
-    // setDesktopFileName here triggered a SECOND portal Register on the
-    // same D-Bus connection, which xdg-desktop-portal rejects with the
-    // "Connection already associated with an application ID" error
-    // that has been spamming every viplestream startup.  Keep the call
-    // for non-Linux platforms where the env-var path is a no-op (Qt
-    // only reads QT_DESKTOP_FILE_NAME on Linux/Wayland).
-#if !defined(Q_OS_LINUX) && !defined(Q_OS_FREEBSD)
-    app.setDesktopFileName("com.piinsta");
-#endif
-    qputenv("SDL_VIDEO_WAYLAND_WMCLASS", "com.piinsta");
-    qputenv("SDL_VIDEO_X11_WMCLASS", "com.piinsta");
+    // §K.4-DESKTOP-ID：desktop id 已在 main() 開頭（QGuiApplication 建構
+    // 前）經 setDesktopFileName("viplestream") 設定，這裡不可再呼叫
+    // setDesktopFileName——建構後再設會觸發第二次 portal Register 被拒。
+    // SDL 串流視窗是獨立的 native 視窗，不吃 Qt 的 desktopFileName，
+    // 用 SDL 自己的 env 讓它的 WM_CLASS / app_id 同樣對齊
+    // viplestream.desktop（配合 .desktop 的 StartupWMClass=viplestream）。
+    qputenv("SDL_VIDEO_WAYLAND_WMCLASS", "viplestream");
+    qputenv("SDL_VIDEO_X11_WMCLASS", "viplestream");
 
     // Register our C++ types for QML
     qmlRegisterType<ComputerModel>("ComputerModel", 1, 0, "ComputerModel");

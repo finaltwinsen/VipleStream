@@ -712,13 +712,21 @@ unix:!macx: {
 
     target.path = $$PREFIX/$$BINDIR/
 
-    desktop.files = deploy/linux/com.piinsta.desktop
+    desktop.files = deploy/linux/viplestream.desktop
     desktop.path = $$PREFIX/$$DATADIR/applications/
 
+    # §K.4-DESKTOP-ID：icon theme 內的名稱必須等於 .desktop 的
+    # Icon=viplestream，否則 GNOME app grid / dock 查不到圖示（歷史 bug：
+    # 這裡只裝原名 moonlight.svg，Icon=viplestream 永遠解析失敗）。qmake
+    # INSTALLS 不支援安裝時改名，用 .extra 複製改名；moonlight.svg 原名
+    # 續裝一份給舊 .desktop 相容。
+    ICON_APPS_DIR = $$PREFIX/$$DATADIR/icons/hicolor/scalable/apps
     icons.files = res/moonlight.svg
-    icons.path = $$PREFIX/$$DATADIR/icons/hicolor/scalable/apps/
+    icons.path = $$ICON_APPS_DIR/
+    icons.extra = mkdir -p $(INSTALL_ROOT)$$ICON_APPS_DIR && cp -f $$PWD/res/moonlight.svg $(INSTALL_ROOT)$$ICON_APPS_DIR/viplestream.svg
+    icons.uninstall = rm -f $(INSTALL_ROOT)$$ICON_APPS_DIR/viplestream.svg
 
-    appstream.files = deploy/linux/com.piinsta.appdata.xml
+    appstream.files = deploy/linux/viplestream.appdata.xml
     appstream.path = $$PREFIX/$$DATADIR/metainfo/
 
     # VipleStream v1.4.143 — Linux AppImage 必須裝 rife model 才能跑 RIFE-β

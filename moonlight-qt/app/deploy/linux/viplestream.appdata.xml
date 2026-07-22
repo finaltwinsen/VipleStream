@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-	<id>com.piinsta.Client</id>
+	<!-- §K.4-DESKTOP-ID：id 對齊 Linux desktop id（= binary 名 viplestream），
+	     檔名 viplestream.appdata.xml 與 <id> 一致。非 reverse-DNS 會被
+	     appstreamcli validate 警告，但兩條 AppImage 產線一條用
+	     --no-appstream、一條在打包前移除 metainfo，實務無影響。 -->
+	<id>viplestream</id>
 	<metadata_license>CC0-1.0</metadata_license>
 	<project_license>GPL-3.0+</project_license>
 	<name>VipleStream</name>
@@ -28,7 +32,7 @@
 		<name>VipleStream</name>
 	</developer>
 	<update_contact>cameron@moonlight-stream.org</update_contact>
-	<launchable type="desktop-id">com.piinsta.desktop</launchable>
+	<launchable type="desktop-id">viplestream.desktop</launchable>
 	<provides>
 		<binary>viplestream</binary>
 	</provides>

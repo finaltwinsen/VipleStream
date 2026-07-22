@@ -80,10 +80,10 @@ pushd $BUILD_FOLDER
 make install || fail "Make install failed!"
 popd
 
-# Patch 4: repo 的 usr/share/metainfo/com.piinsta.appdata.xml 其 component-id
-# (com.piinsta.Client) 與檔名不一致,appimagetool 內建的 appstreamcli validate
-# 會因該 warning 以非零退出 -> 打包失敗。metainfo 對 AppImage 執行無影響,移除以
-# 通過打包。正解(交 win-builder):讓 metainfo 檔名與 <id> 一致,或 <id> 改 com.piinsta。
+# Patch 4: metainfo 檔名與 <id> 已對齊（viplestream.appdata.xml / <id>viplestream</id>，
+# §K.4-DESKTOP-ID），但 <id> 非 reverse-DNS 仍會被 appstreamcli validate 警告，
+# appimagetool 會因 warning 以非零退出 -> 打包失敗。metainfo 對 AppImage 執行無影響，
+# 移除以通過打包。
 rm -f "$DEPLOY_FOLDER"/usr/share/metainfo/*.xml
 rmdir "$DEPLOY_FOLDER/usr/share/metainfo" 2>/dev/null || true
 
@@ -111,7 +111,7 @@ export QML_SOURCES_PATHS="$SOURCE_ROOT/app/gui"
 export QMAKE=qmake6
 echo "  Bundling genuine SDL2: $SDL2_LIB"
 linuxdeploy --appdir $DEPLOY_FOLDER \
-    --desktop-file $DEPLOY_FOLDER/usr/share/applications/com.piinsta.desktop \
+    --desktop-file $DEPLOY_FOLDER/usr/share/applications/viplestream.desktop \
     --icon-file $SOURCE_ROOT/app/res/moonlight.svg \
     --icon-filename viplestream \
     --library "$SDL2_LIB" \
