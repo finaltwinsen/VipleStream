@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
 <!--
     VipleStream primary app icon — variant "Stripe Cut" from the
     Claude-Design mock (temp/design_bundle/viplestream/project/
@@ -21,8 +22,14 @@
       - Android mipmap-*dpi/ic_launcher.png
       - Android mipmap-*dpi/ic_launcher_foreground.png
       - macOS .icns (via a separate tool, not wired yet)
+
+    §K.4-ICON-SNIFF（2026-07-23）：這段說明註解必須放在 <svg> 開頭「之後」，
+    不可放回檔案最前面——gdk-pixbuf 的 SVG 格式嗅探只在檔案開頭附近找
+    "<svg"，先前 ~900 bytes 的檔頭註解把 <svg 推出嗅探窗，GNOME Shell
+    （St → gdk-pixbuf）解碼失敗「Couldn't recognize the image file
+    format」→ Linux dock / app grid 圖示全空白。Qt QSvgRenderer 與
+    rsvg-convert 都不受影響，所以只有 GNOME 桌面圖示壞、其他平台正常。
 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <!-- Square ink ground -->
   <rect width="512" height="512" fill="#0D0F0B"/>
 
