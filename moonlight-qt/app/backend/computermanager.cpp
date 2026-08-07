@@ -553,7 +553,12 @@ void ComputerManager::startPolling()
         });
     }
     else {
-        qWarning() << "mDNS is disabled by user preference";
+        // startPolling() 每次前景切換都會進來；使用者偏好不會中途變，只印首次
+        static bool s_LoggedMdnsDisabled = false;
+        if (!s_LoggedMdnsDisabled) {
+            s_LoggedMdnsDisabled = true;
+            qInfo() << "mDNS is disabled by user preference";
+        }
     }
 
     // Start polling threads for each known host

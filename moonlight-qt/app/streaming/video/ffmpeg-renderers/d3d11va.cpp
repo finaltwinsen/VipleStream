@@ -1489,10 +1489,21 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
             b.callLatMs.clear();
         };
         flushBucket(m_PresentReal,   "real");
-        flushBucket(m_PresentInterp, "interp");
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-PRESENT-Stats] cumul real=%u interp=%u",
-                    m_PresentRealTotal, m_PresentInterpTotal);
+        // §LOGHYG-A6 — FRUC 全關（interp 累計 0）時抑制恆零的 "interp n=0"
+        // 行與 cumul 的 interp 欄位；session 內只要出現過任何 interp
+        // present 就恢復完整輸出（沿用上面 flushBucket 的 n=0 佔位行為，
+        // 讓 parser 仍能分辨「FRUC 開但這 5 秒沒 interp」）。
+        if (m_PresentInterpTotal > 0 || !m_PresentInterp.intervalMs.empty()) {
+            flushBucket(m_PresentInterp, "interp");
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-PRESENT-Stats] cumul real=%u interp=%u",
+                        m_PresentRealTotal, m_PresentInterpTotal);
+        }
+        else {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-PRESENT-Stats] cumul real=%u",
+                        m_PresentRealTotal);
+        }
         m_PresentLastLogMs = now;
     }
 

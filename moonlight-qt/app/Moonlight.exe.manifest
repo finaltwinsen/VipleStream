@@ -11,7 +11,9 @@
     <asmv3:application>
         <asmv3:windowsSettings>
             <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
-            <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitor</dpiAwareness>
+            <!-- PerMonitorV2：Qt 6 執行期會嘗試升級到 V2，manifest 若宣告 V1
+                 會被 OS 以「存取被拒」擋下，行程實際跑 V1 與 Qt 假設不一致 -->
+            <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
         </asmv3:windowsSettings>
     </asmv3:application>
     <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">

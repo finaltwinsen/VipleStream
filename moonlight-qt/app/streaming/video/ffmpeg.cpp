@@ -1,4 +1,5 @@
 #include <Limelight.h>
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include "ffmpeg.h"
@@ -402,6 +403,18 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
 
 FFmpegVideoDecoder::~FFmpegVideoDecoder()
 {
+    // §LOGHYG-NET10 — teardown flush：凍結中退出（quit-during-freeze）時
+    // 視窗不再 flip，ring 內「進入凍結前」的秒級樣本不 flush 就永遠消失
+    // ——那正是事故屍檢最需要的斜坡。testOnly decoder 無 ring 資料不印。
+    for (int i = m_NetRingCount; i >= 1; i--) {
+        const NetSecondSample& s =
+            m_NetRing[(m_NetRingHead - i + 2 * k_NetRingSize) % k_NetRingSize];
+        if (!s.flushed) {
+            logNetSecondLine(s, "(tail) ", "");
+        }
+    }
+    m_NetRingCount = 0;
+
     reset();
 
     // Set log level back to default.
@@ -2424,10 +2437,29 @@ bool FFmpegVideoDecoder::tryInitializeNonHwAccelDecoder(PDECODER_PARAMETERS para
     return false;
 }
 
+// §LOGHYG-A5 — 記錄「真正的 decoder（非 test-only）前一次 initialize 是否
+// 失敗」。跨 decoder 實例保留（Session 失敗重試會重建 decoder），成功即清除。
+static bool s_LastInitializeFailed = false;
+
 bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
 {
-    // Increase log level until the first frame is decoded
-    av_log_set_level(AV_LOG_DEBUG);
+    // §LOGHYG-A5 — 首次嘗試維持 INFO；只有「前一次真實 init 失敗」的重試
+    // 才升 AV_LOG_DEBUG 直到首幀解碼（decoderThreadProc 首幀成功處會降回
+    // INFO，與本旗標一致）。test-only 探測失敗是常態（本來就在試支援度），
+    // 不列入旗標也不升級 —— 否則啟動期 codec cascade 每次都重灌 ~8000 行
+    // GUID 表 DEBUG log。
+    av_log_set_level((!m_TestOnly && s_LastInitializeFailed) ? AV_LOG_DEBUG
+                                                             : AV_LOG_INFO);
+
+    bool ok = initializeInternal(params);
+    if (!m_TestOnly) {
+        s_LastInitializeFailed = !ok;
+    }
+    return ok;
+}
+
+bool FFmpegVideoDecoder::initializeInternal(PDECODER_PARAMETERS params)
+{
 
     // §J.3.e.2.i.3.e-SW — RS_VULKAN 設定 (default) 或 VIPLE_VKFRUC_SW=1
     // 觸發時，force SW h264/hevc/av1 decoder BEFORE HW cascade.  原因是
@@ -2867,14 +2899,36 @@ void FFmpegVideoDecoder::decoderThreadProc()
 
                         // [VIPLE-DEC-DEPTH] §J.3.f recon — log queue depth at receive
                         // to understand whether decoder is pipeline-deep (HEVC ~1,
-                        // AV1 ~12 expected) vs queue back-pressure.  Sample 1/120
-                        // frames to avoid log spam.
-                        if ((m_FramesOut % 120) == 0) {
+                        // AV1 ~12 expected) vs queue back-pressure.
+                        // §LOGHYG-A4 — 舊 1/120 採樣制實測 41k 筆 100%
+                        // queueDepth=0（零資訊量），改事件驅動：只在
+                        // queueDepth>0（back-pressure）或 latRingMaxMs>8ms 時
+                        // 印（同況最多 1 行/秒），另每 60 秒一筆 heartbeat
+                        // 確認機制存活。static 跨 decoder 實例共用（單一
+                        // decode thread，無 race；沿用上面 latency ring 慣例）。
+                        static uint32_t s_DecDepthLastEventMs = 0;
+                        static uint32_t s_DecDepthLastBeatMs = 0;
+                        const uint32_t depthNowMs = SDL_GetTicks();
+                        const bool depthAbnormal =
+                            m_FrameInfoQueue.size() > 0 || maxLatMs > 8.0;
+                        if (depthAbnormal &&
+                                depthNowMs - s_DecDepthLastEventMs >= 1000) {
                             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                         "[VIPLE-DEC-DEPTH] queueDepth=%d "
                                         "frameLatencyUs=%lld latRingMaxMs=%.2f",
-                                        m_FrameInfoQueue.size(),
+                                        (int)m_FrameInfoQueue.size(),
                                         (long long)thisFrameDecodeUs, maxLatMs);
+                            s_DecDepthLastEventMs = depthNowMs;
+                            s_DecDepthLastBeatMs = depthNowMs;
+                        }
+                        else if (depthNowMs - s_DecDepthLastBeatMs >= 60000) {
+                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                        "[VIPLE-DEC-DEPTH] queueDepth=%d "
+                                        "frameLatencyUs=%lld latRingMaxMs=%.2f "
+                                        "heartbeat",
+                                        (int)m_FrameInfoQueue.size(),
+                                        (long long)thisFrameDecodeUs, maxLatMs);
+                            s_DecDepthLastBeatMs = depthNowMs;
                         }
                     }
 
@@ -2937,6 +2991,27 @@ void FFmpegVideoDecoder::decoderThreadProc()
     }
 }
 
+// §LOGHYG-NET10 — 秒級 [VIPLE-NET] 行的統一印出點（暖機 / 異常 / pre-flush
+// 共用），欄位與舊逐秒行相容；hostLat 無回報印 n/a 與真 0.00 區分。
+void FFmpegVideoDecoder::logNetSecondLine(const NetSecondSample& s,
+                                          const char* prefix,
+                                          const char* suffix) const
+{
+    char hostBuf[32];
+    if (s.hostLatAvgMs >= 0.0) {
+        snprintf(hostBuf, sizeof(hostBuf), "%.2f", s.hostLatAvgMs);
+    }
+    else {
+        snprintf(hostBuf, sizeof(hostBuf), "n/a");
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-NET] %sreceived=%u decoded=%u networkDropped=%u total=%u "
+                "decodeMeanMs=%.2f hostLatencyAvgMs=%s%s",
+                prefix,
+                s.receivedFrames, s.decodedFrames, s.networkDroppedFrames,
+                s.totalFrames, s.decodeMeanMs, hostBuf, suffix);
+}
+
 int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 {
     PLENTRY entry = du->bufferList;
@@ -2964,42 +3039,165 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
     // Flip stats windows roughly every second
     if (LiGetMicroseconds() > m_ActiveWndVideoStats.measurementStartUs + 1000000) {
-        // [VIPLE-NET] expose per-second receive/decode/drop counters in the
-        // log without requiring overlay enabled.  Diagnoses where the stream
-        // rate cap is when server pushes 120 fps but client renders fewer.
+        // §LOGHYG-NET10 — [VIPLE-NET]/[VIPLE-RATIO] 舊制每秒各 1 行佔 log
+        // 37.6%。改為：每秒統計照算存 ring，正常時每 10 秒印 [VIPLE-NET10]
+        // （+ [VIPLE-RATIO10]）彙總；異常秒立即用原格式印出並回補前 3 秒
+        // (pre) 行，秒級斜坡診斷力不減。
         const double decodeMeanMsLocal = m_ActiveWndVideoStats.decodedFrames > 0
             ? (double)m_ActiveWndVideoStats.totalDecodeTimeUs / m_ActiveWndVideoStats.decodedFrames / 1000.0
             : 0.0;
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-NET] received=%u decoded=%u networkDropped=%u total=%u "
-                    "decodeMeanMs=%.2f hostLatencyAvgMs=%.2f",
-                    m_ActiveWndVideoStats.receivedFrames,
-                    m_ActiveWndVideoStats.decodedFrames,
-                    m_ActiveWndVideoStats.networkDroppedFrames,
-                    m_ActiveWndVideoStats.totalFrames,
-                    decodeMeanMsLocal,
-                    m_ActiveWndVideoStats.framesWithHostProcessingLatency > 0
-                        ? (double)m_ActiveWndVideoStats.totalHostProcessingLatency / m_ActiveWndVideoStats.framesWithHostProcessingLatency / 10.0
-                        : 0.0);
 
-        // VipleStream v1.4.152 §R2-β-2 + v1.4.153 §R2-γ-5: FRUC ratio telemetry + passive controller.
+        NetSecondSample sec = {};
+        sec.receivedFrames = m_ActiveWndVideoStats.receivedFrames;
+        sec.decodedFrames = m_ActiveWndVideoStats.decodedFrames;
+        sec.networkDroppedFrames = m_ActiveWndVideoStats.networkDroppedFrames;
+        sec.totalFrames = m_ActiveWndVideoStats.totalFrames;
+        sec.decodeMeanMs = decodeMeanMsLocal;
+        // 無 host latency 回報記 -1（印 n/a），跟真的 0.00ms 區分。
+        sec.hostLatAvgMs = m_ActiveWndVideoStats.framesWithHostProcessingLatency > 0
+            ? (double)m_ActiveWndVideoStats.totalHostProcessingLatency / m_ActiveWndVideoStats.framesWithHostProcessingLatency / 10.0
+            : -1.0;
+        sec.flushed = false;
+
+        m_NetWindowSeq++;
+        if (m_NetWindowSeq <= 2) {
+            // 暖機視窗：decodeMean 含 init 期佇列時間（實測 76-101ms 假值）。
+            // 立即印出 + 標 warmup，不進 ring / 不計彙總，免得污染 NET10
+            // 的 p50/max 與自動化門檻。
+            logNetSecondLine(sec, "", " warmup");
+        }
+        else {
+            // 異常判定：hostLat 突波門檻 = ring 近期中位數 ×3（至少 3 筆
+            // 有效樣本才啟用）。
+            double hostMedian = -1.0;
+            {
+                double vals[k_NetRingSize];
+                int nVals = 0;
+                for (int i = 0; i < m_NetRingCount; i++) {
+                    if (m_NetRing[i].hostLatAvgMs >= 0.0) {
+                        vals[nVals++] = m_NetRing[i].hostLatAvgMs;
+                    }
+                }
+                if (nVals >= 3) {
+                    std::sort(vals, vals + nVals);
+                    hostMedian = vals[nVals / 2];
+                }
+            }
+            const bool anomaly =
+                (m_StreamFps > 0 &&
+                 (double)sec.receivedFrames < 0.8 * (double)m_StreamFps)
+                || sec.networkDroppedFrames > 0
+                || sec.decodeMeanMs > 8.0
+                || (sec.hostLatAvgMs >= 0.0 && hostMedian > 0.0 &&
+                    sec.hostLatAvgMs > 3.0 * hostMedian);
+
+            if (anomaly) {
+                if (!m_NetAnomalyActive) {
+                    // 進入異常：回補 ring 裡最近 3 秒還沒印過的行 (pre)。
+                    for (int i = qMin(m_NetRingCount, 3); i >= 1; i--) {
+                        NetSecondSample& prev =
+                            m_NetRing[(m_NetRingHead - i + 2 * k_NetRingSize) % k_NetRingSize];
+                        if (!prev.flushed) {
+                            logNetSecondLine(prev, "(pre) ", "");
+                            prev.flushed = true;
+                        }
+                    }
+                }
+                logNetSecondLine(sec, "", "");
+                sec.flushed = true;
+            }
+            m_NetAnomalyActive = anomaly;
+
+            m_NetRing[m_NetRingHead] = sec;
+            m_NetRingHead = (m_NetRingHead + 1) % k_NetRingSize;
+            if (m_NetRingCount < k_NetRingSize) {
+                m_NetRingCount++;
+            }
+
+            if (++m_NetSecsSinceAggregate >= k_NetRingSize) {
+                // 10 秒彙總 — 此刻 ring 正好是這一批的 10 秒。
+                m_NetSecsSinceAggregate = 0;
+                uint32_t sumRecv = 0, sumDec = 0, sumDrop = 0;
+                double decVals[k_NetRingSize];
+                double hostVals[k_NetRingSize];
+                int nDec = 0, nHost = 0;
+                double recvPctMin = 0.0, recvPctSum = 0.0;
+                int nPct = 0;
+                for (int i = 0; i < m_NetRingCount; i++) {
+                    const NetSecondSample& s = m_NetRing[i];
+                    sumRecv += s.receivedFrames;
+                    sumDec += s.decodedFrames;
+                    sumDrop += s.networkDroppedFrames;
+                    decVals[nDec++] = s.decodeMeanMs;
+                    if (s.hostLatAvgMs >= 0.0) {
+                        hostVals[nHost++] = s.hostLatAvgMs;
+                    }
+                    if (m_StreamFps > 0) {
+                        const double pctSec =
+                            (double)s.receivedFrames / (double)m_StreamFps * 100.0;
+                        if (nPct == 0 || pctSec < recvPctMin) {
+                            recvPctMin = pctSec;
+                        }
+                        recvPctSum += pctSec;
+                        nPct++;
+                    }
+                }
+                std::sort(decVals, decVals + nDec);
+                std::sort(hostVals, hostVals + nHost);
+                char hostBuf[48];
+                if (nHost > 0) {
+                    snprintf(hostBuf, sizeof(hostBuf), "p50=%.2f max=%.2f",
+                             hostVals[nHost / 2], hostVals[nHost - 1]);
+                }
+                else {
+                    snprintf(hostBuf, sizeof(hostBuf), "n/a");
+                }
+                char pctBuf[48];
+                if (nPct > 0) {
+                    snprintf(pctBuf, sizeof(pctBuf), "min=%.0f avg=%.0f",
+                             recvPctMin, recvPctSum / nPct);
+                }
+                else {
+                    snprintf(pctBuf, sizeof(pctBuf), "n/a");
+                }
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-NET10] secs=%d received=%u decoded=%u "
+                            "networkDropped=%u decodeMeanMs p50=%.2f max=%.2f "
+                            "hostLatencyAvgMs %s recvPct %s fmt=0x%x",
+                            m_NetRingCount, sumRecv, sumDec, sumDrop,
+                            nDec > 0 ? decVals[nDec / 2] : 0.0,
+                            nDec > 0 ? decVals[nDec - 1] : 0.0,
+                            hostBuf, pctBuf, m_VideoFormat);
+                if (m_StreamFps > 0) {
+                    // §LOGHYG-A3 — mode 標籤跟實際 FRUC 狀態走：FRUC 全關時
+                    // isPassiveFrucMode()/effectiveFrucRatio() 是 stub 預設值
+                    // （恆 ACTIVE/2x 假標籤），改印 mode=OFF ratio=1x。
+                    const bool frucOn10 =
+                        m_FrontendRenderer && m_FrontendRenderer->isFRUCActive();
+                    const bool passive10 =
+                        frucOn10 && m_FrontendRenderer->isPassiveFrucMode();
+                    const int ratio10 =
+                        frucOn10 ? m_FrontendRenderer->effectiveFrucRatio() : 1;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-RATIO10] mode=%s ratio=%dx server_fps=%d "
+                                "recvPct %s",
+                                frucOn10 ? (passive10 ? "PASSIVE" : "ACTIVE")
+                                         : "OFF",
+                                ratio10, m_StreamFps, pctBuf);
+                }
+            }
+        }
+
+        // VipleStream v1.4.152 §R2-β-2 + v1.4.153 §R2-γ-5: FRUC ratio passive
+        // controller（telemetry 行改 §LOGHYG-NET10 的 10 秒彙總，controller
+        // 邏輯照舊每秒跑）.
         if (m_StreamFps > 0) {
             const double recvRatio = (double)m_ActiveWndVideoStats.receivedFrames / (double)m_StreamFps;
             const double recvPct = recvRatio * 100.0;
 
-            // 取 renderer 端 passive mode + 當前 ratio 給 log + adaptive 用.
+            // 取 renderer 端 passive mode + 當前 ratio 給 adaptive 用.
             const bool passive = m_FrontendRenderer && m_FrontendRenderer->isPassiveFrucMode();
             const int  curRatio = m_FrontendRenderer ? m_FrontendRenderer->effectiveFrucRatio() : 2;
-
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-RATIO] mode=%s ratio=%dx server_fps=%d recv=%u (%.0f%%) decoded=%u (%.0f%%)",
-                        passive ? "PASSIVE" : "ACTIVE",
-                        curRatio,
-                        m_StreamFps,
-                        m_ActiveWndVideoStats.receivedFrames,
-                        recvPct,
-                        m_ActiveWndVideoStats.decodedFrames,
-                        (double)m_ActiveWndVideoStats.decodedFrames / (double)m_StreamFps * 100.0);
 
             if (passive) {
                 // v1.4.170 §R2-θ — PASSIVE 重寫. metric 從 recv/server_fps
@@ -3117,21 +3315,104 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                     m_FpsChangeCooldownSec = 5;
                 }
             } else {
-                // ACTIVE: 一次性 warn 提示 (5s 連續 < 80%).
-                if (recvRatio < 0.80) {
-                    m_LowRecvRatioSeconds++;
-                    if (m_LowRecvRatioSeconds == 5 && !m_RatioWarnedOnce) {
-                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                    "[VIPLE-RATIO-WARN] ACTIVE mode + recv_ratio < 80%% 連續 5s "
-                                    "(server %d fps, 實收 %u). 建議切到「被動補幀」模式 "
-                                    "(Settings → Vulkan FRUC) 讓 client 動態 ratio.",
-                                    m_StreamFps,
-                                    m_ActiveWndVideoStats.receivedFrames);
-                        m_RatioWarnedOnce = true;
-                    }
-                } else {
-                    m_LowRecvRatioSeconds = 0;
+                // §LOGHYG-WARN — ACTIVE 低收警告改 60 秒滑動視窗：recv%<80
+                // 的秒數 ≥ 42/60 (70%) 才觸發。舊制「連續 5 秒 streak」單一
+                // 好秒就歸零，長期 60-70% 低收永遠不觸發；m_RatioWarnedOnce
+                // 永久靜音改 300 秒冷卻。並依視窗內 networkDropped 分流根因
+                // —— 丟包 ≈0 代表 server 根本沒產那麼多幀（遊戲效能不足或
+                // 靜態畫面省流），切被動補幀救不了（clientStruggling gate 會
+                // 擋），訊息不再誤導使用者去改設定。
+                m_WarnWndRecv[m_WarnWndIdx] = m_ActiveWndVideoStats.receivedFrames;
+                m_WarnWndDrop[m_WarnWndIdx] = m_ActiveWndVideoStats.networkDroppedFrames;
+                m_WarnWndIdx = (m_WarnWndIdx + 1) % 60;
+                if (m_WarnWndFill < 60) {
+                    m_WarnWndFill++;
                 }
+                m_LowRecvWindowBits = ((m_LowRecvWindowBits << 1) |
+                                       (recvRatio < 0.80 ? 1u : 0u)) &
+                                      ((1ULL << 60) - 1);
+                if (m_RatioWarnCooldownSec > 0) {
+                    m_RatioWarnCooldownSec--;
+                }
+
+                int lowSecs = 0;
+                for (uint64_t b = m_LowRecvWindowBits; b != 0; b >>= 1) {
+                    lowSecs += (int)(b & 1u);
+                }
+
+                if (lowSecs >= 42 && m_RatioWarnCooldownSec == 0) {
+                    uint64_t recvSum = 0, dropSum = 0;
+                    for (int i = 0; i < m_WarnWndFill; i++) {
+                        recvSum += m_WarnWndRecv[i];
+                        dropSum += m_WarnWndDrop[i];
+                    }
+                    const uint64_t wndFrames = recvSum + dropSum;
+                    const int avgRecvFps = m_WarnWndFill > 0
+                        ? (int)(recvSum / (uint64_t)m_WarnWndFill) : 0;
+                    // dropSum < wndFrames × 0.5% ⇒ SERVER_LIMITED（整數運算
+                    // 避免浮點：dropSum×200 < wndFrames）。
+                    const bool serverLimited =
+                        wndFrames > 0 && dropSum * 200 < wndFrames;
+
+                    char warnMsg[512];
+                    if (serverLimited) {
+                        snprintf(warnMsg, sizeof(warnMsg),
+                                 "伺服器實際輸出僅 ~%d fps（設定 %d fps）："
+                                 "近 60 秒 %d 秒低收但丟包≈0，"
+                                 "多半是遊戲效能不足或靜態畫面省流，非網路問題。",
+                                 avgRecvFps, m_StreamFps, lowSecs);
+                    }
+                    else {
+                        snprintf(warnMsg, sizeof(warnMsg),
+                                 "網路收幀不足：近 60 秒 %d 秒 recv<80%%"
+                                 "（server %d fps、實收 ~%d fps、丟包 %llu）。"
+                                 "建議切到「被動補幀」模式 (Settings → Vulkan "
+                                 "FRUC) 讓 client 動態 ratio。",
+                                 lowSecs, m_StreamFps, avgRecvFps,
+                                 (unsigned long long)dropSum);
+                    }
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-RATIO-WARN] cause=%s %s",
+                                serverLimited ? "SERVER_LIMITED" : "NETWORK",
+                                warnMsg);
+                    // 畫面通知：借既有 status overlay（session.cpp:1905 同款
+                    // 用法），顯示數秒後由下方倒數自動收掉。
+                    // gate：尊重使用者的 connectionWarnings 偏好與 mouse
+                    // emulation 佔用（同 clConnectionStatusUpdate 的兩道檢
+                    // 查）；SERVER_LIMITED 屬環境常態（靜態畫面省流也會低
+                    // 收），overlay 每 session 只跳一次，log 照冷卻節奏記。
+                    const bool overlayAllowed = Session::get() &&
+                        Session::get()->shouldShowStatusOverlayWarning() &&
+                        (!serverLimited || !m_RatioWarnSrvLtdOverlayShown);
+                    if (overlayAllowed) {
+                        if (serverLimited) {
+                            m_RatioWarnSrvLtdOverlayShown = true;
+                        }
+                        snprintf(m_RatioWarnLastMsg, sizeof(m_RatioWarnLastMsg),
+                                 "%s", warnMsg);
+                        Session::get()->getOverlayManager().updateOverlayText(
+                            Overlay::OverlayStatusUpdate, warnMsg);
+                        Session::get()->getOverlayManager().setOverlayState(
+                            Overlay::OverlayStatusUpdate, true);
+                        m_RatioWarnOverlayHideSec = 8;
+                    }
+                    m_RatioWarnCooldownSec = 300;
+                }
+            }
+        }
+
+        // §LOGHYG-WARN — RATIO-WARN 畫面通知倒數；歸零收掉 status overlay
+        // （OverlayManager 本身沒有自動消失計時器，借每秒 flip 當 tick）。
+        // slot 共用：倒數期間別的功能（POOR 連線、gamepad mouse mode）可能
+        // 已改寫同一 slot，文字不再是自己的就不收（getOverlayText 與寫入方
+        // 有理論上的讀寫 race，此處僅做字串比對決定收不收，屬良性）。
+        if (m_RatioWarnOverlayHideSec > 0 && --m_RatioWarnOverlayHideSec == 0) {
+            if (Session::get() &&
+                strcmp(Session::get()->getOverlayManager().getOverlayText(
+                           Overlay::OverlayStatusUpdate),
+                       m_RatioWarnLastMsg) == 0) {
+                Session::get()->getOverlayManager().setOverlayState(
+                    Overlay::OverlayStatusUpdate, false);
             }
         }
 

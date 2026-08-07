@@ -44,6 +44,10 @@ private:
         TestFrame
     };
 
+    // §LOGHYG-A5 — initialize() 本體；public initialize() 變薄殼，
+    // 負責依「前次是否失敗」決定 av_log level 再轉呼叫這裡。
+    bool initializeInternal(PDECODER_PARAMETERS params);
+
     bool completeInitialization(const AVCodec* decoder,
                                 enum AVPixelFormat requiredFormat,
                                 PDECODER_PARAMETERS params,
@@ -127,15 +131,54 @@ private:
     int m_OriginalVideoWidth;
     int m_OriginalVideoHeight;
     int m_VideoFormat;
+
+    // §LOGHYG-NET10 (v1.5.268) — [VIPLE-NET]/[VIPLE-RATIO] 每秒 2 行改為
+    // 每 10 秒 1-2 行彙總。每秒統計照算並存入 ring；異常秒（低收/丟包/
+    // 慢解碼/hostLat 突波）立即用原格式印出，並在進入異常時回補前 3 秒
+    // (pre) 行，保留秒級斜坡診斷力。
+    struct NetSecondSample {
+        uint32_t receivedFrames;
+        uint32_t decodedFrames;
+        uint32_t networkDroppedFrames;
+        uint32_t totalFrames;
+        double decodeMeanMs;
+        double hostLatAvgMs;   // < 0 = 該秒無 host latency 回報（印 n/a）
+        bool flushed;          // 已印過秒級行（pre-flush 不重印）
+    };
+    static constexpr int k_NetRingSize = 10;
+    NetSecondSample m_NetRing[k_NetRingSize] = {};
+    int m_NetRingHead = 0;             // 下一寫入位置
+    int m_NetRingCount = 0;            // 有效格數（<= k_NetRingSize）
+    int m_NetSecsSinceAggregate = 0;   // 距上次 [VIPLE-NET10] 的非暖機秒數
+    uint64_t m_NetWindowSeq = 0;       // stream (re)start 起算的視窗序號
+    bool m_NetAnomalyActive = false;   // 連續異常期間每秒照印
+
+    void logNetSecondLine(const NetSecondSample& s,
+                          const char* prefix, const char* suffix) const;
+
     // VipleStream v1.4.152 §R2-β-2 + v1.4.153 §R2-γ-5: recv-ratio adaptive controller.
-    // ACTIVE: m_LowRecvRatioSeconds 5s warn once.
+    // ACTIVE: §LOGHYG-WARN 60 秒滑動視窗警告（見下方 m_LowRecvWindowBits 區塊）。
     // PASSIVE: above80 / below70 / below40 hysteresis counters drive ratio switch.
     // v1.4.170 §R2-θ: metric changed from recv/server_fps to recv/display_Hz so
     // the controller actually targets display refresh alignment (server fps may
     // not equal display Hz — see plan 167-128-2x-1x-wiggly-lantern).  Counters
     // reused, semantics now "recv against display × X%".
-    int m_LowRecvRatioSeconds = 0;
-    bool m_RatioWarnedOnce = false;
+    // §LOGHYG-WARN (v1.5.268) — 取代舊的「連續 5 秒 streak + 永久靜音」：
+    // 近 60 秒內 recv%<80 的秒數 ≥ 42 才警告、冷卻 300 秒可重警，並依視窗
+    // 內 networkDropped 分流 SERVER_LIMITED（伺服器產幀不足）vs 網路型。
+    uint64_t m_LowRecvWindowBits = 0;  // 每秒 1 bit：該秒 recv% < 80
+    uint32_t m_WarnWndRecv[60] = {};   // 該秒 receivedFrames
+    uint32_t m_WarnWndDrop[60] = {};   // 該秒 networkDroppedFrames
+    int m_WarnWndIdx = 0;
+    int m_WarnWndFill = 0;
+    int m_RatioWarnCooldownSec = 0;    // > 0 遞減；歸零才可再警
+    int m_RatioWarnOverlayHideSec = 0; // > 0 遞減；歸零時收掉畫面通知
+    // SERVER_LIMITED 常見於靜態畫面省流（damage-based 擷取），overlay 每
+    // session 最多一次，之後只記 log，避免每次冷卻到期就跳畫面通知。
+    bool m_RatioWarnSrvLtdOverlayShown = false;
+    // OverlayStatusUpdate 是多方共用的單一 slot；倒數收掉前先比對文字仍是
+    // 自己寫的那份，避免誤關別人的常駐通知（如 gamepad mouse mode）。
+    char m_RatioWarnLastMsg[512] = {};
     int m_RecvAbove80Seconds = 0;  // recv ≥ 95% of display_Hz → step ratio down
     int m_RecvBelow70Seconds = 0;  // recv < 80% of display_Hz → bump to 2x
     int m_RecvBelow40Seconds = 0;  // recv < 40% of display_Hz → bump to 3x

@@ -462,6 +462,14 @@ typedef void(*ConnListenerConnectionTerminated)(int errorCode);
 // supported on GFE 3.22+.
 #define ML_ERROR_FRAME_CONVERSION -104
 
+// ENet 控制連線非預期斷線（unexpected disconnect / service timeout）。
+// 值固定 -1：歷史上以魔術數字 -1 傳給 connectionTerminated()，client 端
+// （session.cpp）依同名常數對應顯示訊息，不可改值。
+// 已知重疊：AudioStream.c / VideoStream.c / ControlStream.c 的 malloc 失敗
+// 路徑也傳 -1（OOM 實務上幾乎不發生）；若照 dialog 文字追事故，記得先排
+// 除這幾個 site。
+#define ML_ERROR_CONTROL_STREAM_DISCONNECT (-1)
+
 // This callback is invoked to log debug message
 typedef void(*ConnListenerLogMessage)(const char* format, ...);
 

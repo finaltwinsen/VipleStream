@@ -2,6 +2,10 @@
 
 #ifdef VIPLE_MPQUIC
 #include "QuicTransport.h"
+
+// §FRZ-ESCALATE 2026-08-07：定義在 ControlStream.c（自帶 200ms 節流；
+// marker 0x49 對 server 等效於 IDR request）。watchdog 升級處置使用。
+void quicSendIdrMarkerRateLimited(const char* tag, const char* what);
 #endif
 
 #define FIRST_FRAME_MAX 1500
@@ -174,6 +178,19 @@ static void VideoReceiveThreadProc(void* context) {
     bool useSelect;
     int waitingForVideoMs;
     bool encrypted;
+#ifndef LC_FUZZING
+    // §FRZ-DIAG 2026-08-07：滾動 1 秒視訊 datagram 計數。watchdog fire 時
+    // 區分「有流量組不出幀」vs「幾乎無流量」兩種凍結型態（07-20 事故的
+    // 每秒 reset+IDR 全無效，log 看不出當下到底有沒有封包抵達）。
+    uint64_t pktWindowStartUs = 0;
+    uint32_t pktWindowCount = 0;
+    uint32_t pktsLastSecond = 0;
+    // §FRZ-ESCALATE：watchdog 連續無效 reset 的追蹤狀態。原為 function-static
+    // 會跨串流 session 殘留（上一場累積 ≥2 時新場首次 fire 就提前升級），
+    // 改為 thread 區域變數，每個接收執行緒（= 每場串流）自然歸零。
+    uint64_t prevFireLastFrameUs = 0;
+    uint32_t consecutiveIneffectiveFires = 0;
+#endif
 
     encrypted = !!(EncryptionFeaturesEnabled & SS_ENC_VIDEO);
     decryptedSize = StreamConfig.packetSize + MAX_RTP_HEADER_SIZE;
@@ -272,6 +289,10 @@ static void VideoReceiveThreadProc(void* context) {
         }
 
 #ifndef LC_FUZZING
+        // §FRZ-DIAG：此處 err > 0，計入所有收到的 datagram（含 runt / FEC /
+        // 舊幀），watchdog fire 時的流量證據要的就是原始抵達量
+        pktWindowCount++;
+
         if (!receivedFullFrame) {
             if (PltGetMillis() - firstDataTimeMs >= FIRST_FRAME_TIMEOUT_SEC * 1000) {
                 Limelog("Terminating connection due to lack of a successful video frame\n");
@@ -292,16 +313,28 @@ static void VideoReceiveThreadProc(void* context) {
             uint64_t nowUs = PltGetMicroseconds();
             if (nowUs - lastWatchdogCheckUs > 250000) {
                 lastWatchdogCheckUs = nowUs;
+                // §FRZ-DIAG：1 秒視窗滾動（藉 250ms 檢查節奏進行；封包完全
+                // 斷流時本區塊不再執行，pktsLastSecond 凍結在最後一窗——
+                // 那正是「幾乎無流量」的證據）
+                if (pktWindowStartUs == 0) {
+                    pktWindowStartUs = nowUs;
+                }
+                else if (nowUs - pktWindowStartUs >= 1000000) {
+                    pktsLastSecond = pktWindowCount;
+                    pktWindowCount = 0;
+                    pktWindowStartUs = nowUs;
+                }
                 uint64_t lastFrameUs = videoDepacketizerLastFrameTimeUs();
                 if (lastFrameUs != 0 &&
                     nowUs - lastFrameUs > 2000000 &&
                     nowUs - lastWatchdogFireUs > 1000000) {
                     lastWatchdogFireUs = nowUs;
                     Limelog("[VIPLE-VIDEO] §FRZ-WATCHDOG: packets flowing but "
-                            "no decode unit for %.1fs (queue frame=%u) — "
+                            "no decode unit for %.1fs (queue frame=%u, pkts last 1s=%u) — "
                             "resetting RTP queue and requesting IDR\n",
                             (float)(nowUs - lastFrameUs) / 1e6f,
-                            RtpvGetCurrentFrameNumber(&rtpQueue));
+                            RtpvGetCurrentFrameNumber(&rtpQueue),
+                            pktsLastSecond);
                     // §FRZ-GAP-FIX 2026-07-17：reset 只為清掉可能毒化的
                     // 佇列內容，幀號連續性必須保留。RtpvInitializeQueue
                     // 會把 currentFrameNumber 打回 1，下一個到達的幀
@@ -324,7 +357,6 @@ static void VideoReceiveThreadProc(void* context) {
                     //（RtpVideoQueue 的 GAP-FEC 遇哨兵跳過合成回報）——毒化
                     // 值一樣被丟棄，且永不製造假 gap。
                     {
-                        static uint64_t prevFireLastFrameUs;
                         bool madeProgress = (lastFrameUs != prevFireLastFrameUs);
                         uint32_t savedFrameNumber = RtpvGetCurrentFrameNumber(&rtpQueue);
                         prevFireLastFrameUs = lastFrameUs;
@@ -332,10 +364,29 @@ static void VideoReceiveThreadProc(void* context) {
                         RtpvInitializeQueue(&rtpQueue);
                         if (madeProgress) {
                             rtpQueue.currentFrameNumber = savedFrameNumber;
+                            consecutiveIneffectiveFires = 0;
                         }
                         else {
                             // §FRZ-RESYNC-SENTINEL：無基準，採納下一個到達幀
                             rtpQueue.currentFrameNumber = 0;
+                            consecutiveIneffectiveFires++;
+#ifdef VIPLE_MPQUIC
+                            // §FRZ-ESCALATE 2026-08-07：07-20 事故型態——連續
+                            // 每秒 reset+IDR 全無效且哨兵 0 從未被認領
+                            // （savedFrameNumber==0 = 上次 reset 後零視訊封包
+                            // 抵達），代表 ENet IDR request 雖 reliable 送達
+                            // 但救不回視訊流。多發一路 QUIC marker（server 收
+                            // 0x49 即出 IDR；函式自帶 200ms 節流，每秒一次
+                            // 無壓力）。首兩次 fire 行為不變（計數 <3 不動作），
+                            // 穩定時段 madeProgress 會歸零計數、零誤觸。
+                            if (consecutiveIneffectiveFires >= 3 && savedFrameNumber == 0) {
+                                Limelog("[VIPLE-VIDEO] §FRZ-ESCALATE: %u consecutive "
+                                        "ineffective resets, sentinel unclaimed — "
+                                        "escalating IDR via QUIC marker\n",
+                                        consecutiveIneffectiveFires);
+                                quicSendIdrMarkerRateLimited("§FRZ-ESCALATE", "IDR");
+                            }
+#endif
                         }
                     }
                     videoDepacketizerRequestResync();

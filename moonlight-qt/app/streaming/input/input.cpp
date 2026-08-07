@@ -418,13 +418,18 @@ void SdlInputHandler::setCaptureActive(bool active)
             m_FakeCaptureActive = true;
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-            "[VIPLE-INPUT] §N.5.linux setCaptureActive: m_AbsoluteMouseMode=%d "
-            "SDL_SetRelativeMouseMode skipped=%d rc=%d err='%s' → "
-            "m_FakeCaptureActive=%d (fake capture 不送 xrel/yrel — Linux client "
-            "若 mouse 不傳, 看 m_FakeCaptureActive=1 + SDL err 是否 platform "
-            "constraint, 例 Hyper-V VM console 常見)",
+            "[VIPLE-INPUT] §N.5.linux setCaptureActive: absMouse=%d relModeSkipped=%d "
+            "rc=%d err='%s' fakeCapture=%d",
             (int)m_AbsoluteMouseMode, (int)relModeSkipped, relModeResult,
             relModeErr, (int)m_FakeCaptureActive);
+#if defined(Q_OS_LINUX)
+        // 診斷散文只在 Linux 有意義（Hyper-V VM console / Wayland 常見）
+        if (m_FakeCaptureActive) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-INPUT] §N.5.linux fake capture active — 不送 xrel/yrel; "
+                "若 mouse 不傳, 檢查上一行 SDL err 是否 platform constraint");
+        }
+#endif
 
         // Synchronize the client and host cursor when activating absolute capture
         if (m_AbsoluteMouseMode) {

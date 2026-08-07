@@ -126,6 +126,14 @@ public:
     // VipleStream: connection quality flag for renderer (atomic, thread-safe)
     bool isConnectionPoor() const { return m_ConnectionPoor.load(); }
 
+    // VipleStream §LOGHYG-WARN: status overlay 警告的共用 gate——尊重使用者
+    // 的 connectionWarnings 偏好、且不蓋掉 mouse emulation 的常駐提示（與
+    // clConnectionStatusUpdate 同兩道檢查）。供 ffmpeg.cpp 等 decoder 端呼叫。
+    bool shouldShowStatusOverlayWarning() const
+    {
+        return m_Preferences->connectionWarnings && m_MouseEmulationRefCount == 0;
+    }
+
     // VipleStream: access computer info for overlay display
     NvComputer* getComputer() const { return m_Computer; }
 
@@ -307,7 +315,9 @@ private:
     IAudioRenderer* m_AudioRenderer;
     OPUS_MULTISTREAM_CONFIGURATION m_ActiveAudioConfig;
     OPUS_MULTISTREAM_CONFIGURATION m_OriginalAudioConfig;
-    int m_AudioSampleCount;
+    // audio 解碼執行緒遞增、SDL 主迴圈（零音訊偵測）與 teardown 統計讀取，
+    // 改 atomic 消除跨執行緒讀寫 race（relaxed 語意即可，僅計數用途）。
+    std::atomic<int> m_AudioSampleCount;
     Uint32 m_DropAudioEndTime;
 
     Overlay::OverlayManager m_OverlayManager;
@@ -317,6 +327,11 @@ private:
 
     // VipleStream: connection quality for FRUC adaptive behavior
     std::atomic<bool> m_ConnectionPoor{false};
+
+    // VipleStream: 使用者已主動觸發退出（quit combo／關窗／interrupt／
+    // setShouldExit）。clConnectionTerminated（common-c 執行緒）據此抑制
+    // teardown 期間才到達的誤導性錯誤對話框，所以要 atomic。
+    std::atomic<bool> m_UserInitiatedQuit{false};
 
     // VipleStream: original user-requested FPS (before FRUC halving)
     int m_OriginalFps = 0;

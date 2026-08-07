@@ -1397,7 +1397,7 @@ enet_main_loop:
                             goto enet_reconnect_wait;
                         }
 #endif
-                        ListenerCallbacks.connectionTerminated(-1);
+                        ListenerCallbacks.connectionTerminated(ML_ERROR_CONTROL_STREAM_DISCONNECT);
                         return;
                     }
                 }
@@ -1418,7 +1418,17 @@ enet_main_loop:
             LC_ASSERT(err == -1);
 
             err = LastSocketFail();
-            Limelog("Control stream connection failed: %d\n", err);
+            // §LOG-TEARDOWN 2026-08-07：使用者主動退出時 input/audio 收線會先
+            // 弄斷 ENet 等待（Windows 必現 err=10004 WSAEINTR），每次正常退出
+            // 都印「connection failed」誤導事後 log 分析。teardown（連線層級
+            // ConnectionInterrupted，LiStopConnection 一開始就設起）改印中性
+            // 訊息；真錯誤（非 interrupted）維持原樣。
+            if (ConnectionInterrupted) {
+                Limelog("Control stream stopped (connection teardown)\n");
+            }
+            else {
+                Limelog("Control stream connection failed: %d\n", err);
+            }
 #ifdef VIPLE_MPQUIC
             // §Q-ENET-GRACE 2026-05-27: ENet socket 綁在 primary interface
             // IP，failover 時 underlying interface 消失，socket 不能遷移所以
@@ -1635,7 +1645,7 @@ enet_main_loop:
             }
 #endif
             Limelog("Control stream received unexpected disconnect event\n");
-            ListenerCallbacks.connectionTerminated(-1);
+            ListenerCallbacks.connectionTerminated(ML_ERROR_CONTROL_STREAM_DISCONNECT);
             return;
         }
     }
@@ -1980,7 +1990,11 @@ static void lossStatsThreadFunc(void* context) {
 // 洪水，server 端全是同一個意圖「給我 IDR」）。200ms 節流對恢復延遲
 // 無感（server 產出 IDR 本身要數十 ms），但把洪水壓掉。marker 對
 // server 而言等效，被節流的請求直接視為已送出。
-static void quicSendIdrMarkerRateLimited(const char* tag, const char* what) {
+// §FRZ-ESCALATE 2026-08-07：去 static——VideoStream.c 的 watchdog 升級
+// 處置也走這條（extern 宣告在該檔）。節流檢查跨執行緒 best-effort：
+// control 與 video 接收執行緒可能同時通過 200ms 檢查各送一枚 marker，
+// 實際送出有 picoquicMutex 保護、最壞多送一張等效 IDR request，無害。
+void quicSendIdrMarkerRateLimited(const char* tag, const char* what) {
     static uint64_t lastMarkerSentMs;
     uint64_t nowMs = PltGetMillis();
     if (lastMarkerSentMs != 0 && nowMs - lastMarkerSentMs < 200) {
@@ -2133,7 +2147,32 @@ static void requestInvalidateReferenceFrames(uint32_t startFrame, uint32_t endFr
         return;
     }
 
-    Limelog("Invalidate reference frame request sent (%d to %d)\n", startFrame, endFrame);
+    // §LOG-RFI-AGG 2026-08-07：RFI 風暴時逐筆列印（事故單場 7,909 筆）淹沒
+    // log。只節流 log、不動送出行為：每秒最多一筆，其餘合併為請求數+涵蓋區間。
+    {
+        static uint64_t lastRfiSentLogMs;
+        static uint32_t rfiSentSuppressed, rfiSentFirstFrame, rfiSentLastFrame;
+        uint64_t nowMs = PltGetMillis();
+
+        if (lastRfiSentLogMs == 0 || nowMs - lastRfiSentLogMs >= 1000) {
+            if (rfiSentSuppressed > 0) {
+                Limelog("Invalidate reference frame request sent (%u to %u; +%u more since last log, frames %u..%u)\n",
+                        startFrame, endFrame, rfiSentSuppressed, rfiSentFirstFrame, rfiSentLastFrame);
+            }
+            else {
+                Limelog("Invalidate reference frame request sent (%d to %d)\n", startFrame, endFrame);
+            }
+            lastRfiSentLogMs = nowMs;
+            rfiSentSuppressed = 0;
+        }
+        else {
+            if (rfiSentSuppressed == 0) {
+                rfiSentFirstFrame = startFrame;
+            }
+            rfiSentSuppressed++;
+            rfiSentLastFrame = endFrame;
+        }
+    }
 }
 
 static void confirmLongtermReferenceFrame(uint32_t frameIndex) {

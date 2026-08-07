@@ -45,10 +45,10 @@ NavigableDialog {
 
     ColumnLayout {
         spacing: 16
-        width: 480
 
         Label {
             Layout.fillWidth: true
+            Layout.maximumWidth: 480
             wrapMode: Text.Wrap
             font.pixelSize: 16
             text: {
@@ -64,6 +64,7 @@ NavigableDialog {
 
         Label {
             Layout.fillWidth: true
+            Layout.maximumWidth: 480
             wrapMode: Text.Wrap
             visible: dialog.mode === "confirm"
             text: qsTr("VipleStream will close and relaunch automatically after the update is applied. " +
@@ -74,6 +75,7 @@ NavigableDialog {
         ColumnLayout {
             visible: dialog.mode === "downloading"
             Layout.fillWidth: true
+            Layout.maximumWidth: 480
             spacing: 6
 
             ProgressBar {
@@ -103,6 +105,7 @@ NavigableDialog {
         Label {
             visible: dialog.mode === "failed"
             Layout.fillWidth: true
+            Layout.maximumWidth: 480
             wrapMode: Text.Wrap
             color: "#ff7070"
             text: dialog.errorMessage
@@ -111,6 +114,7 @@ NavigableDialog {
         Label {
             visible: dialog.mode === "failed"
             Layout.fillWidth: true
+            Layout.maximumWidth: 480
             wrapMode: Text.Wrap
             font.pixelSize: 12
             opacity: 0.7

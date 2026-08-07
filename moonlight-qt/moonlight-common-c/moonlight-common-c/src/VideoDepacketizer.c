@@ -1142,7 +1142,25 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         if (waitingForIdrFrame || waitingForRefInvalFrame) {
             // IDR wait takes priority over RFI wait (and an IDR frame will satisfy both)
             if (waitingForIdrFrame) {
-                Limelog("Waiting for IDR frame (frame %d, type=%d)\n", frameIndex, frameType);
+                // §LOG-IDR-AGG 2026-08-07：等待期內逐幀列印（單秒可 40+ 筆）
+                // 淹沒 log。只節流 log、不動行為：每秒最多一筆 + 累計計數。
+                static uint64_t lastIdrWaitLogMs;
+                static uint32_t idrWaitSuppressed;
+                uint64_t nowMs = PltGetMillis();
+                if (lastIdrWaitLogMs == 0 || nowMs - lastIdrWaitLogMs >= 1000) {
+                    if (idrWaitSuppressed > 0) {
+                        Limelog("Waiting for IDR frame (frame %d, type=%d; %u frames since last log)\n",
+                                frameIndex, frameType, idrWaitSuppressed);
+                    }
+                    else {
+                        Limelog("Waiting for IDR frame (frame %d, type=%d)\n", frameIndex, frameType);
+                    }
+                    lastIdrWaitLogMs = nowMs;
+                    idrWaitSuppressed = 0;
+                }
+                else {
+                    idrWaitSuppressed++;
+                }
 
                 // We wait for the first fully received frame after a loss to approximate
                 // detection of the recovery of the network. Requesting an IDR frame while
@@ -1154,7 +1172,23 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             else {
                 // If we need an RFI frame first, then drop this frame
                 // and update the reference frame invalidation window.
-                Limelog("Waiting for RFI frame\n");
+                // §LOG-IDR-AGG：同上，每秒最多一筆 + 累計計數
+                static uint64_t lastRfiWaitLogMs;
+                static uint32_t rfiWaitSuppressed;
+                uint64_t nowMs = PltGetMillis();
+                if (lastRfiWaitLogMs == 0 || nowMs - lastRfiWaitLogMs >= 1000) {
+                    if (rfiWaitSuppressed > 0) {
+                        Limelog("Waiting for RFI frame (%u frames since last log)\n", rfiWaitSuppressed);
+                    }
+                    else {
+                        Limelog("Waiting for RFI frame\n");
+                    }
+                    lastRfiWaitLogMs = nowMs;
+                    rfiWaitSuppressed = 0;
+                }
+                else {
+                    rfiWaitSuppressed++;
+                }
                 connectionDetectedFrameLoss(startFrameNumber, frameIndex);
             }
 
@@ -1206,7 +1240,31 @@ void notifyFrameLost(unsigned int frameNumber, bool speculative) {
         return;
     }
 
-    Limelog("[VIPLE-DEPACK] notifyFrameLost: frame=%u spec=%d\n", frameNumber, (int)speculative);
+    // §LOG-NFL-AGG 2026-08-07：per-frame 列印（事故單場 3,001 筆）淹沒 log。
+    // 只節流 log、不動行為：每秒最多一筆 + 區間彙總（首末幀號）。
+    {
+        static uint64_t lastNflLogMs;
+        static uint32_t nflSuppressed, nflFirstFrame, nflLastFrame;
+        uint64_t nowMs = PltGetMillis();
+        if (lastNflLogMs == 0 || nowMs - lastNflLogMs >= 1000) {
+            if (nflSuppressed > 0) {
+                Limelog("[VIPLE-DEPACK] notifyFrameLost: frame=%u spec=%d (+%u more since last log, frames %u..%u)\n",
+                        frameNumber, (int)speculative, nflSuppressed, nflFirstFrame, nflLastFrame);
+            }
+            else {
+                Limelog("[VIPLE-DEPACK] notifyFrameLost: frame=%u spec=%d\n", frameNumber, (int)speculative);
+            }
+            lastNflLogMs = nowMs;
+            nflSuppressed = 0;
+        }
+        else {
+            if (nflSuppressed == 0) {
+                nflFirstFrame = frameNumber;
+            }
+            nflSuppressed++;
+            nflLastFrame = frameNumber;
+        }
+    }
 
     // Drop state and determine if we need an IDR frame or if RFI is okay
     dropFrameState();
@@ -1215,11 +1273,27 @@ void notifyFrameLost(unsigned int frameNumber, bool speculative) {
     if (!waitingForIdrFrame) {
         LC_ASSERT(waitingForRefInvalFrame);
 
-        if (speculative) {
-            Limelog("Sending speculative RFI request for predicted loss of frame %d\n", frameNumber);
-        }
-        else {
-            Limelog("Sending RFI request for unrecoverable frame %d\n", frameNumber);
+        // §LOG-NFL-AGG：Sending RFI request 同法節流（speculative / 非
+        // speculative 共用同一節流狀態；實際 RFI 送出行為不受影響）
+        {
+            static uint64_t lastRfiReqLogMs;
+            static uint32_t rfiReqSuppressed;
+            uint64_t nowMs = PltGetMillis();
+            if (lastRfiReqLogMs == 0 || nowMs - lastRfiReqLogMs >= 1000) {
+                if (speculative) {
+                    Limelog("Sending speculative RFI request for predicted loss of frame %d (%u requests since last log)\n",
+                            frameNumber, rfiReqSuppressed + 1);
+                }
+                else {
+                    Limelog("Sending RFI request for unrecoverable frame %d (%u requests since last log)\n",
+                            frameNumber, rfiReqSuppressed + 1);
+                }
+                lastRfiReqLogMs = nowMs;
+                rfiReqSuppressed = 0;
+            }
+            else {
+                rfiReqSuppressed++;
+            }
         }
 
         // Advance the frame number since we won't be expecting this one anymore

@@ -470,8 +470,10 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
         m_KeysDown.remove(keyCode);
     }
 
-    // [VIPLE-DIAG] Log modifier keys to debug IME Right Shift issue
-    if (keyCode >= 0xA0 && keyCode <= 0xA5) {
+    // [VIPLE-DIAG] IME Right Shift 調查遺留：全 modifier 每按放各印一行
+    // （LShift/LCtrl 每場數千行）太吵，且 app 未調 SDL log priority、
+    // SDL_LogDebug 根本不會輸出。收斂為只印調查目標 Right Shift（0xA1）。
+    if (keyCode == 0xA1) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-DIAG] handleKeyEvent: SDL scancode=%d keycode=0x%x mapped_vk=0x%x "
                     "state=%s modifiers=0x%x sdl_mod=0x%x",

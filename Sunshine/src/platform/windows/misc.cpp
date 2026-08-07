@@ -226,8 +226,9 @@ namespace platf {
       // 取得介面友善名稱
       if (adapter->FriendlyName) {
         std::wstring wname(adapter->FriendlyName);
-        // 簡易 wstring → string 轉換（介面名通常是 ASCII）
-        name.assign(wname.begin(), wname.end());
+        // UTF-16 → UTF-8 正確轉換：中文 Windows 的介面名（如「乙太網路」）
+        // 逐 code unit 窄化會變成非法 UTF-8（"Y*��"）並汙染 serverinfo XML
+        name = utf_utils::to_utf8(wname);
       } else {
         name = "Unknown";
       }

@@ -7,6 +7,26 @@
 #include <QHostInfo>
 #include <QNetworkInterface>
 #include <QNetworkProxy>
+#include <QHash>
+#include <QMutex>
+
+namespace {
+// serverinfo 建構子每次 poll 都會重跑，同內容的 log 會刷版面。
+// 用「key → 上次印過的簽章」快取做去重；polling 執行緒每 host 一條，
+// map 共用所以要鎖。回傳 true 表示這次該印（首次或內容有變）。
+bool logOnceOnChange(const QString& key, const QString& signature)
+{
+    static QMutex s_Mutex;
+    static QHash<QString, QString> s_LastLoggedSignature;
+
+    QMutexLocker locker(&s_Mutex);
+    if (s_LastLoggedSignature.value(key) == signature) {
+        return false;
+    }
+    s_LastLoggedSignature.insert(key, signature);
+    return true;
+}
+}
 
 #define SER_NAME "hostname"
 #define SER_UUID "uuid"
@@ -256,9 +276,16 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     // §MP-ADV: 解析伺服器廣告的網路介面清單
     this->serverAdvertisedInterfaces = NvHTTP::getNetworkInterfaceList(serverInfo);
     if (!this->serverAdvertisedInterfaces.isEmpty()) {
-        qInfo() << "Server advertised" << this->serverAdvertisedInterfaces.size() << "network interface(s):";
+        // 內容變化才印（見 logOnceOnChange）
+        QString ifaceSig;
         for (const auto& iface : std::as_const(this->serverAdvertisedInterfaces)) {
-            qInfo() << "  " << iface.name << "(" << iface.type << "):" << iface.address;
+            ifaceSig += iface.name + QLatin1Char('|') + iface.type + QLatin1Char('|') + iface.address + QLatin1Char(';');
+        }
+        if (logOnceOnChange(QStringLiteral("srv-ifaces:") + this->uuid, ifaceSig)) {
+            qInfo() << "Server advertised" << this->serverAdvertisedInterfaces.size() << "network interface(s):";
+            for (const auto& iface : std::as_const(this->serverAdvertisedInterfaces)) {
+                qInfo() << "  " << iface.name << "(" << iface.type << "):" << iface.address;
+            }
         }
     }
 
@@ -300,9 +327,13 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
             this->stunAddress = NvAddress(stunIp, http.httpPort());
         }
         this->stunNatType = NvHTTP::getXmlString(serverInfo, "StunNatType");
-        qInfo() << "STUN endpoint:" << stunEndpoint
-                << "-> HTTP address:" << this->stunAddress.address() << ":" << this->stunAddress.port()
-                << "NAT:" << this->stunNatType;
+        // 值變化才印（見 logOnceOnChange）
+        if (logOnceOnChange(QStringLiteral("stun:") + this->uuid,
+                            stunEndpoint + QLatin1Char('|') + this->stunNatType)) {
+            qInfo() << "STUN endpoint:" << stunEndpoint
+                    << "-> HTTP address:" << this->stunAddress.address() << ":" << this->stunAddress.port()
+                    << "NAT:" << this->stunNatType;
+        }
     }
 
     // VipleStream capability marker. Vanilla Sunshine / GFE don't emit this
@@ -514,11 +545,23 @@ NvComputer::ReachabilityType NvComputer::getActiveAddressReachability() const
             const auto allInterfaceAddresses = nic.addressEntries();
             for (const QNetworkAddressEntry& addr : allInterfaceAddresses) {
                 if (addr.ip() == s.localAddress()) {
-                    qInfo() << "Found matching interface:" << nic.humanReadableName() << nic.hardwareAddress() << nic.flags();
+                    // 每次可達性檢查都會走到這裡；介面資訊同值不重印
+                    QString nicSig = nic.humanReadableName() + QLatin1Char('|') + nic.hardwareAddress()
+                                   + QLatin1Char('|') + QString::number(int(nic.flags()));
+#if QT_VERSION >= QT_VERSION_CHECK(5, 11, 0)
+                    nicSig += QLatin1Char('|') + QString::number(int(nic.type()))
+                            + QLatin1Char('|') + QString::number(nic.maximumTransmissionUnit());
+#endif
+                    const bool logNic = logOnceOnChange(QStringLiteral("reach-nic:") + this->uuid, nicSig);
+                    if (logNic) {
+                        qInfo() << "Found matching interface:" << nic.humanReadableName() << nic.hardwareAddress() << nic.flags();
+                    }
 
 #if QT_VERSION >= QT_VERSION_CHECK(5, 11, 0)
-                    qInfo() << "Interface Type:" << nic.type();
-                    qInfo() << "Interface MTU:" << nic.maximumTransmissionUnit();
+                    if (logNic) {
+                        qInfo() << "Interface Type:" << nic.type();
+                        qInfo() << "Interface MTU:" << nic.maximumTransmissionUnit();
+                    }
 
                     if (nic.type() == QNetworkInterface::Virtual ||
                             nic.type() == QNetworkInterface::Ppp) {

@@ -54,6 +54,7 @@
 #include <QScreen>
 #include <QStandardPaths>
 #include <QDir>
+#include <QHostAddress>
 
 #ifdef VIPLE_MPQUIC
 // §Q Phase 5 (5f): 0-RTT ticket store setter from moonlight-common-c.
@@ -113,7 +114,20 @@ void Session::clConnectionTerminated(int errorCode)
     s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
 
     // Display the termination dialog if this was not intended
-    switch (errorCode) {
+    //
+    // 使用者已主動退出（quit combo／關窗／UI 中斷）後才到達的終止錯誤，
+    // 是 teardown 期間的預期副作用（例如畫面凍結按 quit 後 ENet 逾時），
+    // 只記 log、不彈錯誤對話框，避免主動退出卻看到誤導性的錯誤訊息。
+    if (errorCode != ML_ERROR_GRACEFUL_TERMINATION &&
+        s_ActiveSession->m_UserInitiatedQuit.load()) {
+        // 不設 m_UnexpectedTermination：使用者主動退出＝預期終止，讓收尾
+        // 照送 HTTP /cancel（HTTP 通道與壞掉的串流 socket 獨立，凍結時通常
+        // 仍可達），否則 host 端 ownership 不清、下一台裝置吃 §M.1 503。
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Suppressing termination dialog after user-initiated quit (error: %d)",
+                    errorCode);
+    }
+    else switch (errorCode) {
     case ML_ERROR_GRACEFUL_TERMINATION:
         break;
 
@@ -143,6 +157,13 @@ void Session::clConnectionTerminated(int errorCode)
         s_ActiveSession->m_UnexpectedTermination = true;
         emit s_ActiveSession->displayLaunchError(tr("The host PC reported a fatal video encoding error.") + "\n\n" +
                                                  tr("Try disabling HDR mode, changing the streaming resolution, or changing your host PC's display resolution."));
+        break;
+
+    case ML_ERROR_CONTROL_STREAM_DISCONNECT:
+        // 原本 -1 落入 default 只給 generic 錯誤碼，使用者無從行動。
+        // （qmake mkspec 已注入 -utf-8，中文字面量可直寫。）
+        s_ActiveSession->m_UnexpectedTermination = true;
+        emit s_ActiveSession->displayLaunchError(tr("與伺服器的控制連線中斷——可能是網路瞬斷或伺服器離線，可稍後嘗試繼續串流（resume）"));
         break;
 
     default:
@@ -2300,42 +2321,60 @@ bool Session::startConnectionAsync()
     // VipleStream: Attempt hole punch if we have a STUN endpoint for the server.
     // This is best-effort — failure is not fatal (ENet will try connecting anyway).
     if (!m_Computer->stunAddress.isNull() && !m_Computer->stunAddress.address().isEmpty()) {
-        QByteArray serverUuid = m_Computer->uuid.toUtf8().left(16);
-        QByteArray clientUuid = QByteArray(16, 0);  // placeholder
-        serverUuid.resize(16, 0);
-
-        // stunAddress stores the HTTP port (for API fallback). The hole-punch
-        // intercept on Sunshine lives on the ENet control port = HTTP port + 10
-        // (see Sunshine/src/stream.h CONTROL_PORT = 10). Previously this sent
-        // SYNs to the HTTP port where they were silently dropped.
-        uint16_t controlPort = static_cast<uint16_t>(m_Computer->stunAddress.port() + 10);
-
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-NAT] Attempting hole punch to %s:%d (NAT: %s)",
-                    qPrintable(m_Computer->stunAddress.address()),
-                    controlPort,
-                    qPrintable(m_Computer->stunNatType));
-
-        int punchResult = LiHolePunch(
-            qPrintable(m_Computer->stunAddress.address()),
-            controlPort,
-            (const uint8_t *)serverUuid.constData(),
-            (const uint8_t *)clientUuid.constData(),
-            3000);
-
-        if (punchResult == 0) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-NAT] Hole punch succeeded!");
-        } else {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-NAT] Hole punch failed (%d), proceeding with direct connection", punchResult);
+        // 連線目標若是私網（RFC1918）、loopback（LAN 直連、relay tunnel）
+        // 或 CGNAT 100.64/10（Tailscale），NAT 打洞沒有意義——對 server 的
+        // WAN IP 打洞必定 3 秒逾時（-4 no ACK），每場串流啟動固定多等 3 秒，
+        // 直接跳過。目標不是 IP（hostname）時 QHostAddress 解析失敗、判斷
+        // 都為 false，維持原行為。
+        QHostAddress connectTarget(QString::fromUtf8(hostnameStr));
+        if (connectTarget.isLoopback() || connectTarget.isPrivateUse() ||
+            connectTarget.isInSubnet(QHostAddress("100.64.0.0"), 10)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] Skipping hole punch: direct private address %s",
+                        hostnameStr.constData());
+            // 上一場若打過洞，HolePunch.c 的 LocalControlPort 會殘留舊 port；
+            // 不歸零的話 ENet client socket 會綁死上一場的 port 而非 wildcard，
+            // 該 port 被占用時 LAN 連線直接失敗。
+            LocalControlPort = 0;
         }
+        else {
+            QByteArray serverUuid = m_Computer->uuid.toUtf8().left(16);
+            QByteArray clientUuid = QByteArray(16, 0);  // placeholder
+            serverUuid.resize(16, 0);
 
-        // VipleStream diag: dump the local port LiHolePunch used — ENet control
-        // socket should bind to the same value so the NAT pinhole carries over.
-        // (LocalControlPort is declared in HolePunch.h, defined in HolePunch.c)
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-NAT] LocalControlPort = %u (ENet client will bind to this)",
-                    LocalControlPort);
+            // stunAddress stores the HTTP port (for API fallback). The hole-punch
+            // intercept on Sunshine lives on the ENet control port = HTTP port + 10
+            // (see Sunshine/src/stream.h CONTROL_PORT = 10). Previously this sent
+            // SYNs to the HTTP port where they were silently dropped.
+            uint16_t controlPort = static_cast<uint16_t>(m_Computer->stunAddress.port() + 10);
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] Attempting hole punch to %s:%d (NAT: %s)",
+                        qPrintable(m_Computer->stunAddress.address()),
+                        controlPort,
+                        qPrintable(m_Computer->stunNatType));
+
+            int punchResult = LiHolePunch(
+                qPrintable(m_Computer->stunAddress.address()),
+                controlPort,
+                (const uint8_t *)serverUuid.constData(),
+                (const uint8_t *)clientUuid.constData(),
+                3000);
+
+            if (punchResult == 0) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-NAT] Hole punch succeeded!");
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-NAT] Hole punch failed (%d), proceeding with direct connection", punchResult);
+            }
+
+            // VipleStream diag: dump the local port LiHolePunch used — ENet control
+            // socket should bind to the same value so the NAT pinhole carries over.
+            // (LocalControlPort is declared in HolePunch.h, defined in HolePunch.c)
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-NAT] LocalControlPort = %u (ENet client will bind to this)",
+                        LocalControlPort);
+        }
     }
 
 #ifdef VIPLE_MPQUIC
@@ -2463,6 +2502,16 @@ bool Session::startConnectionAsync()
     // §SC-HID: Start Steam Controller passthrough after connection is established
     m_ScHid.start();
 
+    // [VIPLE-SESSION] 一行結構化 session 標記：每秒遙測行不帶 host/codec，
+    // 事後跨 session log 分析靠這行把遙測歸戶到正確的 host/session。
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-SESSION] host=%s app=%d fps=%d bitrate=%d codecs=0x%x",
+                m_Computer->activeAddress.address().toUtf8().constData(),
+                m_App.id,
+                m_StreamConfig.fps,
+                m_StreamConfig.bitrate,
+                (unsigned int)m_StreamConfig.supportedVideoFormats);
+
     emit connectionStarted();
     return true;
 }
@@ -2494,6 +2543,9 @@ void Session::setShouldExit(bool quitHostApp)
         m_Preferences->quitAppAfter = true;
     }
 
+    // 使用者主動要求退出——之後才到的 connectionTerminated 不再彈錯誤框
+    m_UserInitiatedQuit.store(true);
+
     m_ShouldExit = true;
 }
 
@@ -2518,6 +2570,9 @@ void Session::start()
 
 void Session::interrupt()
 {
+    // interrupt() 只由使用者／UI 主動中止時呼叫——視同使用者退出
+    m_UserInitiatedQuit.store(true);
+
     // Stop any connection in progress
     LiInterruptConnection();
 
@@ -2711,10 +2766,48 @@ void Session::exec()
     // Switch to async logging mode when we enter the SDL loop
     StreamUtils::enterAsyncLoggingMode();
 
+    // 零音訊偵測：開串 60 秒後 m_AudioSampleCount 仍為 0 就警告一次。
+    // 計數來源與結束 stats 的「No audio traffic was ever received」判斷
+    // 同源（audio 解碼回呼），讓使用者當下就知道是 server 端擷取異常，
+    // 不必等串流結束才發現。主執行緒 Qt event loop 在串流期間被 starve，
+    // QTimer 不會動，所以掛在 SDL loop 上（WaitEventTimeout 保證至少每秒
+    // 迭代一次，逾時 continue 也會回到迴圈頂端）。
+    const Uint32 audioSilenceCheckTime = SDL_GetTicks() + 60000;
+    bool audioSilenceChecked = false;
+    // overlay 顯示 15 秒後自動收掉（OverlayStatusUpdate 是共用 slot，收掉前
+    // 比對文字仍是自己寫的那份，避免誤關別人的通知）。
+    static const char* k_ZeroAudioOverlayMsg =
+        "⚠ 未收到任何音訊——伺服器端音訊擷取可能異常";
+    Uint32 audioSilenceOverlayHideTime = 0;
+
     // Hijack this thread to be the SDL main thread. We have to do this
     // because we want to suspend all Qt processing until the stream is over.
     SDL_Event event;
     for (;;) {
+        if (!audioSilenceChecked && SDL_TICKS_PASSED(SDL_GetTicks(), audioSilenceCheckTime)) {
+            audioSilenceChecked = true;
+            if (m_AudioSampleCount == 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-AUD] No audio traffic received in first 60 seconds — "
+                            "server-side audio capture may be broken");
+                // gate 同 clConnectionStatusUpdate：尊重 connectionWarnings
+                // 偏好、不蓋掉 mouse emulation 的常駐提示。
+                if (m_Preferences->connectionWarnings && m_MouseEmulationRefCount == 0) {
+                    m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
+                                                       k_ZeroAudioOverlayMsg);
+                    m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+                    audioSilenceOverlayHideTime = SDL_GetTicks() + 15000;
+                }
+            }
+        }
+        if (audioSilenceOverlayHideTime != 0 &&
+            SDL_TICKS_PASSED(SDL_GetTicks(), audioSilenceOverlayHideTime)) {
+            audioSilenceOverlayHideTime = 0;
+            if (strcmp(m_OverlayManager.getOverlayText(Overlay::OverlayStatusUpdate),
+                       k_ZeroAudioOverlayMsg) == 0) {
+                m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
+            }
+        }
 #if SDL_VERSION_ATLEAST(2, 0, 18) && !defined(STEAM_LINK)
         // SDL 2.0.18 has a proper wait event implementation that uses platform
         // support to block on events rather than polling on Windows, macOS, X11,
@@ -2750,6 +2843,10 @@ void Session::exec()
         case SDL_QUIT:
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Quit event received");
+            // SDL_QUIT 絕大多數來自使用者（quit combo／關窗）；連線終止
+            // callback 自己推的 SDL_QUIT 也會到這裡，但那時對話框早已
+            // 送出、callback 不會再觸發，設旗標無副作用。
+            m_UserInitiatedQuit.store(true);
             goto DispatchDeferredCleanup;
 
         case SDL_USEREVENT:

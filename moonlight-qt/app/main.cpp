@@ -255,7 +255,16 @@ void qtLogToDiskHandler(QtMsgType type, const QMessageLogContext&, const QString
 void ffmpegLogToDiskHandler(void* ptr, int level, const char* fmt, va_list vl)
 {
     char lineBuffer[1024];
-    static int printPrefix = 1;
+    // FFmpeg 同一條訊息可能分多個 fragment 送進來（同一 thread），而 handler
+    // 會被多個 thread 併發呼叫。prefix 狀態與行緩衝都改 thread_local：半行
+    // fragment 先累積、湊滿整行才落盤，根治跨 thread 行交錯毀損。
+    // 行緩衝必須是 POD（無解構子）：main thread 的 thread_local 物件在
+    // static destructor 期間銷毀，而 av_log callback 屆時仍註冊著，FFmpeg
+    // 此時打 log 會觸碰已解構物件（v337 同家族 exit-time 陷阱）。
+    static thread_local int printPrefix = 1;
+    constexpr int k_PendingCap = 4200;
+    static thread_local char pendingBuf[k_PendingCap];
+    static thread_local int pendingLen = 0;
 
     if ((level & 0xFF) > av_log_get_level()) {
         return;
@@ -273,12 +282,32 @@ void ffmpegLogToDiskHandler(void* ptr, int level, const char* fmt, va_list vl)
 
     if (shouldPrefixThisMessage) {
         QTime logTime = QTime::fromMSecsSinceStartOfDay(s_LoggerTime.elapsed());
-        QString txt = QString("%1 - FFmpeg: %2").arg(logTime.toString()).arg(lineBuffer);
-        logToLoggerStream(txt);
+        QByteArray ts = logTime.toString().toLatin1();
+        pendingLen += snprintf(pendingBuf + pendingLen,
+                               (size_t)(k_PendingCap - pendingLen),
+                               "%s - FFmpeg: %s", ts.constData(), lineBuffer);
     }
     else {
-        QString txt = QString(lineBuffer);
-        logToLoggerStream(txt);
+        pendingLen += snprintf(pendingBuf + pendingLen,
+                               (size_t)(k_PendingCap - pendingLen),
+                               "%s", lineBuffer);
+    }
+    // snprintf 回傳「應寫入」長度，可能超過剩餘空間——夾回實際上限
+    if (pendingLen > k_PendingCap - 1) {
+        pendingLen = k_PendingCap - 1;
+    }
+
+    // 累積到換行結尾才寫出；防呆上限：異常長的無換行訊息強制斷行落盤
+    bool flush = pendingLen > 0 && pendingBuf[pendingLen - 1] == '\n';
+    if (!flush && pendingLen > 4096) {
+        pendingBuf[pendingLen - 1] = '\n';
+        flush = true;
+    }
+    if (flush) {
+        // logToLoggerStream 收非 const 左值參考，需具名變數
+        QString flushedLine = QString::fromUtf8(pendingBuf, pendingLen);
+        logToLoggerStream(flushedLine);
+        pendingLen = 0;
     }
 }
 
@@ -679,6 +708,10 @@ int main(int argc, char *argv[])
 
 #ifdef LOG_TO_FILE
     QDir tempDir(Path::getLogDir());
+
+    // §LOG-PERSIST：Linux 的 log 目錄改為持久位置後（path.cpp），累積控制
+    // 交給下方既有的「保留最新 10 份」prune（main.cpp 後段，所有
+    // LOG_TO_FILE 平台通用），這裡不再另做一份輪替。
 
 #ifdef Q_OS_WIN32
     // Only log to a file if the user didn't redirect stderr somewhere else

@@ -129,11 +129,12 @@ ApplicationWindow {
         visible: false
         font: ToolTip.toolTip.font
         text: ToolTip.toolTip.text
-    }
 
-    // This configures the maximum width of the singleton attached QML ToolTip. If left unconstrained,
-    // it will never insert a line break and just extend on forever.
-    ToolTip.toolTip.contentWidth: Math.min(tooltipTextLayoutHelper.width, 400)
+        // This configures the maximum width of the singleton attached QML ToolTip. If left unconstrained,
+        // it will never insert a line break and just extend on forever.
+        // （附加屬性必須掛在 Item 派生元素上；掛根 ApplicationWindow 會產生 QML 警告）
+        ToolTip.toolTip.contentWidth: Math.min(tooltipTextLayoutHelper.width, 400)
+    }
 
     function goBack() {
         if (clearOnBack) {
@@ -444,7 +445,8 @@ ApplicationWindow {
 
                 Shortcut {
                     id: newPcShortcut
-                    sequence: StandardKey.New
+                    // StandardKey 可能有多組鍵位；用 sequences 全綁，避免 QML 警告
+                    sequences: [StandardKey.New]
                     onActivated: addPcButton.clicked()
                 }
 
@@ -516,7 +518,8 @@ ApplicationWindow {
 
                 Shortcut {
                     id: helpShortcut
-                    sequence: StandardKey.HelpContents
+                    // 同上：sequences 全綁多組 StandardKey 鍵位
+                    sequences: [StandardKey.HelpContents]
                     onActivated: helpButton.clicked()
                 }
 

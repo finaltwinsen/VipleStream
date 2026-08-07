@@ -11,8 +11,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLoggingCategory>
+#include <QMutex>
 #include <QNetworkRequest>
 #include <QProcess>
+#include <QSet>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QUuid>
@@ -99,23 +101,35 @@ void FileTransferClient::onWorkerStopping()
 
 void FileTransferClient::onSslErrors(QNetworkReply *reply, const QList<QSslError> &errors)
 {
-    qCInfo(lcXfer) << "[VIPLE-XFER] sslErrors fired, count=" << errors.size()
-                   << "pinnedCertNull=" << m_ServerCert.isNull();
     if (m_ServerCert.isNull()) {
         qCWarning(lcXfer) << "[VIPLE-XFER] SSL errors but no pinned cert to verify against";
         return;
     }
     bool ignoreAll = true;
     for (const QSslError &err : errors) {
-        qCInfo(lcXfer) << "[VIPLE-XFER] sslError:" << err.error() << err.errorString()
-                       << "matchesPinned=" << (err.certificate() == m_ServerCert);
         if (err.certificate() != m_ServerCert) {
-            qCWarning(lcXfer) << "[VIPLE-XFER] SSL error cert mismatch (rejecting):" << err.errorString();
+            // pinning mismatch 是安全事件，per-error 細節只在這條路徑印
+            qCWarning(lcXfer) << "[VIPLE-XFER] SSL error cert mismatch (rejecting):"
+                              << err.error() << err.errorString()
+                              << "count=" << errors.size();
             ignoreAll = false;
             break;
         }
     }
     if (ignoreAll) {
+        // 自簽憑證每個 request 都會觸發 sslErrors；pinning 通過屬預期路徑，
+        // 每 host 只印一次摘要。static 跨 instance 共用（worker thread 各自
+        // 獨立），用 mutex 保護。
+        static QMutex s_PinOkLogMutex;
+        static QSet<QString> s_PinOkLoggedHosts;
+        {
+            QMutexLocker locker(&s_PinOkLogMutex);
+            if (!s_PinOkLoggedHosts.contains(m_HostAddress)) {
+                s_PinOkLoggedHosts.insert(m_HostAddress);
+                qCInfo(lcXfer) << "[VIPLE-XFER] SSL pinning ok host=" << m_HostAddress
+                               << "errorsIgnored=" << errors.size();
+            }
+        }
         reply->ignoreSslErrors(errors);
     }
 }
@@ -217,7 +231,8 @@ void FileTransferClient::onPollTimer()
     if (m_ActiveTransferReply) return;  // 有 transfer 進行中，先別 poll 新命令
 
     QUrl url = buildUrl(QStringLiteral("/transfer/poll"));
-    qCInfo(lcXfer) << "[VIPLE-XFER] poll firing url=" << url.toString();
+    // 每 2 秒一發，常態靜音；錯誤路徑在 onPollFinished 已有 qCWarning
+    qCDebug(lcXfer) << "[VIPLE-XFER] poll firing url=" << url.toString();
     QNetworkRequest req = buildRequest(url);
     m_PollReply = m_Nam->get(req);
     connect(m_PollReply.data(), &QNetworkReply::finished,

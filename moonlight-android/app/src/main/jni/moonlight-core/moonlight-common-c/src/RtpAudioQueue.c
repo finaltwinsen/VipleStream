@@ -18,8 +18,19 @@
 #define RTP_PAYLOAD_TYPE_AUDIO   97
 #define RTP_PAYLOAD_TYPE_FEC     127
 
+// §AUD-PLC-GAP 2026-08-07：整塊 FEC block 全滅（burst 丟包常態路徑）快轉
+// 跳過時，要補發給上層的 size=0 placeholder 數。上層 AudioStream 對 size==0
+// 逐個呼叫 decodeAndPlaySample(NULL,0) 觸發 Opus PLC，避免時間軸直接縮短。
+// clamp 理由：事故型大 gap（數十~數千包）若等量補發只會灌爆播放佇列、堆高
+// 延遲，且 Opus PLC 連續外插超過 ~100ms 後輸出趨近靜音，補多無益。
+// 佇列在 AudioStream.c 只有單一靜態實例，故用檔案層級狀態即可。
+#define RTPA_MAX_PLC_PLACEHOLDERS 5
+static uint32_t pendingPlcPlaceholders;
+
 void RtpaInitializeQueue(PRTP_AUDIO_QUEUE queue) {
     memset(queue, 0, sizeof(*queue));
+
+    pendingPlcPlaceholders = 0; // §AUD-PLC-GAP
 
     // We will start in the synchronizing state, where we wait for the first
     // full FEC block before reporting losses, out of order packets, etc.
@@ -171,6 +182,8 @@ static void freeFecBlockHead(PRTP_AUDIO_QUEUE queue) {
 }
 
 void RtpaCleanupQueue(PRTP_AUDIO_QUEUE queue) {
+    pendingPlcPlaceholders = 0; // §AUD-PLC-GAP
+
     while (queue->blockHead != NULL) {
         PRTPA_FEC_BLOCK block = queue->blockHead;
         queue->blockHead = block->next;
@@ -526,6 +539,17 @@ static void handleMissingPackets(PRTP_AUDIO_QUEUE queue) {
     // remaining packets from this block arrive, they will trigger the OOS detection and kick us out of fast
     // audio recovery mode.
     if (isBefore16(queue->nextRtpSequenceNumber, queue->blockHead->fecHeader.baseSequenceNumber)) {
+        // §AUD-PLC-GAP：舊行為直接快轉，被跳過的 data shard 一個 placeholder
+        // 都沒有 → 該段無 Opus PLC、時間軸縮短，聽感斷裂放大。改為依跳過
+        // 數補發 size=0 placeholder（RtpaGetQueuedPacket 先吐這些，協定與
+        // allowDiscontinuity 路徑一致）。data 序號空間跨 block 連續，差值
+        // 即跳過的 data shard 數。同步期（尚無播放基準）不補。
+        if (!queue->synchronizing) {
+            uint32_t skipped = pendingPlcPlaceholders +
+                (uint16_t)(queue->blockHead->fecHeader.baseSequenceNumber - queue->nextRtpSequenceNumber);
+            pendingPlcPlaceholders = skipped > RTPA_MAX_PLC_PLACEHOLDERS ?
+                RTPA_MAX_PLC_PLACEHOLDERS : skipped;
+        }
         queue->nextRtpSequenceNumber = queue->blockHead->fecHeader.baseSequenceNumber;
         queue->oldestRtpBaseSequenceNumber = queue->blockHead->fecHeader.baseSequenceNumber;
         return;
@@ -654,11 +678,26 @@ int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length) {
         handleMissingPackets(queue);
     }
 
-    return queueHasPacketReady(queue) ? RTPQ_RET_PACKET_READY : 0;
+    // §AUD-PLC-GAP：快轉補發的 placeholder 也要讓上層立即來取（即使
+    // blockHead 第一包還沒到位），否則 PLC 會被延到下一次 PACKET_READY
+    return (queueHasPacketReady(queue) || pendingPlcPlaceholders > 0) ? RTPQ_RET_PACKET_READY : 0;
 }
 
 PRTP_PACKET RtpaGetQueuedPacket(PRTP_AUDIO_QUEUE queue, uint16_t customHeaderLength, uint16_t* length) {
     validateFecBlockState(queue);
+
+    // §AUD-PLC-GAP：先吐出整塊全滅快轉補發的 placeholder（時間軸上位於
+    // blockHead 之前），size=0 協定與下方 allowDiscontinuity 路徑一致
+    if (pendingPlcPlaceholders > 0) {
+        PRTP_PACKET lostPacket = malloc(customHeaderLength);
+        if (lostPacket == NULL) {
+            return NULL;
+        }
+
+        pendingPlcPlaceholders--;
+        *length = 0;
+        return lostPacket;
+    }
 
     // If we're returning audio data even with discontinuities, we'll fill in blank entries
     // for packets that were lost and could not be recovered.
