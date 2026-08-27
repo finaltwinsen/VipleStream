@@ -498,6 +498,33 @@ namespace stream {
       std::chrono::steady_clock::time_point abrLowSince{};
       std::chrono::steady_clock::time_point abrLastFloorSignal{};
       int abrLowLossRounds{0};
+
+      // §ABR-DELAY 2026-08-27：delay-based 壅塞偵測（bufferbloat）。
+      //
+      // 為什麼需要：AIMD 只看丟包，而 bufferbloat 的特徵正是「先塞爆
+      // 延遲、很久以後才丟包」。2026-08-27 事故實測（client log
+      // VipleStream-1787406642.log 場次 #3，走 CloudflareWARP）：控制通道
+      // RTT 從常態 40-50ms 一路衝到 2827→4194ms，而丟包率只有 0.12%。
+      // 對 AIMD 來說那是「零丟包」→ ping-tick 持續 +5% 回升 → 等於在
+      // 管線已經積壓 4 秒的情況下繼續加碼，主動把情況弄得更糟。
+      // 同期 §FRZ-WATCHDOG 連 5 次 reset+IDR 全無效（IDR 是最大的幀，
+      // 塞住時再要一張只會加重壅塞）。
+      //
+      // 基線用「兩段式視窗最小值」而不是 ENet 自己的 lowestRoundTripTime：
+      // ENet 每個 throttle interval（預設 5s）會把 lowest 重置成當前 RTT，
+      // 持續壅塞下基線會跟著漲、膨脹比失效（classic min-RTT 污染問題）。
+      // 兩段各 30s 輪換、取 min(cur, prev) → 基線至少涵蓋 30s，
+      // 又不會被短期壅塞永久污染。
+      //
+      // 取樣只在 ENet 的 IDX_PERIODIC_PING handler（controlBroadcastThread）
+      // 進行——peer 由 ENet 執行緒管理，斷線後指標會失效，不可從
+      // QUIC ioLoop 執行緒碰。run_abr_aimd 只讀這裡存下來的數值。
+      uint32_t abrRttLastMs{0};        // 最近取樣值（log / 判定用）
+      uint32_t abrRttMinCurMs{0};      // 本視窗最小
+      uint32_t abrRttMinPrevMs{0};     // 上一視窗最小
+      std::chrono::steady_clock::time_point abrRttWindowStart{};
+      int abrRttCongestedRounds{0};    // 連續判定壅塞的輪數
+      std::chrono::steady_clock::time_point abrRttLastCutTime{};
     } video;
 
     struct {
@@ -1143,6 +1170,50 @@ namespace stream {
   // session->video.abrMutex（bitrateZeroLossStreak 與 target/applied 的
   // check-then-act 非原子）。內部的 bitrateEvents->raise 自帶 event 鎖、
   // 不回呼任何會取 abrMutex 的程式碼，無鎖序問題。
+  // §ABR-DELAY 2026-08-27：從 ENet peer 取樣 RTT 並維護兩段式視窗最小值。
+  //
+  // **只能從 controlBroadcastThread（ENet 執行緒）呼叫** —— session->control.peer
+  // 由 ENet 管理，斷線後指標失效；從 picoquic ioLoop 讀會是 use-after-free。
+  // 呼叫者需持有 video.abrMutex。
+  void abr_sample_rtt(session_t *session) {
+    using namespace std::chrono_literals;
+    auto peer = session->control.peer;
+    if (!peer) {
+      return;  // QUIC-only 或尚未連上
+    }
+    // ENet 的 roundTripTime 是平滑後的 RTT（ms）。0 代表尚無有效樣本。
+    uint32_t rtt = peer->roundTripTime;
+    if (rtt == 0) {
+      return;
+    }
+    session->video.abrRttLastMs = rtt;
+
+    auto now = std::chrono::steady_clock::now();
+    if (session->video.abrRttWindowStart.time_since_epoch().count() == 0) {
+      session->video.abrRttWindowStart = now;
+      session->video.abrRttMinCurMs = rtt;
+      return;
+    }
+    // 30s 輪換：cur → prev，cur 重新開始學。基線取 min(cur, prev)，
+    // 因此永遠涵蓋至少 30 秒的歷史，又不會被持續壅塞永久污染。
+    if (now - session->video.abrRttWindowStart >= 30s) {
+      session->video.abrRttMinPrevMs = session->video.abrRttMinCurMs;
+      session->video.abrRttMinCurMs = rtt;
+      session->video.abrRttWindowStart = now;
+    } else if (rtt < session->video.abrRttMinCurMs || session->video.abrRttMinCurMs == 0) {
+      session->video.abrRttMinCurMs = rtt;
+    }
+  }
+
+  // §ABR-DELAY：回傳目前的 RTT 基線（兩段視窗的較小者）。0 = 尚不可用。
+  uint32_t abr_rtt_baseline(session_t *session) {
+    uint32_t a = session->video.abrRttMinCurMs;
+    uint32_t b = session->video.abrRttMinPrevMs;
+    if (a == 0) return b;
+    if (b == 0) return a;
+    return std::min(a, b);
+  }
+
   void run_abr_aimd(session_t *session, int lossCount, long long elapsedMs, const char *src) {
     int maxBr = session->video.configuredBitrateKbps;
     if (maxBr <= 0 || !session->video.autoAdjustBitrate) {
@@ -1189,6 +1260,46 @@ namespace stream {
         std::max<uint64_t>((uint64_t) std::max(lossCount, 0), staleDrops),
         (uint64_t) std::numeric_limits<int>::max());
 
+    // §ABR-DELAY 2026-08-27：RTT 膨脹＝bufferbloat 訊號。
+    //
+    // 兩個門檻都要求「比例」與「絕對值」同時成立：
+    //   比例擋住高 RTT 環境的正常抖動（120ms 基線波動到 180ms 不算壅塞）；
+    //   絕對值擋住低 RTT 環境的假警報（LAN 上 2ms→5ms 是 2.5 倍，但那是
+    //   量測雜訊，不是積壓）。缺任一個都會誤觸。
+    //
+    // gate（hold，只是暫停回升）門檻較鬆；cut（主動降碼）門檻嚴格得多，
+    // 且要求連續 2 輪 + 5 秒冷卻——delay 訊號比 loss 早，但也更容易被
+    // 對端瞬間忙碌之類的雜訊干擾，寧可晚一輪也不要誤降畫質。
+    bool rttCongested = false;
+    bool rttSevere = false;
+    {
+      using namespace std::chrono_literals;
+      uint32_t rtt = session->video.abrRttLastMs;
+      uint32_t baseline = abr_rtt_baseline(session);
+      if (rtt > 0 && baseline > 0) {
+        uint32_t excess = (rtt > baseline) ? (rtt - baseline) : 0;
+        rttCongested = (rtt >= baseline * 2) && (excess >= 50);
+        bool severeNow = (rtt >= baseline * 4) && (excess >= 200);
+        if (severeNow) {
+          session->video.abrRttCongestedRounds++;
+        } else {
+          session->video.abrRttCongestedRounds = 0;
+        }
+        auto nowTp = std::chrono::steady_clock::now();
+        bool cooled = session->video.abrRttLastCutTime.time_since_epoch().count() == 0 ||
+                      nowTp - session->video.abrRttLastCutTime >= 5s;
+        rttSevere = severeNow && session->video.abrRttCongestedRounds >= 2 && cooled;
+
+        if (rttCongested) {
+          BOOST_LOG(info) << "[VIPLE-ABR-RTT] rtt=" << rtt << "ms baseline=" << baseline
+            << "ms inflation=" << ((float) rtt / (float) baseline) << "x rounds="
+            << session->video.abrRttCongestedRounds
+            << (rttSevere ? " action=CUT" : " action=HOLD")
+            << " (src=" << src << ")";
+        }
+      }
+    }
+
     if (effectiveLoss > 0) {
       // 丟包：放棄回升累積（target 收斂回 applied），按嚴重度乘法削減
       float lossPerSec = effectiveLoss * 1000.0f / std::max<long long>(elapsedMs, 1);
@@ -1203,11 +1314,28 @@ namespace stream {
         target = base;  // 輕微（≤3/s）→ hold，不升不降
       }
       session->video.bitrateZeroLossStreak = 0;
-    } else if (quicCongested) {
+    } else if (rttSevere) {
+      // §ABR-DELAY：RTT 相對基線嚴重膨脹且持續 → 管線已深度積壓
+      // （bufferbloat）。丟包還沒發生不代表沒事——等它丟包時已經晚了
+      // 好幾秒。這裡主動 cut，讓佇列排空。
+      // 用 ×75% 而不是 loss 路徑的 ×50%：delay 訊號比 loss 更早、
+      // 也更可能誤判（例如對端瞬間忙碌），降幅保守、靠連續輪數收斂。
+      // base 取 min(target, applied)，與 loss 路徑同語義：避免從一個
+      // 還沒真正套用的樂觀 target 往下打折（否則實際降幅會不如預期）。
+      int base = std::min(target, applied);
+      target = base * 75 / 100;
+      session->video.bitrateZeroLossStreak = 0;
+      session->video.abrRttLastCutTime = std::chrono::steady_clock::now();
+    } else if (quicCongested || rttCongested) {
       // §ABR-RAMP-GATE 2026-07-16：QUIC 近 2s 內有 backpressure 或
       // §Q-STALE 丟棄 → 凍結零丟包回升（hold）。streak 保留不清零，
       // 壅塞解除後 1-2 輪即恢復爬升，不需重新累積。防止 ping-tick 在
       // 「server 丟棄但 client 無 missing」的窄路徑情境把 bitrate 推回 max。
+      //
+      // §ABR-DELAY 2026-08-27 擴充：RTT 膨脹也走同一道 gate。這是本次
+      // 最重要的一項——事故中丟包只有 0.12%，AIMD 判定「零丟包」而
+      // 持續 +5% 回升，等於在管線積壓 4 秒時繼續加碼。光是「壅塞時不
+      // 回升」就消除了這個主動加害，而且不會誤降畫質（只是暫停爬升）。
     } else {
       session->video.bitrateZeroLossStreak++;
       if (session->video.bitrateZeroLossStreak >= 5) {
@@ -1340,6 +1468,15 @@ namespace stream {
       //
       // §A1-QUIC-TICK-FIX (review batch 2)：抽成共用函式，QUIC 0x50 ping
       // 入口也呼叫；邏輯不變，詳見 abr_zero_loss_tick。
+      //
+      // §ABR-DELAY 2026-08-27：RTT 取樣**只掛在這裡**。ENet peer 由本
+      // 執行緒（controlBroadcastThread）管理，斷線後指標失效——QUIC 的
+      // 0x50 ping 入口在 picoquic ioLoop 跑，不能碰 peer。這也是為什麼
+      // 取樣與判定要分離：這裡存值，run_abr_aimd 只讀已存的數字。
+      {
+        std::lock_guard<std::mutex> lk(session->video.abrMutex);
+        abr_sample_rtt(session);
+      }
       abr_zero_loss_tick(session);
     });
 
