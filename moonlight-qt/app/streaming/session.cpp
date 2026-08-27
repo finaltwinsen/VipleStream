@@ -3048,11 +3048,39 @@ void Session::exec()
                 // than the display.
                 int displayHz = StreamUtils::getDisplayRefreshRate(m_Window);
                 bool enableVsync = m_Preferences->enableVsync;
+                // §P1-PACE 2026-08-27 — 幀節拍與 V-Sync 是正交的兩件事：
+                // 節拍決定「幀何時送出」（Pacer 用 D3DKMTWaitForVerticalBlank
+                // 等真實 vblank，見 dxvsyncsource.cpp，跟 swapchain present
+                // 模式無關），V-Sync 決定「Present 要不要擋住等交換」。
+                // 上游把兩者綁死（enableVsync && framePacing），結果使用者
+                // 為了低延遲關掉 V-Sync，就連帶關掉唯一能吸收到達抖動的
+                // 機制 —— log 實證：「Frame pacing disabled: target 60 Hz
+                // with 60 FPS stream」，明明是 1:1 最適合節拍的情境。
+                // 代價是 LAN 1080p60 有 25-75% 的 5 秒視窗 p99 幀間隔
+                // > 33ms（60Hz 掉兩幀）；把樣本限縮到「server 全速交付」
+                // 的 1238 個視窗仍有 42.8% 會頓，所以不是 server 少送。
+                // 解耦後：節拍照 vblank 發幀（順），Present 仍走 tearing
+                // 立即模式（不多等一次交換），兩邊的好處都拿到。
+                bool enableFramePacing = m_Preferences->framePacing;
                 if (displayHz + 5 < m_StreamConfig.fps) {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                                 "Disabling V-sync because refresh rate limit exceeded");
                     enableVsync = false;
+                    // 串流本來就快過螢幕時，節拍只會把它壓回螢幕速率，
+                    // 與「讓它跑得比螢幕快」的初衷相反 —— 維持原行為關掉。
+                    enableFramePacing = false;
                 }
+
+                // §P1-PACE 診斷：Pacer 自己只會印「Frame pacing (disabled):
+                // target N Hz」，看不出「為什麼」關掉（是使用者沒開？還是
+                // 被 V-Sync 閘擋掉？還是撞到刷新率上限？）。事後從 log 判斷
+                // 節拍狀態時這三個輸入缺一不可，補一行把決策攤開。
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-PACE] pref=%d vsync=%d displayHz=%d streamFps=%d -> %s",
+                            m_Preferences->framePacing ? 1 : 0,
+                            enableVsync ? 1 : 0,
+                            displayHz, m_StreamConfig.fps,
+                            enableFramePacing ? "ENABLED" : "disabled");
 
                 // Choose a new decoder (hopefully the same one, but possibly
                 // not if a GPU was removed or something).
@@ -3060,7 +3088,7 @@ void Session::exec()
                                    m_Window, m_ActiveVideoFormat, m_ActiveVideoWidth,
                                    m_ActiveVideoHeight, m_ActiveVideoFrameRate,
                                    enableVsync,
-                                   enableVsync && m_Preferences->framePacing,
+                                   enableFramePacing,
                                    false,
                                    s_ActiveSession->m_VideoDecoder)) {
                     SDL_UnlockMutex(m_DecoderLock);

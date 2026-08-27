@@ -1228,15 +1228,18 @@ Flickable {
                     hoverEnabled: true
                     text: qsTr("Frame pacing")
                     font.pointSize:  12
-                    enabled: StreamingPreferences.enableVsync
-                    checked: StreamingPreferences.enableVsync && StreamingPreferences.framePacing
+                    // §P1-PACE: 節拍不再綁 V-Sync。Pacer 是等真實 vblank
+                    // 事件來決定何時送幀，跟 Present 要不要擋是兩回事；
+                    // 綁在一起會讓「關 V-Sync 求低延遲」的使用者同時失去
+                    // 唯一能吸收網路到達抖動的機制。
+                    checked: StreamingPreferences.framePacing
                     onCheckedChanged: {
                         StreamingPreferences.framePacing = checked
                     }
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Frame pacing reduces micro-stutter by delaying frames that come in too early")
+                    ToolTip.text: qsTr("Frame pacing reduces micro-stutter by delaying frames that come in too early. It works with V-Sync off too, so you keep low latency while smoothing out uneven frame arrival.")
                 }
             }
         }
