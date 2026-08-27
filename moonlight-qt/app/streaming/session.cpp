@@ -2257,6 +2257,29 @@ bool Session::startConnectionAsync()
             // Treat it as remote even if the target address is in RFC 1918 address space.
             m_StreamConfig.streamingRemotely = STREAM_CFG_REMOTE;
             m_StreamConfig.packetSize = 1024;
+            // §P4-TUNNEL 2026-08-27 — 目標是同網段私網位址、卻被判定要走
+            // VPN/通道，代表「看起來的 LAN 串流」其實整條繞出去再繞回來。
+            // 這個坑非常安靜：使用者以為在區網直連，實測卻是延遲 25-36ms
+            // （真 LAN 應 1-4ms）、MTU 1280 → packetSize 砍半 → 每幀切更多
+            // shard、叢發丟包更容易吃掉整幀，嚴重時上行佇列積壓造成
+            // bufferbloat（實測控制通道 RTT 衝到 4194ms 而丟包僅 0.12%）。
+            // 更糟的是下面 hole punch 那行會印「direct private address」，
+            // 反而讓人以為是直連。這裡明講，省下重複的除錯輪迴。
+            {
+                QHostAddress tgt(m_Computer->activeAddress.address());
+                if (tgt.isInSubnet(QHostAddress("10.0.0.0"), 8) ||
+                    tgt.isInSubnet(QHostAddress("172.16.0.0"), 12) ||
+                    tgt.isInSubnet(QHostAddress("192.168.0.0"), 16)) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-NAT] §P4-TUNNEL 目標 %s 是私網位址，"
+                                "但路由判定要走 VPN/通道（packetSize 降為 1024）。"
+                                "區網串流繞經通道會同時放大延遲、抖動與丟包 —— "
+                                "若兩端在同一區網，請在 VPN 用戶端（如 Cloudflare "
+                                "WARP / Tailscale）把該網段排除（split tunnel），"
+                                "或串流時暫停 VPN。",
+                                qPrintable(m_Computer->activeAddress.address()));
+                }
+            }
             break;
         default:
             // If we don't have reachability info, let moonlight-common-c decide.
