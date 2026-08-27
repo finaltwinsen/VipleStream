@@ -525,6 +525,14 @@ namespace stream {
       std::chrono::steady_clock::time_point abrRttWindowStart{};
       int abrRttCongestedRounds{0};    // 連續判定壅塞的輪數
       std::chrono::steady_clock::time_point abrRttLastCutTime{};
+      // §ABR-DELAY heartbeat：健康路徑下 rttCongested 永遠是 false、
+      // 一行都不會印，導致「正確地沒觸發」與「程式根本沒跑到這裡」
+      // 在 log 上完全無法區分（2026-08-27 驗測實際踩到：收了整份
+      // server log 也無從判斷取樣路徑是否活著）。沿用 §LOGHYG-A4
+      // DEC-DEPTH 的做法，安靜時每 60 秒印一次存活確認。
+      std::chrono::steady_clock::time_point abrRttLastHeartbeat{};
+      bool abrRttSampled{false};       // 是否已取得過任何 RTT 樣本（0 也算）
+      bool abrRttWindowRolled{false};  // 兩段視窗是否已輪換過一次
     } video;
 
     struct {
@@ -1181,12 +1189,16 @@ namespace stream {
     if (!peer) {
       return;  // QUIC-only 或尚未連上
     }
-    // ENet 的 roundTripTime 是平滑後的 RTT（ms）。0 代表尚無有效樣本。
+    // ENet 的 roundTripTime 是平滑後的 RTT，單位毫秒（整數）。
+    //
+    // 不可用 `rtt == 0` 當「尚無樣本」的哨兵：快速 LAN 上真實 RTT 就是
+    // 次毫秒，ENet 會平滑成 0，舊寫法會 return 掉、基線永遠建不起來，
+    // 整條 delay 偵測靜默失效（2026-08-27 實測踩到：LAN 延遲 2ms，
+    // heartbeat 一筆都沒印）。0 是合法值，照收。
+    // 尚未連上時 peer 為 null，前面已擋掉。
     uint32_t rtt = peer->roundTripTime;
-    if (rtt == 0) {
-      return;
-    }
     session->video.abrRttLastMs = rtt;
+    session->video.abrRttSampled = true;
 
     auto now = std::chrono::steady_clock::now();
     if (session->video.abrRttWindowStart.time_since_epoch().count() == 0) {
@@ -1200,18 +1212,20 @@ namespace stream {
       session->video.abrRttMinPrevMs = session->video.abrRttMinCurMs;
       session->video.abrRttMinCurMs = rtt;
       session->video.abrRttWindowStart = now;
-    } else if (rtt < session->video.abrRttMinCurMs || session->video.abrRttMinCurMs == 0) {
+      session->video.abrRttWindowRolled = true;
+    } else if (rtt < session->video.abrRttMinCurMs) {
       session->video.abrRttMinCurMs = rtt;
     }
   }
 
-  // §ABR-DELAY：回傳目前的 RTT 基線（兩段視窗的較小者）。0 = 尚不可用。
+  // §ABR-DELAY：回傳目前的 RTT 基線（兩段視窗的較小者）。
+  // 0 是**合法**基線（快速 LAN 的次毫秒 RTT），可用性一律看 abrRttSampled，
+  // 不可再用 0 當哨兵。prev 未滿一輪時只有 cur 有效。
   uint32_t abr_rtt_baseline(session_t *session) {
-    uint32_t a = session->video.abrRttMinCurMs;
-    uint32_t b = session->video.abrRttMinPrevMs;
-    if (a == 0) return b;
-    if (b == 0) return a;
-    return std::min(a, b);
+    if (!session->video.abrRttWindowRolled) {
+      return session->video.abrRttMinCurMs;
+    }
+    return std::min(session->video.abrRttMinCurMs, session->video.abrRttMinPrevMs);
   }
 
   void run_abr_aimd(session_t *session, int lossCount, long long elapsedMs, const char *src) {
@@ -1276,29 +1290,54 @@ namespace stream {
       using namespace std::chrono_literals;
       uint32_t rtt = session->video.abrRttLastMs;
       uint32_t baseline = abr_rtt_baseline(session);
-      if (rtt > 0 && baseline > 0) {
+      auto nowHb = std::chrono::steady_clock::now();
+      if (!session->video.abrRttSampled) {
+        // 還沒有任何樣本（peer 尚未連上／非 ENet 路徑）。這種情況也要能
+        // 從 log 看出來，否則又會退化成「沒印＝不知道是正常還是沒跑到」。
+        if (session->video.abrRttLastHeartbeat.time_since_epoch().count() == 0 ||
+            nowHb - session->video.abrRttLastHeartbeat >= 60s) {
+          session->video.abrRttLastHeartbeat = nowHb;
+          BOOST_LOG(info) << "[VIPLE-ABR-RTT] action=NO-SAMPLE heartbeat "
+                             "(peer 尚未連上或非 ENet 路徑，delay 偵測待命)";
+        }
+      }
+      else {
+        // 基線 0 是合法的（次毫秒 LAN）。除法分母用 max(baseline,1) 保護，
+        // 而膨脹判定本來就要求 excess 有絕對量，基線 0 時不會誤觸。
+        uint32_t denom = (baseline > 0) ? baseline : 1;
         uint32_t excess = (rtt > baseline) ? (rtt - baseline) : 0;
-        rttCongested = (rtt >= baseline * 2) && (excess >= 50);
-        bool severeNow = (rtt >= baseline * 4) && (excess >= 200);
+        rttCongested = (rtt >= denom * 2) && (excess >= 50);
+        bool severeNow = (rtt >= denom * 4) && (excess >= 200);
         if (severeNow) {
           session->video.abrRttCongestedRounds++;
         } else {
           session->video.abrRttCongestedRounds = 0;
         }
-        auto nowTp = std::chrono::steady_clock::now();
+        auto nowTp = nowHb;
         bool cooled = session->video.abrRttLastCutTime.time_since_epoch().count() == 0 ||
                       nowTp - session->video.abrRttLastCutTime >= 5s;
         rttSevere = severeNow && session->video.abrRttCongestedRounds >= 2 && cooled;
 
         if (rttCongested) {
           BOOST_LOG(info) << "[VIPLE-ABR-RTT] rtt=" << rtt << "ms baseline=" << baseline
-            << "ms inflation=" << ((float) rtt / (float) baseline) << "x rounds="
+            << "ms inflation=" << ((float) rtt / (float) denom) << "x rounds="
             << session->video.abrRttCongestedRounds
             << (rttSevere ? " action=CUT" : " action=HOLD")
             << " (src=" << src << ")";
+          session->video.abrRttLastHeartbeat = nowTp;
+        }
+        else if (session->video.abrRttLastHeartbeat.time_since_epoch().count() == 0 ||
+                 nowTp - session->video.abrRttLastHeartbeat >= 60s) {
+          // 安靜期存活確認：證明取樣與基線維護真的在跑，而不是這段
+          // 程式碼從未被執行到。60 秒一次，對 log 量無影響。
+          session->video.abrRttLastHeartbeat = nowTp;
+          BOOST_LOG(info) << "[VIPLE-ABR-RTT] rtt=" << rtt << "ms baseline=" << baseline
+            << "ms inflation=" << ((float) rtt / (float) denom)
+            << "x action=OK heartbeat";
         }
       }
     }
+    // 註：inflation 用 denom 當分母（baseline 可能為 0），見上方註解。
 
     if (effectiveLoss > 0) {
       // 丟包：放棄回升累積（target 收斂回 applied），按嚴重度乘法削減
