@@ -17,10 +17,15 @@
 #include <hidclass.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <objbase.h>   // CoInitializeEx — ShellExecuteEx 建議在呼叫執行緒先初始化 COM
 #include <strsafe.h>   // StringCchPrintfW — portable safe printf (MSVC + MinGW)
 #include <cstdio>      // vsnprintf (server-open diagnostic)
 #include <cstdarg>     // va_list
 #include <cstring>     // strlen, wcsstr
+#include <atomic>      // §SC-HID WP2：寫入/輪詢統計跨 input / poll 執行緒共用
+#include <mutex>       // §SC-HID WP2.4：安裝執行緒 ↔ VipleSCHidOpen 交換安裝結果
+#include <string>      // std::wstring（安裝執行緒帶走 installer 路徑）
+#include <thread>      // §SC-HID WP2.4：一次性 detached 安裝執行緒
 
 #pragma comment(lib, "hid.lib")
 #pragma comment(lib, "setupapi.lib")
@@ -45,7 +50,13 @@ struct VipleSCHidCtx {
 // path substring "vid_28de" — but our virtual device is ROOT-enumerated, so its
 // HIDClass child PDO path need not contain vid_xxxx at all. An open failure on
 // it was silently skipped and got misdiagnosed as "SYSTEM cannot enumerate it".
-static char g_diag[4096] = {};
+//
+// §SC-HID WP2（審查修正）：thread_local。開裝置的有兩條執行緒——input 執行緒
+// （VipleSCHidOpen，lazy-open）與 poll 執行緒（VipleSCHidOpenDirect，reopen
+// 退避）——兩者可能同時探測；共用一個 g_diag 會讓一方清掉另一方尚未印出的
+// 軌跡、或在 log 行上讀到撕裂的字串。每條執行緒各自一份，探測與印出都在同
+// 一條執行緒上，天然一致。
+static thread_local char g_diag[4096] = {};
 static void diagAppend(const char* fmt, ...) {
     size_t len = strlen(g_diag);
     if (len >= sizeof(g_diag) - 96) return;
@@ -248,39 +259,152 @@ static HANDLE openHidByVidPid(USHORT vid, USHORT pid) {
 }
 
 // Returns a human-readable reason for the last openHidByVidPid result (for logs).
-const char* VipleSCHidLastDiag(void) { return g_diag; }
+// §SC-HID WP2（審查修正）：回傳前複製進另一個 thread_local 快照緩衝——呼叫端
+// 可能先取指標、再做另一次 open（會重置 g_diag）、最後才印；快照讓「取到的
+// 字串」固定為取用當下的內容。
+const char* VipleSCHidLastDiag(void) {
+    static thread_local char snapshot[sizeof(g_diag)];
+    size_t n = strlen(g_diag);
+    if (n >= sizeof(snapshot)) n = sizeof(snapshot) - 1;
+    memcpy(snapshot, g_diag, n);
+    snapshot[n] = '\0';
+    return snapshot;
+}
 
-// Try to install the UMDF2 driver if not already present.
-// Expects Install-VipleSCHid.ps1 in the same directory as the binary.
-static void tryInstallDriver(void) {
-    wchar_t exePath[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    wchar_t* lastSlash = wcsrchr(exePath, L'\\');
-    if (!lastSlash) return;
-    *(lastSlash + 1) = L'\0';
+// §SC-HID WP2.4：自動安裝的結果另存一份，因為 VipleSCHidOpen 在安裝後會再跑
+// openHidByVidPid（它會清掉 g_diag），安裝結果得在那之後再 append 回 diag，
+// 才會出現在 "device not found: …" / "device opened: …" 的 log 行上。
+//
+// §SC-HID WP2.4（審查修正 major）：安裝程序改在一次性的 detached std::thread
+// 上執行。舊碼在 VipleSCHidOpen 內同步 ShellExecuteEx + WaitForSingleObject(30 s)
+// + Sleep(2000)——而 VipleSCHidOpen 是從 input 封包處理路徑（task_pool 執行緒）
+// 呼叫的，等於把整個 input pipeline 卡住最長 32 s。現在：
+//   - 主執行緒只解析 installer 路徑並啟動執行緒，立刻回傳（diag 只 append
+//     "installer launched async"）；
+//   - 安裝執行緒等最多 60 s，把結果寫進 g_installDiag（installMutex 保護）並
+//     設 g_installDone；
+//   - 之後某次 VipleSCHidOpen 看到 g_installDone 就把結果 append 進那次的
+//     diag（只回報一次，避免每 5 s 的 not-found 行都重印）。
+//   - lpVerb=nullptr（不 runas）：service 以 SYSTEM 執行本來就有權限（已提權的
+//     caller 用 runas 也不會彈 UI，直接成功）；改 nullptr 是為了避免「非提權互動式
+//     開發環境」彈 UAC 同意視窗把 detached 執行緒卡住——該環境下 script 會自己
+//     失敗、結束碼回報在 diag，請手動以管理員執行 Install-VipleSCHid.ps1。
+// mutex 以 new 配置、永不解構：安裝執行緒是 detached，process 退出時若還在跑，
+// 不能碰已被靜態解構的 mutex。
+static std::mutex& installMutex() {
+    static std::mutex* m = new std::mutex;
+    return *m;
+}
+static char g_installDiag[512] = {};               // 受 installMutex() 保護
+static std::atomic<bool> g_installLaunched{false}; // 本 process 只嘗試一次
+static std::atomic<bool> g_installDone{false};     // 結果已寫入 g_installDiag
+static std::atomic<bool> g_installReported{false}; // 結果已 append 進某次 open 的 diag
 
-    // StringCchPrintfW (strsafe.h) rather than MSVC-only _snwprintf_s or the
-    // MinGW-gated swprintf — this file compiles under both MSVC and MinGW/UCRT.
-    wchar_t scriptPath[MAX_PATH] = {};
-    StringCchPrintfW(scriptPath, MAX_PATH, L"%lssc_hid_driver\\Install-VipleSCHid.ps1", exePath);
+static void setInstallDiag(const char* text) {
+    std::lock_guard<std::mutex> lk(installMutex());
+    snprintf(g_installDiag, sizeof(g_installDiag), "%s", text);
+}
 
-    if (GetFileAttributesW(scriptPath) == INVALID_FILE_ATTRIBUTES) return;
-
+// 安裝執行緒本體：啟動 powershell 跑 Install-VipleSCHid.ps1、等最多 60 s、寫結果。
+// 逾時不 TerminateProcess——pnputil 跑到一半被殺可能留下半套 driver store 狀態，
+// 比多一個背景 powershell 更糟；逾時只回報 timeout60s。
+static void installDriverWorker(std::wstring scriptPath) {
     wchar_t params[MAX_PATH * 2] = {};
     StringCchPrintfW(params, MAX_PATH * 2,
-        L"-ExecutionPolicy Bypass -NonInteractive -File \"%ls\"", scriptPath);
+        L"-ExecutionPolicy Bypass -NonInteractive -File \"%ls\"", scriptPath.c_str());
 
+    // ShellExecuteEx 可能委派給 COM shell extension，MS 文件建議先初始化 COM；
+    // 這是我們自己的執行緒，apartment 由我們決定。
+    HRESULT coInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
+    char result[512] = {};
     SHELLEXECUTEINFOW sei = {};
     sei.cbSize       = sizeof(sei);
-    sei.fMask        = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
-    sei.lpVerb       = L"runas";
+    sei.fMask        = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb       = nullptr;   // 不 runas（見上方說明）
     sei.lpFile       = L"powershell.exe";
     sei.lpParameters = params;
     sei.nShow        = SW_HIDE;
     if (ShellExecuteExW(&sei) && sei.hProcess) {
-        WaitForSingleObject(sei.hProcess, 30000);
+        DWORD wait = WaitForSingleObject(sei.hProcess, 60000);
+        DWORD rc = (DWORD)-1;
+        if (wait == WAIT_OBJECT_0) GetExitCodeProcess(sei.hProcess, &rc);
         CloseHandle(sei.hProcess);
+        snprintf(result, sizeof(result),
+                 "installer=%ls wait=%s rc=%lu", scriptPath.c_str(),
+                 wait == WAIT_OBJECT_0 ? "done" : (wait == WAIT_TIMEOUT ? "timeout60s" : "waitErr"),
+                 (unsigned long)rc);
     }
+    else {
+        DWORD e = GetLastError();
+        snprintf(result, sizeof(result),
+                 "installer=%ls launch err=%lu", scriptPath.c_str(), (unsigned long)e);
+    }
+    if (SUCCEEDED(coInit)) CoUninitialize();
+
+    setInstallDiag(result);
+    g_installDone.store(true, std::memory_order_release);
+}
+
+// Try to install the UMDF2 driver if not already present (asynchronously).
+// §SC-HID WP2.4（2026-09-02）：host 的 deploy 把 driver 4 檔（含
+// Install-VipleSCHid.ps1）複製到 exe 根層，但舊碼只找 <exe>\sc_hid_driver\ 子
+// 目錄（host 上不存在）→ 自動安裝從未觸發、也沒留下任何痕跡（F7）。改為先找
+// 根層、再退回子目錄（開發機 build tree 佈局）。不加 -Reinstall（升級由 deploy
+// 鏈負責）。
+// 回傳：要立刻 append 進呼叫端 diag 的一小段狀態字串（thread_local 緩衝）。
+// 找不到 installer / 開不出執行緒 → 結果直接寫進 g_installDiag 並標記完成
+// （這種情況沒有非同步結果可等）。
+static const char* tryInstallDriverAsync(void) {
+    static thread_local char status[MAX_PATH * 2 + 96];
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    wchar_t* lastSlash = wcsrchr(exePath, L'\\');
+    if (!lastSlash) {
+        // 同步失敗：狀態由呼叫端當場 append，標記 reported 避免同一行再印一次。
+        setInstallDiag("installer: exe dir unresolved");
+        g_installReported.store(true, std::memory_order_relaxed);
+        g_installDone.store(true, std::memory_order_release);
+        return "installer: exe dir unresolved";
+    }
+    *(lastSlash + 1) = L'\0';
+
+    // StringCchPrintfW (strsafe.h) rather than MSVC-only _snwprintf_s or the
+    // MinGW-gated swprintf — this file compiles under both MSVC and MinGW/UCRT.
+    static const wchar_t* const kCandidates[] = {
+        L"%lsInstall-VipleSCHid.ps1",                 // deploy 佈局：exe 根層
+        L"%lssc_hid_driver\\Install-VipleSCHid.ps1",  // build tree 佈局：子目錄
+    };
+    wchar_t scriptPath[MAX_PATH] = {};
+    bool found = false;
+    for (const wchar_t* fmt : kCandidates) {
+        StringCchPrintfW(scriptPath, MAX_PATH, fmt, exePath);
+        if (GetFileAttributesW(scriptPath) != INVALID_FILE_ATTRIBUTES) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        snprintf(status, sizeof(status),
+                 "installer: not found (looked in %ls and %lssc_hid_driver\\)", exePath, exePath);
+        setInstallDiag(status);
+        g_installReported.store(true, std::memory_order_relaxed);  // 同步結果，呼叫端已 append
+        g_installDone.store(true, std::memory_order_release);
+        return status;
+    }
+
+    try {
+        std::thread(installDriverWorker, std::wstring(scriptPath)).detach();
+    }
+    catch (const std::exception& ex) {
+        snprintf(status, sizeof(status), "installer=%ls thread launch failed: %s", scriptPath, ex.what());
+        setInstallDiag(status);
+        g_installReported.store(true, std::memory_order_relaxed);  // 同步結果，呼叫端已 append
+        g_installDone.store(true, std::memory_order_release);
+        return status;
+    }
+    snprintf(status, sizeof(status), "installer launched async: %ls (wait<=60s)", scriptPath);
+    return status;
 }
 
 // Throttle timestamp for VipleSCHidOpen (file-scope so VipleSCHidResetOpenThrottle can reset it).
@@ -358,6 +482,9 @@ int VipleSCHidForceReconnect(void) {
     CM_Disable_DevNode(parentInst, 0);
     Sleep(150);
     CM_Enable_DevNode(parentInst, 0);
+    // §SC-HID Round 1：enable 之後 driver 的裝置 context 是新的（0x05 統計計數
+    // 器歸零）。統計改為每次 GetFeature(0x05) 直接讀絕對值，這裡不需要重設任何
+    // user-mode 基準。
     Sleep(300);
 
     // Allow VipleSCHidOpen to proceed immediately after re-enumeration.
@@ -381,15 +508,21 @@ VIPLE_SCHID_HANDLE VipleSCHidOpen(void) {
 
     HANDLE hDev = openHidByVidPid(SC_VID, SC_PID);
     if (hDev == INVALID_HANDLE_VALUE) {
-        // Driver not installed — try auto-install (once per process) and retry
-        static bool installTried = false;
-        if (!installTried) {
-            installTried = true;
-            tryInstallDriver();
-            // Give Windows PnP a moment to enumerate the new device
-            Sleep(2000);
-            hDev = openHidByVidPid(SC_VID, SC_PID);
+        // Driver not installed — kick off the auto-install ONCE per process, on
+        // its own detached thread. No Sleep / wait here: this runs on the input
+        // task_pool thread and must not stall the pipeline (§SC-HID WP2.4 審查
+        // 修正 major). The next (throttled, >=5 s later) VipleSCHidOpen retries
+        // the probe naturally and picks up the result below.
+        if (!g_installLaunched.exchange(true)) {
+            diagAppend(" | %s", tryInstallDriverAsync());
         }
+    }
+    // §SC-HID WP2.4：安裝結果只回報一次——append 進第一個「安裝已完成之後」的
+    // open 嘗試的 diag（成功 → "device opened: …" 行；失敗 → "not found: …" 行）。
+    if (g_installDone.load(std::memory_order_acquire) &&
+        !g_installReported.exchange(true)) {
+        std::lock_guard<std::mutex> lk(installMutex());
+        if (g_installDiag[0] != '\0') diagAppend(" | %s", g_installDiag);
     }
     if (hDev == INVALID_HANDLE_VALUE) return nullptr;
 
@@ -397,53 +530,96 @@ VIPLE_SCHID_HANDLE VipleSCHidOpen(void) {
     return ctx;
 }
 
-// Write-path stats for rate-limited logging (single input thread — no locking).
-static unsigned long g_writeOk = 0, g_writeSkipped = 0, g_writeFailed = 0, g_lastWriteErr = 0;
-static uint8_t g_lastSkippedId = 0;
-static char g_writeDiag[128] = {};
+// §SC-HID WP2：寫入/輪詢統計。舊碼假設「單一 input 執行緒、不用鎖」，但實際上
+// VipleSCHidWrite 同時被 input 執行緒（真實 report）與 poll 執行緒（keepalive
+// 重放）呼叫、VipleSCHidWriteDiag 又會在 session 解構子上跑——plain 計數是
+// data race、共用的 diag 字串緩衝更會被撕裂。改 std::atomic + thread-local 緩衝。
+static std::atomic<unsigned long> g_writeOk{0}, g_writeSkipped{0}, g_writeFailed{0}, g_lastWriteErr{0};
+static std::atomic<uint8_t> g_lastSkippedId{0};
+static std::atomic<unsigned long> g_notifyPolls{0}, g_notifyPollErrs{0}, g_notifyEvents{0};
+static std::atomic<unsigned long> g_responsesDelivered{0};
+
+// §SC-HID Round 1：driver 端統計不再從 0x03 尾段解迴繞累計（那條路徑已刪），
+// 改由 VipleSCHidReadDriverStats() 每次 GetFeature(0x05) 讀絕對值；user-mode
+// 這邊不保留任何 driver 計數狀態。
+
+void VipleSCHidGetStats(VipleSCHidStats* out) {
+    if (!out) return;
+    out->writeOk            = g_writeOk.load(std::memory_order_relaxed);
+    out->writeSkipped       = g_writeSkipped.load(std::memory_order_relaxed);
+    out->writeFailed        = g_writeFailed.load(std::memory_order_relaxed);
+    out->lastWriteErr       = g_lastWriteErr.load(std::memory_order_relaxed);
+    out->lastSkippedId      = g_lastSkippedId.load(std::memory_order_relaxed);
+    out->notifyPolls        = g_notifyPolls.load(std::memory_order_relaxed);
+    out->notifyPollErrs     = g_notifyPollErrs.load(std::memory_order_relaxed);
+    out->notifyEvents       = g_notifyEvents.load(std::memory_order_relaxed);
+    out->responsesDelivered = g_responsesDelivered.load(std::memory_order_relaxed);
+}
 
 const char* VipleSCHidWriteDiag(void) {
-    // vsnprintf-free: tiny fixed format, built on demand
-    snprintf(g_writeDiag, sizeof(g_writeDiag),
+    // vsnprintf-free: tiny fixed format, built on demand. thread_local：input
+    // 執行緒、poll 執行緒與 session 解構子可能同時呼叫。
+    static thread_local char diag[160];
+    snprintf(diag, sizeof(diag),
              "ok=%lu skipped=%lu(lastId=0x%02X) failed=%lu lastErr=%lu",
-             g_writeOk, g_writeSkipped, g_lastSkippedId, g_writeFailed, g_lastWriteErr);
-    return g_writeDiag;
+             g_writeOk.load(std::memory_order_relaxed),
+             g_writeSkipped.load(std::memory_order_relaxed),
+             (unsigned)g_lastSkippedId.load(std::memory_order_relaxed),
+             g_writeFailed.load(std::memory_order_relaxed),
+             g_lastWriteErr.load(std::memory_order_relaxed));
+    return diag;
+}
+
+const char* VipleSCHidFeatureDiag(void) {
+    static thread_local char diag[128];
+    snprintf(diag, sizeof(diag),
+             "featureEvts=%lu responses=%lu pollErrs=%lu",
+             g_notifyEvents.load(std::memory_order_relaxed),
+             g_responsesDelivered.load(std::memory_order_relaxed),
+             g_notifyPollErrs.load(std::memory_order_relaxed));
+    return diag;
 }
 
 int VipleSCHidWrite(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
     if (!h || len <= 0) return 0;
     auto* ctx = static_cast<VipleSCHidCtx*>(h);
 
-    // The virtual device's descriptor declares OUTPUT report id 0x45 only. The
-    // client forwards EVERY vendor interface of the physical SC + Puck (5 of
-    // them), so reports with other ids (Puck management traffic etc.) do come
-    // through — HIDClass would reject those writes with ERROR_INVALID_PARAMETER
-    // every time, and treating that as "device broke" caused a close/re-open
-    // loop that dropped all input. Skip them instead.
-    if (data[0] != 0x45) {
-        g_writeSkipped++;
-        g_lastSkippedId = data[0];
-        return 1;
+    // The virtual device's descriptor declares OUTPUT report ids 0x45 and
+    // (since driver 1.0.5.0, §SC-HID WP0.3) 0x42 — the gamepad state as emitted
+    // through the Puck wireless receiver; SDL treats 0x42 and 0x45 as the same
+    // TritonMTUNoQuat_t layout. The client forwards EVERY vendor interface of
+    // the physical SC + Puck, so reports with other ids (battery 0x43, wireless
+    // status 0x46/0x79, telemetry 0x7B, …) do come through — HIDClass would
+    // reject those writes with ERROR_INVALID_PARAMETER every time, and treating
+    // that as "device broke" caused a close/re-open loop that dropped all input.
+    // Skip them and return 2 (distinct from a real injection, so the caller
+    // does not log "first report injected" / refresh the keepalive cache on
+    // traffic that never reached the device — that masked the 0x42 case, F17).
+    const uint8_t id = data[0];
+    if (id != 0x45 && id != 0x42) {
+        g_writeSkipped.fetch_add(1, std::memory_order_relaxed);
+        g_lastSkippedId.store(id, std::memory_order_relaxed);
+        return 2;
     }
 
     // gen-2 SC: the forwarded wire payload already begins with the HID report id
-    // (0x45) at byte 0 — it IS a report-id'd report, so we do NOT prepend a 0
-    // (that was the old 0x1102 report-id-0 convention). Write it as a 64-byte
+    // (0x45 / 0x42) at byte 0 — it IS a report-id'd report, so we do NOT prepend
+    // a 0 (that was the old 0x1102 report-id-0 convention). Write it as a 64-byte
     // OUTPUT report (OutputReportByteLength=64); the driver takes the leading
-    // 54 bytes ([0x45]+53 data) to complete the pending INPUT read.
+    // 54 bytes ([id]+53 data) to complete the pending INPUT read.
     uint8_t buf[64] = {};
     int n = (len > 64) ? 64 : len;
     memcpy(buf, data, n);
 
     DWORD written = 0;
     if (WriteFile(ctx->hDev, buf, sizeof(buf), &written, nullptr)) {
-        g_writeOk++;
+        g_writeOk.fetch_add(1, std::memory_order_relaxed);
         return 1;
     }
 
     DWORD e = GetLastError();
-    g_writeFailed++;
-    g_lastWriteErr = e;
+    g_writeFailed.fetch_add(1, std::memory_order_relaxed);
+    g_lastWriteErr.store(e, std::memory_order_relaxed);
     // Only treat "the device object is gone" class errors as fatal; parameter
     // rejections and transient errors keep the (still valid) handle.
     switch (e) {
@@ -451,6 +627,8 @@ int VipleSCHidWrite(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
         case ERROR_FILE_NOT_FOUND:        // 2
         case ERROR_INVALID_HANDLE:        // 6
         case ERROR_OPERATION_ABORTED:     // 995 (device removal cancels I/O)
+        case ERROR_NO_SUCH_DEVICE:        // 433 (§SC-HID WP2：PDO 已拆、handle 成孤兒)
+        case ERROR_DEV_NOT_EXIST:         // 55  (§SC-HID WP2：disable/enable 週期中)
             return -1;
         default:
             return 0;
@@ -459,26 +637,71 @@ int VipleSCHidWrite(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
 
 // §SC-HID Phase 2C：輪詢 driver 的待辦 Steam feature 事件（report 0x03）。
 // 注意：用 input 流量 piggyback 呼叫，頻率約 input rate；driver 端有 ring 緩衝。
+// §SC-HID Round 1：0x03 是純事件（driver 統計改走 0x05）；GetFeature 失敗回 -1
+// 讓 poll 執行緒能數「連續失敗」並主動 close/reopen（舊碼失敗與無事件同回 0，
+// handle 死掉後 poll 執行緒永遠不會察覺）。
 int VipleSCHidPollNotify(VIPLE_SCHID_HANDLE h, uint8_t* op, uint8_t* reportId,
                          uint8_t* seq, uint8_t* query, int* qlen) {
-    if (!h) return 0;
+    if (!h) return -1;
     auto* ctx = static_cast<VipleSCHidCtx*>(h);
     uint8_t buf[64] = {};
     buf[0] = 0x03;  // requested report id = notify channel
-    if (!HidD_GetFeature(ctx->hDev, buf, sizeof(buf))) return 0;
-    // layout: [0x03][op][reportId][seq][queryLen][query…]; op==0 → 無事件
+    if (!HidD_GetFeature(ctx->hDev, buf, sizeof(buf))) {
+        g_notifyPollErrs.fetch_add(1, std::memory_order_relaxed);
+        return -1;
+    }
+    g_notifyPolls.fetch_add(1, std::memory_order_relaxed);
+    // layout: [0x03][op][reportId][seq][queryLen][query≤59]; op==0 → 無事件
     if (buf[1] == 0) return 0;
+    g_notifyEvents.fetch_add(1, std::memory_order_relaxed);
     if (op)       *op       = buf[1];
     if (reportId) *reportId = buf[2];
     if (seq)      *seq      = buf[3];
     int n = buf[4];
-    if (n > 59) n = 59;
+    if (n > 59) n = 59;  // query 區 = bytes 5..63
     if (query && qlen) {
         memcpy(query, buf + 5, n);
         *qlen = n;
     } else if (qlen) {
         *qlen = n;
     }
+    return 1;
+}
+
+// §SC-HID Round 1：讀 driver 端統計（Feature 0x05，佈局見 VipleSCHid.h）。
+// 只由 poll 執行緒每 10 s 呼叫一次；LE16 直接用（driver 計數器隨裝置 context
+// 建立歸零，ForceReconnect 後自然重新起算，不需 user-mode 解迴繞）。
+int VipleSCHidReadDriverStats(VIPLE_SCHID_HANDLE h, VipleSCHidDrvStats* out, unsigned long* err) {
+    if (err) *err = 0;
+    if (out) memset(out, 0, sizeof(*out));
+    if (!h || !out) {
+        if (err) *err = ERROR_INVALID_PARAMETER;
+        return 0;
+    }
+    auto* ctx = static_cast<VipleSCHidCtx*>(h);
+    uint8_t buf[64] = {};
+    buf[0] = 0x05;  // requested report id = driver stats
+    if (!HidD_GetFeature(ctx->hDev, buf, sizeof(buf))) {
+        // 舊 driver（1.0.4.0）沒宣告 0x05 → HIDClass 直接拒絕（typ. 87 / 1784）。
+        if (err) *err = GetLastError();
+        return 0;
+    }
+    auto le16 = [](const uint8_t* p) -> uint16_t {
+        return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+    };
+    out->setCount        = le16(buf + 1);
+    out->getCount        = le16(buf + 3);
+    out->lastReportId    = buf[5];
+    out->ringDepth       = buf[6];
+    out->responsePending = buf[7];
+    out->responseReady   = buf[8];
+    out->getEvtPushed    = le16(buf + 9);
+    out->delivered       = le16(buf + 11);
+    out->getGated        = le16(buf + 13);
+    out->zeroDropped     = le16(buf + 15);
+    // driver 寫 [17..18] = 0x05,0x01 = LE16 0x0105 → major 在高位元組 [18]、minor 在 [17]
+    out->verMajor        = buf[18];
+    out->verMinor        = buf[17];
     return 1;
 }
 
@@ -496,7 +719,9 @@ int VipleSCHidDeliverResponse(VIPLE_SCHID_HANDLE h, uint8_t seq,
     if (n > 63) n = 63;
     if (n > 0) memcpy(buf + 1, data + 1, n);
     DWORD written = 0;
-    return WriteFile(ctx->hDev, buf, sizeof(buf), &written, nullptr) ? 1 : 0;
+    if (!WriteFile(ctx->hDev, buf, sizeof(buf), &written, nullptr)) return 0;
+    g_responsesDelivered.fetch_add(1, std::memory_order_relaxed);
+    return 1;
 }
 
 void VipleSCHidSetFeatureCb(VIPLE_SCHID_HANDLE h, VipleSCHidFeatureCb cb, void* ctx_) {

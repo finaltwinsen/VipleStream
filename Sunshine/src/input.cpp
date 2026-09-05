@@ -25,9 +25,11 @@ extern "C" {
 #include <atomic>
 #include <bitset>
 #include <chrono>
+#include <cstdio>  // snprintf（§SC-HID driver 0x05 統計格式化）
 #include <mutex>
 #include <cmath>
 #include <list>
+#include <string>
 #include <thread>
 #include <unordered_map>
 
@@ -183,6 +185,27 @@ namespace input {
     button_state_e back_button_state;
   };
 
+#ifdef _WIN32
+  // §SC-HID Round 1：把 driver 端 Feature 0x05 統計格式化成 10 s / final stats 的
+  // drv 段。valid=false 時印 n/a 與 GetLastError（舊 driver 1.0.4.0 沒宣告 0x05
+  // 會落到這裡；err=0 代表 poll 執行緒還沒讀過）。
+  static std::string sc_hid_drv_stats_str(const VipleSCHidDrvStats &d, bool valid, unsigned long err) {
+    if (!valid) {
+      return "drv=n/a(err=" + std::to_string(err) + ")";
+    }
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "drvSet=%u drvGet=%u drvGated=%u drvGetEvt=%u drvDelivered=%u drvZeroDrop=%u"
+             " drvPending=%u drvReady=%u drvLastId=0x%02X drvRing=%u drvVer=%u.%u",
+             (unsigned) d.setCount, (unsigned) d.getCount, (unsigned) d.getGated,
+             (unsigned) d.getEvtPushed, (unsigned) d.delivered, (unsigned) d.zeroDropped,
+             (unsigned) d.responsePending, (unsigned) d.responseReady,
+             (unsigned) d.lastReportId, (unsigned) d.ringDepth,
+             (unsigned) d.verMajor, (unsigned) d.verMinor);
+    return buf;
+  }
+#endif
+
   struct input_t {
     enum shortkey_e {
       CTRL = 0x1,  ///< Control key
@@ -246,7 +269,46 @@ namespace input {
     // （沒有就用中性零值 0x45），session 結束即停止 → host 端自然斷開。
     std::atomic<int64_t> sc_last_real_inject_us{0};
     std::mutex sc_last_report_mutex;
-    uint8_t sc_last_report[64] = {};   // byte0=0x45 由首筆真實 report 帶入
+    // byte0 = 首筆真實 report 的原 id（USB/BLE 直連 0x45、經 Puck 0x42），keepalive
+    // 重放時原樣沿用；本 session 尚無真實資料時 byte0 仍為 0 → 重放中性零值 0x45。
+    uint8_t sc_last_report[64] = {};
+
+    // §SC-HID WP2（2026-09-02）：以下計數改為 per-session（原本是函式內 static，
+    // process 級 → 第二場 session 起永遠看不到 "First report injected"、write
+    // failed 的節流也跨 session 累積，log 上無法對帳）。
+    bool sc_first_inject_logged = false;        // 只由 input 執行緒讀寫
+    unsigned long sc_write_fail_count = 0;      // VipleSCHidWrite 回 0 的次數（input 執行緒）
+    unsigned long sc_write_skip_count = 0;      // VipleSCHidWrite 回 2 的次數（input 執行緒）
+    std::atomic<unsigned long> sc_keepalive_count{0};  // poll 執行緒寫、解構子讀
+
+    // §SC-HID Round 1（審查修正）：per-session 統計差值。
+    //   sc_poll_thread_started：poll 執行緒曾啟動 → final stats 一定印（不再被
+    //     sc_hid_handle 是否開過閘住——控制器睡眠/純握手的 session 也要對帳）。
+    //   sc_stats_baseline：啟動 poll 執行緒前一刻的 process 級快照，在啟動執行緒
+    //     的那條執行緒上寫；std::thread 建構 synchronizes-with 執行緒起點、解構子
+    //     又在 join 之後才讀，不需要額外同步。
+    //   sc_last_drv_stats：poll 執行緒最近一次 GetFeature(0x05) 的結果（poll 執行
+    //     緒寫、解構子 join 後讀；detach-self 的情況解構子本來就在 poll 執行緒上）。
+    bool sc_poll_thread_started = false;
+    VipleSCHidStats sc_stats_baseline {};
+    VipleSCHidDrvStats sc_last_drv_stats {};
+    bool sc_last_drv_stats_valid = false;
+    unsigned long sc_last_drv_stats_err = 0;
+
+    // 「本 session 差值 + process 累計」統計字串（10 s stats 與 final stats 共用）。
+    // 判讀：okS − keepalive ≈ 本 session 真實注入數。
+    std::string sc_hid_stats_line() const {
+      VipleSCHidStats now {};
+      VipleSCHidGetStats(&now);
+      const auto &b = sc_stats_baseline;
+      return "session okS=" + std::to_string(now.writeOk - b.writeOk)
+           + " skippedS=" + std::to_string(now.writeSkipped - b.writeSkipped)
+           + " failedS=" + std::to_string(now.writeFailed - b.writeFailed)
+           + " featureEvtsS=" + std::to_string(now.notifyEvents - b.notifyEvents)
+           + " responsesS=" + std::to_string(now.responsesDelivered - b.responsesDelivered)
+           + " keepalive=" + std::to_string(sc_keepalive_count.load(std::memory_order_relaxed))
+           + " | process " + VipleSCHidWriteDiag() + " " + VipleSCHidFeatureDiag();
+    }
 
     ~input_t() {
       // Stop polling thread before closing the handle it may be using.
@@ -270,8 +332,15 @@ namespace input {
         }
       }
 
+      // §SC-HID Round 1（審查修正 major）：final stats 只看「poll 執行緒曾啟動」，
+      // 不被 sc_hid_handle 擋——input 端的 lazy-open 只在收到 SC 封包時發生，控制
+      // 器睡眠或只有握手流量的 session 以前印不出這行，與 client 端的
+      // `[SC-HID] rx stats(final)` 對不了帳。drv 段用 poll 執行緒最後一次 0x05 快照。
+      if (sc_poll_thread_started) {
+        BOOST_LOG(info) << "[SC-HID] Session ended, final write stats: " << sc_hid_stats_line()
+                        << " | " << sc_hid_drv_stats_str(sc_last_drv_stats, sc_last_drv_stats_valid, sc_last_drv_stats_err);
+      }
       if (sc_hid_handle) {
-        BOOST_LOG(info) << "[SC-HID] Session ended, final write stats: " << VipleSCHidWriteDiag();
         VipleSCHidClose(sc_hid_handle);
         sc_hid_handle = nullptr;
       }
@@ -1234,7 +1303,9 @@ namespace input {
     int qlen = 0;
     // 一次最多取幾筆，避免單次呼叫卡住（ring 通常只有 0~1 筆）。
     for (int i = 0; i < 4; i++) {
-      if (!VipleSCHidPollNotify(input->sc_hid_handle, &op, &reportId, &seq, query, &qlen)) {
+      // 0 = 無事件、-1 = GetFeature 失敗；input 端不做 reopen（poll 執行緒負責
+      // 連續失敗偵測與退避），兩者都只是停止本輪。
+      if (VipleSCHidPollNotify(input->sc_hid_handle, &op, &reportId, &seq, query, &qlen) <= 0) {
         break;
       }
       input->feedback_queue->raise(
@@ -1249,13 +1320,6 @@ namespace input {
   // 不依賴 input 封包流量（解決 Steam 在第一個 input 封包到達前就查 GetControllerInfo 的時序問題）。
   // 啟動 500 ms 後觸發一次 device reconnect，讓 Steam 在 proxy 就緒後重跑握手。
   static void sc_hid_poll_loop(std::weak_ptr<input_t> weak_inp) {
-    VIPLE_SCHID_HANDLE poll_h = VipleSCHidOpenDirect();
-    if (poll_h) {
-      BOOST_LOG(info) << "[SC-HID] Polling thread started, handle open";
-    }
-
-    bool reconnect_done = false;
-    int iter = 0;
     // §SC-REOPEN-BACKOFF-FIX (review batch 2)：reopen 退避。
     // VipleSCHidOpenDirect 刻意繞過 VipleSCHidOpen 的 5s 節流（poll
     // thread 自管 handle 生命週期），但裝置長期缺席時每輪（20ms）重開
@@ -1265,6 +1329,38 @@ namespace input {
     // 連續 >75 次再放慢到每 250 輪（~5s）。裝置一開成功即全部歸零。
     int reopen_fail_streak = 0;
     int reopen_cooldown = 0;   // 還要跳過幾輪才再嘗試 reopen
+
+    VIPLE_SCHID_HANDLE poll_h = VipleSCHidOpenDirect();
+    if (poll_h) {
+      BOOST_LOG(info) << "[SC-HID] Polling thread started, handle open";
+    }
+    else {
+      // §SC-HID WP2.3：舊碼開不到裝置零 log（F10）——host 三天的 log 只看得到
+      // "Polling thread started"，裝置缺席時什麼都沒有。每個失敗 streak 的
+      // 首次印一行 warning 帶探測軌跡；這裡算 streak 的第一次，迴圈內不重印。
+      reopen_fail_streak = 1;
+      // 字串刻意不含 "Polling thread started"——log-grep 對帳時才分得出「開了」
+      // 與「沒開」兩種啟動結果。
+      BOOST_LOG(warning) << "[SC-HID] Polling thread: device NOT open (retry with backoff): "
+                         << VipleSCHidLastDiag();
+    }
+
+    bool reconnect_done = false;
+    int iter = 0;
+
+    // §SC-HID Round 1（審查修正 major）：GET_FEATURE(0x03) 連續失敗計數。handle
+    // 死掉（裝置被拔/重裝、PDO 重建）時 HidD_GetFeature 每輪都失敗，但舊碼失敗
+    // 與無事件同回 0、永遠不會 close/reopen。連續 ≥50 次（20 ms × 50 ≈ 1 s）就
+    // 關掉 handle 交給既有的 reopen 退避。
+    int notify_fail_streak = 0;
+    constexpr int kNotifyFailCloseAt = 50;
+
+    // §SC-HID WP2.3：每 10 s 有變才印一行 write stats——本 session 差值
+    // （okS/skippedS/failedS/featureEvtsS/responsesS + keepalive）+ process 累計
+    // + driver Feature 0x05 統計。判讀：okS − keepalive ≈ 本 session 真實注入數；
+    // drvSet>0 = Steam 的 SET_FEATURE(0x01) 真的進了 driver。
+    auto next_stats_at = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    std::string last_stats_line;
 
     while (true) {
       auto inp = weak_inp.lock();
@@ -1283,6 +1379,11 @@ namespace input {
           }
           else {
             ++reopen_fail_streak;
+            if (reopen_fail_streak == 1) {
+              // §SC-HID WP2.3：新 streak 的首次失敗才印（之後退避靜默）。
+              BOOST_LOG(warning) << "[SC-HID] Polling thread handle reopen failed (will retry with backoff): "
+                                 << VipleSCHidLastDiag();
+            }
             if (reopen_fail_streak > 75) reopen_cooldown = 250;       // ~5s
             else if (reopen_fail_streak > 25) reopen_cooldown = 50;   // ~1s
             // else：不退避，下一輪（20ms）再試——剛消失/剛 reconnect 要快
@@ -1295,12 +1396,27 @@ namespace input {
         uint8_t op = 0, reportId = 0, seq = 0, query[64] = {};
         int qlen = 0;
         for (int i = 0; i < 4; i++) {
-          if (!VipleSCHidPollNotify(poll_h, &op, &reportId, &seq, query, &qlen)) break;
+          int r = VipleSCHidPollNotify(poll_h, &op, &reportId, &seq, query, &qlen);
+          if (r < 0) {
+            ++notify_fail_streak;  // 每輪最多 +1（第一次失敗就跳出）
+            break;
+          }
+          notify_fail_streak = 0;  // 輪詢成功（有無事件皆算）就歸零
+          if (r == 0) break;
           inp->feedback_queue->raise(
               platf::gamepad_feedback_msg_t::make_sc_hid_feature_request(reportId, op, seq, query, (uint8_t)qlen));
           BOOST_LOG(info) << "[SC-HID] Poll-thread: Steam feature → client: op=" << (unsigned)op
                           << " reportId=0x" << util::hex(reportId).to_string_view()
                           << " seq=" << (unsigned)seq;
+        }
+        if (notify_fail_streak >= kNotifyFailCloseAt) {
+          BOOST_LOG(warning) << "[SC-HID] Poll-thread: GET_FEATURE(0x03) failed " << notify_fail_streak
+                             << " times in a row (~1 s), closing handle for reopen: " << VipleSCHidFeatureDiag();
+          VipleSCHidClose(poll_h);
+          poll_h = nullptr;
+          notify_fail_streak = 0;
+          reopen_fail_streak = 0;  // 交給既有 reopen 退避（從快速重試窗口起算）
+          reopen_cooldown = 0;
         }
       }
 
@@ -1320,16 +1436,38 @@ namespace input {
             std::lock_guard<std::mutex> lk(inp->sc_last_report_mutex);
             memcpy(buf, inp->sc_last_report, sizeof(buf));
           }
-          if (buf[0] != 0x45) {
+          // §SC-HID WP2.2：重放最後一筆真實 report 的「原 id」（0x45 或經 Puck 的
+          // 0x42），不再硬改成 0x45；本 session 尚無真實資料（byte0 仍為 0）才用
+          // 中性零值 0x45。sc_last_report 只在 wr==1 時更新，所以 byte0 不會是
+          // 未宣告的 id。
+          if (buf[0] != 0x45 && buf[0] != 0x42) {
             memset(buf, 0, sizeof(buf));
             buf[0] = 0x45;  // 中性 idle report（本 session 尚無真實資料）
           }
           int wr = VipleSCHidWrite(poll_h, buf, sizeof(buf));
-          if (wr > 0 && !keepaliveLogged) {
-            keepaliveLogged = true;
-            BOOST_LOG(info) << "[SC-HID] Keepalive active (4Hz idle 0x45 replay; "
-                            << "suppressed while real input flows)";
+          if (wr == 1) {
+            inp->sc_keepalive_count.fetch_add(1, std::memory_order_relaxed);
+            if (!keepaliveLogged) {
+              keepaliveLogged = true;
+              BOOST_LOG(info) << "[SC-HID] Keepalive active (4Hz idle replay of last real report, id=0x"
+                              << util::hex(buf[0]).to_string_view()
+                              << "; suppressed while real input flows)";
+            }
           }
+          else if (wr < 0) {
+            // §SC-HID Round 1（審查修正 major）：keepalive 寫入回 fatal（裝置
+            // 消失：1167/2/6/995/433/55）——舊碼只有 input 端的寫入會 close/
+            // reopen，poll 執行緒抱著死 handle 每 250 ms 失敗一次直到 session
+            // 結束。這裡同樣關掉，交給既有 reopen 退避（從快速重試窗口起算）。
+            BOOST_LOG(warning) << "[SC-HID] Poll-thread: keepalive write fatal, closing handle for reopen: "
+                               << VipleSCHidWriteDiag();
+            VipleSCHidClose(poll_h);
+            poll_h = nullptr;
+            notify_fail_streak = 0;
+            reopen_fail_streak = 0;
+            reopen_cooldown = 0;
+          }
+          // wr==0（可恢復失敗）：保留 handle；wr==2 不可能（buf[0] 已保證是 0x45/0x42）。
         }
       }
 
@@ -1351,6 +1489,40 @@ namespace input {
           if (poll_h) {
             BOOST_LOG(info) << "[SC-HID] Poll handle reopened post-reconnect: " << VipleSCHidLastDiag();
           }
+          else {
+            // §SC-HID WP2.3：reconnect 後立刻開不到通常只是 PnP 還在重新列舉，
+            // 迴圈的快速重試會接手；仍印一次（新 streak 的首次），並標記 streak
+            // 已起算，避免迴圈再印一次。
+            reopen_fail_streak = 1;
+            BOOST_LOG(warning) << "[SC-HID] Poll handle reopen post-reconnect failed (fast retry follows): "
+                               << VipleSCHidLastDiag();
+          }
+        }
+      }
+
+      // §SC-HID WP2.3：10 s 一次、內容有變才印的 write stats。
+      if (std::chrono::steady_clock::now() >= next_stats_at) {
+        // 以「現在」為基準重設，避免 poll 執行緒被卡住（休眠／debugger）後連續補印多輪。
+        next_stats_at = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        // driver Feature 0x05 只在這裡（每 10 s、poll 執行緒）讀一次，不進 20 ms
+        // 熱路徑。handle 目前關著或這次讀失敗都沿用上一次成功快照（final stats 才有
+        // 最後已知值），只更新 err 供判讀。
+        if (poll_h) {
+          VipleSCHidDrvStats ds {};
+          unsigned long derr = 0;
+          if (VipleSCHidReadDriverStats(poll_h, &ds, &derr) == 1) {
+            inp->sc_last_drv_stats = ds;
+            inp->sc_last_drv_stats_valid = true;
+            inp->sc_last_drv_stats_err = 0;
+          } else {
+            inp->sc_last_drv_stats_err = derr;   // 保留舊快照；valid 維持既有值
+          }
+        }
+        std::string line = inp->sc_hid_stats_line() + " | "
+          + sc_hid_drv_stats_str(inp->sc_last_drv_stats, inp->sc_last_drv_stats_valid, inp->sc_last_drv_stats_err);
+        if (line != last_stats_line) {
+          last_stats_line = line;
+          BOOST_LOG(info) << "[SC-HID] write stats(10s): " << line;
         }
       }
 
@@ -1359,6 +1531,17 @@ namespace input {
 
     if (poll_h) VipleSCHidClose(poll_h);
     BOOST_LOG(info) << "[SC-HID] Polling thread exited";
+  }
+
+  // §SC-HID Round 1：啟動 poll 執行緒的唯一入口（alloc 的 eager-poll 與
+  // ensure_sc_hid_handle 的 fallback 共用）。啟動前一刻取 process 級統計快照當
+  // 本 session 的 baseline、標記 started（final stats 的印出條件）。
+  static void start_sc_hid_poll_thread(std::shared_ptr<input_t> &input) {
+    VipleSCHidGetStats(&input->sc_stats_baseline);
+    input->sc_poll_thread_started = true;
+    input->sc_hid_thread_active.store(true);
+    std::weak_ptr<input_t> weak = input;
+    input->sc_hid_poll_thread = std::thread([weak]() { sc_hid_poll_loop(std::move(weak)); });
   }
 
   // §SC-HID eager-poll 2026-07-02：lazy-open 虛擬裝置 handle——input 與
@@ -1385,9 +1568,7 @@ namespace input {
 
     // Fallback（正常情況 poll thread 已於 session alloc 啟動）。
     if (!input->sc_hid_thread_active.load()) {
-      input->sc_hid_thread_active.store(true);
-      std::weak_ptr<input_t> weak = input;
-      input->sc_hid_poll_thread = std::thread([weak]() { sc_hid_poll_loop(std::move(weak)); });
+      start_sc_hid_poll_thread(input);
     }
     return true;
   }
@@ -1401,17 +1582,20 @@ namespace input {
     poll_sc_hid_notify(input);
 
     // All 0x55000009 packets carry live SC input reports. VipleSCHidWrite injects
-    // 0x45 (the gen-2 gamepad report) and harmlessly skips any other report id the
-    // virtual device does not declare (e.g. 0x43 battery). Feature *responses* no
-    // longer come on this magic — they arrive on SS_SC_HID_FEATURE_MAGIC.
+    // 0x45 / 0x42 (the gen-2 gamepad report, direct / via Puck) and returns 2 for
+    // any other report id the virtual device does not declare (e.g. 0x43
+    // battery) without touching the device. Feature *responses* no longer come
+    // on this magic — they arrive on SS_SC_HID_FEATURE_MAGIC.
     int wr = VipleSCHidWrite(input->sc_hid_handle, packet->data, 64);
-    if (wr > 0) {
+    if (wr == 1) {
+      // §SC-HID WP2.2：只有真的寫進裝置（wr==1）才算注入。舊碼 `wr > 0` 把
+      // skip（當時也回 1）當成注入：keepalive 快取被未宣告的 report 覆蓋、
+      // "First report injected" 印在從未到達裝置的封包上（F17 的假陽性來源）。
       // Log first successful injection as positive evidence of end-to-end flow.
-      static bool firstInject = true;
-      if (firstInject) {
-        firstInject = false;
-        BOOST_LOG(info) << "[SC-HID] First report injected (id=0x" << std::hex
-                        << (unsigned)packet->data[0] << std::dec << ")";
+      if (!input->sc_first_inject_logged) {
+        input->sc_first_inject_logged = true;
+        BOOST_LOG(info) << "[SC-HID] First report injected (id=0x"
+                        << util::hex(packet->data[0]).to_string_view() << ")";
       }
       // §SC-KEEPALIVE：記錄真實注入時刻與內容，poll thread 據此讓位/重放
       input->sc_last_real_inject_us.store(
@@ -1423,6 +1607,17 @@ namespace input {
         memcpy(input->sc_last_report, packet->data, sizeof(input->sc_last_report));
       }
     }
+    else if (wr == 2) {
+      // §SC-HID WP2.2：未宣告的 report id（0x43 電量、0x46/0x79 無線狀態、0x7B
+      // 遙測…）——client 本輪已改為只轉發 state report，這裡若還大量出現代表
+      // 兩端 id 白名單沒對齊。節流：前 3 筆 + 每 1000 筆一次（session 級計數）。
+      if (++input->sc_write_skip_count <= 3 || input->sc_write_skip_count % 1000 == 0) {
+        BOOST_LOG(warning) << "[SC-HID] Skipped undeclared report id=0x"
+                           << util::hex(packet->data[0]).to_string_view()
+                           << " (session skips=" << input->sc_write_skip_count << "): "
+                           << VipleSCHidWriteDiag();
+      }
+    }
     else if (wr < 0) {
       // Fatal (device gone) — close and let the next packet lazy re-open.
       BOOST_LOG(warning) << "[SC-HID] Write fatal, reopening: " << VipleSCHidWriteDiag();
@@ -1432,10 +1627,12 @@ namespace input {
     else {
       // Recoverable failure (e.g. HIDClass parameter rejection) — KEEP the
       // handle (closing on every failure caused a reopen storm that dropped
-      // all input). Rate-limit: reports arrive at ~100 Hz.
-      static unsigned long fail_count = 0;
-      if (++fail_count <= 3 || fail_count % 500 == 0) {
-        BOOST_LOG(warning) << "[SC-HID] Write failed (keeping handle): " << VipleSCHidWriteDiag();
+      // all input). Rate-limit: reports arrive at ~100-266 Hz. 計數改
+      // per-session（input_t 成員），跨 session 不再累積。
+      if (++input->sc_write_fail_count <= 3 || input->sc_write_fail_count % 500 == 0) {
+        BOOST_LOG(warning) << "[SC-HID] Write failed (keeping handle, id=0x"
+                           << util::hex(packet->data[0]).to_string_view()
+                           << "): " << VipleSCHidWriteDiag();
       }
     }
   }
@@ -2041,11 +2238,7 @@ namespace input {
     // 因為沒人按而永遠不來。feature 請求是 host 主動發起的（睡眠中的
     // 實體 SC 仍會回 feature 查詢），不該被 input 流量閘住。
     // 無控制器的 session 只多一條 20ms 輪詢執行緒（裝置缺席時有退避）。
-    input->sc_hid_thread_active.store(true);
-    {
-      std::weak_ptr<input_t> weak = input;
-      input->sc_hid_poll_thread = std::thread([weak]() { sc_hid_poll_loop(std::move(weak)); });
-    }
+    start_sc_hid_poll_thread(input);
 #endif
 
     // Workaround to ensure new frames will be captured when a client connects

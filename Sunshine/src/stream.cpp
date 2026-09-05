@@ -1108,7 +1108,10 @@ namespace stream {
       plaintext.queryLen = msg.data.sc_hid_feature.queryLen;
       for (int i = 0; i < 64; i++) plaintext.query[i] = msg.data.sc_hid_feature.query[i];
 
-      BOOST_LOG(debug) << "[SC-HID] Sending feature request to client: reportId=0x"sv
+      // §SC-HID Round 1：維持 info——這是握手取證（G4 門檻）的 server→client
+      // 那一半；頻率由 driver 端節流（無 SET 在途的 GET 事件 500 ms 一筆、SET
+      // 只在 Steam 真的查詢時發生），不會刷 log。
+      BOOST_LOG(info) << "[SC-HID] Sending feature request to client: reportId=0x"sv
                       << util::hex(msg.data.sc_hid_feature.reportId).to_string_view()
                       << " op="sv << (unsigned)msg.data.sc_hid_feature.op
                       << " seq="sv << (unsigned)msg.data.sc_hid_feature.seq;

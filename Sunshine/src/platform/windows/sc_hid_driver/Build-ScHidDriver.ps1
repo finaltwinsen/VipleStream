@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 # §SC-HID: Build-ScHidDriver.ps1
 # 在「沒有 WDK Visual Studio 整合（WDK.vsix）」的環境，直接用 cl.exe + link.exe
 # 建出 UMDF2 HID minidriver DLL（VipleSCHid_Driver.dll），可被 in-box WUDFRd /
@@ -206,6 +206,9 @@ if ($Install) {
 # ── 複製產物到模組根目錄（Sunshine 打包用）──────────────────────────────────
 Copy-Item $dll (Join-Path $scriptDir "VipleSCHid_Driver.dll") -Force
 if (Test-Path $catFile) { Copy-Item $catFile (Join-Path $scriptDir "VipleSCHid.cat") -Force }
+# .cer 也放模組根目錄：build_sunshine.cmd 的 5 檔打包 gate 與 Install-VipleSCHid.ps1 的
+# 憑證匯入都從這裡拿（.gitignore 忽略 *.cer，不入版控）。
+if (Test-Path $certFile) { Copy-Item $certFile (Join-Path $scriptDir "VipleSCHid_SelfSign.cer") -Force }
 
 Write-Host ""
 Write-Host "[SC-HID] 完成。產物："

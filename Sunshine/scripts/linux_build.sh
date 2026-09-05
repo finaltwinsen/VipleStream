@@ -810,7 +810,7 @@ elif grep -q "Ubuntu 25.04" /etc/os-release; then
   cuda_build="575.57.08"
   gcc_version="14"
   nvm_node=0
-elif grep -q "Ubuntu 25.10" /etc/os-release; then
+elif grep -qE "Ubuntu (25.10|26.04)" /etc/os-release; then
   distro="ubuntu"
   version="25.10"
   package_update_command="${sudo_cmd} apt-get update"

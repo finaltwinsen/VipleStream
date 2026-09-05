@@ -151,6 +151,110 @@ input latency.
   reduces bitrate by 25% per second until loss clears, then ramps back.
   Override in `sunshine.conf` with `adaptive_bitrate_disabled=true`.
 
+#### Steam Controller 虛擬裝置（§SC-HID）：host 端安裝／驗證
+
+client 端接的實體 Steam Controller（USB 直連 PID `0x1302`，或經 Puck 無線接收器
+PID `0x1304`）會以原生 HID 轉發到 host；host 端由一個 UMDF2 虛擬 HID 裝置
+（root 節點 `ROOT\VID_28DE&PID_1302`、子節點 `HID\VID_28DE&PID_1302`）把它呈現給
+host 的 Steam，所以 Steam 看到的是真的「Steam Controller」而不是模擬的 Xbox 手把。
+串流本身**不**依賴這個 driver；裝不上只會退回 ViGEm X360。
+
+**隨 server zip 出貨的 5 個檔（都在 exe 同目錄；`build_sunshine.cmd` 缺任一檔即中止打包）：**
+`VipleSCHid_Driver.dll`、`VipleSCHid.inf`、`VipleSCHid.cat`、`VipleSCHid_SelfSign.cer`、
+`Install-VipleSCHid.ps1`。
+
+**信任面（`.cer`）：** driver DLL／CAT 以自簽憑證簽署，Windows 只有在該憑證同時在
+`Cert:\LocalMachine\Root`（自簽＝鏈的根，缺了鏈就不可信）與
+`Cert:\LocalMachine\TrustedPublisher`（發行者信任，`pnputil /add-driver` 非互動安裝
+才不會跳「是否信任此發行者」而失敗）兩個電腦層級店時才會接受這個套件。Install 腳本
+會把隨包的 `.cer` 匯入這兩個店，**匯入後回讀店內確認 thumbprint 真的存在**才算成功；
+`-Reinstall`（含 gentle 模式的自動升級）只在「憑證 thumbprint 此刻確實在店內」時才會
+刪舊套件——`.cer` 檔存在但匯入失敗不放行，避免刪了舊 driver 卻裝不回。這是把一張
+自簽根憑證裝進 host 的電腦信任根，只該在你自己的 host 上做。
+
+**安裝／重裝（系統管理員 PowerShell；Windows PowerShell 5.1 或 PowerShell 7 皆可）：**
+
+```powershell
+cd "C:\Program Files\VipleStream-Server"
+# gentle：沒有健康節點才裝；節點健康但綁定版本 != 包內 INF DriverVer 時自動升級成 -Reinstall
+powershell -ExecutionPolicy Bypass -File .\Install-VipleSCHid.ps1
+# 強制：移除節點 + 舊 driver 套件後乾淨重綁（driver 改版後用這個）
+powershell -ExecutionPolicy Bypass -File .\Install-VipleSCHid.ps1 -Reinstall
+# 唯讀診斷：模擬 server 的 openHidByVidPid，看虛擬裝置能否以 R+W 開啟
+powershell -ExecutionPolicy Bypass -File .\Install-VipleSCHid.ps1 -Diag
+```
+
+最後一行 `RESULT:{json}` 是機器可讀結果：`ok`／`bound`（function driver 真的是
+`MsHidUmdf`，不只是 Status=OK）／`driverVersion`（節點實際綁定的 DriverVer）／
+`infVersion`（包內 INF 的 DriverVer）／`versionMatch`／`autoReinstall`／`refused`。
+**通過 = `ok=true, bound=true, versionMatch=true`。** `-Reinstall` 在「簽章憑證的
+thumbprint 此刻不在 Root + TrustedPublisher」時會拒絕（exit 3、`refused=true`）並保留
+舊套件，避免刪了舊 driver 卻裝不回（見上面的信任面說明）。
+
+**部署自動化：** host worker 的 `deploy_from_release.ps1` 在停服務、覆蓋檔案之後會
+自動跑 gentle 模式（`-ForceDriverReinstall` 則跑 `-Reinstall`）；覆蓋前把既有 driver 檔
+備份到 `sc_hid_driver_prev\<既有 INF DriverVer>\`（子目錄先清空；INF 缺或解析不到就是
+`unknown\`），結果附錄在 `config\schid-deploy.log`。Install 以獨立 `powershell.exe` 程序跑、
+180 s 逾時強制結束；driver 失敗／逾時只印 `DRIVER ENSURE FAILED`，服務啟動放在
+`finally`，**不論覆蓋或 driver 步驟成敗都會被拉起**。**只複製檔案不會讓新 driver 生效**
+（`pnputil /add-driver` 對同 DriverVer 靜默跳過、PnP 不替健康節點換 driver、server
+的 `tryInstallDriver()` 只在開不到裝置時才跑），所以 driver 改版一定要 bump INF
+`DriverVer` 並走這條路。
+
+**取證流程（win-builder 透過 CoworkMCP，零 SSH）：** 兩支診斷腳本在
+`Sunshine\src\platform\windows\sc_hid_driver\diag\`（隨 repo 版控；`scripts\` 是本機
+gitignore，別放那裡）。
+
+1. host 端健檢：把 `Sunshine\src\platform\windows\sc_hid_driver\diag\sc_hid_host_check.ps1`
+   放上黑板 `scripts`（`bb_write` + `sync-scripts`）後發 run-script 任務。**服務 Running
+   時腳本預設自動退為 `-NoFeature`**（feature 探測會 SET 0x01 到虛擬裝置，跟進行中的
+   Steam 握手搶同一個一次性回應暫存器；warning 會同時印 sunshine.log 看到的 poll thread
+   狀態供判斷）；串流中就照預設（或明講 `noFeature`），部署後確認沒有串流在跑才帶
+   `forceFeature` 驗 feature 通道。參數可放 `args.*` 或 spec 頂層：
+   ```powershell
+   . scripts\cowork_rpc.ps1; Cowork-Init
+   # 串流中（只看裝置／節點／log／Steam log，不碰 feature 通道）
+   $t = Cowork-RunTask -Type run-script -Role viplestream-host `
+          -Spec @{ op = 'run-script'; script = 'sc_hid_host_check.ps1'; args = @{ noFeature = $true } }
+   # 部署後、沒有串流在跑：驗 feature 通道（GATE-OK）
+   $t = Cowork-RunTask -Type run-script -Role viplestream-host `
+          -Spec @{ op = 'run-script'; script = 'sc_hid_host_check.ps1'; args = @{ forceFeature = $true } }
+   ```
+   讀輸出末行 `RESULT:{json}`：`deviceFound`／`bound`／`driverVersion`／`versionMatch`／
+   `driverStats`（Feature 0x05 解碼：`drvSet`／`drvGet01`／`pending`／`ready`／`delivered`／
+   `gated`／`zeroDropped`／`drvVer`，driver < 1.0.5.0 不宣告 0x05 → `supported=false`）／
+   `feature.verdict`：
+   - `GATE-OK`＝driver ≥ 1.0.5.0 語義正常（SET 事件進 ring、pending 期間 GET 0x01 回 err 31）；
+   - `GATE-OK-RESPONSE-DELIVERED`＝同上且輪詢期間看到 err→ok 轉折（有 server + client 把回應交付了）；
+   - `GATE-OK-BUT-NO-SET-EVENT`＝GET 被閘控但 ring 沒有 SET 事件、服務又沒在跑 → driver 的事件 ring 有問題；
+   - `GATE-SEEN-EVENT-CONSUMED`＝閘控看到了、事件被在跑的 server poll thread 先 pop 走（正常）；
+   - `OLD-DRIVER-ECHO`＝舊 driver 的 GET 回呼叫者原 buffer（RC2b）；`RING-OK-NO-GATE`／`UNCLEAR` 看原始行。
+
+   另看 `sunshineLogState`（`ok`／`missing`／`unreadable: …`，區分「讀不到 log」與「有 log 但無
+   `[SC-HID]` 行」）／`steamReadFailure`／`steamZombie`（host Steam 握手失敗特徵計數，應為 0）。
+2. host server log：`collect(what=["log-grep"], pattern="\\[SC-HID\\]", tail=20000, max=400)`。
+3. host Steam log：`collect(what=["log-grep"], log="C:\\Program Files (x86)\\Steam\\logs\\controller.txt",
+   pattern="(?i)28de|1302|steam controller|GetControllerInfo|Read failure|couldn't get|firmware|disconnect")`。
+4. client 端：`Sunshine\src\platform\windows\sc_hid_driver\diag\sc_hid_probe.ps1 -Seconds 8 -LegacyCheck`
+   （列舉 0x28DE 介面／report 佈局／N 秒 report id 直方圖／SET→1 ms 輪詢 GET 的 feature
+   時序），串流 log 看 `[SC-HID] rx stats(final)` 與 `Feature req … lat=`（tag 字典見
+   `docs/log_tags.md`）。
+
+**通過門檻（依序；任一失敗就停在該層回報）：**
+
+| 門檻 | 看什麼 | 通過條件 |
+|---|---|---|
+| G0 裝置 | host_check `bound`／`driverVersion`；sunshine.log `Polling thread started, handle open` | driver 版本 = 包內 INF、無 `device not found` |
+| G1 client 收到 | client `[SC-HID] rx stats(final)` | `id42 ≥ 500`（Puck slot 約 266 Hz） |
+| G2 client 轉發 | 同上 `fwd` | `fwd ≈ id42` |
+| G3 host 注入 | host `[SC-HID] write stats(10s)` 的 **per-session 差值欄位** | `okS − keepalive ≥ 500`（`okS`＝本 session 寫入成功數；`ok` 是 process 級累計、跨 session 不歸零，不能拿來減）、`skipped=0`、`failed=0` |
+| G4 握手 | host `drvSet>0`（Feature 0x05 統計）+ 成對的 host `Steam feature → client`（input 路徑 `Steam feature op → client` 或 poll thread `Poll-thread: Steam feature → client`，grep pattern `Steam feature (op )?→ client`）／ client `Feature req … lat=ms` ／ host `Feature response delivered`；host Steam log | 不再每秒 `Read failure`、`Firmware Version` 非 0、無 zombie 重開 |
+| G5 使用者可見 | host Steam 設定 → 控制器；遊戲內 | 顯示「Steam Controller」、按鍵／搖桿／觸控板有反應、閒置 90 s 不掉 |
+
+注意：client 本機若有 Steam 常駐，它會跟轉發鏈搶實體控制器的**一次性** feature 回應暫存器
+（實測 report id／頻率／時序不受影響，只是多一個競爭者）；握手成功率明顯偏低時，先退出
+client 本機的 Steam 再試。
+
 ### Android client
 
 - Android 12+ themed icon: VipleStream's "V" mark renders as a
