@@ -297,6 +297,35 @@ Note: do not run Steam Input against the same controller on the client
 machine while streaming — it reconfigures the device and interferes with
 passthrough.
 
+#### Steam Controller passthrough on Android (§SC-HID)
+
+The Android client forwards a gen-2 Steam Controller the same way, but only
+over **USB host**:
+
+- **Supported**: the controller on a USB-C cable (PID `0x1302`), or the Puck /
+  Nereid wireless receiver plugged in via an OTG adapter (PID `0x1304` /
+  `0x1305`). Keep *Settings → Input → "Use USB driver"* enabled (default) and
+  accept Android's USB permission prompt when the device appears. The
+  `SteamControllerDriver` claims every HID interface, forwards the `0x42` /
+  `0x45` state stream (`0x42` is relabelled `0x45`, same layout) and services
+  the host's feature tunnel with a 1 ms GET poll after each SET (the physical
+  controller answers 13–21 ms later and only once).
+- **Not supported: Bluetooth.** The gen-2 controller over BLE is plain HID
+  over GATT. Android's Bluetooth stack owns that profile and blocks apps from
+  reading/writing the HID service (0x1812) report characteristics, and the
+  controller's descriptor only exposes mouse + keyboard + vendor collections
+  (no gamepad), so Android creates `KEYBOARD | MOUSE` input devices only. A
+  Bluetooth-connected controller is therefore forwarded merely as the mouse /
+  keyboard it emulates in lizard mode; the client shows a one-time toast
+  ("connect with USB-C or the Puck receiver via OTG") when it detects
+  `0x28DE:0x1303` at stream start.
+
+Diagnosis (logcat, tag `LimeLog`): `[SC-HID] Steam Controller passthrough
+started (...)`, `First report id=0x42 ...`, `rx stats(5s|final): total= fwd=
+norm42= ... feat req= ok= ...`, `Feature req ... lat= ms src=live|cache`;
+`No input report ... in 3 s` means the controller is asleep or not paired to
+the receiver.
+
 ---
 
 ## Where to file issues

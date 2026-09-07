@@ -236,7 +236,8 @@ INPUT 類別，app 從未設該類別等級，所以**永遠不會出現在 log*
 | 行 | 判讀 |
 |---|---|
 | `Polling thread started, handle open` ／ `Virtual Steam Controller device not found` | **G0**：driver 綁上與否（`Sunshine\src\platform\windows\sc_hid_driver\diag\sc_hid_host_check.ps1` 的 `bound`／`driverVersion` 同義） |
-| `Polling thread: device NOT open (retry with backoff): <探測軌跡>`（刻意不含 `Polling thread started`，G0 可用兩個互斥字串直接判讀） | warning；poll thread 起來了但開不到虛擬裝置（每個失敗 streak 首次印，之後退避靜默）。舊碼這種情況零 log（F10）。看軌跡分「沒列舉到」（driver 沒綁）vs「開啟失敗 err=」（權限／獨占） |
+| `Polling thread: device NOT open (retry with backoff): <探測軌跡>`（刻意不含 `Polling thread started`，G0 可用兩個互斥字串直接判讀） |
+| *(Android client，logcat tag `LimeLog`)* `[SC-HID] Steam Controller passthrough started (N HID interface(s), M input endpoint(s), normalize42=1)`／`First report id=0x.. on endpoint= iface= (n bytes): <hex>`／`rx stats(5s|heartbeat|final): total= fwd= norm42= drop= sendErr= \| id42= id45= id43= id7B= id47= \| feat req= ok= stolen= empty= cache= lat avg/max= \| active= \| ep rx/fwd: …`／`Feature req[ (warm-up)] id=0x01 op=SET|GET seq= type=0x.. -> resp type=0x.. lat= ms iface= src=live|cache stolen= cand= sent= poll= ms`／`No input report from any of N endpoint(s) in 3 s`／`Bluetooth Steam Controller detected as InputDevice ... Android blocks raw HID over GATT` | 與桌面 client 同語義（USB-C／Puck OTG 才會出現前四種；藍牙只會出現最後一行＋toast） | warning；poll thread 起來了但開不到虛擬裝置（每個失敗 streak 首次印，之後退避靜默）。舊碼這種情況零 log（F10）。看軌跡分「沒列舉到」（driver 沒綁）vs「開啟失敗 err=」（權限／獨占） |
 | `First report injected (id=0x…)` | 本場第一筆**真實**（非 keepalive）report 進虛擬裝置；只在寫入真的到裝置（`wr==1`）時印 |
 | `Keepalive active (4Hz idle replay of last real report, id=0x…; suppressed while real input flows)` | 本場首次進入 keepalive（500 ms 無真實注入 → 4 Hz 重放最後一筆真實 report 的原 id；尚無真實資料時重放零值 0x45）。整場只有這行、沒有 `First report injected`＝client 從未轉發任何 state（G2 失敗） |
 | `Skipped undeclared report id=0x%02x` | 節流 warning；descriptor 沒宣告的 id（`VipleSCHidWrite` 回 2） |

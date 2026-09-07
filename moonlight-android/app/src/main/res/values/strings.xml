@@ -71,6 +71,7 @@
     <string name="title_decoding_reset">Video Settings Reset</string>
     <string name="message_decoding_reset">Your device\'s video decoder continues to crash at your selected streaming settings. Your streaming settings have been reset to default.</string>
     <string name="error_usb_prohibited">USB access is prohibited by your device administrator. Check your Knox or MDM settings.</string>
+    <string name="sc_hid_bt_unsupported">Steam Controller over Bluetooth cannot be passed through on Android (the system owns Bluetooth HID). Connect it with a USB-C cable or plug the Puck receiver in via OTG.</string>
     <string name="unable_to_pin_shortcut">Your current launcher does not allow for creating pinned shortcuts.</string>
     <string name="video_decoder_init_failed">Video decoder failed to initialize. Your device may not support the selected resolution or frame rate.</string>
     <string name="no_video_received_error">No video received from host.</string>

@@ -2580,6 +2580,33 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         });
     }
 
+    // §SC-HID（2026-09-07）：gen-2 Steam Controller 走藍牙時是標準 HID over GATT，
+    // Android 的 Bluetooth 堆疊把 HID 服務 0x1812 的 Report 特徵列為受限（非系統 App
+    // 讀寫被拒），且它的描述符只有滑鼠＋鍵盤＋vendor collection、沒有 gamepad——
+    // 系統只會建出 KEYBOARD|MOUSE 的 InputDevice（Pixel 5 實測）。所以藍牙 SC
+    // 只能以 lizard mode 的滑鼠鍵盤被轉發，原生手把轉發需要 USB-C 直連或
+    // Puck/Nereid 接收器經 OTG（UsbDriverService → SteamControllerDriver）。
+    private boolean btSteamControllerWarned;
+    private void warnIfBluetoothSteamController() {
+        if (btSteamControllerWarned) {
+            return;
+        }
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice dev = InputDevice.getDevice(id);
+            if (dev == null) {
+                continue;
+            }
+            if (dev.getVendorId() == 0x28de && dev.getProductId() == 0x1303) {
+                btSteamControllerWarned = true;
+                LimeLog.warning("[SC-HID] Bluetooth Steam Controller detected as InputDevice '"+dev.getName()+
+                        "' (sources=0x"+Integer.toHexString(dev.getSources())+") - Android blocks raw HID over "+
+                        "GATT for apps; native passthrough needs USB-C or the Puck receiver via OTG");
+                Toast.makeText(this, getString(R.string.sc_hid_bt_unsupported), Toast.LENGTH_LONG).show();
+                break;
+            }
+        }
+    }
+
     @Override
     public void connectionStarted() {
         runOnUiThread(new Runnable() {
@@ -2617,6 +2644,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
                 // VipleStream §N — 連線建立後啟動 in-stream file transfer client
                 startFileTransferClient();
+
+                // §SC-HID：藍牙 Steam Controller 在 Android 無法原生轉發，明講
+                warnIfBluetoothSteamController();
             }
         });
 

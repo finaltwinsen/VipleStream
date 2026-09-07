@@ -46,6 +46,7 @@
     <string name="title_decoding_reset">重設視訊設定</string>
     <string name="message_decoding_reset">由於裝置的視訊解碼器在你選取的串流設定上持續當機，已重設你的串流設定。</string>
     <string name="error_usb_prohibited">裝置管理員已禁止 USB 訪問。請檢查您的 Knox 或 MDM 設定。</string>
+    <string name="sc_hid_bt_unsupported">Android 無法原生轉發藍牙連線的 Steam Controller（系統獨佔藍牙 HID）。請改用 USB-C 線直連，或把 Puck 接收器透過 OTG 接上手機。</string>
     <string name="unable_to_pin_shortcut">您目前的啟動器不允許創建釘選的捷徑。</string>
     <!-- Start application messages -->
     <string name="conn_establishing_title">正在建立連線</string>
