@@ -64,7 +64,9 @@ win32 {
     }
 
     INCLUDEPATH += $$PWD/../libs/windows/include $$PWD/../libs/windows/nvofa/include
-    LIBS += ws2_32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib
+    # §HID-PROBE：backend/hidprobe.cpp 用 HidD_*（hid.lib）與 CM_Get_Device_Interface_ListW（cfgmgr32.lib）；
+    # 兩者都是 Windows SDK 內建 import lib，runtime 的 hid.dll / cfgmgr32.dll 是系統元件，打包清單不用動。
+    LIBS += ws2_32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib hid.lib cfgmgr32.lib
     # VipleStream: DirectML FRUC backend. d3d12.lib and directml.lib
     # both ship with the Windows 10 SDK; the runtime DirectML.dll is
     # part of Windows 10 1903+ (no redist needed on modern systems).
@@ -292,6 +294,7 @@ SOURCES += \
     streaming/video/overlaymanager.cpp \
     streaming/transfer/filetransferclient.cpp \
     backend/systemproperties.cpp \
+    backend/hidprobe.cpp \
     wm.cpp
 
 HEADERS += \
@@ -335,7 +338,8 @@ HEADERS += \
     gui/sdlgamepadkeynavigation.h \
     streaming/video/overlaymanager.h \
     streaming/transfer/filetransferclient.h \
-    backend/systemproperties.h
+    backend/systemproperties.h \
+    backend/hidprobe.h
 
 # Platform-specific renderers and decoders
 ffmpeg {

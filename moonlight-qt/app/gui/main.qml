@@ -96,6 +96,14 @@ ApplicationWindow {
                 wow64Dialog.open()
             }
 
+            // §HID-PROBE：啟動探測發現無回應的 HID 裝置（例：Steam Controller Puck 卡死，
+            // 見 backend/hidprobe.cpp）。probe 在 main() 已跑完、屬性是 CONSTANT，同步檢查即可。
+            // CLI stream 路徑 runConfigChecks=false 不會進來——那邊靠 Session 的 launch warning + log。
+            if (SystemProperties.unresponsiveHidDevices) {
+                unresponsiveHidDialog.devices = SystemProperties.unresponsiveHidDevices
+                unresponsiveHidDialog.open()
+            }
+
             // Hardware acceleration and unmapped gamepads are checked asynchronously
             SystemProperties.hasHardwareAccelerationChanged.connect(hasHardwareAccelerationChanged)
             SystemProperties.unmappedGamepadsChanged.connect(hasUnmappedGamepadsChanged)
@@ -612,6 +620,16 @@ ApplicationWindow {
         helpTextSeparator: "\n\n"
         helpText: qsTr("Click the Help button for information on how to map your gamepads.")
         helpUrl: "https://github.com/moonlight-stream/moonlight-docs/wiki/Gamepad-Mapping"
+    }
+
+    // §HID-PROBE：HID 裝置無回應警告。用 NavigableMessageDialog 而非 ErrorMessageDialog：
+    // 後者的 Help 鈕預設連到 moonlight troubleshooting wiki，與此無關。
+    NavigableMessageDialog {
+        id: unresponsiveHidDialog
+        property string devices : ""
+        standardButtons: Dialog.Ok
+        text: qsTr("VipleStream found a HID device that is not responding:") + "\n" + devices + "\n\n" +
+              qsTr("Gamepad detection and Steam Controller passthrough are disabled until it responds again. Unplug and replug the device; if VipleStream still does not see it, restart VipleStream.")
     }
 
     // This dialog appears when quitting via keyboard or gamepad button

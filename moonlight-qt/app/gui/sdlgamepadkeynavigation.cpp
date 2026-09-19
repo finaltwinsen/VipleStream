@@ -5,6 +5,11 @@
 #include <QWindow>
 
 #include "settings/mappingmanager.h"
+#include "backend/hidprobe.h"   // §HID-PROBE
+
+// §HID-PROBE：enable() 因 SDL_InitSubSystem 失敗而放棄時記一筆，讓 getConnectedGamepads()
+// 的「未 enable 就呼叫」斷言只對真正的程式錯誤觸發（審查建議）。本類別是 QML 單例。
+static bool s_InitFailed = false;
 
 #define AXIS_NAVIGATION_REPEAT_DELAY 150
 
@@ -31,6 +36,25 @@ void SdlGamepadKeyNavigation::enable()
         return;
     }
 
+    // §HID-PROBE：有 HID 裝置卡死時，下面的 SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER)
+    // 會在 hidapi 列舉（HidD_GetProductString）永久阻塞主執行緒。GUI 路徑在這之前已先
+    // 經過 getUnmappedGamepads；CLI stream/quit 路徑（runConfigChecks=false）則最先到這裡。
+    // 每次從 UI 回來重新啟用前先 refresh（正常機器 ~ms）：涵蓋「串流中才卡死」與
+    // 「使用者已重插」兩種狀態改變，重插後不必重啟程式。
+    // m_Enabled 維持 false → disable() / updateTimerState() / getConnectedGamepads() 都是安全的 no-op。
+    HidProbe::refresh();
+    if (HidProbe::anyUnresponsive()) {
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-HID] SdlGamepadKeyNavigation::enable skipped: unresponsive HID device(s) %s - "
+                        "gamepad UI navigation disabled; unplug and replug the device",
+                        HidProbe::describeUnresponsive().toUtf8().constData());
+        }
+        return;
+    }
+
     // We have to initialize and uninitialize this in enable()/disable()
     // because we need to get out of the way of the Session class. If it
     // doesn't get to reinitialize the GC subsystem, it won't get initial
@@ -41,6 +65,7 @@ void SdlGamepadKeyNavigation::enable()
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) failed: %s",
                      SDL_GetError());
+        s_InitFailed = true;   // §HID-PROBE
         return;
     }
 
@@ -297,7 +322,13 @@ void SdlGamepadKeyNavigation::setUiNavMode(bool uiNavMode)
 
 int SdlGamepadKeyNavigation::getConnectedGamepads()
 {
-    Q_ASSERT(m_Enabled);
+    // §HID-PROBE：enable() 被閘控（或 SDL init 失敗）時 m_Enabled 仍為 false、joystick 子系統
+    // 沒開，直接回 0（AppView/PcView/SettingsView 的 StackView.onActivated 都會呼叫）。
+    // 正常路徑維持原本的 Q_ASSERT 語意：未 enable 就呼叫仍是 bug。
+    if (!m_Enabled) {
+        Q_ASSERT(HidProbe::anyUnresponsive() || s_InitFailed);
+        return 0;
+    }
 
     int count = 0;
     int numJoysticks = SDL_NumJoysticks();

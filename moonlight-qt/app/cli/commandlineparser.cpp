@@ -1,6 +1,7 @@
 #include "commandlineparser.h"
 
 #include <QCommandLineParser>
+#include <QCoreApplication>
 #include <QRegularExpression>
 
 #include <cstdio>
@@ -100,6 +101,15 @@ public:
     {
         showMessage(message, Info);
         fastExit(0);
+    }
+
+    // VipleStream：QCommandLineParser::showVersion() 不是 virtual，且走一般的 ::exit()——
+    // 正是上面那段註解描述的 static destructor / SDL_Quit 競態路徑。1.5.271 實測 `--version`
+    // 三次裡兩次卡在 SDL_Quit 不結束、一次 0xC0000409。這裡用同名成員遮蔽它，讓 --version
+    // 與 --help 走同一條 fastExit（輸出格式與 Qt 相同：「<name> <version>」）。
+    [[ noreturn ]] void showVersion() const
+    {
+        showInfo(QCoreApplication::applicationName() + " " + QCoreApplication::applicationVersion());
     }
 
     [[ noreturn ]] void showError(QString message) const

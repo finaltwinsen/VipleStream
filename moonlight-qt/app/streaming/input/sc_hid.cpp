@@ -2,6 +2,7 @@
 
 #include "sc_hid.h"
 #include "SDL_compat.h"
+#include "backend/hidprobe.h"   // §HID-PROBE
 #include <SDL_hidapi.h>
 #include <cstdio>    // snprintf
 #include <cstring>   // memset / memcpy / memcmp
@@ -367,6 +368,33 @@ int ScHidPassthrough::featureRequestLocked(uint8_t reportId, uint8_t op, uint8_t
 
 void ScHidPassthrough::start() {
     if (m_running) return;
+
+    // §HID-PROBE：探測若發現 Valve（0x28DE）介面對 control transfer 無回應，下面的
+    // SDL_hid_enumerate / SDL_hid_open_path / featureRequestLocked 暖機（HidD_SetFeature／
+    // GetFeature = 同步 DeviceIoControl）全會在核心永久阻塞——而且是在 m_devMutex 內：
+    //   (a) start() 卡住 → m_running 仍 false → stop() 直接返回，但 AsyncConnectionStartThread
+    //       永不結束、Session::exec 永不被呼叫；
+    //   (b) 串流中 forwardFeatureRequest 卡在鎖內 → readLoop 搶不到鎖 → stop() 的
+    //       SDL_WaitThread 永不返回 → DeferredSessionCleanupTask 卡死、
+    //       s_ActiveSessionSemaphore 永不釋放。
+    // 所以直接拒絕啟動。條件：VID 0x28DE（涵蓋 1302/1303/1304/1305 全家族），或
+    // anyUnidentified()＝卡在 CreateFile／HidD_GetAttributes 階段或整個列舉逾時——
+    // 已核對 SDL 3.4.2 src/hidapi/windows/hid.c hid_enumerate：對每個介面（不分 VID）
+    // 先 open_device + HidD_GetAttributes 再比 VID，只有相符者才查字串；所以其他廠商
+    // 卡在字串查詢的裝置不會擋 SDL_hid_enumerate(0x28DE)，但卡在前兩步的會。升級 SDL 時重驗。
+    if (HidProbe::isUnresponsiveVid(SC_VID) || HidProbe::anyUnidentified()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-HID] [SC-HID] passthrough refused: unresponsive Steam Controller / unidentified HID interface(s) %s - "
+            "unplug and replug the Puck or controller, then start the stream again",
+            HidProbe::describeUnresponsive().toUtf8().constData());
+        return;
+    }
+    if (HidProbe::anyUnresponsive()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "[VIPLE-HID] [SC-HID] non-Valve HID device(s) unresponsive at the string-query stage (%s); "
+            "proceeding with 0x28DE-only enumeration",
+            HidProbe::describeUnresponsive().toUtf8().constData());
+    }
 
     if (SDL_hid_init() < 0) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,

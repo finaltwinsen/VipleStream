@@ -9,6 +9,7 @@
 #include "streaming/transfer/filetransferclient.h"
 #include "streaming/video/overlaymanager.h"
 #include "backend/richpresencemanager.h"
+#include "backend/hidprobe.h"   // §HID-PROBE
 
 #include <Limelight.h>
 #include "HolePunch.h"  // VipleStream: LocalControlPort global
@@ -1470,8 +1471,16 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         emitLaunchWarning(tr("Failed to open audio device. Audio will be unavailable during this session."));
     }
 
+    // §HID-PROBE：每場開始前重測一次（正常機器 ~ms）：Puck 若在上一場串流中才卡死，
+    // 啟動時的快照是「OK」，不重測就會在下面的 getUnmappedGamepads 卡死主執行緒；
+    // 反過來使用者重插後也不必重啟程式。有無回應裝置 → 這場手把與 SC-HID 都停用，
+    // 用 launch warning 提醒（GUI 與 CLI stream 都走這裡；受 configurationWarnings 偏好控制）。
+    HidProbe::refresh();
+    if (HidProbe::anyUnresponsive()) {
+        emitLaunchWarning(tr("A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.").arg(HidProbe::describeUnresponsive()));
+    }
     // Check for unmapped gamepads
-    if (!SdlInputHandler::getUnmappedGamepads().isEmpty()) {
+    else if (!SdlInputHandler::getUnmappedGamepads().isEmpty()) {
         emitLaunchWarning(tr("An attached gamepad has no mapping and won't be usable. Visit the Moonlight help to resolve this."));
     }
 

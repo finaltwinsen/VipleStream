@@ -25,6 +25,10 @@ public:
     Q_PROPERTY(bool hasDiscordIntegration MEMBER hasDiscordIntegration CONSTANT)
     Q_PROPERTY(bool usesMaterial3Theme MEMBER usesMaterial3Theme CONSTANT)
     Q_PROPERTY(QString versionString MEMBER versionString CONSTANT)
+    // §HID-PROBE：啟動探測發現的無回應 HID 裝置（人類可讀、同 VID:PID 去重，
+    // 如 "Steam Controller Puck (28DE:1304)"；空字串 = 全部正常）。probe 在 main()
+    // 早於本單例建立時已跑完，所以是 CONSTANT（啟動快照）；main.qml 在 runConfigChecks 區塊同步檢查。
+    Q_PROPERTY(QString unresponsiveHidDevices MEMBER unresponsiveHidDevices CONSTANT)
 
     // Properties queried asynchronously (startAsyncLoad() must be called!)
     Q_PROPERTY(bool hasHardwareAcceleration MEMBER hasHardwareAcceleration NOTIFY hasHardwareAccelerationChanged)
@@ -71,6 +75,7 @@ private:
     bool hasDiscordIntegration;
     QString versionString;
     bool usesMaterial3Theme;
+    QString unresponsiveHidDevices;   // §HID-PROBE
 
     // Properties only set if startAsyncLoad() is called
     bool hasHardwareAcceleration;

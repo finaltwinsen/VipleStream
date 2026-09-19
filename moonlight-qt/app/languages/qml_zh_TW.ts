@@ -658,6 +658,10 @@
         <translation>附加的手把沒有對應，將無法使用。請造訪 Moonlight 協助解決問題。</translation>
     </message>
     <message>
+        <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
+        <translation>有 HID 裝置沒有回應（%1）。本場串流已停用手把輸入與 Steam Controller 轉發。請拔除並重新插上該裝置，然後重新開始串流。</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="1210"/>
         <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>您的主機電腦 GPU 不支援 4K 視訊串流。</translation>
@@ -1373,13 +1377,13 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
     </message>
     <message>
         <location filename="../gui/main.qml" line="456"/>
-        <source>This version of Moonlight isn&apos;t optimized for your PC. Please download the &apos;%1&apos; version of Moonlight for the best streaming performance.</source>
-        <translation>此版本的 Moonlight 尚未針對你的電腦最佳化。請下載「%1」版本的 Moonlight，以獲得最佳的串流效能。</translation>
+        <source>This version of VipleStream isn&apos;t optimized for your PC. Please download the &apos;%1&apos; version of VipleStream for the best streaming performance.</source>
+        <translation>此版本的 VipleStream 尚未針對你的電腦最佳化。請下載「%1」版本的 VipleStream，以獲得最佳的串流效能。</translation>
     </message>
     <message>
         <location filename="../gui/main.qml" line="465"/>
-        <source>Moonlight detected gamepads without a mapping:</source>
-        <translation>Moonlight 偵測到沒有對應的手把：</translation>
+        <source>VipleStream detected gamepads without a mapping:</source>
+        <translation>VipleStream 偵測到沒有對應的手把：</translation>
     </message>
     <message>
         <location filename="../gui/main.qml" line="378"/>
@@ -1388,8 +1392,8 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
     </message>
     <message>
         <location filename="../gui/main.qml" line="439"/>
-        <source>No functioning hardware accelerated video decoder was detected by Moonlight. Your streaming performance may be severely degraded in this configuration.</source>
-        <translation>Moonlight 沒有偵測到有效的硬體加速視訊解碼器。在這種組態下，你的串流效能可能會嚴重下降。</translation>
+        <source>No functioning hardware accelerated video decoder was detected by VipleStream. Your streaming performance may be severely degraded in this configuration.</source>
+        <translation>VipleStream 沒有偵測到有效的硬體加速視訊解碼器。在這種組態下，你的串流效能可能會嚴重下降。</translation>
     </message>
     <message>
         <location filename="../gui/main.qml" line="441"/>
@@ -1415,6 +1419,14 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <location filename="../gui/main.qml" line="505"/>
         <source>Enter the IP address of your host PC:</source>
         <translation>輸入您的主機電腦 IP 位址：</translation>
+    </message>
+    <message>
+        <source>VipleStream found a HID device that is not responding:</source>
+        <translation>VipleStream 偵測到沒有回應的 HID 裝置：</translation>
+    </message>
+    <message>
+        <source>Gamepad detection and Steam Controller passthrough are disabled until it responds again. Unplug and replug the device; if VipleStream still does not see it, restart VipleStream.</source>
+        <translation>在它恢復回應之前，手把偵測與 Steam Controller 轉發都會停用。請拔除並重新插上該裝置；若 VipleStream 仍看不到它，請重新啟動 VipleStream。</translation>
     </message>
 </context>
 </TS>

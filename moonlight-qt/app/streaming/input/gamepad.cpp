@@ -3,6 +3,7 @@
 #include <Limelight.h>
 #include "SDL_compat.h"
 #include "settings/mappingmanager.h"
+#include "backend/hidprobe.h"   // §HID-PROBE
 
 #include <QtMath>
 
@@ -941,6 +942,19 @@ QString SdlInputHandler::getUnmappedGamepads()
 {
     QString ret;
 
+    // §HID-PROBE：探測發現有 HID 裝置對 control transfer 無回應時，下面的
+    // SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) 會在 hidapi 逐裝置同步呼叫
+    // HidD_GetProductString 的地方在核心永久阻塞（2026-09-19 事故的 cdb 堆疊就停在
+    // 這一行）。兩個呼叫者——啟動 SystemProperties::startAsyncLoad 與每場
+    // Session::validateLaunch——都在主執行緒。這一輪直接跳過手把偵測、回空。
+    if (HidProbe::anyUnresponsive()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-HID] getUnmappedGamepads skipped: unresponsive HID device(s) %s - "
+                    "gamepad detection disabled; unplug and replug the device",
+                    HidProbe::describeUnresponsive().toUtf8().constData());
+        return ret;
+    }
+
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) failed: %s",
@@ -1008,6 +1022,14 @@ int SdlInputHandler::getAttachedGamepadMask()
     if (!m_MultiController) {
         // Player 1 is always present in non-MC mode
         return 0x1;
+    }
+
+    // §HID-PROBE：joystick 子系統這場沒有初始化（見 SdlInputHandler 建構子），別去問 SDL。
+    // 附帶記錄一個既有事實：Session::startConnectionAsync 在非主執行緒呼叫本函式
+    // （上游遺留的 off-main-thread joystick 呼叫）；被閘控時直接回 0 反而更安全，
+    // 日後不要「修正」成又去問 SDL。
+    if (m_GamepadDisabled) {
+        return 0;
     }
 
     count = mask = 0;

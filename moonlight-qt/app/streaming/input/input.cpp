@@ -4,6 +4,7 @@
 #include "settings/mappingmanager.h"
 #include "path.h"
 #include "utils.h"
+#include "backend/hidprobe.h"   // §HID-PROBE
 
 #include <QtGlobal>
 #include <QDir>
@@ -11,6 +12,7 @@
 
 SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, int streamHeight)
     : m_MultiController(prefs.multiController),
+      m_GamepadDisabled(HidProbe::anyUnresponsive()),   // §HID-PROBE
       m_GamepadMouse(prefs.gamepadMouse),
       m_SwapMouseButtons(prefs.swapMouseButtons),
       m_ReverseScrollDirection(prefs.reverseScrollDirection),
@@ -175,44 +177,58 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, streamIgnoreDevices.toUtf8());
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT, streamIgnoreDevicesExcept.toUtf8());
 
-    // We must initialize joystick explicitly before gamecontroller in order
-    // to ensure we receive gamecontroller attach events for gamepads where
-    // SDL doesn't have a built-in mapping. By starting joystick first, we
-    // can allow mapping manager to update the mappings before GC attach
-    // events are generated.
-    SDL_assert(!SDL_WasInit(SDL_INIT_JOYSTICK));
-    if (SDL_InitSubSystem(SDL_INIT_JOYSTICK) != 0) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "SDL_InitSubSystem(SDL_INIT_JOYSTICK) failed: %s",
-                     SDL_GetError());
+    // §HID-PROBE：有 HID 裝置卡死時，SDL_INIT_JOYSTICK / GAMECONTROLLER 的 hidapi 列舉
+    // 會永久阻塞主執行緒（Session::start 在主執行緒 new 本物件，且早於連線）。
+    // 這場跳過整組 joystick 初始化。已確認不依賴 joystick 子系統的部分：鍵盤／滑鼠／
+    // 觸控 handler、所有 KeyCombo、m_GamepadState 全零（rumble/LED/adaptive trigger
+    // 都有 controller != nullptr 守衛）、session.cpp 只在 SDL_CONTROLLER*/SDL_JOY* 事件
+    // 到達時才進手把路徑，而子系統沒開就不會有事件。上面已設的 SDL hint 無害。
+    if (m_GamepadDisabled) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-HID] SdlInputHandler: joystick/gamecontroller subsystems NOT initialised for this session "
+                    "(unresponsive HID device(s) %s) - keyboard/mouse/touch only; unplug and replug the device",
+                    HidProbe::describeUnresponsive().toUtf8().constData());
     }
+    else {
+        // We must initialize joystick explicitly before gamecontroller in order
+        // to ensure we receive gamecontroller attach events for gamepads where
+        // SDL doesn't have a built-in mapping. By starting joystick first, we
+        // can allow mapping manager to update the mappings before GC attach
+        // events are generated.
+        SDL_assert(!SDL_WasInit(SDL_INIT_JOYSTICK));
+        if (SDL_InitSubSystem(SDL_INIT_JOYSTICK) != 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "SDL_InitSubSystem(SDL_INIT_JOYSTICK) failed: %s",
+                         SDL_GetError());
+        }
 
-    MappingManager mappingManager;
-    mappingManager.applyMappings();
+        MappingManager mappingManager;
+        mappingManager.applyMappings();
 
-    // Flush gamepad arrival and departure events which may be queued before
-    // starting the gamecontroller subsystem again. This prevents us from
-    // receiving duplicate arrival and departure events for the same gamepad.
-    SDL_FlushEvent(SDL_CONTROLLERDEVICEADDED);
-    SDL_FlushEvent(SDL_CONTROLLERDEVICEREMOVED);
+        // Flush gamepad arrival and departure events which may be queued before
+        // starting the gamecontroller subsystem again. This prevents us from
+        // receiving duplicate arrival and departure events for the same gamepad.
+        SDL_FlushEvent(SDL_CONTROLLERDEVICEADDED);
+        SDL_FlushEvent(SDL_CONTROLLERDEVICEREMOVED);
 
-    // We need to reinit this each time, since you only get
-    // an initial set of gamepad arrival events once per init.
-    SDL_assert(!SDL_WasInit(SDL_INIT_GAMECONTROLLER));
-    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) failed: %s",
-                     SDL_GetError());
-    }
+        // We need to reinit this each time, since you only get
+        // an initial set of gamepad arrival events once per init.
+        SDL_assert(!SDL_WasInit(SDL_INIT_GAMECONTROLLER));
+        if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) failed: %s",
+                         SDL_GetError());
+        }
 
 #if !SDL_VERSION_ATLEAST(2, 0, 9)
-    SDL_assert(!SDL_WasInit(SDL_INIT_HAPTIC));
-    if (SDL_InitSubSystem(SDL_INIT_HAPTIC) != 0) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "SDL_InitSubSystem(SDL_INIT_HAPTIC) failed: %s",
-                     SDL_GetError());
-    }
+        SDL_assert(!SDL_WasInit(SDL_INIT_HAPTIC));
+        if (SDL_InitSubSystem(SDL_INIT_HAPTIC) != 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "SDL_InitSubSystem(SDL_INIT_HAPTIC) failed: %s",
+                         SDL_GetError());
+        }
 #endif
+    }   // §HID-PROBE else
 
     // Initialize the gamepad mask with currently attached gamepads to avoid
     // causing gamepads to unexpectedly disappear and reappear on the host
@@ -247,16 +263,19 @@ SdlInputHandler::~SdlInputHandler()
     SDL_RemoveTimer(m_RightButtonReleaseTimer);
     SDL_RemoveTimer(m_DragTimer);
 
+    // §HID-PROBE：建構子被閘控時子系統根本沒開，不能 Quit（SDL 的 init refcount 會被扣成負）
+    if (!m_GamepadDisabled) {
 #if !SDL_VERSION_ATLEAST(2, 0, 9)
-    SDL_QuitSubSystem(SDL_INIT_HAPTIC);
-    SDL_assert(!SDL_WasInit(SDL_INIT_HAPTIC));
+        SDL_QuitSubSystem(SDL_INIT_HAPTIC);
+        SDL_assert(!SDL_WasInit(SDL_INIT_HAPTIC));
 #endif
 
-    SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
-    SDL_assert(!SDL_WasInit(SDL_INIT_GAMECONTROLLER));
+        SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+        SDL_assert(!SDL_WasInit(SDL_INIT_GAMECONTROLLER));
 
-    SDL_QuitSubSystem(SDL_INIT_JOYSTICK);
-    SDL_assert(!SDL_WasInit(SDL_INIT_JOYSTICK));
+        SDL_QuitSubSystem(SDL_INIT_JOYSTICK);
+        SDL_assert(!SDL_WasInit(SDL_INIT_JOYSTICK));
+    }
 
     // Return background event handling to off
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");

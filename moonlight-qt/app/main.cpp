@@ -65,6 +65,7 @@
 #include "streaming/session.h"
 #include "settings/streamingpreferences.h"
 #include "gui/sdlgamepadkeynavigation.h"
+#include "backend/hidprobe.h"   // §HID-PROBE
 
 #if defined(Q_OS_WIN32)
 #define IS_UNSPECIFIED_HANDLE(x) ((x) == INVALID_HANDLE_VALUE || (x) == NULL)
@@ -89,6 +90,14 @@ QAtomicInt g_AsyncLoggingEnabled;
 
 static QElapsedTimer s_LoggerTime;
 static QTextStream s_LoggerStream(stderr);
+
+#ifdef Q_OS_WIN32
+// §HID-PROBE（審查結論）：單一實例 mutex 原本刻意不關、靠行程結束釋放。但 HidProbe 遺棄的
+// 卡死執行緒會讓行程在關閉後殘留成殭屍（核心對卡在同步 IOCTL 的執行緒做 I/O rundown、
+// 等 IRP 完成），mutex 就永遠不放 → 使用者照指示重啟卻被「already running」擋下、
+// Task Manager 也殺不掉。改成 app.exec() 返回後主動關閉（具名物件最後一個 handle 關閉即消失）。
+static HANDLE s_SingleInstanceMutex = nullptr;
+#endif
 static QThreadPool s_LoggerThread;
 static QMutex s_SyncLoggerMutex;
 static bool s_SuppressVerboseOutput;
@@ -500,21 +509,24 @@ int main(int argc, char *argv[])
                     fprintf(stderr,
                         "Error: VipleStream is already running.\n"
                         "Close the existing instance before starting a new session.\n"
-                        "  (If you can't find the window, terminate VipleStream.exe in Task Manager)\n");
+                        "  (If you can't find the window, terminate VipleStream.exe in Task Manager.\n"
+                        "   If it cannot be terminated, a HID device is not responding: unplug and replug it.)\n");
                 } else {
                     // GUI 模式：彈出 MessageBox
                     MessageBoxA(NULL,
                         "VipleStream is already running.\n\n"
                         "Please close the existing window before starting a new one.\n"
-                        "(If you can't find the window, terminate VipleStream.exe in Task Manager)",
+                        "(If you can't find the window, terminate VipleStream.exe in Task Manager.\n"
+                        "If it cannot be terminated, a HID device is not responding: unplug and replug it.)",
                         "VipleStream - Already Running",
                         MB_OK | MB_ICONWARNING);
                 }
                 if (hMutex) CloseHandle(hMutex);
                 return 1;
             }
-            // hMutex 故意不 CloseHandle — 保持到 process 結束時
-            // 自動釋放，確保整個生命週期內其他實例都會被擋。
+            // 存起來在 app.exec() 返回後關閉（見 s_SingleInstanceMutex 註解）；
+            // 執行期間仍持有，其他實例照樣被擋。
+            s_SingleInstanceMutex = hMutex;
 #elif defined(Q_OS_UNIX)
             const char* lockPath = "/tmp/viplestream-client.lock";
             int lockFd = open(lockPath, O_CREAT | O_RDWR, 0600);
@@ -932,6 +944,15 @@ int main(int argc, char *argv[])
     // The DXVA2 renderer uses Direct3D 9Ex itself directly.
     SDL_SetHint(SDL_HINT_WINDOWS_USE_D3D9EX, "1");
 
+    // Disable hotplug detection for SDL_GetKeyboards() and SDL_GetMice(). We don't
+    // use this functionality and it can cause hangs when querying broken devices.
+    // §HID-PROBE（審查結論）：這個 hint 由 SDL 3.4.x 的 WIN_VideoInit 在 SDL_INIT_VIDEO 時
+    // 一次讀走、沒有 hint callback，上游把它放在 video init 之後等於從未生效——SDL 自己的
+    // DeviceHotplugThread 照樣對每個鍵鼠 raw device 做 HidD_GetManufacturer/ProductString，
+    // 遇到卡死的 Puck（含鍵盤／滑鼠 collection）就永久卡住，SDL_Quit 又會 join 它 →
+    // 程式關不掉。必須在任何 SDL_InitSubSystem 之前設。
+    SDL_SetHint("SDL_WINDOWS_DETECT_DEVICE_HOTPLUG", "0");
+
     if (SDL_InitSubSystem(SDL_INIT_TIMER) != 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_TIMER) failed: %s",
@@ -1004,10 +1025,6 @@ int main(int argc, char *argv[])
     // Enable fast parameter checks on SDL 3.4.0+. We don't abuse the API by passing
     // incorrect objects, so we don't need additional expensive parameter checks.
     SDL_SetHint("SDL_INVALID_PARAM_CHECKS", "1");
-
-    // Disable hotplug detection for SDL_GetKeyboards() and SDL_GetMice(). We don't
-    // use this functionality and it can cause hangs when querying broken devices.
-    SDL_SetHint("SDL_WINDOWS_DETECT_DEVICE_HOTPLUG", "0");
 
     // VipleStream §K.4-DESKTOP-ID (2026-07-21)：desktop id 必須在
     // QGuiApplication 建構「之前」用 static setter 設好。
@@ -1171,6 +1188,20 @@ int main(int argc, char *argv[])
     QCoreApplication::translate("QPlatformTheme", "OK");
     QCoreApplication::translate("QPlatformTheme", "Help");
     QCoreApplication::translate("QPlatformTheme", "Cancel");
+
+    // §HID-PROBE（2026-09-19 事故：Puck 28DE:1304 卡死 → 主執行緒掛在 SDL hidapi
+    // 列舉、視窗永遠出不來）：在任何 SDL joystick／hidapi 列舉之前，先用純 Win32
+    // 對每個 HID 介面做一次有逾時的探測。位置要件：
+    //   - log 檔與 handler 已就緒，probe 的 [VIPLE-HID] 行會進 log；
+    //   - QGuiApplication 已建、翻譯已套（retranslate）；
+    //   - --help/--version fast-path 已在 parser.parse() 內 _exit（smoke test 不受影響）；
+    //   - 早於 engine.load：GUI 路徑先到 ApplicationWindow.onCompleted → startAsyncLoad →
+    //     getUnmappedGamepads，CLI stream/quit 路徑先到 StackView.onCompleted → doEarlyInit →
+    //     SdlGamepadKeyNavigation::enable()；兩者都在這之後。
+    // 正常機器 ~ms；有裝置卡死時最多等 HidProbe::kPerDeviceWaitMs（1 s）。
+    // 之後四個閘控點：gamepad.cpp getUnmappedGamepads / sdlgamepadkeynavigation.cpp
+    // enable / input.cpp SdlInputHandler ctor / sc_hid.cpp start。
+    HidProbe::runOnce();
 
     // After the QGuiApplication is created, the platform stuff will be initialized
     // and we can set the SDL video driver to match Qt.
@@ -1479,6 +1510,15 @@ int main(int argc, char *argv[])
 
     // Wait for pending log messages to be printed
     s_LoggerThread.waitForDone();
+
+#ifdef Q_OS_WIN32
+    // §HID-PROBE：主動釋放單一實例 mutex（見 s_SingleInstanceMutex 註解）。若 HidProbe 遺棄的
+    // 執行緒讓行程殘留，下一次啟動也不會再被擋。
+    if (s_SingleInstanceMutex) {
+        CloseHandle(s_SingleInstanceMutex);
+        s_SingleInstanceMutex = nullptr;
+    }
+#endif
 
 #ifdef Q_OS_WIN32
     // Without an explicit flush, console redirection for the list command

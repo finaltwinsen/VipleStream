@@ -191,6 +191,37 @@ the full diagnosis trail.
 
 ---
 
+## Client hangs at startup with no window / process lingers after closing (unresponsive HID device)
+
+- **Symptom**: `VipleStream.exe` starts but no window ever appears and Windows logs an
+  "Application Hang"; or after closing, `VipleStream.exe` stays in Task Manager, cannot be killed,
+  and the next launch is refused as "already running".
+- **Cause**: a HID device stopped answering USB control transfers (seen 2026-09-19 with the Steam
+  Controller Puck, USB `28DE:1304`, after an SC-HID passthrough session). Windows still reports the
+  device OK, but `HidD_GetProductString` on its interfaces never returns. SDL's gamepad enumeration
+  calls that for every HID device on the main thread, so the app froze before its window existed.
+  A thread blocked inside that kernel call cannot be cancelled from user mode; at exit Windows waits
+  for it, so the process lingers until the device is reset.
+- **What the client does now (§HID-PROBE)**: a pre-flight probe (`[VIPLE-HID]` lines in the client
+  log) queries every HID interface with a 1 s timeout on worker threads. A device that does not answer
+  disables gamepad detection, gamepad UI navigation, in-stream gamepads and Steam Controller
+  passthrough, and a dialog names it. Keyboard / mouse / touch streaming keeps working. The probe
+  re-runs before each stream and when returning to the UI, so **replugging the device is enough —
+  no restart required**. The single-instance mutex is now released on normal exit, so a lingering
+  process no longer blocks the next launch.
+- **Fix**: unplug and replug the device (or, as admin, `pnputil /restart-device "USB\VID_28DE&PID_1304\<serial>"`).
+  A lingering process disappears by itself once the device is reset.
+- **Log lines**: `[VIPLE-HID] probe (startup) OK: N HID interface(s) responded in X ms ...` = healthy;
+  `[VIPLE-HID] UNRESPONSIVE Steam Controller Puck vid=28DE pid=1304 stuck_at=HidD_GetProductString ...` = the case above.
+  The probe is deliberately stricter than SDL (it queries all HID interfaces, SDL only controller-like
+  ones), so a wedged ordinary keyboard/mouse also triggers it.
+- **Diagnosing without VipleStream**: PnP status is not a reliable signal; a per-interface
+  `HidD_GetProductString` with a timeout (cfgmgr32 `CM_Get_Device_Interface_ListW` + background thread)
+  shows which device hangs. `cdb -pv -p <pid> ... ~*kb` on the hung process shows the main thread in
+  `hid!HidD_GetProductString` under `SDL_InitSubSystem`.
+
+---
+
 ## Logs
 
 | Log | Default path |

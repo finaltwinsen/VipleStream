@@ -206,6 +206,10 @@ private:
 
     SDL_Window* m_Window;
     bool m_MultiController;
+    // §HID-PROBE：探測發現無回應 HID 裝置 → 這場不初始化 JOYSTICK/GAMECONTROLLER
+    // （與舊版 HAPTIC）子系統；鍵盤／滑鼠／觸控與所有 Ctrl+Alt+Shift 組合鍵照常。
+    // 建構子從 HidProbe::anyUnresponsive() 取值，解構子據此跳過 QuitSubSystem。
+    bool m_GamepadDisabled;
     bool m_GamepadMouse;
     bool m_SwapMouseButtons;
     bool m_ReverseScrollDirection;
