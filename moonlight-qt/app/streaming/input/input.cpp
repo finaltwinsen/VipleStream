@@ -157,6 +157,21 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     }
     streamIgnoreDevices += m_OldIgnoreDevices;
 
+    // §SC-HID / §SC-THREAD-OWNER：Session::start() 已 prepare 好 Steam Controller passthrough
+    // （vendor 介面開起來了）→ 把 gen-2 SC 全家族加進忽略清單。SDL 的 Steam hidapi 驅動在
+    // HIDAPI_GetDeviceDriver() 就被擋下（SDL 3.4.2 已核對：在 SDL_hid_open_path 之前），連開都
+    // 不開，不再與 passthrough 搶 feature 暫存器。session 結束由解構子還原舊清單；
+    // gamepad.cpp 的 isActive() 抑制保留當第二道防線。SDL3 仍認這個 SDL2 hint 名（SDL_hints.h）。
+    if (Session::get() != nullptr && Session::get()->m_ScHid.isPrepared()) {
+        if (!streamIgnoreDevices.isEmpty() && !streamIgnoreDevices.endsWith(',')) {
+            streamIgnoreDevices += ',';
+        }
+        streamIgnoreDevices += ScHidPassthrough::sdlIgnoreDevicesSpec();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[SC-HID] passthrough prepared - SDL gamepad path disabled for %s this session",
+                    ScHidPassthrough::sdlIgnoreDevicesSpec());
+    }
+
     // STREAM_IGNORE_DEVICE_GUIDS allows to specify additional devices to be ignored when starting
     // the stream in case the scope of STREAM_GAMECONTROLLER_IGNORE_DEVICES is too broad. One such
     // case is "Steam Virtual Gamepad" where everything is under the same VID/PID, but different GUIDs.

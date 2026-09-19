@@ -212,7 +212,7 @@ Control message took over 10 ms to send (net latency: %u ms | packet loss: %f%%)
 | `[VIPLE-VK-VIDEO]` | `vulkanvideo.cpp` | Vulkan Video 解碼路徑 |
 | `[VIPLE-PREFS]` | 多處 | 設定載入／存檔 |
 | `[SC-HID]` | `streaming/input/sc_hid.cpp` | Steam Controller 原生 HID 轉發（見下節；host 端同 tag） |
-| `[VIPLE-HID]` | `backend/hidprobe.cpp` + 四個閘控點（`gamepad.cpp` getUnmappedGamepads / `sdlgamepadkeynavigation.cpp` enable / `input.cpp` SdlInputHandler ctor / `sc_hid.cpp` start） | 啟動前與每場開始前的 HID 探測（§HID-PROBE，2026-09-19 Puck 卡死事故）。`probe (startup\|refresh) OK: N HID interface(s) responded in X ms (slowest VID:PID Y ms, limit 1000 ms)` = 正常；`UNRESPONSIVE <name> vid= pid= stuck_at=<CreateFile\|HidD_GetAttributes\|HidD_GetProductString\|enumeration> path=` = 該裝置無回應 → 手把偵測、手把 UI 導覽、串流手把與 SC-HID 停用，各閘控點各印一行 `skipped/refused`；重插裝置後下一次 refresh（開串流／回 UI）自動恢復，不必重啟。**刻意比 SDL 保守**：對所有 HID 介面查字串，卡死的普通鍵鼠也會觸發。`(simulated via VIPLE_HID_PROBE_SIMULATE_HANG, dev-only)` = 測試注入（`VID:PID` 直接注入；`VID:PID:stall` 對實體介面真的卡在字串查詢；`enumerate:stall` 整個列舉逾時），不是真故障 |
+| `[VIPLE-HID]` | `backend/hidprobe.cpp` + 四個閘控點（`gamepad.cpp` getUnmappedGamepads / `sdlgamepadkeynavigation.cpp` enable / `input.cpp` SdlInputHandler ctor / `sc_hid.cpp` prepare） | 啟動前與每場開始前的 HID 探測（§HID-PROBE，2026-09-19 Puck 卡死事故）。`probe (startup\|refresh) OK: N HID interface(s) responded in X ms (slowest VID:PID Y ms, limit 1000 ms)` = 正常；`UNRESPONSIVE <name> vid= pid= stuck_at=<CreateFile\|HidD_GetAttributes\|HidD_GetProductString\|enumeration> path=` = 該裝置無回應 → 手把偵測、手把 UI 導覽、串流手把與 SC-HID 停用，各閘控點各印一行 `skipped/refused`；重插裝置後下一次 refresh（開串流／回 UI）自動恢復，不必重啟。**刻意比 SDL 保守**：對所有 HID 介面查字串，卡死的普通鍵鼠也會觸發。`(simulated via VIPLE_HID_PROBE_SIMULATE_HANG, dev-only)` = 測試注入（`VID:PID` 直接注入；`VID:PID:stall` 對實體介面真的卡在字串查詢；`enumerate:stall` 整個列舉逾時），不是真故障 |
 
 ### `[SC-HID]` —— Steam Controller 原生 HID 轉發（§SC-HID Round 1，2026-09-02 起）
 client：`streaming/input/sc_hid.cpp`；host 端 `Sunshine/src/input.cpp` 與
@@ -225,12 +225,17 @@ INPUT 類別，app 從未設該類別等級，所以**永遠不會出現在 log*
 
 | 行 | 何時印 | 判讀 |
 |---|---|---|
-| `Opened N Steam Controller vendor interface(s)` ＋ 每介面 `dev=%d pid=0x%04x …path=…` | `start()` | Puck（PID 0x1304）開 4 個 slot；USB 直連（0x1302）1 個 |
+| `Opened N Steam Controller vendor interface(s) (prepared; SDL ignore list = 0x28DE/0x1302,…)` ＋ 每介面 `dev=%d pid=0x%04x …path=…` | `prepare()`（`Session::start()`，建 SdlInputHandler 之前；§SC-THREAD-OWNER 2026-09-19） | Puck（PID 0x1304）開 4 個 slot；USB 直連（0x1302）1 個 |
+| `passthrough prepared - SDL gamepad path disabled for 0x28DE/0x1302,0x28DE/0x1303,0x28DE/0x1304,0x28DE/0x1305 this session` | `SdlInputHandler` 建構（`input.cpp`），prepare 有開到介面時 | SC 家族已進 SDL 忽略清單（SDL 3.4.2 在 `SDL_hid_open_path` 之前就擋）；**沒這行**＝這場 SC 當一般 SDL 手把（沒插、或 Linux 沒 hidraw 權限） |
+| `Steam Controller passthrough started (normalize42=1, gen=N, all hidapi calls on the SC-HID thread)` | `start()`（LiStartConnection 之後） | `gen` 每場 +1；被遺棄的舊執行緒看到世代不符會自行退出 |
+| `Steam Controller passthrough stopped (read thread joined in N ms)` | `stop()` 正常路徑 | 健康裝置 ≤ ~150 ms（feature 輪詢上限 100 ms） |
+| `[VIPLE-HID] [SC-HID] stop(): read thread did not exit within 1000 ms - stuck in <呼叫> for N ms …; thread + N HID handle(s) abandoned, not closed` | `stop()` 逾時 | 裝置**串流中**卡死（同 §HID-PROBE 的 Puck 事故）；執行緒與 handle 遺棄、session 照常收尾；重插後下一場 `HidProbe::refresh()` 重測。行程結束可能殘留到重插（troubleshooting.md） |
+| `feature queue full (8) - dropped oldest request (dropped=N); is the read thread stuck?` | host 的 feature 請求排不進佇列 | 讀取執行緒沒在消化（通常緊接著上面的 stop() 逾時）；`qdrop=` 累計在 rx stats |
 | `First report id=0x%02x on dev=%d (%d bytes): <全部 bytes hex>` | 每個 report id 首見（每場重置） | `0x42`＝controller state（Puck／USB 都是它）、`0x45`＝BLE-style state、`0x43`＝電量、`0x7B`＝遙測、`0x46/0x79`＝無線狀態、`0x47`＝帶時戳 state（佈局不同，本輪不轉發） |
-| `rx stats(5s\|heartbeat\|final): total= fwd= norm42= drop= sendErr= \| id42= id45= id43= id7B= id47= other= \| feat req= ok= stolen= empty= cache= lat avg/max=/ ms \| active= \| dev rx/fwd: dev0=rx/fwd …` | 每 5 s 有變才印（`5s`）；沒變則定期 `heartbeat`；`stop()` 印 `final` | **G1／G2 依據**：`id42 ≥ 500`／場、`fwd ≈ id42`；`norm42`＝0x42 改標成 0x45 轉發的筆數（`kNormalize42`）；`sendErr`＝`LiSendScHidInputReport` 非 0；`active`＝最近吐 state 的 slot；`final` 與 host `Session ended, final write stats` 對帳 |
+| `rx stats(5s\|heartbeat\|final): total= fwd= norm42= drop= sendErr= \| id42= id45= id43= id7B= id47= other= \| feat req= ok= stolen= empty= cache= qdrop= lat avg/max=/ ms \| active= \| dev rx/fwd: dev0=rx/fwd …` | 每 5 s 有變才印（`5s`）；沒變則定期 `heartbeat`；`stop()` 印 `final` | **G1／G2 依據**：`id42 ≥ 500`／場、`fwd ≈ id42`；`norm42`＝0x42 改標成 0x45 轉發的筆數（`kNormalize42`）；`sendErr`＝`LiSendScHidInputReport` 非 0；`active`＝最近吐 state 的 slot；`final` 與 host `Session ended, final write stats` 對帳 |
 | `No input report from any of %d dev(s) in %u ms — controller asleep (press the Steam button) or not paired to an opened slot` | 啟動後仍 `total=0`，一次 | 按 Steam 鍵喚醒 |
 | `Feature req[ (warm-up)] id=0x%02x op=SET\|GET seq=%u type=0x%02x → resp type=0x%02x n=%d lat=%u ms dev=%d src=… stolen=%u cand=%d sent=%d` | 每次 host 轉來的 feature 請求（與 `start()` 暖機） | **G4 依據**：`lat` 應落在 13～21 ms；`resp type` 必須等於 `type`；`stolen`＝撿到 type 不符的回應（本機 Steam 搶走／未請求的 `0x87` ack）；`src`＝回應來源（live／client 端快取／empty）；`n=0`＝回零 |
-| `Proactive cache prime sent (dev=%d, GET_ATTRIBUTES): …` ／ `Warm-up GET_ATTRIBUTES got no response on %d dev(s) — …` | `start()` 真查詢暖機 | 全失敗＝控制器睡眠或本機 Steam 獨占；握手仍會即時代理 |
+| `Proactive cache prime sent (dev=%d, GET_ATTRIBUTES): …` ／ `Warm-up GET_ATTRIBUTES got no response on %d dev(s) — …` | 暖機（`start()` 排入佇列、讀取執行緒第一輪代跑） | 全失敗＝控制器睡眠或本機 Steam 獨占；握手仍會即時代理 |
 
 **host 行（sunshine.log，同 tag）**
 

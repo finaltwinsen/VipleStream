@@ -17,6 +17,9 @@
 #include <QRegularExpression>
 #include <QTimer>
 
+#include <string>
+#include <vector>
+
 #ifdef Q_OS_UNIX
 #include <sys/socket.h>
 #include <sys/file.h>
@@ -40,6 +43,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+#include <shellapi.h>   // CommandLineToArgvW（檔尾 WinMain）
 #include <dxgi1_6.h>
 // §J.3.e.1.c — early probe entry point lives in NcnnFRUC's TU.
 #include "streaming/video/ffmpeg-renderers/ncnnfruc.h"
@@ -1529,3 +1533,40 @@ int main(int argc, char *argv[])
 
     return err;
 }
+
+#if defined(Q_OS_WIN32)
+// VipleStream §LNK4291：自帶 WinMain，取代 Qt6EntryPoint.lib（app.pro：win32: CONFIG -= entrypoint）。
+// globaldefs.pri 對整個 client 開 -guard:ehcont（EH continuation metadata，配 -cetcompat），但
+// Qt 官方 prebuilt 的 Qt6EntryPoint.lib 沒帶 ehcont 編譯，連結時每次都 LNK4291「模組可能含
+// __except，與 /guard:ehcont 不相容」——它是整個 exe 裡唯一沒有 EH continuation 資料的模組，
+// 也是 CET 嚴格模式下唯一可能 fail-fast 的地方。與其拿掉硬化旗標，不如自己補這 30 行。
+// 做法照 Qt 的 qtentrypoint_win.cpp：CommandLineToArgvW → CP_ACP 多位元組 argv → main()。
+// 用 CP_ACP 而非 UTF-8 是刻意的：Qt 就是這樣轉；QCoreApplication::arguments() 在 Windows 本來
+// 就不看 argv（自己重讀 GetCommandLineW），main() 開頭的 strcmp 快速路徑只比 ASCII。
+extern "C" int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
+{
+    int argc = 0;
+    LPWSTR* argvW = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argvW == nullptr) {
+        return -1;
+    }
+    std::vector<std::string> storage;
+    storage.reserve(argc);
+    for (int i = 0; i < argc; i++) {
+        const int len = WideCharToMultiByte(CP_ACP, 0, argvW[i], -1, nullptr, 0, nullptr, nullptr);
+        std::string arg(len > 0 ? len - 1 : 0, '\0');
+        if (len > 1) {
+            WideCharToMultiByte(CP_ACP, 0, argvW[i], -1, &arg[0], len, nullptr, nullptr);
+        }
+        storage.push_back(std::move(arg));
+    }
+    LocalFree(argvW);
+    std::vector<char*> argv;
+    argv.reserve(argc + 1);
+    for (std::string& arg : storage) {
+        argv.push_back(&arg[0]);
+    }
+    argv.push_back(nullptr);
+    return main(argc, argv.data());
+}
+#endif

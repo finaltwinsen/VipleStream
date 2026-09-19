@@ -2531,7 +2531,8 @@ bool Session::startConnectionAsync()
                     m_Computer->activeHttpsPort);
     }
 
-    // §SC-HID: Start Steam Controller passthrough after connection is established
+    // §SC-HID: 連線建立後啟動 passthrough 讀取執行緒（vendor 介面已在 Session::start() prepare 好；
+    // 暖機查詢由讀取執行緒代跑，這裡不會碰任何 hidapi 呼叫）
     m_ScHid.start();
 
     // [VIPLE-SESSION] 一行結構化 session 標記：每秒遙測行不帶 host/codec，
@@ -2588,6 +2589,13 @@ void Session::start()
 
     // We're now active
     s_ActiveSession = this;
+
+    // §SC-HID / §SC-THREAD-OWNER：先在主執行緒開好 Steam Controller 的 vendor 介面（不碰連線、
+    // 不送 feature），下面 SdlInputHandler 建構時才知道要不要把 SC 家族加進 SDL 忽略清單——
+    // SDL 3.4.x 內建的 Steam hidapi 驅動會自己開同一組介面送 feature report，與 passthrough
+    // 搶一次性暫存器。開不到（沒插、Linux 沒 hidraw 權限）就不加，SC 照舊當一般 SDL 手把。
+    // validateLaunch() 已 HidProbe::refresh() 過：卡死的 SC 在 prepare() 內就被拒絕。
+    m_ScHid.prepare();
 
     // Initialize the gamepad code with our preferences
     // NB: m_InputHandler must be initialize before starting the connection.

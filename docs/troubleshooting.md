@@ -211,6 +211,18 @@ the full diagnosis trail.
   process no longer blocks the next launch.
 - **Fix**: unplug and replug the device (or, as admin, `pnputil /restart-device "USB\VID_28DE&PID_1304\<serial>"`).
   A lingering process disappears by itself once the device is reset.
+- **If the Steam Controller wedges mid-stream (§SC-THREAD-OWNER)**: every hidapi call of the passthrough
+  runs on its own `SC-HID` thread; feature requests from the host are queued to it, never executed on the
+  connection thread. When a stream ends, `stop()` waits up to 1 s for that thread; if the device stopped
+  answering, the log shows `[VIPLE-HID] [SC-HID] stop(): read thread did not exit within 1000 ms - stuck in
+  HidD_SetFeature ...; thread + N HID handle(s) abandoned` and the session still closes normally (the UI comes
+  back). The next stream start re-probes the device; replug it first. The abandoned thread only goes away with
+  the device reset, so the process may linger after exit exactly like the startup case above.
+- **Steam Controller and SDL**: while passthrough is prepared for a stream, the client puts the gen-2 Steam
+  Controller family (`0x28DE/0x1302..0x1305`) on SDL's ignore list for that session
+  (`[SC-HID] passthrough prepared - SDL gamepad path disabled ...`), so SDL's built-in Steam driver never
+  opens the same vendor interface. Outside a stream, or when the interface cannot be opened (Linux without
+  the udev rule), the controller stays an ordinary SDL gamepad.
 - **Log lines**: `[VIPLE-HID] probe (startup) OK: N HID interface(s) responded in X ms ...` = healthy;
   `[VIPLE-HID] UNRESPONSIVE Steam Controller Puck vid=28DE pid=1304 stuck_at=HidD_GetProductString ...` = the case above.
   The probe is deliberately stricter than SDL (it queries all HID interfaces, SDL only controller-like

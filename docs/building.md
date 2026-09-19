@@ -71,6 +71,14 @@ build_moonlight.cmd
 
 做 version bump + MSVC + 打包 Client zip。大約 3-8 分鐘（取決於 cache hit）。
 
+**MP-QUIC 靜態庫（picoquic + picotls）**：`build_moonlight.cmd` 在 qmake 之前會先呼叫
+`build-tools\build_picoquic_client.cmd`，把 `Sunshine\third-party\picoquic\build\` 裡的
+`picoquic-core.lib` 與 `_deps\picotls-build\picotls-*.lib` 以 **Release** 建好（快取已是
+Release 時只做增量 ninja）。不要手動 `cmake -B build` 用預設組態去建：2026-09-19 就是這樣
+建出 Debug（/MDd /Od）版，client 連結時每次噴 `LNK4098: 預設程式庫 MSVCRTD 與其他程式庫
+衝突`，而且 MP-QUIC 整條路徑跑的是未最佳化碼。腳本最後會用 `dumpbin /directives` 驗證沒有
+MSVCRTD 參照；需要強制重新 configure 時加 `--reconfigure`。
+
 ### 2.3 只建置 Sunshine
 
 ```cmd

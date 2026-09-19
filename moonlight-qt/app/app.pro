@@ -1,6 +1,11 @@
 QT += core quick network quickcontrols2 svg
 CONFIG += c++17
 
+# VipleStream §LNK4291：不連 Qt6EntryPoint.lib。Qt 官方 prebuilt 的那支沒帶 -guard:ehcont，
+# 跟 globaldefs.pri 開的 CET/EHCont 旗標衝突，每次連結都 LNK4291（整個 exe 唯一沒有
+# EH continuation 資料的模組）。WinMain 自帶在 main.cpp 檔尾（照 Qt qtentrypoint_win.cpp）。
+win32: CONFIG -= entrypoint
+
 unix:!macx {
     # VipleStream: was `moonlight`. Windows/Linux ship a `viplestream`
     # executable; on macOS the global menu bar shows `VipleStream`.
@@ -66,7 +71,7 @@ win32 {
     INCLUDEPATH += $$PWD/../libs/windows/include $$PWD/../libs/windows/nvofa/include
     # §HID-PROBE：backend/hidprobe.cpp 用 HidD_*（hid.lib）與 CM_Get_Device_Interface_ListW（cfgmgr32.lib）；
     # 兩者都是 Windows SDK 內建 import lib，runtime 的 hid.dll / cfgmgr32.dll 是系統元件，打包清單不用動。
-    LIBS += ws2_32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib hid.lib cfgmgr32.lib
+    LIBS += ws2_32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib hid.lib cfgmgr32.lib shell32.lib
     # VipleStream: DirectML FRUC backend. d3d12.lib and directml.lib
     # both ship with the Windows 10 SDK; the runtime DirectML.dll is
     # part of Windows 10 1903+ (no redist needed on modern systems).
@@ -651,7 +656,9 @@ INCLUDEPATH += $$PWD/../moonlight-common-c/moonlight-common-c/src
 DEPENDPATH += $$PWD/../moonlight-common-c/moonlight-common-c/src
 
 # VipleStream §Q: link picoquic + picotls when MP-QUIC is enabled.
-# Build via: cd Sunshine/third-party/picoquic && cmake -B build && ninja -C build
+# Build via build-tools\build_picoquic_client.cmd（build_moonlight.cmd 會先呼叫；一律 Release）。
+# 2026-09-19 教訓：這個 build 目錄曾被手動用預設 Debug（/MDd /Od）建出來 → 連結時 LNK4098
+# （MSVCRTD 與 MSVCRT 衝突），而且 client 的 MP-QUIC 整條路徑跑的是未最佳化碼。
 # Order matters: picoquic-core first, then picotls-* (picoquic depends on picotls).
 contains(DEFINES, VIPLE_MPQUIC) {
     PICOQUIC_BUILD = $$PWD/../../Sunshine/third-party/picoquic/build
