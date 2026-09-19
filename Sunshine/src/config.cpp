@@ -10,6 +10,7 @@
 #include <functional>
 #include <iostream>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -48,6 +49,18 @@ const std::string APPS_JSON_PATH = platf::appdata().string() + "/apps.json";
 
 namespace config {
 
+  // VipleStream §CFG.defer: 設定解析期間（logging::init() 之前）的警告一律走這裡。
+  // 照舊丟一份給 console（pre-init 只有 Boost 的隱含 sink），同時複製一份到
+  // deferred_config_warnings，讓 main.cpp 在 log sink 準備好之後補寫進 sunshine.log。
+  //
+  // 雙寫是刻意的：config::parse() 回傳非 0 時 logging::init() 永遠不會被呼叫，
+  // 緩衝內容會隨行程結束消失，那時 console 那一份是唯一的輸出管道。
+  // 所以請勿把這裡的 BOOST_LOG 拿掉改成純緩衝。
+  void warn_config(std::string message) {
+    BOOST_LOG(warning) << message;
+    deferred_config_warnings.push_back(std::move(message));
+  }
+
   namespace nv {
 
     nvenc::nvenc_two_pass twopass_from_view(const std::string_view &preset) {
@@ -60,7 +73,7 @@ namespace config {
       if (preset == "full_res") {
         return nvenc::nvenc_two_pass::full_resolution;
       }
-      BOOST_LOG(warning) << "config: unknown nvenc_twopass value: " << preset;
+      warn_config(std::format("config: unknown nvenc_twopass value: '{}' -- accepted values: disabled, quarter_res, full_res. Falling back to 'quarter_res'", preset));
       return nvenc::nvenc_two_pass::quarter_resolution;
     }
 
@@ -355,7 +368,7 @@ namespace config {
   }  // namespace sw
 
   namespace dd {
-    video_t::dd_t::config_option_e config_option_from_view(const std::string_view value) {
+    video_t::dd_t::config_option_e config_option_from_view(const std::string_view value, const std::string_view key) {
 #define _CONVERT_(x) \
   if (value == #x##sv) \
   return video_t::dd_t::config_option_e::x
@@ -365,10 +378,19 @@ namespace config {
       _CONVERT_(ensure_primary);
       _CONVERT_(ensure_only_display);
 #undef _CONVERT_
+      // VipleStream §CFG.defer: 上游在這裡無聲退回 disabled。訊息要同時講出：
+      // 哪個 key、什麼壞值、可接受的 token、以及實際生效的結果。
+      warn_config(std::format(
+        "config: invalid value for '{}': '{}' -- accepted values: disabled, verify_only, "
+        "ensure_active, ensure_primary, ensure_only_display. Falling back to 'disabled' "
+        "(which is also the built-in default, so display-device handling stays off)",
+        key,
+        value
+      ));
       return video_t::dd_t::config_option_e::disabled;  // Default to this if value is invalid
     }
 
-    video_t::dd_t::resolution_option_e resolution_option_from_view(const std::string_view value) {
+    video_t::dd_t::resolution_option_e resolution_option_from_view(const std::string_view value, const std::string_view key) {
 #define _CONVERT_2_ARG_(str, val) \
   if (value == #str##sv) \
   return video_t::dd_t::resolution_option_e::val
@@ -378,10 +400,20 @@ namespace config {
       _CONVERT_(manual);
 #undef _CONVERT_
 #undef _CONVERT_2_ARG_
+      // VipleStream §CFG.defer: 上游在這裡無聲退回 disabled。訊息要同時講出：
+      // 哪個 key、什麼壞值、可接受的 token、以及實際生效的結果。
+      // 特別注意：這個設定項的內建預設值是 automatic，而設定檔認得的 token 是 "auto" ——
+      // 使用者寫下看起來很合理的 "automatic" 就會把功能靜靜關掉，比整行不寫還糟。
+      warn_config(std::format(
+        "config: invalid value for '{}': '{}' -- accepted values: disabled, auto, manual. "
+        "Falling back to 'disabled' (the built-in default is 'auto', so this turns the feature OFF)",
+        key,
+        value
+      ));
       return video_t::dd_t::resolution_option_e::disabled;  // Default to this if value is invalid
     }
 
-    video_t::dd_t::refresh_rate_option_e refresh_rate_option_from_view(const std::string_view value) {
+    video_t::dd_t::refresh_rate_option_e refresh_rate_option_from_view(const std::string_view value, const std::string_view key) {
 #define _CONVERT_2_ARG_(str, val) \
   if (value == #str##sv) \
   return video_t::dd_t::refresh_rate_option_e::val
@@ -391,10 +423,20 @@ namespace config {
       _CONVERT_(manual);
 #undef _CONVERT_
 #undef _CONVERT_2_ARG_
+      // VipleStream §CFG.defer: 上游在這裡無聲退回 disabled。訊息要同時講出：
+      // 哪個 key、什麼壞值、可接受的 token、以及實際生效的結果。
+      // 特別注意：這個設定項的內建預設值是 automatic，而設定檔認得的 token 是 "auto" ——
+      // 使用者寫下看起來很合理的 "automatic" 就會把功能靜靜關掉，比整行不寫還糟。
+      warn_config(std::format(
+        "config: invalid value for '{}': '{}' -- accepted values: disabled, auto, manual. "
+        "Falling back to 'disabled' (the built-in default is 'auto', so this turns the feature OFF)",
+        key,
+        value
+      ));
       return video_t::dd_t::refresh_rate_option_e::disabled;  // Default to this if value is invalid
     }
 
-    video_t::dd_t::hdr_option_e hdr_option_from_view(const std::string_view value) {
+    video_t::dd_t::hdr_option_e hdr_option_from_view(const std::string_view value, const std::string_view key) {
 #define _CONVERT_2_ARG_(str, val) \
   if (value == #str##sv) \
   return video_t::dd_t::hdr_option_e::val
@@ -403,6 +445,14 @@ namespace config {
       _CONVERT_2_ARG_(auto, automatic);
 #undef _CONVERT_
 #undef _CONVERT_2_ARG_
+      // VipleStream §CFG.defer: 上游在這裡無聲退回 disabled。訊息要同時講出：
+      // 哪個 key、什麼壞值、可接受的 token、以及實際生效的結果。
+      warn_config(std::format(
+        "config: invalid value for '{}': '{}' -- accepted values: disabled, auto. "
+        "Falling back to 'disabled' (the built-in default is 'auto', so this turns the feature OFF)",
+        key,
+        value
+      ));
       return video_t::dd_t::hdr_option_e::disabled;  // Default to this if value is invalid
     }
 
@@ -663,7 +713,7 @@ namespace config {
       // 1. We didn't reach the end, or
       // 2. We reached the end but the last character was the matching closing bracket
       if (endl == end && end == begin_val + 1) {
-        BOOST_LOG(warning) << "config: Missing ']' in config option: " << to_string(begin, end_name);
+        warn_config(std::format("config: Missing ']' in config option: {}", to_string(begin, end_name)));
         return std::make_pair(endl, std::nullopt);
       }
     }
@@ -715,7 +765,14 @@ namespace config {
     std::string tmp;
     string_f(vars, name, tmp);
     if (!tmp.empty()) {
-      input = f(tmp);
+      // VipleStream §CFG.defer: 轉換器若多收一個 key 名稱參數，就把設定項名稱一併傳進去，
+      // 這樣它的警告訊息才講得出是哪一個設定項出錯。只收一個參數的舊轉換器維持原本呼叫方式。
+      // 不能用預設引數代替：呼叫點是把函式名字當函式參考傳進來，decay 之後預設引數會消失。
+      if constexpr (std::is_invocable_v<F, const std::string &, const std::string &>) {
+        input = f(tmp, name);
+      } else {
+        input = f(tmp);
+      }
     }
   }
 
@@ -1018,7 +1075,7 @@ namespace config {
 
     // The list needs to be a multiple of 2
     if (list.size() % 2) {
-      BOOST_LOG(warning) << "config: expected "sv << name << " to have a multiple of two elements --> not "sv << list.size();
+      warn_config(std::format("config: expected {} to have a multiple of two elements --> not {}", name, list.size()));
       return;
     }
 
@@ -1048,7 +1105,7 @@ namespace config {
           config::sunshine.flags[config::flag::UPNP].flip();
           break;
         default:
-          BOOST_LOG(warning) << "config: Unrecognized flag: ["sv << *line << ']' << std::endl;
+          warn_config(std::format("config: Unrecognized flag: [{}]", *line));
           ret = -1;
       }
 
@@ -1381,9 +1438,12 @@ namespace config {
       vars.erase(it);
     }
 
+    // VipleStream §CFG.defer: 這是「key 整個拼錯」的警告，與上面「值拼錯」是同一個陷阱的兩面。
+    // 上游直接寫 std::cout，以 Windows 服務執行時永遠看不到；改走 warn_config 才會進 sunshine.log。
+    // 外層的 min_log_level 判斷保留，因為 pre-init 的 console 輸出不受我們的 sink filter 管控。
     if (sunshine.min_log_level <= 3) {
       for (auto &[var, _] : vars) {
-        std::cout << "Warning: Unrecognized configurable option ["sv << var << ']' << std::endl;
+        warn_config(std::format("config: Unrecognized configurable option [{}]", var));
       }
     }
   }

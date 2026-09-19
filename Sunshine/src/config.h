@@ -19,6 +19,16 @@ namespace config {
   // track modified config options
   inline std::unordered_map<std::string, std::string> modified_config_settings;
 
+  // VipleStream §CFG.defer: logging::init() 在 config::parse() 之後才跑
+  // （main.cpp 的 parse 在 init 之前幾行），在那之前 BOOST_LOG 只會流向 Boost 的
+  // 隱含 console sink，永遠進不了 sunshine.log（以 Windows 服務執行時等於完全看不到）。
+  // 設定解析期間產生的警告先存進這個緩衝區，由 main.cpp 在 logging::init() 之後補播 ——
+  // 做法與上面的 modified_config_settings 一致。
+  //
+  // 不變條件：只在啟動時的主執行緒（config::parse -> apply_config）寫入，補播後清空，
+  // 因此不需要加鎖。日後若讓 Web UI 執行緒也呼叫 apply_config，這裡要改成有鎖的容器。
+  inline std::vector<std::string> deferred_config_warnings;
+
   struct video_t {
     // ffmpeg params
     int qp;  // higher == more compression and less quality
@@ -146,7 +156,7 @@ namespace config {
     } dd;
 
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
-    double minimum_fps_target;  ///< Lowest framerate that will be used when streaming. Range 0-1000, 0 = half of client's requested framerate.
+    double minimum_fps_target;  ///< Lowest framerate that will be used when streaming. Range 0-1000, 0 = client's requested framerate.
   };
 
   struct audio_t {

@@ -186,6 +186,14 @@ int main(int argc, char *argv[]) {
   }
   config::modified_config_settings.clear();
 
+  // VipleStream §CFG.defer: 補播設定解析期間（logging::init() 之前）累積的警告。
+  // 不這樣做的話，這些訊息只會出現在 console，永遠不會進 sunshine.log 或 Web UI 的 log 檢視。
+  // 位置必須在下面的 cmd.name 分支之前：像 `--creds` 這種跑完就 return 的路徑也要先寫出警告。
+  for (const auto &message : config::deferred_config_warnings) {
+    BOOST_LOG(warning) << message;
+  }
+  config::deferred_config_warnings.clear();
+
   if (!config::sunshine.cmd.name.empty()) {
     auto fn = cmd_to_func.find(config::sunshine.cmd.name);
     if (fn == std::end(cmd_to_func)) {

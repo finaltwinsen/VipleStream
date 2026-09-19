@@ -1253,13 +1253,85 @@ namespace video {
 
       // The old display was removed, so we'll start back at the first display again
       BOOST_LOG(warning) << "Previous active display ["sv << current_display_name << "] is no longer present"sv;
-    } else {
-      for (int x = 0; x < display_names.size(); ++x) {
-        if (display_names[x] == output_name) {
-          current_display_index = x;
-          return;
-        }
+    }
+
+    // VipleStream §K.dd.select: 上游只在「之前沒有選定顯示器」時才回頭找設定的
+    // output_name。一旦先前選定的顯示器消失（display-device 的 ensure_only_display
+    // 每場串流都會改拓樸），就永遠停在 index 0，再也回不到使用者指定的顯示器。
+    // 改成兩條路徑最後都試一次 output_name。
+    //
+    // 位置很重要：必須在上面「命中 current_display_name 就 return」之後，否則會蓋掉
+    // 使用者剛用 Ctrl+Alt+Shift+F* 手動切換的選擇（input.cpp 的 switch_display 事件）。
+    // output_name 為空時此迴圈等同 no-op：真實後端不會產出空的顯示器名稱，
+    // 唯一例外是上面「兩份清單都空」時自己塞進去的那一筆，
+    // 而該情況 index 本來就是 0 → 未設定 output_name 時行為完全不變。
+    for (int x = 0; x < display_names.size(); ++x) {
+      if (display_names[x] == output_name) {
+        current_display_index = x;
+        return;
       }
+    }
+
+    // VipleStream §K.dd.select: 走到這裡 = 使用者指定的顯示器沒被選上，而上游在這條
+    // 路徑上任何 log level 都完全不出聲。實測因此花了數小時才定位到抓錯螢幕
+    // （60Hz 的 HDMI 誘騙器被當成目標，client 要 180fps 卻永遠拿不到）。
+    if (config::video.output_name.empty()) {
+      return;  // 使用者沒指定，index 0 是正常預設，不是錯誤
+    }
+
+    // xdg-portal 後端的清單恆為單一 sentinel，該後端根本不吃 display_name，
+    // 任何非空 output_name 都會在每次 reinit 誤報。用字串比對排除即可，不需要 #ifdef：
+    // Windows 的 \\.\DISPLAYn 與 macOS 的 CGDirectDisplayID 十進位不可能產生這個名字。
+    constexpr auto portal_sentinel {"org.freedesktop.portal.Desktop"sv};
+    if (display_names.size() == 1 && display_names.front() == portal_sentinel) {
+      return;
+    }
+
+    // 節流：reinit 迴圈在 reset_display 失敗時每 ~400ms 會重呼叫本函式，拓樸持續抖動
+    // 時會洗版。記住上次警告過的「設定 + 映射結果 + 清單」狀態，沒變就不重印；
+    // 清單一變就重印（那正是想知道的時機）。
+    // thread_local 而非 static：captureThread 與 captureThreadSync 是兩條獨立執行緒，
+    // 免掉 std::string 的 data race；capture thread 在最後一個 client 離線時銷毀，
+    // 狀態自然歸零 → 每場串流的 log 至少會帶到一次診斷。
+    // unit separator (0x1f) 不可能出現在顯示器名稱裡，避免拼接歧義。
+    static thread_local std::string last_warned_state;
+    std::string warned_state {config::video.output_name};
+    warned_state += '\x1f';
+    warned_state += output_name;
+    for (const auto &name : display_names) {
+      warned_state += '\x1f';
+      warned_state += name;
+    }
+    if (warned_state == last_warned_state) {
+      return;
+    }
+    last_warned_state = warned_state;
+
+    std::string available;
+    for (const auto &name : display_names) {
+      if (!available.empty()) {
+        available += ", ";
+      }
+      available += name;
+    }
+
+    if (output_name.empty()) {
+      // raw 有設但映射後為空：Windows 的 device-id GUID 對不到實體顯示器
+      // （顯示器沒開／GUID 過期／虛擬顯示器驅動沒起來）。
+      BOOST_LOG(warning) << "[VIPLE-DD] §K.dd.select: configured output_name '"sv
+                         << config::video.output_name
+                         << "' could not be resolved to an active display -- capturing '"sv
+                         << display_names[current_display_index]
+                         << "' instead (available: "sv << available
+                         << "). Check that the monitor is connected and powered on, or that "
+                            "your virtual display driver is running."sv;
+    } else {
+      BOOST_LOG(warning) << "[VIPLE-DD] §K.dd.select: configured display '"sv << output_name
+                         << "' is not among the capturable displays ("sv << available
+                         << ") -- capturing '"sv << display_names[current_display_index]
+                         << "' instead, so the client-requested refresh rate may be unreachable. "
+                            "Set output_name to one of the listed names, or enable "
+                            "dd_configuration_option so the target display is activated."sv;
     }
   }
 
@@ -2074,7 +2146,11 @@ namespace video {
     double def_fps_target = (disp->is_event_driven() ? 1 : config.framerate);
     double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : def_fps_target;
     std::chrono::duration<double, std::milli> max_frametime {1000.0 / minimum_fps_target};
-    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 2) << "fps ("sv << max_frametime.count() * 2 << "ms)"sv;
+    // VipleStream §K.dd.select: 上游這行印的是實際值的一半（除以 2／乘以 2），
+    // 180fps 的 session 會印成 "~90fps (11.1111ms)"，而真正用在 images->pop() 的
+    // max_frametime 是 5.56ms。照 log 推算填充比例會錯一倍 —— 實測差點被誤導。
+    // 只改 log，不動除數（改除數會改變實際行為）。
+    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << minimum_fps_target << "fps ("sv << max_frametime.count() << "ms)"sv;
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
@@ -2762,6 +2838,25 @@ namespace video {
     const auto output_name {display_device::map_output_name(config::video.output_name)};
     std::shared_ptr<platf::display_t> disp;
 
+    // VipleStream §K.dd.select: 映射失敗時 output_name 會是空字串，而 reset_display 把
+    // 空字串當成「用預設顯示器」→ 編碼器探測會對著錯的螢幕跑，且上游完全不出聲。
+    // 編碼器能力大多是 GPU 層級（與哪台螢幕無關），所以這裡刻意只加診斷、不改行為：
+    // 要不要因此讓探測失敗是行為決策（可能讓本來能串流的主機變成「找不到編碼器」），
+    // 留待 docs/TODO.md 的 §K.dd.select 條目決定。
+    // 實測修正：dd_configuration_option 非 disabled 時，Sunshine 會在 /launch 才把目標
+    // 顯示器啟用（例如虛擬顯示器平常是 inactive），所以啟動期的探測本來就會
+    // 落在預設顯示器 —— 那是設計如此，不是設定錯。若這時也警告，正確設定的
+    // 主機每次重啟都會吐一行，只會訓練人忽略警告。
+    // 只有 dd 關掉時，目標顯示器永遠不會被啟用，這個落差才是永久且需要處理的。
+    if (!config::video.output_name.empty() && output_name.empty() &&
+        config::video.dd.configuration_option == config::video_t::dd_t::config_option_e::disabled) {
+      BOOST_LOG(warning) << "[VIPLE-DD] §K.dd.select: configured output_name '"sv
+                         << config::video.output_name
+                         << "' could not be resolved -- probing encoder ["sv << encoder.name
+                         << "] against the default display instead. HDR and multi-GPU "
+                            "capability results may not reflect the intended monitor."sv;
+    }
+
     BOOST_LOG(info) << "Trying encoder ["sv << encoder.name << ']';
     auto fg = util::fail_guard([&]() {
       BOOST_LOG(info) << "Encoder ["sv << encoder.name << "] failed"sv;
@@ -3059,9 +3154,12 @@ namespace video {
     }
 
     if (chosen_encoder == nullptr) {
-      const auto output_name {display_device::map_output_name(config::video.output_name)};
       BOOST_LOG(fatal) << "Unable to find display or encoder during startup."sv;
-      if (!config::video.adapter_name.empty() || !output_name.empty()) {
+      // VipleStream §K.dd.select: 判斷「使用者有沒有手動指定顯示器」要看 raw config，
+      // 不是 map_output_name 的結果。Windows 上 GUID 對不到實體顯示器時映射結果會是
+      // 空字串，於是「明明指定了顯示器、而且正是那台不見了」的使用者反而被導向泛用訊息，
+      // 錯失唯一有用的線索。
+      if (!config::video.adapter_name.empty() || !config::video.output_name.empty()) {
         BOOST_LOG(fatal) << "Please ensure your manually chosen GPU and monitor are connected and powered on."sv;
       } else {
         BOOST_LOG(fatal) << "Please check that a display is connected and powered on."sv;

@@ -780,10 +780,25 @@ namespace display_device {
           }
         }
         if (!available) {
+          // §K.dd.select: 只印「設定的 id」的話，近似錯誤（大小寫、少大括號、過期 GUID）
+          // 無法從單一 log 行分辨，必須再去翻啟動時的裝置 JSON 交叉比對。
+          // 一併列出實際列舉到的 id，讓這行警告自己就能定案。
+          std::string enumerated;
+          for (const auto &d : devices) {
+            if (!enumerated.empty()) {
+              enumerated += ", ";
+            }
+            enumerated += d.m_device_id;
+            if (!d.m_friendly_name.empty()) {
+              enumerated += " (" + d.m_friendly_name + ")";
+            }
+          }
           BOOST_LOG(warning) << "[VIPLE-DD] §K.dd.fallback: configured display device '"
                              << parsed_config->m_device_id
                              << "' not available — skipping display-device configuration "
-                                "and continuing on the default display (avoids Windows API hang).";
+                                "and continuing on the default display (avoids Windows API hang). "
+                                "Enumerated devices: "
+                             << (enumerated.empty() ? std::string {"(none)"} : enumerated);
           revert_configuration();
           return;
         }
