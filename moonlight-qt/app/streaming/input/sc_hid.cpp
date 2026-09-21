@@ -351,9 +351,23 @@ int ScHidPassthrough::runFeatureRequest(uint8_t reportId, uint8_t op, uint8_t se
             const int sn = SDL_hid_send_feature_report(m_devs[d], qbuf, sizeof(qbuf));
             m_lastOp = OpIdle;
             if (sn < 0) {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[SC-HID] Feature SET id=0x%02x type=0x%02x failed on dev=%d: %s",
-                    reportId, expectType, d, SDL_GetError());
+                // §SC-HID-LOG-RATE（2026-09-21）：控制器休眠時 host Steam 每秒 ~8.6 次
+                // feature request × 4 介面全部失敗，這一行曾佔 client log 92%（70 分鐘
+                // 10.9 萬行）並撞到 log 大小上限，把事故後段的診斷全吃掉。前 8 筆照印，
+                // 之後每 30 秒最多一筆並附壓掉的筆數；rx stats(5s) 仍有完整計數。
+                static uint32_t s_setFailLogged = 0, s_setFailSuppressed = 0;
+                static Uint32 s_setFailLastTick = 0;
+                const Uint32 nowTick = SDL_GetTicks();
+                if (s_setFailLogged < 8 || (Uint32)(nowTick - s_setFailLastTick) >= 30000) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[SC-HID] Feature SET id=0x%02x type=0x%02x failed on dev=%d: %s (suppressed since last=%u)",
+                        reportId, expectType, d, SDL_GetError(), s_setFailSuppressed);
+                    s_setFailLogged++;
+                    s_setFailLastTick = nowTick;
+                    s_setFailSuppressed = 0;
+                } else {
+                    s_setFailSuppressed++;
+                }
                 continue;
             }
             sent[sentCount++] = d;

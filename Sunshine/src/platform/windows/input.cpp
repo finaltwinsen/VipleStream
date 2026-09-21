@@ -7,6 +7,7 @@
 #define WINVER 0x0A00
 
 // platform includes
+#include <chrono>
 #include <Windows.h>
 
 // standard includes
@@ -468,8 +469,31 @@ namespace platf {
    * @param i The `INPUT` struct to send.
    */
   void send_input(INPUT &i) {
+    // §INPUT-SENDINPUT 診斷（2026-09-21 鍵鼠斷續事故）：SendInput 會同步呼叫其他
+    // 行程的 WH_KEYBOARD_LL / WH_MOUSE_LL hook（例如 host 上的 Steam），hook 宿主執行緒
+    // 忙碌時本呼叫最長卡到 LowLevelHooksTimeout；task_pool 只有一條執行緒，之後所有
+    // 鍵鼠封包都跟著排隊。量一下就知道停頓是不是發生在這一步。
+    auto t0 = std::chrono::steady_clock::now();
   retry:
     auto send = SendInput(1, &i, sizeof(INPUT));
+    {
+      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+      if (ms >= 20) {
+        static std::chrono::steady_clock::time_point s_lastLog {};
+        static uint32_t s_suppressed = 0;
+        auto now = std::chrono::steady_clock::now();
+        if (now - s_lastLog >= std::chrono::milliseconds(200)) {
+          BOOST_LOG(info) << "[VIPLE-INPUT-SENDINPUT-SLOW] SendInput took " << ms << " ms (type="
+                          << (i.type == INPUT_MOUSE ? "mouse" : i.type == INPUT_KEYBOARD ? "keyboard" : "other")
+                          << ", suppressed since last=" << s_suppressed << ")";
+          s_lastLog = now;
+          s_suppressed = 0;
+        }
+        else {
+          s_suppressed++;
+        }
+      }
+    }
     if (send != 1) {
       auto hDesk = syncThreadDesktop();
       if (_lastKnownInputDesktop != hDesk) {

@@ -2174,11 +2174,32 @@ namespace video {
     // both raise idr_events at kHz rates, and IDR frames are 5-15× the size of
     // P-frames — emitting one per request piles megabytes of keyframe onto an
     // already-congested link and creates a self-reinforcing loss storm. Cap
-    // real submissions to one per IDR_COOLDOWN_MS; subsequent requests inside
-    // the window are coalesced (we already mark requested_idr_frame=true once,
-    // so callers get a fresh keyframe at the next window boundary).
+    // real submissions to one per IDR_COOLDOWN_MS; requests inside the window
+    // are dropped. That is safe because the client keeps re-requesting on its
+    // own (§FRZ-WATCHDOG every 1 s, CONSECUTIVE_DROP_LIMIT ≈ 0.7-0.9 s, ENet
+    // reliable), so a dropped request costs at most ~1 s. Do NOT "coalesce"
+    // dropped requests into a deferred IDR: client requests arrive in pairs
+    // (watchdog + drop-limit, 5-30 ms apart) and a deferred trailing IDR would
+    // fire 1.5 s after every normal recovery (§Q-IDR-INIT-FIX 類的模糊震盪).
+    //
+    // §S.19-INIT-FIX 2026-09-21（凍結事故）：初值原本是
+    // steady_clock::time_point::min()，`now - min()` 有號 64 位元相減必溢位
+    // 成負值（GCC -O3 實際發出 sub/cmp/jle，反組譯已證實未折疊）→
+    // 「cooldown active」永遠成立。§K.14 在 frame 16 會把 last_idr_emit
+    // 設成合法值掩蓋此事，但 frame_nr 跨 encoder 重建（capture_async 的
+    // reinit 迴圈）持續累加，重建後的 encode_run 再也走不到 frame 16 →
+    // 該 encoder 生命期內 client 的每一個 IDR 請求都被壓制（log：
+    // IDR-SUPPRESS ×22、IDR-EMIT ×0；每個 session 的 f=1 都 SUPPRESS 是鐵證）。
+    // 網路閃斷 3 秒後 client 要不到 IDR，畫面永久凍結直到使用者退出。
+    // 初值改為「一個 cooldown 之前」，第一個請求必通過；比較式改成
+    // now >= last + cooldown，任何 steady_clock 值下都不溢位。
     constexpr auto IDR_COOLDOWN_MS = std::chrono::milliseconds {1500};
-    auto last_idr_emit = std::chrono::steady_clock::time_point::min();
+    auto last_idr_emit = std::chrono::steady_clock::now() - IDR_COOLDOWN_MS;
+    constexpr int STARTUP_IDR_RETRY_FRAME = 16;  // §K.14（見下方）
+    // §S.19 診斷：標示本 encoder 生命期的 frame_nr 起點，一眼看出
+    // §K.14 會不會再觸發（encoder 重建後 frame_nr 已 >16 就不會）。
+    BOOST_LOG(info) << "[VIPLE-QLOG] §S.19 cooldown armed f=" << frame_nr
+                    << (frame_nr < STARTUP_IDR_RETRY_FRAME ? " (K.14 pending)" : " (K.14 skipped: rebuilt encoder)");
 
     // §ABR-RAMP：追蹤上次套用的 bitrate，判斷本次變更是降速（cut，需
     // forceIDR 快速收斂）還是回升（ramp，平滑過渡不打斷畫面）
@@ -2216,13 +2237,13 @@ namespace video {
       if (requested_idr_frame) {
         // VipleStream: §S.19 cooldown gate (see top of run() for rationale).
         auto now = std::chrono::steady_clock::now();
-        if (now - last_idr_emit >= IDR_COOLDOWN_MS) {
+        if (now >= last_idr_emit + IDR_COOLDOWN_MS) {
           session->request_idr_frame();
           last_idr_emit = now;
           BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr << " (cooldown OK)";
         }
         else {
-          requested_idr_frame = false;  // suppress for this iteration
+          requested_idr_frame = false;  // suppress for this iteration; client will re-request
           BOOST_LOG(info) << "[VIPLE-QLOG] IDR-SUPPRESS f=" << frame_nr << " (cooldown active)";
         }
       }
@@ -2312,7 +2333,6 @@ namespace video {
       // datagram 丟失而無法組裝完整 IDR。15 frame 後（30fps 下
       // ≈500ms）cwnd 已充分爬升，自動送出第二個 IDR 確保 client
       // 收到完整關鍵幀。配合 §K.14 的握手後 cwnd 重設使用。
-      constexpr int STARTUP_IDR_RETRY_FRAME = 16;
       if (frame_nr == STARTUP_IDR_RETRY_FRAME) {
         session->request_idr_frame();
         last_idr_emit = std::chrono::steady_clock::now();

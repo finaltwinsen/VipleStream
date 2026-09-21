@@ -1716,6 +1716,33 @@ namespace stream {
     server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_INPUT_DATA]"sv;
 
+      // §INPUT-GAP 診斷（2026-09-21 鍵鼠斷續事故）：量 client 輸入封包的到達
+      // 間隔。前 1 秒有活動（≥30 包）後突然 >150 ms 沒封包＝上游（client 主迴圈
+      // 或 ENet）停頓；與 client 端 [VIPLE-INPUT-STALL] 對時即可分辨是哪一側。
+      // 只在 control 執行緒被呼叫，static 不需鎖；一次只有一條 session。
+      {
+        using clock = std::chrono::steady_clock;
+        static clock::time_point s_lastArrival {};
+        static clock::time_point s_winStart {};
+        static uint32_t s_winCount = 0, s_prevRate = 0;
+        auto now = clock::now();
+        if (s_lastArrival != clock::time_point {}) {
+          auto gapMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastArrival).count();
+          uint32_t before = std::max(s_prevRate, s_winCount);
+          if (gapMs > 150 && before >= 30) {
+            BOOST_LOG(info) << "[VIPLE-INPUT-GAP] " << gapMs << " ms since last input packet (rate before gap "
+                            << before << "/s)";
+          }
+        }
+        if (s_winStart == clock::time_point {} || now - s_winStart >= std::chrono::seconds(1)) {
+          s_prevRate = s_winCount;
+          s_winCount = 0;
+          s_winStart = now;
+        }
+        s_winCount++;
+        s_lastArrival = now;
+      }
+
       auto tagged_cipher_length = util::endian::big(*(int32_t *) payload.data());
       std::string_view tagged_cipher {payload.data() + sizeof(tagged_cipher_length), (size_t) tagged_cipher_length};
 

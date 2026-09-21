@@ -29,11 +29,188 @@
 
 #ifdef Q_OS_WIN32
 #include <windows.h>
+#include <SDL_syswm.h>   // §INPUT-STALL watchdog 需要 HWND
+#include <dbghelp.h>     // §INPUT-STALL 主執行緒堆疊擷取
+#ifdef _MSC_VER
+#pragma comment(lib, "dbghelp.lib")
+#endif
 // Scaling the icon down on Win32 looks dreadful, so render at lower res
 #define ICON_SIZE 32
 #else
 #define ICON_SIZE 64
 #endif
+
+// §INPUT-STALL 診斷（2026-09-21 鍵鼠斷續事故）：主執行緒是鍵鼠事件唯一入口，
+// 影像卻由 Pacer 執行緒繪製——主執行緒短暫卡住時畫面照常、鍵鼠「短暫失控後
+// 恢復」。既有 log 沒有主迴圈節拍，這裡用獨立 watchdog 執行緒量測：主迴圈
+// 每圈更新 s_LoopBeat / s_LoopPhase（-1 = 在 SDL_WaitEventTimeout 內；否則為
+// 正在分派的 SDL 事件型別，SDL_USEREVENT 以 0x10000|code 表示）。watchdog 每
+// 10 ms 檢查，節拍停滯 ≥50 ms 且「停滯期間有使用者輸入」（GetLastInputInfo，
+// 合成輸入也算）且本視窗在前景時記一筆 [VIPLE-INPUT-STALL]，恢復時再記總長。
+// 停在 wait 相位＝卡在 SDL 內部（PumpEvents／joystick／hidapi 列舉）；停在
+// 事件相位＝我們自己的 handler。純閒置不會誤報。
+#include <atomic>
+namespace {
+std::atomic<uint32_t> s_LoopBeat {0};
+std::atomic<int32_t>  s_LoopPhase {-2};   // -2 未啟動, -1 wait, >=0 事件
+std::atomic<bool>     s_StallWatchdogRun {false};
+#ifdef Q_OS_WIN32
+HWND                  s_StallWatchdogHwnd = nullptr;
+DWORD                 s_StallMainThreadId = 0;
+static uint32_t stallNowMs() { return GetTickCount(); }   // 與 GetLastInputInfo 同時基
+
+// §INPUT-STALL 堆疊擷取（2026-09-22）：儀器化第一晚抓到 26 次主迴圈停頓，每次都
+// 固定 ≈2016 ms、phase 全是 SDL_WaitEventTimeout（卡在 SDL 內部），log 前後沒有任何
+// 觸發事件。要知道是 SDL 的哪條路（hidapi 列舉／DirectInput／WGI／訊息泵）只能看
+// 堆疊：停頓 ≥300 ms 時暫停主執行緒、StackWalk64 抄下 PC，恢復後再用 dbghelp 解成
+// module!symbol+offset（SDL3.dll 沒 PDB 也能解到最近的匯出符號）。每次停頓只抄一次，
+// 暫停時間只有幾百微秒。dbghelp 非 thread-safe，只在 watchdog 執行緒使用。
+static void stallCaptureMainThreadStack(uint32_t staleMs)
+{
+    if (s_StallMainThreadId == 0) return;
+    HANDLE hThread = OpenThread(THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION,
+                                FALSE, s_StallMainThreadId);
+    if (hThread == nullptr) return;
+
+    static bool s_symInit = false;
+    if (!s_symInit) {
+        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_NO_PROMPTS);
+        SymInitialize(GetCurrentProcess(), nullptr, TRUE);
+        s_symInit = true;
+    }
+
+    DWORD64 pcs[24];
+    int nPcs = 0;
+    if (SuspendThread(hThread) != (DWORD)-1) {
+        CONTEXT ctx;
+        ZeroMemory(&ctx, sizeof(ctx));
+        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if (GetThreadContext(hThread, &ctx)) {
+            STACKFRAME64 sf;
+            ZeroMemory(&sf, sizeof(sf));
+#ifdef _M_X64
+            const DWORD machine = IMAGE_FILE_MACHINE_AMD64;
+            sf.AddrPC.Offset = ctx.Rip;
+            sf.AddrFrame.Offset = ctx.Rbp;
+            sf.AddrStack.Offset = ctx.Rsp;
+#else
+            const DWORD machine = IMAGE_FILE_MACHINE_I386;
+            sf.AddrPC.Offset = ctx.Eip;
+            sf.AddrFrame.Offset = ctx.Ebp;
+            sf.AddrStack.Offset = ctx.Esp;
+#endif
+            sf.AddrPC.Mode = sf.AddrFrame.Mode = sf.AddrStack.Mode = AddrModeFlat;
+            while (nPcs < (int)(sizeof(pcs) / sizeof(pcs[0])) &&
+                   StackWalk64(machine, GetCurrentProcess(), hThread, &sf, &ctx, nullptr,
+                               SymFunctionTableAccess64, SymGetModuleBase64, nullptr) &&
+                   sf.AddrPC.Offset != 0) {
+                pcs[nPcs++] = sf.AddrPC.Offset;
+            }
+        }
+        ResumeThread(hThread);
+    }
+    CloseHandle(hThread);
+
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-INPUT-STALL] main thread stack at %u ms (%d frames):", staleMs, nPcs);
+    for (int i = 0; i < nPcs; i++) {
+        char modName[MAX_PATH] = "?";
+        HMODULE hMod = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)(uintptr_t)pcs[i], &hMod) && hMod != nullptr) {
+            char full[MAX_PATH];
+            if (GetModuleFileNameA(hMod, full, sizeof(full)) > 0) {
+                const char* base = strrchr(full, '\\');
+                SDL_strlcpy(modName, base ? base + 1 : full, sizeof(modName));
+            }
+        }
+        char symBuf[sizeof(SYMBOL_INFO) + 256];
+        SYMBOL_INFO* sym = (SYMBOL_INFO*)symBuf;
+        ZeroMemory(symBuf, sizeof(symBuf));
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen = 255;
+        DWORD64 disp = 0;
+        if (SymFromAddr(GetCurrentProcess(), pcs[i], &disp, sym)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-INPUT-STALL]   #%02d %s!%s+0x%llx",
+                        i, modName, sym->Name, (unsigned long long)disp);
+        }
+        else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-INPUT-STALL]   #%02d %s+0x%llx",
+                        i, modName, (unsigned long long)(hMod ? pcs[i] - (DWORD64)(uintptr_t)hMod : pcs[i]));
+        }
+    }
+}
+#else
+static uint32_t stallNowMs() { return SDL_GetTicks(); }
+#endif
+
+static void stallPhaseName(int32_t phase, char* buf, size_t len)
+{
+    if (phase == -2) SDL_snprintf(buf, len, "not-started");
+    else if (phase == -1) SDL_snprintf(buf, len, "SDL_WaitEventTimeout");
+    else if (phase & 0x10000) SDL_snprintf(buf, len, "SDL_USEREVENT code=%d", phase & 0xFFFF);
+    else SDL_snprintf(buf, len, "event 0x%x", phase);
+}
+
+static int inputStallWatchdogProc(void*)
+{
+    uint32_t lastBeat = s_LoopBeat.load();
+    uint32_t lastBeatChangeMs = stallNowMs();
+    bool reported = false;
+    bool stackCaptured = false;
+    int32_t reportedPhase = -2;
+    uint32_t stallCount = 0;
+    while (s_StallWatchdogRun.load()) {
+        SDL_Delay(10);
+        uint32_t now = stallNowMs();
+        uint32_t beat = s_LoopBeat.load();
+        if (beat != lastBeat) {
+            if (reported) {
+                char pn[48]; stallPhaseName(reportedPhase, pn, sizeof(pn));
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-INPUT-STALL] recovered: main loop was unresponsive %u ms (phase=%s) #%u",
+                            now - lastBeatChangeMs, pn, stallCount);
+                reported = false;
+                stackCaptured = false;
+            }
+            lastBeat = beat;
+            lastBeatChangeMs = now;
+            continue;
+        }
+        uint32_t stale = now - lastBeatChangeMs;
+#ifdef Q_OS_WIN32
+        if (reported && !stackCaptured && stale >= 300) {
+            stackCaptured = true;
+            stallCaptureMainThreadStack(stale);
+        }
+#endif
+        if (stale < 50 || reported) continue;
+        bool inputPending = true;
+#ifdef Q_OS_WIN32
+        LASTINPUTINFO lii; lii.cbSize = sizeof(lii); lii.dwTime = 0;
+        if (GetLastInputInfo(&lii)) {
+            // 只有「節拍停滯後仍有使用者輸入且已等 ≥50 ms」才算鍵鼠受影響
+            // 嚴格晚於節拍停滯起點（GetTickCount 15.6 ms 粒度下 >=0 會把「最後一筆
+            // 輸入剛處理完就閒置」誤判成停頓——首輪合成測試結尾就出現過一次）
+            inputPending = ((int32_t)(lii.dwTime - lastBeatChangeMs) > 0) && (now - lii.dwTime) >= 50;
+        }
+        if (inputPending && s_StallWatchdogHwnd != nullptr && GetForegroundWindow() != s_StallWatchdogHwnd) {
+            inputPending = false;   // 使用者在別的視窗操作，主迴圈閒置是正常的
+        }
+#endif
+        if (!inputPending) continue;
+        reported = true;
+        reportedPhase = s_LoopPhase.load();
+        stallCount++;
+        char pn[48]; stallPhaseName(reportedPhase, pn, sizeof(pn));
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-INPUT-STALL] main loop unresponsive %u ms with user input pending (phase=%s) #%u",
+                    stale, pn, stallCount);
+    }
+    return 0;
+}
+} // namespace
+
 
 #define SDL_CODE_FLUSH_WINDOW_EVENT_BARRIER 100
 #define SDL_CODE_GAMECONTROLLER_RUMBLE 101
@@ -2823,7 +3000,25 @@ void Session::exec()
     // Hijack this thread to be the SDL main thread. We have to do this
     // because we want to suspend all Qt processing until the stream is over.
     SDL_Event event;
+    // §INPUT-STALL：主迴圈 watchdog（見檔頭註解）
+    s_LoopBeat.store(0);
+    s_LoopPhase.store(-1);
+#ifdef Q_OS_WIN32
+    {
+        SDL_SysWMinfo wmInfo;
+        SDL_VERSION(&wmInfo.version);
+        s_StallWatchdogHwnd = (m_Window != nullptr && SDL_GetWindowWMInfo(m_Window, &wmInfo)) ? wmInfo.info.win.window : nullptr;
+    }
+#endif
+#ifdef Q_OS_WIN32
+    s_StallMainThreadId = GetCurrentThreadId();
+#endif
+    s_StallWatchdogRun.store(true);
+    SDL_Thread* stallWatchdog = SDL_CreateThread(inputStallWatchdogProc, "InputStallWD", nullptr);
+
     for (;;) {
+        s_LoopBeat.fetch_add(1);
+        s_LoopPhase.store(-1);
         if (!audioSilenceChecked && SDL_TICKS_PASSED(SDL_GetTicks(), audioSilenceCheckTime)) {
             audioSilenceChecked = true;
             if (m_AudioSampleCount == 0) {
@@ -2879,6 +3074,8 @@ void Session::exec()
             continue;
         }
 #endif
+        s_LoopBeat.fetch_add(1);
+        s_LoopPhase.store(event.type == SDL_USEREVENT ? (0x10000 | (event.user.code & 0xFFFF)) : (int32_t)event.type);
         switch (event.type) {
         case SDL_QUIT:
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -3170,6 +3367,15 @@ void Session::exec()
             // We use GetAsyncKeyState() to detect Right Shift state changes that SDL missed.
             {
                 static bool s_RShiftWasDown = false;
+                // §RSHIFT-DUP-FIX（2026-09-21）：SDL 正常送到的 RShift 事件也會走到這裡，
+                // 上面 handleKeyEvent 已送一次，接著 GetAsyncKeyState 又看到按下 → 再合成
+                // 一次 → host 收到 DOWN,DOWN,UP,UP（10:19 場 log 每次 RShift 都成雙）。
+                // host 端中文輸入法把 RShift 當中英切換，按兩次等於沒切。本事件就是
+                // RShift 時只同步狀態、不合成。
+                if (event.key.keysym.scancode == SDL_SCANCODE_RSHIFT) {
+                    s_RShiftWasDown = (event.type == SDL_KEYDOWN);
+                    break;
+                }
                 bool rShiftIsDown = (GetAsyncKeyState(VK_RSHIFT) & 0x8000) != 0;
                 if (rShiftIsDown && !s_RShiftWasDown) {
                     // Right Shift pressed but SDL didn't report it — synthesize the event
@@ -3252,6 +3458,13 @@ void Session::exec()
     }
 
 DispatchDeferredCleanup:
+    // §INPUT-STALL：收 watchdog
+    s_StallWatchdogRun.store(false);
+    s_LoopPhase.store(-2);
+    if (stallWatchdog != nullptr) {
+        SDL_WaitThread(stallWatchdog, nullptr);
+        stallWatchdog = nullptr;
+    }
     // Switch back to synchronous logging mode
     StreamUtils::exitAsyncLoggingMode();
 

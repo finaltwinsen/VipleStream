@@ -239,6 +239,7 @@ namespace input {
     platf::feedback_queue_t feedback_queue;
 
     std::list<std::vector<uint8_t>> input_queue;
+    std::list<std::chrono::steady_clock::time_point> input_queue_ts;  // §INPUT-QUEUE-LAG 診斷：與 input_queue 同步進出
     std::mutex input_queue_lock;
 
     thread_pool_util::ThreadPool::task_id_t mouse_left_button_timeout;
@@ -2061,6 +2062,7 @@ namespace input {
    */
   void passthrough_next_message(std::shared_ptr<input_t> input) {
     std::list<std::vector<uint8_t>> local_queue;
+    std::list<std::chrono::steady_clock::time_point> local_ts;
 
     // Lock the input queue just long enough to grab all pending events.
     // This avoids all lock contention during the potentially lengthy O(N^2)
@@ -2075,6 +2077,18 @@ namespace input {
 
       // Move everything to a local queue and release the lock instantly
       local_queue = std::move(input->input_queue);
+      local_ts = std::move(input->input_queue_ts);
+    }
+
+    // §INPUT-QUEUE-LAG 診斷（2026-09-21 鍵鼠斷續事故）：從 control 執行緒入佇列到
+    // task_pool 取出的等待時間。task_pool 只有一條執行緒，被別的任務（SendInput 卡在
+    // LL hook、SC-HID driver I/O、其他 pushDelayed 工作）擋住時這裡會看到。
+    if (!local_ts.empty()) {
+      auto lagMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - local_ts.front()).count();
+      if (lagMs >= 50) {
+        BOOST_LOG(info) << "[VIPLE-INPUT-QUEUE-LAG] oldest input waited " << lagMs << " ms in task_pool queue (batch of "
+                        << local_queue.size() << ")";
+      }
     }
 
     // Process all events we managed to grab
@@ -2173,6 +2187,7 @@ namespace input {
     {
       std::lock_guard<std::mutex> lg(input->input_queue_lock);
       input->input_queue.push_back(std::move(input_data));
+      input->input_queue_ts.push_back(std::chrono::steady_clock::now());
     }
     task_pool.push(passthrough_next_message, input);
   }
