@@ -29,10 +29,55 @@ Updater::Updater(QObject *parent)
       m_DownloadFile(nullptr),
       m_BytesReceived(0),
       m_BytesTotal(0),
-      m_Cancelled(false)
+      m_Cancelled(false),
+      m_Platform(UpdateAssetRules::detectPlatform())
 {
     m_Nam->setStrictTransportSecurityEnabled(true);
     m_Nam->setRedirectPolicy(QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    qDebug() << "[VIPLE-UPDATE] platform" << UpdateAssetRules::describe(m_Platform)
+             << "install mode =" << UpdateAssetRules::toString(UpdateAssetRules::installMode(m_Platform));
+    if (m_Platform.emulated) {
+        // §F9：模擬執行時 asset 仍依建置架構選（要覆蓋的是這支 binary）
+        qDebug() << "[VIPLE-UPDATE] running under emulation — cpu" << m_Platform.currentArch
+                 << "build" << m_Platform.buildArch << "; assets follow the build architecture";
+    }
+}
+
+bool Updater::autoInstallSupported() const
+{
+    return UpdateAssetRules::installMode(m_Platform) == UpdateAssetRules::InstallMode::AutoInstall;
+}
+
+QString Updater::manualUpdateHint() const
+{
+    // §F9：不能自動安裝的平台，UpdateDialog 顯示這段說明＋「Open release page」
+    using namespace UpdateAssetRules;
+    switch (installMode(m_Platform)) {
+    case InstallMode::AutoInstall:
+        return QString();
+    case InstallMode::NotifyOnly:
+        if (m_Platform.packaging == Packaging::Flatpak) {
+            // α 的 arm64 Flatpak 是 release 上的單檔 bundle、x64 Flatpak 是本機建的，
+            // 兩者預設都沒有 remote，flatpak update 更新不到——先講 bundle 的裝法；
+            // P1 發佈方式確定有 remote 之後再調整（見 §F9／F17 文件同步待辦）。
+            return tr("This copy of VipleStream is installed as a Flatpak. "
+                      "Download the new .flatpak from the release page and install it with "
+                      "\"flatpak install --bundle <file>\". "
+                      "If you installed it from a Flatpak repository, run \"flatpak update\" instead.");
+        }
+        if (m_Platform.arch == Arch::X64) {
+            return tr("VipleStream is not running from an AppImage, so it cannot replace itself. "
+                      "Download the new version from the release page.");
+        }
+        return tr("Automatic install is not available for Linux arm64 yet. "
+                  "Download the new version from the release page.");
+    case InstallMode::Unsupported:
+    default:
+        return tr("Automatic install is not available on this platform (%1). "
+                  "Download the new version from the release page.")
+            .arg(QStringLiteral("%1/%2").arg(m_Platform.currentArch, m_Platform.buildArch));
+    }
 }
 
 Updater::~Updater()
@@ -79,6 +124,14 @@ void Updater::startUpdate(const QString& version)
         qDebug() << "[VIPLE-UPDATE] startUpdate ignored — already in progress";
         return;
     }
+    if (!autoInstallSupported()) {
+        // §F9：UpdateDialog 在這些平台只顯示通知、不會呼叫 startUpdate；
+        // 這裡是防線——連 API 都不打，更不下載。
+        qDebug() << "[VIPLE-UPDATE] startUpdate refused — install mode"
+                 << UpdateAssetRules::toString(UpdateAssetRules::installMode(m_Platform));
+        fail(manualUpdateHint());
+        return;
+    }
 
     m_Version       = version;
     m_Cancelled     = false;
@@ -115,36 +168,36 @@ void Updater::cancel()
     // 並走 fail() 清理；不要在這裡 emit updateFailed，避免重複信號。
 }
 
-bool Updater::selectAssetForPlatform(const QJsonArray& assets,
-                                     QString& outUrl, QString& outName)
+UpdateAssetRules::ReleasePlan Updater::selectAssetForPlatform(const QJsonObject& release)
 {
-    // Asset 命名規則（v1.5.108 範例）：
-    //   VipleStream-Client-1.5.108.zip                     ← Windows x64
-    //   VipleStream-Client-1.5.108-linux-x64.AppImage      ← Linux x64
-    //   VipleStream-Server-...                              ← 略過（server）
-    //   VipleStream-Android-...apk                          ← 略過（android）
-    for (const QJsonValue& v : assets) {
-        QJsonObject obj = v.toObject();
-        QString name = obj.value("name").toString();
-        QString dl   = obj.value("browser_download_url").toString();
-        if (name.isEmpty() || dl.isEmpty()) continue;
-        if (!name.contains(QStringLiteral("Client"), Qt::CaseInsensitive)) continue;
+    // Asset 命名規則（v1.5.276 範例；3.0.0 起六件）：
+    //   VipleStream-Client-1.5.276.zip                     ← Windows x64（自動安裝）
+    //   VipleStream-Client-1.5.276-debug.zip               ← 略過（PDB 包）
+    //   VipleStream-Client-1.5.276-linux-x64.AppImage      ← Linux x64（自動安裝）
+    //   VipleStream-Client-X.Y.Z-linux-arm64.flatpak/.zip  ← Linux arm64（只通知）
+    //   VipleStream-Server-... / VipleStream-Android-...   ← 略過
+    // §F9：決策全部在 updateassetrules.h 的 planRelease（精確錨定＋建置架構＋
+    // 版號）。asset 版號比對的是這份 JSON 的 tag_name，不是 startUpdate 收到的
+    // m_Version——UI 的版號是啟動時（或快取）查到的，可能已經過時。
+    using namespace UpdateAssetRules;
 
-#if defined(Q_OS_WIN)
-        if (name.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive) &&
-            !name.contains(QStringLiteral("linux"), Qt::CaseInsensitive)) {
-            outUrl = dl; outName = name; return true;
-        }
-#elif defined(Q_OS_LINUX)
-        if (name.endsWith(QStringLiteral(".AppImage"), Qt::CaseInsensitive) &&
-            name.contains(QStringLiteral("linux"), Qt::CaseInsensitive)) {
-            outUrl = dl; outName = name; return true;
-        }
-#else
-        Q_UNUSED(dl);
-#endif
+    const ReleasePlan plan =
+        planRelease(release, m_Platform, QCoreApplication::applicationVersion());
+
+    for (const QString& s : plan.skippedClient) {
+        qDebug() << "[VIPLE-UPDATE] skip asset" << s;
     }
-    return false;
+    if (plan.result == PlanResult::Ok) {
+        qDebug() << "[VIPLE-UPDATE] matched asset" << plan.assetName
+                 << "action =" << toString(plan.action) << "release tag" << plan.tagName;
+    }
+    else {
+        qWarning() << "[VIPLE-UPDATE] no asset for" << describe(m_Platform)
+                   << "— plan" << toString(plan.result) << "release tag" << plan.tagName
+                   << "current" << QCoreApplication::applicationVersion()
+                   << "among" << plan.assetNames;
+    }
+    return plan;
 }
 
 void Updater::handleAssetListFinished()
@@ -169,15 +222,59 @@ void Updater::handleAssetListFinished()
         fail(tr("Release JSON malformed: %1").arg(pe.errorString()));
         return;
     }
-    QJsonObject release = doc.object();
-    QJsonArray assets = release.value("assets").toArray();
-    if (assets.isEmpty()) {
-        fail(tr("No assets attached to release."));
+
+    using UpdateAssetRules::PlanResult;
+    const UpdateAssetRules::ReleasePlan plan = selectAssetForPlatform(doc.object());
+
+    // §F9：實際要裝的版號以這次抓到的 release 為準。和 UI 傳進來的不同時
+    // （常駐期間又發了新版、API 快取落後等）記一行；tag 有效且比目前新時改用
+    // 抓到的 tag，helper 腳本檔名與狀態文字才會和真正下載的檔案一致。
+    if (!plan.releaseVersion.isEmpty() && plan.releaseVersion != m_Version) {
+        qDebug() << "[VIPLE-UPDATE] fetched release" << plan.tagName
+                 << "differs from the version offered in the UI" << m_Version;
+    }
+    const bool tagIsNewer = plan.result == PlanResult::Ok ||
+                            plan.result == PlanResult::NoAssets ||
+                            plan.result == PlanResult::NoMatch;
+    if (tagIsNewer) {
+        m_Version = plan.releaseVersion;
+    }
+
+    switch (plan.result) {
+    case PlanResult::Ok:
+        break;
+    case PlanResult::MissingTag:
+        fail(tr("Release info from GitHub has no tag."));
+        return;
+    case PlanResult::BadTag:
+        fail(tr("The latest release tag \"%1\" is not a version number.").arg(plan.tagName));
+        return;
+    case PlanResult::NotNewer:
+        // API 回應有 max-age 快取，剛發佈時可能比 HEAD 302（AutoUpdateChecker）
+        // 慢；也可能 release 被撤回。這不是「平台沒有安裝檔」，別那樣講。
+        fail(tr("GitHub's release information is not up to date yet: it still reports %1, "
+                "which is not newer than this version (%2). Please try again in a few minutes.")
+             .arg(plan.releaseVersion, QCoreApplication::applicationVersion()));
+        return;
+    case PlanResult::NoAssets:
+        fail(tr("Release %1 has no files attached yet. Please try again in a few minutes.")
+             .arg(plan.releaseVersion));
+        return;
+    case PlanResult::NoMatch:
+    default:
+        // §F9：本平台在這次 release 沒有可安裝的 asset（還沒上傳、版號對不上、
+        // 或本架構根本沒出）——不猜、不下載別的，交給 release 頁面。
+        fail(tr("Release %1 has no installable package for this platform (%2).")
+             .arg(plan.releaseVersion, UpdateAssetRules::describe(m_Platform)));
         return;
     }
 
-    if (!selectAssetForPlatform(assets, m_AssetUrl, m_AssetName)) {
-        fail(tr("No matching asset for this platform in release %1.").arg(m_Version));
+    m_AssetName = plan.assetName;
+    m_AssetUrl  = plan.assetUrl;
+    if (plan.action != UpdateAssetRules::AssetAction::AutoInstall) {
+        // §F9：只通知的 asset（arm64 Flatpak／zip 等）絕不自動下載安裝
+        fail(tr("VipleStream %1 is available as %2, but it has to be installed manually. %3")
+             .arg(m_Version, m_AssetName, manualUpdateHint()));
         return;
     }
 

@@ -4,7 +4,11 @@ import QtQuick.Layouts 1.2
 
 import Updater 1.0
 
-// 三狀態對話框：confirm / downloading / failed。
+// 四狀態對話框：confirm / downloading / failed / notify。
+//
+// §F9：notify＝本平台不能自動安裝（Linux arm64、Flatpak、非 AppImage 的
+// Linux x64、其他架構）。只通知有新版＋Updater.manualUpdateHint，按鈕只有
+// 「Open release page / Close」，不呼叫 startUpdate（不打 API、不下載）。
 //
 // 不用 standardButtons + DialogButtonBox，因為標準按鈕 emit accepted /
 // rejected 後 Dialog 會 auto-close，從 confirm 切到 downloading 會閃。
@@ -20,13 +24,13 @@ NavigableDialog {
 
     property string newVersion: ""
     property string releasePageUrl: ""
-    property string mode: "confirm"           // "confirm" / "downloading" / "failed"
+    property string mode: "confirm"           // "confirm" / "downloading" / "failed" / "notify"
     property string errorMessage: ""
 
     function openForVersion(version, pageUrl) {
         dialog.newVersion     = version
         dialog.releasePageUrl = pageUrl
-        dialog.mode           = "confirm"
+        dialog.mode           = Updater.autoInstallSupported ? "confirm" : "notify"
         dialog.errorMessage   = ""
         dialog.open()
     }
@@ -58,6 +62,9 @@ NavigableDialog {
                 if (dialog.mode === "downloading") {
                     return Updater.status || qsTr("Working…")
                 }
+                if (dialog.mode === "notify") {
+                    return qsTr("VipleStream %1 is available.").arg(dialog.newVersion)
+                }
                 return qsTr("Update failed")
             }
         }
@@ -69,6 +76,15 @@ NavigableDialog {
             visible: dialog.mode === "confirm"
             text: qsTr("VipleStream will close and relaunch automatically after the update is applied. " +
                        "On Windows you may be prompted by UAC if installed to Program Files.")
+        }
+
+        // §F9：只通知模式的說明（例如 Flatpak／非 AppImage 該怎麼手動更新）
+        Label {
+            Layout.fillWidth: true
+            Layout.maximumWidth: 480
+            wrapMode: Text.Wrap
+            visible: dialog.mode === "notify"
+            text: Updater.manualUpdateHint
         }
 
         // 下載進度
@@ -167,10 +183,10 @@ NavigableDialog {
                 Keys.onEnterPressed:  clicked()
             }
 
-            // failed mode: Open release page / Close
+            // failed / notify mode: Open release page / Close
             Button {
                 id: btnOpen
-                visible: dialog.mode === "failed"
+                visible: dialog.mode === "failed" || dialog.mode === "notify"
                 flat: true
                 text: qsTr("Open release page")
                 onClicked: {
@@ -183,7 +199,7 @@ NavigableDialog {
             }
             Button {
                 id: btnClose
-                visible: dialog.mode === "failed"
+                visible: dialog.mode === "failed" || dialog.mode === "notify"
                 flat: true
                 text: qsTr("Close")
                 onClicked: dialog.close()
@@ -199,10 +215,11 @@ NavigableDialog {
         Qt.callLater(function() {
             if (mode === "confirm")        btnYes.forceActiveFocus(Qt.TabFocus)
             else if (mode === "downloading") btnCancel.forceActiveFocus(Qt.TabFocus)
-            else if (mode === "failed")    btnOpen.forceActiveFocus(Qt.TabFocus)
+            else if (mode === "failed" || mode === "notify") btnOpen.forceActiveFocus(Qt.TabFocus)
         })
     }
     onOpened: {
         if (mode === "confirm") btnYes.forceActiveFocus(Qt.TabFocus)
+        else if (mode === "notify") btnOpen.forceActiveFocus(Qt.TabFocus)
     }
 }

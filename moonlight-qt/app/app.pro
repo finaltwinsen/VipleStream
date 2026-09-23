@@ -338,6 +338,7 @@ HEADERS += \
     streaming/streamutils.h \
     backend/autoupdatechecker.h \
     backend/updater.h \
+    backend/updateassetrules.h \
     path.h \
     settings/mappingmanager.h \
     gui/sdlgamepadkeynavigation.h \
