@@ -1,5 +1,14 @@
 apply plugin: 'com.android.application'
 
+// VipleStream 2.0: release 以專用 keystore 簽章（package com.piinsta）。
+// 金鑰路徑與密碼放在 moonlight-android/keystore.properties（gitignored，
+// 每台建置機自備）；缺檔時 release 不簽章，build_android.cmd 會擋下。
+def releaseKeystoreProps = new Properties()
+def releaseKeystorePropsFile = rootProject.file('keystore.properties')
+if (releaseKeystorePropsFile.exists()) {
+    releaseKeystorePropsFile.withInputStream { releaseKeystoreProps.load(it) }
+}
+
 android {
     ndkVersion "30.0.14904198"
 
@@ -68,6 +77,17 @@ android {
         }
     }
 
+    signingConfigs {
+        release {
+            if (releaseKeystorePropsFile.exists()) {
+                storeFile file(releaseKeystoreProps['storeFile'])
+                storePassword releaseKeystoreProps['storePassword']
+                keyAlias releaseKeystoreProps['keyAlias']
+                keyPassword releaseKeystoreProps['keyPassword']
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix ".debug"
@@ -112,6 +132,13 @@ android {
             // above no longer applies — we don't share an applicationId
             // with the official Play Store build.
             resValue "string", "app_label", "VipleStream"
+
+            // 2.0 起出貨版改用 release 建置：native 以 NDK_DEBUG=0 編譯（不帶
+            // -DLC_DEBUG，common-c 的 LC_ASSERT 不會在使用者裝置上 abort）、
+            // 不可除錯。沒有 keystore.properties 時不簽章（輸出 unsigned APK）。
+            if (releaseKeystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
 
             minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'

@@ -51,6 +51,7 @@
   - U6 Flatpak app-id：M2a 第一個建置前必須定（之後改會讓 `~/.var/app/<id>` 的設定和 log 斷掉），預設提案 `io.github.finaltwinsen.VipleStream`。
   - U7 原生 ARM builder 採購：看 G-BUILD（qemu 增量建置 > 45 分鐘就採購）。
   - 控制器預設 Touch 或 Index；`vrDegradedPolicy` 預設值（G-rc A/B）；Frame 帳號是 steamos 還是 steamvr（PoC-1）。
+- **2.0 release notes 必寫**：Android 自 2.0 起改為 release 建置、package `com.piinsta`（原本出貨的是 `com.piinsta.debug`／「VipleStream (Debug)」）。兩者是不同 app，舊版不會原地升級：使用者要安裝新版、重新配對，再自行移除舊的 Debug 版。release keystore 在建置機本機（見 `docs/building.md` §2.4），遺失就無法再發可覆蓋升級的版本。
 - **實機到貨後**：Day 0 唯讀探測 + Flathub 上游 Moonlight（PoC-0/1/6/7）；Day 1 `xr-probe` / `v4l2-probe` / `decode-bench`（PoC-2/2b/3/3b/4/9/F）；Day 2 vrlink 共存與眼動（PoC-5b/8）。
 
 ### §B-NVOF autotier 判斷標準

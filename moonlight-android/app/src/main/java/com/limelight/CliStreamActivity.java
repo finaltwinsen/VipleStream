@@ -24,8 +24,8 @@ import java.util.List;
  * VipleStream CLI streaming entry point — launch streaming directly via adb.
  *
  * Usage:
- *   adb shell am start -n com.piinsta.debug/com.limelight.CliStreamActivity \
- *     --es host "192.168.51.226" \
+ *   adb shell am start -n com.piinsta/com.limelight.CliStreamActivity \
+ *     --es host "<host>" \
  *     --es app "Desktop" \
  *     [--ei bitrate 20000]           # kbps
  *     [--ei fps 30]                  # target FPS

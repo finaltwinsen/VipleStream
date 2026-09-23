@@ -219,3 +219,9 @@ Desktop.ini
 # ── Python bytecode ──
 __pycache__/
 *.pyc
+
+# Android release signing (per-machine secrets) — never commit.
+# keystore.properties points at the release keystore kept outside the repo.
+moonlight-android/keystore.properties
+*.jks
+*.keystore

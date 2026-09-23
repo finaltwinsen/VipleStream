@@ -151,8 +151,25 @@ build_android.cmd
 
 **做的事：**
 1. `version.ps1 propagate`（**不**自動 bump — 版號跟著 `version.json` 目前的值）
-2. Gradle `assembleDebug` 建 APK
-3. 複製到 `release\VipleStream-Android-X.Y.Z.apk`
+2. Gradle `assembleRelease` 建 APK（package `com.piinsta`，以 release keystore 簽章）
+3. 複製到 `release\VipleStream-Android-X.Y.Z.apk`，再用 `apksigner verify` 確認簽章；
+   沒簽好就刪掉輸出並 `exit 1`，不會留下 unsigned APK
+
+**release 與 debug**（2026-09-23 起）：出貨版改用 release 建置。native 以 `NDK_DEBUG=0` 編譯，
+不帶 `-DLC_DEBUG`，common-c 約 340 個 `LC_ASSERT` 不會在使用者裝置上 abort；app 不可除錯。
+開發時需要 `run-as`（例如 debug 配對腳本）就用 `build_android.cmd --debug`：產出
+`VipleStream-Android-X.Y.Z-debug.apk`（package `com.piinsta.debug`、LC_DEBUG 開著），
+不會蓋掉 release 的檔名。兩個 package 是不同的 app，可以同時安裝，配對資料各自獨立。
+
+**release 簽章設定**：`moonlight-android\keystore.properties`（gitignored，每台建置機自備）：
+```properties
+storeFile=<keystore 絕對路徑，放在 repo 外>
+storePassword=<密碼>
+keyAlias=viplestream
+keyPassword=<密碼>
+```
+缺這個檔時 `build_android.cmd` 直接以 `[ERROR]` 停下。**keystore 檔與密碼一定要備份**：
+遺失任何一個，之後發佈的版本就無法覆蓋升級已安裝的 `com.piinsta`，使用者只能移除重裝、重新配對。
 
 **為什麼 Android 不 bump？** 因為 Android 通常 Server/Client 已經 bump 過了。要
 新版號就先跑 `build_moonlight.cmd` 或 `build_sunshine.cmd`，再跑 `build_android.cmd`
@@ -251,8 +268,8 @@ build_sunshine.cmd
 ### 情境 C：改了 Android 程式碼，要測試
 
 ```cmd
-build_android.cmd
-adb install -r release\VipleStream-Android-<ver>.apk
+build_android.cmd --debug
+adb install -r release\VipleStream-Android-<ver>-debug.apk
 ```
 
 ### 情境 D：Server 跟 Client 都改了，要一起發版
