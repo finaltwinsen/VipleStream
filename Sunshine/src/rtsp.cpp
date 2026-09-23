@@ -16,6 +16,7 @@ extern "C" {
 #include <set>
 #include <unordered_map>
 #include <utility>
+#include <vector>  // §M01-D clear_for_client
 
 // lib includes
 #include <boost/asio.hpp>
@@ -509,11 +510,34 @@ namespace rtsp_stream {
      */
     void session_raise(std::shared_ptr<launch_session_t> launch_session) {
       // If a launch event is still pending, don't overwrite it.
-      if (launch_event.view(0s)) {
-        return;
+      //
+      // §M01-D A3 2026-09-23：例外——pending 的與新的來自同一個 client
+      // （TLS 憑證 UUID 兩邊都非空且相等）時改為替換。情境：client 在
+      // /resume 之後、ENet 連上之前被強制關閉，10 s 內重開；照上游「不
+      // 覆蓋」規則，新 /resume 帶的 rikey 與 ping payload 會被丟掉，RTSP
+      // 拿到的是舊 launch → rtspenc 解密失敗或 Initial Ping Timeout。
+      // client 用的一定是最後一次 /resume 的 rikey，所以以新的為準。
+      // uuid 為空（relay HTTP 路徑）或兩邊不同時維持原規則。
+      if (auto pending = launch_event.view(0s)) {
+        const bool same_client = launch_session &&
+                                 !launch_session->client_cert_uuid.empty() &&
+                                 pending->client_cert_uuid == launch_session->client_cert_uuid;
+        if (!same_client) {
+          return;
+        }
+
+        BOOST_LOG(info) << "[VIPLE-MULTI] §M01-D replaced stale pending launch of same client (old id="sv
+                        << pending->id << " new id="sv << launch_session->id << ')';
+
+        // 舊 launch 可能已被 handle_accept 指派給半途的 RTSP 連線並快取成
+        // tunnel 重用對象；清掉，之後的 RTSP 連線一律拿新的 launch。
+        last_session.reset();
       }
 
       // Raise the new launch session to prepare for the RTSP handshake
+      // （§M01-D：raise 直接覆寫 pending，等同 pop 舊的再 raise 新的，
+      // 但中間不留 handle_accept 看得到「沒有 pending」的空窗。下面的
+      // expires_after 會取消舊 launch 的逾時 wait，重新計時。）
       launch_event.raise(std::move(launch_session));
 
       // Arm the timer to expire this launch session if the client times out
@@ -583,6 +607,69 @@ namespace rtsp_stream {
       // §M.1.f race-condition — see remove() note.  Defensive auto-clear
       // reverted; clear() runs during normal stream-setup cleanup of stale
       // sessions and would wipe just-set owner_uuid.
+    }
+
+    /**
+     * @brief §M01-D A1：終止同一 client（TLS 憑證 UUID）殘留的 stream session。
+     *
+     * 做法照 clear(true)（/cancel、takeover 用的同一條持鎖 stop → join →
+     * erase 路徑），只挑 uuid 相符的 slot。先把所有相符的 slot 標記
+     * superseded 並 stop（讓它們並行收尾），第二輪再逐一 join → erase。
+     *
+     * 還沒 start 的 slot（state 仍是 STOPPED：cmd_announce 已 insert、
+     * session::start 還在跑）不能 join——videoThread 可能還是預設建構、
+     * 不可 join 的 std::thread，join 會丟 std::system_error。這種只標記
+     * superseded、記 log，不 stop 也不 join（交給既有的 ping timeout）。
+     *
+     * @return 被終止（已 join、移出清單）的 session 數。
+     */
+    int clear_for_client(const std::string &uuid, const char *via) {
+      if (uuid.empty()) {
+        return 0;
+      }
+
+      auto lg = _session_slots.lock();
+      const auto active_before = _session_slots->size();
+
+      std::vector<std::shared_ptr<stream::session_t>> stopped;
+      for (const auto &slot_p : *_session_slots) {
+        auto &slot = *slot_p;
+        if (stream::session::client_cert_uuid(slot) != uuid) {
+          continue;
+        }
+
+        if (stream::session::state(slot) == stream::session::state_e::STOPPED) {
+          stream::session::mark_superseded(slot);
+          BOOST_LOG(info) << "[VIPLE-MULTI] §M01-D stale session of uuid="sv << uuid
+                          << " has not started yet — marked superseded, not joined (before "sv
+                          << via << ')';
+          continue;
+        }
+
+        // 先標記再 stop：join 拆除 QUIC 閘門時要看得到 superseded（A2）。
+        stream::session::mark_superseded(slot);
+        stream::session::stop(slot);
+        stopped.push_back(slot_p);
+      }
+
+      for (const auto &slot_p : stopped) {
+        stream::session::join(*slot_p);
+        _session_slots->erase(slot_p);
+      }
+
+      if (!stopped.empty()) {
+        BOOST_LOG(info) << "[VIPLE-MULTI] §M01-D superseded "sv << stopped.size()
+                        << " stale session(s) of uuid="sv << uuid
+                        << " before "sv << via
+                        << " (active before="sv << active_before << ')';
+      }
+
+      // 最後一個參考在這裡釋放：若殭屍是最後一條 session，session_t 解構
+      // 會同步觸發 end_broadcast（QUIC listener 停止並釋放舊 cnx）。放在
+      // log 之後，讓 log 順序是 superseded → Listener stopped。
+      const int count = (int) stopped.size();
+      stopped.clear();
+      return count;
     }
 
     /**
@@ -670,6 +757,10 @@ namespace rtsp_stream {
 
   void terminate_sessions() {
     server.clear(true);
+  }
+
+  int terminate_sessions_for_client(const std::string &uuid, const char *via) {
+    return server.clear_for_client(uuid, via);
   }
 
   int send(tcp::socket &sock, const std::string_view &sv) {

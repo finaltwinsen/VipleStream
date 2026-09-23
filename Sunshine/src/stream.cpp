@@ -684,6 +684,17 @@ namespace stream {
     std::shared_ptr<tunnel_session::TunnelSession> tunnel;
     std::string remote_uuid;  ///< Peer UUID, used to allocate a tunnel flow.
 
+    // §M01-D 2026-09-23：建立這條 session 的 client 身分（TLS 憑證 UUID，
+    // 由 launch_session 複製；空 = 未知，例如 relay 的 HTTP 路徑）。alloc
+    // 寫一次後不再變動。rtsp.cpp 的 clear_for_client 以它挑出「同一 client
+    // 殘留的舊 session」。
+    std::string client_cert_uuid;
+
+    // §M01-D：被同一 client 的新 /resume、/launch 取代（rtsp.cpp 在 stop
+    // 之前標記）。join 拆除時若為 true，就把這條 session 擁有的 QUIC 連線
+    // 從 listener map 退役（見 quic_f3_on_session_end）。
+    std::atomic<bool> superseded {false};
+
     safe::mail_raw_t::event_t<bool> shutdown_event;
     safe::signal_t controlEnd;
 
@@ -2547,11 +2558,27 @@ namespace stream {
         quic_f3_gates.erase(it);
       }
       // 只清自己裝的（RTSP 位址與 ping 後的 video peer 位址都試一次）。
+      //
+      // §M01-D A2 2026-09-23：被同一 client 的新 /resume、/launch 取代的
+      // session（superseded），連它擁有的 QUIC 連線一起從 listener map
+      // 退役。為什麼：map 只以 IP 當 key，有其他 client 讓 broadcast 繼續
+      // 活著時（listener 不會跟著停），這條屬於已死 client 的 QuicSession
+      // 會留在 map 裡，新 session 用 getSession(IP) 就會撿到它——§Q-REMOTE
+      // Fix R.1 誤判而跳過 UDP audio ping、只走 UDP 的 client 被導進死連線。
+      // 只有「handler 確實是本 session 裝的」（clearRecvHandlerIfOwner 回
+      // true）才退役，不會動到別的 session 的連線。
+      // 前提：A1 在 /resume、/launch 的 HTTP 處理階段就收掉殘留 session，
+      // 此時新 client 的 QUIC 還沒連上（client 在 RTSP 之後才開 QUIC），
+      // map 裡這個 IP 的連線只可能是舊的。
+      // 鎖序：此處持有 quic_f3_mutex，retireSession 取 _sessionMutex——與
+      // 既有的 quic_f3_mutex → _sessionMutex 一致；呼叫端 rtsp.cpp 持有
+      // _session_slots（_session_slots → quic_f3_mutex → _sessionMutex）。
       if (quic_server::g_listener) {
+        const bool superseded = session.superseded.load(std::memory_order_acquire);
         for (const auto &a : {gate->addr, session.video.peer.address()}) {
           auto qs = quic_server::g_listener->getSession(a);
-          if (qs) {
-            qs->clearRecvHandlerIfOwner(gate.get());
+          if (qs && qs->clearRecvHandlerIfOwner(gate.get()) && superseded) {
+            quic_server::g_listener->retireSession(qs);
           }
         }
       }
@@ -3602,6 +3629,19 @@ namespace stream {
     constexpr auto TUNNEL_POLL = std::chrono::milliseconds(200);
 
     while (current_time - start_time < config::stream.ping_timeout) {
+      // §M01-D H1 2026-09-23：session 已被 stop（例如同一 client 重開時被
+      // §M01-D supersede、/cancel、takeover）就立刻放棄等待。舊版迴圈只看
+      // 時間：client 在 ANNOUNCE 之後、第一個 UDP ping 之前被殺時，video／
+      // audio 執行緒會一直卡到 ping_timeout 才結束，在 HTTP 執行緒上 join
+      // 的 /resume 因此被拖慢最多 ping_timeout（預設 10 s）；ping_timeout
+      // 設得比 10 s 長時更會觸發 join 的 Hang detector（debug_trap）。
+      // 每個 200 ms slice 檢查一次，join 最多多等一個 slice。
+      if (session->shutdown_event->peek()) {
+        BOOST_LOG(info) << "[VIPLE-MULTI] §M01-D recv_ping aborted — session stopping before first "
+                        << (type == socket_e::video ? "video"sv : "audio"sv) << " ping"sv;
+        return -1;
+      }
+
       try_register_tunnel_handler();
 
       auto delta_time = current_time - start_time;
@@ -3715,6 +3755,14 @@ namespace stream {
 
     state_e state(session_t &session) {
       return session.state.load(std::memory_order_relaxed);
+    }
+
+    const std::string &client_cert_uuid(session_t &session) {
+      return session.client_cert_uuid;
+    }
+
+    void mark_superseded(session_t &session) {
+      session.superseded.store(true, std::memory_order_release);
     }
 
     void stop(session_t &session) {
@@ -3875,12 +3923,13 @@ namespace stream {
       session.control.expected_peer_address = addr_string;
       BOOST_LOG(debug) << "Expecting incoming session connections from "sv << addr_string;
 
-      // Insert this session into the session list
-      {
-        auto lg = session.broadcast_ref->control_server._sessions.lock();
-        session.broadcast_ref->control_server._sessions->push_back(&session);
-      }
-
+      // §M01-D H2 2026-09-23：位址解析、video/audio peer、pingTimeout 與
+      // §F3 閘門全部在「放進控制執行緒的 session 清單」之前初始化，由
+      // _sessions 的 mutex 發布給 controlBroadcastThread。舊順序是先
+      // push_back 再寫這些欄位：控制執行緒在這段空檔看到的 pingTimeout
+      // 還是 epoch，會立刻走進 ping-timeout／§Q-SERVER-GRACE 分支，並與
+      // 這裡對 video.peer 的寫入競態（make_address 若丟例外，清單裡還會
+      // 留下一個懸空的 session 指標）。
       auto addr = boost::asio::ip::make_address(addr_string);
       session.video.peer.address(addr);
       session.video.peer.port(0);
@@ -3894,6 +3943,12 @@ namespace stream {
       // §F3：閘門必須在 video/audio 執行緒啟動前建好（見 quic_f3_prepare_gate）。
       quic_f3_prepare_gate(session, addr);
 #endif
+
+      // Insert this session into the session list
+      {
+        auto lg = session.broadcast_ref->control_server._sessions.lock();
+        session.broadcast_ref->control_server._sessions->push_back(&session);
+      }
 
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
@@ -3925,6 +3980,7 @@ namespace stream {
       session->shutdown_event = mail->event<bool>(mail::shutdown);
       session->launch_session_id = launch_session.id;
       session->remote_uuid = launch_session.unique_id;
+      session->client_cert_uuid = launch_session.client_cert_uuid;  // §M01-D
 
       session->config = config;
 

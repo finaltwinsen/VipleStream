@@ -1194,8 +1194,16 @@ namespace nvhttp {
       }
     }
 
+    // §M01-D A1 2026-09-23：同一個 client（同一張 TLS 憑證）重新 /launch
+    // 時先收掉它自己殘留的 stream session（事故說明見 resume()）。放在
+    // 擁有權區塊（503 deny）之後、session_count() 之前；current_appid == 0
+    // 時也要做（沒有 app 但仍可能有殘留 session）。takeover 分支上面已經
+    // terminate_sessions() 全收，這裡是 no-op。
+    rtsp_stream::terminate_sessions_for_client(caller_uuid, "/launch");
+
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     auto launch_session = make_launch_session(host_audio, args);
+    launch_session->client_cert_uuid = caller_uuid;  // §M01-D：A1／A3 的身分依據
 
     if (rtsp_stream::session_count() == 0) {
       // The display should be restored in case something fails as there are no other sessions.
@@ -1296,8 +1304,11 @@ namespace nvhttp {
     // §M.1.f.4 (2026-05-20) — owner 空 + app_running 是 idle watchdog 釋放
     // 後的孤兒狀態，視為「無主」放行（resume code path 下面在 no_active_sessions
     // 時會 reconfigure display + probe encoders 等同新 launch，由新 caller 接手）。
+    //
+    // §M01-D：caller_uuid 提到區塊外，下面 supersede 殘留 session 與標記
+    // launch_session 身分都要用。
+    const auto caller_uuid = caller_uuid_for(request);
     {
-      auto caller_uuid = caller_uuid_for(request);
       // §M.1.f.2 idle reconcile — refresh activity if caller is the owner.
       proc::proc.touch_activity(caller_uuid);
       auto owner_uuid = proc::proc.running_owner_uuid();
@@ -1335,6 +1346,19 @@ namespace nvhttp {
       return;
     }
 
+    // §M01-D A1 2026-09-23：同一個 client（同一張 TLS 憑證）重新 /resume
+    // 時，先收掉它自己殘留的 stream session。
+    // 事故：app 被強制關閉（沒送 /cancel、沒斷 ENet）後 10 s 內重開，舊
+    // session 仍在編碼；MP-QUIC 只以 IP 當 key，新 client 的 QUIC 一連上，
+    // 舊 session 的 P-frame（幀號數萬）就從新連線灌過去，新 session 的
+    // IDR 被 client 的 §FRZ-B1 isBefore32 當成過期幀丟掉 → -101；而且新
+    // client 的 QUIC 還會替舊 session 的 §Q-SERVER-GRACE 續命。
+    // 放在擁有權（403）與參數（400）檢查之後：deny 分支結果不變；放在
+    // session_count() 之前：殭屍若是最後一條，收掉後走 no_active_sessions
+    // 的 configure_display + probe_encoders，與「斷線後 resume」的正規路徑
+    // 相同。只收同一張憑證的 session，其他 client 不受影響。
+    rtsp_stream::terminate_sessions_for_client(caller_uuid, "/resume");
+
     // Newer Moonlight clients send localAudioPlayMode on /resume too,
     // so we should use it if it's present in the args and there are
     // no active sessions we could be interfering with.
@@ -1343,6 +1367,7 @@ namespace nvhttp {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
     const auto launch_session = make_launch_session(host_audio, args);
+    launch_session->client_cert_uuid = caller_uuid;  // §M01-D：A1／A3 的身分依據
 
     if (no_active_sessions) {
       // We want to prepare display only if there are no active sessions at

@@ -1684,6 +1684,34 @@ namespace quic_server {
     return nullptr;
   }
 
+  bool QuicListener::retireSession(const std::shared_ptr<QuicSession> &qs) {
+    if (!qs) {
+      return false;
+    }
+    bool found = false;
+    std::string key;
+    {
+      std::lock_guard<std::mutex> lock(_sessionMutex);
+      for (auto it = _sessions.begin(); it != _sessions.end(); ++it) {
+        if (it->second == qs) {
+          key = it->first;
+          // 先清 ready：sender 執行緒只讀 _ready，store 之後不再入隊。
+          // _cnx 不動（僅限 IO 執行緒），交給 picoquic idle timeout 回收。
+          qs->_ready.store(false, std::memory_order_release);
+          _sessions.erase(it);
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found) {
+      return false;
+    }
+    BOOST_LOG(info) << "[VIPLE-MPQUIC] §M01-D retired QUIC connection of superseded session (peer="
+                    << key << ")";
+    return true;
+  }
+
   void QuicListener::setSessionCallback(SessionCallback cb) {
     _sessionCallback = std::move(cb);
   }

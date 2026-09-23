@@ -435,6 +435,23 @@ namespace quic_server {
         const boost::asio::ip::address &clientAddr);
 
     /**
+     * §M01-D A2 2026-09-23：把 qs 從 session map 退役（以 value 比對，
+     * 找到就 erase 並設 _ready=false）。Thread-safe（取 _sessionMutex）。
+     *
+     * 用途：被同一 client 的新 /resume、/launch 取代的 stream session，
+     * 它的 QUIC 連線屬於已死的 client；map 只以 IP 當 key，留著會被
+     * 同 IP 的新 session 用 getSession() 撿走。
+     *
+     * 刻意不 close、不碰 _cnx（_cnx 僅限 IO 執行緒，§Q-CNX-ATOMIC-FIX）：
+     * cnx 交給 picoquic 的 idle timeout 回收；之後的 callback 以 _cnx 走訪
+     * map 找不到它，自然變成 no-op（與同 IP 重連被擠出的舊連線相同）。
+     * IO 執行緒只在 _sessionMutex 內 drain map 裡的 session，erase 之後
+     * 不會再碰它。
+     * @return 是否在 map 中找到並移除。
+     */
+    bool retireSession(const std::shared_ptr<QuicSession> &qs);
+
+    /**
      * Called when a new QUIC session is accepted (after handshake).
      */
     using SessionCallback = std::function<void(std::shared_ptr<QuicSession>)>;
