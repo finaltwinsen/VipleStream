@@ -390,7 +390,7 @@ namespace stream {
     /**
      * @brief §F4 2026-09-23：可指定 ENet channel 與 packet flags 的控制訊息送出。
      *
-     * 為什麼需要：3.0 的 haptics 等 S→C 即時訊息要走 ch 0x07
+     * 為什麼需要：2.0 的 haptics 等 S→C 即時訊息要走 ch 0x07
      * （CTRL_CHANNEL_VR，M1a 由 VipleVr.h 統一定義，這裡不重複定義）＋
      * ENET_PACKET_FLAG_UNSEQUENCED，不能排在 channel 0 reliable 佇列後面
      * 被重傳卡住（head-of-line blocking）。本項只提供介面，不新增任何
@@ -2217,7 +2217,7 @@ namespace stream {
   //
   // 舊版要等 videoBroadcastThread 第一次用 QUIC 送 video 才註冊 handler，
   // 在那之前 client 經 QUIC 送來的東西（flow 0x04 control fallback、
-  // stream #0 的 IDR request / FEC status / ping）全被丟掉。3.0 的 VR
+  // stream #0 的 IDR request / FEC status / ping）全被丟掉。2.0 的 VR
   // tracking 在 ENet 失效時要改走 flow 0x04，這個空窗必須消除。
   //
   // 改成兩個提早的註冊點，互補、不論先後都不漏：

@@ -1,9 +1,10 @@
-# VipleStream 3.0 架構：Steam Frame 桌面模式與 PCVR 串流
+# VipleStream 2.0 架構：Steam Frame 桌面模式與 PCVR 串流
 
 > 狀態：**設計定稿（2026-09-23）**，實作從 M0 開始。協定細節見 [`vr_protocol.md`](vr_protocol.md)。
 > 這份設計依 9 份平台／程式碼盤點，以及 3 位審查者（code-facts、vr-pipeline、ops-compliance）共 73 項意見修訂完成，處理紀錄見附錄 A。文中行號是撰寫當下的位置，實作時以原始碼為準。
 >
 > 使用者決策：Steam Frame 實機待出貨（先做不依賴實機的工作）；自建完整 PCVR 串流；PCVR server 只做 Windows；頭顯只做 Steam Frame（Android 不做 OpenXR，但 common-c 要對齊）。
+> 版號沿革：原規劃為 3.0，2026-09-23 使用者更正為 **2.0**（2.0.0）；本文件已全面改用 2.0。
 > 主機代號：`<host>` 是測試 server，`<dev-client>` 是開發機。
 
 **路徑縮寫（repo 相對路徑）**
@@ -50,7 +51,7 @@
    - 雙方都明確同意才啟用。
 8. **分期**：程式碼依序做 M0 → M1a → M2a → M1b → M3a → M4a → M5a。實機到手後，關卡依序以批次執行：G-α（M2b）、G-β（M3b）、G-rc（M4b）、GA（M5b）。
 9. **版號與發佈**：
-   - G-α 通過時切 3.0.0。從 3.0.0 起**六件 asset 為必備**。
+   - G-α 通過時切 2.0.0。從 2.0.0 起**六件 asset 為必備**。
    - 每次 push 和 GitHub release 都要使用者明確下令；release 流程在 `gh release` 前一律停下等使用者核准。
    - 測試產物只用 scp 在機器之間直傳，不上雲。
 10. **實機到手前能做的**：
@@ -116,7 +117,7 @@
 
 ### 1.1 桌面模式
 
-**3.0-α：平面 app，不寫 XR 程式碼**
+**2.0-α：平面 app，不寫 XR 程式碼**
 
 ```
 [Steam Frame / SteamOS aarch64]
@@ -133,7 +134,7 @@
    nvhttp → display_device（primary 或 VDD）→ DDA/WGC → NVENC → FEC → RTP 或 QUIC
 ```
 
-**3.0-β：OpenXR 虛擬螢幕**
+**2.0-β：OpenXR 虛擬螢幕**
 
 呈現端改成下面這樣，其餘和 α 相同：
 
@@ -158,7 +159,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 - (b) 同一個行程直接切換。
 - (c) 從 Steam 直接以 OpenXR app 身分啟動（非 overlay）。使用者在文件說明下自行建立 Steam 捷徑，參數走 CLI 或上次使用的設定。
 
-### 1.2 PCVR 模式（3.0-rc）
+### 1.2 PCVR 模式（2.0-rc）
 
 ```
 [Frame client]
@@ -223,7 +224,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 8. 跨行程同步不在 GPU 上等對方的 fence（§1.3）。
 9. SYSTEM 行程絕不寫入使用者可寫的路徑。使用者設定檔（`steamvr.vrsettings`、`openvrpaths.vrpath`）一律用使用者 token 經 `run_command` 修改。
 10. 非 Windows server：VR 程式碼編成 stub，`/serverinfo` 的 b1 固定為 0，linux-server `.deb` 必須能建置，而且 KMS 擷取的行為不變。
-11. 從 3.0.0 起，六件 asset 同一個版號。每一次 push 和 GitHub release 都要使用者明確下令。
+11. 從 2.0.0 起，六件 asset 同一個版號。每一次 push 和 GitHub release 都要使用者明確下令。
 
 ---
 
@@ -281,7 +282,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 - **幀與 metadata 的配對（取代 FIFO，只在 VR session）**：
   - `submitDecodeUnit` 設 `m_Pkt->pts = du->frameNumber`；VR session 建 decoder 時設 `avctx->pkt_timebase = {1,1000000}`，v4l2m2m 經 `v4l2_buffer.timestamp` 帶回時就是恆等換算。
   - vrMeta 存進以 frameNumber 為 key 的小型 map（64 格）。`avcodec_receive_frame` 之後用 `frame->pts` 查表；查不到就丟掉這一幀、不顯示，記 `[VIPLE-VR-FRAME] meta-miss`。同時把 `m_FrameInfoQueue` 中 frameNumber ≤ 命中值的項目清掉，讓統計佇列維持有界。
-  - `vrFlags==0` 時沿用原本的 FIFO（不變式 5）。桌面路徑是否也改成查表，列為 3.0 之後的獨立項目，要有 baseline。
+  - `vrFlags==0` 時沿用原本的 FIFO（不變式 5）。桌面路徑是否也改成查表，列為 2.0 之後的獨立項目，要有 baseline。
 - **Linux renderer 決策（F6 擴充）**：
   - `linuxVideoFrontend`（auto/vulkan/egl）**只決定 frontend**；`rendererSelection` **只決定 decoder cascade**。
   - auto 規則：aarch64，或 EGL vendor 是 Zink 時選 PlVk。同時決定 `isGpuSlow`：DRM driver 是 `msm`（Adreno/Turnip）就視為不慢。
@@ -344,7 +345,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
   - 本地指標 quad 每個 display frame 更新；統計 overlay 合成進桌面 quad。
   - OpenXR 不可用時，備援是 OpenVR `IVROverlay`。
 - **PoC-2b**（實機，Day 1）：從 gamescope openvr overlay 內的行程呼叫 `xrCreateSession`，進入 FOCUSED。觀察 overlay、dashboard 的行為，以及 gamescope 雷射滑鼠會不會和 XR 射線同時送出事件。依結果在 (a)、(b)、(c) 三種啟動形態中選一個預設值。
-- **UI**：3.0 的主機和 App 選擇留在平面 UI。
+- **UI**：2.0 的主機和 App 選擇留在平面 UI。
 
 ### 2.6 PCVR 呈現：reprojection 正確性清單
 
@@ -363,7 +364,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
    - 超過 100 ms 沒有新幀就開始淡出；超過 250 ms 切到本地 loading 環境（完全由頭顯本機追蹤驅動）；恢復時淡入。
    - `poseValid=0` 的幀（包含起播 dummy 黑幀）不進 projection layer。
    - `displayTime` 一律用 `predictedDisplayTime`。
-8. 3.0 不做 depth 和位置 reprojection，也不做 FRUC；XR 模式強制 SDR。
+8. 2.0 不做 depth 和位置 reprojection，也不做 FRUC；XR 模式強制 SDR。
 9. **DRM_PRIME 幀的生命週期**：每張 AVFrame 綁一個 timeline semaphore 值；確認 `pl_render_image` 對應的 GPU 工作完成之後才 unref，避免 v4l2m2m 把 buffer 重新交給 iris 後被覆寫。
 10. **latch**：rc 在 `xrBeginFrame` 之後立即取最新幀，並回報 latch slack（0x5507/08）；GA 改 late-latch。
 11. **色彩**：vr_probe 加灰階色帶比對，確認 client swapchain（SRGB）和 driver 合成器（依 DXGI 格式處理）之間沒有雙重 gamma。
@@ -542,7 +543,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 
 - 沿用 WASAPI loopback。driver 指定同一個 endpoint，避免和 `SW/audio.cpp:777-784` 互搶。
 - VR session 的 Opus 封包長度用 5 ms。
-- 麥克風不在 3.0 範圍（U8）。
+- 麥克風不在 2.0 範圍（U8）。
 
 ### 3.8 vrlink 共存、safe mode、升版、註銷
 
@@ -564,7 +565,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 
 - α、β 直接串 primary 或 `output_name` 指定的顯示器。
 - MTT VDD 模式範本放在 `Sunshine/src_assets/windows/misc/vdd_settings.frame.xml`（新增），並寫進 `docs/setup_guide.md`。
-- 動態 VDD 放到 3.0 之後。
+- 動態 VDD 放到 2.0 之後。
 
 ### 3.10 driver 部署（權限邊界）
 
@@ -606,9 +607,9 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 
 ## 5. 既有問題修正（前置工作，都不需要實機）
 
-| # | 問題 | 位置 | 為什麼是 3.0 前置 | 修法 |
+| # | 問題 | 位置 | 為什麼是 2.0 前置 | 修法 |
 |---|---|---|---|---|
-| F0 | §SELF-UPDATE 還沒 commit | `SS/self_update.{h,cpp}` 等 | 3.0 要改 updater | 先驗證再 commit，**備妥 1.5.276 release 候選，交使用者決定是否發佈**。完成條件包含「**使用者協助完成 service 模式 UAC 實測**」 |
+| F0 | §SELF-UPDATE 還沒 commit | `SS/self_update.{h,cpp}` 等 | 2.0 要改 updater | 先驗證再 commit，**備妥 1.5.276 release 候選，交使用者決定是否發佈**。完成條件包含「**使用者協助完成 service 模式 UAC 實測**」 |
 | F1 | Android common-c 漂移：`src/` 7 檔、**`enet/` 5 檔**；`isBefore16` 凍結 bug | `A/` | VR 依賴 ENet 的 unsequenced 和 throttle 行為 | Q 覆寫 A（`src/` 加 `enet/`）；`PlatformNetIf.h` 和確有平台差異的 enet 檔手動合併，並列入白名單；Pixel 5 回歸 15 分鐘；接上同步檢查 |
 | F2 | 256 B buffer 只有 `LC_ASSERT` 守 | `Q/ControlStream.c:798,817` | VR 封包 236 B | 改成 runtime 檢查 |
 | F3 | QUIC recv handler 註冊太晚 | `SS/stream.cpp:2407-2409` | fallback 期間訊息會被丟掉 | QUIC session 建立時就註冊 |
@@ -618,7 +619,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | F7 | `VIPLE_SMOOTH_PACING` 環境變數 | `SS/stream.cpp:2323-2326` | 違反規則 | 改成 config `smooth_pacing` |
 | F8 | aarch64 建置阻斷 | §2.1 | α 的前提 | §2.1（只放在 M2a） |
 | F9 | updater 不看架構與打包型態 | `MQ/backend/updater.cpp:118-148` | arm64 會下載 x64 AppImage | 精確比對後綴加架構；Flatpak 和 zip 先做「只通知」 |
-| F10 | `version.ps1` 沒有 `set`、沒有防護 | 本機 `build-tools/version.ps1:13-19,57-63` | 3.0.0 切版需要 | `set -Version`：純數字、單調遞增、冪等（已經是目標版號就只 propagate）。**防護寫成共用函式，bump 和 set 都要呼叫**：patch ≤ 999、minor ≤ 9，patch > 900 時先印警告。新增 propagate 目標 `SW/steamvr_driver/driver_version.h`（§6）。`docs/versioning.md`（進 git）記錄 set 的語意、防護條件、切版 SOP，本機 CLAUDE.md 的「跳過 bump」規則加上 set 的例外。單元測試腳本和 version.ps1 一起放在本機，並明確寫成本機限定 |
+| F10 | `version.ps1` 沒有 `set`、沒有防護 | 本機 `build-tools/version.ps1:13-19,57-63` | 2.0.0 切版需要 | `set -Version`：純數字、單調遞增、冪等（已經是目標版號就只 propagate）。**防護寫成共用函式，bump 和 set 都要呼叫**：patch ≤ 999、minor ≤ 9，patch > 900 時先印警告。新增 propagate 目標 `SW/steamvr_driver/driver_version.h`（§6）。`docs/versioning.md`（進 git）記錄 set 的語意、防護條件、切版 SOP，本機 CLAUDE.md 的「跳過 bump」規則加上 set 的例外。單元測試腳本和 version.ps1 一起放在本機，並明確寫成本機限定 |
 | F11 | `build_all.cmd` 漂移 | 本機 | 會無聲缺 driver | 改成呼叫單支腳本並帶 `--no-bump` |
 | F12 | Linux 依賴與 FFmpeg configure 不在 git | 本機腳本 | arm64 builder 拿不到 | 放進 `MQS/steamframe/`（只放在 M2a） |
 | F13 | ABR 降碼 forceIDR | `SS/video.cpp:2276` | VR 會卡頓 | 依 vrProfile 決定 |
@@ -627,26 +628,26 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | F16 | intra-refresh 只接 HEVC，而且要靠 SDP 開 | `nvenc_base.cpp:357-370`、`SS/rtsp.cpp:1006,1045` | VR 恢復協定 | §3.4（強制 IR、三種 codec、隨選 forced IR） |
 | F17 | 文件過期 | 文件 | 同步規則 | §6 |
 | F18 | `VIPLE_MPQUIC` 預設不一致 | `build_moonlight.cmd:19,83-87` | Frame 必須開；**S0 要用 `--mpquic` 建置** | T9 另外決定 Windows 的預設值 |
-| F19 | **（已取消）** CoworkMCP 任務圖會造成版號漂移。CoworkMCP 於 2026-09-23 停用，release 改走 §6 的手動流程，每次建置前核對 `version.ps1 get` 等於目標版號；以下為原始記錄 | `<CoworkMCP repo>/packages/worker/dispatch/{win,host,linux}.json`、`examples\viplestream-release.ts:53-67` | 3.0 發佈流程 | ① `bump-version` op 改成 `pwsh build-tools\version.ps1 set -Version ${version}`。② `win-client`、`win-server` 一律帶 `--no-bump`。③ 每個 build 任務開頭先斷言 `version.ps1 get == spec.version`，不相等就 fail。④ **finalize 前插入人工核准閘門**：coordinator 停下並回報 bb 摘要，等使用者說「發 release」。⑤ linux-arm64 op、host 的 `run-script`/`fetch-artifact`（非特權）寫進**真實 worker 設定**，不能只改範本（本次 coworkmcp 連線失敗，無法確認真實設定，列為待查）。⑥ 在 dry-run（`COWORK_DRYRUN=1`）和一次 1.5.x 實跑中驗證四件版號一致 |
+| F19 | **（已取消）** CoworkMCP 任務圖會造成版號漂移。CoworkMCP 於 2026-09-23 停用，release 改走 §6 的手動流程，每次建置前核對 `version.ps1 get` 等於目標版號；以下為原始記錄 | `<CoworkMCP repo>/packages/worker/dispatch/{win,host,linux}.json`、`examples\viplestream-release.ts:53-67` | 2.0 發佈流程 | ① `bump-version` op 改成 `pwsh build-tools\version.ps1 set -Version ${version}`。② `win-client`、`win-server` 一律帶 `--no-bump`。③ 每個 build 任務開頭先斷言 `version.ps1 get == spec.version`，不相等就 fail。④ **finalize 前插入人工核准閘門**：coordinator 停下並回報 bb 摘要，等使用者說「發 release」。⑤ linux-arm64 op、host 的 `run-script`/`fetch-artifact`（非特權）寫進**真實 worker 設定**，不能只改範本（本次 coworkmcp 連線失敗，無法確認真實設定，列為待查）。⑥ 在 dry-run（`COWORK_DRYRUN=1`）和一次 1.5.x 實跑中驗證四件版號一致 |
 
 - **α 需要**：F0、F6、F8、F9、F12（F14 看 PoC-7）。
 - **M1a 需要**：F2、F3、F4、F5。**M1b 需要**：F7、F13、F15、F16。
-- **3.0.0 切版前需要**：F10、F19。
+- **2.0.0 切版前需要**：F10、F19。
 - **發佈方式**：F 項從 1.5.276 起分批以「release 候選」形式備妥；每一次發佈都由使用者決定。
 
 ---
 
 ## 6. 建置、版號、發佈
 
-- **3.0.0 切版 SOP**
-  1. G-α 用 1.5.x 建置通過之後，執行 `pwsh build-tools\version.ps1 set -Version 3.0.0`，propagate，commit `v3.0.0: …`。所有 build 都帶 `--no-bump`。
+- **2.0.0 切版 SOP**
+  1. G-α 用 1.5.x 建置通過之後，執行 `pwsh build-tools\version.ps1 set -Version 2.0.0`，propagate，commit `v2.0.0: …`。所有 build 都帶 `--no-bump`。
   2. **六件 asset 全部重建之後，重跑一次縮短版驗證**：Frame 上的縮短版 G-α（decoder 那一行、5 分鐘 fps、兩次 `--help`）；Windows client 兩次 `--help`；Windows stream-quality 對照 baseline。
   3. 備妥 release 候選，交使用者決定是否 push 和發佈。
-  - **α-lite（只有軟體解碼）不切 3.0.0**，繼續出 1.5.x。
-  - versionCode 為 30000+x，由 F10 防護。
+  - **α-lite（只有軟體解碼）不切 2.0.0**，繼續出 1.5.x。
+  - versionCode 為 20000+x，由 F10 防護。
   - `vr_pcvr`：rc 以前預設 `disabled`；GA 改 `auto`。
 - **asset**
-  - **從 3.0.0 起六件為強制**：Win Client zip、Win Server zip、Android apk、`-linux-x64.AppImage`、`-linux-x64.deb`、`VipleStream-Client-X.Y.Z-linux-arm64.flatpak`（G-PKG 改 P2 時是 `-linux-arm64.zip`）。
+  - **從 2.0.0 起六件為強制**：Win Client zip、Win Server zip、Android apk、`-linux-x64.AppImage`、`-linux-x64.deb`、`VipleStream-Client-X.Y.Z-linux-arm64.flatpak`（G-PKG 改 P2 時是 `-linux-arm64.zip`）。
   - 本機 CLAUDE.md 的 Release 規範、必備 asset 表、「同版號」條款同步改成六件。
   - **builder 失效規則**：任何一件建置失敗，整個 release 暫停，不得用舊版 asset 頂替；例外必須由使用者明確同意，並記在 release notes。
   - Windows updater 只選不含 linux 的 `.zip`，x64 Linux 只選 `.AppImage`。
@@ -680,7 +681,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 
   **VR 的 server 端取證一律用 SSH 對完整 log 做 grep**（sunshine.log 與 SteamVR 的 vrserver.txt／vrcompositor.txt，脫敏後帶回），不只看尾段（§8.3）。
 - **文件**
-  - 新增：`docs/vr_architecture.md`、`docs/vr_protocol.md`（含不變式 2、參數格式）、`docs/steam_frame_client.md`（Day 0 過渡指引、log 回收 SOP、安裝範圍 `--user` 或 `--system` 等 PoC-1 確認後寫入）、`docs/steamvr_driver.md`（部署、註銷、手動移除）、`docs/releases/v3.0.0.md`。
+  - 新增：`docs/vr_architecture.md`、`docs/vr_protocol.md`（含不變式 2、參數格式）、`docs/steam_frame_client.md`（Day 0 過渡指引、log 回收 SOP、安裝範圍 `--user` 或 `--system` 等 PoC-1 確認後寫入）、`docs/steamvr_driver.md`（部署、註銷、手動移除）、`docs/releases/v2.0.0.md`。
   - 更新：`docs/building.md`、`docs/versioning.md`、`docs/log_tags.md`、`docs/rendering_paths.md`、`docs/setup_guide.md`、`docs/troubleshooting.md`、`docs/TODO.md`、README。
   - **docs 一律用 `<host>` 佔位，commit 前跑洩漏 grep。**
 
@@ -700,7 +701,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | **M4a rc 程式碼** | projection、tracking 兩種模式、LATCH 回授、控制器 skeleton 與 system 組合鍵、haptic 走 SDL 事件、stale 政策、色彩一致 | M1b、M3a | 否 | S1 projection 對 <host> 跑通；500 ms 斷線注入；kill server 注入 | 5–6 週 |
 | **M5a GA 程式碼** | WAN QUIC VR 政策與 buffer、pacer（VsyncEvent，視 PoC-10）、late-latch、QP foveation、L1（視 PoC） | M4a | 部分 | GA 門檻的非實機部分 | 4–6 週 |
 | **實機關卡批次** | G-α（M2b）→ G-PKG → G-β（M3b）→ G-rc（M4b）→ GA（M5b） | 對應的 a 段 | 是 | 下表 | 合計 4–6 週 |
-| 3.0 之後 | 動態 VDD、麥克風、XR 內 Qt UI、sub-frame、幾何 foveation、Linux PCVR server、桌面 pts 查表 | — | — | — | — |
+| 2.0 之後 | 動態 VDD、麥克風、XR 內 Qt UI、sub-frame、幾何 foveation、Linux PCVR server、桌面 pts 查表 | — | — | — | — |
 
 - **單人順序**：M0 → M1a → M2a → M1b → M3a → M4a → M5a。實機到手時 G-α 所需的程式碼大致已完成，關卡依批次插入。總計約 **37–48 週**。比草案多出的部分來自這次審查新增的範圍：恢復協定、時鐘與頻率鎖、IPC 強化、註銷、Linux stub、控制器 skeleton 等。
 - **雙人**：
@@ -720,7 +721,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | 關卡 | 通過條件 | 失敗時 |
 |---|---|---|
 | **G-BUILD**（M0） | 量到 qemu 的乾淨建置和增量建置時間；增量 ≤ 45 分鐘 | 在 M0 決定 U7 採購 |
-| **G-α** | log 顯示 `decoder=hevc_v4l2m2m fmt=DRM_PRIME frontend=PlVk isGpuSlow=0 fullscreenFlag=<預期> matchVideo=<預期>`；1080p60、1440p60（以及 HMD Hz）各跑 15 分鐘：≥ 目標 fps×0.99、解碼 p95 ≤ 10 ms、stutter < 5%；overlay 內 UI、滑鼠、鍵盤可用（F14 視 PoC-7）；`--help` 兩次 rc=0 | 沒有 `/dev/video*`：先換 P2 → 再不行出 α-lite（不切 3.0.0）。v4l2m2m 異常：L1 提前。overlay 太糊：把 β 提前 |
+| **G-α** | log 顯示 `decoder=hevc_v4l2m2m fmt=DRM_PRIME frontend=PlVk isGpuSlow=0 fullscreenFlag=<預期> matchVideo=<預期>`；1080p60、1440p60（以及 HMD Hz）各跑 15 分鐘：≥ 目標 fps×0.99、解碼 p95 ≤ 10 ms、stutter < 5%；overlay 內 UI、滑鼠、鍵盤可用（F14 視 PoC-7）；`--help` 兩次 rc=0 | 沒有 `/dev/video*`：先換 P2 → 再不行出 α-lite（不切 2.0.0）。v4l2m2m 異常：L1 提前。overlay 太糊：把 β 提前 |
 | **G-PKG** | P1 沙箱內能拿到 `/dev/video*`，而且 OpenXR runtime 能載入 | β/rc 改 P2 |
 | **G-β** | PoC-2b 定出啟動形態；XR session 進入 FOCUSED；frame loop miss < 1%；沒有 Wayland 時走 offscreen，decoder 經由 XR_READY 建立；XR 失敗注入依不變式 5 處理；1440p 文字可讀；指標延遲 ≤ 1 個 display frame | 沒有 `vulkan_enable2`：改 `enable`。dmabuf 匯入失敗：泛化 importer，或走 L3。OpenXR 不可用：IVROverlay |
 | **G-DRV**（<host>） | DirectMode 取幀正確；1 小時無 Desync；poseFallback ≤ 1%；`GetFrameTiming` 下沒有半速；**空間驗證**：vr_probe 分別用 Seated、Standing、RawAndUncalibrated 取 pose，涵蓋 Reset seated position 和 PC 上已有 lighthouse chaperone 的情境，space-delta 修正後偏差 < 0.5°；**kill-server 注入**：SteamVR 在 1 秒內回到 standby；重啟 20 次 | 改 VirtualDisplay 的 FrameSource：derivedPose 門檻另訂，poseFallback 不計入 |
@@ -834,7 +835,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | U9 | Valve 方案能不能在 Frame 看完整 Windows 桌面 |
 | C15（critic） | Frame 帳號（steamos 或 steamvr），影響 `/dev/video*` 權限和 Flatpak 安裝範圍 |
 | `vrDegradedPolicy` 預設值 | G-rc A/B |
-| 其他 | 控制器預設 Touch 或 Index；`steam://launch/<id>/VR` 和 vrmanifest 的行為；`loadPriority`；Frame 能不能對我們的 app 關閉 motion smoothing；β 是否隱藏 server 游標；T9；arm64 自我更新；VR 設定放在 Web UI 哪一頁；sniper SDK；Frame 桌面模式（非 VR）是否也改用 intra 恢復（3.0 之後） |
+| 其他 | 控制器預設 Touch 或 Index；`steam://launch/<id>/VR` 和 vrmanifest 的行為；`loadPriority`；Frame 能不能對我們的 app 關閉 motion smoothing；β 是否隱藏 server 游標；T9；arm64 自我更新；VR 設定放在 Web UI 哪一頁；sniper SDK；Frame 桌面模式（非 VR）是否也改用 intra 恢復（2.0 之後） |
 
 ---
 
@@ -870,7 +871,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | 24 | code-facts | minor | 採納：GA 時 buffer ≥ 1024 格，加 `jb-overflow` 計數（§3.5） |
 | 25 | code-facts | minor | 採納：不變式 5 改寫、`opaque_ref` 掛載加 `if` 閘門、baseline（§1.4、§2.4） |
 | 26 | vr-pipeline | blocker | 採納（和第 1 項合併）：LOSS、forced IR、REFRESH_START 加 b7、VR cooldown 300 ms、PoC-3b、G-rc 三種門檻形式 |
-| 27 | vr-pipeline | blocker | 採納：`m_Pkt->pts=frameNumber`、`pkt_timebase`、查表、meta-miss 時丟幀、注入測試。**第 5 點（桌面也改）不在 3.0 採納**：不變式 5 要求 `vrFlags==0` 時行為不變，列為 3.0 之後的項目（§2.3） |
+| 27 | vr-pipeline | blocker | 採納：`m_Pkt->pts=frameNumber`、`pkt_timebase`、查表、meta-miss 時丟幀、注入測試。**第 5 點（桌面也改）不在 2.0 採納**：不變式 5 要求 `vrFlags==0` 時行為不變，列為 2.0 之後的項目（§2.3） |
 | 28 | vr-pipeline | major | 採納：`startConnectionAsync` 前段 bring-up、fallback 分兩段、寫進不變式 5（C22、§2.4） |
 | 29 | vr-pipeline | major | 採納：server 端 offset 對映、poseTimeOffset、T_sv、HMD 和控制器分開設上限、b5 提前到 rc（§3.1、§3.5、§4.3） |
 | 30 | vr-pipeline | major | 採納：G-DRV 空間矩陣、UniverseId、space-delta 修正、client space-mismatch 偵測（§2.6、§3.1） |
@@ -897,7 +898,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | 51 | ops-compliance | blocker | 採納首選：改放 `<install>\config\steamvr\<ver>\`，加上 owner/DACL/reparse/hash 檢查、fail closed，寫進不變式 6（C25、§3.10） |
 | 52 | ops-compliance | major | 採納：a/b 拆段、關卡不放在依賴鏈上、單人和雙人工期、F8/F12 只留在 M2a（§7） |
 | 53 | ops-compliance | major | 採納（和第 4 項合併）：stub、b1=0、Linux baseline 和 `.deb` 納入完成條件（§3.11、不變式 10） |
-| 54 | ops-compliance | major | 採納：3.0.0 起六件強制、刪掉 M5 的重複說法、builder 失效規則、同步修改本機 CLAUDE.md（§6） |
+| 54 | ops-compliance | major | 採納：2.0.0 起六件強制、刪掉 M5 的重複說法、builder 失效規則、同步修改本機 CLAUDE.md（§6） |
 | 55 | ops-compliance | major | 採納：F19（set 冪等、`--no-bump`、版號斷言、真實 worker 設定、dry-run）。真實設定因 coworkmcp 連線失敗未能確認，列為待查（C28、F19） |
 | 56 | ops-compliance | major | 兩個做法都採納：propagate 產生 `driver_version.h`，Stage 再比對 FileVersion（§6、F10） |
 | 57 | ops-compliance | major | 採納：`build-steamframe.sh --arch/--flavor`、`build_moonlight --openxr`、「沒有腳本路徑不能當證據」（§2.1、§8.1） |
@@ -908,7 +909,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | 62 | ops-compliance | major | 採納大部分：vendor `openvr.h`/`openvr_api`、`VrProbe-dev.zip` 走 relay、apps.json 登記、`--vr-selftest`、vanilla VM。**部分不採納「CMake 獨立 target」**：vr_probe 改由 `Build-SteamVRDriver.ps1 -Target probe`（MSVC）建置，因為 `openvr_api` 是 MSVC 產物，而且和 driver 的工具鏈一致（D7）；server 的 MinGW/CMake 不受影響（§3.1、§8.1） |
 | 63 | ops-compliance | major | 採納：M0 的 G-BUILD、ccache、lockhash 快取、隔離安裝、relay 加 git apply（§2.2、§6） |
 | 64 | ops-compliance | minor | 採納：共用防護函式、>900 警告、`versioning.md`、測試腳本標成本機限定（F10） |
-| 65 | ops-compliance | minor | 採納：切版後重跑縮短版 G-α、α-lite 不切 3.0.0、安裝範圍等 PoC-1（§6） |
+| 65 | ops-compliance | minor | 採納：切版後重跑縮短版 G-α、α-lite 不切 2.0.0、安裝範圍等 PoC-1（§6） |
 | 66 | ops-compliance | minor | 採納：腳本不碰網路、<dev-client> 拉回、`<host>` 佔位、Day 0 措辭（§6、§7） |
 | 67 | ops-compliance | minor | 採納：人工核准閘門、「備妥候選交使用者決定」、F0 的 UAC 條件（F0、F19、不變式 11） |
 | 68 | ops-compliance | minor | 採納：LICENSE-OpenVR、THIRD_PARTY_NOTICES、`/MT` 加 dumpbin、Flatpak licenses（§6、§2.2） |

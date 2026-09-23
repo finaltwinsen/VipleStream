@@ -831,9 +831,9 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
         PNVCTL_ENET_PACKET_HEADER_V2 packet;
         char tempBuffer[256];
 
-        // §F2（3.0 M0）：明文用固定 256 B 的 stack buffer 組裝，上游只靠
+        // §F2（2.0 M0）：明文用固定 256 B 的 stack buffer 組裝，上游只靠
         // LC_ASSERT 把關——release 建置的 LC_ASSERT 是空巨集，超長 payload
-        // 會直接 memcpy 溢位 stack。3.0 的 VR tracking（0x5506）加 V2 header
+        // 會直接 memcpy 溢位 stack。2.0 的 VR tracking（0x5506）加 V2 header
         // 共 236 B，已逼近上限，所以改成 runtime 檢查：超長就記 log、回傳
         // false、不送出。上限維持上游斷言的「嚴格小於」（payload ≤ 251 B），
         // 與 docs/vr_protocol.md §4.3／§4.5 的「上限 251 B」一致。
@@ -846,7 +846,7 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
         //
         // 呼叫端語意：false 一律代表「這則訊息沒送出」。現有呼叫端的
         // payload 長度都是編譯期固定且遠小於上限（最大是 input，
-        // MAX_INPUT_PACKET_SIZE 128 + 4 B），此分支對它們不可達；3.0 新增的
+        // MAX_INPUT_PACKET_SIZE 128 + 4 B），此分支對它們不可達；2.0 新增的
         // VR 送出 API 必須把 false 當成「丟棄這筆樣本」，不可據此終止連線。
         if (paylen < 0 || sizeof(*packet) + (size_t)paylen >= sizeof(tempBuffer)) {
             // 節流：前 10 次都印，之後每 1000 次印一次（VR tracking 最高

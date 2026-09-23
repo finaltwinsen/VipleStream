@@ -1,4 +1,4 @@
-# VipleStream 3.0 VR 協定擴充
+# VipleStream 2.0 VR 協定擴充
 
 > 狀態：**設計定稿（2026-09-23）**，架構背景見 [`vr_architecture.md`](vr_architecture.md)。
 > 所有擴充都在雙方明確協商後才啟用，vanilla Moonlight／Sunshine 與舊版 VipleStream 的行為不變。
@@ -123,16 +123,16 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 rsv                           
 
 | client ↔ server | 結果 | 保證機制 |
 |---|---|---|
-| 3.0 Frame ↔ vanilla Sunshine 或 1.5.x VipleStream | 沒有 `<VipleStreamVR>` → 只有平面或 XR 桌面模式 | client 閘門 |
-| vanilla Moonlight（含 Flathub 版）或 Android ↔ 3.0 server | 一般 session；標準 `/applist` **不含** `vr` 類 app；帶 `IsVr` 的一般 app 照舊以平面啟動；直接 launch `vr` 類 app 會收到明確錯誤 | `/applist?vr=1`、launch 檢查 |
-| 1.5.x client ↔ 3.0 server | 同上 | 閘門不看 `isVipleStreamPeer` |
-| Android 3.0（common-c 已對齊）↔ 3.0 server | 一般 session，`vrFlags=0` | — |
-| 任何 client ↔ 3.0 **Linux** server | b1=0，不會啟用 VR | stub |
-| 3.0 ↔ 3.0，主機沒有 SteamVR 或 `vr_pcvr=disabled` | b1=0 | serverinfo |
+| 2.0 Frame ↔ vanilla Sunshine 或 1.5.x VipleStream | 沒有 `<VipleStreamVR>` → 只有平面或 XR 桌面模式 | client 閘門 |
+| vanilla Moonlight（含 Flathub 版）或 Android ↔ 2.0 server | 一般 session；標準 `/applist` **不含** `vr` 類 app；帶 `IsVr` 的一般 app 照舊以平面啟動；直接 launch `vr` 類 app 會收到明確錯誤 | `/applist?vr=1`、launch 檢查 |
+| 1.5.x client ↔ 2.0 server | 同上 | 閘門不看 `isVipleStreamPeer` |
+| Android 2.0（common-c 已對齊）↔ 2.0 server | 一般 session，`vrFlags=0` | — |
+| 任何 client ↔ 2.0 **Linux** server | b1=0，不會啟用 VR | stub |
+| 2.0 ↔ 2.0，主機沒有 SteamVR 或 `vr_pcvr=disabled` | b1=0 | serverinfo |
 | VR session 進行中，其他裝置要 launch 或 resume | 503 busy | VR 獨佔 |
-| 3.0 ↔ 3.0，PCVR，直連 | 啟用（rc：RTP） | 兩段協商 |
-| 3.0 ↔ 3.0，PCVR，**經 relay** | rc：`VR_TRANSPORT_UNSUPPORTED`；GA：啟用（QUIC VR 政策） | `vrlaunchparams` 共用 |
-| Windows 3.0 client ↔ 3.0，啟動 `IsVr` app | 警告後可平面啟動 | §2.8 |
+| 2.0 ↔ 2.0，PCVR，直連 | 啟用（rc：RTP） | 兩段協商 |
+| 2.0 ↔ 2.0，PCVR，**經 relay** | rc：`VR_TRANSPORT_UNSUPPORTED`；GA：啟用（QUIC VR 政策） | `vrlaunchparams` 共用 |
+| Windows 2.0 client ↔ 2.0，啟動 `IsVr` app | 警告後可平面啟動 | §2.8 |
 
 ### 4.8 三份 common-c 要改的檔案與同步檢查
 

@@ -1,6 +1,6 @@
 #pragma once
 
-// §F9（VipleStream 3.0 M0 前置）：client updater 依「作業系統＋架構＋打包型態」
+// §F9（VipleStream 2.0 M0 前置）：client updater 依「作業系統＋架構＋打包型態」
 // 精確選 release asset。
 //
 // 舊規則（updater.cpp 舊版 selectAssetForPlatform）的問題：

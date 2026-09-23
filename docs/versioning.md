@@ -69,7 +69,7 @@ Sunshine 那一列的 regex 也認得 v1.2.43 改名以前的 `project(VipleStre
 - `1.2.12` → `12012`
 - `1.3.0`  → `13000`
 - `2.0.0`  → `20000`
-- `3.0.0`  → `30000`
+- `2.0.0`  → `20000`
 
 此公式保證每次 minor 進位必然 > 上一個 minor 的任何 patch，符合 Play Store 要求的
 單調遞增。前提是 **minor ≤ 9 且 patch ≤ 999**，超過就會碰撞：
@@ -107,11 +107,11 @@ Bump 會**先算出新版號、過 §3.5 防護、再寫 `version.json`、最後
 ### 3.2 set（直接設定版號，§F10）
 
 ```powershell
-pwsh build-tools\version.ps1 set -Version 3.0.0
+pwsh build-tools\version.ps1 set -Version 2.0.0
 ```
 
 `bump` 是相對操作（每跑一次就再加一），`set` 是絕對、冪等的操作，專門用在：
-切 major/minor 版（例如 3.0.0，見 §5）。切版一律照 §5 手動執行（CoworkMCP 已於 2026-09-23
+切 major/minor 版（例如 2.0.0，見 §5）。切版一律照 §5 手動執行（CoworkMCP 已於 2026-09-23
 停用，原本規劃的任務圖修正 F19 隨之取消）。
 
 | 目標版號 vs 目前版號 | 行為 |
@@ -122,9 +122,9 @@ pwsh build-tools\version.ps1 set -Version 3.0.0
 | 目標 **>** 目前 | 過 §3.5 防護 → 寫 `version.json` → propagate |
 
 - **格式**：純數字三段 `X.Y.Z`。不接受 `v` 前綴、預發行尾綴（`-rc1`）、前導零
-  （`03.0.0`、`3.00.0`）、第四段、全形數字；每段最多 9 位數（這只是解析層，確保轉成
+  （`02.0.0`、`2.00.0`）、第四段、全形數字；每段最多 9 位數（這只是解析層，確保轉成
   `[int]` 不溢位；實際可接受的範圍是 §3.5 的防護：major ≤ 255、minor ≤ 9、patch ≤ 999）。
-- **防護擋不住「打錯但合法」的版號**：想打 `3.0.0` 卻打成 `30.0.0`，所有防護都會放行，
+- **防護擋不住「打錯但合法」的版號**：想打 `2.0.0` 卻打成 `20.0.0`，所有防護都會放行，
   而且 `set` 拒絕降版，事後不能再 `set` 回來。所以 `set` 之後一定要核對 stdout 印出的版號
   （以及 stderr 的 `舊版號 -> 新版號`），發現打錯就照 §5 第 2 步的方式回復。
 - **參數組合**：`-Version` 只能搭配 `set`（`bump -Version …` 會被拒，`reason=version-without-set`）；
@@ -211,27 +211,27 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File build-tools\test_version.ps1 -Fixt
 **重點：** 單獨跑任何一個 build script 會做完整的 propagate，所以各專案的版號
 永遠同步，不會因為只 build 其中一個而 drift。
 
-## 5. 切版 SOP（major / minor，例：3.0.0）
+## 5. 切版 SOP（major / minor，例：2.0.0）
 
 用 `set` 定版，之後**這一版 release 的所有建置（到發佈完成為止）都帶 `--no-bump`**。
-不帶的話第一支 build script 就會把 3.0.0 bump 成 3.0.1，後面幾件的版號就對不上了。
+不帶的話第一支 build script 就會把 2.0.0 bump 成 2.0.1，後面幾件的版號就對不上了。
 發佈完成後的日常建置恢復預設的 bump（第 6 步）。
 
 切版一律照本節手動執行。
 
-1. **前提**：要切版的功能已經用 1.x 版號建置、驗證通過（3.0.0 的前提是 G-α 通過，
+1. **前提**：要切版的功能已經用 1.x 版號建置、驗證通過（2.0.0 的前提是 G-α 通過，
    見 `docs/vr_architecture.md` §6）；工作樹乾淨、`version.json` 停在最後一個 1.5.x。
 2. **定版**：
    ```powershell
-   pwsh build-tools\version.ps1 set -Version 3.0.0     # stdout 應為 3.0.0
+   pwsh build-tools\version.ps1 set -Version 2.0.0     # stdout 應為 2.0.0
    git diff --stat                                      # 只應有 version.json 與下游檔
    ```
-   **先核對 stdout 印出的版號**：防護擋不住打錯但合法的版號（例：`30.0.0`），而且 `set`
+   **先核對 stdout 印出的版號**：防護擋不住打錯但合法的版號（例：`20.0.0`），而且 `set`
    拒絕降版，不能再 `set` 回來。commit 之前發現打錯，就用
    `git checkout version.json` 還原 SSOT，再跑 `pwsh build-tools\version.ps1 propagate`
    把下游（含 `driver_version.h`）一起改回來，然後重做這一步。
-3. **commit**：`version.json` 與下游檔放在同一個 commit，主旨 `v3.0.0: …`。
-4. **建置**（全部 `--no-bump`；前後都用 `version.ps1 get` 確認仍是 3.0.0）：
+3. **commit**：`version.json` 與下游檔放在同一個 commit，主旨 `v2.0.0: …`。
+4. **建置**（全部 `--no-bump`；前後都用 `version.ps1 get` 確認仍是 2.0.0）：
    ```cmd
    build_sunshine.cmd --no-bump
    build_moonlight.cmd --no-bump
@@ -241,7 +241,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File build-tools\test_version.ps1 -Fixt
    仍是目標版號。
 5. **驗證**：全部 asset 重建之後重跑縮短版驗證（見 `docs/vr_architecture.md` §6），再備妥 release
    候選，由使用者決定是否 push 和發佈。
-6. **之後**：這一版發佈完成後，日常建置恢復預設（bump patch：3.0.1、3.0.2…）。
+6. **之後**：這一版發佈完成後，日常建置恢復預設（bump patch：2.0.1、2.0.2…）。
 
 注意：`set` 本身是冪等的，第 2 步重跑不會出錯；但絕對不要用「連跑幾次 `bump`」來湊目標版號。
 

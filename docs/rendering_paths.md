@@ -4,7 +4,7 @@
 (Sunshine) 在 **Windows / Linux / Android** 三個 ship target 上完整的「解碼 →
 補幀 → 顯示」管線。
 
-**Steam Frame 欄位是佔位**：標「3.0 規劃中」的內容來自 3.0 設計定稿，尚未實作，
+**Steam Frame 欄位是佔位**：標「2.0 規劃中」的內容來自 2.0 設計定稿，尚未實作，
 細節與變更一律以 [`vr_architecture.md`](vr_architecture.md)（§2.1、§2.3、§2.4）為準。
 實作落地時把該欄改成實際狀態，並拿掉「規劃中」字樣。
 
@@ -14,7 +14,7 @@
 
 ## 1. 解碼器路徑（Decoder × Platform）
 
-| Codec / Mode | Windows | Linux | Android | Steam Frame（3.0 規劃中，見 `vr_architecture.md` §2.3） |
+| Codec / Mode | Windows | Linux | Android | Steam Frame（2.0 規劃中，見 `vr_architecture.md` §2.3） |
 |---|---|---|---|---|
 | H.264 SW | libavcodec (FFmpeg n8.0.1) | 同左 | 同左 | 同左（L4 保底：只保證桌面 1080p60，PCVR 拒絕） |
 | H.264 HW（default） | DXVA2 / D3D11VA + NVDEC | VAAPI / VDPAU / V4L2 (RPi) | MediaCodec | cgutman FFmpeg `h264_v4l2m2m` → DRM_PRIME（L2） |
@@ -29,7 +29,7 @@
 
 ## 2. Renderer 類別（IFFmpegRenderer subclass × Platform）
 
-| Renderer | Windows | Linux | Android | macOS | Steam Frame（3.0 規劃中，見 `vr_architecture.md` §2.3–2.4） | 用途 |
+| Renderer | Windows | Linux | Android | macOS | Steam Frame（2.0 規劃中，見 `vr_architecture.md` §2.3–2.4） | 用途 |
 |---|---|---|---|---|---|---|
 | `SdlRenderer` | ✓ fallback | ✓ fallback | — | ✓ | fallback | 軟體 SDL2 blit |
 | `D3D11VARenderer` | ✓ **default**（RS_AUTO cascade 首選；選 RS_D3D11 時強制）| — | — | — | — | DXVA2/D3D11VA HW decode + present |
@@ -44,7 +44,7 @@
 | `CUDARenderer` | — | (disabled，§J.3.e issue #1314) | — | — | — | ffnvcodec interop（已被 VDPAU/Vulkan 取代）|
 | `GenericHwAccelRenderer` | — | ✓ 通用 ffmpeg hwaccel | — | — | — | 通用 hwaccel passthrough |
 | `VulkanVideoRenderer` | 只編譯，未接進 renderer cascade（僅 `ncnnfruc.cpp` 的 §J.3.b probe 會建立）| —（`app.pro` 只在 `win32:!winrt` 區塊編譯）| — | — | — | §J.3.b 純 vkCmdDecodeVideoKHR skeleton；實際的 Vulkan Video 解碼走 FFmpeg `*_vulkan` hwaccel（§J.3.f） |
-| `XrRenderer`（3.0 新增） | 規劃：S2 開發模擬（`build_moonlight.cmd --openxr`） | 規劃：x86_64 dev 版對 Monado（S1） | — | — | **β／PCVR frontend**（OpenXR quad／projection） | 依賴 `streaming/xr/` 的 XrContext（該目錄只在 `CONFIG+=openxr` 時編譯） |
+| `XrRenderer`（2.0 新增） | 規劃：S2 開發模擬（`build_moonlight.cmd --openxr`） | 規劃：x86_64 dev 版對 Monado（S1） | — | — | **β／PCVR frontend**（OpenXR quad／projection） | 依賴 `streaming/xr/` 的 XrContext（該目錄只在 `CONFIG+=openxr` 時編譯） |
 | `VTBaseRenderer` (vt_avsamplelayer / vt_metal) | — | — | — | ✓ | — | macOS VideoToolbox |
 | Android Vulkan (`VkBackend.java` + `vk_backend.c`) | — | — | ✓ §I.D opt-in | — | — | `debug.viplestream.vkprobe=1` 啟用 |
 | Android GLES (`FrucRenderer.java` 內建)| — | — | ✓ default | — | — | MediaCodec → SurfaceTexture → GLES |
@@ -113,7 +113,7 @@ compute pipeline + 可選 RIFE Phase B（§J.3.e.2.e2）注入 ncnn::Net forward
 
 ## 4. Display / Swapchain × Platform
 
-| 機制 | Windows | Linux | Android | Steam Frame（3.0 規劃中，見 `vr_architecture.md` §1.1、§2.4） |
+| 機制 | Windows | Linux | Android | Steam Frame（2.0 規劃中，見 `vr_architecture.md` §1.1、§2.4） |
 |---|---|---|---|---|
 | D3D11 swapchain | ✓ D3D11VARenderer | — | — | — |
 | Vulkan WSI（Win32 surface ext） | ✓ PlVk / VkFruc | — | — | — |
@@ -123,14 +123,14 @@ compute pipeline + 可選 RIFE Phase B（§J.3.e.2.e2）注入 ncnn::Net forward
 | EGL（X11 / GBM） | — | ✓ EGLRenderer | — | 可選 |
 | GLES via SDL | ✓ SdlRenderer | ✓ SdlRenderer | — | fallback |
 | AHardwareBuffer + GLES Surface | — | — | ✓ MediaCodec output | — |
-| OpenXR swapchain（`XR_KHR_vulkan_enable2`，3.0 新增） | 規劃：S2 開發模擬 | 規劃：S1 Monado | — | β／PCVR：XrRenderer |
+| OpenXR swapchain（`XR_KHR_vulkan_enable2`，2.0 新增） | 規劃：S2 開發模擬 | 規劃：S1 Monado | — | β／PCVR：XrRenderer |
 | VideoToolbox CALayer（macOS 用） | — | — | — | — |
 
 ---
 
 ## 5. HDR support × Platform
 
-| 階段 | Windows | Linux | Android | Steam Frame（3.0 規劃中） |
+| 階段 | Windows | Linux | Android | Steam Frame（2.0 規劃中） |
 |---|---|---|---|---|
 | HDR10 swapchain（A2B10G10R10 + ST.2084） | ✓ via PlVkRenderer / VkFrucRenderer §I HDR2 | ✓ 同源 code | ✓ §I HDR1 Android 13+ | 未規劃；XR 模式與 VR 編碼 profile 固定 8-bit SDR（`vr_architecture.md` §2.6、§3.4） |
 | BT.2020 1000nits metadata（`vkSetHdrMetadataEXT`） | ✓ | ✓ if compositor 支援 | ✓ Surface API | 同上 |
@@ -150,7 +150,7 @@ compute pipeline + 可選 RIFE Phase B（§J.3.e.2.e2）注入 ncnn::Net forward
 | Windows | `RS_AUTO`（實際多半落在 D3D11VARenderer；FRUC backend 預設 Generic） | 切 RS_VULKAN → VkFrucRenderer + Vulkan HW decode + FRUC + DUAL（v1.3.336 起） | RS_AUTO：D3D11VA（D3D11VARenderer）→ Vulkan（GPU 有 Vulkan video decode queue 時，PlVkRenderer 當 backend）→ DXVA2（DXVA2Renderer）→ D3D11VA 重試 → SW decode。SW decode 的 renderer 是 PlVkRenderer；Vulkan 被判定為慢、或選了 RS_D3D11（只在 decoder 沒列出 pix_fmts 的路徑檢查，原生 h264／hevc 屬於這種）時才改用 SdlRenderer。RS_VULKAN：Vulkan hwaccel＋VkFrucRenderer init 失敗 → 回到同一條 cascade（D3D11VA → DXVA2 → SW decode） |
 | Linux | `RS_AUTO`：backend 依 hw_config 順序挑 VAAPIRenderer／VDPAURenderer，GPU 有 Vulkan video decode queue 時也可能是 PlVkRenderer；frontend 由 `createFrontendRenderer` 決定（見表下「Linux RS_AUTO」）。出貨的 x64 AppImage 沒有 DrmRenderer（❷） | RS_VULKAN → Vulkan hwaccel 解碼 + VkFrucRenderer 補幀 | backend：hwaccel 全部失敗 → SW decode（DrmRenderer〔慢 GPU〕→ PlVkRenderer〔Vulkan 不慢時〕→ SdlRenderer）。frontend：alternate frontend 不成 → backend 能直接顯示就用它，否則 DrmRenderer〔慢 GPU〕→ EGLRenderer〔GL 慢時才在這裡試〕→ SdlRenderer |
 | Android | GLES (`FrucRenderer.java`) | `debug.viplestream.vkprobe=1` opt-in 切 VkBackend | VkBackend init 失敗 → SIGSEGV canary 落回 GLES |
-| Steam Frame（3.0 規劃中，見 `vr_architecture.md` §2.3） | `RS_AUTO` + `linuxVideoFrontend=auto`（aarch64 → PlVk），這組預設寫進 G-α | 沒有 Vulkan Video 的裝置要快速略過 Vulkan hwaccel、記 log 後退回 cascade | L2 v4l2m2m DRM_PRIME → L3 mmap 上傳 → L4 軟體解碼；β 的 XrRenderer 失敗退 PlVk 平面 |
+| Steam Frame（2.0 規劃中，見 `vr_architecture.md` §2.3） | `RS_AUTO` + `linuxVideoFrontend=auto`（aarch64 → PlVk），這組預設寫進 G-α | 沒有 Vulkan Video 的裝置要快速略過 Vulkan hwaccel、記 log 後退回 cascade | L2 v4l2m2m DRM_PRIME → L3 mmap 上傳 → L4 軟體解碼；β 的 XrRenderer 失敗退 PlVk 平面 |
 
 **Linux RS_AUTO**（`ffmpeg.cpp` 的 `createHwAccelRenderer`、`createFrontendRenderer`、
 `tryInitializeRendererForUnknownDecoder`）：
@@ -162,7 +162,7 @@ compute pipeline + 可選 RIFE Phase B（§J.3.e.2.e2）注入 ncnn::Net forward
   都不成，才退回上表 Fallback 欄的一般 frontend 選法。
 - 所以「SDR 下 PlVkRenderer 不會被優先挑成 frontend」只適用於 alternate-frontend 分支。在 RS_AUTO 下，
   PlVkRenderer 仍會以 Vulkan hwaccel backend 或 SW 解碼 renderer 的身分出現。
-- 3.0 的 F6（`linuxVideoFrontend`）會改這裡的 frontend 決策，落地時同 commit 更新本段。
+- 2.0 的 F6（`linuxVideoFrontend`）會改這裡的 frontend 決策，落地時同 commit 更新本段。
 
 ---
 
@@ -205,6 +205,6 @@ compute pipeline + 可選 RIFE Phase B（§J.3.e.2.e2）注入 ncnn::Net forward
 - 新增 IFFmpegRenderer subclass → 加進 §2 Renderer 表
 - 新增 IFrucBackend → 加進 §3.a 表
 - 新增 ship target（macOS / FreeBSD / Pi 5 等）→ 加 column
-- Steam Frame（3.0）規劃項目實作或設計變更 → 更新各表的 Steam Frame 欄，落地的格子拿掉「規劃」字樣
+- Steam Frame（2.0）規劃項目實作或設計變更 → 更新各表的 Steam Frame 欄，落地的格子拿掉「規劃」字樣
 - 改 default renderer / FRUC 順序 → 更新 §6
 - 修 Linux / 其他平台 build bug → 對應條目進 §8

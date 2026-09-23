@@ -330,7 +330,7 @@ Linux 兩件要在 Linux x64 機器上建（Ubuntu 26.04 驗證過）。入口�
   腳本的 `NCNN_PREFIX`（預設 `~/.local/ncnn`）實際上只用來設 `LD_LIBRARY_PATH`，讓 linuxdeploy 找到並打包
   `libncnn.so`；腳本雖然也把它傳給 qmake，但 `app.pro` 沒有讀這個變數（腳本註解寫的 "app.pro honors it" 是錯的）。
   ncnn 裝在 `/usr/local` 時跑一次 `sudo ldconfig` 即可，不必設 `NCNN_PREFIX`。讓 `app.pro` 改讀 `NCNN_PREFIX`
-  屬於 3.0 的 F8／C2（[`vr_architecture.md`](vr_architecture.md) §2.1）。
+  屬於 2.0 的 F8／C2（[`vr_architecture.md`](vr_architecture.md) §2.1）。
 - `vkfruc.cpp` 還會 include `<ncnn/stb_image_write.h>`，但原始碼建的 ncnn 不會安裝這個標頭；要另外裝
   `libstb-dev`，做法見 `app.pro` 裡 §K.X 那段註解。
 - 連結的是真正的 SDL2（不是 sdl2-compat），腳本會把它打包進 AppImage。
@@ -356,7 +356,7 @@ Linux 兩件要在 Linux x64 機器上建（Ubuntu 26.04 驗證過）。入口�
   `git clone`／`git pull` 就能避開。
 - 長時間建置用 `nohup setsid … &` 背景跑再輪詢 log，避免 SSH 斷線把建置一起帶走。
 - 產物用 scp 拉回 Windows 開發機的 `release\`，核對 sha256；測試產物不上雲，只有正式 release 才上 GitHub。
-- **Linux arm64（Steam Frame client，3.0 規劃中）**：預計新增 `moonlight-qt/scripts/build-steamframe.sh`
+- **Linux arm64（Steam Frame client，2.0 規劃中）**：預計新增 `moonlight-qt/scripts/build-steamframe.sh`
   產 Flatpak，見 [`vr_architecture.md`](vr_architecture.md) §2.1、§6。
 
 ## 8. 為什麼要這麼死守 script？

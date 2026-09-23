@@ -1,6 +1,6 @@
 ﻿#requires -Version 5
 <#
-  §F1（VipleStream 3.0 M0 前置修正）：三份 moonlight-common-c 同步檢查
+  §F1（VipleStream 2.0 M0 前置修正）：三份 moonlight-common-c 同步檢查
 
   專案裡有三份 moonlight-common-c：
     Q  = moonlight-qt/moonlight-common-c/moonlight-common-c/              （正本）
@@ -9,7 +9,7 @@
 
   為什麼要有這支檢查：A 曾經長期落後 Q（src/ 7 檔、enet/ 5 檔），其中
   RtpVideoQueue.c 的 isBefore16 迴繞 bug（§FRZ-B1）已在 Q 修掉，Android 卻
-  一直帶著會永久凍結畫面的舊版。3.0 的 VR 協定又依賴 ENet 的 unsequenced 與
+  一直帶著會永久凍結畫面的舊版。2.0 的 VR 協定又依賴 ENet 的 unsequenced 與
   throttle 行為，兩端 ENet 若悄悄分岔，VR 會以很難追的方式壞掉。所以同步
   必須由 build 把關，不能靠人記得。
 
