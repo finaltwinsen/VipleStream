@@ -7,24 +7,51 @@
 #include <QJsonObject>
 #include <QSettings>
 #include <QDateTime>
+#include <QRegularExpression>
 
-// VIPLE §perf — autoupdate cache window.  GitHub Releases API has a 60
-// req/hour unauthenticated rate limit per IP; one request per app launch is
-// well within that, but users who restart the app multiple times in a day
-// (testing builds, quick reconnects) burn requests for no value.  24h is
-// plenty for an "is there a new release" check.
+// §UPDATE-HEAD（2026-09-22）：自動更新檢查重寫。
+//
+// 舊版問題：每次啟動先把時間戳寫進 QSettings，24 小時內不再查 GitHub，
+// 無論上次結果或有沒有成功——1.5.275 發佈當天另一台 1.5.271 就是這樣
+// 看不到新版。
+//
+// 新設計：
+// 1. 主要通道：HEAD https://github.com/<repo>/releases/latest。GitHub 網頁
+//    端回 302，Location 就是 /releases/tag/<tag>。這不走 REST API，不吃
+//    匿名 60 次/小時/IP 的配額，也不用抓 15 KB JSON。
+// 2. 備援通道：REST API /releases/latest（帶 If-None-Match 條件請求）。
+//    注意：**匿名條件請求即使回 304 仍然計入配額**（GitHub 文件明寫只有
+//    帶 Authorization 的請求才免計；本機實測 304 每次 x-ratelimit-used +1），
+//    ETag 只省傳輸量。403/429 時讀 x-ratelimit-reset / retry-after 存成
+//    notBefore，之前不再打 API。
+// 3. debounce 5 分鐘（時鐘倒退視為過期），只擋連續重啟；時間戳只在
+//    「HTTP 交換成功」後寫，失敗下次啟動照樣重試。
+// 4. 不打網路（debounce／back-off／失敗／304）時一律用上次成功存下的
+//    latestVersion 判斷，未升級者每次啟動都會再看到提示。
+// 5. 提示以 queued 方式 emit，讓同步（快取）與非同步（網路）路徑對 QML
+//    看起來一致（main.qml 先 connect 再 start()）。
 #define AUTOUPDATE_LAST_CHECK_KEY      "autoupdate/lastCheckUnixSec"
-#define AUTOUPDATE_CACHE_WINDOW_SEC    (24 * 60 * 60)
+#define AUTOUPDATE_NOT_BEFORE_KEY      "autoupdate/notBeforeUnixSec"
+#define AUTOUPDATE_ETAG_KEY            "autoupdate/etag"
+#define AUTOUPDATE_LATEST_VERSION_KEY  "autoupdate/latestVersion"
+#define AUTOUPDATE_LATEST_URL_KEY      "autoupdate/latestUrl"
+#define AUTOUPDATE_DEBOUNCE_SEC        (5 * 60)
+
+static const char* kReleasesLatestPage = "https://github.com/finaltwinsen/VipleStream/releases/latest";
+static const char* kReleasesLatestApi  = "https://api.github.com/repos/finaltwinsen/VipleStream/releases/latest";
 
 AutoUpdateChecker::AutoUpdateChecker(QObject *parent) :
-    QObject(parent)
+    QObject(parent),
+    m_Nam(nullptr),
+    m_Phase(Phase::Idle)
 {
     m_Nam = new QNetworkAccessManager(this);
 
     // Never communicate over HTTP
     m_Nam->setStrictTransportSecurityEnabled(true);
 
-    // Allow HTTP redirects
+    // Allow HTTP redirects by default (the HEAD probe overrides this per
+    // request with ManualRedirectPolicy so we can read the Location).
     m_Nam->setRedirectPolicy(QNetworkRequest::NoLessSafeRedirectPolicy);
 
     connect(m_Nam, &QNetworkAccessManager::finished,
@@ -40,52 +67,38 @@ AutoUpdateChecker::AutoUpdateChecker(QObject *parent) :
 
 void AutoUpdateChecker::start()
 {
-    // VipleStream Phase A — query GitHub Releases API for the latest tag
-    // and compare with the embedded VERSION_STR.  Replaces the upstream
-    // moonlight-stream.org/updates/qt.json check (no longer applicable;
-    // VipleStream releases live on the fork's GitHub repo).
-    //
-    // Endpoint contract (subset we read):
-    //   {
-    //     "tag_name":  "v1.3.312",            // strip leading 'v'
-    //     "html_url":  "https://github.com/.../releases/tag/v1.3.312",
-    //     "draft":     false,
-    //     "prerelease":false
-    //   }
-    //
-    // Notes:
-    //   - We hand the user the release page URL (not the asset download
-    //     URL) so they can read the release notes + breaking-change
-    //     warnings before grabbing the zip.
-    //   - We don't filter `assets[]` per platform — VipleStream's PC
-    //     client only ships Windows zips today; if/when other platforms
-    //     ship, the matching click goes to the release page anyway.
-    //   - GitHub unauthenticated rate limit is 60 req/hour/IP.  One
-    //     request per process launch is well within that.
     if (!m_Nam) {
         Q_ASSERT(m_Nam);
         return;
     }
+    if (m_Phase != Phase::Idle) {
+        return;  // 已在查
+    }
 
-    // VIPLE §perf — skip the GitHub API request if we already checked in the
-    // last 24 hours.  Cuts startup latency by ~50-300ms (no DNS + TLS + GET)
-    // and keeps us well clear of GitHub's 60 req/hour anonymous rate limit
-    // even when the user restarts the app many times a day.  The signal we
-    // skip (offering an update prompt) is at most ~24h late, which is fine.
     {
         QSettings settings;
-        qint64 lastCheck = settings.value(AUTOUPDATE_LAST_CHECK_KEY, 0).toLongLong();
-        qint64 now = QDateTime::currentSecsSinceEpoch();
-        if (lastCheck > 0 && now - lastCheck < AUTOUPDATE_CACHE_WINDOW_SEC) {
-            qDebug() << "AutoUpdateChecker: skipping (last check"
-                     << (now - lastCheck) << "sec ago, cache window"
-                     << AUTOUPDATE_CACHE_WINDOW_SEC << "sec)";
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        const qint64 lastCheck = settings.value(AUTOUPDATE_LAST_CHECK_KEY, 0).toLongLong();
+        const qint64 notBefore = settings.value(AUTOUPDATE_NOT_BEFORE_KEY, 0).toLongLong();
+        m_CachedEtag = settings.value(AUTOUPDATE_ETAG_KEY).toString();
+
+        const qint64 age = now - lastCheck;
+        if (lastCheck > 0 && age < 0) {
+            qWarning() << "AutoUpdateChecker: clock went backwards (last check"
+                       << (-age) << "sec in the future) — treating as expired";
+        }
+        if (lastCheck > 0 && age >= 0 && age < AUTOUPDATE_DEBOUNCE_SEC) {
+            qDebug() << "AutoUpdateChecker: debounced (last check" << age
+                     << "sec ago); using cached result";
+            evaluateCachedLatest("debounce");
             return;
         }
-        // Record the attempt now (not after the reply) so a failed/dropped
-        // request still respects the cache window — we don't want a flaky
-        // network to mean we hammer GitHub on every restart.
-        settings.setValue(AUTOUPDATE_LAST_CHECK_KEY, now);
+        if (notBefore > now && notBefore - now < 24 * 60 * 60) {
+            qDebug() << "AutoUpdateChecker: rate-limit back-off until" << notBefore
+                     << "(" << (notBefore - now) << "sec); using cached result";
+            evaluateCachedLatest("back-off");
+            return;
+        }
     }
 
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0) && QT_VERSION < QT_VERSION_CHECK(5, 15, 1) && !defined(QT_NO_BEARERMANAGEMENT)
@@ -96,26 +109,67 @@ void AutoUpdateChecker::start()
     QT_WARNING_POP
 #endif
 
-    QUrl url("https://api.github.com/repos/finaltwinsen/VipleStream/releases/latest");
-    QNetworkRequest request(url);
+    sendHeadLatest();
+}
+
+void AutoUpdateChecker::sendHeadLatest()
+{
+    m_Phase = Phase::HeadLatest;
+    QNetworkRequest request{QUrl(QString::fromLatin1(kReleasesLatestPage))};
+    request.setRawHeader("User-Agent", "VipleStream-Qt-AutoUpdateChecker/2.0");
+    // 我們要的就是那個 302 的 Location，不要 Qt 自動跟過去（跟過去會抓整頁 HTML）
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+    qDebug() << "AutoUpdateChecker: HEAD" << kReleasesLatestPage;
+    m_Nam->head(request);
+}
+
+void AutoUpdateChecker::sendApiLatest()
+{
+    m_Phase = Phase::ApiLatest;
+    QNetworkRequest request{QUrl(QString::fromLatin1(kReleasesLatestApi))};
     // GitHub recommends sending the API version + a JSON Accept header.
     request.setRawHeader("Accept", "application/vnd.github+json");
     request.setRawHeader("X-GitHub-Api-Version", "2022-11-28");
-    request.setRawHeader("User-Agent", "VipleStream-Qt-AutoUpdateChecker/1.0");
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, true);
-#else
-    request.setAttribute(QNetworkRequest::HTTP2AllowedAttribute, true);
-#endif
+    request.setRawHeader("User-Agent", "VipleStream-Qt-AutoUpdateChecker/2.0");
+    if (!m_CachedEtag.isEmpty()) {
+        // 條件請求：內容沒變回 304（空 body）。匿名下仍計配額，只省傳輸量。
+        request.setRawHeader("If-None-Match", m_CachedEtag.toUtf8());
+    }
+    qDebug() << "AutoUpdateChecker: GET" << kReleasesLatestApi
+             << (m_CachedEtag.isEmpty() ? "(no ETag)" : "(If-None-Match)");
     m_Nam->get(request);
 }
 
-void AutoUpdateChecker::parseStringToVersionQuad(QString& string, QVector<int>& version)
+void AutoUpdateChecker::finishNam()
 {
-    QStringList list = string.split('.');
-    for (const QString& component : std::as_const(list)) {
-        version.append(component.toInt());
+    // Delete the QNetworkAccessManager to free resources and
+    // prevent the bearer plugin from polling in the background.
+    m_Phase = Phase::Idle;
+    if (m_Nam) {
+        m_Nam->deleteLater();
+        m_Nam = nullptr;
     }
+}
+
+bool AutoUpdateChecker::parseStringToVersionQuad(const QString& string, QVector<int>& version)
+{
+    // 只接受「數字.數字[.數字...]」；tag 帶後綴（-rc1、a）或非版號字串
+    // 一律回 false，避免把 0 當成版本快取起來。
+    version.clear();
+    const QStringList list = string.split('.');
+    if (list.size() < 2) {
+        return false;
+    }
+    for (const QString& component : list) {
+        bool ok = false;
+        const int value = component.toInt(&ok);
+        if (!ok || value < 0) {
+            version.clear();
+            return false;
+        }
+        version.append(value);
+    }
+    return true;
 }
 
 QString AutoUpdateChecker::getPlatform()
@@ -133,7 +187,7 @@ QString AutoUpdateChecker::getPlatform()
 #endif
 }
 
-int AutoUpdateChecker::compareVersion(QVector<int>& version1, QVector<int>& version2) {
+int AutoUpdateChecker::compareVersion(const QVector<int>& version1, const QVector<int>& version2) {
     for (int i = 0;; i++) {
         int v1Val = 0;
         int v2Val = 0;
@@ -159,25 +213,180 @@ int AutoUpdateChecker::compareVersion(QVector<int>& version1, QVector<int>& vers
     }
 }
 
+void AutoUpdateChecker::evaluateCachedLatest(const char* reason)
+{
+    QSettings settings;
+    const QString latestVersion = settings.value(AUTOUPDATE_LATEST_VERSION_KEY).toString();
+    const QString latestUrl = settings.value(AUTOUPDATE_LATEST_URL_KEY).toString();
+    if (latestVersion.isEmpty() || latestUrl.isEmpty()) {
+        qDebug() << "[AutoUpdateChecker]" << reason << "— no cached release yet";
+        return;
+    }
+    compareAndNotify(latestVersion, latestUrl, reason);
+}
+
+bool AutoUpdateChecker::storeAndNotify(const QString& latestVersion, const QString& releasePageUrl, const char* source)
+{
+    QVector<int> quad;
+    if (!parseStringToVersionQuad(latestVersion, quad)) {
+        qWarning() << "[AutoUpdateChecker] latest tag not version-like, not caching:" << latestVersion << "(" << source << ")";
+        return false;
+    }
+    {
+        QSettings settings;
+        settings.setValue(AUTOUPDATE_LATEST_VERSION_KEY, latestVersion);
+        settings.setValue(AUTOUPDATE_LATEST_URL_KEY, releasePageUrl);
+    }
+    compareAndNotify(latestVersion, releasePageUrl, source);
+    return true;
+}
+
+void AutoUpdateChecker::compareAndNotify(const QString& latestVersion, const QString& releasePageUrl, const char* source)
+{
+    QVector<int> latestVersionQuad;
+    if (!parseStringToVersionQuad(latestVersion, latestVersionQuad)) {
+        qWarning() << "[AutoUpdateChecker] cached latest not version-like:" << latestVersion;
+        return;
+    }
+
+    const int res = compareVersion(m_CurrentVersionQuad, latestVersionQuad);
+    if (res < 0) {
+        qDebug() << "[AutoUpdateChecker] update available (" << source << ") — current"
+                 << QString(VERSION_STR) << "→ latest" << latestVersion;
+        // queued：debounce／back-off 路徑是在 start() 內同步走到這裡，
+        // 排到事件迴圈後再 emit，和網路路徑一致。
+        QMetaObject::invokeMethod(this, [this, latestVersion, releasePageUrl]() {
+            emit onUpdateAvailable(latestVersion, releasePageUrl);
+        }, Qt::QueuedConnection);
+    }
+    else if (res > 0) {
+        qDebug() << "[AutoUpdateChecker] running ahead of latest release ("
+                 << QString(VERSION_STR) << ">" << latestVersion << "," << source << ") — skip";
+    }
+    else {
+        qDebug() << "[AutoUpdateChecker] up to date (" << latestVersion << "," << source << ")";
+    }
+}
+
 void AutoUpdateChecker::handleUpdateCheckRequestFinished(QNetworkReply* reply)
 {
     Q_ASSERT(reply->isFinished());
+    switch (m_Phase) {
+    case Phase::HeadLatest:
+        handleHeadReply(reply);
+        break;
+    case Phase::ApiLatest:
+        handleApiReply(reply);
+        break;
+    default:
+        reply->deleteLater();
+        finishNam();
+        break;
+    }
+}
 
-    // Delete the QNetworkAccessManager to free resources and
-    // prevent the bearer plugin from polling in the background.
-    m_Nam->deleteLater();
-    m_Nam = nullptr;
+void AutoUpdateChecker::handleHeadReply(QNetworkReply* reply)
+{
+    const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QUrl location = reply->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl();
+    const QNetworkReply::NetworkError err = reply->error();
+    reply->deleteLater();
+
+    // 期望：3xx + Location = https://github.com/<repo>/releases/tag/<tag>
+    if (err == QNetworkReply::NoError && httpStatus >= 300 && httpStatus < 400 && location.isValid()) {
+        const QUrl absolute = QUrl(QString::fromLatin1(kReleasesLatestPage)).resolved(location);
+        static const QRegularExpression tagRe(QStringLiteral("/releases/tag/([^/?#]+)$"));
+        const QRegularExpressionMatch m = tagRe.match(absolute.path());
+        if (m.hasMatch()) {
+            QString latestVersion = QUrl::fromPercentEncoding(m.captured(1).toUtf8());
+            if (latestVersion.startsWith(QLatin1Char('v')) || latestVersion.startsWith(QLatin1Char('V'))) {
+                latestVersion = latestVersion.mid(1);
+            }
+            {
+                QSettings settings;
+                settings.setValue(AUTOUPDATE_LAST_CHECK_KEY, QDateTime::currentSecsSinceEpoch());
+            }
+            qDebug() << "[AutoUpdateChecker] HEAD" << httpStatus << "→" << absolute.toString();
+            if (storeAndNotify(latestVersion, absolute.toString(), "head")) {
+                finishNam();
+                return;
+            }
+            // tag 不像版號：退回 API 拿 JSON 再判斷
+        }
+        else {
+            qDebug() << "[AutoUpdateChecker] HEAD redirect not a tag URL:" << absolute.toString();
+        }
+    }
+    else {
+        qDebug() << "[AutoUpdateChecker] HEAD failed (status" << httpStatus << "):"
+                 << (err == QNetworkReply::NoError ? "unexpected response" : reply->errorString());
+    }
+
+    // 備援：REST API（帶 ETag）
+    sendApiLatest();
+}
+
+void AutoUpdateChecker::handleApiReply(QNetworkReply* reply)
+{
+    const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray remaining = reply->rawHeader("x-ratelimit-remaining");
+
+    if (httpStatus == 304) {
+        // 內容沒變。成功的檢查：記時間戳，用快取結果判斷。
+        reply->deleteLater();
+        QSettings settings;
+        settings.setValue(AUTOUPDATE_LAST_CHECK_KEY, QDateTime::currentSecsSinceEpoch());
+        const bool haveCache = !settings.value(AUTOUPDATE_LATEST_VERSION_KEY).toString().isEmpty() &&
+                               !settings.value(AUTOUPDATE_LATEST_URL_KEY).toString().isEmpty();
+        qDebug() << "[AutoUpdateChecker] API 304 Not Modified (rate-limit remaining" << remaining << ")";
+        if (!haveCache) {
+            // ETag 有、快取沒有（被清掉）：丟掉 ETag，下次走完整 GET 自癒
+            settings.remove(AUTOUPDATE_ETAG_KEY);
+            settings.remove(AUTOUPDATE_LAST_CHECK_KEY);
+            qDebug() << "[AutoUpdateChecker] 304 but no cached release — dropping ETag";
+        }
+        evaluateCachedLatest("304");
+        finishNam();
+        return;
+    }
 
     if (reply->error() != QNetworkReply::NoError) {
         // Quiet failure: don't pop a dialog if the user is offline
         // / behind a captive portal / GitHub is rate-limiting us.
-        // Logged to qDebug so a developer can grep on demand.
-        qDebug() << "[AutoUpdateChecker] HTTP failure (silent):"
-                 << reply->errorString();
+        // 不寫時間戳：下次啟動照樣重試（HEAD 通道先試）。
+        if (httpStatus == 403 || httpStatus == 429) {
+            // 匿名配額耗盡：依 x-ratelimit-reset（epoch 秒）或 retry-after（秒）back-off
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            qint64 notBefore = 0;
+            const qint64 reset = reply->rawHeader("x-ratelimit-reset").toLongLong();
+            const qint64 retryAfter = reply->rawHeader("retry-after").toLongLong();
+            if (reset > now) notBefore = reset;
+            else if (retryAfter > 0) notBefore = now + retryAfter;
+            else notBefore = now + 15 * 60;
+            QSettings settings;
+            settings.setValue(AUTOUPDATE_NOT_BEFORE_KEY, notBefore);
+            qDebug() << "[AutoUpdateChecker] API rate limited (status" << httpStatus
+                     << ", remaining" << remaining << ") — API back-off until" << notBefore;
+        }
+        else {
+            qDebug() << "[AutoUpdateChecker] API failure (silent, status" << httpStatus << "):"
+                     << reply->errorString();
+        }
         reply->deleteLater();
+        // 快取是上次成功的結果，離線時拿來提示不會有假陽性
+        evaluateCachedLatest("error");
+        finishNam();
         return;
     }
 
+    // HTTP 交換成功：先記時間戳（body 能不能解析是另一回事，debounce 不該失效）
+    {
+        QSettings settings;
+        settings.setValue(AUTOUPDATE_LAST_CHECK_KEY, QDateTime::currentSecsSinceEpoch());
+        settings.remove(AUTOUPDATE_NOT_BEFORE_KEY);
+    }
+
+    const QByteArray etag = reply->rawHeader("ETag");
     QString jsonString;
     {
         QTextStream stream(reply);
@@ -191,27 +400,30 @@ void AutoUpdateChecker::handleUpdateCheckRequestFinished(QNetworkReply* reply)
     reply->deleteLater();
 
     QJsonParseError error;
-    QJsonDocument jsonDoc = QJsonDocument::fromJson(jsonString.toUtf8(), &error);
+    const QJsonDocument jsonDoc = QJsonDocument::fromJson(jsonString.toUtf8(), &error);
     if (jsonDoc.isNull() || !jsonDoc.isObject()) {
-        qWarning() << "[AutoUpdateChecker] release JSON malformed:"
-                   << error.errorString();
+        qWarning() << "[AutoUpdateChecker] release JSON malformed:" << error.errorString();
+        evaluateCachedLatest("bad-json");
+        finishNam();
         return;
     }
 
-    QJsonObject release = jsonDoc.object();
+    const QJsonObject release = jsonDoc.object();
 
     // Skip drafts and pre-releases — they shouldn't ever be returned
     // by /releases/latest, but defensive parse nonetheless.
     if (release.value("draft").toBool(false) ||
             release.value("prerelease").toBool(false)) {
         qDebug() << "[AutoUpdateChecker] latest release flagged draft/prerelease — skip";
+        finishNam();
         return;
     }
 
-    QString tagName = release.value("tag_name").toString();
-    QString releasePageUrl = release.value("html_url").toString();
+    const QString tagName = release.value("tag_name").toString();
+    const QString releasePageUrl = release.value("html_url").toString();
     if (tagName.isEmpty() || releasePageUrl.isEmpty()) {
         qWarning() << "[AutoUpdateChecker] release JSON missing tag_name or html_url";
+        finishNam();
         return;
     }
 
@@ -222,24 +434,19 @@ void AutoUpdateChecker::handleUpdateCheckRequestFinished(QNetworkReply* reply)
         latestVersion = latestVersion.mid(1);
     }
 
-    QVector<int> latestVersionQuad;
-    parseStringToVersionQuad(latestVersion, latestVersionQuad);
-    if (latestVersionQuad.isEmpty()) {
-        qWarning() << "[AutoUpdateChecker] tag_name not a version-like string:" << tagName;
-        return;
+    {
+        QSettings settings;
+        if (!etag.isEmpty()) {
+            settings.setValue(AUTOUPDATE_ETAG_KEY, QString::fromUtf8(etag));
+        }
+        else {
+            settings.remove(AUTOUPDATE_ETAG_KEY);
+        }
     }
+    qDebug() << "[AutoUpdateChecker] API 200 OK — latest" << latestVersion
+             << (etag.isEmpty() ? "(no ETag header)" : "(ETag stored)")
+             << "rate-limit remaining" << remaining;
 
-    int res = compareVersion(m_CurrentVersionQuad, latestVersionQuad);
-    if (res < 0) {
-        qDebug() << "[AutoUpdateChecker] update available — current"
-                 << QString(VERSION_STR) << "→ latest" << latestVersion;
-        emit onUpdateAvailable(latestVersion, releasePageUrl);
-    }
-    else if (res > 0) {
-        qDebug() << "[AutoUpdateChecker] running ahead of latest release ("
-                 << QString(VERSION_STR) << ">" << latestVersion << ") — skip";
-    }
-    else {
-        qDebug() << "[AutoUpdateChecker] up to date (" << latestVersion << ")";
-    }
+    storeAndNotify(latestVersion, releasePageUrl, "200");
+    finishNam();
 }

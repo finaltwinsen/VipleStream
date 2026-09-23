@@ -16,9 +16,9 @@
 #include <shellapi.h>
 #endif
 
-// GitHub 對未認證 IP 限 60 req/hr；只在 startUpdate() 內主動觸發一次，
-// 與 AutoUpdateChecker 的 24h cache 各自獨立，但兩者不會在同一秒同 IP
-// 超過該限額。
+// GitHub 對未認證 IP 限 60 req/hr；只在 startUpdate()（使用者點更新）內
+// 主動觸發一次。AutoUpdateChecker（§UPDATE-HEAD）平常走 github.com 網頁端的
+// HEAD/302，不吃這個配額，只有備援路徑才會打同一個 API。
 static const char* RELEASE_API_URL =
     "https://api.github.com/repos/finaltwinsen/VipleStream/releases/latest";
 
