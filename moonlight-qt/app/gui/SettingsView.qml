@@ -797,6 +797,50 @@ Flickable {
                     ToolTip.text: qsTr("自動（推薦）：等同上游 Moonlight 的 hwaccel cascade，由 ffmpeg 挑第一個能 init 的硬解（Windows 通常 = D3D11VA）。沒有特殊需求就選這個。\n\nDirect3D 11：明確鎖死 D3D11VA，補幀引擎可選 Generic / NV-OF / DirectML / NCNN。跟「自動」目前行為相同，但保留為將來「禁止 helper 切到 Vulkan」的 hard-pin.\n\nVulkan [實驗性]：強制 Vulkan-first cascade + 原生 Vulkan 渲染管線 + dual-present，補幀引擎內建（等同 Generic）。已知問題：NV driver 596.36 上 native vkCmdDecodeVideoKHR 在 ONLY mode 會 NVDEC device-lost；AMD APU 上 video session memory bind 226MB 階段 driver crash；PARALLEL+SW upload 路徑 perf 偏低（80+ ms/frame）。穩定後會回到推薦選項。")
                 }
 
+                // §F6 — Linux 視訊 frontend（畫面呈現端）。只在 Linux 顯示。
+                //
+                // 只決定 frontend；decoder cascade 仍由上面的「Renderer 渲染器」
+                // 決定。Enum 值穩定：LVF_AUTO=0 / LVF_VULKAN=1 / LVF_EGL=2，
+                // currentIndex 用 val lookup 對應（同 rendererSelectionCombo）。
+                Label {
+                    width: parent.width
+                    visible: Qt.platform.os === "linux"
+                    text: qsTr("Linux 視訊呈現 (frontend)")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                ComboBox {
+                    id: linuxVideoFrontendCombo
+                    visible: Qt.platform.os === "linux"
+                    width: parent.width
+                    font.pointSize: 12
+                    textRole: "text"
+                    model: ListModel {
+                        id: linuxVideoFrontendModel
+                    }
+                    Component.onCompleted: {
+                        linuxVideoFrontendModel.append({text: qsTr("自動 (Auto) — 推薦：aarch64 或 Zink 走 Vulkan，其餘維持原本順序"), val: StreamingPreferences.LVF_AUTO})
+                        linuxVideoFrontendModel.append({text: qsTr("Vulkan (libplacebo) — 優先用 Vulkan 呈現"), val: StreamingPreferences.LVF_VULKAN})
+                        linuxVideoFrontendModel.append({text: qsTr("EGL — 維持原本順序 (EGL / DRM / SDL)"), val: StreamingPreferences.LVF_EGL})
+                        currentIndex = 0
+                        for (var i = 0; i < linuxVideoFrontendModel.count; i++) {
+                            if (linuxVideoFrontendModel.get(i).val === StreamingPreferences.linuxVideoFrontend) {
+                                currentIndex = i
+                                break
+                            }
+                        }
+                    }
+                    onActivated: {
+                        StreamingPreferences.linuxVideoFrontend = linuxVideoFrontendModel.get(currentIndex).val
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("只決定畫面呈現用哪個 frontend；解碼路徑仍由上面的「Renderer 渲染器」決定。\n\n自動（推薦）：aarch64（例如 Steam Frame）或 GL 跑在 Zink 上時優先 Vulkan (libplacebo)，其餘平台維持原本的 EGL / DRM / SDL 順序。\n\nVulkan：一律優先 Vulkan (libplacebo) 呈現，失敗時自動退回原本順序。\n\nEGL：維持原本順序，不主動偏好 Vulkan。")
+                }
+
                 CheckBox {
                     id: frameInterpolationCheck
                     width: parent.width

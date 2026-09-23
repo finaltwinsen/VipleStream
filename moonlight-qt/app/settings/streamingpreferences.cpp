@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QLocale>
 #include <QReadWriteLock>
+#include <QAtomicInt>
 #include <QtMath>
 
 #include <QtDebug>
@@ -33,6 +34,7 @@
 #define SER_FRAMEINTERP "frameInterpolation"
 #define SER_FRUCBACKEND "frucBackend"
 #define SER_RENDERERSEL "rendererSelection"
+#define SER_LINUXVIDEOFRONTEND "linuxVideoFrontend"  // §F6
 #define SER_FRUCQUALITY "frucQuality"
 #define SER_VKFRUCNVOF  "vkfrucEnableNvOf"   // §B-NVOF UI 整合
 #define SER_VKFRUCTRIPLE "vkfrucEnableTriple" // §B2 UI 整合
@@ -138,7 +140,15 @@ void StreamingPreferences::reload()
     // Wayland doesn't support modesetting, so use fullscreen desktop mode
     // unless we have a slow GPU (which can take advantage of wp_viewporter
     // to reduce GPU load with lower resolution video streams).
-    if (WMUtils::isRunningWayland() && !WMUtils::isGpuSlow()) {
+    bool preferDesktopFullScreen = WMUtils::isRunningWayland();
+#if defined(Q_OS_LINUX) && !defined(Q_PROCESSOR_X86)
+    // §F6 — 非 x86 Linux 在 GPU 不慢時（msm / Adreno，例如 Steam Frame 跑在
+    // gamescope 的 XWayland 下）也不推薦 WM_FULLSCREEN：nested compositor 下
+    // 真全螢幕切 mode 沒有意義。過去非 x86 一律 isGpuSlow()=true，所以只有
+    // msm 這類新判定為「不慢」的裝置會受影響；x86 與 Windows 不經過這段。
+    preferDesktopFullScreen = true;
+#endif
+    if (preferDesktopFullScreen && !WMUtils::isGpuSlow()) {
         recommendedFullScreenMode = WindowMode::WM_FULLSCREEN_DESKTOP;
     }
     else {
@@ -184,6 +194,15 @@ void StreamingPreferences::reload()
     // driver crash、PARALLEL+SW 路徑單核 80+ ms/frame 的 perf 限制。
     // 舊 user 在 settings 已選 Vulkan/D3D11 的不被改動，仍依設定走。
     rendererSelection = static_cast<RendererSelection>(settings.value(SER_RENDERERSEL, static_cast<int>(RS_AUTO)).toInt());
+    // §F6 — Linux 視訊 frontend，預設 AUTO。超出已知範圍（例如之後版本新增的
+    // 值被舊版讀到）一律退回 AUTO。
+    {
+        int lvf = settings.value(SER_LINUXVIDEOFRONTEND, static_cast<int>(LVF_AUTO)).toInt();
+        if (lvf < static_cast<int>(LVF_AUTO) || lvf > static_cast<int>(LVF_EGL)) {
+            lvf = static_cast<int>(LVF_AUTO);
+        }
+        linuxVideoFrontend = static_cast<LinuxVideoFrontend>(lvf);
+    }
     frucQuality = static_cast<FrucQuality>(settings.value(SER_FRUCQUALITY, static_cast<int>(FQ_BALANCED)).toInt());
     // §B-NVOF / §B2 — Vulkan-renderer-only 補幀進階開關.
     //   - NVOF (HW optical flow) 量化 testufo 三指標贏 software block-match
@@ -297,6 +316,55 @@ void StreamingPreferences::reload()
         videoCodecConfig = VCC_AUTO;
         enableHdr = true;
     }
+}
+
+bool StreamingPreferences::shouldPreferVulkanVideoFrontend() const
+{
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+    bool prefer;
+    const char* reason;
+
+    switch (linuxVideoFrontend) {
+    case LVF_VULKAN:
+        prefer = true;
+        reason = "user";
+        break;
+    case LVF_EGL:
+        prefer = false;
+        reason = "user";
+        break;
+    case LVF_AUTO:
+    default:
+#if defined(Q_PROCESSOR_ARM_64)
+        // §F6 — aarch64（Steam Frame 等）一律優先 PlVk，不必探測 EGL
+        prefer = true;
+        reason = "aarch64";
+#else
+        // §F6 — 其他架構只有在 EGL 是 Zink 時才優先 PlVk；x86_64 非 Zink
+        // 維持舊有順序（行為不變）
+        prefer = WMUtils::isEglZink();
+        reason = prefer ? "zink" : "default";
+#endif
+        break;
+    }
+
+    // 同一組（設定值, 結果）只記一次；使用者在 UI 改設定後會再記一次
+    static QAtomicInt s_LastLogged(-1);
+    const int code = static_cast<int>(linuxVideoFrontend) * 2 + (prefer ? 1 : 0);
+    if (s_LastLogged.fetchAndStoreRelaxed(code) != code) {
+        static const char* const k_PrefNames[] = { "auto", "vulkan", "egl" };
+        const int prefIndex = static_cast<int>(linuxVideoFrontend);
+        qInfo().nospace() << "[VIPLE-LNXFE] linuxVideoFrontend="
+                          << ((prefIndex >= 0 && prefIndex <= 2) ? k_PrefNames[prefIndex] : "?")
+                          << " -> frontend=" << (prefer ? "PlVk-first" : "legacy-order")
+                          << " (reason=" << reason
+                          << " isGpuSlow=" << (WMUtils::isGpuSlow() ? 1 : 0) << ")";
+    }
+
+    return prefer;
+#else
+    return false;
+#endif
 }
 
 bool StreamingPreferences::retranslate()
@@ -444,6 +512,7 @@ void StreamingPreferences::save()
             << enableFrameInterpolation;
     settings.setValue(SER_FRUCBACKEND, static_cast<int>(frucBackend));
     settings.setValue(SER_RENDERERSEL, static_cast<int>(rendererSelection));
+    settings.setValue(SER_LINUXVIDEOFRONTEND, static_cast<int>(linuxVideoFrontend));
     settings.setValue(SER_FRUCQUALITY, static_cast<int>(frucQuality));
     settings.setValue(SER_VKFRUCNVOF, vkfrucEnableNvOf);
     settings.setValue(SER_VKFRUCTRIPLE, vkfrucEnableTriple);

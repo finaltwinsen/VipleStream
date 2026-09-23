@@ -1384,6 +1384,18 @@ bool Session::initialize(QQuickWindow* qtWindow)
     }
 #endif
 
+#ifdef Q_OS_LINUX
+    // §F6 — G-α 驗收用：記錄最終的全螢幕旗標（isGpuSlow 為 true 時上面的
+    // windowed/default 分支會強制 SDL_WINDOW_FULLSCREEN）。只記錄、不改行為。
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-LNXFE] windowMode=%d fullscreenFlag=%s isGpuSlow=%d",
+                (int)m_Preferences->windowMode,
+                m_FullScreenFlag == SDL_WINDOW_FULLSCREEN ? "FULLSCREEN" :
+                (m_FullScreenFlag == SDL_WINDOW_FULLSCREEN_DESKTOP ? "FULLSCREEN_DESKTOP" :
+                 (m_FullScreenFlag == 0 ? "NONE" : "OTHER")),
+                WMUtils::isGpuSlow() ? 1 : 0);
+#endif
+
     // Check for validation errors/warnings and emit
     // signals for them, if appropriate
     bool ret = validateLaunch(testWindow);
@@ -1957,6 +1969,15 @@ void Session::updateOptimalWindowDisplayMode()
     if (!Utils::getEnvironmentVariableOverride("MATCH_DISPLAY_MODE_TO_VIDEO", &matchVideo)) {
         matchVideo = WMUtils::isGpuSlow() || QString(SDL_GetCurrentVideoDriver()) == "KMSDRM";
     }
+
+#ifdef Q_OS_LINUX
+    // §F6 — G-α 驗收用（msm / Adreno 不再被判為慢 GPU → 不強制 matchVideo）
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-LNXFE] matchVideo=%d (isGpuSlow=%d videoDriver=%s)",
+                matchVideo ? 1 : 0,
+                WMUtils::isGpuSlow() ? 1 : 0,
+                SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "?");
+#endif
 
     bestMode = desktopMode;
     bestMode.refresh_rate = 0;

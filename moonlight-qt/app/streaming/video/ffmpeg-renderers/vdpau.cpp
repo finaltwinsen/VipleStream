@@ -88,12 +88,24 @@ bool VDPAURenderer::initialize(PDECODER_PARAMETERS params)
     // Using VDPAU may lead to side-effects that break our attempts to create
     // a Vulkan swapchain on this window later.
     if (m_DecoderSelectionPass == 0) {
+        // §F6 — PREFER_VULKAN=1 保留為 dev-only 覆寫（有設定時印一次）
+        Utils::logDevEnvOverride("PREFER_VULKAN");
+
         if (params->videoFormat & VIDEO_FORMAT_MASK_10BIT) {
             return false;
         }
         else if (qgetenv("PREFER_VULKAN") == "1") {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "Deprioritizing Vulkan-incompatible VDPAU renderer due to PREFER_VULKAN=1");
+            return false;
+        }
+        else if (StreamingPreferences::get() != nullptr &&
+                 StreamingPreferences::get()->shouldPreferVulkanVideoFrontend()) {
+            // §F6 — linuxVideoFrontend 決策為 PlVk 時，與 PREFER_VULKAN=1 同語意：
+            // 第一輪先讓出 VDPAU（直接呈現，會破壞之後建立 Vulkan swapchain）。
+            // AUTO 在 x86_64 非 Zink 時恆為 false，行為不變。
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Deprioritizing Vulkan-incompatible VDPAU renderer due to linuxVideoFrontend");
             return false;
         }
     }

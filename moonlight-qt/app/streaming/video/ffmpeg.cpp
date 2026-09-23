@@ -182,7 +182,10 @@ static inline bool hasVulkanVideoDecodeQueue() { return false; }
 static inline bool shouldPreferVulkanDecoderCascade()
 {
     const char* e = SDL_getenv("VIPLE_USE_VK_DECODER");
-    if (e) return SDL_atoi(e) != 0;
+    if (e) {
+        Utils::logDevEnvOverride("VIPLE_USE_VK_DECODER");  // §F6 dev-only
+        return SDL_atoi(e) != 0;
+    }
     auto* prefs = StreamingPreferences::get(nullptr);
     return prefs && prefs->rendererSelection == StreamingPreferences::RS_VULKAN;
 }
@@ -194,7 +197,10 @@ static inline bool shouldPreferVulkanDecoderCascade()
 static inline bool shouldUseVkFrucRendererForVulkanHwaccel()
 {
     const char* e = SDL_getenv("VIPLE_VK_FRUC_GENERIC");
-    if (e) return SDL_atoi(e) != 0;
+    if (e) {
+        Utils::logDevEnvOverride("VIPLE_VK_FRUC_GENERIC");  // §F6 dev-only
+        return SDL_atoi(e) != 0;
+    }
     auto* prefs = StreamingPreferences::get(nullptr);
     return prefs && prefs->rendererSelection == StreamingPreferences::RS_VULKAN;
 }
@@ -527,13 +533,27 @@ bool FFmpegVideoDecoder::createFrontendRenderer(PDECODER_PARAMETERS params, bool
     Q_UNUSED(glIsSlow);
     Q_UNUSED(vulkanIsSlow);
 
+    // §F6 — Linux renderer 決策：linuxVideoFrontend（auto/vulkan/egl）只決定
+    // frontend。preferPlVkFrontend 在非 Linux 平台恆為 false，x86_64 非 Zink
+    // 的 AUTO 也是 false，所以下面所有以它為條件的分支在這些平台上都不會
+    // 走到，順序與 1.5.276 以前完全相同。
+    bool preferPlVkFrontend = false;
+#ifdef HAVE_LIBPLACEBO_VULKAN
+    if (useAlternateFrontend && m_BackendRenderer->getRendererType() != IFFmpegRenderer::RendererType::Vulkan) {
+        auto* lvfPrefs = StreamingPreferences::get(nullptr);
+        preferPlVkFrontend = lvfPrefs && lvfPrefs->shouldPreferVulkanVideoFrontend();
+    }
+#endif
+    Q_UNUSED(preferPlVkFrontend);
+
     // For cases where we're already using Vulkan Video decoding, always use the Vulkan renderer too.
     // The alternate frontend logic is primarily for cases where a different renderer like EGL or DRM
     // may provide additional performance or HDR capabilities. Neither of these are true for Vulkan.
     if (useAlternateFrontend && m_BackendRenderer->getRendererType() != IFFmpegRenderer::RendererType::Vulkan) {
         if (params->videoFormat & VIDEO_FORMAT_MASK_10BIT) {
 #ifdef HAVE_LIBPLACEBO_VULKAN
-            if (!vulkanIsSlow) {
+            // §F6 — 決策為 PlVk 時，即使 GPU 被判定為慢也先試 PlVk（不先試 DRM）
+            if (!vulkanIsSlow || preferPlVkFrontend) {
                 // The Vulkan renderer can also handle HDR with a supported compositor. We prefer
                 // rendering HDR with Vulkan if possible since it's more fully featured than DRM.
                 m_FrontendRenderer = new PlVkRenderer(false, m_BackendRenderer);
@@ -561,7 +581,8 @@ bool FFmpegVideoDecoder::createFrontendRenderer(PDECODER_PARAMETERS params, bool
 #endif
 
 #ifdef HAVE_LIBPLACEBO_VULKAN
-            if (vulkanIsSlow) {
+            // §F6 — preferPlVkFrontend 時上面已經試過同一個 PlVk，不重試
+            if (vulkanIsSlow && !preferPlVkFrontend) {
                 // Try Vulkan even if it's slow because we have no other renderer
                 // that can display HDR properly on Linux.
                 m_FrontendRenderer = new PlVkRenderer(false, m_BackendRenderer);
@@ -576,7 +597,10 @@ bool FFmpegVideoDecoder::createFrontendRenderer(PDECODER_PARAMETERS params, bool
         else
         {
 #ifdef HAVE_LIBPLACEBO_VULKAN
-            if (qgetenv("PREFER_VULKAN") == "1") {
+            // PREFER_VULKAN=1 保留為 dev-only 覆寫（§F6）；正式設定改走
+            // linuxVideoFrontend（preferPlVkFrontend）
+            Utils::logDevEnvOverride("PREFER_VULKAN");
+            if (qgetenv("PREFER_VULKAN") == "1" || preferPlVkFrontend) {
                 m_FrontendRenderer = new PlVkRenderer(false, m_BackendRenderer);
                 if (initializeRendererInternal(m_FrontendRenderer, params)) {
                     return true;
@@ -586,6 +610,20 @@ bool FFmpegVideoDecoder::createFrontendRenderer(PDECODER_PARAMETERS params, bool
             }
 #endif
         }
+
+#ifdef HAVE_LIBPLACEBO_VULKAN
+        // §F6 — 10-bit 時上面只接受「可 HDR」的 PlVk / DRM。決策為 PlVk 時，
+        // 在退回 EGL 之前再試一次不要求 HDR 的 PlVk（兩者都是 SDR 顯示，
+        // 但 PlVk 才是 Frame 要走的 frontend）。
+        if (preferPlVkFrontend && (params->videoFormat & VIDEO_FORMAT_MASK_10BIT)) {
+            m_FrontendRenderer = new PlVkRenderer(false, m_BackendRenderer);
+            if (initializeRendererInternal(m_FrontendRenderer, params)) {
+                return true;
+            }
+            delete m_FrontendRenderer;
+            m_FrontendRenderer = nullptr;
+        }
+#endif
 
 #ifdef HAVE_EGL
         // Try EGLRenderer if GL is not slow on this platform
@@ -871,6 +909,8 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     QString optionVarName = QString("%1_AVOPTIONS").arg(decoder->name).toUpper();
     QByteArray optionVarValue = qgetenv(optionVarName.toUtf8());
     if (!optionVarValue.isNull()) {
+        // §F6 — %s_AVOPTIONS 是 dev-only 覆寫
+        Utils::logDevEnvOverride(optionVarName.toUtf8().constData());
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Applying FFmpeg option overrides for %s: %s",
                     decoder->name,
@@ -1075,6 +1115,34 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
                         "Renderer '%s' chosen",
                         m_FrontendRenderer->getRendererName());
         }
+
+#ifdef Q_OS_LINUX
+        // §F6 — G-α 驗收用摘要：decoder / 像素格式 / frontend / isGpuSlow
+        // （fullscreenFlag 與 matchVideo 由 session.cpp 的 [VIPLE-LNXFE] 記錄）
+        {
+            const char* frontendName = m_FrontendRenderer->getRendererName();
+#ifdef HAVE_LIBPLACEBO_VULKAN
+            if (dynamic_cast<PlVkRenderer*>(m_FrontendRenderer) != nullptr) {
+                frontendName = "PlVk";
+            }
+            else if (dynamic_cast<VkFrucRenderer*>(m_FrontendRenderer) != nullptr) {
+                frontendName = "VkFruc";
+            }
+#endif
+            AVPixelFormat fmt = (requiredFormat != AV_PIX_FMT_NONE) ? requiredFormat
+                                                                    : m_VideoDecoderCtx->pix_fmt;
+            const char* fmtName = av_get_pix_fmt_name(fmt);
+            // 轉大寫以對齊 G-α 條件字樣（例如 fmt=DRM_PRIME）
+            const QByteArray fmtUpper = QByteArray(fmtName ? fmtName : "auto").toUpper();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-LNXFE] decoder=%s fmt=%s frontend=%s backend=%s isGpuSlow=%d",
+                        decoder->name,
+                        fmtUpper.constData(),
+                        frontendName,
+                        m_BackendRenderer->getRendererName(),
+                        WMUtils::isGpuSlow() ? 1 : 0);
+        }
+#endif
     }
 
     return true;
@@ -1956,6 +2024,20 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
     Q_UNUSED(glIsSlow);
     Q_UNUSED(vulkanIsSlow);
 
+    // §F6 — Linux frontend 決策為 PlVk 時，像素格式挑選把 PlVkRenderer 排在
+    // DrmRenderer 之前（不先試 DrmRenderer）。非 Linux 與 x86_64 非 Zink 的
+    // AUTO 恆為 false → 下面各處都照舊。DRM_PRIME 輸出（v4l2m2m）PlVk 單獨
+    // 不支援，仍由 DrmRenderer 當 backend，frontend 在 createFrontendRenderer()
+    // 依同一個決策選 PlVk。
+    bool preferPlVkFrontend = false;
+#ifdef HAVE_LIBPLACEBO_VULKAN
+    {
+        auto* lvfPrefs = StreamingPreferences::get(nullptr);
+        preferPlVkFrontend = lvfPrefs && lvfPrefs->shouldPreferVulkanVideoFrontend();
+    }
+#endif
+    Q_UNUSED(preferPlVkFrontend);
+
     const AVPixelFormat* decoder_pix_fmts;
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 13, 100)
     if (avcodec_get_supported_config(nullptr, decoder, AV_CODEC_CONFIG_PIX_FORMAT, 0,
@@ -2102,6 +2184,21 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
     if (decoder_pix_fmts == NULL) {
         // Supported output pixel formats are unknown. We'll just try DRM/SDL and hope it can cope.
 
+#ifdef HAVE_LIBPLACEBO_VULKAN
+        // §J.3.e.2.i — RS_D3D11 設定下要跳過所有 Vulkan renderer，落到
+        // SDL D3D11/OpenGL renderer.  否則 SW decode + libplacebo Vulkan
+        // renderer 會被選到（PlVkRenderer 沒接 FRUC），效能 overlay 顯示
+        // 「補幀 未啟用」就是這個原因.
+        auto* prefsForVk = StreamingPreferences::get(nullptr);
+        bool prefsForceD3D11ForVk = prefsForVk && prefsForVk->rendererSelection == StreamingPreferences::RS_D3D11;
+
+        // §F6 — frontend 決策為 PlVk：在 DrmRenderer 之前先試 PlVk
+        if (preferPlVkFrontend && !prefsForceD3D11ForVk && tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, nullptr, nullptr,
+                                  []() -> IFFmpegRenderer* { return new PlVkRenderer(); })) {
+            return true;
+        }
+#endif
+
 #ifdef HAVE_DRM
         if ((glIsSlow || vulkanIsSlow) && tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, nullptr, nullptr,
                                   []() -> IFFmpegRenderer* { return new DrmRenderer(); })) {
@@ -2110,13 +2207,8 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
 #endif
 
 #ifdef HAVE_LIBPLACEBO_VULKAN
-        // §J.3.e.2.i — RS_D3D11 設定下要跳過所有 Vulkan renderer，落到
-        // SDL D3D11/OpenGL renderer.  否則 SW decode + libplacebo Vulkan
-        // renderer 會被選到（PlVkRenderer 沒接 FRUC），效能 overlay 顯示
-        // 「補幀 未啟用」就是這個原因.
-        auto* prefsForVk = StreamingPreferences::get(nullptr);
-        bool prefsForceD3D11ForVk = prefsForVk && prefsForVk->rendererSelection == StreamingPreferences::RS_D3D11;
-        if (!prefsForceD3D11ForVk && !vulkanIsSlow && tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, nullptr, nullptr,
+        // §F6 — preferPlVkFrontend 時上面已試過，不重試
+        if (!prefsForceD3D11ForVk && !vulkanIsSlow && !preferPlVkFrontend && tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, nullptr, nullptr,
                                   []() -> IFFmpegRenderer* { return new PlVkRenderer(); })) {
             return true;
         }
@@ -2156,11 +2248,17 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
 
     // Check if any of our decoders prefer any of the pixel formats first
     for (int i = 0; decoder_pix_fmts[i] != AV_PIX_FMT_NONE; i++) {
+#ifdef HAVE_LIBPLACEBO_VULKAN
+        // §F6 — PlVk frontend 優先：排在 DrmRenderer 之前
+        if (preferPlVkFrontend) {
+            TRY_PREFERRED_PIXEL_FORMAT(PlVkRenderer);
+        }
+#endif
 #ifdef HAVE_DRM
         TRY_PREFERRED_PIXEL_FORMAT(DrmRenderer);
 #endif
 #ifdef HAVE_LIBPLACEBO_VULKAN
-        if (!vulkanIsSlow) {
+        if (!vulkanIsSlow && !preferPlVkFrontend) {
             TRY_PREFERRED_PIXEL_FORMAT(PlVkRenderer);
         }
 #endif
@@ -2171,11 +2269,17 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
 
     // Nothing prefers any of them. Let's see if anyone will tolerate one.
     for (int i = 0; decoder_pix_fmts[i] != AV_PIX_FMT_NONE; i++) {
+#ifdef HAVE_LIBPLACEBO_VULKAN
+        // §F6 — PlVk frontend 優先：排在 DrmRenderer 之前
+        if (preferPlVkFrontend) {
+            TRY_SUPPORTED_NON_PREFERRED_PIXEL_FORMAT(PlVkRenderer);
+        }
+#endif
 #ifdef HAVE_DRM
         TRY_SUPPORTED_NON_PREFERRED_PIXEL_FORMAT(DrmRenderer);
 #endif
 #ifdef HAVE_LIBPLACEBO_VULKAN
-        if (!vulkanIsSlow) {
+        if (!vulkanIsSlow && !preferPlVkFrontend) {
             TRY_SUPPORTED_NON_PREFERRED_PIXEL_FORMAT(PlVkRenderer);
         }
 #endif
@@ -2185,7 +2289,8 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
     }
 
 #ifdef HAVE_LIBPLACEBO_VULKAN
-    if (vulkanIsSlow) {
+    // §F6 — preferPlVkFrontend 時兩個迴圈都已試過 PlVk，不再重試
+    if (vulkanIsSlow && !preferPlVkFrontend) {
         // If we got here with VULKAN_IS_SLOW, DrmRenderer didn't work,
         // so we have to resort to PlVkRenderer.
         for (int i = 0; decoder_pix_fmts[i] != AV_PIX_FMT_NONE; i++) {
@@ -2451,6 +2556,10 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
     av_log_set_level((!m_TestOnly && s_LastInitializeFailed) ? AV_LOG_DEBUG
                                                              : AV_LOG_INFO);
 
+    // §F6 — 把影響 decoder / renderer 選擇的 dev-only 環境變數覆寫（含散在
+    // vkfruc.cpp 的 VIPLE_VKFRUC_*）在這裡各印一次；每個名稱整個行程只印一次
+    Utils::logDevEnvOverrides();
+
     bool ok = initializeInternal(params);
     if (!m_TestOnly) {
         s_LastInitializeFailed = !ok;
@@ -2577,6 +2686,10 @@ bool FFmpegVideoDecoder::initializeInternal(PDECODER_PARAMETERS params)
     // - AV_PIX_FMT_YUVJ420P
     // - AV_PIX_FMT_NV12
     // - AV_PIX_FMT_NV21
+    // §F6 — *_DECODER_HINT 是 dev-only 覆寫（有設定時各印一次）
+    Utils::logDevEnvOverride("H264_DECODER_HINT");
+    Utils::logDevEnvOverride("HEVC_DECODER_HINT");
+    Utils::logDevEnvOverride("AV1_DECODER_HINT");
     {
         QString h264DecoderHint = qgetenv("H264_DECODER_HINT");
         if (!h264DecoderHint.isEmpty() && (params->videoFormat & VIDEO_FORMAT_MASK_H264)) {

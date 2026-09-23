@@ -1,5 +1,12 @@
 #include <QtGlobal>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QSet>
+#include <QByteArray>
+#include <QProcessEnvironment>
 
 #include "utils.h"
 
@@ -210,15 +217,268 @@ bool WMUtils::isGpuSlow()
     bool ret;
 
     if (!Utils::getEnvironmentVariableOverride("GL_IS_SLOW", &ret)) {
-#if defined(GL_IS_SLOW) || (!defined(Q_PROCESSOR_X86) && !defined(Q_OS_DARWIN) && !defined(Q_OS_WIN))
+#if defined(GL_IS_SLOW)
+        // 建置時明確指定 glslow / gpuslow，維持原語意
+        ret = true;
+#elif !defined(Q_PROCESSOR_X86) && !defined(Q_OS_DARWIN) && !defined(Q_OS_WIN)
         // We currently assume GPUs on non-x86 hardware are slow by default
         ret = true;
+#ifdef Q_OS_LINUX
+        // §F6 — Adreno（kernel DRM driver = msm，Mesa 走 freedreno / Turnip）
+        // 效能足以跑 PlVk / EGL 合成，不套用「非 x86 一律慢」的預設。
+        // 這個判定會連帶改變 C19 的 7 個呼叫點（ffmpeg.cpp 的 glIsSlow /
+        // vulkanIsSlow、session.cpp 的 SDL_WINDOW_FULLSCREEN 與 matchVideo、
+        // streamingpreferences.cpp 的推薦全螢幕模式）。拿不到 driver 名稱
+        // 時 isDrmDriverMsm() 回 false，維持舊預設（慢）。
+        if (isDrmDriverMsm()) {
+            ret = false;
+        }
+#endif
 #else
         ret = false;
 #endif
     }
 
     return ret;
+}
+
+#ifdef Q_OS_LINUX
+// §F6 — sysfs 後備：/sys/class/drm/<node>/device/driver 是指向 driver 目錄的
+// symlink，取其目錄名稱。只看 renderD* 與 cardN（排除 cardN-<connector>）。
+static QStringList probeDrmDriverNamesFromSysfs()
+{
+    QStringList names;
+    QDir sysDrm("/sys/class/drm");
+    const QStringList nodes = sysDrm.entryList(QStringList() << "renderD*" << "card*",
+                                               QDir::Dirs | QDir::System | QDir::NoDotAndDotDot,
+                                               QDir::Name);
+    for (const QString& node : nodes) {
+        if (node.contains('-')) {
+            // cardN-<connector> 是 connector 節點，不是 GPU
+            continue;
+        }
+
+        QFileInfo driverLink(sysDrm.filePath(node) + "/device/driver");
+        if (!driverLink.exists()) {
+            continue;
+        }
+
+        QString driverName = QFileInfo(driverLink.canonicalFilePath()).fileName();
+        if (!driverName.isEmpty() && !names.contains(driverName)) {
+            names.append(driverName);
+        }
+    }
+
+    return names;
+}
+
+static QStringList probeDrmDriverNames()
+{
+    QStringList names;
+    const char* source = "none";
+
+#ifdef HAVE_DRM
+    // 優先用 libdrm：render node 不牽涉 DRM master，drmGetVersion() 的 name
+    // 就是 kernel DRM driver 名稱（Mesa loader 也是用它挑 driver）。
+    {
+        QDir dir("/dev/dri");
+        const QStringList nodes = dir.entryList(QStringList("renderD*"),
+                                                QDir::Files | QDir::System,
+                                                QDir::Name);
+        for (const QString& node : nodes) {
+            QFile nodeFile(dir.filePath(node));
+            if (!nodeFile.open(QFile::ReadOnly)) {
+                continue;
+            }
+
+            drmVersionPtr version = drmGetVersion(nodeFile.handle());
+            if (version != nullptr) {
+                if (version->name != nullptr && version->name_len > 0) {
+                    QString driverName = QString::fromLatin1(version->name, version->name_len);
+                    if (!names.contains(driverName)) {
+                        names.append(driverName);
+                    }
+                }
+                drmFreeVersion(version);
+            }
+        }
+
+        if (!names.isEmpty()) {
+            source = "libdrm";
+        }
+    }
+#endif
+
+    if (names.isEmpty()) {
+        names = probeDrmDriverNamesFromSysfs();
+        if (!names.isEmpty()) {
+            source = "sysfs";
+        }
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-LNXFE] DRM driver probe: [%s] (source=%s)",
+                names.join(',').toUtf8().constData(),
+                source);
+
+    return names;
+}
+#endif
+
+QStringList WMUtils::getDrmDriverNames()
+{
+#ifdef Q_OS_LINUX
+    // C++11 magic static：多執行緒下只會探測一次
+    static const QStringList s_Names = probeDrmDriverNames();
+    return s_Names;
+#else
+    return QStringList();
+#endif
+}
+
+bool WMUtils::isDrmDriverMsm()
+{
+#ifdef Q_OS_LINUX
+    for (const QString& name : getDrmDriverNames()) {
+        // libdrm 回報的是 "msm"；sysfs 後備可能看到 platform driver 名稱
+        // （msm_dpu / msm_mdss / msm-drm），無顯示輸出的 GPU-only 裝置則是 adreno
+        if (name == "msm" || name.startsWith("msm_") || name.startsWith("msm-") || name == "adreno") {
+            return true;
+        }
+    }
+#endif
+    return false;
+}
+
+#if defined(HAVE_EGL) && defined(Q_OS_LINUX)
+// EGL_MESA_query_driver：eglGetDisplayDriverName（舊版 eglext.h 可能沒有宣告）
+typedef const char* (EGLAPIENTRYP VIPLE_PFNEGLGETDISPLAYDRIVERNAMEPROC)(EGLDisplay dpy);
+#endif
+
+bool WMUtils::isEglZink()
+{
+#if defined(HAVE_EGL) && defined(Q_OS_LINUX)
+    static SDL_atomic_t isZink;
+
+    // If the value is not set yet, populate it now.
+    int val = SDL_AtomicGet(&isZink);
+    if (!(val & VALUE_SET)) {
+        bool zink = false;
+        QByteArray vendorName;
+        QByteArray driverName;
+
+        // 只用 GBM platform + EGL_DEFAULT_DISPLAY（與 supportsDesktopGLWithEGL()
+        // 相同）。刻意不退到 eglGetDisplay(EGL_DEFAULT_DISPLAY)：那個 display
+        // 可能正被 Qt eglfs / SDL 使用，這裡的 eglTerminate() 會把它一起拆掉。
+        EGLDisplay display = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, EGL_DEFAULT_DISPLAY, nullptr);
+        if (display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr)) {
+            const char* vendorString = eglQueryString(display, EGL_VENDOR);
+            if (vendorString != nullptr) {
+                vendorName = vendorString;
+                if (vendorName.toLower().contains("zink")) {
+                    zink = true;
+                }
+            }
+
+            // Mesa 的 EGL_VENDOR 一律是 "Mesa Project"，真正載入哪個 driver
+            // 要靠 EGL_MESA_query_driver（Zink 回報 "zink"）
+            const char* extensions = eglQueryString(display, EGL_EXTENSIONS);
+            if (extensions != nullptr && strstr(extensions, "EGL_MESA_query_driver") != nullptr) {
+                auto getDisplayDriverName = reinterpret_cast<VIPLE_PFNEGLGETDISPLAYDRIVERNAMEPROC>(
+                    eglGetProcAddress("eglGetDisplayDriverName"));
+                if (getDisplayDriverName != nullptr) {
+                    const char* name = getDisplayDriverName(display);
+                    if (name != nullptr) {
+                        // eglTerminate() 之後字串就失效，先複製
+                        driverName = name;
+                        if (driverName.toLower() == "zink") {
+                            zink = true;
+                        }
+                    }
+                }
+            }
+
+            eglTerminate(display);
+        }
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-LNXFE] EGL probe: vendor='%s' driver='%s' zink=%d",
+                    vendorName.constData(),
+                    driverName.constData(),
+                    zink ? 1 : 0);
+
+        // Populate the value to return and have for next time.
+        // This can race with another thread populating the same data,
+        // but that's no big deal.
+        val = VALUE_SET | (zink ? VALUE_TRUE : 0);
+        SDL_AtomicSet(&isZink, val);
+    }
+
+    return !!(val & VALUE_TRUE);
+#else
+    return false;
+#endif
+}
+
+void Utils::logDevEnvOverride(const char* name)
+{
+    if (name == nullptr || qEnvironmentVariableIsEmpty(name)) {
+        return;
+    }
+
+    // 刻意配置在 heap 上且永不釋放：避免行程結束時 static destructor 的
+    // 銷毀順序問題（見 CLAUDE.md 的 v337 QRegularExpression 事故）。
+    static QMutex* s_Lock = new QMutex();
+    static QSet<QByteArray>* s_Logged = new QSet<QByteArray>();
+
+    const QByteArray key(name);
+    {
+        QMutexLocker locker(s_Lock);
+        if (s_Logged->contains(key)) {
+            return;
+        }
+        s_Logged->insert(key);
+    }
+
+    const QByteArray value = qgetenv(name);
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-DEVENV] dev-only override %s=%s",
+                name,
+                value.constData());
+}
+
+void Utils::logDevEnvOverrides()
+{
+    static const char* const k_ExactNames[] = {
+        "PREFER_VULKAN",
+        "GL_IS_SLOW",
+        "VULKAN_IS_SLOW",
+        "MATCH_DISPLAY_MODE_TO_VIDEO",
+        "SEPARATE_TEST_DECODER",
+        "VIPLE_USE_VK_DECODER",
+        "VIPLE_VK_FRUC_GENERIC",
+    };
+
+    for (const char* name : k_ExactNames) {
+        logDevEnvOverride(name);
+    }
+
+#ifdef Q_OS_WIN
+    // Windows 的環境變數名稱不分大小寫
+    const Qt::CaseSensitivity cs = Qt::CaseInsensitive;
+#else
+    const Qt::CaseSensitivity cs = Qt::CaseSensitive;
+#endif
+
+    const QStringList keys = QProcessEnvironment::systemEnvironment().keys();
+    for (const QString& key : keys) {
+        if (key.startsWith(QLatin1String("VIPLE_VKFRUC_"), cs) ||
+                key.endsWith(QLatin1String("_AVOPTIONS"), cs) ||
+                key.endsWith(QLatin1String("_DECODER_HINT"), cs)) {
+            const QByteArray keyBytes = key.toLocal8Bit();
+            logDevEnvOverride(keyBytes.constData());
+        }
+    }
 }
 
 QString WMUtils::getDrmCardOverride()

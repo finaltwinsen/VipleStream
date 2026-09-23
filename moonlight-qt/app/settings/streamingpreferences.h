@@ -219,6 +219,25 @@ public:
     };
     Q_ENUM(AppSortMode);
 
+    // §F6 — Linux 視訊 frontend（畫面呈現端）選擇。
+    //
+    // **只決定 frontend**；decoder cascade 仍然只由 rendererSelection 決定
+    // （RS_VULKAN 已代表 Vulkan 解碼，兩者不混用語意，見 vr_architecture §2.3）。
+    //   LVF_AUTO   — 預設。aarch64，或 EGL 是 Zink 時優先 PlVk；其餘（x86_64
+    //                非 Zink）維持 1.5.276 以前的順序，行為完全不變。
+    //   LVF_VULKAN — 優先 PlVk（libplacebo Vulkan）frontend；取代過去只能用
+    //                PREFER_VULKAN=1 環境變數達成的效果。
+    //   LVF_EGL    — 維持舊有順序（EGL / DRM / SDL，依 isGpuSlow 判定），
+    //                不主動偏好 PlVk。
+    // 非 Linux 平台完全忽略這個設定。列舉值穩定（QSettings），新值只能往後加。
+    enum LinuxVideoFrontend
+    {
+        LVF_AUTO   = 0,
+        LVF_VULKAN = 1,
+        LVF_EGL    = 2,
+    };
+    Q_ENUM(LinuxVideoFrontend);
+
     Q_PROPERTY(int width MEMBER width NOTIFY displayModeChanged)
     Q_PROPERTY(int height MEMBER height NOTIFY displayModeChanged)
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
@@ -234,6 +253,8 @@ public:
     Q_PROPERTY(bool enableFrameInterpolation MEMBER enableFrameInterpolation NOTIFY enableFrameInterpolationChanged)
     Q_PROPERTY(FrucBackend frucBackend MEMBER frucBackend NOTIFY frucBackendChanged)
     Q_PROPERTY(RendererSelection rendererSelection MEMBER rendererSelection NOTIFY rendererSelectionChanged)
+    // §F6 — Linux 視訊 frontend（只決定 frontend，不影響 decoder cascade）
+    Q_PROPERTY(LinuxVideoFrontend linuxVideoFrontend MEMBER linuxVideoFrontend NOTIFY linuxVideoFrontendChanged)
     Q_PROPERTY(FrucQuality frucQuality MEMBER frucQuality NOTIFY frucQualityChanged)
     // §B-NVOF UI 整合 2026-05-07 — Vulkan-only 補幀進階開關，跟既有的
     // VIPLE_VKFRUC_NV_OF / VIPLE_VKFRUC_TRIPLE env var 平行：env var 優先
@@ -313,6 +334,12 @@ public:
 
     Q_INVOKABLE bool retranslate();
 
+    // §F6 — 把 linuxVideoFrontend（含 LVF_AUTO）解析成「是否優先 PlVk frontend」。
+    // 只在 Linux + HAVE_LIBPLACEBO_VULKAN 時可能回 true；其他平台恆為 false，
+    // 所以呼叫端（ffmpeg.cpp / vdpau.cpp）在 Windows 與 macOS 上行為完全不變。
+    // AUTO 在非 aarch64 上會做一次（行程內快取）EGL Zink 探測。
+    bool shouldPreferVulkanVideoFrontend() const;
+
     // Directly accessible members for preferences
     int width;
     int height;
@@ -329,6 +356,7 @@ public:
     bool enableFrameInterpolation;
     FrucBackend frucBackend;
     RendererSelection rendererSelection;  // §J.3.e.2.i — D3D11 vs Vulkan renderer
+    LinuxVideoFrontend linuxVideoFrontend; // §F6 — Linux frontend（auto/vulkan/egl）
     FrucQuality frucQuality;
     bool vkfrucEnableNvOf;     // §B-NVOF — VK_NV_optical_flow 取代 software block-match ME
     bool vkfrucEnableTriple;   // §B2 — TRIPLE 60→180 (兩 interp / server frame)
@@ -392,6 +420,7 @@ signals:
     void enableFrameInterpolationChanged();
     void frucBackendChanged();
     void rendererSelectionChanged();
+    void linuxVideoFrontendChanged();
     void frucQualityChanged();
     void vkfrucEnableNvOfChanged();
     void vkfrucEnableTripleChanged();
