@@ -51,8 +51,8 @@
 8. **分期**：程式碼依序做 M0 → M1a → M2a → M1b → M3a → M4a → M5a。實機到手後，關卡依序以批次執行：G-α（M2b）、G-β（M3b）、G-rc（M4b）、GA（M5b）。
 9. **版號與發佈**：
    - G-α 通過時切 3.0.0。從 3.0.0 起**六件 asset 為必備**。
-   - 每次 push 和 GitHub release 都要使用者明確下令；CoworkMCP 任務圖在 finalize 前設人工核准閘門。
-   - 測試產物只走 relay。
+   - 每次 push 和 GitHub release 都要使用者明確下令；release 流程在 `gh release` 前一律停下等使用者核准。
+   - 測試產物只用 scp 在機器之間直傳，不上雲。
 10. **實機到手前能做的**：
     - M0、M1a、M1b 全部，包含在 <host> 上做 G-DRV、PoC-5a、PoC-10；
     - M2a、M3a、M4a、M5a 的程式碼，在 Monado、<host>、x64 Flatpak 上跑通；
@@ -105,7 +105,7 @@
 | C25 | `C:\ProgramData` 的預設 ACL 允許 Users 建立子目錄，建立者會以 CREATOR OWNER 取得完全控制。self-update 腳本會跳過 `config`、`credentials`（`self_update.cpp:482`） | driver 部署改放 `<install>\config\steamvr\` 並做完整性檢查（§3.10） |
 | C26 | `SUNSHINE_TARGET_FILES` 是全平台共用（`common.cmake:177-181,214,222,224`）；非 Windows 的 self-update 固定找 `-linux-x64.deb`（`self_update.cpp:67-73`） | VR 程式碼在 Linux 要提供 stub（§3.11） |
 | C27 | 3456×1728@90：H.264 是 23,328 MB × 90 = 2.10 M MB/s，超過 level 5.2 的 2,073,600，需要 level 6.x；HEVC 是 537.5 M samples/s，超過 level 5.1 的 534.7 M，需要 5.2 | H.264 保底改成 72 Hz，或每眼 1440²（§3.4） |
-| C28 | `build_*.cmd`、`build-tools/`、`CLAUDE.md` 都不進 git。CoworkMCP `dispatch/win.json` 的 `win-client`、`win-server` 沒有帶 `--no-bump`（而 `build_sunshine.cmd:18-19` 預設會 bump）；`bump-version` 指向不存在的 `scripts/version.ps1` | F10、F19 |
+| C28 | `build_*.cmd`、`build-tools/`、`CLAUDE.md` 都不進 git。`build_sunshine.cmd:18-19` 預設會 bump，自動化呼叫時必須明帶 `--no-bump`（CoworkMCP 已於 2026-09-23 停用，原本的任務圖問題隨之取消） | F10 |
 | C29 | ENet 重連路徑（`Q/ControlStream.c:1732-1756`）只重設 `enet_peer_timeout`，throttle 設定會回到預設值 | F5 抽成 helper，首次連線和重連都呼叫 |
 | C30 | Flathub manifest 裡的 0004/0005 是套用在 **moonlight-qt** 模組上的補丁，不是 FFmpeg 補丁。finish-args 中的 `--env=IGNORE_RFI_LATENCY_BUG=1`，我們 fork 裡完全沒有讀取（grep 0 筆） | §2.2 措辭修正；這個 env 不帶 |
 | C31 | NVENC 的 `forceIntraRefreshWithFrameCnt` 存在於 H.264、HEVC、AV1 的 pic params（`nvEncodeAPI.h:2115,2160,2206`）。前提是 init 時開了 `enableIntraRefresh`；不能和 B 幀並用；優先權高於 slice mode | 隨選 intra-refresh 可行（§3.4） |
@@ -256,7 +256,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 - **OpenXR runtime 探測**：自動探測多個候選路徑（host 的 `~/.config/openxr/1` 經 xdg-config 權限、SteamVR 安裝目錄的 runtime json）。探測失敗時，Settings 的 XR 區段提供路徑欄位和「重新探測」按鈕；CLI `--xr-runtime-json` 只給開發用。
 - **nested 解析度**：PoC-7 如果發現可以調整，就由 app 或 Flatpak 的啟動包裝依 Settings 值決定，**不得要求使用者改環境變數或啟動參數**。
 - **log 路徑**：`~/.var/app/<app-id>/cache/VipleStream/VipleStream/logs/`。
-- **G-BUILD（M0）**：量測 linux-builder 上 qemu-user 的 aarch64 乾淨建置和增量建置時間。策略：`flatpak-builder --ccache`、持久化 state-dir、依賴模組依 lockhash 快取到 relay。增量建置超過 45 分鐘，就把 U7（原生 ARM builder）提前到 M0 決定採購。
+- **G-BUILD（M0）**：量測 linux-builder 上 qemu-user 的 aarch64 乾淨建置和增量建置時間。策略：`flatpak-builder --ccache`、持久化 state-dir、依賴模組依 lockhash 快取在 builder 本機。增量建置超過 45 分鐘，就把 U7（原生 ARM builder）提前到 M0 決定採購。
 
 ### 2.3 解碼路徑、fallback 鏈、恢復與配對
 
@@ -627,7 +627,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | F16 | intra-refresh 只接 HEVC，而且要靠 SDP 開 | `nvenc_base.cpp:357-370`、`SS/rtsp.cpp:1006,1045` | VR 恢復協定 | §3.4（強制 IR、三種 codec、隨選 forced IR） |
 | F17 | 文件過期 | 文件 | 同步規則 | §6 |
 | F18 | `VIPLE_MPQUIC` 預設不一致 | `build_moonlight.cmd:19,83-87` | Frame 必須開；**S0 要用 `--mpquic` 建置** | T9 另外決定 Windows 的預設值 |
-| F19 | CoworkMCP 任務圖會造成版號漂移 | `<CoworkMCP repo>/packages/worker/dispatch/{win,host,linux}.json`、`examples\viplestream-release.ts:53-67` | 3.0 發佈流程 | ① `bump-version` op 改成 `pwsh build-tools\version.ps1 set -Version ${version}`。② `win-client`、`win-server` 一律帶 `--no-bump`。③ 每個 build 任務開頭先斷言 `version.ps1 get == spec.version`，不相等就 fail。④ **finalize 前插入人工核准閘門**：coordinator 停下並回報 bb 摘要，等使用者說「發 release」。⑤ linux-arm64 op、host 的 `run-script`/`fetch-artifact`（非特權）寫進**真實 worker 設定**，不能只改範本（本次 coworkmcp 連線失敗，無法確認真實設定，列為待查）。⑥ 在 dry-run（`COWORK_DRYRUN=1`）和一次 1.5.x 實跑中驗證四件版號一致 |
+| F19 | **（已取消）** CoworkMCP 任務圖會造成版號漂移。CoworkMCP 於 2026-09-23 停用，release 改走 §6 的手動流程，每次建置前核對 `version.ps1 get` 等於目標版號；以下為原始記錄 | `<CoworkMCP repo>/packages/worker/dispatch/{win,host,linux}.json`、`examples\viplestream-release.ts:53-67` | 3.0 發佈流程 | ① `bump-version` op 改成 `pwsh build-tools\version.ps1 set -Version ${version}`。② `win-client`、`win-server` 一律帶 `--no-bump`。③ 每個 build 任務開頭先斷言 `version.ps1 get == spec.version`，不相等就 fail。④ **finalize 前插入人工核准閘門**：coordinator 停下並回報 bb 摘要，等使用者說「發 release」。⑤ linux-arm64 op、host 的 `run-script`/`fetch-artifact`（非特權）寫進**真實 worker 設定**，不能只改範本（本次 coworkmcp 連線失敗，無法確認真實設定，列為待查）。⑥ 在 dry-run（`COWORK_DRYRUN=1`）和一次 1.5.x 實跑中驗證四件版號一致 |
 
 - **α 需要**：F0、F6、F8、F9、F12（F14 看 PoC-7）。
 - **M1a 需要**：F2、F3、F4、F5。**M1b 需要**：F7、F13、F15、F16。
@@ -652,7 +652,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
   - Windows updater 只選不含 linux 的 `.zip`，x64 Linux 只選 `.AppImage`。
 - **arm64 builder**
   - 第一階段：linux-builder 用 qemu-user 跑 `flatpak-builder --arch=aarch64`，一律在 flatpak sandbox 內建置。**Monado 和 SteamVR 用 Flatpak 或容器隔離，不裝進 `/usr/local`**，避免污染 x64 AppImage 的 ldd 收集。
-  - source 同步沿用「relay 加 git apply」的 SOP，寫進 `build-steamframe.sh` 的用法說明。
+  - source 同步：已 push 時 `git pull`；未 push 時在 <dev-client> `git diff` 出 patch、scp 過去 `git apply`。寫進 `build-steamframe.sh` 的用法說明。
   - 長建置用 detach 加輪詢（exec 300 秒會逾時）。
   - 第二階段：`linux-arm64-builder`（U7）；G-BUILD 不過就提前。
   - 不用 GitHub Actions。
@@ -660,24 +660,25 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
   - `MQS/build-steamframe.sh`（`--arch`、`--flavor`）
   - `MQS/steamframe/flatpak/<app-id>.yml` 加各模組、`finish-args.md`
   - `MQS/steamframe/sniper/*`（spike）
-  - **`MQS/frame-poc-collect.sh`**：**只在 Frame 本機產生 tarball，不碰網路**。改由 <dev-client> 經 Developer Mode SSH 拉回，再由 <dev-client> PUT 到 relay。腳本參數化，不寫死任何 IP 或 token。這條流程同時是 G-β、G-rc 的 log 回收 SOP，寫進 `docs/steam_frame_client.md`。
+  - **`MQS/frame-poc-collect.sh`**：**只在 Frame 本機產生 tarball，不碰網路**。改由 <dev-client> 經 Developer Mode SSH（scp）拉回。腳本參數化，不寫死任何 IP 或 token。這條流程同時是 G-β、G-rc 的 log 回收 SOP，寫進 `docs/steam_frame_client.md`。
 - **driver 打包**
   - 本機 `build_sunshine.cmd` 在 SC-HID 區段之後呼叫 `Stage-VipleSteamVR.ps1`（進 git）。
   - 版號做法擇一改成兩者都做：
     - (a) `version.ps1` 的 Propagate 新增第四個目標，產生 `SW/steamvr_driver/driver_version.h`（進 git），防呆的來源集合包含它，`docs/versioning.md` §2 的表格同步更新；
     - (b) Stage 讀出 DLL 的 FileVersion，和 `version.ps1 get` 比對，不一致就強制重建，重建後仍不一致就 `exit 1`。
   - 必要檔：`driver.vrdrivermanifest`、`bin\win64\driver_viplestream.dll`（`/MT`，用 `dumpbin /dependents` 確認不依賴 VCRUNTIME）、`resources\settings\default.vrsettings`、`Install-VipleSteamVR.ps1`、`LICENSE-ALVR.txt`、**`LICENSE-OpenVR.txt`**、**`THIRD_PARTY_NOTICES.md`**。缺任何一個就 `exit 1`。
-  - vr_probe 另外打包成 `VipleStream-VrProbe-dev.zip`，上傳 relay，不進 release。
-- **CoworkMCP 任務圖**
+  - vr_probe 另外打包成 `VipleStream-VrProbe-dev.zip`，只在開發機與 host 之間 scp，不進 release。
+- **release 流程（手動依序；CoworkMCP 已於 2026-09-23 停用）**
 
   ```
-  bump(set) → build×6（每個先斷言版號；'Steam Frame Client (arm64)' @ linux-builder[qemu] → 之後改 linux-arm64-builder）
-  deploy（只依賴 win-server）→ itest(stream-quality) ＋ vr-test(vr-emulate)
-  【人工核准閘門：回報摘要，等使用者說「發 release」】→ finalize
+  version.ps1 set/bump → <dev-client> build_all + build_android（--no-bump）
+  → linux-builder（SSH）建 x64 AppImage/.deb 與 arm64 Flatpak（qemu → 之後原生 ARM builder），scp 拉回、核對 sha256 與版號
+  → deploy_server_to_host.ps1 部署 host → stream-quality ＋ vr-emulate 驗測
+  → 【停下回報，等使用者說「發 release」】→ gh release
   vr-smoke：SteamVR 版本變動時或每週一次（server CLI --vr-selftest）
   ```
 
-  host collect 新增 `what=steamvr`（脫敏快照）。**VR 的 server 端取證改用 run-script 對完整 log 做 grep**（腳本放在黑板的 scripts namespace），不依賴 collect 的 tail 加 8 KB 截斷（§8.3）。
+  **VR 的 server 端取證一律用 SSH 對完整 log 做 grep**（sunshine.log 與 SteamVR 的 vrserver.txt／vrcompositor.txt，脫敏後帶回），不只看尾段（§8.3）。
 - **文件**
   - 新增：`docs/vr_architecture.md`、`docs/vr_protocol.md`（含不變式 2、參數格式）、`docs/steam_frame_client.md`（Day 0 過渡指引、log 回收 SOP、安裝範圍 `--user` 或 `--system` 等 PoC-1 確認後寫入）、`docs/steamvr_driver.md`（部署、註銷、手動移除）、`docs/releases/v3.0.0.md`。
   - 更新：`docs/building.md`、`docs/versioning.md`、`docs/log_tags.md`、`docs/rendering_paths.md`、`docs/setup_guide.md`、`docs/troubleshooting.md`、`docs/TODO.md`、README。
@@ -691,7 +692,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 
 | 里程碑 | 範圍 | 依賴 | 需要實機 | 完成條件 | 工時 |
 |---|---|---|---|---|---|
-| **M0 前置**（1.5.x 候選） | F0–F7、F9–F11、F13、F17–F19；baseline：Windows D3D11、Linux x64 client、**Linux server KMS**；**G-BUILD** 量測 | — | 否 | 同步檢查 PASS（`src/` 加 `enet/`）；Pixel 5 回歸 15 分鐘；`version.ps1 set`/bump 防護測試；updater 選對 asset；CoworkMCP dry-run 版號一致；baseline 寫進黑板 | 4–5 週 |
+| **M0 前置**（1.5.x 候選） | F0–F4、F6、F7、F9–F11、F17、F18（F5、F13 依賴 VR 旗標，併入 M1a；F19 已取消）；baseline：Windows D3D11（Linux runtime baseline 移到 M1a）；G-BUILD 移到 M2a 開頭 | — | 否 | 同步檢查 PASS（`src/` 加 `enet/`）；Pixel 5 回歸 15 分鐘；`version.ps1 set`/bump 防護測試；updater 選對 asset；baseline 寫進 `scripts/benchmark/results/` | 4–5 週 |
 | **M1a 協定骨架** | `VipleVr.h`、協商（含 relay 共用函式）、0x5506–0x5508、0x81、S→C async、VR 恢復協定（common-c 加 NVENC forced IR）、pts 查表、server stub 回聲、Windows `--vr-emulate`、Linux stub | M0 的 F2–F5 | 否 | vr-emulate 在 <host> 上：echo 命中 ≥ 99%；decoder 丟一幀注入後 0 不一致；LOSS → REFRESH_START 往返；**linux-server 建置加相容矩陣（Linux server）** | 4–5 週 |
 | **M2a α 建置** | F8、F12、P1 Flatpak、desktop id、`build-steamframe.sh`（兩種 arch）、probes、F6 在 x64 上的檢查、VDD 範本 | M0 的 F0、F6、F9 | 否 | arm64 Flatpak 產出；qemu 跑 `flatpak run --help` 兩次；Windows 和 AppImage 各跑 `--help` 兩次；PoC-F-pre 在 S3 上的前置 | 3–4 週 |
 | **M1b server VR 本體** | driver（API 修正、compositor、pose 空間、控制器、stale）、hardened IPC、`display_vr_t`、VR profile、時鐘對映與頻率鎖、編排（D8b、衝突偵測、註銷）、部署安全、`vr_probe`、`--vr-selftest` | M1a、F7、F13、F15、F16 | 否 | §8.3 M1；**G-DRV、PoC-5a、PoC-10** 完成；依實測重定 G-rc 延遲門檻 | 8–10 週 |
@@ -736,7 +737,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 
 | 代號 | 環境與建置 | 驗證內容 |
 |---|---|---|
-| S0 `vr-emulate` | <dev-client> Windows client，用 **`build_moonlight.cmd --no-bump --mpquic`** 建置；<host> 跑 SteamVR、driver、`vr_probe`（`VipleStream-VrProbe-dev.zip`，由 relay 抓取，登記成 `apps.json` 的 vr 類 app，由編排以使用者 token 啟動） | server、driver、協定全路徑；echo；pose-tag；**人為讓 ENet 失效，確認 0x5506 改走 QUIC flow 0x04，F3 生效**；decoder 丟幀注入；kill server 注入 |
+| S0 `vr-emulate` | <dev-client> Windows client，用 **`build_moonlight.cmd --no-bump --mpquic`** 建置；<host> 跑 SteamVR、driver、`vr_probe`（`VipleStream-VrProbe-dev.zip`，由 <dev-client> scp 到 host，登記成 `apps.json` 的 vr 類 app，由編排以使用者 token 啟動） | server、driver、協定全路徑；echo；pose-tag；**人為讓 ENet 失效，確認 0x5506 改走 QUIC flow 0x04，F3 生效**；decoder 丟幀注入；kill server 注入 |
 | S1 Monado | linux-builder 跑 `monado-service`（容器或 Flatpak 隔離）；client 用 **`build-steamframe.sh --arch x86_64 --flavor dev`** | 和 Frame 相同的 XR 程式碼路徑；VAAPI DRM_PRIME 走 `pl_map_avframe_ex`；stale 和 loading 環境 |
 | S2 SteamVR null driver | <dev-client>，本機 **`build_moonlight.cmd --openxr`** | XR 桌面的輸入和 layer（軟體解碼） |
 | S3 gamescope openvr | linux-builder 上 SteamVR Linux null driver（隔離）加 `gamescope --backend openvr` | α overlay、PoC-F-pre、PoC-2b 的前置 |
@@ -774,16 +775,16 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 
 | M | harness | log tag | 取證 | 門檻 |
 |---|---|---|---|---|
-| M0 | `stream-quality`、`network`；Pixel 5；Linux server KMS | 既有 | collect | 不比 baseline 差 |
-| M1a/b | `vr-emulate`：`VipleStream.exe stream <host> "SteamVR Home" --display-target pcvr --vr-emulate --vr-synthetic-motion sine`；`--vr-selftest`（SteamVR 重啟 20 次）；server 服務重啟；ENet 重連；相容矩陣（含 Linux server、vanilla VM） | `[VIPLE-VR-SESSION]`、`-POSE`、`-POSE-RX`、`-CLK`、`-IPC`、`-DRV`、`-ORCH`、`-CAP`、`-ENC`、`-TX`、`-FRAME` | **run-script 對完整 log 做 grep**（ORCH 狀態轉換、heartbeat、`(final)`、`idr reason`、`deploy-refused`、`meta-miss` 這些稀疏 tag 必須全檔 grep），加 `what=steamvr` | 15 分鐘：到達間隔 p99 ≤ 2T、丟失 ≤ 0.5%（**含 ENet 重連後**）、亂序 ≤ 0.1%；echo ≥ 99%；vr_probe 0 不一致；Present→首封包 p95 ≤ 6 ms；copy p95 ≤ 1.5 ms；1 小時不 crash；重連 ≤ 3 s；不進 safe mode；kill server 後 SteamVR 1 秒內回到 standby；LOSS→REFRESH 往返 ≤ 2 RTT；vanilla、舊版、Linux server 全數正常 |
-| M2 | `frame-poc-collect.sh`、`v4l2-probe`、`decode-bench`、`analyze_client_log.ps1` | `[VIPLE-V4L2]`、`-PROBE`、`[VIPLE-XR-PROBE]`、`[VIPLE-SF-ENV]` | <dev-client> 拉回，再 PUT 到 relay | G-α |
+| M0 | `stream-quality`、`network`；Pixel 5；Linux server KMS | 既有 | SSH grep | 不比 baseline 差 |
+| M1a/b | `vr-emulate`：`VipleStream.exe stream <host> "SteamVR Home" --display-target pcvr --vr-emulate --vr-synthetic-motion sine`；`--vr-selftest`（SteamVR 重啟 20 次）；server 服務重啟；ENet 重連；相容矩陣（含 Linux server、vanilla VM） | `[VIPLE-VR-SESSION]`、`-POSE`、`-POSE-RX`、`-CLK`、`-IPC`、`-DRV`、`-ORCH`、`-CAP`、`-ENC`、`-TX`、`-FRAME` | **SSH 對完整 log 做 grep**（ORCH 狀態轉換、heartbeat、`(final)`、`idr reason`、`deploy-refused`、`meta-miss` 這些稀疏 tag 必須全檔 grep），加 SteamVR log | 15 分鐘：到達間隔 p99 ≤ 2T、丟失 ≤ 0.5%（**含 ENet 重連後**）、亂序 ≤ 0.1%；echo ≥ 99%；vr_probe 0 不一致；Present→首封包 p95 ≤ 6 ms；copy p95 ≤ 1.5 ms；1 小時不 crash；重連 ≤ 3 s；不進 safe mode；kill server 後 SteamVR 1 秒內回到 standby；LOSS→REFRESH 往返 ≤ 2 RTT；vanilla、舊版、Linux server 全數正常 |
+| M2 | `frame-poc-collect.sh`、`v4l2-probe`、`decode-bench`、`analyze_client_log.ps1` | `[VIPLE-V4L2]`、`-PROBE`、`[VIPLE-XR-PROBE]`、`[VIPLE-SF-ENV]` | <dev-client> 經 SSH 拉回 | G-α |
 | M3 | S1、S2 自動化；XR 失敗注入 | `[VIPLE-XR]` | — | G-β |
 | M4 | S1 對 <host>；實機 `vr-hmd`；本機 `analyze_vr_log.ps1` | `[VIPLE-VR-MTP10]`、`-FRAME`、`-REPROJ`、`-HAPTIC`、`-TX transport=` | 全檔 grep 加 `steamvr` | G-rc |
 | M5 | Tailscale；clumsy；tc netem；240 fps 攝影 | `[VIPLE-ABR]`、`-PACER`、`-FEC`（含 `jb-overflow`）、`[VIPLE-MPQUIC]` | network 加全檔 grep | GA |
 
 - 每一段開工前先量 baseline。
 - 10 秒彙總行保持短格式，健康路徑也要有 heartbeat，兩端都輸出 `(final)`。
-- 每輪結果寫進黑板 `benchmark/vr-round-<N>`。
+- 每輪結果寫進 `scripts/benchmark/results/vr-round-<N>/`（本機，`summary.json` + `report.md`）。
 
 ---
 
@@ -833,11 +834,13 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | U9 | Valve 方案能不能在 Frame 看完整 Windows 桌面 |
 | C15（critic） | Frame 帳號（steamos 或 steamvr），影響 `/dev/video*` 權限和 Flatpak 安裝範圍 |
 | `vrDegradedPolicy` 預設值 | G-rc A/B |
-| 其他 | 控制器預設 Touch 或 Index；`steam://launch/<id>/VR` 和 vrmanifest 的行為；`loadPriority`；Frame 能不能對我們的 app 關閉 motion smoothing；β 是否隱藏 server 游標；T9；arm64 自我更新；VR 設定放在 Web UI 哪一頁；sniper SDK；真實 CoworkMCP worker 是否已有 run-script/fetch-artifact；Frame 桌面模式（非 VR）是否也改用 intra 恢復（3.0 之後） |
+| 其他 | 控制器預設 Touch 或 Index；`steam://launch/<id>/VR` 和 vrmanifest 的行為；`loadPriority`；Frame 能不能對我們的 app 關閉 motion smoothing；β 是否隱藏 server 游標；T9；arm64 自我更新；VR 設定放在 Web UI 哪一頁；sniper SDK；Frame 桌面模式（非 VR）是否也改用 intra 恢復（3.0 之後） |
 
 ---
 
 ## 附錄 A：審查意見處理紀錄
+
+> 註：CoworkMCP 已於 2026-09-23 停用。下表提到的 relay（產物中轉）、run-script、collect、黑板、任務圖等做法，一律改為 SSH／scp，見 §6、§8；第 55 項（F19）取消。
 
 | # | critic | severity | 處理方式 |
 |---|---|---|---|

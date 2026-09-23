@@ -191,7 +191,8 @@ powershell -ExecutionPolicy Bypass -File .\Install-VipleSCHid.ps1 -Diag
 thumbprint 此刻不在 Root + TrustedPublisher」時會拒絕（exit 3、`refused=true`）並保留
 舊套件，避免刪了舊 driver 卻裝不回（見上面的信任面說明）。
 
-**部署自動化：** host worker 的 `deploy_from_release.ps1` 在停服務、覆蓋檔案之後會
+**部署自動化：** `scripts\deploy_server_remote.ps1`（本機腳本，由 `deploy_server_to_host.ps1`
+經 SSH 上傳到 host 執行；`-ForceDriverReinstall` 可直接傳給它）在停服務、覆蓋檔案之後會
 自動跑 gentle 模式（`-ForceDriverReinstall` 則跑 `-Reinstall`）；覆蓋前把既有 driver 檔
 備份到 `sc_hid_driver_prev\<既有 INF DriverVer>\`（子目錄先清空；INF 缺或解析不到就是
 `unknown\`），結果附錄在 `config\schid-deploy.log`。Install 以獨立 `powershell.exe` 程序跑、
@@ -201,24 +202,21 @@ thumbprint 此刻不在 Root + TrustedPublisher」時會拒絕（exit 3、`refus
 的 `tryInstallDriver()` 只在開不到裝置時才跑），所以 driver 改版一定要 bump INF
 `DriverVer` 並走這條路。
 
-**取證流程（win-builder 透過 CoworkMCP，零 SSH）：** 兩支診斷腳本在
+**取證流程（從開發機走 SSH）：** 兩支診斷腳本在
 `Sunshine\src\platform\windows\sc_hid_driver\diag\`（隨 repo 版控；`scripts\` 是本機
-gitignore，別放那裡）。
+gitignore，別放那裡）。以下 `<host>` 是測試 server 的 `user@address`。
 
-1. host 端健檢：把 `Sunshine\src\platform\windows\sc_hid_driver\diag\sc_hid_host_check.ps1`
-   放上黑板 `scripts`（`bb_write` + `sync-scripts`）後發 run-script 任務。**服務 Running
-   時腳本預設自動退為 `-NoFeature`**（feature 探測會 SET 0x01 到虛擬裝置，跟進行中的
-   Steam 握手搶同一個一次性回應暫存器；warning 會同時印 sunshine.log 看到的 poll thread
-   狀態供判斷）；串流中就照預設（或明講 `noFeature`），部署後確認沒有串流在跑才帶
-   `forceFeature` 驗 feature 通道。參數可放 `args.*` 或 spec 頂層：
-   ```powershell
-   . scripts\cowork_rpc.ps1; Cowork-Init
+1. host 端健檢：把 `sc_hid_host_check.ps1` scp 到 host（檔案已帶 UTF-8 BOM，PowerShell 5.1
+   才讀得懂中文），再經 SSH 以管理員 PowerShell 執行。**服務 Running 時腳本預設自動退為
+   `-NoFeature`**（feature 探測會 SET 0x01 到虛擬裝置，跟進行中的 Steam 握手搶同一個一次性
+   回應暫存器；warning 會同時印 sunshine.log 看到的 poll thread 狀態供判斷）；串流中就照預設
+   （或明講 `-NoFeature`），部署後確認沒有串流在跑才帶 `-ForceFeature` 驗 feature 通道：
+   ```bash
+   scp Sunshine/src/platform/windows/sc_hid_driver/diag/sc_hid_host_check.ps1 <host>:sc_hid_host_check.ps1
    # 串流中（只看裝置／節點／log／Steam log，不碰 feature 通道）
-   $t = Cowork-RunTask -Type run-script -Role viplestream-host `
-          -Spec @{ op = 'run-script'; script = 'sc_hid_host_check.ps1'; args = @{ noFeature = $true } }
+   ssh <host> "powershell -NoProfile -ExecutionPolicy Bypass -File sc_hid_host_check.ps1 -NoFeature"
    # 部署後、沒有串流在跑：驗 feature 通道（GATE-OK）
-   $t = Cowork-RunTask -Type run-script -Role viplestream-host `
-          -Spec @{ op = 'run-script'; script = 'sc_hid_host_check.ps1'; args = @{ forceFeature = $true } }
+   ssh <host> "powershell -NoProfile -ExecutionPolicy Bypass -File sc_hid_host_check.ps1 -ForceFeature"
    ```
    讀輸出末行 `RESULT:{json}`：`deviceFound`／`bound`／`driverVersion`／`versionMatch`／
    `driverStats`（Feature 0x05 解碼：`drvSet`／`drvGet01`／`pending`／`ready`／`delivered`／
@@ -232,9 +230,10 @@ gitignore，別放那裡）。
 
    另看 `sunshineLogState`（`ok`／`missing`／`unreadable: …`，區分「讀不到 log」與「有 log 但無
    `[SC-HID]` 行」）／`steamReadFailure`／`steamZombie`（host Steam 握手失敗特徵計數，應為 0）。
-2. host server log：`collect(what=["log-grep"], pattern="\\[SC-HID\\]", tail=20000, max=400)`。
-3. host Steam log：`collect(what=["log-grep"], log="C:\\Program Files (x86)\\Steam\\logs\\controller.txt",
-   pattern="(?i)28de|1302|steam controller|GetControllerInfo|Read failure|couldn't get|firmware|disconnect")`。
+2. host server log：經 SSH 在 host 執行
+   `Select-String -Path 'C:\Program Files\VipleStream-Server\config\sunshine.log' -Pattern '\[SC-HID\]' | Select-Object -Last 400`。
+3. host Steam log：同上，對 `C:\Program Files (x86)\Steam\logs\controller.txt` 以
+   `(?i)28de|1302|steam controller|GetControllerInfo|Read failure|couldn't get|firmware|disconnect` 篩選。
 4. client 端：`Sunshine\src\platform\windows\sc_hid_driver\diag\sc_hid_probe.ps1 -Seconds 8 -LegacyCheck`
    （列舉 0x28DE 介面／report 佈局／N 秒 report id 直方圖／SET→1 ms 輪詢 GET 的 feature
    時序），串流 log 看 `[SC-HID] rx stats(final)` 與 `Feature req … lat=`（tag 字典見

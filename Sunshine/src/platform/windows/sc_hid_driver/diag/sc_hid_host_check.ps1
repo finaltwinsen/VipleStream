@@ -4,12 +4,12 @@
   -> 子 HID 介面 28DE:1302）的 driver 版本、開啟、feature 通道與 host Steam 的握手證據。
 
 .DESCRIPTION
-  這支腳本把 §SC-HID Round 1（2026-09-02）在 host（.226）現場取證的步驟整理進版控，設計成由
-  host worker 以 run-script 執行（也可在 host 上手動以管理員 PowerShell 跑）。輸出人可讀的
-  段落，最後一行 RESULT:{json} 供 win-builder 解析。相容 Windows PowerShell 5.1 與 PowerShell 7。
+  這支腳本把 §SC-HID Round 1（2026-09-02）在 host（.226）現場取證的步驟整理進版控，在 host 上以
+  管理員 PowerShell 執行（從開發機可 scp 過去後經 SSH 跑）。輸出人可讀的段落，最後一行
+  RESULT:{json} 供開發機解析。相容 Windows PowerShell 5.1 與 PowerShell 7。
 
   位置：Sunshine\src\platform\windows\sc_hid_driver\diag\（隨 repo 版控；repo 的 scripts\ 目錄
-  整個是本機 gitignore，別放那裡）。host 黑板 scripts 的副本從這裡 bb_write + sync-scripts。
+  整個是本機 gitignore，別放那裡）。
 
   段落：
     [1] 虛擬裝置：SetupDi 列舉 28DE:1302，attrs / caps / report 佈局、以 R+W 開啟（= server 的
@@ -44,10 +44,6 @@
         "couldn't get controller details" + "Read failure" -> 10.8 s timeout -> zombie 重開）。
     [8] Install-VipleSCHid.ps1 -Diag（唯讀；除非 -SkipInstallerDiag）。
 
-  host worker 走 run-script 時可用 COWORK_TASK_SPEC 覆寫參數，args.* 與頂層同名鍵皆接受（args 優先）：
-    { op:"run-script", script:"sc_hid_host_check.ps1",
-      args:{ dest, maxMs, steamLogLines, noFeature, forceFeature, skipInstallerDiag } }
-
 .PARAMETER Dest            server 安裝目錄（預設 C:\Program Files\VipleStream-Server）
 .PARAMETER MaxMs           GET 0x01 輪詢上限 ms（預設 180；上限鉗 180 = 低於 driver 閘控逾時 400 ms）
 .PARAMETER SteamLogLines   Steam log 各檔掃描末尾行數（預設 200）
@@ -79,37 +75,6 @@ if (-not (Get-PSDrive Cert -ErrorAction SilentlyContinue) -and $PSVersionTable.P
   try { Import-Module Microsoft.PowerShell.Security -ErrorAction Stop } catch { }
 }
 
-# JSON 布林／字串／數字都當布林看（"true"/"1"/"yes"/"on" 為真）。
-function ConvertTo-FlagBool($v) {
-  if ($null -eq $v) { return $false }
-  if ($v -is [bool]) { return $v }
-  $s = "$v".Trim().ToLowerInvariant()
-  return ($s -in @('1', 'true', 'yes', 'y', 'on'))
-}
-
-# run-script 注入：COWORK_TASK_SPEC(JSON) 覆寫命名參數。args.* 優先，其次頂層同名鍵
-#（host worker 的 dispatch 有時把 args 攤平到 spec 頂層；與 collect_server_stats.ps1 同慣例）。
-if ($env:COWORK_TASK_SPEC) {
-  try {
-    $spec = $env:COWORK_TASK_SPEC | ConvertFrom-Json
-    $specSources = @()
-    if ($spec -and $spec.PSObject.Properties['args'] -and $null -ne $spec.args) { $specSources += $spec.args }
-    if ($spec) { $specSources += $spec }
-    function Get-SpecArg([string]$Name) {
-      foreach ($srcObj in $specSources) {
-        $prop = $srcObj.PSObject.Properties[$Name]
-        if ($prop -and $null -ne $prop.Value -and "$($prop.Value)" -ne '') { return $prop.Value }
-      }
-      return $null
-    }
-    $v = Get-SpecArg 'dest';              if ($null -ne $v) { $Dest = [string]$v }
-    $v = Get-SpecArg 'maxMs';             if ($null -ne $v) { $MaxMs = [int]$v }
-    $v = Get-SpecArg 'steamLogLines';     if ($null -ne $v) { $SteamLogLines = [int]$v }
-    $v = Get-SpecArg 'noFeature';         if (ConvertTo-FlagBool $v) { $NoFeature = $true }
-    $v = Get-SpecArg 'forceFeature';      if (ConvertTo-FlagBool $v) { $ForceFeature = $true }
-    $v = Get-SpecArg 'skipInstallerDiag'; if (ConvertTo-FlagBool $v) { $SkipInstallerDiag = $true }
-  } catch { }
-}
 # 輪詢上限鉗 180 ms：低於 driver 的 GET(0x01) 閘控逾時 400 ms，這樣「輪詢期間看到 ok」只可能是
 # 回應真的被交付（err -> ok 轉折），不會是逾時退回 LastResponse 的假 ok。
 if ($MaxMs -gt 180) { $MaxMs = 180 }
@@ -646,7 +611,7 @@ if (Test-Path (Join-Path $Dest 'sc_hid_driver')) { Write-Host '  note: legacy su
 $prevRoot = Join-Path $Dest 'sc_hid_driver_prev'
 if (Test-Path $prevRoot) {
   $prevVers = @(Get-ChildItem $prevRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-  Write-Host ("  backup dir sc_hid_driver_prev\ present (deploy_from_release.ps1); versions: {0}" -f $(if ($prevVers.Count -gt 0) { $prevVers -join ', ' } else { '(flat/legacy layout)' }))
+  Write-Host ("  backup dir sc_hid_driver_prev\ present (deploy script backup); versions: {0}" -f $(if ($prevVers.Count -gt 0) { $prevVers -join ', ' } else { '(flat/legacy layout)' }))
   $R.backupVersions = $prevVers
 }
 $dlog = Join-Path $Dest 'config\schid-deploy.log'
