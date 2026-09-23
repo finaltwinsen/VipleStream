@@ -2,7 +2,7 @@
 
 A self-hosted game-streaming stack — a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients) with built-in NAT traversal, AI frame interpolation, Steam library auto-import, and a Traditional Chinese UI. Wire-protocol-compatible with vanilla Sunshine / Moonlight so VipleStream and upstream installs interoperate.
 
-> **Current version:** 1.5.114 — see [Releases](https://github.com/finaltwinsen/VipleStream/releases) for downloads.
+> **Current version:** see the [latest release](https://github.com/finaltwinsen/VipleStream/releases/latest). Releases ship the Windows client and server, the Android APK, and the Linux x64 client and server at one shared version number.
 
 Project home: <https://github.com/finaltwinsen/VipleStream>
 
@@ -10,12 +10,14 @@ Project home: <https://github.com/finaltwinsen/VipleStream>
 
 ## Components
 
-| Component | Replaces | Binary | Install path (Windows) |
-|---|---|---|---|
-| **VipleStream-Server** | Sunshine | `viplestream-server.exe` + `viplestream-svc.exe` | `C:\Program Files\VipleStream-Server\` |
-| **VipleStream** (PC client) | Moonlight-Qt | `VipleStream.exe` | `C:\Program Files\Moonlight Game Streaming\` |
-| **VipleStream Android** | Moonlight-Android | application id `com.piinsta` | sideload-only APK |
-| **viplestream-relay** | — | `relay_server.py` | run on any always-on host |
+| Component | Replaces | Platform | Release asset → binary | Install location |
+|---|---|---|---|---|
+| **VipleStream-Server** | Sunshine | Windows x64 | `VipleStream-Server-X.Y.Z.zip` → `viplestream-server.exe` + `viplestream-svc.exe` | `C:\Program Files\VipleStream-Server\` (service `VipleStreamServer`) |
+| | | Linux x64 | `VipleStream-Server-X.Y.Z-linux-x64.deb` → `viplestream-server` | `/usr/bin/` (systemd user service) |
+| **VipleStream** (PC client) | Moonlight-Qt | Windows x64 | `VipleStream-Client-X.Y.Z.zip` → `VipleStream.exe` | `C:\Program Files\Moonlight Game Streaming\` |
+| | | Linux x64 | `VipleStream-Client-X.Y.Z-linux-x64.AppImage` | portable, no install step |
+| **VipleStream Android** | Moonlight-Android | Android | `VipleStream-Android-X.Y.Z.apk` (application id `com.piinsta`) | sideload only |
+| **viplestream-relay** | — | any (Python 3.10+) | `tools/viplestream-relay/relay_server.py` (source only, not a release asset) | any always-on host |
 
 The wire protocol on `_nvstream._tcp` mDNS, `/serverinfo` `/launch` `/applist`, RTSP, and the client cert chain are unchanged from upstream. A VipleStream client can connect to a vanilla Sunshine host, and a vanilla Moonlight client can connect to a VipleStream-Server host — VipleStream-only features (Steam profile dropdown, FRUC backends, etc.) are quietly hidden when the peer doesn't advertise the `<VipleStreamProtocol>` capability marker.
 
@@ -96,7 +98,7 @@ PC client HDR is upstream Moonlight-Qt's existing HDR path (Sunshine `hdrMode=1`
 ```
 ┌──────────────────────┐        relay or direct       ┌──────────────────────┐
 │  VipleStream client  │ ◄──────────────────────────► │  VipleStream-Server  │
-│  (PC / Android)      │                              │  (Windows)           │
+│  (PC / Android)      │                              │  (Windows / Linux)   │
 │                      │   1. STUN → public IP        │                      │
 │  RelayClient.java    │   2. relay lookup            │  stun.cpp            │
 │  RelayTcpTunnel.java │   3. HTTP proxy /launch      │  relay.cpp           │

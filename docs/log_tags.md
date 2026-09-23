@@ -161,11 +161,13 @@ Vulkan 對應版是 `[VIPLE-VKFRUC-Stats]`（`vkfruc.cpp:15958`，格式刻意�
 ### `[VIPLE-DEPACK]`
 `VideoDepacketizer.c`
 
-- `:1251` `notifyFrameLost: frame=%u spec=%d (+%u more since last log, frames %u..%u)`
+- `:1258` `notifyFrameLost: frame=%u spec=%d (+%u more since last log, frames %u..%u)`
   —— §LOG-NFL-AGG 節流：每秒最多一筆 + 區間彙總。`spec` = speculative。
 - `:144` `dropFrameState #%u from L%d: strict=%d idrProc=%d wasWait=%d → idr=%d rfi=%d consec=%u`
 - `:834` `§FRZ-WATCHDOG: frame number resync %u → %u`
-- `:1238` `notifyFrameLost: stale frame=%u — ignored`（§FRZ-B2 防幀號倒帶）
+- `:1245` `notifyFrameLost: stale frame=%u (start=%u) — ignored`（§FRZ-B2 防幀號倒帶；
+  §F1-DBG-ASSERT 起這道防衛排在所有 assert 之前，Android debug native 不再先 SIGABRT。
+  同時段常伴隨 `[VIPLE-CTRL]` 的三行幀號倒帶防衛，見第 5 節）
 
 ### `§FRZ-WATCHDOG` / `§FRZ-ESCALATE`（`[VIPLE-VIDEO]`）
 `VideoStream.c:332` / `:383`
@@ -193,10 +195,10 @@ Unrecoverable frame %d: %d+%d=%d received < %d needed
 ```
 Control message took over 10 ms to send (net latency: %u ms | packet loss: %f%%)
 ```
-`ControlStream.c:966`。⚠ **只在送出 >10ms 時才印，是偏誤取樣** ——
+`ControlStream.c:1032`。⚠ **只在送出 >10ms 時才印，是偏誤取樣** ——
 `min` 不代表健康基線，不能拿來當倍率分母。RTT 數百 ms 以上代表管線積壓
 （bufferbloat）。要做真正的 RTT 基線追蹤請用
-`LiGetEstimatedRttInfo()`（`ControlStream.c:2367`，讀 `peer->roundTripTime`）。
+`LiGetEstimatedRttInfo()`（`ControlStream.c:2453`，讀 `peer->roundTripTime`）。
 
 ---
 
@@ -218,6 +220,13 @@ Control message took over 10 ms to send (net latency: %u ms | packet loss: %f%%)
 | `[VIPLE-QLOG] §S.19 cooldown armed f=N (K.14 pending\|skipped)` / `IDR-REQ` / `IDR-EMIT` / `IDR-SUPPRESS` | **host** `video.cpp` encode_run | IDR cooldown 閘門：`armed` 標示本 encoder 生命期起點（`K.14 skipped: rebuilt encoder`＝顯示拓樸切換後重建）；client 要 IDR 卻只見 SUPPRESS、無 EMIT 就是 §S.19-INIT-FIX 修掉的永久凍結型態 |
 | `[VIPLE-UPDATE]` | **host** `self_update.cpp` / `system_tray.cpp` | §SELF-UPDATE 常駐圖示兩段式「Check for updates...」→「Install update vX」與 CLI `--check-update`／`--self-update [--force] [package]`：`latest via HEAD: X`（github.com 302 取 tag，免 API 配額）／`falling back to API`／`up to date`／`update available: A → B`／`downloaded … bytes`／`sha256 verified`（GitHub asset digest，拿不到就拒裝）／`updater launched (pid N) … service=1`（Windows：PowerShell 腳本在 `<install>/config/update`，停 service→rename .old→覆蓋→啟 service，失敗回滾；細節在 `config/self_update.log`）／`sudo path rc=` `pkexec path rc=`（Linux：apt-get install .deb；細節在 `~/.config/sunshine/self_update.log`）／`self-update completed: now running X` 或 `last self-update failed: …`（重啟後讀 result 檔） |
 | `[VIPLE-HID]` | `backend/hidprobe.cpp` + 四個閘控點（`gamepad.cpp` getUnmappedGamepads / `sdlgamepadkeynavigation.cpp` enable / `input.cpp` SdlInputHandler ctor / `sc_hid.cpp` prepare） | 啟動前與每場開始前的 HID 探測（§HID-PROBE，2026-09-19 Puck 卡死事故）。`probe (startup\|refresh) OK: N HID interface(s) responded in X ms (slowest VID:PID Y ms, limit 1000 ms)` = 正常；`UNRESPONSIVE <name> vid= pid= stuck_at=<CreateFile\|HidD_GetAttributes\|HidD_GetProductString\|enumeration> path=` = 該裝置無回應 → 手把偵測、手把 UI 導覽、串流手把與 SC-HID 停用，各閘控點各印一行 `skipped/refused`；重插裝置後下一次 refresh（開串流／回 UI）自動恢復，不必重啟。**刻意比 SDL 保守**：對所有 HID 介面查字串，卡死的普通鍵鼠也會觸發。`(simulated via VIPLE_HID_PROBE_SIMULATE_HANG, dev-only)` = 測試注入（`VID:PID` 直接注入；`VID:PID:stall` 對實體介面真的卡在字串查詢；`enumerate:stall` 整個列舉逾時），不是真故障 |
+| `[VIPLE-CTRL]` | `ControlStream.c`（common-c，Q／A 兩份相同） | 控制通道的防衛，四種行都代表防衛生效（拒送、改送 IDR 或忽略），不是崩潰。**§F2**（`sendMessageEnet` 加密分支）：`§F2 payload too large (ptype=0x%04x len=%d) — limit 251, dropped (count=N)` ＝ 明文超過 256 B stack buffer（payload 上限 251 B）被拒送、回傳 false；前 10 次都印、之後每 1000 次一筆。現有呼叫端都是固定長度（最大是 input 132 B），**1.5.x 正常 log 不該出現**；出現代表有新呼叫端（3.0 VR 送出 API）組出超長封包。**§F1-DBG-ASSERT**（幀號狀態倒帶，三行都改送 IDR）：`Invalid frame loss range (%u to %u) — requesting IDR frame instead`（`queueFrameInvalidationTuple`，每秒最多 1 筆）、`Non-monotonic RFI ranges (start %u, last end %u) — requesting IDR frame instead`（`referenceFrameControlFunc` 聚合時）、`connectionSawFrame: stale frame=%u (lastSeen=%u) — ignored`（倒退幀號不計入統計，每秒最多 1 筆）。這三行與 `[VIPLE-DEPACK] notifyFrameLost: stale` 同時出現＝§FRZ-WATCHDOG 哨兵重置後採納了 failback 殘留的 stale 幀；舊版 Android（debug native、assert 生效）會在這裡 SIGABRT 閃退 |
+| `[VIPLE-CTRL-TX]` | **host** `stream.cpp`（`control_server_t::send`） | §F4 server 控制訊息可指定 channel／flags：`§F4: channel N >= peer channelCount M, falling back to channel 0` ＝ 要求的 ENet channel 超過該 client 協商的 channel 數（舊 client），改走 channel 0、flags 不變；整個程序只記前 5 次。1.5.x 沒有呼叫端送非 0 channel（M1a 的 VR 訊息才會），**目前不該出現** |
+| `[VIPLE-MPQUIC] §F3 …` | **host** `stream.cpp` | §F3 QUIC recv handler 提早註冊（只在開 mpquic 的 session）：`§F3 recv handler registered at session start (via=session-start\|quic-ready, peer=…)` 每條 session 一次，一般順序（RTSP 握手後才連 QUIC）是 `via=quic-ready`；同一條 session 因 QUIC 重連換了 QuicSession 時印 `§F3 recv handler re-registered on new QUIC session (via=…)`。`§Q-IDR-VIA-QUIC: recv handler registered on QUIC session via video loop (§F3 safety net — early registration missed, peer=…)` ＝ 兩個提早註冊點都漏接、由 video 迴圈補上，**不該出現**，出現就是 F3 有漏洞。開 mpquic 的 session 若三行都沒有，client 在 QUIC fallback 期間送的 IDR／FEC／input 會被丟掉 |
+| `[VIPLE-DEVENV]` | `wm.cpp`（`Utils::logDevEnvOverride`）／**host** `config.cpp` | 環境變數覆寫了行為（環境變數只准當 dev-only 偵錯開關）。client：`dev-only override NAME=value`（SDL warn，每個名稱每個行程一次），涵蓋 `PREFER_VULKAN`、`GL_IS_SLOW`、`VULKAN_IS_SLOW`、`MATCH_DISPLAY_MODE_TO_VIDEO`、`SEPARATE_TEST_DECODER`、`FORCE_QT_GLES`、`VIPLE_USE_VK_DECODER`、`VIPLE_VK_FRUC_GENERIC`、`VIPLE_VKFRUC_*`、`*_AVOPTIONS`、`*_DECODER_HINT`。host（sunshine.log，啟動時一次，§F7）：`dev-only override VIPLE_SMOOTH_PACING=<v> （…smooth_pacing=<cfg> 被覆寫，生效值=<eff>…）`，優先序 env > `sunshine.conf` 的 `smooth_pacing` > 預設 false。**分析使用者回報的 log 前先 grep 這個 tag**：有這行就代表行為被環境變數改過，要先排除 |
+| `[VIPLE-LNXFE]` | （僅 Linux）`settings/streamingpreferences.cpp`、`wm.cpp`、`ffmpeg.cpp`、`session.cpp` | §F6 Linux renderer 決策。`linuxVideoFrontend=auto\|vulkan\|egl -> frontend=PlVk-first\|legacy-order (reason=aarch64\|zink\|default\|user isGpuSlow=N)`（設定或結果改變時才印）；`DRM driver probe: [<driver>] (source=libdrm\|sysfs)`（決定 isGpuSlow；msm 判為不慢）；`EGL probe: vendor='…' driver='…' zink=N`（x86 AUTO 第一次選 renderer 時探一次 Zink）；G-α 驗收摘要 `decoder=%s fmt=%s frontend=%s backend=%s isGpuSlow=%d`、`windowMode=%d fullscreenFlag=FULLSCREEN\|FULLSCREEN_DESKTOP\|NONE isGpuSlow=%d`、`matchVideo=%d (isGpuSlow=%d videoDriver=%s)`。Steam Frame 預期：`DRM driver probe: [msm]`、`reason=aarch64`、`fmt=DRM_PRIME frontend=PlVk isGpuSlow=0`、`fullscreenFlag=FULLSCREEN_DESKTOP`、`matchVideo=0`。Windows 不印 |
+| `[VIPLE-UPDATE]`（client updater） | `backend/updater.cpp`（決策在 `backend/updateassetrules.h`） | §F9 更新對話框的「立即更新」路徑（版本檢查本身是上面的 `AutoUpdateChecker`）。啟動時 `platform <os>/<arch> (cpu …, build …, appimage\|flatpak\|plain[, emulated]) install mode = auto-install\|notify-only\|unsupported`，模擬執行另印 `running under emulation — cpu X build Y; assets follow the build architecture`；只通知的平台按下更新印 `startUpdate refused — install mode …`。抓到 release 後逐筆 `skip asset <檔名> — <原因>`，接著 `matched asset <檔名> action = auto-install\|notify-only release tag vX` 或 `no asset for <platform> — plan not-newer\|no-assets\|no-match\|missing-tag\|bad-tag release tag … current … among …`；`fetched release vX differs from the version offered in the UI Y` ＝ UI 顯示的版號已過時，改裝抓到的 tag；之後 `selected asset … → <url>`、`install dir …`，失敗統一 `failed: …`。判讀：`plan not-newer` ＝ GitHub API 快取落後 HEAD 302，幾分鐘後再試；`no-match` ＝ 這個 release 沒有本架構的檔或檔名版號對不上 tag |
+| `[VIPLE-COMMONC-SYNC]` | **build** `moonlight-qt/moonlight-common-c/check_commonc_sync.ps1`（本機 `build_moonlight.cmd`／`build_sunshine.cmd`／`build_android.cmd` 第一步呼叫） | §F1 三份 common-c 同步檢查（規則見 `docs/vr_protocol.md` §4.8），**是 build log，不是 runtime log**。`[ERROR] (1) Q/A …`（Qt 與 Android 兩份 `src/`、`enet/` 必須一致）／`[ERROR] (2) Q/S3 …`（server 實際編譯的指定檔必須一致）→ build 以 `[ERROR] moonlight-common-c sync check failed (rc=N)` 停下，發生在版號步驟之前，不會吃掉版號；`[WARN]` 只提示（未 stage 的刪除、Q/S3 其餘漂移）；結尾一行 `PASS：…` 或 `FAIL：…` |
 
 ### `[SC-HID]` —— Steam Controller 原生 HID 轉發（§SC-HID Round 1，2026-09-02 起）
 client：`streaming/input/sc_hid.cpp`；host 端 `Sunshine/src/input.cpp` 與
