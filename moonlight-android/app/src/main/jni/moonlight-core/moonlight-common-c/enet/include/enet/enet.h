@@ -200,7 +200,11 @@ typedef enum _ENetPeerState
 
 enum
 {
-#ifdef __3DS__
+#if defined(__WIIU__)
+   ENET_HOST_RECEIVE_BUFFER_SIZE          = 256 * 1024,
+   // Send buffer size is limited since it cannot use userbuffers
+   ENET_HOST_SEND_BUFFER_SIZE             = 0x10000 - 1,
+#elif defined(__3DS__)
    ENET_HOST_RECEIVE_BUFFER_SIZE          = 0x20000,
    ENET_HOST_SEND_BUFFER_SIZE             = 0x20000,
 #else
@@ -360,6 +364,7 @@ typedef int (ENET_CALLBACK * ENetInterceptCallback) (struct _ENetHost * host, st
 typedef struct _ENetHost
 {
    ENetSocket           socket;
+   int                  wildcardBind;
    ENetAddress          address;                     /**< Internet address of the host */
    enet_uint32          incomingBandwidth;           /**< downstream bandwidth of the host */
    enet_uint32          outgoingBandwidth;           /**< upstream bandwidth of the host */
@@ -523,6 +528,7 @@ ENET_API int        enet_socketset_select (ENetSocket, ENetSocketSet *, ENetSock
 ENET_API int enet_address_set_host (ENetAddress * address, const char * hostName);
 ENET_API int enet_address_set_address (ENetAddress * address, struct sockaddr * addr, socklen_t addrlen);
 ENET_API int enet_address_set_port (ENetAddress * address, enet_uint16 port);
+ENET_API int enet_address_wildcard (const ENetAddress * address);
 ENET_API int enet_address_equal (ENetAddress * address1, ENetAddress * address2);
 
 /** @} */

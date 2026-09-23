@@ -452,7 +452,25 @@ void destroyControlStream(void) {
 }
 
 static void queueFrameInvalidationTuple(uint32_t startFrame, uint32_t endFrame) {
-    LC_ASSERT(startFrame <= endFrame);
+    // §F1-DBG-ASSERT（§FRZ-B3 同類）：上游原本在這裡
+    // LC_ASSERT(startFrame <= endFrame)。反轉範圍只可能來自幀號狀態倒帶
+    // （例：§FRZ-WATCHDOG 哨兵重置後採納了 failback 殘留的 stale 幀，
+    // depacketizer 以舊的 startFrameNumber 回報較小的 frameIndex）。
+    // Android 出貨的 native 是 NDK_DEBUG=1 建置、assert 生效，會在抵達
+    // requestInvalidateReferenceFrames 的 §FRZ-B3 防衛之前就 SIGABRT；
+    // release 版則把反轉 tuple 排進佇列、聚合後才被 §FRZ-B3 攔下改送 IDR。
+    // 這裡直接改要 IDR，兩種建置行為一致，也不讓反轉 tuple 污染聚合範圍。
+    if (startFrame > endFrame) {
+        static uint64_t lastInvalidTupleLogMs;
+        uint64_t nowMs = PltGetMillis();
+        if (lastInvalidTupleLogMs == 0 || nowMs - lastInvalidTupleLogMs >= 1000) {
+            Limelog("[VIPLE-CTRL] Invalid frame loss range (%u to %u) — requesting IDR frame instead\n",
+                    startFrame, endFrame);
+            lastInvalidTupleLogMs = nowMs;
+        }
+        LiRequestIdrFrame();
+        return;
+    }
 
     if (isReferenceFrameInvalidationEnabled()) {
         PQUEUED_REFERENCE_FRAME_CONTROL qfit;
@@ -561,7 +579,23 @@ void connectionSendFrameFecStatus(PSS_FRAME_FEC_STATUS fecStatus) {
 }
 
 void connectionSawFrame(uint32_t frameIndex) {
-    LC_ASSERT_VT(!isBefore16(frameIndex, lastSeenFrame));
+    // §F1-DBG-ASSERT（§FRZ-B1 同類）：上游原本在這裡
+    // LC_ASSERT_VT(!isBefore16(frameIndex, lastSeenFrame))——拿 16-bit 迴繞
+    // 比對 32-bit 幀號，跟 §FRZ-B1 是同一個錯。§FRZ-WATCHDOG 哨兵重置後
+    // RtpVideoQueue 會採納下一個抵達的幀，若那是 failback 殘留的 stale 幀，
+    // Android 出貨的 debug native（assert 生效）會在這裡 SIGABRT。
+    // 改為 runtime 防衛：倒退的幀號不列入統計、也不改基準（release 版原本
+    // 會讓 intervalTotalFrameCount 以無號相減溢位成天文數字）。
+    if (lastSeenFrame != 0 && isBefore32(frameIndex, lastSeenFrame)) {
+        static uint64_t lastStaleSawLogMs;
+        uint64_t nowMs = PltGetMillis();
+        if (lastStaleSawLogMs == 0 || nowMs - lastStaleSawLogMs >= 1000) {
+            Limelog("[VIPLE-CTRL] connectionSawFrame: stale frame=%u (lastSeen=%u) — ignored\n",
+                    frameIndex, lastSeenFrame);
+            lastStaleSawLogMs = nowMs;
+        }
+        return;
+    }
 
     uint64_t now = PltGetMillis();
 
@@ -797,6 +831,38 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
         PNVCTL_ENET_PACKET_HEADER_V2 packet;
         char tempBuffer[256];
 
+        // §F2（3.0 M0）：明文用固定 256 B 的 stack buffer 組裝，上游只靠
+        // LC_ASSERT 把關——release 建置的 LC_ASSERT 是空巨集，超長 payload
+        // 會直接 memcpy 溢位 stack。3.0 的 VR tracking（0x5506）加 V2 header
+        // 共 236 B，已逼近上限，所以改成 runtime 檢查：超長就記 log、回傳
+        // false、不送出。上限維持上游斷言的「嚴格小於」（payload ≤ 251 B），
+        // 與 docs/vr_protocol.md §4.3／§4.5 的「上限 251 B」一致。
+        //
+        // 檢查刻意放在 enet_packet_create 與 currentEnetSequenceNumber++
+        // 之前：拒送時不配置封包、不持 enetMutex、不消耗加密序號（IV），
+        // 也不會落到下方的 QUIC datagram fallback（那條送的是已加密的
+        // enetPacket->data，同樣受此檢查保護）。paylen 為負值一併擋下，
+        // 避免轉成 size_t 後相加迴繞而繞過檢查。
+        //
+        // 呼叫端語意：false 一律代表「這則訊息沒送出」。現有呼叫端的
+        // payload 長度都是編譯期固定且遠小於上限（最大是 input，
+        // MAX_INPUT_PACKET_SIZE 128 + 4 B），此分支對它們不可達；3.0 新增的
+        // VR 送出 API 必須把 false 當成「丟棄這筆樣本」，不可據此終止連線。
+        if (paylen < 0 || sizeof(*packet) + (size_t)paylen >= sizeof(tempBuffer)) {
+            // 節流：前 10 次都印，之後每 1000 次印一次（VR tracking 最高
+            // 2×顯示 Hz，程式錯誤時不能每包都洗 log）。計數器跨執行緒
+            // 無鎖，只影響 log 取樣，無害。
+            static unsigned int f2OversizeCount;
+            unsigned int count = ++f2OversizeCount;
+            if (count <= 10 || count % 1000 == 0) {
+                Limelog("[VIPLE-CTRL] §F2 payload too large (ptype=0x%04x len=%d) "
+                        "— limit %d, dropped (count=%u)\n",
+                        (unsigned int)(unsigned short)ptype, (int)paylen,
+                        (int)(sizeof(tempBuffer) - sizeof(*packet) - 1), count);
+            }
+            return false;
+        }
+
         enetPacket = enet_packet_create(NULL,
                                         sizeof(*encPacket) + AES_GCM_TAG_LENGTH + sizeof(*packet) + paylen,
                                         flags);
@@ -814,7 +880,7 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
         encPacket->seq = currentEnetSequenceNumber++;
 
         // Construct the plaintext data for encryption
-        LC_ASSERT(sizeof(*packet) + paylen < sizeof(tempBuffer));
+        // §F2：長度已在函式前段做 runtime 檢查（原本只有 LC_ASSERT）。
         packet = (PNVCTL_ENET_PACKET_HEADER_V2)tempBuffer;
         packet->type = ptype;
         packet->payloadLength = paylen;
@@ -2096,18 +2162,21 @@ static void requestIdrFrame(void) {
 }
 
 static void requestInvalidateReferenceFrames(uint32_t startFrame, uint32_t endFrame) {
-    LC_ASSERT(startFrame <= endFrame);
-    LC_ASSERT(isReferenceFrameInvalidationEnabled());
-
     // §FRZ-B3: 反轉範圍（start > end）只可能來自上游狀態毒化（release 版
     // LC_ASSERT 無效；毒化事故實測送出過 "(369149 to 328438)"）。與 server
     // 端 nvenc 防衛（invalid rfi → IDR）對稱：改送 IDR，不送無效範圍上線。
+    // §F1-DBG-ASSERT: 上游原本在此之前 LC_ASSERT(startFrame <= endFrame)。
+    // Android 出貨的 native 是 NDK_DEBUG=1 建置、assert 生效，assert 在前時
+    // 這個防衛永遠執行不到（直接 SIGABRT）。防衛必須放在最前面，原 assert
+    // 在防衛之後恆真，已拿掉。
     if (startFrame > endFrame) {
         Limelog("Invalid RFI range (%u to %u) — requesting IDR frame instead\n",
                 startFrame, endFrame);
         requestIdrFrame();
         return;
     }
+
+    LC_ASSERT(isReferenceFrameInvalidationEnabled());
 
 #ifdef VIPLE_MPQUIC
     // §Q-IDR-QUIC-FIRST v1.5.197 Fix P.1：同 requestIdrFrame()，
@@ -2211,6 +2280,7 @@ static void referenceFrameControlFunc(void* context) {
         uint32_t invalidateStartFrame;
         uint32_t invalidateEndFrame;
         bool invalidate = false;
+        bool rangeRegressed = false;  // §F1-DBG-ASSERT
 
         // Wait for a reference frame control message or a request to shutdown
         if (LbqWaitForQueueElement(&referenceFrameControlQueue, (void**)&qfit) != LBQ_SUCCESS) {
@@ -2227,7 +2297,16 @@ static void referenceFrameControlFunc(void* context) {
                 }
                 else {
                     // Aggregate all lost frames into one range
-                    LC_ASSERT(qfit->endFrame >= invalidateEndFrame);
+                    //
+                    // §F1-DBG-ASSERT: 上游原本 LC_ASSERT(qfit->endFrame >= invalidateEndFrame)。
+                    // 後到 tuple 的 end 比已聚合的 end 小，代表 depacketizer 的
+                    // 幀號狀態倒帶過（§FRZ-WATCHDOG 採納 stale 幀、完整幀又把
+                    // startFrameNumber 拉回舊值），聚合出的範圍已不可信。Android
+                    // 出貨的 debug native 會在 assert SIGABRT；改為標記，整批
+                    // 改送 IDR（與 §FRZ-B3 相同的復原手段）。
+                    if (qfit->endFrame < invalidateEndFrame) {
+                        rangeRegressed = true;
+                    }
                     invalidateEndFrame = qfit->endFrame;
                 }
             }
@@ -2239,8 +2318,15 @@ static void referenceFrameControlFunc(void* context) {
         } while (LbqPollQueueElement(&referenceFrameControlQueue, (void**)&qfit) == LBQ_SUCCESS);
 
         if (invalidate) {
-            // Send the reference frame invalidation request
-            requestInvalidateReferenceFrames(invalidateStartFrame, invalidateEndFrame);
+            if (rangeRegressed) {
+                Limelog("[VIPLE-CTRL] Non-monotonic RFI ranges (start %u, last end %u) — requesting IDR frame instead\n",
+                        invalidateStartFrame, invalidateEndFrame);
+                requestIdrFrame();
+            }
+            else {
+                // Send the reference frame invalidation request
+                requestInvalidateReferenceFrames(invalidateStartFrame, invalidateEndFrame);
+            }
         }
     }
 }

@@ -28,6 +28,12 @@ static bool idrFrameProcessed;
 // §K.10 diag: dropFrameState 呼叫次數（移到頂部避免前向參照）
 static unsigned int dropFrameCallCount = 0;
 
+// §FRZ-WATCHDOG (2026-07-06 凍結事故)：最近一次完整幀產出時刻與幀號
+// 重對齊旗標。VideoStream 的斷糧 watchdog 使用；兩者皆只在 VideoRecv
+// 執行緒觸碰，無競爭。
+static uint64_t lastQueuedFrameTimeUs;
+static bool resyncFrameNumberPending;
+
 #define DR_CLEANUP -1000
 
 #define CONSECUTIVE_DROP_LIMIT 120
@@ -88,6 +94,8 @@ void initializeVideoDepacketizer(int pktSize) {
     idrFrameProcessed = false;
     strictIdrFrameWait = !isReferenceFrameInvalidationEnabled();
     dropFrameCallCount = 0;
+    lastQueuedFrameTimeUs = 0;          // §FRZ-WATCHDOG
+    resyncFrameNumberPending = false;   // §FRZ-WATCHDOG
     Limelog("[VIPLE-DEPACK] init: strictIdrFrameWait=%d (RFI %s)\n",
             (int)strictIdrFrameWait,
             strictIdrFrameWait ? "disabled" : "enabled");
@@ -564,6 +572,10 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
                 LiCompleteVideoFrame(qdu, VideoCallbacks.submitDecodeUnit(&qdu->decodeUnit));
             }
 
+            // §FRZ-WATCHDOG: 任何完整幀產出（queued 或 direct-submit）
+            // 都刷新，供斷糧 watchdog 判斷解碼管線是否還活著。
+            lastQueuedFrameTimeUs = PltGetMicroseconds();
+
             // Notify the control connection
             connectionReceivedCompleteFrame(frameNumber, frameIsLTR);
 
@@ -760,6 +772,17 @@ void requestDecoderRefresh(void) {
     LiRequestIdrFrame();
 }
 
+// §FRZ-WATCHDOG: 供 VideoStream 的斷糧 watchdog 查詢最近一次完整幀
+// 產出時刻，以及要求幀號重對齊（adopt-next：在下一個收到的封包上
+// 直接採用其 frameIndex 為新基準）。
+uint64_t videoDepacketizerLastFrameTimeUs(void) {
+    return lastQueuedFrameTimeUs;
+}
+
+void videoDepacketizerRequestResync(void) {
+    resyncFrameNumberPending = true;
+}
+
 // Return 1 if packet is the first one in the frame
 static bool isFirstPacket(uint8_t flags, uint8_t fecBlockNumber) {
     // Clear the picture data flag
@@ -802,6 +825,18 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
     LC_ASSERT_VT((flags & ~(FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA)) == 0);
 
     streamPacketIndex = videoPacket->streamPacketIndex;
+
+    // §FRZ-WATCHDOG: 斷糧 watchdog 要求重新對齊幀號——採用「下一個收到
+    // 的幀」為新基準（adopt-next），避免直接賦值與下面的 isBefore32 防衛
+    // 互咬；RFI 窗口（startFrameNumber）一併前移，防止產生反轉範圍。
+    if (resyncFrameNumberPending) {
+        resyncFrameNumberPending = false;
+        Limelog("[VIPLE-DEPACK] §FRZ-WATCHDOG: frame number resync %u → %u\n",
+                nextFrameNumber, frameIndex);
+        nextFrameNumber = frameIndex;
+        if (isBefore32(startFrameNumber, frameIndex))
+            startFrameNumber = frameIndex;
+    }
 
     // Drop packets from a previously corrupt frame
     if (isBefore32(frameIndex, nextFrameNumber)) {
@@ -1107,7 +1142,25 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         if (waitingForIdrFrame || waitingForRefInvalFrame) {
             // IDR wait takes priority over RFI wait (and an IDR frame will satisfy both)
             if (waitingForIdrFrame) {
-                Limelog("Waiting for IDR frame (frame %d, type=%d)\n", frameIndex, frameType);
+                // §LOG-IDR-AGG 2026-08-07：等待期內逐幀列印（單秒可 40+ 筆）
+                // 淹沒 log。只節流 log、不動行為：每秒最多一筆 + 累計計數。
+                static uint64_t lastIdrWaitLogMs;
+                static uint32_t idrWaitSuppressed;
+                uint64_t nowMs = PltGetMillis();
+                if (lastIdrWaitLogMs == 0 || nowMs - lastIdrWaitLogMs >= 1000) {
+                    if (idrWaitSuppressed > 0) {
+                        Limelog("Waiting for IDR frame (frame %d, type=%d; %u frames since last log)\n",
+                                frameIndex, frameType, idrWaitSuppressed);
+                    }
+                    else {
+                        Limelog("Waiting for IDR frame (frame %d, type=%d)\n", frameIndex, frameType);
+                    }
+                    lastIdrWaitLogMs = nowMs;
+                    idrWaitSuppressed = 0;
+                }
+                else {
+                    idrWaitSuppressed++;
+                }
 
                 // We wait for the first fully received frame after a loss to approximate
                 // detection of the recovery of the network. Requesting an IDR frame while
@@ -1119,7 +1172,23 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             else {
                 // If we need an RFI frame first, then drop this frame
                 // and update the reference frame invalidation window.
-                Limelog("Waiting for RFI frame\n");
+                // §LOG-IDR-AGG：同上，每秒最多一筆 + 累計計數
+                static uint64_t lastRfiWaitLogMs;
+                static uint32_t rfiWaitSuppressed;
+                uint64_t nowMs = PltGetMillis();
+                if (lastRfiWaitLogMs == 0 || nowMs - lastRfiWaitLogMs >= 1000) {
+                    if (rfiWaitSuppressed > 0) {
+                        Limelog("Waiting for RFI frame (%u frames since last log)\n", rfiWaitSuppressed);
+                    }
+                    else {
+                        Limelog("Waiting for RFI frame\n");
+                    }
+                    lastRfiWaitLogMs = nowMs;
+                    rfiWaitSuppressed = 0;
+                }
+                else {
+                    rfiWaitSuppressed++;
+                }
                 connectionDetectedFrameLoss(startFrameNumber, frameIndex);
             }
 
@@ -1160,9 +1229,49 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
 // that we lost a frame and submit an RFI request.
 void notifyFrameLost(unsigned int frameNumber, bool speculative) {
     // We may not invalidate frames that we've already received
-    LC_ASSERT(frameNumber >= startFrameNumber);
+    //
+    // §FRZ-B2: 上游原本在這裡 LC_ASSERT(frameNumber >= startFrameNumber)。
+    // 毒化事故中 stale frame 編號（5 分鐘前的舊事故殘留）從這裡把
+    // nextFrameNumber 倒帶 4 萬幀並送出反轉範圍 RFI。stale 通知直接忽略，
+    // 不倒帶、不送 RFI。
+    // §F1-DBG-ASSERT: 防衛必須放在任何 assert 之前，而且原 assert 整條拿掉。
+    // Windows release 的 LC_ASSERT 是空巨集，但 Android 出貨的 native 是
+    // NDK_DEBUG=1 建置（Android.mk 會加 -DLC_DEBUG），assert 實際生效：
+    // assert 在前時 stale 輸入會直接 SIGABRT 閃退，防衛永遠執行不到。
+    // 最常見的觸發點正是 §FRZ-WATCHDOG 哨兵重置後採納 failback 殘留的
+    // stale 幀（RtpVideoQueue 對它呼叫 notifyFrameLost(frameIndex - 1)）。
+    // 防衛之後原 assert 已恆真（32-bit 迴繞時反而誤判），沒有保留價值。
+    if (isBefore32(frameNumber, startFrameNumber)) {
+        Limelog("[VIPLE-DEPACK] notifyFrameLost: stale frame=%u (start=%u) — ignored\n",
+                frameNumber, startFrameNumber);
+        return;
+    }
 
-    Limelog("[VIPLE-DEPACK] notifyFrameLost: frame=%u spec=%d\n", frameNumber, (int)speculative);
+    // §LOG-NFL-AGG 2026-08-07：per-frame 列印（事故單場 3,001 筆）淹沒 log。
+    // 只節流 log、不動行為：每秒最多一筆 + 區間彙總（首末幀號）。
+    {
+        static uint64_t lastNflLogMs;
+        static uint32_t nflSuppressed, nflFirstFrame, nflLastFrame;
+        uint64_t nowMs = PltGetMillis();
+        if (lastNflLogMs == 0 || nowMs - lastNflLogMs >= 1000) {
+            if (nflSuppressed > 0) {
+                Limelog("[VIPLE-DEPACK] notifyFrameLost: frame=%u spec=%d (+%u more since last log, frames %u..%u)\n",
+                        frameNumber, (int)speculative, nflSuppressed, nflFirstFrame, nflLastFrame);
+            }
+            else {
+                Limelog("[VIPLE-DEPACK] notifyFrameLost: frame=%u spec=%d\n", frameNumber, (int)speculative);
+            }
+            lastNflLogMs = nowMs;
+            nflSuppressed = 0;
+        }
+        else {
+            if (nflSuppressed == 0) {
+                nflFirstFrame = frameNumber;
+            }
+            nflSuppressed++;
+            nflLastFrame = frameNumber;
+        }
+    }
 
     // Drop state and determine if we need an IDR frame or if RFI is okay
     dropFrameState();
@@ -1171,11 +1280,27 @@ void notifyFrameLost(unsigned int frameNumber, bool speculative) {
     if (!waitingForIdrFrame) {
         LC_ASSERT(waitingForRefInvalFrame);
 
-        if (speculative) {
-            Limelog("Sending speculative RFI request for predicted loss of frame %d\n", frameNumber);
-        }
-        else {
-            Limelog("Sending RFI request for unrecoverable frame %d\n", frameNumber);
+        // §LOG-NFL-AGG：Sending RFI request 同法節流（speculative / 非
+        // speculative 共用同一節流狀態；實際 RFI 送出行為不受影響）
+        {
+            static uint64_t lastRfiReqLogMs;
+            static uint32_t rfiReqSuppressed;
+            uint64_t nowMs = PltGetMillis();
+            if (lastRfiReqLogMs == 0 || nowMs - lastRfiReqLogMs >= 1000) {
+                if (speculative) {
+                    Limelog("Sending speculative RFI request for predicted loss of frame %d (%u requests since last log)\n",
+                            frameNumber, rfiReqSuppressed + 1);
+                }
+                else {
+                    Limelog("Sending RFI request for unrecoverable frame %d (%u requests since last log)\n",
+                            frameNumber, rfiReqSuppressed + 1);
+                }
+                lastRfiReqLogMs = nowMs;
+                rfiReqSuppressed = 0;
+            }
+            else {
+                rfiReqSuppressed++;
+            }
         }
 
         // Advance the frame number since we won't be expecting this one anymore

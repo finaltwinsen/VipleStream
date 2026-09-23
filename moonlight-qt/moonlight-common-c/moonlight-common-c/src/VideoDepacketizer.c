@@ -1229,11 +1229,18 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
 // that we lost a frame and submit an RFI request.
 void notifyFrameLost(unsigned int frameNumber, bool speculative) {
     // We may not invalidate frames that we've already received
-    LC_ASSERT(frameNumber >= startFrameNumber);
-
-    // §FRZ-B2: 上面的 LC_ASSERT 在 release 版是 no-op。毒化事故中 stale
-    // frame 編號（5 分鐘前的舊事故殘留）從這裡把 nextFrameNumber 倒帶
-    // 4 萬幀並送出反轉範圍 RFI。stale 通知直接忽略，不倒帶、不送 RFI。
+    //
+    // §FRZ-B2: 上游原本在這裡 LC_ASSERT(frameNumber >= startFrameNumber)。
+    // 毒化事故中 stale frame 編號（5 分鐘前的舊事故殘留）從這裡把
+    // nextFrameNumber 倒帶 4 萬幀並送出反轉範圍 RFI。stale 通知直接忽略，
+    // 不倒帶、不送 RFI。
+    // §F1-DBG-ASSERT: 防衛必須放在任何 assert 之前，而且原 assert 整條拿掉。
+    // Windows release 的 LC_ASSERT 是空巨集，但 Android 出貨的 native 是
+    // NDK_DEBUG=1 建置（Android.mk 會加 -DLC_DEBUG），assert 實際生效：
+    // assert 在前時 stale 輸入會直接 SIGABRT 閃退，防衛永遠執行不到。
+    // 最常見的觸發點正是 §FRZ-WATCHDOG 哨兵重置後採納 failback 殘留的
+    // stale 幀（RtpVideoQueue 對它呼叫 notifyFrameLost(frameIndex - 1)）。
+    // 防衛之後原 assert 已恆真（32-bit 迴繞時反而誤判），沒有保留價值。
     if (isBefore32(frameNumber, startFrameNumber)) {
         Limelog("[VIPLE-DEPACK] notifyFrameLost: stale frame=%u (start=%u) — ignored\n",
                 frameNumber, startFrameNumber);
