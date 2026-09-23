@@ -2,6 +2,49 @@
 
 #ifdef VIPLE_MPQUIC
 #include "QuicTransport.h"
+
+// §M01-C：輸入送失敗時「壓制 connectionTerminated」與 inputSendThread
+// wait／resume 的 log 節流。條件放寬到「QUIC fallback 可用」後，Wi-Fi 斷線
+// 期間每筆送失敗都會走這條路（每筆 4 行 log），不節流會洗版。
+// 前 3 次照印，之後每 5 s 彙總一次（印出總次數與上次印出後略過的次數）。
+// 計數器跨執行緒無鎖，只影響 log 取樣，無害。
+typedef struct _M01C_LOG_THROTTLE {
+    unsigned int total;
+    unsigned int skipped;
+    uint64_t lastLogMs;
+} M01C_LOG_THROTTLE;
+
+static M01C_LOG_THROTTLE inputSendFailLogThrottle;
+static M01C_LOG_THROTTLE inputWaitLogThrottle;
+
+// 回傳 true 表示這次要印；*skippedOut 為上次印出後略過的次數
+static bool m01cLogThrottleShouldLog(M01C_LOG_THROTTLE* t, unsigned int* skippedOut) {
+    uint64_t nowMs = PltGetMillis();
+
+    t->total++;
+    if (t->total <= 3 || nowMs - t->lastLogMs >= 5000) {
+        *skippedOut = t->skipped;
+        t->skipped = 0;
+        t->lastLogMs = nowMs;
+        return true;
+    }
+    t->skipped++;
+    return false;
+}
+
+// §M01-C：送失敗且 QUIC fallback 可用時的壓制 log（取代舊的「during QUIC
+// failover」文字——新條件下多半根本沒有 failover）。
+static void logInputSendFailSuppressed(const char* path, int err) {
+    unsigned int skipped;
+    int sockErr = (int)LastSocketError();
+
+    if (m01cLogThrottleShouldLog(&inputSendFailLogThrottle, &skipped)) {
+        Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: input %s send failed — ENet unavailable, "
+                "QUIC fallback alive — suppressing connectionTerminated "
+                "(err=%d sockErr=%d, §M01-C count=%u, +%u since last log)\n",
+                path, err, sockErr, inputSendFailLogThrottle.total, skipped);
+    }
+}
 #endif
 
 static SOCKET inputSock = INVALID_SOCKET;
@@ -129,6 +172,12 @@ int initializeInputStream(void) {
     memset(&currentAbsoluteMouseState, 0, sizeof(currentAbsoluteMouseState));
     PltCreateMutex(&batchedInputMutex);
 
+#ifdef VIPLE_MPQUIC
+    // §M01-C：log 節流計數每場 session 重新開始（前 3 次照印要對每場都成立）
+    memset(&inputSendFailLogThrottle, 0, sizeof(inputSendFailLogThrottle));
+    memset(&inputWaitLogThrottle, 0, sizeof(inputWaitLogThrottle));
+#endif
+
     return 0;
 }
 
@@ -251,14 +300,17 @@ static bool sendInputPacket(PPACKET_HOLDER holder, bool moreData) {
                                                         holder->enetPacketFlags,
                                                         moreData);
         if (err < 0) {
-            Limelog("Input: sendInputPacketOnControlStream() failed: %d\n", (int) err);
 #ifdef VIPLE_MPQUIC
-            if (quicIsFailoverActive()) {
-                Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: input send failed during QUIC failover "
-                        "— suppressing connectionTerminated (input lost, video/audio continue)\n");
+            // §M01-C：與 Fix R.3 同義——failover 進行中 *或* QUIC 活著就壓制。
+            // 舊條件只看 quicIsFailoverActive()：Wi-Fi-only 單一路徑沒有
+            // failover（failoverPromotedSlot 恆 -1），任何一次送失敗都會殺掉
+            // session。上游那行 failed log 併入節流過的壓制 log。
+            if (isQuicControlFallbackAvailable()) {
+                logInputSendFailSuppressed("control stream", (int)err);
             } else
 #endif
             {
+                Limelog("Input: sendInputPacketOnControlStream() failed: %d\n", (int) err);
                 ListenerCallbacks.connectionTerminated(err);
             }
             return false;
@@ -288,14 +340,14 @@ static bool sendInputPacket(PPACKET_HOLDER holder, bool moreData) {
             err = send(inputSock, (const char*) encryptedBuffer,
                 (int) (encryptedSize + sizeof(encryptedLengthPrefix)), 0);
             if (err <= 0) {
-                Limelog("Input: send() failed: %d\n", (int) LastSocketError());
 #ifdef VIPLE_MPQUIC
-                if (quicIsFailoverActive()) {
-                    Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: input TCP send failed during QUIC failover "
-                            "— suppressing connectionTerminated\n");
+                // §M01-C：同上（Gen < 5 的 GFE 不會有 QUIC，實務上不會走進壓制分支）
+                if (isQuicControlFallbackAvailable()) {
+                    logInputSendFailSuppressed("TCP", (int)err);
                 } else
 #endif
                 {
+                    Limelog("Input: send() failed: %d\n", (int) LastSocketError());
                     ListenerCallbacks.connectionTerminated(LastSocketFail());
                 }
                 return false;
@@ -318,14 +370,14 @@ static bool sendInputPacket(PPACKET_HOLDER holder, bool moreData) {
                                                             holder->enetPacketFlags,
                                                             moreData);
             if (err < 0) {
-                Limelog("Input: sendInputPacketOnControlStream() failed: %d\n", (int) err);
 #ifdef VIPLE_MPQUIC
-                if (quicIsFailoverActive()) {
-                    Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: input send failed during QUIC failover "
-                            "— suppressing connectionTerminated (input lost, video/audio continue)\n");
+                // §M01-C：同上（failover 進行中 或 QUIC 活著就壓制）
+                if (isQuicControlFallbackAvailable()) {
+                    logInputSendFailSuppressed("control stream", (int)err);
                 } else
 #endif
                 {
+                    Limelog("Input: sendInputPacketOnControlStream() failed: %d\n", (int) err);
                     ListenerCallbacks.connectionTerminated(err);
                 }
                 return false;
@@ -446,7 +498,7 @@ static void inputSendThreadProc(void* context) {
                 if (!sendInputPacket(holder, more)) {
                     freePacketHolder(holder);
 #ifdef VIPLE_MPQUIC
-                    if (quicIsFailoverActive()) goto enet_input_reconnect_wait;
+                    if (isQuicControlFallbackAvailable()) goto enet_input_reconnect_wait; // §M01-C
 #endif
                     return;
                 }
@@ -629,7 +681,7 @@ static void inputSendThreadProc(void* context) {
                 if (!sendInputPacket(&splitPacket, i + 1 < totalLength)) {
                     freePacketHolder(holder);
 #ifdef VIPLE_MPQUIC
-                    if (quicIsFailoverActive()) goto enet_input_reconnect_wait;
+                    if (isQuicControlFallbackAvailable()) goto enet_input_reconnect_wait; // §M01-C
 #endif
                     return;
                 }
@@ -645,7 +697,7 @@ static void inputSendThreadProc(void* context) {
         if (!sendInputPacket(holder, LbqGetItemCount(&packetQueue) > 0)) {
             freePacketHolder(holder);
 #ifdef VIPLE_MPQUIC
-            if (quicIsFailoverActive()) goto enet_input_reconnect_wait;
+            if (isQuicControlFallbackAvailable()) goto enet_input_reconnect_wait; // §M01-C
 #endif
             return;
         }
@@ -658,24 +710,36 @@ static void inputSendThreadProc(void* context) {
         // §Q-ENET-RECONNECT v1.5.186 Fix I: inputSendThread 在 send
         // 失敗後不退出，等待 controlReceiveThread 重建 ENet 連線。
         // peer/client 變回 non-NULL 代表重連成功，繼續送封包。
-        Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: inputSendThread waiting "
-                "for ENet reconnection...\n");
-        while (!PltIsThreadInterrupted(&inputSendThread)) {
-            PltSleepMs(100);
-            // §Q-INPUT-QUIC-ESCAPE-FIX (review batch 2)：加 QUIC 逃生
-            // 條件。§Q-ENET-LOCAL-PUBLISH-FIX 之後，重連嘗試期間全域
-            // peer/client 維持 NULL（舊版 racy 提前發布意外提供了
-            // liveness）——若 ENet 反覆連不上（介面 UP 但 47999 被擋、
-            // 正是 R.3 場景），單靠 isEnetConnected() 會讓輸入凍結整段
-            // 120s、give-up 後永久喪失。QUIC 活著就恢復送：break 後
-            // sendInputPacket 走 sendMessageEnet 的 null-guard QUIC
-            // fallback（Fix K）；若 QUIC 又瞬時失敗且 failover 仍
-            // active，會回到本 wait，行為收斂、不忙轉。
-            if (isEnetConnected() || quicIsConnected()) {
-                Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: inputSendThread "
-                        "resumed (%s)\n",
-                        isEnetConnected() ? "ENet reconnected" : "QUIC escape");
-                break;
+        // §M01-C：進入條件放寬到「QUIC fallback 可用」後，Wi-Fi 斷線期間
+        // 每筆送失敗都會來這裡一次；waiting／resumed 兩行跟著節流
+        //（同一次 wait 的兩行要嘛都印、要嘛都不印）。
+        {
+            unsigned int waitLogSkipped = 0;
+            bool waitLogged = m01cLogThrottleShouldLog(&inputWaitLogThrottle, &waitLogSkipped);
+            if (waitLogged) {
+                Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: inputSendThread waiting "
+                        "for ENet reconnection... (§M01-C count=%u, +%u since last log)\n",
+                        inputWaitLogThrottle.total, waitLogSkipped);
+            }
+            while (!PltIsThreadInterrupted(&inputSendThread)) {
+                PltSleepMs(100);
+                // §Q-INPUT-QUIC-ESCAPE-FIX (review batch 2)：加 QUIC 逃生
+                // 條件。§Q-ENET-LOCAL-PUBLISH-FIX 之後，重連嘗試期間全域
+                // peer/client 維持 NULL（舊版 racy 提前發布意外提供了
+                // liveness）——若 ENet 反覆連不上（介面 UP 但 47999 被擋、
+                // 正是 R.3 場景），單靠 isEnetConnected() 會讓輸入凍結。
+                // QUIC 活著就恢復送：break 後 sendInputPacket 走
+                // sendMessageEnet 的 null-guard QUIC fallback（Fix K）；若
+                // QUIC 又瞬時失敗，會回到本 wait，行為收斂、不忙轉。
+                bool enetUp = isEnetConnected();
+                if (enetUp || quicIsConnected()) {
+                    if (waitLogged) {
+                        Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: inputSendThread "
+                                "resumed (%s)\n",
+                                enetUp ? "ENet reconnected" : "QUIC escape");
+                    }
+                    break;
+                }
             }
         }
 #endif

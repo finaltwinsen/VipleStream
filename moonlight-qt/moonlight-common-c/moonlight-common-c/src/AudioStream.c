@@ -49,24 +49,41 @@ static void quicAudioRecvCallback(unsigned char flowType,
     if (dataLen > MAX_PACKET_SIZE)
         return;
 
-    int next = (quicAudioRing.head + 1) % QUIC_AUDIO_RING_SIZE;
+    // §M01-A：SPSC ring 的發佈順序（屏障巨集與原理見 Limelight-internal.h）。
+    // 舊版只靠 volatile head/tail，ARM64 上消費端可能看到前進後的 head，卻
+    // 讀到同一個 slot 上一輪（512 個 datagram 前）殘留的 len。2026-09-23
+    // 20:06:43 Pixel 5 的實例：標頭完全正確的資料封包（pt=97）配上前一輪
+    // FEC 封包的長度 360（12+12+336）→ blockSize 348≠336 → debug 版在
+    // RtpAudioQueue.c 的 block size 檢查 SIGABRT；release 版則是靜默停用
+    // 整場音訊 FEC。
+    int head = quicAudioRing.head;
+    int next = (head + 1) % QUIC_AUDIO_RING_SIZE;
     if (next == quicAudioRing.tail)
         return;
 
-    memcpy(quicAudioRing.data[quicAudioRing.head], data, dataLen);
-    quicAudioRing.len[quicAudioRing.head] = dataLen;
+    // §M01-A：確認 tail 已前進（消費端讀完這個 slot）之後才覆寫 slot
+    QUIC_RING_ACQUIRE_FENCE();
+    memcpy(quicAudioRing.data[head], data, dataLen);
+    quicAudioRing.len[head] = dataLen;
+    // §M01-A：data/len 必須先於 head 對消費端可見
+    QUIC_RING_RELEASE_FENCE();
     quicAudioRing.head = next;
 }
 
 static int quicAudioRecv(char* buf, int bufLen) {
-    if (quicAudioRing.tail == quicAudioRing.head)
+    int tail = quicAudioRing.tail;
+    if (tail == quicAudioRing.head)
         return 0;
 
-    int len = quicAudioRing.len[quicAudioRing.tail];
+    // §M01-A：看到 head 前進之後才讀這個 slot 的 len/data
+    QUIC_RING_ACQUIRE_FENCE();
+    int len = quicAudioRing.len[tail];
     if (len > bufLen)
         len = bufLen;
-    memcpy(buf, quicAudioRing.data[quicAudioRing.tail], len);
-    quicAudioRing.tail = (quicAudioRing.tail + 1) % QUIC_AUDIO_RING_SIZE;
+    memcpy(buf, quicAudioRing.data[tail], len);
+    // §M01-A：讀完 slot 才把它還給生產端
+    QUIC_RING_RELEASE_FENCE();
+    quicAudioRing.tail = (tail + 1) % QUIC_AUDIO_RING_SIZE;
     return len;
 }
 
@@ -231,6 +248,49 @@ static bool queuePacketToLbq(PQUEUED_AUDIO_PACKET* packet) {
     return err == LBQ_SUCCESS;
 }
 
+#ifdef LC_DEBUG
+// §M01-A：debug 版的 Opus TOC byte 一致性檢查。上游用 LC_ASSERT_VT，但檢查
+// 的是 host 送來（或 FEC 重建）的資料，封包毀損、解密錯誤時 debug 版會直接
+// abort；release 版根本不檢查。改成每秒最多一筆 log、不中止。
+// 第一包的 TOC 是 0x00 時不當基準（等下一包再取），避免把毀損值鎖成基準。
+// 注意：host 是 Sunshine 時後續比對一律略過（見下方），實質上只檢查第一包。
+static void checkOpusHeaderByte(uint8_t tocByte, uint16_t sequenceNumber) {
+    static uint64_t lastOpusHeaderLogMs;
+    uint64_t nowMs;
+
+    if (opusHeaderByte == INVALID_OPUS_HEADER) {
+        if (tocByte != INVALID_OPUS_HEADER) {
+            opusHeaderByte = tocByte;
+            return;
+        }
+
+        nowMs = PltGetMillis();
+        if (lastOpusHeaderLogMs == 0 || nowMs - lastOpusHeaderLogMs >= 1000) {
+            Limelog("[VIPLE-AUDIO] §M01-A first Opus TOC byte is 0x00 (seq=%u), baseline deferred\n",
+                    sequenceNumber);
+            lastOpusHeaderLogMs = nowMs;
+        }
+        return;
+    }
+
+    // Opus header should stay constant for the entire stream.
+    // If it doesn't, it may indicate that the RtpAudioQueue
+    // incorrectly recovered a data shard or the decryption
+    // of the audio packet failed. Sunshine violates this for
+    // surround sound in some cases, so just ignore it.
+    if (tocByte == opusHeaderByte || IS_SUNSHINE()) {
+        return;
+    }
+
+    nowMs = PltGetMillis();
+    if (lastOpusHeaderLogMs == 0 || nowMs - lastOpusHeaderLogMs >= 1000) {
+        Limelog("[VIPLE-AUDIO] §M01-A unexpected Opus TOC byte 0x%02x (expected 0x%02x, seq=%u)\n",
+                tocByte, opusHeaderByte, sequenceNumber);
+        lastOpusHeaderLogMs = nowMs;
+    }
+}
+#endif
+
 static void decodeInputData(PQUEUED_AUDIO_PACKET packet) {
     // If the packet size is zero, this is a placeholder for a missing
     // packet. Trigger packet loss concealment logic in libopus by
@@ -267,41 +327,22 @@ static void decodeInputData(PQUEUED_AUDIO_PACKET packet) {
                                NULL, 0,
                                (unsigned char*)(rtp + 1), dataLength,
                                decryptedOpusData, &dataLength)) {
+            // §M01-A：解密失敗來自網路輸入（封包毀損、長度錯誤、跨 session
+            // 殘留封包用的是舊金鑰）。release 版本來就只是丟掉這包；上游在
+            // 這裡還有 LC_ASSERT_VT(false)，debug 版會直接 abort，拿掉。
             Limelog("Failed to decrypt audio packet (sequence number: %u)\n", rtp->sequenceNumber);
-            LC_ASSERT_VT(false);
             return;
         }
 
 #ifdef LC_DEBUG
-        if (opusHeaderByte == INVALID_OPUS_HEADER) {
-            opusHeaderByte = decryptedOpusData[0];
-            LC_ASSERT_VT(opusHeaderByte != INVALID_OPUS_HEADER);
-        }
-        else {
-            // Opus header should stay constant for the entire stream.
-            // If it doesn't, it may indicate that the RtpAudioQueue
-            // incorrectly recovered a data shard or the decryption
-            // of the audio packet failed. Sunshine violates this for
-            // surround sound in some cases, so just ignore it.
-            LC_ASSERT_VT(decryptedOpusData[0] == opusHeaderByte || IS_SUNSHINE());
-        }
+        checkOpusHeaderByte(decryptedOpusData[0], rtp->sequenceNumber);
 #endif
 
         AudioCallbacks.decodeAndPlaySample((char*)decryptedOpusData, dataLength);
     }
     else {
 #ifdef LC_DEBUG
-        if (opusHeaderByte == INVALID_OPUS_HEADER) {
-            opusHeaderByte = ((uint8_t*)(rtp + 1))[0];
-            LC_ASSERT_VT(opusHeaderByte != INVALID_OPUS_HEADER);
-        }
-        else {
-            // Opus header should stay constant for the entire stream.
-            // If it doesn't, it may indicate that the RtpAudioQueue
-            // incorrectly recovered a data shard. Sunshine violates
-            // this for surround sound in some cases, so just ignore it.
-            LC_ASSERT_VT(((uint8_t*)(rtp + 1))[0] == opusHeaderByte || IS_SUNSHINE());
-        }
+        checkOpusHeaderByte(((uint8_t*)(rtp + 1))[0], rtp->sequenceNumber);
 #endif
 
         AudioCallbacks.decodeAndPlaySample((char*)(rtp + 1), packet->header.size - sizeof(*rtp));
@@ -506,6 +547,10 @@ void stopAudioStream(void) {
     // §Q-AUDIO-RING: session 結束後立即取消 QUIC audio callback，
     // 防止 QUIC I/O 執行緒在 session 間隙繼續向 ring 寫入遲到封包。
     // 下一次 startAudioStream() 會重新註冊。
+    //
+    // §M01-A 已知（良性）：取消 callback 不是同步的，QuicIO 執行緒可能此刻
+    // 仍在 quicAudioRecvCallback 裡，在下面 reset 之後又把 head 寫回 next。
+    // 下一場 initializeAudioStream() 的 flush 會把它清掉；另案見 docs/TODO.md。
     if (useQuicAudio) {
         quicSetRecvCallbackForFlow(QUIC_FLOW_AUDIO, NULL, NULL);
     }

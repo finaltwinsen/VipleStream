@@ -47,26 +47,43 @@ static void quicVideoRecvCallback(unsigned char flowType,
     if (dataLen > QUIC_VIDEO_MAX_PKT)
         return;
 
-    int next = (quicVideoRing.head + 1) % QUIC_VIDEO_RING_SIZE;
+    // §M01-A：與 AudioStream.c 的 quicAudioRing 同一個 SPSC 記憶體序問題
+    // （屏障巨集與原理見 Limelight-internal.h）。舊版只靠 volatile head/tail，
+    // ARM64 上消費端（VideoRecv）可能看到前進後的 head，卻讀到 slot 上一輪
+    // （4096 個 datagram 前）殘留的 len，或部分 cache line 仍是舊內容的 data。
+    // Android 影像沒有加密，標頭正確、payload 混了舊內容的 shard 會被
+    // RtpVideoQueue 當成合法 data 收下，畫面靜默毀損直到下一個 IDR；debug 版
+    // 還可能撞上 RtpVideoQueue.c 的 LC_ASSERT_VT 而 abort。
+    int head = quicVideoRing.head;
+    int next = (head + 1) % QUIC_VIDEO_RING_SIZE;
     if (next == quicVideoRing.tail) {
         quicVideoRingDrops++;
         return;
     }
 
-    memcpy(quicVideoRing.data[quicVideoRing.head], data, dataLen);
-    quicVideoRing.len[quicVideoRing.head] = dataLen;
+    // §M01-A：確認 tail 已前進（消費端讀完這個 slot）之後才覆寫 slot
+    QUIC_RING_ACQUIRE_FENCE();
+    memcpy(quicVideoRing.data[head], data, dataLen);
+    quicVideoRing.len[head] = dataLen;
+    // §M01-A：data/len 必須先於 head 對消費端可見
+    QUIC_RING_RELEASE_FENCE();
     quicVideoRing.head = next;
 }
 
 static int quicVideoRecv(char* buf, int bufLen) {
-    if (quicVideoRing.tail == quicVideoRing.head)
+    int tail = quicVideoRing.tail;
+    if (tail == quicVideoRing.head)
         return 0; // empty
 
-    int len = quicVideoRing.len[quicVideoRing.tail];
+    // §M01-A：看到 head 前進之後才讀這個 slot 的 len/data
+    QUIC_RING_ACQUIRE_FENCE();
+    int len = quicVideoRing.len[tail];
     if (len > bufLen)
         len = bufLen;
-    memcpy(buf, quicVideoRing.data[quicVideoRing.tail], len);
-    quicVideoRing.tail = (quicVideoRing.tail + 1) % QUIC_VIDEO_RING_SIZE;
+    memcpy(buf, quicVideoRing.data[tail], len);
+    // §M01-A：讀完 slot 才把它還給生產端
+    QUIC_RING_RELEASE_FENCE();
+    quicVideoRing.tail = (tail + 1) % QUIC_VIDEO_RING_SIZE;
     return len;
 }
 
@@ -190,6 +207,12 @@ static void VideoReceiveThreadProc(void* context) {
     // 改為 thread 區域變數，每個接收執行緒（= 每場串流）自然歸零。
     uint64_t prevFireLastFrameUs = 0;
     uint32_t consecutiveIneffectiveFires = 0;
+    // §M01-D：-101 診斷，加密視訊在進 RtpVideoQueue 之前就會丟掉的封包
+    // （只計數、不改行為；每個接收執行緒 = 每場串流自然歸零）。
+    // 加密時落後封包在解密前就被丟，佇列的 far 組一律是 0，要看這兩個數。
+    uint32_t diagDecryptFailPkts = 0;        // 解密失敗（例如 rikey 不符）
+    uint32_t diagPreDecryptStalePkts = 0;    // 解密前依幀號判落後而丟棄（含正常尾端 parity）
+    uint32_t diagPreDecryptFarStalePkts = 0; // 同上，lag > RTPV_DIAG_FAR_STALE_LAG
 #endif
 
     encrypted = !!(EncryptionFeaturesEnabled & SS_ENC_VIDEO);
@@ -296,6 +319,52 @@ static void VideoReceiveThreadProc(void* context) {
         if (!receivedFullFrame) {
             if (PltGetMillis() - firstDataTimeMs >= FIRST_FRAME_TIMEOUT_SEC * 1000) {
                 Limelog("Terminating connection due to lack of a successful video frame\n");
+                // §M01-D：-101 診斷（只加 log，不改任何行為）。判讀：
+                // (a) far>0 且 maxLag 達數千以上、far 幀號是低幀號 ＝ 有另一條
+                //     幀號較高的流超過佇列，也就是 host 還在送上一個 session 的
+                //     畫面（殘留／殭屍 session，例如 app 被強制關閉後立刻重開），
+                //     新 session 的 IDR 被 §FRZ-B1 判過期。與封包到達順序無關；
+                //     firstFrameIndex 很大只是佐證，不是必要條件。
+                // (b) far=0 ＝ 一般網路、IDR 或解碼問題。stalePkts>0 是已完成幀的
+                //     尾端 FEC parity，屬正常（見 RtpVideoQueue.h）。
+                // (c) firstFrameIndex=none 且 enc=1、decryptFail 很大 ＝ 金鑰不符
+                //     （例如 host 拿舊 pending launch 的 rikey 在加密）。
+                // 加密時落後封包在解密前就被丟，佇列的 far 一律是 0，(a) 改看
+                // preDecryptFar（讀的是未驗證的標頭，只能當參考）。
+                {
+                    char firstFrameStr[16];
+                    char farRangeStr[32];
+
+                    if (rtpQueue.diagFirstFrameSeen) {
+                        snprintf(firstFrameStr, sizeof(firstFrameStr), "%u", rtpQueue.diagFirstFrameIndex);
+                    }
+                    else {
+                        snprintf(firstFrameStr, sizeof(firstFrameStr), "none");
+                    }
+                    // far=0 時不印範圍，避免 0..0 和 §FRZ-RESYNC-SENTINEL 的哨兵幀號 0 混淆
+                    if (rtpQueue.diagFarStaleFrames != 0) {
+                        snprintf(farRangeStr, sizeof(farRangeStr), "%u..%u",
+                                 rtpQueue.diagFarStaleMinFrame, rtpQueue.diagFarStaleMaxFrame);
+                    }
+                    else {
+                        snprintf(farRangeStr, sizeof(farRangeStr), "-");
+                    }
+
+                    Limelog("[VIPLE-DEPACK] §M01-D no decodable frame: firstFrameIndex=%s queueFrame=%u "
+                            "stalePkts=%u far=%u pkts/%u frames (frames %s, maxLag=%u) "
+                            "enc=%d decryptFail=%u preDecryptStale=%u preDecryptFar=%u\n",
+                            firstFrameStr,
+                            RtpvGetCurrentFrameNumber(&rtpQueue),
+                            rtpQueue.diagStalePkts,
+                            rtpQueue.diagFarStalePkts,
+                            rtpQueue.diagFarStaleFrames,
+                            farRangeStr,
+                            rtpQueue.diagFarStaleMaxLag,
+                            encrypted ? 1 : 0,
+                            diagDecryptFailPkts,
+                            diagPreDecryptStalePkts,
+                            diagPreDecryptFarStalePkts);
+                }
                 ListenerCallbacks.connectionTerminated(ML_ERROR_NO_VIDEO_FRAME);
                 break;
             }
@@ -356,6 +425,13 @@ static void VideoReceiveThreadProc(void* context) {
                     // v2 改用哨兵 0：「無基準幀號」，下一個到達幀被靜默採納
                     //（RtpVideoQueue 的 GAP-FEC 遇哨兵跳過合成回報）——毒化
                     // 值一樣被丟棄，且永不製造假 gap。
+                    //
+                    // §M01-B：RtpvInitializeQueue 的 memset 也把序號基準
+                    // nextContiguousSequenceNumber 清成 0。reset 後的序號基準
+                    // 由 RtpVideoQueue 的 §M01-B 用第一個開新 FEC block 的封包
+                    // 重建。修正前 isBefore16(seq,0) 會把 seq ≥ 32768 的封包
+                    // 全部判成過期，凍結一路卡到 16-bit 序號繞回（約 50% 的
+                    // reset 中招，每秒 fire 又把基準清回 0）。
                     {
                         bool madeProgress = (lastFrameUs != prevFireLastFrameUs);
                         uint32_t savedFrameNumber = RtpvGetCurrentFrameNumber(&rtpQueue);
@@ -379,6 +455,11 @@ static void VideoReceiveThreadProc(void* context) {
                             // 0x49 即出 IDR；函式自帶 200ms 節流，每秒一次
                             // 無壓力）。首兩次 fire 行為不變（計數 <3 不動作），
                             // 穩定時段 madeProgress 會歸零計數、零誤觸。
+                            //
+                            // §M01-B：1.5.276 以前 savedFrameNumber==0 也可能是
+                            // 序號基準失效，把到達的封包在佇列入口全部誤殺
+                            //（封包其實有到）。修正後才真的代表 reset 之後
+                            // 沒有任何封包通過解密與佇列的幀號檢查。
                             if (consecutiveIneffectiveFires >= 3 && savedFrameNumber == 0) {
                                 Limelog("[VIPLE-VIDEO] §FRZ-ESCALATE: %u consecutive "
                                         "ineffective resets, sentinel unclaimed — "
@@ -427,6 +508,14 @@ static void VideoReceiveThreadProc(void* context) {
             // traffic away (as mentioned in the paragraph above) and continue accepting
             // legitmate video traffic.
             if (encHeader->frameNumber && LE32(encHeader->frameNumber) < RtpvGetCurrentFrameNumber(&rtpQueue)) {
+#ifndef LC_FUZZING
+                // §M01-D：只計數。這裡讀的是還沒驗證的標頭（見上方說明），
+                // 數字只能當參考，不能據此改任何狀態。
+                diagPreDecryptStalePkts++;
+                if (RtpvGetCurrentFrameNumber(&rtpQueue) - LE32(encHeader->frameNumber) > RTPV_DIAG_FAR_STALE_LAG) {
+                    diagPreDecryptFarStalePkts++;
+                }
+#endif
                 continue;
             }
 
@@ -436,6 +525,9 @@ static void VideoReceiveThreadProc(void* context) {
                                    encHeader->tag, sizeof(encHeader->tag),
                                    ((unsigned char*)(encHeader + 1)), err - sizeof(ENC_VIDEO_HEADER), // The ciphertext is after the header
                                    (unsigned char*)buffer, &err)) {
+#ifndef LC_FUZZING
+                diagDecryptFailPkts++; // §M01-D：只計數
+#endif
                 Limelog("Failed to decrypt video packet!\n");
                 continue;
             }
@@ -532,6 +624,9 @@ void stopVideoStream(void) {
 
 #ifdef VIPLE_MPQUIC
     // §Q-VIDEO-RING: session 結束後取消 QUIC video callback + 清空 ring。
+    // §M01-A 已知（良性）：取消 callback 不是同步的，QuicIO 執行緒可能此刻
+    // 仍在 quicVideoRecvCallback 裡，在下面 reset 之後又把 head 寫回 next；
+    // 由下一場 initializeVideoStream() 的 flush 清掉。另案見 docs/TODO.md。
     if (useQuicVideo) {
         quicSetRecvCallbackForFlow(QUIC_FLOW_VIDEO, NULL, NULL);
     }

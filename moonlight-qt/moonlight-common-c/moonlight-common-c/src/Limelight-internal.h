@@ -13,6 +13,32 @@
 
 #include <enet/enet.h>
 
+#ifdef VIPLE_MPQUIC
+// §M01-A：QUIC 接收 ring（AudioStream.c 的 quicAudioRing、VideoStream.c 的
+// quicVideoRing）共用的記憶體屏障。兩個 ring 都是 SPSC：生產端是 QuicIO
+// 執行緒（recv callback），消費端是 AudioRecv／VideoRecv 執行緒。
+// 舊版只把 head/tail 宣告成 volatile，volatile 不保證 slot 的 data/len 與
+// head/tail 之間的可見順序：
+//   - 硬體：ARM64（弱記憶體序）上消費端可能先看到前進後的 head，卻讀到
+//     slot 上一輪殘留的 len／data（2026-09-23 Pixel 5 音訊 blockSize 348
+//     SIGABRT 的根因）；x86/x64 是 TSO，硬體不做這種重排。
+//   - 編譯器：len[]、data[] 是一般存取，gcc/clang 在 x64 上也可以把 len
+//     的 store 移到 volatile head 的 store 之後。
+// 屏障同時擋住這兩種重排。用法（兩個 ring 一致）：
+//   生產端：讀 tail 判斷滿不滿 → ACQUIRE → 寫 slot（data、len）→ RELEASE → 寫 head
+//   消費端：讀 head 判斷空不空 → ACQUIRE → 讀 slot（len、data）→ RELEASE → 寫 tail
+// Windows 的 MemoryBarrier()（Platform.h 已引入 Windows.h）在 x64 是
+// lock-prefixed 指令、ARM64 是 dmb ish；其他平台用 GCC/Clang 內建的
+// __atomic_thread_fence（ARM64 編成 dmb ishld／dmb ish，x86 只是編譯器屏障）。
+#if defined(_WIN32)
+#define QUIC_RING_ACQUIRE_FENCE() MemoryBarrier()
+#define QUIC_RING_RELEASE_FENCE() MemoryBarrier()
+#else
+#define QUIC_RING_ACQUIRE_FENCE() __atomic_thread_fence(__ATOMIC_ACQUIRE)
+#define QUIC_RING_RELEASE_FENCE() __atomic_thread_fence(__ATOMIC_RELEASE)
+#endif
+#endif
+
 // Common globals
 extern char* RemoteAddrString;
 extern struct sockaddr_storage RemoteAddr;
@@ -130,6 +156,9 @@ void flushInputOnControlStream(void);
 bool isControlDataInTransit(void);
 #ifdef VIPLE_MPQUIC
 bool isEnetConnected(void);
+// §M01-C：ENet 控制平面的 QUIC fallback 是否可用（failover 進行中 或 QUIC
+// 傳輸活著）；InputStream 用它決定送失敗時要不要壓制 connectionTerminated。
+bool isQuicControlFallbackAvailable(void);
 #endif
 
 int performRtspHandshake(PSERVER_INFORMATION serverInfo);

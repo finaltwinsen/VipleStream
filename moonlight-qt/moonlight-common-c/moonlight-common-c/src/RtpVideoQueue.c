@@ -23,6 +23,11 @@ void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
 
     queue->currentFrameNumber = 1;
     queue->multiFecCapable = APP_VERSION_AT_LEAST(7, 1, 431);
+
+    // §M01-B：memset 出來的 nextContiguousSequenceNumber=0 不代表「沒有基準」。
+    // 舊版會把 isBefore16(seq,0) 為真（seq ≥ 32768）的封包全部判成過期，
+    // 一直卡到 16-bit 序號繞回。基準改由第一個開新 FEC block 的封包重建。
+    queue->seqBaselinePending = true;
 }
 
 static void purgeListEntries(PRTPV_QUEUE_LIST list) {
@@ -676,10 +681,8 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
 }
 
 static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry) {
-    if (isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber)) {
-        // Reject packets behind our current buffer window
-        return RTPF_RET_REJECTED;
-    }
+    // §M01-B：上游在這裡就用 nextContiguousSequenceNumber 拒收「落後」封包，
+    // 已移到下方幀號／FEC block 檢查之後，只套用在要併入進行中 block 的封包。
 
     // FLAG_EXTENSION is required for all supported versions of GFE.
     LC_ASSERT_VT(packet->header & FLAG_EXTENSION);
@@ -708,12 +711,52 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
         nvPacket->multiFecBlocks = 0x00;
     }
 
+    // §M01-D：-101 診斷，記下佇列收到的第一個幀號（只記錄，不影響判斷；
+    // 受封包到達順序影響，只當次要線索，主要判別看 far 組）
+    if (!queue->diagFirstFrameSeen) {
+        queue->diagFirstFrameSeen = true;
+        queue->diagFirstFrameIndex = nvPacket->frameIndex;
+    }
+
 #ifndef LC_FUZZING
     // §FRZ-B1: 原本用 isBefore16 —— frameIndex 是 32-bit 單調遞增，差距
     // >32768 幀的舊 datagram（path failback 時 server 端佇列殘留排出）會被
     // 迴繞誤判成「未來幀」接受，倒帶 currentFrameNumber 後所有新鮮幀反被
     // 判過期 REJECTED → 解碼器斷糧、畫面永久凍結。isBefore32 根治。
+    // §M01-D：這道防線不可放寬（放寬會重開 §FRZ-B1 凍結）；這裡只加計數。
     if (isBefore32(nvPacket->frameIndex, queue->currentFrameNumber)) {
+        // §M01-D：-101 診斷計數（只記錄，拒收行為不變）。lag ≤ 門檻的多半是
+        // 已完成幀的尾端 FEC parity 或亂序，屬正常，只累加總數；超過門檻的
+        // 才進 far 組（見 RtpVideoQueue.h 的說明）。
+        {
+            // isBefore32 成立保證 lag 介於 1 到 2^31 之間
+            uint32_t lag = U32(queue->currentFrameNumber - nvPacket->frameIndex);
+
+            queue->diagStalePkts++;
+            if (lag > RTPV_DIAG_FAR_STALE_LAG) {
+                queue->diagFarStalePkts++;
+                if (lag > queue->diagFarStaleMaxLag) {
+                    queue->diagFarStaleMaxLag = lag;
+                }
+                if (queue->diagFarStaleFrames == 0) {
+                    queue->diagFarStaleFrames = 1;
+                    queue->diagFarStaleLastFrame = nvPacket->frameIndex;
+                    queue->diagFarStaleMinFrame = nvPacket->frameIndex;
+                    queue->diagFarStaleMaxFrame = nvPacket->frameIndex;
+                }
+                else if (nvPacket->frameIndex != queue->diagFarStaleLastFrame) {
+                    queue->diagFarStaleFrames++;
+                    queue->diagFarStaleLastFrame = nvPacket->frameIndex;
+                    if (nvPacket->frameIndex < queue->diagFarStaleMinFrame) {
+                        queue->diagFarStaleMinFrame = nvPacket->frameIndex;
+                    }
+                    if (nvPacket->frameIndex > queue->diagFarStaleMaxFrame) {
+                        queue->diagFarStaleMaxFrame = nvPacket->frameIndex;
+                    }
+                }
+            }
+        }
+
         // Reject frames behind our current frame number
         return RTPF_RET_REJECTED;
     }
@@ -726,6 +769,27 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
         // Reject FEC blocks behind our current block number
         return RTPF_RET_REJECTED;
     }
+
+    // §M01-B：序號「落後」檢查只保護要併入進行中 FEC block 的封包。
+    // 會開新 block 的封包（新幀、新 block、佇列為空）在下方初始化區會用
+    // 自己的序號重建 nextContiguousSequenceNumber，舊基準對它們沒有保護作用。
+    // 基準失效時，舊寫法會把所有新鮮封包判成過期，一路卡到序號繞回。
+    // 基準失效的情況有三種：watchdog reset 後的 memset 0、stale 或 reinject
+    // 封包成了基準、斷線期間 server 序號前進 ≥ 32768。
+    // 合法流量裡，新 block 的序號一定在前半窗，所以行為和上游一樣。
+    if (queue->pendingFecBlockList.count != 0 &&
+        nvPacket->frameIndex == queue->currentFrameNumber &&
+        fecCurrentBlockNumber == queue->multiFecCurrentBlockNumber &&
+        isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber)) {
+        queue->seqRejectStreak++;
+        if (queue->seqRejectStreak == 1024 || (queue->seqRejectStreak % 16384) == 0) {
+            Limelog("[VIPLE-VIDEO] §M01-B: %u consecutive in-block packets behind nextContig=%u (seq=%u frame=%u)\n",
+                    queue->seqRejectStreak, queue->nextContiguousSequenceNumber,
+                    (unsigned)packet->sequenceNumber, nvPacket->frameIndex);
+        }
+        return RTPF_RET_REJECTED;
+    }
+    queue->seqRejectStreak = 0;
 
     // Reinitialize the queue if it's empty after a frame delivery or
     // if we can't finish a frame before receiving the next one.
@@ -881,6 +945,24 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
         connectionSawFrame(queue->currentFrameNumber);
 
         queue->bufferFirstRecvTimeUs = PltGetMicroseconds();
+
+        // §M01-B：這裡用本封包的序號重建基準。舊基準若在本封包「前半窗之外」，
+        // 代表基準已失效（見上方 §M01-B 序號檢查的說明）；只印 log，不改行為。
+        if (queue->seqBaselinePending) {
+            queue->seqBaselinePending = false;
+            Limelog("[VIPLE-VIDEO] §M01-B: RTP seq baseline re-anchored after queue reset (seq=%u lowest=%u frame=%u)\n",
+                    (unsigned)packet->sequenceNumber, (unsigned)U16(packet->sequenceNumber - fecIndex),
+                    nvPacket->frameIndex);
+        }
+        else if (isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber)) {
+            // 舊寫法在函式開頭就會拒收這個封包，一直卡到序號繞回
+            if (queue->seqJumpLogCount++ < 10 || (queue->seqJumpLogCount % 100) == 0) {
+                Limelog("[VIPLE-VIDEO] §M01-B: seq jumped half-window (seq=%u nextContig=%u frame=%u) — re-anchored\n",
+                        (unsigned)packet->sequenceNumber, queue->nextContiguousSequenceNumber,
+                        nvPacket->frameIndex);
+            }
+        }
+
         queue->bufferLowestSequenceNumber = U16(packet->sequenceNumber - fecIndex);
         queue->nextContiguousSequenceNumber = queue->bufferLowestSequenceNumber;
         queue->receivedDataPackets = 0;

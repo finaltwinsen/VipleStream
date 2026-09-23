@@ -27,6 +27,23 @@
 #define RTPA_MAX_PLC_PLACEHOLDERS 5
 static uint32_t pendingPlcPlaceholders;
 
+// §M01-A：上游在這個檔案用 LC_ASSERT_VT 檢查 host 送來的資料（shard 長度、
+// FEC header、timestamp、FEC 重建結果）。LC_ASSERT_VT 在 debug 建置等於
+// assert，封包毀損或長度錯誤就 abort（2026-09-23 20:06:43 Pixel 5 AudioRecv
+// 在 block size 檢查 SIGABRT）；release 建置則完全不檢查。§F1-DBG-ASSERT
+// 只處理了視訊幀號路徑，這裡把音訊佇列裡對網路輸入的 LC_ASSERT_VT 改成
+// runtime 處理，行為與 release 一致（拒收／停用 FEC／照常繼續），只多一筆
+// 節流 log。純內部不變式（串列結構、計數）仍保留 LC_ASSERT。
+// 回傳 true 表示這次可以印（每個呼叫點每秒最多一筆）。
+static bool rtpaViolationLogAllowed(uint64_t* lastLogMs) {
+    uint64_t nowMs = PltGetMillis();
+    if (*lastLogMs == 0 || nowMs - *lastLogMs >= 1000) {
+        *lastLogMs = nowMs;
+        return true;
+    }
+    return false;
+}
+
 void RtpaInitializeQueue(PRTP_AUDIO_QUEUE queue) {
     memset(queue, 0, sizeof(*queue));
 
@@ -96,12 +113,27 @@ static void validateFecBlockState(PRTP_AUDIO_QUEUE queue) {
     while (block != NULL) {
         // Ensure the list is sorted correctly
         LC_ASSERT(isBefore16(lastSeqNum, block->fecHeader.baseSequenceNumber));
-        LC_ASSERT_VT(isBefore32(lastTs, block->fecHeader.baseTimestamp));
 
         // Ensure entry invariants are satisfied
-        LC_ASSERT_VT(block->blockSize == lastBlock->blockSize);
-        LC_ASSERT_VT(block->fecHeader.payloadType == lastBlock->fecHeader.payloadType);
-        LC_ASSERT_VT(block->fecHeader.ssrc == lastBlock->fecHeader.ssrc);
+        //
+        // §M01-A：timestamp／shard 長度／payload type／ssrc 都來自 host，上游
+        // 用 LC_ASSERT_VT。新 block 用第一個到達封包的長度建立，不和既有
+        // block 比對，所以一個長度錯誤的封包開出新 block 就會讓這裡在 debug
+        // 版 abort（release 版不檢查，要等同一 block 下一包長度不符才停用
+        // FEC）。改成節流 log，行為與 release 一致。
+        if (!isBefore32(lastTs, block->fecHeader.baseTimestamp) ||
+            block->blockSize != lastBlock->blockSize ||
+            block->fecHeader.payloadType != lastBlock->fecHeader.payloadType ||
+            block->fecHeader.ssrc != lastBlock->fecHeader.ssrc) {
+            static uint64_t lastListMismatchLogMs;
+            if (rtpaViolationLogAllowed(&lastListMismatchLogMs)) {
+                Limelog("[VIPLE-AUDIO] §M01-A FEC block %u (ts=%u size=%u pt=%u ssrc=%u) inconsistent with block %u (ts=%u size=%u pt=%u ssrc=%u)\n",
+                        block->fecHeader.baseSequenceNumber, block->fecHeader.baseTimestamp,
+                        block->blockSize, block->fecHeader.payloadType, block->fecHeader.ssrc,
+                        lastBlock->fecHeader.baseSequenceNumber, lastBlock->fecHeader.baseTimestamp,
+                        lastBlock->blockSize, lastBlock->fecHeader.payloadType, lastBlock->fecHeader.ssrc);
+            }
+        }
 
         // Ensure the list itself is consistent
         LC_ASSERT(block->prev == lastBlock);
@@ -216,9 +248,9 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
 
     if (packet->packetType == RTP_PAYLOAD_TYPE_AUDIO) {
         if (length < sizeof(RTP_PACKET)) {
+            // §M01-A：網路輸入，runtime 已拒收；拿掉 debug 版的 LC_ASSERT_VT
             queue->stats.packetCountInvalid++;
             Limelog("RTP audio data packet too small: %u\n", length);
-            LC_ASSERT_VT(false);
             return NULL;
         }
 
@@ -254,9 +286,9 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
         PAUDIO_FEC_HEADER fecHeader = (PAUDIO_FEC_HEADER)(packet + 1);
 
         if (length < sizeof(RTP_PACKET) + sizeof(AUDIO_FEC_HEADER)) {
+            // §M01-A：網路輸入，runtime 已拒收；拿掉 debug 版的 LC_ASSERT_VT
             queue->stats.packetCountFecInvalid++;
             Limelog("RTP audio FEC packet too small: %u\n", length);
-            LC_ASSERT_VT(false);
             return NULL;
         }
 
@@ -271,9 +303,9 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
         // Ensure the FEC shard index is valid to prevent OOB access
         // later during recovery.
         if (fecHeader->fecShardIndex >= RTPA_FEC_SHARDS) {
+            // §M01-A：網路輸入，runtime 已拒收；拿掉 debug 版的 LC_ASSERT_VT
             queue->stats.packetCountFecInvalid++;
             Limelog("Too many audio FEC shards: %u\n", fecHeader->fecShardIndex);
-            LC_ASSERT_VT(false);
             return NULL;
         }
 
@@ -285,7 +317,8 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
             Limelog("Invalid FEC block base sequence number (got %u, expected %u)\n",
                     fecBlockBaseSeqNum, (fecBlockBaseSeqNum / RTPA_DATA_SHARDS) * RTPA_DATA_SHARDS);
             Limelog("Audio FEC has been disabled due to an incompatibility with your host's old software!\n");
-            LC_ASSERT_VT(fecBlockBaseSeqNum % RTPA_DATA_SHARDS == 0);
+            // §M01-A：網路輸入；release 行為（停用音訊 FEC）本身就是防衛，
+            // 拿掉上游的 LC_ASSERT_VT(fecBlockBaseSeqNum % RTPA_DATA_SHARDS == 0)
             queue->incompatibleServer = true;
             return NULL;
         }
@@ -293,8 +326,25 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
         blockSize = length - sizeof(RTP_PACKET) - sizeof(AUDIO_FEC_HEADER);
     }
     else {
+        // §M01-A：網路輸入，runtime 已拒收；拿掉 debug 版的 LC_ASSERT_VT
         Limelog("Invalid RTP audio payload type: %u\n", packet->packetType);
-        LC_ASSERT_VT(false);
+        return NULL;
+    }
+
+    // §M01-A 縱深防衛：音訊有加密時是 AES-CBC＋PKCS7，密文長度一定是 16 的
+    // 倍數，data shard（len-12）與 FEC shard（len-24）的 blockSize 都是。
+    // 不是 16 的倍數就一定是 client 端毀損（例如 QUIC ring 讀到殘留 len），
+    // 不可能是 host 合法送出的封包：只丟這一包（同一 block 的 FEC 仍可把它
+    // 重建回來），不要讓它走到下面的 block size 比對而停用整場音訊 FEC。
+    // 合法的變長 host（GFE 3.13、舊版 Sunshine）加密後長度仍是 16 的倍數，
+    // 下面的舊 host 判斷不受影響；未加密的音訊不檢查；wire 不變。
+    if (AudioEncryptionEnabled && (blockSize % 16) != 0) {
+        static uint64_t lastCorruptLengthLogMs;
+        queue->stats.packetCountFecInvalid++;
+        if (rtpaViolationLogAllowed(&lastCorruptLengthLogMs)) {
+            Limelog("[VIPLE-AUDIO] §M01-A corrupt audio shard length (seq=%u pt=%u len=%u) — dropped, FEC kept\n",
+                    packet->sequenceNumber, packet->packetType, length);
+        }
         return NULL;
     }
 
@@ -317,9 +367,23 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
     while (existingBlock != NULL) {
         if (existingBlock->fecHeader.baseSequenceNumber == fecBlockBaseSeqNum) {
             // The FEC header data should match for all packets
-            LC_ASSERT_VT(existingBlock->fecHeader.payloadType == fecBlockPayloadType);
-            LC_ASSERT_VT(existingBlock->fecHeader.baseTimestamp == fecBlockBaseTs);
-            LC_ASSERT_VT(existingBlock->fecHeader.ssrc == fecBlockSsrc);
+            //
+            // §M01-A：這三項都來自 host（FEC header 或 data 封包的 RTP 標頭）。
+            // 上游用 LC_ASSERT_VT，debug 版遇到不一致就 abort；release 版不
+            // 檢查、照常收下（以最先到的封包建立的 header 為準）。改成節流
+            // log 後繼續，行為與 release 一致。
+            if (existingBlock->fecHeader.payloadType != fecBlockPayloadType ||
+                existingBlock->fecHeader.baseTimestamp != fecBlockBaseTs ||
+                existingBlock->fecHeader.ssrc != fecBlockSsrc) {
+                static uint64_t lastHeaderMismatchLogMs;
+                if (rtpaViolationLogAllowed(&lastHeaderMismatchLogMs)) {
+                    Limelog("[VIPLE-AUDIO] §M01-A FEC header mismatch in block %u (seq=%u pt=%u len=%u): pt %u/%u ts %u/%u ssrc %u/%u\n",
+                            fecBlockBaseSeqNum, packet->sequenceNumber, packet->packetType, length,
+                            existingBlock->fecHeader.payloadType, fecBlockPayloadType,
+                            existingBlock->fecHeader.baseTimestamp, fecBlockBaseTs,
+                            existingBlock->fecHeader.ssrc, fecBlockSsrc);
+                }
+            }
 
             // The block size must match in order to safely copy shards into it
             if (existingBlock->blockSize != blockSize) {
@@ -327,8 +391,21 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
                 // constant size for audio packets.
                 queue->stats.packetCountFecInvalid++;
                 Limelog("Audio block size mismatch (got %u, expected %u)\n", blockSize, existingBlock->blockSize);
+                // §M01-A：附上 seq／payload type／原始長度／加密狀態，分辨「host
+                // 真的送了變長封包」與「client 端長度毀損」。判讀：enc=1 且
+                // blockSize%16≠0 ⇒ client 端毀損（上面的縱深防衛已先擋掉，照理
+                // 不會走到這裡）；enc=1 且 blockSize%16==0 ⇒ host 真的送了變長
+                // 封包。2026-09-23 20:06:43 的實例是 pt=97、標頭正確、len=360
+                // （恰為 FEC 封包長度 12+12+336）→ QUIC ring 讀到上一輪殘留的
+                // len（AudioStream.c 已同步修正）。
+                Limelog("[VIPLE-AUDIO] §M01-A block size mismatch detail: seq=%u pt=%u len=%u blockSize=%u enc=%d block=%u (had data=%u fec=%u)\n",
+                        packet->sequenceNumber, packet->packetType, length, blockSize,
+                        AudioEncryptionEnabled ? 1 : 0, fecBlockBaseSeqNum,
+                        existingBlock->dataShardsReceived, existingBlock->fecShardsReceived);
                 Limelog("Audio FEC has been disabled due to an incompatibility with your host's old software!\n");
-                LC_ASSERT_VT(existingBlock->blockSize == blockSize);
+                // §M01-A：上游在此還有 LC_ASSERT_VT(existingBlock->blockSize == blockSize)，
+                // 等於對網路輸入做 assert，debug 版 SIGABRT。release 版的處理
+                // （拒收這包並停用音訊 FEC）就是上游對真正變長 host 的正確防衛，照做。
                 queue->incompatibleServer = true;
                 return NULL;
             }
@@ -488,27 +565,51 @@ static bool completeFecBlock(PRTP_AUDIO_QUEUE queue, PRTPA_FEC_BLOCK block) {
 
 #ifdef FEC_VALIDATION_MODE
     // Check the RTP header values
-    LC_ASSERT_VT(block->dataPackets[dropIndex]->header == droppedRtpPacket->header);
-    LC_ASSERT_VT(block->dataPackets[dropIndex]->packetType == droppedRtpPacket->packetType);
-    LC_ASSERT_VT(block->dataPackets[dropIndex]->sequenceNumber == droppedRtpPacket->sequenceNumber);
-    LC_ASSERT_VT(block->dataPackets[dropIndex]->timestamp == droppedRtpPacket->timestamp);
-    LC_ASSERT_VT(block->dataPackets[dropIndex]->ssrc == droppedRtpPacket->ssrc);
+    //
+    // §M01-A：驗證模式（只在 debug）比對「合成丟包後重建」與實收封包。重建
+    // 不一致代表 host 的 FEC header／parity 與 data shard 對不上，或實收封包
+    // 本身已毀損——都是網路輸入。上游用 LC_ASSERT_VT 直接 abort，且逐 byte
+    // 印 log。改成節流 log，並把實收封包還原回 block：release 版沒有合成
+    // 丟包，交付的本來就是實收封包，debug／release 交付內容因此一致。
+    // 代價：我們自己重建程式的錯誤只剩這行 log 看得到（測試時 grep 它）。
+    bool validationFailed =
+        block->dataPackets[dropIndex]->header != droppedRtpPacket->header ||
+        block->dataPackets[dropIndex]->packetType != droppedRtpPacket->packetType ||
+        block->dataPackets[dropIndex]->sequenceNumber != droppedRtpPacket->sequenceNumber ||
+        block->dataPackets[dropIndex]->timestamp != droppedRtpPacket->timestamp ||
+        block->dataPackets[dropIndex]->ssrc != droppedRtpPacket->ssrc;
+    int recoveryErrors = 0;
+    int firstErrorOffset = -1;
 
     // Check the data itself - use memcmp() and only loop if an error is detected
     if (memcmp(block->dataPackets[dropIndex] + 1, droppedRtpPacket + 1, block->blockSize)) {
         unsigned char* actualData = (unsigned char*)(block->dataPackets[dropIndex] + 1);
         unsigned char* expectedData = (unsigned char*)(droppedRtpPacket + 1);
-        int recoveryErrors = 0;
 
         for (int j = 0; j < block->blockSize; j++) {
             if (actualData[j] != expectedData[j]) {
-                Limelog("Recovery error at %d: expected 0x%02x, actual 0x%02x\n",
-                        j, expectedData[j], actualData[j]);
+                if (firstErrorOffset < 0) {
+                    firstErrorOffset = j;
+                }
                 recoveryErrors++;
             }
         }
 
-        LC_ASSERT_VT(recoveryErrors == 0);
+        validationFailed = true;
+    }
+
+    if (validationFailed) {
+        static uint64_t lastValidationLogMs;
+        static uint32_t validationFailures;
+
+        validationFailures++;
+        if (rtpaViolationLogAllowed(&lastValidationLogMs)) {
+            Limelog("[VIPLE-AUDIO] §M01-A FEC validation mismatch: block %u shard %u, %d byte errors (first at %d), total failures %u — keeping received packet\n",
+                    block->fecHeader.baseSequenceNumber, dropIndex, recoveryErrors,
+                    firstErrorOffset, validationFailures);
+        }
+
+        memcpy(block->dataPackets[dropIndex], droppedRtpPacket, sizeof(RTP_PACKET) + block->blockSize);
     }
 
     free(droppedRtpPacket);
@@ -558,6 +659,16 @@ static void handleMissingPackets(PRTP_AUDIO_QUEUE queue) {
     // If we reach this point, we know the next packet resides in the first FEC block we're
     // currently waiting on. In that case, we want to wait at least until we have a second FEC
     // block to give up on the first one. If we don't have a second block now, just keep waiting.
+    //
+    // §M01-A：這條刻意維持上游原樣（本檔唯一保留的 LC_ASSERT_VT）。同一個條件
+    // 在 validateFecBlockState() 用一般 LC_ASSERT 檢查過（「next sequence
+    // number must not exceed the first FEC block」那條），而且一定先執行：
+    // RtpaAddPacket 先呼叫 queueHasPacketReady()（第一行就是
+    // validateFecBlockState），不 ready 才進本函式，中間只有上面 return 的
+    // 分支會改狀態。所以那條才是真正的守門點，這條在 debug 版到不了。在「過舊
+    // 封包丟棄＋同一 block 內排序」的規則下它是內部不變式，跨 session 的殘留
+    // 封包也會先被 oldestRtpBaseSequenceNumber 擋掉。若日後認定它受 host 序號
+    // 影響，必須連 validateFecBlockState 那條一起改，否則在 debug 版是死碼。
     LC_ASSERT_VT(isBefore16(queue->nextRtpSequenceNumber, queue->blockHead->fecHeader.baseSequenceNumber + RTPA_DATA_SHARDS));
     if (queue->blockHead == queue->blockTail) {
         return;

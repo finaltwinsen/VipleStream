@@ -160,6 +160,28 @@ static volatile int enetReconnecting;
 static bool enetControlChannelDown(void) {
     return enetReconnectPending || enetReconnecting || peer == NULL;
 }
+
+// §M01-C：給 InputStream.c 用，與本檔 quicControlFallbackAvailable() 同義
+//（failover 進行中 或 QUIC 傳輸活著）。舊版 InputStream 只看
+// quicIsFailoverActive()，Wi-Fi-only 單一路徑的 failoverPromotedSlot 恆為
+// -1，任何一次輸入送失敗都會 connectionTerminated + 輸入執行緒 return。
+// 兩邊共用同一個判斷，避免條件各寫各的又漂移。
+bool isQuicControlFallbackAvailable(void) {
+    return quicControlFallbackAvailable();
+}
+
+// §M01-C：LiGetEstimatedRttInfo() 的無鎖快照。上游「peer 永不消失」的
+// 假設已被 §Q-ENET-RECONNECT 打破（重連會 enet_host_destroy 舊 client），
+// 無鎖讀 peer 是 use-after-free 窗口（TODO Q.r16 ③）；但也不能改成加
+// enetMutex——呼叫端在 submitDecodeUnit 路徑（ffmpeg.cpp addVideoStats
+// 每秒一次），而 controlReceiveThread 的 disconnectPending 分支會持鎖
+// service 最長約 1.1 s（Windows SRWLock 不保證公平），等於拿視訊送解碼
+// 去賭鎖。改由 controlReceiveThread 在已持鎖的 service 之後寫快照：
+// peer 是 CONNECTED 才設 enetRttValid=1；銷毀／斷線前先清 0。
+// rtt 與 var 可能來自相鄰兩次更新（撕裂），對統計顯示無害。
+static volatile uint32_t enetRttSnap;
+static volatile uint32_t enetRttVarSnap;
+static volatile int enetRttValid;
 #endif
 
 static LINKED_BLOCKING_QUEUE referenceFrameControlQueue;
@@ -418,6 +440,7 @@ int initializeControlStream(void) {
 #ifdef VIPLE_MPQUIC
     enetReconnectPending = 0;
     enetReconnecting = 0; // §Q-REMOTE Fix R.3
+    enetRttValid = 0;     // §M01-C：上一場 session 的 RTT 快照不可沿用
 #endif
     usePeriodicPing = APP_VERSION_AT_LEAST(7, 1, 415);
     encryptionCtx = PltCreateCryptoContext();
@@ -915,7 +938,22 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
     // §Q-ENET-RECONNECT v1.5.183: peer/client 在 reconnect 等待期間
     // 被銷毀。其他 thread（lossStats 每 100ms、asyncCallback）仍會
     // 呼叫 sendMessageEnet，必須在解引用 peer 前檢查。
-    if (!peer || !client) {
+    //
+    // §M01-C：再加上「重連流程進行中（Fix G 的 500 ms 窗口＋整段重連期）
+    // 且 QUIC fallback 可用」。Fix G 窗口內 peer 仍非 NULL，但 ENet 已判死：
+    //  - 從 socket-error GRACE 進來時 peer 仍是 CONNECTED，可能 packetQueued
+    //    後 service 失敗（err<0）→ 下方 Fix K.2 只在 !packetQueued 才走 QUIC
+    //    → 回 false → 舊 InputStream 在「沒有 failover」時直接
+    //    connectionTerminated；
+    //  - 從 disconnect-timeout GRACE 進來時封包會送進 zombie peer，peer
+    //    reset 時整批遺失。
+    // 兩種都改成直接走 QUIC flow 0x04（本體不變）。這裡已持 enetMutex，
+    // 重連路徑持鎖銷毀 peer/client，讀到的旗標與 peer 一致。
+    // IDR 不受影響：requestIdrFrame 在 enetControlChannelDown() 時先走
+    // QUIC stream #0 的 'I' marker。
+    bool enetObjectsNull = (!peer || !client);
+    if (enetObjectsNull ||
+        ((enetReconnectPending || enetReconnecting) && quicControlFallbackAvailable())) {
         PltUnlockMutex(&enetMutex);
         // §Q-INPUT-QUIC-FALLBACK v1.5.189 Fix K: ENet 不可用時
         // 改走 QUIC datagram。加密已在上方完成，enetPacket->data
@@ -925,8 +963,10 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
             // Fix L.2 v1.5.193: diagnostic log（one-shot，避免每封包都印）
             static int nullGuardLogCount = 0;
             if (nullGuardLogCount < 3) {
-                Limelog("[VIPLE-MPQUIC] §Q-INPUT-QUIC-FALLBACK: peer/client "
-                        "NULL, sending via QUIC datagram (count=%d)\n",
+                Limelog("[VIPLE-MPQUIC] §Q-INPUT-QUIC-FALLBACK: %s, sending "
+                        "via QUIC datagram (count=%d)\n",
+                        enetObjectsNull ? "peer/client NULL"
+                                        : "ENet reconnect in progress (§M01-C)",
                         ++nullGuardLogCount);
             }
             int ret = quicSendDatagram(QUIC_FLOW_INPUT,
@@ -1375,8 +1415,106 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
     }
 }
 
+#ifdef VIPLE_MPQUIC
+// §M01-C：比對兩個位址的 IP（不比 port——探測 socket 每次拿到的 port 都是
+// OS 隨機分配的）。family 不同（含全 0 的初值）一律視為不同。
+static bool enetReconnectSameIp(const struct sockaddr_storage* a, const struct sockaddr_storage* b) {
+    if (a->ss_family != b->ss_family) {
+        return false;
+    }
+    if (a->ss_family == AF_INET) {
+        return ((const struct sockaddr_in*)a)->sin_addr.s_addr ==
+               ((const struct sockaddr_in*)b)->sin_addr.s_addr;
+    }
+#ifdef AF_INET6
+    if (a->ss_family == AF_INET6) {
+        const struct sockaddr_in6* a6 = (const struct sockaddr_in6*)a;
+        const struct sockaddr_in6* b6 = (const struct sockaddr_in6*)b;
+        return memcmp(&a6->sin6_addr, &b6->sin6_addr, sizeof(a6->sin6_addr)) == 0 &&
+               a6->sin6_scope_id == b6->sin6_scope_id;
+    }
+#endif
+    return false;
+}
+
+// §M01-C：ENet 重連前的路由探測。對 RemoteAddr:ControlPortNumber 做 UDP
+// connect()+getsockname()，不綁定、不送封包，只問 OS「此刻會從哪個本機
+// 位址去 host」——與 session 起點 Connection.c 決定 LocalAddr
+//（getLocalAddressByUdpConnect）同一套語意，所以重連選到的介面就是「此刻
+// 做初次連線會選的那張」（有線在就是有線；只剩 Wi-Fi 就是 Wi-Fi；換了 IP
+// 就跟著換）。
+// 不用 lcEnumNetInterfaces()：Android 那份是 session 起點的 JNI 快照、session
+// 中永不更新；Linux 把 docker0／virbr0 等未知介面都分類成 ETHERNET；都不能
+// 拿來判斷「網路回來了」。
+// 回傳 0 = 有路由（*localOut 為實際本機位址）；非 0 = 沒有路由（socket 錯誤碼，
+// 例如 WSAENETUNREACH 10051／ENETUNREACH；-1 = OS 給了未指定位址）。
+// 不印 log（重連迴圈每秒呼叫；狀態轉換由呼叫端印）——所以直接用 socket()
+// 而不是會印「socket() failed」的 createSocket()。
+static int enetReconnectProbeRoute(struct sockaddr_storage* localOut, SOCKADDR_LEN* localLenOut) {
+    LC_SOCKADDR target;
+    SOCKET s;
+    int err;
+
+    s = socket(RemoteAddr.ss_family, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) {
+        err = LastSocketFail();
+        return err;
+    }
+
+    memcpy(&target, &RemoteAddr, AddrLen);
+    SET_PORT(&target, ControlPortNumber);
+    if (connect(s, (struct sockaddr*)&target, AddrLen) < 0) {
+        err = LastSocketFail();
+        closeSocket(s);
+        return err;
+    }
+
+    memset(localOut, 0, sizeof(*localOut));
+    *localLenOut = sizeof(*localOut);
+    if (getsockname(s, (struct sockaddr*)localOut, localLenOut) < 0) {
+        err = LastSocketFail();
+        closeSocket(s);
+        return err;
+    }
+    closeSocket(s);
+
+    // 未指定位址（0.0.0.0／::）視同沒有路由
+    if (localOut->ss_family == AF_INET) {
+        return ((struct sockaddr_in*)localOut)->sin_addr.s_addr != 0 ? 0 : -1;
+    }
+#ifdef AF_INET6
+    if (localOut->ss_family == AF_INET6) {
+        const unsigned char* b = (const unsigned char*)&((struct sockaddr_in6*)localOut)->sin6_addr;
+        for (size_t i = 0; i < sizeof(struct in6_addr); i++) {
+            if (b[i] != 0) {
+                return 0;
+            }
+        }
+        return -1;
+    }
+#endif
+    return -1;
+}
+
+// §M01-C：連線嘗試失敗後的指數退避（1→2→4→8→10 s）。host 連續拒絕 ≥20 次
+//（stale peer 遲遲不清）時上限放寬到 30 s，降低 host「Rejected connection」
+// 警告的 log 量。
+static uint32_t enetReconnectNextBackoff(uint32_t curMs, int consecRejects) {
+    uint32_t capMs = consecRejects >= 20 ? 30000 : 10000;
+    uint32_t nextMs = curMs * 2;
+    return nextMs > capMs ? capMs : nextMs;
+}
+#endif
+
 static void controlReceiveThreadFunc(void* context) {
     int err;
+#ifdef VIPLE_MPQUIC
+    // §M01-C：重連成功 5 s 後在 control thread 持鎖讀一次 peer，印出
+    // 「ENet healthy rtt=… inTransit=…」當作 ENet 雙向可用的正面證據
+    //（periodic ping 0x0200 是 reliable，有 ack 才會更新 RTT）。0 = 不印。
+    uint64_t enetHealthLogAtMs = 0;
+    uint64_t enetHealthReconnectedAtMs = 0;
+#endif
 
     // This is only used for ENet
     if (AppVersionQuad[0] < 5) {
@@ -1389,6 +1527,11 @@ enet_main_loop:
     while (!PltIsThreadInterrupted(&controlReceiveThread)) {
         ENetEvent event;
         enet_uint32 waitTimeMs;
+#ifdef VIPLE_MPQUIC
+        bool healthLogNow = false;
+        enet_uint32 healthRtt = 0, healthRttVar = 0, healthInTransit = 0;
+        int healthState = 0;
+#endif
 
         PltLockMutex(&enetMutex);
 
@@ -1426,7 +1569,46 @@ enet_main_loop:
             }
         }
 
+#ifdef VIPLE_MPQUIC
+        // §M01-C：持鎖更新 LiGetEstimatedRttInfo() 的無鎖快照（語意同上游：
+        // peer 是 CONNECTED 才算有效）。
+        if (peer->state == ENET_PEER_STATE_CONNECTED) {
+            enetRttSnap = peer->roundTripTime;
+            enetRttVarSnap = peer->roundTripTimeVariance;
+            enetRttValid = 1;
+        }
+        else {
+            enetRttValid = 0;
+        }
+        // §M01-C：重連 5 s 後的一次性健康檢查（值在鎖內取、log 在鎖外印）
+        if (enetHealthLogAtMs != 0 && PltGetMillis() >= enetHealthLogAtMs) {
+            enetHealthLogAtMs = 0;
+            healthLogNow = true;
+            healthRtt = peer->roundTripTime;
+            healthRttVar = peer->roundTripTimeVariance;
+            healthInTransit = peer->reliableDataInTransit;
+            healthState = (int)peer->state;
+        }
+#endif
+
         PltUnlockMutex(&enetMutex);
+
+#ifdef VIPLE_MPQUIC
+        if (healthLogNow) {
+            if (healthState == ENET_PEER_STATE_CONNECTED) {
+                Limelog("[VIPLE-MPQUIC] §M01-C ENet healthy rtt=%u var=%u inTransit=%u "
+                        "(%llu ms after reconnect)\n",
+                        healthRtt, healthRttVar, healthInTransit,
+                        (unsigned long long)(PltGetMillis() - enetHealthReconnectedAtMs));
+            }
+            else {
+                Limelog("[VIPLE-MPQUIC] §M01-C ENet NOT healthy %llu ms after reconnect "
+                        "(peer state=%d rtt=%u inTransit=%u)\n",
+                        (unsigned long long)(PltGetMillis() - enetHealthReconnectedAtMs),
+                        healthState, healthRtt, healthInTransit);
+            }
+        }
+#endif
 
         if (err == 0) {
             // Handle a pending disconnect after unsuccessfully polling
@@ -1687,6 +1869,9 @@ enet_main_loop:
                 // disconnected now to avoid delays waiting for an ack that will
                 // never arrive.
                 PltLockMutex(&enetMutex);
+#ifdef VIPLE_MPQUIC
+                enetRttValid = 0; // §M01-C：peer 即將斷線，RTT 快照作廢
+#endif
                 enet_peer_disconnect_now(peer, 0);
                 PltUnlockMutex(&enetMutex);
                 ListenerCallbacks.connectionTerminated((int)terminationErrorCode);
@@ -1718,17 +1903,36 @@ enet_main_loop:
 
 #ifdef VIPLE_MPQUIC
 enet_reconnect_wait:
-    // §Q-ENET-RECONNECT v1.5.182: ENet 斷線後等待 Ethernet QUIC path
-    // 恢復，然後自動重建 ENet 連線。加密 sequence number 不重置，
-    // 重連後 AES-GCM IV 從斷點繼續遞增。
+    // §Q-ENET-RECONNECT v1.5.182：ENet 斷線後自動重建 ENet 連線。加密
+    // sequence number 不重置，重連後 AES-GCM IV 從斷點繼續遞增。
+    //
+    // §M01-C（v1.5.276）重寫等待條件與重試策略：
+    //  - 舊版（v1.5.185 Fix H）等「OS 有 LC_NETIF_TYPE_ETHERNET 介面 UP」，再綁
+    //    session 起點的 LocalAddr 重連。這是當初只在有線為主的桌機上測過的
+    //    替代條件：Wi-Fi-only 裝置（Pixel 5 的 lcEnumNetInterfaces 是 session
+    //    起點的 JNI 快照、只有 wlan0）條件永遠不成立，120 s 後放棄；桌機有線
+    //    不回來、或 DHCP 換了 IP，bind 舊 LocalAddr 也永遠失敗。
+    //  - 新版每秒問 OS「此刻有沒有路由到 host、會從哪個本機位址出去」
+    //    （enetReconnectProbeRoute），有路由就綁那個位址重連。
+    //  - 不再 120 s 放棄：QUIC 活著期間輸入走 flow 0x04 datagram（不可靠，
+    //    server→client 控制訊息全斷），ENet 能回來就一直試（退避 1→10 s）。
+    //    QUIC 死了（連續 ≥2 s !quicIsConnected()）就明確終止 session——串流
+    //    開始後 VideoStream 沒有「影像停了」的 watchdog，不能靠它收尾，否則
+    //    會留下畫面凍結、沒有對話框的殭屍 session。
+    //  - CONNECT 之後在未發布狀態下多聽一段 probation，擋掉 host 還掛著
+    //    stale peer 時的「連上又被踢」抖動。
+    //  - 已知限制（follow-up，見 docs/TODO.md）：沒有 re-home——ENet 經 Wi-Fi
+    //    重連後，有線回來也留在 Wi-Fi，直到下次失效；server 重連時不補送任何
+    //    東西（斷線期間切過 HDR，client 的 HDR 狀態會是舊的）；偵測窗口（10 s）
+    //    送進 zombie peer 的 reliable 輸入（含 key-up）會遺失。
     if (enetReconnectPending) {
         enetReconnecting = 1; // §Q-REMOTE Fix R.3：覆蓋整段重連期
         // 注意：這裡 *** 不 *** 立即把 enetReconnectPending 清零。
         // 保持 = 1 讓 lossStatsThread 偵測到並退出（Fix F）。
         // 清零在 500ms 等待後、銷毀 peer/client 前才做。
 
-        Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: waiting for Ethernet "
-                "interface recovery (up to 120s, checking OS interface state)...\n");
+        Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: waiting for a route to host "
+                "(§M01-C: any interface; input continues via QUIC datagram meanwhile)\n");
 
         // §Q-ENET-RECONNECT v1.5.183 Fix G: 給 lossStatsThread 時間
         // 偵測 enetReconnectPending 並退出（每 100ms 醒一次，500ms 足夠）。
@@ -1739,67 +1943,159 @@ enet_reconnect_wait:
 
         // 銷毀舊 ENet 資源（lossStatsThread 已退出，安全）
         PltLockMutex(&enetMutex);
+        enetRttValid = 0; // §M01-C：舊 peer 即將銷毀，RTT 快照作廢
         if (peer) { enet_peer_reset(peer); peer = NULL; }
         if (client) { enet_host_destroy(client); client = NULL; }
         PltUnlockMutex(&enetMutex);
 
-        // v1.5.185 Fix H: 30→120 秒。使用者重新啟用 Ethernet 可能需要
-        // 30-60 秒；v1.5.184 測試 30s timeout 差 4 秒就到期。
-        // 等待期間 video/audio 正常走 QUIC 備援路徑，只有 input 暫停。
-        int waitSec = 0;
-        while (!stopping && !PltIsThreadInterrupted(&controlReceiveThread) && waitSec < 120) {
-            PltSleepMs(1000);
-            waitSec++;
+        // 上一次重連排定的健康檢查 log 屬於已銷毀的 peer，取消
+        enetHealthLogAtMs = 0;
 
-            // v1.5.185 Fix H: 改用 OS 層介面偵測。
-            // quicGetSubflowStats() 跳過 picoquicDeleted 的 subflow，
-            // 偵測不到已被 picoquic 刪除的 Ethernet path。
-            // lcEnumNetInterfaces() 直接問 OS（Windows: GetAdaptersAddresses），
-            // 介面 UP 就回傳，不受 QUIC 內部狀態影響。
-            LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
-            int ifCount = lcEnumNetInterfaces(interfaces, LC_NETIF_MAX_COUNT);
-            int ethernetAlive = 0;
-            for (int i = 0; i < ifCount; i++) {
-                if (interfaces[i].type == LC_NETIF_TYPE_ETHERNET) {
-                    ethernetAlive = 1;
-                    break;
+        uint64_t waitStartMs = PltGetMillis();
+        uint64_t nextAttemptMs = waitStartMs;
+        uint64_t quicDeadSinceMs = 0;
+        uint32_t backoffMs = 1000;      // 連線嘗試失敗後指數退避 1→2→4→8→10 s
+        int attempts = 0;
+        int rejects = 0;
+        int consecRejects = 0;
+        // session 起點本來就有路由 → 初值 true，第一次探測失敗就會印 lost
+        bool routeUp = true;
+        bool longWaitLogged = false;
+        struct sockaddr_storage lastLocal;
+        memset(&lastLocal, 0, sizeof(lastLocal));
+
+        while (!stopping && !ConnectionInterrupted &&
+               !PltIsThreadInterrupted(&controlReceiveThread)) {
+            PltSleepMsInterruptible(&controlReceiveThread, 1000);
+            if (stopping || ConnectionInterrupted ||
+                PltIsThreadInterrupted(&controlReceiveThread)) {
+                break;
+            }
+
+            uint64_t nowMs = PltGetMillis();
+
+            // (b) QUIC 存活出口：ENet 已斷、QUIC 也不在 ready（picoquic 一旦
+            // 離開 ready 就不會回來；ioDead 也算），2 s debounce 後終止 session。
+            // ClInternalConnectionTerminated 本身有去重，與 lossStats 的 ping
+            // 失敗終止同時發生也無害。
+            if (!quicIsConnected()) {
+                if (quicDeadSinceMs == 0) {
+                    quicDeadSinceMs = nowMs;
+                }
+                if (nowMs - quicDeadSinceMs >= 2000) {
+                    Limelog("[VIPLE-MPQUIC] §M01-C: QUIC transport dead while ENet down "
+                            "— terminating (ENet down %llu ms, attempts=%d rejects=%d)\n",
+                            (unsigned long long)(nowMs - waitStartMs), attempts, rejects);
+                    ListenerCallbacks.connectionTerminated(ML_ERROR_CONTROL_STREAM_DISCONNECT);
+                    return;
                 }
             }
-            if (!ethernetAlive) continue;
+            else {
+                quicDeadSinceMs = 0;
+            }
 
-            // Ethernet 介面恢復 → 嘗試 ENet 重連
-            Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: Ethernet interface "
-                    "detected (OS-level) after %d s, attempting ENet reconnect\n", waitSec);
+            // (c) 長時間等待：只印一次，不放棄
+            if (!longWaitLogged && nowMs - waitStartMs >= 120000) {
+                longWaitLogged = true;
+                Limelog("[VIPLE-MPQUIC] §M01-C: ENet still down after 120 s "
+                        "(attempts=%d rejects=%d) — input via QUIC datagram "
+                        "(unreliable), still retrying\n", attempts, rejects);
+            }
 
+            // (d) 每秒都探路由（不受退避限制），狀態轉換才印 log
+            struct sockaddr_storage probeLocal;
+            SOCKADDR_LEN probeLocalLen = 0;
+            int probeErr = enetReconnectProbeRoute(&probeLocal, &probeLocalLen);
+            bool haveRoute = (probeErr == 0);
+            bool routeRegained = false;
+            if (haveRoute != routeUp) {
+                if (haveRoute) {
+                    char addrStr[URLSAFESTRING_LEN];
+                    addrToUrlSafeString(&probeLocal, addrStr, sizeof(addrStr));
+                    Limelog("[VIPLE-MPQUIC] §M01-C: route to host available "
+                            "(local=%s, %llu ms after ENet down)\n",
+                            addrStr, (unsigned long long)(nowMs - waitStartMs));
+                    routeRegained = true;
+                }
+                else {
+                    Limelog("[VIPLE-MPQUIC] §M01-C: route to host lost "
+                            "(err=%d, %llu ms after ENet down)\n",
+                            probeErr, (unsigned long long)(nowMs - waitStartMs));
+                }
+                routeUp = haveRoute;
+            }
+
+            // (e) 路由剛回來，或出口位址變了（例：Wi-Fi 關掉時先經行動網路
+            // 探到路由、嘗試一路退避；Wi-Fi 回來後位址改變）→ 退避歸零、立刻試
+            if (haveRoute && (routeRegained || !enetReconnectSameIp(&probeLocal, &lastLocal))) {
+                if (!routeRegained && lastLocal.ss_family != 0) {
+                    char oldStr[URLSAFESTRING_LEN], newStr[URLSAFESTRING_LEN];
+                    addrToUrlSafeString(&lastLocal, oldStr, sizeof(oldStr));
+                    addrToUrlSafeString(&probeLocal, newStr, sizeof(newStr));
+                    Limelog("[VIPLE-MPQUIC] §M01-C: route to host now via local=%s "
+                            "(was %s) — backoff reset\n", newStr, oldStr);
+                }
+                backoffMs = 1000;
+                nextAttemptMs = nowMs;
+                lastLocal = probeLocal;
+                consecRejects = 0;
+            }
+
+            // (f) 沒路由、QUIC 看起來已死（等上面的出口收尾）、或還在退避 → 不嘗試
+            if (!haveRoute || quicDeadSinceMs != 0 || nowMs < nextAttemptMs) {
+                continue;
+            }
+
+            // (g) 嘗試一次
+            attempts++;
             {
                 ENetAddress remoteAddress, localAddress;
                 ENetEvent reconnEvent;
                 // §Q-ENET-LOCAL-PUBLISH-FIX (review batch 2)：連線嘗試期間
-                // 不發布全域 client/peer。舊版在鎖內先寫全域再解鎖，接著無鎖
-                // 跑 serviceEnetHost(…, 5000)——此時 enetReconnectPending 已歸
-                // 零、peer 非 NULL，inputSendThread / lossStatsThread 會在鎖內
-                // 對同一個 ENetHost 做 enet_peer_send / enet_host_service，與
-                // 本執行緒的無鎖 serviceEnetHost 形成資料競爭（ENet 非
-                // thread-safe）。改用區域變數：物件在 CONNECT 完成前只有本
-                // 執行緒看得到，無鎖 service 是安全的；其他執行緒這段期間
+                // 不發布全域 client/peer。物件在 CONNECT＋probation 完成前只有
+                // 本執行緒看得到，無鎖 service 是安全的；其他執行緒這段期間
                 // 看到 peer==NULL，照既有 Fix K / Fix R.2 路徑走 QUIC fallback。
-                ENetHost* newClient;
+                ENetHost* newClient = NULL;
                 ENetPeer* newPeer;
+                bool rejected = false;
+                bool quicDiedDuringAttempt = false;
+                int cErr = 0;
+                unsigned short boundPort = 0;
+                char localStr[URLSAFESTRING_LEN];
 
-                enet_address_set_address(&localAddress, (struct sockaddr *)&LocalAddr, AddrLen);
-                enet_address_set_port(&localAddress, 0);  // OS 分配新 port
+                memset(&reconnEvent, 0, sizeof(reconnEvent));
+                addrToUrlSafeString(&probeLocal, localStr, sizeof(localStr));
 
-                enet_address_set_address(&remoteAddress, (struct sockaddr *)&RemoteAddr, AddrLen);
+                // §M01-C：綁「此刻路由選到的」本機位址，而不是 session 起點的
+                // LocalAddr。全域 LocalAddr 不改（video/audio RTP socket、QUIC
+                // 都不看它）。
+                enet_address_set_address(&localAddress, (struct sockaddr*)&probeLocal, probeLocalLen);
+                enet_address_set_address(&remoteAddress, (struct sockaddr*)&RemoteAddr, AddrLen);
                 enet_address_set_port(&remoteAddress, ControlPortNumber);
 
-                // 區域物件尚未發布 → 不需要 enetMutex
-                newClient = enet_host_create(RemoteAddr.ss_family,
-                                             LocalAddr.ss_family != 0 ? &localAddress : NULL,
-                                             1, CTRL_CHANNEL_COUNT, 0, 0);
+                // IP 沒變且 LiHolePunch 留下了 LocalControlPort：先綁回同一個
+                // port（保留 NAT 打洞開出的 pinhole，同 startControlStream），
+                // 綁不上再改用 OS 分配的 port。
+                if (LocalControlPort != 0 && enetReconnectSameIp(&probeLocal, &LocalAddr)) {
+                    enet_address_set_port(&localAddress, LocalControlPort);
+                    newClient = enet_host_create(RemoteAddr.ss_family, &localAddress,
+                                                 1, CTRL_CHANNEL_COUNT, 0, 0);
+                    if (newClient) {
+                        boundPort = LocalControlPort;
+                    }
+                }
                 if (!newClient) {
-                    Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: enet_host_create "
-                            "failed, retrying...\n");
-                    continue;  // 1 秒後重試
+                    enet_address_set_port(&localAddress, 0);  // OS 分配新 port
+                    newClient = enet_host_create(RemoteAddr.ss_family, &localAddress,
+                                                 1, CTRL_CHANNEL_COUNT, 0, 0);
+                }
+                if (!newClient) {
+                    Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: enet_host_create failed "
+                            "(§M01-C attempt=%d local=%s err=%d) — retry in %u ms\n",
+                            attempts, localStr, (int)LastSocketError(), backoffMs);
+                    nextAttemptMs = PltGetMillis() + backoffMs;
+                    backoffMs = enetReconnectNextBackoff(backoffMs, consecRejects);
+                    continue;
                 }
 
                 newClient->intercept = ignoreDisconnectIntercept;
@@ -1809,62 +2105,136 @@ enet_reconnect_wait:
                                             CTRL_CHANNEL_COUNT, ControlConnectData);
                 if (!newPeer) {
                     enet_host_destroy(newClient);
-                    Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: enet_host_connect "
-                            "failed, retrying...\n");
+                    Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: enet_host_connect failed "
+                            "(§M01-C attempt=%d local=%s) — retry in %u ms\n",
+                            attempts, localStr, backoffMs);
+                    nextAttemptMs = PltGetMillis() + backoffMs;
+                    backoffMs = enetReconnectNextBackoff(backoffMs, consecRejects);
                     continue;
                 }
 
-                // 等待連線完成（5 秒超時）。物件僅本執行緒可見，無鎖安全。
-                int cErr = serviceEnetHost(newClient, &reconnEvent, 5000);
+                // 等 CONNECT（共 5 s）。切成 1 s 一段、段與段之間看 QUIC 是否還
+                // 活著：QUIC 死掉時不必把這 5 s 等完，讓上面的存活出口及時收尾。
+                // 分段呼叫與單次 5000 ms 等價（serviceEnetHost 本來就每 100 ms
+                // 呼叫一次 enet_host_service 處理重傳）。
+                for (int slice = 0; slice < 5; slice++) {
+                    cErr = serviceEnetHost(newClient, &reconnEvent, 1000);
+                    if (cErr != 0) {
+                        break;
+                    }
+                    if (!quicIsConnected()) {
+                        quicDiedDuringAttempt = true;
+                        break;
+                    }
+                }
+
                 if (cErr > 0 && reconnEvent.type == ENET_EVENT_TYPE_CONNECT) {
                     // 仍在未發布狀態下完成 flush 與 timeout 設定
                     enet_host_flush(newClient);
                     enet_peer_timeout(newPeer, 2, 10000, 10000);
 
-                    // 連線完成 → 鎖內一次性發布給其他執行緒
-                    PltLockMutex(&enetMutex);
-                    client = newClient;
-                    peer = newPeer;
-                    // §Q-BYPASS-LOG-RESET v1.5.197 Fix P.2：ENet 重連後
-                    // 重置 bypass log 計數器，讓下次 failover 的
-                    // bypass 動作可見（診斷改善）。
-                    bypassLogCount = 0;
-                    // §Q-DISCONNECT-PENDING-FIX (review)：清掉重連前殘留的
-                    // disconnectPending。若由 server DISCONNECT 觸發重連
-                    //（timeout/DISCONNECT 事件路徑進入時旗標已為 true），
-                    // 不歸零會讓重連成功後第一個安靜輪次立刻走 disconnect
-                    // 分支 → 拆掉剛建好的連線 → 每 ~1s 重連活鎖、輸入脈衝震盪。
-                    // pending disconnect 屬於已在上方銷毀的舊 peer；新連線
-                    // 若真收到新 DISCONNECT，intercept hook 會重新設 true。
+                    // (h) §M01-C probation：server 若還掛著舊 peer（它的 ENet 逾時
+                    // 可能比 client 晚，遠端高 RTT 時可達 ~16-30 s），get_session()
+                    // 會拒絕並 enet_peer_disconnect_now()——但 client 已先拿到
+                    // CONNECT。舊碼會把這個 peer 發布出去、~1.3 s 後才發現被拒
+                    //（期間輸入全丟、約 3 s 一輪抖動）。
+                    // 在未發布狀態下多聽一小段。event 傳 NULL → ENet 不 dispatch：
+                    //  - RECEIVE 留在 dispatch queue，發布後主迴圈第一次
+                    //    serviceEnetHost(client, &event, 0) 自然取出，不會掉；
+                    //  - server 的 DISCONNECT 若被 ignoreDisconnectIntercept 吃掉
+                    //    會設 disconnectPending，否則 peer 轉成 ZOMBIE 或
+                    //    ACKNOWLEDGING_DISCONNECT（state 不再是 CONNECTED）。
+                    enet_uint32 probationMs = 300 + 2 * newPeer->roundTripTime;
+                    if (probationMs > 1500) {
+                        probationMs = 1500;
+                    }
                     disconnectPending = false;
-                    // §Q-REMOTE Fix R.3：發布完成後才打開控制平面的 ENet 路徑
-                    //（順序刻意：先讓 peer 非 NULL、再清 reconnecting；無鎖
-                    // 讀者不論看到哪種交錯，至少一個條件成立都會安全走 QUIC）。
-                    enetReconnecting = 0;
-                    PltUnlockMutex(&enetMutex);
-                    Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: ENet reconnected! "
-                            "(seq continues from %u)\n", currentEnetSequenceNumber);
-                    goto enet_main_loop;  // 回到主事件迴圈
-                }
+                    int pErr = serviceEnetHost(newClient, NULL, probationMs);
+                    rejected = (pErr < 0) || disconnectPending ||
+                               newPeer->state != ENET_PEER_STATE_CONNECTED;
 
-                // 連線失敗 → 清理區域物件（未發布、僅本執行緒可見，無鎖
-                // 即可；thread 中斷時 serviceEnetHost 回 -1 也走這裡，無洩漏）
-                if (cErr > 0 && reconnEvent.type == ENET_EVENT_TYPE_RECEIVE &&
-                    reconnEvent.packet) {
+                    if (!rejected) {
+                        // (i) 連線完成 → 鎖內一次性發布給其他執行緒
+                        PltLockMutex(&enetMutex);
+                        client = newClient;
+                        peer = newPeer;
+                        // §Q-BYPASS-LOG-RESET v1.5.197 Fix P.2：ENet 重連後
+                        // 重置 bypass log 計數器，讓下次 failover 的
+                        // bypass 動作可見（診斷改善）。
+                        bypassLogCount = 0;
+                        // §Q-DISCONNECT-PENDING-FIX (review)：清掉重連前殘留的
+                        // disconnectPending。若由 server DISCONNECT 觸發重連
+                        //（timeout/DISCONNECT 事件路徑進入時旗標已為 true），
+                        // 不歸零會讓重連成功後第一個安靜輪次立刻走 disconnect
+                        // 分支 → 拆掉剛建好的連線 → 每 ~1s 重連活鎖、輸入脈衝震盪。
+                        // pending disconnect 屬於已在上方銷毀的舊 peer；新連線
+                        // 若真收到新 DISCONNECT，intercept hook 會重新設 true。
+                        disconnectPending = false;
+                        // （M1 §F5 的 peer 節流設定插在這裡：peer 已發布、
+                        //   enetReconnecting 尚未清除）
+                        // §Q-REMOTE Fix R.3：發布完成後才打開控制平面的 ENet 路徑
+                        //（順序刻意：先讓 peer 非 NULL、再清 reconnecting；無鎖
+                        // 讀者不論看到哪種交錯，至少一個條件成立都會安全走 QUIC）。
+                        enetReconnecting = 0;
+                        PltUnlockMutex(&enetMutex);
+
+                        uint64_t doneMs = PltGetMillis();
+                        Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: ENet reconnected! "
+                                "(§M01-C after %llu ms, attempts=%d, rejects=%d, "
+                                "local=%s port=%u, seq continues from %u)\n",
+                                (unsigned long long)(doneMs - waitStartMs),
+                                attempts, rejects, localStr, (unsigned int)boundPort,
+                                currentEnetSequenceNumber);
+                        enetHealthReconnectedAtMs = doneMs;
+                        enetHealthLogAtMs = doneMs + 5000;
+                        goto enet_main_loop;  // 回到主事件迴圈
+                    }
+
+                    rejects++;
+                    consecRejects++;
+                    disconnectPending = false;  // 屬於被拒的 newPeer，不可帶進下一輪
+                }
+                else if (cErr > 0 && reconnEvent.type == ENET_EVENT_TYPE_RECEIVE &&
+                         reconnEvent.packet) {
                     // 防禦：理論上 verify-connect 前不會收到 RECEIVE，但若
                     // 發生，packet 不銷毀會洩漏
                     enet_packet_destroy(reconnEvent.packet);
                 }
+
+                // (j) 清理區域物件（未發布、僅本執行緒可見，無鎖即可；thread
+                // 中斷時 serviceEnetHost 回 -1 也走這裡，無洩漏）。probation
+                // 期間留在 dispatch queue 的封包由 enet_peer_reset 一併釋放。
                 enet_peer_reset(newPeer);
                 enet_host_destroy(newClient);
-                Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: connect attempt failed "
-                        "(err=%d), retrying...\n", cErr);
-            }
-        }
 
-        if (waitSec >= 120) {
-            Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: 120s timeout — giving up "
-                    "(input permanently lost for this session)\n");
+                if (stopping || ConnectionInterrupted ||
+                    PltIsThreadInterrupted(&controlReceiveThread)) {
+                    break;  // teardown：不印誤導的失敗 log
+                }
+
+                if (quicDiedDuringAttempt && quicDeadSinceMs == 0) {
+                    quicDeadSinceMs = PltGetMillis();
+                }
+                if (!rejected) {
+                    consecRejects = 0;  // 逾時／錯誤打斷「連續被拒」
+                }
+
+                nextAttemptMs = PltGetMillis() + backoffMs;
+                if (rejected) {
+                    Limelog("[VIPLE-MPQUIC] §M01-C: host rejected ENet reconnect "
+                            "(stale peer?) (attempt=%d rejects=%d consecutive=%d "
+                            "local=%s) — retry in %u ms\n",
+                            attempts, rejects, consecRejects, localStr, backoffMs);
+                }
+                else {
+                    Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: connect attempt failed "
+                            "(err=%d event=%d%s, §M01-C attempt=%d local=%s) — retry in %u ms\n",
+                            cErr, cErr > 0 ? (int)reconnEvent.type : 0,
+                            quicDiedDuringAttempt ? ", QUIC not connected" : "",
+                            attempts, localStr, backoffMs);
+                }
+                backoffMs = enetReconnectNextBackoff(backoffMs, consecRejects);
+            }
         }
     }
 #endif
@@ -2351,6 +2721,9 @@ static void requestIdrFrameFunc(void* context) {
 
 // Stops the control stream
 int stopControlStream(void) {
+#ifdef VIPLE_MPQUIC
+    enetRttValid = 0; // §M01-C：peer 即將斷線／銷毀，RTT 快照作廢
+#endif
     stopping = true;
     LbqSignalQueueShutdown(&referenceFrameControlQueue);
     LbqSignalQueueShutdown(&frameFecStatusQueue);
@@ -2390,6 +2763,11 @@ int stopControlStream(void) {
         enet_host_destroy(client);
         client = NULL;
     }
+#ifdef VIPLE_MPQUIC
+    // §M01-C：開頭清過之後，controlReceiveThread 在被 join 前的最後一輪
+    // 可能又把快照設回有效；peer 已銷毀，這裡再清一次。
+    enetRttValid = 0;
+#endif
 
     if (ctlSock != INVALID_SOCKET) {
         closeSocket(ctlSock);
@@ -2451,6 +2829,22 @@ bool isControlDataInTransit(void) {
 }
 
 bool LiGetEstimatedRttInfo(uint32_t* estimatedRtt, uint32_t* estimatedRttVariance) {
+#ifdef VIPLE_MPQUIC
+    // §M01-C：只讀 controlReceiveThread 寫的快照，完全不碰 peer。
+    // 上游下方註解「peer 永不消失」的假設已被 §Q-ENET-RECONNECT 打破
+    //（重連會 enet_host_destroy 舊 client）；也刻意不加 enetMutex——呼叫端
+    // 在 submitDecodeUnit 路徑上（見 enetRttSnap 的說明）。
+    if (!enetRttValid) {
+        return false;
+    }
+    if (estimatedRtt != NULL) {
+        *estimatedRtt = enetRttSnap;
+    }
+    if (estimatedRttVariance != NULL) {
+        *estimatedRttVariance = enetRttVarSnap;
+    }
+    return true;
+#else
     bool ret = false;
 
     // We do not acquire enetMutex here because we're just reading metrics
@@ -2470,6 +2864,7 @@ bool LiGetEstimatedRttInfo(uint32_t* estimatedRtt, uint32_t* estimatedRttVarianc
     }
 
     return ret;
+#endif
 }
 
 // Starts the control stream
@@ -2564,6 +2959,15 @@ int startControlStream(void) {
 #else
         // Set the peer timeout to 10 seconds and limit backoff to 2x RTT
         enet_peer_timeout(peer, 2, 10000, 10000);
+#endif
+
+#ifdef VIPLE_MPQUIC
+        // §M01-C：連上當下先填一次 RTT 快照（上游此時就能回 true；之後由
+        // controlReceiveThread 主迴圈持續更新）。controlReceiveThread 尚未
+        // 建立，這裡是唯一碰 peer 的執行緒。
+        enetRttSnap = peer->roundTripTime;
+        enetRttVarSnap = peer->roundTripTimeVariance;
+        enetRttValid = 1;
 #endif
     }
     else {
