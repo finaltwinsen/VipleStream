@@ -328,6 +328,16 @@ namespace stream {
     return 0; // Not a punch packet, let ENet handle it
   }
 
+  /**
+   * §F4 2026-09-23：controlBroadcastThread 每輪 enet_host_service 的預設逾時。
+   *
+   * 沿用上游的 150 ms（原本寫死在 server->iterate(150ms)）。改成每個
+   * session 的 control.loopTimeout 成員，預設就是這個值，行為不變；
+   * M1 的 VR session 會把自己的 loopTimeout 設成 4 ms，讓 S→C 即時
+   * 訊息（haptics 等）與 feedback 佇列的處理延遲壓到一幀以內。
+   */
+  constexpr std::chrono::milliseconds kControlLoopTimeoutDefault {150};
+
   class control_server_t {
   public:
     int bind(net::af_e address_family, std::uint16_t port) {
@@ -366,9 +376,64 @@ namespace stream {
       _map_type_cb.emplace(type, std::move(cb));
     }
 
+    /**
+     * @brief 以 channel 0 + RELIABLE 送出控制訊息（上游原本的行為）。
+     *
+     * §F4 2026-09-23：改成轉呼叫下面可指定 channel/flags 的 overload，
+     * 參數固定 (0, ENET_PACKET_FLAG_RELIABLE)。既有呼叫點（gamepad
+     * feedback、HDR mode、termination）全部走這裡，送出行為與舊版相同。
+     */
     int send(const std::string_view &payload, net::peer_t peer) {
-      auto packet = enet_packet_create(payload.data(), payload.size(), ENET_PACKET_FLAG_RELIABLE);
-      if (enet_peer_send(peer, 0, packet)) {
+      return send(payload, peer, 0, ENET_PACKET_FLAG_RELIABLE);
+    }
+
+    /**
+     * @brief §F4 2026-09-23：可指定 ENet channel 與 packet flags 的控制訊息送出。
+     *
+     * 為什麼需要：3.0 的 haptics 等 S→C 即時訊息要走 ch 0x07
+     * （CTRL_CHANNEL_VR，M1a 由 VipleVr.h 統一定義，這裡不重複定義）＋
+     * ENET_PACKET_FLAG_UNSEQUENCED，不能排在 channel 0 reliable 佇列後面
+     * 被重傳卡住（head-of-line blocking）。本項只提供介面，不新增任何
+     * 實際送出的訊息。
+     *
+     * channel 上限：server 端 host 以 channelLimit=0 建立（network.cpp
+     * host_create），ENet 視為 ENET_PROTOCOL_MAXIMUM_CHANNEL_COUNT（255），
+     * 所以 server 本身允許 0x07。實際可用數是連線時與 client 要求值取小
+     * 的 peer->channelCount（moonlight-common-c 要求 CTRL_CHANNEL_COUNT=0x30；
+     * 較舊或第三方 client 可能更少）。channel ≥ peer->channelCount 時
+     * enet_peer_send 會直接失敗，所以比照 client 端 ControlStream.c
+     * sendMessageEnet 的慣例退回 channel 0，flags 維持呼叫端指定的值
+     * （UNSEQUENCED 封包不走 channel 的序號，退回 channel 0 也不會卡住
+     * 該 channel 上的 reliable 訊息）。
+     *
+     * @param payload 已由 encode_control 處理過的封包內容。
+     * @param peer 目標 ENet peer；nullptr 時直接回 -1。
+     * @param channel ENet channel ID。
+     * @param flags ENetPacketFlag 組合（例如 ENET_PACKET_FLAG_RELIABLE、ENET_PACKET_FLAG_UNSEQUENCED）。
+     * @return 0 表示已排入送出佇列；-1 表示失敗（封包已釋放）。
+     */
+    int send(const std::string_view &payload, net::peer_t peer, std::uint8_t channel, enet_uint32 flags) {
+      if (!peer) {
+        return -1;
+      }
+
+      if (channel >= peer->channelCount) {
+        // 只在舊 client 連線時才會發生；前幾次留證據即可，避免高頻訊息刷 log。
+        static std::atomic<int> fallbackLogCount {0};
+        if (fallbackLogCount.fetch_add(1, std::memory_order_relaxed) < 5) {
+          BOOST_LOG(info) << "[VIPLE-CTRL-TX] §F4: channel "sv << (unsigned) channel
+                          << " >= peer channelCount "sv << peer->channelCount
+                          << ", falling back to channel 0"sv;
+        }
+        channel = 0;
+      }
+
+      auto packet = enet_packet_create(payload.data(), payload.size(), flags);
+      if (!packet) {
+        return -1;
+      }
+
+      if (enet_peer_send(peer, channel, packet)) {
         enet_packet_destroy(packet);
 
         return -1;
@@ -409,6 +474,31 @@ namespace stream {
 
     control_server_t control_server;
   };
+
+#ifdef VIPLE_MPQUIC
+  /**
+   * §F3 2026-09-23：QUIC recv handler 的 per-session 存活閘門。
+   *
+   * 為什麼需要：recv handler 在 picoquic IO 執行緒執行，要解參考
+   * session_t。§F3 把註冊時機從「video 第一次走 QUIC」提前到
+   * 「session 開始／QUIC 連線建立」，註冊來源多了 rtsp 執行緒與 IO
+   * 執行緒，不再只是生命週期被 join 綁住的 video 執行緒；而且舊版
+   * 「join 時 setRecvHandler({})」只能擋住後續呼叫，擋不住正在 IO
+   * 執行緒上跑到一半的那一次（§Q-RECVHANDLER-CLEAR-FIX 的殘餘競態）。
+   *
+   * 作法：handler 只捕獲這個閘門的 shared_ptr（不捕獲裸 session_t*），
+   * 每次執行都在 mtx 內讀 session；join 拆除時取得 mtx 再把 session
+   * 清成 nullptr——取得 mtx 本身就保證沒有執行中的 callback，之後即使
+   * 有殘留 handler 被呼叫也只會變成 no-op。閘門隨 handler 的 copy 存活，
+   * 比 session_t 活得久，不會 use-after-free。
+   */
+  struct quic_recv_gate_t {
+    std::mutex mtx;                 // handler 本體執行期間持有
+    session_t *session = nullptr;   // nullptr = session 已拆除；start 寫一次、join 在 mtx 內清除
+    asio::ip::address addr;         // RTSP 對端位址；start 寫入後不再變動（IO 執行緒比對用）
+    bool f3Logged = false;          // §F3 註冊 log 每條 session 只印一次（quic_f3_mutex 保護）
+  };
+#endif
 
   struct session_t {
     config_t config;
@@ -574,6 +664,14 @@ namespace stream {
       // 會撕裂 IV / EVP 內部狀態 → 'Failed to verify tag' →
       // session::stop() 誤殺整條串流。
       std::mutex decryptMutex;
+
+      // §F4 2026-09-23：這個 session 要求的控制迴圈逾時
+      // （controlBroadcastThread 每輪 enet_host_service 的等待上限）。
+      // 預設 kControlLoopTimeoutDefault（150 ms，與舊版寫死的值相同）；
+      // M1 的 VR session 會設成 4 ms。控制迴圈由所有 session 共用，
+      // 實際逾時取存活 session 的最小值（見 controlBroadcastThread）。
+      // atomic：由 controlBroadcastThread 讀，M1 可能從其他執行緒寫。
+      std::atomic<std::chrono::milliseconds> loopTimeout {kControlLoopTimeoutDefault};
     } control;
 
     std::uint32_t launch_session_id;
@@ -590,6 +688,11 @@ namespace stream {
     safe::signal_t controlEnd;
 
     std::atomic<session::state_e> state;
+
+#ifdef VIPLE_MPQUIC
+    // §F3：QUIC recv handler 存活閘門（session::start 建立，join 拆除）。
+    std::shared_ptr<quic_recv_gate_t> quicRecvGate;
+#endif
   };
 
   /**
@@ -1875,6 +1978,13 @@ namespace stream {
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
       bool has_session_awaiting_peer = false;
 
+      // §F4 2026-09-23：本輪 iterate 的逾時。控制迴圈由所有 session 共用，
+      // 取存活 session 的 control.loopTimeout 最小值；起始值是預設 150 ms，
+      // 所以 session 只能把它調短、不能拉長（迴圈同時負責 shutdown 偵測與
+      // 其他 session 的 feedback/HDR 佇列）。沒有 session 或全部維持預設時
+      // 就是 150 ms，與舊版寫死的 server->iterate(150ms) 相同。
+      auto loop_timeout = kControlLoopTimeoutDefault;
+
       {
         auto lg = server->_sessions.lock();
 
@@ -1955,6 +2065,9 @@ namespace stream {
             }
           }
 
+          // §F4：只計入沒被移除的 session（STOPPING 的已在上面 continue）。
+          loop_timeout = std::min(loop_timeout, session->control.loopTimeout.load(std::memory_order_relaxed));
+
           ++pos;
         })
       }
@@ -1965,7 +2078,9 @@ namespace stream {
         break;
       }
 
-      server->iterate(150ms);
+      // §F4：下限 1 ms——逾時 0 會讓 enet_host_service 變成不等待的忙迴圈，
+      // 把這條 critical 優先權執行緒的 CPU 吃滿。
+      server->iterate(std::max(loop_timeout, std::chrono::milliseconds {1}));
     }
 
     // Let all remaining connections know the server is shutting down
@@ -2095,6 +2210,361 @@ namespace stream {
       io.run();
     }
   }
+
+#ifdef VIPLE_MPQUIC
+  // ─────────────────────────────────────────────────────────────────
+  // §F3 2026-09-23：QUIC recv handler 提早註冊
+  //
+  // 舊版要等 videoBroadcastThread 第一次用 QUIC 送 video 才註冊 handler，
+  // 在那之前 client 經 QUIC 送來的東西（flow 0x04 control fallback、
+  // stream #0 的 IDR request / FEC status / ping）全被丟掉。3.0 的 VR
+  // tracking 在 ENet 失效時要改走 flow 0x04，這個空窗必須消除。
+  //
+  // 改成兩個提早的註冊點，互補、不論先後都不漏：
+  //   A. session::start 結尾（session 已 RUNNING）：QUIC 連線若已存在
+  //      （QUIC 比 session 先到、或沿用上一條 session 的 QUIC 連線）就註冊。
+  //   B. QuicListener 的 session callback（IO 執行緒，callback_ready 把
+  //      QuicSession 存進 map 之後）：QUIC 連線一建立（含同 IP 重連產生
+  //      的新 QuicSession）就對上對應的 session 註冊。
+  // A 是「quic_f3_mutex 內先入 registry、再查 QUIC map」，B 是「先入
+  // QUIC map、再於 quic_f3_mutex 內掃 registry」——兩段臨界區必有先後，
+  // 後到的一方一定看得到先到的一方，不會兩邊都錯過。
+  // video 迴圈原本的逐幀註冊保留成安全網（owner 相同就直接跳過）。
+  //
+  // 拆除（session::join）：在 quic_f3_mutex 內移出 registry、只清「自己
+  // 裝的」handler；再取得閘門 mtx 把 session 清成 nullptr，保證沒有
+  // 執行中的 callback（見 quic_recv_gate_t）。
+  //
+  // 沒開 mpquic（或 listener 沒起來）的 session 不會進 registry，也不會
+  // 裝任何 handler——行為與舊版相同。
+  //
+  // 鎖序：quic_f3_mutex → QuicListener::_sessionMutex / _recvHandlerMutex。
+  // 閘門 mtx 只在 handler 本體與 join 拆除時取得；join 取閘門 mtx 時不持有
+  // quic_f3_mutex，handler 本體也從不碰 quic_f3_mutex——不構成循環。
+  // ─────────────────────────────────────────────────────────────────
+
+  // 已 start、尚未 join 的 session 閘門（依 start 先後排列）。所有 handler
+  // 的安裝／清除都在 quic_f3_mutex 內進行，join 移出 registry 之後就不可能
+  // 再被裝上。
+  static std::mutex quic_f3_mutex;
+  static std::vector<std::shared_ptr<quic_recv_gate_t>> quic_f3_gates;
+
+  /**
+   * @brief 建立 QUIC recv handler。
+   *
+   * 本體與原本 inline 在 video 迴圈的 lambda 相同（§Q-IDR-VIA-QUIC /
+   * §Q-REMOTE Fix R.2 / §Q-INPUT-QUIC-FALLBACK），只把捕獲裸 session_t*
+   * 改成經 §F3 閘門取得。
+   */
+  static quic_server::RecvHandler make_quic_recv_handler(std::shared_ptr<quic_recv_gate_t> gate) {
+    return [gate = std::move(gate)](uint8_t flowType, const uint8_t *data, size_t len) {
+      // §F3：整個本體都持有閘門 mtx——join 拆除時取得 mtx 即保證沒有
+      // 執行中的 callback；session 已拆除就直接丟棄。
+      std::lock_guard<std::mutex> gateLk(gate->mtx);
+      session_t *session = gate->session;
+      if (!session) {
+        return;
+      }
+      // flowType 0x03 = FLOW_CONTROL (QUIC stream #0)
+      // data[0] == 0x49 ('I') = IDR request marker
+      if (flowType == 0x03 && len >= 1 && data[0] == 0x49) {
+        BOOST_LOG(info)
+            << "[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: received IDR "
+            << "request from client via QUIC stream #0";
+        session->video.idr_events->raise(true);
+      }
+      // §Q-REMOTE Fix R.2: FEC status via QUIC stream #0
+      // Client 的 lossStatsThread 在 ENet 不通時改走 QUIC。
+      // marker 0x55 ('U') + SS_FRAME_FEC_STATUS payload (18+ bytes)
+      else if (flowType == 0x03 && len >= 19 && data[0] == 0x55) {
+        auto *fec = data + 1; // skip marker byte
+        size_t fecLen = len - 1;
+        if (fecLen >= 18) {
+          uint16_t missing = (uint16_t(fec[8]) << 8) | fec[9];
+          // §S11-ABR-LOCK-FIX (review batch 2)：本 lambda 在
+          // picoquic ioLoop 執行緒執行，與 controlBroadcastThread
+          // 的 ENet FEC / loss-stats / ping-tick 共用 ABR 狀態。
+          std::lock_guard<std::mutex> lk(session->video.abrMutex);
+          session->video.fecLossAccum.fetch_add(missing);
+          session->video.fecFrameAccum.fetch_add(1);
+          session->video.lastFecStatusTime = std::chrono::steady_clock::now();  // §ABR-RAMP-TICK
+
+          static bool loggedOnce = false;
+          if (!loggedOnce) {
+            BOOST_LOG(info)
+                << "[VIPLE-MPQUIC] §Q-REMOTE Fix R.2: first FEC "
+                << "status received via QUIC (missing=" << missing
+                << ", len=" << fecLen << ")";
+            loggedOnce = true;
+          }
+
+          // Run same AIMD cycle as ENet SS_FRAME_FEC handler
+          auto now = std::chrono::steady_clock::now();
+          auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - session->video.fecAccumStart).count();
+          if (elapsed >= 500) {
+            int count = session->video.fecLossAccum.exchange(0);
+            session->video.fecFrameAccum.exchange(0);
+            int sentWindow = session->video.videoShardsSentAccum.exchange(0);
+            session->video.fecAccumStart = now;
+
+            // §FRZ-GAP-CLAMP：同 ENet 路徑——missing 以同期
+            // 實發 shard 數為上限，擋 synthetic 虛報。
+            if (count > sentWindow) {
+              static int clampLogCount = 0;
+              if (clampLogCount++ < 20) {
+                BOOST_LOG(info) << "[VIPLE-FEC] §FRZ-GAP-CLAMP (QUIC): "
+                  << "reported missing " << count << " > shards sent "
+                  << sentWindow << " this window — clamped";
+              }
+              count = sentWindow;
+            }
+
+            // Adaptive FEC
+            auto currentFec = session->video.adaptiveFecPercentage.load();
+            if (currentFec == 0) currentFec = config::stream.fec_percentage;
+            if (count > 0) {
+              int newFec = std::min(currentFec + 10, 50);
+              if (newFec != currentFec) {
+                session->video.adaptiveFecPercentage.store(newFec);
+                BOOST_LOG(info) << "[VIPLE-FEC] QUIC FEC status: " << count
+                  << " lost in " << elapsed << "ms, FEC: " << currentFec
+                  << "% -> " << newFec << "%";
+              }
+              session->video.lastLossTime = now;
+              session->video.zeroLossStreak = 0;
+            } else {
+              session->video.zeroLossStreak++;
+              auto sinceLastLoss = std::chrono::duration_cast<std::chrono::seconds>(
+                now - session->video.lastLossTime).count();
+              if (sinceLastLoss > 5 && session->video.zeroLossStreak >= 3) {
+                int baseFec = config::stream.fec_percentage;
+                int newFec = std::max(currentFec - 5, baseFec);
+                if (newFec != currentFec) {
+                  session->video.adaptiveFecPercentage.store(newFec);
+                }
+              }
+            }
+
+            // AIMD bitrate — 共用 §ABR-RAMP 邏輯
+            run_abr_aimd(session, count, elapsed, "quic-fec");
+          }
+        }
+      }
+      // §Q-REMOTE Fix R.2: periodic ping via QUIC stream #0
+      // marker 0x50 ('P') — keeps session alive (extends pingTimeout)
+      else if (flowType == 0x03 && len >= 1 && data[0] == 0x50) {
+        session->pingTimeout = std::chrono::steady_clock::now()
+            + config::stream.ping_timeout;
+        // §A1-QUIC-TICK-FIX (review batch 2)：QUIC-only 模式的
+        // 零丟包 AIMD tick。client 只在 ENet 不通時才送 QUIC
+        // ping（ControlStream.c: enetReconnectPending || !peer），
+        // 與 ENet IDX_PERIODIC_PING 的 tick 不會同時活躍；即使
+        // 過渡期短暫重疊，也由 lastAbrPingTick 在 abrMutex 內
+        // 節流到 500ms 一輪，不會雙倍計步。
+        abr_zero_loss_tick(session);
+        static bool loggedOnce = false;
+        if (!loggedOnce) {
+          BOOST_LOG(info)
+              << "[VIPLE-MPQUIC] §Q-REMOTE Fix R.2: first periodic "
+              << "ping received via QUIC stream #0";
+          loggedOnce = true;
+        }
+      }
+      // §Q-INPUT-QUIC-FALLBACK v1.5.189 Fix K: failover 期間
+      // client 把加密 input packet 改走 QUIC datagram 送過來。
+      // data 格式 = NVCTL_ENCRYPTED_PACKET_HEADER + ciphertext，
+      // 與 ENet 收到的完全一致 → 餵給 control server 解密 + 處理。
+      else if (flowType == 0x04 && len >= 4) {
+        // §Q-INPUT-DIAG v1.5.195 Fix N: one-shot log 確認
+        // server 有收到 QUIC input datagram 並進入 handler
+        static bool loggedOnce = false;
+        if (!loggedOnce) {
+          BOOST_LOG(info)
+              << "[VIPLE-MPQUIC] §Q-INPUT-DIAG: first QUIC "
+              << "input datagram received (len=" << len
+              << "), routing to control_server";
+          loggedOnce = true;
+        }
+        auto type = *(std::uint16_t *)data;
+        std::string_view payload{
+            (char *)data + sizeof(type),
+            len - sizeof(type)
+        };
+        session->broadcast_ref->control_server.call(type, session, payload, false);
+      }
+    };
+  }
+
+  // 閘門是否仍在 registry（呼叫端須持有 quic_f3_mutex）。
+  static bool quic_f3_gate_registered_locked(const void *owner) {
+    for (auto &g : quic_f3_gates) {
+      if (g.get() == owner) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @brief 把 gate 的 handler 裝到 qs 上。呼叫端須持有 quic_f3_mutex。
+   * @return true = 這次新裝上；已是自己的、或被另一條仍在 RUNNING 的
+   *         session 佔用時回 false（不重複註冊、不搶活著的 session）。
+   */
+  static bool quic_f3_install_locked(const std::shared_ptr<quic_recv_gate_t> &gate,
+                                     const std::shared_ptr<quic_server::QuicSession> &qs) {
+    if (!gate || !qs || !quic_f3_gate_registered_locked(gate.get())) {
+      return false;  // 沒登記（mpquic 未啟用）或已 join
+    }
+    // 閘門在 registry 內 = session 尚未 join，gate->session 有效且不變。
+    // STOPPING 的舊 session 不再註冊，避免與同 IP 的新 session 互搶。
+    if (gate->session->state.load(std::memory_order_acquire) != session::state_e::RUNNING) {
+      return false;
+    }
+    const void *cur = qs->recvHandlerOwner();
+    if (cur == gate.get()) {
+      return false;  // 已註冊，不重複
+    }
+    if (cur != nullptr) {
+      // 被別的閘門佔用：對方仍在 registry 且 RUNNING → 讓給對方（同一
+      // client 位址多條 session 時先到先得，與舊版行為一致）；否則是
+      // STOPPING／已 join 的殘留 handler（閘門已拆除 → no-op），由本
+      // session 接手。
+      for (auto &g : quic_f3_gates) {
+        if (g.get() == cur) {
+          if (g->session->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
+            return false;
+          }
+          break;
+        }
+      }
+    }
+    return qs->compareAndSetRecvHandler(cur, make_quic_recv_handler(gate), gate.get());
+  }
+
+  // §F3 log：每條 session 第一次提早註冊印一次；之後（QUIC 同 IP 重連
+  // 產生新 QuicSession）改印 re-registered。呼叫端須持有 quic_f3_mutex。
+  static void quic_f3_log_registered_locked(quic_recv_gate_t &gate, const char *via) {
+    if (!gate.f3Logged) {
+      gate.f3Logged = true;
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] §F3 recv handler registered at session start"
+                      << " (via=" << via << ", peer=" << gate.addr.to_string() << ")";
+    } else {
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] §F3 recv handler re-registered on new QUIC session"
+                      << " (via=" << via << ", peer=" << gate.addr.to_string() << ")";
+    }
+  }
+
+  /**
+   * @brief §F3 閘門建立。session::start 在啟動 video/audio 執行緒「之前」
+   *        呼叫——thread 建立提供 happens-before，之後各執行緒讀
+   *        session->quicRecvGate 不會有 data race。
+   */
+  static void quic_f3_prepare_gate(session_t &session, const asio::ip::address &addr) {
+    auto gate = std::make_shared<quic_recv_gate_t>();
+    gate->session = &session;
+    gate->addr = addr;
+    session.quicRecvGate = std::move(gate);
+  }
+
+  /**
+   * @brief §F3 註冊點 A：session::start 結尾呼叫（session 已 RUNNING）。
+   */
+  static void quic_f3_on_session_start(session_t &session) {
+    auto &gate = session.quicRecvGate;
+    if (!gate || !config::stream.mpquic_enabled || !quic_server::g_listener) {
+      return;  // 沒開 mpquic：不登記、不註冊，行為與舊版相同
+    }
+    std::lock_guard<std::mutex> lk(quic_f3_mutex);
+    quic_f3_gates.push_back(gate);
+    auto qs = quic_server::g_listener->getSession(gate->addr);
+    if (qs && quic_f3_install_locked(gate, qs)) {
+      quic_f3_log_registered_locked(*gate, "session-start");
+    }
+  }
+
+  /**
+   * @brief §F3 註冊點 B：QUIC 連線建立（picoquic IO 執行緒）。
+   *
+   * listener 由 callback 捕獲傳入，不讀 quic_server::g_listener——IO 執行緒
+   * 啟動時 g_listener 可能還沒被 start_broadcast 指派。
+   */
+  static void quic_f3_on_quic_ready(quic_server::QuicListener *listener,
+                                    const std::shared_ptr<quic_server::QuicSession> &qs) {
+    if (!listener || !qs) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(quic_f3_mutex);
+    // 由新到舊：同一 client 位址若有多條 session，最後 start 的優先。
+    for (auto it = quic_f3_gates.rbegin(); it != quic_f3_gates.rend(); ++it) {
+      const auto &gate = *it;
+      if (listener->getSession(gate->addr) != qs) {
+        continue;
+      }
+      if (quic_f3_install_locked(gate, qs)) {
+        quic_f3_log_registered_locked(*gate, "quic-ready");
+        break;
+      }
+    }
+  }
+
+  /**
+   * @brief §F3 安全網：video 迴圈逐幀呼叫（原 §Q-IDR-VIA-QUIC 註冊點）。
+   *
+   * 常態下 owner 已是本 session，只付一次 _recvHandlerMutex（與舊版
+   * hasRecvHandler() 相同成本），不碰 quic_f3_mutex。
+   */
+  static void quic_f3_ensure_from_video(session_t *session,
+                                        const std::shared_ptr<quic_server::QuicSession> &qs) {
+    const auto &gate = session->quicRecvGate;
+    if (!gate || !qs || qs->recvHandlerOwner() == gate.get()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(quic_f3_mutex);
+    if (quic_f3_install_locked(gate, qs)) {
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: recv handler registered on QUIC "
+                      << "session via video loop (§F3 safety net — early registration "
+                      << "missed, peer=" << gate->addr.to_string() << ")";
+    }
+  }
+
+  /**
+   * @brief §F3 拆除：session::join 在 video/audio/control 執行緒都結束後呼叫。
+   *
+   * 取代 §Q-RECVHANDLER-CLEAR-FIX 的「setRecvHandler({})」：舊作法會把
+   * 同一 client 位址上新 session 剛裝好的 handler 一併清掉，也擋不住
+   * IO 執行緒上正在執行的那一次 callback。
+   */
+  static void quic_f3_on_session_end(session_t &session) {
+    auto gate = session.quicRecvGate;
+    if (!gate) {
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lk(quic_f3_mutex);
+      auto it = std::find(quic_f3_gates.begin(), quic_f3_gates.end(), gate);
+      if (it != quic_f3_gates.end()) {
+        quic_f3_gates.erase(it);
+      }
+      // 只清自己裝的（RTSP 位址與 ping 後的 video peer 位址都試一次）。
+      if (quic_server::g_listener) {
+        for (const auto &a : {gate->addr, session.video.peer.address()}) {
+          auto qs = quic_server::g_listener->getSession(a);
+          if (qs) {
+            qs->clearRecvHandlerIfOwner(gate.get());
+          }
+        }
+      }
+    }
+    // 取得閘門 mtx = 等 IO 執行緒上執行中的 callback 跑完；之後任何殘留
+    // handler（例如裝在已被同 IP 重連擠出 map 的舊 QuicSession 上）都只會
+    // 是 no-op。此處不可持有 quic_f3_mutex（見上方鎖序說明）。
+    {
+      std::lock_guard<std::mutex> lk(gate->mtx);
+      gate->session = nullptr;
+    }
+  }
+#endif  // VIPLE_MPQUIC
 
   void videoBroadcastThread(udp::socket &sock) {
     auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
@@ -2317,14 +2787,13 @@ namespace stream {
         // frame's packets get spread across the full inter-frame interval.
         // For 57 Mbps stream + 1500 B blocks: 57M × 1.25 / 8 / 1500 / 1000 =
         // ~6 packets/ms → 30 packets ≈ 5 ms send window vs 0.45 ms burst.
-        // [VIPLE-PERF] Cache env var as static const to avoid per-frame syscall.
-        // Process restart is required to change this setting (same as other
-        // VIPLE_* env vars cached in vkfruc.cpp / plvk.cpp).
-        static const bool s_smoothPacing = [] {
-          const char* env = std::getenv("VIPLE_SMOOTH_PACING");
-          return env && (env[0] == '1' || env[0] == 't' || env[0] == 'T');
-        }();
-        if (s_smoothPacing) {
+        // §F7 2026-09-23：開關改由 config `smooth_pacing` 決定（預設 false，
+        // 與舊版未設環境變數時相同）。VIPLE_SMOOTH_PACING 環境變數降級為
+        // dev-only 覆寫，已在 config::apply_config 啟動時解析並併入
+        // config::stream.smooth_pacing（env > config，並印 [VIPLE-DEVENV]），
+        // 這裡每幀只讀一個啟動後不再變動的 bool，不再 getenv。
+        // 變更設定仍需重啟 service（Web UI 的「套用」會自動重啟）。
+        if (config::stream.smooth_pacing) {
           // session->video.configuredBitrateKbps is the original client-requested
           // bitrate in kbps; adaptiveBitrateKbps may have lowered it on packet loss.
           int br_kbps = session->video.adaptiveBitrateKbps.load();
@@ -2395,154 +2864,13 @@ namespace stream {
                             << session->video.peer.address().to_string() << ")";
             logged_once = true;
           }
-          // §Q-IDR-VIA-QUIC v1.5.177 (server 端)：註冊 QUIC stream #0
-          // recv handler，處理 client 透過 QUIC 送來的 IDR request。
-          // Client 的 ENet 控制通道在 failover 時已死（根因 D），
-          // 改走 QUIC stream #0 確保 IDR request 送達。
-          {
-            // §Q-RECVHANDLER-FIX (review)：改用 per-session 查詢取代
-            // process 級 static——舊式 static 讓 host 第一次串流後，
-            // 之後每條 session 的新 QuicSession 都拿不到 handler，
-            // QUIC IDR/FEC status/ping/input fallback 全靜默失效。
-            if (quicVideoSession && !quicVideoSession->hasRecvHandler()) {
-              auto idrEvt = session->video.idr_events;
-              quicVideoSession->setRecvHandler(
-                  [idrEvt, session](uint8_t flowType, const uint8_t *data, size_t len) {
-                    // flowType 0x03 = FLOW_CONTROL (QUIC stream #0)
-                    // data[0] == 0x49 ('I') = IDR request marker
-                    if (flowType == 0x03 && len >= 1 && data[0] == 0x49) {
-                      BOOST_LOG(info)
-                          << "[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: received IDR "
-                          << "request from client via QUIC stream #0";
-                      idrEvt->raise(true);
-                    }
-                    // §Q-REMOTE Fix R.2: FEC status via QUIC stream #0
-                    // Client 的 lossStatsThread 在 ENet 不通時改走 QUIC。
-                    // marker 0x55 ('U') + SS_FRAME_FEC_STATUS payload (18+ bytes)
-                    else if (flowType == 0x03 && len >= 19 && data[0] == 0x55) {
-                      auto *fec = data + 1; // skip marker byte
-                      size_t fecLen = len - 1;
-                      if (fecLen >= 18) {
-                        uint16_t missing = (uint16_t(fec[8]) << 8) | fec[9];
-                        // §S11-ABR-LOCK-FIX (review batch 2)：本 lambda 在
-                        // picoquic ioLoop 執行緒執行，與 controlBroadcastThread
-                        // 的 ENet FEC / loss-stats / ping-tick 共用 ABR 狀態。
-                        std::lock_guard<std::mutex> lk(session->video.abrMutex);
-                        session->video.fecLossAccum.fetch_add(missing);
-                        session->video.fecFrameAccum.fetch_add(1);
-                        session->video.lastFecStatusTime = std::chrono::steady_clock::now();  // §ABR-RAMP-TICK
-
-                        static bool loggedOnce = false;
-                        if (!loggedOnce) {
-                          BOOST_LOG(info)
-                              << "[VIPLE-MPQUIC] §Q-REMOTE Fix R.2: first FEC "
-                              << "status received via QUIC (missing=" << missing
-                              << ", len=" << fecLen << ")";
-                          loggedOnce = true;
-                        }
-
-                        // Run same AIMD cycle as ENet SS_FRAME_FEC handler
-                        auto now = std::chrono::steady_clock::now();
-                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          now - session->video.fecAccumStart).count();
-                        if (elapsed >= 500) {
-                          int count = session->video.fecLossAccum.exchange(0);
-                          session->video.fecFrameAccum.exchange(0);
-                          int sentWindow = session->video.videoShardsSentAccum.exchange(0);
-                          session->video.fecAccumStart = now;
-
-                          // §FRZ-GAP-CLAMP：同 ENet 路徑——missing 以同期
-                          // 實發 shard 數為上限，擋 synthetic 虛報。
-                          if (count > sentWindow) {
-                            static int clampLogCount = 0;
-                            if (clampLogCount++ < 20) {
-                              BOOST_LOG(info) << "[VIPLE-FEC] §FRZ-GAP-CLAMP (QUIC): "
-                                << "reported missing " << count << " > shards sent "
-                                << sentWindow << " this window — clamped";
-                            }
-                            count = sentWindow;
-                          }
-
-                          // Adaptive FEC
-                          auto currentFec = session->video.adaptiveFecPercentage.load();
-                          if (currentFec == 0) currentFec = config::stream.fec_percentage;
-                          if (count > 0) {
-                            int newFec = std::min(currentFec + 10, 50);
-                            if (newFec != currentFec) {
-                              session->video.adaptiveFecPercentage.store(newFec);
-                              BOOST_LOG(info) << "[VIPLE-FEC] QUIC FEC status: " << count
-                                << " lost in " << elapsed << "ms, FEC: " << currentFec
-                                << "% -> " << newFec << "%";
-                            }
-                            session->video.lastLossTime = now;
-                            session->video.zeroLossStreak = 0;
-                          } else {
-                            session->video.zeroLossStreak++;
-                            auto sinceLastLoss = std::chrono::duration_cast<std::chrono::seconds>(
-                              now - session->video.lastLossTime).count();
-                            if (sinceLastLoss > 5 && session->video.zeroLossStreak >= 3) {
-                              int baseFec = config::stream.fec_percentage;
-                              int newFec = std::max(currentFec - 5, baseFec);
-                              if (newFec != currentFec) {
-                                session->video.adaptiveFecPercentage.store(newFec);
-                              }
-                            }
-                          }
-
-                          // AIMD bitrate — 共用 §ABR-RAMP 邏輯
-                          run_abr_aimd(session, count, elapsed, "quic-fec");
-                        }
-                      }
-                    }
-                    // §Q-REMOTE Fix R.2: periodic ping via QUIC stream #0
-                    // marker 0x50 ('P') — keeps session alive (extends pingTimeout)
-                    else if (flowType == 0x03 && len >= 1 && data[0] == 0x50) {
-                      session->pingTimeout = std::chrono::steady_clock::now()
-                          + config::stream.ping_timeout;
-                      // §A1-QUIC-TICK-FIX (review batch 2)：QUIC-only 模式的
-                      // 零丟包 AIMD tick。client 只在 ENet 不通時才送 QUIC
-                      // ping（ControlStream.c: enetReconnectPending || !peer），
-                      // 與 ENet IDX_PERIODIC_PING 的 tick 不會同時活躍；即使
-                      // 過渡期短暫重疊，也由 lastAbrPingTick 在 abrMutex 內
-                      // 節流到 500ms 一輪，不會雙倍計步。
-                      abr_zero_loss_tick(session);
-                      static bool loggedOnce = false;
-                      if (!loggedOnce) {
-                        BOOST_LOG(info)
-                            << "[VIPLE-MPQUIC] §Q-REMOTE Fix R.2: first periodic "
-                            << "ping received via QUIC stream #0";
-                        loggedOnce = true;
-                      }
-                    }
-                    // §Q-INPUT-QUIC-FALLBACK v1.5.189 Fix K: failover 期間
-                    // client 把加密 input packet 改走 QUIC datagram 送過來。
-                    // data 格式 = NVCTL_ENCRYPTED_PACKET_HEADER + ciphertext，
-                    // 與 ENet 收到的完全一致 → 餵給 control server 解密 + 處理。
-                    else if (flowType == 0x04 && len >= 4) {
-                      // §Q-INPUT-DIAG v1.5.195 Fix N: one-shot log 確認
-                      // server 有收到 QUIC input datagram 並進入 handler
-                      static bool loggedOnce = false;
-                      if (!loggedOnce) {
-                        BOOST_LOG(info)
-                            << "[VIPLE-MPQUIC] §Q-INPUT-DIAG: first QUIC "
-                            << "input datagram received (len=" << len
-                            << "), routing to control_server";
-                        loggedOnce = true;
-                      }
-                      auto type = *(std::uint16_t *)data;
-                      std::string_view payload{
-                          (char *)data + sizeof(type),
-                          len - sizeof(type)
-                      };
-                      session->broadcast_ref->control_server.call(type, session, payload, false);
-                    }
-                  });
-              // §Q-RECVHANDLER-FIX：不再用 process-static 旗標——hasRecvHandler()
-              // 已在迴圈條件判斷，註冊後自然不重入；新 session 會重新註冊。
-              BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: "
-                              << "recv handler registered on QUIC session";
-            }
-          }
+          // §Q-IDR-VIA-QUIC v1.5.177 (server 端)：QUIC stream #0 / flow 0x04
+          // 的 recv handler（IDR request、FEC status、ping、input fallback）。
+          // §F3 2026-09-23：主要註冊點已提前到 session::start 與 QUIC
+          // 連線建立（見 quic_f3_on_session_start / quic_f3_on_quic_ready），
+          // 這裡只剩逐幀安全網——owner 已是本 session 就不碰 quic_f3_mutex、
+          // 不重複註冊；真的在這裡才裝上代表提早註冊漏接，會印警示 log。
+          quic_f3_ensure_from_video(session, quicVideoSession);
           // §Q-FAILOVER-IDR-LOOP v1.5.177：PATH-SWITCH 後 10 秒內每
           // 500ms 強制送一次 IDR。不依賴 client 的 IDR request（ENet
           // 可能已死——根因 D）。單次 IDR 在 WiFi cwnd 冷啟動期幾乎
@@ -3135,6 +3463,13 @@ namespace stream {
     // Start QUIC listener if MP-QUIC is enabled
     if (config::stream.mpquic_enabled) {
       auto listener = new quic_server::QuicListener();
+      // §F3 註冊點 B：QUIC 連線一建立（IO 執行緒 callback_ready）就對上
+      // 對應的 session 註冊 recv handler。必須在 start() 之前設定——
+      // _sessionCallback 由 IO 執行緒無鎖讀取，start 之後再設是 data race。
+      listener->setSessionCallback(
+          [listener](std::shared_ptr<quic_server::QuicSession> qs) {
+            quic_f3_on_quic_ready(listener, qs);
+          });
       if (listener->start(
               config::stream.mpquic_port,
               config::nvhttp.cert,
@@ -3427,21 +3762,15 @@ namespace stream {
       relay::set_allocated_notify_handler({});
 
 #ifdef VIPLE_MPQUIC
-      // §Q-RECVHANDLER-CLEAR-FIX (review batch 2)：清掉 QUIC recv
-      // handler——lambda 捕獲裸 session_t*（與上面 relay listener 同型
-      // 問題）。client 的 QUIC cnx 可在 server 端 session 拆除後存活
-      // （每 100ms 仍送 0x50 ping），不清會對已解構的 session 上鎖
+      // §Q-RECVHANDLER-CLEAR-FIX (review batch 2)：拆掉 QUIC recv
+      // handler。client 的 QUIC cnx 可在 server 端 session 拆除後存活
+      // （每 100ms 仍送 0x50 ping），不拆會對已解構的 session 上鎖
       // abrMutex / 寫 pingTimeout / 解參考 broadcast_ref（UAF）。
-      // invokeRecvHandler 的鎖內 copy 把殘餘競態縮到「正在執行中的
-      // 單次 callback」；handler 清空後 hasRecvHandler() 回 false，
-      // 下一條 session 會重新註冊（§Q-RECVHANDLER-FIX 語意不變）。
-      if (config::stream.mpquic_enabled && quic_server::g_listener) {
-        auto quicSession = quic_server::g_listener->getSession(
-            session.video.peer.address());
-        if (quicSession) {
-          quicSession->setRecvHandler({});
-        }
-      }
+      // §F3：改成對稱拆除——移出 registry、只清本 session 裝的 handler，
+      // 再經閘門等執行中的 callback 結束並使殘留 handler 失效（連舊版
+      // 「正在執行中的單次 callback」殘餘競態一併消除）。下一條 session
+      // 會在自己的 start / QUIC 連線建立時重新註冊。
+      quic_f3_on_session_end(session);
 #endif
       // Tear the tunnel down explicitly too so its WS binary handler
       // is unregistered before the relay thread tries to deliver to a
@@ -3561,10 +3890,21 @@ namespace stream {
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
+#ifdef VIPLE_MPQUIC
+      // §F3：閘門必須在 video/audio 執行緒啟動前建好（見 quic_f3_prepare_gate）。
+      quic_f3_prepare_gate(session, addr);
+#endif
+
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
 
       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
+
+#ifdef VIPLE_MPQUIC
+      // §F3 註冊點 A：session 已 RUNNING，QUIC 連線若已存在就立刻註冊
+      // recv handler；QUIC 之後才連上的由註冊點 B（quic_f3_on_quic_ready）接手。
+      quic_f3_on_session_start(session);
+#endif
 
       // If this is the first session, invoke the platform callbacks
       if (++running_sessions == 1) {

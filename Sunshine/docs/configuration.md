@@ -1753,6 +1753,35 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### smooth_pacing
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream: spread each video frame's packets across the frame interval at the stream
+            bitrate x1.25 instead of sending them in a sub-millisecond near-line-rate burst.
+            This can reduce packet loss on clients or networks that drop bursts (e.g. Wi-Fi or weak
+            network adapters), at the cost of a few extra milliseconds of send time for large frames.
+            @note{The legacy environment variable `VIPLE_SMOOTH_PACING` is a dev-only override:
+            when set (non-empty) it takes precedence over this option and a `[VIPLE-DEVENV]`
+            warning is written to the log at startup. Use this option for normal configuration.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            smooth_pacing = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ## Config Files
 
 ### file_apps

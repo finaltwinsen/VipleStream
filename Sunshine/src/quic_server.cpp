@@ -1280,11 +1280,42 @@ namespace quic_server {
   void QuicSession::setRecvHandler(RecvHandler handler) {
     std::lock_guard<std::mutex> lk(_recvHandlerMutex);
     _recvHandler = std::move(handler);
+    _recvHandlerOwner = nullptr;  // §F3：舊式設定一律是匿名 handler
   }
 
   bool QuicSession::hasRecvHandler() const {
     std::lock_guard<std::mutex> lk(_recvHandlerMutex);
     return (bool)_recvHandler;
+  }
+
+  // §F3：owner 只做指標比對，不解參考（見 quic_server.h 說明）。
+  const void *QuicSession::recvHandlerOwner() const {
+    std::lock_guard<std::mutex> lk(_recvHandlerMutex);
+    return _recvHandler ? _recvHandlerOwner : nullptr;
+  }
+
+  bool QuicSession::compareAndSetRecvHandler(const void *expectedOwner,
+                                             RecvHandler handler,
+                                             const void *newOwner) {
+    std::lock_guard<std::mutex> lk(_recvHandlerMutex);
+    if (expectedOwner == nullptr) {
+      if (_recvHandler)
+        return false;  // 已有 handler（含匿名 handler）→ 不覆蓋
+    } else if (!_recvHandler || _recvHandlerOwner != expectedOwner) {
+      return false;
+    }
+    _recvHandler = std::move(handler);
+    _recvHandlerOwner = _recvHandler ? newOwner : nullptr;
+    return true;
+  }
+
+  bool QuicSession::clearRecvHandlerIfOwner(const void *owner) {
+    std::lock_guard<std::mutex> lk(_recvHandlerMutex);
+    if (!owner || !_recvHandler || _recvHandlerOwner != owner)
+      return false;
+    _recvHandler = nullptr;
+    _recvHandlerOwner = nullptr;
+    return true;
   }
 
   // §Q-RECVHANDLER-FIX：鎖內 copy handler、鎖外呼叫（避免持鎖時

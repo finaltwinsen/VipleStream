@@ -200,6 +200,13 @@ namespace config {
     int mpquic_fec_floor = 1;     // minimum FEC % when QUIC is active (LAN mode)
     int mpquic_congestion = 1;    // 0=newreno, 1=bbr (default, bandwidth-based), 2=cubic
     int abr_floor_kbps = 1500;    // §ABR-FLOOR-DERP: AIMD 絕對下限（窄路徑 2-3Mbps goodput 要餵得飽）
+
+    // §F7 送出 pacing：true = 依串流碼率 ×1.25 攤平每幀封包的送出節拍（見
+    // stream.cpp [VIPLE-SMOOTH-PACING]），false = 上游的 ~800 Mbps 線速 burst。
+    // 預設 false，等同舊版「沒設 VIPLE_SMOOTH_PACING 環境變數」的行為。
+    // 環境變數 VIPLE_SMOOTH_PACING 只保留為 dev-only 覆寫（優先於這裡的值），
+    // 在 apply_config 解析完 config 後套用，所以本欄位存的是最終生效值。
+    bool smooth_pacing = false;
   };
 
   struct nvhttp_t {

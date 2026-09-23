@@ -344,6 +344,8 @@
     "qsv_slow_hevc_desc": "這樣可以在較舊的 Intel GPU 上進行 HEVC 編碼，但代價是 GPU 使用量較高，效能較差。",
     "restart_note": "VipleStream-Server 正在重新啟動以套用變更。",
     "search_options": "搜尋配置選項...",
+    "smooth_pacing": "平滑送出節拍（VipleStream）",
+    "smooth_pacing_desc": "依串流位元率 ×1.25 把每一幀的封包平均分散在幀間隔內送出，而不是以接近線速、不到 1 毫秒的 burst 一次送完。對容易丟掉 burst 封包的用戶端或網路（例如 Wi-Fi、效能較弱的網路卡）可以減少丟包，代價是大幀的送出時間多出數毫秒。",
     "stream_audio": "串流音訊",
     "stream_audio_desc": "是否串流音訊。停用此功能對於串流無頭顯示器作為第二台顯示器很有用。",
     "sunshine_name": "VipleStream-Server 名稱",

@@ -82,6 +82,8 @@ namespace quic_server {
 
     bool sendStream(const uint8_t *data, size_t len);
 
+    // 無 owner 的舊式設定（owner 一律清成 nullptr）。§F3 起 stream.cpp
+    // 改走下面帶 owner 的 CAS / 條件清除，這個保留給相容用途。
     void setRecvHandler(RecvHandler handler);
 
     // §Q-RECVHANDLER-FIX (review)：handler 是否已註冊。stream.cpp 原本
@@ -89,6 +91,25 @@ namespace quic_server {
     // QuicSession 永遠拿不到 handler（QUIC failover/IDR/FEC/ping 全
     // 靜默失效）。改由各 session 自身狀態回報，呼叫端每幀檢查重註冊。
     bool hasRecvHandler() const;
+
+    // §F3 2026-09-23：帶 owner 標記的 handler 管理。owner 是呼叫端
+    // （stream.cpp 的 per-session 閘門）的不透明指標，這裡只拿來比對、
+    // 絕不解參考。目的：
+    //   1. 不重複註冊——呼叫端先比 owner，已是自己就不再裝。
+    //   2. teardown 對稱——session 結束只拆「自己裝的」handler，
+    //      不會誤拆同一個 client 位址上新 session 剛裝好的 handler。
+    // 目前 handler 的 owner；沒有 handler 時回 nullptr。
+    const void *recvHandlerOwner() const;
+
+    // CAS 語意：目前 owner 等於 expectedOwner 才換上 (handler, newOwner)。
+    // expectedOwner == nullptr 表示「目前必須沒有任何 handler」——用舊式
+    // setRecvHandler 裝的匿名 handler 不會被覆蓋。回傳是否換成功。
+    bool compareAndSetRecvHandler(const void *expectedOwner,
+                                  RecvHandler handler,
+                                  const void *newOwner);
+
+    // owner 相符才清除 handler；回傳是否有清掉。
+    bool clearRecvHandlerIfOwner(const void *owner);
 
     // §Q-RECVHANDLER-FIX：IO thread 在 callback 內呼叫 handler，與
     // broadcast thread 的 setRecvHandler 賦值跨執行緒——透過此函式
@@ -118,7 +139,8 @@ namespace quic_server {
     std::atomic<bool> _ready{false};
 
     RecvHandler _recvHandler;
-    mutable std::mutex _recvHandlerMutex; // §Q-RECVHANDLER-FIX：保護 _recvHandler 跨執行緒讀寫
+    const void *_recvHandlerOwner = nullptr; // §F3：_recvHandler 的 owner 標記（僅比對用）
+    mutable std::mutex _recvHandlerMutex; // §Q-RECVHANDLER-FIX：保護 _recvHandler / _recvHandlerOwner 跨執行緒讀寫
 
     // §K.4 fix: video/audio threads enqueue into _pendingQueue;
     // the IO thread drains it via drainPendingToQuic().

@@ -347,6 +347,8 @@
     "qsv_slow_hevc_desc": "This can enable HEVC encoding on older Intel GPUs, at the cost of higher GPU usage and worse performance.",
     "restart_note": "VipleStream-Server is restarting to apply changes.",
     "search_options": "Search configuration options...",
+    "smooth_pacing": "Smooth Pacing (VipleStream)",
+    "smooth_pacing_desc": "Spread each video frame's packets across the frame interval at the stream bitrate x1.25, instead of sending them in a sub-millisecond near-line-rate burst. Can reduce packet loss on clients or networks that drop bursts (e.g. Wi-Fi or weak network adapters), at the cost of a few extra milliseconds of send time for large frames.",
     "stream_audio": "Stream Audio",
     "stream_audio_desc": "Whether to stream audio or not. Disabling this can be useful for streaming headless displays as second monitors.",
     "sunshine_name": "VipleStream-Server Name",

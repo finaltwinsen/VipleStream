@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -1308,6 +1309,30 @@ namespace config {
     int_between_f(vars, "mpquic_fec_floor", stream.mpquic_fec_floor, {0, 100});
     int_between_f(vars, "mpquic_congestion", stream.mpquic_congestion, {0, 2});
     int_between_f(vars, "abr_floor_kbps", stream.abr_floor_kbps, {500, 100000});
+
+    // §F7 送出 pacing 開關（原本只能靠 VIPLE_SMOOTH_PACING 環境變數開，違反
+    // 「功能設定不用環境變數」規則）。正式設定一律走 sunshine.conf / Web UI 的
+    // smooth_pacing，預設 false（線速 burst，與舊版未設環境變數時相同）。
+    bool_f(vars, "smooth_pacing", stream.smooth_pacing);
+
+    // §F7：環境變數降級為 dev-only 覆寫，方便 A/B 時不改 conf 就能切換。
+    // 優先順序：VIPLE_SMOOTH_PACING（有設且非空）> config smooth_pacing > 預設 false。
+    // 真假判斷沿用舊版語意（首字元 '1'/'t'/'T' 為開，其餘為關），讓既有的
+    // 開發腳本行為不變。只在這裡解析一次（啟動時），stream.cpp 每幀直接讀
+    // config::stream.smooth_pacing，送出迴圈裡不再呼叫 getenv。
+    // 這時 logging::init() 還沒跑，所以走 warn_config 延後寫進 sunshine.log。
+    if (const char *env = std::getenv("VIPLE_SMOOTH_PACING"); env != nullptr && env[0] != '\0') {
+      const bool config_value = stream.smooth_pacing;
+      stream.smooth_pacing = (env[0] == '1' || env[0] == 't' || env[0] == 'T');
+      warn_config(std::format(
+        "[VIPLE-DEVENV] dev-only override VIPLE_SMOOTH_PACING={} "
+        "（僅供開發偵錯；環境變數優先於 config：smooth_pacing={} 被覆寫，生效值={}；"
+        "正式設定請改用 sunshine.conf 的 smooth_pacing）",
+        env,
+        config_value ? "enabled" : "disabled",
+        stream.smooth_pacing ? "enabled" : "disabled"
+      ));
+    }
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

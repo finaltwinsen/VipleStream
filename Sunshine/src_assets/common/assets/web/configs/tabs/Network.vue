@@ -223,6 +223,14 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
       </div>
     </div>
 
+    <!-- VipleStream §F7: Smooth pacing (bitrate-shaped video send pacing) -->
+    <Checkbox class="mb-3"
+              id="smooth_pacing"
+              locale-prefix="config"
+              v-model="config.smooth_pacing"
+              default="false"
+    ></Checkbox>
+
   </div>
 </template>
 
