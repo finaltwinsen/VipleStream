@@ -235,6 +235,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/network.cpp"
         "${CMAKE_SOURCE_DIR}/src/network.h"
         "${CMAKE_SOURCE_DIR}/src/move_by_copy.h"
+        "${CMAKE_SOURCE_DIR}/src/self_update.cpp"
+        "${CMAKE_SOURCE_DIR}/src/self_update.h"
         "${CMAKE_SOURCE_DIR}/src/system_tray.cpp"
         "${CMAKE_SOURCE_DIR}/src/system_tray.h"
         "${CMAKE_SOURCE_DIR}/src/task_pool.h"

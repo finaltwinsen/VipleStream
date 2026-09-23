@@ -32,6 +32,7 @@
   #include <atomic>
   #include <chrono>
   #include <csignal>
+  #include <mutex>
   #include <format>
   #include <string>
   #include <thread>
@@ -49,6 +50,7 @@
   #include "logging.h"
   #include "platform/common.h"
   #include "process.h"
+  #include "self_update.h"
   #include "src/entry_handler.h"
 
 using namespace std::literals;
@@ -154,6 +156,37 @@ namespace system_tray {
     launch_ui("/transfer"s);
   }
 
+  // VipleStream §SELF-UPDATE — 常駐圖示「Check for updates...」（兩段式）──────────
+  // 第一次點只查版本；有新版時選單文字換成「Install update vX.Y.Z」，第二次點才
+  // 下載＋驗證＋安裝（串流中拒絕）。進度／結果用 balloon 通知；文字指標必須長存
+  // （tray 只存指標），所以用 static 緩衝；所有從背景執行緒改 tray 狀態的路徑都持
+  // 同一把 s_tray_mtx。
+  static constexpr int k_update_idx = 7;
+  static std::mutex s_tray_mtx;
+  static void set_update_menu_state(bool busy, const std::string &label);
+  static void show_tray_balloon_owned(const std::string &title, const std::string &text);
+
+  void tray_check_update_cb([[maybe_unused]] struct tray_menu *item) {
+    auto notify = [](const std::string &title, const std::string &text) {
+      show_tray_balloon_owned(title, text);
+    };
+    auto on_state = [](bool busy, const std::string &label) {
+      set_update_menu_state(busy, label);
+    };
+    if (self_update::pending()) {
+      BOOST_LOG(info) << "[VIPLE-UPDATE] install requested from system tray";
+      std::string why;
+      if (!self_update::install_pending_async(notify, on_state, &why)) {
+        show_tray_balloon_owned("VipleStream update", why.empty() ? "An update is already in progress." : why);
+      }
+      return;
+    }
+    BOOST_LOG(info) << "[VIPLE-UPDATE] check requested from system tray";
+    if (!self_update::check_async(notify, on_state)) {
+      show_tray_balloon_owned("VipleStream update", "An update check is already in progress.");
+    }
+  }
+
   void tray_quit_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Quitting from system tray"sv;
 
@@ -193,6 +226,9 @@ namespace system_tray {
     {.text = "-"},
     {.text = "Donate", .submenu = donate_submenu},
     {.text = "-"},
+    // VipleStream §SELF-UPDATE — index 固定為 k_update_idx（放在 #ifdef 區塊之前，
+    // 各平台索引一致）。
+    {.text = "Check for updates...", .cb = tray_check_update_cb},
   // Currently display device settings are only supported on Windows
   #ifdef _WIN32
     {.text = "Reset Display Device Config", .cb = tray_reset_display_device_config_cb},
@@ -216,6 +252,28 @@ namespace system_tray {
     tray.notification_title = title;
     tray.notification_text = text;
     tray.notification_icon = TRAY_ICON;
+    tray.notification_cb = nullptr;
+    tray_update(&tray);
+  }
+
+  // VipleStream §SELF-UPDATE — 擁有字串的 balloon（背景執行緒可用；持 s_tray_mtx）
+  static void show_tray_balloon_owned(const std::string &title, const std::string &text) {
+    static std::string s_title, s_text;
+    std::lock_guard<std::mutex> lg(s_tray_mtx);
+    s_title = title;
+    s_text = text;
+    show_tray_balloon(s_title.c_str(), s_text.c_str());
+  }
+
+  static void set_update_menu_state(bool busy, const std::string &label) {
+    static std::string s_label;
+    std::lock_guard<std::mutex> lg(s_tray_mtx);
+    if (!tray_initialized) return;
+    s_label = label;
+    tray_menu_items[k_update_idx].disabled = busy ? 1 : 0;
+    tray_menu_items[k_update_idx].text = s_label.c_str();
+    tray.notification_title = nullptr;
+    tray.notification_text = nullptr;
     tray.notification_cb = nullptr;
     tray_update(&tray);
   }
@@ -352,6 +410,19 @@ namespace system_tray {
 
     BOOST_LOG(info) << "System tray created"sv;
     tray_initialized = true;
+
+    // VipleStream §SELF-UPDATE — 上次更新腳本留下的結果檔：跳一次「已更新」通知
+    if (auto updated = self_update::take_last_result()) {
+      if (updated->rfind("FAILED", 0) == 0) {
+        BOOST_LOG(warning) << "[VIPLE-UPDATE] last self-update failed: " << *updated;
+        show_tray_balloon_owned("VipleStream update failed", *updated + " (see config/self_update.log)");
+      }
+      else {
+        BOOST_LOG(info) << "[VIPLE-UPDATE] self-update completed: now running " << PROJECT_VERSION
+                        << " (updater reported " << *updated << ")";
+        show_tray_balloon_owned("VipleStream updated", "Now running version " + std::string(PROJECT_VERSION) + ".");
+      }
+    }
     return 0;
   }
 
@@ -377,6 +448,7 @@ namespace system_tray {
     if (!tray_initialized) {
       return;
     }
+    std::lock_guard<std::mutex> tray_lock(s_tray_mtx);
 
     // VipleStream §N — stream 開始時啟用檔案傳輸 menu items
     tray_menu_items[k_xfer_send_idx].disabled = 0;
@@ -402,6 +474,7 @@ namespace system_tray {
     if (!tray_initialized) {
       return;
     }
+    std::lock_guard<std::mutex> tray_lock(s_tray_mtx);
 
     tray.notification_title = nullptr;
     tray.notification_text = nullptr;
@@ -423,6 +496,7 @@ namespace system_tray {
     if (!tray_initialized) {
       return;
     }
+    std::lock_guard<std::mutex> tray_lock(s_tray_mtx);
 
     // VipleStream §N — stream 結束時 disable 檔案傳輸 menu items + 中止 in-flight
     tray_menu_items[k_xfer_send_idx].disabled = 1;
@@ -449,6 +523,7 @@ namespace system_tray {
     if (!tray_initialized) {
       return;
     }
+    std::lock_guard<std::mutex> tray_lock(s_tray_mtx);
 
     tray.notification_title = nullptr;
     tray.notification_text = nullptr;

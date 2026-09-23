@@ -263,6 +263,8 @@ namespace logging {
       << "    --help                    | print help"sv << std::endl
       << "    --creds username password | set user credentials for the Web manager"sv << std::endl
       << "    --version                 | print the version of sunshine"sv << std::endl
+      << "    --check-update            | query the latest GitHub release (exit 2 = update available)"sv << std::endl
+      << "    --self-update [--force] [package] | download and install the latest release (or a local zip/deb)"sv << std::endl
       << std::endl
       << "    flags"sv << std::endl
       << "        -0 | Read PIN from stdin"sv << std::endl

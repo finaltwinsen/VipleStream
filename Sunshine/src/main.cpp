@@ -24,6 +24,7 @@
 #include "nvhttp.h"
 #include "process.h"
 #include "system_tray.h"
+#include "self_update.h"
 #include "relay.h"
 #include "stun.h"
 #include "upnp.h"
@@ -57,6 +58,13 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
    }},
   {"version"sv, [](const char *name, int argc, char **argv) {
      return args::version();
+   }},
+  // VipleStream §SELF-UPDATE — CLI：--check-update / --self-update [--force] [package]
+  {"check-update"sv, [](const char *name, int argc, char **argv) {
+     return self_update::cli_check_update(argc, argv);
+   }},
+  {"self-update"sv, [](const char *name, int argc, char **argv) {
+     return self_update::cli_self_update(argc, argv);
    }},
 #ifdef _WIN32
   {"restore-nvprefs-undo"sv, [](const char *name, int argc, char **argv) {
@@ -322,6 +330,7 @@ int main(int argc, char *argv[]) {
 
     // Break out of the main loop
     shutdown_event->raise(true);
+    self_update::shutdown();  // §SELF-UPDATE：取消 curl、join 背景執行緒
     system_tray::end_tray();
 
     display_device_deinit_guard = nullptr;
@@ -339,6 +348,7 @@ int main(int argc, char *argv[]) {
 
     // Break out of the main loop
     shutdown_event->raise(true);
+    self_update::shutdown();  // §SELF-UPDATE：取消 curl、join 背景執行緒
     system_tray::end_tray();
 
     display_device_deinit_guard = nullptr;

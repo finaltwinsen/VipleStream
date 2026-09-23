@@ -190,7 +190,12 @@ namespace http {
       return false;
     }
 
+#ifdef _WIN32
+    // VipleStream：路徑可能含非 ASCII（使用者名稱），走寬字元開檔
+    FILE *fp = _wfopen(std::filesystem::path(file).c_str(), L"wb");
+#else
     FILE *fp = fopen(file.c_str(), "wb");
+#endif
     if (!fp) {
       BOOST_LOG(error) << "Couldn't open ["sv << file << ']';
       curl_easy_cleanup(curl);
@@ -198,6 +203,11 @@ namespace http {
     }
 
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, ssl_version);  // NOSONAR
+#ifdef _WIN32
+    // VipleStream §SELF-UPDATE 順手修：MSYS2 curl（OpenSSL 後端）部署後沒有 CA bundle，
+    // 封面下載一律 curl 77；改用 Windows 憑證存放區。
+    curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, (long) CURLSSLOPT_NATIVE_CA);
+#endif
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);

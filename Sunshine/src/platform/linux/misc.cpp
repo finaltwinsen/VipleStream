@@ -9,6 +9,7 @@
 #endif
 
 // standard includes
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -470,6 +471,16 @@ namespace platf {
       return;
     }
     executable[len] = '\0';
+
+    // VipleStream §SELF-UPDATE：dpkg 換掉執行檔後 /proc/self/exe 會變成
+    // ".../viplestream-server (deleted)"，execv 必 ENOENT。去掉尾綴（新檔已在同路徑）。
+    {
+      static const char kDeleted[] = " (deleted)";
+      const size_t dl = sizeof(kDeleted) - 1;
+      if ((size_t) len > dl && std::strcmp(executable + len - dl, kDeleted) == 0) {
+        executable[len - dl] = '\0';
+      }
+    }
 
     // ASIO doesn't use O_CLOEXEC, so we have to close all fds ourselves
     int openmax = (int) sysconf(_SC_OPEN_MAX);

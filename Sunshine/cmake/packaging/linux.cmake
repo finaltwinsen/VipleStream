@@ -163,8 +163,12 @@ if(${SUNSHINE_TRAY} STREQUAL 1)
 
     set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
                     ${CPACK_DEBIAN_PACKAGE_DEPENDS}, \
-                    libayatana-appindicator3-1, \
+                    libayatana-appindicator3-1 | libappindicator3-1, \
                     libnotify4")
+    # VipleStream §SELF-UPDATE（2026-09-22）：Ubuntu 26.04 上 libayatana-appindicator3-1 與舊的
+    # libappindicator3-1 互相 Conflicts；shlibdeps 又會依實際連結的那一個再加一條，兩者同時
+    # 硬列會讓 apt 判定套件不可安裝（linux-builder 實測「未能滿足相依關係」）。改成擇一，
+    # 實際需要哪個由 shlibdeps 決定。
     set(CPACK_RPM_PACKAGE_REQUIRES "\
                     ${CPACK_RPM_PACKAGE_REQUIRES}, \
                     libappindicator-gtk3 >= 12.10.0")
