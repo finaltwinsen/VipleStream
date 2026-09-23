@@ -9,6 +9,7 @@
 
 | 優先級 | 條目 | 待做事項 |
 |---|---|---|
+| **Active (M0 進行中)** | **§VR** 3.0 Steam Frame（桌面模式 + PCVR） | 設計定稿見 `docs/vr_architecture.md`、`docs/vr_protocol.md`（2026-09-23）。分期：M0 前置修正 → M1a 協定骨架 → M2a α 建置（arm64 Flatpak）→ M1b server VR 本體（SteamVR driver）→ M3a β OpenXR 虛擬螢幕 → M4a rc PCVR → M5a GA；實機關卡 G-α / G-β / G-rc / GA 等 Frame 到貨。**M0 範圍**：F1 Android common-c 對齊（含 `isBefore16` 凍結 bug）、F2 control buffer runtime 檢查、F3 QUIC recv handler 提早註冊、F4 server 控制訊息 channel/flags、F6 Linux renderer 決策、F7 `VIPLE_SMOOTH_PACING` 改 config、F9 updater 依架構選 asset、F10 `version.ps1 set`、F11 `build_all.cmd` 改呼叫單支腳本、F17 過期文件；F5/F13 併入 M1a（依賴 VR 旗標）、G-BUILD 併入 M2a 開頭。見下方「§VR 補充」 |
 | **Active (已實作，待 release 後實測)** | **§SELF-UPDATE** host 自我更新（tray 兩段式 + CLI） | 2026-09-22 實作：HEAD-302 查版、GitHub asset digest 必驗、Windows 腳本兩段式 rename 回滾／Linux apt 路徑；Windows standalone 與 Linux CLI 皆已端到端驗證。**待做**：(1) 下一次 release 後在 .226 與 linux-builder 用 tray 走真實「Install update vX」；(2) release 流程產生 SHA256SUMS 並簽章（目前信任 GitHub asset digest + TLS）；(3) Windows 可對 exe 做 Authenticode 驗證；(4) Linux 附 polkit .policy 讓 pkexec 提示可讀、避免 root 執行使用者目錄腳本；(5) `--self-update --force` 在 Linux 對「已安裝同版且 Depends 壞掉」的舊機需先 `dpkg -i` 脫困（v1.5.275 release 的 .deb Depends 同列兩種 appindicator）。 |
 | **Active (儀器已上線，待實測歸因)** | **§INPUT-STALL** 鍵鼠斷續（畫面正常、短暫失控後恢復） | 2026-09-21 兩端全管線儀器化後，合成鍵鼠測試四個量測點皆 0；但使用者真實 session（09-21 19:26 場）client 主迴圈 26 次停頓、每次固定 ≈2016 ms、phase 全為 `SDL_WaitEventTimeout`（卡在 SDL 內部，log 前後無觸發事件），host 四種標記皆 0。v1.5.275 起停頓 ≥300 ms 會抄主執行緒堆疊（dbghelp，SDL3.dll 只解到匯出符號）→ 下次發生對照 `[VIPLE-INPUT-STALL] main thread stack` 定位是 hidapi 列舉／DirectInput／WGI／訊息泵。外部嫌疑：client `AsusIMEService.exe` 崩潰迴圈（LL keyboard hook）、host Steam 被 SC-HID feature 風暴卡 10.7 s／輪。候選修法：client SC 無活動裝置時對 feature request 立即回「無裝置」讓 driver 解除 400 ms 閘控、server N 次未回應後停止轉發；§K.14 開機 IDR 重試改用 per-encoder 計數（reinit 後目前永不再觸發）。 |
 | **Active (已修，待實測)** | **§P1-PACE** 幀節拍解除 V-Sync 綁定 | 2026-08-27 依 12 份 client log 定位：上游把 frame pacing 綁死在 V-Sync 上（`session.cpp` 的 `enableVsync && framePacing`），使用者為求低延遲關掉 V-Sync 就連帶失去唯一能吸收網路到達抖動的機制。log 實證「Frame pacing disabled: target 60 Hz with 60 FPS stream」——1:1 最適合節拍的情境卻沒開。代價：LAN 1080p60 有 **25-75%** 的 5 秒視窗 p99 幀間隔 > 33ms；限縮到「server 全速交付」的 1238 個視窗仍有 **42.8%**（所以不是靜態畫面省流）。**同 codebase 直接對照**：本機 Twinsen-MSI-NB（179Hz/180fps，log 印 `V-sync enabled` + `Frame pacing: target 180 Hz`）節拍**開** → stutter **0%**；另一台桌機（60Hz/60fps，`V-sync disabled` + `Frame pacing disabled`）節拍**關** → stutter 25-75%。變因就是節拍有沒有開。**已改：** 節拍與 V-Sync 解耦（Pacer 用 `D3DKMTWaitForVerticalBlankEvent` 等真實 vblank，與 swapchain present 模式無關），串流快過螢幕時仍維持關閉；QML 移除 `enabled: enableVsync` 閘。**待做：** LAN 1080p60 跑 ≥15 分鐘，用 `scripts\benchmark\analyze_client_log.ps1` 比對 stutter%（目標 <5%）+ 主觀目視 + 確認延遲無感惡化。baseline 在 `scripts\benchmark\results\baseline_2026-08-27\` |
@@ -31,7 +32,7 @@
 | **Active (long-running)** | **§J.3.e.2.i.8 Phase 2.5** FRUC native source | 殘留小 race 等 J.5 整體切換時補完，不擋使用 |
 | **Active (β.10)** | **§J.3.e.X Path β.10** Linux/AMD/Intel 覆蓋 | §β.12.fix v1.4.193 PASS；剩：視覺品質主觀確認（tiled Conv vs coopmat）+ Intel iGPU 驗測 |
 | **Deferred (driver-bound)** | **§K.4** Wayland portal teardown | `Restart=always` 緩解已 ship；需可重現串流環境（有 GPU 的 Linux 機）才能根治。**§K.4-DESKTOP-ID（2026-07-22 已部署驗證 ✓）**：查證 qtbase/qtwayland 全樹——Qt 從不讀 `QT_DESKTOP_FILE_NAME` env，舊 hygiene fix 是 no-op（desktopFileName 一直為空，`_GTK_APPLICATION_ID` 落到 organizationDomain fallback `com.moonlight-stream.viplestream`，實機 xprop 證實）。已改為 QGuiApplication 建構前 `setDesktopFileName("viplestream")` + Linux desktop id 整組改 `viplestream`（.desktop/.appdata 改名、app.pro 圖示以 viplestream.svg 名稱安裝、SDL WMCLASS 對齊）。AMD 機重建部署後 runtime 驗證：`_GTK_APPLICATION_ID=viplestream` ✓、startup portal register 錯誤 0 筆（spam 根治）✓；箱上另一毒源 stale `icon-theme.cache`（192B）已清。剩：使用者目視 dock/app-grid 圖示；server-side PipeWire portal teardown 是不同層問題，仍 deferred |
-| **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | 待 §K.1 通過後再開工；FRUC 全 disable |
+| **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | 併入 §VR M2a：aarch64 建置阻斷（nvvideoparser SIMD 旗標、ncnn、picotls-fusion、PICOQUIC_BUILD）與 arm64 builder（qemu 或原生 ARM 機，由 G-BUILD 量測決定）和 Steam Frame client 共用；FRUC 全 disable |
 | **Low** | **§J.3.e.Y 4Y.5b** native RIFE activation | 256×256 chain +1.7ms 負收益，revert；重做要先解 §β.5.3 D 全套 |
 | **Low** | **§H.4-perf** VkFrucRenderer AMD draw-time | m_FrucMode=false ~13ms 偏高；需使用者提供 GPU-PROF log 才能精準改 |
 | **Low** | **§A.2 / §A.8** WiX installer / 內部命名 | 沒用 MSI 出貨，優先級極低 |
@@ -42,6 +43,17 @@
 ---
 
 ## 各章節待辦補充
+
+### §VR 補充（3.0 Steam Frame）
+
+- **使用者決策（2026-09-23）**：Frame 實機待出貨，先做不依賴實機的工作；自建完整 PCVR 串流（Windows 自寫 SteamVR driver）；PCVR server 只做 Windows（Linux server 編成 stub）；頭顯只做 Steam Frame（Android 不做 OpenXR，但 common-c 要對齊）。
+- **待決事項**（到對應階段再拍板，不擋 M0）：
+  - U6 Flatpak app-id：M2a 第一個建置前必須定（之後改會讓 `~/.var/app/<id>` 的設定和 log 斷掉），預設提案 `io.github.finaltwinsen.VipleStream`。
+  - U7 原生 ARM builder 採購：看 G-BUILD（qemu 增量建置 > 45 分鐘就採購）。
+  - T9 Windows 的 `VIPLE_MPQUIC` 預設值（F18）。
+  - F19 CoworkMCP 任務圖修正（另一個 repo，動手前確認）。
+  - 控制器預設 Touch 或 Index；`vrDegradedPolicy` 預設值（G-rc A/B）；Frame 帳號是 steamos 還是 steamvr（PoC-1）。
+- **實機到貨後**：Day 0 唯讀探測 + Flathub 上游 Moonlight（PoC-0/1/6/7）；Day 1 `xr-probe` / `v4l2-probe` / `decode-bench`（PoC-2/2b/3/3b/4/9/F）；Day 2 vrlink 共存與眼動（PoC-5b/8）。
 
 ### §B-NVOF autotier 判斷標準
 
