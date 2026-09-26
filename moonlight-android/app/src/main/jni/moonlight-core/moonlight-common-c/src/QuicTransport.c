@@ -288,6 +288,9 @@ typedef struct _QUIC_TRANSPORT_CTX {
     // ICMP + quicAddSubflowEx（已 thread-safe via picoquicMutex）。
     PLT_THREAD recoveryThread;
     bool recoveryRunning;
+    // §M01-E：復原執行緒已建立、尚未 join。recoveryRunning 只代表「請繼續跑」，
+    // §K.13 bail 會把它設成 false 卻不 join，所以是否需要 join 要另外記。
+    bool recoveryThreadStarted;
 
     // §5a.r3 v1.5.198 Fix Q：代表性 active-path RTT（微秒），供 jitter
     // buffer 做 RTT 自適應 reorder timeout。在 quicUpdatePathStats 更新
@@ -712,6 +715,9 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
                 "(non-fatal, path recovery disabled)\n");
         g_ctx.recoveryRunning = false;
     }
+    else {
+        g_ctx.recoveryThreadStarted = true;
+    }
 
     Limelog("[VIPLE-MPQUIC] Connection initiated to port %u\n", params->quicPort);
     return 0;
@@ -720,9 +726,16 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
 void quicDisconnect(void) {
     // §Q.path-recovery: 先停復原執行緒（它可能正在 quicAddSubflowEx
     // 裡持有 mutex，需要 cnx 存活），再停 IO thread。
-    if (g_ctx.recoveryRunning) {
-        g_ctx.recoveryRunning = false;
+    //
+    // §M01-E：是否要 join 看 recoveryThreadStarted，不看 recoveryRunning。
+    // QUIC 閒置逾時或 path 全滅時，§K.13 IO loop bail 會先把 recoveryRunning
+    // 設成 false（叫執行緒停下），舊寫法因此跳過 join：執行緒從沒被 join，
+    // debug 建置在 cleanupPlatform 的 activeThreads==0 assert 中止（2026-09-23
+    // Pixel 5 兩次 SIGABRT），release 建置則洩漏執行緒。
+    g_ctx.recoveryRunning = false;
+    if (g_ctx.recoveryThreadStarted) {
         PltJoinThread(&g_ctx.recoveryThread);
+        g_ctx.recoveryThreadStarted = false;
         Limelog("[VIPLE-MPQUIC] §Q.path-recovery: thread joined\n");
     }
 
