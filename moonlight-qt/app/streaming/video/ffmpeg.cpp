@@ -8,10 +8,27 @@
 #include "backend/nvcomputer.h"
 
 #ifdef VIPLE_MPQUIC
+// common-c 的 PlatformSockets.h（經 QuicTransport.h／PlatformNetIf.h 帶入）在 Windows 會把
+// EAGAIN、EINTR、EWOULDBLOCK 等 errno 巨集改成 WSA 的值。這個檔案後面拿 AVERROR(EAGAIN)
+// 比對 FFmpeg 的回傳值（-11），被改成 -WSAEWOULDBLOCK 之後「暫時沒有輸出」就會落進
+// avcodec_receive_frame 的錯誤分支：每次都要 IDR、累計 20 次還會重置 decoder（M1a 注入
+// 吞幀時實測觸發；MPQUIC 自 1.5.276 起是 Windows 預設建置）。include 完就還原成 CRT 的定義。
+#pragma push_macro("EAGAIN")
+#pragma push_macro("EINTR")
+#pragma push_macro("EWOULDBLOCK")
+#pragma push_macro("EINPROGRESS")
+#pragma push_macro("ETIMEDOUT")
+#pragma push_macro("ECONNREFUSED")
 extern "C" {
 #include <QuicTransport.h>
 #include <PlatformNetIf.h>
 }
+#pragma pop_macro("ECONNREFUSED")
+#pragma pop_macro("ETIMEDOUT")
+#pragma pop_macro("EINPROGRESS")
+#pragma pop_macro("EWOULDBLOCK")
+#pragma pop_macro("EINTR")
+#pragma pop_macro("EAGAIN")
 #endif
 
 #include <h264_stream.h>
@@ -76,6 +93,12 @@ std::atomic<double> g_VkFrucChainMs{0.0};
 
 // This is gross but it allows us to use sizeof()
 #include "ffmpeg_videosamples.cpp"
+
+#if defined(_WIN32) && defined(WSAEWOULDBLOCK)
+// 防回歸：這個檔案的 AVERROR(EAGAIN) 必須是 CRT 的 errno，不能是 common-c
+// PlatformSockets.h 的 WSA 版（見檔頭 VIPLE_MPQUIC include 的 push/pop_macro）
+static_assert(EAGAIN != WSAEWOULDBLOCK, "EAGAIN must keep its CRT value in ffmpeg.cpp");
+#endif
 
 #define MAX_DECODER_PASS 2
 
