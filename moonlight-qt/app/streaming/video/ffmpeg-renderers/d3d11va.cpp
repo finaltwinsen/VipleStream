@@ -1102,8 +1102,10 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
     // tripped. Removing the gate future-proofs and makes the intent
     // explicit: if the user enabled FRUC, initialize FRUC regardless of
     // rate.
+    // §VR：VR session 不做 FRUC（幀與 0x81 pose 一一對應，補幀會破壞配對）
     if (!m_FRUC && !m_GenericFRUC && !m_FRUCInitFailed
-        && StreamingPreferences::get(nullptr)->enableFrameInterpolation) {
+        && StreamingPreferences::get(nullptr)->enableFrameInterpolation
+        && !(LiGetVrFlags() & VIPLE_VR_SF_ENABLED)) {
         // v1.3.40: 1080p hard floor 移除（使用者明確要求）。
         // 過去把 streamW>=1920 && streamH>=1080 當成「FRUC 至少 1080p」
         // 的 minimum intent gate，但實務上：

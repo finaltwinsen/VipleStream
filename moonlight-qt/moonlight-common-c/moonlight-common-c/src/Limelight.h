@@ -7,6 +7,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// VipleStream 2.0：VR 協定定義（ptype、0x81 header、tracking 結構、TLV）
+#include "VipleVr.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -104,6 +107,11 @@ typedef struct _STREAM_CONFIGURATION {
     // VipleStream §ABR: enable server-side adaptive bitrate (AIMD).
     // 1 = enabled (default), 0 = fixed bitrate.
     int autoAdjustBitrate;
+
+    // VipleStream 2.0 §VR：VIPLE_VR_SF_* 旗標。只有 client 在 /launch 帶了
+    // vr=1、而且 server 回應了 <VipleStreamVRSession> 時才可以設（不變式 1）；
+    // 0 代表一般 session，common-c 的行為與桌面完全相同。
+    int vrFlags;
 
 #ifdef VIPLE_MPQUIC
     // VipleStream: MP-QUIC multipath transport.
@@ -214,6 +222,11 @@ typedef struct _DECODE_UNIT {
     // Note: This is not currently parsed from the actual bitstream, so if your
     // client has access to a bitstream parser, prefer that over this field.
     uint8_t colorspace;
+
+    // VipleStream 2.0 §VR：這一幀 0x81 VR header 的內容。一般 session 的
+    // vrMeta.present 永遠是 0。decoder 可能丟幀，所以 client 不能用 FIFO
+    // 對應 DU 與解出來的幀，要以 frameNumber 為 key 查表（docs/vr_architecture.md §2.3）。
+    VIPLE_VR_FRAME_META vrMeta;
 } DECODE_UNIT, *PDECODE_UNIT;
 
 // Specifies that the audio stream should be encoded in stereo (default)
@@ -522,6 +535,12 @@ typedef void(*ConnListenerSetControllerLED)(uint16_t controllerNumber, uint8_t r
 typedef void(*ConnListenerScHidFeatureRequest)(uint8_t reportId, uint8_t op, uint8_t seq,
                                                const uint8_t* query, uint8_t queryLen);
 
+// VipleStream 2.0 §VR：server 送來的 0x5508 VR_S2C（TLV 串，長度 1–251 B）。
+// 只在 VR session 呼叫，執行緒是 common-c 的 async callback 執行緒；buffer 在
+// 回呼返回後失效，要保留就自己複製。REFRESH_START 已由 common-c 先行處理
+// （恢復狀態機），這裡仍會收到，供 client 統計。
+typedef void(*ConnListenerVrMessage)(const uint8_t* tlv, int length);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -537,6 +556,7 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerSetControllerLED setControllerLED;
     ConnListenerSetAdaptiveTriggers setAdaptiveTriggers;
     ConnListenerScHidFeatureRequest scHidFeatureRequest;  // §SC-HID feature tunnel
+    ConnListenerVrMessage vrMessage;  // §VR：只能加在尾端（Qt 以位置初始化這個 struct）
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -1065,6 +1085,27 @@ void LiRequestIdrFrame(void);
 // VipleStream: Request the server to change its encoding framerate mid-stream.
 // Used when toggling FRUC on/off via hotkey to switch between halved and full FPS.
 void LiRequestFpsChange(int newFps);
+
+// ── VipleStream 2.0 §VR（docs/vr_protocol.md §4）──────────────────
+// 以下 API 只在 VR session（StreamConfig.vrFlags 含 VIPLE_VR_SF_ENABLED）有效，
+// 一般 session 呼叫一律回傳 -1、不送任何東西。
+
+// 回傳這次連線生效的 VIPLE_VR_SF_* 旗標（非 VR session 為 0）。
+int LiGetVrFlags(void);
+
+// 送一筆 0x5506 tracking 樣本：ENet VR channel、UNSEQUENCED，ENet 不通時
+// 自動改走 QUIC datagram。回傳 0 表示已送出；負值表示這筆樣本被丟棄
+// （呼叫端只要繼續送下一筆，不可據此終止連線）。可從任何執行緒呼叫。
+int LiSendVrTracking(const VIPLE_VR_TRACKING* sample);
+
+// 送一則 0x5507 VR_C2S（TLV 串，1–251 B）。reliable=true 走一般控制 channel
+// 的可靠傳輸；false 走 VR channel UNSEQUENCED。回傳 0 表示已送出。
+int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable);
+
+// decoder 端回報掉幀（例如解碼錯誤）。recovery=intra 時送 LOSS 並進入恢復
+// 狀態機（逾時會重送，最後退回 IDR）；recovery=idr 時等同 LiRequestIdrFrame()。
+// reason 是 VIPLE_VR_LOSS_*。
+void LiReportVrLoss(uint32_t firstLost, uint32_t lastLost, uint8_t reason);
 
 // This function returns any extended feature flags supported by the host.
 #define LI_FF_PEN_TOUCH_EVENTS        0x01 // LiSendTouchEvent()/LiSendPenEvent() supported

@@ -57,6 +57,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/macos/publish.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/TPCircularBuffer/TPCircularBuffer.c"
         "${CMAKE_SOURCE_DIR}/third-party/TPCircularBuffer/TPCircularBuffer.h"
+        # VipleStream 2.0 §VR：非 Windows 一律用 stub（恆回報不支援）
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/vr_stub.cpp"
         ${APPLE_PLIST_FILE})
 
 if(SUNSHINE_ENABLE_TRAY)

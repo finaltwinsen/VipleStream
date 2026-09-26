@@ -6,7 +6,9 @@
 #include "nvenc_base.h"
 
 // standard includes
+#include <algorithm>
 #include <format>
+#include <string>
 
 // local includes
 #include "src/config.h"
@@ -123,6 +125,7 @@ namespace nvenc {
     encoder_params.height = client_config.height;
     encoder_params.buffer_format = buffer_format;
     encoder_params.rfi = true;
+    encoder_params.video_format = client_config.videoFormat;
 
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS session_params = {min_struct_version(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER)};
     session_params.device = device;
@@ -321,6 +324,50 @@ namespace nvenc {
       vui_config.bitstreamRestrictionFlag = 1;
     };
 
+    // VipleStream 2.0 §VR（F16）：VR profile 一律開 intra refresh（不依賴 client 的 SDP），
+    // H.264／HEVC／AV1 都接上。intraRefreshCnt = LOSS 觸發的 wave 長度（encode_frame 的
+    // forceIntraRefreshWithFrameCnt 用同一個 N）；intraRefreshPeriod = 週期性安全網。
+    // 一般 session 不經過這裡，既有的 HEVC SDP intra refresh 路徑完全不變。
+    auto configure_vr_intra_refresh = [&](auto &format_config, const char *codec_name) {
+      if (!get_encoder_cap(NV_ENC_CAPS_SUPPORT_INTRA_REFRESH)) {
+        BOOST_LOG(warning) << "[VIPLE-VR-ENC] intra refresh unsupported: codec=" << codec_name
+                           << " -- LOSS recovery falls back to IDR";
+        return;
+      }
+
+      // SDK header 只規定 cnt 要小於 period，沒有定義 period=0 的語意（可能被
+      // NvEncInitializeEncoder 以 INVALID_PARAM 拒絕，連帶整個 VR session 起不來），
+      // 所以「關閉週期性安全網」改用一個實際上不會到的間隔（2^20 幀，90 Hz 約 3.2 小時）。
+      constexpr uint32_t kPeriodOff = 1u << 20;
+      const uint32_t cnt = (uint32_t) std::clamp(client_config.vrIntraRefreshFrames > 0 ? client_config.vrIntraRefreshFrames : 8, 2, 60);
+      const bool periodic = client_config.vrIntraRefreshPeriodFrames > 0;
+      uint32_t period = periodic ? (uint32_t) client_config.vrIntraRefreshPeriodFrames : kPeriodOff;
+      if (period <= cnt) {
+        BOOST_LOG(warning) << "[VIPLE-VR-ENC] intra refresh period " << period << " <= cnt " << cnt
+                           << " (NVENC requires period > cnt), adjusted to " << cnt + 1;
+        period = cnt + 1;
+      }
+
+      format_config.enableIntraRefresh = 1;
+      format_config.intraRefreshCnt = cnt;
+      format_config.intraRefreshPeriod = period;
+
+      // AV1 的 config 沒有 singleSliceIntraRefresh
+      bool single_slice = false;
+      if constexpr (requires { format_config.singleSliceIntraRefresh; }) {
+        if (get_encoder_cap(NV_ENC_CAPS_SINGLE_SLICE_INTRA_REFRESH)) {
+          format_config.singleSliceIntraRefresh = 1;
+          single_slice = true;
+        }
+      }
+
+      encoder_params.vr_intra_refresh = true;
+      BOOST_LOG(info) << "[VIPLE-VR-ENC] intra refresh: codec=" << codec_name
+                      << " cnt=" << cnt
+                      << " period=" << (periodic ? std::to_string(period) : std::string("off"))
+                      << " singleSlice=" << (single_slice ? 1 : 0);
+    };
+
     switch (client_config.videoFormat) {
       case 0:
         {
@@ -336,6 +383,9 @@ namespace nvenc {
           set_ref_frames(format_config.maxNumRefFrames, format_config.numRefL0, 5);
           set_minqp_if_enabled(config.min_qp_h264);
           fill_h264_hevc_vui(format_config.h264VUIParameters);
+          if (client_config.vrProfile) {
+            configure_vr_intra_refresh(format_config, "h264");
+          }
           break;
         }
 
@@ -354,7 +404,10 @@ namespace nvenc {
           set_ref_frames(format_config.maxNumRefFramesInDPB, format_config.numRefL0, 5);
           set_minqp_if_enabled(config.min_qp_hevc);
           fill_h264_hevc_vui(format_config.hevcVUIParameters);
-          if (client_config.enableIntraRefresh == 1) {
+          if (client_config.vrProfile) {
+            // §VR：VR profile 的 intra refresh 取代下面 SDP 的固定 300/299 設定
+            configure_vr_intra_refresh(format_config, "hevc");
+          } else if (client_config.enableIntraRefresh == 1) {
             if (get_encoder_cap(NV_ENC_CAPS_SUPPORT_INTRA_REFRESH)) {
               format_config.enableIntraRefresh = 1;
               format_config.intraRefreshPeriod = 300;
@@ -397,6 +450,9 @@ namespace nvenc {
           format_config.chromaSamplePosition = buffer_is_yuv444() ? 0 : 1;
           set_ref_frames(format_config.maxNumRefFramesInDPB, format_config.numFwdRefs, 8);
           set_minqp_if_enabled(config.min_qp_av1);
+          if (client_config.vrProfile) {
+            configure_vr_intra_refresh(format_config, "av1");
+          }
 
           if (client_config.slicesPerFrame > 1) {
             // NVENC only supports slice counts that are powers of two, so we'll pick powers of two
@@ -521,7 +577,7 @@ namespace nvenc {
     encoder_params = {};
   }
 
-  nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr) {
+  nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr, uint32_t force_intra_refresh_frames) {
     if (!encoder) {
       return {};
     }
@@ -563,6 +619,24 @@ namespace nvenc {
     pic_params.bufferFmt = mapped_input_buffer.mappedBufferFmt;
     pic_params.outputBitstream = output_bitstream;
     pic_params.completionEvent = async_event_handle;
+
+    // VipleStream 2.0 §VR：這一幀開始一波 intra refresh。IDR 本身就是完整的恢復點，同一幀
+    // 兩者都要求時只送 IDR。codecPicParams 已由上面的 aggregate 初始化清零。
+    if (force_intra_refresh_frames > 0 && !force_idr && encoder_params.vr_intra_refresh) {
+      switch (encoder_params.video_format) {
+        case 0:
+          pic_params.codecPicParams.h264PicParams.forceIntraRefreshWithFrameCnt = force_intra_refresh_frames;
+          break;
+        case 1:
+          pic_params.codecPicParams.hevcPicParams.forceIntraRefreshWithFrameCnt = force_intra_refresh_frames;
+          break;
+        case 2:
+          pic_params.codecPicParams.av1PicParams.forceIntraRefreshWithFrameCnt = force_intra_refresh_frames;
+          break;
+        default:
+          break;
+      }
+    }
 
     if (nvenc_failed(nvenc->nvEncEncodePicture(encoder, &pic_params))) {
       BOOST_LOG(error) << "NvEnc: NvEncEncodePicture() failed: " << last_nvenc_error_string;

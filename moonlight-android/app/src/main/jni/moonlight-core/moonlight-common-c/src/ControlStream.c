@@ -95,6 +95,10 @@ typedef struct _QUEUED_ASYNC_CALLBACK {
             uint8_t queryLen;
             uint8_t query[64];
         } scHidFeatureRequest;  // §SC-HID feature tunnel
+        struct {
+            uint8_t len;
+            uint8_t buf[VIPLE_VR_MAX_CTRL_PAYLOAD];
+        } vrS2C;  // §VR 0x5508：內嵌複製（佇列的每條釋放路徑都只 free 整個項目，不會洩漏）
     } data;
     LINKED_BLOCKING_QUEUE_ENTRY entry;
 } QUEUED_ASYNC_CALLBACK, *PQUEUED_ASYNC_CALLBACK;
@@ -212,6 +216,10 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_DS_ADAPTIVE_TRIGGERS 12
 #define IDX_FPS_CHANGE 13  // VipleStream: dynamic FPS change (client→server)
 #define IDX_SC_HID_FEATURE_REQ 14  // VipleStream §SC-HID: feature tunnel request (server→client)
+// §VR：0x5508 VR_S2C 的偽 typeIndex。VR ptype 不進 packetTypes 表（不變式 3），
+// 這個值只用在 QUEUED_ASYNC_CALLBACK.typeIndex，絕不可拿來索引 packetTypes[]、
+// payloadLengths[]、preconstructedPayloads[]。
+#define IDX_VIPLE_VR_S2C 0x100
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -383,6 +391,13 @@ static bool supportsIdrFrameRequest;
 #define LOSS_REPORT_INTERVAL_MS 50
 #define PERIODIC_PING_INTERVAL_MS 100
 
+// §VR 恢復狀態機（定義在 connectionDetectedFrameLoss 之前）
+static void vrRecoveryInit(void);
+static void vrRecoveryDestroy(void);
+static void vrSendThreadFunc(void* context);
+static void vrHandleS2CInline(const uint8_t* tlv, int length);
+static void configureVrThrottle(ENetPeer* p);
+
 // Initializes the control stream
 int initializeControlStream(void) {
     stopping = false;
@@ -391,6 +406,7 @@ int initializeControlStream(void) {
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
     LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 30);
     PltCreateMutex(&enetMutex);
+    vrRecoveryInit();
 
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
 
@@ -471,6 +487,7 @@ void destroyControlStream(void) {
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&frameFecStatusQueue));
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&asyncCallbackQueue));
 
+    vrRecoveryDestroy();
     PltDeleteMutex(&enetMutex);
 }
 
@@ -554,8 +571,521 @@ void LiRequestFpsChange(int newFps) {
     Limelog("FPS change request sent: %d fps\n", newFps);
 }
 
+// ── §VR 恢復狀態機（docs/vr_architecture.md §2.3「VR 恢復」）──────────────
+//
+// recovery=intra 時掉幀不等 IDR：depacketizer 照常把後續幀送進 decoder（畫面
+// 局部破圖、由 intra refresh 自癒），這裡送 0x5507/09 LOSS（VR channel
+// UNSEQUENCED，一次送 2 份）請 server 開一波 intra refresh。degraded 期間：
+//   • 收到 REFRESH_START 且 startFrame > lastLost → 等這一波帶 REFRESH_DONE
+//     的那一幀，收到就結束 degraded；
+//   • 2×RTT+20 ms 內沒收到 REFRESH_START → 重送 LOSS；
+//   • 重送 3 次仍沒回應，或等了 500 ms → 退回 IDR；
+//   • 任何晚於 lastLost 的 IDR 幀都結束 degraded。
+// 狀態會被 VideoRecv、控制接收、decoder（LiReportVrLoss）、lossStats 四條
+// 執行緒存取，一律持 vrRecMutex；送封包一律在鎖外做（不與 enetMutex 交錯）。
+
+#define VR_LOSS_RESEND_MAX        3
+#define VR_LOSS_RESEND_BASE_MS    20
+#define VR_UNANSWERED_IDR_MS      500
+#define VR_WAVE_TIMEOUT_MS        1000
+#define VR_IDR_RETRY_MS           1000
+#define VR_STATS_LOG_INTERVAL_MS  10000
+#define VR_SEND_TICK_MS           2     // VrSend 執行緒的輪詢間隔
+#define VR_LOSS_TWIN_DELAY_MS     5     // LOSS 第二份延後送（分開兩個 datagram，避開同一個 burst）
+#define VR_TRACKING_FAIL_BACKOFF  3
+#define VR_TRACKING_BACKOFF_MS    1000
+
+typedef enum {
+    VR_ACTION_NONE = 0,
+    VR_ACTION_RESEND_LOSS,
+    VR_ACTION_REQUEST_IDR,
+} VR_RECOVERY_ACTION;
+
+static PLT_MUTEX vrRecMutex;
+static bool vrSessionAtInit;  // initializeControlStream 當下是否為 VR session（final 統計用）
+static struct {
+    bool degraded;
+    bool refreshSeen;         // 已收到涵蓋 lastLost 的 REFRESH_START
+    bool idrRequested;        // 已退回 IDR，等 IDR 幀
+    uint32_t firstLost;
+    uint32_t lastLost;
+    uint32_t waveStart;
+    uint32_t waveEnd;
+    uint64_t degradedSinceMs;
+    uint64_t pendingSinceMs;  // 目前這個「還沒得到 REFRESH_START」的請求從何時開始
+    uint64_t lastLossSendMs;
+    uint64_t refreshSeenMs;
+    uint64_t idrRequestedMs;
+    int resendCount;
+    // 待 VrSend 執行緒送出的 LOSS（視訊與 decoder 執行緒只登記，不碰 enetMutex）
+    bool lossSendPending;
+    uint8_t lossSendReason;
+    bool twinPending;
+    uint64_t twinDueMs;
+    uint32_t twinFirst, twinLast;
+    uint8_t twinReason;
+    // 統計（10 秒區間與整場）
+    uint32_t lossEvents, lossSends, lossResends, refreshRx, refreshStale;
+    uint32_t recovered, idrFallbacks;
+    uint32_t rttSamples, rttMaxMs;
+    uint64_t rttSumMs;
+    uint32_t recoverSamples, recoverMaxMs;
+    uint64_t recoverSumMs;
+    uint32_t totalLossEvents, totalRecovered, totalIdrFallbacks, totalRefreshRx;
+    uint64_t lastStatsLogMs;
+} vrRec;
+// §VR：LOSS 送出與重送／退回 IDR 的計時由這條執行緒負責（只在 VR session 建立）。
+// §M01-C 規定視訊路徑不得碰 enetMutex（controlReceiveThread 的 disconnectPending
+// 分支可能持鎖 service 將近 1 秒），而送 LOSS 要加密＋enet_host_service。
+static PLT_THREAD vrSendThread;
+static bool vrSendThreadStarted;
+static volatile int vrTrackingConsecutiveFails;
+static volatile uint64_t vrTrackingBackoffUntilMs;
+static volatile uint32_t vrTrackingSent, vrTrackingDropped;
+#ifdef VIPLE_MPQUIC
+// §VR：QUIC keepalive（lossStats 執行緒每 100 ms 一輪，5 輪 = 500 ms 送一次）
+#define VR_QUIC_KEEPALIVE_TICKS 5
+static int vrQuicKeepaliveTicks;
+#endif
+
+static void vrRecoveryInit(void) {
+    PltCreateMutex(&vrRecMutex);
+    memset(&vrRec, 0, sizeof(vrRec));
+    vrSessionAtInit = (VrFlags & VIPLE_VR_SF_ENABLED) != 0;
+    vrSendThreadStarted = false;
+    vrTrackingConsecutiveFails = 0;
+    vrTrackingBackoffUntilMs = 0;
+    vrTrackingSent = 0;
+    vrTrackingDropped = 0;
+#ifdef VIPLE_MPQUIC
+    vrQuicKeepaliveTicks = 0;
+#endif
+}
+
+static void vrRecoveryDestroy(void) {
+    if (vrSessionAtInit) {
+        Limelog("[VIPLE-VR-LOSS] (final) lossEvents=%u recovered=%u idrFallbacks=%u refreshRx=%u "
+                "tracking sent=%u dropped=%u\n",
+                vrRec.totalLossEvents, vrRec.totalRecovered, vrRec.totalIdrFallbacks,
+                vrRec.totalRefreshRx, vrTrackingSent, vrTrackingDropped);
+    }
+    PltDeleteMutex(&vrRecMutex);
+}
+
+static bool vrIntraRecoveryActive(void) {
+    return (VrFlags & VIPLE_VR_SF_ENABLED) && (VrFlags & VIPLE_VR_SF_RECOVERY_INTRA);
+}
+
+static uint32_t vrGetEnetRttMs(void) {
+    uint32_t rtt = 0;
+    PltLockMutex(&enetMutex);
+    if (peer != NULL) {
+        rtt = peer->roundTripTime;
+    }
+    PltUnlockMutex(&enetMutex);
+    return rtt;
+}
+
+// 送一份 LOSS（只能在 VrSend 執行緒或退回路徑呼叫：會持 enetMutex）
+static void vrSendLossOnce(uint32_t firstLost, uint32_t lastLost, uint8_t reason) {
+    uint8_t tlv[2 + sizeof(VIPLE_VR_TLV_LOSS)];
+    VIPLE_VR_TLV_LOSS loss;
+
+    loss.firstLost = firstLost;
+    loss.lastLost = lastLost;
+    loss.reason = reason;
+    tlv[0] = VIPLE_VR_C2S_LOSS;
+    tlv[1] = (uint8_t)sizeof(loss);
+    memcpy(&tlv[2], &loss, sizeof(loss));
+
+    sendMessageAndForget(VIPLE_VR_PTYPE_C2S, (short)sizeof(tlv), tlv,
+                         VIPLE_VR_CTRL_CHANNEL, ENET_PACKET_FLAG_UNSEQUENCED, false);
+}
+
+// 持 vrRecMutex 呼叫：每 10 秒（有動靜時）印一次區間統計
+static void vrMaybeLogStatsLocked(uint64_t now) {
+    if (vrRec.lastStatsLogMs == 0) {
+        vrRec.lastStatsLogMs = now;
+        return;
+    }
+    if (now - vrRec.lastStatsLogMs < VR_STATS_LOG_INTERVAL_MS) {
+        return;
+    }
+    if (vrRec.lossEvents || vrRec.refreshRx || vrRec.idrFallbacks || vrRec.degraded) {
+        Limelog("[VIPLE-VR-LOSS] 10s: lossEvents=%u sends=%u resends=%u refreshRx=%u stale=%u "
+                "recovered=%u idrFallback=%u lossToRefresh avg=%ums max=%ums recover avg=%ums max=%ums%s\n",
+                vrRec.lossEvents, vrRec.lossSends, vrRec.lossResends, vrRec.refreshRx, vrRec.refreshStale,
+                vrRec.recovered, vrRec.idrFallbacks,
+                vrRec.rttSamples ? (unsigned)(vrRec.rttSumMs / vrRec.rttSamples) : 0, vrRec.rttMaxMs,
+                vrRec.recoverSamples ? (unsigned)(vrRec.recoverSumMs / vrRec.recoverSamples) : 0, vrRec.recoverMaxMs,
+                vrRec.degraded ? " (still degraded)" : "");
+    }
+    vrRec.lossEvents = vrRec.lossSends = vrRec.lossResends = vrRec.refreshRx = vrRec.refreshStale = 0;
+    vrRec.recovered = vrRec.idrFallbacks = 0;
+    vrRec.rttSamples = vrRec.rttMaxMs = 0;
+    vrRec.rttSumMs = 0;
+    vrRec.recoverSamples = vrRec.recoverMaxMs = 0;
+    vrRec.recoverSumMs = 0;
+    vrRec.lastStatsLogMs = now;
+}
+
+// 持 vrRecMutex 呼叫：決定逾時動作（實際送出由呼叫端在鎖外做）
+static VR_RECOVERY_ACTION vrEvaluateTimersLocked(uint64_t now, uint32_t rttMs,
+                                                 uint32_t* firstLost, uint32_t* lastLost) {
+    if (!vrRec.degraded) {
+        return VR_ACTION_NONE;
+    }
+
+    if (vrRec.idrRequested) {
+        if (now - vrRec.idrRequestedMs >= VR_IDR_RETRY_MS) {
+            vrRec.idrRequestedMs = now;
+            return VR_ACTION_REQUEST_IDR;
+        }
+        return VR_ACTION_NONE;
+    }
+
+    if (vrRec.refreshSeen) {
+        // 已收到 REFRESH_START，但這一波的 REFRESH_DONE 遲遲沒到（那一幀可能也掉了
+        // 卻沒被偵測到）：當成沒回應，重新要一波
+        if (now - vrRec.refreshSeenMs < VR_WAVE_TIMEOUT_MS) {
+            return VR_ACTION_NONE;
+        }
+        vrRec.refreshSeen = false;
+        vrRec.pendingSinceMs = now;
+        vrRec.resendCount = 0;
+    }
+
+    if (vrRec.resendCount >= VR_LOSS_RESEND_MAX || now - vrRec.pendingSinceMs >= VR_UNANSWERED_IDR_MS) {
+        vrRec.idrRequested = true;
+        vrRec.idrRequestedMs = now;
+        vrRec.idrFallbacks++;
+        vrRec.totalIdrFallbacks++;
+        return VR_ACTION_REQUEST_IDR;
+    }
+
+    if (now - vrRec.lastLossSendMs >= 2 * (uint64_t)rttMs + VR_LOSS_RESEND_BASE_MS) {
+        vrRec.resendCount++;
+        vrRec.lossResends++;
+        vrRec.lastLossSendMs = now;
+        *firstLost = vrRec.firstLost;
+        *lastLost = vrRec.lastLost;
+        return VR_ACTION_RESEND_LOSS;
+    }
+
+    return VR_ACTION_NONE;
+}
+
+static void vrPerformAction(VR_RECOVERY_ACTION action, uint32_t firstLost, uint32_t lastLost) {
+    switch (action) {
+    case VR_ACTION_RESEND_LOSS:
+        vrSendLossOnce(firstLost, lastLost, VIPLE_VR_LOSS_RESEND);
+        break;
+    case VR_ACTION_REQUEST_IDR:
+        Limelog("[VIPLE-VR-LOSS] no refresh response — falling back to IDR (lost %u..%u)\n",
+                firstLost, lastLost);
+        LiRequestIdrFrame();
+        break;
+    default:
+        break;
+    }
+}
+
+// 呼叫端是 VideoRecv（depacketizer）或 decoder 執行緒：只更新狀態、登記待送的 LOSS，
+// 實際送出交給 VrSend 執行緒（不碰 enetMutex）。
+static void vrRecoveryReportLoss(uint32_t firstLost, uint32_t lastLost, uint8_t reason) {
+    uint64_t now = PltGetMillis();
+    bool send = false;
+    bool sendNow = false;
+    uint32_t sendFirst = 0, sendLast = 0;
+
+    if (isBefore32(lastLost, firstLost)) {
+        // 反轉範圍只可能來自幀號狀態倒帶（見 queueFrameInvalidationTuple 的 §F1-DBG-ASSERT），
+        // 只回報比較晚的那一端
+        static uint64_t lastInvalidLogMs;
+        if (lastInvalidLogMs == 0 || now - lastInvalidLogMs >= 1000) {
+            Limelog("[VIPLE-VR-LOSS] invalid loss range %u..%u — using %u\n", firstLost, lastLost, firstLost);
+            lastInvalidLogMs = now;
+        }
+        lastLost = firstLost;
+    }
+
+    PltLockMutex(&vrRecMutex);
+    vrRec.lossEvents++;
+    vrRec.totalLossEvents++;
+    if (!vrRec.degraded) {
+        vrRec.degraded = true;
+        vrRec.refreshSeen = false;
+        vrRec.idrRequested = false;
+        vrRec.firstLost = firstLost;
+        vrRec.lastLost = lastLost;
+        vrRec.degradedSinceMs = now;
+        vrRec.pendingSinceMs = now;
+        vrRec.resendCount = 0;
+        send = true;
+    }
+    else if (isBefore32(vrRec.lastLost, lastLost)) {
+        // 更晚的新掉幀：擴大範圍。如果已經收到的那一波是在新掉幀之前開始的，
+        // 它不保證涵蓋新掉幀 → 重新要一波（server 端會重啟 wave）
+        vrRec.lastLost = lastLost;
+        if (vrRec.refreshSeen && !isBefore32(lastLost, vrRec.waveStart)) {
+            vrRec.refreshSeen = false;
+            vrRec.pendingSinceMs = now;
+            vrRec.resendCount = 0;
+        }
+        send = !vrRec.idrRequested;
+    }
+    // 其餘情況：範圍已涵蓋，交給逾時重送
+    if (send) {
+        vrRec.lastLossSendMs = now;
+        vrRec.lossSends++;
+        if (vrSendThreadStarted) {
+            vrRec.lossSendPending = true;
+            vrRec.lossSendReason = reason;
+        }
+        else {
+            // VrSend 執行緒沒起來（建立失敗）：退回同步送，至少功能正確
+            sendNow = true;
+            sendFirst = vrRec.firstLost;
+            sendLast = vrRec.lastLost;
+        }
+    }
+    PltUnlockMutex(&vrRecMutex);
+
+    if (sendNow) {
+        vrSendLossOnce(sendFirst, sendLast, reason);
+        vrSendLossOnce(sendFirst, sendLast, reason);
+    }
+}
+
+static void vrRecoveryOnRefreshStart(uint32_t startFrame, uint8_t frameCnt) {
+    uint64_t now = PltGetMillis();
+
+    PltLockMutex(&vrRecMutex);
+    if (vrRec.degraded && !vrRec.refreshSeen && !vrRec.idrRequested &&
+            isBefore32(vrRec.lastLost, startFrame)) {
+        uint32_t waitMs = (uint32_t)(now - vrRec.pendingSinceMs);
+        vrRec.refreshSeen = true;
+        vrRec.waveStart = startFrame;
+        vrRec.waveEnd = startFrame + (frameCnt ? frameCnt : 1) - 1;
+        vrRec.refreshSeenMs = now;
+        vrRec.refreshRx++;
+        vrRec.totalRefreshRx++;
+        vrRec.rttSamples++;
+        vrRec.rttSumMs += waitMs;
+        if (waitMs > vrRec.rttMaxMs) {
+            vrRec.rttMaxMs = waitMs;
+        }
+    }
+    else {
+        // 第二份備援、或對應的是更早的掉幀
+        vrRec.refreshStale++;
+    }
+    PltUnlockMutex(&vrRecMutex);
+}
+
+// VideoRecv 執行緒：每組好一幀呼叫一次。只判斷是否恢復，不做任何網路 I/O。
+void vrRecoveryOnFrame(uint32_t frameIndex, uint8_t vrFrameFlags, bool isIdr) {
+    uint64_t now;
+
+    if (!vrIntraRecoveryActive()) {
+        return;
+    }
+
+    now = PltGetMillis();
+
+    PltLockMutex(&vrRecMutex);
+    if (vrRec.degraded) {
+        bool recovered = false;
+        if (isIdr && isBefore32(vrRec.lastLost, frameIndex)) {
+            recovered = true;
+        }
+        // 下界用 waveEnd 而不是 waveStart：startFrame 是 server 的估計值（實際可能晚一幀），
+        // 被重啟的舊 wave 的最後一幀也帶 REFRESH_DONE，只看 waveStart 會把它誤當成新 wave 完成
+        else if (vrRec.refreshSeen && (vrFrameFlags & VIPLE_VR_FF_REFRESH_DONE) &&
+                 !isBefore32(frameIndex, vrRec.waveEnd)) {
+            recovered = true;
+        }
+
+        if (recovered) {
+            uint32_t tookMs = (uint32_t)(now - vrRec.degradedSinceMs);
+            vrRec.degraded = false;
+            vrRec.refreshSeen = false;
+            vrRec.idrRequested = false;
+            vrRec.recovered++;
+            vrRec.totalRecovered++;
+            vrRec.recoverSamples++;
+            vrRec.recoverSumMs += tookMs;
+            if (tookMs > vrRec.recoverMaxMs) {
+                vrRec.recoverMaxMs = tookMs;
+            }
+        }
+    }
+    vrMaybeLogStatsLocked(now);
+    PltUnlockMutex(&vrRecMutex);
+}
+
+// VrSend 執行緒的一輪：送出登記的 LOSS（第二份延後 VR_LOSS_TWIN_DELAY_MS），並推進
+// 重送／退回 IDR 的逾時。這條執行緒可以持 enetMutex（讀 RTT、送封包）。
+static void vrSendTick(void) {
+    VR_RECOVERY_ACTION action;
+    uint32_t firstLost = 0, lastLost = 0;
+    uint32_t rttMs = 0;
+    uint64_t now;
+    bool sendFirst = false, sendTwin = false;
+    uint32_t f1 = 0, l1 = 0, f2 = 0, l2 = 0;
+    uint8_t r1 = 0, r2 = 0;
+
+    // 鎖外讀 degraded 只當提示（讀到舊值的代價是這一輪用 RTT=0 算逾時）
+    if (vrRec.degraded) {
+        rttMs = vrGetEnetRttMs();
+    }
+    now = PltGetMillis();
+
+    PltLockMutex(&vrRecMutex);
+    if (vrRec.lossSendPending) {
+        vrRec.lossSendPending = false;
+        sendFirst = true;
+        f1 = vrRec.firstLost;
+        l1 = vrRec.lastLost;
+        r1 = vrRec.lossSendReason;
+        vrRec.twinPending = true;
+        vrRec.twinDueMs = now + VR_LOSS_TWIN_DELAY_MS;
+        vrRec.twinFirst = f1;
+        vrRec.twinLast = l1;
+        vrRec.twinReason = r1;
+    }
+    else if (vrRec.twinPending && now >= vrRec.twinDueMs) {
+        vrRec.twinPending = false;
+        sendTwin = true;
+        f2 = vrRec.twinFirst;
+        l2 = vrRec.twinLast;
+        r2 = vrRec.twinReason;
+    }
+    action = vrEvaluateTimersLocked(now, rttMs, &firstLost, &lastLost);
+    if (action == VR_ACTION_REQUEST_IDR) {
+        firstLost = vrRec.firstLost;
+        lastLost = vrRec.lastLost;
+    }
+    vrMaybeLogStatsLocked(now);
+    PltUnlockMutex(&vrRecMutex);
+
+    if (sendFirst) {
+        vrSendLossOnce(f1, l1, r1);
+    }
+    if (sendTwin) {
+        vrSendLossOnce(f2, l2, r2);
+    }
+    vrPerformAction(action, firstLost, lastLost);
+}
+
+static void vrSendThreadFunc(void* context) {
+    while (!PltIsThreadInterrupted(&vrSendThread)) {
+        vrSendTick();
+        PltSleepMsInterruptible(&vrSendThread, VR_SEND_TICK_MS);
+    }
+}
+
+// 控制接收執行緒：0x5508 裡的 REFRESH_START 立刻交給恢復狀態機，不等 async
+// 執行緒（整則訊息之後仍照常排進 async 佇列給 client）。
+static void vrHandleS2CInline(const uint8_t* tlv, int length) {
+    int off = 0;
+    while (off + 2 <= length) {
+        uint8_t type = tlv[off];
+        uint8_t len = tlv[off + 1];
+        if (off + 2 + len > length) {
+            break;  // 截斷的 TLV：丟棄其餘部分
+        }
+        if (type == VIPLE_VR_S2C_REFRESH_START && len >= sizeof(VIPLE_VR_TLV_REFRESH_START)) {
+            VIPLE_VR_TLV_REFRESH_START rs;
+            memcpy(&rs, &tlv[off + 2], sizeof(rs));
+            vrRecoveryOnRefreshStart(rs.startFrame, rs.frameCnt);
+        }
+        off += 2 + len;
+    }
+}
+
+// §F5（M1a）：VR tracking 走 UNSEQUENCED，ENet 預設的 throttle 會依 RTT 變異
+// 機率性丟棄 unreliable 封包。VR session 把 deceleration 設 0，throttle 只升不降。
+// server 收到 THROTTLE_CONFIGURE 也會套用到它那端的 peer（S→C 的 unsequenced 同樣受益）。
+// 呼叫端必須持有 enetMutex，或確定沒有其他執行緒碰 peer。
+static void configureVrThrottle(ENetPeer* p) {
+    if (p == NULL || !(VrFlags & VIPLE_VR_SF_ENABLED)) {
+        return;
+    }
+    enet_peer_throttle_configure(p, VIPLE_VR_ENET_THROTTLE_INTERVAL,
+                                 VIPLE_VR_ENET_THROTTLE_ACCELERATION,
+                                 VIPLE_VR_ENET_THROTTLE_DECELERATION);
+    Limelog("[VIPLE-VR-SESSION] ENet throttle configured (interval=%d accel=%d decel=%d)\n",
+            VIPLE_VR_ENET_THROTTLE_INTERVAL, VIPLE_VR_ENET_THROTTLE_ACCELERATION,
+            VIPLE_VR_ENET_THROTTLE_DECELERATION);
+}
+
+int LiGetVrFlags(void) {
+    return VrFlags;
+}
+
+int LiSendVrTracking(const VIPLE_VR_TRACKING* sample) {
+    uint64_t now;
+
+    if (!(VrFlags & VIPLE_VR_SF_ENABLED) || sample == NULL) {
+        return -1;
+    }
+
+    // ENet 與 QUIC 都送不出去時（斷線中）暫停 1 秒，避免 2×Hz 的失敗洗 log
+    now = PltGetMillis();
+    if (vrTrackingBackoffUntilMs != 0 && now < vrTrackingBackoffUntilMs) {
+        vrTrackingDropped++;
+        return -2;
+    }
+
+    if (!sendMessageAndForget(VIPLE_VR_PTYPE_TRACKING, (short)sizeof(*sample), sample,
+                              VIPLE_VR_CTRL_CHANNEL, ENET_PACKET_FLAG_UNSEQUENCED, false)) {
+        vrTrackingDropped++;
+        if (++vrTrackingConsecutiveFails >= VR_TRACKING_FAIL_BACKOFF) {
+            vrTrackingConsecutiveFails = 0;
+            vrTrackingBackoffUntilMs = now + VR_TRACKING_BACKOFF_MS;
+            Limelog("[VIPLE-VR-POSE] tracking send failing — backing off %d ms (sent=%u dropped=%u)\n",
+                    VR_TRACKING_BACKOFF_MS, vrTrackingSent, vrTrackingDropped);
+        }
+        return -3;
+    }
+
+    vrTrackingConsecutiveFails = 0;
+    vrTrackingBackoffUntilMs = 0;
+    vrTrackingSent++;
+    return 0;
+}
+
+int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable) {
+    if (!(VrFlags & VIPLE_VR_SF_ENABLED) || tlv == NULL ||
+            length <= 0 || length > VIPLE_VR_MAX_CTRL_PAYLOAD) {
+        return -1;
+    }
+
+    return sendMessageAndForget(VIPLE_VR_PTYPE_C2S, (short)length, tlv,
+                                reliable ? CTRL_CHANNEL_GENERIC : VIPLE_VR_CTRL_CHANNEL,
+                                reliable ? ENET_PACKET_FLAG_RELIABLE : ENET_PACKET_FLAG_UNSEQUENCED,
+                                false) ? 0 : -1;
+}
+
+void LiReportVrLoss(uint32_t firstLost, uint32_t lastLost, uint8_t reason) {
+    if (!(VrFlags & VIPLE_VR_SF_ENABLED)) {
+        return;
+    }
+    if (!(VrFlags & VIPLE_VR_SF_RECOVERY_INTRA)) {
+        LiRequestIdrFrame();
+        return;
+    }
+    vrRecoveryReportLoss(firstLost, lastLost, reason);
+}
+
 // Invalidate reference frames lost by the network
 void connectionDetectedFrameLoss(uint32_t startFrame, uint32_t endFrame) {
+    // §VR：recovery=intra 改送 LOSS，不走 RFI／IDR
+    if (vrIntraRecoveryActive()) {
+        vrRecoveryReportLoss(startFrame, endFrame, VIPLE_VR_LOSS_NETWORK);
+        return;
+    }
     queueFrameInvalidationTuple(startFrame, endFrame);
 }
 
@@ -1313,6 +1843,10 @@ static void asyncCallbackThreadFunc(void* context) {
                                                       queuedCb->data.scHidFeatureRequest.queryLen);
             }
             break;
+        case IDX_VIPLE_VR_S2C:
+            // §VR：fixupMissingCallbacks 保證 vrMessage 非 NULL
+            ListenerCallbacks.vrMessage(queuedCb->data.vrS2C.buf, queuedCb->data.vrS2C.len);
+            break;
         default:
             // Unhandled packet type from queueAsyncCallback()
             LC_ASSERT(false);
@@ -1330,7 +1864,9 @@ static bool needsAsyncCallback(unsigned short packetType) {
            packetType == packetTypes[IDX_SET_RGB_LED] ||
            packetType == packetTypes[IDX_HDR_INFO] ||
            packetType == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS] ||
-           (packetTypes[IDX_SC_HID_FEATURE_REQ] != -1 && packetType == packetTypes[IDX_SC_HID_FEATURE_REQ]);
+           (packetTypes[IDX_SC_HID_FEATURE_REQ] != -1 && packetType == packetTypes[IDX_SC_HID_FEATURE_REQ]) ||
+           // §VR：只有協商過的 VR session 才收 0x5508；一般 session 照舊忽略
+           ((VrFlags & VIPLE_VR_SF_ENABLED) && packetType == (unsigned short)VIPLE_VR_PTYPE_S2C);
 }
 
 static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLength) {
@@ -1400,6 +1936,22 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.queryLen);
         BbGetBytes(&bb, queuedCb->data.scHidFeatureRequest.query, 64);
         queuedCb->typeIndex = IDX_SC_HID_FEATURE_REQ;
+    }
+    else if ((VrFlags & VIPLE_VR_SF_ENABLED) && ctlHdr->type == (unsigned short)VIPLE_VR_PTYPE_S2C) {
+        int len = packetLength - (int)sizeof(*ctlHdr);
+        if (len <= 0 || len > VIPLE_VR_MAX_CTRL_PAYLOAD) {
+            static uint64_t lastBadLenLogMs;
+            uint64_t nowMs = PltGetMillis();
+            if (lastBadLenLogMs == 0 || nowMs - lastBadLenLogMs >= 1000) {
+                Limelog("[VIPLE-VR-SESSION] dropping VR_S2C with bad length %d\n", len);
+                lastBadLenLogMs = nowMs;
+            }
+            free(queuedCb);
+            return;
+        }
+        queuedCb->data.vrS2C.len = (uint8_t)len;
+        memcpy(queuedCb->data.vrS2C.buf, (const uint8_t*)(ctlHdr + 1), (size_t)len);
+        queuedCb->typeIndex = IDX_VIPLE_VR_S2C;
     }
     else {
         // Unhandled packet type from needsAsyncCallback()
@@ -1793,6 +2345,11 @@ enet_main_loop:
                 hdrEnabled = (enableByte != 0);
             }
 
+            // §VR：REFRESH_START 由控制接收執行緒直接交給恢復狀態機
+            if ((VrFlags & VIPLE_VR_SF_ENABLED) && ctlHdr->type == (unsigned short)VIPLE_VR_PTYPE_S2C) {
+                vrHandleS2CInline((const uint8_t*)(ctlHdr + 1), packetLength - (int)sizeof(*ctlHdr));
+            }
+
             // Process client callbacks in a separate thread
             if (needsAsyncCallback(ctlHdr->type)) {
                 queueAsyncCallback(ctlHdr, packetLength);
@@ -2170,8 +2727,9 @@ enet_reconnect_wait:
                         // pending disconnect 屬於已在上方銷毀的舊 peer；新連線
                         // 若真收到新 DISCONNECT，intercept hook 會重新設 true。
                         disconnectPending = false;
-                        // （M1 §F5 的 peer 節流設定插在這裡：peer 已發布、
-                        //   enetReconnecting 尚未清除）
+                        // §F5：重連後 peer 是新的，throttle 設定要重新套用
+                        //（peer 已發布、enetReconnecting 尚未清除，持 enetMutex）
+                        configureVrThrottle(peer);
                         // §Q-REMOTE Fix R.3：發布完成後才打開控制平面的 ENet 路徑
                         //（順序刻意：先讓 peer 非 NULL、再清 reconnecting；無鎖
                         // 讀者不論看到哪種交錯，至少一個條件成立都會安全走 QUIC）。
@@ -2362,6 +2920,24 @@ static void lossStatsThreadFunc(void* context) {
                     }
                 }
             }
+
+#ifdef VIPLE_MPQUIC
+            // §VR：VR session 的視訊走 RTP/UDP，ENet 正常時 QUIC 上完全沒有流量。
+            // QuicTransport 的 stall 偵測（任何路徑 3 秒沒收到封包就判 INACTIVE）會因此
+            // 誤觸 failover，Fix L 再把控制訊息（含 tracking）全轉去 QUIC（M1a 實測：
+            // 主路徑第 9 秒被判死、來回兩次）。每 500 ms 在 QUIC stream #0 送一個 'P'
+            // 標記——server 只刷新 pingTimeout，ABR tick 在 server 端已節流到 500 ms
+            // 一輪、不會和 ENet ping 重複計步——它的 ACK 讓主路徑維持「有收到東西」。
+            // ENet 斷線時上面的分支本來就每 100 ms 送 'P'，這裡不重複送。
+            // 一般 session 的 QUIC 上有視訊流量，不送（不變式 5）。
+            if ((VrFlags & VIPLE_VR_SF_ENABLED) && !(enetReconnectPending || !peer) && quicIsConnected()) {
+                if (++vrQuicKeepaliveTicks >= VR_QUIC_KEEPALIVE_TICKS) {
+                    static const unsigned char vrKeepaliveMarker = 0x50; // 'P'
+                    vrQuicKeepaliveTicks = 0;
+                    quicSendStream(&vrKeepaliveMarker, 1);
+                }
+            }
+#endif
 
             // Wait a bit
             PltSleepMsInterruptible(&lossStatsThread, PERIODIC_PING_INTERVAL_MS);
@@ -2741,11 +3317,20 @@ int stopControlStream(void) {
     PltInterruptThread(&requestIdrFrameThread);
     PltInterruptThread(&controlReceiveThread);
     PltInterruptThread(&asyncCallbackThread);
+    if (vrSendThreadStarted) {
+        PltInterruptThread(&vrSendThread);
+    }
 
     PltJoinThread(&lossStatsThread);
     PltJoinThread(&requestIdrFrameThread);
     PltJoinThread(&controlReceiveThread);
     PltJoinThread(&asyncCallbackThread);
+    // §VR：一定要在下面銷毀 peer/client 之前 join（它會送 LOSS）；是否 join 看
+    // vrSendThreadStarted（§M01-E 的教訓：不能漏 join）
+    if (vrSendThreadStarted) {
+        PltJoinThread(&vrSendThread);
+        vrSendThreadStarted = false;
+    }
 
     // We will only have an RFI thread if RFI is enabled
     if (isReferenceFrameInvalidationEnabled()) {
@@ -2969,6 +3554,10 @@ int startControlStream(void) {
         enetRttVarSnap = peer->roundTripTimeVariance;
         enetRttValid = 1;
 #endif
+
+        // §F5：VR session 的 throttle 設定（controlReceiveThread 尚未建立，這裡是
+        // 唯一碰 peer 的執行緒；命令會隨 START A 一起 flush 出去）
+        configureVrThrottle(peer);
     }
     else {
         // NB: Do NOT use ControlPortNumber here. 47995 is correct for these old versions.
@@ -3199,6 +3788,17 @@ int startControlStream(void) {
             }
 
             return err;
+        }
+    }
+
+    // §VR：其餘執行緒都成功之後才建立（失敗路徑因此不用管它）。建立失敗時
+    // vrRecoveryReportLoss 會退回同步送 LOSS，功能不受影響。
+    if (VrFlags & VIPLE_VR_SF_ENABLED) {
+        if (PltCreateThread("VrSend", vrSendThreadFunc, NULL, &vrSendThread) == 0) {
+            vrSendThreadStarted = true;
+        }
+        else {
+            Limelog("[VIPLE-VR-LOSS] failed to create VrSend thread — LOSS will be sent synchronously\n");
         }
     }
 

@@ -248,6 +248,11 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/stat_trackers.cpp"
         "${CMAKE_SOURCE_DIR}/src/rswrapper.h"
         "${CMAKE_SOURCE_DIR}/src/rswrapper.c"
+        # VipleStream 2.0 §VR：與平台無關的 VR 協定／session 狀態；平台部分在 vr_platform.h 後面
+        "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/VipleVr.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_platform.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_session.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_session.cpp"
         ${PLATFORM_TARGET_FILES})
 
 if(NOT SUNSHINE_ASSETS_DIR_DEF)

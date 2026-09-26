@@ -11,6 +11,8 @@
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
 #include "video/overlaymanager.h"
+#include "vr/vrlaunchparams.h"
+#include "vr/vrtracking.h"
 
 class SupportedVideoFormatList : public QList<int>
 {
@@ -256,6 +258,15 @@ private:
                                const uint8_t* query, uint8_t queryLen);  // §SC-HID
 
     static
+    void clVrMessage(const uint8_t* tlv, int length);  // §VR 0x5508
+
+    // §VR：主執行緒處理 VR_S2C（由 clVrMessage 包成 SDL_USEREVENT 送來）
+    void handleVrMessage(const uint8_t* tlv, int length);
+
+    // §VR：決定這次要不要以 PCVR 啟動（server 能力＋client pose 來源）
+    void decideVrRequest();
+
+    static
     int arInit(int audioConfiguration,
                const POPUS_MULTISTREAM_CONFIGURATION opusConfig,
                void* arContext, int arFlags);
@@ -338,6 +349,21 @@ private:
 
     // §M.2: 使用者確認接管被他人佔用的 session
     bool m_Takeover;
+
+    // ── VipleStream 2.0 §VR（M1a）───────────────────────────────────
+    // m_VrRequested：initialize() 決定要在 /launch 帶 vr=1；是否真的變成 VR session
+    // 要看 server 有沒有回 <VipleStreamVRSession>（不變式 1），結果在 m_StreamConfig.vrFlags。
+    bool m_VrRequested = false;
+    VrLaunchConfig m_VrLaunch;
+    VrSessionInfo m_VrSession;
+    VrTrackingSender m_VrTracking;
+    // server 每秒一筆 STATS（計數欄位是累計值）。主執行緒每 10 秒印一次
+    // 「最新一筆 − 上次印 log 時的快照」
+    VIPLE_VR_TLV_STATS m_VrServerStatsLatest {};
+    VIPLE_VR_TLV_STATS m_VrServerStatsAtLog {};
+    uint32_t m_VrServerStatsCount = 0;
+    uint32_t m_VrServerStatsLastLogMs = 0;
+    uint32_t m_VrRefreshStartRx = 0;
 
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
     static Session* s_ActiveSession;

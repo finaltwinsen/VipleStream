@@ -253,7 +253,9 @@ VkFrucRenderer::VkFrucRenderer(int pass, CompositeMode compositeMode)
     // driver broken 時 fallback).
     auto* prefs = StreamingPreferences::get(nullptr);
     bool prefsWantVulkan = prefs && prefs->rendererSelection == StreamingPreferences::RS_VULKAN;
-    bool prefsWantInterp = prefs && prefs->enableFrameInterpolation;
+    // §VR：VR session 不做 FRUC（幀與 0x81 pose 一一對應）
+    bool prefsWantInterp = prefs && prefs->enableFrameInterpolation
+                           && !(LiGetVrFlags() & VIPLE_VR_SF_ENABLED);
     // §B-DUMP — VIPLE_VKFRUC_DUMP_DIR implicitly enables FRUC + DUAL so the
     // dump path actually has interp frames to capture.  Without this, dump
     // wouldn't activate when user only sets DUMP_DIR (their RS_D3D11 default

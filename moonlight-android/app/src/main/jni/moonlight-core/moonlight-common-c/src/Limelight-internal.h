@@ -58,6 +58,9 @@ extern OPUS_MULTISTREAM_CONFIGURATION HighQualityOpusConfig;
 extern int AudioPacketDuration;
 extern bool AudioEncryptionEnabled;
 extern bool ReferenceFrameInvalidationSupported;
+// VipleStream 2.0 §VR：本次連線生效的 VIPLE_VR_SF_*（LiStartConnection 由
+// StreamConfig.vrFlags 設定；大端平台一律 0）
+extern int VrFlags;
 
 extern uint16_t RtspPortNumber;
 extern uint16_t ControlPortNumber;
@@ -151,6 +154,10 @@ void connectionDetectedFrameLoss(uint32_t startFrame, uint32_t endFrame);
 void connectionReceivedCompleteFrame(uint32_t frameIndex, bool frameIsLTR);
 void connectionSawFrame(uint32_t frameIndex);
 void connectionSendFrameFecStatus(PSS_FRAME_FEC_STATUS fecStatus);
+// §VR（ControlStream.c）：depacketizer 每組好一幀就通知一次，驅動恢復狀態機
+// （REFRESH_DONE 結束 degraded、IDR 清除 degraded、LOSS 逾時重送）。
+// 呼叫端是 VideoRecv 執行緒。
+void vrRecoveryOnFrame(uint32_t frameIndex, uint8_t vrFrameFlags, bool isIdr);
 int sendInputPacketOnControlStream(unsigned char* data, int length, uint8_t channelId, uint32_t flags, bool moreData);
 void flushInputOnControlStream(void);
 bool isControlDataInTransit(void);

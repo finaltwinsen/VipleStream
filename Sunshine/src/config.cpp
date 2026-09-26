@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <algorithm>
+#include <charconv>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -79,6 +80,64 @@ namespace config {
     }
 
   }  // namespace nv
+
+  // VipleStream 2.0 §VR：vr_* 設定項的轉換器。不能叫 namespace vr——config::vr 是設定變數。
+  namespace vr_opt {
+
+    vr_t::pcvr_e pcvr_from_view(const std::string_view value, const std::string_view key) {
+      if (value == "disabled"sv) {
+        return vr_t::pcvr_e::disabled;
+      }
+      if (value == "stub"sv) {
+        return vr_t::pcvr_e::stub;
+      }
+      warn_config(std::format(
+        "config: invalid value for '{}': '{}' -- accepted values: disabled, stub. "
+        "Falling back to 'disabled' (VR sessions are rejected with VR_DISABLED)",
+        key,
+        value
+      ));
+      return vr_t::pcvr_e::disabled;
+    }
+
+    /**
+     * @brief 嚴格解析 vr_* 的整數設定項：不是十進位整數、或不在允許範圍就警告並保留預設值。
+     *
+     * 不用 int_between_f：它底下的 util::from_view 遇到垃圾字元會無聲回 0，而
+     * vr_intra_refresh_safety_ms 的 0 代表「關閉安全網」，打錯字會靜靜關掉功能。
+     */
+    void int_strict_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, int &input, int lo, int hi, bool allow_zero) {
+      auto it = vars.find(name);
+      if (it == std::end(vars)) {
+        return;
+      }
+
+      std::string_view val = it->second;
+      if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
+        val = val.substr(1, val.size() - 2);
+      }
+
+      int parsed = 0;
+      auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), parsed, 10);
+      const bool is_int = !val.empty() && val.front() != '+' && ec == std::errc {} && ptr == val.data() + val.size();
+      if (is_int && ((allow_zero && parsed == 0) || (parsed >= lo && parsed <= hi))) {
+        input = parsed;
+      } else {
+        warn_config(std::format(
+          "config: invalid value for '{}': '{}' -- accepted values: {}{}..{}. Keeping '{}'",
+          name,
+          it->second,
+          allow_zero ? "0 or " : "",
+          lo,
+          hi,
+          input
+        ));
+      }
+
+      vars.erase(it);
+    }
+
+  }  // namespace vr_opt
 
   namespace amd {
 #if !defined(_WIN32) || defined(DOXYGEN)
@@ -581,6 +640,8 @@ namespace config {
     ENCRYPTION_MODE_NEVER,  // lan_encryption_mode
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
   };
+
+  vr_t vr {};  // VipleStream 2.0 §VR：預設值見 config.h（vr_pcvr=disabled）
 
   nvhttp_t nvhttp {
     "lan",  // origin web manager
@@ -1333,6 +1394,12 @@ namespace config {
         stream.smooth_pacing ? "enabled" : "disabled"
       ));
     }
+
+    // VipleStream 2.0 §VR（M1a）：vr_pcvr 預設 disabled；stub 只供開發驗證。
+    // 值寫錯一律警告並維持預設（壞值絕不靜靜地變成「開啟」或「關閉安全網」）。
+    generic_f(vars, "vr_pcvr", vr.pcvr, vr_opt::pcvr_from_view);
+    vr_opt::int_strict_f(vars, "vr_intra_refresh_frames", vr.intra_refresh_frames, 2, 60, false);
+    vr_opt::int_strict_f(vars, "vr_intra_refresh_safety_ms", vr.intra_refresh_safety_ms, 500, 10000, true);
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

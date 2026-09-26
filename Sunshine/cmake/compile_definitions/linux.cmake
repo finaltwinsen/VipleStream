@@ -107,6 +107,10 @@ endif()
 list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/fs_picker.cpp")
 
+# VipleStream 2.0 §VR：Linux PCVR 在 2.0 範圍外，stub 恆回報不支援（/serverinfo PCVR bit = 0）
+list(APPEND PLATFORM_TARGET_FILES
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/vr_stub.cpp")
+
 # evdev
 include(dependencies/libevdev_Sunshine)
 

@@ -141,6 +141,12 @@ public:
     // VipleStream server build version (e.g. "1.5.229")
     QString vipleStreamVersion;
 
+    // VipleStream 2.0 §VR：/serverinfo 的 <VipleStreamVR>（VIPLE_VR_SERVER_CAP_* bitmask）
+    // 與 <VipleStreamVRProto>。舊版或 vanilla server 沒有這兩個元素 → 0（只能平面）。
+    // 跟其他 VipleStream 能力旗標一樣不序列化，每次 poll 由 update() 帶入。
+    int vipleStreamVr = 0;
+    int vipleStreamVrProto = 0;
+
     // §MP-ADV: 伺服器透過 /serverinfo 廣告的所有網路介面。
     // 客戶端用這些位址取代猜測式的 alt peer，實現伺服器驅動的多路徑探測。
     QVector<NvNetworkInterface> serverAdvertisedInterfaces;

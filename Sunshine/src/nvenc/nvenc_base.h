@@ -56,9 +56,20 @@ namespace nvenc {
      *        Afterwards serves as parameter for `invalidate_ref_frames()`.
      *        No restrictions on the first frame index, but later frame indexes must be subsequent.
      * @param force_idr Whether to encode frame as forced IDR.
+     * @param force_intra_refresh_frames VipleStream 2.0 §VR：非 0 時這一幀開始一波長度 N 的
+     *        intra refresh（forceIntraRefreshWithFrameCnt）。只有 vr_intra_refresh_enabled()
+     *        成立時有效；force_idr 優先。
      * @return Encoded frame.
      */
-    nvenc_encoded_frame encode_frame(uint64_t frame_index, bool force_idr);
+    nvenc_encoded_frame encode_frame(uint64_t frame_index, bool force_idr, uint32_t force_intra_refresh_frames = 0);
+
+    /**
+     * @brief VipleStream 2.0 §VR：encoder 是否以 VR profile 建立、且 GPU 支援 intra refresh
+     *        （可以接受 forceIntraRefreshWithFrameCnt）。
+     */
+    bool vr_intra_refresh_enabled() const {
+      return encoder_params.vr_intra_refresh;
+    }
 
     /**
      * @brief Perform reference frame invalidation (RFI) procedure.
@@ -136,6 +147,8 @@ namespace nvenc {
       NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
       uint32_t ref_frames_in_dpb = 0;
       bool rfi = false;
+      int video_format = 0;  // §VR：0 H.264、1 HEVC、2 AV1（選 codecPicParams 的哪一個）
+      bool vr_intra_refresh = false;  // §VR：VR profile 下已開 intra refresh
     } encoder_params;
 
     std::string last_nvenc_error_string;

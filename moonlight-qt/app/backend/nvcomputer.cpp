@@ -348,6 +348,10 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     // VipleStream server build version
     this->vipleStreamVersion = NvHTTP::getXmlString(serverInfo, "VipleStreamVersion");
 
+    // VipleStream 2.0 §VR 能力（沒有元素時 toInt() 回 0）
+    this->vipleStreamVr = NvHTTP::getXmlString(serverInfo, "VipleStreamVR").toInt();
+    this->vipleStreamVrProto = NvHTTP::getXmlString(serverInfo, "VipleStreamVRProto").toInt();
+
     // Real Nvidia host software (GeForce Experience and RTX Experience) both use the 'Mjolnir'
     // codename in the state field and no version of Sunshine does. We can use this to bypass
     // some assumptions about Nvidia hardware that don't apply to Sunshine hosts.
@@ -760,6 +764,8 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED(isMpQuicCapable);
     ASSIGN_IF_CHANGED(vipleStreamMPQUIC);
     ASSIGN_IF_CHANGED(vipleStreamVersion);
+    ASSIGN_IF_CHANGED(vipleStreamVr);       // §VR：漏加會讓 poll 回來的值被丟掉（見上方事故註解）
+    ASSIGN_IF_CHANGED(vipleStreamVrProto);
     ASSIGN_IF_CHANGED(maxLumaPixelsHEVC);
     ASSIGN_IF_CHANGED(gpuModel);
     ASSIGN_IF_CHANGED_AND_NONNULL(serverCert);

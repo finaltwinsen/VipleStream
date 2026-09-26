@@ -30,6 +30,7 @@ extern "C" {
 #include "platform/common.h"
 #include "sync.h"
 #include "video.h"
+#include "vr/vr_session.h"
 
 #ifdef _WIN32
 // Pre-include d3d11.h with C++ linkage before FFmpeg pulls it in via extern "C",
@@ -416,13 +417,25 @@ namespace video {
       }
     }
 
+    // VipleStream 2.0 §VR：下一幀帶 forceIntraRefreshWithFrameCnt。只有 encoder 建立時
+    // 確實開了 intra refresh（vrProfile 且 GPU 支援）才接受，否則回 false 讓呼叫端改要 IDR。
+    bool request_intra_refresh(int frameCnt) override {
+      if (!device || !device->nvenc || frameCnt <= 0 || !device->nvenc->vr_intra_refresh_enabled()) {
+        return false;
+      }
+
+      force_intra_refresh_frames = (uint32_t) frameCnt;
+      return true;
+    }
+
     nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index) {
       if (!device || !device->nvenc) {
         return {};
       }
 
-      auto result = device->nvenc->encode_frame(frame_index, force_idr);
+      auto result = device->nvenc->encode_frame(frame_index, force_idr, force_intra_refresh_frames);
       force_idr = false;
+      force_intra_refresh_frames = 0;
       return result;
     }
 
@@ -434,6 +447,7 @@ namespace video {
   private:
     std::unique_ptr<platf::nvenc_encode_device_t> device;
     bool force_idr = false;
+    uint32_t force_intra_refresh_frames = 0;  // §VR：0 = 這一幀不強制 intra refresh
   };
 
   struct sync_session_ctx_t {
@@ -1194,6 +1208,7 @@ namespace video {
   int active_av1_mode;
   bool last_encoder_probe_supported_ref_frames_invalidation = false;
   std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec = {};
+  bool last_encoder_probe_supported_vr_intra_refresh = false;
 
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
     // We try this twice, in case we still get an error on reinitialization
@@ -1592,7 +1607,7 @@ namespace video {
     }
   }
 
-  int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp, const vr_frame_meta_t *vr_meta) {
     auto &frame = session.device->frame;
     frame->pts = frame_nr;
 
@@ -1656,6 +1671,10 @@ namespace video {
 
       if (av_packet && av_packet->pts == frame_nr) {
         packet->frame_timestamp = frame_timestamp;
+        // §VR：metadata 跟著 frame_timestamp 一樣只掛在這一幀自己的 packet 上
+        if (vr_meta) {
+          packet->vr_meta = *vr_meta;
+        }
       }
 
       packet->replacements = &session.replacements;
@@ -1666,7 +1685,7 @@ namespace video {
     return 0;
   }
 
-  int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp, const vr_frame_meta_t *vr_meta) {
     auto encoded_frame = session.encode_frame(frame_nr);
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
@@ -1690,16 +1709,22 @@ namespace video {
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     packet->frame_timestamp = frame_timestamp;
+    if (vr_meta) {
+      packet->vr_meta = *vr_meta;
+    }
     packets->raise(std::move(packet));
 
     return 0;
   }
 
-  int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  /**
+   * @param vr_meta VipleStream 2.0 §VR：這一幀的 VR metadata；一般 session 傳 nullptr。
+   */
+  int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp, const vr_frame_meta_t *vr_meta = nullptr) {
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
-      return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp);
+      return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp, vr_meta);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
-      return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp);
+      return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp, vr_meta);
     }
 
     return -1;
@@ -2109,6 +2134,70 @@ namespace video {
     return nullptr;
   }
 
+  // ── VipleStream 2.0 §VR：encode 端（docs/vr_architecture.md §3.4）────────────
+
+  // IDR cooldown 的具名常數。桌面沿用 §S.19 的 1500 ms（行為與舊版相同）；VR session 的
+  // IDR 只在起播、decoder reset、改解析度、或 encoder 不支援 intra refresh 時才送，
+  // cooldown 縮到 300 ms，避免恢復被卡住一秒半。
+  constexpr std::chrono::milliseconds kDesktopIdrCooldownMs {1500};
+  constexpr std::chrono::milliseconds kVrIdrCooldownMs {300};
+
+  namespace {
+    /**
+     * @brief 一個 encoder 生命期內進行中的 intra-refresh wave（只在 encode 執行緒存取）。
+     */
+    struct vr_wave_state_t {
+      int remaining = 0;  // 還沒編的幀數；0 = 沒有 wave
+      bool first = false;  // 下一幀是 wave 的第一幀
+      uint8_t len = 0;  // wave 長度（REFRESH_START.frameCnt）
+      uint8_t reason = 0;  // VIPLE_VR_REFRESH_*
+
+      // 開始（或重啟）一波：從下一個編碼的幀算起
+      void start(int frames, uint8_t why) {
+        remaining = frames;
+        first = true;
+        len = (uint8_t) frames;
+        reason = why;
+      }
+    };
+
+    /**
+     * @brief 取出屬於這個 stream session 的 VR 狀態。一般 session（vrProfile=0）一律回
+     *        nullptr，呼叫端所有 VR 分支都不會進去（不變式 5）。
+     */
+    std::shared_ptr<::vr::session_state_t> vr_state_for(const config_t &config, void *channel_data) {
+      if (!config.vrProfile) {
+        return nullptr;
+      }
+      auto state = ::vr::active();
+      if (!state || state->stream_session() != channel_data) {
+        BOOST_LOG(warning) << "[VIPLE-VR-ENC] vrProfile is set but no matching active VR session — frames will carry no pose"sv;
+        return nullptr;
+      }
+      return state;
+    }
+
+    /**
+     * @brief encode 前取最新的 tracking 樣本填入這一幀的 metadata（M1a 回聲：不外插、
+     *        不做 POS_RELATIVE，位置的夾值在組 0x81 header 時做）。
+     */
+    void vr_fill_pose(::vr::session_state_t &state, vr_frame_meta_t &meta) {
+      auto sample = state.snapshot();
+      if (sample) {
+        meta.valid = true;
+        meta.echoSampleId = sample->sample_id;
+        std::copy(std::begin(sample->pos), std::end(sample->pos), std::begin(meta.pos));
+        std::copy(std::begin(sample->rot), std::end(sample->rot), std::begin(meta.rot));
+        meta.flags = VIPLE_VR_FF_POSE_VALID | VIPLE_VR_FF_ECHO_MATCHED;
+      } else {
+        meta.valid = false;
+        meta.echoSampleId = 0;
+        meta.flags = VIPLE_VR_FF_POSE_FALLBACK;
+      }
+      state.count_frame(sample.has_value());
+    }
+  }  // namespace
+
   void encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
@@ -2159,6 +2248,21 @@ namespace video {
     auto bitrate_events = mail->event<int>(mail::bitrate_change);
     auto fps_events = mail->event<int>(mail::fps_change);
 
+    // VipleStream 2.0 §VR：VR session 的 encode 端狀態。一般 session 的 vr_state 永遠是
+    // nullptr，下面所有 VR 分支都不會進去（不變式 5）。
+    auto vr_state = vr_state_for(config, channel_data);
+    safe::mail_raw_t::event_t<int> vr_refresh_events;
+    vr_wave_state_t vr_wave;
+    bool vr_idr_retry_pending = false;  // encoder 沒有 IR、IDR 又在 VR cooldown 內：cooldown 一到就補送
+    std::chrono::steady_clock::time_point vr_wave_log_last {};
+    uint32_t vr_wave_log_suppressed = 0;
+    if (vr_state) {
+      vr_state->set_next_frame((uint32_t) frame_nr);
+      vr_refresh_events = mail->event<int>(mail::vr_refresh);
+      // 新的 encoder 生命期：上一個 encoder 沒走完的 wave 作廢（client 會照逾時重送 LOSS）
+      vr_state->on_wave_abort();
+    }
+
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
       // even if we timeout waiting on the first frame. This is a relatively large
@@ -2174,7 +2278,7 @@ namespace video {
     // both raise idr_events at kHz rates, and IDR frames are 5-15× the size of
     // P-frames — emitting one per request piles megabytes of keyframe onto an
     // already-congested link and creates a self-reinforcing loss storm. Cap
-    // real submissions to one per IDR_COOLDOWN_MS; requests inside the window
+    // real submissions to one per idr_cooldown; requests inside the window
     // are dropped. That is safe because the client keeps re-requesting on its
     // own (§FRZ-WATCHDOG every 1 s, CONSECUTIVE_DROP_LIMIT ≈ 0.7-0.9 s, ENet
     // reliable), so a dropped request costs at most ~1 s. Do NOT "coalesce"
@@ -2193,8 +2297,9 @@ namespace video {
     // 網路閃斷 3 秒後 client 要不到 IDR，畫面永久凍結直到使用者退出。
     // 初值改為「一個 cooldown 之前」，第一個請求必通過；比較式改成
     // now >= last + cooldown，任何 steady_clock 值下都不溢位。
-    constexpr auto IDR_COOLDOWN_MS = std::chrono::milliseconds {1500};
-    auto last_idr_emit = std::chrono::steady_clock::now() - IDR_COOLDOWN_MS;
+    // §VR：cooldown 改成具名常數，依 vrProfile 選用（桌面 1500 ms 與舊版相同，VR 300 ms）。
+    const auto idr_cooldown = config.vrProfile ? kVrIdrCooldownMs : kDesktopIdrCooldownMs;
+    auto last_idr_emit = std::chrono::steady_clock::now() - idr_cooldown;
     constexpr int STARTUP_IDR_RETRY_FRAME = 16;  // §K.14（見下方）
     // §S.19 診斷：標示本 encoder 生命期的 frame_nr 起點，一眼看出
     // §K.14 會不會再觸發（encoder 重建後 frame_nr 已 >16 就不會）。
@@ -2237,15 +2342,63 @@ namespace video {
       if (requested_idr_frame) {
         // VipleStream: §S.19 cooldown gate (see top of run() for rationale).
         auto now = std::chrono::steady_clock::now();
-        if (now >= last_idr_emit + IDR_COOLDOWN_MS) {
+        if (now >= last_idr_emit + idr_cooldown) {
           session->request_idr_frame();
           last_idr_emit = now;
           BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr << " (cooldown OK)";
+          if (vr_state) {
+            // idr_events 的來源：起播、client 的 IDR 要求、recovery=idr 的 LOSS
+            BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=request f=" << frame_nr;
+          }
         }
         else {
           requested_idr_frame = false;  // suppress for this iteration; client will re-request
           BOOST_LOG(info) << "[VIPLE-QLOG] IDR-SUPPRESS f=" << frame_nr << " (cooldown active)";
         }
+      }
+
+      // VipleStream 2.0 §VR：LOSS 觸發的 intra-refresh wave（control 執行緒 raise mail::vr_refresh，
+      // 值是 wave 長度）。成功 → 下一幀起 N 幀是 wave；encoder 做不到 → 改送 IDR（套 VR cooldown）。
+      if (vr_state && vr_refresh_events->peek()) {
+        if (auto wave_frames = vr_refresh_events->pop(0ms)) {
+          const int frames = std::clamp(*wave_frames, 1, 255);
+          if (requested_idr_frame) {
+            // 這一幀本來就要送 IDR：IDR 本身就是完整的恢復點，當成長度 1 的 wave
+            vr_wave.start(1, VIPLE_VR_REFRESH_IDR);
+          } else if (session->request_intra_refresh(frames)) {
+            vr_wave.start(frames, VIPLE_VR_REFRESH_LOSS);
+          } else {
+            auto now = std::chrono::steady_clock::now();
+            if (now >= last_idr_emit + idr_cooldown) {
+              session->request_idr_frame();
+              requested_idr_frame = true;
+              last_idr_emit = now;
+              vr_wave.start(1, VIPLE_VR_REFRESH_IDR);
+              BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=refresh-fallback f=" << frame_nr << " (encoder has no intra refresh)";
+            } else {
+              // LOSS handler 已經回過 REFRESH_START，放棄會讓 client 空等 1 秒：cooldown 一到就補送
+              // IDR（wave 維持 pending，期間的 LOSS 一律吸收）
+              vr_idr_retry_pending = true;
+              BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=refresh-fallback deferred f=" << frame_nr << " (VR cooldown active)";
+            }
+          }
+        }
+      }
+      if (vr_state && vr_idr_retry_pending && !requested_idr_frame) {
+        auto now = std::chrono::steady_clock::now();
+        if (now >= last_idr_emit + idr_cooldown) {
+          session->request_idr_frame();
+          requested_idr_frame = true;
+          last_idr_emit = now;
+          vr_idr_retry_pending = false;
+          vr_wave.start(1, VIPLE_VR_REFRESH_IDR);
+          BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=refresh-fallback-retry f=" << frame_nr;
+        }
+      }
+      // 這一輪的 wave 決定已定案：之後才到的 LOSS 最早從下一幀開始。LOSS handler 用它當
+      // REFRESH_START.startFrame，估計值因此幾乎總是精確（encode 後也會再設一次）
+      if (vr_state) {
+        vr_state->set_next_frame((uint32_t) frame_nr + 1);
       }
 
       // VipleStream: Adaptive Bitrate — apply new bitrate from control thread
@@ -2273,7 +2426,9 @@ namespace video {
             if (nvenc_session) {
               auto nvenc_dev = nvenc_session->get_nvenc_device();
               if (nvenc_dev && nvenc_dev->nvenc) {
-                nvenc_dev->nvenc->reconfigure_bitrate(*newBitrateKbps, config.framerate, isDecrease);
+                // §VR F13：VR session 降碼也走平滑過渡（不 reset、不 IDR）；一幀大 IDR 在 VR
+                // 就是一次明顯卡頓，恢復交給 intra refresh。一般 session 行為不變。
+                nvenc_dev->nvenc->reconfigure_bitrate(*newBitrateKbps, config.framerate, isDecrease && !config.vrProfile);
               }
             }
           }
@@ -2337,11 +2492,56 @@ namespace video {
         session->request_idr_frame();
         last_idr_emit = std::chrono::steady_clock::now();
         BOOST_LOG(info) << "[VIPLE-IDR] §K.14 startup IDR retry at frame " << frame_nr;
+        if (vr_state) {
+          BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=startup-retry f=" << frame_nr;
+        }
       }
 
-      if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
+      // VipleStream 2.0 §VR：encode 之前取最新的 tracking 樣本，連同 wave 狀態一起帶進這一幀
+      // 的 packet。frame_nr 就是線上的 NV_VIDEO_PACKET.frameIndex（NVENC 的 outputTimeStamp
+      // 與 avcodec 的 pts 都是它），所以 wave 的起點直接用它。
+      vr_frame_meta_t vr_meta {};
+      if (vr_state) {
+        vr_fill_pose(*vr_state, vr_meta);
+        if (vr_wave.remaining > 0) {
+          vr_meta.in_wave = true;
+          vr_meta.wave_start = vr_wave.first;
+          vr_meta.wave_done = (vr_wave.remaining == 1);
+          vr_meta.wave_len = vr_wave.len;
+          vr_meta.wave_reason = vr_wave.reason;
+          if (vr_wave.first) {
+            vr_state->on_wave_begin((uint32_t) frame_nr, vr_wave.len, vr_wave.reason);
+
+            // wave 是稀疏事件，但重度掉包時可能一秒好幾波：每秒最多一行
+            const auto now = std::chrono::steady_clock::now();
+            if (vr_wave_log_last == std::chrono::steady_clock::time_point {} || now - vr_wave_log_last >= 1s) {
+              BOOST_LOG(info) << "[VIPLE-VR-ENC] refresh wave f=" << frame_nr
+                              << " cnt=" << (int) vr_wave.len
+                              << " reason=" << (vr_wave.reason == VIPLE_VR_REFRESH_IDR ? "idr"sv : "loss"sv)
+                              << " (+" << vr_wave_log_suppressed << " suppressed)";
+              vr_wave_log_last = now;
+              vr_wave_log_suppressed = 0;
+            } else {
+              ++vr_wave_log_suppressed;
+            }
+          }
+        }
+      }
+
+      if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp, vr_state ? &vr_meta : nullptr)) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         return;
+      }
+
+      if (vr_state) {
+        vr_state->set_next_frame((uint32_t) frame_nr);
+      }
+
+      if (vr_state && vr_wave.remaining > 0) {
+        vr_wave.first = false;
+        if (--vr_wave.remaining == 0) {
+          vr_state->on_wave_end();
+        }
       }
 
       session->request_normal_frame();
@@ -3070,6 +3270,7 @@ namespace video {
     active_hevc_mode = config::video.hevc_mode;
     active_av1_mode = config::video.av1_mode;
     last_encoder_probe_supported_ref_frames_invalidation = false;
+    last_encoder_probe_supported_vr_intra_refresh = false;
 
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support
@@ -3194,6 +3395,11 @@ namespace video {
     auto &encoder = *chosen_encoder;
 
     last_encoder_probe_supported_ref_frames_invalidation = (encoder.flags & REF_FRAMES_INVALIDATION);
+#ifdef _WIN32
+    // VipleStream 2.0 §VR：隨選 intra refresh（forceIntraRefreshWithFrameCnt）只有 Windows 的
+    // 原生 NVENC（nvenc_base）實作；AMF、QSV、軟體編碼、Linux 走 avcodec 的 NVENC 都沒有。
+    last_encoder_probe_supported_vr_intra_refresh = (&encoder == &nvenc);
+#endif
     last_encoder_probe_supported_yuv444_for_codec[0] = encoder.h264[encoder_t::PASSED] &&
                                                        encoder.h264[encoder_t::YUV444];
     last_encoder_probe_supported_yuv444_for_codec[1] = encoder.hevc[encoder_t::PASSED] &&

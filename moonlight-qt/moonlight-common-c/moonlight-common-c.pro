@@ -75,6 +75,7 @@ SOURCES += \
     $$COMMON_C_DIR/src/VideoStream.c
 HEADERS += \
     $$COMMON_C_DIR/src/Limelight.h \
+    $$COMMON_C_DIR/src/VipleVr.h \
     $$COMMON_C_DIR/src/HolePunch.h \
     $$COMMON_C_DIR/src/UdpTunnel.h
 INCLUDEPATH += \

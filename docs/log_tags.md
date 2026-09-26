@@ -292,6 +292,125 @@ INPUT 類別，app 從未設該類別等級，所以**永遠不會出現在 log*
 
 ---
 
+## 5b. VR（2.0 §VR，M1a 起）
+
+VR 相關 tag 只在 VR session 出現：client 帶 `--display-target pcvr`，而且 server 回了
+`<VipleStreamVRSession>`。一般 session 一行都不會有；一般 session 出現這些 tag 就是 regression
+（不變式 5）。協定細節見 `docs/vr_protocol.md`（M1a 定案在 §4.9）。
+
+### client 端
+
+#### `[VIPLE-VR-SESSION]` —— 協商與 session 狀態
+
+```
+[VIPLE-VR-SESSION] requesting PCVR (emulated pose): eye=1728x1728 hz=90 serverCaps=0x23
+[VIPLE-VR-SESSION] VR request: stream 3456x1728@90 (FRUC off)
+[VIPLE-VR-SESSION] negotiated: proto=1 packed=3456x1728 hz=90 codec=hevc layout=sbs overscan=0 recovery=intra irFrames=8 transport=rtp mode=stub session=…
+[VIPLE-VR-SESSION] VR session: vrFlags=0x3 (recovery=intra)                    ← common-c，LiStartConnection
+[VIPLE-VR-SESSION] ENet throttle configured (interval=5000 accel=2 decel=0)    ← 首次連線與每次 ENet 重連後
+[VIPLE-VR-SESSION] VR session: video over RTP/UDP (QUIC kept for control/tracking)
+[VIPLE-VR-SESSION] server state=3 progress=100 code=0                          ← 0x5508 STATE（3＝STUB_ECHO）
+```
+
+`serverCaps` 是 `/serverinfo` 的 `<VipleStreamVR>`：0x01 PROTO_V1、0x02 PCVR、0x20 RECOVERY_INTRA。
+退回平面時一律印 WARN，原因分別是：
+- `needs an XR runtime`：沒帶 `--vr-emulate`；
+- `host does not offer PCVR`：server 沒有 PCVR bit，也就是 `vr_pcvr=disabled`、Linux server 或舊 server；
+- `server did not confirm a VR session`：舊 server 忽略了 `vr=1`；
+- `relay path — VR not requested`；
+- `no 8-bit HEVC/H.264 decoder`。
+
+server 拒絕時，launch 會以「Host returned error: VR_BUSY: …」之類的錯誤結束，錯誤碼見 `VipleVr.h`。
+
+#### `[VIPLE-VR-POSE]` —— tracking 上行（0x5506）
+
+```
+[VIPLE-VR-POSE] tracking sender started: 180 Hz (display 90 Hz × 2), motion=sine
+[VIPLE-VR-POSE] 10s: sent=1800 (180.0/s) fail=0 late=0 lastId=…
+[VIPLE-VR-POSE] (final) sent=… (…/s over … s) fail=… late=… lastId=…
+[VIPLE-VR-POSE] tracking send failing — backing off 1000 ms (sent=… dropped=…)   ← common-c
+```
+
+- `late`：送出執行緒落後超過一個週期、直接跳到下一個格點的次數。舊樣本沒有價值，所以不補發。
+- ENet 和 QUIC 都送不出去時，連續 3 次就暫停 1 秒，所以斷線期間每秒最多一行 backoff。
+
+#### `[VIPLE-VR-FRAME]` —— 解出的幀與 0x81 metadata 的配對
+
+```
+[VIPLE-VR-FRAME] pts-keyed metadata pairing enabled (injectDropEvery=0 injectLossSec=0)
+[VIPLE-VR-FRAME] 10s: decoded=… submitted=… hit=… miss=0 noHeader=0 echoMatched=…/… (100.00%) echoKnown=… fallback=0 refreshDone=… fifoMismatch=… fifoSkipped=… injectedDrops=… injectedLoss=… ptsMissing=0 echoAge p50=…ms p95=…ms max=…ms
+[VIPLE-VR-FRAME] (final) …（整場累計，decoder 解構時印；decoder 重建時會提前印一次）
+[VIPLE-VR-FRAME] meta-miss: pts=… slot=… used=…
+[VIPLE-VR-FRAME] decoder did not carry pts — falling back to FIFO pairing
+```
+
+判讀：
+- **echo 命中率** = `echoMatched / (hit − noHeader)`，M1a 門檻 ≥ 99%。`echoKnown` 是 echoSampleId 還查得到取樣時間的幀數。
+- **`echoAge`** = 解出這一幀的時間 − 它回聲的 tracking 樣本的取樣時間（client 時鐘）。M1a 的 stub
+  沒有遊戲 render，這個值約等於上行、server 等下一幀、編碼、下行、解碼的總和，可當作之後 MTP 的下限參考。
+- **`miss` 必須是 0**。`fifoMismatch` 是「還用 FIFO 配對的話會配錯幾次」，只在 decoder 吞幀或
+  `--vr-inject-drop` 注入時才會大於 0；`fifoSkipped` 是因此從 FIFO 丟掉的項目數。M1a 的驗收條件
+  「decoder 丟一幀注入後 0 不一致」＝ `injectedDrops>0`、`fifoMismatch>0`，而且 `miss=0`。
+- `ptsMissing>0` 代表這顆 decoder 沒把 pts 帶回來，配對退回 FIFO，PCVR 在這種 decoder 上不可靠。
+- `(final)` 在同一場裡印了很多次，代表 decoder 一直被重建，要找 `Resetting decoder` 的原因。
+
+#### `[VIPLE-VR-LOSS]` —— recovery=intra 的恢復狀態機（common-c／decoder）
+
+```
+[VIPLE-VR-LOSS] 10s: lossEvents=… sends=… resends=… refreshRx=… stale=… recovered=… idrFallback=… lossToRefresh avg=…ms max=…ms recover avg=…ms max=…ms
+[VIPLE-VR-LOSS] (final) lossEvents=… recovered=… idrFallbacks=… refreshRx=… tracking sent=… dropped=…
+[VIPLE-VR-LOSS] no refresh response — falling back to IDR (lost a..b)
+[VIPLE-VR-LOSS] frame N unrecoverable — reporting LOSS (…)                ← depacketizer（取代 RFI 那一行）
+[VIPLE-VR-LOSS] injected LOSS for frame N (test)                            ← --vr-inject-loss
+[VIPLE-VR-LOSS] 3 consecutive decode errors — requesting IDR (frame N)       ← Qt decoder
+[VIPLE-VR-LOSS] failed to create VrSend thread — LOSS will be sent synchronously
+```
+
+- 10 秒統計只在有動靜時印。
+- `lossToRefresh` ＝ 送出 LOSS 到收到對應 REFRESH_START 的時間。server 接受 LOSS 當下就回覆，所以
+  約等於 1 RTT（M1a 在 LAN 實測 ≤ 1 ms）。
+- `recover` ＝ 從掉幀到收到帶 `REFRESH_DONE` 的幀（或 IDR）的時間。主要是 wave 本身的長度：
+  8 幀在 64 fps 下約 125 ms。
+- `stale` 約等於 `refreshRx`：server 每個 REFRESH_START 都送 2 份（第二份晚一個 control tick），第二份一定被當成過期。
+- `resends>0` 代表 REFRESH_START 在 2×RTT+20 ms 內沒到。`idrFallback>0` 代表 server 沒回應 LOSS，
+  重送 3 次或等了 500 ms 才退回 IDR，要對照 server 端的 `[VIPLE-VR-LOSS]`。
+
+#### `[VIPLE-VR-STATS]` —— server 統計的 10 秒區間（client 端印）
+
+```
+[VIPLE-VR-STATS] server 10.0s (10 msgs): poseRx=… ooo=… gap=… tagged=… fallback=… lossRx=… waves=… | refreshStartRx=…
+```
+
+server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差。`poseRx` 應約等於同一區間 client
+`[VIPLE-VR-POSE]` 的 `sent`，兩者的差距就是上行丟失（M1a 門檻 ≤ 0.5%）。`tagged` 應約等於解出的幀數。
+
+### server 端（sunshine.log）
+
+```
+[VIPLE-VR-SESSION] accepted /launch caller=… eye=1728x1728 hz=90 … -> proto=1;packed=…;mode=stub (serverIntra=true safetyMs=2000)
+[VIPLE-VR-SESSION] /launch: skipping configure_display (stub captures the current desktop)
+[VIPLE-VR-SESSION] rejected /launch: 503 VR_BUSY: another device's VR session is active on this host (caller uuid=…)
+[VIPLE-VR-SESSION] RTSP ANNOUNCE session=… vrProfile=1 irFrames=8 irPeriodFrames=180 enableIntraRefresh=1 recovery=intra encode=3456x1728@90
+[VIPLE-VR-SESSION] stream session start session=… mode=stub codec=hevc recovery=intra loopTimeout=4ms
+[VIPLE-VR-SESSION] control connected, STATE stub-echo queued (session=…)
+[VIPLE-VR-SESSION] (final) session=… frames tagged=… fallback=… loss=… waves=… latch=… timing=… otherC2S=… truncatedC2S=… s2cDropped=…
+[VIPLE-VR-ENC] intra refresh: codec=hevc cnt=8 period=180 singleSlice=1        ← encoder 建立時一次；不支援時 "intra refresh unsupported"
+[VIPLE-VR-ENC] idr reason=request|startup-retry|refresh-fallback|refresh-fallback-retry f=…
+[VIPLE-VR-ENC] idr reason=refresh-fallback deferred f=… (VR cooldown active)  ← encoder 沒有 IR、IDR 在冷卻：冷卻一到補送
+[VIPLE-VR-ENC] refresh wave f=… cnt=8 reason=loss (+N suppressed)            ← 每秒最多一行
+[VIPLE-VR-TX] transport=rtp (VR video forced to RTP/UDP; QUIC session present, kept for control fallback)
+[VIPLE-VR-POSE-RX] 10s: rx=1800 (180.0/s) ooo=0 gap=… viaQuic=… bad=0 lastId=… | frames tagged=… fallback=0 | c2s loss=… waves=… latch=… timing=… other=…
+[VIPLE-VR-POSE-RX] (final) rx=… ooo=… gap=… viaQuic=… bad=… resets=… lastId=…
+[VIPLE-VR-LOSS] rx first=… last=… reason=… -> new_wave|absorbed|duplicate|idr (+N suppressed, total=…)   ← duplicate 只在 50 ms 內、RESEND 不算
+```
+
+- 一般情況下 `viaQuic` 應該是 0（tracking 走 ENet VR channel）。持續大於 0 代表 client 的 MP-QUIC 判定
+  failover、Fix L 把控制訊息轉去 QUIC，要看 client 的 `§Q-FAILOVER-BYPASS`、`marked INACTIVE`。VR
+  session 的視訊走 RTP，QUIC 上平常沒有流量；client 每 500 ms 在 QUIC 送 `'P'` 讓路徑保持活躍，
+  少了這個就會被判 stall。
+- `gap` 是 sampleId 跳號累計，也就是上行丟失的估計；`ooo` 是倒退或重複。
+- VR session 的 control 迴圈每 4 ms 醒一次，只有 VR session 如此。
+
 ## 6. 分析工具
 
 ```powershell

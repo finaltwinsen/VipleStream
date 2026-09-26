@@ -43,6 +43,29 @@ namespace video {
     int chromaSamplingType;  // 0 - 4:2:0, 1 - 4:4:4
 
     int enableIntraRefresh;  // 0 - disabled, 1 - enabled
+
+    // VipleStream 2.0 §VR（不變式 4）：新欄位只加在尾端、一律用 default member initializer，
+    // 既有的 aggregate 初始化點（video.cpp 的探測設定）不必改，自動帶 0 = 一般 session。
+    int vrProfile = 0;  // 1 = VR session（M1a stub）：強制 intra refresh、VR IDR cooldown、ABR 降碼不 IDR
+    int vrIntraRefreshFrames = 0;  // LOSS 觸發的 intra-refresh wave 長度（幀）
+    int vrIntraRefreshPeriodFrames = 0;  // 週期性 intra refresh 安全網的間隔（幀），0 = 關閉
+  };
+
+  /**
+   * @brief VipleStream 2.0 §VR：一幀的 VR metadata（encode 執行緒填、videoBroadcast 執行緒
+   *        組 24 B 的 0x81 header）。POD，一般 session 永遠是全 0。
+   */
+  struct vr_frame_meta_t {
+    bool valid = false;  // 帶了收到的 tracking 樣本（POSE_VALID|ECHO_MATCHED）
+    uint32_t echoSampleId = 0;  // 0 = 沒有樣本
+    float pos[3] = {};  // HMD 位置（公尺）
+    float rot[4] = {0.0f, 0.0f, 0.0f, 1.0f};  // HMD 四元數 x, y, z, w
+    uint8_t flags = 0;  // VIPLE_VR_FF_*（REFRESH_DONE 以外；那個由 wave_done 決定）
+    bool in_wave = false;  // 屬於一波 intra refresh（frameType = 4）
+    bool wave_start = false;  // wave 的第一幀：videoBroadcast 看到就送 REFRESH_START
+    bool wave_done = false;  // wave 的最後一幀：vrFlags 加 VIPLE_VR_FF_REFRESH_DONE
+    uint8_t wave_len = 0;  // wave 長度（REFRESH_START.frameCnt）
+    uint8_t wave_reason = 0;  // VIPLE_VR_REFRESH_*
   };
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
@@ -217,6 +240,15 @@ namespace video {
     virtual void request_normal_frame() = 0;
 
     virtual void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
+
+    /**
+     * @brief VipleStream 2.0 §VR：下一幀開始一波長度 frameCnt 的 intra refresh。
+     * @return false 表示這個 encoder 做不到（呼叫端改要 IDR）。預設一律 false，
+     *         只有 NVENC（nvenc_base 的 forceIntraRefreshWithFrameCnt）實作。
+     */
+    virtual bool request_intra_refresh(int frameCnt) {
+      return false;
+    }
   };
 
   // encoders
@@ -267,6 +299,7 @@ namespace video {
     void *channel_data = nullptr;
     bool after_ref_frame_invalidation = false;
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+    vr_frame_meta_t vr_meta {};  // VipleStream 2.0 §VR：只有 VR session 會填
   };
 
   struct packet_raw_avcodec: packet_raw_t {
@@ -345,6 +378,10 @@ namespace video {
   extern int active_av1_mode;
   extern bool last_encoder_probe_supported_ref_frames_invalidation;
   extern std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec;  // 0 - H.264, 1 - HEVC, 2 - AV1
+  // VipleStream 2.0 §VR：最近一次探測選到的 encoder 能不能做隨選 intra refresh（目前只有
+  // Windows 的原生 NVENC；實際支援度要等 encoder 建立時查 NV_ENC_CAPS_SUPPORT_INTRA_REFRESH，
+  // 查不到時 LOSS 會退回 IDR）。決定 /serverinfo 的 RECOVERY_INTRA 與 launch 的 recovery 模式。
+  extern bool last_encoder_probe_supported_vr_intra_refresh;
 
   void capture(
     safe::mail_t mail,

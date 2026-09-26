@@ -4,6 +4,8 @@
 #include <QCoreApplication>
 #include <QRegularExpression>
 
+#include <Limelight.h>  // §VR：VIPLE_VR_* 範圍常數
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -464,6 +466,17 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addChoiceOption("quic-scheduler", "MP-QUIC scheduler",
                            m_QuicSchedulerMap.keys());
 
+    // VipleStream 2.0 §VR（M1a）— PCVR 協定驗證。這些值只存在這次行程，
+    // 不寫入 QSettings（見 StreamingPreferences 的 §VR 欄位註解）。
+    parser.addChoiceOption("display-target", "display target", {"window", "pcvr"});
+    parser.addFlagOption("vr-emulate", "synthetic head/controller pose for PCVR (no XR runtime needed)");
+    parser.addChoiceOption("vr-synthetic-motion", "synthetic pose motion for --vr-emulate",
+                           {"still", "sine", "yaw30"});
+    parser.addValueOption("vr-eye", "per-eye <width>x<height> for PCVR (default 1728x1728)");
+    parser.addValueOption("vr-hz", "HMD refresh rate for PCVR (default 90)");
+    parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
+    parser.addValueOption("vr-inject-loss", "(dev) N: inject a VR LOSS report every N seconds");
+
     if (!parser.parse(args)) {
         parser.showError(parser.errorText());
     }
@@ -636,6 +649,44 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     if (parser.isSet("quic-scheduler")) {
         preferences->mpQuicScheduler =
             mapValue(m_QuicSchedulerMap, parser.getChoiceOptionValue("quic-scheduler"));
+    }
+
+    // VipleStream 2.0 §VR（M1a）
+    if (parser.isSet("display-target")) {
+        preferences->displayTarget =
+            parser.getChoiceOptionValue("display-target").compare("pcvr", Qt::CaseInsensitive) == 0
+                ? StreamingPreferences::DT_PCVR : StreamingPreferences::DT_WINDOW;
+    }
+    preferences->vrEmulate = parser.isSet("vr-emulate");
+    if (parser.isSet("vr-synthetic-motion")) {
+        const QString motion = parser.getChoiceOptionValue("vr-synthetic-motion").toLower();
+        preferences->vrSyntheticMotion = motion == "still" ? 0 : (motion == "yaw30" ? 2 : 1);
+    }
+    if (parser.isSet("vr-eye")) {
+        auto eye = parser.getResolutionOptionValue("vr-eye");
+        if (!inRange(eye.first, VIPLE_VR_EYE_DIM_MIN, VIPLE_VR_EYE_DIM_MAX) ||
+                !inRange(eye.second, VIPLE_VR_EYE_DIM_MIN, VIPLE_VR_EYE_DIM_MAX)) {
+            parser.showError(QString("vr-eye must be within %1-%2 per dimension")
+                                 .arg(VIPLE_VR_EYE_DIM_MIN).arg(VIPLE_VR_EYE_DIM_MAX));
+        }
+        preferences->vrEyeWidth = eye.first;
+        preferences->vrEyeHeight = eye.second;
+    }
+    if (parser.isSet("vr-hz")) {
+        preferences->vrRefreshHz = parser.getIntOption("vr-hz");
+        if (!inRange(preferences->vrRefreshHz, VIPLE_VR_HZ_MIN, VIPLE_VR_HZ_MAX)) {
+            parser.showError(QString("vr-hz must be within %1-%2").arg(VIPLE_VR_HZ_MIN).arg(VIPLE_VR_HZ_MAX));
+        }
+    }
+    if (parser.isSet("vr-inject-drop")) {
+        preferences->vrInjectDropEvery = parser.getIntOption("vr-inject-drop");
+    }
+    if (parser.isSet("vr-inject-loss")) {
+        preferences->vrInjectLossSec = parser.getIntOption("vr-inject-loss");
+    }
+    if (preferences->displayTarget == StreamingPreferences::DT_PCVR && !preferences->vrEmulate) {
+        fprintf(stderr, "Warning: --display-target pcvr needs --vr-emulate in this build (no XR runtime yet); "
+                        "the stream will fall back to a flat window.\n");
     }
 
     // This method will not return and terminates the process if --version or

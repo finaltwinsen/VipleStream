@@ -24,6 +24,10 @@ static uint64_t firstPacketPresentationTime;
 static uint32_t firstPacketRtpTimestamp;
 static bool dropStatePending;
 static bool idrFrameProcessed;
+// §VR：VR session 解析 0x81 header 的 VR 欄位；recovery=intra 時掉幀不等 IDR／RFI
+static bool vrSession;
+static bool vrIntraRecovery;
+static VIPLE_VR_FRAME_META frameVrMeta;  // 目前這一幀（第一個封包解析、reassemble 時帶出）
 
 // §K.10 diag: dropFrameState 呼叫次數（移到頂部避免前向參照）
 static unsigned int dropFrameCallCount = 0;
@@ -92,13 +96,18 @@ void initializeVideoDepacketizer(int pktSize) {
     lastPacketPayloadLength = 0;
     dropStatePending = false;
     idrFrameProcessed = false;
-    strictIdrFrameWait = !isReferenceFrameInvalidationEnabled();
+    vrSession = (VrFlags & VIPLE_VR_SF_ENABLED) != 0;
+    vrIntraRecovery = vrSession && (VrFlags & VIPLE_VR_SF_RECOVERY_INTRA) != 0;
+    memset(&frameVrMeta, 0, sizeof(frameVrMeta));
+    // §VR：recovery=intra 時第一個 IDR 之後不再嚴格等 IDR（掉幀改送 LOSS）
+    strictIdrFrameWait = !isReferenceFrameInvalidationEnabled() && !vrIntraRecovery;
     dropFrameCallCount = 0;
     lastQueuedFrameTimeUs = 0;          // §FRZ-WATCHDOG
     resyncFrameNumberPending = false;   // §FRZ-WATCHDOG
-    Limelog("[VIPLE-DEPACK] init: strictIdrFrameWait=%d (RFI %s)\n",
+    Limelog("[VIPLE-DEPACK] init: strictIdrFrameWait=%d (RFI %s%s)\n",
             (int)strictIdrFrameWait,
-            strictIdrFrameWait ? "disabled" : "enabled");
+            isReferenceFrameInvalidationEnabled() ? "enabled" : "disabled",
+            vrIntraRecovery ? ", VR recovery=intra" : (vrSession ? ", VR recovery=idr" : ""));
 }
 
 // Free the NAL chain
@@ -131,9 +140,10 @@ static void dropFrameStateFrom(int caller) {
     if (willWaitIdr) {
         waitingForIdrFrame = true;
     }
-    else {
+    else if (!vrIntraRecovery) {
         waitingForRefInvalFrame = true;
     }
+    // §VR：recovery=intra 不等 RFI 幀——server 以 intra refresh 恢復，後續幀照常送進 decoder
 
     // Count the number of consecutive frames dropped
     consecutiveFrameDrops++;
@@ -540,6 +550,12 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
                 qdu->decodeUnit.frameType = FRAME_TYPE_PFRAME;
             }
 
+            // §VR：一般 session 的 frameVrMeta 恆為全 0（present=0）。
+            // qdu 送進佇列後可能被別的執行緒釋放，恢復狀態機要用的值先取出來。
+            qdu->decodeUnit.vrMeta = frameVrMeta;
+            uint8_t vrFrameFlags = frameVrMeta.vrFlags;
+            bool vrFrameIsIdr = qdu->decodeUnit.frameType == FRAME_TYPE_IDR;
+
             nalChainHead = nalChainTail = NULL;
             nalChainDataLength = 0;
 
@@ -584,6 +600,11 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
 
             // Move the start of our (potential) RFI window to the next frame
             startFrameNumber = nextFrameNumber;
+
+            // §VR：REFRESH_DONE／IDR 結束 degraded，並推進 LOSS 重送逾時
+            if (vrSession) {
+                vrRecoveryOnFrame((uint32_t)frameNumber, vrFrameFlags, vrFrameIsIdr);
+            }
         }
     }
 }
@@ -879,11 +900,20 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
                         frameIndex - 1);
             }
 
-            nextFrameNumber = frameIndex;
+            if (vrIntraRecovery && idrFrameProcessed && !waitingForIdrFrame) {
+                // §VR：recovery=intra 回報掉的範圍（送 LOSS）後照常組這一幀，
+                // 破圖由 intra refresh 自癒；不等下一個完整幀、也不丟棄這一幀。
+                uint32_t lostFirst = nextFrameNumber;
+                nextFrameNumber = frameIndex;
+                connectionDetectedFrameLoss(lostFirst, frameIndex - 1);
+            }
+            else {
+                nextFrameNumber = frameIndex;
 
-            // Wait until next complete frame
-            waitingForNextSuccessfulFrame = true;
-            dropFrameState();
+                // Wait until next complete frame
+                waitingForNextSuccessfulFrame = true;
+                dropFrameState();
+            }
         }
         else {
             LC_ASSERT(nextFrameNumber == frameIndex);
@@ -893,6 +923,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         decodingFrame = true;
         frameType = FRAME_TYPE_PFRAME;
         firstPacketReceiveTimeUs = receiveTimeUs;
+        memset(&frameVrMeta, 0, sizeof(frameVrMeta));
 
         // Some versions of Sunshine don't send a valid PTS, so we will
         // synthesize one using the receive time as the time base.
@@ -1009,6 +1040,21 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             else {
                 LC_ASSERT_VT(currentPos.data[0] == (char)0x81);
                 frameHeaderSize = 24;
+
+                // §VR：VR session 的 24 B header 在 byte 6–23 帶 VR metadata
+                //（VipleVr.h VIPLE_VR_FRAME_HEADER；前 6 B 與 short header 相同，上面已解析）
+                if (vrSession && currentPos.length >= VIPLE_VR_FRAME_HEADER_SIZE) {
+                    VIPLE_VR_FRAME_HEADER hdr;
+                    memcpy(&hdr, &currentPos.data[currentPos.offset], sizeof(hdr));
+                    frameVrMeta.present = 1;
+                    frameVrMeta.vrFlags = hdr.vrFlags;
+                    frameVrMeta.layoutEpoch = hdr.layoutEpoch;
+                    frameVrMeta.echoSampleId = hdr.echoSampleId;
+                    VipleVrUnpackQuat48(hdr.renderRot, frameVrMeta.renderRot);
+                    for (int i = 0; i < 3; i++) {
+                        frameVrMeta.renderPos[i] = (float)hdr.renderPos[i] / VIPLE_VR_POS_UNITS_PER_M;
+                    }
+                }
             }
         }
         else if (APP_VERSION_AT_LEAST(7, 1, 350)) {
@@ -1277,8 +1323,10 @@ void notifyFrameLost(unsigned int frameNumber, bool speculative) {
     dropFrameState();
 
     // If dropFrameState() determined that RFI was usable, issue it now
+    // （§VR：recovery=intra 時 dropFrameState 不設 RFI 等待，改由
+    //  connectionDetectedFrameLoss 送 LOSS）
     if (!waitingForIdrFrame) {
-        LC_ASSERT(waitingForRefInvalFrame);
+        LC_ASSERT(waitingForRefInvalFrame || vrIntraRecovery);
 
         // §LOG-NFL-AGG：Sending RFI request 同法節流（speculative / 非
         // speculative 共用同一節流狀態；實際 RFI 送出行為不受影響）
@@ -1287,7 +1335,11 @@ void notifyFrameLost(unsigned int frameNumber, bool speculative) {
             static uint32_t rfiReqSuppressed;
             uint64_t nowMs = PltGetMillis();
             if (lastRfiReqLogMs == 0 || nowMs - lastRfiReqLogMs >= 1000) {
-                if (speculative) {
+                if (vrIntraRecovery) {
+                    Limelog("[VIPLE-VR-LOSS] %sframe %d unrecoverable — reporting LOSS (%u reports since last log)\n",
+                            speculative ? "(speculative) " : "", frameNumber, rfiReqSuppressed + 1);
+                }
+                else if (speculative) {
                     Limelog("Sending speculative RFI request for predicted loss of frame %d (%u requests since last log)\n",
                             frameNumber, rfiReqSuppressed + 1);
                 }

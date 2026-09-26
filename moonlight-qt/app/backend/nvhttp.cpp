@@ -195,7 +195,9 @@ NvHTTP::startApp(QString verb,
                  int gamepadMask,
                  bool persistGameControllersOnDisconnect,
                  QString& rtspSessionUrl,
-                 bool takeover)
+                 bool takeover,
+                 const QString& extraQuery,
+                 QString* launchResponse)
 {
     int riKeyId;
 
@@ -226,7 +228,8 @@ NvHTTP::startApp(QString verb,
                                    "&gcpersist="+QString::number(persistGameControllersOnDisconnect ? 1 : 0)+
                                    // §M.2: send takeover=1 when user confirmed session takeover
                                    (takeover ? "&takeover=1" : "")+
-                                   LiGetLaunchUrlQueryParameters(),
+                                   LiGetLaunchUrlQueryParameters()+
+                                   extraQuery,
                                    LAUNCH_TIMEOUT_MS);
 
     qInfo() << "Launch response:" << response;
@@ -235,6 +238,9 @@ NvHTTP::startApp(QString verb,
     verifyResponseStatus(response);
 
     rtspSessionUrl = getXmlString(response, "sessionUrl0");
+    if (launchResponse != nullptr) {
+        *launchResponse = response;
+    }
 }
 
 void

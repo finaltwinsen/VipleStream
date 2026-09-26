@@ -11,6 +11,10 @@
 #include "crypto.h"
 #include "thread_safe.h"
 
+namespace vr {
+  struct negotiated_t;
+}  // namespace vr
+
 namespace rtsp_stream {
   constexpr auto RTSP_SETUP_PORT = 21;
 
@@ -47,6 +51,11 @@ namespace rtsp_stream {
     // 用途：同一 client 被強制關閉後立刻重開時，收掉它自己殘留的
     // stream session 與還沒被消化的 pending launch（見 rtsp.cpp）。
     std::string client_cert_uuid;
+
+    // VipleStream 2.0 §VR：/launch 或 /resume 帶 vr=1 且協商成功時的結果（nvhttp 建立，
+    // 之後唯讀）；nullptr = 一般 session。cmd_announce 據此設 vrProfile，session::alloc
+    // 據此建立 vr::session_state_t。
+    std::shared_ptr<const ::vr::negotiated_t> vr;
   };
 
   void launch_session_raise(std::shared_ptr<launch_session_t> launch_session);

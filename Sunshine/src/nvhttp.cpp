@@ -50,6 +50,8 @@
 #include "utility.h"
 #include "uuid.h"
 #include "video.h"
+#include "vr/vr_platform.h"
+#include "vr/vr_session.h"
 
 #ifdef _WIN32
   #include "platform/windows/steam_scanner.h"
@@ -859,6 +861,22 @@ namespace nvhttp {
       tree.put("root.VipleStreamMPQUIC", "1");
     }
 
+    // VipleStream 2.0 §VR（docs/vr_protocol.md §4.2）：<VipleStreamVR> 十進位 bitmask。
+    // PROTO_V1 恆設；PCVR 只在平台支援（Windows）且 vr_pcvr 不是 disabled 時設；
+    // RECOVERY_INTRA 在 PCVR 成立且最近一次探測選到的 encoder 能做隨選 intra refresh
+    // （Windows 原生 NVENC）時設。vanilla／舊版 client 忽略未知元素，不影響相容性。
+    {
+      uint32_t vr_caps = VIPLE_VR_SERVER_CAP_PROTO_V1;
+      if (::vr::platform_supported() && config::vr.pcvr != config::vr_t::pcvr_e::disabled) {
+        vr_caps |= VIPLE_VR_SERVER_CAP_PCVR;
+        if (video::last_encoder_probe_supported_vr_intra_refresh) {
+          vr_caps |= VIPLE_VR_SERVER_CAP_RECOVERY_INTRA;
+        }
+      }
+      tree.put("root.VipleStreamVR", vr_caps);
+      tree.put("root.VipleStreamVRProto", VIPLE_VR_PROTO_VERSION);
+    }
+
     tree.put("root.appversion", VERSION);
     tree.put("root.GfeVersion", GFE_VERSION);
     tree.put("root.uniqueid", http::unique_id);
@@ -1087,6 +1105,130 @@ namespace nvhttp {
     }
   }
 
+  // ── VipleStream 2.0 §VR（M1a）：/launch、/resume 的 VR 協商（docs/vr_protocol.md §4.2、
+  //    docs/vr_architecture.md §3.6）。錯誤一律沿用既有的 XML status_code／status_message，
+  //    status_message 以 VipleVr.h 的錯誤碼字串開頭、後接 ": 說明"。─────────────────────
+
+  /// 這次 /launch 或 /resume 是否要求 VR（有 vr 參數且不是 "0"；vr=2 之類交給解析報錯）
+  bool is_vr_request(const args_t &args) {
+    auto it = args.find("vr"s);
+    return it != std::end(args) && it->second != "0";
+  }
+
+  /// 寫 VR 錯誤回應並記 [VIPLE-VR-SESSION]
+  void put_vr_error(pt::ptree &tree, bool is_resume, int status, const char *code, const std::string &detail) {
+    BOOST_LOG(info) << "[VIPLE-VR-SESSION] rejected "sv << (is_resume ? "/resume"sv : "/launch"sv)
+                    << ": "sv << status << ' ' << code << ": "sv << detail;
+    if (is_resume) {
+      tree.put("root.resume", 0);
+    } else {
+      tree.put("root.gamesession", 0);
+    }
+    tree.put("root.<xmlattr>.status_code", status);
+    tree.put("root.<xmlattr>.status_message", std::string(code) + ": " + detail);
+  }
+
+  /**
+   * @brief 步驟 1–3：relay 路徑、停用、參數解析。放在任何副作用（takeover、收殘留
+   *        session、configure_display）之前。
+   * @return 解析好的參數；失敗時已寫好錯誤回應並回傳 nullopt。
+   */
+  template<class T>
+  std::optional<::vr::launch_params_t> vr_precheck(pt::ptree &tree, const args_t &args, bool is_resume) {
+    // 1. relay 走 localhost 的 HTTP 路由：M1a 的 VR 視訊強制 RTP/UDP，不支援經 relay／tunnel
+    if constexpr (std::is_same_v<T, SimpleWeb::HTTP>) {
+      put_vr_error(tree, is_resume, 400, VIPLE_VR_ERR_TRANSPORT_UNSUPPORTED, "VR video requires a direct RTP/UDP connection; relay/tunnel transport is not supported yet");
+      return std::nullopt;
+    }
+
+    // 2. 平台不支援（非 Windows）或 vr_pcvr=disabled
+    if (!::vr::platform_supported()) {
+      put_vr_error(tree, is_resume, 403, VIPLE_VR_ERR_DISABLED, "PCVR is not supported on this host platform");
+      return std::nullopt;
+    }
+    if (config::vr.pcvr == config::vr_t::pcvr_e::disabled) {
+      put_vr_error(tree, is_resume, 403, VIPLE_VR_ERR_DISABLED, "PCVR is disabled on this host (vr_pcvr=disabled)");
+      return std::nullopt;
+    }
+
+    // 3. 嚴格解析 vr* 參數
+    auto result = ::vr::parse_launch_params([&args](std::string_view name) -> std::optional<std::string> {
+      auto it = args.find(std::string {name});
+      if (it == std::end(args)) {
+        return std::nullopt;
+      }
+      return it->second;
+    });
+    if (!result.params) {
+      put_vr_error(tree, is_resume, 400, VIPLE_VR_ERR_BAD_PARAMS, result.error);
+      return std::nullopt;
+    }
+
+    return result.params;
+  }
+
+  /**
+   * @brief VR 獨佔：有別的 client 的 VR session（進行中或 /launch 後的預約）時回 503 VR_BUSY。
+   *        放在 §M.1 擁有權判斷之前，admin／takeover 也不能搶走進行中的 VR session。
+   * @return true 表示已拒絕。
+   */
+  bool vr_reject_if_busy(pt::ptree &tree, const std::string &caller_uuid, bool is_resume) {
+    if (!::vr::busy_for(caller_uuid)) {
+      return false;
+    }
+    put_vr_error(tree, is_resume, 503, VIPLE_VR_ERR_BUSY, "another device's VR session is active on this host (caller uuid=" + (caller_uuid.empty() ? "<unknown>"s : caller_uuid) + ")");
+    return true;
+  }
+
+  /**
+   * @brief 步驟 5–7：codec 交集（HEVC 優先、其次 H.264；AV1 等 L1 才接受）、recovery 模式、
+   *        session GUID。必須在 probe_encoders 之後呼叫（codec 與 intra refresh 能力看這次探測）。
+   * @return 協商結果；失敗時已寫好錯誤回應並回傳 nullptr。
+   */
+  std::shared_ptr<const ::vr::negotiated_t> vr_negotiate(pt::ptree &tree, const ::vr::launch_params_t &params, const std::string &caller_uuid, bool is_resume) {
+    const bool server_hevc = video::active_hevc_mode >= 2;
+
+    auto neg = std::make_shared<::vr::negotiated_t>();
+    neg->params = params;
+    if ((params.codecs & VIPLE_VR_CODEC_HEVC) && server_hevc) {
+      neg->codec = ::vr::codec_e::hevc;
+    } else if (params.codecs & VIPLE_VR_CODEC_H264) {
+      neg->codec = ::vr::codec_e::h264;
+    } else {
+      put_vr_error(tree, is_resume, 400, VIPLE_VR_ERR_CODEC_LIMIT, std::format("no common codec (client vrCodecs=0x{:x}, server supports {}; AV1 is not accepted yet)", params.codecs, server_hevc ? "hevc,h264"sv : "h264"sv));
+      return nullptr;
+    }
+
+    const bool server_intra = video::last_encoder_probe_supported_vr_intra_refresh;
+    neg->recovery_intra = (params.caps & VIPLE_VR_CLIENT_CAP_RECOVERY_INTRA) && server_intra;
+    neg->ir_frames = config::vr.intra_refresh_frames;
+    neg->safety_ms = config::vr.intra_refresh_safety_ms;
+    neg->guid = uuid_util::uuid_t::generate().string();
+    neg->owner_uuid = caller_uuid;
+
+    BOOST_LOG(info) << "[VIPLE-VR-SESSION] accepted "sv << (is_resume ? "/resume"sv : "/launch"sv)
+                    << " caller="sv << (caller_uuid.empty() ? "<unknown>"s : caller_uuid)
+                    << " eye="sv << params.eye_width << 'x' << params.eye_height
+                    << " hz="sv << params.hz
+                    << " periodNs="sv << params.period_ns
+                    << " fov=["sv << params.fov[0] << ',' << params.fov[1] << ',' << params.fov[2] << ',' << params.fov[3]
+                    << '|' << params.fov[4] << ',' << params.fov[5] << ',' << params.fov[6] << ',' << params.fov[7] << ']'
+                    << " ipd="sv << params.ipd
+                    << " caps=0x"sv << std::format("{:x}", params.caps)
+                    << " codecs=0x"sv << std::format("{:x}", params.codecs)
+                    << " ctrl="sv << params.ctrl
+                    << " overscan="sv << params.overscan
+                    << " force="sv << (params.force ? 1 : 0)
+                    << " -> "sv << ::vr::format_session_element(*neg)
+                    << " (serverIntra="sv << server_intra << " safetyMs="sv << neg->safety_ms << ')';
+    return neg;
+  }
+
+  /// /launch（或 /resume）接受 VR 之後到 RTSP 建立 session 之前，其他 client 也要看到 VR_BUSY
+  std::chrono::steady_clock::duration vr_reservation_ttl() {
+    return std::max<std::chrono::milliseconds>(config::stream.ping_timeout, 10s) + 5s;
+  }
+
   template <class T>
   void launch(bool &host_audio,
               std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
@@ -1125,6 +1267,15 @@ namespace nvhttp {
       return;
     }
 
+    // VipleStream 2.0 §VR 步驟 1–3（relay、停用、參數），在任何副作用之前
+    std::optional<::vr::launch_params_t> vr_params;
+    if (is_vr_request(args)) {
+      vr_params = vr_precheck<T>(tree, args, false);
+      if (!vr_params) {
+        return;
+      }
+    }
+
     auto appid = util::from_view(get_arg(args, "appid"));
 
     // VipleStream §M.1 — multi-user ownership guard.  Identify the caller from
@@ -1140,6 +1291,13 @@ namespace nvhttp {
     //                                     using the server, takeover?" UI
     auto caller_uuid = caller_uuid_for(request);
     auto caller_admin = is_admin_device(caller_uuid);
+
+    // VipleStream 2.0 §VR：VR 獨佔。別的 client 的 VR session 進行中（或剛 launch 完、RTSP
+    // 還沒到）時，任何 /launch（VR 或一般）都回 503 VR_BUSY——放在 §M.1 之前，
+    // admin／takeover 也不能搶走進行中的 VR session。
+    if (vr_reject_if_busy(tree, caller_uuid, false)) {
+      return;
+    }
 
     // §M.1.f.2 idle reconcile — refresh activity for the current owner if
     // caller matches.  No-op for non-owner / no-owner.
@@ -1201,18 +1359,31 @@ namespace nvhttp {
     // terminate_sessions() 全收，這裡是 no-op。
     rtsp_stream::terminate_sessions_for_client(caller_uuid, "/launch");
 
+    // VipleStream 2.0 §VR 步驟 4：VR 獨佔——同一 client 的殘留 session 已在上面收掉，
+    // 這時還有其他 session 就不能開 VR。
+    if (vr_params && rtsp_stream::session_count() != 0) {
+      put_vr_error(tree, false, 503, VIPLE_VR_ERR_BUSY, std::format("{} other streaming session(s) are active on this host", rtsp_stream::session_count()));
+      return;
+    }
+
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     auto launch_session = make_launch_session(host_audio, args);
     launch_session->client_cert_uuid = caller_uuid;  // §M01-D：A1／A3 的身分依據
 
     if (rtsp_stream::session_count() == 0) {
-      // The display should be restored in case something fails as there are no other sessions.
-      revert_display_configuration = true;
+      if (!vr_params) {
+        // The display should be restored in case something fails as there are no other sessions.
+        revert_display_configuration = true;
 
-      // We want to prepare display only if there are no active sessions at
-      // the moment. This should be done before probing encoders as it could
-      // change the active displays.
-      display_device::configure_display(config::video, *launch_session);
+        // We want to prepare display only if there are no active sessions at
+        // the moment. This should be done before probing encoders as it could
+        // change the active displays.
+        display_device::configure_display(config::video, *launch_session);
+      } else {
+        // §VR 步驟 6：stub 直接擷取目前的桌面（encoder 縮放到 client 要求的尺寸），
+        // 不動顯示器設定，所以也沒有要還原的東西。
+        BOOST_LOG(info) << "[VIPLE-VR-SESSION] /launch: skipping configure_display (stub captures the current desktop)"sv;
+      }
 
       // Probe encoders again before streaming to ensure our chosen
       // encoder matches the active GPU (which could have changed
@@ -1223,6 +1394,14 @@ namespace nvhttp {
         tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
         tree.put("root.gamesession", 0);
 
+        return;
+      }
+    }
+
+    // VipleStream 2.0 §VR 步驟 5–7：codec 交集、recovery 模式、GUID（要看這次 probe 的結果）
+    if (vr_params) {
+      launch_session->vr = vr_negotiate(tree, *vr_params, caller_uuid, false);
+      if (!launch_session->vr) {
         return;
       }
     }
@@ -1262,6 +1441,13 @@ namespace nvhttp {
       )
     );
     tree.put("root.gamesession", 1);
+
+    // VipleStream 2.0 §VR 步驟 8：只有真的接受了 VR 才回 <VipleStreamVRSession>（client 只在
+    // 收到這個元素時才設 vrFlags，不變式 1）。並預約到 RTSP 建立 session 為止。
+    if (launch_session->vr) {
+      tree.put("root.VipleStreamVRSession", ::vr::format_session_element(*launch_session->vr));
+      ::vr::reserve(caller_uuid, vr_reservation_ttl());
+    }
 
     rtsp_stream::launch_session_raise(launch_session);
 
@@ -1308,6 +1494,13 @@ namespace nvhttp {
     // §M01-D：caller_uuid 提到區塊外，下面 supersede 殘留 session 與標記
     // launch_session 身分都要用。
     const auto caller_uuid = caller_uuid_for(request);
+
+    // VipleStream 2.0 §VR：VR 獨佔（同 /launch）。別的 client 的 VR session 進行中時一律
+    // 503 VR_BUSY，放在 §M.1 擁有權（403）之前。
+    if (vr_reject_if_busy(tree, caller_uuid, true)) {
+      return;
+    }
+
     {
       // §M.1.f.2 idle reconcile — refresh activity if caller is the owner.
       proc::proc.touch_activity(caller_uuid);
@@ -1346,6 +1539,16 @@ namespace nvhttp {
       return;
     }
 
+    // VipleStream 2.0 §VR 步驟 1–3（relay、停用、參數），在收殘留 session 之前。
+    // /resume 帶 vr=1 用於 host 上已經有 app 在跑、client 以 VR 重新接上的情況。
+    std::optional<::vr::launch_params_t> vr_params;
+    if (is_vr_request(args)) {
+      vr_params = vr_precheck<T>(tree, args, true);
+      if (!vr_params) {
+        return;
+      }
+    }
+
     // §M01-D A1 2026-09-23：同一個 client（同一張 TLS 憑證）重新 /resume
     // 時，先收掉它自己殘留的 stream session。
     // 事故：app 被強制關閉（沒送 /cancel、沒斷 ENet）後 10 s 內重開，舊
@@ -1359,6 +1562,12 @@ namespace nvhttp {
     // 相同。只收同一張憑證的 session，其他 client 不受影響。
     rtsp_stream::terminate_sessions_for_client(caller_uuid, "/resume");
 
+    // VipleStream 2.0 §VR 步驟 4：VR 獨佔——還有其他 session 就不能開 VR
+    if (vr_params && rtsp_stream::session_count() != 0) {
+      put_vr_error(tree, true, 503, VIPLE_VR_ERR_BUSY, std::format("{} other streaming session(s) are active on this host", rtsp_stream::session_count()));
+      return;
+    }
+
     // Newer Moonlight clients send localAudioPlayMode on /resume too,
     // so we should use it if it's present in the args and there are
     // no active sessions we could be interfering with.
@@ -1370,10 +1579,15 @@ namespace nvhttp {
     launch_session->client_cert_uuid = caller_uuid;  // §M01-D：A1／A3 的身分依據
 
     if (no_active_sessions) {
-      // We want to prepare display only if there are no active sessions at
-      // the moment. This should be done before probing encoders as it could
-      // change the active displays.
-      display_device::configure_display(config::video, *launch_session);
+      if (!vr_params) {
+        // We want to prepare display only if there are no active sessions at
+        // the moment. This should be done before probing encoders as it could
+        // change the active displays.
+        display_device::configure_display(config::video, *launch_session);
+      } else {
+        // §VR 步驟 6：stub 直接擷取目前的桌面，不動顯示器設定
+        BOOST_LOG(info) << "[VIPLE-VR-SESSION] /resume: skipping configure_display (stub captures the current desktop)"sv;
+      }
 
       // Probe encoders again before streaming to ensure our chosen
       // encoder matches the active GPU (which could have changed
@@ -1384,6 +1598,14 @@ namespace nvhttp {
         tree.put("root.<xmlattr>.status_code", 503);
         tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
 
+        return;
+      }
+    }
+
+    // VipleStream 2.0 §VR 步驟 5–7：codec 交集、recovery 模式、GUID（要看這次 probe 的結果）
+    if (vr_params) {
+      launch_session->vr = vr_negotiate(tree, *vr_params, caller_uuid, true);
+      if (!launch_session->vr) {
         return;
       }
     }
@@ -1410,6 +1632,12 @@ namespace nvhttp {
       )
     );
     tree.put("root.resume", 1);
+
+    // VipleStream 2.0 §VR 步驟 8（同 /launch）
+    if (launch_session->vr) {
+      tree.put("root.VipleStreamVRSession", ::vr::format_session_element(*launch_session->vr));
+      ::vr::reserve(caller_uuid, vr_reservation_ttl());
+    }
 
     rtsp_stream::launch_session_raise(launch_session);
   }
@@ -1479,6 +1707,9 @@ namespace nvhttp {
     tree.put("root.<xmlattr>.status_code", 200);
 
     rtsp_stream::terminate_sessions();
+    // VipleStream 2.0 §VR：/launch 之後還沒建立 session 的 VR 預約一併作廢（進行中的 VR
+    // session 由上面的 terminate_sessions → join 撤下）
+    ::vr::clear_reservation();
 
     if (app_running) {
       // Soft handover for Steam-source apps when a non-owner takes over: Steam

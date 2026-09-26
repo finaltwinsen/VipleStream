@@ -209,6 +209,24 @@ namespace config {
     bool smooth_pacing = false;
   };
 
+  /**
+   * @brief VipleStream 2.0 §VR：PCVR 設定（docs/vr_architecture.md §3.4、§3.6）。
+   *
+   * 預設 disabled：VR session 一律回 VR_DISABLED，/serverinfo 不宣告 PCVR。
+   * M1a 只有 stub（開發驗證用：沒有 SteamVR driver，VR session 直接擷取目前桌面、
+   * 把 client 的 tracking 樣本回填進每一幀）。M1b 會再加 auto／enabled。
+   */
+  struct vr_t {
+    enum class pcvr_e {
+      disabled,  ///< 不接受 VR session（預設）
+      stub,  ///< M1a 開發驗證：桌面擷取＋tracking 回聲
+    };
+
+    pcvr_e pcvr = pcvr_e::disabled;  ///< vr_pcvr
+    int intra_refresh_frames = 8;  ///< vr_intra_refresh_frames：LOSS 觸發的 intra-refresh wave 長度（2–60 幀）
+    int intra_refresh_safety_ms = 2000;  ///< vr_intra_refresh_safety_ms：週期性 intra refresh 安全網（0 = 關閉；否則 500–10000 ms）
+  };
+
   struct nvhttp_t {
     // Could be any of the following values:
     // pc|lan|wan
@@ -310,6 +328,7 @@ namespace config {
   extern video_t video;
   extern audio_t audio;
   extern stream_t stream;
+  extern vr_t vr;
   extern nvhttp_t nvhttp;
   extern input_t input;
   extern sunshine_t sunshine;

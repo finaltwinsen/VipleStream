@@ -10,6 +10,7 @@ extern "C" {
 }
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <format>
@@ -33,6 +34,7 @@ extern "C" {
 #include "stream.h"
 #include "sync.h"
 #include "video.h"
+#include "vr/vr_session.h"
 
 namespace asio = boost::asio;
 
@@ -1241,6 +1243,45 @@ namespace rtsp_stream {
 
       respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
       return;
+    }
+
+    // VipleStream 2.0 §VR：/launch 協商過 VR 的 session 在這裡套上 VR encode profile。
+    // 放在 intraRefresh 等 SDP 參數解析之後、session::alloc 之前。recovery=intra 時強制
+    // enableIntraRefresh=1，不依賴 client SDP 的 x-ss-video[0].intraRefresh
+    // （docs/vr_architecture.md 附錄 A 第 1 項；SdpGenerator.c 不改）。
+    if (session.vr) {
+      const auto &neg = *session.vr;
+      config.monitor.vrProfile = 1;
+      config.monitor.vrIntraRefreshFrames = neg.ir_frames;
+      config.monitor.vrIntraRefreshPeriodFrames =
+        neg.safety_ms > 0 ? std::max(1, (int) ((int64_t) neg.safety_ms * config.monitor.framerate / 1000)) : 0;
+      if (neg.recovery_intra) {
+        config.monitor.enableIntraRefresh = 1;
+      }
+
+      // stub 直接擷取目前桌面、照 client 在 SDP 要求的尺寸／codec 編碼；與 /launch 協商的
+      // 打包尺寸、codec、Hz 不一致時只記警告，方便整合測試時對照 client 的設定。
+      if (config.monitor.width != neg.packed_width() || config.monitor.height != neg.packed_height()) {
+        BOOST_LOG(warning) << "[VIPLE-VR-SESSION] RTSP viewport " << config.monitor.width << 'x' << config.monitor.height
+                           << " != negotiated packed " << neg.packed_width() << 'x' << neg.packed_height()
+                           << " (stub encodes what the client requested)";
+      }
+      if (config.monitor.videoFormat != neg.video_format()) {
+        BOOST_LOG(warning) << "[VIPLE-VR-SESSION] RTSP videoFormat " << config.monitor.videoFormat
+                           << " != negotiated codec " << ::vr::codec_name(neg.codec);
+      }
+      if (config.monitor.framerate != neg.params.hz) {
+        BOOST_LOG(warning) << "[VIPLE-VR-SESSION] RTSP maxFPS " << config.monitor.framerate
+                           << " != negotiated hz " << neg.params.hz;
+      }
+
+      BOOST_LOG(info) << "[VIPLE-VR-SESSION] RTSP ANNOUNCE session=" << neg.guid
+                      << " vrProfile=1 irFrames=" << config.monitor.vrIntraRefreshFrames
+                      << " irPeriodFrames=" << config.monitor.vrIntraRefreshPeriodFrames
+                      << " enableIntraRefresh=" << config.monitor.enableIntraRefresh
+                      << " recovery=" << (neg.recovery_intra ? "intra" : "idr")
+                      << " encode=" << config.monitor.width << 'x' << config.monitor.height
+                      << '@' << config.monitor.framerate;
     }
 
     auto stream_session = stream::session::alloc(config, session);

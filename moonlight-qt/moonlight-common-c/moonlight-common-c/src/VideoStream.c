@@ -654,7 +654,14 @@ int startVideoStream(void* rendererContext, int drFlags) {
     }
 
 #ifdef VIPLE_MPQUIC
-    useQuicVideo = (StreamConfig.useQuicTransport && quicIsConnected());
+    // §VR：rc 以前 VR 視訊強制走 RTP/UDP（server 端 stream.cpp 同步強制，
+    // vr_architecture.md §3.5）；QUIC 仍保留給控制與 tracking 的 fallback。
+    // 接收執行緒在 useQuicVideo 時只讀 QUIC ring、不讀 UDP socket，所以兩端必須一致。
+    useQuicVideo = (StreamConfig.useQuicTransport && quicIsConnected() &&
+                    !(VrFlags & VIPLE_VR_SF_ENABLED));
+    if (StreamConfig.useQuicTransport && (VrFlags & VIPLE_VR_SF_ENABLED)) {
+        Limelog("[VIPLE-VR-SESSION] VR session: video over RTP/UDP (QUIC kept for control/tracking)\n");
+    }
     if (useQuicVideo) {
         // Reset ring buffer and register callback
         quicVideoRing.head = 0;

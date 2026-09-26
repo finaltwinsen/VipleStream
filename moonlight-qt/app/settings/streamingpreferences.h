@@ -405,6 +405,26 @@ public:
     Language language;
     CaptureSysKeysMode captureSysKeysMode;
 
+    // ── VipleStream 2.0 §VR（M1a）──────────────────────────────────────
+    // 以下欄位目前只由 CLI 設定，**刻意不進 reload()/save()**：Session 會在串流前
+    // save() 整份偏好，CLI 的 VR 測試旗標若被寫回 QSettings，下次開 GUI 就會殘留
+    // VR 模式。GUI 設定（DisplayTarget 列舉等，vr_architecture.md §2.8）到 M3a
+    // 才做成持久化設定。列舉值穩定，新值只能往後加。
+    enum DisplayTarget
+    {
+        DT_WINDOW     = 0,  // 一般平面視窗
+        DT_XR_DESKTOP = 1,  // XR 虛擬螢幕（β，M3a）
+        DT_PCVR       = 2,  // PCVR（server 端跑 SteamVR 遊戲）
+    };
+    DisplayTarget displayTarget = DT_WINDOW;
+    bool vrEmulate = false;          // 以合成 pose 取代 XR runtime（M1a 沒有 XR）
+    int  vrSyntheticMotion = 1;      // VrSyntheticMotion：0 still、1 sine、2 yaw30
+    int  vrEyeWidth = 1728;          // 每眼解析度（打包尺寸為 2W×H，SBS）
+    int  vrEyeHeight = 1728;
+    int  vrRefreshHz = 90;
+    int  vrInjectDropEvery = 0;      // dev：每 N 個解出的幀丟一幀（模擬 decoder 吞幀），0＝關
+    int  vrInjectLossSec = 0;        // dev：每 N 秒注入一次 LOSS，0＝關
+
 signals:
     void displayModeChanged();
     void bitrateChanged();

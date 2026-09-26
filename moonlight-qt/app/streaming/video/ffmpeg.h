@@ -6,6 +6,9 @@
 
 #include "../bandwidth.h"
 #include "decoder.h"
+#include "../vr/vrframemeta.h"
+
+#include <memory>
 #include "ffmpeg-renderers/renderer.h"
 #include "ffmpeg-renderers/pacer/pacer.h"
 
@@ -106,6 +109,13 @@ private:
 
     void decoderThreadProc();
 
+    // §VR：以 pts 配對解出的幀與 0x81 metadata，並讓 m_FrameInfoQueue 對齊到同一幀。
+    // 回傳 false 代表這一幀被注入的「decoder 吞幀」丟掉。
+    bool vrPairDecodedFrame(AVFrame* frame);
+    // §VR：recovery=intra 時解碼錯誤先送 LOSS（連續 3 次才退回 IDR）。回傳 true
+    // 表示已送 LOSS、呼叫端不必要 IDR。
+    bool vrHandleDecodeError(int frameNumber);
+
     static int decoderThreadProcThunk(void* context);
 
     AVPacket* m_Pkt;
@@ -195,6 +205,10 @@ private:
 
     // Data buffers in the queued DU are not valid
     QQueue<DECODE_UNIT> m_FrameInfoQueue;
+
+    // §VR（M1a）：VR session 的串流 decoder 才建立（test decoder 永遠是 nullptr）
+    std::unique_ptr<VrFrameMetaTracker> m_VrTracker;
+    int m_VrConsecutiveDecodeErrors;
 
     static const uint8_t k_H264TestFrame[];
     static const uint8_t k_HEVCMainTestFrame[];

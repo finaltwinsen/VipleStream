@@ -254,7 +254,11 @@ public:
              int gamepadMask,
              bool persistGameControllersOnDisconnect,
              QString& rtspSessionUrl,
-             bool takeover = false);
+             bool takeover = false,
+             // §VR：接在 query 尾端的額外參數（VrLaunchConfig::toQuery()），
+             // 以及回傳整份 launch 回應（解析 <VipleStreamVRSession> 用）
+             const QString& extraQuery = QString(),
+             QString* launchResponse = nullptr);
 
     QVector<NvApp>
     getAppList();

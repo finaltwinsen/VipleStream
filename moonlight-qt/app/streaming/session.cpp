@@ -218,6 +218,7 @@ static int inputStallWatchdogProc(void*)
 #define SDL_CODE_GAMECONTROLLER_SET_MOTION_EVENT_STATE 103
 #define SDL_CODE_GAMECONTROLLER_SET_CONTROLLER_LED 104
 #define SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS 105
+#define SDL_CODE_VR_MESSAGE 106  // §VR：data1＝長度、data2＝SDL_malloc 的 TLV 副本
 
 #include <openssl/rand.h>
 
@@ -261,7 +262,8 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clSetMotionEventState,
     Session::clSetControllerLED,
     Session::clSetAdaptiveTriggers,
-    Session::clScHidFeatureRequest  // §SC-HID feature tunnel
+    Session::clScHidFeatureRequest,  // §SC-HID feature tunnel
+    Session::clVrMessage             // §VR 0x5508（Limelight.h 的 struct 尾端）
 };
 
 Session* Session::s_ActiveSession;
@@ -499,6 +501,145 @@ void Session::clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlag
 
     setControllerLEDEvent.user.data2 = (void *) state;
     SDL_PushEvent(&setControllerLEDEvent);
+}
+
+void Session::clVrMessage(const uint8_t* tlv, int length)
+{
+    // common-c 的 async callback 執行緒：複製 payload，一律包成 SDL_USEREVENT
+    // 交給主執行緒處理（docs/vr_protocol.md §4.5）
+    if (tlv == nullptr || length <= 0) {
+        return;
+    }
+    void* copy = SDL_malloc((size_t)length);
+    if (copy == nullptr) {
+        return;
+    }
+    memcpy(copy, tlv, (size_t)length);
+
+    SDL_Event event;
+    event.type = SDL_USEREVENT;
+    event.user.code = SDL_CODE_VR_MESSAGE;
+    event.user.data1 = (void*)(uintptr_t)length;
+    event.user.data2 = copy;
+    if (SDL_PushEvent(&event) <= 0) {
+        SDL_free(copy);
+    }
+}
+
+void Session::handleVrMessage(const uint8_t* tlv, int length)
+{
+    int off = 0;
+    while (off + 2 <= length) {
+        const uint8_t type = tlv[off];
+        const uint8_t len = tlv[off + 1];
+        if (off + 2 + len > length) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-SESSION] truncated VR_S2C TLV (type=%u len=%u remaining=%d)",
+                        type, len, length - off - 2);
+            break;
+        }
+        const uint8_t* payload = tlv + off + 2;
+
+        switch (type) {
+        case VIPLE_VR_S2C_STATE:
+            if (len >= sizeof(VIPLE_VR_TLV_STATE)) {
+                VIPLE_VR_TLV_STATE st;
+                memcpy(&st, payload, sizeof(st));
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-SESSION] server state=%u progress=%u code=%u",
+                            st.state, st.progress, st.code);
+            }
+            break;
+        case VIPLE_VR_S2C_STATS: {
+            // 欄位只往後加：依 len 能讀多少算多少。計數欄位是 session 累計值
+            //（STATS 走 UNSEQUENCED，掉一筆不會漏算），區間值 = 兩個快照相減
+            VIPLE_VR_TLV_STATS st;
+            memset(&st, 0, sizeof(st));
+            memcpy(&st, payload, (size_t)len < sizeof(st) ? (size_t)len : sizeof(st));
+            m_VrServerStatsLatest = st;
+            m_VrServerStatsCount++;
+            const uint32_t now = SDL_GetTicks();
+            if (m_VrServerStatsLastLogMs == 0) {
+                m_VrServerStatsAtLog = st;
+                m_VrServerStatsLastLogMs = now;
+            }
+            else if (now - m_VrServerStatsLastLogMs >= 10000) {
+                const VIPLE_VR_TLV_STATS& a = m_VrServerStatsAtLog;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-STATS] server %.1fs (%u msgs): poseRx=%u ooo=%u gap=%u tagged=%u fallback=%u "
+                            "lossRx=%u waves=%u | refreshStartRx=%u",
+                            (now - m_VrServerStatsLastLogMs) / 1000.0, m_VrServerStatsCount,
+                            st.poseRx - a.poseRx, st.poseOutOfOrder - a.poseOutOfOrder,
+                            st.poseGap - a.poseGap, st.framesTagged - a.framesTagged,
+                            st.framesFallback - a.framesFallback, st.lossRx - a.lossRx,
+                            st.refreshWaves - a.refreshWaves, m_VrRefreshStartRx);
+                m_VrServerStatsAtLog = st;
+                m_VrServerStatsCount = 0;
+                m_VrRefreshStartRx = 0;
+                m_VrServerStatsLastLogMs = now;
+            }
+            break;
+        }
+        case VIPLE_VR_S2C_REFRESH_START:
+            // 恢復狀態機已在 common-c 的控制接收執行緒處理，這裡只計數
+            m_VrRefreshStartRx++;
+            break;
+        case VIPLE_VR_S2C_HAPTIC:
+            // M4a 才接控制器震動
+            break;
+        default:
+            // 不認得的 subtype 依 len 跳過（前向相容）
+            break;
+        }
+        off += 2 + len;
+    }
+}
+
+void Session::decideVrRequest()
+{
+    m_VrRequested = false;
+    if (m_Preferences->displayTarget != StreamingPreferences::DT_PCVR) {
+        return;
+    }
+
+    // 不變式 5：XR 在 /launch 之前就不可用 → 退回平面模式，不中斷串流
+    if (!m_Preferences->vrEmulate) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-SESSION] display target PCVR needs an XR runtime, which this build "
+                    "does not have yet (M1a); use --vr-emulate. Streaming flat.");
+        return;
+    }
+    if (!(m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_PCVR) ||
+            m_Computer->vipleStreamVrProto < VIPLE_VR_PROTO_VERSION) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-SESSION] host does not offer PCVR (VipleStreamVR=0x%x proto=%d) — streaming flat",
+                    m_Computer->vipleStreamVr, m_Computer->vipleStreamVrProto);
+        return;
+    }
+    // 下面兩種情況在 /launch 之後才退回平面的話，平面串流會留著 VR 的形狀（2W×H@Hz、
+    // 沒做 FRUC 減半），所以在套用 VR 形狀之前就擋下
+    if (m_Computer->onlineViaRelay || m_Preferences->forceRelayStream) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-SESSION] host is reachable only via relay — VR not requested "
+                    "(transport unsupported before GA), streaming flat");
+        return;
+    }
+    if (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_AV1) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-SESSION] video codec preference forces AV1; PCVR needs HEVC or H.264 "
+                    "(AV1 waits for L1) — streaming flat");
+        return;
+    }
+
+    m_VrLaunch = VrLaunchConfig();
+    m_VrLaunch.eyeWidth = m_Preferences->vrEyeWidth;
+    m_VrLaunch.eyeHeight = m_Preferences->vrEyeHeight;
+    m_VrLaunch.refreshHz = m_Preferences->vrRefreshHz;
+    m_VrRequested = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VR-SESSION] requesting PCVR (emulated pose): eye=%dx%d hz=%d serverCaps=0x%x",
+                m_VrLaunch.eyeWidth, m_VrLaunch.eyeHeight, m_VrLaunch.refreshHz,
+                m_Computer->vipleStreamVr);
 }
 
 void Session::clScHidFeatureRequest(uint8_t reportId, uint8_t op, uint8_t seq,
@@ -962,6 +1103,13 @@ bool Session::initialize(QQuickWindow* qtWindow)
     m_StreamConfig.width = m_Preferences->width;
     m_StreamConfig.height = m_Preferences->height;
 
+    // §VR：PCVR 串流的是 SBS 打包畫面（2W×H），不受 host 顯示器解析度限制
+    decideVrRequest();
+    if (m_VrRequested) {
+        m_StreamConfig.width = 2 * m_VrLaunch.eyeWidth;
+        m_StreamConfig.height = m_VrLaunch.eyeHeight;
+    }
+
     // VipleStream §H.4 — host-display-aware resolution clamp.
     //
     // The settings page is global (no per-host context), so the user can pick
@@ -972,7 +1120,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
     // Sunshine builds advertise host-display modes in /serverinfo (see VipleStream
     // §H.4 patch in nvhttp.cpp); GFE / NVIDIA servers advertise encoder-capable
     // modes instead, so the clamp is gated on the non-NV path.
-    if (!m_Computer->isNvidiaServerSoftware && !m_Computer->displayModes.isEmpty()) {
+    if (!m_VrRequested && !m_Computer->isNvidiaServerSoftware && !m_Computer->displayModes.isEmpty()) {
         int hostMaxW = 0;
         int hostMaxH = 0;
         for (const NvDisplayMode &mode : std::as_const(m_Computer->displayModes)) {
@@ -998,8 +1146,9 @@ bool Session::initialize(QQuickWindow* qtWindow)
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-RES] Stream config requested: %dx%d (host-display clamp skipped: %s)",
                     m_StreamConfig.width, m_StreamConfig.height,
-                    m_Computer->isNvidiaServerSoftware ? "NV server"
-                                                       : "host did not advertise DisplayMode");
+                    m_VrRequested ? "VR packed frame" :
+                    (m_Computer->isNvidiaServerSoftware ? "NV server"
+                                                        : "host did not advertise DisplayMode"));
     }
 
     int x, y, width, height;
@@ -1064,7 +1213,17 @@ bool Session::initialize(QQuickWindow* qtWindow)
                 "(prefs ptr=%p)",
                 (int)m_Preferences->enableFrameInterpolation,
                 (void*)m_Preferences);
-    if (m_Preferences->enableFrameInterpolation) {
+    if (m_VrRequested) {
+        // §VR：fps 一個 session 固定為 HMD 顯示 Hz；VR 不做 FRUC（renderer 端也以
+        // LiGetVrFlags() 關掉），偏好設定本身不動（會被 save() 寫回）
+        m_StreamConfig.fps = m_VrLaunch.refreshHz;
+        m_OriginalFps = m_VrLaunch.refreshHz;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-SESSION] VR request: stream %dx%d@%d (FRUC %s)",
+                    m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps,
+                    m_Preferences->enableFrameInterpolation ? "ignored" : "off");
+    }
+    else if (m_Preferences->enableFrameInterpolation) {
         const bool passive = m_Preferences && m_Preferences->vkfrucPassiveMode;
         if (passive) {
             m_StreamConfig.fps = m_Preferences->fps;
@@ -1396,6 +1555,17 @@ bool Session::initialize(QQuickWindow* qtWindow)
                 WMUtils::isGpuSlow() ? 1 : 0);
 #endif
 
+    // §VR：VR profile 固定 8-bit SDR，AV1 要等 L1（vr_architecture.md §3.4）
+    if (m_VrRequested) {
+        m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_AV1 | VIDEO_FORMAT_MASK_10BIT |
+                                             VIDEO_FORMAT_MASK_YUV444);
+        if (m_SupportedVideoFormats.isEmpty()) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-SESSION] no 8-bit HEVC/H.264 decoder available — streaming flat");
+            m_VrRequested = false;
+        }
+    }
+
     // Check for validation errors/warnings and emit
     // signals for them, if appropriate
     bool ret = validateLaunch(testWindow);
@@ -1403,6 +1573,12 @@ bool Session::initialize(QQuickWindow* qtWindow)
     if (ret) {
         // Video format is now locked in
         m_StreamConfig.supportedVideoFormats = m_SupportedVideoFormats.front();
+
+        // §VR：vrCodecs 告訴 server 這次實際會用的 codec
+        if (m_VrRequested) {
+            m_VrLaunch.codecs = (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_H265)
+                                    ? VIPLE_VR_CODEC_HEVC : VIPLE_VR_CODEC_H264;
+        }
 
         // Populate decoder-dependent properties.
         // Must be done after validateLaunch() since m_StreamConfig is finalized.
@@ -1788,6 +1964,8 @@ private:
 
         // §SC-HID: Stop Steam Controller passthrough before LiStopConnection
         m_Session->m_ScHid.stop();
+        // §VR：tracking 執行緒會呼叫 LiSendVrTracking，必須在 LiStopConnection 之前停
+        m_Session->m_VrTracking.stop();
 
         // Finish cleanup of the connection state
         LiStopConnection();
@@ -2200,6 +2378,14 @@ bool Session::startConnectionAsync()
             return false;
         }
 
+        // §VR：rc 以前 VR 視訊強制 RTP/UDP，server 對 relay 路徑回 VR_TRANSPORT_UNSUPPORTED；
+        // 這裡直接不要求 VR，以平面串流（GA 的 QUIC VR 政策完成後再開放）
+        if (m_VrRequested) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-SESSION] relay path — VR not requested (transport unsupported before GA), streaming flat");
+            m_StreamConfig.vrFlags = 0;
+        }
+
         int riKeyId;
         memcpy(&riKeyId, m_StreamConfig.remoteInputAesIv, sizeof(riKeyId));
         riKeyId = qFromBigEndian(riKeyId);
@@ -2288,6 +2474,7 @@ bool Session::startConnectionAsync()
     } else {
         try {
             NvHTTP http(m_Computer);
+            QString launchResponse;
             http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
                           m_Computer->isNvidiaServerSoftware,
                           m_App.id, &m_StreamConfig,
@@ -2296,7 +2483,35 @@ bool Session::startConnectionAsync()
                           m_InputHandler->getAttachedGamepadMask(),
                           !m_Preferences->multiController,
                           rtspSessionUrl,
-                          m_Takeover);
+                          m_Takeover,
+                          m_VrRequested ? m_VrLaunch.toQuery() : QString(),
+                          &launchResponse);
+
+            // §VR：不變式 1——client 送了 vr=1 **而且** server 回了
+            // <VipleStreamVRSession> 才啟用；不看 IS_SUNSHINE／isVipleStreamPeer
+            if (m_VrRequested) {
+                m_VrSession = VrSessionInfo::parse(NvHTTP::getXmlString(launchResponse, "VipleStreamVRSession"));
+                if (m_VrSession.valid) {
+                    m_StreamConfig.vrFlags = VIPLE_VR_SF_ENABLED |
+                                             (m_VrSession.recoveryIntra ? VIPLE_VR_SF_RECOVERY_INTRA : 0);
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VR-SESSION] negotiated: %s",
+                                qPrintable(m_VrSession.describe()));
+                    if (m_VrSession.packedWidth != m_StreamConfig.width ||
+                            m_VrSession.packedHeight != m_StreamConfig.height ||
+                            m_VrSession.refreshHz != m_StreamConfig.fps) {
+                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-VR-SESSION] server packed %dx%d@%d differs from stream %dx%d@%d",
+                                    m_VrSession.packedWidth, m_VrSession.packedHeight, m_VrSession.refreshHz,
+                                    m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps);
+                    }
+                }
+                else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VR-SESSION] server did not confirm a VR session — streaming flat");
+                    m_StreamConfig.vrFlags = 0;
+                }
+            }
         } catch (const QtNetworkReplyException&) {
             // Direct launch failed — try via relay proxy as fallback.
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2733,6 +2948,12 @@ bool Session::startConnectionAsync()
     // 暖機查詢由讀取執行緒代跑，這裡不會碰任何 hidapi 呼叫）
     m_ScHid.start();
 
+    // §VR：tracking 上行（M1a 為合成 pose）。LiStartConnection 已依 vrFlags 生效
+    if (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) {
+        VrSyntheticMotion motion = (VrSyntheticMotion)m_Preferences->vrSyntheticMotion;
+        m_VrTracking.start(m_StreamConfig.fps, motion);
+    }
+
     // [VIPLE-SESSION] 一行結構化 session 標記：每秒遙測行不帶 host/codec，
     // 事後跨 session log 分析靠這行把遙測歸戶到正確的 host/session。
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -3142,6 +3363,10 @@ void Session::exec()
                 m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                     (DualSenseOutputReport *)event.user.data2);
                 break;
+            case SDL_CODE_VR_MESSAGE:
+                handleVrMessage((const uint8_t*)event.user.data2, (int)(uintptr_t)event.user.data1);
+                SDL_free(event.user.data2);
+                break;
             default:
                 SDL_assert(false);
             }
@@ -3479,6 +3704,29 @@ void Session::exec()
     }
 
 DispatchDeferredCleanup:
+    // §VR：主迴圈已結束，佇列裡還沒處理的 VR_S2C 副本（clVrMessage 以 SDL_malloc 複製）
+    // 不會再被 handleVrMessage 釋放，在這裡取出並釋放。其他 user event 放回佇列。
+    {
+        SDL_Event pending[64];
+        int n;
+        while ((n = SDL_PeepEvents(pending, SDL_arraysize(pending), SDL_GETEVENT,
+                                   SDL_USEREVENT, SDL_USEREVENT)) > 0) {
+            bool freedAny = false;
+            for (int i = 0; i < n; i++) {
+                if (pending[i].user.code == SDL_CODE_VR_MESSAGE) {
+                    SDL_free(pending[i].user.data2);
+                    freedAny = true;
+                }
+                else {
+                    SDL_PushEvent(&pending[i]);
+                }
+            }
+            if (!freedAny) {
+                break;  // 剩下的都不是 VR 訊息（已放回佇列），避免無限迴圈
+            }
+        }
+    }
+
     // §INPUT-STALL：收 watchdog
     s_StallWatchdogRun.store(false);
     s_LoopPhase.store(-2);

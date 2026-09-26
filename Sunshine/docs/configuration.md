@@ -1782,6 +1782,100 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+## VR (VipleStream 2.0)
+
+### vr_pcvr
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: whether this host accepts PCVR sessions (a VipleStream VR client launching
+            with `vr=1`). When disabled, VR launches are rejected with `VR_DISABLED` and `/serverinfo`
+            does not advertise the PCVR capability. Normal (non-VR) streaming is not affected by this option.
+            @note{Only supported on Windows hosts. On Linux and macOS PCVR is always unavailable regardless
+            of this option.}
+            @warning{`stub` is for development and protocol validation only: there is no SteamVR driver yet,
+            the VR session simply captures the current desktop and echoes the client's latest head pose back
+            in every frame. Do not enable it on hosts used for normal streaming.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_pcvr = stub
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="2">Choices</td>
+        <td>disabled</td>
+        <td>Reject VR sessions.</td>
+    </tr>
+    <tr>
+        <td>stub</td>
+        <td>Accept VR sessions in development stub mode (desktop capture + pose echo, no SteamVR).</td>
+    </tr>
+</table>
+
+### vr_intra_refresh_frames
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: length, in frames, of the intra-refresh wave the encoder starts when a VR client
+            reports lost frames. Shorter waves recover faster but produce larger frames while refreshing.
+            Accepted range is 2 to 60; invalid values are ignored with a warning in the log.
+            @note{Applies to VR sessions only, and only when the encoder supports on-demand intra refresh
+            (NVIDIA NVENC on Windows). Otherwise lost frames are recovered with an IDR frame.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            8
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_intra_refresh_frames = 8
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_intra_refresh_safety_ms
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: interval, in milliseconds, of the periodic intra refresh used as a slow safety net
+            for VR sessions, in case a lost frame is never reported. `0` disables the periodic refresh.
+            Otherwise the accepted range is 500 to 10000; invalid values are ignored with a warning in the log.
+            @note{Applies to VR sessions only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            2000
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_intra_refresh_safety_ms = 2000
+            @endcode</td>
+    </tr>
+</table>
+
 ## Config Files
 
 ### file_apps

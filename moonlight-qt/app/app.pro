@@ -298,6 +298,10 @@ SOURCES += \
     gui/sdlgamepadkeynavigation.cpp \
     streaming/video/overlaymanager.cpp \
     streaming/transfer/filetransferclient.cpp \
+    streaming/vr/vrlaunchparams.cpp \
+    streaming/vr/vrsynthetic.cpp \
+    streaming/vr/vrtracking.cpp \
+    streaming/vr/vrframemeta.cpp \
     backend/systemproperties.cpp \
     backend/hidprobe.cpp \
     wm.cpp
@@ -344,6 +348,10 @@ HEADERS += \
     gui/sdlgamepadkeynavigation.h \
     streaming/video/overlaymanager.h \
     streaming/transfer/filetransferclient.h \
+    streaming/vr/vrlaunchparams.h \
+    streaming/vr/vrsynthetic.h \
+    streaming/vr/vrtracking.h \
+    streaming/vr/vrframemeta.h \
     backend/systemproperties.h \
     backend/hidprobe.h
 

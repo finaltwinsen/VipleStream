@@ -421,7 +421,8 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
       m_NeedsSpsFixup(false),
       m_TestOnly(testOnly),
       m_CurrentTestMode(TestMode::TestFrameOnly),
-      m_DecoderThread(nullptr)
+      m_DecoderThread(nullptr),
+      m_VrConsecutiveDecodeErrors(0)
 {
     SDL_zero(m_ActiveWndVideoStats);
     SDL_zero(m_LastWndVideoStats);
@@ -474,6 +475,11 @@ void FFmpegVideoDecoder::reset()
 
     m_FramesIn = m_FramesOut = 0;
     m_FrameInfoQueue.clear();
+
+    // §VR：m_VrTracker 刻意不在這裡清——reset() 也會在 initialize() 的 renderer
+    // cascade 中途被呼叫（例如「Not reusing test decoder」），清掉會讓 VR 配對
+    // 靜默失效。它只在 initialize() 開頭重建，decoder 解構時才釋放（印 final 統計）。
+    m_VrConsecutiveDecodeErrors = 0;
 
     delete m_Pacer;
     m_Pacer = nullptr;
@@ -830,7 +836,9 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     m_VideoDecoderCtx->height = params->height;
     m_VideoDecoderCtx->get_format = ffGetFormat;
     m_VideoDecoderCtx->pkt_timebase.num = 1;
-    m_VideoDecoderCtx->pkt_timebase.den = 90000;
+    // §VR：pts 帶的是 frameNumber。v4l2m2m 經 v4l2_buffer.timestamp（微秒）來回換算，
+    // timebase 設 1/1000000 才是恆等換算（vr_architecture.md §2.3）
+    m_VideoDecoderCtx->pkt_timebase.den = m_VrTracker ? 1000000 : 90000;
 
     // §J.3.f latency tune (round 1: 2026-05-03; round 3: 2026-05-09 §J.3.e.2.i.10b) —
     // FFmpeg's vulkan_decode.c puts the AV1 codec in `dedicated_dpb` mode
@@ -1686,7 +1694,8 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
             //  只是沒補幀），不再 crash／黑畫面。
             {
                 auto* frucPrefs = StreamingPreferences::get(nullptr);
-                const bool frucOn  = frucPrefs && frucPrefs->enableFrameInterpolation;
+                const bool frucOn  = frucPrefs && frucPrefs->enableFrameInterpolation
+                                     && !(LiGetVrFlags() & VIPLE_VR_SF_ENABLED);  // §VR
                 const bool is10bit = (videoFormat & VIDEO_FORMAT_MASK_10BIT) != 0;
                 if (shouldUseVkFrucRendererForVulkanHwaccel() && !is10bit && frucOn) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2583,6 +2592,17 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
     // vkfruc.cpp 的 VIPLE_VKFRUC_*）在這裡各印一次；每個名稱整個行程只印一次
     Utils::logDevEnvOverrides();
 
+    // §VR（M1a）：VR session 的串流 decoder 改用 pts 配對 0x81 metadata。
+    // 串流 decoder 在 LiStartConnection 內的 drSetup 建立，那時 VrFlags 已經生效；
+    // test decoder（codec 探測）一律不啟用。vrFlags==0 時行為完全不變（不變式 5）。
+    m_VrTracker.reset();
+    m_VrConsecutiveDecodeErrors = 0;
+    if (!m_TestOnly && !params->testOnly && (LiGetVrFlags() & VIPLE_VR_SF_ENABLED)) {
+        auto* vrPrefs = StreamingPreferences::get(nullptr);
+        m_VrTracker = std::make_unique<VrFrameMetaTracker>(vrPrefs ? vrPrefs->vrInjectDropEvery : 0,
+                                                           vrPrefs ? vrPrefs->vrInjectLossSec : 0);
+    }
+
     bool ok = initializeInternal(params);
     if (!m_TestOnly) {
         s_LastInitializeFailed = !ok;
@@ -2933,6 +2953,16 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     SDL_assert(m_FrameInfoQueue.size() == m_FramesIn - m_FramesOut);
                     m_FramesOut++;
 
+                    // §VR：pts 配對＋FIFO 對齊（見 vrPairDecodedFrame）
+                    if (m_VrTracker && !vrPairDecodedFrame(frame)) {
+                        // 注入的「decoder 吞幀」：這一幀當作沒出來，FIFO 項目留著，
+                        // 下一幀配對時會被跳過（正是要驗證的情境）
+                        m_FramesOut--;
+                        av_frame_unref(frame);
+                        err = AVERROR(EAGAIN);
+                        continue;
+                    }
+
                     // Attach HDR metadata to the frame if it's not already present. We will defer to
                     // any metadata contained in the bitstream itself since that is guaranteed to be
                     // correctly synchronized to each frame, unlike our async HDR metadata message.
@@ -2995,6 +3025,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
 
                     // Reset failed decodes count if we reached this far
                     m_ConsecutiveFailedDecodes = 0;
+                    m_VrConsecutiveDecodeErrors = 0;
 
                     // Restore default log level after a successful decode
                     av_log_set_level(AV_LOG_INFO);
@@ -3115,7 +3146,12 @@ void FFmpegVideoDecoder::decoderThreadProc()
 
                     // Just in case the error resulted in the loss of the frame,
                     // request an IDR frame to reset our decoder state.
-                    LiRequestIdrFrame();
+                    // §VR：recovery=intra 先送 LOSS，連續 3 次才要 IDR
+                    if (!vrHandleDecodeError(!m_FrameInfoQueue.isEmpty()
+                                                 ? m_FrameInfoQueue.head().frameNumber
+                                                 : (m_VrTracker ? (int)m_VrTracker->lastSubmittedFrame() : 0))) {
+                        LiRequestIdrFrame();
+                    }
                 }
             } while (err == AVERROR(EAGAIN) && !SDL_AtomicGet(&m_DecoderThreadShouldQuit));
 
@@ -3125,6 +3161,54 @@ void FFmpegVideoDecoder::decoderThreadProc()
             }
         }
     }
+}
+
+bool FFmpegVideoDecoder::vrPairDecodedFrame(AVFrame* frame)
+{
+    if (m_VrTracker->shouldInjectDrop()) {
+        return false;
+    }
+
+    const int fifoHead = m_FrameInfoQueue.isEmpty() ? -1 : m_FrameInfoQueue.head().frameNumber;
+    if (frame->pts == AV_NOPTS_VALUE) {
+        // decoder 沒帶回 pts：只能退回原本的 FIFO（下面照舊 dequeue）
+        m_VrTracker->notePtsMissing();
+        return true;
+    }
+
+    // decoder 吞掉的幀永遠不會出來：丟掉 FIFO 裡比這一幀早的項目，並補計 m_FramesOut，
+    // 讓 m_FrameInfoQueue.size() == m_FramesIn - m_FramesOut 的不變式維持成立。
+    // 至少留一項（這一幀自己的），交給下面原本的 dequeue。
+    int skipped = 0;
+    while (m_FrameInfoQueue.size() > 1 && (int64_t)m_FrameInfoQueue.head().frameNumber < frame->pts) {
+        m_FrameInfoQueue.dequeue();
+        m_FramesOut++;
+        skipped++;
+    }
+    if (skipped > 0) {
+        m_VrTracker->noteFifoSkipped(skipped);
+    }
+
+    // M1a 只統計；M4a 的 XrRenderer 會拿 meta 決定 projection pose，查不到的幀要丟棄
+    VIPLE_VR_FRAME_META meta;
+    m_VrTracker->onDecoded(frame->pts, fifoHead, &meta);
+    return true;
+}
+
+bool FFmpegVideoDecoder::vrHandleDecodeError(int frameNumber)
+{
+    if (!m_VrTracker || !(LiGetVrFlags() & VIPLE_VR_SF_RECOVERY_INTRA)) {
+        return false;
+    }
+    if (++m_VrConsecutiveDecodeErrors >= 3) {
+        m_VrConsecutiveDecodeErrors = 0;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-LOSS] 3 consecutive decode errors — requesting IDR (frame %d)",
+                    frameNumber);
+        return false;
+    }
+    LiReportVrLoss((uint32_t)frameNumber, (uint32_t)frameNumber, VIPLE_VR_LOSS_DECODE_ERROR);
+    return true;
 }
 
 // §LOGHYG-NET10 — 秒級 [VIPLE-NET] 行的統一印出點（暖機 / 異常 / pre-flush
@@ -3613,6 +3697,12 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         m_Pkt->flags = 0;
     }
 
+    // §VR：pts 帶 frameNumber，解出來後用它查 0x81 metadata（不靠 FIFO）
+    if (m_VrTracker) {
+        m_Pkt->pts = du->frameNumber;
+        m_VrTracker->onSubmit(du);
+    }
+
     m_ActiveWndVideoStats.totalReassemblyTimeUs += (du->enqueueTimeUs - du->receiveTimeUs);
 
     // §J.3.e.2.i.8 — VipleStream native VK_KHR_video_decode intercept.
@@ -3709,6 +3799,11 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
             // Don't consume any additional data
             SDL_AtomicSet(&m_DecoderThreadShouldQuit, 1);
+        }
+
+        // §VR：recovery=intra 改送 LOSS，後續幀照常解碼（由 intra refresh 自癒）
+        if (vrHandleDecodeError(du->frameNumber)) {
+            return DR_OK;
         }
 
         return DR_NEED_IDR;

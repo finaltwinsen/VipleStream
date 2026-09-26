@@ -97,6 +97,9 @@ $QaWhitelist = @{
 #     add_subdirectory(third-party/moonlight-common-c/enet)：ENet 本體。VR 依賴
 #     兩端 ENet 的 unsequenced／throttle 行為一致（docs/vr_architecture.md F1）。
 $QsRequired = @(
+    # VipleVr.h：2.0 VR 協定的單一定義來源（ptype、0x81 header、tracking、TLV），
+    # stream.cpp 直接 include，三份必須 byte-identical（docs/vr_protocol.md §4.8）。
+    'src/VipleVr.h',
     'src/Input.h',
     'src/Video.h',
     'src/Rtsp.h',

@@ -31,6 +31,7 @@ OPUS_MULTISTREAM_CONFIGURATION HighQualityOpusConfig;
 int AudioPacketDuration;
 bool AudioEncryptionEnabled;
 bool ReferenceFrameInvalidationSupported;
+int VrFlags;
 uint16_t RtspPortNumber;
 uint16_t ControlPortNumber;
 uint16_t AudioPortNumber;
@@ -169,6 +170,9 @@ void LiStopConnection(void) {
         free(RtspAddrString);
         RtspAddrString = NULL;
     }
+
+    // §VR：連線已拆完，之後誤呼叫的 VR API 一律變成 no-op（不碰已銷毀的 mutex）
+    VrFlags = 0;
 }
 
 static void terminationCallbackThreadFunc(void* context)
@@ -290,6 +294,24 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     NegotiatedVideoFormat = 0;
     memcpy(&StreamConfig, streamConfig, sizeof(StreamConfig));
     RemoteAddrString = strdup(serverInfo->address);
+
+    // §VR：每次連線都依 StreamConfig 重設。VR 結構直接以 little-endian 版面
+    // 上線，大端平台不啟用（docs/vr_protocol.md §4）。
+    VrFlags = IS_LITTLE_ENDIAN() ? StreamConfig.vrFlags : 0;
+    if (VrFlags != 0) {
+        if (!(VrFlags & VIPLE_VR_SF_ENABLED)) {
+            // 只有恢復旗標、沒有 ENABLED 是呼叫端錯誤：當成一般 session
+            Limelog("[VIPLE-VR-SESSION] vrFlags=0x%x without ENABLED — ignored\n", StreamConfig.vrFlags);
+            VrFlags = 0;
+        }
+        else {
+            Limelog("[VIPLE-VR-SESSION] VR session: vrFlags=0x%x (recovery=%s)\n",
+                    VrFlags, (VrFlags & VIPLE_VR_SF_RECOVERY_INTRA) ? "intra" : "idr");
+        }
+    }
+    else if (StreamConfig.vrFlags != 0) {
+        Limelog("[VIPLE-VR-SESSION] big-endian platform — VR disabled\n");
+    }
 
     // The values in RTSP SETUP will be used to populate these.
     VideoPortNumber = 0;

@@ -57,6 +57,7 @@ namespace mail {
   MAIL(hdr);
   MAIL(bitrate_change);  // VipleStream: adaptive bitrate (kbps)
   MAIL(fps_change);      // VipleStream: dynamic FPS change from client
+  MAIL(vr_refresh);      // VipleStream 2.0 §VR: LOSS → 開一波 intra refresh（值 = wave 長度，幀）
 #undef MAIL
 
 }  // namespace mail
