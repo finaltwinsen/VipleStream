@@ -332,6 +332,7 @@ ccache 已暖的情況下完整重建一次。release 的 LTO 連結不吃 ccach
 |---|---|---|---|---|---|---|---|---|
 | 09-28 | aarch64 | dev | 乾淨 | 8 | 14463 s（4 h 01 m） | 3681 s（ccache 冷） | 16 s | 依賴：ncnn 5114、FFmpeg 2644、SDL3 1681、openxr 392、libplacebo 304、dav1d 213、sdl2-compat 210、SDL2_ttf 206 s；期間有一次低優先權（`nice -n 19`）的 x64 AppImage 建置重疊 |
 | 09-28 | aarch64 | dev | 增量 | 8 | **453 s（7.5 m）** | 440 s | 17 s | 依賴全部 Cache hit；改動＝審查修正（main.cpp、v4l2caps、decodebench、sfenv、commandlineparser 等） |
+| 09-28 | aarch64 | release | 增量 | 8 | **201 s（3.4 m）** | 186 s | 16 s | commit 729d4050、HEAD 未 push → `-unpublished` 產物；程式碼與上一列相同，ccache 幾乎全中；實際旗標 `-O2`（LTO 未生效，見下）；`--bundle` 安裝後 smoke 通過；`/app/manifest.json` 是 GitHub URL＋commit，沒有本機路徑 |
 | 09-28 | x86_64 | dev | 乾淨（參考） | 8 | 1318 s | 271 s | — | 原生速度；ncnn 561、FFmpeg 171、SDL3 148 s |
 | 09-28 | x86_64 | dev | 增量（參考） | 8 | 68 s | 53 s | — | 同上的審查修正 |
 
@@ -341,7 +342,6 @@ ccache 已暖的情況下完整重建一次。release 的 LTO 連結不吃 ccach
   `QMAKE_CXXFLAGS_RELEASE_WITH_DEBUGINFO`，app 實際編譯旗標是 `-O2 -g`，`app.pro` 的 `-O3 -flto` 從來沒套上（x64
   AppImage 也一樣，是既有問題）。所以 release flavor 與 dev flavor 的增量時間預期相同，`CONFIG+=disable-lto` 在 Linux
   目前等於沒作用。要不要讓 Linux 真的吃到 `-O3 -flto` 會改變已出貨 AppImage 的程式碼產生，列在 `docs/TODO.md` 另案處理。
-- release flavor 的增量（commit 之後、`-unpublished` 產物）另外量一次，數字補在這張表。
 
 ---
 
