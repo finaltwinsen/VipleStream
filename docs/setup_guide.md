@@ -143,13 +143,56 @@ input latency.
 
 - Sunshine config lives at `C:\Program Files\VipleStream-Server\config\sunshine.conf`.
 - Service name is `VipleStreamServer` (not the upstream `SunshineService`).
-- Default install does NOT auto-flip the host display to client-requested
-  resolution. Hosts with a physical / VDD monitor locked at 1080p60 will
-  render the client at 1080p60 even if the client requests 1440p120 —
-  configure VDD or use a higher-res dummy plug if you need 1440p+.
+- 顯示器模式切換由 `dd_configuration_option` 控制，預設值 `disabled`：host 不切換，
+  維持目前的解析度與更新率（client 要求 1440p120，host 還是 1080p60）。設成
+  `ensure_active`／`ensure_primary`／`ensure_only_display`，並讓
+  `dd_resolution_option`、`dd_refresh_rate_option` 維持預設（`auto`；寫成
+  `automatic` 會被當成無效值），host 才會切到 client 要求的模式。目標顯示器的模式表
+  必須有那一組「解析度 × 更新率」，否則整組設定會被還原、擷取悄悄退回原本的螢幕，
+  見下方〈虛擬顯示器（MTT VDD）〉。
 - Adaptive bitrate (AIMD): if the client reports packet loss > 2%, server
   reduces bitrate by 25% per second until loss clears, then ramps back.
   Override in `sunshine.conf` with `adaptive_bitrate_disabled=true`.
+
+<a id="vdd-frame-template"></a>
+#### 虛擬顯示器（MTT VDD）：Steam Frame 桌面模式範本
+
+Frame 桌面模式（α／β）串的是 host 的一般桌面。沒有實體螢幕的 host 建議用 MTT
+Virtual Display Driver（VDD，24.12.24 簽章版）當擷取目標，並讓它具備 Frame 會要求的
+每一組「解析度 × 更新率」。
+
+**為什麼要齊：** 模式表裡沒有 client 要求的組合（更新率容差 ±0.9 Hz）時，Sunshine 會把
+整組顯示器設定還原，擷取悄悄退回原本的螢幕（例如 HDMI 誘騙器），畫面與更新率都不對，
+而且沒有錯誤畫面。
+
+1. 在 `sunshine.log` 找 `Currently available display devices:` 後面的 JSON（每次服務
+   啟動只印一次），抄下 VDD 的 `device_id`。
+2. `sunshine.conf`：
+   ```ini
+   output_name = {<VDD device_id>}
+   dd_configuration_option = ensure_only_display
+   ```
+   `dd_resolution_option`、`dd_refresh_rate_option` 不要寫（預設 `auto`）。
+3. 以系統管理員身分，把 `Sunshine/src_assets/windows/misc/vdd_settings.frame.xml`
+   **合併**進 `C:\VirtualDisplayDriver\vdd_settings.xml`（登錄
+   `HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver\VDDPATH` 有值時以它為準）。這個檔案
+   整台 host 共用，其他 client 需要的模式（例如 1920×1080@180）要保留。
+4. 沒有串流時重新載入 VDD：
+   ```powershell
+   $d = Get-PnpDevice -FriendlyName 'Virtual Display Driver'
+   Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false
+   Enable-PnpDevice  -InstanceId $d.InstanceId -Confirm:$false
+   ```
+5. 驗證：從 Frame 以 1920×1080、HMD 更新率串流，host log 的
+   `Desktop resolution [1920x1080]`、`Display refresh rate [<Hz>Hz]`、
+   `Requested frame rate [<Hz>fps]` 三行一致，而且沒有
+   `Failed to set display mode(-s) completely!`。
+   （`WmiMonitorListedSupportedSourceModes` 只列 EDID 的模式，看不到 VDD 的模式表，
+   不能拿來驗證。）
+
+PCVR 不經過 VDD，不需要這個範本。VipleStream server 不會寫入
+`C:\VirtualDisplayDriver`；這個資料夾預設一般使用者可寫，必要時請自行收緊權限。
+範本目前不隨 server zip 出貨，從 repo 取用即可。
 
 #### Steam Controller 虛擬裝置（§SC-HID）：host 端安裝／驗證
 

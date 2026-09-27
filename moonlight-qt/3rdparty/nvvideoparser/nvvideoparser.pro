@@ -20,10 +20,6 @@ CONFIG += c++17
 # "vkvideo_parser/..." 子目錄.  保留這個 layout, INCLUDEPATH 加我們的
 # include root + Vulkan 頭檔目錄.
 #
-# 兩個 Vulkan include path 都加：
-#   libs/windows/include      → vk_video/* (codec std, 跨架構共用)
-#   libs/windows/include/x64  → vulkan/*, libavcodec/*, etc. (arch-specific)
-#
 # NvVideoParser 子目錄也加進 INCLUDEPATH，因為部分 #include 用 <cpudetect.h>
 # (angle brackets) 而不是 "NvVideoParser/cpudetect.h" — 上游 build system
 # 把 NvVideoParser/include 當作獨立的 include root.
@@ -31,9 +27,18 @@ INCLUDEPATH += \
     $$PWD/include \
     $$PWD/include/NvVideoParser \
     $$PWD/include/vkvideo_parser \
-    $$PWD/include/VkCodecUtils \
-    $$PWD/../../libs/windows/include \
-    $$PWD/../../libs/windows/include/x64
+    $$PWD/include/VkCodecUtils
+
+# Windows 才加內附的 Vulkan 標頭（兩個 include path 都要）：
+#   libs/windows/include      → vk_video/* (codec std, 跨架構共用)
+#   libs/windows/include/x64  → vulkan/*, libavcodec/*, etc. (arch-specific)
+# §M2a（F8）：Linux／Flatpak 一律用系統（SDK）的 Vulkan 標頭，和 app 本體同一份；
+# 以前 Linux 也加這兩條，static lib 與 app 會用到不同版本的 Vulkan 標頭（ODR 風險）。
+win32 {
+    INCLUDEPATH += \
+        $$PWD/../../libs/windows/include \
+        $$PWD/../../libs/windows/include/x64
+}
 
 # §J.3.e.2.i.8 — Phase 1 (H.265) + Phase 2 (H.264) + Phase 3 (AV1).  VP9 still
 # stripped (source not imported).  H264 is now always compiled (Phase 2 import,
@@ -64,14 +69,26 @@ SOURCES += \
 # enabled.  /arch:AVX2 covers most; AVX512/SSSE3 use intrinsic headers
 # that work without the /arch flag (compiler still emits target-specific
 # code via the intrinsics).
+#
+# §M2a-R4：gcc（*-g++*）不再加全域 -m 旗標。以前 -mavx512* 套在整個 lib 的每個 TU 上，
+# gcc 可以在一般 TU（含標頭 inline 函式）自動產生 AVX-512 指令，在沒有 AVX-512 的 CPU
+# （例如 builder 的 Ryzen）上走 Vulkan-video parser 就可能 SIGILL。改成只有三個 SIMD TU
+# 在檔頭用 `#pragma GCC target(...)` 各自開啟需要的指令集（NextStartCode{SSSE3,AVX2,AVX512}.cpp）；
+# 執行期仍由 cpudetect.cpp 依 CPUID 選路。其他 gcc 相容編譯器（clang 等）維持舊行為：
+# 全域開啟三種 SIMD 變體要的指令集。
 *-msvc {
     QMAKE_CXXFLAGS += /arch:AVX2
-} else {
-    # gcc/clang are strict about per-intrinsic target requirements (unlike MSVC).
-    # Enable the full set used across the SSSE3 / AVX2 / AVX512 source variants;
-    # runtime cpudetect.cpp picks the right path based on CPUID at startup.
+} else:equals(QT_ARCH, x86_64):!*-g++* {
     QMAKE_CXXFLAGS += -mssse3 -mavx -mavx2 -mfma \
                       -mavx512f -mavx512bw -mavx512dq -mavx512vl
+}
+
+# §M2a（F8）：上游只匯入了 x86 的 SIMD 實作（NEON／SVE 版沒有匯入），非 x86 架構
+# （Flatpak aarch64）不定義這個，VulkanVideoDecoder.cpp 會去呼叫不存在的
+# ParseByteStreamNEON/SVE → undefined reference。定義後一律走 C 版 next_start_code。
+# SOURCES 不用動：三個 SIMD TU 在非 x86_64 上整檔被 #if 排除，是空的 TU。
+!equals(QT_ARCH, x86_64):!equals(QT_ARCH, i386) {
+    DEFINES += DISABLE_VK_VIDEO_PARSER_SIMD_OPTIMIZATIONS
 }
 
 HEADERS += \

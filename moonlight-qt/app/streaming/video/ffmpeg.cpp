@@ -3,6 +3,7 @@
 #include <atomic>
 #include <mutex>
 #include "ffmpeg.h"
+#include "bitstreamdump.h"
 #include "utils.h"
 #include "streaming/session.h"
 #include "backend/nvcomputer.h"
@@ -402,6 +403,61 @@ enum AVPixelFormat FFmpegVideoDecoder::ffGetFormat(AVCodecContext* context,
     return AV_PIX_FMT_NONE;
 }
 
+bool FFmpegVideoDecoder::getTestFrameData(int videoFormat, const uint8_t** data, size_t* length)
+{
+    if (data == nullptr || length == nullptr) {
+        return false;
+    }
+
+    // sizeof 可用，是因為 ffmpeg_videosamples.cpp 直接 #include 進這個編譯單元
+    switch (videoFormat) {
+    case VIDEO_FORMAT_H264:
+        *data = k_H264TestFrame;
+        *length = sizeof(k_H264TestFrame);
+        return true;
+    case VIDEO_FORMAT_H265:
+        *data = k_HEVCMainTestFrame;
+        *length = sizeof(k_HEVCMainTestFrame);
+        return true;
+    case VIDEO_FORMAT_H265_MAIN10:
+        *data = k_HEVCMain10TestFrame;
+        *length = sizeof(k_HEVCMain10TestFrame);
+        return true;
+    case VIDEO_FORMAT_AV1_MAIN8:
+        *data = k_AV1Main8TestFrame;
+        *length = sizeof(k_AV1Main8TestFrame);
+        return true;
+    case VIDEO_FORMAT_AV1_MAIN10:
+        *data = k_AV1Main10TestFrame;
+        *length = sizeof(k_AV1Main10TestFrame);
+        return true;
+    case VIDEO_FORMAT_H264_HIGH8_444:
+        *data = k_h264High_444TestFrame;
+        *length = sizeof(k_h264High_444TestFrame);
+        return true;
+    case VIDEO_FORMAT_H265_REXT8_444:
+        *data = k_HEVCRExt8_444TestFrame;
+        *length = sizeof(k_HEVCRExt8_444TestFrame);
+        return true;
+    case VIDEO_FORMAT_H265_REXT10_444:
+        *data = k_HEVCRExt10_444TestFrame;
+        *length = sizeof(k_HEVCRExt10_444TestFrame);
+        return true;
+    case VIDEO_FORMAT_AV1_HIGH8_444:
+        *data = k_AV1High8_444TestFrame;
+        *length = sizeof(k_AV1High8_444TestFrame);
+        return true;
+    case VIDEO_FORMAT_AV1_HIGH10_444:
+        *data = k_AV1High10_444TestFrame;
+        *length = sizeof(k_AV1High10_444TestFrame);
+        return true;
+    default:
+        *data = nullptr;
+        *length = 0;
+        return false;
+    }
+}
+
 FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
     : m_Pkt(av_packet_alloc()),
       m_VideoDecoderCtx(nullptr),
@@ -446,6 +502,13 @@ FFmpegVideoDecoder::~FFmpegVideoDecoder()
     m_NetRingCount = 0;
 
     reset();
+
+    // §SF-PROBE（M2a）：串流 decoder 解構時關掉 `--dump-bitstream` 的檔案（印 closed 行）。
+    // reset() 已經 join decoder 執行緒，這裡不會和 writeAccessUnit() 並行。decoder 若之後
+    // 重建（例如 SDL_RENDER_DEVICE_RESET），下一個 AU 會另開 <base>-<n> 新檔。
+    if (!m_TestOnly && BitstreamDump::isEnabled()) {
+        BitstreamDump::close();
+    }
 
     // Set log level back to default.
     // NB: We don't do this in reset() because we want
@@ -3695,6 +3758,16 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     }
     else {
         m_Pkt->flags = 0;
+    }
+
+    // §SF-PROBE（M2a）：`stream --dump-bitstream` 錄下 decoder 實際收到的完整 AU（已含
+    // SPS 修正），在 native decode 攔截與 avcodec_send_packet 之前。關閉時只多一次 relaxed
+    // atomic load（不變式 5）。submitDecodeUnit 只在串流 decoder 的 decoder 執行緒跑；
+    // test decoder 的測試幀在 completeInitialization() 直接送 avcodec，不經過這裡，
+    // !m_TestOnly 只是保險。
+    if (BitstreamDump::isEnabled() && !m_TestOnly) {
+        BitstreamDump::writeAccessUnit(m_Pkt->data, m_Pkt->size, m_VideoFormat,
+                                       m_OriginalVideoWidth, m_OriginalVideoHeight);
     }
 
     // §VR：pts 帶 frameNumber，解出來後用它查 0x81 metadata（不靠 FIFO）

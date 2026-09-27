@@ -2,8 +2,9 @@
 
 > **鐵律：** 所有建置、所有打包、所有版號更動，都必須透過 build script：Windows 與
 > Android 用 repo 根目錄的 `build_*.cmd`（本機檔，見 §0）；Linux 用已入 git 的
-> `moonlight-qt/scripts/build-appimage-native.sh`、`Sunshine/scripts/linux_build.sh`（見 §7）。
-> 不要直接呼叫 `qmake`、`nmake`、`make`、`gradlew`、`cmake --build`。
+> `moonlight-qt/scripts/build-appimage-native.sh`、`Sunshine/scripts/linux_build.sh`（見 §7），
+> Steam Frame 的 arm64 Flatpak 用 `moonlight-qt/scripts/build-steamframe.sh`（見 §8）。
+> 不要直接呼叫 `qmake`、`nmake`、`make`、`gradlew`、`cmake --build`、`flatpak-builder`。
 
 ## 0. 哪些 script 在 git 裡
 
@@ -21,7 +22,7 @@ Windows 端的建置工具**全部不在 git 裡**，是每位開發者自己維
 
 **公開 repo 的 clone 不附 Windows／Android 建置腳本**：`build_*.cmd`、`build-tools\`、
 `build-config.template.cmd` 都不會隨 repo 發佈。目前不支援外部 Windows 建置，需要的話請向
-維護者索取；沒有這些檔就無法照 §1–§6 在 Windows 上建置。新 clone 能直接使用的只有 §7 的
+維護者索取；沒有這些檔就無法照 §1–§6 在 Windows 上建置。新 clone 能直接使用的只有 §7、§8 的
 Linux 腳本。
 
 ## 1. 第一次設定（只需做一次）
@@ -233,6 +234,7 @@ service → 覆蓋 → 確認 SC-HID driver 版號 → 啟 service；預設挑 `
 │   ├── VipleStream-Client-X.Y.Z-debug.zip            ← Client 的 PDB（當機分析用）
 │   ├── VipleStream-Android-X.Y.Z.apk                 ← Android
 │   ├── VipleStream-Client-X.Y.Z-linux-x64.AppImage   ← Linux Client（build_all 的 WSL 步驟，或從 Linux 機 scp 回來）
+│   ├── VipleStream-Client-X.Y.Z-linux-arm64.flatpak  ← Steam Frame Client（2.0.0 起；從 Linux 機 scp 回來，見 §8）
 │   └── VipleStream-Server-X.Y.Z-linux-x64.deb        ← Linux Server（從 Linux 機 scp 回來，見 §7）
 ├── temp\
 │   ├── sunshine\                           ← Sunshine 打包 staging
@@ -319,6 +321,7 @@ build_moonlight.cmd                         :: 重 build
 | 新的子專案要同步版號 | `build-tools\version.ps1` 的 `Propagate-Version` 新增 block，並更新 `docs/versioning.md` §2 的表格 |
 | 新的建置目標（如 iOS） | 建立 `build_ios.cmd`，呼叫 `build-tools\version.ps1 propagate` + 實際建置 |
 | Linux AppImage／`.deb` 的內容 | `moonlight-qt/scripts/build-appimage-native.sh`（linuxdeploy 參數）／`Sunshine/cmake/packaging/linux.cmake` |
+| Steam Frame Flatpak 的模組、pin、finish-args | `moonlight-qt/scripts/steamframe/flatpak/`：manifest 與 `finish-args.md` 必須同步改；沙箱內的建置步驟在 `build-viplestream.sh` |
 
 **注意：Windows 端這些 script 都不在 git 裡**（§0）。改了只存在你自己的工作樹，`git pull`
 不會把新清單帶給其他開發者，PR 裡也審不到。清單有變動時，請在 commit 訊息或相關文件寫明
@@ -337,24 +340,29 @@ Linux 兩件要在 Linux x64 機器上建（Ubuntu 26.04 驗證過）。入口�
 **版號**：兩支腳本讀的是已經 propagate 進 repo 的版號檔（`moonlight-qt/app/version.txt`、
 `Sunshine/CMakeLists.txt`），**不要在 Linux 機上 bump**。版號由 Windows 開發機的
 `build-tools\version.ps1` 決定並 commit；Linux 機 `git pull` 到同一個 commit 再建（還沒 push
-時，在開發機用 `git diff` 產 patch、scp 過去 `git apply`）。建完核對產物版號和 `version.json`
-一致。
+時，在開發機用 `git diff` 產 patch、scp 過去 `git apply`；要 commit SHA 完全一致時改用 `git bundle`，
+arm64 Flatpak 的 release 一定要，見 §8）。建完核對產物版號和 `version.json` 一致。
 
 **Client（`build-appimage-native.sh`）前置**：
 - `qmake6`、`linuxdeploy`（含 Qt plugin）要在 `PATH` 上。
-- ncnn 目前**必須裝在 `/usr/local`**：`app.pro` 只檢查 `/usr/local/include/ncnn/mat.h`，找不到就不定義
-  `VIPLESTREAM_HAVE_NCNN`、也不連 `-lncnn`，但 `plvk.cpp` 無條件 include `<ncnn/…>` 標頭，所以編譯會失敗。
-  腳本的 `NCNN_PREFIX`（預設 `~/.local/ncnn`）實際上只用來設 `LD_LIBRARY_PATH`，讓 linuxdeploy 找到並打包
-  `libncnn.so`；腳本雖然也把它傳給 qmake，但 `app.pro` 沒有讀這個變數（腳本註解寫的 "app.pro honors it" 是錯的）。
-  ncnn 裝在 `/usr/local` 時跑一次 `sudo ldconfig` 即可，不必設 `NCNN_PREFIX`。讓 `app.pro` 改讀 `NCNN_PREFIX`
-  屬於 2.0 的 F8／C2（[`vr_architecture.md`](vr_architecture.md) §2.1）。
+- ncnn 的安裝位置由 qmake 變數 **`NCNN_PREFIX`** 決定（M2a 的 F8 起 `app.pro` 真的讀它；沒傳時預設 `/usr/local`，
+  和舊行為相同）。腳本傳 `NCNN_PREFIX`（預設 `~/.local/ncnn`），`app.pro` 用它設 `-I<prefix>/include` 與
+  `-L<prefix>/lib -lncnn`；腳本同時用它設 `LD_LIBRARY_PATH`，讓 linuxdeploy 找到並打包 `libncnn.so`。qmake 印出
+  `NCNN found at <prefix>` 就是找到了。有開 libplacebo 卻找不到 `<prefix>/include/ncnn/mat.h` 時，qmake 直接以
+  `error()` 停下並指向 `NCNN_PREFIX`（`plvk.cpp`、`vkfruc.cpp`、`rife_native_vk.cpp` 無條件引用 ncnn），不會再噴一長串
+  include 錯誤。M2a 以前 `app.pro` 只看 `/usr/local`，是靠 builder 上 `/usr/local` 的 symlink 才建得起來。
 - `vkfruc.cpp` 還會 include `<ncnn/stb_image_write.h>`，但原始碼建的 ncnn 不會安裝這個標頭；要另外裝
   `libstb-dev`，做法見 `app.pro` 裡 §K.X 那段註解。
 - 連結的是真正的 SDL2（不是 sdl2-compat），腳本會把它打包進 AppImage。
 - 以 `DEFINES+=VIPLE_MPQUIC` 建置，所以 `Sunshine/third-party/picoquic`（submodule）要先初始化，
-  而且 `Sunshine/third-party/picoquic/build/` 裡要有 picoquic／picotls 靜態庫（`app.pro` 的 `PICOQUIC_BUILD`）。
+  而且 `Sunshine/third-party/picoquic/build/` 裡要有 picoquic／picotls 靜態庫（`app.pro` 的 `PICOQUIC_BUILD`，
+  可覆寫，見下方「qmake 變數」）。
 - 腳本固定帶 `CONFIG+=disable-wayland CONFIG+=disable-libdrm`，所以出貨的 AppImage 沒有 DrmRenderer，也沒有
   moonlight 自己的 Wayland 整合（見 [`rendering_paths.md`](rendering_paths.md) 的註 ❷）。
+- linuxdeploy 呼叫帶 **`EXTRA_PLATFORM_PLUGINS=libqoffscreen.so`**（M2a 起，`build-appimage-native.sh` 與
+  `build-appimage.sh` 都有）。經 SSH（沒有 Wayland／X11）執行 `--help`／`--version` 時，`main.cpp` 改用 offscreen QPA，
+  不再落到 EGLFS 去做 KMS modeset；linuxdeploy-plugin-qt 預設只部署 `libqxcb.so`，少了這個外掛 AppImage 會找不到
+  offscreen 平台而 abort。打包後確認 `usr/plugins/platforms/libqoffscreen.so` 存在。
 - 有裝 `fonts-noto-cjk` 就會把 CJK 字型包進去，沒裝就用系統 fontconfig。
 
 **Server（`linux_build.sh`）前置**：
@@ -365,6 +373,19 @@ Linux 兩件要在 Linux x64 機器上建（Ubuntu 26.04 驗證過）。入口�
   （`Sunshine/cmake/packaging/linux.cmake`）。兩者在 Ubuntu 26.04 互相 Conflicts，兩個都硬列會讓 apt
   判定套件無法安裝；host 的自我更新也要靠這個 `.deb` 裝得起來。
 
+**qmake 變數**（M2a 起；由建置腳本傳入，不要自己跑 qmake）。沒傳時一律用預設值，Windows 與 x64 AppImage 的行為和
+以前相同：
+
+| 變數 | 預設 | 用途／誰會傳 |
+|---|---|---|
+| `NCNN_PREFIX` | `/usr/local` | ncnn 安裝前綴，`-I`、`-L` 都指到它。AppImage 腳本傳 `~/.local/ncnn`，Flatpak 傳 `/app` |
+| `PICOQUIC_BUILD` | `Sunshine/third-party/picoquic/build` | `libpicoquic-core` 所在的 picoquic build 目錄（`DEFINES+=VIPLE_MPQUIC` 時才用）。Flatpak 傳沙箱內自建的目錄 |
+| `PICOTLS_LIBDIR` | `$$PICOQUIC_BUILD/_deps/picotls-build` | picotls 靜態庫目錄。`picotls-fusion` 只在這裡有 `libpicotls-fusion.a` 或 `picotls-fusion.lib` 時才連（aarch64 沒有），連結順序維持 openssl → core → fusion → minicrypto |
+| `PICOQUIC_DIR` | `Sunshine/third-party/picoquic/picoquic` | picoquic 原始碼目錄，`moonlight-common-c.pro` 讀（include 路徑與 Windows 的 `wintimeofday.c`） |
+| `VIPLE_DESKTOP_ID` | `viplestream` | desktop id。經 `QMAKE_SUBSTITUTES` 產生 `app/desktop_id.h`（gitignored，同 `version_string.h` 的做法），給 `setDesktopFileName` 與 SDL 的 Wayland app id。只允許單一個 `[A-Za-z0-9._-]+`，否則 `error()`。Flatpak 傳 app-id |
+| `CONFIG+=openxr` | 不帶 | 連 OpenXR loader（pkg-config `openxr`）、定義 `HAVE_OPENXR`、編 `xr-probe` 的 A 段（`streaming/xr/xrprobe_instance.cpp`）。刻意 opt-in、不自動偵測，只有 `build-steamframe.sh` 帶；僅限 Linux（Windows 的 `--openxr` 留到 M3a） |
+| `CONFIG+=disable-lto` | 不帶 | GCC／Clang 的 release 只拿掉 `-flto`，保留 `-O3`。只有 `build-steamframe.sh` 的 dev flavor 帶（qemu 下 LTO 連結不吃 ccache，會把增量建置拉長好幾倍） |
+
 **其他注意事項**：
 - 已入 git 的 `.sh` 受 `.gitattributes`（根目錄與 `Sunshine/` 都有 `*.sh text eol=lf`）保護，Windows 工作樹
   即使 `core.autocrlf=true`，checkout 出來也是 LF。會踩到 CRLF（`$'\r': command not found`）的是根目錄
@@ -373,10 +394,34 @@ Linux 兩件要在 Linux x64 機器上建（Ubuntu 26.04 驗證過）。入口�
   `git clone`／`git pull` 就能避開。
 - 長時間建置用 `nohup setsid … &` 背景跑再輪詢 log，避免 SSH 斷線把建置一起帶走。
 - 產物用 scp 拉回 Windows 開發機的 `release\`，核對 sha256；測試產物不上雲，只有正式 release 才上 GitHub。
-- **Linux arm64（Steam Frame client，2.0 規劃中）**：預計新增 `moonlight-qt/scripts/build-steamframe.sh`
-  產 Flatpak，見 [`vr_architecture.md`](vr_architecture.md) §2.1、§6。
+- **Linux arm64（Steam Frame client）**：見 §8。
 
-## 8. 為什麼要這麼死守 script？
+## 8. Steam Frame client（Linux arm64 Flatpak）
+
+2.0 的 Steam Frame client 是 moonlight-qt 的原生 Linux arm64 版，以 Flatpak 打包，app-id
+`io.github.finaltwinsen.VipleStream`。在 Linux x64 建置機（`<builder>`）上用已入 git 的腳本建置，aarch64 靠 qemu-user：
+
+```bash
+bash moonlight-qt/scripts/build-steamframe.sh --arch aarch64 --check              # 缺什麼、怎麼裝（不會自動裝）
+bash moonlight-qt/scripts/build-steamframe.sh --arch x86_64 --flavor dev --smoke  # 開發用
+bash moonlight-qt/scripts/build-steamframe.sh --arch aarch64 --flavor release     # release 的第六件
+```
+
+| 產物 | 腳本（在 git 裡） | 輸出 | 上 release 的檔名 |
+|---|---|---|---|
+| Client Flatpak（arm64） | `moonlight-qt/scripts/build-steamframe.sh --arch aarch64 --flavor release` | `~/viple-steamframe/out/VipleStream-Client-X.Y.Z-linux-arm64.flatpak`（附 `.sha256`；`--work` 可改工作目錄） | 同左（2.0.0 起必備） |
+
+- **完整說明在 [`steam_frame_client.md`](steam_frame_client.md)**：builder 前置（flatpak、flatpak-builder、
+  qemu-user-binfmt、兩種 arch 的 KDE 6.11 runtime）、dev 與 release 的差異、結束碼、原始碼同步、G-BUILD 量法、
+  smoke test、探測動作。
+- 一律透過這支腳本，不要手動跑 `flatpak-builder`：viplestream 模組的來源（`viplestream-source.json`）由腳本產生。
+  腳本也不安裝任何東西，缺什麼就印出確切指令並以 2 結束。
+- 版號同 §7：不在 builder 上 bump。release flavor 要求 `version.txt` 等於 `version.json`，而且 `moonlight-qt/` 與
+  picoquic 沒有未 commit 的改動；還沒 push 時用 `git bundle` 把 commit 帶到 builder，SHA 才會完全一致。
+- 長建置用 `nohup setsid … & disown` 再輪詢；不要包 `systemd-inhibit`（經 SSH 會被 polkit 擋下）。
+- x86_64 Flatpak 只給開發用（S1、PoC-F-pre），腳本拒絕 `--arch x86_64 --flavor release`。
+
+## 9. 為什麼要這麼死守 script？
 
 歷史教訓（別問為什麼這些都發生過）：
 - 手動 `nmake` 過 → 版號 drift，release zip 裡是 1.2.5 但 Settings 顯示 1.2.3

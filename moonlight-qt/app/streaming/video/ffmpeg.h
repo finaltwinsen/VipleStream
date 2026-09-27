@@ -35,6 +35,12 @@ public:
 
     virtual IFFmpegRenderer* getBackendRenderer();
 
+    // §SF-PROBE（M2a）：借出啟動測試用的單一 IDR 測試幀（全部 720p，見
+    // ffmpeg_videosamples.cpp），給 v4l2-probe 的 header-test 用。videoFormat 是
+    // Limelight.h 的 VIDEO_FORMAT_*；沒有對應測試幀時回 false、*data／*length 清零。
+    // 回傳的指標指向靜態資料，呼叫端不可釋放、不可修改。
+    static bool getTestFrameData(int videoFormat, const uint8_t** data, size_t* length);
+
 private:
     enum class TestMode {
         // No test frame and prepare for rendering

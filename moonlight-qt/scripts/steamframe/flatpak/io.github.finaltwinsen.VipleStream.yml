@@ -1,0 +1,280 @@
+# VipleStream §SF-FLATPAK（M2a α）— Steam Frame client（Linux arm64）的 Flatpak manifest
+#
+# 不要直接對這個檔案跑 flatpak-builder。viplestream 模組的來源（viplestream-source.json）
+# 由 moonlight-qt/scripts/build-steamframe.sh 產生在工作目錄的 manifest/ 內：
+#   - dev：工作樹快照（type: dir，含未 commit 的改動）；
+#   - release：pin 在 HEAD commit 的 git 來源（picoquic 另列一個 git 來源，pin 在 gitlink）。
+# 一律透過腳本建置（它也負責前置檢查、計時、bundle 與 smoke test）：
+#   bash moonlight-qt/scripts/build-steamframe.sh --arch aarch64 --flavor dev
+#
+# 範本是 Flathub 的 com.moonlight_stream.Moonlight（master 234fb653）。和範本的差異：
+#   - 多 ncnn、openxr-loader、picoquic＋picotls（viplestream 模組內建）；
+#   - 不建 libdecor（freedesktop 25.08 runtime 已內建）；
+#   - libplacebo 用 v7.360.1（API 360，和 Windows prebuilt、builder 系統版相同；沒有
+#     VK_KHR_internally_synchronized_queues，所以不需要 Flathub 的 gamescope 補丁）；
+#   - FFmpeg 拿掉 --enable-lto（qemu 下省時間；解碼走硬體），另外開 h264/hevc/av1 parser
+#     （decode-bench 用 av_parser_parse2 切 Annex-B；--disable-all 會把 parser 全關）；
+#   - SDL3 不開 IPO（同樣是 qemu 建置時間）；
+#   - gamescope WSI layer 兩種 arch 都裝（aarch64 版 UNVERIFIED，見 finish-args.md）；
+#   - libdrm 兩種 arch 都開（x86_64 Flatpak 只給開發用，見 finish-args.md「libdrm 決定」）。
+#
+# 規則：
+#   - 每個 git 來源都 pin commit；tag／分支只寫在註解（commit 才是事實）。
+#   - 模組順序：最常改動的放後面。flatpak-builder 的快取是逐模組串接的，前面任何一個
+#     模組變動，後面全部重建（qemu 下 ncnn 一次就是好幾個小時）。
+#   - 各依賴模組的授權檔由 flatpak-builder 自動裝到 /app/share/licenses/<app-id>/<module>/；
+#     viplestream 模組另外手動補 moonlight-qt、picoquic、picotls 的授權（build-viplestream.sh）。
+
+app-id: io.github.finaltwinsen.VipleStream
+runtime: org.kde.Platform
+# 退路：Qt 6.11 是新變數（Windows 與 builder 目前都在 6.10.x）。6.11 有問題時改成 '6.10'
+# （同為 freedesktop 25.08 基底、仍在維護），build-steamframe.sh 的 KDE_BRANCH 要一起改。
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+command: viplestream
+rename-desktop-file: viplestream.desktop
+rename-icon: viplestream
+rename-appdata-file: viplestream.appdata.xml
+# 非 Flathub 發佈：省掉 appstreamcli compose 對 appdata 的嚴格驗證。上架 Flathub 時再打開。
+appstream-compose: false
+
+# 逐條理由、取捨與 UNVERIFIED 項目見同目錄 finish-args.md（改這裡必須同步改那份）。
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=all
+  - --talk-name=org.freedesktop.ScreenSaver
+  - --filesystem=xdg-run/gamescope-0
+  - --filesystem=host-os:ro
+  - --filesystem=xdg-config/openxr:ro
+  - --filesystem=xdg-config/openvr:ro
+  - --filesystem=xdg-data/Steam/steamapps/common/SteamVR:ro
+  - --filesystem=~/.steam:ro
+  - --env=LIBVA_DRIVER_NAME=
+  - --unset-env=LIBVA_DRIVER_NAME
+  - --env=LIBVA_DRIVERS_PATH=
+  - --unset-env=LIBVA_DRIVERS_PATH
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/ffmpeg
+  - '*.a'
+  - '*.la'
+
+modules:
+  # ncnn：RIFE／FRUC 的 Vulkan 推論。runtime 沒有；app 的 libplacebo 路徑（plvk、vkfruc、
+  # rife_native_vk）無條件引用 ncnn。版本與 builder 現用的 ~/.local/ncnn 相同（20250503）。
+  # full-source zip 沒有頂層目錄，預設的 strip-components: 1 會讓 src/、glslang/ 的
+  # CMakeLists.txt 和頂層撞名而失敗，所以必須是 0。NCNN_VERSION 明寫，否則 ncnn 用建置
+  # 當天日期當版號（libncnn.so.1.0.<日期>，不可重現）。
+  - name: ncnn
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DNCNN_VERSION=20250503
+      - -DNCNN_VULKAN=ON
+      - -DNCNN_SIMPLEVK=OFF
+      - -DNCNN_SYSTEM_GLSLANG=OFF
+      - -DNCNN_SHARED_LIB=ON
+      - -DNCNN_BUILD_TOOLS=OFF
+      - -DNCNN_BUILD_EXAMPLES=OFF
+      - -DNCNN_BUILD_BENCHMARK=OFF
+      - -DNCNN_BUILD_TESTS=OFF
+      - -DNCNN_PYTHON=OFF
+    # vkfruc.cpp 需要 ncnn/stb_image_write.h，但 ncnn 的安裝清單沒有它。post-install 的
+    # 工作目錄是 _flatpak_build，一律用 FLATPAK_BUILDER_BUILDDIR（模組根目錄）的絕對路徑。
+    post-install:
+      - 'install -Dm644 "$FLATPAK_BUILDER_BUILDDIR/src/stb_image_write.h" /app/include/ncnn/stb_image_write.h'
+    sources:
+      - type: archive
+        url: https://github.com/Tencent/ncnn/releases/download/20250503/ncnn-20250503-full-source.zip
+        sha256: 'b3190d1b6beae3aac30fa99f4d3fd89a2b47a010b888d2d2389189784743a690'
+        strip-components: 0
+
+  # SDL3＋sdl2-compat：app 只用 SDL2 API；和 Windows（sdl2-compat over SDL3）同一套行為。
+  # runtime 內建的 SDL3 3.2.30 太舊（Flathub 維護者 #69：Moonlight 常需要最新 SDL 修 bug）。
+  - name: SDL3
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DSDL_ALSA=OFF
+      - -DSDL_RPATH=OFF
+      - -DSDL_KMSDRM=OFF
+      - -DSDL_INSTALL_DOCS=OFF
+      - -DSDL_TEST_LIBRARY=OFF
+    sources:
+      - type: git
+        url: https://github.com/libsdl-org/SDL.git
+        # tag: release-3.4.14
+        commit: '147a8ee32dbf9ac02f3794964490687b6bbda1bc'
+
+  - name: sdl2-compat
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DSDL2COMPAT_TESTS=OFF
+    sources:
+      - type: git
+        url: https://github.com/libsdl-org/sdl2-compat.git
+        # tag: release-2.32.70
+        commit: 'a53b6ad90ecd2d0ccfe01d5cfd2059793acf8c12'
+
+  # runtime 只有 sdl3-ttf，app.pro 要的是 SDL2_ttf。
+  - name: SDL2_ttf
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DSDL2TTF_VENDORED=ON
+      - -DSDL2TTF_SAMPLES=OFF
+    sources:
+      - type: git
+        url: https://github.com/libsdl-org/SDL_ttf.git
+        # branch: SDL2（同 Flathub 的 pin）
+        commit: 'a883e490e30fb44a5336ea3dcb990c6982c5216f'
+
+  - name: dav1d
+    buildsystem: meson
+    config-opts:
+      - -Denable_tools=false
+      - -Denable_tests=false
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/dav1d.git
+        # tag: 1.5.4
+        commit: '54706fc6bc0cdecab7e9593974a4039cc038fca7'
+
+  # OpenXR loader：freedesktop 25.08 沒有。產出 openxr.pc，只有 CONFIG+=openxr 的建置會用。
+  # BUILD_TESTS／BUILD_API_LAYERS 在 OpenXR-SDK（非 SDK-Source）裡不存在，只會有無害的
+  # "manually-specified variables were not used" 警告；保留是為了日後換 SDK-Source 也不會多建。
+  - name: openxr-loader
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DBUILD_TESTS=OFF
+      - -DBUILD_API_LAYERS=OFF
+      - -DDYNAMIC_LOADER=ON
+    sources:
+      - type: git
+        url: https://github.com/KhronosGroup/OpenXR-SDK.git
+        # tag: release-1.1.63（annotated tag 97dcbd94 → commit f2448a87）
+        commit: 'f2448a8797c85814aa892efc1ab8707900fbcc78'
+
+  # cgutman 的 FFmpeg fork：n9.0 加上 V4L2 Request API（stateless）與 v4l2m2m DRM_PRIME 補丁。
+  # 旗標＝Flathub 清單去掉 --enable-lto，再加三個 parser（理由見檔頭）。
+  # v4l2m2m 不必寫 --enable-v4l2-m2m：它在 autodetect 清單內，明寫的 *_v4l2m2m decoder
+  # 依賴不滿足時會觸發 --fatal-warnings 讓 configure 直接失敗，所以建得出來就代表有編進去。
+  - name: ffmpeg
+    config-opts:
+      - --fatal-warnings
+      - --disable-stripping
+      - --enable-pic
+      - --enable-shared
+      - --disable-static
+      - --disable-all
+      - --enable-avcodec
+      - --enable-avformat
+      - --enable-swscale
+      - --enable-decoder=h264
+      - --enable-decoder=hevc
+      - --enable-decoder=av1
+      - --enable-parser=h264
+      - --enable-parser=hevc
+      - --enable-parser=av1
+      - --enable-hwaccel=h264_vaapi
+      - --enable-hwaccel=hevc_vaapi
+      - --enable-hwaccel=av1_vaapi
+      - --enable-hwaccel=h264_vdpau
+      - --enable-hwaccel=hevc_vdpau
+      - --enable-hwaccel=av1_vdpau
+      - --enable-libdrm
+      - --enable-hwaccel=h264_vulkan
+      - --enable-hwaccel=hevc_vulkan
+      - --enable-hwaccel=av1_vulkan
+      - --enable-decoder=h264_v4l2m2m
+      - --enable-decoder=hevc_v4l2m2m
+      - --enable-libdav1d
+      - --enable-decoder=libdav1d
+      - --enable-v4l2-request
+      - --enable-hwaccel=h264_v4l2request
+      - --enable-hwaccel=hevc_v4l2request
+      - --enable-hwaccel=av1_v4l2request
+    sources:
+      - type: git
+        url: https://github.com/cgutman/FFmpeg.git
+        # branch: moonlight_9.0_r1（cgutman 會 rebase，分支 head 會變；只信 commit）
+        commit: 'd17de7e33f1332cc2fb3f5afab9ed4f29699c5a0'
+
+  # libplacebo 選 B（v7.360.1）。若和 FFmpeg 9 的 libav helper 編不過，退回 A：
+  # Flathub 的 4d82c689 加 libplacebo-disable-internally-synchronized-queues.patch
+  # （patch 放進本目錄，以 type: patch 來源引用）。
+  - name: libplacebo
+    buildsystem: meson
+    config-opts:
+      - -Ddemos=false
+      - -Dvulkan=enabled
+      - -Dopengl=disabled
+      - -Dshaderc=enabled
+      - -Dtests=false
+    sources:
+      - type: git
+        url: https://github.com/haasn/libplacebo.git
+        # tag: v7.360.1（含 submodule：Vulkan-Headers、glad、jinja 等）
+        commit: 'cee9b076f2c63104ccfd497fa79c39a867293ec4'
+
+  # gamescope WSI layer（implicit layer，ENABLE_GAMESCOPE_WSI=1 才啟用）：JSON 的
+  # library_path 指向 host 的 .so（經 --filesystem=host-os:ro 在 /var/run/host 底下）。
+  # host 沒有這個 .so 時 Vulkan loader 只會略過這個 layer。aarch64 版 UNVERIFIED。
+  - name: gamescope-wsi-x86_64
+    only-arches:
+      - x86_64
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 VkLayer_FROG_gamescope_wsi.x86_64.json /app/share/vulkan/implicit_layer.d/VkLayer_FROG_gamescope_wsi.x86_64.json
+    sources:
+      - type: file
+        path: gamescope-wsi/VkLayer_FROG_gamescope_wsi.x86_64.json
+
+  - name: gamescope-wsi-aarch64
+    only-arches:
+      - aarch64
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 VkLayer_FROG_gamescope_wsi.aarch64.json /app/share/vulkan/implicit_layer.d/VkLayer_FROG_gamescope_wsi.aarch64.json
+    sources:
+      - type: file
+        path: gamescope-wsi/VkLayer_FROG_gamescope_wsi.aarch64.json
+
+  # VipleStream 本體（moonlight-qt）＋ picoquic／picotls（靜態連結）。
+  # buildsystem: simple 不會像 qmake buildsystem 那樣自動注入 SDK 的 CFLAGS／LDFLAGS，
+  # build-viplestream.sh 會明確傳 QMAKE_CFLAGS+= 等參數。
+  - name: viplestream
+    buildsystem: simple
+    build-options:
+      env:
+        # picotls 的 pin 只寫一次（YAML anchor），下面的 git 來源引用同一個值；
+        # build-viplestream.sh 會拿它和 picoquic CMakeLists.txt 的
+        # PICOQUIC_FETCH_PTLS_DEFAULT_TAG（非 AEGIS 分支）比對，不一致就失敗
+        # （FETCHCONTENT_SOURCE_DIR 會忽略 GIT_TAG，不比對會靜默漂移）。
+        VIPLE_PICOTLS_PIN: &picotls-pin 'bfa67875982afc4c24f21e146cef4747fa189c2f'
+    build-commands:
+      - bash moonlight-qt/scripts/steamframe/flatpak/build-viplestream.sh
+    sources:
+      # 由 build-steamframe.sh 產生在 manifest 目錄內（字串項目＝從另一個 JSON 檔載入來源清單）。
+      # 內容：dev＝{dir: src} ＋ flavor.txt ＋ SOURCE_INFO；
+      #       release＝{git: https://github.com/finaltwinsen/VipleStream.git @HEAD, disable-submodules}
+      #       ＋ {git: picoquic @gitlink, dest: Sunshine/third-party/picoquic} ＋ flavor.txt ＋ SOURCE_INFO
+      #       （主 repo 不寫 file://：展開後的 manifest 會進 /app/manifest.json；HEAD 未 push 時腳本在下載
+      #       階段用 url.insteadOf 導到本機 repo）。
+      - viplestream-source.json
+      # picoquic 的 FetchContent 在沙箱內不能連網，改用這份離線來源
+      # （-DFETCHCONTENT_SOURCE_DIR_PICOTLS）。submodule deps/picotest 由 flatpak-builder 一併取回。
+      - type: git
+        url: https://github.com/h2o/picotls.git
+        commit: *picotls-pin
+        dest: picotls-src

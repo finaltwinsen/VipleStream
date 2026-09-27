@@ -1,0 +1,10 @@
+/* 由 qmake 的 QMAKE_SUBSTITUTES 依 app.pro 的 VIPLE_DESKTOP_ID（預設 viplestream）自動產生。
+   請勿直接修改：每次跑 qmake 都會覆寫。
+   Flatpak 建置會傳 VIPLE_DESKTOP_ID=<app-id>；見 app.pro 與 main.cpp（§K.4-DESKTOP-ID）。 */
+
+#ifndef DESKTOP_ID_H
+#define DESKTOP_ID_H
+
+#define VIPLE_DESKTOP_ID $${VIPLE_DESKTOP_ID_VALUE}
+
+#endif

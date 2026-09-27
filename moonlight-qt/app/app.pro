@@ -38,10 +38,18 @@ CONFIG(release, debug|release) {
         QMAKE_LFLAGS_RELEASE   += /LTCG
     }
     # GCC/Clang (Linux/macOS): LTO + O3
+    # §M2a：CONFIG+=disable-lto 只拿掉 LTO（-O3 保留）。給 build-steamframe.sh 的 dev
+    # flavor 用：Flatpak 的 viplestream 模組是 dir 來源、每次整個重建，LTO link 不進
+    # ccache，在 qemu（aarch64）下會把增量建置時間放大好幾倍。release 不帶這個旗標。
     else {
-        QMAKE_CXXFLAGS_RELEASE += -O3 -flto
-        QMAKE_CFLAGS_RELEASE   += -O3 -flto
-        QMAKE_LFLAGS_RELEASE   += -flto
+        !disable-lto {
+            QMAKE_CXXFLAGS_RELEASE += -O3 -flto
+            QMAKE_CFLAGS_RELEASE   += -O3 -flto
+            QMAKE_LFLAGS_RELEASE   += -flto
+        } else {
+            QMAKE_CXXFLAGS_RELEASE += -O3
+            QMAKE_CFLAGS_RELEASE   += -O3
+        }
     }
 }
 
@@ -213,11 +221,22 @@ unix:if(!macx|disable-prebuilts) {
             # 裝 ncnn from source 進 /usr/local (見 scripts/wsl_build_moonlight.sh)，
             # source 完全不動.  AppImage 多 ~9 MB；RIFE Phase B 在 Linux 上技術上
             # 可用，但 stream pipeline 預設仍走 VkFrucRenderer.
-            !disable-ncnn:exists(/usr/local/include/ncnn/mat.h) {
-                message(NCNN found at /usr/local — RIFE Phase B available)
+            #
+            # §M2a（F8）：安裝位置改由 NCNN_PREFIX 指定（預設 /usr/local，與舊行為相同）。
+            # build-appimage-native.sh 傳 $HOME/.local/ncnn、Flatpak 傳 /app；以前腳本有傳
+            # 但這裡根本沒讀，是靠 builder 上 /usr/local 的 symlink 才建得起來。
+            isEmpty(NCNN_PREFIX): NCNN_PREFIX = /usr/local
+            !disable-ncnn:exists($$NCNN_PREFIX/include/ncnn/mat.h) {
+                message(NCNN found at $$NCNN_PREFIX — RIFE Phase B available)
                 DEFINES     += VIPLESTREAM_HAVE_NCNN
-                INCLUDEPATH += /usr/local/include
-                LIBS        += -lncnn
+                INCLUDEPATH += $$NCNN_PREFIX/include
+                LIBS        += -L$$NCNN_PREFIX/lib -lncnn
+            }
+
+            # plvk.cpp／vkfruc.cpp／rife_native_vk.cpp 無條件 include 並呼叫 ncnn：有
+            # libplacebo 而沒有 ncnn 時，與其讓編譯噴一長串 include 錯誤，不如在 qmake 階段講清楚。
+            libplacebo:!contains(DEFINES, VIPLESTREAM_HAVE_NCNN) {
+                error("libplacebo was found but ncnn was not: $$NCNN_PREFIX/include/ncnn/mat.h is missing or CONFIG+=disable-ncnn is set. The Vulkan renderers plvk/vkfruc/rife_native_vk require ncnn - install it and pass NCNN_PREFIX=<install prefix> to qmake, or build with CONFIG+=disable-libplacebo.")
             }
         }
 
@@ -305,6 +324,34 @@ SOURCES += \
     backend/systemproperties.cpp \
     backend/hidprobe.cpp \
     wm.cpp
+
+# VipleStream 2.0 §SF-PROBE／§SF-ENV（M2a）— Steam Frame 探測動作與執行環境摘要。
+# 一律編譯：非 Linux／沒有 FFmpeg／沒有 OpenXR 的建置由各檔自己回 stub（結束碼 10）。
+# bitstreamdump.cpp 也放這裡：StreamCommandLineParser 的 --dump-bitstream 在每個平台
+# 都會呼叫 BitstreamDump::setPath()，實際寫檔只在 ffmpeg.cpp 呼叫。
+SOURCES += \
+    backend/sfenv.cpp \
+    cli/probeutil.cpp \
+    cli/v4l2probe.cpp \
+    cli/decodebench.cpp \
+    cli/xrprobe.cpp \
+    streaming/video/bitstreamdump.cpp \
+    streaming/video/v4l2/v4l2caps.cpp \
+    streaming/xr/xrruntimejson.cpp
+
+HEADERS += \
+    backend/sfenv.h \
+    cli/probeutil.h \
+    cli/v4l2probe.h \
+    cli/decodebench.h \
+    cli/xrprobe.h \
+    streaming/video/bitstreamdump.h \
+    streaming/video/v4l2/v4l2caps.h \
+    streaming/xr/xrruntimejson.h
+
+# 上面幾個檔在 Linux 會 dlopen（Vulkan loader、OpenXR runtime 的診斷）。glibc 2.34 起
+# dlopen 已併入 libc，-ldl 只是保險：舊 glibc 需要它，新 glibc 的 libdl 是空殼、無害。
+linux: LIBS += -ldl
 
 HEADERS += \
     SDL_compat.h \
@@ -614,6 +661,18 @@ wayland {
     SOURCES += streaming/video/ffmpeg-renderers/pacer/waylandvsyncsource.cpp
     HEADERS += streaming/video/ffmpeg-renderers/pacer/waylandvsyncsource.h
 }
+# VipleStream 2.0 §SF-PROBE（M2a）— OpenXR loader（xr-probe 的 A 段）。
+# 刻意 opt-in、不自動偵測：只有 build-steamframe.sh（Flatpak，兩種 arch）帶 CONFIG+=openxr。
+# x64 AppImage 不帶，即使 builder 裝了 libopenxr-dev 也不會意外連上 loader。
+# Windows 的 OpenXR 留到 M3a。
+unix:!macx:openxr {
+    message(OpenXR loader enabled)
+
+    PKGCONFIG += openxr
+    DEFINES += HAVE_OPENXR
+    SOURCES += streaming/xr/xrprobe_instance.cpp
+    HEADERS += streaming/xr/xrprobe_instance.h
+}
 
 RESOURCES += \
     resources.qrc \
@@ -669,10 +728,21 @@ DEPENDPATH += $$PWD/../moonlight-common-c/moonlight-common-c/src
 # 2026-09-19 教訓：這個 build 目錄曾被手動用預設 Debug（/MDd /Od）建出來 → 連結時 LNK4098
 # （MSVCRTD 與 MSVCRT 衝突），而且 client 的 MP-QUIC 整條路徑跑的是未最佳化碼。
 # Order matters: picoquic-core first, then picotls-* (picoquic depends on picotls).
+#
+# §M2a（F8）：兩個目錄都可從 qmake 命令列覆寫（PICOQUIC_BUILD=… PICOTLS_LIBDIR=…），
+# 預設值與舊版相同 → Windows／AppImage 行為不變。Flatpak 在 sandbox 內另建 picoquic
+# （build-viplestream.sh 傳自己的 build 目錄）。picotls-fusion 只在 x86_64 且編譯器支援
+# AES-NI 時才會產生（aarch64 沒有，picoquic 會自動定義 PTLS_WITHOUT_FUSION），所以依
+# 實際檔案存在與否決定要不要連；前後順序維持 openssl → core → fusion → minicrypto。
 contains(DEFINES, VIPLE_MPQUIC) {
-    PICOQUIC_BUILD = $$PWD/../../Sunshine/third-party/picoquic/build
+    isEmpty(PICOQUIC_BUILD): PICOQUIC_BUILD = $$PWD/../../Sunshine/third-party/picoquic/build
+    isEmpty(PICOTLS_LIBDIR): PICOTLS_LIBDIR = $$PICOQUIC_BUILD/_deps/picotls-build
     LIBS += -L$$PICOQUIC_BUILD -lpicoquic-core
-    LIBS += -L$$PICOQUIC_BUILD/_deps/picotls-build -lpicotls-openssl -lpicotls-core -lpicotls-fusion -lpicotls-minicrypto
+    LIBS += -L$$PICOTLS_LIBDIR -lpicotls-openssl -lpicotls-core
+    exists($$PICOTLS_LIBDIR/libpicotls-fusion.a)|exists($$PICOTLS_LIBDIR/picotls-fusion.lib) {
+        LIBS += -lpicotls-fusion
+    }
+    LIBS += -lpicotls-minicrypto
     unix:!macx: LIBS += -lssl -lcrypto
     win32 {
         VCPKG_LIB = $$(VCPKG_ROOT)/installed/x64-windows/lib
@@ -815,3 +885,18 @@ VERSION = "$$cat(version.txt)"
 # headers do).
 VERSION_STR_VALUE = "\"$$cat(version.txt)\""
 QMAKE_SUBSTITUTES += version_string.h.in
+
+# VipleStream §K.4-DESKTOP-ID（M2a W2）：desktop id 由 qmake 產生 desktop_id.h 注入
+# （main.cpp 的 setDesktopFileName 與 SDL Wayland app id 都用它）。預設 viplestream
+# （= binary 名 = viplestream.desktop，AppImage／.deb／Windows 行為不變）；Flatpak 的
+# build-viplestream.sh 傳 VIPLE_DESKTOP_ID=$FLATPAK_ID（io.github.finaltwinsen.VipleStream），
+# 配合 manifest 的 rename-desktop-file 讓 Wayland app_id 對上改名後的 .desktop。
+# 做法照上面的 version_string.h：命令列 -D 巨集不會觸發 nmake 重編，產生式 header 會；
+# 引號同樣預先放進變數值（QMAKE_SUBSTITUTES 會吃掉樣板裡包住 $${VAR} 的引號）。
+# 值會原樣進 C 字串與 Wayland app_id，所以只允許 [A-Za-z0-9._-]，其他一律 error。
+isEmpty(VIPLE_DESKTOP_ID): VIPLE_DESKTOP_ID = viplestream
+!count(VIPLE_DESKTOP_ID, 1)|!contains(VIPLE_DESKTOP_ID, "[A-Za-z0-9._-]+") {
+    error("VIPLE_DESKTOP_ID must be a single token matching [A-Za-z0-9._-]+ - got: $$VIPLE_DESKTOP_ID")
+}
+VIPLE_DESKTOP_ID_VALUE = "\"$$VIPLE_DESKTOP_ID\""
+QMAKE_SUBSTITUTES += desktop_id.h.in

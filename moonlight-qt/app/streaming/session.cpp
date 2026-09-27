@@ -10,6 +10,7 @@
 #include "streaming/video/overlaymanager.h"
 #include "backend/richpresencemanager.h"
 #include "backend/hidprobe.h"   // §HID-PROBE
+#include "backend/sfenv.h"      // §SF-ENV（M2a）
 
 #include <Limelight.h>
 #include "HolePunch.h"  // VipleStream: LocalControlPort global
@@ -2963,6 +2964,19 @@ bool Session::startConnectionAsync()
                 m_StreamConfig.fps,
                 m_StreamConfig.bitrate,
                 (unsigned int)m_StreamConfig.supportedVideoFormats);
+#ifdef Q_OS_LINUX
+    // §SF-ENV（M2a）：session 開場補一行執行環境摘要。summaryLine() 尾端已現取 SDL 實際採用的
+    // video driver 與 SDL_APP_ID（sdl-driver=／sdl-app-id=；R3 驗收：Flatpak 的 SDL3＋sdl2-compat
+    // 下 env 可能沒生效，要看 SDL 自己的值），這裡不再另外印。非 Linux 不編譯（summaryLine 也是空字串）。
+    {
+        const QString sfEnv = SfEnv::summaryLine();
+        if (!sfEnv.isEmpty()) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-SF-ENV] session: %s",
+                        sfEnv.toUtf8().constData());
+        }
+    }
+#endif
 
     emit connectionStarted();
     return true;

@@ -148,7 +148,7 @@ XR frame thread（XrContext 擁有，唯一使用 pl_gpu 的執行緒）：
   → pl_vulkan_release_ex → xrReleaseSwapchainImage → xrEndFrame（quad 或 cylinder，加上本地指標 quad）
   → 這一幀的 GPU 工作完成後，才 unref 對應的 AVFrame（§2.6-9）
 XR input（同一條執行緒）：aim ray 和 quad 求交 → UV → SDL_USEREVENT → main thread → LiSendMousePositionEvent
-SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（程式內 SDL_SetHint，不用環境變數）
+SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（程式內設 OVERRIDE 優先權的 hint，不靠使用者的環境變數）
   decoder 由 XR READY 推送的 SDL_USEREVENT 觸發建立（不等 SHOWN）
   XR FOCUSED 期間忽略 gamescope 注入的 SDL 滑鼠事件
 ```
@@ -234,30 +234,30 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 
 | 阻斷點 | 修法 | 檔案 |
 |---|---|---|
-| nvvideoparser SIMD | C1：只改 `-m*` 旗標，改成依 `QT_ARCH` 條件加入，再加 DISABLE define；SOURCES 不動 | `moonlight-qt/3rdparty/nvvideoparser/nvvideoparser.pro` |
-| ncnn 無條件引用 | C2（包含 `rife_native_vk.cpp`）；Frame 上 FRUC 預設關閉 | `MQ/app.pro:216`；ncnn 的 Flatpak 模組 |
-| picoquic / picotls 路徑 | `app.pro:664-666` 的 `PICOQUIC_BUILD`，以及 **`moonlight-common-c.pro:105-113` 的 `PICOQUIC_DIR`**，都改成 `isEmpty()` 時才用預設值。另加 picotls include 變數；`exists(libpicotls-fusion.a)` 時才連結 fusion | `MQ/app.pro`、`moonlight-qt/moonlight-common-c/moonlight-common-c.pro` |
-| picoquic 是 submodule | Flatpak 模組直接用 picoquic（`finaltwinsen/picoquic`，`viplestream-main` 分支）和 picotls 的 git source，pin 在 submodule SHA；由 `build-steamframe.sh` 傳入路徑 | Flatpak 模組 |
+| nvvideoparser SIMD | C1：非 x86 加 DISABLE define；SOURCES 不動；`libs/windows/include` 只給 win32。M2a 實作：GCC 不再加全域 `-m*`，改在三個 SIMD TU 檔頭（x86 條件內）用 `#pragma GCC target`；clang 維持全域旗標 | `moonlight-qt/3rdparty/nvvideoparser/nvvideoparser.pro`、`src/NextStartCode{SSSE3,AVX2,AVX512}.cpp` |
+| ncnn 無條件引用 | C2（包含 `rife_native_vk.cpp`）；Frame 上 FRUC 預設關閉。M2a：`app.pro` 改讀 `NCNN_PREFIX`（預設 `/usr/local`），有 libplacebo 而找不到 ncnn 時 qmake `error()` | `MQ/app.pro:216`；ncnn 的 Flatpak 模組 |
+| picoquic / picotls 路徑 | `app.pro:672-683` 的 `PICOQUIC_BUILD`（另加 `PICOTLS_LIBDIR`），以及 **`moonlight-common-c.pro:104-120` 的 `PICOQUIC_DIR`**，都改成 `isEmpty()` 時才用預設值；`libpicotls-fusion.a`（或 `.lib`）存在時才連結 fusion。client 不 include picotls 標頭，不需要 picotls include 變數 | `MQ/app.pro`、`moonlight-qt/moonlight-common-c/moonlight-common-c.pro` |
+| picoquic 是 submodule | **不另立 Flatpak 模組**：picoquic 隨 viplestream 模組的來源進沙箱——dev 是工作樹快照，release 是 git 來源（`finaltwinsen/picoquic`，pin 在 gitlink SHA，必須已在 GitHub）。picotls 是 viplestream 模組內的另一個 git 來源（pin 與 picoquic `CMakeLists.txt` 的預設 tag 比對）。`build-viplestream.sh` 在沙箱內離線建靜態庫，再把 `PICOQUIC_BUILD`／`PICOQUIC_DIR` 傳給 qmake | Flatpak viplestream 模組、`MQS/steamframe/flatpak/build-viplestream.sh` |
 | MP-QUIC | Frame 建置一律 `DEFINES+=VIPLE_MPQUIC` | `build-steamframe.sh` |
-| OpenXR | `config_openxr` 區塊：pkg-config `openxr`、定義 `HAVE_OPENXR` | `MQ/app.pro` |
-| 建置腳本 | （新增）`MQS/build-steamframe.sh --arch x86_64|aarch64 --flavor dev|release`。**x86_64 dev** 開 openxr、libdrm、wayland，產出 S1 和 PoC-F-pre 用的 Flatpak 或 raw binary。x64 的 AppImage 腳本不動（`build-appimage-native.sh:64` 仍然關閉 wayland 和 libdrm）。本機 `build_moonlight.cmd` 加 `--openxr`（OpenXR loader 走 vcpkg），給 S2 用。**沒有腳本路徑的模擬環境，不能當成關卡證據** | `MQS/`、本機 `build_moonlight.cmd`、`docs/building.md` |
+| OpenXR | `CONFIG+=openxr` 區塊（`unix:!macx:openxr`，opt-in、不自動偵測，只有 `build-steamframe.sh` 帶）：pkg-config `openxr`、定義 `HAVE_OPENXR`、編 `xr-probe` 的 A 段 | `MQ/app.pro` |
+| 建置腳本 | （M2a 已新增）`MQS/build-steamframe.sh --arch x86_64|aarch64 --flavor dev|release`，用法見 [`steam_frame_client.md`](steam_frame_client.md)。**x86_64 dev** 開 openxr、libdrm、wayland，產出 S1 和 PoC-F-pre 用的 Flatpak。x64 的 AppImage 腳本不動（`build-appimage-native.sh:64` 仍然關閉 wayland 和 libdrm）。本機 `build_moonlight.cmd` 加 `--openxr`（OpenXR loader 走 vcpkg），給 S2 用（延到 M3a）。**沒有腳本路徑的模擬環境，不能當成關卡證據** | `MQS/`、本機 `build_moonlight.cmd`、`docs/building.md` |
 | desktop id | 見 §2.4 | `MQ/main.cpp`、`MQ/app.pro` |
-| FFmpeg 沒開 V4L2 | cgutman `moonlight_9.0_r1`，pin 在 `d17de7e3`，開 `--enable-v4l2-m2m --enable-libdrm`、h264/hevc_v4l2m2m、libdav1d。**R11 真正要評估的是 FFmpeg 9.0 移除了哪些 API**，例如 `plvk.cpp:558-559` 的 `lock_queue` 欄位。0004/0005 是 moonlight-qt v6.1.0 的補丁，不適用我們的 fork | Flatpak FFmpeg 模組 |
+| FFmpeg 沒開 V4L2 | cgutman `moonlight_9.0_r1`，pin 在 `d17de7e3`。旗標＝Flathub 清單去掉 `--enable-lto`（qemu 省時；解碼走硬體），含 `--enable-libdrm`、h264/hevc_v4l2m2m decoder、libdav1d；v4l2-request（h264/hevc/av1 hwaccel）一併開；另開 h264/hevc/av1 parser（decode-bench 用 `av_parser_parse2`，`--disable-all` 會把 parser 全關）。**v4l2m2m 不寫 `--enable-v4l2-m2m`**：它在 autodetect 清單內，加上 `--fatal-warnings` 後，明寫的 `*_v4l2m2m` decoder 依賴不滿足時 configure 直接失敗，建得出來就代表有編進去。**R11 真正要評估的是 FFmpeg 9.0 移除了哪些 API**，例如 `plvk.cpp:558-559` 的 `lock_queue` 欄位。0004/0005 是 moonlight-qt v6.1.0 的補丁，不適用我們的 fork | Flatpak FFmpeg 模組 |
 
 ### 2.2 依賴與打包（決策 D12，關卡 G-PKG、G-BUILD）
 
 | 選項 | 內容 | 定位 |
 |---|---|---|
-| **P1 Flatpak aarch64** | 以 Flathub Moonlight 配方為範本。runtime 是 `org.kde.Platform 6.11`。模組：cgutman FFmpeg、libplacebo、SDL3、sdl2-compat、SDL2_ttf、dav1d、ncnn、OpenXR-SDK loader、picoquic＋picotls（git source，pin 在 SHA）、VipleStream。**finish-args 逐條列在（新增）`MQS/steamframe/flatpak/finish-args.md`，每條註明取捨。** 已知的決定：`--device=all`、`--filesystem=xdg-run/gamescope-0`、`xdg-config/openxr:ro`、SteamVR runtime 路徑唯讀；`disable-libdrm` 只套在 x86_64；**`--env=IGNORE_RFI_LATENCY_BUG=1` 不帶**（C30）。每個模組的授權放進 `/app/share/licenses/`，manifest 保留 pin 住的來源，以符合 GPL/LGPL 的原始碼提供義務 | **α 確定採用**；β/rc 在 PoC-F 通過時沿用 |
+| **P1 Flatpak aarch64** | 以 Flathub Moonlight 配方為範本。runtime 是 `org.kde.Platform 6.11`（退路 6.10：同為 freedesktop 25.08 基底、仍在維護）。模組（依序，最常改的放後面）：ncnn、SDL3、sdl2-compat、SDL2_ttf、dav1d、OpenXR-SDK loader、cgutman FFmpeg、libplacebo（pin `v7.360.1`＝選 B；和 FFmpeg 9 編不過就退回 A：Flathub 的 `4d82c689`＋補丁）、gamescope WSI layer（**兩種 arch 都裝**，aarch64 版 UNVERIFIED）、VipleStream（picoquic＋picotls 在模組內建置，見 §2.1）。**不建 libdecor**（25.08 runtime 內建）；`appstream-compose: false`（非 Flathub 發佈，上架時再開）。**finish-args 逐條列在 `MQS/steamframe/flatpak/finish-args.md`，每條註明取捨。** 已知的決定：`--device=all`、`--filesystem=xdg-run/gamescope-0`、`host-os:ro`、`xdg-config/openxr:ro`、SteamVR runtime 路徑唯讀；**libdrm 兩種 arch 都開**（x86_64 Flatpak 只給開發用，`build-steamframe.sh` 拒絕 x86_64 release；日後要給 NVIDIA 使用者再照 Flathub 加 `disable-libdrm`）；**`--env=IGNORE_RFI_LATENCY_BUG=1` 不帶**（C30）。每個模組的授權放進 `/app/share/licenses/`，manifest 保留 pin 住的來源，以符合 GPL/LGPL 的原始碼提供義務 | **α 確定採用**；β/rc 在 PoC-F 通過時沿用 |
 | P2 sniper arm64 zip | `steamrt/sniper/sdk/arm64` 容器，依賴全部自帶 | M3a 期間只做 spike；G-PKG 判定需要時才全面投入 |
 | P3 舊 glibc，全部自帶 | — | 最後的備援 |
 
 - **為什麼 α 用 Flatpak**：上游 Flathub 在 aarch64 開了同一組建置旗標（v4l2m2m 加 libdrm），**實效待 PoC-0 驗證**；而且不必自建 Qt6。
 - **β/rc 的風險**：SteamVR 的 OpenXR runtime `.so` 能不能在 KDE runtime 沙箱內載入。實機前先做 PoC-F-pre（S3）。
-- **OpenXR runtime 探測**：自動探測多個候選路徑（host 的 `~/.config/openxr/1` 經 xdg-config 權限、SteamVR 安裝目錄的 runtime json）。探測失敗時，Settings 的 XR 區段提供路徑欄位和「重新探測」按鈕；CLI `--xr-runtime-json` 只給開發用。
+- **OpenXR runtime 探測**：自動探測多個候選路徑（host 的 `~/.config/openxr/1` 經 xdg-config 權限、SteamVR 安裝目錄的 runtime json）。沙箱把 `XDG_CONFIG_HOME` 改到 `~/.var/app/<id>/config`，loader 自己看不到 host 的 `~/.config/openxr`：由 `XrRuntimeJson::resolveActive()` 解析 host 路徑，只在 loader 找不到而 host 路徑找得到時，於行程內設 `XR_RUNTIME_JSON` 再 `xrCreateInstance`（M2a 的 `xr-probe` 已這樣做）。探測失敗時，Settings 的 XR 區段提供路徑欄位和「重新探測」按鈕；CLI `--xr-runtime-json` 只給開發用。
 - **nested 解析度**：PoC-7 如果發現可以調整，就由 app 或 Flatpak 的啟動包裝依 Settings 值決定，**不得要求使用者改環境變數或啟動參數**。
 - **log 路徑**：`~/.var/app/<app-id>/cache/VipleStream/VipleStream/logs/`。
-- **G-BUILD（M0）**：量測 linux-builder 上 qemu-user 的 aarch64 乾淨建置和增量建置時間。策略：`flatpak-builder --ccache`、持久化 state-dir、依賴模組依 lockhash 快取在 builder 本機。增量建置超過 45 分鐘，就把 U7（原生 ARM builder）提前到 M0 決定採購。
+- **G-BUILD（M2a 開頭；原列 M0）**：量測 linux-builder 上 qemu-user 的 aarch64 乾淨建置和增量建置時間。策略：`flatpak-builder --ccache`、持久化 state-dir（兩種 arch 共用），依賴模組靠 flatpak-builder 逐模組的快取留在 builder 本機。viplestream 模組的來源一變就整個重建，所以「增量」＝依賴全部 cache hit、app 模組在 ccache 已暖時完整重建一次；以 release flavor（開 LTO）判定。增量建置超過 45 分鐘，就停下交使用者決定 U7（原生 ARM builder）採購。量法與結果見 [`steam_frame_client.md`](steam_frame_client.md) §4。
 
 ### 2.3 解碼路徑、fallback 鏈、恢復與配對
 
@@ -325,12 +325,12 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 
 | 檔案 | 改動 |
 |---|---|
-| `MQ/streaming/session.cpp` | ① **`startConnectionAsync` 一開始（`/launch` 和 relay 路徑之前）建立 XrContext 並 `bringUp`**；失敗依不變式 5 處理。② XR 模式在 video subsystem 初始化前用 `SDL_SetHint` 選 offscreen driver（沒有 Wayland 時）。③ XR READY 推送 `SDL_CODE_XR_READY`，走和 SHOWN 相同的 decoder 建立流程。④ **拆除順序**：停 VrTrackingSender 並 join → 摘掉 haptic sink（atomic 指標換成 null）→ `:3486` 刪 input → `:3493` 刪 decoder → 刪 XrContext（`xrRequestExitSession` → `xrEndSession`）→ `:3524` `SDL_DestroyWindow`。`exec()` 的連線失敗分支也要刪 XrContext。⑤ 在 `:3089-3126` 的 switch 加 `SDL_CODE_XR_POINTER/XR_STATE/XR_EXIT/XR_READY/VR_MESSAGE`（避免踩到 `:3125` 的 `SDL_assert(false)`）。⑥ XR 模式 Pacer 的 `enableFramePacing=false`；XR FOCUSED 期間忽略滑鼠事件 |
+| `MQ/streaming/session.cpp` | ① **`startConnectionAsync` 一開始（`/launch` 和 relay 路徑之前）建立 XrContext 並 `bringUp`**；失敗依不變式 5 處理。② XR 模式在 video subsystem 初始化前用 SDL hint 選 offscreen driver（沒有 Wayland 時）；要用 `SDL_HINT_OVERRIDE`：`main.cpp` 可能已依 Qt 平台設了 `SDL_VIDEODRIVER`／`SDL_VIDEO_DRIVER` env 與 OVERRIDE hint（例如 eglfs 時是 `kmsdrm`），NORMAL 的 hint 碰到已存在的 env 或 OVERRIDE hint 會被拒；兩個 env 最好也一併改成同值，理由同 `main.cpp` 的 `setSdlVideoDriver`（見本表 desktop id 那一列）。③ XR READY 推送 `SDL_CODE_XR_READY`，走和 SHOWN 相同的 decoder 建立流程。④ **拆除順序**：停 VrTrackingSender 並 join → 摘掉 haptic sink（atomic 指標換成 null）→ `:3486` 刪 input → `:3493` 刪 decoder → 刪 XrContext（`xrRequestExitSession` → `xrEndSession`）→ `:3524` `SDL_DestroyWindow`。`exec()` 的連線失敗分支也要刪 XrContext。⑤ 在 `:3089-3126` 的 switch 加 `SDL_CODE_XR_POINTER/XR_STATE/XR_EXIT/XR_READY/VR_MESSAGE`（避免踩到 `:3125` 的 `SDL_assert(false)`）。⑥ XR 模式 Pacer 的 `enableFramePacing=false`；XR FOCUSED 期間忽略滑鼠事件 |
 | `MQ/streaming/video/decoder.h` | `DECODER_PARAMETERS` 加 `XrContext* xr`、`bool testFrameOnly`（尾端） |
 | `MQ/streaming/video/ffmpeg-renderers/renderer.h` | `RendererType::XR` |
 | `MQ/streaming/video/ffmpeg.cpp` | `createFrontendRenderer` 在 `params.xr` 存在時先試 XrRenderer；F6 決策；**VR 專用**的 pts 設定與查表；`opaque_ref` 掛載包在 `if (du.vrMeta.valid)` 內 |
 | `MQ/streaming/video/ffmpeg-renderers/pacer/pacer.{h,cpp}` | XR 模式只做統計 |
-| `MQ/main.cpp`、`MQ/app.pro` | `setDesktopFileName` 的參數改由 qmake 注入 `DEFINES+=VIPLE_DESKTOP_ID=\\\"<id>\\\"`（Flatpak 用 app-id，其餘維持 `viplestream`），**仍然在 `QGuiApplication`（`:1057`）之前呼叫**。這項明確列為早期 init 變更：Windows、x64 AppImage 各跑兩次 `--help`；arm64 在 linux-builder 上用 qemu 跑 `flatpak run … --help` 兩次，納入 M2a 完成條件 |
+| `MQ/main.cpp`、`MQ/app.pro` | `setDesktopFileName` 的參數改由 qmake 產生的 `desktop_id.h` 提供 `VIPLE_DESKTOP_ID`（`QMAKE_SUBSTITUTES`，同 `version_string.h` 的做法：命令列 `-D` 巨集不會觸發 nmake 重編；qmake 變數 `VIPLE_DESKTOP_ID`，Flatpak 傳 app-id，其餘預設 `viplestream`，只允許 `[A-Za-z0-9._-]`），**仍然在 `QGuiApplication`（`:1057`）之前呼叫**。SDL 視窗 id **依 Qt 平台決定一個值、三處設成同值**：Wayland 用 desktop id（Flatpak 是 app-id，其餘 `viplestream`），xcb 用 `viplestream`，其他平台不設；同一個分支裡 `SDL_VIDEO_WAYLAND_WMCLASS`、`SDL_VIDEO_X11_WMCLASS` 與 SDL3 的字面名稱 `SDL_APP_ID` 三個 env 一律設成這個值，另以 `SDL_SetHintWithPriority("SDL_APP_ID", …, SDL_HINT_OVERRIDE)` 設 hint。原因：sdl2-compat 把兩個 WMCLASS 都對應到 SDL3 的 `SDL_APP_ID`，而且它的 constructor 在 `main()` 之前就把繼承來的 env 抄成 SDL3 的名稱，之後 `SDL_InitSubSystem` 同步 env 時誰最後寫入取決於 SDL3 環境 hash 表的迭代順序（不確定），三個同值才與順序無關；SDL3 又把 env 視同 override 優先權，NORMAL 的 hint 壓不過繼承來的 env，所以 hint 一定要用 `SDL_HINT_OVERRIDE`。video driver 同理：`SDL_VIDEODRIVER` 與 SDL3 的字面名稱 `SDL_VIDEO_DRIVER` 兩個 env 設成同值，hint `SDL_VIDEODRIVER` 也用 `SDL_HINT_OVERRIDE`（所以使用者 export 的 `SDL_VIDEODRIVER` 無法讓 SDL 用和 Qt 平台不同的 driver，和 classic SDL2 原本被 `qputenv` 蓋掉的行為相同）。classic SDL2（AppImage、`.deb`、Windows）讀的是舊名稱，行為不變。驗收：Flatpak 上 `WAYLAND_DEBUG=1` 看 `set_app_id`，以及 `[VIPLE-SF-ENV] session:` 的 `sdl-driver=`／`sdl-app-id=`（SDL 實際採用的值）。這項明確列為早期 init 變更：Windows、x64 AppImage 各跑兩次 `--help`；arm64 在 linux-builder 上用 qemu 跑 `flatpak run … --help` 兩次，納入 M2a 完成條件 |
 
 **生命週期不變式**
 - `RENDER_DEVICE_RESET` 只重建 decoder 和 XrRenderer，XrContext 不動。這段期間 XR thread 用自有的最後一幀複本重送，適用 stale 政策。
@@ -525,7 +525,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 - **`vr` 類 app**（`SS/process.cpp:313-488`）：execute 時設 `placebo=true`。`running()` 由 vr_session 狀態機決定：`ORCH_*` 或 `HMD_ACTIVE` 時回 app_id；只有 disarm 或使用者結束才回 0。這樣可以避開 `SS/stream.cpp:1963-1966` 在遊戲還沒起來時就結束 session。
 - **編排狀態機**（每一步記 `[VIPLE-VR-ORCH]`，並用 0x5508/02 STATE 推給 client）：
   1. 部署 driver（§3.10），以使用者身分 `vrpathreg adddriver`，檢查 safe mode 封鎖。
-  2. **偵測其他 HMD 是否正在使用**（vrlink 已連線，或有 VR 遊戲在跑）。有的話**預設拒絕**，回 STATE `VRLINK_ACTIVE`；由 Frame client 顯示確認，使用者同意後帶 `force=1` 重試。
+  2. **偵測其他 HMD 是否正在使用**（vrlink 已連線、其他 PC-VR 串流程式正在服務頭顯（例如 Virtual Desktop Streamer，測試 host 上就有裝），或有 VR 遊戲在跑）。有的話**預設拒絕**，回 STATE `VRLINK_ACTIVE`；由 Frame client 顯示確認，使用者同意後帶 `force=1` 重試。
   3. D8b settings guard（§3.8），以使用者 token 執行。
   4. 把 shm 設為 armed。
   5. 需要時重啟 SteamVR。「自動重啟」只在沒有任何 HMD 在用時才允許。
@@ -553,6 +553,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
   - server 啟動或使用者登入時，看到 marker 就以使用者 token 還原。
   - UI 提示「需重啟 SteamVR 才能用原生 Steam Link」。
 - **降級成 D8a**（armed 閘門加 loadPriority，不動 vrlink）：只有 PoC-5a/5b 證明 vrlink 不會劫持 Frame、也不會影響 Tailscale 路徑時才降級。
+- **其他 PC-VR 串流程式**：Virtual Desktop Streamer（測試 host 上有裝，另帶 Virtual Desktop Audio／Gamepad driver）也是一套 PC-VR 串流，列入 §3.6 第 2 步的衝突偵測。它是否也需要類似 D8b 的 settings guard，M1b 盤點後決定。
 - **safe mode**：每個 driver 版本只自動解除一次；再被封鎖就回 `SAFE_MODE_BLOCKED`。
 - **升版**：記 `[VIPLE-VR-DRV] steamvr=<ver> iface=<...>`；版本變動時自動 self-check。
 - **註銷路徑**（新增）。下列三種情況都以使用者身分執行 `removedriver`、還原 marker、刪除版本目錄：
@@ -564,7 +565,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 ### 3.9 桌面模式的虛擬顯示器（D11）
 
 - α、β 直接串 primary 或 `output_name` 指定的顯示器。
-- MTT VDD 模式範本放在 `Sunshine/src_assets/windows/misc/vdd_settings.frame.xml`（新增），並寫進 `docs/setup_guide.md`。
+- MTT VDD 模式範本放在 `Sunshine/src_assets/windows/misc/vdd_settings.frame.xml`（M2a 已新增），用法見 [`docs/setup_guide.md`](setup_guide.md#vdd-frame-template)。範本不隨 server zip 出貨（`build_sunshine.cmd` 只收固定清單；日後要出貨時放新的頂層 `vdd\`，**不可**放 `scripts\` 或 `config\`，前者會被 self-update 整個替換、後者被跳過）。server 以 SYSTEM 執行，不自動寫入 `C:\VirtualDisplayDriver`（該目錄一般使用者可寫，不變式 9）。
 - 動態 VDD 放到 2.0 之後。
 
 ### 3.10 driver 部署（權限邊界）
@@ -653,8 +654,8 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
   - Windows updater 只選不含 linux 的 `.zip`，x64 Linux 只選 `.AppImage`。
 - **arm64 builder**
   - 第一階段：linux-builder 用 qemu-user 跑 `flatpak-builder --arch=aarch64`，一律在 flatpak sandbox 內建置。**Monado 和 SteamVR 用 Flatpak 或容器隔離，不裝進 `/usr/local`**，避免污染 x64 AppImage 的 ldd 收集。
-  - source 同步：已 push 時 `git pull`；未 push 時在 <dev-client> `git diff` 出 patch、scp 過去 `git apply`。寫進 `build-steamframe.sh` 的用法說明。
-  - 長建置用 detach 加輪詢（exec 300 秒會逾時）。
+  - source 同步：已 push 時 `git pull`。未 push 時：dev 在 <dev-client> 用 `git add -N`（新檔）＋`git diff --binary HEAD` 出 patch、scp 過去 `git apply`；**release 要 commit SHA 完全一致，用 `git bundle`**（<dev-client> `git bundle create` → scp → builder `git fetch <bundle>` 後 `git merge --ff-only`）。寫在 `build-steamframe.sh --help` 與 [`steam_frame_client.md`](steam_frame_client.md) §3.5。
+  - 長建置用 `nohup setsid … & disown` 加輪詢。不要包 `systemd-inhibit`：經 SSH 呼叫時 polkit 回 `interactive authentication required`；builder 已關掉 AC 下的休眠（`sleep.target` masked），直接用 `nohup setsid`。
   - 第二階段：`linux-arm64-builder`（U7）；G-BUILD 不過就提前。
   - 不用 GitHub Actions。
 - **進 git 的新腳本**
@@ -695,7 +696,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 |---|---|---|---|---|---|
 | **M0 前置**（1.5.x 候選） | F0–F4、F6、F7、F9–F11、F17、F18（F5、F13 依賴 VR 旗標，併入 M1a；F19 已取消）；baseline：Windows D3D11（Linux runtime baseline 移到 M1a）；G-BUILD 移到 M2a 開頭 | — | 否 | 同步檢查 PASS（`src/` 加 `enet/`）；Pixel 5 回歸 15 分鐘；`version.ps1 set`/bump 防護測試；updater 選對 asset；baseline 寫進 `scripts/benchmark/results/` | 4–5 週 |
 | **M1a 協定骨架** | `VipleVr.h`、協商（含 relay 共用函式）、0x5506–0x5508、0x81、S→C async、VR 恢復協定（common-c 加 NVENC forced IR）、pts 查表、server stub 回聲、Windows `--vr-emulate`、Linux stub | M0 的 F2–F5 | 否 | vr-emulate 在 <host> 上：echo 命中 ≥ 99%；decoder 丟一幀注入後 0 不一致；LOSS → REFRESH_START 往返；**linux-server 建置加相容矩陣（Linux server）** | 4–5 週 |
-| **M2a α 建置** | F8、F12、P1 Flatpak、desktop id、`build-steamframe.sh`（兩種 arch）、probes、F6 在 x64 上的檢查、VDD 範本 | M0 的 F0、F6、F9 | 否 | arm64 Flatpak 產出；qemu 跑 `flatpak run --help` 兩次；Windows 和 AppImage 各跑 `--help` 兩次；PoC-F-pre 在 S3 上的前置 | 3–4 週 |
+| **M2a α 建置** | F8、F12、P1 Flatpak、desktop id、`build-steamframe.sh`（兩種 arch）、probes、F6 在 x64 上的檢查、VDD 範本 | M0 的 F0、F6、F9 | 否 | arm64 Flatpak 產出；qemu 跑 `flatpak run --help` 兩次；Windows 和 AppImage 各跑 `--help` 兩次；PoC-F-pre 在 S3 上的前置（**PoC-F-pre 本身延到 M3a 開頭**：使用者 2026-09-28 決定，需要 Steam 登入；M2a 只備妥 `MQS/steamframe/s3/` 的腳本與 SOP） | 3–4 週 |
 | **M1b server VR 本體** | driver（API 修正、compositor、pose 空間、控制器、stale）、hardened IPC、`display_vr_t`、VR profile、時鐘對映與頻率鎖、編排（D8b、衝突偵測、註銷）、部署安全、`vr_probe`、`--vr-selftest` | M1a、F7、F13、F15、F16 | 否 | §8.3 M1；**G-DRV、PoC-5a、PoC-10** 完成；依實測重定 G-rc 延遲門檻 | 8–10 週 |
 | **M3a β 程式碼** | XrContext（`/launch` 前 bring-up、loading 環境）、XrRenderer（測試實例規則）、quad/cylinder、射線、鍵盤、fallback、SDL offscreen、P2 spike、S2（`--openxr`） | M2a | 否 | S1 和 S2 自動化；XR 失敗注入：`/launch` 前退回平面、`/launch` 後送 cancel | 5–6 週 |
 | **M4a rc 程式碼** | projection、tracking 兩種模式、LATCH 回授、控制器 skeleton 與 system 組合鍵、haptic 走 SDL 事件、stale 政策、色彩一致 | M1b、M3a | 否 | S1 projection 對 <host> 跑通；500 ms 斷線注入；kill server 注入 | 5–6 週 |
@@ -720,7 +721,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 
 | 關卡 | 通過條件 | 失敗時 |
 |---|---|---|
-| **G-BUILD**（M0） | 量到 qemu 的乾淨建置和增量建置時間；增量 ≤ 45 分鐘 | 在 M0 決定 U7 採購 |
+| **G-BUILD**（M2a） | 量到 qemu 的乾淨建置和增量建置時間；增量 ≤ 45 分鐘（release flavor，開 LTO） | 停下交使用者決定 U7 採購 |
 | **G-α** | log 顯示 `decoder=hevc_v4l2m2m fmt=DRM_PRIME frontend=PlVk isGpuSlow=0 fullscreenFlag=<預期> matchVideo=<預期>`；1080p60、1440p60（以及 HMD Hz）各跑 15 分鐘：≥ 目標 fps×0.99、解碼 p95 ≤ 10 ms、stutter < 5%；overlay 內 UI、滑鼠、鍵盤可用（F14 視 PoC-7）；`--help` 兩次 rc=0 | 沒有 `/dev/video*`：先換 P2 → 再不行出 α-lite（不切 2.0.0）。v4l2m2m 異常：L1 提前。overlay 太糊：把 β 提前 |
 | **G-PKG** | P1 沙箱內能拿到 `/dev/video*`，而且 OpenXR runtime 能載入 | β/rc 改 P2 |
 | **G-β** | PoC-2b 定出啟動形態；XR session 進入 FOCUSED；frame loop miss < 1%；沒有 Wayland 時走 offscreen，decoder 經由 XR_READY 建立；XR 失敗注入依不變式 5 處理；1440p 文字可讀；指標延遲 ≤ 1 個 display frame | 沒有 `vulkan_enable2`：改 `enable`。dmabuf 匯入失敗：泛化 importer，或走 L3。OpenXR 不可用：IVROverlay |
@@ -829,7 +830,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | D8 vrlink | **預設 b**；PoC-5a/5b 通過才降級成 a |
 | D12 打包 | α 用 P1；β/rc 等 G-PKG |
 | U3 WAN 目標 RTT | ≤ 25 允許；> 60 預設停用 |
-| **U6 app-id 與發佈管道** | **必須在 M2a 第一個 Frame 建置之前拍板**（之後再改，`~/.var/app/<id>` 的設定和 log 會斷掉）。候選：`io.github.<owner>.VipleStream` |
+| **U6 app-id 與發佈管道** | **已定案（2026-09-27）：`io.github.finaltwinsen.VipleStream`**。之後不可再改（`~/.var/app/<id>` 的設定和 log 會斷掉）。發佈管道：GitHub release 附 `.flatpak` bundle（§6）；目前不走 Flathub（manifest 關閉 `appstream-compose`，要上架時再開） |
 | U7 ARM builder | 依 G-BUILD 的結果 |
 | U8 麥克風 | 0x5507/7F 保留 |
 | U9 | Valve 方案能不能在 Frame 看完整 Windows 桌面 |

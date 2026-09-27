@@ -411,6 +411,230 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
 - `gap` 是 sampleId 跳號累計，也就是上行丟失的估計；`ooo` 是倒退或重複。
 - VR session 的 control 迴圈每 4 ms 醒一次，只有 VR session 如此。
 
+---
+
+## 5c. Steam Frame 探測與執行環境（2.0 §SF，M2a 起）
+
+探測動作（`xr-probe`、`v4l2-probe`、`decode-bench`）的用法、選項、結束碼與 JSON 見
+`docs/steam_frame_client.md` §6；這裡只列 log 行格式。探測輸出的每一行同時印到 stdout（不帶 tag）。
+
+**log 位置**：Linux release 建置寫 `~/.cache/VipleStream/VipleStream/logs/`；Flatpak 是
+`~/.var/app/io.github.finaltwinsen.VipleStream/cache/VipleStream/VipleStream/logs/`；Windows 同本文件開頭。
+探測動作另寫 `probe-<action>-<epochMs>-<pid>.log`，只把 `probe-*.log` 修到最新 50 份，**不動**
+`VipleStream-*.log`（連跑幾十次探測也不會把串流 log 擠掉）。
+
+### 探測的開始與結束行
+
+`cli/probeutil.cpp`（`beginProbe`／`finish`）。tag 依動作而定：`xr-probe` → `[VIPLE-XR-PROBE]`、`v4l2-probe` →
+`[VIPLE-V4L2-PROBE]`、`decode-bench` → `[VIPLE-V4L2] bench:`。
+
+```
+[VIPLE-XR-PROBE] xr-probe: VipleStream <版號> <平台> pid=<pid>            ← 平台例：linux-arm64 flatpak、winnt-x86_64 plain、
+                                                                          linux-x86_64 plain (running on arm64)
+[VIPLE-V4L2] bench: decode-bench: VipleStream <版號> <平台> pid=<pid>
+…
+[VIPLE-V4L2-PROBE] v4l2-probe: done rc=<rc> json=<JSON 路徑>
+[VIPLE-XR-PROBE] xr-probe: done rc=15 json=(none)                         ← JSON 寫不出來：只有原本 rc=0 才改成 15
+```
+
+每個探測一定有一對開始／結束行；只有開始行代表行程在探測中途被殺或崩潰（v4l2 ioctl、`xrCreateInstance` 卡死時看
+最後一行停在哪）。stdout 的第一行是 `<action>: VipleStream <版號> <平台>`，stderr 的最後一行是 `json: <路徑>`。
+
+### `[VIPLE-SF-ENV]` —— 執行環境摘要
+
+`backend/sfenv.cpp`（`logOnce`）、`streaming/session.cpp`。**只在 Linux 印**，其他平台是 no-op。
+
+```
+[VIPLE-SF-ENV] pkg=flatpak id=<app-id> runtime=<runtime ref> flatpak=<ver> [commit=<app commit 前 12 碼>] app=<版號> arch=<build>/<current>[(emulated)] host-os=<ID>/<VERSION_ID>[,variant=…][,build=…] runtime-os=<…> kernel=<…> devices=<…> fs=<…>
+[VIPLE-SF-ENV] pkg=appimage|plain app=<版號> arch=<build>/<current>[(emulated)] os=<ID>/<VERSION_ID>[,…] kernel=<…>      ← 非 Flatpak 的第一行
+[VIPLE-SF-ENV] session=<XDG_SESSION_TYPE> desktop=<XDG_CURRENT_DESKTOP> wayland=<WAYLAND_DISPLAY> display=<DISPLAY> qpa=<原始>[-><目前>] sdl=<原始>[-><目前>] gamescope=0|1(env=…,gamescope-0) steam-env=<N> video=[<node>:<sysfs name>,…] drm=[<driver>,…] xr-env=<XR_RUNTIME_JSON> xr-json=<路徑>(<source>,loader=0|1)|none
+[VIPLE-SF-ENV] session: pkg=<…> arch=<…> os=<…> kernel=<…> gamescope=0|1 video=<N> drm=[<driver>,…] xr=<source>|none sdl-driver=<SDL 實際 driver>|none sdl-app-id=<SDL_APP_ID>|unset
+```
+
+- **何時印**：前兩行在啟動時印一次（SDL video driver 決定、DRM hooks 之後；`list` 動作不印）；探測動作在派發時印。
+  `session:` 行接在 `[VIPLE-SESSION]` 之後，每場一次。
+- **只收便宜的資訊**：讀 `/.flatpak-info`、os-release、sysfs、環境變數白名單、DRM driver 名稱、OpenXR runtime JSON
+  路徑；不 dlopen Vulkan、不對 `/dev/video*` 做 ioctl。完整版（Vulkan 裝置、V4L2 QUERYCAP）只在探測 JSON 的 `env`。
+- 未設的環境變數印 `unset`、空字串印 `""`；`qpa`、`sdl` 被 `main.cpp` 改寫過時印 `原始->目前`（例如 SSH 下
+  `--help` 的 `unset->offscreen`）。
+- `pkg`：`flatpak`／`appimage`／`plain`。`arch` 是 build／current，`(emulated)`＝在 qemu 之類的模擬下執行。
+- `host-os`／`runtime-os`：Flatpak 內 host 的 `/run/host/os-release` 與 runtime 的 `/etc/os-release`。
+- `devices`、`fs`：`/.flatpak-info` 的 `[Context]`（`fs` 截到 240 字）。
+- `gamescope=1`：`GAMESCOPE_WAYLAND_DISPLAY` 有值，或 `$XDG_RUNTIME_DIR/gamescope-0` 存在（Flatpak 要有
+  `xdg-run/gamescope-0` 權限才看得到）。
+- `steam-env`：`STEAM*` 環境變數的**個數**，名稱與值都不印（可能含 token）。
+- `video`：sysfs 的 video4linux 節點（最多 16 個），不開裝置；`drm`：`WMUtils::getDrmDriverNames()`，Frame 預期 `msm`。
+- `xr-json`：`XrRuntimeJson::resolveActive()` 的結果；`loader=0`＝OpenXR loader 自己找不到（Flatpak 內 host 的
+  `~/.config/openxr`），`xr-probe` 會在行程內設 `XR_RUNTIME_JSON`。
+- `sdl-driver`、`sdl-app-id` 在 session 開場時才現取（SDL 自己的值，不是 env）。Wayland 下 `sdl-app-id` 應等於 desktop id
+  （Flatpak 是 app-id，其他是 `viplestream`），xcb 下是 `viplestream`；其他 Qt 平台（eglfs 等）`main.cpp` 不設，通常是 `unset`。
+- **連帶變化**：Linux 啟動時 SfEnv 就會呼叫 `WMUtils::getDrmDriverNames()`（只開 render node，不牽涉 DRM master），
+  所以 `[VIPLE-LNXFE] DRM driver probe` 從 M2a 起提前在啟動時出現，判讀 F6 時不要當成 session 內的探測。
+
+### `[VIPLE-V4L2-PROBE]` —— `v4l2-probe`
+
+`cli/v4l2probe.cpp`、`streaming/video/v4l2/v4l2caps.cpp`
+
+```
+[VIPLE-V4L2-PROBE] sysfs: N video node(s): video0="<name>" …
+[VIPLE-V4L2-PROBE] nodes: N /dev/video* node(s), M /dev/media* node(s)[ (inside Flatpak)]
+[VIPLE-V4L2-PROBE] device: <path> (--device)
+[VIPLE-V4L2-PROBE] dev=<path> open=ok driver=<…> card="<…>" bus=<…> version=<x.y.z> caps=0x<…> m2m=1 mplane=0|1 legacyCaps=0|1 role=decoder|non-video-decoder|encoder|converter[ kind=stateful|stateless|mixed|unknown] coded=[<fourcc>,…][ otherCoded=[<fourcc>,…]]
+[VIPLE-V4L2-PROBE] dev=<path> open=ok driver=<…> … m2m=0 role=not-m2m
+[VIPLE-V4L2-PROBE] dev=<path> open=failed <errno> <stat> groups=[…][ hint=…]
+[VIPLE-V4L2-PROBE] dev=<path> open=ok querycap=<errno> (not a V4L2 device?) <stat>
+[VIPLE-V4L2-PROBE] dev=<path> coded=<fourcc>(<名稱>) flags=<…> size=<…> capture=[<fourcc>,…] profiles=[…] levelMax=<…> vr90=ok|no(need <level>) vr72=ok|no(need <level>) tiers=[…] minBufCapture(static)=N|?
+[VIPLE-V4L2-PROBE] dev=<path> coded=<fourcc>(<名稱>) … s_fmt=<errno>|substituted(<fourcc>)
+[VIPLE-V4L2-PROBE] dev=<path> decoderCmd stop=<…> start=<…> g_parm output=<…> capture=<…> queueCaps output=[…]|skipped(legacy-caps) capture=[…]|skipped(legacy-caps)
+[VIPLE-V4L2-PROBE] dev=<path> header-test codec=<名稱> 1280x720 sourceChange=<ms>[(nextAu)]|none(<ms>ms) capture=<fourcc> WxH visible=<…> minBufCapture=N|? [expbuf=<…>] firstFrame=<ms> out=immediate|nextAu|drain errFlag=0|1 result=ok|frame-with-error-flag|<失敗原因>
+[VIPLE-V4L2-PROBE] dev=<path> header-test codec=<名稱> 1280x720 … firstFrame=none[(<原因>)] result=no-frame|source-change-during-capture
+[VIPLE-V4L2-PROBE] dev=<path> header-test codec=h264|hevc skipped: <原因>
+[VIPLE-V4L2-PROBE] m2m decoders: N: <path> driver=<…> kind=<…>[(legacy-caps)] coded=[…] statefulVideo=[<codec>,…]; …
+[VIPLE-V4L2-PROBE] stateful video decoder: yes (<path>=[<codec>,…]; …)                     ← 有 decoder 時才印這行或下一行
+[VIPLE-V4L2-PROBE] stateful video decoder: no (no H264/HEVC/AV1/VP9 stateful decoder; the app's v4l2m2m path cannot use these decoders)
+[VIPLE-V4L2-PROBE] no m2m decoder visible (<原因>)                        ← rc=13
+[VIPLE-V4L2-PROBE] v4l2-probe: not available in this build (V4L2 needs Linux with <linux/videodev2.h>)   ← rc=10
+```
+
+- **decoder**＝m2m，且 OUTPUT 至少有一個 compressed 的**視訊**格式（`role=decoder`）。JPEG、MJPEG、PJPG、JPGL、DV、MPEG
+  多工容器這類非視訊格式（kernel 會自動加 COMPRESSED 旗標）不算，列在 `otherCoded=[…]`；只有這類格式的節點是
+  `role=non-video-decoder`（例如 mtk-jpeg、mxc-jpeg），不算 decoder。`legacyCaps=1`＝只宣告舊式 CAPTURE＋OUTPUT 旗標的 driver。
+- `kind` 只看已知 codec 表內的格式：`stateful`、`stateless`（Request API）、`mixed`；只有表外格式（例如還沒查證的 AV1
+  fourcc）時是 `unknown`，不預設成 stateful。`kind=stateless` 也算 decoder，但 app 的 v4l2m2m 路徑只能用 stateful。
+- **app 能不能用，看 `stateful video decoder:` 那一行**（JSON 的 `summary.hasStatefulVideoDecoder`）：只有 H.264／HEVC／
+  AV1／VP9 的 stateful decoder 算 `yes`；`statefulVideo=[…]` 是每個 decoder 的清單。stateless decoder 與 vicodec 的 FWHT
+  讓結束碼是 0，這行卻是 `no`。G-α 的替代路徑條件與 PoC-0 看這一行，**不看結束碼**。rc=13 時沒有這行。
+- `queueCaps`：`REQBUFS(0)` 只對 decoder 做；舊式旗標判定的節點印 `skipped(legacy-caps)`（`exclusive_caps=0` 的
+  v4l2loopback 會被舊式旗標判成 m2m，REQBUFS 會打斷正在讀它的程式）。
+- `vr90`／`vr72`：和 3456×1728 所需 level 比對（HEVC 90 Hz 要 5.2、72 Hz 要 5.1；H.264 90 Hz 要 6.0、72 Hz 要 5.2）。
+- header-test 的 `sourceChange`：STREAMON 前只入列一份 AU。`<ms>(nextAu)`＝1 秒內沒等到 `SOURCE_CHANGE`，補送第二份 AU
+  之後才等到；`none(<ms>ms)` 的數字是總共等了多久（1000 或 2000），之後照舊式流程繼續設定 CAPTURE（JSON
+  `captureSetupWithoutSourceChange`）。
+- header-test 的 `out=`（JSON `firstFrame.outputAfter`）：
+  - `immediate`＝只有一份 AU、不 drain 就吐幀。**只有這個代表沒有額外的幀延遲**。
+  - `nextAu`＝補送第二份 AU 才吐幀，串流時每幀至少多等一個幀間隔（90 Hz 約 11 ms）。第二份和第一份是同一張 IRAP
+    （IDR／CRA），不是 P 幀，所以這是**樂觀的下限**。等 `SOURCE_CHANGE` 時已經補送過第二份的話，第一段出幀也記這個。
+  - `drain`＝送 `DEC_CMD_STOP` 之後才吐幀；串流路徑從不 drain，照現況不能用。
+  - `firstFrame=<ms>` 從 CAPTURE STREAMON 起算，不是單幀解碼延遲。
+- `firstFrame=none(…)` 的括號：`(drained, no frame)`＝`DEC_CMD_STOP` 成功送出後仍沒有幀；`(source change, capture needs
+  reconfig)`＝CAPTURE 串流中途收到 `SOURCE_CHANGE` 又拿到空的 LAST buffer，是解析度變更、CAPTURE 要重新配置；
+  `(source change during capture)`＝收到 `SOURCE_CHANGE`、沒有 LAST；`(LAST without drain)`＝沒送 `DEC_CMD_STOP` 卻拿到
+  LAST；沒有括號＝三段都逾時。沒有幀而且中途收到 `SOURCE_CHANGE` 時 `result=source-change-during-capture`，否則 `no-frame`。
+- **真正的每幀延遲不看 header-test**（測試幀的 SPS 也不是 Sunshine 的串流參數）：以 `decode-bench <Sunshine 錄的樣本>
+  --fps 90` 的 `lat p99` 與 `eagainMax` 為準（下一節）。每個 header-test 最壞約 4 秒。**header-test 失敗不改結束碼。**
+- `open=failed`：看 errno、`<stat>`（mode／owner）與 `groups=`，SSH 下沒有 active seat 時可能拿不到 uaccess；
+  `no m2m decoder visible` 的括號內會說明是沒有節點、開檔失敗、節點都不是 decoder，還是只有非視訊格式（JPEG 等）。
+
+### `[VIPLE-V4L2] bench:` —— `decode-bench`
+
+`cli/decodebench.cpp`。tag 是 `[VIPLE-V4L2]`，每一行都以 `bench: ` 開頭。
+
+```
+[VIPLE-V4L2] bench: input file=<檔名> codec=h264|hevc|av1 container=annexb|ivf aus=N keyframes=N WxH bytes=N[ truncatedTail=1]
+[VIPLE-V4L2] bench: compare-sw reference=<decoder> frames=N grid=WxH step=N              ← --compare-sw
+[VIPLE-V4L2] bench: candidate <label> (sw|v4l2m2m|hwaccel|hw): ok|<失敗原因>              ← auto 時逐一列；指定 decoder 只在失敗時印
+[VIPLE-V4L2] bench: decoder=<label> kind=<kind> threads=N open=X.Xms[ outBufs=N capBufs=N]
+[VIPLE-V4L2] bench: map-vulkan device="<GPU>"                                            ← --map-vulkan
+[VIPLE-V4L2] bench: progress sent=N/M out=N errFlag=N stall=N                            ← 每 10 秒
+[VIPLE-V4L2] bench: first-frame WxH fmt=<pix_fmt> sw=<sw_format>|- drm=<layer>[+<layer>…]/mod=0x<…>/objs=N/pitch=<p>[,<p>…]|- afterMs=X.XX
+[VIPLE-V4L2] bench: decoder=<label> out=<pix_fmt> drm=<同上> WxH fps=N n=N lat p50=… p95=… p99=… max=… errFlag=N stall=N eagainMax=N
+[VIPLE-V4L2] bench: sendBlock p50=… p95=… max=… sendEagain=N sendErr=N recvErr=N ptsMismatch=N skipped=N flushes=N throughput=X.Xfps wall=Nms
+[VIPLE-V4L2] bench: drop|corrupt|error=<k> errFrames=N missing=N stallMs=X.X healFrames=N|n/a (psnr>40dB) idrNeeded=0|1|inconclusive|n/a[ merged=N]
+[VIPLE-V4L2] bench: ... N more event(s) in the JSON                                       ← 事件行最多 20 行
+[VIPLE-V4L2] bench: events=N selfHealed=N needIdr=N healMax=N healMean=X.X inconclusive=N merged=N   ← 有事件且帶 --compare-sw
+[VIPLE-V4L2] bench: compare-sw ref=<decoder> compared=N psnr min=… mean=… below40=N failures=N[ firstFailure=…]
+[VIPLE-V4L2] bench: map-vulkan device="<GPU>" mapped=N map p50=… p95=… max=… fail=N unsupported=N
+[VIPLE-V4L2] bench: ABORTED <原因>                                                       ← rc=14
+[VIPLE-V4L2] bench: error: <訊息>
+[VIPLE-V4L2] bench: unavailable (this build has no FFmpeg)                               ← rc=10
+```
+
+- 延遲（ms）＝送出到收到同一幀；`sendBlock`＝`send_packet` 本身的阻塞時間。`eagainMax`＝送出後、下一張幀輸出之前
+  累積的最長封包數（約等於管線深度）；`stall`＝有 `--fps` 時超過 3 個幀間隔、否則超過 100 ms 沒有輸出。
+- **量每幀延遲一律帶 `--fps`**（Frame 用 90）：連發模式下一個封包立刻就送，看不出「要等下一個 AU 才出幀」的延遲。
+  header-test 的 `out=` 判讀要拿這一輪的 `lat p99`、`eagainMax` 佐證。
+- `drm=`：每個 layer 的格式都列（VAAPI 匯出的 NV12 是 `R8+GR88` 兩個 layer，只看第一個會誤判成單平面），`mod` 是第一個
+  object 的 modifier，`pitch` 依序列出每個 plane。硬體幀不是 DRM_PRIME 時（例如 VAAPI）另外 `av_hwframe_map` 一次只為描述；
+  拿不到描述（SW 幀、匯出失敗）時印 `-`。完整描述在 JSON 的 `firstFrame.drm.layers[]`（`drmVia` 記來源）。
+- 事件行的 `<k>` 是**檔內幀號**（0 起算）。`healFrames`＝事件後到 PSNR 穩定回到 40 dB 以上的幀數（要 `--compare-sw`，
+  否則 `n/a`）；`idrNeeded=1`＝視窗內沒恢復，或是靠 keyframe 才恢復。PoC-3b 看這組。
+- **事件視窗**：注入事件（drop／corrupt）的視窗到下一個注入事件（或結尾）為止，不被中間的 error 事件切斷。視窗內、
+  PSNR 癒合點之前（沒癒合就是整個視窗）的 error 事件是同一次注入的後果，併進注入事件：不另成一行、不計入
+  `selfHealed`／`needIdr`，事件行尾的 `merged=N` 是併進來幾個。癒合之後才出現的 error 事件自己成一行。error 事件的
+  視窗到下一個事件（任何種類）為止。
+- `idrNeeded=inconclusive`：視窗被下一個事件截斷時 PSNR 還沒回到 40 dB，判斷不出再等下去會不會自己好。彙總行另計
+  `inconclusive`，不算進 `needIdr`。`--drop-every` 很密、decoder 又不會自己好時大多是這個，判讀時一起看 JSON 的
+  `windowFrames`。
+- 彙總行：`events` 是全部事件數（含被併的），`merged` 是被併的個數；`selfHealed`、`needIdr`、`inconclusive` 只算沒被併的
+  事件。
+- JSON：`events[]` 依全域幀號 `g` 排序（最多 2000 筆，超過時 `eventSummary.jsonTruncated=true`）。被併的 error 事件緊接在
+  所屬的注入事件之後，只帶 `mergedInto`（注入事件的 `g`），沒有視窗欄位；注入事件帶 `mergedErrors`。視窗被截斷時
+  `idrNeeded` 是 `null`、`truncated` 是 `true`；沒有 PSNR 時 `healFrames`、`idrNeeded` 也是 `null`，但沒有 `truncated`。
+  `eventSummary` 另有 `merged`，`--compare-sw` 生效時另有 `inconclusive`。
+- `--compare-sw`、`--map-vulkan` 會擾動延遲與吞吐，量延遲的那一輪不要帶。
+
+### `[VIPLE-XR-PROBE]` —— `xr-probe`
+
+`cli/xrprobe.cpp`、`streaming/xr/xrprobe_instance.cpp`（只在 `CONFIG+=openxr` 建置）
+
+```
+[VIPLE-XR-PROBE] env: <SfEnv 兩行合併的摘要>
+[VIPLE-XR-PROBE] env: vulkan[i] "<GPU>" type=<…> driver=<…> <driverInfo> api=<x.y.z>      ← 或 env: vulkan unavailable (<原因>)
+[VIPLE-XR-PROBE] override: XR_RUNTIME_JSON=<path> (--xr-runtime-json, in-process only)
+[VIPLE-XR-PROBE] override: XR_LOADER_DEBUG=all (--loader-debug; loader output goes to stderr)
+[VIPLE-XR-PROBE] xr-probe: this build has no OpenXR (CONFIG+=openxr)                     ← rc=10
+[VIPLE-XR-PROBE] xr-probe: --session (B stage: …) requires M3a (XrContext); …              ← rc=12
+[VIPLE-XR-PROBE] runtime-json candidate: <path> source=<…> exists=0|1 readable=0|1[ symlink-><target>[ (dangling)]]
+[VIPLE-XR-PROBE] runtime-json: N candidate path(s) checked, M present
+[VIPLE-XR-PROBE] runtime-json: active=<path> source=<…> name="<…>" library=<path> libExists=0|1 loaderWouldFind=0|1[ parseError=…]
+[VIPLE-XR-PROBE] runtime-json: none found (no active_runtime json in any searched path)
+[VIPLE-XR-PROBE] runtime-json: set XR_RUNTIME_JSON=<path> in-process (host-config (sandbox XDG_CONFIG_HOME hides host ~/.config/openxr))
+[VIPLE-XR-PROBE] loader: OpenXR headers <x.y.z>
+[VIPLE-XR-PROBE] api-layer: <name> spec=<x.y.z>
+[VIPLE-XR-PROBE] ext: <name> v<N>[ [enabled]]
+[VIPLE-XR-PROBE] valve-ext: <name>
+[VIPLE-XR-PROBE] required: vulkan_enable2=0|1 vulkan_enable=0|1 convert_timespec=0|1 -> tracking=thread|frameloop graphics=enable2|enable|none
+[VIPLE-XR-PROBE] instance: runtime="<name>" ver=<x.y.z> api=<1.1|1.0> exts=N enabled=N     ← 或 instance: xrCreateInstance failed (<XrResult>)
+[VIPLE-XR-PROBE] timespec: roundtrip=<ns>ns xr-mono=<ns>ns toXr=<us>us toTs=<us>us
+[VIPLE-XR-PROBE] system: name="<…>" vendor=0x<…> maxSwapchain=WxH layers=N orient=0|1 pos=0|1 eyeGaze=<…>   ← 或 system: HMD unavailable (<XrResult>); …
+[VIPLE-XR-PROBE] viewconfig: types=[…]
+[VIPLE-XR-PROBE] viewconfig PRIMARY_STEREO: views=N <每眼建議尺寸> fovMutable=0|1|? blend=[…]
+[VIPLE-XR-PROBE] vulkan: path=enable2|enable minApi=<…> maxApi=<…> device="<GPU>" vendor=0x<…> id=0x<…> api=<…> (index i of N)
+[VIPLE-XR-PROBE] note: refresh rate, FOV and reference spaces need a session (xr-probe --session, M3a)
+[VIPLE-XR-PROBE] instance: destroyed (<XrResult>)
+[VIPLE-XR-PROBE] runtime-lib: dlopen(<path>) failed: <dlerror>[ elf=<machine>]           ← rc=13 時的診斷
+[VIPLE-XR-PROBE] runtime-lib: dlopen(<path>) ok, xrNegotiateLoaderRuntimeInterface=0|1 (library loads; the failure is inside the runtime or its IPC)
+[VIPLE-XR-PROBE] result: no usable OpenXR runtime (rc=13; …)
+[VIPLE-XR-PROBE] result: runtime reported INSTANCE_LOST/RUNTIME_FAILURE during the probe (rc=14)
+```
+
+- `required:` 行是 PoC-2 的核心：`convert_timespec=0` 時 tracking 要改用 frameloop 模式；`graphics=none` 表示 runtime 兩種
+  Vulkan 擴充都沒有（G-β 的替代路徑）。
+- `runtime-json: set XR_RUNTIME_JSON=… in-process` 只在 loader 自己找不到、而 host 路徑找得到時出現；使用者自己設了
+  `XR_RUNTIME_JSON` 就不會改。
+- rc=13 時先看 `runtime-lib:`：`dlopen … failed` 是 runtime 的 `.so` 在沙箱內載不起來（缺函式庫或架構不符，PoC-F 的答案）；
+  `dlopen … ok` 代表失敗在 runtime 內部或它的 IPC。要 loader 的細節時加 `--loader-debug`（輸出在 stderr）。
+
+### `[VIPLE-BSDUMP]` —— `stream --dump-bitstream`（dev-only）
+
+`streaming/video/bitstreamdump.cpp`
+
+```
+[VIPLE-BSDUMP] armed base=<路徑，不含副檔名> ext=auto|<ext> (dev-only, not persisted)
+[VIPLE-BSDUMP] open <path> codec=h264|hevc|av1(0x<videoFormat>) WxH
+[VIPLE-BSDUMP] progress frames=N bytes=N                                                 ← 每 10 秒
+[VIPLE-BSDUMP] closed frames=N bytes=N path=<path> reason=decoder-destroyed|format-change|set-path|write-error
+[VIPLE-BSDUMP] extension .<ext> does not match codec <codec>; writing .<ext> instead
+[VIPLE-BSDUMP] cannot open <path>: <原因>
+[VIPLE-BSDUMP] cannot write IVF header to <path>: <原因>
+[VIPLE-BSDUMP] write failed on <path>: <原因>
+[VIPLE-BSDUMP] dump disabled for the rest of this process
+[VIPLE-BSDUMP] unsupported videoFormat 0x<…>
+```
+
+- `reason=format-change` 之後會再有一行 `open <base>-<n>.<ext>`（decoder 重建、格式或解析度改變）。
+- 開檔或寫檔失敗就整個停用（`dump disabled …`），不會每幀刷錯誤。一般 session 沒帶 `--dump-bitstream` 時一行都不會有。
+
 ## 6. 分析工具
 
 ```powershell

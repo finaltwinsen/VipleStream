@@ -169,6 +169,11 @@ if [ -z "$NCNN_LIB_DIR" ]; then
     NCNN_LIB_DIR=$(dirname "$(find "$HOME/.local" -name 'libncnn.so.1' 2>/dev/null | head -1)" 2>/dev/null)
 fi
 
+# VipleStream 2.0 §M2a（R2）：經 SSH 執行（沒有 Wayland／X11）時，--help／--version 由
+# main.cpp 早期掃描改用 offscreen QPA（不再落到 EGLFS）。linuxdeploy-plugin-qt 預設只部署
+# libqxcb.so，要明確多帶 offscreen 平台外掛，否則 AppImage 找不到它而 abort。
+# 與 build-appimage-native.sh 同一條。
+EXTRA_PLATFORM_PLUGINS=libqoffscreen.so \
 LD_LIBRARY_PATH="${NCNN_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH}" \
 linuxdeploy --appdir $DEPLOY_FOLDER \
     --executable $DEPLOY_FOLDER/usr/lib/libSDL3.so.0 \

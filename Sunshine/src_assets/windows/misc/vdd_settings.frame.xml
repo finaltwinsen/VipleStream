@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  VipleStream 2.0 Steam Frame 桌面模式：MTT Virtual Display Driver 模式範本
+  （docs/vr_architecture.md §3.9、決策 D11；用法見 docs/setup_guide.md#vdd-frame-template）
+
+  用途：讓 host 的 VDD 具備 Frame client 可能要求的每一組「解析度 × 更新率」。
+  Sunshine 在 dd_resolution_option 與 dd_refresh_rate_option 為 auto 時，會把 VDD 切到
+  client 要求的模式（更新率容差 ±0.9 Hz）。模式表裡沒有這一組時，整個顯示器設定會被
+  還原，擷取退回原本的顯示器，畫面與更新率都不對，而且沒有錯誤畫面。
+
+  注意：
+  1. 這個檔案整台 host 共用。請合併進現有的 C:\VirtualDisplayDriver\vdd_settings.xml，
+     保留其他 client 需要的模式（範例見 resolutions 最後的註解）。
+  2. 格式對應 MTT VDD 24.12.24 簽章版 driver（DriverVer 11.30.4.434）。
+     較新的 driver 以元素名稱讀取同一組欄位。
+  3. 改完要在沒有串流時重新載入 VDD（停用再啟用裝置）。
+  4. PCVR 不經過 VDD，這裡不放 SBS 或每眼解析度。
+  5. 全域更新率會套用到每一個解析度；每筆 resolution 自己的 refresh_rate 會和全域值
+     重複一次，driver 不去重，Windows 可以接受。
+  6. g_refresh_rate 只接受整數；resolution 內的 refresh_rate 可寫小數。
+-->
+<vdd_settings>
+  <monitors>
+    <!-- 維持 1 台。改成 2 會多出一台新顯示器，device id 不同，output_name 要重抄 -->
+    <count>1</count>
+  </monitors>
+  <gpu>
+    <!-- default：依 adapter.txt，沒有就選專用記憶體最大的 GPU。多 GPU 主機請填 NVENC 所在 GPU 的名稱 -->
+    <friendlyname>default</friendlyname>
+  </gpu>
+  <global>
+    <!-- 60：G-α 的 1080p60 與 1440p60 關卡，也是其他 client 的常用值 -->
+    <g_refresh_rate>60</g_refresh_rate>
+    <!-- 72、80、90、120：Frame 面板更新率；gamescope openvr backend 依 HMD 更新率回報 -->
+    <g_refresh_rate>72</g_refresh_rate>
+    <g_refresh_rate>80</g_refresh_rate>
+    <g_refresh_rate>90</g_refresh_rate>
+    <g_refresh_rate>120</g_refresh_rate>
+    <!-- 144：Frame 的實驗性模式 -->
+    <g_refresh_rate>144</g_refresh_rate>
+  </global>
+  <resolutions>
+    <!-- 第一筆是 Windows 的偏好模式（driver 固定回報索引 0）：α 建議的 1080p 加 HMD 更新率 -->
+    <resolution>
+      <width>1920</width>
+      <height>1080</height>
+      <refresh_rate>90</refresh_rate>
+    </resolution>
+    <!-- gamescope openvr backend 預設的輸出大小；client 選原生解析度時會要求它 -->
+    <resolution>
+      <width>1280</width>
+      <height>720</height>
+      <refresh_rate>60</refresh_rate>
+    </resolution>
+    <!-- G-α 的 1440p 關卡；β 虛擬螢幕的文字清晰度 -->
+    <resolution>
+      <width>2560</width>
+      <height>1440</height>
+      <refresh_rate>60</refresh_rate>
+    </resolution>
+    <!-- client 的 4K 預設選項；Frame 能否即時解碼待 PoC-3 -->
+    <resolution>
+      <width>3840</width>
+      <height>2160</height>
+      <refresh_rate>60</refresh_rate>
+    </resolution>
+    <!-- Frame 每眼面板原生大小（正方形）；只在 client 明確要求時使用 -->
+    <resolution>
+      <width>2160</width>
+      <height>2160</height>
+      <refresh_rate>90</refresh_rate>
+    </resolution>
+    <!-- 其他 client 需要、上面沒有的模式加在這裡，例如：
+    <resolution>
+      <width>1920</width>
+      <height>1080</height>
+      <refresh_rate>180</refresh_rate>
+    </resolution>
+    -->
+  </resolutions>
+  <options>
+    <CustomEdid>false</CustomEdid>
+    <PreventSpoof>false</PreventSpoof>
+    <EdidCeaOverride>false</EdidCeaOverride>
+    <HardwareCursor>true</HardwareCursor>
+    <!-- Frame 與 XR 路徑一律 8-bit SDR -->
+    <SDR10bit>false</SDR10bit>
+    <HDRPlus>false</HDRPlus>
+    <logging>false</logging>
+    <debuglogging>false</debuglogging>
+  </options>
+</vdd_settings>

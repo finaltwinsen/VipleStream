@@ -1,4 +1,11 @@
 #if defined(__x86_64__) || defined(_M_X64)
+// VipleStream §M2a-R4：gcc 不再對整個 nvvideoparser 加全域 -mavx2 等旗標（見 nvvideoparser.pro），
+// 只有這個 TU 開 AVX2（cpudetect.cpp 選 AVX2 路徑時檢查的就是 avx2；AVX2 已隱含 AVX）。
+// pragma 必須在任何 #include 之前，標頭裡被這裡實體化的 template／inline 函式才會用同一個 target。
+// MSVC 不需要（全域 /arch:AVX2），clang 仍走 .pro 的全域旗標。
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC target("avx2")
+#endif
 #include <immintrin.h>
 #include <cpudetect.h>
 #include "ByteStreamParser.h"

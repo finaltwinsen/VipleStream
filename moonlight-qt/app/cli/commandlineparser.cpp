@@ -1,13 +1,17 @@
 #include "commandlineparser.h"
+#include "streaming/video/bitstreamdump.h"  // §SF-PROBE：stream --dump-bitstream
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QFileInfo>
 #include <QRegularExpression>
 
 #include <Limelight.h>  // §VR：VIPLE_VR_* 範圍常數
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #if defined(Q_OS_WIN)
 #include <qt_windows.h>
@@ -185,6 +189,84 @@ private:
     QMap<QString, QStringList> m_Choices;
 };
 
+// §SF-PROBE（M2a）：整數選項＋範圍檢查（超出範圍走 showError，結束碼 1）。
+static int getBoundedIntOption(const CommandLineParser& parser, const QString& name, int min, int max)
+{
+    const int value = parser.getIntOption(name);
+    if (!inRange(value, min, max)) {
+        parser.showError(QString("%1 must be within %2-%3").arg(name).arg(min).arg(max));
+    }
+    return value;
+}
+
+// §SF-PROBE（M2a）：decode-bench 的幀號清單。"3,10,20-24" → 3,10,20,21,22,23,24（排序、去重）。
+// 只接受非負整數與 a-b（a<=b）區間；總數上限 100000，防止打錯字展開成巨大清單。
+static bool parseFrameList(const QString& text, QList<int>& out)
+{
+    static const qint64 k_MaxEntries = 100000;
+    const QStringList parts = text.split(',', Qt::SkipEmptyParts);
+    if (parts.isEmpty()) {
+        return false;
+    }
+    for (const QString& rawPart : parts) {
+        const QString part = rawPart.trimmed();
+        const int dash = part.indexOf('-');
+        bool ok1 = false;
+        bool ok2 = false;
+        if (dash > 0) {
+            const int first = part.left(dash).toInt(&ok1);
+            const int last = part.mid(dash + 1).toInt(&ok2);
+            if (!ok1 || !ok2 || first < 0 || last < first ||
+                    (qint64)last - first + 1 + out.size() > k_MaxEntries) {
+                return false;
+            }
+            for (qint64 i = first; i <= last; i++) {
+                out.append((int)i);
+            }
+        }
+        else {
+            const int value = part.toInt(&ok1);
+            if (!ok1 || value < 0 || out.size() + 1 > k_MaxEntries) {
+                return false;
+            }
+            out.append(value);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return true;
+}
+
+// §SF-PROBE（M2a）：探測動作只接受「動作名稱」這一個位置參數；多出來的多半是打錯
+// （例如把 --device 的值直接寫在後面），直接報錯比默默忽略好。
+static void rejectExtraPositionals(const CommandLineParser& parser, int expected)
+{
+    const QStringList posArgs = parser.positionalArguments();
+    if (posArgs.size() > expected) {
+        parser.showError(QString("Unexpected argument(s): %1").arg(posArgs.mid(expected).join(' ')));
+    }
+}
+
+// 已知動作表：parse() 與 earlyProbeAction() 共用，兩者對同一組 argv 一定得出同一個動作。
+namespace {
+struct ActionEntry {
+    const char* name;
+    GlobalCommandLineParser::ParseResult result;
+    bool earlyProbe;    // §SF-PROBE：main.cpp 在 QGuiApplication 之前以 QCoreApplication 派發
+};
+
+const ActionEntry k_Actions[] = {
+    {"quit",         GlobalCommandLineParser::QuitRequested,        false},
+    {"stream",       GlobalCommandLineParser::StreamRequested,      false},
+    {"pair",         GlobalCommandLineParser::PairRequested,        false},
+    {"list",         GlobalCommandLineParser::ListRequested,        false},
+    {"fruc-offline", GlobalCommandLineParser::FrucOfflineRequested, false},
+    {"xr-probe",     GlobalCommandLineParser::XrProbeRequested,     true},
+    {"v4l2-probe",   GlobalCommandLineParser::V4l2ProbeRequested,   true},
+    {"decode-bench", GlobalCommandLineParser::DecodeBenchRequested, true},
+};
+}
+
 GlobalCommandLineParser::GlobalCommandLineParser()
 {
 }
@@ -207,6 +289,9 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
         "  stream          Start streaming an app\n"
         "  pair            Pair a new host\n"
         "  fruc-offline    Offline FRUC quality measurement (dev-only)\n"
+        "  xr-probe        Probe the OpenXR runtime (Steam Frame bring-up)\n"
+        "  v4l2-probe      Probe V4L2 stateful video decoders (Steam Frame bring-up)\n"
+        "  decode-bench    Benchmark a video decoder on a recorded bitstream (dev)\n"
         "\n"
         "See 'moonlight <action> --help' for help of specific action."
     );
@@ -230,21 +315,41 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
         // for "quit" or "stream" positional arguments anywhere.
         for (int i = 0; i < posArgs.size(); i++) {
             QString action = posArgs.at(i).toLower();
-            if (action == "quit") {
-                return QuitRequested;
-            } else if (action == "stream") {
-                return StreamRequested;
-            } else if (action == "pair") {
-                return PairRequested;
-            } else if (action == "list") {
-                return ListRequested;
-            } else if (action == "fruc-offline") {
-                return FrucOfflineRequested;
+            for (const ActionEntry& entry : k_Actions) {
+                if (action == QLatin1String(entry.name)) {
+                    return entry.result;
+                }
             }
         }
 
         parser.showError(QString("Invalid action"));
     }
+}
+
+const char* GlobalCommandLineParser::earlyProbeAction(int argc, char* argv[])
+{
+    // 對齊 parse()：QCommandLineParser 把「-」開頭的字當選項（這個階段不認得的選項後面
+    // 接的值會被當成位置參數，這裡同樣當成候選）、「--」之後全部是位置參數；位置參數
+    // 依序比對已知動作（不分大小寫），第一個命中的決定動作。
+    bool afterDoubleDash = false;
+    for (int i = 1; i < argc; i++) {
+        const char* arg = argv[i];
+        if (arg == nullptr) {
+            continue;
+        }
+        if (!afterDoubleDash && arg[0] == '-' && arg[1] != '\0') {
+            if (strcmp(arg, "--") == 0) {
+                afterDoubleDash = true;
+            }
+            continue;
+        }
+        for (const ActionEntry& entry : k_Actions) {
+            if (qstricmp(arg, entry.name) == 0) {
+                return entry.earlyProbe ? entry.name : nullptr;
+            }
+        }
+    }
+    return nullptr;
 }
 
 QuitCommandLineParser::QuitCommandLineParser()
@@ -477,6 +582,14 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
     parser.addValueOption("vr-inject-loss", "(dev) N: inject a VR LOSS report every N seconds");
 
+    // VipleStream 2.0 §SF-PROBE（M2a）dev-only：把 decoder 實際收到的 bitstream 錄成
+    // decode-bench 的樣本。值只存在 BitstreamDump 的行程內全域，絕不進 StreamingPreferences
+    // （CLI 覆寫會在 session 開始時被 save() 寫回 QSettings，下次一般啟動就會一直錄）。
+    parser.addOption(QCommandLineOption("dump-bitstream",
+                                        "(dev) Record the bitstream fed to the video decoder to <path> "
+                                        "(Annex-B for H.264/HEVC, IVF for AV1) for decode-bench.",
+                                        "path"));
+
     if (!parser.parse(args)) {
         parser.showError(parser.errorText());
     }
@@ -704,6 +817,15 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         parser.showError("App not provided");
     }
     m_AppName = parser.positionalArguments().at(2);
+
+    // §SF-PROBE（M2a）：參數都驗過、確定要串流才開啟 dump（session 開始前）。
+    if (parser.isSet("dump-bitstream")) {
+        const QString dumpPath = parser.value("dump-bitstream");
+        if (dumpPath.isEmpty()) {
+            parser.showError("dump-bitstream requires a file path");
+        }
+        BitstreamDump::setPath(QFileInfo(dumpPath).absoluteFilePath());
+    }
 }
 
 QString StreamCommandLineParser::getHost() const
@@ -829,3 +951,276 @@ QString FrucOfflineCommandLineParser::getInputDir() const { return m_InputDir; }
 QString FrucOfflineCommandLineParser::getDumpDir() const { return m_DumpDir; }
 int FrucOfflineCommandLineParser::getWidth() const { return m_Width; }
 int FrucOfflineCommandLineParser::getHeight() const { return m_Height; }
+
+// §SF-PROBE（M2a）：--json 的共用處理（相對路徑以目前目錄解析成絕對路徑，結尾印的就是實際位置）。
+static QString getJsonPathOption(const CommandLineParser& parser)
+{
+    if (!parser.isSet("json")) {
+        return QString();
+    }
+    const QString path = parser.value("json");
+    if (path.isEmpty()) {
+        parser.showError("json requires a file path");
+    }
+    return QFileInfo(path).absoluteFilePath();
+}
+
+// VipleStream 2.0 §SF-PROBE（M2a）— xr-probe
+void XrProbeCommandLineParser::parse(const QStringList &args)
+{
+    CommandLineParser parser;
+    parser.setupCommonOptions();
+    parser.setApplicationDescription(
+        "\n"
+        "Probe the OpenXR runtime at the instance/system level (Steam Frame bring-up).\n"
+        "Loads the OpenXR loader, creates an XrInstance, queries extensions, the HMD\n"
+        "system, the stereo view configuration and the Vulkan requirements, then\n"
+        "destroys the instance. A summary goes to stdout; the full result is written\n"
+        "as JSON (its path is printed on stderr).\n"
+        "\n"
+        "Exit codes: 0 runtime loaded, 1 command line error, 10 not built with OpenXR,\n"
+        "12 --session needs a later milestone, 13 no usable runtime, 14 runtime error,\n"
+        "15 JSON write failed."
+    );
+    parser.addPositionalArgument("xr-probe", "probe the OpenXR runtime");
+    parser.addOption(QCommandLineOption("session",
+                                        "Also run the session-level checks (not available in this build; exits with 12)."));
+    parser.addOption(QCommandLineOption("xr-runtime-json",
+                                        "(dev) Load the runtime from this manifest (sets XR_RUNTIME_JSON inside this process only).",
+                                        "path"));
+    parser.addOption(QCommandLineOption("loader-debug",
+                                        "(dev) Print OpenXR loader diagnostics to stderr (XR_LOADER_DEBUG=all inside this process only)."));
+    parser.addOption(QCommandLineOption("json",
+                                        "Write the JSON report to <path> (default: probe-xr-probe-<ms>-<pid>.json in the log directory).",
+                                        "path"));
+
+    if (!parser.parse(args)) {
+        parser.showError(parser.errorText());
+    }
+
+    parser.handleUnknownOptions();
+
+    // 指定 --version 或 --help 時，這個呼叫會直接結束行程、不會返回
+    parser.handleHelpAndVersionOptions();
+
+    rejectExtraPositionals(parser, 1);
+
+    m_Options.session = parser.isSet("session");
+    m_Options.loaderDebug = parser.isSet("loader-debug");
+    if (parser.isSet("xr-runtime-json")) {
+        const QString path = parser.value("xr-runtime-json");
+        if (path.isEmpty()) {
+            parser.showError("xr-runtime-json requires a file path");
+        }
+        m_Options.runtimeJson = QFileInfo(path).absoluteFilePath();
+    }
+    m_Options.jsonPath = getJsonPathOption(parser);
+}
+
+const XrProbeOptions& XrProbeCommandLineParser::options() const
+{
+    return m_Options;
+}
+
+// VipleStream 2.0 §SF-PROBE（M2a）— v4l2-probe
+void V4l2ProbeCommandLineParser::parse(const QStringList &args)
+{
+    CommandLineParser parser;
+    parser.setupCommonOptions();
+    parser.setApplicationDescription(
+        "\n"
+        "Probe V4L2 stateful (memory-to-memory) video decoders (Steam Frame bring-up).\n"
+        "Lists /dev/video* and, for every m2m decoder, its formats, frame sizes,\n"
+        "profile/level controls and minimum buffer counts. --header-test submits a\n"
+        "720p test frame, reads the capture format after SOURCE_CHANGE and waits for\n"
+        "the first decoded frame (this briefly uses the hardware decoder). A summary\n"
+        "goes to stdout; the full result is written as JSON (its path is printed on\n"
+        "stderr).\n"
+        "\n"
+        "Exit codes: 0 at least one m2m decoder, 1 command line error, 10 not a Linux\n"
+        "build, 13 no m2m decoder visible, 14 runtime error, 15 JSON write failed."
+    );
+    parser.addPositionalArgument("v4l2-probe", "probe V4L2 decoders");
+    parser.addOption(QCommandLineOption("device",
+                                        "Probe only this device node, e.g. /dev/video0 (default: every /dev/video*).",
+                                        "path"));
+    parser.addChoiceOption("header-test", "codec(s) for the header test", {"h264", "hevc", "all"});
+    parser.addOption(QCommandLineOption("expbuf",
+                                        "During --header-test, also test VIDIOC_EXPBUF on the capture buffers."));
+    parser.addOption(QCommandLineOption("json",
+                                        "Write the JSON report to <path> (default: probe-v4l2-probe-<ms>-<pid>.json in the log directory).",
+                                        "path"));
+
+    if (!parser.parse(args)) {
+        parser.showError(parser.errorText());
+    }
+
+    parser.handleUnknownOptions();
+
+    // 指定 --version 或 --help 時，這個呼叫會直接結束行程、不會返回
+    parser.handleHelpAndVersionOptions();
+
+    rejectExtraPositionals(parser, 1);
+
+    if (parser.isSet("device")) {
+        m_Options.device = parser.value("device");
+        if (m_Options.device.isEmpty()) {
+            parser.showError("device requires a device node path");
+        }
+    }
+    if (parser.isSet("header-test")) {
+        m_Options.headerTest = parser.getChoiceOptionValue("header-test").toLower();
+    }
+    m_Options.expbuf = parser.isSet("expbuf");
+    if (m_Options.expbuf && m_Options.headerTest.isEmpty()) {
+        parser.showError("expbuf only applies together with --header-test");
+    }
+    m_Options.jsonPath = getJsonPathOption(parser);
+}
+
+const V4l2ProbeOptions& V4l2ProbeCommandLineParser::options() const
+{
+    return m_Options;
+}
+
+// VipleStream 2.0 §SF-PROBE（M2a）— decode-bench
+void DecodeBenchCommandLineParser::parse(const QStringList &args)
+{
+    CommandLineParser parser;
+    parser.setupCommonOptions();
+    parser.setApplicationDescription(
+        "\n"
+        "Benchmark a video decoder on a recorded bitstream (dev; Steam Frame PoC-3/3b/3c/4).\n"
+        "The decoder is configured exactly like a streaming session. Record samples with\n"
+        "\"stream --dump-bitstream <path>\". A summary goes to stdout; the full result is\n"
+        "written as JSON (its path is printed on stderr).\n"
+        "\n"
+        "Exit codes: 0 done, 1 command line error, 10 not built with FFmpeg,\n"
+        "11 input file unreadable or malformed, 13 the requested decoder cannot be\n"
+        "opened, 14 decoding failed, 15 JSON write failed."
+    );
+    parser.addPositionalArgument("decode-bench", "benchmark a video decoder");
+    parser.addPositionalArgument("file",
+                                 "Annex-B H.264/HEVC (.h264 .264 .h265 .265 .hevc) or AV1 IVF (.ivf) bitstream",
+                                 "<file>");
+    // h265 是 hevc 的別名（decode-bench 內部會正規化）
+    parser.addChoiceOption("codec", "bitstream codec (default auto = from the file extension)",
+                           {"auto", "h264", "hevc", "h265", "av1"});
+    parser.addOption(QCommandLineOption("decoder",
+                                        "Decoder: auto (default), sw, an FFmpeg decoder name such as hevc_v4l2m2m, "
+                                        "or hwaccel:<type> such as hwaccel:vaapi.",
+                                        "decoder"));
+    parser.addChoiceOption("out", "output frames (default drm_prime; sw = system memory)",
+                           {"drm_prime", "sw"});
+    parser.addOption(QCommandLineOption("fps",
+                                        "Submit input at N frames per second like a stream (default 0: as fast as possible).",
+                                        "N"));
+    parser.addOption(QCommandLineOption("frames",
+                                        "Decode at most N frames per pass (default 0: the whole file).",
+                                        "N"));
+    parser.addOption(QCommandLineOption("loop", "Decode the file N times (default 1).", "N"));
+    parser.addOption(QCommandLineOption("warmup",
+                                        "Leave the first N frames out of the statistics (default 0).",
+                                        "N"));
+    parser.addOption(QCommandLineOption("capture-buffers",
+                                        "v4l2m2m capture buffer count (default: same as a streaming session).",
+                                        "N"));
+    parser.addOption(QCommandLineOption("output-buffers",
+                                        "v4l2m2m output buffer count (default: same as a streaming session).",
+                                        "N"));
+    parser.addOption(QCommandLineOption("hold",
+                                        "Keep every decoded frame referenced for N more frames (renderer/GPU hold).",
+                                        "N"));
+    // 單數寫法（--drop-frame／--corrupt-frame）也收：decode-bench 的交接說明與文件草稿用的是單數。
+    // 幀號是檔內的第 k 幀（0 起算），--loop 時每一輪都套用（decodebench.cpp）。
+    parser.addOption(QCommandLineOption(QStringList{QStringLiteral("drop-frames"), QStringLiteral("drop-frame")},
+                                        "Do not submit these frame numbers (numbered within the file, applied on every loop), "
+                                        "e.g. 100,200-204 (recovery test).",
+                                        "list"));
+    parser.addOption(QCommandLineOption("drop-every", "Drop every Nth frame (recovery test).", "N"));
+    parser.addOption(QCommandLineOption(QStringList{QStringLiteral("corrupt-frames"), QStringLiteral("corrupt-frame")},
+                                        "Flip bytes in the middle of these frames before submitting them, e.g. 100,300.",
+                                        "list"));
+    parser.addOption(QCommandLineOption("flush-on-error", "Call avcodec_flush_buffers() after a decode error."));
+    parser.addOption(QCommandLineOption("compare-sw",
+                                        "Also decode the file with the software decoder and report per-frame luma PSNR."));
+    parser.addOption(QCommandLineOption("map-vulkan",
+                                        "Map every frame into Vulkan through libplacebo and time it (libplacebo builds only)."));
+    parser.addOption(QCommandLineOption("verbose", "Raise FFmpeg logging to debug."));
+    parser.addOption(QCommandLineOption("json",
+                                        "Write the JSON report to <path> (default: probe-decode-bench-<ms>-<pid>.json in the log directory).",
+                                        "path"));
+
+    if (!parser.parse(args)) {
+        parser.showError(parser.errorText());
+    }
+
+    parser.handleUnknownOptions();
+
+    // 指定 --version 或 --help 時，這個呼叫會直接結束行程、不會返回
+    parser.handleHelpAndVersionOptions();
+
+    const QStringList posArgs = parser.positionalArguments();
+    if (posArgs.size() < 2) {
+        parser.showError("Input file not provided");
+    }
+    rejectExtraPositionals(parser, 2);
+    m_Options.file = QFileInfo(posArgs.at(1)).absoluteFilePath();
+
+    if (parser.isSet("codec")) {
+        m_Options.codec = parser.getChoiceOptionValue("codec").toLower();
+    }
+    if (parser.isSet("decoder")) {
+        m_Options.decoder = parser.value("decoder").trimmed();
+        if (m_Options.decoder.isEmpty()) {
+            parser.showError("decoder requires a value");
+        }
+    }
+    if (parser.isSet("out")) {
+        m_Options.out = parser.getChoiceOptionValue("out").toLower();
+    }
+    if (parser.isSet("fps")) {
+        m_Options.fps = getBoundedIntOption(parser, "fps", 0, 1000);
+    }
+    if (parser.isSet("frames")) {
+        m_Options.frames = getBoundedIntOption(parser, "frames", 0, 100000000);
+    }
+    if (parser.isSet("loop")) {
+        m_Options.loop = getBoundedIntOption(parser, "loop", 1, 100000);
+    }
+    if (parser.isSet("warmup")) {
+        m_Options.warmup = getBoundedIntOption(parser, "warmup", 0, 100000000);
+    }
+    // FFmpeg v4l2m2m 的 num_capture_buffers／num_output_buffers 下限都是 2。
+    if (parser.isSet("capture-buffers")) {
+        m_Options.captureBuffers = getBoundedIntOption(parser, "capture-buffers", 2, 256);
+    }
+    if (parser.isSet("output-buffers")) {
+        m_Options.outputBuffers = getBoundedIntOption(parser, "output-buffers", 2, 256);
+    }
+    if (parser.isSet("hold")) {
+        m_Options.hold = getBoundedIntOption(parser, "hold", 0, 64);
+    }
+    if (parser.isSet("drop-frames") && !parseFrameList(parser.value("drop-frames"), m_Options.dropFrames)) {
+        parser.showError(QString("Invalid drop-frames list: %1 (expected e.g. 100,200-204)").arg(parser.value("drop-frames")));
+    }
+    if (parser.isSet("drop-every")) {
+        m_Options.dropEvery = getBoundedIntOption(parser, "drop-every", 0, 100000000);
+        if (m_Options.dropEvery == 1) {
+            parser.showError("drop-every must be 0 (off) or at least 2");
+        }
+    }
+    if (parser.isSet("corrupt-frames") && !parseFrameList(parser.value("corrupt-frames"), m_Options.corruptFrames)) {
+        parser.showError(QString("Invalid corrupt-frames list: %1 (expected e.g. 100,300)").arg(parser.value("corrupt-frames")));
+    }
+    m_Options.flushOnError = parser.isSet("flush-on-error");
+    m_Options.compareSw = parser.isSet("compare-sw");
+    m_Options.mapVulkan = parser.isSet("map-vulkan");
+    m_Options.verbose = parser.isSet("verbose");
+    m_Options.jsonPath = getJsonPathOption(parser);
+}
+
+const DecodeBenchOptions& DecodeBenchCommandLineParser::options() const
+{
+    return m_Options;
+}

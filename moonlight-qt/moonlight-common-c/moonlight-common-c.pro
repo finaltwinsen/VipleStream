@@ -104,7 +104,8 @@ CONFIG(debug, debug|release) {
 # VipleStream: MP-QUIC multipath transport (opt-in)
 # Enable with: qmake DEFINES+=VIPLE_MPQUIC
 contains(DEFINES, VIPLE_MPQUIC) {
-    PICOQUIC_DIR = $$PWD/../../Sunshine/third-party/picoquic/picoquic
+    # §M2a（F8）：可從 qmake 命令列覆寫（Flatpak sandbox 內的快照路徑）；預設值不變。
+    isEmpty(PICOQUIC_DIR): PICOQUIC_DIR = $$PWD/../../Sunshine/third-party/picoquic/picoquic
     SOURCES += \
         $$COMMON_C_DIR/src/PlatformNetIf.c \
         $$COMMON_C_DIR/src/QuicTransport.c

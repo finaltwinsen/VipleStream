@@ -19,6 +19,8 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 # (plvk.cpp/vkfruc.cpp include ncnn unconditionally). /usr/local is not writable
 # without sudo, so ncnn is installed to a user prefix and passed via NCNN_PREFIX
 # (app.pro honors it). LD_LIBRARY_PATH lets linuxdeploy's ldd find+bundle libncnn.so.
+# M2a 以前 app.pro 其實沒讀 NCNN_PREFIX，是靠 builder 上 /usr/local 的 symlink 才建得起來；
+# 現在 app.pro 真的用它（-I/-L 指到這個 prefix）。
 NCNN_PREFIX="${NCNN_PREFIX:-$HOME/.local/ncnn}"
 export LD_LIBRARY_PATH="$NCNN_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
@@ -110,6 +112,10 @@ pushd $INSTALLER_FOLDER
 export QML_SOURCES_PATHS="$SOURCE_ROOT/app/gui"
 export QMAKE=qmake6
 echo "  Bundling genuine SDL2: $SDL2_LIB"
+# Patch 5（M2a R2）：經 SSH 執行（沒有 Wayland／X11）時，--help／--version 由 main.cpp
+# 早期掃描改用 offscreen QPA，不再落到 EGLFS。linuxdeploy-plugin-qt 預設只部署
+# libqxcb.so，要明確多帶 offscreen 平台外掛，否則 AppImage 裡找不到它而 abort。
+EXTRA_PLATFORM_PLUGINS=libqoffscreen.so \
 linuxdeploy --appdir $DEPLOY_FOLDER \
     --desktop-file $DEPLOY_FOLDER/usr/share/applications/viplestream.desktop \
     --icon-file $SOURCE_ROOT/app/res/moonlight.svg \
