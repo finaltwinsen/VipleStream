@@ -17,14 +17,14 @@
 | 3 | `--socket=wayland` | Frame 的 gamescope 與 builder 的 GNOME 都是 Wayland | 無 | 同 Flathub |
 | 4 | `--socket=fallback-x11` | 沒有 Wayland 時才給 X11 socket（Xwayland-only 環境、舊桌面） | 有 Wayland 時不會暴露 X11 | 同 Flathub |
 | 5 | `--socket=pulseaudio` | 音訊輸出（PipeWire 的 pulse 相容層） | 可以錄音（pulse socket 的通病）；app 不錄音 | 同 Flathub |
-| 6 | `--device=all` | V4L2 m2m 解碼器 `/dev/video*`（PoC-3，L2 硬解的前提）、DRM render node（Vulkan／VAAPI）、`/dev/hidraw*`（§SC-HID 轉發 Steam Controller）、輸入裝置 | 範圍大，但 Flatpak 沒有 `--device=video`／`hidraw` 之類的細分可用；`--device=dri` 不含 `/dev/video*` | 同 Flathub；Frame 上沙箱內是否看得到 `/dev/video*` **UNVERIFIED**（PoC-0、G-PKG；`v4l2-probe` 直接回答） |
+| 6 | `--device=all` | V4L2 m2m 解碼器 `/dev/video*`（PoC-3，L2 硬解的前提）、DRM render node（Vulkan／VAAPI）、`/dev/hidraw*`（§SC-HID 轉發 Steam Controller）、輸入裝置 | 範圍大，但 Flatpak 沒有 `--device=video`／`hidraw` 之類的細分可用；`--device=dri` 不含 `/dev/video*` | 同 Flathub；**Frame 已驗證**（2026-09-28，PoC-0）：沙箱內 iris 解碼器 `/dev/video-dec0` 可用，SSH 與 Steam 啟動皆可。注意 `--device=all` **不含** host 的 `/dev/shm`（沙箱拿到私有的 `/dev/shm`，見 §6） |
 | 7 | `--talk-name=org.freedesktop.ScreenSaver` | 串流時抑制螢幕保護／休眠 | 無 | 同 Flathub |
-| 8 | `--filesystem=xdg-run/gamescope-0` | gamescope 的 Wayland socket 名叫 `gamescope-0`，不是 `wayland-*`，flatpak 不會自動沿用；α 在 gamescope（SteamVR dashboard overlay）內跑需要它 | 只暴露 gamescope 的 socket | 同 Flathub；Frame 上 socket 名稱 **UNVERIFIED**（PoC-7） |
-| 9 | `--filesystem=host-os:ro` | gamescope WSI layer：JSON 的 `library_path` 指向 `/var/run/host/usr/lib/libVkLayer_FROG_gamescope_wsi_<arch>.so`，要 host 的 `/usr` 才讀得到（Steam Deck 先例，Flathub `7d91dc21`） | 唯讀暴露 host 的 `/usr`、`/lib*` 等系統檔（不含 `/etc`、不含家目錄）；沒有個資，但讓沙箱能讀 host 的函式庫版本資訊 | 同 Flathub；**Frame 上沒有這個 layer 就拿掉**（PoC-7）。aarch64 版 layer 是否存在、檔名是否是 `_aarch64` **UNVERIFIED** |
-| 10 | `--filesystem=xdg-config/openxr:ro` | SteamVR 設 active runtime 時寫 `~/.config/openxr/1/active_runtime.json` | **OpenXR loader 自己看不到它**：Flatpak 把 `XDG_CONFIG_HOME` 改成 `~/.var/app/<id>/config`，而這條權限是把 host 的 `~/.config/openxr` 掛在沙箱內**同一路徑**。所以由 `XrRuntimeJson::resolveActive()` 自己查 `$HOME/.config/openxr/1/…`，找到後在 `xrCreateInstance` 前（行程內）設 `XR_RUNTIME_JSON`，來源記進 xr-probe 的 JSON | 新增；Frame 上路徑 **UNVERIFIED**（PoC-F） |
-| 11 | `--filesystem=xdg-config/openvr:ro` | SteamVR 的 vrclient 讀 `~/.config/openvr/openvrpaths.vrpath` 找 runtime 位置 | 唯讀；內容是路徑清單 | 新增；是否真的需要 **UNVERIFIED**，PoC-F 後收窄 |
-| 12 | `--filesystem=xdg-data/Steam/steamapps/common/SteamVR:ro` | SteamVR 的 OpenXR runtime JSON 與 `.so`（`library_path` 指向這裡） | 唯讀；只暴露 SteamVR 目錄，不是整個 Steam library | 新增；Frame 上的實際路徑（原生 Steam、另一個 library 資料夾、SteamOS 佈局）**UNVERIFIED**（PoC-F／PoC-F-pre） |
-| 13 | `--filesystem=~/.steam:ro` | `~/.steam/root`、`~/.steam/steam` 是指向 Steam 安裝位置的 symlink，SteamVR 與 vrclient 會經由它找路徑 | **會暴露 `~/.steam/registry.vdf`（含 Steam 帳號名）**；唯讀但仍是個資。**PoC-F 之後收窄**成實際需要的子路徑或拿掉 | 新增；**收窄** |
+| 8 | `--filesystem=xdg-run/gamescope-0` | gamescope 的 Wayland socket 名叫 `gamescope-0`，不是 `wayland-*`，flatpak 不會自動沿用；α 在 gamescope（SteamVR dashboard overlay）內跑需要它 | 只暴露 gamescope 的 socket | 同 Flathub；**Frame 已驗證**：socket 名稱是 `gamescope-0`（沒有 `wayland-0`）。Steam 啟動時 app 在 Xwayland（`DISPLAY=:1`）上，Vulkan 經 gamescope WSI 以 `GAMESCOPE_WAYLAND_DISPLAY=gamescope-0` 送畫面，所以仍需要這條 |
+| 9 | `--filesystem=host-os:ro` | gamescope WSI layer：JSON 的 `library_path` 指向 `/var/run/host/usr/lib/libVkLayer_FROG_gamescope_wsi_<arch>.so`，要 host 的 `/usr` 才讀得到（Steam Deck 先例，Flathub `7d91dc21`） | 唯讀暴露 host 的 `/usr`、`/lib*` 等系統檔（不含 `/etc`、不含家目錄）；沒有個資，但讓沙箱能讀 host 的函式庫版本資訊 | 同 Flathub；**Frame 的 host 有 aarch64 layer**（Day 0）。manifest 也自帶 `gamescope-wsi` 模組；串流時 WSI 生效（log `[Gamescope WSI] Made gamescope surface`）。這條是否仍必要（改用自帶 layer 即可）待 M3a 精簡時確認 |
+| 10 | `--filesystem=xdg-config/openxr:ro` | SteamVR 設 active runtime 時寫 `~/.config/openxr/1/active_runtime.json` | **OpenXR loader 自己看不到它**：Flatpak 把 `XDG_CONFIG_HOME` 改成 `~/.var/app/<id>/config`，而這條權限是把 host 的 `~/.config/openxr` 掛在沙箱內**同一路徑**。所以由 `XrRuntimeJson::resolveActive()` 自己查 `$HOME/.config/openxr/1/…`，找到後在 `xrCreateInstance` 前（行程內）設 `XR_RUNTIME_JSON`，來源記進 xr-probe 的 JSON | 新增；**Frame 已驗證**：`~/.config/openxr/1/active_runtime.json` 是指向 `/opt/steamvr/steamxr_linuxarm64.json` 的 symlink。Flatpak 1.15.8 會把 `xdg-config/openxr` **同時**掛到沙箱的 `XDG_CONFIG_HOME` 底下，loader 自己就找得到（上面「loader 看不到」的說法只適用舊版 flatpak）；但 symlink 目標要靠第 12 條的替代品 `/opt/steamvr` 才解得開 |
+| 11 | `--filesystem=xdg-config/openvr:ro` | SteamVR 的 vrclient 讀 `~/.config/openvr/openvrpaths.vrpath` 找 runtime 位置 | 唯讀；內容是路徑清單 | 新增；Frame 上內容是 `runtime: /opt/steamvr`、`config`、`log` 三個路徑，vrclient 會讀；保留 |
+| 12 | `--filesystem=xdg-data/Steam/steamapps/common/SteamVR:ro` | SteamVR 的 OpenXR runtime JSON 與 `.so`（`library_path` 指向這裡） | 唯讀；只暴露 SteamVR 目錄，不是整個 Steam library | 新增；**Frame 上路徑不對**：SteamOS（Frame）的 SteamVR 裝在 **`/opt/steamvr`**，這條在 Frame 上沒有作用。PoC-F 實測需要 `--filesystem=/opt/steamvr:ro`（見 §6）；桌面 Linux（S1／S3）仍可能用得到，M3a 決定包裝形態時一起定 |
+| 13 | `--filesystem=~/.steam:ro` | `~/.steam/root`、`~/.steam/steam` 是指向 Steam 安裝位置的 symlink，SteamVR 與 vrclient 會經由它找路徑 | **會暴露 `~/.steam/registry.vdf`（含 Steam 帳號名）**；唯讀但仍是個資。**PoC-F 之後收窄**成實際需要的子路徑或拿掉 | 新增；**收窄**：Frame 上 SteamVR 經 `openvrpaths.vrpath` 找到 `/opt/steamvr`，沒有用到 `~/.steam`；M3a 精簡時拿掉 |
 | 14 | `--env=LIBVA_DRIVER_NAME=` ＋ `--unset-env=LIBVA_DRIVER_NAME` | host 設的 VAAPI driver 名稱對 runtime 內的 Mesa／driver 不一定適用；清掉讓 libva 自己偵測。先設空再 unset 是為了相容舊版 flatpak（沒有 `--unset-env`） | 使用者想在 host 強制指定 VAAPI driver 時，要改用 `flatpak run --env=LIBVA_DRIVER_NAME=…` | 同 Flathub |
 | 15 | `--env=LIBVA_DRIVERS_PATH=` ＋ `--unset-env=LIBVA_DRIVERS_PATH` | host 的 driver 路徑在沙箱內不存在或 ABI 不合 | 同上 | 同 Flathub |
 
@@ -52,13 +52,13 @@
 ## 4. 已知風險
 
 1. **Qt 6.11 是新變數**：Windows（`C:\Qt\6.10.x`）與 builder（系統 Qt 6.10.2）都在 6.10。KDE runtime 6.11 是 Qt 6.11.2。出現 Qt 6.11 專屬的問題時，退路是 `runtime-version: '6.10'`（同為 freedesktop 25.08 基底、仍在維護）；manifest 與 `build-steamframe.sh` 的 `KDE_BRANCH` 一起改。
-2. **`~/.steam:ro` 暴露 `registry.vdf`**（第 13 條）。PoC-F 確認 SteamVR 實際需要哪些路徑後收窄。
-3. **gamescope WSI aarch64 layer UNVERIFIED**：SteamOS ARM 是否提供 `libVkLayer_FROG_gamescope_wsi_aarch64.so`、放在 `/usr/lib` 還是別處，都沒有證據。沒有時 Vulkan loader 只會略過（無害），但第 9 條 `host-os:ro` 就沒有存在理由，要拿掉。`frame-poc-collect.sh` 會列出 host 上的 layer 檔案。
-4. **OpenXR runtime 在 KDE runtime 沙箱內能不能載入**（R2）：SteamVR 的 runtime `.so` 依賴 Steam Runtime 的函式庫，和 KDE 6.11 runtime 的 glibc／libstdc++ 是否相容 **UNVERIFIED**。先用 PoC-F-pre（S3，`moonlight-qt/scripts/steamframe/s3/`）在 builder 上驗證機制，Frame 上由 `xr-probe` 回答（失敗時 JSON 內有 `dlopen` 的 `dlerror()`）。
+2. **`~/.steam:ro` 暴露 `registry.vdf`**（第 13 條）。Frame 上用不到（§6），M3a 拿掉。
+3. ~~gamescope WSI aarch64 layer UNVERIFIED~~（2026-09-28：Frame host 有這個 layer，app 的 WSI 生效）：SteamOS ARM 是否提供 `libVkLayer_FROG_gamescope_wsi_aarch64.so`、放在 `/usr/lib` 還是別處，都沒有證據。沒有時 Vulkan loader 只會略過（無害），但第 9 條 `host-os:ro` 就沒有存在理由，要拿掉。`frame-poc-collect.sh` 會列出 host 上的 layer 檔案。
+4. **OpenXR runtime 在 KDE runtime 沙箱內能不能載入**（R2）：**2026-09-28 Frame 實測：函式庫相容沒問題，卡在 IPC**（§6）。原本的說明：SteamVR 的 runtime `.so` 依賴 Steam Runtime 的函式庫，和 KDE 6.11 runtime 的 glibc／libstdc++ 是否相容 **UNVERIFIED**。先用 PoC-F-pre（S3，`moonlight-qt/scripts/steamframe/s3/`）在 builder 上驗證機制，Frame 上由 `xr-probe` 回答（失敗時 JSON 內有 `dlopen` 的 `dlerror()`）。
 5. **libplacebo 選 B（v7.360.1）**：沒有 `VK_KHR_internally_synchronized_queues`，所以不需要 Flathub 的 gamescope 補丁；但和 FFmpeg 9.0 的 libav helper 能不能編過 **UNVERIFIED**（S1 第一次建置時確認）。編不過就退回 A（Flathub 的 `4d82c689`＋補丁，補丁一定要帶，否則 gamescope 下 SIGABRT，見 moonlight-qt#1925／#1930）。
 6. **hardening 旗標**：`buildsystem: simple` 不會自動注入 SDK 的 CFLAGS／LDFLAGS；`build-viplestream.sh` 明確傳 `QMAKE_CFLAGS+=`／`QMAKE_CXXFLAGS+=`／`QMAKE_LFLAGS+=`。picoquic／picotls 的 CMake 會自己讀環境變數 `CFLAGS`。
 7. **appstream-compose: false**：省掉 appdata 的嚴格驗證（`<id>` 非 reverse-DNS 等）。上架 Flathub 時要打開並修 appdata。
-8. **`--device=all` 在 Frame 上的 uaccess**：SSH（Developer Mode）執行 `flatpak run` 時，`/dev/video*` 的權限是否因沒有 active seat 而不同 **UNVERIFIED**；`v4l2-probe` 開檔失敗時會記 errno、mode／gid 與 `getgroups()`。
+8. ~~`--device=all` 在 Frame 上的 uaccess~~（2026-09-28：SSH 下 `v4l2-probe`、decode-bench 都能開 `/dev/video-dec0`，帳號在 `video` 群組）：SSH（Developer Mode）執行 `flatpak run` 時，`/dev/video*` 的權限是否因沒有 active seat 而不同 **UNVERIFIED**；`v4l2-probe` 開檔失敗時會記 errno、mode／gid 與 `getgroups()`。
 
 ## 5. 測試時才加的權限（不進 manifest）
 
@@ -72,3 +72,28 @@ flatpak run --filesystem=xdg-run/monado_comp_ipc io.github.finaltwinsen.VipleStr
 # PoC-F-pre：SteamVR 不在預設佈局時（例如 Flatpak 版 Steam）
 flatpak run --filesystem=<SteamVR 目錄>:ro io.github.finaltwinsen.VipleStream xr-probe --xr-runtime-json <runtime JSON>
 ```
+
+## 6. Frame 實測（2026-09-28）：沙箱內的 OpenXR（PoC-F）
+
+`xr-probe` 在 Frame（SteamOS 0.3.0、SteamVR 2.17.10、flatpak 1.15.8）上逐步加權限的結果：
+
+| 權限組合 | 結果 |
+|---|---|
+| manifest 現有的 finish-args | `active_runtime.json` 的 symlink 在沙箱內斷掉（`/opt/steamvr` 不存在）→ `XR_ERROR_RUNTIME_UNAVAILABLE` |
+| ＋`--filesystem=/opt/steamvr:ro` | loader 載入 `vrclient.so` 成功，`xrCreateInstance` 回 `XR_ERROR_RUNTIME_FAILURE`：沙箱的 `/dev/shm` 是空的，vrclient 連不上 vrserver 的共享記憶體 |
+| ＋`--device=shm` | 同上。vrclient 還會用 `/tmp/.steam-sem-names`、`/tmp/SteamVR-IPCControlFile-*`，沙箱的 `/tmp` 是私有的 |
+| ＋`--filesystem=/tmp` | `xrCreateInstance` 成功（SteamVR/OpenXR 2.17.10，48 個擴充：`vulkan_enable2`、`convert_timespec_time`、`EXT_eye_gaze_interaction`、`FB_display_refresh_rate`、`VALVE_frame_controller_interaction`、`EXT_local_floor`、`FB_space_warp`、foveation 等），`xrGetSystem` 回 `FORM_FACTOR_UNAVAILABLE`（頭盔待機） |
+
+**事故**：最後一組退出後，vrserver 反覆出現 `ipcposix: clearing futex due to timeout`（鎖擁有者是我們的執行緒），pose 迴圈
+卡 4 s，`Failed Watchdog timeout in thread Web in ProcessMessages … Aborting` → SteamVR 連同 Steam 重啟約 20 s。
+vrserver log 另有 `Old connection found for pid …`。判讀：**Flatpak 一定會開獨立的 PID namespace**（沒有任何 finish-arg
+能關），SteamVR 的 client IPC 以 PID（`getpid`、`SO_PEERCRED`、`/proc/self`）辨識行程，兩端看到的 PID 不一致。Chromium 在
+Frame 上也碰到同一類問題（utzcoz/chromium-webxr-linux#7）。
+
+結論與後續：
+- α（gamescope overlay，不用 OpenXR）不受影響。
+- β／rc 的 OpenXR 不能直接靠 P1 Flatpak；M3a 開頭用「同一支程式、隔 PID 與不隔 PID 的 bwrap」對照實驗確認 PID namespace 是
+  主因，再決定 P2（Steam Linux Runtime／pressure-vessel，不隔 PID）或其他形態。`/opt/steamvr:ro`、`--device=shm`、`/tmp`
+  這三條先**不進** manifest。
+- 在 Frame 上跑任何會連 SteamVR 的程式前，先通知使用者（會打斷他的 VR session）。
+- `xr-probe` 待修：`xrGetSystem` 遇到 `FORM_FACTOR_UNAVAILABLE` 依規格重試數秒，退出前給 runtime 收尾時間。

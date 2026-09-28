@@ -13,6 +13,22 @@
 // - 1 frame for deferred free
 #define PACER_MAX_OUTSTANDING_FRAMES (2 + 1 + 1)
 
+// §SF-FREEZE：render 執行緒目前在做什麼、從何時開始（ffmpeg.cpp 的凍結 watchdog 讀取）。
+// 只是診斷用的 relaxed atomic，不參與任何同步。
+namespace FreezeDiag {
+enum RenderPhase : int {
+    RP_IDLE = 0,
+    RP_WAIT_TO_RENDER = 1,   // renderer->waitToRender()（PlVk：swap_buffers／start_frame）
+    RP_WAIT_QUEUE = 2,       // 等 render queue 有幀
+    RP_RENDER = 3,           // renderer->renderFrame()
+};
+void setRenderPhase(int phase);
+int renderPhase();
+uint64_t renderPhaseSinceUs();
+int renderQueueDepth();
+const char* renderPhaseName(int phase);
+}
+
 class IVsyncSource {
 public:
     virtual ~IVsyncSource() {}

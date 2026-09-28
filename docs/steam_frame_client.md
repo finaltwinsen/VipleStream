@@ -729,6 +729,46 @@ bash ~/frame-poc-collect.sh --with-app-probes --samples ~/samples
 
 - 測試產物只用 scp 在機器之間直傳，不上雲。
 
+### 7.4 Day 0／Day 1 實機結果（2026-09-28）
+
+| 項目 | 結果 |
+|---|---|
+| 平台 | SteamOS 0.3.0（variant vr）、kernel 6.18 aarch64、帳號 `steamos`（群組 video、render、input）；Turnip Adreno 750（Mesa 26.x）；gamescope 3.16.28，socket `gamescope-0`；面板 4320×2160，SteamVR 預設 120 Hz（另有 108／96／90／80／72） |
+| PoC-0 | **通過**。iris stateful 解碼器 `/dev/video-dec0`（→ video22），沙箱內（`--device=all`）可用。H.264（到 level 6.0）、HEVC、VP9；**沒有 AV1**（L1 的 AV1 選項在 Frame 上不存在）。capture 格式 NV12、NV21、Q08C（UBWC）、AB24。編碼器在 `/dev/video-enc0` |
+| decode-bench（`hevc_v4l2m2m`，`--fps 90`） | 輸出 DRM_PRIME、線性 NV12（modifier 0）。VR 3456×1728：p50 4.50、p95 4.96、**p99 5.60 ms**、0 錯誤、`ptsMismatch=0`（G-rc 門檻 < 11 ms；靜態桌面樣本）。1080p：p99 約 3.2 ms。軟體解碼 3456×1728 只有 49 fps，PCVR 一定要硬解 |
+| v4l2-probe header-test | H.264／HEVC `out=immediate`，首幀約 1.6–1.8 ms，EXPBUF 可用 |
+| iris 對破損的反應（PoC-3b 一部分） | 掉參考幀、送破損幀、連發 IDR（最密 0.2 s）、扣住 8/10 張 capture buffer：iris 只把受影響的幀標 `errFlag`、繼續出幀，**從不卡住**。唯一會卡的是參數集改變的 IDR（§7.5） |
+| PoC-6 Wi-Fi | 6 GHz、160 MHz、約 −67 dBm、省電開啟。5 pps RTT p50 8.1／p95 44 ms（省電）；180 pps p50 2.67／p95 3.76／p99 6.22 ms、0% loss。串流時丟幀率變動很大（0.2%～4.6%），戴著頭盔時明顯變差 |
+| PoC-F | 見 `moonlight-qt/scripts/steamframe/flatpak/finish-args.md` §6：函式庫相容，但 Flatpak 的 PID namespace 讓 SteamVR IPC 出錯，**曾導致 Frame 的 SteamVR 重啟** |
+| α 啟動路徑 | 用 `steamos-add-to-steam <可執行檔>` 加成非 Steam 遊戲，由 Steam 啟動：app 跑在 Xwayland（`DISPLAY=:1`），Vulkan 走 gamescope WSI，畫面是 SteamVR dashboard 的 `valve.steam.desktopgame.<appid>` overlay。從 SSH 以 `steam steam://rungameid/<gameid>` 可觸發同一路徑 |
+| PlVk 前端 | 修正前 `pl_map_avframe_ex()` 失敗（iris 的 DRM_PRIME 是單一 layer、兩個平面的 NV12，libplacebo 只吃每平面一個 layer），退回 SDL/OpenGL。§SF-DRMSPLIT 改寫成 R8＋GR88 後 `frontend=PlVk`，log 見 `log_tags.md` |
+| client log 位置 | `~/.var/app/<app-id>/cache/VipleStream/VipleStream/logs/VipleStream-<時間>.log` |
+
+### 7.5 G-α 凍結根因（2026-09-28）
+
+**現象**：串流幾秒到十幾秒後畫面定格，之後收到 SIGTERM 也結束不了。`[VIPLE-FREEZE]` 顯示
+`dec=submitPacket …、in=out、liveFrames=1、render=waitQueue`：解碼執行緒卡在 `avcodec_send_packet` 內的 V4L2 poll，
+app 沒有扣住任何 capture buffer。另一種結局是 `avcodec_receive_frame() failed: End of file` 連續 20 次後重置 decoder。
+
+**根因**：
+1. Wi-Fi 掉包讓 host 的 ABR 降碼（reset＋IDR）。
+2. Sunshine 的 NVENC 把 level／tier 交給自動選擇，降碼後在下一個 IDR 依新碼率重選：實測 HEVC level 4.1 從 26 Mbps 的
+   **High tier 變成 18 Mbps 的 Main tier**（Main tier 上限 20 Mbps），VPS／SPS 的 profile_tier_level 一個位元組改變。
+3. iris 看到參數集改變就發 `V4L2_EVENT_SOURCE_CHANGE`。FFmpeg v4l2m2m（`v4l2_handle_event`）在解析度沒變時只送
+   `V4L2_DEC_CMD_START`，iris 卻要 capture queue 重新 STREAMON；兩邊互等。
+
+戴頭盔時掉包多、ABR 常降到 20 Mbps 以下，所以看起來「只在頭盔顯示中發生」；頭盔待機時也能重現。用
+`stream --dump-bitstream` 錄下凍結前的 bitstream，`decode-bench` 重播必定卡住（凍結前的 IDR tier 位元翻轉）。
+
+**修法**（兩層）：
+- server：`nvenc_base.cpp` 的 `pin_level_for_reconfigure()` 在初始化後讀回 NVENC 實際寫出的 SPS，把 level（HEVC 另加
+  tier）固定進 ABR reconfigure 用的設定，整個 session 的參數集不再改變。
+- client：`ffmpeg.cpp` §SF-PARAMSETS，v4l2m2m decoder 遇到參數集改變的 IDR 時不餵進舊實例，改成重建 decoder 再要 IDR
+  （對上 vanilla Sunshine 或其他會改參數集的 host 也不會卡死）。
+
+**另外記下的**：Linux 上的 `[VIPLE-INPUT-STALL]` 是誤報（只有 Windows 查真的輸入，非 Windows 一律當作有輸入，PlVk 在
+Pacer 執行緒繪製時主迴圈閒置就會被記）。
+
 ---
 
 ## 8. S3／PoC-F-pre（延到 M3a 開頭）
@@ -754,17 +794,17 @@ PoC-F 用同一個 `xr-probe` 回答後半。）做法是 `<builder>` 上隔離�
 
 1. **Qt 6.11 是新變數**（Windows 與 builder 目前都在 6.10.x）。出現 Qt 6.11 專屬問題時退回 `runtime-version: '6.10'`
    （同為 freedesktop 25.08 基底、仍在維護）；manifest 與 `build-steamframe.sh` 的 `KDE_BRANCH` 要一起改。
-2. **gamescope WSI 的 aarch64 layer UNVERIFIED**：SteamOS ARM 是否提供 `libVkLayer_FROG_gamescope_wsi_aarch64.so`、放在哪裡，
+2. ~~gamescope WSI 的 aarch64 layer UNVERIFIED~~（2026-09-28：Frame host 有這個 layer，串流時 WSI 生效）：SteamOS ARM 是否提供 `libVkLayer_FROG_gamescope_wsi_aarch64.so`、放在哪裡，
    都沒有證據。沒有時 Vulkan loader 只會略過（無害），但 `--filesystem=host-os:ro` 就沒有存在理由，要拿掉。Day 0 會列出
    host 上的 layer 檔案。
-3. **`--filesystem=~/.steam:ro` 會暴露 `~/.steam/registry.vdf`**（含 Steam 帳號名）。PoC-F 確認 SteamVR 實際需要的路徑後收窄。
-4. **沙箱內的 OpenXR loader 看不到 host 的 `~/.config/openxr`**：由 `XrRuntimeJson` 解析 host 路徑，在行程內設
+3. **`--filesystem=~/.steam:ro` 會暴露 `~/.steam/registry.vdf`**（含 Steam 帳號名）。Frame 上用不到（SteamVR 在 `/opt/steamvr`），M3a 拿掉。
+4. **沙箱內的 OpenXR（R2）**：2026-09-28 Frame 實測，函式庫相容，但 Flatpak 的 PID namespace 讓 SteamVR IPC 出錯（§7.4、finish-args.md §6），β／rc 的包裝形態在 M3a 開頭決定。原本的說明——沙箱內的 OpenXR loader 看不到 host 的 `~/.config/openxr`：由 `XrRuntimeJson` 解析 host 路徑，在行程內設
    `XR_RUNTIME_JSON`（§6.3）。SteamVR runtime 的 `.so` 依賴 Steam Runtime 的函式庫，和 KDE runtime 的 glibc／libstdc++
    是否相容 **UNVERIFIED**（PoC-F-pre、PoC-F）。
 5. **libplacebo 選 B（v7.360.1）** 和 FFmpeg 9 的 libav helper 能不能編過 UNVERIFIED；不行就退回 A（補丁一定要帶，否則
    gamescope 下 SIGABRT）。
 6. **qemu 建置時間**（G-BUILD，§4）：超標時 U7 提前。
-7. **`--device=all` 在 SSH 下的 uaccess**：Developer Mode 經 SSH 跑 `flatpak run` 時，`/dev/video*` 權限是否因為沒有
+7. ~~`--device=all` 在 SSH 下的 uaccess~~（2026-09-28：SSH 下可開 `/dev/video-dec0`）：Developer Mode 經 SSH 跑 `flatpak run` 時，`/dev/video*` 權限是否因為沒有
    active seat 而不同 UNVERIFIED；`v4l2-probe` 開檔失敗時會記下判讀所需的資訊（§6.4）。
 8. **release 產物的 `/app/manifest.json` 會跟著 `.flatpak` 發佈**：主 repo 來源已改成一律寫公開 URL，還沒 push 時產物
    命名 `-unpublished`（§3.2）。風險剩在人為操作：`-unpublished` 的 bundle 被改名上傳，或發佈前沒用 §3.2 的指令驗

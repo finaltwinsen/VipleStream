@@ -13,6 +13,8 @@
 
 #include <SDL_syswm.h>
 
+#include <atomic>
+
 // Limit the number of queued frames to prevent excessive memory consumption
 // if the V-Sync source or renderer is blocked for a while. It's important
 // that the sum of all queued frames between both pacing and rendering queues
@@ -30,6 +32,43 @@ static_assert(PACER_MAX_OUTSTANDING_FRAMES == MAX_QUEUED_FRAMES + 2,
 // V-sync happens.
 // [Reduced from 3→2ms: 1ms closer to vsync deadline]
 #define TIMER_SLACK_MS 2
+
+namespace FreezeDiag {
+static std::atomic<int> s_RenderPhase {RP_IDLE};
+static std::atomic<uint64_t> s_RenderPhaseSinceUs {0};
+static std::atomic<int> s_RenderQueueDepth {0};
+
+void setRenderPhase(int phase)
+{
+    s_RenderPhase.store(phase, std::memory_order_relaxed);
+    s_RenderPhaseSinceUs.store(LiGetMicroseconds(), std::memory_order_relaxed);
+}
+
+int renderPhase()
+{
+    return s_RenderPhase.load(std::memory_order_relaxed);
+}
+
+uint64_t renderPhaseSinceUs()
+{
+    return s_RenderPhaseSinceUs.load(std::memory_order_relaxed);
+}
+
+int renderQueueDepth()
+{
+    return s_RenderQueueDepth.load(std::memory_order_relaxed);
+}
+
+const char* renderPhaseName(int phase)
+{
+    switch (phase) {
+    case RP_WAIT_TO_RENDER: return "waitToRender";
+    case RP_WAIT_QUEUE: return "waitQueue";
+    case RP_RENDER: return "renderFrame";
+    default: return "idle";
+    }
+}
+}
 
 Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
     m_RenderThread(nullptr),
@@ -81,6 +120,7 @@ Pacer::~Pacer()
         av_frame_free(&frame);
     }
     av_frame_free(&m_DeferredFreeFrame);
+    FreezeDiag::s_RenderQueueDepth.store(0, std::memory_order_relaxed);
 }
 
 void Pacer::renderOnMainThread()
@@ -94,9 +134,12 @@ void Pacer::renderOnMainThread()
 
     if (!m_RenderQueue.isEmpty()) {
         AVFrame* frame = m_RenderQueue.dequeue();
+        FreezeDiag::s_RenderQueueDepth.store(m_RenderQueue.count(), std::memory_order_relaxed);
         m_FrameQueueLock.unlock();
 
+        FreezeDiag::setRenderPhase(FreezeDiag::RP_RENDER);
         renderFrame(frame);
+        FreezeDiag::setRenderPhase(FreezeDiag::RP_IDLE);
     }
     else {
         m_FrameQueueLock.unlock();
@@ -148,6 +191,7 @@ int Pacer::renderThread(void* context)
 
     while (!me->m_Stopping) {
         // Wait for the renderer to be ready for the next frame
+        FreezeDiag::setRenderPhase(FreezeDiag::RP_WAIT_TO_RENDER);
         me->m_VsyncRenderer->waitToRender();
 
         // Acquire the frame queue lock to protect the queue and
@@ -155,6 +199,7 @@ int Pacer::renderThread(void* context)
         me->m_FrameQueueLock.lock();
 
         // Wait for a frame to be ready to render
+        FreezeDiag::setRenderPhase(FreezeDiag::RP_WAIT_QUEUE);
         while (!me->m_Stopping && me->m_RenderQueue.isEmpty()) {
             me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock);
         }
@@ -166,10 +211,13 @@ int Pacer::renderThread(void* context)
         }
 
         AVFrame* frame = me->m_RenderQueue.dequeue();
+        FreezeDiag::s_RenderQueueDepth.store(me->m_RenderQueue.count(), std::memory_order_relaxed);
         me->m_FrameQueueLock.unlock();
 
+        FreezeDiag::setRenderPhase(FreezeDiag::RP_RENDER);
         me->renderFrame(frame);
     }
+    FreezeDiag::setRenderPhase(FreezeDiag::RP_IDLE);
 
     // Notify the renderer that it is being destroyed soon
     // NB: This must happen on the same thread that calls renderFrame().
@@ -182,6 +230,7 @@ void Pacer::enqueueFrameForRenderingAndUnlock(AVFrame *frame)
 {
     dropFrameForEnqueue(m_RenderQueue);
     m_RenderQueue.enqueue(frame);
+    FreezeDiag::s_RenderQueueDepth.store(m_RenderQueue.count(), std::memory_order_relaxed);
 
     m_FrameQueueLock.unlock();
 
@@ -396,6 +445,7 @@ void Pacer::renderFrame(AVFrame* frame)
         av_frame_free(&frame);
         m_FrameQueueLock.lock();
     }
+    FreezeDiag::s_RenderQueueDepth.store(m_RenderQueue.count(), std::memory_order_relaxed);
 
     m_FrameQueueLock.unlock();
 }

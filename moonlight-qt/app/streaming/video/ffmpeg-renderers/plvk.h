@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <thread>
+#include <vector>
 
 // §J.3.e.2.e2 — RIFE forward integration on the external ncnn instance.
 // ncnn::VkMat / ncnn::Net are needed as members.  ncnn is Windows-only
@@ -162,6 +163,18 @@ private:
     pl_renderer m_Renderer = nullptr;
     pl_tex m_Textures[PL_MAX_PLANES] = {};
     pl_color_space m_LastColorspace = {};
+
+    // §SF-DRMSPLIT：第一張 DRM_PRIME 幀的描述子版面只記一次
+    bool m_LoggedDrmPrimeLayout = false;
+
+    // §SF-PRESENT-STATS：和 d3d11va 同格式的 [VIPLE-PRESENT-Stats]（analyze_client_log.ps1 解析），
+    // 間隔取相鄰兩次 pl_swapchain_submit_frame 成功的時間差。Linux／Steam Frame 原本量不到 stutter。
+    std::vector<double> m_PresentIntervalsMs;
+    std::vector<double> m_PresentSubmitMs;
+    uint64_t m_LastSubmitNs = 0;
+    uint64_t m_PresentLastLogNs = 0;
+    uint32_t m_PresentTotal = 0;
+    void recordPresentStats(uint64_t submitBeginNs, uint64_t submitEndNs);
 
     // Pending swapchain state shared between waitToRender(), renderFrame(), and cleanupRenderContext()
     pl_swapchain_frame m_SwapchainFrame = {};

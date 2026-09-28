@@ -24,11 +24,20 @@
 
 extern "C" {
 #include <libavutil/hwcontext_vulkan.h>
+#ifdef HAVE_DRM
+#include <libavutil/hwcontext_drm.h>
+#endif
 }
+
+#ifdef HAVE_DRM
+#include <libdrm/drm_fourcc.h>
+#endif
 
 #include <vector>
 #include <set>
 #include <atomic>
+#include <algorithm>
+#include <chrono>
 
 #ifndef VK_KHR_video_decode_av1
 #define VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME "VK_KHR_video_decode_av1"
@@ -5800,12 +5809,127 @@ bool PlVkRenderer::prepareDecoderContextInGetFormat(AVCodecContext *context,
     return true;
 }
 
+#ifdef HAVE_DRM
+// §SF-DRMSPLIT：libplacebo 的 pl_map_avframe_drm 只認「每個平面一個 layer」的 DRM_PRIME
+// 描述子（VAAPI SEPARATE_LAYERS 的形式）：它逐 layer 用 pl_find_fourcc(layer->format)
+// 找單平面格式。Qualcomm iris 的 v4l2m2m（cgutman FFmpeg）輸出單一 layer、兩個平面的
+// DRM_FORMAT_NV12，libplacebo 找不到 NV12 就直接回 false、不印任何訊息（release 建置
+// 沒有它的 assert），PlVk 的 test decode 失敗而退回 SDL/EGL 前端。
+// 這裡改寫成 R8＋GR88（10-bit 是 R16＋GR1616）兩個 layer；dmabuf、offset、pitch、
+// modifier 都不動，只是換描述方式。
+// 回傳新的 AVFrame（呼叫端負責 av_frame_free）；沒有改寫時回 nullptr。*outcome 給 log 用，
+// 分辨「不需要改寫／fourcc 不認得／配置失敗」。M3a 的 XrRenderer 也要用，屆時搬進 plvk_common。
+static AVFrame* splitDrmPrimeLayers(const AVFrame* frame, const char** outcome)
+{
+    *outcome = "as-is";
+
+    auto src = (const AVDRMFrameDescriptor*)frame->data[0];
+    if (src == nullptr || src->nb_layers != 1 || src->layers[0].nb_planes != 2) {
+        return nullptr;
+    }
+
+    uint32_t lumaFormat, chromaFormat;
+    switch (src->layers[0].format) {
+    case DRM_FORMAT_NV12:
+        lumaFormat = DRM_FORMAT_R8;
+        chromaFormat = DRM_FORMAT_GR88;
+        break;
+    case DRM_FORMAT_P010:
+        lumaFormat = DRM_FORMAT_R16;
+        chromaFormat = DRM_FORMAT_GR1616;
+        break;
+    default:
+        *outcome = "unsupported multi-plane fourcc";
+        return nullptr;
+    }
+
+    *outcome = "split failed (alloc)";
+    AVBufferRef* descBuf = av_buffer_allocz(sizeof(AVDRMFrameDescriptor));
+    if (descBuf == nullptr) {
+        return nullptr;
+    }
+
+    auto dst = (AVDRMFrameDescriptor*)descBuf->data;
+    dst->nb_objects = src->nb_objects;
+    for (int i = 0; i < src->nb_objects; i++) {
+        dst->objects[i] = src->objects[i];
+    }
+    dst->nb_layers = 2;
+    dst->layers[0].format = lumaFormat;
+    dst->layers[0].nb_planes = 1;
+    dst->layers[0].planes[0] = src->layers[0].planes[0];
+    dst->layers[1].format = chromaFormat;
+    dst->layers[1].nb_planes = 1;
+    dst->layers[1].planes[0] = src->layers[0].planes[1];
+
+    // clone 會對原本的 buf[] 加參照，解碼器的 V4L2 buffer 在 mapping 期間不會被回收
+    AVFrame* out = av_frame_clone(frame);
+    if (out == nullptr) {
+        av_buffer_unref(&descBuf);
+        return nullptr;
+    }
+
+    // 描述子的記憶體掛在第一個空的 buf 槽，生命週期跟著 frame；pl_map_avframe_ex 會再
+    // av_frame_clone 一份自己持有到 pl_unmap_avframe，所以呼叫端 map 完就能放掉這份。
+    int slot = -1;
+    for (int i = 0; i < AV_NUM_DATA_POINTERS; i++) {
+        if (out->buf[i] == nullptr) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        av_buffer_unref(&descBuf);
+        av_frame_free(&out);
+        return nullptr;
+    }
+    out->buf[slot] = descBuf;
+    out->data[0] = descBuf->data;
+    *outcome = "split into per-plane layers";
+    return out;
+}
+#endif
+
 bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame)
 {
+    const AVFrame* mapSource = frame;
+#ifdef HAVE_DRM
+    AVFrame* splitFrame = nullptr;
+    if (frame->format == AV_PIX_FMT_DRM_PRIME) {
+        const char* outcome;
+        splitFrame = splitDrmPrimeLayers(frame, &outcome);
+        if (!m_LoggedDrmPrimeLayout) {
+            // layers[0]、objects[0] 是描述子裡的固定陣列，nb_* 為 0 時讀它們也不會越界
+            auto drm = (const AVDRMFrameDescriptor*)frame->data[0];
+            if (drm != nullptr) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-LNXFE] DRM_PRIME layout: layers=%d planes0=%d fourcc=0x%08x "
+                            "objects=%d mod=0x%llx -> %s",
+                            drm->nb_layers, drm->layers[0].nb_planes, drm->layers[0].format,
+                            drm->nb_objects, (unsigned long long)drm->objects[0].format_modifier,
+                            outcome);
+            }
+            else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-LNXFE] DRM_PRIME frame without descriptor");
+            }
+            m_LoggedDrmPrimeLayout = true;
+        }
+        if (splitFrame != nullptr) {
+            mapSource = splitFrame;
+        }
+    }
+#endif
+
     pl_avframe_params mapParams = {};
-    mapParams.frame = frame;
+    mapParams.frame = mapSource;
     mapParams.tex = m_Textures;
-    if (!pl_map_avframe_ex(m_Vulkan->gpu, mappedFrame, &mapParams)) {
+    bool mapped = pl_map_avframe_ex(m_Vulkan->gpu, mappedFrame, &mapParams);
+#ifdef HAVE_DRM
+    // libplacebo 已經 clone 自己的一份（成功時持有到 pl_unmap_avframe、失敗時已釋放）
+    av_frame_free(&splitFrame);
+#endif
+    if (!mapped) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_map_avframe_ex() failed");
         return false;
@@ -6001,6 +6125,75 @@ void PlVkRenderer::waitToRender()
     if (pl_swapchain_start_frame(m_Swapchain, &m_SwapchainFrame)) {
         m_HasPendingSwapchainFrame = true;
     }
+}
+
+static uint64_t presentStatsNowNs()
+{
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// §SF-PRESENT-STATS：每次 submit 成功後呼叫。每 5 秒印一行與 d3d11va 相同格式的
+// [VIPLE-PRESENT-Stats] real …（ft = 相鄰兩次 submit 的間隔，call = submit 本身花的時間），
+// 再印累計 cumul；analyze_client_log.ps1 以 real 行的 p99 > 33.3 ms 算 stutter。
+void PlVkRenderer::recordPresentStats(uint64_t submitBeginNs, uint64_t submitEndNs)
+{
+    m_PresentSubmitMs.push_back((submitEndNs - submitBeginNs) / 1e6);
+    if (m_LastSubmitNs != 0) {
+        m_PresentIntervalsMs.push_back((submitEndNs - m_LastSubmitNs) / 1e6);
+    }
+    m_LastSubmitNs = submitEndNs;
+    m_PresentTotal++;
+
+    if (m_PresentLastLogNs == 0) {
+        m_PresentLastLogNs = submitEndNs;
+        return;
+    }
+    if (submitEndNs - m_PresentLastLogNs < 5000000000ULL) {
+        return;
+    }
+    m_PresentLastLogNs = submitEndNs;
+
+    if (m_PresentIntervalsMs.empty()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PRESENT-Stats] real n=0");
+    }
+    else {
+        std::sort(m_PresentIntervalsMs.begin(), m_PresentIntervalsMs.end());
+        std::sort(m_PresentSubmitMs.begin(), m_PresentSubmitMs.end());
+        auto pct = [](const std::vector<double>& s, double p) {
+            if (s.empty()) {
+                return 0.0;
+            }
+            size_t idx = (size_t)(p * s.size());
+            if (idx >= s.size()) {
+                idx = s.size() - 1;
+            }
+            return s[idx];
+        };
+        double intSum = 0;
+        for (double v : m_PresentIntervalsMs) {
+            intSum += v;
+        }
+        double callSum = 0;
+        for (double v : m_PresentSubmitMs) {
+            callSum += v;
+        }
+        const size_t n = m_PresentIntervalsMs.size();
+        const double intMean = intSum / n;
+        const double callMean = m_PresentSubmitMs.empty() ? 0.0 : callSum / m_PresentSubmitMs.size();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-PRESENT-Stats] real n=%zu fps=%.2f "
+                    "ft_mean=%.3fms p50=%.3f p95=%.3f p99=%.3f p99.9=%.3f "
+                    "call_mean=%.3fms p95=%.3f",
+                    n, intMean > 0 ? 1000.0 / intMean : 0.0, intMean,
+                    pct(m_PresentIntervalsMs, 0.50), pct(m_PresentIntervalsMs, 0.95),
+                    pct(m_PresentIntervalsMs, 0.99), pct(m_PresentIntervalsMs, 0.999),
+                    callMean, pct(m_PresentSubmitMs, 0.95));
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-PRESENT-Stats] cumul real=%u", m_PresentTotal);
+    m_PresentIntervalsMs.clear();
+    m_PresentSubmitMs.clear();
 }
 
 void PlVkRenderer::cleanupRenderContext()
@@ -6362,15 +6555,19 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 
     // Submit the frame for display and swap buffers
     m_HasPendingSwapchainFrame = false;
-    if (!pl_swapchain_submit_frame(m_Swapchain)) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "pl_swapchain_submit_frame() failed");
+    {
+        const uint64_t submitBeginNs = presentStatsNowNs();
+        if (!pl_swapchain_submit_frame(m_Swapchain)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "pl_swapchain_submit_frame() failed");
 
-        // Recreate the renderer
-        SDL_Event event;
-        event.type = SDL_RENDER_DEVICE_RESET;
-        SDL_PushEvent(&event);
-        goto UnmapExit;
+            // Recreate the renderer
+            SDL_Event event;
+            event.type = SDL_RENDER_DEVICE_RESET;
+            SDL_PushEvent(&event);
+            goto UnmapExit;
+        }
+        recordPresentStats(submitBeginNs, presentStatsNowNs());
     }
 
 #ifdef Q_OS_WIN32

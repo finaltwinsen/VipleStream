@@ -124,10 +124,20 @@ private:
 
     static int decoderThreadProcThunk(void* context);
 
+    // §SF-FREEZE：凍結診斷 watchdog（非 Windows）。解碼執行緒可能卡在 FFmpeg 裡出不來，
+    // 所以另開一條執行緒定時檢查「多久沒出幀」並印出解碼／render 兩端的相位。
+    static int freezeWatchdogThunk(void* context);
+    void freezeWatchdogProc();
+    SDL_Thread* m_FreezeWatchdogThread = nullptr;
+    SDL_atomic_t m_FreezeWatchdogQuit {};
+    SDL_sem* m_FreezeWatchdogWake = nullptr;   // reset() 立刻叫醒，不必等輪詢間隔
+
     AVPacket* m_Pkt;
     AVCodecContext* m_VideoDecoderCtx;
     enum AVPixelFormat m_RequiredPixelFormat;
     QByteArray m_DecodeBuffer;
+    // §SF-PARAMSETS：v4l2m2m decoder 目前這個實例吃過的 VPS/SPS/PPS（見 submitDecodeUnit）
+    QByteArray m_V4l2ParamSets;
     const AVCodecHWConfig* m_HwDecodeCfg;
     IFFmpegRenderer* m_BackendRenderer;
     IFFmpegRenderer* m_FrontendRenderer;

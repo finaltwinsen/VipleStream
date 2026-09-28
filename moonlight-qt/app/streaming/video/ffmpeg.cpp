@@ -90,7 +90,82 @@ extern "C" {
 // but the symbols resolve at link time.
 std::atomic<double> g_VkFrucDecodeLatencyMs{0.0};
 std::atomic<double> g_VkFrucChainMs{0.0};
+
 #endif
+
+// §SF-FREEZE（2026-09-28，Steam Frame G-α 凍結調查）：頭盔顯示中串流幾秒後定格，
+// 當下 FFDecoder 執行緒停在 V4L2 poll、不再出幀、也收不了尾；decode-bench 以連發 IDR、
+// 掉參考幀、扣 buffer 都重現不出來。下面三樣儀器用來分辨「app 扣住／漏掉了 capture
+// buffer（活幀數逼近 buffer 總數）」還是「iris 自己停了（活幀數很低）」：
+//   1. 解碼執行緒相位＋開始時間；
+//   2. 每張解出的幀掛一個參照計數標記（串在 opaque_ref 上，libplacebo 的 clone、renderer
+//      扣著的都算），統計目前還活著的解碼幀；
+//   3. watchdog 執行緒：超過 1.5 s 沒出幀就印兩端相位與活幀數，平常每 10 s 印活幀數峰值。
+// 全部只在非 Windows 編入；純診斷，不改變解碼或渲染行為。
+namespace {
+enum DecoderPhase : int {
+    DP_IDLE = 0,
+    DP_WAIT_INPUT = 1,   // LiWaitForNextVideoFrame
+    DP_SUBMIT = 2,       // submitDecodeUnit（avcodec_send_packet）
+    DP_RECEIVE = 3,      // avcodec_receive_frame
+    DP_TO_PACER = 4,     // m_Pacer->submitFrame
+};
+std::atomic<int> s_DecPhase {DP_IDLE};
+std::atomic<uint64_t> s_DecPhaseSinceUs {0};
+std::atomic<uint64_t> s_LastFrameOutUs {0};
+std::atomic<int> s_LiveDecodedFrames {0};
+std::atomic<int> s_LiveDecodedMax {0};
+
+inline void setDecPhase(int phase)
+{
+#ifndef Q_OS_WIN32
+    s_DecPhase.store(phase, std::memory_order_relaxed);
+    s_DecPhaseSinceUs.store(LiGetMicroseconds(), std::memory_order_relaxed);
+#else
+    (void)phase;
+#endif
+}
+
+const char* decPhaseName(int phase)
+{
+    switch (phase) {
+    case DP_WAIT_INPUT: return "waitInput";
+    case DP_SUBMIT: return "submitPacket";
+    case DP_RECEIVE: return "receiveFrame";
+    case DP_TO_PACER: return "toPacer";
+    default: return "idle";
+    }
+}
+
+#ifndef Q_OS_WIN32
+// 標記 buffer 釋放時（這張幀的所有參照都放掉了）活幀數減一，並放掉串接的舊 opaque_ref
+void liveFrameTagFree(void* opaque, uint8_t* data)
+{
+    AVBufferRef* chained = (AVBufferRef*)opaque;
+    av_buffer_unref(&chained);
+    av_free(data);
+    s_LiveDecodedFrames.fetch_sub(1, std::memory_order_relaxed);
+}
+
+void tagLiveDecodedFrame(AVFrame* frame)
+{
+    uint8_t* data = (uint8_t*)av_mallocz(1);
+    if (data == nullptr) {
+        return;
+    }
+    AVBufferRef* tag = av_buffer_create(data, 1, liveFrameTagFree, frame->opaque_ref, 0);
+    if (tag == nullptr) {
+        av_free(data);
+        return;
+    }
+    frame->opaque_ref = tag;
+    int live = s_LiveDecodedFrames.fetch_add(1, std::memory_order_relaxed) + 1;
+    int prevMax = s_LiveDecodedMax.load(std::memory_order_relaxed);
+    while (live > prevMax && !s_LiveDecodedMax.compare_exchange_weak(prevMax, live, std::memory_order_relaxed)) {
+    }
+}
+#endif
+}
 
 // This is gross but it allows us to use sizeof()
 #include "ffmpeg_videosamples.cpp"
@@ -534,6 +609,19 @@ void FFmpegVideoDecoder::reset()
         SDL_WaitThread(m_DecoderThread, NULL);
         SDL_AtomicSet(&m_DecoderThreadShouldQuit, 0);
         m_DecoderThread = nullptr;
+    }
+
+    // §SF-FREEZE：放在解碼執行緒 join 之後停，解碼執行緒卡住時 watchdog 會繼續回報
+    if (m_FreezeWatchdogThread != nullptr) {
+        SDL_AtomicSet(&m_FreezeWatchdogQuit, 1);
+        SDL_SemPost(m_FreezeWatchdogWake);
+        SDL_WaitThread(m_FreezeWatchdogThread, NULL);
+        SDL_AtomicSet(&m_FreezeWatchdogQuit, 0);
+        m_FreezeWatchdogThread = nullptr;
+    }
+    if (m_FreezeWatchdogWake != nullptr) {
+        SDL_DestroySemaphore(m_FreezeWatchdogWake);
+        m_FreezeWatchdogWake = nullptr;
     }
 
     m_FramesIn = m_FramesOut = 0;
@@ -1197,6 +1285,16 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
                          "Failed to create decoder thread: %s", SDL_GetError());
             return false;
         }
+
+#ifndef Q_OS_WIN32
+        // 上一個 decoder 實例的最後出幀時間與相位不能拿來判定這一個凍結
+        s_LastFrameOutUs.store(0, std::memory_order_relaxed);
+        setDecPhase(DP_IDLE);
+        m_FreezeWatchdogWake = SDL_CreateSemaphore(0);
+        if (m_FreezeWatchdogWake != nullptr) {
+            m_FreezeWatchdogThread = SDL_CreateThread(FFmpegVideoDecoder::freezeWatchdogThunk, "FreezeWD", (void*)this);
+        }
+#endif
 
         if (m_FrontendRenderer->getRendererType() != m_BackendRenderer->getRendererType()) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2972,6 +3070,84 @@ void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
     }
 }
 
+int FFmpegVideoDecoder::freezeWatchdogThunk(void* context)
+{
+    ((FFmpegVideoDecoder*)context)->freezeWatchdogProc();
+    return 0;
+}
+
+void FFmpegVideoDecoder::freezeWatchdogProc()
+{
+    const uint64_t kFreezeUs = 1500000;
+    const uint64_t kRepeatUs = 5000000;
+    const uint64_t kBeatUs = 10000000;
+    uint64_t lastReportUs = 0;
+    uint64_t lastBeatUs = LiGetMicroseconds();
+    uint64_t frozenSinceUs = 0;
+
+    while (!SDL_AtomicGet(&m_FreezeWatchdogQuit)) {
+        SDL_SemWaitTimeout(m_FreezeWatchdogWake, 250);
+        if (SDL_AtomicGet(&m_FreezeWatchdogQuit)) {
+            break;
+        }
+        const uint64_t now = LiGetMicroseconds();
+        const uint64_t lastOut = s_LastFrameOutUs.load(std::memory_order_relaxed);
+        const int live = s_LiveDecodedFrames.load(std::memory_order_relaxed);
+
+        // 這個實例還沒出過任何一幀：只看相位——卡在送封包／收幀超過門檻也要報
+        // （例如重建後的 decoder 在第一張 IDR 就卡住）
+        if (lastOut == 0) {
+            const int dp = s_DecPhase.load(std::memory_order_relaxed);
+            const uint64_t since = s_DecPhaseSinceUs.load(std::memory_order_relaxed);
+            if ((dp == DP_SUBMIT || dp == DP_RECEIVE) && since != 0 && now > since && now - since >= kFreezeUs &&
+                    (lastReportUs == 0 || now - lastReportUs >= kRepeatUs)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FREEZE] no first frame yet: dec=%s %llu ms in=%d out=%d liveFrames=%d | "
+                            "render=%s renderQueue=%d",
+                            decPhaseName(dp), (unsigned long long)((now - since) / 1000),
+                            m_FramesIn, m_FramesOut, live,
+                            FreezeDiag::renderPhaseName(FreezeDiag::renderPhase()),
+                            FreezeDiag::renderQueueDepth());
+                lastReportUs = now;
+            }
+        }
+        else if (now > lastOut && now - lastOut >= kFreezeUs) {
+            if (frozenSinceUs == 0 || now - lastReportUs >= kRepeatUs) {
+                const int dp = s_DecPhase.load(std::memory_order_relaxed);
+                const int rp = FreezeDiag::renderPhase();
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FREEZE] no decoded frame for %llu ms: dec=%s %llu ms in=%d out=%d "
+                            "liveFrames=%d | render=%s %llu ms renderQueue=%d",
+                            (unsigned long long)((now - lastOut) / 1000),
+                            decPhaseName(dp),
+                            (unsigned long long)((now - s_DecPhaseSinceUs.load(std::memory_order_relaxed)) / 1000),
+                            m_FramesIn, m_FramesOut, live,
+                            FreezeDiag::renderPhaseName(rp),
+                            (unsigned long long)((now - FreezeDiag::renderPhaseSinceUs()) / 1000),
+                            FreezeDiag::renderQueueDepth());
+                lastReportUs = now;
+            }
+            if (frozenSinceUs == 0) {
+                frozenSinceUs = lastOut;
+            }
+        }
+        else if (frozenSinceUs != 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FREEZE] recovered after %llu ms (liveFrames=%d)",
+                        (unsigned long long)((now - frozenSinceUs) / 1000), live);
+            frozenSinceUs = 0;
+        }
+
+        if (now - lastBeatUs >= kBeatUs) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FREEZE] beat liveFrames=%d max=%d in=%d out=%d",
+                        live, s_LiveDecodedMax.exchange(live, std::memory_order_relaxed),
+                        m_FramesIn, m_FramesOut);
+            lastBeatUs = now;
+        }
+    }
+}
+
 int FFmpegVideoDecoder::decoderThreadProcThunk(void *context)
 {
     ((FFmpegVideoDecoder*)context)->decoderThreadProc();
@@ -2987,11 +3163,13 @@ void FFmpegVideoDecoder::decoderThreadProc()
 
             // Waiting for input. All output frames have been received.
             // Block until we receive a new frame from the host.
+            setDecPhase(DP_WAIT_INPUT);
             if (!LiWaitForNextVideoFrame(&handle, &du)) {
                 // This might be a signal from the main thread to exit
                 continue;
             }
 
+            setDecPhase(DP_SUBMIT);
             LiCompleteVideoFrame(handle, submitDecodeUnit(du));
         }
 
@@ -3011,6 +3189,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
 
             int err;
             do {
+                setDecPhase(DP_RECEIVE);
                 err = avcodec_receive_frame(m_VideoDecoderCtx, frame);
                 if (err == 0) {
                     SDL_assert(m_FrameInfoQueue.size() == m_FramesIn - m_FramesOut);
@@ -3164,7 +3343,13 @@ void FFmpegVideoDecoder::decoderThreadProc()
 
                     m_ActiveWndVideoStats.decodedFrames++;
 
+#ifndef Q_OS_WIN32
+                    tagLiveDecodedFrame(frame);
+                    s_LastFrameOutUs.store(LiGetMicroseconds(), std::memory_order_relaxed);
+#endif
+
                     // Queue the frame for rendering (or render now if pacer is disabled)
+                    setDecPhase(DP_TO_PACER);
                     m_Pacer->submitFrame(frame);
                 }
                 else if (err == AVERROR(EAGAIN)) {
@@ -3175,6 +3360,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // while we're waiting for this to frame to come back.
                     if (LiPollNextVideoFrame(&handle, &du)) {
                         // FIXME: Handle EAGAIN on avcodec_send_packet() properly?
+                        setDecPhase(DP_SUBMIT);
                         LiCompleteVideoFrame(handle, submitDecodeUnit(du));
                     }
                     else {
@@ -3305,6 +3491,46 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     // If this is the first frame, reject anything that's not an IDR frame
     if (m_FramesIn == 0 && du->frameType != FRAME_TYPE_IDR) {
         return DR_NEED_IDR;
+    }
+
+    // §SF-PARAMSETS（2026-09-28，Steam Frame 凍結根因）：host 的 ABR 降碼會讓 NVENC 在下一個
+    // IDR 改用別的 HEVC tier／level，VPS/SPS 跟著變。Qualcomm iris 看到就發 source change，
+    // FFmpeg v4l2m2m 在解析度沒變時只送 DEC_CMD_START，iris 卻要 capture queue 重新
+    // STREAMON，兩邊互等：decoder 執行緒永遠卡在 avcodec_send_packet 的 poll（或提早 EOF）。
+    // v4l2m2m 遇到參數集改變的 IDR 時不餵進舊實例，改成重建 decoder 再要 IDR（和下面
+    // 「consistent failure」同一條重置路徑）。其他 decoder 行為不變。
+    // 已知限制：比對是逐 byte（哪些欄位會讓 iris 發 source change 沒有逐項驗過，寧可多重建）；
+    // Linux host 走 FFmpeg hevc_nvenc 時 SPS 的 HRD 隨碼率變，每次 ABR 調整都會觸發重建
+    // （server 的 level／tier 固定只做在 Windows nvenc_base）。被丟掉的 IDR 之後，新 decoder 要的
+    // IDR 若落在 server 的 IDR cooldown 內會被壓掉，要等 §FRZ-WATCHDOG／連續丟幀上限才恢復。
+    if (du->frameType == FRAME_TYPE_IDR && m_VideoDecoderCtx != nullptr &&
+            m_VideoDecoderCtx->codec != nullptr &&
+            strstr(m_VideoDecoderCtx->codec->name, "_v4l2m2m") != nullptr) {
+        QByteArray paramSets;
+        for (PLENTRY e = du->bufferList; e != nullptr; e = e->next) {
+            if (e->bufferType == BUFFER_TYPE_VPS || e->bufferType == BUFFER_TYPE_SPS ||
+                    e->bufferType == BUFFER_TYPE_PPS) {
+                paramSets.append(e->data, e->length);
+            }
+        }
+        if (!paramSets.isEmpty()) {
+            if (!m_V4l2ParamSets.isEmpty() && paramSets != m_V4l2ParamSets) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-LNXFE] parameter sets changed on IDR frame %d (%s, %d -> %d bytes); "
+                            "recreating the decoder instead of feeding it to the running instance",
+                            du->frameNumber, m_VideoDecoderCtx->codec->name,
+                            (int)m_V4l2ParamSets.size(), (int)paramSets.size());
+
+                SDL_Event event;
+                event.type = SDL_RENDER_DEVICE_RESET;
+                SDL_PushEvent(&event);
+
+                // Don't consume any additional data
+                SDL_AtomicSet(&m_DecoderThreadShouldQuit, 1);
+                return DR_NEED_IDR;
+            }
+            m_V4l2ParamSets = paramSets;
+        }
     }
 
     if (!m_LastFrameNumber) {

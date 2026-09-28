@@ -138,6 +138,10 @@ Client log 位置：`%TEMP%\VipleStream-*.log`（檔名的數字是啟動時的 
 ### `[VIPLE-PRESENT-Stats]`
 `d3d11va.cpp:1482`，每 **5 秒**一批。
 
+**Linux PlVk**（`plvk.cpp` `recordPresentStats`，§SF-PRESENT-STATS，2026-09-28 起）印同樣格式、只有 `real`：間隔取相鄰兩次
+`pl_swapchain_submit_frame` 成功的時間差，`call_*` 是 submit 本身花的時間。Steam Frame 的 stutter 指標來自這裡；EGL／SDL
+前端沒有這一行。
+
 ```
 [VIPLE-PRESENT-Stats] real|interp n=%zu fps=%.2f ft_mean=%.3fms p50=%.3f p95=%.3f p99=%.3f p99.9=%.3f call_mean=%.3fms p95=%.3f
 [VIPLE-PRESENT-Stats] cumul real=%u [interp=%u]
@@ -199,6 +203,23 @@ reset 本身的 bug：reset 把 RTP 序號基準清成 0，序號 ≥ 32768 的�
 第一行是正常的 reset 後恢復；第二、三行出現代表序號仍在大幅跳動，要對照 host 的 failover
 與 QUIC path 事件看。修正後若仍連續 fire 且有流量、又沒有 re-anchored 行，才代表根因不在佇列。
 
+### `[VIPLE-FREEZE]` —— 解碼／render 凍結診斷（僅非 Windows，§SF-FREEZE，2026-09-28 起）
+`ffmpeg.cpp`（watchdog 執行緒 `FreezeWD`）＋`pacer.cpp`（render 相位）
+
+```
+[VIPLE-FREEZE] no decoded frame for %llu ms: dec=<相位> %llu ms in=%d out=%d liveFrames=%d | render=<相位> %llu ms renderQueue=%d
+[VIPLE-FREEZE] recovered after %llu ms (liveFrames=%d)
+[VIPLE-FREEZE] beat liveFrames=%d max=%d in=%d out=%d
+```
+
+- 超過 1.5 s 沒有解出新幀就印第一行，之後每 5 s 重印；恢復時印 `recovered`；平常每 10 s 一行 `beat`。
+- `dec` 相位：`waitInput`（等 host 送幀）、`submitPacket`（`avcodec_send_packet`）、`receiveFrame`（`avcodec_receive_frame`）、
+  `toPacer`；`render` 相位：`waitToRender`（renderer 的 `waitToRender()`，PlVk 是 swapchain）、`waitQueue`（等幀）、`renderFrame`。
+- `liveFrames`：目前還活著的解碼幀（標記串在 `opaque_ref` 上，libplacebo 的 clone、renderer 扣著的都算）。**判讀**：凍結時
+  `liveFrames` 接近 v4l2m2m capture buffer 總數（10）＝ app 扣住或漏掉 buffer；很低（1～2）而 `dec=submitPacket`／`receiveFrame`
+  長時間不動 ＝ 硬體解碼器自己停了（Steam Frame 2026-09-28 的參數集改變事故就是這個樣子，見 `steam_frame_client.md` §7.5）。
+- 純診斷：不改變解碼或渲染行為。
+
 ### 非 tag 的 FEC 證據行
 ```
 Unrecoverable frame %d: %d+%d=%d received < %d needed
@@ -234,7 +255,7 @@ Control message took over 10 ms to send (net latency: %u ms | packet loss: %f%%)
 | `[VIPLE-PREFS]` | 多處 | 設定載入／存檔 |
 | `AutoUpdateChecker` / `[AutoUpdateChecker]` | `backend/autoupdatechecker.cpp` | §UPDATE-HEAD 自動更新檢查（每次啟動、5 分鐘 debounce）：`HEAD https://github.com/…/releases/latest` → `HEAD 302 → …/releases/tag/vX`（免 API 配額）→ `up to date` / `update available (head)`；HEAD 失敗才退回 REST API：`GET … (If-None-Match)` → `API 200 OK` / `API 304 Not Modified`（**匿名 304 仍計入 60 次/小時/IP 配額**）/ `API rate limited … back-off until <epoch>`；不打網路時（`debounce`／`back-off`／`error`）用上次快取判斷。發佈當天第一次啟動就該看到 `update available`；沒有就看是哪一行 |
 | `[SC-HID]` | `streaming/input/sc_hid.cpp` | Steam Controller 原生 HID 轉發（見下節；host 端同 tag） |
-| `[VIPLE-INPUT-STALL]` | `session.cpp`（watchdog 執行緒） | 主迴圈（鍵鼠唯一入口）停頓 ≥50 ms 且期間有使用者輸入、本視窗在前景才記；`phase=SDL_WaitEventTimeout`＝卡在 SDL 內部，`phase=event 0x…`＝我們的 handler；停頓 ≥300 ms 另抄一份主執行緒堆疊（`module!symbol+offset`）。影像由 Pacer 執行緒繪製，所以「畫面正常但鍵鼠斷續」要看這行 |
+| `[VIPLE-INPUT-STALL]` | `session.cpp`（watchdog 執行緒） | **非 Windows 會誤報**：只有 Windows 以 `GetLastInputInfo` 確認真的有輸入，其他平台一律當作有輸入，主迴圈閒置（例如 Linux PlVk 在 Pacer 執行緒繪製）就會被記成停頓（TODO）。主迴圈（鍵鼠唯一入口）停頓 ≥50 ms 且期間有使用者輸入、本視窗在前景才記；`phase=SDL_WaitEventTimeout`＝卡在 SDL 內部，`phase=event 0x…`＝我們的 handler；停頓 ≥300 ms 另抄一份主執行緒堆疊（`module!symbol+offset`）。影像由 Pacer 執行緒繪製，所以「畫面正常但鍵鼠斷續」要看這行 |
 | `[VIPLE-INPUT-GAP]` / `[VIPLE-INPUT-QUEUE-LAG]` / `[VIPLE-INPUT-SENDINPUT-SLOW]` | **host** `stream.cpp` / `input.cpp` / `platform/windows/input.cpp` | 輸入封包到達間隔 >150 ms（前 1 秒 ≥30 包才算）／task_pool 排隊 ≥50 ms／`SendInput` ≥20 ms（被其他行程的 low-level hook 卡住）。四者對時可分辨停頓在 client、傳輸還是 host 注入 |
 | `[VIPLE-QLOG] §S.19 cooldown armed f=N (K.14 pending\|skipped)` / `IDR-REQ` / `IDR-EMIT` / `IDR-SUPPRESS` | **host** `video.cpp` encode_run | IDR cooldown 閘門：`armed` 標示本 encoder 生命期起點（`K.14 skipped: rebuilt encoder`＝顯示拓樸切換後重建）；client 要 IDR 卻只見 SUPPRESS、無 EMIT 就是 §S.19-INIT-FIX 修掉的永久凍結型態 |
 | `[VIPLE-UPDATE]` | **host** `self_update.cpp` / `system_tray.cpp` | §SELF-UPDATE 常駐圖示兩段式「Check for updates...」→「Install update vX」與 CLI `--check-update`／`--self-update [--force] [package]`：`latest via HEAD: X`（github.com 302 取 tag，免 API 配額）／`falling back to API`／`up to date`／`update available: A → B`／`downloaded … bytes`／`sha256 verified`（GitHub asset digest，拿不到就拒裝）／`updater launched (pid N) … service=1`（Windows：PowerShell 腳本在 `<install>/config/update`，停 service→rename .old→覆蓋→啟 service，失敗回滾；細節在 `config/self_update.log`）／`sudo path rc=` `pkexec path rc=`（Linux：apt-get install .deb；細節在 `~/.config/sunshine/self_update.log`）／`self-update completed: now running X` 或 `last self-update failed: …`（重啟後讀 result 檔） |
@@ -247,7 +268,8 @@ Control message took over 10 ms to send (net latency: %u ms | packet loss: %f%%)
 | `[VIPLE-MPQUIC] §F3 …` | **host** `stream.cpp` | §F3 QUIC recv handler 提早註冊（只在開 mpquic 的 session）：`§F3 recv handler registered at session start (via=session-start\|quic-ready, peer=…)` 每條 session 一次，一般順序（RTSP 握手後才連 QUIC）是 `via=quic-ready`；同一條 session 因 QUIC 重連換了 QuicSession 時印 `§F3 recv handler re-registered on new QUIC session (via=…)`。`§Q-IDR-VIA-QUIC: recv handler registered on QUIC session via video loop (§F3 safety net — early registration missed, peer=…)` ＝ 兩個提早註冊點都漏接、由 video 迴圈補上，**不該出現**，出現就是 F3 有漏洞。開 mpquic 的 session 若三行都沒有，client 在 QUIC fallback 期間送的 IDR／FEC／input 會被丟掉 |
 | `[VIPLE-MULTI] §M01-D …` / `[VIPLE-MPQUIC] §M01-D …` | **host** `rtsp.cpp`（`clear_for_client`、`session_raise`）/ `stream.cpp`（`recv_ping`）/ `quic_server.cpp`（`retireSession`） | §M01-D 同一個 client（同一張 TLS 憑證）被強制關閉後立刻重開：/resume、/launch 先收掉它自己殘留的 stream session（2026-09-23 事故：殭屍 session 的 P-frame 經同 IP 的新 QUIC 連線灌給新 client → `Network dropped 69411 frames` → -101）。`superseded N stale session(s) of uuid=… before /resume\|/launch (active before=M)` ＝ 收掉 N 條；單一 client 時之後應依序出現 `Listener stopped` → `Listener started` → `New streaming session started [active sessions: 1]` → `Session stored` → `§F3 … via=quic-ready`，**不該**再有 `active sessions: 2`、`§F3 safety net`、重連後的 `ping timeout suppressed`。`stale session of uuid=… has not started yet — marked superseded, not joined` ＝ 殘留的那條還在 `session::start` 中途，只標記、交給 ping timeout（極少見）。`replaced stale pending launch of same client (old id=… new id=…)` ＝ client 在 /resume 之後、ENet 連上之前被殺又重開，pending launch 換成新的（否則 RTSP 會拿到舊 rikey／ping payload）。`[VIPLE-MPQUIC] §M01-D retired QUIC connection of superseded session (peer=…)` ＝ 被取代的 session 擁有的 QUIC 連線從 listener map 移除（cnx 交給 picoquic 30 s idle 回收）。`recv_ping aborted — session stopping before first video\|audio ping` ＝ 被收掉的 session 還在等第一個 UDP ping，立刻放棄（否則 /resume 會被拖到 ping_timeout）。一般串流、failover、outage 都**不該出現任何 §M01-D 行**。B 線（縱深防禦：`claimed by another session — not extending grace`／`dropping stale-session frames\|audio`／`QUIC owned by older session — falling back`）尚未合入，目前版本不會出現 |
 | `[VIPLE-DEVENV]` | `wm.cpp`（`Utils::logDevEnvOverride`）／**host** `config.cpp` | 環境變數覆寫了行為（環境變數只准當 dev-only 偵錯開關）。client：`dev-only override NAME=value`（SDL warn，每個名稱每個行程一次），涵蓋 `PREFER_VULKAN`、`GL_IS_SLOW`、`VULKAN_IS_SLOW`、`MATCH_DISPLAY_MODE_TO_VIDEO`、`SEPARATE_TEST_DECODER`、`FORCE_QT_GLES`、`VIPLE_USE_VK_DECODER`、`VIPLE_VK_FRUC_GENERIC`、`VIPLE_VKFRUC_*`、`*_AVOPTIONS`、`*_DECODER_HINT`。host（sunshine.log，啟動時一次，§F7）：`dev-only override VIPLE_SMOOTH_PACING=<v> （…smooth_pacing=<cfg> 被覆寫，生效值=<eff>…）`，優先序 env > `sunshine.conf` 的 `smooth_pacing` > 預設 false。**分析使用者回報的 log 前先 grep 這個 tag**：有這行就代表行為被環境變數改過，要先排除 |
-| `[VIPLE-LNXFE]` | （僅 Linux）`settings/streamingpreferences.cpp`、`wm.cpp`、`ffmpeg.cpp`、`session.cpp` | §F6 Linux renderer 決策。`linuxVideoFrontend=auto\|vulkan\|egl -> frontend=PlVk-first\|legacy-order (reason=aarch64\|zink\|default\|user isGpuSlow=N)`（設定或結果改變時才印）；`DRM driver probe: [<driver>] (source=libdrm\|sysfs)`（決定 isGpuSlow；msm 判為不慢）；`EGL probe: vendor='…' driver='…' zink=N`（x86 AUTO 第一次選 renderer 時探一次 Zink）；G-α 驗收摘要 `decoder=%s fmt=%s frontend=%s backend=%s isGpuSlow=%d`、`windowMode=%d fullscreenFlag=FULLSCREEN\|FULLSCREEN_DESKTOP\|NONE isGpuSlow=%d`、`matchVideo=%d (isGpuSlow=%d videoDriver=%s)`。Steam Frame 預期：`DRM driver probe: [msm]`、`reason=aarch64`、`fmt=DRM_PRIME frontend=PlVk isGpuSlow=0`、`fullscreenFlag=FULLSCREEN_DESKTOP`、`matchVideo=0`。Windows 不印 |
+| `[VIPLE-ABR] NvEnc: pinned …` | **host** `nvenc/nvenc_base.cpp`（`pin_level_for_reconfigure`） | §SF-PARAMSETS：encoder 初始化後讀回 NVENC 自動選的 level（HEVC 另加 tier），固定進 ABR reconfigure 的設定，讓整個 session 的 VPS／SPS 不變。`pinned HEVC level_idc=%u tier=high\|main for mid-stream reconfigure`、`pinned H.264 level_idc=%u …`；失敗時 `NvEncGetSequenceParams() failed, level not pinned`／`SPS not found in sequence header (N bytes), level not pinned`（ABR 照常，只是參數集可能改變）。AV1 尚未處理 |
+| `[VIPLE-LNXFE]` | （僅 Linux）`settings/streamingpreferences.cpp`、`wm.cpp`、`ffmpeg.cpp`、`session.cpp` | §F6 Linux renderer 決策。`linuxVideoFrontend=auto\|vulkan\|egl -> frontend=PlVk-first\|legacy-order (reason=aarch64\|zink\|default\|user isGpuSlow=N)`（設定或結果改變時才印）；`DRM driver probe: [<driver>] (source=libdrm\|sysfs)`（決定 isGpuSlow；msm 判為不慢）；`EGL probe: vendor='…' driver='…' zink=N`（x86 AUTO 第一次選 renderer 時探一次 Zink）；G-α 驗收摘要 `decoder=%s fmt=%s frontend=%s backend=%s isGpuSlow=%d`、`windowMode=%d fullscreenFlag=FULLSCREEN\|FULLSCREEN_DESKTOP\|NONE isGpuSlow=%d`、`matchVideo=%d (isGpuSlow=%d videoDriver=%s)`。Steam Frame 預期：`DRM driver probe: [msm]`、`reason=aarch64`、`fmt=DRM_PRIME frontend=PlVk isGpuSlow=0`、`fullscreenFlag=FULLSCREEN_DESKTOP`、`matchVideo=0`。**§SF-DRMSPLIT**（PlVk，每個 renderer 印一次）：`DRM_PRIME layout: layers=%d planes0=%d fourcc=0x%08x objects=%d mod=0x%llx -> split into per-plane layers\|as-is\|unsupported multi-plane fourcc\|split failed (alloc)`；Steam Frame 的 iris 預期 `layers=1 planes0=2 fourcc=0x3231564e`（NV12）`-> split`。**§SF-PARAMSETS**（v4l2m2m）：`parameter sets changed on IDR frame %d (<decoder>, %d -> %d bytes); recreating the decoder instead of feeding it to the running instance` ＝ host 換了 VPS／SPS／PPS（例如 ABR 降碼讓 NVENC 改 tier），client 主動重建 decoder；server 修正（`[VIPLE-ABR] NvEnc: pinned …`）部署後不該再出現。Windows 不印 |
 | `[VIPLE-UPDATE]`（client updater） | `backend/updater.cpp`（決策在 `backend/updateassetrules.h`） | §F9 更新對話框的「立即更新」路徑（版本檢查本身是上面的 `AutoUpdateChecker`）。啟動時 `platform <os>/<arch> (cpu …, build …, appimage\|flatpak\|plain[, emulated]) install mode = auto-install\|notify-only\|unsupported`，模擬執行另印 `running under emulation — cpu X build Y; assets follow the build architecture`；只通知的平台按下更新印 `startUpdate refused — install mode …`。抓到 release 後逐筆 `skip asset <檔名> — <原因>`，接著 `matched asset <檔名> action = auto-install\|notify-only release tag vX` 或 `no asset for <platform> — plan not-newer\|no-assets\|no-match\|missing-tag\|bad-tag release tag … current … among …`；`fetched release vX differs from the version offered in the UI Y` ＝ UI 顯示的版號已過時，改裝抓到的 tag；之後 `selected asset … → <url>`、`install dir …`，失敗統一 `failed: …`。判讀：`plan not-newer` ＝ GitHub API 快取落後 HEAD 302，幾分鐘後再試；`no-match` ＝ 這個 release 沒有本架構的檔或檔名版號對不上 tag |
 | `[VIPLE-COMMONC-SYNC]` | **build** `moonlight-qt/moonlight-common-c/check_commonc_sync.ps1`（本機 `build_moonlight.cmd`／`build_sunshine.cmd`／`build_android.cmd` 第一步呼叫） | §F1 三份 common-c 同步檢查（規則見 `docs/vr_protocol.md` §4.8），**是 build log，不是 runtime log**。`[ERROR] (1) Q/A …`（Qt 與 Android 兩份 `src/`、`enet/` 必須一致）／`[ERROR] (2) Q/S3 …`（server 實際編譯的指定檔必須一致）→ build 以 `[ERROR] moonlight-common-c sync check failed (rc=N)` 停下，發生在版號步驟之前，不會吃掉版號；`[WARN]` 只提示（未 stage 的刪除、Q/S3 其餘漂移）；結尾一行 `PASS：…` 或 `FAIL：…` |
 
@@ -433,6 +455,31 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
   搬到 `<install>\config\viplestream-svc.log`（protected DACL）。
 
 ---
+
+### 5b-2. VR IPC 與 selftest（M1b V2 起，Windows server）
+
+```
+[VIPLE-VR-IPC] pipe ready session=<N> dacl=system-only                    ← service 啟動；使用者 ACE 另外補
+[VIPLE-VR-IPC] user-ace set sid=*<RID>                                    ← 只印 RID，不印完整 SID
+[VIPLE-VR-IPC] user-ace reapplied | user-ace reapply failed               ← 核對時發現 pipe 少了使用者 ACE
+[VIPLE-VR-IPC] handshake gen=<G> driver=<ver> abi=<N> vrserver-pid=<pid> iface=IVRDriverDirectModeComponent_009 ring=<W>x<H> luid=set identity=<身分> caps=0x…
+[VIPLE-VR-IPC] rejected reason=<原因> …                                    ← 映像路徑經 loggable_path 過濾（空白、`=`、`[` 會變成 `?`）
+[VIPLE-VR-ADMIN] pipe ready
+[VIPLE-VR-ADMIN] selftest accepted run=<UTC 時間戳> (detached; …)
+[VIPLE-VR-ADMIN] result rc=<N> state=done|running|interrupted run=<…> pass=<N> fail=<N> notRun=<N> source=memory|file
+[VIPLE-VR-ADMIN] summary written | summary-skip <原因> | status from saved summary | saved summary unreadable
+[VIPLE-VR-SELFTEST] T<n>.<情境> result=PASS|FAIL|INFO|NOT-RUN <細節>
+[VIPLE-VR-SELFTEST] T<n> end pass=<N> fail=<N> notRun=<N> ms=<N>
+[VIPLE-VR-SELFTEST] (final) pass=<N> fail=<N> notRun=<N> rc=<N> ms=<N>
+```
+
+- 執行：以管理員身分跑 `viplestream-server.exe --vr-selftest [--detach] --only T0,T2,T6`（由執行中的 service 以 SYSTEM 代跑），
+  `--vr-status` 讀進度或結果，`--vr-abort` 中止。結果另存 `config\steamvr\selftest\<run>\summary.json`（service 重啟後
+  `--vr-status` 以 `source=file` 讀回；跑到一半重啟會回 `state=interrupted`、rc=6）。
+- `result=NOT-RUN`：這一版還不能跑的情境（例如 V2 的 `T2.gpu-hold`、`T2.live` 要到 V3），計入 `notRun=`，不影響 rc。
+  rc=0 不代表所有情境都驗過，要看 `notRun`。
+- 2026-09-28 `<host>` 實測：T0＋T2 `pass=29 fail=0 notRun=2`、T6 `pass=30`；`T2.second-instance` 的 SYSTEM 探測在實例已滿時回
+  ERROR_PIPE_BUSY（231），和 ERROR_ACCESS_DENIED（5）同樣算通過。
 
 ## 5c. Steam Frame 探測與執行環境（2.0 §SF，M2a 起）
 
