@@ -6,9 +6,11 @@
 
 // standard includes
 #include <bitset>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 
 // lib includes
@@ -24,6 +26,7 @@
 #include "src/thread_safe.h"
 #include "src/utility.h"
 #include "src/video_colorspace.h"
+#include "src/vr/vr_frame_meta.h"
 
 extern "C" {
 #include <moonlight-common-c/src/Limelight.h>
@@ -410,6 +413,12 @@ namespace platf {
     std::int32_t row_pitch {};
 
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+
+    // VipleStream 2.0 §VR（M1b S1-03）：這一幀的 VR metadata。只有 pcvr 的擷取端
+    // （display_vr_t）會填；一般 session 與 M1a stub 永遠是 nullopt。
+    // 影像池回收時（video.cpp 的 pull_free_image_callback）與 frame_timestamp 一起清掉，
+    // 避免上一幀的 pose／frame_id 被帶到下一幀。
+    std::optional<::video::vr_frame_meta_t> vr;
 
     virtual ~img_t() = default;
   };
@@ -932,5 +941,24 @@ namespace platf {
    * @return A unique pointer to timer
    */
   std::unique_ptr<high_precision_timer> create_high_precision_timer();
+
+  /**
+   * @brief VipleStream 2.0 §VR（M1b S1-01／S1-12）：VR 路徑共用的單調時鐘，目前的 tick 值。
+   * @details 平台中立的宣告，讓 stream.cpp 的 tracking handler、vr_selftest 等共用程式碼在
+   *          Linux／macOS 也能編譯（vr_session／vr_clock 是純模組，不直接呼叫它，tick 由
+   *          呼叫端取好傳入）。實作依平台分開：
+   *            - Windows：QueryPerformanceCounter 的原始值（QPC tick），與 driver 寫進 shm 的
+   *              present_qpc／submit_qpc 等欄位同一個時基，可以直接相減。
+   *            - Linux／macOS：CLOCK_MONOTONIC，單位 ns。
+   *          tick 換成時間一律用整數公式，不要假設頻率等於 10 MHz。
+   * @return 目前的 tick 值。
+   */
+  int64_t vr_clock_ticks();
+
+  /**
+   * @brief VipleStream 2.0 §VR：vr_clock_ticks() 每秒的 tick 數。
+   * @return Windows 為 QueryPerformanceFrequency（快取值）；Linux／macOS 固定 1'000'000'000。
+   */
+  int64_t vr_clock_frequency();
 
 }  // namespace platf

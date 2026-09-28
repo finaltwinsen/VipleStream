@@ -286,10 +286,17 @@ namespace platf::dxgi {
 
       // Start new frame pacing group if necessary, snapshot() is called with non-zero timeout
       if (status == capture_e::timeout || (status == capture_e::ok && !frame_pacing_group_start)) {
+        snapshot_steady_now.reset();
         status = snapshot(pull_free_image_cb, img_out, 200ms, *cursor);
 
         if (status == capture_e::ok && img_out) {
-          frame_pacing_group_start = img_out->frame_timestamp;
+          // M1b S1-01（K9）：節拍群組錨點刻意維持舊行為，不跟著 frame_timestamp 的修正移動。
+          // 舊版 qpc_time_difference 小了 10⁴ 倍，frame_timestamp 實際上 ≈ snapshot 內換算當下的
+          // steady_clock（誤差只有數 µs）；修正後 frame_timestamp 變成真正的 present 時間，若照舊拿它當錨點，
+          // 錨點會往前移（最多約一個 refresh），桌面節拍的相位就變了（不變式 5）。所以錨點改用
+          // frame_timestamp_from_qpc() 在同一個位置取樣的 steady_clock 當下 —— 與舊值相差僅數 µs，
+          // 也不含 snapshot 其後的 Map／複製時間（RAM 後端可達數 ms）。沒有 timestamp 的影像照舊警告並用 now。
+          frame_pacing_group_start = img_out->frame_timestamp ? snapshot_steady_now.value_or(std::chrono::steady_clock::now()) : std::optional<std::chrono::steady_clock::time_point> {};
 
           if (!frame_pacing_group_start) {
             BOOST_LOG(warning) << "snapshot() provided image without timestamp";
@@ -346,6 +353,53 @@ namespace platf::dxgi {
     }
 
     return capture_e::ok;
+  }
+
+  std::chrono::steady_clock::time_point display_base_t::frame_timestamp_from_qpc(int64_t frame_qpc) {
+    // M1b S1-01：兩個時鐘相鄰取樣（位置與舊版的換算式相同）；這個 steady_clock 當下同時是 K9 的節拍錨點。
+    const auto qpc_now = qpc_counter();
+    const auto steady_now = std::chrono::steady_clock::now();
+    snapshot_steady_now = steady_now;
+
+    // 防呆：QPC 在未來（不可能是真的 present 時間；VR 的 present_qpc 還來自不可信的 driver）、非正值、
+    // 或早於 now − 1 s → 改用 now 並計數。先比大小再相減，極端輸入也不會溢位。
+    // 改用 now 等於舊版的結果（舊版換算出來的值本來就 ≈ now），所以桌面在這些情況的行為不變。
+    constexpr auto max_age = std::chrono::seconds(1);
+    bool future = false;
+    bool stale = false;
+    std::chrono::nanoseconds age {};
+    if (frame_qpc > qpc_now) {
+      future = true;
+    } else if (frame_qpc <= 0) {
+      stale = true;
+    } else {
+      age = qpc_time_difference(qpc_now, frame_qpc);
+      stale = age > max_age;
+    }
+
+    if (!future && !stale) {
+      return steady_now - age;
+    }
+
+    // 兩類各自節流：第一次立刻記，之後每 10 s 最多一行（計數是累計值）。
+    // 未來的時間一定是異常（時鐘或 driver 出錯）→ warning；過舊只會在擷取執行緒停頓、或 duplication 剛建立時
+    // 拿到很久以前的 present 才發生，改用 now 就等於舊版行為 → debug，不在預設 log level 製造雜訊。
+    auto &last_log = future ? qpc_guard_last_log_future : qpc_guard_last_log_stale;
+    const bool log_now = last_log == std::chrono::steady_clock::time_point {} || steady_now - last_log >= 10s;
+    if (future) {
+      ++qpc_guard_future;
+    } else {
+      ++qpc_guard_stale;
+    }
+    if (log_now) {
+      last_log = steady_now;
+      if (future) {
+        BOOST_LOG(warning) << "[VIPLE-VR-CAP] qpc-guard: frame timestamp in the future, replaced with now (future="sv << qpc_guard_future << " stale="sv << qpc_guard_stale << ')';
+      } else {
+        BOOST_LOG(debug) << "[VIPLE-VR-CAP] qpc-guard: frame timestamp older than 1s, replaced with now (future="sv << qpc_guard_future << " stale="sv << qpc_guard_stale << ')';
+      }
+    }
+    return steady_now;
   }
 
   /**
@@ -437,6 +491,113 @@ namespace platf::dxgi {
     } else {
       return STATUS_INVALID_PARAMETER;
     }
+  }
+
+  int display_base_t::init_device(IDXGIAdapter1 *selected_adapter) {
+    // M1b S1-05（K10）：以下從 init() 逐行搬出（舊版 display_base.cpp:555-598），log 文字不變。
+    // 只多一個防呆：沒有 adapter 就直接失敗（DDA／WGC 走到這裡時 adapter 一定已設好）。
+    if (!selected_adapter) {
+      BOOST_LOG(error) << "[VIPLE-VR-CAP] init_device: no adapter selected"sv;
+      return -1;
+    }
+
+    D3D_FEATURE_LEVEL featureLevels[] {
+      D3D_FEATURE_LEVEL_11_1,
+      D3D_FEATURE_LEVEL_11_0,
+      D3D_FEATURE_LEVEL_10_1,
+      D3D_FEATURE_LEVEL_10_0,
+      D3D_FEATURE_LEVEL_9_3,
+      D3D_FEATURE_LEVEL_9_2,
+      D3D_FEATURE_LEVEL_9_1
+    };
+
+    // R-init-4：用自己的區域變數，不再借用 init() 列舉迴圈的 adapter_p
+    IDXGIAdapter *adapter_p = nullptr;
+    HRESULT status = selected_adapter->QueryInterface(IID_IDXGIAdapter, (void **) &adapter_p);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Failed to query IDXGIAdapter interface"sv;
+      return -1;
+    }
+
+    status = D3D11CreateDevice(
+      adapter_p,
+      D3D_DRIVER_TYPE_UNKNOWN,
+      nullptr,
+      D3D11_CREATE_DEVICE_FLAGS,
+      featureLevels,
+      sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
+      D3D11_SDK_VERSION,
+      &device,
+      &feature_level,
+      &device_ctx
+    );
+
+    adapter_p->Release();
+
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Failed to create D3D11 device [0x"sv << util::hex(status).to_string_view() << ']';
+
+      return -1;
+    }
+
+    // Try to get D3D11.4 device context for fence-based synchronization
+    {
+      auto ctx4_status = device_ctx->QueryInterface(__uuidof(ID3D11DeviceContext4), (void **) &device_ctx4);
+      if (FAILED(ctx4_status)) {
+        BOOST_LOG(warning) << "ID3D11DeviceContext4 not available, fence-based sync will be disabled [0x"sv << util::hex(ctx4_status).to_string_view() << ']';
+      }
+    }
+
+    return 0;
+  }
+
+  int display_base_t::configure_frame_latency() {
+    // M1b S1-05：從 init() 的 "Try to reduce latency" 區段逐行搬出（舊版 display_base.cpp:713-726）。
+    // 以 IID_IDXGIDevice 查詢、存進 IDXGIDevice1 的寫法是上游原樣（D3D11 device 的 DXGI 介面在同一個
+    // 物件上實作 IDXGIDevice1），行為中性重構不順手改。
+    HRESULT status;
+    dxgi::dxgi1_t dxgi {};
+    status = device->QueryInterface(IID_IDXGIDevice, (void **) &dxgi);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Failed to query DXGI interface from device [0x"sv << util::hex(status).to_string_view() << ']';
+      return -1;
+    }
+
+    status = dxgi->SetMaximumFrameLatency(1);
+    if (FAILED(status)) {
+      BOOST_LOG(warning) << "Failed to set maximum frame latency [0x"sv << util::hex(status).to_string_view() << ']';
+    }
+
+    return 0;
+  }
+
+  adapter_t display_base_t::find_adapter_by_luid(const LUID &luid) {
+    // M1b S1-05（K10）：VR 擷取依 server 選定的 LUID 開 adapter（C.2 第 1 步）。自建 factory，
+    // 不碰任何 display 物件的成員；DDA／WGC 不呼叫這裡，所以桌面路徑沒有多出任何查找。
+    factory1_t factory1;
+    auto status = CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &factory1);
+    if (FAILED(status)) {
+      BOOST_LOG(warning) << "[VIPLE-VR-CAP] find_adapter_by_luid: CreateDXGIFactory1 failed [0x"sv << util::hex(status).to_string_view() << ']';
+      return nullptr;
+    }
+
+    util::safe_ptr<IDXGIFactory4, Release<IDXGIFactory4>> factory4;
+    status = factory1->QueryInterface(__uuidof(IDXGIFactory4), (void **) &factory4);
+    if (FAILED(status)) {
+      BOOST_LOG(warning) << "[VIPLE-VR-CAP] find_adapter_by_luid: IDXGIFactory4 not available [0x"sv << util::hex(status).to_string_view() << ']';
+      return nullptr;
+    }
+
+    adapter_t::pointer adapter_p {};
+    status = factory4->EnumAdapterByLuid(luid, __uuidof(IDXGIAdapter1), (void **) &adapter_p);
+    if (FAILED(status) || !adapter_p) {
+      BOOST_LOG(warning) << "[VIPLE-VR-CAP] find_adapter_by_luid: no adapter for luid="sv
+                         << util::hex(luid.HighPart).to_string_view() << ':' << util::hex(luid.LowPart).to_string_view()
+                         << " [0x"sv << util::hex(status).to_string_view() << ']';
+      return nullptr;
+    }
+
+    return adapter_t {adapter_p};
   }
 
   int display_base_t::init(const ::video::config_t &config, const std::string &display_name) {
@@ -552,49 +713,10 @@ namespace platf::dxgi {
       return -1;
     }
 
-    D3D_FEATURE_LEVEL featureLevels[] {
-      D3D_FEATURE_LEVEL_11_1,
-      D3D_FEATURE_LEVEL_11_0,
-      D3D_FEATURE_LEVEL_10_1,
-      D3D_FEATURE_LEVEL_10_0,
-      D3D_FEATURE_LEVEL_9_3,
-      D3D_FEATURE_LEVEL_9_2,
-      D3D_FEATURE_LEVEL_9_1
-    };
-
-    status = adapter->QueryInterface(IID_IDXGIAdapter, (void **) &adapter_p);
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Failed to query IDXGIAdapter interface"sv;
+    // M1b S1-05（K10）：建 device 的區段抽成 init_device()，直接傳上面列舉到的 adapter（不重新查找）。
+    // 之後的 log、優先權區塊都留在原位，順序與舊版逐行相同（R-init-1～6）。
+    if (init_device(adapter.get())) {
       return -1;
-    }
-
-    status = D3D11CreateDevice(
-      adapter_p,
-      D3D_DRIVER_TYPE_UNKNOWN,
-      nullptr,
-      D3D11_CREATE_DEVICE_FLAGS,
-      featureLevels,
-      sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
-      D3D11_SDK_VERSION,
-      &device,
-      &feature_level,
-      &device_ctx
-    );
-
-    adapter_p->Release();
-
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Failed to create D3D11 device [0x"sv << util::hex(status).to_string_view() << ']';
-
-      return -1;
-    }
-
-    // Try to get D3D11.4 device context for fence-based synchronization
-    {
-      auto ctx4_status = device_ctx->QueryInterface(__uuidof(ID3D11DeviceContext4), (void **) &device_ctx4);
-      if (FAILED(ctx4_status)) {
-        BOOST_LOG(warning) << "ID3D11DeviceContext4 not available, fence-based sync will be disabled [0x"sv << util::hex(ctx4_status).to_string_view() << ']';
-      }
     }
 
     DXGI_ADAPTER_DESC adapter_desc;
@@ -711,18 +833,9 @@ namespace platf::dxgi {
     }
 
     // Try to reduce latency
-    {
-      dxgi::dxgi1_t dxgi {};
-      status = device->QueryInterface(IID_IDXGIDevice, (void **) &dxgi);
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Failed to query DXGI interface from device [0x"sv << util::hex(status).to_string_view() << ']';
-        return -1;
-      }
-
-      status = dxgi->SetMaximumFrameLatency(1);
-      if (FAILED(status)) {
-        BOOST_LOG(warning) << "Failed to set maximum frame latency [0x"sv << util::hex(status).to_string_view() << ']';
-      }
+    // M1b S1-05：區段抽成 configure_frame_latency()，仍在優先權區塊之後、frame rate 之前呼叫。
+    if (configure_frame_latency()) {
+      return -1;
     }
 
     client_frame_rate = config.framerate;

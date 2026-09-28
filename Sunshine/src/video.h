@@ -9,6 +9,7 @@
 #include "platform/common.h"
 #include "thread_safe.h"
 #include "video_colorspace.h"
+#include "vr/vr_frame_meta.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -51,22 +52,8 @@ namespace video {
     int vrIntraRefreshPeriodFrames = 0;  // 週期性 intra refresh 安全網的間隔（幀），0 = 關閉
   };
 
-  /**
-   * @brief VipleStream 2.0 §VR：一幀的 VR metadata（encode 執行緒填、videoBroadcast 執行緒
-   *        組 24 B 的 0x81 header）。POD，一般 session 永遠是全 0。
-   */
-  struct vr_frame_meta_t {
-    bool valid = false;  // 帶了收到的 tracking 樣本（POSE_VALID|ECHO_MATCHED）
-    uint32_t echoSampleId = 0;  // 0 = 沒有樣本
-    float pos[3] = {};  // HMD 位置（公尺）
-    float rot[4] = {0.0f, 0.0f, 0.0f, 1.0f};  // HMD 四元數 x, y, z, w
-    uint8_t flags = 0;  // VIPLE_VR_FF_*（REFRESH_DONE 以外；那個由 wave_done 決定）
-    bool in_wave = false;  // 屬於一波 intra refresh（frameType = 4）
-    bool wave_start = false;  // wave 的第一幀：videoBroadcast 看到就送 REFRESH_START
-    bool wave_done = false;  // wave 的最後一幀：vrFlags 加 VIPLE_VR_FF_REFRESH_DONE
-    uint8_t wave_len = 0;  // wave 長度（REFRESH_START.frameCnt）
-    uint8_t wave_reason = 0;  // VIPLE_VR_REFRESH_*
-  };
+  // VipleStream 2.0 §VR：vr_frame_meta_t 已搬到 vr/vr_frame_meta.h（M1b S1-03），
+  // 因為 platform/common.h 的 img_t 也要用它，留在這裡會形成 include 循環。
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt);

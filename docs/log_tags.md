@@ -410,6 +410,27 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
   少了這個就會被判 stall。
 - `gap` 是 sampleId 跳號累計，也就是上行丟失的估計；`ooo` 是倒退或重複。
 - VR session 的 control 迴圈每 4 ms 醒一次，只有 VR session 如此。
+- **M1b 起的 log 衛生**：VR 相關行的 session GUID 只印前 8 hex（`::vr::log_guid`）；寫給 client 的
+  `<VipleStreamVRSession>` 仍是完整值。
+- `[VIPLE-VR-CAP] qpc-guard: frame timestamp in the future, replaced with now (future=N stale=M)`（warning）／
+  `… older than 1s …`（debug）：擷取的 QPC 時間戳不可信時改用 now 並計數，兩類各自每 10 s 最多一行。
+  M1b 修正 `qpc_time_difference`（舊版小 10⁴ 倍）後才有意義；桌面 session 正常情況下不會出現 warning。
+- `[VIPLE-VR-CAP] init_device: no adapter selected`：`display_base_t::init_device` 收到空 adapter（DDA／WGC 不會走到）。
+
+### 5b-1. 機密與權限（M1b 起，Windows server）
+
+- `config: 'relay_psk' = <redacted len=N>`：`config::is_secret_key()` 為真的鍵（`relay_psk`、`relay_url`、結尾
+  `_psk`／`_password`／`_secret`／`_token`／`_key`）在 config dump 一律遮蔽；兩個輸出點（`apply_config` 與
+  `main.cpp` 重印）都遮。
+- `[RELAY] Target: wss://<host#xxxxxxxx>:443`：relay 連線 log 不印 host 原文，改印 SHA-256 前 8 hex。
+- `[VIPLE-SEC] config-acl tightened files=N skipped=M`：server（SYSTEM）啟動時把 `config\` 頂層的
+  `sunshine.conf`、conf 備份、`sunshine*.log*`、`viplestream-svc.log`、`sunshine-cli.log`、`sunshine_state.json`
+  與 `credentials\` 底下的檔案設成 protected DACL `O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)`（一般使用者不可讀）；
+  目錄本身的 DACL 不動。`[VIPLE-SEC] webui-port publish failed step=… err=…`：`config\webui_port`（給
+  `--shortcut` 用的非機密 port 號）寫入失敗。
+- CLI 模式（`--version`、`--creds`、`--vr-selftest` 等任何 `--<command>`）的 log 寫到同目錄的 `sunshine-cli.log`，
+  **不再截斷** service 使用中的 `sunshine.log`。service 自己的 stdout log 由 `%SystemRoot%\Temp\viplestream.log`
+  搬到 `<install>\config\viplestream-svc.log`（protected DACL）。
 
 ---
 

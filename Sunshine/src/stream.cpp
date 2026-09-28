@@ -1420,7 +1420,7 @@ namespace stream {
       ctl.statePeer = session->control.peer;
       vr_state.queue_state(VIPLE_VR_STATE_STUB_ECHO, 100, VIPLE_VR_STATE_CODE_NONE);
       BOOST_LOG(info) << "[VIPLE-VR-SESSION] control connected, STATE stub-echo queued (session="
-                      << vr_state.negotiated().guid << ')';
+                      << ::vr::log_guid(vr_state.negotiated().guid) << ')';
     }
 
     if (now - ctl.lastStats >= 1s) {
@@ -3371,7 +3371,10 @@ namespace stream {
             frame_is_dupe = true;
           }
           using rtp_tick = std::chrono::duration<uint32_t, std::ratio<1, 90000>>;
-          uint32_t timestamp = std::chrono::round<rtp_tick>(*packet->frame_timestamp - video_epoch).count();
+          // §M1b S1-01：QPC 換算修正後 frame_timestamp 是真正的 present 時間，session 第一幀的
+          // present 可能早於 video_epoch（仍在 1 s 防呆內），相減為負轉 uint32 會繞回 2^32 附近。
+          // 夾到 epoch：舊版的值一定 ≥ epoch，所以桌面行為不變。
+          uint32_t timestamp = std::chrono::round<rtp_tick>(std::max(*packet->frame_timestamp, video_epoch) - video_epoch).count();
 
           // set FEC info now that we know for sure what our percentage will be for this frame
           for (auto x = 0; x < shards.size(); ++x) {
@@ -4157,7 +4160,7 @@ namespace stream {
                         << " bad=" << s.pose_bad
                         << " resets=" << s.pose_resets
                         << " lastId=" << s.last_sample_id;
-        BOOST_LOG(info) << "[VIPLE-VR-SESSION] (final) session=" << session.vr->negotiated().guid
+        BOOST_LOG(info) << "[VIPLE-VR-SESSION] (final) session=" << ::vr::log_guid(session.vr->negotiated().guid)
                         << " frames tagged=" << s.frames_tagged
                         << " fallback=" << s.frames_fallback
                         << " loss=" << s.loss_rx
@@ -4318,7 +4321,7 @@ namespace stream {
       if (session.vr) {
         ::vr::set_active(session.vr);
         const auto &neg = session.vr->negotiated();
-        BOOST_LOG(info) << "[VIPLE-VR-SESSION] stream session start session=" << neg.guid
+        BOOST_LOG(info) << "[VIPLE-VR-SESSION] stream session start session=" << ::vr::log_guid(neg.guid)
                         << " mode=stub codec=" << ::vr::codec_name(neg.codec)
                         << " recovery=" << (neg.recovery_intra ? "intra" : "idr")
                         << " loopTimeout=" << session.control.loopTimeout.load().count() << "ms";

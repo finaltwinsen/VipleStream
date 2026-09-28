@@ -34,6 +34,8 @@
 
 #ifdef _WIN32
   #include <shellapi.h>
+
+  #include "platform/windows/config_acl.h"
 #endif
 
 #if !defined(__ANDROID__) && !defined(__APPLE__)
@@ -61,6 +63,51 @@ namespace config {
   void warn_config(std::string message) {
     BOOST_LOG(warning) << message;
     deferred_config_warnings.push_back(std::move(message));
+  }
+
+  // VipleStream §S1-02（K25）：config dump 的兩個輸出點（apply_config 的逐鍵 log、main.cpp 的重印）
+  // 都經過 loggable_value，relay PSK 之類的值不再以明文進 stdout、sunshine.log、viplestream-svc.log。
+  // 比對不分大小寫：鍵名拼錯大小寫時雖然不會被套用，但仍會出現在 dump 裡，照樣要遮。
+  bool is_secret_key(std::string_view name) {
+    std::string key;
+    key.reserve(name.size());
+    for (const char ch : name) {
+      key.push_back((ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch - 'A' + 'a') : ch);
+    }
+
+    if (key == "relay_psk"sv || key == "relay_url"sv) {
+      return true;
+    }
+    for (const auto suffix : {"_psk"sv, "_password"sv, "_secret"sv, "_token"sv, "_key"sv}) {
+      if (key.ends_with(suffix)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  namespace {
+    // loggable_value 自己產生的佔位字串：`<redacted len=` + 1～10 位數字 + `>`
+    bool is_redacted_placeholder(std::string_view value) {
+      constexpr auto prefix = "<redacted len="sv;
+      if (!value.starts_with(prefix) || !value.ends_with('>')) {
+        return false;
+      }
+      const auto digits = value.substr(prefix.size(), value.size() - prefix.size() - 1);
+      if (digits.empty() || digits.size() > 10) {
+        return false;
+      }
+      return std::all_of(digits.begin(), digits.end(), [](char ch) {
+        return ch >= '0' && ch <= '9';
+      });
+    }
+  }  // namespace
+
+  std::string loggable_value(std::string_view name, std::string_view value) {
+    if (!is_secret_key(name) || is_redacted_placeholder(value)) {
+      return std::string {value};
+    }
+    return std::format("<redacted len={}>", value.size());
   }
 
   namespace nv {
@@ -1189,8 +1236,11 @@ namespace config {
 
   void apply_config(std::unordered_map<std::string, std::string> &&vars) {
     for (auto &[name, val] : vars) {
-      BOOST_LOG(info) << "config: '"sv << name << "' = "sv << val;
-      modified_config_settings[name] = val;
+      // VipleStream §S1-02：這一行在 logging::init() 之前，只到 stdout（service 下即 viplestream-svc.log）；
+      // modified_config_settings 只存遮蔽後的值（解析用下面的 vars 原值）
+      auto shown = loggable_value(name, val);
+      BOOST_LOG(info) << "config: '"sv << name << "' = "sv << shown;
+      modified_config_settings[name] = std::move(shown);
     }
 
     int_f(vars, "qp", video.qp);
@@ -1540,6 +1590,35 @@ namespace config {
     }
   }
 
+#ifdef _WIN32
+  namespace {
+    /**
+     * VipleStream [VIPLE-SEC]：`--shortcut`（開始功能表捷徑，UAC 過濾後的 token）在 sunshine.conf 被 SYSTEM
+     * server 收緊成只有 SY／BA 之後讀不到 conf；file_handler::read_file 會靜默回空字串，port 落回預設值，
+     * 自訂 port 的安裝就會開錯 Web UI 網址。conf「存在但打不開」時，改用 SYSTEM server 發佈的
+     * `<config>\webui_port`；也讀不到就在 stdout 警告（logging 還沒初始化），不再靜默套用預設值。
+     * conf 讀得到（或不存在）時什麼都不做，行為與以前相同。
+     */
+    void use_published_webui_port() {
+      if (std::ifstream {sunshine.config_file}.is_open()) {
+        return;
+      }
+      // 確定不存在才返回；連屬性都查不到（ec 非零）時也當成「存在但打不開」
+      std::error_code ec;
+      if (!fs::exists(sunshine.config_file, ec) && !ec) {
+        return;
+      }
+      const auto published = platf::config_acl::read_published_webui_port(platf::appdata());
+      // 範圍與 apply_config 對 "port" 的檢查相同
+      if (published && *published >= 1024 + nvhttp::PORT_HTTPS && *published <= 65535 - rtsp_stream::RTSP_SETUP_PORT) {
+        sunshine.port = static_cast<std::uint16_t>(*published);
+        return;
+      }
+      std::cout << "[VIPLE-SEC] shortcut: sunshine.conf not readable; using default Web UI port" << std::endl;
+    }
+  }  // namespace
+#endif
+
   int parse(int argc, char *argv[]) {
     std::unordered_map<std::string, std::string> cmd_vars;
 #ifdef _WIN32
@@ -1654,6 +1733,9 @@ namespace config {
       return 1;
     }
     if (shortcut_launch) {
+      // VipleStream [VIPLE-SEC]：conf 已被收緊、這個行程讀不到時，改用 server 發佈的 Web UI port
+      use_published_webui_port();
+
       if (!service_ctrl::is_service_running()) {
         // If the service isn't running, relaunch ourselves as admin to start it
         WCHAR executable[MAX_PATH];

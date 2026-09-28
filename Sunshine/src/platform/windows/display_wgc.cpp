@@ -214,7 +214,9 @@ namespace platf::dxgi {
       return capture_e::error;
     }
     capture_access->GetInterface(IID_ID3D11Texture2D, (void **) out);
-    out_time = consumed_frame.SystemRelativeTime().count();  // raw ticks from query performance counter
+    // M1b S1-01（ops-m3）：SystemRelativeTime() 是 TimeSpan（100 ns 單位、QPC 時基），不是 raw QPC tick；
+    // 明確換成 QPC tick（QPF = 10 MHz 時數值不變，但不再依賴這個巧合）
+    out_time = qpc_from_100ns(consumed_frame.SystemRelativeTime().count());
     return capture_e::ok;
   }
 
@@ -263,7 +265,8 @@ namespace platf::dxgi {
       return capture_status;
     }
 
-    auto frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), frame_qpc);
+    // M1b S1-01：frame_qpc 已由 next_frame() 換成 QPC tick；改走共用換算（修正後的公式＋防呆＋K9 錨點取樣）
+    auto frame_timestamp = frame_timestamp_from_qpc((int64_t) frame_qpc);
     D3D11_TEXTURE2D_DESC desc;
     src->GetDesc(&desc);
 

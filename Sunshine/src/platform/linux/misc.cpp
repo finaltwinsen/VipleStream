@@ -10,6 +10,7 @@
 
 // standard includes
 #include <cstring>
+#include <ctime>  // clock_gettime：§VR vr_clock_ticks()
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -1232,5 +1233,19 @@ namespace platf {
 
   std::unique_ptr<high_precision_timer> create_high_precision_timer() {
     return std::make_unique<linux_high_precision_timer>();
+  }
+
+  int64_t vr_clock_ticks() {
+    // VipleStream 2.0 §VR（M1b S1-01）：非 Windows 的 VR 時鐘是 CLOCK_MONOTONIC，單位 ns。
+    // Linux PCVR 不在 2.0 範圍（不變式 10），這裡只是讓平台無關的 VR 程式碼能編譯、連結。
+    struct timespec ts {};
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+      return 0;
+    }
+    return (int64_t) ts.tv_sec * 1'000'000'000 + (int64_t) ts.tv_nsec;
+  }
+
+  int64_t vr_clock_frequency() {
+    return 1'000'000'000;
   }
 }  // namespace platf

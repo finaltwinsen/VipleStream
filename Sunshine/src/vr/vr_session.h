@@ -130,6 +130,27 @@ namespace vr {
    */
   std::string format_session_element(const negotiated_t &neg);
 
+  /**
+   * @brief log 用的 session GUID 縮寫（前 8 hex，§M1b S1-02 VR log 衛生）。
+   *        寫給 client 的 `<VipleStreamVRSession>` 一律用完整值，只有 log 用這個。
+   */
+  inline std::string log_guid(std::string_view guid) {
+    return std::string(guid.substr(0, 8));
+  }
+
+  /**
+   * @brief `format_session_element` 的 log 版：`session=` 的值換成前 8 hex。
+   */
+  inline std::string format_session_element_for_log(const negotiated_t &neg) {
+    std::string s = format_session_element(neg);
+    if (!neg.guid.empty()) {
+      if (auto pos = s.find(neg.guid); pos != std::string::npos) {
+        s.replace(pos, neg.guid.size(), log_guid(neg.guid));
+      }
+    }
+    return s;
+  }
+
   // ── 每個 VR session 的共享狀態 ──────────────────────────────────────
 
   /**

@@ -1219,7 +1219,7 @@ namespace nvhttp {
                     << " ctrl="sv << params.ctrl
                     << " overscan="sv << params.overscan
                     << " force="sv << (params.force ? 1 : 0)
-                    << " -> "sv << ::vr::format_session_element(*neg)
+                    << " -> "sv << ::vr::format_session_element_for_log(*neg)
                     << " (serverIntra="sv << server_intra << " safetyMs="sv << neg->safety_ms << ')';
     return neg;
   }

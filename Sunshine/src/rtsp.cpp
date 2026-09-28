@@ -1275,7 +1275,7 @@ namespace rtsp_stream {
                            << " != negotiated hz " << neg.params.hz;
       }
 
-      BOOST_LOG(info) << "[VIPLE-VR-SESSION] RTSP ANNOUNCE session=" << neg.guid
+      BOOST_LOG(info) << "[VIPLE-VR-SESSION] RTSP ANNOUNCE session=" << ::vr::log_guid(neg.guid)
                       << " vrProfile=1 irFrames=" << config.monitor.vrIntraRefreshFrames
                       << " irPeriodFrames=" << config.monitor.vrIntraRefreshPeriodFrames
                       << " enableIntraRefresh=" << config.monitor.enableIntraRefresh

@@ -243,10 +243,55 @@ namespace platf::dxgi {
     const char *colorspace_to_string(DXGI_COLOR_SPACE_TYPE type);
     virtual std::vector<DXGI_FORMAT> get_supported_capture_formats() = 0;
 
+    /**
+     * @brief 依 LUID 找 adapter（M1b S1-05，K10）：給 VR 擷取用，DDA／WGC 不經過這裡。
+     * @details IDXGIFactory4::EnumAdapterByLuid；每次呼叫自建 factory，不動任何成員。
+     * @param luid 要找的 adapter LUID。
+     * @return 找到的 adapter；失敗回 nullptr（原因記在 log）。
+     */
+    static adapter_t find_adapter_by_luid(const LUID &luid);
+
   protected:
     int get_pixel_pitch() {
       return (capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 8 : 4;
     }
+
+    /**
+     * @brief 在「已選好的」adapter 上建立擷取用的 D3D11 device（M1b S1-05，K10）。
+     * @details 從 init() 逐行搬出：D3D11CreateDevice → device、feature_level、device_ctx，再取
+     *          device_ctx4（失敗只警告）。不設 `adapter` 成員、不印 "Device Description" log、不碰
+     *          GPU 優先權：呼叫端先把 `adapter` 設好再傳進來（DDA／WGC 直接傳列舉到的 adapter，不重新查找；
+     *          VR 傳 find_adapter_by_luid() 的結果）。
+     * @param selected_adapter 已選定的 adapter（不取得所有權）。
+     * @return 0 成功；-1 失敗（錯誤已記 log）。
+     */
+    int init_device(IDXGIAdapter1 *selected_adapter);
+
+    /**
+     * @brief SetMaximumFrameLatency(1)（M1b S1-05；從 init() 的 "Try to reduce latency" 區段逐行搬出）。
+     * @return 0 成功（SetMaximumFrameLatency 本身失敗只警告）；-1 QueryInterface 失敗。
+     */
+    int configure_frame_latency();
+
+    /**
+     * @brief 把擷取 API 給的 QPC 時間換成 steady_clock 的 frame_timestamp（M1b S1-01）。
+     * @details 用修正後的 qpc_time_difference()。防呆：QPC 在未來、非正值、或早於 now − 1 s 時改用 now
+     *          並計數（`[VIPLE-VR-CAP] qpc-guard`：未來＝warning、過舊＝debug，兩類各自每 10 s 最多一行）。
+     *          同時把這次取樣的 steady_clock
+     *          當下記進 snapshot_steady_now，給 capture() 當節拍群組錨點（K9）。只在擷取執行緒呼叫。
+     * @param frame_qpc QPC tick（DXGI 的 LastPresentTime／LastMouseUpdateTime、WGC 換算後的值、VR 的 present_qpc）。
+     * @return 對應的 steady_clock 時間點。
+     */
+    std::chrono::steady_clock::time_point frame_timestamp_from_qpc(int64_t frame_qpc);
+
+    /// K9：最近一次 frame_timestamp_from_qpc() 取樣的 steady_clock 當下；capture() 在 200 ms 的 snapshot 前清掉。
+    std::optional<std::chrono::steady_clock::time_point> snapshot_steady_now;
+
+    /// S1-01 防呆計數（display 物件生命週期內累計；reinit 重建物件後歸零）與兩類 log 各自的節流時間點。
+    uint64_t qpc_guard_future = 0;
+    uint64_t qpc_guard_stale = 0;
+    std::chrono::steady_clock::time_point qpc_guard_last_log_future {};
+    std::chrono::steady_clock::time_point qpc_guard_last_log_stale {};
 
     virtual capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) = 0;
     virtual capture_e release_snapshot() = 0;

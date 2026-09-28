@@ -1478,6 +1478,7 @@ namespace video {
           // trim allocated but unused portion of the pool based on timeouts
           trim_imgs();
           img_out->frame_timestamp.reset();
+          img_out->vr.reset();  // §VR（M1b S1-03）：回收的影像不可帶著上一幀的 VR metadata
           return true;
         } else {
           // sleep and retry if image pool is full
@@ -2838,6 +2839,7 @@ namespace video {
       auto pull_free_image_callback = [&img](std::shared_ptr<platf::img_t> &img_out) -> bool {
         img_out = img;
         img_out->frame_timestamp.reset();
+        img_out->vr.reset();  // §VR（M1b S1-03）：sync 路徑重複使用同一張影像，一樣要清掉上一幀的 VR metadata
         return true;
       };
 

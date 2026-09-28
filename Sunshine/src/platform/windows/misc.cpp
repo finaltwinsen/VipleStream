@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -1795,18 +1796,81 @@ namespace platf {
     return 0;
   }
 
-  std::chrono::nanoseconds qpc_time_difference(int64_t performance_counter1, int64_t performance_counter2) {
-    auto get_frequency = []() {
-      LARGE_INTEGER frequency;
-      frequency.QuadPart = 0;
-      QueryPerformanceFrequency(&frequency);
-      return frequency.QuadPart;
-    };
-    static const double frequency = get_frequency();
-    if (frequency) {
-      return std::chrono::nanoseconds((int64_t) ((performance_counter1 - performance_counter2) * frequency / std::nano::den));
+  int64_t qpc_frequency() {
+    // QPF 在開機後固定不變；函式區域 static 的初始化是執行緒安全的，只查一次。
+    static const int64_t frequency = []() -> int64_t {
+      LARGE_INTEGER f;
+      f.QuadPart = 0;
+      if (!QueryPerformanceFrequency(&f)) {
+        return 0;
+      }
+      return f.QuadPart;
+    }();
+    return frequency;
+  }
+
+  int64_t qpc_ticks_to_ns(int64_t ticks) {
+    const int64_t f = qpc_frequency();
+    if (f <= 0) {
+      return 0;
     }
-    return {};
+    // 整數公式：整秒部分與餘數分開換算。|ticks % f| < f，所以 (ticks % f) * 1e9 在 f < 9.2e9 時不溢位，
+    // 餘數項結果 < 1e9。整秒部分超過 max_sec（約 292 年）就對稱飽和到 ±INT64_MAX：
+    // 上限先扣一秒，sec * 1e9 ≤ INT64_MAX − 1.85e9，再加上餘數項也不會溢位。
+    // 用 −INT64_MAX 而不是 INT64_MIN，保持 f(−t) == −f(t)，呼叫端取負號也不會溢位。
+    // 向 0 截斷的除法讓負值與正值對稱。
+    constexpr int64_t ns_per_s = std::nano::den;
+    constexpr int64_t max_ns = std::numeric_limits<int64_t>::max();
+    constexpr int64_t max_sec = max_ns / ns_per_s - 1;  // 9223372035
+    const int64_t sec = ticks / f;
+    if (sec > max_sec) {
+      return max_ns;
+    }
+    if (sec < -max_sec) {
+      return -max_ns;
+    }
+    return sec * ns_per_s + (ticks % f) * ns_per_s / f;
+  }
+
+  int64_t qpc_from_100ns(int64_t t100ns) {
+    const int64_t f = qpc_frequency();
+    if (f <= 0) {
+      return 0;
+    }
+    // 100 ns 單位 → 秒是 1e7；公式同 qpc_ticks_to_ns（f == 1e7 時，未飽和的範圍內結果恰好等於輸入）。
+    // 同樣對稱飽和：sec ≤ INT64_MAX / f − 1 時 sec * f ≤ INT64_MAX − f，加上餘數項（< f）不溢位；
+    // 餘數項 (t % 1e7) * f 在 f < 9.2e11 時不溢位。輸入是 OS 給的 WGC 時間，飽和只是補強。
+    constexpr int64_t units_per_s = 10'000'000;
+    constexpr int64_t max_ticks = std::numeric_limits<int64_t>::max();
+    const int64_t max_sec = max_ticks / f - 1;
+    const int64_t sec = t100ns / units_per_s;
+    if (sec > max_sec) {
+      return max_ticks;
+    }
+    if (sec < -max_sec) {
+      return -max_ticks;
+    }
+    return sec * f + (t100ns % units_per_s) * f / units_per_s;
+  }
+
+  std::chrono::nanoseconds qpc_time_difference(int64_t performance_counter1, int64_t performance_counter2) {
+    // M1b S1-01（K9）：舊版是 Δtick * frequency / 1e9（方向反了，10 MHz 時小 10⁴ 倍）。
+    // 以 unsigned 相減（模 2^64）再轉回 int64：兩個正常 QPC 值的結果與有號相減相同。
+    // 減法不會有號溢位，qpc_ticks_to_ns 再對乘法與加法做飽和，所以整條路徑對任何輸入
+    // （例如 VR driver 寫進 shm、不可信的值）都沒有有號溢位的 UB；極端輸入得到 ±INT64_MAX ns
+    // 或回繞後的差值（數值無意義）。呼叫端做 `steady_now - age` 之前仍要自己檢查範圍（§B.8 第 5 條）。
+    const auto delta = static_cast<int64_t>(static_cast<uint64_t>(performance_counter1) - static_cast<uint64_t>(performance_counter2));
+    return std::chrono::nanoseconds(qpc_ticks_to_ns(delta));
+  }
+
+  int64_t vr_clock_ticks() {
+    // VipleStream 2.0 §VR（M1b S1-01／S1-12）：Windows 的 VR 時鐘就是 QPC，與 driver 寫進 shm 的
+    // present_qpc／submit_qpc 同一個時基（QPC 在同一次開機中對所有行程、所有 session 一致）。
+    return qpc_counter();
+  }
+
+  int64_t vr_clock_frequency() {
+    return qpc_frequency();
   }
 
   std::string get_host_name() {

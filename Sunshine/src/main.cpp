@@ -30,6 +30,10 @@
 #include "upnp.h"
 #include "video.h"
 
+#ifdef _WIN32
+  #include "platform/windows/config_acl.h"
+#endif
+
 extern "C" {
 #include "rswrapper.h"
 }
@@ -175,7 +179,21 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
-  auto log_deinit_guard = logging::init(config::sunshine.min_log_level, config::sunshine.log_file);
+  // VipleStream §S1-02（K25）：CLI 模式（任何 --<command>，含未知指令）改寫同目錄的 sunshine-cli.log。
+  // logging::init() 是截斷式開檔；以前從 SSH 跑一次 --version 就會清掉 service 正在寫的 sunshine.log。
+  // stdout 照舊。tray 的自我更新在 service 行程內執行，不經過這裡。
+  std::string log_path = config::sunshine.log_file;
+  if (!config::sunshine.cmd.name.empty()) {
+    log_path = (std::filesystem::path {config::sunshine.log_file}.parent_path() / "sunshine-cli.log").string();
+  }
+
+#ifdef _WIN32
+  // VipleStream [VIPLE-SEC]：以 SYSTEM（或 config 已被收緊時的提升管理員）執行時，先以 protected SD
+  // 建立／收緊 log 檔，logging::init() 的截斷式開檔會沿用這個 SD，沒有「先繼承 Users:RX」的窗口。
+  platf::config_acl::prepare_log_file(platf::appdata(), log_path);
+#endif
+
+  auto log_deinit_guard = logging::init(config::sunshine.min_log_level, log_path);
   if (!log_deinit_guard) {
     BOOST_LOG(error) << "Logging failed to initialize"sv;
   }
@@ -189,8 +207,10 @@ int main(int argc, char *argv[]) {
   log_publisher_data();
 
   // Log modified_config_settings
+  // VipleStream §S1-02（K25）：modified_config_settings 寫入時就只存遮蔽後的值；這裡再套一次 loggable_value
+  // 當第二道防線（它對佔位字串是冪等的）。這是 config dump 進 sunshine.log 的唯一一處。
   for (auto &[name, val] : config::modified_config_settings) {
-    BOOST_LOG(info) << "config: '"sv << name << "' = "sv << val;
+    BOOST_LOG(info) << "config: '"sv << name << "' = "sv << config::loggable_value(name, val);
   }
   config::modified_config_settings.clear();
 
@@ -217,6 +237,19 @@ int main(int argc, char *argv[]) {
 
     return fn->second(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
   }
+
+#ifdef _WIN32
+  // VipleStream [VIPLE-SEC]：server 模式、以 SYSTEM 執行時，把 config 目錄內的機密檔案（sunshine.conf、
+  // sunshine*.conf* 備份、sunshine_state.json（或 config 頂層的 credentials_file／file_state）、
+  // sunshine*.log*、viplestream-svc.log、credentials\ 下的檔案）收成只有 SYSTEM 與 Administrators
+  // 可存取；冪等，只動檔案不動目錄。非 SYSTEM（console 模式）直接返回。寫一行 [VIPLE-SEC] config-acl。
+  {
+    const std::filesystem::path secret_files[] {config::sunshine.credentials_file, config::nvhttp.file_state};
+    platf::config_acl::tighten_config_dir(platf::appdata(), secret_files);
+  }
+  // conf 收緊後，一般使用者的 `--shortcut` 讀不到 conf 裡的 port；另外發佈一份不含機密的 webui_port 給它讀
+  platf::config_acl::publish_webui_port(platf::appdata(), config::sunshine.port);
+#endif
 
   // Adding guard here first as it also performs recovery after crash,
   // otherwise people could theoretically end up without display output.

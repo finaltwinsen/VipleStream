@@ -14,6 +14,7 @@
 #include "stun.h"
 #include "udp_tunnel.h"
 
+#include <cstdio>
 #include <cstring>
 #include <chrono>
 #include <thread>
@@ -54,6 +55,19 @@ namespace relay {
   // most intermediate NAT / LB timeouts.
   static constexpr int ENDPOINT_PUBLISH_SEC = 25;
   static constexpr int RECV_TIMEOUT_MS = 5000;
+
+  // §M1b S1-02：relay_url 被 config::is_secret_key 視為機密（config dump 印 <redacted>），
+  // 這裡的連線 log 也不印 host 原文，改印 SHA-256 前 8 hex，仍可跨行、跨次對照同一台 relay。
+  static std::string loggable_host(const std::string &host) {
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int len = 0;
+    if (!EVP_Digest(host.data(), host.size(), md, &len, EVP_sha256(), nullptr) || len < 4) {
+      return "<host>";
+    }
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%02x%02x%02x%02x", md[0], md[1], md[2], md[3]);
+    return std::string("<host#") + buf + ">";
+  }
 
   // ============================================================
   // Transport: abstracts plain TCP vs TLS socket
@@ -643,7 +657,7 @@ namespace relay {
     }
 
     BOOST_LOG(info) << "[RELAY] Target: " << (useTls ? "wss://" : "ws://")
-                    << host << ":" << port
+                    << loggable_host(host) << ":" << port
                     << " (TLS=" << (useTls ? "yes" : "no") << ")";
 
     // Wait for http::unique_id to be initialized (race condition with nvhttp startup)
@@ -665,7 +679,7 @@ namespace relay {
       snprintf(portStr, sizeof(portStr), "%u", port);
 
       if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0 || !res) {
-        BOOST_LOG(warning) << "[RELAY] Failed to resolve " << host;
+        BOOST_LOG(warning) << "[RELAY] Failed to resolve " << loggable_host(host);
         if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
         continue;
       }
@@ -686,7 +700,7 @@ namespace relay {
 #endif
 
       if (connect(sock, res->ai_addr, (int)res->ai_addrlen) != 0) {
-        BOOST_LOG(warning) << "[RELAY] TCP connect failed to " << host << ":" << port;
+        BOOST_LOG(warning) << "[RELAY] TCP connect failed to " << loggable_host(host) << ":" << port;
         closesocket(sock);
         freeaddrinfo(res);
         if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
@@ -745,7 +759,7 @@ namespace relay {
           if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
           continue;
         }
-        BOOST_LOG(info) << "[RELAY] TLS connected to " << host;
+        BOOST_LOG(info) << "[RELAY] TLS connected to " << loggable_host(host);
         transport = std::move(tls);
       } else {
         transport = std::make_unique<PlainTransport>(sock);

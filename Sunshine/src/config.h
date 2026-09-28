@@ -9,6 +9,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -17,7 +18,27 @@
 
 namespace config {
   // track modified config options
+  // VipleStream §S1-02（K25）：這裡只存「可以寫進 log 的值」（loggable_value 的結果），
+  // 機密鍵存的是 `<redacted len=N>`。它只用於 main.cpp 在 logging::init() 之後重印，
+  // 設定解析一律用 apply_config 收到的 vars 原值，不從這裡讀。
   inline std::unordered_map<std::string, std::string> modified_config_settings;
+
+  /**
+   * @brief VipleStream §S1-02（K25）：設定鍵是否為機密（值一律不得進 log 或 stdout）。
+   *
+   * 判定不分大小寫：完全等於 `relay_psk`、`relay_url`，或以 `_psk`、`_password`、
+   * `_secret`、`_token`、`_key` 結尾。
+   */
+  bool is_secret_key(std::string_view name);
+
+  /**
+   * @brief VipleStream §S1-02（K25）：回傳可以寫進 log 的值。
+   *
+   * 機密鍵回 `<redacted len=N>`（N＝原值的位元組數），其餘鍵回原值。已經是這個佔位字串的值
+   * 原樣返回（冪等），所以 main.cpp 重印 modified_config_settings 時再套一次，長度也不會
+   * 變成佔位字串自己的長度。
+   */
+  std::string loggable_value(std::string_view name, std::string_view value);
 
   // VipleStream §CFG.defer: logging::init() 在 config::parse() 之後才跑
   // （main.cpp 的 parse 在 init 之前幾行），在那之前 BOOST_LOG 只會流向 Boost 的

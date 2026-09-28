@@ -222,7 +222,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 6. vrserver 載入的 driver DLL 只能放在 `<install>\config\steamvr\<ver>\`：這是 self-update 不會碰的子樹，而且部署前要通過 owner、DACL、reparse point、hash 檢查。install 目錄如果一般使用者可寫，VR 一律停用（fail closed）。
 7. 所有設定走 Settings UI、CLI 或 Sunshine config，不用環境變數。既有的環境變數覆寫一律標成 dev-only，使用時在 log 警告。
 8. 跨行程同步不在 GPU 上等對方的 fence（§1.3）。
-9. SYSTEM 行程絕不寫入使用者可寫的路徑。使用者設定檔（`steamvr.vrsettings`、`openvrpaths.vrpath`）一律用使用者 token 經 `run_command` 修改。
+9. **任何特權身分（SYSTEM，或提升的管理員）**絕不寫入、也不執行使用者可寫路徑裡的東西（例如 Steam 整棵樹是 `BUILTIN\Users:(F)`，裡面的 `vrpathreg.exe`、`vrserver.exe` 都不可由特權身分執行）。使用者設定檔（`steamvr.vrsettings`、`openvrpaths.vrpath`）一律**以主控台使用者身分**修改：使用者 token 經 `run_command` 啟動的行程，或行程內在單一執行緒以 `ImpersonateLoggedOnUser` 模擬、寫完 `RevertToSelf`（使用者 2026-09-28 同意改寫；M1b 設計 K21）。
 10. 非 Windows server：VR 程式碼編成 stub，`/serverinfo` 的 b1 固定為 0，linux-server `.deb` 必須能建置，而且 KMS 擷取的行為不變。
 11. 從 2.0.0 起，六件 asset 同一個版號。每一次 push 和 GitHub release 都要使用者明確下令。
 

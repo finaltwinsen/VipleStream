@@ -6,6 +6,8 @@
 #include <format>
 #include <string>
 #include <Windows.h>
+#include <aclapi.h>
+#include <sddl.h>
 #include <WtsApi32.h>
 
 // PROC_THREAD_ATTRIBUTE_JOB_LIST is currently missing from MinGW headers
@@ -116,18 +118,95 @@ HANDLE DuplicateTokenForSession(DWORD console_session_id) {
   return new_token;
 }
 
-HANDLE OpenLogFileHandle() {
-  WCHAR log_file_name[MAX_PATH];
+// VipleStream §S1-02：安裝目錄（本 exe 在 <install>\tools\，main() 去掉兩層路徑後記在這裡）
+static std::wstring g_install_dir;
 
-  // Create viplestream.log in the Temp folder (usually %SYSTEMROOT%\Temp)
-  GetTempPathW(_countof(log_file_name), log_file_name);
-  wcscat_s(log_file_name, L"viplestream.log");
+// VipleStream §S1-02 [VIPLE-SEC]：viplestream-svc.log 的安全描述元。protected DACL 只有 SYSTEM 與
+// Administrators（沒有 Users），與 server 端 src/platform/windows/config_acl.cpp 的 kSddlFull 相同。
+constexpr auto LOG_FILE_SDDL = L"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)";
+
+// 把既有檔改名成 <name>.stale-<16 hex>，讓出原本的名字；失敗回 false
+static bool MoveAsideStaleLogFile(const std::wstring &path) {
+  FILETIME now;
+  GetSystemTimeAsFileTime(&now);
+  const auto stamp = (static_cast<unsigned long long>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+  const std::wstring stale = path + std::format(L".stale-{:016x}", stamp);
+  return MoveFileExW(path.c_str(), stale.c_str(), 0) != FALSE;
+}
+
+// 在 CREATE_ALWAYS 之前處理「檔案已存在」的情況（CREATE_ALWAYS 會保留既有檔的 SD，傳入的 SD 只用在新檔）：
+//   - owner 是 SYSTEM 或 Administrators → 就地套用 LOG_FILE_SDDL（冪等），沿用這個檔；
+//   - owner 是別人、是 reparse point／目錄／有多個 hard link、或打不開 → 改名成 .stale-<hex> 讓出名字。
+// 回 true 表示可以對 path 做 CREATE_ALWAYS。
+static bool PrepareExistingLogFile(const std::wstring &path, PSECURITY_DESCRIPTOR sd) {
+  HANDLE file = CreateFileW(path.c_str(), READ_CONTROL | WRITE_DAC | WRITE_OWNER, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    const DWORD err = GetLastError();
+    if (err == ERROR_FILE_NOT_FOUND) {
+      return true;  // 新檔：CREATE_ALWAYS 會直接套用 SD
+    }
+    // 連 SYSTEM 都打不開（例如被人加了拒絕 ACE）：改名讓開（config 目錄的 FILE_DELETE_CHILD 仍允許）
+    return MoveAsideStaleLogFile(path);
+  }
+
+  bool usable = false;
+  BY_HANDLE_FILE_INFORMATION file_info {};
+  if (GetFileInformationByHandle(file, &file_info) &&
+      !(file_info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
+      file_info.nNumberOfLinks == 1) {
+    PSID owner = nullptr;
+    PSECURITY_DESCRIPTOR current = nullptr;
+    if (GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &current) == ERROR_SUCCESS) {
+      usable = owner != nullptr && (IsWellKnownSid(owner, WinLocalSystemSid) || IsWellKnownSid(owner, WinBuiltinAdministratorsSid));
+      LocalFree(current);
+    }
+    if (usable) {
+      PSID new_owner = nullptr;
+      PSID new_group = nullptr;
+      PACL new_dacl = nullptr;
+      BOOL present = FALSE;
+      BOOL defaulted = FALSE;
+      usable = GetSecurityDescriptorOwner(sd, &new_owner, &defaulted) &&
+               GetSecurityDescriptorGroup(sd, &new_group, &defaulted) &&
+               GetSecurityDescriptorDacl(sd, &present, &new_dacl, &defaulted) && present &&
+               SetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, new_owner, new_group, new_dacl, nullptr) == ERROR_SUCCESS;
+    }
+  }
+  CloseHandle(file);
+
+  return usable || MoveAsideStaleLogFile(path);
+}
+
+HANDLE OpenLogFileHandle() {
+  // VipleStream §S1-02：以前寫在 %SystemRoot%\Temp\viplestream.log。那個目錄一般使用者可以建檔，
+  // 可以先建一個同名檔並保留自己的 DACL（CREATE_ALWAYS 會沿用既有檔的 SD），之後就讀得到 server 的
+  // 全部 stdout。改寫到 <install>\config\viplestream-svc.log（一般使用者在 config 目錄只有 RX），
+  // 並以 LOG_FILE_SDDL 建立。
+  // 不建立 config 目錄（它由安裝程式／server 建立）；任何一步失敗就把 stdout 接到 NUL，
+  // 絕不退回 Temp。server 自己的 sunshine.log 不受影響。
 
   // The file handle must be inheritable for our child process to use it
   SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), nullptr, TRUE};
 
-  // Overwrite the old sunshine.log
-  return CreateFileW(log_file_name, GENERIC_WRITE, FILE_SHARE_READ, &security_attributes, CREATE_ALWAYS, 0, nullptr);
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  PSECURITY_DESCRIPTOR sd = nullptr;
+  if (!g_install_dir.empty() && ConvertStringSecurityDescriptorToSecurityDescriptorW(LOG_FILE_SDDL, SDDL_REVISION_1, &sd, nullptr)) {
+    const std::wstring config_dir = g_install_dir + L"\\config";
+    const std::wstring log_file_name = config_dir + L"\\viplestream-svc.log";
+    const DWORD dir_attrs = GetFileAttributesW(config_dir.c_str());
+    if (dir_attrs != INVALID_FILE_ATTRIBUTES && (dir_attrs & FILE_ATTRIBUTE_DIRECTORY) && PrepareExistingLogFile(log_file_name, sd)) {
+      security_attributes.lpSecurityDescriptor = sd;
+      // Overwrite the old log
+      handle = CreateFileW(log_file_name.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &security_attributes, CREATE_ALWAYS, 0, nullptr);
+      security_attributes.lpSecurityDescriptor = nullptr;
+    }
+    LocalFree(sd);
+  }
+
+  if (handle == INVALID_HANDLE_VALUE) {
+    handle = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &security_attributes, OPEN_EXISTING, 0, nullptr);
+  }
+  return handle;
 }
 
 bool RunTerminationHelper(HANDLE console_token, DWORD pid) {
@@ -366,6 +445,7 @@ int main(int argc, char *argv[]) {
     }
   }
   SetCurrentDirectoryW(module_path);
+  g_install_dir = module_path;  // VipleStream §S1-02：viplestream-svc.log 放在 <install>\config
 
   // Trigger our ServiceMain()
   return StartServiceCtrlDispatcher(service_table);

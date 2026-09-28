@@ -191,7 +191,8 @@ namespace platf::dxgi {
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
     if (auto qpc_displayed = std::max(frame_info.LastPresentTime.QuadPart, frame_info.LastMouseUpdateTime.QuadPart)) {
       // Translate QueryPerformanceCounter() value to steady_clock time point
-      frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), qpc_displayed);
+      // M1b S1-01：改走共用換算（修正後的 qpc_time_difference、未來／過舊防呆、K9 節拍錨點取樣）
+      frame_timestamp = frame_timestamp_from_qpc(qpc_displayed);
     }
 
     if (frame_info.PointerShapeBufferSize > 0) {
