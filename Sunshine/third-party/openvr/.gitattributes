@@ -1,0 +1,7 @@
+# VipleStream §VR S2-01：vendored OpenVR SDK 一律逐位元組保存，不做換行轉換。
+# repo 根目錄的 `* text=auto` 加上 .195 的 core.autocrlf=true，checkout 時會把
+# LF 標頭改成 CRLF，sha256 就對不上上游（README.VipleStream.md 的雜湊表與
+# Build-SteamVRDriver.ps1 的新鮮度檢查都以上游位元組為準）。
+* -text
+*.lib binary
+*.dll binary

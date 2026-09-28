@@ -1,0 +1,5 @@
+# VipleStream §VR S2-01：Sunshine/.gitignore 全域排除 *.dll 與 *.lib（第 17、27 行），
+# 但 vendored 的 OpenVR 匯入庫與 runtime DLL 必須入庫。只放行這兩個確切路徑，
+# 避免這個目錄意外收進其他建置產物。
+!/lib/win64/openvr_api.lib
+!/bin/win64/openvr_api.dll
