@@ -313,16 +313,16 @@ TEST(VrSessionStateTest, TrackingOrderAndGap) {
   t.sampleId = 5;
   t.pose[VIPLE_VR_POSE_HMD].pos[1] = 1.5f;
   t.pose[VIPLE_VR_POSE_HMD].rot[3] = 1.0f;
-  EXPECT_TRUE(st.on_tracking(t, false));
+  EXPECT_TRUE(st.on_tracking(t, false, 0));
   t.sampleId = 4;  // 倒退
-  EXPECT_FALSE(st.on_tracking(t, false));
+  EXPECT_FALSE(st.on_tracking(t, false, 0));
   t.sampleId = 5;  // 重複
-  EXPECT_FALSE(st.on_tracking(t, true));
+  EXPECT_FALSE(st.on_tracking(t, true, 0));
   t.sampleId = 9;  // 跳號 3
-  EXPECT_TRUE(st.on_tracking(t, false));
+  EXPECT_TRUE(st.on_tracking(t, false, 0));
   t.version = 0;  // 版本不合
   t.sampleId = 10;
-  EXPECT_FALSE(st.on_tracking(t, false));
+  EXPECT_FALSE(st.on_tracking(t, false, 0));
 
   auto s = st.stats();
   EXPECT_EQ(s.pose_rx, 4u);
@@ -337,13 +337,13 @@ TEST(VrSessionStateTest, TrackingOrderAndGap) {
 
   // client 重新計數（大幅倒退）→ 接受並計 resets
   t.version = VIPLE_VR_TRACKING_VERSION;
-  st.on_tracking(t, false);  // 10
+  st.on_tracking(t, false, 0);  // 10
   for (uint32_t id = 11; id < 3000; ++id) {
     t.sampleId = id;
-    st.on_tracking(t, false);
+    st.on_tracking(t, false, 0);
   }
   t.sampleId = 1;
-  EXPECT_TRUE(st.on_tracking(t, false));
+  EXPECT_TRUE(st.on_tracking(t, false, 0));
   EXPECT_EQ(st.stats().pose_resets, 1u);
   EXPECT_EQ(st.snapshot()->sample_id, 1u);
 }

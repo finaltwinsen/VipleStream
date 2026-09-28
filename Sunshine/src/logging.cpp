@@ -265,6 +265,13 @@ namespace logging {
       << "    --version                 | print the version of sunshine"sv << std::endl
       << "    --check-update            | query the latest GitHub release (exit 2 = update available)"sv << std::endl
       << "    --self-update [--force] [package] | download and install the latest release (or a local zip/deb)"sv << std::endl
+#ifdef _WIN32
+      // VipleStream 2.0 §VR（M1b §F.5）：經 admin pipe 交給執行中的 server；需要提升的管理員
+      << "    --vr-selftest [--only T0,T2,T6] [--detach] [--probe-path exe] | run the VR self-test in the running server (elevated admin)"sv << std::endl
+      << "    --vr-status               | show the progress or result of the last VR self-test"sv << std::endl
+      << "    --vr-abort                | abort the running VR self-test"sv << std::endl
+      << "    --steamvr-driver status   | show the VR bridge state of the running server"sv << std::endl
+#endif
       << std::endl
       << "    flags"sv << std::endl
       << "        -0 | Read PIN from stdin"sv << std::endl

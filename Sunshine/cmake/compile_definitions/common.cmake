@@ -253,6 +253,15 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/vr/vr_platform.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_session.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_session.cpp"
+        # §VR M1b V2：IPC ABI（與 SteamVR driver／vr_probe 共用的單一來源）、bridge 平台中立介面、
+        # 時鐘對映（純模組）、selftest 協調（平台無關；Linux 也編譯，平台部分走 vr_stub.cpp）
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_ipc_abi.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_ipc_abi_table.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_bridge.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_clock.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_clock.cpp"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_selftest.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_selftest.cpp"
         ${PLATFORM_TARGET_FILES})
 
 if(NOT SUNSHINE_ASSETS_DIR_DEF)

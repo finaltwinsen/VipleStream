@@ -51,6 +51,7 @@
 #include "uuid.h"
 #include "video.h"
 #include "vr/vr_platform.h"
+#include "vr/vr_selftest.h"
 #include "vr/vr_session.h"
 
 #ifdef _WIN32
@@ -1175,6 +1176,11 @@ namespace nvhttp {
   bool vr_reject_if_busy(pt::ptree &tree, const std::string &caller_uuid, bool is_resume) {
     if (!::vr::busy_for(caller_uuid)) {
       return false;
+    }
+    // §M1b §F.5：`--vr-selftest` 執行期間持有 VR 預約（owner=selftest），所有 /launch 都在這裡被擋下
+    if (::vr::selftest::running()) {
+      put_vr_error(tree, is_resume, 503, VIPLE_VR_ERR_BUSY, "selftest running on this host");
+      return true;
     }
     put_vr_error(tree, is_resume, 503, VIPLE_VR_ERR_BUSY, "another device's VR session is active on this host (caller uuid=" + (caller_uuid.empty() ? "<unknown>"s : caller_uuid) + ")");
     return true;

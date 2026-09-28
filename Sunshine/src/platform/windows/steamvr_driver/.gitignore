@@ -1,0 +1,2 @@
+# Build-SteamVRDriver.ps1 的輸出（DLL、vr_probe、obj、fxc 產生的 header）
+out/

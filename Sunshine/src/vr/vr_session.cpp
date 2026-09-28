@@ -355,12 +355,21 @@ namespace vr {
 
   // ── session_state_t ──────────────────────────────────────────────────
 
-  session_state_t::session_state_t(negotiated_t neg, const void *stream_session):
+  session_state_t::session_state_t(negotiated_t neg, const void *stream_session, int64_t clock_frequency):
       neg_ {std::move(neg)},
       stream_session_ {stream_session} {
+    if (clock_frequency > 0) {
+      clock_.emplace(clock_frequency);
+    }
   }
 
-  bool session_state_t::on_tracking(const VIPLE_VR_TRACKING &sample, bool via_quic) {
+  bool session_state_t::on_tracking(const VIPLE_VR_TRACKING &sample, bool via_quic, int64_t arrival_ticks, tracking_timing_t *timing) {
+    if (timing) {
+      *timing = {};
+      timing->clock_enabled = clock_.has_value();
+      timing->arrival_ticks = arrival_ticks;
+    }
+
     if (sample.version < VIPLE_VR_TRACKING_VERSION || sample.sampleId == 0) {
       pose_bad_.fetch_add(1, std::memory_order_relaxed);
       return false;
@@ -369,6 +378,24 @@ namespace vr {
     pose_rx_.fetch_add(1, std::memory_order_relaxed);
     if (via_quic) {
       pose_via_quic_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // §M1b S1-12：時鐘對映。亂序／重複的樣本也餵（d 仍是有效量測）。估計器的鎖與 pose 的鎖分開、
+    // 不巢狀：兩條執行緒搶鎖的順序可能與到達順序相反，估計器內部會把時刻單調化。
+    int64_t target_ticks = 0;
+    if (clock_) {
+      const auto rtt = clk::select_rtt(rtt_quic_ns_.load(std::memory_order_relaxed), rtt_enet_ms_.load(std::memory_order_relaxed));
+      clk::sample_result_t res;
+      {
+        std::lock_guard clk_lk {clock_mtx_};
+        res = clock_->on_sample(arrival_ticks, sample.sampleTimeNs, sample.predictNs, via_quic, rtt);
+      }
+      target_ticks = res.target_server_ticks;
+      if (timing) {
+        timing->clock_fed = true;
+        timing->target_server_ticks = target_ticks;
+        timing->clock = res;
+      }
     }
 
     std::lock_guard lk {pose_mtx_};
@@ -394,7 +421,8 @@ namespace vr {
     const auto &hmd = sample.pose[VIPLE_VR_POSE_HMD];
     std::memcpy(s.pos, hmd.pos, sizeof(s.pos));
     std::memcpy(s.rot, hmd.rot, sizeof(s.rot));
-    s.arrival = std::chrono::steady_clock::now();
+    s.arrival_ticks = arrival_ticks;
+    s.target_server_ticks = target_ticks;
     latest_ = s;
     last_sample_id_.store(sample.sampleId, std::memory_order_relaxed);
     return true;
@@ -407,6 +435,14 @@ namespace vr {
   std::optional<pose_sample_t> session_state_t::snapshot() const {
     std::lock_guard lk {pose_mtx_};
     return latest_;
+  }
+
+  std::optional<clk::stats_t> session_state_t::clock_stats(bool with_jitter) const {
+    if (!clock_) {
+      return std::nullopt;
+    }
+    std::lock_guard lk {clock_mtx_};
+    return clock_->stats(with_jitter);
   }
 
   void session_state_t::expire_stale_wave_locked(std::chrono::steady_clock::time_point now) {
@@ -591,8 +627,10 @@ namespace vr {
 
   void session_state_t::queue_stats() {
     // 所有計數欄位都是 session 開始以來的累計值（VipleVr.h：STATS 走 UNSEQUENCED，
-    // 掉一筆也不會漏算，client 自行取差分）。clkOffset／staleCount 屬於 M1b 的時鐘對映，
-    // M1a 固定 0。
+    // 掉一筆也不會漏算，client 自行取差分）。
+    // clkOffsetUs／clkOffsetJitterUs（§M1b S1-12）：offset 是兩台機器單調時鐘的原點差，遠超過
+    // int32 µs 的範圍，所以取 µs 值的低 32 位（client 只能用相鄰兩筆的 int32 差）；jitter 未就緒
+    // （暖機 2 s 內、時鐘對映停用）是 0xFFFFFFFF。staleCount 屬於 driver 端（之後的切片），固定 0。
     VIPLE_VR_TLV_STATS st {};
     st.poseRx = (uint32_t) pose_rx_.load(std::memory_order_relaxed);
     st.poseOutOfOrder = (uint32_t) pose_ooo_.load(std::memory_order_relaxed);
@@ -601,8 +639,13 @@ namespace vr {
     st.framesFallback = (uint32_t) frames_fallback_.load(std::memory_order_relaxed);
     st.lossRx = (uint32_t) loss_rx_.load(std::memory_order_relaxed);
     st.refreshWaves = (uint32_t) refresh_waves_.load(std::memory_order_relaxed);
-    st.clkOffsetUs = 0;
-    st.clkOffsetJitterUs = 0;
+    if (const auto cs = clock_stats(true)) {
+      st.clkOffsetUs = clk::tlv_offset_us(cs->offset_ns);
+      st.clkOffsetJitterUs = clk::tlv_jitter_us(*cs);
+    } else {
+      st.clkOffsetUs = 0;
+      st.clkOffsetJitterUs = 0xFFFFFFFFu;
+    }
     st.staleCount = 0;
     queue_s2c(make_tlv(VIPLE_VR_S2C_STATS, &st, sizeof(st)), false);
   }

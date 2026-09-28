@@ -93,6 +93,12 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sc_hid_driver/VipleSCHid.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sc_hid_driver/VipleSCHid.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_platform_win.cpp"
+        # §VR M1b V2：vr_bridge（pipe／shm／ring 貼圖／握手）、admin pipe（--vr-selftest 的 server 端）、
+        # selftest 的 Windows 平台層（T0／T2／T6）
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_bridge_win.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_admin_pipe.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_admin_pipe.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_selftest_win.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/src/ViGEmClient.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include/ViGEm/Client.h"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include/ViGEm/Common.h"

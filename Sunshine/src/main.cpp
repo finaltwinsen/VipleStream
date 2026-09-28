@@ -29,9 +29,11 @@
 #include "stun.h"
 #include "upnp.h"
 #include "video.h"
+#include "vr/vr_selftest.h"
 
 #ifdef _WIN32
   #include "platform/windows/config_acl.h"
+  #include "platform/windows/vr_admin_pipe.h"
 #endif
 
 extern "C" {
@@ -73,6 +75,37 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
 #ifdef _WIN32
   {"restore-nvprefs-undo"sv, [](const char *name, int argc, char **argv) {
      return args::restore_nvprefs_undo();
+   }},
+  // VipleStream 2.0 §VR（M1b S1-18、§F.5）：經 admin pipe 請執行中的 SYSTEM server 代勞；只有提升的管理員能連
+  {"vr-selftest"sv, [](const char *name, int argc, char **argv) {
+     return platf::vr_admin::cli_vr_selftest(argc, argv);
+   }},
+  {"vr-status"sv, [](const char *name, int argc, char **argv) {
+     return platf::vr_admin::cli_vr_status(argc, argv);
+   }},
+  {"vr-abort"sv, [](const char *name, int argc, char **argv) {
+     return platf::vr_admin::cli_vr_abort(argc, argv);
+   }},
+  {"steamvr-driver"sv, [](const char *name, int argc, char **argv) {
+     return platf::vr_admin::cli_steamvr_driver(argc, argv);
+   }},
+#else
+  // VipleStream 2.0 §VR（S1-19）：非 Windows 沒有 SteamVR driver 與 VR IPC
+  {"vr-selftest"sv, [](const char *name, int argc, char **argv) {
+     BOOST_LOG(error) << "--vr-selftest is not supported on this platform"sv;
+     return vr::selftest::rc_unsupported;
+   }},
+  {"vr-status"sv, [](const char *name, int argc, char **argv) {
+     BOOST_LOG(error) << "--vr-status is not supported on this platform"sv;
+     return vr::selftest::rc_unsupported;
+   }},
+  {"vr-abort"sv, [](const char *name, int argc, char **argv) {
+     BOOST_LOG(error) << "--vr-abort is not supported on this platform"sv;
+     return vr::selftest::rc_unsupported;
+   }},
+  {"steamvr-driver"sv, [](const char *name, int argc, char **argv) {
+     BOOST_LOG(error) << "--steamvr-driver is not supported on this platform"sv;
+     return vr::selftest::rc_unsupported;
    }},
 #endif
 };
@@ -456,6 +489,15 @@ int main(int argc, char *argv[]) {
     return lifetime::desired_exit_code;
   }
 
+#ifdef _WIN32
+  // VipleStream 2.0 §VR（M1b S1-07／S1-18）：VR pipe（bridge，K3：一啟動就建、DACL 先只有 SY）與只給提升管理員的
+  // admin pipe（--vr-selftest 等 CLI 的通道）。不變式 5：vr_pcvr=disabled 時完全不啟動，VR 程式碼閒置。
+  std::unique_ptr<platf::deinit_t> vr_services;
+  if (config::vr.pcvr != config::vr_t::pcvr_e::disabled) {
+    vr_services = platf::vr_admin::start_services();
+  }
+#endif
+
   std::thread httpThread {nvhttp::start};
   std::thread configThread {confighttp::start};
   std::thread rtspThread {rtsp_stream::start};
@@ -483,6 +525,11 @@ int main(int argc, char *argv[]) {
   }
 
   mainThreadLoop(shutdown_event);
+
+#ifdef _WIN32
+  // 先中止進行中的 selftest（它持有 VR 預約、可能開著 vr_probe），再停 admin pipe 與 bridge（BYE(SERVER_SHUTDOWN)）
+  vr_services.reset();
+#endif
 
   httpThread.join();
   configThread.join();

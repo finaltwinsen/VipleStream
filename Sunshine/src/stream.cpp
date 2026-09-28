@@ -42,6 +42,7 @@ extern "C" {
 #include "tunnel_session.h"
 #include "udp_tunnel.h"
 #include "utility.h"
+#include "vr/vr_bridge.h"
 #include "vr/vr_session.h"
 
 #ifdef VIPLE_MPQUIC
@@ -1401,9 +1402,141 @@ namespace stream {
     }
   }
 
+  // ── §VR M1b S1-12：時鐘對映與 bridge 的 tracking 寫入 ──────────────────────
+  //
+  // 與時鐘模組（vr_clock.h／vr_session.h，§F.1）的契約：
+  //   - session_state_t 建構時給 platf::vr_clock_frequency()（session::alloc）；
+  //   - 0x5506 handler 一進來取 arrival = platf::vr_clock_ticks()，呼叫
+  //     on_tracking(sample, via_quic, arrival, &timing)，timing 帶回 target_server_ticks 與時鐘事件；
+  //   - RTT：QUIC 的 rtt_min 由本檔 control 執行緒每秒 set_rtt_quic_min_ns()；ENet 的基線由
+  //     IDX_PERIODIC_PING handler（持 abrMutex）set_rtt_enet_ms()；「< 16 ms 當 0」在 clk::select_rtt() 做；
+  //   - log 由呼叫端印：step／transport-switch／clock-reset 事件、10 秒與 (final) 行（clk::format_stats）。
+  // 時間一律是 platf::vr_clock_ticks()（Windows = raw QPC），不跨模組傳 steady_clock。
+
+  /**
+   * @brief 把 QUIC path 的 rtt_min 交給時鐘對映（control 執行緒，每秒一次；只有 VR session 會走到）。
+   *        沒有 QUIC session 或還沒有樣本時發布 -1，時鐘改用 ENet 基線（見 IDX_PERIODIC_PING handler）。
+   *        0x5506 handler 只讀 session_state_t 裡的 atomic，絕不自己碰 QuicSession（scout F §2.2）。
+   */
+  static void vr_publish_quic_rtt(session_t *session, ::vr::session_state_t &vr_state) {
+    int64_t rtt_ns = -1;
+#ifdef VIPLE_MPQUIC
+    if (config::stream.mpquic_enabled && quic_server::g_listener) {
+      auto quicSession = quic_server::g_listener->getSession(session->video.peer.address());
+      if (quicSession && quicSession->isReady()) {
+        float best = 0;
+        for (const auto &s : quicSession->getStats()) {
+          if (s.active && s.rttMinMs > 0 && (best == 0 || s.rttMinMs < best)) {
+            best = s.rttMinMs;
+          }
+        }
+        if (best > 0) {
+          rtt_ns = (int64_t) std::llround((double) best * 1e6);
+        }
+      }
+    }
+#endif
+    vr_state.set_rtt_quic_min_ns(rtt_ns);
+  }
+
+  /**
+   * @brief 時鐘對映的罕見事件 log（handler 執行緒；step／transport-switch／clock-reset 都是低頻事件）。
+   *        離群與夾值只計數，由 10 秒行的 outliers=／clamped= 呈現，不逐筆印。
+   */
+  static void vr_log_clock_events(const ::vr::session_state_t &vr_state, const ::vr::tracking_timing_t &timing, bool via_quic) {
+    const auto &c = timing.clock;
+    if (!c.step && !c.transport_switch && !c.clock_reset) {
+      return;
+    }
+    // 每種事件每秒最多一行（handler 在 ENet 與 picoquic 兩條執行緒上跑、每秒可達 180 筆；ENet 與 QUIC 並行時
+    // transport 可能來回切），被略過的次數加在下一行的 suppressed=；總數另見 10 秒行的 steps=／switches=／clockResets=。
+    // 同一時間只有一個 VR session（vr::busy_for），所以計數用行程層級的 atomic 即可。
+    struct limiter_t {
+      std::atomic<int64_t> last {0};
+      std::atomic<uint64_t> suppressed {0};
+
+      bool take(int64_t now, int64_t freq, uint64_t &skipped) {
+        int64_t prev = last.load(std::memory_order_relaxed);
+        if (prev != 0 && now - prev < freq) {
+          suppressed.fetch_add(1, std::memory_order_relaxed);
+          return false;
+        }
+        if (!last.compare_exchange_strong(prev, now, std::memory_order_relaxed)) {
+          suppressed.fetch_add(1, std::memory_order_relaxed);
+          return false;
+        }
+        skipped = suppressed.exchange(0, std::memory_order_relaxed);
+        return true;
+      }
+    };
+
+    static limiter_t step_lim, switch_lim, reset_lim;
+    const int64_t now = timing.arrival_ticks;
+    const int64_t freq = platf::vr_clock_frequency();
+    uint64_t skipped = 0;
+    if (c.step && step_lim.take(now, freq, skipped)) {
+      BOOST_LOG(info) << "[VIPLE-VR-CLK] step=" << c.step_ns / 1000 << "us offset=" << c.offset_ns / 1000
+                      << "us suppressed=" << skipped << " session=" << ::vr::log_guid(vr_state.negotiated().guid);
+    }
+    if (c.transport_switch && switch_lim.take(now, freq, skipped)) {
+      BOOST_LOG(info) << "[VIPLE-VR-CLK] transport-switch to=" << (via_quic ? "quic" : "enet")
+                      << " suppressed=" << skipped << " session=" << ::vr::log_guid(vr_state.negotiated().guid);
+    }
+    if (c.clock_reset && reset_lim.take(now, freq, skipped)) {
+      BOOST_LOG(warning) << "[VIPLE-VR-CLK] clock-reset (client clock jumped; estimator re-warming) suppressed=" << skipped
+                         << " session=" << ::vr::log_guid(vr_state.negotiated().guid);
+    }
+  }
+
+  /**
+   * @brief pcvr：已接受的 tracking 樣本 → bridge 的 tracking ring（K26：bridge 內部的 writer mutex 序列化
+   *        ENet、picoquic、selftest 三個來源）。
+   *
+   * 只在 on_tracking() 把樣本當成最新之後呼叫。bridge 沒有帶 session config 的 generation 時
+   * tracking_wanted() 為 false，這裡立刻返回：`vr_pcvr == disabled`（bridge 沒啟動）與 stub（沒有人設
+   * session config）都是這樣，M1a 的回聲路徑完全不變。只碰 bridge 自己的鎖，不碰 quic_f3_mutex。
+   */
+  static void vr_publish_tracking(const VIPLE_VR_TRACKING &sample, const ::vr::tracking_timing_t &timing) {
+    if (!::vr::bridge::tracking_wanted()) {
+      return;
+    }
+#if VIPLE_VR_BRIDGE_HAS_ABI
+    static_assert(sizeof(VIPLE_VR_POSE) == sizeof(vripc_pose_t), "0x5506 pose 與 IPC pose 版面必須一致");
+    static_assert(sizeof(VIPLE_VR_CONTROLLER_INPUT) == sizeof(vripc_ctrl_input_t), "0x5506 input 與 IPC input 版面必須一致");
+
+    ::vr::bridge::tracked_sample_t t;
+    t.sample_id = sample.sampleId;
+    t.space_epoch = sample.spaceEpoch;
+    t.flags = sample.flags;
+    t.sample_time_ns = sample.sampleTimeNs;
+    t.arrival_qpc = timing.arrival_ticks;
+    t.predict_ns = sample.predictNs;
+    std::memcpy(t.pose, sample.pose, sizeof t.pose);
+    std::memcpy(t.input, sample.input, sizeof t.input);
+    t.gaze_yaw_f16 = sample.gaze.yawF16;
+    t.gaze_pitch_f16 = sample.gaze.pitchF16;
+    t.gaze_conf = sample.gaze.confidence;
+    t.gaze_flags = sample.gaze.flags;
+
+    // target = sampleTime + predictNs + offset（時鐘對映已換成 server tick 並夾在到達 ±1 s 內）。
+    // 時鐘對映停用（不該發生：session::alloc 一律給頻率）時退回 arrival + predict，與 selftest 合成來源同一個定義。
+    if (timing.clock_enabled && timing.clock_fed) {
+      t.target_server_qpc = timing.target_server_ticks;
+    } else {
+      t.target_server_qpc = timing.arrival_ticks + ::vr::clk::ns_to_ticks((int64_t) sample.predictNs, platf::vr_clock_frequency());
+    }
+    ::vr::bridge::publish_tracking(t);
+#else
+    // 非 x64（aarch64 Linux、Apple Silicon）：沒有 VR IPC ABI（vr_ipc_abi.h 只支援 x64），tracking_wanted() 恆為
+    // false，走不到這裡；保留函式讓呼叫端不必分平台
+    (void) sample;
+    (void) timing;
+#endif
+  }
+
   /**
    * @brief VR session 的控制迴圈工作（只在 control 執行緒、peer 已連上時呼叫）：
-   *        STATE（連上後一次）、1 Hz STATS、drain outbox、10 秒統計 log。
+   *        STATE（連上後一次）、1 Hz STATS 與 RTT 下限、drain outbox、10 秒統計 log。
    */
   static void vr_control_tick(session_t *session, std::chrono::steady_clock::time_point now) {
     auto &vr_state = *session->vr;
@@ -1425,6 +1558,7 @@ namespace stream {
 
     if (now - ctl.lastStats >= 1s) {
       ctl.lastStats = now;
+      vr_publish_quic_rtt(session, vr_state);  // §M1b S1-12：時鐘對映的 RTT 來源（STATS 的 clkOffset 會用到）
       vr_state.queue_stats();
     }
 
@@ -1455,6 +1589,10 @@ namespace stream {
                       << " latch=" << cur.latch_rx - prev.latch_rx
                       << " timing=" << cur.timing_rx - prev.timing_rx
                       << " other=" << cur.other_c2s - prev.other_c2s;
+      // §M1b S1-12：時鐘對映 10 秒行（欄位順序見 clk::format_stats，F.10 分析腳本依賴）
+      if (const auto cs = vr_state.clock_stats(true)) {
+        BOOST_LOG(info) << "[VIPLE-VR-CLK] 10s: " << ::vr::clk::format_stats(*cs);
+      }
       ctl.lastLog = now;
       ctl.lastLogStats = cur;
     }
@@ -1814,6 +1952,11 @@ namespace stream {
       {
         std::lock_guard<std::mutex> lk(session->video.abrMutex);
         abr_sample_rtt(session);
+        // §M1b S1-12：VR session 的時鐘對映以 ENet 基線當 QUIC rtt_min 的後備（< 16 ms 當 0 在
+        // clk::select_rtt() 裡做）；還沒取樣過發布 -1。一般 session 沒有 vr，不受影響。
+        if (session->vr) {
+          session->vr->set_rtt_enet_ms(session->video.abrRttSampled ? (int64_t) abr_rtt_baseline(session) : -1);
+        }
       }
       abr_zero_loss_tick(session);
     });
@@ -1999,8 +2142,11 @@ namespace stream {
     // VipleStream 2.0 §VR（M1a）：0x5506 TRACKING。照 SS_FRAME_FEC_PTYPE 的方式直接用常數
     // 註冊，不進 packetTypes／IDX 表（不變式 3）。handler 也會在 picoquic IO 執行緒上被呼叫
     // （QUIC flow 0x04 → IDX_ENCRYPTED → reinject，此時持有 §F3 閘門 mtx）：只碰
-    // session_state_t 自己的鎖與 atomic，絕不碰 quic_f3_mutex。
+    // session_state_t 自己的鎖與 atomic、以及 bridge 的 tracking writer mutex（M1b K26），
+    // 絕不碰 quic_f3_mutex，也不碰 ENet peer（scout F §2.2）。
     server->map(VIPLE_VR_PTYPE_TRACKING, [](session_t *session, const std::string_view &payload) {
+      // §M1b S1-12：到達時間一進來就取（任何解析與鎖之前），時基 = platf::vr_clock_ticks()（Windows = QPC）
+      const int64_t arrival = platf::vr_clock_ticks();
       auto vr_state = session->vr;
       if (!vr_state) {
         vr_drop_non_vr(session, VIPLE_VR_PTYPE_TRACKING);
@@ -2014,7 +2160,13 @@ namespace stream {
       // 比 232 B 長的部分是之後版本的欄位，只讀前 232 B（前向相容）
       VIPLE_VR_TRACKING sample;
       std::memcpy(&sample, payload.data(), sizeof(sample));
-      vr_state->on_tracking(sample, t_ctrl_via_quic);
+      ::vr::tracking_timing_t timing;
+      const bool latest = vr_state->on_tracking(sample, t_ctrl_via_quic, arrival, &timing);
+      vr_log_clock_events(*vr_state, timing, t_ctrl_via_quic);
+      if (latest) {
+        // pcvr：接受為最新樣本之後才寫進 bridge（stub／disabled 時 tracking_wanted() 恆為 false，立即返回）
+        vr_publish_tracking(sample, timing);
+      }
     });
 
     // VipleStream 2.0 §VR（M1a）：0x5507 VR_C2S（TLV 容器：u8 subtype, u8 len, payload[len]）
@@ -4170,6 +4322,9 @@ namespace stream {
                         << " otherC2S=" << s.other_c2s
                         << " truncatedC2S=" << s.c2s_truncated
                         << " s2cDropped=" << s.s2c_dropped;
+        if (const auto cs = session.vr->clock_stats(true)) {
+          BOOST_LOG(info) << "[VIPLE-VR-CLK] (final) " << ::vr::clk::format_stats(*cs);
+        }
         ::vr::clear_active_if(session.vr.get());
       }
 
@@ -4427,7 +4582,8 @@ namespace stream {
       // VipleStream 2.0 §VR：/launch 協商過 VR 的 session 建立共享狀態、LOSS→wave 的事件，
       // 控制迴圈逾時縮到 4 ms（§F4 的 per-session 機制），S→C 即時訊息與 LOSS 處理壓在一幀內。
       if (launch_session.vr) {
-        session->vr = std::make_shared<::vr::session_state_t>(*launch_session.vr, session.get());
+        // §M1b S1-12：給 vr_clock 頻率才會啟用時鐘對映（pcvr 的 tracking 目標時間與 STATS 的 clkOffset）
+        session->vr = std::make_shared<::vr::session_state_t>(*launch_session.vr, session.get(), platf::vr_clock_frequency());
         session->vrRefreshEvents = mail->event<int>(mail::vr_refresh);
         session->control.loopTimeout.store(std::chrono::milliseconds {4}, std::memory_order_relaxed);
       }

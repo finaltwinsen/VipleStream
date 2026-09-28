@@ -7,8 +7,10 @@
 // standard includes
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 // platform includes
 #include <Windows.h>
@@ -17,6 +19,73 @@
 namespace platf {
   void print_status(const std::string_view &prefix, HRESULT status);
   HDESK syncThreadDesktop();
+
+  // ── 使用者身分工具（M1b S1-13 的 V2 部分：只補宣告，實作一直在 misc.cpp）──────────
+
+  /**
+   * @brief 取得主控台 session 使用者的 primary token（`WTSGetActiveConsoleSessionId` → `WTSQueryUserToken`）。
+   * @details 需要 SYSTEM（SeTcbPrivilege）。`elevated=false` 回傳原樣的 token：UAC 管理員是 limited token
+   *          （medium IL，`TokenElevationTypeLimited`）；`elevated=true` 且使用者是 UAC 管理員時改回 linked token。
+   *          沒有人登入、或 API 失敗時回 nullptr。呼叫端負責 `CloseHandle`。
+   * @param elevated 是否要提升的 token。
+   * @return token；失敗時 nullptr。
+   */
+  HANDLE retrieve_users_token(bool elevated);
+
+  /**
+   * @brief 目前行程的 token 是否包含 LocalSystem（S-1-5-18）。
+   */
+  bool is_running_as_system();
+
+  /**
+   * @brief 以 `user_token` 模擬後執行 callback，結束時一定還原（內部用 impersonation_guard）。
+   * @details M1b sec-M11：callback 丟出的例外在模擬範圍內被攔下並記錄（不會帶著使用者身分離開這個函式），
+   *          此時回傳 `std::errc::interrupted`。模擬失敗回 `std::errc::permission_denied`，callback 不會被呼叫。
+   *          模擬期間的限制見 docs（不得呼叫不帶 token 的 CreateProcessW、不得載入使用者可寫路徑的模組、不得用 COM）。
+   * @param user_token primary 或 impersonation token（`TOKEN_QUERY | TOKEN_DUPLICATE`）。
+   * @param callback 在模擬身分下執行的工作。
+   * @return 錯誤碼；成功時為空。
+   */
+  std::error_code impersonate_current_user(HANDLE user_token, std::function<void()> callback);
+
+  /**
+   * @brief 模擬的 RAII 守衛（M1b sec-M11）：建構時開始模擬，解構時 `RevertToSelf`。
+   * @details
+   *   - `impersonation_guard(token)`：`ImpersonateLoggedOnUser(token)`。
+   *   - `impersonation_guard(named_pipe_client, pipe)`：`ImpersonateNamedPipeClient(pipe)`（必須先從 pipe 讀過一則訊息）。
+   *   - 模擬失敗時 `valid() == false`、`error()` 是 Win32 錯誤碼，解構時什麼都不做。
+   *   - 解構時 `RevertToSelf` 失敗 → 記 fatal、flush log 後 `std::terminate()`：執行緒帶著未知身分繼續跑
+   *     比結束行程更危險（取代舊版的 `DebugBreak()`）。
+   *   - 只能在同一條執行緒上建構與解構（模擬是執行緒層級的狀態），所以不可複製、不可移動；請當區域變數用。
+   */
+  class impersonation_guard {
+  public:
+    struct named_pipe_client_t {};
+    static constexpr named_pipe_client_t named_pipe_client {};
+
+    explicit impersonation_guard(HANDLE user_token);
+    impersonation_guard(named_pipe_client_t, HANDLE pipe);
+    ~impersonation_guard();
+
+    impersonation_guard(const impersonation_guard &) = delete;
+    impersonation_guard &operator=(const impersonation_guard &) = delete;
+    impersonation_guard(impersonation_guard &&) = delete;
+    impersonation_guard &operator=(impersonation_guard &&) = delete;
+
+    /// 模擬是否成功（成功時解構會 RevertToSelf）
+    bool valid() const {
+      return active_;
+    }
+
+    /// 模擬失敗時的 Win32 錯誤碼；成功時為 0
+    DWORD error() const {
+      return error_;
+    }
+
+  private:
+    bool active_ = false;
+    DWORD error_ = 0;
+  };
 
   int64_t qpc_counter();
 

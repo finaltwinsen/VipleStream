@@ -5,8 +5,9 @@
  * 權威設計：docs/vr_protocol.md §4、docs/vr_architecture.md §3.4–§3.6。
  * 線上格式的單一定義來源是 moonlight-common-c/src/VipleVr.h（與 client 端 byte-identical）。
  *
- * 這個模組刻意只依賴標準函式庫與 VipleVr.h（不碰 logging／config／stream），
- * 所以參數解析與 wave 狀態機可以脫離整個 Sunshine 單獨編譯測試；log 一律由呼叫端印。
+ * 這個模組刻意只依賴標準函式庫、VipleVr.h 與同樣是純模組的 vr_clock.h（不碰 platform／
+ * logging／config／stream），所以參數解析、wave 狀態機與時鐘對映可以脫離整個 Sunshine
+ * 單獨編譯測試；log 一律由呼叫端印，時間（vr_clock tick）也由呼叫端取好傳入。
  *
  * M1a（stub 模式）沒有 SteamVR driver：VR session 直接跑在一般的桌面擷取上，
  * server 把最新收到的 tracking 樣本回填進每一幀的 24 B 0x81 header（回聲），
@@ -30,6 +31,9 @@
 
 // lib includes
 #include <moonlight-common-c/src/VipleVr.h>
+
+// local includes
+#include "vr_clock.h"
 
 namespace vr {
 
@@ -163,7 +167,24 @@ namespace vr {
     uint32_t predict_ns = 0;
     float pos[3] {};  ///< HMD 位置（公尺）
     float rot[4] {};  ///< HMD 四元數 x, y, z, w
-    std::chrono::steady_clock::time_point arrival {};
+    /// 到達時刻：0x5506 handler 一進來取的 `platf::vr_clock_ticks()`（Windows = raw QPC，§M1b S1-12；
+    /// 取代 M1a 的 steady_clock，跨行程只傳 raw QPC）
+    int64_t arrival_ticks = 0;
+    /// 時鐘對映的結果：sampleTime + predictNs + offset，換成 server vr_clock tick；
+    /// 時鐘對映停用（建構時沒給頻率）時為 0
+    int64_t target_server_ticks = 0;
+  };
+
+  /**
+   * @brief on_tracking() 的時間資訊（選填輸出）。pcvr 的 `bridge::publish_tracking` 需要
+   *        arrival 與 target 兩個 tick 值；clock 的事件旗標讓呼叫端決定要不要記 log。
+   */
+  struct tracking_timing_t {
+    bool clock_enabled = false;  ///< 建構時有給 vr_clock 頻率
+    bool clock_fed = false;  ///< 這個樣本進了時鐘估計器（版本不合、sampleId=0 的不進）
+    int64_t arrival_ticks = 0;
+    int64_t target_server_ticks = 0;  ///< clock_enabled && clock_fed 時才有意義
+    clk::sample_result_t clock {};  ///< step／transport_switch／outlier／clock_reset／target_clamped
   };
 
   /**
@@ -230,8 +251,10 @@ namespace vr {
     /**
      * @param neg 協商結果。
      * @param stream_session 所屬的 stream::session_t（只拿來比對身分，永不解參考）。
+     * @param clock_frequency `platf::vr_clock_frequency()`（§M1b S1-12 時鐘對映）。0 = 停用時鐘對映
+     *        （只給不經 platform 的單元測試用；stream.cpp 一律要傳，pcvr 沒有它無法發布 tracking）。
      */
-    session_state_t(negotiated_t neg, const void *stream_session);
+    session_state_t(negotiated_t neg, const void *stream_session, int64_t clock_frequency = 0);
 
     session_state_t(const session_state_t &) = delete;
     session_state_t &operator=(const session_state_t &) = delete;
@@ -249,9 +272,48 @@ namespace vr {
     /**
      * @brief 收到一筆 tracking 樣本。version<1 或 sampleId=0 丟棄；sampleId 倒退或重複只計
      *        ooo、不覆蓋最新；跳號累計 gap。
-     * @return true 表示成為最新樣本。
+     *
+     * 時鐘對映（啟用時）：所有通過版本／sampleId 檢查的樣本都餵進估計器，包括亂序與重複的
+     * （d = 到達 − sampleTime 仍是有效量測；亂序的 d 較大，不影響最小值）。RTT 用
+     * set_rtt_quic_min_ns()／set_rtt_enet_ms() 最近發布的值（§F.1：QUIC 優先、ENet 後備）。
+     * 可以在 ENet control 與 picoquic IO 兩條執行緒同時呼叫：估計器有自己的 mutex，
+     * 與 pose 的 mutex 不巢狀。
+     *
+     * @param arrival_ticks handler 一進來取的 `platf::vr_clock_ticks()`（要在任何其他處理之前取，
+     *        min 濾波才吃得掉 service loop 的延遲）。
+     * @param timing 選填：帶出 arrival／target tick 與時鐘事件。
+     * @return true 表示成為最新樣本（pcvr 只有這時才呼叫 bridge::publish_tracking）。
      */
-    bool on_tracking(const VIPLE_VR_TRACKING &sample, bool via_quic);
+    bool on_tracking(const VIPLE_VR_TRACKING &sample, bool via_quic, int64_t arrival_ticks, tracking_timing_t *timing = nullptr);
+
+    // ── 時鐘對映（§M1b S1-12、§F.1）──
+
+    /// 建構時有給 vr_clock 頻率
+    bool clock_enabled() const {
+      return clock_.has_value();
+    }
+
+    /**
+     * @brief control 執行緒發布 QUIC path 的 rtt_min（ns）。≤ 0 表示沒有 QUIC session 或還沒有樣本。
+     *        0x5506 handler 只讀這個 atomic，絕不自己去碰 peer／QuicSession（scout F §2.2）。
+     */
+    void set_rtt_quic_min_ns(int64_t rtt_min_ns) {
+      rtt_quic_ns_.store(rtt_min_ns, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief control 執行緒（IDX_PERIODIC_PING handler，持 abrMutex）發布 ENet 的 RTT 基線
+     *        （`abr_rtt_baseline()`，ms）。< 0 表示還沒取樣過（abrRttSampled == false）。
+     */
+    void set_rtt_enet_ms(int64_t rtt_ms) {
+      rtt_enet_ms_.store(rtt_ms, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief 時鐘對映的統計快照（停用時 nullopt）。
+     * @param with_jitter 見 clk::clock_map_t::stats()：true 要排序（1 Hz／10 s 用），false 是 O(1)。
+     */
+    std::optional<clk::stats_t> clock_stats(bool with_jitter = true) const;
 
     /// 長度不足等在呼叫端就被丟棄的 tracking 訊息
     void count_bad_tracking();
@@ -350,6 +412,12 @@ namespace vr {
     // pose
     mutable std::mutex pose_mtx_;
     std::optional<pose_sample_t> latest_;
+
+    // 時鐘對映（clk::clock_map_t 不是執行緒安全的；只在 clock_mtx_ 內碰，不與 pose_mtx_ 巢狀）
+    mutable std::mutex clock_mtx_;
+    std::optional<clk::clock_map_t> clock_;
+    std::atomic<int64_t> rtt_quic_ns_ {-1};
+    std::atomic<int64_t> rtt_enet_ms_ {-1};
 
     // wave／LOSS
     mutable std::mutex wave_mtx_;

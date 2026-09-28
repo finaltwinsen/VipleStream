@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <csignal>
+#include <exception>
 #include <filesystem>
 #include <iomanip>
 #include <iterator>
@@ -575,28 +576,63 @@ namespace platf {
     // checks are done against the user token, not our SYSTEM token. It will also allow network
     // shares and mapped network drives to be used as launch targets, since those credentials
     // are stored per-user.
-    if (!ImpersonateLoggedOnUser(user_token)) {
-      auto winerror = GetLastError();
+    //
+    // VipleStream M1b sec-M11：改用 impersonation_guard。行為與舊版相同（失敗回 permission_denied、
+    // RevertToSelf 失敗就結束行程），多了例外安全：callback 丟出的例外在守衛的範圍內被攔下，
+    // 守衛解構（RevertToSelf）之後才回到呼叫端，執行緒不會帶著使用者身分離開。
+    impersonation_guard guard {user_token};
+    if (!guard.valid()) {
       // Log the failure of impersonating the user and its error code
-      BOOST_LOG(error) << "Failed to impersonate user: "sv << winerror;
+      BOOST_LOG(error) << "Failed to impersonate user: "sv << guard.error();
       ec = std::make_error_code(std::errc::permission_denied);
       return ec;
     }
 
     // Execute the callback function while impersonating the user
-    callback();
-
-    // End impersonation of the logged on user. If this fails (which is extremely unlikely),
-    // we will be running with an unknown user token. The only safe thing to do in that case
-    // is terminate ourselves.
-    if (!RevertToSelf()) {
-      auto winerror = GetLastError();
-      // Log the failure of reverting to self and its error code
-      BOOST_LOG(fatal) << "Failed to revert to self after impersonation: "sv << winerror;
-      DebugBreak();
+    try {
+      callback();
+    } catch (const std::exception &e) {
+      BOOST_LOG(error) << "Exception while impersonating user: "sv << e.what();
+      ec = std::make_error_code(std::errc::interrupted);
+    } catch (...) {
+      BOOST_LOG(error) << "Unknown exception while impersonating user"sv;
+      ec = std::make_error_code(std::errc::interrupted);
     }
 
+    // guard 在這裡解構：End impersonation of the logged on user. If this fails (which is extremely
+    // unlikely), we will be running with an unknown user token. The only safe thing to do in that
+    // case is terminate ourselves.
     return ec;
+  }
+
+  impersonation_guard::impersonation_guard(HANDLE user_token) {
+    if (ImpersonateLoggedOnUser(user_token)) {
+      active_ = true;
+    } else {
+      error_ = GetLastError();
+    }
+  }
+
+  impersonation_guard::impersonation_guard(named_pipe_client_t, HANDLE pipe) {
+    // 必須先從 pipe 讀過一則訊息，模擬的才是對方的身分（MSDN：impersonates the client of the last message read）
+    if (ImpersonateNamedPipeClient(pipe)) {
+      active_ = true;
+    } else {
+      error_ = GetLastError();
+    }
+  }
+
+  impersonation_guard::~impersonation_guard() {
+    if (!active_) {
+      return;
+    }
+    if (!RevertToSelf()) {
+      const auto winerror = GetLastError();
+      // 還原失敗＝這條執行緒之後以未知身分執行；唯一安全的做法是結束行程（先把 fatal 寫進 log）
+      BOOST_LOG(fatal) << "Failed to revert to self after impersonation: "sv << winerror;
+      logging::log_flush();
+      std::terminate();
+    }
   }
 
   /**
@@ -994,7 +1030,7 @@ namespace platf {
     std::wstring start_dir = utf_utils::from_utf8(working_dir.string());
     HANDLE job = group ? group->native_handle() : nullptr;
     STARTUPINFOEXW startup_info = create_startup_info(file, job ? &job : nullptr, ec);
-    PROCESS_INFORMATION process_info;
+    PROCESS_INFORMATION process_info {};
 
     // Clone the environment to create a local copy. Boost.Process (bp) shares the environment with all spawned processes.
     // Since we're going to modify the 'env' variable by merging user-specific environment variables into it,
@@ -1042,7 +1078,10 @@ namespace platf {
       }
     });
 
-    BOOL ret;
+    // VipleStream M1b sec-M11：impersonate_current_user 現在會攔下 callback 的例外（例如
+    // resolve_command_string 丟出），這時 CreateProcessAsUserW 沒被呼叫；先給 FALSE，
+    // 後面 create_boost_child_from_results 才不會讀到未初始化的值。
+    BOOL ret = FALSE;
     if (is_running_as_system()) {
       // Duplicate the current user's token
       HANDLE user_token = retrieve_users_token(elevated);
