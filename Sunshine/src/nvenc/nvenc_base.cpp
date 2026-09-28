@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <format>
 #include <string>
+#include <vector>
 
 // local includes
 #include "src/config.h"
@@ -475,6 +476,7 @@ namespace nvenc {
     stored_enc_config = enc_config;
     stored_init_params = init_params;
     stored_init_params.encodeConfig = &stored_enc_config;
+    pin_level_for_reconfigure(client_config.videoFormat);
 
     if (async_event_handle) {
       NV_ENC_EVENT_PARAMS event_params = {min_struct_version(NV_ENC_EVENT_PARAMS_VER)};
@@ -755,6 +757,104 @@ namespace nvenc {
     return true;
   }
 
+  // VipleStream §SF-PARAMSETS（2026-09-28，Steam Frame 凍結根因）：level／tier 交給 NVENC 自動選時，
+  // ABR reconfigure 降碼會讓它依新碼率重選（實測 HEVC level 4.1：26 Mbps 的 High tier 在降到 18 Mbps
+  // 後變成 Main tier），下一個 IDR 的 VPS/SPS 就跟著變。Qualcomm iris（Steam Frame 的硬體解碼器）
+  // 看到參數集改變就發 source change，FFmpeg v4l2m2m 處理不了而永久卡住。這裡在初始化後讀回
+  // NVENC 實際寫出的 SPS，把 level（HEVC 另加 tier）寫死進 reconfigure 用的設定，讓整個 session
+  // 的參數集維持不變。ABR 只在初始碼率以下調整，初始選出的 level／tier 一定夠用。
+  // AV1（seq_level_idx／seq_tier）尚未處理：Frame 沒有 AV1 硬解，列 TODO。
+  void nvenc_base::pin_level_for_reconfigure(int video_format) {
+    const bool hevc = video_format == 1;
+    const bool h264 = video_format == 0;
+    pinned_video_format = video_format;
+    if (!hevc && !h264) {
+      return;
+    }
+    if ((hevc && stored_enc_config.encodeCodecConfig.hevcConfig.level != NV_ENC_LEVEL_AUTOSELECT) ||
+        (h264 && stored_enc_config.encodeCodecConfig.h264Config.level != NV_ENC_LEVEL_AUTOSELECT)) {
+      return;  // level 已經明確指定，本來就不會變
+    }
+
+    std::vector<uint8_t> header(1024);
+    uint32_t header_size = 0;
+    NV_ENC_SEQUENCE_PARAM_PAYLOAD payload = {min_struct_version(NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER)};
+    payload.inBufferSize = static_cast<uint32_t>(header.size());
+    payload.spsppsBuffer = header.data();
+    payload.outSPSPPSPayloadSize = &header_size;
+    if (nvenc_failed(nvenc->nvEncGetSequenceParams(encoder, &payload))) {
+      BOOST_LOG(warning) << "[VIPLE-ABR] NvEnc: NvEncGetSequenceParams() failed, level not pinned: " << last_nvenc_error_string;
+      return;
+    }
+    header.resize(std::min<size_t>(header_size, header.size()));
+
+    // 在 Annex-B 裡找 SPS（HEVC nal_unit_type 33、H.264 7），去掉 emulation prevention 後取前 16 bytes
+    std::vector<uint8_t> rbsp;
+    for (size_t i = 0; i + 3 < header.size() && rbsp.empty(); i++) {
+      if (header[i] != 0 || header[i + 1] != 0 || header[i + 2] != 1) {
+        continue;
+      }
+      const size_t nal = i + 3;
+      const int type = hevc ? ((header[nal] >> 1) & 0x3F) : (header[nal] & 0x1F);
+      if (type != (hevc ? 33 : 7)) {
+        continue;
+      }
+      int zeros = 0;
+      for (size_t k = nal + (hevc ? 2 : 1); k < header.size() && rbsp.size() < 16; k++) {
+        if (zeros >= 2 && header[k] == 3) {
+          zeros = 0;
+          continue;
+        }
+        zeros = header[k] == 0 ? zeros + 1 : 0;
+        rbsp.push_back(header[k]);
+      }
+    }
+
+    if (hevc && rbsp.size() >= 13) {
+      // [0] vps_id／max_sub_layers／nesting，[1] profile_space(2) tier(1) profile_idc(5)，
+      // [2..5] compatibility flags，[6..11] constraint flags，[12] general_level_idc
+      const uint32_t tier = (rbsp[1] >> 5) & 1;
+      const uint32_t level = rbsp[12];
+      unpinned_level = stored_enc_config.encodeCodecConfig.hevcConfig.level;
+      unpinned_tier = stored_enc_config.encodeCodecConfig.hevcConfig.tier;
+      stored_enc_config.encodeCodecConfig.hevcConfig.level = level;
+      stored_enc_config.encodeCodecConfig.hevcConfig.tier = tier ? NV_ENC_TIER_HEVC_HIGH : NV_ENC_TIER_HEVC_MAIN;
+      level_pinned = true;
+      BOOST_LOG(info) << "[VIPLE-ABR] NvEnc: pinned HEVC level_idc=" << level << " tier=" << (tier ? "high" : "main")
+                      << " for mid-stream reconfigure";
+    }
+    else if (h264 && rbsp.size() >= 3) {
+      // [0] profile_idc，[1] constraint_set flags，[2] level_idc；level 1b 以 constraint_set3 表示
+      uint32_t level = rbsp[2];
+      if (level == 11 && (rbsp[1] & 0x10) && (rbsp[0] == 66 || rbsp[0] == 77 || rbsp[0] == 88)) {
+        level = NV_ENC_LEVEL_H264_1b;
+      }
+      unpinned_level = stored_enc_config.encodeCodecConfig.h264Config.level;
+      stored_enc_config.encodeCodecConfig.h264Config.level = level;
+      level_pinned = true;
+      BOOST_LOG(info) << "[VIPLE-ABR] NvEnc: pinned H.264 level_idc=" << level << " for mid-stream reconfigure";
+    }
+    else {
+      BOOST_LOG(warning) << "[VIPLE-ABR] NvEnc: SPS not found in sequence header (" << header_size
+                         << " bytes), level not pinned";
+    }
+  }
+
+  // 驅動不接受明確的 level／tier 時退回自動選擇（參數集可能又會隨碼率變，但 ABR 不能因此失效）
+  void nvenc_base::unpin_level_for_reconfigure() {
+    if (!level_pinned) {
+      return;
+    }
+    if (pinned_video_format == 1) {
+      stored_enc_config.encodeCodecConfig.hevcConfig.level = unpinned_level;
+      stored_enc_config.encodeCodecConfig.hevcConfig.tier = unpinned_tier;
+    }
+    else {
+      stored_enc_config.encodeCodecConfig.h264Config.level = unpinned_level;
+    }
+    level_pinned = false;
+  }
+
   // VipleStream §ABR: mid-stream bitrate reconfigure via NvEncReconfigureEncoder
   // §ABR-RAMP: force_idr 由呼叫端依方向決定——降速（擁塞救援）reset + IDR
   // 快速收斂；回升不 reset 平滑過渡（NVENC 支援動態改 rcParams），畫面無感。
@@ -780,7 +880,16 @@ namespace nvenc {
     reconfigure_params.resetEncoder = force_idr ? 1 : 0;
     reconfigure_params.forceIDR = force_idr ? 1 : 0;
 
-    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params))) {
+    bool reconfigured = !nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params));
+    if (!reconfigured && level_pinned) {
+      // §SF-PARAMSETS：固定的 level／tier 被拒時退回自動選擇重試一次，ABR 不因固定而失效
+      BOOST_LOG(warning) << "[VIPLE-ABR] NvEnc: reconfigure rejected with pinned level/tier ("
+                         << last_nvenc_error_string << "), retrying with auto-selected level";
+      unpin_level_for_reconfigure();
+      reconfigure_params.reInitEncodeParams = stored_init_params;
+      reconfigured = !nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params));
+    }
+    if (!reconfigured) {
       BOOST_LOG(error) << "[VIPLE-ABR] NvEnc: NvEncReconfigureEncoder() failed: " << last_nvenc_error_string;
       stored_enc_config.rcParams.averageBitRate = old_avg;
       stored_enc_config.rcParams.vbvBufferSize = old_vbv;

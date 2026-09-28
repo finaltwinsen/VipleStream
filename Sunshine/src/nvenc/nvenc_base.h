@@ -171,6 +171,15 @@ namespace nvenc {
     NV_ENC_INITIALIZE_PARAMS stored_init_params {};
     NV_ENC_CONFIG stored_enc_config {};
 
+    // VipleStream §SF-PARAMSETS: pin the auto-selected level (and HEVC tier) into
+    // stored_enc_config so ABR reconfigures never change the VPS/SPS mid-session.
+    void pin_level_for_reconfigure(int video_format);
+    void unpin_level_for_reconfigure();
+    bool level_pinned = false;
+    int pinned_video_format = -1;
+    uint32_t unpinned_level = 0;
+    uint32_t unpinned_tier = 0;
+
     struct {
       uint64_t last_encoded_frame_index = 0;
       bool rfi_needs_confirmation = false;
