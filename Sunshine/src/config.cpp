@@ -138,8 +138,11 @@ namespace config {
       if (value == "stub"sv) {
         return vr_t::pcvr_e::stub;
       }
+      if (value == "enabled"sv) {
+        return vr_t::pcvr_e::enabled;
+      }
       warn_config(std::format(
-        "config: invalid value for '{}': '{}' -- accepted values: disabled, stub. "
+        "config: invalid value for '{}': '{}' -- accepted values: disabled, stub, enabled. "
         "Falling back to 'disabled' (VR sessions are rejected with VR_DISABLED)",
         key,
         value

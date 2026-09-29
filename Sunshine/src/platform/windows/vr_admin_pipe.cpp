@@ -31,6 +31,7 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/vr/vr_bridge.h"
+#include "src/vr/vr_orchestrator.h"
 #include "src/vr/vr_selftest.h"
 #include "vr_admin_pipe.h"
 
@@ -1214,6 +1215,10 @@ namespace platf::vr_admin {
         if (!vr::bridge::start()) {
           BOOST_LOG(warning) << "[VIPLE-VR-ADMIN] vr bridge did not start (see [VIPLE-VR-IPC] lines); the admin pipe still starts for diagnostics"sv;
         }
+        // M1b V5（S1-17）：編排器只在 vr_pcvr=enabled 時常駐；stub 下由 selftest T3 需要時才起
+        if (config::vr.pcvr == config::vr_t::pcvr_e::enabled) {
+          vr::orchestrator::init();
+        }
         auto server = std::make_unique<server_t>();
         std::lock_guard lk {g_server_mtx};
         g_server = server.release();
@@ -1227,6 +1232,7 @@ namespace platf::vr_admin {
           g_server = nullptr;
         }
         delete server;  // 先中止 selftest（它會用到 bridge），再停 admin pipe
+        vr::orchestrator::shutdown();
         vr::bridge::stop();
       }
     };

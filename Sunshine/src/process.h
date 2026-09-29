@@ -87,6 +87,9 @@ namespace proc {
     // Client uses these to offer Recently-Played / Most-Played sort modes.
     int64_t steam_last_played      = 0;
     int64_t steam_playtime_minutes = 0;
+    // VipleStream 2.0 §VR M1b V5（S1-16、§D.12）：只在 vr_pcvr=enabled 時設定
+    bool vr_class = false;  ///< 「SteamVR Home」：只在 /applist?vr=1 出現，一般 /launch 回 VR_NEEDS_VR_CLIENT
+    std::string vr_launch_url;  ///< steamapps.vrmanifest 裡的 VR 遊戲：`steam://launch/<id>/VR`
   };
 
   class proc_t {
@@ -204,6 +207,9 @@ namespace proc {
 
     // If no command associated with _app_id, yet it's still running
     bool placebo {};
+
+    // VipleStream 2.0 §VR M1b V5：這次 execute 是 pcvr session（app 生命週期由 vr_orchestrator 負責）
+    bool _vr_pcvr {};
 
     boost::process::v1::child _process;
     boost::process::v1::group _process_group;

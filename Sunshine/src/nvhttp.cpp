@@ -50,6 +50,7 @@
 #include "utility.h"
 #include "uuid.h"
 #include "video.h"
+#include "vr/vr_orchestrator.h"
 #include "vr/vr_platform.h"
 #include "vr/vr_selftest.h"
 #include "vr/vr_session.h"
@@ -868,7 +869,10 @@ namespace nvhttp {
     // （Windows 原生 NVENC）時設。vanilla／舊版 client 忽略未知元素，不影響相容性。
     {
       uint32_t vr_caps = VIPLE_VR_SERVER_CAP_PROTO_V1;
-      if (::vr::platform_supported() && config::vr.pcvr != config::vr_t::pcvr_e::disabled) {
+      // M1b V5（S1-11）：stub → 平台支援即設（M1a 行為）；enabled → pcvr_available()（只讀快取）
+      const bool pcvr_bit = ::vr::platform_supported() &&
+                            (config::vr.pcvr == config::vr_t::pcvr_e::stub || (config::vr.pcvr == config::vr_t::pcvr_e::enabled && ::vr::platform::pcvr_available()));
+      if (pcvr_bit) {
         vr_caps |= VIPLE_VR_SERVER_CAP_PCVR;
         if (video::last_encoder_probe_supported_vr_intra_refresh) {
           vr_caps |= VIPLE_VR_SERVER_CAP_RECOVERY_INTRA;
@@ -1057,7 +1061,19 @@ namespace nvhttp {
 
     apps.put("<xmlattr>.status_code", 200);
 
+    // VipleStream 2.0 §VR M1b V5（S1-16、§D.12）：只在 vr_pcvr=enabled 時有 VR app（disabled／stub 時 ctx_t
+    // 的 vr_* 欄位恆為空，輸出與 M1b 之前逐字相同）。標準清單不含 vr_class；`?vr=1` 且 pcvr 可用時加上。
+    bool want_vr = false;
+    if (config::vr.pcvr == config::vr_t::pcvr_e::enabled) {
+      auto args = request->parse_query_string();
+      auto it = args.find("vr"s);
+      want_vr = it != std::end(args) && it->second == "1" && ::vr::platform::pcvr_available();
+    }
+
     for (auto &proc : proc::proc.get_apps()) {
+      if (proc.vr_class && !want_vr) {
+        continue;
+      }
       pt::ptree app;
 
       app.put("IsHdrSupported"s, video::active_hevc_mode == 3 ? 1 : 0);
@@ -1100,6 +1116,9 @@ namespace nvhttp {
       }
       if (proc.steam_playtime_minutes > 0) {
         app.put("Playtime"s, std::to_string(proc.steam_playtime_minutes));
+      }
+      if (proc.vr_class || !proc.vr_launch_url.empty()) {
+        app.put("IsVr"s, 1);
       }
 
       apps.push_back(std::make_pair("App", std::move(app)));
@@ -1211,6 +1230,7 @@ namespace nvhttp {
     neg->safety_ms = config::vr.intra_refresh_safety_ms;
     neg->guid = uuid_util::uuid_t::generate().string();
     neg->owner_uuid = caller_uuid;
+    neg->pcvr = config::vr.pcvr == config::vr_t::pcvr_e::enabled;  // M1b V5：enabled 才是真的 SteamVR 串流
 
     BOOST_LOG(info) << "[VIPLE-VR-SESSION] accepted "sv << (is_resume ? "/resume"sv : "/launch"sv)
                     << " caller="sv << (caller_uuid.empty() ? "<unknown>"s : caller_uuid)
@@ -1228,6 +1248,54 @@ namespace nvhttp {
                     << " -> "sv << ::vr::format_session_element_for_log(*neg)
                     << " (serverIntra="sv << server_intra << " safetyMs="sv << neg->safety_ms << ')';
     return neg;
+  }
+
+  /// appid 對應的 app（找不到回 nullopt）
+  std::optional<proc::ctx_t> find_app(int64_t appid) {
+    for (const auto &a : proc::proc.get_apps()) {
+      if (a.id == std::to_string(appid)) {
+        return a;
+      }
+    }
+    return std::nullopt;
+  }
+
+  /**
+   * @brief M1b V5（§D.4）：pcvr /launch 的同步檢查（≤ 200 ms，只讀快取與 atomic，不讀使用者可寫檔案）。
+   * @return 目標 app；失敗時已寫好錯誤回應並回 nullopt。
+   */
+  std::optional<::vr::orchestrator::app_ref_t> vr_pcvr_checks(pt::ptree &tree, const ::vr::launch_params_t &params, int64_t appid) {
+    std::string reason;
+    if (!::vr::platform::pcvr_available(&reason)) {
+      put_vr_error(tree, false, 403, VIPLE_VR_ERR_DISABLED, reason);
+      return std::nullopt;
+    }
+    const auto app = find_app(appid);
+    if (!app || (!app->vr_class && app->vr_launch_url.empty())) {
+      put_vr_error(tree, false, 400, VIPLE_VR_ERR_BAD_PARAMS, "not a VR app");
+      return std::nullopt;
+    }
+    const auto c = ::vr::platform::cached_conflicts();
+    if (c.any && !params.force) {
+      put_vr_error(tree, false, 503, VIPLE_VR_ERR_VRLINK_ACTIVE, "kind=" + c.kind + " (retry with vrForce=1 to let the host restart SteamVR)");
+      return std::nullopt;
+    }
+    if (::vr::selftest::running()) {
+      put_vr_error(tree, false, 503, VIPLE_VR_ERR_BUSY, "selftest running on this host");
+      return std::nullopt;
+    }
+    return ::vr::orchestrator::app_ref_t {app->name, app->vr_class, app->vr_launch_url};
+  }
+
+  /// §C.6：pcvr 的 encoder 探測形狀
+  video::vr_probe_shape_t vr_shape_of(const ::vr::launch_params_t &params) {
+    video::vr_probe_shape_t shape;
+    shape.packed_w = params.eye_width * 2;
+    shape.packed_h = params.eye_height;
+    shape.hz = params.hz;
+    shape.codec_mask = params.codecs;
+    shape.ir_frames = config::vr.intra_refresh_frames;
+    return shape;
   }
 
   /// /launch（或 /resume）接受 VR 之後到 RTSP 建立 session 之前，其他 client 也要看到 VR_BUSY
@@ -1283,6 +1351,22 @@ namespace nvhttp {
     }
 
     auto appid = util::from_view(get_arg(args, "appid"));
+
+    // VipleStream 2.0 §VR M1b V5（§D.4、§D.12）：pcvr 的同步檢查；一般 launch 指到 SteamVR Home → VR_NEEDS_VR_CLIENT
+    const bool pcvr_mode = config::vr.pcvr == config::vr_t::pcvr_e::enabled;
+    std::optional<::vr::orchestrator::app_ref_t> vr_app;
+    std::optional<video::vr_probe_scope> vr_scope;
+    if (pcvr_mode && vr_params) {
+      vr_app = vr_pcvr_checks(tree, *vr_params, appid);
+      if (!vr_app) {
+        return;
+      }
+    } else if (pcvr_mode && !vr_params) {
+      if (const auto a = find_app(appid); a && a->vr_class) {
+        put_vr_error(tree, false, 400, VIPLE_VR_ERR_NEEDS_VR_CLIENT, "\"" + a->name + "\" needs a VR client (launch with vr=1)");
+        return;
+      }
+    }
 
     // VipleStream §M.1 — multi-user ownership guard.  Identify the caller from
     // its TLS client cert (cached in SSL ex_data by the verify callback) and
@@ -1388,14 +1472,22 @@ namespace nvhttp {
       } else {
         // §VR 步驟 6：stub 直接擷取目前的桌面（encoder 縮放到 client 要求的尺寸），
         // 不動顯示器設定，所以也沒有要還原的東西。
-        BOOST_LOG(info) << "[VIPLE-VR-SESSION] /launch: skipping configure_display (stub captures the current desktop)"sv;
+        BOOST_LOG(info) << "[VIPLE-VR-SESSION] /launch: skipping configure_display ("sv << (pcvr_mode ? "pcvr captures the SteamVR driver"sv : "stub captures the current desktop"sv) << ')';
       }
 
       // Probe encoders again before streaming to ensure our chosen
       // encoder matches the active GPU (which could have changed
       // due to hotplugging, driver crash, primary monitor change,
       // or any number of other factors).
-      if (video::probe_encoders()) {
+      // M1b S1-11（§C.6）：pcvr 以 VR 形狀探測（display_vr_t），守衛保證任何失敗出口都還原桌面探測狀態
+      if (vr_app) {
+        vr_scope.emplace();
+        const auto shape = vr_shape_of(*vr_params);
+        if (video::probe_encoders(1, &shape)) {
+          put_vr_error(tree, false, 503, VIPLE_VR_ERR_BUSY, "VR encoder probe failed");
+          return;
+        }
+      } else if (video::probe_encoders()) {
         tree.put("root.<xmlattr>.status_code", 503);
         tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
         tree.put("root.gamesession", 0);
@@ -1434,6 +1526,16 @@ namespace nvhttp {
 
         return;
       }
+    }
+
+    // M1b V5（S1-17）：pcvr 交給編排器（背景執行緒從 PRECHECK 開始）；探測狀態改由 VR session 結束時還原
+    if (vr_app) {
+      if (!::vr::orchestrator::start(*launch_session->vr, *vr_app, vr_params->force)) {
+        proc::proc.terminate();
+        put_vr_error(tree, false, 503, VIPLE_VR_ERR_BUSY, std::format("SteamVR orchestration busy (state={})", ::vr::orchestrator::state_name(::vr::orchestrator::state().state)));
+        return;
+      }
+      vr_scope->handoff_to_session();
     }
 
     tree.put("root.<xmlattr>.status_code", 200);
@@ -1555,6 +1657,21 @@ namespace nvhttp {
       }
     }
 
+    // M1b V5（S1-11）：pcvr 的 /resume 只接回進行中的編排，而且 VR 參數要一致
+    const bool pcvr_resume = vr_params && config::vr.pcvr == config::vr_t::pcvr_e::enabled;
+    std::optional<video::vr_probe_scope> vr_scope;
+    if (pcvr_resume) {
+      const auto cur = ::vr::orchestrator::current_params();
+      if (!::vr::orchestrator::active() || !cur) {
+        put_vr_error(tree, true, 503, VIPLE_VR_ERR_BUSY, "no SteamVR orchestration to resume (use /launch)");
+        return;
+      }
+      if (cur->eye_width != vr_params->eye_width || cur->eye_height != vr_params->eye_height || cur->hz != vr_params->hz || cur->fov != vr_params->fov) {
+        put_vr_error(tree, true, 503, VIPLE_VR_ERR_BUSY, "VR parameters differ from the running orchestration");
+        return;
+      }
+    }
+
     // §M01-D A1 2026-09-23：同一個 client（同一張 TLS 憑證）重新 /resume
     // 時，先收掉它自己殘留的 stream session。
     // 事故：app 被強制關閉（沒送 /cancel、沒斷 ENet）後 10 s 內重開，舊
@@ -1599,7 +1716,15 @@ namespace nvhttp {
       // encoder matches the active GPU (which could have changed
       // due to hotplugging, driver crash, primary monitor change,
       // or any number of other factors).
-      if (video::probe_encoders()) {
+      int probe_rc;
+      if (pcvr_resume) {
+        vr_scope.emplace();
+        const auto shape = vr_shape_of(*vr_params);
+        probe_rc = video::probe_encoders(1, &shape);
+      } else {
+        probe_rc = video::probe_encoders();
+      }
+      if (probe_rc) {
         tree.put("root.resume", 0);
         tree.put("root.<xmlattr>.status_code", 503);
         tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
@@ -1638,6 +1763,9 @@ namespace nvhttp {
       )
     );
     tree.put("root.resume", 1);
+    if (vr_scope) {
+      vr_scope->handoff_to_session();
+    }
 
     // VipleStream 2.0 §VR 步驟 8（同 /launch）
     if (launch_session->vr) {

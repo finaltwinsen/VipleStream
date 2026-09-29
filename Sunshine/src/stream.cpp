@@ -43,6 +43,7 @@ extern "C" {
 #include "udp_tunnel.h"
 #include "utility.h"
 #include "vr/vr_bridge.h"
+#include "vr/vr_orchestrator.h"
 #include "vr/vr_session.h"
 
 #ifdef VIPLE_MPQUIC
@@ -725,6 +726,7 @@ namespace stream {
     // 以下只在 controlBroadcastThread 存取
     struct {
       net::peer_t statePeer = nullptr;  // STATE 已送給這個 peer（§Q-ENET-RECONNECT 換 peer 後重送）
+      uint64_t stateSeq = UINT64_MAX;  // M1b V5：pcvr 最近一次送出的編排器快照 seq
       std::chrono::steady_clock::time_point lastStats {};  // 上次排 STATS 的時間（1 Hz）
       std::chrono::steady_clock::time_point lastLog {};  // 上次印 10 秒統計的時間
       ::vr::stats_snapshot_t lastLogStats {};  // 上次 10 秒統計時的累計值（算區間差）
@@ -1553,11 +1555,26 @@ namespace stream {
     }
 
     // control 連上（或 §Q-ENET-RECONNECT 換了 peer）之後送一次 STATE（reliable）
+    const bool pcvr = vr_state.negotiated().pcvr;
     if (ctl.statePeer != session->control.peer) {
       ctl.statePeer = session->control.peer;
-      vr_state.queue_state(VIPLE_VR_STATE_STUB_ECHO, 100, VIPLE_VR_STATE_CODE_NONE);
-      BOOST_LOG(info) << "[VIPLE-VR-SESSION] control connected, STATE stub-echo queued (session="
-                      << ::vr::log_guid(vr_state.negotiated().guid) << ')';
+      if (!pcvr) {
+        vr_state.queue_state(VIPLE_VR_STATE_STUB_ECHO, 100, VIPLE_VR_STATE_CODE_NONE);
+        BOOST_LOG(info) << "[VIPLE-VR-SESSION] control connected, STATE stub-echo queued (session="
+                        << ::vr::log_guid(vr_state.negotiated().guid) << ')';
+      } else {
+        ctl.stateSeq = UINT64_MAX;  // 換 peer：重送目前的編排狀態
+      }
+    }
+    // M1b V5（§D.2）：pcvr 每 tick 比對編排器快照，變了就送 STATE（reliable）
+    if (pcvr) {
+      const auto snap = ::vr::orchestrator::state();
+      if (snap.seq != ctl.stateSeq) {
+        ctl.stateSeq = snap.seq;
+        vr_state.queue_state(snap.stream_state, snap.progress, snap.code);
+        BOOST_LOG(info) << "[VIPLE-VR-SESSION] STATE state=" << (int) snap.stream_state << " progress=" << (int) snap.progress << " code=" << snap.code
+                        << " orch=" << ::vr::orchestrator::state_name(snap.state) << " (session=" << ::vr::log_guid(vr_state.negotiated().guid) << ')';
+      }
     }
 
     if (now - ctl.lastStats >= 1s) {
@@ -4506,7 +4523,7 @@ namespace stream {
         ::vr::set_active(session.vr);
         const auto &neg = session.vr->negotiated();
         BOOST_LOG(info) << "[VIPLE-VR-SESSION] stream session start session=" << ::vr::log_guid(neg.guid)
-                        << " mode=stub codec=" << ::vr::codec_name(neg.codec)
+                        << " mode=" << (neg.pcvr ? "pcvr" : "stub") << " codec=" << ::vr::codec_name(neg.codec)
                         << " recovery=" << (neg.recovery_intra ? "intra" : "idr")
                         << " loopTimeout=" << session.control.loopTimeout.load().count() << "ms";
       }

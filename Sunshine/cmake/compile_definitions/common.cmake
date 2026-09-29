@@ -262,6 +262,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/vr/vr_clock.cpp"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_selftest.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_selftest.cpp"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_orchestrator.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_orchestrator.cpp"
         ${PLATFORM_TARGET_FILES})
 
 if(NOT SUNSHINE_ASSETS_DIR_DEF)

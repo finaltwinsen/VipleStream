@@ -30,6 +30,8 @@
 #include "logging.h"
 #include "platform/common.h"
 #include "process.h"
+#include "vr/vr_orchestrator.h"
+#include "vr/vr_platform.h"
 #include "system_tray.h"
 #include "utility.h"
 
@@ -326,6 +328,14 @@ namespace proc {
 
     _app_id = app_id;
     _app = *iter;
+    // VipleStream 2.0 §VR M1b V5（§D.12）：pcvr 不跑 cmd、prep_cmd（含全域，避免切顯示器解析度）、detached，
+    // 也不啟 Steam 遊戲 watchdog；SteamVR 與 VR 遊戲由 nvhttp 在 execute 成功後交給 vr_orchestrator 啟動
+    _vr_pcvr = launch_session && launch_session->vr && launch_session->vr->pcvr;
+    if (_vr_pcvr) {
+      _app.cmd.clear();
+      _app.prep_cmds.clear();
+      _app.detached.clear();
+    }
     // §M.1.f.2 — set owner + reset activity timestamp under lock to keep
     // the idle watchdog snapshot atomic.
     {
@@ -468,7 +478,7 @@ namespace proc {
     // VipleStream H Phase 2.4: kick off the Steam game-exit watchdog
     // for auto-imported Steam apps, AFTER all other launch steps so a
     // failure path above doesn't leave a watchdog running.
-    if (_app.source == "steam" && !_app.steam_app_id.empty()) {
+    if (_app.source == "steam" && !_app.steam_app_id.empty() && !_vr_pcvr) {
       try {
         uint32_t aid = static_cast<uint32_t>(std::stoul(_app.steam_app_id));
         if (aid > 0) {
@@ -498,6 +508,10 @@ namespace proc {
     });
 #endif
 
+    if (_vr_pcvr) {
+      // §D.2：pcvr 的 app 在編排器 active（PRECHECK～DRIVER_LOST，或 ERROR 的前 10 s）時才算在跑
+      return placebo && ::vr::orchestrator::active() ? _app_id : 0;
+    }
     if (placebo) {
       return _app_id;
     } else if (_app.wait_all && _process_group && platf::process_group_running((std::uintptr_t) _process_group.native_handle())) {
@@ -526,6 +540,10 @@ namespace proc {
   void proc_t::terminate() {
     std::error_code ec;
     placebo = false;
+    if (_vr_pcvr) {
+      _vr_pcvr = false;
+      ::vr::orchestrator::stop(::vr::orchestrator::stop_reason_e::terminated);
+    }
     // VipleStream H Phase 2.4: cancel any in-flight Steam game-exit
     // watchdog before tearing down the app — otherwise the watchdog
     // would race with us and call terminate() again.
@@ -598,6 +616,10 @@ namespace proc {
   }
 
   void proc_t::detach() {
+    if (_vr_pcvr) {
+      _vr_pcvr = false;
+      ::vr::orchestrator::stop(::vr::orchestrator::stop_reason_e::user_ended);
+    }
     // VipleStream §M.1 — soft handover.  End the streaming session and forget
     // the app, but skip terminate()'s destructive steps:
     //   - no group.terminate()  (would only kill the URL-handler child anyway;
@@ -1219,7 +1241,31 @@ namespace proc {
           manual_names.insert(std::move(lower));
         }
         int steam_added = 0, steam_skipped = 0;
+        // VipleStream 2.0 §VR M1b V5（S1-16、§D.12）：只在 vr_pcvr=enabled 時改變 app 清單
+        // （disabled／stub 與 M1b 之前逐字相同，ops-M7）：250820 不當平面 app，改合成「SteamVR Home」；
+        // steamapps.vrmanifest 裡的 VR 遊戲帶 vr_launch_url。
+        const bool vr_apps = config::vr.pcvr == config::vr_t::pcvr_e::enabled;
+        const auto vr_ids = vr_apps ? ::vr::platform::vr_manifest_app_ids(true) : std::set<std::string> {};
         for (const auto &sa : steam_result->apps) {
+          if (vr_apps && sa.app_id == "250820") {
+            proc::ctx_t ctx;
+            ctx.name = "SteamVR Home";
+            ctx.image_path = !sa.image_library.empty() ? sa.image_library : sa.image_header;
+            ctx.source = "steam";
+            ctx.steam_app_id = sa.app_id;
+            ctx.steam_owners = sa.owners;
+            ctx.vr_class = true;
+            ctx.auto_detach = true;
+            ctx.wait_all = false;
+            ctx.elevated = false;
+            ctx.exit_timeout = std::chrono::seconds {5};
+            auto vr_ids_tuple = calculate_app_id(ctx.name, ctx.image_path, i++);
+            ctx.id = ids.count(std::get<0>(vr_ids_tuple)) == 0 ? std::get<0>(vr_ids_tuple) : std::get<1>(vr_ids_tuple);
+            ids.insert(ctx.id);
+            apps.emplace_back(std::move(ctx));
+            steam_added++;
+            continue;
+          }
           std::string lower = sa.name;
           std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
           if (manual_names.count(lower)) {
@@ -1235,6 +1281,9 @@ namespace proc {
           ctx.steam_owners           = sa.owners;
           ctx.steam_last_played      = sa.last_played;
           ctx.steam_playtime_minutes = sa.playtime_minutes;
+          if (vr_apps && vr_ids.contains(sa.app_id)) {
+            ctx.vr_launch_url = "steam://launch/" + sa.app_id + "/VR";
+          }
 
           // VipleStream H Phase 2.3: cover the "launching game" desktop
           // leak. Sunshine launches via `steam://rungameid/<AppID>`,

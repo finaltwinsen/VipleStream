@@ -326,7 +326,7 @@ namespace vr {
 
   std::string format_session_element(const negotiated_t &neg) {
     return std::format(
-      "proto={};packed={}x{};hz={};codec={};layout=sbs;overscan={};recovery={};irFrames={};transport=rtp;universeId=0;session={};mode=stub",
+      "proto={};packed={}x{};hz={};codec={};layout=sbs;overscan={};recovery={};irFrames={};transport=rtp;universeId={};session={};mode={}",
       VIPLE_VR_PROTO_VERSION,
       neg.packed_width(),
       neg.packed_height(),
@@ -335,7 +335,10 @@ namespace vr {
       neg.params.overscan,
       neg.recovery_intra ? "intra" : "idr",
       neg.recovery_intra ? neg.ir_frames : 0,
-      neg.guid
+      // M1b S1-11（K24）：pcvr 的 universeId 固定 0x5649504C（uint32）；stub 維持 0
+      neg.pcvr ? 1447645260u : 0u,
+      neg.guid,
+      neg.pcvr ? "pcvr" : "stub"
     );
   }
 

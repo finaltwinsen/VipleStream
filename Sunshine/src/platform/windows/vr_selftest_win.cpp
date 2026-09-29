@@ -37,6 +37,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -74,6 +75,8 @@
 #include "src/vr/vr_bridge.h"
 #include "src/vr/vr_ipc_abi.h"
 #include "src/vr/vr_ipc_abi_table.h"
+#include "src/vr/vr_orchestrator.h"
+#include "src/vr/vr_platform.h"
 #include "src/vr/vr_scene_pattern.h"
 #include "src/vr/vr_selftest.h"
 #include <moonlight-common-c/src/VipleVr.h>
@@ -710,6 +713,23 @@ namespace vr::selftest::platform {
         }
       }
       return best;
+    }
+
+    /// 映像名稱為 exe 的所有行程 PID
+    std::vector<DWORD> pids_of(const wchar_t *exe) {
+      std::vector<DWORD> out;
+      handle_t snap {CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)};
+      if (!snap) {
+        return out;
+      }
+      PROCESSENTRY32W pe {};
+      pe.dwSize = sizeof(pe);
+      for (BOOL ok = Process32FirstW(snap.h, &pe); ok; ok = Process32NextW(snap.h, &pe)) {
+        if (_wcsicmp(pe.szExeFile, exe) == 0) {
+          out.push_back(pe.th32ProcessID);
+        }
+      }
+      return out;
     }
 
     bool process_running(const wchar_t *exe) {
@@ -2861,8 +2881,28 @@ namespace vr::selftest::platform {
     // 目前 /serverinfo 沒有時間欄位（VR 探測前後 state／currentgame 不變），整份逐字比對
     const bool same = *before == *after;
     r.check("T1b.serverinfo"sv, same, same ? std::format("identical bytes={} probeRc={} vrIntraRefresh={}", before->size(), rc, vr_ir ? 1 : 0) : first_diff(*before, *after));
-    // VR /launch 失敗出口（vr_negotiate 失敗、強制加密拒絕、execute 失敗）後的比對：pcvr 的 /launch 在 S1-11
-    r.not_run("T1b.launch-exits"sv, "V5"sv, "VR /launch failure exits need vr_pcvr=enabled (S1-11); the probe scope API is in place"sv);
+    // M1b V5：pcvr /launch 探測之後的三個失敗出口（vr_negotiate 失敗、強制加密拒絕、execute 失敗）。
+    // nvhttp 在這三處都是「vr_probe_scope 內探測完、沒有 handoff 就 return」，這裡以同一個守衛重現那個順序，
+    // 每個出口前後比對 /serverinfo 與桌面探測狀態（不經 HTTPS /launch：selftest 沒有配對憑證）。
+    for (const auto exit_name : {"negotiate"sv, "encryption"sv, "execute"sv}) {
+      if (stop.load()) {
+        return;
+      }
+      const auto b = fetch_serverinfo_xml(err);
+      const auto view0 = desktop_probe_view_t::now();
+      int prc = -1;
+      {
+        ::video::vr_probe_scope scope;
+        const auto shape = t1_shape();
+        prc = ::video::probe_encoders(1, &shape);
+        // 出口：沒有 handoff_to_session() 就離開（scope 解構 → 還原桌面探測狀態）
+      }
+      const auto a = fetch_serverinfo_xml(err);
+      const auto view1 = desktop_probe_view_t::now();
+      const bool ok = b && a && *b == *a && view0 == view1;
+      r.check(std::format("T1b.launch-exits.{}", exit_name), ok,
+              ok ? std::format("identical bytes={} probeRc={} probeState=[{}]", b->size(), prc, view1.str()) : (b && a ? first_diff(*b, *a) : "serverinfo fetch failed: "s + err) + " before=[" + view0.str() + "] after=[" + view1.str() + "]");
+    }
   }
 
   bool supported() {
@@ -3316,10 +3356,34 @@ namespace vr::selftest::platform {
             std::format("ms={} status={} gen={} copied={} seen={} consumption={:.4f} skipped={} fenceTimeout={} invalid={} torn={} fenceLost={} black={} evtToPushMs p50={:.3f} p95={:.3f} presentToPushMs p50={:.3f} p95={:.3f} synth={}",
                         elapsed_ms, (int) status, s.generation, s.copied, seen, consumption, s.skipped, s.fence_timeout, s.invalid, s.torn, s.fence_lost, s.black, pct(s.evt_to_push_ms, 0.5), pct(s.evt_to_push_ms, 0.95),
                         pct(s.present_to_push_ms, 0.5), pct(s.present_to_push_ms, 0.95), synth.published()));
+    // STEP0-1（V4 未解 1）：vrcompositor 自己重畫第 0 層（系統層，尺寸不是 session 的每眼尺寸）時圖案解不出來；
+    // 以 driver 的 `layer0 eye=… src pid=… size=WxH` 行判定，這種 session 另列 INCONCLUSIVE，不算 FAIL
+    std::string layer0;
+    bool system_layer = false;
     if (do_readback) {
+      const auto tail = vr::platform::steamvr_log_tail("vrserver.txt", 512u << 10);
+      static const std::regex l0 {R"(layer0 eye=\d+ src pid=(\d+) size=(\d+)x(\d+))"};
+      std::string last_pid, last_w, last_h;
+      for (auto it = std::sregex_iterator(tail.begin(), tail.end(), l0); it != std::sregex_iterator(); ++it) {
+        last_pid = (*it)[1].str();
+        last_w = (*it)[2].str();
+        last_h = (*it)[3].str();
+      }
+      if (!last_w.empty()) {
+        bool is_comp = false;
+        for (const auto pid : pids_of(L"vrcompositor.exe")) {
+          is_comp = is_comp || std::to_string(pid) == last_pid;
+        }
+        system_layer = std::stoul(last_w) != cfg.eye_width || std::stoul(last_h) != cfg.eye_height;
+        layer0 = std::format(" layer0Src={} layer0Size={}x{} layer0FromCompositor={}", last_pid, last_w, last_h, is_comp ? 1 : 0);
+      }
+    }
+    if (do_readback && system_layer && rb.mismatch == 0 && rb.compared < 20) {
+      r.info("T4.readback"sv, std::format("INCONCLUSIVE system-layer compared={} decodeFail={}{} (vrcompositor re-renders layer 0; not a wrong-frame failure)", rb.compared, rb.decode_fail, layer0));
+    } else if (do_readback) {
       const bool pass = rb.compared >= 20 && rb.mismatch == 0 && rb.eye_disagree == 0;
       r.check("T4.readback"sv, pass, std::format("compared={} mismatch={} eyeDisagree={} decodeFail={} distinctCounters={} echoMatched={} maxAngleDeg={:.5f}{}", rb.compared, rb.mismatch, rb.eye_disagree, rb.decode_fail,
-                                                 rb.counters.size(), rb.echo_matched, rb.max_angle, rb.first_mismatch.empty() ? ""s : " first=[" + rb.first_mismatch + "]"));
+                                                 rb.counters.size(), rb.echo_matched, rb.max_angle, (rb.first_mismatch.empty() ? ""s : " first=[" + rb.first_mismatch + "]") + layer0));
     }
     disp.reset();
     const auto sd = vr::bridge::status();
@@ -3333,4 +3397,122 @@ namespace vr::selftest::platform {
       relay(r, "T4"sv, *p);
     }
   }
+  void run_t3(reporter_t &r, const request_t &req, const std::atomic<bool> &stop) {
+    namespace vp = vr::platform;
+    namespace orch = vr::orchestrator;
+    if (!platf::is_running_as_system()) {
+      r.check("T3"sv, false, "server is not LocalSystem (the VR bridge only runs in the SYSTEM service)"sv);
+      return;
+    }
+    if (!get_console_user().present) {
+      r.check("T3"sv, false, "no console user: SteamVR runs as the console user"sv);
+      return;
+    }
+    const auto env = vp::probe_environment(true);
+    if (!env.steamvr_installed) {
+      r.check("T3"sv, false, "SteamVR is not installed"sv);
+      return;
+    }
+    if (vp::vrserver_pid() != 0) {
+      r.check("T3"sv, false, "SteamVR is running: close it first (T3 starts and quits SteamVR itself)"sv);
+      return;
+    }
+    // stub 下編排器平常不常駐：T3 期間起，結束時收掉（enabled 時本來就在跑）
+    const bool own_orch = !orch::running();
+    orch::init();
+    auto orch_cleanup = util::fail_guard([own_orch]() {
+      if (own_orch && config::vr.pcvr != config::vr_t::pcvr_e::enabled) {
+        orch::shutdown();
+      }
+    });
+    if (!orch::wait_idle(30000ms)) {
+      r.check("T3"sv, false, std::format("orchestrator not idle (state={})", orch::state_name(orch::state().state)));
+      return;
+    }
+    const auto base_keys = vp::guard_keys_snapshot();
+    const auto base_regs = vp::registered_viplestream_drivers();
+    r.info("T3.baseline"sv, std::format("buildid={} runtime=..{} guardKeys=[{}] viplestreamRegs={} guardPending={}", env.buildid, path_tail(utf_utils::from_utf8(env.steamvr_runtime)), base_keys,
+                                        base_regs ? (int) base_regs->size() : -1, vp::guard_pending() ? 1 : 0));
+
+    ::vr::negotiated_t neg;
+    neg.params.eye_width = 1728;
+    neg.params.eye_height = 1728;
+    neg.params.hz = 90;
+    neg.params.period_ns = 11'111'111;
+    neg.params.fov = {10000, 9000, 9500, 10500, 9000, 10000, 9500, 10500};
+    neg.params.eye_to_head = {-3150, 0, 0, 0, 0, 0, 10000, 3150, 0, 0, 0, 0, 0, 10000};
+    neg.params.codecs = VIPLE_VR_CODEC_HEVC;
+    neg.codec = ::vr::codec_e::hevc;
+    neg.pcvr = true;
+    const orch::app_ref_t app {"SteamVR Home", true, ""};
+
+    const int cycles = req.cycles;
+    int passed = 0;
+    for (int c = 1; c <= cycles && !stop.load(); ++c) {
+      neg.guid = std::format("selftest-t3-{}", c);
+      const auto t_cycle = steady::now();
+      // 合成 tracking（HMD|PRESENCE，space epoch 0 = 編排器的 session config）
+      t4_synth_t synth("still", 0);
+      if (!orch::start(neg, app, false)) {
+        r.check(std::format("T3.cycle{}", c), false, std::format("cycle={}/{} orchestrator refused start (state={})", c, cycles, orch::state_name(orch::state().state)));
+        break;
+      }
+      // 等 ACTIVE（或 ERROR）：launch → handshake → HMD_PRESENTING
+      const int64_t active_ms = wait_until(150000ms, stop, []() {
+        const auto s = orch::state().state;
+        return s == orch::state_e::active || s == orch::state_e::error || s == orch::state_e::idle;
+      });
+      const auto st = orch::state();
+      const auto bs = vr::bridge::status();
+      const bool reached = st.state == orch::state_e::active && bs.hmd_presenting;
+      const std::string reach_info = std::format("orch={} code={} presenting={} gen={} actHz={} actEye={}x{}", orch::state_name(st.state), st.code, bs.hmd_presenting ? 1 : 0, bs.generation,
+                                                 bs.act_refresh_mhz / 1000, bs.act_eye_w, bs.act_eye_h);
+
+      // disarm → quit → vrserver 結束 → guard 還原
+      orch::stop(orch::stop_reason_e::selftest);
+      wait_until(15000ms, stop, []() {
+        const auto s = orch::state().state;
+        return s == orch::state_e::restore_pending || s == orch::state_e::idle || s == orch::state_e::error;
+      });
+      const auto t_quit = steady::now();
+      const uint32_t pid = vp::vrserver_pid();
+      bool quit_ok = pid == 0;
+      std::string quit_how = "not-running";
+      if (pid) {
+        const auto b2 = vr::bridge::status();
+        if (b2.connected && b2.hmd_added && !b2.peer_is_selftest) {
+          vr::bridge::request_steamvr_quit();
+          quit_ok = wait_until(5000ms, stop, []() {
+                      return vp::vrserver_pid() == 0;
+                    }) >= 0;
+          quit_how = "driver-request";
+        }
+        if (!quit_ok) {
+          const auto q = vp::quit_steamvr(false);
+          quit_ok = q == vp::quit_e::exited || q == vp::quit_e::not_running;
+          quit_how += "+vrmonitor";
+        }
+      }
+      const auto quit_ms = std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - t_quit).count();
+      const bool idle = orch::wait_idle(30000ms);
+      const bool guard_left = vp::guard_pending();
+      const auto keys = vp::guard_keys_snapshot();
+      const auto regs = vp::registered_viplestream_drivers();
+      const bool one_reg = regs && regs->size() == 1;
+      const bool safe_mode = keys.find("blocked_by_safe_mode=true") != std::string::npos;
+      const bool same = keys == base_keys;
+      const bool pass = reached && quit_ok && idle && !guard_left && one_reg && !safe_mode && same;
+      passed += pass ? 1 : 0;
+      r.check(std::format("T3.cycle{}", c), pass,
+              std::format("cycle={}/{} activeMs={} {} quit={} quitMs={} idle={} guardPending={} safeMode={} viplestreamRegs={} settingsSame={} synth={} cycleMs={}{}", c, cycles, active_ms, reach_info, quit_how,
+                          quit_ms, idle ? 1 : 0, guard_left ? 1 : 0, safe_mode ? 1 : 0, regs ? (int) regs->size() : -1, same ? 1 : 0, synth.published(),
+                          std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - t_cycle).count(), same ? ""s : " keys=[" + keys + "]"));
+      BOOST_LOG(info) << "[VIPLE-VR-SELFTEST] cycle=" << c << '/' << cycles << " result=" << (pass ? "PASS" : "FAIL");
+      if (!pass && (!quit_ok || guard_left)) {
+        break;  // SteamVR 沒關掉或 guard 沒還原：不要再疊一輪
+      }
+    }
+    r.info("T3.summary"sv, std::format("pass={} of {} (final guardKeys=[{}] guardPending={})", passed, cycles, vp::guard_keys_snapshot(), vp::guard_pending() ? 1 : 0));
+  }
+
 }  // namespace vr::selftest::platform

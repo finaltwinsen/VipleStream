@@ -622,4 +622,22 @@ namespace platf::dxgi {
       }
     }
   }
+  /**
+   * @brief M1b V5（§S1-13）：給 vr_platform 的環境探測與編排器用的 K22 adapter 規則（與擷取端同一套）。
+   * @return 恰好一張候選時寫入 out 並回 true；否則 why 為原因。
+   */
+  bool vr_pick_adapter_luid(LUID &out, std::string &why) {
+    auto a = pick_vr_adapter(why);
+    if (!a) {
+      return false;
+    }
+    DXGI_ADAPTER_DESC1 desc {};
+    if (FAILED(a->GetDesc1(&desc))) {
+      why = "GetDesc1 failed";
+      return false;
+    }
+    out = desc.AdapterLuid;
+    return true;
+  }
+
 }  // namespace platf::dxgi

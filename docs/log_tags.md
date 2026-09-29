@@ -521,6 +521,23 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 - 選卡（K22）：`<install>\config\steamvr\state.json` 的 `vrcompositor_adapter` 以 **LUID** 記錄 vrcompositor 實際使用的卡（`<host>` 上 IddCx 虛擬卡與實體卡同名，不能用名稱比對）。
 - selftest T4（只在 `--vr-selftest --manual-steamvr`）：`T4.readback result=PASS|FAIL compared=<n> mismatch=<n> eyeDisagree=<n> … echoMatched=<n> maxAngleDeg=…`、`T4.consume … consumption=<比例> …`。已知限制：vrcompositor 自己重畫第 0 層（系統面板顯示時）的 session 圖案解不出來，`compared`≈0、`decodeFail` 高，不代表傳錯畫面（見 TODO V4）。
 
+### 5b-4. SteamVR 編排器（M1b V5 起；`vr_pcvr = enabled`，Windows server）
+
+```
+[VIPLE-VR-ORCH] start app="<name>" …                         ← /launch mode=pcvr 後背景啟動
+[VIPLE-VR-ORCH] env installed=<0|1> …                          ← Steam／SteamVR 探索（維護 tick 每 60 s 也會做一次）
+[VIPLE-VR-ORCH] step=<deploy|register|conflict|guard|arm|launch-steamvr|wait-hmd|launch-app|disarm|prune|quit-vrmonitor|unregister-other> result=…
+[VIPLE-VR-ORCH] state <ORCHESTRATING|HMD_ACTIVE|ERROR…> code=<n> …   ← 同一份 STATE 推給 client（0x5508 STATE）
+[VIPLE-VR-ORCH] error code=<n> …                               ← code 見 VipleVr.h（4–21，例 7=HMD_TIMEOUT、16=OPENXR_RUNTIME_OTHER 為警告）
+[VIPLE-VR-ORCH] deploy-refused reason=…                        ← secure_fs 檢查不過（owner／DACL／reparse／hash），fail closed
+[VIPLE-VR-ORCH] guard-restore skipped key=…                    ← vrserver 還在跑時不還原設定，下次 tick／啟動再補
+[VIPLE-VR-ORCH] safe-mode unblocked ver=…                      ← 每個 driver 版本只自動解除一次
+[VIPLE-VR-ORCH] stop reason=…
+```
+
+- guard 只以使用者 token 修改 `steamvr.vrsettings`（`forcedDriver=viplestream`、`driver_vrlink.enable=false`），留 marker；vrserver 沒在跑時才還原，server 啟動或維護 tick 看到 marker 會補還原。
+- 已知限制（V5）：driver 進入 standby 後再 arm，vrcompositor 可能不再 Present（與 V4 的 `AcquireSync` 逾時同源），目前遇到「我們的 HMD 在 standby 且沒有 VR app」時直接重啟 SteamVR 迴避。
+
 ### 探測的開始與結束行
 
 `cli/probeutil.cpp`（`beginProbe`／`finish`）。tag 依動作而定：`xr-probe` → `[VIPLE-XR-PROBE]`、`v4l2-probe` →

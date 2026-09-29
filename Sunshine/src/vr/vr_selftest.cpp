@@ -56,7 +56,7 @@ namespace vr::selftest {
       {"T1"sv, ""sv},
       {"T1B"sv, ""sv},
       {"T2"sv, ""sv},
-      {"T3"sv, "V5"sv},
+      {"T3"sv, ""sv},  // V5：SteamVR 週期（編排器）
       {"T4"sv, ""sv},  // V4：只有 --manual-steamvr（T3 的編排在 V5）
       {"T5"sv, "V5"sv},  // hold：V4 以 T4 的 --hold-sec 代替
       {"T6"sv, ""sv},
@@ -504,7 +504,6 @@ namespace vr::selftest {
     };
 
     const later_t later[] = {
-      {req.cycles != 20, "--cycles (T3)", "V5"},
       {req.preset != "none", "--preset (PoC presets)", "V6"},
       {req.dry_run, "--dry-run (DEPLOY/CONFLICT)", "V5"},
       {req.attach_session, "--attach-session (T4 during a pcvr session)", "V5"},
@@ -648,6 +647,8 @@ namespace vr::selftest {
         platform::run_t1b(r, req, stop);
       } else if (t == "T2") {
         platform::run_t2(r, req, stop);
+      } else if (t == "T3") {
+        platform::run_t3(r, req, stop);
       } else if (t == "T4") {
         platform::run_t4(r, req, stop);
       } else if (t == "T6") {
@@ -711,6 +712,10 @@ namespace vr::selftest {
 
     void run_t2(reporter_t &r, const request_t &, const std::atomic<bool> &) {
       r.check("T2"sv, false, "unsupported-platform"sv);
+    }
+
+    void run_t3(reporter_t &r, const request_t &, const std::atomic<bool> &) {
+      r.check("T3"sv, false, "unsupported-platform"sv);
     }
 
     void run_t4(reporter_t &r, const request_t &, const std::atomic<bool> &) {

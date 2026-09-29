@@ -187,6 +187,11 @@ namespace vr::selftest {
     ///     live 消費（display_vr_t 60 s，V3）；gpu-hold 以 NOT-RUN until=V4 明列
     void run_t2(reporter_t &r, const request_t &req, const std::atomic<bool> &stop);
 
+    /// T3（M1b V5）：SteamVR 週期 ×cycles，經 vr_orchestrator：guard → arm（合成 tracking，帶 PRESENCE）→ launch →
+    ///     handshake → HMD_PRESENTING → disarm → quit → vrserver 結束 → guard 還原 → 檢查 safe mode、設定與基準相同、
+    ///     openvrpaths 恰好一個 viplestream 註冊
+    void run_t3(reporter_t &r, const request_t &req, const std::atomic<bool> &stop);
+
     /// T4（M1b V4，只有 --manual-steamvr）：真的 SteamVR driver（操作手冊以使用者身分啟動 SteamVR）握手、HMD Activate、
     ///     HMD_PRESENTING、selftest consumer；--probe scene 時讀回角落位元圖案與 descriptor 的 renderPose 比對
     void run_t4(reporter_t &r, const request_t &req, const std::atomic<bool> &stop);

@@ -241,6 +241,7 @@ namespace config {
     enum class pcvr_e {
       disabled,  ///< 不接受 VR session（預設）
       stub,  ///< M1a 開發驗證：桌面擷取＋tracking 回聲
+      enabled,  ///< M1b V5（S1-11）：真正的 PCVR（SteamVR driver＋display_vr_t＋編排器）
     };
 
     pcvr_e pcvr = pcvr_e::disabled;  ///< vr_pcvr

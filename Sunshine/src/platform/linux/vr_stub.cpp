@@ -23,6 +23,116 @@ namespace vr {
   }
 }  // namespace vr
 
+// M1b V5：Linux／macOS 沒有 SteamVR 編排；全部回報不可用（不變式 10）
+namespace vr::platform {
+  env_t probe_environment(bool) {
+    env_t e;
+    e.probed = true;
+    return e;
+  }
+
+  env_t cached_environment() {
+    return probe_environment(false);
+  }
+
+  bool pcvr_available(std::string *reason) {
+    if (reason) {
+      *reason = "platform unsupported";
+    }
+    return false;
+  }
+
+  void disable_pcvr_until_restart() {
+  }
+
+  bool console_user_present() {
+    return false;
+  }
+
+  uint32_t console_user_rid() {
+    return 0;
+  }
+
+  uint32_t vrserver_pid() {
+    return 0;
+  }
+
+  std::wstring expected_driver_host_image() {
+    return {};
+  }
+
+  bool steam_logged_in() {
+    return false;
+  }
+
+  bool launch_steamvr() {
+    return false;
+  }
+
+  bool launch_vr_app(const std::string &) {
+    return false;
+  }
+
+  quit_e quit_steamvr(bool) {
+    return quit_e::not_running;
+  }
+
+  run_result_t run_vrpathreg(const std::string &, const std::string &) {
+    return {};
+  }
+
+  std::optional<std::vector<std::string>> registered_viplestream_drivers() {
+    return std::nullopt;
+  }
+
+  deploy_result_t deploy_driver() {
+    deploy_result_t r;
+    r.reason = "unsupported";
+    return r;
+  }
+
+  int remove_other_registrations(const std::string &) {
+    return 0;
+  }
+
+  void prune_old_versions(const std::string &) {
+  }
+
+  guard_report_t guard_apply() {
+    return {};
+  }
+
+  guard_report_t guard_restore() {
+    guard_report_t g;
+    g.result = guard_e::nothing_to_do;
+    return g;
+  }
+
+  bool guard_pending() {
+    return false;
+  }
+
+  std::string guard_keys_snapshot() {
+    return {};
+  }
+
+  std::string steamvr_log_tail(const std::string &, size_t) {
+    return {};
+  }
+
+  conflict_t detect_conflicts(bool, uint32_t) {
+    return {};
+  }
+
+  conflict_t cached_conflicts() {
+    return {};
+  }
+
+  std::set<std::string> vr_manifest_app_ids(bool) {
+    return {};
+  }
+}  // namespace vr::platform
+
 namespace vr::bridge {
   bool start() {
     return false;
