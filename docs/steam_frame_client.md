@@ -804,7 +804,14 @@ Pacer 執行緒繪製時主迴圈閒置就會被記）。
 5. **殭屍行程後遠端重開**：`ssh … /usr/bin/steamos-polkit-helpers/steamos-reboot-now`（polkit `allow_any=yes`）。必須在
    SSH 前景執行；`setsid -f` 背景化會被 pkexec 以 "Refusing to render service to dead parents" 拒絕。
 
-**已知、之後處理**：Frame 在 Wi-Fi 上走 QUIC 時主路徑丟包統計 40～67%（UDP 同環境 < 1%），和多路徑精進一起查。
+**QUIC 在 Frame Wi-Fi 上的丟包（2026-09-29 查明）**：兩個原因。
+1. 多路徑配到死路、server 選到未驗證的路徑（§MP-ROUTECHK、§MP-VERIFIED，fb1defbc）：丟幀 13.9% → 2.33%。
+2. **QUIC 封包沒有 DSCP**：UDP 影像 socket 由 qWAVE 標 DSCP 40（CS5，Wi-Fi 基地台放進 WMM 影像佇列），QUIC 是 0（best effort），
+   在 Wi-Fi 上會一次連續掉好幾包、超過 FEC。qWAVE 無法標記共用的 QUIC socket（`QOSAddSocketToFlow` 回 1168），改由
+   `add-firewall-rule.bat` 建立永久的原則式 QoS `VipleStream-Server-QUIC`（`viplestream-server.exe` UDP 來源埠 48010 → DSCP 40；
+   `delete-firewall-rule.bat` 移除）。**已安裝的 host 要重跑一次 `scripts\add-firewall-rule.bat` 才會生效**（自我更新不跑）。
+   交錯 A/B（Frame、QUIC、60 秒）：DSCP 40 丟幀中位數約 0.8%、無 DSCP 約 2.7%；緊接著的同環境對照 UDP 1.30%、QUIC＋DSCP 0.27%。
+   Wi-Fi 變異大（個別一次 8.6%），結論屬強烈傾向。細節 `scripts\benchmark\results\mpq-20260929\report.md`（本機）。
 
 ---
 
