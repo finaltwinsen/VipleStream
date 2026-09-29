@@ -600,13 +600,28 @@ namespace quic_server {
       };
       // §MP-VERIFIED：第一次選路（還沒選過任何路徑）直接用健康的 path 0，
       // 不看 cwin——剛握手完的 path 0 本來就還沒暖。
+      // §MP-REJOIN 2026-09-30：單路徑期間不選路（_lastVideoPath=-1，走 cnx-level），
+      // 第二條路徑加入時也當成初次選路。Frame 實測（M9）：path 0 載了 30 秒，
+      // 家用 Wi-Fi 子流重新加入的瞬間 path 0 正好 nb_retransmit>0，Pass 2 挑了
+      // cwin 15 KB 的冷路徑，接著凍結 16 秒。path 0 沒被 demoted/backup 時優先
+      // 留著；它暫時 RTO 時，只有其他路徑已暖（cwin ≥ MIN_WARM_CWND）才讓出。
       bool initialPick = false;
-      if (_lastVideoPath == -2 && _cnx->path[0] != nullptr &&
+      if (_lastVideoPath < 0 && _cnx->path[0] != nullptr &&
           !_cnx->path[0]->path_is_demoted &&
-          !_cnx->path[0]->path_is_backup &&
-          _cnx->path[0]->nb_retransmit == 0) {
-        bestVideoPath = 0;
-        initialPick = true;
+          !_cnx->path[0]->path_is_backup) {
+        bool otherWarm = false;
+        for (int i = 1; i < _cnx->nb_paths; i++) {
+          auto* q = _cnx->path[i];
+          if (q != nullptr && !q->path_is_demoted && !q->path_is_backup &&
+              q->nb_retransmit == 0 && q->cwin >= MIN_WARM_CWND && pathVerified(i)) {
+            otherWarm = true;
+            break;
+          }
+        }
+        if (_cnx->path[0]->nb_retransmit == 0 || !otherWarm) {
+          bestVideoPath = 0;
+          initialPick = true;
+        }
       }
       // Pass 1: warm paths, min RTT, no active retransmit
       uint64_t minRtt = UINT64_MAX;
@@ -726,6 +741,31 @@ namespace quic_server {
                       << _lastVideoPath << " warm — resuming per-path queue";
     }
 
+    // §MP-BACKUP-FLIP 2026-09-29：per-path 模式下若目前載影像的路徑被 peer 的
+    // PATH_BACKUP 翻回 backup，picoquic 不會再從它排程 datagram，per-path queue 會
+    // 一直堆（Frame 實測：resume 後幾秒就卡住，§Q-STALE 每 ~6 s 觸發一次安全閥）。
+    // 立刻退回 cnx-level queue，並清掉卡在該路徑上的舊影像（下一個 IDR 會補上）。
+    if (!_failoverCnxQueue && _lastVideoPath >= 0 && _lastVideoPath < _cnx->nb_paths &&
+        _cnx->path[_lastVideoPath] != nullptr && _cnx->path[_lastVideoPath]->path_is_backup) {
+      auto *bp = _cnx->path[_lastVideoPath];
+      int purged = 0;
+      picoquic_misc_frame_header_t *f = bp->first_datagram;
+      while (f != nullptr) {
+        picoquic_misc_frame_header_t *next = f->next_misc_frame;
+        if (picoquic_queued_datagram_flow(f) == FLOW_VIDEO) {
+          picoquic_delete_misc_or_dg(&bp->first_datagram, &bp->last_datagram, f);
+          purged++;
+        }
+        f = next;
+      }
+      _approxVideoQueueDepth = std::max<int64_t>(0, (int64_t) _approxVideoQueueDepth - purged);
+      _failoverCnxQueue = true;
+      _cnxQueueMinUntil = picoquic_current_time() + 3000000;
+      BOOST_LOG(warning) << "[VIPLE-MPQUIC] §MP-BACKUP-FLIP: video path id=" << bp->unique_path_id
+                         << " flipped to backup by peer — back to cnx-level queue, purged "
+                         << purged << " video datagrams";
+    }
+
     // §Q-STICKY-ESCAPE 2026-07-02: sticky 選路的品質逃生門——評估段。
     // 2026-07-01 事故：failover 到 VPN 後乙太網路恢復，但 sticky
     // 「不死不換」+ Pass 1 warm-cwin 門檻（閒置 path 永遠冷）讓視訊
@@ -764,14 +804,33 @@ namespace quic_server {
             _escSnaps[freeK].used = true;
             _escSnaps[freeK].pathId = p->unique_path_id;
             _escSnaps[freeK].lossSnap = p->nb_losses_found;  // 首見只建 baseline
+            _escSnaps[freeK].bytesSnap = p->bytes_sent;
+            _escSnaps[freeK].spurSnap = p->nb_spurious;
             seen[freeK] = true;
             continue;
           }
           seen[k] = true;
+          // §MP-MEASURE：真實 loss = 新增 loss − 新增 spurious；封包數由 bytes_sent
+          // 估（send_mtu）。樣本 < 30 包的視窗記為「未量測」，不算乾淨也不算 lossy；
+          // loss ≥ 2% 才算 lossy（Wi-Fi 上零星亂序誤判不該觸發換路）。
           uint64_t delta = p->nb_losses_found - _escSnaps[k].lossSnap;
+          uint64_t spur = p->nb_spurious - _escSnaps[k].spurSnap;
+          uint64_t dBytes = p->bytes_sent - _escSnaps[k].bytesSnap;
           _escSnaps[k].lossSnap = p->nb_losses_found;
+          _escSnaps[k].spurSnap = p->nb_spurious;
+          _escSnaps[k].bytesSnap = p->bytes_sent;
+          uint64_t realLoss = delta > spur ? delta - spur : 0;
+          uint64_t mtu = p->send_mtu > 0 ? p->send_mtu : 1200;
+          uint64_t pk = dBytes / mtu;
+          bool measured = pk >= 30;
+          bool lossy = measured && realLoss * 100 >= pk * 2;
           _escSnaps[k].lossyBits =
-              (uint8_t)((_escSnaps[k].lossyBits << 1) | (delta ? 1u : 0u));
+              (uint8_t)((_escSnaps[k].lossyBits << 1) | (lossy ? 1u : 0u));
+          _escSnaps[k].measuredBits =
+              (uint8_t)((_escSnaps[k].measuredBits << 1) | (measured ? 1u : 0u));
+          _escSnaps[k].winPk[_escSnaps[k].winPos] = (uint32_t)std::min<uint64_t>(pk, UINT32_MAX);
+          _escSnaps[k].winLoss[_escSnaps[k].winPos] = (uint32_t)std::min<uint64_t>(realLoss, UINT32_MAX);
+          _escSnaps[k].winPos = (uint8_t)((_escSnaps[k].winPos + 1) % 6);
           if (_escSnaps[k].samples < 0xFF) _escSnaps[k].samples++;
         }
         for (int s = 0; s < 16; s++) {
@@ -791,11 +850,62 @@ namespace quic_server {
           return -1;
         };
 
+        // 近 6 視窗中樣本足夠的視窗數；-1 = 觀測不足
+        auto measuredWin = [this](uint64_t pathId) -> int {
+          for (int s = 0; s < 16; s++) {
+            if (_escSnaps[s].used && _escSnaps[s].pathId == pathId) {
+              if (_escSnaps[s].samples < 6) return -1;
+              int c = 0;
+              for (int b = 0; b < 6; b++) c += (_escSnaps[s].measuredBits >> b) & 1;
+              return c;
+            }
+          }
+          return -1;
+        };
+        // 近 6 視窗的 loss 比例（千分比）；無樣本回 -1
+        auto lossPermille = [this](uint64_t pathId) -> int {
+          for (int s = 0; s < 16; s++) {
+            if (_escSnaps[s].used && _escSnaps[s].pathId == pathId) {
+              uint64_t pk = 0, ls = 0;
+              for (int w = 0; w < 6; w++) { pk += _escSnaps[s].winPk[w]; ls += _escSnaps[s].winLoss[w]; }
+              if (pk == 0) return -1;
+              return (int)std::min<uint64_t>(1000, ls * 1000 / pk);
+            }
+          }
+          return -1;
+        };
+
+        // 1b) §MP-PROBE：選探測路徑——已驗證、未 demoted、非 backup、不是目前
+        // 影像路徑。不主動改路徑狀態：把本端 backup 改成 available 會讓連線在
+        // 十幾秒內關閉（Windows 有線 client 對照實測，HEAD 版同條件正常），backup 一律不探測。
+        {
+          int probe = -1;
+          uint64_t probeRtt = UINT64_MAX;
+          for (int i = 0; i < _cnx->nb_paths; i++) {
+            auto* p = _cnx->path[i];
+            if (i == _lastVideoPath || p == nullptr) continue;
+            if (p->path_is_demoted) continue;
+            if (!p->first_tuple || !p->first_tuple->challenge_verified) continue;
+            if (p->path_is_backup) continue;
+            if (p->smoothed_rtt < probeRtt) { probeRtt = p->smoothed_rtt; probe = i; }
+          }
+          uint64_t newId = probe >= 0 ? _cnx->path[probe]->unique_path_id : UINT64_MAX;
+          if (newId != _probePathId) {
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §MP-PROBE: probe path "
+                            << (_probePathId == UINT64_MAX ? std::string("none") : std::to_string(_probePathId))
+                            << " -> " << (probe >= 0 ? std::to_string(newId) : std::string("none"))
+                            << (probe >= 0 ? " (rtt=" + std::to_string(probeRtt / 1000) + "ms)" : std::string());
+            _probePathId = newId;
+          }
+          _probePath = probe;
+        }
+
         // 2) 逃生評估
         picoquic_path_t* cur =
             (_lastVideoPath >= 0 && _lastVideoPath < _cnx->nb_paths)
                 ? _cnx->path[_lastVideoPath] : nullptr;
         int curLossy = cur ? lossyWin(cur->unique_path_id) : -1;
+        int curLossPm = cur ? lossPermille(cur->unique_path_id) : -1;
         // 一般模式：≥4/6 視窗有 loss；ABR floor-stuck 模式：≥1 即可
         bool distress = (cur != nullptr) && curLossy >= (reeval ? 1 : 4);
         if (distress) {
@@ -804,13 +914,23 @@ namespace quic_server {
           for (int i = 0; i < _cnx->nb_paths; i++) {
             auto* p = _cnx->path[i];
             if (i == _lastVideoPath || p == nullptr) continue;
-            if (p->path_is_demoted || p->path_is_backup) continue;
-            if (!p->first_tuple->challenge_verified) continue;
+            // §MP-QUALITY 2026-09-29：RTT 條件為「不比當前差超過 1 ms」（原為
+            // ≤ 當前一半）；震盪防護改靠量測式候選條件、連續 3 輪、10 s 駐留與
+            // 30 s 冷卻。
+            // §MP-MEASURE 2026-09-30：候選必須「量得到而且確實比較好」——6 視窗
+            // 至少 4 個樣本足夠、無 lossy 視窗、loss 比例 ≤ 目前路徑的一半；
+            // 樣本來自 §MP-PROBE 探測副本。backup 路徑不當候選（沒有探測樣本）。
+            if (p->path_is_demoted) continue;
+            if (!p->first_tuple || !p->first_tuple->challenge_verified) continue;
+            if (p->path_is_backup) continue;
             if (p->nb_retransmit != 0) continue;
-            if (lossyWin(p->unique_path_id) != 0) continue;  // 6 視窗零 loss
-            // RTT ≤ 當前一半且絕對差 ≥1ms（sub-ms 雜訊不觸發）
-            if (p->smoothed_rtt * 2 > cur->smoothed_rtt) continue;
-            if (cur->smoothed_rtt - p->smoothed_rtt < 1000) continue;
+            if (lossyWin(p->unique_path_id) != 0) continue;
+            if (measuredWin(p->unique_path_id) < 4) continue;
+            {
+              int pm = lossPermille(p->unique_path_id);
+              if (pm < 0 || curLossPm < 0 || pm * 2 > curLossPm) continue;
+            }
+            if (p->smoothed_rtt > cur->smoothed_rtt + 1000) continue;
             // 故意不要求 warm cwin：閒置候選 cwin 永遠冷（雞生蛋——
             // 要 warm 才被選、要被選才會 warm）。切換後 LAN 亞秒級
             // slow-start + light IDR 吸收瞬間凹陷。
@@ -839,7 +959,8 @@ namespace quic_server {
                   << _lastVideoPath << " (rtt=" << (cur->smoothed_rtt / 1000)
                   << "ms, lossy " << curLossy << "/6 win) -> path " << best
                   << " (rtt=" << (bestRtt / 1000)
-                  << "ms, 0 loss/6 win) streak=" << _escapeStreak
+                  << "ms, 0 lossy/6 win, loss " << lossPermille(_cnx->path[best]->unique_path_id)
+                  << "‰ vs " << curLossPm << "‰) streak=" << _escapeStreak
                   << (reeval ? " [abr-distress]" : "");
             }
           } else {
@@ -927,6 +1048,31 @@ namespace quic_server {
       // （§Q-FAILOVER-CNXQ 教訓，該 path 剛被 client 從 backup 升回）
       // → 先走 cnx-level queue，Pass 1 偵測到 warm 後自動清除。
       _failoverCnxQueue = true;
+    }
+
+    // §MP-PURGE 2026-09-29：影像換路時清掉舊路徑 per-path queue 裡的 video datagram。
+    // 舊路徑被 client 標成 backup（例：啟動初期誤判 INACTIVE）後 picoquic 不再從它的
+    // per-path queue 送 datagram，裡面的幾千個 video 永遠卡住；approxVQ 的校正會把它們
+    // 算進去而一直超過 §Q-STALE 門檻 → 新路徑上所有新 video 被當成過時丟掉，每 ~6 s
+    // 凍結一次（Frame 雙路徑實測 46% 丟幀）。舊畫面本來就不該再送，換路後的 IDR 會補上。
+    if (bestVideoPath != _lastVideoPath && _lastVideoPath >= 0 &&
+        _lastVideoPath < _cnx->nb_paths && _cnx->path[_lastVideoPath] != nullptr) {
+      auto *op = _cnx->path[_lastVideoPath];
+      int purged = 0;
+      picoquic_misc_frame_header_t *f = op->first_datagram;
+      while (f != nullptr) {
+        picoquic_misc_frame_header_t *next = f->next_misc_frame;
+        if (picoquic_queued_datagram_flow(f) == FLOW_VIDEO) {
+          picoquic_delete_misc_or_dg(&op->first_datagram, &op->last_datagram, f);
+          purged++;
+        }
+        f = next;
+      }
+      if (purged > 0) {
+        _approxVideoQueueDepth = std::max<int64_t>(0, (int64_t) _approxVideoQueueDepth - purged);
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] §MP-PURGE: dropped " << purged
+                        << " stale video datagrams queued on old path id=" << op->unique_path_id;
+      }
     }
 
     // §Q-PATH-SWITCH: 記錄 bestVideoPath 切換事件
@@ -1300,6 +1446,15 @@ namespace quic_server {
         // （資料堆積在 path->first_datagram 但排程器不發送）。
         qret = picoquic_queue_datagram_frame_on_path(
             _cnx, bestVideoPath, dg.data.size(), dg.data.data());
+        // §MP-PROBE：每 16 個 video 資料報複製 1 份到探測路徑（約 6%）。只在該
+        // 路徑 per-path queue 為空時放，確保探測副本不會堆積或污染 approxVQ。
+        if (qret == 0 && _probePath >= 0 && _probePath < _cnx->nb_paths &&
+            _probePath != bestVideoPath && _cnx->path[_probePath] != nullptr &&
+            _cnx->path[_probePath]->first_datagram == nullptr &&
+            (++_probeCtr & 15u) == 0) {
+          (void) picoquic_queue_datagram_frame_on_path(
+              _cnx, _probePath, dg.data.size(), dg.data.data());
+        }
       } else {
         qret = picoquic_queue_datagram_frame(_cnx, dg.data.size(), dg.data.data());
       }

@@ -3468,7 +3468,14 @@ static int quicDgramCallback(picoquic_cnx_t* cnx,
 
     case picoquic_callback_close:
     case picoquic_callback_application_close:
-        Limelog("[VIPLE-MPQUIC] Connection closed\n");
+        // §MP-CLOSE-DIAG 2026-09-29：記錄關閉原因（Frame 雙路徑實測：主路徑被刪後
+        // 1 s 連線就關，log 看不出是本端逾時、協定錯誤還是對端關閉）。
+        Limelog("[VIPLE-MPQUIC] Connection closed (%s) local=0x%llx remote=0x%llx app=0x%llx paths=%d\n",
+                fin_or_event == picoquic_callback_close ? "transport" : "application",
+                (unsigned long long)picoquic_get_local_error(cnx),
+                (unsigned long long)picoquic_get_remote_error(cnx),
+                (unsigned long long)picoquic_get_application_error(cnx),
+                cnx->nb_paths);
         break;
 
     case picoquic_callback_path_available: {

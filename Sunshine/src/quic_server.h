@@ -234,6 +234,14 @@ namespace quic_server {
       uint64_t lossSnap = 0;
       uint8_t lossyBits = 0;   // bit0 = 最近視窗是否有 loss
       uint8_t samples = 0;     // 已觀測視窗數（新 path 需滿 6 才可信）
+      // §MP-MEASURE 2026-09-30：比例式量測。閒置路徑沒有樣本不等於乾淨
+      // （M7：閒置的家用 Wi-Fi「6 視窗零 loss」被選中，接手後立刻崩）。
+      uint64_t bytesSnap = 0;
+      uint64_t spurSnap = 0;
+      uint8_t measuredBits = 0;  // bit0 = 最近視窗樣本數足夠
+      uint32_t winPk[6] = {};    // 近 6 視窗送出封包數（估）
+      uint32_t winLoss[6] = {};  // 近 6 視窗真實 loss（扣 spurious）
+      uint8_t winPos = 0;
     };
     EscSnap _escSnaps[16] {};
     uint64_t _lastEscapeEval = 0;      // 上次評估時刻（500ms 節流）
@@ -241,6 +249,11 @@ namespace quic_server {
     uint64_t _escLastCandidateId = 0;  // streak 綁定的候選 path id
     uint64_t _lastEscapeSwitch = 0;    // escape 專屬 30s 冷卻
     uint64_t _escNoCandWarn = 0;       // 「無候選」log 節流
+    // §MP-PROBE 2026-09-30：把少量 video 資料報複製到最佳替代路徑，讓它有
+    // 可比較的即時 loss/RTT 樣本（client 以 seq 去重）。-1 = 不探測。
+    int _probePath = -1;
+    uint64_t _probePathId = UINT64_MAX;
+    uint32_t _probeCtr = 0;
     bool _escapeIdrLight = false;      // 本輪切換使用 light IDR
 
     // §Q-ABR-FLOOR-ESCAPE (Fix C): stream.cpp ABR 執行緒設，IO 執行緒
