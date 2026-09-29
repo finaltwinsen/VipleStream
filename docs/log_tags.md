@@ -506,6 +506,21 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
 探測動作另寫 `probe-<action>-<epochMs>-<pid>.log`，只把 `probe-*.log` 修到最新 50 份，**不動**
 `VipleStream-*.log`（連跑幾十次探測也不會把串流 log 擠掉）。
 
+### 5b-3. SteamVR driver（M1b V4 起；寫在 SteamVR 的 `vrserver.txt`，不在 sunshine.log）
+
+```
+Loaded server driver viplestream … \config\steamvr\<ver>\viplestream\bin\win64\driver_viplestream.dll   ← SteamVR 自己的行
+driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 …                  ← 必須有 _009
+[VIPLE-VR-DRV] init ver=<ver> ms=<N> …                                                          ← Init 一律回 None（不讓 SteamVR 進 safe mode）
+[VIPLE-VR-DRV] ipc handshake gen=<G> … armed=<0|1>  →  hmd leave-standby
+[VIPLE-VR-DRV] pipe lost gen=<G> reason=<…> -> standby (hmd stays connected)                   ← server 消失；pose 約 33 ms 內失效
+[VIPLE-VR-DRV] swapset create pid=<pid> fmt=<dxgi> size=<W>x<H> samples=<n> …                  ← P-B3：app 每眼一組、vrcompositor 系統層另有
+[VIPLE-VR-DRV] timing 10s: … acqTimeout=<n> … keyedMutex=yes syncOk=<n> releaseFailed=<n>      ← U13：acqTimeout 應為 0
+```
+
+- 選卡（K22）：`<install>\config\steamvr\state.json` 的 `vrcompositor_adapter` 以 **LUID** 記錄 vrcompositor 實際使用的卡（`<host>` 上 IddCx 虛擬卡與實體卡同名，不能用名稱比對）。
+- selftest T4（只在 `--vr-selftest --manual-steamvr`）：`T4.readback result=PASS|FAIL compared=<n> mismatch=<n> eyeDisagree=<n> … echoMatched=<n> maxAngleDeg=…`、`T4.consume … consumption=<比例> …`。已知限制：vrcompositor 自己重畫第 0 層（系統面板顯示時）的 session 圖案解不出來，`compared`≈0、`decodeFail` 高，不代表傳錯畫面（見 TODO V4）。
+
 ### 探測的開始與結束行
 
 `cli/probeutil.cpp`（`beginProbe`／`finish`）。tag 依動作而定：`xr-probe` → `[VIPLE-XR-PROBE]`、`v4l2-probe` →

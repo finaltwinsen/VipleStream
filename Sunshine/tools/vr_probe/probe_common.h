@@ -72,15 +72,24 @@ namespace probe {
 
     // unit
     bool no_loopback = false;  // --no-loopback：只跑純函式測試
+
+    // space（V4）
+    bool reset_seated = false;  // --reset-seated：先 IVRChaperone::ResetZeroPose(Seated)
   };
 
   int run_ipcpeer(const args_t &a);
   int run_unit(const args_t &a);
+  // V4：需要 SteamVR（probe_openvr.cpp；openvr_api.dll 以 /DELAYLOAD 載入）
+  int run_whoami(const args_t &a);
+  int run_scene(const args_t &a);
+  int run_timing(const args_t &a);
+  int run_watch(const args_t &a);
+  int run_space(const args_t &a);
 
   // 回傳碼（selftest 依此判讀；情境的預期結果以 stdout 的 key=value 為準）
   constexpr int rc_ok = 0;  // 跑完（不代表情境「成功」，見 summary 行）
   constexpr int rc_failed = 1;  // 內部錯誤或 unit 有失敗
   constexpr int rc_usage = 2;  // 參數錯誤
-  constexpr int rc_not_implemented = 3;  // 這個模式要到 V4 才有
+  constexpr int rc_not_implemented = 3;  // 保留（V4 起所有模式都已實作）
 
 }  // namespace probe

@@ -56,12 +56,12 @@ namespace vr::selftest {
       {"T1"sv, ""sv},
       {"T1B"sv, ""sv},
       {"T2"sv, ""sv},
-      {"T3"sv, "V4"sv},
-      {"T4"sv, "V4"sv},
-      {"T5"sv, "V4"sv},
+      {"T3"sv, "V5"sv},
+      {"T4"sv, ""sv},  // V4：只有 --manual-steamvr（T3 的編排在 V5）
+      {"T5"sv, "V5"sv},  // hold：V4 以 T4 的 --hold-sec 代替
       {"T6"sv, ""sv},
-      {"T7"sv, "V4"sv},
-      {"CLEANUP"sv, "V4"sv},
+      {"T7"sv, "V6"sv},
+      {"CLEANUP"sv, "V5"sv},
     };
 
     const std::vector<std::string> k_default_only {"T0", "T1", "T1B", "T2", "T6"};
@@ -496,7 +496,7 @@ namespace vr::selftest {
       return std::nullopt;
     }
 
-    // V2 沒有 T3 以後的子測試：這些選項的非預設值不會有任何效果，直接拒絕，不讓使用者誤以為生效
+    // 還沒實作的選項：非預設值不會有任何效果，直接拒絕，不讓使用者誤以為生效
     struct later_t {
       bool set;
       const char *what;
@@ -504,21 +504,39 @@ namespace vr::selftest {
     };
 
     const later_t later[] = {
-      {req.cycles != 20, "--cycles (T3)", "V4"},
-      {req.probe != "none", "--probe (T4)", "V4"},
-      {req.motion != "still", "--motion (T3 synthetic tracking)", "V4"},
-      {req.hold_sec != 0, "--hold-sec (T5)", "V4"},
-      {req.reset_seated, "--reset-seated (T4 space)", "V4"},
-      {req.preset != "none", "--preset (PoC presets)", "V4"},
+      {req.cycles != 20, "--cycles (T3)", "V5"},
+      {req.preset != "none", "--preset (PoC presets)", "V6"},
       {req.dry_run, "--dry-run (DEPLOY/CONFLICT)", "V5"},
-      {req.manual_steamvr, "--manual-steamvr", "V4"},
-      {req.attach_session, "--attach-session (T4 only)", "V4"},
+      {req.attach_session, "--attach-session (T4 during a pcvr session)", "V5"},
     };
     for (const auto &l : later) {
       if (l.set) {
         err = std::format("option {} is not implemented until {}", l.what, l.slice);
         return std::nullopt;
       }
+    }
+
+    // V4：T4 只有 --manual-steamvr；--probe／--motion／--hold-sec／--reset-seated 只對 T4 有意義
+    const bool has_t4 = std::find(req.only.begin(), req.only.end(), "T4") != req.only.end();
+    if (has_t4 && !req.manual_steamvr) {
+      err = "T4 needs --manual-steamvr until V5 (the T3 SteamVR orchestration)";
+      return std::nullopt;
+    }
+    if (req.manual_steamvr && !has_t4) {
+      err = "--manual-steamvr only applies to T4";
+      return std::nullopt;
+    }
+    if (!has_t4 && (req.probe != "none" || req.motion != "still" || req.hold_sec != 0 || req.reset_seated)) {
+      err = "--probe/--motion/--hold-sec/--reset-seated only apply to T4";
+      return std::nullopt;
+    }
+    if (req.reset_seated && req.probe != "space") {
+      err = "--reset-seated needs --probe space";
+      return std::nullopt;
+    }
+    if (has_t4 && std::find(req.only.begin(), req.only.end(), "T2") != req.only.end()) {
+      err = "T2 needs SteamVR closed and T4 needs it running: run them separately";
+      return std::nullopt;
     }
 
     return req;
@@ -630,6 +648,8 @@ namespace vr::selftest {
         platform::run_t1b(r, req, stop);
       } else if (t == "T2") {
         platform::run_t2(r, req, stop);
+      } else if (t == "T4") {
+        platform::run_t4(r, req, stop);
       } else if (t == "T6") {
         run_t6_neutral(r);
         if (!stop.load()) {
@@ -691,6 +711,10 @@ namespace vr::selftest {
 
     void run_t2(reporter_t &r, const request_t &, const std::atomic<bool> &) {
       r.check("T2"sv, false, "unsupported-platform"sv);
+    }
+
+    void run_t4(reporter_t &r, const request_t &, const std::atomic<bool> &) {
+      r.check("T4"sv, false, "unsupported-platform"sv);
     }
 
     void run_t6(reporter_t &, const request_t &, const std::atomic<bool> &) {

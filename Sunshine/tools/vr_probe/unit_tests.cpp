@@ -36,6 +36,9 @@
 #include "ipc_proto.h"
 #include "probe_common.h"
 #include "probe_d3d.h"
+#include "virtual_vsync.h"
+#include "vr_math.h"
+#include "vr_scene_pattern.h"
 
 namespace probe {
   namespace {
@@ -1016,6 +1019,125 @@ namespace probe {
 
   }  // namespace
 
+  // ── V4：fov_to_rect、virtual_vsync（pacing 是不可信輸入）、scene 圖案 ─────────────
+  namespace {
+    void test_v4(tally_t &t) {
+      t.begin("v4");
+      {
+        // §E.2 drv-M-1：{-1.0, 1.1, 0.9, -1.3} → top=-1.3, bottom=0.9
+        const float fov[4] = {-1.0f, 1.1f, 0.9f, -1.3f};
+        const auto r = vrdrv::math::fov_to_rect(fov);
+        t.check(r.left == -1.0f && r.right == 1.1f && r.top == -1.3f && r.bottom == 0.9f, "fov-to-rect", "l=%.2f r=%.2f t=%.2f b=%.2f", r.left, r.right, r.top, r.bottom);
+      }
+      {
+        // 矩陣 ↔ 四元數往返（yaw 30°）
+        const double h = 15.0 * 3.14159265358979 / 180.0;
+        const vrdrv::math::quat_t q {0.0, std::sin(h), 0.0, std::cos(h)};
+        float m[3][4];
+        vrdrv::math::pose_to_matrix34(q, vrdrv::math::vec3_t {0.1, 1.6, -0.2}, m);
+        vrdrv::math::quat_t q2;
+        vrdrv::math::vec3_t p2;
+        vrdrv::math::matrix34_to_pose(m, q2, p2);
+        const double ang = vrdrv::math::angle_deg(q, q2);
+        t.check(ang < 1e-3 && std::fabs(p2.y - 1.6) < 1e-5, "matrix-quat-roundtrip", "ang=%.6f", ang);
+      }
+      const int64_t f = qpf();
+      const uint32_t mhz = 90000;
+      const double p_nom = (double) f / 90.0;
+      auto pacing = [&](double period_ticks, uint32_t slew, uint32_t mode) {
+        vripc_pacing_t p {};
+        p.period_q32 = (uint64_t) (period_ticks * 4294967296.0);
+        p.slew_ppm_max = slew;
+        p.mode = mode;
+        return p;
+      };
+      struct case_t {
+        const char *name;
+        vripc_pacing_t p;
+        bool expect_reject;
+      };
+      vripc_pacing_t anchor_far = pacing(p_nom, 200, 0);
+      anchor_far.pacing_flags = VRIPC_PF_HAS_ANCHOR | VRIPC_PF_ALLOW_SNAP;
+      anchor_far.anchor_qpc = qpc() + 3600 * f;  // 1 小時後：忽略
+      const case_t cases[] = {
+        {"vsync-zero", pacing(0.0, 200, 0), true},
+        {"vsync-max", [] {
+           vripc_pacing_t p {};
+           p.period_q32 = UINT64_MAX;
+           return p;
+         }(),
+         true},
+        {"vsync-1.5x", pacing(p_nom * 1.5, 200, 0), true},
+        {"vsync-0.5x", pacing(p_nom * 0.5, 200, 0), true},
+        {"vsync-slew-huge", pacing(p_nom, 1000000, 0), true},
+        {"vsync-mode-no-dev", pacing(p_nom, 200, 2), true},
+        {"vsync-nominal", pacing(p_nom, 200, 0), false},
+        {"vsync-anchor-far", anchor_far, false},
+      };
+      for (const auto &c : cases) {
+        vrdrv::virtual_vsync_t v;
+        const int64_t t0 = qpc();
+        v.activate(f, mhz, t0);
+        const auto r = v.step(&c.p, false, t0 + (int64_t) (p_nom * 1.5), 0);
+        const double period_ms = (double) r.period_ns / 1e6;
+        const bool period_ok = std::fabs(period_ms - 1000.0 / 90.0) < 0.05;
+        t.check(r.pacing_rejected == c.expect_reject && period_ok && r.missed == 1 && !r.snapped, c.name, "rejected=%d periodMs=%.4f missed=%u", r.pacing_rejected ? 1 : 0, period_ms, r.missed);
+      }
+      {
+        // 停頓 10 s 後：一次算出 missed、立即返回（不逐週期相加）、下一個 vsync 在 now 之後
+        vrdrv::virtual_vsync_t v;
+        const int64_t t0 = qpc();
+        v.activate(f, mhz, t0);
+        const int64_t later = t0 + 10 * f;
+        const int64_t c0 = qpc();
+        const auto r = v.step(nullptr, false, later, 0);
+        const double ms = qpc_to_ms(qpc() - c0);
+        t.check(r.missed >= 899 && r.missed <= 901 && r.vsync_qpc > later && ms < 1.0, "vsync-stall-10s", "missed=%u ms=%.3f", r.missed, ms);
+        const auto r2 = v.step(nullptr, false, later + (int64_t) (p_nom * 0.5), 1);
+        t.check(r2.missed == 0 && r2.target_qpc > r2.vsync_qpc, "vsync-throttle", "missed=%u", r2.missed);
+      }
+      {
+        // wait_until：目標在 1 小時後也只睡 ≤ 2T
+        vrdrv::virtual_vsync_t v;
+        v.activate(f, mhz, qpc());
+        HANDLE tm = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        const int64_t c0 = qpc();
+        const uint32_t us = v.wait_until(tm, c0 + 3600 * f);
+        const double ms = qpc_to_ms(qpc() - c0);
+        if (tm) {
+          CloseHandle(tm);
+        }
+        t.check(us >= 20000 && us <= 30000 && ms < 40.0, "vsync-sleep-cap", "us=%u ms=%.2f", us, ms);
+      }
+      {
+        // scene 圖案往返（含全黑必須失敗）
+        uint8_t q48[6] = {1, 2, 3, 4, 5, 6};
+        uint8_t bytes[vr_scene_pattern::k_bytes];
+        vr_scene_pattern::encode(0xBEEF, q48, bytes);
+        const uint32_t w = 1728, h = 1728;
+        auto luma = [&](uint32_t x, uint32_t y) -> uint32_t {
+          for (int k = 0; k < vr_scene_pattern::k_bits; ++k) {
+            uint32_t x0, y0, x1, y1;
+            vr_scene_pattern::block_rect(k, w, h, x0, y0, x1, y1);
+            if (x >= x0 && x < x1 && y >= y0 && y < y1) {
+              return vr_scene_pattern::bit(bytes, k) ? 255u : 0u;
+            }
+          }
+          return 64u;
+        };
+        uint16_t counter = 0;
+        uint8_t out[6] = {};
+        const bool ok = vr_scene_pattern::decode(w, h, luma, counter, out);
+        t.check(ok && counter == 0xBEEF && std::memcmp(out, q48, 6) == 0, "scene-pattern-roundtrip");
+        const bool black = vr_scene_pattern::decode(w, h, [](uint32_t, uint32_t) -> uint32_t {
+          return 0u;
+        }, counter, out);
+        t.check(!black, "scene-pattern-black-rejected");
+      }
+      t.end();
+    }
+  }  // namespace
+
   int run_unit(const args_t &a) {
     // T6：先印 ABI 表（selftest 逐字比對 server（GCC）與 vr_probe（MSVC）的版面）
     print_abi_table();
@@ -1026,6 +1148,7 @@ namespace probe {
     test_rings(t);
     test_paths(t);
     test_log_throttle(t);
+    test_v4(t);
     if (a.no_loopback) {
       line("unit-skip case=loop reason=no-loopback");
     } else {

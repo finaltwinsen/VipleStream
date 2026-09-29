@@ -1,0 +1,17 @@
+{
+   "jsonid" : "input_profile",
+   "controller_type" : "viplestream_hmd",
+   "device_class" : "TrackedDeviceClass_HMD",
+   "input_bindingui_mode" : "hmd",
+   "input_source" : {
+      "/input/system" : {
+         "type" : "button",
+         "click" : true,
+         "binding_image_point" : [ 0, 0 ],
+         "order" : 1
+      },
+      "/proximity" : {
+         "type" : "proximity"
+      }
+   }
+}

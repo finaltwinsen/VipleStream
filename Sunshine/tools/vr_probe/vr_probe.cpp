@@ -2,7 +2,7 @@
 //
 //   vr_probe.exe --mode <whoami|space|timing|scene|watch|ipcpeer|unit> [--out <dir>] [--seconds N] [...]
 //
-// V2 只實作 ipcpeer 與 unit（都不需要 SteamVR）；其餘模式在 V4 加入，現在回 rc=3。
+// V2 實作 ipcpeer 與 unit（都不需要 SteamVR）；V4 加入 whoami／space／timing／scene／watch（probe_openvr.cpp）。
 // 由 Build-SteamVRDriver.ps1 -Target probe 建置；輸出 out\x64\Release\vr_probe\{vr_probe.exe, openvr_api.dll}。
 #include <cstdarg>
 #include <cstdlib>
@@ -13,8 +13,8 @@
 #include <windows.h>
 #include <shlobj.h>
 
-// vendored OpenVR（/external:I，/external:W0）。V2 只取版本常數，不呼叫任何函式：
-// vr_probe.exe 的匯入表因此不含 openvr_api.dll，ipcpeer／unit 在沒有 SteamVR 的機器上也能跑。
+// vendored OpenVR（/external:I，/external:W0）。openvr_api.dll 以 /DELAYLOAD 載入：
+// ipcpeer／unit 不會碰到它，在沒有 SteamVR 的機器上也能跑。
 #include <openvr.h>
 
 #include "probe_common.h"
@@ -181,6 +181,7 @@ namespace {
     probe::line("usage ipcpeer: --peer-close-after-welcome --peer-fence-max --peer-fence-max-after N --peer-escalate");
     probe::line("usage ipcpeer: --peer-gpu-hold-ms X --peer-writers N --peer-no-flush --peer-no-render --hello-repeat N --hello-interval-ms M --pipe NAME");
     probe::line("usage unit: --no-loopback");
+    probe::line("usage space: --reset-seated");
   }
 }  // namespace
 
@@ -247,6 +248,8 @@ int wmain(int argc, wchar_t **argv) {
       ok = need(v) && parse_u32(v, a.hello_interval_ms) && a.hello_interval_ms >= 10 && a.hello_interval_ms <= 60000;
     } else if (k == L"--no-loopback") {
       a.no_loopback = true;
+    } else if (k == L"--reset-seated") {
+      a.reset_seated = true;
     } else {
       probe::line("error reason=unknown-arg arg=%s", narrow(k.c_str()).c_str());
       ok = false;
@@ -270,9 +273,20 @@ int wmain(int argc, wchar_t **argv) {
   if (a.mode == "unit") {
     return probe::run_unit(a);
   }
-  if (a.mode == "whoami" || a.mode == "space" || a.mode == "timing" || a.mode == "scene" || a.mode == "watch") {
-    probe::line("result mode=%s status=not-implemented until=V4", a.mode.c_str());
-    return probe::rc_not_implemented;
+  if (a.mode == "whoami") {
+    return probe::run_whoami(a);
+  }
+  if (a.mode == "scene") {
+    return probe::run_scene(a);
+  }
+  if (a.mode == "timing") {
+    return probe::run_timing(a);
+  }
+  if (a.mode == "watch") {
+    return probe::run_watch(a);
+  }
+  if (a.mode == "space") {
+    return probe::run_space(a);
   }
   probe::line("error reason=unknown-mode mode=%s", a.mode.c_str());
   usage();

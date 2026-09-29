@@ -15,6 +15,8 @@
  *   V3 起加上 T2.live（display_vr_t live 消費 60 s）；§F.5 另列的 gpu-hold（U31）需要 vr_probe 的 GPU hold，
  *   以 `result=NOT-RUN until=V4` 明列，計入 (final) 行的 notRun=，rc=0 不代表它驗過。
  * - T1（V3）：display_vr_t 探測形態＋VR 形狀的 encoder 探測；T1b（V3）：VR 探測前後 /serverinfo 逐字相同。
+ * - T4（V4，只有 --manual-steamvr）：真的 SteamVR driver 握手、HMD Activate、HMD_PRESENTING、selftest consumer，
+ *   scene 時讀回 vr_probe 畫在兩眼角落的位元圖案與 descriptor 的 renderPose 比對（mismatch=0）。
  * - T6：QPC 換算（S1-01，含飽和）、§B.8 descriptor 驗證純函式、ABI 表與 vr_probe 逐字比對
  *   （vr_ipc_abi_table.h）、`vr_probe --mode unit`。
  *
@@ -38,12 +40,14 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <set>
 #include <utility>
 #include <vector>
 
 // lib includes（boost 要在 Windows.h 之前，理由同 misc.cpp）
 #include <boost/filesystem/path.hpp>
 #include <boost/process/v1.hpp>
+#include <nlohmann/json.hpp>
 
 // platform includes
 // clang-format off
@@ -55,6 +59,7 @@
 #include <sddl.h>
 #include <tlhelp32.h>
 #include <WtsApi32.h>
+#include <ShlObj.h>
 #include <winternl.h>  // NTSTATUS（display.h 的 D3DKMT 型別）
 // clang-format on
 
@@ -69,7 +74,9 @@
 #include "src/vr/vr_bridge.h"
 #include "src/vr/vr_ipc_abi.h"
 #include "src/vr/vr_ipc_abi_table.h"
+#include "src/vr/vr_scene_pattern.h"
 #include "src/vr/vr_selftest.h"
+#include <moonlight-common-c/src/VipleVr.h>
 #include "utf_utils.h"
 #include "vr_admin_pipe.h"
 
@@ -869,13 +876,15 @@ namespace vr::selftest::platform {
           error_ = std::format("job creation failed: {}", e.what());
           return;
         }
-        // kill-on-close：server 行程被殺時 kernel 關掉 job handle，vr_probe 一起結束（不留孤兒）
+        // kill-on-close：server 行程被殺時 kernel 關掉 job handle，vr_probe 一起結束（不留孤兒）。
+        // silent breakaway（M1b V4 實測）：vr_probe 的 VR_Init 可能讓 SteamVR 重新拉起 vrmonitor 等行程，它們若留在 job 裡，
+        // job 關閉時會被一起殺掉（vrserver 看到「Lost master process」就整個 SteamVR 退出）。只有 vr_probe 本身留在 job 內。
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION info {};
         if (!QueryInformationJobObject(group_->native_handle(), JobObjectExtendedLimitInformation, &info, sizeof(info), nullptr)) {
           error_ = std::format("QueryInformationJobObject err={}", GetLastError());
           return;
         }
-        info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
         if (!SetInformationJobObject(group_->native_handle(), JobObjectExtendedLimitInformation, &info, sizeof(info))) {
           error_ = std::format("SetInformationJobObject(kill-on-close) err={}", GetLastError());
           return;
@@ -2477,6 +2486,309 @@ namespace vr::selftest::platform {
       disp.reset();
       relay(c.r, id, *p);
     }
+
+    // ── T4（M1b V4、§F.5）：--manual-steamvr ─────────────────────────────────────
+
+    /// T4 的 session config：每眼 1728×1728@90（與 PoC-10 的證據行 3456x1728 90.0Hz 相同）、不對稱 FOV（驗 GetProjectionRaw 對映）
+    vripc_session_config_t make_config_t4(const adapter_info_t &a) {
+      vripc_session_config_t c = make_config(a, 1, 1);
+      c.eye_width = 1728;
+      c.eye_height = 1728;
+      c.packed_width = 3456;
+      c.packed_height = 1728;
+      const float fl[4] = {-1.0f, 0.9f, 0.95f, -1.05f};  // left, right, up, down
+      const float fr[4] = {-0.9f, 1.0f, 0.95f, -1.05f};
+      std::copy(std::begin(fl), std::end(fl), std::begin(c.fov_tan[0]));
+      std::copy(std::begin(fr), std::end(fr), std::begin(c.fov_tan[1]));
+      return c;
+    }
+
+    /// 執行中的 vrserver.exe 映像（第一個找到的）；沒有回空字串
+    std::wstring running_vrserver_image() {
+      handle_t snap {CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)};
+      if (!snap) {
+        return {};
+      }
+      PROCESSENTRY32W pe {};
+      pe.dwSize = sizeof(pe);
+      for (BOOL ok = Process32FirstW(snap.h, &pe); ok; ok = Process32NextW(snap.h, &pe)) {
+        if (_wcsicmp(pe.szExeFile, L"vrserver.exe") != 0) {
+          continue;
+        }
+        handle_t p {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID)};
+        if (!p) {
+          continue;
+        }
+        std::wstring buf(1024, L'\0');
+        DWORD n = static_cast<DWORD>(buf.size());
+        if (QueryFullProcessImageNameW(p.h, 0, buf.data(), &n)) {
+          buf.resize(n);
+          return buf;
+        }
+      }
+      return {};
+    }
+
+    /// 主控台使用者的 openvrpaths.vrpath → runtime[0]\bin\win64\vrserver.exe（只讀；以使用者 token 解析 LocalAppData）
+    std::wstring vrserver_image_from_openvrpaths() {
+      handle_t token {platf::retrieve_users_token(false)};
+      if (!token) {
+        return {};
+      }
+      PWSTR base = nullptr;
+      if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, token.h, &base)) || !base) {
+        if (base) {
+          CoTaskMemFree(base);
+        }
+        return {};
+      }
+      const std::filesystem::path file = std::filesystem::path {base} / L"openvr" / L"openvrpaths.vrpath";
+      CoTaskMemFree(base);
+      std::error_code ec;
+      if (!std::filesystem::is_regular_file(file, ec) || std::filesystem::file_size(file, ec) > (1u << 20)) {
+        return {};
+      }
+      FILE *f = _wfopen(file.c_str(), L"rb");
+      if (!f) {
+        return {};
+      }
+      std::string text;
+      char chunk[4096];
+      size_t n = 0;
+      while ((n = std::fread(chunk, 1, sizeof(chunk), f)) > 0) {
+        text.append(chunk, n);
+      }
+      std::fclose(f);
+      const auto j = nlohmann::json::parse(text, nullptr, false);
+      if (j.is_discarded() || !j.is_object() || !j.contains("runtime") || !j["runtime"].is_array() || j["runtime"].empty() || !j["runtime"][0].is_string()) {
+        return {};
+      }
+      const auto runtime = utf_utils::from_utf8(j["runtime"][0].get<std::string>());
+      return (std::filesystem::path {runtime} / L"bin" / L"win64" / L"vrserver.exe").wstring();
+    }
+
+    /// 路徑只印 SteamVR 之後的尾端（前面可能含使用者名稱）
+    std::string path_tail(const std::wstring &p) {
+      const auto s = utf_utils::to_utf8(p);
+      const auto pos = s.find("SteamVR");
+      return pos == std::string::npos ? "<other>"s : "..\\" + s.substr(pos);
+    }
+
+    /// T4 的合成 tracking：2×Hz（180 Hz）、flags HMD|PRESENCE、target = now + predict；motion = still／yaw30／sine
+    class t4_synth_t {
+    public:
+      t4_synth_t(std::string motion, uint16_t space_epoch):
+          motion_(std::move(motion)),
+          space_epoch_(space_epoch) {
+        thread_ = std::thread([this]() {
+          run();
+        });
+      }
+
+      ~t4_synth_t() {
+        stop_.store(true);
+        if (thread_.joinable()) {
+          thread_.join();
+        }
+      }
+
+      t4_synth_t(const t4_synth_t &) = delete;
+      t4_synth_t &operator=(const t4_synth_t &) = delete;
+
+      uint64_t published() const {
+        return published_.load();
+      }
+
+    private:
+      void run() {
+        platf::set_thread_name("vr_selftest_t4_synth");
+        handle_t timer {CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS)};
+        const int64_t f = platf::qpc_frequency();
+        const int64_t t0 = platf::qpc_counter();
+        uint32_t id = 1;
+        constexpr double k_pi = 3.14159265358979323846;
+        while (!stop_.load()) {
+          vr::bridge::tracked_sample_t s;
+          const int64_t now = platf::qpc_counter();
+          const int64_t predict = f / 50;  // 20 ms
+          const double t = (double) (now - t0) / (double) f;
+          double yaw = 0.0, yaw_rate = 0.0;
+          if (motion_ == "yaw30") {
+            yaw = std::fmod(30.0 * t, 360.0) * k_pi / 180.0;
+            yaw_rate = 30.0 * k_pi / 180.0;
+          } else if (motion_ == "sine") {
+            const double w = 2.0 * k_pi * 0.25;
+            yaw = 20.0 * k_pi / 180.0 * std::sin(w * t);
+            yaw_rate = 20.0 * k_pi / 180.0 * w * std::cos(w * t);
+          }
+          s.sample_id = id++;
+          s.space_epoch = space_epoch_;
+          // VIPLE_VR_TRK_HMD | VIPLE_VR_TRK_PRESENCE：沒有 presence 時 pauseCompositorOnStandby 可能讓 compositor 停止 Present
+          s.flags = 0x01 | 0x10;
+          s.sample_time_ns = static_cast<uint64_t>(platf::qpc_ticks_to_ns(now));
+          s.arrival_qpc = now;
+          s.target_server_qpc = now + predict;
+          s.predict_ns = static_cast<uint32_t>(platf::qpc_ticks_to_ns(predict));
+          s.pose[0].pos[1] = 1.6f;
+          s.pose[0].rot[1] = static_cast<float>(std::sin(yaw / 2.0));
+          s.pose[0].rot[3] = static_cast<float>(std::cos(yaw / 2.0));
+          s.pose[0].ang_vel[1] = static_cast<float>(yaw_rate);
+          bridge_view::publish(s);
+          published_.fetch_add(1);
+          LARGE_INTEGER due;
+          due.QuadPart = -55555;  // 5.56 ms（180 Hz）
+          if (timer && SetWaitableTimer(timer.h, &due, 0, nullptr, nullptr, FALSE)) {
+            WaitForSingleObject(timer.h, 100);
+          } else {
+            std::this_thread::sleep_for(5ms);
+          }
+        }
+      }
+
+      std::string motion_;
+      uint16_t space_epoch_;
+      std::atomic<bool> stop_ {false};
+      std::atomic<uint64_t> published_ {0};
+      std::thread thread_;
+    };
+
+    /// T4 的角落讀回（每 10 幀一次；在擷取執行緒上呼叫，與 capture() 用同一個 immediate context，順序天然成立）
+    struct t4_readback_t {
+      platf::dxgi::display_vr_t &disp;
+      uint32_t eye_w;
+      uint32_t eye_h;
+      platf::dxgi::texture2d_t staging;
+      uint32_t rw = 0, rh = 0;
+      uint64_t frames = 0;
+      uint64_t compared = 0;
+      uint64_t mismatch = 0;
+      uint64_t decode_fail = 0;  ///< 圖案沒通過 CRC（scene app 還沒畫、SteamVR 的載入畫面等）
+      uint64_t eye_disagree = 0;  ///< 兩眼解出來的 counter 或姿態不同
+      uint64_t echo_matched = 0;
+      double max_angle = 0.0;
+      std::set<uint16_t> counters;
+      std::string first_mismatch;
+      int dumps = 0;
+      int dumps_ok = 0;
+      std::string dump_dir;  ///< 非空才寫診斷用的 PGM（兩眼角落的亮度）
+
+      /// 診斷：把讀回的角落區域（兩眼並排）寫成 PGM；只寫 SYSTEM／管理員的 config\steamvr\selftest
+      void dump(const uint8_t *base, UINT pitch, const char *what) {
+        if (dump_dir.empty()) {
+          return;
+        }
+        ++dumps;
+        std::error_code ec;
+        std::filesystem::create_directories(dump_dir, ec);
+        const auto file = std::filesystem::path {dump_dir} / std::format("t4-{}-{}-{}.pgm", what, frames, dumps);
+        FILE *f = _wfopen(file.c_str(), L"wb");
+        if (!f) {
+          return;
+        }
+        std::fprintf(f, "P5\n%u %u\n255\n", 2 * rw, rh);
+        std::vector<uint8_t> row(2 * rw);
+        for (uint32_t y = 0; y < rh; ++y) {
+          const uint8_t *src = base + (size_t) y * pitch;
+          for (uint32_t x = 0; x < 2 * rw; ++x) {
+            row[x] = (uint8_t) (((uint32_t) src[x * 4] + src[x * 4 + 1] + src[x * 4 + 2]) / 3);
+          }
+          std::fwrite(row.data(), 1, row.size(), f);
+        }
+        std::fclose(f);
+      }
+
+      bool init() {
+        rw = vr_scene_pattern::region_w(eye_w);
+        rh = vr_scene_pattern::region_h(eye_h);
+        D3D11_TEXTURE2D_DESC d {};
+        d.Width = 2 * rw;
+        d.Height = rh;
+        d.MipLevels = 1;
+        d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_STAGING;
+        d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ID3D11Texture2D *t = nullptr;
+        if (FAILED(disp.device->CreateTexture2D(&d, nullptr, &t))) {
+          return false;
+        }
+        staging.reset(t);
+        return true;
+      }
+
+      void on_frame(platf::img_t &img) {
+        auto &d3d = static_cast<platf::dxgi::img_d3d_t &>(img);
+        if (d3d.blank || !img.vr || !d3d.capture_texture) {
+          return;
+        }
+        if (++frames % 10 != 0) {
+          return;
+        }
+        for (uint32_t e = 0; e < 2; ++e) {
+          D3D11_BOX box {e * eye_w, 0, 0, e * eye_w + rw, rh, 1};
+          disp.device_ctx->CopySubresourceRegion(staging.get(), 0, e * rw, 0, 0, d3d.capture_texture.get(), 0, &box);
+        }
+        D3D11_MAPPED_SUBRESOURCE m {};
+        if (FAILED(disp.device_ctx->Map(staging.get(), 0, D3D11_MAP_READ, 0, &m))) {
+          return;
+        }
+        uint16_t cnt[2] = {};
+        uint8_t q48[2][6] = {};
+        bool ok[2] = {};
+        const auto *base = static_cast<const uint8_t *>(m.pData);
+        for (uint32_t e = 0; e < 2; ++e) {
+          auto luma = [&](uint32_t x, uint32_t y) -> uint32_t {
+            if (x >= rw || y >= rh) {
+              return 0u;
+            }
+            const uint8_t *px = base + (size_t) y * m.RowPitch + (size_t) (e * rw + x) * 4;
+            return ((uint32_t) px[0] + px[1] + px[2]) / 3;
+          };
+          ok[e] = vr_scene_pattern::decode(eye_w, eye_h, luma, cnt[e], q48[e]);
+        }
+        // 診斷：開頭一張、播放中（300 幀之後）再兩張失敗的；第一張成功的
+        if ((!ok[0] || !ok[1]) && (dumps == 0 || (frames > 300 && dumps < 3))) {
+          dump(base, m.RowPitch, "fail");
+        } else if (ok[0] && ok[1] && dumps_ok < 1) {
+          ++dumps_ok;
+          dump(base, m.RowPitch, "ok");
+        }
+        disp.device_ctx->Unmap(staging.get(), 0);
+        if (!ok[0] || !ok[1]) {
+          ++decode_fail;
+          return;
+        }
+        if (cnt[0] != cnt[1] || std::memcmp(q48[0], q48[1], 6) != 0) {
+          ++eye_disagree;
+        }
+        float q[4];
+        VipleVrUnpackQuat48(q48[0], q);
+        const auto &meta = *img.vr;
+        // |dot| → 角距離（q 與 −q 是同一個旋轉）
+        double dot = 0.0, n1 = 0.0, n2 = 0.0;
+        for (int i = 0; i < 4; ++i) {
+          dot += (double) q[i] * meta.rot[i];
+          n1 += (double) q[i] * q[i];
+          n2 += (double) meta.rot[i] * meta.rot[i];
+        }
+        double c = n1 > 0 && n2 > 0 ? std::fabs(dot) / std::sqrt(n1 * n2) : 0.0;
+        c = std::min(c, 1.0);
+        const double ang = 2.0 * std::acos(c) * 57.29577951308232;
+        ++compared;
+        counters.insert(cnt[0]);
+        if (meta.flags & VRIPC_FRM_ECHO_MATCHED) {
+          ++echo_matched;
+        }
+        max_angle = std::max(max_angle, ang);
+        if (!(ang < 0.01)) {
+          ++mismatch;
+          if (first_mismatch.empty()) {
+            first_mismatch = std::format("frame={} counter={} angDeg={:.4f} decoded=({:.4f},{:.4f},{:.4f},{:.4f}) desc=({:.4f},{:.4f},{:.4f},{:.4f})", meta.frame_id, cnt[0], ang, q[0], q[1], q[2], q[3], meta.rot[0], meta.rot[1], meta.rot[2], meta.rot[3]);
+          }
+        }
+      }
+    };
   }  // namespace
 
   void run_t1(reporter_t &r, const request_t &, const std::atomic<bool> &stop) {
@@ -2764,5 +3076,261 @@ namespace vr::selftest::platform {
       return;
     }
     t6_probe(r, probe, stop);
+  }
+  /**
+   * T4（M1b V4、§F.5）：只支援 `--manual-steamvr`（T3 的 SteamVR 編排在 V5）。
+   * 不註冊、不套 guard、不啟停 SteamVR（那些由本機操作手冊以使用者身分做，S3-10）；這裡只：
+   *   設「合法 driver 宿主」映像（執行中的 vrserver，或使用者 openvrpaths 的 runtime）→ 設 session config → arm →
+   *   合成 tracking（180 Hz，HMD|PRESENCE）→ 等真的 driver（identity=vrserver）READY 最多 120 s →
+   *   以使用者身分啟動 vr_probe（--probe）→ selftest consumer（display_vr_t live）跑 hold 秒；scene 時每 10 幀讀回
+   *   兩眼左上角的位元圖案，與 descriptor 的 renderPose 比對（角誤差 < 0.01°）→ disarm、清 config、清宿主映像。
+   */
+  void run_t4(reporter_t &r, const request_t &req, const std::atomic<bool> &stop) {
+    if (!req.manual_steamvr) {
+      r.check("T4"sv, false, "V4 runs T4 only with --manual-steamvr (the T3 SteamVR orchestration is V5)"sv);
+      return;
+    }
+    if (!platf::is_running_as_system()) {
+      r.check("T4"sv, false, "server is not LocalSystem (the VR bridge only runs in the SYSTEM service)"sv);
+      return;
+    }
+    const auto user = get_console_user();
+    if (!user.present) {
+      r.check("T4"sv, false, "no console user: SteamVR and vr_probe run as the console user"sv);
+      return;
+    }
+    std::filesystem::path probe;
+    if (req.probe != "none"sv) {
+      probe = probe_exe(req);
+      if (auto why = probe_unusable(probe)) {
+        r.check("T4"sv, false, *why);
+        return;
+      }
+    }
+    bridge_view::refresh_user();
+    wait_until(3000ms, stop, []() {
+      const auto s = bridge_view::status();
+      return s.phase != "no-user"sv && s.phase != "no-pipe"sv && s.phase != "stopped"sv;
+    });
+    const auto st0 = bridge_view::status();
+    if (st0.phase == "stopped"sv || st0.phase == "no-pipe"sv || st0.phase == "no-user"sv) {
+      r.check("T4"sv, false, std::format("bridge is not accepting connections (phase={} pipeReason={})", st0.phase, st0.pipe_reason));
+      return;
+    }
+    if (st0.connected && st0.peer_is_selftest) {
+      r.check("T4"sv, false, "a selftest peer is connected to the VR pipe"sv);
+      return;
+    }
+    const auto adapter = pick_adapter(list_adapters());
+    if (!adapter) {
+      r.check("T4"sv, false, "no hardware DXGI adapter"sv);
+      return;
+    }
+
+    // 「合法 driver 宿主」映像（§B.1 第 5 步）：先看執行中的 vrserver，沒有就讀使用者的 openvrpaths
+    std::wstring host = running_vrserver_image();
+    std::string host_src = "running";
+    if (host.empty()) {
+      host = vrserver_image_from_openvrpaths();
+      host_src = "openvrpaths";
+    }
+    if (host.empty()) {
+      r.check("T4"sv, false, "cannot determine the vrserver.exe path (SteamVR not running and openvrpaths.vrpath has no runtime)"sv);
+      return;
+    }
+    const bool steamvr_running = process_running(L"vrserver.exe");
+    vr::bridge::set_expected_driver_host_image(host);
+
+    const auto cfg = make_config_t4(*adapter);
+    const int hold = req.hold_sec > 0 ? req.hold_sec : 60;
+    r.info("T4.setup"sv, std::format("adapter={} luid={} eye={}x{} hz={} motion={} probe={} holdSec={} hostImage={} source={} steamvrRunning={} phase={} connected={}", adapter->index,
+                                     luid_str(adapter->luid), cfg.eye_width, cfg.eye_height, cfg.refresh_mhz / 1000, req.motion, req.probe, hold, path_tail(host), host_src,
+                                     steamvr_running ? 1 : 0, st0.phase, st0.connected ? 1 : 0));
+    auto restore = util::fail_guard([]() {
+      vr::bridge::set_armed(false);
+      bridge_view::clear_config();
+      vr::bridge::set_expected_driver_host_image(L"");
+    });
+    if (!bridge_view::set_config(cfg)) {
+      r.check("T4"sv, false, "bridge rejected the T4 session config"sv);
+      return;
+    }
+    vr::bridge::set_armed(true);
+    t4_synth_t synth(req.motion, cfg.space_epoch);
+
+    // 等真的 driver（不是 selftest peer）READY：操作手冊在這段時間以使用者身分啟動 SteamVR
+    const auto t_wait0 = steady::now();
+    auto last_progress = t_wait0;
+    const int64_t ready_ms = wait_until(120000ms, stop, [&]() {
+      const auto s = bridge_view::status();
+      const auto now = steady::now();
+      if (host_src != "running"sv) {
+        // vrserver 啟動了但路徑與 openvrpaths 推的不同：改用實際的（下一次握手生效）
+        const auto running = running_vrserver_image();
+        if (!running.empty()) {
+          if (_wcsicmp(running.c_str(), host.c_str()) != 0) {
+            host = running;
+            vr::bridge::set_expected_driver_host_image(host);
+          }
+          host_src = "running";
+        }
+      }
+      if (now - last_progress >= 10s) {
+        last_progress = now;
+        const auto c = bridge_view::counters();
+        r.info("T4.wait"sv, std::format("sec={} phase={} connected={} ready={} peer={} rejects={} lastIdentity={} vrserver={}", std::chrono::duration_cast<std::chrono::seconds>(now - t_wait0).count(), s.phase,
+                                        s.connected ? 1 : 0, s.ready ? 1 : 0, s.peer_is_selftest ? 1 : 0, bridge_view::rejects_total(c), c.last_identity, process_running(L"vrserver.exe") ? 1 : 0));
+      }
+      return s.connected && s.ready && !s.peer_is_selftest;
+    },
+                                        50ms);
+    if (ready_ms < 0) {
+      if (!stop.load()) {
+        const auto s = bridge_view::status();
+        const auto c = bridge_view::counters();
+        r.check("T4.handshake"sv, false, std::format("the SteamVR driver never became READY within 120 s (phase={} connected={} ready={} rejects={} identityRejects={} vrserver={})", s.phase, s.connected ? 1 : 0,
+                                                     s.ready ? 1 : 0, bridge_view::rejects_total(c), bridge_view::rejects(c, VRIPC_REJ_IDENTITY), process_running(L"vrserver.exe") ? 1 : 0));
+      }
+      return;
+    }
+    {
+      const auto s = vr::bridge::status();
+      const auto c = bridge_view::counters();
+      const bool pass = !s.peer_is_selftest && (s.driver_caps & VRIPC_DCAP_PEER) == 0 && s.driver_iface == "IVRDriverDirectModeComponent_009" && c.last_identity == 1;
+      r.check("T4.handshake"sv, pass, std::format("gen={} driver={}.{}.{} caps=0x{:x} iface={} identity={} waitMs={} hostSource={}", s.generation, s.driver_version_packed >> 24, (s.driver_version_packed >> 16) & 0xFF,
+                                                  s.driver_version_packed & 0xFFFF, s.driver_caps, s.driver_iface, c.last_identity == 1 ? "vrserver"sv : "other"sv, ready_ms, host_src));
+    }
+
+    // HMD Activate（act_* 有效）最多 30 s
+    const int64_t act_ms = wait_until(30000ms, stop, []() {
+      const auto s = vr::bridge::status();
+      return s.act_valid && s.act_refresh_mhz != 0;
+    });
+    {
+      const auto s = vr::bridge::status();
+      const bool pass = act_ms >= 0 && s.act_refresh_mhz == cfg.refresh_mhz && s.act_eye_w == cfg.eye_width && s.act_eye_h == cfg.eye_height;
+      r.check("T4.hmd-activated"sv, pass, std::format("ms={} actHz={} actEye={}x{} hmdAdded={} driverState={} otherHmd={} degraded=0x{:x}", act_ms, s.act_refresh_mhz / 1000, s.act_eye_w, s.act_eye_h,
+                                                      s.hmd_added ? 1 : 0, s.driver_state, s.other_hmd, s.degraded_code));
+      if (!pass) {
+        return;
+      }
+    }
+
+    // vr_probe（主控台使用者身分、kill-on-close job）
+    std::unique_ptr<probe_proc_t> p;
+    if (!probe.empty()) {
+      std::string args = std::format("--mode {} --seconds {}", req.probe, req.probe == "whoami"sv ? 1 : hold + 30);
+      if (req.reset_seated) {
+        args += " --reset-seated";
+      }
+      p = std::make_unique<probe_proc_t>(probe, args);
+      if (!p->ok()) {
+        r.check("T4.probe"sv, false, "vr_probe launch failed: " + p->error());
+        return;
+      }
+    }
+    auto probe_cleanup = util::fail_guard([&]() {
+      if (p) {
+        p->terminate();
+      }
+    });
+
+    // HMD_PRESENTING（第一次合成並發布）最多 30 s
+    const int64_t pres_ms = wait_until(30000ms, stop, []() {
+      return vr::bridge::status().hmd_presenting;
+    });
+    r.check("T4.presenting"sv, pres_ms >= 0, std::format("ms={} driverState={}", pres_ms, vr::bridge::status().driver_state));
+    if (pres_ms < 0 || stop.load()) {
+      if (p) {
+        relay(r, "T4"sv, *p);
+      }
+      return;
+    }
+
+    // selftest consumer：display_vr_t live、影像池 3 張；scene 時做角落讀回
+    ::video::config_t vcfg {};
+    vcfg.width = (int) cfg.packed_width;
+    vcfg.height = (int) cfg.packed_height;
+    vcfg.framerate = (int) (cfg.refresh_mhz / 1000);
+    vcfg.captureSource = 1;
+    auto disp = std::make_shared<platf::dxgi::display_vr_t>();
+    if (disp->init(vcfg)) {
+      r.check("T4.consume"sv, false, "display_vr_t init failed (see [VIPLE-VR-CAP] in sunshine.log)"sv);
+      return;
+    }
+    t4_readback_t rb {*disp, cfg.eye_width, cfg.eye_height};
+    rb.dump_dir = (install_dir() / L"config" / L"steamvr" / L"selftest").string();
+    const bool do_readback = req.probe == "scene"sv;
+    if (do_readback && !rb.init()) {
+      r.check("T4.readback"sv, false, "staging texture creation failed"sv);
+      return;
+    }
+    std::vector<std::shared_ptr<platf::img_t>> pool(3);
+    uint64_t pushed = 0;
+    const auto t0 = steady::now();
+    auto last_line = t0;
+    auto pull = [&](std::shared_ptr<platf::img_t> &out) -> bool {
+      out.reset();
+      while (!stop.load()) {
+        for (auto &slot : pool) {
+          if (!slot) {
+            slot = disp->alloc_img();
+          }
+          if (slot.use_count() == 1) {
+            out = slot;
+            out->frame_timestamp.reset();
+            out->vr.reset();
+            return true;
+          }
+        }
+        std::this_thread::sleep_for(1ms);
+      }
+      return false;
+    };
+    auto push = [&](std::shared_ptr<platf::img_t> &&img, bool captured) -> bool {
+      if (captured && img) {
+        ++pushed;
+        if (do_readback) {
+          rb.on_frame(*img);
+        }
+      }
+      img.reset();
+      const auto now = steady::now();
+      if (now - last_line >= 10s) {
+        last_line = now;
+        r.info("T4.progress"sv, std::format("sec={} pushed={} compared={} mismatch={} decodeFail={} synth={}", std::chrono::duration_cast<std::chrono::seconds>(now - t0).count(), pushed, rb.compared, rb.mismatch,
+                                            rb.decode_fail, synth.published()));
+      }
+      return !stop.load() && now - t0 < std::chrono::seconds(hold);
+    };
+    bool cursor = false;
+    const auto status = disp->capture(push, pull, &cursor);
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - t0).count();
+    if (stop.load()) {
+      return;
+    }
+    const auto s = disp->stats();
+    const uint64_t seen = s.last_frame_id >= s.first_frame_id && s.first_frame_id != 0 ? s.last_frame_id - s.first_frame_id + 1 : 0;
+    const double consumption = seen ? (double) s.copied / (double) seen : 0.0;
+    r.check("T4.consume"sv, status == platf::capture_e::ok && s.copied > 0 && s.invalid == 0 && s.fence_lost == 0,
+            std::format("ms={} status={} gen={} copied={} seen={} consumption={:.4f} skipped={} fenceTimeout={} invalid={} torn={} fenceLost={} black={} evtToPushMs p50={:.3f} p95={:.3f} presentToPushMs p50={:.3f} p95={:.3f} synth={}",
+                        elapsed_ms, (int) status, s.generation, s.copied, seen, consumption, s.skipped, s.fence_timeout, s.invalid, s.torn, s.fence_lost, s.black, pct(s.evt_to_push_ms, 0.5), pct(s.evt_to_push_ms, 0.95),
+                        pct(s.present_to_push_ms, 0.5), pct(s.present_to_push_ms, 0.95), synth.published()));
+    if (do_readback) {
+      const bool pass = rb.compared >= 20 && rb.mismatch == 0 && rb.eye_disagree == 0;
+      r.check("T4.readback"sv, pass, std::format("compared={} mismatch={} eyeDisagree={} decodeFail={} distinctCounters={} echoMatched={} maxAngleDeg={:.5f}{}", rb.compared, rb.mismatch, rb.eye_disagree, rb.decode_fail,
+                                                 rb.counters.size(), rb.echo_matched, rb.max_angle, rb.first_mismatch.empty() ? ""s : " first=[" + rb.first_mismatch + "]"));
+    }
+    disp.reset();
+    const auto sd = vr::bridge::status();
+    r.info("T4.driver"sv, std::format("driverState={} presenting={} otherHmd={} otherSystem={} degraded=0x{:x}", sd.driver_state, sd.hmd_presenting ? 1 : 0, sd.other_hmd, sd.other_hmd_system, sd.degraded_code));
+
+    if (p) {
+      const auto w = p->wait(40000ms, stop);
+      const auto code = p->exit_code();
+      const auto summary = p->last(req.probe, "summary"sv);
+      r.check("T4.probe"sv, summary.has_value() && code && *code == 0, std::format("mode={} wait={} {}", req.probe, (int) w, peer_diag(*p)));
+      relay(r, "T4"sv, *p);
+    }
   }
 }  // namespace vr::selftest::platform

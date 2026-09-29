@@ -1,0 +1,8 @@
+{
+   "driver_viplestream" : {
+      "enable" : true,
+      "forceSystemLayerUseAppPoses" : true,
+      "hmdAllowsClientToControlTextureIndex" : true,
+      "loadPriority" : 0
+   }
+}

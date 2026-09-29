@@ -57,6 +57,7 @@ $OpenVrInc = Join-Path $OpenVrDir 'headers'
 $OpenVrLibDir = Join-Path $OpenVrDir 'lib\win64'
 $OpenVrDll = Join-Path $OpenVrDir 'bin\win64\openvr_api.dll'
 $ProbeDir = Join-Path $SunshineDir 'tools\vr_probe'
+$CommonCDir = Join-Path $SunshineDir 'third-party\moonlight-common-c\src'   # VipleVr.h（scene 圖案的 Quat48）
 $OutDir = Join-Path $DrvDir "out\x64\$Config"
 $GenDir = Join-Path $DrvDir 'out\gen'
 
@@ -233,15 +234,16 @@ function Build-Probe {
         if (Test-Path -LiteralPath $p) { $srcs += $p }
     }
     $pdbObj = Join-Path $objDir 'vc.pdb'
-    $cl = $CommonCl + @('/DVRDRV_PEER_HOOKS', "/I$DrvDir", "/I$ProbeDir", "/Fo$objDir/", "/Fd$pdbObj") + $srcs
+    $cl = $CommonCl + @('/DVRDRV_PEER_HOOKS', "/I$DrvDir", "/I$ProbeDir", "/external:I$CommonCDir", "/Fo$objDir/", "/Fd$pdbObj") + $srcs
     Say "cl：$($srcs.Count) 個來源檔"
     Invoke-Native 'cl.exe' $cl 'cl（vr_probe）'
 
     $objs = @(Get-ChildItem -LiteralPath $objDir -Filter '*.obj' -File | ForEach-Object { $_.FullName })
     $exe = Join-Path $binDir 'vr_probe.exe'
     $pdb = Join-Path $binDir 'vr_probe.pdb'
-    $link = $CommonLink + @('/SUBSYSTEM:CONSOLE', "/OUT:$exe", "/PDB:$pdb", "/LIBPATH:$OpenVrLibDir") + $objs + @(
-        'openvr_api.lib', 'd3d11.lib', 'dxgi.lib', 'advapi32.lib', 'kernel32.lib', 'shell32.lib', 'ole32.lib')
+    # openvr_api.dll 延遲載入：ipcpeer／unit 不需要它（V4 的 whoami／scene／… 才會真的載入）
+    $link = $CommonLink + @('/SUBSYSTEM:CONSOLE', "/OUT:$exe", "/PDB:$pdb", "/LIBPATH:$OpenVrLibDir", '/DELAYLOAD:openvr_api.dll') + $objs + @(
+        'openvr_api.lib', 'delayimp.lib', 'd3d11.lib', 'dxgi.lib', 'advapi32.lib', 'kernel32.lib', 'shell32.lib', 'ole32.lib')
     Say 'link vr_probe.exe'
     Invoke-Native 'link.exe' $link 'link（vr_probe）'
     Copy-Item -LiteralPath $OpenVrDll -Destination (Join-Path $binDir 'openvr_api.dll') -Force

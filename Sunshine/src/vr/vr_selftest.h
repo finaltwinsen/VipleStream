@@ -13,7 +13,7 @@
  *   - 傳輸：Windows 的 admin pipe（`src/platform/windows/vr_admin_pipe.cpp`）在背景執行緒呼叫 run()，
  *     每一行經 sink 送回 CLI。
  *
- * V2 實作 T0、T2、T6，V3 加上 T1、T1b 與 T2.live；其他子測試與選項回「not implemented until V<n>」（rc = rc_bad_request）。
+ * V2 實作 T0、T2、T6，V3 加上 T1、T1b 與 T2.live，V4 加上 T4（--manual-steamvr）；其他子測試與選項回「not implemented until V<n>」（rc = rc_bad_request）。
  *
  * log 衛生（S1-02）：行內不含 handle 值、完整 GUID、SID（只印 RID）或任何機密。
  */
@@ -186,6 +186,10 @@ namespace vr::selftest {
     ///     不讀 pipe、雙寫入者、升權嘗試、停止 Signal、第二 instance、ABI 不同、HELLO 大小不符、冒名、恢復、限速）；
     ///     live 消費（display_vr_t 60 s，V3）；gpu-hold 以 NOT-RUN until=V4 明列
     void run_t2(reporter_t &r, const request_t &req, const std::atomic<bool> &stop);
+
+    /// T4（M1b V4，只有 --manual-steamvr）：真的 SteamVR driver（操作手冊以使用者身分啟動 SteamVR）握手、HMD Activate、
+    ///     HMD_PRESENTING、selftest consumer；--probe scene 時讀回角落位元圖案與 descriptor 的 renderPose 比對
+    void run_t4(reporter_t &r, const request_t &req, const std::atomic<bool> &stop);
 
     /// T6 的平台部分：QPC 換算、§B.8 descriptor 驗證純函式、ABI 表與 vr_probe 逐字比對、vr_probe unit
     void run_t6(reporter_t &r, const request_t &req, const std::atomic<bool> &stop);
