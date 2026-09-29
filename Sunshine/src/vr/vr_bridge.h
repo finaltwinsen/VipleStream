@@ -30,6 +30,7 @@
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <optional>
 #include <string>
 
 // local includes
@@ -620,6 +621,12 @@ namespace vr::bridge {
 
   /// READY 之後本 generation 的幀來源；還沒 READY、沒有 config、或已 TEARDOWN 時為 nullptr
   std::shared_ptr<frame_source_t> frame_source();
+
+  /**
+   * @brief 目前設定的 session config 的 adapter LUID（M1b S1-08、§C.2 第 1 步）：display_vr_t 在 driver 還沒
+   *        READY 時也要在同一張卡建 device（server 先選 LUID，driver 照做）。沒有 session config 時 nullopt。
+   */
+  std::optional<luid_t> session_config_luid();
 
   /**
    * @brief frame ring 的單一消費者輔助（§B.3 讀取方＋§B.8 copy-once-validate）。只能由一條執行緒使用。

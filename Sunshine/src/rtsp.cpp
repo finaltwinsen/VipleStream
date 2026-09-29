@@ -1259,9 +1259,26 @@ namespace rtsp_stream {
         config.monitor.enableIntraRefresh = 1;
       }
 
-      // stub 直接擷取目前桌面、照 client 在 SDP 要求的尺寸／codec 編碼；與 /launch 協商的
-      // 打包尺寸、codec、Hz 不一致時只記警告，方便整合測試時對照 client 的設定。
-      if (config.monitor.width != neg.packed_width() || config.monitor.height != neg.packed_height()) {
+      if (neg.pcvr) {
+        // M1b S1-10（§C.8）：pcvr 以協商值為準——擷取來源換成 display_vr_t，一律 8-bit SDR 4:2:0、
+        // 打包尺寸、協商 Hz、4 slices。client 在 SDP 帶的值不同時以協商值覆寫並記一行。
+        const auto override_field = [&](const char *field, int &value, int negotiated) {
+          if (value != negotiated) {
+            BOOST_LOG(info) << "[VIPLE-VR-SESSION] rtsp override field=" << field << " client=" << value << " negotiated=" << negotiated;
+            value = negotiated;
+          }
+        };
+        config.monitor.captureSource = 1;
+        override_field("dynamicRange", config.monitor.dynamicRange, 0);
+        override_field("chromaSamplingType", config.monitor.chromaSamplingType, 0);
+        override_field("width", config.monitor.width, neg.packed_width());
+        override_field("height", config.monitor.height, neg.packed_height());
+        override_field("framerate", config.monitor.framerate, neg.params.hz);
+        override_field("slicesPerFrame", config.monitor.slicesPerFrame, 4);
+        override_field("videoFormat", config.monitor.videoFormat, neg.video_format());
+      } else if (config.monitor.width != neg.packed_width() || config.monitor.height != neg.packed_height()) {
+        // stub 直接擷取目前桌面、照 client 在 SDP 要求的尺寸／codec 編碼；與 /launch 協商的
+        // 打包尺寸、codec、Hz 不一致時只記警告，方便整合測試時對照 client 的設定。
         BOOST_LOG(warning) << "[VIPLE-VR-SESSION] RTSP viewport " << config.monitor.width << 'x' << config.monitor.height
                            << " != negotiated packed " << neg.packed_width() << 'x' << neg.packed_height()
                            << " (stub encodes what the client requested)";

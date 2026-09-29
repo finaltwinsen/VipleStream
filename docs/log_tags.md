@@ -443,6 +443,16 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
   `… older than 1s …`（debug）：擷取的 QPC 時間戳不可信時改用 now 並計數，兩類各自每 10 s 最多一行。
   M1b 修正 `qpc_time_difference`（舊版小 10⁴ 倍）後才有意義；桌面 session 正常情況下不會出現 warning。
 - `[VIPLE-VR-CAP] init_device: no adapter selected`：`display_base_t::init_device` 收到空 adapter（DDA／WGC 不會走到）。
+- **M1b V3（VR 擷取，`display_vr_t`）**：
+  - `[VIPLE-VR-CAP] init adapter=<desc> luid=<match|n/a> size=<W>x<H>@<hz> mode=<probe|live>`：建立時一次。選卡（K22）只收非軟體、VendorId≠0x1414、能建 FL 11_0、而且 `D3DKMT` ADAPTERTYPE 不是間接顯示（IddCx，例：MTT VDD 會在 DXGI 裡冒充成同名實體卡）的adapter；候選多於一張又沒有 `vrcompositor_adapter` 紀錄 → `VR_DISABLED: adapter mismatch …`（fail closed）。
+  - `[VIPLE-VR-CAP] opened gen=<n> ring=<W>x<H>` / `first frame gen=<n> …` / `frame source gen=<n> is on a different adapter; reinit` / `ring … != display …; reinit` / `open gen=<n> failed: <open-texture[i]|open-shared-fence|open-consumed-fence>`。driver generation 換了只重開 ring，不重建 encoder。
+  - `[VIPLE-VR-CAP] 10s: gen= copied= skipped= fenceTimeout= invalid= stale= black= evtToPush p50/p95 presentToPush p50/p95`：健康時 invalid／stale／fenceTimeout 為 0，evtToPush p95 ≤ 1.5 ms（V3 host 實測 0.33 ms）。`black` 只在 driver 回報 HMD_PRESENTING 前（10 fps 黑幀）。
+  - `[VIPLE-VR-CAP] gpu-priority=high (was realtime|high)`：擷取期間行程 GPU 優先權改 HIGH（vrcompositor 與遊戲同卡，REALTIME 會搶遊戲）。
+  - `[VIPLE-VR-CAP] capture ctx mixed sources; using newest (source=…)`：前一個桌面擷取執行緒還沒結束就接上 VR ctx，強制重建成 display_vr_t。`sync capture path does not support captureSource=1`＝防呆（Windows 走不到）。
+  - `[VIPLE-VR-ENC] desktop probe state saved|restored (source=…)`：VR 探測（`vr_probe_scope`）前後保存／還原桌面探測結果，`/serverinfo` 前後必須逐字相同（selftest T1b）；`probe shape codec=… <W>x<H>@<hz> ir=<n>` 與 `intra refresh: …` 是 VR 形狀的探測結果。
+  - `[VIPLE-VR-TX] 10s: frames=… presentToFirstPkt p50/p95 transport=rtp`：VR session 的 Present→首封包（§8.3 量測點）。
+  - `[VIPLE-VR-SESSION] rtsp override field=<f> client=<v> negotiated=<v>`：pcvr 模式以協商值覆寫 client 帶來的 HDR／解析度／fps／slices（V5 才會出現）。
+  - selftest：`T1.init|probe|vr-intra-refresh|restore …`、`T1b.serverinfo result=PASS identical bytes=N`（`T1b.launch-exits` 到 V5 才跑）、`T2.live … consumption= evtToPushMs p50/p95/max`（門檻 ≥ 99%、p95 ≤ 1.5 ms）。
 
 ### 5b-1. 機密與權限（M1b 起，Windows server）
 

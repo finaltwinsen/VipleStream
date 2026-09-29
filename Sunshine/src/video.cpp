@@ -1210,6 +1210,77 @@ namespace video {
   std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec = {};
   bool last_encoder_probe_supported_vr_intra_refresh = false;
 
+  // M1b S1-09（§C.6 第 5 點）：上一次探測的來源（-1 = 還沒探測過）。桌面與 VR 的探測結果不能互相沿用。
+  static int last_probe_capture_source = -1;
+  // validate_encoder 的 VR 形狀驗證結果（只在 capture_source == 1 時有意義；validate_encoder 每次重設）
+  static bool encoder_vr_shape_ok = false;
+
+  namespace {
+    /// §C.6 第 6 點：桌面探測狀態快照（VR 探測前存、VR 探測結束或 VR session 結束時還原）
+    struct desktop_probe_snapshot_t {
+      encoder_t *chosen = nullptr;
+      int hevc_mode = 0;
+      int av1_mode = 0;
+      bool ref_frames_invalidation = false;
+      std::array<bool, 3> yuv444 = {};
+      bool vr_intra_refresh = false;
+      int capture_source = -1;
+      struct caps_t {
+        encoder_t *enc;
+        std::bitset<encoder_t::MAX_FLAGS> h264, hevc, av1;
+      };
+      std::vector<caps_t> caps;
+    };
+
+    // 並行（§C.6 第 7 點）：VR 探測需要 session_count()==0，VR 與 selftest 期間其他 launch 一律 503，
+    // 桌面探測不會與 VR 探測並行；這把鎖只保護快照本身的存取。
+    std::mutex desktop_probe_snapshot_mtx;
+    std::optional<desktop_probe_snapshot_t> desktop_probe_snapshot;
+  }  // namespace
+
+  void save_desktop_probe_state() {
+    std::lock_guard lk {desktop_probe_snapshot_mtx};
+    if (desktop_probe_snapshot) {
+      return;  // 巢狀：保留第一份（最外層的桌面狀態）
+    }
+    desktop_probe_snapshot_t s;
+    s.chosen = chosen_encoder;
+    s.hevc_mode = active_hevc_mode;
+    s.av1_mode = active_av1_mode;
+    s.ref_frames_invalidation = last_encoder_probe_supported_ref_frames_invalidation;
+    s.yuv444 = last_encoder_probe_supported_yuv444_for_codec;
+    s.vr_intra_refresh = last_encoder_probe_supported_vr_intra_refresh;
+    s.capture_source = last_probe_capture_source;
+    for (auto *e : encoders) {
+      s.caps.push_back({e, e->h264.capabilities, e->hevc.capabilities, e->av1.capabilities});
+    }
+    desktop_probe_snapshot = std::move(s);
+    BOOST_LOG(debug) << "[VIPLE-VR-ENC] desktop probe state saved (source="sv << s.capture_source << ')';
+  }
+
+  void restore_desktop_probe_state() {
+    std::lock_guard lk {desktop_probe_snapshot_mtx};
+    if (!desktop_probe_snapshot) {
+      return;
+    }
+    const auto &s = *desktop_probe_snapshot;
+    chosen_encoder = s.chosen;
+    active_hevc_mode = s.hevc_mode;
+    active_av1_mode = s.av1_mode;
+    last_encoder_probe_supported_ref_frames_invalidation = s.ref_frames_invalidation;
+    last_encoder_probe_supported_yuv444_for_codec = s.yuv444;
+    last_encoder_probe_supported_vr_intra_refresh = s.vr_intra_refresh;
+    last_probe_capture_source = s.capture_source;
+    for (const auto &c : s.caps) {
+      c.enc->h264.capabilities = c.h264;
+      c.enc->hevc.capabilities = c.hevc;
+      c.enc->av1.capabilities = c.av1;
+    }
+    BOOST_LOG(info) << "[VIPLE-VR-ENC] desktop probe state restored (source="sv << s.capture_source
+                    << " encoder="sv << (s.chosen ? s.chosen->name : "none"sv) << ')';
+    desktop_probe_snapshot.reset();
+  }
+
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
     // We try this twice, in case we still get an error on reinitialization
     for (int x = 0; x < 2; ++x) {
@@ -1350,6 +1421,22 @@ namespace video {
     }
   }
 
+  /**
+   * @brief M1b S1-08（§C.5）：擷取執行緒建 display 時用哪個 ctx 的設定。
+   * @details 預設回 front().config（舊行為）；只有最新加入的 ctx 的 captureSource 與 front 不同時，
+   *          改回最新 ctx 的 config——前一個桌面 session 的擷取執行緒還沒完全結束時接上 VR ctx，
+   *          要強制重建成 display_vr_t，不能拿到桌面畫面（反之亦然）。
+   */
+  const config_t &display_config_for(const std::vector<capture_ctx_t> &capture_ctxs) {
+    const auto &front = capture_ctxs.front().config;  // 與舊版相同的前提：呼叫時至少有一個 ctx
+    const auto &newest = capture_ctxs.back().config;
+    if (newest.captureSource != front.captureSource) {
+      BOOST_LOG(info) << "[VIPLE-VR-CAP] capture ctx mixed sources; using newest (source="sv << newest.captureSource << ')';
+      return newest;
+    }
+    return front;
+  }
+
   void captureThread(
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
@@ -1383,14 +1470,23 @@ namespace video {
     // get the most up-to-date list available monitors
     std::vector<std::string> display_names;
     int display_p = -1;
-    refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
-    auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+    // M1b S1-08（§C.5）：VR 擷取不列舉桌面顯示器（display_vr_t 依 adapter 規則選 adapter，不碰 output）
+    int disp_source = capture_ctxs.front().config.captureSource;
+    std::shared_ptr<platf::display_t> disp;
+    if (disp_source == 1) {
+      disp = platf::display(encoder.platform_formats->dev_type, "", capture_ctxs.front().config);
+    } else {
+      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+    }
     if (!disp) {
       return;
     }
     display_wp = disp;
 
-    constexpr auto capture_buffer_size = 12;
+    // M1b S1-08（§C.3）：VR 影像 3456×1728×4 ≈ 23.9 MB，池子上限降到 6（省 ~140 MB VRAM）。
+    // 執行緒啟動時決定，之後不變：前一個桌面擷取執行緒還在時接上的 VR ctx 仍是 12 張（ops-m16）。
+    const int capture_buffer_size = disp_source == 1 ? 6 : 12;
     std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
 
     std::vector<std::optional<std::chrono::steady_clock::time_point>> imgs_used_timestamps;
@@ -1516,9 +1612,17 @@ namespace video {
 
         while (capture_ctx_queue->peek()) {
           capture_ctxs.emplace_back(std::move(*capture_ctx_queue->pop()));
+          // M1b S1-08（§C.5）：新 ctx 的來源與目前 display 不同 → 重建 display（桌面↔VR）
+          if (capture_ctxs.back().config.captureSource != disp_source) {
+            artificial_reinit = true;
+          }
+        }
+        if (artificial_reinit) {
+          return false;
         }
 
-        if (switch_display_event->peek()) {
+        // M1b S1-08（§C.5）：VR 忽略 switch_display（Ctrl+Alt+Shift+F* 切換的是桌面顯示器）
+        if (disp_source != 1 && switch_display_event->peek()) {
           artificial_reinit = true;
           return false;
         }
@@ -1573,16 +1677,25 @@ namespace video {
               // only support a single display session per device/application.
               disp.reset();
 
-              // Refresh display names since a display removal might have caused the reinitialization
-              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+              // M1b S1-08（§C.5）：與舊版同樣以 capture_ctxs 的設定建 display（舊版固定用 front()）
+              const auto &cfg = display_config_for(capture_ctxs);
+              disp_source = cfg.captureSource;
 
-              // Process any pending display switch with the new list of displays
-              if (switch_display_event->peek()) {
-                display_p = std::clamp(*switch_display_event->pop(), 0, (int) display_names.size() - 1);
+              if (disp_source == 1) {
+                // VR：不列舉桌面、不處理 switch_display（display_vr_t 自己選 adapter）
+                reset_display(disp, encoder.platform_formats->dev_type, "", cfg);
+              } else {
+                // Refresh display names since a display removal might have caused the reinitialization
+                refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+
+                // Process any pending display switch with the new list of displays
+                if (switch_display_event->peek()) {
+                  display_p = std::clamp(*switch_display_event->pop(), 0, (int) display_names.size() - 1);
+                }
+
+                // reset_display() will sleep between retries
+                reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], cfg);
               }
-
-              // reset_display() will sleep between retries
-              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
               if (disp) {
                 break;
               }
@@ -2233,7 +2346,8 @@ namespace video {
     });
 
     // set max frame time based on client-requested target framerate (or 0.5fps/2000ms for event-driven capture)
-    double def_fps_target = (disp->is_event_driven() ? 1 : config.framerate);
+    // M1b S1-08（§C.4）：VR（display_vr_t）沒有新幀 100 ms 就重編上一張並標 REPEATED（除非設了 minimum_fps_target）
+    double def_fps_target = config.captureSource == 1 ? 10 : (disp->is_event_driven() ? 1 : config.framerate);
     double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : def_fps_target;
     std::chrono::duration<double, std::milli> max_frametime {1000.0 / minimum_fps_target};
     // VipleStream §K.dd.select: 上游這行印的是實際值的一半（除以 2／乘以 2），
@@ -2257,6 +2371,8 @@ namespace video {
     bool vr_idr_retry_pending = false;  // encoder 沒有 IR、IDR 又在 VR cooldown 內：cooldown 一到就補送
     std::chrono::steady_clock::time_point vr_wave_log_last {};
     uint32_t vr_wave_log_suppressed = 0;
+    // M1b S1-08（§C.4）：pcvr 最近一次 pop 到的影像帶的 metadata（逾時重編時沿用並標 REPEATED）
+    std::optional<vr_frame_meta_t> vr_last_img_meta;
     if (vr_state) {
       vr_state->set_next_frame((uint32_t) frame_nr);
       vr_refresh_events = mail->event<int>(mail::vr_refresh);
@@ -2470,11 +2586,16 @@ namespace video {
       }
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+      bool vr_repeated = true;  // M1b S1-08（§C.4）：這一幀沒有 pop 到新影像（逾時重編上一張）
 
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
         if (auto img = images->pop(max_frametime)) {
           frame_timestamp = img->frame_timestamp;
+          vr_repeated = false;
+          if (config.captureSource == 1) {
+            vr_last_img_meta = img->vr;  // §C.4：display_vr_t 帶來的 renderPose／epoch
+          }
           if (session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             return;
@@ -2503,7 +2624,22 @@ namespace video {
       // 與 avcodec 的 pts 都是它），所以 wave 的起點直接用它。
       vr_frame_meta_t vr_meta {};
       if (vr_state) {
-        vr_fill_pose(*vr_state, vr_meta);
+        if (config.captureSource == 1) {
+          // M1b S1-08（§C.4）：pcvr 用 driver 的 descriptor（img->vr）；wave 欄位在下面疊加。
+          // 逾時重編上一張時加 REPEATED；還沒有任何幀的 metadata 時標 POSE_FALLBACK。
+          if (vr_last_img_meta) {
+            vr_meta = *vr_last_img_meta;
+            if (vr_repeated) {
+              vr_meta.flags |= VIPLE_VR_FF_REPEATED;
+            }
+          } else {
+            vr_meta.valid = false;
+            vr_meta.flags = VIPLE_VR_FF_POSE_FALLBACK;
+          }
+          vr_state->count_frame((vr_meta.flags & VIPLE_VR_FF_ECHO_MATCHED) != 0);
+        } else {
+          vr_fill_pose(*vr_state, vr_meta);  // stub：維持 M1a 的回聲
+        }
         if (vr_wave.remaining > 0) {
           vr_meta.in_wave = true;
           vr_meta.wave_start = vr_wave.first;
@@ -2717,6 +2853,12 @@ namespace video {
       }
 
       synced_session_ctxs.emplace_back(std::make_unique<sync_session_ctx_t>(std::move(*ctx)));
+    }
+
+    // M1b S1-08（§C.4）：同步擷取路徑不支援 VR（Windows 一律走非同步 captureThread，走不到這裡；防呆）
+    if (synced_session_ctxs.front()->config.captureSource == 1) {
+      BOOST_LOG(error) << "[VIPLE-VR-CAP] sync capture path does not support captureSource=1"sv;
+      return encode_e::error;
     }
 
     while (encode_session_ctx_queue.running()) {
@@ -3056,8 +3198,11 @@ namespace video {
     return flag;
   }
 
-  bool validate_encoder(encoder_t &encoder, bool expect_failure) {
-    const auto output_name {display_device::map_output_name(config::video.output_name)};
+  bool validate_encoder(encoder_t &encoder, bool expect_failure, int capture_source, const vr_probe_shape_t *shape) {
+    // M1b S1-09（§C.6 第 3 點）：VR 探測不碰 output——display_vr_t 只在 adapter 上建 device，
+    // 所以不做 output 對映，也不印 §K.dd.select 的警告（那是桌面顯示器的診斷）。
+    const bool vr_probe = capture_source == 1;
+    const auto output_name {vr_probe ? std::string {} : display_device::map_output_name(config::video.output_name)};
     std::shared_ptr<platf::display_t> disp;
 
     // VipleStream §K.dd.select: 映射失敗時 output_name 會是空字串，而 reset_display 把
@@ -3070,7 +3215,7 @@ namespace video {
     // 落在預設顯示器 —— 那是設計如此，不是設定錯。若這時也警告，正確設定的
     // 主機每次重啟都會吐一行，只會訓練人忽略警告。
     // 只有 dd 關掉時，目標顯示器永遠不會被啟用，這個落差才是永久且需要處理的。
-    if (!config::video.output_name.empty() && output_name.empty() &&
+    if (!vr_probe && !config::video.output_name.empty() && output_name.empty() &&
         config::video.dd.configuration_option == config::video_t::dd_t::config_option_e::disabled) {
       BOOST_LOG(warning) << "[VIPLE-DD] §K.dd.select: configured output_name '"sv
                          << config::video.output_name
@@ -3094,6 +3239,9 @@ namespace video {
     // First, test encoder viability
     config_t config_max_ref_frames {1920, 1080, 60, 6000, 1000, 1, 1, 1, 0, 0, 0};
     config_t config_autoselect {1920, 1080, 60, 6000, 1000, 1, 0, 1, 0, 0, 0};
+    // M1b S1-09：aggregate 初始化之後才設來源（captureSource 在 config_t 尾端，不動上面兩行）
+    config_max_ref_frames.captureSource = capture_source;
+    config_autoselect.captureSource = capture_source;
 
     // If the encoder isn't supported at all (not even H.264), bail early
     reset_display(disp, encoder.platform_formats->dev_type, output_name, config_autoselect);
@@ -3185,7 +3333,14 @@ namespace video {
     }
 
     // Test HDR and YUV444 support
-    {
+    // M1b S1-09（§C.6 第 3 點）：VR 一律 8-bit SDR 4:2:0，不測 HDR／YUV444，旗標明確清掉
+    // （上面的 capabilities.set() 會讓沒測的旗標殘留 true）。
+    if (vr_probe) {
+      for (auto *c : {&encoder.h264, &encoder.hevc, &encoder.av1}) {
+        (*c)[encoder_t::DYNAMIC_RANGE] = false;
+        (*c)[encoder_t::YUV444] = false;
+      }
+    } else {
       // H.264 is special because encoders may support YUV 4:4:4 without supporting 10-bit color depth
       if (encoder.flags & YUV444_SUPPORT) {
         config_t config_h264_yuv444 {1920, 1080, 60, 6000, 1000, 1, 0, 1, 0, 0, 1};
@@ -3239,6 +3394,35 @@ namespace video {
       test_hdr_and_yuv444(encoder.av1, 2);
     }
 
+    // M1b S1-09（§C.6 第 4 點）：VR 形狀驗證。上面的可用性測試用 1920×1080 建 display；沿用它會測到
+    // 1920×1080→packed 的縮放路徑，不是實際的 1:1（ops-m7）。所以先以 VR config reset_display，
+    // 再以 VR encode profile（slices=4、intra refresh 開）跑一次 validate_config。
+    // 成功與否記在 vr_shape_ok，由 probe_encoders 決定 last_encoder_probe_supported_vr_intra_refresh。
+    encoder_vr_shape_ok = false;
+    if (vr_probe && shape && shape->packed_w > 0 && shape->packed_h > 0) {
+      const bool want_hevc = (shape->codec_mask & 0x2) && encoder.hevc[encoder_t::PASSED];
+      config_t vr_cfg {shape->packed_w, shape->packed_h, shape->hz, 0, 50000, 4, 0, 1, want_hevc ? 1 : 0, 0, 0};
+      vr_cfg.enableIntraRefresh = 1;
+      vr_cfg.vrProfile = 1;
+      vr_cfg.vrIntraRefreshFrames = shape->ir_frames;
+      vr_cfg.captureSource = 1;
+      // C27：H.264 3456×1728@90 超過 level 5.2（MaxMBPS 2073600）；只接受 72 Hz 或每眼 1440²
+      const int64_t mbps = (int64_t) ((shape->packed_w + 15) / 16) * ((shape->packed_h + 15) / 16) * shape->hz;
+      if (!want_hevc && mbps > 2073600) {
+        BOOST_LOG(warning) << "[VIPLE-VR-ENC] probe shape " << shape->packed_w << 'x' << shape->packed_h << '@' << shape->hz
+                           << " exceeds H.264 level 5.2 (MB/s=" << mbps << "); VR shape not supported on ["sv << encoder.name << ']';
+      } else {
+        reset_display(disp, encoder.platform_formats->dev_type, output_name, vr_cfg);
+        if (disp) {
+          encoder_vr_shape_ok = disp->is_codec_supported(encoder.codec_from_config(vr_cfg).name, vr_cfg) &&
+                                validate_config(disp, encoder, vr_cfg) >= 0;
+        }
+        BOOST_LOG(info) << "[VIPLE-VR-ENC] probe shape codec=" << (want_hevc ? "hevc"sv : "h264"sv) << ' '
+                        << shape->packed_w << 'x' << shape->packed_h << '@' << shape->hz << " slices=4 irFrames=" << shape->ir_frames
+                        << " -> " << (encoder_vr_shape_ok ? "ok"sv : "failed"sv) << " ["sv << encoder.name << ']';
+      }
+    }
+
     encoder.h264[encoder_t::VUI_PARAMETERS] = encoder.h264[encoder_t::VUI_PARAMETERS] && !config::sunshine.flags[config::flag::FORCE_VIDEO_HEADER_REPLACE];
     encoder.hevc[encoder_t::VUI_PARAMETERS] = encoder.hevc[encoder_t::VUI_PARAMETERS] && !config::sunshine.flags[config::flag::FORCE_VIDEO_HEADER_REPLACE];
 
@@ -3253,16 +3437,27 @@ namespace video {
     return true;
   }
 
-  int probe_encoders() {
-    if (!allow_encoder_probing()) {
+  int probe_encoders(int capture_source, const vr_probe_shape_t *shape) {
+    const bool vr_probe = capture_source == 1;
+    // M1b S1-09（§C.6 第 2 點）：VR 探測不碰 output（只在 adapter 上建 device），不受「沒有 active
+    // 顯示器時探測會弄壞 DXGI」的閘門限制。UNVERIFIED：headless 且完全沒有 active 顯示器時
+    // D3D11CreateDevice＋NVENC 是否安全（host 有 HDMI 誘騙器，無法自然重現）。
+    if (!vr_probe && !allow_encoder_probing()) {
       // Error already logged
+      return -1;
+    }
+    if (vr_probe && !shape) {
+      BOOST_LOG(error) << "[VIPLE-VR-ENC] probe_encoders(capture_source=1) needs a VR probe shape"sv;
       return -1;
     }
 
     auto encoder_list = encoders;
 
     // If we already have a good encoder, check to see if another probe is required
-    if (chosen_encoder && !(chosen_encoder->flags & ALWAYS_REPROBE) && !platf::needs_encoder_reenumeration()) {
+    // M1b S1-09（§C.6 第 5 點）：來源不同時不沿用。桌面連續探測時第二個條件恆真，
+    // 短路順序與舊版相同（needs_encoder_reenumeration() 的副作用時機不變）。
+    // VR 探測一律重跑：形狀（尺寸、Hz）每個 session 可能不同。
+    if (!vr_probe && chosen_encoder && last_probe_capture_source == capture_source && !(chosen_encoder->flags & ALWAYS_REPROBE) && !platf::needs_encoder_reenumeration()) {
       return 0;
     }
 
@@ -3300,7 +3495,7 @@ namespace video {
 
         if (encoder->name == config::video.encoder) {
           // Remove the encoder from the list entirely if it fails validation
-          if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder)) {
+          if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder, capture_source, shape)) {
             pos = encoder_list.erase(pos);
             break;
           }
@@ -3328,7 +3523,7 @@ namespace video {
         auto encoder = *pos;
 
         // Remove the encoder from the list entirely if it fails validation
-        if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder)) {
+        if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder, capture_source, shape)) {
           pos = encoder_list.erase(pos);
           continue;
         }
@@ -3363,7 +3558,7 @@ namespace video {
         // If we've used a previous encoder and it's not this one, we expect this encoder to
         // fail to validate. It will use a slightly different order of checks to more quickly
         // eliminate failing encoders.
-        if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder)) {
+        if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder, capture_source, shape)) {
           pos = encoder_list.erase(pos);
           continue;
         }
@@ -3397,10 +3592,25 @@ namespace video {
     auto &encoder = *chosen_encoder;
 
     last_encoder_probe_supported_ref_frames_invalidation = (encoder.flags & REF_FRAMES_INVALIDATION);
+    last_probe_capture_source = capture_source;  // M1b S1-09：這次結果屬於哪個來源
 #ifdef _WIN32
     // VipleStream 2.0 §VR：隨選 intra refresh（forceIntraRefreshWithFrameCnt）只有 Windows 的
     // 原生 NVENC（nvenc_base）實作；AMF、QSV、軟體編碼、Linux 走 avcodec 的 NVENC 都沒有。
-    last_encoder_probe_supported_vr_intra_refresh = (&encoder == &nvenc);
+    // M1b S1-09（§C.6 第 4 點）：VR 探測改由實測決定——VR 形狀（1:1、slices=4、intra refresh 開）
+    // 的 validate_config 真的過了才算，不再只看「是不是 NVENC」。桌面探測維持舊的判斷。
+    if (vr_probe) {
+      last_encoder_probe_supported_vr_intra_refresh = (&encoder == &nvenc) && encoder_vr_shape_ok;
+      BOOST_LOG(info) << "[VIPLE-VR-ENC] intra refresh: codec="sv << ((shape->codec_mask & 0x2) && encoder.hevc[encoder_t::PASSED] ? "hevc"sv : "h264"sv)
+                      << " cnt="sv << shape->ir_frames << " encoder="sv << encoder.name
+                      << " shape="sv << shape->packed_w << 'x' << shape->packed_h << '@' << shape->hz
+                      << " supported="sv << (last_encoder_probe_supported_vr_intra_refresh ? 1 : 0);
+    } else {
+      last_encoder_probe_supported_vr_intra_refresh = (&encoder == &nvenc);
+    }
+#else
+    if (vr_probe) {
+      last_encoder_probe_supported_vr_intra_refresh = false;
+    }
 #endif
     last_encoder_probe_supported_yuv444_for_codec[0] = encoder.h264[encoder_t::PASSED] &&
                                                        encoder.h264[encoder_t::YUV444];

@@ -14,6 +14,11 @@
 #include <Unknwn.h>
 #include <winrt/windows.graphics.capture.h>
 
+// standard includes
+#include <cstring>
+#include <mutex>
+#include <vector>
+
 // local includes
 #include "src/platform/common.h"
 #include "src/utility.h"
@@ -437,5 +442,73 @@ namespace platf::dxgi {
     int init(const ::video::config_t &config, const std::string &display_name);
     capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
     capture_e release_snapshot() override;
+  };
+
+  /**
+   * @brief VR 擷取（M1b S1-08、§C）：從 VR bridge 的 frame ring 取 driver 合成好的 SBS 影像。
+   * @details 探測與 live 共用 init()（不需要 IPC）；capture() 是事件驅動的消費迴圈：
+   *          等 evtFrm → 讀最新 descriptor（§B.8 驗證）→ CPU 端確認 sharedFence（§B.7，絕不 GPU Wait 對方）→
+   *          CopyResource 到影像池 → Signal(consumedFence)。driver 還沒 HMD_PRESENTING 時以 10 fps 推黑幀。
+   *          實作在 display_vr.cpp。
+   */
+  class display_vr_t: public display_vram_t {
+  public:
+    /// 10 秒統計（也給 selftest T2.live 讀；只在擷取執行緒寫，stats() 回傳複本）
+    struct stats_t {
+      uint64_t generation = 0;
+      uint64_t copied = 0;
+      uint64_t skipped = 0;
+      uint64_t fence_timeout = 0;
+      uint64_t invalid = 0;
+      uint64_t torn = 0;
+      uint64_t stale = 0;
+      uint64_t black = 0;
+      uint64_t fence_lost = 0;
+      uint64_t teardown_requests = 0;
+      uint64_t first_frame_id = 0;  ///< 本 display 看到的第一筆 descriptor（算消費率的分母）
+      uint64_t last_frame_id = 0;
+      std::vector<double> evt_to_push_ms;  ///< evtFrm 醒來 → push 回呼（只保留最近一個統計窗）
+      std::vector<double> present_to_push_ms;  ///< descriptor.present_qpc → push 回呼
+    };
+
+    int init(const ::video::config_t &config);
+    capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override;
+    capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
+    capture_e release_snapshot() override;
+
+    bool is_hdr() override {
+      return false;
+    }
+
+    bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {
+      std::memset(&metadata, 0, sizeof(metadata));
+      return false;
+    }
+
+    bool is_event_driven() override {
+      return true;
+    }
+
+    std::vector<DXGI_FORMAT> get_supported_capture_formats() override {
+      return {DXGI_FORMAT_B8G8R8A8_UNORM};
+    }
+
+    /// 累計統計的複本（evt_to_push_ms／present_to_push_ms 是整個 display 生命週期的樣本，selftest 用）
+    stats_t stats();
+
+    /// display 的 adapter LUID（init 之後有效；selftest 比對 frame_source 的 LUID）
+    LUID adapter_luid {};
+
+  private:
+    capture_e push_black(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb);
+
+    struct consumer_state_t;
+    std::shared_ptr<consumer_state_t> st_;  ///< ring／fence 與讀取器（每個 generation 重開）
+    std::mutex stats_mtx_;
+    stats_t stats_;  ///< 累計（selftest）
+    stats_t window_;  ///< 10 秒窗（log）
+    std::chrono::steady_clock::time_point last_black_ {};
+    std::chrono::steady_clock::time_point last_log_ {};
+    bool live_logged_ = false;
   };
 }  // namespace platf::dxgi

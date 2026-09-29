@@ -152,6 +152,11 @@ namespace platf {
   };
 
   std::shared_ptr<display_t> display(platf::mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    // M1b S1-08：VR 擷取（captureSource=1）只有 Windows 的 display_vr_t；其他平台沒有 PCVR（S1-19 stub）
+    if (config.captureSource != 0) {
+      BOOST_LOG(error) << "[VIPLE-VR-CAP] captureSource="sv << config.captureSource << " is not supported on this platform"sv;
+      return nullptr;
+    }
     if (hwdevice_type != platf::mem_type_e::system && hwdevice_type != platf::mem_type_e::videotoolbox) {
       BOOST_LOG(error) << "Could not initialize display with the given hw device type."sv;
       return nullptr;

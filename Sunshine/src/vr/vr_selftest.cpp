@@ -15,6 +15,7 @@
 #include <utility>
 
 // lib includes
+#include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
 // local includes
@@ -52,8 +53,8 @@ namespace vr::selftest {
     constexpr test_def_t k_tests[] = {
       {"T0"sv, ""sv},
       {"T0-SECFS"sv, "V5"sv},
-      {"T1"sv, "V3"sv},
-      {"T1B"sv, "V3"sv},
+      {"T1"sv, ""sv},
+      {"T1B"sv, ""sv},
       {"T2"sv, ""sv},
       {"T3"sv, "V4"sv},
       {"T4"sv, "V4"sv},
@@ -63,7 +64,7 @@ namespace vr::selftest {
       {"CLEANUP"sv, "V4"sv},
     };
 
-    const std::vector<std::string> k_default_only {"T0", "T2", "T6"};
+    const std::vector<std::string> k_default_only {"T0", "T1", "T1B", "T2", "T6"};
 
     std::string upper_trim(std::string_view s) {
       while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
@@ -147,6 +148,34 @@ namespace vr::selftest {
       run_t6_clock(r);
     }
   }  // namespace
+
+  std::optional<std::string> fetch_serverinfo_xml(std::string &err) {
+    // T1b（M1b V3）：從本機 HTTP 埠抓 /serverinfo（未配對也會回 XML）。uniqueid 固定，讓兩次請求條件相同。
+    CURL *curl = curl_easy_init();  // NOSONAR
+    if (!curl) {
+      err = "curl_easy_init failed";
+      return std::nullopt;
+    }
+    std::string body;
+    const auto url = std::format("http://127.0.0.1:{}/serverinfo?uniqueid=0123456789ABCDEF", (int) config::sunshine.port);
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_NOPROXY, "*");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char *ptr, size_t size, size_t nmemb, void *userdata) -> size_t {
+      static_cast<std::string *>(userdata)->append(ptr, size * nmemb);
+      return size * nmemb;
+    });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    const CURLcode rc = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_cleanup(curl);
+    if (rc != CURLE_OK || status != 200) {
+      err = std::format("curl={} http={}", (int) rc, status);
+      return std::nullopt;
+    }
+    return body;
+  }
 
   // ── reporter ────────────────────────────────────────────────────────
 
@@ -595,6 +624,10 @@ namespace vr::selftest {
       r.line(std::format("{} begin", t));
       if (t == "T0") {
         platform::run_t0(r, req, stop);
+      } else if (t == "T1") {
+        platform::run_t1(r, req, stop);
+      } else if (t == "T1B") {
+        platform::run_t1b(r, req, stop);
       } else if (t == "T2") {
         platform::run_t2(r, req, stop);
       } else if (t == "T6") {
@@ -646,6 +679,14 @@ namespace vr::selftest {
 
     void run_t0(reporter_t &r, const request_t &, const std::atomic<bool> &) {
       r.check("T0"sv, false, "unsupported-platform"sv);
+    }
+
+    void run_t1(reporter_t &r, const request_t &, const std::atomic<bool> &) {
+      r.check("T1"sv, false, "unsupported-platform"sv);
+    }
+
+    void run_t1b(reporter_t &r, const request_t &, const std::atomic<bool> &) {
+      r.check("T1b"sv, false, "unsupported-platform"sv);
     }
 
     void run_t2(reporter_t &r, const request_t &, const std::atomic<bool> &) {

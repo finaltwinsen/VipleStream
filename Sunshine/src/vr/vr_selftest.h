@@ -13,7 +13,7 @@
  *   - 傳輸：Windows 的 admin pipe（`src/platform/windows/vr_admin_pipe.cpp`）在背景執行緒呼叫 run()，
  *     每一行經 sink 送回 CLI。
  *
- * V2 只實作 T0、T2、T6；其他子測試與選項回「not implemented until V<n>」（rc = rc_bad_request）。
+ * V2 實作 T0、T2、T6，V3 加上 T1、T1b 與 T2.live；其他子測試與選項回「not implemented until V<n>」（rc = rc_bad_request）。
  *
  * log 衛生（S1-02）：行內不含 handle 值、完整 GUID、SID（只印 RID）或任何機密。
  */
@@ -46,7 +46,7 @@ namespace vr::selftest {
   /**
    * @brief 已驗證的 selftest 請求（§F.5 的 `args`）。
    *
-   * V2 只接受 T0、T2、T6；T3 以後的選項（cycles、probe、motion…）保留欄位，但非預設值會被拒絕，
+   * 目前接受 T0、T1、T1b、T2、T6；T3 以後的選項（cycles、probe、motion…）保留欄位，但非預設值會被拒絕，
    * 避免使用者以為它們生效了。
    */
   struct request_t {
@@ -175,14 +175,28 @@ namespace vr::selftest {
     /// T0：環境（session、主控台使用者、elevationType）、VR pipe 與 admin pipe 的安全描述元（含一次 SetSecurityInfo 來回）
     void run_t0(reporter_t &r, const request_t &req, const std::atomic<bool> &stop);
 
+    /// T1（M1b V3）：display_vr_t 探測形態（is_hdr、get_hdr_metadata、alloc_img、dummy_img、complete_img）＋
+    ///     VR 形狀的 encoder 探測（intra refresh 真的開起來）；結束時還原桌面探測狀態
+    void run_t1(reporter_t &r, const request_t &req, const std::atomic<bool> &stop);
+
+    /// T1b（M1b V3）：VR 探測前後各抓一次 `/serverinfo` XML，逐字相同
+    void run_t1b(reporter_t &r, const request_t &req, const std::atomic<bool> &stop);
+
     /// T2：以 `vr_probe --mode ipcpeer` 驗 §F.5 T2 的情境（握手、消費、kill、RECONFIG、fence=UINT64_MAX、所有權、
     ///     不讀 pipe、雙寫入者、升權嘗試、停止 Signal、第二 instance、ABI 不同、HELLO 大小不符、冒名、恢復、限速）；
-    ///     gpu-hold 與 live 消費以 NOT-RUN until=V3 明列
+    ///     live 消費（display_vr_t 60 s，V3）；gpu-hold 以 NOT-RUN until=V4 明列
     void run_t2(reporter_t &r, const request_t &req, const std::atomic<bool> &stop);
 
     /// T6 的平台部分：QPC 換算、§B.8 descriptor 驗證純函式、ABI 表與 vr_probe 逐字比對、vr_probe unit
     void run_t6(reporter_t &r, const request_t &req, const std::atomic<bool> &stop);
   }  // namespace platform
+
+  /**
+   * @brief T1b（M1b V3）：抓本機 `/serverinfo` 的 XML（HTTP 埠、未配對的回應）。
+   * @details 放在平台中立檔：curl 的 header 會帶進 winsock2，必須比 <Windows.h> 先 include。
+   * @param err 失敗時的說明（curl 代碼、HTTP 狀態）。
+   */
+  std::optional<std::string> fetch_serverinfo_xml(std::string &err);
 
   /**
    * @brief vr_probe 的 stdout 行過濾（sec-m14；不可信輸入）。

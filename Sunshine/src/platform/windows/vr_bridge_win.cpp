@@ -703,6 +703,7 @@ namespace vr::bridge {
       status_t status();
       bool set_session_config(const vripc_session_config_t &cfg);
       void clear_session_config();
+      std::optional<luid_t> session_config_luid();
       void set_armed(bool armed);
       void request_quit();
       void set_pacing(const vripc_pacing_t &p);
@@ -950,6 +951,14 @@ namespace vr::bridge {
         cmds_.config_changed = true;
       }
       SetEvent(ev_cmd_.get());
+    }
+
+    std::optional<luid_t> bridge_t::session_config_luid() {
+      std::lock_guard lk(mtx_);
+      if (!desired_config_) {
+        return std::nullopt;
+      }
+      return luid_t {desired_config_->adapter_luid_low, desired_config_->adapter_luid_high};
     }
 
     void bridge_t::set_armed(bool armed) {
@@ -3173,6 +3182,10 @@ namespace vr::bridge {
 
   void clear_session_config() {
     bridge().clear_session_config();
+  }
+
+  std::optional<luid_t> session_config_luid() {
+    return bridge().session_config_luid();
   }
 
   void set_armed(bool armed) {

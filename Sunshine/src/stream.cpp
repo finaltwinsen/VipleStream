@@ -733,6 +733,10 @@ namespace stream {
 
     // 只在 videoBroadcastThread 存取：[VIPLE-VR-TX] 每個 session 印一次
     bool vrTxLogged = false;
+    // M1b S1-08（§C.4）：pcvr（captureSource=1）的 present→首封包（now − frame_timestamp）10 秒統計
+    std::vector<double> vrTxPresentToFirstPktMs;
+    std::chrono::steady_clock::time_point vrTxLastLog {};
+    uint64_t vrTxFrames = 0;
   };
 
   // VipleStream 2.0 §VR：這次 control handler 呼叫是否來自 QUIC fallback。flow 0x04 →
@@ -3032,7 +3036,8 @@ namespace stream {
       flags |= VIPLE_VR_FF_REFRESH_DONE;
     }
     h.vrFlags = flags;
-    h.layoutEpoch = 0;
+    // M1b S1-08（§C.4）：layoutEpoch 取 display_vr_t 帶來的 driver descriptor 值；stub 與一般 session 維持 0
+    h.layoutEpoch = meta.layout_epoch;
     h.echoSampleId = meta.valid ? meta.echoSampleId : 0;
 
     // 四元數先正規化（長度退化時用單位四元數），再以 smallest-three 48 bit 打包
@@ -3207,6 +3212,27 @@ namespace stream {
 #else
       const bool vr_quic_present = false;
 #endif
+      // M1b S1-08（§C.4）：§8.3「Present→首封包」量測點。frame_timestamp 是 display_vr_t 以 driver 的
+      // present_qpc 換算的 steady_clock（S1-01），此處在送出第一個 shard 之前取樣。
+      if (vr_force_rtp && session->config.monitor.captureSource == 1 && packet->frame_timestamp) {
+        const auto now = std::chrono::steady_clock::now();
+        session->vrTxPresentToFirstPktMs.push_back(std::chrono::duration<double, std::milli>(now - *packet->frame_timestamp).count());
+        ++session->vrTxFrames;
+        if (session->vrTxLastLog == std::chrono::steady_clock::time_point {}) {
+          session->vrTxLastLog = now;
+        } else if (now - session->vrTxLastLog >= 10s) {
+          auto &v = session->vrTxPresentToFirstPktMs;
+          std::sort(v.begin(), v.end());
+          const auto at = [&](double q) {
+            return v.empty() ? 0.0 : v[std::min(v.size() - 1, (size_t) (q * (double) (v.size() - 1) + 0.5))];
+          };
+          BOOST_LOG(info) << "[VIPLE-VR-TX] 10s: frames=" << v.size() << " presentToFirstPkt p50=" << std::format("{:.2f}", at(0.5))
+                          << "ms p95=" << std::format("{:.2f}", at(0.95)) << "ms transport=rtp";
+          v.clear();
+          session->vrTxLastLog = now;
+        }
+      }
+
       if (vr_force_rtp && !session->vrTxLogged) {
         session->vrTxLogged = true;
         BOOST_LOG(info) << "[VIPLE-VR-TX] transport=rtp (VR video forced to RTP/UDP; QUIC session "
@@ -4326,6 +4352,9 @@ namespace stream {
           BOOST_LOG(info) << "[VIPLE-VR-CLK] (final) " << ::vr::clk::format_stats(*cs);
         }
         ::vr::clear_active_if(session.vr.get());
+        // M1b S1-09（§C.6 第 6 點）：VR launch 以 handoff_to_session() 接手探測狀態時，VR session 結束才還原
+        // 桌面探測結果。沒有存過快照（stub、或 VR 探測沒有 handoff）時是 no-op。
+        video::restore_desktop_probe_state();
       }
 
       // VipleStream: clear our relay-allocation listener before the

@@ -12,8 +12,9 @@
  *   （E-4）；所有權（sec-M1）；不讀 pipe（sec-M8）；雙寫入者＋echo 驗證（K26、§B.8 第 4 條）；升權嘗試（U30，只記錄）；
  *   ABI 不同 → REJECT(ABI_MISMATCH)；HELLO 大小不符 → REJECT(BAD_MESSAGE)；冒名 → REJECT(IDENTITY)；恢復；
  *   連續 10 次錯誤 HELLO 的退避（sec-m18）與之後的恢復。
- *   §F.5 另列的 gpu-hold（U31）與 display_vr_t live 消費 60 s 要到 V3：以 `result=NOT-RUN until=V3` 明列，
- *   計入 (final) 行的 notRun=，rc=0 不代表它們驗過。
+ *   V3 起加上 T2.live（display_vr_t live 消費 60 s）；§F.5 另列的 gpu-hold（U31）需要 vr_probe 的 GPU hold，
+ *   以 `result=NOT-RUN until=V4` 明列，計入 (final) 行的 notRun=，rc=0 不代表它驗過。
+ * - T1（V3）：display_vr_t 探測形態＋VR 形狀的 encoder 探測；T1b（V3）：VR 探測前後 /serverinfo 逐字相同。
  * - T6：QPC 換算（S1-01，含飽和）、§B.8 descriptor 驗證純函式、ABI 表與 vr_probe 逐字比對
  *   （vr_ipc_abi_table.h）、`vr_probe --mode unit`。
  *
@@ -54,12 +55,17 @@
 #include <sddl.h>
 #include <tlhelp32.h>
 #include <WtsApi32.h>
+#include <winternl.h>  // NTSTATUS（display.h 的 D3DKMT 型別）
 // clang-format on
 
 // local includes
+#include "display.h"
+#include "display_vram.h"
 #include "misc.h"
+#include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/video.h"
 #include "src/vr/vr_bridge.h"
 #include "src/vr/vr_ipc_abi.h"
 #include "src/vr/vr_ipc_abi_table.h"
@@ -2322,7 +2328,230 @@ namespace vr::selftest::platform {
       const bool pass = mismatches == 0 && probe_rows.size() == server_rows.size() && probe_digest == server_digest;
       r.check("T6.abi-table"sv, pass, std::format("source={} serverRows={} probeRows={} mismatches={} serverDigest={} probeDigest={}", source, server_rows.size(), probe_rows.size(), mismatches, server_digest, probe_digest));
     }
+
+    // ── M1b V3：T1／T1b／T2.live ────────────────────────────────────────
+
+    double pct(std::vector<double> v, double q) {
+      if (v.empty()) {
+        return 0;
+      }
+      std::sort(v.begin(), v.end());
+      return v[std::min(v.size() - 1, (size_t) (q * (double) (v.size() - 1) + 0.5))];
+    }
+
+    /// T1／T1b 的 VR 探測形狀：預設每眼 1728²＠90 Hz、HEVC（設計 §C.6、一頁摘要第 5 點）
+    ::video::vr_probe_shape_t t1_shape() {
+      ::video::vr_probe_shape_t s;
+      s.packed_w = 3456;
+      s.packed_h = 1728;
+      s.hz = 90;
+      s.codec_mask = 0x2;
+      s.ir_frames = config::vr.intra_refresh_frames;
+      return s;
+    }
+
+    /// 探測後要被還原的桌面探測狀態（video.h 對外可見的部分）
+    struct desktop_probe_view_t {
+      int hevc_mode;
+      int av1_mode;
+      bool ref_frames_invalidation;
+      std::array<bool, 3> yuv444;
+      bool vr_intra_refresh;
+
+      static desktop_probe_view_t now() {
+        return {::video::active_hevc_mode, ::video::active_av1_mode, ::video::last_encoder_probe_supported_ref_frames_invalidation, ::video::last_encoder_probe_supported_yuv444_for_codec, ::video::last_encoder_probe_supported_vr_intra_refresh};
+      }
+
+      bool operator==(const desktop_probe_view_t &) const = default;
+
+      std::string str() const {
+        return std::format("hevcMode={} av1Mode={} rfi={} yuv444={}{}{} vrIntraRefresh={}", hevc_mode, av1_mode, ref_frames_invalidation ? 1 : 0, yuv444[0] ? 1 : 0, yuv444[1] ? 1 : 0, yuv444[2] ? 1 : 0, vr_intra_refresh ? 1 : 0);
+      }
+    };
+
+    /// VR 形狀探測（vr_probe_scope 內；離開時還原桌面探測狀態）。@return probe_encoders 的回傳值與 VR intra refresh 結果
+    std::pair<int, bool> vr_probe_once() {
+      ::video::vr_probe_scope scope;
+      const auto shape = t1_shape();
+      const int rc = ::video::probe_encoders(1, &shape);
+      return {rc, ::video::last_encoder_probe_supported_vr_intra_refresh};
+    }
+
+    /// XML 第一個差異點附近的元素名（不印值，避免把 uniqueid 之類的欄位寫進 log）
+    std::string first_diff(const std::string &a, const std::string &b) {
+      size_t i = 0;
+      while (i < a.size() && i < b.size() && a[i] == b[i]) {
+        ++i;
+      }
+      const auto lt = a.rfind('<', i);
+      std::string elem;
+      if (lt != std::string::npos) {
+        auto end = a.find_first_of(" >/", lt + 1);
+        elem = a.substr(lt + 1, (end == std::string::npos ? a.size() : end) - lt - 1);
+      }
+      return std::format("offset={} lenBefore={} lenAfter={} element=<{}>", i, a.size(), b.size(), elem);
+    }
+
+    /**
+     * @brief T2.live（M1b V3、§F.5）：peer（ipcpeer）當 driver，selftest 自己建 display_vr_t（live）跑 capture() 60 s；
+     *        影像池 3 張、push 回呼只做統計（設計 §F.5「selftest consumer」）。
+     *        判定：消費率（copied ÷ 本 display 看到的 frame_id 範圍）≥ 99%、evtToPush p95 ≤ 1.5 ms、0 不合格、0 fence 遺失。
+     * vr_probe：`--mode ipcpeer --seconds 80`
+     */
+    void t2_live(t2_ctx_t &c) {
+      constexpr auto id = "T2.live"sv;
+      if (!wait_idle(c, id)) {
+        return;
+      }
+      auto p = launch_peer(c, id, "--mode ipcpeer --seconds 80", true);
+      if (!p) {
+        return;
+      }
+      auto cleanup = util::fail_guard([&]() {
+        p->terminate();
+        bridge_view::revoke_peer();
+      });
+      if (wait_until(15000ms, c.stop, []() {
+            const auto s = bridge_view::status();
+            return s.connected && s.ready;
+          }) < 0) {
+        if (!c.stop.load()) {
+          c.r.check(id, false, "peer never became READY " + peer_diag(*p));
+          relay(c.r, id, *p);
+        }
+        return;
+      }
+
+      ::video::config_t cfg {};
+      cfg.width = (int) c.cfg.packed_width;
+      cfg.height = (int) c.cfg.packed_height;
+      cfg.framerate = (int) (c.cfg.refresh_mhz / 1000);
+      cfg.captureSource = 1;
+      auto disp = std::make_shared<platf::dxgi::display_vr_t>();
+      if (disp->init(cfg)) {
+        c.r.check(id, false, "display_vr_t init failed (see [VIPLE-VR-CAP] in sunshine.log)"sv);
+        return;
+      }
+
+      std::vector<std::shared_ptr<platf::img_t>> pool(3);
+      uint64_t pushed = 0;
+      const auto t0 = std::chrono::steady_clock::now();
+      auto pull = [&](std::shared_ptr<platf::img_t> &out) -> bool {
+        out.reset();
+        while (!c.stop.load()) {
+          for (auto &slot : pool) {
+            if (!slot) {
+              slot = disp->alloc_img();
+            }
+            if (slot.use_count() == 1) {
+              out = slot;
+              out->frame_timestamp.reset();
+              out->vr.reset();
+              return true;
+            }
+          }
+          std::this_thread::sleep_for(1ms);
+        }
+        return false;
+      };
+      auto push = [&](std::shared_ptr<platf::img_t> &&img, bool captured) -> bool {
+        if (captured && img) {
+          ++pushed;
+        }
+        img.reset();
+        return !c.stop.load() && std::chrono::steady_clock::now() - t0 < 60s;
+      };
+      bool cursor = false;
+      const auto status = disp->capture(push, pull, &cursor);
+      const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+      if (c.stop.load()) {
+        return;
+      }
+      const auto s = disp->stats();
+      const uint64_t seen = s.last_frame_id >= s.first_frame_id && s.first_frame_id != 0 ? s.last_frame_id - s.first_frame_id + 1 : 0;
+      const double consumption = seen ? (double) s.copied / (double) seen : 0.0;
+      const double evt_p50 = pct(s.evt_to_push_ms, 0.5), evt_p95 = pct(s.evt_to_push_ms, 0.95), evt_max = pct(s.evt_to_push_ms, 1.0);
+      const double pr_p50 = pct(s.present_to_push_ms, 0.5), pr_p95 = pct(s.present_to_push_ms, 0.95);
+      const bool pass = status == platf::capture_e::ok && s.copied > 0 && consumption >= 0.99 && evt_p95 <= 1.5 && s.invalid == 0 && s.fence_lost == 0;
+      c.r.check(id, pass, std::format("ms={} status={} gen={} copied={} seen={} consumption={:.4f} skipped={} stale={} fenceTimeout={} invalid={} torn={} fenceLost={} black={} pushed={} evtToPushMs p50={:.3f} p95={:.3f} max={:.3f} presentToPushMs p50={:.3f} p95={:.3f} {}", elapsed_ms, (int) status, s.generation, s.copied, seen, consumption, s.skipped, s.stale, s.fence_timeout, s.invalid, s.torn, s.fence_lost, s.black, pushed, evt_p50, evt_p95, evt_max, pr_p50, pr_p95, peer_diag(*p)));
+      disp.reset();
+      relay(c.r, id, *p);
+    }
   }  // namespace
+
+  void run_t1(reporter_t &r, const request_t &, const std::atomic<bool> &stop) {
+    // (a) display_vr_t 探測形態：不需要 IPC；此時沒有 session config → adapter 走 K22 候選規則
+    {
+      ::video::config_t cfg {};
+      const auto shape = t1_shape();
+      cfg.width = shape.packed_w;
+      cfg.height = shape.packed_h;
+      cfg.framerate = shape.hz;
+      cfg.captureSource = 1;
+      auto disp = std::make_shared<platf::dxgi::display_vr_t>();
+      const int irc = disp->init(cfg);
+      r.check("T1.init"sv, irc == 0, std::format("rc={} size={}x{}@{}", irc, cfg.width, cfg.height, cfg.framerate));
+      if (irc == 0) {
+        SS_HDR_METADATA md;
+        std::memset(&md, 0xAB, sizeof(md));
+        const bool hdr = disp->is_hdr();
+        const bool has_md = disp->get_hdr_metadata(md);
+        bool md_zero = true;
+        for (size_t i = 0; i < sizeof(md); ++i) {
+          md_zero = md_zero && reinterpret_cast<const uint8_t *>(&md)[i] == 0;
+        }
+        r.check("T1.hdr"sv, !hdr && !has_md && md_zero, std::format("isHdr={} hasMetadata={} metadataZeroed={}", hdr ? 1 : 0, has_md ? 1 : 0, md_zero ? 1 : 0));
+
+        auto img = disp->alloc_img();
+        const int drc = disp->dummy_img(img.get());
+        const int crc = disp->complete_img(img.get(), false);
+        D3D11_TEXTURE2D_DESC d {};
+        auto *d3d = static_cast<platf::dxgi::img_d3d_t *>(img.get());
+        if (d3d->capture_texture) {
+          d3d->capture_texture->GetDesc(&d);
+        }
+        const bool img_ok = drc == 0 && crc == 0 && d.Width == (UINT) cfg.width && d.Height == (UINT) cfg.height && d.Format == DXGI_FORMAT_B8G8R8A8_UNORM && !d3d->dummy && d3d->fence_shared_handle && d3d->encoder_texture_handle;
+        r.check("T1.img"sv, img_ok, std::format("dummyRc={} completeRc={} tex={}x{} fmt={} eventDriven={}", drc, crc, d.Width, d.Height, (uint32_t) d.Format, disp->is_event_driven() ? 1 : 0));
+      }
+    }
+    if (stop.load()) {
+      return;
+    }
+
+    // (b) VR 形狀的 encoder 探測（先以 VR config reset_display，IR 真的開起來）；結束時還原桌面探測狀態
+    const auto before = desktop_probe_view_t::now();
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto [rc, vr_ir] = vr_probe_once();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    const auto after = desktop_probe_view_t::now();
+    const auto shape = t1_shape();
+    r.check("T1.probe"sv, rc == 0, std::format("rc={} ms={} shape={}x{}@{} irFrames={}", rc, ms, shape.packed_w, shape.packed_h, shape.hz, shape.ir_frames));
+    r.check("T1.vr-intra-refresh"sv, vr_ir, std::format("vr_intra_refresh={} (expected 1 on NVENC; see [VIPLE-VR-ENC] intra refresh in sunshine.log)", vr_ir ? 1 : 0));
+    r.check("T1.restore"sv, before == after, std::format("before=[{}] after=[{}]", before.str(), after.str()));
+  }
+
+  void run_t1b(reporter_t &r, const request_t &, const std::atomic<bool> &stop) {
+    std::string err;
+    const auto before = fetch_serverinfo_xml(err);
+    if (!before) {
+      r.check("T1b"sv, false, "serverinfo before: " + err);
+      return;
+    }
+    if (stop.load()) {
+      return;
+    }
+    const auto [rc, vr_ir] = vr_probe_once();
+    const auto after = fetch_serverinfo_xml(err);
+    if (!after) {
+      r.check("T1b"sv, false, "serverinfo after: " + err);
+      return;
+    }
+    // 目前 /serverinfo 沒有時間欄位（VR 探測前後 state／currentgame 不變），整份逐字比對
+    const bool same = *before == *after;
+    r.check("T1b.serverinfo"sv, same, same ? std::format("identical bytes={} probeRc={} vrIntraRefresh={}", before->size(), rc, vr_ir ? 1 : 0) : first_diff(*before, *after));
+    // VR /launch 失敗出口（vr_negotiate 失敗、強制加密拒絕、execute 失敗）後的比對：pcvr 的 /launch 在 S1-11
+    r.not_run("T1b.launch-exits"sv, "V5"sv, "VR /launch failure exits need vr_pcvr=enabled (S1-11); the probe scope API is in place"sv);
+  }
 
   bool supported() {
     return true;
@@ -2488,6 +2717,7 @@ namespace vr::selftest::platform {
       t2_never_read,
       t2_dual_writer,
       t2_escalate,
+      t2_live,
     };
     for (auto fn : scenarios) {
       if (stop.load()) {
@@ -2516,9 +2746,9 @@ namespace vr::selftest::platform {
     if (stop.load()) {
       return;
     }
-    // §F.5 T2 列出、但要到 V3 才驗得了的情境：明列 NOT-RUN（計入 notRun=），rc=0 不代表它們驗過
-    r.not_run("T2.gpu-hold"sv, "V3"sv, "U31 implicit sync (--peer-gpu-hold-ms 50 -> server copy latency): vr_probe implements the GPU hold in V3"sv);
-    r.not_run("T2.live"sv, "V3"sv, "display_vr_t live consumption 60 s (consumption >= 99%, evtToPush p95 <= 1.5 ms) needs S1-08 display_vr_t"sv);
+    // §F.5 T2 列出、但還沒驗得了的情境：明列 NOT-RUN（計入 notRun=），rc=0 不代表它們驗過。
+    // T2.live 已在 V3 實作（上面的 t2_live）；gpu-hold 需要 vr_probe 的 GPU hold（ipcpeer 目前回 not-implemented），不在 V3 的驗收內。
+    r.not_run("T2.gpu-hold"sv, "V4"sv, "U31 implicit sync (--peer-gpu-hold-ms 50 -> server copy latency): vr_probe ipcpeer does not implement the GPU hold yet"sv);
   }
 
   void run_t6(reporter_t &r, const request_t &req, const std::atomic<bool> &stop) {

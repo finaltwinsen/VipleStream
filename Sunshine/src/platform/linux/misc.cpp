@@ -1118,6 +1118,11 @@ namespace platf {
   }
 
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    // M1b S1-08：VR 擷取（captureSource=1）只有 Windows 的 display_vr_t；其他平台沒有 PCVR（S1-19 stub）
+    if (config.captureSource != 0) {
+      BOOST_LOG(error) << "[VIPLE-VR-CAP] captureSource="sv << config.captureSource << " is not supported on this platform"sv;
+      return nullptr;
+    }
 #ifdef SUNSHINE_BUILD_CUDA
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
       BOOST_LOG(info) << "Screencasting with NvFBC"sv;

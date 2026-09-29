@@ -50,6 +50,18 @@ namespace video {
     int vrProfile = 0;  // 1 = VR session（M1a stub）：強制 intra refresh、VR IDR cooldown、ABR 降碼不 IDR
     int vrIntraRefreshFrames = 0;  // LOSS 觸發的 intra-refresh wave 長度（幀）
     int vrIntraRefreshPeriodFrames = 0;  // 週期性 intra refresh 安全網的間隔（幀），0 = 關閉
+    int captureSource = 0;  // M1b S1-08：0 = 桌面（DDA／WGC），1 = VR（display_vr_t，driver 交來的 SBS ring）
+  };
+
+  /**
+   * @brief VR 形狀的探測參數（M1b S1-09、§C.6）：探測用 display_vr_t 與 VR encode profile 的實際尺寸。
+   */
+  struct vr_probe_shape_t {
+    int packed_w = 0;  ///< SBS 打包寬（2 × 每眼寬）
+    int packed_h = 0;
+    int hz = 90;
+    unsigned codec_mask = 0x2;  ///< bit0 = H.264、bit1 = HEVC（與 VipleVr.h 的 vrCodecs 同義）
+    int ir_frames = 8;  ///< vrIntraRefreshFrames
   };
 
   // VipleStream 2.0 §VR：vr_frame_meta_t 已搬到 vr/vr_frame_meta.h（M1b S1-03），
@@ -376,7 +388,11 @@ namespace video {
     void *channel_data
   );
 
-  bool validate_encoder(encoder_t &encoder, bool expect_failure);
+  /**
+   * @param capture_source M1b S1-09（§C.6）：0 = 桌面（舊行為）；1 = VR（display_vr_t，略過 output 對映、HDR／YUV444）。
+   * @param shape VR 形狀；capture_source == 1 時用來做 1:1 的 VR 形狀驗證（nullptr = 只做一般可用性）。
+   */
+  bool validate_encoder(encoder_t &encoder, bool expect_failure, int capture_source = 0, const vr_probe_shape_t *shape = nullptr);
 
   /**
    * @brief Probe encoders and select the preferred encoder.
@@ -385,8 +401,49 @@ namespace video {
    * at runtime due to all sorts of things from driver updates to eGPUs.
    *
    * @warning This is only safe to call when there is no client actively streaming.
+   * @param capture_source M1b S1-09：0 = 桌面（預設，行為與舊版相同）；1 = VR。VR 探測前一定要先建立
+   *        vr_probe_scope，探測結束（或 VR session 結束）時才能把桌面的探測結果還原。
+   * @param shape VR 形狀（capture_source == 1 時必填）。
    */
-  int probe_encoders();
+  int probe_encoders(int capture_source = 0, const vr_probe_shape_t *shape = nullptr);
+
+  /**
+   * @brief M1b S1-09（§C.6 第 6 點）：把桌面探測的全域狀態（chosen_encoder、active_*_mode、
+   *        last_encoder_probe_supported_*、每個 encoder 的 h264／hevc／av1 bitset、快取的來源）存起來。
+   *        VR 探測會覆寫這些值；呼叫端以 vr_probe_scope 保證任何出口都還原。重複呼叫只保留第一份（巢狀安全）。
+   */
+  void save_desktop_probe_state();
+
+  /// 還原 save_desktop_probe_state() 存的狀態；沒有存過時不動作。桌面從沒探測過時還原成「未探測」。
+  void restore_desktop_probe_state();
+
+  /**
+   * @brief VR 探測的 RAII 守衛（§C.6 第 6 點）。建構時存桌面探測狀態，解構時還原；
+   *        只有 VR launch session 成功建立時呼叫 handoff_to_session()，改由 VR session 結束時還原。
+   */
+  class vr_probe_scope {
+  public:
+    vr_probe_scope() {
+      save_desktop_probe_state();
+    }
+
+    ~vr_probe_scope() {
+      if (!handed_off_) {
+        restore_desktop_probe_state();
+      }
+    }
+
+    vr_probe_scope(const vr_probe_scope &) = delete;
+    vr_probe_scope &operator=(const vr_probe_scope &) = delete;
+
+    /// VR session 接手：解構時不還原（VR session 結束或 launch 逾時時呼叫 restore_desktop_probe_state()）
+    void handoff_to_session() {
+      handed_off_ = true;
+    }
+
+  private:
+    bool handed_off_ = false;
+  };
 
   // Several NTSC standard refresh rates are hardcoded here, because their
   // true rate requires a denominator of 1001. ffmpeg's av_d2q() would assume it could

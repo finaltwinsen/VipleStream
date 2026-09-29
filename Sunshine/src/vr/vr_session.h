@@ -113,6 +113,9 @@ namespace vr {
     int safety_ms = 0;  ///< vr_intra_refresh_safety_ms（0 = 關閉週期性安全網）
     std::string guid;  ///< session GUID
     std::string owner_uuid;  ///< 發起 VR session 的 client（TLS 憑證 UUID）
+    /// M1b S1-10：true = pcvr（display_vr_t 擷取 driver 的 SBS ring）；false = M1a stub（桌面擷取＋回聲）。
+    /// V3 只有 RTSP 端讀它；由 `vr_pcvr=enabled` 的 /launch 設定是 S1-11（V5）。
+    bool pcvr = false;
 
     int packed_width() const {
       return params.eye_width * 2;  // layout=sbs
