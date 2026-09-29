@@ -261,7 +261,7 @@ public:
              QString* launchResponse = nullptr);
 
     QVector<NvApp>
-    getAppList();
+    getAppList(bool vr = false);
 
     QImage
     getBoxArt(int appId);

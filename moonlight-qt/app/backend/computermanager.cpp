@@ -91,7 +91,16 @@ private:
         QVector<NvApp> appList;
 
         try {
-            appList = http.getAppList();
+            // VipleStream 2.0 §VR M1b V5（S3-06 的 client 部分）：CLI 帶 --display-target pcvr 而且 host 宣告 PCVR bit
+            // 時改打 /applist?vr=1，才找得到「SteamVR Home」（vanilla／舊 server 不會宣告這個 bit，不會收到 vr=1）
+            auto prefs = StreamingPreferences::get(nullptr);
+            bool vrList;
+            {
+                QReadLocker computerLock(&m_Computer->lock);
+                vrList = prefs && prefs->displayTarget == StreamingPreferences::DT_PCVR &&
+                         (m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_PCVR);
+            }
+            appList = http.getAppList(vrList);
             if (appList.isEmpty()) {
                 return false;
             }

@@ -325,11 +325,12 @@ NvHTTP::getNetworkInterfaceList(QString serverInfo)
 }
 
 QVector<NvApp>
-NvHTTP::getAppList()
+NvHTTP::getAppList(bool vr)
 {
+    // VipleStream 2.0 §VR M1b V5（§D.12）：vr=1 時 host 在標準清單之外加上 VR 專用 app（例：SteamVR Home）
     QString appxml = openConnectionToString(m_BaseUrlHttps,
                                             "applist",
-                                            nullptr,
+                                            vr ? "vr=1" : nullptr,
                                             REQUEST_TIMEOUT_MS,
                                             NvLogLevel::NVLL_ERROR);
     verifyResponseStatus(appxml);
