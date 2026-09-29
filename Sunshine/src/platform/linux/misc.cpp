@@ -48,6 +48,7 @@
 #include "src/entry_handler.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/video.h"
 #include "vaapi.h"
 
 #ifdef __GNUC__
