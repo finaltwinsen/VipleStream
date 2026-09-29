@@ -999,6 +999,37 @@ static unsigned int quicIcmpProbeReachable(
 #endif
 }
 
+#if defined(__linux__) && !defined(__ANDROID__)
+// §MP-ROUTECHK：/proc/net/route 裡是否有 Iface==ifname 且涵蓋 peerNet（網路位元組序）
+// 的路由（含 0.0.0.0/0）。欄位是 16 進位、與記憶體同位元組序，可直接和
+// s_addr 比對。讀不到檔案時回 true（不擋）。
+static bool quicLinuxIfHasRoute(const char* ifname, uint32_t peerNet) {
+    FILE* f = fopen("/proc/net/route", "r");
+    char line[256];
+    bool found = false;
+
+    if (f == NULL)
+        return true;
+    if (fgets(line, sizeof(line), f) == NULL) {  // 表頭
+        fclose(f);
+        return true;
+    }
+    while (!found && fgets(line, sizeof(line), f) != NULL) {
+        char iface[64];
+        unsigned int dst, gw, flags, refcnt, use, metric, mask;
+        if (sscanf(line, "%63s %x %x %x %u %u %u %x",
+                   iface, &dst, &gw, &flags, &refcnt, &use, &metric, &mask) != 8)
+            continue;
+        if (strcmp(iface, ifname) != 0 || !(flags & 0x1))  // RTF_UP
+            continue;
+        if ((peerNet & mask) == (dst & mask))
+            found = true;
+    }
+    fclose(f);
+    return found;
+}
+#endif
+
 int quicAddSubflowEx(int interfaceIndex,
                      const char* interfaceName,
                      int interfaceType,
@@ -1111,6 +1142,25 @@ int quicAddSubflowEx(int interfaceIndex,
         closeSocket(sock);
         return -1;
     }
+
+#if defined(__linux__) && !defined(__ANDROID__)
+    // §MP-ROUTECHK：主路由表裡這張網卡完全沒有通往 peer 的路由（連預設路由都沒有）
+    // 就不建路徑。SO_BINDTODEVICE 之後 Linux 對無路由目的地會假設 on-link，
+    // connect() 照樣成功，於是「wlanap → server 的 LAN 位址」這類死路會被
+    // 建成路徑、吃掉 path ID；Steam Frame 在 host 適配器沒連上時就是這樣。
+    // 只看 main table（/proc/net/route）：VPN 介面（Tailscale 用 table 52）不套用；
+    // Android 讀不到 /proc/net/route 且用 policy routing，整段排除；讀檔失敗也放行。
+    if (interfaceName && interfaceName[0] &&
+        interfaceType != LC_NETIF_TYPE_VPN &&
+        effPeer && effPeer->ss_family == AF_INET &&
+        !quicLinuxIfHasRoute(interfaceName,
+                             ((const struct sockaddr_in*)effPeer)->sin_addr.s_addr)) {
+        Limelog("[VIPLE-MPQUIC] §MP-ROUTECHK: if %d '%s' has no route to peer in main "
+                "table; skipping path\n", interfaceIndex, interfaceName);
+        closeSocket(sock);
+        return -1;
+    }
+#endif
 
 #if defined(__linux__)
     // §MP-BINDDEV：Linux 是 weak host 模型，bind() 本機位址不會限制出口

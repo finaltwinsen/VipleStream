@@ -539,14 +539,35 @@ namespace quic_server {
       // 時直接踢出 best 選擇，讓資料流向其他活路徑。nb_retransmit 收到
       // ACK 後會自動歸零，正常 transient loss 不會誤判。
       //
+      // §MP-VERIFIED 2026-09-29：path 1+ 必須完成路徑驗證（PATH_CHALLENGE 收到回應）
+      // 才能載視訊。Steam Frame 實測：client 從 wlanap 探出的路徑還沒驗證、初始 cwin
+      // 69KB，而 path 0 剛被 §K.14 重置到 59KB（< MIN_WARM_CWND），Pass 1 反而選中
+      // 新路徑；sticky 再把它黏住，3 秒丟 1680 包、ABR 連砍四次（17→3.5 Mbps）。
+      // path 0 是握手路徑，雙向已證明，不受此限。
+      auto pathVerified = [this](int i) {
+        if (i == 0) return true;
+        auto* t = _cnx->path[i]->first_tuple;
+        return t != nullptr && t->challenge_verified;
+      };
+      // §MP-VERIFIED：第一次選路（還沒選過任何路徑）直接用健康的 path 0，
+      // 不看 cwin——剛握手完的 path 0 本來就還沒暖。
+      bool initialPick = false;
+      if (_lastVideoPath == -2 && _cnx->path[0] != nullptr &&
+          !_cnx->path[0]->path_is_demoted &&
+          !_cnx->path[0]->path_is_backup &&
+          _cnx->path[0]->nb_retransmit == 0) {
+        bestVideoPath = 0;
+        initialPick = true;
+      }
       // Pass 1: warm paths, min RTT, no active retransmit
       uint64_t minRtt = UINT64_MAX;
-      for (int i = 0; i < _cnx->nb_paths; i++) {
+      for (int i = 0; !initialPick && i < _cnx->nb_paths; i++) {
         if (_cnx->path[i] != nullptr &&
             !_cnx->path[i]->path_is_demoted &&
             !_cnx->path[i]->path_is_backup &&
             _cnx->path[i]->nb_retransmit == 0 &&
             _cnx->path[i]->cwin >= MIN_WARM_CWND &&
+            pathVerified(i) &&
             _cnx->path[i]->smoothed_rtt < minRtt) {
           minRtt = _cnx->path[i]->smoothed_rtt;
           bestVideoPath = i;
@@ -565,6 +586,7 @@ namespace quic_server {
               !_cnx->path[i]->path_is_demoted &&
               !_cnx->path[i]->path_is_backup &&
               _cnx->path[i]->nb_retransmit == 0 &&
+              pathVerified(i) &&
               _cnx->path[i]->cwin > maxCwin) {
             maxCwin = _cnx->path[i]->cwin;
             bestVideoPath = i;
@@ -596,6 +618,7 @@ namespace quic_server {
           if (_cnx->path[i] != nullptr &&
               !_cnx->path[i]->path_is_demoted &&
               _cnx->path[i]->path_is_backup &&
+              pathVerified(i) &&
               _cnx->path[i]->smoothed_rtt < bestRtt) {
             bestRtt = _cnx->path[i]->smoothed_rtt;
             bestBackupIdx = i;
