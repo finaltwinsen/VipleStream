@@ -875,12 +875,13 @@ namespace quic_server {
           return -1;
         };
 
-        // §MP-SINGLE-AVAIL 2026-09-30：server 端只讓影像路徑是 available。picoquic
-        // 在兩條以上 available 時，影像所在（非最低 RTT）路徑的 per-path queue
-        // 會被餓死：路徑有被選中（sel 計數增加）、pacing／cwin 都放行，卻組不出
-        // 資料封包，inFlight=0、佇列一路漲（Frame M8／M12／M13／M14 與 Windows
-        // 有線對照皆重現，client 16 s 無幀後自行斷線）。新路徑本來就設 backup，
-        // 但 client 之後的 PATH_AVAILABLE 會蓋掉（誰後寫誰贏），這裡設回去。
+        // §MP-SINGLE-AVAIL 2026-09-30：server 端只讓影像路徑是 available。起因：
+        // 兩條以上 available 時影像所在（非最低 RTT）路徑的 per-path queue 被餓死
+        // （Frame M8／M12–M14、Windows 有線對照皆重現，client 16 s 無幀後斷線）。
+        // 根因已在 picoquic fork 修掉（§MP-PERPATH-WAKE：per-path queue 有資料時
+        // 不再長睡；§MP-PERPATH-DG：優先選有 per-path 資料的路徑），此守衛保留為
+        // 保守設計。新路徑本來就設 backup，但 client 之後的 PATH_AVAILABLE 會蓋掉
+        // （誰後寫誰贏），這裡設回去。
         // failover 期間（cnx-level queue）不動，交給既有的升級流程。
         // 寬限：client 的 §Q-LOSS-DEMOTE 會同時送「新路徑 AVAILABLE＋舊路徑 BACKUP」，
         // 兩個 frame 到達有先後（M16：先到的 AVAILABLE 被立刻設回 backup，client
