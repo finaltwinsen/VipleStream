@@ -30,6 +30,8 @@ typedef struct _LC_NET_INTERFACE {
     int metric;
     bool up;
     bool preferred;
+    // §MP-ONLINK：本機位址的子網路前綴長度（0 = 未知，例如 Android JNI 未填）
+    int prefixLen;
 } LC_NET_INTERFACE, *PLC_NET_INTERFACE;
 
 // Enumerate all usable network interfaces on this host.

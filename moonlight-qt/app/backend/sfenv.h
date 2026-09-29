@@ -37,4 +37,8 @@ QString summaryLine();
 // 只有探測動作呼叫；結果嵌進各探測的 JSON。
 QJsonObject snapshot();
 
+// host 是 Steam Frame（SteamOS 且 os-release 的 VARIANT_ID=vr；Flatpak 內讀 /run/host/os-release）。
+// 非 Linux 回傳 false。只用來決定預設值，不取代使用者設定。
+bool isSteamFrame();
+
 } // namespace SfEnv

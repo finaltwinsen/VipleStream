@@ -762,6 +762,33 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
                         // a separate picoquic path.  picoquic validates
                         // which paths are alive; dead ones get marked
                         // inactive without affecting live paths.
+                        //
+                        // §MP-ONLINK：server 有位址和這張網卡同子網路時只配那一個。
+                        // 其他組合在 Linux（weak host、SO_BINDTODEVICE 的 on-link
+                        // 退路）會變成不對稱或單向的死路，還會吃光 picoquic 的
+                        // path ID，讓真正的專用鏈路（Steam Frame 適配器 wlanap ↔
+                        // host 10.35.78.x）落得 PATH_ID_BLOCKED。
+                        int onlink = quicOnLinkAltPeerIndex(&interfaces[i].addr,
+                                                            interfaces[i].prefixLen);
+                        if (onlink != -1) {
+                            SOCKADDR_LEN olLen = 0;
+                            const struct sockaddr_storage* ol =
+                                (onlink >= 0) ? quicGetAltPeer(onlink, &olLen) : NULL;
+                            int rc3 = quicAddSubflowEx(interfaces[i].index,
+                                                       interfaces[i].name,
+                                                       interfaces[i].type,
+                                                       &interfaces[i].addr,
+                                                       interfaces[i].addrLen,
+                                                       ol, olLen);
+                            Limelog("[VIPLE-MPQUIC] §MP-ONLINK: if %d '%s' /%d shares subnet with "
+                                    "peer %d (-2=primary) — pairing only that peer (%s)\n",
+                                    interfaces[i].index, interfaces[i].name,
+                                    interfaces[i].prefixLen, onlink,
+                                    rc3 >= 0 ? "added" : "failed");
+                            if (rc3 >= 0)
+                                added++;
+                            continue;
+                        }
                         int rc = quicAddSubflow(interfaces[i].index,
                                                 interfaces[i].name,
                                                 interfaces[i].type,

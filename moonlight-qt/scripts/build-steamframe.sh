@@ -944,7 +944,10 @@ if ! flatpak-builder --show-manifest "$MANIFEST_FILE" > "$LOG_DIR/resolved-manif
 	die "$RC_SOURCE" "flatpak-builder 無法解析 $MANIFEST_FILE（細節在 $MAIN_LOG；flatpak-builder 沒有 YAML 支援時會在這裡失敗）"
 fi
 
-FB_COMMON=(--arch="$ARCH" --state-dir="$STATE_DIR" --default-branch="$BRANCH" --force-clean)
+# --disable-rofiles-fuse：finish 階段的 rofiles-fuse 掛載點偶發卸載不掉（fusermount: Device or resource busy
+# → Failure spawning rofiles-fuse，2026-09-28／29 兩次），整次建置白費；不用 rofiles 只是少一層對 cache
+# 的防寫保護（CI 常見做法）。
+FB_COMMON=(--arch="$ARCH" --state-dir="$STATE_DIR" --default-branch="$BRANCH" --force-clean --disable-rofiles-fuse)
 [ -n "$JOBS" ] && FB_COMMON+=(--jobs="$JOBS")
 
 # 下載階段（不計時）。--disable-updates：已經有的 commit 不再連網更新，只補缺的。

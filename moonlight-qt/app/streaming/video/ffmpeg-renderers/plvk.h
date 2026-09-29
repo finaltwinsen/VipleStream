@@ -167,6 +167,28 @@ private:
     // §SF-DRMSPLIT：第一張 DRM_PRIME 幀的描述子版面只記一次
     bool m_LoggedDrmPrimeLayout = false;
 
+    // §SF-DMABUF-CACHE：DRM_PRIME 幀的 dmabuf 匯入快取。libplacebo 的 pl_map_avframe_drm
+    // 每幀每平面都新建 pl_tex（DRM_IOCTL_PRIME_FD_TO_HANDLE）、unmap 時銷毀；解碼器的
+    // capture pool 只有十幾個 buffer，改成依 dmabuf 身分快取，只在第一次遇到時匯入。
+    // 起因：Steam Frame（SteamOS 6.18 msm）在匯入失敗的錯誤路徑 drm_gem_put_pages
+    // NULL deref（kernel Oops），PacerRender 永遠卡在核心、行程成殭屍。
+    struct DrmTexCacheEntry {
+        uint64_t dev = 0, ino = 0, modifier = 0;
+        uint32_t offset = 0, pitch = 0, fourcc = 0;
+        int w = 0, h = 0;
+        pl_tex tex = nullptr;
+        uint64_t lastUse = 0;
+    };
+    std::vector<DrmTexCacheEntry> m_DrmTexCache;
+    const void* m_DrmTexCacheCtx = nullptr;   // hw_frames_ctx 換了（解碼器重建）就整批清掉
+    uint64_t m_DrmTexCacheTick = 0;
+    uint64_t m_DrmTexImports = 0;
+    uint64_t m_DrmTexHits = 0;
+    bool m_LoggedDrmCacheFallback = false;
+    bool m_LoggedDrmPitchClamp = false;
+    bool mapDrmPrimeCached(const AVFrame* frame, pl_frame* out);
+    void clearDrmTexCache(const char* reason);
+
     // §SF-PRESENT-STATS：和 d3d11va 同格式的 [VIPLE-PRESENT-Stats]（analyze_client_log.ps1 解析），
     // 間隔取相鄰兩次 pl_swapchain_submit_frame 成功的時間差。Linux／Steam Frame 原本量不到 stutter。
     std::vector<double> m_PresentIntervalsMs;

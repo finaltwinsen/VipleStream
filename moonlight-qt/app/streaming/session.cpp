@@ -1612,7 +1612,8 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         return false;
     }
 
-    if (m_Preferences->absoluteMouseMode && !m_App.isAppCollectorGame) {
+    // §SF-ABSMOUSE：Steam Frame 上絕對滑鼠是預設值（SteamVR 雷射給的是絕對位置），不是使用者特意選的，不警告
+    if (m_Preferences->absoluteMouseMode && !m_App.isAppCollectorGame && !SfEnv::isSteamFrame()) {
         emitLaunchWarning(tr("Your selection to enable remote desktop mouse mode may cause problems in games."));
     }
 

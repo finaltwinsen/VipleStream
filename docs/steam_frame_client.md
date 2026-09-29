@@ -769,6 +769,43 @@ app 沒有扣住任何 capture buffer。另一種結局是 `avcodec_receive_fram
 **另外記下的**：Linux 上的 `[VIPLE-INPUT-STALL]` 是誤報（只有 Windows 查真的輸入，非 Windows 一律當作有輸入，PlVk 在
 Pacer 執行緒繪製時主迴圈閒置就會被記）。
 
+### 7.6 G-α 第二、三輪與通過（2026-09-29）
+
+結果在 `scripts\benchmark\results\galpha-20260929-r3\`（本機，不入 git）。**G-α 通過**：
+
+| 組 | Frame 畫出 ÷ host 送出（門檻 ≥ 99%） | 解碼 p50 | 網路丟幀 | 參數集重建 | 核心錯誤 |
+|---|---|---|---|---|---|
+| 1080p60 20 Mbps（15 分鐘） | 99.75% | 1.97 ms | 0.88% | 0 | 0 |
+| 1440p60 25 Mbps（15 分鐘） | 99.37% | 2.04 ms | 0.66% | 0 | 0 |
+| 1080p120 25 Mbps（15 分鐘） | 99.47% | 1.90 ms | 0.51% | 0 | 0 |
+
+使用者目視確認畫面順暢、絕對滑鼠的雷射指向正確。判定方式的兩個修正（使用者決定）：
+- **幀率改看「送出 vs 畫出」**：host 送出取 sunshine.log `[VIPLE-BCAST-RATE]` 在該組時段的加總，Frame 畫出取
+  `[VIPLE-PRESENT-Stats] cumul`。1080p120 那組 host 只送出約 96 fps（host 擷取端，不查），Frame 全收全畫。
+- **頓挫率不列入**：Frame 輸出 120 Hz，60 fps 內容本來就隔一次刷新換一幀；到達時間稍有抖動就有幀多停一次刷新
+  （25～31 ms），貼著 33.3 ms 的門檻被算進頓挫，但人眼看不出來。
+
+**途中修掉的問題**：
+1. **核心錯誤（kernel Oops）**：第二輪 1440p60 在第 3 分鐘，`PacerRender` 執行緒於 `DRM_IOCTL_PRIME_FD_TO_HANDLE`
+   → `msm_gem_prime_import` → `msm_gem_import` 失敗後的清理路徑 `drm_gem_put_pages` NULL deref。SteamOS 6.18 msm 驅動錯誤路徑
+   的 bug，被 libplacebo `pl_map_avframe_drm`「每幀每平面新建一次 dmabuf 匯入」觸發（60 fps＝每秒 120 次）。執行緒永遠卡在
+   核心、行程成殭屍，SIGKILL 無效，只能重開機。修法 §SF-DMABUF-CACHE：PlVk 自己處理 DRM_PRIME，依 dmabuf 身分
+   （fstat 的 dev/ino＋offset/pitch/fourcc/modifier/尺寸）快取 `pl_tex`，解碼器重建（hw_frames_ctx 改變）時整批清掉，
+   上限 64 筆（最久沒用的先釋放）。每場只匯入 6～8 次，45 分鐘 0 次核心錯誤。
+2. **從啟動程式開 GUI 閃一下就消失**：不是縮到背景，是 SIGSEGV。GUI 啟動的解碼探測測試幀，iris 回報寬 1344、
+   pitch 只有 1280（buffer 大小＝1280×736×1.5），`pl_tex_create` validation 失敗後程式崩潰。§SF-PITCHCLAMP 把寬度夾到
+   pitch 內、裁切範圍一併夾住；命令列串流的 1080p／1440p 不會觸發。
+3. **頭盔放著會休眠**：SteamVR `power.turnOffScreensTimeout` 預設 5 秒（頭盔靜止就關螢幕），SteamOS 的系統睡眠設定管不到。
+   手改 `steamvr.vrsettings` 會在 SteamVR 關閉時被覆寫，要在執行中用
+   `/opt/steamvr/bin/linuxarm64/vrcmd --set-settings-float power.turnOffScreensTimeout 86400`（`--set-settings-bool
+   power.pauseCompositorOnStandby 0`）。vrserver log 的 ` - 0 - entering standby` 才是頭盔，1、2 是控制器。
+4. **命令列參數會被存成設定**：`Session` 開始串流時 `save()` 偏好設定，`--quic` 之類的覆寫會留在設定檔（第二輪因此全走
+   QUIC、作廢）。驗測腳本一律明確帶 `--no-quic`。
+5. **殭屍行程後遠端重開**：`ssh … /usr/bin/steamos-polkit-helpers/steamos-reboot-now`（polkit `allow_any=yes`）。必須在
+   SSH 前景執行；`setsid -f` 背景化會被 pkexec 以 "Refusing to render service to dead parents" 拒絕。
+
+**已知、之後處理**：Frame 在 Wi-Fi 上走 QUIC 時主路徑丟包統計 40～67%（UDP 同環境 < 1%），和多路徑精進一起查。
+
 ---
 
 ## 8. S3／PoC-F-pre（延到 M3a 開頭）

@@ -158,6 +158,7 @@ int lcEnumNetInterfaces(PLC_NET_INTERFACE out, int maxCount) {
             out[count].metric = (int)(adapter->Ipv4Metric);
             out[count].up = true;
             out[count].preferred = (unicast->DadState == IpDadStatePreferred);
+            out[count].prefixLen = (int)unicast->OnLinkPrefixLength;
             count++;
         }
     }
@@ -244,6 +245,34 @@ static int classifyPosixInterface(const char* name, unsigned int flags) {
     return LC_NETIF_TYPE_ETHERNET;
 }
 
+// §MP-ONLINK：由 netmask 算前綴長度（連續 1 位元數）；未知回 0。
+static int netmaskPrefixLen(const struct sockaddr* mask) {
+    const unsigned char* p;
+    int len, bits = 0;
+
+    if (!mask)
+        return 0;
+    if (mask->sa_family == AF_INET) {
+        p = (const unsigned char*)&((const struct sockaddr_in*)mask)->sin_addr;
+        len = 4;
+    } else if (mask->sa_family == AF_INET6) {
+        p = (const unsigned char*)&((const struct sockaddr_in6*)mask)->sin6_addr;
+        len = 16;
+    } else {
+        return 0;
+    }
+    for (int i = 0; i < len; i++) {
+        unsigned char b = p[i];
+        while (b & 0x80) {
+            bits++;
+            b = (unsigned char)(b << 1);
+        }
+        if (p[i] != 0xFF)
+            break;
+    }
+    return bits;
+}
+
 int lcEnumNetInterfaces(PLC_NET_INTERFACE out, int maxCount) {
     struct ifaddrs* ifList = NULL;
     struct ifaddrs* ifa;
@@ -288,6 +317,7 @@ int lcEnumNetInterfaces(PLC_NET_INTERFACE out, int maxCount) {
         out[count].metric = 0;
         out[count].up = true;
         out[count].preferred = true;
+        out[count].prefixLen = netmaskPrefixLen(ifa->ifa_netmask);
         count++;
     }
 

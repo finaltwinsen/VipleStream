@@ -1112,6 +1112,25 @@ int quicAddSubflowEx(int interfaceIndex,
         return -1;
     }
 
+#if defined(__linux__)
+    // §MP-BINDDEV：Linux 是 weak host 模型，bind() 本機位址不會限制出口
+    // 網卡——底下的 connect() 路由檢查只看目的位址，於是「Steam Frame 的
+    // wlanap（10.35.78.1）→ server 的 LAN 位址」也會通過，實際卻從 wlan0
+    // 出去，形成上行走家用 Wi-Fi、下行走適配器的不對稱路徑，還吃掉
+    // picoquic 有限的 path ID，讓真正對稱的 alt peer 落得 PATH_ID_BLOCKED。
+    // SO_BINDTODEVICE 把路由查詢限定在這張網卡上，沒有經由它的路由就在
+    // connect() 回 ENETUNREACH。失敗（名稱對不上核心介面、權限）時保留
+    // 原本行為，只記一行。
+    if (interfaceName && interfaceName[0]) {
+        if (setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE,
+                       interfaceName, (socklen_t)strlen(interfaceName) + 1) != 0) {
+            Limelog("[VIPLE-MPQUIC] §MP-BINDDEV: SO_BINDTODEVICE '%s' failed (errno %d); "
+                    "route check falls back to weak-host semantics\n",
+                    interfaceName, errno);
+        }
+    }
+#endif
+
     // §Q-MP-REACH 2026-05-23 — Routing reachability probe.  UDP connect()
     // doesn't put any bytes on the wire; it just walks the routing table
     // and ARP/ND state for the destination, returning ENETUNREACH /
@@ -2663,13 +2682,18 @@ static void quicTryRecoverPaths(int* rejectedIfs, int* rejectedCount) {
                 interfaces[i].index, interfaces[i].name,
                 lcNetIfTypeName(interfaces[i].type));
 
+        // §MP-ONLINK：同子網路的 alt peer 才是這張網卡的對稱對象，復原也用它。
+        SOCKADDR_LEN olLen = 0;
+        const struct sockaddr_storage* ol = quicGetAltPeer(
+            quicOnLinkAltPeerIndex(&interfaces[i].addr, interfaces[i].prefixLen), &olLen);
+
         int ret = quicAddSubflowEx(
             interfaces[i].index,
             interfaces[i].name,
             interfaces[i].type,
             &interfaces[i].addr,
             interfaces[i].addrLen,
-            NULL, 0);
+            ol, ol ? olLen : 0);
 
         if (ret >= 0) {
             recovered++;
@@ -2777,6 +2801,57 @@ void quicSetAltPeers(const struct sockaddr_storage* addrs,
         }
         g_ctx.altPeerCount = count;
     }
+}
+
+// §MP-ONLINK：前 prefixLen 位元相同即同子網路。
+static bool quicSameSubnet(const struct sockaddr_storage* a,
+                           const struct sockaddr_storage* b, int prefixLen) {
+    const unsigned char* pa;
+    const unsigned char* pb;
+    int maxBits;
+
+    if (a->ss_family != b->ss_family || prefixLen <= 0)
+        return false;
+    if (a->ss_family == AF_INET) {
+        pa = (const unsigned char*)&((const struct sockaddr_in*)a)->sin_addr;
+        pb = (const unsigned char*)&((const struct sockaddr_in*)b)->sin_addr;
+        maxBits = 32;
+    } else if (a->ss_family == AF_INET6) {
+        pa = (const unsigned char*)&((const struct sockaddr_in6*)a)->sin6_addr;
+        pb = (const unsigned char*)&((const struct sockaddr_in6*)b)->sin6_addr;
+        maxBits = 128;
+    } else {
+        return false;
+    }
+    if (prefixLen > maxBits)
+        prefixLen = maxBits;
+    for (int bit = 0; bit < prefixLen; bit += 8) {
+        int n = prefixLen - bit;
+        unsigned char mask = (unsigned char)(n >= 8 ? 0xFF : (0xFF << (8 - n)));
+        if ((pa[bit / 8] & mask) != (pb[bit / 8] & mask))
+            return false;
+    }
+    return true;
+}
+
+int quicOnLinkAltPeerIndex(const struct sockaddr_storage* localAddr, int prefixLen) {
+    if (!localAddr || prefixLen <= 0)
+        return -1;
+    if (g_ctx.peerAddrLen > 0 && quicSameSubnet(localAddr, &g_ctx.peerAddr, prefixLen))
+        return QUIC_ONLINK_PRIMARY;
+    for (int i = 0; i < g_ctx.altPeerCount; i++) {
+        if (quicSameSubnet(localAddr, &g_ctx.altPeerAddrs[i], prefixLen))
+            return i;
+    }
+    return -1;
+}
+
+const struct sockaddr_storage* quicGetAltPeer(int idx, SOCKADDR_LEN* lenOut) {
+    if (idx < 0 || idx >= g_ctx.altPeerCount)
+        return NULL;
+    if (lenOut)
+        *lenOut = g_ctx.altPeerAddrLens[idx];
+    return &g_ctx.altPeerAddrs[idx];
 }
 
 // ── Monitoring ──────────────────────────────────────────────

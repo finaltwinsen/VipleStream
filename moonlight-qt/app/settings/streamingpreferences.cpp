@@ -1,5 +1,6 @@
 #include "streamingpreferences.h"
 #include "utils.h"
+#include "backend/sfenv.h"
 
 #include <QSettings>
 #include <QTranslator>
@@ -258,7 +259,10 @@ void StreamingPreferences::reload()
     relayPsk = settings.value(SER_RELAYPSK, "").toString();
     forceRelayStream = settings.value(SER_FORCE_RELAY_STREAM, false).toBool();
     quitAppAfter = settings.value(SER_QUITAPPAFTER, false).toBool();
-    absoluteMouseMode = settings.value(SER_ABSMOUSEMODE, false).toBool();
+    // §SF-ABSMOUSE（2026-09-29）：Steam Frame 的平面 app 在 SteamVR dashboard 裡以雷射操作，雷射給的是
+    // 絕對位置；相對滑鼠只送位移量，host 游標會和雷射點漂開（使用者回報、實測絕對模式逐像素一致）。
+    // 只改 Frame 上的預設值，使用者存過的設定照舊；Steam Deck 等其他 gamescope 環境不受影響。
+    absoluteMouseMode = settings.value(SER_ABSMOUSEMODE, SfEnv::isSteamFrame()).toBool();
     absoluteTouchMode = settings.value(SER_ABSTOUCHMODE, true).toBool();
     framePacing = settings.value(SER_FRAMEPACING, false).toBool();
     connectionWarnings = settings.value(SER_CONNWARNINGS, true).toBool();

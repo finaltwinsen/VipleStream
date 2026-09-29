@@ -809,6 +809,17 @@ QJsonObject vulkanJson()
 
 namespace SfEnv {
 
+bool isSteamFrame()
+{
+#if defined(Q_OS_LINUX)
+    const CheapInfo& c = cheapInfo();
+    return c.os.value(QStringLiteral("ID")) == QStringLiteral("steamos") &&
+           c.os.value(QStringLiteral("VARIANT_ID")) == QStringLiteral("vr");
+#else
+    return false;
+#endif
+}
+
 void captureOriginalEnv()
 {
 #if defined(Q_OS_LINUX)

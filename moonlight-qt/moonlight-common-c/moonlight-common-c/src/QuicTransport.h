@@ -176,6 +176,17 @@ void quicSetAltPeers(const struct sockaddr_storage* addrs,
                      const SOCKADDR_LEN* addrLens,
                      int count);
 
+// §MP-ONLINK：回傳和本機位址（localAddr/prefixLen）同子網路的 server 位址：
+// QUIC_ONLINK_PRIMARY（主 peer 同子網路）、alt peer 索引（>=0），
+// 都沒有或 prefixLen 未知（<=0）時回 -1。必須在 quicSetAltPeers 之後呼叫。
+// 同子網路的 peer 是這張網卡唯一對稱的對象（例：Steam Frame 無線適配器
+// 的專用鏈路），此時不該再拿其他位址去配這張網卡。
+#define QUIC_ONLINK_PRIMARY (-2)
+int quicOnLinkAltPeerIndex(const struct sockaddr_storage* localAddr, int prefixLen);
+
+// 取得第 idx 個 alt peer（供 Phase B 與 quicRecheckPaths 配對用）；越界回 NULL。
+const struct sockaddr_storage* quicGetAltPeer(int idx, SOCKADDR_LEN* lenOut);
+
 // Set the scheduling strategy for a specific flow type,
 // or for all flows if flowType == 0.
 int quicSetScheduler(unsigned char flowType, int strategy);
