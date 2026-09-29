@@ -446,7 +446,7 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
 - **M1b V3（VR 擷取，`display_vr_t`）**：
   - `[VIPLE-VR-CAP] init adapter=<desc> luid=<match|n/a> size=<W>x<H>@<hz> mode=<probe|live>`：建立時一次。選卡（K22）只收非軟體、VendorId≠0x1414、能建 FL 11_0、而且 `D3DKMT` ADAPTERTYPE 不是間接顯示（IddCx，例：MTT VDD 會在 DXGI 裡冒充成同名實體卡）的adapter；候選多於一張又沒有 `vrcompositor_adapter` 紀錄 → `VR_DISABLED: adapter mismatch …`（fail closed）。
   - `[VIPLE-VR-CAP] opened gen=<n> ring=<W>x<H>` / `first frame gen=<n> …` / `frame source gen=<n> is on a different adapter; reinit` / `ring … != display …; reinit` / `open gen=<n> failed: <open-texture[i]|open-shared-fence|open-consumed-fence>`。driver generation 換了只重開 ring，不重建 encoder。
-  - `[VIPLE-VR-CAP] 10s: gen= copied= skipped= fenceTimeout= invalid= stale= black= evtToPush p50/p95 presentToPush p50/p95`：健康時 invalid／stale／fenceTimeout 為 0，evtToPush p95 ≤ 1.5 ms（V3 host 實測 0.33 ms）。`black` 只在 driver 回報 HMD_PRESENTING 前（10 fps 黑幀）。
+  - `[VIPLE-VR-CAP] 10s: gen= copied= skipped= fenceTimeout= invalid= stale= black= evtToPush p50/p95 presentToPush p50/p95 echoAge p50/p95`：健康時 invalid／stale／fenceTimeout 為 0，evtToPush p95 ≤ 1.5 ms（V3 host 實測 0.33 ms）。`echoAge`（V6 起）＝echo 樣本發布到 tracking ring → app Present，涵蓋延遲預算第 3＋4＋5 項，只算 ECHO_MATCHED 的幀（S3-09 用）。`black` 只在 driver 回報 HMD_PRESENTING 前（10 fps 黑幀）。
   - `[VIPLE-VR-CAP] gpu-priority=high (was realtime|high)`：擷取期間行程 GPU 優先權改 HIGH（vrcompositor 與遊戲同卡，REALTIME 會搶遊戲）。
   - `[VIPLE-VR-CAP] capture ctx mixed sources; using newest (source=…)`：前一個桌面擷取執行緒還沒結束就接上 VR ctx，強制重建成 display_vr_t。`sync capture path does not support captureSource=1`＝防呆（Windows 走不到）。
   - `[VIPLE-VR-ENC] desktop probe state saved|restored (source=…)`：VR 探測（`vr_probe_scope`）前後保存／還原桌面探測結果，`/serverinfo` 前後必須逐字相同（selftest T1b）；`probe shape codec=… <W>x<H>@<hz> ir=<n>` 與 `intra refresh: …` 是 VR 形狀的探測結果。
@@ -516,6 +516,9 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-DRV] pipe lost gen=<G> reason=<…> -> standby (hmd stays connected)                   ← server 消失；pose 約 33 ms 內失效
 [VIPLE-VR-DRV] swapset create pid=<pid> fmt=<dxgi> size=<W>x<H> samples=<n> …                  ← P-B3：app 每眼一組、vrcompositor 系統層另有
 [VIPLE-VR-DRV] timing 10s: … acqTimeout=<n> … keyedMutex=yes syncOk=<n> releaseFailed=<n>      ← U13：acqTimeout 應為 0
+[VIPLE-VR-DRV] space-delta=<yaw>/<pitch>/<roll>deg pos=<x>,<y>,<z>mm trigger=<still|event:<name>>  ← S2-06：採用新的 SteamVR↔client 空間差（V6 起）
+[VIPLE-VR-DRV] controller activate hand=<left|right> index=<n>  /  controller deactivate hand=…   ← S2-09 最小 Touch 控制器（V6 起）
+[VIPLE-VR-DRV] controller hand=<left|right> <out-of-range|tracking> age_ms=<n>                   ← 控制器狀態切換（沒資料、active=0、> 100 ms）
 ```
 
 - 選卡（K22）：`<install>\config\steamvr\state.json` 的 `vrcompositor_adapter` 以 **LUID** 記錄 vrcompositor 實際使用的卡（`<host>` 上 IddCx 虛擬卡與實體卡同名，不能用名稱比對）。

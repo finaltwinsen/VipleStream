@@ -755,11 +755,11 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 |---|---|---|---|---|---|---|
 | 1 | 取樣、預測、送出 | 0.2 | 0.2 | 0.5 | | `[VIPLE-VR-POSE]` |
 | 2 | 上行 | 1.5 | 1.5 | 4 | | `[VIPLE-VR-POSE-RX]`、`[VIPLE-VR-CLK]` |
-| 3 | server 收到 → `PoseUpdated` | 0.1 | 0.1 | 0.3 | | `[VIPLE-VR-DRV]` |
+| 3 | server 收到 → `PoseUpdated` | 0.1 | 0.1 | 0.3 | 3＋4＋5 合計 p50 8.5／p95 24.1（`echoAge`，SteamVR Home、vr-emulate） | `[VIPLE-VR-DRV]` |
 | 4 | 等遊戲取 pose | 1.0（b5 已在 rc） | 1.0 | — | | echo 年齡 |
 | 5 | 遊戲 render 加 vrcompositor | 11.1（**ALVR 實務 `steamvr_pipeline_frames=2.1`，4+5 可能約 23 ms，多約 5 ms**） | 11.1 | — | | `vr_probe`：WaitGetPoses→Present |
-| 6 | driver 合成 SBS | 0.6 | 0.6 | 1.0 | | GPU timestamp |
-| 7 | IPC、fence 確認、copy | 0.4 | 0.4 | 0.8 | | `[VIPLE-VR-CAP]` |
+| 6 | driver 合成 SBS | 0.6 | 0.6 | 1.0 | 6＋7＋8＋首封包 p50 4.41／p95 4.70（`presentToFirstPkt`） | GPU timestamp |
+| 7 | IPC、fence 確認、copy | 0.4 | 0.4 | 0.8 | evtToPush p95 1.04（presentToPush p50 1.05） | `[VIPLE-VR-CAP]` |
 | 8 | NVENC | 3.5 | 3.5 | 5.0 | | `[VIPLE-NVENC-PROF]` |
 | 9 | packetize、FEC、送出窗 | 2.5 | 2.0 | 4.0 | | `[VIPLE-VR-TX]` |
 | 10 | 下行 | 1.5 | 1.5 | 4.0 | | CLIENT_TIMING |
@@ -771,6 +771,12 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | | **內容 MTP** | **≈43（+5 待測）** | **≈41** | 門檻見 §7 | | `[VIPLE-VR-MTP10]` |
 
 - 旋轉延遲由機上 ATW 決定。**G-rc 和 GA 的門檻在 M1b 結束時，依第 4、5 項的實測值加上 client 段的估計重定**，避免誤觸 fallback。
+- **M1b V6 實測與重定（2026-09-29，`<host>`、S0 60 分鐘、SteamVR Home、vr-emulate sine，待使用者確認後生效）**：
+  server 段＝`echoAge`（樣本發布 → app Present，第 3＋4＋5 項）p50 8.46 ms ＋ `presentToFirstPkt`（第 6–8 項＋首封包）p50 4.41 ms
+  ＝ 12.9 ms，第 9 項剩餘部分沒有量測、沿用預算 2.5 ms → 15.4 ms。套 §F.9 公式（client 段 24.3 ms、餘裕 3 ms）：
+  **G-rc p50 ≤ 43 ms、p95 ≤ 53 ms；GA p50 ≤ 33 ms、p95 ≤ 43 ms**；**Present→首封包 p50 ≤ 5.5 ms、p95 ≤ 6 ms**（實測＋1 ms）。
+  限制：第 4＋5 項是輕負載的 SteamVR Home（p95 24 ms 來自 app 取 pose 到 Present 之間的一幀延遲），重負載遊戲
+  （ALVR 實務 `steamvr_pipeline_frames=2.1`）會再多約 5–11 ms；G-rc 前要以實際遊戲重量一次 `echoAge`，超過就回到暫定值 55／65。
 - **頻寬**：追蹤上行約 0.42 Mbps；視訊 150–300 Mbps 加 FEC。
 
 ### 8.3 各里程碑的驗法
