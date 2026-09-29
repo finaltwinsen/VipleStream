@@ -17,6 +17,7 @@
 
 #include <windows.h>
 
+#include "controller_device.h"
 #include "d3d_device.h"
 #include "direct_mode.h"
 #include "driver_context.h"
@@ -129,6 +130,7 @@ namespace vrdrv {
       direct_mode_t *dm_ = nullptr;
       tracking_t *trk_ = nullptr;
       hmd_device_t *hmd_ = nullptr;
+      controller_device_t *ctrl_[2] = {nullptr, nullptr};  // S2-09；物件刻意不釋放（SteamVR 持有指標到 Cleanup 之後）
       bool add_rejected_ = false;
       bool standby_ = false;
       bool exiting_sent_ = false;
@@ -152,6 +154,7 @@ namespace vrdrv {
       guarded("Init", [&]() {
         ctx_ = new driver_ctx_t();
         ctx_->qpf = qpf_value();
+        ctx_->pose_hist.set_qpf(ctx_->qpf);
         ipc_ = new ipc_client_t();
         ctx_->ipc = ipc_;
         g_ctx = ctx_;
@@ -164,6 +167,8 @@ namespace vrdrv {
         ipc_callbacks_t cb;
         cb.on_mapped = [ctx](const generation_ptr &, bool armed) {
           ctx->armed.store(armed);
+          // 新 generation＝新的 client session：client 空間可能重建，Δ 回到恆等重新學（§E.2）
+          ctx->pose_hist.reset();
           ctx->link_up.store(true);
           ctx->link_events.fetch_add(1);
         };
@@ -244,6 +249,16 @@ namespace vrdrv {
         ctx_->hmd_added.store(true);
         ipc_->set_device_state(VRIPC_DRV_HMD_ADDED);
         ipc_->send_state(VRIPC_ST_HMD_ADDED, 0);
+        // S2-09：最小 Touch 控制器（左右各一）；沒有控制器資料時 poseIsValid=false／OutOfRange
+        for (int h = 0; h < 2; ++h) {
+          auto *c = new controller_device_t(*ctx_, h == 1);
+          if (vr::VRServerDriverHost()->TrackedDeviceAdded(c->serial(), vr::TrackedDeviceClass_Controller, c)) {
+            ctrl_[h] = c;
+          } else {
+            VRDRV_LOG_WARN("controller add rejected hand=%s", h == 1 ? "right" : "left");
+          }
+        }
+        trk_->set_controllers(ctrl_[0], ctrl_[1]);
       } else {
         // 被拒就不再重試（避免每幀洗 log）；hmd 物件刻意保留（SteamVR 可能仍持有指標）
         add_rejected_ = true;
@@ -287,7 +302,30 @@ namespace vrdrv {
       auto *host = vr::VRServerDriverHost();
       vr::VREvent_t ev {};
       while (host->PollNextEvent(&ev, sizeof(ev))) {
-        // V4 沒有控制器（haptic 在 V5）；space-delta 觸發事件在 V5 的 pose_history
+        switch (ev.eventType) {
+          case vr::VREvent_Input_HapticVibration:
+            for (auto *c : ctrl_) {
+              if (c && c->on_haptic(ev.data.hapticVibration)) {
+                break;
+              }
+            }
+            break;
+          // space-delta 的「事件觸發」視窗（§E.2：事件後 2 s 內即使在轉頭也可採用新 Δ）
+          case vr::VREvent_SeatedZeroPoseReset:
+            ctx_->pose_hist.note_event("SeatedZeroPoseReset", now_qpc());
+            break;
+          case vr::VREvent_StandingZeroPoseReset:
+            ctx_->pose_hist.note_event("StandingZeroPoseReset", now_qpc());
+            break;
+          case vr::VREvent_ChaperoneUniverseHasChanged:
+            ctx_->pose_hist.note_event("ChaperoneUniverseHasChanged", now_qpc());
+            break;
+          case vr::VREvent_SceneApplicationChanged:
+            ctx_->pose_hist.note_event("SceneApplicationChanged", now_qpc());
+            break;
+          default:
+            break;
+        }
       }
       if (!exiting_sent_ && host->IsExiting()) {
         exiting_sent_ = true;

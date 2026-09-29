@@ -34,6 +34,7 @@
 #include "driver_version.h"
 #include "ipc_client.h"
 #include "ipc_proto.h"
+#include "pose_history.h"
 #include "probe_common.h"
 #include "probe_d3d.h"
 #include "virtual_vsync.h"
@@ -1136,6 +1137,115 @@ namespace probe {
       }
       t.end();
     }
+    // S2-06：pose_history 配對與 space-delta 採用規則（§E.2）
+    void test_pose_history(tally_t &t) {
+      t.begin("pose-history");
+      using vrdrv::ph_pose_t;
+      using vrdrv::ph_sample_t;
+      using vrdrv::pose_history_t;
+      namespace m = vrdrv::math;
+      constexpr double k_pi = 3.14159265358979323846;
+      const int64_t f = 10000000;  // 固定 qpf，結果與機器無關
+      const int64_t t0 = 1000 * f;
+      const double T = 1.0 / 90.0;
+      auto yaw = [&](double deg) {
+        const double h = 0.5 * deg * k_pi / 180.0;
+        return m::quat_t {0.0, std::sin(h), 0.0, std::cos(h)};
+      };
+      auto qpc = [&](double s) {
+        return t0 + (int64_t) (s * (double) f);
+      };
+      {
+        ph_pose_t a {yaw(37.0), {0.3, 1.6, -0.2}};
+        const ph_pose_t i = pose_history_t::compose(a, pose_history_t::inverse(a));
+        t.check(m::angle_deg(i.rot, m::quat_t {}) < 1e-6 && pose_history_t::pos_dist(i.pos, m::vec3_t {}) < 1e-9, "compose-inverse-identity");
+        ph_sample_t s;
+        s.pose.rot = yaw(0.0);
+        s.ang_vel = {0.0, 30.0 * k_pi / 180.0, 0.0};
+        s.lin_vel = {1.0, 0.0, 0.0};
+        const ph_pose_t e = pose_history_t::extrapolate(s, 0.1);
+        t.check(std::fabs(m::angle_deg(e.rot, yaw(3.0))) < 1e-6 && std::fabs(e.pos.x - 0.1) < 1e-9, "extrapolate-yaw30", "ang=%.6f", m::angle_deg(e.rot, yaw(3.0)));
+      }
+      // 情境：以 90 Hz 回報 yaw 等速 w（度/秒）；app 的 mHmdPose = Δ_true · P(t_app − lag)
+      struct run_t {
+        int hits = 0, falls = 0, adopted = 0;
+        std::string trigger;
+        double client_err_deg = 0.0;
+        bool nonidentity = false;
+        uint32_t last_echo = 0, last_id = 0;
+      };
+      auto run = [&](double w_deg, double lag_s, const ph_pose_t &delta_true, int frames, const char *event) {
+        pose_history_t ph(f);
+        run_t r;
+        uint32_t id = 0;
+        for (int i = 0; i < frames; ++i) {
+          const double ts = i * T;
+          ph_sample_t s;
+          s.sample_id = ++id;
+          s.pose.rot = yaw(w_deg * ts);
+          s.pose.pos = {0.0, 1.6, 0.0};
+          s.ang_vel = {0.0, w_deg * k_pi / 180.0, 0.0};
+          s.reported_qpc = qpc(ts);
+          s.offset_s = 0.0;
+          ph.record(s);
+          if (event && i == 5) {
+            ph.note_event(event, qpc(ts));
+          }
+          const double now = ts + 0.002;
+          const double t_app = now + 0.03;
+          const ph_pose_t truth {yaw(w_deg * (t_app - lag_s)), {0.0, 1.6, 0.0}};
+          const ph_pose_t app = pose_history_t::compose(delta_true, truth);
+          const auto mm = ph.match(app, qpc(t_app), qpc(now));
+          r.hits += mm.hit ? 1 : 0;
+          r.falls += mm.hit ? 0 : 1;
+          if (mm.adopted) {
+            ++r.adopted;
+            r.trigger = mm.adopted_trigger;
+          }
+          r.client_err_deg = m::angle_deg(mm.client_pose.rot, truth.rot);
+          r.nonidentity = mm.delta_nonidentity;
+          r.last_echo = mm.echo;
+          r.last_id = id;
+        }
+        return r;
+      };
+      const ph_pose_t ident {};
+      {
+        const auto r = run(30.0, 0.0, ident, 120, nullptr);
+        t.check(r.falls == 0 && r.last_echo == r.last_id && !r.nonidentity, "match-yaw30-identity", "hits=%d falls=%d echo=%u/%u", r.hits, r.falls, r.last_echo, r.last_id);
+      }
+      {
+        // 靜止＋SteamVR 端 yaw 10°／位移 10 cm：前 29 幀 fallback，第 30 幀以 still 採用，之後全命中、renderPose 回到 client 空間
+        const ph_pose_t d {yaw(10.0), {0.1, 0.0, 0.0}};
+        const auto r = run(0.0, 0.0, d, 60, nullptr);
+        t.check(r.adopted == 1 && r.trigger == "still" && r.falls == 30 && r.nonidentity && r.client_err_deg < 0.01, "adopt-still-yaw10",
+                "adopted=%d trigger=%s falls=%d err=%.4f", r.adopted, r.trigger.c_str(), r.falls, r.client_err_deg);
+      }
+      {
+        // 設計 §E.2 必測：yaw 30°/s 且 app 晚 44 ms（穩定的 1.32° 假偏移）不可採用新 Δ
+        const auto r = run(30.0, 0.044, ident, 120, nullptr);
+        t.check(r.adopted == 0 && !r.nonidentity && r.hits == 0, "no-adopt-yaw30-lag44", "adopted=%d falls=%d", r.adopted, r.falls);
+      }
+      {
+        // 同上但 2 s 內有 SeatedZeroPoseReset：允許採用（trigger=event:…）
+        const ph_pose_t d {yaw(25.0), {0.0, 0.0, 0.0}};
+        const auto r = run(30.0, 0.0, d, 60, "SeatedZeroPoseReset");
+        t.check(r.adopted == 1 && r.trigger == "event:SeatedZeroPoseReset" && r.client_err_deg < 0.01, "adopt-event-yaw25",
+                "adopted=%d trigger=%s err=%.4f", r.adopted, r.trigger.c_str(), r.client_err_deg);
+      }
+      {
+        // 候選視窗外（樣本全都 > 100 ms 前）：fallback 且 have_candidate=false
+        pose_history_t ph(f);
+        ph_sample_t s;
+        s.sample_id = 7;
+        s.reported_qpc = qpc(0.0);
+        ph.record(s);
+        const auto mm = ph.match(ph_pose_t {}, qpc(0.25), qpc(0.2));
+        t.check(!mm.hit && !mm.have_candidate && mm.echo == 0, "no-candidate-window");
+      }
+      t.end();
+    }
+
   }  // namespace
 
   int run_unit(const args_t &a) {
@@ -1149,6 +1259,7 @@ namespace probe {
     test_paths(t);
     test_log_throttle(t);
     test_v4(t);
+    test_pose_history(t);
     if (a.no_loopback) {
       line("unit-skip case=loop reason=no-loopback");
     } else {

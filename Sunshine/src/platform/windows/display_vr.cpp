@@ -372,14 +372,16 @@ namespace platf::dxgi {
         w = std::move(window_);
         window_ = stats_t {};
       }
-      double e50, e95, p50, p95;
+      double e50, e95, p50, p95, a50, a95;
       percentiles(std::move(w.evt_to_push_ms), e50, e95);
       percentiles(std::move(w.present_to_push_ms), p50, p95);
+      percentiles(std::move(w.echo_age_ms), a50, a95);
       BOOST_LOG(info) << "[VIPLE-VR-CAP] 10s: gen="sv << (cs && cs->src ? cs->src->generation : 0)
                       << " copied="sv << w.copied << " skipped="sv << w.skipped << " fenceTimeout="sv << w.fence_timeout
                       << " invalid="sv << w.invalid << " stale="sv << w.stale << " black="sv << w.black
                       << " evtToPush p50="sv << std::format("{:.3f}", e50) << "ms p95="sv << std::format("{:.3f}", e95)
-                      << "ms presentToPush p50="sv << std::format("{:.3f}", p50) << "ms p95="sv << std::format("{:.3f}", p95) << "ms"sv;
+                      << "ms presentToPush p50="sv << std::format("{:.3f}", p50) << "ms p95="sv << std::format("{:.3f}", p95)
+                      << "ms echoAge p50="sv << std::format("{:.3f}", a50) << "ms p95="sv << std::format("{:.3f}", a95) << "ms"sv;
       last_log_ = now;
     };
 
@@ -612,6 +614,9 @@ namespace platf::dxgi {
         const double p = qpc_to_ms(push_qpc - d.present_qpc);
         window_.evt_to_push_ms.push_back(e);
         window_.present_to_push_ms.push_back(p);
+        if (const int64_t pub = cs->reader->last_echo_published_qpc(); pub != 0 && d.present_qpc > pub) {
+          window_.echo_age_ms.push_back(qpc_to_ms(d.present_qpc - pub));
+        }
         if (stats_.evt_to_push_ms.size() < k_stats_samples_max) {
           stats_.evt_to_push_ms.push_back(e);
           stats_.present_to_push_ms.push_back(p);

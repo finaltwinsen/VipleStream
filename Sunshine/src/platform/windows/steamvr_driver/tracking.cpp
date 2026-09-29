@@ -6,6 +6,7 @@
 #include <cmath>
 #include <process.h>
 
+#include "controller_device.h"
 #include "driver_log.h"
 #include "hmd_device.h"
 #include "seh_guard.h"
@@ -106,6 +107,14 @@ namespace vrdrv {
     }
   }
 
+  void tracking_t::invalidate_controllers() {
+    for (auto &c : ctrl_) {
+      if (auto *d = c.load()) {
+        d->invalidate();
+      }
+    }
+  }
+
   void tracking_t::run() {
     uint64_t cur_gen = 0;
     uint64_t last_idx = UINT64_MAX;
@@ -136,6 +145,7 @@ namespace vrdrv {
             p.result = vr::TrackingResult_Running_OutOfRange;
             p.poseIsValid = false;
             report(p);
+            invalidate_controllers();
           });
           if (!ok) {
             break;
@@ -175,6 +185,7 @@ namespace vrdrv {
             p.result = vr::TrackingResult_Running_OutOfRange;
             p.poseIsValid = false;
             report(p);
+            invalidate_controllers();
             invalid_sent = true;
             ++n_invalid;
             push_timing(ctx_, VRIPC_TE_STALE, 0, 3, 0);
@@ -209,6 +220,16 @@ namespace vrdrv {
         const bool now_oor = age_us > (int64_t) oor_us;
         if (!fresh && !now_stale) {
           return;  // 同一筆樣本已送過、還沒 stale：不重送
+        }
+        // S2-09：控制器跟 HMD 同一個節奏（新樣本或 stale 重送）；> stale_oor_ctrl_us（預設 100 ms）OutOfRange
+        {
+          const uint32_t ctrl_oor_us = cfg.stale_oor_ctrl_us != 0 ? cfg.stale_oor_ctrl_us : 100000;
+          const uint8_t hand_flag[2] = {0x02, 0x04};  // VIPLE_VR_TRK_LEFT／RIGHT
+          for (int h = 0; h < 2; ++h) {
+            if (auto *d = ctrl_[h].load()) {
+              d->update(last.pose[1 + h], last.input[h], (last.flags & hand_flag[h]) != 0, age_us, ctrl_oor_us, now_stale);
+            }
+          }
         }
         const vripc_pose_t &hp = last.pose[0];
         vr::DriverPose_t p = base_pose();
@@ -248,7 +269,15 @@ namespace vrdrv {
         ctx_.presence.store((last.flags & VIPLE_TRK_PRESENCE_FLAG) != 0);
         if (fresh) {
           ++n_new;
-          ctx_.remember_sample(last.sample_id, q, now);
+          ph_sample_t hs;
+          hs.sample_id = last.sample_id;
+          hs.pose.rot = q;
+          hs.pose.pos = {hp.pos[0], hp.pos[1], hp.pos[2]};
+          hs.lin_vel = {hp.lin_vel[0], hp.lin_vel[1], hp.lin_vel[2]};
+          hs.ang_vel = {hp.ang_vel[0], hp.ang_vel[1], hp.ang_vel[2]};
+          hs.reported_qpc = now;
+          hs.offset_s = off;
+          ctx_.pose_hist.record(hs);
           const int64_t off_us = (int64_t) (off * 1e6);
           offset_min_us = off_us < offset_min_us ? off_us : offset_min_us;
           offset_max_us = off_us > offset_max_us ? off_us : offset_max_us;

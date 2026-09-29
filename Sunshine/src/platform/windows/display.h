@@ -468,6 +468,7 @@ namespace platf::dxgi {
       uint64_t first_frame_id = 0;  ///< 本 display 看到的第一筆 descriptor（算消費率的分母）
       uint64_t last_frame_id = 0;
       std::vector<double> evt_to_push_ms;  ///< evtFrm 醒來 → push 回呼（只保留最近一個統計窗）
+      std::vector<double> echo_age_ms;  ///< echo 樣本發布到 tracking ring → app Present（預算第 3＋4＋5 項；S3-09）
       std::vector<double> present_to_push_ms;  ///< descriptor.present_qpc → push 回呼
     };
 

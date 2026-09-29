@@ -12,6 +12,7 @@
 #include <windows.h>
 
 #include "ipc_client.h"
+#include "pose_history.h"
 #include "vr_math.h"
 
 namespace vrdrv {
@@ -21,13 +22,6 @@ namespace vrdrv {
   // 0x5506 tracking flags（VipleVr.h 的 VIPLE_VR_TRK_*；driver 不 include common-c，只取這兩個值）
   constexpr uint8_t VIPLE_TRK_HMD_FLAG = 0x01;
   constexpr uint8_t VIPLE_TRK_PRESENCE_FLAG = 0x10;
-
-  // 回報給 SteamVR 的 HMD 樣本（echo 比對用；V5 的 pose_history 取代它）
-  struct reported_sample_t {
-    uint32_t sample_id = 0;
-    math::quat_t rot;
-    int64_t reported_qpc = 0;
-  };
 
   struct driver_ctx_t {
     ipc_client_t *ipc = nullptr;
@@ -48,43 +42,12 @@ namespace vrdrv {
     std::atomic<bool> presence {false};  // 最新樣本帶 PRESENCE（RunFrame 更新 /proximity）
     SRWLOCK pose_lock = SRWLOCK_INIT;
 
-    // ── echo（SubmitLayer 的 mHmdPose ↔ 回報過的樣本）──
-    static constexpr uint32_t k_echo_slots = 128;
-    SRWLOCK echo_lock = SRWLOCK_INIT;
-    reported_sample_t echo[k_echo_slots] {};
-    uint32_t echo_head = 0;
+    // ── pose_history（S2-06：SubmitLayer 的 mHmdPose ↔ 回報過的樣本、space-delta）──
+    pose_history_t pose_hist;
 
     // 目前是否應該對 SteamVR 呈現「有效 HMD」（否則 poseIsValid=false、/proximity=false、不合成）
     bool active() const {
       return link_up.load() && armed.load() && !server_stale.load();
-    }
-
-    void remember_sample(uint32_t id, const math::quat_t &q, int64_t qpc) {
-      AcquireSRWLockExclusive(&echo_lock);
-      echo[echo_head % k_echo_slots] = reported_sample_t {id, q, qpc};
-      ++echo_head;
-      ReleaseSRWLockExclusive(&echo_lock);
-    }
-
-    // 最近 100 ms 內角距離最小的樣本；回傳角度（度），找不到回負值
-    double find_echo(const math::quat_t &q, int64_t now, uint32_t &id_out) {
-      double best = -1.0;
-      AcquireSRWLockShared(&echo_lock);
-      const uint32_t n = echo_head < k_echo_slots ? echo_head : k_echo_slots;
-      for (uint32_t i = 0; i < n; ++i) {
-        const auto &s = echo[i];
-        if (s.sample_id == 0 || now - s.reported_qpc > qpf / 10) {
-          continue;
-        }
-        const double a = math::angle_deg(q, s.rot);
-        // 同角度時取較新的樣本
-        if (best < 0.0 || a < best || (a == best && (int32_t) (s.sample_id - id_out) > 0)) {
-          best = a;
-          id_out = s.sample_id;
-        }
-      }
-      ReleaseSRWLockShared(&echo_lock);
-      return best;
     }
   };
 

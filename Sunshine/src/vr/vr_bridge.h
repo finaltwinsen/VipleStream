@@ -671,6 +671,12 @@ namespace vr::bridge {
       return last_fence_;
     }
 
+    /// 上一筆 ok 的 echo 樣本在 server 發布到 tracking ring 的 QPC（ECHO_MATCHED 才有；否則 0）。
+    /// present_qpc − 它 ＝ 延遲預算第 3＋4＋5 項（server 收到 → app 取 pose → render → Present），S3-09 用。
+    int64_t last_echo_published_qpc() const {
+      return last_echo_pub_qpc_;
+    }
+
     frame_invalid_e last_invalid() const {
       return last_invalid_;
     }
@@ -689,6 +695,7 @@ namespace vr::bridge {
     bool have_last_frame_ = false;
     uint64_t last_fence_ = 0;
     uint64_t last_skipped_ = 0;
+    int64_t last_echo_pub_qpc_ = 0;
     uint32_t invalid_streak_ = 0;
     bool teardown_requested_ = false;
     frame_invalid_e last_invalid_ = frame_invalid_e::none;

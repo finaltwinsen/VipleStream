@@ -19,6 +19,7 @@
 namespace vrdrv {
 
   class hmd_device_t;
+  class controller_device_t;
 
   class tracking_t {
   public:
@@ -36,13 +37,21 @@ namespace vrdrv {
       hmd_.store(hmd);
     }
 
+    // S2-09：RunFrame 在加入控制器後設定（之後不變）
+    void set_controllers(controller_device_t *left, controller_device_t *right) {
+      ctrl_[0].store(left);
+      ctrl_[1].store(right);
+    }
+
   private:
     static unsigned __stdcall entry(void *self);
     void run();
     void report(const vr::DriverPose_t &p);
+    void invalidate_controllers();
 
     driver_ctx_t &ctx_;
     std::atomic<hmd_device_t *> hmd_ {nullptr};
+    std::atomic<controller_device_t *> ctrl_[2] {};
     HANDLE thread_ = nullptr;
     HANDLE stop_evt_ = nullptr;
   };

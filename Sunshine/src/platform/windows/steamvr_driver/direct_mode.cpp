@@ -485,29 +485,37 @@ namespace vrdrv {
     d.submit_qpc = submit_qpc;
     d.render_rot[3] = 1.0f;
     if (layer_count_ > 0) {
-      // 第 0 層＝scene：renderPose(client 空間) = mHmdPose（V4：space-delta 恆為 I，S2-06 在 V5）
-      math::quat_t q;
-      math::vec3_t p;
-      math::matrix34_to_pose(layers_[0].pose, q, p);
-      d.render_rot[0] = (float) q.x;
-      d.render_rot[1] = (float) q.y;
-      d.render_rot[2] = (float) q.z;
-      d.render_rot[3] = (float) q.w;
-      d.render_pos[0] = (float) p.x;
-      d.render_pos[1] = (float) p.y;
-      d.render_pos[2] = (float) p.z;
+      // 第 0 層＝scene：mHmdPose 是 SteamVR 世界空間；renderPose(client 空間) = Δ_cur⁻¹ · mHmdPose（S2-06、§E.2）
+      ph_pose_t app;
+      math::matrix34_to_pose(layers_[0].pose, app.rot, app.pos);
       const float pred = std::isfinite(layers_[0].pred_s) ? layers_[0].pred_s : 0.0f;
       d.t_target_qpc = layers_[0].submit_qpc + (int64_t) ((double) pred * (double) ctx_.qpf);
-      uint32_t echo = 0;
-      const double ang = ctx_.find_echo(q, present_qpc, echo);
+      const ph_match_t m = ctx_.pose_hist.match(app, d.t_target_qpc, present_qpc);
+      d.render_rot[0] = (float) m.client_pose.rot.x;
+      d.render_rot[1] = (float) m.client_pose.rot.y;
+      d.render_rot[2] = (float) m.client_pose.rot.z;
+      d.render_rot[3] = (float) m.client_pose.rot.w;
+      d.render_pos[0] = (float) m.client_pose.pos.x;
+      d.render_pos[1] = (float) m.client_pose.pos.y;
+      d.render_pos[2] = (float) m.client_pose.pos.z;
       d.flags = VRIPC_FRM_POSE_VALID;
-      if (ang >= 0.0 && ang < 1.0) {
+      d.echo_sample_id = m.echo;
+      if (m.hit) {
         d.flags |= VRIPC_FRM_ECHO_MATCHED;
-        d.echo_sample_id = echo;
       } else {
         d.flags |= VRIPC_FRM_POSE_FALLBACK;
-        d.echo_sample_id = echo;
         st.posehist_miss.fetch_add(1, std::memory_order_relaxed);
+      }
+      if (m.delta_nonidentity) {
+        d.flags |= VRIPC_FRM_SPACE_DELTA;
+      }
+      if (m.adopted) {
+        double yaw = 0, pitch = 0, roll = 0;
+        pose_history_t::to_euler_deg(m.adopted_delta.rot, yaw, pitch, roll);
+        const double ang = math::angle_deg(m.adopted_delta.rot, math::quat_t {});
+        st.space_delta_mdeg.store((int32_t) (ang * 1000.0), std::memory_order_relaxed);
+        VRDRV_LOG_INFO("space-delta=%.2f/%.2f/%.2fdeg pos=%.1f,%.1f,%.1fmm trigger=%s", yaw, pitch, roll, m.adopted_delta.pos.x * 1000.0,
+                       m.adopted_delta.pos.y * 1000.0, m.adopted_delta.pos.z * 1000.0, m.adopted_trigger.c_str());
       }
     } else {
       d.t_target_qpc = present_qpc;

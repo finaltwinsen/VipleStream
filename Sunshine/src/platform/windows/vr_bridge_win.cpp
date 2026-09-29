@@ -721,7 +721,7 @@ namespace vr::bridge {
       void set_timing_sink(timing_cb cb);
       bool tracking_wanted() const;
       void publish(const tracked_sample_t &s);
-      bool sample_recent(uint32_t id, int64_t now);
+      bool sample_recent(uint32_t id, int64_t now, int64_t *published_qpc = nullptr);
       std::shared_ptr<frame_source_t> source();
       pipe_sd_report_t check_pipe_security(bool roundtrip);
 
@@ -1198,7 +1198,7 @@ namespace vr::bridge {
       trk_published_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    bool bridge_t::sample_recent(uint32_t id, int64_t now) {
+    bool bridge_t::sample_recent(uint32_t id, int64_t now, int64_t *published_qpc) {
       if (id == 0) {
         return false;
       }
@@ -1211,6 +1211,9 @@ namespace vr::bridge {
           break;
         }
         if (e.id == id) {
+          if (published_qpc) {
+            *published_qpc = e.qpc;
+          }
           return true;
         }
       }
@@ -3105,10 +3108,13 @@ namespace vr::bridge {
     last_fence_ = local.fence_value;
 
     // §B.8 第 4 條：echo 不在 server 最近 2 s 發布過的集合內 → 不算 echo
-    if (!bridge().sample_recent(local.echo_sample_id, ctx.now_qpc)) {
+    int64_t pub = 0;
+    if (!bridge().sample_recent(local.echo_sample_id, ctx.now_qpc, &pub)) {
       local.flags &= ~VRIPC_FRM_ECHO_MATCHED;
       local.flags |= VRIPC_FRM_POSE_FALLBACK;
+      pub = 0;
     }
+    last_echo_pub_qpc_ = (local.flags & VRIPC_FRM_ECHO_MATCHED) ? pub : 0;
     out = local;
     return result_e::ok;
   }
