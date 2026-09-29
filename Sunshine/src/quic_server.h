@@ -290,6 +290,15 @@ namespace quic_server {
     std::atomic<uint64_t> _dgramPushed{0};
     std::atomic<uint64_t> _dgramDroppedStale{0};
     std::atomic<uint64_t> _dgramPendingPeak{0};
+    // §Q-ACCT：picoquic 連線層級計數的快照（IO 執行緒寫、統計執行緒讀）
+    std::atomic<uint64_t> _acctPqSent{0}, _acctPqRecv{0}, _acctRetx{0}, _acctSpurious{0};
+    // §Q-ACCT：影像資料 shard 逐序號的最終狀態（0 未見、1 已排入、2 已確認、3 判遺失、
+    // 4 誤判遺失）。只在 IO 執行緒存取；session 關閉時列出 3 與 1 的序號，和 client 的
+    // `§Q-ACCT skip seq=` 對帳。
+    std::vector<uint8_t> _acctSeqState = std::vector<uint8_t>(65536, 0);
+    uint64_t _acctDgAcked = 0, _acctDgLost = 0, _acctDgSpurious = 0;
+    void acctMark(const uint8_t *dgram, size_t len, uint8_t state);
+    void acctDump();
 
     // §ABR-QSTALE-FEEDBACK：ABR 專用 consume 計數器。不重用
     // _dgramDroppedStale——它是累積診斷值且會在 §Q-GRACE-FIX 新

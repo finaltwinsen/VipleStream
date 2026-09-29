@@ -137,6 +137,7 @@ typedef struct _QUIC_SUBFLOW {
     uint64_t lastRecvTime;
     uint64_t bytesSent;
     uint64_t bytesRecv;
+    uint64_t pktsRecv;   // §Q-ACCT：IO 執行緒 recvfrom 取得的原始 UDP 封包數
 
     // §Q-MP-STANDBY: Phase B 的 ICMP RTT（毫秒）。path 0 不做 ICMP
     // 所以 icmpRttMs=0。path_available callback 比較此值和 path 0 的
@@ -3166,6 +3167,17 @@ static void quicJitterCheckTimeout(QUIC_TRANSPORT_CTX* ctx, QUIC_JITTER_BUF* jb,
                 // §5a.fix: i 是正確的跳過距離（uint16_t 模加法保證正）。
                 // 舊寫法 (uint64_t)(trySeq - deliverNextSeq) 在 uint16_t
                 // 邊界繞回時，int 升型導致負值轉 uint64_t 造成溢位。
+                // §Q-ACCT：跳過的序號範圍（和 server 端送出紀錄對帳用；每行程最多 30 行）
+                {
+                    static int acctSkipLogs = 0;
+                    if (ft == QUIC_FLOW_VIDEO && acctSkipLogs < 30) {
+                        acctSkipLogs++;
+                        Limelog("[VIPLE-MPQUIC] §Q-ACCT skip seq=%u count=%d sinceDeliver=%lluus buffered=%d\n",
+                                (unsigned)jb->deliverNextSeq, i,
+                                (unsigned long long)(now - jb->lastDeliverUs),
+                                jb->bufferedCount);
+                    }
+                }
                 jb->timedOut += (uint64_t)i;
                 jb->timeoutEvents++; // §5a.r3 診斷：timeout 事件次數
                 // §5a.r4 Fix Q.5：記錄這次 timeout 跳過的 seq 範圍
@@ -3827,6 +3839,7 @@ static void quicIoThreadProc(void* context) {
                         pktsThisSocket++;
                         ctx->subflows[i].lastRecvTime = currentTime;
                         ctx->subflows[i].bytesRecv += (uint64_t)recvLen;
+                        ctx->subflows[i].pktsRecv++;  // §Q-ACCT
                         if (!ctx->subflows[i].active) {
                             ctx->subflows[i].active = true;
                             ctx->subflows[i].consecutiveTimeouts = 0;
@@ -4047,12 +4060,21 @@ static void quicIoThreadProc(void* context) {
                 // Per-path 摘要
                 for (int pi = 0; pi < ctx->subflowCount; pi++) {
                     QUIC_SUBFLOW* sf = &ctx->subflows[pi];
-                    Limelog("[VIPLE-MPQUIC] §K.10 path[%d] if=%d %s RTT=%.1fms %.1fMbps loss=%.1f%% tx=%lluKB rx=%lluKB\n",
+                    Limelog("[VIPLE-MPQUIC] §K.10 path[%d] if=%d %s RTT=%.1fms %.1fMbps loss=%.1f%% tx=%lluKB rx=%lluKB rxPkts=%llu\n",
                             pi, sf->interfaceIndex,
                             sf->active ? "ACTIVE" : "DEAD",
                             sf->rttMs, sf->throughputMbps, sf->lossPercent,
                             (unsigned long long)(sf->bytesSent / 1024),
-                            (unsigned long long)(sf->bytesRecv / 1024));
+                            (unsigned long long)(sf->bytesRecv / 1024),
+                            (unsigned long long)sf->pktsRecv);
+                }
+                // §Q-ACCT 2026-09-29：和 server 的 pqSent 對帳。Σ rxPkts（socket 取得）
+                // 與 pqRecv（picoquic 成功處理）的差＝client picoquic 丟掉的封包
+                //（解密失敗、未知 CID、重複）；server pqSent − Σ rxPkts ＝ 網路／OS 遺失。
+                if (ctx->cnx != NULL) {
+                    Limelog("[VIPLE-MPQUIC] §Q-ACCT client: pqRecv=%llu pqSent=%llu\n",
+                            (unsigned long long)ctx->cnx->nb_packets_received,
+                            (unsigned long long)ctx->cnx->nb_packets_sent);
                 }
 
                 for (int bi = 1; bi < QUIC_FLOW_COUNT; bi++) {

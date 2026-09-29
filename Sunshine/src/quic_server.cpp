@@ -342,6 +342,41 @@ namespace quic_server {
     }
   }
 
+  // §Q-ACCT 2026-09-29：影像資料 shard 的逐序號狀態（診斷用，IO 執行緒）。
+  // parity（reserved 最高位）共用 baseSeq，不列入。
+  void QuicSession::acctMark(const uint8_t *dgram, size_t len, uint8_t state) {
+    if (dgram == nullptr || len < DGRAM_HDR_SIZE) return;
+    auto *h = reinterpret_cast<const QuicDgramHeader *>(dgram);
+    if (h->flowType != FLOW_VIDEO || (h->reserved & 0x80)) return;
+    uint16_t seq = ntohs(h->seq);
+    uint8_t &cur = _acctSeqState[seq];
+    switch (state) {
+      case 1: if (cur == 0) cur = 1; break;
+      case 2: cur = 2; _acctDgAcked++; break;
+      case 3: if (cur != 2) cur = 3; _acctDgLost++; break;
+      case 4: cur = (cur == 3) ? 4 : cur; _acctDgSpurious++; break;
+      default: break;
+    }
+  }
+
+  void QuicSession::acctDump() {
+    uint64_t n[5] = {};
+    std::string lost, pending;
+    int nl = 0, np = 0;
+    for (int s = 0; s < 65536; s++) {
+      uint8_t st = _acctSeqState[s];
+      if (st < 5) n[st]++;
+      if (st == 3 && nl < 40) { lost += " " + std::to_string(s); nl++; }
+      if (st == 1 && np < 40) { pending += " " + std::to_string(s); np++; }
+    }
+    BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-ACCT dgram: queued-only=" << n[1] << " acked=" << n[2]
+                    << " lost=" << n[3] << " spurious=" << n[4]
+                    << " (events acked=" << _acctDgAcked << " lost=" << _acctDgLost
+                    << " spurious=" << _acctDgSpurious << ")";
+    BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-ACCT lost seqs:" << lost;
+    BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-ACCT queued-never-acked seqs:" << pending;
+  }
+
   void QuicSession::drainPendingToQuic() {
     // §K.4：從 _pendingQueue 取出所有待發項目，在 IO 執行緒上
     // 統一呼叫 picoquic API（picoquic 是單執行緒設計，所有
@@ -353,6 +388,20 @@ namespace quic_server {
     {
       std::lock_guard<std::mutex> lock(_pendingMutex);
       batch.swap(_pendingQueue);
+    }
+    {  // §Q-ACCT：每 10 秒在 IO 執行緒印一次逐序號累計（close 不一定經過 callback）
+      static thread_local uint64_t lastAcctDumpUs = 0;
+      uint64_t nowAcct = picoquic_current_time();
+      if (nowAcct - lastAcctDumpUs > 10000000) {
+        if (lastAcctDumpUs != 0) acctDump();
+        lastAcctDumpUs = nowAcct;
+      }
+    }
+    if (_cnx != nullptr) {  // §Q-ACCT：IO 執行緒上抄一份計數給統計執行緒
+      _acctPqSent.store(_cnx->nb_packets_sent, std::memory_order_relaxed);
+      _acctPqRecv.store(_cnx->nb_packets_received, std::memory_order_relaxed);
+      _acctRetx.store(_cnx->nb_retransmission_total, std::memory_order_relaxed);
+      _acctSpurious.store(_cnx->nb_spurious, std::memory_order_relaxed);
     }
 
     if (batch.empty() || !_cnx)
@@ -1082,6 +1131,7 @@ namespace quic_server {
           p->max_acked_packet_size < MTU_PAROLE_CONFIRM_LEN &&
           !_mtuBoostBlocked.count(pid)) {
         _mtuBoostBlocked.insert(pid);
+        p->viple_mtu_pinned = 0;  // §Q-MTU-PIN：交還 PMTUD
         BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.9 PMTUD takeover: path=" << i
                         << " id=" << pid << " send_mtu=" << p->send_mtu
                         << " mtuLosses=" << p->nb_mtu_losses
@@ -1106,6 +1156,7 @@ namespace quic_server {
         } else if (p->max_acked_packet_size < MTU_PAROLE_CONFIRM_LEN &&
                    paroleNowUs - it->second > MTU_PAROLE_TIMEOUT_US) {
           _mtuBoostBlocked.insert(pid);
+          p->viple_mtu_pinned = 0;  // §Q-MTU-PIN：交還 PMTUD
           picoquic_reset_path_mtu(p);
           BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.9-PAROLE revoke: path=" << i
                           << " id=" << pid
@@ -1117,8 +1168,15 @@ namespace quic_server {
           continue;
         }
       }
-      if (p->send_mtu < 1500 && !_mtuBoostBlocked.count(pid)) {
-        p->send_mtu = 1500;
+      if (!_mtuBoostBlocked.count(pid)) {
+        if (p->send_mtu < 1500) {
+          p->send_mtu = 1500;
+        }
+        // §Q-MTU-PIN 2026-09-29：boost 期間不讓 picoquic 因遺失（多為 PTO／RACK 誤判）
+        // 把 send_mtu 打回 1232。打回到下次 drain 重新 boost 之間，佇列開頭 >1232B 的
+        // video datagram 會在 picoquic_format_first_datagram_frame（§K.11）被直接刪除、
+        // 不留任何計數：client 看到整段連號缺失。靜止桌面稀疏流量 PTO 多，最明顯。
+        p->viple_mtu_pinned = 1;
       }
     }
 
@@ -1259,6 +1317,7 @@ namespace quic_server {
                            << " cnxState=" << (int)picoquic_get_cnx_state(_cnx);
         }
       } else {
+        acctMark(dg.data.data(), dg.data.size(), 1);  // §Q-ACCT
         _dgramQueued++;
         _dgramQueuedByFlow[ft]++;
         _bytesByFlow[ft] += dg.data.size();
@@ -2043,6 +2102,7 @@ namespace quic_server {
       if (cnx->nb_paths > 0 && cnx->path[0] != nullptr) {
         size_t oldMtu = cnx->path[0]->send_mtu;
         cnx->path[0]->send_mtu = 1500;
+        cnx->path[0]->viple_mtu_pinned = 1;  // §Q-MTU-PIN
         BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.8 path[0] send_mtu boosted: "
                         << oldMtu << " → 1500";
 
@@ -2272,6 +2332,19 @@ namespace quic_server {
       break;
     }
 
+    // §Q-ACCT：picoquic 對每個帶 datagram frame 的封包回報確認／判遺失／誤判
+    case picoquic_callback_datagram_acked:
+    case picoquic_callback_datagram_lost:
+    case picoquic_callback_datagram_spurious: {
+      auto session = findSession(cnx);
+      if (session) {
+        uint8_t st = (fin_or_event == picoquic_callback_datagram_acked) ? 2
+                   : (fin_or_event == picoquic_callback_datagram_lost)  ? 3 : 4;
+        session->acctMark(bytes, length, st);
+      }
+      break;
+    }
+
     case picoquic_callback_stream_data:
     case picoquic_callback_stream_fin: {
       if (stream_id != 0)
@@ -2298,6 +2371,7 @@ namespace quic_server {
       for (auto it = listener->_sessions.begin();
            it != listener->_sessions.end(); ++it) {
         if (it->second->_cnx == cnx) {
+          it->second->acctDump();  // §Q-ACCT
           // §Q-CNX-ATOMIC-FIX：先清 ready 再清 _cnx——sender 執行緒只讀
           // _ready，store 之後不會再進入任何 send 路徑。
           it->second->_ready.store(false, std::memory_order_release);
@@ -2322,12 +2396,7 @@ namespace quic_server {
       // 注意：picoquic 收到 length=0 會自動清除 datagram_ready flag。
       break;
 
-    case picoquic_callback_datagram_acked:
-    case picoquic_callback_datagram_lost:
-    case picoquic_callback_datagram_spurious:
-      // Datagram 送達/遺失/誤判通知 — 目前不需處理（datagram
-      // 本身是 fire-and-forget，retransmit 由上層 FEC 處理）。
-      break;
+    // datagram_acked／lost／spurious 由上方 §Q-ACCT 處理（不重傳，只記帳）。
 
     default: {
       // §K.6: 降級為 debug，避免未知 event 灌爆 log。
@@ -2414,6 +2483,12 @@ namespace quic_server {
         }
         BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.10 " << addr << " paths: " << pathLine;
       }
+      // §Q-ACCT 2026-09-29：和 client 的 rxPkts／pqRecv 對帳（見 client §Q-ACCT）
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-ACCT server " << addr
+                      << ": pqSent=" << session->_acctPqSent.load()
+                      << " pqRecv=" << session->_acctPqRecv.load()
+                      << " retx=" << session->_acctRetx.load()
+                      << " spurious=" << session->_acctSpurious.load();
     }
   }
 
