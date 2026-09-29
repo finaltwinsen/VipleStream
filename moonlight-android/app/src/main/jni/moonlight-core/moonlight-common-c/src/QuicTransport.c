@@ -173,6 +173,9 @@ typedef struct _QUIC_SUBFLOW {
     // LOSS_PROBATION_US 內 loss 越檻的降級 hold 減半（4s → 2s），
     // 讓 REGAIN 促升到壞路徑的停格更短。
     uint64_t lastPromotedAtUs;
+    // §MP-FAST-STALL：最近一次被標成 INACTIVE 的時刻；10 s 內不憑舊的 ICMP 探測
+    // 被當成替代路徑（M22：被黑洞的適配器因 25 s 內的探測紀錄被當成活的）。
+    uint64_t lastInactiveAtUs;
 } QUIC_SUBFLOW;
 
 typedef struct _QUIC_TRANSPORT_CTX {
@@ -2014,6 +2017,47 @@ static void quicCheckPathHealth(void) {
         bool stalled = sf->active && sf->lastRecvTime > 0 &&
                        (now - sf->lastRecvTime) > stallThreshold;
 
+        // §MP-FAST-STALL 2026-09-30：正在大量收資料的路徑（上個統計週期
+        // ≥ 1 Mbps，即載影像的那條）完全收不到 max(5×RTT, 1 s) 就算停滯，
+        // 但只在有替代路徑時才縮短——60 fps 影像斷 1 s 已是明確的斷線證據，
+        // 3 s 門檻讓 Steam Frame 斷路接手要 3.9～4.8 s。閒置／備援路徑與
+        // 單路徑維持 3 s，避免 Wi-Fi 短暫空檔誤判。
+        // 剛升級的路徑 3 s 內不套用（切換過渡期的短暫空檔不算斷線；M22 兩條
+        // 路徑因此互相判死來回切了 30 s）。
+        if (!stalled && sf->active && sf->lastRecvTime > 0 &&
+            sf->throughputMbps >= 1.0f &&
+            (sf->lastPromotedAtUs == 0 || (now - sf->lastPromotedAtUs) >= 3000000)) {
+            uint64_t fastThreshold = (uint64_t)(sf->rttMs * 5000.0f);
+            if (fastThreshold < 1000000) fastThreshold = 1000000;
+            if ((now - sf->lastRecvTime) > fastThreshold) {
+                for (int j = 0; j < g_ctx.subflowCount; j++) {
+                    QUIC_SUBFLOW* alt = &g_ctx.subflows[j];
+                    if (j == i || alt->picoquicDeleted)
+                        continue;
+                    // 替代路徑：3 s 內有收的活躍路徑，或 ICMP 探測新鮮的 standby
+                    // （含已被降成 INACTIVE 的——斷線時 §Q-MP-FAILOVER 正是升級它；
+                    // 備援路徑平常幾乎沒流量，只看收包會永遠不成立；M21 反向測試
+                    // 因此退回 3 s 規則、接手 3.55 s）。
+                    bool altAlive = (alt->active && alt->lastRecvTime > 0 &&
+                                     (now - alt->lastRecvTime) < 3000000) ||
+                        (alt->keepAsStandby && alt->lastStandbyProbeOk != 0 &&
+                         (now - alt->lastStandbyProbeOk) < 25000000 &&
+                         (alt->lastInactiveAtUs == 0 || (now - alt->lastInactiveAtUs) >= 10000000));
+                    if (altAlive) {
+                        stalled = true;
+                        if (sf->consecutiveTimeouts == 0) {
+                            Limelog("[VIPLE-MPQUIC] §MP-FAST-STALL: subflow %d (if %d) "
+                                    "carried %.1f Mbps, nothing received for %.1fs while "
+                                    "subflow %d is alive\n",
+                                    sf->id, sf->interfaceIndex, sf->throughputMbps,
+                                    (float)(now - sf->lastRecvTime) / 1e6f, alt->id);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
         // §Q-LOSS-DEMOTE (2026-07-06 凍結事故)：zombie 準則。stall 偵測
         // 只看 lastRecvTime，而 IO 迴圈收到任一 UDP 封包（含 ACK/控制面
         // 零星封包）就刷新它——「ICMP 通、UDP 大流量死」的半死鏈路永遠
@@ -2060,6 +2104,7 @@ static void quicCheckPathHealth(void) {
 
             if (sf->consecutiveTimeouts >= PROBE_TIMEOUT_THRESHOLD) {
                 sf->active = false;
+                sf->lastInactiveAtUs = now;  // §MP-FAST-STALL
                 Limelog("[VIPLE-MPQUIC] Subflow %d (if %d) marked INACTIVE "
                         "(%d consecutive timeouts, last recv %.1fs ago)\n",
                         sf->id, sf->interfaceIndex,

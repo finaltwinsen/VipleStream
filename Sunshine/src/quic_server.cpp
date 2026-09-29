@@ -875,29 +875,76 @@ namespace quic_server {
           return -1;
         };
 
-        // 1b) §MP-PROBE：選探測路徑——已驗證、未 demoted、非 backup、不是目前
-        // 影像路徑。不主動改路徑狀態：把本端 backup 改成 available 會讓連線在
-        // 十幾秒內關閉（Windows 有線 client 對照實測，HEAD 版同條件正常），backup 一律不探測。
-        {
-          int probe = -1;
-          uint64_t probeRtt = UINT64_MAX;
+        // §MP-SINGLE-AVAIL 2026-09-30：server 端只讓影像路徑是 available。picoquic
+        // 在兩條以上 available 時，影像所在（非最低 RTT）路徑的 per-path queue
+        // 會被餓死：路徑有被選中（sel 計數增加）、pacing／cwin 都放行，卻組不出
+        // 資料封包，inFlight=0、佇列一路漲（Frame M8／M12／M13／M14 與 Windows
+        // 有線對照皆重現，client 16 s 無幀後自行斷線）。新路徑本來就設 backup，
+        // 但 client 之後的 PATH_AVAILABLE 會蓋掉（誰後寫誰贏），這裡設回去。
+        // failover 期間（cnx-level queue）不動，交給既有的升級流程。
+        // 寬限：client 的 §Q-LOSS-DEMOTE 會同時送「新路徑 AVAILABLE＋舊路徑 BACKUP」，
+        // 兩個 frame 到達有先後（M16：先到的 AVAILABLE 被立刻設回 backup，client
+        // 依連線狀態做的換路被擋掉）。所以非影像路徑要持續 available ≥ 0.5 s、
+        // 期間影像路徑一直不是 backup，且距上次「非初次」換路 ≥ 3 s，才設回
+        // backup（初次選路不算：開場 client 就把所有路徑設 available，等 3 s
+        // 會餓死影像佇列約 2 s，M20 開場即觸發 §MP-SCHED-DIAG）。
+        bool videoAvail = _lastVideoPath >= 0 && _lastVideoPath < _cnx->nb_paths &&
+                          _cnx->path[_lastVideoPath] && !_cnx->path[_lastVideoPath]->path_is_backup;
+        for (int s = 0; s < 16; s++) {
+          if (!_escSnaps[s].used) continue;
+          picoquic_path_t* sp = nullptr;
+          for (int i = 0; i < _cnx->nb_paths; i++)
+            if (_cnx->path[i] && _cnx->path[i]->unique_path_id == _escSnaps[s].pathId) { sp = _cnx->path[i]; break; }
+          bool other = sp && !(_lastVideoPath >= 0 && _lastVideoPath < _cnx->nb_paths && _cnx->path[_lastVideoPath] == sp);
+          if (other && !sp->path_is_backup && videoAvail) {
+            if (_escSnaps[s].availSinceUs == 0) _escSnaps[s].availSinceUs = nowEsc;
+          } else {
+            _escSnaps[s].availSinceUs = 0;
+          }
+        }
+        if (videoAvail && !_failoverCnxQueue &&
+            (_lastPathSwitchTime == 0 || _lastSwitchWasInitial ||
+             nowEsc - _lastPathSwitchTime >= 3000000)) {
           for (int i = 0; i < _cnx->nb_paths; i++) {
             auto* p = _cnx->path[i];
-            if (i == _lastVideoPath || p == nullptr) continue;
-            if (p->path_is_demoted) continue;
-            if (!p->first_tuple || !p->first_tuple->challenge_verified) continue;
-            if (p->path_is_backup) continue;
-            if (p->smoothed_rtt < probeRtt) { probeRtt = p->smoothed_rtt; probe = i; }
+            if (i == _lastVideoPath || p == nullptr || p->path_is_backup || p->path_is_demoted) continue;
+            uint64_t since = 0;
+            for (int s = 0; s < 16; s++)
+              if (_escSnaps[s].used && _escSnaps[s].pathId == p->unique_path_id) { since = _escSnaps[s].availSinceUs; break; }
+            if (since == 0 || nowEsc - since < 500000) continue;
+            picoquic_set_path_status(_cnx, p->unique_path_id, picoquic_path_status_backup);
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §MP-SINGLE-AVAIL: path id=" << p->unique_path_id
+                            << " became available while video is on path " << _lastVideoPath
+                            << " — set back to backup";
           }
-          uint64_t newId = probe >= 0 ? _cnx->path[probe]->unique_path_id : UINT64_MAX;
-          if (newId != _probePathId) {
-            BOOST_LOG(info) << "[VIPLE-MPQUIC] §MP-PROBE: probe path "
-                            << (_probePathId == UINT64_MAX ? std::string("none") : std::to_string(_probePathId))
-                            << " -> " << (probe >= 0 ? std::to_string(newId) : std::string("none"))
-                            << (probe >= 0 ? " (rtt=" + std::to_string(probeRtt / 1000) + "ms)" : std::string());
-            _probePathId = newId;
+        }
+        // §MP-SCHED-DIAG：只在「影像路徑佇列 > 500 且 inFlight=0」（上述餓死特徵）
+        // 時印各路徑的排程計數增量，10 s 節流。
+        if (_lastVideoPath >= 0 && _lastVideoPath < _cnx->nb_paths && _cnx->path[_lastVideoPath] &&
+            _cnx->path[_lastVideoPath]->bytes_in_transit == 0 &&
+            nowEsc - _schedDiagLastUs >= 10000000) {
+          int vq = 0;
+          for (auto* f = _cnx->path[_lastVideoPath]->first_datagram; f != nullptr && vq <= 500; f = f->next_misc_frame) vq++;
+          if (vq > 500) {
+            _schedDiagLastUs = nowEsc;
+            std::string line;
+            for (int i = 0; i < _cnx->nb_paths && i < 8; i++) {
+              auto* p = _cnx->path[i];
+              if (p == nullptr) continue;
+              line += " | i" + std::to_string(i) + " id=" + std::to_string(p->unique_path_id)
+                    + " bk=" + std::to_string((int) p->path_is_backup)
+                    + " cwin=" + std::to_string(p->cwin)
+                    + " inTr=" + std::to_string(p->bytes_in_transit)
+                    + " poll=" + std::to_string(p->polled - _schedPrev[i][0])
+                    + " paced=" + std::to_string(p->paced - _schedPrev[i][1])
+                    + " cong=" + std::to_string(p->congested - _schedPrev[i][2])
+                    + " sel=" + std::to_string(p->selected - _schedPrev[i][3]);
+              _schedPrev[i][0] = p->polled; _schedPrev[i][1] = p->paced;
+              _schedPrev[i][2] = p->congested; _schedPrev[i][3] = p->selected;
+            }
+            BOOST_LOG(warning) << "[VIPLE-MPQUIC] §MP-SCHED-DIAG video path " << _lastVideoPath
+                               << " queue>500 with nothing in flight" << line;
           }
-          _probePath = probe;
         }
 
         // 2) 逃生評估
@@ -919,7 +966,7 @@ namespace quic_server {
             // 30 s 冷卻。
             // §MP-MEASURE 2026-09-30：候選必須「量得到而且確實比較好」——6 視窗
             // 至少 4 個樣本足夠、無 lossy 視窗、loss 比例 ≤ 目前路徑的一半；
-            // 樣本來自 §MP-PROBE 探測副本。backup 路徑不當候選（沒有探測樣本）。
+            // backup 路徑沒有樣本，不當候選（§MP-SINGLE-AVAIL 下目前等同停用，待 picoquic 多路徑排程修好後再開探測）。
             if (p->path_is_demoted) continue;
             if (!p->first_tuple || !p->first_tuple->challenge_verified) continue;
             if (p->path_is_backup) continue;
@@ -1018,8 +1065,11 @@ namespace quic_server {
             currentPathDead = cur->path_is_demoted || cur->path_is_backup;
           } else {
             // 鎖定期過：完整健康檢查
+            // §MP-RTO2 2026-09-30：單次 RTO 不算死（Wi-Fi 上常見，M20 因此在
+            // 適配器健康時換路＋IDR）；連續 2 次才算。真的斷線由 client 的
+            // §MP-FAST-STALL 約 1 s 偵測、PATH_BACKUP 觸發 §MP-BACKUP-FLIP。
             currentPathDead = cur->path_is_demoted ||
-                              cur->nb_retransmit > 0 ||
+                              cur->nb_retransmit >= 2 ||
                               cur->cwin == 0 ||
                               cur->path_is_backup;
           }
@@ -1207,6 +1257,7 @@ namespace quic_server {
         _videoPathLostTime = nowUsForEpisode;
       }
 
+      _lastSwitchWasInitial = (_lastVideoPath < 0);  // §MP-SINGLE-AVAIL：-2／-1 → M 不算換路
       _lastVideoPath = bestVideoPath;
       _lastPathSwitchTime = nowUsForEpisode;
       _escapeIdrLight = false;  // §Q-STICKY-ESCAPE: kind 已消費，清除
@@ -1446,15 +1497,6 @@ namespace quic_server {
         // （資料堆積在 path->first_datagram 但排程器不發送）。
         qret = picoquic_queue_datagram_frame_on_path(
             _cnx, bestVideoPath, dg.data.size(), dg.data.data());
-        // §MP-PROBE：每 16 個 video 資料報複製 1 份到探測路徑（約 6%）。只在該
-        // 路徑 per-path queue 為空時放，確保探測副本不會堆積或污染 approxVQ。
-        if (qret == 0 && _probePath >= 0 && _probePath < _cnx->nb_paths &&
-            _probePath != bestVideoPath && _cnx->path[_probePath] != nullptr &&
-            _cnx->path[_probePath]->first_datagram == nullptr &&
-            (++_probeCtr & 15u) == 0) {
-          (void) picoquic_queue_datagram_frame_on_path(
-              _cnx, _probePath, dg.data.size(), dg.data.data());
-        }
       } else {
         qret = picoquic_queue_datagram_frame(_cnx, dg.data.size(), dg.data.data());
       }

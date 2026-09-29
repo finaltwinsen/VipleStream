@@ -189,6 +189,7 @@ namespace quic_server {
     // 只延遲震盪不防止震盪 → 改為無條件 sticky。
     // _lastPathSwitchTime 僅用於 diagnostic log。
     uint64_t _lastPathSwitchTime = 0;  // picoquic_current_time() µs
+    bool _lastSwitchWasInitial = false;  // §MP-SINGLE-AVAIL：上次切換是 -2／-1 → M
 
     // §Q-RECOVERY-IDR-FIX (review batch 2)：是否曾經選定過有效 video
     // path（bestVideoPath ≥ 0）。用於區分「初始 path 選定的 -1 → 0」
@@ -242,6 +243,7 @@ namespace quic_server {
       uint32_t winPk[6] = {};    // 近 6 視窗送出封包數（估）
       uint32_t winLoss[6] = {};  // 近 6 視窗真實 loss（扣 spurious）
       uint8_t winPos = 0;
+      uint64_t availSinceUs = 0;  // §MP-SINGLE-AVAIL 寬限起點
     };
     EscSnap _escSnaps[16] {};
     uint64_t _lastEscapeEval = 0;      // 上次評估時刻（500ms 節流）
@@ -249,11 +251,8 @@ namespace quic_server {
     uint64_t _escLastCandidateId = 0;  // streak 綁定的候選 path id
     uint64_t _lastEscapeSwitch = 0;    // escape 專屬 30s 冷卻
     uint64_t _escNoCandWarn = 0;       // 「無候選」log 節流
-    // §MP-PROBE 2026-09-30：把少量 video 資料報複製到最佳替代路徑，讓它有
-    // 可比較的即時 loss/RTT 樣本（client 以 seq 去重）。-1 = 不探測。
-    int _probePath = -1;
-    uint64_t _probePathId = UINT64_MAX;
-    uint32_t _probeCtr = 0;
+    uint64_t _schedDiagLastUs = 0;      // §MP-SCHED-DIAG 節流
+    int _schedPrev[8][4] = {};
     bool _escapeIdrLight = false;      // 本輪切換使用 light IDR
 
     // §Q-ABR-FLOOR-ESCAPE (Fix C): stream.cpp ABR 執行緒設，IO 執行緒
