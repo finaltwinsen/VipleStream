@@ -541,6 +541,8 @@ int main(int argc, char *argv[])
         // 快速掃描 argv，判斷是否為純資訊查詢 + 是否為 CLI 模式
         bool isInfoOnly = false;
         bool isCliMode = false;
+        bool isXrDesktopStream = false;  // §VR M3a X5：stream --display-target xr-desktop
+        bool isStream = false;
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0 ||
                 strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
@@ -550,7 +552,15 @@ int main(int argc, char *argv[])
                 strcmp(argv[i], "list") == 0 || strcmp(argv[i], "quit") == 0) {
                 isCliMode = true;
             }
+            if (strcmp(argv[i], "stream") == 0) {
+                isStream = true;
+            }
+            if ((strcmp(argv[i], "--display-target") == 0 && i + 1 < argc && strcmp(argv[i + 1], "xr-desktop") == 0) ||
+                strcmp(argv[i], "--display-target=xr-desktop") == 0) {
+                isXrDesktopStream = true;
+            }
         }
+        isXrDesktopStream = isXrDesktopStream && isStream;
 
         // §SF-PROBE（M2a R1）：xr-probe／v4l2-probe／decode-bench 在下面（log 就緒後、
         // QGuiApplication 之前）以 QCoreApplication 派發。它們不串流、不開視窗，Frame 上
@@ -564,7 +574,10 @@ int main(int argc, char *argv[])
         // 只在「純資訊查詢、沒有視窗環境、使用者也沒指定 QT_QPA_PLATFORM」時改用 offscreen；
         // 有桌面的情況與一般 GUI／串流啟動完全不變。AppImage 由 build-appimage-native.sh
         // 額外帶 libqoffscreen.so。
-        if (isInfoOnly && s_ProbeAction == nullptr &&
+        // §VR M3a X5：XR 虛擬螢幕的無頭串流（沒有 Wayland／X11，例如 Frame 上經 SSH 或以 OpenXR app
+        // 直接啟動）同樣不能讓 EGLFS 去搶 DRM master——影像全在 XR 裡，Qt 用 offscreen 即可
+        // （SDL 端由 session.cpp 在 video init 前選 offscreen driver）。
+        if ((isInfoOnly || isXrDesktopStream) && s_ProbeAction == nullptr &&
                 !qEnvironmentVariableIsSet("QT_QPA_PLATFORM") &&
                 !WMUtils::isRunningWindowManager()) {
             qputenv("QT_QPA_PLATFORM", "offscreen");

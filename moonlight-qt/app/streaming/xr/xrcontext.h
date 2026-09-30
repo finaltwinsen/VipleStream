@@ -34,6 +34,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -72,7 +73,20 @@ public:
         XrInputSink inputSink;
         // X4（dev）：合成射線（不讀控制器），驗證求交→濾波→事件→Li* 路徑
         bool testPointer = false;
+        // X5：session 不是因 shutdown() 而結束時，frame thread 結束前呼叫一次（只推事件，不可阻塞）。
+        // reason：kEndedLoss（LOSS_PENDING／instance loss／SESSION_LOST／INSTANCE_LOST）或
+        // kEndedExit（runtime 發起的 EXITING，例如使用者關掉 SteamVR）。
+        std::function<void(int reason)> onEnded;
+        // X5（dev）失敗注入：testFailBringUp＝bringUp 直接失敗；testFailAfterSec>0＝bring-up 後 N 秒
+        // 模擬 testFailKind（kEndedLoss：不經 runtime 直接當 LOSS_PENDING；kEndedExit：
+        // xrRequestExitSession 後把 runtime 的正常結束當成 runtime 發起的 EXITING）
+        bool testFailBringUp = false;
+        int testFailAfterSec = 0;
+        int testFailKind = 0;
     };
+
+    static constexpr int kEndedLoss = 1;
+    static constexpr int kEndedExit = 2;
 
     struct Stats {
         uint64_t frames = 0;          // xrEndFrame 成功次數
@@ -194,6 +208,8 @@ private:
     std::vector<uint32_t> m_XrCpuUs;      // 本視窗 XR thread 每幀 CPU 時間（xrWaitFrame 返回→xrEndFrame 返回）
     uint64_t m_BringUpNs = 0;
     bool m_TestRecenterDone = false;
+    bool m_TestFailFired = false;          // X5（dev）
+    std::atomic<bool> m_SimExit{false};    // X5（dev）：模擬的 runtime EXITING
     int m_MissEventsLogged = 0;
     uint64_t m_DiagWaitNs = 0, m_DiagLockNs = 0, m_DiagBeginNs = 0, m_DiagEndNs = 0;  // X3 漏幀診斷
     XrVersion m_ApiVersion = 0;

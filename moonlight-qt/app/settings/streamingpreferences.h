@@ -429,6 +429,7 @@ public:
     int xrTestStallMs = 0;           // dev（M3a X3）：第一幀 20 s 後丟 N ms 影像幀，驗 stale 轉換，不存設定
     int xrTestRecenterSec = 0;       // dev（M3a X3）：bring-up 後第 N 秒自動 recenter 一次，不存設定
     bool xrTestPointer = false;       // §VR M3a X4（dev）：--xr-test-pointer，不寫入設定
+    QString xrTestFail;               // §VR M3a X5（dev）：--xr-test-fail bringup|loss|loss3|exit，不寫入設定
 
 signals:
     void displayModeChanged();

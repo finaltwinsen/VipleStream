@@ -316,6 +316,15 @@ private:
     XrContext* m_XrContext = nullptr;
     void setupXrDesktop();
     void destroyXrContext();
+    // §VR M3a X5：XR 生命週期（LOSS 重建 ≤3 次、runtime EXITING 退回平面）
+    bool createXrContext(bool isRebuild, QString* error);
+    void handleXrEnded(int reason);
+    void handleXrRebuild(uint32_t generation);
+    void scheduleXrRebuild();
+    void requestDecoderRecreate();
+    int m_XrRebuildAttempt = 0;
+    uint32_t m_XrRebuildGeneration = 0;
+    SDL_TimerID m_XrRebuildTimer = 0;
     ScHidPassthrough m_ScHid;
     int m_MouseEmulationRefCount;
     int m_FlushingWindowEventsRef;

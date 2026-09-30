@@ -719,6 +719,15 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-XR] xr-desktop unavailable (<原因>) - falling back to the flat window   ← 不變式 5：/launch 前失敗退回平面
 [VIPLE-XR] xr-desktop requested but this build has no OpenXR - falling back …
 [VIPLE-XR] session did not reach STOPPING within 3 s; forcing frame thread stop
+[VIPLE-XR] session ended by the runtime: loss|exit                     ← X5：非 shutdown() 的結束（LOSS_PENDING／instance loss／SESSION_LOST，或 runtime 發起的 EXITING）
+[VIPLE-XR] XR session lost - rebuilding (up to 3 attempts); video paused
+[VIPLE-XR] XR session rebuilt (attempt n/3)                            ← 之後 Recreating renderer by internal request（decoder 重建、要 IDR）
+[VIPLE-XR] XR rebuild attempt n/3 failed: <原因>                        ← 退避 0.5／1／2 s
+[VIPLE-XR] giving up on XR after 3 attempts - falling back to the flat window
+[VIPLE-XR] runtime ended the XR session (EXITING) - continuing in the flat window
+[VIPLE-XR] xrWaitFrame: <XrResult> - treating as session loss
+[VIPLE-XR] no Wayland/X11 display - using the SDL offscreen video driver   ← Linux 無頭；VAAPI 另印 `VAAPI: offscreen video driver - using a DRM render node display`
+[VIPLE-XR] test: simulating LOSS_PENDING|a runtime-initiated exit (--xr-test-fail)   ← dev
 [VIPLE-XR] destroyed
 ```
 

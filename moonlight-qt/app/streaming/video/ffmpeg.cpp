@@ -901,8 +901,12 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     // Don't bother initializing Pacer if we're not actually going to render
     if (testMode != TestMode::TestFrameOnly) {
         m_Pacer = new Pacer(m_FrontendRenderer, &m_ActiveWndVideoStats);
+        // §VR M3a X5（設計 §2.4 ⑥）：XR 模式的顯示節拍由 XR frame thread 決定，Pacer 只轉交幀、
+        // 不取視窗的 vsync 來源（無頭 offscreen 時也取不到，舊寫法會讓整組 renderer 初始化失敗）
+        const bool xrPacingOff = params->xr != nullptr;
         if (!m_Pacer->initialize(params->window, params->frameRate,
-                                 params->enableFramePacing || (params->enableVsync && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING)))) {
+                                 !xrPacingOff &&
+                                 (params->enableFramePacing || (params->enableVsync && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING))))) {
             return false;
         }
     }

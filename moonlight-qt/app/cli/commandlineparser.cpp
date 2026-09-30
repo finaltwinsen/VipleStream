@@ -579,6 +579,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("xr-test-stall-ms", "(dev) drop video frames for N ms starting 20 s after the first XR frame (stale-state test)");
     parser.addValueOption("xr-test-recenter-sec", "(dev) recenter the XR screen once N seconds after XR bring-up");
     parser.addFlagOption("xr-test-pointer", "(dev) synthetic XR pointer ray (4 s circle, trigger click at the top) instead of the controllers");
+    parser.addChoiceOption("xr-test-fail", "(dev) XR failure injection: bringup (fail before /launch), loss (LOSS_PENDING 15 s in, rebuild succeeds), loss3 (loss, all rebuilds fail -> flat), exit (runtime exit 15 s in -> flat)",
+                           {"bringup", "loss", "loss3", "exit"});
     parser.addFlagOption("vr-emulate", "synthetic head/controller pose for PCVR (no XR runtime needed)");
     parser.addChoiceOption("vr-synthetic-motion", "synthetic pose motion for --vr-emulate",
                            {"still", "sine", "yaw30"});
@@ -809,6 +811,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
     if (parser.isSet("xr-test-pointer")) {
         preferences->xrTestPointer = true;
+    }
+    if (parser.isSet("xr-test-fail")) {
+        preferences->xrTestFail = parser.getChoiceOptionValue("xr-test-fail").toLower();
     }
 #ifndef HAVE_OPENXR
     if (preferences->displayTarget == StreamingPreferences::DT_XR_DESKTOP) {

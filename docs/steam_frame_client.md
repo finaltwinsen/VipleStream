@@ -876,3 +876,90 @@ PoC-F 用同一個 `xr-probe` 回答後半。）做法是 `<builder>` 上隔離�
 觀察（非 M2a 回歸，G-α 時留意）：`<builder>` 的 Flatpak 串流 10 次中有 2 次 `serverinfo` 5 秒逾時、1 次卡在解碼器探測
 （headless compositor 下），重跑即正常。兩種 arch 都裝在同一台時，`flatpak run` 不帶 `--arch` 可能挑到 aarch64（在 qemu 下跑），
 測試一律明寫 `--arch`。
+
+## 8. β：XR 虛擬螢幕（M3a）
+
+`--display-target xr-desktop`：client 自己開 OpenXR session，把串流畫面畫在前方的虛擬螢幕上，控制器射線當滑鼠。
+程式碼在 `app/streaming/xr/`（XrContext、XrVideo、xrdesktopscreen、xrinput）與
+`app/streaming/video/ffmpeg-renderers/xrrenderer.*`，只在 `CONFIG+=openxr` 建置（Flatpak 兩種 arch 一律帶；
+Windows 本機 `build_moonlight.cmd --openxr`）。log tag：`[VIPLE-XR]`、`[VIPLE-XR-INPUT]`（`docs/log_tags.md`）。
+
+### 8.1 架構
+
+```
+startConnectionAsync 開頭（/launch 與 relay 之前）：XrContext bring-up（5 s）
+  失敗 → 退回平面（不變式 5）
+XR frame thread（XrContext 擁有）：xrWaitFrame／BeginFrame／EndFrame、送 layer（影像 quad 或 cylinder、
+  狀態條、指標）、xrSyncActions→射線求交→SDL_USEREVENT→main thread→Li*Mouse*
+decoder thread → XrRenderer::renderFrame：只放 mailbox（latest wins）
+影像 render thread（XrVideo）：pl_vulkan_import 共用 XrContext 的 VkDevice，pl_map_avframe_ex→render→release；
+  XR thread 只送最後 release 的影像（＝最後一幀複本，decoder 重建時不動）
+```
+
+- 擺放：第一次 FOCUSED 依頭部水平朝向擺在正前方 1.5 m、寬 60°；Ctrl+Alt+Shift+R recenter。runtime 有
+  `XR_KHR_composition_layer_cylinder` 就用 cylinder（SteamVR 沒有，走 quad）。
+- stale：1 s 沒新幀疊狀態條、5 s 改顯示 loading。
+- 輸入：trigger 左鍵、squeeze 或 B 右鍵、搖桿 Y 捲動；XR FOCUSED 期間忽略平面視窗滑鼠（鍵盤照常）；失去
+  FOCUSED 放開全部。
+- 生命週期（X5）：runtime 失效（LOSS_PENDING、instance loss、`xrWaitFrame` 回 SESSION_LOST／INSTANCE_LOST）
+  → 刪 decoder、拆 XrContext、以 0.5／1／2 s 退避重建最多 3 次，之後經 `SDL_RENDER_DEVICE_RESET` 重建 decoder
+  （有新 context 接回 XR，沒有就平面）；runtime 發起的 EXITING（例如使用者關掉 SteamVR）→ 不重建、直接平面，
+  串流不中斷。PCVR 的「VR session 後失敗送 /cancel」留到 M4a。
+- 無頭（Linux 沒有 Wayland／X11，例如經 SSH 或 Steam 以 OpenXR app 直接啟動）：Qt 用 offscreen（不讓 EGLFS
+  搶 DRM master）、SDL 用 offscreen driver、VAAPI 改開 DRM render node、XR 模式不用 Pacer 節拍。
+
+### 8.2 CLI
+
+```bash
+VipleStream stream <host> Desktop --display-target xr-desktop
+# dev（不寫入設定）：
+#   --xr-runtime-json <path>   行程內指定 OpenXR runtime manifest
+#   --xr-dump-frame <path>     第 300 幀影像 quad 讀回 PNG（最長邊 ≤ 1280）
+#   --xr-test-stall-ms N       第一幀 20 s 後丟 N ms 影像（驗 stale）
+#   --xr-test-recenter-sec N   bring-up 後 N 秒 recenter
+#   --xr-test-pointer          合成射線（4 s 一圈、圓頂按 trigger）
+#   --xr-test-fail bringup|loss|loss3|exit   失敗注入（見 8.4）
+VipleStream xr-probe --session [--duration N] [--xr-runtime-json <path>]   # session 與 frame loop 量測
+VipleStream xr-probe --selftest-ray                                         # 射線求交自測
+```
+
+### 8.3 模擬環境
+
+| 代號 | 環境 | 腳本（dev-only） |
+|---|---|---|
+| S1 | `<builder>` 上無頭 Monado（null compositor＋模擬 HMD），client 用 x86_64 dev Flatpak | `moonlight-qt/scripts/xr-s1-monado.sh [--stream <host>]` |
+| S2 | `<dev-client>`（Windows）SteamVR null driver，client 用 `build_moonlight.cmd --openxr` | `moonlight-qt/scripts/xr-s2-steamvr-null.ps1 -Mode on|start|off` |
+
+- S1：腳本把主機的 Monado OpenXR client（`libopenxr_monado.so`＋`libcjson.so.1`）與一份 runtime JSON 放到
+  `~/.var/app/<app-id>/data/xr-s1/`，`flatpak run` 只在測試時加 `--filesystem=xdg-run/monado_comp_ipc` 與
+  `LD_LIBRARY_PATH`（不改 finish-args）。Monado 25 client 最高需要 GLIBC_2.38，KDE runtime 6.11 是 2.42。
+  monado-service 會 epoll 監看 stdin，`< /dev/null` 起不來，腳本用一條不結束的 pipe。null compositor 固定
+  20 Hz（`XRT_COMPOSITOR_DEFAULT_FRAMERATE` 對它無效）。兩種 arch 都裝時一律寫 `--arch`、`//dev`。
+- S2：OpenXR app 只會拉起 vrserver，要先 `-Mode start` 完整啟動 SteamVR；null HMD 不動會進 standby、沒有控制器時
+  dashboard 搶焦點，`-Mode on` 一併關掉。系統的 OpenXR active runtime 不改（用 `--xr-runtime-json` 指 SteamVR），
+  SteamVR 會跳「未設為預設 runtime」通知，不影響，不要按。
+
+### 8.4 驗證紀錄（2026-09-30）
+
+| 項目 | S2（Windows SteamVR null、軟解） | S1（Monado 無頭、VAAPI） |
+|---|---|---|
+| session | FOCUSED、30 s 4109 幀 0% miss、90 Hz | FOCUSED、30 s 601 幀 0% miss、20 Hz、bring-up 110～130 ms |
+| 影像進 XR（1080p60） | 每 10 s 畫出 581～589 幀、XR thread cpu p95 0.8 ms | 每 10 s 畫出 582～591 幀、render thread cpu p50 8.2 ms |
+| 讀回畫面 | 內容正確 | 內容正確（底色比 S2 略亮，待查） |
+| 射線滑鼠（合成） | 命中 99.9～100%，host 游標到位；selftest 12/12 | — |
+| 失敗注入 bringup | 退回平面，串流持續 | — |
+| 失敗注入 loss | 0.5 s 後重建成功（bring-up 608 ms），影像接回 XR | — |
+| 失敗注入 loss3 | 3 次重建（0.5／1／2 s）全失敗 → 平面 | — |
+| 失敗注入 exit | FOCUSED→…→EXITING → 平面，不重建 | — |
+| 正常結束 | EXITING → destroyed，rc 0，不觸發重建 | — |
+| 無頭（offscreen） | 不適用 | Qt offscreen、SDL offscreen、VAAPI DRM render node |
+
+### 8.5 已知限制與待辦
+
+- Frame 控制器專屬綁定（`XR_VALVE_frame_controller_interaction`）目前被 SteamVR 以 PATH_UNSUPPORTED 拒絕，
+  元件路徑待查；Frame 上先靠 Touch／Index profile＋SteamVR 重對映（待實機確認）。
+- Windows 硬解（D3D11VA）在 XR 模式會退到 PlVk 自建 Vulkan device，開場讓 SteamVR compositor 停頓（漏幀約 5%）；
+  需讓硬解共用 XrContext 的 VkDevice。Frame 用 DrmRenderer，不受影響。
+- 自繪虛擬鍵盤未做（藍牙鍵盤可用）。
+- PoC-2b（β 的啟動形態：overlay 內子行程、同行程切換、Steam 直接以 OpenXR app 啟動）與 G-β 要在 Frame 實機做；
+  在 Frame 上跑任何 XR 程式前要先通知使用者（曾讓 Frame 的 SteamVR 重啟）。

@@ -17,6 +17,7 @@
 
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 
 VAAPIRenderer::VAAPIRenderer(int decoderSelectionPass)
     : IFFmpegRenderer(RendererType::VAAPI),
@@ -95,6 +96,32 @@ VAAPIRenderer::openDisplay(SDL_Window* window)
     SDL_VERSION(&info.version);
 
     if (!SDL_GetWindowWMInfo(window, &info)) {
+#ifdef HAVE_LIBVA_DRM
+        // §VR M3a X5：XR 無頭（沒有 Wayland／X11，session 選了 SDL offscreen driver）沒有視窗系統，
+        // VAAPI 直接開 DRM render node；影像只交給 XrRenderer，不會直接畫到視窗。
+        const char* videoDriver = SDL_GetCurrentVideoDriver();
+        if (videoDriver != nullptr && SDL_strcmp(videoDriver, "offscreen") == 0) {
+            if (m_DrmFd < 0) {
+                m_DrmFd = StreamUtils::getDrmFd(true);
+                if (m_DrmFd < 0) {
+                    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                 "Failed to open DRM render node for VAAPI (offscreen): %d",
+                                 errno);
+                    return nullptr;
+                }
+            }
+            m_WindowSystem = SDL_SYSWM_UNKNOWN;
+            display = vaGetDisplayDRM(m_DrmFd);
+            if (display == nullptr) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "Unable to open DRM display for VAAPI (offscreen)");
+                return nullptr;
+            }
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "VAAPI: offscreen video driver - using a DRM render node display");
+            return display;
+        }
+#endif
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_GetWindowWMInfo() failed: %s",
                      SDL_GetError());

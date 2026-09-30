@@ -230,6 +230,10 @@ static int inputStallWatchdogProc(void*)
 #define SDL_CODE_XR_POINTER 108  // data1＝(u16 << 16) | v16
 #define SDL_CODE_XR_BUTTON 109   // data1＝Limelight BUTTON_*、data2＝1 按下／0 放開
 #define SDL_CODE_XR_SCROLL 110   // data1＝高解析捲動量（intptr_t）
+// §VR M3a X5：XR session 被 runtime 結束（data1＝XrContext::kEndedLoss／kEndedExit）；
+// 重建計時到期（data1＝generation，過期的忽略）
+#define SDL_CODE_XR_ENDED 111
+#define SDL_CODE_XR_REBUILD 112
 
 #include <openssl/rand.h>
 #include <algorithm>
@@ -1107,6 +1111,18 @@ bool Session::initialize(QQuickWindow* qtWindow)
         // https://github.com/moonlight-stream/moonlight-qt/issues/1211
         // https://github.com/moonlight-stream/moonlight-qt/issues/1218
         SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, shouldUseFullScreenSpaces ? "1" : "0");
+    }
+#endif
+
+#if defined(Q_OS_LINUX) && defined(HAVE_OPENXR)
+    // §VR M3a X5（設計 §2.4 ②）：XR 模式且沒有 Wayland／X11 顯示（例如 Frame 上從 SSH 啟動，
+    // 或 Steam 以 OpenXR app 直接啟動）時改用 SDL offscreen driver，影像全在 XR 裡。
+    if (m_Preferences->displayTarget == StreamingPreferences::DT_XR_DESKTOP &&
+        qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") && qEnvironmentVariableIsEmpty("DISPLAY")) {
+        qputenv("SDL_VIDEODRIVER", "offscreen");
+        qputenv("SDL_VIDEO_DRIVER", "offscreen");
+        SDL_SetHintWithPriority("SDL_VIDEODRIVER", "offscreen", SDL_HINT_OVERRIDE);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] no Wayland/X11 display - using the SDL offscreen video driver");
     }
 #endif
 
@@ -2369,11 +2385,49 @@ void Session::setupXrDesktop()
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev override: XR_RUNTIME_JSON=%s (in-process)",
                     qUtf8Printable(m_Preferences->xrRuntimeJsonPath));
     }
+    m_XrRebuildAttempt = 0;
+    QString err;
+    if (!createXrContext(false, &err)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] xr-desktop unavailable (%s) - falling back to the flat window (invariant 5)",
+                    qUtf8Printable(err));
+        return;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-XR] xr-desktop session running (video path %s)",
+                m_XrContext->video() != nullptr ? "ready" : "unavailable - video stays in the flat window");
+#else
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-XR] xr-desktop requested but this build has no OpenXR - falling back to the flat window");
+#endif
+}
+
+// §VR M3a X5：建立並 bring-up XrContext（首次與 LOSS 後重建共用）。失敗時 m_XrContext 維持 nullptr。
+bool Session::createXrContext(bool isRebuild, QString* error)
+{
+#ifdef HAVE_OPENXR
     XrContext::Options xo;
-    xo.dumpFramePath = m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
-    xo.testStallMs = m_Preferences->xrTestStallMs;       // dev：--xr-test-stall-ms
-    xo.testRecenterSec = m_Preferences->xrTestRecenterSec;  // dev：--xr-test-recenter-sec
-    xo.testPointer = m_Preferences->xrTestPointer;          // dev：--xr-test-pointer
+    xo.dumpFramePath = isRebuild ? QString() : m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
+    xo.testStallMs = isRebuild ? 0 : m_Preferences->xrTestStallMs;             // dev：--xr-test-stall-ms
+    xo.testRecenterSec = isRebuild ? 0 : m_Preferences->xrTestRecenterSec;     // dev：--xr-test-recenter-sec
+    xo.testPointer = m_Preferences->xrTestPointer;                              // dev：--xr-test-pointer
+    // X5（dev）：--xr-test-fail。首次：bringup＝直接失敗；loss／loss3／exit＝15 s 後模擬。
+    // 重建：loss3＝每次都失敗（驗 3 次後退回平面）；loss＝重建成功且不再注入。
+    const QString& tf = m_Preferences->xrTestFail;
+    if (!isRebuild) {
+        xo.testFailBringUp = (tf == QLatin1String("bringup"));
+        if (tf == QLatin1String("loss") || tf == QLatin1String("loss3")) {
+            xo.testFailAfterSec = 15;
+            xo.testFailKind = XrContext::kEndedLoss;
+        }
+        else if (tf == QLatin1String("exit")) {
+            xo.testFailAfterSec = 15;
+            xo.testFailKind = XrContext::kEndedExit;
+        }
+    }
+    else {
+        xo.testFailBringUp = (tf == QLatin1String("loss3"));
+    }
     // X4：射線滑鼠事件從 XR frame thread 推到 main loop（SDL_PushEvent 可跨執行緒）
     xo.inputSink.pointer = [](float u, float v) {
         const uint32_t u16 = (uint32_t)(std::clamp(u, 0.0f, 1.0f) * 65535.0f + 0.5f);
@@ -2399,23 +2453,106 @@ void Session::setupXrDesktop()
         ev.user.data1 = (void*)(intptr_t)amount;
         SDL_PushEvent(&ev);
     };
+    // X5：runtime 結束 session（frame thread 呼叫，只推事件）
+    xo.onEnded = [](int reason) {
+        SDL_Event ev = {};
+        ev.type = SDL_USEREVENT;
+        ev.user.code = SDL_CODE_XR_ENDED;
+        ev.user.data1 = (void*)(intptr_t)reason;
+        SDL_PushEvent(&ev);
+    };
     m_XrContext = new XrContext(xo);
-    QString err;
-    if (!m_XrContext->bringUp(5000, &err)) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-XR] xr-desktop unavailable (%s) - falling back to the flat window (invariant 5)",
-                    qUtf8Printable(err));
+    // 首次在 /launch 前（設計 §2.4 ①）逾時 5 s；重建在 main thread，也用 5 s
+    if (!m_XrContext->bringUp(5000, error)) {
         delete m_XrContext;
         m_XrContext = nullptr;
+        return false;
+    }
+    return true;
+#else
+    Q_UNUSED(isRebuild);
+    if (error) *error = QStringLiteral("no OpenXR in this build");
+    return false;
+#endif
+}
+
+// §VR M3a X5：XR session 被 runtime 結束。decoder 綁著舊 XrContext 的 XrVideo，先刪 decoder
+// 再拆 XrContext；之後一律經 SDL_RENDER_DEVICE_RESET 走既有的 decoder 重建流程（有 m_XrContext
+// 就接回 XR，沒有就是平面）——重建 decoder 本來就需要 IDR，這條路徑已經過大量實戰；改成把
+// XrRenderer 掛到新 context 則要處理舊 XrVideo 內 in-flight 幀的所有權，風險較高。
+// PCVR（DT_PCVR）：VR session 建立後的 XR 失敗應送 /cancel 並顯示錯誤（不變式 5），M4a 接 PCVR XR 時做。
+void Session::handleXrEnded(int reason)
+{
+#ifdef HAVE_OPENXR
+    if (m_XrContext == nullptr) {
         return;
     }
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-XR] xr-desktop session running (video path %s)",
-                m_XrContext->video() != nullptr ? "ready" : "unavailable - video stays in the flat window");
-#else
+    SDL_LockMutex(m_DecoderLock);
+    delete m_VideoDecoder;
+    m_VideoDecoder = nullptr;
+    SDL_UnlockMutex(m_DecoderLock);
+    destroyXrContext();
+
+    if (reason == XrContext::kEndedExit) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] runtime ended the XR session (EXITING) - continuing in the flat window");
+        requestDecoderRecreate();
+        return;
+    }
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-XR] xr-desktop requested but this build has no OpenXR - falling back to the flat window");
+                "[VIPLE-XR] XR session lost - rebuilding (up to 3 attempts); video paused");
+    m_XrRebuildAttempt = 0;
+    scheduleXrRebuild();
+#else
+    Q_UNUSED(reason);
 #endif
+}
+
+void Session::scheduleXrRebuild()
+{
+    // 退避 0.5／1／2 s；generation 讓 session 結束或被取代後的舊計時事件失效
+    const uint32_t delayMs = 500u << (std::min)(m_XrRebuildAttempt, 2);
+    const uint32_t gen = ++m_XrRebuildGeneration;
+    m_XrRebuildTimer = SDL_AddTimer(delayMs, [](Uint32, void* param) -> Uint32 {
+        SDL_Event ev = {};
+        ev.type = SDL_USEREVENT;
+        ev.user.code = SDL_CODE_XR_REBUILD;
+        ev.user.data1 = param;
+        SDL_PushEvent(&ev);
+        return 0;  // 一次性
+    }, (void*)(uintptr_t)gen);
+}
+
+void Session::handleXrRebuild(uint32_t generation)
+{
+    if (generation != m_XrRebuildGeneration || m_XrContext != nullptr) {
+        return;  // 過期或已有 context
+    }
+    m_XrRebuildTimer = 0;
+    m_XrRebuildAttempt++;
+    QString err;
+    if (createXrContext(true, &err)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] XR session rebuilt (attempt %d/3)", m_XrRebuildAttempt);
+        requestDecoderRecreate();
+        return;
+    }
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] XR rebuild attempt %d/3 failed: %s",
+                m_XrRebuildAttempt, qUtf8Printable(err));
+    if (m_XrRebuildAttempt < 3) {
+        scheduleXrRebuild();
+        return;
+    }
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-XR] giving up on XR after 3 attempts - falling back to the flat window");
+    requestDecoderRecreate();
+}
+
+void Session::requestDecoderRecreate()
+{
+    // 走既有的 SDL_RENDER_DEVICE_RESET：刪舊 decoder、依 m_XrContext 重選 frontend、要 IDR
+    SDL_Event ev = {};
+    ev.type = SDL_RENDER_DEVICE_RESET;
+    SDL_PushEvent(&ev);
 }
 
 bool Session::xrOwnsMouse() const
@@ -2440,6 +2577,12 @@ void Session::xrRecenter()
 
 void Session::destroyXrContext()
 {
+    // §VR M3a X5：取消尚未觸發的重建計時，並讓已排隊的 SDL_CODE_XR_REBUILD 失效
+    if (m_XrRebuildTimer != 0) {
+        SDL_RemoveTimer(m_XrRebuildTimer);
+        m_XrRebuildTimer = 0;
+    }
+    m_XrRebuildGeneration++;
 #ifdef HAVE_OPENXR
     if (m_XrContext != nullptr) {
         m_XrContext->shutdown();
@@ -3507,6 +3650,12 @@ void Session::exec()
                 break;
             case SDL_CODE_XR_SCROLL:
                 m_InputHandler->handleXrScroll((int)(intptr_t)event.user.data1);
+                break;
+            case SDL_CODE_XR_ENDED:
+                handleXrEnded((int)(intptr_t)event.user.data1);
+                break;
+            case SDL_CODE_XR_REBUILD:
+                handleXrRebuild((uint32_t)(uintptr_t)event.user.data1);
                 break;
             case SDL_CODE_VR_MESSAGE:
                 handleVrMessage((const uint8_t*)event.user.data2, (int)(uintptr_t)event.user.data1);

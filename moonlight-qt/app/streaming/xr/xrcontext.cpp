@@ -233,6 +233,13 @@ const char* XrContext::sessionStateName(int state)
 
 bool XrContext::bringUp(int timeoutMs, QString* error)
 {
+    if (m_Options.testFailBringUp) {
+        // X5（dev）：--xr-test-fail bringup／loss3 的重建嘗試
+        const QString err = QStringLiteral("test injection (--xr-test-fail)");
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] bring-up failed: %s", qUtf8Printable(err));
+        if (error) *error = err;
+        return false;
+    }
     shutdown();  // 重入：清掉前一次
 
     QString err;
@@ -274,6 +281,8 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     m_WarmupEndNs = steadyNowNs() + 2000000000ull;
     m_BringUpNs = steadyNowNs();
     m_TestRecenterDone = false;
+    m_TestFailFired = false;
+    m_SimExit.store(false);
     m_MissEventsLogged = 0;
     m_QuadReady = false;
     m_StatusReady = false;
@@ -1066,7 +1075,26 @@ void XrContext::frameThreadMain()
         if (!pollEvents()) {
             break;  // EXITING／LOSS_PENDING／instance loss
         }
+        // X5（dev）：--xr-test-fail loss／loss3／exit
+        if (m_Options.testFailAfterSec > 0 && !m_TestFailFired &&
+            steadyNowNs() - m_BringUpNs > static_cast<uint64_t>(m_Options.testFailAfterSec) * 1000000000ull) {
+            m_TestFailFired = true;
+            if (m_Options.testFailKind == kEndedLoss) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] test: simulating LOSS_PENDING (--xr-test-fail)");
+                m_Lost.store(true);
+                break;
+            }
+            if (m_Options.testFailKind == kEndedExit && m_SessionBegun.load()) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] test: simulating a runtime-initiated exit (--xr-test-fail)");
+                m_SimExit.store(true);
+                xrRequestExitSession(m_Session);
+            }
+        }
         const int state = m_State.load();
+        if (m_SimExit.load() && !m_SessionBegun.load() &&
+            (state == XR_SESSION_STATE_IDLE || state == XR_SESSION_STATE_EXITING)) {
+            break;
+        }
         if (exitRequested && !m_SessionBegun.load() &&
             (state == XR_SESSION_STATE_IDLE || state == XR_SESSION_STATE_EXITING)) {
             break;
@@ -1097,6 +1125,13 @@ void XrContext::frameThreadMain()
         const uint64_t tw0 = steadyNowNs();
         const XrResult wr = xrWaitFrame(m_Session, &wi, &fs);
         m_DiagWaitNs = steadyNowNs() - tw0;
+        if (wr == XR_ERROR_SESSION_LOST || wr == XR_ERROR_INSTANCE_LOST) {
+            // X5：runtime 已失效（例如 SteamVR 崩潰）——與 LOSS_PENDING 同樣處理
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] xrWaitFrame: %s - treating as session loss",
+                        qUtf8Printable(xrResultStr(m_Instance, wr)));
+            m_Lost.store(true);
+            break;
+        }
         if (XR_FAILED(wr)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
@@ -1368,6 +1403,24 @@ void XrContext::frameThreadMain()
                 static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.missed), s.missPercent(),
                 static_cast<unsigned long long>(s.warmupMissed),
                 sessionStateName(s.highestState), sessionStateName(s.currentState), m_Lost.load() ? 1 : 0);
+
+    // X5：不是 shutdown() 要求的結束 → 通知 Session（β：重建或退回平面）
+    if (!m_ExitRequested.load() && !m_StopRequested.load()) {
+        int reason = 0;
+        if (m_Lost.load()) {
+            reason = kEndedLoss;
+        }
+        else if (m_SimExit.load() || m_State.load() == XR_SESSION_STATE_EXITING) {
+            reason = kEndedExit;
+        }
+        if (reason != 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] session ended by the runtime: %s",
+                        reason == kEndedLoss ? "loss" : "exit");
+            if (m_Options.onEnded) {
+                m_Options.onEnded(reason);
+            }
+        }
+    }
     m_FrameThreadRunning.store(false, std::memory_order_release);
 }
 
