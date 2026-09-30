@@ -576,6 +576,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addChoiceOption("display-target", "display target", {"window", "xr-desktop", "pcvr"});
     parser.addValueOption("xr-runtime-json", "(dev) OpenXR runtime manifest for --display-target xr-desktop (in-process only)");
     parser.addValueOption("xr-dump-frame", "(dev) save the 300th XR video frame as PNG (longest side <= 1280) for --display-target xr-desktop");
+    parser.addValueOption("xr-test-stall-ms", "(dev) drop video frames for N ms starting 20 s after the first XR frame (stale-state test)");
+    parser.addValueOption("xr-test-recenter-sec", "(dev) recenter the XR screen once N seconds after XR bring-up");
     parser.addFlagOption("vr-emulate", "synthetic head/controller pose for PCVR (no XR runtime needed)");
     parser.addChoiceOption("vr-synthetic-motion", "synthetic pose motion for --vr-emulate",
                            {"still", "sine", "yaw30"});
@@ -787,6 +789,22 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError("xr-dump-frame requires a file path");
         }
         preferences->xrDumpFramePath = QFileInfo(path).absoluteFilePath();
+    }
+    if (parser.isSet("xr-test-stall-ms")) {
+        bool ok = false;
+        const int v = parser.value("xr-test-stall-ms").toInt(&ok);
+        if (!ok || v < 0 || v > 600000) {
+            parser.showError("xr-test-stall-ms must be 0..600000");
+        }
+        preferences->xrTestStallMs = v;
+    }
+    if (parser.isSet("xr-test-recenter-sec")) {
+        bool ok = false;
+        const int v = parser.value("xr-test-recenter-sec").toInt(&ok);
+        if (!ok || v < 0 || v > 3600) {
+            parser.showError("xr-test-recenter-sec must be 0..3600");
+        }
+        preferences->xrTestRecenterSec = v;
     }
 #ifndef HAVE_OPENXR
     if (preferences->displayTarget == StreamingPreferences::DT_XR_DESKTOP) {

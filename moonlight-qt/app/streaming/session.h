@@ -195,6 +195,9 @@ private:
     void toggleFullscreen();
     void toggleFRUC();
 
+    // §VR M3a X3：XR 虛擬螢幕重新置中（熱鍵 Ctrl+Alt+Shift+R／SDL_CODE_XR_RECENTER）
+    void xrRecenter();
+
     // §N.6 (v1.4.103) — in-session cancel current file transfer (Ctrl+Alt+Shift+T).
     // Web UI 重新整理 / 等 stream 結束已可中止 transfer; 本 method 提供 keystroke
     // shortcut 接口給 SdlInputHandler::performSpecialKeyCombo dispatch.

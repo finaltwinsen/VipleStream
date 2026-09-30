@@ -141,6 +141,12 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     // §N.6 (v1.4.103) — Ctrl+Alt+Shift+T: in-session cancel current file
     // transfer (TODO.md 原寫 +X 但 X 已被 KeyComboToggleFullScreen 用,
     // 改 T for Transfer cancel).
+    // §VR M3a X3：Ctrl+Alt+Shift+R — XR 虛擬螢幕重新置中（非 XR 模式只記 log）
+    m_SpecialKeyCombos[KeyComboXrRecenter].keyCombo = KeyComboXrRecenter;
+    m_SpecialKeyCombos[KeyComboXrRecenter].keyCode = SDLK_r;
+    m_SpecialKeyCombos[KeyComboXrRecenter].scanCode = SDL_SCANCODE_R;
+    m_SpecialKeyCombos[KeyComboXrRecenter].enabled = true;
+
     m_SpecialKeyCombos[KeyComboCancelTransfer].keyCombo = KeyComboCancelTransfer;
     m_SpecialKeyCombos[KeyComboCancelTransfer].keyCode = SDLK_t;
     m_SpecialKeyCombos[KeyComboCancelTransfer].scanCode = SDL_SCANCODE_T;

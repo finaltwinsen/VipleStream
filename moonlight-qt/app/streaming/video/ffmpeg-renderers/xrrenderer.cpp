@@ -83,6 +83,34 @@ bool XrRenderer::isPixelFormatSupported(int, AVPixelFormat pixelFormat)
     return isSoftwareFormat(pixelFormat);
 }
 
+XrSwBackend::XrSwBackend(XrContext* xr) : IFFmpegRenderer(RendererType::Unknown), m_Xr(xr) {}
+
+bool XrSwBackend::initialize(PDECODER_PARAMETERS params)
+{
+    if (params->testFrameOnly || !XrRenderer::available(m_Xr)) {
+        return false;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-XR] XrSwBackend: software decode straight into XR (no flat-window GPU device) %dx%d",
+                params->width, params->height);
+    return true;
+}
+
+bool XrSwBackend::prepareDecoderContext(AVCodecContext*, AVDictionary**)
+{
+    return true;  // 軟體解碼，不設 hwaccel
+}
+
+void XrSwBackend::renderFrame(AVFrame*)
+{
+    // 平面視窗不畫；影像由 frontend（XrRenderer）送進 XR
+}
+
+bool XrSwBackend::isPixelFormatSupported(int, AVPixelFormat pixelFormat)
+{
+    return isSoftwareFormat(pixelFormat);
+}
+
 int XrRenderer::getRendererAttributes()
 {
     // XR frame thread 自己跟著 runtime 的節拍送幀，Pacer 不需要 vsync 節拍

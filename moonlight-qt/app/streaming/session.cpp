@@ -224,6 +224,8 @@ static int inputStallWatchdogProc(void*)
 #define SDL_CODE_GAMECONTROLLER_SET_CONTROLLER_LED 104
 #define SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS 105
 #define SDL_CODE_VR_MESSAGE 106  // §VR：data1＝長度、data2＝SDL_malloc 的 TLV 副本
+// §VR M3a X3：XR 事件（X4 的 xrinput 會從 XR thread 推這些事件到 main loop）
+#define SDL_CODE_XR_RECENTER 107
 
 #include <openssl/rand.h>
 
@@ -2364,6 +2366,8 @@ void Session::setupXrDesktop()
     }
     XrContext::Options xo;
     xo.dumpFramePath = m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
+    xo.testStallMs = m_Preferences->xrTestStallMs;       // dev：--xr-test-stall-ms
+    xo.testRecenterSec = m_Preferences->xrTestRecenterSec;  // dev：--xr-test-recenter-sec
     m_XrContext = new XrContext(xo);
     QString err;
     if (!m_XrContext->bringUp(5000, &err)) {
@@ -2381,6 +2385,17 @@ void Session::setupXrDesktop()
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-XR] xr-desktop requested but this build has no OpenXR - falling back to the flat window");
 #endif
+}
+
+void Session::xrRecenter()
+{
+#ifdef HAVE_OPENXR
+    if (m_XrContext != nullptr) {
+        m_XrContext->requestRecenter();
+        return;
+    }
+#endif
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] recenter ignored: no XR session");
 }
 
 void Session::destroyXrContext()
@@ -3438,6 +3453,9 @@ void Session::exec()
             case SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS:
                 m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                     (DualSenseOutputReport *)event.user.data2);
+                break;
+            case SDL_CODE_XR_RECENTER:
+                xrRecenter();
                 break;
             case SDL_CODE_VR_MESSAGE:
                 handleVrMessage((const uint8_t*)event.user.data2, (int)(uintptr_t)event.user.data1);

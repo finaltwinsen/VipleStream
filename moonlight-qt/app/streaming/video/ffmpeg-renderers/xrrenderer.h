@@ -35,3 +35,22 @@ private:
     bool m_TestFrameOnly = false;
     uint64_t m_Submitted = 0;
 };
+
+// §VR M3a X3：XR 模式＋軟體解碼的 backend——不建任何 GPU 物件、不碰平面視窗。
+// 原本 SW 解碼的 backend 是 PlVkRenderer：它自己建一個 Vulkan device 並在平面視窗建 swapchain，
+// 建 device 的那一刻 NVIDIA 驅動會讓 SteamVR compositor 停頓約 770 ms（S2 開場一次漏 69 幀）。
+// 影像由 XrRenderer（frontend）交給 XrVideo 畫進 XR；平面視窗留空。
+// 只給真正串流的 decoder 用（params->xr 且非 testFrameOnly）；能力探測照舊走原本的 cascade。
+class XrSwBackend : public IFFmpegRenderer
+{
+public:
+    explicit XrSwBackend(XrContext* xr);
+    virtual bool initialize(PDECODER_PARAMETERS params) override;
+    virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
+    virtual void renderFrame(AVFrame* frame) override;
+    virtual bool isPixelFormatSupported(int videoFormat, AVPixelFormat pixelFormat) override;
+    virtual int getRendererAttributes() override { return 0; }
+
+private:
+    XrContext* m_Xr;
+};

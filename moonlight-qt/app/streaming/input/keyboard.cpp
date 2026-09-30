@@ -166,6 +166,12 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
         Session::get()->cancelFileTransfer();
         break;
 
+    case KeyComboXrRecenter:
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] Detected recenter combo (Ctrl+Alt+Shift+R)");
+        Session::get()->xrRecenter();
+        break;
+
     default:
         Q_UNREACHABLE();
     }

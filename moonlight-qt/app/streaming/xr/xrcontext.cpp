@@ -1,6 +1,7 @@
 // VipleStream 2.0 §VR M3a X1 — XrContext 實作。設計見 xrcontext.h。
 
 #include "xrcontext.h"
+#include "xrdesktopscreen.h"
 
 #ifdef HAVE_XR_VIDEO
 #include "xrvideo.h"
@@ -162,11 +163,22 @@ static XrContextVk s_Vk;  // 函式指標與 instance／device 無關的部分�
 
 XrContext::XrContext() : XrContext(Options()) {}
 
-XrContext::XrContext(const Options& options) : m_Options(options) {}
+XrContext::XrContext(const Options& options)
+    : m_Options(options), m_Screen(new XrDesktopScreen(options.quadDistanceM, options.quadFovDeg))
+{
+}
+
+void XrContext::requestRecenter()
+{
+    m_Screen->requestRecenter();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] recenter requested");
+}
 
 XrContext::~XrContext()
 {
     shutdown();
+    delete m_Screen;
+    m_Screen = nullptr;
 }
 
 PFN_vkGetInstanceProcAddr XrContext::loadVulkanLoader(QString* error)
@@ -230,6 +242,7 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         XrVideo::Config vc;
         vc.dumpPath = m_Options.dumpFramePath;
         vc.dumpAfterFrames = m_Options.dumpAfterFrames;
+        vc.testStallMs = m_Options.testStallMs;
         m_Video = new XrVideo(this, vc);
         QString verr;
         if (!m_Video->init(&verr)) {
@@ -249,9 +262,21 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         return false;
     }
 
+#ifdef HAVE_XR_VIDEO
+    if (m_Video != nullptr) {
+        m_Video->setSession(m_Session);  // X3：影像 render thread 用
+    }
+#endif
     m_StopRequested.store(false);
     m_Lost.store(false);
     m_WarmupEndNs = steadyNowNs() + 2000000000ull;
+    m_BringUpNs = steadyNowNs();
+    m_TestRecenterDone = false;
+    m_MissEventsLogged = 0;
+    m_QuadReady = false;
+    m_StatusReady = false;
+    m_StaleState = 0;
+    m_LoggedLayerKind = false;
     m_FrameThreadRunning.store(true, std::memory_order_release);
     m_FrameThread = std::thread(&XrContext::frameThreadMain, this);
 
@@ -713,6 +738,34 @@ bool XrContext::createQuadSwapchain(QString* error)
     for (uint32_t i = 0; i < m_QuadImageCount; i++) {
         m_QuadImages[i] = imgs[i].image;
     }
+
+    // X3：stale 狀態 quad（小色條）。建不起來不影響 session，只是沒有 stale 提示
+    ci.width = kStatusW;
+    ci.height = kStatusH;
+    r = xrCreateSwapchain(m_Session, &ci, &m_StatusSwapchain);
+    if (XR_SUCCEEDED(r)) {
+        xrEnumerateSwapchainImages(m_StatusSwapchain, 0, &m_StatusImageCount, nullptr);
+        std::vector<XrSwapchainImageVulkan2KHR> simgs(m_StatusImageCount,
+                                                      xrStruct<XrSwapchainImageVulkan2KHR>(XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR));
+        r = xrEnumerateSwapchainImages(m_StatusSwapchain, m_StatusImageCount, &m_StatusImageCount,
+                                       reinterpret_cast<XrSwapchainImageBaseHeader*>(simgs.data()));
+        if (XR_SUCCEEDED(r) && m_StatusImageCount > 0) {
+            m_StatusImages = new VkImage[m_StatusImageCount];
+            for (uint32_t i = 0; i < m_StatusImageCount; i++) {
+                m_StatusImages[i] = simgs[i].image;
+            }
+        }
+        else {
+            xrDestroySwapchain(m_StatusSwapchain);
+            m_StatusSwapchain = XR_NULL_HANDLE;
+            m_StatusImageCount = 0;
+        }
+    }
+    else {
+        m_StatusSwapchain = XR_NULL_HANDLE;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] status quad swapchain unavailable: %s",
+                    xrResultStr(m_Instance, r).toUtf8().constData());
+    }
     return true;
 }
 
@@ -863,9 +916,8 @@ void XrContext::handleStateChange(XrSessionState state)
 
 // ── frame thread ──
 
-bool XrContext::renderQuad(uint32_t imageIndex)
+bool XrContext::clearImage(VkImage img, float r, float g, float b)
 {
-    VkImage img = m_QuadImages[imageIndex];
     s_Vk.ResetCommandBuffer(m_Cmd, 0);
     VkCommandBufferBeginInfo bi = vkStruct<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -873,30 +925,32 @@ bool XrContext::renderQuad(uint32_t imageIndex)
 
     VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     // XR_KHR_vulkan_enable：acquire 後影像在 COLOR_ATTACHMENT_OPTIMAL，release 前也要回到這個 layout
-    VkImageMemoryBarrier b = vkStruct<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
-    b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = img;
-    b.subresourceRange = range;
+    VkImageMemoryBarrier bar = vkStruct<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
+    bar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.image = img;
+    bar.subresourceRange = range;
     s_Vk.CmdPipelineBarrier(m_Cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            0, 0, nullptr, 0, nullptr, 1, &b);
+                            0, 0, nullptr, 0, nullptr, 1, &bar);
 
     VkClearColorValue gray;
     std::memset(&gray, 0, sizeof(gray));
-    gray.float32[0] = gray.float32[1] = gray.float32[2] = 0.08f;  // loading 環境：深灰
+    gray.float32[0] = r;
+    gray.float32[1] = g;
+    gray.float32[2] = b;
     gray.float32[3] = 1.0f;
     s_Vk.CmdClearColorImage(m_Cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &gray, 1, &range);
 
-    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    b.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    b.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bar.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bar.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     s_Vk.CmdPipelineBarrier(m_Cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                            0, 0, nullptr, 0, nullptr, 1, &b);
+                            0, 0, nullptr, 0, nullptr, 1, &bar);
     s_Vk.EndCommandBuffer(m_Cmd);
 
     VkSubmitInfo si = vkStruct<VkSubmitInfo>(VK_STRUCTURE_TYPE_SUBMIT_INFO);
@@ -913,6 +967,37 @@ bool XrContext::renderQuad(uint32_t imageIndex)
     s_Vk.WaitForFences(m_VkDevice, 1, &m_Fence, VK_TRUE, 1000000000ull);
     s_Vk.ResetFences(m_VkDevice, 1, &m_Fence);
     return true;
+}
+
+bool XrContext::ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count, bool* ready,
+                                float r, float g, float b)
+{
+    if (*ready) {
+        return true;  // runtime 沿用最後 release 的影像
+    }
+    if (sc == XR_NULL_HANDLE || images == nullptr) {
+        return false;
+    }
+    uint32_t idx = 0;
+    XrSwapchainImageAcquireInfo ai = xrStruct<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
+    XrSwapchainImageWaitInfo swi = xrStruct<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
+    swi.timeout = 100000000;  // 100 ms
+    XrSwapchainImageReleaseInfo ri = xrStruct<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
+    XrResult ar;
+    {
+        std::lock_guard<std::mutex> lk(m_QueueMutex);
+        ar = xrAcquireSwapchainImage(sc, &ai, &idx);
+    }
+    if (XR_FAILED(ar) || XR_FAILED(xrWaitSwapchainImage(sc, &swi))) {
+        return false;
+    }
+    const bool drawn = idx < count && clearImage(images[idx], r, g, b);
+    {
+        std::lock_guard<std::mutex> lk(m_QueueMutex);
+        xrReleaseSwapchainImage(sc, &ri);
+    }
+    *ready = drawn;
+    return drawn;
 }
 
 void XrContext::maybeLogStats(uint64_t nowNs)
@@ -937,12 +1022,22 @@ void XrContext::maybeLogStats(uint64_t nowNs)
     Stats d;
     d.frames = cur.frames - prev.frames;
     d.missed = cur.missed - prev.missed;
+    double cpuP50 = 0.0, cpuP95 = 0.0;
+    if (!m_XrCpuUs.empty()) {
+        std::vector<uint32_t> v;
+        v.swap(m_XrCpuUs);
+        std::sort(v.begin(), v.end());
+        cpuP50 = v[v.size() / 2] / 1000.0;
+        cpuP95 = v[(std::min)(v.size() - 1, (v.size() * 95) / 100)] / 1000.0;
+    }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-XR] 10s frames=%llu missed=%llu (%.2f%%) notRendered=%llu endFrameErr=%llu state=%s period=%.2f ms",
+                "[VIPLE-XR] 10s frames=%llu missed=%llu (%.2f%%) notRendered=%llu endFrameErr=%llu state=%s period=%.2f ms "
+                "xrThread cpu p50=%.2f p95=%.2f ms stale=%d",
                 static_cast<unsigned long long>(d.frames), static_cast<unsigned long long>(d.missed), d.missPercent(),
                 static_cast<unsigned long long>(cur.notRendered - prev.notRendered),
                 static_cast<unsigned long long>(cur.endFrameErrors - prev.endFrameErrors),
-                sessionStateName(cur.currentState), static_cast<double>(m_LastPeriod) / 1e6);
+                sessionStateName(cur.currentState), static_cast<double>(m_LastPeriod) / 1e6,
+                cpuP50, cpuP95, m_StaleState);
 #ifdef HAVE_XR_VIDEO
     if (m_Video != nullptr) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] 10s video %s", qUtf8Printable(m_Video->takeStatsLine()));
@@ -952,10 +1047,6 @@ void XrContext::maybeLogStats(uint64_t nowNs)
 
 void XrContext::frameThreadMain()
 {
-    const float widthM = 2.0f * m_Options.quadDistanceM *
-                         std::tan(m_Options.quadFovDeg * 0.5f * 3.14159265f / 180.0f);
-    const float heightM = widthM * static_cast<float>(m_Options.quadHeight) / static_cast<float>(m_Options.quadWidth);
-
     XrEnvironmentBlendMode blend = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     {
         uint32_t n = 0;
@@ -1006,76 +1097,150 @@ void XrContext::frameThreadMain()
 
         XrFrameState fs = xrStruct<XrFrameState>(XR_TYPE_FRAME_STATE);
         XrFrameWaitInfo wi = xrStruct<XrFrameWaitInfo>(XR_TYPE_FRAME_WAIT_INFO);
-        if (XR_FAILED(xrWaitFrame(m_Session, &wi, &fs))) {
+        const uint64_t tw0 = steadyNowNs();
+        const XrResult wr = xrWaitFrame(m_Session, &wi, &fs);
+        m_DiagWaitNs = steadyNowNs() - tw0;
+        if (XR_FAILED(wr)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
         XrFrameBeginInfo bfi = xrStruct<XrFrameBeginInfo>(XR_TYPE_FRAME_BEGIN_INFO);
         XrResult br;
         {
+            const uint64_t tl0 = steadyNowNs();
             std::lock_guard<std::mutex> lk(m_QueueMutex);  // runtime 可能在 xrBeginFrame 用 queue
+            const uint64_t tl1 = steadyNowNs();
             br = xrBeginFrame(m_Session, &bfi);
+            m_DiagLockNs = tl1 - tl0;
+            m_DiagBeginNs = steadyNowNs() - tl1;
         }
         if (XR_FAILED(br)) {
             continue;
         }
 
-        const XrCompositionLayerBaseHeader* layers[1];
+        const uint64_t cpuT0 = steadyNowNs();
+
+        // X3：擺放。第一次 FOCUSED 依頭部水平朝向擺到正前方；recenter 要求（熱鍵／dev）下一幀重擺
+        if (fs.shouldRender) {
+            if (m_Options.testRecenterSec > 0 && !m_TestRecenterDone &&
+                cpuT0 - m_BringUpNs > static_cast<uint64_t>(m_Options.testRecenterSec) * 1000000000ull) {
+                m_TestRecenterDone = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev test recenter (--xr-test-recenter-sec %d)",
+                            m_Options.testRecenterSec);
+                m_Screen->requestRecenter();
+            }
+            const XrDesktopScreen::Reason why = m_Screen->takePendingPlacement(m_State.load() == XR_SESSION_STATE_FOCUSED);
+            if (why != XrDesktopScreen::Reason::None) {
+                XrSpaceLocation loc = xrStruct<XrSpaceLocation>(XR_TYPE_SPACE_LOCATION);
+                const XrResult lr = xrLocateSpace(m_ViewSpace, m_LocalSpace, fs.predictedDisplayTime, &loc);
+                if (XR_SUCCEEDED(lr) && (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
+                    (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+                    m_Screen->place(loc.pose);
+                    const XrPosef qp = m_Screen->quadPose();
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-XR] placement (%s): yaw=%.1f deg head=(%.2f, %.2f, %.2f) screen=(%.2f, %.2f, %.2f) layer=%s",
+                                why == XrDesktopScreen::Reason::Initial ? "initial" : "recenter",
+                                static_cast<double>(m_Screen->yawRad() * 180.0f / 3.14159265f),
+                                static_cast<double>(loc.pose.position.x), static_cast<double>(loc.pose.position.y),
+                                static_cast<double>(loc.pose.position.z), static_cast<double>(qp.position.x),
+                                static_cast<double>(qp.position.y), static_cast<double>(qp.position.z),
+                                m_EnabledExtensions.contains(QLatin1String(kExtCylinder)) ? "cylinder" : "quad");
+                }
+                else if (why == XrDesktopScreen::Reason::Recenter) {
+                    m_Screen->requestRecenter();  // head pose 暫時無效：下一幀再試
+                }
+            }
+        }
+
+        const XrCompositionLayerBaseHeader* layers[2];
         uint32_t layerCount = 0;
         XrCompositionLayerQuad quad = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
+        XrCompositionLayerCylinderKHR cyl = xrStruct<XrCompositionLayerCylinderKHR>(XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR);
+        XrCompositionLayerQuad status = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
+        const bool useCylinder = m_EnabledExtensions.contains(QLatin1String(kExtCylinder));
+        const float screenW = m_Screen->quadWidthM();
         bool videoLayer = false;
+        uint64_t videoGen = 0;
 #ifdef HAVE_XR_VIDEO
-        // X2：有影像（收過至少一幀）就改送影像 quad；新幀才 acquire／render／release，沒有新幀時
-        // runtime 沿用上次 release 的影像
-        XrSwapchainSubImage videoSub = {};
-        float videoAspect = 0.0f;
-        if (fs.shouldRender && m_Video != nullptr && m_Video->update(m_Session, &videoSub, &videoAspect) &&
-            videoAspect > 0.0f) {
+        // X3：影像由 XrVideo 的 render thread 畫，這裡只引用最後 release 的影像（沒有新幀時就是
+        // 自有的最後一幀複本）。> 1 s 沒更新疊狀態條；> 5 s 改回 loading quad。
+        XrVideo::Current vcur;
+        const bool haveVideo = fs.shouldRender && m_Video != nullptr && m_Video->current(&vcur);
+        int stale = 0;
+        if (haveVideo) {
+            const uint64_t nowUs = cpuT0 / 1000ull;
+            const uint64_t ageMs = nowUs > vcur.lastDrawnUs ? (nowUs - vcur.lastDrawnUs) / 1000ull : 0;
+            stale = ageMs < 1000 ? 1 : (ageMs < 5000 ? 2 : 3);
+        }
+        if (fs.shouldRender && stale != m_StaleState) {
+            static const char* const kStaleName[] = {"no-video", "live", "stale", "lost"};
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video state %s -> %s",
+                        kStaleName[m_StaleState], kStaleName[stale]);
+            m_StaleState = stale;
+        }
+        if (haveVideo && stale != 3) {
+            const float screenH = (useCylinder ? m_Screen->cylinderRadiusM() * m_Screen->cylinderAngleRad() : screenW) /
+                                  vcur.aspect;
+            if (useCylinder) {
+                cyl.layerFlags = 0;
+                cyl.space = m_LocalSpace;
+                cyl.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                cyl.subImage = vcur.subImage;
+                cyl.pose = m_Screen->cylinderPose();
+                cyl.radius = m_Screen->cylinderRadiusM();
+                cyl.centralAngle = m_Screen->cylinderAngleRad();
+                cyl.aspectRatio = vcur.aspect;
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&cyl);
+            }
+            else {
+                quad.layerFlags = 0;
+                quad.space = m_LocalSpace;
+                quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                quad.subImage = vcur.subImage;
+                quad.pose = m_Screen->quadPose();
+                quad.size = {screenW, screenW / vcur.aspect};
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+            }
+            if (!m_LoggedLayerKind) {
+                m_LoggedLayerKind = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video layer: %s %.2f x %.2f m at %.2f m",
+                            useCylinder ? "cylinder" : "quad",
+                            static_cast<double>(useCylinder ? m_Screen->cylinderRadiusM() * m_Screen->cylinderAngleRad() : screenW),
+                            static_cast<double>(screenH), static_cast<double>(m_Options.quadDistanceM));
+            }
+            videoLayer = true;
+            videoGen = vcur.generation;
+            if (stale == 2 &&
+                ensureSolidQuad(m_StatusSwapchain, m_StatusImages, m_StatusImageCount, &m_StatusReady, 0.85f, 0.45f, 0.05f)) {
+                const float statusW = screenW * 0.3f;
+                const float statusH = statusW * static_cast<float>(kStatusH) / static_cast<float>(kStatusW);
+                status.layerFlags = 0;
+                status.space = m_LocalSpace;
+                status.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                status.subImage.swapchain = m_StatusSwapchain;
+                status.subImage.imageRect.offset = {0, 0};
+                status.subImage.imageRect.extent = {static_cast<int32_t>(kStatusW), static_cast<int32_t>(kStatusH)};
+                status.subImage.imageArrayIndex = 0;
+                status.pose = m_Screen->statusPose(screenH, statusH);
+                status.size = {statusW, statusH};
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&status);
+            }
+        }
+#endif
+        if (fs.shouldRender && !videoLayer &&
+            ensureSolidQuad(m_QuadSwapchain, m_QuadImages, m_QuadImageCount, &m_QuadReady, 0.08f, 0.08f, 0.08f)) {
+            // loading 環境：深灰 quad（只清一次色）
             quad.layerFlags = 0;
             quad.space = m_LocalSpace;
             quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-            quad.subImage = videoSub;
-            quad.pose.orientation.w = 1.0f;
-            quad.pose.position.z = -m_Options.quadDistanceM;
-            quad.size = {widthM, widthM / videoAspect};
+            quad.subImage.swapchain = m_QuadSwapchain;
+            quad.subImage.imageRect.offset = {0, 0};
+            quad.subImage.imageRect.extent = {static_cast<int32_t>(m_Options.quadWidth),
+                                              static_cast<int32_t>(m_Options.quadHeight)};
+            quad.subImage.imageArrayIndex = 0;
+            quad.pose = m_Screen->quadPose();
+            quad.size = {screenW, screenW * static_cast<float>(m_Options.quadHeight) / static_cast<float>(m_Options.quadWidth)};
             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
-            videoLayer = true;
-        }
-#endif
-        if (fs.shouldRender && !videoLayer) {
-            uint32_t idx = 0;
-            XrSwapchainImageAcquireInfo ai = xrStruct<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
-            XrSwapchainImageWaitInfo swi = xrStruct<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
-            swi.timeout = 100000000;  // 100 ms
-            XrSwapchainImageReleaseInfo ri = xrStruct<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
-            XrResult ar;
-            {
-                std::lock_guard<std::mutex> lk(m_QueueMutex);
-                ar = xrAcquireSwapchainImage(m_QuadSwapchain, &ai, &idx);
-            }
-            if (XR_SUCCEEDED(ar) &&
-                XR_SUCCEEDED(xrWaitSwapchainImage(m_QuadSwapchain, &swi))) {
-                const bool drawn = idx < m_QuadImageCount && renderQuad(idx);
-                {
-                    std::lock_guard<std::mutex> lk(m_QueueMutex);
-                    xrReleaseSwapchainImage(m_QuadSwapchain, &ri);
-                }
-                if (drawn) {
-                    quad.layerFlags = 0;
-                    quad.space = m_LocalSpace;
-                    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-                    quad.subImage.swapchain = m_QuadSwapchain;
-                    quad.subImage.imageRect.offset = {0, 0};
-                    quad.subImage.imageRect.extent = {static_cast<int32_t>(m_Options.quadWidth),
-                                                      static_cast<int32_t>(m_Options.quadHeight)};
-                    quad.subImage.imageArrayIndex = 0;
-                    quad.pose.orientation.w = 1.0f;
-                    quad.pose.position.z = -m_Options.quadDistanceM;
-                    quad.size = {widthM, heightM};
-                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
-                }
-            }
-
         }
         if (fs.shouldRender) {
             // FOV／眼位：每秒 locate 一次即可（X1 只做量測）
@@ -1107,8 +1272,21 @@ void XrContext::frameThreadMain()
         ei.layers = layerCount ? layers : nullptr;
         XrResult er;
         {
+            const uint64_t tl0 = steadyNowNs();
             std::lock_guard<std::mutex> lk(m_QueueMutex);  // runtime 可能在 xrEndFrame 用 queue
+            const uint64_t tl1 = steadyNowNs();
             er = xrEndFrame(m_Session, &ei);
+            m_DiagLockNs += tl1 - tl0;
+            m_DiagEndNs = steadyNowNs() - tl1;
+        }
+#ifdef HAVE_XR_VIDEO
+        if (videoLayer && XR_SUCCEEDED(er) && m_Video != nullptr) {
+            m_Video->frameEnded(videoGen);
+        }
+#endif
+        {
+            const uint64_t cpuUs = (steadyNowNs() - cpuT0) / 1000ull;
+            m_XrCpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(cpuUs, 0xffffffffu)));
         }
 
         {
@@ -1133,6 +1311,16 @@ void XrContext::frameThreadMain()
                     }
                     else {
                         m_Stats.missed += lost;
+                    }
+                    // X3 診斷：開場前 30 次漏幀逐次記錄（時間點＋影像狀態），定位開場卡頓來源
+                    if (m_MissEventsLogged < 30) {
+                        m_MissEventsLogged++;
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-XR] missed %llu frame(s) at +%llu ms (video=%d prevCpu=%.2f waitFrame=%.1f lock=%.1f begin=%.1f end=%.1f ms)",
+                                    static_cast<unsigned long long>(lost),
+                                    static_cast<unsigned long long>((steadyNowNs() - m_BringUpNs) / 1000000ull),
+                                    m_StaleState, m_XrCpuUs.empty() ? 0.0 : m_XrCpuUs.back() / 1000.0,
+                                    m_DiagWaitNs / 1e6, m_DiagLockNs / 1e6, m_DiagBeginNs / 1e6, m_DiagEndNs / 1e6);
                     }
                 }
             }
@@ -1237,6 +1425,13 @@ void XrContext::destroyAll()
         xrDestroySwapchain(m_QuadSwapchain);
         m_QuadSwapchain = XR_NULL_HANDLE;
     }
+    if (m_StatusSwapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(m_StatusSwapchain);
+        m_StatusSwapchain = XR_NULL_HANDLE;
+    }
+    delete[] m_StatusImages;
+    m_StatusImages = nullptr;
+    m_StatusImageCount = 0;
     delete[] m_QuadImages;
     m_QuadImages = nullptr;
     m_QuadImageCount = 0;

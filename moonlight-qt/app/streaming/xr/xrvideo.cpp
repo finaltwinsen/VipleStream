@@ -119,6 +119,11 @@ bool XrVideo::init(QString* error)
     }
     m_SemValue = 0;
     m_Usable.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(m_MailboxMutex);
+        m_StopThread = false;
+    }
+    m_Thread = std::thread(&XrVideo::renderThreadMain, this);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-XR] video: libplacebo imported the XR VkDevice (api %u.%u, %d device exts)",
                 VK_API_VERSION_MAJOR(m_Vulkan->api_version), VK_API_VERSION_MINOR(m_Vulkan->api_version),
@@ -133,34 +138,84 @@ void XrVideo::markUnusable(const char* why)
     }
 }
 
-void XrVideo::destroySwapchain()
+void XrVideo::setSession(XrSession session)
+{
+    std::lock_guard<std::mutex> lk(m_MailboxMutex);
+    m_Session = session;
+}
+
+void XrVideo::destroySwapchainSet(SwapchainSet& s)
 {
     pl_gpu g = gpu();
-    for (pl_tex& t : m_Wrapped) {
+    for (pl_tex& t : s.wrapped) {
         if (t != nullptr && g != nullptr) {
             pl_tex_destroy(g, &t);
         }
     }
-    m_Wrapped.clear();
-    m_Images.clear();
-    if (m_Swapchain != XR_NULL_HANDLE) {
-        xrDestroySwapchain(m_Swapchain);
-        m_Swapchain = XR_NULL_HANDLE;
+    s.wrapped.clear();
+    if (s.swapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(s.swapchain);
+        s.swapchain = XR_NULL_HANDLE;
     }
-    m_SwWidth = m_SwHeight = 0;
+    s.width = s.height = 0;
+}
+
+void XrVideo::destroyAllSwapchains()
+{
+    std::vector<SwapchainSet> retired;
+    {
+        std::lock_guard<std::mutex> lk(m_SwMutex);
+        retired.swap(m_Retired);
+        m_HavePublished = false;
+        m_Published = Current();
+    }
+    for (SwapchainSet& s : retired) {
+        destroySwapchainSet(s);
+    }
+    destroySwapchainSet(m_Sw);
     m_SwFormat = 0;
     m_ViewFormat = VK_FORMAT_UNDEFINED;
     m_Mode = TargetMode::None;
-    m_HaveReleased = false;
+}
+
+void XrVideo::reapRetired()
+{
+    std::vector<SwapchainSet> dead;
+    {
+        std::lock_guard<std::mutex> lk(m_SwMutex);
+        for (auto it = m_Retired.begin(); it != m_Retired.end();) {
+            // XR thread 已送出引用更新一代的 xrEndFrame：舊的一代不再被任何 layer 引用
+            if (it->generation < m_XrAckGeneration) {
+                dead.push_back(std::move(*it));
+                it = m_Retired.erase(it);
+            }
+            else {
+                ++it;
+            }
+        }
+    }
+    for (SwapchainSet& s : dead) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video swapchain gen=%llu %dx%d retired and destroyed",
+                    static_cast<unsigned long long>(s.generation), s.width, s.height);
+        destroySwapchainSet(s);
+    }
 }
 
 void XrVideo::destroy()
 {
     m_Usable.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(m_MailboxMutex);
+        m_StopThread = true;
+    }
+    m_MailboxCv.notify_all();
+    if (m_Thread.joinable()) {
+        m_Thread.join();
+    }
     if (m_Vulkan != nullptr) {
         pl_gpu_finish(m_Vulkan->gpu);
     }
-    destroySwapchain();
+    destroyAllSwapchains();
     {
         std::lock_guard<std::mutex> lk(m_MailboxMutex);
         av_frame_free(&m_Pending);
@@ -191,6 +246,23 @@ void XrVideo::submit(const AVFrame* frame)
     if (!usable() || frame == nullptr) {
         return;
     }
+    if (m_Config.testStallMs > 0) {
+        // dev（--xr-test-stall-ms）：第一幀進來 20 s 後丟掉 testStallMs 毫秒的幀，驗 stale 轉換
+        const uint64_t now = nowUs();
+        if (m_FirstSubmitUs == 0) {
+            m_FirstSubmitUs = now;
+        }
+        const uint64_t start = m_FirstSubmitUs + 20000000ull;
+        if (now >= start && now < start + static_cast<uint64_t>(m_Config.testStallMs) * 1000ull) {
+            if (!m_TestStallLogged) {
+                m_TestStallLogged = true;
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev test stall: dropping frames for %d ms",
+                            m_Config.testStallMs);
+            }
+            m_TestStallDropped++;
+            return;
+        }
+    }
     AVFrame* c = av_frame_clone(frame);
     if (c == nullptr) {
         return;
@@ -204,6 +276,7 @@ void XrVideo::submit(const AVFrame* frame)
         }
         m_Pending = c;
     }
+    m_MailboxCv.notify_one();
     std::lock_guard<std::mutex> lk(m_StatsMutex);
     m_Received++;
     if (overwrote) {
@@ -256,15 +329,18 @@ bool XrVideo::testMap(const AVFrame* frame)
 
 bool XrVideo::ensureSwapchain(XrSession session, int width, int height)
 {
-    if (m_Swapchain != XR_NULL_HANDLE && m_SwWidth == width && m_SwHeight == height) {
+    if (m_Sw.swapchain != XR_NULL_HANDLE && m_Sw.width == width && m_Sw.height == height) {
         return true;
-    }
-    if (m_Swapchain != XR_NULL_HANDLE) {
-        pl_gpu_finish(m_Vulkan->gpu);
-        destroySwapchain();
     }
     if (width <= 0 || height <= 0) {
         return false;
+    }
+    if (m_Sw.swapchain != XR_NULL_HANDLE) {
+        // 解析度改變：舊的一代可能還被 XR thread 的 layer 引用（最後 release 的那張），先退休，
+        // 等 XR thread 用新一代送出 xrEndFrame 後由 reapRetired() 銷毀
+        std::lock_guard<std::mutex> lk(m_SwMutex);
+        m_Retired.push_back(std::move(m_Sw));
+        m_Sw = SwapchainSet();
     }
 
     uint32_t n = 0;
@@ -349,22 +425,18 @@ bool XrVideo::ensureSwapchain(XrSession session, int width, int height)
                         static_cast<int>(c.sw), static_cast<int>(c.view), modeName(static_cast<int>(c.mode)));
             continue;
         }
-        m_Swapchain = sc;
-        m_SwWidth = width;
-        m_SwHeight = height;
+        m_Sw.swapchain = sc;
+        m_Sw.width = width;
+        m_Sw.height = height;
+        m_Sw.wrapped = std::move(wrapped);
+        m_Sw.generation = m_NextGeneration++;
         m_SwFormat = c.sw;
         m_ViewFormat = c.view;
         m_Mode = c.mode;
-        m_Wrapped = std::move(wrapped);
-        m_Images.clear();
-        for (uint32_t i = 0; i < count; i++) {
-            m_Images.push_back(imgs[i].image);
-        }
-        m_HaveReleased = false;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-XR] video swapchain %dx%d fmt=%d view=%d mode=%s images=%u",
-                    width, height, static_cast<int>(c.sw), static_cast<int>(c.view),
-                    modeName(static_cast<int>(c.mode)), count);
+                    "[VIPLE-XR] video swapchain gen=%llu %dx%d fmt=%d view=%d mode=%s images=%u",
+                    static_cast<unsigned long long>(m_Sw.generation), width, height, static_cast<int>(c.sw),
+                    static_cast<int>(c.view), modeName(static_cast<int>(c.mode)), count);
         return true;
     }
     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] no usable video swapchain format for %dx%d", width, height);
@@ -411,9 +483,9 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     XrResult r;
     {
         std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
-        r = xrAcquireSwapchainImage(m_Swapchain, &ai, &idx);
+        r = xrAcquireSwapchainImage(m_Sw.swapchain, &ai, &idx);
     }
-    if (XR_FAILED(r) || idx >= m_Wrapped.size()) {
+    if (XR_FAILED(r) || idx >= m_Sw.wrapped.size()) {
         av_frame_free(&frame);
         std::lock_guard<std::mutex> lk(m_StatsMutex);
         m_RenderErrors++;
@@ -421,10 +493,10 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     }
     XrSwapchainImageWaitInfo wi = xrS<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
     wi.timeout = 100000000;  // 100 ms
-    xrWaitSwapchainImage(m_Swapchain, &wi);
+    xrWaitSwapchainImage(m_Sw.swapchain, &wi);
 
     pl_gpu g = m_Vulkan->gpu;
-    pl_tex tex = m_Wrapped[idx];
+    pl_tex tex = m_Sw.wrapped[idx];
 
     // OpenXR（Vulkan）：acquire 後彩色影像在 COLOR_ATTACHMENT_OPTIMAL，release 前也要回到這個 layout
     pl_vulkan_release_params rp = {};
@@ -477,8 +549,11 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     hp.semaphore.sem = m_Sem;
     hp.semaphore.value = ++m_SemValue;
     const bool held = pl_vulkan_hold_ex(g, &hp);
-    // GPU 做完才 release 給 runtime、才放掉解碼幀（pl_gpu_finish 會等到 hold 的 semaphore 觸發）
+    const uint64_t tCpuEnd = nowUs();
+    // GPU 做完才 release 給 runtime、才放掉解碼幀（pl_gpu_finish 會等到 hold 的 semaphore 觸發）。
+    // X3 起這裡是影像 render thread，不再阻塞 XR frame thread。
     pl_gpu_finish(g);
+    const uint64_t tGpuEnd = nowUs();
     if (mappedOk) {
         pl_unmap_avframe(g, &mapped);
     }
@@ -487,15 +562,25 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
     {
         std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
-        xrReleaseSwapchainImage(m_Swapchain, &ri);
+        xrReleaseSwapchainImage(m_Sw.swapchain, &ri);
     }
-    m_HaveReleased = true;
+    if (rendered && held) {
+        std::lock_guard<std::mutex> lk(m_SwMutex);
+        m_Published.subImage.swapchain = m_Sw.swapchain;
+        m_Published.subImage.imageRect.offset = {0, 0};
+        m_Published.subImage.imageRect.extent = {m_Sw.width, m_Sw.height};
+        m_Published.subImage.imageArrayIndex = 0;
+        m_Published.aspect = static_cast<float>(m_Sw.width) / static_cast<float>(m_Sw.height);
+        m_Published.generation = m_Sw.generation;
+        m_Published.lastDrawnUs = tGpuEnd;
+        m_HavePublished = true;
+    }
 
-    const uint64_t dt = nowUs() - t0;
     std::lock_guard<std::mutex> lk(m_StatsMutex);
     if (rendered && held) {
         m_Drawn++;
-        m_RenderUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(dt, 0xffffffffu)));
+        m_CpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tCpuEnd - t0, 0xffffffffu)));
+        m_GpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tGpuEnd - tCpuEnd, 0xffffffffu)));
     }
     else {
         m_RenderErrors++;
@@ -503,55 +588,79 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     return rendered && held;
 }
 
-bool XrVideo::update(XrSession session, XrSwapchainSubImage* subImage, float* aspect)
+void XrVideo::renderThreadMain()
 {
-    if (m_Vulkan == nullptr) {
-        return false;
-    }
-    AVFrame* f = nullptr;
-    {
-        std::lock_guard<std::mutex> lk(m_MailboxMutex);
-        f = m_Pending;
-        m_Pending = nullptr;
-    }
-    if (f != nullptr) {
-        if (usable() && ensureSwapchain(session, f->width, f->height)) {
+    while (true) {
+        AVFrame* f = nullptr;
+        XrSession session = XR_NULL_HANDLE;
+        {
+            std::unique_lock<std::mutex> lk(m_MailboxMutex);
+            m_MailboxCv.wait_for(lk, std::chrono::milliseconds(100),
+                                 [this] { return m_StopThread || m_Pending != nullptr; });
+            if (m_StopThread) {
+                break;
+            }
+            f = m_Pending;
+            m_Pending = nullptr;
+            session = m_Session;
+        }
+        reapRetired();
+        if (f == nullptr) {
+            continue;
+        }
+        if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, f->width, f->height)) {
             renderNewFrame(f);
         }
         else {
             av_frame_free(&f);
-            if (usable() && m_Swapchain == XR_NULL_HANDLE) {
+            if (session != XR_NULL_HANDLE && usable() && m_Sw.swapchain == XR_NULL_HANDLE) {
                 markUnusable("no usable video swapchain");
             }
         }
     }
-    if (m_Swapchain == XR_NULL_HANDLE || !m_HaveReleased || m_SwHeight <= 0) {
+}
+
+bool XrVideo::current(Current* out)
+{
+    std::lock_guard<std::mutex> lk(m_SwMutex);
+    if (!m_HavePublished || m_Published.aspect <= 0.0f) {
         return false;
     }
-    subImage->swapchain = m_Swapchain;
-    subImage->imageRect.offset = {0, 0};
-    subImage->imageRect.extent = {m_SwWidth, m_SwHeight};
-    subImage->imageArrayIndex = 0;
-    *aspect = static_cast<float>(m_SwWidth) / static_cast<float>(m_SwHeight);
+    *out = m_Published;
     return true;
+}
+
+void XrVideo::frameEnded(uint64_t generation)
+{
+    std::lock_guard<std::mutex> lk(m_SwMutex);
+    if (generation > m_XrAckGeneration) {
+        m_XrAckGeneration = generation;
+    }
 }
 
 QString XrVideo::takeStatsLine()
 {
     std::lock_guard<std::mutex> lk(m_StatsMutex);
-    double p50 = 0.0, p95 = 0.0;
-    if (!m_RenderUs.empty()) {
-        std::vector<uint32_t> v = m_RenderUs;
+    auto pct = [](std::vector<uint32_t> v, double* p50, double* p95) {
+        *p50 = *p95 = 0.0;
+        if (v.empty()) {
+            return;
+        }
         std::sort(v.begin(), v.end());
-        p50 = v[v.size() / 2] / 1000.0;
-        p95 = v[std::min(v.size() - 1, (v.size() * 95) / 100)] / 1000.0;
-    }
-    const QString line = QStringLiteral("recv=%1 drawn=%2 overwritten=%3 errors=%4 render p50=%5 p95=%6 ms mode=%7 %8x%9")
+        *p50 = v[v.size() / 2] / 1000.0;
+        *p95 = v[std::min(v.size() - 1, (v.size() * 95) / 100)] / 1000.0;
+    };
+    double c50, c95, g50, g95;
+    pct(m_CpuUs, &c50, &c95);
+    pct(m_GpuUs, &g50, &g95);
+    const QString line = QStringLiteral("recv=%1 drawn=%2 overwritten=%3 errors=%4 renderThread cpu p50=%5 p95=%6 ms "
+                                        "gpu p50=%7 p95=%8 ms mode=%9 %10x%11 stallDropped=%12")
                              .arg(m_Received).arg(m_Drawn).arg(m_Overwritten).arg(m_RenderErrors)
-                             .arg(p50, 0, 'f', 2).arg(p95, 0, 'f', 2)
+                             .arg(c50, 0, 'f', 2).arg(c95, 0, 'f', 2).arg(g50, 0, 'f', 2).arg(g95, 0, 'f', 2)
                              .arg(QLatin1String(modeName(static_cast<int>(m_Mode))))
-                             .arg(m_SwWidth).arg(m_SwHeight);
+                             .arg(m_Sw.width).arg(m_Sw.height).arg(m_TestStallDropped);
     m_Received = m_Drawn = m_Overwritten = m_RenderErrors = 0;
-    m_RenderUs.clear();
+    m_CpuUs.clear();
+    m_GpuUs.clear();
     return line;
 }

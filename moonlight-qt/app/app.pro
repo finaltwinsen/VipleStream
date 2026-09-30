@@ -672,8 +672,8 @@ unix:!macx:openxr {
 
     PKGCONFIG += openxr
     DEFINES += HAVE_OPENXR
-    SOURCES += streaming/xr/xrprobe_instance.cpp streaming/xr/xrcontext.cpp
-    HEADERS += streaming/xr/xrprobe_instance.h streaming/xr/xrcontext.h
+    SOURCES += streaming/xr/xrprobe_instance.cpp streaming/xr/xrcontext.cpp streaming/xr/xrdesktopscreen.cpp
+    HEADERS += streaming/xr/xrprobe_instance.h streaming/xr/xrcontext.h streaming/xr/xrdesktopscreen.h
 }
 win32:openxr {
     message(OpenXR loader enabled (vcpkg))
@@ -681,8 +681,8 @@ win32:openxr {
     INCLUDEPATH += $$(VCPKG_ROOT)/installed/x64-windows/include
     LIBS += -L$$(VCPKG_ROOT)/installed/x64-windows/lib -lopenxr_loader
     DEFINES += HAVE_OPENXR
-    SOURCES += streaming/xr/xrprobe_instance.cpp streaming/xr/xrcontext.cpp
-    HEADERS += streaming/xr/xrprobe_instance.h streaming/xr/xrcontext.h
+    SOURCES += streaming/xr/xrprobe_instance.cpp streaming/xr/xrcontext.cpp streaming/xr/xrdesktopscreen.cpp
+    HEADERS += streaming/xr/xrprobe_instance.h streaming/xr/xrcontext.h streaming/xr/xrdesktopscreen.h
 }
 # §VR M3a X2：XR 影像路徑（libplacebo 共用 XrContext 的 VkDevice）。需要 openxr 與 libplacebo 都有。
 openxr:libplacebo:!macx {

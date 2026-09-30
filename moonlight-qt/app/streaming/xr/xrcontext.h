@@ -46,6 +46,7 @@
 #include <openxr/openxr_platform.h>
 
 class XrVideo;
+class XrDesktopScreen;
 
 class XrContext
 {
@@ -61,6 +62,10 @@ public:
         // X2（dev）：影像 quad 第 N 幀讀回存 PNG（最長邊 ≤ 1280），空字串＝不存
         QString dumpFramePath;
         int dumpAfterFrames = 300;
+        // X3（dev）：第一幀影像 20 s 後丟 testStallMs 毫秒的幀（驗 stale 1 s／5 s 轉換）；0＝不用
+        int testStallMs = 0;
+        // X3（dev）：bring-up 後第 N 秒自動 recenter 一次；0＝不用
+        int testRecenterSec = 0;
     };
 
     struct Stats {
@@ -93,6 +98,9 @@ public:
     void shutdown();
 
     bool isRunning() const { return m_FrameThreadRunning.load(std::memory_order_acquire); }
+
+    // X3：任何執行緒呼叫；frame thread 下一幀依當下頭部水平朝向把螢幕重擺到正前方
+    void requestRecenter();
     bool isLost() const { return m_Lost.load(std::memory_order_acquire); }
     Stats stats() const;
 
@@ -138,7 +146,9 @@ private:
     bool pollEvents();
     void handleStateChange(XrSessionState state);
     void frameThreadMain();
-    bool renderQuad(uint32_t imageIndex);
+    bool clearImage(VkImage img, float r, float g, float b);
+    // X3：loading／狀態 quad 只清一次色，之後的幀重用最後 release 的影像
+    bool ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count, bool* ready, float r, float g, float b);
     void maybeLogStats(uint64_t nowNs);
 
     Options m_Options;
@@ -156,6 +166,22 @@ private:
     int64_t m_QuadFormat = 0;
     uint32_t m_QuadImageCount = 0;
     VkImage* m_QuadImages = nullptr;  // new[]，m_QuadImageCount 個
+    bool m_QuadReady = false;         // loading quad 已清色並 release 過（frame thread）
+    // X3：stale 狀態 quad（影像超過 1 s 沒更新時疊在螢幕上緣之上）
+    XrSwapchain m_StatusSwapchain = XR_NULL_HANDLE;
+    uint32_t m_StatusImageCount = 0;
+    VkImage* m_StatusImages = nullptr;
+    bool m_StatusReady = false;
+    static constexpr uint32_t kStatusW = 256;
+    static constexpr uint32_t kStatusH = 32;
+    XrDesktopScreen* m_Screen = nullptr;  // X3 擺放（frame thread 用；requestRecenter 任何執行緒）
+    int m_StaleState = 0;                 // 0 無影像、1 正常、2 stale（>1 s）、3 lost（>5 s，顯示 loading）
+    bool m_LoggedLayerKind = false;
+    std::vector<uint32_t> m_XrCpuUs;      // 本視窗 XR thread 每幀 CPU 時間（xrWaitFrame 返回→xrEndFrame 返回）
+    uint64_t m_BringUpNs = 0;
+    bool m_TestRecenterDone = false;
+    int m_MissEventsLogged = 0;
+    uint64_t m_DiagWaitNs = 0, m_DiagLockNs = 0, m_DiagBeginNs = 0, m_DiagEndNs = 0;  // X3 漏幀診斷
     XrVersion m_ApiVersion = 0;
     QStringList m_EnabledExtensions;
     QStringList m_ReferenceSpaces;

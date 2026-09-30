@@ -2,16 +2,21 @@
 // 只在 HAVE_OPENXR 且 HAVE_LIBPLACEBO_VULKAN 時編譯。設計：vr_architecture.md §2.4（XrRenderer 與
 // 共用碼、C20 測試實例）。
 //
-// 執行緒模型：
-//   - init()／destroy()：XrContext 的 bring-up／destroyAll（frame thread 未跑或已 join）。
+// 執行緒模型（X3 起）：
+//   - init()／destroy()：XrContext 的 bring-up／destroyAll（XR frame thread 未跑或已 join）。
+//     init 起一條「影像 render thread」，destroy 先停它再放資源。
 //   - submit()：decoder／render thread（XrRenderer::renderFrame）——只把 av_frame_clone 放進
-//     mailbox（latest wins），不碰 GPU。
+//     mailbox（latest wins）並喚醒影像 render thread，不碰 GPU。
 //   - testMap()：decoder thread（XrRenderer::testRenderFrame，C20）——用獨立的 pl_tex 組在同一個
 //     pl_gpu 上真的 map 一次再 unmap；pl_gpu 本身執行緒安全，pl_tex 各執行緒不共用。
-//   - update()：XR frame thread——唯一使用 pl_renderer 與影像 swapchain 的執行緒。有新幀就
+//   - 影像 render thread：唯一使用 pl_renderer 與影像 swapchain 的執行緒。有新幀就
 //     acquire→pl_vulkan_release_ex→pl_map_avframe_ex→pl_render_image→pl_vulkan_hold_ex→
-//     pl_gpu_finish（GPU 確定做完）→pl_unmap_avframe→xrReleaseSwapchainImage；沒有新幀就回傳上次
-//     release 的影像給 layer 用。
+//     pl_gpu_finish（GPU 確定做完才放掉解碼幀）→pl_unmap_avframe→xrReleaseSwapchainImage。
+//     X2 把這串放在 XR frame thread 上，每新幀阻塞約 8 ms、開場 shader 編譯造成漏幀；X3 移出。
+//   - current()／frameEnded()：XR frame thread——只讀「最後一次 release 的影像」（swapchain 保留
+//     最後一幀，就是 XrContext 自有的最後一幀複本：decoder 因 RENDER_DEVICE_RESET 重建時 XrVideo
+//     不動，XR thread 繼續重送）。解析度改變時舊 swapchain 先退休，等 XR thread 用新一代送出
+//     xrEndFrame（frameEnded）後才銷毀，避免 layer 引用已銷毀的 swapchain。
 //
 // swapchain 格式：libplacebo 的 pl_fmt 沒有 sRGB 格式，所以
 //   1. runtime 有 *_SRGB 且接受 MUTABLE_FORMAT：以對應的 UNORM 包裝，libplacebo 直接寫 sRGB 編碼值
@@ -26,8 +31,10 @@
 #include <QString>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include <libplacebo/log.h>
@@ -42,6 +49,16 @@ public:
     struct Config {
         QString dumpPath;          // dev：第 dumpAfterFrames 幀讀回存 PNG（最長邊 ≤ 1280）
         int dumpAfterFrames = 300;
+        // dev：第一幀進來 20 s 後丟掉接下來 testStallMs 毫秒的幀（驗 stale 1 s／5 s 轉換），0＝不用
+        int testStallMs = 0;
+    };
+
+    // XR frame thread 讀取的「目前可顯示影像」
+    struct Current {
+        XrSwapchainSubImage subImage;
+        float aspect = 0.0f;
+        uint64_t generation = 0;
+        uint64_t lastDrawnUs = 0;  // steady clock；最近一次畫出新幀的時間
     };
 
     XrVideo(XrContext* ctx, const Config& config);
@@ -63,8 +80,12 @@ public:
     void submit(const AVFrame* frame);
     bool testMap(const AVFrame* frame);
 
-    // XR frame thread：有可顯示的影像就回 true 並填 subImage 與寬高比
-    bool update(XrSession session, XrSwapchainSubImage* subImage, float* aspect);
+    // XR frame thread：有可顯示的影像（至少 release 過一次）就回 true
+    bool current(Current* out);
+    // XR frame thread：xrEndFrame 已送出引用 generation 這一代 swapchain 的 layer
+    void frameEnded(uint64_t generation);
+    // 暖機：XrContext bring-up 後、第一幀之前可呼叫（目前由 render thread 在第一幀自行處理）
+    void setSession(XrSession session);
 
     // 10 s 統計（XrContext::maybeLogStats 呼叫；回傳後歸零視窗）
     QString takeStatsLine();
@@ -72,11 +93,22 @@ public:
 private:
     enum class TargetMode { None, SrgbMutable, Float16Linear, Unorm8Linear };
 
+    struct SwapchainSet {
+        XrSwapchain swapchain = XR_NULL_HANDLE;
+        int width = 0;
+        int height = 0;
+        std::vector<pl_tex> wrapped;
+        uint64_t generation = 0;
+    };
+
     bool ensureSwapchain(XrSession session, int width, int height);
-    void destroySwapchain();
+    void destroySwapchainSet(SwapchainSet& s);
+    void destroyAllSwapchains();
     bool mapFrame(const AVFrame* frame, pl_frame* out, pl_tex* texSet);
     bool renderNewFrame(AVFrame* frame);
     void dumpTexture(pl_tex tex);
+    void renderThreadMain();
+    void reapRetired();
 
     XrContext* m_Ctx;
     Config m_Config;
@@ -91,21 +123,31 @@ private:
     VkSemaphore m_Sem = VK_NULL_HANDLE;
     uint64_t m_SemValue = 0;
 
-    // 影像 swapchain（XR thread）
-    XrSwapchain m_Swapchain = XR_NULL_HANDLE;
-    int m_SwWidth = 0;
-    int m_SwHeight = 0;
-    int64_t m_SwFormat = 0;       // swapchain 的 VkFormat
+    XrSession m_Session = XR_NULL_HANDLE;
+
+    // 影像 swapchain（render thread 擁有；m_SwMutex 保護「目前」與「退休」清單給 XR thread 讀）
+    SwapchainSet m_Sw;                     // render thread 正在畫的一代
+    int64_t m_SwFormat = 0;                // swapchain 的 VkFormat
     VkFormat m_ViewFormat = VK_FORMAT_UNDEFINED;  // libplacebo 包裝用的格式
     TargetMode m_Mode = TargetMode::None;
-    std::vector<VkImage> m_Images;
-    std::vector<pl_tex> m_Wrapped;
-    bool m_HaveReleased = false;  // 至少 release 過一次才能拿去當 layer
     bool m_LoggedFormat = false;
+    uint64_t m_NextGeneration = 1;
+
+    std::mutex m_SwMutex;
+    bool m_HavePublished = false;          // 至少 release 過一次
+    Current m_Published;                   // XR thread 讀的快照
+    std::vector<SwapchainSet> m_Retired;   // 等 XR thread 送出新一代後銷毀
+    uint64_t m_XrAckGeneration = 0;        // XR thread 最近一次 xrEndFrame 引用的 generation
 
     // mailbox（latest wins）
     std::mutex m_MailboxMutex;
+    std::condition_variable m_MailboxCv;
     AVFrame* m_Pending = nullptr;
+    bool m_StopThread = false;
+    std::thread m_Thread;
+    uint64_t m_FirstSubmitUs = 0;          // stall 測試的起點（submit 端）
+    uint64_t m_TestStallDropped = 0;
+    bool m_TestStallLogged = false;
 
     // 統計
     std::mutex m_StatsMutex;
@@ -113,7 +155,8 @@ private:
     uint64_t m_Overwritten = 0;
     uint64_t m_Drawn = 0;
     uint64_t m_RenderErrors = 0;
-    std::vector<uint32_t> m_RenderUs;  // 本視窗每次 render 的微秒
+    std::vector<uint32_t> m_CpuUs;     // 本視窗每新幀 render thread 的 CPU 時間（不含等 GPU）
+    std::vector<uint32_t> m_GpuUs;     // 本視窗每新幀等 GPU 做完的時間
     uint64_t m_TotalDrawn = 0;         // dump 用（XR thread）
     bool m_Dumped = false;
 };

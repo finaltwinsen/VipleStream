@@ -2397,6 +2397,17 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
     if (decoder_pix_fmts == NULL) {
         // Supported output pixel formats are unknown. We'll just try DRM/SDL and hope it can cope.
 
+#ifdef HAVE_XR_VIDEO
+        // §VR M3a X3：XR 模式的真正串流 decoder 先試不建 GPU 物件的 backend（見 XrSwBackend）
+        if (params->xr != nullptr && !params->testFrameOnly && XrRenderer::available(params->xr)) {
+            XrContext* xr = params->xr;
+            if (tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, nullptr, nullptr,
+                                      [xr]() -> IFFmpegRenderer* { return new XrSwBackend(xr); })) {
+                return true;
+            }
+        }
+#endif
+
 #ifdef HAVE_LIBPLACEBO_VULKAN
         // §J.3.e.2.i — RS_D3D11 設定下要跳過所有 Vulkan renderer，落到
         // SDL D3D11/OpenGL renderer.  否則 SW decode + libplacebo Vulkan

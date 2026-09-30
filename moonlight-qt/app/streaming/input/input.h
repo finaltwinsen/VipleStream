@@ -169,6 +169,7 @@ private:
         KeyComboQuitAndExit,
         KeyComboToggleFRUC,
         KeyComboCancelTransfer,
+        KeyComboXrRecenter,
         KeyComboMax
     };
 
