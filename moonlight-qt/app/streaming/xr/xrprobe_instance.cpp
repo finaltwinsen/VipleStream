@@ -57,6 +57,8 @@
 
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+// 放在 openxr 標頭之後：本檔先定義 XR_USE_TIMESPEC 等巨集，xrcontext.h 若先引入會讓那些原型被 guard 掉
+#include "xrcontext.h"  // XrContext::loadVulkanLoader（Linux dlopen／Windows vulkan-1.dll）
 
 #if __has_include(<openxr/openxr_reflection.h>)
 #include <openxr/openxr_reflection.h>
@@ -452,30 +454,11 @@ QString vkVersionString(uint32_t v)
     return QStringLiteral("%1.%2.%3").arg((v >> 22) & 0x7Fu).arg((v >> 12) & 0x3FFu).arg(v & 0xFFFu);
 }
 
-// vkGetInstanceProcAddr：執行期 dlopen libvulkan.so.1（同 ffmpeg.cpp；app 不連 -lvulkan）。
-// 不 dlclose：runtime 建的 VkInstance 與它自己的 Vulkan 用途都還靠這份 loader。
+// vkGetInstanceProcAddr：執行期載入 Vulkan loader（app 不連 -lvulkan）。M3a X1 起與 XrContext 共用
+// （Linux dlopen libvulkan.so.1、Windows vulkan-1.dll；不卸載）。
 PFN_vkGetInstanceProcAddr loadVulkanGipa(QString* error)
 {
-#if defined(Q_OS_WIN)
-    // Windows 的 OpenXR（S2）在 M3a；這一版的 openxr 區塊只在 unix 編
-    *error = QStringLiteral("not implemented on Windows (M3a)");
-    return nullptr;
-#else
-    static void* s_Lib = nullptr;
-    if (s_Lib == nullptr) {
-        s_Lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
-        if (s_Lib == nullptr) {
-            const char* e = dlerror();
-            *error = QStringLiteral("dlopen(libvulkan.so.1): ") + QString::fromLocal8Bit(e != nullptr ? e : "failed");
-            return nullptr;
-        }
-    }
-    auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(s_Lib, "vkGetInstanceProcAddr"));
-    if (gipa == nullptr) {
-        *error = QStringLiteral("dlsym(vkGetInstanceProcAddr) failed");
-    }
-    return gipa;
-#endif
+    return XrContext::loadVulkanLoader(error);
 }
 
 // XR 的 API 版本需求（XrVersion：16/16/32 bit）轉 Vulkan 的 apiVersion（取 major.minor，至少 1.0）

@@ -6,11 +6,12 @@
 //   2. dev 覆寫：--xr-runtime-json／--loader-debug 在行程內設 XR_RUNTIME_JSON／XR_LOADER_DEBUG
 //      （只影響這個行程；不是使用者設定，不變式 7）
 //   3. 列出 runtime JSON 的探索結果（XrRuntimeJson::candidates／resolveActive）
-//   4. 沒有 HAVE_OPENXR → rc 10；--session → rc 12；否則：
+//   4. 沒有 HAVE_OPENXR → rc 10；否則：
 //      - 只有 host-config 找得到（Flatpak 的 XDG_CONFIG_HOME 看不到 host 的 ~/.config）而且
 //        XR_RUNTIME_JSON 沒設 → 行程內設 XR_RUNTIME_JSON，記進 JSON
 //      - xrProbeInstance()（streaming/xr/xrprobe_instance.cpp）
 //      - rc 13（runtime 載不起來）→ 自己 dlopen runtime JSON 的 library_path，記 dlerror()
+//      - --session 且 A 段 rc 0／14 → B 段：XrContext bring-up＋frame loop（M3a X1），失敗 rc 14
 //   5. JSON 一律寫檔（沒有 OpenXR 的建置也寫：AppImage 上的環境與 runtime JSON 診斷一樣有用）
 
 #include "xrprobe.h"
@@ -20,8 +21,12 @@
 #include "streaming/xr/xrruntimejson.h"
 
 #ifdef HAVE_OPENXR
+#include "streaming/xr/xrcontext.h"
 #include "streaming/xr/xrprobe_instance.h"
 #endif
+
+#include <chrono>
+#include <thread>
 
 #include <QByteArray>
 #include <QFile>
@@ -31,6 +36,7 @@
 #include <QJsonValue>
 #include <QList>
 #include <QString>
+#include <QVariant>
 #include <QtGlobal>
 
 #if defined(Q_OS_LINUX)
@@ -57,6 +63,65 @@ QJsonObject candidateJson(const XrRuntimeJson::Candidate& c)
     }
     return o;
 }
+
+#ifdef HAVE_OPENXR
+// B 段（M3a X1）：XrContext bring-up（READY 等待 20 s：SteamVR 冷啟動常超過 bringUp 預設的
+// 5 s）、跑 frame loop durationSec 秒、收 describe() 與 stats，最後 shutdown。
+int runSessionStage(const XrProbeOptions& options, QJsonObject& out)
+{
+    XrContext::Options xo;
+    xo.applicationName = "VipleStream xr-probe";
+    XrContext ctx(xo);
+    QString err;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!ctx.bringUp(20000, &err)) {
+        out[QStringLiteral("error")] = err;
+        ProbeUtil::printLine(kTag, "session: bring-up failed (%s)", qUtf8Printable(err));
+        return ProbeUtil::kExitRuntimeError;
+    }
+    const auto bringUpMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    out[QStringLiteral("bringUpMs")] = static_cast<double>(bringUpMs);
+    ProbeUtil::printLine(kTag, "session: bring-up %lld ms; running the frame loop for %d s",
+                         static_cast<long long>(bringUpMs), options.durationSec);
+
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(options.durationSec);
+    while (std::chrono::steady_clock::now() < end && ctx.isRunning() && !ctx.isLost()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    const bool endedEarly = !ctx.isRunning() || ctx.isLost();
+    const QJsonObject d = ctx.describe();
+    const XrContext::Stats s = ctx.stats();
+    ctx.shutdown();
+
+    for (auto it = d.begin(); it != d.end(); ++it) {
+        out[it.key()] = it.value();
+    }
+    out[QStringLiteral("endedEarly")] = endedEarly;
+
+    ProbeUtil::printLine(kTag, "session: highest=%s frames=%llu missed=%llu (%.2f%%) warmupMissed=%llu notRendered=%llu endFrameErr=%llu%s",
+                         XrContext::sessionStateName(s.highestState),
+                         static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.missed),
+                         s.missPercent(), static_cast<unsigned long long>(s.warmupMissed),
+                         static_cast<unsigned long long>(s.notRendered),
+                         static_cast<unsigned long long>(s.endFrameErrors), endedEarly ? " (ended early)" : "");
+    ProbeUtil::printLine(kTag, "session: refresh=%.1f Hz period=%.2f ms spaces=[%s] swapchainFmt=%d",
+                         d.value(QStringLiteral("refreshRateHz")).toDouble(),
+                         d.value(QStringLiteral("predictedPeriodMs")).toDouble(),
+                         qUtf8Printable(d.value(QStringLiteral("referenceSpaces")).toVariant().toStringList().join(QLatin1Char(','))),
+                         d.value(QStringLiteral("quadSwapchainFormat")).toInt());
+    const QJsonArray views = d.value(QStringLiteral("views")).toArray();
+    for (int e = 0; e < views.size(); e++) {
+        const QJsonObject v = views.at(e).toObject();
+        ProbeUtil::printLine(kTag, "session: eye %d fov L%.1f R%.1f U%.1f D%.1f deg", e,
+                             v.value(QStringLiteral("angleLeftDeg")).toDouble(), v.value(QStringLiteral("angleRightDeg")).toDouble(),
+                             v.value(QStringLiteral("angleUpDeg")).toDouble(), v.value(QStringLiteral("angleDownDeg")).toDouble());
+    }
+    if (d.contains(QStringLiteral("ipdM"))) {
+        ProbeUtil::printLine(kTag, "session: ipd=%.1f mm", d.value(QStringLiteral("ipdM")).toDouble() * 1000.0);
+    }
+    return s.frames > 0 ? ProbeUtil::kExitOk : ProbeUtil::kExitRuntimeError;
+}
+#endif
 
 QJsonObject resolvedJson(const XrRuntimeJson::Resolved& r)
 {
@@ -304,18 +369,10 @@ int runXrProbe(const XrProbeOptions& options)
     root[QStringLiteral("runtimeJson")] = describeRuntimeJson(nullptr);
     rc = ProbeUtil::kExitNotBuilt;
 #else
-    if (options.session) {
-        ProbeUtil::printLine(kTag, "xr-probe: --session (B stage: session, refresh rate, FOV, rect test) "
-                                   "requires M3a (XrContext); run without --session for the A stage");
-    }
-
     XrRuntimeJson::Resolved res;
     QJsonObject runtimeJson = describeRuntimeJson(&res);
 
-    if (options.session) {
-        rc = ProbeUtil::kExitNeedsLaterMilestone;
-    }
-    else {
+    {
         // Flatpak：loader 只看沙箱的 XDG_CONFIG_HOME（~/.var/app/<id>/config），看不到 host 的
         // ~/.config/openxr。只有 host-config 找得到（或更前面有 loader 會選中卻讀不到的檔案）時，
         // 在行程內指給 loader。使用者自己設了 XR_RUNTIME_JSON 就尊重它。
@@ -333,6 +390,14 @@ int runXrProbe(const XrProbeOptions& options)
         QJsonObject openxr;
         rc = xrProbeInstance(options, openxr);
         root[QStringLiteral("openxr")] = openxr;
+
+        // B 段在 A 段只報 runtime error（instance 建得起來，例如 A 段的 Vulkan 探測失敗）時也跑：
+        // B 段走完整 session 流程，結論以 B 段為準（rc 取 B 段）。runtime 載不起來（13）才跳過。
+        if (options.session && (rc == ProbeUtil::kExitOk || rc == ProbeUtil::kExitRuntimeError)) {
+            QJsonObject session;
+            rc = runSessionStage(options, session);
+            root[QStringLiteral("session")] = session;
+        }
 
         if (rc == ProbeUtil::kExitCapabilityAbsent) {
 #if defined(Q_OS_LINUX)

@@ -92,6 +92,8 @@ public:
     }
 };
 
+class XrContext;  // §VR M3a X1（streaming/xr/xrcontext.h，只在 HAVE_OPENXR 建置）
+
 class Session : public QObject
 {
     Q_OBJECT
@@ -303,6 +305,11 @@ private:
     QQuickWindow* m_QtWindow;
     bool m_UnexpectedTermination;
     SdlInputHandler* m_InputHandler;
+    // §VR M3a X1：--display-target xr-desktop 時在 startConnectionAsync 開頭建立；bring-up 失敗
+    // 就是 nullptr（退回平面，不變式 5）。拆除在 decoder 刪除之後、SDL_DestroyWindow 之前。
+    XrContext* m_XrContext = nullptr;
+    void setupXrDesktop();
+    void destroyXrContext();
     ScHidPassthrough m_ScHid;
     int m_MouseEmulationRefCount;
     int m_FlushingWindowEventsRef;

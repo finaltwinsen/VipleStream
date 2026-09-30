@@ -573,7 +573,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
 
     // VipleStream 2.0 §VR（M1a）— PCVR 協定驗證。這些值只存在這次行程，
     // 不寫入 QSettings（見 StreamingPreferences 的 §VR 欄位註解）。
-    parser.addChoiceOption("display-target", "display target", {"window", "pcvr"});
+    parser.addChoiceOption("display-target", "display target", {"window", "xr-desktop", "pcvr"});
+    parser.addValueOption("xr-runtime-json", "(dev) OpenXR runtime manifest for --display-target xr-desktop (in-process only)");
     parser.addFlagOption("vr-emulate", "synthetic head/controller pose for PCVR (no XR runtime needed)");
     parser.addChoiceOption("vr-synthetic-motion", "synthetic pose motion for --vr-emulate",
                            {"still", "sine", "yaw30"});
@@ -766,10 +767,25 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
 
     // VipleStream 2.0 §VR（M1a）
     if (parser.isSet("display-target")) {
+        const QString dt = parser.getChoiceOptionValue("display-target");
         preferences->displayTarget =
-            parser.getChoiceOptionValue("display-target").compare("pcvr", Qt::CaseInsensitive) == 0
-                ? StreamingPreferences::DT_PCVR : StreamingPreferences::DT_WINDOW;
+            dt.compare("pcvr", Qt::CaseInsensitive) == 0 ? StreamingPreferences::DT_PCVR
+            : dt.compare("xr-desktop", Qt::CaseInsensitive) == 0 ? StreamingPreferences::DT_XR_DESKTOP
+                                                                  : StreamingPreferences::DT_WINDOW;
     }
+    if (parser.isSet("xr-runtime-json")) {
+        const QString path = parser.value("xr-runtime-json");
+        if (path.isEmpty()) {
+            parser.showError("xr-runtime-json requires a file path");
+        }
+        preferences->xrRuntimeJsonPath = QFileInfo(path).absoluteFilePath();
+    }
+#ifndef HAVE_OPENXR
+    if (preferences->displayTarget == StreamingPreferences::DT_XR_DESKTOP) {
+        fprintf(stderr, "Warning: --display-target xr-desktop needs an OpenXR build (CONFIG+=openxr); "
+                        "the stream will use a flat window.\n");
+    }
+#endif
     preferences->vrEmulate = parser.isSet("vr-emulate");
     if (parser.isSet("vr-synthetic-motion")) {
         const QString motion = parser.getChoiceOptionValue("vr-synthetic-motion").toLower();
@@ -972,19 +988,25 @@ void XrProbeCommandLineParser::parse(const QStringList &args)
     parser.setupCommonOptions();
     parser.setApplicationDescription(
         "\n"
-        "Probe the OpenXR runtime at the instance/system level (Steam Frame bring-up).\n"
+        "Probe the OpenXR runtime (Steam Frame bring-up).\n"
         "Loads the OpenXR loader, creates an XrInstance, queries extensions, the HMD\n"
         "system, the stereo view configuration and the Vulkan requirements, then\n"
-        "destroys the instance. A summary goes to stdout; the full result is written\n"
-        "as JSON (its path is printed on stderr).\n"
+        "destroys the instance. With --session it then creates a Vulkan device and an\n"
+        "XrSession, runs the frame loop for --duration seconds (a gray loading quad)\n"
+        "and reports the highest session state, frame count, missed frames, refresh\n"
+        "rate, per-eye FOV and reference spaces. A summary goes to stdout; the full\n"
+        "result is written as JSON (its path is printed on stderr).\n"
         "\n"
-        "Exit codes: 0 runtime loaded, 1 command line error, 10 not built with OpenXR,\n"
-        "12 --session needs a later milestone, 13 no usable runtime, 14 runtime error,\n"
-        "15 JSON write failed."
+        "Exit codes: 0 runtime loaded (and, with --session, frames were submitted),\n"
+        "1 command line error, 10 not built with OpenXR, 13 no usable runtime,\n"
+        "14 runtime error (session failed), 15 JSON write failed."
     );
     parser.addPositionalArgument("xr-probe", "probe the OpenXR runtime");
     parser.addOption(QCommandLineOption("session",
-                                        "Also run the session-level checks (not available in this build; exits with 12)."));
+                                        "Also create an XrSession and run the frame loop (session state, refresh rate, FOV, reference spaces)."));
+    parser.addOption(QCommandLineOption("duration",
+                                        "Seconds to run the frame loop with --session (default 10, 1-600).",
+                                        "seconds"));
     parser.addOption(QCommandLineOption("xr-runtime-json",
                                         "(dev) Load the runtime from this manifest (sets XR_RUNTIME_JSON inside this process only).",
                                         "path"));
@@ -1006,6 +1028,14 @@ void XrProbeCommandLineParser::parse(const QStringList &args)
     rejectExtraPositionals(parser, 1);
 
     m_Options.session = parser.isSet("session");
+    if (parser.isSet("duration")) {
+        bool ok = false;
+        const int d = parser.value("duration").toInt(&ok);
+        if (!ok || d < 1 || d > 600) {
+            parser.showError("duration must be an integer between 1 and 600");
+        }
+        m_Options.durationSec = d;
+    }
     m_Options.loaderDebug = parser.isSet("loader-debug");
     if (parser.isSet("xr-runtime-json")) {
         const QString path = parser.value("xr-runtime-json");

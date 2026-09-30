@@ -424,6 +424,7 @@ public:
     int  vrRefreshHz = 90;
     int  vrInjectDropEvery = 0;      // dev：每 N 個解出的幀丟一幀（模擬 decoder 吞幀），0＝關
     int  vrInjectLossSec = 0;        // dev：每 N 秒注入一次 LOSS，0＝關
+    QString xrRuntimeJsonPath;       // dev（M3a X1）：xr-desktop 的 OpenXR runtime manifest，行程內設 XR_RUNTIME_JSON
 
 signals:
     void displayModeChanged();

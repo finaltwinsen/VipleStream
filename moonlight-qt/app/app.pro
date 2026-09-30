@@ -664,14 +664,23 @@ wayland {
 # VipleStream 2.0 §SF-PROBE（M2a）— OpenXR loader（xr-probe 的 A 段）。
 # 刻意 opt-in、不自動偵測：只有 build-steamframe.sh（Flatpak，兩種 arch）帶 CONFIG+=openxr。
 # x64 AppImage 不帶，即使 builder 裝了 libopenxr-dev 也不會意外連上 loader。
-# Windows 的 OpenXR 留到 M3a。
+# Windows（M3a，S2 用）：本機 build_moonlight.cmd --openxr，loader 走 vcpkg openxr-loader。
 unix:!macx:openxr {
     message(OpenXR loader enabled)
 
     PKGCONFIG += openxr
     DEFINES += HAVE_OPENXR
-    SOURCES += streaming/xr/xrprobe_instance.cpp
-    HEADERS += streaming/xr/xrprobe_instance.h
+    SOURCES += streaming/xr/xrprobe_instance.cpp streaming/xr/xrcontext.cpp
+    HEADERS += streaming/xr/xrprobe_instance.h streaming/xr/xrcontext.h
+}
+win32:openxr {
+    message(OpenXR loader enabled (vcpkg))
+
+    INCLUDEPATH += $$(VCPKG_ROOT)/installed/x64-windows/include
+    LIBS += -L$$(VCPKG_ROOT)/installed/x64-windows/lib -lopenxr_loader
+    DEFINES += HAVE_OPENXR
+    SOURCES += streaming/xr/xrprobe_instance.cpp streaming/xr/xrcontext.cpp
+    HEADERS += streaming/xr/xrprobe_instance.h streaming/xr/xrcontext.h
 }
 
 RESOURCES += \

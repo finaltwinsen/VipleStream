@@ -11,6 +11,10 @@
 #include "backend/richpresencemanager.h"
 #include "backend/hidprobe.h"   // §HID-PROBE
 #include "backend/sfenv.h"      // §SF-ENV（M2a）
+#ifdef HAVE_OPENXR
+#include "streaming/xr/xrcontext.h"  // §VR M3a X1
+#include <QFile>
+#endif
 
 #include <Limelight.h>
 #include "HolePunch.h"  // VipleStream: LocalControlPort global
@@ -1033,6 +1037,9 @@ Session::~Session()
 {
     // NB: This may not get destroyed for a long time! Don't put any non-trivial cleanup here.
     // Use Session::exec() or DeferredSessionCleanupTask instead.
+
+    // §VR M3a X1：正常情況 exec() 已拆掉；這裡只防 exec() 沒跑到的路徑讓 XR session 殘留
+    destroyXrContext();
 
     // VipleStream: safety net for the relay UDP tunnel — normally torn
     // down in the deferred cleanup task after LiStopConnection, but
@@ -2337,12 +2344,58 @@ public:
 };
 
 // Called in a non-main thread
+// §VR M3a X1：XR 虛擬螢幕（β）的 XrContext 在 /launch 與 relay 之前 bring-up（設計 §2.4 ①；
+// PCVR 的 /launch 要先量 FOV 等，β 共用同一個時機）。失敗依不變式 5：/launch 前 → 記原因、
+// 退回平面，不中斷連線。X1 只有 loading quad，影像仍畫在平面視窗（XrRenderer 在 X2）。
+void Session::setupXrDesktop()
+{
+    if (m_Preferences->displayTarget != StreamingPreferences::DT_XR_DESKTOP) {
+        return;
+    }
+#ifdef HAVE_OPENXR
+    if (!m_Preferences->xrRuntimeJsonPath.isEmpty()) {
+        // dev 覆寫（CLI --xr-runtime-json）：只影響這個行程，不是使用者設定（不變式 7）
+        qputenv("XR_RUNTIME_JSON", QFile::encodeName(m_Preferences->xrRuntimeJsonPath));
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev override: XR_RUNTIME_JSON=%s (in-process)",
+                    qUtf8Printable(m_Preferences->xrRuntimeJsonPath));
+    }
+    m_XrContext = new XrContext();
+    QString err;
+    if (!m_XrContext->bringUp(5000, &err)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] xr-desktop unavailable (%s) - falling back to the flat window (invariant 5)",
+                    qUtf8Printable(err));
+        delete m_XrContext;
+        m_XrContext = nullptr;
+        return;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-XR] xr-desktop session running (X1: loading quad only; video stays in the flat window)");
+#else
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-XR] xr-desktop requested but this build has no OpenXR - falling back to the flat window");
+#endif
+}
+
+void Session::destroyXrContext()
+{
+#ifdef HAVE_OPENXR
+    if (m_XrContext != nullptr) {
+        m_XrContext->shutdown();
+        delete m_XrContext;
+    }
+#endif
+    m_XrContext = nullptr;
+}
+
 bool Session::startConnectionAsync()
 {
     // The UI should have ensured the old game was already quit
     // if we decide to stream a different game.
     Q_ASSERT(m_Computer->currentGameId == 0 ||
              m_Computer->currentGameId == m_App.id);
+
+    setupXrDesktop();  // §VR M3a X1：/launch、relay 之前
 
     bool enableGameOptimizations;
     if (m_Computer->isNvidiaServerSoftware) {
@@ -3063,6 +3116,7 @@ void Session::exec()
     if (!m_AsyncConnectionSuccess) {
         delete m_InputHandler;
         m_InputHandler = nullptr;
+        destroyXrContext();  // §VR M3a X1
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
         return;
@@ -3150,6 +3204,7 @@ void Session::exec()
 
             delete m_InputHandler;
             m_InputHandler = nullptr;
+            destroyXrContext();  // §VR M3a X1
             SDL_QuitSubSystem(SDL_INIT_VIDEO);
             QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
             return;
@@ -3802,6 +3857,10 @@ DispatchDeferredCleanup:
         }
 #endif
     }
+
+    // §VR M3a X1：XrContext 在 decoder 之後、視窗之前拆（設計 §2.4 ④；X2 起 XrRenderer 屬於
+    // decoder，先刪 decoder 才能停 XR frame thread）
+    destroyXrContext();
 
     // This must be called after the decoder is deleted, because
     // the renderer may want to interact with the window
