@@ -52,6 +52,8 @@ VipleStream S1（Monado 無頭）XR 驗測（dev-only）
   --arch ARCH         flatpak run 的 arch（預設本機 uname -m；兩種 arch 都裝時不寫可能挑到 qemu 的 aarch64）
   --display-target T  串流的顯示目標：xr-desktop（預設，β 虛擬螢幕）或 pcvr（M4a，projection＋XR tracking）
   --rotate            模擬 HMD 持續旋轉（Monado SIMULATED_ROTATE=1；只在本腳本起 monado 時生效），用來驗 pose 會變
+  --controllers TYPE  模擬左右控制器（Monado SIMULATED_LEFT／SIMULATED_RIGHT，例：simple、wmr、ml2；只在本腳本起
+                      monado 時生效）。模擬控制器不會自己按鍵，按鍵用串流參數 --vr-test-input 合成（M4a R2）
   -h, --help          顯示這段說明
 
 結束碼：0 xr-probe 成功（與串流結果無關，串流看摘要）；1 參數錯誤；2 前置條件不足；3 xr-probe 失敗。
@@ -72,6 +74,7 @@ while [ $# -gt 0 ]; do
 		--branch) BRANCH=${2:?}; shift 2 ;;
 		--display-target) TARGET=${2:?}; shift 2 ;;
 		--rotate) ROTATE=1; shift ;;
+		--controllers) CONTROLLERS=${2:?}; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "未知參數：$1（--help 看用法）" 1>&2; exit 1 ;;
 	esac
@@ -98,6 +101,10 @@ CJSON=$(ldd "$MONADO_LIB" | awk '/libcjson/ {print $3}')
 # ── 1. Monado ──
 TARGET=${TARGET:-xr-desktop}
 ROTATE=${ROTATE:-0}
+CONTROLLERS=${CONTROLLERS:-}
+case "$CONTROLLERS" in ""|simple|wmr|ml2) ;; *) echo "--controllers 只能是 simple、wmr 或 ml2" 1>&2; exit 1 ;; esac
+CTRL_ENV=""
+[ -n "$CONTROLLERS" ] && CTRL_ENV="SIMULATED_LEFT=$CONTROLLERS SIMULATED_RIGHT=$CONTROLLERS"
 case "$TARGET" in xr-desktop|pcvr) ;; *) echo "--display-target 只能是 xr-desktop 或 pcvr" 1>&2; exit 1 ;; esac
 
 STARTED_MONADO=0
@@ -107,7 +114,7 @@ if pgrep -x monado-service >/dev/null; then
 else
 	rm -f "$XDG_RUNTIME_DIR/monado.pid"
 	# monado-service 會 epoll 監看 stdin，/dev/null 會讓它起不來；給一條不會結束的 pipe
-	nohup setsid bash -c "tail -f /dev/null | XRT_COMPOSITOR_NULL=1 XRT_COMPOSITOR_DEFAULT_FRAMERATE=90 SIMULATED_ENABLE=1 SIMULATED_ROTATE=$ROTATE exec monado-service" \
+	nohup setsid bash -c "tail -f /dev/null | XRT_COMPOSITOR_NULL=1 XRT_COMPOSITOR_DEFAULT_FRAMERATE=90 SIMULATED_ENABLE=1 SIMULATED_ROTATE=$ROTATE $CTRL_ENV exec monado-service" \
 		> "$OUT/monado.log" 2>&1 < /dev/null &
 	# 非互動腳本的背景工作不是行程群組 leader，setsid 會直接 exec：$! 即新 session 的 leader，
 	# 也就是這組 bash／tail／monado-service 的行程群組 id（清理時只停這一組）

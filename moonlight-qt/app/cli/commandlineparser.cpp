@@ -579,6 +579,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("xr-test-stall-ms", "(dev) drop video frames for N ms starting 20 s after the first XR frame (stale-state test)");
     parser.addValueOption("xr-test-recenter-sec", "(dev) recenter the XR screen once N seconds after XR bring-up");
     parser.addFlagOption("xr-test-pointer", "(dev) synthetic XR pointer ray (4 s circle, trigger click at the top) instead of the controllers");
+    parser.addFlagOption("vr-test-input", "(dev) PCVR: synthetic 8 s controller button sequence (A, B, trigger ramp, stick, grip, menu+trigger system combo) packed into 0x5506; poses still come from the runtime");
+    parser.addFlagOption("vr-test-haptic", "(dev) PCVR: inject a local HAPTIC message every 3 s (alternating hands) through the VR_S2C path");
     parser.addValueOption("xr-test-keyboard", "(dev) open the XR virtual keyboard 5 s after the screen is placed and type this text with a synthetic ray");
     parser.addValueOption("xr-dump-keyboard", "(dev) save the XR virtual keyboard texture as PNG (longest side <= 1280)");
     parser.addChoiceOption("xr-test-fail", "(dev) XR failure injection: bringup (fail before /launch), loss (LOSS_PENDING 15 s in, rebuild succeeds), loss3 (loss, all rebuilds fail -> flat), exit (runtime exit 15 s in -> flat)",
@@ -823,6 +825,12 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
     if (parser.isSet("xr-test-pointer")) {
         preferences->xrTestPointer = true;
+    }
+    if (parser.isSet("vr-test-input")) {
+        preferences->vrTestInput = true;
+    }
+    if (parser.isSet("vr-test-haptic")) {
+        preferences->vrTestHaptic = true;
     }
     if (parser.isSet("xr-test-fail")) {
         preferences->xrTestFail = parser.getChoiceOptionValue("xr-test-fail").toLower();

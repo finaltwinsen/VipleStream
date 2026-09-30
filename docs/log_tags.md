@@ -769,6 +769,32 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
   eyeToHead，fov 用量測值（＝協商值，overscan 0）。
 - XR 在 VR session 建立之後失效：先停 tracking、拆 XR、結束串流（`/cancel` 與 UI 錯誤訊息待後續切片）。
 
+### `[VIPLE-VR-INPUT]`／`[VIPLE-VR-HAPTIC]` —— PCVR 控制器與震動（M4a R2）
+
+`streaming/xr/xrvrcontrollers.cpp`、`streaming/xr/xrcontext.cpp`、`streaming/session.cpp`（`handleVrMessage`）
+
+```
+[VIPLE-VR-INPUT] bindings accepted: <profile> (N)             ← 完整清單被拒時：… full binding list rejected, retrying core set
+[VIPLE-VR-INPUT] interaction profile L|R: <profile>
+[VIPLE-VR-INPUT] 10s L active=0|1 edges=N pressCtr=0x… | R active=… | focused=0|1 systemCombos=N focusLoss=N | haptic applied=N failed=N dropped=N
+[VIPLE-VR-HAPTIC] rx=N queued=N device=1|2 dur=<us> freq=<Hz> amp=<0-1> id=N   ← 前 3 則與每 50 則印一次
+[VIPLE-VR-HAPTIC] xrApplyHapticFeedback(L|R): <XrResult>        ← 前 3 次失敗
+```
+
+- PCVR 取代 β 的 XrInput（一個 session 只 attach 一組 action set）：grip pose（含速度）→ 0x5506 `pose[LEFT/RIGHT]`
+  （server 自己套 raw_from_grip）；按鍵依 `docs/vr_protocol.md` 的按鍵 bit 填 `buttons／touches`，`pressCtr` 每鍵 2 bit
+  按下邊緣計數；trigger／grip 0–65535、搖桿 ±32767、battery 255（未知）；`flags` b0 active（pose 有效）、b1 focused。
+- 綁定：simple（select 當 trigger）、Oculus Touch（左 x/y/menu、右 a/b/system，trigger／squeeze 以 0.70 推 click）、
+  Valve Index（兩手 a/b、system、trigger click）、Frame（`frame_controller_valve`：右 a/b/menu；左 dpad_down→A/X、
+  dpad_up→B/Y、view→MENU，**左手幾何待實機確認**）。
+- 沒有 FOCUSED：按鍵與類比值全部放開（pressCtr 不動）。同一手 menu＋trigger 按住 1 s → SYSTEM（期間遮掉 MENU 與
+  TRIGGER），`systemCombos` 計數。
+- haptic：0x5508/01 在 main thread 解析 → `XrContext::queueHaptic` → XR frame thread `xrApplyHapticFeedback`
+  （duration 0＝最短、freq 0＝未指定）。**server 目前沒有送 HAPTIC**：driver 已把 SteamVR 的震動推進 IPC，但
+  `vr::set_haptic_sink` 沒有人註冊（待做）。
+- dev：`stream --vr-test-input`（8 s 一輪合成按鍵：右 A、B、trigger 漸進、搖桿；左 grip、menu＋trigger 1.4 s →
+  SYSTEM）、`--vr-test-haptic`（每 3 s 本地注入一則 HAPTIC，走 clVrMessage 同一路徑）。
+
 ### `[VIPLE-XR-INPUT]` —— XR 控制器射線滑鼠（M3a X4）
 
 `streaming/xr/xrinput.cpp`、`streaming/xr/xrkeyboard.cpp`、`streaming/input/mouse.cpp`（`handleXrPointer/Button/Scroll/Key`）

@@ -390,6 +390,11 @@ private:
     uint32_t m_VrServerStatsCount = 0;
     uint32_t m_VrServerStatsLastLogMs = 0;
     uint32_t m_VrRefreshStartRx = 0;
+    // M4a R2：HAPTIC 接收／交給 XrContext 的計數；--vr-test-haptic（dev）的注入計時器與序號
+    uint32_t m_VrHapticRx = 0;
+    uint32_t m_VrHapticQueued = 0;
+    SDL_TimerID m_VrTestHapticTimer = 0;
+    std::atomic<uint32_t> m_VrTestHapticSeq { 0 };
 
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
     static Session* s_ActiveSession;

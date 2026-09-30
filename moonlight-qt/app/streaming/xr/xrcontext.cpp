@@ -2,6 +2,7 @@
 
 #include "xrcontext.h"
 #include "xrdesktopscreen.h"
+#include <Limelight.h>  // M4a R2：VIPLE_VR_TRACKING（sampleControllers）
 
 #ifdef HAVE_XR_VIDEO
 #include "xrvideo.h"
@@ -984,6 +985,15 @@ bool XrContext::createSolidSwapchain(uint32_t w, uint32_t h, XrSwapchain* sc, Vk
 
 bool XrContext::createActions(QString* error)
 {
+    if (m_Options.pcvr) {
+        // M4a R2：PCVR 的控制器（grip pose、按鍵、haptic）→ 0x5506
+        m_VrCtl = new XrVrControllers(m_Options.testVrInput);
+        if (!m_VrCtl->create(m_Instance, m_Session, m_EnabledExtensions, error)) {
+            return false;
+        }
+        m_ActionSet = m_VrCtl->actionSet();
+        return true;
+    }
     // X4：action set、actions、各 profile 綁定、attach 與 aim space 全交給 XrInput
     m_Input = new XrInput(m_Options.inputSink, m_Options.testPointer, m_Options.testKeyboardText);
     if (!m_Input->create(m_Instance, m_Session, m_EnabledExtensions, error)) {
@@ -1040,6 +1050,9 @@ bool XrContext::pollEvents()
         case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
             if (m_Input != nullptr) {
                 m_Input->onProfileChanged();
+            }
+            if (m_VrCtl != nullptr) {
+                m_VrCtl->onProfileChanged();
             }
             break;
         default:
@@ -1402,6 +1415,9 @@ void XrContext::maybeLogStats(uint64_t nowNs)
     if (!m_Options.pcvr && m_Input != nullptr) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] 10s %s", qUtf8Printable(m_Input->takeStatsLine()));
     }
+    if (m_VrCtl != nullptr) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-INPUT] 10s %s", qUtf8Printable(m_VrCtl->takeStatsLine()));
+    }
 }
 
 void XrContext::frameThreadMain()
@@ -1491,6 +1507,11 @@ void XrContext::frameThreadMain()
         }
         if (m_Options.pcvr) {
             pcvrAfterWaitFrame(fs.predictedDisplayTime, static_cast<uint64_t>(fs.predictedDisplayPeriod));
+            if (m_VrCtl != nullptr) {
+                // M4a R2：按鍵快照＋frameloop 的 grip pose（xrSyncActions 已在本幀 xrWaitFrame 前做過）
+                m_VrCtl->updateFrame(fs.predictedDisplayTime, m_State.load() == XR_SESSION_STATE_FOCUSED, m_TrackSpace);
+                m_VrCtl->applyPendingHaptics();
+            }
         }
         XrFrameBeginInfo bfi = xrStruct<XrFrameBeginInfo>(XR_TYPE_FRAME_BEGIN_INFO);
         XrResult br;
@@ -2082,6 +2103,26 @@ bool XrContext::sampleHmd(float pos[3], float rot[4], float linVel[3], float ang
     return true;
 }
 
+void XrContext::sampleControllers(VIPLE_VR_TRACKING* sample)
+{
+    if (m_VrCtl == nullptr || !m_SessionBegun.load()) {
+        return;
+    }
+    XrTime xrTime = 0;
+    XrTime xrNow = 0;
+    if (m_TimeConv != nullptr && nowXrTime(&xrNow)) {
+        xrTime = xrNow + (m_PredictAheadNs > 0 ? m_PredictAheadNs : 20000000);
+    }
+    m_VrCtl->fill(sample, m_TrackSpace, xrTime);
+}
+
+void XrContext::queueHaptic(uint8_t device, uint32_t durationUs, float frequencyHz, float amplitude)
+{
+    if (m_VrCtl != nullptr) {
+        m_VrCtl->queueHaptic(device, durationUs, frequencyHz, amplitude);
+    }
+}
+
 bool XrContext::waitViews(ViewInfo* out, int timeoutMs)
 {
     std::unique_lock<std::mutex> lk(m_StatsMutex);
@@ -2302,6 +2343,11 @@ void XrContext::destroyAll()
         m_Input->destroy();  // aim space／actions／action set，要在 session 之前
         delete m_Input;
         m_Input = nullptr;
+    }
+    if (m_VrCtl != nullptr) {
+        m_VrCtl->destroy();  // grip space／actions／action set，要在 session 之前
+        delete m_VrCtl;
+        m_VrCtl = nullptr;
     }
     m_ActionSet = XR_NULL_HANDLE;
     if (m_FadeSwapchain != XR_NULL_HANDLE) {

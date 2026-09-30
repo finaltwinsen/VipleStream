@@ -49,6 +49,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "xrinput.h"
+#include "xrvrcontrollers.h"
 
 class XrVideo;
 class XrDesktopScreen;
@@ -91,6 +92,8 @@ public:
         // M4a R1：PCVR 模式——影像以 projection layer 呈現（pose＝0x81 帶回的 renderPose∘eyeToHead），
         // 不建 β 的射線滑鼠／鍵盤；參考空間 STAGE→LOCAL_FLOOR→LOCAL；stale 100 ms 淡出、250 ms loading。
         bool pcvr = false;
+        // M4a R2（dev）：PCVR 控制器按鍵改用合成序列（pose 仍來自 runtime），驗 0x5506 打包
+        bool testVrInput = false;
     };
 
     // M4a R1：bring-up 後量到的顯示參數（/launch 的 vrFov、vrIpd、vrEyeToHead、vrHz、vrPeriodNs 來源）
@@ -179,6 +182,12 @@ public:
     // 時當下直接 xrLocateSpace（thread 模式，2×Hz 都是新樣本）；沒有時沿用 frame loop 最近一次 locate
     // （frameloop 模式）。還沒有有效 pose 回 false。
     bool sampleHmd(float pos[3], float rot[4], float linVel[3], float angVel[3], uint32_t* predictNs);
+    // M4a R2：tracking 送出執行緒填左右控制器（pose[LEFT/RIGHT]、input[0/1]、flags 的 LEFT/RIGHT）。
+    // thread 模式當下 locate grip；frameloop 模式沿用 frame loop 最近一次的 grip pose。
+    void sampleControllers(struct _VIPLE_VR_TRACKING* sample);
+    // M4a R2：main thread 放進 haptic 佇列，XR frame thread 呼叫 xrApplyHapticFeedback。
+    // device 1＝左、2＝右（VIPLE_VR_POSE_LEFT/RIGHT）
+    void queueHaptic(uint8_t device, uint32_t durationUs, float frequencyHz, float amplitude);
     bool trackingThreadMode() const { return m_TimeConv != nullptr; }
 
     // 執行期載入 Vulkan loader（Linux：libvulkan.so.1；Windows：vulkan-1.dll），app 不連 -lvulkan。
@@ -221,6 +230,8 @@ private:
     // X4：XrInput 擁有 action set／actions／aim space（射線滑鼠）；m_ActionSet 只是它的 handle 副本。
     XrActionSet m_ActionSet = XR_NULL_HANDLE;
     XrInput* m_Input = nullptr;
+    // M4a R2：PCVR 模式的控制器（取代 XrInput；一個 session 只能 attach 一組 action set）
+    XrVrControllers* m_VrCtl = nullptr;
     // X4：指標 quad（白色小方塊，畫在命中點）
     XrSwapchain m_PointerSwapchain = XR_NULL_HANDLE;
     uint32_t m_PointerImageCount = 0;

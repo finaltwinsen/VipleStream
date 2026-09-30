@@ -983,5 +983,10 @@ VipleStream xr-probe --selftest-ray                                         # �
   --stream-args '--no-quic --vr-eye 1024x1024'`（`--rotate` 讓 Monado 模擬 HMD 旋轉；server 需 `vr_pcvr = stub` 或
   `enabled`）。2026-09-30 對本機 service（stub）60 s：projection 每 10 s 約 200 幀（20 Hz 每幀）、noMeta 0～1、回聲
   100%、tracking thread 模式 120/s、XR 漏幀 0%；`--xr-test-stall-ms 400`：live→fade（124 ms）→loading（274 ms）→live。
-- 待辦：控制器（0x5506 的 LEFT／RIGHT 與按鍵）、LATCH、haptic、XR 在 VR session 後失效時的 `/cancel`、Hz 夾值時
-  period 與實際顯示不符的影響（S1 限定）、真 driver（`vr_pcvr = enabled`）端到端。
+- **M4a R2 控制器與 haptic**：0x5506 帶左右 grip pose、按鍵、pressCtr、flags；menu＋trigger 1 s → SYSTEM；
+  0x5508 HAPTIC → `xrApplyHapticFeedback`（log 見 `log_tags.md` 的 `[VIPLE-VR-INPUT]`）。S1 加
+  `--controllers simple`（Monado 模擬左右控制器）與串流參數 `--vr-test-input --vr-test-haptic`：2026-09-30 對本機
+  service（stub）45 s：兩手 active、tracking 120/s、pressCtr 與合成序列相符（左 SYSTEM／MENU／TRIGGER／GRIP、右
+  A／B／TRIGGER）、systemCombos 每 8 s 一次、haptic applied 2～4／10 s、failed 0、XR 漏幀 0%、回聲 100%。
+- 待辦：server 送 HAPTIC（`set_haptic_sink` 未註冊）、Frame 左手面鍵幾何、LATCH、XR 在 VR session 後失效時的
+  `/cancel`、Hz 夾值時 period 與實際顯示不符的影響（S1 限定）、真 driver（`vr_pcvr = enabled`）端到端。

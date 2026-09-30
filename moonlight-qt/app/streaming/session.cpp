@@ -604,7 +604,25 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
             m_VrRefreshStartRx++;
             break;
         case VIPLE_VR_S2C_HAPTIC:
-            // M4a 才接控制器震動
+            // M4a R2：控制器震動 → XrContext haptic 佇列 → XR frame thread xrApplyHapticFeedback。
+            // 本函式與 destroyXrContext 都在 main thread，不會與拆除競爭
+            if (len >= sizeof(VIPLE_VR_TLV_HAPTIC)) {
+                VIPLE_VR_TLV_HAPTIC h;
+                memcpy(&h, payload, sizeof(h));
+                m_VrHapticRx++;
+#ifdef HAVE_OPENXR
+                if (m_XrPcvr && m_XrContext != nullptr) {
+                    m_XrContext->queueHaptic(h.device, h.durationUs, h.frequencyHz, h.amplitude);
+                    m_VrHapticQueued++;
+                }
+#endif
+                if (m_VrHapticRx <= 3 || m_VrHapticRx % 50 == 0) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VR-HAPTIC] rx=%u queued=%u device=%u dur=%u us freq=%.0f Hz amp=%.2f id=%u",
+                                m_VrHapticRx, m_VrHapticQueued, h.device, h.durationUs,
+                                (double)h.frequencyHz, (double)h.amplitude, h.eventId);
+                }
+            }
             break;
         default:
             // 不認得的 subtype 依 len 跳過（前向相容）
@@ -2424,6 +2442,7 @@ bool Session::createXrContext(bool isRebuild, QString* error)
 #ifdef HAVE_OPENXR
     XrContext::Options xo;
     xo.pcvr = m_XrPcvr;  // M4a R1
+    xo.testVrInput = m_Preferences->vrTestInput;  // M4a R2（dev）：--vr-test-input
     xo.dumpFramePath = isRebuild ? QString() : m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
     xo.testStallMs = isRebuild ? 0 : m_Preferences->xrTestStallMs;             // dev：--xr-test-stall-ms
     xo.testRecenterSec = isRebuild ? 0 : m_Preferences->xrTestRecenterSec;     // dev：--xr-test-recenter-sec
@@ -2633,6 +2652,11 @@ void Session::xrRecenter()
 
 void Session::destroyXrContext()
 {
+    // M4a R2（dev）：--vr-test-haptic 的注入計時器要在 XrContext 拆除前移除
+    if (m_VrTestHapticTimer != 0) {
+        SDL_RemoveTimer(m_VrTestHapticTimer);
+        m_VrTestHapticTimer = 0;
+    }
     // §VR M3a X5：取消尚未觸發的重建計時，並讓已排隊的 SDL_CODE_XR_REBUILD 失效
     if (m_XrRebuildTimer != 0) {
         SDL_RemoveTimer(m_XrRebuildTimer);
@@ -3356,11 +3380,38 @@ bool Session::startConnectionAsync()
                 }
                 s->flags = VIPLE_VR_TRK_HMD | VIPLE_VR_TRK_PRESENCE;
                 s->predictNs = predict;
+                // M4a R2：左右控制器（pose、按鍵、pressCtr、flags active／focused）
+                xr->sampleControllers(s);
                 return true;
             }, m_XrContext->trackingThreadMode() ? "xr-thread" : "xr-frameloop");
         }
 #endif
         m_VrTracking.start(m_StreamConfig.fps, motion);
+#ifdef HAVE_OPENXR
+        if (m_XrPcvr && m_Preferences->vrTestHaptic && m_VrTestHapticTimer == 0) {
+            // M4a R2（dev）：每 3 s 本地注入一則 HAPTIC（左右交替），走與 server 訊息相同的
+            // clVrMessage → SDL_USEREVENT → handleVrMessage 路徑。destroyXrContext 前移除
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HAPTIC] dev --vr-test-haptic: injecting a local HAPTIC every 3 s");
+            m_VrTestHapticTimer = SDL_AddTimer(3000, [](Uint32 interval, void* param) -> Uint32 {
+                auto* self = static_cast<Session*>(param);
+                const uint32_t n = ++self->m_VrTestHapticSeq;
+                uint8_t tlv[2 + sizeof(VIPLE_VR_TLV_HAPTIC)] = {};
+                tlv[0] = VIPLE_VR_S2C_HAPTIC;
+                tlv[1] = (uint8_t)sizeof(VIPLE_VR_TLV_HAPTIC);
+                VIPLE_VR_TLV_HAPTIC h;
+                memset(&h, 0, sizeof(h));
+                h.device = (n & 1) ? VIPLE_VR_POSE_LEFT : VIPLE_VR_POSE_RIGHT;
+                h.durationUs = 120000;
+                h.frequencyHz = 160.0f;
+                h.amplitude = 0.6f;
+                h.eventId = n;
+                memcpy(tlv + 2, &h, sizeof(h));
+                self->clVrMessage(tlv, (int)sizeof(tlv));
+                return interval;
+            }, this);
+        }
+#endif
     }
 
     // [VIPLE-SESSION] 一行結構化 session 標記：每秒遙測行不帶 host/codec，
