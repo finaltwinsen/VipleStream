@@ -388,8 +388,16 @@ typedef struct vripc_ctrl_input_t { /* 與 0x5506 input 區塊逐欄相同 */
   int16_t stick_y;
   uint8_t battery;
   uint8_t flags; /* b0 active、b1 focused */
-  uint16_t reserved;
+  uint8_t profile; /* VIPLE_VR_CTRL_PROFILE_*（M4a 收尾；原 reserved 低位元組，位移不變、舊端為 0＝未知） */
+  uint8_t reserved;
 } vripc_ctrl_input_t;
+
+/* vripc_ctrl_input_t.profile：與 VipleVr.h 的 VIPLE_VR_CTRL_PROFILE_* 同值（driver 不 include common-c） */
+#define VRIPC_CTRL_PROFILE_UNKNOWN 0u
+#define VRIPC_CTRL_PROFILE_TOUCH 1u
+#define VRIPC_CTRL_PROFILE_INDEX 2u
+#define VRIPC_CTRL_PROFILE_FRAME 3u
+#define VRIPC_CTRL_PROFILE_OTHER 4u
 
 typedef struct vripc_tracking_slot_t { /* 寫入方：server（bridge 的 writer mutex 內）；per-slot seqlock */
   uint64_t seq; /* 2*idx+1 寫入中、2*idx+2 完成（idx 編進 seq 防 ABA） */

@@ -203,7 +203,7 @@ void XrVideo::reapRetired()
     }
 }
 
-void XrVideo::destroy()
+void XrVideo::destroy(bool gpuWedged)
 {
     m_Usable.store(false, std::memory_order_release);
     {
@@ -213,6 +213,34 @@ void XrVideo::destroy()
     m_MailboxCv.notify_all();
     if (m_Thread.joinable()) {
         m_Thread.join();
+    }
+    if (gpuWedged) {
+        // 所有 libplacebo 釋放都會等 GPU：只收掉 XR swapchain handle 與沒被 GPU 參照的 mailbox 幀，其餘洩漏
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] video: GPU wedged - leaking libplacebo objects and %d in-flight frame(s)",
+                    static_cast<int>(m_WedgedFrames.size()));
+        for (SwapchainSet* s : {&m_Sw}) {
+            if (s->swapchain != XR_NULL_HANDLE) {
+                xrDestroySwapchain(s->swapchain);
+                s->swapchain = XR_NULL_HANDLE;
+            }
+        }
+        for (SwapchainSet& s : m_Retired) {
+            if (s.swapchain != XR_NULL_HANDLE) {
+                xrDestroySwapchain(s.swapchain);
+                s.swapchain = XR_NULL_HANDLE;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(m_MailboxMutex);
+            av_frame_free(&m_Pending);
+        }
+        m_WedgedFrames.clear();  // 刻意不 free
+        m_Vulkan = nullptr;
+        m_Renderer = nullptr;
+        m_Sem = VK_NULL_HANDLE;
+        m_Log = nullptr;
+        return;
     }
     if (m_Vulkan != nullptr) {
         pl_gpu_finish(m_Vulkan->gpu);
@@ -574,8 +602,17 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     hp.semaphore.value = ++m_SemValue;
     const bool held = pl_vulkan_hold_ex(g, &hp);
     const uint64_t tCpuEnd = nowUs();
-    // GPU 做完才 release 給 runtime、才放掉解碼幀（pl_gpu_finish 會等到 hold 的 semaphore 觸發）。
-    // X3 起這裡是影像 render thread，不再阻塞 XR frame thread。
+    // GPU 做完才 release 給 runtime、才放掉解碼幀。X3 起這裡是影像 render thread，不再阻塞 XR frame thread。
+    // M4a 收尾：先以有上限的 timeline 等待確認 hold 的 semaphore 到了（pl_gpu_finish 沒有逾時；runtime 串流
+    // 中死掉時 GPU 工作可能永遠等不到結果，R4 在 S1 卡了 7 分鐘），到了再 pl_gpu_finish（此時立即返回）。
+    if (held && !m_Ctx->waitSemaphoreBounded(m_Sem, hp.semaphore.value, 1000000000ull)) {
+        m_WedgedFrames.push_back(frame);  // 仍被 GPU 參照：不 unmap、不 free
+        m_Ctx->markGpuWedged("video render did not finish within 1 s");
+        markUnusable("GPU wedged");
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        m_RenderErrors++;
+        return false;
+    }
     pl_gpu_finish(g);
     const uint64_t tGpuEnd = nowUs();
     if (mappedOk) {
@@ -635,6 +672,11 @@ void XrVideo::renderThreadMain()
         }
         reapRetired();
         if (f == nullptr) {
+            continue;
+        }
+        if (m_Ctx->gpuWedged()) {
+            // M4a 收尾：已判定 GPU 卡住——不再送新工作（新工作只會跟著卡住）
+            av_frame_free(&f);
             continue;
         }
         if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, f->width, f->height)) {

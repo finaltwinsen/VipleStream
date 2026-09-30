@@ -562,6 +562,7 @@ void XrVrControllers::fill(_VIPLE_VR_TRACKING* sample, XrSpace trackSpace, XrTim
         in.battery = 255;  // runtime 沒有標準的電量 API
         in.flags = static_cast<uint8_t>((active ? VIPLE_VR_CTRL_ACTIVE : 0) |
                                         ((focused || m_TestInput) ? VIPLE_VR_CTRL_FOCUSED : 0));
+        in.profile = m_Profile[h].load(std::memory_order_relaxed);  // M4a 收尾：server 選控制器外觀
         in.reserved = 0;
     }
 }
@@ -620,10 +621,18 @@ void XrVrControllers::onProfileChanged()
         }
         char buf[XR_MAX_PATH_LENGTH] = "(none)";
         uint32_t n = 0;
-        if (st.interactionProfile != XR_NULL_PATH) {
-            xrPathToString(m_Instance, st.interactionProfile, sizeof(buf), &n, buf);
+        uint8_t profile = VIPLE_VR_CTRL_PROFILE_UNKNOWN;
+        if (st.interactionProfile != XR_NULL_PATH &&
+            XR_SUCCEEDED(xrPathToString(m_Instance, st.interactionProfile, sizeof(buf), &n, buf))) {
+            const QByteArray p(buf);
+            profile = p.contains("/touch_controller") ? VIPLE_VR_CTRL_PROFILE_TOUCH
+                    : p.contains("/index_controller") ? VIPLE_VR_CTRL_PROFILE_INDEX
+                    : p.contains("/frame_controller") ? VIPLE_VR_CTRL_PROFILE_FRAME
+                                                       : VIPLE_VR_CTRL_PROFILE_OTHER;
         }
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-INPUT] interaction profile %s: %s", handName(h), buf);
+        m_Profile[h].store(profile, std::memory_order_relaxed);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-INPUT] interaction profile %s: %s (wire profile %u)",
+                    handName(h), buf, static_cast<unsigned>(profile));
     }
 }
 

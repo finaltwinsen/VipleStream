@@ -33,8 +33,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Sunshine\src\platform\window
 `--peer-escalate`、`--peer-no-flush`、`--peer-no-render`、`--hello-repeat N [--hello-interval-ms M]`、`--pipe NAME`
 （不存在的 pipe 會一直重試到 `--seconds` 用完）。`--peer-gpu-hold-ms` 在 V3 實作。
 
-兩種模式都在最前面印 `abi-row <key>=<value>` ×305 與 `abi-rows count=<n> digest=<16 hex>`，selftest T6 與
+兩種模式都在最前面印 `abi-row <key>=<value>` ×306 與 `abi-rows count=<n> digest=<16 hex>`，selftest T6 與
 server（MinGW GCC）自己的表逐字比對。
 
 CSV（ipcpeer）寫 `%LOCALAPPDATA%\VipleStream\vr_probe\<utc>-<pid>\ipcpeer.csv`；stdout 寫入失敗一律忽略。
 所有輸出都不含 handle 值（只印 `GrantedAccess` 之類的權限遮罩）。
+
+- M4a 收尾：`--mode scene|timing --haptic-every-ms N`（50～60000）每 N ms 對每支控制器送一次 legacy `TriggerHapticPulse`（3 ms），log `haptic mode=… pulses=N`；用來驗 driver→server→client 的 haptic 轉送（client 看 `[VIPLE-VR-INPUT] … haptic applied=`）。以一般使用者身分在 PCVR session 中執行即成為 scene app，不必登記進 apps.json。

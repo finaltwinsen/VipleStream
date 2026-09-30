@@ -192,9 +192,25 @@ namespace probe {
       std::vector<double> client_interval_ms;
       uint64_t reproj_frames = 0, dropped_total = 0;
       vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+      // M4a 收尾：--haptic-every-ms（legacy TriggerHapticPulse；SteamVR 轉成 driver 的 haptic 事件）
+      const int64_t haptic_period = a.haptic_every_ms > 0 ? (int64_t) (a.haptic_every_ms * (double) qpf() / 1000.0) : 0;
+      int64_t next_haptic = qpc() + haptic_period;
+      uint64_t haptic_pulses = 0;
       while (qpc() < t_end) {
         const vr::EVRCompositorError we = comp->WaitGetPoses(poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
         const int64_t t_wgp = qpc();
+        if (haptic_period > 0 && t_wgp >= next_haptic) {
+          next_haptic = t_wgp + haptic_period;
+          for (vr::TrackedDeviceIndex_t d = 0; d < vr::k_unMaxTrackedDeviceCount; ++d) {
+            if (s.sys->GetTrackedDeviceClass(d) == vr::TrackedDeviceClass_Controller) {
+              s.sys->TriggerHapticPulse(d, 0, 3000);  // 3 ms（legacy API 上限約 3999 µs）
+              ++haptic_pulses;
+            }
+          }
+          if (haptic_pulses <= 8 || haptic_pulses % 20 == 0) {
+            line("haptic mode=%s pulses=%llu", mode, (unsigned long long) haptic_pulses);
+          }
+        }
         if (we != vr::VRCompositorError_None) {
           ++wgp_errors;
           Sleep(5);

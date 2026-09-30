@@ -81,7 +81,9 @@ public:
     XrVideo& operator=(const XrVideo&) = delete;
 
     bool init(QString* error);
-    void destroy();  // 可重入；呼叫時 frame thread 必須已停、device 已 idle
+    // 可重入；呼叫時 frame thread 必須已停。gpuWedged＝XrContext 判定 GPU 工作等不到結果（runtime 串流中
+    // 死掉）：跳過所有會等 GPU 的呼叫（pl_gpu_finish、pl_tex_destroy、pl_vulkan_destroy），刻意洩漏
+    void destroy(bool gpuWedged = false);
 
     // 影像路徑是否可用（XrRenderer 的 SW 格式測試 map 失敗時標成不可用，之後的 decoder 嘗試改走平面）
     bool usable() const { return m_Usable.load(std::memory_order_acquire); }
@@ -135,6 +137,9 @@ private:
     std::mutex m_TestMutex;
     VkSemaphore m_Sem = VK_NULL_HANDLE;
     uint64_t m_SemValue = 0;
+    // M4a 收尾：render 後等 GPU 逾時時卡住的解碼幀（仍被 GPU 參照，不可 unmap／free——也讓 VAAPI surface
+    // 不被回收，免得解碼器銷毀時卡在 dma-buf 的 fence 上）
+    std::vector<AVFrame*> m_WedgedFrames;
 
     XrSession m_Session = XR_NULL_HANDLE;
 

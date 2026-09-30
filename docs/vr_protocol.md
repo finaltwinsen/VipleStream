@@ -48,9 +48,14 @@ u8 ver=1 | u8 flags(b0 hmd,b1 L,b2 R,b3 gaze,b4 presence,b5 phaseSample) | u16 s
 u32 sampleId | u64 sampleTimeNs(client 時鐘) | u32 predictNs(target − sample)                   = 16
 pose×3（HMD、L、R）：f32 pos[3], f32 rot[4], f32 linVel[3], f32 angVel[3]                        = 156
 input×2：u32 buttons, u32 touches, u32 pressCtr(16 鍵 × 2 bit), u16 trigger, u16 grip,
-         i16 sx, i16 sy, u8 battery, u8 flags(b0 active,b1 focused), u16 rsv                      = 48
+         i16 sx, i16 sy, u8 battery, u8 flags(b0 active,b1 focused), u8 profile, u8 rsv           = 48
 gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 rsv                                            = 8
 ```
+
+- **input.profile（M4a 收尾，原 u16 rsv 的低位元組）**：client 目前的 OpenXR interaction profile
+  （`VIPLE_VR_CTRL_PROFILE_*`：0 未知、1 Touch、2 Index、3 Frame、4 其他）。server 原樣 memcpy 進 IPC
+  `vripc_ctrl_input_t.profile`（同位移，不 bump ABI），driver 依此選控制器 render model。舊 client 送 0，driver
+  維持 Touch 外觀。
 
 - **頻率**：2×顯示 Hz。b5 相位對齊取樣從 GA **提前到 rc**：每幀依 latch 回授多送 1 個樣本。
 - **通道**：ch 0x07 UNSEQUENCED，沿用 C5 的 fallback。

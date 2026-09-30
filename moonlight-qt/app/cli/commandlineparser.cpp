@@ -583,8 +583,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addFlagOption("vr-test-haptic", "(dev) PCVR: inject a local HAPTIC message every 3 s (alternating hands) through the VR_S2C path");
     parser.addValueOption("xr-test-keyboard", "(dev) open the XR virtual keyboard 5 s after the screen is placed and type this text with a synthetic ray");
     parser.addValueOption("xr-dump-keyboard", "(dev) save the XR virtual keyboard texture as PNG (longest side <= 1280)");
-    parser.addChoiceOption("xr-test-fail", "(dev) XR failure injection: bringup (fail before /launch), loss (LOSS_PENDING 15 s in, rebuild succeeds), loss3 (loss, all rebuilds fail -> flat), exit (runtime exit 15 s in -> flat)",
-                           {"bringup", "loss", "loss3", "exit"});
+    parser.addChoiceOption("xr-test-fail", "(dev) XR failure injection: bringup (fail before /launch), loss (LOSS_PENDING 15 s in, rebuild succeeds), loss3 (loss, all rebuilds fail -> flat), exit (runtime exit 15 s in -> flat), gpuwedge (GPU wait timeout 15 s in -> wedged teardown)",
+                           {"bringup", "loss", "loss3", "exit", "gpuwedge"});
     parser.addFlagOption("vr-emulate", "synthetic head/controller pose for PCVR (no XR runtime needed)");
     parser.addChoiceOption("vr-synthetic-motion", "synthetic pose motion for --vr-emulate",
                            {"still", "sine", "yaw30"});
@@ -643,6 +643,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     // Resolve --bitrate option
     if (parser.isSet("bitrate")) {
         preferences->bitrateKbps = parser.getIntOption("bitrate");
+        preferences->bitrateFromCli = true;  // VipleStream M4a：VR session 的預設位元率不覆蓋明確指定的值
         if (!inRange(preferences->bitrateKbps, 500, 500000)) {
             fprintf(stderr, "Warning: Bitrate is out of the supported range (500 - 500000 Kbps). Performance may suffer!\n");
         }

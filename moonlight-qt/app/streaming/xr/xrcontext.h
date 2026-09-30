@@ -94,6 +94,10 @@ public:
         bool pcvr = false;
         // M4a R2（dev）：PCVR 控制器按鍵改用合成序列（pose 仍來自 runtime），驗 0x5506 打包
         bool testVrInput = false;
+        // M4a 收尾（Frame 實測）：>0＝bring-up 時經 XR_FB_display_refresh_rate 列出可用更新率，要求最接近
+        // 這個值的那個（PCVR 用 90；runtime 不支援擴充就沿用目前的）。waitViews 會等 predictedDisplayPeriod
+        // 穩定、與要求一致後才回報（不一致時以量到的週期為準）。
+        float preferredRefreshHz = 0.0f;
     };
 
     // M4a R1：bring-up 後量到的顯示參數（/launch 的 vrFov、vrIpd、vrEyeToHead、vrHz、vrPeriodNs 來源）
@@ -110,6 +114,7 @@ public:
 
     static constexpr int kEndedLoss = 1;
     static constexpr int kEndedExit = 2;
+    static constexpr int kTestGpuWedge = 100;  // dev：--xr-test-fail gpuwedge（只用在 testFailKind）
 
     struct Stats {
         uint64_t frames = 0;          // xrEndFrame 成功次數
@@ -164,6 +169,12 @@ public:
     uint32_t vkApiVersion() const { return m_VkApiVersion; }
     PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr() const { return m_Gipa; }
     std::mutex& queueMutex() { return m_QueueMutex; }
+    // M4a 收尾：runtime 在串流中死掉時，已送出的 GPU 工作可能永遠等不到結果（R4 在 S1 卡了 7 分鐘）。
+    // 所有 GPU 等待改成有上限；等不到就標記 wedged，拆除時跳過無限期等待並刻意洩漏 device／libplacebo 物件。
+    // timeline semaphore 到 value 或逾時；true＝已到達
+    bool waitSemaphoreBounded(VkSemaphore sem, uint64_t value, uint64_t timeoutNs);
+    bool gpuWedged() const { return m_GpuWedged.load(std::memory_order_acquire); }
+    void markGpuWedged(const char* why);
     const QStringList& enabledExtensions() const { return m_EnabledExtensions; }
     // pl_vulkan_import 要求：device 建立時實際啟用的 device 擴充與 features（required∪recommended∩支援）
     const std::vector<const char*>& vkEnabledDeviceExtensions() const { return m_DevExts; }
@@ -301,6 +312,8 @@ private:
     VkDevice m_VkDevice = VK_NULL_HANDLE;
     uint32_t m_QueueFamily = 0;
     VkQueue m_Queue = VK_NULL_HANDLE;
+    std::atomic<bool> m_LostByGpu{false};  // frame thread 看到就當成 session loss
+    std::atomic<bool> m_GpuWedged{false};  // M4a 收尾：GPU 等待逾時（見 waitSemaphoreBounded）
     uint32_t m_VkApiVersion = 0;
     VkCommandPool m_CmdPool = VK_NULL_HANDLE;
     VkCommandBuffer m_Cmd = VK_NULL_HANDLE;
@@ -331,7 +344,10 @@ private:
     XrFovf m_Fov[2] = {};
     XrPosef m_EyePose[2] = {};
     bool m_HaveViews = false;
-    float m_RefreshHz = 0.0f;
+    float m_RefreshHz = 0.0f;       // m_StatsMutex 保護（REFRESH_RATE_CHANGED_FB 事件會更新）
+    float m_RequestedHz = 0.0f;     // M4a 收尾：xrRequestDisplayRefreshRateFB 成功要求的值；0＝沒要求
+    uint32_t m_StablePeriodFrames = 0;  // m_StatsMutex：predictedDisplayPeriod 連續不變（±1%）的幀數
+    bool m_PeriodSettled = false;       // m_StatsMutex：週期已穩定（且符合要求或等夠久）→ waitViews 可回報
 
     // ── M4a R1（PCVR）──
     XrSpace m_TrackSpace = XR_NULL_HANDLE;   // PCVR：STAGE→LOCAL_FLOOR→LOCAL（β 不用）
@@ -339,7 +355,7 @@ private:
     XrPosef m_EyeToHead[2] = {};              // m_StatsMutex 保護（與 m_Fov 一起）
     bool m_HaveEyeToHead = false;
     uint32_t m_RecW = 0, m_RecH = 0;
-    std::condition_variable m_ViewsCv;        // waitViews 等 m_HaveEyeToHead
+    std::condition_variable m_ViewsCv;        // waitViews 等 m_HaveEyeToHead 與 m_PeriodSettled
     // XrTime 換算（沒有＝nullptr，tracking 走 frameloop 模式）：Linux timespec、Windows QPC
     void* m_TimeConv = nullptr;
     bool m_TimeConvQpc = false;

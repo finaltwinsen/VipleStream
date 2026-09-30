@@ -141,6 +141,14 @@ extern "C" {
 #define VIPLE_VR_CTRL_ACTIVE   0x01
 #define VIPLE_VR_CTRL_FOCUSED  0x02
 
+// VIPLE_VR_CONTROLLER_INPUT.profile（M4a 收尾）：client 目前的 OpenXR interaction profile，server 的
+// SteamVR driver 依此選控制器外觀（render model）。原本是 reserved 的低位元組，舊 client 送 0＝未知。
+#define VIPLE_VR_CTRL_PROFILE_UNKNOWN  0
+#define VIPLE_VR_CTRL_PROFILE_TOUCH    1  // /interaction_profiles/oculus/touch_controller（Quest 系列）
+#define VIPLE_VR_CTRL_PROFILE_INDEX    2  // /interaction_profiles/valve/index_controller
+#define VIPLE_VR_CTRL_PROFILE_FRAME    3  // /interaction_profiles/valve/frame_controller_valve（Steam Frame）
+#define VIPLE_VR_CTRL_PROFILE_OTHER    4  // 其他（khr/simple 等）
+
 #pragma pack(push, 1)
 
 typedef struct _VIPLE_VR_POSE {
@@ -160,7 +168,8 @@ typedef struct _VIPLE_VR_CONTROLLER_INPUT {
     int16_t  stickY;
     uint8_t  battery;   // 0–100，255 = 未知
     uint8_t  flags;     // VIPLE_VR_CTRL_*
-    uint16_t reserved;
+    uint8_t  profile;   // VIPLE_VR_CTRL_PROFILE_*（M4a 收尾；原 reserved 的低位元組）
+    uint8_t  reserved;
 } VIPLE_VR_CONTROLLER_INPUT;
 
 typedef struct _VIPLE_VR_GAZE {

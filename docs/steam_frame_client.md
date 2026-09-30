@@ -1014,3 +1014,32 @@ VipleStream xr-probe --selftest-ray                                         # �
   - 待辦：server 轉送 HAPTIC 的實測（需要會震動的 VR app 或登記 `vr_probe`）；連線錯誤後 CLI `stream` 在無頭
     XR 下不會自行結束（停在錯誤提示等使用者）；runtime 在串流中掛掉時 client 拆除可能卡在 VAAPI fence（Frame 上
     SteamVR 當掉的情境，待注入驗證）。
+- **M4a 收尾（2026-09-30）**：
+  - runtime 串流中死掉：所有 GPU 等待改成有上限——影像 render 後以 timeline semaphore 等 1 s（原本 `pl_gpu_finish`
+    無上限）、拆除時以空 batch＋fence 等 2 s（原本 `vkDeviceWaitIdle`）。等不到就標 wedged：當成 session loss 走
+    X5（β 重建／退平面；PCVR 結束），拆除時跳過所有會等 GPU 的呼叫、刻意洩漏 VkDevice／libplacebo 物件與仍被
+    GPU 參照的解碼幀（`[VIPLE-XR] GPU wedged - leaking …`）。PCVR 在 VR session 後失效：顯示錯誤（GUI 對話框／
+    CLI stderr）並以正常退出路徑結束 → 送 `/cancel`。dev 注入 `--xr-test-fail gpuwedge`（15 s 後模擬 GPU 等待
+    逾時）；S1 腳本 `--kill-runtime-after SEC`（串流第 SEC 秒 SIGKILL monado-service）。
+  - S1 驗證（linux-builder 本機測試 server，β）：串流 25 s 殺 Monado → loss→3 次重建（`xrCreateInstance`
+    XR_ERROR_RUNTIME_FAILURE）→ 4 s 內放棄 XR 退平面；無頭環境平面 renderer 起不來 → `Stream error: …` 印到
+    stderr、送 `/cancel`、行程自行結束（不再停在對話框）、teardownHang 0。`gpuwedge`：wedged 拆除立即完成、第
+    1 次重建 <1 s 成功、串流照常跑完。PCVR（S1 → `.195` service，SteamVR Home）：第 45 s 殺 Monado → 顯示
+    「The XR runtime stopped responding …」、1 s 內送 `/cancel`（server 回 200）並結束，`/serverinfo` 回 FREE；
+    `gpuwedge` 同樣結束且 wedged 拆除不等待。Monado 的 `xrEnumerateDisplayRefreshRatesFB` 只有 20.0 → 要求 20、
+    週期一致（夾值 60 照舊）。
+  - CLI `stream`：session 建立後的錯誤（`displayLaunchError`／`stageFailed`）印 `Stream error: …` 到 stderr，
+    `sessionFinished` 有錯誤時以 rc 1 結束、不開等人按確定的對話框；GUI 行為不變。
+  - CLI `pair`：原本 `Pair succeeded` 後直接 quit，延遲寫入執行緒還沒把 srvcert 寫進設定 → 下次 `stream` 報
+    「尚未配對」。改成結束前先 delete ComputerManager（解構會等 flush 寫完）。
+  - 更新率（Frame 實測：`xrGetDisplayRefreshRateFB` 回 120、實際 `predictedDisplayPeriod` 13.89 ms＝72 Hz）：PCVR
+    bring-up 時列出 `xrEnumerateDisplayRefreshRatesFB`、要求最接近 `--vr-hz`（預設 90）的值；`waitViews` 等週期
+    穩定（符合要求 10 幀，或不符合但穩定 45 幀）才回報，回報值與週期不符（>3%）時以量到的週期為準並警告
+    （`[VIPLE-XR] refresh mismatch`）。Monado 20 Hz 夾值邏輯不變。
+  - 位元率：VR session 沒有明確指定位元率（CLI 沒帶 `--bitrate`、偏好值仍是平面預設）時，用 3456x1728@90＝150 Mbps
+    按像素率線性縮放（上限 200 Mbps、下限平面預設），ABR 照常往下調（`[VIPLE-VR-SESSION] bitrate … (VR default …)`）。
+  - 控制器外觀：0x5506 `VIPLE_VR_CONTROLLER_INPUT.profile`（原 reserved 低位元組，三份 VipleVr.h＋IPC ABI 同位移）
+    帶 client 的 interaction profile；driver 依此設 `Prop_RenderModelName_String`（Touch＝`oculus_quest2_controller_*`、
+    Index＝`{indexcontroller}valve_controller_knu_1_0_*`、Frame＝`{frame_controller}frame_controller_*`；driver 目錄
+    不存在時退回 Touch），換外觀時送一筆 `deviceIsConnected=false` 讓 app 重新載入。ControllerType／binding 仍是
+    oculus_touch。

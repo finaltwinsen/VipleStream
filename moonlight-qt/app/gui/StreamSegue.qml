@@ -85,6 +85,12 @@ Item {
             // If this was a CLI launch without errors, exit now
             Qt.quit()
         }
+        else if (quitAfter && typeof cliStreamSession !== "undefined" && cliStreamSession) {
+            // VipleStream M4a：C++ 驅動的 CLI stream（main.cpp StreamRequested）——錯誤已由 main.cpp 印到
+            // stderr；不開等人按確定的對話框（無頭 offscreen／XR 下沒人能按），以非零結束碼退出
+            console.error(streamSegueErrorDialog.text)
+            Qt.exit(1)
+        }
         else {
             // Show the Qt window again after streaming
             window.visible = true

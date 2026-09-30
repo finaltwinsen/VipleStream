@@ -1339,6 +1339,29 @@ bool Session::initialize(QQuickWindow* qtWindow)
 
     m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
     m_StreamConfig.autoAdjustBitrate = m_Preferences->autoAdjustBitrate ? 1 : 0;
+    if (m_VrRequested) {
+        // M4a 收尾（Frame 實測）：使用者平面預設的 20 Mbps 對 3456x1728@90～120 太低（清晰度差）。沒有明確指定
+        // 位元率時（CLI 沒帶 --bitrate，且偏好值仍是平面預設——與設定頁「Use Default」同一判斷）改用 VR 預設：
+        // 以 3456x1728@90＝150 Mbps 按像素率線性縮放，上限 200 Mbps、下限為平面預設。ABR 照常可往下調。
+        const int flatDefault = StreamingPreferences::getDefaultBitrate(m_Preferences->width, m_Preferences->height,
+                                                                        m_Preferences->fps, m_Preferences->enableYUV444,
+                                                                        m_Preferences->enableFrameInterpolation);
+        const char* source = "user setting";
+        if (m_Preferences->bitrateFromCli) {
+            source = "--bitrate";
+        }
+        else if (m_Preferences->bitrateKbps == flatDefault) {
+            const double pixRate = static_cast<double>(m_StreamConfig.width) * m_StreamConfig.height * m_StreamConfig.fps;
+            const double ref = 3456.0 * 1728.0 * 90.0;
+            const int vrDefault = static_cast<int>(std::lround(150000.0 * pixRate / ref));
+            m_StreamConfig.bitrate = std::clamp(vrDefault, flatDefault, 200000);
+            source = "VR default";
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-SESSION] bitrate %d kbps (%s; %dx%d@%d, flat default %d kbps, ABR %s)",
+                    m_StreamConfig.bitrate, source, m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps,
+                    flatDefault, m_StreamConfig.autoAdjustBitrate ? "on" : "off");
+    }
 
 #ifndef STEAM_LINK
     // Opt-in to all encryption features if we detect that the platform
@@ -2442,6 +2465,8 @@ bool Session::createXrContext(bool isRebuild, QString* error)
 #ifdef HAVE_OPENXR
     XrContext::Options xo;
     xo.pcvr = m_XrPcvr;  // M4a R1
+    // M4a 收尾：PCVR 明確要求更新率（偏好 vrRefreshHz，預設 90；取 runtime 可用值中最接近的）
+    xo.preferredRefreshHz = m_XrPcvr ? static_cast<float>(m_Preferences->vrRefreshHz) : 0.0f;
     xo.testVrInput = m_Preferences->vrTestInput;  // M4a R2（dev）：--vr-test-input
     xo.dumpFramePath = isRebuild ? QString() : m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
     xo.testStallMs = isRebuild ? 0 : m_Preferences->xrTestStallMs;             // dev：--xr-test-stall-ms
@@ -2461,6 +2486,11 @@ bool Session::createXrContext(bool isRebuild, QString* error)
         else if (tf == QLatin1String("exit")) {
             xo.testFailAfterSec = 15;
             xo.testFailKind = XrContext::kEndedExit;
+        }
+        else if (tf == QLatin1String("gpuwedge")) {
+            // M4a 收尾：模擬 GPU 等待逾時（runtime 串流中死掉）→ wedged 拆除＋loss 流程
+            xo.testFailAfterSec = 15;
+            xo.testFailKind = XrContext::kTestGpuWedge;
         }
     }
     else {
@@ -2535,8 +2565,12 @@ void Session::handleXrEnded(int reason)
         return;
     }
     if (m_XrPcvr) {
-        // M4a R1：VR session 已建立後 XR 失效——不變式 5 要送 /cancel 並顯示錯誤（TODO：/cancel 與 UI 錯誤
-        // 訊息接在 M4a 後續切片）；這裡先停 tracking、拆 XR、結束串流，不退回平面（平面留著 VR 形狀沒有意義）
+        // M4a R1／收尾：VR session 已建立後 XR 失效——不變式 5：送 /cancel 並顯示錯誤，不退回平面（平面留著
+        // VR 形狀沒有意義）。/cancel：這裡推的 SDL_QUIT 走正常退出路徑（m_UnexpectedTermination=false →
+        // shouldNotifyServerCancel），server 收到後結束 VR session、編排器 disarm。錯誤經 displayLaunchError
+        // 顯示（GUI 對話框；CLI 印 stderr 並以 rc 1 結束，見 StreamSegue.qml／main.cpp）。
+        emit displayLaunchError(tr("The XR runtime %1 after the VR session started, so the stream was ended.")
+                                    .arg(reason == XrContext::kEndedExit ? tr("exited") : tr("stopped responding or was lost")));
         m_VrTracking.stop();
         SDL_LockMutex(m_DecoderLock);
         delete m_VideoDecoder;

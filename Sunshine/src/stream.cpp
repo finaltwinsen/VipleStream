@@ -1512,6 +1512,11 @@ namespace stream {
 #if VIPLE_VR_BRIDGE_HAS_ABI
     static_assert(sizeof(VIPLE_VR_POSE) == sizeof(vripc_pose_t), "0x5506 pose 與 IPC pose 版面必須一致");
     static_assert(sizeof(VIPLE_VR_CONTROLLER_INPUT) == sizeof(vripc_ctrl_input_t), "0x5506 input 與 IPC input 版面必須一致");
+    // M4a 收尾：interaction profile 原樣經 memcpy 帶給 driver（選控制器外觀）
+    static_assert(offsetof(VIPLE_VR_CONTROLLER_INPUT, profile) == offsetof(vripc_ctrl_input_t, profile), "input.profile 位移必須一致");
+    static_assert(VIPLE_VR_CTRL_PROFILE_TOUCH == VRIPC_CTRL_PROFILE_TOUCH && VIPLE_VR_CTRL_PROFILE_INDEX == VRIPC_CTRL_PROFILE_INDEX &&
+                    VIPLE_VR_CTRL_PROFILE_FRAME == VRIPC_CTRL_PROFILE_FRAME && VIPLE_VR_CTRL_PROFILE_OTHER == VRIPC_CTRL_PROFILE_OTHER,
+                  "VIPLE_VR_CTRL_PROFILE_* 與 VRIPC_CTRL_PROFILE_* 必須同值");
 
     ::vr::bridge::tracked_sample_t t;
     t.sample_id = sample.sampleId;

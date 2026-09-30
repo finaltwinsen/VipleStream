@@ -182,6 +182,7 @@ namespace {
     probe::line("usage ipcpeer: --peer-gpu-hold-ms X --peer-writers N --peer-no-flush --peer-no-render --hello-repeat N --hello-interval-ms M --pipe NAME");
     probe::line("usage unit: --no-loopback");
     probe::line("usage space: --reset-seated");
+    probe::line("usage scene/timing: --haptic-every-ms N (50..60000; legacy TriggerHapticPulse to every controller)");
   }
 }  // namespace
 
@@ -250,6 +251,8 @@ int wmain(int argc, wchar_t **argv) {
       a.no_loopback = true;
     } else if (k == L"--reset-seated") {
       a.reset_seated = true;
+    } else if (k == L"--haptic-every-ms") {
+      ok = need(v) && parse_u32(v, a.haptic_every_ms) && a.haptic_every_ms >= 50 && a.haptic_every_ms <= 60000;
     } else {
       probe::line("error reason=unknown-arg arg=%s", narrow(k.c_str()).c_str());
       ok = false;

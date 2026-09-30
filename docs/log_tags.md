@@ -531,6 +531,8 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-DRV] timing 10s: … acqTimeout=<n> … keyedMutex=yes syncOk=<n> releaseFailed=<n>      ← U13：acqTimeout 應為 0
 [VIPLE-VR-DRV] space-delta=<yaw>/<pitch>/<roll>deg pos=<x>,<y>,<z>mm trigger=<still|event:<name>>  ← S2-06：採用新的 SteamVR↔client 空間差（V6 起）
 [VIPLE-VR-DRV] controller activate hand=<left|right> index=<n>  /  controller deactivate hand=…   ← S2-09 最小 Touch 控制器（V6 起）
+[VIPLE-VR-DRV] controller hand=<left|right> render model=<name> (client profile <n>)   ← M4a 收尾：依 0x5506 input.profile 選外觀（Touch／Index／Frame）
+[VIPLE-VR-DRV] controller hand=<…> render model <name> not installed - using Touch
 [VIPLE-VR-DRV] controller hand=<left|right> <out-of-range|tracking> age_ms=<n>                   ← 控制器狀態切換（沒資料、active=0、> 100 ms）
 ```
 
@@ -733,8 +735,18 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-XR] xrWaitFrame: <XrResult> - treating as session loss
 [VIPLE-XR] no Wayland/X11 display - using the SDL offscreen video driver   ← Linux 無頭；VAAPI 另印 `VAAPI: offscreen video driver - using a DRM render node display`
 [VIPLE-XR] test: simulating LOSS_PENDING|a runtime-initiated exit (--xr-test-fail)   ← dev
+[VIPLE-XR] test: simulating a GPU wait timeout (--xr-test-fail gpuwedge)              ← dev（M4a 收尾）
+[VIPLE-XR] GPU wait timed out (<原因>) - treating the XR context as lost              ← M4a 收尾：render 等 1 s／拆除等 2 s 逾時；之後走 loss 流程
+[VIPLE-XR] video: GPU wedged - leaking libplacebo objects and N in-flight frame(s)
+[VIPLE-XR] GPU wedged - leaking the Vulkan device instead of waiting for it
+[VIPLE-XR] display refresh rates=[72.0,90.0,120.0] current=<Hz> -> requested <Hz> (want 90.0): XR_SUCCESS   ← PCVR（M4a 收尾）
+[VIPLE-XR] display refresh rate changed <舊> -> <新> Hz                             ← XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB
+[VIPLE-XR] refresh mismatch: runtime reports <Hz> (requested <Hz>) but predictedDisplayPeriod=<ms> (<Hz>) - using the measured period
+[VIPLE-XR] predictedDisplayPeriod did not settle within <ms> ms (last <ms>) - using it anyway
 [VIPLE-XR] destroyed
 ```
+
+- M4a 收尾（CLI `stream`，main.cpp）：session 建立後的錯誤印 `Stream error: <訊息>`／`Stream error: starting <stage> failed (error <n>)…` 到 stderr，CLI 以 rc 1 結束（不開對話框）；建立前的錯誤仍是 `Stream failed: …`。
 
 - `--display-target xr-desktop` 在 `startConnectionAsync` 開頭（`/launch` 與 relay 之前）bring-up，逾時 5 s；拆除在 decoder 刪除之後、`SDL_DestroyWindow` 之前。
 - 沒有影像時畫 loading quad（前方 1.5 m、寬 60°、深灰）；X2 起影像由 XrRenderer（frontend，只放 mailbox）交給 XR thread，用 `pl_vulkan_import` 共用 XrContext 的 VkDevice（queue lock 同一把）以 libplacebo 畫進影像 quad swapchain。testRenderFrame 在 XR 的 pl_gpu 上實際 map 一次，失敗退回平面。
@@ -755,7 +767,8 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-XR] pcvr projection: <w>x<h> per eye from <2w>x<h> SBS, space=…, first render pose (x, y, z | qx, qy, qz, qw) echo=<sampleId>
 [VIPLE-XR] pcvr video state <no-video|live|fade|loading> -> <…> (age <ms>)   ← >100 ms 疊半透明黑、>250 ms 改 loading quad
 [VIPLE-XR] 10s pcvr projection=N noMeta=N state=<0..3> space=… tracking=… predictAhead=<ms> hmd=(x, y, z | qx, qy, qz, qw)
-[VIPLE-VR-SESSION] XR session <lost|exited> after the VR session started - ending the stream (invariant 5)
+[VIPLE-VR-SESSION] XR session <lost|exited> after the VR session started - ending the stream (invariant 5)   ← M4a 收尾：同時顯示錯誤並以正常退出送 /cancel
+[VIPLE-VR-SESSION] bitrate <kbps> kbps (<VR default|--bitrate|user setting>; <w>x<h>@<hz>, flat default <kbps> kbps, ABR on|off)   ← M4a 收尾
 [VIPLE-VR-POSE] tracking sender started: <Hz> …, source=<xr-thread|xr-frameloop|sine|…>
 [VIPLE-VR-POSE] 10s: sent=… fail=… late=… noPose=…    ← noPose：XR 還沒有有效 HMD pose 的拍數（不送）
 ```
@@ -775,7 +788,7 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 
 ```
 [VIPLE-VR-INPUT] bindings accepted: <profile> (N)             ← 完整清單被拒時：… full binding list rejected, retrying core set
-[VIPLE-VR-INPUT] interaction profile L|R: <profile>
+[VIPLE-VR-INPUT] interaction profile L|R: <profile> (wire profile <n>)   ← M4a 收尾：0x5506 input.profile（1 Touch、2 Index、3 Frame、4 其他）
 [VIPLE-VR-INPUT] 10s L active=0|1 edges=N pressCtr=0x… | R active=… | focused=0|1 systemCombos=N focusLoss=N | haptic applied=N failed=N dropped=N
 [VIPLE-VR-HAPTIC] rx=N queued=N device=1|2 dur=<us> freq=<Hz> amp=<0-1> id=N   ← 前 3 則與每 50 則印一次
 [VIPLE-VR-HAPTIC] xrApplyHapticFeedback(L|R): <XrResult>        ← 前 3 次失敗

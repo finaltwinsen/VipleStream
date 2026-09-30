@@ -24,6 +24,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -118,6 +119,8 @@ private:
 
     mutable std::mutex m_Mutex;
     Hand m_Hand[2];
+    // M4a 收尾：目前的 interaction profile（VIPLE_VR_CTRL_PROFILE_*，frame thread 寫、tracking thread 讀）
+    std::atomic<uint8_t> m_Profile[2] = {{0}, {0}};
     bool m_Focused = false;
     uint64_t m_CreatedNs = 0;
 

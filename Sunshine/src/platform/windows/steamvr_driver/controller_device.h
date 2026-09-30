@@ -68,6 +68,8 @@ namespace vrdrv {
 
     void release_inputs();
     void report(const vr::DriverPose_t &p);
+    /// M4a 收尾：依 client 的 interaction profile 設 Prop_RenderModelName_String（profile 變了才設）
+    void apply_render_model(uint8_t profile);
 
     driver_ctx_t &ctx_;
     const bool right_;
@@ -78,6 +80,9 @@ namespace vrdrv {
     vr::VRInputComponentHandle_t haptic_ = vr::k_ulInvalidInputComponentHandle;
     bool inputs_released_ = true;
     bool oor_logged_ = false;
+    const char *render_model_ = nullptr;  ///< 目前設定的 render model（字串常值）；nullptr＝還沒設
+    int render_profile_ = -1;       ///< 目前設定的 render model 對應的 profile；-1＝還沒設
+    bool reconnect_pending_ = false; ///< render model 換了：送一次 deviceIsConnected=false，讓 app 重新載入外觀
     SRWLOCK pose_mtx_ = SRWLOCK_INIT;
     vr::DriverPose_t last_pose_ {};
   };

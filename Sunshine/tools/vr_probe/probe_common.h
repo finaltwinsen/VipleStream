@@ -75,6 +75,10 @@ namespace probe {
 
     // space（V4）
     bool reset_seated = false;  // --reset-seated：先 IVRChaperone::ResetZeroPose(Seated)
+
+    // scene／timing（M4a 收尾）：每 N ms 對每支控制器送一次 legacy TriggerHapticPulse，驗 driver→server→client
+    // 的 haptic 轉送（0x5508/01）；0＝不送
+    uint32_t haptic_every_ms = 0;
   };
 
   int run_ipcpeer(const args_t &a);

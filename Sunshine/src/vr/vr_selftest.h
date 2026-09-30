@@ -135,7 +135,7 @@ namespace vr::selftest {
     /// 設計要求、但這個切片還不能驗的情境：`<id> result=NOT-RUN until=<slice> <detail>`（計入 not_run，不影響 rc）
     void not_run(std::string_view id, std::string_view until, std::string_view detail);
 
-    /// 大量明細（例如 ABI 表的 305 列）：只送 sink，不寫 sunshine.log
+    /// 大量明細（例如 ABI 表的 306 列）：只送 sink，不寫 sunshine.log
     void verbose(std::string_view id, std::string_view text);
 
     /// 任意一行（已經是完整內容，不含前綴）：同時寫 log 與 sink

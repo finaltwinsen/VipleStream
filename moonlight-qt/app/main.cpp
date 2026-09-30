@@ -1574,6 +1574,18 @@ int main(int argc, char *argv[])
                              [&engine, &app](QString sessionAppName, Session* session) {
                                  fprintf(stderr, "Session created for '%s'; loading renderer.\n",
                                          qPrintable(sessionAppName));
+                                 // VipleStream M4a：session 建立後的錯誤也印到 stderr（StreamSegue.qml 在
+                                 // CLI 模式下以 rc 1 結束、不開對話框）
+                                 QObject::connect(session, &Session::displayLaunchError, &app, [](QString text) {
+                                     fprintf(stderr, "Stream error: %s\n", qPrintable(text));
+                                 });
+                                 QObject::connect(session, &Session::stageFailed, &app,
+                                                  [](QString stage, int errorCode, QString failingPorts) {
+                                     fprintf(stderr, "Stream error: starting %s failed (error %d)%s%s\n",
+                                             qPrintable(stage), errorCode,
+                                             failingPorts.isEmpty() ? "" : ", check ports: ",
+                                             qPrintable(failingPorts));
+                                 });
                                  // Hand off to main.qml + StreamSegue. Context
                                  // properties tell CliStartStreamSegue.qml to
                                  // skip its own launcher dance and push the
@@ -1638,19 +1650,29 @@ int main(int argc, char *argv[])
                                  fprintf(stderr, "Pairing... Please enter '%s' on %s.\n",
                                          qPrintable(pin), qPrintable(pcName));
                              });
+            // VipleStream M4a：ComputerManager 的 host 清單（含配對得到的 srvcert）由延遲 flush 執行緒寫入
+            // QSettings；直接 quit 會在寫入前結束，印出 Pair succeeded 卻沒存到配對。結束前先 delete，
+            // 解構會等延遲 flush 寫完。
+            auto pairComputerManager = new ComputerManager(StreamingPreferences::get());
+            auto finishPair = [&app, pairComputerManager](int rc) {
+                QTimer::singleShot(0, &app, [&app, pairComputerManager, rc]() {
+                    delete pairComputerManager;
+                    app.exit(rc);
+                });
+            };
             QObject::connect(launcher, &CliPair::Launcher::failed,
-                             [&app](QString text) {
+                             [finishPair](QString text) {
                                  fprintf(stderr, "Pair failed: %s\n", qPrintable(text));
-                                 app.exit(1);
+                                 finishPair(1);
                              });
             QObject::connect(launcher, &CliPair::Launcher::success,
-                             [&app]() {
+                             [finishPair]() {
                                  fprintf(stderr, "Pair succeeded.\n");
-                                 app.quit();
+                                 finishPair(0);
                              });
 
-            QTimer::singleShot(0, [launcher]() {
-                launcher->execute(new ComputerManager(StreamingPreferences::get()));
+            QTimer::singleShot(0, [launcher, pairComputerManager]() {
+                launcher->execute(pairComputerManager);
             });
 
             hasGUI = false;

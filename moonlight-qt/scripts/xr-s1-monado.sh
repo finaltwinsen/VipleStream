@@ -27,6 +27,8 @@ STREAM_APP="Desktop"
 STREAM_SEC=45
 STREAM_ARGS="--resolution 1920x1080 --fps 60 --bitrate 10000 --no-quic"
 CLIENT_EXIT_SEC=15
+KILL_RT_AFTER=0
+RT_KILLED_AT=0
 TEARDOWN_HANG=0
 OUT=""
 KEEP_MONADO=0
@@ -56,6 +58,9 @@ VipleStream S1（Monado 無頭）XR 驗測（dev-only）
   --rotate            模擬 HMD 持續旋轉（Monado SIMULATED_ROTATE=1；只在本腳本起 monado 時生效），用來驗 pose 會變
   --controllers TYPE  模擬左右控制器（Monado SIMULATED_LEFT／SIMULATED_RIGHT，例：simple、wmr、ml2；只在本腳本起
                       monado 時生效）。模擬控制器不會自己按鍵，按鍵用串流參數 --vr-test-input 合成（M4a R2）
+  --kill-runtime-after SEC
+                      失敗注入：串流開始 SEC 秒後對 monado-service 送 SIGKILL（模擬 Frame 上 SteamVR 串流中
+                      當掉），記錄 client 何時自行結束或進入平面；只在本腳本起 monado 時生效
   -h, --help          顯示這段說明
 
 結束碼：0 xr-probe 成功（與串流結果無關，串流看摘要）；1 參數錯誤；2 前置條件不足；3 xr-probe 失敗。
@@ -73,6 +78,7 @@ while [ $# -gt 0 ]; do
 		--out) OUT=${2:?}; shift 2 ;;
 		--keep-monado) KEEP_MONADO=1; shift ;;
 		--arch) ARCH=${2:?}; shift 2 ;;
+		--kill-runtime-after) KILL_RT_AFTER=${2:?}; shift 2 ;;
 		--branch) BRANCH=${2:?}; shift 2 ;;
 		--display-target) TARGET=${2:?}; shift 2 ;;
 		--rotate) ROTATE=1; shift ;;
@@ -114,7 +120,9 @@ MONADO_PGID=""
 if pgrep -x monado-service >/dev/null; then
 	log "沿用已在執行的 monado-service（pid $(pgrep -x monado-service | head -1)）"
 else
-	rm -f "$XDG_RUNTIME_DIR/monado.pid"
+	# 上一輪若被 SIGKILL（例：--kill-runtime-after），會留下 socket 與 pid 檔；不清掉的話下面的等待
+	# 迴圈看到舊 socket 就以為起好了，client 早於新 monado 綁好 socket 而拿到 RUNTIME_UNAVAILABLE
+	rm -f "$XDG_RUNTIME_DIR/monado.pid" "$XDG_RUNTIME_DIR/monado_comp_ipc"
 	# monado-service 會 epoll 監看 stdin，/dev/null 會讓它起不來；給一條不會結束的 pipe
 	nohup setsid bash -c "tail -f /dev/null | XRT_COMPOSITOR_NULL=1 XRT_COMPOSITOR_DEFAULT_FRAMERATE=90 SIMULATED_ENABLE=1 SIMULATED_ROTATE=$ROTATE $CTRL_ENV exec monado-service" \
 		> "$OUT/monado.log" 2>&1 < /dev/null &
@@ -122,7 +130,11 @@ else
 	# 也就是這組 bash／tail／monado-service 的行程群組 id（清理時只停這一組）
 	MONADO_PGID=$!
 	disown
-	for _ in $(seq 1 20); do [ -S "$XDG_RUNTIME_DIR/monado_comp_ipc" ] && pgrep -x monado-service >/dev/null && break; sleep 0.5; done
+	for _ in $(seq 1 30); do
+		[ -S "$XDG_RUNTIME_DIR/monado_comp_ipc" ] && pgrep -x monado-service >/dev/null &&
+			grep -q "The Monado service has started" "$OUT/monado.log" 2>/dev/null && break
+		sleep 0.5
+	done
 	if ! pgrep -x monado-service >/dev/null; then
 		log "monado-service 起不來，見 $OUT/monado.log"; exit 2
 	fi
@@ -162,8 +174,24 @@ if [ -n "$STREAM_HOST" ]; then
 		--display-target "$TARGET" --xr-runtime-json "$STAGE/openxr_monado_s1.json" \
 		--xr-dump-frame "$STAGE/dump.png" > "$OUT/stream.out" 2>&1 &
 	FRUN_PID=$!
-	STREAM_END=$(( $(date +%s) + STREAM_SEC ))
-	while kill -0 "$FRUN_PID" 2>/dev/null && [ "$(date +%s)" -lt "$STREAM_END" ]; do sleep 1; done
+	STREAM_START=$(date +%s)
+	STREAM_END=$(( STREAM_START + STREAM_SEC ))
+	while kill -0 "$FRUN_PID" 2>/dev/null && [ "$(date +%s)" -lt "$STREAM_END" ]; do
+		if [ "$KILL_RT_AFTER" -gt 0 ] && [ "$RT_KILLED_AT" -eq 0 ] && [ $STARTED_MONADO -eq 1 ] &&
+			[ $(( $(date +%s) - STREAM_START )) -ge "$KILL_RT_AFTER" ]; then
+			pkill -KILL -x monado-service 2>/dev/null
+			RT_KILLED_AT=$(date +%s)
+			log "失敗注入：串流第 ${KILL_RT_AFTER} s 對 monado-service 送 SIGKILL（$(date +%T.%3N)）"
+		fi
+		sleep 1
+	done
+	if [ "$RT_KILLED_AT" -gt 0 ]; then
+		if kill -0 "$FRUN_PID" 2>/dev/null; then
+			log "runtime 被殺 $(( $(date +%s) - RT_KILLED_AT )) s 後 client 仍在執行（β 應已退回平面；PCVR 應已結束）"
+		else
+			log "runtime 被殺後 client 自行結束"
+		fi
+	fi
 	CLIENT_PIDS=$(pgrep -f "^viplestream stream $STREAM_HOST" || true)
 	if [ -n "$CLIENT_PIDS" ]; then
 		# shellcheck disable=SC2086
@@ -189,7 +217,7 @@ if [ -n "$STREAM_HOST" ]; then
 	else
 		cp -f "$OUT/stream.out" "$OUT/stream-app.log"
 	fi
-	grep -E "\[VIPLE-XR\] (bring-up|xr-desktop|10s|session ended|no Wayland|XrRenderer|pcvr)|VAAPI: offscreen|VIPLE-NET10|VIPLE-VR-(SESSION|POSE|FRAME)\\]" \
+	grep -E "\[VIPLE-XR\] (bring-up|xr-desktop|10s|session ended|no Wayland|XrRenderer|pcvr|lost|rebuild|GPU wait|runtime)|VAAPI: offscreen|VIPLE-NET10|VIPLE-VR-(SESSION|POSE|FRAME)\\]|/cancel|Connection terminated" \
 		"$OUT/stream-app.log" | tail -30 | tee -a "$OUT/xr-s1.log"
 fi
 

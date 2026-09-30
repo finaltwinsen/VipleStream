@@ -422,6 +422,7 @@ public:
     int  vrEyeWidth = 1728;          // 每眼解析度（打包尺寸為 2W×H，SBS）
     int  vrEyeHeight = 1728;
     int  vrRefreshHz = 90;
+    bool bitrateFromCli = false;     // M4a 收尾：這次 CLI 明確帶了 --bitrate（不存設定；VR 預設位元率不覆蓋它）
     int  vrInjectDropEvery = 0;      // dev：每 N 個解出的幀丟一幀（模擬 decoder 吞幀），0＝關
     int  vrInjectLossSec = 0;        // dev：每 N 秒注入一次 LOSS，0＝關
     QString xrRuntimeJsonPath;       // dev（M3a X1）：xr-desktop 的 OpenXR runtime manifest，行程內設 XR_RUNTIME_JSON

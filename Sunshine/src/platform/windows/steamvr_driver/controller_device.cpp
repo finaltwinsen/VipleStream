@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #include "driver_log.h"
 #include "seh_guard.h"
@@ -81,6 +82,9 @@ namespace vrdrv {
       p->SetStringProperty(c, vr::Prop_ControllerType_String, "oculus_touch");
       p->SetStringProperty(c, vr::Prop_InputProfilePath_String, "{oculus}/input/touch_profile.json");
       p->SetBoolProperty(c, vr::Prop_DeviceProvidesBatteryStatus_Bool, true);
+      // M4a 收尾（Frame 實測：沒設 render model，SteamVR Home 顯示成一般手把）。先用 Touch 的外觀，
+      // 收到 client 的 interaction profile 後在 update() 換成對應的（apply_render_model）
+      apply_render_model(VRIPC_CTRL_PROFILE_UNKNOWN);
 
       auto *in = vr::VRDriverInput();
       const char *lo = right_ ? "/input/a" : "/input/x";
@@ -145,6 +149,45 @@ namespace vrdrv {
     return p;
   }
 
+  void controller_device_t::apply_render_model(uint8_t profile) {
+    if (container_ == vr::k_ulInvalidPropertyContainer || (int) profile == render_profile_) {
+      return;
+    }
+    // SteamVR 內建模型：Touch（Quest 2）在全域 resources/rendermodels；Index、Frame 在各自的 resource-only
+    // driver 目錄，名稱要帶 {driver} 前綴（與 vrserver 自己用的寫法相同）。該 driver 目錄不存在（舊版 SteamVR
+    // 沒有 frame_controller）時退回 Touch。
+    const char *touch = right_ ? "oculus_quest2_controller_right" : "oculus_quest2_controller_left";
+    const char *model = touch;
+    const char *probe = nullptr;
+    if (profile == VRIPC_CTRL_PROFILE_FRAME) {
+      model = right_ ? "{frame_controller}frame_controller_right" : "{frame_controller}frame_controller_left";
+      probe = right_ ? "{frame_controller}/rendermodels/frame_controller_right/frame_controller_right.json" :
+                       "{frame_controller}/rendermodels/frame_controller_left/frame_controller_left.json";
+    } else if (profile == VRIPC_CTRL_PROFILE_INDEX) {
+      model = right_ ? "{indexcontroller}valve_controller_knu_1_0_right" : "{indexcontroller}valve_controller_knu_1_0_left";
+      probe = right_ ? "{indexcontroller}/rendermodels/valve_controller_knu_1_0_right/valve_controller_knu_1_0_right.json" :
+                       "{indexcontroller}/rendermodels/valve_controller_knu_1_0_left/valve_controller_knu_1_0_left.json";
+    }
+    if (probe != nullptr) {
+      char full[MAX_PATH] = {};
+      auto *res = vr::VRResources();
+      if (res == nullptr || res->GetResourceFullPath(probe, "", full, sizeof(full)) == 0 || full[0] == 0) {
+        VRDRV_LOG_WARN("controller hand=%s render model %s not installed - using Touch", right_ ? "right" : "left", model);
+        model = touch;
+      }
+    }
+    render_profile_ = profile;
+    if (render_model_ != nullptr && std::strcmp(render_model_, model) == 0) {
+      return;  // 外觀沒變（例：預設 Touch → client 回報 Touch）：不設、不觸發重新連線
+    }
+    vr::VRProperties()->SetStringProperty(container_, vr::Prop_RenderModelName_String, model);
+    if (render_model_ != nullptr) {
+      reconnect_pending_ = true;  // 已顯示過舊外觀：讓 app 重新載入
+    }
+    render_model_ = model;  // 指向字串常值
+    VRDRV_LOG_INFO("controller hand=%s render model=%s (client profile %u)", right_ ? "right" : "left", model, (unsigned) profile);
+  }
+
   void controller_device_t::report(const vr::DriverPose_t &p) {
     AcquireSRWLockExclusive(&pose_mtx_);
     last_pose_ = p;
@@ -196,6 +239,9 @@ namespace vrdrv {
     }
     const bool active = have && (in.flags & k_in_active) != 0 && finite_pose(hp);
     const bool oor = !active || age_us > (int64_t) oor_us;
+    if (have && in.profile != VRIPC_CTRL_PROFILE_UNKNOWN) {
+      apply_render_model(in.profile);  // M4a 收尾：profile 沒變時立即返回
+    }
     vr::DriverPose_t p = GetPose();
     if (active) {
       p.vecPosition[0] = hp.pos[0];
@@ -219,6 +265,15 @@ namespace vrdrv {
       p.poseIsValid = false;
     }
     p.result = oor ? vr::TrackingResult_Running_OutOfRange : vr::TrackingResult_Running_OK;
+    if (reconnect_pending_) {
+      // render model 換了：送一筆 deviceIsConnected=false，下一筆恢復 true → app 收到斷線／連線事件後重新載入外觀
+      reconnect_pending_ = false;
+      vr::DriverPose_t off = p;
+      off.deviceIsConnected = false;
+      off.poseIsValid = false;
+      report(off);
+      p.deviceIsConnected = true;
+    }
     report(p);
     if (oor != oor_logged_) {
       oor_logged_ = oor;

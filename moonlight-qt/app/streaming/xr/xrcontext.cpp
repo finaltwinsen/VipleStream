@@ -170,6 +170,7 @@ struct XrContextVk {
     PFN_vkCreateFence CreateFence = nullptr;
     PFN_vkDestroyFence DestroyFence = nullptr;
     PFN_vkWaitForFences WaitForFences = nullptr;
+    PFN_vkWaitSemaphores WaitSemaphores = nullptr;  // M4a 收尾：有上限的 GPU 等待（1.2 core 或 KHR）
     PFN_vkResetFences ResetFences = nullptr;
     // 虛擬鍵盤貼圖上傳（staging buffer）
     PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties = nullptr;
@@ -331,6 +332,8 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     {
         std::lock_guard<std::mutex> lk(m_StatsMutex);
         m_HaveEyeToHead = false;
+        m_StablePeriodFrames = 0;
+        m_PeriodSettled = false;
         m_ProjFrames = 0;
         m_ProjNoMeta = 0;
     }
@@ -688,6 +691,10 @@ bool XrContext::createVulkan(QString* error)
     LOAD_DEV(CreateFence);
     LOAD_DEV(DestroyFence);
     LOAD_DEV(WaitForFences);
+    s_Vk.WaitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(s_Vk.GetDeviceProcAddr(m_VkDevice, "vkWaitSemaphores"));
+    if (s_Vk.WaitSemaphores == nullptr) {
+        s_Vk.WaitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(s_Vk.GetDeviceProcAddr(m_VkDevice, "vkWaitSemaphoresKHR"));
+    }
     LOAD_DEV(ResetFences);
     LOAD_DEV(CreateBuffer);
     LOAD_DEV(DestroyBuffer);
@@ -821,10 +828,45 @@ bool XrContext::createSession(QString* error)
         }
     }
 
+    m_RequestedHz = 0.0f;
     if (m_HasRefreshRate) {
         auto pfnRate = xrProc<PFN_xrGetDisplayRefreshRateFB>(m_Instance, "xrGetDisplayRefreshRateFB");
         if (pfnRate) {
-            pfnRate(m_Session, &m_RefreshHz);
+            float hz = 0.0f;
+            pfnRate(m_Session, &hz);
+            std::lock_guard<std::mutex> lk(m_StatsMutex);
+            m_RefreshHz = hz;
+        }
+        // M4a 收尾（Frame 實測）：xrGetDisplayRefreshRateFB 回 120、實際 predictedDisplayPeriod 卻是 13.89 ms
+        // （72 Hz），/launch 照 120 要、server 白做工。這裡明確要求一個可用值（最接近 preferredRefreshHz），
+        // waitViews 再以量到的週期把關。
+        auto pfnEnum = xrProc<PFN_xrEnumerateDisplayRefreshRatesFB>(m_Instance, "xrEnumerateDisplayRefreshRatesFB");
+        auto pfnReq = xrProc<PFN_xrRequestDisplayRefreshRateFB>(m_Instance, "xrRequestDisplayRefreshRateFB");
+        uint32_t n = 0;
+        if (m_Options.preferredRefreshHz > 0.0f && pfnEnum && pfnReq && XR_SUCCEEDED(pfnEnum(m_Session, 0, &n, nullptr)) &&
+            n > 0) {
+            std::vector<float> rates(n, 0.0f);
+            if (XR_SUCCEEDED(pfnEnum(m_Session, n, &n, rates.data())) && n > 0) {
+                rates.resize(n);
+                const float want = m_Options.preferredRefreshHz;
+                float best = rates[0];
+                QStringList names;
+                for (float r : rates) {
+                    names << QString::number(static_cast<double>(r), 'f', 1);
+                    const float dr = std::fabs(r - want), db = std::fabs(best - want);
+                    if (dr < db || (dr == db && r > best)) {
+                        best = r;
+                    }
+                }
+                const XrResult rr = pfnReq(m_Session, best);
+                if (XR_SUCCEEDED(rr)) {
+                    m_RequestedHz = best;
+                }
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-XR] display refresh rates=[%s] current=%.1f Hz -> requested %.1f Hz (want %.1f): %s",
+                            qUtf8Printable(names.join(QLatin1Char(','))), static_cast<double>(m_RefreshHz),
+                            static_cast<double>(best), static_cast<double>(want), qUtf8Printable(xrResultStr(m_Instance, rr)));
+            }
         }
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] session created: spaces=[%s] refresh=%.1f Hz",
@@ -1057,6 +1099,14 @@ bool XrContext::pollEvents()
         case XR_TYPE_EVENT_DATA_EVENTS_LOST:
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] runtime event queue overflowed");
             break;
+        case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB: {
+            auto* rc = reinterpret_cast<XrEventDataDisplayRefreshRateChangedFB*>(&ev);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] display refresh rate changed %.1f -> %.1f Hz",
+                        static_cast<double>(rc->fromDisplayRefreshRate), static_cast<double>(rc->toDisplayRefreshRate));
+            std::lock_guard<std::mutex> lk(m_StatsMutex);
+            m_RefreshHz = rc->toDisplayRefreshRate;
+            break;
+        }
         case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
             if (m_Input != nullptr) {
                 m_Input->onProfileChanged();
@@ -1463,6 +1513,12 @@ void XrContext::frameThreadMain()
                 m_Lost.store(true);
                 break;
             }
+            if (m_Options.testFailKind == kTestGpuWedge) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] test: simulating a GPU wait timeout (--xr-test-fail gpuwedge)");
+                markGpuWedged("test injection (--xr-test-fail gpuwedge)");
+                m_Lost.store(true);
+                break;
+            }
             if (m_Options.testFailKind == kEndedExit && m_SessionBegun.load()) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] test: simulating a runtime-initiated exit (--xr-test-fail)");
                 m_SimExit.store(true);
@@ -1514,6 +1570,11 @@ void XrContext::frameThreadMain()
         if (XR_FAILED(wr)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
+        }
+        if (m_LostByGpu.load(std::memory_order_acquire)) {
+            // M4a 收尾：影像 render thread 的 GPU 等待逾時——runtime 多半已死或卡住，同 session loss 處理
+            m_Lost.store(true);
+            break;
         }
         if (m_Options.pcvr) {
             pcvrAfterWaitFrame(fs.predictedDisplayTime, static_cast<uint64_t>(fs.predictedDisplayPeriod));
@@ -1963,7 +2024,20 @@ void XrContext::frameThreadMain()
                 }
             }
             m_LastDisplayTime = pdt;
+            // M4a 收尾：週期穩定度（waitViews 用）。穩定 10 幀且符合要求（±3%）就算定下；有要求但一直不符合時，
+            // 穩定 45 幀（72～90 Hz 約 0.5～0.6 s）後接受量到的週期（waitViews 會 log 警告）
+            const uint64_t pd = period > m_LastPeriod ? period - m_LastPeriod : m_LastPeriod - period;
+            m_StablePeriodFrames = (period > 0 && m_LastPeriod > 0 && pd <= m_LastPeriod / 100) ? m_StablePeriodFrames + 1 : 0;
             m_LastPeriod = period;
+            if (!m_PeriodSettled && period > 0) {
+                const double periodHz = 1e9 / static_cast<double>(period);
+                const bool matches = m_RequestedHz <= 0.0f ||
+                                     std::fabs(periodHz - m_RequestedHz) <= 0.03 * static_cast<double>(m_RequestedHz);
+                if ((m_StablePeriodFrames >= 10 && matches) || m_StablePeriodFrames >= 45) {
+                    m_PeriodSettled = true;
+                    m_ViewsCv.notify_all();
+                }
+            }
         }
         maybeLogStats(steadyNowNs());
     }
@@ -2273,10 +2347,15 @@ bool XrContext::waitViews(ViewInfo* out, int timeoutMs)
 {
     std::unique_lock<std::mutex> lk(m_StatsMutex);
     m_ViewsCv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [this] {
-        return m_HaveEyeToHead || !m_FrameThreadRunning.load();
+        return (m_HaveEyeToHead && m_PeriodSettled) || !m_FrameThreadRunning.load();
     });
     if (!m_HaveEyeToHead) {
         return false;
+    }
+    if (!m_PeriodSettled) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] predictedDisplayPeriod did not settle within %d ms (last %.2f ms) - using it anyway",
+                    timeoutMs, static_cast<double>(m_LastPeriod) / 1e6);
     }
     out->valid = true;
     for (int e = 0; e < 2; e++) {
@@ -2284,8 +2363,17 @@ bool XrContext::waitViews(ViewInfo* out, int timeoutMs)
         out->eyeToHead[e] = m_EyeToHead[e];
     }
     out->periodNs = m_LastPeriod;
-    out->refreshHz = m_RefreshHz > 0.0f ? m_RefreshHz
-                                          : (m_LastPeriod > 0 ? 1e9f / static_cast<float>(m_LastPeriod) : 0.0f);
+    const float periodHz = m_LastPeriod > 0 ? 1e9f / static_cast<float>(m_LastPeriod) : 0.0f;
+    out->refreshHz = m_RefreshHz > 0.0f ? m_RefreshHz : periodHz;
+    // M4a 收尾：runtime 回報的更新率與實際的幀週期不一致（Frame：回 120、實際 72）→ 以量到的週期為準
+    if (periodHz > 0.0f && m_RefreshHz > 0.0f && std::fabs(periodHz - m_RefreshHz) > 0.03f * periodHz) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] refresh mismatch: runtime reports %.1f Hz (requested %.1f) but predictedDisplayPeriod=%.2f ms "
+                    "(%.1f Hz) - using the measured period",
+                    static_cast<double>(m_RefreshHz), static_cast<double>(m_RequestedHz),
+                    static_cast<double>(m_LastPeriod) / 1e6, static_cast<double>(periodHz));
+        out->refreshHz = periodHz;
+    }
     out->recommendedWidth = m_RecW;
     out->recommendedHeight = m_RecH;
     out->trackingSpace = m_TrackSpaceName;
@@ -2414,6 +2502,29 @@ void XrContext::shutdown()
     m_StopRequested.store(false);
 }
 
+bool XrContext::waitSemaphoreBounded(VkSemaphore sem, uint64_t value, uint64_t timeoutNs)
+{
+    if (m_VkDevice == VK_NULL_HANDLE || sem == VK_NULL_HANDLE || s_Vk.WaitSemaphores == nullptr) {
+        return false;
+    }
+    VkSemaphoreWaitInfo wi = {};
+    wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    wi.semaphoreCount = 1;
+    wi.pSemaphores = &sem;
+    wi.pValues = &value;
+    return s_Vk.WaitSemaphores(m_VkDevice, &wi, timeoutNs) == VK_SUCCESS;
+}
+
+void XrContext::markGpuWedged(const char* why)
+{
+    if (!m_GpuWedged.exchange(true, std::memory_order_acq_rel)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] GPU wait timed out (%s) - treating the XR context as lost",
+                     why);
+        // 讓 frame thread 走既有的 loss 流程（β 重建／退平面，PCVR 送 /cancel 結束）
+        m_LostByGpu.store(true, std::memory_order_release);
+    }
+}
+
 void XrContext::destroyAll()
 {
     const bool hadAnything = m_Instance != XR_NULL_HANDLE;
@@ -2430,14 +2541,33 @@ void XrContext::destroyAll()
     for (QImage& img : m_KbCache) {
         img = QImage();
     }
-    if (m_VkDevice != VK_NULL_HANDLE && s_Vk.DeviceWaitIdle) {
-        std::lock_guard<std::mutex> lk(m_QueueMutex);
-        s_Vk.DeviceWaitIdle(m_VkDevice);
+    // M4a 收尾：原本 vkDeviceWaitIdle 沒有上限——runtime 在串流中死掉、GPU 工作等不到結果時會永遠卡住。
+    // 改成送一個空 batch 帶 fence、最多等 2 s；等不到就標 wedged，下面跳過所有無限期等待並洩漏資源。
+    if (m_VkDevice != VK_NULL_HANDLE && m_Queue != VK_NULL_HANDLE && !gpuWedged() &&
+        s_Vk.CreateFence && s_Vk.QueueSubmit && s_Vk.WaitForFences) {
+        VkFenceCreateInfo fci = {};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence idle = VK_NULL_HANDLE;
+        if (s_Vk.CreateFence(m_VkDevice, &fci, nullptr, &idle) == VK_SUCCESS) {
+            VkResult sr;
+            {
+                std::lock_guard<std::mutex> lk(m_QueueMutex);
+                sr = s_Vk.QueueSubmit(m_Queue, 0, nullptr, idle);
+            }
+            const VkResult wr = sr == VK_SUCCESS ? s_Vk.WaitForFences(m_VkDevice, 1, &idle, VK_TRUE, 2000000000ull) : sr;
+            if (wr == VK_SUCCESS) {
+                s_Vk.DestroyFence(m_VkDevice, idle, nullptr);
+            }
+            else {
+                markGpuWedged(wr == VK_TIMEOUT ? "queue did not go idle within 2 s at teardown" : "queue idle wait failed at teardown");
+                // fence 仍可能被 GPU 參照：刻意不 destroy
+            }
+        }
     }
 #ifdef HAVE_XR_VIDEO
     // X2：影像 swapchain 與 libplacebo 物件要在 session／VkDevice 之前釋放
     if (m_Video != nullptr) {
-        m_Video->destroy();
+        m_Video->destroy(gpuWedged());
         delete m_Video;
         m_Video = nullptr;
     }
@@ -2529,7 +2659,12 @@ void XrContext::destroyAll()
         xrDestroySession(m_Session);
         m_Session = XR_NULL_HANDLE;
     }
-    if (m_VkDevice != VK_NULL_HANDLE) {
+    if (m_VkDevice != VK_NULL_HANDLE && gpuWedged()) {
+        // GPU 工作卡住：vkDestroyDevice 本身也會等 GPU，刻意洩漏 device、command pool 與 fence
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] GPU wedged - leaking the Vulkan device instead of waiting for it");
+    }
+    else if (m_VkDevice != VK_NULL_HANDLE) {
         if (m_Fence != VK_NULL_HANDLE && s_Vk.DestroyFence) s_Vk.DestroyFence(m_VkDevice, m_Fence, nullptr);
         if (m_CmdPool != VK_NULL_HANDLE && s_Vk.DestroyCommandPool) s_Vk.DestroyCommandPool(m_VkDevice, m_CmdPool, nullptr);
         if (s_Vk.DestroyDevice) s_Vk.DestroyDevice(m_VkDevice, nullptr);
