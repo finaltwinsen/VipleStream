@@ -508,6 +508,7 @@ libplacebo {
     DEFINES += HAVE_LIBPLACEBO_VULKAN
     SOURCES += \
         streaming/video/ffmpeg-renderers/plvk.cpp \
+        streaming/video/ffmpeg-renderers/plvk_common.cpp \
         streaming/video/ffmpeg-renderers/plvk_c.c \
         streaming/video/ffmpeg-renderers/vkfruc.cpp \
         streaming/video/ffmpeg-renderers/vkfruc-decode.cpp \
@@ -517,6 +518,7 @@ libplacebo {
         streaming/video/ffmpeg-renderers/modelfetcher.cpp
     HEADERS += \
         streaming/video/ffmpeg-renderers/plvk.h \
+        streaming/video/ffmpeg-renderers/plvk_common.h \
         streaming/video/ffmpeg-renderers/vkfruc.h \
         streaming/video/ffmpeg-renderers/vkfruc-decode.h \
         streaming/video/ffmpeg-renderers/vkfruc-aftermath.h \
@@ -681,6 +683,14 @@ win32:openxr {
     DEFINES += HAVE_OPENXR
     SOURCES += streaming/xr/xrprobe_instance.cpp streaming/xr/xrcontext.cpp
     HEADERS += streaming/xr/xrprobe_instance.h streaming/xr/xrcontext.h
+}
+# §VR M3a X2：XR 影像路徑（libplacebo 共用 XrContext 的 VkDevice）。需要 openxr 與 libplacebo 都有。
+openxr:libplacebo:!macx {
+    message(XR video path enabled (XrVideo + XrRenderer))
+
+    DEFINES += HAVE_XR_VIDEO
+    SOURCES += streaming/xr/xrvideo.cpp streaming/video/ffmpeg-renderers/xrrenderer.cpp
+    HEADERS += streaming/xr/xrvideo.h streaming/video/ffmpeg-renderers/xrrenderer.h
 }
 
 RESOURCES += \

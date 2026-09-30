@@ -2,6 +2,11 @@
 
 #include "xrcontext.h"
 
+#ifdef HAVE_XR_VIDEO
+#include "xrvideo.h"
+#include <libplacebo/vulkan.h>
+#endif
+
 #include <QJsonArray>
 #include <QtGlobal>
 
@@ -10,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
@@ -87,6 +93,43 @@ double radToDeg(float r)
     return static_cast<double>(r) * 180.0 / 3.14159265358979323846;
 }
 
+// §VR M3a X2：Vulkan feature 結構除了 sType／pNext 表頭之外全是 VkBool32。依 sType 對齊後逐欄位
+// 合併「want（libplacebo 的 required／recommended）∩ supported」到 enable，不必逐一列舉欄位名。
+struct FeatureSlot {
+    VkStructureType type;
+    VkBaseOutStructure* enable;
+    const VkBaseOutStructure* supported;
+    size_t size;
+};
+
+void mergeFeatureChain(const VkBaseInStructure* want, FeatureSlot* featSlots, int featSlotCount, int* missingRequired)
+{
+    // pNext 對齊到 8：x64 上表頭是 16 bytes（不是 4+8）
+    const size_t header = offsetof(VkBaseOutStructure, pNext) + sizeof(void*);
+    for (const VkBaseInStructure* w = want; w != nullptr; w = w->pNext) {
+        for (int i = 0; i < featSlotCount; i++) {
+            if (featSlots[i].type != w->sType) {
+                continue;
+            }
+            // VkPhysicalDeviceFeatures2 的 features 成員也全是 VkBool32，同樣處理
+            const size_t count = (featSlots[i].size - header) / sizeof(VkBool32);
+            auto wantB = reinterpret_cast<const VkBool32*>(reinterpret_cast<const char*>(w) + header);
+            auto supB = reinterpret_cast<const VkBool32*>(reinterpret_cast<const char*>(featSlots[i].supported) + header);
+            auto enB = reinterpret_cast<VkBool32*>(reinterpret_cast<char*>(featSlots[i].enable) + header);
+            for (size_t f = 0; f < count; f++) {
+                if (wantB[f]) {
+                    if (supB[f]) {
+                        enB[f] = VK_TRUE;
+                    }
+                    else if (missingRequired) {
+                        (*missingRequired)++;
+                    }
+                }
+            }
+        }
+    }
+}
+
 }  // namespace
 
 // ── Vulkan 函式表（instance／device 建立後填入）──
@@ -96,6 +139,7 @@ struct XrContextVk {
     PFN_vkGetPhysicalDeviceQueueFamilyProperties GetPhysicalDeviceQueueFamilyProperties = nullptr;
     PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties = nullptr;
     PFN_vkGetPhysicalDeviceFeatures2 GetPhysicalDeviceFeatures2 = nullptr;
+    PFN_vkEnumerateDeviceExtensionProperties EnumerateDeviceExtensionProperties = nullptr;
     PFN_vkDestroyDevice DestroyDevice = nullptr;
     PFN_vkGetDeviceQueue GetDeviceQueue = nullptr;
     PFN_vkDeviceWaitIdle DeviceWaitIdle = nullptr;
@@ -179,9 +223,25 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
 
     QString err;
     const auto t0 = std::chrono::steady_clock::now();
-    bool ok = createInstance(&err) && createSystem(&err) && createVulkan(&err) &&
-              createSession(&err) && createQuadSwapchain(&err) && createActions(&err) &&
-              waitForReadyAndBegin(timeoutMs, &err);
+    bool ok = createInstance(&err) && createSystem(&err) && createVulkan(&err);
+#ifdef HAVE_XR_VIDEO
+    if (ok && m_Options.enableVideo) {
+        // X2：影像路徑失敗不影響 session（XrRenderer 會看到 video()==nullptr 而退回平面）
+        XrVideo::Config vc;
+        vc.dumpPath = m_Options.dumpFramePath;
+        vc.dumpAfterFrames = m_Options.dumpAfterFrames;
+        m_Video = new XrVideo(this, vc);
+        QString verr;
+        if (!m_Video->init(&verr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video path unavailable: %s", qUtf8Printable(verr));
+            m_Video->destroy();
+            delete m_Video;
+            m_Video = nullptr;
+        }
+    }
+#endif
+    ok = ok && createSession(&err) && createQuadSwapchain(&err) && createActions(&err) &&
+         waitForReadyAndBegin(timeoutMs, &err);
     if (!ok) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] bring-up failed: %s", qUtf8Printable(err));
         destroyAll();
@@ -364,6 +424,7 @@ bool XrContext::createVulkan(QString* error)
     LOAD_INST(GetPhysicalDeviceQueueFamilyProperties);
     LOAD_INST(GetPhysicalDeviceProperties);
     LOAD_INST(GetPhysicalDeviceFeatures2);
+    LOAD_INST(EnumerateDeviceExtensionProperties);
 #undef LOAD_INST
 
     XrVulkanGraphicsDeviceGetInfoKHR dgi = xrStruct<XrVulkanGraphicsDeviceGetInfoKHR>(XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR);
@@ -396,16 +457,71 @@ bool XrContext::createVulkan(QString* error)
     std::memset(&pdp, 0, sizeof(pdp));
     s_Vk.GetPhysicalDeviceProperties(m_VkPhysicalDevice, &pdp);
 
-    // 1.2 時啟用 timelineSemaphore／hostQueryReset（X2 libplacebo 需要），有才開
-    VkPhysicalDeviceVulkan12Features f12 = vkStruct<VkPhysicalDeviceVulkan12Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
-    VkPhysicalDeviceFeatures2 f2 = vkStruct<VkPhysicalDeviceFeatures2>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
-    VkPhysicalDeviceVulkan12Features want12 = vkStruct<VkPhysicalDeviceVulkan12Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
+    // X2：device 擴充與 features 依 libplacebo（pl_vulkan_import）需求啟用——required 必須全開，
+    // recommended 有支援就開；外部記憶體擴充給 Linux／Frame 的 DRM_PRIME 匯入。只在 Vulkan 1.2
+    // 以上掛 Vulkan11／12 feature 結構（libplacebo 最低 1.2，不足時 XrVideo 會失敗並退回平面）。
     const bool use12 = api >= VK_API_VERSION_1_2 && pdp.apiVersion >= VK_API_VERSION_1_2 && s_Vk.GetPhysicalDeviceFeatures2 != nullptr;
+    VkPhysicalDeviceFeatures2 sup2 = vkStruct<VkPhysicalDeviceFeatures2>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
+    VkPhysicalDeviceVulkan11Features sup11 = vkStruct<VkPhysicalDeviceVulkan11Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES);
+    VkPhysicalDeviceVulkan12Features sup12 = vkStruct<VkPhysicalDeviceVulkan12Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
+    m_EnFeat2 = vkStruct<VkPhysicalDeviceFeatures2>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
+    m_EnF11 = vkStruct<VkPhysicalDeviceVulkan11Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES);
+    m_EnF12 = vkStruct<VkPhysicalDeviceVulkan12Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
+    m_HaveFeatureChain = false;
+    int missingRequired = 0;
     if (use12) {
-        f2.pNext = &f12;
-        s_Vk.GetPhysicalDeviceFeatures2(m_VkPhysicalDevice, &f2);
-        want12.timelineSemaphore = f12.timelineSemaphore;
-        want12.hostQueryReset = f12.hostQueryReset;
+        sup2.pNext = &sup11;
+        sup11.pNext = &sup12;
+        s_Vk.GetPhysicalDeviceFeatures2(m_VkPhysicalDevice, &sup2);
+        m_EnFeat2.pNext = &m_EnF11;
+        m_EnF11.pNext = &m_EnF12;
+        FeatureSlot featSlots[] = {
+            {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, reinterpret_cast<VkBaseOutStructure*>(&m_EnFeat2),
+             reinterpret_cast<const VkBaseOutStructure*>(&sup2), sizeof(VkPhysicalDeviceFeatures2)},
+            {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, reinterpret_cast<VkBaseOutStructure*>(&m_EnF11),
+             reinterpret_cast<const VkBaseOutStructure*>(&sup11), sizeof(VkPhysicalDeviceVulkan11Features)},
+            {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, reinterpret_cast<VkBaseOutStructure*>(&m_EnF12),
+             reinterpret_cast<const VkBaseOutStructure*>(&sup12), sizeof(VkPhysicalDeviceVulkan12Features)},
+        };
+#ifdef HAVE_XR_VIDEO
+        mergeFeatureChain(reinterpret_cast<const VkBaseInStructure*>(&pl_vulkan_required_features), featSlots, 3, &missingRequired);
+        mergeFeatureChain(reinterpret_cast<const VkBaseInStructure*>(&pl_vulkan_recommended_features), featSlots, 3, nullptr);
+#endif
+        // X1 已開的兩項（沒有 libplacebo 的建置也保留）
+        if (sup12.timelineSemaphore) m_EnF12.timelineSemaphore = VK_TRUE;
+        if (sup12.hostQueryReset) m_EnF12.hostQueryReset = VK_TRUE;
+        m_HaveFeatureChain = true;
+    }
+
+    // device 擴充：固定清單 ∩ 裝置支援（刻意不照抄 pl_vulkan_recommended_extensions——其中有些依賴
+    // swapchain／video 擴充，沒一起開會讓 device 建立失敗）
+    m_DevExts.clear();
+    {
+        static const char* const kWantDevExts[] = {
+            "VK_KHR_push_descriptor",
+            "VK_EXT_external_memory_host",
+            "VK_KHR_external_memory_fd",
+            "VK_EXT_external_memory_dma_buf",
+            "VK_EXT_image_drm_format_modifier",
+            "VK_KHR_external_semaphore_fd",
+            "VK_EXT_physical_device_drm",
+            "VK_KHR_image_format_list",
+        };
+        uint32_t extCount = 0;
+        std::vector<VkExtensionProperties> avail;
+        if (s_Vk.EnumerateDeviceExtensionProperties != nullptr &&
+            s_Vk.EnumerateDeviceExtensionProperties(m_VkPhysicalDevice, nullptr, &extCount, nullptr) == VK_SUCCESS) {
+            avail.resize(extCount);
+            s_Vk.EnumerateDeviceExtensionProperties(m_VkPhysicalDevice, nullptr, &extCount, avail.data());
+        }
+        for (const char* want : kWantDevExts) {
+            for (const VkExtensionProperties& e : avail) {
+                if (std::strcmp(e.extensionName, want) == 0) {
+                    m_DevExts.push_back(want);
+                    break;
+                }
+            }
+        }
     }
 
     const float prio = 1.0f;
@@ -416,8 +532,10 @@ bool XrContext::createVulkan(QString* error)
     VkDeviceCreateInfo dci = vkStruct<VkDeviceCreateInfo>(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    if (use12) {
-        dci.pNext = &want12;
+    dci.enabledExtensionCount = static_cast<uint32_t>(m_DevExts.size());
+    dci.ppEnabledExtensionNames = m_DevExts.empty() ? nullptr : m_DevExts.data();
+    if (m_HaveFeatureChain) {
+        dci.pNext = &m_EnFeat2;  // features 走 pNext（pEnabledFeatures 必須為 null）
     }
 
     XrVulkanDeviceCreateInfoKHR xdci = xrStruct<XrVulkanDeviceCreateInfoKHR>(XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR);
@@ -475,11 +593,12 @@ bool XrContext::createVulkan(QString* error)
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-XR] vulkan: gpu=\"%s\" api=%u.%u (runtime %u.%u-%u.%u) queueFamily=%u timeline=%d",
+                "[VIPLE-XR] vulkan: gpu=\"%s\" api=%u.%u (runtime %u.%u-%u.%u) queueFamily=%u timeline=%d devExts=%d missingRequiredFeatures=%d",
                 pdp.deviceName, VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api),
                 VK_API_VERSION_MAJOR(minApi), VK_API_VERSION_MINOR(minApi),
                 VK_API_VERSION_MAJOR(maxApi), VK_API_VERSION_MINOR(maxApi),
-                m_QueueFamily, use12 ? static_cast<int>(want12.timelineSemaphore) : 0);
+                m_QueueFamily, m_HaveFeatureChain ? static_cast<int>(m_EnF12.timelineSemaphore) : 0,
+                static_cast<int>(m_DevExts.size()), missingRequired);
     return true;
 }
 
@@ -824,6 +943,11 @@ void XrContext::maybeLogStats(uint64_t nowNs)
                 static_cast<unsigned long long>(cur.notRendered - prev.notRendered),
                 static_cast<unsigned long long>(cur.endFrameErrors - prev.endFrameErrors),
                 sessionStateName(cur.currentState), static_cast<double>(m_LastPeriod) / 1e6);
+#ifdef HAVE_XR_VIDEO
+    if (m_Video != nullptr) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] 10s video %s", qUtf8Printable(m_Video->takeStatsLine()));
+    }
+#endif
 }
 
 void XrContext::frameThreadMain()
@@ -887,23 +1011,55 @@ void XrContext::frameThreadMain()
             continue;
         }
         XrFrameBeginInfo bfi = xrStruct<XrFrameBeginInfo>(XR_TYPE_FRAME_BEGIN_INFO);
-        if (XR_FAILED(xrBeginFrame(m_Session, &bfi))) {
+        XrResult br;
+        {
+            std::lock_guard<std::mutex> lk(m_QueueMutex);  // runtime 可能在 xrBeginFrame 用 queue
+            br = xrBeginFrame(m_Session, &bfi);
+        }
+        if (XR_FAILED(br)) {
             continue;
         }
 
         const XrCompositionLayerBaseHeader* layers[1];
         uint32_t layerCount = 0;
         XrCompositionLayerQuad quad = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
-        if (fs.shouldRender) {
+        bool videoLayer = false;
+#ifdef HAVE_XR_VIDEO
+        // X2：有影像（收過至少一幀）就改送影像 quad；新幀才 acquire／render／release，沒有新幀時
+        // runtime 沿用上次 release 的影像
+        XrSwapchainSubImage videoSub = {};
+        float videoAspect = 0.0f;
+        if (fs.shouldRender && m_Video != nullptr && m_Video->update(m_Session, &videoSub, &videoAspect) &&
+            videoAspect > 0.0f) {
+            quad.layerFlags = 0;
+            quad.space = m_LocalSpace;
+            quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            quad.subImage = videoSub;
+            quad.pose.orientation.w = 1.0f;
+            quad.pose.position.z = -m_Options.quadDistanceM;
+            quad.size = {widthM, widthM / videoAspect};
+            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+            videoLayer = true;
+        }
+#endif
+        if (fs.shouldRender && !videoLayer) {
             uint32_t idx = 0;
             XrSwapchainImageAcquireInfo ai = xrStruct<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
             XrSwapchainImageWaitInfo swi = xrStruct<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
             swi.timeout = 100000000;  // 100 ms
             XrSwapchainImageReleaseInfo ri = xrStruct<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
-            if (XR_SUCCEEDED(xrAcquireSwapchainImage(m_QuadSwapchain, &ai, &idx)) &&
+            XrResult ar;
+            {
+                std::lock_guard<std::mutex> lk(m_QueueMutex);
+                ar = xrAcquireSwapchainImage(m_QuadSwapchain, &ai, &idx);
+            }
+            if (XR_SUCCEEDED(ar) &&
                 XR_SUCCEEDED(xrWaitSwapchainImage(m_QuadSwapchain, &swi))) {
                 const bool drawn = idx < m_QuadImageCount && renderQuad(idx);
-                xrReleaseSwapchainImage(m_QuadSwapchain, &ri);
+                {
+                    std::lock_guard<std::mutex> lk(m_QueueMutex);
+                    xrReleaseSwapchainImage(m_QuadSwapchain, &ri);
+                }
                 if (drawn) {
                     quad.layerFlags = 0;
                     quad.space = m_LocalSpace;
@@ -920,6 +1076,8 @@ void XrContext::frameThreadMain()
                 }
             }
 
+        }
+        if (fs.shouldRender) {
             // FOV／眼位：每秒 locate 一次即可（X1 只做量測）
             const uint64_t nowNs = steadyNowNs();
             if (nowNs - lastViewLocateNs > 1000000000ull) {
@@ -947,7 +1105,11 @@ void XrContext::frameThreadMain()
         ei.environmentBlendMode = blend;
         ei.layerCount = layerCount;
         ei.layers = layerCount ? layers : nullptr;
-        const XrResult er = xrEndFrame(m_Session, &ei);
+        XrResult er;
+        {
+            std::lock_guard<std::mutex> lk(m_QueueMutex);  // runtime 可能在 xrEndFrame 用 queue
+            er = xrEndFrame(m_Session, &ei);
+        }
 
         {
             std::lock_guard<std::mutex> lk(m_StatsMutex);
@@ -1063,6 +1225,14 @@ void XrContext::destroyAll()
         std::lock_guard<std::mutex> lk(m_QueueMutex);
         s_Vk.DeviceWaitIdle(m_VkDevice);
     }
+#ifdef HAVE_XR_VIDEO
+    // X2：影像 swapchain 與 libplacebo 物件要在 session／VkDevice 之前釋放
+    if (m_Video != nullptr) {
+        m_Video->destroy();
+        delete m_Video;
+        m_Video = nullptr;
+    }
+#endif
     if (m_QuadSwapchain != XR_NULL_HANDLE) {
         xrDestroySwapchain(m_QuadSwapchain);
         m_QuadSwapchain = XR_NULL_HANDLE;

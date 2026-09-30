@@ -220,7 +220,8 @@ private:
                        SDL_Window* window, int videoFormat, int width, int height,
                        int frameRate, bool enableVsync, bool enableFramePacing,
                        bool testOnly,
-                       IVideoDecoder*& chosenDecoder);
+                       IVideoDecoder*& chosenDecoder,
+                       XrContext* xr = nullptr);  // §VR M3a X2：真正串流的 decoder 才傳
 
     static
     void clStageStarting(int stage);

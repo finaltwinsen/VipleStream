@@ -660,7 +660,8 @@ void Session::clScHidFeatureRequest(uint8_t reportId, uint8_t op, uint8_t seq,
 
 bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
                             SDL_Window* window, int videoFormat, int width, int height,
-                            int frameRate, bool enableVsync, bool enableFramePacing, bool testOnly, IVideoDecoder*& chosenDecoder)
+                            int frameRate, bool enableVsync, bool enableFramePacing, bool testOnly, IVideoDecoder*& chosenDecoder,
+                            XrContext* xr)
 {
     DECODER_PARAMETERS params;
 
@@ -678,6 +679,8 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     params.enableFramePacing = enableFramePacing;
     params.testOnly = testOnly;
     params.vds = vds;
+    // §VR M3a X2：只有真正串流的 decoder 才接 XR（能力探測的 testOnly 實例一律平面）
+    params.xr = testOnly ? nullptr : xr;
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "V-sync %s",
@@ -2359,7 +2362,9 @@ void Session::setupXrDesktop()
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev override: XR_RUNTIME_JSON=%s (in-process)",
                     qUtf8Printable(m_Preferences->xrRuntimeJsonPath));
     }
-    m_XrContext = new XrContext();
+    XrContext::Options xo;
+    xo.dumpFramePath = m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
+    m_XrContext = new XrContext(xo);
     QString err;
     if (!m_XrContext->bringUp(5000, &err)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -2370,7 +2375,8 @@ void Session::setupXrDesktop()
         return;
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-XR] xr-desktop session running (X1: loading quad only; video stays in the flat window)");
+                "[VIPLE-XR] xr-desktop session running (video path %s)",
+                m_XrContext->video() != nullptr ? "ready" : "unavailable - video stays in the flat window");
 #else
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-XR] xr-desktop requested but this build has no OpenXR - falling back to the flat window");
@@ -3643,7 +3649,8 @@ void Session::exec()
                                    enableVsync,
                                    enableFramePacing,
                                    false,
-                                   s_ActiveSession->m_VideoDecoder)) {
+                                   s_ActiveSession->m_VideoDecoder,
+                                   s_ActiveSession->m_XrContext)) {
                     SDL_UnlockMutex(m_DecoderLock);
                     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                                  "Failed to recreate decoder after reset");

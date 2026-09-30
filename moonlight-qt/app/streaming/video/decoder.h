@@ -47,6 +47,11 @@ typedef struct _DECODER_PARAMETERS {
     bool enableVsync;
     bool enableFramePacing;
     bool testOnly;
+    // §VR M3a X2（尾端，預設值讓既有逐欄位設定的呼叫端不受影響）：XR 虛擬螢幕的 XrContext，
+    // 非 null 時 FFmpegVideoDecoder 先試 XrRenderer frontend；testFrameOnly＝這個實例只解測試幀
+    // （separate test decoder，C20），不可把幀送進 XR mailbox。
+    class XrContext* xr = nullptr;
+    bool testFrameOnly = false;
 } DECODER_PARAMETERS, *PDECODER_PARAMETERS;
 
 #define WINDOW_STATE_CHANGE_SIZE 0x01

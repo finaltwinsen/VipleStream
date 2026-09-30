@@ -575,6 +575,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     // 不寫入 QSettings（見 StreamingPreferences 的 §VR 欄位註解）。
     parser.addChoiceOption("display-target", "display target", {"window", "xr-desktop", "pcvr"});
     parser.addValueOption("xr-runtime-json", "(dev) OpenXR runtime manifest for --display-target xr-desktop (in-process only)");
+    parser.addValueOption("xr-dump-frame", "(dev) save the 300th XR video frame as PNG (longest side <= 1280) for --display-target xr-desktop");
     parser.addFlagOption("vr-emulate", "synthetic head/controller pose for PCVR (no XR runtime needed)");
     parser.addChoiceOption("vr-synthetic-motion", "synthetic pose motion for --vr-emulate",
                            {"still", "sine", "yaw30"});
@@ -779,6 +780,13 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError("xr-runtime-json requires a file path");
         }
         preferences->xrRuntimeJsonPath = QFileInfo(path).absoluteFilePath();
+    }
+    if (parser.isSet("xr-dump-frame")) {
+        const QString path = parser.value("xr-dump-frame");
+        if (path.isEmpty()) {
+            parser.showError("xr-dump-frame requires a file path");
+        }
+        preferences->xrDumpFramePath = QFileInfo(path).absoluteFilePath();
     }
 #ifndef HAVE_OPENXR
     if (preferences->displayTarget == StreamingPreferences::DT_XR_DESKTOP) {

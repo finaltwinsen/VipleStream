@@ -16,6 +16,12 @@
 //   - bringUp(timeoutMs)：instance→system→vulkan→session，等到 READY 並 xrBeginSession、frame
 //     thread 起跑才回 true；shutdown() 可重入（destructor 也會呼叫）。
 //
+// X2（§VR M3a）：影像由 XrVideo（streaming/xr/xrvideo.*，HAVE_LIBPLACEBO_VULKAN 時）以 libplacebo
+// pl_vulkan_import 共用本類別的 VkDevice；XrRenderer（ffmpeg frontend）只把幀放進 XrVideo 的
+// mailbox，XR frame thread 取最新一幀畫進影像 quad swapchain。第一幀之前仍顯示 loading quad。
+// runtime 在 xrBeginFrame／xrEndFrame／xrAcquire／ReleaseSwapchainImage 可能使用 queue，這些呼叫
+// 一律持 queueMutex()（libplacebo 的 lock_queue 也是這把鎖）。
+//
 // 執行緒：bringUp／shutdown 在呼叫端執行緒（Session 的 AsyncConnectionStartThread 或 main）；
 // frame thread 起跑後，xrPollEvent 與所有 frame 呼叫只在 frame thread 上。queue 的使用一律持
 // queueMutex()。
@@ -30,6 +36,7 @@
 #include <cstdint>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include <vulkan/vulkan.h>
 #ifndef XR_USE_GRAPHICS_API_VULKAN
@@ -37,6 +44,8 @@
 #endif
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+
+class XrVideo;
 
 class XrContext
 {
@@ -47,6 +56,11 @@ public:
         uint32_t quadHeight = 720;
         float quadDistanceM = 1.5f;  // world-locked，前方距離
         float quadFovDeg = 60.0f;    // 水平張角
+        // X2：建立 XrVideo（libplacebo）。xr-probe --session 可關掉。
+        bool enableVideo = true;
+        // X2（dev）：影像 quad 第 N 幀讀回存 PNG（最長邊 ≤ 1280），空字串＝不存
+        QString dumpFramePath;
+        int dumpAfterFrames = 300;
     };
 
     struct Stats {
@@ -96,6 +110,14 @@ public:
     PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr() const { return m_Gipa; }
     std::mutex& queueMutex() { return m_QueueMutex; }
     const QStringList& enabledExtensions() const { return m_EnabledExtensions; }
+    // pl_vulkan_import 要求：device 建立時實際啟用的 device 擴充與 features（required∪recommended∩支援）
+    const std::vector<const char*>& vkEnabledDeviceExtensions() const { return m_DevExts; }
+    const VkPhysicalDeviceFeatures2* vkEnabledFeatures() const { return m_HaveFeatureChain ? &m_EnFeat2 : nullptr; }
+    XrInstance xrInstance() const { return m_Instance; }
+    XrSession xrSession() const { return m_Session; }
+
+    // X2：影像路徑（沒有 libplacebo、或 pl_vulkan_import 失敗時為 nullptr）
+    XrVideo* video() const { return m_Video; }
 
     // 執行期載入 Vulkan loader（Linux：libvulkan.so.1；Windows：vulkan-1.dll），app 不連 -lvulkan。
     static PFN_vkGetInstanceProcAddr loadVulkanLoader(QString* error);
@@ -150,6 +172,12 @@ private:
     VkCommandBuffer m_Cmd = VK_NULL_HANDLE;
     VkFence m_Fence = VK_NULL_HANDLE;
     std::mutex m_QueueMutex;
+    std::vector<const char*> m_DevExts;
+    VkPhysicalDeviceFeatures2 m_EnFeat2 = {};
+    VkPhysicalDeviceVulkan11Features m_EnF11 = {};
+    VkPhysicalDeviceVulkan12Features m_EnF12 = {};
+    bool m_HaveFeatureChain = false;
+    XrVideo* m_Video = nullptr;
 
     std::thread m_FrameThread;
     std::atomic<bool> m_FrameThreadRunning{false};

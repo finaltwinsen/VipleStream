@@ -425,6 +425,7 @@ public:
     int  vrInjectDropEvery = 0;      // dev：每 N 個解出的幀丟一幀（模擬 decoder 吞幀），0＝關
     int  vrInjectLossSec = 0;        // dev：每 N 秒注入一次 LOSS，0＝關
     QString xrRuntimeJsonPath;       // dev（M3a X1）：xr-desktop 的 OpenXR runtime manifest，行程內設 XR_RUNTIME_JSON
+    QString xrDumpFramePath;         // dev（M3a X2）：XR 影像 quad 第 300 幀讀回存 PNG（最長邊 ≤ 1280），不存設定
 
 signals:
     void displayModeChanged();

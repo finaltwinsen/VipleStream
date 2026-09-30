@@ -714,6 +714,7 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-XR] bring-up OK in <ms> ms: session begun, frame thread started
 [VIPLE-XR] bring-up failed: <原因>
 [VIPLE-XR] 10s frames=N missed=N (x.xx%) notRendered=N …                ← frame thread 每 10 s；前 2 s 暖機另計 warmupMissed
+[VIPLE-XR] 10s video recv=N drawn=N overwritten=N render p50=<ms> p95=<ms> …   ← X2：影像 mailbox 與 XR thread 畫出統計
 [VIPLE-XR] frame thread exit: frames=N missed=N (x.xx%) …
 [VIPLE-XR] xr-desktop unavailable (<原因>) - falling back to the flat window   ← 不變式 5：/launch 前失敗退回平面
 [VIPLE-XR] xr-desktop requested but this build has no OpenXR - falling back …
@@ -722,7 +723,8 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 ```
 
 - `--display-target xr-desktop` 在 `startConnectionAsync` 開頭（`/launch` 與 relay 之前）bring-up，逾時 5 s；拆除在 decoder 刪除之後、`SDL_DestroyWindow` 之前。
-- X1 只畫 loading quad（前方 1.5 m、寬 60°、深灰），影像仍在平面視窗；X2 起才把影像畫進 XR。
+- 沒有影像時畫 loading quad（前方 1.5 m、寬 60°、深灰）；X2 起影像由 XrRenderer（frontend，只放 mailbox）交給 XR thread，用 `pl_vulkan_import` 共用 XrContext 的 VkDevice（queue lock 同一把）以 libplacebo 畫進影像 quad swapchain。testRenderFrame 在 XR 的 pl_gpu 上實際 map 一次，失敗退回平面。
+- dev：`--xr-dump-frame <path>` 把第 300 幀的影像 quad 讀回存 PNG（最長邊 ≤ 1280）。
 - S2（Windows SteamVR null driver）注意：OpenXR app 只會拉起 vrserver，要先完整啟動 SteamVR（否則 `xrGetVulkanGraphicsDevice2KHR` 回 RUNTIME_FAILURE）；null HMD 不動會進 standby、沒有控制器時 dashboard 搶焦點（停在 VISIBLE），驗測前要關 standby 與 dashboard。
 - `xr-probe --session [--duration N]`：B 段用 XrContext 實跑 session 與 frame loop，回報最高狀態、幀數、miss%、refresh、每眼 FOV、reference space；rc 0 成功、13 runtime 載不起來、14 runtime 錯誤。
 

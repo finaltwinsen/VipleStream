@@ -41,6 +41,9 @@ extern "C" {
 }
 
 #include "ffmpeg-renderers/sdlvid.h"
+#ifdef HAVE_XR_VIDEO
+#include "ffmpeg-renderers/xrrenderer.h"  // §VR M3a X2
+#endif
 #include "ffmpeg-renderers/genhwaccel.h"
 
 #ifdef Q_OS_WIN32
@@ -712,6 +715,21 @@ bool FFmpegVideoDecoder::createFrontendRenderer(PDECODER_PARAMETERS params, bool
 
     Q_UNUSED(glIsSlow);
     Q_UNUSED(vulkanIsSlow);
+
+#ifdef HAVE_XR_VIDEO
+    // §VR M3a X2：XR 虛擬螢幕——有 XrContext 且影像路徑可用時先試 XrRenderer（backend 照常解碼，
+    // frontend 把幀交給 XR frame thread）。initialize 失敗就照原本流程選平面 frontend；testRenderFrame
+    // 失敗由 cascade 處理（軟體格式也 map 不了時 XrVideo 會被標成不可用，之後都走平面）。
+    if (params->xr != nullptr && XrRenderer::available(params->xr)) {
+        m_FrontendRenderer = new XrRenderer(params->xr, m_BackendRenderer);
+        if (initializeRendererInternal(m_FrontendRenderer, params)) {
+            return true;
+        }
+        delete m_FrontendRenderer;
+        m_FrontendRenderer = nullptr;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] XrRenderer init failed - using the flat frontend");
+    }
+#endif
 
     // §F6 — Linux renderer 決策：linuxVideoFrontend（auto/vulkan/egl）只決定
     // frontend。preferPlVkFrontend 在非 Linux 平台恆為 false，x86_64 非 Zink
@@ -2049,6 +2067,8 @@ bool FFmpegVideoDecoder::tryInitializeRenderer(const AVCodec* decoder,
 
     DECODER_PARAMETERS testFrameDecoderParams = *params;
     bool separateTestDecoder = isSeparateTestDecoderRequired(decoder);
+    // §VR M3a X2（C20）：只解測試幀的實例不可把幀送進 XR mailbox
+    testFrameDecoderParams.testFrameOnly = m_TestOnly || separateTestDecoder;
 
     if (separateTestDecoder) {
         // Setup the test decoder parameters using the dimensions for the test frame. These are
