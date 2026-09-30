@@ -189,3 +189,35 @@ void VrFrameMetaTracker::maybeLog(bool final)
     m_IntervalAgesMs.clear();
     m_LastLogMs = now;
 }
+
+// ── M4a R1：VrRenderMetaRing ──
+std::mutex VrRenderMetaRing::s_Lock;
+VrRenderMetaRing::Entry VrRenderMetaRing::s_Entries[VrRenderMetaRing::kSize];
+
+void VrRenderMetaRing::reset()
+{
+    std::lock_guard<std::mutex> lock(s_Lock);
+    for (Entry& e : s_Entries) {
+        e.used = false;
+    }
+}
+
+void VrRenderMetaRing::publish(int64_t pts, const VIPLE_VR_FRAME_META& meta)
+{
+    std::lock_guard<std::mutex> lock(s_Lock);
+    Entry& e = s_Entries[slot(pts)];
+    e.pts = pts;
+    e.used = true;
+    e.meta = meta;
+}
+
+bool VrRenderMetaRing::lookup(int64_t pts, VIPLE_VR_FRAME_META* meta)
+{
+    std::lock_guard<std::mutex> lock(s_Lock);
+    const Entry& e = s_Entries[slot(pts)];
+    if (!e.used || e.pts != pts) {
+        return false;
+    }
+    *meta = e.meta;
+    return true;
+}

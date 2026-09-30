@@ -225,6 +225,12 @@ private:
     // §VR（M1a）：VR session 的串流 decoder 才建立（test decoder 永遠是 nullptr）
     std::unique_ptr<VrFrameMetaTracker> m_VrTracker;
     int m_VrConsecutiveDecodeErrors;
+    // M4a R1：PCVR 走 XR projection 時，查不到 0x81 meta 的幀要丟（沒有 render pose 就無法正確投影）
+    bool m_VrDropOnMetaMiss = false;
+    uint32_t m_VrMetaMissDropped = 0;
+    VIPLE_VR_FRAME_META m_VrPendingMeta {};
+    bool m_VrPendingMetaValid = false;
+    int64_t m_VrPendingMetaFrame = 0;
 
     static const uint8_t k_H264TestFrame[];
     static const uint8_t k_HEVCMainTestFrame[];

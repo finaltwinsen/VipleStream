@@ -88,6 +88,21 @@ public:
         bool testFailBringUp = false;
         int testFailAfterSec = 0;
         int testFailKind = 0;
+        // M4a R1：PCVR 模式——影像以 projection layer 呈現（pose＝0x81 帶回的 renderPose∘eyeToHead），
+        // 不建 β 的射線滑鼠／鍵盤；參考空間 STAGE→LOCAL_FLOOR→LOCAL；stale 100 ms 淡出、250 ms loading。
+        bool pcvr = false;
+    };
+
+    // M4a R1：bring-up 後量到的顯示參數（/launch 的 vrFov、vrIpd、vrEyeToHead、vrHz、vrPeriodNs 來源）
+    struct ViewInfo {
+        bool valid = false;
+        XrFovf fov[2] = {};
+        XrPosef eyeToHead[2] = {};   // 每眼相對頭（VIEW space）的 pose
+        float refreshHz = 0.0f;      // FB_display_refresh_rate 或由 period 推算
+        uint64_t periodNs = 0;       // xrWaitFrame 的 predictedDisplayPeriod
+        uint32_t recommendedWidth = 0, recommendedHeight = 0;
+        QString trackingSpace;       // STAGE／LOCAL_FLOOR／LOCAL
+        bool timeConversion = false; // 有 XrTime↔client 時鐘換算（tracking thread 模式）
     };
 
     static constexpr int kEndedLoss = 1;
@@ -155,6 +170,16 @@ public:
 
     // X2：影像路徑（沒有 libplacebo、或 pl_vulkan_import 失敗時為 nullptr）
     XrVideo* video() const { return m_Video; }
+
+    // ── M4a R1（PCVR）──
+    // 等 frame thread 量到每眼 FOV／eyeToHead／period（bring-up 後第一個 shouldRender 幀），最多 timeoutMs
+    bool waitViews(ViewInfo* out, int timeoutMs);
+    // tracking 送出執行緒（任何執行緒）取 HMD 樣本：pose 在追蹤參考空間；predictNs＝目標顯示時間 − 取樣時間。
+    // 有 XrTime 換算（Linux XR_KHR_convert_timespec_time／Windows XR_KHR_win32_convert_performance_counter_time）
+    // 時當下直接 xrLocateSpace（thread 模式，2×Hz 都是新樣本）；沒有時沿用 frame loop 最近一次 locate
+    // （frameloop 模式）。還沒有有效 pose 回 false。
+    bool sampleHmd(float pos[3], float rot[4], float linVel[3], float angVel[3], uint32_t* predictNs);
+    bool trackingThreadMode() const { return m_TimeConv != nullptr; }
 
     // 執行期載入 Vulkan loader（Linux：libvulkan.so.1；Windows：vulkan-1.dll），app 不連 -lvulkan。
     static PFN_vkGetInstanceProcAddr loadVulkanLoader(QString* error);
@@ -296,4 +321,41 @@ private:
     XrPosef m_EyePose[2] = {};
     bool m_HaveViews = false;
     float m_RefreshHz = 0.0f;
+
+    // ── M4a R1（PCVR）──
+    XrSpace m_TrackSpace = XR_NULL_HANDLE;   // PCVR：STAGE→LOCAL_FLOOR→LOCAL（β 不用）
+    QString m_TrackSpaceName;
+    XrPosef m_EyeToHead[2] = {};              // m_StatsMutex 保護（與 m_Fov 一起）
+    bool m_HaveEyeToHead = false;
+    uint32_t m_RecW = 0, m_RecH = 0;
+    std::condition_variable m_ViewsCv;        // waitViews 等 m_HaveEyeToHead
+    // XrTime 換算（沒有＝nullptr，tracking 走 frameloop 模式）：Linux timespec、Windows QPC
+    void* m_TimeConv = nullptr;
+    bool m_TimeConvQpc = false;
+    bool nowXrTime(XrTime* out) const;
+    void pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodNs);
+    bool buildProjection(XrSwapchain swapchain, const XrRect2Di& rect, const float renderRot[4], const float renderPos[3],
+                         uint32_t echoSampleId, XrCompositionLayerProjection* proj,
+                         XrCompositionLayerProjectionView views[2]);
+    // frame loop 最近一次的 HMD locate（frameloop 模式樣本；thread 模式也用它的 predict 估計）
+    struct HmdSample {
+        bool valid = false;
+        float pos[3] = {};
+        float rot[4] = {0, 0, 0, 1};
+        float linVel[3] = {};
+        float angVel[3] = {};
+        uint64_t predictNs = 0;
+    };
+    mutable std::mutex m_HmdMutex;
+    HmdSample m_Hmd;
+    int64_t m_PredictAheadNs = 0;             // predictedDisplayTime − xrWaitFrame 返回時的 XrTime（EMA）
+    // PCVR 呈現：stale 淡出用的半透明黑 quad（head-locked）
+    XrSwapchain m_FadeSwapchain = XR_NULL_HANDLE;
+    uint32_t m_FadeImageCount = 0;
+    VkImage* m_FadeImages = nullptr;
+    bool m_FadeReady = false;
+    bool m_LoggedProjection = false;
+    uint64_t m_ProjFrames = 0;                // 10 s 視窗：送出 projection layer 的幀數（m_StatsMutex）
+    uint64_t m_ProjNoMeta = 0;                // 影像有但沒有 pose meta 的幀
+    int m_PcvrStale = 0;                      // 0 無影像、1 live、2 fade（>100 ms）、3 loading（>250 ms）
 };

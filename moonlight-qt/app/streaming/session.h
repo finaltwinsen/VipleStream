@@ -316,8 +316,10 @@ private:
     // §VR M3a X1：--display-target xr-desktop 時在 startConnectionAsync 開頭建立；bring-up 失敗
     // 就是 nullptr（退回平面，不變式 5）。拆除在 decoder 刪除之後、SDL_DestroyWindow 之前。
     XrContext* m_XrContext = nullptr;
+    bool m_XrPcvr = false;  // M4a R1：XrContext 是 PCVR 模式（projection＋XR tracking）
     void setupXrDesktop();
     void destroyXrContext();
+    bool setupXrPcvr();  // M4a R1
     // §VR M3a X5：XR 生命週期（LOSS 重建 ≤3 次、runtime EXITING 退回平面）
     bool createXrContext(bool isRebuild, QString* error);
     void handleXrEnded(int reason);

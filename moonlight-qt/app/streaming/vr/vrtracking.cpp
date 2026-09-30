@@ -78,46 +78,61 @@ void VrTrackingSender::run()
     const uint32_t predictNs = (uint32_t)(3LL * 1000000000LL / m_DisplayHz);
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VR-POSE] tracking sender started: %d Hz (display %d Hz × %d), motion=%s",
-                rateHz, m_DisplayHz, VIPLE_VR_TRACKING_RATE_MUL, vrSyntheticMotionName(m_Motion));
+                "[VIPLE-VR-POSE] tracking sender started: %d Hz (display %d Hz × %d), source=%s",
+                rateHz, m_DisplayHz, VIPLE_VR_TRACKING_RATE_MUL,
+                m_Source ? (m_SourceName ? m_SourceName : "xr") : vrSyntheticMotionName(m_Motion));
 
     const auto start = clock::now();
     auto next = start;
     auto lastLog = start;
     uint32_t sampleId = 0;
-    uint32_t sent = 0, failed = 0, late = 0;
-    uint32_t totalSent = 0, totalFailed = 0, totalLate = 0;
+    uint32_t sent = 0, failed = 0, late = 0, noPose = 0;
+    uint32_t totalSent = 0, totalFailed = 0, totalLate = 0, totalNoPose = 0;
 
     while (m_Running.load()) {
         VIPLE_VR_TRACKING sample;
         memset(&sample, 0, sizeof(sample));
 
         const auto now = clock::now();
-        const double t = std::chrono::duration<double>(now - start).count();
-        vrSyntheticFill(m_Motion, t, &sample);
-        sample.version = VIPLE_VR_TRACKING_VERSION;
-        sample.spaceEpoch = 0;
-        sample.sampleId = ++sampleId;
-        sample.sampleTimeNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
-            now.time_since_epoch()).count();
-        sample.predictNs = predictNs;
-
-        VrSampleHistory::record(sample.sampleId, sample.sampleTimeNs);
-        if (LiSendVrTracking(&sample) == 0) {
-            sent++;
-            totalSent++;
+        bool havePose = true;
+        if (m_Source) {
+            // M4a R1：真 XR。來源填 pose[HMD]、flags、predictNs；取樣時間仍是 client 單調時鐘（M1a 定義）
+            sample.predictNs = predictNs;
+            havePose = m_Source(&sample);
         }
         else {
-            failed++;
-            totalFailed++;
+            const double t = std::chrono::duration<double>(now - start).count();
+            vrSyntheticFill(m_Motion, t, &sample);
+            sample.predictNs = predictNs;
+        }
+        sample.version = VIPLE_VR_TRACKING_VERSION;
+        sample.spaceEpoch = 0;
+        sample.sampleTimeNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+            now.time_since_epoch()).count();
+
+        if (!havePose) {
+            noPose++;
+            totalNoPose++;
+        }
+        else {
+            sample.sampleId = ++sampleId;
+            VrSampleHistory::record(sample.sampleId, sample.sampleTimeNs);
+            if (LiSendVrTracking(&sample) == 0) {
+                sent++;
+                totalSent++;
+            }
+            else {
+                failed++;
+                totalFailed++;
+            }
         }
 
         if (now - lastLog >= std::chrono::seconds(10)) {
             const double secs = std::chrono::duration<double>(now - lastLog).count();
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VR-POSE] 10s: sent=%u (%.1f/s) fail=%u late=%u lastId=%u",
-                        sent, sent / secs, failed, late, sampleId);
-            sent = failed = late = 0;
+                        "[VIPLE-VR-POSE] 10s: sent=%u (%.1f/s) fail=%u late=%u noPose=%u lastId=%u",
+                        sent, sent / secs, failed, late, noPose, sampleId);
+            sent = failed = late = noPose = 0;
             lastLog = now;
         }
 
@@ -134,7 +149,7 @@ void VrTrackingSender::run()
 
     const double totalSecs = std::chrono::duration<double>(clock::now() - start).count();
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VR-POSE] (final) sent=%u (%.1f/s over %.1f s) fail=%u late=%u lastId=%u",
+                "[VIPLE-VR-POSE] (final) sent=%u (%.1f/s over %.1f s) fail=%u late=%u noPose=%u lastId=%u",
                 totalSent, totalSecs > 0 ? totalSent / totalSecs : 0.0, totalSecs,
-                totalFailed, totalLate, sampleId);
+                totalFailed, totalLate, totalNoPose, sampleId);
 }

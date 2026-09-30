@@ -860,10 +860,12 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     if (parser.isSet("vr-inject-loss")) {
         preferences->vrInjectLossSec = parser.getIntOption("vr-inject-loss");
     }
+#ifndef HAVE_OPENXR
     if (preferences->displayTarget == StreamingPreferences::DT_PCVR && !preferences->vrEmulate) {
-        fprintf(stderr, "Warning: --display-target pcvr needs --vr-emulate in this build (no XR runtime yet); "
+        fprintf(stderr, "Warning: --display-target pcvr needs --vr-emulate in this build (no OpenXR); "
                         "the stream will fall back to a flat window.\n");
     }
+#endif
 
     // This method will not return and terminates the process if --version or
     // --help is specified

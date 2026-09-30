@@ -973,3 +973,15 @@ VipleStream xr-probe --selftest-ray                                         # �
   去掉，改用 Ctrl+Alt+Shift+K 或藍牙鍵盤）；UNORM 格式的 swapchain 上貼圖會略亮（runtime 當線性值）。
 - PoC-2b（β 的啟動形態：overlay 內子行程、同行程切換、Steam 直接以 OpenXR app 啟動）與 G-β 要在 Frame 實機做；
   在 Frame 上跑任何 XR 程式前要先通知使用者（曾讓 Frame 的 SteamVR 重啟）。
+
+### 8.6 PCVR 走真 XR（M4a R1）
+
+- `stream <host> <app> --display-target pcvr`（不帶 `--vr-emulate`）：XrContext 以 PCVR 模式 bring-up（參考空間
+  STAGE→LOCAL_FLOOR→LOCAL，不建射線滑鼠／鍵盤），量每眼 FOV／eyeToHead／Hz 填 `/launch`；HMD 樣本經 0x5506 送出，
+  server 回聲的 render pose（0x81）決定 projection layer 的每眼 pose；stale >100 ms 疊半透明黑、>250 ms 顯示 loading。
+- S1 驗證：`bash moonlight-qt/scripts/xr-s1-monado.sh --arch x86_64 --rotate --display-target pcvr --stream <host>
+  --stream-args '--no-quic --vr-eye 1024x1024'`（`--rotate` 讓 Monado 模擬 HMD 旋轉；server 需 `vr_pcvr = stub` 或
+  `enabled`）。2026-09-30 對本機 service（stub）60 s：projection 每 10 s 約 200 幀（20 Hz 每幀）、noMeta 0～1、回聲
+  100%、tracking thread 模式 120/s、XR 漏幀 0%；`--xr-test-stall-ms 400`：live→fade（124 ms）→loading（274 ms）→live。
+- 待辦：控制器（0x5506 的 LEFT／RIGHT 與按鍵）、LATCH、haptic、XR 在 VR session 後失效時的 `/cancel`、Hz 夾值時
+  period 與實際顯示不符的影響（S1 限定）、真 driver（`vr_pcvr = enabled`）端到端。

@@ -50,6 +50,8 @@ VipleStream S1（Monado 無頭）XR 驗測（dev-only）
   --keep-monado       結束時不停掉這支腳本起的 monado-service
   --branch BRANCH     Flatpak branch（預設：該 arch 有裝 dev 就用 dev，否則 stable）
   --arch ARCH         flatpak run 的 arch（預設本機 uname -m；兩種 arch 都裝時不寫可能挑到 qemu 的 aarch64）
+  --display-target T  串流的顯示目標：xr-desktop（預設，β 虛擬螢幕）或 pcvr（M4a，projection＋XR tracking）
+  --rotate            模擬 HMD 持續旋轉（Monado SIMULATED_ROTATE=1；只在本腳本起 monado 時生效），用來驗 pose 會變
   -h, --help          顯示這段說明
 
 結束碼：0 xr-probe 成功（與串流結果無關，串流看摘要）；1 參數錯誤；2 前置條件不足；3 xr-probe 失敗。
@@ -68,6 +70,8 @@ while [ $# -gt 0 ]; do
 		--keep-monado) KEEP_MONADO=1; shift ;;
 		--arch) ARCH=${2:?}; shift 2 ;;
 		--branch) BRANCH=${2:?}; shift 2 ;;
+		--display-target) TARGET=${2:?}; shift 2 ;;
+		--rotate) ROTATE=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "未知參數：$1（--help 看用法）" 1>&2; exit 1 ;;
 	esac
@@ -92,6 +96,10 @@ done
 CJSON=$(ldd "$MONADO_LIB" | awk '/libcjson/ {print $3}')
 
 # ── 1. Monado ──
+TARGET=${TARGET:-xr-desktop}
+ROTATE=${ROTATE:-0}
+case "$TARGET" in xr-desktop|pcvr) ;; *) echo "--display-target 只能是 xr-desktop 或 pcvr" 1>&2; exit 1 ;; esac
+
 STARTED_MONADO=0
 MONADO_PGID=""
 if pgrep -x monado-service >/dev/null; then
@@ -99,7 +107,7 @@ if pgrep -x monado-service >/dev/null; then
 else
 	rm -f "$XDG_RUNTIME_DIR/monado.pid"
 	# monado-service 會 epoll 監看 stdin，/dev/null 會讓它起不來；給一條不會結束的 pipe
-	nohup setsid bash -c "tail -f /dev/null | XRT_COMPOSITOR_NULL=1 XRT_COMPOSITOR_DEFAULT_FRAMERATE=90 SIMULATED_ENABLE=1 exec monado-service" \
+	nohup setsid bash -c "tail -f /dev/null | XRT_COMPOSITOR_NULL=1 XRT_COMPOSITOR_DEFAULT_FRAMERATE=90 SIMULATED_ENABLE=1 SIMULATED_ROTATE=$ROTATE exec monado-service" \
 		> "$OUT/monado.log" 2>&1 < /dev/null &
 	# 非互動腳本的背景工作不是行程群組 leader，setsid 會直接 exec：$! 即新 session 的 leader，
 	# 也就是這組 bash／tail／monado-service 的行程群組 id（清理時只停這一組）
@@ -135,10 +143,10 @@ grep -E "session|FOCUSED|frames|miss|refresh|vulkan" "$OUT/xr-probe.out" | grep 
 # ── 3b. 串流（可選）──
 if [ -n "$STREAM_HOST" ]; then
 	rm -f "$STAGE/dump.png"
-	log "stream $STREAM_HOST $STREAM_APP --display-target xr-desktop（$STREAM_SEC s）"
+	log "stream $STREAM_HOST $STREAM_APP --display-target $TARGET（$STREAM_SEC s）"
 	# shellcheck disable=SC2086
 	timeout "$STREAM_SEC" "${FRUN[@]}" stream "$STREAM_HOST" "$STREAM_APP" $STREAM_ARGS \
-		--display-target xr-desktop --xr-runtime-json "$STAGE/openxr_monado_s1.json" \
+		--display-target "$TARGET" --xr-runtime-json "$STAGE/openxr_monado_s1.json" \
 		--xr-dump-frame "$STAGE/dump.png" > "$OUT/stream.out" 2>&1
 	log "stream rc=$?（124＝到時結束）"
 	timeout 20 "${FRUN[@]}" quit "$STREAM_HOST" > /dev/null 2>&1
@@ -150,8 +158,8 @@ if [ -n "$STREAM_HOST" ]; then
 	else
 		cp -f "$OUT/stream.out" "$OUT/stream-app.log"
 	fi
-	grep -E "\[VIPLE-XR\] (bring-up|xr-desktop|10s|session ended|no Wayland|XrRenderer)|VAAPI: offscreen|VIPLE-NET10" \
-		"$OUT/stream-app.log" | tail -14 | tee -a "$OUT/xr-s1.log"
+	grep -E "\[VIPLE-XR\] (bring-up|xr-desktop|10s|session ended|no Wayland|XrRenderer|pcvr)|VAAPI: offscreen|VIPLE-NET10|VIPLE-VR-(SESSION|POSE|FRAME)\\]" \
+		"$OUT/stream-app.log" | tail -30 | tee -a "$OUT/xr-s1.log"
 fi
 
 # ── 4. 清理 ──

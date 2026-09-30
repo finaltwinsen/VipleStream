@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <thread>
 
@@ -45,6 +46,11 @@ public:
     VrTrackingSender(const VrTrackingSender&) = delete;
     VrTrackingSender& operator=(const VrTrackingSender&) = delete;
 
+    // M4a R1：真 XR 的 HMD 樣本來源（XrContext::sampleHmd）。填 pose[HMD] 與 predictNs，回 false＝這一拍還沒有
+    // 有效 pose（不送）。沒設定＝M1a 的合成 pose（--vr-emulate）。要在 start() 之前設定，stop() 之後才可讓來源失效。
+    using Source = std::function<bool(VIPLE_VR_TRACKING* sample)>;
+    void setSource(Source source, const char* name) { m_Source = std::move(source); m_SourceName = name; }
+
     // 重複呼叫無害；已在跑時忽略
     void start(int displayHz, VrSyntheticMotion motion);
     // join 送出執行緒並印 (final) 統計；重複呼叫無害
@@ -60,4 +66,6 @@ private:
     std::atomic<bool> m_Running { false };
     int m_DisplayHz = 0;
     VrSyntheticMotion m_Motion = VrSyntheticMotion::Sine;
+    Source m_Source;
+    const char* m_SourceName = nullptr;
 };

@@ -15,7 +15,31 @@
 
 #include <array>
 #include <cstdint>
+#include <mutex>
 #include <vector>
+
+// M4a R1：decoder 執行緒查到的 0x81 meta 交給 XR 影像 render 執行緒（以 pts＝frameNumber 為 key）。
+// 不掛在 AVFrame::opaque_ref：那是串接鏈（活幀計數標記、VAAPI 的 DRM 描述子都會把它包進新 buffer），
+// 最外層不會是 meta；pts 則會被 av_frame_clone／av_frame_copy_props／backend 的轉換保留。
+class VrRenderMetaRing {
+public:
+    static void reset();
+    static void publish(int64_t pts, const VIPLE_VR_FRAME_META& meta);
+    // 查不到（太舊被覆蓋，或從沒登記）回 false
+    static bool lookup(int64_t pts, VIPLE_VR_FRAME_META* meta);
+
+private:
+    static constexpr int kSize = 128;
+    // pts 是 90 kHz 的 rtpTimestamp（60 fps 每幀 +1500），直接取餘數只會落在少數格子，改用雜湊
+    static int slot(int64_t pts) { return (int)(((uint64_t)pts * 0x9E3779B97F4A7C15ull) >> 57); }
+    struct Entry {
+        int64_t pts;
+        bool used;
+        VIPLE_VR_FRAME_META meta;
+    };
+    static std::mutex s_Lock;
+    static Entry s_Entries[kSize];
+};
 
 class VrFrameMetaTracker {
 public:

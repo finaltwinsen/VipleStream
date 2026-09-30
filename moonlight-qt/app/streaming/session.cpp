@@ -239,6 +239,7 @@ static int inputStallWatchdogProc(void*)
 
 #include <openssl/rand.h>
 #include <algorithm>
+#include <cmath>
 
 #include <QtEndian>
 #include <QCoreApplication>
@@ -621,12 +622,14 @@ void Session::decideVrRequest()
     }
 
     // 不變式 5：XR 在 /launch 之前就不可用 → 退回平面模式，不中斷串流
+#ifndef HAVE_OPENXR
     if (!m_Preferences->vrEmulate) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-SESSION] display target PCVR needs an XR runtime, which this build "
-                    "does not have yet (M1a); use --vr-emulate. Streaming flat.");
+                    "does not have (CONFIG+=openxr); use --vr-emulate. Streaming flat.");
         return;
     }
+#endif
     if (!(m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_PCVR) ||
             m_Computer->vipleStreamVrProto < VIPLE_VR_PROTO_VERSION) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -653,9 +656,15 @@ void Session::decideVrRequest()
     m_VrLaunch.eyeWidth = m_Preferences->vrEyeWidth;
     m_VrLaunch.eyeHeight = m_Preferences->vrEyeHeight;
     m_VrLaunch.refreshHz = m_Preferences->vrRefreshHz;
+#ifdef HAVE_OPENXR
+    if (!m_Preferences->vrEmulate && !setupXrPcvr()) {
+        return;  // 已記原因；不變式 5（/launch 前）→ 平面
+    }
+#endif
     m_VrRequested = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VR-SESSION] requesting PCVR (emulated pose): eye=%dx%d hz=%d serverCaps=0x%x",
+                "[VIPLE-VR-SESSION] requesting PCVR (%s): eye=%dx%d hz=%d serverCaps=0x%x",
+                m_Preferences->vrEmulate ? "emulated pose" : "XR runtime",
                 m_VrLaunch.eyeWidth, m_VrLaunch.eyeHeight, m_VrLaunch.refreshHz,
                 m_Computer->vipleStreamVr);
 }
@@ -1119,7 +1128,8 @@ bool Session::initialize(QQuickWindow* qtWindow)
 #if defined(Q_OS_LINUX) && defined(HAVE_OPENXR)
     // §VR M3a X5（設計 §2.4 ②）：XR 模式且沒有 Wayland／X11 顯示（例如 Frame 上從 SSH 啟動，
     // 或 Steam 以 OpenXR app 直接啟動）時改用 SDL offscreen driver，影像全在 XR 裡。
-    if (m_Preferences->displayTarget == StreamingPreferences::DT_XR_DESKTOP &&
+    if ((m_Preferences->displayTarget == StreamingPreferences::DT_XR_DESKTOP ||
+         (m_Preferences->displayTarget == StreamingPreferences::DT_PCVR && !m_Preferences->vrEmulate)) &&
         qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") && qEnvironmentVariableIsEmpty("DISPLAY")) {
         qputenv("SDL_VIDEODRIVER", "offscreen");
         qputenv("SDL_VIDEO_DRIVER", "offscreen");
@@ -1599,6 +1609,10 @@ bool Session::initialize(QQuickWindow* qtWindow)
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VR-SESSION] no 8-bit HEVC/H.264 decoder available — streaming flat");
             m_VrRequested = false;
+            if (m_XrPcvr) {
+                destroyXrContext();  // M4a R1：平面串流不留 PCVR 的 XR session
+                m_XrPcvr = false;
+            }
         }
     }
 
@@ -2409,6 +2423,7 @@ bool Session::createXrContext(bool isRebuild, QString* error)
 {
 #ifdef HAVE_OPENXR
     XrContext::Options xo;
+    xo.pcvr = m_XrPcvr;  // M4a R1
     xo.dumpFramePath = isRebuild ? QString() : m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
     xo.testStallMs = isRebuild ? 0 : m_Preferences->xrTestStallMs;             // dev：--xr-test-stall-ms
     xo.testRecenterSec = isRebuild ? 0 : m_Preferences->xrTestRecenterSec;     // dev：--xr-test-recenter-sec
@@ -2498,6 +2513,23 @@ void Session::handleXrEnded(int reason)
 {
 #ifdef HAVE_OPENXR
     if (m_XrContext == nullptr) {
+        return;
+    }
+    if (m_XrPcvr) {
+        // M4a R1：VR session 已建立後 XR 失效——不變式 5 要送 /cancel 並顯示錯誤（TODO：/cancel 與 UI 錯誤
+        // 訊息接在 M4a 後續切片）；這裡先停 tracking、拆 XR、結束串流，不退回平面（平面留著 VR 形狀沒有意義）
+        m_VrTracking.stop();
+        SDL_LockMutex(m_DecoderLock);
+        delete m_VideoDecoder;
+        m_VideoDecoder = nullptr;
+        SDL_UnlockMutex(m_DecoderLock);
+        destroyXrContext();
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VR-SESSION] XR session %s after the VR session started - ending the stream (invariant 5)",
+                     reason == XrContext::kEndedExit ? "exited" : "lost");
+        SDL_Event quit = {};
+        quit.type = SDL_QUIT;
+        SDL_PushEvent(&quit);
         return;
     }
     SDL_LockMutex(m_DecoderLock);
@@ -2609,11 +2641,85 @@ void Session::destroyXrContext()
     m_XrRebuildGeneration++;
 #ifdef HAVE_OPENXR
     if (m_XrContext != nullptr) {
+        // M4a R1：tracking 送出執行緒的樣本來源會呼叫 m_XrContext->sampleHmd，拆之前先停
+        m_VrTracking.stop();
         m_XrContext->shutdown();
         delete m_XrContext;
     }
 #endif
     m_XrContext = nullptr;
+}
+
+// M4a R1：PCVR 走真 XR。在 initialize()（/launch 之前、串流尺寸決定之前）bring-up，量每眼 FOV／eyeToHead／
+// period 填 /launch 參數。失敗回 false（呼叫端退回平面，不變式 5）。
+bool Session::setupXrPcvr()
+{
+#ifdef HAVE_OPENXR
+    if (!m_Preferences->xrRuntimeJsonPath.isEmpty()) {
+        qputenv("XR_RUNTIME_JSON", QFile::encodeName(m_Preferences->xrRuntimeJsonPath));
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev override: XR_RUNTIME_JSON=%s (in-process)",
+                    qUtf8Printable(m_Preferences->xrRuntimeJsonPath));
+    }
+    m_XrPcvr = true;
+    m_XrRebuildAttempt = 0;
+    QString err;
+    if (!createXrContext(false, &err)) {
+        m_XrPcvr = false;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-SESSION] PCVR: XR runtime unavailable (%s) - streaming flat (invariant 5)", qUtf8Printable(err));
+        return false;
+    }
+    XrContext::ViewInfo vi;
+    if (!m_XrContext->waitViews(&vi, 3000)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-SESSION] PCVR: XR views not available within 3 s - streaming flat (invariant 5)");
+        destroyXrContext();
+        m_XrPcvr = false;
+        return false;
+    }
+    // FOV：tan 的絕對值×10000（左、右、上、下；與 M1a 預設一致，server 端一律取絕對值）
+    for (int e = 0; e < 2; e++) {
+        const XrFovf& f = vi.fov[e];
+        const float t[4] = {std::tan(-f.angleLeft), std::tan(f.angleRight), std::tan(f.angleUp), std::tan(-f.angleDown)};
+        for (int i = 0; i < 4; i++) {
+            m_VrLaunch.fovTan[e * 4 + i] = (int)std::lround(std::clamp(std::fabs(t[i]), 0.01f, 10.0f) * 10000.0f);
+        }
+        const XrPosef& p = vi.eyeToHead[e];
+        m_VrLaunch.eyeToHead[e * 7 + 0] = (int)std::lround(p.position.x * 100000.0f);  // m → mm×100
+        m_VrLaunch.eyeToHead[e * 7 + 1] = (int)std::lround(p.position.y * 100000.0f);
+        m_VrLaunch.eyeToHead[e * 7 + 2] = (int)std::lround(p.position.z * 100000.0f);
+        m_VrLaunch.eyeToHead[e * 7 + 3] = (int)std::lround(p.orientation.x * 10000.0f);
+        m_VrLaunch.eyeToHead[e * 7 + 4] = (int)std::lround(p.orientation.y * 10000.0f);
+        m_VrLaunch.eyeToHead[e * 7 + 5] = (int)std::lround(p.orientation.z * 10000.0f);
+        m_VrLaunch.eyeToHead[e * 7 + 6] = (int)std::lround(p.orientation.w * 10000.0f);
+    }
+    const float dx = vi.eyeToHead[1].position.x - vi.eyeToHead[0].position.x;
+    const float dy = vi.eyeToHead[1].position.y - vi.eyeToHead[0].position.y;
+    const float dz = vi.eyeToHead[1].position.z - vi.eyeToHead[0].position.z;
+    m_VrLaunch.ipd = (int)std::lround(std::sqrt(dx * dx + dy * dy + dz * dz) * 100000.0f);
+    // Hz：夾在協定範圍（Monado null compositor 等測試 runtime 可能低於 60）
+    int hz = (int)std::lround(vi.refreshHz);
+    const int measuredHz = hz;
+    hz = std::clamp(hz, (int)VIPLE_VR_HZ_MIN, (int)VIPLE_VR_HZ_MAX);
+    m_VrLaunch.refreshHz = hz;
+    m_VrLaunch.periodNs = (measuredHz == hz && vi.periodNs > 0) ? (qint64)vi.periodNs : 1000000000LL / hz;
+    if (!vi.timeConversion) {
+        m_VrLaunch.caps &= ~VIPLE_VR_CLIENT_CAP_TRACK_THREAD;  // frameloop 模式
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VR-SESSION] PCVR XR measured: space=%s tracking=%s hz=%.2f%s period=%lld ns recommended=%ux%u "
+                "ipd=%.2f mm fov L[%.1f %.1f %.1f %.1f] R[%.1f %.1f %.1f %.1f] deg -> launch eye=%dx%d hz=%d",
+                qUtf8Printable(vi.trackingSpace), vi.timeConversion ? "thread" : "frameloop",
+                (double)vi.refreshHz, measuredHz != hz ? " (clamped)" : "", (long long)m_VrLaunch.periodNs,
+                vi.recommendedWidth, vi.recommendedHeight, m_VrLaunch.ipd / 100.0,
+                vi.fov[0].angleLeft * 57.29578, vi.fov[0].angleRight * 57.29578, vi.fov[0].angleUp * 57.29578,
+                vi.fov[0].angleDown * 57.29578, vi.fov[1].angleLeft * 57.29578, vi.fov[1].angleRight * 57.29578,
+                vi.fov[1].angleUp * 57.29578, vi.fov[1].angleDown * 57.29578, m_VrLaunch.eyeWidth,
+                m_VrLaunch.eyeHeight, m_VrLaunch.refreshHz);
+    return true;
+#else
+    return false;
+#endif
 }
 
 bool Session::startConnectionAsync()
@@ -2793,6 +2899,10 @@ bool Session::startConnectionAsync()
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VR-SESSION] server did not confirm a VR session — streaming flat");
                     m_StreamConfig.vrFlags = 0;
+                    if (m_XrPcvr) {
+                        destroyXrContext();  // M4a R1：沒有 VR session 就沒有 render pose，XR 無從投影
+                        m_XrPcvr = false;
+                    }
                 }
             }
         } catch (const QtNetworkReplyException&) {
@@ -3234,6 +3344,22 @@ bool Session::startConnectionAsync()
     // §VR：tracking 上行（M1a 為合成 pose）。LiStartConnection 已依 vrFlags 生效
     if (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) {
         VrSyntheticMotion motion = (VrSyntheticMotion)m_Preferences->vrSyntheticMotion;
+#ifdef HAVE_OPENXR
+        if (m_XrPcvr && m_XrContext != nullptr) {
+            // M4a R1：HMD 樣本來自 XR runtime（destroyXrContext 會先 stop 這條執行緒）
+            XrContext* xr = m_XrContext;
+            m_VrTracking.setSource([xr](VIPLE_VR_TRACKING* s) {
+                uint32_t predict = 0;
+                VIPLE_VR_POSE& hmd = s->pose[VIPLE_VR_POSE_HMD];
+                if (!xr->sampleHmd(hmd.pos, hmd.rot, hmd.linVel, hmd.angVel, &predict)) {
+                    return false;
+                }
+                s->flags = VIPLE_VR_TRK_HMD | VIPLE_VR_TRK_PRESENCE;
+                s->predictNs = predict;
+                return true;
+            }, m_XrContext->trackingThreadMode() ? "xr-thread" : "xr-frameloop");
+        }
+#endif
         m_VrTracking.start(m_StreamConfig.fps, motion);
     }
 

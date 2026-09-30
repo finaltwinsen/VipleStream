@@ -378,6 +378,7 @@ server 拒絕時，launch 會以「Host returned error: VR_BUSY: …」之類的
 [VIPLE-VR-FRAME] 10s: decoded=… submitted=… hit=… miss=0 noHeader=0 echoMatched=…/… (100.00%) echoKnown=… fallback=0 refreshDone=… fifoMismatch=… fifoSkipped=… injectedDrops=… injectedLoss=… ptsMissing=0 echoAge p50=…ms p95=…ms max=…ms
 [VIPLE-VR-FRAME] (final) …（整場累計，decoder 解構時印；decoder 重建時會提前印一次）
 [VIPLE-VR-FRAME] meta-miss: pts=… slot=… used=…
+[VIPLE-VR-FRAME] meta-miss: frame pts=… not in the meta map|has no 0x81 VR header — dropped (total N)   ← M4a R1：PCVR 接 XR 時才丟幀
 [VIPLE-VR-FRAME] decoder did not carry pts — falling back to FIFO pairing
 ```
 
@@ -390,6 +391,8 @@ server 拒絕時，launch 會以「Host returned error: VR_BUSY: …」之類的
   「decoder 丟一幀注入後 0 不一致」＝ `injectedDrops>0`、`fifoMismatch>0`，而且 `miss=0`。
 - `ptsMissing>0` 代表這顆 decoder 沒把 pts 帶回來，配對退回 FIFO，PCVR 在這種 decoder 上不可靠。
 - `(final)` 在同一場裡印了很多次，代表 decoder 一直被重建，要找 `Resetting decoder` 的原因。
+- M4a R1：PCVR 走 XR projection 時（decoder 有 XrContext），查不到 meta 或沒有 0x81 header 的幀直接丟（沒有 render pose
+  無法正確投影）；查到的 meta 以最終 pts（rtpTimestamp）放進 `VrRenderMetaRing` 交給 XrVideo。`--vr-emulate`（平面）不丟。
 
 #### `[VIPLE-VR-LOSS]` —— recovery=intra 的恢復狀態機（common-c／decoder）
 
@@ -739,6 +742,32 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 - X3：螢幕依頭部水平朝向擺在正前方 1.5 m（第一次 FOCUSED 時；Ctrl+Alt+Shift+R recenter，log `placement(recenter)`）；有 `XR_KHR_composition_layer_cylinder` 送 cylinder，否則 quad。影像在獨立 render thread 畫（XR thread 只送最後 release 的影像＝最後一幀複本），stale 狀態 `no-video/live/stale/lost`：1 s 沒新幀疊橘色狀態條、5 s 改 loading。10s 統計分 XR thread cpu 與 render thread cpu／gpu 等待。dev：`--xr-test-stall-ms`、`--xr-test-recenter-sec`。
 - S2（Windows SteamVR null driver）注意：OpenXR app 只會拉起 vrserver，要先完整啟動 SteamVR（否則 `xrGetVulkanGraphicsDevice2KHR` 回 RUNTIME_FAILURE）；null HMD 不動會進 standby、沒有控制器時 dashboard 搶焦點（停在 VISIBLE），驗測前要關 standby 與 dashboard。
 - `xr-probe --session [--duration N]`：B 段用 XrContext 實跑 session 與 frame loop，回報最高狀態、幀數、miss%、refresh、每眼 FOV、reference space；rc 0 成功、13 runtime 載不起來、14 runtime 錯誤。
+
+### `[VIPLE-XR]` pcvr —— PCVR 走真 XR（M4a R1）
+
+`streaming/session.cpp`（`setupXrPcvr`）、`streaming/xr/xrcontext.cpp`
+
+```
+[VIPLE-VR-SESSION] PCVR XR measured: space=<STAGE|LOCAL_FLOOR|LOCAL> tracking=<thread|frameloop> hz=<x>[ (clamped)] period=<ns>
+                   recommended=<w>x<h> ipd=<mm> fov L[l r u d] R[l r u d] deg -> launch eye=<w>x<h> hz=<n>
+[VIPLE-VR-SESSION] PCVR: XR runtime unavailable (<原因>) - streaming flat (invariant 5)
+[VIPLE-XR] bring-up OK in … (… pcvr space=STAGE tracking=thread)
+[VIPLE-XR] pcvr projection: <w>x<h> per eye from <2w>x<h> SBS, space=…, first render pose (x, y, z | qx, qy, qz, qw) echo=<sampleId>
+[VIPLE-XR] pcvr video state <no-video|live|fade|loading> -> <…> (age <ms>)   ← >100 ms 疊半透明黑、>250 ms 改 loading quad
+[VIPLE-XR] 10s pcvr projection=N noMeta=N state=<0..3> space=… tracking=… predictAhead=<ms> hmd=(x, y, z | qx, qy, qz, qw)
+[VIPLE-VR-SESSION] XR session <lost|exited> after the VR session started - ending the stream (invariant 5)
+[VIPLE-VR-POSE] tracking sender started: <Hz> …, source=<xr-thread|xr-frameloop|sine|…>
+[VIPLE-VR-POSE] 10s: sent=… fail=… late=… noPose=…    ← noPose：XR 還沒有有效 HMD pose 的拍數（不送）
+```
+
+- `--display-target pcvr` 不帶 `--vr-emulate` 時，XrContext 在 `initialize()` bring-up（串流尺寸決定之前）並量每眼 FOV、
+  eyeToHead（以 VIEW space locate）、period 填 `/launch`；每眼解析度用 `--vr-eye`（預設 1728²）。Hz 夾在 60–144（Monado
+  null compositor 固定 20 Hz）。tracking：有 XrTime 換算（Linux `XR_KHR_convert_timespec_time`、Windows
+  `XR_KHR_win32_convert_performance_counter_time`）時送出執行緒當下 `xrLocateSpace`（thread 模式，`vrCaps` 帶
+  TRACK_THREAD），沒有時沿用 frame loop 最近一次 locate（frameloop 模式）。
+- projection：單一 2W×H swapchain，左右眼各取一半 imageRect；view pose＝0x81 帶回的 renderPose（追蹤參考空間）∘
+  eyeToHead，fov 用量測值（＝協商值，overscan 0）。
+- XR 在 VR session 建立之後失效：先停 tracking、拆 XR、結束串流（`/cancel` 與 UI 錯誤訊息待後續切片）。
 
 ### `[VIPLE-XR-INPUT]` —— XR 控制器射線滑鼠（M3a X4）
 

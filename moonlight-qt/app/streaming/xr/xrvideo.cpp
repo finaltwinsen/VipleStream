@@ -3,6 +3,7 @@
 #include "xrvideo.h"
 
 #include "streaming/video/ffmpeg-renderers/plvk_common.h"
+#include "streaming/vr/vrframemeta.h"
 
 #include <QImage>
 
@@ -13,6 +14,7 @@
 #include <cstring>
 
 extern "C" {
+#include <libavutil/buffer.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixdesc.h>
 }
@@ -565,6 +567,12 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     if (mappedOk) {
         pl_unmap_avframe(g, &mapped);
     }
+    // M4a R1：PCVR 的 render pose（decoder 以 pts 查到後放進 VrRenderMetaRing），跟著這張影像一起發布
+    bool hasMeta = false;
+    VIPLE_VR_FRAME_META meta = {};
+    if (frame->pts != AV_NOPTS_VALUE && VrRenderMetaRing::lookup(frame->pts, &meta)) {
+        hasMeta = meta.present != 0;
+    }
     av_frame_free(&frame);
 
     XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
@@ -581,6 +589,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         m_Published.aspect = static_cast<float>(m_Sw.width) / static_cast<float>(m_Sw.height);
         m_Published.generation = m_Sw.generation;
         m_Published.lastDrawnUs = tGpuEnd;
+        m_Published.hasMeta = hasMeta;
+        m_Published.meta = meta;
         m_HavePublished = true;
     }
 

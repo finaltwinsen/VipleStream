@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <ctime>
 #include <vector>
 
 #if defined(Q_OS_WIN)
@@ -38,6 +39,14 @@ const char* const kExtCylinder = "XR_KHR_composition_layer_cylinder";
 const char* const kExtLocalFloor = "XR_EXT_local_floor";
 // X4：Steam Frame 控制器（1.1.59 registry 未收錄；SteamVR 2.17.10 提供）
 const char* const kExtFrameController = "XR_VALVE_frame_controller_interaction";
+// M4a R1：XrTime ↔ client 單調時鐘（tracking thread 模式）
+const char* const kExtTimespec = "XR_KHR_convert_timespec_time";
+const char* const kExtQpc = "XR_KHR_win32_convert_performance_counter_time";
+// XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR（1.1 核心／XR_EXT_local_floor 同值）；舊標頭沒有這個列舉值
+const XrReferenceSpaceType kRefSpaceLocalFloor = static_cast<XrReferenceSpaceType>(1000426000);
+// 自訂函式指標型別：避免為了 XR_USE_TIMESPEC／XR_USE_PLATFORM_WIN32 在標頭拉進 <time.h>／<windows.h>
+typedef XrResult(XRAPI_PTR* PfnConvTimespec)(XrInstance, const struct timespec*, XrTime*);
+typedef XrResult(XRAPI_PTR* PfnConvQpc)(XrInstance, const void* /* LARGE_INTEGER* */, XrTime*);
 
 template <typename T>
 T xrStruct(XrStructureType type)
@@ -307,12 +316,26 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     m_PointerReady = false;
     m_StaleState = 0;
     m_LoggedLayerKind = false;
+    m_FadeReady = false;
+    m_LoggedProjection = false;
+    m_PcvrStale = 0;
+    m_PredictAheadNs = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_HmdMutex);
+        m_Hmd = HmdSample();
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        m_HaveEyeToHead = false;
+        m_ProjFrames = 0;
+        m_ProjNoMeta = 0;
+    }
     m_FrameThreadRunning.store(true, std::memory_order_release);
     m_FrameThread = std::thread(&XrContext::frameThreadMain, this);
 
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     // 虛擬鍵盤貼圖：背景執行緒先畫無修飾鍵版本（暖字型，不阻塞 bring-up 與 XR thread）
-    if (m_Input != nullptr && m_KbSwapchain != XR_NULL_HANDLE && !m_KbRenderThread.joinable()) {
+    if (!m_Options.pcvr && m_Input != nullptr && m_KbSwapchain != XR_NULL_HANDLE && !m_KbRenderThread.joinable()) {
         {
             std::lock_guard<std::mutex> lk(m_KbRenderMutex);
             m_KbRenderCancel = false;
@@ -322,9 +345,11 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         m_KbRenderThread = std::thread(&XrContext::keyboardRenderThreadMain, this);
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-XR] bring-up OK in %lld ms: session begun, frame thread started (quad %ux%u fmt=%lld, refresh=%.1f Hz)",
+                "[VIPLE-XR] bring-up OK in %lld ms: session begun, frame thread started (quad %ux%u fmt=%lld, refresh=%.1f Hz%s%s%s)",
                 static_cast<long long>(ms), m_Options.quadWidth, m_Options.quadHeight,
-                static_cast<long long>(m_QuadFormat), static_cast<double>(m_RefreshHz));
+                static_cast<long long>(m_QuadFormat), static_cast<double>(m_RefreshHz),
+                m_Options.pcvr ? ", pcvr space=" : "", m_Options.pcvr ? qUtf8Printable(m_TrackSpaceName) : "",
+                m_Options.pcvr ? (m_TimeConv != nullptr ? " tracking=thread" : " tracking=frameloop") : "");
     return true;
 }
 
@@ -360,6 +385,16 @@ bool XrContext::createInstance(QString* error)
         if (has(opt)) {
             enable.push_back(opt);
         }
+    }
+    // M4a R1：tracking thread 模式要把 client 單調時鐘換成 XrTime
+#if defined(Q_OS_WIN)
+    const char* const timeExt = kExtQpc;
+#else
+    const char* const timeExt = kExtTimespec;
+#endif
+    const bool wantTime = m_Options.pcvr && has(timeExt);
+    if (wantTime) {
+        enable.push_back(timeExt);
     }
 
     XrInstanceCreateInfo ci = xrStruct<XrInstanceCreateInfo>(XR_TYPE_INSTANCE_CREATE_INFO);
@@ -398,6 +433,16 @@ bool XrContext::createInstance(QString* error)
         m_EnabledExtensions << QString::fromLatin1(e);
     }
     m_HasRefreshRate = has(kExtRefresh);
+    m_TimeConv = nullptr;
+    m_TimeConvQpc = false;
+    if (wantTime) {
+#if defined(Q_OS_WIN)
+        m_TimeConv = reinterpret_cast<void*>(xrProc<PfnConvQpc>(m_Instance, "xrConvertWin32PerformanceCounterToTimeKHR"));
+        m_TimeConvQpc = true;
+#else
+        m_TimeConv = reinterpret_cast<void*>(xrProc<PfnConvTimespec>(m_Instance, "xrConvertTimespecTimeToTimeKHR"));
+#endif
+    }
 
     XrInstanceProperties ip = xrStruct<XrInstanceProperties>(XR_TYPE_INSTANCE_PROPERTIES);
     xrGetInstanceProperties(m_Instance, &ip);
@@ -706,6 +751,7 @@ bool XrContext::createSession(QString* error)
         case XR_REFERENCE_SPACE_TYPE_VIEW: m_ReferenceSpaces << QStringLiteral("VIEW"); break;
         case XR_REFERENCE_SPACE_TYPE_LOCAL: m_ReferenceSpaces << QStringLiteral("LOCAL"); break;
         case XR_REFERENCE_SPACE_TYPE_STAGE: m_ReferenceSpaces << QStringLiteral("STAGE"); break;
+        case kRefSpaceLocalFloor: m_ReferenceSpaces << QStringLiteral("LOCAL_FLOOR"); break;
         default: m_ReferenceSpaces << QStringLiteral("0x%1").arg(static_cast<int>(t), 0, 16); break;
         }
     }
@@ -722,6 +768,46 @@ bool XrContext::createSession(QString* error)
     rci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     if (XR_FAILED(xrCreateReferenceSpace(m_Session, &rci, &m_ViewSpace))) {
         m_ViewSpace = XR_NULL_HANDLE;  // head-locked quad 用；X1 不強制
+    }
+
+    // M4a R1：PCVR 的追蹤／投影參考空間 STAGE → LOCAL_FLOOR → LOCAL（設計「參考空間」）
+    m_TrackSpaceName.clear();
+    if (m_Options.pcvr) {
+        if (m_ViewSpace == XR_NULL_HANDLE) {
+            *error = QStringLiteral("PCVR needs the VIEW reference space");
+            return false;
+        }
+        const bool haveStage = std::find(spaces.begin(), spaces.end(), XR_REFERENCE_SPACE_TYPE_STAGE) != spaces.end();
+        const bool haveFloor = std::find(spaces.begin(), spaces.end(), kRefSpaceLocalFloor) != spaces.end();
+        struct Cand { XrReferenceSpaceType t; const char* name; bool ok; };
+        const Cand cands[] = {{XR_REFERENCE_SPACE_TYPE_STAGE, "STAGE", haveStage},
+                              {kRefSpaceLocalFloor, "LOCAL_FLOOR", haveFloor},
+                              {XR_REFERENCE_SPACE_TYPE_LOCAL, "LOCAL", true}};
+        for (const Cand& c : cands) {
+            if (!c.ok) {
+                continue;
+            }
+            rci.referenceSpaceType = c.t;
+            if (XR_SUCCEEDED(xrCreateReferenceSpace(m_Session, &rci, &m_TrackSpace))) {
+                m_TrackSpaceName = QString::fromLatin1(c.name);
+                break;
+            }
+            m_TrackSpace = XR_NULL_HANDLE;
+        }
+        if (m_TrackSpace == XR_NULL_HANDLE) {
+            *error = QStringLiteral("PCVR: no usable tracking reference space");
+            return false;
+        }
+        uint32_t vc = 0;
+        xrEnumerateViewConfigurationViews(m_Instance, m_SystemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &vc, nullptr);
+        if (vc >= 2) {
+            std::vector<XrViewConfigurationView> v(vc, xrStruct<XrViewConfigurationView>(XR_TYPE_VIEW_CONFIGURATION_VIEW));
+            if (XR_SUCCEEDED(xrEnumerateViewConfigurationViews(m_Instance, m_SystemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                                              vc, &vc, v.data()))) {
+                m_RecW = v[0].recommendedImageRectWidth;
+                m_RecH = v[0].recommendedImageRectHeight;
+            }
+        }
     }
 
     if (m_HasRefreshRate) {
@@ -852,6 +938,10 @@ bool XrContext::createQuadSwapchain(QString* error)
                              &m_KbImages, &m_KbImageCount, "keyboard");
         createSolidSwapchain(8, 8, &m_KbHoverSwapchain, &m_KbHoverImages, &m_KbHoverImageCount, "keyboard hover");
         createSolidSwapchain(8, 8, &m_KbPressSwapchain, &m_KbPressImages, &m_KbPressImageCount, "keyboard press");
+    }
+    // M4a R1：PCVR stale 淡出（head-locked 半透明黑，預乘 alpha）
+    if (m_Options.pcvr) {
+        createSolidSwapchain(8, 8, &m_FadeSwapchain, &m_FadeImages, &m_FadeImageCount, "pcvr fade");
     }
     return true;
 }
@@ -1286,7 +1376,30 @@ void XrContext::maybeLogStats(uint64_t nowNs)
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] 10s video %s", qUtf8Printable(m_Video->takeStatsLine()));
     }
 #endif
-    if (m_Input != nullptr) {
+    if (m_Options.pcvr) {
+        uint64_t proj = 0, noMeta = 0;
+        {
+            std::lock_guard<std::mutex> lk(m_StatsMutex);
+            proj = m_ProjFrames;
+            noMeta = m_ProjNoMeta;
+            m_ProjFrames = 0;
+            m_ProjNoMeta = 0;
+        }
+        HmdSample h;
+        {
+            std::lock_guard<std::mutex> lk(m_HmdMutex);
+            h = m_Hmd;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] 10s pcvr projection=%llu noMeta=%llu state=%d space=%s tracking=%s predictAhead=%.1f ms "
+                    "hmd=(%.3f, %.3f, %.3f | %.3f, %.3f, %.3f, %.3f)",
+                    static_cast<unsigned long long>(proj), static_cast<unsigned long long>(noMeta), m_PcvrStale,
+                    qUtf8Printable(m_TrackSpaceName), m_TimeConv != nullptr ? "thread" : "frameloop",
+                    static_cast<double>(m_PredictAheadNs) / 1e6, static_cast<double>(h.pos[0]),
+                    static_cast<double>(h.pos[1]), static_cast<double>(h.pos[2]), static_cast<double>(h.rot[0]),
+                    static_cast<double>(h.rot[1]), static_cast<double>(h.rot[2]), static_cast<double>(h.rot[3]));
+    }
+    if (!m_Options.pcvr && m_Input != nullptr) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] 10s %s", qUtf8Printable(m_Input->takeStatsLine()));
     }
 }
@@ -1376,6 +1489,9 @@ void XrContext::frameThreadMain()
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
+        if (m_Options.pcvr) {
+            pcvrAfterWaitFrame(fs.predictedDisplayTime, static_cast<uint64_t>(fs.predictedDisplayPeriod));
+        }
         XrFrameBeginInfo bfi = xrStruct<XrFrameBeginInfo>(XR_TYPE_FRAME_BEGIN_INFO);
         XrResult br;
         {
@@ -1426,6 +1542,12 @@ void XrContext::frameThreadMain()
 
         const XrCompositionLayerBaseHeader* layers[8];
         uint32_t layerCount = 0;
+        // M4a R1（PCVR）：projection＋淡出 quad（結構體要活到 xrEndFrame）
+        XrCompositionLayerProjection proj = xrStruct<XrCompositionLayerProjection>(XR_TYPE_COMPOSITION_LAYER_PROJECTION);
+        XrCompositionLayerProjectionView projViews[2] = {
+            xrStruct<XrCompositionLayerProjectionView>(XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW),
+            xrStruct<XrCompositionLayerProjectionView>(XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW)};
+        XrCompositionLayerQuad fade = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         XrCompositionLayerQuad quad = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         XrCompositionLayerCylinderKHR cyl = xrStruct<XrCompositionLayerCylinderKHR>(XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR);
         XrCompositionLayerQuad status = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
@@ -1446,13 +1568,60 @@ void XrContext::frameThreadMain()
             const uint64_t ageMs = nowUs > vcur.lastDrawnUs ? (nowUs - vcur.lastDrawnUs) / 1000ull : 0;
             stale = ageMs < 1000 ? 1 : (ageMs < 5000 ? 2 : 3);
         }
-        if (fs.shouldRender && stale != m_StaleState) {
+        if (m_Options.pcvr && fs.shouldRender) {
+            // M4a R1：projection。pose＝0x81 帶回的 renderPose∘eyeToHead；>100 ms 沒新幀疊半透明黑、
+            // >250 ms 改 loading quad（下面 β 的 loading 分支，因為 videoLayer 維持 false）
+            uint64_t ageMs = 0;
+            if (haveVideo) {
+                const uint64_t nowUs = cpuT0 / 1000ull;
+                ageMs = nowUs > vcur.lastDrawnUs ? (nowUs - vcur.lastDrawnUs) / 1000ull : 0;
+            }
+            int ps = 0;
+            if (haveVideo && vcur.hasMeta) {
+                ps = ageMs < 100 ? 1 : (ageMs < 250 ? 2 : 3);
+            }
+            else if (haveVideo) {
+                std::lock_guard<std::mutex> lk(m_StatsMutex);
+                m_ProjNoMeta++;
+            }
+            if (ps != m_PcvrStale) {
+                static const char* const kPcvrName[] = {"no-video", "live", "fade", "loading"};
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] pcvr video state %s -> %s (age %llu ms)",
+                            kPcvrName[m_PcvrStale], kPcvrName[ps], static_cast<unsigned long long>(ageMs));
+                m_PcvrStale = ps;
+            }
+            if (ps == 1 || ps == 2) {
+                if (buildProjection(vcur.subImage.swapchain, vcur.subImage.imageRect, vcur.meta.renderRot,
+                                    vcur.meta.renderPos, vcur.meta.echoSampleId, &proj, projViews)) {
+                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
+                    videoLayer = true;
+                    videoGen = vcur.generation;
+                    std::lock_guard<std::mutex> lk(m_StatsMutex);
+                    m_ProjFrames++;
+                }
+            }
+            if (videoLayer && ps == 2 &&
+                ensureSolidQuad(m_FadeSwapchain, m_FadeImages, m_FadeImageCount, &m_FadeReady, 0.0f, 0.0f, 0.0f, 0.6f)) {
+                fade.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                fade.space = m_ViewSpace;
+                fade.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                fade.subImage.swapchain = m_FadeSwapchain;
+                fade.subImage.imageRect.offset = {0, 0};
+                fade.subImage.imageRect.extent = {8, 8};
+                fade.subImage.imageArrayIndex = 0;
+                fade.pose.orientation.w = 1.0f;
+                fade.pose.position = {0.0f, 0.0f, -0.3f};
+                fade.size = {3.0f, 3.0f};  // 0.3 m 前方 3 m 寬：蓋住整個視野
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&fade);
+            }
+        }
+        if (!m_Options.pcvr && fs.shouldRender && stale != m_StaleState) {
             static const char* const kStaleName[] = {"no-video", "live", "stale", "lost"};
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video state %s -> %s",
                         kStaleName[m_StaleState], kStaleName[stale]);
             m_StaleState = stale;
         }
-        if (haveVideo && stale != 3) {
+        if (!m_Options.pcvr && haveVideo && stale != 3) {
             const float screenH = (useCylinder ? m_Screen->cylinderRadiusM() * m_Screen->cylinderAngleRad() : screenW) /
                                   vcur.aspect;
             if (useCylinder) {
@@ -1525,7 +1694,7 @@ void XrContext::frameThreadMain()
         bool kbShown = false;
         XrPosef kbPose = {};
         float kbW = 0.0f, kbH = 0.0f;
-        if (m_Input != nullptr && fs.shouldRender && m_Input->keyboardOpen() && m_Screen->placed() &&
+        if (!m_Options.pcvr && m_Input != nullptr && fs.shouldRender && m_Input->keyboardOpen() && m_Screen->placed() &&
             (videoLayer || loadingLayer) && m_KbSwapchain != XR_NULL_HANDLE) {
             const XrKeyboard& kb = m_Input->keyboard();
             m_Input->takeKeyboardDirty();
@@ -1590,7 +1759,7 @@ void XrContext::frameThreadMain()
 
         // X4：射線滑鼠。螢幕（影像或 loading quad）在畫面上才求交；失去 FOCUSED 時 XrInput 送全部放開
         XrCompositionLayerQuad pointer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
-        if (m_Input != nullptr && fs.shouldRender) {
+        if (!m_Options.pcvr && m_Input != nullptr && fs.shouldRender) {
             XrInput::Screen scr;
             scr.kbValid = kbShown;
             scr.kbPose = kbPose;
@@ -1653,7 +1822,7 @@ void XrContext::frameThreadMain()
         if (fs.shouldRender) {
             // FOV／眼位：每秒 locate 一次即可（X1 只做量測）
             const uint64_t nowNs = steadyNowNs();
-            if (nowNs - lastViewLocateNs > 1000000000ull) {
+            if (nowNs - lastViewLocateNs > 1000000000ull || (m_Options.pcvr && lastViewLocateNs == 0)) {
                 lastViewLocateNs = nowNs;
                 XrViewLocateInfo li = xrStruct<XrViewLocateInfo>(XR_TYPE_VIEW_LOCATE_INFO);
                 li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -1669,6 +1838,30 @@ void XrContext::frameThreadMain()
                         m_EyePose[e] = views[e].pose;
                     }
                     m_HaveViews = true;
+                }
+                if (m_Options.pcvr && m_ViewSpace != XR_NULL_HANDLE) {
+                    // M4a R1：eyeToHead（每眼相對頭）＝以 VIEW space locate
+                    li.space = m_ViewSpace;
+                    XrView hv[2] = {xrStruct<XrView>(XR_TYPE_VIEW), xrStruct<XrView>(XR_TYPE_VIEW)};
+                    uint32_t hc = 0;
+                    XrViewState hs = xrStruct<XrViewState>(XR_TYPE_VIEW_STATE);
+                    if (XR_SUCCEEDED(xrLocateViews(m_Session, &li, &hs, 2, &hc, hv)) && hc == 2 &&
+                        (hs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) &&
+                        (hs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT)) {
+                        bool first = false;
+                        {
+                            std::lock_guard<std::mutex> lk(m_StatsMutex);
+                            for (int e = 0; e < 2; e++) {
+                                m_EyeToHead[e] = hv[e].pose;
+                                m_Fov[e] = hv[e].fov;
+                            }
+                            first = !m_HaveEyeToHead;
+                            m_HaveEyeToHead = true;
+                        }
+                        if (first) {
+                            m_ViewsCv.notify_all();
+                        }
+                    }
                 }
             }
         }
@@ -1763,6 +1956,208 @@ void XrContext::frameThreadMain()
         }
     }
     m_FrameThreadRunning.store(false, std::memory_order_release);
+}
+
+// ── M4a R1（PCVR）──
+
+namespace {
+inline XrQuaternionf quatMul(const XrQuaternionf& a, const XrQuaternionf& b)
+{
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+inline XrVector3f quatRotate(const XrQuaternionf& q, const XrVector3f& v)
+{
+    // v' = v + 2w(q×v) + 2(q×(q×v))
+    const float tx = 2.0f * (q.y * v.z - q.z * v.y);
+    const float ty = 2.0f * (q.z * v.x - q.x * v.z);
+    const float tz = 2.0f * (q.x * v.y - q.y * v.x);
+    return {v.x + q.w * tx + (q.y * tz - q.z * ty), v.y + q.w * ty + (q.z * tx - q.x * tz),
+            v.z + q.w * tz + (q.x * ty - q.y * tx)};
+}
+}  // namespace
+
+bool XrContext::nowXrTime(XrTime* out) const
+{
+    if (m_TimeConv == nullptr || m_Instance == XR_NULL_HANDLE) {
+        return false;
+    }
+#if defined(Q_OS_WIN)
+    LARGE_INTEGER qpc;
+    QueryPerformanceCounter(&qpc);
+    return XR_SUCCEEDED(reinterpret_cast<PfnConvQpc>(m_TimeConv)(m_Instance, &qpc, out));
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return XR_SUCCEEDED(reinterpret_cast<PfnConvTimespec>(m_TimeConv)(m_Instance, &ts, out));
+#endif
+}
+
+// frame thread：xrWaitFrame 之後。更新「預測顯示時間 − 現在」的估計，並 locate 一次 HMD（frameloop 模式樣本）
+void XrContext::pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodNs)
+{
+    XrTime xrNow = 0;
+    int64_t ahead = static_cast<int64_t>(2 * periodNs);  // 沒有時間換算：約兩個顯示週期
+    if (nowXrTime(&xrNow) && predictedDisplayTime > xrNow) {
+        ahead = static_cast<int64_t>(predictedDisplayTime - xrNow);
+    }
+    m_PredictAheadNs = m_PredictAheadNs == 0 ? ahead : (m_PredictAheadNs * 7 + ahead) / 8;
+    if (m_TrackSpace == XR_NULL_HANDLE || m_ViewSpace == XR_NULL_HANDLE) {
+        return;
+    }
+    XrSpaceVelocity vel = xrStruct<XrSpaceVelocity>(XR_TYPE_SPACE_VELOCITY);
+    XrSpaceLocation loc = xrStruct<XrSpaceLocation>(XR_TYPE_SPACE_LOCATION);
+    loc.next = &vel;
+    if (XR_FAILED(xrLocateSpace(m_ViewSpace, m_TrackSpace, predictedDisplayTime, &loc)) ||
+        !(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+        return;
+    }
+    HmdSample s;
+    s.valid = true;
+    s.pos[0] = loc.pose.position.x;
+    s.pos[1] = loc.pose.position.y;
+    s.pos[2] = loc.pose.position.z;
+    s.rot[0] = loc.pose.orientation.x;
+    s.rot[1] = loc.pose.orientation.y;
+    s.rot[2] = loc.pose.orientation.z;
+    s.rot[3] = loc.pose.orientation.w;
+    if (vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
+        s.linVel[0] = vel.linearVelocity.x;
+        s.linVel[1] = vel.linearVelocity.y;
+        s.linVel[2] = vel.linearVelocity.z;
+    }
+    if (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
+        s.angVel[0] = vel.angularVelocity.x;
+        s.angVel[1] = vel.angularVelocity.y;
+        s.angVel[2] = vel.angularVelocity.z;
+    }
+    s.predictNs = static_cast<uint64_t>(std::max<int64_t>(ahead, 0));
+    std::lock_guard<std::mutex> lk(m_HmdMutex);
+    m_Hmd = s;
+}
+
+bool XrContext::sampleHmd(float pos[3], float rot[4], float linVel[3], float angVel[3], uint32_t* predictNs)
+{
+    XrTime xrNow = 0;
+    if (m_SessionBegun.load() && m_TrackSpace != XR_NULL_HANDLE && m_ViewSpace != XR_NULL_HANDLE && nowXrTime(&xrNow)) {
+        // thread 模式：當下 locate「現在＋預測提前量」
+        const int64_t ahead = m_PredictAheadNs > 0 ? m_PredictAheadNs : 20000000;
+        XrSpaceVelocity vel = xrStruct<XrSpaceVelocity>(XR_TYPE_SPACE_VELOCITY);
+        XrSpaceLocation loc = xrStruct<XrSpaceLocation>(XR_TYPE_SPACE_LOCATION);
+        loc.next = &vel;
+        if (XR_SUCCEEDED(xrLocateSpace(m_ViewSpace, m_TrackSpace, xrNow + ahead, &loc)) &&
+            (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+            pos[0] = loc.pose.position.x;
+            pos[1] = loc.pose.position.y;
+            pos[2] = loc.pose.position.z;
+            rot[0] = loc.pose.orientation.x;
+            rot[1] = loc.pose.orientation.y;
+            rot[2] = loc.pose.orientation.z;
+            rot[3] = loc.pose.orientation.w;
+            const bool lv = (vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) != 0;
+            const bool av = (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) != 0;
+            linVel[0] = lv ? vel.linearVelocity.x : 0.0f;
+            linVel[1] = lv ? vel.linearVelocity.y : 0.0f;
+            linVel[2] = lv ? vel.linearVelocity.z : 0.0f;
+            angVel[0] = av ? vel.angularVelocity.x : 0.0f;
+            angVel[1] = av ? vel.angularVelocity.y : 0.0f;
+            angVel[2] = av ? vel.angularVelocity.z : 0.0f;
+            *predictNs = static_cast<uint32_t>(std::min<int64_t>(ahead, 0xffffffffll));
+            return true;
+        }
+    }
+    std::lock_guard<std::mutex> lk(m_HmdMutex);
+    if (!m_Hmd.valid) {
+        return false;
+    }
+    for (int i = 0; i < 3; i++) {
+        pos[i] = m_Hmd.pos[i];
+        linVel[i] = m_Hmd.linVel[i];
+        angVel[i] = m_Hmd.angVel[i];
+    }
+    for (int i = 0; i < 4; i++) {
+        rot[i] = m_Hmd.rot[i];
+    }
+    *predictNs = static_cast<uint32_t>(std::min<uint64_t>(m_Hmd.predictNs, 0xffffffffull));
+    return true;
+}
+
+bool XrContext::waitViews(ViewInfo* out, int timeoutMs)
+{
+    std::unique_lock<std::mutex> lk(m_StatsMutex);
+    m_ViewsCv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [this] {
+        return m_HaveEyeToHead || !m_FrameThreadRunning.load();
+    });
+    if (!m_HaveEyeToHead) {
+        return false;
+    }
+    out->valid = true;
+    for (int e = 0; e < 2; e++) {
+        out->fov[e] = m_Fov[e];
+        out->eyeToHead[e] = m_EyeToHead[e];
+    }
+    out->periodNs = m_LastPeriod;
+    out->refreshHz = m_RefreshHz > 0.0f ? m_RefreshHz
+                                          : (m_LastPeriod > 0 ? 1e9f / static_cast<float>(m_LastPeriod) : 0.0f);
+    out->recommendedWidth = m_RecW;
+    out->recommendedHeight = m_RecH;
+    out->trackingSpace = m_TrackSpaceName;
+    out->timeConversion = m_TimeConv != nullptr;
+    return true;
+}
+
+// frame thread：VR session 的 SBS 影像（2W×H）→ 兩個 projection view（左右各半）。
+// view pose＝renderPose（0x81，追蹤參考空間）∘ eyeToHead（量測值）；fov 用量測（＝/launch 協商）值。
+bool XrContext::buildProjection(XrSwapchain swapchain, const XrRect2Di& rect, const float renderRot[4],
+                                const float renderPos[3], uint32_t echoSampleId, XrCompositionLayerProjection* proj,
+                                XrCompositionLayerProjectionView views[2])
+{
+    XrPosef eye[2];
+    XrFovf fov[2];
+    {
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        if (!m_HaveEyeToHead) {
+            return false;
+        }
+        for (int e = 0; e < 2; e++) {
+            eye[e] = m_EyeToHead[e];
+            fov[e] = m_Fov[e];
+        }
+    }
+    const int32_t w = rect.extent.width;
+    const int32_t h = rect.extent.height;
+    if (w < 2 || h < 1) {
+        return false;
+    }
+    XrPosef head;
+    head.orientation = {renderRot[0], renderRot[1], renderRot[2], renderRot[3]};
+    head.position = {renderPos[0], renderPos[1], renderPos[2]};
+    for (int e = 0; e < 2; e++) {
+        const XrVector3f off = quatRotate(head.orientation, eye[e].position);
+        views[e].pose.orientation = quatMul(head.orientation, eye[e].orientation);
+        views[e].pose.position = {head.position.x + off.x, head.position.y + off.y, head.position.z + off.z};
+        views[e].fov = fov[e];
+        views[e].subImage.swapchain = swapchain;
+        views[e].subImage.imageArrayIndex = 0;
+        views[e].subImage.imageRect.offset = {rect.offset.x + (e == 0 ? 0 : w / 2), rect.offset.y};
+        views[e].subImage.imageRect.extent = {w / 2, h};
+    }
+    proj->layerFlags = 0;
+    proj->space = m_TrackSpace;
+    proj->viewCount = 2;
+    proj->views = views;
+    if (!m_LoggedProjection) {
+        m_LoggedProjection = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] pcvr projection: %dx%d per eye from %dx%d SBS, space=%s, first render pose "
+                    "(%.3f, %.3f, %.3f | %.3f, %.3f, %.3f, %.3f) echo=%u",
+                    w / 2, h, w, h, qUtf8Printable(m_TrackSpaceName), static_cast<double>(head.position.x),
+                    static_cast<double>(head.position.y), static_cast<double>(head.position.z),
+                    static_cast<double>(head.orientation.x), static_cast<double>(head.orientation.y),
+                    static_cast<double>(head.orientation.z), static_cast<double>(head.orientation.w),
+                    echoSampleId);
+    }
+    return true;
 }
 
 XrContext::Stats XrContext::stats() const
@@ -1909,6 +2304,23 @@ void XrContext::destroyAll()
         m_Input = nullptr;
     }
     m_ActionSet = XR_NULL_HANDLE;
+    if (m_FadeSwapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(m_FadeSwapchain);
+        m_FadeSwapchain = XR_NULL_HANDLE;
+    }
+    delete[] m_FadeImages;
+    m_FadeImages = nullptr;
+    m_FadeImageCount = 0;
+    m_FadeReady = false;
+    if (m_TrackSpace != XR_NULL_HANDLE) {
+        xrDestroySpace(m_TrackSpace);
+        m_TrackSpace = XR_NULL_HANDLE;
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_HmdMutex);
+        m_Hmd = HmdSample();
+    }
+    m_TimeConv = nullptr;
     if (m_ViewSpace != XR_NULL_HANDLE) {
         xrDestroySpace(m_ViewSpace);
         m_ViewSpace = XR_NULL_HANDLE;

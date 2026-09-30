@@ -543,6 +543,7 @@ int main(int argc, char *argv[])
         bool isCliMode = false;
         bool isXrDesktopStream = false;  // §VR M3a X5：stream --display-target xr-desktop
         bool isStream = false;
+        bool isVrEmulate = false;  // §VR M4a R1：--vr-emulate 的 PCVR 是平面，不走無頭 offscreen
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0 ||
                 strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
@@ -555,12 +556,17 @@ int main(int argc, char *argv[])
             if (strcmp(argv[i], "stream") == 0) {
                 isStream = true;
             }
-            if ((strcmp(argv[i], "--display-target") == 0 && i + 1 < argc && strcmp(argv[i + 1], "xr-desktop") == 0) ||
-                strcmp(argv[i], "--display-target=xr-desktop") == 0) {
+            // M4a R1：PCVR（非 --vr-emulate）同樣全在 XR 裡
+            if ((strcmp(argv[i], "--display-target") == 0 && i + 1 < argc &&
+                 (strcmp(argv[i + 1], "xr-desktop") == 0 || strcmp(argv[i + 1], "pcvr") == 0)) ||
+                strcmp(argv[i], "--display-target=xr-desktop") == 0 || strcmp(argv[i], "--display-target=pcvr") == 0) {
                 isXrDesktopStream = true;
             }
+            if (strcmp(argv[i], "--vr-emulate") == 0) {
+                isVrEmulate = true;
+            }
         }
-        isXrDesktopStream = isXrDesktopStream && isStream;
+        isXrDesktopStream = isXrDesktopStream && isStream && !isVrEmulate;
 
         // §SF-PROBE（M2a R1）：xr-probe／v4l2-probe／decode-bench 在下面（log 就緒後、
         // QGuiApplication 之前）以 QCoreApplication 派發。它們不串流、不開視窗，Frame 上

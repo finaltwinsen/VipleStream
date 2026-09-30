@@ -1,6 +1,7 @@
 #include <Limelight.h>
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include "ffmpeg.h"
 #include "bitstreamdump.h"
@@ -2793,7 +2794,13 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
     // test decoder（codec 探測）一律不啟用。vrFlags==0 時行為完全不變（不變式 5）。
     m_VrTracker.reset();
     m_VrConsecutiveDecodeErrors = 0;
+    m_VrDropOnMetaMiss = false;
+    m_VrMetaMissDropped = 0;
+    m_VrPendingMetaValid = false;
     if (!m_TestOnly && !params->testOnly && (LiGetVrFlags() & VIPLE_VR_SF_ENABLED)) {
+        // M4a R1：幀要畫進 XR projection 才需要 render pose；--vr-emulate（平面）維持 M1a 只統計
+        m_VrDropOnMetaMiss = (params->xr != nullptr);
+        VrRenderMetaRing::reset();
         auto* vrPrefs = StreamingPreferences::get(nullptr);
         m_VrTracker = std::make_unique<VrFrameMetaTracker>(vrPrefs ? vrPrefs->vrInjectDropEvery : 0,
                                                            vrPrefs ? vrPrefs->vrInjectLossSec : 0);
@@ -3340,6 +3347,14 @@ void FFmpegVideoDecoder::decoderThreadProc()
 
                         // Store the presentation time (90 kHz timebase)
                         frame->pts = (int64_t)du.rtpTimestamp;
+                        // M4a R1：renderer 端看到的是這個 pts，render pose 以它為 key 交給 XrVideo
+                        if (m_VrPendingMetaValid) {
+                            // 只給配對的那一幀（中途被丟的幀不可把 meta 留給下一幀）
+                            if ((int64_t)du.frameNumber == m_VrPendingMetaFrame) {
+                                VrRenderMetaRing::publish(frame->pts, m_VrPendingMeta);
+                            }
+                            m_VrPendingMetaValid = false;
+                        }
 
                         // [VIPLE-DEC-DEPTH] §J.3.f recon — log queue depth at receive
                         // to understand whether decoder is pipeline-deep (HEVC ~1,
@@ -3473,9 +3488,25 @@ bool FFmpegVideoDecoder::vrPairDecodedFrame(AVFrame* frame)
         m_VrTracker->noteFifoSkipped(skipped);
     }
 
-    // M1a 只統計；M4a 的 XrRenderer 會拿 meta 決定 projection pose，查不到的幀要丟棄
+    // M1a 只統計；M4a R1：XR projection 用 meta 的 render pose，以 pts 交給 XrVideo（VrRenderMetaRing）
     VIPLE_VR_FRAME_META meta;
-    m_VrTracker->onDecoded(frame->pts, fifoHead, &meta);
+    std::memset(&meta, 0, sizeof(meta));
+    const bool hit = m_VrTracker->onDecoded(frame->pts, fifoHead, &meta);
+    if (m_VrDropOnMetaMiss) {
+        if (!hit || !meta.present) {
+            if (m_VrMetaMissDropped++ < 20 || (m_VrMetaMissDropped % 300) == 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-FRAME] meta-miss: frame pts=%lld %s — dropped (total %u)",
+                            (long long)frame->pts, hit ? "has no 0x81 VR header" : "not in the meta map",
+                            m_VrMetaMissDropped);
+            }
+            return false;
+        }
+        // 配對用的 pts（frameNumber）稍後會被改成 rtpTimestamp（呈現時間）；等改完再以最終 pts 發布
+        m_VrPendingMeta = meta;
+        m_VrPendingMetaFrame = frame->pts;
+        m_VrPendingMetaValid = true;
+    }
     return true;
 }
 
