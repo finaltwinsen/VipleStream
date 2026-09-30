@@ -103,6 +103,8 @@ public:
     void handleXrPointer(uint16_t u16, uint16_t v16);
     void handleXrButton(int button, bool pressed);
     void handleXrScroll(int amount);
+    // §VR M3a：XR 虛擬鍵盤（Win32 VK＋Limelight MODIFIER_*）
+    void handleXrKey(int vk, bool down, uint8_t modifiers);
 
     void handleControllerAxisEvent(SDL_ControllerAxisEvent* event);
 
@@ -176,6 +178,7 @@ private:
         KeyComboToggleFRUC,
         KeyComboCancelTransfer,
         KeyComboXrRecenter,
+        KeyComboXrKeyboard,
         KeyComboMax
     };
 

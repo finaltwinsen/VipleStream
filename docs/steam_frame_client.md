@@ -901,6 +901,10 @@ decoder thread → XrRenderer::renderFrame：只放 mailbox（latest wins）
 - stale：1 s 沒新幀疊狀態條、5 s 改顯示 loading。
 - 輸入：trigger 左鍵、squeeze 或 B 右鍵、搖桿 Y 捲動；XR FOCUSED 期間忽略平面視窗滑鼠（鍵盤照常）；失去
   FOCUSED 放開全部。
+- 虛擬鍵盤：影像螢幕下方、拉近 30 cm、後仰 30°，寬為螢幕的 62%。開關：Touch 左 menu、Index 左 thumbstick click、
+  Frame 左 view、Ctrl+Alt+Shift+K、鍵盤上的 ✕。修飾鍵黏滯一次；「中/英」送 Shift 單擊（host 端 Windows 注音的
+  中／英切換）。貼圖由背景執行緒畫（Windows 首次畫字要初始化字型系統），XR thread 只上傳；按鍵高亮是疊在鍵上的
+  半透明 quad。
 - 生命週期（X5）：runtime 失效（LOSS_PENDING、instance loss、`xrWaitFrame` 回 SESSION_LOST／INSTANCE_LOST）
   → 刪 decoder、拆 XrContext、以 0.5／1／2 s 退避重建最多 3 次，之後經 `SDL_RENDER_DEVICE_RESET` 重建 decoder
   （有新 context 接回 XR，沒有就平面）；runtime 發起的 EXITING（例如使用者關掉 SteamVR）→ 不重建、直接平面，
@@ -918,6 +922,8 @@ VipleStream stream <host> Desktop --display-target xr-desktop
 #   --xr-test-stall-ms N       第一幀 20 s 後丟 N ms 影像（驗 stale）
 #   --xr-test-recenter-sec N   bring-up 後 N 秒 recenter
 #   --xr-test-pointer          合成射線（4 s 一圈、圓頂按 trigger）
+#   --xr-test-keyboard "<文字>"  鍵盤出現後合成射線逐鍵輸入
+#   --xr-dump-keyboard <path>  鍵盤貼圖 PNG（量效能時不要帶）
 #   --xr-test-fail bringup|loss|loss3|exit   失敗注入（見 8.4）
 VipleStream xr-probe --session [--duration N] [--xr-runtime-json <path>]   # session 與 frame loop 量測
 VipleStream xr-probe --selftest-ray                                         # 射線求交自測
@@ -947,6 +953,7 @@ VipleStream xr-probe --selftest-ray                                         # �
 | 影像進 XR（1080p60） | 每 10 s 畫出 581～589 幀、XR thread cpu p95 0.8 ms | 每 10 s 畫出 582～591 幀、render thread cpu p50 8.2 ms |
 | 讀回畫面 | 內容正確 | 內容正確（底色比 S2 略亮，待查） |
 | 射線滑鼠（合成） | 命中 99.9～100%，host 游標到位；selftest 12/12 | — |
+| 虛擬鍵盤（合成輸入 `Hello VR 123`） | 15 次按壓全送出，VK 序列正確（H／V／R 前自動黏滯 Shift，下一鍵放開後解除）；鍵盤開啟期間 XR 漏幀 0%；首次貼圖背景畫 534 ms | — |
 | 失敗注入 bringup | 退回平面，串流持續 | — |
 | 失敗注入 loss | 0.5 s 後重建成功（bring-up 608 ms），影像接回 XR | — |
 | 失敗注入 loss3 | 3 次重建（0.5／1／2 s）全失敗 → 平面 | — |
@@ -962,6 +969,7 @@ VipleStream xr-probe --selftest-ray                                         # �
   不再退到 PlVk 自建 Vulkan device（那會讓 SteamVR compositor 停頓，開場漏幀約 5%）。讓 FFmpeg Vulkan 硬解共用
   XrContext 的 VkDevice 可省掉搬移，但 SteamVR 回報 OpenXR 的 Vulkan 上限 1.2、FFmpeg Vulkan 解碼要 1.3 等級功能，
   暫不做；4K 或高幀率時搬移成本需重估。Frame 用 DrmRenderer（DRM_PRIME 直接匯入），不受影響。
-- 自繪虛擬鍵盤未做（藍牙鍵盤可用）。
+- 虛擬鍵盤：Shift 雙擊鎖定（Caps）、數字鍵盤、長按字元未做；Frame 左 view 當開關鍵待實機確認（不被接受時會自動
+  去掉，改用 Ctrl+Alt+Shift+K 或藍牙鍵盤）；UNORM 格式的 swapchain 上貼圖會略亮（runtime 當線性值）。
 - PoC-2b（β 的啟動形態：overlay 內子行程、同行程切換、Steam 直接以 OpenXR app 啟動）與 G-β 要在 Frame 實機做；
   在 Frame 上跑任何 XR 程式前要先通知使用者（曾讓 Frame 的 SteamVR 重啟）。

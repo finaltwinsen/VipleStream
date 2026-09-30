@@ -197,6 +197,8 @@ private:
 
     // §VR M3a X3：XR 虛擬螢幕重新置中（熱鍵 Ctrl+Alt+Shift+R／SDL_CODE_XR_RECENTER）
     void xrRecenter();
+    // §VR M3a：XR 虛擬鍵盤開關（熱鍵 Ctrl+Alt+Shift+K）
+    void xrToggleKeyboard();
     // §VR M3a X4：XR FOCUSED 時平面視窗的滑鼠事件交給射線（鍵盤照常）
     bool xrOwnsMouse() const;
 

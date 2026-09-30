@@ -742,16 +742,26 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 
 ### `[VIPLE-XR-INPUT]` —— XR 控制器射線滑鼠（M3a X4）
 
-`streaming/xr/xrinput.cpp`、`streaming/input/mouse.cpp`（`handleXrPointer/Button/Scroll`）
+`streaming/xr/xrinput.cpp`、`streaming/xr/xrkeyboard.cpp`、`streaming/input/mouse.cpp`（`handleXrPointer/Button/Scroll/Key`）
 
 ```
 [VIPLE-XR-INPUT] bindings accepted|rejected: <profile> (N)       ← SteamVR 2.17.10 接受 simple、oculus touch、valve index、valve/frame_controller_valve
 [VIPLE-XR-INPUT] interaction profile <hand> -> <profile>
-[VIPLE-XR-INPUT] 10s hit=<%> move=N button=N scroll=N filterLag≈<ms> hand=<L|R>
+[VIPLE-XR-INPUT] 10s frames=N hit=<%> moves=N buttons=N scrolls=N hand=<left|right> filterLatency~<ms> keyboard=<open|closed> keys=N sticky=0x<mods>
+[VIPLE-XR-INPUT] keyboard opened|closed (<hotkey|controller|close key|dev test|focus lost>)
+[VIPLE-XR-INPUT] keyboard keys and modifiers released (<why>)          ← 關鍵盤或失去 FOCUSED 時放開按住的鍵與黏滯修飾鍵
+[VIPLE-XR-INPUT] <profile>: retrying without the keyboard toggle (<path>)   ← 鍵盤開關鍵的路徑不被 runtime 認得時，去掉它重送
+[VIPLE-XR] keyboard texture ready in <ms> ms (first render warms up fonts)   ← 背景執行緒畫貼圖；Windows 首次畫字約 0.5～3 s
+[VIPLE-XR] keyboard texture upload failed (format N)                      ← swapchain 不是 8-bit RGBA／BGRA，鍵盤不顯示
+[VIPLE-XR-INPUT] dev key vk=0xNN down|up mods=0xN                        ← 只有 dev --xr-test-keyboard 才逐鍵記錄
+[VIPLE-XR-INPUT] dev test keyboard done: N presses, N keys sent
+[VIPLE-XR] dev keyboard dump WxH -> <path> (ok|FAILED)
 ```
 
 - 射線與 quad／cylinder 求交得 UV，One-Euro 濾波後經 `SDL_CODE_XR_POINTER/BUTTON/SCROLL`（108–110）送到 main thread，以串流解析度送絕對滑鼠座標。trigger＝左鍵、squeeze 或 B＝右鍵、搖桿 Y 捲動；按下只在命中時送、放開隨時送；失去 FOCUSED 放開全部；XR FOCUSED 期間忽略平面視窗滑鼠。
 - dev：`stream --xr-test-pointer` 合成射線（每 4 s 一圈、圓頂按一次 trigger）；`xr-probe --selftest-ray` 求交自測（全過 rc 0、有失敗 14）。
+- 虛擬鍵盤：US QWERTY 五列（含 Esc、Tab、Bksp、Del、Enter、左右 Shift、Ctrl、Win、Alt、方向鍵、「中/英」、✕）。開關：Touch 左 menu、Index 左 thumbstick click、Frame 左 view（不被接受時自動去掉）、熱鍵 Ctrl+Alt+Shift+K、鍵盤上的 ✕。鍵盤優先於影像螢幕求交，命中時不送滑鼠。trigger 按下／放開＝按鍵按下／放開（host 端自己連發）；Shift／Ctrl／Alt／Win 黏滯一次，送出順序模擬實體鍵盤（修飾鍵先按、一般鍵、修飾鍵後放），經 `SDL_CODE_XR_KEY`（113）送 `LiSendKeyboardEvent`。「中/英」＝Shift 單擊（Windows 注音預設的中／英切換；Win+Space 是切換鍵盤配置，不是同一件事）。一般模式不記錄按了哪些鍵，只記數量。
+- dev：`stream --xr-test-keyboard "<文字>"`（鍵盤出現後合成射線逐鍵點擊，大寫與 Shift 字元自動先點 Shift）、`--xr-dump-keyboard <path>`（貼圖 PNG；PNG 編碼在 XR thread，會讓那一刻漏幾幀，量效能時不要帶）。
 
 ### `[VIPLE-XR-PROBE]` —— `xr-probe`
 

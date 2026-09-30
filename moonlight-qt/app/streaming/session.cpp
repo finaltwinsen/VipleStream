@@ -234,6 +234,8 @@ static int inputStallWatchdogProc(void*)
 // 重建計時到期（data1＝generation，過期的忽略）
 #define SDL_CODE_XR_ENDED 111
 #define SDL_CODE_XR_REBUILD 112
+// §VR M3a 虛擬鍵盤：data1＝VK | (modifiers << 16)、data2＝1 按下／0 放開
+#define SDL_CODE_XR_KEY 113
 
 #include <openssl/rand.h>
 #include <algorithm>
@@ -2411,6 +2413,8 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     xo.testStallMs = isRebuild ? 0 : m_Preferences->xrTestStallMs;             // dev：--xr-test-stall-ms
     xo.testRecenterSec = isRebuild ? 0 : m_Preferences->xrTestRecenterSec;     // dev：--xr-test-recenter-sec
     xo.testPointer = m_Preferences->xrTestPointer;                              // dev：--xr-test-pointer
+    xo.testKeyboardText = isRebuild ? QString() : m_Preferences->xrTestKeyboard;   // dev：--xr-test-keyboard
+    xo.dumpKeyboardPath = isRebuild ? QString() : m_Preferences->xrDumpKeyboardPath;  // dev：--xr-dump-keyboard
     // X5（dev）：--xr-test-fail。首次：bringup＝直接失敗；loss／loss3／exit＝15 s 後模擬。
     // 重建：loss3＝每次都失敗（驗 3 次後退回平面）；loss＝重建成功且不再注入。
     const QString& tf = m_Preferences->xrTestFail;
@@ -2451,6 +2455,15 @@ bool Session::createXrContext(bool isRebuild, QString* error)
         ev.type = SDL_USEREVENT;
         ev.user.code = SDL_CODE_XR_SCROLL;
         ev.user.data1 = (void*)(intptr_t)amount;
+        SDL_PushEvent(&ev);
+    };
+    // 虛擬鍵盤：按鍵依序推到 main loop（SDL 事件佇列保序，修飾鍵與一般鍵的先後不會亂）
+    xo.inputSink.key = [](int vk, bool down, uint8_t modifiers) {
+        SDL_Event ev = {};
+        ev.type = SDL_USEREVENT;
+        ev.user.code = SDL_CODE_XR_KEY;
+        ev.user.data1 = (void*)(uintptr_t)(((uint32_t)modifiers << 16) | ((uint32_t)vk & 0xFFFFu));
+        ev.user.data2 = (void*)(uintptr_t)(down ? 1 : 0);
         SDL_PushEvent(&ev);
     };
     // X5：runtime 結束 session（frame thread 呼叫，只推事件）
@@ -2562,6 +2575,17 @@ bool Session::xrOwnsMouse() const
 #else
     return false;
 #endif
+}
+
+void Session::xrToggleKeyboard()
+{
+#ifdef HAVE_OPENXR
+    if (m_XrContext != nullptr) {
+        m_XrContext->requestKeyboardToggle();
+        return;
+    }
+#endif
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] keyboard toggle ignored: no XR session");
 }
 
 void Session::xrRecenter()
@@ -3648,6 +3672,12 @@ void Session::exec()
             case SDL_CODE_XR_BUTTON:
                 m_InputHandler->handleXrButton((int)(uintptr_t)event.user.data1, (uintptr_t)event.user.data2 != 0);
                 break;
+            case SDL_CODE_XR_KEY: {
+                const uint32_t packed = (uint32_t)(uintptr_t)event.user.data1;
+                m_InputHandler->handleXrKey((int)(packed & 0xFFFFu), (uintptr_t)event.user.data2 != 0,
+                                            (uint8_t)((packed >> 16) & 0xFFu));
+                break;
+            }
             case SDL_CODE_XR_SCROLL:
                 m_InputHandler->handleXrScroll((int)(intptr_t)event.user.data1);
                 break;

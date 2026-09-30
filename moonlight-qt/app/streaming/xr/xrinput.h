@@ -15,7 +15,11 @@
 // （路徑依 Valve OpenXR Unity 套件文件的 Steam Frame Controller Profile；openxr-loader 1.1.59 的標頭沒收錄
 // 此擴充。面鍵左右不同：右手 a/b/x/y、左手 dpad_up/left/down/right；SteamVR 2.17.10 已接受這組綁定）。
 //
-// TODO(M3a)：自繪虛擬鍵盤（β 輸入的鍵盤部分）尚未實作。
+// 鍵盤（M3a）：自繪虛擬鍵盤見 xrkeyboard.h。鍵盤開啟時射線先對鍵盤求交（優先於影像螢幕），命中時
+// 不送滑鼠移動；trigger 按下／放開＝按鍵按下／放開；Shift／Ctrl／Alt／Win 黏滯（按一下保持，下一個一般鍵
+// 放開後自動放開）。開關：控制器（Touch 左 menu、Index 左 thumbstick click、Frame 左 view）、熱鍵
+// Ctrl+Alt+Shift+K、鍵盤上的 ✕。失去 FOCUSED 或關閉鍵盤時放開按住的鍵與修飾鍵。
+// 一般模式下不記錄按了哪些鍵（避免 log 變成 keylogger），只記數量；dev --xr-test-keyboard 才逐鍵記錄。
 
 #pragma once
 
@@ -24,9 +28,12 @@
 #include <QString>
 #include <QStringList>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <vector>
+
+#include "xrkeyboard.h"
 
 namespace XrRay {
 
@@ -76,6 +83,7 @@ struct XrInputSink {
     std::function<void(float u, float v)> pointer;         // 命中點（濾波後），0..1
     std::function<void(int button, bool pressed)> button;  // Limelight BUTTON_LEFT／BUTTON_RIGHT
     std::function<void(int amount)> scroll;                 // 高解析捲動量（120＝一格）
+    std::function<void(int vk, bool down, uint8_t modifiers)> key;  // 虛擬鍵盤：Win32 VK＋Limelight MODIFIER_*
 };
 
 class XrInput
@@ -90,9 +98,14 @@ public:
         float radiusM = 0.0f;  // cylinder
         float angleRad = 0.0f;
         float aspect = 16.0f / 9.0f;
+        // 虛擬鍵盤 quad（XrContext 擺放；鍵盤開啟且擺好時 kbValid）
+        bool kbValid = false;
+        XrPosef kbPose = {};
+        float kbWidthM = 0.0f;
+        float kbHeightM = 0.0f;
     };
 
-    XrInput(const XrInputSink& sink, bool testPointer);
+    XrInput(const XrInputSink& sink, bool testPointer, const QString& testKeyboardText = QString());
     ~XrInput();
 
     // bring-up 執行緒：建 action set、actions、各 profile 綁定、attach、aim action space
@@ -113,8 +126,27 @@ public:
     // frame thread：10 s 彙總（呼叫後清零）
     QString takeStatsLine();
 
+    // ── 虛擬鍵盤 ──
+    // 任何執行緒：要求切換開關（熱鍵），frame thread 下一幀處理
+    void requestKeyboardToggle() { m_KbToggleReq.fetch_add(1, std::memory_order_acq_rel); }
+    // frame thread
+    bool keyboardOpen() const { return m_KbOpen; }
+    const XrKeyboard& keyboard() const { return m_Kb; }
+    uint8_t stickyModifiers() const { return m_Sticky; }
+    // 貼圖需要重畫（黏滯修飾鍵變了）；取回即清除
+    bool takeKeyboardDirty() { const bool d = m_KbDirty; m_KbDirty = false; return d; }
+    // 高亮：目前射線指著的鍵（-1＝沒有）與是否按住中
+    int keyboardHover(bool* pressed) const { *pressed = m_KbActiveKey >= 0 && m_KbActiveKey == m_KbHover; return m_KbHover; }
+
 private:
     void releaseAll(const char* why);
+    void setKeyboardOpen(bool open, const char* why);
+    void releaseKeyboard(const char* why);
+    void kbPress(int idx);
+    void kbRelease();
+    void sendKey(int vk, bool down, uint8_t mods);
+    bool syntheticKeyboardRay(XrTime t, XrSpace local, XrSpace view, const Screen& s, uint64_t nowNs,
+                              XrRay::Vec3* origin, XrRay::Vec3* dir, bool* trigger);
     void setButton(int idx, bool pressed);
     bool locateAim(int hand, XrTime t, XrSpace local, XrRay::Vec3* origin, XrRay::Vec3* dir);
     bool syntheticRay(XrTime t, XrSpace local, XrSpace view, const Screen& s, uint64_t nowNs,
@@ -131,6 +163,8 @@ private:
     XrAction m_Squeeze = XR_NULL_HANDLE;
     XrAction m_Secondary = XR_NULL_HANDLE;
     XrAction m_Stick = XR_NULL_HANDLE;
+    XrAction m_KbToggleAction = XR_NULL_HANDLE;
+    bool m_KbToggleWas[2] = {false, false};
     XrSpace m_AimSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
 
     int m_Dominant = 1;  // 0 左、1 右
@@ -150,6 +184,32 @@ private:
     uint64_t m_TestStartNs = 0;
     bool m_TestTriggerDown = false;
     int m_TestLastCycle = -1;
+
+    // 虛擬鍵盤
+    XrKeyboard m_Kb;
+    bool m_KbOpen = false;
+    bool m_KbDirty = true;
+    std::atomic<int> m_KbToggleReq{0};
+    uint8_t m_Sticky = 0;          // 黏滯修飾鍵（XrKeyboard::kMod*）
+    int m_KbHover = -1;            // 射線指著的鍵
+    int m_KbActiveKey = -1;        // 已送出按下、尚未放開的一般鍵
+    uint8_t m_KbActiveMods = 0;    // 該鍵按下時送出的修飾鍵
+    bool m_KbTrigPrev = false;
+    bool m_TrigOnKb = false;       // 這次 trigger 按下發生在鍵盤上：放開前不轉成滑鼠左鍵
+    bool m_KbHit = false;
+    uint64_t m_StatKeys = 0;
+
+    // dev --xr-test-keyboard
+    struct TestKbStep {
+        int key;
+    };
+    QString m_TestKbText;
+    std::vector<TestKbStep> m_TestKbSteps;
+    uint64_t m_TestKbStartNs = 0;
+    uint64_t m_TestKbShownNs = 0;  // 鍵盤第一次顯示（序列從這裡起算，不受貼圖準備時間影響）
+    bool m_TestKbOpened = false;
+    bool m_TestKbDone = false;
+    int m_TestKbSent = 0;
 
     // 10 s 統計
     uint64_t m_StatFrames = 0, m_StatHits = 0, m_StatMoves = 0, m_StatButtons = 0, m_StatScrolls = 0;

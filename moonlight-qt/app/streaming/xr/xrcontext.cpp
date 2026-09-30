@@ -159,6 +159,17 @@ struct XrContextVk {
     PFN_vkDestroyFence DestroyFence = nullptr;
     PFN_vkWaitForFences WaitForFences = nullptr;
     PFN_vkResetFences ResetFences = nullptr;
+    // 虛擬鍵盤貼圖上傳（staging buffer）
+    PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties = nullptr;
+    PFN_vkCreateBuffer CreateBuffer = nullptr;
+    PFN_vkDestroyBuffer DestroyBuffer = nullptr;
+    PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements = nullptr;
+    PFN_vkAllocateMemory AllocateMemory = nullptr;
+    PFN_vkFreeMemory FreeMemory = nullptr;
+    PFN_vkBindBufferMemory BindBufferMemory = nullptr;
+    PFN_vkMapMemory MapMemory = nullptr;
+    PFN_vkUnmapMemory UnmapMemory = nullptr;
+    PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage = nullptr;
 };
 
 static XrContextVk s_Vk;  // 函式指標與 instance／device 無關的部分；每次 createVulkan 重填
@@ -174,6 +185,13 @@ void XrContext::requestRecenter()
 {
     m_Screen->requestRecenter();
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] recenter requested");
+}
+
+void XrContext::requestKeyboardToggle()
+{
+    if (m_Input != nullptr) {
+        m_Input->requestKeyboardToggle();
+    }
 }
 
 XrContext::~XrContext()
@@ -293,6 +311,16 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     m_FrameThread = std::thread(&XrContext::frameThreadMain, this);
 
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    // 虛擬鍵盤貼圖：背景執行緒先畫無修飾鍵版本（暖字型，不阻塞 bring-up 與 XR thread）
+    if (m_Input != nullptr && m_KbSwapchain != XR_NULL_HANDLE && !m_KbRenderThread.joinable()) {
+        {
+            std::lock_guard<std::mutex> lk(m_KbRenderMutex);
+            m_KbRenderCancel = false;
+            m_KbRenderRequest = 0;
+        }
+        m_KbReadyMask.store(0);
+        m_KbRenderThread = std::thread(&XrContext::keyboardRenderThreadMain, this);
+    }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-XR] bring-up OK in %lld ms: session begun, frame thread started (quad %ux%u fmt=%lld, refresh=%.1f Hz)",
                 static_cast<long long>(ms), m_Options.quadWidth, m_Options.quadHeight,
@@ -462,6 +490,7 @@ bool XrContext::createVulkan(QString* error)
     LOAD_INST(GetPhysicalDeviceProperties);
     LOAD_INST(GetPhysicalDeviceFeatures2);
     LOAD_INST(EnumerateDeviceExtensionProperties);
+    LOAD_INST(GetPhysicalDeviceMemoryProperties);
 #undef LOAD_INST
 
     XrVulkanGraphicsDeviceGetInfoKHR dgi = xrStruct<XrVulkanGraphicsDeviceGetInfoKHR>(XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR);
@@ -604,6 +633,15 @@ bool XrContext::createVulkan(QString* error)
     LOAD_DEV(DestroyFence);
     LOAD_DEV(WaitForFences);
     LOAD_DEV(ResetFences);
+    LOAD_DEV(CreateBuffer);
+    LOAD_DEV(DestroyBuffer);
+    LOAD_DEV(GetBufferMemoryRequirements);
+    LOAD_DEV(AllocateMemory);
+    LOAD_DEV(FreeMemory);
+    LOAD_DEV(BindBufferMemory);
+    LOAD_DEV(MapMemory);
+    LOAD_DEV(UnmapMemory);
+    LOAD_DEV(CmdCopyBufferToImage);
 #undef LOAD_DEV
 
     s_Vk.GetDeviceQueue(m_VkDevice, m_QueueFamily, 0, &m_Queue);
@@ -806,13 +844,58 @@ bool XrContext::createQuadSwapchain(QString* error)
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] pointer quad swapchain unavailable: %s",
                     xrResultStr(m_Instance, r).toUtf8().constData());
     }
+
+    // 虛擬鍵盤：貼圖（尺寸同 XrKeyboard）＋hover／按下高亮。建不起來只是沒有鍵盤，其他照常
+    {
+        const XrKeyboard kb;
+        createSolidSwapchain(static_cast<uint32_t>(kb.width()), static_cast<uint32_t>(kb.height()), &m_KbSwapchain,
+                             &m_KbImages, &m_KbImageCount, "keyboard");
+        createSolidSwapchain(8, 8, &m_KbHoverSwapchain, &m_KbHoverImages, &m_KbHoverImageCount, "keyboard hover");
+        createSolidSwapchain(8, 8, &m_KbPressSwapchain, &m_KbPressImages, &m_KbPressImageCount, "keyboard press");
+    }
+    return true;
+}
+
+bool XrContext::createSolidSwapchain(uint32_t w, uint32_t h, XrSwapchain* sc, VkImage** images, uint32_t* count,
+                                     const char* what)
+{
+    XrSwapchainCreateInfo ci = xrStruct<XrSwapchainCreateInfo>(XR_TYPE_SWAPCHAIN_CREATE_INFO);
+    ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT |
+                    XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    ci.format = m_QuadFormat;
+    ci.sampleCount = 1;
+    ci.width = w;
+    ci.height = h;
+    ci.faceCount = 1;
+    ci.arraySize = 1;
+    ci.mipCount = 1;
+    XrResult r = xrCreateSwapchain(m_Session, &ci, sc);
+    if (XR_FAILED(r)) {
+        *sc = XR_NULL_HANDLE;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] %s swapchain unavailable: %s", what,
+                    xrResultStr(m_Instance, r).toUtf8().constData());
+        return false;
+    }
+    xrEnumerateSwapchainImages(*sc, 0, count, nullptr);
+    std::vector<XrSwapchainImageVulkan2KHR> imgs(*count, xrStruct<XrSwapchainImageVulkan2KHR>(XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR));
+    r = xrEnumerateSwapchainImages(*sc, *count, count, reinterpret_cast<XrSwapchainImageBaseHeader*>(imgs.data()));
+    if (XR_FAILED(r) || *count == 0) {
+        xrDestroySwapchain(*sc);
+        *sc = XR_NULL_HANDLE;
+        *count = 0;
+        return false;
+    }
+    *images = new VkImage[*count];
+    for (uint32_t i = 0; i < *count; i++) {
+        (*images)[i] = imgs[i].image;
+    }
     return true;
 }
 
 bool XrContext::createActions(QString* error)
 {
     // X4：action set、actions、各 profile 綁定、attach 與 aim space 全交給 XrInput
-    m_Input = new XrInput(m_Options.inputSink, m_Options.testPointer);
+    m_Input = new XrInput(m_Options.inputSink, m_Options.testPointer, m_Options.testKeyboardText);
     if (!m_Input->create(m_Instance, m_Session, m_EnabledExtensions, error)) {
         return false;
     }
@@ -919,7 +1002,7 @@ void XrContext::handleStateChange(XrSessionState state)
 
 // ── frame thread ──
 
-bool XrContext::clearImage(VkImage img, float r, float g, float b)
+bool XrContext::clearImage(VkImage img, float r, float g, float b, float a)
 {
     s_Vk.ResetCommandBuffer(m_Cmd, 0);
     VkCommandBufferBeginInfo bi = vkStruct<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
@@ -945,7 +1028,7 @@ bool XrContext::clearImage(VkImage img, float r, float g, float b)
     gray.float32[0] = r;
     gray.float32[1] = g;
     gray.float32[2] = b;
-    gray.float32[3] = 1.0f;
+    gray.float32[3] = a;
     s_Vk.CmdClearColorImage(m_Cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &gray, 1, &range);
 
     bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -973,7 +1056,7 @@ bool XrContext::clearImage(VkImage img, float r, float g, float b)
 }
 
 bool XrContext::ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count, bool* ready,
-                                float r, float g, float b)
+                                float r, float g, float b, float a)
 {
     if (*ready) {
         return true;  // runtime 沿用最後 release 的影像
@@ -994,13 +1077,170 @@ bool XrContext::ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count,
     if (XR_FAILED(ar) || XR_FAILED(xrWaitSwapchainImage(sc, &swi))) {
         return false;
     }
-    const bool drawn = idx < count && clearImage(images[idx], r, g, b);
+    const bool drawn = idx < count && clearImage(images[idx], r, g, b, a);
     {
         std::lock_guard<std::mutex> lk(m_QueueMutex);
         xrReleaseSwapchainImage(sc, &ri);
     }
     *ready = drawn;
     return drawn;
+}
+
+void XrContext::keyboardRenderThreadMain()
+{
+    const XrKeyboard kb;
+    bool first = true;
+    for (;;) {
+        int m = -1;
+        {
+            std::unique_lock<std::mutex> lk(m_KbRenderMutex);
+            m_KbRenderCv.wait(lk, [this]() { return m_KbRenderCancel || m_KbRenderRequest >= 0; });
+            if (m_KbRenderCancel) {
+                return;
+            }
+            m = m_KbRenderRequest;
+            m_KbRenderRequest = -1;
+        }
+        if (m_KbReadyMask.load(std::memory_order_acquire) & (1u << m)) {
+            continue;
+        }
+        const uint64_t t0 = steadyNowNs();
+        m_KbCache[m] = kb.render(static_cast<uint8_t>(m));
+        m_KbReadyMask.fetch_or(1u << m, std::memory_order_release);
+        if (first) {
+            first = false;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] keyboard texture ready in %.0f ms (first render warms up fonts)",
+                        static_cast<double>(steadyNowNs() - t0) / 1e6);
+        }
+    }
+}
+
+bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& src)
+{
+    const bool bgra = m_QuadFormat == VK_FORMAT_B8G8R8A8_SRGB || m_QuadFormat == VK_FORMAT_B8G8R8A8_UNORM;
+    const bool rgba = m_QuadFormat == VK_FORMAT_R8G8B8A8_SRGB || m_QuadFormat == VK_FORMAT_R8G8B8A8_UNORM;
+    if (sc == XR_NULL_HANDLE || images == nullptr || (!bgra && !rgba) || s_Vk.CreateBuffer == nullptr) {
+        return false;
+    }
+    // Format_ARGB32 在記憶體裡是 B,G,R,A（little-endian）；UNORM 格式會被 runtime 當線性值（稍亮），SRGB 正確
+    const QImage img = src.convertToFormat(bgra ? QImage::Format_ARGB32 : QImage::Format_RGBA8888);
+    const uint32_t w = static_cast<uint32_t>(img.width());
+    const uint32_t h = static_cast<uint32_t>(img.height());
+    const VkDeviceSize size = static_cast<VkDeviceSize>(w) * h * 4;
+    if (m_StagingSize < size) {
+        if (m_Staging != VK_NULL_HANDLE) {
+            s_Vk.UnmapMemory(m_VkDevice, m_StagingMem);
+            s_Vk.DestroyBuffer(m_VkDevice, m_Staging, nullptr);
+            s_Vk.FreeMemory(m_VkDevice, m_StagingMem, nullptr);
+            m_Staging = VK_NULL_HANDLE;
+            m_StagingMem = VK_NULL_HANDLE;
+            m_StagingPtr = nullptr;
+            m_StagingSize = 0;
+        }
+        VkBufferCreateInfo bci = vkStruct<VkBufferCreateInfo>(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
+        bci.size = size;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (s_Vk.CreateBuffer(m_VkDevice, &bci, nullptr, &m_Staging) != VK_SUCCESS) {
+            m_Staging = VK_NULL_HANDLE;
+            return false;
+        }
+        VkMemoryRequirements req = {};
+        s_Vk.GetBufferMemoryRequirements(m_VkDevice, m_Staging, &req);
+        VkPhysicalDeviceMemoryProperties mp = {};
+        s_Vk.GetPhysicalDeviceMemoryProperties(m_VkPhysicalDevice, &mp);
+        uint32_t type = UINT32_MAX;
+        const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (uint32_t t = 0; t < mp.memoryTypeCount; t++) {
+            if ((req.memoryTypeBits & (1u << t)) && (mp.memoryTypes[t].propertyFlags & want) == want) {
+                type = t;
+                break;
+            }
+        }
+        VkMemoryAllocateInfo mai = vkStruct<VkMemoryAllocateInfo>(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = type;
+        if (type == UINT32_MAX || s_Vk.AllocateMemory(m_VkDevice, &mai, nullptr, &m_StagingMem) != VK_SUCCESS ||
+            s_Vk.BindBufferMemory(m_VkDevice, m_Staging, m_StagingMem, 0) != VK_SUCCESS ||
+            s_Vk.MapMemory(m_VkDevice, m_StagingMem, 0, VK_WHOLE_SIZE, 0, &m_StagingPtr) != VK_SUCCESS) {
+            if (m_StagingMem != VK_NULL_HANDLE) {
+                s_Vk.FreeMemory(m_VkDevice, m_StagingMem, nullptr);
+            }
+            s_Vk.DestroyBuffer(m_VkDevice, m_Staging, nullptr);
+            m_Staging = VK_NULL_HANDLE;
+            m_StagingMem = VK_NULL_HANDLE;
+            m_StagingPtr = nullptr;
+            return false;
+        }
+        m_StagingSize = size;
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        std::memcpy(static_cast<uint8_t*>(m_StagingPtr) + static_cast<size_t>(y) * w * 4, img.constScanLine(static_cast<int>(y)),
+                    static_cast<size_t>(w) * 4);
+    }
+
+    uint32_t idx = 0;
+    XrSwapchainImageAcquireInfo ai = xrStruct<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
+    XrSwapchainImageWaitInfo swi = xrStruct<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
+    swi.timeout = 100000000;  // 100 ms
+    XrSwapchainImageReleaseInfo ri = xrStruct<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
+    XrResult ar;
+    {
+        std::lock_guard<std::mutex> lk(m_QueueMutex);
+        ar = xrAcquireSwapchainImage(sc, &ai, &idx);
+    }
+    if (XR_FAILED(ar) || XR_FAILED(xrWaitSwapchainImage(sc, &swi))) {
+        return false;
+    }
+    bool ok = idx < count;
+    if (ok) {
+        const VkImage dst = images[idx];
+        s_Vk.ResetCommandBuffer(m_Cmd, 0);
+        VkCommandBufferBeginInfo bi = vkStruct<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        s_Vk.BeginCommandBuffer(m_Cmd, &bi);
+        VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkImageMemoryBarrier bar = vkStruct<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
+        bar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image = dst;
+        bar.subresourceRange = range;
+        s_Vk.CmdPipelineBarrier(m_Cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                0, 0, nullptr, 0, nullptr, 1, &bar);
+        VkBufferImageCopy region = {};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {w, h, 1};
+        s_Vk.CmdCopyBufferToImage(m_Cmd, m_Staging, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        s_Vk.CmdPipelineBarrier(m_Cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                0, 0, nullptr, 0, nullptr, 1, &bar);
+        s_Vk.EndCommandBuffer(m_Cmd);
+        VkSubmitInfo si = vkStruct<VkSubmitInfo>(VK_STRUCTURE_TYPE_SUBMIT_INFO);
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &m_Cmd;
+        VkResult vr;
+        {
+            std::lock_guard<std::mutex> lk(m_QueueMutex);
+            vr = s_Vk.QueueSubmit(m_Queue, 1, &si, m_Fence);
+        }
+        ok = vr == VK_SUCCESS;
+        if (ok) {
+            s_Vk.WaitForFences(m_VkDevice, 1, &m_Fence, VK_TRUE, 1000000000ull);
+            s_Vk.ResetFences(m_VkDevice, 1, &m_Fence);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_QueueMutex);
+        xrReleaseSwapchainImage(sc, &ri);
+    }
+    return ok;
 }
 
 void XrContext::maybeLogStats(uint64_t nowNs)
@@ -1184,7 +1424,7 @@ void XrContext::frameThreadMain()
             }
         }
 
-        const XrCompositionLayerBaseHeader* layers[4];
+        const XrCompositionLayerBaseHeader* layers[8];
         uint32_t layerCount = 0;
         XrCompositionLayerQuad quad = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         XrCompositionLayerCylinderKHR cyl = xrStruct<XrCompositionLayerCylinderKHR>(XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR);
@@ -1279,10 +1519,83 @@ void XrContext::frameThreadMain()
             loadingLayer = true;
         }
 
+        // 虛擬鍵盤：影像螢幕下方 6 cm、往使用者拉近 30 cm、後仰 30°（像筆電鍵盤），寬為螢幕 62%
+        XrCompositionLayerQuad kbLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
+        XrCompositionLayerQuad kbHi = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
+        bool kbShown = false;
+        XrPosef kbPose = {};
+        float kbW = 0.0f, kbH = 0.0f;
+        if (m_Input != nullptr && fs.shouldRender && m_Input->keyboardOpen() && m_Screen->placed() &&
+            (videoLayer || loadingLayer) && m_KbSwapchain != XR_NULL_HANDLE) {
+            const XrKeyboard& kb = m_Input->keyboard();
+            m_Input->takeKeyboardDirty();
+            const int wantMods = m_Input->stickyModifiers() & 0x0F;
+            const bool ready = (m_KbReadyMask.load(std::memory_order_acquire) & (1u << wantMods)) != 0;
+            if (!ready) {
+                std::lock_guard<std::mutex> lk(m_KbRenderMutex);
+                if (m_KbRenderRequest != wantMods) {
+                    m_KbRenderRequest = wantMods;
+                    m_KbRenderCv.notify_one();
+                }
+            }
+            if (ready && (wantMods != m_KbUploadedMods || !m_KbUploaded)) {
+                const QImage& img = m_KbCache[wantMods];
+                m_KbUploaded = uploadImage(m_KbSwapchain, m_KbImages, m_KbImageCount, img);
+                m_KbUploadedMods = m_KbUploaded ? wantMods : -1;
+                if (!m_KbUploaded && !m_KbUnsupportedLogged) {
+                    m_KbUnsupportedLogged = true;
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] keyboard texture upload failed (format %lld)",
+                                static_cast<long long>(m_QuadFormat));
+                }
+                if (m_KbUploaded && !m_KbDumped && !m_Options.dumpKeyboardPath.isEmpty()) {
+                    m_KbDumped = true;
+                    const QImage out = img.width() > 1280 || img.height() > 1280
+                                           ? img.scaled(QSize(1280, 1280), Qt::KeepAspectRatio, Qt::SmoothTransformation)
+                                           : img;
+                    const bool saved = out.save(m_Options.dumpKeyboardPath, "PNG");
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev keyboard dump %dx%d -> %s (%s)", out.width(),
+                                out.height(), qUtf8Printable(m_Options.dumpKeyboardPath), saved ? "ok" : "FAILED");
+                }
+            }
+            if (m_KbUploaded) {
+                const XrPosef sp = m_Screen->quadPose();
+                const float scrH = (useCylinder && videoLayer ? m_Screen->cylinderRadiusM() * m_Screen->cylinderAngleRad() : screenW) /
+                                   screenAspect;
+                kbW = screenW * 0.62f;
+                kbH = kbW / kb.aspect();
+                const float tilt = -30.0f * 3.14159265f / 180.0f;
+                const XrQuaternionf qx = {std::sin(tilt * 0.5f), 0.0f, 0.0f, std::cos(tilt * 0.5f)};
+                const XrQuaternionf& q = sp.orientation;
+                const XrQuaternionf qt = {q.w * qx.x + q.x * qx.w + q.y * qx.z - q.z * qx.y,
+                                          q.w * qx.y - q.x * qx.z + q.y * qx.w + q.z * qx.x,
+                                          q.w * qx.z + q.x * qx.y - q.y * qx.x + q.z * qx.w,
+                                          q.w * qx.w - q.x * qx.x - q.y * qx.y - q.z * qx.z};
+                const XrRay::Vec3 top = XrRay::rotate(q, {0.0f, -scrH * 0.5f - 0.06f, 0.30f});
+                const XrRay::Vec3 down = XrRay::rotate(qt, {0.0f, -kbH * 0.5f, 0.0f});
+                kbPose.orientation = qt;
+                kbPose.position = {sp.position.x + top.x + down.x, sp.position.y + top.y + down.y, sp.position.z + top.z + down.z};
+                kbLayer.layerFlags = 0;
+                kbLayer.space = m_LocalSpace;
+                kbLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                kbLayer.subImage.swapchain = m_KbSwapchain;
+                kbLayer.subImage.imageRect.offset = {0, 0};
+                kbLayer.subImage.imageRect.extent = {kb.width(), kb.height()};
+                kbLayer.subImage.imageArrayIndex = 0;
+                kbLayer.pose = kbPose;
+                kbLayer.size = {kbW, kbH};
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&kbLayer);
+                kbShown = true;
+            }
+        }
+
         // X4：射線滑鼠。螢幕（影像或 loading quad）在畫面上才求交；失去 FOCUSED 時 XrInput 送全部放開
         XrCompositionLayerQuad pointer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         if (m_Input != nullptr && fs.shouldRender) {
             XrInput::Screen scr;
+            scr.kbValid = kbShown;
+            scr.kbPose = kbPose;
+            scr.kbWidthM = kbW;
+            scr.kbHeightM = kbH;
             scr.valid = m_Screen->placed() && (videoLayer || loadingLayer);
             scr.cylinder = videoLayer && useCylinder;
             scr.pose = scr.cylinder ? m_Screen->cylinderPose() : m_Screen->quadPose();
@@ -1293,8 +1606,36 @@ void XrContext::frameThreadMain()
             scr.aspect = screenAspect;
             m_Input->update(fs.predictedDisplayTime, m_LocalSpace, m_ViewSpace, scr,
                             m_State.load() == XR_SESSION_STATE_FOCUSED, steadyNowNs());
+            // 鍵盤高亮：射線指著的鍵（按住時換色），貼在鍵盤面前 2 mm
+            bool hiPressed = false;
+            const int hover = kbShown ? m_Input->keyboardHover(&hiPressed) : -1;
+            if (hover >= 0 && layerCount < 7) {
+                XrSwapchain hsc = hiPressed ? m_KbPressSwapchain : m_KbHoverSwapchain;
+                const bool ready = hiPressed
+                                       ? ensureSolidQuad(m_KbPressSwapchain, m_KbPressImages, m_KbPressImageCount, &m_KbPressReady,
+                                                         0.10f * 0.55f, 0.45f * 0.55f, 1.0f * 0.55f, 0.55f)
+                                       : ensureSolidQuad(m_KbHoverSwapchain, m_KbHoverImages, m_KbHoverImageCount, &m_KbHoverReady,
+                                                         0.30f, 0.30f, 0.30f, 0.30f);
+                if (ready && hsc != XR_NULL_HANDLE) {
+                    float cu = 0.0f, cv = 0.0f, du = 0.0f, dv = 0.0f;
+                    m_Input->keyboard().keyUv(hover, &cu, &cv, &du, &dv);
+                    const XrRay::Vec3 c = XrRay::quadPoint(kbPose, kbW, kbH, cu, cv);
+                    const XrRay::Vec3 nrm = XrRay::rotate(kbPose.orientation, {0.0f, 0.0f, 0.002f});
+                    kbHi.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                    kbHi.space = m_LocalSpace;
+                    kbHi.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                    kbHi.subImage.swapchain = hsc;
+                    kbHi.subImage.imageRect.offset = {0, 0};
+                    kbHi.subImage.imageRect.extent = {8, 8};
+                    kbHi.subImage.imageArrayIndex = 0;
+                    kbHi.pose.orientation = kbPose.orientation;
+                    kbHi.pose.position = {c.x + nrm.x, c.y + nrm.y, c.z + nrm.z};
+                    kbHi.size = {du * kbW, dv * kbH};
+                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&kbHi);
+                }
+            }
             XrPosef pp;
-            if (m_Input->pointerPose(&pp) && layerCount < 4 &&
+            if (m_Input->pointerPose(&pp) && layerCount < 8 &&
                 ensureSolidQuad(m_PointerSwapchain, m_PointerImages, m_PointerImageCount, &m_PointerReady, 1.0f, 1.0f, 1.0f)) {
                 const float size = screenW * 0.008f;  // 1080p 螢幕上約 16 px
                 pointer.layerFlags = 0;
@@ -1494,6 +1835,19 @@ void XrContext::shutdown()
 void XrContext::destroyAll()
 {
     const bool hadAnything = m_Instance != XR_NULL_HANDLE;
+    if (m_KbRenderThread.joinable()) {
+        {
+            std::lock_guard<std::mutex> lk(m_KbRenderMutex);
+            m_KbRenderCancel = true;
+        }
+        m_KbRenderCv.notify_one();
+        m_KbRenderThread.join();
+    }
+    m_KbReadyMask.store(0);
+    m_KbUploadedMods = -1;
+    for (QImage& img : m_KbCache) {
+        img = QImage();
+    }
     if (m_VkDevice != VK_NULL_HANDLE && s_Vk.DeviceWaitIdle) {
         std::lock_guard<std::mutex> lk(m_QueueMutex);
         s_Vk.DeviceWaitIdle(m_VkDevice);
@@ -1520,6 +1874,27 @@ void XrContext::destroyAll()
     delete[] m_QuadImages;
     m_QuadImages = nullptr;
     m_QuadImageCount = 0;
+    for (auto* s : {&m_KbSwapchain, &m_KbHoverSwapchain, &m_KbPressSwapchain}) {
+        if (*s != XR_NULL_HANDLE) {
+            xrDestroySwapchain(*s);
+            *s = XR_NULL_HANDLE;
+        }
+    }
+    for (auto* imgs : {&m_KbImages, &m_KbHoverImages, &m_KbPressImages}) {
+        delete[] *imgs;
+        *imgs = nullptr;
+    }
+    m_KbImageCount = m_KbHoverImageCount = m_KbPressImageCount = 0;
+    m_KbUploaded = m_KbHoverReady = m_KbPressReady = false;
+    if (m_Staging != VK_NULL_HANDLE && m_VkDevice != VK_NULL_HANDLE) {
+        s_Vk.UnmapMemory(m_VkDevice, m_StagingMem);
+        s_Vk.DestroyBuffer(m_VkDevice, m_Staging, nullptr);
+        s_Vk.FreeMemory(m_VkDevice, m_StagingMem, nullptr);
+    }
+    m_Staging = VK_NULL_HANDLE;
+    m_StagingMem = VK_NULL_HANDLE;
+    m_StagingPtr = nullptr;
+    m_StagingSize = 0;
     if (m_PointerSwapchain != XR_NULL_HANDLE) {
         xrDestroySwapchain(m_PointerSwapchain);
         m_PointerSwapchain = XR_NULL_HANDLE;

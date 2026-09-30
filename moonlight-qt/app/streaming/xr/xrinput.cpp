@@ -268,12 +268,28 @@ int selfTest(const std::function<void(const char*, bool, const QString&)>& repor
 
 // ─────────────────────────── XrInput ───────────────────────────
 
-XrInput::XrInput(const XrInputSink& sink, bool testPointer)
+XrInput::XrInput(const XrInputSink& sink, bool testPointer, const QString& testKeyboardText)
     : m_Sink(sink),
       m_TestPointer(testPointer),
       m_FiltU(kFilterMinCutoffHz, kFilterBeta, kFilterDCutoffHz),
-      m_FiltV(kFilterMinCutoffHz, kFilterBeta, kFilterDCutoffHz)
+      m_FiltV(kFilterMinCutoffHz, kFilterBeta, kFilterDCutoffHz),
+      m_TestKbText(testKeyboardText)
 {
+    // dev --xr-test-keyboard：把文字展開成按鍵序列（大寫／Shift 字元先點一次黏滯 Shift）
+    const int shiftKey = m_Kb.findKind(XrKeyboard::Kind::Shift);
+    for (const QChar c : m_TestKbText) {
+        int idx = -1;
+        bool needShift = false;
+        if (!m_Kb.keyForChar(c, &idx, &needShift)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dev test keyboard: no key for U+%04X, skipped",
+                        static_cast<unsigned>(c.unicode()));
+            continue;
+        }
+        if (needShift && shiftKey >= 0) {
+            m_TestKbSteps.push_back({shiftKey});
+        }
+        m_TestKbSteps.push_back({idx});
+    }
 }
 
 XrInput::~XrInput()
@@ -314,7 +330,8 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         !mk("trigger", "Trigger (left click)", XR_ACTION_TYPE_FLOAT_INPUT, &m_Trigger) ||
         !mk("squeeze", "Grip (right click)", XR_ACTION_TYPE_FLOAT_INPUT, &m_Squeeze) ||
         !mk("secondary", "B (right click)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_Secondary) ||
-        !mk("scroll", "Thumbstick (scroll)", XR_ACTION_TYPE_VECTOR2F_INPUT, &m_Stick)) {
+        !mk("scroll", "Thumbstick (scroll)", XR_ACTION_TYPE_VECTOR2F_INPUT, &m_Stick) ||
+        !mk("keyboard", "Virtual keyboard (toggle)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_KbToggleAction)) {
         return false;
     }
 
@@ -322,10 +339,10 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         XrAction action;
         const char* path;
     };
-    auto suggest = [&](const char* profile, const std::vector<B>& list) {
+    auto suggest = [&](const char* profile, const std::vector<B>& list) -> bool {
         XrPath prof = XR_NULL_PATH;
         if (XR_FAILED(xrStringToPath(instance, profile, &prof))) {
-            return;
+            return false;
         }
         std::vector<XrActionSuggestedBinding> sb;
         for (const B& b : list) {
@@ -346,6 +363,18 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         else {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] bindings rejected: %s: %s", profile,
                         qUtf8Printable(xrStr(instance, rr)));
+        }
+        return XR_SUCCEEDED(rr);
+    };
+    // 鍵盤開關鍵是選用綁定：同一 profile 的建議會整組被接受或拒絕，路徑不被 runtime 認得時
+    // 去掉它重送，射線滑鼠的綁定不受影響（每次建議會取代同 profile 的前一次）
+    auto suggestWithKb = [&](const char* profile, std::vector<B> list, const char* kbPath) {
+        std::vector<B> withKb = list;
+        withKb.push_back({m_KbToggleAction, kbPath});
+        if (!suggest(profile, withKb)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-XR-INPUT] %s: retrying without the keyboard toggle (%s)", profile, kbPath);
+            suggest(profile, list);
         }
     };
 
@@ -368,8 +397,8 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         {m_Stick, "/user/hand/left/input/thumbstick"},
         {m_Stick, "/user/hand/right/input/thumbstick"},
     };
-    suggest("/interaction_profiles/oculus/touch_controller", touchLike);
-    suggest("/interaction_profiles/valve/index_controller",
+    suggestWithKb("/interaction_profiles/oculus/touch_controller", touchLike, "/user/hand/left/input/menu/click");
+    suggestWithKb("/interaction_profiles/valve/index_controller",
             {{m_Aim, "/user/hand/left/input/aim/pose"},
              {m_Aim, "/user/hand/right/input/aim/pose"},
              {m_Trigger, "/user/hand/left/input/trigger/value"},
@@ -379,7 +408,8 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
              {m_Secondary, "/user/hand/left/input/b/click"},
              {m_Secondary, "/user/hand/right/input/b/click"},
              {m_Stick, "/user/hand/left/input/thumbstick"},
-             {m_Stick, "/user/hand/right/input/thumbstick"}});
+             {m_Stick, "/user/hand/right/input/thumbstick"}},
+            "/user/hand/left/input/thumbstick/click");
     if (enabledExts.contains(QStringLiteral("XR_VALVE_frame_controller_interaction"))) {
         // XR_VALVE_frame_controller_interaction（2026-09-30 依 Valve OpenXR Unity 套件文件
         // ValveSoftware/Unity com.valvesoftware.openxr.utils 的 Steam Frame Controller Profile）：
@@ -387,7 +417,7 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         // 舊路徑被 SteamVR 2.17.10 以 PATH_UNSUPPORTED 拒絕）。trigger、squeeze 有 value／click、
         // thumbstick 同 Touch；面鍵左右不同：右手 a/b/x/y，左手 dpad_up/left/down/right；另有
         // shoulder、menu（右）／view（左）、system。右鍵取「外側」面鍵：右 b、左 dpad_left。
-        suggest("/interaction_profiles/valve/frame_controller_valve",
+        suggestWithKb("/interaction_profiles/valve/frame_controller_valve",
                 {{m_Aim, "/user/hand/left/input/aim/pose"},
                  {m_Aim, "/user/hand/right/input/aim/pose"},
                  {m_Trigger, "/user/hand/left/input/trigger/value"},
@@ -397,7 +427,8 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
                  {m_Secondary, "/user/hand/left/input/dpad_left/click"},
                  {m_Secondary, "/user/hand/right/input/b/click"},
                  {m_Stick, "/user/hand/left/input/thumbstick"},
-                 {m_Stick, "/user/hand/right/input/thumbstick"}});
+                 {m_Stick, "/user/hand/right/input/thumbstick"}},
+                "/user/hand/left/input/view/click");
     }
 
     XrSessionActionSetsAttachInfo ai = xrStruct<XrSessionActionSetsAttachInfo>(XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO);
@@ -424,6 +455,11 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-XR-INPUT] dev --xr-test-pointer: synthetic ray (4 s circle, trigger at the top), controllers ignored");
     }
+    if (!m_TestKbText.isEmpty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR-INPUT] dev --xr-test-keyboard: %zu key presses queued (keyboard opens 5 s after the screen is placed)",
+                    m_TestKbSteps.size());
+    }
     return true;
 }
 
@@ -435,7 +471,7 @@ void XrInput::destroy()
             s = XR_NULL_HANDLE;
         }
     }
-    for (XrAction* a : {&m_Aim, &m_Trigger, &m_Squeeze, &m_Secondary, &m_Stick}) {
+    for (XrAction* a : {&m_Aim, &m_Trigger, &m_Squeeze, &m_Secondary, &m_Stick, &m_KbToggleAction}) {
         if (*a != XR_NULL_HANDLE) {
             xrDestroyAction(*a);
             *a = XR_NULL_HANDLE;
@@ -541,6 +577,7 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     if (!focused) {
         if (m_WasFocused) {
             releaseAll("focus lost");
+            releaseKeyboard("focus lost");
             m_WasFocused = false;
         }
         m_Hit = false;
@@ -549,6 +586,25 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
         return;
     }
     m_WasFocused = true;
+
+    // ── 鍵盤開關：熱鍵要求與控制器（任一手）上升緣 ──
+    for (int n = m_KbToggleReq.exchange(0, std::memory_order_acq_rel); n > 0; n--) {
+        setKeyboardOpen(!m_KbOpen, "hotkey");
+    }
+    if (!m_TestPointer && m_TestKbText.isEmpty() && m_KbToggleAction != XR_NULL_HANDLE) {
+        for (int h = 0; h < 2; h++) {
+            XrActionStateGetInfo gi = xrStruct<XrActionStateGetInfo>(XR_TYPE_ACTION_STATE_GET_INFO);
+            gi.action = m_KbToggleAction;
+            gi.subactionPath = m_Hands[h];
+            XrActionStateBoolean bs = xrStruct<XrActionStateBoolean>(XR_TYPE_ACTION_STATE_BOOLEAN);
+            const bool now = XR_SUCCEEDED(xrGetActionStateBoolean(m_Session, &gi, &bs)) && bs.isActive && bs.currentState;
+            if (now && !m_KbToggleWas[h]) {
+                setKeyboardOpen(!m_KbOpen, "controller");
+            }
+            m_KbToggleWas[h] = now;
+        }
+    }
+
     if (!screen.valid) {
         m_Hit = false;
         return;
@@ -559,7 +615,12 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     bool haveRay = false;
     bool leftDesired = false, rightDesired = false;
     float stickY = 0.0f;
-    if (m_TestPointer) {
+    if (!m_TestKbText.isEmpty() && !m_TestKbDone) {
+        bool trig = false;
+        haveRay = syntheticKeyboardRay(displayTime, local, view, screen, nowNs, &origin, &dir, &trig);
+        leftDesired = trig;
+    }
+    else if (m_TestPointer) {
         bool trig = false;
         haveRay = syntheticRay(displayTime, local, view, screen, nowNs, &origin, &dir, &trig);
         leftDesired = trig;
@@ -603,6 +664,48 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             stickY = st.currentState.y;
         }
         haveRay = locateAim(d, displayTime, local, &origin, &dir);
+    }
+
+    // ── 虛擬鍵盤（優先於影像螢幕）──
+    bool kbHit = false;
+    if (m_KbOpen && screen.kbValid && haveRay) {
+        float ku = 0.0f, kv = 0.0f, kt = 0.0f;
+        if (XrRay::intersectQuad(screen.kbPose, screen.kbWidthM, screen.kbHeightM, origin, dir, &ku, &kv, &kt)) {
+            kbHit = true;
+            m_KbHover = m_Kb.keyAt(ku, kv);
+            const XrRay::Vec3 p = XrRay::quadPoint(screen.kbPose, screen.kbWidthM, screen.kbHeightM, ku, kv);
+            m_HitPose.position = {p.x, p.y, p.z};
+            m_HitPose.orientation = screen.kbPose.orientation;
+        }
+    }
+    if (!kbHit) {
+        m_KbHover = -1;
+    }
+    // trigger 上升緣落在鍵上＝按鍵按下；下降緣放開（按住時 host 端自己連發）
+    if (leftDesired && !m_KbTrigPrev && kbHit && m_KbHover >= 0 && !m_Pressed[0]) {
+        kbPress(m_KbHover);
+    }
+    else if (!leftDesired && m_KbTrigPrev) {
+        kbRelease();
+        m_TrigOnKb = false;
+    }
+    m_KbTrigPrev = leftDesired;
+    m_KbHit = kbHit;
+    if (kbHit) {
+        // 指標畫在鍵盤上；不送滑鼠移動、不按下滑鼠鍵（已按住的照常放開）
+        m_Hit = true;
+        m_StatHits++;
+        if (!leftDesired && m_Pressed[0]) {
+            setButton(0, false);
+        }
+        if (!rightDesired && m_Pressed[1]) {
+            setButton(1, false);
+        }
+        m_ScrollAccum = 0.0f;
+        m_FiltU.reset();  // 回到螢幕時直接跳到命中點
+        m_FiltV.reset();
+        m_LastFilterNs = nowNs;
+        return;
     }
 
     // ── 求交 ──
@@ -649,8 +752,8 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     }
     m_Hit = hit;
 
-    // ── 按鍵：按下只在命中時；放開隨時 ──
-    if (leftDesired && !m_Pressed[0] && hit) {
+    // ── 按鍵：按下只在命中時；放開隨時。按下始於鍵盤的這次 trigger 不轉成滑鼠左鍵 ──
+    if (leftDesired && !m_Pressed[0] && hit && !m_TrigOnKb) {
         setButton(0, true);
     }
     else if (!leftDesired && m_Pressed[0]) {
@@ -681,6 +784,165 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     }
 }
 
+void XrInput::setKeyboardOpen(bool open, const char* why)
+{
+    if (open == m_KbOpen) {
+        return;
+    }
+    if (!open) {
+        releaseKeyboard(why);
+    }
+    m_KbOpen = open;
+    m_KbDirty = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] keyboard %s (%s)", open ? "opened" : "closed", why);
+}
+
+void XrInput::releaseKeyboard(const char* why)
+{
+    const bool had = m_KbActiveKey >= 0 || m_Sticky != 0;
+    kbRelease();
+    if (m_Sticky != 0) {
+        m_Sticky = 0;
+        m_KbDirty = true;
+    }
+    m_KbHover = -1;
+    m_KbTrigPrev = false;
+    m_TrigOnKb = false;
+    if (had) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] keyboard keys and modifiers released (%s)", why);
+    }
+}
+
+void XrInput::sendKey(int vk, bool down, uint8_t mods)
+{
+    if (!m_TestKbText.isEmpty()) {
+        // dev 才逐鍵記錄（一般模式只記數量，避免 log 變成 keylogger）
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dev key vk=0x%02X %s mods=0x%X", vk,
+                    down ? "down" : "up", static_cast<unsigned>(mods));
+    }
+    if (down && !m_TestKbText.isEmpty()) {
+        m_TestKbSent++;
+    }
+    if (m_Sink.key) {
+        m_Sink.key(vk, down, mods);
+    }
+}
+
+void XrInput::kbPress(int idx)
+{
+    using K = XrKeyboard::Kind;
+    const XrKeyboard::Key& k = m_Kb.key(idx);
+    m_TrigOnKb = true;
+    switch (k.kind) {
+    case K::Shift:
+    case K::Ctrl:
+    case K::Alt:
+    case K::Win:
+        // 黏滯：按一下保持，再按一下取消；下一個一般鍵放開後自動放開
+        m_Sticky ^= XrKeyboard::modBit(k.kind);
+        m_KbDirty = true;
+        if (!m_TestKbText.isEmpty()) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dev sticky modifiers=0x%X",
+                        static_cast<unsigned>(m_Sticky));
+        }
+        break;
+    case K::Close:
+        setKeyboardOpen(false, "close key");
+        break;
+    case K::Ime:
+        // 中/英：Shift 單擊（Windows 注音預設的中／英切換；見 xrkeyboard.h）
+        sendKey(k.vk, true, MODIFIER_SHIFT);
+        sendKey(k.vk, false, 0);
+        m_StatKeys++;
+        break;
+    case K::Normal: {
+        const uint8_t mods = m_Sticky;
+        uint8_t cur = 0;
+        for (K mk : {K::Ctrl, K::Alt, K::Shift, K::Win}) {
+            if (mods & XrKeyboard::modBit(mk)) {
+                cur |= XrKeyboard::modBit(mk);
+                sendKey(XrKeyboard::modVk(mk), true, cur);
+            }
+        }
+        sendKey(k.vk, true, mods);
+        m_KbActiveKey = idx;
+        m_KbActiveMods = mods;
+        m_StatKeys++;
+        break;
+    }
+    }
+}
+
+void XrInput::kbRelease()
+{
+    using K = XrKeyboard::Kind;
+    if (m_KbActiveKey < 0) {
+        return;
+    }
+    uint8_t cur = m_KbActiveMods;
+    sendKey(m_Kb.key(m_KbActiveKey).vk, false, cur);
+    for (K mk : {K::Win, K::Shift, K::Alt, K::Ctrl}) {
+        if (cur & XrKeyboard::modBit(mk)) {
+            cur &= static_cast<uint8_t>(~XrKeyboard::modBit(mk));
+            sendKey(XrKeyboard::modVk(mk), false, cur);
+        }
+    }
+    m_KbActiveKey = -1;
+    m_KbActiveMods = 0;
+    if (m_Sticky != 0) {
+        m_Sticky = 0;  // 黏滯修飾鍵只作用一個鍵
+        m_KbDirty = true;
+    }
+}
+
+bool XrInput::syntheticKeyboardRay(XrTime t, XrSpace local, XrSpace view, const Screen& s, uint64_t nowNs,
+                                   XrRay::Vec3* origin, XrRay::Vec3* dir, bool* trigger)
+{
+    *trigger = false;
+    if (m_TestKbStartNs == 0) {
+        m_TestKbStartNs = nowNs;
+    }
+    const double elapsed = static_cast<double>(nowNs - m_TestKbStartNs) / 1e9;
+    if (!m_TestKbOpened) {
+        if (elapsed < 5.0) {
+            return false;
+        }
+        m_TestKbOpened = true;
+        setKeyboardOpen(true, "dev test");
+        return false;
+    }
+    if (!s.kbValid) {
+        return false;  // 開啟後，貼圖畫好並擺好才顯示
+    }
+    if (m_TestKbShownNs == 0) {
+        m_TestKbShownNs = nowNs;
+    }
+    constexpr double kStep = 0.6;  // 每鍵：0.30 s 瞄準、0.12 s 按下、0.18 s 放開
+    const double seq = static_cast<double>(nowNs - m_TestKbShownNs) / 1e9 - 1.0;
+    if (seq < 0.0) {
+        return false;
+    }
+    const int step = static_cast<int>(seq / kStep);
+    if (step >= static_cast<int>(m_TestKbSteps.size())) {
+        m_TestKbDone = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dev test keyboard done: %zu presses, %d keys sent",
+                    m_TestKbSteps.size(), m_TestKbSent);
+        return false;
+    }
+    const double f = seq / kStep - step;
+    XrSpaceLocation loc = xrStruct<XrSpaceLocation>(XR_TYPE_SPACE_LOCATION);
+    if (XR_FAILED(xrLocateSpace(view, local, t, &loc)) || !(loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+        return false;
+    }
+    float cu = 0.0f, cv = 0.0f, du = 0.0f, dv = 0.0f;
+    m_Kb.keyUv(m_TestKbSteps[static_cast<size_t>(step)].key, &cu, &cv, &du, &dv);
+    const XrRay::Vec3 target = XrRay::quadPoint(s.kbPose, s.kbWidthM, s.kbHeightM, cu, cv);
+    *origin = fromXr(loc.pose.position);
+    *dir = normalize(sub(target, *origin));
+    *trigger = f >= 0.5 && f < 0.7;
+    return true;
+}
+
 bool XrInput::pointerPose(XrPosef* pose) const
 {
     if (!m_Hit) {
@@ -694,7 +956,8 @@ QString XrInput::takeStatsLine()
 {
     const double hitPct = m_StatFrames ? 100.0 * static_cast<double>(m_StatHits) / static_cast<double>(m_StatFrames) : 0.0;
     const double lat = m_StatLatencyN ? m_StatLatencySumMs / static_cast<double>(m_StatLatencyN) : 0.0;
-    const QString line = QStringLiteral("frames=%1 hit=%2% moves=%3 buttons=%4 scrolls=%5 hand=%6 filterLatency~%7 ms%8")
+    const QString line = QStringLiteral("frames=%1 hit=%2% moves=%3 buttons=%4 scrolls=%5 hand=%6 filterLatency~%7 ms "
+                                        "keyboard=%9 keys=%10 sticky=0x%11%8")
                              .arg(m_StatFrames)
                              .arg(hitPct, 0, 'f', 1)
                              .arg(m_StatMoves)
@@ -702,8 +965,12 @@ QString XrInput::takeStatsLine()
                              .arg(m_StatScrolls)
                              .arg(m_Dominant ? QStringLiteral("right") : QStringLiteral("left"))
                              .arg(lat, 0, 'f', 1)
-                             .arg(m_TestPointer ? QStringLiteral(" (dev test pointer)") : QString());
+                             .arg(m_TestPointer ? QStringLiteral(" (dev test pointer)") : QString())
+                             .arg(m_KbOpen ? QStringLiteral("open") : QStringLiteral("closed"))
+                             .arg(m_StatKeys)
+                             .arg(m_Sticky, 0, 16);
     m_StatFrames = m_StatHits = m_StatMoves = m_StatButtons = m_StatScrolls = 0;
+    m_StatKeys = 0;
     m_StatLatencySumMs = 0.0;
     m_StatLatencyN = 0;
     return line;

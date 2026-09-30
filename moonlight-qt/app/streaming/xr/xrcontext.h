@@ -28,11 +28,13 @@
 
 #pragma once
 
+#include <QImage>
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -73,6 +75,9 @@ public:
         XrInputSink inputSink;
         // X4（dev）：合成射線（不讀控制器），驗證求交→濾波→事件→Li* 路徑
         bool testPointer = false;
+        // 虛擬鍵盤（dev）：--xr-test-keyboard 的文字（合成射線逐鍵點擊）、--xr-dump-keyboard 的 PNG 路徑
+        QString testKeyboardText;
+        QString dumpKeyboardPath;
         // X5：session 不是因 shutdown() 而結束時，frame thread 結束前呼叫一次（只推事件，不可阻塞）。
         // reason：kEndedLoss（LOSS_PENDING／instance loss／SESSION_LOST／INSTANCE_LOST）或
         // kEndedExit（runtime 發起的 EXITING，例如使用者關掉 SteamVR）。
@@ -121,6 +126,8 @@ public:
 
     // X3：任何執行緒呼叫；frame thread 下一幀依當下頭部水平朝向把螢幕重擺到正前方
     void requestRecenter();
+    // 虛擬鍵盤：任何執行緒呼叫（熱鍵 Ctrl+Alt+Shift+K），frame thread 下一幀切換開關
+    void requestKeyboardToggle();
     bool isLost() const { return m_Lost.load(std::memory_order_acquire); }
     // X4：XR session 持有輸入焦點（FOCUSED）時，平面視窗的滑鼠事件一律忽略（鍵盤照常）
     bool inputFocused() const { return m_Input != nullptr && m_State.load() == XR_SESSION_STATE_FOCUSED; }
@@ -168,9 +175,13 @@ private:
     bool pollEvents();
     void handleStateChange(XrSessionState state);
     void frameThreadMain();
-    bool clearImage(VkImage img, float r, float g, float b);
-    // X3：loading／狀態 quad 只清一次色，之後的幀重用最後 release 的影像
-    bool ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count, bool* ready, float r, float g, float b);
+    bool clearImage(VkImage img, float r, float g, float b, float a = 1.0f);
+    // X3：loading／狀態 quad 只清一次色，之後的幀重用最後 release 的影像（a<1 時 rgb 應為預乘值）
+    bool ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count, bool* ready, float r, float g, float b,
+                         float a = 1.0f);
+    // 虛擬鍵盤：把 QImage 經 staging buffer 複製進 swapchain 影像（格式需為 8-bit RGBA／BGRA）
+    bool uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& img);
+    bool createSolidSwapchain(uint32_t w, uint32_t h, XrSwapchain* sc, VkImage** images, uint32_t* count, const char* what);
     void maybeLogStats(uint64_t nowNs);
 
     Options m_Options;
@@ -191,6 +202,37 @@ private:
     VkImage* m_PointerImages = nullptr;
     bool m_PointerReady = false;
     static constexpr uint32_t kPointerPx = 16;
+    // 虛擬鍵盤：整塊貼圖＋hover／按下高亮（半透明，預乘 alpha）
+    XrSwapchain m_KbSwapchain = XR_NULL_HANDLE;
+    uint32_t m_KbImageCount = 0;
+    VkImage* m_KbImages = nullptr;
+    bool m_KbUploaded = false;
+    bool m_KbUnsupportedLogged = false;
+    bool m_KbDumped = false;
+    XrSwapchain m_KbHoverSwapchain = XR_NULL_HANDLE;
+    uint32_t m_KbHoverImageCount = 0;
+    VkImage* m_KbHoverImages = nullptr;
+    bool m_KbHoverReady = false;
+    XrSwapchain m_KbPressSwapchain = XR_NULL_HANDLE;
+    uint32_t m_KbPressImageCount = 0;
+    VkImage* m_KbPressImages = nullptr;
+    bool m_KbPressReady = false;
+    // 貼圖由背景執行緒畫：第一次 QPainter 畫字要初始化字型系統，Windows 上約 3 s，放在 XR thread
+    // 會整段漏幀。bring-up 後先畫無修飾鍵版本（順便暖字型），其餘組合（黏滯修飾鍵變色／大寫）第一次
+    // 用到時才畫；畫好之前沿用舊貼圖，基本貼圖好之前不顯示鍵盤。
+    void keyboardRenderThreadMain();
+    std::thread m_KbRenderThread;
+    std::mutex m_KbRenderMutex;
+    std::condition_variable m_KbRenderCv;
+    int m_KbRenderRequest = -1;               // 要畫的修飾鍵組合（-1＝沒有）；受 m_KbRenderMutex 保護
+    bool m_KbRenderCancel = false;            // 受 m_KbRenderMutex 保護
+    std::atomic<uint32_t> m_KbReadyMask{0};   // bit m＝m_KbCache[m] 已畫好
+    QImage m_KbCache[16];
+    int m_KbUploadedMods = -1;                // 目前 swapchain 裡是哪一種組合
+    VkBuffer m_Staging = VK_NULL_HANDLE;
+    VkDeviceMemory m_StagingMem = VK_NULL_HANDLE;
+    void* m_StagingPtr = nullptr;
+    VkDeviceSize m_StagingSize = 0;
     int64_t m_QuadFormat = 0;
     uint32_t m_QuadImageCount = 0;
     VkImage* m_QuadImages = nullptr;  // new[]，m_QuadImageCount 個

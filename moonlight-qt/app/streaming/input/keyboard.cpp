@@ -172,6 +172,12 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
         Session::get()->xrRecenter();
         break;
 
+    case KeyComboXrKeyboard:
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] Detected virtual keyboard combo (Ctrl+Alt+Shift+K)");
+        Session::get()->xrToggleKeyboard();
+        break;
+
     default:
         Q_UNREACHABLE();
     }

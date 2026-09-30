@@ -366,6 +366,12 @@ void SdlInputHandler::handleXrButton(int button, bool pressed)
     LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, button);
 }
 
+// §VR M3a：XR 虛擬鍵盤。VK 與修飾鍵由 XrInput 依實體按鍵的順序產生（修飾鍵先按後放），這裡直接送出。
+void SdlInputHandler::handleXrKey(int vk, bool down, uint8_t modifiers)
+{
+    LiSendKeyboardEvent((short)vk, down ? KEY_ACTION_DOWN : KEY_ACTION_UP, (char)modifiers);
+}
+
 void SdlInputHandler::handleXrScroll(int amount)
 {
     if (amount > 32767) amount = 32767;

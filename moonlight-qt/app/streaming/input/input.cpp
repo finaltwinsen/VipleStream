@@ -147,6 +147,12 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     m_SpecialKeyCombos[KeyComboXrRecenter].scanCode = SDL_SCANCODE_R;
     m_SpecialKeyCombos[KeyComboXrRecenter].enabled = true;
 
+    // §VR M3a：Ctrl+Alt+Shift+K — XR 虛擬鍵盤開關（非 XR 模式只記 log）
+    m_SpecialKeyCombos[KeyComboXrKeyboard].keyCombo = KeyComboXrKeyboard;
+    m_SpecialKeyCombos[KeyComboXrKeyboard].keyCode = SDLK_k;
+    m_SpecialKeyCombos[KeyComboXrKeyboard].scanCode = SDL_SCANCODE_K;
+    m_SpecialKeyCombos[KeyComboXrKeyboard].enabled = true;
+
     m_SpecialKeyCombos[KeyComboCancelTransfer].keyCombo = KeyComboCancelTransfer;
     m_SpecialKeyCombos[KeyComboCancelTransfer].keyCode = SDLK_t;
     m_SpecialKeyCombos[KeyComboCancelTransfer].scanCode = SDL_SCANCODE_T;
