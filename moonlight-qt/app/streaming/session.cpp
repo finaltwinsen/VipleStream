@@ -226,8 +226,13 @@ static int inputStallWatchdogProc(void*)
 #define SDL_CODE_VR_MESSAGE 106  // §VR：data1＝長度、data2＝SDL_malloc 的 TLV 副本
 // §VR M3a X3：XR 事件（X4 的 xrinput 會從 XR thread 推這些事件到 main loop）
 #define SDL_CODE_XR_RECENTER 107
+// §VR M3a X4：XR 射線滑鼠（XR frame thread → main loop → SdlInputHandler::handleXr*）
+#define SDL_CODE_XR_POINTER 108  // data1＝(u16 << 16) | v16
+#define SDL_CODE_XR_BUTTON 109   // data1＝Limelight BUTTON_*、data2＝1 按下／0 放開
+#define SDL_CODE_XR_SCROLL 110   // data1＝高解析捲動量（intptr_t）
 
 #include <openssl/rand.h>
+#include <algorithm>
 
 #include <QtEndian>
 #include <QCoreApplication>
@@ -2368,6 +2373,32 @@ void Session::setupXrDesktop()
     xo.dumpFramePath = m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
     xo.testStallMs = m_Preferences->xrTestStallMs;       // dev：--xr-test-stall-ms
     xo.testRecenterSec = m_Preferences->xrTestRecenterSec;  // dev：--xr-test-recenter-sec
+    xo.testPointer = m_Preferences->xrTestPointer;          // dev：--xr-test-pointer
+    // X4：射線滑鼠事件從 XR frame thread 推到 main loop（SDL_PushEvent 可跨執行緒）
+    xo.inputSink.pointer = [](float u, float v) {
+        const uint32_t u16 = (uint32_t)(std::clamp(u, 0.0f, 1.0f) * 65535.0f + 0.5f);
+        const uint32_t v16 = (uint32_t)(std::clamp(v, 0.0f, 1.0f) * 65535.0f + 0.5f);
+        SDL_Event ev = {};
+        ev.type = SDL_USEREVENT;
+        ev.user.code = SDL_CODE_XR_POINTER;
+        ev.user.data1 = (void*)(uintptr_t)((u16 << 16) | v16);
+        SDL_PushEvent(&ev);
+    };
+    xo.inputSink.button = [](int button, bool pressed) {
+        SDL_Event ev = {};
+        ev.type = SDL_USEREVENT;
+        ev.user.code = SDL_CODE_XR_BUTTON;
+        ev.user.data1 = (void*)(uintptr_t)button;
+        ev.user.data2 = (void*)(uintptr_t)(pressed ? 1 : 0);
+        SDL_PushEvent(&ev);
+    };
+    xo.inputSink.scroll = [](int amount) {
+        SDL_Event ev = {};
+        ev.type = SDL_USEREVENT;
+        ev.user.code = SDL_CODE_XR_SCROLL;
+        ev.user.data1 = (void*)(intptr_t)amount;
+        SDL_PushEvent(&ev);
+    };
     m_XrContext = new XrContext(xo);
     QString err;
     if (!m_XrContext->bringUp(5000, &err)) {
@@ -2384,6 +2415,15 @@ void Session::setupXrDesktop()
 #else
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-XR] xr-desktop requested but this build has no OpenXR - falling back to the flat window");
+#endif
+}
+
+bool Session::xrOwnsMouse() const
+{
+#ifdef HAVE_OPENXR
+    return m_XrContext != nullptr && m_XrContext->inputFocused();
+#else
+    return false;
 #endif
 }
 
@@ -3457,6 +3497,17 @@ void Session::exec()
             case SDL_CODE_XR_RECENTER:
                 xrRecenter();
                 break;
+            case SDL_CODE_XR_POINTER: {
+                const uint32_t packed = (uint32_t)(uintptr_t)event.user.data1;
+                m_InputHandler->handleXrPointer((uint16_t)(packed >> 16), (uint16_t)(packed & 0xFFFF));
+                break;
+            }
+            case SDL_CODE_XR_BUTTON:
+                m_InputHandler->handleXrButton((int)(uintptr_t)event.user.data1, (uintptr_t)event.user.data2 != 0);
+                break;
+            case SDL_CODE_XR_SCROLL:
+                m_InputHandler->handleXrScroll((int)(intptr_t)event.user.data1);
+                break;
             case SDL_CODE_VR_MESSAGE:
                 handleVrMessage((const uint8_t*)event.user.data2, (int)(uintptr_t)event.user.data1);
                 SDL_free(event.user.data2);
@@ -3744,12 +3795,21 @@ void Session::exec()
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP:
             presence.runCallbacks();
+            if (xrOwnsMouse()) {
+                break;  // §VR M3a X4：XR FOCUSED 期間滑鼠由射線負責，平面／gamescope 的滑鼠事件忽略
+            }
             m_InputHandler->handleMouseButtonEvent(&event.button);
             break;
         case SDL_MOUSEMOTION:
+            if (xrOwnsMouse()) {
+                break;
+            }
             m_InputHandler->handleMouseMotionEvent(&event.motion);
             break;
         case SDL_MOUSEWHEEL:
+            if (xrOwnsMouse()) {
+                break;
+            }
             m_InputHandler->handleMouseWheelEvent(&event.wheel);
             break;
         case SDL_CONTROLLERAXISMOTION:

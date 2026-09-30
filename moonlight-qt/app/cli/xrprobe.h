@@ -25,6 +25,7 @@ struct XrProbeOptions {
     QString runtimeJson;       // dev：在 xrCreateInstance 前（行程內）設 XR_RUNTIME_JSON
     bool loaderDebug = false;  // dev：行程內設 XR_LOADER_DEBUG=all（loader 的輸出在 stderr）
     QString jsonPath;          // 空 = ProbeUtil::defaultJsonPath("xr-probe")
+    bool selftestRay = false;  // M3a X4：只跑射線求交／One-Euro 自測（不需要 runtime）；全過 0、有失敗 14
 };
 
 int runXrProbe(const XrProbeOptions& options);

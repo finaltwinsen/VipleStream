@@ -98,6 +98,12 @@ public:
 
     void handleMouseWheelEvent(SDL_MouseWheelEvent* event);
 
+    // §VR M3a X4：XR 射線滑鼠（main thread；由 Session 收 SDL_CODE_XR_* 後呼叫）
+    // u16／v16：命中點 UV × 65535（左上為原點）；button：Limelight BUTTON_*；amount：高解析捲動量
+    void handleXrPointer(uint16_t u16, uint16_t v16);
+    void handleXrButton(int button, bool pressed);
+    void handleXrScroll(int amount);
+
     void handleControllerAxisEvent(SDL_ControllerAxisEvent* event);
 
     void handleControllerButtonEvent(SDL_ControllerButtonEvent* event);

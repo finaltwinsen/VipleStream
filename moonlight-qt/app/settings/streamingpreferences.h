@@ -428,6 +428,7 @@ public:
     QString xrDumpFramePath;         // dev（M3a X2）：XR 影像 quad 第 300 幀讀回存 PNG（最長邊 ≤ 1280），不存設定
     int xrTestStallMs = 0;           // dev（M3a X3）：第一幀 20 s 後丟 N ms 影像幀，驗 stale 轉換，不存設定
     int xrTestRecenterSec = 0;       // dev（M3a X3）：bring-up 後第 N 秒自動 recenter 一次，不存設定
+    bool xrTestPointer = false;       // §VR M3a X4（dev）：--xr-test-pointer，不寫入設定
 
 signals:
     void displayModeChanged();

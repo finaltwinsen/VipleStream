@@ -729,6 +729,19 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 - S2（Windows SteamVR null driver）注意：OpenXR app 只會拉起 vrserver，要先完整啟動 SteamVR（否則 `xrGetVulkanGraphicsDevice2KHR` 回 RUNTIME_FAILURE）；null HMD 不動會進 standby、沒有控制器時 dashboard 搶焦點（停在 VISIBLE），驗測前要關 standby 與 dashboard。
 - `xr-probe --session [--duration N]`：B 段用 XrContext 實跑 session 與 frame loop，回報最高狀態、幀數、miss%、refresh、每眼 FOV、reference space；rc 0 成功、13 runtime 載不起來、14 runtime 錯誤。
 
+### `[VIPLE-XR-INPUT]` —— XR 控制器射線滑鼠（M3a X4）
+
+`streaming/xr/xrinput.cpp`、`streaming/input/mouse.cpp`（`handleXrPointer/Button/Scroll`）
+
+```
+[VIPLE-XR-INPUT] bindings <profile>: <XrResult>                 ← simple／oculus touch／valve index 被 SteamVR 接受；valve/frame_controller 目前回 PATH_UNSUPPORTED（元件路徑待查）
+[VIPLE-XR-INPUT] interaction profile <hand> -> <profile>
+[VIPLE-XR-INPUT] 10s hit=<%> move=N button=N scroll=N filterLag≈<ms> hand=<L|R>
+```
+
+- 射線與 quad／cylinder 求交得 UV，One-Euro 濾波後經 `SDL_CODE_XR_POINTER/BUTTON/SCROLL`（108–110）送到 main thread，以串流解析度送絕對滑鼠座標。trigger＝左鍵、squeeze 或 B＝右鍵、搖桿 Y 捲動；按下只在命中時送、放開隨時送；失去 FOCUSED 放開全部；XR FOCUSED 期間忽略平面視窗滑鼠。
+- dev：`stream --xr-test-pointer` 合成射線（每 4 s 一圈、圓頂按一次 trigger）；`xr-probe --selftest-ray` 求交自測（全過 rc 0、有失敗 14）。
+
 ### `[VIPLE-XR-PROBE]` —— `xr-probe`
 
 `cli/xrprobe.cpp`、`streaming/xr/xrprobe_instance.cpp`（只在 `CONFIG+=openxr` 建置）

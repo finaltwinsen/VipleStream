@@ -22,6 +22,7 @@
 
 #ifdef HAVE_OPENXR
 #include "streaming/xr/xrcontext.h"
+#include "streaming/xr/xrinput.h"
 #include "streaming/xr/xrprobe_instance.h"
 #endif
 
@@ -322,6 +323,40 @@ int runXrProbe(const XrProbeOptions& options)
     const QString jsonPath = options.jsonPath.isEmpty()
                                  ? ProbeUtil::defaultJsonPath(QStringLiteral("xr-probe"))
                                  : options.jsonPath;
+
+    if (options.selftestRay) {
+        // §VR M3a X4：射線與 quad／cylinder 求交、UV 往返、One-Euro 的已知案例（純數學，不載 runtime）
+        QJsonObject root;
+        root[QStringLiteral("probe")] = QStringLiteral("xr-probe");
+        root[QStringLiteral("mode")] = QStringLiteral("selftest-ray");
+        int rc = ProbeUtil::kExitNotBuilt;
+#ifdef HAVE_OPENXR
+        QJsonArray cases;
+        const int failures = XrRay::selfTest([&](const char* name, bool ok, const QString& detail) {
+            ProbeUtil::printLine(kTag, "selftest-ray %s %s (%s)", ok ? "PASS" : "FAIL", name, qUtf8Printable(detail));
+            QJsonObject c;
+            c[QStringLiteral("name")] = QLatin1String(name);
+            c[QStringLiteral("pass")] = ok;
+            c[QStringLiteral("detail")] = detail;
+            cases.append(c);
+        });
+        ProbeUtil::printLine(kTag, "selftest-ray: %lld case(s), %d failure(s)", static_cast<long long>(cases.size()), failures);
+        root[QStringLiteral("cases")] = cases;
+        root[QStringLiteral("failures")] = failures;
+        rc = failures == 0 ? ProbeUtil::kExitOk : ProbeUtil::kExitRuntimeError;
+#else
+        ProbeUtil::printLine(kTag, "selftest-ray: this build has no OpenXR (CONFIG+=openxr)");
+#endif
+        root[QStringLiteral("rc")] = rc;
+        QString writtenPath = jsonPath;
+        if (!ProbeUtil::writeJson(jsonPath, root)) {
+            writtenPath.clear();
+            if (rc == ProbeUtil::kExitOk) {
+                rc = ProbeUtil::kExitJsonWriteFailed;
+            }
+        }
+        return ProbeUtil::finish(rc, writtenPath);
+    }
 
     QJsonObject root;
     root[QStringLiteral("probe")] = QStringLiteral("xr-probe");

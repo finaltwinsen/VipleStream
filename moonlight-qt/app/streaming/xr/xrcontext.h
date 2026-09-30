@@ -45,6 +45,8 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
+#include "xrinput.h"
+
 class XrVideo;
 class XrDesktopScreen;
 
@@ -66,6 +68,10 @@ public:
         int testStallMs = 0;
         // X3（dev）：bring-up 後第 N 秒自動 recenter 一次；0＝不用
         int testRecenterSec = 0;
+        // X4：射線滑鼠事件的出口（Session 提供，從 XR frame thread 呼叫；推 SDL_USEREVENT 到 main thread）
+        XrInputSink inputSink;
+        // X4（dev）：合成射線（不讀控制器），驗證求交→濾波→事件→Li* 路徑
+        bool testPointer = false;
     };
 
     struct Stats {
@@ -102,6 +108,8 @@ public:
     // X3：任何執行緒呼叫；frame thread 下一幀依當下頭部水平朝向把螢幕重擺到正前方
     void requestRecenter();
     bool isLost() const { return m_Lost.load(std::memory_order_acquire); }
+    // X4：XR session 持有輸入焦點（FOCUSED）時，平面視窗的滑鼠事件一律忽略（鍵盤照常）
+    bool inputFocused() const { return m_Input != nullptr && m_State.load() == XR_SESSION_STATE_FOCUSED; }
     Stats stats() const;
 
     // 需要 session 的量測（xr-probe --session）：refresh rate、每眼 FOV、reference space 清單、
@@ -159,10 +167,16 @@ private:
     XrSpace m_LocalSpace = XR_NULL_HANDLE;
     XrSpace m_ViewSpace = XR_NULL_HANDLE;
     XrSwapchain m_QuadSwapchain = XR_NULL_HANDLE;
-    // 最小 action set（X1）：SteamVR 要 app 掛上 action set 並每幀 xrSyncActions 才給 FOCUSED。
-    // X4（xrinput）接手擴充成射線／按鍵。
+    // action set：SteamVR 要 app 掛上 action set 並每幀 xrSyncActions 才給 FOCUSED。
+    // X4：XrInput 擁有 action set／actions／aim space（射線滑鼠）；m_ActionSet 只是它的 handle 副本。
     XrActionSet m_ActionSet = XR_NULL_HANDLE;
-    XrAction m_SelectAction = XR_NULL_HANDLE;
+    XrInput* m_Input = nullptr;
+    // X4：指標 quad（白色小方塊，畫在命中點）
+    XrSwapchain m_PointerSwapchain = XR_NULL_HANDLE;
+    uint32_t m_PointerImageCount = 0;
+    VkImage* m_PointerImages = nullptr;
+    bool m_PointerReady = false;
+    static constexpr uint32_t kPointerPx = 16;
     int64_t m_QuadFormat = 0;
     uint32_t m_QuadImageCount = 0;
     VkImage* m_QuadImages = nullptr;  // new[]，m_QuadImageCount 個

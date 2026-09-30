@@ -197,6 +197,8 @@ private:
 
     // §VR M3a X3：XR 虛擬螢幕重新置中（熱鍵 Ctrl+Alt+Shift+R／SDL_CODE_XR_RECENTER）
     void xrRecenter();
+    // §VR M3a X4：XR FOCUSED 時平面視窗的滑鼠事件交給射線（鍵盤照常）
+    bool xrOwnsMouse() const;
 
     // §N.6 (v1.4.103) — in-session cancel current file transfer (Ctrl+Alt+Shift+T).
     // Web UI 重新整理 / 等 stream 結束已可中止 transfer; 本 method 提供 keystroke

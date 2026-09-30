@@ -348,3 +348,27 @@ void SdlInputHandler::updatePointerRegionLock()
 #endif
     }
 }
+
+// §VR M3a X4：XR 射線滑鼠。座標以串流解析度為參考（host 依自己的桌面縮放），與 abstouch 的
+// LiSendMousePositionEvent 用法一致。
+void SdlInputHandler::handleXrPointer(uint16_t u16, uint16_t v16)
+{
+    if (m_StreamWidth <= 0 || m_StreamHeight <= 0) {
+        return;
+    }
+    const int x = (int)((uint32_t)u16 * (uint32_t)(m_StreamWidth - 1) / 65535u);
+    const int y = (int)((uint32_t)v16 * (uint32_t)(m_StreamHeight - 1) / 65535u);
+    LiSendMousePositionEvent((short)x, (short)y, (short)m_StreamWidth, (short)m_StreamHeight);
+}
+
+void SdlInputHandler::handleXrButton(int button, bool pressed)
+{
+    LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, button);
+}
+
+void SdlInputHandler::handleXrScroll(int amount)
+{
+    if (amount > 32767) amount = 32767;
+    if (amount < -32768) amount = -32768;
+    LiSendHighResScrollEvent((short)amount);
+}

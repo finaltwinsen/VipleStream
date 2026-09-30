@@ -36,6 +36,8 @@ const char* const kExtVulkan1 = "XR_KHR_vulkan_enable";
 const char* const kExtRefresh = "XR_FB_display_refresh_rate";
 const char* const kExtCylinder = "XR_KHR_composition_layer_cylinder";
 const char* const kExtLocalFloor = "XR_EXT_local_floor";
+// X4：Steam Frame 控制器（1.1.59 registry 未收錄；SteamVR 2.17.10 提供）
+const char* const kExtFrameController = "XR_VALVE_frame_controller_interaction";
 
 template <typename T>
 T xrStruct(XrStructureType type)
@@ -275,6 +277,7 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     m_MissEventsLogged = 0;
     m_QuadReady = false;
     m_StatusReady = false;
+    m_PointerReady = false;
     m_StaleState = 0;
     m_LoggedLayerKind = false;
     m_FrameThreadRunning.store(true, std::memory_order_release);
@@ -316,7 +319,7 @@ bool XrContext::createInstance(QString* error)
         return false;
     }
     enable.push_back(kExtVulkan2);
-    for (const char* opt : {kExtRefresh, kExtCylinder, kExtLocalFloor}) {
+    for (const char* opt : {kExtRefresh, kExtCylinder, kExtLocalFloor, kExtFrameController}) {
         if (has(opt)) {
             enable.push_back(opt);
         }
@@ -766,59 +769,45 @@ bool XrContext::createQuadSwapchain(QString* error)
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] status quad swapchain unavailable: %s",
                     xrResultStr(m_Instance, r).toUtf8().constData());
     }
+
+    // X4：指標 quad（白色小方塊）。建不起來只是沒有指標，輸入照常
+    ci.width = kPointerPx;
+    ci.height = kPointerPx;
+    r = xrCreateSwapchain(m_Session, &ci, &m_PointerSwapchain);
+    if (XR_SUCCEEDED(r)) {
+        xrEnumerateSwapchainImages(m_PointerSwapchain, 0, &m_PointerImageCount, nullptr);
+        std::vector<XrSwapchainImageVulkan2KHR> pimgs(m_PointerImageCount,
+                                                      xrStruct<XrSwapchainImageVulkan2KHR>(XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR));
+        r = xrEnumerateSwapchainImages(m_PointerSwapchain, m_PointerImageCount, &m_PointerImageCount,
+                                       reinterpret_cast<XrSwapchainImageBaseHeader*>(pimgs.data()));
+        if (XR_SUCCEEDED(r) && m_PointerImageCount > 0) {
+            m_PointerImages = new VkImage[m_PointerImageCount];
+            for (uint32_t i = 0; i < m_PointerImageCount; i++) {
+                m_PointerImages[i] = pimgs[i].image;
+            }
+        }
+        else {
+            xrDestroySwapchain(m_PointerSwapchain);
+            m_PointerSwapchain = XR_NULL_HANDLE;
+            m_PointerImageCount = 0;
+        }
+    }
+    else {
+        m_PointerSwapchain = XR_NULL_HANDLE;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] pointer quad swapchain unavailable: %s",
+                    xrResultStr(m_Instance, r).toUtf8().constData());
+    }
     return true;
 }
 
 bool XrContext::createActions(QString* error)
 {
-    XrActionSetCreateInfo asci = xrStruct<XrActionSetCreateInfo>(XR_TYPE_ACTION_SET_CREATE_INFO);
-    qstrncpy(asci.actionSetName, "viple_xr", sizeof(asci.actionSetName));
-    qstrncpy(asci.localizedActionSetName, "VipleStream XR", sizeof(asci.localizedActionSetName));
-    XrResult r = xrCreateActionSet(m_Instance, &asci, &m_ActionSet);
-    if (XR_FAILED(r)) {
-        *error = QStringLiteral("xrCreateActionSet: %1").arg(xrResultStr(m_Instance, r));
+    // X4：action set、actions、各 profile 綁定、attach 與 aim space 全交給 XrInput
+    m_Input = new XrInput(m_Options.inputSink, m_Options.testPointer);
+    if (!m_Input->create(m_Instance, m_Session, m_EnabledExtensions, error)) {
         return false;
     }
-    XrPath hands[2] = {XR_NULL_PATH, XR_NULL_PATH};
-    xrStringToPath(m_Instance, "/user/hand/left", &hands[0]);
-    xrStringToPath(m_Instance, "/user/hand/right", &hands[1]);
-    XrActionCreateInfo aci = xrStruct<XrActionCreateInfo>(XR_TYPE_ACTION_CREATE_INFO);
-    qstrncpy(aci.actionName, "select", sizeof(aci.actionName));
-    qstrncpy(aci.localizedActionName, "Select", sizeof(aci.localizedActionName));
-    aci.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
-    aci.countSubactionPaths = 2;
-    aci.subactionPaths = hands;
-    r = xrCreateAction(m_ActionSet, &aci, &m_SelectAction);
-    if (XR_FAILED(r)) {
-        *error = QStringLiteral("xrCreateAction: %1").arg(xrResultStr(m_Instance, r));
-        return false;
-    }
-
-    // simple_controller 是所有 runtime 都得接受的 profile；其他 profile 的綁定在 X4
-    XrPath profile = XR_NULL_PATH;
-    XrPath selL = XR_NULL_PATH, selR = XR_NULL_PATH;
-    xrStringToPath(m_Instance, "/interaction_profiles/khr/simple_controller", &profile);
-    xrStringToPath(m_Instance, "/user/hand/left/input/select/click", &selL);
-    xrStringToPath(m_Instance, "/user/hand/right/input/select/click", &selR);
-    XrActionSuggestedBinding sb[2] = {{m_SelectAction, selL}, {m_SelectAction, selR}};
-    XrInteractionProfileSuggestedBinding isb = xrStruct<XrInteractionProfileSuggestedBinding>(XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING);
-    isb.interactionProfile = profile;
-    isb.countSuggestedBindings = 2;
-    isb.suggestedBindings = sb;
-    r = xrSuggestInteractionProfileBindings(m_Instance, &isb);
-    if (XR_FAILED(r)) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] xrSuggestInteractionProfileBindings(simple): %s",
-                    qUtf8Printable(xrResultStr(m_Instance, r)));
-    }
-
-    XrSessionActionSetsAttachInfo ai = xrStruct<XrSessionActionSetsAttachInfo>(XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO);
-    ai.countActionSets = 1;
-    ai.actionSets = &m_ActionSet;
-    r = xrAttachSessionActionSets(m_Session, &ai);
-    if (XR_FAILED(r)) {
-        *error = QStringLiteral("xrAttachSessionActionSets: %1").arg(xrResultStr(m_Instance, r));
-        return false;
-    }
+    m_ActionSet = m_Input->actionSet();
     return true;
 }
 
@@ -865,6 +854,11 @@ bool XrContext::pollEvents()
         }
         case XR_TYPE_EVENT_DATA_EVENTS_LOST:
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] runtime event queue overflowed");
+            break;
+        case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
+            if (m_Input != nullptr) {
+                m_Input->onProfileChanged();
+            }
             break;
         default:
             break;
@@ -1043,6 +1037,9 @@ void XrContext::maybeLogStats(uint64_t nowNs)
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] 10s video %s", qUtf8Printable(m_Video->takeStatsLine()));
     }
 #endif
+    if (m_Input != nullptr) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] 10s %s", qUtf8Printable(m_Input->takeStatsLine()));
+    }
 }
 
 void XrContext::frameThreadMain()
@@ -1152,7 +1149,7 @@ void XrContext::frameThreadMain()
             }
         }
 
-        const XrCompositionLayerBaseHeader* layers[2];
+        const XrCompositionLayerBaseHeader* layers[4];
         uint32_t layerCount = 0;
         XrCompositionLayerQuad quad = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         XrCompositionLayerCylinderKHR cyl = xrStruct<XrCompositionLayerCylinderKHR>(XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR);
@@ -1160,6 +1157,8 @@ void XrContext::frameThreadMain()
         const bool useCylinder = m_EnabledExtensions.contains(QLatin1String(kExtCylinder));
         const float screenW = m_Screen->quadWidthM();
         bool videoLayer = false;
+        bool loadingLayer = false;
+        float screenAspect = static_cast<float>(m_Options.quadWidth) / static_cast<float>(m_Options.quadHeight);
         uint64_t videoGen = 0;
 #ifdef HAVE_XR_VIDEO
         // X3：影像由 XrVideo 的 render thread 畫，這裡只引用最後 release 的影像（沒有新幀時就是
@@ -1210,6 +1209,7 @@ void XrContext::frameThreadMain()
             }
             videoLayer = true;
             videoGen = vcur.generation;
+            screenAspect = vcur.aspect;
             if (stale == 2 &&
                 ensureSolidQuad(m_StatusSwapchain, m_StatusImages, m_StatusImageCount, &m_StatusReady, 0.85f, 0.45f, 0.05f)) {
                 const float statusW = screenW * 0.3f;
@@ -1241,6 +1241,38 @@ void XrContext::frameThreadMain()
             quad.pose = m_Screen->quadPose();
             quad.size = {screenW, screenW * static_cast<float>(m_Options.quadHeight) / static_cast<float>(m_Options.quadWidth)};
             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+            loadingLayer = true;
+        }
+
+        // X4：射線滑鼠。螢幕（影像或 loading quad）在畫面上才求交；失去 FOCUSED 時 XrInput 送全部放開
+        XrCompositionLayerQuad pointer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
+        if (m_Input != nullptr && fs.shouldRender) {
+            XrInput::Screen scr;
+            scr.valid = m_Screen->placed() && (videoLayer || loadingLayer);
+            scr.cylinder = videoLayer && useCylinder;
+            scr.pose = scr.cylinder ? m_Screen->cylinderPose() : m_Screen->quadPose();
+            scr.widthM = screenW;
+            scr.heightM = screenW / screenAspect;
+            scr.radiusM = m_Screen->cylinderRadiusM();
+            scr.angleRad = m_Screen->cylinderAngleRad();
+            scr.aspect = screenAspect;
+            m_Input->update(fs.predictedDisplayTime, m_LocalSpace, m_ViewSpace, scr,
+                            m_State.load() == XR_SESSION_STATE_FOCUSED, steadyNowNs());
+            XrPosef pp;
+            if (m_Input->pointerPose(&pp) && layerCount < 4 &&
+                ensureSolidQuad(m_PointerSwapchain, m_PointerImages, m_PointerImageCount, &m_PointerReady, 1.0f, 1.0f, 1.0f)) {
+                const float size = screenW * 0.008f;  // 1080p 螢幕上約 16 px
+                pointer.layerFlags = 0;
+                pointer.space = m_LocalSpace;
+                pointer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                pointer.subImage.swapchain = m_PointerSwapchain;
+                pointer.subImage.imageRect.offset = {0, 0};
+                pointer.subImage.imageRect.extent = {static_cast<int32_t>(kPointerPx), static_cast<int32_t>(kPointerPx)};
+                pointer.subImage.imageArrayIndex = 0;
+                pointer.pose = pp;
+                pointer.size = {size, size};
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&pointer);
+            }
         }
         if (fs.shouldRender) {
             // FOV／眼位：每秒 locate 一次即可（X1 只做量測）
@@ -1435,14 +1467,20 @@ void XrContext::destroyAll()
     delete[] m_QuadImages;
     m_QuadImages = nullptr;
     m_QuadImageCount = 0;
-    if (m_SelectAction != XR_NULL_HANDLE) {
-        xrDestroyAction(m_SelectAction);
-        m_SelectAction = XR_NULL_HANDLE;
+    if (m_PointerSwapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(m_PointerSwapchain);
+        m_PointerSwapchain = XR_NULL_HANDLE;
     }
-    if (m_ActionSet != XR_NULL_HANDLE) {
-        xrDestroyActionSet(m_ActionSet);
-        m_ActionSet = XR_NULL_HANDLE;
+    delete[] m_PointerImages;
+    m_PointerImages = nullptr;
+    m_PointerImageCount = 0;
+    m_PointerReady = false;
+    if (m_Input != nullptr) {
+        m_Input->destroy();  // aim space／actions／action set，要在 session 之前
+        delete m_Input;
+        m_Input = nullptr;
     }
+    m_ActionSet = XR_NULL_HANDLE;
     if (m_ViewSpace != XR_NULL_HANDLE) {
         xrDestroySpace(m_ViewSpace);
         m_ViewSpace = XR_NULL_HANDLE;

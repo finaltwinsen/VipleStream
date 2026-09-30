@@ -578,6 +578,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("xr-dump-frame", "(dev) save the 300th XR video frame as PNG (longest side <= 1280) for --display-target xr-desktop");
     parser.addValueOption("xr-test-stall-ms", "(dev) drop video frames for N ms starting 20 s after the first XR frame (stale-state test)");
     parser.addValueOption("xr-test-recenter-sec", "(dev) recenter the XR screen once N seconds after XR bring-up");
+    parser.addFlagOption("xr-test-pointer", "(dev) synthetic XR pointer ray (4 s circle, trigger click at the top) instead of the controllers");
     parser.addFlagOption("vr-emulate", "synthetic head/controller pose for PCVR (no XR runtime needed)");
     parser.addChoiceOption("vr-synthetic-motion", "synthetic pose motion for --vr-emulate",
                            {"still", "sine", "yaw30"});
@@ -805,6 +806,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError("xr-test-recenter-sec must be 0..3600");
         }
         preferences->xrTestRecenterSec = v;
+    }
+    if (parser.isSet("xr-test-pointer")) {
+        preferences->xrTestPointer = true;
     }
 #ifndef HAVE_OPENXR
     if (preferences->displayTarget == StreamingPreferences::DT_XR_DESKTOP) {
@@ -1038,6 +1042,9 @@ void XrProbeCommandLineParser::parse(const QStringList &args)
                                         "path"));
     parser.addOption(QCommandLineOption("loader-debug",
                                         "(dev) Print OpenXR loader diagnostics to stderr (XR_LOADER_DEBUG=all inside this process only)."));
+    parser.addOption(QCommandLineOption("selftest-ray",
+                                        "Only run the XR pointer math self-test (ray vs quad/cylinder, UV round trip, One-Euro); "
+                                        "no runtime needed. Exit 0 all pass, 14 on failure."));
     parser.addOption(QCommandLineOption("json",
                                         "Write the JSON report to <path> (default: probe-xr-probe-<ms>-<pid>.json in the log directory).",
                                         "path"));
@@ -1063,6 +1070,7 @@ void XrProbeCommandLineParser::parse(const QStringList &args)
         m_Options.durationSec = d;
     }
     m_Options.loaderDebug = parser.isSet("loader-debug");
+    m_Options.selftestRay = parser.isSet("selftest-ray");
     if (parser.isSet("xr-runtime-json")) {
         const QString path = parser.value("xr-runtime-json");
         if (path.isEmpty()) {
