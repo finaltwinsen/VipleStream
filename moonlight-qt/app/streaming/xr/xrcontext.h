@@ -188,6 +188,9 @@ public:
     // ── M4a R1（PCVR）──
     // 等 frame thread 量到每眼 FOV／eyeToHead／period（bring-up 後第一個 shouldRender 幀），最多 timeoutMs
     bool waitViews(ViewInfo* out, int timeoutMs);
+    // §H.4-AUTO（XR 桌面）：等 predictedDisplayPeriod 穩定後回報實際顯示更新率（Hz；runtime 回報與量到的
+    // 週期不一致時以週期為準，與 waitViews 同規則）。不需要 eyeToHead，XR 桌面模式也可用；拿不到回 0。
+    float waitRefreshHz(int timeoutMs);
     // tracking 送出執行緒（任何執行緒）取 HMD 樣本：pose 在追蹤參考空間；predictNs＝目標顯示時間 − 取樣時間。
     // 有 XrTime 換算（Linux XR_KHR_convert_timespec_time／Windows XR_KHR_win32_convert_performance_counter_time）
     // 時當下直接 xrLocateSpace（thread 模式，2×Hz 都是新樣本）；沒有時沿用 frame loop 最近一次 locate

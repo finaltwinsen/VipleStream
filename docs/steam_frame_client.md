@@ -929,6 +929,12 @@ VipleStream xr-probe --session [--duration N] [--xr-runtime-json <path>]   # ses
 VipleStream xr-probe --selftest-ray                                         # 射線求交自測
 ```
 
+解析度／更新率「自動」（§H.4-AUTO，2.0.0 起新安裝的預設值；CLI 用 `--resolution auto`、`--fps auto`）在
+xr-desktop 模式下：解析度固定 **2560x1440**；更新率在 XrContext bring-up 後（/launch 之前）取 **XR runtime
+實際顯示更新率**（與 `waitViews` 同規則：runtime 回報與量到的 predictedDisplayPeriod 不一致時以週期為準），再與
+host `<DisplayModeSwitchable>` 回報的最高 Hz 取小。FRUC 開著時不改 server fps。log 看
+`[VIPLE-RES] auto fps (XR desktop)`（見 `log_tags.md`）。明確帶 `--resolution WxH`／`--fps N` 時照舊用明確值。
+
 ### 8.3 模擬環境
 
 | 代號 | 環境 | 腳本（dev-only） |

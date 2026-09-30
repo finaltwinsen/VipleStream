@@ -17,6 +17,8 @@
 #define SER_HEIGHT "height"
 #define SER_FPS "fps"
 #define SER_BITRATE "bitrate"
+#define SER_AUTORES "autoresolution"
+#define SER_AUTOFPS "autofps"
 #define SER_UNLOCK_BITRATE "unlockbitrate"
 #define SER_AUTOADJUSTBITRATE "autoadjustbitrate"
 #define SER_FULLSCREEN "fullscreen"
@@ -160,6 +162,10 @@ void StreamingPreferences::reload()
     width = settings.value(SER_WIDTH, 1280).toInt();
     height = settings.value(SER_HEIGHT, 720).toInt();
     fps = settings.value(SER_FPS, 60).toInt();
+    // §H.4-AUTO：新安裝（從沒存過解析度／FPS）預設「自動（本機螢幕最佳）」；已存在的使用者設定
+    // 一律保留原本的明確值，不會被改成自動。
+    autoResolution = settings.value(SER_AUTORES, !settings.contains(SER_WIDTH)).toBool();
+    autoFps = settings.value(SER_AUTOFPS, !settings.contains(SER_FPS)).toBool();
     enableYUV444 = settings.value(SER_YUV444, false).toBool();
     // VipleStream: read enableFrameInterpolation BEFORE bitrate, so
     // getDefaultBitrate() can factor it into the default (halved
@@ -502,6 +508,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_WIDTH, width);
     settings.setValue(SER_HEIGHT, height);
     settings.setValue(SER_FPS, fps);
+    settings.setValue(SER_AUTORES, autoResolution);
+    settings.setValue(SER_AUTOFPS, autoFps);
     settings.setValue(SER_BITRATE, bitrateKbps);
     settings.setValue(SER_UNLOCK_BITRATE, unlockBitrate);
     settings.setValue(SER_AUTOADJUSTBITRATE, autoAdjustBitrate);

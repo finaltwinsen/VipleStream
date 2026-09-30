@@ -1174,6 +1174,9 @@ bool Session::initialize(QQuickWindow* qtWindow)
         m_StreamConfig.height = m_VrLaunch.eyeHeight;
     }
 
+    // §H.4-AUTO：「自動（本機螢幕最佳）」在這裡換成實際值（PCVR 不經過）
+    resolveAutoDisplayMode();
+
     // VipleStream §H.4 — host-display-aware resolution clamp.
     //
     // The settings page is global (no per-host context), so the user can pick
@@ -1194,8 +1197,9 @@ bool Session::initialize(QQuickWindow* qtWindow)
             }
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-RES] Stream config requested: %dx%d; host advertises max: %dx%d",
-                    m_StreamConfig.width, m_StreamConfig.height, hostMaxW, hostMaxH);
+                    "[VIPLE-RES] Stream config requested: %dx%d; host advertises max: %dx%d (%s)",
+                    m_StreamConfig.width, m_StreamConfig.height, hostMaxW, hostMaxH,
+                    m_Computer->displayModeSwitchable ? "switchable max" : "current mode");
         if (hostMaxW > 0 && hostMaxH > 0 &&
             (long long)m_StreamConfig.width * m_StreamConfig.height >
                 (long long)hostMaxW * hostMaxH) {
@@ -2122,8 +2126,177 @@ private:
     Session* m_Session;
 };
 
-void Session::getWindowDimensions(int& x, int& y,
-                                  int& width, int& height)
+// §H.4-AUTO：把「自動（本機螢幕最佳）」換成實際串流值。
+//   本機值：一般＝串流視窗所在螢幕的桌面解析度／目前更新率；XR 桌面＝2560x1440，更新率先用
+//           本機螢幕的值當暫定，XrContext bring-up 後由 applyXrDesktopAutoFps 換成 runtime 實際值。
+//   與 host 取小：host 回報 DisplayModeSwitchable（串流前會把顯示器切到要求模式）時，解析度與
+//           更新率都跟它回報的「可切換最高模式」取小；沒有時更新率不夾、解析度交給下面原本的
+//           §H.4 clamp（夾到 host 目前模式）。
+//   位元率：偏好值仍等於「舊解析度／fps 的預設值」（沒自訂過、CLI 沒帶 --bitrate）時跟著重算。
+// 結果寫回 m_Preferences（width/height/fps 在自動模式下本來就只是「上次解析的值」）。
+void Session::resolveAutoDisplayMode()
+{
+    const bool autoRes = m_Preferences->effectiveAutoResolution();
+    const bool autoFps = m_Preferences->effectiveAutoFps();
+    if (!autoRes && !autoFps) {
+        return;
+    }
+    if (m_VrRequested) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RES] auto display mode skipped: PCVR uses the HMD eye size / refresh");
+        return;
+    }
+
+    const bool xrDesktop = m_Preferences->displayTarget == StreamingPreferences::DT_XR_DESKTOP;
+    const int displayIndex = getStreamDisplayIndex();
+    int localW = 0, localH = 0, localHz = 0;
+    SDL_DisplayMode dm;
+    if (SDL_GetDesktopDisplayMode(displayIndex, &dm) == 0) {
+        localW = dm.w;
+        localH = dm.h;
+        localHz = dm.refresh_rate;
+    }
+    else {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RES] auto: SDL_GetDesktopDisplayMode(%d) failed: %s",
+                    displayIndex, SDL_GetError());
+    }
+    // 與設定頁同樣的正規化（有些螢幕回報 59／119 之類的值）
+    if (localHz >= 58 && localHz <= 62) {
+        localHz = 60;
+    }
+    else if (localHz >= 28 && localHz <= 32) {
+        localHz = 30;
+    }
+    if (xrDesktop) {
+        localW = 2560;
+        localH = 1440;
+        if (localHz <= 0) {
+            localHz = 60;  // 暫定值；XR runtime 量到後會取代
+        }
+    }
+
+    int hostW = 0, hostH = 0, hostHz = 0;
+    const bool hostSwitchable = !m_Computer->isNvidiaServerSoftware && m_Computer->displayModeSwitchable;
+    if (hostSwitchable) {
+        for (const NvDisplayMode &mode : std::as_const(m_Computer->displayModes)) {
+            const long long area = (long long)mode.width * mode.height;
+            if (area > (long long)hostW * hostH || (area == (long long)hostW * hostH && mode.refreshRate > hostHz)) {
+                hostW = mode.width;
+                hostH = mode.height;
+                hostHz = mode.refreshRate;
+            }
+        }
+    }
+
+    int newW = m_Preferences->width;
+    int newH = m_Preferences->height;
+    int newFps = m_Preferences->fps;
+    if (autoRes && localW > 0 && localH > 0) {
+        newW = localW;
+        newH = localH;
+        if (hostW > 0 && hostH > 0 && (long long)newW * newH > (long long)hostW * hostH) {
+            newW = hostW;
+            newH = hostH;
+        }
+    }
+    if (autoFps && localHz > 0) {
+        newFps = localHz;
+        if (hostHz > 0 && newFps > hostHz) {
+            newFps = hostHz;
+        }
+    }
+
+    const int oldDefault = StreamingPreferences::getDefaultBitrate(m_Preferences->width, m_Preferences->height,
+                                                                   m_Preferences->fps, m_Preferences->enableYUV444,
+                                                                   m_Preferences->enableFrameInterpolation);
+    const bool bitrateWasDefault = !m_Preferences->bitrateFromCli && m_Preferences->bitrateKbps == oldDefault;
+
+    m_Preferences->width = newW;
+    m_Preferences->height = newH;
+    m_Preferences->fps = newFps;
+    m_StreamConfig.width = newW;
+    m_StreamConfig.height = newH;
+    if (bitrateWasDefault) {
+        m_Preferences->bitrateKbps = StreamingPreferences::getDefaultBitrate(newW, newH, newFps,
+                                                                            m_Preferences->enableYUV444,
+                                                                            m_Preferences->enableFrameInterpolation);
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RES] auto display mode: resolution=%s fps=%s local=%dx%d@%d (%s, display %d) "
+                "host=%s%dx%d@%d -> stream %dx%d@%d, bitrate %d kbps (%s)",
+                autoRes ? "auto" : "manual", autoFps ? "auto" : "manual",
+                localW, localH, localHz, xrDesktop ? "XR desktop" : "desktop mode", displayIndex,
+                hostSwitchable ? "switchable max " : "not switchable ", hostW, hostH, hostHz,
+                newW, newH, newFps, m_Preferences->bitrateKbps,
+                bitrateWasDefault ? "default, recomputed" : "user setting kept");
+}
+
+// §H.4-AUTO：XR 桌面自動更新率。XrContext 在 startConnectionAsync（/launch 之前）才 bring-up，
+// 所以更新率要在這裡、/launch 之前才換成 runtime 實際值。FRUC 開著時不動（server fps 已依 UI fps 折半）。
+void Session::applyXrDesktopAutoFps()
+{
+#ifdef HAVE_OPENXR
+    if (m_Preferences->displayTarget != StreamingPreferences::DT_XR_DESKTOP || m_VrRequested ||
+        !m_Preferences->effectiveAutoFps() || m_XrContext == nullptr) {
+        return;
+    }
+    const float measured = m_XrContext->waitRefreshHz(3000);
+    int fps = static_cast<int>(std::lround(measured));
+    if (fps <= 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RES] auto fps (XR desktop): runtime refresh unknown - keeping %d fps", m_StreamConfig.fps);
+        return;
+    }
+    int hostHz = 0;
+    if (!m_Computer->isNvidiaServerSoftware && m_Computer->displayModeSwitchable) {
+        int hostW = 0, hostH = 0;
+        for (const NvDisplayMode &mode : std::as_const(m_Computer->displayModes)) {
+            const long long area = (long long)mode.width * mode.height;
+            if (area > (long long)hostW * hostH || (area == (long long)hostW * hostH && mode.refreshRate > hostHz)) {
+                hostW = mode.width;
+                hostH = mode.height;
+                hostHz = mode.refreshRate;
+            }
+        }
+        if (hostHz > 0 && fps > hostHz) {
+            fps = hostHz;
+        }
+    }
+    if (m_Preferences->enableFrameInterpolation) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RES] auto fps (XR desktop): runtime %.2f Hz, FRUC on - keeping server fps %d",
+                    (double)measured, m_StreamConfig.fps);
+        return;
+    }
+    if (fps == m_StreamConfig.fps) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RES] auto fps (XR desktop): runtime %.2f Hz -> %d fps (unchanged)", (double)measured, fps);
+        return;
+    }
+    const bool bitrateWasDefault =
+        !m_Preferences->bitrateFromCli &&
+        m_StreamConfig.bitrate == StreamingPreferences::getDefaultBitrate(m_StreamConfig.width, m_StreamConfig.height,
+                                                                          m_Preferences->fps, m_Preferences->enableYUV444,
+                                                                          false);
+    const int oldFps = m_StreamConfig.fps;
+    m_StreamConfig.fps = fps;
+    m_OriginalFps = fps;
+    m_Preferences->fps = fps;
+    if (bitrateWasDefault) {
+        m_StreamConfig.bitrate = StreamingPreferences::getDefaultBitrate(m_StreamConfig.width, m_StreamConfig.height, fps,
+                                                                         m_Preferences->enableYUV444, false);
+        m_Preferences->bitrateKbps = m_StreamConfig.bitrate;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RES] auto fps (XR desktop): runtime %.2f Hz, host max %d Hz -> stream %dx%d@%d (was %d), bitrate %d kbps%s",
+                (double)measured, hostHz, m_StreamConfig.width, m_StreamConfig.height, fps, oldFps,
+                m_StreamConfig.bitrate, bitrateWasDefault ? " (default, recomputed)" : "");
+#endif
+}
+
+int Session::getStreamDisplayIndex()
 {
     int displayIndex = 0;
 
@@ -2169,6 +2342,14 @@ void Session::getWindowDimensions(int& x, int& y,
             }
         }
     }
+
+    return displayIndex;
+}
+
+void Session::getWindowDimensions(int& x, int& y,
+                                  int& width, int& height)
+{
+    const int displayIndex = getStreamDisplayIndex();
 
     SDL_Rect usableBounds;
     if (SDL_GetDisplayUsableBounds(displayIndex, &usableBounds) == 0) {
@@ -2788,6 +2969,7 @@ bool Session::startConnectionAsync()
              m_Computer->currentGameId == m_App.id);
 
     setupXrDesktop();  // §VR M3a X1：/launch、relay 之前
+    applyXrDesktopAutoFps();  // §H.4-AUTO：XR 桌面自動更新率＝runtime 實際值（/launch 之前）
 
     bool enableGameOptimizations;
     if (m_Computer->isNvidiaServerSoftware) {

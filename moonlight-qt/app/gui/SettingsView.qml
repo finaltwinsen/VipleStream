@@ -162,6 +162,19 @@ Flickable {
                             }
                         }
 
+                        // §H.4-AUTO：「自動（本機螢幕最佳）」在設定頁的估計值（實際串流值在 Session 依串流視窗
+                        // 所在螢幕重算，並與 host 回報的最高模式取小）。這裡只用來顯示與算預設位元率。
+                        function autoLocalResolution() {
+                            var w = Math.round(Screen.width * Screen.devicePixelRatio)
+                            var h = Math.round(Screen.height * Screen.devicePixelRatio)
+                            var host_max = ComputerManager.getMaxHostDisplayMode()
+                            if (host_max.width * host_max.height > 0 && w * h > host_max.width * host_max.height) {
+                                w = host_max.width
+                                h = host_max.height
+                            }
+                            return Qt.size(w, h)
+                        }
+
                         // ignore setting the index at first, and actually set it when the component is loaded
                         Component.onCompleted: {
                             // Refresh display data before using it to build the list
@@ -209,6 +222,45 @@ Flickable {
                                         j--
                                     }
                                 }
+                            }
+
+                            // §H.4-AUTO：自動模式直接選「自動」項目（video_width 為 "0"），並把估計值同步回
+                            // 偏好（位元率仍等於舊值的預設時才跟著重算，不動使用者自訂的位元率）
+                            if (StreamingPreferences.autoResolution) {
+                                for (var a = 0; a < resolutionListModel.count; a++) {
+                                    if (parseInt(resolutionListModel.get(a).video_width) === 0) {
+                                        currentIndex = a
+                                        break
+                                    }
+                                }
+                                resolutionListModel.append({
+                                                               "text": qsTr("Custom"),
+                                                               "video_width": "",
+                                                               "video_height": "",
+                                                               "is_custom": true
+                                                           })
+                                var est = autoLocalResolution()
+                                if (est.width > 0 && est.height > 0 &&
+                                        (StreamingPreferences.width !== est.width || StreamingPreferences.height !== est.height)) {
+                                    var oldDefault = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
+                                                                                            StreamingPreferences.height,
+                                                                                            StreamingPreferences.fps,
+                                                                                            StreamingPreferences.enableYUV444,
+                                                                                            StreamingPreferences.enableFrameInterpolation)
+                                    var wasDefault = StreamingPreferences.bitrateKbps === oldDefault
+                                    StreamingPreferences.width = est.width
+                                    StreamingPreferences.height = est.height
+                                    if (wasDefault) {
+                                        StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(est.width,
+                                                                                                                  est.height,
+                                                                                                                  StreamingPreferences.fps,
+                                                                                                                  StreamingPreferences.enableYUV444,
+                                                                                                                  StreamingPreferences.enableFrameInterpolation)
+                                    }
+                                }
+                                recalculateWidth()
+                                lastIndexValue = currentIndex
+                                return
                             }
 
                             // load the saved width/height, and iterate through the ComboBox until a match is found
@@ -261,6 +313,12 @@ Flickable {
                             // Other elements may be added at runtime
                             // based on attached display resolution
                             ListElement {
+                                text: qsTr("Auto (best for this display)")
+                                video_width: "0"
+                                video_height: "0"
+                                is_custom: false
+                            }
+                            ListElement {
                                 text: qsTr("720p")
                                 video_width: "1280"
                                 video_height: "720"
@@ -289,6 +347,15 @@ Flickable {
                         function updateBitrateForSelection() {
                             var selectedWidth = parseInt(resolutionListModel.get(currentIndex).video_width)
                             var selectedHeight = parseInt(resolutionListModel.get(currentIndex).video_height)
+
+                            // §H.4-AUTO：「自動」項目（寬高 0）→ 記住自動，寬高用本機螢幕估計值
+                            var isAuto = (selectedWidth === 0)
+                            StreamingPreferences.autoResolution = isAuto
+                            if (isAuto) {
+                                var est = autoLocalResolution()
+                                selectedWidth = est.width
+                                selectedHeight = est.height
+                            }
 
                             // Only modify the bitrate if the values actually changed
                             if (StreamingPreferences.width !== selectedWidth || StreamingPreferences.height !== selectedHeight) {
@@ -403,7 +470,7 @@ Flickable {
                                         id: widthField
                                         maximumLength: 5
                                         inputMethodHints: Qt.ImhDigitsOnly
-                                        placeholderText: resolutionListModel.get(resolutionComboBox.currentIndex).video_width
+                                        placeholderText: resolutionListModel.get(resolutionComboBox.currentIndex).video_width === "0" ? ""+StreamingPreferences.width : resolutionListModel.get(resolutionComboBox.currentIndex).video_width
                                         validator: IntValidator{bottom:256; top:8192}
                                         focus: true
 
@@ -432,7 +499,7 @@ Flickable {
                                         id: heightField
                                         maximumLength: 5
                                         inputMethodHints: Qt.ImhDigitsOnly
-                                        placeholderText: resolutionListModel.get(resolutionComboBox.currentIndex).video_height
+                                        placeholderText: resolutionListModel.get(resolutionComboBox.currentIndex).video_height === "0" ? ""+StreamingPreferences.height : resolutionListModel.get(resolutionComboBox.currentIndex).video_height
                                         validator: IntValidator{bottom:256; top:8192}
 
                                         onTextChanged: {
@@ -458,9 +525,35 @@ Flickable {
                     AutoResizingComboBox {
                         property int lastIndexValue
 
+                        // §H.4-AUTO：自動更新率在設定頁的估計值＝本視窗所在螢幕（找不到對應時用第 0 台）
+                        // 回報的更新率；實際串流值在 Session 依串流視窗所在螢幕的目前更新率重算。
+                        function autoLocalFps() {
+                            var w = Math.round(Screen.width * Screen.devicePixelRatio)
+                            var h = Math.round(Screen.height * Screen.devicePixelRatio)
+                            var idx = 0
+                            for (var d = 0; d < 16; d++) {
+                                var r = SystemProperties.getNativeResolution(d)
+                                if (r.width === 0) {
+                                    break
+                                }
+                                if (r.width === w && r.height === h) {
+                                    idx = d
+                                    break
+                                }
+                            }
+                            var hz = SystemProperties.getRefreshRate(idx)
+                            return hz > 0 ? hz : 60
+                        }
+
                         function updateBitrateForSelection() {
                             // Only modify the bitrate if the values actually changed
                             var selectedFps = parseInt(model.get(fpsComboBox.currentIndex).video_fps)
+                            // §H.4-AUTO：「自動」項目（fps 0）
+                            var isAuto = (selectedFps === 0)
+                            StreamingPreferences.autoFps = isAuto
+                            if (isAuto) {
+                                selectedFps = autoLocalFps()
+                            }
                             if (StreamingPreferences.fps !== selectedFps) {
                                 StreamingPreferences.fps = selectedFps
 
@@ -549,7 +642,7 @@ Flickable {
                                         id: fpsField
                                         maximumLength: 4
                                         inputMethodHints: Qt.ImhDigitsOnly
-                                        placeholderText: fpsListModel.get(fpsComboBox.currentIndex).video_fps
+                                        placeholderText: fpsListModel.get(fpsComboBox.currentIndex).video_fps === "0" ? ""+StreamingPreferences.fps : fpsListModel.get(fpsComboBox.currentIndex).video_fps
                                         validator: IntValidator{bottom:10; top:9999}
                                         focus: true
 
@@ -658,6 +751,36 @@ Flickable {
                                 })
                             }
 
+                            // §H.4-AUTO：自動模式直接選「自動」項目，估計值同步回偏好（位元率是預設值時才重算）
+                            if (StreamingPreferences.autoFps) {
+                                for (var a = 0; a < model.count; a++) {
+                                    if (parseInt(model.get(a).video_fps) === 0) {
+                                        currentIndex = a
+                                        break
+                                    }
+                                }
+                                var estFps = autoLocalFps()
+                                if (StreamingPreferences.fps !== estFps) {
+                                    var oldDefault = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
+                                                                                            StreamingPreferences.height,
+                                                                                            StreamingPreferences.fps,
+                                                                                            StreamingPreferences.enableYUV444,
+                                                                                            StreamingPreferences.enableFrameInterpolation)
+                                    var wasDefault = StreamingPreferences.bitrateKbps === oldDefault
+                                    StreamingPreferences.fps = estFps
+                                    if (wasDefault) {
+                                        StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
+                                                                                                                  StreamingPreferences.height,
+                                                                                                                  estFps,
+                                                                                                                  StreamingPreferences.enableYUV444,
+                                                                                                                  StreamingPreferences.enableFrameInterpolation)
+                                    }
+                                }
+                                recalculateWidth()
+                                lastIndexValue = currentIndex
+                                return
+                            }
+
                             var saved_fps = StreamingPreferences.fps
                             var found = false
                             for (var i = 0; i < model.count; i++) {
@@ -727,6 +850,11 @@ Flickable {
                         model: ListModel {
                             id: fpsListModel
                             // Other elements may be added at runtime
+                            ListElement {
+                                text: qsTr("Auto (this display)")
+                                video_fps: "0"
+                                is_custom: false
+                            }
                             ListElement {
                                 text: qsTr("30 FPS")
                                 video_fps: "30"

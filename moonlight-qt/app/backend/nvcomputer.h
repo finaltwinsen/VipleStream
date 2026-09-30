@@ -104,6 +104,9 @@ public:
     QString gfeVersion;
     QString appVersion;
     QVector<NvDisplayMode> displayModes;
+    // §H.4-SWITCH：host 開了 display device 設定、串流前會把目標顯示器切到 client 要求的模式；
+    // 此時 displayModes 是「可切換的最高模式」而不是目前模式。
+    bool displayModeSwitchable = false;
     int maxLumaPixelsHEVC;
     int serverCodecModeSupport;
     QString gpuModel;

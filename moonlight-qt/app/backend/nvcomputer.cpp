@@ -351,6 +351,7 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     // VipleStream 2.0 §VR 能力（沒有元素時 toInt() 回 0）
     this->vipleStreamVr = NvHTTP::getXmlString(serverInfo, "VipleStreamVR").toInt();
     this->vipleStreamVrProto = NvHTTP::getXmlString(serverInfo, "VipleStreamVRProto").toInt();
+    this->displayModeSwitchable = NvHTTP::getXmlString(serverInfo, "DisplayModeSwitchable") == "1";
 
     // Real Nvidia host software (GeForce Experience and RTX Experience) both use the 'Mjolnir'
     // codename in the state field and no version of Sunshine does. We can use this to bypass
@@ -766,6 +767,7 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED(vipleStreamVersion);
     ASSIGN_IF_CHANGED(vipleStreamVr);       // §VR：漏加會讓 poll 回來的值被丟掉（見上方事故註解）
     ASSIGN_IF_CHANGED(vipleStreamVrProto);
+    ASSIGN_IF_CHANGED(displayModeSwitchable);  // §H.4-SWITCH
     ASSIGN_IF_CHANGED(maxLumaPixelsHEVC);
     ASSIGN_IF_CHANGED(gpuModel);
     ASSIGN_IF_CHANGED_AND_NONNULL(serverCert);

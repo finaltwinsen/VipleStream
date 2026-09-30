@@ -2343,6 +2343,19 @@ void XrContext::queueHaptic(uint8_t device, uint32_t durationUs, float frequency
     }
 }
 
+float XrContext::waitRefreshHz(int timeoutMs)
+{
+    std::unique_lock<std::mutex> lk(m_StatsMutex);
+    m_ViewsCv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [this] {
+        return m_PeriodSettled || !m_FrameThreadRunning.load();
+    });
+    const float periodHz = m_LastPeriod > 0 ? 1e9f / static_cast<float>(m_LastPeriod) : 0.0f;
+    if (periodHz > 0.0f && m_RefreshHz > 0.0f && std::fabs(periodHz - m_RefreshHz) > 0.03f * periodHz) {
+        return periodHz;
+    }
+    return m_RefreshHz > 0.0f ? m_RefreshHz : periodHz;
+}
+
 bool XrContext::waitViews(ViewInfo* out, int timeoutMs)
 {
     std::unique_lock<std::mutex> lk(m_StatsMutex);

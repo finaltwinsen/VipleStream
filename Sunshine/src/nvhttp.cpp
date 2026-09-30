@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -821,6 +822,99 @@ namespace nvhttp {
     return true;
   }
 
+#ifdef _WIN32
+  namespace {
+    // §H.4-SWITCH：dd 會在串流前切換的目標裝置，其「可切換最高模式」。
+    struct switchable_mode_t {
+      std::string display_name;
+      int width {0};
+      int height {0};
+      int refresh_hz {0};
+      int mode_count {0};
+      bool from_cache {false};
+    };
+
+    /**
+     * 找出 output_name 對應裝置（比對 device_id，或直接給 \.\DISPLAYn），
+     * 再用 EnumDisplaySettingsW 列舉它的模式表，取面積最大、同面積最高 Hz。
+     * /serverinfo 呼叫頻繁（client 輪詢），列舉結果快取 10 秒；裝置未啟用
+     * （沒有 m_info／display_name）或列舉不到模式時回 nullopt，由呼叫端退回
+     * 原本的「primary 目前模式」行為。
+     */
+    std::optional<switchable_mode_t> best_switchable_mode_for_output(const std::string &output_name) {
+      static std::mutex cache_mutex;
+      static std::optional<switchable_mode_t> cached;
+      static std::string cached_key;
+      static std::chrono::steady_clock::time_point cached_at;
+      constexpr auto cache_ttl = std::chrono::seconds(10);
+
+      std::lock_guard lock {cache_mutex};
+      const auto now = std::chrono::steady_clock::now();
+      if (cached && cached_key == output_name && now - cached_at < cache_ttl) {
+        auto hit = *cached;
+        hit.from_cache = true;
+        return hit;
+      }
+
+      std::string display_name;
+      for (const auto &device : display_device::enumerate_devices()) {
+        const bool match = device.m_device_id == output_name ||
+                           (!device.m_display_name.empty() && device.m_display_name == output_name);
+        if (match && device.m_info && !device.m_display_name.empty()) {
+          display_name = device.m_display_name;
+          break;
+        }
+      }
+      if (display_name.empty()) {
+        BOOST_LOG(info) << "[VIPLE-RES] dd target '" << output_name
+                        << "' not active/enumerable; falling back to primary current mode";
+        cached.reset();
+        return std::nullopt;
+      }
+
+      // EnumDisplaySettingsW 傳 null 會回 FALSE，一定要給 \.\DISPLAYn。
+      const int wlen = MultiByteToWideChar(CP_UTF8, 0, display_name.c_str(), -1, nullptr, 0);
+      std::wstring wname(wlen > 0 ? wlen : 0, L'\0');
+      if (wlen > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, display_name.c_str(), -1, wname.data(), wlen);
+      }
+
+      switchable_mode_t best;
+      best.display_name = display_name;
+      long long best_area = 0;
+      DEVMODEW dm {};
+      dm.dmSize = sizeof(dm);
+      for (DWORD i = 0; EnumDisplaySettingsW(wname.c_str(), i, &dm); ++i) {
+        if (dm.dmBitsPerPel < 24 || (dm.dmDisplayFlags & DM_INTERLACED)) {
+          continue;
+        }
+        ++best.mode_count;
+        const long long area = static_cast<long long>(dm.dmPelsWidth) * dm.dmPelsHeight;
+        const int hz = static_cast<int>(dm.dmDisplayFrequency);
+        if (area > best_area || (area == best_area && hz > best.refresh_hz)) {
+          best_area = area;
+          best.width = static_cast<int>(dm.dmPelsWidth);
+          best.height = static_cast<int>(dm.dmPelsHeight);
+          best.refresh_hz = hz;
+        }
+        dm = {};
+        dm.dmSize = sizeof(dm);
+      }
+      if (best_area <= 0 || best.refresh_hz <= 1) {
+        BOOST_LOG(warning) << "[VIPLE-RES] EnumDisplaySettingsW(" << display_name
+                           << ") returned no usable modes; falling back to primary current mode";
+        cached.reset();
+        return std::nullopt;
+      }
+
+      cached = best;
+      cached_key = output_name;
+      cached_at = now;
+      return best;
+    }
+  }  // namespace
+#endif
+
   template<class T>
   void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
@@ -976,31 +1070,61 @@ namespace nvhttp {
     // the host display physically supports.  Upstream Sunshine omits these
     // elements entirely; vanilla Moonlight's client parser treats them as
     // optional, so adding them is wire-compat-safe.
+    //
+    // §H.4-SWITCH（2026-10-01）：開了 display device 設定（dd）且 output_name
+    // 對得到一台已啟用裝置時，串流開始前 server 本來就會把該裝置切到 client
+    // 要求的模式，所以此時回報「目前模式」會把 client 錯夾到閒置模式（例：VDD
+    // 閒置 1080p180 → 1440p／4K 被壓成 1080p）。改回報該裝置可切換的最高模式
+    // （面積最大，同面積取最高 Hz），並加 <DisplayModeSwitchable>1。目標裝置未
+    // 啟用、列舉不到或非 Windows 時退回原本行為。
     {
-      const auto enumerated = display_device::enumerate_devices();
-      for (const auto &device : enumerated) {
-        if (!device.m_info || !device.m_info->m_primary) {
-          continue;  // skip inactive / non-primary outputs
+      bool advertised_switchable = false;
+#ifdef _WIN32
+      const auto &dd_cfg = config::video.dd;
+      if (dd_cfg.configuration_option != config::video_t::dd_t::config_option_e::disabled &&
+          dd_cfg.resolution_option != config::video_t::dd_t::resolution_option_e::disabled &&
+          !config::video.output_name.empty()) {
+        if (const auto best = best_switchable_mode_for_output(config::video.output_name)) {
+          pt::ptree mode;
+          mode.put("Width", best->width);
+          mode.put("Height", best->height);
+          mode.put("RefreshRate", best->refresh_hz);
+          tree.add_child("root.DisplayMode", mode);
+          tree.put("root.DisplayModeSwitchable", 1);
+          advertised_switchable = true;
+          BOOST_LOG(info) << "[VIPLE-RES] /serverinfo advertising switchable max of "
+                          << best->display_name << ": " << best->width << "x" << best->height
+                          << " @ " << best->refresh_hz << "Hz (" << best->mode_count << " modes"
+                          << (best->from_cache ? ", cached" : "") << ")";
         }
-        const auto &res = device.m_info->m_resolution;
-        const double refresh = std::visit(
-          [](auto &&val) -> double {
-            using V = std::decay_t<decltype(val)>;
-            if constexpr (std::is_same_v<V, display_device::Rational>) {
-              return val.m_denominator ? static_cast<double>(val.m_numerator) / val.m_denominator : 60.0;
-            } else {
-              return static_cast<double>(val);
-            }
-          },
-          device.m_info->m_refresh_rate);
-        const int refresh_hz = static_cast<int>(std::lround(refresh > 0.0 ? refresh : 60.0));
-        pt::ptree mode;
-        mode.put("Width", res.m_width);
-        mode.put("Height", res.m_height);
-        mode.put("RefreshRate", refresh_hz);
-        tree.add_child("root.DisplayMode", mode);
-        BOOST_LOG(info) << "[VIPLE-RES] /serverinfo advertising primary display: "
-                        << res.m_width << "x" << res.m_height << " @ " << refresh_hz << "Hz";
+      }
+#endif
+      if (!advertised_switchable) {
+        const auto enumerated = display_device::enumerate_devices();
+        for (const auto &device : enumerated) {
+          if (!device.m_info || !device.m_info->m_primary) {
+            continue;  // skip inactive / non-primary outputs
+          }
+          const auto &res = device.m_info->m_resolution;
+          const double refresh = std::visit(
+            [](auto &&val) -> double {
+              using V = std::decay_t<decltype(val)>;
+              if constexpr (std::is_same_v<V, display_device::Rational>) {
+                return val.m_denominator ? static_cast<double>(val.m_numerator) / val.m_denominator : 60.0;
+              } else {
+                return static_cast<double>(val);
+              }
+            },
+            device.m_info->m_refresh_rate);
+          const int refresh_hz = static_cast<int>(std::lround(refresh > 0.0 ? refresh : 60.0));
+          pt::ptree mode;
+          mode.put("Width", res.m_width);
+          mode.put("Height", res.m_height);
+          mode.put("RefreshRate", refresh_hz);
+          tree.add_child("root.DisplayMode", mode);
+          BOOST_LOG(info) << "[VIPLE-RES] /serverinfo advertising primary display current mode: "
+                          << res.m_width << "x" << res.m_height << " @ " << refresh_hz << "Hz";
+        }
       }
     }
 

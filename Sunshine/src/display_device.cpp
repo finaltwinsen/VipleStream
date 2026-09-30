@@ -12,8 +12,12 @@
 #include <display_device/json.h>
 #include <display_device/retry_scheduler.h>
 #include <display_device/settings_manager_interface.h>
+#include <algorithm>
+#include <cmath>
 #include <mutex>
 #include <regex>
+#include <variant>
+#include <vector>
 
 // local includes
 #include "audio.h"
@@ -25,6 +29,7 @@
   #include <display_device/windows/settings_manager.h>
   #include <display_device/windows/win_api_layer.h>
   #include <display_device/windows/win_display_device.h>
+  #include <windows.h>  // §H.4-SNAP：EnumDisplaySettingsW
 #endif
 
 namespace display_device {
@@ -802,6 +807,67 @@ namespace display_device {
           revert_configuration();
           return;
         }
+#ifdef _WIN32
+        // §H.4-SNAP（2026-10-01）：client 要求的更新率不在目標顯示器該解析度的模式表裡（例：XR runtime
+        // 實際 72／20 Hz、VDD 只有 60/90/120/144/165/244）時，Windows 設定模式會整個失敗（1610），
+        // 連解析度都不切。改成把「顯示器」更新率對到模式表裡 ≥ 要求值的最小者（沒有就取最高）；
+        // 編碼 fps 仍照 client 要求（擷取端自己節拍），只有顯示器模式被調整。
+        for (const auto &d : devices) {
+          if (d.m_device_id == parsed_config->m_device_id && !d.m_display_name.empty() && parsed_config->m_refresh_rate) {
+            SingleDisplayConfiguration adjusted {*parsed_config};
+            const double requested_hz = std::visit(
+              [](auto &&val) -> double {
+                using V = std::decay_t<decltype(val)>;
+                if constexpr (std::is_same_v<V, Rational>) {
+                  return val.m_denominator ? static_cast<double>(val.m_numerator) / val.m_denominator : 0.0;
+                } else {
+                  return static_cast<double>(val);
+                }
+              },
+              *adjusted.m_refresh_rate);
+            unsigned int want_w = adjusted.m_resolution ? adjusted.m_resolution->m_width : 0;
+            unsigned int want_h = adjusted.m_resolution ? adjusted.m_resolution->m_height : 0;
+            if (!adjusted.m_resolution && d.m_info) {
+              want_w = d.m_info->m_resolution.m_width;
+              want_h = d.m_info->m_resolution.m_height;
+            }
+            const std::wstring wname(d.m_display_name.begin(), d.m_display_name.end());  // \\.\DISPLAYn 是 ASCII
+            std::vector<unsigned int> rates;
+            DEVMODEW dm {};
+            dm.dmSize = sizeof(dm);
+            for (DWORD i = 0; EnumDisplaySettingsW(wname.c_str(), i, &dm); ++i) {
+              if (dm.dmPelsWidth == want_w && dm.dmPelsHeight == want_h && dm.dmDisplayFrequency > 1 &&
+                  !(dm.dmDisplayFlags & DM_INTERLACED)) {
+                rates.push_back(dm.dmDisplayFrequency);
+              }
+              dm = {};
+              dm.dmSize = sizeof(dm);
+            }
+            bool exact = false;
+            unsigned int best_ge = 0;
+            unsigned int highest = 0;
+            for (const auto r : rates) {
+              if (std::abs(static_cast<double>(r) - requested_hz) < 1.0) {
+                exact = true;
+              }
+              if (r >= requested_hz && (best_ge == 0 || r < best_ge)) {
+                best_ge = r;
+              }
+              highest = std::max(highest, r);
+            }
+            if (!rates.empty() && !exact && requested_hz > 0.0) {
+              const unsigned int snapped = best_ge ? best_ge : highest;
+              adjusted.m_refresh_rate = Rational {snapped, 1};
+              BOOST_LOG(info) << "[VIPLE-RES] dd refresh snap: " << want_w << "x" << want_h << " @ " << requested_hz
+                              << "Hz not in " << d.m_display_name << " mode list; setting display to " << snapped
+                              << "Hz (encode fps unchanged)";
+              configure_display(adjusted);
+              return;
+            }
+            break;
+          }
+        }
+#endif
       }
       configure_display(*parsed_config);
       return;

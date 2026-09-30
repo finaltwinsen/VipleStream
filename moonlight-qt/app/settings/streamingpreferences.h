@@ -241,6 +241,11 @@ public:
     Q_PROPERTY(int width MEMBER width NOTIFY displayModeChanged)
     Q_PROPERTY(int height MEMBER height NOTIFY displayModeChanged)
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
+    // §H.4-AUTO：解析度／更新率「自動（本機螢幕最佳）」。true 時 width/height/fps 只是上次解析出的值
+    // （給設定頁的位元率預設與 Use Default 判斷用），真正串流值在 Session::initialize 依串流視窗所在
+    // 螢幕重算，再與 host 回報的最高模式取小。
+    Q_PROPERTY(bool autoResolution MEMBER autoResolution NOTIFY displayModeChanged)
+    Q_PROPERTY(bool autoFps MEMBER autoFps NOTIFY displayModeChanged)
     Q_PROPERTY(int bitrateKbps MEMBER bitrateKbps NOTIFY bitrateChanged)
     Q_PROPERTY(bool unlockBitrate MEMBER unlockBitrate NOTIFY unlockBitrateChanged)
     Q_PROPERTY(bool autoAdjustBitrate MEMBER autoAdjustBitrate NOTIFY autoAdjustBitrateChanged)
@@ -344,6 +349,8 @@ public:
     int width;
     int height;
     int fps;
+    bool autoResolution;
+    bool autoFps;
     int bitrateKbps;
     bool unlockBitrate;
     bool autoAdjustBitrate;
@@ -422,6 +429,12 @@ public:
     int  vrEyeWidth = 1728;          // 每眼解析度（打包尺寸為 2W×H，SBS）
     int  vrEyeHeight = 1728;
     int  vrRefreshHz = 90;
+    // §H.4-AUTO：CLI 這次的解析度／更新率覆寫（不存設定，不會把 GUI 的「自動」改掉）。
+    // -1＝CLI 沒指定、0＝指定明確值、1＝指定 auto。
+    int cliAutoResolution = -1;
+    int cliAutoFps = -1;
+    bool effectiveAutoResolution() const { return cliAutoResolution >= 0 ? cliAutoResolution == 1 : autoResolution; }
+    bool effectiveAutoFps() const { return cliAutoFps >= 0 ? cliAutoFps == 1 : autoFps; }
     bool bitrateFromCli = false;     // M4a 收尾：這次 CLI 明確帶了 --bitrate（不存設定；VR 預設位元率不覆蓋它）
     int  vrInjectDropEvery = 0;      // dev：每 N 個解出的幀丟一幀（模擬 decoder 吞幀），0＝關
     int  vrInjectLossSec = 0;        // dev：每 N 秒注入一次 LOSS，0＝關

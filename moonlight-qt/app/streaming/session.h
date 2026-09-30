@@ -192,6 +192,14 @@ private:
     void getWindowDimensions(int& x, int& y,
                              int& width, int& height);
 
+    // 串流視窗會開在哪個 SDL display（已有視窗用它所在的；否則跟 Qt UI 同一台）
+    int getStreamDisplayIndex();
+
+    // §H.4-AUTO：解析度／更新率「自動（本機螢幕最佳）」→ 本機值與 host 回報最高值取小
+    void resolveAutoDisplayMode();
+    // §H.4-AUTO：XR 桌面自動更新率＝XR runtime 實際顯示更新率（XrContext bring-up 後才量得到）
+    void applyXrDesktopAutoFps();
+
     void toggleFullscreen();
     void toggleFRUC();
 

@@ -35,7 +35,21 @@ Client log 位置：`%TEMP%\VipleStream-*.log`（檔名的數字是啟動時的 
 ### `[VIPLE-RES]` / `[VIPLE-NAT]` / `[VIPLE-FRUC]`（啟動階段）
 這三個都在**串流真正開始之前**印，切段時要往前回看才抓得到：
 
-- `[VIPLE-RES] Stream config requested: WxH; host advertises max: WxH`（`session.cpp:807`）
+- `[VIPLE-RES] Stream config requested: WxH; host advertises max: WxH (switchable max|current mode)`
+  （`session.cpp` 的 §H.4 clamp）。`switchable max`＝host 回了 `<DisplayModeSwitchable>1`，max 是 host
+  串流前可切到的最高模式；`current mode`＝舊 host 或沒開 dd，max 是 host 目前模式。
+- `[VIPLE-RES] auto display mode: resolution=auto|manual fps=auto|manual local=WxH@Hz (...) host=... -> stream WxH@N, bitrate K kbps (...)`
+  —— §H.4-AUTO：「自動（本機螢幕最佳）」解析結果（本機串流視窗所在螢幕的桌面模式；XR 桌面固定 2560x1440）
+  與 host 可切換最高模式取小，以及位元率是否跟著重算（`default, recomputed`／`user setting kept`）。
+- `[VIPLE-RES] auto fps (XR desktop): runtime X Hz, host max N Hz -> stream WxH@N (was M)` —— XR 桌面自動
+  更新率在 XrContext bring-up 後（/launch 之前）換成 runtime 實際顯示更新率。
+- server 端：`[VIPLE-RES] /serverinfo advertising switchable max of \\.\DISPLAYn: WxH @ NHz (K modes[, cached])`
+  （開了 dd、`output_name` 對得到已啟用裝置；列舉結果快取 10 秒）或
+  `[VIPLE-RES] /serverinfo advertising primary display current mode: WxH @ NHz`（原本行為）；目標裝置未啟用時先印
+  `dd target '...' not active/enumerable; falling back ...`。
+- server 端：`[VIPLE-RES] dd refresh snap: WxH @ XHz not in \\.\DISPLAYn mode list; setting display to NHz (encode fps unchanged)`
+  —— §H.4-SNAP：要求的更新率不在目標顯示器該解析度的模式表裡（XR runtime 72／20 Hz 等），改把顯示器設成
+  ≥ 要求值的最小可用 Hz（沒有就最高），否則 Windows 設模式失敗（1610）連解析度都不切；編碼 fps 不變。
 - `[VIPLE-NAT] Skipping hole punch: direct private address ...` ＝ LAN 直連；
   `Attempting hole punch to ...` ＝ 遠端（`session.cpp:2304` 一帶）
 - `[VIPLE-FRUC] FRUC disabled — requesting N FPS from server (pass-through)`

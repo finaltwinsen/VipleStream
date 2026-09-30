@@ -526,9 +526,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addFlagOption("1080", "1920x1080 resolution");
     parser.addFlagOption("1440", "2560x1440 resolution");
     parser.addFlagOption("4K", "3840x2160 resolution");
-    parser.addValueOption("resolution", "custom <width>x<height> resolution");
+    parser.addValueOption("resolution", "custom <width>x<height> resolution, or 'auto' for this display's native resolution");
     parser.addToggleOption("vsync", "V-Sync");
-    parser.addValueOption("fps", "FPS");
+    parser.addValueOption("fps", "FPS, or 'auto' for this display's refresh rate");
     parser.addValueOption("bitrate", "bitrate in Kbps");
     parser.addValueOption("packet-size", "video packet size");
     parser.addChoiceOption("display-mode", "display mode", m_WindowModeMap.keys());
@@ -626,17 +626,30 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             preferences->width  = 3840;
             preferences->height = 2160;
         } else if (name == "resolution") {
-            auto resolution = parser.getResolutionOptionValue(name);
-            preferences->width  = resolution.first;
-            preferences->height = resolution.second;
+            if (parser.value(name).compare("auto", Qt::CaseInsensitive) == 0) {
+                // §H.4-AUTO：串流時依本機螢幕解析（Session::initialize）
+                preferences->cliAutoResolution = 1;
+            } else {
+                auto resolution = parser.getResolutionOptionValue(name);
+                preferences->width  = resolution.first;
+                preferences->height = resolution.second;
+            }
+        }
+        if (preferences->cliAutoResolution != 1) {
+            preferences->cliAutoResolution = 0;  // 明確值優先於設定裡的「自動」（不存設定）
         }
     }
 
     // Resolve --fps option
     if (parser.isSet("fps")) {
-        preferences->fps = parser.getIntOption("fps");
-        if (!inRange(preferences->fps, 10, 480)) {
-            fprintf(stderr, "Warning: FPS is out of the supported range (10 - 480 FPS). Performance may suffer!\n");
+        if (parser.value("fps").compare("auto", Qt::CaseInsensitive) == 0) {
+            preferences->cliAutoFps = 1;
+        } else {
+            preferences->fps = parser.getIntOption("fps");
+            preferences->cliAutoFps = 0;
+            if (!inRange(preferences->fps, 10, 480)) {
+                fprintf(stderr, "Warning: FPS is out of the supported range (10 - 480 FPS). Performance may suffer!\n");
+            }
         }
     }
 
