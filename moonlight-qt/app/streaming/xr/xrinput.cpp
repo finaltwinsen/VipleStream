@@ -381,9 +381,23 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
              {m_Stick, "/user/hand/left/input/thumbstick"},
              {m_Stick, "/user/hand/right/input/thumbstick"}});
     if (enabledExts.contains(QStringLiteral("XR_VALVE_frame_controller_interaction"))) {
-        // 元件路徑：Frame 控制器有 a/b/x/y、trigger、grip、thumbstick（SteamVR driver 的 input profile），
-        // 這裡沿用 touch 的 OpenXR 元件名稱；runtime 驗證不過會記 "bindings rejected"（見 xrinput.h）。
-        suggest("/interaction_profiles/valve/frame_controller", touchLike);
+        // XR_VALVE_frame_controller_interaction（2026-09-30 依 Valve OpenXR Unity 套件文件
+        // ValveSoftware/Unity com.valvesoftware.openxr.utils 的 Steam Frame Controller Profile）：
+        // profile 是 /interaction_profiles/valve/frame_controller_valve（不是 frame_controller——
+        // 舊路徑被 SteamVR 2.17.10 以 PATH_UNSUPPORTED 拒絕）。trigger、squeeze 有 value／click、
+        // thumbstick 同 Touch；面鍵左右不同：右手 a/b/x/y，左手 dpad_up/left/down/right；另有
+        // shoulder、menu（右）／view（左）、system。右鍵取「外側」面鍵：右 b、左 dpad_left。
+        suggest("/interaction_profiles/valve/frame_controller_valve",
+                {{m_Aim, "/user/hand/left/input/aim/pose"},
+                 {m_Aim, "/user/hand/right/input/aim/pose"},
+                 {m_Trigger, "/user/hand/left/input/trigger/value"},
+                 {m_Trigger, "/user/hand/right/input/trigger/value"},
+                 {m_Squeeze, "/user/hand/left/input/squeeze/value"},
+                 {m_Squeeze, "/user/hand/right/input/squeeze/value"},
+                 {m_Secondary, "/user/hand/left/input/dpad_left/click"},
+                 {m_Secondary, "/user/hand/right/input/b/click"},
+                 {m_Stick, "/user/hand/left/input/thumbstick"},
+                 {m_Stick, "/user/hand/right/input/thumbstick"}});
     }
 
     XrSessionActionSetsAttachInfo ai = xrStruct<XrSessionActionSetsAttachInfo>(XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO);

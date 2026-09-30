@@ -11,9 +11,9 @@
 //     trigger 按下／放開；求交之後的路徑與真實輸入完全相同。
 //
 // 綁定：khr/simple_controller、oculus/touch_controller、valve/index_controller；runtime 有
-// XR_VALVE_frame_controller_interaction 時另外建議 /interaction_profiles/valve/frame_controller
-// （profile 路徑取自 SteamVR 2.17.10 的 vrclient；1.1.59 registry 沒收錄此擴充，元件路徑以 runtime
-// 在 xrSuggestInteractionProfileBindings 的驗證結果為準，被拒就記 log，靠其他 profile＋SteamVR 重對映）。
+// XR_VALVE_frame_controller_interaction 時另外建議 /interaction_profiles/valve/frame_controller_valve
+// （路徑依 Valve OpenXR Unity 套件文件的 Steam Frame Controller Profile；openxr-loader 1.1.59 的標頭沒收錄
+// 此擴充。面鍵左右不同：右手 a/b/x/y、左手 dpad_up/left/down/right；SteamVR 2.17.10 已接受這組綁定）。
 //
 // TODO(M3a)：自繪虛擬鍵盤（β 輸入的鍵盤部分）尚未實作。
 

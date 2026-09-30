@@ -956,10 +956,12 @@ VipleStream xr-probe --selftest-ray                                         # �
 
 ### 8.5 已知限制與待辦
 
-- Frame 控制器專屬綁定（`XR_VALVE_frame_controller_interaction`）目前被 SteamVR 以 PATH_UNSUPPORTED 拒絕，
-  元件路徑待查；Frame 上先靠 Touch／Index profile＋SteamVR 重對映（待實機確認）。
-- Windows 硬解（D3D11VA）在 XR 模式會退到 PlVk 自建 Vulkan device，開場讓 SteamVR compositor 停頓（漏幀約 5%）；
-  需讓硬解共用 XrContext 的 VkDevice。Frame 用 DrmRenderer，不受影響。
+- Frame 控制器綁定用 `/interaction_profiles/valve/frame_controller_valve`（Valve OpenXR Unity 套件文件；右手 a/b/x/y、
+  左手 dpad_up/left/down/right），SteamVR 2.17.10 已接受；真控制器行為待實機確認。
+- Windows XR＋硬解（D3D11VA）：幀用 `av_hwframe_transfer_data` 搬到系統記憶體再上傳（1080p p50 3.6／p95 5.0 ms），
+  不再退到 PlVk 自建 Vulkan device（那會讓 SteamVR compositor 停頓，開場漏幀約 5%）。讓 FFmpeg Vulkan 硬解共用
+  XrContext 的 VkDevice 可省掉搬移，但 SteamVR 回報 OpenXR 的 Vulkan 上限 1.2、FFmpeg Vulkan 解碼要 1.3 等級功能，
+  暫不做；4K 或高幀率時搬移成本需重估。Frame 用 DrmRenderer（DRM_PRIME 直接匯入），不受影響。
 - 自繪虛擬鍵盤未做（藍牙鍵盤可用）。
 - PoC-2b（β 的啟動形態：overlay 內子行程、同行程切換、Steam 直接以 OpenXR app 啟動）與 G-β 要在 Frame 實機做；
   在 Frame 上跑任何 XR 程式前要先通知使用者（曾讓 Frame 的 SteamVR 重啟）。

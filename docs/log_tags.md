@@ -715,6 +715,8 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-XR] bring-up failed: <原因>
 [VIPLE-XR] 10s frames=N missed=N (x.xx%) notRendered=N …                ← frame thread 每 10 s；前 2 s 暖機另計 warmupMissed
 [VIPLE-XR] 10s video recv=N drawn=N overwritten=N render p50=<ms> p95=<ms> …   ← X2：影像 mailbox 與 XR thread 畫出統計
+[VIPLE-XR] 10s d3d11-readback frames=N failed=N p50=<ms> p95=<ms> (sw=<fmt> WxH)   ← Windows XR＋D3D11VA：幀搬到系統記憶體再上傳
+[VIPLE-XR] test map via d3d11 readback: ok|failed
 [VIPLE-XR] frame thread exit: frames=N missed=N (x.xx%) …
 [VIPLE-XR] xr-desktop unavailable (<原因>) - falling back to the flat window   ← 不變式 5：/launch 前失敗退回平面
 [VIPLE-XR] xr-desktop requested but this build has no OpenXR - falling back …
@@ -743,7 +745,7 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 `streaming/xr/xrinput.cpp`、`streaming/input/mouse.cpp`（`handleXrPointer/Button/Scroll`）
 
 ```
-[VIPLE-XR-INPUT] bindings <profile>: <XrResult>                 ← simple／oculus touch／valve index 被 SteamVR 接受；valve/frame_controller 目前回 PATH_UNSUPPORTED（元件路徑待查）
+[VIPLE-XR-INPUT] bindings accepted|rejected: <profile> (N)       ← SteamVR 2.17.10 接受 simple、oculus touch、valve index、valve/frame_controller_valve
 [VIPLE-XR-INPUT] interaction profile <hand> -> <profile>
 [VIPLE-XR-INPUT] 10s hit=<%> move=N button=N scroll=N filterLag≈<ms> hand=<L|R>
 ```
