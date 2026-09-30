@@ -10,6 +10,7 @@
 #include <libplacebo/vulkan.h>
 #endif
 
+#include <QGuiApplication>
 #include <QJsonArray>
 #include <QtGlobal>
 
@@ -281,6 +282,7 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         vc.dumpPath = m_Options.dumpFramePath;
         vc.dumpAfterFrames = m_Options.dumpAfterFrames;
         vc.testStallMs = m_Options.testStallMs;
+        vc.requireMeta = m_Options.pcvr;  // M4a R4：PCVR 不發布無 render pose 的影像
         m_Video = new XrVideo(this, vc);
         QString verr;
         if (!m_Video->init(&verr)) {
@@ -336,8 +338,15 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     m_FrameThread = std::thread(&XrContext::frameThreadMain, this);
 
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-    // 虛擬鍵盤貼圖：背景執行緒先畫無修飾鍵版本（暖字型，不阻塞 bring-up 與 XR thread）
-    if (!m_Options.pcvr && m_Input != nullptr && m_KbSwapchain != XR_NULL_HANDLE && !m_KbRenderThread.joinable()) {
+    // 虛擬鍵盤貼圖：背景執行緒先畫無修飾鍵版本（暖字型，不阻塞 bring-up 與 XR thread）。
+    // QPainter 畫字需要 QGuiApplication：xr-probe 在 QCoreApplication 下派發（M2a），沒有它就不畫鍵盤，
+    // 否則 Qt Fatal「Must construct a QGuiApplication before accessing QFontDatabase」→ SIGABRT
+    // （M4a R4 發現：xr-probe --session 自鍵盤 commit 起一律 rc=134）。
+    const bool haveGuiApp = qobject_cast<QGuiApplication*>(QCoreApplication::instance()) != nullptr;
+    if (!haveGuiApp && !m_Options.pcvr && m_Input != nullptr && m_KbSwapchain != XR_NULL_HANDLE) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] keyboard disabled (no QGuiApplication, e.g. xr-probe)");
+    }
+    if (haveGuiApp && !m_Options.pcvr && m_Input != nullptr && m_KbSwapchain != XR_NULL_HANDLE && !m_KbRenderThread.joinable()) {
         {
             std::lock_guard<std::mutex> lk(m_KbRenderMutex);
             m_KbRenderCancel = false;

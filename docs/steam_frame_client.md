@@ -990,3 +990,27 @@ VipleStream xr-probe --selftest-ray                                         # �
   A／B／TRIGGER）、systemCombos 每 8 s 一次、haptic applied 2～4／10 s、failed 0、XR 漏幀 0%、回聲 100%。
 - 待辦：server 送 HAPTIC（`set_haptic_sink` 未註冊）、Frame 左手面鍵幾何、LATCH、XR 在 VR session 後失效時的
   `/cancel`、Hz 夾值時 period 與實際顯示不符的影響（S1 限定）、真 driver（`vr_pcvr = enabled`）端到端。
+  （R3／R4 已補：HAPTIC sink、LATCH、真 driver 端到端。）
+- **M4a R4 真 driver 端到端與失敗注入（2026-09-30）**：S1（Monado 無頭、模擬 HMD 旋轉＋左右控制器）→ `<dev-server>`
+  （Windows service、`vr_pcvr = enabled`，app＝SteamVR Home：`vr_pcvr=enabled` 時由 Steam 250820 合成的 vr 類 app）。
+  - 雙顯卡筆電：`pick_vr_adapter()` 在多張硬體卡中自動選「唯一接顯示輸出」的那張（log `[VIPLE-VR-CAP] adapter
+    auto-pick`），否則 `/serverinfo` 不宣告 PCVR（b1）。
+  - 端到端：編排器 IDLE→…→ACTIVE 約 7.2 s；driver 每 10 s vsync／present 600（60 Hz）、stale 0；讀回為 driver
+    合成的 SBS（左右眼視差、兩手控制器模型）；暖機後回聲 100%、XR 漏幀 0%、tracking 120/s；LATCH 暖機後
+    slackEma 收斂到 3.8～4.1 ms（目標 4 ms）、ppm 穩定於 −70～−59。
+  - 500 ms 斷線（linux-builder：出方向 `tc netem loss 100%`、入方向 `iptables INPUT DROP`，只針對 server）：
+    fade 141 ms→loading 293 ms→約 1 s 後回 live，LOSS→REFRESH_START 3 ms、恢復 150 ms、不退 IDR，session 不斷。
+    **不要用 `iptables OUTPUT DROP` 注入**：本機 send 回 EPERM，ENet 直接結束連線（`Connection terminated: 1`），
+    不代表真實掉包。
+  - kill server（service 的 server 子行程被強制結束）：driver 89 ms 內 `pipe lost -> standby (hmd stays
+    connected)`，新 server 起來後重新握手；client 約 10 s 後 ENet 逾時、XR 正常拆除、不崩潰；`/serverinfo` 恢復。
+  - guard：session 結束後編排器 disarm→RESTORE_PENDING（SteamVR 不自動關，已知）；SteamVR 結束後下一次維護
+    tick 還原 `steamvr.vrsettings`（`forcedDriver`、`driver_vrlink.enable` 與備份逐鍵一致）；server 當機重啟後
+    也依 marker 補還原。
+  - 修正：XR PCVR 每 10 s 約 2 次閃 loading（meta 在 render 後才查、ring 碰撞 → 改 render 前查一次、無 meta 幀在
+    acquire 前丟棄、ring 128→512）；`xr-probe --session` 自鍵盤 commit 起 SIGABRT（QPainter 需要 QGuiApplication
+    → 無 QGuiApplication 時不畫鍵盤）；S1 腳本到時對沙箱內 client 送 SIGTERM 並等它結束後才停 Monado（先停
+    Monado 會讓 client 卡在 VAAPI 匯出的 fence 等待）。
+  - 待辦：server 轉送 HAPTIC 的實測（需要會震動的 VR app 或登記 `vr_probe`）；連線錯誤後 CLI `stream` 在無頭
+    XR 下不會自行結束（停在錯誤提示等使用者）；runtime 在串流中掛掉時 client 拆除可能卡在 VAAPI fence（Frame 上
+    SteamVR 當掉的情境，待注入驗證）。

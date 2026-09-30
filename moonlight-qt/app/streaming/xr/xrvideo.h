@@ -53,6 +53,11 @@ public:
         int dumpAfterFrames = 300;
         // dev：第一幀進來 20 s 後丟掉接下來 testStallMs 毫秒的幀（驗 stale 1 s／5 s 轉換），0＝不用
         int testStallMs = 0;
+        // M4a R4（PCVR）：沒有 0x81 render pose 的幀在 acquire 之前就丟掉。OpenXR layer 參照整個
+        // swapchain、runtime 顯示最後 release 的影像，畫進去就回不去上一張有 pose 的影像；R1 讓
+        // XR thread 看到「目前影像無 meta」→ 當成 no-video 送 loading quad，頭盔裡閃一幀（S1 真 driver
+        // 每 10 s 約 2 次）。
+        bool requireMeta = false;
     };
 
     // XR frame thread 讀取的「目前可顯示影像」
@@ -156,6 +161,7 @@ private:
     std::thread m_Thread;
     uint64_t m_FirstSubmitUs = 0;          // stall 測試的起點（submit 端）
     uint64_t m_TestStallDropped = 0;
+    uint64_t m_NoMetaDropped = 0;  // M4a R4：requireMeta 時丟掉的無 meta 幀（累計）
     bool m_TestStallLogged = false;
 
     // 統計

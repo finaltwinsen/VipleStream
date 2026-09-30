@@ -26,6 +26,8 @@ STREAM_HOST=""
 STREAM_APP="Desktop"
 STREAM_SEC=45
 STREAM_ARGS="--resolution 1920x1080 --fps 60 --bitrate 10000 --no-quic"
+CLIENT_EXIT_SEC=15
+TEARDOWN_HANG=0
 OUT=""
 KEEP_MONADO=0
 ARCH=$(uname -m)
@@ -152,10 +154,32 @@ if [ -n "$STREAM_HOST" ]; then
 	rm -f "$STAGE/dump.png"
 	log "stream $STREAM_HOST $STREAM_APP --display-target $TARGET（$STREAM_SEC s）"
 	# shellcheck disable=SC2086
-	timeout "$STREAM_SEC" "${FRUN[@]}" stream "$STREAM_HOST" "$STREAM_APP" $STREAM_ARGS \
+	# timeout 只殺得到 `flatpak run` 這個外層行程，沙箱內的 client 會繼續拆除；若腳本這時就停掉
+	# Monado，client 可能卡在參照 runtime swapchain 的 GPU 工作上（2026-09-30 R4 實測卡了 7 分鐘）。
+	# 所以改成：到時對沙箱內的 client 送 SIGTERM，最多等 CLIENT_EXIT_SEC 秒讓它自己結束；等不到就
+	# 記 teardown hang 並 SIGKILL，之後才清 Monado。
+	"${FRUN[@]}" stream "$STREAM_HOST" "$STREAM_APP" $STREAM_ARGS \
 		--display-target "$TARGET" --xr-runtime-json "$STAGE/openxr_monado_s1.json" \
-		--xr-dump-frame "$STAGE/dump.png" > "$OUT/stream.out" 2>&1
-	log "stream rc=$?（124＝到時結束）"
+		--xr-dump-frame "$STAGE/dump.png" > "$OUT/stream.out" 2>&1 &
+	FRUN_PID=$!
+	STREAM_END=$(( $(date +%s) + STREAM_SEC ))
+	while kill -0 "$FRUN_PID" 2>/dev/null && [ "$(date +%s)" -lt "$STREAM_END" ]; do sleep 1; done
+	CLIENT_PIDS=$(pgrep -f "^viplestream stream $STREAM_HOST" || true)
+	if [ -n "$CLIENT_PIDS" ]; then
+		# shellcheck disable=SC2086
+		kill -TERM $CLIENT_PIDS 2>/dev/null
+		T_TERM=$(date +%s)
+		while [ -n "$(pgrep -f "^viplestream stream $STREAM_HOST" || true)" ] && [ $(( $(date +%s) - T_TERM )) -lt "$CLIENT_EXIT_SEC" ]; do sleep 1; done
+		if [ -n "$(pgrep -f "^viplestream stream $STREAM_HOST" || true)" ]; then
+			log "警告：client 收到 SIGTERM 後 ${CLIENT_EXIT_SEC} s 仍未結束（teardown hang），改送 SIGKILL"
+			pkill -KILL -f "^viplestream stream $STREAM_HOST" 2>/dev/null
+			TEARDOWN_HANG=1
+		else
+			log "client 收到 SIGTERM 後 $(( $(date +%s) - T_TERM )) s 內正常結束"
+		fi
+	fi
+	wait "$FRUN_PID" 2>/dev/null
+	log "stream 結束（teardownHang=${TEARDOWN_HANG}）"
 	timeout 20 "${FRUN[@]}" quit "$STREAM_HOST" > /dev/null 2>&1
 	cp -f "$STAGE/dump.png" "$OUT/" 2>/dev/null && log "讀回畫面：$OUT/dump.png"
 	# Flatpak 版把 log 寫到沙箱的 cache 目錄（stdout 只有一行「Redirecting log output to …」）

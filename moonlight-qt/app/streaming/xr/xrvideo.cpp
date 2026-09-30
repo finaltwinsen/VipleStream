@@ -488,6 +488,20 @@ void XrVideo::dumpTexture(pl_tex tex)
 bool XrVideo::renderNewFrame(AVFrame* frame)
 {
     const uint64_t t0 = nowUs();
+    // M4a R1/R4：PCVR 的 render pose（decoder 以 pts 查到後放進 VrRenderMetaRing）。只在這裡查一次：
+    // render 要 10～20 ms，期間 ring 會被後面的幀寫入，R1 在 render 之後才查，碰撞時查不到 → 發布成
+    // 無 meta → XR thread 當成 no-video 閃一幀 loading（R4 實測每 10 s 約 2 次）。
+    bool hasMeta = false;
+    VIPLE_VR_FRAME_META meta = {};
+    if (frame->pts != AV_NOPTS_VALUE && VrRenderMetaRing::lookup(frame->pts, &meta)) {
+        hasMeta = meta.present != 0;
+    }
+    if (m_Config.requireMeta && !hasMeta) {
+        av_frame_free(&frame);
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        m_NoMetaDropped++;
+        return false;
+    }
     uint32_t idx = 0;
     XrSwapchainImageAcquireInfo ai = xrS<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
     XrResult r;
@@ -567,12 +581,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     if (mappedOk) {
         pl_unmap_avframe(g, &mapped);
     }
-    // M4a R1：PCVR 的 render pose（decoder 以 pts 查到後放進 VrRenderMetaRing），跟著這張影像一起發布
-    bool hasMeta = false;
-    VIPLE_VR_FRAME_META meta = {};
-    if (frame->pts != AV_NOPTS_VALUE && VrRenderMetaRing::lookup(frame->pts, &meta)) {
-        hasMeta = meta.present != 0;
-    }
+    // hasMeta／meta 已在函式開頭查好，跟著這張影像一起發布
     av_frame_free(&frame);
 
     XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
@@ -674,11 +683,11 @@ QString XrVideo::takeStatsLine()
     pct(m_CpuUs, &c50, &c95);
     pct(m_GpuUs, &g50, &g95);
     const QString line = QStringLiteral("recv=%1 drawn=%2 overwritten=%3 errors=%4 renderThread cpu p50=%5 p95=%6 ms "
-                                        "gpu p50=%7 p95=%8 ms mode=%9 %10x%11 stallDropped=%12")
+                                        "gpu p50=%7 p95=%8 ms mode=%9 %10x%11 stallDropped=%12 noMetaDropped=%13")
                              .arg(m_Received).arg(m_Drawn).arg(m_Overwritten).arg(m_RenderErrors)
                              .arg(c50, 0, 'f', 2).arg(c95, 0, 'f', 2).arg(g50, 0, 'f', 2).arg(g95, 0, 'f', 2)
                              .arg(QLatin1String(modeName(static_cast<int>(m_Mode))))
-                             .arg(m_Sw.width).arg(m_Sw.height).arg(m_TestStallDropped);
+                             .arg(m_Sw.width).arg(m_Sw.height).arg(m_TestStallDropped).arg(m_NoMetaDropped);
     m_Received = m_Drawn = m_Overwritten = m_RenderErrors = 0;
     m_CpuUs.clear();
     m_GpuUs.clear();

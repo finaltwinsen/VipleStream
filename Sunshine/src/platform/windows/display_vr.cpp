@@ -147,6 +147,28 @@ namespace platf::dxgi {
       if (candidates.size() == 1) {
         return std::move(candidates.front());
       }
+      // 雙顯卡筆電（例：Intel UHD＋RTX 3060）：候選多張、但只有一張有接顯示輸出時，選那張。
+      // 在 SteamVR 還沒跑、vrcompositor 的 adapter 還沒記錄前，/serverinfo 就要決定是否宣告
+      // PCVR；兩張都有輸出或都沒有時不猜，照舊要求 adapter_name。
+      if (candidates.size() > 1) {
+        int with_output = -1;
+        int n_with_output = 0;
+        for (int i = 0; i < (int) candidates.size(); ++i) {
+          IDXGIOutput *out = nullptr;
+          if (SUCCEEDED(candidates[i]->EnumOutputs(0, &out)) && out) {
+            out->Release();
+            ++n_with_output;
+            with_output = i;
+          }
+        }
+        if (n_with_output == 1) {
+          DXGI_ADAPTER_DESC1 d {};
+          candidates[with_output]->GetDesc1(&d);
+          BOOST_LOG(info) << "[VIPLE-VR-CAP] adapter auto-pick: the only one of " << candidates.size()
+                          << " hardware adapters driving a display: " << utf_utils::to_utf8(d.Description);
+          return std::move(candidates[with_output]);
+        }
+      }
       why = candidates.empty() ? "no hardware adapter can create a feature level 11_0 device" :
                                  std::format("adapter mismatch (candidates={} skippedIndirect={}; vrcompositor adapter not recorded yet, set adapter_name to pick one)", candidates.size(), skipped_indirect);
       return nullptr;

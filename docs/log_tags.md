@@ -795,6 +795,13 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 - dev：`stream --vr-test-input`（8 s 一輪合成按鍵：右 A、B、trigger 漸進、搖桿；左 grip、menu＋trigger 1.4 s →
   SYSTEM）、`--vr-test-haptic`（每 3 s 本地注入一則 HAPTIC，走 clVrMessage 同一路徑）。
 
+### M4a R4 補充（真 driver 端到端）
+
+- `[VIPLE-XR] 10s video … stallDropped=N noMetaDropped=N`：PCVR 時沒有 0x81 render pose 的幀在 acquire 前丟棄的累計數（正常應為 0；非 0 代表 decoder 與 render 之間 meta 查不到）。`10s pcvr … noMeta=N` 暖機後也應為 0。
+- `[VIPLE-XR-INPUT] keyboard disabled (no QGuiApplication, e.g. xr-probe)`：xr-probe（QCoreApplication）不畫虛擬鍵盤，屬正常。
+- `[VIPLE-VR-CAP] adapter auto-pick: the only one of N hardware adapters driving a display: <GPU>`：server 雙顯卡時自動選卡。
+- driver（`Steam\logs\vrserver.txt`）：`[VIPLE-VR-DRV] pipe lost gen=N reason=… -> standby (hmd stays connected)`＝server 消失後進 standby（R4 實測 kill server 後 89 ms）；`ipc handshake gen=N … idle=1 armed=0`＝新 server 重新握手。
+
 ### `[VIPLE-VR-MTP10]`／`[VIPLE-VR-LATCH]`／`[VIPLE-VR-TIMING]` —— 延遲與頻率鎖（M4a R3）
 
 client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`

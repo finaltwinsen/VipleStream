@@ -29,9 +29,9 @@ public:
     static bool lookup(int64_t pts, VIPLE_VR_FRAME_META* meta);
 
 private:
-    static constexpr int kSize = 128;
+    static constexpr int kSize = 512;  // M4a R4：128 格時在途幀雜湊碰撞會蓋掉 meta（見 xrvideo.cpp）
     // pts 是 90 kHz 的 rtpTimestamp（60 fps 每幀 +1500），直接取餘數只會落在少數格子，改用雜湊
-    static int slot(int64_t pts) { return (int)(((uint64_t)pts * 0x9E3779B97F4A7C15ull) >> 57); }
+    static int slot(int64_t pts) { return (int)(((uint64_t)pts * 0x9E3779B97F4A7C15ull) >> 55); }  // 64−log2(kSize)
     struct Entry {
         int64_t pts;
         bool used;
