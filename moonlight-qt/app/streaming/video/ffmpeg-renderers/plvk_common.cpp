@@ -126,7 +126,7 @@ AVFrame* splitDrmPrimeLayers(const AVFrame* frame, const char** outcome)
 }
 #endif
 
-void fixupMappedFrame(const AVFrame* frame, pl_frame* mapped)
+void fixupMappedFrame(const AVFrame* frame, pl_frame* mapped, bool forceFullRange)
 {
     // libplacebo assumes a minimum luminance value of 0 means the actual value was unknown.
     // Since we assume the host values are correct, we use the PL_COLOR_HDR_BLACK constant to
@@ -142,7 +142,15 @@ void fixupMappedFrame(const AVFrame* frame, pl_frame* mapped)
     // bitstream data, so libplacebo incorrectly renders the content as limited range.
     //
     // As a workaround, set full range manually in the mapped frame ourselves.
-    mapped->repr.levels = PL_COLOR_LEVELS_FULL;
+    //
+    // §VR M3a：XR 路徑（forceFullRange=false）只在幀明確標 MPEG（limited）時用 limited，
+    // 其餘（JPEG、未標示）維持 full，保留上面 AMF 的繞法。
+    if (!forceFullRange && frame->color_range == AVCOL_RANGE_MPEG) {
+        mapped->repr.levels = PL_COLOR_LEVELS_LIMITED;
+    }
+    else {
+        mapped->repr.levels = PL_COLOR_LEVELS_FULL;
+    }
 }
 
 }  // namespace PlvkCommon

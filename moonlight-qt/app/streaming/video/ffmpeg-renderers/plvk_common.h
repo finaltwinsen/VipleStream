@@ -26,6 +26,9 @@ AVFrame* splitDrmPrimeLayers(const AVFrame* frame, const char** outcome);
 
 // pl_map_avframe_ex 成功後的共用修正：HDR 最低亮度 0 視為無限對比、強制 full range
 // （host 的 AMF AV1 在 bitstream 不設 full range 的繞法）。
-void fixupMappedFrame(const AVFrame* frame, pl_frame* mapped);
+// forceFullRange=true：平面 PlVk 的既有行為（它向 host 要求 full range，並無條件標 full，
+// 繞過 AMF AV1 不寫 range 旗標）。false：依幀的 color_range 決定——XR 的串流 range 由探測時
+// 選到的平面 decoder 決定，可能是 limited（§VR M3a S1：Linux 協商到 MPEG，強標 full 使黑位抬高）。
+void fixupMappedFrame(const AVFrame* frame, pl_frame* mapped, bool forceFullRange = true);
 
 }  // namespace PlvkCommon

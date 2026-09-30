@@ -304,7 +304,15 @@ bool XrVideo::mapFrame(const AVFrame* frame, pl_frame* out, pl_tex* texSet)
     // libplacebo 成功時自己 clone 一份持有到 pl_unmap_avframe，這份改寫描述子可以放掉
     av_frame_free(&split);
     if (ok) {
-        PlvkCommon::fixupMappedFrame(frame, out);
+        PlvkCommon::fixupMappedFrame(frame, out, false);
+        if (!m_LoggedColor.exchange(true)) {
+            const char* rn = av_color_range_name(frame->color_range);
+            const char* sn = av_color_space_name(frame->colorspace);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-XR] video color: frame range=%s matrix=%s -> levels=%s",
+                        rn ? rn : "?", sn ? sn : "?",
+                        out->repr.levels == PL_COLOR_LEVELS_LIMITED ? "limited" : "full");
+        }
     }
     return ok;
 }

@@ -131,6 +131,7 @@ private:
     VkFormat m_ViewFormat = VK_FORMAT_UNDEFINED;  // libplacebo 包裝用的格式
     TargetMode m_Mode = TargetMode::None;
     bool m_LoggedFormat = false;
+    std::atomic<bool> m_LoggedColor{false};  // mapFrame 由 render thread 與 testMap 呼叫
     uint64_t m_NextGeneration = 1;
 
     std::mutex m_SwMutex;
