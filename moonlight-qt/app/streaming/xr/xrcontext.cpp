@@ -3,6 +3,7 @@
 #include "xrcontext.h"
 #include "xrdesktopscreen.h"
 #include <Limelight.h>  // M4a R2：VIPLE_VR_TRACKING（sampleControllers）
+#include "streaming/vr/vrtracking.h"  // M4a R3：VrSampleHistory（MTP）
 
 #ifdef HAVE_XR_VIDEO
 #include "xrvideo.h"
@@ -1604,6 +1605,7 @@ void XrContext::frameThreadMain()
             else if (haveVideo) {
                 std::lock_guard<std::mutex> lk(m_StatsMutex);
                 m_ProjNoMeta++;
+                m_PcvrTiming.metaMissTotal++;
             }
             if (ps != m_PcvrStale) {
                 static const char* const kPcvrName[] = {"no-video", "live", "fade", "loading"};
@@ -1617,6 +1619,8 @@ void XrContext::frameThreadMain()
                     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
                     videoLayer = true;
                     videoGen = vcur.generation;
+                    pcvrTimingOnLatch(vcur.seq, vcur.lastDrawnUs, vcur.renderUs, vcur.hasMeta,
+                                      vcur.meta.echoSampleId, cpuT0);
                     std::lock_guard<std::mutex> lk(m_StatsMutex);
                     m_ProjFrames++;
                 }
@@ -1635,6 +1639,9 @@ void XrContext::frameThreadMain()
                 fade.size = {3.0f, 3.0f};  // 0.3 m 前方 3 m 寬：蓋住整個視野
                 layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&fade);
             }
+        }
+        if (m_Options.pcvr) {
+            pcvrTimingTick(cpuT0, static_cast<uint64_t>(fs.predictedDisplayPeriod));  // M4a R3
         }
         if (!m_Options.pcvr && fs.shouldRender && stale != m_StaleState) {
             static const char* const kStaleName[] = {"no-video", "live", "stale", "lost"};
@@ -2014,14 +2021,144 @@ bool XrContext::nowXrTime(XrTime* out) const
 #endif
 }
 
+namespace {
+template <typename T>
+T pctOf(std::vector<T> v, double p)
+{
+    if (v.empty()) {
+        return T{};
+    }
+    const size_t idx = (std::min)(v.size() - 1, static_cast<size_t>(p * static_cast<double>(v.size() - 1) + 0.5));
+    std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(idx), v.end());
+    return v[idx];
+}
+uint16_t sat16u(uint64_t v) { return static_cast<uint16_t>((std::min<uint64_t>)(v, 0xffff)); }
+int16_t sat16s(int64_t v) { return static_cast<int16_t>((std::max<int64_t>)(-32768, (std::min<int64_t>)(v, 32767))); }
+}  // namespace
+
+// M4a R3：frame thread，新的一張串流影像第一次被 latch 進 projection layer 時呼叫。
+// slack＝latch 時刻 − 影像就緒時刻（正值＝幀比 latch 早到）；MTP_content＝本幀預測顯示時間 −
+// echoSampleId 的 sampleTime（兩者都是 client steady 時鐘）。
+void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta,
+                                  uint32_t echoSampleId, uint64_t latchNs)
+{
+    auto& t = m_PcvrTiming;
+    if (seq == 0 || seq == t.lastLatchedSeq) {
+        return;  // 同一張影像重送（沒有新幀）不算
+    }
+    t.lastLatchedSeq = seq;
+    t.presentedTotal++;
+    const int64_t slackUs = static_cast<int64_t>(latchNs / 1000ull) - static_cast<int64_t>(lastDrawnUs);
+    t.lastSlackUs = static_cast<int32_t>((std::max<int64_t>)(INT32_MIN, (std::min<int64_t>)(slackUs, INT32_MAX)));
+    t.lastFrameId = static_cast<uint32_t>(seq);
+    t.haveLatch = true;
+    t.slack1s.push_back(t.lastSlackUs);
+    t.render1s.push_back(renderUs);
+    if (hasMeta) {
+        uint64_t sampleNs = 0;
+        if (VrSampleHistory::lookup(echoSampleId, &sampleNs) && t.predictedDisplayClientNs > sampleNs) {
+            const uint64_t mtpUs = (t.predictedDisplayClientNs - sampleNs) / 1000ull;
+            if (mtpUs < 2000000ull) {  // > 2 s 視為樣本對不上（不列入）
+                t.mtp1sUs.push_back(static_cast<uint32_t>(mtpUs));
+                t.mtp10sUs.push_back(static_cast<uint32_t>(mtpUs));
+            }
+        }
+        else {
+            t.mtpNoSample++;
+        }
+    }
+}
+
+// M4a R3：frame thread 每幀呼叫。10 Hz 送 LATCH、1 Hz 送 CLIENT_TIMING、10 s 印 [VIPLE-VR-MTP10]。
+// LiSendVrMessage 在沒有 VR session 時回 -1（例如 bring-up 後、/launch 前），直接忽略。
+void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
+{
+    auto& t = m_PcvrTiming;
+    if (t.mtpWindowStartNs == 0) {
+        t.mtpWindowStartNs = nowNs;
+        t.lastTimingSendNs = nowNs;
+    }
+
+    // 以固定截止時間排程（下一次＝上一次截止＋間隔），frame thread 每幀呼叫一次時不會因為幀間隔
+    // 抖動而把 10 Hz 拖成 8 Hz；落後超過一個間隔就重新對齊到現在。
+    auto due = [nowNs](uint64_t& next, uint64_t interval) {
+        if (nowNs < next) {
+            return false;
+        }
+        next = (nowNs - next >= interval) ? nowNs + interval : next + interval;
+        return true;
+    };
+    if (t.haveLatch && due(t.lastLatchSendNs, 100000000ull)) {
+        uint8_t tlv[2 + sizeof(VIPLE_VR_TLV_LATCH)];
+        VIPLE_VR_TLV_LATCH l{};
+        l.frameId = t.lastFrameId;
+        l.slackUs = t.lastSlackUs;
+        l.displayPeriodNs = static_cast<uint32_t>((std::min<uint64_t>)(periodNs, 0xffffffffu));
+        tlv[0] = VIPLE_VR_C2S_LATCH;
+        tlv[1] = sizeof(l);
+        memcpy(tlv + 2, &l, sizeof(l));
+        if (LiSendVrMessage(tlv, sizeof(tlv), false) == 0) {
+            t.latchSent++;
+        }
+    }
+
+    if (due(t.lastTimingSendNs, 1000000000ull)) {
+        VIPLE_VR_TLV_CLIENT_TIMING ct{};
+        ct.framesPresented = t.presentedTotal;
+        {
+            std::lock_guard<std::mutex> lk(m_StatsMutex);
+            ct.xrMissed = static_cast<uint32_t>((std::min<uint64_t>)(m_Stats.missed, 0xffffffffu));
+        }
+        ct.metaMiss = t.metaMissTotal;
+        ct.displayPeriodNs = static_cast<uint32_t>((std::min<uint64_t>)(periodNs, 0xffffffffu));
+        ct.decodeP50Us = 0;  // XrContext 拿不到 decoder 延遲（TODO：由 Session 提供）
+        ct.decodeP95Us = 0;
+        ct.renderP50Us = sat16u(pctOf(t.render1s, 0.50));
+        ct.renderP95Us = sat16u(pctOf(t.render1s, 0.95));
+        ct.slackP50Us = sat16s(pctOf(t.slack1s, 0.50));
+        ct.slackP05Us = sat16s(pctOf(t.slack1s, 0.05));
+        ct.mtpP50_100us = sat16u(pctOf(t.mtp1sUs, 0.50) / 100u);
+        ct.mtpP95_100us = sat16u(pctOf(t.mtp1sUs, 0.95) / 100u);
+        uint8_t tlv[2 + sizeof(VIPLE_VR_TLV_CLIENT_TIMING)];
+        tlv[0] = VIPLE_VR_C2S_CLIENT_TIMING;
+        tlv[1] = sizeof(ct);
+        memcpy(tlv + 2, &ct, sizeof(ct));
+        if (LiSendVrMessage(tlv, sizeof(tlv), false) == 0) {
+            t.timingSent++;
+        }
+        t.slack1s.clear();
+        t.render1s.clear();
+        t.mtp1sUs.clear();
+    }
+
+    if (nowNs - t.mtpWindowStartNs >= 10000000000ull) {
+        const double secs = static_cast<double>(nowNs - t.mtpWindowStartNs) / 1e9;
+        t.mtpWindowStartNs = nowNs;
+        const size_t n = t.mtp10sUs.size();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s",
+                    n, pctOf(t.mtp10sUs, 0.50) / 1000.0, pctOf(t.mtp10sUs, 0.95) / 1000.0,
+                    pctOf(t.mtp10sUs, 0.99) / 1000.0, t.mtpNoSample, t.latchSent,
+                    secs > 0 ? t.latchSent / secs : 0.0, t.lastSlackUs, t.timingSent,
+                    m_TimeConv != nullptr ? "" : " (mtp approx: no time conversion ext)");
+        t.mtp10sUs.clear();
+        t.mtpNoSample = 0;
+        t.latchSent = 0;
+        t.timingSent = 0;
+    }
+}
+
 // frame thread：xrWaitFrame 之後。更新「預測顯示時間 − 現在」的估計，並 locate 一次 HMD（frameloop 模式樣本）
 void XrContext::pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodNs)
 {
+    const uint64_t steadyNow = steadyNowNs();
     XrTime xrNow = 0;
     int64_t ahead = static_cast<int64_t>(2 * periodNs);  // 沒有時間換算：約兩個顯示週期
     if (nowXrTime(&xrNow) && predictedDisplayTime > xrNow) {
         ahead = static_cast<int64_t>(predictedDisplayTime - xrNow);
     }
+    // M4a R3：預測顯示時間換成 client steady 時鐘（MTP 用）。沒有時間換算擴充時 ahead 是估計值（≈2 週期）
+    m_PcvrTiming.predictedDisplayClientNs = steadyNow + static_cast<uint64_t>(ahead);
     m_PredictAheadNs = m_PredictAheadNs == 0 ? ahead : (m_PredictAheadNs * 7 + ahead) / 8;
     if (m_TrackSpace == XR_NULL_HANDLE || m_ViewSpace == XR_NULL_HANDLE) {
         return;

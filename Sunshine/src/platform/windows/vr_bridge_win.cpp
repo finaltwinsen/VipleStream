@@ -707,6 +707,7 @@ namespace vr::bridge {
       void set_armed(bool armed);
       void request_quit();
       void set_pacing(const vripc_pacing_t &p);
+      void set_pacing_ppm(int32_t ppm);
       void set_dev_mode(bool on);
       bool send_v2p(uint32_t us);
       void user_changed();
@@ -990,6 +991,23 @@ namespace vr::bridge {
         cmds_.pacing = p;
       }
       SetEvent(ev_cmd_.get());
+    }
+
+    void bridge_t::set_pacing_ppm(int32_t ppm) {
+      uint32_t mhz;
+      {
+        std::lock_guard lk(mtx_);
+        mhz = last_refresh_mhz_;
+      }
+      const int32_t c = std::clamp<int32_t>(ppm, -200, 200);
+      const uint64_t base = period_q32_for(mhz);
+      vripc_pacing_t p {};
+      p.period_q32 = (uint64_t) ((double) base * (1.0 + (double) c * 1e-6));
+      p.slew_ppm_max = 200;
+      p.pacing_flags = 0;  // 沒有 anchor：driver 只跟週期
+      p.mode = VRIPC_PM_PRODUCTION;
+      p.epoch = 1;  // 與 write_default_pacing 相同，不觸發重新對齊
+      set_pacing(p);
     }
 
     void bridge_t::set_dev_mode(bool on) {
@@ -3204,6 +3222,10 @@ namespace vr::bridge {
 
   void set_pacing(const vripc_pacing_t &pacing) {
     bridge().set_pacing(pacing);
+  }
+
+  void set_pacing_ppm(int32_t ppm) {
+    bridge().set_pacing_ppm(ppm);
   }
 
   void set_dev_mode(bool enabled) {

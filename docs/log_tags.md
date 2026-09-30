@@ -795,6 +795,21 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 - dev：`stream --vr-test-input`（8 s 一輪合成按鍵：右 A、B、trigger 漸進、搖桿；左 grip、menu＋trigger 1.4 s →
   SYSTEM）、`--vr-test-haptic`（每 3 s 本地注入一則 HAPTIC，走 clVrMessage 同一路徑）。
 
+### `[VIPLE-VR-MTP10]`／`[VIPLE-VR-LATCH]`／`[VIPLE-VR-TIMING]` —— 延遲與頻率鎖（M4a R3）
+
+client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
+
+```
+[VIPLE-VR-MTP10] n=N p50=… p95=… p99=… ms noSample=N | latch sent=N (x/s) lastSlack=… us | timing sent=N   ← client 10 s；沒有時間換算擴充時行尾註明 approx
+[VIPLE-VR-LATCH] pacing ppm=N slackEma=…us target=…us (applied|stub: log only)   ← server：前 10 次＋變化 ≥ 10 ppm 才印
+[VIPLE-VR-LATCH] 10s: rx=N slackEma=…us target=…us ppm=N haptics=N               ← server 10 s（haptics＝累計排入的 HAPTIC）
+[VIPLE-VR-TIMING] 10s: presented=N xrMissed=N metaMiss=N period=…ms decode p50/p95=… render p50/p95=… slack p50/p05=… mtp p50/p95=…ms
+```
+
+- client 每 100 ms 送 0x5507/08 LATCH、每 1 s 送 0x5507/06 CLIENT_TIMING（都走 ch 0x07 unsequenced）；定義見 `vr_protocol.md` §4.5。
+- `decode p50/p95` 目前填 0（XrContext 拿不到 decoder 延遲，TODO 由 Session 提供）。
+- pcvr 才把 ppm 寫進 driver pacing；stub 只記錄。
+
 ### `[VIPLE-XR-INPUT]` —— XR 控制器射線滑鼠（M3a X4）
 
 `streaming/xr/xrinput.cpp`、`streaming/xr/xrkeyboard.cpp`、`streaming/input/mouse.cpp`（`handleXrPointer/Button/Scroll/Key`）

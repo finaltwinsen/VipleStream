@@ -559,6 +559,56 @@ namespace vr {
     }
   }
 
+  latch::result_t session_state_t::on_latch(const VIPLE_VR_TLV_LATCH &latch, int64_t now_ns) {
+    std::lock_guard lk {latch_mtx_};
+    latch_last_ = latch_ctl_.on_latch(latch.slackUs, latch.displayPeriodNs, now_ns);
+    return latch_last_;
+  }
+
+  latch::result_t session_state_t::latch_idle(int64_t now_ns) {
+    std::lock_guard lk {latch_mtx_};
+    auto r = latch_ctl_.on_idle(now_ns);
+    if (r.update) {
+      latch_last_ = r;
+    }
+    return r;
+  }
+
+  latch::result_t session_state_t::latch_snapshot() const {
+    std::lock_guard lk {latch_mtx_};
+    auto r = latch_last_;
+    r.update = false;
+    r.ppm = latch_ctl_.last_sent_ppm();
+    return r;
+  }
+
+  void session_state_t::on_client_timing(const uint8_t *body, std::size_t len) {
+    VIPLE_VR_TLV_CLIENT_TIMING t {};
+    std::memcpy(&t, body, std::min(len, sizeof(t)));
+    std::lock_guard lk {timing_mtx_};
+    timing_last_ = t;
+  }
+
+  std::optional<VIPLE_VR_TLV_CLIENT_TIMING> session_state_t::last_client_timing() const {
+    std::lock_guard lk {timing_mtx_};
+    return timing_last_;
+  }
+
+  bool session_state_t::queue_haptic(uint8_t device, uint32_t duration_us, float frequency_hz, float amplitude) {
+    if (device != VIPLE_VR_POSE_LEFT && device != VIPLE_VR_POSE_RIGHT) {
+      return false;
+    }
+    VIPLE_VR_TLV_HAPTIC h {};
+    h.device = device;
+    h.durationUs = duration_us;
+    h.frequencyHz = frequency_hz;
+    h.amplitude = amplitude;
+    h.eventId = haptic_event_id_.fetch_add(1, std::memory_order_relaxed) + 1;
+    queue_s2c(make_tlv(VIPLE_VR_S2C_HAPTIC, &h, sizeof(h)), false);
+    haptic_tx_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+
   void session_state_t::count_c2s_truncated() {
     c2s_truncated_.fetch_add(1, std::memory_order_relaxed);
   }

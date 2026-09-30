@@ -731,6 +731,9 @@ namespace stream {
       std::chrono::steady_clock::time_point lastLog {};  // 上次印 10 秒統計的時間
       ::vr::stats_snapshot_t lastLogStats {};  // 上次 10 秒統計時的累計值（算區間差）
       int sendFailLogs = 0;  // S→C 送出失敗的 log 次數（只印前幾次）
+      // M4a R3：LATCH pacing log 節流（LATCH 也可能從 QUIC IO 執行緒進來，所以用 atomic）
+      std::atomic<int> latchLogs {0};
+      std::atomic<int32_t> latchLoggedPpm {0};
     } vrCtrl;
 
     // 只在 videoBroadcastThread 存取：[VIPLE-VR-TX] 每個 session 印一次
@@ -1540,6 +1543,38 @@ namespace stream {
 #endif
   }
 
+  static int64_t vr_steady_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+
+  /**
+   * @brief M4a R3：套用 LATCH 頻率鎖的結果。pcvr 才寫 driver pacing；stub 只記錄（沒有 driver）。
+   */
+  static void vr_apply_latch(session_t *session, ::vr::session_state_t &vr_state, const ::vr::latch::result_t &r) {
+    if (!r.update) {
+      return;
+    }
+    const bool pcvr = vr_state.negotiated().pcvr;
+#if VIPLE_VR_BRIDGE_HAS_ABI
+    if (pcvr) {
+      ::vr::bridge::set_pacing_ppm(r.ppm);
+    }
+#endif
+    auto &ctl = session->vrCtrl;
+    {
+      // 前 10 次＋數值變化 ≥ 10 ppm 才印（1 s 週期的例行更新不洗版）
+      const int logs = ctl.latchLogs.load(std::memory_order_relaxed);
+      const int32_t logged = ctl.latchLoggedPpm.load(std::memory_order_relaxed);
+      if (logs < 10 || std::abs(r.ppm - logged) >= 10) {
+        ctl.latchLogs.store(logs + 1, std::memory_order_relaxed);
+        ctl.latchLoggedPpm.store(r.ppm, std::memory_order_relaxed);
+        BOOST_LOG(info) << "[VIPLE-VR-LATCH] pacing ppm=" << r.ppm << " slackEma=" << std::format("{:.0f}", r.slack_ema_us)
+                        << "us target=" << std::format("{:.0f}", r.target_us) << "us"
+                        << (pcvr ? " (applied)" : " (stub: log only)");
+      }
+    }
+  }
+
   /**
    * @brief VR session 的控制迴圈工作（只在 control 執行緒、peer 已連上時呼叫）：
    *        STATE（連上後一次）、1 Hz STATS 與 RTT 下限、drain outbox、10 秒統計 log。
@@ -1581,6 +1616,7 @@ namespace stream {
       ctl.lastStats = now;
       vr_publish_quic_rtt(session, vr_state);  // §M1b S1-12：時鐘對映的 RTT 來源（STATS 的 clkOffset 會用到）
       vr_state.queue_stats();
+      vr_apply_latch(session, vr_state, vr_state.latch_idle(vr_steady_ns()));  // M4a R3：LATCH 停了就衰減
     }
 
     for (const auto &msg : vr_state.drain_s2c()) {
@@ -1613,6 +1649,21 @@ namespace stream {
       // §M1b S1-12：時鐘對映 10 秒行（欄位順序見 clk::format_stats，F.10 分析腳本依賴）
       if (const auto cs = vr_state.clock_stats(true)) {
         BOOST_LOG(info) << "[VIPLE-VR-CLK] 10s: " << ::vr::clk::format_stats(*cs);
+      }
+      // M4a R3：LATCH 頻率鎖與 client 時序
+      if (cur.latch_rx != prev.latch_rx) {
+        const auto ls = vr_state.latch_snapshot();
+        BOOST_LOG(info) << "[VIPLE-VR-LATCH] 10s: rx=" << cur.latch_rx - prev.latch_rx << " slackEma=" << std::format("{:.0f}", ls.slack_ema_us)
+                        << "us target=" << std::format("{:.0f}", ls.target_us) << "us ppm=" << ls.ppm
+                        << (pcvr ? "" : " (stub: log only)") << " haptics=" << vr_state.haptics_queued();
+      }
+      if (const auto t = vr_state.last_client_timing()) {
+        BOOST_LOG(info) << "[VIPLE-VR-TIMING] 10s: presented=" << t->framesPresented << " xrMissed=" << t->xrMissed
+                        << " metaMiss=" << t->metaMiss << " period=" << std::format("{:.2f}", t->displayPeriodNs / 1e6) << "ms"
+                        << " decode p50/p95=" << t->decodeP50Us << '/' << t->decodeP95Us << "us"
+                        << " render p50/p95=" << t->renderP50Us << '/' << t->renderP95Us << "us"
+                        << " slack p50/p05=" << t->slackP50Us << '/' << t->slackP05Us << "us"
+                        << " mtp p50/p95=" << std::format("{:.1f}", t->mtpP50_100us / 10.0) << '/' << std::format("{:.1f}", t->mtpP95_100us / 10.0) << "ms";
       }
       ctl.lastLog = now;
       ctl.lastLogStats = cur;
@@ -2219,8 +2270,18 @@ namespace stream {
           } else {
             vr_state->count_c2s(type);
           }
+        } else if (type == VIPLE_VR_C2S_LATCH && len >= sizeof(VIPLE_VR_TLV_LATCH)) {
+          // M4a R3：LATCH 相位回授 → 頻率鎖（pcvr 寫 driver pacing；stub 只記錄）
+          vr_state->count_c2s(type);
+          VIPLE_VR_TLV_LATCH latch;
+          std::memcpy(&latch, body, sizeof(latch));
+          vr_apply_latch(session, *vr_state, vr_state->on_latch(latch, vr_steady_ns()));
+        } else if (type == VIPLE_VR_C2S_CLIENT_TIMING) {
+          // M4a R3：1 Hz client 時序（依 len 能讀多少算多少）
+          vr_state->count_c2s(type);
+          vr_state->on_client_timing(body, len);
         } else {
-          // LATCH／CLIENT_TIMING 在 M1a 只計數（10 秒統計印出）；不認得的 subtype 依 len 跳過
+          // 不認得的 subtype 依 len 跳過
           vr_state->count_c2s(type);
         }
 
@@ -4368,6 +4429,11 @@ namespace stream {
         if (const auto cs = session.vr->clock_stats(true)) {
           BOOST_LOG(info) << "[VIPLE-VR-CLK] (final) " << ::vr::clk::format_stats(*cs);
         }
+#if VIPLE_VR_BRIDGE_HAS_ABI
+        if (session.vr->negotiated().pcvr) {
+          ::vr::bridge::set_haptic_sink(nullptr);  // M4a R3：先摘 sink，再清 active
+        }
+#endif
         ::vr::clear_active_if(session.vr.get());
         // M1b S1-09（§C.6 第 6 點）：VR launch 以 handoff_to_session() 接手探測狀態時，VR session 結束才還原
         // 桌面探測結果。沒有存過快照（stub、或 VR 探測沒有 handoff）時是 no-op。
@@ -4522,6 +4588,17 @@ namespace stream {
       if (session.vr) {
         ::vr::set_active(session.vr);
         const auto &neg = session.vr->negotiated();
+#if VIPLE_VR_BRIDGE_HAS_ABI
+        // M4a R3：driver 推進 IPC 的 SteamVR haptic → 0x5508/01（unsequenced）。bridge 執行緒呼叫，
+        // 只排入 active session 的 outbox，由 control 執行緒送出。
+        if (neg.pcvr) {
+          ::vr::bridge::set_haptic_sink([](const vripc_haptic_evt_t &e) {
+            if (auto s = ::vr::active(); s && s->negotiated().pcvr) {
+              s->queue_haptic((uint8_t) e.device, e.duration_us, e.frequency_hz, e.amplitude);
+            }
+          });
+        }
+#endif
         BOOST_LOG(info) << "[VIPLE-VR-SESSION] stream session start session=" << ::vr::log_guid(neg.guid)
                         << " mode=" << (neg.pcvr ? "pcvr" : "stub") << " codec=" << ::vr::codec_name(neg.codec)
                         << " recovery=" << (neg.recovery_intra ? "intra" : "idr")

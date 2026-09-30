@@ -61,6 +61,8 @@ public:
         float aspect = 0.0f;
         uint64_t generation = 0;
         uint64_t lastDrawnUs = 0;  // steady clock；最近一次畫出新幀的時間
+        uint64_t seq = 0;          // M4a R3：發布序號（每畫出一張新影像 +1）
+        uint32_t renderUs = 0;     // M4a R3：這張影像的 map＋render＋等 GPU 時間
         // M4a R1（PCVR）：這張影像的 0x81 render pose（FFmpegVideoDecoder 以 pts 查到後放進
         // VrRenderMetaRing，render 時以 frame->pts 取回）。hasMeta=false＝沒有 meta（β 或非 VR session）。
         bool hasMeta = false;

@@ -369,4 +369,28 @@ private:
     uint64_t m_ProjFrames = 0;                // 10 s 視窗：送出 projection layer 的幀數（m_StatsMutex）
     uint64_t m_ProjNoMeta = 0;                // 影像有但沒有 pose meta 的幀
     int m_PcvrStale = 0;                      // 0 無影像、1 live、2 fade（>100 ms）、3 loading（>250 ms）
+
+    // M4a R3：LATCH（10 Hz）、CLIENT_TIMING（1 Hz）、MTP 統計。只在 frame thread 存取。
+    struct PcvrTiming {
+        uint64_t predictedDisplayClientNs = 0;  // 本幀預測顯示時間（client steady 時鐘）
+        uint64_t lastLatchedSeq = 0;
+        bool haveLatch = false;
+        uint32_t lastFrameId = 0;
+        int32_t lastSlackUs = 0;
+        uint64_t lastLatchSendNs = 0;
+        uint64_t lastTimingSendNs = 0;
+        uint64_t mtpWindowStartNs = 0;
+        uint32_t presentedTotal = 0;
+        uint32_t metaMissTotal = 0;
+        uint32_t latchSent = 0;
+        uint32_t timingSent = 0;
+        uint32_t mtpNoSample = 0;
+        std::vector<int32_t> slack1s;
+        std::vector<uint32_t> render1s;
+        std::vector<uint32_t> mtp1sUs;
+        std::vector<uint32_t> mtp10sUs;
+    } m_PcvrTiming;
+    void pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta,
+                           uint32_t echoSampleId, uint64_t latchNs);
+    void pcvrTimingTick(uint64_t nowNs, uint64_t periodNs);
 };

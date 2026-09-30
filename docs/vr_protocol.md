@@ -87,12 +87,12 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 rsv                           
 | | 02 RECENTER | 新 spaceEpoch | reliable |
 | | 03 PRESENCE、04 CONTROLLER_STATE | — | reliable |
 | | 05 REFRESH_CHANGED | u16 Hz，觸發重開 session | reliable |
-| | 06 CLIENT_TIMING | 1 Hz 統計 | ch 0x07 unseq |
+| | 06 CLIENT_TIMING | 1 Hz 統計（M4a R3 定義，32 B）：`{framesPresented u32, xrMissed u32, metaMiss u32（三者累計）, displayPeriodNs u32, decodeP50Us u16, decodeP95Us u16, renderP50Us u16, renderP95Us u16, slackP50Us i16, slackP05Us i16, mtpP50_100us u16, mtpP95_100us u16}` | ch 0x07 unseq |
 | | 07 FRAME_FEEDBACK（GA） | 每 8 幀一批 | ch 0x07 unseq |
 | | **08 LATCH** | 10 Hz：`{frameId u32, slackUs i32, displayPeriodNs u32}` | ch 0x07 unseq |
 | | **09 LOSS** | `{firstLost u32, lastLost u32, reason u8}`，送 2 次 | ch 0x07 unseq |
 | | 7F | 保留：麥克風 | — |
-| 0x5508 S→C | 01 HAPTIC | `{device, durationUs, freqHz, amp, eventId}` | ch 0x07 unseq |
+| 0x5508 S→C | 01 HAPTIC | `{device, durationUs, freqHz, amp, eventId}`（M4a R3：pcvr session 由 `bridge::set_haptic_sink` 把 driver 推進 IPC 的震動打包送出） | ch 0x07 unseq |
 | | 02 STATE | `{state, code, progress}`：編排進度、HMD 就緒、safe mode、`VRLINK_ACTIVE`、`ABI_MISMATCH_RESTART_STEAMVR` | reliable |
 | | 03 STATS | 1 Hz 統計，含 `clkOffsetJitter`、`staleCount` | ch 0x07 unseq |
 | | 04 CONFIG_ACK、05 LAYOUT | epoch 對應的 FoV、overscan、foveation、**eyeToHead** | reliable |
@@ -184,7 +184,9 @@ session（§M01-D）、`session_count()==0`、codec 交集（放在 `probe_encod
 `VrFlags`，`LiStopConnection` 結束時清零。大端平台一律 0。
 
 **TLV payload 大小**（`static_assert` 鎖定）：LOSS 9 B、LATCH 12 B、REFRESH_START 6 B、STATE 4 B、
-HAPTIC 20 B、STATS 40 B。**STATS 的計數欄位一律是 session 累計值**：STATS 走 UNSEQUENCED，掉一筆也不會
+HAPTIC 20 B、STATS 40 B、CLIENT_TIMING 32 B。
+
+**LATCH 與頻率鎖（M4a R3）**：client 在 XR frame thread 記下每張新串流影像第一次被 latch 進 projection layer 的時刻，`slackUs`＝latch 時刻 − 影像就緒（render thread release）時刻，正值＝幀比 latch 早到；`frameId` 是 client 的影像發布序號（server 只記錄）；10 Hz 送最近一張。server 以 EMA（α 0.2）平滑 slack，目標＝顯示週期 / 4（夾 1～4 ms），PI 控制（Kp 0.05 ppm/µs、Ki 0.004、積分上限 150）算出週期修正 ppm（夾 ±200；正值＝週期變長），pcvr 模式以 `bridge::set_pacing_ppm` 寫 driver pacing（epoch 不變、不重新對齊）；ppm 變化 ≥ 2 或距上次 ≥ 1 s 才更新；超過 2 s 沒 LATCH 每秒減半回到 0。stub 模式只記錄。**MTP_content**＝顯示該幀的 predictedDisplayTime（換成 client steady 時鐘）− echoSampleId 的 sampleTime；沒有時間換算擴充的 runtime 以 ≈2 週期估 predictedDisplayTime。**STATS 的計數欄位一律是 session 累計值**：STATS 走 UNSEQUENCED，掉一筆也不會
 漏算，client 以相鄰兩筆相減得到區間值。欄位只往後加，client 依 len 能讀多少算多少。
 
 **STATE.state**：0 IDLE、1 ORCHESTRATING、2 HMD_ACTIVE、3 **STUB_ECHO**（M1a）、0xFF ERROR。

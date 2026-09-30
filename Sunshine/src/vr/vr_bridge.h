@@ -310,6 +310,13 @@ namespace vr::bridge {
    *        （新 generation 先寫依 config Hz 算的預設週期）。
    */
   void set_pacing(const vripc_pacing_t &pacing);
+
+  /**
+   * @brief M4a R3：LATCH 頻率鎖。以目前 session config 的 Hz（沒有就沿用上一個 session）算標稱週期，
+   *        乘上 (1 + ppm·10⁻⁶) 後以 production 模式寫 pacing（epoch 不變，driver 不重新對齊相位）。
+   *        ppm 夾在 ±200。
+   */
+  void set_pacing_ppm(int32_t ppm);
 #endif
 
   /**

@@ -589,6 +589,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         m_Published.aspect = static_cast<float>(m_Sw.width) / static_cast<float>(m_Sw.height);
         m_Published.generation = m_Sw.generation;
         m_Published.lastDrawnUs = tGpuEnd;
+        m_Published.seq++;
+        m_Published.renderUs = static_cast<uint32_t>(std::min<uint64_t>(tGpuEnd - t0, 0xffffffffu));
         m_Published.hasMeta = hasMeta;
         m_Published.meta = meta;
         m_HavePublished = true;

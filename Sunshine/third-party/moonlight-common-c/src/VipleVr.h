@@ -297,6 +297,25 @@ typedef struct _VIPLE_VR_TLV_LATCH {
     uint32_t displayPeriodNs;
 } VIPLE_VR_TLV_LATCH;
 
+// M4a R3：1 Hz client 時序統計（C→S，VR channel unsequenced）。欄位只往後加；server 依 len
+// 能讀多少算多少。cumulative 欄位是 session 開始以來的累計值（同 STATS，掉一筆不漏算）；
+// *P50／*P95 是最近 1 s 區間的分位數。mtp* 以 0.1 ms 為單位（MTP_content＝顯示該幀的
+// predictedDisplayTime − echoSampleId 的 sampleTime，全部在 client 時鐘內算）。
+typedef struct _VIPLE_VR_TLV_CLIENT_TIMING {
+    uint32_t framesPresented;  // cumulative：送進 projection layer 的串流幀
+    uint32_t xrMissed;         // cumulative：XR frame loop 漏幀
+    uint32_t metaMiss;         // cumulative：查不到 0x81 meta 而丟棄的幀
+    uint32_t displayPeriodNs;
+    uint16_t decodeP50Us;
+    uint16_t decodeP95Us;
+    uint16_t renderP50Us;      // latch 前的影像 render（map＋render）
+    uint16_t renderP95Us;
+    int16_t  slackP50Us;       // 與 LATCH.slackUs 同義（正值＝幀比 latch 早到）
+    int16_t  slackP05Us;       // 最差的 5%（最晚到）
+    uint16_t mtpP50_100us;
+    uint16_t mtpP95_100us;
+} VIPLE_VR_TLV_CLIENT_TIMING;
+
 typedef struct _VIPLE_VR_TLV_REFRESH_START {
     uint32_t startFrame;  // wave 第一幀的幀號
     uint8_t  frameCnt;    // wave 長度；最後一幀帶 VIPLE_VR_FF_REFRESH_DONE
@@ -344,6 +363,7 @@ VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_FRAME_HEADER) == VIPLE_VR_FRAME_HEADER_SI
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LOSS) == 9, tlv_loss_9);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LATCH) == 12, tlv_latch_12);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_REFRESH_START) == 6, tlv_refresh_6);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_CLIENT_TIMING) == 32, tlv_client_timing_32);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_STATE) == 4, tlv_state_4);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HAPTIC) == 20, tlv_haptic_20);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_STATS) == 40, tlv_stats_40);

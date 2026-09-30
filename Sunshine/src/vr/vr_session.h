@@ -34,6 +34,7 @@
 
 // local includes
 #include "vr_clock.h"
+#include "vr_latch.h"
 
 namespace vr {
 
@@ -363,6 +364,36 @@ namespace vr {
     /// control 執行緒：LOSS 以外的 C2S subtype
     void count_c2s(uint8_t subtype);
 
+    // ── M4a R3：LATCH／CLIENT_TIMING／HAPTIC ──
+
+    /**
+     * @brief control 執行緒（或 QUIC IO 執行緒）：一則 LATCH。更新頻率鎖控制器並回傳建議的
+     *        pacing 修正；result.update 為 true 時呼叫端才寫 pacing（stub 模式只記錄）。
+     */
+    latch::result_t on_latch(const VIPLE_VR_TLV_LATCH &latch, int64_t now_ns);
+
+    /// control 執行緒的 1 s tick：LATCH 停了太久時讓修正衰減回 0
+    latch::result_t latch_idle(int64_t now_ns);
+
+    /// 最近一次 LATCH 控制器狀態（10 s log 用）
+    latch::result_t latch_snapshot() const;
+
+    /// 一則 CLIENT_TIMING（依 len 能讀多少算多少；缺的欄位為 0）
+    void on_client_timing(const uint8_t *body, std::size_t len);
+
+    /// 最近一則 CLIENT_TIMING（沒收過回 nullopt）
+    std::optional<VIPLE_VR_TLV_CLIENT_TIMING> last_client_timing() const;
+
+    /**
+     * @brief bridge 執行緒（haptic sink）：把 driver 的一則 haptic 打包成 0x5508/01（unsequenced）排入 outbox。
+     *        device：VIPLE_VR_POSE_LEFT／RIGHT；其他值丟棄。回傳是否排入。
+     */
+    bool queue_haptic(uint8_t device, uint32_t duration_us, float frequency_hz, float amplitude);
+
+    uint64_t haptics_queued() const {
+      return haptic_tx_.load(std::memory_order_relaxed);
+    }
+
     /// control 執行緒：TLV 長度超出剩餘長度
     void count_c2s_truncated();
 
@@ -458,6 +489,15 @@ namespace vr {
     std::atomic<uint64_t> other_c2s_ {0};
     std::atomic<uint64_t> c2s_truncated_ {0};
     std::atomic<uint64_t> s2c_dropped_ {0};
+
+    // M4a R3
+    mutable std::mutex latch_mtx_;
+    latch::controller_t latch_ctl_;
+    latch::result_t latch_last_ {};
+    mutable std::mutex timing_mtx_;
+    std::optional<VIPLE_VR_TLV_CLIENT_TIMING> timing_last_;
+    std::atomic<uint32_t> haptic_event_id_ {0};
+    std::atomic<uint64_t> haptic_tx_ {0};
   };
 
   // ── 全域「目前的 VR session」（VR 獨佔：同時最多一個）──────────────────

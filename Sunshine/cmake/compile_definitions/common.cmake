@@ -260,6 +260,9 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/vr/vr_bridge.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_clock.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_clock.cpp"
+        # §VR M4a R3：LATCH 相位回授的頻率鎖控制器（純模組）
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_latch.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_latch.cpp"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_selftest.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_selftest.cpp"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_orchestrator.h"
