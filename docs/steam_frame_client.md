@@ -1051,7 +1051,9 @@ host `<DisplayModeSwitchable>` 回報的最高 Hz 取小。FRUC 開著時不改 
       `xrCreateSession` 當下 `xrEnumerateDisplayRefreshRatesFB` 只回目前值（[120.0]），app 變成 scene app 約 0.1 s 後
       SteamVR 才切到 72（vrcompositor.txt：`Request to change refresh to 72.000000Hz`，面板可用 72／80／90／96／108／
       120／144）。§XR-REFRESH-LATE：週期穩定 20 幀後若不是 `--vr-hz`，重新列舉並再要求一次（最多 2 次），仍不成才用
-      量到的週期（穩定門檻由 10／45 幀改 20／60 幀）。使用者也可以在 Frame 的 SteamVR 影像設定替這個 app 指定更新率。
+      量到的週期（穩定門檻由 10／45 幀改 20／60 幀）。**複測結果**：跑起來後列舉也只回目前值（`rates=[72.0]`），
+      app 沒有辦法自己換更新率；要在 Frame 的 SteamVR 影像設定替這個 app 指定更新率（vrsettings 的
+      `steam.app.<捷徑 id>.preferredRefreshRate`，其他 app 的例子：`vrlink.client`、`steam.app.810500` 都是 120）。
     - server 的 ABR 對 VR 太敏感（§VR-ABR-RATIO）：設定 150 Mbps、實際 13～80 Mbps。丟包其實只有 0.0x%。
     - OpenXR 遊戲上下顛倒（§CHAP-JSONID，`steamvr_driver.md` §9）。
   - 控制器外觀：0x5506 `VIPLE_VR_CONTROLLER_INPUT.profile`（原 reserved 低位元組，三份 VipleVr.h＋IPC ABI 同位移）
