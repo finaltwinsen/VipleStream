@@ -112,7 +112,7 @@ namespace vr {
       steady::time_point g_env_at {};
       std::atomic<bool> g_disabled {false};
       conflict_t g_conf;
-      std::set<std::string> g_vr_ids;
+      std::map<std::string, std::string> g_vr_ids;  // Steam app id → 啟動選項（"VR"／"openxr"）
       bool g_vr_ids_loaded = false;
 
       fs::path install_dir() {
@@ -1011,7 +1011,7 @@ namespace vr {
     }
 
     bool launch_vr_app(const std::string &url) {
-      static const std::regex ok_url {R"(^steam://(launch/\d{1,10}/VR|rungameid/\d{1,10})$)"};
+      static const std::regex ok_url {R"(^steam://(launch/\d{1,10}/(VR|openxr)|rungameid/\d{1,10})$)"};
       if (!std::regex_match(url, ok_url) || !console_user_present()) {
         return false;
       }
@@ -1490,14 +1490,14 @@ namespace vr {
       return g_conf;
     }
 
-    std::set<std::string> vr_manifest_app_ids(bool refresh) {
+    std::map<std::string, std::string> vr_manifest_app_ids(bool refresh) {
       {
         std::lock_guard lk(g_mtx);
         if (g_vr_ids_loaded && !refresh) {
           return g_vr_ids;
         }
       }
-      std::set<std::string> ids;
+      std::map<std::string, std::string> ids;
       auto root = cached_environment().steam_root;
       if (root.empty()) {
         root = utf_utils::to_utf8(reg_sz(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Valve\\Steam", L"InstallPath"));
@@ -1506,7 +1506,7 @@ namespace vr {
       if (!root.empty() && read_user_file(fs::path {utf_utils::from_utf8(root)} / L"config" / L"steamapps.vrmanifest", k_cap_4m, false, text) == rd_e::ok) {
         const auto j = nlohmann::json::parse(text, nullptr, false);
         static const std::regex key_re {R"(^steam\.app\.(\d{1,10})$)"};
-        static const std::regex url_re {R"(^steam://launch/(\d{1,10})/VR$)"};
+        static const std::regex url_re {R"(^steam://launch/(\d{1,10})/(VR|openxr)$)"};
         if (!j.is_discarded() && j.is_object() && j.contains("applications") && j["applications"].is_array()) {
           for (const auto &a : j["applications"]) {
             if (!a.is_object() || !a.contains("app_key") || !a["app_key"].is_string() || !a.contains("url") || !a["url"].is_string()) {
@@ -1516,7 +1516,7 @@ namespace vr {
             const auto key = a["app_key"].get<std::string>();
             const auto url = a["url"].get<std::string>();
             if (std::regex_match(key, km, key_re) && std::regex_match(url, um, url_re) && km[1].str() == um[1].str()) {
-              ids.insert(km[1].str());
+              ids[km[1].str()] = um[2].str();
             }
           }
         }

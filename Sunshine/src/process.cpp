@@ -1245,7 +1245,7 @@ namespace proc {
         // （disabled／stub 與 M1b 之前逐字相同，ops-M7）：250820 不當平面 app，改合成「SteamVR Home」；
         // steamapps.vrmanifest 裡的 VR 遊戲帶 vr_launch_url。
         const bool vr_apps = config::vr.pcvr == config::vr_t::pcvr_e::enabled;
-        const auto vr_ids = vr_apps ? ::vr::platform::vr_manifest_app_ids(true) : std::set<std::string> {};
+        const auto vr_ids = vr_apps ? ::vr::platform::vr_manifest_app_ids(true) : std::map<std::string, std::string> {};
         for (const auto &sa : steam_result->apps) {
           if (vr_apps && sa.app_id == "250820") {
             proc::ctx_t ctx;
@@ -1281,8 +1281,8 @@ namespace proc {
           ctx.steam_owners           = sa.owners;
           ctx.steam_last_played      = sa.last_played;
           ctx.steam_playtime_minutes = sa.playtime_minutes;
-          if (vr_apps && vr_ids.contains(sa.app_id)) {
-            ctx.vr_launch_url = "steam://launch/" + sa.app_id + "/VR";
+          if (const auto vr_it = vr_ids.find(sa.app_id); vr_apps && vr_it != vr_ids.end()) {
+            ctx.vr_launch_url = "steam://launch/" + sa.app_id + "/" + vr_it->second;  // "VR" 或 "openxr"
           }
 
           // VipleStream H Phase 2.3: cover the "launching game" desktop

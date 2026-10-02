@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -195,7 +196,9 @@ namespace vr {
     conflict_t cached_conflicts();
 
     // ── app 模型（§D.12）────────────────────────────────────────────────────
-    /// `<steam_root>\config\steamapps.vrmanifest` 裡 url 符合 `steam://launch/<id>/VR` 的 Steam app id（快取；refresh 時重讀）
-    std::set<std::string> vr_manifest_app_ids(bool refresh);
+    /// `<steam_root>\config\steamapps.vrmanifest` 裡 url 符合 `steam://launch/<id>/VR` 或 `…/<id>/openxr` 的
+    /// Steam app：id → 啟動選項（"VR"／"openxr"；快取，refresh 時重讀）。新的 OpenXR 遊戲（例：Pixel Dungeon VR）
+    /// 登記的是 `/openxr`，只認 `/VR` 會把它們當成一般 app，/launch 回「not a VR app」。
+    std::map<std::string, std::string> vr_manifest_app_ids(bool refresh);
   }  // namespace platform
 }  // namespace vr

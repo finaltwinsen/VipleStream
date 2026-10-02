@@ -49,19 +49,30 @@ namespace vrdrv {
   }
 
   std::string hmd_device_t::chaperone_json() const {
-    // DOC:3500-3560：json_id、version、time 必填；seated 與 standing 必填。standing == raw（space-delta 起始為 I）。
+    // 格式照 SteamVR 自己寫的 chaperone_info.vrchap：最外層 "jsonid"（不是 "json_id"）、"version"，
+    // 每個 universe 帶 "time"（asctime 樣式）、"universeID"（字串）、"play_area"、"collision_bounds"、
+    // "standing"、"seated"。standing == raw（space-delta 起始為 I）。
+    //
+    // §CHAP-JSONID（2026-10-02，Frame 實測）：原本鍵名寫成 "json_id"，vrserver 記
+    // 「Failed to parse chaperone file because jsonid was missing」整份拒收 → 這個 universe 沒有校正資料。
+    // OpenVR app（SteamVR Home）不受影響，但 SteamVR 的 OpenXR runtime 拿不到 standing／seated 零點，
+    // OpenXR 遊戲（Unity OpenXR 等）的參考空間整個繞視線軸轉了 180°：世界上下顛倒、文字倒著。
+    static const char *const k_wday[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    static const char *const k_mon[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
     SYSTEMTIME st;
     GetSystemTime(&st);
     char t[40];
-    std::snprintf(t, sizeof(t), "%04u-%02u-%02uT%02u:%02u:%02uZ", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    std::snprintf(t, sizeof(t), "%s %s %02u %02u:%02u:%02u %04u", k_wday[st.wDayOfWeek % 7], k_mon[(st.wMonth + 11) % 12], st.wDay, st.wHour, st.wMinute,
+                  st.wSecond, st.wYear);
     const unsigned universe = (unsigned) (cfg_.universe_id & 0xFFFFFFFFu);
     char buf[1024];
     std::snprintf(buf, sizeof(buf),
-                  "{\"json_id\":\"chaperone_info\",\"version\":5,\"time\":\"%s\",\"universes\":[{\"universeID\":\"%u\","
-                  "\"play_area\":[10.0,10.0],"
+                  "{\"jsonid\":\"chaperone_info\",\"universes\":[{"
                   "\"collision_bounds\":[[[-5,0,-5],[-5,2.5,-5],[-5,2.5,5],[-5,0,5]],[[-5,0,5],[-5,2.5,5],[5,2.5,5],[5,0,5]],"
                   "[[5,0,5],[5,2.5,5],[5,2.5,-5],[5,0,-5]],[[5,0,-5],[5,2.5,-5],[-5,2.5,-5],[-5,0,-5]]],"
-                  "\"standing\":{\"translation\":[0,0,0],\"yaw\":0},\"seated\":{\"translation\":[0,1.2,0],\"yaw\":0}}]}",
+                  "\"play_area\":[10.0,10.0],"
+                  "\"seated\":{\"translation\":[0,1.2,0],\"yaw\":0},\"standing\":{\"translation\":[0,0,0],\"yaw\":0},"
+                  "\"time\":\"%s\",\"universeID\":\"%u\"}],\"version\":5}",
                   t, universe);
     return buf;
   }

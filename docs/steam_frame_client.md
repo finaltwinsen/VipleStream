@@ -1044,6 +1044,16 @@ host `<DisplayModeSwitchable>` 回報的最高 Hz 取小。FRUC 開著時不改 
     （`[VIPLE-XR] refresh mismatch`）。Monado 20 Hz 夾值邏輯不變。
   - 位元率：VR session 沒有明確指定位元率（CLI 沒帶 `--bitrate`、偏好值仍是平面預設）時，用 3456x1728@90＝150 Mbps
     按像素率線性縮放（上限 200 Mbps、下限平面預設），ABR 照常往下調（`[VIPLE-VR-SESSION] bitrate … (VR default …)`）。
+    **2026-10-02 改（§VR-BITRATE）**：不再看平面偏好值——Frame 上那個值是 23000（對不上 1080p120 的預設 28000，
+    被當成「使用者改過」），VR 又用 23 Mbps。現在只有 CLI `--bitrate` 才覆寫 VR 預設（下限 10 Mbps、上限 200 Mbps）。
+  - **Frame → host 實測後的補充（2026-10-02）**：
+    - Frame 的 SteamVR 依「每個 app 的更新率設定」切顯示器：沒設定過的 app（我們的 Steam 捷徑）是 72 Hz；
+      `xrCreateSession` 當下 `xrEnumerateDisplayRefreshRatesFB` 只回目前值（[120.0]），app 變成 scene app 約 0.1 s 後
+      SteamVR 才切到 72（vrcompositor.txt：`Request to change refresh to 72.000000Hz`，面板可用 72／80／90／96／108／
+      120／144）。§XR-REFRESH-LATE：週期穩定 20 幀後若不是 `--vr-hz`，重新列舉並再要求一次（最多 2 次），仍不成才用
+      量到的週期（穩定門檻由 10／45 幀改 20／60 幀）。使用者也可以在 Frame 的 SteamVR 影像設定替這個 app 指定更新率。
+    - server 的 ABR 對 VR 太敏感（§VR-ABR-RATIO）：設定 150 Mbps、實際 13～80 Mbps。丟包其實只有 0.0x%。
+    - OpenXR 遊戲上下顛倒（§CHAP-JSONID，`steamvr_driver.md` §9）。
   - 控制器外觀：0x5506 `VIPLE_VR_CONTROLLER_INPUT.profile`（原 reserved 低位元組，三份 VipleVr.h＋IPC ABI 同位移）
     帶 client 的 interaction profile；driver 依此設 `Prop_RenderModelName_String`（Touch＝`oculus_quest2_controller_*`、
     Index＝`{indexcontroller}valve_controller_knu_1_0_*`、Frame＝`{frame_controller}frame_controller_*`；driver 目錄

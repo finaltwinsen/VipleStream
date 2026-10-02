@@ -757,6 +757,8 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-XR] video: GPU wedged - leaking libplacebo objects and N in-flight frame(s)
 [VIPLE-XR] GPU wedged - leaking the Vulkan device instead of waiting for it
 [VIPLE-XR] display refresh rates=[72.0,90.0,120.0] current=<Hz> -> requested <Hz> (want 90.0): XR_SUCCESS   ← PCVR（M4a 收尾）
+[VIPLE-XR] display refresh (running, try N) rates=[…] measured=<Hz> want=<Hz> -> requested <Hz>: XR_SUCCESS | keeping the measured rate (nothing closer)
+                                                                                    ← §XR-REFRESH-LATE：session 跑起來、週期穩定後不是想要的更新率時再要求一次（最多 2 次）
 [VIPLE-XR] display refresh rate changed <舊> -> <新> Hz                             ← XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB
 [VIPLE-XR] refresh mismatch: runtime reports <Hz> (requested <Hz>) but predictedDisplayPeriod=<ms> (<Hz>) - using the measured period
 [VIPLE-XR] predictedDisplayPeriod did not settle within <ms> ms (last <ms>) - using it anyway
@@ -785,7 +787,8 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-XR] pcvr video state <no-video|live|fade|loading> -> <…> (age <ms>)   ← >100 ms 疊半透明黑、>250 ms 改 loading quad
 [VIPLE-XR] 10s pcvr projection=N noMeta=N state=<0..3> space=… tracking=… predictAhead=<ms> hmd=(x, y, z | qx, qy, qz, qw)
 [VIPLE-VR-SESSION] XR session <lost|exited> after the VR session started - ending the stream (invariant 5)   ← M4a 收尾：同時顯示錯誤並以正常退出送 /cancel
-[VIPLE-VR-SESSION] bitrate <kbps> kbps (<VR default|--bitrate|user setting>; <w>x<h>@<hz>, flat default <kbps> kbps, ABR on|off)   ← M4a 收尾
+[VIPLE-VR-SESSION] bitrate <kbps> kbps (<VR default|--bitrate>; <w>x<h>@<hz>, flat setting <kbps> kbps / flat default <kbps> kbps ignored, ABR on|off)
+                                                                                    ← §VR-BITRATE：VR 不再參考平面位元率偏好，只有 CLI --bitrate 才覆寫 VR 預設
 [VIPLE-VR-POSE] tracking sender started: <Hz> …, source=<xr-thread|xr-frameloop|sine|…>
 [VIPLE-VR-POSE] 10s: sent=… fail=… late=… noPose=…    ← noPose：XR 還沒有有效 HMD pose 的拍數（不送）
 ```
@@ -838,7 +841,10 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 
 ```
 [VIPLE-VR-MTP10] n=N p50=… p95=… p99=… ms noSample=N | latch sent=N (x/s) lastSlack=… us | timing sent=N   ← client 10 s；沒有時間換算擴充時行尾註明 approx
-[VIPLE-VR-LATCH] pacing ppm=N slackEma=…us target=…us (applied|stub: log only)   ← server：前 10 次＋變化 ≥ 10 ppm 才印
+[VIPLE-VR-LATCH] pacing ppm=N slackEma=…us target=…us (applied|stub: log only)   ← server：前 5 次；之後變化 ≥ 50 ppm 且距上次 ≥ 5 s 才印
+[VIPLE-ABR] Bitrate: A -> B kbps (cut|ramp, loss=N staleDrops=N in <ms>ms, src=…, vr lossPct=x.xx)
+                                                                                    ← §VR-ABR-RATIO：VR session 的 cut 依丟包比例（1～3% −10%、3～8% −25%、>8% 砍半）；
+                                                                                       <1% 當成零丟包（不加 FEC、不降碼、不擋回升）。桌面 session 沒有 vr lossPct、行為不變
 [VIPLE-VR-LATCH] 10s: rx=N slackEma=…us target=…us ppm=N haptics=N               ← server 10 s（haptics＝累計排入的 HAPTIC）
 [VIPLE-VR-TIMING] 10s: presented=N xrMissed=N metaMiss=N period=…ms decode p50/p95=… render p50/p95=… slack p50/p05=… mtp p50/p95=…ms
 ```

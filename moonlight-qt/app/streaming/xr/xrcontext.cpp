@@ -334,6 +334,7 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         m_HaveEyeToHead = false;
         m_StablePeriodFrames = 0;
         m_PeriodSettled = false;
+        m_LateRefreshTries = 0;
         m_ProjFrames = 0;
         m_ProjNoMeta = 0;
     }
@@ -1988,6 +1989,7 @@ void XrContext::frameThreadMain()
             m_XrCpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(cpuUs, 0xffffffffu)));
         }
 
+        double lateRefreshMeasuredHz = 0.0;  // > 0：鎖外呼叫 requestRefreshLate()
         {
             std::lock_guard<std::mutex> lk(m_StatsMutex);
             if (XR_SUCCEEDED(er)) {
@@ -2024,8 +2026,10 @@ void XrContext::frameThreadMain()
                 }
             }
             m_LastDisplayTime = pdt;
-            // M4a 收尾：週期穩定度（waitViews 用）。穩定 10 幀且符合要求（±3%）就算定下；有要求但一直不符合時，
-            // 穩定 45 幀（72～90 Hz 約 0.5～0.6 s）後接受量到的週期（waitViews 會 log 警告）
+            // M4a 收尾：週期穩定度（waitViews 用）。穩定 20 幀且符合要求（±3%）就算定下；有要求但一直不符合時，
+            // 穩定 60 幀（72～90 Hz 約 0.7～0.8 s）後接受量到的週期（waitViews 會 log 警告）。
+            // 門檻由 10／45 幀放寬：Frame 上 app 變成 scene app 約 0.1 s 後 SteamVR 才把顯示器切到該 app 的
+            // 更新率，太早定下會把切換前的週期當真。
             const uint64_t pd = period > m_LastPeriod ? period - m_LastPeriod : m_LastPeriod - period;
             m_StablePeriodFrames = (period > 0 && m_LastPeriod > 0 && pd <= m_LastPeriod / 100) ? m_StablePeriodFrames + 1 : 0;
             m_LastPeriod = period;
@@ -2033,11 +2037,20 @@ void XrContext::frameThreadMain()
                 const double periodHz = 1e9 / static_cast<double>(period);
                 const bool matches = m_RequestedHz <= 0.0f ||
                                      std::fabs(periodHz - m_RequestedHz) <= 0.03 * static_cast<double>(m_RequestedHz);
-                if ((m_StablePeriodFrames >= 10 && matches) || m_StablePeriodFrames >= 45) {
+                // §XR-REFRESH-LATE：週期穩定在「不是想要的更新率」→ 鎖外重新列舉並再要求一次（最多 2 次）
+                const double want = static_cast<double>(m_Options.preferredRefreshHz);
+                if (m_StablePeriodFrames == 20 && m_HasRefreshRate && want > 0.0 && m_LateRefreshTries < 2 &&
+                    std::fabs(periodHz - want) > 0.03 * want) {
+                    lateRefreshMeasuredHz = periodHz;
+                }
+                else if ((m_StablePeriodFrames >= 20 && matches) || m_StablePeriodFrames >= 60) {
                     m_PeriodSettled = true;
                     m_ViewsCv.notify_all();
                 }
             }
+        }
+        if (lateRefreshMeasuredHz > 0.0) {
+            requestRefreshLate(lateRefreshMeasuredHz);
         }
         maybeLogStats(steadyNowNs());
     }
@@ -2341,6 +2354,59 @@ void XrContext::queueHaptic(uint8_t device, uint32_t durationUs, float frequency
     if (m_VrCtl != nullptr) {
         m_VrCtl->queueHaptic(device, durationUs, frequencyHz, amplitude);
     }
+}
+
+// §XR-REFRESH-LATE（2026-10-02，Frame 實測）：xrCreateSession 當下 Frame 的 SteamVR 只列舉得到「目前」的更新率
+// （[120.0]），而 app 變成 scene app 之後它會依「每個 app 的更新率設定」把顯示器切到別的值（沒設定過的 app
+// 是 72 Hz）。所以 session 跑起來、週期穩定後若不是想要的更新率，就在這裡重新列舉並再要求一次；runtime
+// 不理會時最後仍以量到的週期為準（waitViews）。只在 frame thread 呼叫。
+void XrContext::requestRefreshLate(double measuredHz)
+{
+    ++m_LateRefreshTries;
+    auto pfnEnum = xrProc<PFN_xrEnumerateDisplayRefreshRatesFB>(m_Instance, "xrEnumerateDisplayRefreshRatesFB");
+    auto pfnReq = xrProc<PFN_xrRequestDisplayRefreshRateFB>(m_Instance, "xrRequestDisplayRefreshRateFB");
+    const float want = m_Options.preferredRefreshHz;
+    if (!pfnEnum || !pfnReq || want <= 0.0f) {
+        m_LateRefreshTries = 2;
+        return;
+    }
+    std::vector<float> rates;
+    uint32_t n = 0;
+    if (XR_SUCCEEDED(pfnEnum(m_Session, 0, &n, nullptr)) && n > 0) {
+        rates.assign(n, 0.0f);
+        if (XR_FAILED(pfnEnum(m_Session, n, &n, rates.data()))) {
+            n = 0;
+        }
+        rates.resize(n);
+    }
+    // 候選＝列舉到的值＋目前量到的值；取最接近 want 的（一樣近取高的）
+    float best = static_cast<float>(measuredHz);
+    QStringList names;
+    for (float r : rates) {
+        names << QString::number(static_cast<double>(r), 'f', 1);
+        const float dr = std::fabs(r - want), db = std::fabs(best - want);
+        if (dr < db || (dr == db && r > best)) {
+            best = r;
+        }
+    }
+    QString outcome;
+    if (std::fabs(static_cast<double>(best) - measuredHz) <= 0.03 * measuredHz) {
+        m_LateRefreshTries = 2;  // 沒有比現況更接近的值，不再試
+        outcome = QStringLiteral("keeping the measured rate (nothing closer)");
+    }
+    else {
+        const XrResult rr = pfnReq(m_Session, best);
+        if (XR_SUCCEEDED(rr)) {
+            std::lock_guard<std::mutex> lk(m_StatsMutex);
+            m_RequestedHz = best;
+            m_StablePeriodFrames = 0;
+        }
+        outcome = QStringLiteral("requested %1 Hz: %2").arg(static_cast<double>(best), 0, 'f', 1).arg(xrResultStr(m_Instance, rr));
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-XR] display refresh (running, try %d) rates=[%s] measured=%.1f Hz want=%.1f -> %s",
+                m_LateRefreshTries, qUtf8Printable(names.join(QLatin1Char(','))), measuredHz, static_cast<double>(want),
+                qUtf8Printable(outcome));
 }
 
 float XrContext::waitRefreshHz(int timeoutMs)

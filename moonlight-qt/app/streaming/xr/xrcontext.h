@@ -231,6 +231,8 @@ private:
     bool uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& img);
     bool createSolidSwapchain(uint32_t w, uint32_t h, XrSwapchain* sc, VkImage** images, uint32_t* count, const char* what);
     void maybeLogStats(uint64_t nowNs);
+    // §XR-REFRESH-LATE：session 已在跑、量到的幀週期不是想要的更新率時，重新列舉並再要求一次（frame thread）
+    void requestRefreshLate(double measuredHz);
 
     Options m_Options;
 
@@ -350,6 +352,7 @@ private:
     float m_RefreshHz = 0.0f;       // m_StatsMutex 保護（REFRESH_RATE_CHANGED_FB 事件會更新）
     float m_RequestedHz = 0.0f;     // M4a 收尾：xrRequestDisplayRefreshRateFB 成功要求的值；0＝沒要求
     uint32_t m_StablePeriodFrames = 0;  // m_StatsMutex：predictedDisplayPeriod 連續不變（±1%）的幀數
+    int m_LateRefreshTries = 0;         // frame thread：session 跑起來後再要求更新率的次數（最多 2 次）
     bool m_PeriodSettled = false;       // m_StatsMutex：週期已穩定（且符合要求或等夠久）→ waitViews 可回報
 
     // ── M4a R1（PCVR）──

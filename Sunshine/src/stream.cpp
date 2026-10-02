@@ -734,6 +734,7 @@ namespace stream {
       // M4a R3：LATCH pacing log 節流（LATCH 也可能從 QUIC IO 執行緒進來，所以用 atomic）
       std::atomic<int> latchLogs {0};
       std::atomic<int32_t> latchLoggedPpm {0};
+      std::atomic<int64_t> latchLoggedAtMs {0};  // 上次印 pacing 行的時間（steady clock，ms）
     } vrCtrl;
 
     // 只在 videoBroadcastThread 存取：[VIPLE-VR-TX] 每個 session 印一次
@@ -1567,12 +1568,16 @@ namespace stream {
 #endif
     auto &ctl = session->vrCtrl;
     {
-      // 前 10 次＋數值變化 ≥ 10 ppm 才印（1 s 週期的例行更新不洗版）
+      // 前 5 次照印；之後數值變化 ≥ 50 ppm 且距上次 ≥ 5 s 才印。Frame 實測（Wi-Fi）ppm 每 100 ms 都在 ±數十
+      // 之間跳，「變化 ≥ 10 ppm 就印」每秒 3～4 行；例行數值看每 10 s 的 [VIPLE-VR-LATCH] 10s 行就夠。
       const int logs = ctl.latchLogs.load(std::memory_order_relaxed);
       const int32_t logged = ctl.latchLoggedPpm.load(std::memory_order_relaxed);
-      if (logs < 10 || std::abs(r.ppm - logged) >= 10) {
+      const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+      const int64_t logged_at = ctl.latchLoggedAtMs.load(std::memory_order_relaxed);
+      if (logs < 5 || (std::abs(r.ppm - logged) >= 50 && now_ms - logged_at >= 5000)) {
         ctl.latchLogs.store(logs + 1, std::memory_order_relaxed);
         ctl.latchLoggedPpm.store(r.ppm, std::memory_order_relaxed);
+        ctl.latchLoggedAtMs.store(now_ms, std::memory_order_relaxed);
         BOOST_LOG(info) << "[VIPLE-VR-LATCH] pacing ppm=" << r.ppm << " slackEma=" << std::format("{:.0f}", r.slack_ema_us)
                         << "us target=" << std::format("{:.0f}", r.target_us) << "us"
                         << (pcvr ? " (applied)" : " (stub: log only)");
@@ -1742,6 +1747,43 @@ namespace stream {
     return std::min(session->video.abrRttMinCurMs, session->video.abrRttMinPrevMs);
   }
 
+  // §VR-ABR-RATIO（2026-10-02，Frame 實測）：VR 的封包率是桌面的數倍（150 Mbps ≈ 每秒 13,000 個），
+  // 「每秒丟幾個」的絕對門檻（>3／>10／>30 個）是照 ~20 Mbps 桌面串流定的。Wi-Fi 上 0.05% 的零星丟包
+  // 在 VR 就是每秒好幾個，被當成壅塞：FEC 20 s 內升到 50%、位元率一路砍半再慢慢爬（實測設定
+  // 150 Mbps，實際在 13～80 Mbps 之間來回，清晰度差）。VR session 改看丟包「比例」：
+  //   < 1%：當成沒有丟包（FEC 補得回來；不加 FEC、不降碼、不擋回升）
+  //   1～3%：−10%；3～8%：−25%；> 8%：砍半
+  // 分母用「這段時間照目前位元率大約送出的影像封包數」估（不含 FEC，偏保守）。真的壅塞時丟包比例
+  // 很快越過門檻，RTT 膨脹（§ABR-DELAY）與 LOSS→intra refresh 也照常運作。桌面 session 完全不變。
+  constexpr float kVrAbrIgnorePct = 1.0f;
+  constexpr int kVrAbrMinExpected = 200;  // 估出來的封包數太少時比例沒有意義，退回絕對門檻
+
+  /// 這段時間內照目前（已套用的）位元率大約送出幾個影像封包（不含 FEC）；估不出來回 0
+  static int abr_expected_packets(session_t *session, long long elapsedMs) {
+    int applied = session->video.adaptiveBitrateKbps.load();
+    if (applied <= 0) {
+      applied = session->video.configuredBitrateKbps;
+    }
+    if (applied <= 0 || elapsedMs <= 0) {
+      return 0;
+    }
+    const int pkt = std::max<int>(session->config.packetsize, 500);
+    const double n = (double) applied * 125.0 / (double) pkt * (double) elapsedMs / 1000.0;
+    return n >= 2.0e9 ? std::numeric_limits<int>::max() : (int) n;
+  }
+
+  /// VR session 的丟包比例（%）；不是 VR session 或樣本太少回 −1（呼叫端走原本的絕對門檻）
+  static float vr_abr_loss_pct(session_t *session, int lossCount, long long elapsedMs) {
+    if (!session->vr || lossCount <= 0) {
+      return -1.0f;
+    }
+    const int expected = abr_expected_packets(session, elapsedMs);
+    if (expected < kVrAbrMinExpected) {
+      return -1.0f;
+    }
+    return 100.0f * (float) lossCount / (float) expected;
+  }
+
   void run_abr_aimd(session_t *session, int lossCount, long long elapsedMs, const char *src) {
     int maxBr = session->video.configuredBitrateKbps;
     if (maxBr <= 0 || !session->video.autoAdjustBitrate) {
@@ -1787,6 +1829,12 @@ namespace stream {
     int effectiveLoss = (int) std::min<uint64_t>(
         std::max<uint64_t>((uint64_t) std::max(lossCount, 0), staleDrops),
         (uint64_t) std::numeric_limits<int>::max());
+
+    // §VR-ABR-RATIO：VR session 的丟包改看比例；< 1% 當成零丟包（見上方說明）。lossPct < 0 = 不適用
+    const float lossPct = vr_abr_loss_pct(session, effectiveLoss, elapsedMs);
+    if (lossPct >= 0.0f && lossPct < kVrAbrIgnorePct) {
+      effectiveLoss = 0;
+    }
 
     // §ABR-DELAY 2026-08-27：RTT 膨脹＝bufferbloat 訊號。
     //
@@ -1857,7 +1905,16 @@ namespace stream {
       // 丟包：放棄回升累積（target 收斂回 applied），按嚴重度乘法削減
       float lossPerSec = effectiveLoss * 1000.0f / std::max<long long>(elapsedMs, 1);
       int base = std::min(target, applied);
-      if (lossPerSec > 30) {
+      if (lossPct >= 0.0f) {
+        // §VR-ABR-RATIO：VR 依丟包比例（到這裡一定 ≥ 1%）
+        if (lossPct > 8.0f) {
+          target = base * 50 / 100;
+        } else if (lossPct > 3.0f) {
+          target = base * 75 / 100;
+        } else {
+          target = base * 90 / 100;
+        }
+      } else if (lossPerSec > 30) {
         target = base * 50 / 100;  // heavy loss → halve
       } else if (lossPerSec > 10) {
         target = base * 70 / 100;  // moderate → -30%
@@ -1911,7 +1968,8 @@ namespace stream {
       BOOST_LOG(info) << "[VIPLE-ABR] Bitrate: " << applied << " -> " << target
         << " kbps (" << (target < applied ? "cut" : "ramp")
         << ", loss=" << lossCount << " staleDrops=" << staleDrops
-        << " in " << elapsedMs << "ms, src=" << src << ")";
+        << " in " << elapsedMs << "ms, src=" << src
+        << (lossPct >= 0.0f ? std::format(", vr lossPct={:.2f}", lossPct) : std::string {}) << ")";
     }
 
     // §Q-ABR-FLOOR-ESCAPE 2026-07-02 (Fix C)：低檔困死偵測。持續 loss
@@ -2187,7 +2245,10 @@ namespace stream {
         auto currentFec = session->video.adaptiveFecPercentage.load();
         if (currentFec == 0) currentFec = config::stream.fec_percentage;
 
-        if (count > 0) {
+        // §VR-ABR-RATIO：VR session 丟包比例 < 1% 時不加 FEC（當成零丟包，讓 FEC 能降回基準）
+        const float vrLossPct = vr_abr_loss_pct(session, count, elapsed);
+        const bool lossSignificant = count > 0 && !(vrLossPct >= 0.0f && vrLossPct < kVrAbrIgnorePct);
+        if (lossSignificant) {
           int newFec = std::min(currentFec + 10, 50);
           if (newFec != currentFec) {
             session->video.adaptiveFecPercentage.store(newFec);
@@ -2824,7 +2885,10 @@ namespace stream {
             // Adaptive FEC
             auto currentFec = session->video.adaptiveFecPercentage.load();
             if (currentFec == 0) currentFec = config::stream.fec_percentage;
-            if (count > 0) {
+            // §VR-ABR-RATIO：同 ENet 路徑
+            const float vrLossPct = vr_abr_loss_pct(session, count, elapsed);
+            const bool lossSignificant = count > 0 && !(vrLossPct >= 0.0f && vrLossPct < kVrAbrIgnorePct);
+            if (lossSignificant) {
               int newFec = std::min(currentFec + 10, 50);
               if (newFec != currentFec) {
                 session->video.adaptiveFecPercentage.store(newFec);

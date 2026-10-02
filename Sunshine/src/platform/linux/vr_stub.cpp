@@ -140,7 +140,7 @@ namespace vr::platform {
     return {};
   }
 
-  std::set<std::string> vr_manifest_app_ids(bool) {
+  std::map<std::string, std::string> vr_manifest_app_ids(bool) {
     return {};
   }
 }  // namespace vr::platform

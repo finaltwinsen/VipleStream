@@ -130,6 +130,12 @@ kill server 之後約 33 ms pose 就失效（V4 實測，門檻 1 s）；新 ser
 - vrcompositor 顯示系統面板時會自己重畫第 0 層，T4 的圖案解不出來（`compared`≈0），不代表傳錯畫面。
 - 控制器沒有 skeleton 與 render model；SteamVR 裡看得到姿勢與輸入，但沒有手的模型。
 - 只有 Windows。Linux／macOS server 的 VR 相關入口全部回「不支援」（`vr_stub`），`/serverinfo` 只宣告 stub 能力。
+- **chaperone JSON 的鍵名是 `jsonid`**（§CHAP-JSONID，2026-10-02）：`Prop_DriverProvidedChaperoneJson_String` 要照 SteamVR
+  自己寫的 `chaperone_info.vrchap` 格式（最外層 `jsonid`、`version`；每個 universe 帶 `time`、`universeID`、`play_area`、
+  `collision_bounds`、`standing`、`seated`）。寫成 `json_id` 時 vrserver 記「Failed to parse chaperone file because
+  jsonid was missing」整份拒收：OpenVR app（SteamVR Home）正常，但 **OpenXR app 的參考空間會繞視線軸轉 180°**
+  （Unity OpenXR 遊戲整個世界上下顛倒、host 上遊戲自己的視窗也是倒的）。驗法：vrserver.txt 出現
+  `Found universe <id> in chaperone file`；`vr_probe --mode space` 的 `seatedVsRawMm` 應為 1200。
 - **不要在 SteamVR 啟動期結束它**（§QUIT-SETTLE，2026-10-02 在 Win11 `<host>` 實測）：vrserver 起來幾秒內就結束
   vrmonitor，vrserver 會走「Lost master process → Quitting all immediately」，偶發在自己的 IPC 連線物件上
   use-after-free 當掉（0xC0000005、堆疊沒有 driver 的 frame）；當掉時 uptime 很短，下一次 SteamVR 以 safe mode

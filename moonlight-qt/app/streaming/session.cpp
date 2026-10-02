@@ -1344,27 +1344,28 @@ bool Session::initialize(QQuickWindow* qtWindow)
     m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
     m_StreamConfig.autoAdjustBitrate = m_Preferences->autoAdjustBitrate ? 1 : 0;
     if (m_VrRequested) {
-        // M4a 收尾（Frame 實測）：使用者平面預設的 20 Mbps 對 3456x1728@90～120 太低（清晰度差）。沒有明確指定
-        // 位元率時（CLI 沒帶 --bitrate，且偏好值仍是平面預設——與設定頁「Use Default」同一判斷）改用 VR 預設：
-        // 以 3456x1728@90＝150 Mbps 按像素率線性縮放，上限 200 Mbps、下限為平面預設。ABR 照常可往下調。
+        // M4a 收尾（Frame 實測）：平面串流的位元率（預設 20 Mbps 上下）對 3456x1728@72～120 太低（清晰度差）。
+        // VR 用自己的預設：以 3456x1728@90＝150 Mbps 按像素率線性縮放，上限 200 Mbps；只有 CLI 明確帶
+        // --bitrate 才照指定值。ABR 照常可往下調。
+        //
+        // §VR-BITRATE（2026-10-02）：原本還要求「平面位元率偏好＝該解析度的預設值」才套 VR 預設，把平面設定
+        // 當成使用者對 VR 的意思。Frame 實測那個偏好是 23000（平面 1080p120 的預設是 28000；CLI 參數會被
+        // 存回設定，值對不上就被當成「使用者改過」），結果 VR 又用 23 Mbps。平面設定與 VR 無關，不再參考。
         const int flatDefault = StreamingPreferences::getDefaultBitrate(m_Preferences->width, m_Preferences->height,
                                                                         m_Preferences->fps, m_Preferences->enableYUV444,
                                                                         m_Preferences->enableFrameInterpolation);
-        const char* source = "user setting";
-        if (m_Preferences->bitrateFromCli) {
-            source = "--bitrate";
-        }
-        else if (m_Preferences->bitrateKbps == flatDefault) {
+        const char* source = "--bitrate";
+        if (!m_Preferences->bitrateFromCli) {
             const double pixRate = static_cast<double>(m_StreamConfig.width) * m_StreamConfig.height * m_StreamConfig.fps;
             const double ref = 3456.0 * 1728.0 * 90.0;
             const int vrDefault = static_cast<int>(std::lround(150000.0 * pixRate / ref));
-            m_StreamConfig.bitrate = std::clamp(vrDefault, flatDefault, 200000);
+            m_StreamConfig.bitrate = std::clamp(vrDefault, 10000, 200000);
             source = "VR default";
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VR-SESSION] bitrate %d kbps (%s; %dx%d@%d, flat default %d kbps, ABR %s)",
+                    "[VIPLE-VR-SESSION] bitrate %d kbps (%s; %dx%d@%d, flat setting %d kbps / flat default %d kbps ignored, ABR %s)",
                     m_StreamConfig.bitrate, source, m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps,
-                    flatDefault, m_StreamConfig.autoAdjustBitrate ? "on" : "off");
+                    m_Preferences->bitrateKbps, flatDefault, m_StreamConfig.autoAdjustBitrate ? "on" : "off");
     }
 
 #ifndef STEAM_LINK
