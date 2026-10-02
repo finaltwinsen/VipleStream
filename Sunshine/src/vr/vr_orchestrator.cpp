@@ -347,6 +347,7 @@ namespace vr::orchestrator {
           set_state(state_e::quit_steamvr);
           t0 = steady::now();
           bool quit = false;
+          platform::wait_steamvr_settled();  // §QUIT-SETTLE：啟動期不結束 SteamVR
           if (bs.connected && bs.hmd_added && !bs.peer_is_selftest) {
             // VendorSpecificEvent(DriverRequestedQuit) 實測（V5 T3）沒讓 vrserver 結束：只給 5 s，之後走 vrmonitor
             bridge::request_steamvr_quit();
@@ -406,8 +407,10 @@ namespace vr::orchestrator {
       }
       step("arm", true, need_launch ? "launch" : "reuse", t0);
 
-      const auto launch_t0 = steady::now();
-      if (need_launch) {
+      auto launch_t0 = steady::now();
+      // §SAFE-RETRY：上一次 vrserver 在啟動後很快當掉時，這一次 SteamVR 會以 safe mode 啟動並擋掉我們的 driver
+      // （啟動當下才寫 blocked_by_safe_mode，前面的 guard 清不到）。偵測到就結束 SteamVR、清掉封鎖、重啟一次。
+      for (int launch_attempt = 0; need_launch; ++launch_attempt) {
         // 8 LAUNCH_STEAMVR
         set_state(state_e::launch_steamvr);
         t0 = steady::now();
@@ -439,13 +442,55 @@ namespace vr::orchestrator {
         // 9 WAIT_DRIVER
         set_state(state_e::wait_driver);
         t0 = steady::now();
-        if (!wait_for(30s, []() {
-              const auto s = bridge::status();
-              return (s.connected && s.ready && !s.peer_is_selftest) || s.abi_mismatch_seen;
-            })) {
-          if (stop_requested()) {
-            return;
+        bool safe_blocked = false;
+        auto safe_checked = steady::now();
+        const auto driver_up = []() {
+          const auto s = bridge::status();
+          return (s.connected && s.ready && !s.peer_is_selftest) || s.abi_mismatch_seen;
+        };
+        const bool waited_ok = wait_for(30s, [&]() {
+          if (driver_up()) {
+            return true;
           }
+          if (steady::now() - safe_checked >= 1s) {  // 讀設定檔要模擬使用者，每秒查一次就好
+            safe_checked = steady::now();
+            safe_blocked = platform::safe_mode_blocked();
+          }
+          return safe_blocked;
+        });
+        if (stop_requested()) {
+          return;
+        }
+        if (!driver_up() && !safe_blocked) {
+          safe_blocked = platform::safe_mode_blocked();  // SteamVR 可能晚寫設定檔：逾時後再查一次
+        }
+        if (!driver_up() && safe_blocked) {
+          if (launch_attempt >= 1) {
+            step("wait-driver", false, "safe-mode-blocked again", t0);
+            return fail(VIPLE_VR_STATE_CODE_SAFE_MODE, "driver blocked by SteamVR safe mode after one retry");
+          }
+          step("wait-driver", false, "safe-mode-blocked retry=1", t0);
+          BOOST_LOG(warning) << "[VIPLE-VR-ORCH] safe-mode: SteamVR blocked our driver at launch (previous vrserver crash); restarting SteamVR once"sv;
+          set_state(state_e::quit_steamvr);
+          t0 = steady::now();
+          const auto q = platform::quit_steamvr(false);
+          const bool quit = q == platform::quit_e::exited || q == platform::quit_e::not_running;
+          step("quit-steamvr", quit, "safe-mode-retry", t0);
+          if (!quit) {
+            return fail(VIPLE_VR_STATE_CODE_SAFE_MODE, "steamvr did not exit after safe-mode block");
+          }
+          set_state(state_e::guard);
+          t0 = steady::now();
+          const auto g2 = platform::guard_apply();  // 清掉 blocked_by_safe_mode（vrserver 已不在跑）
+          if (g2.result != platform::guard_e::ok) {
+            step("guard", false, g2.detail, t0);
+            return fail(g2.result == platform::guard_e::no_user ? VIPLE_VR_STATE_CODE_NO_USER_SESSION : VIPLE_VR_STATE_CODE_GUARD_FAILED, g2.detail);
+          }
+          step("guard", true, g2.detail + (g2.safe_mode_blocked ? " safeModeUnblocked=1" : ""), t0);
+          launch_t0 = steady::now();  // WAIT_HMD 的 45 s 從重啟起算
+          continue;
+        }
+        if (!waited_ok) {
           step("wait-driver", false, "timeout", t0);
           const auto s = bridge::status();
           return fail(s.last_reject_reason == VRIPC_REJ_ADAPTER_MISMATCH ? VIPLE_VR_STATE_CODE_ADAPTER_MISMATCH : VIPLE_VR_STATE_CODE_HMD_TIMEOUT, "driver not ready in 30 s");
@@ -454,6 +499,7 @@ namespace vr::orchestrator {
           return fail(VIPLE_VR_STATE_CODE_ABI_MISMATCH_RESTART, "abi mismatch");
         }
         step("wait-driver", true, std::format("gen={}", bridge::status().generation), t0);
+        break;
       }
 
       // 10 WAIT_HMD（自 LAUNCH 起累計 45 s）

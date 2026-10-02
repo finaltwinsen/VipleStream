@@ -796,6 +796,16 @@
         <translation>原生 (不包括瀏海區域)</translation>
     </message>
     <message>
+        <location filename="../gui/SettingsView.qml" line="316"/>
+        <source>Auto (best for this display)</source>
+        <translation>自動（此螢幕最佳）</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="854"/>
+        <source>Auto (this display)</source>
+        <translation>自動（跟隨此螢幕）</translation>
+    </message>
+    <message>
         <location filename="../gui/SettingsView.qml" line="718"/>
         <source>Use Default (%1 Mbps)</source>
         <translation>使用預設值 (%1 Mbps)</translation>

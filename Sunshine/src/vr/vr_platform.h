@@ -77,6 +77,19 @@ namespace vr {
     /// 執行中的 vrserver（主控台 session）；沒有回 0
     uint32_t vrserver_pid();
 
+    /// vrserver 已執行多久（毫秒，至少 1）；沒在跑或查不到回 0
+    uint32_t vrserver_uptime_ms();
+
+    /**
+     * @brief §QUIT-SETTLE：vrserver 起來未滿 20 s 時先等到滿，再讓呼叫端結束 SteamVR；回實際等了幾毫秒。
+     *
+     * 2026-10-02 host 實測：SteamVR 還在啟動期（各 helper 還在連線、載入 binding）就結束 vrmonitor，
+     * vrserver 會走「Lost master process → Quitting all immediately」，偶發在自己的 IPC 連線物件上
+     * use-after-free 當掉（0xC0000005，堆疊沒有 driver 的 frame）；當掉時 uptime 很短，下一次啟動
+     * SteamVR 就進 safe mode、擋掉我們的 driver。沒在跑或查不到啟動時間時不等。
+     */
+    uint32_t wait_steamvr_settled();
+
     /// 「合法 driver 宿主」映像：執行中的 vrserver，否則 `<runtime>\bin\win64\vrserver.exe`（沒有回空；直接交給 bridge）
     std::wstring expected_driver_host_image();
 
@@ -159,6 +172,9 @@ namespace vr {
 
     /// guard 相關鍵的目前值（T3 比對用；只在背景執行緒呼叫）：`steamvr.forcedDriver=… driver_vrlink.enable=… …`
     std::string guard_keys_snapshot();
+
+    /// steamvr.vrsettings 目前有 `driver_viplestream.blocked_by_safe_mode=true`（SteamVR 啟動時因上次當機擋掉我們的 driver）
+    bool safe_mode_blocked();
 
     /// `<steam_root>\logs\<file>` 的尾端 cap 位元組（使用者身分讀；selftest 診斷用，不記內容到 log）
     std::string steamvr_log_tail(const std::string &file, size_t cap);

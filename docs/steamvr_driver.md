@@ -130,3 +130,12 @@ kill server 之後約 33 ms pose 就失效（V4 實測，門檻 1 s）；新 ser
 - vrcompositor 顯示系統面板時會自己重畫第 0 層，T4 的圖案解不出來（`compared`≈0），不代表傳錯畫面。
 - 控制器沒有 skeleton 與 render model；SteamVR 裡看得到姿勢與輸入，但沒有手的模型。
 - 只有 Windows。Linux／macOS server 的 VR 相關入口全部回「不支援」（`vr_stub`），`/serverinfo` 只宣告 stub 能力。
+- **不要在 SteamVR 啟動期結束它**（§QUIT-SETTLE，2026-10-02 在 Win11 `<host>` 實測）：vrserver 起來幾秒內就結束
+  vrmonitor，vrserver 會走「Lost master process → Quitting all immediately」，偶發在自己的 IPC 連線物件上
+  use-after-free 當掉（0xC0000005、堆疊沒有 driver 的 frame）；當掉時 uptime 很短，下一次 SteamVR 以 safe mode
+  啟動並擋掉第三方 driver（`blocked_by_safe_mode`）。編排器與 selftest 結束 SteamVR 前會先等 vrserver 滿 20 s；
+  滿 20 s 後 `DriverRequestedQuit` 也會生效（約 1 s 結束，不必再結束 vrmonitor）。
+- SteamVR 以 safe mode 啟動時（§SAFE-RETRY），編排器在 WAIT_DRIVER 每秒查一次 `blocked_by_safe_mode`，查到就結束
+  SteamVR、清掉封鎖、重啟一次；第二次仍被擋回 `VIPLE_VR_STATE_CODE_SAFE_MODE`。
+- 全新安裝的 Windows 第一次由 Steam 啟動 SteamVR 時，Steam 會要求以管理員身分裝 VC++ 2013 runtime（UAC 視窗；
+  沒人按就卡 2 分鐘後才繼續，期間編排器回 code 10）。先在主機上手動啟動一次 SteamVR 並同意，或預先裝好。

@@ -57,6 +57,14 @@ namespace vr::platform {
     return 0;
   }
 
+  uint32_t vrserver_uptime_ms() {
+    return 0;
+  }
+
+  uint32_t wait_steamvr_settled() {
+    return 0;
+  }
+
   std::wstring expected_driver_host_image() {
     return {};
   }
@@ -114,6 +122,10 @@ namespace vr::platform {
 
   std::string guard_keys_snapshot() {
     return {};
+  }
+
+  bool safe_mode_blocked() {
+    return false;
   }
 
   std::string steamvr_log_tail(const std::string &, size_t) {

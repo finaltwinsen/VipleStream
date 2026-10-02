@@ -3480,6 +3480,7 @@ namespace vr::selftest::platform {
       std::string quit_how = "not-running";
       if (pid) {
         const auto b2 = vr::bridge::status();
+        vp::wait_steamvr_settled();  // §QUIT-SETTLE：T3 一 ACTIVE 就 stop，不等的話會在 SteamVR 啟動期結束它
         if (b2.connected && b2.hmd_added && !b2.peer_is_selftest) {
           vr::bridge::request_steamvr_quit();
           quit_ok = wait_until(5000ms, stop, []() {

@@ -563,7 +563,10 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-ORCH] error code=<n> …                               ← code 見 VipleVr.h（4–21，例 7=HMD_TIMEOUT、16=OPENXR_RUNTIME_OTHER 為警告）
 [VIPLE-VR-ORCH] deploy-refused reason=…                        ← secure_fs 檢查不過（owner／DACL／reparse／hash），fail closed
 [VIPLE-VR-ORCH] guard-restore skipped key=…                    ← vrserver 還在跑時不還原設定，下次 tick／啟動再補
-[VIPLE-VR-ORCH] safe-mode unblocked ver=…                      ← 每個 driver 版本只自動解除一次
+[VIPLE-VR-ORCH] safe-mode unblocked ver=…                      ← guard 套用時清掉 blocked_by_safe_mode（vrserver 不在跑時）
+[VIPLE-VR-ORCH] step=quit-settle waitedMs=<N> …                ← §QUIT-SETTLE：vrserver 起來未滿 20 s，先等滿才結束 SteamVR
+[VIPLE-VR-ORCH] step=wait-driver result=fail reason=safe-mode-blocked retry=1   ← §SAFE-RETRY：SteamVR 以 safe mode 啟動、擋掉 driver
+[VIPLE-VR-ORCH] safe-mode: SteamVR blocked our driver at launch … restarting SteamVR once   ← 接著 quit-steamvr、guard、再啟動一次；仍被擋回 code 2
 [VIPLE-VR-ORCH] stop reason=…
 ```
 

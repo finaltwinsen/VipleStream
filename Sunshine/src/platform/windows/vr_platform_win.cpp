@@ -18,6 +18,7 @@
 #include <mutex>
 #include <regex>
 #include <string>
+#include <thread>
 #include <vector>
 
 // lib includes（boost 要在 Windows.h 之前，理由同 misc.cpp）
@@ -946,6 +947,46 @@ namespace vr {
       return v.empty() ? 0 : v.front().pid;
     }
 
+    uint32_t vrserver_uptime_ms() {
+      const DWORD pid = vrserver_pid();
+      if (!pid) {
+        return 0;
+      }
+      handle_t h {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)};
+      FILETIME created {}, exited {}, kernel {}, user {};
+      if (!h || !GetProcessTimes(h.h, &created, &exited, &kernel, &user)) {
+        return 0;
+      }
+      FILETIME now {};
+      GetSystemTimeAsFileTime(&now);
+      const auto to64 = [](const FILETIME &f) {
+        return (static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime;
+      };
+      const uint64_t n = to64(now), s = to64(created);
+      if (n <= s) {
+        return 1;
+      }
+      const uint64_t ms = (n - s) / 10000;  // FILETIME 單位 100 ns
+      return ms >= UINT32_MAX ? UINT32_MAX : std::max<uint32_t>(1, static_cast<uint32_t>(ms));
+    }
+
+    uint32_t wait_steamvr_settled() {
+      constexpr uint32_t settle_ms = 20000;
+      const auto t0 = steady::now();
+      for (;;) {
+        const uint32_t up = vrserver_uptime_ms();
+        if (up == 0 || up >= settle_ms) {
+          break;
+        }
+        std::this_thread::sleep_for(100ms);
+      }
+      const auto waited = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - t0).count());
+      if (waited >= 100) {
+        BOOST_LOG(info) << "[VIPLE-VR-ORCH] step=quit-settle waitedMs=" << waited << " (vrserver uptime < " << settle_ms / 1000 << " s)";
+      }
+      return waited;
+    }
+
     std::wstring expected_driver_host_image() {
       auto img = vrserver_image_running();
       if (img.empty()) {
@@ -983,6 +1024,8 @@ namespace vr {
       if (!pid) {
         return quit_e::not_running;
       }
+      // §QUIT-SETTLE：啟動期就結束 vrmonitor 會讓 vrserver 偶發當掉、下一次進 safe mode（見 wait_steamvr_settled）
+      wait_steamvr_settled();
       // §D.8 第 2 步：結束主控台 session 內的 vrmonitor（WM_CLOSE 實測 30 s 內關不掉）→ vrserver 約 1 s 內 Graceful exit
       const int n = terminate_all(L"vrmonitor.exe");
       BOOST_LOG(info) << "[VIPLE-VR-ORCH] step=quit-vrmonitor terminated=" << n << " vrserverPid=" << pid;
@@ -1383,6 +1426,20 @@ namespace vr {
         out += std::format("{}{}.{}={}", out.empty() ? "" : " ", sec, key, v ? v->dump() : "<absent>");
       }
       return out;
+    }
+
+    bool safe_mode_blocked() {
+      const auto vs = vrsettings_path();
+      if (!vs) {
+        return false;
+      }
+      nlohmann::ordered_json j;
+      std::string raw;
+      if (load_vrsettings(*vs, j, raw) != vs_e::ok) {
+        return false;
+      }
+      const auto sm = get_key(j, "driver_viplestream", "blocked_by_safe_mode");
+      return sm && sm->is_boolean() && sm->get<bool>();
     }
 
     std::string steamvr_log_tail(const std::string &file, size_t cap) {
