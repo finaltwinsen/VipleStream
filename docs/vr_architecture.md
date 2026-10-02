@@ -36,7 +36,7 @@
    - 之後沿用 NVENC、FEC、RTP 送出。rc 的 VR 視訊強制走 RTP/UDP，QUIC VR 政策到 GA 才開。
 4. **PCVR：client 端呈現。**
    - Frame 用 OpenXR projection layer 顯示。projection pose 是遊戲實際的 render pose（`SubmitLayer.mHmdPose`），由 driver 換回 client 空間後回傳。頭部轉動交給機上 SteamVR 的 ATW。
-   - 定義了 stale 政策：超過 100 ms 沒有新幀就淡出，超過 250 ms 切到本地 loading 環境。
+   - 定義了 stale 政策：超過 500 ms 沒有新幀就淡出，超過 2 s 切到本地 loading 環境（原設計 100／250 ms，Frame 實測後放寬，§VR-STALE）。
 5. **追蹤與時序。**
    - 追蹤上行：2×顯示 Hz 送 232 B 的 `0x5506`，走 ENet ch 0x07 UNSEQUENCED。
    - server 端做輕量時鐘對映，把樣本的目標時間換成 server QPC，由此設定 `poseTimeOffset`。
@@ -359,9 +359,11 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
    - driver 提供 standing = raw 的 chaperone 和專屬 `Prop_CurrentUniverseId_Uint64`；**`Prop_DriverProvidedChaperoneVisibility_Bool=false`**，邊界完全交給 Frame 機上處理。
 4. **recenter**：收到 `ReferenceSpaceChangePending` 後送 0x5507/02。在 SteamVR 端對映成 seated zero reset 的語意，不換 client 空間；layoutEpoch 加一。
 5. **IPD**：Frame 用實體滾輪調 IPD。變動時 client 送 0x5507/01 CONFIG，driver 呼叫 `SetDisplayEyeToHead`，layoutEpoch 加一；0x5508/05 LAYOUT 帶上 eyeToHead。client 依每一幀的 epoch 取用對應版本，避免立體錯位。
-6. 單一 `2W×H` swapchain，用 `imageRect` 分眼。**PoC-2 加測左右眼不同色**；不支援時改用 `arraySize=2`，或每眼一個 swapchain。預設每眼 1728²（HEVC level 5.2）。
+6. 單一 `2W×H` swapchain，用 `imageRect` 分眼。**PoC-2 加測左右眼不同色**；不支援時改用 `arraySize=2`，或每眼一個 swapchain。預設每眼 2160²（Frame 面板每眼原生；4320×2160@120 是 HEVC level 6.1。原設計值 1728²＝level 5.2，2026-10-03 依 Frame 實測調整）。
 7. **stale 政策**：
-   - 超過 100 ms 沒有新幀就開始淡出；超過 250 ms 切到本地 loading 環境（完全由頭顯本機追蹤驅動）；恢復時淡入。
+   - 超過 500 ms 沒有新幀就開始淡出；超過 2 s 切到本地 loading 環境（完全由頭顯本機追蹤驅動）；恢復時淡入。
+     原設計是 100／250 ms；Frame 實測（2026-10-02）Wi-Fi 一次短暫斷訊就超過 100 ms，258 ms 那一次直接切到 loading
+     環境，使用者感受是「畫面丟失」。最後一幀由 runtime 重投影，短暫凍結比較不突兀（§VR-STALE）。
    - `poseValid=0` 的幀（包含起播 dummy 黑幀）不進 projection layer。
    - `displayTime` 一律用 `predictedDisplayTime`。
 8. 2.0 不做 depth 和位置 reprojection，也不做 FRUC；XR 模式強制 SDR。

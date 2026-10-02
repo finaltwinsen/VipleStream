@@ -784,7 +784,7 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-SESSION] PCVR: XR runtime unavailable (<原因>) - streaming flat (invariant 5)
 [VIPLE-XR] bring-up OK in … (… pcvr space=STAGE tracking=thread)
 [VIPLE-XR] pcvr projection: <w>x<h> per eye from <2w>x<h> SBS, space=…, first render pose (x, y, z | qx, qy, qz, qw) echo=<sampleId>
-[VIPLE-XR] pcvr video state <no-video|live|fade|loading> -> <…> (age <ms>)   ← >100 ms 疊半透明黑、>250 ms 改 loading quad
+[VIPLE-XR] pcvr video state <no-video|live|fade|loading> -> <…> (age <ms>)   ← §VR-STALE：>500 ms 疊半透明黑、>2000 ms 改 loading quad（2026-10-03 前是 100／250 ms）
 [VIPLE-XR] 10s pcvr projection=N noMeta=N state=<0..3> space=… tracking=… predictAhead=<ms> hmd=(x, y, z | qx, qy, qz, qw)
 [VIPLE-VR-SESSION] XR session <lost|exited> after the VR session started - ending the stream (invariant 5)   ← M4a 收尾：同時顯示錯誤並以正常退出送 /cancel
 [VIPLE-VR-SESSION] bitrate <kbps> kbps (<VR default|--bitrate>; <w>x<h>@<hz>, flat setting <kbps> kbps / flat default <kbps> kbps ignored, ABR on|off)
@@ -794,7 +794,7 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 ```
 
 - `--display-target pcvr` 不帶 `--vr-emulate` 時，XrContext 在 `initialize()` bring-up（串流尺寸決定之前）並量每眼 FOV、
-  eyeToHead（以 VIEW space locate）、period 填 `/launch`；每眼解析度用 `--vr-eye`（預設 1728²）。Hz 夾在 60–144（Monado
+  eyeToHead（以 VIEW space locate）、period 填 `/launch`；每眼解析度用 `--vr-eye`（預設 2160²，2026-10-03 前是 1728²）。Hz 夾在 60–144（Monado
   null compositor 固定 20 Hz）。tracking：有 XrTime 換算（Linux `XR_KHR_convert_timespec_time`、Windows
   `XR_KHR_win32_convert_performance_counter_time`）時送出執行緒當下 `xrLocateSpace`（thread 模式，`vrCaps` 帶
   TRACK_THREAD），沒有時沿用 frame loop 最近一次 locate（frameloop 模式）。
@@ -845,6 +845,11 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 [VIPLE-ABR] Bitrate: A -> B kbps (cut|ramp, loss=N staleDrops=N in <ms>ms, src=…, vr lossPct=x.xx)
                                                                                     ← §VR-ABR-RATIO：VR session 的 cut 依丟包比例（1～3% −10%、3～8% −25%、>8% 砍半）；
                                                                                        <1% 當成零丟包（不加 FEC、不降碼、不擋回升）。桌面 session 沒有 vr lossPct、行為不變
+[VIPLE-FEC] VR unrecoverable frame, FEC: A% -> B%                                  ← §VR-FEC-LOSS：client 回報 LOSS、掉的是 1～2 幀 → +10%（上限 40%）
+[VIPLE-FEC] VR outage (N frames lost), FEC stays A%                                ← 連掉 3 幀以上＝斷線，FEC 補不回來：不加，只把回降往後延
+[VIPLE-FEC] VR no unrecoverable frame for a while, FEC: A% -> B%                   ← 30 s 沒有 LOSS、也沒有缺包 ≥1% 的視窗 → 每 5 s −5%，降回 fec_percentage
+                                                                                       VR 的 FEC status（缺包 ≥1%）不再加 FEC，只延後回降；FEC 高於基準時影像位元率上限
+                                                                                       ＝設定值 ×(100+基準)/(100+FEC)，上限移動時 [VIPLE-ABR] 立即套用（不受 10% 防抖動帶限制）
 [VIPLE-VR-LATCH] 10s: rx=N slackEma=…us target=…us ppm=N haptics=N               ← server 10 s（haptics＝累計排入的 HAPTIC）
 [VIPLE-VR-TIMING] 10s: presented=N xrMissed=N metaMiss=N period=…ms decode p50/p95=… render p50/p95=… slack p50/p05=… mtp p50/p95=…ms
 ```

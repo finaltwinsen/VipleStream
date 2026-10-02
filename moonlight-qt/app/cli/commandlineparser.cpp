@@ -588,7 +588,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addFlagOption("vr-emulate", "synthetic head/controller pose for PCVR (no XR runtime needed)");
     parser.addChoiceOption("vr-synthetic-motion", "synthetic pose motion for --vr-emulate",
                            {"still", "sine", "yaw30"});
-    parser.addValueOption("vr-eye", "per-eye <width>x<height> for PCVR (default 1728x1728)");
+    parser.addValueOption("vr-eye", "per-eye <width>x<height> for PCVR (default 2160x2160)");
     parser.addValueOption("vr-hz", "HMD refresh rate for PCVR (default 90)");
     parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
     parser.addValueOption("vr-inject-loss", "(dev) N: inject a VR LOSS report every N seconds");

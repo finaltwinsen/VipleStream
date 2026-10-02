@@ -984,7 +984,7 @@ host `<DisplayModeSwitchable>` 回報的最高 Hz 取小。FRUC 開著時不改 
 
 - `stream <host> <app> --display-target pcvr`（不帶 `--vr-emulate`）：XrContext 以 PCVR 模式 bring-up（參考空間
   STAGE→LOCAL_FLOOR→LOCAL，不建射線滑鼠／鍵盤），量每眼 FOV／eyeToHead／Hz 填 `/launch`；HMD 樣本經 0x5506 送出，
-  server 回聲的 render pose（0x81）決定 projection layer 的每眼 pose；stale >100 ms 疊半透明黑、>250 ms 顯示 loading。
+  server 回聲的 render pose（0x81）決定 projection layer 的每眼 pose；stale >500 ms 疊半透明黑、>2000 ms 顯示 loading（§VR-STALE；2026-10-03 前是 100／250 ms）。
 - S1 驗證：`bash moonlight-qt/scripts/xr-s1-monado.sh --arch x86_64 --rotate --display-target pcvr --stream <host>
   --stream-args '--no-quic --vr-eye 1024x1024'`（`--rotate` 讓 Monado 模擬 HMD 旋轉；server 需 `vr_pcvr = stub` 或
   `enabled`）。2026-09-30 對本機 service（stub）60 s：projection 每 10 s 約 200 幀（20 Hz 每幀）、noMeta 0～1、回聲
@@ -1056,6 +1056,28 @@ host `<DisplayModeSwitchable>` 回報的最高 Hz 取小。FRUC 開著時不改 
       `steam.app.<捷徑 id>.preferredRefreshRate`，其他 app 的例子：`vrlink.client`、`steam.app.810500` 都是 120）。
     - server 的 ABR 對 VR 太敏感（§VR-ABR-RATIO）：設定 150 Mbps、實際 13～80 Mbps。丟包其實只有 0.0x%。
     - OpenXR 遊戲上下顛倒（§CHAP-JSONID，`steamvr_driver.md` §9）。
+  - **複測後的調整（2026-10-03；使用者回饋：方向正常、清晰度仍不夠、中途一度畫面丟失）**：
+    - 更新率 120 Hz：在 Frame 上 `vrcmd --set-settings-float steam.app.<捷徑 id>.preferredRefreshRate 120`
+      （讀回確認，設定會留著；`<捷徑 id>` 是 Steam 給非 Steam 遊戲捷徑的 32 位元 app id）。
+    - 每眼解析度預設 1728² → **2160²**（Frame 面板每眼原生解析度；`--vr-eye` 可改）。4320×2160@120 的 HEVC level
+      是 6.1（server log：`pinned HEVC level_idc=183`）。能力實測（`stream --dump-bitstream` 錄 200 Mbps 樣本、
+      Frame 上 `decode-bench --decoder hevc_v4l2m2m`；host＝RTX 5060 Ti）：
+
+      | 打包尺寸 | host 編碼延遲 | Frame 解碼 p50 | 備註 |
+      |---|---|---|---|
+      | 3456×1728@120 | 5.2 ms | 6.80 ms | |
+      | 3840×1920@120 | 6.2 ms | 7.40 ms | |
+      | 4320×2160@90 | 8.0 ms | 9.46 ms | |
+      | 4320×2160@120 | 7.2 ms | 8.11 ms（p99 9.11） | 吞吐量 120 fps、0 錯誤；解碼時間接近一個幀間隔，餘裕不大 |
+
+      host 的 SteamVR「解析度倍率」是使用者設定（實測當時 80%，app 每眼實際約 1932²），串流尺寸不受它影響。
+    - §VR-STALE：使用者看到的「畫面丟失」是 stale 政策——258 ms 沒新幀就切到 loading 環境；10 分鐘內另有 22 次
+      超過 100 ms 而變暗。門檻放寬成 500 ms（變暗）／2 s（loading）：最後一幀由 runtime 依頭部轉動重投影，
+      短暫凍結比變暗或換場景不突兀。
+    - §VR-FEC-LOSS（server）：584 s 內 124 幀救不回，其中 44% 只差不到 10% 的封包、71% 差不到 20%；server 記到的
+      67 筆 LOSS 有 66 筆只掉 1 幀。VR 的 FEC 改成跟著 LOSS 調（`log_tags.md` 的 `[VIPLE-FEC] VR …`）：掉 1～2 幀
+      +10%（上限 40%）、連掉 3 幀以上當斷線不加、30 s 沒事才每 5 s −5% 降回基準；FEC 多佔的份額從影像位元率上限扣。
+      驗證：`<dev-client>` 跑 `--vr-emulate`（4320×2160@120、200 Mbps）＋ `<host>` 上的假 ARP 黑洞（`New-NetNeighbor` 假 MAC，約 300 ms）。
   - 控制器外觀：0x5506 `VIPLE_VR_CONTROLLER_INPUT.profile`（原 reserved 低位元組，三份 VipleVr.h＋IPC ABI 同位移）
     帶 client 的 interaction profile；driver 依此設 `Prop_RenderModelName_String`（Touch＝`oculus_quest2_controller_*`、
     Index＝`{indexcontroller}valve_controller_knu_1_0_*`、Frame＝`{frame_controller}frame_controller_*`；driver 目錄

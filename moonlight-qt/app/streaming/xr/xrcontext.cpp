@@ -1662,8 +1662,11 @@ void XrContext::frameThreadMain()
             stale = ageMs < 1000 ? 1 : (ageMs < 5000 ? 2 : 3);
         }
         if (m_Options.pcvr && fs.shouldRender) {
-            // M4a R1：projection。pose＝0x81 帶回的 renderPose∘eyeToHead；>100 ms 沒新幀疊半透明黑、
-            // >250 ms 改 loading quad（下面 β 的 loading 分支，因為 videoLayer 維持 false）
+            // M4a R1：projection。pose＝0x81 帶回的 renderPose∘eyeToHead；>500 ms 沒新幀疊半透明黑、
+            // >2000 ms 改 loading quad（下面 β 的 loading 分支，因為 videoLayer 維持 false）。
+            // §VR-STALE（2026-10-03，Frame 實測）：原本是 100／250 ms。Wi-Fi 上一次短暫斷訊就超過 100 ms
+            // （10 分鐘 22 次變暗），258 ms 的那一次直接切到 loading 環境——使用者看到的是「畫面丟失」。
+            // 最後一幀由 runtime 依頭部轉動重投影，短暫凍結比變暗或換場景不突兀；真的斷了（>2 s）才換。
             uint64_t ageMs = 0;
             if (haveVideo) {
                 const uint64_t nowUs = cpuT0 / 1000ull;
@@ -1671,7 +1674,7 @@ void XrContext::frameThreadMain()
             }
             int ps = 0;
             if (haveVideo && vcur.hasMeta) {
-                ps = ageMs < 100 ? 1 : (ageMs < 250 ? 2 : 3);
+                ps = ageMs < 500 ? 1 : (ageMs < 2000 ? 2 : 3);
             }
             else if (haveVideo) {
                 std::lock_guard<std::mutex> lk(m_StatsMutex);

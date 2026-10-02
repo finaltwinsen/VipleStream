@@ -90,7 +90,7 @@ public:
         int testFailAfterSec = 0;
         int testFailKind = 0;
         // M4a R1：PCVR 模式——影像以 projection layer 呈現（pose＝0x81 帶回的 renderPose∘eyeToHead），
-        // 不建 β 的射線滑鼠／鍵盤；參考空間 STAGE→LOCAL_FLOOR→LOCAL；stale 100 ms 淡出、250 ms loading。
+        // 不建 β 的射線滑鼠／鍵盤；參考空間 STAGE→LOCAL_FLOOR→LOCAL；stale 500 ms 淡出、2000 ms loading。
         bool pcvr = false;
         // M4a R2（dev）：PCVR 控制器按鍵改用合成序列（pose 仍來自 runtime），驗 0x5506 打包
         bool testVrInput = false;
@@ -390,7 +390,7 @@ private:
     bool m_LoggedProjection = false;
     uint64_t m_ProjFrames = 0;                // 10 s 視窗：送出 projection layer 的幀數（m_StatsMutex）
     uint64_t m_ProjNoMeta = 0;                // 影像有但沒有 pose meta 的幀
-    int m_PcvrStale = 0;                      // 0 無影像、1 live、2 fade（>100 ms）、3 loading（>250 ms）
+    int m_PcvrStale = 0;                      // 0 無影像、1 live、2 fade（>500 ms）、3 loading（>2000 ms）
 
     // M4a R3：LATCH（10 Hz）、CLIENT_TIMING（1 Hz）、MTP 統計。只在 frame thread 存取。
     struct PcvrTiming {

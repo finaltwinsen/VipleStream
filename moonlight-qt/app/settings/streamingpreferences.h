@@ -426,8 +426,11 @@ public:
     DisplayTarget displayTarget = DT_WINDOW;
     bool vrEmulate = false;          // 以合成 pose 取代 XR runtime（M1a 沒有 XR）
     int  vrSyntheticMotion = 1;      // VrSyntheticMotion：0 still、1 sine、2 yaw30
-    int  vrEyeWidth = 1728;          // 每眼解析度（打包尺寸為 2W×H，SBS）
-    int  vrEyeHeight = 1728;
+    // 每眼解析度（打包尺寸為 2W×H，SBS）。預設 2160x2160＝Steam Frame 面板每眼的原生解析度。
+    // 2026-10-03 Frame 實測：每眼 1728 清晰度不夠；iris 解 4320x2160@120（200 Mbps）每幀 p50 8.1 ms、
+    // 吞吐量 120 fps 無誤，RTX 5060 Ti 編碼約 7 ms。--vr-eye 可改。
+    int  vrEyeWidth = 2160;
+    int  vrEyeHeight = 2160;
     int  vrRefreshHz = 90;
     // §H.4-AUTO：CLI 這次的解析度／更新率覆寫（不存設定，不會把 GUI 的「自動」改掉）。
     // -1＝CLI 沒指定、0＝指定明確值、1＝指定 auto。

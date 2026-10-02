@@ -1368,6 +1368,61 @@ namespace stream {
     }
   }
 
+  // §VR-FEC-LOSS（2026-10-03，Frame 實測）：VR 的 FEC 跟著「救不回的幀」調，而不是跟著缺包數調。
+  // 第二輪實測 584 s 有 124 幀救不回（每次靠 intra refresh 約 125 ms 才恢復），其中 44% 只差不到 10% 的
+  // 封包、71% 差不到 20%——缺口是 Wi-Fi 一次聚合框（數十個封包、不到 1 ms）的損失，FEC 10% 補不滿。
+  // server 端記到的 67 筆 LOSS 有 66 筆只掉 1 幀，剩下 1 筆是斷線（連掉數十幀）。
+  //   - client 回報 LOSS、掉的是 1～2 幀（開始一波 intra refresh）→ FEC +10%，上限 40%；
+  //   - 連續掉 3 幀以上是斷線，FEC 再多也補不回來：不加，只把回降往後延；
+  //   - FEC status 的缺包比例 ≥ 1% 也只延後回降、不加（FEC 不夠會直接表現成救不回的幀，由上面那條處理）；
+  //   - 之後 30 s 沒有上述任何一種才開始降，每 5 s −5%，降回設定的基準值；
+  //   - FEC 多佔的份額從影像位元率的上限扣（run_abr_aimd），線上總流量大致維持在使用者設定的位元率。
+  // 連線乾淨時 FEC 停在基準值，不付這個成本。只影響 VR session。
+  constexpr int kVrFecLossStep = 10;
+  constexpr int kVrFecLossMax = 40;
+  constexpr std::uint32_t kVrFecLossMaxSpan = 2;
+  constexpr auto kVrFecHold = std::chrono::seconds(30);
+  constexpr auto kVrFecDecayEvery = std::chrono::seconds(5);
+
+  /// VR session：有丟包跡象，FEC 的回降重新計時。呼叫者持 abrMutex。
+  static void vr_fec_hold_locked(session_t *session, std::chrono::steady_clock::time_point now) {
+    session->video.lastLossTime = now;
+    session->video.zeroLossStreak = 0;
+  }
+
+  /// client 回報了救不回的幀（新的 refresh wave）。lostFrames＝這筆 LOSS 涵蓋的幀數。任何執行緒；內部取 abrMutex。
+  static void vr_fec_on_loss(session_t *session, std::uint32_t lostFrames) {
+    std::lock_guard<std::mutex> lk(session->video.abrMutex);
+    vr_fec_hold_locked(session, std::chrono::steady_clock::now());
+    int cur = session->video.adaptiveFecPercentage.load();
+    if (cur == 0) {
+      cur = config::stream.fec_percentage;
+    }
+    if (lostFrames > kVrFecLossMaxSpan) {
+      BOOST_LOG(info) << "[VIPLE-FEC] VR outage (" << lostFrames << " frames lost), FEC stays " << cur << '%';
+      return;
+    }
+    const int next = cur >= kVrFecLossMax ? cur : std::min(cur + kVrFecLossStep, kVrFecLossMax);
+    if (next != cur) {
+      session->video.adaptiveFecPercentage.store(next);
+      BOOST_LOG(info) << "[VIPLE-FEC] VR unrecoverable frame, FEC: " << cur << "% -> " << next << '%';
+    }
+  }
+
+  /// VR session：距上次丟包跡象超過 30 s 後每 5 s 降 5%，降回基準值。呼叫者持 abrMutex。
+  static void vr_fec_decay_locked(session_t *session, std::chrono::steady_clock::time_point now) {
+    int cur = session->video.adaptiveFecPercentage.load();
+    const int base = config::stream.fec_percentage;
+    if (cur == 0 || cur <= base || now - session->video.lastLossTime < kVrFecHold) {
+      return;
+    }
+    const int next = std::max(cur - 5, base);
+    session->video.adaptiveFecPercentage.store(next);
+    // 下一階再等 5 s：把基準點往後推，維持「距 lastLossTime ≥ 30 s」的同一個判斷
+    session->video.lastLossTime = now - kVrFecHold + kVrFecDecayEvery;
+    BOOST_LOG(info) << "[VIPLE-FEC] VR no unrecoverable frame for a while, FEC: " << cur << "% -> " << next << '%';
+  }
+
   /**
    * @brief 處理一筆 0x5507/09 LOSS（control 執行緒或 QUIC IO 執行緒）。
    */
@@ -1375,6 +1430,10 @@ namespace stream {
     const auto action = vr_state.on_loss(loss.firstLost, loss.lastLost, loss.reason);
     switch (action) {
       case ::vr::loss_action_e::new_wave:
+        // §VR-FEC-LOSS：decoder 自己出錯（reason=DECODE_ERROR）不是網路掉包，加 FEC 沒有用
+        if (loss.reason != VIPLE_VR_LOSS_DECODE_ERROR) {
+          vr_fec_on_loss(session, loss.lastLost - loss.firstLost + 1);  // uint32 相減，迴繞也成立
+        }
         session->vrRefreshEvents->raise(vr_state.negotiated().ir_frames);
         // 接受 LOSS 當下就回 REFRESH_START（startFrame = encoder 即將編的幀號）。等 wave 第一幀
         // 打包才送會多等最多一個幀間隔（M1a 實測平均 32 ms，超過 client 的 2×RTT+20 ms 重送門檻，
@@ -1789,9 +1848,20 @@ namespace stream {
     if (maxBr <= 0 || !session->video.autoAdjustBitrate) {
       return;
     }
+    if (session->vr) {
+      // §VR-FEC-LOSS：configuredBitrateKbps 是照基準 FEC 算出的影像位元率；FEC 升高時把多佔的份額扣回來，
+      // 線上總流量（影像＋FEC）維持不變。FEC 降回基準後上限恢復，靠零丟包回升爬回去。
+      const int base = config::stream.fec_percentage;
+      const int fec = session->video.adaptiveFecPercentage.load();
+      if (fec > base) {
+        maxBr = (int) ((long long) maxBr * (100 + base) / (100 + fec));
+      }
+    }
 
+    // 還沒調整過（adaptive=0）時編碼器跑的是 configuredBitrateKbps。VR 的 maxBr 可能已被上面扣過 FEC 份額，
+    // 這裡要用沒扣過的值，下面「偏離已套用值 >10%」才比得出來、才會真的把編碼器降下去。
     int applied = session->video.adaptiveBitrateKbps.load();
-    if (applied <= 0) applied = maxBr;
+    if (applied <= 0) applied = session->video.configuredBitrateKbps;
     int target = session->video.targetBitrateKbps.load();
     if (target <= 0) target = applied;
 
@@ -1959,7 +2029,11 @@ namespace stream {
 
     // 只在偏離已套用值 >10% 時真正 reconfigure（防抖動）。
     // 回升累積在 target，數輪後必過門檻 → 能一路回到 max。
-    if (std::abs(target - applied) > applied / 10) {
+    // §VR-FEC-LOSS：VR 的上限會跟著 FEC 一階一階移動（每階 3～8%），都落在 10% 防抖動帶內。target 已頂到
+    // 上限、或已套用值超過新的上限時直接套用，否則 FEC 升高時線上總流量會多出一截、FEC 回降後又永遠停在
+    // 上限的九成多。VR 降碼不送 IDR（video.cpp），多幾次 reconfigure 沒有代價。桌面 session 不變。
+    const bool vrCapMoved = session->vr && target != applied && (target >= maxBr || applied > maxBr);
+    if (std::abs(target - applied) > applied / 10 || vrCapMoved) {
       session->video.adaptiveBitrateKbps.store(target);
 
       auto bitrateEvents = session->mail->event<int>(mail::bitrate_change);
@@ -2055,6 +2129,9 @@ namespace stream {
         if (residual > sentWindow) residual = sentWindow;
       } else if (session->video.videoShardsSentAccum.load(std::memory_order_relaxed) > 1000000) {
         session->video.videoShardsSentAccum.exchange(0);
+      }
+      if (session->vr) {
+        vr_fec_decay_locked(session, now);  // §VR-FEC-LOSS
       }
       run_abr_aimd(session, residual, 500,
                    residual > 0 ? "ping-tick-residual" : "ping-tick");
@@ -2248,7 +2325,9 @@ namespace stream {
         // §VR-ABR-RATIO：VR session 丟包比例 < 1% 時不加 FEC（當成零丟包，讓 FEC 能降回基準）
         const float vrLossPct = vr_abr_loss_pct(session, count, elapsed);
         const bool lossSignificant = count > 0 && !(vrLossPct >= 0.0f && vrLossPct < kVrAbrIgnorePct);
-        if (lossSignificant) {
+        if (lossSignificant && session->vr) {
+          vr_fec_hold_locked(session, now);  // §VR-FEC-LOSS：VR 的 FEC 只跟著 LOSS 升，這裡只延後回降
+        } else if (lossSignificant) {
           int newFec = std::min(currentFec + 10, 50);
           if (newFec != currentFec) {
             session->video.adaptiveFecPercentage.store(newFec);
@@ -2257,6 +2336,9 @@ namespace stream {
           }
           session->video.lastLossTime = now;
           session->video.zeroLossStreak = 0;
+        } else if (session->vr) {
+          session->video.zeroLossStreak++;
+          vr_fec_decay_locked(session, now);  // §VR-FEC-LOSS：30 s 沒有救不回的幀才開始降
         } else {
           session->video.zeroLossStreak++;
           auto sinceLastLoss = std::chrono::duration_cast<std::chrono::seconds>(
@@ -2888,7 +2970,9 @@ namespace stream {
             // §VR-ABR-RATIO：同 ENet 路徑
             const float vrLossPct = vr_abr_loss_pct(session, count, elapsed);
             const bool lossSignificant = count > 0 && !(vrLossPct >= 0.0f && vrLossPct < kVrAbrIgnorePct);
-            if (lossSignificant) {
+            if (lossSignificant && session->vr) {
+              vr_fec_hold_locked(session, now);  // §VR-FEC-LOSS：同 ENet 路徑
+            } else if (lossSignificant) {
               int newFec = std::min(currentFec + 10, 50);
               if (newFec != currentFec) {
                 session->video.adaptiveFecPercentage.store(newFec);
@@ -2898,6 +2982,9 @@ namespace stream {
               }
               session->video.lastLossTime = now;
               session->video.zeroLossStreak = 0;
+            } else if (session->vr) {
+              session->video.zeroLossStreak++;
+              vr_fec_decay_locked(session, now);  // §VR-FEC-LOSS：同 ENet 路徑
             } else {
               session->video.zeroLossStreak++;
               auto sinceLastLoss = std::chrono::duration_cast<std::chrono::seconds>(
