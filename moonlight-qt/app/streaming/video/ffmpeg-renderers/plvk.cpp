@@ -160,7 +160,9 @@ PlVkRenderer::~PlVkRenderer()
             pl_tex_destroy(m_Vulkan->gpu, &m_Textures[i]);
         }
 
-        clearDrmTexCache("renderer destroyed");
+#ifdef HAVE_DRM
+        m_DrmTexCache.clear(m_Vulkan->gpu, "renderer destroyed");
+#endif
     }
 
     pl_renderer_destroy(&m_Renderer);
@@ -5786,193 +5788,8 @@ bool PlVkRenderer::prepareDecoderContextInGetFormat(AVCodecContext *context,
     return true;
 }
 
-#ifdef HAVE_DRM
 // §SF-DRMSPLIT：DRM_PRIME 單 layer 兩平面的改寫移到 plvk_common（XrRenderer 共用）。
-
-// §SF-DMABUF-CACHE：取代 pl_map_avframe_drm 的每幀匯入。pl_tex 參數和 libplacebo 相同，
-// 差別只在依 dmabuf 身分（fstat 的 dev/ino，加上 offset/pitch/fourcc/modifier/尺寸）重複使用。
-// dmabuf 的 inode 每個 buffer 唯一，fd 號碼被重用（解碼器重建）也不會誤認；hw_frames_ctx
-// 換了就整批清掉，避免抓著舊 pool 的記憶體。out->user_data 留 nullptr，pl_unmap_avframe
-// 只會清空結構、不會銷毀快取的材質。任何一步不成立就回 false，由呼叫端退回 libplacebo。
-bool PlVkRenderer::mapDrmPrimeCached(const AVFrame* frame, pl_frame* out)
-{
-    static constexpr size_t kMaxEntries = 64;
-    pl_gpu gpu = m_Vulkan->gpu;
-    auto drm = (const AVDRMFrameDescriptor*)frame->data[0];
-    if (drm == nullptr || frame->hw_frames_ctx == nullptr ||
-            !(gpu->import_caps.tex & PL_HANDLE_DMA_BUF)) {
-        return false;
-    }
-    auto hwfc = (const AVHWFramesContext*)frame->hw_frames_ctx->data;
-    if (hwfc != m_DrmTexCacheCtx) {
-        clearDrmTexCache("decoder frames context changed");
-        m_DrmTexCacheCtx = hwfc;
-    }
-    const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(hwfc->sw_format);
-    if (desc == nullptr) {
-        return false;
-    }
-
-    *out = {};
-    pl_frame_from_avframe(out, frame);
-    if (out->num_planes <= 0 || drm->nb_layers < out->num_planes) {
-        *out = {};
-        return false;
-    }
-
-    for (int n = 0; n < out->num_planes; n++) {
-        const AVDRMLayerDescriptor* layer = &drm->layers[n];
-        if (layer->nb_planes != 1) {
-            *out = {};
-            return false;
-        }
-        const AVDRMPlaneDescriptor* plane = &layer->planes[0];
-        const AVDRMObjectDescriptor* object = &drm->objects[plane->object_index];
-        pl_fmt fmt = pl_find_fourcc(gpu, layer->format);
-        struct stat st;
-        if (fmt == nullptr || !pl_fmt_has_modifier(fmt, object->format_modifier) ||
-                plane->pitch < 0 || fstat(object->fd, &st) != 0) {
-            *out = {};
-            return false;
-        }
-        bool isChroma = n == 1 || n == 2;
-        int w = AV_CEIL_RSHIFT(frame->width, isChroma ? desc->log2_chroma_w : 0);
-        int h = AV_CEIL_RSHIFT(frame->height, isChroma ? desc->log2_chroma_h : 0);
-        // §SF-PITCHCLAMP：iris／v4l2m2m 對 GUI 啟動探測的 1280x720 測試幀回報 frame 寬 1344
-        // （對齊後的寬度），但 buffer 的 pitch 只有 1280（size=1280*736*1.5 也對得上），
-        // 實際寬度不可能超過 pitch。原本 w > pitch 被 libplacebo validation 擋下，失敗路徑
-        // 接著讓整個程式 SIGSEGV（從啟動程式開 GUI 閃一下就消失）。把寬度夾到 pitch 內，
-        // 裁切範圍在迴圈後一併夾住。
-        if (w > 0 && fmt->texel_size > 0 && plane->pitch > 0 &&
-                plane->pitch < (ptrdiff_t)w * fmt->texel_size) {
-            int clamped = (int)(plane->pitch / (ptrdiff_t)fmt->texel_size);
-            if (!m_LoggedDrmPitchClamp) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-LNXFE] dmabuf plane %d width %d exceeds pitch %lld; clamped to %d "
-                            "(frame=%dx%d)",
-                            n, w, (long long)plane->pitch, clamped, frame->width, frame->height);
-                m_LoggedDrmPitchClamp = true;
-            }
-            w = clamped;
-        }
-        // 其餘不合法的情況仍交給 libplacebo 前先擋下，並同步留下實際值
-        //（log 是非同步的，崩潰時最後幾行會遺失）。
-        if (w <= 0 || h <= 0 || plane->pitch < (ptrdiff_t)w * fmt->texel_size) {
-            fprintf(stderr, "[VIPLE-LNXFE] dmabuf plane %d rejected: frame=%dx%d sw_format=%d "
-                            "fourcc=0x%08x w=%d h=%d pitch=%lld offset=%lld texel=%zu size=%zu\n",
-                    n, frame->width, frame->height, (int)hwfc->sw_format, layer->format, w, h,
-                    (long long)plane->pitch, (long long)plane->offset, fmt->texel_size,
-                    object->size);
-            fflush(stderr);
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-LNXFE] dmabuf plane %d rejected: frame=%dx%d sw_format=%d "
-                        "fourcc=0x%08x w=%d h=%d pitch=%lld",
-                        n, frame->width, frame->height, (int)hwfc->sw_format, layer->format,
-                        w, h, (long long)plane->pitch);
-            *out = {};
-            return false;
-        }
-
-        DrmTexCacheEntry* hit = nullptr;
-        for (auto& e : m_DrmTexCache) {
-            if (e.dev == (uint64_t)st.st_dev && e.ino == (uint64_t)st.st_ino &&
-                    e.offset == (uint32_t)plane->offset && e.pitch == (uint32_t)plane->pitch &&
-                    e.fourcc == layer->format && e.modifier == object->format_modifier &&
-                    e.w == w && e.h == h) {
-                hit = &e;
-                break;
-            }
-        }
-
-        if (hit != nullptr) {
-            m_DrmTexHits++;
-        }
-        else {
-            pl_tex_params params = {};
-            params.w = w;
-            params.h = h;
-            params.format = fmt;
-            params.sampleable = true;
-            params.blit_src = (fmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
-            params.import_handle = PL_HANDLE_DMA_BUF;
-            params.shared_mem.handle.fd = object->fd;
-            params.shared_mem.size = object->size;
-            params.shared_mem.offset = plane->offset;
-            params.shared_mem.drm_format_mod = object->format_modifier;
-            params.shared_mem.stride_w = plane->pitch;
-            pl_tex tex = pl_tex_create(gpu, &params);
-            if (tex == nullptr) {
-                *out = {};
-                return false;
-            }
-            m_DrmTexImports++;
-
-            if (m_DrmTexCache.size() >= kMaxEntries) {
-                // 最久沒用的先走；pl_tex_destroy 會等 GPU 用完才真的釋放
-                auto lru = std::min_element(m_DrmTexCache.begin(), m_DrmTexCache.end(),
-                                            [](const DrmTexCacheEntry& a, const DrmTexCacheEntry& b) {
-                                                return a.lastUse < b.lastUse;
-                                            });
-                pl_tex_destroy(gpu, &lru->tex);
-                m_DrmTexCache.erase(lru);
-            }
-
-            DrmTexCacheEntry e;
-            e.dev = (uint64_t)st.st_dev;
-            e.ino = (uint64_t)st.st_ino;
-            e.modifier = object->format_modifier;
-            e.offset = (uint32_t)plane->offset;
-            e.pitch = (uint32_t)plane->pitch;
-            e.fourcc = layer->format;
-            e.w = w;
-            e.h = h;
-            e.tex = tex;
-            m_DrmTexCache.push_back(e);
-            hit = &m_DrmTexCache.back();
-        }
-        hit->lastUse = ++m_DrmTexCacheTick;
-        out->planes[n].texture = hit->tex;
-    }
-
-    // §SF-PITCHCLAMP：寬高被夾過時，裁切範圍不能超出亮度平面的材質
-    {
-        float maxX = (float)out->planes[0].texture->params.w;
-        float maxY = (float)out->planes[0].texture->params.h;
-        if (out->crop.x1 > maxX) out->crop.x1 = maxX;
-        if (out->crop.y1 > maxY) out->crop.y1 = maxY;
-    }
-
-    // 同 libplacebo 的 pl_fix_hwframe_sample_depth 與 P010 的 bit_shift
-    out->repr.bits.sample_depth = out->planes[0].texture->params.format->component_depth[0];
-    if (hwfc->sw_format == AV_PIX_FMT_P010) {
-        out->repr.bits.bit_shift = 6;
-    }
-    out->user_data = nullptr;
-
-    if ((m_DrmTexHits + m_DrmTexImports) % 3600 == 0) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-LNXFE] dmabuf cache: entries=%zu imports=%llu hits=%llu",
-                    m_DrmTexCache.size(), (unsigned long long)m_DrmTexImports,
-                    (unsigned long long)m_DrmTexHits);
-    }
-    return true;
-}
-#endif
-
-void PlVkRenderer::clearDrmTexCache(const char* reason)
-{
-    if (m_DrmTexCache.empty()) {
-        return;
-    }
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-LNXFE] dmabuf cache cleared (%s): entries=%zu imports=%llu hits=%llu",
-                reason, m_DrmTexCache.size(), (unsigned long long)m_DrmTexImports,
-                (unsigned long long)m_DrmTexHits);
-    for (auto& e : m_DrmTexCache) {
-        pl_tex_destroy(m_Vulkan->gpu, &e.tex);
-    }
-    m_DrmTexCache.clear();
-}
+// §SF-DMABUF-CACHE：dmabuf 匯入快取 2026-10-03 移到 plvk_common 的 DrmTexCache（XrVideo 共用）。
 
 bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame)
 {
@@ -6008,7 +5825,7 @@ bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFra
     bool mapped = false;
 #ifdef HAVE_DRM
     if (frame->format == AV_PIX_FMT_DRM_PRIME) {
-        mapped = mapDrmPrimeCached(mapSource, mappedFrame);
+        mapped = m_DrmTexCache.map(m_Vulkan->gpu, mapSource, mappedFrame);
         if (!mapped && !m_LoggedDrmCacheFallback) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-LNXFE] dmabuf cache not applicable, using pl_map_avframe_ex");

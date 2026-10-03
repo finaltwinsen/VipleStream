@@ -1078,6 +1078,27 @@ host `<DisplayModeSwitchable>` 回報的最高 Hz 取小。FRUC 開著時不改 
       67 筆 LOSS 有 66 筆只掉 1 幀。VR 的 FEC 改成跟著 LOSS 調（`log_tags.md` 的 `[VIPLE-FEC] VR …`）：掉 1～2 幀
       +10%（上限 40%）、連掉 3 幀以上當斷線不加、30 s 沒事才每 5 s −5% 降回基準；FEC 多佔的份額從影像位元率上限扣。
       驗證：`<dev-client>` 跑 `--vr-emulate`（4320×2160@120、200 Mbps）＋ `<host>` 上的假 ARP 黑洞（`New-NetNeighbor` 假 MAC，約 300 ms）。
+  - **第三輪（2026-10-03 早上，4320×2160@120、200 Mbps）**：
+    - 120 Hz 生效（`display refresh rates=[120.0] current=120.0`）；解碼 p50 約 5 ms（比 decode-bench 好）。
+    - 連線很差：適配器→頭盔的 rx 速率多在 MCS 3～4、常掉到 0～2（ack −60～−71 dBm），host 對 Frame 熱點 ping 逾時、
+      RTT 尖峰到 134 ms；位元率多在 25～50 Mbps（ABR 6 分鐘調 159 次），FEC 開頭 3 s 升到 40%，斷線 45 次
+      （3～180 幀）。**Frame 的家用 Wi‑Fi（wlan0）和熱點（wlanap）在同一張網卡（phy0）**，wlan0 在路由器兩個
+      BSSID 之間反覆漫遊失敗（認證逾時、status 30），每次都讓熱點斷 3～7 s（host ping 的斷線時間對得上 kernel log）。
+    - XR 漏幀從前 4 分鐘的 2～5% 一路升到 8～15%，SteamVR 不時把 app 降到 60／40 Hz（`period=16.67／25.00 ms`）。
+    - **09:52:38 kernel Oops，頭盔整個卡死（按鍵全無反應），只能強制重開**：client 行程在 `DRM_IOCTL_PRIME_FD_TO_HANDLE`
+      → `msm_gem_import` 失敗的清理路徑 `drm_gem_put_pages` NULL deref——和 G-α 第二輪（上面「途中修掉的問題」1.）
+      同一個 SteamOS msm bug。執行緒死在核心、鎖沒放，client 收不到 SIGTERM、`xrRequestExitSession` 後 3 s 等不到
+      STOPPING。**原因：XR 影像路徑（XrVideo）沒有用 §SF-DMABUF-CACHE**，仍用 `pl_map_avframe_ex` 每幀匯入
+      dmabuf（4320×2160@120、兩平面＝每秒 240 次）；漏幀率逐步上升也可能和這個匯入量有關。
+    - 修法：快取搬到 `plvk_common` 的 `DrmTexCache`，PlVk 與 XrVideo 共用（XrVideo 的 render thread 用、`testMap`
+      不用）；log：`[VIPLE-XR] dmabuf cache: entries=… imports=… hits=…`。
+  - **第四輪（同日 10:45，DrmTexCache 版，Frame 實機驗證通過）**：10 分鐘無核心錯誤，SIGTERM 後正常收尾；dmabuf 快取
+    整場只匯入 10 次、命中約 14 萬次；XR 71,515 幀只漏 2 幀（開場切換時），影像 render thread CPU p95 從 4～9 ms 降到
+    0.2 ms；MTP p50 47～60、p95 55～64 ms；解碼 6.1～8.3 ms（4320×2160@120 的預算是 8.33 ms，餘裕很小）；位元率時間
+    加權約 154 Mbps（ABR 調 46 次）；LOSS 17 次全靠 intra refresh 恢復、0 次 IDR；FEC 升 13 次、降 19 次（單幀 +10%
+    的路徑在實機上走到）。開場約 4 s 連線不穩（4 筆各 32 幀的 LOSS＋host ping 逾時），之後只有零星單幀掉包；
+    這次 Frame 的家用 Wi‑Fi 沒有漫遊。msm 核心錯誤的回報資料（兩次 Oops、分析、上游修正 `e6863b085606`
+    的 6.18 回移 patch）整理在本機 `scripts/benchmark/results/frame-msm-oops-report/`（不入 git）。
   - 控制器外觀：0x5506 `VIPLE_VR_CONTROLLER_INPUT.profile`（原 reserved 低位元組，三份 VipleVr.h＋IPC ABI 同位移）
     帶 client 的 interaction profile；driver 依此設 `Prop_RenderModelName_String`（Touch＝`oculus_quest2_controller_*`、
     Index＝`{indexcontroller}valve_controller_knu_1_0_*`、Frame＝`{frame_controller}frame_controller_*`；driver 目錄

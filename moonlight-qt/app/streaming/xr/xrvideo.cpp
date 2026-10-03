@@ -236,6 +236,9 @@ void XrVideo::destroy(bool gpuWedged)
             av_frame_free(&m_Pending);
         }
         m_WedgedFrames.clear();  // 刻意不 free
+#ifdef HAVE_DRM
+        m_DrmCache.abandon();    // 匯入的材質也可能還被 GPU 參照
+#endif
         m_Vulkan = nullptr;
         m_Renderer = nullptr;
         m_Sem = VK_NULL_HANDLE;
@@ -251,6 +254,9 @@ void XrVideo::destroy(bool gpuWedged)
         av_frame_free(&m_Pending);
     }
     if (m_Vulkan != nullptr) {
+#ifdef HAVE_DRM
+        m_DrmCache.clear(m_Vulkan->gpu, "video destroyed");
+#endif
         for (pl_tex& t : m_Tex) {
             pl_tex_destroy(m_Vulkan->gpu, &t);
         }
@@ -314,10 +320,11 @@ void XrVideo::submit(const AVFrame* frame)
     }
 }
 
-bool XrVideo::mapFrame(const AVFrame* frame, pl_frame* out, pl_tex* texSet)
+bool XrVideo::mapFrame(const AVFrame* frame, pl_frame* out, pl_tex* texSet, bool useCache)
 {
     const AVFrame* src = frame;
     AVFrame* split = nullptr;
+    bool ok = false;
 #ifdef HAVE_DRM
     if (frame->format == AV_PIX_FMT_DRM_PRIME) {
         const char* outcome = nullptr;
@@ -325,13 +332,26 @@ bool XrVideo::mapFrame(const AVFrame* frame, pl_frame* out, pl_tex* texSet)
         if (split != nullptr) {
             src = split;
         }
+        if (useCache) {
+            ok = m_DrmCache.map(m_Vulkan->gpu, src, out);
+            if (!ok && !m_LoggedCacheFallback) {
+                m_LoggedCacheFallback = true;
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-XR] dmabuf cache not applicable, using pl_map_avframe_ex");
+            }
+        }
     }
+#else
+    (void)useCache;
 #endif
-    pl_avframe_params mp = {};
-    mp.frame = src;
-    mp.tex = texSet;
-    const bool ok = pl_map_avframe_ex(m_Vulkan->gpu, out, &mp);
-    // libplacebo 成功時自己 clone 一份持有到 pl_unmap_avframe，這份改寫描述子可以放掉
+    if (!ok) {
+        pl_avframe_params mp = {};
+        mp.frame = src;
+        mp.tex = texSet;
+        ok = pl_map_avframe_ex(m_Vulkan->gpu, out, &mp);
+    }
+    // libplacebo 成功時自己 clone 一份持有到 pl_unmap_avframe；快取路徑不持有幀（材質在快取裡，解碼幀由
+    // 呼叫端持有到 GPU 做完）。兩種情況這份改寫描述子都可以放掉
     av_frame_free(&split);
     if (ok) {
         PlvkCommon::fixupMappedFrame(frame, out, false);
@@ -355,7 +375,7 @@ bool XrVideo::testMap(const AVFrame* frame)
     std::lock_guard<std::mutex> lk(m_TestMutex);
     pl_frame mapped;
     std::memset(&mapped, 0, sizeof(mapped));
-    if (!mapFrame(frame, &mapped, m_TestTex)) {
+    if (!mapFrame(frame, &mapped, m_TestTex, false)) {
         const char* fmt = av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format));
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video test map failed (format=%s)", fmt ? fmt : "?");
         return false;
@@ -559,7 +579,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
 
     pl_frame mapped;
     std::memset(&mapped, 0, sizeof(mapped));
-    const bool mappedOk = mapFrame(frame, &mapped, m_Tex);
+    const bool mappedOk = mapFrame(frame, &mapped, m_Tex, true);
     bool rendered = false;
     if (mappedOk) {
         pl_frame target;

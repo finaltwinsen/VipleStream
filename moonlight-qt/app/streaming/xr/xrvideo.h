@@ -27,6 +27,7 @@
 #pragma once
 
 #include "xrcontext.h"
+#include "streaming/video/ffmpeg-renderers/plvk_common.h"  // §SF-DMABUF-CACHE：DrmTexCache
 
 #include <QString>
 
@@ -119,7 +120,8 @@ private:
     bool ensureSwapchain(XrSession session, int width, int height);
     void destroySwapchainSet(SwapchainSet& s);
     void destroyAllSwapchains();
-    bool mapFrame(const AVFrame* frame, pl_frame* out, pl_tex* texSet);
+    // useCache：DRM_PRIME 走 dmabuf 匯入快取（只有影像 render thread 可以用）
+    bool mapFrame(const AVFrame* frame, pl_frame* out, pl_tex* texSet, bool useCache);
     bool renderNewFrame(AVFrame* frame);
     void dumpTexture(pl_tex tex);
     void renderThreadMain();
@@ -134,6 +136,13 @@ private:
     pl_renderer m_Renderer = nullptr;
     pl_tex m_Tex[4] = {};       // XR thread 的 map 材質
     pl_tex m_TestTex[4] = {};   // testMap 用（m_TestMutex）
+#ifdef HAVE_DRM
+    // §SF-DMABUF-CACHE（2026-10-03）：影像 render thread 的 DRM_PRIME 匯入快取。原本每幀 pl_map_avframe_ex
+    // 都重新匯入 dmabuf（4320x2160@120、兩平面＝每秒 240 次），PCVR 第三輪第 6 分鐘踩到 SteamOS msm 匯入
+    // 失敗路徑的 kernel Oops，頭盔卡死、只能重開機（G-α 平面路徑同一個問題）。testMap 不用（另一條執行緒、一次性）。
+    PlvkCommon::DrmTexCache m_DrmCache{"[VIPLE-XR]"};
+    bool m_LoggedCacheFallback = false;
+#endif
     std::mutex m_TestMutex;
     VkSemaphore m_Sem = VK_NULL_HANDLE;
     uint64_t m_SemValue = 0;
