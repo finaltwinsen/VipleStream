@@ -1876,6 +1876,305 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### vr_vsync_to_photons_us
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: the headset's "seconds from vsync to photons", in microseconds, reported to SteamVR.
+            SteamVR predicts the head pose a game renders with up to this point in time. A streamed frame is
+            shown on the headset only after encoding, transport and decoding, so the default is adaptive: a
+            session starts at one display period plus 30 ms (or the value learned from the previous session),
+            and the server then adjusts it from the pose lag the client measures. Any value from 1000 to 200000
+            pins it and disables the adjustment. `0` selects the adaptive behaviour.
+            @note{Applies to VR sessions only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            0
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_vsync_to_photons_us = 44000
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_latch_mode
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: controller that locks the server's frame pacing to the headset's display, using the
+            client's LATCH reports (how early each new frame was ready before the headset latched it).
+            `legacy` is the original controller. `v2` treats the reported value as a phase modulo one display
+            period (a frame that misses a latch by δ is reported as one period minus δ), ignores repeated and
+            out-of-range reports, stops integrating while the output is saturated, and aims at
+            [vr_latch_target_pct](#vr_latch_target_pct) of the period. `v2` removes the periodic phase slips
+            (a burst of repeated frames every 30 to 60 seconds) seen with `legacy` on Wi-Fi.
+            @note{Applies to VR sessions only. The default will change after headset A/B testing.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            legacy
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_latch_mode = v2
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_latch_target_pct
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: target margin of [vr_latch_mode](#vr_latch_mode) `v2`, as a percentage of the display
+            period: how long a new frame should be ready before the headset latches it. A larger margin absorbs
+            more arrival jitter (fewer repeated frames) at the cost of the same amount of extra latency.
+            The accepted range is 25 to 50; invalid values are ignored with a warning in the log.
+            @note{Applies to VR sessions with `vr_latch_mode = v2` only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            40
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_latch_target_pct = 50
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_ctrl_pose_offset
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: also tell SteamVR how far ahead the client already predicted the controller poses
+            (the same pose time offset the headset uses). When disabled, SteamVR treats the already-predicted
+            controller pose as the current one and extrapolates it again, so the controllers run ahead of the
+            head by roughly the client's prediction time.
+            @note{Applies to VR sessions only. The default will change after headset A/B testing.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_ctrl_pose_offset = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_angvel_local
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: convert the headset and controller angular velocities to each device's own (body)
+            frame before handing them to SteamVR. SteamVR extrapolates a pose as `rotation · exp(ω·t)`, i.e. it
+            treats the angular velocity as body-frame, while OpenXR clients report it in the tracking (world)
+            frame. When disabled, SteamVR rotates around the wrong axis whenever the device is tilted, so the
+            predicted controller (paddle, racket) angle is off during fast swings.
+            @note{Applies to VR sessions only. The default will change after headset A/B testing.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_angvel_local = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_stale_policy
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: what the SteamVR driver does when no new tracking sample arrives for more than two
+            display periods. `legacy` zeroes the velocities and the pose time offset, which makes the head and the
+            controllers jump back and then forward again when the next sample arrives. `hold` keeps extrapolating
+            from the last sample for gaps of up to 100 ms (the angular velocity fades out over 50 ms) and only
+            then falls back to `legacy`.
+            @note{Applies to VR sessions only. The default will change after headset A/B testing.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            legacy
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_stale_policy = hold
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_multilink
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: use one link per client network interface for VR sessions (for example the headset's
+            home Wi-Fi and its dedicated adapter). Every link gets its own sockets and its own non-blocking send
+            thread on the host, so a link that stalls no longer holds up the others. Tracking and audio are sent on
+            every link; the receiver uses whichever copy arrives first.
+            `auto` starts video on the link the session was opened on and only probes the other links (one batch
+            of video per second); a link starts carrying video once the client has measured it to be fast enough
+            (1.5 times the video bitrate, twice in a row), and a link that cannot keep up goes back to probing.
+            `all` sends video on every link from the start; a link that cannot keep up is paused for video
+            (2 s, doubling up to 30 s) and then simply tried again.
+            `primary` sends video only on the link the session was opened on and keeps the others as standby.
+            Sending video on a link that is too slow costs the headset radio time and degrades the other link as
+            well, which is why `auto` measures first.
+            @note{Applies to VR sessions only, and only when the client supports it. With `disabled` the behaviour
+            is identical to earlier versions. The default will change after headset testing.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_multilink = auto
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_multilink_ctrl
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: carry the time-critical VR control messages over the multi-link sockets as well, one
+            copy per link, instead of only over the control connection of the address the session was opened on.
+            This covers the client's frame-loss reports and display-phase feedback and the host's
+            "refresh started" reply. Without it a weak link that happens to be the session address delays loss
+            recovery by hundreds of milliseconds even while another link is healthy.
+            @note{Only has an effect when `vr_multilink` is not `disabled` and the client supports it; older
+            clients keep using the control connection. The default will change after headset testing.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_multilink_ctrl = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_multilink_repair
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: resend lost video packets on request. The host keeps the last few frames exactly as
+            they were sent; when the client cannot rebuild a frame from what arrived (more packets lost than the
+            error correction covers), it reports what it has and the host resends just enough of the missing
+            packets, ahead of new video, on the links that carry video. Frames that would otherwise be dropped
+            (followed by a visible recovery) arrive a few milliseconds late instead.
+            Resends are limited to 15% of the video packet rate; beyond that, and for frames that are already
+            too old, the host tells the client not to wait and the normal loss recovery takes over.
+            Packets recovered this way are not treated as packet loss by the automatic bitrate control; a large
+            amount of them (3% or more) only stops the bitrate from rising.
+            @note{Requires `vr_multilink_ctrl = enabled`. The default will change after headset testing.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_multilink_repair = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_multilink_fault
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Development only: periodically drop everything sent and received on a link to emulate link outages on
+            a single network interface. Format: `<linkId>:<on_ms>:<off_ms>[:<phase_ms>]`, comma separated.
+            Other items, in the same list:
+            `r<linkId>:<mbps>` caps the video send rate of that link (a link that is too slow);
+            `d<linkId>:<ms>` (1-40) sends every video batch of that link that much later, and delays its ping
+            replies by twice that (a link that lags behind the others);
+            `b<linkId>:<period_ms>:<packets>` drops that many consecutive video packets of first transmissions
+            once per period (burst loss; resent packets are not affected);
+            `c:<on_ms>:<off_ms>[:<phase_ms>]` drops the unreliable VR messages on the control connection in both
+            directions during the off time (to test `vr_multilink_ctrl`).
+            @note{Leave empty outside of testing. A session log line states when fault injection is active.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            (empty)
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_multilink_fault = 1:60:40,2:40:60:40
+            @endcode</td>
+    </tr>
+</table>
+
 ## Config Files
 
 ### file_apps

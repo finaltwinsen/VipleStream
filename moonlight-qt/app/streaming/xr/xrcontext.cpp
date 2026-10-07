@@ -4,6 +4,7 @@
 #include "xrdesktopscreen.h"
 #include <Limelight.h>  // M4a R2：VIPLE_VR_TRACKING（sampleControllers）
 #include "streaming/vr/vrtracking.h"  // M4a R3：VrSampleHistory（MTP）
+#include "streaming/vr/vrframemeta.h"  // 2026-10-05：VrDecodeTiming（CLIENT_TIMING decode 欄位）
 
 #ifdef HAVE_XR_VIDEO
 #include "xrvideo.h"
@@ -19,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <cstddef>
 #include <cstring>
 #include <ctime>
@@ -1472,6 +1474,37 @@ void XrContext::maybeLogStats(uint64_t nowNs)
                     static_cast<double>(m_PredictAheadNs) / 1e6, static_cast<double>(h.pos[0]),
                     static_cast<double>(h.pos[1]), static_cast<double>(h.pos[2]), static_cast<double>(h.rot[0]),
                     static_cast<double>(h.rot[1]), static_cast<double>(h.rot[2]), static_cast<double>(h.rot[3]));
+        // §VR-POSEERR：pcvrPoseErr 與這裡都在 frame thread
+        if (!m_PoseErrPosMm.empty()) {
+            auto pq = [](std::vector<float>& v, double p) -> double {
+                if (v.empty()) {
+                    return 0.0;
+                }
+                std::sort(v.begin(), v.end());
+                return v[(std::min)(v.size() - 1, static_cast<size_t>(p * static_cast<double>(v.size() - 1) + 0.5))];
+            };
+            // 2026-10-05：露邊比例＝旋轉誤差超過 overscan 的幀（重投影會露出沒畫面的邊；overscan 0 時任何誤差都會露）
+            auto above = [](const std::vector<float>& v, float x) -> double {
+                size_t k = 0;
+                for (float a : v) {
+                    k += a > x ? 1 : 0;
+                }
+                return v.empty() ? 0.0 : 100.0 * static_cast<double>(k) / static_cast<double>(v.size());
+            };
+            const float ov = m_Options.pcvrOverscanDeg;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-POSEERR] 10s n=%zu pos p50=%.1f p95=%.1f mm rot p50=%.2f p95=%.2f deg | "
+                        "lag n=%zu p05=%.1f p50=%.1f p95=%.1f ms (+behind/-ahead, head moving) | "
+                        "rot>1deg=%.1f%% >3deg=%.1f%% edge(>%.1fdeg overscan)=%.1f%%",
+                        m_PoseErrPosMm.size(), pq(m_PoseErrPosMm, 0.5), pq(m_PoseErrPosMm, 0.95),
+                        pq(m_PoseErrRotDeg, 0.5), pq(m_PoseErrRotDeg, 0.95), m_PoseLagMs.size(),
+                        pq(m_PoseLagMs, 0.05), pq(m_PoseLagMs, 0.5), pq(m_PoseLagMs, 0.95),
+                        above(m_PoseErrRotDeg, 1.0f), above(m_PoseErrRotDeg, 3.0f), static_cast<double>(ov),
+                        above(m_PoseErrRotDeg, ov));
+            m_PoseErrPosMm.clear();
+            m_PoseErrRotDeg.clear();
+            m_PoseLagMs.clear();
+        }
     }
     if (!m_Options.pcvr && m_Input != nullptr) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] 10s %s", qUtf8Printable(m_Input->takeStatsLine()));
@@ -1695,6 +1728,8 @@ void XrContext::frameThreadMain()
                     videoGen = vcur.generation;
                     pcvrTimingOnLatch(vcur.seq, vcur.lastDrawnUs, vcur.renderUs, vcur.hasMeta,
                                       vcur.meta.echoSampleId, cpuT0);
+                    pcvrPoseErr(vcur.meta.renderRot, vcur.meta.renderPos, vcur.seq != m_PoseErrLastSeq);
+                    m_PoseErrLastSeq = vcur.seq;
                     std::lock_guard<std::mutex> lk(m_StatsMutex);
                     m_ProjFrames++;
                 }
@@ -1936,7 +1971,9 @@ void XrContext::frameThreadMain()
                 if (XR_SUCCEEDED(xrLocateViews(m_Session, &li, &vs, 2, &vc, views)) && vc == 2) {
                     std::lock_guard<std::mutex> lk(m_StatsMutex);
                     for (int e = 0; e < 2; e++) {
-                        m_Fov[e] = views[e].fov;
+                        if (!m_Options.pcvr) {
+                            m_Fov[e] = views[e].fov;  // PCVR 的 FOV 只取下面 VIEW space 那次（含 --vr-overscan）
+                        }
                         m_EyePose[e] = views[e].pose;
                     }
                     m_HaveViews = true;
@@ -1951,11 +1988,19 @@ void XrContext::frameThreadMain()
                         (hs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) &&
                         (hs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT)) {
                         bool first = false;
+                        // dev --vr-overscan：四邊各放大 δ（左、下是負角度）；/launch 與 projection 都讀 m_Fov
+                        const float ov = m_Options.pcvrOverscanDeg * 0.017453293f;
                         {
                             std::lock_guard<std::mutex> lk(m_StatsMutex);
                             for (int e = 0; e < 2; e++) {
                                 m_EyeToHead[e] = hv[e].pose;
                                 m_Fov[e] = hv[e].fov;
+                                if (ov > 0.0f) {
+                                    m_Fov[e].angleLeft -= ov;
+                                    m_Fov[e].angleRight += ov;
+                                    m_Fov[e].angleUp += ov;
+                                    m_Fov[e].angleDown -= ov;
+                                }
                             }
                             first = !m_HaveEyeToHead;
                             m_HaveEyeToHead = true;
@@ -1978,6 +2023,12 @@ void XrContext::frameThreadMain()
             const uint64_t tl0 = steadyNowNs();
             std::lock_guard<std::mutex> lk(m_QueueMutex);  // runtime 可能在 xrEndFrame 用 queue
             const uint64_t tl1 = steadyNowNs();
+#ifdef HAVE_XR_VIDEO
+            // 2026-10-05（§VR 錯配計數）：release 也在這把鎖內，所以這裡讀到的就是 xrEndFrame 會用的那張
+            if (m_Options.pcvr && videoLayer && m_Video != nullptr && m_Video->releaseNo() != vcur.releaseNo) {
+                m_PcvrTiming.mismatch10s++;
+            }
+#endif
             er = xrEndFrame(m_Session, &ei);
             m_DiagLockNs += tl1 - tl0;
             m_DiagEndNs = steadyNowNs() - tl1;
@@ -2142,9 +2193,17 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
                                   uint32_t echoSampleId, uint64_t latchNs)
 {
     auto& t = m_PcvrTiming;
-    if (seq == 0 || seq == t.lastLatchedSeq) {
-        return;  // 同一張影像重送（沒有新幀）不算
+    if (seq == 0) {
+        return;
     }
+    if (seq == t.lastLatchedSeq) {
+        t.repeat10s++;  // 同一張影像重送（沒有新幀）：只計數
+        return;
+    }
+    if (t.lastLatchedSeq != 0 && seq > t.lastLatchedSeq + 1) {
+        t.skip10s += static_cast<uint32_t>((std::min<uint64_t>)(seq - t.lastLatchedSeq - 1, 0xffffu));  // XrVideo 每發布一張 seq+1
+    }
+    t.new10s++;
     t.lastLatchedSeq = seq;
     t.presentedTotal++;
     const int64_t slackUs = static_cast<int64_t>(latchNs / 1000ull) - static_cast<int64_t>(lastDrawnUs);
@@ -2210,14 +2269,28 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         }
         ct.metaMiss = t.metaMissTotal;
         ct.displayPeriodNs = static_cast<uint32_t>((std::min<uint64_t>)(periodNs, 0xffffffffu));
-        ct.decodeP50Us = 0;  // XrContext 拿不到 decoder 延遲（TODO：由 Session 提供）
-        ct.decodeP95Us = 0;
+        // 2026-10-05：decoder 執行緒記的單幀解碼延遲（DU 進佇列到解出；沒有樣本時 0）
+        uint32_t dec50 = 0, dec95 = 0;
+        VrDecodeTiming::take(&dec50, &dec95);
+        ct.decodeP50Us = sat16u(dec50);
+        ct.decodeP95Us = sat16u(dec95);
         ct.renderP50Us = sat16u(pctOf(t.render1s, 0.50));
         ct.renderP95Us = sat16u(pctOf(t.render1s, 0.95));
         ct.slackP50Us = sat16s(pctOf(t.slack1s, 0.50));
         ct.slackP05Us = sat16s(pctOf(t.slack1s, 0.05));
         ct.mtpP50_100us = sat16u(pctOf(t.mtp1sUs, 0.50) / 100u);
         ct.mtpP95_100us = sat16u(pctOf(t.mtp1sUs, 0.95) / 100u);
+        // §VR-PREDICT：姿態落後中位數（0.1 ms；正值＝落後）。樣本不足時 server 依 count 忽略
+        if (!m_PoseLag1s.empty()) {
+            const double lag100us = static_cast<double>(pctOf(m_PoseLag1s, 0.50)) * 10.0;
+            ct.poseLagP50_100us = static_cast<int16_t>((std::max)(-32767.0, (std::min)(32766.0, std::round(lag100us))));
+            ct.poseLagCount = static_cast<uint16_t>((std::min)(m_PoseLag1s.size(), static_cast<size_t>(0xffff)));
+        }
+        else {
+            ct.poseLagP50_100us = VIPLE_VR_POSE_LAG_NONE;
+            ct.poseLagCount = 0;
+        }
+        m_PoseLag1s.clear();
         uint8_t tlv[2 + sizeof(VIPLE_VR_TLV_CLIENT_TIMING)];
         tlv[0] = VIPLE_VR_C2S_CLIENT_TIMING;
         tlv[1] = sizeof(ct);
@@ -2234,16 +2307,20 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         const double secs = static_cast<double>(nowNs - t.mtpWindowStartNs) / 1e9;
         t.mtpWindowStartNs = nowNs;
         const size_t n = t.mtp10sUs.size();
+        // 2026-10-05：尾端加 frames new／repeat／skip（前段欄位順序不變）
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s",
+                    "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s"
+                    " | frames new=%u repeat=%u skip=%u mismatch=%u",
                     n, pctOf(t.mtp10sUs, 0.50) / 1000.0, pctOf(t.mtp10sUs, 0.95) / 1000.0,
                     pctOf(t.mtp10sUs, 0.99) / 1000.0, t.mtpNoSample, t.latchSent,
                     secs > 0 ? t.latchSent / secs : 0.0, t.lastSlackUs, t.timingSent,
-                    m_TimeConv != nullptr ? "" : " (mtp approx: no time conversion ext)");
+                    m_TimeConv != nullptr ? "" : " (mtp approx: no time conversion ext)", t.new10s, t.repeat10s, t.skip10s,
+                    t.mismatch10s);
         t.mtp10sUs.clear();
         t.mtpNoSample = 0;
         t.latchSent = 0;
         t.timingSent = 0;
+        t.new10s = t.repeat10s = t.skip10s = t.mismatch10s = 0;
     }
 }
 
@@ -2289,6 +2366,15 @@ void XrContext::pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodN
         s.angVel[2] = vel.angularVelocity.z;
     }
     s.predictNs = static_cast<uint64_t>(std::max<int64_t>(ahead, 0));
+    s.displayTime = static_cast<int64_t>(predictedDisplayTime);
+    // §VR-POSEERR：顯示時頭部位置的軌跡（frame thread 專用）
+    PoseTrailPoint& tp = m_PoseTrail[m_PoseTrailHead];
+    tp.t = s.displayTime;
+    for (int i = 0; i < 3; i++) {
+        tp.pos[i] = s.pos[i];
+    }
+    m_PoseTrailHead = (m_PoseTrailHead + 1) % kPoseTrailLen;
+    m_PoseTrailCount = (std::min)(m_PoseTrailCount + 1, kPoseTrailLen);
     std::lock_guard<std::mutex> lk(m_HmdMutex);
     m_Hmd = s;
 }
@@ -2515,6 +2601,127 @@ bool XrContext::buildProjection(XrSwapchain swapchain, const XrRect2Di& rect, co
                     echoSampleId);
     }
     return true;
+}
+
+// §VR-POSEERR：frame thread，每次送出 projection layer 後呼叫。m_Hmd 是這一幀 predictedDisplayTime 的頭部
+// 姿態（pcvrAfterWaitFrame 剛 locate 的），也就是 runtime 重投影的目標；它和 0x81 算繪姿態的差＝重投影要補的量。
+// 時間差（§VR-PREDICT）要延後約 100 ms 再估：等頭部軌跡延伸到這一幀之後，才分得出算繪姿態是落後還是超前。
+// freshFrame＝false（沒有新影像、同一張重複顯示）：誤差照算（使用者實際看到的），但不估落後——重複顯示的
+// 落後是網路／解碼慢了，不是 SteamVR 預測得不夠遠，拿去調 v2p 會越調越歪（第六輪 a：卡頓那一秒 +16 ms）。
+void XrContext::pcvrPoseErr(const float renderRot[4], const float renderPos[3], bool freshFrame)
+{
+    HmdSample d;
+    {
+        std::lock_guard<std::mutex> lk(m_HmdMutex);
+        d = m_Hmd;
+    }
+    if (!d.valid || d.displayTime == 0) {
+        return;
+    }
+    const float ex = renderPos[0] - d.pos[0];
+    const float ey = renderPos[1] - d.pos[1];
+    const float ez = renderPos[2] - d.pos[2];
+    m_PoseErrPosMm.push_back(std::sqrt(ex * ex + ey * ey + ez * ez) * 1000.0f);
+    float dot = std::fabs(renderRot[0] * d.rot[0] + renderRot[1] * d.rot[1] + renderRot[2] * d.rot[2] +
+                          renderRot[3] * d.rot[3]);
+    dot = (std::min)(dot, 1.0f);
+    m_PoseErrRotDeg.push_back(2.0f * std::acos(dot) * 57.2957795f);
+
+    if (freshFrame) {
+        if (m_PosePendingCount == kPosePendingLen) {  // 不該發生（約 100 ms 就會處理掉）：丟最舊的
+            m_PosePendingHead = (m_PosePendingHead + 1) % kPosePendingLen;
+            m_PosePendingCount--;
+        }
+        PosePending& slot = m_PosePending[(m_PosePendingHead + m_PosePendingCount) % kPosePendingLen];
+        slot.t = d.displayTime;
+        for (int i = 0; i < 3; i++) {
+            slot.pos[i] = renderPos[i];
+        }
+        m_PosePendingCount++;
+    }
+
+    if (m_PoseTrailCount == 0) {
+        return;
+    }
+    const int64_t newestT = m_PoseTrail[(m_PoseTrailHead - 1 + kPoseTrailLen) % kPoseTrailLen].t;
+    while (m_PosePendingCount > 0) {
+        const PosePending& e = m_PosePending[m_PosePendingHead];
+        if (e.t + 100000000 > newestT) {
+            break;
+        }
+        pcvrPoseLagEval(e);
+        m_PosePendingHead = (m_PosePendingHead + 1) % kPosePendingLen;
+        m_PosePendingCount--;
+    }
+}
+
+// §VR-PREDICT：在 [t − 400 ms, t + 100 ms] 的顯示姿態軌跡上找離算繪位置最近的點（線段內插）。算繪位置相當於頭部
+// 在 t_match 的位置：t − t_match＞0 是落後（SteamVR 預測得不夠遠），＜0 是超前。頭部幾乎不動時估不出時間，跳過。
+void XrContext::pcvrPoseLagEval(const PosePending& e)
+{
+    auto trail = [this](int i) -> const PoseTrailPoint& {  // i＝0 最新
+        return m_PoseTrail[(m_PoseTrailHead - 1 - i + 2 * kPoseTrailLen) % kPoseTrailLen];
+    };
+    // 移動量閘門：t 前後各 50 ms 的頭部位置相差至少 10 mm
+    int before = -1, after = -1;
+    int64_t bestBefore = (std::numeric_limits<int64_t>::max)();
+    int64_t bestAfter = bestBefore;
+    for (int i = 0; i < m_PoseTrailCount; i++) {
+        const int64_t t = trail(i).t;
+        const int64_t db = t > e.t - 50000000 ? t - (e.t - 50000000) : (e.t - 50000000) - t;
+        const int64_t da = t > e.t + 50000000 ? t - (e.t + 50000000) : (e.t + 50000000) - t;
+        if (db < bestBefore) {
+            bestBefore = db;
+            before = i;
+        }
+        if (da < bestAfter) {
+            bestAfter = da;
+            after = i;
+        }
+    }
+    if (before < 0 || after < 0 || before == after) {
+        return;
+    }
+    const PoseTrailPoint& pb = trail(before);
+    const PoseTrailPoint& pa = trail(after);
+    const float mx = pa.pos[0] - pb.pos[0];
+    const float my = pa.pos[1] - pb.pos[1];
+    const float mz = pa.pos[2] - pb.pos[2];
+    if (mx * mx + my * my + mz * mz < 0.010f * 0.010f) {
+        return;
+    }
+    float bestDist2 = 1e30f;
+    int64_t bestT = 0;
+    for (int i = 0; i + 1 < m_PoseTrailCount; i++) {
+        const PoseTrailPoint& a = trail(i);      // 較新
+        const PoseTrailPoint& b = trail(i + 1);  // 較舊
+        if (a.t > e.t + 110000000 || b.t < e.t - 400000000) {
+            continue;
+        }
+        const float abx = a.pos[0] - b.pos[0];
+        const float aby = a.pos[1] - b.pos[1];
+        const float abz = a.pos[2] - b.pos[2];
+        const float len2 = abx * abx + aby * aby + abz * abz;
+        float u = 0.0f;
+        if (len2 > 1e-12f) {
+            u = ((e.pos[0] - b.pos[0]) * abx + (e.pos[1] - b.pos[1]) * aby + (e.pos[2] - b.pos[2]) * abz) / len2;
+            u = (std::max)(0.0f, (std::min)(1.0f, u));
+        }
+        const float px = b.pos[0] + u * abx - e.pos[0];
+        const float py = b.pos[1] + u * aby - e.pos[1];
+        const float pz = b.pos[2] + u * abz - e.pos[2];
+        const float dist2 = px * px + py * py + pz * pz;
+        if (dist2 < bestDist2) {
+            bestDist2 = dist2;
+            bestT = b.t + static_cast<int64_t>(static_cast<double>(u) * static_cast<double>(a.t - b.t));
+        }
+    }
+    // 離軌跡 5 mm 以上＝算繪位置不在實際走過的路徑上（預測方向不同），時間沒有意義
+    if (bestDist2 < 0.005f * 0.005f) {
+        const float lagMs = static_cast<float>(static_cast<double>(e.t - bestT) / 1e6);
+        m_PoseLagMs.push_back(lagMs);
+        m_PoseLag1s.push_back(lagMs);
+    }
 }
 
 XrContext::Stats XrContext::stats() const

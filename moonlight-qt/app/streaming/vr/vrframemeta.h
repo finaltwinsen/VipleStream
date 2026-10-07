@@ -41,6 +41,21 @@ private:
     static Entry s_Entries[kSize];
 };
 
+// 2026-10-05：XR 模式的單幀解碼延遲（DU 進佇列到解出，與統計浮層同定義），decoder 執行緒寫、XR frame thread
+// 每秒取走 p50／p95 填 CLIENT_TIMING 的 decode 欄位（原本一直是 0）。同時最多一個 VR session，用行程全域。
+class VrDecodeTiming {
+public:
+    static void reset();
+    static void record(uint64_t us);
+    // 取走目前累積的樣本；沒有樣本回 false
+    static bool take(uint32_t* p50Us, uint32_t* p95Us);
+
+private:
+    static constexpr size_t kCap = 1024;  // 120 Hz 下 1 s 約 120 筆
+    static std::mutex s_Lock;
+    static std::vector<uint32_t> s_Samples;
+};
+
 class VrFrameMetaTracker {
 public:
     // injectDropEvery：每 N 個解出的幀丟一幀（模擬 decoder 吞幀），0＝關

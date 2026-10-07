@@ -425,7 +425,10 @@ public:
     };
     DisplayTarget displayTarget = DT_WINDOW;
     bool vrEmulate = false;          // 以合成 pose 取代 XR runtime（M1a 沒有 XR）
-    int  vrSyntheticMotion = 1;      // VrSyntheticMotion：0 still、1 sine、2 yaw30
+    int  vrSyntheticMotion = 1;      // VrSyntheticMotion：0 still、1 sine、2 yaw30、3 tilt30yaw（dev）、4 fast（dev）
+    // dev（--vr-synthetic-hmd，不寫入設定）：真的 XR 連線上，頭的姿態改送 vrSyntheticMotion 的合成運動。
+    // 無人配戴時用來跑「頭在動」才走得到的路徑；畫面會在頭盔裡甩動，不可以戴著用
+    bool vrSyntheticHmd = false;
     // 每眼解析度（打包尺寸為 2W×H，SBS）。預設 2160x2160＝Steam Frame 面板每眼的原生解析度。
     // 2026-10-03 Frame 實測：每眼 1728 清晰度不夠；iris 解 4320x2160@120（200 Mbps）每幀 p50 8.1 ms、
     // 吞吐量 120 fps 無誤，RTX 5060 Ti 編碼約 7 ms。--vr-eye 可改。
@@ -447,6 +450,8 @@ public:
     int xrTestRecenterSec = 0;       // dev（M3a X3）：bring-up 後第 N 秒自動 recenter 一次，不存設定
     bool xrTestPointer = false;       // §VR M3a X4（dev）：--xr-test-pointer，不寫入設定
     bool vrTestInput = false;         // §VR M4a R2（dev）：--vr-test-input 合成控制器按鍵，不寫入設定
+    bool vrLinkSelftest = false;      // §VR-MULTILINK（dev）：--vr-link-selftest 在同一張網卡再開一條連線，不寫入設定
+    double vrOverscanDeg = 0.0;       // 2026-10-05（dev）：--vr-overscan 每眼 FOV 四邊各放大幾度（0～10），不寫入設定
     bool vrTestHaptic = false;        // §VR M4a R2（dev）：--vr-test-haptic 本地注入 HAPTIC，不寫入設定
     QString xrTestKeyboard;           // §VR M3a（dev）：--xr-test-keyboard 的文字，不寫入設定
     QString xrDumpKeyboardPath;       // §VR M3a（dev）：--xr-dump-keyboard 的 PNG 路徑，不寫入設定

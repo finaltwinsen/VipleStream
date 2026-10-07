@@ -176,7 +176,8 @@ namespace {
   }
 
   void usage() {
-    probe::line("usage vr_probe --mode whoami|space|timing|scene|watch|ipcpeer|unit --out DIR --seconds N");
+    probe::line("usage vr_probe --mode whoami|space|timing|scene|watch|predict|ipcpeer|unit --out DIR --seconds N");
+    probe::line("usage predict: needs the client in --vr-emulate --vr-synthetic-motion tilt30yaw (SteamVR extrapolation semantics)");
     probe::line("usage ipcpeer: --abi N --hello-size B --peer-stop-signal-after N --peer-crash-after N --peer-never-read");
     probe::line("usage ipcpeer: --peer-close-after-welcome --peer-fence-max --peer-fence-max-after N --peer-escalate");
     probe::line("usage ipcpeer: --peer-gpu-hold-ms X --peer-writers N --peer-no-flush --peer-no-render --hello-repeat N --hello-interval-ms M --pipe NAME");
@@ -290,6 +291,9 @@ int wmain(int argc, wchar_t **argv) {
   }
   if (a.mode == "space") {
     return probe::run_space(a);
+  }
+  if (a.mode == "predict") {
+    return probe::run_predict(a);
   }
   probe::line("error reason=unknown-mode mode=%s", a.mode.c_str());
   usage();

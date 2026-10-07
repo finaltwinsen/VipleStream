@@ -633,7 +633,7 @@ namespace platf {
    * 多路徑探測使用。過濾 loopback、虛擬介面（Hyper-V、VMware、Docker）等。
    */
   struct advertised_interface {
-    std::string address;  // IPv4 字串，如 "192.168.51.226"
+    std::string address;  // IPv4 字串，如 "192.168.1.20"
     std::string name;     // 介面名稱，如 "Ethernet", "Tailscale"
     std::string type;     // "ethernet", "wifi", "vpn"
   };

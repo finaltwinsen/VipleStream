@@ -1944,7 +1944,7 @@ namespace quic_server {
   }
 
   // §K.5 helper: 正規化地址字串 — 去掉 IPv6-mapped-IPv4 前綴
-  // 讓 "::ffff:192.168.51.5" 和 "192.168.51.5" 可以比對
+  // 讓 "::ffff:192.168.1.5" 和 "192.168.1.5" 可以比對
   static std::string normalizeAddrStr(const std::string &addr) {
     static const std::string v4mapped = "::ffff:";
     if (addr.size() > v4mapped.size() &&

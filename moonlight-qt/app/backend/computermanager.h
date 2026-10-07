@@ -19,6 +19,8 @@
 #include <QMutex>
 #include <QWaitCondition>
 
+#include <atomic>
+
 class ComputerManager;
 
 class DelayedFlushThread : public QThread
@@ -249,6 +251,13 @@ public:
 
     QVector<NvComputer*> getComputers();
 
+    // VipleStream 2.0 §VR-LAUNCHER：GUI 的 VR 模式改抓 /applist?vr=1（多出 SteamVR Home 這類 vr 類 app）。
+    // 模式真的改變時才動作：不清空現有清單（hidden／directLaunch 這些 client 端屬性要靠舊清單依 id 合併），
+    // 而是請各輪詢執行緒立刻重抓；世代號讓切換前已發出、切換後才回來的舊模式結果作廢。
+    Q_INVOKABLE void setVrAppLists(bool vr);
+    bool vrAppLists() const { return m_VrAppLists.load(std::memory_order_acquire); }
+    uint32_t appListGeneration() const { return m_AppListGeneration.load(std::memory_order_acquire); }
+
     // VipleStream §H.4 — return the largest host display mode advertised by any
     // paired computer (Sunshine-based hosts only — NV/GFE servers advertise
     // encoder-capable modes rather than physical display modes).  Used by the
@@ -299,6 +308,8 @@ private:
     void startPollingComputer(NvComputer* computer);
 
     StreamingPreferences* m_Prefs;
+    std::atomic<bool> m_VrAppLists {false};             // §VR-LAUNCHER：GUI 執行緒寫、輪詢執行緒讀
+    std::atomic<uint32_t> m_AppListGeneration {0};      // 每次切換模式 +1
     int m_PollingRef;
     QReadWriteLock m_Lock;
     QMap<QString, NvComputer*> m_KnownHosts;

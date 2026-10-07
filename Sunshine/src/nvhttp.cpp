@@ -972,6 +972,10 @@ namespace nvhttp {
           vr_caps |= VIPLE_VR_SERVER_CAP_RECOVERY_INTRA;
         }
       }
+      // §VR-MULTILINK：只在 pcvr 且 vr_multilink 開啟時宣告
+      if ((vr_caps & VIPLE_VR_SERVER_CAP_PCVR) && config::vr.multilink != config::vr_t::multilink_e::disabled) {
+        vr_caps |= VIPLE_VR_SERVER_CAP_MULTILINK;
+      }
       tree.put("root.VipleStreamVR", vr_caps);
       tree.put("root.VipleStreamVRProto", VIPLE_VR_PROTO_VERSION);
     }
@@ -1132,7 +1136,8 @@ namespace nvhttp {
     // MP-QUIC 多路徑探測。客戶端會從中篩選可達的 IP，為每個可達
     // 的 client-NIC × server-IP 組合建立 QUIC path。舊客戶端的
     // XML parser 會忽略未知元素，不影響相容性。
-    if (config::stream.mpquic_enabled) {
+    // §VR-MULTILINK：多連線的 client 也靠這份清單找「和它每張網卡同子網路的 server 位址」
+    if (config::stream.mpquic_enabled || config::vr.multilink != config::vr_t::multilink_e::disabled) {
       auto net_ifaces = platf::enum_net_interfaces();
       for (const auto &iface : net_ifaces) {
         pt::ptree node;
@@ -1354,6 +1359,8 @@ namespace nvhttp {
     neg->safety_ms = config::vr.intra_refresh_safety_ms;
     neg->guid = uuid_util::uuid_t::generate().string();
     neg->owner_uuid = caller_uuid;
+    // §VR-MULTILINK：雙方都支援才啟用
+    neg->multilink = (params.caps & VIPLE_VR_CLIENT_CAP_MULTILINK) && config::vr.multilink != config::vr_t::multilink_e::disabled;
     neg->pcvr = config::vr.pcvr == config::vr_t::pcvr_e::enabled;  // M1b V5：enabled 才是真的 SteamVR 串流
 
     BOOST_LOG(info) << "[VIPLE-VR-SESSION] accepted "sv << (is_resume ? "/resume"sv : "/launch"sv)
@@ -1400,7 +1407,11 @@ namespace nvhttp {
       return std::nullopt;
     }
     const auto c = ::vr::platform::cached_conflicts();
-    if (c.any && !params.force) {
+    // §VR-REARM（2026-10-04）：SteamVR 用的是我們的 driver 時，執行中的 VR 遊戲多半是上一個 VR session 留下的
+    // （斷線、從頭盔結束串流）。不在這裡擋——交給編排器：HMD 還在 Present 就沿用，standby 先試重新 arm，不行才回
+    // restart-required。原本一律回 503 VRLINK_ACTIVE: kind=vr-app，斷線後就接不回原本的遊戲。
+    const bool own_vr_app = c.kind == "vr-app" && c.our_driver;
+    if (c.any && !own_vr_app && !params.force) {
       put_vr_error(tree, false, 503, VIPLE_VR_ERR_VRLINK_ACTIVE, "kind=" + c.kind + " (retry with vrForce=1 to let the host restart SteamVR)");
       return std::nullopt;
     }

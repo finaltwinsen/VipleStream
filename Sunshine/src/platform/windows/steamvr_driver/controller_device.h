@@ -26,8 +26,14 @@ namespace vrdrv {
       return right_ ? "VIPLE-CTRL-R" : "VIPLE-CTRL-L";
     }
 
-    /// tracking 執行緒：slot 的 pose[1|2] 與 input[0|1]；have = slot 帶 LEFT/RIGHT 旗標；age_us = 距上次新樣本
-    void update(const vripc_pose_t &pose, const vripc_ctrl_input_t &in, bool have, int64_t age_us, uint32_t oor_us, bool zero_vel);
+    /**
+     * tracking 執行緒：slot 的 pose[1|2] 與 input[0|1]；have = slot 帶 LEFT/RIGHT 旗標；age_us = 距上次新樣本。
+     * pose_time_offset：DriverPose_t::poseTimeOffset（§VR-CTRL-OFFSET 關閉時呼叫端給 0）；
+     * ang_scale：角速度倍率（§VR-STALE-HOLD 期間由 1 衰減到 0，其他時候 1）
+     * angvel_local：§VR-ANGVEL-LOCAL，把 client 的世界座標角速度轉成機體座標（SteamVR 的語意）
+     */
+    void update(const vripc_pose_t &pose, const vripc_ctrl_input_t &in, bool have, int64_t age_us, uint32_t oor_us, bool zero_vel,
+                double pose_time_offset, double ang_scale, bool angvel_local);
     /// 連線中斷／standby：poseIsValid=false、放開所有輸入
     void invalidate();
 

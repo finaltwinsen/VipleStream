@@ -221,3 +221,41 @@ bool VrRenderMetaRing::lookup(int64_t pts, VIPLE_VR_FRAME_META* meta)
     *meta = e.meta;
     return true;
 }
+
+// ── 2026-10-05：VrDecodeTiming ──
+std::mutex VrDecodeTiming::s_Lock;
+std::vector<uint32_t> VrDecodeTiming::s_Samples;
+
+void VrDecodeTiming::reset()
+{
+    std::lock_guard<std::mutex> lock(s_Lock);
+    s_Samples.clear();
+}
+
+void VrDecodeTiming::record(uint64_t us)
+{
+    std::lock_guard<std::mutex> lock(s_Lock);
+    if (s_Samples.size() < kCap) {
+        s_Samples.push_back((uint32_t)std::min<uint64_t>(us, 0xffffffffu));
+    }
+}
+
+bool VrDecodeTiming::take(uint32_t* p50Us, uint32_t* p95Us)
+{
+    std::vector<uint32_t> v;
+    {
+        std::lock_guard<std::mutex> lock(s_Lock);
+        v.swap(s_Samples);
+    }
+    if (v.empty()) {
+        return false;
+    }
+    auto pct = [&v](double p) {
+        const size_t idx = std::min(v.size() - 1, (size_t)(p * (double)(v.size() - 1) + 0.5));
+        std::nth_element(v.begin(), v.begin() + (std::ptrdiff_t)idx, v.end());
+        return v[idx];
+    };
+    *p50Us = pct(0.50);
+    *p95Us = pct(0.95);
+    return true;
+}

@@ -73,7 +73,17 @@ public:
         // VrRenderMetaRing，render 時以 frame->pts 取回）。hasMeta=false＝沒有 meta（β 或非 VR session）。
         bool hasMeta = false;
         VIPLE_VR_FRAME_META meta = {};
+        // 2026-10-05（§VR 錯配計數）：這張影像 xrReleaseSwapchainImage 後的 release 序號
+        uint64_t releaseNo = 0;
     };
+
+    // 2026-10-05：目前最後一次 xrReleaseSwapchainImage 的序號（呼叫端持 XrContext::queueMutex() 讀，與 release 互斥）。
+    // runtime 在 xrEndFrame 用的是「最後 release 的影像」；它跟 current() 拿到的 releaseNo 不同，就代表 projection 用的
+    // render pose 屬於前一張影像（錯配一幀）。
+    uint64_t releaseNo() const
+    {
+        return m_ReleaseNo.load(std::memory_order_relaxed);
+    }
 
     XrVideo(XrContext* ctx, const Config& config);
     ~XrVideo();
@@ -164,6 +174,7 @@ private:
     std::mutex m_SwMutex;
     bool m_HavePublished = false;          // 至少 release 過一次
     Current m_Published;                   // XR thread 讀的快照
+    std::atomic<uint64_t> m_ReleaseNo{0};  // 2026-10-05：xrReleaseSwapchainImage 次數（在 queueMutex 內遞增）
     std::vector<SwapchainSet> m_Retired;   // 等 XR thread 送出新一代後銷毀
     uint64_t m_XrAckGeneration = 0;        // XR thread 最近一次 xrEndFrame 引用的 generation
 

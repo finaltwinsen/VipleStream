@@ -22,6 +22,7 @@
 #include "vr_bridge.h"
 #include "vr_orchestrator.h"
 #include "vr_platform.h"
+#include "vr_predict.h"
 #if VIPLE_VR_BRIDGE_HAS_ABI
   #include "vr_ipc_abi.h"
 #endif
@@ -209,12 +210,41 @@ namespace vr::orchestrator {
       c.space_epoch = 0;  // client 的 0x5506 目前固定 spaceEpoch=0
       c.layout_epoch = 1;
       const uint32_t period_us = static_cast<uint32_t>(c.period_ns / 1000u);
-      c.vsync_to_photons_us = period_us;
+      // §VR-PREDICT：設定檔 vr_vsync_to_photons_us > 0＝固定；否則用上一個 session 學到的值，沒有就用「一個
+      // 顯示週期＋30 ms」，串流中再依 client 回報的姿態落後調整（stream.cpp 的 CLIENT_TIMING 處理）
+      const auto v2p = vr::predict::begin_session(period_us, config::vr.vsync_to_photons_us > 0 ? static_cast<uint32_t>(config::vr.vsync_to_photons_us) : 0u);
+      c.vsync_to_photons_us = v2p.us;
+      {
+        std::string src;
+        switch (v2p.source) {
+          case vr::predict::start_e::fixed:
+            src = "fixed by config";
+            break;
+          case vr::predict::start_e::learned:
+            src = "learned";
+            break;
+          case vr::predict::start_e::converted:
+            // 2026-10-05：學到的值依更新率分開存；這個更新率沒學過時由最接近的更新率換算
+            src = std::format("converted from the value learned at {:.1f} Hz", v2p.from_period_us ? 1e6 / v2p.from_period_us : 0.0);
+            break;
+          case vr::predict::start_e::initial:
+            src = "default: period + 30 ms";
+            break;
+        }
+        BOOST_LOG(info) << "[VIPLE-VR-PREDICT] session start vsync_to_photons_us=" << v2p.us << " (" << src << ')';
+      }
       c.hmd_extrap_cap_us = 50000;
       c.ctrl_extrap_cap_us = 50000;
       c.stale_oor_ctrl_us = 100000;
       c.stale_zero_vel_us = 2 * period_us;
       c.stale_oor_hmd_us = 1000000;
+      // §VR-CTRL-OFFSET／§VR-STALE-HOLD（2026-10-05）：預設都關，Frame A/B 後再決定預設值
+      c.pose_flags = (config::vr.ctrl_pose_offset ? VRIPC_POSE_F_CTRL_OFFSET : 0u) |
+                     (config::vr.stale_policy == config::vr_t::stale_e::hold ? VRIPC_POSE_F_STALE_HOLD : 0u) |
+                     (config::vr.angvel_local ? VRIPC_POSE_F_ANGVEL_LOCAL : 0u);
+      BOOST_LOG(info) << "[VIPLE-VR-ORCH] pose flags ctrlOffset=" << (config::vr.ctrl_pose_offset ? 1 : 0)
+                      << " stalePolicy=" << (config::vr.stale_policy == config::vr_t::stale_e::hold ? "hold" : "legacy")
+                      << " angvelLocal=" << (config::vr.angvel_local ? 1 : 0);
       return c;
     }
 #endif
@@ -298,6 +328,7 @@ namespace vr::orchestrator {
       set_state(state_e::conflict);
       t0 = steady::now();
       bool need_launch = true;
+      bool rearm = false;  // §VR-REARM：我們的 HMD 在 standby、VR 遊戲還在跑——先試直接重新 arm
       {
         const auto bs = bridge::status();
         const auto c = platform::detect_conflicts(bs.connected && !bs.peer_is_selftest, bs.other_hmd);
@@ -317,12 +348,17 @@ namespace vr::orchestrator {
               restart = true;
             } else if (!bs.hmd_presenting) {
               // V5 S0 實測：上一個 session 的 disarm（standby）之後 re-arm，vrcompositor 不會再 Present（45 s HMD_TIMEOUT，
-              // 與 V4 未解 2 的 AcquireSync 逾時同源）。我們自己閒置的 SteamVR 直接重啟；有 VR app 在跑時不動它。
-              if (c.vr_app_running && !job.force) {
-                step("conflict", false, "restart-required (standby)", t0);
-                return fail(VIPLE_VR_STATE_CODE_STEAMVR_RESTART_REQUIRED, "our HMD is in standby and a VR app is running");
+              // 與 V4 未解 2 的 AcquireSync 逾時同源）。我們自己閒置的 SteamVR 直接重啟。
+              // §VR-REARM（2026-10-04）：有 VR 遊戲在跑時重啟 SteamVR 會把遊戲關掉（使用者斷線後想接回原本的遊戲）。
+              // §VR-RING-RELEASE 修好 frame ring 死結之後先試直接重新 arm，WAIT_HMD 只等 k_rearm_wait；
+              // 等不到 Present 才照舊回 restart-required。
+              // RunningAppID 是 SteamVR 本身（250820）不算遊戲：照舊直接重啟
+              if (c.vr_app_running && c.running_app_id != platform::k_steamvr_app_id && !job.force) {
+                rearm = true;
+                need_launch = false;
+              } else {
+                restart = true;
               }
-              restart = true;
             } else {
               need_launch = false;
             }
@@ -403,9 +439,16 @@ namespace vr::orchestrator {
           const auto s = bridge::status();
           return s.connected && s.ready && s.has_config && !s.peer_is_selftest;
         });
+        if (rearm && !ready) {
+          if (stop_requested()) {
+            return;
+          }
+          step("arm", false, "rearm: driver not ready", t0);
+          return fail(VIPLE_VR_STATE_CODE_STEAMVR_RESTART_REQUIRED, "re-arm from standby: driver not ready and a VR app is running");
+        }
         need_launch = !ready;
       }
-      step("arm", true, need_launch ? "launch" : "reuse", t0);
+      step("arm", true, rearm ? "rearm" : (need_launch ? "launch" : "reuse"), t0);
 
       auto launch_t0 = steady::now();
       // §SAFE-RETRY：上一次 vrserver 在啟動後很快當掉時，這一次 SteamVR 會以 safe mode 啟動並擋掉我們的 driver
@@ -419,6 +462,19 @@ namespace vr::orchestrator {
           return fail(VIPLE_VR_STATE_CODE_REGISTER_FAILED, "not exactly one registration before launch");
         }
         if (!platform::vrserver_pid()) {
+          // §STEAM-LOGIN（2026-10-04）：§VR-NODASH 改用 vrstartup.exe 之後，Steam 沒在跑時不會被帶起來；Steam 沒記住帳號時
+          // 更會停在登入畫面（實測：使用者為了換帳號登出後沒登回來）——以前一律等 60 s 才回 STEAM_NOT_LOGGED_IN。
+          // 沒登入又沒記住帳號就立刻失敗（頭盔裡的人也沒辦法登入）；有記住帳號但 Steam 沒在跑就先以使用者身分啟動。
+          if (!platform::steam_logged_in()) {
+            if (!platform::steam_auto_login_configured()) {
+              step("launch-steamvr", false, "steam not signed in (no saved login)", t0);
+              return fail(VIPLE_VR_STATE_CODE_STEAM_NOT_LOGGED_IN, "steam not signed in and no saved login");
+            }
+            if (!platform::steam_running()) {
+              const bool started = platform::start_steam_silent();
+              BOOST_LOG(info) << "[VIPLE-VR-ORCH] steam not running (saved login) - started=" << started;
+            }
+          }
           if (!platform::launch_steamvr()) {
             return fail(VIPLE_VR_STATE_CODE_STEAMVR_LAUNCH_FAILED, "open_url");
           }
@@ -502,19 +558,28 @@ namespace vr::orchestrator {
         break;
       }
 
-      // 10 WAIT_HMD（自 LAUNCH 起累計 45 s）
+      // 10 WAIT_HMD（自 LAUNCH 起累計 45 s；§VR-REARM 只等 k_rearm_wait）
       set_state(state_e::wait_hmd);
       t0 = steady::now();
       const auto left = 45s - std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - launch_t0);
-      if (!wait_for(std::max<std::chrono::milliseconds>(left, 5s), []() {
+      constexpr auto k_rearm_wait = 10s;
+      if (!wait_for(rearm ? std::chrono::milliseconds(k_rearm_wait) : std::max<std::chrono::milliseconds>(left, 5s), []() {
             const auto s = bridge::status();
             return s.hmd_presenting || s.other_hmd == VRIPC_OTHER_HMD_PRESENT || s.degraded_code != 0;
           })) {
         if (stop_requested()) {
           return;
         }
+        if (rearm) {
+          step("wait-hmd", false, "rearm: no present", t0);
+          return fail(VIPLE_VR_STATE_CODE_STEAMVR_RESTART_REQUIRED, "our HMD stayed in standby after re-arm and a VR app is running");
+        }
         step("wait-hmd", false, "timeout", t0);
         return fail(VIPLE_VR_STATE_CODE_HMD_TIMEOUT, "no HMD_PRESENTING in 45 s");
+      }
+      if (rearm) {
+        BOOST_LOG(info) << "[VIPLE-VR-ORCH] rearm from standby ok (VR app kept running) ms="
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - t0).count();
       }
       {
         const auto s = bridge::status();
@@ -537,7 +602,6 @@ namespace vr::orchestrator {
 
       // 12 ACTIVE（13 DRIVER_LOST）
       set_state(state_e::active);
-      int lost_tries = 0;
       while (!stop_requested()) {
         {
           std::unique_lock lk(g_mtx);
@@ -550,21 +614,24 @@ namespace vr::orchestrator {
         if (!s.connected || s.peer_is_selftest) {
           set_state(state_e::driver_lost);
           t0 = steady::now();
-          const bool back = wait_for(10s, []() {
+          const auto reconnected = []() {
             const auto x = bridge::status();
             return x.connected && x.ready && !x.peer_is_selftest;
+          };
+          wait_for(10s, [&]() {
+            return reconnected() || platform::vrserver_pid() == 0;
           });
           if (stop_requested()) {
             break;
           }
-          if (!back) {
-            if (platform::vrserver_pid() == 0 && lost_tries++ == 0 && platform::launch_steamvr() && wait_for(40s, []() {
-                  const auto x = bridge::status();
-                  return x.connected && x.ready && x.hmd_presenting;
-                })) {
-              step("driver-lost-relaunch", true, "", t0);
-              set_state(state_e::active);
-              continue;
+          if (!reconnected()) {
+            // §VR-EXIT（2026-10-04）：使用者在 host 的 SteamVR 主控台按「退出 VR」→ vrserver 結束 → driver 斷線。以前等 10 s
+            // 後自動重開 SteamVR（當成當掉），Frame 上畫面亂閃、使用者出不去。SteamVR 不在了就正常結束這個 session：
+            // run_session 正常返回 → STOPPING → active() 變 false → proc.running() 回 0 → control 迴圈送 graceful
+            // termination，client 不跳錯誤。SteamVR 真的當掉時遊戲也已經跟著結束，重開 SteamVR 接不回遊戲。
+            if (platform::vrserver_pid() == 0) {
+              step("driver-lost", true, "steamvr closed on host - ending session", t0);
+              return;
             }
             step("driver-lost", false, "no reconnect", t0);
             return fail(VIPLE_VR_STATE_CODE_DRIVER_LOST, "driver lost");
@@ -574,6 +641,48 @@ namespace vr::orchestrator {
         }
       }
 #endif
+    }
+
+    /// §VR-RESTORE-IDLE（2026-10-04，Frame 實測）：session 結束後 SteamVR 還開著時 guard 還原不了——host 的
+    /// `forcedDriver` 還是 viplestream、vrlink 被我們關著，使用者改用 Steam 自己的串流就開不起來。我們的 HMD 在 standby、
+    /// 沒有 VR 遊戲在跑滿 k_idle_quit 就結束 SteamVR（下一個維護 tick 還原設定）。遊戲還在跑時不動（留給斷線後接回）；
+    /// 沒有遊戲時下一個 session 本來就會重啟 SteamVR（CONFLICT 的 restart），提早結束不會讓接續變慢。
+    void idle_quit_steamvr(state_e st) {
+      static steady::time_point idle_since {};
+      constexpr auto k_idle_quit = 30s;
+      const auto bs = bridge::status();
+      const auto c = platform::cached_conflicts();
+      // 遊戲結束後 RunningAppID 常變成 SteamVR 本身（250820，也在 vrmanifest 裡）——那不算還有遊戲在跑
+      const bool game_running = c.vr_app_running && c.running_app_id != platform::k_steamvr_app_id;
+      const bool idle_ours = st == state_e::restore_pending && platform::guard_pending() && platform::vrserver_pid() != 0 &&
+                             bs.connected && !bs.peer_is_selftest && !bs.hmd_presenting && !game_running;
+      if (!idle_ours) {
+        idle_since = {};
+        return;
+      }
+      const auto now = steady::now();
+      if (idle_since == steady::time_point {}) {
+        idle_since = now;
+        return;
+      }
+      if (now - idle_since < k_idle_quit) {
+        return;
+      }
+      idle_since = {};
+      const auto t0 = steady::now();
+      platform::wait_steamvr_settled();  // §QUIT-SETTLE
+      bool quit = false;
+      if (bs.hmd_added) {
+        bridge::request_steamvr_quit();
+        quit = wait_for(5s, []() {
+          return platform::vrserver_pid() == 0;
+        });
+      }
+      if (!quit) {
+        const auto q = platform::quit_steamvr(false);
+        quit = q == platform::quit_e::exited || q == platform::quit_e::killed || q == platform::quit_e::not_running;
+      }
+      step("idle-quit-steamvr", quit, "no VR app, HMD in standby", t0);
     }
 
     /// 維護（IDLE／RESTORE_PENDING／ERROR 時）：環境、衝突快取、guard 還原
@@ -593,6 +702,7 @@ namespace vr::orchestrator {
       if (st == state_e::error && now_ms() < g_error_until_ms.load()) {
         return;
       }
+      idle_quit_steamvr(st);
       if (platform::guard_pending() && platform::vrserver_pid() == 0) {
         const auto t0 = steady::now();
         const auto g = platform::guard_restore();

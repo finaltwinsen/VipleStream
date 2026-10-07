@@ -89,6 +89,7 @@ namespace probe {
   int run_timing(const args_t &a);
   int run_watch(const args_t &a);
   int run_space(const args_t &a);
+  int run_predict(const args_t &a);
 
   // 回傳碼（selftest 依此判讀；情境的預期結果以 stdout 的 key=value 為準）
   constexpr int rc_ok = 0;  // 跑完（不代表情境「成功」，見 summary 行）

@@ -65,6 +65,7 @@ SOURCES += \
     $$COMMON_C_DIR/src/PlatformSockets.c \
     $$COMMON_C_DIR/src/RtpAudioQueue.c \
     $$COMMON_C_DIR/src/RtpVideoQueue.c \
+    $$COMMON_C_DIR/src/VrMultiLink.c \
     $$COMMON_C_DIR/src/RtspConnection.c \
     $$COMMON_C_DIR/src/RtspParser.c \
     $$COMMON_C_DIR/src/SdpGenerator.c \
@@ -76,6 +77,7 @@ SOURCES += \
 HEADERS += \
     $$COMMON_C_DIR/src/Limelight.h \
     $$COMMON_C_DIR/src/VipleVr.h \
+    $$COMMON_C_DIR/src/VrMultiLink.h \
     $$COMMON_C_DIR/src/HolePunch.h \
     $$COMMON_C_DIR/src/UdpTunnel.h
 INCLUDEPATH += \

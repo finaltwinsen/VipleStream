@@ -455,6 +455,70 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
 [VIPLE-VR-TX] transport=rtp (VR video forced to RTP/UDP; QUIC session present, kept for control fallback)
 [VIPLE-VR-POSE-RX] 10s: rx=1800 (180.0/s) ooo=0 gap=… viaQuic=… bad=0 lastId=… | frames tagged=… fallback=0 | c2s loss=… waves=… latch=… timing=… other=…
 [VIPLE-VR-POSE-RX] (final) rx=… ooo=… gap=… viaQuic=… bad=… resets=… lastId=…
+[VIPLE-VR-UPLINK] 10s: arrivalMaxMs=… gt2T=N | ctrl loop bodyMaxUs=… cbMaxUs=… cbMaxType=0x<type> slowCb=N events=N
+                                                                              ← 2026-10-05：server 收到 tracking 樣本的最大間隔與 > 2 個顯示週期的次數；控制執行緒
+                                                                                 迴圈本體與單一 callback 的最長耗時（≥ 2 ms 算 slowCb）。和 driver 的 tracking 10s
+                                                                                 arrivalMaxMs 對照：server 端就大＝網路／client；只有 driver 端大＝server 轉送
+[VIPLE-VR-LINK] multi-link ready: video=auto|all|primary maxAgeMs=…               ← §VR-MULTILINK（2026-10-06）：session 協商了多連線
+[VIPLE-VR-LINK] link N created: server <addr> video:<port> audio:<port> <-> client <addr> video:<port> audio:<port>
+[VIPLE-VR-LINK] link N confirmed (both directions pass)                       ← 第一次收到帶 CONFIRMED 的 PING
+[VIPLE-VR-LINK] link N cannot keep up - video paused on it for [at least ]S s (…) ← 飽和偵測：1 s 視窗內至少 24 個批次、其中 40% 以上送不完；
+                                                                                 auto 時退回探測（at least）
+[VIPLE-VR-LINK] link N measured X Mbps (need Y) - video starts on it          ← auto：探測中的連線連續 2 次量到夠快
+[VIPLE-VR-LINK] link N measured faster than measurable (need Y Mbps) - video starts on it
+                                                                              ← auto：頭盔回報 65535（整個探測幀同一瞬間到）連續 2 次
+[VIPLE-VR-LINK] hold 10s: waits=N recovered=N expired=N heldPkts=N maxWaitMs=… limitMs=… | nack=N repaired=N gone=N
+                                                                              ← client（§VR-MULTILINK-HOLD）：下一幀先到時，等落後那條連線補齊這一幀的次數、
+                                                                                 等到／等不到的次數、排過隊的封包數、最長等待與上限；沒有等待也沒有回報就不印。
+                                                                                 至少兩條連線實際在送影像、或 server 會補包時才會等。
+                                                                                 nack／repaired／gone（§VR-LINK-REPAIR）＝送出的缺包回報數、回報之後收齊的
+                                                                                 block 數、server 回「補不了」的次數。可以補包時 maxWaitMs 可能大於 limitMs：
+                                                                                 等待期間前面的 block 收齊過，期限會從那一刻起再延一個幀週期（上限兩個）
+[VIPLE-VR-LINK] link features: ctrl=on|off repair=on|off                      ← server（2026-10-07）：這個 session 協商出來的連線層功能
+                                                                                 （§VR-LINK-CTRL／§VR-LINK-REPAIR；`vr_multilink_ctrl`、`vr_multilink_repair`
+                                                                                 開著、而且 client 支援）
+[VIPLE-VR-LINK] link features agreed by the server: ctrl=… repair=…           ← client：同上（LINK_READY 尾端的 hubCaps）
+[VIPLE-VR-REPAIR] nack frame=F block=B have=N/T (data D) attempt=K (…)[ SEND FAILED]
+                                                                              ← client：回報正在等的 FEC block 缺 shard。have＝手上有幾個／這個 block 共幾個；
+                                                                                 0/0＝一個封包都沒收到。括號是觸發原因：tail seen（最後一個 shard 到了還不夠）、
+                                                                                 idle（3 ms 沒有新封包）、next frame waiting（下一幀到了）、every link passed
+                                                                                 （兩條以上在送：每條都送過這個 block 了）、slower link overdue（較慢那條超過
+                                                                                 平常的時間差還沒送到）、retry。每場前 12 筆照印，之後每 50 筆一筆
+[VIPLE-VR-REPAIR] gave up frame=F block=B (wait expired|hold full): nacks=N refunds=N, … ms since the last one (rto … ms), have=N/D, first packet … ms ago, gone=0|1
+                                                                              ← client：回報過、還是等不到，放棄這個 block（接著會報 LOSS）。refunds＝鏈路空檔後
+                                                                                 退還的回報次數；first packet＝這個 block 第一個封包多久以前到的（−1＝一個都
+                                                                                 沒到）；gone＝server 回了「補不了」。自己的節流：每場前 30 筆，之後每 20 筆一筆
+[VIPLE-VR-POSE] dev: --vr-synthetic-hmd - the head pose sent to the host is synthetic (…)   ← client（warning）：dev 選項，真的 XR 連線上
+                                                                                 頭的姿態改送合成運動（無人配戴的測試用）；tracking sender 的 source 會印
+                                                                                 `xr+synthetic-hmd`
+[VIPLE-VR-REPAIR] nack frame=F block=B age=…ms have=N/T (data D) attempt=K round=R -> resend N pkts|GONE reason=R|nothing to send
+                                                                              ← server：收到一則回報與處置。age＝這個 block 第一批送出到現在；GONE reason
+                                                                                 1＝太舊（超過三個幀週期）、2＝補包額度用完、3＝封包倉裡沒有這個 block；
+                                                                                 nothing to send＝client 其實已經夠還原，或缺的剛補過還在路上。
+                                                                                 「太舊」與「額度用完」另外節流（每場前 30 筆、之後每 20 筆一筆），格式是
+                                                                                 `age=…ms attempt=K rounds=R[ wanted=N pkts, budget left M] -> GONE reason=1|2`
+[VIPLE-VR-REPAIR] link N sent K/M repair pkts, queued … ms, sending took … ms  ← server：一批補包在這條連線送出的情況（queued＝在補包佇列等了多久；
+                                                                                 K < M＝等過頭或送到一半過期，沒送的算進下一行的 late）
+[VIPLE-VR-REPAIR] 10s: nack=N rounds=N pkts=N gone=N (expired=N budget=N unknown=N) nothingToSend=N exhausted=N | L1 tx=N late=N queuedMaxMs=… | L2 …
+                                                                              ← server：10 秒彙總（有回報才印）。rounds／pkts＝補了幾輪、共幾個封包（每條連線
+                                                                                 各送一份只算一次）；exhausted＝同一個 block 補滿 5 輪還缺
+[VIPLE-ABR] ramp held: N shards repaired in M ms (P% of the video packets; src=…)
+                                                                              ← server：補包救回來的缺包佔 3% 以上，這一輪不回升位元率（也不降；補得回來的
+                                                                                 不算丟包）。每 5 秒最多一行
+[VIPLE-VR-LINK] skipping '<if>' (USB network link is not used for multi-link)  ← client：USB 網路 gadget 不當連線
+[VIPLE-VR-LINK] 10s: trkFirst enet=N | L1 up|down[(probing)][(paused Ns)] tx=N (… Mbps) dropAge=N dropBlock=N dropFull=N paused=N standby=N fault=N err=N
+                     sendMaxMs=… audio=N/N mutes=N probes=N starts=N forced=N deliv=P%|- rx ping=N trk=N dup=N bad=N trkFirst=N ctl=N s2c=N/N client rx=N used=N rttMs=… gapMaxMs=N burstMbps=N | L2 …
+                                                                              ← 每條連線一段。dropAge＝出列時已超過兩個幀週期；dropBlock＝送到一半
+                                                                                 期限到了；paused／standby＝暫停期間或 video=primary 時沒送的；
+                                                                                 trkFirst＝這條連線先送到的追蹤樣本；client …＝頭盔端在 PING 回報的
+                                                                                 收到／被採用封包數、往返時間、最大到達間隔與最近一串封包的到達速率；
+                                                                                 probes／starts＝累計送出的探測批數與「量到夠快而開始送影像」的次數；
+                                                                                 forced＝沒有任何連線在送影像時，保底在這條連線送出的封包數（累計）；
+                                                                                 deliv＝送達率（頭盔在 PING 回報的累計收到數 ÷ server 的累計送出數，約每秒結算；還不知道時印 -）；
+                                                                                 ctl＝這條連線先送到的 0x5507（LOSS／LATCH／NACK）則數、s2c＝送出／送不出去的
+                                                                                 T_S2C（§VR-LINK-CTRL）。
+                                                                                 client 端的同名 10s 行另有每條連線的 lagMs（這條比最先送到的那條平常晚多久，
+                                                                                 §VR-LINK-REPAIR 決定回報時機用）與結尾的 ctl tx／drop、s2c rx／dup／bad
 [VIPLE-VR-LOSS] rx first=… last=… reason=… -> new_wave|absorbed|duplicate|idr (+N suppressed, total=…)   ← duplicate 只在 50 ms 內、RESEND 不算
 ```
 
@@ -472,8 +536,8 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
 - `[VIPLE-VR-CAP] init_device: no adapter selected`：`display_base_t::init_device` 收到空 adapter（DDA／WGC 不會走到）。
 - **M1b V3（VR 擷取，`display_vr_t`）**：
   - `[VIPLE-VR-CAP] init adapter=<desc> luid=<match|n/a> size=<W>x<H>@<hz> mode=<probe|live>`：建立時一次。選卡（K22）只收非軟體、VendorId≠0x1414、能建 FL 11_0、而且 `D3DKMT` ADAPTERTYPE 不是間接顯示（IddCx，例：MTT VDD 會在 DXGI 裡冒充成同名實體卡）的adapter；候選多於一張又沒有 `vrcompositor_adapter` 紀錄 → `VR_DISABLED: adapter mismatch …`（fail closed）。
-  - `[VIPLE-VR-CAP] opened gen=<n> ring=<W>x<H>` / `first frame gen=<n> …` / `frame source gen=<n> is on a different adapter; reinit` / `ring … != display …; reinit` / `open gen=<n> failed: <open-texture[i]|open-shared-fence|open-consumed-fence>`。driver generation 換了只重開 ring，不重建 encoder。
-  - `[VIPLE-VR-CAP] 10s: gen= copied= skipped= fenceTimeout= invalid= stale= black= evtToPush p50/p95 presentToPush p50/p95 echoAge p50/p95`：健康時 invalid／stale／fenceTimeout 為 0，evtToPush p95 ≤ 1.5 ms（V3 host 實測 0.33 ms）。`echoAge`（V6 起）＝echo 樣本發布到 tracking ring → app Present，涵蓋延遲預算第 3＋4＋5 項，只算 ECHO_MATCHED 的幀（S3-09 用）。`black` 只在 driver 回報 HMD_PRESENTING 前（10 fps 黑幀）。
+  - `[VIPLE-VR-CAP] opened gen=<n> ring=<W>x<H> released=<k>` / `first frame gen=<n> …` / `frame source gen=<n> is on a different adapter; reinit` / `ring … != display …; reinit` / `open gen=<n> failed: <open-texture[i]|open-shared-fence|open-consumed-fence>`。driver generation 換了只重開 ring，不重建 encoder。`released`（§VR-RING-RELEASE，2.0.0）＝開 ring 時直接交還 driver、沒複製的幀數：同一個 generation 換消費者（例：VR 斷線後 `/resume`），上一個消費者停掉後 driver 發布的最後幾幀（最多 3 個 slot）不論是否過期都放回；舊版用 read_latest() 排空，停過 1 s 以上那一筆會被 §B.8 時間窗判不合格而不交還，driver 沒有 slot 可用、只剩 10 fps 重送幀。
+  - `[VIPLE-VR-CAP] 10s: gen= copied= skipped= fenceTimeout= invalid= stale= black= released= evtToPush p50/p95 presentToPush p50/p95 echoAge p50/p95`：健康時 invalid／stale／fenceTimeout 為 0，`released` 只在換消費者或等幀逾時 100 ms 時才可能非 0（交還曾被判不合格、沒複製的幀），evtToPush p95 ≤ 1.5 ms（V3 host 實測 0.33 ms）。`echoAge`（V6 起）＝echo 樣本發布到 tracking ring → app Present，涵蓋延遲預算第 3＋4＋5 項，只算 ECHO_MATCHED 的幀（S3-09 用）。`black` 只在 driver 回報 HMD_PRESENTING 前（10 fps 黑幀）。
   - `[VIPLE-VR-CAP] gpu-priority=high (was realtime|high)`：擷取期間行程 GPU 優先權改 HIGH（vrcompositor 與遊戲同卡，REALTIME 會搶遊戲）。
   - `[VIPLE-VR-CAP] capture ctx mixed sources; using newest (source=…)`：前一個桌面擷取執行緒還沒結束就接上 VR ctx，強制重建成 display_vr_t。`sync capture path does not support captureSource=1`＝防呆（Windows 走不到）。
   - `[VIPLE-VR-ENC] desktop probe state saved|restored (source=…)`：VR 探測（`vr_probe_scope`）前後保存／還原桌面探測結果，`/serverinfo` 前後必須逐字相同（selftest T1b）；`probe shape codec=… <W>x<H>@<hz> ir=<n>` 與 `intra refresh: …` 是 VR 形狀的探測結果。
@@ -548,6 +612,12 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-DRV] controller hand=<left|right> render model=<name> (client profile <n>)   ← M4a 收尾：依 0x5506 input.profile 選外觀（Touch／Index／Frame）
 [VIPLE-VR-DRV] controller hand=<…> render model <name> not installed - using Touch
 [VIPLE-VR-DRV] controller hand=<left|right> <out-of-range|tracking> age_ms=<n>                   ← 控制器狀態切換（沒資料、active=0、> 100 ms）
+[VIPLE-VR-DRV] tracking 10s: new=N staleSends=N stale=N oor=N invalid=N torn=N offsetUs min=… max=… p50=… ctrlOffUs p50=… p95=…
+               arrivalMaxMs=… gt2T=N hold=N holdExpired=N poseFlags=0x<n>
+                                                                                    ← 2026-10-05 起尾端加：HMD offset 中位數、控制器 offset（§VR-CTRL-OFFSET 開才有值）、
+                                                                                       driver 收到新樣本的最大間隔與 > 2T 次數、§VR-STALE-HOLD 次數與超過 100 ms 的次數、
+                                                                                       pose_flags（bit0 控制器 offset、bit1 stale hold、bit2 角速度轉機體座標）
+[VIPLE-VR-DRV] tracking recovered gap_ms=… total_ms=… hold=<0|1>                  ← stale 之後收到新樣本；gap_ms＝距上次 stale 重送、total_ms＝整段空窗（2026-10-05 起）
 ```
 
 - 選卡（K22）：`<install>\config\steamvr\state.json` 的 `vrcompositor_adapter` 以 **LUID** 記錄 vrcompositor 實際使用的卡（`<host>` 上 IddCx 虛擬卡與實體卡同名，不能用名稱比對）。
@@ -567,6 +637,16 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-ORCH] step=quit-settle waitedMs=<N> …                ← §QUIT-SETTLE：vrserver 起來未滿 20 s，先等滿才結束 SteamVR
 [VIPLE-VR-ORCH] step=wait-driver result=fail reason=safe-mode-blocked retry=1   ← §SAFE-RETRY：SteamVR 以 safe mode 啟動、擋掉 driver
 [VIPLE-VR-ORCH] safe-mode: SteamVR blocked our driver at launch … restarting SteamVR once   ← 接著 quit-steamvr、guard、再啟動一次；仍被擋回 code 2
+[VIPLE-VR-ORCH] pose flags ctrlOffset=<0|1> stalePolicy=<legacy|hold> angvelLocal=<0|1>
+                                                                ← 每次組 session config 一次（vr_ctrl_pose_offset／vr_stale_policy／vr_angvel_local → driver pose_flags）
+[VIPLE-VR-ORCH] step=arm result=ok reason=rearm                 ← §VR-REARM：HMD 在 standby、VR 遊戲還在跑，不重啟 SteamVR、直接重新 arm
+[VIPLE-VR-ORCH] rearm from standby ok (VR app kept running) ms=<N>   ← 重新 arm 後 vrcompositor 恢復 Present
+[VIPLE-VR-ORCH] step=wait-hmd result=fail reason=rearm: no present   ← 10 s 內沒有 Present → error code 19（STEAMVR_RESTART_REQUIRED）
+[VIPLE-VR-ORCH] step=launch-steamvr result=fail reason=steam not signed in (no saved login)   ← §STEAM-LOGIN：Steam 沒登入又沒記住帳號，立刻回 code 17（不再白等 60 s）
+[VIPLE-VR-ORCH] steam not running (saved login) - started=<0|1>   ← §STEAM-LOGIN：記住了帳號但 Steam 沒在跑，先以使用者身分 `steam.exe -silent`
+[VIPLE-VR-ORCH] step=driver-lost result=ok reason=steamvr closed on host - ending session   ← §VR-EXIT：使用者在 host 關掉 SteamVR，正常結束 session（不再自動重開 SteamVR）
+[steam-watchdog <appid>] game exited (RunningAppID=…); ending stream   ← §VR-EXIT：PCVR 的 Steam 遊戲結束也會收掉串流（graceful，client 不跳錯誤）
+[VIPLE-VR-ORCH] step=idle-quit-steamvr result=ok reason=no VR app, HMD in standby   ← §VR-RESTORE-IDLE：session 結束、沒有遊戲、HMD standby 滿 30 s，結束 SteamVR 以還原 host 設定
 [VIPLE-VR-ORCH] stop reason=…
 ```
 
@@ -751,6 +831,7 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-XR] runtime ended the XR session (EXITING) - continuing in the flat window
 [VIPLE-XR] xrWaitFrame: <XrResult> - treating as session loss
 [VIPLE-XR] no Wayland/X11 display - using the SDL offscreen video driver   ← Linux 無頭；VAAPI 另印 `VAAPI: offscreen video driver - using a DRM render node display`
+[VIPLE-XR] … SDL offscreen video driver (PCVR under gamescope: headless, no flat window)   ← §VR-HEADLESS：Frame 上 PCVR 刻意不開平面視窗（否則 Frame 加回手把模式＋雷射滑鼠）
 [VIPLE-XR] test: simulating LOSS_PENDING|a runtime-initiated exit (--xr-test-fail)   ← dev
 [VIPLE-XR] test: simulating a GPU wait timeout (--xr-test-fail gpuwedge)              ← dev（M4a 收尾）
 [VIPLE-XR] GPU wait timed out (<原因>) - treating the XR context as lost              ← M4a 收尾：render 等 1 s／拆除等 2 s 逾時；之後走 loss 流程
@@ -789,6 +870,14 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-SESSION] XR session <lost|exited> after the VR session started - ending the stream (invariant 5)   ← M4a 收尾：同時顯示錯誤並以正常退出送 /cancel
 [VIPLE-VR-SESSION] bitrate <kbps> kbps (<VR default|--bitrate>; <w>x<h>@<hz>, flat setting <kbps> kbps / flat default <kbps> kbps ignored, ABR on|off)
                                                                                     ← §VR-BITRATE：VR 不再參考平面位元率偏好，只有 CLI --bitrate 才覆寫 VR 預設
+[VIPLE-VR-SESSION] PCVR: MP-QUIC off for this session (preference unchanged)       ← §VR-LAUNCHER：PCVR 執行期不開 QUIC，偏好設定不動
+[VIPLE-VR-LAUNCHER] mode=<vr|desktop>                                              ← Frame GUI 的模式選單（steam_frame_client.md §8.6）
+[VIPLE-VR-LAUNCHER] launching VR stream: app="<name>"[ (takeover)]                 ← GUI 另開 `stream --display-target pcvr [--takeover] -- <位址> <app>` 子行程
+[VIPLE-VR-LAUNCHER] stream process finished exit=<rc> status=<0 正常|1 崩潰>[ error=<給使用者看的原因>]
+[VIPLE-VR-LAUNCHER] failed to start the stream process                             ← error
+[VIPLE-VR-LAUNCHER] could not take the single-instance lock back                   ← warning：子行程結束後 GUI 拿不回單一實例鎖（別的實例趁隙拿走）
+[VIPLE-VR-LAUNCHER] waiting for the VR stream process to finish                    ← GUI 結束時子行程還在跑：先等 8 s，再 SIGTERM，最後 SIGKILL
+[VIPLE-VR-SESSION] PCVR has no flat window to fall back to: <原因>                  ← error：無頭 PCVR 不退回平面，以啟動錯誤結束
 [VIPLE-VR-POSE] tracking sender started: <Hz> …, source=<xr-thread|xr-frameloop|sine|…>
 [VIPLE-VR-POSE] 10s: sent=… fail=… late=… noPose=…    ← noPose：XR 還沒有有效 HMD pose 的拍數（不送）
 ```
@@ -841,21 +930,61 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 
 ```
 [VIPLE-VR-MTP10] n=N p50=… p95=… p99=… ms noSample=N | latch sent=N (x/s) lastSlack=… us | timing sent=N   ← client 10 s；沒有時間換算擴充時行尾註明 approx
+[VIPLE-VR-POSEERR] 10s n=N pos p50=… p95=… mm rot p50=… p95=… deg | lag n=N p05=… p50=… p95=… ms (+behind/-ahead, head moving)
+                                                                                    ← client 10 s（§VR-POSEERR）：0x81 算繪姿態對「該幀實際顯示時的頭部姿態」的差。pos 是頭盔
+                                                                                       重投影修不掉的平移偏差；lag 是算繪位置在頭部軌跡上對應的時間差（延後 100 ms 估，正＝落後），
+                                                                                       只算頭部 ±50 ms 內移動 ≥ 10 mm、而且是第一次顯示的幀（同一張影像重複顯示時誤差照算、不估 lag）
+[VIPLE-VR-PREDICT] session start vsync_to_photons_us=N (fixed by config|learned|converted from the value learned at X Hz|default: period + 30 ms)
+                                                                                    ← server（§VR-PREDICT）。2026-10-05 起學到的值依更新率分開存；這個更新率沒學過時由最接近的更新率
+                                                                                       換算（v' = 14 ms + (v − 14 ms)·T'/T）
+[VIPLE-VR-PREDICT] probe: vsync_to_photons_us A -> B (pose lag mean of 3 windows x.x ms)   ← 探測：session 開頭 10 個可靠視窗（≥ 60 樣本）先丟掉（暖機），之後 3 個視窗
+                                                                                       平均 ≥ 1.5 ms、且 3 個視窗最大差 ≤ 6 ms 時往補償方向改 8～10 ms
+[VIPLE-VR-PREDICT] SteamVR applies mid-session changes (pose lag x.x -> y.y ms after A -> B us); tracking
+                                                                                    ← 探測後 2 s 再取 3 個視窗平均，落後往預期方向移動 ≥ 步長一半：之後改追蹤（同一個行程的下一個 session 直接追蹤）
+[VIPLE-VR-PREDICT] SteamVR did not apply the mid-session change (pose lag x.x -> y.y ms); keeping A us, next session starts at B us; <will probe again next session|second time in a row - later sessions only measure>
+                                                                                    ← 探測沒效果：退回起始值、本 session 停調，下一個 session 從「起始值＋探測前後平均」開始；
+                                                                                       2026-10-05 起連續兩個 session 都這樣才不再探測（舊版判一次就整個行程放棄）
+[VIPLE-VR-PREDICT] probe inconclusive (pose lag windows spread x.x ms); back to A us, measuring again
+                                                                                    ← 2026-10-05：探測後 3 個視窗最大差 > 6 ms（載入、掉拍），退回起始值重量，不算一次「不採用」
+[VIPLE-VR-PREDICT] measured pose lag x.x ms at A us (no probe: SteamVR ignores mid-session changes); next session starts at B us
+                                                                                    ← 2026-10-05：已知不採用時只量（舊版借用上面「did not apply」的訊息，看起來像又探測了一次）
+[VIPLE-VR-PREDICT] 10s: vsync_to_photons_us=N (min A max B) pose lag ema=x.x ms updates=K windows=W
+                                                                                    ← 追蹤階段的 10 s 摘要：落後的移動平均（α 0.25）≥ 1 ms 時補一半、每秒 ≤ 3 ms；session 內 ±40 ms；
+                                                                                       每個視窗先夾到 ±20 ms。健康時 min／max 差幾 ms、ema 在 ±1 ms 附近
+[VIPLE-VR-PREDICT] driver not connected; vsync_to_photons_us stays A                    ← warning：bridge 沒連線，這次不算調整（探測會重新量）
 [VIPLE-VR-LATCH] pacing ppm=N slackEma=…us target=…us (applied|stub: log only)   ← server：前 5 次；之後變化 ≥ 50 ppm 且距上次 ≥ 5 s 才印
 [VIPLE-ABR] Bitrate: A -> B kbps (cut|ramp, loss=N staleDrops=N in <ms>ms, src=…, vr lossPct=x.xx)
                                                                                     ← §VR-ABR-RATIO：VR session 的 cut 依丟包比例（1～3% −10%、3～8% −25%、>8% 砍半）；
-                                                                                       <1% 當成零丟包（不加 FEC、不降碼、不擋回升）。桌面 session 沒有 vr lossPct、行為不變
+                                                                                       <1% 當成零丟包（不加 FEC、不降碼、不擋回升）。桌面 session 沒有 vr lossPct、行為不變。
+                                                                                       lossPct 的分母是照位元率估的影像封包數（不含 FEC），斷訊時回報的缺包可能超過它：> 100 時加註 `(est)`
+[VIPLE-ABR] VR outage (src=…): will restore N kbps once the link is clean again   ← §VR-ABR-OUTAGE：丟包 ≥ 30% 的視窗或 client 回報連掉 3 幀以上（src=client-loss）＝斷訊。
+                                                                                       記下斷訊前的位元率；斷訊期間照常降碼
+[VIPLE-ABR] VR link clean again: restoring A -> N kbps (pre-outage bitrate)       ← 最後一個斷訊訊號後安靜 1 s、2 個乾淨視窗、client LATCH 幀號 300 ms 內有前進（沒 LATCH 的舊 client
+                                                                                       不看）、參考值高於 target → 直接拉回（每次斷訊只拉一次）。修正前約 3 分 40 秒才回到 129 Mbps
+[VIPLE-ABR] VR outage again right after restoring (src=…): restore target lowered to N kbps
+                                                                                    ← 拉回後 5 s 內又斷、且這次事件在低位元率（≤ 參考值一半）時沒斷過：參考值打 75 折（連線可能已變窄）；
+                                                                                       低位元率也斷過＝閃斷，不打折。client 重送的 LOSS 只延長事件；30 s 沒有斷訊訊號就結束
 [VIPLE-FEC] VR unrecoverable frame, FEC: A% -> B%                                  ← §VR-FEC-LOSS：client 回報 LOSS、掉的是 1～2 幀 → +10%（上限 40%）
 [VIPLE-FEC] VR outage (N frames lost), FEC stays A%                                ← 連掉 3 幀以上＝斷線，FEC 補不回來：不加，只把回降往後延
 [VIPLE-FEC] VR no unrecoverable frame for a while, FEC: A% -> B%                   ← 30 s 沒有 LOSS、也沒有缺包 ≥1% 的視窗 → 每 5 s −5%，降回 fec_percentage
                                                                                        VR 的 FEC status（缺包 ≥1%）不再加 FEC，只延後回降；FEC 高於基準時影像位元率上限
                                                                                        ＝設定值 ×(100+基準)/(100+FEC)，上限移動時 [VIPLE-ABR] 立即套用（不受 10% 防抖動帶限制）
-[VIPLE-VR-LATCH] 10s: rx=N slackEma=…us target=…us ppm=N haptics=N               ← server 10 s（haptics＝累計排入的 HAPTIC）
+[VIPLE-VR-LATCH] 10s: rx=N slackEma=…us target=…us ppm=N haptics=N err=…us integ=… slips=N dropped=N mode=<legacy|v2>
+                                                                                    ← server 10 s（haptics＝累計排入的 HAPTIC）。2026-10-05 起尾端加：平滑後的誤差、積分項（ppm）、
+                                                                                       累計相位滑移（相鄰兩筆新量測跳 > 0.6 週期）、v2 丟掉的樣本（重複 frameId、|slack| > 1.5 週期）
+[VIPLE-VR-LATCH] controller mode=<legacy|v2> targetPct=N hostPeriod=…ms            ← session 開始一次（§VR-LATCH-V2，設定 vr_latch_mode／vr_latch_target_pct）
 [VIPLE-VR-TIMING] 10s: presented=N xrMissed=N metaMiss=N period=…ms decode p50/p95=… render p50/p95=… slack p50/p05=… mtp p50/p95=…ms
 ```
 
 - client 每 100 ms 送 0x5507/08 LATCH、每 1 s 送 0x5507/06 CLIENT_TIMING（都走 ch 0x07 unsequenced）；定義見 `vr_protocol.md` §4.5。
-- `decode p50/p95` 目前填 0（XrContext 拿不到 decoder 延遲，TODO 由 Session 提供）。
+- `decode p50/p95`：2026-10-05 起是 decoder 執行緒記的單幀解碼延遲（DU 進佇列到解出，與統計浮層同定義；`VrDecodeTiming`），
+  之前的 client 一律填 0。
+- client 的 `[VIPLE-VR-MTP10]` 尾端（2026-10-05 起）：`frames new=N repeat=N skip=N mismatch=N`——新影像、latch 時沒有新影像
+  （重複幀）、兩次 latch 之間到了兩張以上而沒顯示的、xrEndFrame 時 runtime 會用的影像不是 projection 姿態所屬那張（錯配一幀）。
+- client 的 `[VIPLE-VR-POSEERR] 10s` 尾端：`rot>1deg=…% >3deg=…% edge(>Xdeg overscan)=…%`——旋轉誤差超過 overscan 的幀
+  會在重投影時露出沒畫面的邊（dev `--vr-overscan` 0 時任何誤差都會露）。
+- client 的 `[VIPLE-VR-INPUT] 10s` 尾端：`vel L n=… linValid=…% angValid=…% |v|max=… |w|max=…`（右手同），runtime 回報的
+  控制器速度有效率與最大值（無效時送 0，SteamVR 就不外插拍子）。
 - pcvr 才把 ppm 寫進 driver pacing；stub 只記錄。
 
 ### `[VIPLE-XR-INPUT]` —— XR 控制器射線滑鼠（M3a X4）

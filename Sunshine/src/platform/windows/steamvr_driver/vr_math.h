@@ -71,6 +71,18 @@ namespace vrdrv::math {
     };
   }
 
+  // 以單位四元數 q 旋轉向量：q ⊗ (v, 0) ⊗ q*
+  inline vec3_t rotate(const quat_t &q, const vec3_t &v) {
+    const double tx = 2.0 * (q.y * v.z - q.z * v.y);
+    const double ty = 2.0 * (q.z * v.x - q.x * v.z);
+    const double tz = 2.0 * (q.x * v.y - q.y * v.x);
+    return vec3_t {
+      v.x + q.w * tx + (q.y * tz - q.z * ty),
+      v.y + q.w * ty + (q.z * tx - q.x * tz),
+      v.z + q.w * tz + (q.x * ty - q.y * tx),
+    };
+  }
+
   // 兩個旋轉之間的角距離（度）；q 與 −q 視為相同
   inline double angle_deg(const quat_t &a, const quat_t &b) {
     double d = std::fabs(dot(normalize(a), normalize(b)));

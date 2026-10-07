@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "VrMultiLink.h"
 
 #ifdef VIPLE_MPQUIC
 #include "QuicTransport.h"
@@ -115,6 +116,8 @@ void LiStopConnection(void) {
         Limelog("done\n");
     }
     if (stage == STAGE_CONTROL_STREAM_START) {
+        // §VR-MULTILINK：影像與音訊的接收執行緒到這裡都已經停了
+        vrmlStop();
         Limelog("Stopping control stream...");
         stopControlStream();
         stage--;
@@ -868,6 +871,12 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_CONTROL_STREAM_START);
     ListenerCallbacks.stageComplete(STAGE_CONTROL_STREAM_START);
     Limelog("done\n");
+
+    // §VR-MULTILINK：控制通道連上之後、影像接收執行緒啟動之前，把每張網卡的連線建好並通知 server。
+    // 沒協商多連線（或只找得到不能用的位址）時回 0，後面完全走原本的單一路徑。
+    if (vrmlPrepare() > 0) {
+        vrmlStart();
+    }
 
     Limelog("Starting video stream...");
     ListenerCallbacks.stageStarting(STAGE_VIDEO_STREAM_START);

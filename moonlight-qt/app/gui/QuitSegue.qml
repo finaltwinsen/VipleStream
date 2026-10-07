@@ -9,6 +9,8 @@ Item {
     property var quitRunningAppFn
     property Session nextSession : null
     property string nextAppName : ""
+    // §VR-LAUNCHER：VR 模式結束舊 app 後改呼叫這個（另開 VR 串流子行程），不在 GUI 行程裡串流
+    property var nextLaunchFn : null
 
     property string stageText : qsTr("Quitting %1...").arg(appName)
 
@@ -30,6 +32,9 @@ Item {
         else {
             // Exit this view
             stackView.pop()
+            if (error === undefined && nextLaunchFn) {
+                nextLaunchFn()
+            }
         }
     }
 

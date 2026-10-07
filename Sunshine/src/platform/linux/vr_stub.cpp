@@ -73,6 +73,18 @@ namespace vr::platform {
     return false;
   }
 
+  bool steam_auto_login_configured() {
+    return false;
+  }
+
+  bool steam_running() {
+    return false;
+  }
+
+  bool start_steam_silent() {
+    return false;
+  }
+
   bool launch_steamvr() {
     return false;
   }
@@ -189,7 +201,7 @@ namespace vr::bridge {
   void set_dev_mode(bool) {
   }
 
-  bool send_dev_set_v2p(uint32_t) {
+  bool send_set_v2p(uint32_t) {
     return false;
   }
 

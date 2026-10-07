@@ -267,6 +267,39 @@ TEST(VrSessionStateTest, LossWaveStateMachine) {
   EXPECT_EQ(st.stats().refresh_waves, 2u);
 }
 
+TEST(VrSessionStateTest, ScheduledWaveEstimateIsStableAndNeverBehindTheLoss) {
+  vr::negotiated_t neg;
+  neg.params = *parse_map(minimal_args()).params;
+  neg.recovery_intra = true;
+  neg.ir_frames = 8;
+  vr::session_state_t st {neg, nullptr};
+  EXPECT_FALSE(st.scheduled_wave().has_value());
+
+  // 排定當下 encoder 即將編第 1003 幀：這就是估計的起點
+  st.set_next_frame(1003);
+  EXPECT_EQ(st.on_loss(1000, 1000, VIPLE_VR_LOSS_NETWORK), vr::loss_action_e::new_wave);
+  ASSERT_TRUE(st.scheduled_wave().has_value());
+  EXPECT_EQ(st.scheduled_wave()->start_frame, 1003u);
+  EXPECT_EQ(st.scheduled_wave()->frame_cnt, 8);
+  EXPECT_EQ(st.scheduled_wave()->reason, VIPLE_VR_REFRESH_LOSS);
+  // encoder 已經決定從 1003 開 wave、正在等影像：next_frame 變成 1004，被吸收的 LOSS 回的仍是 1003（不能多算一幀）
+  st.set_next_frame(1004);
+  EXPECT_EQ(st.on_loss(1000, 1001, VIPLE_VR_LOSS_NETWORK), vr::loss_action_e::absorbed);
+  EXPECT_EQ(st.scheduled_wave()->start_frame, 1003u);
+  // wave 一直沒開始（等 IDR cooldown）、encoder 繼續出幀，之後又掉了第 1006 幀：估計值推到 1007，重送也一致
+  st.set_next_frame(1008);
+  EXPECT_EQ(st.on_loss(1000, 1006, VIPLE_VR_LOSS_NETWORK), vr::loss_action_e::absorbed);
+  EXPECT_EQ(st.scheduled_wave()->start_frame, 1007u);
+  EXPECT_EQ(st.on_loss(1000, 1006, VIPLE_VR_LOSS_RESEND), vr::loss_action_e::absorbed);
+  EXPECT_EQ(st.scheduled_wave()->start_frame, 1007u);
+  // wave 真的開始之後回的是精確值
+  st.on_wave_begin(1009, 8, VIPLE_VR_REFRESH_IDR);
+  EXPECT_EQ(st.scheduled_wave()->start_frame, 1009u);
+  EXPECT_EQ(st.scheduled_wave()->reason, VIPLE_VR_REFRESH_IDR);
+  st.on_wave_end();
+  EXPECT_FALSE(st.scheduled_wave().has_value());
+}
+
 TEST(VrSessionStateTest, LossResendIsNeverDuplicate) {
   vr::negotiated_t neg;
   neg.params = *parse_map(minimal_args()).params;

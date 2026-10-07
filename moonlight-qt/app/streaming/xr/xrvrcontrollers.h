@@ -78,6 +78,8 @@ private:
         float rot[4] = {0, 0, 0, 1};
         float linVel[3] = {};
         float angVel[3] = {};
+        bool linValid = false;  // 2026-10-05：runtime 回報的速度旗標（無效時 linVel／angVel 送 0）
+        bool angValid = false;
         // system 組合
         uint64_t comboStartNs = 0;
         bool comboActive = false;
@@ -139,6 +141,14 @@ private:
     uint32_t m_StatHapticFailed = 0;
     uint32_t m_StatHapticDropped = 0;
     uint32_t m_StatFocusLoss = 0;
+    // 2026-10-05：送出樣本的控制器速度有效率與最大值（m_Mutex 保護；fill 在 tracking 送出執行緒）
+    struct VelStat {
+        uint32_t samples = 0;
+        uint32_t linValid = 0;
+        uint32_t angValid = 0;
+        float linMax = 0.0f;  // m/s
+        float angMax = 0.0f;  // rad/s
+    } m_VelStat[2];
 };
 
 #endif // HAVE_OPENXR

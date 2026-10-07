@@ -100,9 +100,9 @@ public:
                 if (-1 != index) {
                     app = m_Computer->appList[index];
                     m_TimeoutTimer->stop();
-                    if (isNotStreaming() || isStreamingApp(app)) {
+                    if (isNotStreaming() || isStreamingApp(app) || m_Takeover) {
                         m_State = StateStartSession;
-                        session = new Session(m_Computer, app, m_Preferences);
+                        session = new Session(m_Computer, app, m_Preferences, m_Takeover);
                         emit q->sessionCreated(app.name, session);
                     } else {
                         emit q->appQuitRequired(getCurrentAppName());
@@ -179,6 +179,7 @@ public:
     NvComputer *m_Computer;
     State m_State;
     QTimer *m_TimeoutTimer;
+    bool m_Takeover = false;
 };
 
 Launcher::Launcher(QString computer, QString app,
@@ -220,6 +221,12 @@ bool Launcher::isExecuted() const
 {
     Q_D(const Launcher);
     return d->m_State != StateInit;
+}
+
+void Launcher::setTakeover(bool takeover)
+{
+    Q_D(Launcher);
+    d->m_Takeover = takeover;
 }
 
 void Launcher::onComputerFound(NvComputer *computer)

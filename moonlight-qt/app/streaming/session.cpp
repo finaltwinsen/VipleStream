@@ -567,6 +567,17 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VR-SESSION] server state=%u progress=%u code=%u",
                             st.state, st.progress, st.code);
+                // §VR-LAUNCHER：編排器失敗（例：host 上有 VR 遊戲在跑、SteamVR 要重啟）時 server 只送 STATE ERROR、
+                // 串流照常送黑幀，client 會一直停在 loading。顯示原因，經 SDL_QUIT 走正常退出（送 /cancel）。
+                if (st.state == VIPLE_VR_STATE_ERROR && !m_VrServerErrorHandled) {
+                    m_VrServerErrorHandled = true;
+                    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                 "[VIPLE-VR-SESSION] server could not start VR (code=%u) - ending the stream", st.code);
+                    emit displayLaunchError(vrServerErrorText(st.code));
+                    SDL_Event quit = {};
+                    quit.type = SDL_QUIT;
+                    SDL_PushEvent(&quit);
+                }
             }
             break;
         case VIPLE_VR_S2C_STATS: {
@@ -632,6 +643,51 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
     }
 }
 
+bool Session::pcvrCannotFallBackToFlat() const
+{
+#if defined(Q_OS_LINUX) && !defined(STEAM_LINK)
+    return m_Preferences->displayTarget == StreamingPreferences::DT_PCVR && !m_Preferences->vrEmulate &&
+           qEnvironmentVariableIsEmpty("DISPLAY") && qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY");
+#else
+    return false;
+#endif
+}
+
+void Session::vrFallBackToFlat(const QString& userMessage)
+{
+    if (m_VrNoFlatError.isEmpty() && pcvrCannotFallBackToFlat()) {
+        m_VrNoFlatError = userMessage;
+    }
+}
+
+QString Session::vrServerErrorText(unsigned code) const
+{
+    const QString host = m_Computer->name;
+    switch (code) {
+    case VIPLE_VR_STATE_CODE_VRLINK_ACTIVE:
+    case VIPLE_VR_STATE_CODE_OTHER_HMD_ACTIVE:
+        return tr("Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.").arg(host);
+    case VIPLE_VR_STATE_CODE_VR_APP_RUNNING:
+        return tr("A VR game is already running on %1 without VipleStream. Quit it, then try again.").arg(host);
+    case VIPLE_VR_STATE_CODE_STEAMVR_RESTART_REQUIRED:
+        return tr("SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first "
+                  "(Quit Game in the app list), then try again.").arg(host);
+    case VIPLE_VR_STATE_CODE_SAFE_MODE:
+        return tr("SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.").arg(host);
+    case VIPLE_VR_STATE_CODE_STEAMVR_NOT_INSTALLED:
+        return tr("SteamVR is not installed on %1.").arg(host);
+    case VIPLE_VR_STATE_CODE_STEAM_NOT_LOGGED_IN:
+        return tr("Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.").arg(host);
+    case VIPLE_VR_STATE_CODE_NO_USER_SESSION:
+        return tr("Nobody is signed in to Windows on %1.").arg(host);
+    case VIPLE_VR_STATE_CODE_HMD_TIMEOUT:
+    case VIPLE_VR_STATE_CODE_STEAMVR_LAUNCH_FAILED:
+        return tr("SteamVR on %1 did not start in time. Try again.").arg(host);
+    default:
+        return tr("%1 could not start VR (error %2).").arg(host).arg(code);
+    }
+}
+
 void Session::decideVrRequest()
 {
     m_VrRequested = false;
@@ -653,6 +709,8 @@ void Session::decideVrRequest()
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-SESSION] host does not offer PCVR (VipleStreamVR=0x%x proto=%d) — streaming flat",
                     m_Computer->vipleStreamVr, m_Computer->vipleStreamVrProto);
+        vrFallBackToFlat(tr("%1 doesn't offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.")
+                             .arg(m_Computer->name));
         return;
     }
     // 下面兩種情況在 /launch 之後才退回平面的話，平面串流會留著 VR 的形狀（2W×H@Hz、
@@ -661,12 +719,16 @@ void Session::decideVrRequest()
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-SESSION] host is reachable only via relay — VR not requested "
                     "(transport unsupported before GA), streaming flat");
+        vrFallBackToFlat(tr("%1 is only reachable through the relay. VR streaming needs a direct connection.")
+                             .arg(m_Computer->name));
         return;
     }
     if (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_AV1) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-SESSION] video codec preference forces AV1; PCVR needs HEVC or H.264 "
                     "(AV1 waits for L1) — streaming flat");
+        vrFallBackToFlat(tr("The video codec setting forces AV1, but VR streaming needs HEVC or H.264. "
+                            "Change the video codec in Settings."));
         return;
     }
 
@@ -1152,7 +1214,9 @@ bool Session::initialize(QQuickWindow* qtWindow)
         qputenv("SDL_VIDEODRIVER", "offscreen");
         qputenv("SDL_VIDEO_DRIVER", "offscreen");
         SDL_SetHintWithPriority("SDL_VIDEODRIVER", "offscreen", SDL_HINT_OVERRIDE);
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] no Wayland/X11 display - using the SDL offscreen video driver");
+        // §VR-HEADLESS：gamescope 裡的 PCVR 是 main() 刻意清掉 DISPLAY／WAYLAND_DISPLAY（不開平面視窗）
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] no Wayland/X11 display - using the SDL offscreen video driver%s",
+                    !qEnvironmentVariableIsEmpty("GAMESCOPE_WAYLAND_DISPLAY") ? " (PCVR under gamescope: headless, no flat window)" : "");
     }
 #endif
 
@@ -1169,6 +1233,14 @@ bool Session::initialize(QQuickWindow* qtWindow)
 
     // §VR：PCVR 串流的是 SBS 打包畫面（2W×H），不受 host 顯示器解析度限制
     decideVrRequest();
+    if (!m_VrNoFlatError.isEmpty()) {
+        // §VR-LAUNCHER：無頭 PCVR 不能退回平面（看不到）——以啟動錯誤結束（CLI 印 "Stream error:"、rc 1）
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-VR-SESSION] PCVR has no flat window to fall back to: %s", qUtf8Printable(m_VrNoFlatError));
+        emit displayLaunchError(m_VrNoFlatError);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        return false;
+    }
     if (m_VrRequested) {
         m_StreamConfig.width = 2 * m_VrLaunch.eyeWidth;
         m_StreamConfig.height = m_VrLaunch.eyeHeight;
@@ -1658,6 +1730,13 @@ bool Session::initialize(QQuickWindow* qtWindow)
             if (m_XrPcvr) {
                 destroyXrContext();  // M4a R1：平面串流不留 PCVR 的 XR session
                 m_XrPcvr = false;
+            }
+            vrFallBackToFlat(tr("This device has no 8-bit HEVC or H.264 video decoder for VR streaming."));
+            if (!m_VrNoFlatError.isEmpty()) {
+                emit displayLaunchError(m_VrNoFlatError);
+                SDL_DestroyWindow(testWindow);
+                SDL_QuitSubSystem(SDL_INIT_VIDEO);
+                return false;
             }
         }
     }
@@ -2650,6 +2729,7 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     // M4a 收尾：PCVR 明確要求更新率（偏好 vrRefreshHz，預設 90；取 runtime 可用值中最接近的）
     xo.preferredRefreshHz = m_XrPcvr ? static_cast<float>(m_Preferences->vrRefreshHz) : 0.0f;
     xo.testVrInput = m_Preferences->vrTestInput;  // M4a R2（dev）：--vr-test-input
+    xo.pcvrOverscanDeg = m_XrPcvr ? static_cast<float>(m_Preferences->vrOverscanDeg) : 0.0f;  // dev：--vr-overscan
     xo.dumpFramePath = isRebuild ? QString() : m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
     xo.testStallMs = isRebuild ? 0 : m_Preferences->xrTestStallMs;             // dev：--xr-test-stall-ms
     xo.testRecenterSec = isRebuild ? 0 : m_Preferences->xrTestRecenterSec;     // dev：--xr-test-recenter-sec
@@ -2907,6 +2987,7 @@ bool Session::setupXrPcvr()
         m_XrPcvr = false;
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-SESSION] PCVR: XR runtime unavailable (%s) - streaming flat (invariant 5)", qUtf8Printable(err));
+        vrFallBackToFlat(tr("Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.").arg(err));
         return false;
     }
     XrContext::ViewInfo vi;
@@ -2915,6 +2996,7 @@ bool Session::setupXrPcvr()
                     "[VIPLE-VR-SESSION] PCVR: XR views not available within 3 s - streaming flat (invariant 5)");
         destroyXrContext();
         m_XrPcvr = false;
+        vrFallBackToFlat(tr("The headset's VR runtime did not respond in time. Make sure SteamVR is running, then try again."));
         return false;
     }
     // FOV：tan 的絕對值×10000（左、右、上、下；與 M1a 預設一致，server 端一律取絕對值）
@@ -2948,14 +3030,15 @@ bool Session::setupXrPcvr()
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VR-SESSION] PCVR XR measured: space=%s tracking=%s hz=%.2f%s period=%lld ns recommended=%ux%u "
-                "ipd=%.2f mm fov L[%.1f %.1f %.1f %.1f] R[%.1f %.1f %.1f %.1f] deg -> launch eye=%dx%d hz=%d",
+                "ipd=%.2f mm fov L[%.1f %.1f %.1f %.1f] R[%.1f %.1f %.1f %.1f] deg%s -> launch eye=%dx%d hz=%d",
                 qUtf8Printable(vi.trackingSpace), vi.timeConversion ? "thread" : "frameloop",
                 (double)vi.refreshHz, measuredHz != hz ? " (clamped)" : "", (long long)m_VrLaunch.periodNs,
                 vi.recommendedWidth, vi.recommendedHeight, m_VrLaunch.ipd / 100.0,
                 vi.fov[0].angleLeft * 57.29578, vi.fov[0].angleRight * 57.29578, vi.fov[0].angleUp * 57.29578,
                 vi.fov[0].angleDown * 57.29578, vi.fov[1].angleLeft * 57.29578, vi.fov[1].angleRight * 57.29578,
-                vi.fov[1].angleUp * 57.29578, vi.fov[1].angleDown * 57.29578, m_VrLaunch.eyeWidth,
-                m_VrLaunch.eyeHeight, m_VrLaunch.refreshHz);
+                vi.fov[1].angleUp * 57.29578, vi.fov[1].angleDown * 57.29578,
+                m_Preferences->vrOverscanDeg > 0.0 ? qUtf8Printable(QString(" (incl. dev overscan %1 deg per side)").arg(m_Preferences->vrOverscanDeg)) : "",
+                m_VrLaunch.eyeWidth, m_VrLaunch.eyeHeight, m_VrLaunch.refreshHz);
     return true;
 #else
     return false;
@@ -3123,7 +3206,10 @@ bool Session::startConnectionAsync()
                 m_VrSession = VrSessionInfo::parse(NvHTTP::getXmlString(launchResponse, "VipleStreamVRSession"));
                 if (m_VrSession.valid) {
                     m_StreamConfig.vrFlags = VIPLE_VR_SF_ENABLED |
-                                             (m_VrSession.recoveryIntra ? VIPLE_VR_SF_RECOVERY_INTRA : 0);
+                                             (m_VrSession.recoveryIntra ? VIPLE_VR_SF_RECOVERY_INTRA : 0) |
+                                             // §VR-MULTILINK：server 回了 multilink=1 才啟用（selftest 是 dev 選項）
+                                             (m_VrSession.multilink ? VIPLE_VR_SF_MULTILINK : 0) |
+                                             (m_VrSession.multilink && m_Preferences->vrLinkSelftest ? VIPLE_VR_SF_MULTILINK_SELFTEST : 0);
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VR-SESSION] negotiated: %s",
                                 qPrintable(m_VrSession.describe()));
@@ -3144,9 +3230,20 @@ bool Session::startConnectionAsync()
                         destroyXrContext();  // M4a R1：沒有 VR session 就沒有 render pose，XR 無從投影
                         m_XrPcvr = false;
                     }
+                    // §VR-LAUNCHER：無頭時不能以平面串流（看不到）
+                    if (pcvrCannotFallBackToFlat()) {
+                        emit displayLaunchError(tr("%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.")
+                                                    .arg(m_Computer->name));
+                        return false;
+                    }
                 }
             }
         } catch (const QtNetworkReplyException&) {
+            // §VR-LAUNCHER：無頭 PCVR 不改走 relay（relay 只能平面串流，看不到）
+            if (m_VrRequested && pcvrCannotFallBackToFlat()) {
+                emit displayLaunchError(tr("Connection to host failed"));
+                return false;
+            }
             // Direct launch failed — try via relay proxy as fallback.
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-NAT] Direct launch failed, trying relay proxy...");
@@ -3457,8 +3554,49 @@ bool Session::startConnectionAsync()
     }
 
 #ifdef VIPLE_MPQUIC
+    // VipleStream 2.0 §VR-LAUNCHER：PCVR 的影像強制走 RTP，VR 的實測也都在沒有 MP-QUIC 下做的——這個 session
+    // 不開 QUIC，偏好設定不動（GUI 另開的 VR 子行程不帶 --no-quic，免得 session 開始時 save() 把桌面模式的
+    // MP-QUIC 設定也關掉）
+    if (m_VrRequested && m_Preferences->enableMpQuic && m_Computer->isMpQuicCapable) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SESSION] PCVR: MP-QUIC off for this session (preference unchanged)");
+    }
+    // §VR-MULTILINK：多連線要知道 server 的每個位址，才能替 client 的每張網卡找到同子網路的那一個。
+    // 沿用 MP-QUIC 的 alt peer 清單欄位（QUIC 本身在 VR session 維持關閉）。
+    if (m_VrRequested && (m_StreamConfig.vrFlags & VIPLE_VR_SF_MULTILINK)) {
+        const QString activeAddr = m_Computer->activeAddress.address();
+        m_StreamConfig.quicAltPeerCount = 0;
+        auto addPeer = [&](const QString& ip) {
+            if (ip.isEmpty() || ip == activeAddr || m_StreamConfig.quicAltPeerCount >= QUIC_MAX_ALT_PEERS) {
+                return;
+            }
+            for (int i = 0; i < m_StreamConfig.quicAltPeerCount; i++) {
+                if (ip == QString::fromUtf8(m_StreamConfig.quicAltPeers[i])) {
+                    return;
+                }
+            }
+            const QByteArray utf8 = ip.toUtf8();
+            if (utf8.size() >= QUIC_ALT_PEER_LEN) {
+                return;
+            }
+            memcpy(m_StreamConfig.quicAltPeers[m_StreamConfig.quicAltPeerCount], utf8.constData(), utf8.size() + 1);
+            m_StreamConfig.quicAltPeerCount++;
+        };
+        for (const auto& iface : std::as_const(m_Computer->serverAdvertisedInterfaces)) {
+            addPeer(iface.address);
+        }
+        if (!m_Computer->localAddress.isNull()) {
+            addPeer(m_Computer->localAddress.address());
+        }
+        if (!m_Computer->manualAddress.isNull()) {
+            addPeer(m_Computer->manualAddress.address());
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-LINK] multi-link negotiated: %d other server address(es) known (advertised=%d)%s",
+                    m_StreamConfig.quicAltPeerCount, (int)m_Computer->serverAdvertisedInterfaces.size(),
+                    (m_StreamConfig.vrFlags & VIPLE_VR_SF_MULTILINK_SELFTEST) ? " [selftest]" : "");
+    }
     // Wire MP-QUIC preferences into stream config for moonlight-common-c
-    if (m_Preferences->enableMpQuic && m_Computer->isMpQuicCapable) {
+    if (m_Preferences->enableMpQuic && m_Computer->isMpQuicCapable && !m_VrRequested) {
         m_StreamConfig.useQuicTransport = 1;
         m_StreamConfig.quicPort = 48010;
         m_StreamConfig.quicScheduler = m_Preferences->mpQuicScheduler;
@@ -3589,7 +3727,17 @@ bool Session::startConnectionAsync()
         if (m_XrPcvr && m_XrContext != nullptr) {
             // M4a R1：HMD 樣本來自 XR runtime（destroyXrContext 會先 stop 這條執行緒）
             XrContext* xr = m_XrContext;
-            m_VrTracking.setSource([xr](VIPLE_VR_TRACKING* s) {
+            // dev（--vr-synthetic-hmd）：頭的姿態換成合成運動，其餘（取樣時機、predictNs、控制器）照舊來自 XR runtime。
+            // 無人配戴的場次頭盔是靜止的，host 端「對不到算圖姿態」這類只有頭在動才出現的現象驗不到
+            const bool syntheticHmd = m_Preferences->vrSyntheticHmd;
+            const auto synthStart = std::chrono::steady_clock::now();
+            if (syntheticHmd) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-POSE] dev: --vr-synthetic-hmd - the head pose sent to the host is synthetic (%s), not the tracked one. "
+                            "The picture will swing in the headset; do not wear it.",
+                            vrSyntheticMotionName(motion));
+            }
+            m_VrTracking.setSource([xr, syntheticHmd, motion, synthStart](VIPLE_VR_TRACKING* s) {
                 uint32_t predict = 0;
                 VIPLE_VR_POSE& hmd = s->pose[VIPLE_VR_POSE_HMD];
                 if (!xr->sampleHmd(hmd.pos, hmd.rot, hmd.linVel, hmd.angVel, &predict)) {
@@ -3599,8 +3747,14 @@ bool Session::startConnectionAsync()
                 s->predictNs = predict;
                 // M4a R2：左右控制器（pose、按鍵、pressCtr、flags active／focused）
                 xr->sampleControllers(s);
+                if (syntheticHmd) {
+                    VIPLE_VR_TRACKING synth;
+                    memset(&synth, 0, sizeof(synth));
+                    vrSyntheticFill(motion, std::chrono::duration<double>(std::chrono::steady_clock::now() - synthStart).count(), &synth);
+                    hmd = synth.pose[VIPLE_VR_POSE_HMD];
+                }
                 return true;
-            }, m_XrContext->trackingThreadMode() ? "xr-thread" : "xr-frameloop");
+            }, syntheticHmd ? "xr+synthetic-hmd" : (m_XrContext->trackingThreadMode() ? "xr-thread" : "xr-frameloop"));
         }
 #endif
         m_VrTracking.start(m_StreamConfig.fps, motion);

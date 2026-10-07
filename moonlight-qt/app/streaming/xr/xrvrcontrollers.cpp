@@ -367,6 +367,8 @@ bool XrVrControllers::locateGrip(int h, XrSpace trackSpace, XrTime t, Hand* out)
     out->angVel[0] = av ? vel.angularVelocity.x : 0.0f;
     out->angVel[1] = av ? vel.angularVelocity.y : 0.0f;
     out->angVel[2] = av ? vel.angularVelocity.z : 0.0f;
+    out->linValid = lv;
+    out->angValid = av;
     out->poseValid = true;
     return true;
 }
@@ -564,6 +566,18 @@ void XrVrControllers::fill(_VIPLE_VR_TRACKING* sample, XrSpace trackSpace, XrTim
                                         ((focused || m_TestInput) ? VIPLE_VR_CTRL_FOCUSED : 0));
         in.profile = m_Profile[h].load(std::memory_order_relaxed);  // M4a 收尾：server 選控制器外觀
         in.reserved = 0;
+        if (active) {
+            // 2026-10-05：速度有效率與最大值（拍子外插只靠這兩個速度；無效時送 0＝SteamVR 不外插）
+            const float lin = std::sqrt(hd.linVel[0] * hd.linVel[0] + hd.linVel[1] * hd.linVel[1] + hd.linVel[2] * hd.linVel[2]);
+            const float ang = std::sqrt(hd.angVel[0] * hd.angVel[0] + hd.angVel[1] * hd.angVel[1] + hd.angVel[2] * hd.angVel[2]);
+            std::lock_guard<std::mutex> lk(m_Mutex);
+            VelStat& vs = m_VelStat[h];
+            vs.samples++;
+            vs.linValid += hd.linValid ? 1 : 0;
+            vs.angValid += hd.angValid ? 1 : 0;
+            vs.linMax = (std::max)(vs.linMax, lin);
+            vs.angMax = (std::max)(vs.angMax, ang);
+        }
     }
 }
 
@@ -641,6 +655,7 @@ QString XrVrControllers::takeStatsLine()
     Hand snap[2];
     bool focused;
     uint32_t combos, focusLoss;
+    VelStat vel[2];
     {
         std::lock_guard<std::mutex> lk(m_Mutex);
         snap[0] = m_Hand[0];
@@ -652,11 +667,26 @@ QString XrVrControllers::takeStatsLine()
         m_StatFocusLoss = 0;
         m_Hand[0].edges = 0;
         m_Hand[1].edges = 0;
+        vel[0] = m_VelStat[0];
+        vel[1] = m_VelStat[1];
+        m_VelStat[0] = VelStat {};
+        m_VelStat[1] = VelStat {};
     }
     const uint32_t applied = m_StatHapticApplied, failed = m_StatHapticFailed, dropped = m_StatHapticDropped;
     m_StatHapticApplied = m_StatHapticFailed = m_StatHapticDropped = 0;
+    // 2026-10-05：尾端加速度有效率（%）與最大值，前段欄位順序不變
+    auto velText = [](const VelStat& v) {
+        auto pct = [&v](uint32_t k) { return v.samples ? 100.0 * k / v.samples : 0.0; };
+        return QStringLiteral("n=%1 linValid=%2% angValid=%3% |v|max=%4 m/s |w|max=%5 rad/s")
+            .arg(v.samples)
+            .arg(pct(v.linValid), 0, 'f', 1)
+            .arg(pct(v.angValid), 0, 'f', 1)
+            .arg(static_cast<double>(v.linMax), 0, 'f', 2)
+            .arg(static_cast<double>(v.angMax), 0, 'f', 2);
+    };
+    const QString velLine = QStringLiteral(" | vel L %1 | vel R %2").arg(velText(vel[0]), velText(vel[1]));
     return QStringLiteral("L active=%1 edges=%2 pressCtr=0x%3 | R active=%4 edges=%5 pressCtr=0x%6 | focused=%7 "
-                          "systemCombos=%8 focusLoss=%9 | haptic applied=%10 failed=%11 dropped=%12%13")
+                          "systemCombos=%8 focusLoss=%9 | haptic applied=%10 failed=%11 dropped=%12%13%14")
         .arg(snap[0].poseActive && snap[0].poseValid ? 1 : 0)
         .arg(snap[0].edges)
         .arg(snap[0].pressCtr, 8, 16, QLatin1Char('0'))
@@ -669,7 +699,8 @@ QString XrVrControllers::takeStatsLine()
         .arg(applied)
         .arg(failed)
         .arg(dropped)
-        .arg(m_TestInput ? QStringLiteral(" [dev test-input]") : QString());
+        .arg(m_TestInput ? QStringLiteral(" [dev test-input]") : QString())
+        .arg(velLine);
 }
 
 #endif // HAVE_OPENXR

@@ -76,6 +76,7 @@
 #include "settings/streamingpreferences.h"
 #include "gui/sdlgamepadkeynavigation.h"
 #include "backend/hidprobe.h"   // §HID-PROBE
+#include "backend/vrlauncher.h"  // §VR-LAUNCHER
 
 #if defined(Q_OS_WIN32)
 #define IS_UNSPECIFIED_HANDLE(x) ((x) == INVALID_HANDLE_VALUE || (x) == NULL)
@@ -107,7 +108,31 @@ static QTextStream s_LoggerStream(stderr);
 // 等 IRP 完成），mutex 就永遠不放 → 使用者照指示重啟卻被「already running」擋下、
 // Task Manager 也殺不掉。改成 app.exec() 返回後主動關閉（具名物件最後一個 handle 關閉即消失）。
 static HANDLE s_SingleInstanceMutex = nullptr;
+#elif defined(Q_OS_UNIX)
+// §SINGLE-INST 的鎖檔 fd（O_CLOEXEC：任何子行程都不繼承）。§VR-LAUNCHER 的 VR 串流子行程是同一支程式，
+// GUI 開它之前先放鎖、它結束後再拿回（見 vrlauncher.h），否則子行程一定被自己的 GUI 擋下。
+static int s_SingleInstanceLockFd = -1;
 #endif
+
+void singleInstanceReleaseForChild()
+{
+#if defined(Q_OS_UNIX)
+    if (s_SingleInstanceLockFd >= 0) {
+        flock(s_SingleInstanceLockFd, LOCK_UN);
+    }
+#endif
+}
+
+bool singleInstanceReacquire()
+{
+#if defined(Q_OS_UNIX)
+    if (s_SingleInstanceLockFd >= 0) {
+        return flock(s_SingleInstanceLockFd, LOCK_EX | LOCK_NB) == 0;
+    }
+#endif
+    return true;
+}
+
 static QThreadPool s_LoggerThread;
 static QMutex s_SyncLoggerMutex;
 static bool s_SuppressVerboseOutput;
@@ -542,6 +567,7 @@ int main(int argc, char *argv[])
         bool isInfoOnly = false;
         bool isCliMode = false;
         bool isXrDesktopStream = false;  // §VR M3a X5：stream --display-target xr-desktop
+        bool isPcvr = false;  // --display-target pcvr（§VR-HEADLESS 只套用 PCVR）
         bool isStream = false;
         bool isVrEmulate = false;  // §VR M4a R1：--vr-emulate 的 PCVR 是平面，不走無頭 offscreen
         for (int i = 1; i < argc; i++) {
@@ -562,11 +588,26 @@ int main(int argc, char *argv[])
                 strcmp(argv[i], "--display-target=xr-desktop") == 0 || strcmp(argv[i], "--display-target=pcvr") == 0) {
                 isXrDesktopStream = true;
             }
+            if ((strcmp(argv[i], "--display-target") == 0 && i + 1 < argc && strcmp(argv[i + 1], "pcvr") == 0) ||
+                strcmp(argv[i], "--display-target=pcvr") == 0) {
+                isPcvr = true;
+            }
             if (strcmp(argv[i], "--vr-emulate") == 0) {
                 isVrEmulate = true;
             }
         }
         isXrDesktopStream = isXrDesktopStream && isStream && !isVrEmulate;
+
+#if defined(Q_OS_LINUX) && !defined(STEAM_LINK)
+        // §VR-HEADLESS（2026-10-04，Frame 第六輪 a）：PCVR 在 gamescope 裡（Steam Frame 從收藏庫啟動 Linux app 都經
+        // gamescope）不開平面視窗。開了的話 Frame 把它當平面遊戲：進 XR 後 42～67 ms 又加回「手把模式＋雷射滑鼠」，
+        // Frame 自己的介面疊在串流畫面上。在任何 X11／Wayland 探測之前清掉 DISPLAY／WAYLAND_DISPLAY，下面的
+        // offscreen 規則（Qt）與 session.cpp（SDL）就走實測過的無頭路徑。XR 桌面不套用：實體鍵盤要靠視窗焦點。
+        if (isPcvr && isXrDesktopStream && !qEnvironmentVariableIsEmpty("GAMESCOPE_WAYLAND_DISPLAY")) {
+            qunsetenv("DISPLAY");
+            qunsetenv("WAYLAND_DISPLAY");
+        }
+#endif
 
         // §SF-PROBE（M2a R1）：xr-probe／v4l2-probe／decode-bench 在下面（log 就緒後、
         // QGuiApplication 之前）以 QCoreApplication 派發。它們不串流、不開視窗，Frame 上
@@ -623,7 +664,7 @@ int main(int argc, char *argv[])
             s_SingleInstanceMutex = hMutex;
 #elif defined(Q_OS_UNIX)
             const char* lockPath = "/tmp/viplestream-client.lock";
-            int lockFd = open(lockPath, O_CREAT | O_RDWR, 0600);
+            int lockFd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
             if (lockFd >= 0) {
                 if (flock(lockFd, LOCK_EX | LOCK_NB) != 0) {
                     fprintf(stderr,
@@ -635,6 +676,7 @@ int main(int argc, char *argv[])
                 }
                 // lockFd 故意不 close — 保持到 process 結束，
                 // flock 會自動在 fd 關閉時釋放。
+                s_SingleInstanceLockFd = lockFd;
             }
 #endif
         }
@@ -1505,6 +1547,12 @@ int main(int argc, char *argv[])
                                                    [](QQmlEngine* qmlEngine, QJSEngine*) -> QObject* {
                                                        return StreamingPreferences::get(qmlEngine);
                                                    });
+    // VipleStream 2.0 §VR-LAUNCHER：Frame 上的桌面／VR 模式選擇
+    qmlRegisterSingletonType<VrLauncher>("VrLauncher", 1, 0,
+                                         "VrLauncher",
+                                         [](QQmlEngine*, QJSEngine*) -> QObject* {
+                                             return new VrLauncher();
+                                         });
 
     // Create the identity manager on the main thread
     IdentityManager::get();
@@ -1550,6 +1598,7 @@ int main(int argc, char *argv[])
             QString host    = streamParser.getHost();
             QString appName = streamParser.getAppName();
             auto launcher   = new CliStartStream::Launcher(host, appName, preferences, &app);
+            launcher->setTakeover(streamParser.isTakeover());
             engine.rootContext()->setContextProperty("launcher", launcher);
 
             QObject::connect(launcher, &CliStartStream::Launcher::searchingComputer,

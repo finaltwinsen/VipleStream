@@ -2292,7 +2292,7 @@ namespace vr::selftest::platform {
      * @brief T6.probe-unit（K16）與 T6.abi-table。
      * - unit：`vr_probe --mode unit`，期望 `unit pass=<n> fail=<n>`、exit 0（driver 端純模組：fov_to_rect、virtual_vsync、
      *   pose_history 與 ipc_client 的迴路測試）。
-     * - ABI 表：server（GCC）與 vr_probe（MSVC）各自印 vr_ipc_abi_table.h 的 306 列，逐字比對。vr_probe 在 ipcpeer 與 unit
+     * - ABI 表：server（GCC）與 vr_probe（MSVC）各自印 vr_ipc_abi_table.h 的 307 列，逐字比對。vr_probe 在 ipcpeer 與 unit
      *   開頭印 `abi-row <key>=<value>` 各一行、最後 `abi-rows count=<n> digest=<16 hex>`；unit 的輸出沒有表時，另跑一次
      *   連不存在的 pipe 的 ipcpeer（`--peer-no-render --pipe \\.\pipe\VipleStreamVR-selftest-abi`，不碰 bridge）取表。
      */

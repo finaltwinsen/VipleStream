@@ -80,10 +80,12 @@ public:
 
     QString getHost() const;
     QString getAppName() const;
+    bool isTakeover() const;
 
 private:
     QString m_Host;
     QString m_AppName;
+    bool m_Takeover = false;
     QMap<QString, StreamingPreferences::WindowMode> m_WindowModeMap;
     QMap<QString, StreamingPreferences::AudioConfig> m_AudioConfigMap;
     QMap<QString, StreamingPreferences::VideoCodecConfig> m_VideoCodecMap;

@@ -478,7 +478,12 @@ namespace proc {
     // VipleStream H Phase 2.4: kick off the Steam game-exit watchdog
     // for auto-imported Steam apps, AFTER all other launch steps so a
     // failure path above doesn't leave a watchdog running.
-    if (_app.source == "steam" && !_app.steam_app_id.empty() && !_vr_pcvr) {
+    //
+    // §VR-EXIT（2026-10-04）：PCVR 的 Steam 遊戲也要看（M1b V5 起排除 _vr_pcvr）。遊戲結束後 host 的 SteamVR 還開著，
+    // 編排器照樣 ACTIVE，串流一直送 SteamVR 的主控台（Frame 上變成雙介面，使用者出不去）。監看器要先看到遊戲在跑、
+    // 之後 RunningAppID 變了才結束，不會在遊戲還沒起來時就收掉 session（設計 §3.6 的顧慮）；terminate() 會停編排器，
+    // control 迴圈送 graceful termination，client 正常結束、不跳錯誤。
+    if (_app.source == "steam" && !_app.steam_app_id.empty()) {
       try {
         uint32_t aid = static_cast<uint32_t>(std::stoul(_app.steam_app_id));
         if (aid > 0) {

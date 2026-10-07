@@ -92,6 +92,9 @@ public:
         // M4a R1：PCVR 模式——影像以 projection layer 呈現（pose＝0x81 帶回的 renderPose∘eyeToHead），
         // 不建 β 的射線滑鼠／鍵盤；參考空間 STAGE→LOCAL_FLOOR→LOCAL；stale 500 ms 淡出、2000 ms loading。
         bool pcvr = false;
+        // 2026-10-05（dev）：--vr-overscan。PCVR 每眼 FOV 四邊各放大這麼多度：/launch 的 vrFov 與 projection 用同一組
+        // 放大後的值（vrOverscan 仍送 0），host 多畫一圈，轉頭時 Frame 端重投影不會露出沒畫面的邊。0＝不放大。
+        float pcvrOverscanDeg = 0.0f;
         // M4a R2（dev）：PCVR 控制器按鍵改用合成序列（pose 仍來自 runtime），驗 0x5506 打包
         bool testVrInput = false;
         // M4a 收尾（Frame 實測）：>0＝bring-up 時經 XR_FB_display_refresh_rate 列出可用更新率，要求最接近
@@ -378,10 +381,37 @@ private:
         float linVel[3] = {};
         float angVel[3] = {};
         uint64_t predictNs = 0;
+        int64_t displayTime = 0;  // frame loop locate 用的 predictedDisplayTime（XrTime）
     };
     mutable std::mutex m_HmdMutex;
     HmdSample m_Hmd;
     int64_t m_PredictAheadNs = 0;             // predictedDisplayTime − xrWaitFrame 返回時的 XrTime（EMA）
+    // §VR-POSEERR（2026-10-03）：算繪姿態（0x81）對「這一幀實際顯示時的頭部姿態」的誤差與落後時間。
+    // 頭盔的重投影只修轉動，平移落後多少就是近物晃動的幅度。全部只在 frame thread 存取。
+    struct PoseTrailPoint {
+        int64_t t = 0;      // predictedDisplayTime（XrTime，ns）
+        float pos[3] = {};
+    };
+    static constexpr int kPoseTrailLen = 64;  // 約 0.53 s（120 Hz）
+    PoseTrailPoint m_PoseTrail[kPoseTrailLen];
+    int m_PoseTrailHead = 0;
+    int m_PoseTrailCount = 0;
+    std::vector<float> m_PoseErrPosMm;        // 10 s 視窗
+    std::vector<float> m_PoseErrRotDeg;
+    std::vector<float> m_PoseLagMs;           // 10 s 視窗；正值＝落後、負值＝超前，只在頭部有移動時估
+    std::vector<float> m_PoseLag1s;           // §VR-PREDICT：1 s 視窗，隨 CLIENT_TIMING 回報給 server
+    // 延後評估：等軌跡延伸到該幀顯示時間之後 100 ms 才找對應時間點，才看得出「超前」
+    struct PosePending {
+        int64_t t = 0;      // 該幀 predictedDisplayTime
+        float pos[3] = {};  // 算繪位置
+    };
+    static constexpr int kPosePendingLen = 32;
+    PosePending m_PosePending[kPosePendingLen];
+    int m_PosePendingHead = 0;   // 最舊的一筆
+    int m_PosePendingCount = 0;
+    uint64_t m_PoseErrLastSeq = 0;  // 上一次算誤差的影像（XrVideo::Current::seq）：同一張重複顯示不估落後
+    void pcvrPoseErr(const float renderRot[4], const float renderPos[3], bool freshFrame);
+    void pcvrPoseLagEval(const PosePending& e);
     // PCVR 呈現：stale 淡出用的半透明黑 quad（head-locked）
     XrSwapchain m_FadeSwapchain = XR_NULL_HANDLE;
     uint32_t m_FadeImageCount = 0;
@@ -407,6 +437,12 @@ private:
         uint32_t latchSent = 0;
         uint32_t timingSent = 0;
         uint32_t mtpNoSample = 0;
+        // 2026-10-05：10 s 視窗的新影像／重複（latch 時沒有新影像）／跳過（兩次 latch 之間到了兩張以上，舊的沒顯示）
+        uint32_t new10s = 0;
+        uint32_t repeat10s = 0;
+        uint32_t skip10s = 0;
+        // 2026-10-05：xrEndFrame 時 runtime 會用的影像（最後 release 的）不是 projection 姿態所屬的那張（錯配一幀）
+        uint32_t mismatch10s = 0;
         std::vector<int32_t> slack1s;
         std::vector<uint32_t> render1s;
         std::vector<uint32_t> mtp1sUs;

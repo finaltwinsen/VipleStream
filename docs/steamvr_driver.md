@@ -101,6 +101,50 @@ client 的頭盔／控制器姿勢 ──0x5506──▶ server ──tracking r
 
 kill server 之後約 33 ms pose 就失效（V4 實測，門檻 1 s）；新 server 握手後自動恢復。
 
+**pose_flags（2026-10-05，session config 的 `reserved2` 拆出 `pose_flags`；版面不變、不升 ABI 版號，0＝上表的舊行為）**
+由 server 設定檔決定，全部預設關，等 Frame 上 A/B 之後再定預設值：
+
+- **bit0 §VR-CTRL-OFFSET**（`vr_ctrl_pose_offset = enabled`）：控制器也設 `poseTimeOffset`，與 HMD 用同一個目標時間
+  （client 以同一個預測時間 locate 頭與雙手）、同樣的 −50 ms 下限，上限改讀 `ctrl_extrap_cap_us`（舊版寫了但沒讀）。
+  舊版控制器的 offset 一直是 0：SteamVR 把 client 已經預測到「取樣＋A」的拍子姿態當成「到達時刻」的姿態再外插一次，
+  第八輪推算拍子比頭超前約 25～31 ms，上行抖動也直接變成拍子的時間誤差。速度歸零（stale、OutOfRange）時 offset 也歸零。
+- **bit1 §VR-STALE-HOLD**（`vr_stale_policy = hold`）：2T < 空窗 ≤ `stale_oor_ctrl_us`（預設 100 ms）時，HMD 與控制器都
+  保留線速度、`poseTimeOffset` 照實設成「目標 − 現在」（下限放寬到 −100 ms，否則空窗約 81 ms 就撞到 −50 ms），
+  SteamVR 從樣本的目標時間繼續外插；角速度的座標語意還沒以探測確認，hold 期間 50 ms 內線性衰減到 0。重送的樣本
+  （角速度已衰減）也記進 pose_history。超過 100 ms 才回到舊規則（`holdExpired` 計數）。舊規則每輪約 150 次讓頭與拍子
+  先往回跳（外插整段被拿掉）、新樣本到了再往前跳；上行空窗多半是延遲尖峰而不是掉包（POSE-RX gap 只有 0～9）。
+
+- **bit2 §VR-ANGVEL-LOCAL**（`vr_angvel_local = enabled`）：HMD 與控制器的角速度轉成機體座標（`ω_local = q⁻¹ ω q`）
+  再交給 SteamVR。`vr_probe --mode predict`（client `--vr-emulate --vr-synthetic-motion tilt30yaw`：頭與右手先傾 30°、
+  再繞世界 Y 轉 30°/s）實測 SteamVR 以 `q·exp(ω t)` 外插——**把 `vecAngularVelocity` 當本地座標**；client（OpenXR
+  `XrSpaceVelocity`）給的是追蹤空間（世界）座標。沒轉時外插增量的旋轉軸與世界 Y 的 |dot|＝0.866（cos 30°，繞錯軸），
+  轉了之後＝1.000。頭或拍子一傾斜，舊版就繞錯的軸外插（揮拍時拍面角度偏掉）。pose_history 照舊記世界座標
+  （它以 `exp(ω t)·q` 外插，與 SteamVR 對本地 ω 的結果相同）。
+- 同一支探測量到的其他事實（SteamVR 2.17.10）：poseTimeOffset 依文件的正號採用（HMD offset +33 ms、控制器 0 時，
+  兩者在 pred=0 的姿態差正好 +33.3 ms；`vr_ctrl_pose_offset` 開啟後 0.0 ms）；外插量在約 100 ms 以內是線性的
+  （gain 1.00），超過後封頂在距樣本時間約 97～100 ms（pred 200 ms 時 gain 0.65）。所以 §VR-STALE-HOLD 的空窗
+  加上 SteamVR 的預測時間超過約 100 ms 時，姿態會停在那裡（仍比舊規則整段拿掉外插好）。
+
+觀察：driver 的 `tracking 10s` 尾端有 HMD／控制器 offset 分布、`arrivalMaxMs`／`gt2T`、`hold`／`holdExpired`、
+`poseFlags`；`tracking recovered` 多了 `total_ms`（整段空窗）與 `hold`。server 的 `[VIPLE-VR-UPLINK] 10s` 是同一段
+空窗在 server 收到的時刻（加上控制執行緒單輪耗時），兩邊對照可分出網路與 server 轉送。
+
+**姿態預測時間（§VR-PREDICT，2.0.0）**：HMD 的 `Prop_SecondsFromVsyncToPhotons` 決定 SteamVR 把遊戲用的頭部姿態預測到
+多遠。session 開始時取 session config 的 `vsync_to_photons_us`（server `vr::predict` 決定：設定檔固定值、上一個
+session 學到的值，或一個週期＋30 ms）；串流中 server 依 client 回報的姿態落後送 STATE `SET_V2P`（0x05，arg＝µs，
+1000～200000，超出範圍 driver 忽略並記 `ipc state-ignored reason=range`），driver 在 RunFrame 改屬性並送
+`VREvent_PropertyChanged`，log `set-v2p us=<N>`。舊的 `DEV_SET_V2P`（0x04）只在 selftest 的 dev mode 有效。
+重新握手（新 generation）時屬性回到 session config 的值。
+2026-10-05 修正（server `vr_predict`，Frame 第六～八輪的教訓）：每個 session 開頭 10 個可靠視窗不用（暖機）；探測前後的
+3 個視窗最大差 > 6 ms 視為不穩（探測前不探測、探測後退回起始值重量）；「不採用」只停該 session，連續兩個 session 才
+不再探測；學到的值依更新率分開存，沒學過的更新率由最接近的換算（`v' = 14 ms + (v − 14 ms)·T'/T`）。設定檔固定值時
+（目前 `<host>` 是 `vr_vsync_to_photons_us = 55000`）整段不跑。
+
+**frame ring 交還（§VR-RING-RELEASE，2.0.0）**：driver 發布一幀後要等 server 的 consumedFence 到值才會重用那個 slot。
+server 換消費者（VR 斷線後 `/resume`、encoder 重建）時，ring 裡最後幾幀可能已過期 1 s 以上；server 用
+`frame_reader_t::release_latest()` 只驗 generation 與 fence 就交還，不複製。舊版用一般讀取排空，過期那筆被判不合格
+而不交還，driver 三個 slot 全被佔住（driver log `noslot` 一直增加、`composed=0`），串流只剩 10 fps 重送幀。
+
 ## 7. 部署、註冊與還原
 
 由 server 的編排器（`vr_orchestrator`＋`vr_platform_win`）在 `/launch mode=pcvr` 時處理，**不需要手動安裝**：
@@ -118,15 +162,26 @@ kill server 之後約 33 ms pose 就失效（V4 實測，門檻 1 s）；新 ser
 
 | 層級 | 指令 | 內容 |
 |---|---|---|
-| 單元 | `vr_probe.exe --mode unit` | ABI 表、訊息驗證、ring、log 節流、virtual vsync、pose_history（7 項）、loopback |
+| 單元 | `vr_probe.exe --mode unit` | ABI 表、訊息驗證、ring、log 節流、virtual vsync、pose_history（7 項）、pose-policy（21 項：offset／hold 規則、揮拍空窗模擬、角速度座標換算）、loopback |
 | selftest | `viplestream-server.exe --vr-selftest --only T0,T3 --cycles 20` | 由執行中的 service 代跑；T3 每輪啟動／結束 SteamVR，驗 settingsSame、safeMode=0、註冊恰好一筆 |
 | selftest（手動 SteamVR） | `--vr-selftest --only T4 --manual-steamvr --probe scene|whoami --motion still|yaw --hold-sec N` | 讀回兩眼圖案與 renderPose 比對（mismatch=0）；`whoami` 列出 SteamVR 看到的裝置 |
 | 端到端（S0） | `VipleStream.exe stream <host> "SteamVR Home" --display-target pcvr --vr-emulate --vr-synthetic-motion sine` | host 需 `vr_pcvr = enabled` |
+| 外插語意（2026-10-05） | client `--vr-emulate --vr-synthetic-motion tilt30yaw` 串流中，host 以主控台使用者身分跑 `vr_probe.exe --mode predict --seconds 30 --out <dir>` | `predict summary dev=<hmd|right> pred=… angGain／worldDotY／localDotY／posGain`、`predict offset hmdMinusRight`；判讀見第 6 節 pose_flags |
 
 ## 9. 已知限制
 
 - standby 後再 arm，vrcompositor 可能不再 Present（與 V4 看到的 `AcquireSync` 逾時同源）；編排器遇到
   「我們的 HMD 在 standby 且沒有 VR app」時直接重啟 SteamVR 迴避。
+  **§VR-REARM（2026-10-04）**：有 VR 遊戲在跑時重啟 SteamVR 會把遊戲關掉，而使用者斷線後常常就是想接回原本的遊戲。
+  §VR-RING-RELEASE 修好 frame ring 死結之後，這種情況先試直接重新 arm：driver 5 s 內要就緒，WAIT_HMD 只等 10 s 的 Present。
+  等不到才照舊回 `STEAMVR_RESTART_REQUIRED`（client 會顯示原因並結束，見 `steam_frame_client.md` §8.6）。
+  沒有 VR app 在跑時照舊直接重啟 SteamVR。
+  `/launch` 的同步衝突檢查原本只要看到執行中的 VR 遊戲（kind=vr-app）就回 `503 VRLINK_ACTIVE`，連我們自己的 SteamVR
+  上、上一個 session 留下的遊戲也擋，請求根本到不了編排器。現在 SteamVR 用的是我們的 driver 時（`conflict_t::our_driver`）
+  不擋，交給編排器處理。
+  驗證（2026-10-04，`<host>`，Eleven Table Tennis 在上一個 session 結束後仍在跑、HMD standby）：`<dev-client>` 以
+  `--vr-emulate` 啟動 SteamVR Home（每眼 2160、120 Hz），流程為 `conflict … kind=vr-app restart=0` → `arm reason=rearm` →
+  `rearm from standby ok`（arm 後立即恢復 Present）→ ACTIVE。擷取每 10 s 約 1199 幀、黑幀 0，SteamVR 沒有重啟，遊戲繼續跑。
 - vrcompositor 顯示系統面板時會自己重畫第 0 層，T4 的圖案解不出來（`compared`≈0），不代表傳錯畫面。
 - 控制器沒有 skeleton 與 render model；SteamVR 裡看得到姿勢與輸入，但沒有手的模型。
 - 只有 Windows。Linux／macOS server 的 VR 相關入口全部回「不支援」（`vr_stub`），`/serverinfo` 只宣告 stub 能力。
@@ -143,5 +198,22 @@ kill server 之後約 33 ms pose 就失效（V4 實測，門檻 1 s）；新 ser
   滿 20 s 後 `DriverRequestedQuit` 也會生效（約 1 s 結束，不必再結束 vrmonitor）。
 - SteamVR 以 safe mode 啟動時（§SAFE-RETRY），編排器在 WAIT_DRIVER 每秒查一次 `blocked_by_safe_mode`，查到就結束
   SteamVR、清掉封鎖、重啟一次；第二次仍被擋回 `VIPLE_VR_STATE_CODE_SAFE_MODE`。
+- **§VR-EXIT（2026-10-04，Frame 實測回報）**：
+  - 遊戲結束：原本 PCVR 的 app 是否在跑完全由編排器決定，遊戲關掉後 host 的 SteamVR 還開著，串流就一直送 SteamVR
+    主控台（Frame 上變成雙介面）。現在平面模式的 Steam 遊戲結束監看（`process.cpp` 的 `start_steam_watchdog_`）也套用到
+    PCVR：先看到 RunningAppID 是這個遊戲，之後變掉就 `proc.terminate()`，停編排器並送 graceful termination。
+  - SteamVR 被關掉（使用者在主控台按「退出 VR」）：以前 driver 斷線 10 s 後會自動重開 SteamVR，Frame 上畫面亂閃、
+    使用者出不去。現在 vrserver 不在了就正常結束 session（`run_session` 正常返回 → `active()` 為 false →
+    `proc.running()` 回 0）。SteamVR 真的當掉時遊戲也已經跟著結束，重開 SteamVR 接不回遊戲。
+- **§VR-RESTORE-IDLE（2026-10-04，Frame 實測）**：session 結束後 SteamVR 若還開著，guard 就一直還原不了，因為設定只在
+  vrserver 不在時才還原。host 的 `forcedDriver` 會一直是 viplestream、vrlink 也一直被關著，使用者改用 Steam 自己的
+  串流就開不起來（實測如此）。現在編排器在 RESTORE_PENDING 時，如果我們的 HMD 在 standby、沒有 VR 遊戲在跑，滿 30 s
+  就結束 SteamVR，下一個維護 tick 還原設定。遊戲結束後 RunningAppID 常會變成 SteamVR 本身（250820，它也在 vrmanifest
+  裡），這不算遊戲；CONFLICT 的重新 arm 判斷也同樣排除 250820。遊戲還在跑時不動 SteamVR，留給斷線後接回。沒有遊戲時，
+  下一個 session 本來就會重啟 SteamVR，所以提早結束不會讓接續變慢。
+- **§STEAM-LOGIN（2026-10-04）**：§VR-NODASH 改用 `vrstartup.exe` 之後，Steam 沒在跑時不會被帶起來。編排器在
+  LAUNCH_STEAMVR 前先查：Steam 沒登入、又沒記住帳號（HKU 的 `AutoLoginUser` 是空的，例如為了換別的帳號登出後沒登回來），
+  就立刻回 code 17，以前要白等 60 s。有記住帳號但 Steam 沒在跑，就先以使用者身分執行 `steam.exe -silent`，再照舊等登入。
+  client 的訊息會提示使用者先在主機登入 Steam（可用桌面模式）。
 - 全新安裝的 Windows 第一次由 Steam 啟動 SteamVR 時，Steam 會要求以管理員身分裝 VC++ 2013 runtime（UAC 視窗；
   沒人按就卡 2 分鐘後才繼續，期間編排器回 code 10）。先在主機上手動啟動一次 SteamVR 並同意，或預先裝好。

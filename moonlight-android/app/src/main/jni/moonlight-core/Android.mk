@@ -65,6 +65,7 @@ LOCAL_SRC_FILES := moonlight-common-c/src/AudioStream.c \
                    moonlight-common-c/src/SimpleStun.c \
                    moonlight-common-c/src/VideoDepacketizer.c \
                    moonlight-common-c/src/VideoStream.c \
+                   moonlight-common-c/src/VrMultiLink.c \
                    moonlight-common-c/src/PlatformNetIf.c \
                    moonlight-common-c/src/QuicTransport.c \
                    moonlight-common-c/enet/callbacks.c \

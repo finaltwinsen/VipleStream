@@ -1301,6 +1301,14 @@ namespace vrdrv {
                       cb_.on_server_state(m.kind, m.arg);
                     }
                     break;
+                  case VRIPC_ST_SET_V2P:
+                    // §VR-PREDICT：正式路徑；值域外（寫入方不可信）不套用
+                    if (m.arg < 1000u || m.arg > 200000u) {
+                      VRDRV_LOG_WARN("ipc state-ignored reason=range kind=0x%x arg=%u", m.kind, m.arg);
+                    } else if (cb_.on_server_state) {
+                      cb_.on_server_state(m.kind, m.arg);
+                    }
+                    break;
                   default:
                     VRDRV_LOG_WARN("ipc state-ignored reason=unknown kind=0x%x", m.kind);
                     break;

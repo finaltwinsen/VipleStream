@@ -150,6 +150,45 @@ namespace config {
       return vr_t::pcvr_e::disabled;
     }
 
+    vr_t::latch_e latch_from_view(const std::string_view value, const std::string_view key) {
+      if (value == "legacy"sv) {
+        return vr_t::latch_e::legacy;
+      }
+      if (value == "v2"sv) {
+        return vr_t::latch_e::v2;
+      }
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: legacy, v2. Falling back to 'legacy'", key, value));
+      return vr_t::latch_e::legacy;
+    }
+
+    vr_t::multilink_e multilink_from_view(const std::string_view value, const std::string_view key) {
+      if (value == "disabled"sv) {
+        return vr_t::multilink_e::disabled;
+      }
+      if (value == "all"sv || value == "enabled"sv) {
+        return vr_t::multilink_e::all;
+      }
+      if (value == "primary"sv) {
+        return vr_t::multilink_e::primary;
+      }
+      if (value == "auto"sv) {
+        return vr_t::multilink_e::automatic;
+      }
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: disabled, auto, all, primary. Falling back to 'disabled'", key, value));
+      return vr_t::multilink_e::disabled;
+    }
+
+    vr_t::stale_e stale_from_view(const std::string_view value, const std::string_view key) {
+      if (value == "legacy"sv) {
+        return vr_t::stale_e::legacy;
+      }
+      if (value == "hold"sv) {
+        return vr_t::stale_e::hold;
+      }
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: legacy, hold. Falling back to 'legacy'", key, value));
+      return vr_t::stale_e::legacy;
+    }
+
     /**
      * @brief 嚴格解析 vr_* 的整數設定項：不是十進位整數、或不在允許範圍就警告並保留預設值。
      *
@@ -1449,10 +1488,24 @@ namespace config {
     }
 
     // VipleStream 2.0 §VR（M1a）：vr_pcvr 預設 disabled；stub 只供開發驗證。
-    // 值寫錯一律警告並維持預設（壞值絕不靜靜地變成「開啟」或「關閉安全網」）。
+    // enum 與整數選項（vr_opt::*_from_view、vr_opt::int_strict_f）值寫錯一律警告並維持預設
+    // （壞值絕不靜靜地變成「開啟」或「關閉安全網」）。
+    // 例外：四個布林選項（vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、vr_multilink_repair）
+    // 走上游的 bool_f：不認得的值（含大小寫不同）不警告、當成關閉，值裡含 '1' 則當成開啟。
+    // vr_multilink_fault 是原樣字串，格式錯誤要到多連線的 VR session 建立時才警告（stream.cpp）。
     generic_f(vars, "vr_pcvr", vr.pcvr, vr_opt::pcvr_from_view);
     vr_opt::int_strict_f(vars, "vr_intra_refresh_frames", vr.intra_refresh_frames, 2, 60, false);
     vr_opt::int_strict_f(vars, "vr_intra_refresh_safety_ms", vr.intra_refresh_safety_ms, 500, 10000, true);
+    vr_opt::int_strict_f(vars, "vr_vsync_to_photons_us", vr.vsync_to_photons_us, 1000, 200000, true);
+    generic_f(vars, "vr_latch_mode", vr.latch_mode, vr_opt::latch_from_view);
+    vr_opt::int_strict_f(vars, "vr_latch_target_pct", vr.latch_target_pct, 25, 50, false);
+    bool_f(vars, "vr_ctrl_pose_offset", vr.ctrl_pose_offset);
+    bool_f(vars, "vr_angvel_local", vr.angvel_local);
+    generic_f(vars, "vr_stale_policy", vr.stale_policy, vr_opt::stale_from_view);
+    generic_f(vars, "vr_multilink", vr.multilink, vr_opt::multilink_from_view);
+    string_f(vars, "vr_multilink_fault", vr.multilink_fault);
+    bool_f(vars, "vr_multilink_ctrl", vr.multilink_ctrl);
+    bool_f(vars, "vr_multilink_repair", vr.multilink_repair);
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

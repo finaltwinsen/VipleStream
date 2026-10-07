@@ -6,6 +6,7 @@ import AppModel 1.0
 import ComputerManager 1.0
 import SdlGamepadKeyNavigation 1.0
 import StreamingPreferences 1.0
+import VrLauncher 1.0
 
 CenteredGridView {
     property int computerIndex
@@ -93,7 +94,8 @@ CenteredGridView {
     function createModel()
     {
         var model = Qt.createQmlObject('import AppModel 1.0; AppModel {}', parent, '')
-        model.initialize(ComputerManager, computerIndex, showHiddenGames)
+        // §VR-LAUNCHER：VR 模式只列 VR app（切換模式時會回到主機清單，這個 view 會重建）
+        model.initialize(ComputerManager, computerIndex, showHiddenGames, VrLauncher.vrMode)
         return model
     }
 
@@ -539,6 +541,17 @@ CenteredGridView {
         {
             var runningId = appModel.getRunningAppId()
 
+            // §VR-LAUNCHER：VR 模式先確認這台主機能串 VR（宣告 PCVR、不是只能走 relay、在線）。
+            // 不擋的話子行程會退回平面串流，而無頭的子行程看不到平面畫面
+            if (VrLauncher.vrMode) {
+                var vrReason = appModel.vrUnavailableReason()
+                if (vrReason !== "") {
+                    vrInfoDialog.text = vrReason
+                    vrInfoDialog.open()
+                    return
+                }
+            }
+
             // §M.2: 檢查 session 是否被其他裝置佔用
             if (runningId !== 0 && !takeover) {
                 var ownerUuid = appModel.getSessionOwnerUuid()
@@ -558,12 +571,20 @@ CenteredGridView {
             if (runningId !== 0 && runningId !== model.appid) {
                 if (quitExistingApp) {
                     quitAppDialog.appName = appModel.getRunningAppName()
-                    quitAppDialog.segueToStream = true
+                    // §VR-LAUNCHER：VR 模式結束舊 app 後不在 GUI 行程裡串流，改開 VR 串流子行程
+                    quitAppDialog.segueToStream = !VrLauncher.vrMode
+                    quitAppDialog.launchVrAfter = VrLauncher.vrMode
                     quitAppDialog.nextAppName = model.name
                     quitAppDialog.nextAppIndex = index
                     quitAppDialog.open()
                 }
 
+                return
+            }
+
+            // VipleStream 2.0 §VR-LAUNCHER：VR 模式另開子行程串流（用主機目前的位址；名稱可能重複）
+            if (VrLauncher.vrMode) {
+                VrLauncher.launch(appModel.vrLaunchAddress(), model.name, takeover || false)
                 return
             }
 
@@ -635,6 +656,7 @@ CenteredGridView {
         function doQuitGame() {
             quitAppDialog.appName = appModel.getRunningAppName()
             quitAppDialog.segueToStream = false
+            quitAppDialog.launchVrAfter = false
             quitAppDialog.open()
         }
 
@@ -696,7 +718,12 @@ CenteredGridView {
         }
 
         Label {
-            text: qsTr("This computer doesn't seem to have any applications or some applications are hidden")
+            // §VR-LAUNCHER：VR 模式只列 VR app，空的時候說明原因
+            text: !VrLauncher.vrMode
+                  ? qsTr("This computer doesn't seem to have any applications or some applications are hidden")
+                  : (appModel.vrUnavailableReason() !== ""
+                     ? appModel.vrUnavailableReason()
+                     : qsTr("No VR apps were found on this computer. Switch to desktop mode to see all apps."))
             font.pointSize: 16
             color: "#F2F5E1"    // vs paper
             horizontalAlignment: Text.AlignHCenter
@@ -709,6 +736,7 @@ CenteredGridView {
         id: quitAppDialog
         property string appName : ""
         property bool segueToStream : false
+        property bool launchVrAfter : false   // §VR-LAUNCHER：結束舊 app 後開 VR 串流子行程
         property string nextAppName: ""
         property int nextAppIndex: 0
         text:qsTr("Are you sure you want to quit %1? Any unsaved progress will be lost.").arg(appName)
@@ -726,12 +754,23 @@ CenteredGridView {
             else {
                 params.nextAppName = null
                 params.nextSession = null
+                if (launchVrAfter) {
+                    var vrAddress = appModel.vrLaunchAddress()
+                    var vrAppName = nextAppName
+                    params.nextLaunchFn = function() { VrLauncher.launch(vrAddress, vrAppName, false) }
+                }
             }
 
             stackView.push(component.createObject(stackView, params))
         }
 
         onAccepted: quitApp()
+    }
+
+    // §VR-LAUNCHER：VR 模式下這台主機不能用的原因
+    NavigableMessageDialog {
+        id: vrInfoDialog
+        standardButtons: Dialog.Ok
     }
 
     // §M.2: 接管被其他裝置佔用的 session 確認對話框
@@ -744,6 +783,12 @@ CenteredGridView {
         standardButtons: Dialog.Yes | Dialog.No
 
         onAccepted: {
+            // §VR-LAUNCHER：VR 模式一律走子行程；使用者已確認接管，子行程帶 --takeover
+            if (VrLauncher.vrMode) {
+                VrLauncher.launch(appModel.vrLaunchAddress(), targetAppName, true)
+                return
+            }
+
             // 以 takeover=true 重新呼叫 launch
             var component = Qt.createComponent("StreamSegue.qml")
             var segue = component.createObject(stackView, {

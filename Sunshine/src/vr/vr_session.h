@@ -117,6 +117,9 @@ namespace vr {
     /// M1b S1-10：true = pcvr（display_vr_t 擷取 driver 的 SBS ring）；false = M1a stub（桌面擷取＋回聲）。
     /// V3 只有 RTSP 端讀它；由 `vr_pcvr=enabled` 的 /launch 設定是 S1-11（V5）。
     bool pcvr = false;
+    /// §VR-MULTILINK：client 帶了 VIPLE_VR_CLIENT_CAP_MULTILINK 且 vr_multilink 不是 disabled。
+    /// true 時 <VipleStreamVRSession> 多一個 multilink=1，client 才會送 LINK_HELLO。
+    bool multilink = false;
 
     int packed_width() const {
       return params.eye_width * 2;  // layout=sbs
@@ -350,6 +353,15 @@ namespace vr {
     std::optional<wave_info_t> active_wave() const;
 
     /**
+     * @brief 進行中或已排定的 wave（都沒有就 nullopt）。已排定、第一幀還沒編時，回的是 on_loss() 接受那筆 LOSS 當下記的
+     *        估計（start_frame＝當時 encoder 即將編的幀號），一定不晚於實際起點。不能每次重新取 next_frame()——encoder
+     *        決定從第 F 幀開 wave 之後、等影像的那一個幀週期裡 next_frame() 已經是 F+1，client 採用它會把 wave 的結尾
+     *        多算一幀，真正帶 REFRESH_DONE 的那一幀反而被當成 wave 還沒結束。排定期間又回報了不在估計值之前的掉幀時，
+     *        on_loss() 會把估計值往後推到 lastLost + 1（仍然不晚於實際起點），之後回的都是推過的值。
+     */
+    std::optional<wave_info_t> scheduled_wave() const;
+
+    /**
      * @brief LOSS log 的節流閘門：每秒最多放行一次。
      * @param suppressed 放行時帶出上次放行之後被壓掉的筆數。
      * @return true 表示這次可以印。
@@ -365,6 +377,9 @@ namespace vr {
     void count_c2s(uint8_t subtype);
 
     // ── M4a R3：LATCH／CLIENT_TIMING／HAPTIC ──
+
+    /// §VR-LATCH-V2：session 開始、第一則 LATCH 之前設定控制器（config vr_latch_mode／vr_latch_target_pct）
+    void configure_latch(latch::mode_e mode, int target_pct, uint32_t host_period_ns);
 
     /**
      * @brief control 執行緒（或 QUIC IO 執行緒）：一則 LATCH。更新頻率鎖控制器並回傳建議的
@@ -399,12 +414,24 @@ namespace vr {
 
     stats_snapshot_t stats() const;
 
+    /// 2026-10-05：被採用的 tracking 樣本之間的到達間隔（server 收到的時刻），10 s 視窗
+    struct arrival_stats_t {
+      int64_t max_us = 0;  ///< 最大間隔
+      uint64_t gt2t = 0;  ///< 間隔 > 2 個顯示週期的次數（driver 會因此觸發 stale 規則）
+    };
+
+    /// 取出目前視窗的統計並歸零（10 s log 用）
+    arrival_stats_t take_arrival_stats();
+
     // ── S→C outbox（任何執行緒都能排入；只有 control 執行緒 drain 後送出）──
 
     void queue_s2c(std::vector<uint8_t> tlv, bool reliable);
 
     /// REFRESH_START 連排 2 份（unsequenced 不重傳，互為備援）
     void queue_refresh_start(const wave_info_t &wave);
+
+    /// REFRESH_START 的 TLV 位元組（§VR-LINK-CTRL：同一則訊息另外經連線層送出時用）
+    static std::vector<uint8_t> refresh_start_tlv(const wave_info_t &wave);
 
     /**
      * @brief encode 執行緒在每次 encode 之後更新：下一個要編的幀號（= 線上的 frameIndex）。
@@ -442,10 +469,12 @@ namespace vr {
 
     const negotiated_t neg_;
     const void *const stream_session_;
+    const int64_t clock_frequency_;
 
     // pose
     mutable std::mutex pose_mtx_;
     std::optional<pose_sample_t> latest_;
+    arrival_stats_t arrival_win_ {};  ///< pose_mtx_ 保護
 
     // 時鐘對映（clk::clock_map_t 不是執行緒安全的；只在 clock_mtx_ 內碰，不與 pose_mtx_ 巢狀）
     mutable std::mutex clock_mtx_;
@@ -457,6 +486,7 @@ namespace vr {
     mutable std::mutex wave_mtx_;
     wave_phase_e wave_phase_ = wave_phase_e::idle;
     wave_info_t wave_ {};
+    wave_info_t pending_wave_ {};  ///< wave_phase_ == pending 時有效：排定當下的估計
     std::chrono::steady_clock::time_point wave_since_ {};
     bool have_last_loss_ = false;
     uint32_t last_loss_first_ = 0;

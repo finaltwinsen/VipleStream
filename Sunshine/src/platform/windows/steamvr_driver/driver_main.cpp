@@ -194,6 +194,7 @@ namespace vrdrv {
               ctx->quit_pending.store(true);
               break;
             case VRIPC_ST_DEV_SET_V2P:
+            case VRIPC_ST_SET_V2P:
               ctx->v2p_pending.store(arg);
               break;
             default:

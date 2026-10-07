@@ -586,12 +586,20 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addChoiceOption("xr-test-fail", "(dev) XR failure injection: bringup (fail before /launch), loss (LOSS_PENDING 15 s in, rebuild succeeds), loss3 (loss, all rebuilds fail -> flat), exit (runtime exit 15 s in -> flat), gpuwedge (GPU wait timeout 15 s in -> wedged teardown)",
                            {"bringup", "loss", "loss3", "exit", "gpuwedge"});
     parser.addFlagOption("vr-emulate", "synthetic head/controller pose for PCVR (no XR runtime needed)");
-    parser.addChoiceOption("vr-synthetic-motion", "synthetic pose motion for --vr-emulate",
-                           {"still", "sine", "yaw30"});
+    parser.addChoiceOption("vr-synthetic-motion", "synthetic pose motion for --vr-emulate and --vr-synthetic-hmd (tilt30yaw: dev, for the host vr_probe --mode predict; "
+                           "fast: dev, head motion on the scale of actual play)",
+                           {"still", "sine", "yaw30", "tilt30yaw", "fast"});
+    parser.addFlagOption("vr-synthetic-hmd", "(dev) PCVR on a real XR runtime: send the --vr-synthetic-motion head pose instead of the tracked one, to exercise the "
+                         "motion-dependent paths with nobody wearing the headset. The picture swings in the headset - do not wear it. Not saved.");
     parser.addValueOption("vr-eye", "per-eye <width>x<height> for PCVR (default 2160x2160)");
     parser.addValueOption("vr-hz", "HMD refresh rate for PCVR (default 90)");
     parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
     parser.addValueOption("vr-inject-loss", "(dev) N: inject a VR LOSS report every N seconds");
+    parser.addFlagOption("vr-link-selftest", "(dev) PCVR multi-link: open a second link on the same network interface to exercise duplication and de-duplication. Not saved.");
+    parser.addValueOption("vr-overscan", "(dev) PCVR: widen each eye's field of view by this many degrees on every side (0-10); "
+                                         "the host renders the extra margin so head turns do not expose blank edges");
+    // §VR-LAUNCHER：GUI 的 VR 模式以子行程串流，接管確認在 GUI 做完後帶這個旗標（不寫入設定）
+    parser.addFlagOption("takeover", "take over the host even if another device is streaming from it (that device is disconnected)");
 
     // VipleStream 2.0 §SF-PROBE（M2a）dev-only：把 decoder 實際收到的 bitstream 錄成
     // decode-bench 的樣本。值只存在 BitstreamDump 的行程內全域，絕不進 StreamingPreferences
@@ -858,8 +866,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     preferences->vrEmulate = parser.isSet("vr-emulate");
     if (parser.isSet("vr-synthetic-motion")) {
         const QString motion = parser.getChoiceOptionValue("vr-synthetic-motion").toLower();
-        preferences->vrSyntheticMotion = motion == "still" ? 0 : (motion == "yaw30" ? 2 : 1);
+        preferences->vrSyntheticMotion = motion == "still" ? 0 : (motion == "yaw30" ? 2 : (motion == "tilt30yaw" ? 3 : (motion == "fast" ? 4 : 1)));
     }
+    preferences->vrSyntheticHmd = parser.isSet("vr-synthetic-hmd");
     if (parser.isSet("vr-eye")) {
         auto eye = parser.getResolutionOptionValue("vr-eye");
         if (!inRange(eye.first, VIPLE_VR_EYE_DIM_MIN, VIPLE_VR_EYE_DIM_MAX) ||
@@ -881,6 +890,17 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
     if (parser.isSet("vr-inject-loss")) {
         preferences->vrInjectLossSec = parser.getIntOption("vr-inject-loss");
+    }
+    if (parser.isSet("vr-link-selftest")) {
+        preferences->vrLinkSelftest = true;
+    }
+    if (parser.isSet("vr-overscan")) {
+        bool ok = false;
+        const double deg = parser.value("vr-overscan").toDouble(&ok);
+        if (!ok || deg < 0.0 || deg > 10.0) {
+            parser.showError(QString("vr-overscan must be a number of degrees within 0-10: %1").arg(parser.value("vr-overscan")));
+        }
+        preferences->vrOverscanDeg = deg;
     }
 #ifndef HAVE_OPENXR
     if (preferences->displayTarget == StreamingPreferences::DT_PCVR && !preferences->vrEmulate) {
@@ -904,6 +924,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         parser.showError("App not provided");
     }
     m_AppName = parser.positionalArguments().at(2);
+    m_Takeover = parser.isSet("takeover");
 
     // §SF-PROBE（M2a）：參數都驗過、確定要串流才開啟 dump（session 開始前）。
     if (parser.isSet("dump-bitstream")) {
@@ -923,6 +944,11 @@ QString StreamCommandLineParser::getHost() const
 QString StreamCommandLineParser::getAppName() const
 {
     return m_AppName;
+}
+
+bool StreamCommandLineParser::isTakeover() const
+{
+    return m_Takeover;
 }
 
 ListCommandLineParser::ListCommandLineParser()

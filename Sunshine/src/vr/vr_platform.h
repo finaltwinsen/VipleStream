@@ -97,6 +97,16 @@ namespace vr {
     /// Steam 已登入（HKU 的 ActiveUser ≠ 0；code 17 用）
     bool steam_logged_in();
 
+    /// §STEAM-LOGIN（2026-10-04）：主控台使用者的 Steam 記住了帳號（HKU 的 `AutoLoginUser` 非空），啟動後會自己登入。
+    /// 沒記住時 Steam 會停在登入畫面（例：為了換別的帳號登出後沒登回來），編排器不必白等 60 s
+    bool steam_auto_login_configured();
+
+    /// 主控台 session 裡有 steam.exe 在跑
+    bool steam_running();
+
+    /// 以使用者身分啟動 Steam（`-silent`：不開主視窗；有記住帳號就會自己登入）
+    bool start_steam_silent();
+
     /// 以使用者身分開 `steam://rungameid/250820`（§D.8）
     bool launch_steamvr();
 
@@ -187,7 +197,15 @@ namespace vr {
       bool steamvr_running = false;
       bool vr_app_running = false;
       bool openxr_other = false;
+      /// §VR-REARM：SteamVR 在跑、HMD 是我們的 driver（已連線、沒有別的 HMD）。這時執行中的 VR 遊戲多半是上一個
+      /// VR session 留下的，/launch 不擋（交給編排器：沿用、重新 arm，不行才回 restart-required）
+      bool our_driver = false;
+      /// Steam 的 RunningAppID（0＝沒有）。遊戲結束後常變成 250820（SteamVR 本身，也在 vrmanifest 裡）
+      uint32_t running_app_id = 0;
     };
+
+    /// SteamVR 本身的 Steam app id
+    constexpr uint32_t k_steamvr_app_id = 250820;
 
     /// 重新判定（會讀使用者可寫的 vrserver.txt；只在背景執行緒呼叫）。driver_connected／other_hmd 取自 bridge
     conflict_t detect_conflicts(bool driver_connected, uint32_t other_hmd);

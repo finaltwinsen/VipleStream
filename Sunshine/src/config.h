@@ -247,6 +247,60 @@ namespace config {
     pcvr_e pcvr = pcvr_e::disabled;  ///< vr_pcvr
     int intra_refresh_frames = 8;  ///< vr_intra_refresh_frames：LOSS 觸發的 intra-refresh wave 長度（2–60 幀）
     int intra_refresh_safety_ms = 2000;  ///< vr_intra_refresh_safety_ms：週期性 intra refresh 安全網（0 = 關閉；否則 500–10000 ms）
+    /// vr_vsync_to_photons_us：HMD 的 Prop_SecondsFromVsyncToPhotons（µs）。SteamVR 依它決定遊戲的姿態要預測到多久之後。
+    /// 0（預設）＝自動（§VR-PREDICT）：session 從「一個顯示週期＋30 ms」或上一個 session 學到的值開始，再依 client 回報的
+    /// 姿態落後調整；1000–200000＝固定、不調。
+    int vsync_to_photons_us = 0;
+
+    /// §VR-LATCH-V2：vr_latch_mode。legacy（預設）＝M4a R3 原版；v2＝相位取模、anti-windup、目標 vr_latch_target_pct
+    enum class latch_e {
+      legacy,
+      v2,
+    };
+
+    latch_e latch_mode = latch_e::legacy;
+    int latch_target_pct = 40;  ///< vr_latch_target_pct：v2 的目標 slack，佔週期的百分比（25–50）
+
+    /// §VR-CTRL-OFFSET：vr_ctrl_pose_offset（disabled 預設）。enabled＝控制器也設 poseTimeOffset（driver pose_flags bit0）
+    bool ctrl_pose_offset = false;
+
+    /// §VR-ANGVEL-LOCAL：vr_angvel_local（disabled 預設）。enabled＝driver 把 client 的世界座標角速度轉成機體座標再交給
+    /// SteamVR（pose_flags bit2；SteamVR 把 vecAngularVelocity 當本地座標，10-05 vr_probe --mode predict 實測）
+    bool angvel_local = false;
+
+    /// §VR-STALE-HOLD：vr_stale_policy。legacy（預設）＝超過 2T 沒新樣本就速度與 offset 歸零；
+    /// hold＝100 ms 內的空窗保留速度與 offset（driver pose_flags bit1）
+    enum class stale_e {
+      legacy,
+      hold,
+    };
+
+    stale_e stale_policy = stale_e::legacy;
+
+    /// §VR-MULTILINK：vr_multilink。disabled（預設）＝單一路徑，行為與之前相同；
+    /// all＝client 的每張網卡各一條連線，影像、音訊、追蹤每條各送一份（送不動的連線會自動暫停送影像）；
+    /// primary＝連線照建、追蹤與音訊每條都送，但影像只走 session 本身那條（其餘待命）。
+    /// 只有 client 也支援時才會啟用（/launch 協商）。
+    enum class multilink_e {
+      disabled,
+      all,
+      primary,
+      automatic,  ///< auto：session 本身那條先送，其餘量到夠快才送影像；送不動的退回量測
+    };
+
+    multilink_e multilink = multilink_e::disabled;
+
+    /// §VR-LINK-CTRL：vr_multilink_ctrl（disabled 預設）。enabled＝client 也支援時，時間敏感的控制訊息走連線：
+    /// client 的 LOSS／LATCH 在每條已確認的連線各送一份，server 的 REFRESH_START 也是。session 位址那條鏈路
+    /// 變弱時，掉幀的恢復不再被它拖住（2026-10-07 頭盔實測：走開後 LOSS 送不到，退回 IDR 花了 832 ms）。
+    bool multilink_ctrl = false;
+    /// §VR-LINK-REPAIR：vr_multilink_repair（disabled 預設；要 vr_multilink_ctrl 也開）。enabled＝server 保留最近
+    /// 幾幀已加密的封包，client 回報某個 FEC block 缺哪些 shard 時原樣補送。
+    bool multilink_repair = false;
+
+    /// 開發用：vr_multilink_fault = <linkId>:<on_ms>:<off_ms>[:<phase_ms>][,…]，在指定連線上週期性丟掉全部收送，
+    /// 用來在單一網卡上模擬鏈路空檔。空字串＝關閉。
+    std::string multilink_fault;
   };
 
   struct nvhttp_t {

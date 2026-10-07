@@ -325,8 +325,8 @@ namespace vr::bridge {
    */
   void set_dev_mode(bool enabled);
 
-  /// STATE DEV_SET_V2P（只在 dev mode 且連線中）；@return 有送出為 true
-  bool send_dev_set_v2p(uint32_t vsync_to_photons_us);
+  /// §VR-PREDICT：STATE SET_V2P（連線中才送；不需 dev mode）。@return 有排入送出為 true
+  bool send_set_v2p(uint32_t vsync_to_photons_us);
 
   /// 登入／登出／解鎖／換人：立刻重查主控台使用者並以 SetSecurityInfo 換掉 pipe 的使用者 ACE（平時每 5／30 s 輪詢）
   void on_user_session_changed();
@@ -687,6 +687,16 @@ namespace vr::bridge {
     frame_invalid_e last_invalid() const {
       return last_invalid_;
     }
+
+    /**
+     * @brief §VR-RING-RELEASE：只為了把 slot 交還 driver 而讀最新一筆，內容不可使用。
+     *
+     * 只驗 generation 與 fence（> 目前基準、差距 ≤ 1024），不驗時間與 pose：換消費者時 ring 裡最新一筆可能已過期
+     * 超過 1 s（§B.8 時間窗），read_latest() 會判不合格、不交還 → driver 三個 slot 全被佔住、不再發布，消費端也
+     * 等不到新幀（2026-10-03 VR /resume 只剩 10 fps 重送幀）。read_latest() 判不合格而沒交還的幀也走這裡。
+     * @return 要 Signal 到 consumedFence 的值；沒有需要交還的（已交還、generation 不符、fence 不合理）回 0。
+     */
+    uint64_t release_latest();
 
     /// 寫 consume 區塊（server 寫入方；只供診斷，driver 以 consumedFence 為準）
     void publish_consume(const vripc_consume_status_t &status);

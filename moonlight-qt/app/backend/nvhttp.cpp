@@ -381,6 +381,10 @@ NvHTTP::getAppList(bool vr)
             else if (name == QString("Playtime")) {
                 apps.last().playtimeMinutes = xmlReader.readElementText().toLongLong();
             }
+            // VipleStream 2.0 §VR-LAUNCHER：VR app 標記（vr 類 app 與 Steam VR 遊戲）
+            else if (name == QString("IsVr")) {
+                apps.last().isVr = xmlReader.readElementText() == "1";
+            }
         }
     }
 

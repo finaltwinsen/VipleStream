@@ -1002,9 +1002,72 @@ namespace vr {
       return !viple::steam::read_active_user_id3().empty();
     }
 
+    bool steam_auto_login_configured() {
+      const auto u = console_user();
+      if (!u) {
+        return false;
+      }
+      return !reg_sz(HKEY_USERS, (u->sid + L"\\Software\\Valve\\Steam").c_str(), L"AutoLoginUser").empty();
+    }
+
+    bool steam_running() {
+      return !console_procs(L"steam.exe").empty();
+    }
+
+    bool start_steam_silent() {
+      if (!console_user_present()) {
+        return false;
+      }
+      const auto root = cached_environment().steam_root;
+      if (root.empty()) {
+        return false;
+      }
+      const fs::path dir {utf_utils::from_utf8(root)};
+      const fs::path exe = dir / L"steam.exe";
+      std::error_code fec;
+      if (!fs::exists(exe, fec)) {
+        return false;
+      }
+      const std::string cmd = std::format("\"{}\" -silent", utf_utils::to_utf8(exe.wstring()));
+      boost::filesystem::path wd {dir.wstring()};
+      std::error_code ec;
+      auto env = boost::this_process::environment();
+      auto child = platf::run_command(false, false, cmd, wd, env, nullptr, ec, nullptr);
+      if (ec) {
+        BOOST_LOG(warning) << "[VIPLE-VR-ORCH] steam start failed (" << ec.message() << ')';
+        return false;
+      }
+      child.detach();
+      return true;
+    }
+
     bool launch_steamvr() {
       if (!console_user_present()) {
         return false;
+      }
+      // §VR-NODASH（2026-10-03，Frame 實測）：以使用者身分直接執行 vrstartup.exe（同遊戲自己帶起 SteamVR）。
+      // 透過 steam://rungameid/250820 等於從收藏庫「執行 SteamVR」：Steam 會打開主控台顯示目前 app 的頁面，
+      // 串流畫面一開場就疊著 host 的主控台；Steam 的 RunningAppID 也會變成 250820（在 vrmanifest 裡），
+      // 下一次 /launch 被 detect_conflicts 當成別的 VR app 回 VRLINK_ACTIVE。找不到或起不來才退回 Steam URL。
+      const auto e = cached_environment();
+      if (!e.steamvr_runtime.empty()) {
+        const fs::path bin = fs::path {utf_utils::from_utf8(e.steamvr_runtime)} / L"bin" / L"win64";
+        const fs::path exe = bin / L"vrstartup.exe";
+        std::error_code fec;
+        if (fs::exists(exe, fec)) {
+          const std::string cmd = std::format("\"{}\"", utf_utils::to_utf8(exe.wstring()));
+          boost::filesystem::path wd {bin.wstring()};
+          std::error_code ec;
+          auto env = boost::this_process::environment();
+          auto child = platf::run_command(false, false, cmd, wd, env, nullptr, ec, nullptr);
+          if (!ec) {
+            child.detach();
+            BOOST_LOG(info) << "[VIPLE-VR-ORCH] launch-steamvr via vrstartup.exe";
+            return true;
+          }
+          BOOST_LOG(warning) << "[VIPLE-VR-ORCH] vrstartup.exe start failed (" << ec.message()
+                             << ") - falling back to steam://rungameid/250820";
+        }
       }
       platf::open_url("steam://rungameid/250820");
       return true;
@@ -1460,9 +1523,11 @@ namespace vr {
       const auto env = cached_environment();
       c.openxr_other = env.openxr_other;
       c.steamvr_running = vrserver_pid() != 0;
+      c.our_driver = c.steamvr_running && driver_connected && other_hmd != VRIPC_OTHER_HMD_PRESENT;
       if (auto u = console_user()) {
         const auto id = reg_dword(HKEY_USERS, u->sid + L"\\Software\\Valve\\Steam", L"RunningAppID");
         if (id && *id != 0) {
+          c.running_app_id = *id;
           const auto ids = vr_manifest_app_ids(false);
           c.vr_app_running = ids.contains(std::to_string(*id));
         }

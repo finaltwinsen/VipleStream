@@ -6,7 +6,8 @@
  *   幾何＝協商的打包尺寸、BGRA8、SDR。不做桌面 DDA 的 GPU 優先權區塊（改在 capture() 以 HIGH 為準，§C.7）。
  * - capture()（§C.3）：事件驅動。driver 還沒 READY／generation 換了 → 以 bridge 的 NT handle 在自己的 device 上
  *   重開 ring／fence（不 reinit，避免重建 encoder 與 IDR）；等 evtFrm → frame_reader_t 讀最新一筆（§B.8 驗證）→
- *   fence_waiter_t 在 CPU 端確認 sharedFence（§B.7，2 ms；不變式 8：絕不 GPU Wait 對方的 fence）→ CopyResource
+ *   fence_waiter_t 在 CPU 端確認 sharedFence（§B.7；上限依週期 2～6 ms，§VR-FENCE-WAIT；不變式 8：絕不 GPU Wait
+ *   對方的 fence）→ CopyResource
  *   到影像池 → Signal(影像 fence)、Signal(consumedFence)、Flush。driver 還沒 HMD_PRESENTING 時 10 fps 推黑幀。
  * - log 衛生（S1-02）：不印 handle 值、完整 GUID、SID。LUID 只印 match／n/a。
  *
@@ -38,7 +39,18 @@ namespace platf::dxgi {
 
   namespace {
     constexpr auto k_black_interval = 100ms;  ///< §C.3：HMD_PRESENTING 之前的黑幀節拍（10 fps）
-    constexpr uint32_t k_fence_wait_ms = 2;  ///< §B.7：CPU 端確認 sharedFence 的上限
+    constexpr uint32_t k_fence_wait_min_ms = 2;  ///< §B.7：CPU 端確認 sharedFence 的上限（原本固定 2 ms）
+    constexpr uint32_t k_fence_wait_max_ms = 6;
+
+    /// §VR-FENCE-WAIT（2026-10-04，Frame 實測）：遊戲吃滿 GPU 時 driver 的合成排在遊戲後面，常超過 2 ms
+    /// （10 s 內 fenceTimeout 94～274 次，擷取只剩 922～1054／1200 幀）。丟一幀要多等一整個週期才有下一張，
+    /// 只要不拖到下一幀就繼續等：上限＝週期的 70%，夾在 2～6 ms（120 Hz 約 5 ms）。
+    uint32_t fence_wait_ms(int fps) {
+      if (fps <= 0) {
+        return k_fence_wait_min_ms;
+      }
+      return std::clamp<uint32_t>(static_cast<uint32_t>(700 / fps), k_fence_wait_min_ms, k_fence_wait_max_ms);
+    }
     constexpr size_t k_stats_samples_max = 200000;  ///< selftest 用的累計樣本上限（60 s × 90 Hz 綽綽有餘）
 
     double qpc_to_ms(int64_t d) {
@@ -400,7 +412,7 @@ namespace platf::dxgi {
       percentiles(std::move(w.echo_age_ms), a50, a95);
       BOOST_LOG(info) << "[VIPLE-VR-CAP] 10s: gen="sv << (cs && cs->src ? cs->src->generation : 0)
                       << " copied="sv << w.copied << " skipped="sv << w.skipped << " fenceTimeout="sv << w.fence_timeout
-                      << " invalid="sv << w.invalid << " stale="sv << w.stale << " black="sv << w.black
+                      << " invalid="sv << w.invalid << " stale="sv << w.stale << " black="sv << w.black << " released="sv << w.released
                       << " evtToPush p50="sv << std::format("{:.3f}", e50) << "ms p95="sv << std::format("{:.3f}", e95)
                       << "ms presentToPush p50="sv << std::format("{:.3f}", p50) << "ms p95="sv << std::format("{:.3f}", p95)
                       << "ms echoAge p50="sv << std::format("{:.3f}", a50) << "ms p95="sv << std::format("{:.3f}", a95) << "ms"sv;
@@ -492,17 +504,26 @@ namespace platf::dxgi {
           std::lock_guard lk {stats_mtx_};
           stats_.generation = cur->generation;
         }
-        BOOST_LOG(info) << "[VIPLE-VR-CAP] opened gen="sv << cur->generation << " ring="sv << width << 'x' << height;
-        // 開完先「排空」：最新一筆的 slot 直接放回（不複製；避免拿到早就過期的幀）
-        vripc_frame_desc_t d {};
-        if (cs->reader->read_latest(d) == vr::bridge::frame_reader_t::result_e::ok) {
-          signal_consumed(d.fence_value);
+        // 開完先「排空」：上一個消費者沒交還的 slot 直接放回（不複製；避免拿到早就過期的幀）。
+        // §VR-RING-RELEASE：不能用 read_latest()——停過 1 s 以上的那一筆會被判不合格而不交還，driver 就沒有 slot 可用
+        const uint64_t baseline = cs->last_consumed;
+        const uint64_t drained = cs->reader->release_latest();
+        if (drained) {
+          signal_consumed(drained);
+          count(&stats_t::released);
         }
+        BOOST_LOG(info) << "[VIPLE-VR-CAP] opened gen="sv << cur->generation << " ring="sv << width << 'x' << height
+                        << " released="sv << (drained > baseline ? drained - baseline : 0);
       }
 
       // ── 等下一幀 ─────────────────────────────────────────────────────────────
       const DWORD w = WaitForSingleObject(static_cast<HANDLE>(cs->src->evt_frm), 100);
       if (w != WAIT_OBJECT_0) {
+        // §VR-RING-RELEASE：100 ms 沒有新幀時，把 ring 裡還沒交還的幀（例：被判不合格）放回，免得 driver 一直沒 slot
+        if (const uint64_t f = cs->reader->release_latest()) {
+          signal_consumed(f);
+          count(&stats_t::released);
+        }
         const auto now = std::chrono::steady_clock::now();
         if (!vr::bridge::status().hmd_presenting && now - last_black_ >= k_black_interval) {
           if (auto r = push_black(push_captured_image_cb, pull_free_image_cb); r != capture_e::timeout) {
@@ -546,7 +567,7 @@ namespace platf::dxgi {
       }
 
       // §B.7：CPU 端確認 driver 的 GPU 寫完（不 GPU Wait 對方的 fence，不變式 8）
-      const auto fr = cs->waiter->wait(cs->shared_fence.get(), d.fence_value, k_fence_wait_ms);
+      const auto fr = cs->waiter->wait(cs->shared_fence.get(), d.fence_value, fence_wait_ms(client_frame_rate));
       if (fr == vr::bridge::fence_waiter_t::result_e::lost) {
         count(&stats_t::fence_lost);
         if (device->GetDeviceRemovedReason() != S_OK) {

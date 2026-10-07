@@ -2801,6 +2801,7 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
         // M4a R1：幀要畫進 XR projection 才需要 render pose；--vr-emulate（平面）維持 M1a 只統計
         m_VrDropOnMetaMiss = (params->xr != nullptr);
         VrRenderMetaRing::reset();
+        VrDecodeTiming::reset();
         auto* vrPrefs = StreamingPreferences::get(nullptr);
         m_VrTracker = std::make_unique<VrFrameMetaTracker>(vrPrefs ? vrPrefs->vrInjectDropEvery : 0,
                                                            vrPrefs ? vrPrefs->vrInjectLossSec : 0);
@@ -3327,6 +3328,9 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         const uint64_t thisFrameDecodeUs =
                             LiGetMicroseconds() - du.enqueueTimeUs;
                         m_ActiveWndVideoStats.totalDecodeTimeUs += thisFrameDecodeUs;
+                        if (m_VrDropOnMetaMiss) {
+                            VrDecodeTiming::record(thisFrameDecodeUs);  // 2026-10-05：XR 模式的 CLIENT_TIMING decode 欄位
+                        }
 
                         // §J.3.e.2.i.58 (v1.4.125) — per-frame decode latency publish
                         // 給 vkfruc 的 adaptive throttle 用. ring-max of last 8 frames

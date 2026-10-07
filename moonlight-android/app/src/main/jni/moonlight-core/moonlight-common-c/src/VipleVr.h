@@ -47,12 +47,14 @@ extern "C" {
 #define VIPLE_VR_SERVER_CAP_GAZE_UPLINK     0x08
 #define VIPLE_VR_SERVER_CAP_QP_FOVEATION    0x10
 #define VIPLE_VR_SERVER_CAP_RECOVERY_INTRA  0x20  // encoder 支援 intra refresh
+#define VIPLE_VR_SERVER_CAP_MULTILINK       0x40  // §VR-MULTILINK：支援多連線
 
 // /launch 的 vrCaps（十六進位）
 #define VIPLE_VR_CLIENT_CAP_RECOVERY_INTRA  0x01
 #define VIPLE_VR_CLIENT_CAP_TRACK_THREAD    0x02
 #define VIPLE_VR_CLIENT_CAP_GAZE            0x04
 #define VIPLE_VR_CLIENT_CAP_SKELETON        0x08
+#define VIPLE_VR_CLIENT_CAP_MULTILINK       0x10  // §VR-MULTILINK
 
 // /launch 的 vrCodecs（client 能解的 codec）
 #define VIPLE_VR_CODEC_H264  0x01
@@ -83,6 +85,8 @@ extern "C" {
 // <VipleStreamVRSession> 之後設定。0 代表一般 session，行為與桌面完全相同。
 #define VIPLE_VR_SF_ENABLED         0x01  // 這是 VR session（0x81 帶 24 B VR header）
 #define VIPLE_VR_SF_RECOVERY_INTRA  0x02  // recovery=intra：掉幀送 LOSS，不等 IDR
+#define VIPLE_VR_SF_MULTILINK       0x04  // §VR-MULTILINK：server 在 <VipleStreamVRSession> 回了 multilink=1
+#define VIPLE_VR_SF_MULTILINK_SELFTEST 0x08  // dev：同一張網卡再開一條連線，用單一網卡驗複製與去重
 
 // ── 控制通道（§4.1、§4.3）──────────────────────────────────────────
 
@@ -242,6 +246,8 @@ typedef struct _VIPLE_VR_FRAME_HEADER {
 #define VIPLE_VR_C2S_FRAME_FEEDBACK    0x07  // VR channel unsequenced（GA）
 #define VIPLE_VR_C2S_LATCH             0x08  // VR channel unsequenced，10 Hz
 #define VIPLE_VR_C2S_LOSS              0x09  // VR channel unsequenced，送 2 次
+#define VIPLE_VR_C2S_LINK_HELLO        0x0A  // reliable，§VR-MULTILINK
+#define VIPLE_VR_C2S_NACK              0x0B  // §VR-LINK-REPAIR：只走連線的 DATA（不走 ENet）
 #define VIPLE_VR_C2S_RESERVED_MIC      0x7F
 
 // S→C subtype
@@ -251,6 +257,8 @@ typedef struct _VIPLE_VR_FRAME_HEADER {
 #define VIPLE_VR_S2C_CONFIG_ACK        0x04  // reliable
 #define VIPLE_VR_S2C_LAYOUT            0x05  // reliable
 #define VIPLE_VR_S2C_REFRESH_START     0x06  // VR channel unsequenced，送 2 次
+#define VIPLE_VR_S2C_LINK_READY        0x07  // reliable，§VR-MULTILINK
+#define VIPLE_VR_S2C_REPAIR_GONE       0x08  // §VR-LINK-REPAIR：只走連線的 T_S2C
 
 // LOSS.reason
 #define VIPLE_VR_LOSS_NETWORK       1  // depacketizer 偵測到掉幀
@@ -323,7 +331,14 @@ typedef struct _VIPLE_VR_TLV_CLIENT_TIMING {
     int16_t  slackP05Us;       // 最差的 5%（最晚到）
     uint16_t mtpP50_100us;
     uint16_t mtpP95_100us;
+    // §VR-PREDICT（2026-10-03，36 B；舊 server 只讀前 32 B）：遊戲算繪姿態相對「該幀實際顯示時的頭部位置」
+    // 的時間差，0.1 ms 單位，正值＝落後（SteamVR 預測得不夠遠）、負值＝超前。只算頭部有移動的幀；
+    // 這 1 s 樣本不足時 poseLagP50_100us＝VIPLE_VR_POSE_LAG_NONE、poseLagCount＝0。
+    int16_t  poseLagP50_100us;
+    uint16_t poseLagCount;
 } VIPLE_VR_TLV_CLIENT_TIMING;
+
+#define VIPLE_VR_POSE_LAG_NONE 0x7FFF
 
 typedef struct _VIPLE_VR_TLV_REFRESH_START {
     uint32_t startFrame;  // wave 第一幀的幀號
@@ -362,6 +377,98 @@ typedef struct _VIPLE_VR_TLV_STATS {
     uint32_t staleCount;
 } VIPLE_VR_TLV_STATS;
 
+// ── §VR-MULTILINK（2026-10-06）：多連線 ─────────────────────────────
+//
+// client 的每張網卡一條連線（link）：兩端各一組專用 UDP socket（影像、音訊各一）。影像與音訊的 RTP
+// 封包在每條連線各送一份（位元組與單一路徑時完全相同，接收端靠既有的 RTP 序號去重）；追蹤
+// （0x5506）以 VIPLE_VR_LINK_T_DATA 加密後在每條連線各送一份。連線清單走既有的加密控制通道交換：
+//   C→S 0x5507/0A LINK_HELLO：{u8 count, VIPLE_VR_LINK_DESC[count]}
+//   S→C 0x5508/07 LINK_READY：{u8 count, VIPLE_VR_LINK_PORTS[count], [u8 hubCaps]}
+// hubCaps（VIPLE_VR_LINK_F_*）是 server 同意啟用的連線層功能；沒有任何功能時不附這個 byte（舊 client 本來就只讀陣列）。
+// 只支援 IPv4。位址欄位是網路位元組序的 4 個 byte；其餘整數 little-endian。
+#define VIPLE_VR_LINK_MAX        4
+#define VIPLE_VR_LINK_MAGIC0     0x56  // 'V'
+#define VIPLE_VR_LINK_MAGIC1     0x4C  // 'L'
+#define VIPLE_VR_LINK_T_PING     1     // C→S（影像、音訊 socket 都送）
+#define VIPLE_VR_LINK_T_PONG     2     // S→C（只在影像 socket 回）
+#define VIPLE_VR_LINK_T_DATA     3     // C→S：AES-GCM 加密的控制訊息（0x5506；協商了 F_CTRL 之後也載 0x5507 的 LOSS／LATCH／NACK）
+#define VIPLE_VR_LINK_T_S2C      4     // S→C（影像 socket）：AES-GCM 加密的 0x5508 TLV（§VR-LINK-CTRL）；整個資料報必須 < VIPLE_VR_LINK_CTRL_MAX_LEN
+// 連線層功能位元：client 放在每個 VIPLE_VR_LINK_DESC.flags（它支援的），server 放在 LINK_READY 尾端的 hubCaps（同意啟用的）
+#define VIPLE_VR_LINK_F_CTRL     0x01  // §VR-LINK-CTRL：時間敏感的控制訊息走連線。C→S 的 LOSS／LATCH 放進 DATA（每條已確認的連線各一份），
+                                       // S→C 的 REFRESH_START 用 T_S2C。session 位址那條鏈路變弱時，恢復不再被它拖住
+#define VIPLE_VR_LINK_F_REPAIR   0x02  // §VR-LINK-REPAIR：補包。C→S NACK（0x5507/0B）、S→C REPAIR_GONE（0x5508/08）；要同時有 F_CTRL
+#define VIPLE_VR_LINK_PING_F_CONFIRMED  0x01  // client 最近 1 s 內在這條連線收過 PONG
+#define VIPLE_VR_LINK_READY_OK       0
+#define VIPLE_VR_LINK_READY_REFUSED  1
+// S→C 影像 socket 上長度小於這個值的資料報是連線控制（PONG），其餘是影像 RTP。
+#define VIPLE_VR_LINK_CTRL_MAX_LEN   64
+#define VIPLE_VR_LINK_RTT_UNKNOWN    0xFFFF
+
+typedef struct _VIPLE_VR_LINK_DESC {
+    uint8_t  linkId;           // 1..VIPLE_VR_LINK_MAX
+    uint8_t  flags;            // VIPLE_VR_LINK_F_*：client 支援的連線層功能（每條連線填一樣的值；舊 server 不讀這一欄）
+    uint16_t clientVideoPort;
+    uint16_t clientAudioPort;
+    uint8_t  clientAddr[4];
+    uint8_t  serverAddr[4];    // client 配對到的 server 位址（同子網路，或 session 本身連的位址）
+} VIPLE_VR_LINK_DESC;
+
+typedef struct _VIPLE_VR_LINK_PORTS {
+    uint8_t  linkId;
+    uint8_t  status;           // VIPLE_VR_LINK_READY_*
+    uint16_t serverVideoPort;
+    uint16_t serverAudioPort;
+} VIPLE_VR_LINK_PORTS;
+
+// 連線資料報標頭（12 B）。PING／PONG：seq＝ping 序號、arg＝client 微秒時戳的低 32 bit（PONG 原樣帶回）。
+// DATA：seq＝每個 session 遞增的訊息序號（同一則訊息在各連線的 seq 相同，server 以它去重並防重放）、
+// arg＝0；後面接 tag[16]＋密文（明文＝u16 ptype（LE）＋payload）。IV＝seq（LE32）＋6 個 0＋'C'＋'L'。
+// S2C：同樣的格式，方向相反：seq 由 server 發（自己的計數器，整場不歸零）、明文的 ptype＝0x5508、IV 尾端是 'H'＋'L'。
+typedef struct _VIPLE_VR_LINK_HDR {
+    uint8_t  magic[2];
+    uint8_t  type;
+    uint8_t  linkId;
+    uint32_t seq;
+    uint32_t arg;
+} VIPLE_VR_LINK_HDR;
+
+// PING 的本體（接在 VIPLE_VR_LINK_HDR 之後）。計數是 session 開始以來的累計值（PING 掉了也不漏算）。
+typedef struct _VIPLE_VR_LINK_PING {
+    uint8_t  flags;            // VIPLE_VR_LINK_PING_F_*
+    uint8_t  burstSeq;         // 每量到一串封包（見 burstMbps）就加一；server 靠它分辨是不是新的量測
+    uint16_t rttMs10;          // 最近一次量到的往返時間，0.1 ms；VIPLE_VR_LINK_RTT_UNKNOWN＝未知
+    uint32_t rxPkts;           // 這條連線收到的影像封包
+    uint32_t rxUsed;           // 其中先到、被佇列採用的
+    uint16_t maxGapMs;         // 上一個 PING 以來這條連線影像封包的最大到達間隔
+    uint16_t burstMbps;        // 最近一幀（≥ 32 個封包）在這條連線的到達速率，Mbps；65535＝整幀同一瞬間到、快到量不出來；0＝還沒量到。
+                               // server 在 vr_multilink=auto 時用它決定要不要在這條連線送影像
+} VIPLE_VR_LINK_PING;
+
+// §VR-LINK-REPAIR：client 只回報「正在等的那個 FEC block 手上有哪些 shard」，補哪些、走哪條、補不補都由 server 決定。
+// 每一份都是完整的現況（不是差異），掉一份或重複都無妨。結構後面接 have[(total+7)/8]：bit i＝第 i 個 shard 已收到
+// （i＝RTP 序號 − 這個 block 的第一個序號；data 在前、parity 在後）。
+// total＝0：這個 block 一個封包都還沒收到（client 不知道它有幾個 shard），不帶位元圖，server 用自己的紀錄。
+typedef struct _VIPLE_VR_TLV_NACK {
+    uint32_t frame;     // 幀號
+    uint8_t  block;     // FEC block 序號（0 起）
+    uint8_t  flags;     // 保留
+    uint8_t  need;      // 還差幾個 shard 才能還原（total＝0 時填 0）
+    uint8_t  total;     // 這個 block 的 shard 總數（data＋parity，≤ 255）
+    uint8_t  attempt;   // 這個 block 的第幾份回報（1 起）
+} VIPLE_VR_TLV_NACK;
+
+#define VIPLE_VR_GONE_EXPIRED  1  // 太舊，補了也來不及
+#define VIPLE_VR_GONE_BUDGET   2  // 補包額度用完（鏈路已經壅塞，不再加碼）
+#define VIPLE_VR_GONE_UNKNOWN  3  // server 沒有這個 block 的紀錄（已被覆寫，或是不做 FEC 的超大幀）
+
+// server 補不了某個 block：client 不必再等，照原本的方式放棄並回報 LOSS。
+typedef struct _VIPLE_VR_TLV_REPAIR_GONE {
+    uint32_t frame;
+    uint8_t  block;
+    uint8_t  reason;    // VIPLE_VR_GONE_*
+} VIPLE_VR_TLV_REPAIR_GONE;
+
+
 #pragma pack(pop)
 
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_POSE) == 52, pose_52);
@@ -372,10 +479,16 @@ VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_FRAME_HEADER) == VIPLE_VR_FRAME_HEADER_SI
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LOSS) == 9, tlv_loss_9);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LATCH) == 12, tlv_latch_12);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_REFRESH_START) == 6, tlv_refresh_6);
-VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_CLIENT_TIMING) == 32, tlv_client_timing_32);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_CLIENT_TIMING) == 36, tlv_client_timing_36);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_STATE) == 4, tlv_state_4);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HAPTIC) == 20, tlv_haptic_20);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_STATS) == 40, tlv_stats_40);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_DESC) == 14, link_desc_14);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_PORTS) == 6, link_ports_6);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_HDR) == 12, link_hdr_12);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_PING) == 16, link_ping_16);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_NACK) == 9, tlv_nack_9);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_REPAIR_GONE) == 6, tlv_repair_gone_6);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TRACKING) <= VIPLE_VR_MAX_CTRL_PAYLOAD, tracking_fits);
 
 // ── 解碼後的每幀 VR metadata（client 內部，不上線）─────────────────

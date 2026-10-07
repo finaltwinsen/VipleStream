@@ -326,7 +326,7 @@ namespace vr {
 
   std::string format_session_element(const negotiated_t &neg) {
     return std::format(
-      "proto={};packed={}x{};hz={};codec={};layout=sbs;overscan={};recovery={};irFrames={};transport=rtp;universeId={};session={};mode={}",
+      "proto={};packed={}x{};hz={};codec={};layout=sbs;overscan={};recovery={};irFrames={};transport=rtp;universeId={};session={};mode={}{}",
       VIPLE_VR_PROTO_VERSION,
       neg.packed_width(),
       neg.packed_height(),
@@ -338,7 +338,9 @@ namespace vr {
       // M1b S1-11（K24）：pcvr 的 universeId 固定 0x5649504C（uint32）；stub 維持 0
       neg.pcvr ? 1447645260u : 0u,
       neg.guid,
-      neg.pcvr ? "pcvr" : "stub"
+      neg.pcvr ? "pcvr" : "stub",
+      // §VR-MULTILINK：只在協商成立時多這一項（舊 client 不認得的 key 會略過）
+      neg.multilink ? ";multilink=1" : ""
     );
   }
 
@@ -360,10 +362,18 @@ namespace vr {
 
   session_state_t::session_state_t(negotiated_t neg, const void *stream_session, int64_t clock_frequency):
       neg_ {std::move(neg)},
-      stream_session_ {stream_session} {
+      stream_session_ {stream_session},
+      clock_frequency_ {clock_frequency} {
     if (clock_frequency > 0) {
       clock_.emplace(clock_frequency);
     }
+  }
+
+  session_state_t::arrival_stats_t session_state_t::take_arrival_stats() {
+    std::lock_guard lk {pose_mtx_};
+    arrival_stats_t r = arrival_win_;
+    arrival_win_ = {};
+    return r;
   }
 
   bool session_state_t::on_tracking(const VIPLE_VR_TRACKING &sample, bool via_quic, int64_t arrival_ticks, tracking_timing_t *timing) {
@@ -413,6 +423,17 @@ namespace vr {
         pose_gap_.fetch_add((uint64_t) (delta - 1), std::memory_order_relaxed);
       } else if (delta <= -kSampleIdResetThreshold) {
         pose_resets_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+
+    // 2026-10-05：被採用的樣本之間的到達間隔（server 收到的時刻）。> 2T 就會在 driver 觸發 stale 規則；
+    // 和 driver 的 tracking 10s（arrivalMaxMs／gt2T）對照，分得出空窗是網路造成還是 server 轉送造成
+    if (latest_ && clock_frequency_ > 0 && arrival_ticks > latest_->arrival_ticks) {
+      const int64_t gap_us = (arrival_ticks - latest_->arrival_ticks) * 1'000'000 / clock_frequency_;
+      const int64_t period_ns = neg_.params.period_ns > 0 ? neg_.params.period_ns : (neg_.params.hz > 0 ? 1'000'000'000LL / neg_.params.hz : 0);
+      arrival_win_.max_us = std::max(arrival_win_.max_us, gap_us);
+      if (period_ns > 0 && gap_us * 1000 > 2 * period_ns) {
+        ++arrival_win_.gt2t;
       }
     }
 
@@ -487,6 +508,12 @@ namespace vr {
 
     // 已排定的 wave 一定從還沒編碼的幀開始，client 能回報的掉幀都在它之前
     if (wave_phase_ == wave_phase_e::pending) {
+      // 排定之後 encoder 可能還在出一般幀（沒有隨選 intra refresh、IDR 又在 cooldown 內時，wave 會停在排定狀態幾百毫秒）：
+      // 這時才掉的幀不在當初的估計值之前，而 client 會丟掉 startFrame <= lastLost 的 REFRESH_START、一再重送 LOSS。
+      // wave 還沒開始，它的第一幀一定晚於所有已送出的幀——lastLost + 1 仍然不晚於實際起點。
+      if (!is_before32(last_lost, pending_wave_.start_frame)) {
+        pending_wave_.start_frame = last_lost + 1;
+      }
       return loss_action_e::absorbed;
     }
     if (wave_phase_ == wave_phase_e::active && is_before32(last_lost, wave_.start_frame)) {
@@ -496,6 +523,7 @@ namespace vr {
     // 沒有 wave，或 wave 進行中卻掉了 wave 內的幀 → 開新的一波（重啟 wave）
     wave_phase_ = wave_phase_e::pending;
     wave_since_ = now;
+    pending_wave_ = {next_frame_.load(std::memory_order_relaxed), (uint8_t) neg_.ir_frames, VIPLE_VR_REFRESH_LOSS};
     return loss_action_e::new_wave;
   }
 
@@ -526,6 +554,18 @@ namespace vr {
       return std::nullopt;
     }
     return wave_;
+  }
+
+  std::optional<wave_info_t> session_state_t::scheduled_wave() const {
+    std::lock_guard lk {wave_mtx_};
+    switch (wave_phase_) {
+      case wave_phase_e::active:
+        return wave_;
+      case wave_phase_e::pending:
+        return pending_wave_;
+      default:
+        return std::nullopt;
+    }
   }
 
   bool session_state_t::loss_log_gate(uint32_t &suppressed) {
@@ -559,9 +599,15 @@ namespace vr {
     }
   }
 
+  void session_state_t::configure_latch(latch::mode_e mode, int target_pct, uint32_t host_period_ns) {
+    std::lock_guard lk {latch_mtx_};
+    latch_ctl_.configure(mode, target_pct, host_period_ns);
+    latch_last_.mode = mode;
+  }
+
   latch::result_t session_state_t::on_latch(const VIPLE_VR_TLV_LATCH &latch, int64_t now_ns) {
     std::lock_guard lk {latch_mtx_};
-    latch_last_ = latch_ctl_.on_latch(latch.slackUs, latch.displayPeriodNs, now_ns);
+    latch_last_ = latch_ctl_.on_latch(latch.slackUs, latch.displayPeriodNs, now_ns, latch.frameId);
     return latch_last_;
   }
 
@@ -657,12 +703,16 @@ namespace vr {
     outbox_.push_back({std::move(tlv), reliable});
   }
 
-  void session_state_t::queue_refresh_start(const wave_info_t &wave) {
+  std::vector<uint8_t> session_state_t::refresh_start_tlv(const wave_info_t &wave) {
     VIPLE_VR_TLV_REFRESH_START rs {};
     rs.startFrame = wave.start_frame;
     rs.frameCnt = wave.frame_cnt;
     rs.reason = wave.reason;
-    auto tlv = make_tlv(VIPLE_VR_S2C_REFRESH_START, &rs, sizeof(rs));
+    return make_tlv(VIPLE_VR_S2C_REFRESH_START, &rs, sizeof(rs));
+  }
+
+  void session_state_t::queue_refresh_start(const wave_info_t &wave) {
+    auto tlv = refresh_start_tlv(wave);
     queue_s2c(tlv, false);
     // 第二份延到下一次 drain（下一個 control tick，≥ 一次 enet_host_service 之後）：同一輪
     // 排進去的兩份會被 ENet 打包進同一個 datagram，那個 datagram 掉了就兩份一起掉

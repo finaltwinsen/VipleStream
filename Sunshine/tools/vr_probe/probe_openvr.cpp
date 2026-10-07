@@ -462,4 +462,120 @@ namespace probe {
     return rc_ok;
   }
 
+  // ── predict（2026-10-05）：SteamVR 怎麼用 driver 給的速度與 poseTimeOffset 外插 ───────────────
+  // 搭配 client `--vr-emulate --vr-synthetic-motion tilt30yaw`：頭與右手控制器的姿態完全相同（先繞本地 X 傾 30°，再以
+  // 30°/s 繞世界 Y 轉；x 方向 ±20 cm @0.1 Hz 平移），角速度照 client 的語意給世界座標 (0, ω, 0)。
+  //   1. 角速度語意：pred=p 與 pred=0 的世界增量 R_p·R_0⁻¹ 的旋轉軸與世界 Y 的 |dot|：≈1＝SteamVR 把角速度當世界座標
+  //      （與 OpenXR、我們的 client 相同）；≈cos30°＝當成本地座標（拍面角度的外插會錯，要在 driver 換算）。
+  //   2. 外插量：angGain＝外插角度 ÷（回報角速度×p）、posGain＝位移 ÷（回報速度×p）；p 加大後 gain 往下掉＝有上限。
+  //   3. poseTimeOffset：pred=0 時 HMD 與右手控制器繞 Y 的有號角度差 ÷ ω＝（HMD offset − 控制器 offset）。emulate 下 driver
+  //      的 HMD offset 約 +33 ms：控制器 offset 為 0（legacy）時得 +33 ms＝SteamVR 依文件的正號採用；−33 ms＝正負號相反；
+  //      0＝沒採用。vr_ctrl_pose_offset=enabled 時應接近 0。
+  int run_predict(const args_t &a) {
+    vr_session_t s(vr::VRApplication_Background);
+    if (!init_or_report(s, "predict")) {
+      return rc_failed;
+    }
+    const uint32_t right = s.sys->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_RightHand);
+    line("predict start right=%u seconds=%.0f (client: --vr-emulate --vr-synthetic-motion tilt30yaw)", (unsigned) right, a.seconds);
+    std::wstring out_dir;
+    csv_t csv;
+    if (prepare_out_dir(a.out, out_dir)) {
+      csv.open(out_dir, L"predict.csv", "qpc,dev,pred_ms,ang_deg,ang_gain,world_dot_y,local_dot_y,pos_mm,pos_gain,omega_dps,v_mps");
+    }
+    constexpr int k_np = 6;
+    const double preds[k_np] = {0.010, 0.020, 0.040, 0.080, 0.120, 0.200};
+    struct acc_t {
+      std::vector<double> ang_gain, world_dot, local_dot, pos_gain;
+    };
+    acc_t acc[2][k_np];
+    std::vector<double> rel_ms;
+    // 旋轉增量的單位軸與角度（rad）；角度太小時軸不可信，回 false
+    auto axis_angle = [](vm::quat_t q, vm::vec3_t &axis, double &angle) {
+      q = vm::normalize(q);
+      if (q.w < 0.0) {
+        q = vm::quat_t {-q.x, -q.y, -q.z, -q.w};
+      }
+      angle = 2.0 * std::acos(std::min(1.0, q.w));
+      const double sn = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+      if (!(sn > 1e-6)) {
+        return false;
+      }
+      axis = vm::vec3_t {q.x / sn, q.y / sn, q.z / sn};
+      return true;
+    };
+    const int64_t t_end = qpc() + (int64_t) (a.seconds * (double) qpf());
+    while (qpc() < t_end) {
+      static vr::TrackedDevicePose_t p0[vr::k_unMaxTrackedDeviceCount];
+      static vr::TrackedDevicePose_t pp[vr::k_unMaxTrackedDeviceCount];
+      s.sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0.0f, p0, vr::k_unMaxTrackedDeviceCount);
+      for (int pi = 0; pi < k_np; ++pi) {
+        s.sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, (float) preds[pi], pp, vr::k_unMaxTrackedDeviceCount);
+        for (int d = 0; d < 2; ++d) {
+          const uint32_t idx = d == 0 ? 0u : right;
+          if (idx >= vr::k_unMaxTrackedDeviceCount || !p0[idx].bPoseIsValid || !pp[idx].bPoseIsValid) {
+            continue;
+          }
+          vm::quat_t q0, qp;
+          vm::vec3_t x0, xp;
+          pose_of(p0[idx].mDeviceToAbsoluteTracking, q0, x0);
+          pose_of(pp[idx].mDeviceToAbsoluteTracking, qp, xp);
+          const auto &w = p0[idx].vAngularVelocity.v;
+          const auto &v = p0[idx].vVelocity.v;
+          const double omega = std::sqrt((double) w[0] * w[0] + (double) w[1] * w[1] + (double) w[2] * w[2]);
+          const double speed = std::sqrt((double) v[0] * v[0] + (double) v[1] * v[1] + (double) v[2] * v[2]);
+          vm::vec3_t aw, al;
+          double angle = 0.0, angle_l = 0.0;
+          const bool okw = axis_angle(vm::mul(qp, vm::conj(q0)), aw, angle);
+          const bool okl = axis_angle(vm::mul(vm::conj(q0), qp), al, angle_l);
+          double ang_gain = -1, wdot = -1, ldot = -1, pos_gain = -1;
+          if (okw && okl && omega > 0.1) {
+            ang_gain = angle / (omega * preds[pi]);
+            wdot = std::fabs(aw.y);
+            ldot = std::fabs(al.y);
+            acc[d][pi].ang_gain.push_back(ang_gain);
+            acc[d][pi].world_dot.push_back(wdot);
+            acc[d][pi].local_dot.push_back(ldot);
+          }
+          const double dpos = std::sqrt((xp.x - x0.x) * (xp.x - x0.x) + (xp.y - x0.y) * (xp.y - x0.y) + (xp.z - x0.z) * (xp.z - x0.z));
+          if (speed > 0.02) {
+            pos_gain = dpos / (speed * preds[pi]);
+            acc[d][pi].pos_gain.push_back(pos_gain);
+          }
+          csv.row("%lld,%d,%.0f,%.4f,%.4f,%.5f,%.5f,%.3f,%.4f,%.2f,%.4f", (long long) qpc(), d, preds[pi] * 1000.0, angle * 57.29577951308232, ang_gain, wdot,
+                  ldot, dpos * 1000.0, pos_gain, omega * 57.29577951308232, speed);
+        }
+      }
+      // pred=0：HMD 與右手的相對旋轉 R_r·R_h⁻¹ 繞 Y 的有號角度 ÷ ω＝HMD offset − 控制器 offset
+      if (right < vr::k_unMaxTrackedDeviceCount && p0[0].bPoseIsValid && p0[right].bPoseIsValid) {
+        vm::quat_t qh, qr;
+        vm::vec3_t xh, xr;
+        pose_of(p0[0].mDeviceToAbsoluteTracking, qh, xh);
+        pose_of(p0[right].mDeviceToAbsoluteTracking, qr, xr);
+        vm::quat_t rel = vm::normalize(vm::mul(qr, vm::conj(qh)));
+        if (rel.w < 0.0) {
+          rel = vm::quat_t {-rel.x, -rel.y, -rel.z, -rel.w};
+        }
+        const auto &w = p0[0].vAngularVelocity.v;
+        const double omega_y = (double) w[1];
+        if (std::fabs(omega_y) > 0.1) {
+          rel_ms.push_back(2.0 * std::atan2(rel.y, rel.w) / omega_y * 1000.0);
+        }
+      }
+      Sleep(50);
+    }
+    for (int d = 0; d < 2; ++d) {
+      for (int pi = 0; pi < k_np; ++pi) {
+        const acc_t &c = acc[d][pi];
+        line("predict summary dev=%s pred=%.0fms n=%u angGain p50=%.3f worldDotY p50=%.4f localDotY p50=%.4f posGain p50=%.3f (n=%u)", d == 0 ? "hmd" : "right",
+             preds[pi] * 1000.0, (unsigned) c.ang_gain.size(), pct(c.ang_gain, 0.5), pct(c.world_dot, 0.5), pct(c.local_dot, 0.5), pct(c.pos_gain, 0.5),
+             (unsigned) c.pos_gain.size());
+      }
+    }
+    line("predict offset hmdMinusRight p50=%.1f p10=%.1f p90=%.1f ms n=%u (legacy controller offset 0: about +33 = adopted with the documented sign, "
+         "-33 = opposite sign, 0 = ignored; with vr_ctrl_pose_offset enabled expect about 0)",
+         pct(rel_ms, 0.5), pct(rel_ms, 0.1), pct(rel_ms, 0.9), (unsigned) rel_ms.size());
+    return rc_ok;
+  }
+
 }  // namespace probe

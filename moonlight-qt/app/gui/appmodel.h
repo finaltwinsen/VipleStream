@@ -27,7 +27,15 @@ public:
     explicit AppModel(QObject *parent = nullptr);
 
     // Must be called before any QAbstractListModel functions
-    Q_INVOKABLE void initialize(ComputerManager* computerManager, int computerIndex, bool showHiddenGames);
+    // vrOnly（§VR-LAUNCHER）：GUI 的 VR 模式只列 `<IsVr>` 的 app
+    Q_INVOKABLE void initialize(ComputerManager* computerManager, int computerIndex, bool showHiddenGames,
+                                bool vrOnly = false);
+
+    // §VR-LAUNCHER：VR 模式的子行程用這個位址找主機（位址比名稱可靠：名稱可能重複，CLI 也會拿它去解析）
+    Q_INVOKABLE QString vrLaunchAddress();
+
+    // §VR-LAUNCHER：這台主機在 VR 模式不能用的原因（給使用者看）；可以用時回空字串
+    Q_INVOKABLE QString vrUnavailableReason();
 
     Q_INVOKABLE Session* createSessionForApp(int appIndex, bool takeover = false);
 
@@ -129,6 +137,7 @@ private:
     QVector<NvApp> m_VisibleApps, m_AllApps;
     int m_CurrentGameId;
     bool m_ShowHiddenGames;
+    bool m_VrOnly = false;
 
     // VipleStream H.4: Steam profile cache + last switch error string.
     QList<SteamProfile> m_SteamProfiles;

@@ -102,6 +102,8 @@ struct OriginalEnv {
     QByteArray qpa;
     bool sdlSet = false;
     QByteArray sdl;
+    bool sdl3Set = false;   // SDL3 的字面名稱（main.cpp 的 setSdlVideoDriver 也會改寫）
+    QByteArray sdl3;
 };
 
 OriginalEnv& originalEnv()
@@ -831,8 +833,36 @@ void captureOriginalEnv()
     e.qpa = qgetenv("QT_QPA_PLATFORM");
     e.sdlSet = qEnvironmentVariableIsSet("SDL_VIDEODRIVER");
     e.sdl = qgetenv("SDL_VIDEODRIVER");
+    e.sdl3Set = qEnvironmentVariableIsSet("SDL_VIDEO_DRIVER");
+    e.sdl3 = qgetenv("SDL_VIDEO_DRIVER");
     e.captured = true;
 #endif
+}
+
+bool originalValue(const char* name, QByteArray* value)
+{
+#if defined(Q_OS_LINUX)
+    const OriginalEnv& e = originalEnv();
+    if (!e.captured) {
+        return false;
+    }
+    if (qstrcmp(name, "QT_QPA_PLATFORM") == 0) {
+        *value = e.qpa;
+        return e.qpaSet;
+    }
+    if (qstrcmp(name, "SDL_VIDEODRIVER") == 0) {
+        *value = e.sdl;
+        return e.sdlSet;
+    }
+    if (qstrcmp(name, "SDL_VIDEO_DRIVER") == 0) {
+        *value = e.sdl3;
+        return e.sdl3Set;
+    }
+#else
+    Q_UNUSED(name);
+    Q_UNUSED(value);
+#endif
+    return false;
 }
 
 void logOnce()

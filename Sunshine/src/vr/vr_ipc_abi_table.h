@@ -40,7 +40,7 @@ namespace vripc_abi_table {
 #define VRIPC_ABI_ROW_ALIGN(s) row_t {"align." #s, static_cast<unsigned long long>(alignof(s))}
 #define VRIPC_ABI_ROW_OFF(s, f) row_t {"off." #s "." #f, static_cast<unsigned long long>(offsetof(s, f))}
 
-  // 機械產生：vr_ipc_abi.h（ABI v1）的 26 個 struct、共 306 列
+  // 機械產生：vr_ipc_abi.h（ABI v1）的 26 個 struct、共 307 列（2026-10-05：config.reserved2 拆出 pose_flags）
   inline constexpr row_t k_rows[] = {
       VRIPC_ABI_ROW_CONST(VRIPC_ABI_VERSION),
       VRIPC_ABI_ROW_CONST(VRIPC_MAGIC_PIPE),
@@ -199,6 +199,7 @@ namespace vripc_abi_table {
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, stale_oor_ctrl_us),
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, stale_zero_vel_us),
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, stale_oor_hmd_us),
+      VRIPC_ABI_ROW_OFF(vripc_session_config_t, pose_flags),
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, reserved2),
       VRIPC_ABI_ROW_SIZE(vripc_pacing_t),
       VRIPC_ABI_ROW_ALIGN(vripc_pacing_t),

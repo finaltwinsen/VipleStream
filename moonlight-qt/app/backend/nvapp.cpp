@@ -16,6 +16,7 @@
 #define SER_APPSTEAMOWNERS "steam_owners"
 #define SER_APPLASTPLAYED "last_played"
 #define SER_APPPLAYTIME "playtime_minutes"
+#define SER_APPISVR "is_vr"
 
 NvApp::NvApp(QSettings& settings)
 {
@@ -30,6 +31,7 @@ NvApp::NvApp(QSettings& settings)
     steamOwners = settings.value(SER_APPSTEAMOWNERS).toString();
     lastPlayed = settings.value(SER_APPLASTPLAYED).toLongLong();
     playtimeMinutes = settings.value(SER_APPPLAYTIME).toLongLong();
+    isVr = settings.value(SER_APPISVR).toBool();
 }
 
 void NvApp::serialize(QSettings& settings) const
@@ -45,4 +47,5 @@ void NvApp::serialize(QSettings& settings) const
     settings.setValue(SER_APPSTEAMOWNERS, steamOwners);
     settings.setValue(SER_APPLASTPLAYED, lastPlayed);
     settings.setValue(SER_APPPLAYTIME, playtimeMinutes);
+    settings.setValue(SER_APPISVR, isVr);
 }

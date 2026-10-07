@@ -55,6 +55,11 @@
         <source>Are you sure you want to quit %1? Any unsaved progress will be lost.</source>
         <translation>你確定要結束 %1 嗎? 所有未儲存的進度將會遺失。</translation>
     </message>
+    <message>
+        <location filename="../gui/AppView.qml"/>
+        <source>No VR apps were found on this computer. Switch to desktop mode to see all apps.</source>
+        <translation>這台電腦上找不到 VR 應用程式。切換到桌面模式可以看到所有應用程式。</translation>
+    </message>
 </context>
 <context>
     <name>CliPair</name>
@@ -680,6 +685,86 @@
         <location filename="../streaming/session.cpp" line="2207"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>無法初始化畫面解碼器。請檢查您的串流設定並再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
+        <translation>%1 沒有提供 VR 串流。需要 VipleStream Server 2.0 以上的版本，並在主機上開啟 PCVR。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
+        <translation>%1 只能經由中繼伺服器連線。VR 串流需要直接連線。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
+        <translation>視訊編碼設定強制使用 AV1，但 VR 串流需要 HEVC 或 H.264。請在設定中更改視訊編碼。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
+        <translation>這台裝置沒有可用於 VR 串流的 8 位元 HEVC 或 H.264 視訊解碼器。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
+        <translation>無法在這台頭戴裝置上啟動 VR（%1）。請確認 SteamVR 正在執行，再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
+        <translation>頭戴裝置的 VR 執行環境沒有及時回應。請確認 SteamVR 正在執行，再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
+        <translation>%1 沒有開始 VR 工作階段。請確認主機已開啟 PCVR，再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
+        <translation>%1 的 SteamVR 正由另一台頭戴裝置使用（例如 Steam Link）。請先中斷它，再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
+        <translation>%1 上已有一個不是經由 VipleStream 開啟的 VR 遊戲正在執行。請先結束它，再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
+        <translation>%1 的 SteamVR 需要重新啟動，但那裡還有 VR 遊戲在執行。請先結束遊戲（應用程式清單中的「結束遊戲」），再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
+        <translation>%1 的 SteamVR 以安全模式啟動，擋下了 VipleStream 驅動程式。請在主機上重新啟動 SteamVR，再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>SteamVR is not installed on %1.</source>
+        <translation>%1 沒有安裝 SteamVR。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
+        <translation>%1 的 Steam 尚未登入。請先在主機上登入 Steam（例如用桌面模式連進去），再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>Nobody is signed in to Windows on %1.</source>
+        <translation>%1 目前沒有使用者登入 Windows。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>SteamVR on %1 did not start in time. Try again.</source>
+        <translation>%1 的 SteamVR 沒有及時啟動。請再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp"/>
+        <source>%1 could not start VR (error %2).</source>
+        <translation>%1 無法啟動 VR（錯誤 %2）。</translation>
     </message>
 </context>
 <context>
@@ -1437,6 +1522,92 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
     <message>
         <source>Gamepad detection and Steam Controller passthrough are disabled until it responds again. Unplug and replug the device; if VipleStream still does not see it, restart VipleStream.</source>
         <translation>在它恢復回應之前，手把偵測與 Steam Controller 轉發都會停用。請拔除並重新插上該裝置；若 VipleStream 仍看不到它，請重新啟動 VipleStream。</translation>
+    </message>
+    <message>
+        <location filename="../gui/main.qml"/>
+        <source>VR mode (switch mode)</source>
+        <translation>VR 模式（切換模式）</translation>
+    </message>
+    <message>
+        <location filename="../gui/main.qml"/>
+        <source>Desktop mode (switch mode)</source>
+        <translation>桌面模式（切換模式）</translation>
+    </message>
+    <message>
+        <location filename="../gui/main.qml"/>
+        <source>Choose a mode</source>
+        <translation>選擇模式</translation>
+    </message>
+    <message>
+        <location filename="../gui/main.qml"/>
+        <source>Desktop mode</source>
+        <translation>桌面模式</translation>
+    </message>
+    <message>
+        <location filename="../gui/main.qml"/>
+        <source>Your PC's desktop on a virtual screen</source>
+        <translation>在虛擬螢幕上操作電腦桌面</translation>
+    </message>
+    <message>
+        <location filename="../gui/main.qml"/>
+        <source>VR mode</source>
+        <translation>VR 模式</translation>
+    </message>
+    <message>
+        <location filename="../gui/main.qml"/>
+        <source>Play SteamVR games from your PC</source>
+        <translation>玩電腦上的 SteamVR 遊戲</translation>
+    </message>
+</context>
+<context>
+    <name>VrLauncher</name>
+    <message>
+        <location filename="../backend/vrlauncher.cpp"/>
+        <source>VR mode is not available when VipleStream is started this way (Flatpak PID sandbox). Start it from the VipleStream VR shortcut instead.</source>
+        <translation>用這種方式啟動 VipleStream 時無法使用 VR 模式（Flatpak 的 PID 沙盒）。請改從 VipleStream VR 捷徑啟動。</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrlauncher.cpp"/>
+        <source>VR mode is not supported on this platform.</source>
+        <translation>這個平台不支援 VR 模式。</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrlauncher.cpp"/>
+        <source>The VR stream stopped unexpectedly.</source>
+        <translation>VR 串流意外中止。</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrlauncher.cpp"/>
+        <source>The VR stream ended with an error (code %1).</source>
+        <translation>VR 串流因錯誤而結束（代碼 %1）。</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrlauncher.cpp"/>
+        <source>Could not start the VR stream.</source>
+        <translation>無法開始 VR 串流。</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrlauncher.cpp"/>
+        <source>Another app is running on the host. Quit it first, then start the VR app again.</source>
+        <translation>主機上有其他應用程式正在執行。請先結束它，再重新開啟 VR 應用程式。</translation>
+    </message>
+</context>
+<context>
+    <name>AppModel</name>
+    <message>
+        <location filename="../gui/appmodel.cpp"/>
+        <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
+        <translation>%1 沒有提供 VR 串流。需要 VipleStream Server 2.0 以上的版本，並在主機上開啟 PCVR。</translation>
+    </message>
+    <message>
+        <location filename="../gui/appmodel.cpp"/>
+        <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
+        <translation>%1 只能經由中繼伺服器連線。VR 串流需要直接連線。</translation>
+    </message>
+    <message>
+        <location filename="../gui/appmodel.cpp"/>
+        <source>%1 is offline.</source>
+        <translation>%1 目前離線。</translation>
     </message>
 </context>
 </TS>

@@ -158,6 +158,9 @@ void connectionSendFrameFecStatus(PSS_FRAME_FEC_STATUS fecStatus);
 // （REFRESH_DONE 結束 degraded、IDR 清除 degraded、LOSS 逾時重送）。
 // 呼叫端是 VideoRecv 執行緒。
 void vrRecoveryOnFrame(uint32_t frameIndex, uint8_t vrFrameFlags, bool isIdr);
+// §VR-LINK-CTRL（ControlStream.c）：連線層送來的 0x5508 TLV（已解密、已去重）。目前只有 REFRESH_START 會被處理，
+// 直接交給恢復狀態機。呼叫端是 VideoRecv 執行緒。
+void vrLinkS2C(const uint8_t* tlv, int length);
 int sendInputPacketOnControlStream(unsigned char* data, int length, uint8_t channelId, uint32_t flags, bool moreData);
 void flushInputOnControlStream(void);
 bool isControlDataInTransit(void);

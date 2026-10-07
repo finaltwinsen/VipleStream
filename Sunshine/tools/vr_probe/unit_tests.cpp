@@ -35,6 +35,7 @@
 #include "ipc_client.h"
 #include "ipc_proto.h"
 #include "pose_history.h"
+#include "pose_policy.h"
 #include "probe_common.h"
 #include "probe_d3d.h"
 #include "virtual_vsync.h"
@@ -1246,6 +1247,176 @@ namespace probe {
       t.end();
     }
 
+    // ── pose_policy（2026-10-05：§VR-CTRL-OFFSET、§VR-STALE-HOLD） ─────────────
+    struct swing_result_t {
+      double max_err_in_hold_mm = 0;  ///< 空窗 ≤ hold 上限那段的最大誤差
+      double max_err_mm = 0;  ///< 整段最大誤差
+      int hold_reports = 0;
+      int expired_reports = 0;
+    };
+
+    /**
+     * 等速揮拍（1 m/s）模擬：client 每 5.556 ms 取樣、預測到「取樣＋31 ms」（等速運動預測完全正確）、上行 5 ms；
+     * 從 t=200 ms 起有 gap_ms 的上行空窗。driver 在每張新樣本到達時、或距上次醒來 2T 時重送（同 tracking.cpp 的等待）。
+     * SteamVR 從「回報時刻＋poseTimeOffset」以回報的速度外插到「現在＋40 ms」，與真值比較。
+     */
+    swing_result_t run_swing(double gap_ms, bool hold) {
+      constexpr double v = 1.0;  // m/s
+      constexpr double dt_s = 0.0055556;
+      constexpr double ahead_s = 0.031;
+      constexpr double uplink_s = 0.005;
+      constexpr double steamvr_predict_s = 0.040;
+      constexpr uint32_t zero_vel_us = 22222;
+      swing_result_t r;
+      double last_fresh_arrival = -1;
+      double last_target = 0;
+      double last_wake = 0;
+      double next_sample = 0;
+      const double gap_start = 0.2, gap_end = 0.2 + gap_ms / 1000.0;
+      for (double now = 0; now < 0.6; now += 0.0001) {  // 0.1 ms 步進
+        bool fresh = false;
+        while (next_sample + uplink_s <= now) {
+          const bool lost = next_sample >= gap_start && next_sample < gap_end;
+          if (!lost) {
+            fresh = true;
+            last_target = next_sample + ahead_s;
+            last_fresh_arrival = next_sample + uplink_s;
+          }
+          next_sample += dt_s;
+        }
+        if (last_fresh_arrival < 0) {
+          continue;
+        }
+        const bool wake = fresh || now - last_wake >= zero_vel_us / 1e6;
+        if (!wake) {
+          continue;
+        }
+        last_wake = now;
+        vrdrv::pose_policy_in_t in;
+        in.age_us = (int64_t) std::llround((now - last_fresh_arrival) * 1e6);
+        in.zero_vel_us = zero_vel_us;
+        in.stale_hold = hold;
+        in.raw_off_s = last_target - now;
+        const auto p = vrdrv::decide_pose_policy(in);
+        if (!fresh && !p.stale) {
+          continue;  // tracking.cpp：同一筆樣本已送過、還沒 stale 不重送
+        }
+        const double pos = v * last_target;
+        const double vel = p.zero_vel ? 0.0 : v;
+        const double est = pos + vel * (steamvr_predict_s - p.hmd_off_s);
+        const double err_mm = std::abs(est - v * (now + steamvr_predict_s)) * 1000.0;
+        r.max_err_mm = (std::max)(r.max_err_mm, err_mm);
+        if (p.hold) {
+          ++r.hold_reports;
+          r.max_err_in_hold_mm = (std::max)(r.max_err_in_hold_mm, err_mm);
+        } else if (p.stale && hold) {
+          ++r.expired_reports;
+        }
+      }
+      return r;
+    }
+
+    void test_pose_policy(tally_t &t) {
+      t.begin("pose-policy");
+      using vrdrv::decide_pose_policy;
+      using vrdrv::pose_policy_in_t;
+      {
+        // 新樣本：offset 照算、控制器 offset 預設 0（舊行為）
+        pose_policy_in_t in;
+        in.raw_off_s = 0.025;
+        auto p = decide_pose_policy(in);
+        t.check(!p.stale && !p.hold && !p.zero_vel && p.ang_scale == 1.0, "fresh-flags");
+        t.check(std::abs(p.hmd_off_s - 0.025) < 1e-12 && p.ctrl_off_s == 0.0, "fresh-legacy-ctrl-zero", "hmd=%f ctrl=%f", p.hmd_off_s, p.ctrl_off_s);
+        in.ctrl_offset = true;
+        p = decide_pose_policy(in);
+        t.check(std::abs(p.ctrl_off_s - p.hmd_off_s) < 1e-12, "fresh-ctrl-same-as-hmd", "hmd=%f ctrl=%f", p.hmd_off_s, p.ctrl_off_s);
+        in.ctrl_cap_us = 20000;  // 控制器上限獨立
+        p = decide_pose_policy(in);
+        t.check(std::abs(p.ctrl_off_s - 0.020) < 1e-12 && std::abs(p.hmd_off_s - 0.025) < 1e-12, "ctrl-cap", "ctrl=%f", p.ctrl_off_s);
+      }
+      {
+        // 上下限：平常 −50 ms；cap 50 ms；非有限值給下限
+        pose_policy_in_t in;
+        in.raw_off_s = -0.09;
+        t.check(std::abs(decide_pose_policy(in).hmd_off_s + 0.05) < 1e-12, "floor-legacy");
+        in.raw_off_s = 0.08;
+        t.check(std::abs(decide_pose_policy(in).hmd_off_s - 0.05) < 1e-12, "cap");
+        in.raw_off_s = std::numeric_limits<double>::quiet_NaN();
+        t.check(std::abs(decide_pose_policy(in).hmd_off_s + 0.05) < 1e-12, "nan-floor");
+      }
+      {
+        // stale 舊規則：速度與 offset（HMD、控制器）歸零
+        pose_policy_in_t in;
+        in.age_us = 30000;
+        in.raw_off_s = -0.005;
+        in.ctrl_offset = true;
+        const auto p = decide_pose_policy(in);
+        t.check(p.stale && !p.hold && p.zero_vel && p.hmd_off_s == 0.0 && p.ctrl_off_s == 0.0, "stale-legacy");
+      }
+      {
+        // hold：2T 之後保留 offset，下限放寬到 −100 ms；角速度 50 ms 內線性衰減；超過 100 ms 回到舊規則
+        pose_policy_in_t in;
+        in.stale_hold = true;
+        in.zero_vel_us = 22222;
+        in.age_us = 22222 + 25000;
+        in.raw_off_s = -0.09;
+        auto p = decide_pose_policy(in);
+        t.check(p.hold && !p.zero_vel && std::abs(p.hmd_off_s + 0.09) < 1e-12, "hold-floor-relaxed", "off=%f", p.hmd_off_s);
+        t.check(std::abs(p.ang_scale - 0.5) < 1e-9, "hold-ang-half", "scale=%f", p.ang_scale);
+        in.age_us = 22222 + 60000;
+        p = decide_pose_policy(in);
+        t.check(p.hold && p.ang_scale == 0.0, "hold-ang-zero", "scale=%f", p.ang_scale);
+        in.age_us = 100001;
+        p = decide_pose_policy(in);
+        t.check(!p.hold && p.zero_vel && p.hmd_off_s == 0.0, "hold-expired");
+        in.age_us = 1000;  // 沒 stale：hold 開關不影響
+        p = decide_pose_policy(in);
+        t.check(!p.stale && !p.hold && p.ang_scale == 1.0, "hold-not-stale");
+      }
+      {
+        // 揮拍模擬：舊規則在空窗裡位置往回跳數公分；hold 在 100 ms 內的空窗維持連續（等速運動誤差 < 1 mm）
+        const auto legacy44 = run_swing(44.0, false);
+        t.check(legacy44.max_err_mm > 30.0, "swing-legacy-snaps", "maxErr=%.1fmm", legacy44.max_err_mm);
+        for (const double g : {22.0, 44.0, 80.0}) {
+          const auto h = run_swing(g, true);
+          char name[48];
+          snprintf(name, sizeof(name), "swing-hold-%.0fms", g);
+          t.check(h.max_err_mm < 1.0 && h.expired_reports == 0, name, "maxErr=%.2fmm hold=%d expired=%d", h.max_err_mm, h.hold_reports, h.expired_reports);
+        }
+        const auto h150 = run_swing(150.0, true);
+        t.check(h150.hold_reports > 0 && h150.max_err_in_hold_mm < 1.0 && h150.expired_reports > 0, "swing-hold-150ms-expires",
+                "holdErr=%.2fmm hold=%d expired=%d", h150.max_err_in_hold_mm, h150.hold_reports, h150.expired_reports);
+      }
+      {
+        // §VR-ANGVEL-LOCAL：SteamVR 以 q·exp(ω_local t) 外插（10-05 vr_probe --mode predict 實測）。把世界座標的角速度
+        // 轉成 ω_local = q⁻¹ ω q 後，結果要等於世界座標的 exp(ω_world t)·q（pose_history 的外插）；沒轉的話軸是錯的
+        namespace vm = vrdrv::math;
+        auto expq = [](const vm::vec3_t &w, double dt) {
+          const double mag = std::sqrt(w.x * w.x + w.y * w.y + w.z * w.z);
+          const double h = 0.5 * mag * dt;
+          const double k = mag > 1e-12 ? std::sin(h) / mag : 0.0;
+          return vm::quat_t {w.x * k, w.y * k, w.z * k, std::cos(h)};
+        };
+        constexpr double k_deg = 3.14159265358979323846 / 180.0;
+        const double sx = std::sin(15.0 * k_deg), cx = std::cos(15.0 * k_deg);  // 半角：繞 X 傾 30°
+        const double sy = std::sin(10.0 * k_deg), cy = std::cos(10.0 * k_deg);  // 半角：再繞世界 Y 轉 20°
+        const vm::quat_t q = vm::normalize(vm::mul(vm::quat_t {0.0, sy, 0.0, cy}, vm::quat_t {sx, 0.0, 0.0, cx}));
+        const vm::vec3_t w_world {0.3, 2.0, -0.7};  // rad/s
+        const double dt = 0.06;
+        const vm::quat_t world_ref = vm::normalize(vm::mul(expq(w_world, dt), q));
+        const vm::vec3_t w_local = vm::rotate(vm::conj(q), w_world);
+        const vm::quat_t steamvr_fixed = vm::normalize(vm::mul(q, expq(w_local, dt)));
+        const vm::quat_t steamvr_raw = vm::normalize(vm::mul(q, expq(w_world, dt)));
+        const double err_fixed = vm::angle_deg(world_ref, steamvr_fixed);
+        const double err_raw = vm::angle_deg(world_ref, steamvr_raw);
+        t.check(err_fixed < 1e-6, "angvel-local-matches-world", "err=%.8f deg", err_fixed);
+        t.check(err_raw > 1.0, "angvel-world-as-local-is-wrong", "err=%.3f deg", err_raw);
+        const vm::vec3_t back = vm::rotate(q, w_local);
+        t.check(std::abs(back.x - w_world.x) + std::abs(back.y - w_world.y) + std::abs(back.z - w_world.z) < 1e-12, "rotate-roundtrip");
+      }
+      t.end();
+    }
+
   }  // namespace
 
   int run_unit(const args_t &a) {
@@ -1260,6 +1431,7 @@ namespace probe {
     test_log_throttle(t);
     test_v4(t);
     test_pose_history(t);
+    test_pose_policy(t);
     if (a.no_loopback) {
       line("unit-skip case=loop reason=no-loopback");
     } else {

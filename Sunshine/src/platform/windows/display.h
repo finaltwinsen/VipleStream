@@ -465,6 +465,7 @@ namespace platf::dxgi {
       uint64_t black = 0;
       uint64_t fence_lost = 0;
       uint64_t teardown_requests = 0;
+      uint64_t released = 0;  ///< §VR-RING-RELEASE：沒複製、直接交還 driver 的幀（換消費者時過期、或曾被判不合格）
       uint64_t first_frame_id = 0;  ///< 本 display 看到的第一筆 descriptor（算消費率的分母）
       uint64_t last_frame_id = 0;
       std::vector<double> evt_to_push_ms;  ///< evtFrm 醒來 → push 回呼（只保留最近一個統計窗）

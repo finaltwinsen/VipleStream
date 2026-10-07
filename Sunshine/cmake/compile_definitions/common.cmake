@@ -263,6 +263,15 @@ set(SUNSHINE_TARGET_FILES
         # §VR M4a R3：LATCH 相位回授的頻率鎖控制器（純模組）
         "${CMAKE_SOURCE_DIR}/src/vr/vr_latch.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_latch.cpp"
+        # §VR-PREDICT：依 client 量到的姿態落後調整 SecondsFromVsyncToPhotons（純模組）
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_predict.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_predict.cpp"
+        # §VR-ABR-OUTAGE：VR 斷訊後把位元率拉回斷訊前的值（純函式標頭）
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_abr_outage.h"
+        # §VR-MULTILINK：多連線（純邏輯在 _logic.h，socket／執行緒在 .cpp；Linux 也編譯）
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_multilink_logic.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_multilink.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_multilink.cpp"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_selftest.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_selftest.cpp"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_orchestrator.h"

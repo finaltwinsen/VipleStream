@@ -226,12 +226,14 @@ namespace vrdrv {
       p.vecVelocity[i] = 0.0;
       p.vecAngularVelocity[i] = 0.0;
     }
+    p.poseTimeOffset = 0.0;
     report(p);
     release_inputs();
     ReleaseSRWLockShared(&ctx_.pose_lock);
   }
 
-  void controller_device_t::update(const vripc_pose_t &hp, const vripc_ctrl_input_t &in, bool have, int64_t age_us, uint32_t oor_us, bool zero_vel) {
+  void controller_device_t::update(const vripc_pose_t &hp, const vripc_ctrl_input_t &in, bool have, int64_t age_us, uint32_t oor_us, bool zero_vel,
+                                   double pose_time_offset, double ang_scale, bool angvel_local) {
     AcquireSRWLockShared(&ctx_.pose_lock);
     if (index_.load() == k_invalid_index) {
       ReleaseSRWLockShared(&ctx_.pose_lock);
@@ -254,14 +256,25 @@ namespace vrdrv {
       p.qRotation.w = q.w;
       for (int i = 0; i < 3; ++i) {
         p.vecVelocity[i] = (zero_vel || oor || !std::isfinite(hp.lin_vel[i])) ? 0.0 : hp.lin_vel[i];
-        p.vecAngularVelocity[i] = (zero_vel || oor || !std::isfinite(hp.ang_vel[i])) ? 0.0 : hp.ang_vel[i];
+        p.vecAngularVelocity[i] = (zero_vel || oor || !std::isfinite(hp.ang_vel[i])) ? 0.0 : hp.ang_vel[i] * ang_scale;
       }
+      if (angvel_local) {
+        // §VR-ANGVEL-LOCAL：SteamVR 把角速度當機體座標；client（OpenXR grip space 對追蹤空間）給的是世界座標。
+        // 舊版拍子只要不是直立就繞錯的軸外插，揮拍時拍面角度偏掉
+        const math::vec3_t wl = math::rotate(math::conj(q), math::vec3_t {p.vecAngularVelocity[0], p.vecAngularVelocity[1], p.vecAngularVelocity[2]});
+        p.vecAngularVelocity[0] = wl.x;
+        p.vecAngularVelocity[1] = wl.y;
+        p.vecAngularVelocity[2] = wl.z;
+      }
+      // §VR-CTRL-OFFSET：速度歸零（stale、OutOfRange）時 offset 也歸零，與 HMD 的舊規則一致
+      p.poseTimeOffset = (zero_vel || oor || !std::isfinite(pose_time_offset)) ? 0.0 : pose_time_offset;
       p.poseIsValid = true;
     } else {
       for (int i = 0; i < 3; ++i) {
         p.vecVelocity[i] = 0.0;
         p.vecAngularVelocity[i] = 0.0;
       }
+      p.poseTimeOffset = 0.0;
       p.poseIsValid = false;
     }
     p.result = oor ? vr::TrackingResult_Running_OutOfRange : vr::TrackingResult_Running_OK;

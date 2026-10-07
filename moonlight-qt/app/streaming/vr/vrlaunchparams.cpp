@@ -8,6 +8,10 @@ VrLaunchConfig::VrLaunchConfig()
 {
     fovTan.fill(10000);  // tan 45° = 1.0
     caps = VIPLE_VR_CLIENT_CAP_RECOVERY_INTRA | VIPLE_VR_CLIENT_CAP_TRACK_THREAD;
+#ifdef VIPLE_MPQUIC
+    // §VR-MULTILINK：common-c 的多連線靠 PlatformNetIf 列舉網卡，只有 VIPLE_MPQUIC 建置有
+    caps |= VIPLE_VR_CLIENT_CAP_MULTILINK;
+#endif
     codecs = VIPLE_VR_CODEC_HEVC | VIPLE_VR_CODEC_H264;
     setIpd(ipd);
 }
@@ -103,6 +107,9 @@ VrSessionInfo VrSessionInfo::parse(const QString& text)
         else if (key == "mode") {
             info.mode = value;
         }
+        else if (key == "multilink") {
+            info.multilink = (value == "1");
+        }
         // 不認得的 key 直接略過（server 之後可以往後加欄位）
     }
 
@@ -115,9 +122,10 @@ VrSessionInfo VrSessionInfo::parse(const QString& text)
 QString VrSessionInfo::describe() const
 {
     return QString("proto=%1 packed=%2x%3 hz=%4 codec=%5 layout=%6 overscan=%7 recovery=%8 "
-                   "irFrames=%9 transport=%10 mode=%11 session=%12")
+                   "irFrames=%9 transport=%10 mode=%11 session=%12%13")
         .arg(proto).arg(packedWidth).arg(packedHeight).arg(refreshHz)
         .arg(codec, layout).arg(overscan)
         .arg(recoveryIntra ? "intra" : "idr").arg(irFrames)
-        .arg(transport, mode, sessionGuid);
+        .arg(transport, mode, sessionGuid)
+        .arg(multilink ? " multilink=1" : "");
 }

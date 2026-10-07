@@ -1,6 +1,8 @@
 #include "appmodel.h"
 #include "backend/identitymanager.h"
 
+#include <Limelight.h>  // VipleVr.h：§VR-LAUNCHER 的 PCVR 能力位元
+
 // VipleStream H.4 v1.2.119: poll-loop in requestSteamSwitch needs these.
 #include <QCoreApplication>
 #include <QDateTime>
@@ -14,7 +16,7 @@ AppModel::AppModel(QObject *parent)
             this, &AppModel::handleBoxArtLoaded);
 }
 
-void AppModel::initialize(ComputerManager* computerManager, int computerIndex, bool showHiddenGames)
+void AppModel::initialize(ComputerManager* computerManager, int computerIndex, bool showHiddenGames, bool vrOnly)
 {
     m_ComputerManager = computerManager;
     connect(m_ComputerManager, &ComputerManager::computerStateChanged,
@@ -24,12 +26,40 @@ void AppModel::initialize(ComputerManager* computerManager, int computerIndex, b
     m_Computer = m_ComputerManager->getComputers().at(computerIndex);
     m_CurrentGameId = m_Computer->currentGameId;
     m_ShowHiddenGames = showHiddenGames;
+    m_VrOnly = vrOnly;
     {
         QReadLocker lock(&m_Computer->lock);
         m_LastKnownPeerIsViple = m_Computer->isVipleStreamPeer;
     }
 
     updateAppList(m_Computer->appList);
+}
+
+QString AppModel::vrLaunchAddress()
+{
+    QReadLocker lock(&m_Computer->lock);
+    if (m_Computer->state != NvComputer::CS_ONLINE || m_Computer->activeAddress.isNull()) {
+        return QString();
+    }
+    return m_Computer->activeAddress.toString();
+}
+
+QString AppModel::vrUnavailableReason()
+{
+    QReadLocker lock(&m_Computer->lock);
+    if (!(m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_PCVR) ||
+            m_Computer->vipleStreamVrProto < VIPLE_VR_PROTO_VERSION) {
+        return tr("%1 doesn't offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.")
+                .arg(m_Computer->name);
+    }
+    if (m_Computer->onlineViaRelay) {
+        return tr("%1 is only reachable through the relay. VR streaming needs a direct connection.")
+                .arg(m_Computer->name);
+    }
+    if (m_Computer->state != NvComputer::CS_ONLINE || m_Computer->activeAddress.isNull()) {
+        return tr("%1 is offline.").arg(m_Computer->name);
+    }
+    return QString();
 }
 
 int AppModel::getRunningAppId()
@@ -189,6 +219,11 @@ QVector<NvApp> AppModel::getVisibleApps(const QVector<NvApp>& appList)
     QVector<NvApp> visibleApps;
 
     for (const NvApp& app : appList) {
+        // §VR-LAUNCHER：VR 模式只列 VR app（其他 app 以 vr=1 啟動會被 server 拒絕）
+        if (m_VrOnly && !app.isVr) {
+            continue;
+        }
+
         // Don't immediately hide games that were previously visible. This
         // allows users to easily uncheck the "Hide App" checkbox if they
         // check it by mistake.

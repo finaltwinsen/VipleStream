@@ -42,8 +42,11 @@ extern "C" {
 #include "tunnel_session.h"
 #include "udp_tunnel.h"
 #include "utility.h"
+#include "vr/vr_multilink.h"
 #include "vr/vr_bridge.h"
 #include "vr/vr_orchestrator.h"
+#include "vr/vr_abr_outage.h"
+#include "vr/vr_predict.h"
 #include "vr/vr_session.h"
 
 #ifdef VIPLE_MPQUIC
@@ -568,6 +571,9 @@ namespace stream {
       // 實發量，排空時以此為 count 上限。與 fecLossAccum 同步歸零。
       std::atomic<int> videoShardsSentAccum{0};
       std::chrono::steady_clock::time_point fecAccumStart{std::chrono::steady_clock::now()};
+      // §VR-LINK-REPAIR：補包救回來的缺包數（下一次 run_abr_aimd 取走）。不進 fecLossAccum，見 kVrAbrRepairHoldPct
+      std::atomic<int> vrRepairAccum{0};
+      std::chrono::steady_clock::time_point vrRepairHoldLog{};  // 「補包量大、暫停回升」的 log 節流（握 abrMutex）
 
       // §ABR-RAMP-TICK：periodic ping 驅動的零丟包 tick 節流（500ms 一輪）。
       // client 只在有 missing 時送 FEC status，零丟包輪由 ping handler 合成。
@@ -630,6 +636,9 @@ namespace stream {
       std::chrono::steady_clock::time_point abrRttLastHeartbeat{};
       bool abrRttSampled{false};       // 是否已取得過任何 RTT 樣本（0 也算）
       bool abrRttWindowRolled{false};  // 兩段視窗是否已輪換過一次
+
+      // §VR-ABR-OUTAGE（2026-10-04）：VR 斷訊事件（斷訊前的位元率，恢復後直接拉回）。abrMutex 保護。
+      vr::abr::outage_state_t vrOutage;
     } video;
 
     struct {
@@ -743,6 +752,12 @@ namespace stream {
     std::vector<double> vrTxPresentToFirstPktMs;
     std::chrono::steady_clock::time_point vrTxLastLog {};
     uint64_t vrTxFrames = 0;
+
+    // §VR-MULTILINK：/launch 協商了多連線的 VR session 才有值（alloc 建立，join 時 stop）。
+    // 有連線可用時影像與音訊改由它在每條連線各送一份，原本的單一路徑暫停；nullptr 時行為完全不變。
+    // 宣告在最後：hub 的接收執行緒會經 callback 碰這個 session 的其他成員（§VR-LINK-CTRL），成員反序解構時
+    // 它必須第一個解構（解構會停掉並 join 那些執行緒）。正常路徑是 session::join 先 stop()。
+    std::shared_ptr<::vr::multilink::hub_t> vrLinks;
   };
 
   // VipleStream 2.0 §VR：這次 control handler 呼叫是否來自 QUIC fallback。flow 0x04 →
@@ -878,6 +893,47 @@ namespace stream {
   }
 
   /**
+   * 2026-10-05（VR 上行空窗診斷）：控制執行緒的單輪耗時。controlBroadcastThread 一輪只處理一個 ENet 事件，
+   * 本體或某個 callback 慢，排在後面的 tracking 樣本就會成串晚到。只做診斷，數值在 [VIPLE-VR-UPLINK] 10s 行。
+   * callback 也可能從 QUIC IO 執行緒重入，所以用 atomic（max 的競爭只影響統計）。
+   */
+  struct ctrl_loop_stats_t {
+    int64_t body_max_us = 0;  ///< 迴圈本體（session 處理、vr_control_tick），不含 enet_host_service 的等待
+    int64_t cb_max_us = 0;  ///< 單一 control 訊息 callback（加密訊息算內層的型別）
+    uint16_t cb_max_type = 0;
+    uint64_t slow_cb = 0;  ///< callback ≥ 2 ms 的次數
+    uint64_t events = 0;  ///< 處理的 ENet 事件數
+  };
+
+  namespace {
+    std::atomic<int64_t> g_ctrl_body_max_us {0};
+    std::atomic<int64_t> g_ctrl_cb_max_us {0};
+    std::atomic<uint16_t> g_ctrl_cb_max_type {0};
+    std::atomic<uint64_t> g_ctrl_slow_cb {0};
+    std::atomic<uint64_t> g_ctrl_events {0};
+
+    void note_max(std::atomic<int64_t> &slot, int64_t v) {
+      int64_t cur = slot.load(std::memory_order_relaxed);
+      while (v > cur && !slot.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
+      }
+    }
+
+    int64_t us_since(std::chrono::steady_clock::time_point t0) {
+      return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+    }
+  }  // namespace
+
+  static ctrl_loop_stats_t take_ctrl_loop_stats() {
+    ctrl_loop_stats_t s;
+    s.body_max_us = g_ctrl_body_max_us.exchange(0, std::memory_order_relaxed);
+    s.cb_max_us = g_ctrl_cb_max_us.exchange(0, std::memory_order_relaxed);
+    s.cb_max_type = g_ctrl_cb_max_type.exchange(0, std::memory_order_relaxed);
+    s.slow_cb = g_ctrl_slow_cb.exchange(0, std::memory_order_relaxed);
+    s.events = g_ctrl_events.exchange(0, std::memory_order_relaxed);
+    return s;
+  }
+
+  /**
    * @brief Call the handler for a given control stream message.
    * @param type The message type.
    * @param session The session the message was received on.
@@ -898,8 +954,19 @@ namespace stream {
         << "---data---"sv << std::endl
         << util::hex_vec(payload) << std::endl
         << "---end data---"sv;
+    } else if (type == packetTypes[IDX_ENCRYPTED]) {
+      cb->second(session, payload);  // 解密後以內層型別重入 call()，耗時記在內層
     } else {
+      const auto t0 = std::chrono::steady_clock::now();
       cb->second(session, payload);
+      const int64_t us = us_since(t0);
+      if (us > g_ctrl_cb_max_us.load(std::memory_order_relaxed)) {
+        note_max(g_ctrl_cb_max_us, us);
+        g_ctrl_cb_max_type.store(type, std::memory_order_relaxed);
+      }
+      if (us >= 2000) {
+        g_ctrl_slow_cb.fetch_add(1, std::memory_order_relaxed);
+      }
     }
   }
 
@@ -908,6 +975,7 @@ namespace stream {
     auto res = enet_host_service(_host.get(), &event, (enet_uint32) timeout.count());
 
     if (res > 0) {
+      g_ctrl_events.fetch_add(1, std::memory_order_relaxed);
       auto session = get_session(event.peer, event.data);
       if (!session) {
         BOOST_LOG(warning) << "Rejected connection from ["sv << platf::from_sockaddr((sockaddr *) &event.peer->address.address) << "]: it's not properly set up"sv;
@@ -1384,22 +1452,49 @@ namespace stream {
   constexpr auto kVrFecHold = std::chrono::seconds(30);
   constexpr auto kVrFecDecayEvery = std::chrono::seconds(5);
 
+  /// §VR-ABR-OUTAGE：斷訊訊號（丟包 ≥ 30% 的視窗或 client 回報連掉多幀）。applied＝降碼前的已套用位元率；
+  /// resend＝client 重送的 LOSS（只延長事件）。ABR 關閉時不開事件（不會有人拉回）。呼叫者持 abrMutex。
+  static void vr_abr_mark_outage_locked(session_t *session, int applied, std::chrono::steady_clock::time_point now, const char *src, bool resend = false) {
+    if (!session->video.autoAdjustBitrate || session->video.configuredBitrateKbps <= 0 || applied <= 0) {
+      return;
+    }
+    auto &st = session->video.vrOutage;
+    switch (vr::abr::on_outage(st, applied, now, resend)) {
+      case vr::abr::outage_e::started:
+        BOOST_LOG(info) << "[VIPLE-ABR] VR outage (src=" << src << "): will restore " << st.ref_kbps << " kbps once the link is clean again";
+        break;
+      case vr::abr::outage_e::lowered:
+        BOOST_LOG(info) << "[VIPLE-ABR] VR outage again right after restoring (src=" << src << "): restore target lowered to " << st.ref_kbps << " kbps";
+        break;
+      case vr::abr::outage_e::extended:
+        break;
+    }
+  }
+
   /// VR session：有丟包跡象，FEC 的回降重新計時。呼叫者持 abrMutex。
   static void vr_fec_hold_locked(session_t *session, std::chrono::steady_clock::time_point now) {
     session->video.lastLossTime = now;
     session->video.zeroLossStreak = 0;
   }
 
-  /// client 回報了救不回的幀（新的 refresh wave）。lostFrames＝這筆 LOSS 涵蓋的幀數。任何執行緒；內部取 abrMutex。
-  static void vr_fec_on_loss(session_t *session, std::uint32_t lostFrames) {
+  /// client 回報了救不回的幀（新的 refresh wave）。lostFrames＝這筆 LOSS 涵蓋的幀數；resend＝client 重送的 LOSS。
+  /// 任何執行緒；內部取 abrMutex。
+  static void vr_fec_on_loss(session_t *session, std::uint32_t lostFrames, bool resend) {
     std::lock_guard<std::mutex> lk(session->video.abrMutex);
-    vr_fec_hold_locked(session, std::chrono::steady_clock::now());
+    const auto now = std::chrono::steady_clock::now();
+    vr_fec_hold_locked(session, now);
     int cur = session->video.adaptiveFecPercentage.load();
     if (cur == 0) {
       cur = config::stream.fec_percentage;
     }
     if (lostFrames > kVrFecLossMaxSpan) {
       BOOST_LOG(info) << "[VIPLE-FEC] VR outage (" << lostFrames << " frames lost), FEC stays " << cur << '%';
+      // §VR-ABR-OUTAGE：client 看到的斷訊也開始／延長斷訊事件，恢復後 ABR 直接拉回斷訊前的位元率
+      int applied = session->video.adaptiveBitrateKbps.load();
+      if (applied <= 0) {
+        applied = session->video.configuredBitrateKbps;
+      }
+      vr_abr_mark_outage_locked(session, applied, now, "client-loss", resend);
       return;
     }
     const int next = cur >= kVrFecLossMax ? cur : std::min(cur + kVrFecLossStep, kVrFecLossMax);
@@ -1423,8 +1518,21 @@ namespace stream {
     BOOST_LOG(info) << "[VIPLE-FEC] VR no unrecoverable frame for a while, FEC: " << cur << "% -> " << next << '%';
   }
 
+  /// §VR-LINK-CTRL：協商了連線層控制通道（任何執行緒）
+  static bool vr_link_ctrl(const session_t *session) {
+    return session->vrLinks && (session->vrLinks->features() & VIPLE_VR_LINK_F_CTRL);
+  }
+
+  /// §VR-LINK-CTRL：REFRESH_START 立刻在每條連線各送一份——不等 control tick，也不受 ENet 那條鏈路影響。任何執行緒。
+  static void vr_links_send_refresh(session_t *session, const ::vr::wave_info_t &wave) {
+    if (vr_link_ctrl(session)) {
+      const auto tlv = ::vr::session_state_t::refresh_start_tlv(wave);
+      session->vrLinks->send_s2c(std::string_view {(const char *) tlv.data(), tlv.size()});
+    }
+  }
+
   /**
-   * @brief 處理一筆 0x5507/09 LOSS（control 執行緒或 QUIC IO 執行緒）。
+   * @brief 處理一筆 0x5507/09 LOSS（control 執行緒、QUIC IO 執行緒，或 §VR-LINK-CTRL 的連線接收執行緒）。
    */
   static void vr_handle_loss(session_t *session, ::vr::session_state_t &vr_state, const VIPLE_VR_TLV_LOSS &loss) {
     const auto action = vr_state.on_loss(loss.firstLost, loss.lastLost, loss.reason);
@@ -1432,28 +1540,37 @@ namespace stream {
       case ::vr::loss_action_e::new_wave:
         // §VR-FEC-LOSS：decoder 自己出錯（reason=DECODE_ERROR）不是網路掉包，加 FEC 沒有用
         if (loss.reason != VIPLE_VR_LOSS_DECODE_ERROR) {
-          vr_fec_on_loss(session, loss.lastLost - loss.firstLost + 1);  // uint32 相減，迴繞也成立
+          vr_fec_on_loss(session, loss.lastLost - loss.firstLost + 1, loss.reason == VIPLE_VR_LOSS_RESEND);  // uint32 相減，迴繞也成立
         }
         session->vrRefreshEvents->raise(vr_state.negotiated().ir_frames);
         // 接受 LOSS 當下就回 REFRESH_START（startFrame = encoder 即將編的幀號）。等 wave 第一幀
         // 打包才送會多等最多一個幀間隔（M1a 實測平均 32 ms，超過 client 的 2×RTT+20 ms 重送門檻，
         // 每個 LOSS 都白白重送一次）；改成這樣約 1 RTT。encoder 做不到 IR 而改送 IDR 時，
         // 打包端另外補一則 reason=IDR 的 REFRESH_START。
-        vr_state.queue_refresh_start({vr_state.next_frame(), (uint8_t) vr_state.negotiated().ir_frames, VIPLE_VR_REFRESH_LOSS});
+        {
+          // on_loss() 排定時已經記下同一個估計值；encoder 在這幾微秒內就開始的話拿到的是精確值
+          const ::vr::wave_info_t estimate {vr_state.next_frame(), (uint8_t) vr_state.negotiated().ir_frames, VIPLE_VR_REFRESH_LOSS};
+          const ::vr::wave_info_t wave = vr_state.scheduled_wave().value_or(estimate);
+          vr_state.queue_refresh_start(wave);
+          vr_links_send_refresh(session, wave);
+        }
         break;
       case ::vr::loss_action_e::idr:
         session->video.idr_events->raise(true);
         break;
       case ::vr::loss_action_e::absorbed:
-        // client 在 2×RTT+20 ms 內沒收到 REFRESH_START 才會送 RESEND：進行中那一波的
-        // REFRESH_START 很可能兩份都掉了，再送一次（排定中的 wave 開始時本來就會送）。
-        if (loss.reason == VIPLE_VR_LOSS_RESEND) {
-          if (auto wave = vr_state.active_wave()) {
-            vr_state.queue_refresh_start(*wave);
-          } else {
-            // wave 已排定、第一幀還沒編：再回一次估計值
-            vr_state.queue_refresh_start({vr_state.next_frame(), (uint8_t) vr_state.negotiated().ir_frames, VIPLE_VR_REFRESH_LOSS});
+        {
+          // wave 已排定、第一幀還沒編時，回的是排定當下記的估計值（和第一份 REFRESH_START 相同，見 scheduled_wave()）
+          const ::vr::wave_info_t estimate {vr_state.next_frame(), (uint8_t) vr_state.negotiated().ir_frames, VIPLE_VR_REFRESH_LOSS};
+          const ::vr::wave_info_t wave = vr_state.scheduled_wave().value_or(estimate);
+          // client 在 2×RTT+20 ms 內沒收到 REFRESH_START 才會送 RESEND：進行中那一波的
+          // REFRESH_START 很可能兩份都掉了，再送一次（排定中的 wave 開始時本來就會送）。
+          if (loss.reason == VIPLE_VR_LOSS_RESEND) {
+            vr_state.queue_refresh_start(wave);
           }
+          // §VR-LINK-CTRL：走連線的回覆很便宜（一個小資料報），被吸收的 LOSS 也立刻回——client 若還沒收到這一波的
+          // REFRESH_START，不必等一輪重送
+          vr_links_send_refresh(session, wave);
         }
         break;
       case ::vr::loss_action_e::duplicate:
@@ -1557,6 +1674,32 @@ namespace stream {
     }
   }
 
+  static void vr_publish_tracking(const VIPLE_VR_TRACKING &sample, const ::vr::tracking_timing_t &timing);
+
+  /**
+   * @brief 0x5506 的共同處理：ENet／QUIC 的 control handler 與 §VR-MULTILINK 的連線接收執行緒共用。
+   *        只碰 session_state_t 自己的鎖與 bridge 的 writer mutex，可以在任何一條執行緒呼叫。
+   * @return true＝這一份被採為最新樣本（另一條路先送到時是 false）
+   */
+  static bool vr_handle_tracking(::vr::session_state_t &vr_state, const std::string_view &payload, bool via_quic, int64_t arrival) {
+    if (payload.size() < sizeof(VIPLE_VR_TRACKING)) {
+      vr_state.count_bad_tracking();
+      return false;
+    }
+
+    // 比 232 B 長的部分是之後版本的欄位，只讀前 232 B（前向相容）
+    VIPLE_VR_TRACKING sample;
+    std::memcpy(&sample, payload.data(), sizeof(sample));
+    ::vr::tracking_timing_t timing;
+    const bool latest = vr_state.on_tracking(sample, via_quic, arrival, &timing);
+    vr_log_clock_events(vr_state, timing, via_quic);
+    if (latest) {
+      // pcvr：接受為最新樣本之後才寫進 bridge（stub／disabled 時 tracking_wanted() 恆為 false，立即返回）
+      vr_publish_tracking(sample, timing);
+    }
+    return latest;
+  }
+
   /**
    * @brief pcvr：已接受的 tracking 樣本 → bridge 的 tracking ring（K26：bridge 內部的 writer mutex 序列化
    *        ENet、picoquic、selftest 三個來源）。
@@ -1644,6 +1787,61 @@ namespace stream {
     }
   }
 
+  /// 0x5507/08 LATCH 的共同處理（control 執行緒、QUIC IO 執行緒，或 §VR-LINK-CTRL 的連線接收執行緒）
+  static void vr_handle_latch(session_t *session, ::vr::session_state_t &vr_state, const VIPLE_VR_TLV_LATCH &latch) {
+    // M4a R3：LATCH 相位回授 → 頻率鎖（pcvr 寫 driver pacing；stub 只記錄）。
+    // 補過包的幀比正常晚到，它的相位不是節拍造成的；但 frameId 是 client 的發布序號、不是線上的幀號，這裡認不出是
+    // 哪一幀。LATCH 每秒只取 10 個樣本，補過包的幀佔極少數，控制器的 EMA 與 ±200 ppm 上限吸收得掉——不特別排除。
+    vr_apply_latch(session, vr_state, vr_state.on_latch(latch, vr_steady_ns()));
+    // §VR-ABR-OUTAGE：幀號前進＝影像確實在送達（斷訊後拉回位元率的條件之一）
+    std::lock_guard<std::mutex> lk(session->video.abrMutex);
+    vr::abr::on_progress(session->video.vrOutage, latch.frameId, std::chrono::steady_clock::now());
+  }
+
+  /**
+   * @brief §VR-LINK-CTRL：連線層送來的 0x5507（hub 的接收執行緒；已解密、已去重）。只收時間敏感、處理函式可以在
+   *        別條執行緒跑的那幾種；其餘（CONFIG、CLIENT_TIMING、LINK_HELLO…）只走 ENet，從這裡來的一律忽略。
+   */
+  static void vr_handle_c2s_from_link(session_t *session, ::vr::session_state_t &vr_state, const std::string_view &payload) {
+    const auto *p = (const std::uint8_t *) payload.data();
+    const std::size_t size = payload.size();
+    std::size_t off = 0;
+    while (off + 2 <= size) {
+      const std::uint8_t type = p[off];
+      const std::uint8_t len = p[off + 1];
+      if (off + 2 + len > size) {
+        vr_state.count_c2s_truncated();
+        break;
+      }
+      const std::uint8_t *body = p + off + 2;
+      if (type == VIPLE_VR_C2S_LOSS && len >= sizeof(VIPLE_VR_TLV_LOSS)) {
+        VIPLE_VR_TLV_LOSS loss;
+        std::memcpy(&loss, body, sizeof(loss));
+        vr_handle_loss(session, vr_state, loss);
+      } else if (type == VIPLE_VR_C2S_LATCH && len >= sizeof(VIPLE_VR_TLV_LATCH)) {
+        vr_state.count_c2s(type);
+        VIPLE_VR_TLV_LATCH latch;
+        std::memcpy(&latch, body, sizeof(latch));
+        vr_handle_latch(session, vr_state, latch);
+      } else if (type == VIPLE_VR_C2S_NACK && session->vrLinks) {
+        // §VR-LINK-REPAIR：client 回報某個 FEC block 缺哪些 shard；補哪些、走哪條由 hub 決定
+        vr_state.count_c2s(type);
+        const auto r = session->vrLinks->on_nack(body, len);
+        if (r.resent > 0) {
+          // 「補之前還差幾個才夠還原」＝這份回報救回來的缺包數（多補的餘裕不算）。另外記在 vrRepairAccum：補得回來的
+          // 不當成丟包、不降碼，量大時只擋回升（見 kVrAbrRepairHoldPct）；補完還剩的洞由 client 的 FEC status 照常
+          // 回報。不碰 fecLossAccum 與 lastFecStatusTime：ping tick 與 FEC status 的排空節奏不受補包影響。
+          // FEC 百分比仍然只跟「救不回的幀」（LOSS）調，這裡只延後它的回降。
+          std::lock_guard<std::mutex> lk(session->video.abrMutex);
+          session->video.vrRepairAccum.fetch_add((int) r.needed);
+          session->video.videoShardsSentAccum.fetch_add((int) r.resent);
+          vr_fec_hold_locked(session, std::chrono::steady_clock::now());
+        }
+      }
+      off += 2 + len;
+    }
+  }
+
   /**
    * @brief VR session 的控制迴圈工作（只在 control 執行緒、peer 已連上時呼叫）：
    *        STATE（連上後一次）、1 Hz STATS 與 RTT 下限、drain outbox、10 秒統計 log。
@@ -1689,6 +1887,9 @@ namespace stream {
     }
 
     for (const auto &msg : vr_state.drain_s2c()) {
+      if (!msg.reliable && session->vrLinks && session->vrLinks->fault_ctrl_blocked()) {
+        continue;  // 開發用故障注入（c: 規則）：ENet 上的即時訊息在這段期間送不到
+      }
       if (send_vr_s2c(session, msg) && ctl.sendFailLogs < 5) {
         ++ctl.sendFailLogs;
         BOOST_LOG(warning) << "[VIPLE-VR-SESSION] failed to send VR_S2C subtype=" << (int) msg.tlv[0]
@@ -1715,6 +1916,24 @@ namespace stream {
                       << " latch=" << cur.latch_rx - prev.latch_rx
                       << " timing=" << cur.timing_rx - prev.timing_rx
                       << " other=" << cur.other_c2s - prev.other_c2s;
+      // 2026-10-05：上行空窗（server 收到的時刻）與控制執行緒單輪耗時。tracking 樣本與其他 control 訊息共用這條
+      // 執行緒、一輪只處理一個 ENet 事件，本體或某個 callback 卡住，樣本就會成串晚到（driver 端看到 > 2T 的空窗）
+      {
+        const auto arr = vr_state.take_arrival_stats();
+        const auto loop = take_ctrl_loop_stats();
+        BOOST_LOG(info) << "[VIPLE-VR-UPLINK] 10s: arrivalMaxMs=" << std::format("{:.1f}", arr.max_us / 1000.0) << " gt2T=" << arr.gt2t
+                        << " | ctrl loop bodyMaxUs=" << loop.body_max_us << " cbMaxUs=" << loop.cb_max_us
+                        << " cbMaxType=0x" << std::format("{:04x}", loop.cb_max_type) << " slowCb=" << loop.slow_cb << " events=" << loop.events;
+      }
+      // §VR-MULTILINK：每條連線的 10 秒統計（還沒有連線時不印）
+      if (session->vrLinks) {
+        if (const auto line = session->vrLinks->take_stats_line(); !line.empty()) {
+          BOOST_LOG(info) << "[VIPLE-VR-LINK] 10s: " << line;
+        }
+        if (const auto line = session->vrLinks->take_repair_line(); !line.empty()) {
+          BOOST_LOG(info) << "[VIPLE-VR-REPAIR] 10s: " << line;
+        }
+      }
       // §M1b S1-12：時鐘對映 10 秒行（欄位順序見 clk::format_stats，F.10 分析腳本依賴）
       if (const auto cs = vr_state.clock_stats(true)) {
         BOOST_LOG(info) << "[VIPLE-VR-CLK] 10s: " << ::vr::clk::format_stats(*cs);
@@ -1722,9 +1941,13 @@ namespace stream {
       // M4a R3：LATCH 頻率鎖與 client 時序
       if (cur.latch_rx != prev.latch_rx) {
         const auto ls = vr_state.latch_snapshot();
+        // §VR-LATCH-V2：尾端加 err／integ／slips（累計）／dropped（累計，v2 才有）／mode；前面的欄位順序不變
         BOOST_LOG(info) << "[VIPLE-VR-LATCH] 10s: rx=" << cur.latch_rx - prev.latch_rx << " slackEma=" << std::format("{:.0f}", ls.slack_ema_us)
                         << "us target=" << std::format("{:.0f}", ls.target_us) << "us ppm=" << ls.ppm
-                        << (pcvr ? "" : " (stub: log only)") << " haptics=" << vr_state.haptics_queued();
+                        << (pcvr ? "" : " (stub: log only)") << " haptics=" << vr_state.haptics_queued()
+                        << " err=" << std::format("{:.0f}", ls.err_us) << "us integ=" << std::format("{:.1f}", ls.integral_ppm)
+                        << " slips=" << ls.slips << " dropped=" << ls.dropped
+                        << " mode=" << (ls.mode == ::vr::latch::mode_e::v2 ? "v2" : "legacy");
       }
       if (const auto t = vr_state.last_client_timing()) {
         BOOST_LOG(info) << "[VIPLE-VR-TIMING] 10s: presented=" << t->framesPresented << " xrMissed=" << t->xrMissed
@@ -1816,6 +2039,12 @@ namespace stream {
   // 很快越過門檻，RTT 膨脹（§ABR-DELAY）與 LOSS→intra refresh 也照常運作。桌面 session 完全不變。
   constexpr float kVrAbrIgnorePct = 1.0f;
   constexpr int kVrAbrMinExpected = 200;  // 估出來的封包數太少時比例沒有意義，退回絕對門檻
+  // §VR-LINK-REPAIR（2026-10-07）：補包救回來的缺包不算進上面的丟包比例。會走到補包的是「一個 FEC block 掉的比
+  // parity 還多」的成串掉包——Wi-Fi 的短暫空檔（頭盔的單一無線電在兩個網路之間切換、干擾），和位元率高低無關：
+  // 降碼不會讓它少掉，只是白白犧牲清晰度（S0 實測：每 500 ms 斷 12 ms、補包全數救回、零掉幀，照丟包算卻一路砍到
+  // 下限 17 Mbps）。真的送不動時補包也救不回來：補包額度用完回 GONE → client 放棄那一幀、報 LOSS 與 FEC status，
+  // 走原本的降碼。補的量很大（≥ 3%）時不降碼、但也不回升——鏈路狀況不好，別再加碼。
+  constexpr float kVrAbrRepairHoldPct = 3.0f;
 
   /// 這段時間內照目前（已套用的）位元率大約送出幾個影像封包（不含 FEC）；估不出來回 0
   static int abr_expected_packets(session_t *session, long long elapsedMs) {
@@ -1904,6 +2133,16 @@ namespace stream {
     const float lossPct = vr_abr_loss_pct(session, effectiveLoss, elapsedMs);
     if (lossPct >= 0.0f && lossPct < kVrAbrIgnorePct) {
       effectiveLoss = 0;
+    }
+    // §VR-LINK-REPAIR：這段時間補包救回來的缺包。不算丟包；比例高時暫停回升（下面和 RTT 膨脹走同一道 gate）
+    const int repaired = session->vr ? session->video.vrRepairAccum.exchange(0) : 0;
+    const float repairPct = vr_abr_loss_pct(session, repaired, elapsedMs);
+    const bool repairHold = repairPct >= kVrAbrRepairHoldPct;
+    // §VR-ABR-OUTAGE：丟包 ≥ 30% 的視窗是斷訊（只有 VR 才有 lossPct）——照常降碼，但記下降碼前的位元率，
+    // 連線恢復後在下面的零丟包分支直接拉回
+    const auto abrNow = std::chrono::steady_clock::now();
+    if (lossPct >= vr::abr::k_outage_loss_pct) {
+      vr_abr_mark_outage_locked(session, applied, abrNow, src);
     }
 
     // §ABR-DELAY 2026-08-27：RTT 膨脹＝bufferbloat 訊號。
@@ -2006,7 +2245,16 @@ namespace stream {
       target = base * 75 / 100;
       session->video.bitrateZeroLossStreak = 0;
       session->video.abrRttLastCutTime = std::chrono::steady_clock::now();
-    } else if (quicCongested || rttCongested) {
+    } else if (quicCongested || rttCongested || repairHold) {
+      // §VR-LINK-REPAIR：補包量大（repairHold）也走這裡——不降碼、不回升
+      if (repairHold) {
+        using namespace std::chrono_literals;
+        if (session->video.vrRepairHoldLog == std::chrono::steady_clock::time_point {} || abrNow - session->video.vrRepairHoldLog >= 5s) {
+          session->video.vrRepairHoldLog = abrNow;
+          BOOST_LOG(info) << "[VIPLE-ABR] ramp held: " << repaired << " shards repaired in " << elapsedMs << " ms ("
+                          << std::format("{:.1f}", repairPct) << "% of the video packets; src=" << src << ')';
+        }
+      }
       // §ABR-RAMP-GATE 2026-07-16：QUIC 近 2s 內有 backpressure 或
       // §Q-STALE 丟棄 → 凍結零丟包回升（hold）。streak 保留不清零，
       // 壅塞解除後 1-2 輪即恢復爬升，不需重新累積。防止 ping-tick 在
@@ -2018,6 +2266,15 @@ namespace stream {
       // 回升」就消除了這個主動加害，而且不會誤降畫質（只是暫停爬升）。
     } else {
       session->video.bitrateZeroLossStreak++;
+      // §VR-ABR-OUTAGE：斷訊後安靜 1 s、2 個乾淨視窗、影像確實在送達 → 直接拉回斷訊前的位元率（每次斷訊只拉一次）
+      if (session->vr) {
+        const int restored = vr::abr::on_clean(session->video.vrOutage, target, maxBr, abrNow);
+        if (restored > target) {
+          BOOST_LOG(info) << "[VIPLE-ABR] VR link clean again: restoring " << target << " -> " << restored << " kbps (pre-outage bitrate)";
+          target = restored;
+          session->video.bitrateZeroLossStreak = 0;
+        }
+      }
       if (session->video.bitrateZeroLossStreak >= 5) {
         target += maxBr * 5 / 100;  // additive increase: +5% of max
         session->video.bitrateZeroLossStreak = 0;
@@ -2026,6 +2283,10 @@ namespace stream {
 
     target = std::max(minBr, std::min(target, maxBr));
     session->video.targetBitrateKbps.store(target);
+    // §VR-ABR-OUTAGE：記下降碼前的值——被稀釋的視窗（< 30%）先砍、斷訊訊號 1 s 內才到時，事件用它當參考
+    if (session->vr && target < applied) {
+      vr::abr::note_cut(session->video.vrOutage, applied, abrNow);
+    }
 
     // 只在偏離已套用值 >10% 時真正 reconfigure（防抖動）。
     // 回升累積在 target，數輪後必過門檻 → 能一路回到 max。
@@ -2043,7 +2304,8 @@ namespace stream {
         << " kbps (" << (target < applied ? "cut" : "ramp")
         << ", loss=" << lossCount << " staleDrops=" << staleDrops
         << " in " << elapsedMs << "ms, src=" << src
-        << (lossPct >= 0.0f ? std::format(", vr lossPct={:.2f}", lossPct) : std::string {}) << ")";
+        // 分母是照位元率估的影像封包數（不含 FEC），斷訊時回報的缺包（含 FEC、前一段累積的）可能超過它：> 100 標成估計值
+        << (lossPct >= 0.0f ? std::format(", vr lossPct={:.2f}{}", lossPct, lossPct > 100.0f ? "(est)" : "") : std::string {}) << ")";
     }
 
     // §Q-ABR-FLOOR-ESCAPE 2026-07-02 (Fix C)：低檔困死偵測。持續 loss
@@ -2372,20 +2634,9 @@ namespace stream {
         vr_drop_non_vr(session, VIPLE_VR_PTYPE_TRACKING);
         return;
       }
-      if (payload.size() < sizeof(VIPLE_VR_TRACKING)) {
-        vr_state->count_bad_tracking();
-        return;
-      }
-
-      // 比 232 B 長的部分是之後版本的欄位，只讀前 232 B（前向相容）
-      VIPLE_VR_TRACKING sample;
-      std::memcpy(&sample, payload.data(), sizeof(sample));
-      ::vr::tracking_timing_t timing;
-      const bool latest = vr_state->on_tracking(sample, t_ctrl_via_quic, arrival, &timing);
-      vr_log_clock_events(*vr_state, timing, t_ctrl_via_quic);
-      if (latest) {
-        // pcvr：接受為最新樣本之後才寫進 bridge（stub／disabled 時 tracking_wanted() 恆為 false，立即返回）
-        vr_publish_tracking(sample, timing);
+      // §VR-MULTILINK：同一個樣本也可能已經從某條連線送到（那時這一份不是最新，只計數）
+      if (vr_handle_tracking(*vr_state, payload, t_ctrl_via_quic, arrival) && session->vrLinks) {
+        session->vrLinks->note_enet_tracking_first();
       }
     });
 
@@ -2399,6 +2650,8 @@ namespace stream {
 
       const auto *p = (const std::uint8_t *) payload.data();
       const std::size_t size = payload.size();
+      // 開發用故障注入（c: 規則）：ENet 上的即時訊息在這段期間收不到
+      const bool enet_fault = !t_ctrl_via_quic && session->vrLinks && session->vrLinks->fault_ctrl_blocked();
       std::size_t off = 0;
       while (off + 2 <= size) {
         const std::uint8_t type = p[off];
@@ -2410,6 +2663,10 @@ namespace stream {
         }
 
         const std::uint8_t *body = p + off + 2;
+        if (enet_fault && (type == VIPLE_VR_C2S_LOSS || type == VIPLE_VR_C2S_LATCH)) {
+          off += 2 + len;
+          continue;
+        }
         if (type == VIPLE_VR_C2S_LOSS) {
           if (len >= sizeof(VIPLE_VR_TLV_LOSS)) {
             VIPLE_VR_TLV_LOSS loss;
@@ -2418,16 +2675,85 @@ namespace stream {
           } else {
             vr_state->count_c2s(type);
           }
+        } else if (type == VIPLE_VR_C2S_LINK_HELLO) {
+          // §VR-MULTILINK：client 宣告它的連線（每張網卡一條）。只在 control 執行緒處理（要回 reliable 的 LINK_READY）；
+          // 沒協商多連線、或訊息是從 QUIC 轉進來的，都忽略。
+          vr_state->count_c2s(type);
+          std::vector<::vr::multilink::hello_link_t> hello;
+          if (session->vrLinks && !t_ctrl_via_quic && ::vr::multilink::parse_hello(body, len, hello)) {
+            std::array<uint8_t, 4> primary {};
+            if (const auto addr = session->video.peer.address(); addr.is_v4()) {
+              primary = addr.to_v4().to_bytes();
+            } else if (addr.is_v6() && addr.to_v6().is_v4_mapped()) {
+              primary = boost::asio::ip::make_address_v4(boost::asio::ip::v4_mapped, addr.to_v6()).to_bytes();
+            }
+            ::vr::s2c_msg_t msg;
+            const auto ready = session->vrLinks->on_hello(hello, primary);  // 先處理 HELLO，功能位元才定得下來
+            msg.tlv = ::vr::multilink::format_ready_tlv(ready, session->vrLinks->features());
+            msg.reliable = true;
+            if (send_vr_s2c(session, msg)) {
+              BOOST_LOG(warning) << "[VIPLE-VR-LINK] could not send LINK_READY"sv;
+            }
+          } else if (session->vrLinks) {
+            BOOST_LOG(warning) << "[VIPLE-VR-LINK] malformed LINK_HELLO ignored (len=" << (int) len << ")";
+          }
         } else if (type == VIPLE_VR_C2S_LATCH && len >= sizeof(VIPLE_VR_TLV_LATCH)) {
-          // M4a R3：LATCH 相位回授 → 頻率鎖（pcvr 寫 driver pacing；stub 只記錄）
           vr_state->count_c2s(type);
           VIPLE_VR_TLV_LATCH latch;
           std::memcpy(&latch, body, sizeof(latch));
-          vr_apply_latch(session, *vr_state, vr_state->on_latch(latch, vr_steady_ns()));
+          vr_handle_latch(session, *vr_state, latch);
         } else if (type == VIPLE_VR_C2S_CLIENT_TIMING) {
           // M4a R3：1 Hz client 時序（依 len 能讀多少算多少）
           vr_state->count_c2s(type);
           vr_state->on_client_timing(body, len);
+          // §VR-PREDICT：client 回報的姿態落後 → 調整 SteamVR 的姿態預測時間（36 B 以上的 CLIENT_TIMING 才有）
+          if (len >= sizeof(VIPLE_VR_TLV_CLIENT_TIMING)) {
+            VIPLE_VR_TLV_CLIENT_TIMING ct;
+            std::memcpy(&ct, body, sizeof(ct));
+            const auto now = std::chrono::steady_clock::now();
+            const auto ms = [](int32_t us) {
+              return std::format("{:.1f}", us / 1000.0);
+            };
+            if (auto r = vr::predict::on_pose_lag(ct.poseLagP50_100us, ct.poseLagCount, now)) {
+              switch (r->action) {
+                case vr::predict::action_e::update:
+                  if (!vr::bridge::send_set_v2p(r->to_us)) {
+                    vr::predict::revert(*r);  // driver 沒連線：不算一次調整，免得探測誤判成「不採用」
+                    BOOST_LOG(warning) << "[VIPLE-VR-PREDICT] driver not connected; vsync_to_photons_us stays " << r->from_us;
+                  } else if (!r->quiet) {
+                    BOOST_LOG(info) << "[VIPLE-VR-PREDICT] probe: vsync_to_photons_us " << r->from_us << " -> " << r->to_us
+                                    << " (pose lag mean of 3 windows " << ms(r->lag_us) << " ms)";
+                  }
+                  break;
+                case vr::predict::action_e::honored:
+                  BOOST_LOG(info) << "[VIPLE-VR-PREDICT] SteamVR applies mid-session changes (pose lag " << ms(r->lag_us) << " -> "
+                                  << ms(r->lag_after_us) << " ms after " << r->from_us << " -> " << r->to_us << " us); tracking";
+                  break;
+                case vr::predict::action_e::not_honored:
+                  vr::bridge::send_set_v2p(r->to_us);
+                  BOOST_LOG(info) << "[VIPLE-VR-PREDICT] SteamVR did not apply the mid-session change (pose lag " << ms(r->lag_us) << " -> "
+                                  << ms(r->lag_after_us) << " ms); keeping " << r->to_us << " us, next session starts at "
+                                  << r->next_session_us << " us"
+                                  << (r->runtime_ignored ? "; second time in a row - later sessions only measure" : "; will probe again next session");
+                  break;
+                case vr::predict::action_e::inconclusive:
+                  // 2026-10-05：探測後的視窗不穩（遊戲載入、掉拍）：退回起始值重量，不判成「不採用」
+                  vr::bridge::send_set_v2p(r->to_us);
+                  BOOST_LOG(info) << "[VIPLE-VR-PREDICT] probe inconclusive (pose lag windows spread " << ms(r->spread_us)
+                                  << " ms); back to " << r->to_us << " us, measuring again";
+                  break;
+                case vr::predict::action_e::learned:
+                  // runtime 已知不採用中途改值：只量（舊版借用 not_honored 的訊息，看起來像又探測了一次）
+                  BOOST_LOG(info) << "[VIPLE-VR-PREDICT] measured pose lag " << ms(r->lag_us) << " ms at " << r->to_us
+                                  << " us (no probe: SteamVR ignores mid-session changes); next session starts at " << r->next_session_us << " us";
+                  break;
+              }
+            }
+            if (auto s = vr::predict::take_summary(now)) {
+              BOOST_LOG(info) << "[VIPLE-VR-PREDICT] 10s: vsync_to_photons_us=" << s->now_us << " (min " << s->min_us << " max " << s->max_us
+                              << ") pose lag ema=" << ms(s->ema_us) << " ms updates=" << s->updates << " windows=" << s->windows;
+            }
+          }
         } else {
           // 不認得的 subtype 依 len 跳過
           vr_state->count_c2s(type);
@@ -2618,6 +2944,7 @@ namespace stream {
       // 其他 session 的 feedback/HDR 佇列）。沒有 session 或全部維持預設時
       // 就是 150 ms，與舊版寫死的 server->iterate(150ms) 相同。
       auto loop_timeout = kControlLoopTimeoutDefault;
+      const auto body_t0 = std::chrono::steady_clock::now();  // [VIPLE-VR-UPLINK] 診斷：迴圈本體耗時
 
       {
         auto lg = server->_sessions.lock();
@@ -2721,6 +3048,8 @@ namespace stream {
         BOOST_LOG(info) << "Process terminated"sv;
         break;
       }
+
+      note_max(g_ctrl_body_max_us, us_since(body_t0));
 
       // §F4：下限 1 ms——逾時 0 會讓 enet_host_service 變成不等待的忙迴圈，
       // 把這條 critical 優先權執行緒的 CPU 吃滿。
@@ -3723,6 +4052,12 @@ namespace stream {
           session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
           session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
 
+        // §VR-MULTILINK：有連線可用時，這一幀改由每條連線各送一份（複製進各自的佇列就返回，不會被任何一條
+        // 鏈路卡住）；原本的單一路徑暫停。全部連線都不可用時自動退回下面的單一路徑。
+        const auto vr_links_keep = session->vrLinks;  // 複製一份 shared_ptr：這一幀送完之前 hub 不會被釋放
+        auto *const vr_links = (!use_quic && !use_tunnel) ? vr_links_keep.get() : nullptr;
+        const bool use_links = vr_links && vr_links->active();
+
         // Pre-resolve tunnel ports (constant for this session)
         const uint16_t tunnel_video_server_port = use_tunnel ? net::map_port(VIDEO_STREAM_PORT) : 0;
         const uint16_t tunnel_video_peer_port   = use_tunnel ? session->video.peer.port() : 0;
@@ -3909,6 +4244,24 @@ namespace stream {
                   session->tunnel->send(tunnel_video_server_port, tunnel_video_peer_port,
                                         scratch.data(), scratch.size());
                 }
+              } else if (use_links) {
+                const size_t pre = shards.prefixsize;
+                const size_t dat = shards.blocksize;
+                scratch.resize(current_batch_size * (pre + dat));
+                for (size_t y = 0; y < current_batch_size; y++) {
+                  const auto idx = next_shard_to_send + y;
+                  auto *dst = scratch.data() + y * (pre + dat);
+                  std::memcpy(dst, shards.prefix(idx), pre);
+                  std::memcpy(dst + pre, shards.data(idx), dat);
+                }
+                // §VR-LINK-REPAIR：告訴 hub 這一批是哪一幀、哪個 FEC block 的哪幾個 shard（它留一份，client 缺了就原樣補送）
+                ::vr::multilink::video_meta_t meta;
+                meta.frame = (uint32_t) packet->frame_index();
+                meta.block = (uint8_t) blockIndex;
+                meta.first_shard = (uint16_t) next_shard_to_send;
+                meta.data_shards = (uint16_t) std::min<size_t>(shards.data_shards, UINT16_MAX);
+                meta.total_shards = (uint16_t) std::min<size_t>(shards.size(), UINT16_MAX);
+                vr_links->send_video((const uint8_t *) scratch.data(), pre + dat, current_batch_size, &meta);
               } else if (!platf::send_batch(batch_info)) {
                 // Batched send is not available, so send each packet individually
                 BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
@@ -4091,6 +4444,10 @@ namespace stream {
           session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
           session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
         const uint16_t server_audio_port = net::map_port(AUDIO_STREAM_PORT);
+        // §VR-MULTILINK：有連線可用時，音訊在每條連線各送一份，原本的單一路徑暫停
+        const auto vr_links_keep = session->vrLinks;
+        auto *const vr_links = (!use_quic_audio && !use_tunnel) ? vr_links_keep.get() : nullptr;
+        const bool use_links = vr_links && vr_links->active();
 
 #ifdef VIPLE_MPQUIC
         if (use_quic_audio) {
@@ -4113,6 +4470,9 @@ namespace stream {
                       shards_p[sequenceNumber % RTPA_DATA_SHARDS], bytes);
           session->tunnel->send(server_audio_port, session->audio.peer.port(),
                                 audioScratch.data(), audioScratch.size());
+        } else if (use_links) {
+          vr_links->send_audio((const uint8_t *) &audio_packet, sizeof(audio_packet),
+                               (const uint8_t *) shards_p[sequenceNumber % RTPA_DATA_SHARDS], (size_t) bytes);
         } else {
           auto send_info = platf::send_info_t {
             (const char *) &audio_packet,
@@ -4163,6 +4523,9 @@ namespace stream {
               session->tunnel->send(server_audio_port,
                                     session->audio.peer.port(),
                                     audioScratch.data(), audioScratch.size());
+            } else if (use_links) {
+              vr_links->send_audio((const uint8_t *) &fec_packet, sizeof(fec_packet),
+                                   (const uint8_t *) shards_p[RTPA_DATA_SHARDS + x], (size_t) bytes);
             } else {
               auto send_info = platf::send_info_t {
                 (const char *) &fec_packet,
@@ -4555,6 +4918,10 @@ namespace stream {
       session.videoThread.join();
       BOOST_LOG(debug) << "Waiting for audio to end..."sv;
       session.audioThread.join();
+      // §VR-MULTILINK：影像與音訊執行緒（唯一的送出來源）都結束之後，才停掉各連線的執行緒
+      if (session.vrLinks) {
+        session.vrLinks->stop();
+      }
       BOOST_LOG(debug) << "Waiting for control to end..."sv;
       session.controlEnd.view();
       // Reset input on session stop to avoid stuck repeated keys
@@ -4863,6 +5230,56 @@ namespace stream {
       if (launch_session.vr) {
         // §M1b S1-12：給 vr_clock 頻率才會啟用時鐘對映（pcvr 的 tracking 目標時間與 STATS 的 clkOffset）
         session->vr = std::make_shared<::vr::session_state_t>(*launch_session.vr, session.get(), platf::vr_clock_frequency());
+        {
+          // §VR-LATCH-V2：模數用協商的 host 虛擬 vsync 週期（vrPeriodNs，缺席時 1e9/vrHz）
+          const auto &p = launch_session.vr->params;
+          const int64_t host_period = p.period_ns > 0 ? p.period_ns : (p.hz > 0 ? 1'000'000'000LL / p.hz : 0);
+          const auto mode = config::vr.latch_mode == config::vr_t::latch_e::v2 ? ::vr::latch::mode_e::v2 : ::vr::latch::mode_e::legacy;
+          session->vr->configure_latch(mode, config::vr.latch_target_pct, (uint32_t) std::clamp<int64_t>(host_period, 0, 50'000'000));
+          BOOST_LOG(info) << "[VIPLE-VR-LATCH] controller mode=" << (mode == ::vr::latch::mode_e::v2 ? "v2" : "legacy")
+                          << " targetPct=" << config::vr.latch_target_pct << " hostPeriod=" << std::format("{:.2f}", host_period / 1e6) << "ms";
+        }
+        // §VR-MULTILINK：/launch 協商成立才建立。連線由 client 的 LINK_HELLO 建立，在那之前（以及全部連線都
+        // 不可用時）影像與音訊照舊走單一路徑。
+        if (launch_session.vr->multilink && (config.encryptionFlagsEnabled & SS_ENC_CONTROL_V2)) {
+          ::vr::multilink::options_t opt;
+          opt.video = config::vr.multilink == config::vr_t::multilink_e::primary   ? ::vr::multilink::options_t::video_e::primary :
+                      config::vr.multilink == config::vr_t::multilink_e::automatic ? ::vr::multilink::options_t::video_e::automatic :
+                                                                                     ::vr::multilink::options_t::video_e::all;
+          const auto &p = launch_session.vr->params;
+          const int64_t period_ns = p.period_ns > 0 ? p.period_ns : (p.hz > 0 ? 1'000'000'000LL / p.hz : 11'111'111LL);
+          opt.video_max_age = std::chrono::microseconds {std::clamp<int64_t>(2 * period_ns / 1000, 8000, 40000)};  // 兩個幀週期：起播的 IDR 比一般幀大好幾倍，一個週期送不完
+          opt.video_qos = config.videoQosType != 0;
+          opt.audio_qos = config.audioQosType != 0;
+          opt.ctrl = config::vr.multilink_ctrl;
+          opt.repair = config::vr.multilink_repair && opt.ctrl;
+          if (config::vr.multilink_repair && !opt.ctrl) {
+            BOOST_LOG(warning) << "[VIPLE-VR-LINK] vr_multilink_repair needs vr_multilink_ctrl = enabled - repair stays off"sv;
+          }
+          if (!config::vr.multilink_fault.empty()) {
+            if (auto f = ::vr::multilink::fault_t::parse(config::vr.multilink_fault)) {
+              opt.fault = *f;
+            } else {
+              BOOST_LOG(warning) << "[VIPLE-VR-LINK] vr_multilink_fault could not be parsed - ignored"sv;
+            }
+          }
+          session->vrLinks = std::make_shared<::vr::multilink::hub_t>(
+            launch_session.gcm_key,
+            opt,
+            // session 的裸指標：hub 的執行緒在 session::join 裡（hub->stop()）就結束，早於 session 釋放；
+            // 沒經過 join 的話，vrLinks 是 session_t 最後一個成員、第一個解構，同樣先停執行緒
+            [s = session.get(), vr_state = session->vr](uint8_t, uint16_t ptype, std::string_view payload) {
+              if (ptype == VIPLE_VR_PTYPE_TRACKING) {
+                // 到達時間在這條執行緒取（和 control handler 一樣是「一進來就取」）
+                return vr_handle_tracking(*vr_state, payload, false, platf::vr_clock_ticks());
+              }
+              if (ptype == VIPLE_VR_PTYPE_C2S) {
+                vr_handle_c2s_from_link(s, *vr_state, payload);  // hub 只在協商了 §VR-LINK-CTRL 時才交過來
+              }
+              return false;
+            }
+          );
+        }
         session->vrRefreshEvents = mail->event<int>(mail::vr_refresh);
         session->control.loopTimeout.store(std::chrono::milliseconds {4}, std::memory_order_relaxed);
       }

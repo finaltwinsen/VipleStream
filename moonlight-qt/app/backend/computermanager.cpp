@@ -41,12 +41,22 @@ class PcMonitorThread : public QThread
 #define EXPLICIT_WAKE_TTL_MS   90000    // grace period after user-initiated wake
 
 public:
-    PcMonitorThread(NvComputer* computer, StreamingPreferences* prefs)
+    PcMonitorThread(NvComputer* computer, StreamingPreferences* prefs, ComputerManager* manager)
         : m_Computer(computer),
           m_Prefs(prefs),
+          m_Manager(manager),
           m_ExplicitWakeUntil(0)
     {
         setObjectName("Polling thread for " + computer->name);
+    }
+
+    // §VR-LAUNCHER：GUI 切換桌面／VR 模式（ComputerManager::setVrAppLists，任何執行緒）——下一輪立刻重抓
+    // app 清單、而且不等平常的輪詢間隔
+    void requestAppListRefresh()
+    {
+        m_AppListRefresh.store(true);
+        QMutexLocker locker(&m_WakeMutex);
+        m_WakeCondition.wakeAll();
     }
 
     // Called from ComputerManager::notifyExplicitWake (any thread) to
@@ -90,21 +100,29 @@ private:
 
         QVector<NvApp> appList;
 
+        // §VR-LAUNCHER：抓的途中 GUI 切換了模式（世代號變了）就丟掉這次結果，下一輪重抓
+        const uint32_t generation = m_Manager->appListGeneration();
         try {
-            // VipleStream 2.0 §VR M1b V5（S3-06 的 client 部分）：CLI 帶 --display-target pcvr 而且 host 宣告 PCVR bit
-            // 時改打 /applist?vr=1，才找得到「SteamVR Home」（vanilla／舊 server 不會宣告這個 bit，不會收到 vr=1）
+            // VipleStream 2.0 §VR M1b V5（S3-06 的 client 部分）：CLI 帶 --display-target pcvr（行程啟動時就定）
+            // 或 GUI 在 VR 模式（§VR-LAUNCHER）而且 host 宣告 PCVR bit 時改打 /applist?vr=1，才找得到「SteamVR Home」
+            // （vanilla／舊 server 不會宣告這個 bit，不會收到 vr=1）
             auto prefs = StreamingPreferences::get(nullptr);
+            const bool vrMode = m_Manager->vrAppLists() ||
+                                (prefs && prefs->displayTarget == StreamingPreferences::DT_PCVR);
             bool vrList;
             {
                 QReadLocker computerLock(&m_Computer->lock);
-                vrList = prefs && prefs->displayTarget == StreamingPreferences::DT_PCVR &&
-                         (m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_PCVR);
+                vrList = vrMode && (m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_PCVR);
             }
             appList = http.getAppList(vrList);
             if (appList.isEmpty()) {
                 return false;
             }
         } catch (...) {
+            return false;
+        }
+        if (m_Manager->appListGeneration() != generation) {
+            m_AppListRefresh.store(true);
             return false;
         }
 
@@ -258,6 +276,9 @@ private:
             // Grab the applist if it's empty or it's been long enough that we need to refresh
             // Skip if relay-only (TCP HTTP unreachable — can't fetch app list)
             pollsSinceLastAppListFetch++;
+            if (m_AppListRefresh.exchange(false)) {
+                pollsSinceLastAppListFetch = POLLS_PER_APPLIST_FETCH;  // §VR-LAUNCHER：模式切換，立刻重抓
+            }
             if (!relayOnly &&
                     m_Computer->state == NvComputer::CS_ONLINE &&
                     m_Computer->pairState == NvComputer::PS_PAIRED &&
@@ -312,7 +333,8 @@ private:
                 QMutexLocker locker(&m_WakeMutex);
                 qint64 deadlineMs = QDateTime::currentMSecsSinceEpoch() + (qint64)sleepMs;
                 bool wokenByCv = false;
-                while (!isInterruptionRequested() && !wokenByCv) {
+                // §VR-LAUNCHER：抓清單途中已收到重抓要求（喚醒發生在這次等待之前）就不睡
+                while (!isInterruptionRequested() && !wokenByCv && !m_AppListRefresh.load()) {
                     qint64 nowChunk = QDateTime::currentMSecsSinceEpoch();
                     if (nowChunk >= deadlineMs) {
                         break;
@@ -334,6 +356,8 @@ signals:
 private:
     NvComputer* m_Computer;
     StreamingPreferences* m_Prefs;       // VipleStream §K.X — for autoWakeOnLan gating
+    ComputerManager* m_Manager;          // §VR-LAUNCHER：app 清單模式與世代號
+    std::atomic<bool> m_AppListRefresh {false};
     qint64 m_ExplicitWakeUntil;          // wallclock ms; protected by m_WakeMutex
     QMutex m_WakeMutex;
     QWaitCondition m_WakeCondition;
@@ -599,7 +623,7 @@ void ComputerManager::startPollingComputer(NvComputer* computer)
         // observe the autoWakeOnLan toggle each iteration and adjust
         // its polling cadence accordingly (avoids relaunching the
         // thread when the user flips the setting mid-session).
-        PcMonitorThread* thread = new PcMonitorThread(computer, m_Prefs);
+        PcMonitorThread* thread = new PcMonitorThread(computer, m_Prefs, this);
         connect(thread, &PcMonitorThread::computerStateChanged,
                 this, &ComputerManager::handleComputerStateChanged);
         pollingEntry->setActiveThread(thread);
@@ -699,6 +723,23 @@ void ComputerManager::handleComputerStateChanged(NvComputer* computer)
 
     // Save updates to this host
     saveHost(computer);
+}
+
+void ComputerManager::setVrAppLists(bool vr)
+{
+    if (m_VrAppLists.exchange(vr) == vr) {
+        return;
+    }
+    m_AppListGeneration.fetch_add(1);
+
+    // getActiveThread() 會順手回收已結束的執行緒（改 m_PollEntries 底下的清單），所以取寫鎖
+    QWriteLocker lock(&m_Lock);
+    for (ComputerPollingEntry* entry : std::as_const(m_PollEntries)) {
+        PcMonitorThread* monitor = qobject_cast<PcMonitorThread*>(entry->getActiveThread());
+        if (monitor != nullptr) {
+            monitor->requestAppListRefresh();
+        }
+    }
 }
 
 QVector<NvComputer*> ComputerManager::getComputers()

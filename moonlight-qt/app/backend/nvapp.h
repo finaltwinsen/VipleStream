@@ -28,7 +28,8 @@ public:
                 steamAppId == other.steamAppId &&
                 steamOwners == other.steamOwners &&
                 lastPlayed == other.lastPlayed &&
-                playtimeMinutes == other.playtimeMinutes;
+                playtimeMinutes == other.playtimeMinutes &&
+                isVr == other.isVr;
     }
 
     bool operator!=(const NvApp& other) const
@@ -68,6 +69,10 @@ public:
     // for alternative sort modes (Recently-Played / Most-Played).
     qint64  lastPlayed = 0;       ///< unix timestamp
     qint64  playtimeMinutes = 0;  ///< all-time total
+
+    // VipleStream 2.0 §VR-LAUNCHER：server 的 `<IsVr>1`（vr 類 app，或 Steam 的 VR 遊戲）。
+    // GUI 的 VR 模式只列這些 app（其他 app 以 vr=1 啟動會被 server 回 400「not a VR app」）。
+    bool isVr = false;
 };
 
 Q_DECLARE_METATYPE(NvApp)

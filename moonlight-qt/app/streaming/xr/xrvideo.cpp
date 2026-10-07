@@ -642,12 +642,15 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     av_frame_free(&frame);
 
     XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
+    uint64_t releaseNo = 0;
     {
         std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
         xrReleaseSwapchainImage(m_Sw.swapchain, &ri);
+        releaseNo = m_ReleaseNo.fetch_add(1, std::memory_order_relaxed) + 1;
     }
     if (rendered && held) {
         std::lock_guard<std::mutex> lk(m_SwMutex);
+        m_Published.releaseNo = releaseNo;
         m_Published.subImage.swapchain = m_Sw.swapchain;
         m_Published.subImage.imageRect.offset = {0, 0};
         m_Published.subImage.imageRect.extent = {m_Sw.width, m_Sw.height};

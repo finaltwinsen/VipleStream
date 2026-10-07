@@ -1018,7 +1018,7 @@ namespace vr::bridge {
     bool bridge_t::send_v2p(uint32_t us) {
       {
         std::lock_guard lk(mtx_);
-        if (!dev_mode_ || !status_.connected) {
+        if (!status_.connected || us < 1000 || us > 200000) {
           return false;
         }
         cmds_.v2p = us;
@@ -2504,7 +2504,6 @@ namespace vr::bridge {
       commands_t cmd;
       std::optional<vripc_session_config_t> cfg;
       bool armed = false;
-      bool dev = false;
       {
         std::lock_guard lk(mtx_);
         cmd = std::exchange(cmds_, commands_t {});
@@ -2512,7 +2511,6 @@ namespace vr::bridge {
           cfg = desired_config_;
         }
         armed = desired_armed_;
-        dev = dev_mode_;
       }
       if (!conn_) {
         return;
@@ -2544,8 +2542,8 @@ namespace vr::bridge {
           return;
         }
       }
-      if (cmd.v2p && dev) {
-        send_state(VRIPC_ST_DEV_SET_V2P, *cmd.v2p);
+      if (cmd.v2p) {
+        send_state(VRIPC_ST_SET_V2P, *cmd.v2p);  // §VR-PREDICT：正式路徑（DEV_SET_V2P 只留給舊 driver 的 dev 實驗）
         if (!conn_) {
           return;
         }
@@ -3137,6 +3135,45 @@ namespace vr::bridge {
     return result_e::ok;
   }
 
+  uint64_t frame_reader_t::release_latest() {
+    if (!src_) {
+      return 0;
+    }
+    const auto g = gen_of(*src_);
+    if (!g || !g->shm) {
+      return 0;
+    }
+    auto &ring = g->shm->frames;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      const uint64_t w = vripc_load_acquire_u64(&ring.write_index);
+      if (w == 0) {
+        return 0;
+      }
+      const uint64_t idx = w - 1;
+      auto *s = &ring.slot[idx % VRIPC_FRM_SLOTS];
+      const uint64_t s1 = vripc_load_acquire_u64(&s->seq);
+      if (s1 != 2 * idx + 2) {
+        continue;
+      }
+      vripc_frame_desc_t local {};
+      std::memcpy(&local, (const void *) s, sizeof local);
+      VRIPC_COMPILER_BARRIER();
+      const uint64_t s2 = vripc_load_acquire_u64(&s->seq);
+      if (s1 != s2 || local.seq != s1) {
+        continue;
+      }
+      // 已交還過（fence ≤ 基準）或不合理（generation 不符、跳太遠）：不動；寫入方不可信，不 Signal 任意值
+      if (local.generation != src_->generation || local.fence_value <= last_fence_ || local.fence_value - last_fence_ > 1024) {
+        return 0;
+      }
+      // frame_id 不記：內容沒驗過，下一筆照「本 generation 第一筆」或沿用上一個已接受的 frame_id 比對
+      last_write_index_ = w;
+      last_fence_ = local.fence_value;
+      return local.fence_value;
+    }
+    return 0;
+  }
+
   void frame_reader_t::publish_consume(const vripc_consume_status_t &status) {
     if (!src_) {
       return;
@@ -3232,7 +3269,7 @@ namespace vr::bridge {
     bridge().set_dev_mode(enabled);
   }
 
-  bool send_dev_set_v2p(uint32_t vsync_to_photons_us) {
+  bool send_set_v2p(uint32_t vsync_to_photons_us) {
     return bridge().send_v2p(vsync_to_photons_us);
   }
 
@@ -3361,15 +3398,17 @@ namespace vr::bridge {
         rep.generations_opened++;
         rep.ok = true;
         rep.error.clear();
-        // 開完先「排空」：最新一筆的 slot 直接放回
-        vripc_frame_desc_t d {};
-        if (reader->read_latest(d) == frame_reader_t::result_e::ok) {
-          signal_consumed(d.fence_value);
+        // 開完先「排空」：上一個消費者沒交還的 slot 直接放回（§VR-RING-RELEASE，不驗時間窗）
+        if (const uint64_t f = reader->release_latest()) {
+          signal_consumed(f);
         }
       }
 
       if (WaitForSingleObject(static_cast<HANDLE>(src->evt_frm), 100) != WAIT_OBJECT_0) {
         rep.evt_timeouts++;
+        if (const uint64_t f = reader->release_latest()) {
+          signal_consumed(f);
+        }
         continue;
       }
       rep.evt_wakes++;

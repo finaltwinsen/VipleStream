@@ -1099,8 +1099,548 @@ host `<DisplayModeSwitchable>` 回報的最高 Hz 取小。FRUC 開著時不改 
     的路徑在實機上走到）。開場約 4 s 連線不穩（4 筆各 32 幀的 LOSS＋host ping 逾時），之後只有零星單幀掉包；
     這次 Frame 的家用 Wi‑Fi 沒有漫遊。msm 核心錯誤的回報資料（兩次 Oops、分析、上游修正 `e6863b085606`
     的 6.18 回移 patch）整理在本機 `scripts/benchmark/results/frame-msm-oops-report/`（不入 git）。
+  - **使用者回饋（第四輪）**：畫質好很多，但打桌球時整張桌子不斷晃動；另外開場有兩層介面（Frame 自己的平面遊戲介面＋
+    串流畫面裡 host 的 SteamVR 主控台）。
+  - **§VR-POSEERR／§VR-PREDICT（桌子晃動）**：host 遊戲穩定 120 fps、時鐘抖動 2～4 ms，不是 host 效能。client 新量測
+    `[VIPLE-VR-POSEERR]`：遊戲算繪姿態（0x81）對「該幀實際顯示時的頭部姿態」的差。原因是 HMD 的
+    `Prop_SecondsFromVsyncToPhotons` 只填一個週期（8.3 ms），SteamVR 只把姿態預測到 vsync＋8.3 ms，但畫面要約
+    55 ms 後才在頭盔顯示；頭盔的重投影只修轉動、不修平移，近處物體隨頭部移動晃。第五輪 A/B（同一遊戲 Eleven Table
+    Tennis）：
+
+    | | 5a：8.3 ms | 5b：44 ms（`vr_vsync_to_photons_us`） |
+    |---|---|---|
+    | 算繪姿態落後實際顯示 | 28～37 ms | 0～3 ms |
+    | 平移偏差 p95 | 3～17 mm（多在 8～10） | 0.4～3.4 mm |
+
+    改成自動：client 把落後延後 100 ms 再估（看得出超前，帶正負號；只算第一次顯示的幀——同一張影像因卡頓重複顯示時，
+    落後是網路／解碼慢了，不是預測不夠遠），每秒放進 CLIENT_TIMING 新欄位（36 B）；server `vr::predict` 經 IPC STATE `SET_V2P`
+    讓 driver 直接改屬性（原本的 `DEV_SET_V2P` 只在 selftest dev mode 送得出去，正式環境永遠送不到，已改）。控制分兩段：
+    (1) 探測——3 個可靠視窗（≥ 60 樣本）平均 ≥ 1.5 ms 時往補償方向改 8～10 ms，等 2 s 再取 3 個視窗平均，落後往預期方向移動
+    ≥ 步長一半才算 SteamVR 採用；不採用就退回起始值、本 session 停調，下一個 session 從推算值開始。(2) 追蹤——落後的指數移動
+    平均（α 0.25）≥ 1 ms 時補一半、每秒 ≤ 3 ms，每個視窗先夾到 ±20 ms；session 內最多偏離起始值 ±40 ms。預設起始值＝一個
+    週期＋30 ms；設定檔有值則固定。
+    5b 另見解碼 8.4～9.4 ms（超過 8.33 ms 預算、溫度正常），以及 MTP p95 從約 60 升到約 130 ms（疑為 echo 樣本配對選到較舊
+    樣本的統計假象，待查）。
+  - **第六輪 a（10-03 20:29，自動預測第一版＋無頭模式，300 s）**：SteamVR 採用串流中途改的值（探測 +5 ms 後落後 +2.3 →
+    −1.6 ms）；整場 10 s 落後中位數都在 ±4 ms 內（5a 的 8.3 ms 是 28～37 ms）、MTP p50 53～60／p95 60～69 ms、XR 漏幀 0、
+    解碼 7.6～9 ms。但第一版每 2 s 照單一視窗（雜訊約 ±3.5 ms）補 60%，預測值在 40～50 ms 間來回跳（平均約 45 ms），
+    平移誤差 p95 2～6 mm、比 5b 固定 44 ms 的 0.4～3.4 mm 略差；n=33 的卡頓視窗冒出 +16 ms、結束前一秒 +147 ms 都被
+    照補。使用者回饋：晃動變好、但有「一點點」呼吸感 → 改成上面的兩段式（模擬：穩定後預測值標準差 2.3 → 1.1 ms、
+    ≥ 2 ms 的跳動 66 → 0 次／270 s）＋client 不估重複顯示的幀。
+  - **第六輪 b（10-04 11:26，兩段式預測＋程式版無頭）**：探測 3 視窗平均 +2.1 ms → +8 ms，4 s 後 −5.9 ms（移動 8 ms）判定採用、
+    進追蹤；打球時 10 s 落後中位數都在 ±2 ms，預測值多在 43～47 ms，每 10 s 擺幅從 5～10 ms 降到約 3 ms；開場按一次 Steam 鍵後
+    整場沒有再加回手把模式（`[VIPLE-XR] … (PCVR under gamescope: headless, no flat window)`）。
+  - **第六輪 c（10-04 12:05，使用者改連 6 GHz 的家用網路後）**：使用者回報「收藏庫開的平面很順、VR 卡又抖」。兩者都走適配器
+    （平面 1920×1080@60 23 Mbps、解碼 2.8 ms；VR 4320×2160@120 140～200 Mbps、解碼 6～8.7 ms）。關鍵是 **Frame 的熱點跟著
+    家用網路換頻段**：`softapmanager` 一律把熱點放在家用網路沒用的頻段（家用在 2.4／5 GHz → 熱點 6 GHz ch37 160 MHz；家用在
+    6 GHz → 熱點 5 GHz ch36／40 80 MHz，正好和路由器的 5 GHz 重疊），**而且每次家用網路換頻段都會整個重建熱點**（適配器斷線
+    重連；10-04 11:22～11:31 被路由器頻段導引觸發 5 次，含第六輪 b 開場兩次）。單純中斷家用網路不會觸發重建（熱點留在原頻段）。
+    這輪 12:09 一次斷訊（0.5 s 掉 2110 個封包）讓 ABR 每個視窗砍半到 11 Mbps，約 3 分 40 秒才第一次回到 129 Mbps、4 分鐘才穩定。
+  - **§VR-ABR-OUTAGE**：VR 的 ABR 遇到斷訊型視窗（丟包 ≥ 30%，或 client 回報連掉 3 幀以上）記下斷訊前的位元率，照常降碼；
+    最後一個斷訊訊號後安靜 1 s、2 個乾淨視窗、client LATCH 幀號有前進，就直接拉回（每次斷訊一次）；拉回後 5 s 內又斷、而且
+    這次事件在低位元率時沒斷過才把參考值打 75 折（閃斷不打折）；稀釋過的視窗先砍、斷訊訊號 1 s 內才到時用砍之前的值；
+    30 s 沒斷訊結束事件（純函式 `src/vr/vr_abr_outage.h`、單元測試 13 項；3 路對抗式審查後修正：沒東西可拉時不消耗拉回、
+    閃斷不打折、要求影像送達證據）。驗證：`--vr-emulate` 下 host 端「閃爍黑洞」（10 個 200 ms 洞、間隔約 80 ms，
+    重現 87～98%／>100% 丟包與連掉數百幀的 LOSS）兩次，斷訊結束後 1.7 s 都拉回 179 Mbps（修正前約 3 分 40 秒）。單次長黑洞
+    （2.7 s 完全不通）client 走 §FRZ-WATCHDOG 重置＋IDR、ABR 本來就幾乎不動，測不到這條路徑。
+  - **Frame 管理經 host 跳板**：家用網路中斷後 `ssh -o HostKeyAlias=<frame-lan-ip> -J <host> steamos@<frame-hotspot-ip>`；
+    SSH 工作階段沒有 polkit 的 network-control 權限（`nmcli device disconnect` 回 not authorized），改用
+    `systemd-run --user --wait --pipe nmcli …` 就能操作。msm kernel bug 已公開回報 ValveSoftware/SteamOS#2882。
+  - **兩層介面**：Frame 端——捷徑 `OpenVR=0` 時 Frame 把它當平面遊戲（手把模式＋平面遊戲介面）；改 `OpenVR=1`（「加入 VR
+    收藏庫」）後仍在進 VR 後 42～67 ms 被加回手把模式與雷射滑鼠（`vrclient_vrcompositor.txt` 的 `AddSystemBehaviorFlag
+    SystemBehaviorFlag_GamepadMode_*`），原因是 client 在 gamescope 裡開了全螢幕平面視窗（`[VIPLE-SF-ENV] session=x11
+    display=:1`）。第六輪 a 用無頭模式（`next.env` 放空的 `DISPLAY=`，Qt／SDL 都改 offscreen，dev 驗證用）：開場那層要按一次
+    Steam 鍵（從 SSH 啟動時 Frame 首頁本來就開著），按掉之後整場沒有再被加回來，使用者確認。**§VR-HEADLESS**：PCVR 在 gamescope 裡
+    （`GAMESCOPE_WAYLAND_DISPLAY` 有值）`main()` 一開始就清掉 `DISPLAY`／`WAYLAND_DISPLAY`，走同一條無頭路徑，log
+    `[VIPLE-XR] … SDL offscreen video driver (PCVR under gamescope: headless, no flat window)`；XR 桌面不套用（實體鍵盤要靠
+    視窗焦點），`--vr-emulate` 也不套用（它是平面）。host 端——SteamVR 啟動
+    就開主控台：`steam://rungameid/250820`（從收藏庫「執行 SteamVR」）與直接跑 `vrstartup.exe`（§VR-NODASH，SteamVR
+    179 ms 起來、不會把 Steam 的 RunningAppID 設成 250820，下一個 session 不再被誤判 VRLINK_ACTIVE）都會開，
+    `steamvr.startDashboardFromAppLaunch=false` 無效（待查）。
   - 控制器外觀：0x5506 `VIPLE_VR_CONTROLLER_INPUT.profile`（原 reserved 低位元組，三份 VipleVr.h＋IPC ABI 同位移）
     帶 client 的 interaction profile；driver 依此設 `Prop_RenderModelName_String`（Touch＝`oculus_quest2_controller_*`、
     Index＝`{indexcontroller}valve_controller_knu_1_0_*`、Frame＝`{frame_controller}frame_controller_*`；driver 目錄
     不存在時退回 Touch），換外觀時送一筆 `deviceIsConnected=false` 讓 app 重新載入。ControllerType／binding 仍是
     oculus_touch。
+  - **§VR-LAUNCHER 模式選單（2026-10-04）**：從 Frame 收藏庫開 VipleStream（GUI）時，先選「桌面模式」或「VR 模式」
+    （只在 Linux＋OpenXR 建置、`GAMESCOPE_WAYLAND_DISPLAY` 有值時出現；工具列另有按鈕可以隨時切換）。
+    - 選 VR 後，主機的 app 清單改抓 `/applist?vr=1`（會多出 SteamVR Home 這類 vr 類 app），格子只列 `<IsVr>` 的 app
+      （其他 app 以 `vr=1` 啟動會被 server 回 400）。切換模式時不清空清單（`hidden`／`directLaunch` 這些 client 端屬性
+      要靠舊清單依 id 合併），改由各輪詢執行緒立刻重抓；世代號讓切換前送出、切換後才回來的舊模式結果作廢。
+    - 點 app 時 GUI 不開串流頁，而是另開子行程
+      `viplestream stream --display-target pcvr [--takeover] -- <主機目前的位址> <app>`，走 CLI 實測過的無頭 PCVR 路徑
+      （§VR-HEADLESS）。用位址而不是名稱，因為名稱可能重複；位置參數放在 `--` 之後，app 名稱以 `-` 開頭也不會被當成選項。
+      子行程跑的期間 GUI 隱藏，結束後再出現並重新取得焦點。
+    - 主機沒有宣告 PCVR、只能走 relay、或離線時，GUI 直接說明原因，不開子行程。子行程本身在無頭狀態下也不再「退回平面串流」
+      （看不到），一律以啟動錯誤結束，例如 XR runtime 起不來、server 沒有確認 VR session、直接連線失敗。錯誤原因由 GUI 從
+      子行程 stderr 的 `Stream failed:`／`Stream error:` 行取出顯示；結束碼 2 表示主機上有別的 app 在跑。
+    - 接管：使用者在 GUI 確認接管別的裝置的 session 後，子行程帶 `--takeover`（CLI 新旗標，不寫入設定）。VR 模式下
+      「先結束舊 app」確認後，結束完成會直接開 VR 子行程。
+    - 單一實例鎖（Linux 的 `/tmp/viplestream-client.lock`）：子行程是同一支程式，GUI 開它之前先放鎖、它結束後再拿回；鎖檔
+      fd 一律 `O_CLOEXEC`。子行程的環境中，`QT_QPA_PLATFORM`、`SDL_VIDEODRIVER` 與 `SDL_VIDEO_DRIVER` 還原成 GUI 改寫之前的值。
+      子行程設了 `PR_SET_PDEATHSIG`（SIGTERM），GUI 異常死亡時會正常收尾。GUI 正常結束時先等子行程 8 s，再 SIGTERM，
+      最後才 SIGKILL：Frame 的「結束遊戲」會對整個行程群組送 SIGTERM，子行程這時多半正在收尾，送第二個 SIGTERM
+      會讓它直接 `_Exit`。
+    - 子行程只帶上面這幾個參數，因為 CLI 覆寫會在 session 開始時被寫回偏好設定（§K.15），VR 用的值不能污染桌面模式。
+      PCVR 不用 MP-QUIC 這件事改在 `session.cpp` 執行期跳過，偏好設定不變（log `[VIPLE-VR-SESSION] PCVR: MP-QUIC off …`）。
+    - Flatpak 沙盒有 PID 隔離時（`/proc/1/comm` 是 `bwrap`），VR 選項停用並說明原因，啟動時也不跳出選單：OpenXR 連
+      Frame 的 SteamVR 會出錯，2026-09-30 曾讓 SteamVR 重啟。dev 環境的 Steam 捷徑 wrapper 改用不開 PID namespace 的
+      bwrap 包裝（`FLATPAK_BWRAP`）啟動 GUI。**正式打包怎麼處理 PID 隔離還沒決定。**
+    - 審查（2026-10-04，2 路）：單一實例鎖讓子行程一定以「already running」結束（必修）、切換模式清空清單會洗掉
+      `hidden`／`directLaunch`（必修），以及無頭退回平面、非 PCVR 主機、接管、GUI 結束時 SIGKILL 子行程、焦點等應修項，
+      都已照上面的設計修正。
+    - log：`[VIPLE-VR-LAUNCHER]`。
+    - **Frame 實測（2026-10-04 晚）**：GUI 的 VR 模式能在熱點上找到 host，並且只列出 VR app。冷啟動（含重啟 SteamVR）約
+      2 s 進入 ACTIVE。用遊戲內選單退出後，§VR-EXIT 的監看器自動收掉串流並回到 GUI。Steam 沒登入時顯示原因並回到 GUI，
+      不會停在 loading。
+  - **§FRAME-RADIO：Frame 單一無線電造成的丟包（2026-10-04 晚）**：同一天晚上的 VR 卡頓、破圖、間歇停格，逐輪對照如下
+    （Eleven Table Tennis，4320×2160@120）：
+
+    | 條件 | 實際路徑 | 斷訊/分 | ABR 下修 | 位元率中位數 |
+    |---|---|---|---|---|
+    | 熱點 5 GHz ch40（與家用路由器同頻道）、wlan0 斷線 | 適配器 | 約 7 | — | 斷斷續續 |
+    | wlan0 連家用 5 GHz，GUI 選了 LAN 位址 | 家用 Wi-Fi | 11～17 | 74～171 | 44～51 Mbps |
+    | wlan0 連家用 5 GHz，熱點 6 GHz ch37 160 MHz | 適配器 | 9.1 | 71 | 46 Mbps |
+    | **wlan0 不受管理**，熱點 6 GHz | 適配器 | **0** | **3** | **171 Mbps** |
+
+    - 根因：Frame 的 ath12k 只有一顆無線電，同時服務 wlan0（家用 Wi-Fi）與 wlanap（熱點）時只能分時。負載下送往適配器的
+      封包有 1～4% 到不了頭盔，閒置時則不丟。外部有同樣的逐封包量測：ValveSoftware/SteamVR-for-Linux#946、#965。
+      Frame 的 `RcvbufErrors` 是 0，所以不是接收端來不及收。
+    - Steam 自己的串流在同樣條件下很順，因為它是「多連線」（`driver_vrlink.allowMultipleLinks`）：家用 Wi-Fi 與適配器
+      同時有流量，一條路分時造成的空檔由另一條補上。我們的 VR 影像是 `vr_force_rtp` 單一路徑。
+    - wlan0 只「中斷」不夠：斷線但仍受管理時，NetworkManager 會背景掃描，一樣要佔用無線電。要
+      `nmcli device set wlan0 managed no`（SSH 下經 `systemd-run --user --wait --pipe`；重開機會還原）。
+    - GUI 選路：Frame 的設定檔只存 host 的 LAN 位址。兩條路都通時，GUI 走 LAN（也就是家用 Wi-Fi）；家用網路斷掉時才會
+      經 mDNS 在熱點上找到 10.35.78.x。選路要依實測的丟包／RTT 決定，不寫死「適配器優先」。
+    - 排除項：host 的 Steam 每 12～15 s 重新初始化適配器（`remote_connections.txt` 的 `OnRemoteClientUSBTriggerHotplug`
+      → `RTK_Initialize`），16 次斷訊只有 4 次落在它附近，跟巧合沒有差別；NVFBC 只影響 Steam 遠端暢玩的平面擷取。
+    - 長期解法：VR 影像也走 MP-QUIC 雙路徑（適配器＋家用 Wi-Fi），見 TODO。（後來改成每張網卡一條 UDP 連線，見 8.7。）
+    - **外部回報與檢查（2026-10-05 凌晨，網路與 GitHub 搜尋）**：
+      - 同型丟包：SteamVR-for-Linux#946（負載下 1～4% 到不了頭盔的無線電、閒置時不丟；離開家用 Wi-Fi 後中斷少約 75%）、
+        #965（遺失發生在 PC 送出到 Frame 無線電之間；同一台 PC 的 Windows 對照約 0 掉包）。
+      - SteamOS#2831：Frame 的 ath12k 韌體崩潰並自動復原後，會默默降級到重開頭盔為止。我們的 Frame 在 10-05 00:04:46
+        重新連回家用網路時，也記到一次 `failed to transmit frame -108` → `Uploading coredump` → `pdev 0 successfully recovered`。
+        **重要測試前先重開頭盔。**
+      - Frame 的 Wi-Fi 設定有「保留 Wi-Fi 6E 給適配器」，可以讓熱點一律待在 6 GHz；Remote Play 連線管理可改成 Custom、
+        自選 6 GHz 頻道。
+      - 適配器的擺放：直接插主機板的 USB 3 孔、不經 hub，用短的 USB 3 延長線拉離機殼與排風、朝向遊玩區。USB 2 延長線的
+        症狀就像「高位元率時丟包」。適配器會很燙；`RT_EVENT_RF_THER_RANGE` 依 Realtek 命名推測是溫度事件。host 檢查：
+        我們的適配器目前經過一個「Generic SuperSpeed USB Hub」，並非直接插在主機板上。
+      - host 每 12～15 s 一次的 `OnRemoteClientUSBTriggerHotplug`→`RTK_Initialize` 迴圈沒有人公開回報過；
+        `RF_THER_RANGE`、`RTK_VRFeatureConfig` 查無資料。
+      - Frame 穩定版 SteamOS 0.3.0（20260922）；0.4.1 beta 修了「其他網路介面干擾適配器連線」，0.4.3 beta 繼續改善串流
+        （PC 端要 SteamVR 2.18.2 以上）。
+    - **鏈路乾淨後剩下的「稍微卡」**（wlan0 不受管理那一輪，使用者回報「有改善，但比不上 Steam 串流」）：
+      - host 端掉幀：前 50 s 每 10 s 有 94～274 次 `fenceTimeout`，擷取只剩 922～1054／1200 幀。遊戲吃滿 GPU 時，driver
+        的合成排在遊戲後面，超過原本固定的 2 ms 上限就被丟掉。**§VR-FENCE-WAIT**：上限改成週期的 70%，夾在 2～6 ms
+        （120 Hz 約 5 ms）。丟一幀要多等一整個週期，多等幾 ms 一定比較好。
+      - 頭盔解碼太貼邊：4320×2160@120 每幀解碼 7.5～8.5 ms（偶爾 21 ms），預算只有 8.33 ms，慢一點就只能重複上一張。
+        MTP p95 75～90 ms（10/3 那輪是 55～64 ms），每 10 s 有新畫面的顯示幀 899～1193／1200。待做 A/B：90 Hz（預算
+        11.1 ms）或每眼 1920²（解碼約 6 ms）；長期做注視點編碼（Frame 有眼動追蹤，Steam 的串流很可能有用）。
+      - **第六～八輪（2026-10-04 23:36～10-05 00:00，wlan0 不受管理、適配器 6 GHz）**：
+
+        | 輪 | 條件 | fenceTimeout | 新畫面比例 | 解碼 p50 | MTP p50／p95 | 預測落後 p50 | 位置誤差 p95 | 使用者回饋 |
+        |---|---|---|---|---|---|---|---|---|
+        | 6 | 120 Hz，§VR-FENCE-WAIT | 7（第五輪約 750） | 94.3% | 8.7 ms | 57／78 ms | 5.9 ms | 5.0 mm | 再好一點，但每一兩秒抖一下 |
+        | 7 | 90 Hz（Frame 捷徑 `preferredRefreshRate=90`） | 0 | 98.6% | 9.6 ms | 71／91 ms | 16.2 ms | 9.0 mm | 沒有改善，還是抖 |
+        | 8 | 90 Hz，host 設定 `vr_vsync_to_photons_us = 55000` | — | 98.0% | — | 約 64～75 ms | −0.3 ms | 7.0 mm | 轉頭時撕裂、殘影、抖動，打不到球 |
+
+        - 90 Hz 解碼有餘裕（重複幀大幅減少），但「抖」沒有消失，所以剩下的問題不在解碼。
+        - §VR-PREDICT 兩輪都印出「SteamVR did not apply the mid-session change」，但只有第六輪真的探測過：
+          - 第六輪的探測移動 3.4 ms（門檻是步長 8 ms 的一半），探測視窗剛好落在遊戲載入、host 還在掉拍的時段
+            （driver missed＝183、173，之後才變成 0）。
+          - 判定一次「沒採用」之後，整個 server 行程都把自動預測當成不可用（行程層級的狀態），第七輪根本沒有探測：
+            那行「16.3 -> 16.3」是 learn 的結果，借用了同一個訊息格式。（10-05 更正：先前寫的「第七輪可能剛好在載入時
+            探測」不正確。）
+          - 學到的值也沒分更新率：120 Hz 學到 38.7 ms，拿去給 90 Hz 用，實際需要約 55 ms，所以第七輪預測落後 16 ms。
+        - 鎖相鋸齒：`[VIPLE-VR-LATCH]` 的 slackEma 在 1～8 ms 之間擺盪，ppm 大部分時間頂在 +200（上限），每 30～40 s
+          突然跳高 4～5 ms，再慢慢拉回。預測時間固定、實際顯示時間卻在跳，位置誤差就忽大忽小。
+        - 轉頭時的撕裂與殘影，對應 MTP 偏高（65～75 ms，重投影只修旋轉、不修位移與近物視差）以及 overscan＝0
+          （快速轉頭會露邊）。
+        - 調查與修正計畫見 TODO（鎖相、overscan、控制器姿態預測、延遲拆解、預測依更新率換算）。
+        - 測試後的狀態：Frame 捷徑仍是 90 Hz；host 設定 `vr_vsync_to_photons_us = 55000` 還在（配合 90 Hz）；Frame 的
+          wlan0 已恢復受管理並連回家用網路。
+    - **10-05 夜間的修正（當時頭盔還沒驗；10-07 以無人場次在頭盔上跑過 A1、A2，結果與還沒驗的部分見 8.7。除了 §VR-PREDICT 的修正不需開關、預設就生效，其餘新行為都在開關後面，預設維持舊行為）**：
+      - 根因與對應開關：
+
+        | 問題 | 證據 | 修正（設定） |
+        |---|---|---|
+        | 每 35～60 s 整格滑移、鎖住時約每秒一張重複幀 | LATCH 的 slack 是取模一個週期的相位（晚到 δ 量成 T−δ），server 當線性量處理、輸出飽和時照樣積分；第八輪 ppm 全在 92～200 | §VR-LATCH-V2（`vr_latch_mode = v2`、`vr_latch_target_pct = 40`） |
+        | 拍子超前、上行抖動直接變成拍子的時間誤差 | 控制器的 poseTimeOffset 一直是 0（只有 HMD 有設），拍子被 SteamVR 再外插一次，推算超前約 25～31 ms | §VR-CTRL-OFFSET（`vr_ctrl_pose_offset = enabled`） |
+        | 拍面角度（與傾斜的頭）繞錯軸外插 | SteamVR 把 driver 給的角速度當**機體座標**（`vr_probe --mode predict` 實測），client／OpenXR 給的是世界座標；傾 30° 時外插軸偏 30° | §VR-ANGVEL-LOCAL（`vr_angvel_local = enabled`） |
+        | 頭與拍子約每秒往回跳一次 | 超過 2T 沒新樣本就把速度與 offset 歸零；每輪約 150 次，原因是上行延遲尖峰而不是掉包 | §VR-STALE-HOLD（`vr_stale_policy = hold`） |
+        | 轉頭時邊緣露出沒畫面的區域（假設） | overscan＝0；90 Hz 每 10 s 的旋轉誤差 p95 中位數 2.6～2.7° | dev `--vr-overscan <deg>`（client 旗標） |
+        | §VR-PREDICT 探測一次失敗就整個行程放棄、學到的值不分更新率 | 見上面第六～八輪 | 暖機、穩定度閘門、不採用只停該 session、依更新率換算（不需開關；固定值時不跑） |
+
+      - 不戴頭盔做過的驗證：
+        - LATCH v2：單元測試 22 項（含 90／120 Hz、±60 ppm 時鐘漂移、25 組初始相位的閉迴路）全過；同一個模型下 legacy
+          在抖動 ±1.5 ms 以上或漂移 +60 ppm 時大量滑移，v2 全部 0 滑移、0 重複幀。Python 尖峰抖動模型（2% 幀晚 3～8 ms）：
+          120 Hz legacy 25 組有 7 組進極限環、重複幀每秒 4.9 → v2 0 組、每秒 2.1；90 Hz 每秒 1.67 → 1.23（剩下的是尖峰本身，
+          相位控制修不掉）；代價是平均多等約 1.6 ms（目標從 T/4 改 0.4T）。
+        - driver：vr_probe `--mode unit` 149/0（新增 pose-policy 21 項：揮拍 1 m/s 的空窗模擬，舊規則在 44 ms 空窗裡位置往回跳
+          36 mm，hold 在 100 ms 內的空窗誤差 < 1 mm）。
+        - S0（`<dev-client>` `--vr-emulate --vr-synthetic-motion sine`，90 Hz）：legacy 場 `poseFlags=0x0`、控制器 offset 0；
+          全開場 `poseFlags=0x3`、控制器 offset p50＝HMD p50（33.2 ms）。以 `NtSuspendProcess` 暫停 client 製造上行空窗：
+          50／80 ms 都以 hold 接回（`tracking recovered … hold=1`），150 ms 超過上限才回到舊規則（`holdExpired`）；server 的
+          `[VIPLE-VR-UPLINK]` 與 driver 端的到達間隔一致，session 不斷。LATCH 在 emulate 下不會送（驗不到）。
+        - SteamVR 外插語意（新的 `vr_probe --mode predict`＋client `--vr-synthetic-motion tilt30yaw`，SteamVR 2.17.10）：
+          - 角速度：外插增量的旋轉軸對世界 Y 的 |dot| 在舊版是 0.866（cos 30°）、對機體 Y 是 1.000＝SteamVR 當機體座標用；
+            開 `vr_angvel_local` 後世界 1.000（HMD 與右手都是）。這是拍面角度外插錯誤的直接證據，修正已做（預設關）。
+          - poseTimeOffset：legacy 時 HMD 與右手（姿態相同）在 pred=0 差 +33.3 ms＝SteamVR 依文件正號採用 HMD 的 offset、
+            控制器沒有 offset；開 `vr_ctrl_pose_offset` 後 0.0 ms。
+          - 外插量：約 100 ms 內線性（gain 1.00），之後封頂在距樣本時間約 97～100 ms。
+        - S2（`<dev-client>` 本機 SteamVR null driver 當 XR runtime，真的跑 XR 路徑）：每眼 1440² 時 MTP p50 34～36 ms、
+          CLIENT_TIMING decode p50／p95 0.41／0.51 ms、錯配每 10 s 1～4 次（約 0.1～0.3%）、XR 漏幀 0；每眼 2160² 時
+          `<dev-client>` 解不動（decode 頂到 65535 µs、佇列越積越多），那場的數字不能用。null driver 的 frame loop 實際約
+          138 Hz（宣告 90 Hz），latch 與 host 的 90 Hz 沒有固定相位，LATCH（舊版或 v2）在 S2 本來就鎖不住。
+      - 當時排定的頭盔 A/B（一次只開一個，每場 4～5 分鐘；先重開 Frame、wlan0 不受管理、熱點 6 GHz、捷徑 90 Hz）：
+        A0 新 build 全部 legacy → A1 `vr_latch_mode = v2` → A2 再加 `vr_ctrl_pose_offset = enabled`＋`vr_angvel_local = enabled`
+        （兩個都是探測證實的預測正確性修正）→ A3 再加 `vr_stale_policy = hold` → A4 client `--vr-overscan 0` 對 `3`。
+        host 端切換：`powershell -ExecutionPolicy Bypass -File C:\ProgramData\VipleStream\vr_ab.ps1 -Preset A0|A1|A2|A3`
+        （先備份 log 與 conf、只改這幾個鍵、重啟 service）。看的欄位：LATCH `slips`／`ppm`／`err`、MTP10
+        `repeat`／`skip`／`mismatch`、POSEERR `edge`、driver `ctrlOffUs`／`hold`、`[VIPLE-VR-UPLINK]`。
+    - **10-06 晚：Steam 多連線怎麼做（實測）與我們的對照**（頭盔照常連著家用 Wi-Fi 5 GHz、熱點 6 GHz 160 MHz；
+      Eleven Table Tennis；host 兩張網卡每 100 ms 的計數器＋頭盔 `/sys/class/net` 計數器＋pktmon）：
+      - 使用者明講不接受「VR 時要中斷家用 Wi-Fi」——Steam 做得到，我們也要做到。
+      - **Steam（vrlink）＝兩條路各送一份完整串流**：
+
+        | | host 送出 | 頭盔收到 | 接近空白的 0.1 s 區間 |
+        |---|---|---|---|
+        | 乙太網路 → 路由器 → 頭盔家用 Wi-Fi | 平均 216 Mbps（穩定，完整串流） | 平均 207 Mbps | 2.4% |
+        | 適配器 → 頭盔熱點 | 平均 133 Mbps（25～234，塞得進多少送多少） | 平均 125 Mbps | 11.2% |
+        | 兩條同時 | | | **1.0%** |
+
+        開場兩張網卡的流量完全相同；適配器上抓到的封包有 52% 在乙太網路那邊找得到內容相同的（乙太網路只抓到約 45%，
+        換算幾乎全部重複）。封包是 Valve 自己的 UDP 格式：每張網卡一個綁定的 socket、兩邊都是同一個埠、每個封包約 1 KB、
+        所有連線共用 16-bit 序號（接收端去重）；上行（頭盔→host）也是兩條都送。vrlink log：`Uber link enabled`、
+        `Found primary link`＝適配器那個位址、`nTimedRetryOption = 1`（有時限的重傳）、`HandleFECChange(32)`、120 Hz、
+        編碼寬 1152（注視點編碼）、4.3 分鐘內 14 次 stream reset（encoder reset，使用者無感）。
+      - **同一晚的 VipleStream（舊行為、只走適配器）**：位元率從 140 Mbps 被掉包壓到 20～30 Mbps；4 分鐘 LOSS 431 次、
+        intra refresh 173 次；上行追蹤空檔每 10 s 有 0～61 次超過 2T、最長 352 ms（`[VIPLE-VR-UPLINK]`：同時段控制
+        執行緒單輪 ≤ 0.16 ms，空檔來自 Wi-Fi）；LATCH `slips` 4 分鐘 127 次（約每 2 s 一次）、ppm 整場頂在 +200；
+        熱點接收有 5 次 200～800 ms 的整段空白。使用者：「非常糟糕，破圖嚴重，轉頭時撕裂感超嚴重」。
+      - 判讀：單一無線電輪流服務兩個頻道，任何一條路單獨用都有空檔；兩條都送同一份，空檔只剩兩條同時不通的那 1%，
+        再用重傳與 FEC 補。在這個環境家用 Wi-Fi 那條其實比適配器穩，我們之前只走適配器是挑到比較差的那條。
+        **聚合（1+1=2）在這裡不存在**：兩條路共用一顆無線電，Steam 也是拿第二條換穩定而不是換頻寬。
+      - 量測陷阱：pktmon 對 Wi-Fi 網卡給的是原生 802.11 資料幀（pcapng 標成 Ethernet 是錯的：24／26 B 標頭＋8 B
+        LLC/SNAP 才是 IP）；乙太網路 component 每個封包記 4 次、高流量時漏一半以上——流量比例要看網卡計數器。
+      - 頭盔的 USB：內建 USB 網路 gadget（`ncm.usb0`，已配一組 /29 位址，沒插線時 down）＋ADB。插 USB-C 線應該會在
+        PC 上多一張網卡，是不經無線電的第三條路（當時還沒實測；之後的結果見 8.7「結論」第 4 點：目前不能用）。
+      - **下一步（傳輸）**：VR 的影像、音訊、追蹤都兩條路同送、接收端以序號去重；之後補有時限的重傳。（已做，見 8.7。）
+
+### 8.7 連線層實測與多連線（§VR-MULTILINK，2026-10-06 夜）
+
+**為什麼做**：使用者不接受「VR 時中斷家用 Wi-Fi」。同晚量到 Steam 的做法是每張網卡一條綁定的 UDP 連線、
+兩條各送一份完整串流、接收端以序號去重（見 8.6 的 10-06 量測）。動手照做之前，先用連線層的合成流量量
+「單走一條」與「兩條都送」的差別。
+
+**量測工具**（本機 `scripts/vr/`，不入 git）：
+
+| 檔案 | 位置 | 做什麼 |
+|---|---|---|
+| `vlpt_host.ps1` | `<host>` | 每條連線一個綁定位址的 socket＋一條送出執行緒，以幀節拍送 1040 B 封包（帶幀號、序號、送出時間）；同時記錄頭盔回送的模擬追蹤。落後超過 1.5 幀的幀直接跳過 |
+| `vlpt_frame.py` | 頭盔 | 每條連線跑一份：記錄每個封包的到達時間；子行程用同一個 socket 以 180 Hz 回送 262 B 的模擬追蹤。純 UDP，不碰 SteamVR／OpenXR |
+| `vlpt_analyze.py` | `<dev-client>` | 扣掉兩機時鐘差與漂移（每秒最小延遲的直線擬合）後算：封包送達率與遲到時間、到達空檔、幀層（任意 K／N 封包到齊，模擬 FEC；規則與 `RtpVideoQueue` 相同——看到下一幀的封包就放棄上一幀）、上行空檔 |
+| `vlpt_run.sh` | `<dev-client>` | 串起一輪並把兩端的紀錄拉回 `temp/steamlink/poc/` |
+
+**量測條件**：頭盔放在路由器旁邊，不是遊玩位置。家用 Wi-Fi（5 GHz、80 MHz）訊號約 −33 dBm、PHY 1441 Mbps；
+適配器那條（6 GHz、160 MHz）在頭盔端量到的 ack 訊號只有 −69～−81 dBm，PHY 在 17～432 Mbps 之間跳。
+**下表的適配器數字只代表「弱鏈路」的情況**，遊玩位置要另外量。
+
+| 測法（200 Mbps、90 Hz、30 s） | 家用 Wi-Fi 那條 | 適配器那條 | 兩條合併（先到先用） |
+|---|---|---|---|
+| 只送家用 | 送達 99.83%；遲到 p99 6.0 ms；FEC 10% 下 2700 幀壞 14 幀 | 不送 | — |
+| 只送家用、每幀分散 5 ms 送出 | 送達 99.96%；FEC 10% 下壞 4 幀 | 不送 | — |
+| 兩條都送 | 送達 **91.5%**；16 次 > 100 ms 的到達空檔；FEC 10% 下壞 295 幀（最長連續 14 幀） | 只送出 5.5%（送出端一次最長阻塞 3.1 s）；送到的晚 0.5～4 s | 與家用那條幾乎相同 |
+| 兩條都送、20 Mbps | 送達 99.93% | 0.6 s 後送出端一次阻塞 **10 s**；送到的晚 6～12 s | 與家用那條相同 |
+
+上行（模擬追蹤，兩條各自 180 Hz）：只在家用那條送影像時，兩條的上行都乾淨（最大空檔 18 ms／40 ms）；兩條都送影像時，
+家用那條的上行出現 37 次 > 50 ms 的空檔，適配器那條的上行延遲中位數 233 ms、最大空檔 0.9 s。
+
+**第二個位置（10-07 00:20，頭盔被移到離 `<host>` 較近的地方）**：家用 Wi-Fi −58 dBm；適配器那條的 ack 訊號 −61 dBm、
+PHY 1.7 Gbps。同樣 200 Mbps、90 Hz、30 s：
+
+| 測法 | 家用 Wi-Fi 那條 | 適配器那條 | 兩條合併（先到先用） |
+|---|---|---|---|
+| 只送家用 | 送達 **64%**；141 次 > 50 ms 的到達空檔（最長 174 ms）；FEC 10% 下準時（一個幀週期內）到齊的幀 **42%** | 不送（它的上行很乾淨：最大空檔 18 ms） | — |
+| 只送適配器 | 不送 | 送達 99.98%，但每秒約 1 次 50～100 ms 的停頓（26 次 > 50 ms）；準時到齊的幀 **92%**、100 ms 內 98.9% | — |
+| 兩條都送 | 送達 70.9%；103 次 > 50 ms 空檔 | 送出 94%（送出端跳過 6% 過期的幀）、送達 99.6%；45 次 > 50 ms 空檔 | 送達 **99.89%**；**沒有任何 > 20 ms 的空檔**（最長 15.6 ms）；準時到齊的幀 **98.2%**；現行佇列規則下 2700 幀壞 33 幀 |
+
+上行（模擬追蹤）：單一條各有 54～107 次 > 50 ms 的空檔；兩條合併最長 42 ms、沒有 > 50 ms 的。
+
+這個位置的結論與第一個位置相反：**兩條的空檔互補，合併遠勝任何單一條**（Steam 多連線的原理）。單走適配器時
+「每秒約一次 50～100 ms 的停頓」正是先前「每一兩秒抖一下」的來源；單走家用 Wi-Fi 在這裡不能用。
+兩個位置合起來看：哪條好、要不要兩條都送，取決於當下每條鏈路的速率，不能寫死——這就是 `vr_multilink = auto` 要解決的。
+
+**結論（改變了做法）**
+
+1. **兩條連線不是互相獨立的。** 它們共用頭盔的無線電。往一條送不動的鏈路硬送影像，會把無線電時間耗在那條路上，
+   原本乾淨的另一條也被拖垮（送達率 99.8% → 91.5%）。「每條都送一份完整串流」只有在兩條的鏈路速率都夠高時才划算
+   （Steam 當晚在遊玩位置：家用 207 Mbps、適配器 125 Mbps）。所以多連線必須能判斷「這條送不動」並停止在它上面送影像。
+2. **Windows 對送不動的 Wi-Fi 網卡做阻塞式 UDP 送出，一次可以卡 10 秒。** 現行單一路徑的影像執行緒就是這樣送的：
+   session 走適配器那條、鏈路一變差，整條影像管線跟著停。每條連線必須有自己的佇列與送出執行緒、非阻塞送出、過期就丟。
+3. **整幀一口氣送出會造成成串掉包。** 家用那條單走時掉包只有 0.17%，但集中在少數幀（每約 2 秒壞一幀，與先前
+   「每一兩秒抖一下」的主觀描述相符）；把一幀分散成 5 ms 送出，壞幀少約 3 倍。各只量一輪，待重複確認。
+   server 現行的節拍是固定約 800 Mbps（`ratecontrol_packets_in_1ms`），200 Mbps 的一幀約 2.8 ms 送完，等於沒有分散。
+4. **USB 網路目前不能用。** 頭盔內建 NCM gadget（`usb0`，有自己的 DHCP），接上 `<host>` 後 Windows 以內建的
+   「UsbNcm Host Device」驅動自動取得位址（USB 2.0、連線速率 426 Mbps），ping 正常；但量測的 UDP 流量（5 Mbps 也一樣）
+   數秒內就讓整條鏈路卡死——兩端的介面計數器不再前進，之後 ping 也不通。`pnputil /restart-device` 重啟複合裝置第一次
+   可以恢復，第二次留下「Unknown USB Device (Port Reset Failed)」，只能實體重插。觸發條件還沒定位（先別對它灌流量）。
+
+**§VR-MULTILINK 實作（2026-10-06，預設關閉）**
+
+- 開關：server `vr_multilink = disabled|auto|all|primary`（`Sunshine/docs/configuration.md`）。client 以 `vrCaps` 的
+  `VIPLE_VR_CLIENT_CAP_MULTILINK` 宣告支援，server 在 `<VipleStreamVRSession>` 回 `multilink=1` 才啟用；任何一邊不支援，
+  行為與之前完全相同。線上格式見 `docs/vr_protocol.md` §4.10。
+- client（common-c `VrMultiLink.c`）：session 本身那一組位址是主連線；其餘每張網卡只配「同子網路」的 server 位址
+  （清單來自 `/serverinfo` 的介面通告）。每條連線一組專用的影像／音訊 UDP socket（Linux 另加 `SO_BINDTODEVICE`）。
+  影像與音訊的接收執行緒同時等原本的 socket 與所有連線的 socket，餵進同一個佇列（重複的由既有的 RTP 序號檢查丟掉；
+  多連線時關掉「依目前缺包數提早判定掉幀」的推測）。追蹤（0x5506）以 AES-GCM 加密後在每條已確認的連線各送一份；
+  沒有已確認的連線時照舊走 ENet。
+- server（`src/vr/vr_multilink.{h,cpp}`、純邏輯在 `vr_multilink_logic.h`）：每條連線一組綁在對應位址的 socket、
+  自己的影像佇列與送出執行緒（非阻塞；批次超過兩個幀週期還沒送完就丟——起播的 IDR 一個週期送不完）；全部連線共用一條接收執行緒
+  （PING／PONG、追蹤解密與去重）。**飽和偵測**：1 s 視窗內至少 24 個批次、其中 40% 以上送不完，就暫停在這條連線送影像
+  （2 s 起、連續發生加倍到 30 s；最後一條可用的連線不暫停），連線本身保持（追蹤、音訊、ping 照送）。
+  只要有一條連線可用，原本的單一路徑就暫停；全部不可用時自動退回。
+- **`auto`（依量測決定哪條送影像）**：session 本身那條先送影像，其餘連線先「探測」——每秒只送一批影像（約 64 個封包）。
+  client 量這一批到達的速率並在 PING 回報；連續 2 次量到 ≥ 影像位元率的 1.5 倍（至少 50 Mbps），server 才開始在那條
+  連線送影像。送不動的連線退回探測，而不是時間到就盲目重試（上表「兩條都送」的情況：每重試一次，另一條就被拖下去一次）。
+  `all` 則是一開始每條都送、送不動的暫停一段時間後直接再試。
+- 存活判定是雙向的：client 收得到 PONG 才在 PING 帶 CONFIRMED，server 最近 2 s 內收過 CONFIRMED 才把這條當可用。
+- log：兩端各有 `[VIPLE-VR-LINK] 10s:`（`docs/log_tags.md`）。
+
+**S0 驗證**（`<dev-client>` 只有一張網卡，用 dev 選項 `--vr-link-selftest` 在同一張網卡開兩條連線；
+`scripts/vr/s0_ml.sh` 一輪）：
+
+| 輪次 | 條件 | 結果 |
+|---|---|---|
+| run1 | `vr_multilink = all` | 兩條都確認（RTT 0.9 ms）；啟動 200 ms 後影像改走連線（原本的 socket 只收到 10 個封包）；兩條各送 179 Mbps、client 每條每 10 s 收約 16.2 萬個封包、採用比例約 6：4；追蹤每條 180/s、server 端另一條那一份全部被去重；60 s 內 LOSS 0、wave 0；結束時 client rc=0、server 正常收尾 |
+| run2／run3 | 另加 `vr_multilink_fault = 1:60:40,2:40:60:40`（兩條互補地各斷一段，任何時刻至少一條通） | server 端每一批都確實在其中一條送出（L1 送出數＝L2 被丟數），client 也全部收到，但 33 s 內仍有 LOSS 8、wave 3。原因在 client：兩個 socket 各自先進先出，「先讀哪一個」會把跨幀的順序打亂——連線 A 還留著第 N 幀的尾巴、連線 B 已有第 N+1 幀的開頭時，先讀到 B，佇列就放棄第 N 幀 |
+| run4 | 同上，client 改成「把已經到的封包全部收進暫存、依幀號排序再交給佇列」（不等待、不加延遲） | 起播交接時掉 1 次（故障注入從第一刻就在丟），之後 25 s LOSS 0 |
+| run5 | `vr_multilink_fault = 1:70:30,2:70:30`（兩條同時斷 30 ms） | LOSS 442、wave 221——確認注入器真的在丟、run4 的乾淨是靠互補與去重 |
+| run6 | `vr_multilink = all`、不帶 selftest（只有一條連線） | 一條連線 178 Mbps、LOSS 0、追蹤全走連線；單一連線也能用（送出不阻塞影像執行緒） |
+| run7 | `vr_multilink = disabled` | client 沒有任何 `[VIPLE-VR-LINK]`、server 沒有收到 LINK_HELLO、LOSS 0——舊路徑不受影響 |
+| auto1 | `vr_multilink = auto`（第二條連線先探測） | 第二條送了 2 批探測，client 量到 614 Mbps（需求 243），約 5 s 後開始送影像；LOSS 0 |
+| auto2 | `auto`＋`vr_multilink_fault = r2:20`（第二條限速 20 Mbps） | 第二條每批探測只送得出約 20 個封包、量不到足夠的速率，整場停在探測；第一條 179 Mbps 不受影響，LOSS 0 |
+| auto3 | `auto`＋`r1:20`（session 本身那條限速 20 Mbps） | 起播約 2 s 內畫面在掉（主連線送不動）；第二條量到 978 Mbps 後接手，0.2 s 後主連線退回探測（量到 19 Mbps），之後 LOSS 0 |
+
+**首次頭盔實測（2026-10-07 01:17，遊玩位置、`vr_multilink = auto`、Eleven Table Tennis）**
+
+- 兩條連線 0.5 s 內都確認；session 位址在適配器那條（L1），家用 Wi-Fi（L2）2 s 後量到 250 Mbps 開始送影像。
+- 前約 2 分鐘：兩條各 170～180 Mbps；12 個 10 s 視窗裡 10 個 LOSS 0；追蹤到達的最大間隔 10～37 ms、超過 2T 每 10 s 0～1 次
+  （同晚單一路徑：最長 352 ms、每 10 s 0～61 次）；位元率維持 150～180 Mbps（單一路徑掉到 20～30）。
+  先到的幾乎都是適配器那一份，家用那條被採用的只有 2～5%（補洞用）。使用者：「進步很多，大部分都順，偶爾抖一下」。
+- 01:19:21 起頭盔的 wlan0 在家用路由器同一個網路名稱下的不同無線電之間來回漫遊（路由器回 status 30 拒絕，約每 45 s 一次）；
+  第三次漫遊時頭盔的 ath12k 驅動卡死（`failed wait for peer deleted`，之後所有 WMI 指令 -11），wlan0 與熱點全斷，只能重開機。
+  同一次開機先前 4.5 小時沒有任何漫遊，觸發原因未定。處置：依使用者要求把頭盔的家用連線設定檔鎖定在 5 GHz
+  （`802-11-wireless.band a`）。
+- 這一場暴露的規則問題（都已修、S0 回歸通過）：
+  - 漫遊那幾秒家用那條斷線、適配器連續卡超過 0.4 s，被判成「送不動」而暫停，只剩一條不通的。現在暫停一條連線之前，
+    另一條必須「最近 0.7 s 內還有 PING」而且有實際送達率的證據（≥ 80%，或比被暫停那條這一秒實際送得出去的比例高 30 個百分點以上）。
+  - 送達率＝頭盔在 PING 回報的累計收到數 ÷ server 的累計送出數，每秒結算，印在 10 s 統計行的 `deliv=`。
+  - 「正在送影像」的判定改用 0.7 s 的 PING 新鮮度：唯一在送的那條一沒聲音就立刻在所有可用連線上送（保底），不白等 2 s。
+  - auto：退回探測後，如果沒有任何一條送達率夠好的連線在送，量到夠快就立刻回來，不等最短探測時間；
+    最短探測時間 2 s 起、連續發生加倍、封頂 8 s。探測成績以「之後又送了幾批探測」計算時效，不能拿舊量測放行。
+  - 位元率很低（每幀不到 32 個封包）時等不到可量的批次：等 2 s 後直接開始送（審查發現）。
+  - 連線的 socket 補上 QoS 標記；primary 模式下主連線被暫停時待命連線會接手。
+
+**程式審查（兩輪背景 workflow，唯讀）**：第一輪五個視角共 30 項、去重後查證 16 項，14 項成立（1 高、5 中、8 低）；修正後第二輪三個視角
+再找到 8 項（2 高），都與「證據過期」和「暫停後不重新評估」有關，已一併修掉。
+
+**第三輪：頭盔端修正與跨幀等待（2026-10-07）**
+
+- 頭盔端（要重建 Flatpak）：
+  - USB 網路 gadget（`usb*`／`rndis*`／`ncm*`）不拿來當連線（一有 UDP 流量就卡死，見上面第 4 點）。
+  - 到達速率改用核心的接收時戳（`SO_TIMESTAMPNS`＋`recvmsg`）：在 user space 讀取的時刻會把已經排在 socket 裡的封包擠成
+    同一瞬間，量到的是讀取速度。一次量測＝同一幀在這條連線從第一個封包到最後一個花了多久（至少 32 個封包）；不以封包間的
+    空檔分段——鏈路被擠到一小撮一小撮送時，分段會把每一小撮都量成「很快」。整幀在 300 µs 內到（一個聚合框就送完）
+    回報 65535＝「快到量不出來」，server 當成合格的量測；不回報的話 server 等不到新量測，連線會永遠停在探測。
+  - 「已確認」的判定修掉無號數相減下溢，逾時從 2 s 縮到 1 s。
+  - 影像加密時，暫存排序的次要鍵改用 IV 計數器（server 每送一個封包加一），同一幀內也排得出順序。
+- server 端：
+  - 一次探測改成 6 ms 內的所有批次（約一整幀）：只送一批（64 KB）在快的鏈路上是一個聚合框，頭盔端量不出速率。
+  - 探測中的批次不進飽和偵測，連線從探測轉為送影像時重新開始統計（否則整幀的探測會湊滿視窗，把還在探測的連線再判一次
+    「送不動」、退避加倍；或把探測期算成健康期而提早把退避歸零）。
+- **跨幀等待（§VR-MULTILINK-HOLD，common-c `RtpVideoQueue.c`）**：原本佇列只要看到下一幀（或同一幀的下一個 FEC block）
+  的封包就放棄還沒收齊的這一個。兩條連線的延遲不一樣時，領先那條剛好掉了一段、落後那條稍後才送到同一段，就全被當成過期——
+  兩條合起來收得齊，這一幀還是掉了。現在多連線時，超前的封包先照到達順序排著（最多 2048 個），目前這個 block 收齊就依序放行；
+  最前面那個等超過一個幀週期（4～14 ms）才照原本的方式放棄。多連線時取代 §K.17 的寬限期
+  （只處理差一個 shard、最多 4 個封包）；單一路徑的行為不變。統計印在 `[VIPLE-VR-LINK] hold 10s:`。
+  - 佇列等的對象一換（上一個 block 收齊或被放棄）就把整個環掃一遍，把屬於新對象的封包照到達順序先交出去——
+    下一幀有兩個 FEC block 時，領先那條的 block 1 會排在落後那條送來的 block 0 前面，只看最前面那個會把 block 0 等到放棄。
+  - 沒有封包到的時候也檢查期限：接收的 poll 逾時縮短到最前面那個的剩餘期限（VR 沒有新畫面時 server 100 ms 才送一幀）。
+  - 等不到（到期或排滿）時放行的是環裡「幀號、block 最小」那個對象最早到的封包，不是最前面那一格：最前面的可能是
+    領先那條送來的更後面的幀，直接放行它會把中間那一幀（落後那條已經送到、排在後面）整個跳過。
+  - 只有在「至少兩條連線實際在送影像」時才等（每 200 ms 結算，收到的影像封包數達到最多那條的四分之一才算；探測中的連線
+    每秒只來一幀，不算；曾經有兩條之後要連續 5 個視窗都不足才算只剩一條——一條連線停頓 150～200 ms 是常態）。
+    單網卡、`primary`、另一條還在探測時沒有第二份可等，等只會讓掉幀回報晚一個幀週期。
+  - 排過隊的封包放行後被採用才計入那條連線的「採用數」（`used=`）。
+  - 兩條連線走同一條實體路徑（selftest 對真的很差的鏈路）時救不回來，只會多等：那是測試條件的特性。
+- S0（`vr_multilink_fault` 新增 `d<id>:<ms>`：這條連線的每一批晚這麼久才送）：
+
+| 輪次 | 條件 | 結果（30 s） |
+|---|---|---|
+| base | `all`＋`1:100:25,d2:8`（連線 1 每 125 ms 斷 25 ms、連線 2 落後 8 ms），舊 client | LOSS 378、wave 189，位元率被壓到 14～17 Mbps |
+| hold | 同上，新 client | LOSS 4、wave 2，位元率約 135～178 Mbps；每 10 s 約 80 次等待、99% 救回（81/82、76/77、78/79），最長等 10.7 ms（上限 11.1 ms） |
+| auto | `auto`、不注入 | LOSS 0、沒有觸發任何等待；第二條 2 次探測後量到 573 Mbps 開始送 |
+| auto-slow | `auto`＋`r1:60` | 第二條量到後接手、主連線退回探測並量到 60 Mbps（限速 60，量測不再高估）；掉幀只在接手前那 1 s |
+| linux | linux-builder（Wi-Fi）的 x86_64 dev Flatpak 當 client、`--vr-emulate --vr-link-selftest`、`auto` | 兩條都確認、核心時戳量到 57～170 Mbps（那台的 Wi-Fi 本來就只有這個速度；同一條鏈路以前用讀取時刻會量到上千）、第二條在位元率降下來後被放行；Linux 才有的 `recvmsg`／`SO_TIMESTAMPNS`／`SO_BINDTODEVICE` 路徑都走過 |
+
+- 第三、四、五輪審查（各一輪多個視角＋逐項反證）：第三輪成立 4 項（跨幀等待、量不出速率時卡在探測、探測批次進了飽和偵測、
+  速率分段只看讀取時刻）；第四輪針對等待佇列與上一輪的修法成立 9 項（多 FEC block 的幀等不到、期限只在有封包時檢查、
+  單一連線也在等、採用數灌水、送達率後備會放行慢鏈路等），其中「量不出速率」原本在 server 用送達率當後備，
+  改成由頭盔明確回報後整段拿掉；第五輪複查重寫後的等待佇列，沒有記憶體或狀態損壞，成立 5 項低嚴重度的邊角
+  （到期時的放行順序、排滿時要重新判斷、「幾條在送」缺遲滯等）。都已修。
+
+**頭盔家用 Wi-Fi 的頻段（2026-10-07 03:25 發現）**
+
+- 01:32 鎖 5 GHz 的那個設定檔在 1 分鐘後就不是現用的了：使用者在頭盔介面重新加入了家用網路，產生新的設定檔
+  （Steam 給它的 `band` 是 `no6`），舊的鎖定不會跟過去。之後整晚 wlan0 在路由器的 2.4 GHz 與 5 GHz 之間來回
+  （每 10 分鐘 2～5 次連線嘗試、路由器回 status 30），每 10～25 分鐘整條重新連線一次；從 2.4 GHz 換回 5 GHz 時
+  softapmanager 會重啟 hostapd，熱點（`<host>` 適配器那條）跟著斷約 7 s。
+- 03:25 把現用的設定檔也設成 `802-11-wireless.band a`：wlan0 回到 5200 MHz、熱點 6 GHz ch37。03:26:48 路由器主動把頭盔
+  踢下 5 GHz（reason 47）並拒絕了約 30 s（status 1），頭盔堅持 5 GHz、03:27:21 連回；之後觀察 9 分鐘沒有任何重連。
+  路由器的頻段導引會想把它推到訊號比較強的 2.4 GHz（2.4 GHz −43 dBm、5 GHz −61 dBm），**治本要在路由器上對這台關掉
+  頻段導引或綁定 5 GHz**。
+- 查法：`journalctl -b -u NetworkManager | grep 'audit: op="connection-'`（誰在什麼時候加／改／啟用哪個設定檔）、
+  `journalctl -b | grep "wlan0: Trying to associate"`（依頻率統計）、`iw dev wlan0 link`。測試前後都要看。
+
+**第二次頭盔實測（2026-10-07 05:54，新 client、`auto`、5 GHz 鎖定依使用者要求拿掉；約 3 分鐘）**
+
+- 兩條連線 0.5 s 內確認，家用那條 2 s 後量到 339 Mbps 開始送（核心時戳的量測值 124～660 Mbps）。整場 wlan0 沒有漫遊。
+- 使用者在約 85 s 時刻意走到適配器收不太到的位置：之前兩條各約 180 Mbps（適配器送達 98～100%、家用 68～100%，
+  掉幀事件 2 次）；之後適配器那條送不動被退回探測（探測只量到 20～198 Mbps、門檻約 225～285，沒再回來），
+  家用那條單獨送 145～190 Mbps、送達 97～100%（另一條不送之後它反而變好）。換線前後掉幀事件 9 次，沒有斷線。
+- 跨幀等待整場只觸發 1 次：領先那條幾乎都自己收得齊。這一場的抖動主要不是掉幀。
+- 使用者的感受：移動前「震動抖動比較嚴重」，移動後「跳格、幀數變少」。
+- 移動前的抖動對得上 LATCH（舊控制）的鋸齒：slack 每 60 s 被積分項推過目標、滑掉一整格（05:55:16、05:56:16、05:57:16，
+  `ppm` 頂在 200、`integ` 頂在 150），slack 小於約 2.5 ms 的 10 s 視窗有 19～148 張重複幀，3.8～6.6 ms 的視窗只有 0～29 張。
+- host 端 `fallback`（沒對到算圖姿態的幀）全場 18%；頭盔靜止的場次只有 0.08%（見下），與頭部運動有關，留給 A2。
+
+**LATCH v2 的頭盔 A/B（同日 07:16／07:21，無人配戴、頭盔靜止、從 SSH 啟動同一個遊戲各 4 分鐘；兩場都零掉幀、兩條各約 180 Mbps）**
+
+| | 舊控制（`legacy`） | 新控制（`vr_latch_mode = v2`） |
+|---|---|---|
+| 開頭 30 s 的重複幀 | 343 | 82 |
+| 之後 3.5 分鐘的重複幀 | 341（其中 01:13～01:43 一段 321 張） | 1 |
+| 滑格次數（`slips`） | 49，`ppm` 前 1 分鐘頂在 +200 | 15（全在開頭 20 s），之後不再增加 |
+| 鎖定後的 slack | 2.5～3.3 ms（目標 2.8 ms），鎖定前曾掉到 0.6～1.6 ms | 4.3～4.9 ms（目標 4.4 ms） |
+
+- 靜止、無人的條件下舊控制最後也鎖得住；有人在玩、到達時間抖動比較大時它每 60 s 一輪（見上一場）。v2 在 30 s 內鎖定後沒有再滑。
+- 無人配戴時 XR session 停在 VISIBLE、MTP 的數字（p50 約 90 ms）不能和配戴時（63～72 ms）比，只比兩場之間。
+- host 已留在 `vr_latch_mode = v2`（`vr_ab.ps1 -Preset A1`）。下一步 A2（控制器 offset＋角速度座標）需要使用者配戴。
+- 從 SSH 啟動的做法：寫 `~/viplestream-galpha/next.{args,duration,flatpak,host,app,env}` 後
+  `steam steam://rungameid/<捷徑 id>`；跑之前備份、跑完還原頭盔的 `VipleStream.conf`（CLI 參數會被存）。
+
+**控制訊息走連線、補包（§VR-LINK-CTRL／§VR-LINK-REPAIR，2026-10-07 上午；預設關閉）**
+
+線上格式與規則在 `docs/vr_protocol.md` §4.10 最後兩段，開關是 server 的 `vr_multilink_ctrl`、`vr_multilink_repair`
+（`Sunshine/docs/configuration.md`）。這裡記為什麼做與量到什麼。
+
+- **為什麼做**：第二次頭盔實測裡，使用者走到適配器收訊差的位置之後「跳格、幀數變少」。log 對得上兩件事：
+  (1) 影像已經改由家用那條送，LOSS 與 REFRESH_START 卻還只走 session 本身那條（適配器）——第 10803 幀的 LOSS 等了
+  832 ms 才退回 IDR，第 11628 幀的 LOSS 沒送到；(2) 只剩一條在送時，掉的比 parity 多的 block 只能整幀放棄。
+  前者把時間敏感的控制訊息改成每條連線各送一份；後者由 server 重送原封包。
+- **分工**：頭盔只回報「正在等哪個 block、手上有哪些 shard」；補哪些、走哪條、補不補、要不要告訴頭盔別等了，
+  都在 PC 這端決定——它留著原封包，也看得到每條鏈路的送出狀況、往返時間與位元率。頭盔端不做任何估計以外的運算。
+- **S0**（`<dev-client>` 模擬頭盔；每輪 30 s、90 Hz、約 180 Mbps；注入規則見 `vr_multilink_fault`）
+
+| 情境 | 兩個開關都關 | 都開 |
+|---|---|---|
+| 兩條同時斷 60 ms（每 960 ms 一次）＋ENet 上的 VR 訊息全丟（`1:900:60,2:900:60,c:0:1000`） | 33 次掉幀全部等到逾時退回 IDR | 34 次全部 2～4 ms 內收到 REFRESH_START、約 100 ms 恢復，0 次 IDR。這種長度補包幫不上（超過兩個幀週期），server 回 GONE、頭盔立刻放棄不空等 |
+| 單一連線，每 500 ms 連掉 45 個封包（`b1:500:45`，比 parity 多） | 掉幀 112 次、位元率被壓到 17 Mbps | 穩定後 0 次掉幀、181 Mbps；每 10 s 回報約 21 次、全數補回，一次補約 30 個封包 |
+| 單一連線，每 500 ms 斷 12 ms（`1:488:12`，整幀沒到） | 掉幀 54 次、16.7 Mbps | 0 次掉幀、181 Mbps；每次斷訊回報一次、整幀補回（約 150～170 個封包） |
+| 兩條都在送，只有一條掉（`b1:500:45`） | 另一條的那一份補上，0 次掉幀 | 相同，而且完全沒有回報（不該補的不補） |
+| 兩條都在送、同一段都掉（`b1:500:45,b2:500:45`） | 掉幀 | 兩條都送過這個 block 就立刻回報（block 開始後 2～4 ms），全數補回、181 Mbps |
+| 一條每 100 ms 斷 25 ms、另一條落後 8 ms（`1:100:25,d2:8`） | 跨幀等待救回，0 次掉幀、181 Mbps | 第一版規則太早回報：補包全是多餘的，又被記成丟包，位元率掉到 47～62 Mbps。改成「每條連線都走過這個 block 才報」之後 0 次回報、181 Mbps |
+| 壓力：每 20 ms 連掉 45 個（`b1:20:45`） | 位元率降到下限、每秒數次掉幀 | 補包額度用完後回 GONE，退回原本的 FEC＋refresh＋降碼，行為與關閉時相近、沒有惡化 |
+| 乾淨的 `auto`、舊版 client | — | 沒有任何回報；舊版 client 協商結果是兩個功能都關，行為不變 |
+
+- **做的過程中發現的幾件事**
+  - **service 行程的睡眠精度是 15.6 ms**：Windows 11 上沒有可見視窗的行程拿不到調高的系統計時解析度，
+    `std::this_thread::sleep_for(0.3 ms)` 實際睡到下一個 tick（要求 4 ms，量到 7～15.6 ms）。hub 的送出執行緒在
+    would_block 之後「稍等再試」因此變成一次等十幾毫秒，一批的期限（兩個幀週期）內只試得了一兩次——鏈路只是
+    短暫塞住也會被當成送不動。改用高解析度 waitable timer（`platf::create_high_precision_timer`）。這也修正了
+    先前「落後 8 ms」那幾輪 S0 的延遲注入（當時實際延遲是 8～16 ms）。
+  - **補得回來的不該算丟包**：一開始把補的量記進 ABR 的丟包，「每 500 ms 斷 12 ms」這種和位元率無關的空檔
+    就一路把位元率砍到下限（零掉幀、畫質卻剩 17 Mbps）。改成不算丟包、量大（影像封包的 3% 以上）時只擋回升；
+    補不回來的照舊走 LOSS 與降碼，補包額度（15%）是上限。
+  - **鏈路整個斷一小段時，回報次數會在空檔裡用完**：三次回報都落在 12 ms 的空檔裡，恢復後反而沒得報。
+    改成鏈路恢復（一個幀週期以上沒有任何封包之後又有封包）時退還空檔裡的那幾次、馬上再報。
+  - **往返時間太長的鏈路不該回報**：linux-builder 的 Wi-Fi（RTT 18～39 ms）上每 10 s 回報約 30 次，補包到的時候
+    那一幀早就被放棄了，只是在已經很擠的鏈路上加碼。RTT＋2 ms 超過一個半幀週期就不回報（一開始訂一個幀週期，
+    頭盔上適配器那條的 RTT 偶爾到 10 ms，另一條剛好卡住時補包被關掉、掉了本來救得回來的幀，才放寬）。
+  - **「靜默多久」在真實鏈路上量不準**：退還空檔裡的回報次數，一開始只看「一個幀週期以上沒有任何封包」。頭盔上
+    12 ms 的空檔量到的靜默常常不滿一個幀週期（空檔前送出的封包晚幾毫秒才到），約 1.5% 的空檔沒退還、三次回報
+    全用完。加一條不看時間的判斷：回報送出後一路沒有封包、而第一個到的是後面的封包（不是補包）。
+    （那台筆電另有硬體解碼器跟不上 4320×2160@90 的問題，掉幀事件是解碼錯誤造成的，和連線層無關。）
+  - **補包的年齡上限要看頭盔等到什麼時候，不是看送出多久**：12 ms 的空檔剛好吞掉連續兩整幀時，頭盔要等第三幀的
+    封包到了才知道缺，第一幀這時已超過兩個幀週期。上限放寬到三個幀週期；頭盔端另外在「等待期間有進展」時把
+    期限從那一刻起再延一個幀週期（從後面的封包到達起算不超過兩個）。S0 用 `1:489:12`（週期不是幀週期的整數倍，
+    空檔會掃過每一個相位）45 s：0 次掉幀。
+- **第六、七輪審查**（各一輪多個視角＋逐項反證）：第六輪成立 12 項（補包規劃多送了用不到的封包又重複記帳、
+  對象剛換時送出「什麼都沒收到」的回報、控制資料報讓等待重新起算、GONE 排在同一批補包前面、primary 模式下
+  待命的連線也收到補包、排定中的 wave 回覆多算一幀等）；第七輪針對這些修法與雙連線的回報時機成立 13 項
+  （等的應該是「還沒送到的那幾條」比已經送到的晚多久、時間差只看幀頭所以速率低的連線要另外判斷、單一離群
+  樣本會把估計值推高、幀號取自未驗證的標頭所以要防跳號、GONE 與慢連線上的補包的先後、整個 block 沒到時回報
+  太晚等）。第八輪只看最後幾個改動，成立 4 項低嚴重度：補包額度的突發量要補得起連續兩整幀（400→600；72／80 Hz
+  或高位元率時 400 只夠第一幀）、合成運動 `fast` 的角速度改成姿態真正的導數、放棄 log 的「第一個封包多久以前到」
+  改用到達時刻、以及「期限減一個重報間隔」那個上限的說明——審查用實際程式碼驗過，把它改成「等落後那條該到的時刻」
+  反而會多掉幀，所以時機不動、只把取捨寫清楚。都已修；單元測試 `test_vr_multilink.cpp` 42 則、`test_vr_params.cpp`
+  20 則通過。
+- **頭盔無人驗證**（2026-10-07 12:30～12:50，頭盔靜止、插電、沒有人戴；從 SSH 啟動 Eleven Table Tennis，
+  `scripts/vr/hs_run.sh`；資料在本機 `temp/launchertest/ml/hs4/`，不入 git）
+
+| 場次 | 條件 | 結果 |
+|---|---|---|
+| H0 | 舊版 client（沒有這兩個功能）× 新 server，`auto`，3 分鐘 | 協商結果兩個功能都關；0 次掉幀、兩條各 186 Mbps——新 server 對舊 client 沒有退步 |
+| H1 | 新 client，`auto`、兩個功能都開，4 分鐘 | 協商成功；0 次掉幀、兩條各 186 Mbps、送達 98～99%；開場 30 s 之後重複幀 0；LATCH 回授 9 成由家用那條先送到；兩條連線實際只差 0.6～1.4 ms（`lagMs`）；鏈路乾淨，沒有任何回報 |
+| H2 | 同上＋兩條各自每 489 ms 連掉 45 個（相位錯開） | 幾乎都被另一條的那一份蓋掉；剛好重疊的 1 次以「每條都走過」回報、補回 |
+| H3 | `primary`（只走適配器那條）＋每 489 ms 連掉 45 個，100 s | 回報後 block 開始 2.5～5.4 ms 內補包送出，正常時全數補回。中間有一段適配器**真的**卡住約 90 ms（server 端 `dropAge 312／dropBlock 604`、`sendMaxMs 22.7`）：補包被正確拒絕（block 已 38～88 ms），3 ms 內轉成 REFRESH——只走一條的弱點，也是多連線存在的理由 |
+| H4 | `primary`＋每 501 ms 斷 12 ms（掃過所有相位），100 s、200 次斷訊 | **0 次掉幀、186 Mbps**；每次斷訊只多一張重複幀；等待最長 7～9 ms |
+| F3／F4 | `all`（兩條都送）＋兩條同時每 489 ms 連掉 45 個，80～100 s | 以「每條都走過」回報（block 開始後 4.7～7 ms）、全數補回；F3 另有 2 幀是另一條剛好卡住、往返時間門檻把補包關掉而掉的，門檻放寬後的 F4 只剩開場那一次 |
+| F6 | 最終版，`primary`＋每 501 ms 斷 12 ms，120 s、約 240 次斷訊 | 掉 1 幀（那一次鏈路實際斷得比注入的久，回報 4 次仍沒補到）；等待最長 5.5～5.7 ms（退還回報次數的判斷改掉之後） |
+| F7 | 最終版，`auto`、不注入，120 s | 0 次掉幀、兩條各 183 Mbps；期間鏈路自己掉了一次超過 parity 的 block，兩條各補 7 個封包補回——第一次在真實掉包上看到補包生效 |
+
+- 結論：兩個功能在真頭盔（arm64、核心時戳、實際的往返時間 1.4～10 ms）上行為和 S0 一致。host 留在
+  `vr_multilink = auto`、`vr_multilink_ctrl = enabled`、`vr_multilink_repair = enabled`，等使用者實際配戴驗證後再決定預設值。
+
+**合成頭部運動與「對不到算圖姿態」（2026-10-07 下午）**
+
+- 起因：無人配戴時頭盔是靜止的，host 端「沒對到算圖姿態」（`[VIPLE-VR-SESSION] fallback`）只有 0.08%，使用者實際在玩時是
+  18%——只有頭在動才出現的現象，無人測試驗不到。
+- 新增 dev 選項 `--vr-synthetic-hmd`：真的 XR 連線上，頭的姿態改送 `--vr-synthetic-motion` 的合成運動（取樣時機、
+  `predictNs`、控制器仍來自 XR runtime）；另加運動 `fast`（左右 ±30° @1.2 Hz、峰值約 226°/s，接近實際遊玩的量級；
+  原本的 `sine` 只有約 31°/s）。畫面會在頭盔裡甩動，不可以戴著用；不寫入設定。
+- 結果（每場 25～100 s）：
+
+| 條件 | `sine`（慢） | `fast`（快） |
+|---|---|---|
+| S0 模擬、host A1（只開 LATCH v2） | fallback 0.7% | **77%** |
+| S0 模擬、host A2（另開 `vr_angvel_local`＋`vr_ctrl_pose_offset`） | 0.6% | **0.6%** |
+| 頭盔實機（`--vr-synthetic-hmd`）、A1 | — | **78%**（1781 幀對到、6487 幀沒對到） |
+| 頭盔實機、A2 | — | **0.3%**（8231／25） |
+
+- 解讀：client 送的角速度是世界座標，SteamVR 的 `DriverPose_t` 要的是機體座標（`docs/steamvr_driver.md`
+  的外插語意實測）。頭水平、轉得慢時兩者幾乎相同；頭有俯仰又轉得快時，SteamVR 外插出來的姿態和 driver 自己照同一份樣本
+  外插的差超過 1°，`pose_history` 就對不到，那一幀只能用後備的姿態重投影。`vr_angvel_local` 把角速度轉成機體座標
+  之後兩邊一致。這很可能是「轉頭時畫面抖」的主因之一，而且和連線層無關。
+- host 目前留在 A2（`vr_ab.ps1 -Preset A2`）。`vr_ctrl_pose_offset`（控制器的時間偏移）還沒有用真的控制器驗過；
+  手部若有異樣，`-Preset A1` 可以退回。
+
+**還沒做**
+
+- **使用者實際配戴驗 §VR-LINK-CTRL／§VR-LINK-REPAIR 與 A2**：無人場次已通過（見上）；還缺有人在玩、會走動、
+  鏈路會變差的條件。要看 10 s 行的 `lagMs`、`hold 10s` 的 `nack／repaired／gone`、server 的 `[VIPLE-VR-REPAIR] 10s`、
+  `[VIPLE-VR-LOSS]` 的 `lossToRefresh` 與 `[VIPLE-VR-SESSION] fallback`，再決定各開關的預設值。
+- 雙連線、兩條同時斷訊而且其中一條固定落後 8 ms 的組合（S0 `1:489:12,2:489:12,d2:8`）40 s 還會掉 1～2 幀
+  （80 次斷訊）：那一幀只有落後那條送到、又缺了幾個，回報離等待期限太近。
+- LATCH 帶線上的幀號（`rtpFrame`）：補過包的幀比正常晚到，server 目前認不出來（`frameId` 是發布序號）。
+- `video.cpp`：`idr_events` 送出 IDR 時沒有清掉 `vr_idr_retry_pending`，cooldown 到期後可能多送一張 IDR（既有行為，
+  第七輪審查順帶看到）。
+- 確認第二個位置是不是實際遊玩的位置；不是的話在遊玩位置再量一輪（約 3 分鐘，不用開遊戲）。
+- 第二次頭盔實測：核心時戳量測、跨幀等待都只在 S0（Windows、同一張網卡）驗過；等待上限（一個幀週期）與探測門檻
+  （1.5 倍、連續 2 次）待實機看 `hold 10s` 的 `maxWaitMs`／`expired` 與 `burstMbps` 再調。
+- 每幀分散送出（pacing）重複量測後再決定要不要改 server 的節拍。
+- CLIENT_TIMING（1 Hz 統計）仍只走 ENet（不急，掉了也不影響行為）。
+- USB 卡死的觸發條件。

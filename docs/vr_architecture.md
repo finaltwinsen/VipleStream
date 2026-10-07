@@ -767,7 +767,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | 10 | 下行 | 1.5 | 1.5 | 4.0 | | CLIENT_TIMING |
 | 11 | FEC 重組 → 佇列 | 0.3 | 0.3 | 1.0 | | — |
 | 12 | V4L2 解碼 | 4.0 | 4.0 | 6.0 | | `[VIPLE-V4L2]` |
-| 13 | 等 latch | 3.0（頻率加相位回授的 margin） | 1.0（late-latch） | — | | `[VIPLE-VR-PACER]` slack |
+| 13 | 等 latch | 3.0（頻率加相位回授的 margin）；2026-10-05 §VR-LATCH-V2 目標改 0.4 週期（90 Hz 4.4 ms），實測 legacy 鋸齒時平均 4.2～4.6 | 1.0（late-latch） | — | Frame 第七、八輪 slackEma 1.9～7.0（legacy 滑移） | `[VIPLE-VR-LATCH] 10s` slackEma／err |
 | 14 | client 轉色 | 0.8 | 0.8 | 1.2 | | GPU timestamp |
 | 15 | runtime 合成、scanout、面板 | ≈13 | ≈13 | ≈14 | | 平台決定 |
 | | **內容 MTP** | **≈43（+5 待測）** | **≈41** | 門檻見 §7 | | `[VIPLE-VR-MTP10]` |

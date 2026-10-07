@@ -118,6 +118,8 @@ static inline void vripc_seq_write_begin(uint64_t *p, uint64_t v) {
 #define VRIPC_ST_DISARM 0x02u
 #define VRIPC_ST_REQUEST_QUIT 0x03u /* 只在我們的 HMD 存在時：driver 在 RunFrame 以 HMD index 送 VREvent_DriverRequestedQuit */
 #define VRIPC_ST_DEV_SET_V2P 0x04u /* 只在 VRIPC_WF_DEV_PACING：arg = vsync_to_photons µs，driver 不重連直接改屬性（PoC-10 E7） */
+#define VRIPC_ST_SET_V2P 0x05u /* §VR-PREDICT（2.0.0）：arg = vsync_to_photons µs（1000–200000，超出範圍 driver 忽略），不需 dev mode、
+                                  driver 不重連直接改 HMD 屬性。舊 driver 當未知 kind 忽略 */
 #define VRIPC_ST_HMD_ADDED 0x81u /* TrackedDeviceAdded(HMD) 回 true */
 #define VRIPC_ST_HMD_ADD_REJECTED 0x82u /* TrackedDeviceAdded(HMD) 回 false */
 #define VRIPC_ST_HMD_ACTIVATED 0x83u /* Activate() 被呼叫；driver_status.act_* 此時已寫好 */
@@ -163,6 +165,12 @@ static inline void vripc_seq_write_begin(uint64_t *p, uint64_t v) {
 #define VRIPC_DEV_CHAPERONE_OFFSET 0x8u /* chaperone JSON 的 standing 改成 yaw 30°、translation (0.5, 0, -0.3)（G-DRV-3'） */
 #define VRIPC_DEV_REPORT_DROPPED 0x10u /* GetFrameTiming 每 90 幀故意回報一次 m_nNumDroppedFrames=1（PoC-10 E5b） */
 #define VRIPC_DEV_FAULT_INJECT 0x20u /* 在 SubmitLayer／Present／RunFrame 各製造一次 AV（T7；由 config.dev_arg 選哪一個） */
+
+/* config.pose_flags（2026-10-05，由原本的 reserved2 拆出：版面不變、不升 ABI 版號；0＝舊行為，舊 driver 讀不到這個欄位） */
+#define VRIPC_POSE_F_CTRL_OFFSET 0x1u /* §VR-CTRL-OFFSET：控制器也設 poseTimeOffset（與 HMD 同一個目標時間，上限 ctrl_extrap_cap_us） */
+#define VRIPC_POSE_F_STALE_HOLD 0x2u /* §VR-STALE-HOLD：短空窗（2T～stale_oor_ctrl_us，預設 100 ms）保留速度與 poseTimeOffset，不歸零 */
+#define VRIPC_POSE_F_ANGVEL_LOCAL 0x4u /* §VR-ANGVEL-LOCAL：角速度轉成機體座標再交給 SteamVR（SteamVR 把 vecAngularVelocity 當本地座標，
+                                         10-05 vr_probe --mode predict 實測；client／OpenXR 給的是世界座標） */
 
 /* frame descriptor flags：低 8 bit 與 0x81 vrFlags 同值；server 轉送時只取 & 0x2F */
 #define VRIPC_FRM_POSE_VALID 0x01u
@@ -353,7 +361,8 @@ typedef struct vripc_session_config_t { /* 寫入方：server，WELCOME 前寫�
   uint32_t stale_oor_ctrl_us; /* 控制器 OutOfRange 門檻，預設 100000 */
   uint32_t stale_zero_vel_us; /* 2T */
   uint32_t stale_oor_hmd_us; /* HMD OutOfRange（灰畫面）門檻，預設 1000000 */
-  uint64_t reserved2;
+  uint32_t pose_flags; /* VRIPC_POSE_F_*；0＝舊行為 */
+  uint32_t reserved2;
 } vripc_session_config_t;
 
 typedef struct vripc_pacing_t { /* 寫入方：server；單格 seqlock（seq 偶數 = 完成）；idle generation 也必須寫有效週期。
@@ -551,6 +560,7 @@ VRIPC_STATIC_ASSERT(sizeof(vripc_session_config_t) == 448, "config");
 VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, audio_endpoint_id) == 160, "config.audio");
 VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, vsync_to_photons_us) == 416, "config.v2p");
 VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, stale_oor_hmd_us) == 436, "config.oor_hmd");
+VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, pose_flags) == 440, "config.pose_flags");
 VRIPC_STATIC_ASSERT(sizeof(vripc_pacing_t) == 64, "pacing");
 VRIPC_STATIC_ASSERT(sizeof(vripc_pose_t) == 52, "pose");
 VRIPC_STATIC_ASSERT(sizeof(vripc_ctrl_input_t) == 24, "ctrl_input");

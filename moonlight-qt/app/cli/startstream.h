@@ -28,6 +28,10 @@ public:
     Q_INVOKABLE void quitRunningApp();
     Q_INVOKABLE bool isExecuted() const;
 
+    // --takeover（§VR-LAUNCHER）：主機被其他裝置佔用時照樣開 session（Session 帶 takeover），
+    // 不走「先結束別的 app」的確認
+    void setTakeover(bool takeover);
+
 signals:
     void searchingComputer();
     void searchingApp();

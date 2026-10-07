@@ -9,6 +9,7 @@ import AutoUpdateChecker 1.0
 import StreamingPreferences 1.0
 import SystemProperties 1.0
 import SdlGamepadKeyNavigation 1.0
+import VrLauncher 1.0
 
 ApplicationWindow {
     property bool pollingActive: false
@@ -74,8 +75,9 @@ ApplicationWindow {
         SdlGamepadKeyNavigation.enable()
     }
 
-    Component.onCompleted: {
-        // Show the window according to the user's preferences
+    // Show the window according to the user's preferences
+    // （§VR-LAUNCHER：VR 串流子行程結束後也用這裡把視窗叫回來）
+    function showMainWindow() {
         if (SystemProperties.hasDesktopEnvironment) {
             if (StreamingPreferences.uiDisplayMode == StreamingPreferences.UI_MAXIMIZED) {
                 window.showMaximized()
@@ -88,6 +90,17 @@ ApplicationWindow {
             }
         } else {
             window.showFullScreen()
+        }
+    }
+
+    Component.onCompleted: {
+        showMainWindow()
+
+        // VipleStream 2.0 §VR-LAUNCHER：Steam Frame 上（gamescope＋OpenXR 建置）一開始先選桌面或 VR 模式。
+        // CLI 路徑（runConfigChecks=false）不跳；VR 模式不能用（PID 隔離的 Flatpak）時也不跳——沒有選擇可做，
+        // 工具列的模式按鈕仍可開來看原因。
+        if (runConfigChecks && VrLauncher.available && VrLauncher.blockedReason === "") {
+            modeDialog.open()
         }
 
         // Display any modal dialogs for configuration warnings
@@ -467,6 +480,29 @@ ApplicationWindow {
                 }
             }
 
+            // VipleStream 2.0 §VR-LAUNCHER：重新選擇桌面／VR 模式（只在 Frame 上出現）
+            NavigableToolButton {
+                id: modeButton
+                visible: VrLauncher.available && !VrLauncher.running
+
+                // 圖示標示目前的模式（手把操作時看不到只在滑鼠懸停才出現的提示）
+                iconSource: VrLauncher.vrMode ? "qrc:/res/ic_videogame_asset_white_48px.svg"
+                                              : "qrc:/res/desktop_windows-48px.svg"
+
+                ToolTip.delay: 1000
+                ToolTip.timeout: 3000
+                ToolTip.visible: hovered || visualFocus
+                ToolTip.text: VrLauncher.vrMode ? qsTr("VR mode (switch mode)") : qsTr("Desktop mode (switch mode)")
+
+                onClicked: {
+                    modeDialog.open()
+                }
+
+                Keys.onDownPressed: {
+                    stackView.currentItem.forceActiveFocus(Qt.TabFocus)
+                }
+            }
+
             NavigableToolButton {
                 property string browserUrl: ""
                 property string newVersion: ""
@@ -590,6 +626,7 @@ ApplicationWindow {
                    "Your streaming performance may be severely degraded in this configuration.")
         helpText: qsTr("Click the Help button for more information on solving this problem.")
         helpUrl: "https://github.com/moonlight-stream/moonlight-docs/wiki/Fixing-Hardware-Decoding-Problems"
+        onClosed: modeDialog.refocusIfOpen()
     }
 
     ErrorMessageDialog {
@@ -598,6 +635,7 @@ ApplicationWindow {
                    "Try running with QT_QPA_PLATFORM=wayland or switch to X11.")
         helpText: qsTr("Click the Help button for more information.")
         helpUrl: "https://github.com/moonlight-stream/moonlight-docs/wiki/Fixing-Hardware-Decoding-Problems"
+        onClosed: modeDialog.refocusIfOpen()
     }
 
     NavigableMessageDialog {
@@ -607,6 +645,7 @@ ApplicationWindow {
         onAccepted: {
             Qt.openUrlExternally("https://github.com/moonlight-stream/moonlight-qt/releases");
         }
+        onClosed: modeDialog.refocusIfOpen()
     }
 
     UpdateDialog {
@@ -620,6 +659,7 @@ ApplicationWindow {
         helpTextSeparator: "\n\n"
         helpText: qsTr("Click the Help button for information on how to map your gamepads.")
         helpUrl: "https://github.com/moonlight-stream/moonlight-docs/wiki/Gamepad-Mapping"
+        onClosed: modeDialog.refocusIfOpen()
     }
 
     // §HID-PROBE：HID 裝置無回應警告。用 NavigableMessageDialog 而非 ErrorMessageDialog：
@@ -630,6 +670,7 @@ ApplicationWindow {
         standardButtons: Dialog.Ok
         text: qsTr("VipleStream found a HID device that is not responding:") + "\n" + devices + "\n\n" +
               qsTr("Gamepad detection and Steam Controller passthrough are disabled until it responds again. Unplug and replug the device; if VipleStream still does not see it, restart VipleStream.")
+        onClosed: modeDialog.refocusIfOpen()
     }
 
     // This dialog appears when quitting via keyboard or gamepad button
@@ -705,5 +746,104 @@ ApplicationWindow {
                 }
             }
         }
+    }
+    // VipleStream 2.0 §VR-LAUNCHER：桌面／VR 模式選擇（Steam Frame）
+    NavigableDialog {
+        id: modeDialog
+        closePolicy: Popup.CloseOnEscape
+        title: qsTr("Choose a mode")
+
+        function choose(vr) {
+            if (VrLauncher.setVrMode(vr)) {
+                // 模式真的改變才動作：app 清單改抓一般的或 VR 的（不清空，輪詢執行緒立刻重抓），回到主機清單重選
+                ComputerManager.setVrAppLists(VrLauncher.vrMode)
+                if (stackView.depth > 1) {
+                    stackView.pop(null)
+                }
+            }
+            modeDialog.close()
+        }
+
+        function focusCurrentMode() {
+            (VrLauncher.vrMode && vrModeButton.enabled ? vrModeButton : desktopModeButton).forceActiveFocus(Qt.TabFocus)
+        }
+
+        // 啟動時的設定警告（非同步）可能疊在這個對話框上；它們關閉時 NavigableDialog 把焦點交給 stackView，
+        // 這裡再拿回來，否則手把操作的是被遮住的主機清單
+        function refocusIfOpen() {
+            if (modeDialog.opened) {
+                Qt.callLater(focusCurrentMode)
+            }
+        }
+
+        onOpened: {
+            focusCurrentMode()
+        }
+
+        ColumnLayout {
+            spacing: 16
+
+            Button {
+                id: desktopModeButton
+                Layout.fillWidth: true
+                text: qsTr("Desktop mode") + "\n" + qsTr("Your PC's desktop on a virtual screen")
+                KeyNavigation.down: vrModeButton
+                Keys.onReturnPressed: clicked()
+                Keys.onEnterPressed: clicked()
+                onClicked: modeDialog.choose(false)
+            }
+
+            Button {
+                id: vrModeButton
+                Layout.fillWidth: true
+                enabled: VrLauncher.blockedReason === ""
+                text: qsTr("VR mode") + "\n" + qsTr("Play SteamVR games from your PC")
+                KeyNavigation.up: desktopModeButton
+                Keys.onReturnPressed: clicked()
+                Keys.onEnterPressed: clicked()
+                onClicked: modeDialog.choose(true)
+            }
+
+            Label {
+                visible: VrLauncher.blockedReason !== ""
+                Layout.maximumWidth: 480
+                wrapMode: Text.Wrap
+                text: VrLauncher.blockedReason
+            }
+        }
+    }
+
+    // §VR-LAUNCHER：VR 串流在子行程進行時隱藏主視窗（留著的話 Frame 會把它當平面遊戲、疊上手把模式介面），
+    // 子行程結束後叫回來；異常結束時顯示錯誤
+    Connections {
+        target: VrLauncher
+
+        function onRunningChanged() {
+            if (VrLauncher.running) {
+                SdlGamepadKeyNavigation.disable()
+                window.hide()
+            }
+            else {
+                showMainWindow()
+                // §K.4：有些 WM 在 hide→show 之後不會重新接管視窗、也不給焦點（同 StreamSegue）；沒拿到焦點時
+                // 手把導覽與主機輪詢都不會恢復
+                window.raise()
+                window.requestActivate()
+                SdlGamepadKeyNavigation.enable()
+            }
+        }
+
+        function onFinished(exitCode, error) {
+            if (error !== "") {
+                vrErrorDialog.text = error
+                vrErrorDialog.open()
+            }
+        }
+    }
+
+    // §VR-LAUNCHER：VR 串流的錯誤。只有「確定」（ErrorMessageDialog 的 Help 鈕會連到上游 wiki，跟這裡無關）
+    NavigableMessageDialog {
+        id: vrErrorDialog
+        standardButtons: Dialog.Ok
     }
 }

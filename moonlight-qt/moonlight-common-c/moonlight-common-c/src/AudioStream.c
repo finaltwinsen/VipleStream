@@ -4,6 +4,8 @@
 #include "QuicTransport.h"
 #endif
 
+#include "VrMultiLink.h"
+
 static SOCKET rtpSocket = INVALID_SOCKET;
 
 static LINKED_BLOCKING_QUEUE packetQueue;
@@ -357,6 +359,9 @@ static void AudioReceiveThreadProc(void* context) {
     uint32_t packetsToDrop;
     int waitingForAudioMs;
 
+    // §VR-MULTILINK：0＝單一路徑，以下行為不變
+    const int mlLinks = vrmlLinkCount();
+
     packet = NULL;
     packetsToDrop = 500 / AudioPacketDuration;
 
@@ -390,7 +395,11 @@ static void AudioReceiveThreadProc(void* context) {
         }
         else
 #endif
-        {
+        if (mlLinks > 0) {
+            // 同時等原本的 socket 與每條連線的音訊 socket；重複的封包由 RtpaAddPacket 丟掉
+            packet->header.size = vrmlRecvAudio(rtpSocket, &packet->data[0], MAX_PACKET_SIZE);
+        }
+        else {
             packet->header.size = recvUdpSocket(rtpSocket, &packet->data[0], MAX_PACKET_SIZE, useSelect);
         }
         if (packet->header.size < 0) {

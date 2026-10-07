@@ -40,7 +40,7 @@ public:
                 type == other.type;
     }
 
-    QString address;  // IPv4 字串，如 "192.168.51.226"
+    QString address;  // IPv4 字串，如 "192.168.1.20"
     QString name;     // 介面名稱，如 "Ethernet", "Tailscale"
     QString type;     // "ethernet", "wifi", "vpn"
 };

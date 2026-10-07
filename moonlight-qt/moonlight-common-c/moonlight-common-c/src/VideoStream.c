@@ -15,6 +15,8 @@ void quicSendIdrMarkerRateLimited(const char* tag, const char* what);
 
 static RTP_VIDEO_QUEUE rtpQueue;
 
+#include "VrMultiLink.h"
+
 static SOCKET rtpSocket = INVALID_SOCKET;
 static SOCKET firstFrameSocket = INVALID_SOCKET;
 
@@ -215,6 +217,23 @@ static void VideoReceiveThreadProc(void* context) {
     uint32_t diagPreDecryptFarStalePkts = 0; // 同上，lag > RTPV_DIAG_FAR_STALE_LAG
 #endif
 
+    // §VR-MULTILINK：連線在影像串流啟動前就建好了（vrmlPrepare），這裡只看數量；0＝單一路徑，以下行為不變
+    const int mlLinks = vrmlLinkCount();
+    // 多連線：下一幀先到時，還沒收齊的這一幀最多再等一個幀週期（等落後那條連線送來的那一份）。
+    // server 每條連線最多把一批留兩個幀週期，等一個週期是延遲與救回率的折衷
+    uint32_t mlHoldUs = 0;
+    int mlHoldPollMs = 0;
+    if (mlLinks > 0) {
+        mlHoldUs = StreamConfig.fps > 0 ? 1000000u / (uint32_t)StreamConfig.fps : 11111u;
+        if (mlHoldUs < 4000) {
+            mlHoldUs = 4000;
+        }
+        if (mlHoldUs > 14000) {
+            mlHoldUs = 14000;
+        }
+    }
+    int rxLink = -1;
+
     encrypted = !!(EncryptionFeaturesEnabled & SS_ENC_VIDEO);
     decryptedSize = StreamConfig.packetSize + MAX_RTP_HEADER_SIZE;
     minSize = sizeof(RTP_PACKET) + ((EncryptionFeaturesEnabled & SS_ENC_VIDEO) ? sizeof(ENC_VIDEO_HEADER) : 0);
@@ -271,7 +290,36 @@ static void VideoReceiveThreadProc(void* context) {
         }
         else
 #endif
-        {
+        if (mlLinks > 0) {
+            // 同時等原本的 socket 與每條連線的影像 socket；重複的封包由下面的 RtpvAddPacket 丟掉
+            // 佇列有封包在等期限時，這一次最多等到期限為止（VR 沒有新畫面時 server 100 ms 才送一幀，
+            // 光靠「下一個封包到了再檢查」會把已經到齊的下一幀壓住那麼久）
+            // §VR-LINK-REPAIR：server 說某個 block 補不了（連線層收到的 REPAIR_GONE，同一條執行緒）。在這裡取——
+            // 上一個封包已經交給佇列了；和 GONE 同一批收進來的影像封包全部處理完，vrmlTakeGone 才會給
+            uint32_t goneFrame;
+            uint8_t goneBlock;
+            bool goneOnly = false;
+
+            while (vrmlTakeGone(&goneFrame, &goneBlock)) {
+                RtpvRepairGone(&rtpQueue, goneFrame, goneBlock);
+            }
+            mlHoldPollMs = RtpvHoldTimeoutMs(&rtpQueue);
+            err = vrmlRecvVideo(rtpSocket,
+                                encrypted ? encryptedBuffer : buffer,
+                                receiveSize,
+                                &rxLink,
+                                mlHoldPollMs);
+            while (err == 0 && vrmlTakeGone(&goneFrame, &goneBlock)) {
+                // 只收到 GONE、沒有影像封包：vrmlRecvVideo 提早返回，不是逾時
+                RtpvRepairGone(&rtpQueue, goneFrame, goneBlock);
+                goneOnly = true;
+            }
+            if (goneOnly) {
+                mlHoldPollMs = 0;
+                continue;
+            }
+        }
+        else {
             err = recvUdpSocket(rtpSocket,
                                 encrypted ? encryptedBuffer : buffer,
                                 receiveSize,
@@ -283,6 +331,12 @@ static void VideoReceiveThreadProc(void* context) {
             break;
         }
         else if  (err == 0) {
+            if (mlHoldPollMs > 0) {
+                // 為了等待期限而縮短的逾時：把到期的放行，不算進「一直沒有影像」的計時
+                RtpvPollHold(&rtpQueue);
+                mlHoldPollMs = 0;
+                continue;
+            }
             if (!receivedDataFromPeer) {
                 // If we wait many seconds without ever receiving a video packet,
                 // assume something is broken and terminate the connection.
@@ -539,11 +593,41 @@ static void VideoReceiveThreadProc(void* context) {
         packet->timestamp = BE32(packet->timestamp);
         packet->ssrc = BE32(packet->ssrc);
 
+        rtpQueue.multiLink = mlLinks > 0;
+        {
+            // 有東西可等才等：至少兩條連線實際在送影像（另一條的那一份），或 server 會補包（§VR-LINK-REPAIR）。
+            // 只有一條在送、又不能補包時（單網卡、primary、另一條還在探測）等只會讓掉幀回報晚一個幀週期
+            const int repairRttMs = (mlLinks > 0 && (vrmlFeatures() & VIPLE_VR_LINK_F_REPAIR)) ? vrmlCtrlRttMs() : -1;
+            rtpQueue.mlHoldDual = vrmlVideoCarrying() >= 2;
+            rtpQueue.mlCarryMask = (uint8_t)vrmlVideoCarryMask();
+            // -1＝沒協商，或沒有已確認的連線（回報送不出去）。往返時間太長也不回報：回報→補包至少一個往返，補包到的
+            // 時候這一幀早就被放棄了——2026-10-07 在往返 18～39 ms 的 Wi-Fi 上實測，每 10 秒回報 30 次，補的封包只是
+            // 在已經很擠的鏈路上再加碼。門檻＝一個半幀週期減 2 ms（90 Hz 約 14 ms）：缺一段的幀在尾端到的時候就回報了，
+            // 離「下一幀到了之後再等一個幀週期」的期限還有將近兩個週期，往返十毫秒上下仍然來得及。頭盔實測適配器
+            // 那條的往返中位數 3 ms、九成在 10 ms 以內、最大 13 ms；門檻訂在一個幀週期時，另一條剛好卡住的那一刻
+            // 補包就被關掉，本來救得回來的幀掉了。
+            rtpQueue.mlRepair = repairRttMs >= 0 && (uint32_t)repairRttMs * 1000u + 2000u <= mlHoldUs + mlHoldUs / 2;
+            if (rtpQueue.mlRepair) {
+                // 回報→補包大約一個往返；再給 3 ms（server 排進佇列、送出），夾在 4～10 ms
+                uint32_t rtoUs = 2000u * (uint32_t)repairRttMs + 3000u;
+                int ml;
+                rtpQueue.mlRepairRtoUs = rtoUs < 4000u ? 4000u : (rtoUs > 10000u ? 10000u : rtoUs);
+                // 各條連線平常晚多久（要在上面算出這個封包的 mlRepair 之後才填，否則剛變成可以補包的那個封包拿到的是舊值）
+                for (ml = 0; ml < RTPV_ML_LINKS; ml++) {
+                    rtpQueue.mlLinkLagUs[ml] = vrmlVideoLinkLagUs(ml);
+                }
+            }
+            rtpQueue.mlHoldMaxUs = (rtpQueue.mlHoldDual || rtpQueue.mlRepair) ? mlHoldUs : 0;
+        }
+        rtpQueue.mlRxLink = rxLink;
         queueStatus = RtpvAddPacket(&rtpQueue, packet, err, (PRTPV_QUEUE_ENTRY)&buffer[decryptedSize]);
 
-        if (queueStatus == RTPF_RET_QUEUED) {
+        if (queueStatus != RTPF_RET_REJECTED) {
             // The queue owns the buffer
             buffer = NULL;
+            if (mlLinks > 0 && queueStatus == RTPF_RET_QUEUED) {
+                vrmlNoteVideoUsed(rxLink);  // 這條連線的這一份先到、被採用（排著的等放行時由佇列自己計）
+            }
         }
     }
 

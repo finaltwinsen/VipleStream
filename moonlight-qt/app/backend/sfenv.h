@@ -25,6 +25,10 @@ namespace SfEnv {
 // 原始值。之後 main.cpp 可能為了 SSH／eglfs 陷阱改寫它們，log 裡要看得到使用者原本的設定。
 void captureOriginalEnv();
 
+// §VR-LAUNCHER：captureOriginalEnv 記下的原始值（QT_QPA_PLATFORM、SDL_VIDEODRIVER、SDL_VIDEO_DRIVER），
+// 給 GUI 另開的 VR 子行程還原成 main() 改寫之前的環境。回傳 false＝原本沒設（或沒記錄、非 Linux）。
+bool originalValue(const char* name, QByteArray* value);
+
 // 印兩行 `[VIPLE-SF-ENV]`（便宜資訊）。每個行程只印一次；非 Linux 為 no-op。
 void logOnce();
 

@@ -48,6 +48,7 @@ struct VrSessionInfo {
     QString layout;
     int overscan = 0;
     bool recoveryIntra = false;
+    bool multilink = false;   // §VR-MULTILINK：server 回了 multilink=1（雙方都支援）
     int irFrames = 0;
     QString transport;
     QString universeId;

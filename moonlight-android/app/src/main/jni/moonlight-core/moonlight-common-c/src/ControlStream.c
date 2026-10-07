@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "VrMultiLink.h"
 #include "HolePunch.h"  // VipleStream: for LocalControlPort (NAT-pinhole preservation)
 
 #ifdef VIPLE_MPQUIC
@@ -698,6 +699,13 @@ static void vrSendLossOnce(uint32_t firstLost, uint32_t lastLost, uint8_t reason
     tlv[1] = (uint8_t)sizeof(loss);
     memcpy(&tlv[2], &loss, sizeof(loss));
 
+    // §VR-LINK-CTRL：server 同意的話，在每條已確認的連線各送一份，不走綁在 session 位址的 ENet——那條鏈路變弱時
+    // 回報會掉或晚到（2026-10-07 頭盔實測：走到適配器收不到的位置後等不到回應，退回 IDR 花了 832 ms）。
+    // 兩條路只走一條：server 的去重只認 50 ms 內的同一筆，晚到的那一份會白開一波。沒有可用連線時照舊走 ENet。
+    if (vrmlSendCtrl(tlv, (int)sizeof(tlv)) > 0) {
+        return;
+    }
+
     sendMessageAndForget(VIPLE_VR_PTYPE_C2S, (short)sizeof(tlv), tlv,
                          VIPLE_VR_CTRL_CHANNEL, ENET_PACKET_FLAG_UNSEQUENCED, false);
 }
@@ -937,7 +945,9 @@ static void vrSendTick(void) {
 
     // 鎖外讀 degraded 只當提示（讀到舊值的代價是這一輪用 RTT=0 算逾時）
     if (vrRec.degraded) {
-        rttMs = vrGetEnetRttMs();
+        // §VR-LINK-CTRL：LOSS 走連線時，重送的計時也用連線的往返時間（ENet 那條變弱時 RTT 會被拉高）
+        int linkRttMs = vrmlCtrlRttMs();
+        rttMs = linkRttMs >= 0 ? (uint32_t)linkRttMs : vrGetEnetRttMs();
     }
     now = PltGetMillis();
 
@@ -1008,6 +1018,11 @@ static void vrHandleS2CInline(const uint8_t* tlv, int length) {
 // 機率性丟棄 unreliable 封包。VR session 把 deceleration 設 0，throttle 只升不降。
 // server 收到 THROTTLE_CONFIGURE 也會套用到它那端的 peer（S→C 的 unsequenced 同樣受益）。
 // 呼叫端必須持有 enetMutex，或確定沒有其他執行緒碰 peer。
+void vrLinkS2C(const uint8_t* tlv, int length) {
+    // 恢復狀態機自己有鎖（vrRecMutex），可以在影像接收執行緒直接呼叫
+    vrHandleS2CInline(tlv, length);
+}
+
 static void configureVrThrottle(ENetPeer* p) {
     if (p == NULL || !(VrFlags & VIPLE_VR_SF_ENABLED)) {
         return;
@@ -1029,6 +1044,15 @@ int LiSendVrTracking(const VIPLE_VR_TRACKING* sample) {
 
     if (!(VrFlags & VIPLE_VR_SF_ENABLED) || sample == NULL) {
         return -1;
+    }
+
+    // §VR-MULTILINK：有已確認的連線時，加密後在每條連線各送一份（server 以序號去重）；
+    // 還沒建好或全部斷線時回 0，照舊走下面的 ENet。
+    if (vrmlSendTracking(sample, (int)sizeof(*sample)) > 0) {
+        vrTrackingConsecutiveFails = 0;
+        vrTrackingBackoffUntilMs = 0;
+        vrTrackingSent++;
+        return 0;
     }
 
     // ENet 與 QUIC 都送不出去時（斷線中）暫停 1 秒，避免 2×Hz 的失敗洗 log
@@ -1060,6 +1084,12 @@ int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable) {
     if (!(VrFlags & VIPLE_VR_SF_ENABLED) || tlv == NULL ||
             length <= 0 || length > VIPLE_VR_MAX_CTRL_PAYLOAD) {
         return -1;
+    }
+
+    // §VR-LINK-CTRL：LATCH（10 Hz 的節拍回授）在 server 同意時走連線，理由同 LOSS。其餘訊息照舊走 ENet。
+    if (!reliable && length >= 2 && tlv[0] == VIPLE_VR_C2S_LATCH && 2 + (int)tlv[1] == length &&
+            vrmlSendCtrl(tlv, length) > 0) {
+        return 0;
     }
 
     return sendMessageAndForget(VIPLE_VR_PTYPE_C2S, (short)length, tlv,
@@ -1949,6 +1979,8 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
             free(queuedCb);
             return;
         }
+        // §VR-MULTILINK：LINK_READY 由 common-c 自己處理（其餘 subtype 照舊交給 app）
+        vrmlOnS2C((const unsigned char*)(ctlHdr + 1), len);
         queuedCb->data.vrS2C.len = (uint8_t)len;
         memcpy(queuedCb->data.vrS2C.buf, (const uint8_t*)(ctlHdr + 1), (size_t)len);
         queuedCb->typeIndex = IDX_VIPLE_VR_S2C;

@@ -284,6 +284,16 @@ private:
     // §VR：決定這次要不要以 PCVR 啟動（server 能力＋client pose 來源）
     void decideVrRequest();
 
+    // §VR-LAUNCHER：PCVR 而且沒有平面視窗可用（§VR-HEADLESS 清掉了 DISPLAY／WAYLAND_DISPLAY，或本來就沒有）。
+    // 這時「退回平面串流（不變式 5）」等於看不見的串流——host 上的遊戲照跑、使用者什麼都看不到——改成啟動失敗。
+    bool pcvrCannotFallBackToFlat() const;
+
+    // 記下退回平面的原因：無頭時變成 m_VrNoFlatError（initialize() 以啟動錯誤結束）
+    void vrFallBackToFlat(const QString& userMessage);
+
+    // §VR-LAUNCHER：server 編排器回 STATE ERROR 時給使用者看的原因（依 VIPLE_VR_STATE_CODE_*）
+    QString vrServerErrorText(unsigned code) const;
+
     static
     int arInit(int audioConfiguration,
                const POPUS_MULTISTREAM_CONFIGURATION opusConfig,
@@ -388,6 +398,8 @@ private:
     // m_VrRequested：initialize() 決定要在 /launch 帶 vr=1；是否真的變成 VR session
     // 要看 server 有沒有回 <VipleStreamVRSession>（不變式 1），結果在 m_StreamConfig.vrFlags。
     bool m_VrRequested = false;
+    QString m_VrNoFlatError;  // §VR-LAUNCHER：無頭 PCVR 不能退回平面時的錯誤訊息（給使用者看）
+    bool m_VrServerErrorHandled = false;  // §VR-LAUNCHER：STATE ERROR 只處理一次
     VrLaunchConfig m_VrLaunch;
     VrSessionInfo m_VrSession;
     VrTrackingSender m_VrTracking;

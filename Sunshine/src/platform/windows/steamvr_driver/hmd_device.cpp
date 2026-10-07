@@ -249,7 +249,7 @@ namespace vrdrv {
       d.property.prop = vr::Prop_SecondsFromVsyncToPhotons_Float;
       vr::VRServerDriverHost()->VendorSpecificEvent(idx, vr::VREvent_PropertyChanged, d, 0.0);
     }
-    VRDRV_LOG_INFO("dev set-v2p us=%u", us);
+    VRDRV_LOG_INFO("set-v2p us=%u", us);
   }
 
   // ── IVRDisplayComponent_003 ──
