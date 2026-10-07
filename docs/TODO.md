@@ -56,8 +56,12 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
   `docs/vr_protocol.md` §4.10。已完成：每張網卡一條連線、`auto`（量過才送影像）、跨幀等待、頭盔兩次實測；
   **§VR-LINK-CTRL（LOSS／LATCH／REFRESH_START 走連線）與 §VR-LINK-REPAIR（補包）**（2026-10-07，server 開關
   `vr_multilink_ctrl`／`vr_multilink_repair`，預設關閉）S0、linux-builder 的 Wi-Fi 與頭盔無人場次已驗。待做：
-  - 使用者實際配戴驗 §VR-LINK-CTRL／§VR-LINK-REPAIR（看 `lagMs`、`hold 10s` 的 `nack／repaired／gone`、`lossToRefresh`），
-    再決定 `vr_multilink`、`vr_multilink_ctrl`、`vr_multilink_repair`、`vr_latch_mode` 的預設值。
+  - **10-07 晚配戴實測＋Steam 內建串流對照的三個結論（`steam_frame_client.md` §8.7）**：(1) 每幀像素量太大——
+    Steam 算圖 2160、編碼寬度 1152、10-bit；我們降到每眼 1152 後 MTP 55～59 → 41～45 ms、解碼 8 → 3.5 ms。
+    要做編碼尺寸小於算圖尺寸＋注視點編碼。(2) 差的那條連線要不排隊（只送當下這一幀），頭盔回報缺包時不等
+    明顯落後的那條；`vr_multilink = always`（實驗用）在改好之前不要用。(3) ENet 控制連線只走 session 位址，
+    那條一斷整場結束——要能換路。另：延遲拆解量測。
+  - 決定 `vr_multilink`、`vr_multilink_ctrl`、`vr_multilink_repair`、`vr_latch_mode` 的預設值（配戴已驗過 `auto`＋ctrl＋repair＋A2）。
   - 遊玩位置的連線量測（`scripts/vr/vlpt_run.sh`，需要使用者把頭盔放在遊玩位置約 10 分鐘）。
   - 被退回探測的連線，條件恢復後的重新放行（第二次實測沒有回來：探測量到 20～198 Mbps、門檻約 225～285）。
   - 影像每幀分散送出（實測一輪：壞幀少約 3 倍）：重複量測後決定要不要讓 VR session 預設開 `smooth_pacing` 或另訂節拍。

@@ -160,19 +160,35 @@ namespace vr::multilink {
     /// 之前的成績作廢。用「送了幾批探測」而不是時間來算，探測間隔怎麼變都成立；2＝容許回報晚一批。
     static constexpr uint32_t kMaxProbeGap = 2;
 
+    /// 放行前探測封包至少要送到這個比例。到達速率只說明「到的那些封包來得多快」：鏈路在掉包時，到的那一半
+    /// 照樣量得出很高的速率（2026-10-07 配戴實測：量到 151 Mbps 放行，一送影像就掉 46%）。
+    static constexpr uint32_t kDelivPct = 85;
+    static constexpr uint32_t kDelivMinPkts = 32;  ///< 送出不到這麼多就判不出比例，不擋
+
     uint8_t last_seq = 0;
     bool have_seq = false;
     int good = 0;
     uint32_t last_good_probe = 0;
+    bool have_base = false;
+    uint32_t tx0 = 0;
+    uint32_t rx0 = 0;
 
     /// @param probes_sent server 到目前為止在這條連線送了幾批探測
-    /// @return true＝已經連續 kNeed 次量到足夠的速率，而且成績還沒過期
-    bool on_report(uint8_t burst_seq, uint32_t burst_mbps, uint32_t need_mbps, uint32_t probes_sent = 0) {
+    /// @param need_good 要連續幾次合格的量測（見 probe_need_good）
+    /// @param tx_pkts／rx_pkts server 在這條連線累計送出的影像封包數、client 在 PING 回報的累計收到數（低 32 bit）
+    /// @return true＝已經連續 need_good 次量到足夠的速率、成績還沒過期，而且這段探測期間的封包確實送到了
+    bool on_report(uint8_t burst_seq, uint32_t burst_mbps, uint32_t need_mbps, uint32_t probes_sent = 0, int need_good = kNeed,
+                   uint32_t tx_pkts = 0, uint32_t rx_pkts = 0) {
+      if (!have_base) {
+        have_base = true;
+        tx0 = tx_pkts;
+        rx0 = rx_pkts;
+      }
       if (good > 0 && probes_sent - last_good_probe > kMaxProbeGap) {
         good = 0;  // 同一個 seq 被重複回報時也要檢查：不能拿很久以前的量測放行
       }
       if (have_seq && burst_seq == last_seq) {
-        return good >= kNeed;
+        return good >= need_good;
       }
       have_seq = true;
       last_seq = burst_seq;
@@ -182,18 +198,59 @@ namespace vr::multilink {
       } else {
         good = 0;
       }
-      return good >= kNeed;
+      if (good >= need_good) {
+        // 速率夠了，再看這段探測期間送出的封包有沒有到：沒到齊就從頭來（基準移到現在，下一輪只看之後的）
+        const uint32_t dtx = tx_pkts - tx0;
+        const uint32_t drx = rx_pkts - rx0;
+        if (dtx >= kDelivMinPkts && (uint64_t) drx * 100 < (uint64_t) dtx * kDelivPct) {
+          good = 0;
+          tx0 = tx_pkts;
+          rx0 = rx_pkts;
+        }
+      }
+      return good >= need_good;
     }
 
     void reset() {
       good = 0;
+      have_base = false;
     }
 
     /// 退回探測時用：歸零，並把「已看過的量測」對齊到當下，退回之前（還在送影像時）量到的那一筆不算
-    void reset(uint8_t current_seq) {
+    void reset(uint8_t current_seq, uint32_t tx_pkts = 0, uint32_t rx_pkts = 0) {
       good = 0;
       have_seq = true;
       last_seq = current_seq;
+      have_base = true;
+      tx0 = tx_pkts;
+      rx0 = rx_pkts;
+    }
+  };
+
+  /// 一條連線剛放行不久（kQuickFail 內）就又被判送不動，算一次「放行失敗」：下一次要更多次連續合格的量測
+  /// （2、4、8 次；探測每秒一批，最多多等約 8 秒），免得每隔幾秒就把畫面拖下去一次。撐過 kQuickFail 就歸零。
+  constexpr int64_t kProbeQuickFailNs = 10'000'000'000;
+  constexpr int kProbeMaxStrikes = 2;
+
+  inline int probe_need_good(int strikes) {
+    return probe_gate_t::kNeed << std::clamp(strikes, 0, kProbeMaxStrikes);
+  }
+
+  /**
+   * @brief 影像位元率的近期峰值（保持 kHold）。恢復門檻要用它算：斷訊時 ABR 會把位元率砍到很低，
+   *        拿那一刻的位元率當門檻（1.5 倍、最低 50 Mbps）等於沒有門檻，而鏈路一恢復 ABR 就把位元率拉回去。
+   */
+  struct peak_rate_t {
+    static constexpr int64_t kHoldNs = 30'000'000'000;
+    uint32_t peak = 0;
+    int64_t at_ns = 0;
+
+    uint32_t update(uint32_t mbps, int64_t now_ns) {
+      if (mbps >= peak || now_ns - at_ns > kHoldNs) {
+        peak = mbps;
+        at_ns = now_ns;
+      }
+      return peak;
     }
   };
 

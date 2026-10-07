@@ -46,6 +46,10 @@ namespace vr::multilink {
       all,
       primary,
       automatic,
+      /// always＝每條可用的連線都一直送影像；送不完的批次過期就丟（dropAge／dropBlock），不暫停任何一條。
+      /// 2026-10-07 配戴對照：Steam 在收訊差的位置照樣兩條全送，差的那條送到多少算多少，好的那條瞬間掉包時
+      /// 另一條手上已經有同一幀的一部分；我們暫停差的那條之後只剩一條，它一掉就整段卡
+      always,
     };
 
     video_e video = video_e::all;

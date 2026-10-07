@@ -711,6 +711,51 @@ TEST(VrMultilinkFault, BurstRule) {
 
 // ── 審查與首次頭盔實測之後補的規則 ────────────────────────────────
 
+// 2026-10-07 配戴實測：掉包中的鏈路照樣量得出 151 Mbps。速率合格還不夠，探測期間送出的封包要有 85% 以上送到
+TEST(VrMultilinkProbeGate, FastButLossyProbesDoNotPass) {
+  ml::probe_gate_t g;
+  g.reset(0, 1000, 900);
+  // 兩批各 64 個、只到一半：速率夠、送達不夠 → 不放行，而且成績歸零
+  EXPECT_FALSE(g.on_report(1, 150, 100, 1, 2, 1064, 932));
+  EXPECT_FALSE(g.on_report(2, 150, 100, 2, 2, 1128, 964));
+  // 之後鏈路好了：從重新起算的基準開始，要再兩批都送到才放行
+  EXPECT_FALSE(g.on_report(3, 150, 100, 3, 2, 1192, 1028));
+  EXPECT_TRUE(g.on_report(4, 150, 100, 4, 2, 1256, 1092));
+}
+
+TEST(VrMultilinkProbeGate, DeliveredProbesPassAndTinySamplesAreNotJudged) {
+  ml::probe_gate_t g;
+  g.reset(0, 5000, 4000);
+  EXPECT_FALSE(g.on_report(1, 150, 100, 1, 2, 5064, 4063));
+  EXPECT_TRUE(g.on_report(2, 150, 100, 2, 2, 5128, 4126));  // 128 送、126 到
+  ml::probe_gate_t h;  // 沒有計數（舊呼叫方式）或樣本太少：不擋
+  EXPECT_FALSE(h.on_report(1, 150, 100, 1));
+  EXPECT_TRUE(h.on_report(2, 150, 100, 2));
+}
+
+TEST(VrMultilinkProbeGate, QuickFailuresNeedMoreGoodProbes) {
+  EXPECT_EQ(ml::probe_need_good(0), 2);
+  EXPECT_EQ(ml::probe_need_good(1), 4);
+  EXPECT_EQ(ml::probe_need_good(2), 8);
+  EXPECT_EQ(ml::probe_need_good(9), 8);
+  ml::probe_gate_t g;
+  for (uint8_t i = 1; i <= 3; ++i) {
+    EXPECT_FALSE(g.on_report(i, 150, 100, i, ml::probe_need_good(1)));
+  }
+  EXPECT_TRUE(g.on_report(4, 150, 100, 4, ml::probe_need_good(1)));
+}
+
+// 斷訊時位元率被砍到很低，門檻不能跟著掉：用近 30 秒的峰值
+TEST(VrMultilinkProbeGate, NeedFollowsTheRecentPeakBitrate) {
+  ml::peak_rate_t p;
+  const int64_t s = 1'000'000'000;
+  EXPECT_EQ(p.update(180, 1 * s), 180u);
+  EXPECT_EQ(p.update(11, 5 * s), 180u);
+  EXPECT_EQ(ml::probe_need_mbps(p.update(92, 20 * s)), 270u);
+  EXPECT_EQ(p.update(92, 32 * s), 92u);  // 峰值過了 30 秒：改用現在的
+  EXPECT_EQ(p.update(120, 33 * s), 120u);
+}
+
 TEST(VrMultilinkProbeGate, GoodMeasurementsMustBeConsecutiveProbes) {
   // 兩次「夠快」中間有探測沒量到（封包沒到齊，client 不會回報）：不算連續
   ml::probe_gate_t g;

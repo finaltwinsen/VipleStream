@@ -99,6 +99,8 @@ namespace vr::multilink {
     std::unique_ptr<platf::deinit_t> qos_a;
     std::atomic<int> fast_probes {(int) kProbeFastCount};  // 還剩幾批用較短的間隔送（剛建立、或剛退回探測時重設）
     probe_gate_t gate;  // 只在 io 執行緒存取
+    std::atomic<int64_t> promoted_ns {0};  // 最近一次從探測轉為送影像的時刻
+    std::atomic<int> strikes {0};  // 連續幾次「剛放行就又送不動」（見 probe_need_good）
     clock::time_point fault_next_free {};  // 故障注入的限速（只在 tx 執行緒存取）
 
     // 影像佇列
@@ -193,6 +195,8 @@ namespace vr::multilink {
 
     // 目前的影像位元率（send_video 每 500 ms 更新；automatic 的恢復門檻用）
     std::atomic<uint32_t> video_mbps {0};
+    std::atomic<uint32_t> video_peak_mbps {0};  // 近 30 秒的峰值（恢復門檻用）
+    peak_rate_t rate_peak;  // 只在影像執行緒存取
     uint64_t rate_bytes = 0;  // 只在影像執行緒存取
     clock::time_point rate_since {};
 
@@ -329,14 +333,18 @@ namespace vr::multilink {
           L.deliv.on_ping(L.tx_pkts.load(std::memory_order_relaxed), ping.rxPkts, now_ns);
           L.deliv_pct.store(L.deliv.pct, std::memory_order_relaxed);
           if (L.probing.load(std::memory_order_relaxed)) {
+            const uint32_t tx_now = (uint32_t) L.tx_pkts.load(std::memory_order_relaxed);
             if (L.gate_reset.exchange(false, std::memory_order_relaxed)) {
-              L.gate.reset(ping.burstSeq);
+              L.gate.reset(ping.burstSeq, tx_now, ping.rxPkts);
             }
-            const uint32_t need = probe_need_mbps(video_mbps.load(std::memory_order_relaxed));
+            // 門檻用近 30 秒的位元率峰值算：斷訊當下 ABR 把位元率砍得很低，照那個值算等於沒有門檻
+            const uint32_t need = probe_need_mbps(std::max(video_mbps.load(std::memory_order_relaxed), video_peak_mbps.load(std::memory_order_relaxed)));
+            const int need_good = probe_need_good(L.strikes.load(std::memory_order_relaxed));
             // 量到夠快之後，還要過了最短探測時間才回來——除非現在沒有任何一條送達率夠好的連線在送，那就不等了。
             // burstMbps 65535＝整個探測幀同一瞬間到（一個聚合框就送完），頭盔量不出數字但確定夠快，照樣算一次合格的量測
-            if (L.gate.on_report(ping.burstSeq, ping.burstMbps, need, L.probes.load(std::memory_order_relaxed)) &&
+            if (L.gate.on_report(ping.burstSeq, ping.burstMbps, need, L.probes.load(std::memory_order_relaxed), need_good, tx_now, ping.rxPkts) &&
                 (now_ns >= L.muted_until_ns.load(std::memory_order_relaxed) || !good_carrier_besides(L, now_ns))) {
+              L.promoted_ns.store(now_ns, std::memory_order_relaxed);
               L.muted_until_ns.store(0, std::memory_order_relaxed);
               L.sat_reset.store(true, std::memory_order_relaxed);
               L.probing.store(false, std::memory_order_relaxed);
@@ -640,7 +648,8 @@ namespace vr::multilink {
         }
         // 探測中的批次也不算：一次探測是一整幀，會湊滿視窗，把還在探測的連線再判一次「送不動」（退避加倍、
         // 重新快速探測），或把探測期算成健康期而提早把退避歸零
-        if (!faulted && !L.probing.load(std::memory_order_relaxed) && L.sat.report(sent == b.count, end)) {
+        // always：照樣統計（last_ok_pct 給別條參考），但不暫停
+        if (!faulted && !L.probing.load(std::memory_order_relaxed) && L.sat.report(sent == b.count, end) && opt.video != options_t::video_e::always) {
           const int64_t now_ns = to_ns(end);
           if (other_usable(L, now_ns, L.sat.last_ok_pct)) {
             // all：時間到就再試，所以連續發生時要加倍退避；automatic：恢復由量測決定，只留一個很短的下限
@@ -650,6 +659,13 @@ namespace vr::multilink {
             L.mutes.fetch_add(1, std::memory_order_relaxed);
             if (opt.video == options_t::video_e::automatic) {
               // automatic：不是時間到就重試，而是退回探測——量到夠快才再送影像
+              // 剛放行不久就又送不動：下一次要更多次合格的量測才放行；撐得夠久才歸零
+              const int64_t promoted = L.promoted_ns.load(std::memory_order_relaxed);
+              if (promoted != 0 && now_ns - promoted < kProbeQuickFailNs) {
+                L.strikes.store(std::min(L.strikes.load(std::memory_order_relaxed) + 1, kProbeMaxStrikes), std::memory_order_relaxed);
+              } else {
+                L.strikes.store(0, std::memory_order_relaxed);
+              }
               L.gate_reset.store(true, std::memory_order_relaxed);
               L.fast_probes.store((int) kProbeFastCount, std::memory_order_relaxed);
               L.probing.store(true, std::memory_order_relaxed);
@@ -685,7 +701,7 @@ namespace vr::multilink {
       p->io.run();
     }};
     BOOST_LOG(info) << "[VIPLE-VR-LINK] multi-link ready: video="
-                    << (impl_->opt.video == options_t::video_e::all ? "all" : impl_->opt.video == options_t::video_e::primary ? "primary" : "auto")
+                    << (impl_->opt.video == options_t::video_e::all ? "all" : impl_->opt.video == options_t::video_e::always ? "always" : impl_->opt.video == options_t::video_e::primary ? "primary" : "auto")
                     << " maxAgeMs=" << std::format("{:.1f}", impl_->opt.video_max_age.count() / 1000.0)
                     << (impl_->opt.fault.any() ? " FAULT INJECTION ON (dev)" : "");
   }
@@ -947,7 +963,9 @@ namespace vr::multilink {
       m.rate_since = now;
     } else if (now - m.rate_since >= 500ms) {
       const double secs = std::chrono::duration<double>(now - m.rate_since).count();
-      m.video_mbps.store((uint32_t) (m.rate_bytes * 8 / secs / 1e6), std::memory_order_relaxed);
+      const uint32_t mbps_now = (uint32_t) (m.rate_bytes * 8 / secs / 1e6);
+      m.video_mbps.store(mbps_now, std::memory_order_relaxed);
+      m.video_peak_mbps.store(m.rate_peak.update(mbps_now, to_ns(now)), std::memory_order_relaxed);
       m.rate_bytes = 0;
       m.rate_since = now;
     }

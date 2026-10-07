@@ -286,6 +286,7 @@ namespace config {
       all,
       primary,
       automatic,  ///< auto：session 本身那條先送，其餘量到夠快才送影像；送不動的退回量測
+      always,  ///< always：每條都一直送，送不完的批次過期就丟，不暫停任何一條（2026-10-07 對照 Steam 的做法）
     };
 
     multilink_e multilink = multilink_e::disabled;

@@ -451,7 +451,7 @@ public:
     bool xrTestPointer = false;       // §VR M3a X4（dev）：--xr-test-pointer，不寫入設定
     bool vrTestInput = false;         // §VR M4a R2（dev）：--vr-test-input 合成控制器按鍵，不寫入設定
     bool vrLinkSelftest = false;      // §VR-MULTILINK（dev）：--vr-link-selftest 在同一張網卡再開一條連線，不寫入設定
-    double vrOverscanDeg = 0.0;       // 2026-10-05（dev）：--vr-overscan 每眼 FOV 四邊各放大幾度（0～10），不寫入設定
+    double vrOverscanDeg = 0.0;       // --vr-overscan：每眼 FOV 四邊各放大幾度（0～10）。2026-10-07 起寫入設定（vroverscandeg），GUI 啟動的 VR 也吃得到
     bool vrTestHaptic = false;        // §VR M4a R2（dev）：--vr-test-haptic 本地注入 HAPTIC，不寫入設定
     QString xrTestKeyboard;           // §VR M3a（dev）：--xr-test-keyboard 的文字，不寫入設定
     QString xrDumpKeyboardPath;       // §VR M3a（dev）：--xr-dump-keyboard 的 PNG 路徑，不寫入設定

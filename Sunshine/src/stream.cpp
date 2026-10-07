@@ -5245,6 +5245,7 @@ namespace stream {
           ::vr::multilink::options_t opt;
           opt.video = config::vr.multilink == config::vr_t::multilink_e::primary   ? ::vr::multilink::options_t::video_e::primary :
                       config::vr.multilink == config::vr_t::multilink_e::automatic ? ::vr::multilink::options_t::video_e::automatic :
+                      config::vr.multilink == config::vr_t::multilink_e::always    ? ::vr::multilink::options_t::video_e::always :
                                                                                      ::vr::multilink::options_t::video_e::all;
           const auto &p = launch_session.vr->params;
           const int64_t period_ns = p.period_ns > 0 ? p.period_ns : (p.hz > 0 ? 1'000'000'000LL / p.hz : 11'111'111LL);

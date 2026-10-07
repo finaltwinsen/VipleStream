@@ -80,6 +80,9 @@
 #define SER_SWAPFACEBUTTONS "swapfacebuttons"
 #define SER_CAPTURESYSKEYS "capturesyskeys"
 #define SER_KEEPAWAKE "keepawake"
+#define SER_VROVERSCANDEG "vroverscandeg"
+#define SER_VREYEWIDTH "vreyewidth"
+#define SER_VREYEHEIGHT "vreyeheight"
 #define SER_LANGUAGE "language"
 
 #define CURRENT_DEFAULT_VER 2
@@ -286,6 +289,15 @@ void StreamingPreferences::reload()
     reverseScrollDirection = settings.value(SER_REVERSESCROLL, false).toBool();
     swapFaceButtons = settings.value(SER_SWAPFACEBUTTONS, false).toBool();
     keepAwake = settings.value(SER_KEEPAWAKE, true).toBool();
+    vrOverscanDeg = qBound(0.0, settings.value(SER_VROVERSCANDEG, 0.0).toDouble(), 10.0);
+    // 每眼解析度（2026-10-07 起寫入設定，GUI 啟動的 VR 也吃得到）。範圍同 --vr-eye；超出範圍就用預設
+    {
+        const int w = settings.value(SER_VREYEWIDTH, 2160).toInt();
+        const int h = settings.value(SER_VREYEHEIGHT, 2160).toInt();
+        const bool ok = w >= 640 && w <= 4096 && h >= 640 && h <= 4096 && (w % 2) == 0 && (h % 2) == 0;
+        vrEyeWidth = ok ? w : 2160;
+        vrEyeHeight = ok ? h : 2160;
+    }
     enableHdr = settings.value(SER_HDR, false).toBool();
     captureSysKeysMode = static_cast<CaptureSysKeysMode>(settings.value(SER_CAPTURESYSKEYS,
                                                          static_cast<int>(CaptureSysKeysMode::CSK_OFF)).toInt());
@@ -571,6 +583,9 @@ void StreamingPreferences::save()
     settings.setValue(SER_SWAPFACEBUTTONS, swapFaceButtons);
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);
+    settings.setValue(SER_VROVERSCANDEG, vrOverscanDeg);
+    settings.setValue(SER_VREYEWIDTH, vrEyeWidth);
+    settings.setValue(SER_VREYEHEIGHT, vrEyeHeight);
 
     // §K.15: force immediate write to registry / plist / INI.
     // Without sync(), QSettings delays the flush and a crash or

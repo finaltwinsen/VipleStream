@@ -174,7 +174,10 @@ namespace config {
       if (value == "auto"sv) {
         return vr_t::multilink_e::automatic;
       }
-      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: disabled, auto, all, primary. Falling back to 'disabled'", key, value));
+      if (value == "always"sv) {
+        return vr_t::multilink_e::always;
+      }
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: disabled, auto, all, always, primary. Falling back to 'disabled'", key, value));
       return vr_t::multilink_e::disabled;
     }
 
