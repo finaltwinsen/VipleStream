@@ -260,6 +260,10 @@ namespace config {
 
     latch_e latch_mode = latch_e::legacy;
     int latch_target_pct = 40;  ///< vr_latch_target_pct：v2 的目標 slack，佔週期的百分比（25–50）
+    /// §VR-RENDER-SCALE（2026-10-08）：vr_render_scale_pct。告訴 SteamVR 的建議算圖尺寸＝串流的每眼尺寸 × 這個百分比
+    /// （100–250）。串流尺寸決定編碼、傳輸、解碼的負擔（也就是延遲），算圖尺寸決定畫面細節；Steam 內建串流是
+    /// 算圖 2160、編碼寬度 1152。100＝舊行為（兩者相同）。改了要等 SteamVR 重啟才生效。
+    int render_scale_pct = 100;
 
     /// §VR-CTRL-OFFSET：vr_ctrl_pose_offset（disabled 預設）。enabled＝控制器也設 poseTimeOffset（driver pose_flags bit0）
     bool ctrl_pose_offset = false;

@@ -1502,6 +1502,7 @@ namespace config {
     vr_opt::int_strict_f(vars, "vr_vsync_to_photons_us", vr.vsync_to_photons_us, 1000, 200000, true);
     generic_f(vars, "vr_latch_mode", vr.latch_mode, vr_opt::latch_from_view);
     vr_opt::int_strict_f(vars, "vr_latch_target_pct", vr.latch_target_pct, 25, 50, false);
+    vr_opt::int_strict_f(vars, "vr_render_scale_pct", vr.render_scale_pct, 100, 250, false);
     bool_f(vars, "vr_ctrl_pose_offset", vr.ctrl_pose_offset);
     bool_f(vars, "vr_angvel_local", vr.angvel_local);
     generic_f(vars, "vr_stale_policy", vr.stale_policy, vr_opt::stale_from_view);

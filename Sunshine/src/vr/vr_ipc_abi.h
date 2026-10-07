@@ -362,7 +362,7 @@ typedef struct vripc_session_config_t { /* 寫入方：server，WELCOME 前寫�
   uint32_t stale_zero_vel_us; /* 2T */
   uint32_t stale_oor_hmd_us; /* HMD OutOfRange（灰畫面）門檻，預設 1000000 */
   uint32_t pose_flags; /* VRIPC_POSE_F_*；0＝舊行為 */
-  uint32_t reserved2;
+  uint32_t render_scale_pct; /* 2026-10-08：建議算圖尺寸＝每眼尺寸 × 這個百分比（driver 夾在 100–250）；0＝100（舊行為，原 reserved2） */
 } vripc_session_config_t;
 
 typedef struct vripc_pacing_t { /* 寫入方：server；單格 seqlock（seq 偶數 = 完成）；idle generation 也必須寫有效週期。

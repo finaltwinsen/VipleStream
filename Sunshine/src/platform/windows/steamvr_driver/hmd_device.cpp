@@ -270,8 +270,13 @@ namespace vrdrv {
   }
 
   void hmd_device_t::GetRecommendedRenderTargetSize(uint32_t *pnWidth, uint32_t *pnHeight) {
-    *pnWidth = cfg_.eye_width;
-    *pnHeight = cfg_.eye_height;
+    // §VR-RENDER-SCALE（2026-10-08）：算圖尺寸可以大於串流尺寸（合成時縮小）。0 或超出範圍＝100%（舊行為）
+    uint32_t pct = cfg_.render_scale_pct;
+    if (pct < 100 || pct > 250) {
+      pct = 100;
+    }
+    *pnWidth = (cfg_.eye_width * pct / 100) & ~1u;
+    *pnHeight = (cfg_.eye_height * pct / 100) & ~1u;
   }
 
   void hmd_device_t::GetEyeOutputViewport(vr::EVREye eEye, uint32_t *pnX, uint32_t *pnY, uint32_t *pnWidth, uint32_t *pnHeight) {

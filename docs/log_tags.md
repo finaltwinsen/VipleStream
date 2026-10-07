@@ -639,6 +639,7 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-ORCH] safe-mode: SteamVR blocked our driver at launch … restarting SteamVR once   ← 接著 quit-steamvr、guard、再啟動一次；仍被擋回 code 2
 [VIPLE-VR-ORCH] pose flags ctrlOffset=<0|1> stalePolicy=<legacy|hold> angvelLocal=<0|1>
                                                                 ← 每次組 session config 一次（vr_ctrl_pose_offset／vr_stale_policy／vr_angvel_local → driver pose_flags）
+[VIPLE-VR-ORCH] render scale P% (recommended render target WxH per eye, stream WxH)   ← §VR-RENDER-SCALE：`vr_render_scale_pct` 不是 100 時印
 [VIPLE-VR-ORCH] step=arm result=ok reason=rearm                 ← §VR-REARM：HMD 在 standby、VR 遊戲還在跑，不重啟 SteamVR、直接重新 arm
 [VIPLE-VR-ORCH] rearm from standby ok (VR app kept running) ms=<N>   ← 重新 arm 後 vrcompositor 恢復 Present
 [VIPLE-VR-ORCH] step=wait-hmd result=fail reason=rearm: no present   ← 10 s 內沒有 Present → error code 19（STEAMVR_RESTART_REQUIRED）

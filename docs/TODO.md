@@ -61,6 +61,10 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
     要做編碼尺寸小於算圖尺寸＋注視點編碼。(2) 差的那條連線要不排隊（只送當下這一幀），頭盔回報缺包時不等
     明顯落後的那條；`vr_multilink = always`（實驗用）在改好之前不要用。(3) ENet 控制連線只走 session 位址，
     那條一斷整場結束——要能換路。另：延遲拆解量測。
+  - **使用者 2026-10-08 定的優先順序：流暢第一、解析度可以降，但一定要贏過 Steam 內建串流。**
+    §VR-RENDER-SCALE（`vr_render_scale_pct`）已做：串流每眼 1152、算圖 2160，頭盔無人場次 MTP 41～45 ms。
+    接著：注視點編碼、10-bit、和 Steam 比延遲（要使用者讀頭盔裡的進階效能圖表）、補幀（參考 Virtual Desktop，
+    排在延遲與穩定之後）。host 停在登入／鎖定畫面時整片單色，要回明確的錯誤。
   - 決定 `vr_multilink`、`vr_multilink_ctrl`、`vr_multilink_repair`、`vr_latch_mode` 的預設值（配戴已驗過 `auto`＋ctrl＋repair＋A2）。
   - 遊玩位置的連線量測（`scripts/vr/vlpt_run.sh`，需要使用者把頭盔放在遊玩位置約 10 分鐘）。
   - 被退回探測的連線，條件恢復後的重新放行（第二次實測沒有回來：探測量到 20～198 Mbps、門檻約 225～285）。

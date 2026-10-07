@@ -245,6 +245,13 @@ namespace vr::orchestrator {
       BOOST_LOG(info) << "[VIPLE-VR-ORCH] pose flags ctrlOffset=" << (config::vr.ctrl_pose_offset ? 1 : 0)
                       << " stalePolicy=" << (config::vr.stale_policy == config::vr_t::stale_e::hold ? "hold" : "legacy")
                       << " angvelLocal=" << (config::vr.angvel_local ? 1 : 0);
+      // §VR-RENDER-SCALE：算圖尺寸與串流尺寸分開（100＝相同）
+      c.render_scale_pct = (uint32_t) (config::vr.render_scale_pct < 100 ? 100 : config::vr.render_scale_pct > 250 ? 250 : config::vr.render_scale_pct);
+      if (c.render_scale_pct != 100) {
+        BOOST_LOG(info) << "[VIPLE-VR-ORCH] render scale " << c.render_scale_pct << "% (recommended render target "
+                        << c.eye_width * c.render_scale_pct / 100 << "x" << c.eye_height * c.render_scale_pct / 100 << " per eye, stream "
+                        << c.eye_width << "x" << c.eye_height << ")";
+      }
       return c;
     }
 #endif

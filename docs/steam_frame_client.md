@@ -1684,12 +1684,33 @@ PHY 1.7 Gbps。同樣 200 Mbps、90 Hz、30 s：
   `--vr-eye` 改成會保存的設定（`vroverscandeg`、`vreyewidth`／`vreyeheight`），GUI 啟動的 VR 也吃得到。
   路由器 log 的對照做法：只記連上、不記斷開，要先濾掉每 2 秒一行的洗版訊息。
 
+**算圖尺寸與串流尺寸分開（§VR-RENDER-SCALE，2026-10-08 凌晨；server `vr_render_scale_pct`，預設 100＝舊行為）**
+
+- 使用者定的優先順序：**流暢第一，解析度可以降，但一定要贏過 Steam 內建串流**。
+- 做法：driver 回報給 SteamVR 的建議算圖尺寸＝串流的每眼尺寸 × 百分比（100～250），合成時縮到串流尺寸。
+  session config 用掉原本的 `reserved2`（版面不變、不升 ABI 版號，0＝100%）。改了要等 SteamVR 重啟才生效。
+- 驗證：串流每眼 1152、`vr_render_scale_pct = 188` → 遊戲的貼圖 2164×2164（`[VIPLE-VR-DRV] layer0 … size=`），
+  `<dev-client>` 模擬存下的畫面球網、磚牆的細節都在。頭盔無人場次（120 Hz、合成頭部運動、4 分鐘）：
+  MTP p50 41～45 ms、開場之後 0 張重複幀、0 次掉幀、解碼 3.2 ms、兩條各 82 Mbps。
+  同條件每眼 2160 是 MTP 55～59 ms、解碼約 8 ms。
+- MTP 每兩三分鐘會從 41 慢慢升到 45 再跳回（相位慢慢滑、滑過一格），2160 時也有同樣的形狀；還沒查。
+
+**host 停在登入／鎖定畫面時整片單色（2026-10-07 深夜）**
+
+- host 重開機後沒有人登入，PCVR 的每一幀都是完全相同的藍綠色（解出來 Y=103 U=139 V=64）。host 的 log 全部正常，
+  只有 `[VIPLE-NVENC] bitstream_size` 平均約 210 B 看得出畫面沒有內容；一般桌面串流不受影響。使用者一登入就恢復。
+- 從 SSH 看不出這個狀態（`quser` 顯示 console Active，explorer 與 Steam 都在跑）。待做：server 偵測到之後回明確的錯誤。
+- 查的方法：`<dev-client>` 用 `--vr-emulate` 連 host、`--dump-bitstream` 存下串流，用 ffmpeg 抽一幀看。
+
 **還沒做**
 
 - **降低每幀的像素量**（10-07 晚結論一）：編碼尺寸小於算圖尺寸、注視點編碼、10-bit；先用每眼 1152／1440
   在原本位置完整跑幾分鐘，確認延遲與流暢度（要等姿態預測收斂），並請使用者戴眼鏡看清晰度能不能接受。
 - **差的連線不排隊**（結論二）與**控制連線可以換路**（結論三）。
 - **延遲拆解**：把 MTP 逐段量出來（擷取、編碼、傳輸、解碼、等顯示），找最肥的一段。
+- **和 Steam 內建串流比延遲**：它的 log 沒有數字，要請使用者開頭盔裡的進階效能圖表（`showAdvancedGraphs`）讀出來。
+- **補幀**（使用者 2026-10-08 提出，參考 Virtual Desktop 的做法）：遊戲以一半的幀率算圖，頭盔端用位移資訊補出
+  中間的幀。排在延遲與穩定之後。
 - **使用者實際配戴驗 §VR-LINK-CTRL／§VR-LINK-REPAIR 與 A2**：10-07 晚配戴驗過（見上：A2 成立、
   掉幀回報與補包有接上、120 Hz 與 overscan 有效、修正後的探測放行沒有再誤放）。要看 10 s 行的 `lagMs`、`hold 10s` 的 `nack／repaired／gone`、server 的 `[VIPLE-VR-REPAIR] 10s`、
   `[VIPLE-VR-LOSS]` 的 `lossToRefresh` 與 `[VIPLE-VR-SESSION] fallback`，再決定各開關的預設值。

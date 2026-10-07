@@ -2017,6 +2017,35 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### vr_render_scale_pct
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: size the games render at, as a percentage of the streamed per-eye size (100 to 250).
+            The streamed size (requested by the client) decides how much there is to encode, send and decode,
+            and therefore the latency; the render size decides how much detail the picture has. With a value
+            above 100 SteamVR recommends a larger render target to the game and the driver scales the result
+            down to the streamed size. Example: a client streaming 1152x1152 per eye with `188` gets games
+            rendered at about 2160x2160.
+            @note{Applies to VR sessions only. Takes effect the next time SteamVR starts.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            100
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_render_scale_pct = 188
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_stale_policy
 
 <table>
