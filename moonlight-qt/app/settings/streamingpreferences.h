@@ -428,6 +428,7 @@ public:
     int  vrSyntheticMotion = 1;      // VrSyntheticMotion：0 still、1 sine、2 yaw30、3 tilt30yaw（dev）、4 fast（dev）
     // dev（--vr-synthetic-hmd，不寫入設定）：真的 XR 連線上，頭的姿態改送 vrSyntheticMotion 的合成運動。
     // 無人配戴時用來跑「頭在動」才走得到的路徑；畫面會在頭盔裡甩動，不可以戴著用
+    bool vrSyntheticHands = false;    // 2026-10-08（dev）：--vr-synthetic-hands，控制器換成在眼前揮動的合成姿態，不寫入設定
     bool vrSyntheticHmd = false;
     // 每眼解析度（打包尺寸為 2W×H，SBS）。預設 2160x2160＝Steam Frame 面板每眼的原生解析度。
     // 2026-10-03 Frame 實測：每眼 1728 清晰度不夠；iris 解 4320x2160@120（200 Mbps）每幀 p50 8.1 ms、

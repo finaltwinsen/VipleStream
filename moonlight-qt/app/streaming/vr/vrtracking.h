@@ -66,6 +66,12 @@ private:
     std::atomic<bool> m_Running { false };
     int m_DisplayHz = 0;
     VrSyntheticMotion m_Motion = VrSyntheticMotion::Sine;
+    bool m_SyntheticHands = false;  // dev（--vr-synthetic-hands）：--vr-emulate 時也把控制器換成揮動的合成姿態；start() 之前設
+
+public:
+    void setSyntheticHands(bool on) { m_SyntheticHands = on; }
+
+private:
     Source m_Source;
     const char* m_SourceName = nullptr;
 };

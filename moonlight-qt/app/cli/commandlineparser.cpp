@@ -591,6 +591,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                            {"still", "sine", "yaw30", "tilt30yaw", "fast"});
     parser.addFlagOption("vr-synthetic-hmd", "(dev) PCVR on a real XR runtime: send the --vr-synthetic-motion head pose instead of the tracked one, to exercise the "
                          "motion-dependent paths with nobody wearing the headset. The picture swings in the headset - do not wear it. Not saved.");
+    parser.addFlagOption("vr-synthetic-hands", "(dev) PCVR: replace both controller poses with a synthetic swing in front of the head (buttons untouched), "
+                         "so an unattended session has moving near objects in view. Works with --vr-emulate and on a real XR runtime. Not saved.");
     parser.addValueOption("vr-eye", "per-eye <width>x<height> for PCVR (default 2160x2160)");
     parser.addValueOption("vr-hz", "HMD refresh rate for PCVR (default 90)");
     parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
@@ -869,6 +871,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         preferences->vrSyntheticMotion = motion == "still" ? 0 : (motion == "yaw30" ? 2 : (motion == "tilt30yaw" ? 3 : (motion == "fast" ? 4 : 1)));
     }
     preferences->vrSyntheticHmd = parser.isSet("vr-synthetic-hmd");
+    preferences->vrSyntheticHands = parser.isSet("vr-synthetic-hands");
     if (parser.isSet("vr-eye")) {
         auto eye = parser.getResolutionOptionValue("vr-eye");
         if (!inRange(eye.first, VIPLE_VR_EYE_DIM_MIN, VIPLE_VR_EYE_DIM_MAX) ||

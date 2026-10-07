@@ -154,3 +154,54 @@ void vrSyntheticFill(VrSyntheticMotion motion, double t, VIPLE_VR_TRACKING* out)
     }
     memset(&out->gaze, 0, sizeof(out->gaze));
 }
+
+void vrSyntheticHands(double t, VIPLE_VR_TRACKING* out)
+{
+    const VIPLE_VR_POSE& head = out->pose[VIPLE_VR_POSE_HMD];
+    // 只取頭的 yaw（頭是 qYaw·qPitch）：手跟著身體的朝向，不跟著低頭抬頭
+    const double qx = head.rot[0], qy = head.rot[1], qz = head.rot[2], qw = head.rot[3];
+    const double yaw = std::atan2(2.0 * (qw * qy + qx * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
+    const double dYaw = head.angVel[1];
+    const double cy = std::cos(yaw), sy = std::sin(yaw);
+
+    for (int hand = 0; hand < 2; hand++) {
+        const bool right = hand == 1;
+        // 身體座標（x 右、y 上、z 後）裡的位置與速度
+        double p[3], v[3], roll = 0.0, dRoll = 0.0;
+        if (right) {
+            const double w = 2 * kPi * 1.3, wv = 2 * kPi * 0.9;
+            p[0] = 0.20 + 0.25 * std::sin(w * t);
+            p[1] = -0.25 + 0.12 * std::sin(wv * t);
+            p[2] = -0.45 - 0.10 * std::cos(w * t);
+            v[0] = 0.25 * w * std::cos(w * t);
+            v[1] = 0.12 * wv * std::cos(wv * t);
+            v[2] = 0.10 * w * std::sin(w * t);
+            roll = 40.0 * kDegToRad * std::sin(w * t);
+            dRoll = 40.0 * kDegToRad * w * std::cos(w * t);
+        }
+        else {
+            const double w = 2 * kPi * 0.7;
+            p[0] = -0.22;
+            p[1] = -0.30 + 0.08 * std::sin(w * t);
+            p[2] = -0.40;
+            v[0] = 0.0;
+            v[1] = 0.08 * w * std::cos(w * t);
+            v[2] = 0.0;
+        }
+        // 轉到世界座標：r = R_y(yaw)·p；速度＝頭的線速度＋R_y(yaw)·v＋(0,dYaw,0)×r
+        const double rx = cy * p[0] + sy * p[2], rz = -sy * p[0] + cy * p[2];
+        const double vx = cy * v[0] + sy * v[2], vz = -sy * v[0] + cy * v[2];
+        const float pos[3] = { (float)(head.pos[0] + rx), (float)(head.pos[1] + p[1]), (float)(head.pos[2] + rz) };
+        const float lin[3] = { (float)(head.linVel[0] + vx + dYaw * rz), (float)(head.linVel[1] + v[1]), (float)(head.linVel[2] + vz - dYaw * rx) };
+        // 姿態 q = qYaw·qRollZ；世界座標的角速度＝dYaw·Y＋R_y(yaw)·(dRoll·Z)
+        const double chy = std::cos(yaw / 2), shy = std::sin(yaw / 2), cr = std::cos(roll / 2), sr = std::sin(roll / 2);
+        const float rot[4] = { (float)(shy * sr), (float)(shy * cr), (float)(chy * sr), (float)(chy * cr) };
+        const float ang[3] = { (float)(dRoll * sy), (float)dYaw, (float)(dRoll * cy) };
+        setPose(&out->pose[right ? VIPLE_VR_POSE_RIGHT : VIPLE_VR_POSE_LEFT], pos, rot, lin, ang);
+        out->input[hand].flags |= VIPLE_VR_CTRL_ACTIVE | VIPLE_VR_CTRL_FOCUSED;
+        if (out->input[hand].battery == 0) {
+            out->input[hand].battery = 100;
+        }
+    }
+    out->flags |= VIPLE_VR_TRK_LEFT | VIPLE_VR_TRK_RIGHT;
+}

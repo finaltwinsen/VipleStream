@@ -27,3 +27,8 @@ const char* vrSyntheticMotionName(VrSyntheticMotion motion);
 
 // 填 out 的 flags、pose[]、input[]、gaze；version／sampleId／時間欄位由呼叫端填
 void vrSyntheticFill(VrSyntheticMotion motion, double tSec, VIPLE_VR_TRACKING* out);
+
+// 2026-10-08（dev，--vr-synthetic-hands）：依 out 裡已經填好的頭部姿態，把左右控制器換成「在眼前揮動」的合成姿態
+// （右手像揮拍：左右 ±25 cm、前後 ±10 cm @1.3 Hz，拍面繞前後軸 ±40°；左手小幅上下），並標成 active／focused。
+// 按鍵不動。無人配戴時畫面裡才有會動的近物，看得到手部的預測與重投影。
+void vrSyntheticHands(double tSec, VIPLE_VR_TRACKING* out);

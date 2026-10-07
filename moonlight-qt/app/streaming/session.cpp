@@ -3730,6 +3730,7 @@ bool Session::startConnectionAsync()
             // dev（--vr-synthetic-hmd）：頭的姿態換成合成運動，其餘（取樣時機、predictNs、控制器）照舊來自 XR runtime。
             // 無人配戴的場次頭盔是靜止的，host 端「對不到算圖姿態」這類只有頭在動才出現的現象驗不到
             const bool syntheticHmd = m_Preferences->vrSyntheticHmd;
+            const bool syntheticHands = m_Preferences->vrSyntheticHands;  // dev：控制器換成在眼前揮動的合成姿態
             const auto synthStart = std::chrono::steady_clock::now();
             if (syntheticHmd) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -3737,7 +3738,7 @@ bool Session::startConnectionAsync()
                             "The picture will swing in the headset; do not wear it.",
                             vrSyntheticMotionName(motion));
             }
-            m_VrTracking.setSource([xr, syntheticHmd, motion, synthStart](VIPLE_VR_TRACKING* s) {
+            m_VrTracking.setSource([xr, syntheticHmd, syntheticHands, motion, synthStart](VIPLE_VR_TRACKING* s) {
                 uint32_t predict = 0;
                 VIPLE_VR_POSE& hmd = s->pose[VIPLE_VR_POSE_HMD];
                 if (!xr->sampleHmd(hmd.pos, hmd.rot, hmd.linVel, hmd.angVel, &predict)) {
@@ -3753,10 +3754,14 @@ bool Session::startConnectionAsync()
                     vrSyntheticFill(motion, std::chrono::duration<double>(std::chrono::steady_clock::now() - synthStart).count(), &synth);
                     hmd = synth.pose[VIPLE_VR_POSE_HMD];
                 }
+                if (syntheticHands) {
+                    vrSyntheticHands(std::chrono::duration<double>(std::chrono::steady_clock::now() - synthStart).count(), s);
+                }
                 return true;
             }, syntheticHmd ? "xr+synthetic-hmd" : (m_XrContext->trackingThreadMode() ? "xr-thread" : "xr-frameloop"));
         }
 #endif
+        m_VrTracking.setSyntheticHands(m_Preferences->vrSyntheticHands);
         m_VrTracking.start(m_StreamConfig.fps, motion);
 #ifdef HAVE_OPENXR
         if (m_XrPcvr && m_Preferences->vrTestHaptic && m_VrTestHapticTimer == 0) {

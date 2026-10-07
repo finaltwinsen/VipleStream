@@ -103,6 +103,9 @@ void VrTrackingSender::run()
         else {
             const double t = std::chrono::duration<double>(now - start).count();
             vrSyntheticFill(m_Motion, t, &sample);
+            if (m_SyntheticHands) {
+                vrSyntheticHands(t, &sample);
+            }
             sample.predictNs = predictNs;
         }
         sample.version = VIPLE_VR_TRACKING_VERSION;
