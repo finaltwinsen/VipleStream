@@ -574,44 +574,84 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         m_NoMetaDropped++;
         return false;
     }
-    uint32_t idx = 0;
-    XrSwapchainImageAcquireInfo ai = xrS<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
-    XrResult r;
-    {
+
+    pl_gpu g = m_Vulkan->gpu;
+    // 取一張 swapchain 影像並交給 libplacebo。OpenXR（Vulkan）：acquire 後彩色影像在 COLOR_ATTACHMENT_OPTIMAL，
+    // release 前也要回到這個 layout
+    auto acquire = [&](pl_tex* texOut) {
+        uint32_t idx = 0;
+        XrSwapchainImageAcquireInfo ai = xrS<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
+        XrResult r;
+        {
+            std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
+            r = xrAcquireSwapchainImage(m_Sw.swapchain, &ai, &idx);
+        }
+        if (XR_FAILED(r) || idx >= m_Sw.wrapped.size()) {
+            return false;
+        }
+        XrSwapchainImageWaitInfo wi = xrS<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
+        wi.timeout = 100000000;  // 100 ms
+        xrWaitSwapchainImage(m_Sw.swapchain, &wi);
+        pl_vulkan_release_params rp = {};
+        rp.tex = m_Sw.wrapped[idx];
+        rp.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        rp.qf = VK_QUEUE_FAMILY_IGNORED;
+        pl_vulkan_release_ex(g, &rp);
+        *texOut = m_Sw.wrapped[idx];
+        return true;
+    };
+    // GPU 做完才 release 給 runtime、才放掉解碼幀。X3 起這裡是影像 render thread，不再阻塞 XR frame thread。
+    // M4a 收尾：先以有上限的 timeline 等待確認 hold 的 semaphore 到了（pl_gpu_finish 沒有逾時；runtime 串流
+    // 中死掉時 GPU 工作可能永遠等不到結果，R4 在 S1 卡了 7 分鐘），到了再 pl_gpu_finish（此時立即返回）。
+    // 回傳 1＝做完、0＝hold 失敗（照舊 pl_gpu_finish）、-1＝GPU 卡住
+    auto finishGpu = [&](pl_tex tex) {
+        pl_vulkan_hold_params hp = {};
+        hp.tex = tex;
+        hp.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        hp.qf = VK_QUEUE_FAMILY_IGNORED;
+        hp.semaphore.sem = m_Sem;
+        hp.semaphore.value = ++m_SemValue;
+        if (!pl_vulkan_hold_ex(g, &hp)) {
+            pl_gpu_finish(g);
+            return 0;
+        }
+        if (!m_Ctx->waitSemaphoreBounded(m_Sem, hp.semaphore.value, 1000000000ull)) {
+            return -1;
+        }
+        pl_gpu_finish(g);
+        return 1;
+    };
+    auto releaseImage = [&]() {
+        XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
         std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
-        r = xrAcquireSwapchainImage(m_Sw.swapchain, &ai, &idx);
-    }
-    if (XR_FAILED(r) || idx >= m_Sw.wrapped.size()) {
+        xrReleaseSwapchainImage(m_Sw.swapchain, &ri);
+        return m_ReleaseNo.fetch_add(1, std::memory_order_relaxed) + 1;
+    };
+    auto wedged = [&](const char* why) {
+        m_WedgedFrames.push_back(frame);  // 仍被 GPU 參照：不 unmap、不 free
+        m_Ctx->markGpuWedged(why);
+        markUnusable("GPU wedged");
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        m_RenderErrors++;
+    };
+
+    pl_tex tex = nullptr;
+    if (!acquire(&tex)) {
         av_frame_free(&frame);
         std::lock_guard<std::mutex> lk(m_StatsMutex);
         m_RenderErrors++;
         return false;
     }
-    XrSwapchainImageWaitInfo wi = xrS<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
-    wi.timeout = 100000000;  // 100 ms
-    xrWaitSwapchainImage(m_Sw.swapchain, &wi);
-
-    pl_gpu g = m_Vulkan->gpu;
-    pl_tex tex = m_Sw.wrapped[idx];
-
-    // OpenXR（Vulkan）：acquire 後彩色影像在 COLOR_ATTACHMENT_OPTIMAL，release 前也要回到這個 layout
-    pl_vulkan_release_params rp = {};
-    rp.tex = tex;
-    rp.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    rp.qf = VK_QUEUE_FAMILY_IGNORED;
-    pl_vulkan_release_ex(g, &rp);
 
     pl_frame mapped;
     std::memset(&mapped, 0, sizeof(mapped));
     const bool mappedOk = mapFrame(frame, &mapped, m_Tex, true);
     bool rendered = false;
-    bool synthOk = false;
-    VIPLE_VR_FRAME_META synthMeta = {};
     const int frameH = m_Config.synth ? m_Sw.height / 2 : m_Sw.height;  // swapchain 裡一張影像的高度
     const bool fovea = m_FvA.load(std::memory_order_relaxed) < 0.999f;
+    pl_frame target;
+    std::memset(&target, 0, sizeof(target));
     if (mappedOk) {
-        pl_frame target;
-        std::memset(&target, 0, sizeof(target));
         target.num_planes = 1;
         target.planes[0].texture = tex;
         target.planes[0].components = 4;
@@ -624,21 +664,20 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         if (m_Mode != TargetMode::SrgbMutable) {
             target.color.transfer = PL_COLOR_TRC_LINEAR;
         }
-        if (m_Config.synth && !m_SynthFailed) {
-            rendered = renderSynth(&mapped, &target, tex, frame->width, frame->height, hasMeta, meta, frame->pts, &synthOk, &synthMeta);
+        // 第一張：只畫真的那一張（開著合成時 swapchain 是兩倍高，畫在上半）。和沒開合成時一樣的工作量，
+        // 所以真的那一張不會被合成的運算拖慢。
+        pl_frame t1 = target;
+        if (m_Config.synth) {
+            t1.crop.x0 = 0.0f;
+            t1.crop.y0 = 0.0f;
+            t1.crop.x1 = static_cast<float>(m_Sw.width);
+            t1.crop.y1 = static_cast<float>(frameH);
         }
-        else if (fovea && !m_UnwarpFailed) {
-            rendered = renderUnwarp(&mapped, &target, tex, frame->width, frame->height);
+        if (fovea && !m_UnwarpFailed) {
+            rendered = renderUnwarp(&mapped, &t1, tex, frame->width, frame->height);
         }
         else {
-            if (m_Config.synth) {
-                // 合成壞掉之後：swapchain 仍是兩倍高，真的那一張照樣只畫上半
-                target.crop.x0 = 0.0f;
-                target.crop.y0 = 0.0f;
-                target.crop.x1 = static_cast<float>(m_Sw.width);
-                target.crop.y1 = static_cast<float>(frameH);
-            }
-            rendered = pl_render_image(m_Renderer, &mapped, &target, &pl_render_fast_params);
+            rendered = pl_render_image(m_Renderer, &mapped, &t1, &pl_render_fast_params);
         }
         if (!rendered) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] pl_render_image failed");
@@ -651,48 +690,33 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     }
 
     m_TotalDrawn += rendered ? 1 : 0;
-    // §VR-SYNTH：開著合成時等到第 2400 張之後、而且這一張真的有合成影像才存（上半真的、下半合成）
-    if (rendered && !m_Dumped && !m_Config.dumpPath.isEmpty() &&
-        m_TotalDrawn >= static_cast<uint64_t>(m_Config.synth ? 2400 : std::max(1, m_Config.dumpAfterFrames)) &&
-        (!m_Config.synth || synthOk || m_SynthFailed)) {
+    // §VR-SYNTH：開著合成時等到第 2400 張之後、而且那一張真的有合成影像才存（存第二張：上半真的、下半合成）
+    const bool wantDump = rendered && !m_Dumped && !m_Config.dumpPath.isEmpty() &&
+                          m_TotalDrawn >= static_cast<uint64_t>(m_Config.synth ? 2400 : std::max(1, m_Config.dumpAfterFrames));
+    if (wantDump && !m_Config.synth) {
         m_Dumped = true;
         dumpTexture(tex);  // 必須在 hold 之前（download 需要 libplacebo 仍持有影像）
     }
 
-    pl_vulkan_hold_params hp = {};
-    hp.tex = tex;
-    hp.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    hp.qf = VK_QUEUE_FAMILY_IGNORED;
-    hp.semaphore.sem = m_Sem;
-    hp.semaphore.value = ++m_SemValue;
-    const bool held = pl_vulkan_hold_ex(g, &hp);
     const uint64_t tCpuEnd = nowUs();
-    // GPU 做完才 release 給 runtime、才放掉解碼幀。X3 起這裡是影像 render thread，不再阻塞 XR frame thread。
-    // M4a 收尾：先以有上限的 timeline 等待確認 hold 的 semaphore 到了（pl_gpu_finish 沒有逾時；runtime 串流
-    // 中死掉時 GPU 工作可能永遠等不到結果，R4 在 S1 卡了 7 分鐘），到了再 pl_gpu_finish（此時立即返回）。
-    if (held && !m_Ctx->waitSemaphoreBounded(m_Sem, hp.semaphore.value, 1000000000ull)) {
-        m_WedgedFrames.push_back(frame);  // 仍被 GPU 參照：不 unmap、不 free
-        m_Ctx->markGpuWedged("video render did not finish within 1 s");
-        markUnusable("GPU wedged");
-        std::lock_guard<std::mutex> lk(m_StatsMutex);
-        m_RenderErrors++;
+    const int fin = finishGpu(tex);
+    if (fin < 0) {
+        wedged("video render did not finish within 1 s");
         return false;
     }
-    pl_gpu_finish(g);
+    const bool held = fin > 0;
     const uint64_t tGpuEnd = nowUs();
-    if (mappedOk) {
-        pl_unmap_avframe(g, &mapped);
+    // 第二張要再用一次解碼幀（mapped）：做合成時先不放掉
+    const bool doSynth = m_Config.synth && !m_SynthFailed && mappedOk && rendered && held;
+    if (!doSynth) {
+        if (mappedOk) {
+            pl_unmap_avframe(g, &mapped);
+        }
+        // hasMeta／meta 已在函式開頭查好，跟著這張影像一起發布
+        av_frame_free(&frame);
     }
-    // hasMeta／meta 已在函式開頭查好，跟著這張影像一起發布
-    av_frame_free(&frame);
 
-    XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
-    uint64_t releaseNo = 0;
-    {
-        std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
-        xrReleaseSwapchainImage(m_Sw.swapchain, &ri);
-        releaseNo = m_ReleaseNo.fetch_add(1, std::memory_order_relaxed) + 1;
-    }
+    const uint64_t releaseNo = releaseImage();
     if (rendered && held) {
         std::lock_guard<std::mutex> lk(m_SwMutex);
         m_Published.releaseNo = releaseNo;
@@ -701,10 +725,10 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         m_Published.subImage.imageRect.extent = {m_Sw.width, frameH};
         m_Published.subImage.imageArrayIndex = 0;
         m_Published.aspect = static_cast<float>(m_Sw.width) / static_cast<float>(frameH);
-        m_Published.hasSynth = synthOk;
+        m_Published.hasSynth = false;
         m_Published.synthRect.offset = {0, frameH};
         m_Published.synthRect.extent = {m_Sw.width, frameH};
-        m_Published.synthMeta = synthMeta;
+        m_Published.synthMeta = {};
         m_Published.generation = m_Sw.generation;
         m_Published.lastDrawnUs = tGpuEnd;
         m_Published.seq++;
@@ -713,18 +737,59 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         m_Published.meta = meta;
         m_HavePublished = true;
     }
+    {
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        if (rendered && held) {
+            m_Drawn++;
+            m_CpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tCpuEnd - t0, 0xffffffffu)));
+            m_GpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tGpuEnd - tCpuEnd, 0xffffffffu)));
+        }
+        else {
+            m_RenderErrors++;
+        }
+    }
+    if (!doSynth) {
+        return rendered && held;
+    }
 
-    std::lock_guard<std::mutex> lk(m_StatsMutex);
-    if (rendered && held) {
-        m_Drawn++;
+    // 第二張（§VR-SYNTH）：上半再畫一次真的、下半是合成的。做完後以同一個 seq 再發布一次——frame thread 在這張
+    // 影像第二次被顯示時（半速串流的另一格）改用下半；來不及的話那一格照舊重送真的。
+    pl_tex tex2 = nullptr;
+    bool synthOk = false;
+    VIPLE_VR_FRAME_META synthMeta = {};
+    if (!acquire(&tex2)) {
+        pl_unmap_avframe(g, &mapped);
+        av_frame_free(&frame);
+        return true;
+    }
+    pl_frame t2 = target;
+    t2.planes[0].texture = tex2;
+    const bool r2 = renderSynth(&mapped, &t2, tex2, frame->width, frame->height, hasMeta, meta, frame->pts, &synthOk, &synthMeta);
+    if (r2 && wantDump && (synthOk || m_SynthFailed)) {
+        m_Dumped = true;
+        dumpTexture(tex2);
+    }
+    const int fin2 = finishGpu(tex2);
+    if (fin2 < 0) {
+        wedged("synthesized frame did not finish within 1 s");
+        return false;
+    }
+    const uint64_t tSynthEnd = nowUs();
+    pl_unmap_avframe(g, &mapped);
+    av_frame_free(&frame);
+    const uint64_t releaseNo2 = releaseImage();
+    if (r2 && fin2 > 0) {
+        std::lock_guard<std::mutex> lk(m_SwMutex);
+        m_Published.releaseNo = releaseNo2;
+        m_Published.hasSynth = synthOk;
+        m_Published.synthMeta = synthMeta;
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
         m_SynthDrawn += synthOk ? 1 : 0;
-        m_CpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tCpuEnd - t0, 0xffffffffu)));
-        m_GpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tGpuEnd - tCpuEnd, 0xffffffffu)));
+        m_SynthGpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tSynthEnd - tGpuEnd, 0xffffffffu)));
     }
-    else {
-        m_RenderErrors++;
-    }
-    return rendered && held;
+    return true;
 }
 
 void XrVideo::renderThreadMain()
@@ -791,7 +856,7 @@ bool XrVideo::current(Current* out)
 
 namespace {
 
-// 位移估計。頭部轉動造成的整張影像位移 vs_g 由呼叫端從兩張的算圖姿態算好傳進來（那一部分交給頭盔的重投影處理），
+// 位移估計。頭部轉動造成的影像位移由兩張的算圖姿態逐像素算出來（vs_w＝轉動量；那一部分交給頭盔的重投影處理），
 // 這裡只找「扣掉它之後還剩多少」：對每個像素，在上一張裡找 3x3 稀疏區塊最像的位置，用拋物線取到小數格。
 // 不夠確定（比「沒有位移」好不到 40%）就當成 0——靜止的場景原樣保留，只有真的在動的物體會被外插。
 // 輸出 rg＝剩餘位移（上一張的位置 − 現在的位置 − vs_g，整張 SBS 影像的 UV 單位）。搜尋不跨過左右眼。
@@ -819,16 +884,23 @@ vec2 px = 1.0 / sz;
 vec2 uv = gl_FragCoord.xy * px;
 float xmin = (uv.x < 0.5 ? 0.0 : 0.5) + 0.5 * px.x;
 float xmax = xmin + 0.5 - px.x;
-vec2 g = vs_g * sz;
-{
-    // §VR-FOVEA：vs_g 是均勻取樣時的位移；壓縮過的影像裡，同樣的視角位移在每個位置佔的像素數是它除以那裡的斜率
-    float ex = (uv.x < 0.5 ? uv.x : uv.x - 0.5) * 2.0;
-    float cx = uv.x < 0.5 ? vs_fv.y : vs_fv.z;
-    float tx = (ex - cx) / (ex < cx ? cx : 1.0 - cx);
-    float ty = (uv.y - vs_fv.w) / (uv.y < vs_fv.w ? vs_fv.w : 1.0 - vs_fv.w);
-    float b = 1.0 - vs_fv.x;
-    g /= vec2(vs_fv.x + 3.0 * b * tx * tx, vs_fv.x + 3.0 * b * ty * ty);
-}
+// 頭部轉動造成的位移，逐像素算（小轉角）：這個像素的視線方向是 (tx, ty, -1)，頭轉 w（弧度，機體座標）之後
+// tx 變 tx + wy(1+tx²) + wz·ty − wx·tx·ty、ty 變 ty − wx(1+ty²) − wz·tx + wy·tx·ty。只用中心的值（原本的做法）
+// 在影像邊緣會差到每幀好幾個像素，靜止的景物看起來「還有位移」，搜尋範圍加大之後窗格這類重複的圖樣就會被配錯。
+// §VR-FOVEA：影像是壓縮過的時候，先把座標換回均勻取樣算視線方向，位移再除以這個位置的斜率。
+float ex = (uv.x < 0.5 ? uv.x : uv.x - 0.5) * 2.0;
+float cx = uv.x < 0.5 ? vs_fv.y : vs_fv.z;
+float extx = ex < cx ? cx : 1.0 - cx;
+float exty = uv.y < vs_fv.w ? vs_fv.w : 1.0 - vs_fv.w;
+float ux = (ex - cx) / extx;
+float uy = (uv.y - vs_fv.w) / exty;
+float fb = 1.0 - vs_fv.x;
+float tx = (vs_fv.x * ux + fb * ux * ux * ux) * extx * vs_tan.x;
+float ty = -(vs_fv.x * uy + fb * uy * uy * uy) * exty * vs_tan.y;
+float dtx = vs_w.y * (1.0 + tx * tx) + vs_w.z * ty - vs_w.x * tx * ty;
+float dty = -vs_w.x * (1.0 + ty * ty) - vs_w.z * tx + vs_w.y * tx * ty;
+vec2 slope = vec2(vs_fv.x + 3.0 * fb * ux * ux, vs_fv.x + 3.0 * fb * uy * uy);
+vec2 g = vec2(-0.5 * dtx / vs_tan.x, dty / vs_tan.y) / slope * sz;
 for (int j = -1; j <= 1; j++) {
     for (int i = -1; i <= 1; i++) {
         vec2 p = uv + vec2(float(i), float(j)) * 1.5 * px;
@@ -1115,17 +1187,21 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
                 // 抬頭（ω.x > 0）景物往下移；mv 的定義是「上一張的位置 − 現在的位置」，所以取負號。一隻眼佔 UV 寬度的一半。
                 const float tanW = std::max(0.5f, m_FovTanW.load(std::memory_order_relaxed));
                 const float tanH = std::max(0.5f, m_FovTanH.load(std::memory_order_relaxed));
-                float gvec[2] = {-0.5f * (2.0f * d[1]) / tanW, -(2.0f * d[0]) / tanH};
+                float wvec[3] = {2.0f * d[0], 2.0f * d[1], 2.0f * d[2]};
+                float tvec[2] = {tanW, tanH};
                 // 兩層：1/16 尺寸半徑 6（起點 0）→ 1/8 尺寸半徑 3（起點＝粗層的結果）。vs_init 一定要綁一張材質：
                 // 粗層不用它（vs_p.y＝0），綁 m_Flow（這個 pass 不寫它）
                 auto runFlow = [&](pl_tex curT, pl_tex prevT, pl_tex initT, pl_tex target, float radius, float useInit) {
                     float pvec[2] = {radius, useInit};
                     pl_shader shf = pl_dispatch_begin(m_Dp);
                     pl_shader_desc fd[3] = {sampledTex("vs_cur", curT), sampledTex("vs_prev", prevT), sampledTex("vs_init", initT)};
-                    pl_shader_var gv[3] = {};
-                    gv[0].var = pl_var_vec2("vs_g");
-                    gv[0].data = gvec;
+                    pl_shader_var gv[4] = {};
+                    gv[0].var = pl_var_vec3("vs_w");
+                    gv[0].data = wvec;
                     gv[0].dynamic = true;
+                    gv[3].var = pl_var_vec2("vs_tan");
+                    gv[3].data = tvec;
+                    gv[3].dynamic = true;
                     gv[1].var = pl_var_vec4("vs_fv");
                     gv[1].data = fv;
                     gv[1].dynamic = true;
@@ -1141,7 +1217,7 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
                     cs.descriptors = fd;
                     cs.num_descriptors = 3;
                     cs.variables = gv;
-                    cs.num_variables = 3;
+                    cs.num_variables = 4;
                     if (!pl_shader_custom(shf, &cs)) {
                         pl_dispatch_abort(m_Dp, &shf);
                         return false;
@@ -1343,9 +1419,10 @@ QString XrVideo::takeStatsLine()
         *p50 = v[v.size() / 2] / 1000.0;
         *p95 = v[std::min(v.size() - 1, (v.size() * 95) / 100)] / 1000.0;
     };
-    double c50, c95, g50, g95;
+    double c50, c95, g50, g95, s50, s95;
     pct(m_CpuUs, &c50, &c95);
     pct(m_GpuUs, &g50, &g95);
+    pct(m_SynthGpuUs, &s50, &s95);
     QString line = QStringLiteral("recv=%1 drawn=%2 overwritten=%3 errors=%4 renderThread cpu p50=%5 p95=%6 ms "
                                   "gpu p50=%7 p95=%8 ms mode=%9 %10x%11 stallDropped=%12 noMetaDropped=%13")
                        .arg(m_Received).arg(m_Drawn).arg(m_Overwritten).arg(m_RenderErrors)
@@ -1354,10 +1431,13 @@ QString XrVideo::takeStatsLine()
                        .arg(m_Sw.width).arg(m_Sw.height).arg(m_TestStallDropped).arg(m_NoMetaDropped);
     if (m_Config.synth) {
         // §VR-SYNTH：這個視窗合成了幾張、顯示了幾次合成的那一格
-        line += QStringLiteral(" synth drawn=%1 shown=%2%3").arg(m_SynthDrawn)
+        // 第五版起真的那一張先發布：上面的 gpu 是真的那一張，synthGpu 是之後合成那一張多花的時間
+        line += QStringLiteral(" synth drawn=%1 shown=%2 synthGpu p50=%3 p95=%4 ms%5").arg(m_SynthDrawn)
                     .arg(m_SynthShown.exchange(0, std::memory_order_relaxed))
+                    .arg(s50, 0, 'f', 2).arg(s95, 0, 'f', 2)
                     .arg(m_SynthFailed ? QStringLiteral(" (FAILED: off)") : QString());
         m_SynthDrawn = 0;
+        m_SynthGpuUs.clear();
     }
     m_Received = m_Drawn = m_Overwritten = m_RenderErrors = 0;
     m_CpuUs.clear();

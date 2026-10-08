@@ -67,7 +67,6 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
     注視點編碼已做（§VR-FOVEA，client `--vr-foveation`／設定頁，預設關閉；頭盔無人場次通過，清晰度待使用者戴眼鏡看）。
     10-bit：host 端已做（§VR-10BIT），Frame 的 iris 解碼路徑只給 8-bit 輸出、Main10 會讓 client 崩潰，頭盔上先擋掉；
     **使用者 2026-10-08 決定不做 Frame 的 10-bit**（來源是 8-bit、只對暗處色帶有幫助）；host 端的支援留著不動。
-    另：dmabuf 匯入失敗不該讓 client 崩潰，這個仍要修。
     接著：和 Steam 比延遲（要使用者讀頭盔裡的進階效能圖表）。補幀第一版已做
     （client `--vr-half-rate`＋`--vr-synth`，預設關閉；頭盔無人場次通過，待使用者配戴確認）。VR 設定已進 GUI 設定頁（版面待使用者看）。host 停在登入／鎖定畫面時回明確的錯誤
     （§VR-HOST-LOCKED；鎖定狀態下的實測待做）。
@@ -76,9 +75,10 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
   - 被退回探測的連線，條件恢復後的重新放行（第二次實測沒有回來：探測量到 20～198 Mbps、門檻約 225～285）。
   - 影像每幀分散送出（實測一輪：壞幀少約 3 倍）：重複量測後決定要不要讓 VR session 預設開 `smooth_pacing` 或另訂節拍。
   - §VR-TRACK-LOCK（追蹤樣本鎖到顯示節拍，`--vr-track-lock`，預設關）：頭盔無人場次 MTP 由 38.8～43.0 ms 的鋸齒變成
-    平的 40.6 ms；配戴確認後決定要不要預設開。半速串流時每 10 s 有幾 % 的幀晚一格顯示（slack 很散），原因未查。
+    平的 40.6 ms；配戴確認後決定要不要預設開。半速串流時幀晚一格顯示的問題在補幀第五版處理了（真的那一張先發布）。
+  - 觀察到一場半速串流整場 MTP 高 13 ms：host 上遊戲讀姿態到 Present 多一整幀（18.8 ms，平常 3.4），下一場恢復，原因未查。
+  - 頭盔端 dmabuf 匯入失敗會讓 client 崩潰（目前只有 10-bit 會觸發，已擋掉）：要有除錯版才能定位崩潰點。
   - LATCH 帶線上的幀號（補過包的幀不該進相位量測）；CLIENT_TIMING 仍只走 ENet（不急）。
-  - `video.cpp`：`idr_events` 送出 IDR 時沒有清 `vr_idr_retry_pending`（cooldown 到期後可能多送一張 IDR）。
   - 單一路徑的影像送出也改成非阻塞＋過期丟棄（Windows 對送不動的 Wi-Fi 網卡一次會卡 10 秒；多連線沒啟用時仍是舊行為）。
   - USB 網路（頭盔 NCM gadget ↔ Windows UsbNcm）一有 UDP 流量就卡死，觸發條件未定位；`pnputil /restart-device` 不可靠
     （第二次留下 Port Reset Failed，要實體重插）。
@@ -90,7 +90,7 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
 - **2.0 release notes 必寫**：Android 自 2.0 起改為 release 建置、package `com.piinsta`（原本出貨的是 `com.piinsta.debug`／「VipleStream (Debug)」）。兩者是不同 app，舊版不會原地升級：使用者要安裝新版、重新配對，再自行移除舊的 Debug 版。release keystore 在建置機本機（見 `docs/building.md` §2.4），遺失就無法再發可覆蓋升級的版本。
 - **M1a 後續（不擋 M2a）**：
   - **VR session 的 MP-QUIC 路徑存活**：VR 視訊走 RTP 時 QUIC 上幾乎沒有流量。client 每 500 ms 在 QUIC 送 `'P'` 已消除每場開頭的假 failover，但發生真的路徑事件後，重建的子路徑沒流量撐著，會「regain 3 秒後又判死」來回數次（15 分鐘長測中出現一次，tracking 經 QUIC fallback 仍送達）。rc 前要決定：VR session 乾脆不開 MP-QUIC（ENet 重連 §M01-C 兜底），或讓 keepalive 涵蓋每條子路徑，或等 GA 的 QUIC VR 政策（視訊也走 QUIC）。
-  - `/resume` 的 VR 參數與進行中 session 不一致時回 503（vr_architecture §3.6）未做；H.264 level 限制檢查（C27）未做；`encode_run_sync` 沒有 VR 標記（Windows 全走 async，暫不影響）。
+  - H.264 level 限制檢查（C27）未做；`encode_run_sync` 沒有 VR 標記（Windows 全走 async，暫不影響）。
   - recovery=intra 的協商依據是「probe 選到 Windows NVENC」，不是 `NV_ENC_CAPS_SUPPORT_INTRA_REFRESH`；沒有 IR 的 NVENC 會退回 IDR（已處理 cooldown 內的補送），M1b 改看實際能力。
   - STATS 的 `clkOffsetUs`／`staleCount` 等 M1b 時鐘對映；`vrDegradedPolicy`（show/hold）等 M4a。
   - stub 的 echo age（p50 約 7.5 ms）受 host 顯示器刷新率限制（60 Hz 桌面 → 約 64 fps 擷取）；M1b 的 `display_vr_t` 改由 driver Present 驅動。

@@ -249,6 +249,7 @@ private:
     uint64_t m_RenderErrors = 0;
     std::vector<uint32_t> m_CpuUs;     // 本視窗每新幀 render thread 的 CPU 時間（不含等 GPU）
     std::vector<uint32_t> m_GpuUs;     // 本視窗每新幀等 GPU 做完的時間
+    std::vector<uint32_t> m_SynthGpuUs;  // §VR-SYNTH：真的那一張發布之後，到合成那一張做完的時間
     uint64_t m_TotalDrawn = 0;         // dump 用（XR thread）
     bool m_Dumped = false;
 };
