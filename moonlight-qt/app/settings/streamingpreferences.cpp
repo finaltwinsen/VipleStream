@@ -81,6 +81,7 @@
 #define SER_CAPTURESYSKEYS "capturesyskeys"
 #define SER_KEEPAWAKE "keepawake"
 #define SER_VROVERSCANDEG "vroverscandeg"
+#define SER_VRLATCHDELAYMS "vrlatchdelayms"
 #define SER_VREYEWIDTH "vreyewidth"
 #define SER_VREYEHEIGHT "vreyeheight"
 #define SER_LANGUAGE "language"
@@ -290,6 +291,7 @@ void StreamingPreferences::reload()
     swapFaceButtons = settings.value(SER_SWAPFACEBUTTONS, false).toBool();
     keepAwake = settings.value(SER_KEEPAWAKE, true).toBool();
     vrOverscanDeg = qBound(0.0, settings.value(SER_VROVERSCANDEG, 0.0).toDouble(), 10.0);
+    vrLatchDelayMs = qBound(0.0, settings.value(SER_VRLATCHDELAYMS, 0.0).toDouble(), 20.0);
     // 每眼解析度（2026-10-07 起寫入設定，GUI 啟動的 VR 也吃得到）。範圍同 --vr-eye；超出範圍就用預設
     {
         const int w = settings.value(SER_VREYEWIDTH, 2160).toInt();
@@ -584,6 +586,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);
     settings.setValue(SER_VROVERSCANDEG, vrOverscanDeg);
+    settings.setValue(SER_VRLATCHDELAYMS, vrLatchDelayMs);
     settings.setValue(SER_VREYEWIDTH, vrEyeWidth);
     settings.setValue(SER_VREYEHEIGHT, vrEyeHeight);
 

@@ -35,6 +35,9 @@ int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeo
 void vrmlNoteVideoUsed(int linkIdx);
 // 最近（約 200 ms）實際在送影像的連線數：探測中的連線每秒只送一幀，不算。少於 2 時跨幀等待沒有東西可等。
 int vrmlVideoCarrying(void);
+
+// §VR-LINK-GRACE：有沒有任何一條連線最近還收得到 PONG（ENet 斷線時用來決定要不要撐住 session）
+int vrmlAnyAlive(void);
 // 同一份統計的另外兩個面向（只在影像接收執行緒呼叫）：哪幾條在送（bit i＝連線索引 i），以及每條連線平常比最先
 // 送到的那條晚多久（us；每一幀比各條連線第一個封包的到達時刻）。§VR-LINK-REPAIR 用來決定回報缺包的時機。
 int vrmlVideoCarryMask(void);

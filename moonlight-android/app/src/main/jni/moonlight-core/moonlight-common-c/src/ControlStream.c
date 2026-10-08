@@ -153,6 +153,23 @@ static bool quicControlFallbackAvailable(void) {
     return quicIsFailoverActive() || quicIsConnected();
 }
 
+// §VR-LINK-GRACE（2026-10-08）：VR 多連線還有連線活著（最近 1 s 內收過 PONG）。影像、音訊、追蹤與時間敏感的
+// 控制訊息都在連線上送，ENet 那條斷了不該結束 session。和 QUIC 不同的是連線上沒有通用的控制通道——ENet 斷線期間
+// 其他控制訊息（FEC 狀態、ping、server→client 的觸覺回饋等）就是不送，等 ENet 重連。
+static bool vrLinksAlive(void) {
+    return (VrFlags & VIPLE_VR_SF_ENABLED) != 0 && vrmlAnyAlive() != 0;
+}
+
+// 壓住 connectionTerminated、改進 ENet 重連的條件：QUIC 可當控制通道，或多連線還活著
+static bool controlGraceAvailable(void) {
+    return quicControlFallbackAvailable() || vrLinksAlive();
+}
+
+// ENet 以外還有傳輸活著（重連迴圈用它決定要不要繼續等）
+static bool altTransportAlive(void) {
+    return quicIsConnected() || vrLinksAlive();
+}
+
 // §Q-REMOTE Fix R.3：整段 ENet 重連期間為 1（含每次 5 秒連線嘗試中
 // peer 短暫非 NULL 的窗口），重連成功才歸零。若沒有這個旗標，IDR
 // 恰落在嘗試窗口會經 sendMessageEnet 失敗路徑走 INPUT datagram
@@ -2221,8 +2238,8 @@ enet_main_loop:
                         PltUnlockMutex(&enetMutex);
                         Limelog("Disconnect event timeout expired\n");
 #ifdef VIPLE_MPQUIC
-                        // §Q-REMOTE Fix R.3：failover 或 QUIC 健康都壓制
-                        if (quicControlFallbackAvailable()) {
+                        // §Q-REMOTE Fix R.3：failover 或 QUIC 健康都壓制；§VR-LINK-GRACE：多連線活著也壓制
+                        if (controlGraceAvailable()) {
                             Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: ENet timeout while "
                                     "QUIC transport alive — suppressing connectionTerminated\n");
                             enetReconnectPending = 1;
@@ -2274,7 +2291,7 @@ enet_main_loop:
             // 120s」的誤導 log）。用連線層級的 ConnectionInterrupted 判斷
             // ——它在 LiStopConnection 一開始就設起（Connection.c），
             // teardown 走原始收尾（connectionTerminated 此時本就 no-op）。
-            if (quicControlFallbackAvailable() &&
+            if (controlGraceAvailable() &&  // §VR-LINK-GRACE：多連線活著也壓制
                 !ConnectionInterrupted &&
                 !PltIsThreadInterrupted(&controlReceiveThread)) {
                 Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: control stream "
@@ -2475,8 +2492,8 @@ enet_main_loop:
             // §Q-ENET-GRACE: 當 QUIC failover 正在進行中，ENet 斷線不立即
             // 終止串流。QUIC 已將 video/audio 切到備援路徑，串流仍然活著。
             // 控制輸入（滑鼠 / 鍵盤）暫時中斷，直到用戶重新串流。
-            // §Q-REMOTE Fix R.3：failover 或 QUIC 健康都壓制
-            if (quicControlFallbackAvailable()) {
+            // §Q-REMOTE Fix R.3：failover 或 QUIC 健康都壓制；§VR-LINK-GRACE：多連線活著也壓制
+            if (controlGraceAvailable()) {
                 Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: ENet disconnected while "
                         "QUIC transport alive — suppressing connectionTerminated. "
                         "Stream continues over QUIC (ENet reconnect pending)\n");
@@ -2567,7 +2584,7 @@ enet_reconnect_wait:
             // 離開 ready 就不會回來；ioDead 也算），2 s debounce 後終止 session。
             // ClInternalConnectionTerminated 本身有去重，與 lossStats 的 ping
             // 失敗終止同時發生也無害。
-            if (!quicIsConnected()) {
+            if (!altTransportAlive()) {  // §VR-LINK-GRACE：多連線活著也算
                 if (quicDeadSinceMs == 0) {
                     quicDeadSinceMs = nowMs;
                 }
@@ -2711,7 +2728,7 @@ enet_reconnect_wait:
                     if (cErr != 0) {
                         break;
                     }
-                    if (!quicIsConnected()) {
+                    if (!altTransportAlive()) {  // §VR-LINK-GRACE
                         quicDiedDuringAttempt = true;
                         break;
                     }
@@ -2846,6 +2863,15 @@ static void lossStatsThreadFunc(void* context) {
                 PQUEUED_FRAME_FEC_STATUS queuedFrameStatus;
 
 #ifdef VIPLE_MPQUIC
+                // §VR-LINK-GRACE：ENet 不通（重連中、peer 已銷毀）而且沒有 QUIC，但多連線還活著——這條執行緒留著
+                // （重連後要繼續送 FEC 狀態與 ping），這段期間什麼都不送、不碰 peer，佇列裡的 FEC 狀態丟掉。
+                if (enetControlChannelDown() && !quicIsConnected() && vrLinksAlive()) {
+                    while (LbqPollQueueElement(&frameFecStatusQueue, (void**)&queuedFrameStatus) == LBQ_SUCCESS) {
+                        free(queuedFrameStatus);
+                    }
+                    PltSleepMsInterruptible(&lossStatsThread, PERIODIC_PING_INTERVAL_MS);
+                    continue;
+                }
                 // §Q-ENET-RECONNECT v1.5.183: peer/client 即將被銷毀。
                 // 但如果 QUIC 還活著，改走 QUIC 送 FEC status，不退出。
                 if (enetReconnectPending && !quicIsConnected()) {
@@ -2901,6 +2927,11 @@ static void lossStatsThreadFunc(void* context) {
                             free(queuedFrameStatus);
                             return;
                         }
+                        if (vrLinksAlive()) {
+                            // §VR-LINK-GRACE：ENet 送不出去但多連線還活著 → 這一輪不送了，等接收執行緒判定斷線、重連
+                            free(queuedFrameStatus);
+                            break;
+                        }
 #endif
                         ListenerCallbacks.connectionTerminated(LastSocketFail());
                         free(queuedFrameStatus);
@@ -2940,8 +2971,8 @@ static void lossStatsThreadFunc(void* context) {
                 if (!pingSent) {
                     Limelog("Loss Stats: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
-                    if (quicIsConnected()) {
-                        // QUIC still alive — continue loop, don't terminate
+                    if (quicIsConnected() || vrLinksAlive()) {
+                        // QUIC still alive — continue loop, don't terminate（§VR-LINK-GRACE：多連線活著也一樣）
                     } else if (quicIsFailoverActive()) {
                         return;
                     } else
@@ -3009,6 +3040,9 @@ static void lossStatsThreadFunc(void* context) {
                 free(lossStatsPayload);
                 Limelog("Loss Stats: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
+                if (!quicControlFallbackAvailable() && vrLinksAlive()) {
+                    return;  // §VR-LINK-GRACE：多連線還活著，這則丟掉、不結束 session
+                }
                 if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
                     Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: legacy loss stats "
                             "send failed while QUIC transport alive — stopping "
@@ -3103,6 +3137,9 @@ static void requestIdrFrame(void) {
                                         false)) {
             Limelog("Request IDR Frame: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
+            if (!quicControlFallbackAvailable() && vrLinksAlive()) {
+                return;  // §VR-LINK-GRACE：多連線還活著，這則丟掉、不結束 session
+            }
             if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
                 // §Q-IDR-VIA-QUIC v1.5.177：ENet 死了但 QUIC 還活著。
                 // 改走 QUIC stream #0 送 IDR request 給 server，
@@ -3125,6 +3162,9 @@ static void requestIdrFrame(void) {
                                         false)) {
             Limelog("Request IDR Frame: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
+            if (!quicControlFallbackAvailable() && vrLinksAlive()) {
+                return;  // §VR-LINK-GRACE：多連線還活著，這則丟掉、不結束 session
+            }
             if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
                 // §Q-IDR-VIA-QUIC v1.5.177：同上，改走 QUIC stream #0
                 quicSendIdrMarkerRateLimited("§Q-IDR-VIA-QUIC", "IDR");
@@ -3183,6 +3223,9 @@ static void requestInvalidateReferenceFrames(uint32_t startFrame, uint32_t endFr
                                     false)) {
         Limelog("Request Invalidate Reference Frames: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
+        if (!quicControlFallbackAvailable() && vrLinksAlive()) {
+            return;  // §VR-LINK-GRACE：多連線還活著，這則丟掉、不結束 session
+        }
         if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
             // §Q-IDR-VIA-QUIC v1.5.177：RFI 也走 QUIC fallback。
             // RFI 效果等同 IDR request，server 收到 0x49 就送 IDR。
@@ -3238,6 +3281,9 @@ static void confirmLongtermReferenceFrame(uint32_t frameIndex) {
                               false)) {
         Limelog("LTR frame ACK: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
+        if (!quicControlFallbackAvailable() && vrLinksAlive()) {
+            return;  // §VR-LINK-GRACE：多連線還活著，這則丟掉、不結束 session
+        }
         if (quicControlFallbackAvailable()) { // §Q-REMOTE Fix R.3
             Limelog("[VIPLE-MPQUIC] §Q-ENET-GRACE: LTR ACK send "
                     "failed while QUIC transport alive — ACK dropped "

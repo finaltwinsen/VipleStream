@@ -584,7 +584,12 @@ namespace vr::multilink {
         }
 
         const auto begin = clock::now();
-        const auto deadline = b.enq + fault_delay + opt.video_max_age;
+        // §VR-LINK-FRESH（2026-10-08）：always 模式下，另有一條送達率正常的連線在送時，這條的批次只留四分之一的期限
+        // （約半個幀週期）。送不動的鏈路照原本的期限排隊，送出去的都是晚兩個幀週期的舊資料——頭盔收到時那一幀
+        // 早就由另一條湊齊了，白佔空中時間，還讓頭盔以為這條平常就落後幾十毫秒而延後回報缺包（10-07 晚實測：
+        // 落後 30～50 ms、被採用的封包接近 0）。期限縮短後，它送出去的一定是當下這一幀的資料。
+        const bool fresh_only = opt.video == options_t::video_e::always && good_carrier_besides(L, to_ns(begin));
+        const auto deadline = b.enq + fault_delay + (fresh_only ? opt.video_max_age / 4 : opt.video_max_age);
         size_t sent = 0;
         bool faulted = false;
         if (opt.fault.blocked(L.id, to_ns(b.enq) / 1'000'000)) {  // 以入列時刻判斷：每條連線的同一批入列時刻相同，互補的規則不會把同一批在兩條都丟掉
@@ -1270,6 +1275,20 @@ namespace vr::multilink {
       L.audio_sock.send_to(bufs, L.client_audio, 0, ec);
       (ec ? L.audio_drop : L.audio_pkts).fetch_add(1, std::memory_order_relaxed);
     }
+  }
+
+  bool hub_t::any_alive() const {
+    if (!impl_) {
+      return false;
+    }
+    const int64_t now_ns = to_ns(clock::now());
+    const int n = impl_->count.load(std::memory_order_acquire);
+    for (int i = 0; i < n; ++i) {
+      if (impl_->alive(*impl_->links[i], now_ns)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   std::string hub_t::take_stats_line() {

@@ -593,6 +593,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                          "motion-dependent paths with nobody wearing the headset. The picture swings in the headset - do not wear it. Not saved.");
     parser.addFlagOption("vr-synthetic-hands", "(dev) PCVR: replace both controller poses with a synthetic swing in front of the head (buttons untouched), "
                          "so an unattended session has moving near objects in view. Works with --vr-emulate and on a real XR runtime. Not saved.");
+    parser.addValueOption("vr-latch-delay", "PCVR: wait this many milliseconds (0-20) after the XR runtime wakes the frame loop before picking the "
+                          "newest decoded frame, so each displayed frame is fresher (default 0)");
     parser.addValueOption("vr-eye", "per-eye <width>x<height> for PCVR (default 2160x2160)");
     parser.addValueOption("vr-hz", "HMD refresh rate for PCVR (default 90)");
     parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
@@ -872,6 +874,14 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
     preferences->vrSyntheticHmd = parser.isSet("vr-synthetic-hmd");
     preferences->vrSyntheticHands = parser.isSet("vr-synthetic-hands");
+    if (parser.isSet("vr-latch-delay")) {
+        bool ok = false;
+        const double ms = parser.value("vr-latch-delay").toDouble(&ok);
+        if (!ok || ms < 0.0 || ms > 20.0) {
+            parser.showError(QString("vr-latch-delay must be a number of milliseconds within 0-20: %1").arg(parser.value("vr-latch-delay")));
+        }
+        preferences->vrLatchDelayMs = ms;
+    }
     if (parser.isSet("vr-eye")) {
         auto eye = parser.getResolutionOptionValue("vr-eye");
         if (!inRange(eye.first, VIPLE_VR_EYE_DIM_MIN, VIPLE_VR_EYE_DIM_MAX) ||

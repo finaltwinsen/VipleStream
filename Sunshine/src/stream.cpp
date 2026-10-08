@@ -1002,6 +1002,20 @@ namespace stream {
           break;
         case ENET_EVENT_TYPE_DISCONNECT:
           BOOST_LOG(info) << "CLIENT DISCONNECTED"sv;
+          // §VR-LINK-GRACE（2026-10-08）：ENet 斷了但 VR 多連線還有連線活著 → 不結束 session。影像、音訊、追蹤與
+          // 時間敏感的控制訊息都在連線上送；清掉舊 peer 等 client 的 ENet 重連（同 §Q-ENET-RECONNECT）。
+          // client 真的不見了的話連線 2 s 內也會全部失效，ping timeout 照常收尾。
+          if (session->vrLinks && session->vrLinks->any_alive()) {
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] ENet disconnected but a link is still alive - keeping the session, waiting for the control channel to reconnect";
+            {
+              auto ptslg = _peer_to_session.lock();
+              _peer_to_session->erase(session->control.peer);
+            }
+            enet_peer_reset(session->control.peer);
+            session->control.peer = nullptr;
+            session->pingTimeout = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            break;
+          }
 #ifdef VIPLE_MPQUIC
           // §Q-SERVER-GRACE 2026-05-27: 若 QUIC multipath 仍有可用路徑，
           // 不立即 teardown session。ENet 死了只是失去控制通道（input），
@@ -2961,6 +2975,11 @@ namespace stream {
 
           // §S11-PING-ATOMIC-FIX：比較點需顯式 load——time_point 的
           // operator> 是 template，不會對 atomic 做隱式轉換推導。
+          // §VR-LINK-GRACE：ENet 的 ping 沒到，但 VR 多連線還活著 → 每次延 5 s（連線全部失效後就照常逾時）
+          if (now > session->pingTimeout.load() && session->vrLinks && session->vrLinks->any_alive()) {
+            session->pingTimeout = now + std::chrono::seconds(5);
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] control ping timeout suppressed - a link is still alive, extending 5 s";
+          }
           if (now > session->pingTimeout.load()) {
 #ifdef VIPLE_MPQUIC
             // §Q-SERVER-GRACE: QUIC 仍活著時延長 ping timeout，不 teardown。

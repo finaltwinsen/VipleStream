@@ -1612,6 +1612,10 @@ void XrContext::frameThreadMain()
         }
         if (m_Options.pcvr) {
             pcvrAfterWaitFrame(fs.predictedDisplayTime, static_cast<uint64_t>(fs.predictedDisplayPeriod));
+            if (m_Options.pcvrLatchDelayUs > 0) {
+                // §VR-LATE-LATCH：晚一點才挑影像（預測顯示時間已在上面記下，不受這段等待影響）
+                std::this_thread::sleep_for(std::chrono::microseconds(m_Options.pcvrLatchDelayUs));
+            }
             if (m_VrCtl != nullptr) {
                 // M4a R2：按鍵快照＋frameloop 的 grip pose（xrSyncActions 已在本幀 xrWaitFrame 前做過）
                 m_VrCtl->updateFrame(fs.predictedDisplayTime, m_State.load() == XR_SESSION_STATE_FOCUSED, m_TrackSpace);

@@ -979,6 +979,17 @@ int vrmlVideoCarrying(void) {
     return carryLinks;
 }
 
+// §VR-LINK-GRACE：有沒有任何一條連線「已確認」（最近 VRML_CONFIRM_TIMEOUT_MS 內收過 PONG）
+int vrmlAnyAlive(void) {
+    const uint64_t nowMs = PltGetMillis();
+    for (int i = 0; i < linkCount; i++) {
+        if (isConfirmed(&links[i], nowMs)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int vrmlVideoCarryMask(void) {
     return carryMask;
 }
@@ -1445,6 +1456,7 @@ void vrmlOnS2C(const unsigned char* tlv, int len) { (void)tlv; (void)len; }
 int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeoutMs) { (void)legacy; (void)buffer; (void)size; (void)timeoutMs; *linkIdx = -1; return -1; }
 void vrmlNoteVideoUsed(int linkIdx) { (void)linkIdx; }
 int vrmlVideoCarrying(void) { return 0; }
+int vrmlAnyAlive(void) { return 0; }
 int vrmlVideoCarryMask(void) { return 0; }
 uint32_t vrmlVideoLinkLagUs(int linkIdx) { (void)linkIdx; return 0; }
 int vrmlRecvAudio(SOCKET legacy, char* buffer, int size) { (void)legacy; (void)buffer; (void)size; return -1; }

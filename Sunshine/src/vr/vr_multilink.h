@@ -133,6 +133,9 @@ namespace vr::multilink {
     /// 10 秒統計行（control 執行緒；回傳空字串＝還沒有連線）
     std::string take_stats_line();
 
+    /// §VR-LINK-GRACE：有沒有任何一條連線還活著（最近 2 s 內收過帶 CONFIRMED 的 PING）。任何執行緒
+    bool any_alive() const;
+
   private:
     struct link_t;
     struct impl_t;

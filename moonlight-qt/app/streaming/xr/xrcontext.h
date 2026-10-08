@@ -95,6 +95,10 @@ public:
         // 2026-10-05（dev）：--vr-overscan。PCVR 每眼 FOV 四邊各放大這麼多度：/launch 的 vrFov 與 projection 用同一組
         // 放大後的值（vrOverscan 仍送 0），host 多畫一圈，轉頭時 Frame 端重投影不會露出沒畫面的邊。0＝不放大。
         float pcvrOverscanDeg = 0.0f;
+        // 2026-10-08（§VR-LATE-LATCH）：PCVR 的 frame thread 在 xrWaitFrame 返回後先等這麼久，才挑最新的串流影像交給
+        // runtime。我們的「算圖」只是把解碼好的影像貼上去，幾乎不花時間；runtime 卻在顯示前約 3 個週期就叫醒我們
+        // （Frame 實測 predictAhead 約 26 ms）。晚一點挑，同一個顯示時刻就能用到更新的影像。0＝不等（舊行為）。
+        uint32_t pcvrLatchDelayUs = 0;
         // M4a R2（dev）：PCVR 控制器按鍵改用合成序列（pose 仍來自 runtime），驗 0x5506 打包
         bool testVrInput = false;
         // M4a 收尾（Frame 實測）：>0＝bring-up 時經 XR_FB_display_refresh_rate 列出可用更新率，要求最接近

@@ -2729,6 +2729,7 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     // M4a 收尾：PCVR 明確要求更新率（偏好 vrRefreshHz，預設 90；取 runtime 可用值中最接近的）
     xo.preferredRefreshHz = m_XrPcvr ? static_cast<float>(m_Preferences->vrRefreshHz) : 0.0f;
     xo.testVrInput = m_Preferences->vrTestInput;  // M4a R2（dev）：--vr-test-input
+    xo.pcvrLatchDelayUs = m_XrPcvr ? static_cast<uint32_t>(m_Preferences->vrLatchDelayMs * 1000.0) : 0u;  // §VR-LATE-LATCH
     xo.pcvrOverscanDeg = m_XrPcvr ? static_cast<float>(m_Preferences->vrOverscanDeg) : 0.0f;  // dev：--vr-overscan
     xo.dumpFramePath = isRebuild ? QString() : m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
     xo.testStallMs = isRebuild ? 0 : m_Preferences->xrTestStallMs;             // dev：--xr-test-stall-ms
