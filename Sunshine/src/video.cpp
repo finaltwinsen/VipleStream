@@ -2470,6 +2470,12 @@ namespace video {
           if (vr_state) {
             // idr_events 的來源：起播、client 的 IDR 要求、recovery=idr 的 LOSS
             BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=request f=" << frame_nr;
+            if (vr_idr_retry_pending) {
+              // 等 cooldown 補送的那一張 IDR 被這一張取代了（它本身就是完整的恢復點）：不清掉的話 cooldown
+              // 到期後會再多送一張
+              vr_idr_retry_pending = false;
+              vr_wave.start(1, VIPLE_VR_REFRESH_IDR);
+            }
           }
         }
         else {
