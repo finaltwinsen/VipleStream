@@ -2760,14 +2760,33 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     xo.testVrInput = m_Preferences->vrTestInput;  // M4a R2（dev）：--vr-test-input
     xo.pcvrSynth = m_XrPcvr && m_Preferences->vrHalfRate && m_Preferences->vrSynth;  // §VR-SYNTH：只在半速串流時有意義
     xo.pcvrTrackLock = m_XrPcvr && m_Preferences->vrTrackLock;  // §VR-TRACK-LOCK
+    xo.pcvrTrackRelock = xo.pcvrTrackLock && m_Preferences->effectiveTrackRelock();  // §VR-TRACK-RELOCK（--vr-track-relock 優先）
     xo.pcvrLatchDelayUs = m_XrPcvr ? static_cast<uint32_t>(m_Preferences->vrLatchDelayMs * 1000.0) : 0u;  // §VR-LATE-LATCH
+    xo.pcvrLatchRelatch = m_XrPcvr && m_Preferences->effectiveLatchRelatch();  // §VR-LATCH-RELATCH（--vr-latch-relatch 優先）
+    xo.pcvrLatchAbSec = m_XrPcvr ? m_Preferences->vrLatchAbSec : 0;            // §VR-LATCH A/B
+    // §VR-LATCH-WAIT（--vr-latch-wait 優先）。串流是不是半速要等量到更新率才知道，見 setupXrPcvr() 的 setPcvrStreamDiv
+    xo.pcvrLatchWaitUs = m_XrPcvr ? static_cast<uint32_t>(std::lround(std::clamp(m_Preferences->effectiveLatchWaitMs(), 0.0, 1.0) * 1000.0)) : 0u;
     xo.pcvrOverscanDeg = m_XrPcvr ? static_cast<float>(m_Preferences->vrOverscanDeg) : 0.0f;  // dev：--vr-overscan
     xo.dumpFramePath = isRebuild ? QString() : m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
     xo.testStallMs = isRebuild ? 0 : m_Preferences->xrTestStallMs;             // dev：--xr-test-stall-ms
+    xo.testJitter = (m_XrPcvr && !isRebuild) ? m_Preferences->vrTestJitter : QString();  // dev：--vr-test-jitter（§VR-LDIAG，只給 PCVR）
     xo.testRecenterSec = isRebuild ? 0 : m_Preferences->xrTestRecenterSec;     // dev：--xr-test-recenter-sec
     xo.testPointer = m_Preferences->xrTestPointer;                              // dev：--xr-test-pointer
     xo.testKeyboardText = isRebuild ? QString() : m_Preferences->xrTestKeyboard;   // dev：--xr-test-keyboard
     xo.dumpKeyboardPath = isRebuild ? QString() : m_Preferences->xrDumpKeyboardPath;  // dev：--xr-dump-keyboard
+    if (m_XrPcvr && !isRebuild) {
+        // §VR-LDIAG：這一場 client 端和 latch 有關的設定值。事後看 log 要對得上是哪一組（延後挑影像幾毫秒只看
+        // predictAhead 是猜不準的）。halfRate 是設定值，實際有沒有減半看 [VIPLE-VR-SESSION] half-rate 那一行
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-LDIAG] client cfg: latchDelay=%.1f ms trackLock=%d halfRate=%d synth=%d fovea=%d overscan=%.1f jitter=%s"
+                    " trackRelock=%d latchRelatch=%d latchWait=%.2f ms abSec=%d",
+                    xo.pcvrLatchDelayUs / 1000.0, xo.pcvrTrackLock ? 1 : 0, m_Preferences->vrHalfRate ? 1 : 0, xo.pcvrSynth ? 1 : 0,
+                    m_Preferences->vrFoveation, static_cast<double>(xo.pcvrOverscanDeg),
+                    xo.testJitter.isEmpty() ? "off" : qUtf8Printable(xo.testJitter), xo.pcvrTrackRelock ? 1 : 0,
+                    // 補幀開著時 relatch 與等待都不作用：印實際會用的值（等待另外受「延後＋等待 ≤ 6 ms」限制，
+                    // 而且 Windows 上不作用，見 XrContext::pcvrLatchWaitSupported；生效的上限在 10 s 行的 wait=）
+                    xo.pcvrLatchRelatch && !xo.pcvrSynth ? 1 : 0, xo.pcvrSynth ? 0.0 : xo.pcvrLatchWaitUs / 1000.0, xo.pcvrLatchAbSec);
+    }
     // X5（dev）：--xr-test-fail。首次：bringup＝直接失敗；loss／loss3／exit＝15 s 後模擬。
     // 重建：loss3＝每次都失敗（驗 3 次後退回平面）；loss＝重建成功且不再注入。
     const QString& tf = m_Preferences->xrTestFail;
@@ -3063,6 +3082,7 @@ bool Session::setupXrPcvr()
     if (m_Preferences->vrHalfRate && hz / 2 >= (int)VIPLE_VR_HZ_MIN) {
         m_VrLaunch.refreshHz = hz / 2;
         m_VrLaunch.periodNs *= 2;
+        m_XrContext->setPcvrStreamDiv(2);  // §VR-LATCH-WAIT：串流一幀佔兩個顯示格（沒有新影像的那一格不等）
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SESSION] half-rate: display %d Hz, stream %d Hz", hz, hz / 2);
     }
     if (!vi.timeConversion) {

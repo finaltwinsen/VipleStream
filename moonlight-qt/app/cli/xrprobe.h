@@ -26,6 +26,9 @@ struct XrProbeOptions {
     bool loaderDebug = false;  // dev：行程內設 XR_LOADER_DEBUG=all（loader 的輸出在 stderr）
     QString jsonPath;          // 空 = ProbeUtil::defaultJsonPath("xr-probe")
     bool selftestRay = false;  // M3a X4：只跑射線求交／One-Euro 自測（不需要 runtime）；全過 0、有失敗 14
+    // §VR-LDIAG：只跑 latch 分類與 --vr-test-jitter 產生器的自測（streaming/xr/xrlatchstats.h；不需要 runtime，
+    // 沒有 OpenXR 的建置也跑得到）；全過 0、有失敗 14
+    bool selftestLatch = false;
 };
 
 int runXrProbe(const XrProbeOptions& options);

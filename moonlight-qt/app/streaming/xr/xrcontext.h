@@ -49,6 +49,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "xrinput.h"
+#include "xrlatchstats.h"  // §VR-LDIAG：xrlatch::Classifier（header-only，不依賴 OpenXR）
 #include "xrvrcontrollers.h"
 
 class XrVideo;
@@ -72,6 +73,9 @@ public:
         int testStallMs = 0;
         // X3（dev）：bring-up 後第 N 秒自動 recenter 一次；0＝不用
         int testRecenterSec = 0;
+        // §VR-LDIAG（dev）：--vr-test-jitter。影像 render thread 畫每一張串流影像之前照這個字串延後（xrlatch::Jitter
+        // 的格式），模擬到達抖動；空字串＝不注入
+        QString testJitter;
         // X4：射線滑鼠事件的出口（Session 提供，從 XR frame thread 呼叫；推 SDL_USEREVENT 到 main thread）
         XrInputSink inputSink;
         // X4（dev）：合成射線（不讀控制器），驗證求交→濾波→事件→Li* 路徑
@@ -101,8 +105,26 @@ public:
         uint32_t pcvrLatchDelayUs = 0;
         // 2026-10-08（§VR-TRACK-LOCK）：追蹤樣本的送出時刻鎖到顯示的節拍，相位依 MTP 自動找（見 pcvrTrackPhaseStep）
         bool pcvrTrackLock = false;
+        // 2026-10-08（§VR-TRACK-RELOCK）：鎖定之後有一部分的幀開始用到前一筆樣本（host 的相位移動了，樣本離邊界太近；
+        // 中位數不會跳，原本的維持模式看不出來）就重新搜尋。只在 pcvrTrackLock 開著時有作用
+        bool pcvrTrackRelock = false;
         // 2026-10-08（§VR-SYNTH）：PCVR 半速串流時，沒有新影像的那一格顯示合成影像（見 XrVideo::renderSynth）
         bool pcvrSynth = false;
+        // 2026-10-08（§VR-LATCH-RELATCH）：xrEndFrame 之前再確認一次。frame thread 挑完影像之後、xrEndFrame 之前影像
+        // render thread 又 release 了一張的話，runtime 顯示的是新的那一張、projection 的姿態卻是舊的（錯配一幀，
+        // 原本只計數）；開著就把這一格的 projection 改用新影像自己的姿態。這個空窗只有幾十微秒，救的就是這幾次，
+        // 不是把截止時間往後延。pcvrSynth 開著時不作用。
+        bool pcvrLatchRelatch = false;
+        // 2026-10-08（§VR-LATCH A/B）：> 0＝每這麼多秒把 pcvrLatchRelatch（與之後的等待）在「開／關」之間切換一次，
+        // 同一場裡比對（10 s 行尾的 ab=<0|1> 標示那個視窗是哪一邊）。0＝不切換，一直照設定
+        int pcvrLatchAbSec = 0;
+        // 2026-10-08（§VR-LATCH-WAIT）：延後（pcvrLatchDelayUs）之後，這一格該有的新影像還沒到就再等它，最多這麼久。
+        // 「延後＋等待」不超過 6.0 ms（量過沒事的最後一列；8 ms 時 runtime 把整幀往後排），超過的部分不等；
+        // pcvrSynth 開著時不作用。0＝不等（舊行為）。實際生效的值見 pcvrLatchWaitEffUs()
+        uint32_t pcvrLatchWaitUs = 0;
+        // §VR-LATCH-WAIT：串流一幀佔幾個顯示格（半速串流 2）。用協商出來的值——半速是量到更新率之後才決定的，
+        // 所以 bring-up 之後由 setPcvrStreamDiv() 設；這裡只是起始值
+        int pcvrStreamDiv = 1;
         // M4a R2（dev）：PCVR 控制器按鍵改用合成序列（pose 仍來自 runtime），驗 0x5506 打包
         bool testVrInput = false;
         // M4a 收尾（Frame 實測）：>0＝bring-up 時經 XR_FB_display_refresh_rate 列出可用更新率，要求最接近
@@ -215,6 +237,8 @@ public:
     void queueHaptic(uint8_t device, uint32_t durationUs, float frequencyHz, float amplitude);
     // §VR-FOVEA：server 在協商回應裡確認的注視點編碼強度（%，100＝關）。main thread 在 /launch 之後設，frame thread 讀
     void setPcvrFoveation(int pct) { m_PcvrFoveaPct.store(pct, std::memory_order_relaxed); }
+    // §VR-LATCH-WAIT：串流一幀佔幾個顯示格（半速串流 2）。main thread 在決定串流更新率之後設，frame thread 讀
+    void setPcvrStreamDiv(int div) { m_PcvrStreamDiv.store(div >= 1 ? div : 1, std::memory_order_relaxed); }
     bool trackingThreadMode() const { return m_TimeConv != nullptr; }
 
     // 執行期載入 Vulkan loader（Linux：libvulkan.so.1；Windows：vulkan-1.dll），app 不連 -lvulkan。
@@ -331,6 +355,7 @@ private:
     uint32_t m_QueueFamily = 0;
     VkQueue m_Queue = VK_NULL_HANDLE;
     std::atomic<int> m_PcvrFoveaPct{100};
+    std::atomic<int> m_PcvrStreamDiv{1};   // §VR-LATCH-WAIT（見 setPcvrStreamDiv）
     std::atomic<bool> m_LostByGpu{false};  // frame thread 看到就當成 session loss
     std::atomic<bool> m_GpuWedged{false};  // M4a 收尾：GPU 等待逾時（見 waitSemaphoreBounded）
     uint32_t m_VkApiVersion = 0;
@@ -449,6 +474,9 @@ private:
         uint32_t trkBackoffs = 0;        // 維持中重新搜尋的次數
         double trkLateSum = 0.0;         // 10 s 視窗：每秒晚到比例的總和／秒數
         uint32_t trkLateN = 0;
+        // §VR-TRACK-RELOCK：維持時連續幾秒有 15% 以上的幀用到前一筆樣本；10 s 視窗的比例總和（秒數同 trkLateN）
+        int trkMixRun = 0;
+        double trkPrevSum = 0.0;
         uint64_t lastLatchedSeq = 0;
         bool haveLatch = false;
         uint32_t lastFrameId = 0;
@@ -467,12 +495,94 @@ private:
         uint32_t skip10s = 0;
         // 2026-10-05：xrEndFrame 時 runtime 會用的影像（最後 release 的）不是 projection 姿態所屬的那張（錯配一幀）
         uint32_t mismatch10s = 0;
+        // §VR-LATCH-RELATCH：錯配時改用新影像的姿態成功的次數（10 s 視窗）；這一格原本挑的是不是重複上一張；
+        // 這一格的 pcvrTimingOnLatch 之後 10 s 視窗有沒有印出並歸零過（有的話原本那一筆已經算在上一個視窗）
+        uint32_t relatch10s = 0;
+        bool lastWasRepeat = false;
+        bool windowRolled = false;
+        // §VR-LATCH A/B：目前是哪一邊（true＝開）、這一邊已經跑了幾秒
+        bool abOn = false;
+        double abElapsedSec = 0.0;
+        // §VR-LATCH-WAIT：10 s 視窗——等了幾格、其中等到新影像的、等到逾時的
+        uint32_t waited10s = 0;
+        uint32_t waitSaved10s = 0;
+        uint32_t waitTimeout10s = 0;
+        // §VR-LATCH-WAIT 的 runtime 防護（見 pcvrWaitGuard）：等待暫停到這個時刻、下一次暫停多久（每次加倍，上限 480 s）、
+        // predictAhead 的基準（bring-up 3 s 之後看過的最小值）、連續幾秒高過基準半個週期、最近 10 s 每秒的 XR 漏幀
+        uint64_t waitOffUntilNs = 0;
+        uint32_t waitCooldownSec = 60;
+        int64_t waitPaBaseNs = 0;
+        int waitPaHighRun = 0;
+        uint32_t waitMissed[10] = {};
+        uint32_t waitMissedIdx = 0;
+        uint32_t waitMissedLast = 0;
+        bool waitMissedInit = false;
+        // §VR-LDIAG：每個顯示格的內容年齡（含重複那幾格）。目前這張影像第一次顯示時的 MTP（0＝沒量到）、之後重複了幾格
+        uint32_t lastMtpUs = 0;
+        uint32_t repRun = 0;
+        bool lastAgePushed = false;      // 上一次 pcvrTimingOnLatch 有沒有記一筆年齡
         std::vector<int32_t> slack1s;
         std::vector<uint32_t> render1s;
         std::vector<uint32_t> mtp1sUs;
         std::vector<uint32_t> mtp10sUs;
     } m_PcvrTiming;
     void pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta,
-                           uint32_t echoSampleId, uint64_t latchNs);
+                           uint32_t echoSampleId, uint64_t latchNs, uint32_t periodUs);
+    // §VR-LATCH-RELATCH：這一格改送另一張影像（參數是新的那一張）——把 pcvrTimingOnLatch 對原本那張記的帳改過來
+    void pcvrTimingRelatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta, uint32_t echoSampleId,
+                           const float renderRot[4], const float renderPos[3], uint64_t nowNs, uint32_t periodUs);
     void pcvrTimingTick(uint64_t nowNs, uint64_t periodNs);
+
+    // §VR-LDIAG（2026-10-08）：逐張的發布／latch 量測，只附加、不影響呈現。全部只在 frame thread 存取。
+    struct LatchDiag {
+        uint64_t drainedSeq = 0;           // 已經從 XrVideo 抄過的最後一筆發布紀錄
+        int64_t lastPdt = 0;               // 上一格的 predictedDisplayTime（XrTime，ns）
+        int64_t dispTick = 0;              // 顯示格序號（由相鄰兩格預測顯示時間的差累加）
+        uint64_t secStartNs = 0;           // 1 s 視窗的起點
+        xrlatch::Classifier cls;           // late／lateShift／gap／early／catchup
+        uint32_t hist[64] = {};            // 10 s：發布到「第一個挑得到它的 latch」還有多久，250 µs 一格
+        uint32_t phN[64] = {};             // 60 s：gpu-by-phase——到達相位（顯示格點之後，250 µs 一格）的張數
+        uint64_t phSum[64] = {};           //       那一格的 render 時間總和（µs）
+        uint32_t phMax[64] = {};           //       那一格的 render 時間最大值（µs）
+        std::vector<uint32_t> render1s;    // 這一秒每張的 render 時間（到達→GPU 做完）
+        uint32_t rtypUs = 0;               // 上一秒 render 時間的 p25（「沒被卡住」的典型值；0＝還沒有）
+        std::vector<uint32_t> pubLag;      // 10 s：GPU 做完→發布
+        std::vector<uint32_t> wake2latch;  // 10 s：xrWaitFrame 返回→挑影像
+        std::vector<uint32_t> latchPhase;  // 10 s：挑影像的時刻在顯示格點之後多久
+        std::vector<uint32_t> age10s;      // 10 s：每個顯示格的內容年齡（µs；重複的格＝第一次顯示的 MTP＋重複格數×週期）
+        uint32_t held10s = 0;              // 10 s：render 時間比典型值多 1 ms 以上的張數（被 GPU 忙碌期卡住）
+        uint32_t heldMiss10s = 0;          //       其中差不到 1.5 ms 就趕得上前一個 latch 的
+        uint32_t windows = 0;              // 已經印過幾個 10 s 視窗（每 6 個印一次 gpu-by-phase）
+        // pcvrTimingTick 的 10 s 區塊設：這一格送出（xrEndFrame）之後要印 [VIPLE-VR-LDIAG]；那個視窗的 A/B 是哪一邊
+        bool logDue = false;
+        bool logAb = false;
+    } m_LatchDiag;
+    void pcvrLatchDiag(bool latched, uint64_t seq, uint64_t latchNs, uint64_t wakeNs, XrTime predictedDisplayTime,
+                       uint64_t periodNs);
+    void pcvrLatchDiagLog();
+    // §VR-LATCH-WAIT：這個平台能不能用「等這一格的影像」。「延後＋等待 ≤ 6.0 ms」的上限靠 condition_variable 的逾時
+    // 準時醒來才守得住；Windows 的逾時是毫秒級的（開發機實測，MSVC 的 STL：計時器刻度 1 ms 時超過截止時間 p50
+    // 0.6～0.7 ms、p95 1.5～1.9 ms，系統預設的刻度下約 14 ms），等不到影像的那一格會超過 6 ms 很多，所以 Windows 上
+    // 一律不等（等同沒開，bring-up 時印一行警告）。Linux（頭盔）的逾時走高解析度計時器（libstdc++ 用 CLOCK_MONOTONIC
+    // 的 pthread_cond_clockwait），預期只超過數十微秒——這個數字還沒有在頭盔上量過，看 10 s 行的 timeout 與 predictAhead。
+    static constexpr bool pcvrLatchWaitSupported()
+    {
+#if defined(Q_OS_WIN)
+        return false;
+#else
+        return true;
+#endif
+    }
+    // §VR-LATCH-WAIT：實際會等多久（µs）。設定值夾在「延後＋等待 ≤ 6.0 ms」之內；非 PCVR、補幀開著、或這個平台
+    // 不能用（見上）時 0
+    uint32_t pcvrLatchWaitEffUs() const
+    {
+        if (!m_Options.pcvr || m_Options.pcvrSynth || m_Options.pcvrLatchWaitUs == 0) {
+            return 0;
+        }
+        const uint32_t room = m_Options.pcvrLatchDelayUs < 6000u ? 6000u - m_Options.pcvrLatchDelayUs : 0u;
+        const uint32_t waitUs = m_Options.pcvrLatchWaitUs < room ? m_Options.pcvrLatchWaitUs : room;
+        return pcvrLatchWaitSupported() ? waitUs : 0u;
+    }
+    void pcvrWaitGuard(uint64_t nowNs, uint64_t periodNs, uint32_t xrMissedTotal);
 };

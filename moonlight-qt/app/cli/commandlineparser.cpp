@@ -1,5 +1,6 @@
 #include "commandlineparser.h"
 #include "streaming/video/bitstreamdump.h"  // §SF-PROBE：stream --dump-bitstream
+#include "streaming/xr/xrlatchstats.h"      // §VR-LDIAG：--vr-test-jitter 的格式檢查（header-only，不依賴 OpenXR）
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -577,6 +578,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("xr-runtime-json", "(dev) OpenXR runtime manifest for --display-target xr-desktop (in-process only)");
     parser.addValueOption("xr-dump-frame", "(dev) save the 300th XR video frame as PNG (longest side <= 1280) for --display-target xr-desktop");
     parser.addValueOption("xr-test-stall-ms", "(dev) drop video frames for N ms starting 20 s after the first XR frame (stale-state test)");
+    parser.addValueOption("vr-test-jitter", "(dev) PCVR arrival-jitter injection that delays each stream frame before it is rendered (not saved): "
+                          "worn | light | early[=<baseUs>:<permille>] | scan=<maxUs>, optionally followed by "
+                          ",shift=<startSec>:<us>:<durSec> and ,seed=<n>");
     parser.addValueOption("xr-test-recenter-sec", "(dev) recenter the XR screen once N seconds after XR bring-up");
     parser.addFlagOption("xr-test-pointer", "(dev) synthetic XR pointer ray (4 s circle, trigger click at the top) instead of the controllers");
     parser.addFlagOption("vr-test-input", "(dev) PCVR: synthetic 8 s controller button sequence (A, B, trigger ramp, stick, grip, menu+trigger system combo) packed into 0x5506; poses still come from the runtime");
@@ -595,12 +599,22 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                          "so an unattended session has moving near objects in view. Works with --vr-emulate and on a real XR runtime. Not saved.");
     parser.addToggleOption("vr-10bit", "PCVR: ask the host for 10-bit HEVC (Main10, SDR) instead of 8-bit");
     parser.addToggleOption("vr-track-lock", "PCVR: lock the tracking samples to the display refresh and tune their phase from the measured latency");
+    parser.addChoiceOption("vr-track-relock", "PCVR with --vr-track-lock: whether to search for the tracking phase again when part of the frames "
+                           "start using the previous sample at the locked phase (this run only, the saved setting is not changed)",
+                           {"on", "off"});
     parser.addToggleOption("vr-half-rate", "PCVR: run the game and the stream at half the headset refresh rate (the headset still displays at full rate)");
     parser.addToggleOption("vr-synth", "PCVR with --vr-half-rate: show a motion-extrapolated frame on the display refreshes that have no new stream frame");
     parser.addValueOption("vr-foveation", "PCVR: foveated encoding - pixel density straight ahead as a percentage of uniform sampling "
                           "(100 = off, up to 250; the edges get fewer pixels, the stream size stays the same)");
     parser.addValueOption("vr-latch-delay", "PCVR: wait this many milliseconds (0-20) after the XR runtime wakes the frame loop before picking the "
                           "newest decoded frame, so each displayed frame is fresher (default 0)");
+    parser.addChoiceOption("vr-latch-relatch", "PCVR: whether to re-check the newest frame right before the XR frame is submitted and, when a newer "
+                           "one was released in between, show it with its own render pose (this run only, the saved setting is not "
+                           "changed; no effect with --vr-synth)",
+                           {"on", "off"});
+    parser.addValueOption("vr-latch-wait", "PCVR: after --vr-latch-delay, wait up to this many milliseconds (0-1.0) for the stream frame that is due "
+                          "on this display refresh when it has not arrived yet; the delay plus the wait never exceeds 6 ms "
+                          "(this run only, the saved setting is not changed; no effect with --vr-synth; default 0)");
     parser.addValueOption("vr-eye", "per-eye <width>x<height> for PCVR (default 2160x2160)");
     parser.addValueOption("vr-hz", "HMD refresh rate for PCVR (default 90)");
     parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
@@ -837,6 +851,17 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         }
         preferences->xrTestStallMs = v;
     }
+    if (parser.isSet("vr-test-jitter")) {
+        // §VR-LDIAG（dev）：格式在這裡就檢查（寫錯不可以默默變成不注入）；實際的延後在 XrVideo 的影像 render thread
+        const QString spec = parser.value("vr-test-jitter");
+        xrlatch::Jitter jitter;
+        std::string jitterErr;
+        if (spec.isEmpty() || !jitter.configure(spec.toStdString(), &jitterErr)) {
+            parser.showError(QString("vr-test-jitter: %1 (got '%2')")
+                                 .arg(spec.isEmpty() ? QString("a spec is required") : QString::fromStdString(jitterErr), spec));
+        }
+        preferences->vrTestJitter = spec;
+    }
     if (parser.isSet("xr-test-recenter-sec")) {
         bool ok = false;
         const int v = parser.value("xr-test-recenter-sec").toInt(&ok);
@@ -883,6 +908,10 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     preferences->vrHalfRate = parser.getToggleOptionValue("vr-half-rate", preferences->vrHalfRate);
     preferences->vr10Bit = parser.getToggleOptionValue("vr-10bit", preferences->vr10Bit);
     preferences->vrTrackLock = parser.getToggleOptionValue("vr-track-lock", preferences->vrTrackLock);
+    if (parser.isSet("vr-track-relock")) {
+        // §VR-TRACK-RELOCK：只覆寫這一次（不改 vrTrackRelock，session 開始時存檔的仍是原本的設定）
+        preferences->cliTrackRelock = parser.getChoiceOptionValue("vr-track-relock").compare("on", Qt::CaseInsensitive) == 0 ? 1 : 0;
+    }
     preferences->vrSynth = parser.getToggleOptionValue("vr-synth", preferences->vrSynth);
     if (parser.isSet("vr-foveation")) {
         bool ok = false;
@@ -899,6 +928,19 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError(QString("vr-latch-delay must be a number of milliseconds within 0-20: %1").arg(parser.value("vr-latch-delay")));
         }
         preferences->vrLatchDelayMs = ms;
+    }
+    if (parser.isSet("vr-latch-relatch")) {
+        // §VR-LATCH-RELATCH：只覆寫這一次（不改 vrLatchRelatch）
+        preferences->cliLatchRelatch = parser.getChoiceOptionValue("vr-latch-relatch").compare("on", Qt::CaseInsensitive) == 0 ? 1 : 0;
+    }
+    if (parser.isSet("vr-latch-wait")) {
+        // §VR-LATCH-WAIT：只覆寫這一次（不改 vrLatchWaitMs）
+        bool ok = false;
+        const double ms = parser.value("vr-latch-wait").toDouble(&ok);
+        if (!ok || !(ms >= 0.0 && ms <= 1.0)) {
+            parser.showError(QString("vr-latch-wait must be a number of milliseconds within 0-1.0: %1").arg(parser.value("vr-latch-wait")));
+        }
+        preferences->cliLatchWaitMs = ms;
     }
     if (parser.isSet("vr-eye")) {
         auto eye = parser.getResolutionOptionValue("vr-eye");
@@ -1143,6 +1185,10 @@ void XrProbeCommandLineParser::parse(const QStringList &args)
     parser.addOption(QCommandLineOption("selftest-ray",
                                         "Only run the XR pointer math self-test (ray vs quad/cylinder, UV round trip, One-Euro); "
                                         "no runtime needed. Exit 0 all pass, 14 on failure."));
+    parser.addOption(QCommandLineOption("selftest-latch",
+                                        "Only run the PCVR latch statistics self-test (frame classification on scripted sequences, "
+                                        "the --vr-test-jitter generator); no runtime and no OpenXR build needed. "
+                                        "Exit 0 all pass, 14 on failure."));
     parser.addOption(QCommandLineOption("json",
                                         "Write the JSON report to <path> (default: probe-xr-probe-<ms>-<pid>.json in the log directory).",
                                         "path"));
@@ -1169,6 +1215,10 @@ void XrProbeCommandLineParser::parse(const QStringList &args)
     }
     m_Options.loaderDebug = parser.isSet("loader-debug");
     m_Options.selftestRay = parser.isSet("selftest-ray");
+    m_Options.selftestLatch = parser.isSet("selftest-latch");
+    if (m_Options.selftestRay && m_Options.selftestLatch) {
+        parser.showError("selftest-ray and selftest-latch cannot be combined");
+    }
     if (parser.isSet("xr-runtime-json")) {
         const QString path = parser.value("xr-runtime-json");
         if (path.isEmpty()) {

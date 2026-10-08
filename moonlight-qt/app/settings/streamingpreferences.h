@@ -456,6 +456,7 @@ public:
     QString xrRuntimeJsonPath;       // dev（M3a X1）：xr-desktop 的 OpenXR runtime manifest，行程內設 XR_RUNTIME_JSON
     QString xrDumpFramePath;         // dev（M3a X2）：XR 影像 quad 第 300 幀讀回存 PNG（最長邊 ≤ 1280），不存設定
     int xrTestStallMs = 0;           // dev（M3a X3）：第一幀 20 s 後丟 N ms 影像幀，驗 stale 轉換，不存設定
+    QString vrTestJitter;            // dev（§VR-LDIAG）：--vr-test-jitter，PCVR 影像的到達抖動注入（xrlatch::Jitter 的格式），不存設定
     int xrTestRecenterSec = 0;       // dev（M3a X3）：bring-up 後第 N 秒自動 recenter 一次，不存設定
     bool xrTestPointer = false;       // §VR M3a X4（dev）：--xr-test-pointer，不寫入設定
     bool vrTestInput = false;         // §VR M4a R2（dev）：--vr-test-input 合成控制器按鍵，不寫入設定
@@ -464,6 +465,26 @@ public:
     bool vrSynth = false;             // §VR-SYNTH：--vr-synth，半速串流時合成中間那一格；寫入設定（vrsynth）
     bool vr10Bit = false;             // §VR-10BIT：--vr-10bit，PCVR 要求 HEVC Main10（SDR）；寫入設定（vr10bit）。PCVR 不看 enableHdr
     bool vrTrackLock = false;         // §VR-TRACK-LOCK：--vr-track-lock，追蹤樣本鎖到顯示的節拍；寫入設定（vrtracklock）
+    // §VR-TRACK-RELOCK：鎖相之後有一部分的幀開始用到前一筆樣本就重新搜尋（只在 vrTrackLock 開著時有作用）；寫入設定
+    // （vrtrackrelock，預設關）。--vr-track-relock on|off 只覆寫這一次、不存設定（-1＝命令列沒指定）：session 開始時
+    // 整份偏好會被存檔，無人場次的參數不可以留在頭盔上
+    bool vrTrackRelock = false;
+    int cliTrackRelock = -1;
+    bool effectiveTrackRelock() const { return cliTrackRelock >= 0 ? cliTrackRelock == 1 : vrTrackRelock; }
+    // §VR-LATCH-RELATCH：xrEndFrame 之前再確認一次，錯配的那一幀改用新影像自己的姿態；寫入設定（vrlatchrelatch，預設關）。
+    // --vr-latch-relatch on|off 只覆寫這一次、不存設定（-1＝命令列沒指定）。補幀（vrSynth）開著時不作用
+    bool vrLatchRelatch = false;
+    int cliLatchRelatch = -1;
+    bool effectiveLatchRelatch() const { return cliLatchRelatch >= 0 ? cliLatchRelatch == 1 : vrLatchRelatch; }
+    // §VR-LATCH A/B：每這麼多秒把 vrLatchRelatch（與 vrLatchWaitMs）在開／關之間切換一次，同一場裡比對；寫入設定
+    // （vrlatchabsec；0＝不切換，20～600）。沒有命令列選項
+    int vrLatchAbSec = 0;
+    // §VR-LATCH-WAIT：延後挑影像之後，這一格該有的新影像還沒到就再等它，最多幾毫秒（0～1.0；0＝不等）；寫入設定
+    // （vrlatchwaitms，預設 0）。「延後＋等待」超過 6.0 ms 的部分不等。--vr-latch-wait <ms> 只覆寫這一次、不存設定
+    // （負值＝命令列沒指定）。補幀（vrSynth）開著時不作用
+    double vrLatchWaitMs = 0.0;
+    double cliLatchWaitMs = -1.0;
+    double effectiveLatchWaitMs() const { return cliLatchWaitMs >= 0.0 ? cliLatchWaitMs : vrLatchWaitMs; }
     bool vrHalfRate = false;          // §VR-HALF-RATE：--vr-half-rate，串流跑顯示更新率的一半；寫入設定（vrhalfrate）
     double vrLatchDelayMs = 0.0;      // §VR-LATE-LATCH：--vr-latch-delay，frame thread 晚幾毫秒才挑影像（0～20）；寫入設定（vrlatchdelayms）
     double vrOverscanDeg = 0.0;       // --vr-overscan：每眼 FOV 四邊各放大幾度（0～10）。2026-10-07 起寫入設定（vroverscandeg），GUI 啟動的 VR 也吃得到

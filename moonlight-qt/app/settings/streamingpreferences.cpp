@@ -85,6 +85,10 @@
 #define SER_VRHALFRATE "vrhalfrate"
 #define SER_VR10BIT "vr10bit"
 #define SER_VRTRACKLOCK "vrtracklock"
+#define SER_VRTRACKRELOCK "vrtrackrelock"
+#define SER_VRLATCHRELATCH "vrlatchrelatch"
+#define SER_VRLATCHABSEC "vrlatchabsec"
+#define SER_VRLATCHWAITMS "vrlatchwaitms"
 #define SER_VRSYNTH "vrsynth"
 #define SER_VRFOVEATION "vrfoveation"
 #define SER_VREYEWIDTH "vreyewidth"
@@ -300,6 +304,14 @@ void StreamingPreferences::reload()
     vrHalfRate = settings.value(SER_VRHALFRATE, false).toBool();
     vr10Bit = settings.value(SER_VR10BIT, false).toBool();
     vrTrackLock = settings.value(SER_VRTRACKLOCK, false).toBool();
+    vrTrackRelock = settings.value(SER_VRTRACKRELOCK, false).toBool();
+    vrLatchRelatch = settings.value(SER_VRLATCHRELATCH, false).toBool();
+    {
+        // 0＝不切換；其他值要在 20～600 秒內（視窗是 10 s 一個，太短比不出東西），超出範圍當成 0
+        const int ab = settings.value(SER_VRLATCHABSEC, 0).toInt();
+        vrLatchAbSec = (ab >= 20 && ab <= 600) ? ab : 0;
+    }
+    vrLatchWaitMs = qBound(0.0, settings.value(SER_VRLATCHWAITMS, 0.0).toDouble(), 1.0);
     vrSynth = settings.value(SER_VRSYNTH, false).toBool();
     vrFoveation = qBound(100, settings.value(SER_VRFOVEATION, 100).toInt(), 250);
     // 每眼解析度（2026-10-07 起寫入設定，GUI 啟動的 VR 也吃得到）。範圍同 --vr-eye；超出範圍就用預設
@@ -600,6 +612,10 @@ void StreamingPreferences::save()
     settings.setValue(SER_VRHALFRATE, vrHalfRate);
     settings.setValue(SER_VR10BIT, vr10Bit);
     settings.setValue(SER_VRTRACKLOCK, vrTrackLock);
+    settings.setValue(SER_VRTRACKRELOCK, vrTrackRelock);
+    settings.setValue(SER_VRLATCHRELATCH, vrLatchRelatch);
+    settings.setValue(SER_VRLATCHABSEC, vrLatchAbSec);
+    settings.setValue(SER_VRLATCHWAITMS, vrLatchWaitMs);
     settings.setValue(SER_VRSYNTH, vrSynth);
     settings.setValue(SER_VRFOVEATION, vrFoveation);
     settings.setValue(SER_VREYEWIDTH, vrEyeWidth);

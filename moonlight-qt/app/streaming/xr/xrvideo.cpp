@@ -65,7 +65,16 @@ const char* modeName(int m)
 
 }  // namespace
 
-XrVideo::XrVideo(XrContext* ctx, const Config& config) : m_Ctx(ctx), m_Config(config) {}
+XrVideo::XrVideo(XrContext* ctx, const Config& config) : m_Ctx(ctx), m_Config(config)
+{
+    if (m_Config.synth) {
+        // §VR-SYNTH 的第二次發布（合成的那一半）不在 queue 鎖內，atomicPublish 的保證（queue 鎖內看到 releaseNo 變了，
+        // 快照就一定是新的那一張）對它不成立，它也不叫醒 waitNewerThan()。XrContext::bringUp 本來就不會兩個一起開，
+        // 這裡再擋一次，免得日後只改到其中一邊
+        m_Config.atomicPublish = false;
+        m_Config.notifyPublish = false;
+    }
+}
 
 XrVideo::~XrVideo()
 {
@@ -130,6 +139,18 @@ bool XrVideo::init(QString* error)
         return false;
     }
     m_SemValue = 0;
+    if (!m_Config.testJitter.isEmpty()) {
+        // dev（--vr-test-jitter）：格式在命令列解析時已經檢查過，這裡再不對就不注入
+        std::string jerr;
+        if (m_Jitter.configure(m_Config.testJitter.toStdString(), &jerr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev test jitter: delaying stream frames before render (%s)",
+                        m_Jitter.spec().c_str());
+        }
+        else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev test jitter ignored (%s): %s",
+                        qUtf8Printable(m_Config.testJitter), jerr.c_str());
+        }
+    }
     m_Usable.store(true, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lk(m_MailboxMutex);
@@ -560,6 +581,8 @@ void XrVideo::dumpTexture(pl_tex tex)
 bool XrVideo::renderNewFrame(AVFrame* frame)
 {
     const uint64_t t0 = nowUs();
+    // §VR-LDIAG：發布紀錄要帶 pts（host 的 Present 時刻，90 kHz）；發布時 frame 可能已經放掉，先抄下來
+    const int64_t pts90 = frame->pts;
     // M4a R1/R4：PCVR 的 render pose（decoder 以 pts 查到後放進 VrRenderMetaRing）。只在這裡查一次：
     // render 要 10～20 ms，期間 ring 會被後面的幀寫入，R1 在 render 之後才查，碰撞時查不到 → 發布成
     // 無 meta → XR thread 當成 no-video 閃一幀 loading（R4 實測每 10 s 約 2 次）。
@@ -716,9 +739,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         av_frame_free(&frame);
     }
 
-    const uint64_t releaseNo = releaseImage();
-    if (rendered && held) {
-        std::lock_guard<std::mutex> lk(m_SwMutex);
+    // 發布（呼叫端持 m_SwMutex）：frame thread 的 current() 從這裡開始看得到這張影像
+    auto publishLocked = [&](uint64_t releaseNo, uint64_t tPub) {
         m_Published.releaseNo = releaseNo;
         m_Published.subImage.swapchain = m_Sw.swapchain;
         m_Published.subImage.imageRect.offset = {0, 0};
@@ -736,6 +758,36 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         m_Published.hasMeta = hasMeta;
         m_Published.meta = meta;
         m_HavePublished = true;
+        m_Published.publishedUs = tPub;
+        // §VR-LDIAG：每一張發布的影像記一筆（被跳過、沒顯示的也有），frame thread 用 drainPublished() 抄走
+        m_PubRing[m_PubHead++ % kPubRing] = {m_Published.seq, pts90, t0, tGpuEnd, tPub};
+    };
+    if (m_Config.atomicPublish) {
+        // §VR-LATCH-RELATCH：release 與發布放進同一段 queue 鎖。原本 release 之後、發布之前有一小段空窗——frame thread
+        // 在 xrEndFrame 的 queue 鎖內看到 releaseNo 變了，快照卻可能還是舊的；放在一起就保證 peek() 拿到的是新的那一張。
+        // 唯一的巢狀鎖：queueMutex → m_SwMutex（見 xrvideo.h 檔頭的執行緒模型）。
+        XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
+        std::lock_guard<std::mutex> q(m_Ctx->queueMutex());
+        xrReleaseSwapchainImage(m_Sw.swapchain, &ri);
+        const uint64_t releaseNo = m_ReleaseNo.fetch_add(1, std::memory_order_relaxed) + 1;
+        const uint64_t tPub = nowUs();
+        if (rendered && held) {
+            std::lock_guard<std::mutex> lk(m_SwMutex);
+            publishLocked(releaseNo, tPub);
+        }
+    }
+    else {
+        const uint64_t releaseNo = releaseImage();
+        const uint64_t tPub = nowUs();
+        if (rendered && held) {
+            std::lock_guard<std::mutex> lk(m_SwMutex);
+            publishLocked(releaseNo, tPub);
+        }
+    }
+    if (m_Config.notifyPublish && rendered && held) {
+        // §VR-LATCH-WAIT：frame thread 可能正在等這一格的影像（waitNewerThan）。鎖都放掉了才叫醒。
+        // §VR-SYNTH 的第二次發布（下面）沿用同一個 seq，不叫
+        m_PubCv.notify_all();
     }
     {
         std::lock_guard<std::mutex> lk(m_StatsMutex);
@@ -817,6 +869,11 @@ void XrVideo::renderThreadMain()
             av_frame_free(&f);
             continue;
         }
+        // dev（--vr-test-jitter）：先睡一下再畫，等同這一張晚到（到達時刻在 renderNewFrame 才取）。不持任何鎖；
+        // 睡的時候進來的幀照舊放進 mailbox（latest wins）
+        if (const uint32_t jitUs = jitterNextUs()) {
+            std::this_thread::sleep_for(std::chrono::microseconds(jitUs));
+        }
         int outW = f->width, outH = f->height;
         outputSize(f->width, f->height, &outW, &outH);
         if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, outW, m_Config.synth ? outH * 2 : outH)) {
@@ -852,6 +909,65 @@ bool XrVideo::current(Current* out)
         }
     }
     return true;
+}
+
+bool XrVideo::peek(Current* out)
+{
+    std::lock_guard<std::mutex> lk(m_SwMutex);
+    if (!m_HavePublished || m_Published.aspect <= 0.0f) {
+        return false;
+    }
+    *out = m_Published;
+    return true;
+}
+
+bool XrVideo::latest(uint64_t* seq, uint64_t* pubUs)
+{
+    std::lock_guard<std::mutex> lk(m_SwMutex);
+    if (!m_HavePublished) {
+        return false;
+    }
+    *seq = m_Published.seq;
+    *pubUs = m_Published.publishedUs;
+    return true;
+}
+
+bool XrVideo::waitNewerThan(uint64_t seq, uint64_t deadlineUs)
+{
+    // nowUs() 與 frame thread 的時鐘都是 steady_clock，deadlineUs 可以直接當成它的時間點
+    const std::chrono::steady_clock::time_point deadline{std::chrono::microseconds(static_cast<int64_t>(deadlineUs))};
+    std::unique_lock<std::mutex> lk(m_SwMutex);
+    return m_PubCv.wait_until(lk, deadline, [&] { return m_HavePublished && m_Published.seq != seq; });
+}
+
+size_t XrVideo::drainPublished(uint64_t afterSeq, uint64_t notAfterUs, PubRec* out, size_t max)
+{
+    std::lock_guard<std::mutex> lk(m_SwMutex);
+    size_t n = 0;
+    for (uint64_t i = m_PubHead > kPubRing ? m_PubHead - kPubRing : 0; i < m_PubHead && n < max; i++) {
+        const PubRec& r = m_PubRing[i % kPubRing];
+        if (r.seq <= afterSeq) {
+            continue;
+        }
+        if (r.pubUs > notAfterUs) {
+            break;  // 發布時刻隨序號遞增：後面的更晚，留給下一次
+        }
+        out[n++] = r;
+    }
+    return n;
+}
+
+uint32_t XrVideo::jitterNextUs()
+{
+    if (!m_Jitter.enabled()) {
+        return 0;
+    }
+    const uint32_t d = m_Jitter.nextUs(nowUs());
+    if (d > 0) {
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        m_JitUs.push_back(d);
+    }
+    return d;
 }
 
 namespace {
@@ -1438,6 +1554,13 @@ QString XrVideo::takeStatsLine()
                     .arg(m_SynthFailed ? QStringLiteral(" (FAILED: off)") : QString());
         m_SynthDrawn = 0;
         m_SynthGpuUs.clear();
+    }
+    if (m_Jitter.enabled()) {
+        // dev（--vr-test-jitter）：這個視窗有幾張被延後、延後時間的 p95
+        double j50, j95;
+        pct(m_JitUs, &j50, &j95);
+        line += QStringLiteral(" jit n=%1 p95=%2 ms").arg(m_JitUs.size()).arg(j95, 0, 'f', 2);
+        m_JitUs.clear();
     }
     m_Received = m_Drawn = m_Overwritten = m_RenderErrors = 0;
     m_CpuUs.clear();

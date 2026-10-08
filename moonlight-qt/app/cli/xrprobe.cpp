@@ -18,6 +18,7 @@
 
 #include "probeutil.h"
 #include "backend/sfenv.h"
+#include "streaming/xr/xrlatchstats.h"  // §VR-LDIAG：--selftest-latch（header-only，沒有 OpenXR 的建置也有）
 #include "streaming/xr/xrruntimejson.h"
 
 #ifdef HAVE_OPENXR
@@ -347,6 +348,36 @@ int runXrProbe(const XrProbeOptions& options)
 #else
         ProbeUtil::printLine(kTag, "selftest-ray: this build has no OpenXR (CONFIG+=openxr)");
 #endif
+        root[QStringLiteral("rc")] = rc;
+        QString writtenPath = jsonPath;
+        if (!ProbeUtil::writeJson(jsonPath, root)) {
+            writtenPath.clear();
+            if (rc == ProbeUtil::kExitOk) {
+                rc = ProbeUtil::kExitJsonWriteFailed;
+            }
+        }
+        return ProbeUtil::finish(rc, writtenPath);
+    }
+
+    if (options.selftestLatch) {
+        // §VR-LDIAG：latch 分類（腳本序列）與 --vr-test-jitter 產生器的已知案例。純計算、不載 runtime；
+        // 標頭不依賴 OpenXR，所以沒有 OpenXR 的建置（Windows 一般建置）也跑
+        QJsonObject root;
+        root[QStringLiteral("probe")] = QStringLiteral("xr-probe");
+        root[QStringLiteral("mode")] = QStringLiteral("selftest-latch");
+        QJsonArray cases;
+        const int failures = xrlatch::selfTest([&](const char* name, bool ok, const std::string& detail) {
+            ProbeUtil::printLine(kTag, "selftest-latch %s %s (%s)", ok ? "PASS" : "FAIL", name, detail.c_str());
+            QJsonObject c;
+            c[QStringLiteral("name")] = QLatin1String(name);
+            c[QStringLiteral("pass")] = ok;
+            c[QStringLiteral("detail")] = QString::fromStdString(detail);
+            cases.append(c);
+        });
+        ProbeUtil::printLine(kTag, "selftest-latch: %lld case(s), %d failure(s)", static_cast<long long>(cases.size()), failures);
+        root[QStringLiteral("cases")] = cases;
+        root[QStringLiteral("failures")] = failures;
+        int rc = failures == 0 ? ProbeUtil::kExitOk : ProbeUtil::kExitRuntimeError;
         root[QStringLiteral("rc")] = rc;
         QString writtenPath = jsonPath;
         if (!ProbeUtil::writeJson(jsonPath, root)) {

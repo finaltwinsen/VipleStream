@@ -194,6 +194,7 @@ XrContext::XrContext() : XrContext(Options()) {}
 XrContext::XrContext(const Options& options)
     : m_Options(options), m_Screen(new XrDesktopScreen(options.quadDistanceM, options.quadFovDeg))
 {
+    setPcvrStreamDiv(options.pcvrStreamDiv);  // §VR-LATCH-WAIT：起始值；協商完由 Session 再設一次
 }
 
 void XrContext::requestRecenter()
@@ -287,6 +288,16 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         vc.testStallMs = m_Options.testStallMs;
         vc.requireMeta = m_Options.pcvr;  // M4a R4：PCVR 不發布無 render pose 的影像
         vc.synth = m_Options.pcvr && m_Options.pcvrSynth;  // §VR-SYNTH
+        vc.testJitter = m_Options.testJitter;  // §VR-LDIAG（dev）：--vr-test-jitter
+        // §VR-LATCH-RELATCH／§VR-LATCH-WAIT：整場維持（A/B 切換只切 frame thread 那一側，發布的方式不跟著變）
+        vc.notifyPublish = pcvrLatchWaitEffUs() > 0;
+        vc.atomicPublish = (m_Options.pcvr && m_Options.pcvrLatchRelatch && !m_Options.pcvrSynth) || vc.notifyPublish;
+        if (!pcvrLatchWaitSupported() && m_Options.pcvr && !m_Options.pcvrSynth && m_Options.pcvrLatchWaitUs > 0) {
+            // §VR-LATCH-WAIT：這個平台不等（見 pcvrLatchWaitSupported）。設定了卻沒作用，要讓看 log 的人知道
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-LDIAG] latch wait %.2f ms ignored on this platform: its timed waits are too coarse to keep delay + wait within 6 ms",
+                        m_Options.pcvrLatchWaitUs / 1000.0);
+        }
         m_Video = new XrVideo(this, vc);
         QString verr;
         if (!m_Video->init(&verr)) {
@@ -328,6 +339,7 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     m_LoggedProjection = false;
     m_PcvrStale = 0;
     m_PredictAheadNs = 0;
+    m_LatchDiag = LatchDiag();  // §VR-LDIAG：XrVideo 是新的，發布序號從頭算
     {
         std::lock_guard<std::mutex> lk(m_HmdMutex);
         m_Hmd = HmdSample();
@@ -1595,6 +1607,9 @@ void XrContext::frameThreadMain()
         const uint64_t tw0 = steadyNowNs();
         const XrResult wr = xrWaitFrame(m_Session, &wi, &fs);
         m_DiagWaitNs = steadyNowNs() - tw0;
+#ifdef HAVE_XR_VIDEO
+        const uint64_t wakeNs = tw0 + m_DiagWaitNs;  // §VR-LDIAG：xrWaitFrame 返回的時刻
+#endif
         if (wr == XR_ERROR_SESSION_LOST || wr == XR_ERROR_INSTANCE_LOST) {
             // X5：runtime 已失效（例如 SteamVR 崩潰）——與 LOSS_PENDING 同樣處理
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] xrWaitFrame: %s - treating as session loss",
@@ -1622,6 +1637,36 @@ void XrContext::frameThreadMain()
                 m_VrCtl->updateFrame(fs.predictedDisplayTime, m_State.load() == XR_SESSION_STATE_FOCUSED, m_TrackSpace);
                 m_VrCtl->applyPendingHaptics();
             }
+#ifdef HAVE_XR_VIDEO
+            // §VR-LATCH-WAIT：這一格該有的新影像還沒到就等它，最晚等到「xrWaitFrame 返回＋延後＋等待」。準時的影像
+            // 照舊在延後那一點被挑，只有差一點沒趕上的才多等。這裡不持任何鎖——絕對不可以持 m_QueueMutex 等，
+            // 影像 render thread 要它才 release 得出去。關著（預設）時 waitUs 是 0，整段跳過。
+            const uint32_t waitUs = pcvrLatchWaitEffUs();
+            if (waitUs > 0 && fs.shouldRender && m_Video != nullptr &&
+                (m_Options.pcvrLatchAbSec == 0 || m_PcvrTiming.abOn) && steadyNowNs() >= m_PcvrTiming.waitOffUntilNs) {
+                const uint64_t deadlineUs = wakeNs / 1000ull + m_Options.pcvrLatchDelayUs + waitUs;
+                uint64_t latestSeq = 0, latestPubUs = 0;
+                // 最新那一張已經顯示過，才有「等下一張」這回事
+                if (steadyNowNs() / 1000ull < deadlineUs && m_Video->latest(&latestSeq, &latestPubUs) &&
+                    latestSeq == m_PcvrTiming.lastLatchedSeq) {
+                    // 串流一幀的長度（半速＝兩個顯示格）。下一張照節拍會在截止時間之前發布，才是「這一格該有新影像」
+                    // （半速串流沒有新影像的那一格不等）；最新那一張太舊（超過三幀）＝串流停了，也不等
+                    const uint64_t streamPeriodUs =
+                        (fs.predictedDisplayPeriod > 0 ? static_cast<uint64_t>(fs.predictedDisplayPeriod) / 1000ull : 0ull) *
+                        static_cast<uint64_t>(m_PcvrStreamDiv.load(std::memory_order_relaxed));
+                    if (streamPeriodUs > 0 && latestPubUs + streamPeriodUs <= deadlineUs &&
+                        latestPubUs + 3 * streamPeriodUs >= deadlineUs) {
+                        m_PcvrTiming.waited10s++;
+                        if (m_Video->waitNewerThan(latestSeq, deadlineUs)) {
+                            m_PcvrTiming.waitSaved10s++;
+                        }
+                        else {
+                            m_PcvrTiming.waitTimeout10s++;
+                        }
+                    }
+                }
+            }
+#endif
         }
         XrFrameBeginInfo bfi = xrStruct<XrFrameBeginInfo>(XR_TYPE_FRAME_BEGIN_INFO);
         XrResult br;
@@ -1692,6 +1737,10 @@ void XrContext::frameThreadMain()
         // X3：影像由 XrVideo 的 render thread 畫，這裡只引用最後 release 的影像（沒有新幀時就是
         // 自有的最後一幀複本）。> 1 s 沒更新疊狀態條；> 5 s 改回 loading quad。
         XrVideo::Current vcur;
+        // §VR-LDIAG：這一格的顯示週期（µs），算每個顯示格的內容年齡用
+        const uint32_t periodUs = fs.predictedDisplayPeriod > 0
+                                      ? static_cast<uint32_t>((std::min<uint64_t>)(static_cast<uint64_t>(fs.predictedDisplayPeriod) / 1000ull, 0xffffffffu))
+                                      : 0u;
         if (m_Video != nullptr && m_Options.pcvr) {
             // §VR-FOVEA：正前方（tangent 0）在每隻眼影像裡的位置，和 host 合成器用同一組視角算
             const int fpct = m_PcvrFoveaPct.load(std::memory_order_relaxed);
@@ -1751,7 +1800,7 @@ void XrContext::frameThreadMain()
                     videoLayer = true;
                     videoGen = vcur.generation;
                     pcvrTimingOnLatch(vcur.seq, vcur.lastDrawnUs, vcur.renderUs, vcur.hasMeta,
-                                      vcur.meta.echoSampleId, cpuT0);
+                                      vcur.meta.echoSampleId, cpuT0, periodUs);
                     pcvrPoseErr(vcur.meta.renderRot, vcur.meta.renderPos, vcur.seq != m_PoseErrLastSeq);
                     m_PoseErrLastSeq = vcur.seq;
                     std::lock_guard<std::mutex> lk(m_StatsMutex);
@@ -2045,12 +2094,38 @@ void XrContext::frameThreadMain()
         XrResult er;
         {
             const uint64_t tl0 = steadyNowNs();
-            std::lock_guard<std::mutex> lk(m_QueueMutex);  // runtime 可能在 xrEndFrame 用 queue
+            std::unique_lock<std::mutex> lk(m_QueueMutex);  // runtime 可能在 xrEndFrame 用 queue
             const uint64_t tl1 = steadyNowNs();
 #ifdef HAVE_XR_VIDEO
             // 2026-10-05（§VR 錯配計數）：release 也在這把鎖內，所以這裡讀到的就是 xrEndFrame 會用的那張
             if (m_Options.pcvr && videoLayer && m_Video != nullptr && m_Video->releaseNo() != vcur.releaseNo) {
-                m_PcvrTiming.mismatch10s++;
+                // §VR-LATCH-RELATCH：開著時試一次——放掉 queue 鎖，看新發布的那一張（XrVideo 的 atomicPublish 保證
+                // 快照已經是它），把 projection 原地改成它自己的姿態（proj 已經在 layers[] 裡，存的是指標；
+                // buildProjection 只會在寫入 views 之前失敗，不會留下半套），再拿回 queue 鎖。重建只拿 m_StatsMutex。
+                // 關著時 fixed 恆為 false，下面就是原本的計數。
+                bool fixed = false;
+                const bool relatchOn = m_Options.pcvrLatchRelatch && !m_Options.pcvrSynth &&
+                                       (m_Options.pcvrLatchAbSec == 0 || m_PcvrTiming.abOn);
+                if (relatchOn) {
+                    lk.unlock();
+                    XrVideo::Current v2;
+                    if (m_Video->peek(&v2) && v2.seq != vcur.seq && v2.hasMeta && v2.generation == vcur.generation &&
+                        buildProjection(v2.subImage.swapchain, v2.subImage.imageRect, v2.meta.renderRot, v2.meta.renderPos,
+                                        v2.meta.echoSampleId, &proj, projViews)) {
+                        pcvrTimingRelatch(v2.seq, v2.lastDrawnUs, v2.renderUs, v2.hasMeta, v2.meta.echoSampleId,
+                                          v2.meta.renderRot, v2.meta.renderPos, steadyNowNs(), periodUs);
+                        vcur = v2;
+                        videoGen = v2.generation;
+                        fixed = true;
+                    }
+                    lk.lock();
+                }
+                if (m_Video->releaseNo() != vcur.releaseNo) {
+                    m_PcvrTiming.mismatch10s++;  // 沒修到，或放掉鎖的這一小段又 release 了一張
+                }
+                else if (fixed) {
+                    m_PcvrTiming.relatch10s++;
+                }
             }
 #endif
             er = xrEndFrame(m_Session, &ei);
@@ -2065,6 +2140,19 @@ void XrContext::frameThreadMain()
         {
             const uint64_t cpuUs = (steadyNowNs() - cpuT0) / 1000ull;
             m_XrCpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(cpuUs, 0xffffffffu)));
+        }
+#ifdef HAVE_XR_VIDEO
+        if (m_Options.pcvr && m_Video != nullptr) {
+            // §VR-LDIAG：這一格送出去之後才記帳（抄發布紀錄、分類），不佔 latch 到 xrEndFrame 的那一段
+            pcvrLatchDiag(haveVideo && videoLayer, vcur.seq, cpuT0, wakeNs, fs.predictedDisplayTime,
+                          static_cast<uint64_t>(fs.predictedDisplayPeriod));
+        }
+#endif
+        if (m_LatchDiag.logDue) {
+            // §VR-LDIAG：pcvrTimingTick 在這一格印了 [VIPLE-VR-MTP10]，同一個視窗的逐張量測接著印。排序與組字串
+            // 放在這裡（這一格已經送出去），不放在挑影像到 xrEndFrame 之間
+            m_LatchDiag.logDue = false;
+            pcvrLatchDiagLog();
         }
 
         double lateRefreshMeasuredHz = 0.0;  // > 0：鎖外呼叫 requestRefreshLate()
@@ -2213,23 +2301,39 @@ int16_t sat16s(int64_t v) { return static_cast<int16_t>((std::max<int64_t>)(-327
 // M4a R3：frame thread，新的一張串流影像第一次被 latch 進 projection layer 時呼叫。
 // slack＝latch 時刻 − 影像就緒時刻（正值＝幀比 latch 早到）；MTP_content＝本幀預測顯示時間 −
 // echoSampleId 的 sampleTime（兩者都是 client steady 時鐘）。
+// §VR-LDIAG：另外記每個顯示格的內容年齡——新影像＝它的 MTP，重複的格＝那張影像的 MTP＋重複格數×顯示週期（periodUs）。
+// 上面的 MTP 統計不含重複的格，拿它驗收會漏掉重複與晚一格。
+// 補幀（§VR-SYNTH）開著時，同一張影像第二次顯示的是合成的那一半，這裡照樣走「重複」那一支：那一格的年齡記成
+// 真的那一張＋一個週期（它的內容來自那一張，外插補回來的部分不算）。所以拿 age 比補幀開／關會低估補幀。
 void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta,
-                                  uint32_t echoSampleId, uint64_t latchNs)
+                                  uint32_t echoSampleId, uint64_t latchNs, uint32_t periodUs)
 {
     auto& t = m_PcvrTiming;
+    t.lastAgePushed = false;
+    t.windowRolled = false;
     if (seq == 0) {
         return;
     }
     if (seq == t.lastLatchedSeq) {
         t.repeat10s++;  // 同一張影像重送（沒有新幀）：只計數
+        t.lastWasRepeat = true;
+        if (t.lastMtpUs != 0) {
+            ++t.repRun;
+            m_LatchDiag.age10s.push_back(static_cast<uint32_t>(
+                (std::min<uint64_t>)(t.lastMtpUs + static_cast<uint64_t>(t.repRun) * periodUs, 0xffffffffu)));
+            t.lastAgePushed = true;
+        }
         return;
     }
     if (t.lastLatchedSeq != 0 && seq > t.lastLatchedSeq + 1) {
         t.skip10s += static_cast<uint32_t>((std::min<uint64_t>)(seq - t.lastLatchedSeq - 1, 0xffffu));  // XrVideo 每發布一張 seq+1
     }
     t.new10s++;
+    t.lastWasRepeat = false;
     t.lastLatchedSeq = seq;
     t.presentedTotal++;
+    t.lastMtpUs = 0;  // 這一張的 MTP 還沒量到；下面量到才記
+    t.repRun = 0;
     const int64_t slackUs = static_cast<int64_t>(latchNs / 1000ull) - static_cast<int64_t>(lastDrawnUs);
     t.lastSlackUs = static_cast<int32_t>((std::max<int64_t>)(INT32_MIN, (std::min<int64_t>)(slackUs, INT32_MAX)));
     t.lastFrameId = static_cast<uint32_t>(seq);
@@ -2243,12 +2347,54 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
             if (mtpUs < 2000000ull) {  // > 2 s 視為樣本對不上（不列入）
                 t.mtp1sUs.push_back(static_cast<uint32_t>(mtpUs));
                 t.mtp10sUs.push_back(static_cast<uint32_t>(mtpUs));
+                t.lastMtpUs = static_cast<uint32_t>(mtpUs);
+                m_LatchDiag.age10s.push_back(t.lastMtpUs);
+                t.lastAgePushed = true;
             }
         }
         else {
             t.mtpNoSample++;
         }
     }
+}
+
+// §VR-LATCH-RELATCH：frame thread。這一格原本挑的那張影像沒有真的顯示——xrEndFrame 之前影像 render thread 又 release
+// 了一張，runtime 顯示的是新的那一張，projection 也已經改用它的姿態。把 pcvrTimingOnLatch 對原本那張記的帳改過來，
+// 再照「這一格挑到新的那一張」記一次（參數都是新的那一張）。改的只有計數：原本那一張已經記進 MTP／slack／render
+// 統計與 pcvrPoseErr 的樣本不拿掉，10 Hz 的 LATCH 在這之前若剛好輪到送出，帶的也是原本那一張（每 10 s 不到兩次）。
+void XrContext::pcvrTimingRelatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta, uint32_t echoSampleId,
+                                  const float renderRot[4], const float renderPos[3], uint64_t nowNs, uint32_t periodUs)
+{
+    auto& t = m_PcvrTiming;
+    // pcvrTimingTick 排在 pcvrTimingOnLatch 與這裡之間：10 s 視窗若剛好在這一格印出並歸零，原本那一筆已經印在上一個
+    // 視窗，新視窗裡沒有它可以扣，這一格也不再算進新視窗（一個顯示格只算一次，new＋repeat 才等於送出影像的格數）
+    const bool rolled = t.windowRolled;
+    if (t.lastWasRepeat) {
+        // 原本算成「重複上一張」的這一格，其實顯示了新影像
+        if (!rolled && t.repeat10s > 0) {
+            t.repeat10s--;
+        }
+    }
+    else {
+        // 原本挑的是一張新影像，但它沒有顯示過：改算成被跳過
+        if (!rolled && t.new10s > 0) {
+            t.new10s--;
+        }
+        t.skip10s++;
+        if (t.presentedTotal > 0) {
+            t.presentedTotal--;
+        }
+    }
+    if (t.lastAgePushed && !m_LatchDiag.age10s.empty()) {
+        m_LatchDiag.age10s.pop_back();  // §VR-LDIAG：這一格的內容年齡改記新的那一張
+    }
+    // 序號剛好是上一張 +1：算成新影像，不會再加 skip
+    pcvrTimingOnLatch(seq, lastDrawnUs, renderUs, hasMeta, echoSampleId, nowNs, periodUs);
+    if (rolled && t.new10s > 0) {
+        t.new10s--;
+    }
+    pcvrPoseErr(renderRot, renderPos, true);
+    m_PoseErrLastSeq = seq;
 }
 
 // §VR-TRACK-LOCK：每秒一次，依這一秒的 MTP 調整追蹤樣本的相位。
@@ -2281,6 +2427,39 @@ void XrContext::pcvrTrackPhaseStep(std::vector<uint32_t>& mtpUs, uint64_t period
     }
     t.trkLateSum += static_cast<double>(lateN) / static_cast<double>(mtpUs.size());
     t.trkLateN++;
+    // §VR-TRACK-RELOCK：比低分位高半個到一個半樣本間隔的幀＝用到前一筆樣本。晚一整格顯示的幀高兩個樣本間隔
+    // （一個顯示週期），那是影像晚到、不是樣本晚到，不算在內（上面的 lateN 把兩種都算了）。
+    double prevFrac = 0.0;
+    if (m_Options.pcvrTrackRelock) {
+        size_t prevN = 0;
+        for (uint32_t v : mtpUs) {
+            prevN += (v > lo + jumpUs && v <= lo + 3 * jumpUs) ? 1 : 0;
+        }
+        prevFrac = static_cast<double>(prevN) / static_cast<double>(mtpUs.size());
+        t.trkPrevSum += prevFrac;
+    }
+    // 維持模式假設 host 的相位不動；host 的相位一移（負載變重後控制器把節拍往前拉、或 v3 的步進），樣本離邊界可能
+    // 只剩不到 1 ms：2～3 成的幀用到前一筆、MTP 在差一個樣本間隔的兩個值之間跳，中位數卻不跳，就會停在這個狀態。
+    // 連 5 秒有 15% 以上就重新搜尋（鎖定後的底噪是 0.1～7%，而且那還含晚一格顯示的幀）。不重跑 20 s 的暖機，
+    // 從目前的相位照原本的搜尋走。
+    auto mixedTooLong = [&]() {
+        if (!m_Options.pcvrTrackRelock) {
+            return false;
+        }
+        t.trkMixRun = prevFrac >= 0.15 ? t.trkMixRun + 1 : 0;
+        if (t.trkMixRun < 5) {
+            return false;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-POSE] tracking phase: %.0f%% of frames use the previous sample at the locked phase - searching again",
+                    prevFrac * 100.0);
+        t.trkMode = 0;
+        t.trkPrevMtpUs = 0;
+        t.trkClean = 0;
+        t.trkMixRun = 0;
+        t.trkBackoffs++;
+        return true;
+    };
     if (t.trkWarm < 20) {
         // 串流剛開始時 host 的虛擬 vsync 還在往顯示的節拍收斂，這時看到的跳動不是樣本相位造成的（頭盔實測：
         // 開場 10 s 內就「找到邊界」，鎖在錯的位置）。先等 20 秒有量測的時間再開始找。
@@ -2293,6 +2472,7 @@ void XrContext::pcvrTrackPhaseStep(std::vector<uint32_t>& mtpUs, uint64_t period
             t.trkMode = 1;
             t.trkSettle = 3;
             t.trkClean = 0;
+            t.trkMixRun = 0;
             t.trkLocks++;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VR-POSE] tracking phase locked: phase=%.2f ms (sample interval %.2f ms, MTP %.1f -> %.1f ms at the edge) #%u",
@@ -2307,6 +2487,9 @@ void XrContext::pcvrTrackPhaseStep(std::vector<uint32_t>& mtpUs, uint64_t period
     else if (t.trkSettle > 0) {
         t.trkSettle--;  // 相位剛改，樣本新舊混在一起；最後一秒的中位數當基準
         t.trkPrevMtpUs = p50;
+    }
+    else if (mixedTooLong()) {
+        // §VR-TRACK-RELOCK：已經改回搜尋，下一秒從目前的相位開始
     }
     else if (p50 > t.trkPrevMtpUs + jumpUs) {
         if (++t.trkClean >= 3) {
@@ -2397,6 +2580,9 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         if (LiSendVrMessage(tlv, sizeof(tlv), false) == 0) {
             t.timingSent++;
         }
+        if (pcvrLatchWaitEffUs() > 0) {
+            pcvrWaitGuard(nowNs, periodNs, ct.xrMissed);  // §VR-LATCH-WAIT：runtime 防護（等待開著才做）
+        }
         pcvrTrackPhaseStep(t.mtp1sUs, periodNs);
         t.slack1s.clear();
         t.render1s.clear();
@@ -2410,29 +2596,272 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         // 2026-10-05：尾端加 frames new／repeat／skip（前段欄位順序不變）
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s"
-                    " | frames new=%u repeat=%u skip=%u mismatch=%u%s",
+                    " | frames new=%u repeat=%u skip=%u mismatch=%u%s%s%s",
                     n, pctOf(t.mtp10sUs, 0.50) / 1000.0, pctOf(t.mtp10sUs, 0.95) / 1000.0,
                     pctOf(t.mtp10sUs, 0.99) / 1000.0, t.mtpNoSample, t.latchSent,
                     secs > 0 ? t.latchSent / secs : 0.0, t.lastSlackUs, t.timingSent,
                     m_TimeConv != nullptr ? "" : " (mtp approx: no time conversion ext)", t.new10s, t.repeat10s, t.skip10s,
                     t.mismatch10s,
+                    // §VR-LATCH-RELATCH：錯配時改用新影像的姿態救回來的次數（救回來的不算進 mismatch；開著才印）
+                    m_Options.pcvrLatchRelatch && !m_Options.pcvrSynth
+                        ? qUtf8Printable(QString(" relatch=%1").arg(t.relatch10s))
+                        : "",
                     // §VR-TRACK-LOCK：相位、這 10 s 用到前一筆樣本的比例、重新搜尋的次數
                     m_Options.pcvrTrackLock
-                        ? qUtf8Printable(QString(" | trk %1 phase=%2 ms late=%3% researches=%4")
+                        ? qUtf8Printable(QString(" | trk %1 phase=%2 ms late=%3% researches=%4%5")
                                              .arg(t.trkMode == 0 ? "search" : "hold")
                                              .arg(t.trkPhaseNs / 1e6, 0, 'f', 2)
                                              .arg(t.trkLateN ? 100.0 * t.trkLateSum / t.trkLateN : 0.0, 0, 'f', 1)
-                                             .arg(t.trkBackoffs))
-                        : "");
+                                             .arg(t.trkBackoffs)
+                                             // §VR-TRACK-RELOCK：這 10 s 用到前一筆樣本的幀（不含晚一格顯示的）
+                                             .arg(m_Options.pcvrTrackRelock
+                                                      ? QString(" prev=%1%").arg(t.trkLateN ? 100.0 * t.trkPrevSum / t.trkLateN : 0.0, 0, 'f', 1)
+                                                      : QString()))
+                        : "",
+                    // §VR-LATCH A/B：這個視窗是哪一邊
+                    m_Options.pcvrLatchAbSec > 0 ? (t.abOn ? " ab=1" : " ab=0") : "");
         t.trkLateSum = 0.0;
+        t.trkPrevSum = 0.0;
         t.trkLateN = 0;
         t.mtp10sUs.clear();
         t.mtpNoSample = 0;
         t.latchSent = 0;
         t.timingSent = 0;
         t.new10s = t.repeat10s = t.skip10s = t.mismatch10s = 0;
+        t.relatch10s = 0;
+        t.windowRolled = true;  // §VR-LATCH-RELATCH：這一格記的那一筆已經印在上面那一行（見 pcvrTimingRelatch）
+        // §VR-LDIAG：同一個視窗的逐張量測接在 MTP10 後面印，但等這一格送出去（xrEndFrame 之後，見 frameThreadMain）
+        // 才算、才印。A/B 是哪一邊先記下來（下面可能換邊）
+        m_LatchDiag.logDue = true;
+        m_LatchDiag.logAb = t.abOn;
+        if (m_Options.pcvrLatchAbSec > 0) {
+            // §VR-LATCH A/B：這一邊跑滿了就換邊（[VIPLE-VR-MTP10] 與 [VIPLE-VR-LDIAG] 印的都是剛結束的視窗用的那一邊）。
+            // 視窗是 10 s 一個，所以實際的切換間隔是 10 s 的整數倍
+            t.abElapsedSec += secs;
+            if (t.abElapsedSec >= static_cast<double>(m_Options.pcvrLatchAbSec)) {
+                t.abElapsedSec = 0.0;
+                t.abOn = !t.abOn;
+            }
+        }
     }
 }
+
+// §VR-LATCH-WAIT 的 runtime 防護：frame thread，每秒一次（等待開著才呼叫）。「等這一格的影像」讓 frame thread 每一格
+// 的長短不一；runtime 不接受的話會把提前量加大、整幀往後排（延後 8 ms 那一場：predictAhead 在 26～37 ms 之間跳，
+// 開始漏幀）。predictAhead 連 2 秒比基準（bring-up 3 s 之後看過的最小值）高過半個週期，或最近 10 s XR 漏了 3 幀以上，
+// 就把等待暫停一段時間；冷卻由 60 s 起每次加倍、上限 480 s，結束後自動恢復，沒有整場停用。
+void XrContext::pcvrWaitGuard(uint64_t nowNs, uint64_t periodNs, uint32_t xrMissedTotal)
+{
+    auto& t = m_PcvrTiming;
+    if (nowNs - m_BringUpNs >= 3000000000ull && m_PredictAheadNs > 0 &&
+        (t.waitPaBaseNs == 0 || m_PredictAheadNs < t.waitPaBaseNs)) {
+        t.waitPaBaseNs = m_PredictAheadNs;  // 等待關著的那一邊、冷卻期間也照樣更新
+    }
+    const uint32_t missedDelta = t.waitMissedInit ? xrMissedTotal - t.waitMissedLast : 0u;
+    t.waitMissedLast = xrMissedTotal;
+    t.waitMissedInit = true;
+    auto clearWindow = [&t]() {
+        std::fill(std::begin(t.waitMissed), std::end(t.waitMissed), 0u);
+        t.waitPaHighRun = 0;
+    };
+    const bool active = (m_Options.pcvrLatchAbSec == 0 || t.abOn) && nowNs >= t.waitOffUntilNs;
+    if (!active) {
+        clearWindow();  // 沒在等的時候（A/B 的另一邊、冷卻中）發生的事不算在等待頭上
+        return;
+    }
+    t.waitMissed[t.waitMissedIdx++ % 10u] = missedDelta;
+    uint32_t missed10 = 0;
+    for (uint32_t m : t.waitMissed) {
+        missed10 += m;
+    }
+    const bool paHigh = t.waitPaBaseNs > 0 && m_PredictAheadNs > t.waitPaBaseNs + static_cast<int64_t>(periodNs / 2);
+    t.waitPaHighRun = paHigh ? t.waitPaHighRun + 1 : 0;
+    if (t.waitPaHighRun >= 2 || missed10 >= 3) {
+        t.waitOffUntilNs = nowNs + static_cast<uint64_t>(t.waitCooldownSec) * 1000000000ull;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LDIAG] wait paused %d s (predictAhead %.1f ms, missed %u)",
+                    static_cast<int>(t.waitCooldownSec), static_cast<double>(m_PredictAheadNs) / 1e6, missed10);
+        t.waitCooldownSec = (std::min)(t.waitCooldownSec * 2u, 480u);
+        clearWindow();
+    }
+}
+
+// §VR-LDIAG：10 s 一行，每 6 個視窗另印一行 gpu-by-phase。pcvrTimingTick 的 10 s 區塊（印 [VIPLE-VR-MTP10] 的那一格）
+// 設 logDue，frame thread 在那一格送出（xrEndFrame）之後呼叫：兩行的視窗相同，都含那一格。
+//  - late／lateShift／gap／early／catchup：見 xrlatchstats.h 檔頭與 xrlatch::Counters。late、gap 是串流幀數，其餘是
+//    顯示格數（半速時一張佔兩格）；gap 也包含到了 client 卻沒發布的影像（對 10s video 的 overwritten 等）；
+//    frame thread 自己漏格不會產生計數。
+//  - held／heldMiss：render 時間比典型值（上一秒的 p25，rtyp）多 1 ms 以上的張數＝被頭盔 GPU 的忙碌期卡住；
+//    其中差不到 1.5 ms 就趕得上前一個 latch 的是 heldMiss。
+//  - age：每個顯示格的內容年齡（含重複的格；補幀開著時合成的那一格也算成重複，見 pcvrTimingOnLatch）。
+//  - slackPub：每張影像（含被跳過的）發布到「第一個挑得到它的 latch」還有多久，250 µs 一格；第 0 格附近＝險過，
+//    接近一個週期的那幾格＝剛錯過上一個 latch。尾端的 0 省略。
+void XrContext::pcvrLatchDiagLog()
+{
+    auto& d = m_LatchDiag;
+    const xrlatch::Counters c = d.cls.take();
+    QString hist;
+    int last = 63;
+    while (last >= 0 && d.hist[last] == 0) {
+        last--;
+    }
+    for (int i = 0; i <= last; i++) {
+        if (i > 0) {
+            hist += QLatin1Char(',');
+        }
+        hist += QString::number(d.hist[i]);
+    }
+    if (hist.isEmpty()) {
+        hist = QStringLiteral("-");
+    }
+    uint32_t wakeMax = 0;
+    for (uint32_t v : d.wake2latch) {
+        wakeMax = (std::max)(wakeMax, v);
+    }
+    // §VR-LATCH-WAIT：設定了等待才印——實際生效的上限（延後＋等待 ≤ 6 ms，可能是 0）、這 10 s 等了幾格、
+    // 其中等到新影像的、等到逾時的
+    auto& t = m_PcvrTiming;
+    const QByteArray waitTail =
+        m_Options.pcvr && !m_Options.pcvrSynth && m_Options.pcvrLatchWaitUs > 0
+            ? QString(" wait=%1 ms waited=%2 saved=%3 timeout=%4")
+                  .arg(pcvrLatchWaitEffUs() / 1000.0, 0, 'f', 2)
+                  .arg(t.waited10s)
+                  .arg(t.waitSaved10s)
+                  .arg(t.waitTimeout10s)
+                  .toUtf8()
+            : QByteArray();
+    t.waited10s = 0;
+    t.waitSaved10s = 0;
+    t.waitTimeout10s = 0;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VR-LDIAG] 10s late=%u lateShift=%u gap=%u early=%u catchup=%u lateMax=%u us | held=%u heldMiss=%u rtyp=%u us "
+                "pubLag p50/p95=%u/%u us | wake2latch p50/p95/max=%u/%u/%u us latchPhase p50=%u us | "
+                "age p50/p95/p99=%.1f/%.1f/%.1f ms | slackPub(250us)=%s%s%s",
+                c.late, c.lateShift, c.gap, c.early, c.catchup, c.lateMaxUs, d.held10s, d.heldMiss10s, d.rtypUs,
+                pctOf(d.pubLag, 0.50), pctOf(d.pubLag, 0.95), pctOf(d.wake2latch, 0.50), pctOf(d.wake2latch, 0.95), wakeMax,
+                pctOf(d.latchPhase, 0.50), pctOf(d.age10s, 0.50) / 1000.0, pctOf(d.age10s, 0.95) / 1000.0,
+                pctOf(d.age10s, 0.99) / 1000.0, qUtf8Printable(hist), waitTail.constData(),
+                // §VR-LATCH A/B：這個視窗是哪一邊（和同一輪的 [VIPLE-VR-MTP10] 相同；10 s 區塊在換邊之前記下來的）
+                m_Options.pcvrLatchAbSec > 0 ? (d.logAb ? " ab=1" : " ab=0") : "");
+    std::fill(std::begin(d.hist), std::end(d.hist), 0u);
+    d.pubLag.clear();
+    d.wake2latch.clear();
+    d.latchPhase.clear();
+    d.age10s.clear();
+    d.held10s = 0;
+    d.heldMiss10s = 0;
+    if (++d.windows % 6 == 0) {
+        // 到達相位＝影像 render thread 開始處理這一張的時刻，落在顯示格點之後多久（對週期取餘）。某一段相位的平均
+        // render 時間明顯比其他段長，就是頭盔 GPU 的忙碌期；那幾格的 max 是被卡住的影像最晚多久做完
+        QString s;
+        for (int b = 0; b < 64; b++) {
+            if (d.phN[b] == 0) {
+                continue;
+            }
+            s += QStringLiteral(" %1:%2/%3/%4")
+                     .arg(b * 0.25, 0, 'f', 2)
+                     .arg(d.phN[b])
+                     .arg(d.phSum[b] / d.phN[b])
+                     .arg(d.phMax[b]);
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-LDIAG] 60s gpu-by-phase (250 us bins after the display grid; n/avgUs/maxUs)%s",
+                    s.isEmpty() ? " -" : qUtf8Printable(s));
+        std::fill(std::begin(d.phN), std::end(d.phN), 0u);
+        std::fill(std::begin(d.phSum), std::end(d.phSum), static_cast<uint64_t>(0));
+        std::fill(std::begin(d.phMax), std::end(d.phMax), 0u);
+    }
+}
+
+#ifdef HAVE_XR_VIDEO
+// §VR-LDIAG：frame thread，每一格在 xrEndFrame 與 frameEnded 之後呼叫。只量測：抄這一格之前發布的影像紀錄、
+// 把這一格挑到的影像交給 xrlatch::Classifier 分類、記 latch 時刻本身的抖動。
+//   latched＝這一格送出了串流影像的 projection layer，seq 是那張影像；latchNs＝挑影像的時刻（cpuT0）；
+//   wakeNs＝xrWaitFrame 返回的時刻。
+void XrContext::pcvrLatchDiag(bool latched, uint64_t seq, uint64_t latchNs, uint64_t wakeNs, XrTime predictedDisplayTime,
+                              uint64_t periodNs)
+{
+    if (periodNs < 1000000ull || periodNs > 100000000ull) {
+        return;  // 週期還沒有合理的值
+    }
+    auto& d = m_LatchDiag;
+    const double T = static_cast<double>(periodNs) / 1000.0;
+    const uint64_t latchUs = latchNs / 1000ull;
+    // 顯示格點：這一格的預測顯示時刻（client steady 時鐘），其他時刻對它取相位
+    const double gridUs = static_cast<double>(m_PcvrTiming.predictedDisplayClientNs / 1000ull);
+    auto posmod = [T](double x) {
+        x = std::fmod(x, T);
+        return x < 0.0 ? x + T : x;
+    };
+
+    // 顯示格序號：用相鄰兩格預測顯示時間的差累加（差幾個週期就進幾格，frame thread 沒跑到的格也算）。
+    // 不直接拿預測顯示時間除以週期：runtime 回報的週期是名目值，和實際的格距差幾十 ppm，直接除的商每隔幾分鐘
+    // 會多進或少進一格，在邊界附近還會來回跳。
+    const int64_t pdt = static_cast<int64_t>(predictedDisplayTime);
+    if (d.lastPdt != 0) {
+        const int64_t adv = static_cast<int64_t>(std::llround(static_cast<double>(pdt - d.lastPdt) / static_cast<double>(periodNs)));
+        d.dispTick += (std::max)(adv, static_cast<int64_t>(1));
+    }
+    d.lastPdt = pdt;
+
+    // 這一格「挑得到」的發布紀錄：有送影像層時＝序號不超過挑到的那一張（之後才發布的留給下一格）；沒有影像層時
+    // 以時刻為準。一次最多抄 8 筆，平常只有 1 筆；frame thread 停過才會多，分幾次抄完。
+    for (;;) {
+        XrVideo::PubRec recs[8];
+        const size_t n = m_Video->drainPublished(d.drainedSeq, latched ? UINT64_MAX : latchUs, recs, 8);
+        size_t used = 0;
+        for (; used < n; used++) {
+            const XrVideo::PubRec& r = recs[used];
+            if (latched && r.seq > seq) {
+                break;
+            }
+            d.drainedSeq = r.seq;
+            d.cls.onPublished(r.seq, r.pts90, r.pubUs);
+            const uint32_t render = static_cast<uint32_t>(
+                (std::min<uint64_t>)(r.gpuEndUs > r.arriveUs ? r.gpuEndUs - r.arriveUs : 0, 0xffffffffu));
+            // 在 latch 與 current() 之間發布的那一張也被挑到了：餘裕算 0
+            const uint64_t slackPub = latchUs > r.pubUs ? latchUs - r.pubUs : 0;
+            d.hist[(std::min<uint64_t>)(slackPub / 250ull, 63)]++;
+            d.pubLag.push_back(static_cast<uint32_t>((std::min<uint64_t>)(r.pubUs > r.gpuEndUs ? r.pubUs - r.gpuEndUs : 0, 0xffffffffu)));
+            const int b = static_cast<int>(posmod(static_cast<double>(r.arriveUs) - gridUs) / 250.0) % 64;
+            d.phN[b]++;
+            d.phSum[b] += render;
+            d.phMax[b] = (std::max)(d.phMax[b], render);
+            if (d.rtypUs != 0 && render > d.rtypUs + 1000u) {
+                d.held10s++;
+                if (static_cast<double>(slackPub) + 1500.0 >= T) {
+                    d.heldMiss10s++;
+                }
+            }
+            d.render1s.push_back(render);
+        }
+        if (used < 8) {
+            break;  // 抄完了，或後面的還沒輪到
+        }
+    }
+    if (latched) {
+        xrlatch::Tick tick;
+        tick.dispTick = d.dispTick;
+        tick.latchUs = latchUs;
+        tick.seq = seq;
+        tick.periodUs = T;
+        d.cls.onTick(tick);
+    }
+    d.wake2latch.push_back(static_cast<uint32_t>((std::min<uint64_t>)(latchNs > wakeNs ? (latchNs - wakeNs) / 1000ull : 0, 0xffffffffu)));
+    d.latchPhase.push_back(static_cast<uint32_t>(posmod(static_cast<double>(latchUs) - gridUs)));
+
+    // 每秒：這一秒 render 時間的 p25 當「沒被卡住」的典型值
+    if (d.secStartNs == 0) {
+        d.secStartNs = latchNs;
+    }
+    else if (latchNs - d.secStartNs >= 1000000000ull) {
+        d.secStartNs = latchNs;
+        if (!d.render1s.empty()) {
+            d.rtypUs = pctOf(d.render1s, 0.25);
+        }
+        d.render1s.clear();
+    }
+}
+#endif
 
 // frame thread：xrWaitFrame 之後。更新「預測顯示時間 − 現在」的估計，並 locate 一次 HMD（frameloop 模式樣本）
 void XrContext::pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodNs)

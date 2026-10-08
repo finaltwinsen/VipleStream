@@ -17,6 +17,10 @@
 //     最後一幀，就是 XrContext 自有的最後一幀複本：decoder 因 RENDER_DEVICE_RESET 重建時 XrVideo
 //     不動，XR thread 繼續重送）。解析度改變時舊 swapchain 先退休，等 XR thread 用新一代送出
 //     xrEndFrame（frameEnded）後才銷毀，避免 layer 引用已銷毀的 swapchain。
+//   - 鎖的順序（§VR-LATCH-RELATCH，2026-10-08）：XrContext::queueMutex() 與 m_SwMutex 原本從不巢狀持有。
+//     Config::atomicPublish 開著時，影像 render thread 在 queueMutex 內 release 之後接著拿 m_SwMutex 發布
+//     （queueMutex → m_SwMutex）——這是唯一的巢狀，而且只在影像 render thread。其他執行緒不可以持著 m_SwMutex
+//     再去拿 queueMutex：XR frame thread 的 current()／peek()／frameEnded()／drainPublished() 都在 queue 鎖外呼叫。
 //
 // swapchain 格式：libplacebo 的 pl_fmt 沒有 sRGB 格式，所以
 //   1. runtime 有 *_SRGB 且接受 MUTABLE_FORMAT：以對應的 UNORM 包裝，libplacebo 直接寫 sRGB 編碼值
@@ -27,6 +31,7 @@
 #pragma once
 
 #include "xrcontext.h"
+#include "xrlatchstats.h"  // §VR-LDIAG：xrlatch::Jitter（dev 的到達抖動注入）
 #include "streaming/video/ffmpeg-renderers/plvk_common.h"  // §SF-DMABUF-CACHE：DrmTexCache
 
 #include <QString>
@@ -61,6 +66,24 @@ public:
         bool requireMeta = false;
         // §VR-SYNTH：合成中間格（只在 PCVR 半速串流時開）。swapchain 高度加倍，下半是合成影像
         bool synth = false;
+        // §VR-LDIAG（dev，--vr-test-jitter）：畫每一張串流影像之前照這個字串延後（xrlatch::Jitter 的格式），空字串＝不注入
+        QString testJitter;
+        // §VR-LATCH-RELATCH：xrReleaseSwapchainImage 與發布放進同一段 queue 鎖。frame thread 在 queue 鎖內看到
+        // releaseNo() 變了，就保證 peek() 拿到的已經是新的那一張。關著（預設）時照舊：先 release、放掉 queue 鎖再發布。
+        // 不可以和 synth 一起開——§VR-SYNTH 的第二次發布不在 queue 鎖內，這個保證對它不成立（建構子會把它關掉）
+        bool atomicPublish = false;
+        // §VR-LATCH-WAIT：每發布一張新影像就叫醒 waitNewerThan()（frame thread 在等這一格的影像）。要和 atomicPublish
+        // 一起開；同樣不可以和 synth 一起開（建構子會把它關掉）
+        bool notifyPublish = false;
+    };
+
+    // §VR-LDIAG：每發布一張新影像記一筆（§VR-SYNTH 的第二次發布沿用同一個 seq，不另記）。時刻都是 steady 時鐘的微秒
+    struct PubRec {
+        uint64_t seq;       // 發布序號（＝Current::seq）
+        int64_t pts90;      // 這張影像的 pts：host 的 Present 時刻，90 kHz
+        uint64_t arriveUs;  // 影像 render thread 開始處理的時刻
+        uint64_t gpuEndUs;  // GPU 做完的時刻
+        uint64_t pubUs;     // xrReleaseSwapchainImage 返回的時刻（之後 frame thread 才挑得到）
     };
 
     // XR frame thread 讀取的「目前可顯示影像」
@@ -77,6 +100,8 @@ public:
         VIPLE_VR_FRAME_META meta = {};
         // 2026-10-05（§VR 錯配計數）：這張影像 xrReleaseSwapchainImage 後的 release 序號
         uint64_t releaseNo = 0;
+        // §VR-LATCH-WAIT：這張影像發布的時刻（steady 時鐘，µs；和 PubRec::pubUs 是同一個值）
+        uint64_t publishedUs = 0;
         // §VR-SYNTH：這張 swapchain 影像的下半有合成影像時，它的範圍與姿態（current() 視情況換進 subImage／meta）
         bool hasSynth = false;
         XrRect2Di synthRect = {};
@@ -115,8 +140,21 @@ public:
 
     // XR frame thread：有可顯示的影像（至少 release 過一次）就回 true
     bool current(Current* out);
+    // §VR-LATCH-RELATCH（XR frame thread）：current() 的無副作用版——只看目前發布的是哪一張，不算成「顯示過一次」
+    // （不動 §VR-SYNTH 的輪替，回傳的一律是真的那一半）。不可以持著 queueMutex 呼叫
+    bool peek(Current* out);
+    // §VR-LATCH-WAIT（XR frame thread）：目前發布的是哪一張、什麼時候發布的；還沒有影像回 false
+    bool latest(uint64_t* seq, uint64_t* pubUs);
+    // §VR-LATCH-WAIT（XR frame thread）：等到發布的影像不是 seq 這一張，或到了 deadlineUs（steady 時鐘，µs）。
+    // true＝有新的一張。等的時候不持鎖；呼叫時不可以持 queueMutex（影像 render thread 要它才 release 得出去）。
+    // 要 Config::notifyPublish 才會被叫醒（否則只會等到逾時）。等不到的那一次多久才返回，取決於條件變數逾時的
+    // 精度：Linux 預期數十微秒；Windows 是毫秒級，所以 XrContext 在 Windows 上不用它（pcvrLatchWaitSupported）
+    bool waitNewerThan(uint64_t seq, uint64_t deadlineUs);
     // XR frame thread：xrEndFrame 已送出引用 generation 這一代 swapchain 的 layer
     void frameEnded(uint64_t generation);
+    // §VR-LDIAG（XR frame thread）：依序抄出序號大於 afterSeq、而且在 notAfterUs 之前（含）發布的紀錄，最多 max 筆；
+    // 回傳筆數。只保留最近 64 筆，更舊的抄不到
+    size_t drainPublished(uint64_t afterSeq, uint64_t notAfterUs, PubRec* out, size_t max);
     // §VR-SYNTH：一隻眼的水平／垂直視角（左右、上下兩個 tan 的和）；用來把頭部轉動換算成影像位移（XR thread 每幀設）
     void setEyeFovTan(float tanW, float tanH)
     {
@@ -164,6 +202,8 @@ private:
     void dumpTexture(pl_tex tex);
     void renderThreadMain();
     void reapRetired();
+    // §VR-LDIAG（dev）：這一張串流影像要延後幾微秒（沒開注入時恆為 0）。只在影像 render thread 呼叫
+    uint32_t jitterNextUs();
 
     XrContext* m_Ctx;
     Config m_Config;
@@ -224,11 +264,16 @@ private:
     uint64_t m_NextGeneration = 1;
 
     std::mutex m_SwMutex;
+    std::condition_variable m_PubCv;       // §VR-LATCH-WAIT：發布了新影像（配 m_SwMutex）
     bool m_HavePublished = false;          // 至少 release 過一次
     Current m_Published;                   // XR thread 讀的快照
     std::atomic<uint64_t> m_ReleaseNo{0};  // 2026-10-05：xrReleaseSwapchainImage 次數（在 queueMutex 內遞增）
     std::vector<SwapchainSet> m_Retired;   // 等 XR thread 送出新一代後銷毀
     uint64_t m_XrAckGeneration = 0;        // XR thread 最近一次 xrEndFrame 引用的 generation
+    // §VR-LDIAG：最近 kPubRing 筆發布紀錄（環狀；m_SwMutex 保護）
+    static constexpr size_t kPubRing = 64;
+    PubRec m_PubRing[kPubRing] = {};
+    uint64_t m_PubHead = 0;                // 累計寫入筆數（下一筆寫在 m_PubHead % kPubRing）
 
     // mailbox（latest wins）
     std::mutex m_MailboxMutex;
@@ -240,6 +285,7 @@ private:
     uint64_t m_TestStallDropped = 0;
     uint64_t m_NoMetaDropped = 0;  // M4a R4：requireMeta 時丟掉的無 meta 幀（累計）
     bool m_TestStallLogged = false;
+    xrlatch::Jitter m_Jitter;      // §VR-LDIAG（dev）：只在影像 render thread 用（init() 設定，之後不變）
 
     // 統計
     std::mutex m_StatsMutex;
@@ -250,6 +296,7 @@ private:
     std::vector<uint32_t> m_CpuUs;     // 本視窗每新幀 render thread 的 CPU 時間（不含等 GPU）
     std::vector<uint32_t> m_GpuUs;     // 本視窗每新幀等 GPU 做完的時間
     std::vector<uint32_t> m_SynthGpuUs;  // §VR-SYNTH：真的那一張發布之後，到合成那一張做完的時間
+    std::vector<uint32_t> m_JitUs;     // §VR-LDIAG（dev）：本視窗被注入延後的影像各延後多久
     uint64_t m_TotalDrawn = 0;         // dump 用（XR thread）
     bool m_Dumped = false;
 };
