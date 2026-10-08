@@ -66,7 +66,8 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
     §VR-RENDER-SCALE（`vr_render_scale_pct`）已做：串流每眼 1152、算圖 2160，頭盔無人場次 MTP 41～45 ms。
     注視點編碼已做（§VR-FOVEA，client `--vr-foveation`／設定頁，預設關閉；頭盔無人場次通過，清晰度待使用者戴眼鏡看）。
     10-bit：host 端已做（§VR-10BIT），Frame 的 iris 解碼路徑只給 8-bit 輸出、Main10 會讓 client 崩潰，頭盔上先擋掉；
-    要做就得改 FFmpeg v4l2m2m 與 dmabuf 匯入（另：dmabuf 匯入失敗不該崩潰）。
+    **使用者 2026-10-08 決定不做 Frame 的 10-bit**（來源是 8-bit、只對暗處色帶有幫助）；host 端的支援留著不動。
+    另：dmabuf 匯入失敗不該讓 client 崩潰，這個仍要修。
     接著：和 Steam 比延遲（要使用者讀頭盔裡的進階效能圖表）。補幀第一版已做
     （client `--vr-half-rate`＋`--vr-synth`，預設關閉；頭盔無人場次通過，待使用者配戴確認）。VR 設定已進 GUI 設定頁（版面待使用者看）。host 停在登入／鎖定畫面時回明確的錯誤
     （§VR-HOST-LOCKED；鎖定狀態下的實測待做）。
