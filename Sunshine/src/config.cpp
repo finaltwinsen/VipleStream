@@ -229,6 +229,43 @@ namespace config {
       vars.erase(it);
     }
 
+    /**
+     * @brief 嚴格解析 vr_* 的布林設定項：只接受明確的開／關字樣（不分大小寫），其他一律警告並保留原值。
+     *
+     * 不用 bool_f：它底下的 to_bool 把不認得的值當成關閉、而且值裡只要有 '1' 就當成開啟（"disabled1"、"10" 都是開），
+     * 都不警告。這四個選項寫錯的後果是整個功能靜靜地沒開，驗測時很難發現。
+     */
+    void bool_strict_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, bool &input) {
+      auto it = vars.find(name);
+      if (it == std::end(vars)) {
+        return;
+      }
+
+      std::string_view raw = it->second;
+      if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
+        raw = raw.substr(1, raw.size() - 2);
+      }
+      std::string val {raw};
+      std::transform(val.begin(), val.end(), val.begin(), [](unsigned char ch) {
+        return (char) std::tolower(ch);
+      });
+
+      if (val == "enabled"sv || val == "enable"sv || val == "true"sv || val == "yes"sv || val == "on"sv || val == "1"sv) {
+        input = true;
+      } else if (val == "disabled"sv || val == "disable"sv || val == "false"sv || val == "no"sv || val == "off"sv || val == "0"sv) {
+        input = false;
+      } else {
+        warn_config(std::format(
+          "config: invalid value for '{}': '{}' -- accepted values: enabled, disabled (also true/false, yes/no, on/off, 1/0). Keeping '{}'",
+          name,
+          it->second,
+          input ? "enabled" : "disabled"
+        ));
+      }
+
+      vars.erase(it);
+    }
+
   }  // namespace vr_opt
 
   namespace amd {
@@ -1493,8 +1530,8 @@ namespace config {
     // VipleStream 2.0 §VR（M1a）：vr_pcvr 預設 disabled；stub 只供開發驗證。
     // enum 與整數選項（vr_opt::*_from_view、vr_opt::int_strict_f）值寫錯一律警告並維持預設
     // （壞值絕不靜靜地變成「開啟」或「關閉安全網」）。
-    // 例外：四個布林選項（vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、vr_multilink_repair）
-    // 走上游的 bool_f：不認得的值（含大小寫不同）不警告、當成關閉，值裡含 '1' 則當成開啟。
+    // 四個布林選項（vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、vr_multilink_repair）走
+    // vr_opt::bool_strict_f（2026-10-08）：只接受明確的開／關字樣，其他警告並維持預設。
     // vr_multilink_fault 是原樣字串，格式錯誤要到多連線的 VR session 建立時才警告（stream.cpp）。
     generic_f(vars, "vr_pcvr", vr.pcvr, vr_opt::pcvr_from_view);
     vr_opt::int_strict_f(vars, "vr_intra_refresh_frames", vr.intra_refresh_frames, 2, 60, false);
@@ -1503,13 +1540,13 @@ namespace config {
     generic_f(vars, "vr_latch_mode", vr.latch_mode, vr_opt::latch_from_view);
     vr_opt::int_strict_f(vars, "vr_latch_target_pct", vr.latch_target_pct, 25, 50, false);
     vr_opt::int_strict_f(vars, "vr_render_scale_pct", vr.render_scale_pct, 100, 250, false);
-    bool_f(vars, "vr_ctrl_pose_offset", vr.ctrl_pose_offset);
-    bool_f(vars, "vr_angvel_local", vr.angvel_local);
+    vr_opt::bool_strict_f(vars, "vr_ctrl_pose_offset", vr.ctrl_pose_offset);
+    vr_opt::bool_strict_f(vars, "vr_angvel_local", vr.angvel_local);
     generic_f(vars, "vr_stale_policy", vr.stale_policy, vr_opt::stale_from_view);
     generic_f(vars, "vr_multilink", vr.multilink, vr_opt::multilink_from_view);
     string_f(vars, "vr_multilink_fault", vr.multilink_fault);
-    bool_f(vars, "vr_multilink_ctrl", vr.multilink_ctrl);
-    bool_f(vars, "vr_multilink_repair", vr.multilink_repair);
+    vr_opt::bool_strict_f(vars, "vr_multilink_ctrl", vr.multilink_ctrl);
+    vr_opt::bool_strict_f(vars, "vr_multilink_repair", vr.multilink_repair);
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

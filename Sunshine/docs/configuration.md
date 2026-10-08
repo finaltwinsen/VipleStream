@@ -1962,6 +1962,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+@note{The four on/off VR options below (`vr_ctrl_pose_offset`, `vr_angvel_local`, `vr_multilink_ctrl`,
+`vr_multilink_repair`) accept `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`; case does not
+matter). Any other value is reported in the log as an invalid value and the option keeps its default.}
+
 ### vr_ctrl_pose_offset
 
 <table>
