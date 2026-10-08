@@ -289,6 +289,15 @@ namespace vr {
       p.overscan = (int) overscan;
     }
 
+    // vrFovea（選填，預設 100＝關）
+    if (auto v = lookup("vrFovea")) {
+      int64_t fovea = 100;
+      if (!parse_int_field("vrFovea", *v, false, 100, 250, fovea, error)) {
+        return fail(error);
+      }
+      p.fovea = (int) fovea;
+    }
+
     // vrForce（選填，預設 0）
     if (auto v = lookup("vrForce")) {
       if (*v != "0" && *v != "1") {
@@ -304,7 +313,7 @@ namespace vr {
 
   std::string format_launch_params(const launch_params_t &p) {
     return std::format(
-      "vr=1&vrEye={}x{}&vrHz={}&vrPeriodNs={}&vrFov={}&vrIpd={}&vrEyeToHead={}&vrCaps={:x}&vrCodecs={}&vrCtrl={}&vrOverscan={}&vrForce={}",
+      "vr=1&vrEye={}x{}&vrHz={}&vrPeriodNs={}&vrFov={}&vrIpd={}&vrEyeToHead={}&vrCaps={:x}&vrCodecs={}&vrCtrl={}&vrOverscan={}&vrForce={}{}",
       p.eye_width,
       p.eye_height,
       p.hz,
@@ -316,7 +325,9 @@ namespace vr {
       p.codecs,
       p.ctrl,
       p.overscan,
-      p.force ? 1 : 0
+      p.force ? 1 : 0,
+      // §VR-FOVEA：關閉時不帶（舊 server 不認得的 key 會略過，但字串維持和以前一樣）
+      p.fovea > 100 ? std::format("&vrFovea={}", p.fovea) : std::string()
     );
   }
 
@@ -326,7 +337,7 @@ namespace vr {
 
   std::string format_session_element(const negotiated_t &neg) {
     return std::format(
-      "proto={};packed={}x{};hz={};codec={};layout=sbs;overscan={};recovery={};irFrames={};transport=rtp;universeId={};session={};mode={}{}",
+      "proto={};packed={}x{};hz={};codec={};layout=sbs;overscan={};recovery={};irFrames={};transport=rtp;universeId={};session={};mode={}{}{}",
       VIPLE_VR_PROTO_VERSION,
       neg.packed_width(),
       neg.packed_height(),
@@ -340,7 +351,9 @@ namespace vr {
       neg.guid,
       neg.pcvr ? "pcvr" : "stub",
       // §VR-MULTILINK：只在協商成立時多這一項（舊 client 不認得的 key 會略過）
-      neg.multilink ? ";multilink=1" : ""
+      neg.multilink ? ";multilink=1" : "",
+      // §VR-FOVEA：只有真的 driver 會做（stub 不合成影像）；回了這一項 client 才還原
+      neg.pcvr && neg.params.fovea > 100 ? std::format(";fovea={}", neg.params.fovea) : std::string()
     );
   }
 

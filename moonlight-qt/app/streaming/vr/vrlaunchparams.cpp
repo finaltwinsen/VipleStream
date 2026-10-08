@@ -53,7 +53,8 @@ QString VrLaunchConfig::toQuery() const
            "&vrCodecs=" + QString::number(codecs) +
            "&vrCtrl=" + controller +
            "&vrOverscan=" + QString::number(overscan) +
-           "&vrForce=" + QString::number(force ? 1 : 0);
+           "&vrForce=" + QString::number(force ? 1 : 0) +
+           (fovea > 100 ? "&vrFovea=" + QString::number(fovea) : QString());
 }
 
 VrSessionInfo VrSessionInfo::parse(const QString& text)
@@ -89,6 +90,10 @@ VrSessionInfo VrSessionInfo::parse(const QString& text)
         else if (key == "overscan") {
             info.overscan = value.toInt();
         }
+        else if (key == "fovea") {
+            const int v = value.toInt();
+            info.fovea = (v > 100 && v <= 250) ? v : 100;
+        }
         else if (key == "recovery") {
             info.recoveryIntra = (value == "intra");
         }
@@ -122,10 +127,11 @@ VrSessionInfo VrSessionInfo::parse(const QString& text)
 QString VrSessionInfo::describe() const
 {
     return QString("proto=%1 packed=%2x%3 hz=%4 codec=%5 layout=%6 overscan=%7 recovery=%8 "
-                   "irFrames=%9 transport=%10 mode=%11 session=%12%13")
+                   "irFrames=%9 transport=%10 mode=%11 session=%12%13%14")
         .arg(proto).arg(packedWidth).arg(packedHeight).arg(refreshHz)
         .arg(codec, layout).arg(overscan)
         .arg(recoveryIntra ? "intra" : "idr").arg(irFrames)
         .arg(transport, mode, sessionGuid)
-        .arg(multilink ? " multilink=1" : "");
+        .arg(multilink ? " multilink=1" : "")
+        .arg(fovea > 100 ? QString(" fovea=%1").arg(fovea) : QString());
 }

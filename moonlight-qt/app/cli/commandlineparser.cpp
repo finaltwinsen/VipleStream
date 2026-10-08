@@ -595,6 +595,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                          "so an unattended session has moving near objects in view. Works with --vr-emulate and on a real XR runtime. Not saved.");
     parser.addToggleOption("vr-half-rate", "PCVR: run the game and the stream at half the headset refresh rate (the headset still displays at full rate)");
     parser.addToggleOption("vr-synth", "PCVR with --vr-half-rate: show a motion-extrapolated frame on the display refreshes that have no new stream frame");
+    parser.addValueOption("vr-foveation", "PCVR: foveated encoding - pixel density straight ahead as a percentage of uniform sampling "
+                          "(100 = off, up to 250; the edges get fewer pixels, the stream size stays the same)");
     parser.addValueOption("vr-latch-delay", "PCVR: wait this many milliseconds (0-20) after the XR runtime wakes the frame loop before picking the "
                           "newest decoded frame, so each displayed frame is fresher (default 0)");
     parser.addValueOption("vr-eye", "per-eye <width>x<height> for PCVR (default 2160x2160)");
@@ -878,6 +880,14 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     preferences->vrSyntheticHands = parser.isSet("vr-synthetic-hands");
     preferences->vrHalfRate = parser.getToggleOptionValue("vr-half-rate", preferences->vrHalfRate);
     preferences->vrSynth = parser.getToggleOptionValue("vr-synth", preferences->vrSynth);
+    if (parser.isSet("vr-foveation")) {
+        bool ok = false;
+        const int pct = parser.value("vr-foveation").toInt(&ok);
+        if (!ok || pct < 100 || pct > 250) {
+            parser.showError(QString("vr-foveation must be a percentage within 100-250: %1").arg(parser.value("vr-foveation")));
+        }
+        preferences->vrFoveation = pct;
+    }
     if (parser.isSet("vr-latch-delay")) {
         bool ok = false;
         const double ms = parser.value("vr-latch-delay").toDouble(&ok);

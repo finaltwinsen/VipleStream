@@ -1692,6 +1692,20 @@ void XrContext::frameThreadMain()
         // X3：影像由 XrVideo 的 render thread 畫，這裡只引用最後 release 的影像（沒有新幀時就是
         // 自有的最後一幀複本）。> 1 s 沒更新疊狀態條；> 5 s 改回 loading quad。
         XrVideo::Current vcur;
+        if (m_Video != nullptr && m_Options.pcvr) {
+            // §VR-FOVEA：正前方（tangent 0）在每隻眼影像裡的位置，和 host 合成器用同一組視角算
+            const int fpct = m_PcvrFoveaPct.load(std::memory_order_relaxed);
+            if (fpct > 100 && fpct <= 250) {
+                const float l0 = std::tan(-m_Fov[0].angleLeft), r0 = std::tan(m_Fov[0].angleRight);
+                const float l1 = std::tan(-m_Fov[1].angleLeft), r1 = std::tan(m_Fov[1].angleRight);
+                const float up = std::tan(m_Fov[0].angleUp), dn = std::tan(-m_Fov[0].angleDown);
+                m_Video->setFoveation(100.0f / static_cast<float>(fpct), std::clamp(l0 / (l0 + r0), 0.05f, 0.95f),
+                                      std::clamp(l1 / (l1 + r1), 0.05f, 0.95f), std::clamp(up / (up + dn), 0.05f, 0.95f));
+            }
+            else {
+                m_Video->setFoveation(1.0f, 0.5f, 0.5f, 0.5f);
+            }
+        }
         if (m_Video != nullptr && m_Options.pcvrSynth) {
             // §VR-SYNTH：串流用的每眼視角（含 overscan），合成時把頭部轉動換算成影像位移用
             m_Video->setEyeFovTan(std::tan(-m_Fov[0].angleLeft) + std::tan(m_Fov[0].angleRight),

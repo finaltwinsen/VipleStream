@@ -42,7 +42,8 @@ namespace vrdrv {
 
     // 合成到 rtv（packed：左眼在左半、右眼在右半）。eye_rect：本眼的 tangent 範圍（fov_to_rect）。
     // layer 為 0 層時清成黑色（仍發布，讓串流不中斷）。
-    void compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count);
+    // fovea_a（§VR-FOVEA）：0＝均勻取樣；0.4–1＝注視點編碼，正前方（tangent 0）的斜率（見 compositor_ps.hlsl）。
+    void compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, float fovea_a = 0.0f);
 
   private:
     ComPtr<ID3D11VertexShader> vs_;

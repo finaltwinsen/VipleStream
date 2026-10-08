@@ -103,6 +103,7 @@ namespace vrdrv {
     eye_h_ = eye_h;
     eye_rect_[0] = math::fov_to_rect(cfg.fov_tan[0]);
     eye_rect_[1] = math::fov_to_rect(cfg.fov_tan[1]);
+    fovea_a_ = cfg.fovea_pct > 100 && cfg.fovea_pct <= 250 ? 100.0f / (float) cfg.fovea_pct : 0.0f;
     act_luid_ = luid;
     unlock();
     vsync_.activate(ctx_.qpf, cfg.refresh_mhz, now_qpc());
@@ -455,7 +456,7 @@ namespace vrdrv {
     }
 
     auto *ctx = device_.ctx();
-    comp_.compose(ctx, R.rtv[slot].Get(), R.width / 2, R.height, eye_rect_, in, n);
+    comp_.compose(ctx, R.rtv[slot].Get(), R.width / 2, R.height, eye_rect_, in, n, fovea_a_);
     const uint64_t value = ++R.fence_n;
     HRESULT hr = device_.ctx4()->Signal(R.shared_fence.Get(), value);
     ctx->Flush();  // 跨行程 CPU 觀察需要（§B.7）

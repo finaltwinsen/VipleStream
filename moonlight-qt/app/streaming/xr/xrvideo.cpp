@@ -603,7 +603,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     bool rendered = false;
     bool synthOk = false;
     VIPLE_VR_FRAME_META synthMeta = {};
-    const int frameH = m_Config.synth ? frame->height : m_Sw.height;
+    const int frameH = m_Config.synth ? m_Sw.height / 2 : m_Sw.height;  // swapchain 裡一張影像的高度
+    const bool fovea = m_FvA.load(std::memory_order_relaxed) < 0.999f;
     if (mappedOk) {
         pl_frame target;
         std::memset(&target, 0, sizeof(target));
@@ -622,13 +623,16 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         if (m_Config.synth && !m_SynthFailed) {
             rendered = renderSynth(&mapped, &target, tex, frame->width, frame->height, hasMeta, meta, frame->pts, &synthOk, &synthMeta);
         }
+        else if (fovea && !m_UnwarpFailed) {
+            rendered = renderUnwarp(&mapped, &target, tex, frame->width, frame->height);
+        }
         else {
             if (m_Config.synth) {
                 // 合成壞掉之後：swapchain 仍是兩倍高，真的那一張照樣只畫上半
                 target.crop.x0 = 0.0f;
                 target.crop.y0 = 0.0f;
-                target.crop.x1 = static_cast<float>(frame->width);
-                target.crop.y1 = static_cast<float>(frame->height);
+                target.crop.x1 = static_cast<float>(m_Sw.width);
+                target.crop.y1 = static_cast<float>(frameH);
             }
             rendered = pl_render_image(m_Renderer, &mapped, &target, &pl_render_fast_params);
         }
@@ -744,7 +748,9 @@ void XrVideo::renderThreadMain()
             av_frame_free(&f);
             continue;
         }
-        if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, f->width, m_Config.synth ? f->height * 2 : f->height)) {
+        int outW = f->width, outH = f->height;
+        outputSize(f->width, f->height, &outW, &outH);
+        if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, outW, m_Config.synth ? outH * 2 : outH)) {
             renderNewFrame(f);
         }
         else {
@@ -808,6 +814,15 @@ vec2 uv = gl_FragCoord.xy * px;
 float xmin = (uv.x < 0.5 ? 0.0 : 0.5) + 0.5 * px.x;
 float xmax = xmin + 0.5 - px.x;
 vec2 g = vs_g * sz;
+{
+    // §VR-FOVEA：vs_g 是均勻取樣時的位移；壓縮過的影像裡，同樣的視角位移在每個位置佔的像素數是它除以那裡的斜率
+    float ex = (uv.x < 0.5 ? uv.x : uv.x - 0.5) * 2.0;
+    float cx = uv.x < 0.5 ? vs_fv.y : vs_fv.z;
+    float tx = (ex - cx) / (ex < cx ? cx : 1.0 - cx);
+    float ty = (uv.y - vs_fv.w) / (uv.y < vs_fv.w ? vs_fv.w : 1.0 - vs_fv.w);
+    float b = 1.0 - vs_fv.x;
+    g /= vec2(vs_fv.x + 3.0 * b * tx * tx, vs_fv.x + 3.0 * b * ty * ty);
+}
 for (int j = -1; j <= 1; j++) {
     for (int i = -1; i <= 1; i++) {
         vec2 p = uv + vec2(float(i), float(j)) * 1.5 * px;
@@ -847,10 +862,11 @@ color = vec4(r * px, best, 1.0);
 const char* kCombineBody = R"GLSL(
 vec2 tsz = vec2(textureSize(vs_full, 0));
 vec2 fc = gl_FragCoord.xy;
-if (fc.y < tsz.y) {
-    color = texture(vs_full, fc / tsz);
+bool bottom = fc.y >= vs_osz.y;
+vec2 uv = vs_unwarp(vec2(fc.x, bottom ? fc.y - vs_osz.y : fc.y) / vs_osz, vs_fv);
+if (!bottom) {
+    color = texture(vs_full, uv);
 } else {
-    vec2 uv = vec2(fc.x, fc.y - tsz.y) / tsz;
     vec2 fpx = 0.75 / vec2(textureSize(vs_flow, 0));
     float fmin = (uv.x < 0.5 ? 0.0 : 0.5) + fpx.x;
     float fmax = fmin + 0.5 - 2.0 * fpx.x;
@@ -869,6 +885,36 @@ if (fc.y < tsz.y) {
     s.y = clamp(s.y, 0.5 / tsz.y, 1.0 - 0.5 / tsz.y);
     color = texture(vs_full, s);
 }
+)GLSL";
+
+// §VR-FOVEA：還原注視點編碼。輸出（swapchain）是均勻取樣的座標，解碼出來的影像是壓縮過的：對每一軸解
+// (1−a)·e³ + a·e = t（Cardano，再做一次牛頓法修掉 float 的誤差）。fv＝(a, cxL, cxR, cy)；a ≥ 0.999 時原樣回傳。
+const char* kFovHeader = R"GLSL(
+float vs_inv1(float x, float c, float a) {
+    float ext = x < c ? c : 1.0 - c;
+    float t = (x - c) / ext;
+    float b = 1.0 - a;
+    float p = a / b;
+    float q = t / b;
+    float d = sqrt(q * q * 0.25 + p * p * p / 27.0);
+    float u = q * 0.5 + d;
+    float v = q * 0.5 - d;
+    float e = sign(u) * pow(abs(u), 1.0 / 3.0) + sign(v) * pow(abs(v), 1.0 / 3.0);
+    e -= (b * e * e * e + a * e - t) / (3.0 * b * e * e + a);
+    return c + clamp(e, -1.0, 1.0) * ext;
+}
+vec2 vs_unwarp(vec2 uv, vec4 fv) {
+    if (fv.x >= 0.999) { return uv; }
+    bool right = uv.x >= 0.5;
+    float ex = (right ? uv.x - 0.5 : uv.x) * 2.0;
+    float x = vs_inv1(ex, right ? fv.z : fv.y, fv.x);
+    float y = vs_inv1(uv.y, fv.w, fv.x);
+    return vec2((right ? 0.5 : 0.0) + 0.5 * x, y);
+}
+)GLSL";
+
+const char* kUnwarpBody = R"GLSL(
+color = texture(vs_full, vs_unwarp(gl_FragCoord.xy / vs_osz, vs_fv));
 )GLSL";
 
 // 縮到 1/8：每個輸出像素取來源 8x8 區塊的平均（4x4 個雙線性取樣點，各涵蓋 2x2）。直接雙線性縮 8 倍只看得到其中
@@ -909,7 +955,10 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     *synthOk = false;
     const auto caps = static_cast<pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
     const bool wantFloat = m_Mode == TargetMode::Float16Linear;
-    pl_fmt fmtFull = wantFloat ? pl_find_fmt(g, PL_FMT_FLOAT, 4, 16, 16, caps) : pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, caps);
+    const float ow = static_cast<float>(m_Sw.width), oh = static_cast<float>(m_Sw.height / 2);  // swapchain 裡一張影像的尺寸
+    float fv[4];
+    loadFoveation(fv);
+    float osz[2] = {ow, oh};
     pl_fmt fmtSmall = pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, caps);
     pl_fmt fmtFlow = pl_find_fmt(g, PL_FMT_FLOAT, 4, 16, 16, caps);
     const int sw = std::max(16, fw / 8), sh = std::max(16, fh / 8);
@@ -922,15 +971,16 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         tp.renderable = true;
         return pl_tex_recreate(g, t, &tp);
     };
-    if (fmtFull == nullptr || fmtSmall == nullptr || fmtFlow == nullptr || !mk(&m_Full, fw, fh, fmtFull) ||
+    (void) wantFloat;
+    if (fmtSmall == nullptr || fmtFlow == nullptr || !ensureFull(fw, fh) ||
         !mk(&m_Small[0], sw, sh, fmtSmall) || !mk(&m_Small[1], sw, sh, fmtSmall) || !mk(&m_Flow, sw, sh, fmtFlow)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] texture setup failed - frame synthesis off for this session");
         m_SynthFailed = true;
         pl_frame t = *targetProto;
         t.crop.x0 = 0.0f;
         t.crop.y0 = 0.0f;
-        t.crop.x1 = static_cast<float>(fw);
-        t.crop.y1 = static_cast<float>(fh);
+        t.crop.x1 = ow;
+        t.crop.y1 = oh;
         return pl_render_image(m_Renderer, mapped, &t, &pl_render_fast_params);
     }
     if (m_FrameH != fh) {
@@ -1011,10 +1061,13 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
                 float gvec[2] = {-0.5f * (2.0f * d[1]) / tanW, -(2.0f * d[0]) / tanH};
                 pl_shader shf = pl_dispatch_begin(m_Dp);
                 pl_shader_desc fd[2] = {sampledTex("vs_cur", m_Small[cur]), sampledTex("vs_prev", m_Small[prev])};
-                pl_shader_var gv = {};
-                gv.var = pl_var_vec2("vs_g");
-                gv.data = gvec;
-                gv.dynamic = true;
+                pl_shader_var gv[2] = {};
+                gv[0].var = pl_var_vec2("vs_g");
+                gv[0].data = gvec;
+                gv[0].dynamic = true;
+                gv[1].var = pl_var_vec4("vs_fv");
+                gv[1].data = fv;
+                gv[1].dynamic = true;
                 pl_custom_shader cs = {};
                 cs.description = "viple vr synth flow";
                 cs.header = kFlowHeader;
@@ -1023,8 +1076,8 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
                 cs.output = PL_SHADER_SIG_COLOR;
                 cs.descriptors = fd;
                 cs.num_descriptors = 2;
-                cs.variables = &gv;
-                cs.num_variables = 1;
+                cs.variables = gv;
+                cs.num_variables = 2;
                 if (pl_shader_custom(shf, &cs)) {
                     pl_dispatch_params dpar = {};
                     dpar.shader = &shf;
@@ -1048,19 +1101,26 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     {
         pl_shader shc = pl_dispatch_begin(m_Dp);
         pl_shader_desc cd[2] = {sampledTex("vs_full", m_Full), sampledTex("vs_flow", m_Flow)};
-        pl_shader_var kv = {};
-        kv.var = pl_var_float("vs_k");
-        kv.data = &k;
-        kv.dynamic = true;
+        pl_shader_var kv[3] = {};
+        kv[0].var = pl_var_float("vs_k");
+        kv[0].data = &k;
+        kv[0].dynamic = true;
+        kv[1].var = pl_var_vec2("vs_osz");
+        kv[1].data = osz;
+        kv[1].dynamic = true;
+        kv[2].var = pl_var_vec4("vs_fv");
+        kv[2].data = fv;
+        kv[2].dynamic = true;
         pl_custom_shader cs = {};
         cs.description = "viple vr synth combine";
+        cs.header = kFovHeader;
         cs.body = kCombineBody;
         cs.input = PL_SHADER_SIG_NONE;
         cs.output = PL_SHADER_SIG_COLOR;
         cs.descriptors = cd;
         cs.num_descriptors = 2;
-        cs.variables = &kv;
-        cs.num_variables = 1;
+        cs.variables = kv;
+        cs.num_variables = 3;
         if (pl_shader_custom(shc, &cs)) {
             pl_dispatch_params dpar = {};
             dpar.shader = &shc;
@@ -1077,8 +1137,8 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         pl_frame t = *targetProto;
         t.crop.x0 = 0.0f;
         t.crop.y0 = 0.0f;
-        t.crop.x1 = static_cast<float>(fw);
-        t.crop.y1 = static_cast<float>(fh);
+        t.crop.x1 = ow;
+        t.crop.y1 = oh;
         return pl_render_image(m_Renderer, mapped, &t, &pl_render_fast_params);
     }
 
@@ -1095,6 +1155,106 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     m_PrevPts = pts;
     m_SmallCur = prev;
     return true;
+}
+
+void XrVideo::loadFoveation(float fv[4]) const
+{
+    fv[0] = m_FvA.load(std::memory_order_relaxed);
+    fv[1] = m_FvCxL.load(std::memory_order_relaxed);
+    fv[2] = m_FvCxR.load(std::memory_order_relaxed);
+    fv[3] = m_FvCy.load(std::memory_order_relaxed);
+    if (!(fv[0] >= 0.4f && fv[0] < 0.999f)) {
+        fv[0] = 1.0f;
+    }
+}
+
+void XrVideo::outputSize(int fw, int fh, int* ow, int* oh) const
+{
+    *ow = fw;
+    *oh = fh;
+    const float a = m_FvA.load(std::memory_order_relaxed);
+    if (a >= 0.4f && a < 0.999f && fw > 0 && fh > 0) {
+        // 正前方的像素密度是 1/a 倍：swapchain 跟著放大才放得下那些細節。每眼最高 2304（頭盔面板每眼 2160）
+        const float s = std::min(1.0f / a, 2.0f);
+        int h = std::min(static_cast<int>(static_cast<float>(fh) * s + 0.5f), 2304);
+        h = std::max(h, fh) & ~1;
+        *oh = h;
+        *ow = static_cast<int>(static_cast<int64_t>(fw) * h / fh) & ~1;
+    }
+}
+
+// m_Full：解碼出來的影像轉成 RGB 的那一張（影像原本的尺寸），之後的 pass 從它取樣
+bool XrVideo::ensureFull(int fw, int fh)
+{
+    pl_gpu g = m_Vulkan->gpu;
+    const auto caps = static_cast<pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
+    pl_fmt fmt = m_Mode == TargetMode::Float16Linear ? pl_find_fmt(g, PL_FMT_FLOAT, 4, 16, 16, caps)
+                                                     : pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, caps);
+    if (fmt == nullptr) {
+        return false;
+    }
+    pl_tex_params tp = {};
+    tp.w = fw;
+    tp.h = fh;
+    tp.format = fmt;
+    tp.sampleable = true;
+    tp.renderable = true;
+    return pl_tex_recreate(g, &m_Full, &tp);
+}
+
+// §VR-FOVEA（不合成中間格時）：mapped → m_Full → 還原後寫進 swapchain。失敗就改回直接畫（影像是壓縮過的樣子）。
+bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh)
+{
+    bool ok = false;
+    if (m_Dp == nullptr) {
+        m_Dp = pl_dispatch_create(m_Log, m_Vulkan->gpu);  // 沒開合成時 init() 不會建
+    }
+    if (m_Dp != nullptr && ensureFull(fw, fh)) {
+        pl_frame tFull = *targetProto;
+        tFull.planes[0].texture = m_Full;
+        if (!pl_render_image(m_Renderer, mapped, &tFull, &pl_render_fast_params)) {
+            return false;
+        }
+        float fv[4];
+        loadFoveation(fv);
+        // swapchain 可能是兩倍高（合成壞掉之後）：一張影像的高度由寬度照比例算
+        float osz[2] = {static_cast<float>(m_Sw.width), static_cast<float>(m_Config.synth ? m_Sw.height / 2 : m_Sw.height)};
+        pl_shader sh = pl_dispatch_begin(m_Dp);
+        pl_shader_desc dd[1] = {sampledTex("vs_full", m_Full)};
+        pl_shader_var vv[2] = {};
+        vv[0].var = pl_var_vec2("vs_osz");
+        vv[0].data = osz;
+        vv[0].dynamic = true;
+        vv[1].var = pl_var_vec4("vs_fv");
+        vv[1].data = fv;
+        vv[1].dynamic = true;
+        pl_custom_shader cs = {};
+        cs.description = "viple vr fovea unwarp";
+        cs.header = kFovHeader;
+        cs.body = kUnwarpBody;
+        cs.input = PL_SHADER_SIG_NONE;
+        cs.output = PL_SHADER_SIG_COLOR;
+        cs.descriptors = dd;
+        cs.num_descriptors = 1;
+        cs.variables = vv;
+        cs.num_variables = 2;
+        if (pl_shader_custom(sh, &cs)) {
+            pl_dispatch_params dpar = {};
+            dpar.shader = &sh;
+            dpar.target = swTex;
+            ok = pl_dispatch_finish(m_Dp, &dpar);
+        }
+        else {
+            pl_dispatch_abort(m_Dp, &sh);
+        }
+    }
+    if (ok) {
+        return true;
+    }
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VR-FOVEA] unwarp pass failed - showing the stream without undoing the foveated encoding for this session");
+    m_UnwarpFailed = true;
+    return pl_render_image(m_Renderer, mapped, targetProto, &pl_render_fast_params);
 }
 
 void XrVideo::frameEnded(uint64_t generation)

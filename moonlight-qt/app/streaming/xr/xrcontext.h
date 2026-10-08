@@ -211,6 +211,8 @@ public:
     // M4a R2：main thread 放進 haptic 佇列，XR frame thread 呼叫 xrApplyHapticFeedback。
     // device 1＝左、2＝右（VIPLE_VR_POSE_LEFT/RIGHT）
     void queueHaptic(uint8_t device, uint32_t durationUs, float frequencyHz, float amplitude);
+    // §VR-FOVEA：server 在協商回應裡確認的注視點編碼強度（%，100＝關）。main thread 在 /launch 之後設，frame thread 讀
+    void setPcvrFoveation(int pct) { m_PcvrFoveaPct.store(pct, std::memory_order_relaxed); }
     bool trackingThreadMode() const { return m_TimeConv != nullptr; }
 
     // 執行期載入 Vulkan loader（Linux：libvulkan.so.1；Windows：vulkan-1.dll），app 不連 -lvulkan。
@@ -326,6 +328,7 @@ private:
     VkDevice m_VkDevice = VK_NULL_HANDLE;
     uint32_t m_QueueFamily = 0;
     VkQueue m_Queue = VK_NULL_HANDLE;
+    std::atomic<int> m_PcvrFoveaPct{100};
     std::atomic<bool> m_LostByGpu{false};  // frame thread 看到就當成 session loss
     std::atomic<bool> m_GpuWedged{false};  // M4a 收尾：GPU 等待逾時（見 waitSemaphoreBounded）
     uint32_t m_VkApiVersion = 0;

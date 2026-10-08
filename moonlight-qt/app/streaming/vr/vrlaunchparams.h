@@ -25,6 +25,7 @@ struct VrLaunchConfig {
     uint32_t codecs = 0;           // VIPLE_VR_CODEC_*
     QString controller = QStringLiteral("touch");
     int overscan = 0;              // deg×10
+    int fovea = 100;               // §VR-FOVEA：正前方的像素密度是均勻取樣的幾 %（100＝關）
     bool force = false;
 
     // 預設值：對稱 90° FOV、IPD 63 mm、兩眼只有水平位移
@@ -47,6 +48,7 @@ struct VrSessionInfo {
     QString codec;
     QString layout;
     int overscan = 0;
+    int fovea = 100;          // §VR-FOVEA：server 回了 fovea=N 才是 N（否則 100：影像沒有壓縮，不必還原）
     bool recoveryIntra = false;
     bool multilink = false;   // §VR-MULTILINK：server 回了 multilink=1（雙方都支援）
     int irFrames = 0;

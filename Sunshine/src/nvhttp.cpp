@@ -1805,6 +1805,12 @@ namespace nvhttp {
         put_vr_error(tree, true, 503, VIPLE_VR_ERR_BUSY, "VR parameters differ from the running orchestration");
         return;
       }
+      // §VR-FOVEA：driver 的設定在編排開始時就定了，/resume 不會重寫。回應裡的 fovea= 要照 driver 實際在做的，
+      // client 依回應決定要不要還原（要求的值不一樣不算錯）。
+      if (cur->fovea != vr_params->fovea) {
+        BOOST_LOG(info) << "[VIPLE-VR-SESSION] /resume: foveation stays at "sv << cur->fovea << "% (running orchestration; client asked for "sv << vr_params->fovea << "%)"sv;
+        vr_params->fovea = cur->fovea;
+      }
     }
 
     // §M01-D A1 2026-09-23：同一個 client（同一張 TLS 憑證）重新 /resume

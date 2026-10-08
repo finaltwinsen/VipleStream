@@ -64,7 +64,8 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
     §VR-LATE-LATCH（`--vr-latch-delay`）省 2～4 ms。
   - **使用者 2026-10-08 定的優先順序：流暢第一、解析度可以降，但一定要贏過 Steam 內建串流。**
     §VR-RENDER-SCALE（`vr_render_scale_pct`）已做：串流每眼 1152、算圖 2160，頭盔無人場次 MTP 41～45 ms。
-    接著：注視點編碼、10-bit、和 Steam 比延遲（要使用者讀頭盔裡的進階效能圖表）。補幀第一版已做
+    注視點編碼已做（§VR-FOVEA，client `--vr-foveation`／設定頁，預設關閉；頭盔無人場次通過，清晰度待使用者戴眼鏡看）。
+    接著：10-bit、和 Steam 比延遲（要使用者讀頭盔裡的進階效能圖表）。補幀第一版已做
     （client `--vr-half-rate`＋`--vr-synth`，預設關閉；頭盔無人場次通過，待使用者配戴確認）。VR 設定已進 GUI 設定頁（版面待使用者看）。host 停在登入／鎖定畫面時回明確的錯誤
     （§VR-HOST-LOCKED；鎖定狀態下的實測待做）。
   - 決定 `vr_multilink`、`vr_multilink_ctrl`、`vr_multilink_repair`、`vr_latch_mode` 的預設值（配戴已驗過 `auto`＋ctrl＋repair＋A2）。

@@ -1435,6 +1435,14 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <source>With half-rate streaming, moving objects are pushed forward on the refreshes that have no new frame instead of showing the previous frame again.</source>
         <translation>半速串流時，沒有新畫面的那一格不重複上一張，而是把正在移動的物體往前推。</translation>
     </message>
+    <message>
+        <source>Sharper centre (foveated encoding)</source>
+        <translation>正前方更清晰（注視點編碼）</translation>
+    </message>
+    <message>
+        <source>Spends more of the stream's pixels straight ahead and fewer at the edges of each eye. The stream stays the same size.</source>
+        <translation>串流的像素多分給正前方、少分給每隻眼睛的邊緣。串流的大小不變。</translation>
+    </message>
 </context>
 <context>
     <name>StreamSegue</name>

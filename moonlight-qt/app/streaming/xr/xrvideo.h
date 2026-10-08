@@ -123,6 +123,14 @@ public:
         m_FovTanW.store(tanW, std::memory_order_relaxed);
         m_FovTanH.store(tanH, std::memory_order_relaxed);
     }
+    // §VR-FOVEA：a＝正前方的斜率（1＝關）、cxL／cxR／cy＝正前方在左右眼影像裡的位置（0–1，y 從上緣算）。XR thread 每幀設
+    void setFoveation(float a, float cxL, float cxR, float cy)
+    {
+        m_FvCxL.store(cxL, std::memory_order_relaxed);
+        m_FvCxR.store(cxR, std::memory_order_relaxed);
+        m_FvCy.store(cy, std::memory_order_relaxed);
+        m_FvA.store(a, std::memory_order_relaxed);
+    }
     // 暖機：XrContext bring-up 後、第一幀之前可呼叫（目前由 render thread 在第一幀自行處理）
     void setSession(XrSession session);
 
@@ -148,6 +156,11 @@ private:
     bool renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh,
                      bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, bool* synthOk, VIPLE_VR_FRAME_META* synthMeta);
     bool renderNewFrame(AVFrame* frame);
+    // §VR-FOVEA：swapchain 裡一張影像的尺寸（還原後正前方的細節要有地方放，所以比解碼出來的影像大）
+    void outputSize(int fw, int fh, int* ow, int* oh) const;
+    bool ensureFull(int fw, int fh);
+    void loadFoveation(float fv[4]) const;
+    bool renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh);
     void dumpTexture(pl_tex tex);
     void renderThreadMain();
     void reapRetired();
@@ -176,6 +189,11 @@ private:
     std::atomic<uint64_t> m_SynthShown{0};
     std::atomic<float> m_FovTanW{3.2f};
     std::atomic<float> m_FovTanH{3.2f};
+    std::atomic<float> m_FvA{1.0f};
+    std::atomic<float> m_FvCxL{0.5f};
+    std::atomic<float> m_FvCxR{0.5f};
+    std::atomic<float> m_FvCy{0.5f};
+    bool m_UnwarpFailed = false;     // 還原的 shader 或材質失敗過：這個 session 改回直接畫（影像會是壓縮過的樣子）
     pl_tex m_Tex[4] = {};       // XR thread 的 map 材質
     pl_tex m_TestTex[4] = {};   // testMap 用（m_TestMutex）
 #ifdef HAVE_DRM

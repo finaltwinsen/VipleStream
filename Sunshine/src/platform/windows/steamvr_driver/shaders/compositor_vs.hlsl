@@ -9,6 +9,7 @@ cbuffer layer_cb : register(b0) {
   uint mode;  // 0 SRGB 視圖（取樣已是 linear）、1 UNORM 視為 sRGB 編碼（原樣）、2 float linear
   uint force_alpha;  // B8G8R8X8：alpha 未定義 → 1
   uint2 pad;
+  float4 fovea;  // §VR-FOVEA：x＝a（0＝關）。開的時候四邊形蓋滿本眼的 viewport，uv 改成本眼影像的座標（左上 0,0）
 };
 
 struct vs_out {
@@ -21,6 +22,11 @@ vs_out main(uint id : SV_VertexID) {
   const float fx = (id & 1) ? 1.0 : 0.0;
   const float fy = (id & 2) ? 1.0 : 0.0;
   vs_out o;
+  if (fovea.x > 0.0) {
+    o.pos = float4(lerp(-1.0, 1.0, fx), lerp(1.0, -1.0, fy), 0.0, 1.0);
+    o.uv = float2(fx, fy);
+    return o;
+  }
   o.pos = float4(lerp(dst_rect.x, dst_rect.z, fx), lerp(dst_rect.w, dst_rect.y, fy), 0.0, 1.0);
   o.uv = float2(lerp(uv_rect.x, uv_rect.z, fx), lerp(uv_rect.y, uv_rect.w, fy));
   return o;

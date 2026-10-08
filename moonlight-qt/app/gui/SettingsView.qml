@@ -2028,6 +2028,31 @@ Flickable {
                     ToolTip.text: qsTr("Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.")
                 }
 
+                Label {
+                    width: parent.width
+                    text: qsTr("Sharper centre (foveated encoding)")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                ComboBox {
+                    id: vrFoveationComboBox
+                    property var values: [100, 125, 150, 200]
+                    model: [qsTr("Off"), "1.25x", "1.5x", "2x"]
+                    Component.onCompleted: {
+                        var i = values.indexOf(StreamingPreferences.vrFoveation)
+                        currentIndex = i >= 0 ? i : 0
+                    }
+                    onActivated: {
+                        StreamingPreferences.vrFoveation = values[currentIndex]
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Spends more of the stream's pixels straight ahead and fewer at the edges of each eye. The stream stays the same size.")
+                }
+
                 CheckBox {
                     id: vrHalfRateCheck
                     width: parent.width

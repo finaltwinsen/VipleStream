@@ -246,7 +246,13 @@ namespace vr::orchestrator {
                       << " stalePolicy=" << (config::vr.stale_policy == config::vr_t::stale_e::hold ? "hold" : "legacy")
                       << " angvelLocal=" << (config::vr.angvel_local ? 1 : 0);
       // §VR-RENDER-SCALE：算圖尺寸與串流尺寸分開（100＝相同）
-      c.render_scale_pct = (uint32_t) (config::vr.render_scale_pct < 100 ? 100 : config::vr.render_scale_pct > 250 ? 250 : config::vr.render_scale_pct);
+      c.render_scale_pct = (uint16_t) (config::vr.render_scale_pct < 100 ? 100 : config::vr.render_scale_pct > 250 ? 250 : config::vr.render_scale_pct);
+      // §VR-FOVEA：client 要求、而且是真的 driver 才開（協商回應裡的 fovea= 用同一個條件）
+      c.fovea_pct = (uint16_t) (neg.pcvr && p.fovea > 100 && p.fovea <= 250 ? p.fovea : 100);
+      if (c.fovea_pct > 100) {
+        BOOST_LOG(info) << "[VIPLE-VR-ORCH] foveated encoding: centre density " << c.fovea_pct << "% of uniform (edge "
+                        << (int) (100.0f / (3.0f - 200.0f / c.fovea_pct) + 0.5f) << "%)";
+      }
       if (c.render_scale_pct != 100) {
         BOOST_LOG(info) << "[VIPLE-VR-ORCH] render scale " << c.render_scale_pct << "% (recommended render target "
                         << c.eye_width * c.render_scale_pct / 100 << "x" << c.eye_height * c.render_scale_pct / 100 << " per eye, stream "

@@ -218,6 +218,31 @@ TEST(VrParamsTest, NegativeValues) {
   expect_error(with(minimal_args(), "vrCaps", "-3"), "vrCaps='-3'");
 }
 
+// §VR-FOVEA：vrFovea 選填（100＝關）；關閉時 query 與協商回應都和以前一樣，只有真的 driver 會回 fovea=
+TEST(VrParamsTest, Foveation) {
+  EXPECT_EQ(parse_map(minimal_args()).params->fovea, 100);
+  auto r = parse_map(with(minimal_args(), "vrFovea", "150"));
+  ASSERT_TRUE(r.params.has_value()) << r.error;
+  EXPECT_EQ(r.params->fovea, 150);
+  const auto query = vr::format_launch_params(*r.params);
+  EXPECT_NE(query.find("&vrForce=0&vrFovea=150"), std::string::npos) << query;
+  auto back = parse_map(split_query(query));
+  ASSERT_TRUE(back.params.has_value()) << back.error;
+  EXPECT_EQ(*back.params, *r.params);
+  expect_error(with(minimal_args(), "vrFovea", "99"), "vrFovea=99 out of range");
+  expect_error(with(minimal_args(), "vrFovea", "251"), "vrFovea=251 out of range");
+
+  vr::negotiated_t neg;
+  neg.params = *r.params;
+  neg.guid = "g";
+  EXPECT_EQ(vr::format_session_element(neg).find("fovea"), std::string::npos);  // stub 不合成影像
+  neg.pcvr = true;
+  const auto el = vr::format_session_element(neg);
+  EXPECT_EQ(el.substr(el.size() - 10), ";fovea=150") << el;
+  neg.params.fovea = 100;
+  EXPECT_EQ(vr::format_session_element(neg).find("fovea"), std::string::npos);
+}
+
 TEST(VrParamsTest, SessionElement) {
   vr::negotiated_t neg;
   neg.params = *parse_map(minimal_args()).params;

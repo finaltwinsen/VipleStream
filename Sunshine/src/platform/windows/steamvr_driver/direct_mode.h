@@ -120,6 +120,7 @@ namespace vrdrv {
     uint32_t eye_w_ = 0;
     uint32_t eye_h_ = 0;
     math::rect_t eye_rect_[2];
+    float fovea_a_ = 0.0f;  // §VR-FOVEA：正前方的斜率 a＝100/fovea_pct；0＝關
     LUID act_luid_ {};
 
     // PostPresent／GetFrameTiming（同一條 compositor 執行緒依序呼叫）

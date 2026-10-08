@@ -55,6 +55,7 @@ namespace vr {
     uint32_t codecs = 0;  ///< vrCodecs：VIPLE_VR_CODEC_*
     std::string ctrl = "touch";  ///< vrCtrl："touch"|"index"
     int overscan = 0;  ///< vrOverscan：deg×10
+    int fovea = 100;  ///< vrFovea（§VR-FOVEA）：正前方的像素密度是均勻取樣的幾 %（100＝關，上限 250）
     bool force = false;  ///< vrForce：0|1
 
     bool operator==(const launch_params_t &) const = default;

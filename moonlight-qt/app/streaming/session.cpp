@@ -741,6 +741,7 @@ void Session::decideVrRequest()
     m_VrLaunch.eyeWidth = m_Preferences->vrEyeWidth;
     m_VrLaunch.eyeHeight = m_Preferences->vrEyeHeight;
     m_VrLaunch.refreshHz = m_Preferences->vrRefreshHz;
+    m_VrLaunch.fovea = m_Preferences->vrFoveation;  // §VR-FOVEA
 #ifdef HAVE_OPENXR
     if (!m_Preferences->vrEmulate && !setupXrPcvr()) {
         return;  // 已記原因；不變式 5（/launch 前）→ 平面
@@ -3228,6 +3229,11 @@ bool Session::startConnectionAsync()
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VR-SESSION] negotiated: %s",
                                 qPrintable(m_VrSession.describe()));
+#ifdef HAVE_OPENXR
+                    if (m_XrPcvr && m_XrContext != nullptr) {
+                        m_XrContext->setPcvrFoveation(m_VrSession.fovea);  // §VR-FOVEA：server 確認了才還原
+                    }
+#endif
                     if (m_VrSession.packedWidth != m_StreamConfig.width ||
                             m_VrSession.packedHeight != m_StreamConfig.height ||
                             m_VrSession.refreshHz != m_StreamConfig.fps) {
