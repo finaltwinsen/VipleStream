@@ -744,6 +744,20 @@ namespace stream {
       std::atomic<int> latchLogs {0};
       std::atomic<int32_t> latchLoggedPpm {0};
       std::atomic<int64_t> latchLoggedAtMs {0};  // 上次印 pacing 行的時間（steady clock，ms）
+      // 2026-10-08：上一行 [VIPLE-VR-TIMING] 10s 印出的 framesPresented（算 newPer10s：client 這 10 s 顯示了幾張新影像）
+      uint32_t lastPresented = 0;
+      bool havePresented = false;
+      // §VR-LATCH-V3：LATCH 控制器用的 host 幀週期（alloc 時填；記住／取回積分的索引）
+      uint32_t latchHostPeriodNs = 0;
+      // §VR-LATCH-V3：同場 A/B（config vr_latch_ab；latchAbSeconds == 0＝關）。A＝設定檔的模式與目標，B＝vr_latch_ab 指定的；
+      // alloc 時填好，之後只有 control 執行緒的 1 s tick 讀寫
+      int latchAbSeconds = 0;
+      ::vr::latch::mode_e latchAbModeA = ::vr::latch::mode_e::legacy;
+      int latchAbPctA = 0;
+      ::vr::latch::mode_e latchAbModeB = ::vr::latch::mode_e::legacy;
+      int latchAbPctB = 0;
+      std::chrono::steady_clock::time_point latchAbStart {};  // 第一次 tick 的時間
+      bool latchAbOnB = false;
     } vrCtrl;
 
     // 只在 videoBroadcastThread 存取：[VIPLE-VR-TX] 每個 session 印一次
@@ -1773,15 +1787,41 @@ namespace stream {
    * @brief M4a R3：套用 LATCH 頻率鎖的結果。pcvr 才寫 driver pacing；stub 只記錄（沒有 driver）。
    */
   static void vr_apply_latch(session_t *session, ::vr::session_state_t &vr_state, const ::vr::latch::result_t &r) {
+    // §VR-LATCH-V3：上一次 burst 的結果（每一步印一次；那一筆不一定要更新 pacing，所以放在 update 的判斷之前）。
+    // moved＝量到的相位移動量、of＝要求的量；成敗只看 err 有沒有進到門檻內（控制器判的），moved 只供對照。
+    // void＝burst 之後、量完之前閘門關了或 LATCH 停了，這一步量不到結果（moved／err 印 n/a）：不算成敗，
+    // 統計「結果是 track 的比例」「moved 與要求同號的比例」時不要把這種行算進去。
+    if (r.eval_valid) {
+      if (r.eval_outcome == ::vr::latch::kEvalVoid) {
+        BOOST_LOG(info) << "[VIPLE-VR-LATCH] step result: moved=n/a of " << std::format("{:.0f}", r.eval_cmd_us) << "us err=n/a -> "
+                        << ::vr::latch::eval_outcome_name(r.eval_outcome);
+      } else {
+        BOOST_LOG(info) << "[VIPLE-VR-LATCH] step result: moved=" << std::format("{:.0f}", r.eval_moved_us) << "us of "
+                        << std::format("{:.0f}", r.eval_cmd_us) << "us err=" << std::format("{:.0f}", r.eval_err_us) << "us -> "
+                        << ::vr::latch::eval_outcome_name(r.eval_outcome);
+      }
+    }
     if (!r.update) {
       return;
     }
     const bool pcvr = vr_state.negotiated().pcvr;
 #if VIPLE_VR_BRIDGE_HAS_ABI
     if (pcvr) {
-      ::vr::bridge::set_pacing_ppm(r.ppm);
+      if (r.burst_us > 0) {
+        // §VR-LATCH-V3：定時 burst——先寫 burst_ppm，burst_us 之後由 bridge 執行緒改回基準（r.ppm）
+        ::vr::bridge::set_pacing_step(r.ppm, r.burst_ppm, r.burst_us);
+      } else {
+        ::vr::bridge::set_pacing_ppm(r.ppm);
+      }
     }
 #endif
+    if (r.burst_us > 0) {
+      // 每一步都印（不節流）：一個 session 開場 2～3 步，之後只有負載改變時才有
+      BOOST_LOG(info) << "[VIPLE-VR-LATCH] step why=" << ::vr::latch::step_why_name(r.step_why) << " err=" << std::format("{:.0f}", r.step_err_us)
+                      << "us center=" << std::format("{:.0f}", r.center_us) << "us target=" << std::format("{:.0f}", r.target_us)
+                      << "us burst=" << r.burst_ppm << "ppm x " << std::format("{:.0f}", r.burst_us / 1000.0) << "ms base=" << r.ppm << "ppm"
+                      << (pcvr ? "" : " (stub: log only)");
+    }
     auto &ctl = session->vrCtrl;
     {
       // 前 5 次照印；之後數值變化 ≥ 50 ppm 且距上次 ≥ 5 s 才印。Frame 實測（Wi-Fi）ppm 每 100 ms 都在 ±數十
@@ -1897,6 +1937,22 @@ namespace stream {
       ctl.lastStats = now;
       vr_publish_quic_rtt(session, vr_state);  // §M1b S1-12：時鐘對映的 RTT 來源（STATS 的 clkOffset 會用到）
       vr_state.queue_stats();
+      // §VR-LATCH-V3：同場 A/B（vr_latch_ab；預設關）。每隔 latchAbSeconds 秒在 A（設定檔）與 B 之間切換一次；
+      // 控制器的積分留著，樣本重來。場與場之間的差異比要量的效果大，所以比較要在同一場裡交替。
+      if (ctl.latchAbSeconds > 0) {
+        if (ctl.latchAbStart == std::chrono::steady_clock::time_point {}) {
+          ctl.latchAbStart = now;
+        }
+        const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - ctl.latchAbStart).count();
+        const bool want_b = (elapsed_s / ctl.latchAbSeconds) % 2 == 1;
+        if (want_b != ctl.latchAbOnB) {
+          ctl.latchAbOnB = want_b;
+          const auto ab_mode = want_b ? ctl.latchAbModeB : ctl.latchAbModeA;
+          const int ab_pct = want_b ? ctl.latchAbPctB : ctl.latchAbPctA;
+          vr_state.switch_latch(ab_mode, ab_pct);
+          BOOST_LOG(info) << "[VIPLE-VR-LATCH] ab -> mode=" << ::vr::latch::mode_name(ab_mode) << " targetPct=" << ab_pct;
+        }
+      }
       vr_apply_latch(session, vr_state, vr_state.latch_idle(vr_steady_ns()));  // M4a R3：LATCH 停了就衰減
     }
 
@@ -1955,21 +2011,40 @@ namespace stream {
       // M4a R3：LATCH 頻率鎖與 client 時序
       if (cur.latch_rx != prev.latch_rx) {
         const auto ls = vr_state.latch_snapshot();
+        // §VR-LATCH-V3：v3 時尾端再加 st（wait／measure／burst／track）、gate（節拍閘門）、steps／bad（累計的 burst 次數
+        // 與失敗輪數）；slackEma／err 在 v3 是「目標＋誤差」與「環狀中位數到目標的最短路徑」
+        std::string v3_tail;
+        if (ls.mode == ::vr::latch::mode_e::v3) {
+          v3_tail = std::format(" st={} gate={} steps={} bad={}", ::vr::latch::phase_name(ls.phase), ls.gate_open ? 1 : 0, ls.steps, ls.bad_steps);
+        }
         // §VR-LATCH-V2：尾端加 err／integ／slips（累計）／dropped（累計，v2 才有）／mode；前面的欄位順序不變
         BOOST_LOG(info) << "[VIPLE-VR-LATCH] 10s: rx=" << cur.latch_rx - prev.latch_rx << " slackEma=" << std::format("{:.0f}", ls.slack_ema_us)
                         << "us target=" << std::format("{:.0f}", ls.target_us) << "us ppm=" << ls.ppm
                         << (pcvr ? "" : " (stub: log only)") << " haptics=" << vr_state.haptics_queued()
                         << " err=" << std::format("{:.0f}", ls.err_us) << "us integ=" << std::format("{:.1f}", ls.integral_ppm)
                         << " slips=" << ls.slips << " dropped=" << ls.dropped
-                        << " mode=" << (ls.mode == ::vr::latch::mode_e::v2 ? "v2" : "legacy");
+                        << " mode=" << ::vr::latch::mode_name(ls.mode) << v3_tail;
+        // §VR-LATCH-V3：連續追蹤夠久的積分＝兩台機器的時鐘差，記在行程內給下一個 session 當起點
+        if (const auto learned = vr_state.latch_learned(vr_steady_ns())) {
+          ::vr::latch::remember(ctl.latchHostPeriodNs, *learned);
+        }
       }
       if (const auto t = vr_state.last_client_timing()) {
+        // 2026-10-08：尾端加 newPer10s＝framesPresented 與上一行的差（client 這段時間顯示了幾張新影像；和 client 的
+        // [VIPLE-VR-MTP10] frames new 對照）。第一行沒有上一行可比、或計數倒退（client 重建）時不印這一欄。
+        std::string new_per_10s;
+        if (ctl.havePresented && (int32_t) (t->framesPresented - ctl.lastPresented) >= 0) {
+          new_per_10s = std::format(" newPer10s={}", t->framesPresented - ctl.lastPresented);
+        }
+        ctl.lastPresented = t->framesPresented;
+        ctl.havePresented = true;
         BOOST_LOG(info) << "[VIPLE-VR-TIMING] 10s: presented=" << t->framesPresented << " xrMissed=" << t->xrMissed
                         << " metaMiss=" << t->metaMiss << " period=" << std::format("{:.2f}", t->displayPeriodNs / 1e6) << "ms"
                         << " decode p50/p95=" << t->decodeP50Us << '/' << t->decodeP95Us << "us"
                         << " render p50/p95=" << t->renderP50Us << '/' << t->renderP95Us << "us"
                         << " slack p50/p05=" << t->slackP50Us << '/' << t->slackP05Us << "us"
-                        << " mtp p50/p95=" << std::format("{:.1f}", t->mtpP50_100us / 10.0) << '/' << std::format("{:.1f}", t->mtpP95_100us / 10.0) << "ms";
+                        << " mtp p50/p95=" << std::format("{:.1f}", t->mtpP50_100us / 10.0) << '/' << std::format("{:.1f}", t->mtpP95_100us / 10.0) << "ms"
+                        << new_per_10s;
       }
       ctl.lastLog = now;
       ctl.lastLogStats = cur;
@@ -2728,7 +2803,11 @@ namespace stream {
             const auto ms = [](int32_t us) {
               return std::format("{:.1f}", us / 1000.0);
             };
-            if (auto r = vr::predict::on_pose_lag(ct.poseLagP50_100us, ct.poseLagCount, now)) {
+            // §VR-LATCH-V3：相位還在動（等待、量測、burst、剛進追蹤）的視窗不採樣——host 讀姿態的時刻跟著虛擬 vsync 走，
+            // 相位一移，量到的姿態落後就跟著變，探測會把它誤判成「改值沒被採用」。樣本數報 0 的視窗 on_pose_lag 本來就不用。
+            // legacy／v2 的 latch_unsettled() 恆為 false，行為不變。
+            const uint16_t pose_lag_count = vr_state->latch_unsettled(vr_steady_ns()) ? uint16_t {0} : ct.poseLagCount;
+            if (auto r = vr::predict::on_pose_lag(ct.poseLagP50_100us, pose_lag_count, now)) {
               switch (r->action) {
                 case vr::predict::action_e::update:
                   if (!vr::bridge::send_set_v2p(r->to_us)) {
@@ -5253,10 +5332,46 @@ namespace stream {
           // §VR-LATCH-V2：模數用協商的 host 虛擬 vsync 週期（vrPeriodNs，缺席時 1e9/vrHz）
           const auto &p = launch_session.vr->params;
           const int64_t host_period = p.period_ns > 0 ? p.period_ns : (p.hz > 0 ? 1'000'000'000LL / p.hz : 0);
-          const auto mode = config::vr.latch_mode == config::vr_t::latch_e::v2 ? ::vr::latch::mode_e::v2 : ::vr::latch::mode_e::legacy;
-          session->vr->configure_latch(mode, config::vr.latch_target_pct, (uint32_t) std::clamp<int64_t>(host_period, 0, 50'000'000));
-          BOOST_LOG(info) << "[VIPLE-VR-LATCH] controller mode=" << (mode == ::vr::latch::mode_e::v2 ? "v2" : "legacy")
-                          << " targetPct=" << config::vr.latch_target_pct << " hostPeriod=" << std::format("{:.2f}", host_period / 1e6) << "ms";
+          const auto mode = config::vr.latch_mode == config::vr_t::latch_e::v3 ? ::vr::latch::mode_e::v3 :
+                            config::vr.latch_mode == config::vr_t::latch_e::v2 ? ::vr::latch::mode_e::v2 :
+                                                                                 ::vr::latch::mode_e::legacy;
+          // §VR-LATCH-V3：v3 的目標可以另外設（vr_latch_target_v3_pct，上限 65%）；0＝沿用 vr_latch_target_pct
+          const int target_pct = mode == ::vr::latch::mode_e::v3 && config::vr.latch_target_v3_pct > 0 ? config::vr.latch_target_v3_pct : config::vr.latch_target_pct;
+          const auto host_period_u32 = (uint32_t) std::clamp<int64_t>(host_period, 0, 50'000'000);
+          auto &ctl = session->vrCtrl;
+          ctl.latchHostPeriodNs = host_period_u32;
+          // §VR-LATCH-V3：定時 burst（vr_latch_acquire）與上一個 session 學到的積分；兩者都只有 v3 會用
+          ::vr::latch::options_t latch_opt;
+          latch_opt.acquire = config::vr.latch_acquire;
+          latch_opt.step_ppm = config::vr.latch_acquire_ppm;
+          if (mode == ::vr::latch::mode_e::v3) {
+            if (const auto seed = ::vr::latch::recall(host_period_u32)) {
+              latch_opt.have_seed = true;
+              latch_opt.seed_integral_ppm = *seed;
+            }
+          }
+          session->vr->configure_latch(mode, target_pct, host_period_u32, latch_opt);
+          // §VR-LATCH-V3：同場 A/B（開發用；預設空＝關）
+          std::string ab_text = "off";
+          if (!config::vr.latch_ab.empty()) {
+            if (const auto ab = ::vr::latch::parse_ab(config::vr.latch_ab)) {
+              ctl.latchAbSeconds = ab->seconds;
+              ctl.latchAbModeA = mode;
+              ctl.latchAbPctA = target_pct;
+              ctl.latchAbModeB = ab->mode;
+              ctl.latchAbPctB = ab->target_pct;
+              ab_text = std::format("{}:{}:{}", ab->seconds, ::vr::latch::mode_name(ab->mode), ab->target_pct);
+            } else {
+              BOOST_LOG(warning) << "[VIPLE-VR-LATCH] vr_latch_ab could not be parsed (expected <seconds 20-600>:<legacy|v2|v3>:<target%>) - ignored"sv;
+            }
+          }
+          // acquire 印的是這個 session 會不會用到（設定開著、而且設定的模式或 A/B 的另一段是 v3）
+          const bool acquire_used = latch_opt.acquire &&
+                                    (mode == ::vr::latch::mode_e::v3 || (ctl.latchAbSeconds > 0 && ctl.latchAbModeB == ::vr::latch::mode_e::v3));
+          BOOST_LOG(info) << "[VIPLE-VR-LATCH] controller mode=" << ::vr::latch::mode_name(mode)
+                          << " targetPct=" << target_pct << " hostPeriod=" << std::format("{:.2f}", host_period / 1e6) << "ms"
+                          << " integSeed=" << (latch_opt.have_seed ? std::format("{:.1f}", latch_opt.seed_integral_ppm) : "none"s)
+                          << " ab=" << ab_text << " acquire=" << (acquire_used ? 1 : 0);
         }
         // §VR-MULTILINK：/launch 協商成立才建立。連線由 client 的 LINK_HELLO 建立，在那之前（以及全部連線都
         // 不可用時）影像與音訊照舊走單一路徑。

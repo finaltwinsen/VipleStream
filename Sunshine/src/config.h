@@ -252,14 +252,26 @@ namespace config {
     /// 姿態落後調整；1000–200000＝固定、不調。
     int vsync_to_photons_us = 0;
 
-    /// §VR-LATCH-V2：vr_latch_mode。legacy（預設）＝M4a R3 原版；v2＝相位取模、anti-windup、目標 vr_latch_target_pct
+    /// §VR-LATCH-V2：vr_latch_mode。legacy（預設）＝M4a R3 原版；v2＝相位取模、anti-windup、目標 vr_latch_target_pct；
+    /// v3（§VR-LATCH-V3）＝環狀中位數＋最短路徑、節拍閘門、積分保留並跨場沿用（src/vr/vr_latch.h）
     enum class latch_e {
       legacy,
       v2,
+      v3,
     };
 
     latch_e latch_mode = latch_e::legacy;
     int latch_target_pct = 40;  ///< vr_latch_target_pct：v2 的目標 slack，佔週期的百分比（25–50）
+    /// §VR-LATCH-V3：vr_latch_target_v3_pct。v3 的目標（25–65）；0（預設）＝沿用 vr_latch_target_pct。
+    /// 50 以上會把影像往「早到」那一側推，要先看過 client 的早到分佈再用。
+    int latch_target_v3_pct = 0;
+    /// §VR-LATCH-V3：vr_latch_ab（預設空＝關）。開發用的同場 A/B：`<秒>:<模式>:<target%>`（例 `60:v2:50`），每隔這麼多秒
+    /// 在設定的模式與這裡指定的模式之間切換一次。原樣字串，格式錯誤要到 VR session 建立時才警告（stream.cpp）。
+    std::string latch_ab;
+    /// §VR-LATCH-V3：vr_latch_acquire（disabled 預設；只在 vr_latch_mode = v3 時有作用）。enabled＝相位誤差大時把虛擬 vsync
+    /// 的週期暫時改 ±vr_latch_acquire_ppm 一段算好的時間（burst），一次把相位移到位
+    bool latch_acquire = false;
+    int latch_acquire_ppm = 4000;  ///< vr_latch_acquire_ppm：burst 相對基準的週期修正量（1000–5000 ppm）
     /// §VR-RENDER-SCALE（2026-10-08）：vr_render_scale_pct。告訴 SteamVR 的建議算圖尺寸＝串流的每眼尺寸 × 這個百分比
     /// （100–250）。串流尺寸決定編碼、傳輸、解碼的負擔（也就是延遲），算圖尺寸決定畫面細節；Steam 內建串流是
     /// 算圖 2160、編碼寬度 1152。100＝舊行為（兩者相同）。改了要等 SteamVR 重啟才生效。

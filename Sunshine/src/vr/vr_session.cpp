@@ -612,10 +612,29 @@ namespace vr {
     }
   }
 
-  void session_state_t::configure_latch(latch::mode_e mode, int target_pct, uint32_t host_period_ns) {
+  void session_state_t::configure_latch(latch::mode_e mode, int target_pct, uint32_t host_period_ns, const latch::options_t &options) {
     std::lock_guard lk {latch_mtx_};
-    latch_ctl_.configure(mode, target_pct, host_period_ns);
+    latch_ctl_.configure(mode, target_pct, host_period_ns, options);
     latch_last_.mode = mode;
+  }
+
+  bool session_state_t::latch_unsettled(int64_t now_ns) const {
+    std::lock_guard lk {latch_mtx_};
+    return latch_ctl_.unsettled(now_ns);
+  }
+
+  std::optional<double> session_state_t::latch_learned(int64_t now_ns) const {
+    std::lock_guard lk {latch_mtx_};
+    return latch_ctl_.learned(now_ns);
+  }
+
+  void session_state_t::switch_latch(latch::mode_e mode, int target_pct) {
+    std::lock_guard lk {latch_mtx_};
+    latch_ctl_.switch_mode(mode, target_pct);
+    // 10 s log 讀的是最近一次的結果：下一則 LATCH 進來之前先把模式換掉，v3 的狀態欄位回到等待
+    latch_last_.mode = mode;
+    latch_last_.phase = latch::kPhaseWait;
+    latch_last_.gate_open = false;
   }
 
   latch::result_t session_state_t::on_latch(const VIPLE_VR_TLV_LATCH &latch, int64_t now_ns) {
@@ -638,6 +657,11 @@ namespace vr {
     auto r = latch_last_;
     r.update = false;
     r.ppm = latch_ctl_.last_sent_ppm();
+    // §VR-LATCH-V3：burst 與步進結果是「那一筆」才有的指令，快照不帶
+    r.burst_ppm = 0;
+    r.burst_us = 0;
+    r.step_why = 0;
+    r.eval_valid = false;
     return r;
   }
 

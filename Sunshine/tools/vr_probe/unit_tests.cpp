@@ -1086,6 +1086,40 @@ namespace probe {
         t.check(r.pacing_rejected == c.expect_reject && period_ok && r.missed == 1 && !r.snapped, c.name, "rejected=%d periodMs=%.4f missed=%u", r.pacing_rejected ? 1 : 0, period_ms, r.missed);
       }
       {
+        // §VR-LATCH-V3 定時 burst：週期 ±4000 ppm（server 平常只給 ±200）連走 120 格。driver 本體沒有改，這裡只是補上
+        // 從沒測過的大數值：不被拒絕、每格都是正常的一格（missed == 1）、格點的總位移＝120 × 標稱週期 × (1 ± 0.004)。
+        // 每一格都在上一個虛擬 vsync 過後四分之一個週期呼叫，和 PostPresent 睡到格點再返回的節奏一樣。
+        struct burst_case_t {
+          const char *name;
+          double scale;
+        };
+        const burst_case_t bursts[] = {
+          {"vsync-burst+4000ppm", 1.004},
+          {"vsync-burst-4000ppm", 0.996},
+        };
+        for (const auto &b : bursts) {
+          vrdrv::virtual_vsync_t v;
+          const int64_t t0 = qpc();
+          v.activate(f, mhz, t0);
+          const vripc_pacing_t p = pacing(p_nom * b.scale, 200, 0);
+          auto r = v.step(&p, false, t0 + (int64_t) (p_nom * 1.5), 0);  // 第一格當起點
+          bool rejected = r.pacing_rejected;
+          bool cadence_ok = r.missed == 1 && !r.snapped;
+          const int64_t start = r.vsync_qpc;
+          for (int i = 0; i < 120; ++i) {
+            r = v.step(&p, false, r.vsync_qpc + (int64_t) (p_nom * 0.25), 0);
+            rejected = rejected || r.pacing_rejected;
+            cadence_ok = cadence_ok && r.missed == 1 && !r.snapped;
+          }
+          const double moved = (double) (r.vsync_qpc - start);
+          const double expect = 120.0 * p_nom * b.scale;
+          const double period_ms = (double) r.period_ns / 1e6;
+          const bool period_ok = std::fabs(period_ms - 1000.0 / 90.0 * b.scale) < 0.001;
+          t.check(!rejected && cadence_ok && std::fabs(moved - expect) <= 2.0 && period_ok, b.name, "rejected=%d cadenceOk=%d moved=%.1f expect=%.1f periodMs=%.4f", rejected ? 1 : 0,
+                  cadence_ok ? 1 : 0, moved, expect, period_ms);
+        }
+      }
+      {
         // 停頓 10 s 後：一次算出 missed、立即返回（不逐週期相加）、下一個 vsync 在 now 之後
         vrdrv::virtual_vsync_t v;
         const int64_t t0 = qpc();

@@ -157,7 +157,10 @@ namespace config {
       if (value == "v2"sv) {
         return vr_t::latch_e::v2;
       }
-      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: legacy, v2. Falling back to 'legacy'", key, value));
+      if (value == "v3"sv) {
+        return vr_t::latch_e::v3;
+      }
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: legacy, v2, v3. Falling back to 'legacy'", key, value));
       return vr_t::latch_e::legacy;
     }
 
@@ -1530,15 +1533,21 @@ namespace config {
     // VipleStream 2.0 §VR（M1a）：vr_pcvr 預設 disabled；stub 只供開發驗證。
     // enum 與整數選項（vr_opt::*_from_view、vr_opt::int_strict_f）值寫錯一律警告並維持預設
     // （壞值絕不靜靜地變成「開啟」或「關閉安全網」）。
-    // 四個布林選項（vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、vr_multilink_repair）走
+    // 五個布林選項（vr_latch_acquire、vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、vr_multilink_repair）走
     // vr_opt::bool_strict_f（2026-10-08）：只接受明確的開／關字樣，其他警告並維持預設。
-    // vr_multilink_fault 是原樣字串，格式錯誤要到多連線的 VR session 建立時才警告（stream.cpp）。
+    // vr_multilink_fault 是原樣字串，格式錯誤要到多連線的 VR session 建立時才警告（stream.cpp）；
+    // vr_latch_ab 也是原樣字串，VR session 建立時才驗。
     generic_f(vars, "vr_pcvr", vr.pcvr, vr_opt::pcvr_from_view);
     vr_opt::int_strict_f(vars, "vr_intra_refresh_frames", vr.intra_refresh_frames, 2, 60, false);
     vr_opt::int_strict_f(vars, "vr_intra_refresh_safety_ms", vr.intra_refresh_safety_ms, 500, 10000, true);
     vr_opt::int_strict_f(vars, "vr_vsync_to_photons_us", vr.vsync_to_photons_us, 1000, 200000, true);
     generic_f(vars, "vr_latch_mode", vr.latch_mode, vr_opt::latch_from_view);
     vr_opt::int_strict_f(vars, "vr_latch_target_pct", vr.latch_target_pct, 25, 50, false);
+    // §VR-LATCH-V3：0＝沿用 vr_latch_target_pct。vr_latch_target_pct 的範圍與語意不動（v2 下寫 51 以上照舊是警告、保留原值）
+    vr_opt::int_strict_f(vars, "vr_latch_target_v3_pct", vr.latch_target_v3_pct, 25, 65, true);
+    string_f(vars, "vr_latch_ab", vr.latch_ab);
+    vr_opt::bool_strict_f(vars, "vr_latch_acquire", vr.latch_acquire);
+    vr_opt::int_strict_f(vars, "vr_latch_acquire_ppm", vr.latch_acquire_ppm, 1000, 5000, false);
     vr_opt::int_strict_f(vars, "vr_render_scale_pct", vr.render_scale_pct, 100, 250, false);
     vr_opt::bool_strict_f(vars, "vr_ctrl_pose_offset", vr.ctrl_pose_offset);
     vr_opt::bool_strict_f(vars, "vr_angvel_local", vr.angvel_local);

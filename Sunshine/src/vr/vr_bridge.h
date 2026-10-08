@@ -317,6 +317,16 @@ namespace vr::bridge {
    *        ppm 夾在 ±200。
    */
   void set_pacing_ppm(int32_t ppm);
+
+  /**
+   * @brief §VR-LATCH-V3：定時 burst。先以 burst_ppm 寫 pacing，burst_us 之後由 bridge 執行緒自己改回 base_ppm
+   *        （連線中它每 2 ms 醒一次；不靠 control 執行緒，ENet 斷線時 control tick 不跑）。兩份 pacing 的算法與
+   *        set_pacing_ppm 相同（production 模式、epoch 不變、沒有 anchor）：driver 每格整份採用週期，只檢查 ±5%。
+   *        base_ppm 夾在 ±200、burst_ppm 夾在 ±5000、burst_us 夾在 2 s 以內。
+   *        之後任何一次 set_pacing／set_pacing_ppm 都會取消還沒結束的 burst（最新的指令為準）；新的 generation
+   *        （driver 重連）從 base_ppm 開始。
+   */
+  void set_pacing_step(int32_t base_ppm, int32_t burst_ppm, uint32_t burst_us);
 #endif
 
   /**

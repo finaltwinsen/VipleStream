@@ -379,8 +379,20 @@ namespace vr {
 
     // ── M4a R3：LATCH／CLIENT_TIMING／HAPTIC ──
 
-    /// §VR-LATCH-V2：session 開始、第一則 LATCH 之前設定控制器（config vr_latch_mode／vr_latch_target_pct）
-    void configure_latch(latch::mode_e mode, int target_pct, uint32_t host_period_ns);
+    /// §VR-LATCH-V2：session 開始、第一則 LATCH 之前設定控制器（config vr_latch_mode／vr_latch_target_pct）。
+    /// options 是 §VR-LATCH-V3 的選配項（上一個 session 學到的積分、定時 burst），legacy／v2 不用。
+    void configure_latch(latch::mode_e mode, int target_pct, uint32_t host_period_ns, const latch::options_t &options = {});
+
+    // §VR-LATCH-V3：以下三個都在 latch_mtx_ 內轉呼叫控制器（LATCH 可能從 control、QUIC IO 或多連線的接收執行緒進來）
+
+    /// v3 的相位還沒穩定（§VR-PREDICT 這時不採樣）。legacy／v2 恆為 false。
+    bool latch_unsettled(int64_t now_ns) const;
+
+    /// v3 連續追蹤夠久之後的積分（可以帶到下一個 session）；其他情況 nullopt
+    std::optional<double> latch_learned(int64_t now_ns) const;
+
+    /// 同一個 session 裡換模式或目標（config vr_latch_ab 的同場 A/B）：積分保留，樣本重來
+    void switch_latch(latch::mode_e mode, int target_pct);
 
     /**
      * @brief control 執行緒（或 QUIC IO 執行緒）：一則 LATCH。更新頻率鎖控制器並回傳建議的

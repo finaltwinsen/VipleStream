@@ -1918,7 +1918,19 @@ editing the `conf` file in a text editor. Use the examples as reference.
             out-of-range reports, stops integrating while the output is saturated, and aims at
             [vr_latch_target_pct](#vr_latch_target_pct) of the period. `v2` removes the periodic phase slips
             (a burst of repeated frames every 30 to 60 seconds) seen with `legacy` on Wi-Fi.
-            @note{Applies to VR sessions only. The default will change after headset A/B testing.}
+            `v3` (experimental) takes the phase as the circular median of the last few reports and steers along
+            the shortest way round to the target, so reports that straddle the latch edge no longer cancel
+            out. It ignores reports while frames are not arriving at the negotiated rate (start-up, loading
+            screens, a frozen picture: only the learned clock difference is applied then), and keeps the clock
+            difference it has learned between the two machines when the reports
+            pause (the proportional part is dropped after 2 seconds, the learned part only starts to decay after
+            60 seconds) and reuses it as the starting point of the next session. Its target can be set separately
+            with [vr_latch_target_v3_pct](#vr_latch_target_v3_pct), and
+            [vr_latch_acquire](#vr_latch_acquire) lets it move the phase in one timed step instead of drifting
+            there at 200 ppm.
+            @note{Applies to VR sessions only. The default will change after headset A/B testing. Servers older
+            than the one that introduced `v3` treat it as an invalid value and fall back to `legacy`: set the
+            option back to `v2` before downgrading.}
         </td>
     </tr>
     <tr>
@@ -1945,7 +1957,8 @@ editing the `conf` file in a text editor. Use the examples as reference.
             period: how long a new frame should be ready before the headset latches it. A larger margin absorbs
             more arrival jitter (fewer repeated frames) at the cost of the same amount of extra latency.
             The accepted range is 25 to 50; invalid values are ignored with a warning in the log.
-            @note{Applies to VR sessions with `vr_latch_mode = v2` only.}
+            @note{Applies to VR sessions with `vr_latch_mode = v2`, and with `vr_latch_mode = v3` unless
+            [vr_latch_target_v3_pct](#vr_latch_target_v3_pct) is set.}
         </td>
     </tr>
     <tr>
@@ -1962,9 +1975,141 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
-@note{The four on/off VR options below (`vr_ctrl_pose_offset`, `vr_angvel_local`, `vr_multilink_ctrl`,
-`vr_multilink_repair`) accept `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`; case does not
-matter). Any other value is reported in the log as an invalid value and the option keeps its default.}
+### vr_latch_target_v3_pct
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: target margin of [vr_latch_mode](#vr_latch_mode) `v3`, as a percentage of the display
+            period. `0` uses [vr_latch_target_pct](#vr_latch_target_pct). Otherwise the accepted range is 25 to
+            65; invalid values are ignored with a warning in the log. Values above 50 leave less room on the
+            other side: a frame that arrives early by more than the remaining part of the period takes the
+            previous display slot, and the slot after it then repeats a frame. Look at the client's early/late
+            statistics before going above 50.
+            @note{Applies to VR sessions with `vr_latch_mode = v3` only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            0
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_latch_target_v3_pct = 55
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_latch_ab
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Development only: alternate between two pacing controller settings within one VR session, so they can
+            be compared under the same conditions (two sessions with the same settings differ by more than the
+            effect being measured). Format: `<seconds>:<mode>:<target%>`. Every `<seconds>` (20 to 600) the
+            controller switches between the configured [vr_latch_mode](#vr_latch_mode) and target, and the
+            mode (`legacy`, `v2` or `v3`) and target (25 to 50, or 25 to 65 for `v3`) given here. The learned
+            clock difference is kept across a switch; the phase is measured afresh (a
+            [vr_latch_acquire](#vr_latch_acquire) step that is under way at that moment is not judged). A log line
+            (`[VIPLE-VR-LATCH] ab -> ...`) marks each switch; ignore the first 10 seconds after it.
+            @note{Leave empty outside of testing. A value that cannot be parsed is reported in the log when a VR
+            session starts and is then ignored.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            (empty)
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_latch_ab = 60:v2:50
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_latch_acquire
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (experimental): let [vr_latch_mode](#vr_latch_mode) `v3` correct a large phase error
+            in one timed step. When the measured phase is more than 15% of the period away from the target
+            (after start-up, or when the host's frame pipeline suddenly takes longer, for example when a game
+            starts rendering), the server changes the virtual vsync period by
+            [vr_latch_acquire_ppm](#vr_latch_acquire_ppm) for exactly as long as it takes to cover the error
+            (3 ms at 4000 ppm takes 0.75 seconds), then returns to the normal period and measures again; one
+            follow-up step is allowed if more than 12% is left. Without it the controller can only move the
+            phase by about 0.2 ms per second. No reports are used and the period is left alone while a step is
+            in progress and for 250 ms after it. A round of steps that does not bring the error within 15%
+            only delays the next attempt (5 seconds, doubling up to 60); at most 8 steps are made per minute.
+            If frames stop arriving at the negotiated rate (or the reports stop) before a step could be
+            measured, that step is not judged at all (`void` in the log) and the next measurement starts a
+            new round.
+            Accepts `enabled`/`disabled` like the on/off options below.
+            @note{Only has an effect with `vr_latch_mode = v3`. Not yet verified on a headset: SteamVR and games
+            see the frame period change by up to 0.5% during a step.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_latch_acquire = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_latch_acquire_ppm
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: how far a [vr_latch_acquire](#vr_latch_acquire) step changes the virtual vsync
+            period, in parts per million (4000 ppm is 33 µs per frame at 120 Hz). A smaller value makes each
+            step take proportionally longer. The accepted range is 1000 to 5000; invalid values are ignored with
+            a warning in the log. A step lasts at most 1.5 seconds and a round is at most two steps, so one
+            round moves the phase by at most 3 µs per ppm (6 ms at 2000 ppm). Below about 1300 ppm at 90 Hz
+            (1650 ppm at 72 Hz) a start half a period away from the target does not fit in one round: that
+            round is logged as failed even though every step moved as asked, and the rest is left to the
+            normal 200 ppm tracking and, if still needed after the 5 second back-off, another round. 2000 and
+            above is enough down to 60 Hz.
+            @note{Only has an effect with `vr_latch_mode = v3` and `vr_latch_acquire = enabled`.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            4000
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_latch_acquire_ppm = 2000
+            @endcode</td>
+    </tr>
+</table>
+
+@note{The on/off VR options ([vr_latch_acquire](#vr_latch_acquire) above and `vr_ctrl_pose_offset`, `vr_angvel_local`,
+`vr_multilink_ctrl`, `vr_multilink_repair` below) accept `enabled`/`disabled` (also `true`/`false`, `yes`/`no`,
+`on`/`off`, `1`/`0`; case does not matter). Any other value is reported in the log as an invalid value and the option
+keeps its default.}
 
 ### vr_ctrl_pose_offset
 

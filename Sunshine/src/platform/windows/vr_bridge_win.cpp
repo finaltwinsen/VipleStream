@@ -646,6 +646,16 @@ namespace vr::bridge {
       int64_t timing_window = 0;
       uint64_t timing_counts[16] {};
       uint64_t timing_total = 0;
+      // 2026-10-08：driver 實際採用的週期（VSYNC_VIRTUAL 的 arg0，ns）在這個視窗的最小／最大值——確認 pacing 有沒有被套用
+      int64_t vs_period_min_ns = INT64_MAX;
+      int64_t vs_period_max_ns = 0;
+      // 2026-10-08：每一幀的 Present 落在虛擬 vsync 格內的位置（PRESENT_ENTER − 上一筆 POSTPRESENT_EXIT，ms）
+      int64_t last_ppexit_qpc = 0;
+      std::vector<float> present_phase_ms;
+      // §VR-LATCH-V3 定時 burst：burst_until（QPC，0＝沒有進行中的 burst）到了就寫 burst_after（基準週期）
+      int64_t burst_until = 0;
+      vripc_pacing_t burst_after {};
+      uint32_t bursts_done = 0;  ///< 這個 timing 視窗裡走完的 burst 數（10 s log 用）
       vripc_driver_status_t last_driver {};  ///< 最近一次複製的 driver_status（已驗證的欄位另存 status_）
     };
 
@@ -685,6 +695,9 @@ namespace vr::bridge {
       std::optional<uint32_t> v2p;
       std::optional<std::pair<uint64_t, uint32_t>> teardown;
       std::optional<vripc_pacing_t> pacing;
+      // §VR-LATCH-V3 定時 burst：有值時 pacing 是 burst 的週期，pacing_after_us 之後改寫成 pacing_after（基準）
+      std::optional<vripc_pacing_t> pacing_after;
+      uint32_t pacing_after_us = 0;
     };
 
     void fill_hdr(vripc_msg_hdr_t &h, uint16_t type, uint32_t size, uint32_t seq) {
@@ -708,6 +721,7 @@ namespace vr::bridge {
       void request_quit();
       void set_pacing(const vripc_pacing_t &p);
       void set_pacing_ppm(int32_t ppm);
+      void set_pacing_step(int32_t base_ppm, int32_t burst_ppm, uint32_t burst_us);
       void set_dev_mode(bool on);
       bool send_v2p(uint32_t us);
       void user_changed();
@@ -989,6 +1003,7 @@ namespace vr::bridge {
         p.seq = 0;
         explicit_pacing_ = p;
         cmds_.pacing = p;
+        cmds_.pacing_after.reset();  // §VR-LATCH-V3：一般寫入＝最新的指令，取消還沒結束的 burst
       }
       SetEvent(ev_cmd_.get());
     }
@@ -1008,6 +1023,34 @@ namespace vr::bridge {
       p.mode = VRIPC_PM_PRODUCTION;
       p.epoch = 1;  // 與 write_default_pacing 相同，不觸發重新對齊
       set_pacing(p);
+    }
+
+    void bridge_t::set_pacing_step(int32_t base_ppm, int32_t burst_ppm, uint32_t burst_us) {
+      // §VR-LATCH-V3 定時 burst：兩份 pacing 的算法與 set_pacing_ppm 相同，只是 burst 的 ppm 上限放到 ±5000
+      // （driver 接受標稱週期 ±5%＝±50000 ppm；slew_ppm_max 只管 anchor 的相位追蹤，這裡沒有 anchor）。
+      // set_pacing_ppm 與它的 ±200 不動。
+      const int32_t base_c = std::clamp<int32_t>(base_ppm, -200, 200);
+      const int32_t burst_c = std::clamp<int32_t>(burst_ppm, -5000, 5000);
+      const uint32_t us = std::min<uint32_t>(burst_us, 2'000'000u);
+      {
+        std::lock_guard lk(mtx_);
+        const uint64_t nominal = period_q32_for(last_refresh_mhz_);
+        const auto make = [nominal](int32_t ppm) {
+          vripc_pacing_t p {};
+          p.period_q32 = (uint64_t) ((double) nominal * (1.0 + (double) ppm * 1e-6));
+          p.slew_ppm_max = 200;
+          p.pacing_flags = 0;  // 沒有 anchor：driver 只跟週期
+          p.mode = VRIPC_PM_PRODUCTION;
+          p.epoch = 1;  // 與 write_default_pacing 相同，不觸發重新對齊
+          return p;
+        };
+        const vripc_pacing_t base = make(base_c);
+        explicit_pacing_ = base;  // 新 generation（driver 重連）握手時從基準開始，不重播 burst
+        cmds_.pacing = make(burst_c);
+        cmds_.pacing_after = base;
+        cmds_.pacing_after_us = us;
+      }
+      SetEvent(ev_cmd_.get());
     }
 
     void bridge_t::set_dev_mode(bool on) {
@@ -2550,6 +2593,13 @@ namespace vr::bridge {
       }
       if (cmd.pacing) {
         write_pacing(*conn_, *cmd.pacing);
+        if (cmd.pacing_after) {
+          // §VR-LATCH-V3 定時 burst：剛寫的是 burst 的週期；到期由 periodic() 改寫成基準
+          conn_->burst_after = *cmd.pacing_after;
+          conn_->burst_until = now_qpc() + (int64_t) cmd.pacing_after_us * qpf() / 1000000;
+        } else {
+          conn_->burst_until = 0;  // 一般寫入：取消還沒結束的 burst
+        }
       }
     }
 
@@ -2679,6 +2729,22 @@ namespace vr::bridge {
         ++timing_rx;
         ++c.timing_total;
         c.timing_counts[r.event < 16 ? r.event : 0]++;
+        // 2026-10-08：只統計、不影響任何行為。紀錄是 driver 寫的（不可信）：數值只拿來算有上限的統計量
+        if (r.event == VRIPC_TE_VSYNC_VIRTUAL && r.arg0 > 0) {
+          // arg0＝driver 這一格實際採用的週期（ns）
+          c.vs_period_min_ns = std::min(c.vs_period_min_ns, r.arg0);
+          c.vs_period_max_ns = std::max(c.vs_period_max_ns, r.arg0);
+        } else if (r.event == VRIPC_TE_POSTPRESENT_EXIT) {
+          // PostPresent 返回＝driver 把 compositor 放行的那個虛擬 vsync 格點
+          c.last_ppexit_qpc = r.qpc;
+        } else if (r.event == VRIPC_TE_PRESENT_ENTER && c.last_ppexit_qpc != 0 && r.qpc >= c.last_ppexit_qpc) {
+          // 下一筆 Present 進來的時刻減掉它＝這一幀的 Present 落在格內的位置（無號相減：兩個值相差再大也不會溢位）
+          const double ms = (double) ((uint64_t) r.qpc - (uint64_t) c.last_ppexit_qpc) * 1000.0 / (double) qpf();
+          if (ms < 100.0 && c.present_phase_ms.size() < 4096) {
+            c.present_phase_ms.push_back((float) ms);
+          }
+          c.last_ppexit_qpc = 0;  // 一個格點只配一筆 Present
+        }
         if (tsink) {
           tsink(r);
         }
@@ -2732,6 +2798,29 @@ namespace vr::bridge {
         if (c.timing_total) {
           const auto &d = c.last_driver;
           const auto *k = c.timing_counts;
+          // 2026-10-08：尾端加 periodPpm（driver 實際採用的週期相對標稱值，確認 pacing 有被套用）與 presentPhase
+          // （Present 落在虛擬 vsync 格內的位置的分佈）。這個 generation 沒有 config（不知道標稱週期）時兩段都不印；
+          // 視窗裡沒有對應的紀錄時那一段不印。前面的欄位順序不變。
+          // §VR-LATCH-V3：最後再加 bursts（這個視窗裡走完的定時 burst 數；和 [VIPLE-VR-LATCH] step 的行數對照）。
+          std::string tail;
+          if (c.gen->has_config && c.gen->config.refresh_mhz != 0) {
+            if (c.vs_period_max_ns > 0) {
+              const double nominal_ns = 1e12 / (double) c.gen->config.refresh_mhz;
+              const auto ppm = [nominal_ns](int64_t period_ns) {
+                return (int) std::lround(std::clamp(((double) period_ns - nominal_ns) / nominal_ns * 1e6, -999999.0, 999999.0));
+              };
+              tail += std::format(" periodPpm min/max={}/{}", ppm(c.vs_period_min_ns), ppm(c.vs_period_max_ns));
+            }
+            if (!c.present_phase_ms.empty()) {
+              auto &v = c.present_phase_ms;
+              std::sort(v.begin(), v.end());
+              const auto at = [&v](double q) {
+                return (double) v[std::min(v.size() - 1, (size_t) (q * (double) (v.size() - 1) + 0.5))];
+              };
+              tail += std::format(" presentPhase p50/p95/p99/max={:.2f}/{:.2f}/{:.2f}/{:.2f} ms", at(0.5), at(0.95), at(0.99), (double) v.back());
+            }
+          }
+          tail += std::format(" bursts={}", c.bursts_done);
           BOOST_LOG(info) << "[VIPLE-VR-DRV] timing 10s: recs=" << c.timing_total << " vsync=" << k[VRIPC_TE_VSYNC_VIRTUAL]
                           << " submit=" << k[VRIPC_TE_SUBMIT_LAYER] << " present=" << k[VRIPC_TE_PRESENT_EXIT]
                           << " postpresent=" << k[VRIPC_TE_POSTPRESENT_EXIT] << " compose=" << k[VRIPC_TE_COMPOSE_DONE]
@@ -2739,11 +2828,16 @@ namespace vr::bridge {
                           << " pacingRejected=" << k[VRIPC_TE_PACING_REJECTED] << " nextIndex=" << k[VRIPC_TE_NEXT_INDEX]
                           << " | drv presented=" << d.frames_presented << " composited=" << d.frames_composited
                           << " noslot=" << d.drop_noslot << " acqTimeout=" << d.drop_acquire_timeout << " fmt=" << d.drop_format
-                          << " staleCnt=" << d.stale_pose_count << " oor=" << d.outofrange_count << " posehistMiss=" << d.posehist_miss;
+                          << " staleCnt=" << d.stale_pose_count << " oor=" << d.outofrange_count << " posehistMiss=" << d.posehist_miss
+                          << tail;
         }
         c.timing_window = now;
         c.timing_total = 0;
         std::fill(std::begin(c.timing_counts), std::end(c.timing_counts), 0);
+        c.vs_period_min_ns = INT64_MAX;
+        c.vs_period_max_ns = 0;
+        c.present_phase_ms.clear();
+        c.bursts_done = 0;
       }
 
       if (c.ring_corrupt >= kRingCorruptLimit) {
@@ -2756,6 +2850,13 @@ namespace vr::bridge {
       if (c.textures_sent && !c.ready && now > c.ready_deadline) {
         teardown("ready-timeout", true, VRIPC_BYE_PROTOCOL_ERROR, VRIPC_REJ_TIMEOUT);
         return;
+      }
+      // §VR-LATCH-V3 定時 burst 到期：改回基準週期。放在 bridge 執行緒（連線中每 2 ms 醒一次），
+      // 不靠 control 執行緒的 tick——ENet 斷線時它不跑，burst 的週期會一直留著
+      if (c.burst_until != 0 && now >= c.burst_until) {
+        write_pacing(c, c.burst_after);
+        c.burst_until = 0;
+        ++c.bursts_done;
       }
       if (now >= c.next_heartbeat) {
         c.next_heartbeat = now + ms_to_qpc(kHeartbeatMs);
@@ -3263,6 +3364,10 @@ namespace vr::bridge {
 
   void set_pacing_ppm(int32_t ppm) {
     bridge().set_pacing_ppm(ppm);
+  }
+
+  void set_pacing_step(int32_t base_ppm, int32_t burst_ppm, uint32_t burst_us) {
+    bridge().set_pacing_step(base_ppm, burst_ppm, burst_us);
   }
 
   void set_dev_mode(bool enabled) {
