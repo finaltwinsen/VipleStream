@@ -177,6 +177,8 @@ private:
     pl_tex m_Full = nullptr;         // 這一張的 RGB（和寫進 swapchain 的值相同）
     pl_tex m_Small[2] = {};          // 1/8 尺寸，這一張與上一張（輪流）
     pl_tex m_Flow = nullptr;         // 1/8 尺寸的位移場（UV 單位）
+    pl_tex m_Mid[2] = {};            // 1/16 尺寸（位移估計的粗層），這一張與上一張
+    pl_tex m_FlowC = nullptr;        // 1/16 尺寸的位移場（粗層的結果，給 1/8 那一層當起點）
     int m_SmallCur = 0;
     bool m_HavePrevSmall = false;
     bool m_HavePrevMeta = false;

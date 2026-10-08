@@ -254,6 +254,7 @@ void XrVideo::destroy(bool gpuWedged)
         m_Dp = nullptr;  // 刻意洩漏（同上）
         m_Full = m_Flow = nullptr;
         m_Small[0] = m_Small[1] = nullptr;
+        m_Mid[0] = m_Mid[1] = m_FlowC = nullptr;
         m_Sem = VK_NULL_HANDLE;
         m_Log = nullptr;
         return;
@@ -277,6 +278,9 @@ void XrVideo::destroy(bool gpuWedged)
         pl_tex_destroy(m_Vulkan->gpu, &m_Flow);
         pl_tex_destroy(m_Vulkan->gpu, &m_Small[0]);
         pl_tex_destroy(m_Vulkan->gpu, &m_Small[1]);
+        pl_tex_destroy(m_Vulkan->gpu, &m_Mid[0]);
+        pl_tex_destroy(m_Vulkan->gpu, &m_Mid[1]);
+        pl_tex_destroy(m_Vulkan->gpu, &m_FlowC);
         if (m_Dp != nullptr) {
             pl_dispatch_destroy(&m_Dp);
         }
@@ -787,10 +791,12 @@ bool XrVideo::current(Current* out)
 
 namespace {
 
-// 位移估計（1/8 尺寸）。頭部轉動造成的整張影像位移 vs_g 由呼叫端從兩張的算圖姿態算好傳進來（那一部分交給頭盔的
-// 重投影處理），這裡只找「扣掉它之後還剩多少」：對每個像素，在上一張裡 vs_g 附近 ±4 格找 3x3 稀疏區塊最像的位置，
-// 用拋物線取到小數格。不夠確定（比「沒有位移」好不到 40%）就當成 0——靜止的場景原樣保留，只有真的在動的物體會被
-// 外插。輸出 rg＝剩餘位移（上一張的位置 − 現在的位置 − vs_g，整張 SBS 影像的 UV 單位）。搜尋不跨過左右眼。
+// 位移估計。頭部轉動造成的整張影像位移 vs_g 由呼叫端從兩張的算圖姿態算好傳進來（那一部分交給頭盔的重投影處理），
+// 這裡只找「扣掉它之後還剩多少」：對每個像素，在上一張裡找 3x3 稀疏區塊最像的位置，用拋物線取到小數格。
+// 不夠確定（比「沒有位移」好不到 40%）就當成 0——靜止的場景原樣保留，只有真的在動的物體會被外插。
+// 輸出 rg＝剩餘位移（上一張的位置 − 現在的位置 − vs_g，整張 SBS 影像的 UV 單位）。搜尋不跨過左右眼。
+// 跑兩次（vs_p＝搜尋半徑、要不要用起點）：先在 1/16 尺寸、半徑 6、沒有起點；再在 1/8 尺寸、半徑 3，以 1/16 那一層
+// 的結果（vs_init）為起點。粗的一層沒過門檻時輸出 0，細的一層就等於在 0 附近找。
 const char* kFlowHeader = R"GLSL(
 float vs_lum(sampler2D t, vec2 uv) { return dot(texture(t, uv).rgb, vec3(0.299, 0.587, 0.114)); }
 float vs_c0[9];
@@ -833,10 +839,15 @@ for (int j = -1; j <= 1; j++) {
 float czero = vs_cost(vs_prev, uv, g, px, xmin, xmax);
 float best = czero;
 vec2 bd = vec2(0.0);
-for (int dy = -4; dy <= 4; dy++) {
-    for (int dx = -4; dx <= 4; dx++) {
-        vec2 d = vec2(float(dx), float(dy));
-        float c = vs_cost(vs_prev, uv, g + d, px, xmin, xmax) + 0.01 * length(d);
+vec2 init = vec2(0.0);
+if (vs_p.y > 0.5) {
+    init = texture(vs_init, uv).xy * sz;  // 粗的一層給的剩餘位移（UV）換成這一層的格數
+}
+int rad = int(vs_p.x + 0.5);
+for (int dy = -rad; dy <= rad; dy++) {
+    for (int dx = -rad; dx <= rad; dx++) {
+        vec2 d = init + vec2(float(dx), float(dy));
+        float c = vs_cost(vs_prev, uv, g + d, px, xmin, xmax) + 0.004 * length(d);
         if (c < best) { best = c; bd = d; }
     }
 }
@@ -879,6 +890,28 @@ if (!bottom) {
         }
     }
     mv *= 0.25;
+    // 物體邊緣：四點裡有的是物體的位移、有的是背景的 0，平均會讓邊緣只走一半、拖出殘影。最大的那個明顯大於平均時
+    // 就是在邊緣上——前緣（物體要到的地方）畫出物體，後緣（物體剛離開的地方）從更後面取背景。
+    vec2 mvMax = vec2(0.0);
+    for (int j = -1; j <= 1; j += 2) {
+        for (int i = -1; i <= 1; i += 2) {
+            vec2 q = uv + vec2(float(i), float(j)) * fpx;
+            q.x = clamp(q.x, fmin, fmax);
+            vec2 m = texture(vs_flow, q).xy;
+            if (dot(m, m) > dot(mvMax, mvMax)) { mvMax = m; }
+        }
+    }
+    if (length(mvMax * tsz) > 1.5 * length(mv * tsz) + 1.0) {
+        // 但旁邊的背景不能跟著被拖走（第一版直接用最大的，手把旁邊的文字被拉歪）：往回取樣的那一點在物體上
+        // （那裡的位移也大）＝物體會蓋到這裡；或這一點現在就在物體上（後緣）——才用最大的。兩邊都是背景就不動。
+        vec2 sq = uv + vs_k * mvMax;
+        sq.x = clamp(sq.x, fmin, fmax);
+        vec2 cq = vec2(clamp(uv.x, fmin, fmax), uv.y);
+        vec2 ms = texture(vs_flow, sq).xy;
+        vec2 mc = texture(vs_flow, cq).xy;
+        float big = dot(mvMax, mvMax);
+        mv = (dot(ms, ms) > 0.25 * big || dot(mc, mc) > 0.25 * big) ? mvMax : vec2(0.0);
+    }
     float xmin = (uv.x < 0.5 ? 0.0 : 0.5) + 0.5 / tsz.x;
     vec2 s = uv + vs_k * mv;
     s.x = clamp(s.x, xmin, xmin + 0.5 - 1.0 / tsz.x);
@@ -972,7 +1005,9 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         return pl_tex_recreate(g, t, &tp);
     };
     (void) wantFloat;
+    const int mw = std::max(8, sw / 2), mh = std::max(8, sh / 2);
     if (fmtSmall == nullptr || fmtFlow == nullptr || !ensureFull(fw, fh) ||
+        !mk(&m_Mid[0], mw, mh, fmtSmall) || !mk(&m_Mid[1], mw, mh, fmtSmall) || !mk(&m_FlowC, mw, mh, fmtFlow) ||
         !mk(&m_Small[0], sw, sh, fmtSmall) || !mk(&m_Small[1], sw, sh, fmtSmall) || !mk(&m_Flow, sw, sh, fmtFlow)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] texture setup failed - frame synthesis off for this session");
         m_SynthFailed = true;
@@ -1011,6 +1046,28 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
             pl_dispatch_params dpar = {};
             dpar.shader = &shd;
             dpar.target = m_Small[cur];
+            smallOk = pl_dispatch_finish(m_Dp, &dpar);
+        }
+        else {
+            pl_dispatch_abort(m_Dp, &shd);
+        }
+    }
+    if (smallOk) {
+        // 1/16：1/8 那一張再縮一半（雙線性取樣點落在 2x2 的中心＝四個像素的平均）
+        pl_shader shd = pl_dispatch_begin(m_Dp);
+        pl_shader_desc dd[2] = {sampledTex("vs_full", m_Small[cur]), sampledTex("vs_ref", m_Mid[prev])};
+        pl_custom_shader cs = {};
+        cs.description = "viple vr synth downscale 16";
+        cs.body = "color = vec4(texture(vs_full, gl_FragCoord.xy / vec2(textureSize(vs_ref, 0))).rgb, 1.0);";
+        cs.input = PL_SHADER_SIG_NONE;
+        cs.output = PL_SHADER_SIG_COLOR;
+        cs.descriptors = dd;
+        cs.num_descriptors = 2;
+        smallOk = false;
+        if (pl_shader_custom(shd, &cs)) {
+            pl_dispatch_params dpar = {};
+            dpar.shader = &shd;
+            dpar.target = m_Mid[cur];
             smallOk = pl_dispatch_finish(m_Dp, &dpar);
         }
         else {
@@ -1059,34 +1116,43 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
                 const float tanW = std::max(0.5f, m_FovTanW.load(std::memory_order_relaxed));
                 const float tanH = std::max(0.5f, m_FovTanH.load(std::memory_order_relaxed));
                 float gvec[2] = {-0.5f * (2.0f * d[1]) / tanW, -(2.0f * d[0]) / tanH};
-                pl_shader shf = pl_dispatch_begin(m_Dp);
-                pl_shader_desc fd[2] = {sampledTex("vs_cur", m_Small[cur]), sampledTex("vs_prev", m_Small[prev])};
-                pl_shader_var gv[2] = {};
-                gv[0].var = pl_var_vec2("vs_g");
-                gv[0].data = gvec;
-                gv[0].dynamic = true;
-                gv[1].var = pl_var_vec4("vs_fv");
-                gv[1].data = fv;
-                gv[1].dynamic = true;
-                pl_custom_shader cs = {};
-                cs.description = "viple vr synth flow";
-                cs.header = kFlowHeader;
-                cs.body = kFlowBody;
-                cs.input = PL_SHADER_SIG_NONE;
-                cs.output = PL_SHADER_SIG_COLOR;
-                cs.descriptors = fd;
-                cs.num_descriptors = 2;
-                cs.variables = gv;
-                cs.num_variables = 2;
-                if (pl_shader_custom(shf, &cs)) {
+                // 兩層：1/16 尺寸半徑 6（起點 0）→ 1/8 尺寸半徑 3（起點＝粗層的結果）。vs_init 一定要綁一張材質：
+                // 粗層不用它（vs_p.y＝0），綁 m_Flow（這個 pass 不寫它）
+                auto runFlow = [&](pl_tex curT, pl_tex prevT, pl_tex initT, pl_tex target, float radius, float useInit) {
+                    float pvec[2] = {radius, useInit};
+                    pl_shader shf = pl_dispatch_begin(m_Dp);
+                    pl_shader_desc fd[3] = {sampledTex("vs_cur", curT), sampledTex("vs_prev", prevT), sampledTex("vs_init", initT)};
+                    pl_shader_var gv[3] = {};
+                    gv[0].var = pl_var_vec2("vs_g");
+                    gv[0].data = gvec;
+                    gv[0].dynamic = true;
+                    gv[1].var = pl_var_vec4("vs_fv");
+                    gv[1].data = fv;
+                    gv[1].dynamic = true;
+                    gv[2].var = pl_var_vec2("vs_p");
+                    gv[2].data = pvec;
+                    gv[2].dynamic = true;
+                    pl_custom_shader cs = {};
+                    cs.description = "viple vr synth flow";
+                    cs.header = kFlowHeader;
+                    cs.body = kFlowBody;
+                    cs.input = PL_SHADER_SIG_NONE;
+                    cs.output = PL_SHADER_SIG_COLOR;
+                    cs.descriptors = fd;
+                    cs.num_descriptors = 3;
+                    cs.variables = gv;
+                    cs.num_variables = 3;
+                    if (!pl_shader_custom(shf, &cs)) {
+                        pl_dispatch_abort(m_Dp, &shf);
+                        return false;
+                    }
                     pl_dispatch_params dpar = {};
                     dpar.shader = &shf;
-                    dpar.target = m_Flow;
-                    flowOk = pl_dispatch_finish(m_Dp, &dpar);
-                }
-                else {
-                    pl_dispatch_abort(m_Dp, &shf);
-                }
+                    dpar.target = target;
+                    return pl_dispatch_finish(m_Dp, &dpar);
+                };
+                flowOk = runFlow(m_Mid[cur], m_Mid[prev], m_Flow, m_FlowC, 6.0f, 0.0f) &&
+                         runFlow(m_Small[cur], m_Small[prev], m_FlowC, m_Flow, 3.0f, 1.0f);
                 if (!flowOk) {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] flow pass failed - frame synthesis off for this session");
                     m_SynthFailed = true;
