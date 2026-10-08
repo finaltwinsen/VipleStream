@@ -41,6 +41,7 @@ namespace vr {
       bool install_dir_safe = false;  ///< VipleStream 安裝目錄沒有一般使用者可寫（不變式 6）
       std::string unsafe_reason;
       bool user_present = false;  ///< 有主控台使用者（可以取得 limited token）
+      bool console_locked = false;  ///< 主控台 session 停在登入／鎖定畫面（這時 PCVR 的畫面是整片單色）
       bool session_ok = false;  ///< 自身 session == 主控台 session 且以 SYSTEM 執行
       bool adapter_rule_ok = false;  ///< K22：恰好一張可用的硬體 adapter，或 state.json 指定的那張在候選內
       std::string adapter_reason;

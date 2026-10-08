@@ -1757,11 +1757,25 @@ PHY 1.7 Gbps。同樣 200 Mbps、90 Hz、30 s：
   （球、對手）；每眼 2160 時 GPU 的負擔。位移的搜尋範圍是全尺寸約 ±32 像素（每 1/60 秒），更快的物體不會被外插。
   合成只做「往前推」（外插），不是在兩張真的影像之間內插，所以不增加延遲。
 
+**VR 設定進 GUI 設定頁（2026-10-08）**
+
+- 設定頁最下面多一組「VR 串流（Steam Frame）」：每眼解析度（1152／1440／1728／2160）、額外視角（關閉、2～5°）、
+  延後挑影像（關閉、3／5／6 ms）、半速串流、補幀（勾了半速串流才能勾）。對應保存的 `vreyewidth`／`vreyeheight`、
+  `vroverscandeg`、`vrlatchdelayms`、`vrhalfrate`、`vrsynth`。
+- 從 GUI 啟動的 VR 串流是另一個行程（§VR-LAUNCHER），讀的就是這些保存的值，所以在頭盔裡改完直接開下一場就能比較，
+  不必再用 SSH 帶 CLI 參數。CLI 參數照舊可用，而且一樣會被存下來。
+- Windows 與 arm64 都建置通過、qmllint 沒有語法錯誤；**版面還沒有人實際看過**（頭盔裡與桌面各看一次）。
+
 **host 停在登入／鎖定畫面時整片單色（2026-10-07 深夜）**
 
 - host 重開機後沒有人登入，PCVR 的每一幀都是完全相同的藍綠色（解出來 Y=103 U=139 V=64）。host 的 log 全部正常，
   只有 `[VIPLE-NVENC] bitstream_size` 平均約 210 B 看得出畫面沒有內容；一般桌面串流不受影響。使用者一登入就恢復。
-- 從 SSH 看不出這個狀態（`quser` 顯示 console Active，explorer 與 Steam 都在跑）。待做：server 偵測到之後回明確的錯誤。
+- 從 SSH 看不出這個狀態（`quser` 顯示 console Active，explorer 與 Steam 都在跑）。
+- **§VR-HOST-LOCKED（2026-10-08）**：VR `/launch` 的 PRECHECK 用 `WTSQuerySessionInformationW(…, WTSSessionInfoEx)` 看主控台
+  session 的 `SessionFlags`，是 `WTS_SESSIONSTATE_LOCK` 就不啟動，回 STATE ERROR `VIPLE_VR_STATE_CODE_HOST_LOCKED`（22）；
+  client 顯示「主機停在 Windows 的登入或鎖定畫面，請先在主機上登入」。舊 client 不認得 22，顯示成一般錯誤。
+  頭盔無人場次確認：host 已登入時不會誤判，session 照常（MTP、漏幀與之前相同）。
+  **鎖定狀態下會不會真的擋下來還沒驗**（要有人把 host 鎖起來再連一次）。
 - 查的方法：`<dev-client>` 用 `--vr-emulate` 連 host、`--dump-bitstream` 存下串流，用 ffmpeg 抽一幀看。
 
 **還沒做**

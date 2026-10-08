@@ -1939,6 +1939,129 @@ Flickable {
                 }
             }
         }
+
+        // VR（Steam Frame PCVR）：從 GUI 啟動的 VR 串流是另一個行程，讀的是這裡存下來的值
+        GroupBox {
+            id: vrSettingsGroupBox
+            width: (parent.width - (parent.leftPadding + parent.rightPadding))
+            padding: 12
+            title: "<font color=\"#D4FF3A\">§ VR · </font><font color=\"#F2F5E1\">" + qsTr("VR Streaming (Steam Frame)") + "</font>"
+            font.pointSize: 12
+
+            Column {
+                anchors.fill: parent
+                spacing: 5
+
+                Label {
+                    width: parent.width
+                    text: qsTr("Resolution per eye")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                ComboBox {
+                    id: vrEyeComboBox
+                    property var values: [1152, 1440, 1728, 2160]
+                    model: ["1152 x 1152", "1440 x 1440", "1728 x 1728", "2160 x 2160"]
+                    Component.onCompleted: {
+                        var i = values.indexOf(StreamingPreferences.vrEyeWidth)
+                        currentIndex = i >= 0 ? i : values.length - 1
+                    }
+                    onActivated: {
+                        StreamingPreferences.vrEyeWidth = values[currentIndex]
+                        StreamingPreferences.vrEyeHeight = values[currentIndex]
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.")
+                }
+
+                Label {
+                    width: parent.width
+                    text: qsTr("Extra field of view (overscan)")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                ComboBox {
+                    id: vrOverscanComboBox
+                    property var values: [0, 2, 3, 4, 5]
+                    model: [qsTr("Off"), "2\u00b0", "3\u00b0", "4\u00b0", "5\u00b0"]
+                    Component.onCompleted: {
+                        var i = values.indexOf(Math.round(StreamingPreferences.vrOverscanDeg))
+                        currentIndex = i >= 0 ? i : 0
+                    }
+                    onActivated: {
+                        StreamingPreferences.vrOverscanDeg = values[currentIndex]
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.")
+                }
+
+                Label {
+                    width: parent.width
+                    text: qsTr("Pick the newest frame this late")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                ComboBox {
+                    id: vrLatchDelayComboBox
+                    property var values: [0, 3, 5, 6]
+                    model: [qsTr("Off"), "3 ms", "5 ms", "6 ms"]
+                    Component.onCompleted: {
+                        var i = values.indexOf(Math.round(StreamingPreferences.vrLatchDelayMs))
+                        currentIndex = i >= 0 ? i : 0
+                    }
+                    onActivated: {
+                        StreamingPreferences.vrLatchDelayMs = values[currentIndex]
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.")
+                }
+
+                CheckBox {
+                    id: vrHalfRateCheck
+                    width: parent.width
+                    text: qsTr("Stream at half the headset refresh rate")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.vrHalfRate
+                    onCheckedChanged: {
+                        StreamingPreferences.vrHalfRate = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("The game renders and streams at half rate while the headset still displays at full rate. Halves the load on the host and the network.")
+                }
+
+                CheckBox {
+                    id: vrSynthCheck
+                    width: parent.width
+                    text: qsTr("Synthesize the in-between frames")
+                    font.pointSize: 12
+                    enabled: vrHalfRateCheck.checked
+                    checked: StreamingPreferences.vrSynth
+                    onCheckedChanged: {
+                        StreamingPreferences.vrSynth = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("With half-rate streaming, moving objects are pushed forward on the refreshes that have no new frame instead of showing the previous frame again.")
+                }
+            }
+        }
     }
 
     Column {

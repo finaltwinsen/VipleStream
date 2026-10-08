@@ -644,6 +644,7 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-SESSION] half-rate: display D Hz, stream S Hz                              ← §VR-HALF-RATE（client）：串流跑顯示更新率的一半
 [VIPLE-VR-SYNTH] texture setup failed|flow pass failed|combine pass failed - frame synthesis off for this session   ← §VR-SYNTH（client）：合成失敗，這個 session 改回重送
 [VIPLE-XR] 10s video … synth drawn=N shown=N[ (FAILED: off)]                          ← §VR-SYNTH：這 10 s 合成了幾張、顯示了幾次合成的那一格
+[VIPLE-VR-ORCH] … step=precheck … console session is locked (sign-in or lock screen)   ← §VR-HOST-LOCKED：host 停在登入／鎖定畫面，VR session 不啟動（STATE ERROR code 22）
 [VIPLE-VR-ORCH] render scale P% (recommended render target WxH per eye, stream WxH)   ← §VR-RENDER-SCALE：`vr_render_scale_pct` 不是 100 時印
 [VIPLE-VR-ORCH] step=arm result=ok reason=rearm                 ← §VR-REARM：HMD 在 standby、VR 遊戲還在跑，不重啟 SteamVR、直接重新 arm
 [VIPLE-VR-ORCH] rearm from standby ok (VR app kept running) ms=<N>   ← 重新 arm 後 vrcompositor 恢復 Present

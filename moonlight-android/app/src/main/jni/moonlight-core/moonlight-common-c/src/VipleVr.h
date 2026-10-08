@@ -301,6 +301,7 @@ typedef struct _VIPLE_VR_FRAME_HEADER {
 #define VIPLE_VR_STATE_CODE_STEAMVR_RESTART_REQUIRED 19
 #define VIPLE_VR_STATE_CODE_ADAPTER_MISMATCH       20
 #define VIPLE_VR_STATE_CODE_DRIVER_DEGRADED        21
+#define VIPLE_VR_STATE_CODE_HOST_LOCKED            22  // host 停在 Windows 登入／鎖定畫面（2026-10-08；舊 client 顯示成一般錯誤）
 
 typedef struct _VIPLE_VR_TLV_LOSS {
     uint32_t firstLost;  // 幀號（含）

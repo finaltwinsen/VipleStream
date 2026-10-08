@@ -757,6 +757,10 @@
         <translation>%1 目前沒有使用者登入 Windows。</translation>
     </message>
     <message>
+        <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
+        <translation>%1 停在 Windows 的登入或鎖定畫面。請先在主機上登入，再試一次。</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>%1 的 SteamVR 沒有及時啟動。請再試一次。</translation>
@@ -1382,6 +1386,54 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
     <message>
         <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
         <translation>即使主機可直接連線,也總是透過中繼串流。當 VPN(例如 Cloudflare WARP)仍讓 /launch 直連時,適合用來驗證中繼的 UDP 通道。</translation>
+    </message>
+    <message>
+        <source>VR Streaming (Steam Frame)</source>
+        <translation>VR 串流（Steam Frame）</translation>
+    </message>
+    <message>
+        <source>Resolution per eye</source>
+        <translation>每眼解析度</translation>
+    </message>
+    <message>
+        <source>Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.</source>
+        <translation>要編碼、傳輸、解碼的像素越少，延遲越低。主機仍然可以用較高的解析度算圖再縮小。</translation>
+    </message>
+    <message>
+        <source>Extra field of view (overscan)</source>
+        <translation>額外視角（overscan）</translation>
+    </message>
+    <message>
+        <source>Off</source>
+        <translation>關閉</translation>
+    </message>
+    <message>
+        <source>Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.</source>
+        <translation>每隻眼睛多算一圈畫面，轉頭時邊緣才不會露出沒有畫面的區域。</translation>
+    </message>
+    <message>
+        <source>Pick the newest frame this late</source>
+        <translation>延後多久才挑最新的畫面</translation>
+    </message>
+    <message>
+        <source>Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.</source>
+        <translation>先等幾毫秒再決定顯示哪一張，畫面會比較新。等太久頭盔會漏幀。</translation>
+    </message>
+    <message>
+        <source>Stream at half the headset refresh rate</source>
+        <translation>以頭盔更新率的一半串流</translation>
+    </message>
+    <message>
+        <source>The game renders and streams at half rate while the headset still displays at full rate. Halves the load on the host and the network.</source>
+        <translation>遊戲以一半的幀率算圖與串流，頭盔仍以完整的更新率顯示。主機與網路的負擔減半。</translation>
+    </message>
+    <message>
+        <source>Synthesize the in-between frames</source>
+        <translation>合成中間的畫面（補幀）</translation>
+    </message>
+    <message>
+        <source>With half-rate streaming, moving objects are pushed forward on the refreshes that have no new frame instead of showing the previous frame again.</source>
+        <translation>半速串流時，沒有新畫面的那一格不重複上一張，而是把正在移動的物體往前推。</translation>
     </message>
 </context>
 <context>

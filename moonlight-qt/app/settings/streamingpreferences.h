@@ -334,6 +334,13 @@ public:
     Q_PROPERTY(bool reverseScrollDirection MEMBER reverseScrollDirection NOTIFY reverseScrollDirectionChanged)
     Q_PROPERTY(bool swapFaceButtons MEMBER swapFaceButtons NOTIFY swapFaceButtonsChanged)
     Q_PROPERTY(bool keepAwake MEMBER keepAwake NOTIFY keepAwakeChanged)
+    // VR（Steam Frame PCVR）：設定頁用。vrEyeWidth 在設定頁一律和 vrEyeHeight 一起改（正方形）
+    Q_PROPERTY(int vrEyeWidth MEMBER vrEyeWidth NOTIFY vrSettingsChanged)
+    Q_PROPERTY(int vrEyeHeight MEMBER vrEyeHeight NOTIFY vrSettingsChanged)
+    Q_PROPERTY(double vrOverscanDeg MEMBER vrOverscanDeg NOTIFY vrSettingsChanged)
+    Q_PROPERTY(double vrLatchDelayMs MEMBER vrLatchDelayMs NOTIFY vrSettingsChanged)
+    Q_PROPERTY(bool vrHalfRate MEMBER vrHalfRate NOTIFY vrSettingsChanged)
+    Q_PROPERTY(bool vrSynth MEMBER vrSynth NOTIFY vrSettingsChanged)
     Q_PROPERTY(CaptureSysKeysMode captureSysKeysMode MEMBER captureSysKeysMode NOTIFY captureSysKeysModeChanged)
     Q_PROPERTY(Language language MEMBER language NOTIFY languageChanged);
 
@@ -520,6 +527,7 @@ signals:
     void swapFaceButtonsChanged();
     void captureSysKeysModeChanged();
     void keepAwakeChanged();
+    void vrSettingsChanged();
     void languageChanged();
 
 private:

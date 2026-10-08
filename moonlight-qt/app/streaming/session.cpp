@@ -683,6 +683,8 @@ QString Session::vrServerErrorText(unsigned code) const
         return tr("Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.").arg(host);
     case VIPLE_VR_STATE_CODE_NO_USER_SESSION:
         return tr("Nobody is signed in to Windows on %1.").arg(host);
+    case VIPLE_VR_STATE_CODE_HOST_LOCKED:
+        return tr("%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.").arg(host);
     case VIPLE_VR_STATE_CODE_HMD_TIMEOUT:
     case VIPLE_VR_STATE_CODE_STEAMVR_LAUNCH_FAILED:
         return tr("SteamVR on %1 did not start in time. Try again.").arg(host);

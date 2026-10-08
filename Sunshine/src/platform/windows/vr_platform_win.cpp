@@ -32,6 +32,7 @@
 #include <sddl.h>
 #include <ShlObj.h>
 #include <tlhelp32.h>
+#include <WtsApi32.h>
 
 // local includes
 #include "misc.h"
@@ -856,6 +857,15 @@ namespace vr {
       }
 
       e.user_present = console_user().has_value();
+      {
+        // §VR-HOST-LOCKED：WTSSessionInfoEx 的 SessionFlags＝WTS_SESSIONSTATE_LOCK 表示鎖定（含開機自動登入後停在鎖定畫面）
+        PWTSINFOEXW info = nullptr;
+        DWORD bytes = 0;
+        if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTSGetActiveConsoleSessionId(), WTSSessionInfoEx, (LPWSTR *) &info, &bytes) && info) {
+          e.console_locked = bytes >= sizeof(WTSINFOEXW) && info->Level == 1 && info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK;
+          WTSFreeMemory(info);
+        }
+      }
       DWORD self_sess = 0;
       ProcessIdToSessionId(GetCurrentProcessId(), &self_sess);
       e.session_ok = platf::is_running_as_system() && self_sess == WTSGetActiveConsoleSessionId();

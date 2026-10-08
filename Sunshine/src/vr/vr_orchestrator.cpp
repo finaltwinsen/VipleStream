@@ -276,6 +276,9 @@ namespace vr::orchestrator {
           code = VIPLE_VR_STATE_CODE_STEAMVR_NOT_INSTALLED, why = "steamvr not installed";
         } else if (!env.user_present) {
           code = VIPLE_VR_STATE_CODE_NO_USER_SESSION, why = "no console user";
+        } else if (env.console_locked) {
+          // §VR-HOST-LOCKED：鎖定畫面下 SteamVR 與遊戲照跑、log 全部正常，但送出去的每一幀都是同一個顏色
+          code = VIPLE_VR_STATE_CODE_HOST_LOCKED, why = "console session is locked (sign-in or lock screen)";
         } else if (!env.session_ok || bs.phase == bridge::phase_e::stopped || bs.phase == bridge::phase_e::no_pipe) {
           code = VIPLE_VR_STATE_CODE_IPC_UNAVAILABLE, why = "pipe=" + bs.pipe_reason;
         } else if (!env.adapter_rule_ok) {
