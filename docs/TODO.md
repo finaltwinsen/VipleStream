@@ -58,9 +58,10 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
   `vr_multilink_ctrl`／`vr_multilink_repair`，預設關閉）S0、linux-builder 的 Wi-Fi 與頭盔無人場次已驗。待做：
   - **10-07 晚配戴實測＋Steam 內建串流對照的三個結論（`steam_frame_client.md` §8.7）**：(1) 每幀像素量太大——
     Steam 算圖 2160、編碼寬度 1152、10-bit；我們降到每眼 1152 後 MTP 55～59 → 41～45 ms、解碼 8 → 3.5 ms。
-    要做編碼尺寸小於算圖尺寸＋注視點編碼。(2) 差的那條連線要不排隊（只送當下這一幀），頭盔回報缺包時不等
-    明顯落後的那條；`vr_multilink = always`（實驗用）在改好之前不要用。(3) ENet 控制連線只走 session 位址，
-    那條一斷整場結束——要能換路。另：延遲拆解量測。
+    要做編碼尺寸小於算圖尺寸＋注視點編碼。(2) 差的那條連線不排隊——§VR-LINK-FRESH 已做（`always` 模式，S0 驗過，真頭盔弱訊號位置待驗）。
+    (3) 控制連線斷了不結束 session——§VR-LINK-GRACE 已做並在頭盔上驗過（擋控制埠 28 s 不斷、自動重連）；
+    重連時換到另一個 host 位址還沒做。延遲拆解：MTP 42～45 ms 裡約 26 ms 是頭盔 runtime 的提前量，
+    §VR-LATE-LATCH（`--vr-latch-delay`）省 2～4 ms。
   - **使用者 2026-10-08 定的優先順序：流暢第一、解析度可以降，但一定要贏過 Steam 內建串流。**
     §VR-RENDER-SCALE（`vr_render_scale_pct`）已做：串流每眼 1152、算圖 2160，頭盔無人場次 MTP 41～45 ms。
     接著：注視點編碼、10-bit、和 Steam 比延遲（要使用者讀頭盔裡的進階效能圖表）、補幀（參考 Virtual Desktop，

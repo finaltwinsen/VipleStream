@@ -2090,9 +2090,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
             `all` sends video on every link from the start; a link that cannot keep up is paused for video
             (2 s, doubling up to 30 s) and then simply tried again.
             `primary` sends video only on the link the session was opened on and keeps the others as standby.
-            `always` (experimental) sends video on every link and never pauses one: batches that cannot be sent
-            in time are dropped. In headset testing the slow link's packets arrived 30 to 50 ms late and made
-            loss repair worse, so this mode is not recommended until the slow link stops queueing.
+            `always` (experimental) sends video on every link and never pauses one. While another link with a
+            normal delivery rate is carrying video, a link's batches are dropped after a quarter of the usual
+            deadline (about half a frame period) instead of queueing, so a slow link only ever carries data of
+            the current frame. Not yet verified on a headset at a weak-signal position.
             Sending video on a link that is too slow costs the headset radio time and degrades the other link as
             well, which is why `auto` measures first.
             @note{Applies to VR sessions only, and only when the client supports it. With `disabled` the behaviour
