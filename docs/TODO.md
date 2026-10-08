@@ -74,6 +74,19 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
   - 遊玩位置的連線量測（`scripts/vr/vlpt_run.sh`，需要使用者把頭盔放在遊玩位置約 10 分鐘）。
   - 被退回探測的連線，條件恢復後的重新放行（第二次實測沒有回來：探測量到 20～198 Mbps、門檻約 225～285）。
   - 影像每幀分散送出（實測一輪：壞幀少約 3 倍）：重複量測後決定要不要讓 VR session 預設開 `smooth_pacing` 或另訂節拍。
+  - **10-08 晚配戴三輪的結論（`steam_frame_client.md`「10-08 晚配戴實測」）**：不夠流暢的主因是 repeat／skip（影像畫好了但沒趕上
+    顯示那一格）。目標 slack 40% → 50% 由 3.4% 降到 1.1%；50%＋注視點 1.5x 那一場 0.1%，使用者體感「非常好」（原因未定論，
+    要同場 A/B）。host 目前留在 `vr_latch_target_pct = 50`，頭盔留在注視點 1.5x＋鎖相。待做（都要配戴）：
+    既有的「延後挑影像 6 ms」；同場 A/B 注視點開／關；和 Steam 內建串流同位置同遊戲對照。
+  - **10-09 已實作、待頭盔驗證（都在開關後面、預設關；`steam_frame_client.md`「依這三輪做的改動」有下次配戴的順序）**：
+    client 量測 `[VIPLE-VR-LDIAG]`（一律開）、host `vr_latch_mode = v3`＋`vr_latch_acquire`（Monado 上驗過：一步到位、約 3 s 進入追蹤、
+    driver 沒有多漏格）、client `vrtrackrelock`／`vrlatchrelatch`／`vrlatchwaitms`／`vrlatchabsec`、dev `--vr-test-jitter`。
+    頭盔版已建好（arm64 dev bundle），還沒裝。
+  - `Sunshine/tests/integration/test_config_consistency.cpp` 的 AllConfigOptionsExistInAllFiles 在 vr_* 的設定鍵上本來就會失敗
+    （這些鍵沒有進 web UI 的 config.html／en.json）；要嘛把 vr_* 列進該測試的 internalOptions，要嘛補進 web UI。
+  - 開場 30～40 s 的重複，七到九成是 host 在 SteamVR 啟動與遊戲載入時沒出幀（每場 200～250 張），需要 host 給「遊戲開始出幀
+    且穩定」的訊號才能遮住，還沒做。
+  - 配戴實玩時 host 的 evtToPush 由 0.97 變 2.38 ms（擷取要多等 GPU），連同遊戲算圖變久讓 MTP 多約 4.5 ms；原因未查。
   - §VR-TRACK-LOCK（追蹤樣本鎖到顯示節拍，`--vr-track-lock`，預設關）：頭盔無人場次 MTP 由 38.8～43.0 ms 的鋸齒變成
     平的 40.6 ms；配戴確認後決定要不要預設開。半速串流時幀晚一格顯示的問題在補幀第五版處理了（真的那一張先發布）。
   - 觀察到一場半速串流整場 MTP 高 13 ms：host 上遊戲讀姿態到 Present 多一整幀（18.8 ms，平常 3.4），下一場恢復，原因未查。

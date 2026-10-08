@@ -647,6 +647,29 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-ENC] probe: HEVC 10-bit supported|not supported                              ← §VR-10BIT：VR 探測（來源 display_vr）測 HEVC 10-bit 的結果
 [VIPLE-VR-SESSION] 10-bit HEVC (Main10, SDR) requested by the client                    ← §VR-10BIT（server）：這個 VR session 用 10-bit 編碼
 [VIPLE-VR-SESSION] 10-bit was requested (vr10bit) but this device's hardware decoder path only outputs 8-bit - streaming 8-bit   ← client（Frame）：不要求 10-bit
+[VIPLE-VR-LDIAG] client cfg: latchDelay=… ms trackLock=… halfRate=… synth=… fovea=… overscan=… jitter=<spec|off> trackRelock=… latchRelatch=… latchWait=… ms abSec=…
+                                                                                    ← client，PCVR 第一次建立 XR 時印一次：這一場 client 端的設定值（2026-10-09 起；之前的 log 查不到延後挑影像是幾毫秒）
+[VIPLE-VR-LDIAG] 10s late=N lateShift=N gap=N early=N catchup=N lateMax=N us | held=N heldMiss=N rtyp=N us pubLag p50/p95=… us | wake2latch p50/p95/max=… us latchPhase p50=… us | age p50/p95/p99=… ms | slackPub(250us)=n0,n1,…[ wait=… ms waited=N saved=N timeout=N][ ab=<0|1>]
+                                                                                    ← client 每 10 s，緊接在 [VIPLE-VR-MTP10] 之後（視窗相同）。量測一律開著，不改變呈現。
+                                                                                       late＝有影像但沒趕上自己那一格、被下一張蓋掉（串流幀數）；lateShift＝整條對位晚幾格（顯示格數）；
+                                                                                       gap＝那一格根本沒有影像（host 沒出、掉包，或到了 client 沒發布——對照 10s video 的 overwritten／errors）；
+                                                                                       early＝影像提早搶了前一格；catchup＝從晚幾格回到原位；lateMax＝晚到最多多久。
+                                                                                       全速時「多出來的重複格數」≈ late＋lateShift＋gap＋early；半速時 late 與 gap 要乘 2。
+                                                                                       held／heldMiss＝等 GPU 比平常（rtyp）多 1 ms 以上的張數／其中剛錯過的；pubLag＝GPU 做完到真正發布；
+                                                                                       wake2latch＝xrWaitFrame 返回到 latch；latchPhase＝latch 落在顯示格點之後多久；
+                                                                                       age＝每個顯示格的內容年齡（**含重複的那幾格**，MTP10 不含）；
+                                                                                       slackPub＝每張發布的影像到「第一個挑得到它的 latch」還有多久的直方圖（每格 250 µs；0 附近＝險過，接近一個週期＝剛錯過）；
+                                                                                       wait…＝§VR-LATCH-WAIT 開著時：實際上限、等了幾格、等到幾張、逾時幾次；ab＝vrlatchabsec 的同場 A/B 是哪一邊。
+                                                                                       分類用每張影像的 pts（host 的 Present 時刻）：Present 間隔偏離半格以上的那幾次可能多算 gap 1＋early 1
+[VIPLE-VR-LDIAG] 60s gpu-by-phase (250 us bins after the display grid; n/avgUs/maxUs) <相位 ms>:<張數>/<平均 µs>/<最大 µs> …
+                                                                                    ← client 每 60 s：影像 render thread 開始處理的時刻落在顯示格點之後多久 → 那一格的平均／最大處理時間。
+                                                                                       某一段的平均明顯較長＝頭盔 GPU 的忙碌期；那幾格的最大值＝被卡住的影像最晚多久做完
+[VIPLE-VR-LDIAG] wait paused N s (predictAhead … ms, missed N)                         ← §VR-LATCH-WAIT 的 runtime 防護：predictAhead 連 2 s 高過半個週期、或 10 s 內 XR 漏 3 幀 → 暫停等待（60 s 起加倍、上限 480 s，自動恢復）
+[VIPLE-VR-LDIAG] latch wait … ms ignored on this platform: …                            ← Windows 的定時等待太粗，守不住「延後＋等待 ≤ 6 ms」：等待不作用（頭盔上不會出現）
+[VIPLE-VR-POSE] tracking phase: N% of frames use the previous sample at the locked phase - searching again   ← §VR-TRACK-RELOCK（vrtrackrelock）：鎖相維持中連 5 s 有 15% 以上的幀用到前一筆樣本 → 重新搜尋
+[VIPLE-VR-MTP10] … mismatch=N[ relatch=N][ | trk … researches=N[ prev=P%]][ ab=<0|1>]      ← relatch＝§VR-LATCH-RELATCH 救回來的次數（不算進 mismatch）；prev＝用到前一筆樣本的幀（不含晚一格顯示的）
+[VIPLE-XR] 10s video … jit n=N p95=… ms                                                 ← dev：--vr-test-jitter 開著時，這個視窗被延後的張數與延後時間
+[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> …／selftest-latch: N case(s), N failure(s)   ← `VipleStream.exe xr-probe --selftest-latch`（不需要 XR runtime；全過 rc 0、有失敗 14）
 [VIPLE-VR-POSE] tracking phase locked: phase=P ms (sample interval T ms, MTP A -> B ms at the edge) #N   ← §VR-TRACK-LOCK（client）：找到邊界，退 2 ms 維持
 [VIPLE-VR-POSE] tracking phase: MTP A ms is above the locked level B ms - searching again              ← §VR-TRACK-LOCK：連 3 秒偏高，重新找
 [VIPLE-VR-MTP10] … | trk search|hold phase=P ms late=L% researches=N                                 ← §VR-TRACK-LOCK 開著時多的欄位（late＝用到前一筆樣本的幀）
@@ -992,6 +1015,29 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
                                                                                        累計相位滑移（相鄰兩筆新量測跳 > 0.6 週期）、v2 丟掉的樣本（重複 frameId、|slack| > 1.5 週期）
 [VIPLE-VR-LATCH] controller mode=<legacy|v2> targetPct=N hostPeriod=…ms            ← session 開始一次（§VR-LATCH-V2，設定 vr_latch_mode／vr_latch_target_pct）
 [VIPLE-VR-TIMING] 10s: presented=N xrMissed=N metaMiss=N period=…ms decode p50/p95=… render p50/p95=… slack p50/p05=… mtp p50/p95=…ms
+```
+
+2026-10-09 起（§VR-LATCH-V3、§VR-LATCH-ACQ 與量測；既有欄位的順序不變，新欄位都加在行尾）：
+
+```
+[VIPLE-VR-LATCH] controller mode=<legacy|v2|v3> targetPct=N hostPeriod=…ms integSeed=<ppm|none> ab=<off|秒:模式:pct> acquire=<0|1>
+                                                                                    ← targetPct 印生效值（v3 且 vr_latch_target_v3_pct > 0 時是它）；integSeed＝v3 從上一個 session
+                                                                                       學到的積分（兩端的時鐘差）起步；acquire＝這個 session 會不會用到定時步進
+[VIPLE-VR-LATCH] 10s: … mode=v3 st=<wait|measure|burst|track> gate=<0|1> steps=N bad=N
+                                                                                    ← v3：st＝wait（節拍閘門關著：黑幀、host 沒在出幀、影像停住，輸出只剩積分）／measure（收 5 筆）／
+                                                                                       burst（定時步進與它的盲區）／track（PI 追蹤）；steps＝累計步進次數；bad＝失敗的輪數。
+                                                                                       v3 的 slackEma＝目標＋誤差，err＝最近 7 筆的環狀中位數到目標的最短路徑
+[VIPLE-VR-LATCH] step why=<acq|trim|reacq> err=…us center=…us target=…us burst=…ppm x …ms base=…ppm
+                                                                                    ← §VR-LATCH-ACQ：開始一次定時步進（err 正值＝影像太早到；burst＝這段時間的週期修正與長度；base＝結束後改回的值）
+[VIPLE-VR-LATCH] step result: moved=…us of …us err=…us -> <track|trim|backoff>         ← 那一步量完的結果：開始追蹤／再補一步／這一輪失敗（退避 5 s 起加倍、上限 60 s）
+[VIPLE-VR-LATCH] step result: moved=n/a of …us err=n/a -> void                          ← 那一步量不到結果（量完之前 host 掉拍、影像停住或 LATCH 停了）：不算成敗
+[VIPLE-VR-LATCH] ab -> mode=… targetPct=N                                               ← vr_latch_ab 的同場 A/B 每次切換（切換後第一個 10 s 視窗不要算）
+[VIPLE-VR-LATCH] vr_latch_ab could not be parsed (…) - ignored                          ← 格式錯：當成沒設
+[VIPLE-VR-DRV] timing 10s: recs=… posehistMiss=N periodPpm min/max=a/b presentPhase p50/p95/p99/max=… ms bursts=N
+                                                                                    ← periodPpm＝driver 這個視窗實際採用的週期相對標稱值（v2 在 ±200 內；有步進的視窗約 ±4000）；
+                                                                                       presentPhase＝每一幀的 Present 落在虛擬 vsync 格內的位置（遊戲算完的時刻的抖動就在這裡）；
+                                                                                       bursts＝走完的定時步進數
+[VIPLE-VR-TIMING] 10s: … mtp p50/p95=…ms newPer10s=N                                    ← client 這 10 s 顯示了幾張新影像（和 client 的 MTP10 frames new 對照）
 ```
 
 - client 每 100 ms 送 0x5507/08 LATCH、每 1 s 送 0x5507/06 CLIENT_TIMING（都走 ch 0x07 unsequenced）；定義見 `vr_protocol.md` §4.5。
