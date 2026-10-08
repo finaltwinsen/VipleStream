@@ -593,6 +593,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                          "motion-dependent paths with nobody wearing the headset. The picture swings in the headset - do not wear it. Not saved.");
     parser.addFlagOption("vr-synthetic-hands", "(dev) PCVR: replace both controller poses with a synthetic swing in front of the head (buttons untouched), "
                          "so an unattended session has moving near objects in view. Works with --vr-emulate and on a real XR runtime. Not saved.");
+    parser.addToggleOption("vr-half-rate", "PCVR: run the game and the stream at half the headset refresh rate (the headset still displays at full rate)");
+    parser.addToggleOption("vr-synth", "PCVR with --vr-half-rate: show a motion-extrapolated frame on the display refreshes that have no new stream frame");
     parser.addValueOption("vr-latch-delay", "PCVR: wait this many milliseconds (0-20) after the XR runtime wakes the frame loop before picking the "
                           "newest decoded frame, so each displayed frame is fresher (default 0)");
     parser.addValueOption("vr-eye", "per-eye <width>x<height> for PCVR (default 2160x2160)");
@@ -874,6 +876,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
     preferences->vrSyntheticHmd = parser.isSet("vr-synthetic-hmd");
     preferences->vrSyntheticHands = parser.isSet("vr-synthetic-hands");
+    preferences->vrHalfRate = parser.getToggleOptionValue("vr-half-rate", preferences->vrHalfRate);
+    preferences->vrSynth = parser.getToggleOptionValue("vr-synth", preferences->vrSynth);
     if (parser.isSet("vr-latch-delay")) {
         bool ok = false;
         const double ms = parser.value("vr-latch-delay").toDouble(&ok);

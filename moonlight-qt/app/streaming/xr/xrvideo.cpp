@@ -10,6 +10,7 @@
 #include <SDL.h>
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 
@@ -22,6 +23,8 @@ extern "C" {
 // Implementation in plvk_c.c
 #define PL_LIBAV_IMPLEMENTATION 0
 #include <libplacebo/utils/libav.h>
+#include <libplacebo/dispatch.h>
+#include <libplacebo/shaders/custom.h>
 
 namespace {
 
@@ -110,6 +113,13 @@ bool XrVideo::init(QString* error)
     if (m_Renderer == nullptr) {
         *error = QStringLiteral("pl_renderer_create failed");
         return false;
+    }
+    if (m_Config.synth) {
+        m_Dp = pl_dispatch_create(m_Log, m_Vulkan->gpu);
+        if (m_Dp == nullptr) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] pl_dispatch_create failed - frame synthesis off");
+            m_Config.synth = false;
+        }
     }
     pl_vulkan_sem_params sp = {};
     sp.type = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -241,6 +251,9 @@ void XrVideo::destroy(bool gpuWedged)
 #endif
         m_Vulkan = nullptr;
         m_Renderer = nullptr;
+        m_Dp = nullptr;  // 刻意洩漏（同上）
+        m_Full = m_Flow = nullptr;
+        m_Small[0] = m_Small[1] = nullptr;
         m_Sem = VK_NULL_HANDLE;
         m_Log = nullptr;
         return;
@@ -259,6 +272,13 @@ void XrVideo::destroy(bool gpuWedged)
 #endif
         for (pl_tex& t : m_Tex) {
             pl_tex_destroy(m_Vulkan->gpu, &t);
+        }
+        pl_tex_destroy(m_Vulkan->gpu, &m_Full);
+        pl_tex_destroy(m_Vulkan->gpu, &m_Flow);
+        pl_tex_destroy(m_Vulkan->gpu, &m_Small[0]);
+        pl_tex_destroy(m_Vulkan->gpu, &m_Small[1]);
+        if (m_Dp != nullptr) {
+            pl_dispatch_destroy(&m_Dp);
         }
         {
             std::lock_guard<std::mutex> lk(m_TestMutex);
@@ -581,6 +601,9 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     std::memset(&mapped, 0, sizeof(mapped));
     const bool mappedOk = mapFrame(frame, &mapped, m_Tex, true);
     bool rendered = false;
+    bool synthOk = false;
+    VIPLE_VR_FRAME_META synthMeta = {};
+    const int frameH = m_Config.synth ? frame->height : m_Sw.height;
     if (mappedOk) {
         pl_frame target;
         std::memset(&target, 0, sizeof(target));
@@ -596,7 +619,19 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         if (m_Mode != TargetMode::SrgbMutable) {
             target.color.transfer = PL_COLOR_TRC_LINEAR;
         }
-        rendered = pl_render_image(m_Renderer, &mapped, &target, &pl_render_fast_params);
+        if (m_Config.synth && !m_SynthFailed) {
+            rendered = renderSynth(&mapped, &target, tex, frame->width, frame->height, hasMeta, meta, frame->pts, &synthOk, &synthMeta);
+        }
+        else {
+            if (m_Config.synth) {
+                // 合成壞掉之後：swapchain 仍是兩倍高，真的那一張照樣只畫上半
+                target.crop.x0 = 0.0f;
+                target.crop.y0 = 0.0f;
+                target.crop.x1 = static_cast<float>(frame->width);
+                target.crop.y1 = static_cast<float>(frame->height);
+            }
+            rendered = pl_render_image(m_Renderer, &mapped, &target, &pl_render_fast_params);
+        }
         if (!rendered) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] pl_render_image failed");
         }
@@ -608,8 +643,10 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     }
 
     m_TotalDrawn += rendered ? 1 : 0;
+    // §VR-SYNTH：開著合成時等到第 2400 張之後、而且這一張真的有合成影像才存（上半真的、下半合成）
     if (rendered && !m_Dumped && !m_Config.dumpPath.isEmpty() &&
-        m_TotalDrawn >= static_cast<uint64_t>(std::max(1, m_Config.dumpAfterFrames))) {
+        m_TotalDrawn >= static_cast<uint64_t>(m_Config.synth ? 2400 : std::max(1, m_Config.dumpAfterFrames)) &&
+        (!m_Config.synth || synthOk || m_SynthFailed)) {
         m_Dumped = true;
         dumpTexture(tex);  // 必須在 hold 之前（download 需要 libplacebo 仍持有影像）
     }
@@ -653,9 +690,13 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         m_Published.releaseNo = releaseNo;
         m_Published.subImage.swapchain = m_Sw.swapchain;
         m_Published.subImage.imageRect.offset = {0, 0};
-        m_Published.subImage.imageRect.extent = {m_Sw.width, m_Sw.height};
+        m_Published.subImage.imageRect.extent = {m_Sw.width, frameH};
         m_Published.subImage.imageArrayIndex = 0;
-        m_Published.aspect = static_cast<float>(m_Sw.width) / static_cast<float>(m_Sw.height);
+        m_Published.aspect = static_cast<float>(m_Sw.width) / static_cast<float>(frameH);
+        m_Published.hasSynth = synthOk;
+        m_Published.synthRect.offset = {0, frameH};
+        m_Published.synthRect.extent = {m_Sw.width, frameH};
+        m_Published.synthMeta = synthMeta;
         m_Published.generation = m_Sw.generation;
         m_Published.lastDrawnUs = tGpuEnd;
         m_Published.seq++;
@@ -668,6 +709,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     std::lock_guard<std::mutex> lk(m_StatsMutex);
     if (rendered && held) {
         m_Drawn++;
+        m_SynthDrawn += synthOk ? 1 : 0;
         m_CpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tCpuEnd - t0, 0xffffffffu)));
         m_GpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tGpuEnd - tCpuEnd, 0xffffffffu)));
     }
@@ -702,7 +744,7 @@ void XrVideo::renderThreadMain()
             av_frame_free(&f);
             continue;
         }
-        if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, f->width, f->height)) {
+        if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, f->width, m_Config.synth ? f->height * 2 : f->height)) {
             renderNewFrame(f);
         }
         else {
@@ -721,6 +763,337 @@ bool XrVideo::current(Current* out)
         return false;
     }
     *out = m_Published;
+    if (m_Config.synth) {
+        // §VR-SYNTH：一張新影像第一次被顯示用真的那一半；同一張再被顯示（半速串流時每張會顯示兩次）就換成
+        // 合成的那一半與外插的姿態。沒有合成影像（第一張、掉過幀、合成失敗）時照舊重送真的那一半。
+        if (m_Published.seq != m_FirstShownSeq) {
+            m_FirstShownSeq = m_Published.seq;
+        }
+        else if (m_Published.hasSynth) {
+            out->subImage.imageRect = m_Published.synthRect;
+            out->meta = m_Published.synthMeta;
+            out->synthShown = true;
+            m_SynthShown.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    return true;
+}
+
+namespace {
+
+// 位移估計（1/8 尺寸）。頭部轉動造成的整張影像位移 vs_g 由呼叫端從兩張的算圖姿態算好傳進來（那一部分交給頭盔的
+// 重投影處理），這裡只找「扣掉它之後還剩多少」：對每個像素，在上一張裡 vs_g 附近 ±4 格找 3x3 稀疏區塊最像的位置，
+// 用拋物線取到小數格。不夠確定（比「沒有位移」好不到 40%）就當成 0——靜止的場景原樣保留，只有真的在動的物體會被
+// 外插。輸出 rg＝剩餘位移（上一張的位置 − 現在的位置 − vs_g，整張 SBS 影像的 UV 單位）。搜尋不跨過左右眼。
+const char* kFlowHeader = R"GLSL(
+float vs_lum(sampler2D t, vec2 uv) { return dot(texture(t, uv).rgb, vec3(0.299, 0.587, 0.114)); }
+float vs_c0[9];
+float vs_cost(sampler2D prev, vec2 uv, vec2 off, vec2 px, float xmin, float xmax) {
+    float c = 0.0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            vec2 p = uv + (vec2(float(i), float(j)) * 1.5 + off) * px;
+            p.x = clamp(p.x, xmin, xmax);
+            c += abs(vs_c0[(j + 1) * 3 + (i + 1)] - vs_lum(prev, p));
+        }
+    }
+    return c;
+}
+)GLSL";
+
+const char* kFlowBody = R"GLSL(
+vec2 sz = vec2(textureSize(vs_cur, 0));
+vec2 px = 1.0 / sz;
+vec2 uv = gl_FragCoord.xy * px;
+float xmin = (uv.x < 0.5 ? 0.0 : 0.5) + 0.5 * px.x;
+float xmax = xmin + 0.5 - px.x;
+vec2 g = vs_g * sz;
+for (int j = -1; j <= 1; j++) {
+    for (int i = -1; i <= 1; i++) {
+        vec2 p = uv + vec2(float(i), float(j)) * 1.5 * px;
+        p.x = clamp(p.x, xmin, xmax);
+        vs_c0[(j + 1) * 3 + (i + 1)] = vs_lum(vs_cur, p);
+    }
+}
+float czero = vs_cost(vs_prev, uv, g, px, xmin, xmax);
+float best = czero;
+vec2 bd = vec2(0.0);
+for (int dy = -4; dy <= 4; dy++) {
+    for (int dx = -4; dx <= 4; dx++) {
+        vec2 d = vec2(float(dx), float(dy));
+        float c = vs_cost(vs_prev, uv, g + d, px, xmin, xmax) + 0.01 * length(d);
+        if (c < best) { best = c; bd = d; }
+    }
+}
+vec2 r = vec2(0.0);
+if (czero - best > 0.4 * czero + 0.08) {
+    float cxm = vs_cost(vs_prev, uv, g + bd + vec2(-1.0, 0.0), px, xmin, xmax);
+    float cxp = vs_cost(vs_prev, uv, g + bd + vec2(1.0, 0.0), px, xmin, xmax);
+    float cym = vs_cost(vs_prev, uv, g + bd + vec2(0.0, -1.0), px, xmin, xmax);
+    float cyp = vs_cost(vs_prev, uv, g + bd + vec2(0.0, 1.0), px, xmin, xmax);
+    float bc = vs_cost(vs_prev, uv, g + bd, px, xmin, xmax);
+    vec2 sub = vec2(0.0);
+    float denx = cxm - 2.0 * bc + cxp;
+    float deny = cym - 2.0 * bc + cyp;
+    if (denx > 1e-5) { sub.x = clamp(0.5 * (cxm - cxp) / denx, -0.5, 0.5); }
+    if (deny > 1e-5) { sub.y = clamp(0.5 * (cym - cyp) / deny, -0.5, 0.5); }
+    r = bd + sub;
+}
+color = vec4(r * px, best, 1.0);
+)GLSL";
+
+// 合成＋複製：上半原樣複製這一張；下半把這一張沿（平滑過的）剩餘位移往前推半個串流週期——內容從 uv＋mv 移到 uv，
+// 再過半個週期會到 uv − 0.5·mv，所以反向取樣 uv ＋ 0.5·mv。取樣不跨過左右眼的分界。
+const char* kCombineBody = R"GLSL(
+vec2 tsz = vec2(textureSize(vs_full, 0));
+vec2 fc = gl_FragCoord.xy;
+if (fc.y < tsz.y) {
+    color = texture(vs_full, fc / tsz);
+} else {
+    vec2 uv = vec2(fc.x, fc.y - tsz.y) / tsz;
+    vec2 fpx = 0.75 / vec2(textureSize(vs_flow, 0));
+    float fmin = (uv.x < 0.5 ? 0.0 : 0.5) + fpx.x;
+    float fmax = fmin + 0.5 - 2.0 * fpx.x;
+    vec2 mv = vec2(0.0);
+    for (int j = -1; j <= 1; j += 2) {
+        for (int i = -1; i <= 1; i += 2) {
+            vec2 q = uv + vec2(float(i), float(j)) * fpx;
+            q.x = clamp(q.x, fmin, fmax);
+            mv += texture(vs_flow, q).xy;
+        }
+    }
+    mv *= 0.25;
+    float xmin = (uv.x < 0.5 ? 0.0 : 0.5) + 0.5 / tsz.x;
+    vec2 s = uv + vs_k * mv;
+    s.x = clamp(s.x, xmin, xmin + 0.5 - 1.0 / tsz.x);
+    s.y = clamp(s.y, 0.5 / tsz.y, 1.0 - 0.5 / tsz.y);
+    color = texture(vs_full, s);
+}
+)GLSL";
+
+// 縮到 1/8：每個輸出像素取來源 8x8 區塊的平均（4x4 個雙線性取樣點，各涵蓋 2x2）。直接雙線性縮 8 倍只看得到其中
+// 4 個像素，細字與細線會隨畫面微小的移動閃爍，位移估計會把它當成物體在動。
+const char* kDownBody = R"GLSL(
+vec2 tsz = vec2(textureSize(vs_full, 0));
+vec2 osz = vec2(textureSize(vs_ref, 0));
+vec2 c = gl_FragCoord.xy / osz;
+vec2 st = 1.0 / tsz;
+vec3 acc = vec3(0.0);
+for (int j = 0; j < 4; j++) {
+    for (int i = 0; i < 4; i++) {
+        acc += texture(vs_full, c + (vec2(float(i), float(j)) * 2.0 - 3.0) * st).rgb;
+    }
+}
+color = vec4(acc / 16.0, 1.0);
+)GLSL";
+
+pl_shader_desc sampledTex(const char* name, pl_tex tex)
+{
+    pl_shader_desc d = {};
+    d.desc.name = name;
+    d.desc.type = PL_DESC_SAMPLED_TEX;
+    d.binding.object = tex;
+    d.binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+    d.binding.sample_mode = PL_TEX_SAMPLE_LINEAR;
+    return d;
+}
+
+}  // namespace
+
+// §VR-SYNTH：mapped → m_Full／m_Small；有上一張就估位移；最後一個 pass 把上半（複製）與下半（合成）寫進 swapchain。
+// 回傳 false＝真的那一張也沒畫成功。*synthOk＝下半是合成影像（否則下半只是這一張的複製，不拿來顯示）。
+bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh,
+                          bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, bool* synthOk, VIPLE_VR_FRAME_META* synthMeta)
+{
+    pl_gpu g = m_Vulkan->gpu;
+    *synthOk = false;
+    const auto caps = static_cast<pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
+    const bool wantFloat = m_Mode == TargetMode::Float16Linear;
+    pl_fmt fmtFull = wantFloat ? pl_find_fmt(g, PL_FMT_FLOAT, 4, 16, 16, caps) : pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, caps);
+    pl_fmt fmtSmall = pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, caps);
+    pl_fmt fmtFlow = pl_find_fmt(g, PL_FMT_FLOAT, 4, 16, 16, caps);
+    const int sw = std::max(16, fw / 8), sh = std::max(16, fh / 8);
+    auto mk = [g](pl_tex* t, int w, int h, pl_fmt f) {
+        pl_tex_params tp = {};
+        tp.w = w;
+        tp.h = h;
+        tp.format = f;
+        tp.sampleable = true;
+        tp.renderable = true;
+        return pl_tex_recreate(g, t, &tp);
+    };
+    if (fmtFull == nullptr || fmtSmall == nullptr || fmtFlow == nullptr || !mk(&m_Full, fw, fh, fmtFull) ||
+        !mk(&m_Small[0], sw, sh, fmtSmall) || !mk(&m_Small[1], sw, sh, fmtSmall) || !mk(&m_Flow, sw, sh, fmtFlow)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] texture setup failed - frame synthesis off for this session");
+        m_SynthFailed = true;
+        pl_frame t = *targetProto;
+        t.crop.x0 = 0.0f;
+        t.crop.y0 = 0.0f;
+        t.crop.x1 = static_cast<float>(fw);
+        t.crop.y1 = static_cast<float>(fh);
+        return pl_render_image(m_Renderer, mapped, &t, &pl_render_fast_params);
+    }
+    if (m_FrameH != fh) {
+        m_FrameH = fh;
+        m_HavePrevSmall = false;
+        m_HavePrevMeta = false;
+    }
+
+    pl_frame tFull = *targetProto;
+    tFull.planes[0].texture = m_Full;
+    if (!pl_render_image(m_Renderer, mapped, &tFull, &pl_render_fast_params)) {
+        return false;
+    }
+    const int cur = m_SmallCur, prev = cur ^ 1;
+    bool smallOk = false;
+    {
+        // vs_ref 只用來取輸出尺寸（另一張縮圖，尺寸相同）
+        pl_shader shd = pl_dispatch_begin(m_Dp);
+        pl_shader_desc dd[2] = {sampledTex("vs_full", m_Full), sampledTex("vs_ref", m_Small[prev])};
+        pl_custom_shader cs = {};
+        cs.description = "viple vr synth downscale";
+        cs.body = kDownBody;
+        cs.input = PL_SHADER_SIG_NONE;
+        cs.output = PL_SHADER_SIG_COLOR;
+        cs.descriptors = dd;
+        cs.num_descriptors = 2;
+        if (pl_shader_custom(shd, &cs)) {
+            pl_dispatch_params dpar = {};
+            dpar.shader = &shd;
+            dpar.target = m_Small[cur];
+            smallOk = pl_dispatch_finish(m_Dp, &dpar);
+        }
+        else {
+            pl_dispatch_abort(m_Dp, &shd);
+        }
+    }
+
+    // 位移：要有上一張、兩張的算圖姿態、而且是連續的兩幀（pts 差 1；掉過幀就不合成），轉動也不能太大
+    bool flowOk = false;
+    float half[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    // 這裡的 pts 已經不是幀號（decoder 把它換成呈現時間）：用間隔的移動平均當一幀的長度，超過 1.6 倍就是中間掉過幀
+    static int64_t s_nominalDelta = 0;
+    const int64_t ptsDelta = pts - m_PrevPts;
+    if (m_HavePrevMeta && ptsDelta > 0) {
+        if (s_nominalDelta == 0) {
+            s_nominalDelta = ptsDelta;
+        }
+        else if (ptsDelta < s_nominalDelta * 3) {
+            s_nominalDelta = (s_nominalDelta * 7 + ptsDelta) / 8;
+        }
+    }
+    const bool consecutive = ptsDelta > 0 && s_nominalDelta > 0 && ptsDelta * 10 <= s_nominalDelta * 16;
+    if (smallOk && m_HavePrevSmall && hasMeta && m_HavePrevMeta && consecutive) {
+        // d＝q_prev⁻¹·q_cur（上一張到這一張的轉動，機體座標）；half＝它的一半＝normalize(d ＋ 1)
+        const float* a = m_PrevMeta.renderRot;
+        const float* b = meta.renderRot;
+        const float ax = -a[0], ay = -a[1], az = -a[2], aw = a[3];
+        float d[4] = {
+            aw * b[0] + ax * b[3] + ay * b[2] - az * b[1],
+            aw * b[1] - ax * b[2] + ay * b[3] + az * b[0],
+            aw * b[2] + ax * b[1] - ay * b[0] + az * b[3],
+            aw * b[3] - ax * b[0] - ay * b[1] - az * b[2],
+        };
+        if (d[3] < 0.0f) {
+            d[0] = -d[0]; d[1] = -d[1]; d[2] = -d[2]; d[3] = -d[3];
+        }
+        if (d[3] > 0.9962f) {  // 兩張之間轉不到 10°
+            float h[4] = {d[0], d[1], d[2], d[3] + 1.0f};
+            const float n = std::sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2] + h[3] * h[3]);
+            if (n > 1e-6f) {
+                for (int i = 0; i < 4; i++) {
+                    half[i] = h[i] / n;
+                }
+                // 頭部轉動造成的整張影像位移（小角度近似）：ω＝2·d.xyz（弧度，機體座標）。往左轉（ω.y > 0）景物往右移、
+                // 抬頭（ω.x > 0）景物往下移；mv 的定義是「上一張的位置 − 現在的位置」，所以取負號。一隻眼佔 UV 寬度的一半。
+                const float tanW = std::max(0.5f, m_FovTanW.load(std::memory_order_relaxed));
+                const float tanH = std::max(0.5f, m_FovTanH.load(std::memory_order_relaxed));
+                float gvec[2] = {-0.5f * (2.0f * d[1]) / tanW, -(2.0f * d[0]) / tanH};
+                pl_shader shf = pl_dispatch_begin(m_Dp);
+                pl_shader_desc fd[2] = {sampledTex("vs_cur", m_Small[cur]), sampledTex("vs_prev", m_Small[prev])};
+                pl_shader_var gv = {};
+                gv.var = pl_var_vec2("vs_g");
+                gv.data = gvec;
+                gv.dynamic = true;
+                pl_custom_shader cs = {};
+                cs.description = "viple vr synth flow";
+                cs.header = kFlowHeader;
+                cs.body = kFlowBody;
+                cs.input = PL_SHADER_SIG_NONE;
+                cs.output = PL_SHADER_SIG_COLOR;
+                cs.descriptors = fd;
+                cs.num_descriptors = 2;
+                cs.variables = &gv;
+                cs.num_variables = 1;
+                if (pl_shader_custom(shf, &cs)) {
+                    pl_dispatch_params dpar = {};
+                    dpar.shader = &shf;
+                    dpar.target = m_Flow;
+                    flowOk = pl_dispatch_finish(m_Dp, &dpar);
+                }
+                else {
+                    pl_dispatch_abort(m_Dp, &shf);
+                }
+                if (!flowOk) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] flow pass failed - frame synthesis off for this session");
+                    m_SynthFailed = true;
+                }
+            }
+        }
+    }
+
+    // 上半複製、下半合成（沒有位移場時 k＝0：下半只是複製，不會被拿來顯示）
+    float k = flowOk ? 0.5f : 0.0f;
+    bool combined = false;
+    {
+        pl_shader shc = pl_dispatch_begin(m_Dp);
+        pl_shader_desc cd[2] = {sampledTex("vs_full", m_Full), sampledTex("vs_flow", m_Flow)};
+        pl_shader_var kv = {};
+        kv.var = pl_var_float("vs_k");
+        kv.data = &k;
+        kv.dynamic = true;
+        pl_custom_shader cs = {};
+        cs.description = "viple vr synth combine";
+        cs.body = kCombineBody;
+        cs.input = PL_SHADER_SIG_NONE;
+        cs.output = PL_SHADER_SIG_COLOR;
+        cs.descriptors = cd;
+        cs.num_descriptors = 2;
+        cs.variables = &kv;
+        cs.num_variables = 1;
+        if (pl_shader_custom(shc, &cs)) {
+            pl_dispatch_params dpar = {};
+            dpar.shader = &shc;
+            dpar.target = swTex;
+            combined = pl_dispatch_finish(m_Dp, &dpar);
+        }
+        else {
+            pl_dispatch_abort(m_Dp, &shc);
+        }
+    }
+    if (!combined) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] combine pass failed - frame synthesis off for this session");
+        m_SynthFailed = true;
+        pl_frame t = *targetProto;
+        t.crop.x0 = 0.0f;
+        t.crop.y0 = 0.0f;
+        t.crop.x1 = static_cast<float>(fw);
+        t.crop.y1 = static_cast<float>(fh);
+        return pl_render_image(m_Renderer, mapped, &t, &pl_render_fast_params);
+    }
+
+    if (flowOk) {
+        // 合成那一格沿用這一張的算圖姿態：頭部的轉動交給頭盔的重投影（位移場已經扣掉那一部分），
+        // 這裡只外插場景裡在動的東西
+        *synthMeta = meta;
+        (void) half;
+        *synthOk = true;
+    }
+    m_HavePrevSmall = smallOk;
+    m_HavePrevMeta = hasMeta;
+    m_PrevMeta = meta;
+    m_PrevPts = pts;
+    m_SmallCur = prev;
     return true;
 }
 
@@ -747,12 +1120,19 @@ QString XrVideo::takeStatsLine()
     double c50, c95, g50, g95;
     pct(m_CpuUs, &c50, &c95);
     pct(m_GpuUs, &g50, &g95);
-    const QString line = QStringLiteral("recv=%1 drawn=%2 overwritten=%3 errors=%4 renderThread cpu p50=%5 p95=%6 ms "
-                                        "gpu p50=%7 p95=%8 ms mode=%9 %10x%11 stallDropped=%12 noMetaDropped=%13")
-                             .arg(m_Received).arg(m_Drawn).arg(m_Overwritten).arg(m_RenderErrors)
-                             .arg(c50, 0, 'f', 2).arg(c95, 0, 'f', 2).arg(g50, 0, 'f', 2).arg(g95, 0, 'f', 2)
-                             .arg(QLatin1String(modeName(static_cast<int>(m_Mode))))
-                             .arg(m_Sw.width).arg(m_Sw.height).arg(m_TestStallDropped).arg(m_NoMetaDropped);
+    QString line = QStringLiteral("recv=%1 drawn=%2 overwritten=%3 errors=%4 renderThread cpu p50=%5 p95=%6 ms "
+                                  "gpu p50=%7 p95=%8 ms mode=%9 %10x%11 stallDropped=%12 noMetaDropped=%13")
+                       .arg(m_Received).arg(m_Drawn).arg(m_Overwritten).arg(m_RenderErrors)
+                       .arg(c50, 0, 'f', 2).arg(c95, 0, 'f', 2).arg(g50, 0, 'f', 2).arg(g95, 0, 'f', 2)
+                       .arg(QLatin1String(modeName(static_cast<int>(m_Mode))))
+                       .arg(m_Sw.width).arg(m_Sw.height).arg(m_TestStallDropped).arg(m_NoMetaDropped);
+    if (m_Config.synth) {
+        // §VR-SYNTH：這個視窗合成了幾張、顯示了幾次合成的那一格
+        line += QStringLiteral(" synth drawn=%1 shown=%2%3").arg(m_SynthDrawn)
+                    .arg(m_SynthShown.exchange(0, std::memory_order_relaxed))
+                    .arg(m_SynthFailed ? QStringLiteral(" (FAILED: off)") : QString());
+        m_SynthDrawn = 0;
+    }
     m_Received = m_Drawn = m_Overwritten = m_RenderErrors = 0;
     m_CpuUs.clear();
     m_GpuUs.clear();

@@ -99,6 +99,8 @@ public:
         // runtime。我們的「算圖」只是把解碼好的影像貼上去，幾乎不花時間；runtime 卻在顯示前約 3 個週期就叫醒我們
         // （Frame 實測 predictAhead 約 26 ms）。晚一點挑，同一個顯示時刻就能用到更新的影像。0＝不等（舊行為）。
         uint32_t pcvrLatchDelayUs = 0;
+        // 2026-10-08（§VR-SYNTH）：PCVR 半速串流時，沒有新影像的那一格顯示合成影像（見 XrVideo::renderSynth）
+        bool pcvrSynth = false;
         // M4a R2（dev）：PCVR 控制器按鍵改用合成序列（pose 仍來自 runtime），驗 0x5506 打包
         bool testVrInput = false;
         // M4a 收尾（Frame 實測）：>0＝bring-up 時經 XR_FB_display_refresh_rate 列出可用更新率，要求最接近

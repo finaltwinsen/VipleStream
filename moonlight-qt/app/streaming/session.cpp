@@ -265,6 +265,9 @@ extern "C" void quicSetTicketStorePath(const char* path);
 #include <QQuickOpenGLUtils>
 #endif
 
+// §VR-HALF-RATE：頭盔的顯示更新率（追蹤樣本的送出頻率用；半速串流時 m_StreamConfig.fps 是一半）
+static int s_VrTrackingHz = 0;
+
 #define CONN_TEST_SERVER "qt.conntest.moonlight-stream.org"
 
 CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
@@ -2729,6 +2732,7 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     // M4a 收尾：PCVR 明確要求更新率（偏好 vrRefreshHz，預設 90；取 runtime 可用值中最接近的）
     xo.preferredRefreshHz = m_XrPcvr ? static_cast<float>(m_Preferences->vrRefreshHz) : 0.0f;
     xo.testVrInput = m_Preferences->vrTestInput;  // M4a R2（dev）：--vr-test-input
+    xo.pcvrSynth = m_XrPcvr && m_Preferences->vrHalfRate && m_Preferences->vrSynth;  // §VR-SYNTH：只在半速串流時有意義
     xo.pcvrLatchDelayUs = m_XrPcvr ? static_cast<uint32_t>(m_Preferences->vrLatchDelayMs * 1000.0) : 0u;  // §VR-LATE-LATCH
     xo.pcvrOverscanDeg = m_XrPcvr ? static_cast<float>(m_Preferences->vrOverscanDeg) : 0.0f;  // dev：--vr-overscan
     xo.dumpFramePath = isRebuild ? QString() : m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
@@ -3026,6 +3030,14 @@ bool Session::setupXrPcvr()
     hz = std::clamp(hz, (int)VIPLE_VR_HZ_MIN, (int)VIPLE_VR_HZ_MAX);
     m_VrLaunch.refreshHz = hz;
     m_VrLaunch.periodNs = (measuredHz == hz && vi.periodNs > 0) ? (qint64)vi.periodNs : 1000000000LL / hz;
+    // §VR-HALF-RATE（2026-10-08）：遊戲與串流跑顯示更新率的一半（頭盔照樣全速顯示，沒有新畫面的那一格重送上一張，
+    // 轉動由頭盔的重投影補）。算圖、編碼、傳輸、解碼的負擔都減半；補幀（合成中間那一格）建立在這個模式上。
+    s_VrTrackingHz = hz;  // 追蹤樣本照顯示更新率送（半速串流時不跟著減半）
+    if (m_Preferences->vrHalfRate && hz / 2 >= (int)VIPLE_VR_HZ_MIN) {
+        m_VrLaunch.refreshHz = hz / 2;
+        m_VrLaunch.periodNs *= 2;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SESSION] half-rate: display %d Hz, stream %d Hz", hz, hz / 2);
+    }
     if (!vi.timeConversion) {
         m_VrLaunch.caps &= ~VIPLE_VR_CLIENT_CAP_TRACK_THREAD;  // frameloop 模式
     }
@@ -3763,7 +3775,7 @@ bool Session::startConnectionAsync()
         }
 #endif
         m_VrTracking.setSyntheticHands(m_Preferences->vrSyntheticHands);
-        m_VrTracking.start(m_StreamConfig.fps, motion);
+        m_VrTracking.start(s_VrTrackingHz > 0 ? s_VrTrackingHz : m_StreamConfig.fps, motion);
 #ifdef HAVE_OPENXR
         if (m_XrPcvr && m_Preferences->vrTestHaptic && m_VrTestHapticTimer == 0) {
             // M4a R2（dev）：每 3 s 本地注入一則 HAPTIC（左右交替），走與 server 訊息相同的

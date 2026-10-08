@@ -641,6 +641,9 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
                                                                 ← 每次組 session config 一次（vr_ctrl_pose_offset／vr_stale_policy／vr_angvel_local → driver pose_flags）
 [VIPLE-VR-LINK] ENet disconnected but a link is still alive - keeping the session, waiting for the control channel to reconnect   ← §VR-LINK-GRACE（server）
 [VIPLE-VR-LINK] control ping timeout suppressed - a link is still alive, extending 5 s                                             ← 同上，ENet 還沒重連時每 5 s 一行
+[VIPLE-VR-SESSION] half-rate: display D Hz, stream S Hz                              ← §VR-HALF-RATE（client）：串流跑顯示更新率的一半
+[VIPLE-VR-SYNTH] texture setup failed|flow pass failed|combine pass failed - frame synthesis off for this session   ← §VR-SYNTH（client）：合成失敗，這個 session 改回重送
+[VIPLE-XR] 10s video … synth drawn=N shown=N[ (FAILED: off)]                          ← §VR-SYNTH：這 10 s 合成了幾張、顯示了幾次合成的那一格
 [VIPLE-VR-ORCH] render scale P% (recommended render target WxH per eye, stream WxH)   ← §VR-RENDER-SCALE：`vr_render_scale_pct` 不是 100 時印
 [VIPLE-VR-ORCH] step=arm result=ok reason=rearm                 ← §VR-REARM：HMD 在 standby、VR 遊戲還在跑，不重啟 SteamVR、直接重新 arm
 [VIPLE-VR-ORCH] rearm from standby ok (VR app kept running) ms=<N>   ← 重新 arm 後 vrcompositor 恢復 Present

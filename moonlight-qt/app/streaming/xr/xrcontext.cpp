@@ -286,6 +286,7 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         vc.dumpAfterFrames = m_Options.dumpAfterFrames;
         vc.testStallMs = m_Options.testStallMs;
         vc.requireMeta = m_Options.pcvr;  // M4a R4：PCVR 不發布無 render pose 的影像
+        vc.synth = m_Options.pcvr && m_Options.pcvrSynth;  // §VR-SYNTH
         m_Video = new XrVideo(this, vc);
         QString verr;
         if (!m_Video->init(&verr)) {
@@ -1691,6 +1692,11 @@ void XrContext::frameThreadMain()
         // X3：影像由 XrVideo 的 render thread 畫，這裡只引用最後 release 的影像（沒有新幀時就是
         // 自有的最後一幀複本）。> 1 s 沒更新疊狀態條；> 5 s 改回 loading quad。
         XrVideo::Current vcur;
+        if (m_Video != nullptr && m_Options.pcvrSynth) {
+            // §VR-SYNTH：串流用的每眼視角（含 overscan），合成時把頭部轉動換算成影像位移用
+            m_Video->setEyeFovTan(std::tan(-m_Fov[0].angleLeft) + std::tan(m_Fov[0].angleRight),
+                                  std::tan(m_Fov[0].angleUp) + std::tan(-m_Fov[0].angleDown));
+        }
         const bool haveVideo = fs.shouldRender && m_Video != nullptr && m_Video->current(&vcur);
         int stale = 0;
         if (haveVideo) {

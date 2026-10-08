@@ -59,6 +59,8 @@ public:
         // XR thread 看到「目前影像無 meta」→ 當成 no-video 送 loading quad，頭盔裡閃一幀（S1 真 driver
         // 每 10 s 約 2 次）。
         bool requireMeta = false;
+        // §VR-SYNTH：合成中間格（只在 PCVR 半速串流時開）。swapchain 高度加倍，下半是合成影像
+        bool synth = false;
     };
 
     // XR frame thread 讀取的「目前可顯示影像」
@@ -75,6 +77,11 @@ public:
         VIPLE_VR_FRAME_META meta = {};
         // 2026-10-05（§VR 錯配計數）：這張影像 xrReleaseSwapchainImage 後的 release 序號
         uint64_t releaseNo = 0;
+        // §VR-SYNTH：這張 swapchain 影像的下半有合成影像時，它的範圍與姿態（current() 視情況換進 subImage／meta）
+        bool hasSynth = false;
+        XrRect2Di synthRect = {};
+        VIPLE_VR_FRAME_META synthMeta = {};
+        bool synthShown = false;  // current() 這次回傳的是合成那一格
     };
 
     // 2026-10-05：目前最後一次 xrReleaseSwapchainImage 的序號（呼叫端持 XrContext::queueMutex() 讀，與 release 互斥）。
@@ -110,6 +117,12 @@ public:
     bool current(Current* out);
     // XR frame thread：xrEndFrame 已送出引用 generation 這一代 swapchain 的 layer
     void frameEnded(uint64_t generation);
+    // §VR-SYNTH：一隻眼的水平／垂直視角（左右、上下兩個 tan 的和）；用來把頭部轉動換算成影像位移（XR thread 每幀設）
+    void setEyeFovTan(float tanW, float tanH)
+    {
+        m_FovTanW.store(tanW, std::memory_order_relaxed);
+        m_FovTanH.store(tanH, std::memory_order_relaxed);
+    }
     // 暖機：XrContext bring-up 後、第一幀之前可呼叫（目前由 render thread 在第一幀自行處理）
     void setSession(XrSession session);
 
@@ -132,6 +145,8 @@ private:
     void destroyAllSwapchains();
     // useCache：DRM_PRIME 走 dmabuf 匯入快取（只有影像 render thread 可以用）
     bool mapFrame(const AVFrame* frame, pl_frame* out, pl_tex* texSet, bool useCache);
+    bool renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh,
+                     bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, bool* synthOk, VIPLE_VR_FRAME_META* synthMeta);
     bool renderNewFrame(AVFrame* frame);
     void dumpTexture(pl_tex tex);
     void renderThreadMain();
@@ -144,6 +159,23 @@ private:
     pl_log m_Log = nullptr;
     pl_vulkan m_Vulkan = nullptr;
     pl_renderer m_Renderer = nullptr;
+    // §VR-SYNTH（都只在 render thread 用）
+    pl_dispatch m_Dp = nullptr;
+    pl_tex m_Full = nullptr;         // 這一張的 RGB（和寫進 swapchain 的值相同）
+    pl_tex m_Small[2] = {};          // 1/8 尺寸，這一張與上一張（輪流）
+    pl_tex m_Flow = nullptr;         // 1/8 尺寸的位移場（UV 單位）
+    int m_SmallCur = 0;
+    bool m_HavePrevSmall = false;
+    bool m_HavePrevMeta = false;
+    VIPLE_VR_FRAME_META m_PrevMeta = {};
+    int64_t m_PrevPts = 0;
+    int m_FrameH = 0;                // 一張影像的高度（synth 時 swapchain 是它的兩倍）
+    bool m_SynthFailed = false;      // shader 或材質建立失敗過：這個 session 不再試
+    uint64_t m_FirstShownSeq = 0;    // XR thread（m_SwMutex 內）：已經顯示過一次的 seq
+    uint64_t m_SynthDrawn = 0;       // m_StatsMutex
+    std::atomic<uint64_t> m_SynthShown{0};
+    std::atomic<float> m_FovTanW{3.2f};
+    std::atomic<float> m_FovTanH{3.2f};
     pl_tex m_Tex[4] = {};       // XR thread 的 map 材質
     pl_tex m_TestTex[4] = {};   // testMap 用（m_TestMutex）
 #ifdef HAVE_DRM
