@@ -99,6 +99,8 @@ public:
         // runtime。我們的「算圖」只是把解碼好的影像貼上去，幾乎不花時間；runtime 卻在顯示前約 3 個週期就叫醒我們
         // （Frame 實測 predictAhead 約 26 ms）。晚一點挑，同一個顯示時刻就能用到更新的影像。0＝不等（舊行為）。
         uint32_t pcvrLatchDelayUs = 0;
+        // 2026-10-08（§VR-TRACK-LOCK）：追蹤樣本的送出時刻鎖到顯示的節拍，相位依 MTP 自動找（見 pcvrTrackPhaseStep）
+        bool pcvrTrackLock = false;
         // 2026-10-08（§VR-SYNTH）：PCVR 半速串流時，沒有新影像的那一格顯示合成影像（見 XrVideo::renderSynth）
         bool pcvrSynth = false;
         // M4a R2（dev）：PCVR 控制器按鍵改用合成序列（pose 仍來自 runtime），驗 0x5506 打包
@@ -379,6 +381,7 @@ private:
     bool m_TimeConvQpc = false;
     bool nowXrTime(XrTime* out) const;
     void pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodNs);
+    void pcvrTrackPhaseStep(std::vector<uint32_t>& mtpUs, uint64_t periodNs);
     bool buildProjection(XrSwapchain swapchain, const XrRect2Di& rect, const float renderRot[4], const float renderPos[3],
                          uint32_t echoSampleId, XrCompositionLayerProjection* proj,
                          XrCompositionLayerProjectionView views[2]);
@@ -434,6 +437,18 @@ private:
     // M4a R3：LATCH（10 Hz）、CLIENT_TIMING（1 Hz）、MTP 統計。只在 frame thread 存取。
     struct PcvrTiming {
         uint64_t predictedDisplayClientNs = 0;  // 本幀預測顯示時間（client steady 時鐘）
+        // §VR-TRACK-LOCK：相位搜尋／維持（只在 frame thread）
+        int trkMode = 0;                 // 0 搜尋、1 維持
+        int64_t trkPhaseNs = 0;
+        int64_t trkLastGoodNs = 0;       // 搜尋時上一步的相位（還沒跳之前）
+        uint32_t trkPrevMtpUs = 0;
+        int trkSettle = 0;
+        int trkWarm = 0;                 // 開場先等幾秒（host 的節拍還在收斂）
+        int trkClean = 0;                // 維持時連續幾秒比鎖定時的水位高
+        uint32_t trkLocks = 0;
+        uint32_t trkBackoffs = 0;        // 維持中重新搜尋的次數
+        double trkLateSum = 0.0;         // 10 s 視窗：每秒晚到比例的總和／秒數
+        uint32_t trkLateN = 0;
         uint64_t lastLatchedSeq = 0;
         bool haveLatch = false;
         uint32_t lastFrameId = 0;

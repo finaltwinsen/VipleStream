@@ -2251,6 +2251,81 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
     }
 }
 
+// §VR-TRACK-LOCK：每秒一次，依這一秒的 MTP 調整追蹤樣本的相位。
+// 樣本往後送（phase 加大）→ host 那一幀用到的樣本比較新 → MTP 等量變小；晚到趕不上 host 讀姿態的時刻，host 就改用
+// 前一筆，MTP 一次跳高一個樣本間隔 T。所以 MTP 對相位是鋸齒。
+//  - 搜尋：每秒往後移 0.25 ms，看到中位數跳高就退回「跳之前那一步再往前 2 ms」，進入維持。
+//  - 維持：host 的虛擬 vsync 本來就鎖在顯示的節拍上，樣本也鎖上去之後兩者的相位差固定，不必一直找。連 3 秒的
+//    中位數都比鎖定時高過半個 T（例如換了網路路徑）才重新搜尋。
+// 為什麼退 2 ms 這麼多（頭盔實測，2026-10-08）：樣本的到達時刻有 ±1.5 ms 左右的抖動，「晚到的比例」對相位不是一刀切，
+// 而是一段約 3 ms 寬的斜坡——離邊界 1 ms 時有 2～3 成的幀用到前一筆，退到 2 ms 才降到 2% 上下的底噪。
+// 試過依晚到比例自動調整距離：底噪本身就有 1～2%，控制器會一直往前退、繞一圈再撞上邊界，反而變成反向的鋸齒。
+void XrContext::pcvrTrackPhaseStep(std::vector<uint32_t>& mtpUs, uint64_t periodNs)
+{
+    if (!m_Options.pcvrTrackLock || m_TimeConv == nullptr || periodNs < 2000000ull || mtpUs.size() < 30) {
+        return;
+    }
+    auto& t = m_PcvrTiming;
+    const int64_t T = static_cast<int64_t>(periodNs) / VIPLE_VR_TRACKING_RATE_MUL;
+    const uint32_t jumpUs = static_cast<uint32_t>(T / 2000);  // 半個樣本間隔
+    const int64_t kStepNs = 250000, kMarginNs = 2000000;
+    auto wrap = [T](int64_t p) {
+        p %= T;
+        return p < 0 ? p + T : p;
+    };
+    const uint32_t p50 = pctOf(mtpUs, 0.50);
+    const uint32_t lo = pctOf(mtpUs, 0.10);
+    size_t lateN = 0;
+    for (uint32_t v : mtpUs) {
+        lateN += v > lo + jumpUs ? 1 : 0;
+    }
+    t.trkLateSum += static_cast<double>(lateN) / static_cast<double>(mtpUs.size());
+    t.trkLateN++;
+    if (t.trkWarm < 20) {
+        // 串流剛開始時 host 的虛擬 vsync 還在往顯示的節拍收斂，這時看到的跳動不是樣本相位造成的（頭盔實測：
+        // 開場 10 s 內就「找到邊界」，鎖在錯的位置）。先等 20 秒有量測的時間再開始找。
+        t.trkWarm++;
+        return;
+    }
+    if (t.trkMode == 0) {
+        if (t.trkPrevMtpUs != 0 && p50 > t.trkPrevMtpUs + jumpUs) {
+            t.trkPhaseNs = wrap(t.trkLastGoodNs - kMarginNs);
+            t.trkMode = 1;
+            t.trkSettle = 3;
+            t.trkClean = 0;
+            t.trkLocks++;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-POSE] tracking phase locked: phase=%.2f ms (sample interval %.2f ms, MTP %.1f -> %.1f ms at the edge) #%u",
+                        t.trkPhaseNs / 1e6, T / 1e6, t.trkPrevMtpUs / 1000.0, p50 / 1000.0, t.trkLocks);
+        }
+        else {
+            t.trkLastGoodNs = t.trkPhaseNs;
+            t.trkPhaseNs = wrap(t.trkPhaseNs + kStepNs);  // 繞過 T 等於同一組格點，不會跳
+        }
+        t.trkPrevMtpUs = p50;
+    }
+    else if (t.trkSettle > 0) {
+        t.trkSettle--;  // 相位剛改，樣本新舊混在一起；最後一秒的中位數當基準
+        t.trkPrevMtpUs = p50;
+    }
+    else if (p50 > t.trkPrevMtpUs + jumpUs) {
+        if (++t.trkClean >= 3) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-POSE] tracking phase: MTP %.1f ms is above the locked level %.1f ms - searching again",
+                        p50 / 1000.0, t.trkPrevMtpUs / 1000.0);
+            t.trkMode = 0;
+            t.trkPrevMtpUs = 0;
+            t.trkClean = 0;
+            t.trkBackoffs++;
+        }
+    }
+    else {
+        t.trkClean = 0;
+        t.trkPrevMtpUs = (t.trkPrevMtpUs * 7 + p50) / 8;
+    }
+    VrTrackingSender::setPhaseNs(t.trkPhaseNs);
+}
+
 // M4a R3：frame thread 每幀呼叫。10 Hz 送 LATCH、1 Hz 送 CLIENT_TIMING、10 s 印 [VIPLE-VR-MTP10]。
 // LiSendVrMessage 在沒有 VR session 時回 -1（例如 bring-up 後、/launch 前），直接忽略。
 void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
@@ -2322,6 +2397,7 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         if (LiSendVrMessage(tlv, sizeof(tlv), false) == 0) {
             t.timingSent++;
         }
+        pcvrTrackPhaseStep(t.mtp1sUs, periodNs);
         t.slack1s.clear();
         t.render1s.clear();
         t.mtp1sUs.clear();
@@ -2334,12 +2410,22 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         // 2026-10-05：尾端加 frames new／repeat／skip（前段欄位順序不變）
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s"
-                    " | frames new=%u repeat=%u skip=%u mismatch=%u",
+                    " | frames new=%u repeat=%u skip=%u mismatch=%u%s",
                     n, pctOf(t.mtp10sUs, 0.50) / 1000.0, pctOf(t.mtp10sUs, 0.95) / 1000.0,
                     pctOf(t.mtp10sUs, 0.99) / 1000.0, t.mtpNoSample, t.latchSent,
                     secs > 0 ? t.latchSent / secs : 0.0, t.lastSlackUs, t.timingSent,
                     m_TimeConv != nullptr ? "" : " (mtp approx: no time conversion ext)", t.new10s, t.repeat10s, t.skip10s,
-                    t.mismatch10s);
+                    t.mismatch10s,
+                    // §VR-TRACK-LOCK：相位、這 10 s 用到前一筆樣本的比例、重新搜尋的次數
+                    m_Options.pcvrTrackLock
+                        ? qUtf8Printable(QString(" | trk %1 phase=%2 ms late=%3% researches=%4")
+                                             .arg(t.trkMode == 0 ? "search" : "hold")
+                                             .arg(t.trkPhaseNs / 1e6, 0, 'f', 2)
+                                             .arg(t.trkLateN ? 100.0 * t.trkLateSum / t.trkLateN : 0.0, 0, 'f', 1)
+                                             .arg(t.trkBackoffs))
+                        : "");
+        t.trkLateSum = 0.0;
+        t.trkLateN = 0;
         t.mtp10sUs.clear();
         t.mtpNoSample = 0;
         t.latchSent = 0;
@@ -2359,6 +2445,10 @@ void XrContext::pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodN
     }
     // M4a R3：預測顯示時間換成 client steady 時鐘（MTP 用）。沒有時間換算擴充時 ahead 是估計值（≈2 週期）
     m_PcvrTiming.predictedDisplayClientNs = steadyNow + static_cast<uint64_t>(ahead);
+    if (m_Options.pcvrTrackLock && m_TimeConv != nullptr && periodNs > 0) {
+        // §VR-TRACK-LOCK：預測的顯示時刻是 runtime 排好的等間隔格點，拿它當追蹤樣本的節拍
+        VrTrackingSender::setDisplayGrid(m_PcvrTiming.predictedDisplayClientNs, periodNs);
+    }
     m_PredictAheadNs = m_PredictAheadNs == 0 ? ahead : (m_PredictAheadNs * 7 + ahead) / 8;
     if (m_TrackSpace == XR_NULL_HANDLE || m_ViewSpace == XR_NULL_HANDLE) {
         return;

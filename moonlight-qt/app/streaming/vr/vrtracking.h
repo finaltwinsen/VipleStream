@@ -59,6 +59,12 @@ public:
     // client 單調時鐘（奈秒）。tracking 的 sampleTimeNs 與 echo age 都用它
     static uint64_t nowNs();
 
+    // §VR-TRACK-LOCK：把送出時刻鎖到顯示的節拍上。XR frame thread 每幀給「這一幀預測的顯示時刻」（client 單調時鐘）
+    // 與顯示週期；送出執行緒把每一拍對齊到 顯示時刻 + phase + k·(週期 / 每個顯示週期的樣本數)。沒呼叫過＝照自己的計時送。
+    static void setDisplayGrid(uint64_t displayNs, uint64_t periodNs);
+    // 相位（奈秒，0 到一個樣本間隔）：往後移＝樣本比較新，但太晚會趕不上 host 那一幀讀姿態。由 XrContext 依 MTP 調整
+    static void setPhaseNs(int64_t phaseNs);
+
 private:
     void run();
 

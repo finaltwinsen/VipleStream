@@ -2759,6 +2759,7 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     xo.preferredRefreshHz = m_XrPcvr ? static_cast<float>(m_Preferences->vrRefreshHz) : 0.0f;
     xo.testVrInput = m_Preferences->vrTestInput;  // M4a R2（dev）：--vr-test-input
     xo.pcvrSynth = m_XrPcvr && m_Preferences->vrHalfRate && m_Preferences->vrSynth;  // §VR-SYNTH：只在半速串流時有意義
+    xo.pcvrTrackLock = m_XrPcvr && m_Preferences->vrTrackLock;  // §VR-TRACK-LOCK
     xo.pcvrLatchDelayUs = m_XrPcvr ? static_cast<uint32_t>(m_Preferences->vrLatchDelayMs * 1000.0) : 0u;  // §VR-LATE-LATCH
     xo.pcvrOverscanDeg = m_XrPcvr ? static_cast<float>(m_Preferences->vrOverscanDeg) : 0.0f;  // dev：--vr-overscan
     xo.dumpFramePath = isRebuild ? QString() : m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame

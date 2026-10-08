@@ -84,6 +84,7 @@
 #define SER_VRLATCHDELAYMS "vrlatchdelayms"
 #define SER_VRHALFRATE "vrhalfrate"
 #define SER_VR10BIT "vr10bit"
+#define SER_VRTRACKLOCK "vrtracklock"
 #define SER_VRSYNTH "vrsynth"
 #define SER_VRFOVEATION "vrfoveation"
 #define SER_VREYEWIDTH "vreyewidth"
@@ -298,6 +299,7 @@ void StreamingPreferences::reload()
     vrLatchDelayMs = qBound(0.0, settings.value(SER_VRLATCHDELAYMS, 0.0).toDouble(), 20.0);
     vrHalfRate = settings.value(SER_VRHALFRATE, false).toBool();
     vr10Bit = settings.value(SER_VR10BIT, false).toBool();
+    vrTrackLock = settings.value(SER_VRTRACKLOCK, false).toBool();
     vrSynth = settings.value(SER_VRSYNTH, false).toBool();
     vrFoveation = qBound(100, settings.value(SER_VRFOVEATION, 100).toInt(), 250);
     // 每眼解析度（2026-10-07 起寫入設定，GUI 啟動的 VR 也吃得到）。範圍同 --vr-eye；超出範圍就用預設
@@ -597,6 +599,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_VRLATCHDELAYMS, vrLatchDelayMs);
     settings.setValue(SER_VRHALFRATE, vrHalfRate);
     settings.setValue(SER_VR10BIT, vr10Bit);
+    settings.setValue(SER_VRTRACKLOCK, vrTrackLock);
     settings.setValue(SER_VRSYNTH, vrSynth);
     settings.setValue(SER_VRFOVEATION, vrFoveation);
     settings.setValue(SER_VREYEWIDTH, vrEyeWidth);

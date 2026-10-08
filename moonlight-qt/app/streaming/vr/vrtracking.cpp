@@ -41,6 +41,23 @@ VrTrackingSender::~VrTrackingSender()
     stop();
 }
 
+namespace {
+std::atomic<uint64_t> s_GridNs{0};
+std::atomic<uint64_t> s_GridPeriodNs{0};
+std::atomic<int64_t> s_PhaseNs{0};
+}
+
+void VrTrackingSender::setDisplayGrid(uint64_t displayNs, uint64_t periodNs)
+{
+    s_GridNs.store(displayNs, std::memory_order_relaxed);
+    s_GridPeriodNs.store(periodNs, std::memory_order_relaxed);
+}
+
+void VrTrackingSender::setPhaseNs(int64_t phaseNs)
+{
+    s_PhaseNs.store(phaseNs, std::memory_order_relaxed);
+}
+
 uint64_t VrTrackingSender::nowNs()
 {
     return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -53,6 +70,8 @@ void VrTrackingSender::start(int displayHz, VrSyntheticMotion motion)
         return;
     }
     m_DisplayHz = displayHz > 0 ? displayHz : 90;
+    s_GridPeriodNs.store(0, std::memory_order_relaxed);  // 上一個 session 的節拍不沿用
+    s_PhaseNs.store(0, std::memory_order_relaxed);
     m_Motion = motion;
     VrSampleHistory::reset();
     m_Running.store(true);
@@ -141,6 +160,17 @@ void VrTrackingSender::run()
 
         // 固定頻率：落後超過一個週期就直接跳到下一個格點，不補發（舊樣本沒有價值）
         next += period;
+        // §VR-TRACK-LOCK：有顯示的節拍時，下一拍改成「這一拍之後至少半個間隔」的第一個格點
+        // （格點＝顯示時刻 + phase + k·T）。顯示時刻每幀更新，格點跟著顯示的時鐘走，不再用自己的計時累加。
+        const uint64_t gridPeriod = s_GridPeriodNs.load(std::memory_order_relaxed);
+        if (gridPeriod >= 2000000ull) {
+            const int64_t T = static_cast<int64_t>(gridPeriod) / VIPLE_VR_TRACKING_RATE_MUL;
+            const int64_t base = static_cast<int64_t>(s_GridNs.load(std::memory_order_relaxed)) + s_PhaseNs.load(std::memory_order_relaxed);
+            const int64_t nowTick = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+            const int64_t d = nowTick + T / 2 - base;
+            const int64_t n = d >= 0 ? (d + T - 1) / T : -((-d) / T);  // ceil(d / T)
+            next = clock::time_point(std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds(base + n * T)));
+        }
         const auto after = clock::now();
         if (after > next + period) {
             late++;

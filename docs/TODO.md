@@ -74,6 +74,8 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
   - 遊玩位置的連線量測（`scripts/vr/vlpt_run.sh`，需要使用者把頭盔放在遊玩位置約 10 分鐘）。
   - 被退回探測的連線，條件恢復後的重新放行（第二次實測沒有回來：探測量到 20～198 Mbps、門檻約 225～285）。
   - 影像每幀分散送出（實測一輪：壞幀少約 3 倍）：重複量測後決定要不要讓 VR session 預設開 `smooth_pacing` 或另訂節拍。
+  - §VR-TRACK-LOCK（追蹤樣本鎖到顯示節拍，`--vr-track-lock`，預設關）：頭盔無人場次 MTP 由 38.8～43.0 ms 的鋸齒變成
+    平的 40.6 ms；配戴確認後決定要不要預設開。半速串流時每 10 s 有幾 % 的幀晚一格顯示（slack 很散），原因未查。
   - LATCH 帶線上的幀號（補過包的幀不該進相位量測）；CLIENT_TIMING 仍只走 ENet（不急）。
   - `video.cpp`：`idr_events` 送出 IDR 時沒有清 `vr_idr_retry_pending`（cooldown 到期後可能多送一張 IDR）。
   - 單一路徑的影像送出也改成非阻塞＋過期丟棄（Windows 對送不動的 Wi-Fi 網卡一次會卡 10 秒；多連線沒啟用時仍是舊行為）。

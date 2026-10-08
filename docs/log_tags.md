@@ -647,6 +647,9 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-ENC] probe: HEVC 10-bit supported|not supported                              ← §VR-10BIT：VR 探測（來源 display_vr）測 HEVC 10-bit 的結果
 [VIPLE-VR-SESSION] 10-bit HEVC (Main10, SDR) requested by the client                    ← §VR-10BIT（server）：這個 VR session 用 10-bit 編碼
 [VIPLE-VR-SESSION] 10-bit was requested (vr10bit) but this device's hardware decoder path only outputs 8-bit - streaming 8-bit   ← client（Frame）：不要求 10-bit
+[VIPLE-VR-POSE] tracking phase locked: phase=P ms (sample interval T ms, MTP A -> B ms at the edge) #N   ← §VR-TRACK-LOCK（client）：找到邊界，退 2 ms 維持
+[VIPLE-VR-POSE] tracking phase: MTP A ms is above the locked level B ms - searching again              ← §VR-TRACK-LOCK：連 3 秒偏高，重新找
+[VIPLE-VR-MTP10] … | trk search|hold phase=P ms late=L% researches=N                                 ← §VR-TRACK-LOCK 開著時多的欄位（late＝用到前一筆樣本的幀）
 [VIPLE-VR-LINK] control reconnect: no answer|no route after N attempt(s) on A - trying host address B (another link's address|the session address again)   ← §VR-LINK-REHOME（client）：ENet 重連換目標位址
 [VIPLE-VR-LINK] control connection re-homed to host address B (local=L)                ← §VR-LINK-REHOME：控制連線連到了不是 session 位址的 host 位址
 [VIPLE-VR-ORCH] foveated encoding: centre density P% of uniform (edge E%)              ← §VR-FOVEA：這次編排開了注視點編碼（client 要求的強度）
