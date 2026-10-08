@@ -374,6 +374,8 @@ namespace video {
   using hdr_info_t = std::unique_ptr<hdr_info_raw_t>;
 
   extern int active_hevc_mode;
+  /// §VR-10BIT：目前選用的編碼器在最近一次探測裡通過了 HEVC 10-bit（VR 探測測的是 display_vr 來源的 10-bit SDR）
+  bool hevc_10bit_supported();
   extern int active_av1_mode;
   extern bool last_encoder_probe_supported_ref_frames_invalidation;
   extern std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec;  // 0 - H.264, 1 - HEVC, 2 - AV1

@@ -1260,7 +1260,8 @@ namespace rtsp_stream {
       }
 
       if (neg.pcvr) {
-        // M1b S1-10（§C.8）：pcvr 以協商值為準——擷取來源換成 display_vr_t，一律 8-bit SDR 4:2:0、
+        // M1b S1-10（§C.8）：pcvr 以協商值為準——擷取來源換成 display_vr_t，SDR 4:2:0（§VR-10BIT：client 要求、
+        // codec 是 HEVC、而且 VR 探測通過時用 10-bit，否則 8-bit）、
         // 打包尺寸、協商 Hz、4 slices。client 在 SDP 帶的值不同時以協商值覆寫並記一行。
         const auto override_field = [&](const char *field, int &value, int negotiated) {
           if (value != negotiated) {
@@ -1269,7 +1270,11 @@ namespace rtsp_stream {
           }
         };
         config.monitor.captureSource = 1;
-        override_field("dynamicRange", config.monitor.dynamicRange, 0);
+        const bool vr_10bit = config.monitor.dynamicRange != 0 && neg.video_format() == 1 && video::hevc_10bit_supported();
+        override_field("dynamicRange", config.monitor.dynamicRange, vr_10bit ? 1 : 0);
+        if (vr_10bit) {
+          BOOST_LOG(info) << "[VIPLE-VR-SESSION] 10-bit HEVC (Main10, SDR) requested by the client";
+        }
         override_field("chromaSamplingType", config.monitor.chromaSamplingType, 0);
         override_field("width", config.monitor.width, neg.packed_width());
         override_field("height", config.monitor.height, neg.packed_height());

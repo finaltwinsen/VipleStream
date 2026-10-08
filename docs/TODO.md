@@ -65,7 +65,9 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
   - **使用者 2026-10-08 定的優先順序：流暢第一、解析度可以降，但一定要贏過 Steam 內建串流。**
     §VR-RENDER-SCALE（`vr_render_scale_pct`）已做：串流每眼 1152、算圖 2160，頭盔無人場次 MTP 41～45 ms。
     注視點編碼已做（§VR-FOVEA，client `--vr-foveation`／設定頁，預設關閉；頭盔無人場次通過，清晰度待使用者戴眼鏡看）。
-    接著：10-bit、和 Steam 比延遲（要使用者讀頭盔裡的進階效能圖表）。補幀第一版已做
+    10-bit：host 端已做（§VR-10BIT），Frame 的 iris 解碼路徑只給 8-bit 輸出、Main10 會讓 client 崩潰，頭盔上先擋掉；
+    要做就得改 FFmpeg v4l2m2m 與 dmabuf 匯入（另：dmabuf 匯入失敗不該崩潰）。
+    接著：和 Steam 比延遲（要使用者讀頭盔裡的進階效能圖表）。補幀第一版已做
     （client `--vr-half-rate`＋`--vr-synth`，預設關閉；頭盔無人場次通過，待使用者配戴確認）。VR 設定已進 GUI 設定頁（版面待使用者看）。host 停在登入／鎖定畫面時回明確的錯誤
     （§VR-HOST-LOCKED；鎖定狀態下的實測待做）。
   - 決定 `vr_multilink`、`vr_multilink_ctrl`、`vr_multilink_repair`、`vr_latch_mode` 的預設值（配戴已驗過 `auto`＋ctrl＋repair＋A2）。
@@ -74,8 +76,6 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
   - 影像每幀分散送出（實測一輪：壞幀少約 3 倍）：重複量測後決定要不要讓 VR session 預設開 `smooth_pacing` 或另訂節拍。
   - LATCH 帶線上的幀號（補過包的幀不該進相位量測）；CLIENT_TIMING 仍只走 ENet（不急）。
   - `video.cpp`：`idr_events` 送出 IDR 時沒有清 `vr_idr_retry_pending`（cooldown 到期後可能多送一張 IDR）。
-  - 四個 `vr_*` 布林選項（`vr_ctrl_pose_offset`、`vr_angvel_local`、`vr_multilink_ctrl`、`vr_multilink_repair`）走上游的
-    `bool_f`：值寫錯或大小寫不同時不警告、當成關閉。改成嚴格解析（比照 `vr_opt::int_strict_f`，寫錯就警告並維持預設）。
   - 單一路徑的影像送出也改成非阻塞＋過期丟棄（Windows 對送不動的 Wi-Fi 網卡一次會卡 10 秒；多連線沒啟用時仍是舊行為）。
   - USB 網路（頭盔 NCM gadget ↔ Windows UsbNcm）一有 UDP 流量就卡死，觸發條件未定位；`pnputil /restart-device` 不可靠
     （第二次留下 Port Reset Failed，要實體重插）。

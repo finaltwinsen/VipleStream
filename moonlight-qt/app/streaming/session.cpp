@@ -268,6 +268,25 @@ extern "C" void quicSetTicketStorePath(const char* path);
 // §VR-HALF-RATE：頭盔的顯示更新率（追蹤樣本的送出頻率用；半速串流時 m_StreamConfig.fps 是一半）
 static int s_VrTrackingHz = 0;
 
+// §VR-10BIT：要不要向 host 要 10-bit 的格式。一般串流看「HDR」設定；PCVR 沒有 HDR，10-bit 只是編碼精度，
+// 由自己的設定（vr10bit）決定——HDR 開著不會讓 PCVR 變成 10-bit，反過來也不會。
+//
+// Steam Frame（Linux arm64）目前不行：iris 解碼器（V4L2）在 FFmpeg 的 v4l2m2m 路徑上只協商得到 8-bit 的輸出格式
+// （NV12），Main10 的串流解出來的影格版面和 dmabuf 匯入對不上，client 會在第一幀崩潰（2026-10-08 頭盔實測）。
+// 所以真的頭盔上一律不要求 10-bit；--vr-emulate（不解到 XR）不受限，用來驗 host 端。
+static bool wants10Bit(const StreamingPreferences* prefs)
+{
+    if (prefs->displayTarget != StreamingPreferences::DT_PCVR) {
+        return prefs->enableHdr;
+    }
+#if defined(Q_OS_LINUX) && defined(Q_PROCESSOR_ARM_64)
+    if (!prefs->vrEmulate) {
+        return false;
+    }
+#endif
+    return prefs->vr10Bit;
+}
+
 #define CONN_TEST_SERVER "qt.conntest.moonlight-stream.org"
 
 CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
@@ -1529,12 +1548,12 @@ bool Session::initialize(QQuickWindow* qtWindow)
         auto hevcDA = getDecoderAvailability(testWindow,
                                              m_Preferences->videoDecoderSelection,
                                              m_Preferences->enableYUV444 ?
-                                                 (m_Preferences->enableHdr ? VIDEO_FORMAT_H265_REXT10_444 : VIDEO_FORMAT_H265_REXT8_444) :
-                                                 (m_Preferences->enableHdr ? VIDEO_FORMAT_H265_MAIN10 : VIDEO_FORMAT_H265),
+                                                 (wants10Bit(m_Preferences) ? VIDEO_FORMAT_H265_REXT10_444 : VIDEO_FORMAT_H265_REXT8_444) :
+                                                 (wants10Bit(m_Preferences) ? VIDEO_FORMAT_H265_MAIN10 : VIDEO_FORMAT_H265),
                                              m_StreamConfig.width,
                                              m_StreamConfig.height,
                                              m_StreamConfig.fps);
-        if (hevcDA == DecoderAvailability::None && m_Preferences->enableHdr) {
+        if (hevcDA == DecoderAvailability::None && wants10Bit(m_Preferences)) {
             // Remove all 10-bit HEVC profiles
             m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_H265 & VIDEO_FORMAT_MASK_10BIT);
 
@@ -1565,7 +1584,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
             // Deprioritize HEVC unless the user forced software decoding and enabled HDR.
             // We need HEVC in that case because we cannot support 10-bit content with H.264,
             // which would ordinarily be prioritized for software decoding performance.
-            if (m_Preferences->videoDecoderSelection != StreamingPreferences::VDS_FORCE_SOFTWARE || !m_Preferences->enableHdr) {
+            if (m_Preferences->videoDecoderSelection != StreamingPreferences::VDS_FORCE_SOFTWARE || !wants10Bit(m_Preferences)) {
                 m_SupportedVideoFormats.deprioritizeByMask(VIDEO_FORMAT_MASK_H265);
             }
         }
@@ -1592,12 +1611,12 @@ bool Session::initialize(QQuickWindow* qtWindow)
         // because dav1d is higher performance than FFmpeg's HEVC software decoder.
         if (hevcDA == DecoderAvailability::Hardware
 #if !defined(Q_OS_WIN32) && (!(defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN)) || defined(Q_PROCESSOR_X86))
-            || !m_Preferences->enableHdr
+            || !wants10Bit(m_Preferences)
 #endif
             ) {
             m_SupportedVideoFormats.deprioritizeByMask(VIDEO_FORMAT_MASK_AV1);
         }
-        else if (!m_Preferences->enableHdr &&
+        else if (!wants10Bit(m_Preferences) &&
                    getDecoderAvailability(testWindow,
                                           m_Preferences->videoDecoderSelection,
                                           m_Preferences->enableYUV444 ? VIDEO_FORMAT_AV1_HIGH8_444 : VIDEO_FORMAT_AV1_MAIN8,
@@ -1661,7 +1680,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
     }
 
     // Mask off 10-bit codecs if HDR is not enabled
-    if (!m_Preferences->enableHdr) {
+    if (!wants10Bit(m_Preferences)) {
         m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_10BIT);
     }
     else {
@@ -1725,10 +1744,14 @@ bool Session::initialize(QQuickWindow* qtWindow)
                 WMUtils::isGpuSlow() ? 1 : 0);
 #endif
 
-    // §VR：VR profile 固定 8-bit SDR，AV1 要等 L1（vr_architecture.md §3.4）
+    // §VR：VR profile 是 SDR 4:2:0，AV1 要等 L1（vr_architecture.md §3.4）。§VR-10BIT：開了 vr10bit 才留 10-bit 的格式
     if (m_VrRequested) {
-        m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_AV1 | VIDEO_FORMAT_MASK_10BIT |
-                                             VIDEO_FORMAT_MASK_YUV444);
+        m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_AV1 | VIDEO_FORMAT_MASK_YUV444 |
+                                             (wants10Bit(m_Preferences) ? 0 : VIDEO_FORMAT_MASK_10BIT));
+        if (m_Preferences->vr10Bit && !wants10Bit(m_Preferences)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-SESSION] 10-bit was requested (vr10bit) but this device's hardware decoder path only outputs 8-bit - streaming 8-bit");
+        }
         if (m_SupportedVideoFormats.isEmpty()) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VR-SESSION] no 8-bit HEVC/H.264 decoder available — streaming flat");
@@ -1813,7 +1836,7 @@ bool Session::validateLaunch(SDL_Window* testWindow)
             m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_AV1);
         }
         else {
-            if (!m_Preferences->enableHdr && // HDR is checked below
+            if (!wants10Bit(m_Preferences) && // HDR is checked below
                  m_Preferences->videoDecoderSelection == StreamingPreferences::VDS_AUTO && // Force hardware decoding checked below
                  m_Preferences->videoCodecConfig != StreamingPreferences::VCC_AUTO && // Auto VCC is already checked in initialize()
                  getDecoderAvailability(testWindow,
@@ -1843,7 +1866,7 @@ bool Session::validateLaunch(SDL_Window* testWindow)
             m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_H265);
         }
         else {
-            if (!m_Preferences->enableHdr && // HDR is checked below
+            if (!wants10Bit(m_Preferences) && // HDR is checked below
                  m_Preferences->videoDecoderSelection == StreamingPreferences::VDS_AUTO && // Force hardware decoding checked below
                  m_Preferences->videoCodecConfig != StreamingPreferences::VCC_AUTO && // Auto VCC is already checked in initialize()
                  getDecoderAvailability(testWindow,
@@ -1889,7 +1912,7 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         }
     }
 
-    if (m_Preferences->enableHdr) {
+    if (wants10Bit(m_Preferences)) {
         if (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_H264) {
             emitLaunchWarning(tr("HDR is not supported using the H.264 codec."));
             m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_10BIT);

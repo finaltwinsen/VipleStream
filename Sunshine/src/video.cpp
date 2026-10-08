@@ -1205,6 +1205,10 @@ namespace video {
 
   static encoder_t *chosen_encoder;
   int active_hevc_mode;
+
+  bool hevc_10bit_supported() {
+    return chosen_encoder && chosen_encoder->hevc[encoder_t::PASSED] && chosen_encoder->hevc[encoder_t::DYNAMIC_RANGE];
+  }
   int active_av1_mode;
   bool last_encoder_probe_supported_ref_frames_invalidation = false;
   std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec = {};
@@ -3339,6 +3343,15 @@ namespace video {
       for (auto *c : {&encoder.h264, &encoder.hevc, &encoder.av1}) {
         (*c)[encoder_t::DYNAMIC_RANGE] = false;
         (*c)[encoder_t::YUV444] = false;
+      }
+      // §VR-10BIT（2026-10-08）：VR 來源不是 HDR，但可以用 10-bit 編碼（HEVC Main10、SDR）。只測 HEVC 4:2:0。
+      if (encoder.hevc[encoder_t::PASSED]) {
+        auto config_vr_10bit = config_autoselect;
+        config_vr_10bit.videoFormat = 1;
+        config_vr_10bit.dynamicRange = 1;
+        encoder.hevc[encoder_t::DYNAMIC_RANGE] = disp->is_codec_supported(encoder.hevc.name, config_vr_10bit) &&
+                                                 validate_config(disp, encoder, config_vr_10bit) >= 0;
+        BOOST_LOG(info) << "[VIPLE-VR-ENC] probe: HEVC 10-bit "sv << (encoder.hevc[encoder_t::DYNAMIC_RANGE] ? "supported"sv : "not supported"sv);
       }
     } else {
       // H.264 is special because encoders may support YUV 4:4:4 without supporting 10-bit color depth

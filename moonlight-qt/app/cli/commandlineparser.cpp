@@ -593,6 +593,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                          "motion-dependent paths with nobody wearing the headset. The picture swings in the headset - do not wear it. Not saved.");
     parser.addFlagOption("vr-synthetic-hands", "(dev) PCVR: replace both controller poses with a synthetic swing in front of the head (buttons untouched), "
                          "so an unattended session has moving near objects in view. Works with --vr-emulate and on a real XR runtime. Not saved.");
+    parser.addToggleOption("vr-10bit", "PCVR: ask the host for 10-bit HEVC (Main10, SDR) instead of 8-bit");
     parser.addToggleOption("vr-half-rate", "PCVR: run the game and the stream at half the headset refresh rate (the headset still displays at full rate)");
     parser.addToggleOption("vr-synth", "PCVR with --vr-half-rate: show a motion-extrapolated frame on the display refreshes that have no new stream frame");
     parser.addValueOption("vr-foveation", "PCVR: foveated encoding - pixel density straight ahead as a percentage of uniform sampling "
@@ -879,6 +880,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     preferences->vrSyntheticHmd = parser.isSet("vr-synthetic-hmd");
     preferences->vrSyntheticHands = parser.isSet("vr-synthetic-hands");
     preferences->vrHalfRate = parser.getToggleOptionValue("vr-half-rate", preferences->vrHalfRate);
+    preferences->vr10Bit = parser.getToggleOptionValue("vr-10bit", preferences->vr10Bit);
     preferences->vrSynth = parser.getToggleOptionValue("vr-synth", preferences->vrSynth);
     if (parser.isSet("vr-foveation")) {
         bool ok = false;

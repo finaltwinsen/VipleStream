@@ -1788,6 +1788,26 @@ PHY 1.7 Gbps。同樣 200 Mbps、90 Hz、30 s：
 - **還沒驗的**：有人配戴時看起來如何（正前方是不是真的比較清楚、邊緣的糊會不會被注意到、轉動眼球看邊緣時的感受）；
   哪個強度當預設；每眼 1440 以上時頭盔 GPU 的負擔。清晰度沒辦法從縮小的截圖判斷，要請使用者戴眼鏡看。
 
+**10-bit 編碼（§VR-10BIT，2026-10-08）：host 端做好了，Frame 的解碼路徑還不行**
+
+- 原本 VR session 一律 8-bit：client 在 PCVR 不列 10-bit 的格式、server 把 SDP 的 `dynamicRange` 覆寫成 0、VR 的編碼器
+  探測不測 10-bit。Steam 內建串流用的是 10-bit。
+- **host**：VR 探測多測一項「HEVC 10-bit、來源是 display_vr」（`[VIPLE-VR-ENC] probe: HEVC 10-bit supported`）；
+  RTSP ANNOUNCE 時 client 要求 10-bit、codec 是 HEVC、而且探測通過才用 10-bit（SDR，HEVC Main10），否則照舊 8-bit。
+  `<dev-client>` 用 `--vr-emulate --vr-10bit` 驗過：送出來的串流是 `Main 10`／`yuv420p10le`，顏色正確。
+- **client**：`--vr-10bit`（保存為 `vr10bit`，預設關）。PCVR 要不要 10-bit 只看這個設定，不看一般串流的「HDR」
+  （HDR 開著不會讓 PCVR 變 10-bit）。
+- **Frame 不行的原因（頭盔實測）**：iris 解碼器（`/dev/video-dec0`）列出的輸出格式只有 8-bit 的
+  （`Q08C`、`NV12`、`NV21`、`AB24`、`QC24`），FFmpeg 的 v4l2m2m 對 Main10 的串流照樣要求 `NV12`。測試幀解得過，
+  但真的串流第一幀進來時 dmabuf 匯入失敗（libplacebo：`shared_mem.stride_w >= params->w` 不成立），接著 client
+  SIGSEGV 結束。頭盔本身沒事，重開 client 就好。
+- 所以目前在真的頭盔（Linux arm64、不是 `--vr-emulate`）上 `vr10bit` 不生效：照舊要求 8-bit，log 一行
+  `[VIPLE-VR-SESSION] 10-bit was requested (vr10bit) but this device's hardware decoder path only outputs 8-bit`。
+  設定頁沒有放這個選項。
+- 要讓 Frame 用 10-bit，得先弄清楚 iris 在 10-bit 串流的 source change 之後給哪些輸出格式（P010 或 Qualcomm 的
+  壓縮 10-bit 格式），再改 FFmpeg 的 v4l2m2m 與 dmabuf 匯入——是自寫 V4L2 解碼器（L1）等級的工作，排在後面。
+  另外，dmabuf 匯入失敗不該讓 client 崩潰，這個要另外修。
+
 **VR 設定進 GUI 設定頁（2026-10-08）**
 
 - 設定頁最下面多一組「VR 串流（Steam Frame）」：每眼解析度（1152／1440／1728／2160）、額外視角（關閉、2～5°）、
@@ -1811,7 +1831,8 @@ PHY 1.7 Gbps。同樣 200 Mbps、90 Hz、30 s：
 
 **還沒做**
 
-- **降低每幀的像素量**（10-07 晚結論一）：編碼尺寸小於算圖尺寸（已做）、注視點編碼（已做，見上）、10-bit；先用每眼 1152／1440
+- **降低每幀的像素量**（10-07 晚結論一）：編碼尺寸小於算圖尺寸（已做）、注視點編碼（已做，見上）、10-bit（host 端已做，
+  Frame 的解碼路徑不支援，見上）；先用每眼 1152／1440
   在原本位置完整跑幾分鐘，確認延遲與流暢度（要等姿態預測收斂），並請使用者戴眼鏡看清晰度能不能接受。
 - 結論二、三與延遲拆解在 10-08 上午做了（見上）。剩：`always`＋§VR-LINK-FRESH 在真頭盔的弱訊號位置驗證、
   控制連線重連時換到另一個 host 位址、頭盔合成管線那約 21 ms 有沒有別的路可以繞。

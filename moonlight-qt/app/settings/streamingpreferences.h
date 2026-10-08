@@ -462,6 +462,7 @@ public:
     bool vrLinkSelftest = false;      // §VR-MULTILINK（dev）：--vr-link-selftest 在同一張網卡再開一條連線，不寫入設定
     int  vrFoveation = 100;           // §VR-FOVEA：--vr-foveation，正前方的像素密度（%，100＝關）；寫入設定（vrfoveation）
     bool vrSynth = false;             // §VR-SYNTH：--vr-synth，半速串流時合成中間那一格；寫入設定（vrsynth）
+    bool vr10Bit = false;             // §VR-10BIT：--vr-10bit，PCVR 要求 HEVC Main10（SDR）；寫入設定（vr10bit）。PCVR 不看 enableHdr
     bool vrHalfRate = false;          // §VR-HALF-RATE：--vr-half-rate，串流跑顯示更新率的一半；寫入設定（vrhalfrate）
     double vrLatchDelayMs = 0.0;      // §VR-LATE-LATCH：--vr-latch-delay，frame thread 晚幾毫秒才挑影像（0～20）；寫入設定（vrlatchdelayms）
     double vrOverscanDeg = 0.0;       // --vr-overscan：每眼 FOV 四邊各放大幾度（0～10）。2026-10-07 起寫入設定（vroverscandeg），GUI 啟動的 VR 也吃得到
