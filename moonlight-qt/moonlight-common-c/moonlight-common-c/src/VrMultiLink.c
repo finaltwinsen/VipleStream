@@ -990,6 +990,28 @@ int vrmlAnyAlive(void) {
     return 0;
 }
 
+// §VR-LINK-REHOME
+int vrmlOtherAliveServer(const struct sockaddr_storage* exclude, struct sockaddr_storage* out) {
+    const uint64_t nowMs = PltGetMillis();
+    if (exclude == NULL || out == NULL || exclude->ss_family != AF_INET) {
+        return 0;
+    }
+    const struct sockaddr_in* ex = (const struct sockaddr_in*)exclude;
+    for (int i = 0; i < linkCount; i++) {
+        if (!isConfirmed(&links[i], nowMs) || links[i].serverV.sin_addr.s_addr == ex->sin_addr.s_addr) {
+            continue;
+        }
+        struct sockaddr_in a;
+        memset(&a, 0, sizeof(a));
+        a.sin_family = AF_INET;
+        a.sin_addr = links[i].serverV.sin_addr;
+        memset(out, 0, sizeof(*out));
+        memcpy(out, &a, sizeof(a));
+        return 1;
+    }
+    return 0;
+}
+
 int vrmlVideoCarryMask(void) {
     return carryMask;
 }
@@ -1457,6 +1479,7 @@ int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeo
 void vrmlNoteVideoUsed(int linkIdx) { (void)linkIdx; }
 int vrmlVideoCarrying(void) { return 0; }
 int vrmlAnyAlive(void) { return 0; }
+int vrmlOtherAliveServer(const struct sockaddr_storage* exclude, struct sockaddr_storage* out) { (void)exclude; (void)out; return 0; }
 int vrmlVideoCarryMask(void) { return 0; }
 uint32_t vrmlVideoLinkLagUs(int linkIdx) { (void)linkIdx; return 0; }
 int vrmlRecvAudio(SOCKET legacy, char* buffer, int size) { (void)legacy; (void)buffer; (void)size; return -1; }

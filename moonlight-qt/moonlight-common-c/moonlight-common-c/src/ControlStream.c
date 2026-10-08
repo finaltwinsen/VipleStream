@@ -2051,18 +2051,19 @@ static bool enetReconnectSameIp(const struct sockaddr_storage* a, const struct s
 // 例如 WSAENETUNREACH 10051／ENETUNREACH；-1 = OS 給了未指定位址）。
 // 不印 log（重連迴圈每秒呼叫；狀態轉換由呼叫端印）——所以直接用 socket()
 // 而不是會印「socket() failed」的 createSocket()。
-static int enetReconnectProbeRoute(struct sockaddr_storage* localOut, SOCKADDR_LEN* localLenOut) {
+static int enetReconnectProbeRoute(const struct sockaddr_storage* remote,
+                                   struct sockaddr_storage* localOut, SOCKADDR_LEN* localLenOut) {
     LC_SOCKADDR target;
     SOCKET s;
     int err;
 
-    s = socket(RemoteAddr.ss_family, SOCK_DGRAM, IPPROTO_UDP);
+    s = socket(remote->ss_family, SOCK_DGRAM, IPPROTO_UDP);
     if (s == INVALID_SOCKET) {
         err = LastSocketFail();
         return err;
     }
 
-    memcpy(&target, &RemoteAddr, AddrLen);
+    memcpy(&target, remote, AddrLen);
     SET_PORT(&target, ControlPortNumber);
     if (connect(s, (struct sockaddr*)&target, AddrLen) < 0) {
         err = LastSocketFail();
@@ -2569,6 +2570,13 @@ enet_reconnect_wait:
         bool longWaitLogged = false;
         struct sockaddr_storage lastLocal;
         memset(&lastLocal, 0, sizeof(lastLocal));
+        // §VR-LINK-REHOME（2026-10-08）：這一輪重連的目標位址。先試 session 位址（RemoteAddr）；沒有路由、或連著
+        // 兩次沒連上，而多連線裡有另一個 host 位址的連線還活著，就改連那個位址（再連著兩次失敗就換回來）。
+        // server 以 connect data 認 session，不看來源位址。每一輪重連都從 session 位址開始。
+        struct sockaddr_storage reconnTarget;
+        bool reconnAlt = false;
+        int targetTries = 0;
+        memcpy(&reconnTarget, &RemoteAddr, sizeof(reconnTarget));
 
         while (!stopping && !ConnectionInterrupted &&
                !PltIsThreadInterrupted(&controlReceiveThread)) {
@@ -2611,8 +2619,32 @@ enet_reconnect_wait:
             // (d) 每秒都探路由（不受退避限制），狀態轉換才印 log
             struct sockaddr_storage probeLocal;
             SOCKADDR_LEN probeLocalLen = 0;
-            int probeErr = enetReconnectProbeRoute(&probeLocal, &probeLocalLen);
+            int probeErr = enetReconnectProbeRoute(&reconnTarget, &probeLocal, &probeLocalLen);
             bool haveRoute = (probeErr == 0);
+            if (targetTries >= 2 || (!haveRoute && !reconnAlt)) {
+                struct sockaddr_storage other;
+                bool haveOther;
+                if (reconnAlt) {
+                    memcpy(&other, &RemoteAddr, sizeof(other));
+                    haveOther = true;
+                }
+                else {
+                    haveOther = vrmlOtherAliveServer(&RemoteAddr, &other) != 0;
+                }
+                if (haveOther) {
+                    char fromStr[URLSAFESTRING_LEN], toStr[URLSAFESTRING_LEN];
+                    addrToUrlSafeString(&reconnTarget, fromStr, sizeof(fromStr));
+                    addrToUrlSafeString(&other, toStr, sizeof(toStr));
+                    Limelog("[VIPLE-VR-LINK] control reconnect: %s after %d attempt(s) on %s - trying host address %s%s\n",
+                            haveRoute ? "no answer" : "no route", targetTries, fromStr, toStr,
+                            reconnAlt ? " (the session address again)" : " (another link's address)");
+                    memcpy(&reconnTarget, &other, sizeof(reconnTarget));
+                    reconnAlt = !reconnAlt;
+                    targetTries = 0;
+                    probeErr = enetReconnectProbeRoute(&reconnTarget, &probeLocal, &probeLocalLen);
+                    haveRoute = (probeErr == 0);
+                }
+            }
             bool routeRegained = false;
             if (haveRoute != routeUp) {
                 if (haveRoute) {
@@ -2654,6 +2686,7 @@ enet_reconnect_wait:
 
             // (g) 嘗試一次
             attempts++;
+            targetTries++;
             {
                 ENetAddress remoteAddress, localAddress;
                 ENetEvent reconnEvent;
@@ -2676,7 +2709,7 @@ enet_reconnect_wait:
                 // LocalAddr。全域 LocalAddr 不改（video/audio RTP socket、QUIC
                 // 都不看它）。
                 enet_address_set_address(&localAddress, (struct sockaddr*)&probeLocal, probeLocalLen);
-                enet_address_set_address(&remoteAddress, (struct sockaddr*)&RemoteAddr, AddrLen);
+                enet_address_set_address(&remoteAddress, (struct sockaddr*)&reconnTarget, AddrLen);
                 enet_address_set_port(&remoteAddress, ControlPortNumber);
 
                 // IP 沒變且 LiHolePunch 留下了 LocalControlPort：先綁回同一個
@@ -2792,6 +2825,11 @@ enet_reconnect_wait:
                                 (unsigned long long)(doneMs - waitStartMs),
                                 attempts, rejects, localStr, (unsigned int)boundPort,
                                 currentEnetSequenceNumber);
+                        if (reconnAlt) {
+                            char toStr[URLSAFESTRING_LEN];
+                            addrToUrlSafeString(&reconnTarget, toStr, sizeof(toStr));
+                            Limelog("[VIPLE-VR-LINK] control connection re-homed to host address %s (local=%s)\n", toStr, localStr);
+                        }
                         enetHealthReconnectedAtMs = doneMs;
                         enetHealthLogAtMs = doneMs + 5000;
                         goto enet_main_loop;  // 回到主事件迴圈

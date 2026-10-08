@@ -647,6 +647,8 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-ENC] probe: HEVC 10-bit supported|not supported                              ← §VR-10BIT：VR 探測（來源 display_vr）測 HEVC 10-bit 的結果
 [VIPLE-VR-SESSION] 10-bit HEVC (Main10, SDR) requested by the client                    ← §VR-10BIT（server）：這個 VR session 用 10-bit 編碼
 [VIPLE-VR-SESSION] 10-bit was requested (vr10bit) but this device's hardware decoder path only outputs 8-bit - streaming 8-bit   ← client（Frame）：不要求 10-bit
+[VIPLE-VR-LINK] control reconnect: no answer|no route after N attempt(s) on A - trying host address B (another link's address|the session address again)   ← §VR-LINK-REHOME（client）：ENet 重連換目標位址
+[VIPLE-VR-LINK] control connection re-homed to host address B (local=L)                ← §VR-LINK-REHOME：控制連線連到了不是 session 位址的 host 位址
 [VIPLE-VR-ORCH] foveated encoding: centre density P% of uniform (edge E%)              ← §VR-FOVEA：這次編排開了注視點編碼（client 要求的強度）
 [VIPLE-VR-SESSION] /resume: foveation stays at P% (running orchestration; client asked for Q%)   ← §VR-FOVEA：/resume 沿用進行中的強度
 [VIPLE-VR-FOVEA] unwarp pass failed - showing the stream without undoing the foveated encoding for this session   ← client：還原失敗，這個 session 的畫面是壓縮過的樣子
