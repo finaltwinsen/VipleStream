@@ -32,3 +32,8 @@ void vrSyntheticFill(VrSyntheticMotion motion, double tSec, VIPLE_VR_TRACKING* o
 // （右手像揮拍：左右 ±25 cm、前後 ±10 cm @1.3 Hz，拍面繞前後軸 ±40°；左手小幅上下），並標成 active／focused。
 // 按鍵不動。無人配戴時畫面裡才有會動的近物，看得到手部的預測與重投影。
 void vrSyntheticHands(double tSec, VIPLE_VR_TRACKING* out);
+
+// 2026-10-09（dev，--vr-synthetic-menu-at）：tSec 落在 [pressAtSec, pressAtSec + 0.15) 時在左手按住 MENU，
+// 之後 pressCtr 的 MENU 計數比原值多 1（照協定填；host 目前只看 buttons 的準位）。pressAtSec <= 0＝不做。其餘輸入不動。
+// 只寫按鍵：左手控制器沒有 active（沒被追蹤、也沒有合成的手）時 host 會整個忽略。
+void vrSyntheticMenu(double tSec, double pressAtSec, VIPLE_VR_TRACKING* out);

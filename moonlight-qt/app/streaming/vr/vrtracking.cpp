@@ -125,6 +125,7 @@ void VrTrackingSender::run()
             if (m_SyntheticHands) {
                 vrSyntheticHands(t, &sample);
             }
+            vrSyntheticMenu(t, m_SyntheticMenuAtSec, &sample);
             sample.predictNs = predictNs;
         }
         sample.version = VIPLE_VR_TRACKING_VERSION;

@@ -597,6 +597,11 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                          "motion-dependent paths with nobody wearing the headset. The picture swings in the headset - do not wear it. Not saved.");
     parser.addFlagOption("vr-synthetic-hands", "(dev) PCVR: replace both controller poses with a synthetic swing in front of the head (buttons untouched), "
                          "so an unattended session has moving near objects in view. Works with --vr-emulate and on a real XR runtime. Not saved.");
+    parser.addValueOption("vr-synthetic-menu-at", "(dev) PCVR: press the left MENU button for 150 ms this many seconds after tracking starts (0 = off). "
+                          "The host maps it to the SteamVR system button, which only TOGGLES the SteamVR dashboard: it closes a dashboard that is open "
+                          "(the usual state with nobody wearing the headset) and opens one that is closed. Closing it this way does not give the timing "
+                          "of a worn session - to measure, disable the dashboard on the host instead. Needs an active left controller: always the case "
+                          "with --vr-emulate; on a real XR runtime add --vr-synthetic-hands unless the controller is tracked. Not saved.");
     parser.addToggleOption("vr-10bit", "PCVR: ask the host for 10-bit HEVC (Main10, SDR) instead of 8-bit");
     parser.addToggleOption("vr-track-lock", "PCVR: lock the tracking samples to the display refresh and tune their phase from the measured latency");
     parser.addChoiceOption("vr-track-relock", "PCVR with --vr-track-lock: whether to search for the tracking phase again when part of the frames "
@@ -905,6 +910,14 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
     preferences->vrSyntheticHmd = parser.isSet("vr-synthetic-hmd");
     preferences->vrSyntheticHands = parser.isSet("vr-synthetic-hands");
+    if (parser.isSet("vr-synthetic-menu-at")) {
+        bool ok = false;
+        const double sec = parser.value("vr-synthetic-menu-at").toDouble(&ok);
+        if (!ok || !(sec >= 0.0 && sec <= 3600.0)) {
+            parser.showError(QString("vr-synthetic-menu-at must be a number of seconds within 0-3600 (0 = off): %1").arg(parser.value("vr-synthetic-menu-at")));
+        }
+        preferences->vrSyntheticMenuAtSec = sec;
+    }
     preferences->vrHalfRate = parser.getToggleOptionValue("vr-half-rate", preferences->vrHalfRate);
     preferences->vr10Bit = parser.getToggleOptionValue("vr-10bit", preferences->vr10Bit);
     preferences->vrTrackLock = parser.getToggleOptionValue("vr-track-lock", preferences->vrTrackLock);

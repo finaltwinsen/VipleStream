@@ -3803,7 +3803,8 @@ bool Session::startConnectionAsync()
                             "The picture will swing in the headset; do not wear it.",
                             vrSyntheticMotionName(motion));
             }
-            m_VrTracking.setSource([xr, syntheticHmd, syntheticHands, motion, synthStart](VIPLE_VR_TRACKING* s) {
+            const double syntheticMenuAt = m_Preferences->vrSyntheticMenuAtSec;  // dev：第幾秒按一下左手 MENU
+            m_VrTracking.setSource([xr, syntheticHmd, syntheticHands, syntheticMenuAt, motion, synthStart](VIPLE_VR_TRACKING* s) {
                 uint32_t predict = 0;
                 VIPLE_VR_POSE& hmd = s->pose[VIPLE_VR_POSE_HMD];
                 if (!xr->sampleHmd(hmd.pos, hmd.rot, hmd.linVel, hmd.angVel, &predict)) {
@@ -3822,11 +3823,22 @@ bool Session::startConnectionAsync()
                 if (syntheticHands) {
                     vrSyntheticHands(std::chrono::duration<double>(std::chrono::steady_clock::now() - synthStart).count(), s);
                 }
+                vrSyntheticMenu(std::chrono::duration<double>(std::chrono::steady_clock::now() - synthStart).count(), syntheticMenuAt, s);
                 return true;
             }, syntheticHmd ? "xr+synthetic-hmd" : (m_XrContext->trackingThreadMode() ? "xr-thread" : "xr-frameloop"));
         }
 #endif
         m_VrTracking.setSyntheticHands(m_Preferences->vrSyntheticHands);
+        m_VrTracking.setSyntheticMenuAt(m_Preferences->vrSyntheticMenuAtSec);
+        if (m_Preferences->vrSyntheticMenuAtSec > 0.0) {
+            // host 只在左手控制器 active 時才看按鍵：--vr-emulate 一定是；真的 XR 連線上沒被追蹤、又沒有合成的手，這一下會被丟掉
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-INPUT] dev: --vr-synthetic-menu-at - the left MENU button is pressed %.1f s after tracking starts "
+                        "(toggles the host's SteamVR dashboard)%s",
+                        m_Preferences->vrSyntheticMenuAtSec,
+                        m_Preferences->vrSyntheticHands ? "" :
+                        "; on a real XR runtime the host ignores it unless the left controller is tracked - add --vr-synthetic-hands");
+        }
         m_VrTracking.start(s_VrTrackingHz > 0 ? s_VrTrackingHz : m_StreamConfig.fps, motion);
 #ifdef HAVE_OPENXR
         if (m_XrPcvr && m_Preferences->vrTestHaptic && m_VrTestHapticTimer == 0) {

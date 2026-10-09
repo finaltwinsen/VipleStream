@@ -205,3 +205,17 @@ void vrSyntheticHands(double t, VIPLE_VR_TRACKING* out)
     }
     out->flags |= VIPLE_VR_TRK_LEFT | VIPLE_VR_TRK_RIGHT;
 }
+
+void vrSyntheticMenu(double t, double pressAt, VIPLE_VR_TRACKING* out)
+{
+    if (!(pressAt > 0.0) || t < pressAt) {
+        return;
+    }
+    VIPLE_VR_CONTROLLER_INPUT& left = out->input[0];
+    if (t < pressAt + 0.15) {
+        left.buttons |= VIPLE_VR_BTN_MENU;
+    }
+    // MENU 是第 1 個鍵（pressCtr 的 bit 2..3）：按過之後計數比原值多 1（照協定填；host 目前只看 buttons 的準位，不讀 pressCtr）
+    const uint32_t ctr = (((left.pressCtr >> 2) & 3u) + 1u) & 3u;
+    left.pressCtr = (left.pressCtr & ~(3u << 2)) | (ctr << 2);
+}
