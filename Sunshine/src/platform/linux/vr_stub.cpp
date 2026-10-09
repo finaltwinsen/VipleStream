@@ -244,6 +244,14 @@ namespace vr::bridge {
   }
 #endif
 
+  // §VR-FENCE-LATE：沒有 VR 擷取，擷取健康恆為預設值（overload == false）
+  void set_capture_health(const capture::snapshot_t &) {
+  }
+
+  capture::snapshot_t capture_health() {
+    return {};
+  }
+
   pipe_sd_report_t check_pipe_security(bool) {
     pipe_sd_report_t r;
     r.pipe_reason = "unsupported";

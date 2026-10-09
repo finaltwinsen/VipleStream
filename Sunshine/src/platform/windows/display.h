@@ -23,6 +23,7 @@
 #include "src/platform/common.h"
 #include "src/utility.h"
 #include "src/video.h"
+#include "src/vr/vr_capture_health.h"
 
 namespace platf::dxgi {
   extern const char *format_str[];
@@ -471,6 +472,11 @@ namespace platf::dxgi {
       std::vector<double> evt_to_push_ms;  ///< evtFrm 醒來 → push 回呼（只保留最近一個統計窗）
       std::vector<double> echo_age_ms;  ///< echo 樣本發布到 tracking ring → app Present（預算第 3＋4＋5 項；S3-09）
       std::vector<double> present_to_push_ms;  ///< descriptor.present_qpc → push 回呼
+      // §VR-FENCE-LATE（2026-10-09）
+      uint64_t late = 0;  ///< 第一段等待逾時、在等待預算內到值而照樣複製的幀（已含在 copied 裡；開關關著時恆為 0）
+      uint64_t over_period = 0;  ///< 複製成功的幀裡，fence_wait 達到一個顯示週期的（已含在 copied 裡；評估過載的定義用）
+      std::vector<double> fence_wait_ms;  ///< 複製成功的每一張：evtFrm 醒來 → CPU 端確認 fence 到值（含準時的）
+      std::vector<double> present_to_fence_ms;  ///< 複製成功的每一張：descriptor.present_qpc → fence 到值（發布後實際晚多久）
     };
 
     int init(const ::video::config_t &config);
@@ -512,5 +518,9 @@ namespace platf::dxgi {
     std::chrono::steady_clock::time_point last_black_ {};
     std::chrono::steady_clock::time_point last_log_ {};
     bool live_logged_ = false;
+    /// §VR-FENCE-LATE：等待預算、卡死／餓死、退避、過載旗標（只在擷取執行緒用）。放在這裡而不是 consumer_state_t：
+    /// 退避要活過 generation 更換（拆線就是換 generation）。captureThread 在 capture_e::reinit 時會重建整個 display，
+    /// 那一段由 display_vr.cpp 的行程層級備份接上。
+    ::vr::capture::health_t health_;
   };
 }  // namespace platf::dxgi

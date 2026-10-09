@@ -9,6 +9,11 @@
  *   fence_waiter_t 在 CPU 端確認 sharedFence（§B.7；上限依週期 2～6 ms，§VR-FENCE-WAIT；不變式 8：絕不 GPU Wait
  *   對方的 fence）→ CopyResource
  *   到影像池 → Signal(影像 fence)、Signal(consumedFence)、Flush。driver 還沒 HMD_PRESENTING 時 10 fps 推黑幀。
+ * - §VR-FENCE-LATE（2026-10-09；config `vr_capture_late`，預設關）：第一段等待逾時後不丟這一張，繼續在 CPU 端等同一個
+ *   fence 值到「等待預算」為止，晚到照樣複製；拆線改由 src/vr/vr_capture_health.h 判定（完成值 3 s 不動、或 5 s 沒有
+ *   一張複製成功，而且有退避），不再用「連續逾時滿 1 s」。放棄可以連續很久（退避期最長 30 s），所以開關開著時
+ *   所有不交影像的路徑都會每 100 ms 讓 captureThread 檢查一次停止（keepalive）。開關關著時走的每一條路徑與之前
+ *   相同，只多量測與 log。
  * - log 衛生（S1-02）：不印 handle 值、完整 GUID、SID。LUID 只印 match／n/a。
  *
  * 結構比照 vr_bridge_win.cpp 的 selftest_consume()（V2 的 T2 消費者），差別在：ring／fence 開在 display 自己的
@@ -18,7 +23,9 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <mutex>
 #include <optional>
+#include <string_view>
 
 // platform includes
 #include <d3d11_4.h>
@@ -31,6 +38,7 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/vr/vr_bridge.h"
+#include "src/vr/vr_capture_health.h"
 #include "src/vr/vr_ipc_abi.h"
 #include "utf_utils.h"
 
@@ -52,6 +60,28 @@ namespace platf::dxgi {
       return std::clamp<uint32_t>(static_cast<uint32_t>(700 / fps), k_fence_wait_min_ms, k_fence_wait_max_ms);
     }
     constexpr size_t k_stats_samples_max = 200000;  ///< selftest 用的累計樣本上限（60 s × 90 Hz 綽綽有餘）
+
+    /// §VR-FENCE-LATE：第一段等待逾時後繼續等同一個 fence 值時，每次最多等多久就醒來一次（看 generation 還在不在）
+    constexpr uint32_t k_late_slice_ms = 2;
+
+    /// §VR-FENCE-LATE：沒有影像可交的路徑上，最多隔多久讓 captureThread 檢查一次停止／新 ctx（同黑幀的節拍）
+    constexpr int64_t k_keepalive_ms = 100;
+
+    /// §VR-FENCE-LATE：退避狀態在行程層級的備份。health_t 是 display_vr_t 的成員，活得過 generation 更換；但
+    /// captureThread 在 capture_e::reinit 時會銷毀並重建 display（video.cpp），新的 session 也是新的 display。
+    /// capture() 進來時從這裡載入、離開時存回，退避的階梯才不會因為重建而歸零。
+    /// 備份只是為了跨過重建（以及使用者馬上重連的下一場）：存下來超過 k_backoff_keep_ms 沒有人接手就不還原，
+    /// 隔了很久的下一場從第一級開始，不會一拆就是 30 s 的退避。
+    /// 正常同一時間只有一個 capture() 在跑；selftest 另外開一個時，以後離開的那一個存的為準。
+    constexpr int64_t k_backoff_keep_ms = 60'000;
+
+    struct backoff_save_t {
+      vr::capture::backoff_t backoff;
+      int64_t saved_qpc = 0;  ///< 存下來的時刻；0＝沒有存過
+    };
+
+    std::mutex g_backoff_mtx;
+    backoff_save_t g_backoff;
 
     double qpc_to_ms(int64_t d) {
       const int64_t f = platf::qpc_frequency();
@@ -256,6 +286,8 @@ namespace platf::dxgi {
     fence_t consumed_fence;
     uint64_t last_consumed = 0;
     int64_t fence_timeout_since = 0;
+    bool first_timeout_logged = false;  ///< §VR-FENCE-LATE：這個 generation 的第一次 fence 逾時已經印過
+    bool deferred_logged = false;  ///< §VR-FENCE-LATE：這個 generation 的「判定成立但還在退避期」已經印過
   };
 
   int display_vr_t::init(const ::video::config_t &config) {
@@ -386,6 +418,93 @@ namespace platf::dxgi {
     std::string last_open_error;
     last_log_ = std::chrono::steady_clock::now();
 
+    // §VR-FENCE-LATE：開關與等待上限在進來時讀一次（設定檔改了要重啟 server 才生效）；退避接上一次離開時存的
+    // （存下來超過 k_backoff_keep_ms 就不接，從頭開始）
+    const bool late_enabled = config::vr.capture_late;
+    health_.configure(late_enabled, client_frame_rate > 0 ? vr::capture::k_ns_per_s / client_frame_rate : 0, (int64_t) config::vr.capture_late_max_ms * vr::capture::k_ns_per_ms);
+    {
+      vr::capture::backoff_t restored {};
+      std::lock_guard lk {g_backoff_mtx};
+      if (g_backoff.saved_qpc != 0 && platf::qpc_counter() - g_backoff.saved_qpc < ms_to_qpc(k_backoff_keep_ms)) {
+        restored = g_backoff.backoff;
+      }
+      health_.restore_backoff(restored);
+    }
+    // 實際生效的設定印一次（每次進 capture() 一行）：之後的 log 只能從 budgetMs 是不是 0 反推開關，看不到上限
+    BOOST_LOG(info) << "[VIPLE-VR-CAP] capture late="sv << (late_enabled ? "on"sv : "off"sv)
+                    << " firstWaitMs="sv << fence_wait_ms(client_frame_rate) << " maxWaitMs="sv << config::vr.capture_late_max_ms
+                    << " backoffStep="sv << health_.backoff().step;
+    const int64_t keepalive_qpc = ms_to_qpc(k_keepalive_ms);
+    const int64_t period_qpc = client_frame_rate > 0 ? platf::qpc_frequency() / client_frame_rate : 0;  ///< 一個顯示週期
+    uint64_t health_gen = 0;  ///< 目前（或最近一個）開著的 generation，log 用
+    bool overload_pub = false;  ///< 發布出去的過載旗標（stream.cpp 看到的值）
+    int64_t health_pub_qpc = 0;  ///< 上一次發布快照的時刻；0＝目前發布的是預設值
+    int64_t last_push_cb_qpc = platf::qpc_counter();  ///< 上一次呼叫 push 回呼的時刻（下面的 keepalive 用；約略即可）
+
+    // 過載旗標變化各印一行（設起來要 ≥ 30%、清掉要 < 5% 持續 2 s，再怎麼來回 10 s 內也只有十行上下）
+    auto log_overload = [&](bool on, std::string_view why) {
+      const auto snap = health_.snapshot();
+      BOOST_LOG(info) << "[VIPLE-VR-CAP] overload "sv << (on ? "on"sv : "off"sv) << " gen="sv << health_gen
+                      << " latePermille="sv << snap.late_permille << " fps="sv << snap.pushed_fps
+                      << " budgetMs="sv << (health_.wait_budget_ns() + 500'000) / 1'000'000
+                      << " waitMaxMs="sv << std::format("{:.1f}", (double) health_.window_wait_max_ns() / 1e6)
+                      << " why="sv << why;
+    };
+    // 給其他執行緒看的快照（stream.cpp 的 LATCH／PREDICT 只讀過載旗標）：旗標一變就發布，數字每秒發布一次
+    auto publish_health = [&](int64_t now_qpc) {
+      const auto snap = health_.snapshot();
+      if (snap.overload == overload_pub && health_pub_qpc != 0 && now_qpc - health_pub_qpc < platf::qpc_frequency()) {
+        return;
+      }
+      vr::bridge::set_capture_health(snap);
+      health_pub_qpc = now_qpc;
+      if (snap.overload != overload_pub) {
+        overload_pub = snap.overload;
+        log_overload(snap.overload, snap.overload ? "late-frames"sv : "recovered"sv);
+      }
+    };
+    // 沒有 frame source、換 generation、離開 capture()：快照清成預設（過載旗標 false）
+    auto clear_health = [&](std::string_view why) {
+      if (overload_pub) {
+        overload_pub = false;
+        log_overload(false, why);
+      }
+      if (health_pub_qpc != 0) {
+        vr::bridge::set_capture_health({});
+        health_pub_qpc = 0;
+      }
+    };
+    // 任何出口：退避連同現在的時刻存回行程層級的備份、快照清成預設
+    const auto on_leave = util::fail_guard([&]() {
+      {
+        std::lock_guard lk {g_backoff_mtx};
+        g_backoff = {health_.backoff(), platf::qpc_counter()};
+      }
+      clear_health("capture-exit"sv);
+    });
+    // §VR-FENCE-LATE：沒有影像可交的路徑（放棄、過期、不合格、ring 開不起來）也要定期讓 captureThread 檢查停止與
+    // 新的 ctx——它只在 push／pull 回呼裡看。卡死／餓死的判定成立、但還在退避期內時，每一張都放棄而 driver 仍在發布，
+    // 「100 ms 沒有新幀」那一支走不到，最長 30 s 不會經過任何回呼；那段時間 session 一結束，session::join 等擷取
+    // 執行緒超過 10 s 就會觸發 Hang detector、把 server 行程中止。最多每 k_keepalive_ms 一次；回 false＝該離開 capture()。
+    // 只在開關開著時啟用：開關關著的路徑維持原樣（舊規則連續逾時 1 s 就拆線，之後走上面每 100 ms 有回呼的那一支）。
+    // tick_health＝順便讓最近 1 s 的視窗往前走：影像一直來、但沒有一張走到等 fence（過期、不合格）時 on_frame 不會被
+    // 呼叫，發布出去的過載旗標會停在最後的值。
+    auto keepalive = [&](bool tick_health) -> bool {
+      if (!late_enabled) {
+        return true;
+      }
+      const int64_t now_qpc = platf::qpc_counter();
+      if (now_qpc - last_push_cb_qpc < keepalive_qpc) {
+        return true;
+      }
+      last_push_cb_qpc = now_qpc;
+      if (tick_health) {
+        health_.on_idle(platf::qpc_ticks_to_ns(now_qpc));
+        publish_health(now_qpc);
+      }
+      return push_captured_image_cb(nullptr, false);
+    };
+
     auto &cs = st_;
     auto signal_consumed = [&](uint64_t v) {
       // 只往上（latest-wins 跳過的 slot 一併放回），Signal 後一定 Flush（跨行程 CPU 觀察）
@@ -393,6 +512,57 @@ namespace platf::dxgi {
       device_ctx4->Signal(cs->consumed_fence.get(), v);
       device_ctx->Flush();
       cs->last_consumed = v;
+    };
+
+    // 一張走到「等 fence」這一步的影像處理完：餵健康判定（純整數運算，不配置、不上鎖）。wait_qpc＝從被叫醒到等待結束
+    auto feed = [&](vr::capture::outcome_e outcome, const vripc_frame_desc_t &desc, uint64_t completed, int64_t wait_qpc, int64_t now_qpc) {
+      vr::capture::frame_t f;
+      f.outcome = outcome;
+      f.now_ns = platf::qpc_ticks_to_ns(now_qpc);
+      f.wait_ns = platf::qpc_ticks_to_ns(wait_qpc);
+      f.present_ns = platf::qpc_ticks_to_ns(desc.present_qpc);
+      f.frame_id = desc.frame_id;
+      f.observed = completed;
+      const auto verdict = health_.on_frame(f);
+      if (verdict.backoff_reset) {
+        // 健康的一秒格在「下一格的第一張」結算，那一張可能是複製成功的、也可能是放棄的：兩條路徑都從這裡印
+        BOOST_LOG(info) << "[VIPLE-VR-CAP] teardown backoff reset gen="sv << health_gen << " (10 s healthy)"sv;
+      }
+      return verdict;
+    };
+
+    // 每個 generation 第一次第一段等待逾時要印的一行。數字在逾時的當下記下來，等這一張處理完才印：
+    // 放棄的那一支要先把 slot 交還 driver，不讓 log 的格式化擋在前面
+    struct {
+      bool pending = false;
+      bool waiter_error = false;  ///< fence_waiter_t 本身出錯（沒有真的等、也沒有讀完成值），不是逾時
+      uint64_t generation = 0;
+      uint64_t frame_id = 0;
+      uint64_t expected = 0;
+      uint64_t completed = 0;
+      int64_t waited_qpc = 0;
+    } first_timeout;
+    auto flush_first_timeout = [&]() {
+      if (!first_timeout.pending) {
+        return;
+      }
+      first_timeout.pending = false;
+      BOOST_LOG(info) << "[VIPLE-VR-CAP] first fence timeout gen="sv << first_timeout.generation << " frame="sv << first_timeout.frame_id
+                      << " expected="sv << first_timeout.expected << " completed="sv << first_timeout.completed
+                      << " waitedMs="sv << std::format("{:.3f}", qpc_to_ms(first_timeout.waited_qpc))
+                      << " mode="sv << (late_enabled ? "late"sv : "legacy"sv)
+                      << (first_timeout.waiter_error ? " result=error"sv : ""sv);
+    };
+
+    // 每次要求拆線印一行（why＝legacy-1s／stall／starve／device-lost）。開關關著時也印：sinceAdvanceMs 很小而
+    // sinceCopyMs 很大＝完成值一直在前進、只是每一張都比等待上限晚（2026-10-09 的事故）；兩個都大＝fence 真的不動
+    auto log_teardown = [&](std::string_view why, uint64_t expected, uint64_t completed, int64_t now_qpc, int64_t next_allowed_ns) {
+      const auto g = health_.diag(platf::qpc_ticks_to_ns(now_qpc));
+      BOOST_LOG(warning) << "[VIPLE-VR-CAP] teardown request gen="sv << (cs && cs->src ? cs->src->generation : 0) << " why="sv << why
+                         << " expected="sv << expected << " completed="sv << completed
+                         << " sinceAdvanceMs="sv << g.since_advance_ns / 1'000'000 << " sinceCopyMs="sv << g.since_copy_ns / 1'000'000
+                         << " published="sv << g.published << " copied="sv << g.copied
+                         << " nextAllowedMs="sv << next_allowed_ns / 1'000'000;
     };
 
     auto log_window = [&]() {
@@ -406,16 +576,31 @@ namespace platf::dxgi {
         w = std::move(window_);
         window_ = stats_t {};
       }
-      double e50, e95, p50, p95, a50, a95;
+      double e50, e95, p50, p95, a50, a95, f50, f95, pf50, pf95;
+      const double fmax = w.fence_wait_ms.empty() ? 0.0 : *std::max_element(w.fence_wait_ms.begin(), w.fence_wait_ms.end());
+      const double pfmax = w.present_to_fence_ms.empty() ? 0.0 : *std::max_element(w.present_to_fence_ms.begin(), w.present_to_fence_ms.end());
       percentiles(std::move(w.evt_to_push_ms), e50, e95);
       percentiles(std::move(w.present_to_push_ms), p50, p95);
       percentiles(std::move(w.echo_age_ms), a50, a95);
+      percentiles(std::move(w.fence_wait_ms), f50, f95);
+      percentiles(std::move(w.present_to_fence_ms), pf50, pf95);
+      // §VR-FENCE-LATE（2026-10-09）：late 起的欄位都加在行尾，前面的欄位一個字都不動（有分析腳本在讀）。
+      // fenceWait＝複製成功的每一張從被叫醒到 fence 到值（含準時的）。fence 晚到超過一個發布間隔時，下一張被取用的
+      // 時刻就是上一張做完的時刻，這個數字會貼在發布間隔上，不代表「發布後晚多久」——那要看 presentToFence
+      // （present_qpc → 到值）。overPeriod＝複製成功的張數裡 fenceWait 達到一個顯示週期的（評估過載的定義用）。
+      // overload＝發布給 stream.cpp 的過載旗標；budgetMs＝目前的等待預算（開關關著印 0）
       BOOST_LOG(info) << "[VIPLE-VR-CAP] 10s: gen="sv << (cs && cs->src ? cs->src->generation : 0)
                       << " copied="sv << w.copied << " skipped="sv << w.skipped << " fenceTimeout="sv << w.fence_timeout
                       << " invalid="sv << w.invalid << " stale="sv << w.stale << " black="sv << w.black << " released="sv << w.released
                       << " evtToPush p50="sv << std::format("{:.3f}", e50) << "ms p95="sv << std::format("{:.3f}", e95)
                       << "ms presentToPush p50="sv << std::format("{:.3f}", p50) << "ms p95="sv << std::format("{:.3f}", p95)
-                      << "ms echoAge p50="sv << std::format("{:.3f}", a50) << "ms p95="sv << std::format("{:.3f}", a95) << "ms"sv;
+                      << "ms echoAge p50="sv << std::format("{:.3f}", a50) << "ms p95="sv << std::format("{:.3f}", a95) << "ms"sv
+                      << " late="sv << w.late << " fenceWait p50="sv << std::format("{:.3f}", f50) << "ms p95="sv << std::format("{:.3f}", f95)
+                      << "ms max="sv << std::format("{:.3f}", fmax) << "ms teardownReq="sv << w.teardown_requests
+                      << " overload="sv << (overload_pub ? 1 : 0)
+                      << " budgetMs="sv << (late_enabled ? (health_.wait_budget_ns() + 500'000) / 1'000'000 : 0)
+                      << " presentToFence p50="sv << std::format("{:.3f}", pf50) << "ms p95="sv << std::format("{:.3f}", pf95)
+                      << "ms max="sv << std::format("{:.3f}", pfmax) << "ms overPeriod="sv << w.over_period;
       last_log_ = now;
     };
 
@@ -434,6 +619,7 @@ namespace platf::dxgi {
         if (cs) {
           cs.reset();
         }
+        clear_health("no-frame-source"sv);  // §VR-FENCE-LATE：沒有 frame source 時快照是預設值（已經是就什麼都不做）
         const auto now = std::chrono::steady_clock::now();
         if (now - last_black_ >= k_black_interval) {
           if (!vr::bridge::status().hmd_presenting) {
@@ -451,6 +637,9 @@ namespace platf::dxgi {
         continue;
       }
       if (!cs || cur->generation != cs->src->generation) {
+        // §VR-FENCE-LATE：上一個 generation 發布的快照到此為止。新的還沒開起來（開失敗會一直重試）的期間也是預設值，
+        // 不留著舊的過載旗標擋住 LATCH／PREDICT
+        clear_health("new-generation"sv);
         // ring／fence 所在的卡必須就是自己的 capture device 那張；不同就重建 display（init 會改用 session config 的 LUID）
         if (!luid_eq(adapter_luid, cur->luid)) {
           BOOST_LOG(warning) << "[VIPLE-VR-CAP] frame source gen="sv << cur->generation << " is on a different adapter; reinit"sv;
@@ -487,6 +676,9 @@ namespace platf::dxgi {
           if (dev5 && device->GetDeviceRemovedReason() != S_OK) {
             return capture_e::reinit;
           }
+          if (!keepalive(false)) {
+            return capture_e::ok;  // 一直開不起來時也要停得下來（§VR-FENCE-LATE；開關關著時這一行沒有作用）
+          }
           Sleep(100);
           continue;
         }
@@ -504,6 +696,9 @@ namespace platf::dxgi {
           std::lock_guard lk {stats_mtx_};
           stats_.generation = cur->generation;
         }
+        // §VR-FENCE-LATE：新 generation 的 ring／fence 都是新的——發布間隔、完成值、卡死／餓死、過載全部重來（退避不動）
+        health_gen = cur->generation;
+        health_.begin_generation(platf::qpc_ticks_to_ns(platf::qpc_counter()));
         // 開完先「排空」：上一個消費者沒交還的 slot 直接放回（不複製；避免拿到早就過期的幀）。
         // §VR-RING-RELEASE：不能用 read_latest()——停過 1 s 以上的那一筆會被判不合格而不交還，driver 就沒有 slot 可用
         const uint64_t baseline = cs->last_consumed;
@@ -524,6 +719,13 @@ namespace platf::dxgi {
           signal_consumed(f);
           count(&stats_t::released);
         }
+        {
+          // §VR-FENCE-LATE：沒有影像時也讓最近 1 s 的視窗往前走（過載旗標才清得掉），快照照常更新
+          const int64_t idle_qpc = platf::qpc_counter();
+          health_.on_idle(platf::qpc_ticks_to_ns(idle_qpc));
+          publish_health(idle_qpc);
+          last_push_cb_qpc = idle_qpc;  // 下面兩條路都會呼叫回呼
+        }
         const auto now = std::chrono::steady_clock::now();
         if (!vr::bridge::status().hmd_presenting && now - last_black_ >= k_black_interval) {
           if (auto r = push_black(push_captured_image_cb, pull_free_image_cb); r != capture_e::timeout) {
@@ -538,17 +740,28 @@ namespace platf::dxgi {
       }
       const int64_t evt_qpc = platf::qpc_counter();
 
+      // 下面幾條不交影像就 continue 的路徑都經過 keepalive()（§VR-FENCE-LATE；開關關著時它什麼都不做）：
+      // evtFrm 一直有訊號、卻沒有一張走到複製（不合格與過期交錯出現、時間戳寫得太舊）時，舊程式永遠不會呼叫回呼
       vripc_frame_desc_t d {};
       switch (cs->reader->read_latest(d)) {
         case vr::bridge::frame_reader_t::result_e::ok:
           break;
         case vr::bridge::frame_reader_t::result_e::invalid:
           count(&stats_t::invalid);
+          if (!keepalive(true)) {
+            return capture_e::ok;
+          }
           continue;
         case vr::bridge::frame_reader_t::result_e::torn:
           count(&stats_t::torn);
+          if (!keepalive(true)) {
+            return capture_e::ok;
+          }
           continue;
         case vr::bridge::frame_reader_t::result_e::none:
+          if (!keepalive(true)) {
+            return capture_e::ok;
+          }
           continue;
       }
       count(&stats_t::skipped, cs->reader->last_skipped());
@@ -563,37 +776,122 @@ namespace platf::dxgi {
       if (evt_qpc - d.present_qpc > ms_to_qpc(100)) {
         count(&stats_t::stale);
         signal_consumed(d.fence_value);
+        if (!keepalive(true)) {
+          return capture_e::ok;
+        }
         continue;
       }
 
-      // §B.7：CPU 端確認 driver 的 GPU 寫完（不 GPU Wait 對方的 fence，不變式 8）
-      const auto fr = cs->waiter->wait(cs->shared_fence.get(), d.fence_value, fence_wait_ms(client_frame_rate));
-      if (fr == vr::bridge::fence_waiter_t::result_e::lost) {
+      // §B.7：CPU 端確認 driver 的 GPU 寫完（不 GPU Wait 對方的 fence，不變式 8）。
+      // observed＝等待結束時讀到的完成值（waiter 本來就會讀，這裡只是多帶出來）
+      using fence_result_e = vr::bridge::fence_waiter_t::result_e;
+      uint64_t observed = 0;
+      auto fr = cs->waiter->wait(cs->shared_fence.get(), d.fence_value, fence_wait_ms(client_frame_rate), &observed);
+      bool late = false;  ///< §VR-FENCE-LATE：第一段逾時、在等待預算內到值
+      bool gen_gone = false;  ///< §VR-FENCE-LATE：繼續等的期間這個 generation 被換掉了
+      if (fr != fence_result_e::reached && fr != fence_result_e::lost) {
+        if (!cs->first_timeout_logged) {
+          // 每個 generation 的第一次逾時記下期望值與當下的完成值（2026-10-09 的事故沒有這兩個數字，只能反推）。
+          // 這裡只記數字，等這一張處理完才印（flush_first_timeout）
+          cs->first_timeout_logged = true;
+          first_timeout.pending = true;
+          first_timeout.waiter_error = fr == fence_result_e::error;
+          first_timeout.generation = cs->src->generation;
+          first_timeout.frame_id = d.frame_id;
+          first_timeout.expected = d.fence_value;
+          first_timeout.completed = observed;
+          first_timeout.waited_qpc = platf::qpc_counter() - evt_qpc;
+        }
+        if (late_enabled && fr == fence_result_e::timeout) {
+          // §VR-FENCE-LATE：fence 是「晚到」不是「不來」。同一條 GPU 命令流裡的 Signal 依序完成，丟掉這一張不會讓下一張
+          // 變快，只是把一張馬上就要好的影像丟掉。繼續在 CPU 端等同一個值（不變式 8 不變），到值就照常複製；
+          // 從被叫醒起累計超過等待預算才放棄。每 k_late_slice_ms 醒來一次，這個 generation 已經被換掉（拆線、
+          // driver 重連）就不必再等。這個迴圈裡不碰 push／pull 回呼。
+          const int64_t budget_ns = health_.wait_budget_ns();
+          for (;;) {
+            const int64_t waited_ns = platf::qpc_ticks_to_ns(platf::qpc_counter() - evt_qpc);
+            if (waited_ns >= budget_ns) {
+              break;
+            }
+            const auto slice_ms = (uint32_t) std::clamp<int64_t>((budget_ns - waited_ns + 999'999) / 1'000'000, 1, k_late_slice_ms);
+            fr = cs->waiter->wait(cs->shared_fence.get(), d.fence_value, slice_ms, &observed);
+            if (fr != fence_result_e::timeout) {
+              break;  // 到值、lost，或 waiter 本身出錯（它不會等，再繞只是空轉）
+            }
+            const auto now_src = vr::bridge::frame_source();
+            if (!now_src || now_src->generation != cs->src->generation || !now_src->alive()) {
+              gen_gone = true;
+              break;
+            }
+          }
+          late = fr == fence_result_e::reached;
+        }
+        if (fr == fence_result_e::reached || fr == fence_result_e::lost || gen_gone) {
+          flush_first_timeout();  // 這一張不走放棄那一支（晚到照收、lost、generation 換掉）：沒有 slot 要先交還，現在就印
+        }
+      }
+      if (fr == fence_result_e::lost) {
         count(&stats_t::fence_lost);
         if (device->GetDeviceRemovedReason() != S_OK) {
           return capture_e::reinit;  // 自己的 device 掉了
         }
+        log_teardown("device-lost"sv, d.fence_value, observed, platf::qpc_counter(), 0);
         vr::bridge::request_teardown(cs->src->generation, VRIPC_BYE_DEVICE_LOST);  // driver 端問題 → 新 generation
         count(&stats_t::teardown_requests);
         abandoned_gen = cs->src->generation;
         cs.reset();
         continue;
       }
-      if (fr != vr::bridge::fence_waiter_t::result_e::reached) {
+      if (gen_gone) {
+        // 這一張不複製、不算逾時、也不餵健康判定（不算進餓死的計時：這個 generation 本來就要被換掉）。
+        // 10 s 行的任何欄位都不計它（每換一次 generation 最多一張）。迴圈開頭會放掉舊的 ring／fence、重開新的。
+        continue;
+      }
+      if (fr != fence_result_e::reached) {
         count(&stats_t::fence_timeout);
         signal_consumed(d.fence_value);  // 不複製，但仍放回 slot
         const int64_t now = platf::qpc_counter();
-        if (cs->fence_timeout_since == 0) {
-          cs->fence_timeout_since = now;
-        } else if (now - cs->fence_timeout_since >= platf::qpc_frequency()) {
-          vr::bridge::request_teardown(cs->src->generation, VRIPC_BYE_PROTOCOL_ERROR);  // 連續逾時累計 ≥ 1 s
+        flush_first_timeout();  // slot 交還、時刻也讀了之後才印
+        // 健康判定：開關關著時只記數（拆線那一行 log 要用），不判定
+        const auto verdict = feed(vr::capture::outcome_e::abandoned, d, observed, now - evt_qpc, now);
+        if (!late_enabled) {
+          // 舊規則（vr_capture_late = disabled）：連續逾時、距第一次逾時滿 1 s 就拆
+          if (cs->fence_timeout_since == 0) {
+            cs->fence_timeout_since = now;
+          } else if (now - cs->fence_timeout_since >= platf::qpc_frequency()) {
+            log_teardown("legacy-1s"sv, d.fence_value, observed, now, 0);
+            vr::bridge::request_teardown(cs->src->generation, VRIPC_BYE_PROTOCOL_ERROR);  // 連續逾時累計 ≥ 1 s
+            count(&stats_t::teardown_requests);
+            abandoned_gen = cs->src->generation;
+            cs.reset();
+          }
+          continue;
+        }
+        if (verdict.teardown != vr::capture::teardown_e::none) {
+          // §VR-FENCE-LATE：完成值 3 s 不動（stall）或 5 s 沒有一張複製成功（starve），而且過了退避期。
+          // BYE 代碼沿用 PROTOCOL_ERROR（driver 不必改）；下一次最早 nextAllowedMs 之後才會再拆。
+          log_teardown(vr::capture::teardown_name(verdict.teardown), d.fence_value, observed, now, verdict.allowed_in_ns);
+          vr::bridge::request_teardown(cs->src->generation, VRIPC_BYE_PROTOCOL_ERROR);
           count(&stats_t::teardown_requests);
           abandoned_gen = cs->src->generation;
           cs.reset();
+          continue;
+        }
+        if (verdict.deferred != vr::capture::teardown_e::none && !cs->deferred_logged) {
+          cs->deferred_logged = true;  // 每個 generation 只印一次
+          BOOST_LOG(info) << "[VIPLE-VR-CAP] teardown deferred gen="sv << cs->src->generation << " why="sv << vr::capture::teardown_name(verdict.deferred)
+                          << " allowedInMs="sv << verdict.allowed_in_ns / 1'000'000 << " backoffStep="sv << health_.backoff().step;
+        }
+        publish_health(now);
+        // 放棄可以連續很久（判定成立前 3～5 s、退避期內最長 30 s），這條路徑沒有影像可交：定期讓 captureThread 檢查停止。
+        // 已經離開等 fence 的迴圈，slot 也交還了
+        if (!keepalive(false)) {
+          return capture_e::ok;
         }
         continue;
       }
       cs->fence_timeout_since = 0;
+      const int64_t fence_qpc = platf::qpc_counter();  // fence 到值的時刻（fenceWait 的終點）
 
       std::shared_ptr<platf::img_t> img_base;
       if (!pull_free_image_cb(img_base)) {
@@ -665,7 +963,30 @@ namespace platf::dxgi {
           stats_.present_to_push_ms.push_back(p);
         }
       }
-      if (!push_captured_image_cb(std::move(img_base), true)) {
+      const bool keep_going = push_captured_image_cb(std::move(img_base), true);
+      last_push_cb_qpc = push_qpc;
+      // §VR-FENCE-LATE：這個功能加的量測與健康判定全部放在交出影像之後——準時那條路徑在 push 之前只多讀一次時鐘
+      // （fence_qpc）。新的樣本另開一個鎖區段記（配置記憶體也在這裡，不在 push 之前）。
+      {
+        std::lock_guard lk {stats_mtx_};
+        const double fw = qpc_to_ms(fence_qpc - evt_qpc);
+        const double pf = qpc_to_ms(fence_qpc - d.present_qpc);
+        const bool over_period = period_qpc > 0 && fence_qpc - evt_qpc >= period_qpc;
+        window_.fence_wait_ms.push_back(fw);
+        window_.present_to_fence_ms.push_back(pf);
+        window_.late += late ? 1 : 0;
+        window_.over_period += over_period ? 1 : 0;
+        stats_.late += late ? 1 : 0;
+        stats_.over_period += over_period ? 1 : 0;
+        if (stats_.fence_wait_ms.size() < k_stats_samples_max) {
+          stats_.fence_wait_ms.push_back(fw);
+          stats_.present_to_fence_ms.push_back(pf);
+        }
+      }
+      // 複製成功的影像不會觸發拆線，回覆只可能帶「退避歸零」（feed 裡印）
+      feed(late ? vr::capture::outcome_e::late : vr::capture::outcome_e::on_time, d, observed, fence_qpc - evt_qpc, push_qpc);
+      publish_health(push_qpc);
+      if (!keep_going) {
         return capture_e::ok;
       }
     }

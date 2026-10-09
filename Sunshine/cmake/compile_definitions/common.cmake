@@ -268,6 +268,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/vr/vr_predict.cpp"
         # §VR-ABR-OUTAGE：VR 斷訊後把位元率拉回斷訊前的值（純函式標頭）
         "${CMAKE_SOURCE_DIR}/src/vr/vr_abr_outage.h"
+        # §VR-FENCE-LATE：VR 擷取端等 fence 的等待預算、卡死／餓死、退避、過載旗標（純邏輯標頭；Linux 也編譯）
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_capture_health.h"
         # §VR-MULTILINK：多連線（純邏輯在 _logic.h，socket／執行緒在 .cpp；Linux 也編譯）
         "${CMAKE_SOURCE_DIR}/src/vr/vr_multilink_logic.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_multilink.h"

@@ -318,6 +318,15 @@ namespace config {
     /// 開發用：vr_multilink_fault = <linkId>:<on_ms>:<off_ms>[:<phase_ms>][,…]，在指定連線上週期性丟掉全部收送，
     /// 用來在單一網卡上模擬鏈路空檔。空字串＝關閉。
     std::string multilink_fault;
+
+    /// §VR-FENCE-LATE（2026-10-09）：vr_capture_late（disabled 預設）。enabled＝擷取端等 driver 的 fence 逾時後不丟這一張，
+    /// 繼續等到它到值或超過等待預算（晚到照收）；拆線改由「完成值 3 s 不動」「5 s 沒有一張複製成功」判定並有退避，
+    /// 不再用「連續逾時滿 1 s」。disabled＝行為與之前相同（只多 log）。只有 Windows 的 PCVR 擷取會用到。
+    bool capture_late = false;
+    /// vr_capture_late_max_ms：一張影像從被叫醒起最多等多久（20–250 ms）；實際的等待預算是
+    /// 3 個發布間隔，夾在 3 個顯示週期與這個值之間（src/vr/vr_capture_health.h）。
+    /// 預設值要等於 vr::capture::k_max_wait_ms_default（config.cpp 有 static_assert 對住那個常數；要改兩邊一起改）
+    int capture_late_max_ms = 100;
   };
 
   struct nvhttp_t {

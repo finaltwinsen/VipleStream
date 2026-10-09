@@ -333,6 +333,28 @@ namespace vr::latch {
     return decide(now_ns, ppm);
   }
 
+  result_t controller_t::on_hold(int64_t now_ns, uint32_t frame_id) {
+    // §VR-FENCE-LATE：LATCH 還在來，只是這一筆不當相位量測。時刻與 frameId 照常記（理由見標頭）
+    last_latch_ns_ = now_ns;
+    have_frame_ = true;
+    last_frame_id_ = frame_id;
+    have_prev_slack_ = false;  // 相位滑移只比相鄰兩筆量測；隔著暫停的兩筆不比
+    if (mode_ != mode_e::v3) {
+      // legacy／v2：比例項拿掉，輸出只留積分；積分不動。過載旗標要看滿一段時間才設，設起來之前已經有幾筆過載的樣本
+      // 進了控制器——v2 的增益下 3 筆「晚 4 ms」就把輸出推到 ±200 ppm，而積分只動 2 ppm 上下。照原樣凍結的話，
+      // 那個被帶偏的輸出會維持到過載結束（200 ppm＝每秒漂 0.2 ms）。誤差的平滑值也是髒的：作廢，恢復後從第一筆
+      // 新樣本重新開始。
+      have_ema_ = false;
+      return decide(now_ns, (int32_t) std::lround(integral_));
+    }
+    // v3：和節拍閘門關著同樣處理（v3_gate_closed），另外把閘門的紀錄清掉——暫停前的間隔與樣本都不沿用
+    const bool voided = v3_abort_round();
+    v3_to_wait();
+    v3_clear_gate();
+    const result_t r = now_ns < blind_until_ns_ ? hold() : decide(now_ns, (int32_t) std::lround(integral_));  // 盲區內不寫 pacing
+    return voided ? with_void_eval(r, step_cmd_us_) : r;
+  }
+
   // ── §VR-LATCH-V3 ──────────────────────────────────────────────────────
 
   int64_t controller_t::stream_period_ns() const {

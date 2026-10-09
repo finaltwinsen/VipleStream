@@ -245,6 +245,7 @@ namespace vr {
     uint64_t other_c2s = 0;  ///< 其他／不認得的 C2S subtype
     uint64_t c2s_truncated = 0;  ///< TLV 長度超出剩餘長度而丟棄其餘部分的訊息
     uint64_t s2c_dropped = 0;  ///< outbox 滿了丟掉的 S→C 訊息
+    uint64_t latch_held = 0;  ///< §VR-FENCE-LATE：host 擷取端過載時沒有餵進頻率鎖的 LATCH（已含在 latch_rx 裡）
   };
 
   /**
@@ -400,6 +401,13 @@ namespace vr {
      */
     latch::result_t on_latch(const VIPLE_VR_TLV_LATCH &latch, int64_t now_ns);
 
+    /**
+     * @brief §VR-FENCE-LATE：host 擷取端過載時的一則 LATCH——不餵進控制器（latch::controller_t::on_hold：
+     *        積分不動、輸出只留積分；v3 另外視同節拍閘門關著），只計數（stats 的 latch_held）。
+     *        要不要走這裡由呼叫端決定（stream.cpp 看 bridge 的擷取健康快照）；這個模組不碰 bridge。
+     */
+    latch::result_t hold_latch(const VIPLE_VR_TLV_LATCH &latch, int64_t now_ns);
+
     /// control 執行緒的 1 s tick：LATCH 停了太久時讓修正衰減回 0
     latch::result_t latch_idle(int64_t now_ns);
 
@@ -532,6 +540,7 @@ namespace vr {
     std::atomic<uint64_t> other_c2s_ {0};
     std::atomic<uint64_t> c2s_truncated_ {0};
     std::atomic<uint64_t> s2c_dropped_ {0};
+    std::atomic<uint64_t> latch_held_ {0};
 
     // M4a R3
     mutable std::mutex latch_mtx_;

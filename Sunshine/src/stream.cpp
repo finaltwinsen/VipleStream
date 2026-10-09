@@ -1846,7 +1846,17 @@ namespace stream {
     // M4a R3：LATCH 相位回授 → 頻率鎖（pcvr 寫 driver pacing；stub 只記錄）。
     // 補過包的幀比正常晚到，它的相位不是節拍造成的；但 frameId 是 client 的發布序號、不是線上的幀號，這裡認不出是
     // 哪一幀。LATCH 每秒只取 10 個樣本，補過包的幀佔極少數，控制器的 EMA 與 ±200 ppm 上限吸收得掉——不特別排除。
-    vr_apply_latch(session, vr_state, vr_state.on_latch(latch, vr_steady_ns()));
+    //
+    // §VR-FENCE-LATE：host 擷取端回報過載（遊戲把 GPU 壓滿，影像晚到是因為 GPU 排隊、不是節拍）時，這一筆不餵進
+    // 控制器——2026-10-09 的事故裡 ppm 頂到 +200、積分一路累積到 +118。改走 hold_latch：三種模式都是積分不動、
+    // 輸出只留積分（比例項拿掉：旗標設起來之前漏進去的幾筆已經把它帶偏，不能原樣凍結）；v3 另外視同節拍閘門關著。
+    // 被擋掉的筆數記在 10 s 行尾的 overloadHeld。
+    // 旗標只有 `vr_capture_late = enabled` 的 PCVR 擷取會設；其他情況恆為 false，這裡走的就是原本的 on_latch。
+    if (::vr::bridge::capture_health().overload) {
+      vr_apply_latch(session, vr_state, vr_state.hold_latch(latch, vr_steady_ns()));
+    } else {
+      vr_apply_latch(session, vr_state, vr_state.on_latch(latch, vr_steady_ns()));
+    }
     // §VR-ABR-OUTAGE：幀號前進＝影像確實在送達（斷訊後拉回位元率的條件之一）
     std::lock_guard<std::mutex> lk(session->video.abrMutex);
     vr::abr::on_progress(session->video.vrOutage, latch.frameId, std::chrono::steady_clock::now());
@@ -2018,12 +2028,14 @@ namespace stream {
           v3_tail = std::format(" st={} gate={} steps={} bad={}", ::vr::latch::phase_name(ls.phase), ls.gate_open ? 1 : 0, ls.steps, ls.bad_steps);
         }
         // §VR-LATCH-V2：尾端加 err／integ／slips（累計）／dropped（累計，v2 才有）／mode；前面的欄位順序不變
+        // §VR-FENCE-LATE：最尾端再加 overloadHeld＝這 10 s 因為 host 擷取端過載而沒有餵進控制器的 LATCH 筆數（含在 rx 裡）
         BOOST_LOG(info) << "[VIPLE-VR-LATCH] 10s: rx=" << cur.latch_rx - prev.latch_rx << " slackEma=" << std::format("{:.0f}", ls.slack_ema_us)
                         << "us target=" << std::format("{:.0f}", ls.target_us) << "us ppm=" << ls.ppm
                         << (pcvr ? "" : " (stub: log only)") << " haptics=" << vr_state.haptics_queued()
                         << " err=" << std::format("{:.0f}", ls.err_us) << "us integ=" << std::format("{:.1f}", ls.integral_ppm)
                         << " slips=" << ls.slips << " dropped=" << ls.dropped
-                        << " mode=" << ::vr::latch::mode_name(ls.mode) << v3_tail;
+                        << " mode=" << ::vr::latch::mode_name(ls.mode) << v3_tail
+                        << " overloadHeld=" << cur.latch_held - prev.latch_held;
         // §VR-LATCH-V3：連續追蹤夠久的積分＝兩台機器的時鐘差，記在行程內給下一個 session 當起點
         if (const auto learned = vr_state.latch_learned(vr_steady_ns())) {
           ::vr::latch::remember(ctl.latchHostPeriodNs, *learned);
@@ -2806,7 +2818,11 @@ namespace stream {
             // §VR-LATCH-V3：相位還在動（等待、量測、burst、剛進追蹤）的視窗不採樣——host 讀姿態的時刻跟著虛擬 vsync 走，
             // 相位一移，量到的姿態落後就跟著變，探測會把它誤判成「改值沒被採用」。樣本數報 0 的視窗 on_pose_lag 本來就不用。
             // legacy／v2 的 latch_unsettled() 恆為 false，行為不變。
-            const uint16_t pose_lag_count = vr_state->latch_unsettled(vr_steady_ns()) ? uint16_t {0} : ct.poseLagCount;
+            // §VR-FENCE-LATE：host 擷取端過載時同樣不採樣——那時量到的姿態落後含 GPU 排隊的時間，不是預測時間不夠。
+            // 學到的值（下一場的起點）只在採用樣本時才會更新，所以過載期間量到的東西也不會被存給下一場。
+            // 旗標只有 `vr_capture_late = enabled` 時才會設，其他情況這一行的結果與之前相同。
+            const bool predict_hold = vr_state->latch_unsettled(vr_steady_ns()) || ::vr::bridge::capture_health().overload;
+            const uint16_t pose_lag_count = predict_hold ? uint16_t {0} : ct.poseLagCount;
             if (auto r = vr::predict::on_pose_lag(ct.poseLagP50_100us, pose_lag_count, now)) {
               switch (r->action) {
                 case vr::predict::action_e::update:

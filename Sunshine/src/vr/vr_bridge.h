@@ -34,6 +34,7 @@
 #include <string>
 
 // local includes
+#include "vr_capture_health.h"
 #if defined(_M_X64) || defined(__x86_64__)
   #define VIPLE_VR_BRIDGE_HAS_ABI 1
   #include "vr_ipc_abi.h"
@@ -364,7 +365,8 @@ namespace vr::bridge {
   /**
    * @brief 要求拆除指定 generation（消費端偵測到 driver 端問題時用）：送 BYE(bye_reason) 後 TEARDOWN。
    *        generation 已經不是目前的就忽略。常見：VRIPC_BYE_DEVICE_LOST（sharedFence 讀到 UINT64_MAX 而自己的
-   *        device 沒被移除）、VRIPC_BYE_PROTOCOL_ERROR（連續 30 筆不合格、fence 逾時累計 ≥ 1 s）。
+   *        device 沒被移除）、VRIPC_BYE_PROTOCOL_ERROR（連續 30 筆不合格；fence 逾時累計 ≥ 1 s，或
+   *        `vr_capture_late = enabled` 時改成完成值 3 s 不動／5 s 沒有一張複製成功，見 vr_capture_health.h）。
    */
   void request_teardown(uint64_t generation, uint32_t bye_reason);
 
@@ -392,6 +394,23 @@ namespace vr::bridge {
    */
   void publish_tracking(const tracked_sample_t &sample);
 #endif
+
+  // ── 擷取端的健康快照（§VR-FENCE-LATE）────────────────────────────────────
+
+  /**
+   * @brief 擷取執行緒（display_vr_t）發布目前的擷取健康：過載旗標一變就更新，數字約每秒更新一次；
+   *        沒有 frame source、離開 capture() 時清成預設值。lock-free（一個 atomic），任何執行緒都可以呼叫。
+   *        Linux／macOS 的 stub 不存任何東西。
+   */
+  void set_capture_health(const capture::snapshot_t &snapshot);
+
+  /**
+   * @brief 最近一次發布的擷取健康（lock-free）。stream.cpp 在過載旗標設著時不把 LATCH 樣本餵給頻率鎖、
+   *        §VR-PREDICT 不採樣。沒有 VR 擷取在跑、stub 模式、非 Windows 平台都是預設值；`vr_capture_late = disabled`
+   *        時 overload 恆為 false，所以這些情況下呼叫端的行為不變。另外兩個數字只供觀察：約每秒更新一次，
+   *        開關關著而且每一張都逾時的期間不更新（那條舊路徑不經過發布）。
+   */
+  capture::snapshot_t capture_health();
 
   // ── selftest 診斷 ─────────────────────────────────────────────────────────
 

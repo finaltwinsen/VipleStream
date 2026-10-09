@@ -203,6 +203,30 @@ namespace vr::latch {
      */
     result_t on_idle(int64_t now_ns);
 
+    /**
+     * @brief §VR-FENCE-LATE：收到一則 LATCH，但這一筆不能當相位量測（host 的擷取端回報過載：遊戲把 GPU 壓滿，
+     *        影像晚到是因為 GPU 排隊，不是節拍）。呼叫端在那段期間以它取代 on_latch()。
+     *
+     * 光是「不呼叫 on_latch」不夠：on_idle() 會把它當成 LATCH 停了——legacy／v2 停 2 s 就每秒把輸出與積分減半，
+     * v3 停 2 s 把比例項拿掉、停滿 kV3IdleDecayNs 連積分也開始減半（過載可以持續整場）。這裡把「最近一則 LATCH」
+     * 的時刻與 frameId 照常記下（過載期間量的那一張被 client 重送時仍然當重複丟掉；legacy／v2 恢復後第一筆樣本的
+     * 積分 dt 是距上一則 LATCH 多久，不會被算成整段暫停），其餘三種模式都一樣：**輸出只留積分（學到的時鐘差），
+     * 比例項拿掉，積分不動**。
+     *   - 比例項不留的理由：過載旗標設起來之前已經有幾筆過載的樣本進了控制器，v2 的增益下 3 筆就把輸出推到上限、
+     *     積分只動 2 ppm 上下。把那個輸出原樣凍結，相位會以最多 200 ppm（每秒 0.2 ms）一路漂到過載結束，
+     *     恢復時要從任意的相位重新鎖；只留積分的話虛擬 vsync 照學到的時鐘差走，相位留在原地附近。
+     *     （同 on_latch_v3 對「影像停住」的處理、on_idle() 對「LATCH 停了」的處理。）
+     *   - legacy／v2：誤差的平滑值作廢，恢復後從第一筆新樣本重新開始。
+     *   - v3：視同節拍閘門關著——回到等待、樣本與閘門的紀錄清掉；走到一半的那一輪步進到此為止（kEvalVoid）。
+     *     恢復後要重新收滿 kV3GateN 個間隔、再量 kV3AcqN 筆才動相位。盲區內照舊不寫 pacing。重新進追蹤的第一筆，
+     *     PI 的 dt 和閘門關過之後一樣是夾出來的 1 s（見 last_pi_ns_ 的說明）。
+     * 和平常一樣約每秒寫一次 pacing（例行重送）。
+     * 顯示週期不在這裡更新。過載期間換了更新率：v3 恢復後第一則 on_latch 照常偵測到並重來；legacy／v2 的平滑值
+     * 本來就已經作廢，積分（時鐘差，和更新率無關）留著。
+     * @param frame_id LATCH.frameId
+     */
+    result_t on_hold(int64_t now_ns, uint32_t frame_id = 0);
+
     int32_t last_sent_ppm() const {
       return sent_ppm_;
     }

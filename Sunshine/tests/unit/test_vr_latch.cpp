@@ -2599,3 +2599,330 @@ TEST(VrLatchTest, HapticTlvRoundTrip) {
   EXPECT_FLOAT_EQ(back.amplitude, 0.75f);
   EXPECT_EQ(back.eventId, 7u);
 }
+
+// ── §VR-FENCE-LATE：host 擷取端過載時的 hold 入口（on_hold／hold_latch）──────────────
+
+TEST(VrLatchTest, HoldLeavesOnlyTheIntegralForLegacyAndV2) {
+  // legacy 與 v2：過載期間（這裡 60 s）LATCH 照來、但走 on_hold——比例項拿掉、輸出只留積分（學到的時鐘差），
+  // 積分一動也不動；和平常一樣每秒例行重送一次；每秒的 on_idle 不會把它當成「LATCH 停了」而每秒減半
+  for (const auto mode : {mode_e::legacy, mode_e::v2}) {
+    SCOPED_TRACE(vr::latch::mode_name(mode));
+    controller_t c;
+    if (mode == mode_e::v2) {
+      c.configure(mode_e::v2, 40, kPeriod120);
+    }
+    const double target = mode == mode_e::v2 ? kT120 * 0.4 : controller_t::target_for_period(kPeriod120);
+    const auto slack = (int32_t) std::lround(target + 800.0);  // 誤差 +800 µs
+    int64_t now = 0;
+    uint32_t id = 0;
+    vr::latch::result_t r;
+    for (int i = 0; i < 50; ++i) {
+      now += kStepNs;
+      r = c.on_latch(slack, kPeriod120, now, ++id);
+    }
+    const int32_t ppm = c.last_sent_ppm();
+    const double integ = r.integral_ppm;
+    const auto base = (int32_t) std::lround(integ);
+    ASSERT_GT(integ, 1.0);
+    ASSERT_GT(ppm, base + 20);  // 比例項：legacy 0.05 × 800＝40 ppm，v2 0.12 × 800＝96 ppm
+
+    // 第一則 hold 就把比例項拿掉
+    now += kStepNs;
+    auto h = c.on_hold(now, ++id);
+    EXPECT_TRUE(h.update);
+    EXPECT_EQ(h.ppm, base);
+    EXPECT_DOUBLE_EQ(h.integral_ppm, integ);
+    EXPECT_NEAR(h.err_us, 0.0, 1e-9);  // 誤差的平滑值作廢
+    EXPECT_EQ(h.mode, mode);
+
+    int updates = 0;
+    for (int i = 0; i < 600; ++i) {
+      now += kStepNs;
+      h = c.on_hold(now, ++id);
+      ASSERT_EQ(h.ppm, base) << i;
+      ASSERT_DOUBLE_EQ(h.integral_ppm, integ) << i;
+      ASSERT_EQ(h.mode, mode);
+      updates += h.update ? 1 : 0;
+      if (i % 10 == 9) {
+        const auto ri = c.on_idle(now + 50'000'000);
+        ASSERT_FALSE(ri.update) << i;  // 沒有被當成 LATCH 停了
+        ASSERT_DOUBLE_EQ(ri.integral_ppm, integ) << i;
+      }
+    }
+    EXPECT_GE(updates, 59);  // 每秒例行重送一次，不是每則都寫
+    EXPECT_LE(updates, 61);
+    EXPECT_EQ(c.last_sent_ppm(), base);
+
+    // 恢復，誤差換成 −600 µs：平滑值從這一筆重新開始（接著過載前的 +800 走的話會是 +520）；
+    // 積分的 dt 是距上一則 LATCH 的 0.1 s，不是整段暫停（夾在 1 s）
+    now += kStepNs;
+    r = c.on_latch((int32_t) std::lround(target - 600.0), kPeriod120, now, ++id);
+    const double ki = mode == mode_e::v2 ? controller_t::kKiV2 : controller_t::kKi;
+    EXPECT_NEAR(r.err_us, -600.0, 1.0);
+    EXPECT_NEAR(r.integral_ppm - integ, ki * -600.0 * 0.1, 0.02);
+
+    // 對照：同樣的歷史、暫停期間什麼都不呼叫 → 3 s 後的 idle 就把輸出砍半（這就是需要 hold 入口的原因）
+    controller_t idle;
+    if (mode == mode_e::v2) {
+      idle.configure(mode_e::v2, 40, kPeriod120);
+    }
+    int64_t t = 0;
+    uint32_t k = 0;
+    for (int i = 0; i < 50; ++i) {
+      t += kStepNs;
+      idle.on_latch(slack, kPeriod120, t, ++k);
+    }
+    const auto ri = idle.on_idle(t + 3'000'000'000LL);
+    EXPECT_TRUE(ri.update);
+    EXPECT_EQ(ri.ppm, ppm / 2);
+  }
+
+  // v2：過載期間量的那一張之後被 client 重送（同一個 frameId）仍然當重複丟掉；隔著暫停的兩筆量測不比相位滑移
+  controller_t v;
+  v.configure(mode_e::v2, 40, kPeriod120);
+  int64_t now = 0;
+  uint32_t id = 0;
+  auto r = feed_v2(v, 1000, 5, now, id, kPeriod120);
+  const uint64_t dropped = r.dropped;
+  now += kStepNs;
+  v.on_hold(now, 777);
+  now += kStepNs;
+  r = v.on_latch(7000, kPeriod120, now, 777);
+  EXPECT_EQ(r.dropped, dropped + 1);
+  EXPECT_FALSE(r.update);
+  now += kStepNs;
+  r = v.on_latch(7000, kPeriod120, now, 778);  // 距暫停前那一筆跳了 6000 µs（> 0.6 個週期）
+  EXPECT_EQ(r.slips, 0u);
+  controller_t w;  // 對照：沒有暫停的話，同樣的一跳算一次滑移
+  w.configure(mode_e::v2, 40, kPeriod120);
+  now = 0;
+  id = 0;
+  feed_v2(w, 1000, 5, now, id, kPeriod120);
+  r = feed_v2(w, 7000, 1, now, id, kPeriod120);
+  EXPECT_EQ(r.slips, 1u);
+}
+
+TEST(VrLatchTest, HoldDoesNotFreezeASkewedV2Output) {
+  // 過載旗標要看滿一段時間才設，設起來之前已經有幾筆過載的樣本進了控制器。v2 原本鎖在目標上（ppm 0），漏進 3 筆
+  // 「晚 4 ms」的樣本就把輸出推到 −200，積分只被帶走不到 2 ppm。hold 不能把 −200 凍住（5 分鐘會漂 60 ms、七個週期）：
+  // 輸出回到積分
+  controller_t c;
+  c.configure(mode_e::v2, 40, kPeriod120);
+  const double target = kT120 * 0.4;
+  int64_t now = 0;
+  uint32_t id = 0;
+  auto r = feed_v2(c, (int32_t) std::lround(target), 300, now, id, kPeriod120);  // 鎖住 30 s
+  ASSERT_EQ(r.ppm, 0);
+  r = feed_v2(c, slack_for_err(target, -4000.0, kT120), 3, now, id, kPeriod120);
+  ASSERT_EQ(r.ppm, -200);
+  ASSERT_GT(r.integral_ppm, -2.5);
+  const auto base = (int32_t) std::lround(r.integral_ppm);
+  for (int i = 0; i < 3000; ++i) {  // 過載 5 分鐘
+    now += kStepNs;
+    r = c.on_hold(now, ++id);
+    ASSERT_EQ(r.ppm, base) << i;
+    if (i % 10 == 9) {
+      c.on_idle(now + 50'000'000);
+    }
+  }
+  EXPECT_EQ(c.last_sent_ppm(), base);
+  EXPECT_LE(std::abs(base), 2);
+
+  // 過載結束、相位還在原地（誤差 0）：第一筆樣本的輸出就是積分，不必先把髒的平滑值洗掉
+  r = feed_v2(c, (int32_t) std::lround(target), 1, now, id, kPeriod120);
+  EXPECT_NEAR(r.err_us, 0.0, 1.0);
+  EXPECT_LE(std::abs(r.ppm), 2);
+}
+
+TEST(VrLatchTest, HoldV3ActsLikeAClosedGate) {
+  controller_t c;
+  c.configure(mode_e::v3, 40, kPeriod120);
+  const double target = kT120 * 0.4;
+  int64_t now = 0;
+  uint32_t id = 0;
+  auto r = feed_v3(c, slack_for_err(target, 800.0, kT120), 60, now, id);  // 誤差 +800 µs 約 5 s
+  ASSERT_EQ(r.phase, vr::latch::kPhaseTrack);
+  const double integ = r.integral_ppm;
+  const auto base = (int32_t) std::lround(integ);
+  ASSERT_GT(integ, 20.0);
+  ASSERT_GT(r.ppm, base + 50);  // 比例項約 96 ppm
+
+  // 第一則 hold：比例項拿掉（輸出＝積分）、回到等待、閘門關，積分原封不動
+  now += kStepNs;
+  id += 12;
+  auto h = c.on_hold(now, id);
+  EXPECT_TRUE(h.update);
+  EXPECT_EQ(h.ppm, base);
+  EXPECT_DOUBLE_EQ(h.integral_ppm, integ);
+  EXPECT_EQ(h.phase, vr::latch::kPhaseWait);
+  EXPECT_FALSE(h.gate_open);
+  EXPECT_EQ(h.burst_us, 0u);
+  EXPECT_FALSE(h.eval_valid);
+  EXPECT_TRUE(c.unsettled(now));  // §VR-PREDICT 這時也不採樣
+  EXPECT_FALSE(c.learned(now).has_value());
+
+  // 過載持續 120 s（超過 v3「LATCH 停滿 60 s 積分才衰減」的門檻）：積分一直都在，輸出一直是積分
+  int updates = 0;
+  for (int i = 0; i < 1200; ++i) {
+    now += kStepNs;
+    id += 10;  // 過載時幀率比較低
+    h = c.on_hold(now, id);
+    ASSERT_DOUBLE_EQ(h.integral_ppm, integ) << i;
+    ASSERT_EQ(h.ppm, base) << i;
+    ASSERT_EQ(h.phase, vr::latch::kPhaseWait) << i;
+    ASSERT_FALSE(h.gate_open) << i;
+    updates += h.update ? 1 : 0;
+    if (i % 10 == 9) {
+      const auto ri = c.on_idle(now + 50'000'000);
+      ASSERT_FALSE(ri.update) << i;
+      ASSERT_DOUBLE_EQ(ri.integral_ppm, integ) << i;
+    }
+  }
+  EXPECT_GE(updates, 118);  // 和平常一樣每秒例行重送一次，不是每則都寫
+  EXPECT_LE(updates, 121);
+  EXPECT_FALSE(c.learned(now).has_value());  // 過載期間不會產生「可以帶到下一場」的積分
+
+  // 恢復，相位換了地方（−600 µs）：閘門重新收滿 5 個間隔、再量 5 筆才進追蹤；暫停前的樣本（+800）沒有混進來
+  const int32_t slack_after = slack_for_err(target, -600.0, kT120);
+  r = feed_v3(c, slack_after, 4, now, id);
+  EXPECT_FALSE(r.gate_open);
+  EXPECT_EQ(r.phase, vr::latch::kPhaseWait);
+  EXPECT_EQ(r.ppm, base);
+  r = feed_v3(c, slack_after, 1, now, id);
+  EXPECT_TRUE(r.gate_open);
+  EXPECT_EQ(r.phase, vr::latch::kPhaseMeasure);
+  r = feed_v3(c, slack_after, 4, now, id);
+  EXPECT_EQ(r.phase, vr::latch::kPhaseTrack);
+  EXPECT_NEAR(r.err_us, -600.0, 1.0);
+}
+
+TEST(VrLatchTest, HoldV3VoidsAStepInFlight) {
+  // 定時步進走到一半 host 過載：那一步量不到結果（void，只帶出一次、不算失敗）；盲區內照舊不寫 pacing；
+  // 恢復後是新的一輪（從 acq 開始）
+  const double target = kT120 * 0.4;
+  const int32_t slack_far = slack_for_err(target, 3000.0, kT120);
+  auto c = make_acquire(40, kPeriod120, -46.0);
+  int64_t now = 0;
+  uint32_t id = 0;
+  auto r = feed_v3(c, slack_far, 10, now, id);
+  ASSERT_EQ(r.step_why, vr::latch::kStepAcq);
+  ASSERT_NEAR((double) r.burst_us, 750'000.0, 130.0);  // 盲區 1.0 s：之後 9 則在裡面
+
+  int voids = 0;
+  for (int i = 1; i <= 9; ++i) {
+    now += kStepNs;
+    id += 12;
+    const auto h = c.on_hold(now, id);
+    EXPECT_FALSE(h.update) << "blind " << i;
+    EXPECT_EQ(h.phase, vr::latch::kPhaseWait);
+    if (h.eval_valid) {
+      ++voids;
+      EXPECT_EQ(i, 1);
+      EXPECT_EQ(h.eval_outcome, vr::latch::kEvalVoid);
+      EXPECT_NEAR(h.eval_cmd_us, 3000.0, 1.0);
+    }
+  }
+  EXPECT_EQ(voids, 1);
+
+  // 盲區過了：輸出＝基準（積分的起點）
+  now += kStepNs;
+  id += 12;
+  auto h = c.on_hold(now, id);
+  EXPECT_TRUE(h.update);
+  EXPECT_EQ(h.ppm, -46);
+  EXPECT_EQ(h.burst_us, 0u);
+  EXPECT_FALSE(h.eval_valid);
+  EXPECT_EQ(h.steps, 1u);
+  EXPECT_EQ(h.bad_steps, 0u);
+
+  // 恢復、誤差還是 +3000 µs：閘門重新開（5 個間隔）、量 5 筆之後重新步進，而且是新的一輪
+  bool stepped = false;
+  for (int i = 0; i < 20 && !stepped; ++i) {
+    r = feed_v3(c, slack_far, 1, now, id);
+    EXPECT_FALSE(r.eval_valid) << "latch " << i;  // 作廢的那一步不會再被拿出來評估
+    if (r.burst_us > 0) {
+      stepped = true;
+      EXPECT_EQ(i, 8);  // 第 5 則閘門開、收第 1 筆；第 9 則收滿 5 筆
+      EXPECT_EQ(r.step_why, vr::latch::kStepAcq);
+      EXPECT_EQ(r.steps, 2u);
+    }
+  }
+  EXPECT_TRUE(stepped);
+}
+
+TEST(VrLatchTest, HoldBeforeAnyLatchIsHarmless) {
+  // session 一開始就過載（還沒餵過任何樣本）：三種模式都把積分的起點寫出去——legacy／v2 是 0（標稱週期），
+  // 和平常第一則 LATCH 一定會寫一次 pacing 一樣
+  controller_t legacy;
+  auto r = legacy.on_hold(1'000'000'000, 5);
+  EXPECT_TRUE(r.update);
+  EXPECT_EQ(r.ppm, 0);
+  EXPECT_DOUBLE_EQ(r.integral_ppm, 0.0);
+  EXPECT_EQ(r.mode, mode_e::legacy);
+  r = legacy.on_hold(1'100'000'000, 6);
+  EXPECT_FALSE(r.update);  // 沒有變化、也還沒到例行重送
+  EXPECT_EQ(r.ppm, 0);
+
+  controller_t v2;
+  v2.configure(mode_e::v2, 40, kPeriod120);
+  r = v2.on_hold(1'000'000'000, 5);
+  EXPECT_TRUE(r.update);
+  EXPECT_EQ(r.ppm, 0);
+  EXPECT_EQ(r.mode, mode_e::v2);
+  // 過載一結束，第一筆樣本照常進控制器（誤差 +1000 µs → 比例項 120 ppm）
+  r = v2.on_latch((int32_t) std::lround(kT120 * 0.4 + 1000.0), kPeriod120, 1'100'000'000, 6);
+  EXPECT_TRUE(r.update);
+  EXPECT_NEAR(r.err_us, 1000.0, 1.0);
+  EXPECT_NEAR(r.ppm, 120, 2);
+
+  // v3：和「閘門關著的第一則 LATCH」一樣，把積分的起點寫出去
+  vr::latch::options_t opt;
+  opt.have_seed = true;
+  opt.seed_integral_ppm = -46.0;
+  controller_t v3;
+  v3.configure(mode_e::v3, 40, kPeriod120, opt);
+  r = v3.on_hold(1'000'000'000, 5);
+  EXPECT_TRUE(r.update);
+  EXPECT_EQ(r.ppm, -46);
+  EXPECT_EQ(r.phase, vr::latch::kPhaseWait);
+  EXPECT_FALSE(r.eval_valid);
+}
+
+TEST(VrLatchTest, SessionHoldLatchCountsAndLeavesTheIntegral) {
+  vr::session_state_t st {vr::negotiated_t {}, nullptr, 0};
+  st.configure_latch(mode_e::v2, 40, kPeriod120);
+  int64_t now = 10'000'000'000;
+  uint32_t id = 1000;
+  for (int i = 0; i < 50; ++i) {
+    now += kStepNs;
+    id += 12;
+    st.on_latch(make_latch(id, 4200), now);
+  }
+  const auto before = st.latch_snapshot();
+  const auto base = (int32_t) std::lround(before.integral_ppm);
+  ASSERT_GT(before.ppm, base + 20);  // 誤差約 +867 µs：比例項約 104 ppm
+  EXPECT_EQ(st.stats().latch_held, 0u);
+
+  // 過載 30 s：slack 亂跳（GPU 排隊），一筆都不進控制器；輸出＝積分，每秒例行重送一次
+  int updates = 0;
+  for (int i = 0; i < 300; ++i) {
+    now += kStepNs;
+    id += 9;
+    const auto h = st.hold_latch(make_latch(id, -3000 + (i % 5) * 1500), now);
+    ASSERT_EQ(h.ppm, base) << i;
+    updates += h.update ? 1 : 0;
+    if (i % 10 == 9) {
+      ASSERT_FALSE(st.latch_idle(now + 10'000'000).update) << i;
+    }
+  }
+  EXPECT_GE(updates, 30);
+  EXPECT_LE(updates, 31);
+  EXPECT_EQ(st.stats().latch_held, 300u);
+  const auto after = st.latch_snapshot();
+  EXPECT_EQ(after.ppm, base);
+  EXPECT_DOUBLE_EQ(after.integral_ppm, before.integral_ppm);
+  EXPECT_NEAR(after.err_us, 0.0, 1e-9);  // 誤差的平滑值作廢，log 的 err／slackEma 印 0／目標
+  EXPECT_EQ(after.dropped, before.dropped);  // 被擋掉的另外計（latch_held），不算進 dropped
+  EXPECT_EQ(after.slips, before.slips);
+  EXPECT_EQ(after.mode, mode_e::v2);
+}

@@ -3133,6 +3133,10 @@ namespace vr::bridge {
     }
 
     std::mutex g_consume_mtx;
+
+    /// §VR-FENCE-LATE：擷取端的健康快照（capture::pack 的值；0＝預設）。不經 bridge 執行緒：擷取執行緒寫、
+    /// control／QUIC IO／連線接收執行緒讀，各自只做一次 atomic 存取。
+    std::atomic<uint64_t> g_capture_health {0};
   }  // namespace
 
   // ── frame_source_t／frame_reader_t／fence_waiter_t ─────────────────────────
@@ -3432,6 +3436,14 @@ namespace vr::bridge {
 
   void publish_tracking(const tracked_sample_t &sample) {
     bridge().publish(sample);
+  }
+
+  void set_capture_health(const capture::snapshot_t &snapshot) {
+    g_capture_health.store(capture::pack(snapshot), std::memory_order_relaxed);
+  }
+
+  capture::snapshot_t capture_health() {
+    return capture::unpack(g_capture_health.load(std::memory_order_relaxed));
   }
 
   std::shared_ptr<frame_source_t> frame_source() {

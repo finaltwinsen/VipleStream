@@ -31,6 +31,7 @@
 #include "platform/common.h"
 #include "rtsp.h"
 #include "utility.h"
+#include "vr/vr_capture_health.h"
 
 #ifdef _WIN32
   #include <shellapi.h>
@@ -1533,8 +1534,8 @@ namespace config {
     // VipleStream 2.0 §VR（M1a）：vr_pcvr 預設 disabled；stub 只供開發驗證。
     // enum 與整數選項（vr_opt::*_from_view、vr_opt::int_strict_f）值寫錯一律警告並維持預設
     // （壞值絕不靜靜地變成「開啟」或「關閉安全網」）。
-    // 五個布林選項（vr_latch_acquire、vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、vr_multilink_repair）走
-    // vr_opt::bool_strict_f（2026-10-08）：只接受明確的開／關字樣，其他警告並維持預設。
+    // 六個布林選項（vr_latch_acquire、vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、vr_multilink_repair、
+    // vr_capture_late）走 vr_opt::bool_strict_f（2026-10-08）：只接受明確的開／關字樣，其他警告並維持預設。
     // vr_multilink_fault 是原樣字串，格式錯誤要到多連線的 VR session 建立時才警告（stream.cpp）；
     // vr_latch_ab 也是原樣字串，VR session 建立時才驗。
     generic_f(vars, "vr_pcvr", vr.pcvr, vr_opt::pcvr_from_view);
@@ -1556,6 +1557,12 @@ namespace config {
     string_f(vars, "vr_multilink_fault", vr.multilink_fault);
     vr_opt::bool_strict_f(vars, "vr_multilink_ctrl", vr.multilink_ctrl);
     vr_opt::bool_strict_f(vars, "vr_multilink_repair", vr.multilink_repair);
+    // §VR-FENCE-LATE：擷取端「fence 晚到照收」的開關與等待上限。範圍直接用 vr_capture_health.h 的常數（在這個
+    // namespace 裡 `vr` 是設定變數，所以要寫 `::vr::`）；config.h 的預設值是寫死的數字，由下面的 static_assert 對住。
+    // 兩個平台都認得這兩個 key（Linux 沒有 PCVR 擷取，設了沒有作用，但不會被當成不認得的選項）
+    static_assert(::vr::capture::k_max_wait_ms_default == 100, "keep the default of vr_t::capture_late_max_ms (config.h) and the docs in sync");
+    vr_opt::bool_strict_f(vars, "vr_capture_late", vr.capture_late);
+    vr_opt::int_strict_f(vars, "vr_capture_late_max_ms", vr.capture_late_max_ms, ::vr::capture::k_max_wait_ms_min, ::vr::capture::k_max_wait_ms_max, false);
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

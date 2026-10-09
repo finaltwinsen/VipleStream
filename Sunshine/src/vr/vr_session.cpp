@@ -643,6 +643,13 @@ namespace vr {
     return latch_last_;
   }
 
+  latch::result_t session_state_t::hold_latch(const VIPLE_VR_TLV_LATCH &latch, int64_t now_ns) {
+    latch_held_.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard lk {latch_mtx_};
+    latch_last_ = latch_ctl_.on_hold(now_ns, latch.frameId);
+    return latch_last_;
+  }
+
   latch::result_t session_state_t::latch_idle(int64_t now_ns) {
     std::lock_guard lk {latch_mtx_};
     auto r = latch_ctl_.on_idle(now_ns);
@@ -714,6 +721,7 @@ namespace vr {
     s.other_c2s = other_c2s_.load(std::memory_order_relaxed);
     s.c2s_truncated = c2s_truncated_.load(std::memory_order_relaxed);
     s.s2c_dropped = s2c_dropped_.load(std::memory_order_relaxed);
+    s.latch_held = latch_held_.load(std::memory_order_relaxed);
     return s;
   }
 

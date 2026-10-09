@@ -2107,9 +2107,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
 </table>
 
 @note{The on/off VR options ([vr_latch_acquire](#vr_latch_acquire) above and `vr_ctrl_pose_offset`, `vr_angvel_local`,
-`vr_multilink_ctrl`, `vr_multilink_repair` below) accept `enabled`/`disabled` (also `true`/`false`, `yes`/`no`,
-`on`/`off`, `1`/`0`; case does not matter). Any other value is reported in the log as an invalid value and the option
-keeps its default.}
+`vr_multilink_ctrl`, `vr_multilink_repair`, `vr_capture_late` below) accept `enabled`/`disabled` (also `true`/`false`,
+`yes`/`no`, `on`/`off`, `1`/`0`; case does not matter). Any other value is reported in the log as an invalid value and
+the option keeps its default.}
 
 ### vr_ctrl_pose_offset
 
@@ -2353,6 +2353,96 @@ keeps its default.}
         <td>Example</td>
         <td colspan="2">@code{}
             vr_multilink_fault = 1:60:40,2:40:60:40
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_capture_late
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: keep waiting for a frame whose GPU work on the host has not finished yet, instead of
+            dropping it. Before a frame from the SteamVR driver is copied to the encoder, the host confirms (on
+            the CPU) that the driver's GPU work for that frame has completed. This normally takes 1 to 3 ms, and
+            the host gives up after a first wait of 5 ms at 120 Hz (700 ms divided by the frame rate, in whole
+            milliseconds and kept within 2 to 6 ms; 6 ms at 100 Hz and below). While a game is shown directly (SteamVR
+            dashboard closed), the driver's work is queued behind the game's own GPU work for that frame, so the
+            wait grows with the GPU time the game needs per frame and can exceed that limit while the game
+            still renders at the full display rate. With this option disabled every such frame is dropped (a
+            game can lose most of its frames without itself slowing down), and after one second without a
+            usable frame the connection to the driver is torn down and re-established, again and again; the
+            headset only shows black.
+            When enabled, the host keeps waiting for the same frame, for up to three times the recent interval
+            between frames published by the driver (at least three display periods, at most
+            [vr_capture_late_max_ms](#vr_capture_late_max_ms)), and uses the frame when it is ready: the stream
+            slows down to the game's actual frame rate instead of stopping. The connection to the driver is
+            torn down only if its GPU work makes no progress at all for 3 seconds, or if none of the frames
+            it published over 5 seconds could be used; repeated teardowns are at least 5, 15 and then 30
+            seconds apart until frames have been flowing normally for 10 seconds (this spacing is remembered
+            for up to a minute after a session ends).
+            While a large share of the frames is late (30% or more within one second, until it has stayed below
+            5% for 2 seconds), the pacing controller ([vr_latch_mode](#vr_latch_mode)) and the adaptive
+            [vr_vsync_to_photons_us](#vr_vsync_to_photons_us) ignore the client's measurements, which then
+            reflect the host's GPU load rather than timing; the pacing controller keeps applying only the
+            clock difference it has already learned.
+            @note{Applies to PCVR sessions on Windows hosts only. With `disabled` the behaviour is identical to
+            earlier versions; only the log has additional lines and fields. The default will change after
+            headset testing.}
+            @note{Known limitation: "late" means later than that first wait (5 ms at 120 Hz). A game whose
+            frames are steadily a little later than that, but which still keeps up with the display rate, is
+            treated like an overloaded one: pacing and prediction tracking stay paused for the whole session.
+            In the one headset session measured in this state the share of repeated frames was 7.2% against 3.4%
+            at normal load; roughly a third of that difference is attributable to the paused pacing, the rest to
+            encoding taking longer and less regularly while the GPU is that busy, which this option does not
+            change. The condition will be narrowed to the case where the game no longer keeps up with the virtual
+            vsync before the default changes.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_capture_late = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_capture_late_max_ms
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: upper limit, in milliseconds, of how long the host waits for the GPU work of one
+            frame when [vr_capture_late](#vr_capture_late) is enabled, counted from the moment the host starts
+            handling the frame (which is later than the moment the driver published it if the host was still
+            waiting for the previous frame). The wait budget itself is three times the recent interval between
+            published frames and never less than three display periods (25 ms at 120 Hz), but it never exceeds
+            this value, even where three display periods would be longer. A frame that is still not ready when the
+            budget runs out is dropped. A larger value keeps very slow games (below roughly 30 frames per
+            second) flowing, at the price of holding on for longer to a frame that may never complete; frames
+            that old are of little use in VR anyway. The accepted range is 20 to 250; invalid values are
+            ignored with a warning in the log.
+            @note{Only has an effect with `vr_capture_late = enabled`.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            100
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_capture_late_max_ms = 60
             @endcode</td>
     </tr>
 </table>
